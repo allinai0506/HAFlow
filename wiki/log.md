@@ -515,6 +515,7 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - **跨仓（xiyu-bid-poc，用户授权）**：`scripts/check-testing-standards.sh` 识别 `HERDR_DEFER_HEAVY_TESTS=1`（仅 controller 收尾注入，避免按仓库来源猜测误伤人类提交），herdr 任务提交只跑快速检查，全量测试交由 workflow test 节点与 pre-push 门禁。
 - **现场重载验证**：热重载后真实工作流 `wf-xiyu-bid-poc-0915-01` 的 test 节点首次触发 `[DIRECT DISPATCH FALLBACK] reason=node purpose missing` —— 该项目 `workflow.json` 为旧模板快照（`purpose=""`/`required_outputs=[]`）。修复：新增 `merge_node_policy`（纯函数），节点字段为空时回退 `stage-policies.json`（与总指挥路径语义一致），policy 也缺 purpose 才回落；补 3 项合并用例 + 1 项 policy 回退用例。
 - 回归：新增 `tests/test_direct_stage_dispatch.py` 20 项 + `test_fix_loop_gates` 子集用例 2 项；相关套件 147 passed；unittest 全量 318 passed（17 个 pytest-only 文件因环境缺 pytest 未进入）。
+- **流程纠正（CoW 隔离）**：本条目落地期间曾因在共享主工作区直接开发，把并行 session 的在途 controller 改动卷入提交；已按「剥离范围 + 保留对方改动（新增 `244490d`，未强推）」处置，并在 CoW 沙盒内对 PR 分支独立复验（94 tests OK + compile OK 后 purge）。xiyu 侧 hook 改动同样迁至沙盒分支落盘并走其 PR 流程。教训归档 §44：非平凡改动一律 CoW 沙盒 + 单写者。
 - 更新 [[architecture]] §2.1（Direct Stage Dispatch）。
 
 ## [2026-09-16] fix | 跨阶段返工拓扑作废与收尾断链自愈 (committed retry & intermediate invalidation)
