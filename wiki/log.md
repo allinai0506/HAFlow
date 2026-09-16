@@ -516,3 +516,14 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - **现场重载验证**：热重载后真实工作流 `wf-xiyu-bid-poc-0915-01` 的 test 节点首次触发 `[DIRECT DISPATCH FALLBACK] reason=node purpose missing` —— 该项目 `workflow.json` 为旧模板快照（`purpose=""`/`required_outputs=[]`）。修复：新增 `merge_node_policy`（纯函数），节点字段为空时回退 `stage-policies.json`（与总指挥路径语义一致），policy 也缺 purpose 才回落；补 3 项合并用例 + 1 项 policy 回退用例。
 - 回归：新增 `tests/test_direct_stage_dispatch.py` 20 项 + `test_fix_loop_gates` 子集用例 2 项；相关套件 147 passed；unittest 全量 318 passed（17 个 pytest-only 文件因环境缺 pytest 未进入）。
 - 更新 [[architecture]] §2.1（Direct Stage Dispatch）。
+
+## [2026-09-16] fix | 跨阶段返工拓扑作废与收尾断链自愈 (committed retry & intermediate invalidation)
+- **背景**：`wf-xiyu-bid-poc-0915-01` 在 review 门禁返工后再次卡死在协调器。总指挥汇报已验收通过等待 finalize，但随后毫无推进。排查发现两大根因：
+  1. **主仓脏树导致集成收尾断链**：主仓 `xiyu-bid-poc` 遗留未提交的 `scripts/check-testing-standards.sh` 修改，`herdr-task integrate` 安全检查（`git status --porcelain --untracked-files=no`）退出 5（`Main repository has tracked changes`），任务停在 `committed` 态。旧版 controller 的 `finalize_completed_task` 仅接收 `completed` 态，重试直接 SKIP，且无后台常驻补收尾逻辑，导致任务永久悬挂。
+  2. **跨阶段返工漏作废中间节点**：`review` 门禁回流到上游 `implementation` 时，`invalidate_for_fix_loop` 仅收集了 `gate_node_id`（`review`）的下游节点，遗漏了 `retry_node` 与 `gate_node_id` 之间的中间节点 `test`。`test` 的 r2 任务仍处于 `cleaned`，DAG 判定 `test` 已完成，跳过 `test` 直扑 `review`；而 `review` 的 `notified` 锁未解除，导致 `test` 推进事件永远无法到达总指挥。
+- **Controller & Task 修复**：
+  - `invalidate_for_fix_loop` 增加 `retry_node` 支持：计算 `retry_node` 的下游闭包（排除 `retry_node` 自身），将 `test` 等中间验证节点与 `review` 一同作废；跨阶段回流时门禁与中间节点任务不可复用；
+  - `finalize_completed_task` 兼容 `committed` 状态：已 `committed` 任务跳过 commit 直接重试 integrate/cleanup，保障幂等；
+  - Registry Watcher 增加 `status == "committed"` 的 attention 慢速重试护栏，主仓解除脏树或锁竞争后可自动断链续跑；
+  - 现场救援：暂存主仓 `scripts/check-testing-standards.sh`、对修复任务补跑 integrate/cleanup、作废 `test` r2 任务；Controller 自动触发 `implementation -> test` 阶段推进，总指挥成功接收事件并并发派发 r3/r4 验证任务。
+- 回归：`tests/test_fix_loop_gates.py` 新增 2 项回归测试（跨阶段中间节点作废 + committed 状态幂等收尾）；全量 500 项测试全部通过；沉淀工程教训 §43。

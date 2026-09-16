@@ -318,8 +318,8 @@ def _fix_loop_keepable(task):
     return False
 
 
-def invalidate_for_fix_loop(workflow_id, gate_node_id, workflow_cfg):
-    """作废 gate 节点及其全部下游的非 superseded 任务(fix-loop 回流前提)。
+def invalidate_for_fix_loop(workflow_id, gate_node_id, workflow_cfg, retry_node=None):
+    """作废 gate 节点及其全部下游、以及 retry_node 到 gate 间全部中间节点的非 superseded 任务(fix-loop 回流前提)。
 
     completed/cleanup_ready 中间态先 finalize 规范化到 cleaned——
     completed→superseded 会被状态机拒绝;pending 不可作废,跳过。
@@ -340,7 +340,10 @@ def invalidate_for_fix_loop(workflow_id, gate_node_id, workflow_cfg):
             }
             prev = stage_id
 
-    node_ids = _collect_downstream_nodes(nodes_by_id, gate_node_id)
+    node_ids = set(_collect_downstream_nodes(nodes_by_id, gate_node_id))
+    if retry_node and retry_node in nodes_by_id:
+        downstream_retry = _collect_downstream_nodes(nodes_by_id, retry_node) - {retry_node}
+        node_ids = node_ids | downstream_retry
 
     supersedeable = FIX_LOOP_SUPERSEDEABLE
     invalidated = []
@@ -361,10 +364,12 @@ def invalidate_for_fix_loop(workflow_id, gate_node_id, workflow_cfg):
         if status == "superseded":
             continue
 
-        # 返工只重跑受影响子集:门禁节点内 verdict=pass 且已落定的任务保留,
-        # 只作废真正失败(blocked/无结论)的任务与全部下游。
+        # 返工只重跑受影响子集:仅在门禁自身重跑(not retry_node 或 retry_node == gate_node_id)时,
+        # 门禁节点内 verdict=pass 且已落定的任务保留;
+        # 若跨阶段回流(如 review 回流 implementation),上游已变更,门禁与中间节点任务不可复用。
         if (
             task_node == gate_node_id
+            and (not retry_node or retry_node == gate_node_id)
             and task.get("stage_verdict") == "pass"
             and _fix_loop_keepable(task)
         ):
@@ -480,7 +485,7 @@ def handle_fix_loop(workflow_id, gate_node_id, gate_cfg, workflow_cfg):
             )
 
     invalidated = invalidate_for_fix_loop(
-        workflow_id, gate_node_id, workflow_cfg
+        workflow_id, gate_node_id, workflow_cfg, retry_node=retry_node
     )
 
     if not invalidated:
@@ -1560,7 +1565,7 @@ def finalize_completed_task(task_id):
         print(f"[FINALIZE SKIP] task={task_id} missing")
         return
 
-    if task.get("status") != "completed":
+    if task.get("status") not in ("completed", "committed"):
         print(
             f"[FINALIZE SKIP] "
             f"task={task_id} "
@@ -1584,45 +1589,46 @@ def finalize_completed_task(task_id):
     # --------------------------------
     if mode == "git":
 
-        # 1. 将 Task 自己产生的修改安全提交
-        # 提交门禁拆分:herdr 任务克隆内只跑快速必需检查,
-        # 全量测试由 workflow test 节点与 pre-push 门禁负责。
-        commit_env = dict(os.environ)
-        commit_env["HERDR_DEFER_HEAVY_TESTS"] = "1"
+        # 1. 将 Task 自己产生的修改安全提交(若此前已 committed 则跳过)
+        if task.get("status") == "completed":
+            # 提交门禁拆分:herdr 任务克隆内只跑快速必需检查,
+            # 全量测试由 workflow test 节点与 pre-push 门禁负责。
+            commit_env = dict(os.environ)
+            commit_env["HERDR_DEFER_HEAVY_TESTS"] = "1"
 
-        result = subprocess.run(
-            [
-                TASK_MANAGER,
-                "commit",
-                task_id,
-                "--message",
-                f"task: {task_id}"
-            ],
-            text=True,
-            capture_output=True,
-            env=commit_env
-        )
-
-        if result.stdout.strip():
-            print(result.stdout.strip())
-
-        if result.returncode != 0:
-            print(
-                f"[COMMIT ERROR] "
-                f"task={task_id}: "
-                f"{result.stderr.strip() or result.stdout.strip()}"
+            result = subprocess.run(
+                [
+                    TASK_MANAGER,
+                    "commit",
+                    task_id,
+                    "--message",
+                    f"task: {task_id}"
+                ],
+                text=True,
+                capture_output=True,
+                env=commit_env
             )
-            return
 
-        task = get_task(task_id)
+            if result.stdout.strip():
+                print(result.stdout.strip())
 
-        if not task or task.get("status") != "committed":
-            print(
-                f"[FINALIZE ERROR] "
-                f"task={task_id} "
-                f"did not reach committed"
-            )
-            return
+            if result.returncode != 0:
+                print(
+                    f"[COMMIT ERROR] "
+                    f"task={task_id}: "
+                    f"{result.stderr.strip() or result.stdout.strip()}"
+                )
+                return
+
+            task = get_task(task_id)
+
+            if not task or task.get("status") != "committed":
+                print(
+                    f"[FINALIZE ERROR] "
+                    f"task={task_id} "
+                    f"did not reach committed"
+                )
+                return
 
         # 2. Rebase + 导入主仓库 + Integration Branch
         result = subprocess.run(
@@ -3198,6 +3204,32 @@ def registry_watcher():
                         attention_throttle(key, now=now)
                 else:
                     attention_clear(f"{task_id}:attention")
+
+                # ---- committed 滞留任务:此前 integrate 失败(如主仓库脏/并发锁),补收尾护栏 ----
+                if status == "committed" and task.get("integration_mode") == "git" and not workflow_closed(task.get("workflow_id")):
+                    key = f"{task_id}:finalize"
+                    if not attention_blocks_retry(key, now):
+                        print(
+                            f"[REGISTRY WATCHER] "
+                            f"task={task_id} "
+                            f"status=committed -> retry finalize"
+                        )
+                        finalize_completed_task(task_id)
+                        cur_t = get_task(task_id)
+                        if cur_t and cur_t.get("status") == "committed":
+                            if not attention_get(key):
+                                attention_note(
+                                    key,
+                                    task,
+                                    "finalize",
+                                    reason="integration_retry",
+                                    attempts=1,
+                                )
+                            attention_throttle(key, now=now)
+                        else:
+                            attention_clear(key)
+                else:
+                    attention_clear(f"{task_id}:finalize")
 
                 if status == "rework" and not workflow_closed(task.get("workflow_id")):
                     pane_id = task.get("pane_id")
