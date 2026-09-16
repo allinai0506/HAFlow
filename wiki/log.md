@@ -528,3 +528,18 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
   - Registry Watcher 增加 `status == "committed"` 的 attention 慢速重试护栏，主仓解除脏树或锁竞争后可自动断链续跑；
   - 现场救援：暂存主仓 `scripts/check-testing-standards.sh`、对修复任务补跑 integrate/cleanup、作废 `test` r2 任务；Controller 自动触发 `implementation -> test` 阶段推进，总指挥成功接收事件并并发派发 r3/r4 验证任务。
 - 回归：`tests/test_fix_loop_gates.py` 新增 2 项回归测试（跨阶段中间节点作废 + committed 状态幂等收尾）；全量 500 项测试全部通过；沉淀工程教训 §43。
+
+## [2026-09-16] feat | 软件开发流程模板优化 (software-development-v1) 与跨阶段 Agent 隔离
+- **背景**：旧版 `software-development-v1.yaml` 模板中全节点声明“同一阶段允许多个 Task 并行协作”，导致协调器与总指挥在需求、计划甚至收尾阶段无序切碎任务（单个 Tab 出现 4+ 个分屏 Pane），引发终端拥挤、上下文碎片化、协调延迟与并发混乱；同时测试/评审阶段缺乏与实现者的隔离机制，易发生自审自查盲区。
+- **模板与策略重构 (`software-development-v1.yaml`)**：
+  1. **Pane 数量硬性收敛**：严格限定各阶段工位上限，彻底移除诱导无序膨胀的模糊描述；
+  2. **需求与计划阶段双工位对抗审查 (`max_agents: 2`)**：配置 `executor`（主执行者）与 `challenger`（对抗性质询者），分别产出核心规格/方案与《对抗审查与边界漏洞清单》，两份交付物完备后方可推进；
+  3. **实现阶段自适应解耦并发 (`max_agents: 3`)**：解耦无冲突任务多 Agent 并发，强耦合/单点改动强制单 Agent 顺序执行，根除 Git 合并冲突；
+  4. **测试/评审/收尾阶段单工位 (`max_agents: 1`) + 跨阶段隔离**：配置 `exclude_stage_agents: ["implementation"]`，由独立 Agent 客观把关。
+- **调度与派发引擎增强**：
+  - `herdr/agent_router.py`：`choose_agent` 解析 `exclude_stage_agents` 策略，查询 Workflow 实现阶段已用 Agent 并从候选池剔除；支持单 Agent 调试环境平稳降级兜底与违规指定显式拦截；
+  - `herdr/direct_dispatch.py`：`plan_stage_dispatch` 解析 `agent_policy.roles`，使需求与计划阶段直接规则化派发 `executor` 与 `challenger` 双规格 Task。
+- **回归与沉淀**：
+  - 新增 `tests/test_agent_router_stage_exclusion.py`（3 项）与 `tests/test_software_development_v1_template.py`（8 项）；更新 `tests/test_direct_stage_dispatch.py`（1 项）；
+  - 全仓 512 项自动化测试 100% PASS；沉淀通用工程教训 §45。
+

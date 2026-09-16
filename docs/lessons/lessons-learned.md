@@ -2032,3 +2032,47 @@ git diff main...HEAD --stat
 python3 -m unittest <相关套件>
 rm -rf ~/.sandboxes/<task-id>
 ```
+
+---
+
+## 45. 工作流多 Agent 协同收敛、双工位对抗审查与跨阶段 Agent 隔离
+
+### 问题背景
+
+在长期的多 Agent 工作流实践中，开发标准流程模板 `software-development-v1.yaml` 存在严重的“无序切碎”与“自审自查”问题：
+1. **Pane 终端分屏爆炸**：各节点默认声明“同一阶段允许多个 Task 并行协作”，导致协调器与总指挥在需求分析、架构计划甚至收尾阶段无序切出 3~4 个细碎 Task/Pane，使单个 WezTerm 标签页拥挤不堪，引发严重的上下文碎片化、LLM 协调等待与调度延迟；
+2. **缺乏对抗性质询**：需求与计划若仅靠单 Agent 起草，极易遗漏隐式假设、极端边界与架构死锁，缺乏系统化的“红蓝对抗”与漏洞挖掘机制；
+3. **实现阶段盲目并发**：未根据代码解耦性动态判断，强耦合模块强行切碎多 Agent 修改同一组核心文件，引发灾难性 Git 合并冲突；
+4. **评审与测试自审自查盲区**：测试与评审阶段未与实现阶段进行 Agent 隔离，导致实现者（如 Codex）自己评审/测试自己编写的代码，产生确认偏差与盲区。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| **Pane 数量失控** | 开放式并行提示词会导致 LLM 倾向于无限切碎工位，带来巨大的 UI 与协调开销 | 每个节点必须明确硬性设定 `max_agents` 上限；除实现阶段外坚决杜绝 >2 工位 |
+| **单视角思维盲区** | 需求与计划若无专门的对抗角色，漏洞往往要流转到下游甚至线上才暴露 | 需求与计划阶段强制收敛为**严格双工位**（`max_agents: 2`）：1 个主执行者 + 1 个对抗性质询者，两份互补交付物完备后方可通过门禁 |
+| **强耦合代码并发冲突** | 任务并发必须建立在“文件集合完全解耦”的前提下，强耦合代码并发只会制造合并灾难 | 实现阶段采用**自适应并发**（上限 3）：解耦任务并发，强耦合或单点改动强制单 Agent 顺序执行 |
+| **裁判与运动员同体** | 同一 Agent 往往具备相同的认知盲点，无法有效指出自身代码的隐性架构缺陷 | 测试、评审与收尾阶段强制**跨阶段硬隔离**（`exclude_stage_agents: [implementation]`），调度器自动剔除实现者，由跨模型独立把关 |
+
+### 操作规范
+
+1. **工位上限与双工位规范**：`software-development-v1.yaml` 的需求与计划阶段设置 `max_agents: 2`，声明 `roles: [executor, challenger]`，分别输出核心规格与《对抗审查与边界漏洞清单》；
+2. **规则化角色直接派发**：`herdr/direct_dispatch.py` 支持解析 `roles`，常规推进直接生成双工位 Task 规格，免除协调器回合等待；
+3. **调度器跨阶段硬隔离**：`herdr/agent_router.py` 的 `choose_agent` 解析 `exclude_stage_agents` 策略，自动查询并剔除对应阶段已分配的 Agent，且在单 Agent 受限环境下提供优雅降级保护；
+4. **单工位独立验收**：测试、评审与收尾阶段严格限制为单工位（`max_agents: 1`, `parallel: false`），杜绝 Pane 泛滥。
+
+### 验证命令 / 证据
+
+```bash
+# 1. 跨阶段 Agent 隔离测试
+pytest tests/test_agent_router_stage_exclusion.py -v
+
+# 2. 规则化双工位派发测试
+pytest tests/test_direct_stage_dispatch.py -v
+
+# 3. 模板规格与 DAG 合法性测试
+pytest tests/test_software_development_v1_template.py -v
+
+# 4. 全仓自动化回归
+pytest
+```

@@ -74,6 +74,7 @@ def merge_node_policy(node, policy):
     merged["rules"] = pick("rules", [])
     merged["default_task_type"] = pick("default_task_type")
     merged["default_integration_mode"] = pick("default_integration_mode")
+    merged["agent_policy"] = pick("agent_policy", {})
     return merged
 
 
@@ -89,6 +90,13 @@ def normalize_node(node):
     label = str(node.get("label") or node_id).strip()
     purpose = str(node.get("purpose") or "").strip()
 
+    agent_policy = node.get("agent_policy") or node.get("worker_policy") or {}
+    roles = []
+    if isinstance(agent_policy, dict):
+        raw_roles = agent_policy.get("roles") or []
+        if isinstance(raw_roles, list):
+            roles = [r for r in raw_roles if isinstance(r, dict) and r.get("name")]
+
     return {
         "id": node_id,
         "label": label,
@@ -101,6 +109,7 @@ def normalize_node(node):
         "integration_mode": str(
             node.get("default_integration_mode") or DEFAULT_INTEGRATION_MODE
         ).strip(),
+        "roles": roles,
     }
 
 
@@ -150,8 +159,10 @@ def _prompt(
     redispatch_of=None,
     last_failure_note=None,
     context_branch=None,
+    role_outputs=None,
 ):
-    outputs = "\n".join(f"- {line}" for line in node["required_outputs"]) or "- 未定义"
+    target_outputs = role_outputs if role_outputs is not None else node["required_outputs"]
+    outputs = "\n".join(f"- {line}" for line in target_outputs) or "- 未定义"
     rules = "\n".join(f"- {line}" for line in node["rules"]) or "- 未定义"
     criteria = "\n".join(f"- {line}" for line in acceptance) or "- 未定义"
 
@@ -212,6 +223,7 @@ def _dispatch_spec(
     last_failure_note=None,
     context_branch=None,
     integration_mode=None,
+    role_outputs=None,
 ):
     return {
         "task_id": task_id,
@@ -225,6 +237,7 @@ def _dispatch_spec(
             redispatch_of=redispatch_of,
             last_failure_note=last_failure_note,
             context_branch=context_branch,
+            role_outputs=role_outputs,
         ),
         "task_type": node["task_type"],
         "integration_mode": integration_mode or node["integration_mode"],
@@ -326,6 +339,37 @@ def plan_stage_dispatch(
         for task in (tasks or [])
         if task.get("task_id")
     }
+
+    roles = normalized.get("roles") or []
+    if roles:
+        specs = []
+        for r in roles:
+            r_name = str(r.get("name") or "worker").strip()
+            r_label = str(r.get("label") or r_name).strip()
+            r_goal = str(r.get("goal") or "").strip()
+            if not r_goal:
+                suffix = str(r.get("purpose_suffix") or "").strip()
+                r_goal = f"{normalized['label']} ({r_label}): {suffix or normalized['purpose']}"
+            r_outputs = _as_list(r.get("outputs")) or list(normalized["required_outputs"])
+            r_acceptance = _acceptance_lines(normalized, r_outputs)
+
+            task_id = f"{workflow_id}-{node_id}-{r_name}"
+            if task_id in existing_ids:
+                task_id = initial_task_id(workflow_id, f"{node_id}-{r_name}", existing_ids)
+            existing_ids.add(task_id)
+
+            specs.append(
+                _dispatch_spec(
+                    normalized,
+                    requirement.strip(),
+                    r_goal,
+                    r_acceptance,
+                    task_id,
+                    role_outputs=r_outputs,
+                )
+            )
+        return {"mode": "dispatch", "reason": "initial node dispatch with roles", "specs": specs}
+
     acceptance = _acceptance_lines(normalized, None)
     goal = f"{normalized['label']}: {normalized['purpose']}"
     spec = _dispatch_spec(

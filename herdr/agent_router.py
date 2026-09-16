@@ -239,6 +239,25 @@ def choose_agent(
             if node:
                 node_policy = node.get("agent_policy", {})
 
+    exclude_stages = (
+        node_policy.get("exclude_stage_agents")
+        or node_policy.get("disallow_from_stages")
+        or []
+    )
+    if isinstance(exclude_stages, str):
+        exclude_stages = [exclude_stages]
+
+    stage_used_agents = set()
+    if workflow_id and exclude_stages:
+        store = _get_store()
+        tasks = store.list_tasks()
+        target_stages = set(exclude_stages)
+        for t in tasks:
+            if t.get("workflow_id") == workflow_id:
+                t_stage = t.get("node") or t.get("stage")
+                if t_stage in target_stages and t.get("agent"):
+                    stage_used_agents.add(t.get("agent"))
+
     pool = ensure_pool_for_project(project_id)
     allowed = set(pool.get("allowed_agents", []))
     disabled = set(pool.get("disabled_agents", []))
@@ -256,6 +275,15 @@ def choose_agent(
     healthy = set(record.get("healthy_agents", []))
 
     if selected:
+        if selected in stage_used_agents:
+            other_available = [
+                a for a in allowed
+                if a not in disabled and (not healthy or a in healthy) and a not in stage_used_agents
+            ]
+            if other_available:
+                raise RuntimeError(
+                    f"Agent '{selected}' is prohibited for stage '{stage}' because it was used in stage(s): {', '.join(exclude_stages)}"
+                )
         if selected not in allowed:
             raise RuntimeError(
                 f"Agent '{selected}' is not allowed for project {project_id}"
@@ -304,6 +332,11 @@ def choose_agent(
                 and (not healthy or agent in healthy)
             )
         ]
+
+        if stage_used_agents:
+            filtered = [a for a in candidates if a not in stage_used_agents]
+            if filtered:
+                candidates = filtered
 
         if not candidates:
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
