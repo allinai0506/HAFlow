@@ -41,12 +41,13 @@ Evidence:
 ## 2. 轻量静态体检 (`herdr-preflight`)
 
 `FACT` 用于日常快速巡检，耗时毫秒级，不消耗任何模型 Token：
-1. **二进制可执行探测**: 检查 `opencode`, `codex`, `claude`, `qodercn`, `agy`, `pi` 是否可解析。解析顺序：`shutil.which`（进程 PATH）→ 常见安装目录兜底（`~/.local/bin`、`~/.volta/bin`、`~/.qoder-cn/entry`、homebrew）→ 登录 shell `command -v` 终极兜底。LaunchAgent 服务的精简 PATH 不再导致已装 CLI 被误判为"未安装"。
+1. **二进制可执行探测**: 检查 `opencode`, `codex`, `claude`, `qodercn`, `agy`, `pi`, `grok` 是否可解析。解析顺序：`shutil.which`（进程 PATH）→ 常见安装目录兜底（`~/.local/bin`、`~/.volta/bin`、`~/.qoder-cn/entry`、homebrew）→ 登录 shell `command -v` 终极兜底。LaunchAgent 服务的精简 PATH 不再导致已装 CLI 被误判为"未安装"。
 2. **版本号探测**: 带 8 秒超时的 `--version` 探活，防止二进制由于系统动态链接库缺失而僵死。
 3. **本地凭证提示 (`AUTH_HINTS`)**:
    - Codex: `~/.codex/auth.json`
    - Claude: `~/.claude.json`
    - Pi: `~/.pi/agent/auth.json`
+   - Grok: `~/.grok/auth.json`
    - OpenCode: `~/.config/opencode`
    - QoderCLI: `~/.qoder-cn`
 

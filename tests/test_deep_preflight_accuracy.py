@@ -254,6 +254,18 @@ class TestSmokeTimeoutAndRetry(unittest.TestCase):
         )
         self.assertEqual(adapter, "pi --print")
 
+    def test_grok_adapter_uses_p(self):
+        m = self.m
+        help_text = "  -p, --single <PROMPT>  Single-turn prompt. Prints the response to stdout and exits\n"
+        with patch.object(m, "help_probe", return_value=help_text):
+            cmd, adapter = m.choose_smoke_command("grok", "/Users/user/.local/bin/grok", "/tmp")
+        self.assertEqual(
+            cmd,
+            ["/Users/user/.local/bin/grok", "-p",
+             "Reply with exactly HERDR_PREFLIGHT_OK and nothing else."],
+        )
+        self.assertEqual(adapter, "grok -p")
+
 
 class TestConsoleSelfCheckEvidence(unittest.TestCase):
     def test_modal_renders_probe_output_evidence(self):

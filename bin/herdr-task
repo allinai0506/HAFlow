@@ -54,7 +54,7 @@ except ImportError:
 
 TASKS_FILE = os.environ.get("TASKS_FILE") or os.path.expanduser("~/.herdr-controller/tasks.json")
 WORKFLOW_FILE = os.environ.get("WORKFLOW_FILE") or os.path.expanduser("~/.herdr-controller/workflow.json")
-DEFAULT_AGENT_LABELS = ["opencode", "codex", "qodercli", "claude", "agy", "pi"]
+DEFAULT_AGENT_LABELS = ["opencode", "codex", "qodercli", "claude", "agy", "pi", "grok"]
 
 try:
     from herdr.agent_router import DEFAULT_ALLOWED

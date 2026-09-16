@@ -16,7 +16,8 @@ Architecture:
                 ├── OpenCodeAdapter
                 ├── QoderAdapter
                 ├── AgyAdapter
-                └── PiAdapter
+                ├── PiAdapter
+                └── GrokAdapter
 
 The current concrete steering implementation (TTYAgentAdapter and subclasses) is
 explicitly labelled "TTY-level steering prototype" — not a universal agent
@@ -455,6 +456,19 @@ class PiAdapter(TTYAgentAdapter):
     )
 
 
+class GrokAdapter(TTYAgentAdapter):
+    """Adapter for Grok Build CLI."""
+
+    name = "grok"
+    capabilities = AgentCapability(
+        supports_interrupt=True,
+        supports_soft_steer=True,
+        supports_resume=True,
+        supports_prompt_injection=True,
+        protocol_level="tty_prototype",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Adapter registry
 # ---------------------------------------------------------------------------
@@ -467,11 +481,13 @@ _ADAPTER_REGISTRY: Dict[str, AgentAdapter] = {
     "qodercli": QoderAdapter(),
     "agy": AgyAdapter(),
     "pi": PiAdapter(),
+    "grok": GrokAdapter(),
 }
 
 _ALIASES: Dict[str, str] = {
     "qoder": "qodercli",
     "qodercn": "qodercli",
+    "grokcli": "grok",
 }
 
 _UNKNOWN_ADAPTER = UnknownAgentAdapter()

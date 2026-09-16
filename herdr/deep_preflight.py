@@ -32,6 +32,7 @@ AUTH_HINTS = {
     "qodercli": [HOME / ".qoder-cn"],
     "agy": [],
     "pi": [HOME / ".pi" / "agent" / "auth.json"],
+    "grok": [HOME / ".grok" / "auth.json"],
 }
 
 # These patterns are intentionally conservative. We only classify an error when
@@ -338,6 +339,15 @@ def choose_smoke_command(agent, binary, cwd):
                 "--no-session",
                 prompt,
             ], "pi --print"
+
+    if agent == "grok":
+        # Grok CLI exposes `-p/--single` as single-turn non-interactive mode.
+        if re.search(r"(^|\s)-p([,\s]|$)", help_text) or "--single" in help_text:
+            return [
+                binary,
+                "-p",
+                prompt,
+            ], "grok -p"
 
     return None, "no safe non-interactive adapter"
 

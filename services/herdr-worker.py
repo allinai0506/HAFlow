@@ -494,6 +494,23 @@ def ensure_claude_workspace_trust(repo):
     )
 
 
+def ensure_grok_workspace_trust(repo):
+    repo = str(Path(repo).expanduser().resolve())
+    config = Path.home() / ".grok" / "trusted_folders.toml"
+    try:
+        content = config.read_text(encoding="utf-8") if config.exists() else ""
+        header = f'[folders."{repo}"]'
+        if header not in content:
+            entry = f'\n[folders."{repo}"]\ntrusted = true\ndecided_at = {int(time.time())}\n'
+            config.parent.mkdir(parents=True, exist_ok=True)
+            tmp = config.with_suffix(".toml.tmp")
+            tmp.write_text((content.rstrip() + "\n" + entry).lstrip(), encoding="utf-8")
+            tmp.replace(config)
+        print(f"[GROK PREFLIGHT] trusted={repo}")
+    except Exception as e:
+        print(f"[GROK PREFLIGHT ERROR] failed to trust {repo}: {e}")
+
+
 def unique_agent_name(task_id, pane_id):
     base = re.sub(
         r"[^a-z0-9_-]+",
@@ -546,6 +563,8 @@ def start_agent(task_id, agent_kind, pane_id, retries=10, delay=0.5):
                 cmd += ["--", "--auto"]
             elif agent_kind in ("qodercli", "claude", "agy"):
                 cmd += ["--", "--dangerously-skip-permissions"]
+            elif agent_kind == "grok":
+                cmd += ["--", "--always-approve"]
 
             data = run_json(cmd)
             return data["result"]["agent"]
@@ -680,6 +699,10 @@ def main():
 
         if args.agent == "claude":
             ensure_claude_workspace_trust(
+                clone
+            )
+        elif args.agent == "grok":
+            ensure_grok_workspace_trust(
                 clone
             )
 

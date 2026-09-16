@@ -13,7 +13,7 @@ nodes:
     default_integration_mode: none
     default_task_type: docs
     agent_policy:
-      preferred: [claude, qodercli, opencode, codex, agy, pi]
+      preferred: [claude, qodercli, opencode, codex, agy, pi, grok]
       max_agents: 2
       roles:
         - name: executor
@@ -60,7 +60,7 @@ nodes:
     default_integration_mode: none
     default_task_type: docs
     agent_policy:
-      preferred: [claude, qodercli, codex, opencode, agy, pi]
+      preferred: [claude, qodercli, codex, opencode, agy, pi, grok]
       max_agents: 2
       roles:
         - name: executor
@@ -103,7 +103,7 @@ nodes:
     default_integration_mode: git
     default_task_type: feat
     agent_policy:
-      preferred: [opencode, codex, qodercli, agy, claude, pi]
+      preferred: [opencode, codex, qodercli, agy, claude, pi, grok]
       parallel: true
       max_agents: 3
     required_outputs:
@@ -128,7 +128,7 @@ nodes:
     default_integration_mode: none
     default_task_type: test
     agent_policy:
-      preferred: [codex, opencode, qodercli, claude, agy, pi]
+      preferred: [codex, opencode, qodercli, claude, agy, pi, grok]
       max_agents: 1
       exclude_stage_agents: [implementation]
     required_outputs:
@@ -155,7 +155,7 @@ nodes:
     default_integration_mode: none
     default_task_type: test
     agent_policy:
-      preferred: [claude, codex, qodercli, opencode, agy, pi]
+      preferred: [claude, codex, qodercli, opencode, agy, pi, grok]
       max_agents: 1
       exclude_stage_agents: [implementation]
     required_outputs:
@@ -183,7 +183,7 @@ nodes:
     default_integration_mode: git
     default_task_type: docs
     agent_policy:
-      preferred: [claude, qodercli, opencode, codex, agy, pi]
+      preferred: [claude, qodercli, opencode, codex, agy, pi, grok]
       max_agents: 1
       exclude_stage_agents: [implementation]
     required_outputs:

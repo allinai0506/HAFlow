@@ -51,6 +51,43 @@ class TestStartAgent(unittest.TestCase):
             ],
         )
 
+    def test_grok_start_uses_always_approve(self):
+        worker = load_worker()
+        response = {"result": {"agent": {"agent": "grok"}}}
+
+        with patch.object(worker, "run_json", return_value=response) as run_json:
+            agent = worker.start_agent("urgent-fix", "grok", "w1:p2", retries=1)
+
+        self.assertEqual(agent, response["result"]["agent"])
+        self.assertEqual(
+            run_json.call_args.args[0],
+            [
+                "herdr",
+                "agent",
+                "start",
+                worker.unique_agent_name("urgent-fix", "w1:p2"),
+                "--kind",
+                "grok",
+                "--pane",
+                "w1:p2",
+                "--timeout",
+                "120000",
+                "--",
+                "--always-approve",
+            ],
+        )
+
+    def test_ensure_grok_workspace_trust(self):
+        worker = load_worker()
+        with tempfile.TemporaryDirectory() as td:
+            with patch.object(worker.Path, "home", return_value=Path(td)):
+                worker.ensure_grok_workspace_trust("/path/to/myrepo")
+                config = Path(td) / ".grok" / "trusted_folders.toml"
+                self.assertTrue(config.exists())
+                content = config.read_text(encoding="utf-8")
+                self.assertIn('[folders."/path/to/myrepo"]', content)
+                self.assertIn("trusted = true", content)
+
 
 
 class TestCleanSandbox(unittest.TestCase):
