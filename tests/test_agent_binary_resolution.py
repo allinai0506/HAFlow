@@ -1,5 +1,6 @@
 """Regression tests for agent CLI binary resolution outside LaunchAgent PATH."""
 
+import os
 import stat
 import tempfile
 import unittest
@@ -65,6 +66,30 @@ class ResolveBinaryTests(unittest.TestCase):
         with patch.object(agent_binary, "resolve_binary", return_value="/x/foo") as rb:
             self.assertEqual(agent_binary.resolve_agent_binary("foo"), "/x/foo")
         rb.assert_called_once_with("foo")
+
+    def test_user_bin_dirs_registered(self):
+        opencode_bin = agent_binary.HOME / ".opencode" / "bin"
+        self.assertIn(opencode_bin, agent_binary.USER_BIN_DIRS)
+        self.assertIn(opencode_bin, agent_binary.EXTRA_BIN_DIRS)
+        # 用户主目录应优先排在系统目录前面
+        opencode_idx = agent_binary.EXTRA_BIN_DIRS.index(opencode_bin)
+        homebrew_idx = agent_binary.EXTRA_BIN_DIRS.index(Path("/opt/homebrew/bin"))
+        self.assertLess(opencode_idx, homebrew_idx)
+
+    def test_ensure_user_bin_dirs_prepends_path(self):
+        with tempfile.TemporaryDirectory() as td1, tempfile.TemporaryDirectory() as td2:
+            fake_user_dir = Path(td1)
+            fake_sys_dir = Path(td2)
+            orig_env = os.environ.get("PATH", "")
+            try:
+                os.environ["PATH"] = str(fake_sys_dir)
+                with patch.object(agent_binary, "USER_BIN_DIRS", [fake_user_dir]):
+                    agent_binary.ensure_user_bin_dirs()
+                    parts = os.environ["PATH"].split(os.pathsep)
+                    self.assertEqual(parts[0], str(fake_user_dir))
+                    self.assertIn(str(fake_sys_dir), parts)
+            finally:
+                os.environ["PATH"] = orig_env
 
 
 class PreflightInspectTests(unittest.TestCase):

@@ -10,6 +10,19 @@
 
 ---
 
+## [2026-09-16] fix | LaunchAgent PATH prepending for user-space agent binaries
+Console deep preflight failed for opencode with a 500 error because the
+LaunchAgent service's minimal PATH resolved the outdated Homebrew-installed
+binary (/opt/homebrew/bin/opencode v1.18.30) instead of the user's latest
+install (~/.opencode/bin/opencode v1.18.31), and EXTRA_BIN_DIRS omitted
+`~/.opencode/bin`.
+- Updated [[preflight-and-health]] §2: `herdr/agent_binary.py` now prepends
+  `USER_BIN_DIRS` to `os.environ["PATH"]` on import, guaranteeing user-space
+  tools take precedence over system/Homebrew shadows.
+- Expanded `EXTRA_BIN_DIRS` with full user-space agent paths (.opencode, .cargo,
+  .bun, .grok, .kimi-code, etc.).
+- Lessons recorded in `docs/lessons/lessons-learned.md` §47.
+
 ## [2026-09-12] init | Initial repository analysis & Wiki creation
 Created initial LLM Wiki directly derived from active repository code inspection and behavioral evidence.
 - Established Wiki Governance Rules in [[WIKI]].
