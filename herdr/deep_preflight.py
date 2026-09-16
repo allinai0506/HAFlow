@@ -440,12 +440,17 @@ def smoke_probe(agent, binary, cwd, timeout=None):
         }
 
 
-def inspect(project, deep=False):
+def inspect(project, deep=False, target_agents=None):
     project_id = project.get("project_id") if project else None
     project_root = project.get("project_root") if project else os.getcwd()
     pool = project_pool(project_id) if project_id else {}
     allowed = pool.get("allowed_agents", AGENTS)
     disabled = set(pool.get("disabled_agents", []))
+
+    if target_agents:
+        target_set = set(target_agents)
+        filtered = [a for a in allowed if a in target_set]
+        allowed = filtered if filtered else [a for a in target_agents if a in AGENTS]
 
     rows = []
     for agent in allowed:
@@ -539,6 +544,7 @@ def main():
     ap = argparse.ArgumentParser(description="Herdr Factory Deep Agent Preflight")
     ap.add_argument("--project-id")
     ap.add_argument("--project-root")
+    ap.add_argument("--agent", action="append", dest="agents", help="Check specific agent(s) only")
     ap.add_argument("--deep", action="store_true", help="Perform minimal real provider calls where a safe adapter is known")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--auto-disable", action="store_true", help="Disable only agents with explicit hard failures from deep probes")
@@ -554,7 +560,12 @@ def main():
     if not project:
         raise SystemExit("当前目录不是已注册 Factory 项目；请进入项目目录或传 --project-id/--project-root")
 
-    rows = inspect(project, deep=args.deep)
+    target_agents = []
+    if args.agents:
+        for item in args.agents:
+            target_agents.extend([x.strip() for x in item.split(",") if x.strip()])
+
+    rows = inspect(project, deep=args.deep, target_agents=target_agents or None)
 
     if args.auto_disable and args.deep:
         hard = {

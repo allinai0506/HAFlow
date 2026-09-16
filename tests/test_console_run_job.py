@@ -72,6 +72,15 @@ class TestConsoleDeepPreflight(unittest.TestCase):
         self.assertEqual(run_command.call_args.args[1], 320)
         self.assertEqual(result, {"agents": []})
 
+    def test_deep_preflight_supports_single_agent_flag(self):
+        module = load_console()
+        with patch.object(module, "run", return_value=self.fake_completed()) as run_command:
+            result = module.deep_preflight({"project_id": "p1"}, agent="opencode")
+        command = run_command.call_args.args[0]
+        self.assertEqual(command[0], str(ROOT / "bin" / "herdr-deep-preflight"))
+        self.assertEqual(command[1:], ["--project-id", "p1", "--deep", "--json", "--agent", "opencode"])
+        self.assertEqual(result, {"agents": []})
+
     def test_falls_back_to_the_library_script_without_the_cli(self):
         module = load_console()
         with tempfile.TemporaryDirectory() as tmp:

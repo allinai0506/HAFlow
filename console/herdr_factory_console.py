@@ -156,19 +156,23 @@ def preflight(p):
         out.append({'agent':a,'installed':bool(b),'binary':b,'disabled':a in disabled,'load':loads.get(a,0),'auth_hint':auth_state,'status':'disabled' if a in disabled else 'ready' if b else 'missing'})
     return out
 
-def deep_preflight(p):
+def deep_preflight(p, agent=None):
     script = HERDR_ROOT / "bin" / "herdr-deep-preflight"
     if not script.exists():
         script = HERDR_ROOT / "herdr" / "deep_preflight.py"
     if not script.exists():
         raise RuntimeError(f"Deep Preflight 未安装: {script}")
 
-    r = run([
+    cmd = [
         str(script),
         "--project-id", p.get("project_id"),
         "--deep",
         "--json",
-    ], 320)
+    ]
+    if agent:
+        cmd.extend(["--agent", agent])
+
+    r = run(cmd, 320)
 
     if r.returncode != 0:
         raise RuntimeError(r.stderr.strip() or r.stdout.strip() or "Deep Preflight 执行失败")
@@ -681,7 +685,7 @@ def tail_log(kind='controller',n=180):
 
 HTML_TEMPLATE=r'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>__PRODUCT_NAME__</title><style>
 :root{--bg:#0b0f14;--panel:#121821;--panel-elevated:#172230;--card:#17202b;--card-hover:#1c2838;--line:#293342;--line-focus:#455973;--text:#edf2f7;--muted:#8fa0b5;--subtle:#9cb2cd;--accent:#67a4ff;--accent-glow:rgba(103,164,255,0.2);--good:#42c58a;--warn:#f3b950;--bad:#f36b6b}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",sans-serif;line-height:1.5}button,input,select,textarea{font:inherit}button{cursor:pointer}*:focus-visible{outline:2px solid var(--accent);outline-offset:2px}.shell{display:grid;grid-template-columns:250px minmax(0,1fr);min-height:100vh}.sidebar{border-right:1px solid var(--line);background:#0f141b;padding:16px;position:sticky;top:0;height:100vh;overflow:auto}.brand{font-size:20px;font-weight:750;letter-spacing:-0.3px}.sub{color:var(--muted);font-size:12px;margin:4px 0 16px}.project{width:100%;text-align:left;background:transparent;border:1px solid var(--line);color:var(--text);border-radius:12px;padding:14px;margin-bottom:8px;transition:all .15s ease}.project:hover{border-color:var(--line-focus);background:rgba(255,255,255,0.02)}.project.active{border-color:var(--accent);background:#14243a;box-shadow:0 0 12px var(--accent-glow)}.project small{display:block;color:var(--subtle);margin-top:4px;font-size:11.5px}.main{padding:24px;min-width:0}.top{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:18px}.title{font-size:22px;font-weight:760}.muted{color:var(--muted)}.actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.btn{border:1px solid var(--line);background:var(--card);color:var(--text);border-radius:10px;padding:8px 14px;display:inline-flex;align-items:center;gap:6px;font-weight:550;transition:all .15s ease;user-select:none}.btn:hover{background:var(--card-hover);border-color:var(--line-focus)}.btn:active{transform:translateY(1px)}.btn.primary{background:#2563eb;color:#ffffff;border:1px solid #3b82f6;font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.25)}.btn.primary:hover{background:#1d4ed8;border-color:#60a5fa;color:#ffffff}.btn.primary:active{background:#1e40af;transform:translateY(1px)}.btn.danger-btn{background:var(--bad);color:#fff;border-color:var(--bad);font-weight:700}.btn.danger-btn:hover{background:#ff7d7d}.btn.is-loading{opacity:.75;pointer-events:none;cursor:wait}.btn.icon-only{padding:8px 10px;font-weight:700}.actions .btn.primary{margin-left:auto}.btn-group{display:inline-flex;vertical-align:middle;border-radius:10px}.btn-group .btn{border-radius:0;margin-left:-1px}.btn-group .btn:first-child{border-top-left-radius:10px;border-bottom-left-radius:10px;margin-left:0}.btn-group .btn:last-child{border-top-right-radius:10px;border-bottom-right-radius:10px}.btn-group .btn:focus-visible{z-index:1}.dropdown{position:relative;display:inline-block}.dropdown-menu{display:none;position:absolute;right:0;top:calc(100% + 6px);background:var(--panel-elevated);border:1px solid var(--line);border-radius:12px;min-width:180px;z-index:80;box-shadow:0 12px 28px rgba(0,0,0,.6);padding:6px}.dropdown.open .dropdown-menu{display:block;animation:popIn .12s ease-out}.dropdown-item{padding:8px 12px;font-size:13px;color:var(--text);border-radius:8px;cursor:pointer;display:flex;align-items:center;gap:8px;background:transparent;border:0;width:100%;text-align:left;font:inherit;transition:background .12s}.dropdown-item:hover{background:#202e40}.dropdown-item.danger-text{color:var(--bad)}.dropdown-item.danger-text:hover{background:rgba(243,107,107,.15)}.dropdown-divider{height:1px;background:var(--line);margin:6px 0}.metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:18px}.metric,.panel{background:var(--panel);border:1px solid var(--line);border-radius:14px}.metric{padding:16px}.metric b{font-size:24px;display:block;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-variant-numeric:tabular-nums}.metric span{font-size:12px;color:var(--muted)}.stages{display:flex;gap:10px;overflow-x:auto;margin-bottom:18px;padding:2px 2px 6px;scroll-behavior:smooth}.stage{flex:1;min-width:136px;padding:14px 16px;background:var(--panel);border:1px solid var(--line);border-radius:14px;position:relative;transition:all .2s ease}.stage:hover{border-color:var(--line-focus)}.stage.stage-active{border-color:var(--accent);box-shadow:0 0 14px var(--accent-glow)}.stage:not(:last-child)::after{content:'›';position:absolute;right:-7px;top:50%;transform:translateY(-50%);color:var(--muted);font-size:18px;font-weight:700;z-index:2;pointer-events:none}.stage-head{font-size:11px;color:var(--accent);font-weight:700;margin-bottom:4px;letter-spacing:0.5px}.stage strong{display:block;margin-bottom:8px;font-size:14px}.badge{font-size:12px;border-radius:999px;padding:4px 8px;display:inline-block;border:1px solid var(--line)}.badge.cleaned{color:var(--good);border-color:rgba(66,197,138,.3)}.badge.working,.badge.finalizing{color:var(--warn);border-color:rgba(243,185,80,.3)}.badge.failed,.badge.blocked{color:var(--bad);border-color:rgba(243,107,107,.3)}.badge.waiting{color:var(--muted)}.badge.superseded{color:var(--muted)}.badge.in_progress{color:var(--warn);border-color:rgba(243,185,80,.3)}.grid{display:grid;grid-template-columns:minmax(0,1.65fr) minmax(280px,.8fr);gap:16px}.panel{overflow:hidden}.panel h3{font-size:14px;margin:0;padding:14px 16px;border-bottom:1px solid var(--line);background:rgba(255,255,255,0.015)}.task{padding:16px;border-bottom:1px solid var(--line);display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:center;transition:background .15s}.task:hover{background:rgba(255,255,255,0.01)}.task.task-highlight{background:rgba(103,164,255,.14);border-left:3px solid var(--accent)}.task-name{font-weight:650;font-size:14px}.task-id{color:var(--subtle);font-size:11.5px;margin-top:4px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.task-meta{color:var(--subtle);font-size:12px;margin-top:4px}.task-actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}.mini{padding:5px 10px;border-radius:8px;border:1px solid var(--line);background:#101720;color:var(--text);font-size:12px;transition:all .15s}.mini:hover{background:#1a2636;border-color:var(--line-focus)}.agent-row,.slot-row,.alert-row{padding:10px 16px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;gap:8px;align-items:center}.dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:8px;background:var(--muted)}.dot.ready{background:var(--good);box-shadow:0 0 6px rgba(66,197,138,.4)}.dot.working{background:var(--warn);box-shadow:0 0 6px rgba(243,185,80,.4)}.dot.disabled,.dot.failed{background:var(--bad);box-shadow:0 0 6px rgba(243,107,107,.4)}.section-gap{margin-top:16px}.empty{padding:20px 16px;color:var(--muted);font-size:13px;text-align:center}pre{margin:0;white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;line-height:1.55}.modal{position:fixed;inset:0;background:rgba(0,0,0,.68);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);display:none;align-items:center;justify-content:center;padding:16px;z-index:50}.modal.open{display:flex;animation:fadeIn .15s ease-out}.modal-card{width:min(920px,100%);max-height:86vh;overflow:auto;background:var(--panel);border:1px solid var(--line);border-radius:16px;box-shadow:0 24px 60px rgba(0,0,0,.7)}.modal-head{display:flex;justify-content:space-between;align-items:center;padding:16px 20px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--panel);z-index:2}.modal-body{padding:20px}.close{background:transparent;color:var(--muted);border:0;width:32px;height:32px;border-radius:8px;display:inline-flex;align-items:center;justify-content:center;cursor:pointer;transition:all .15s}.close:hover{background:rgba(255,255,255,.08);color:var(--text)}.form{display:grid;gap:10px}.form label{font-size:12px;color:var(--muted);font-weight:600}.form input,.form select,.form textarea{width:100%;background:#0d131a;color:var(--text);border:1px solid var(--line);border-radius:9px;padding:10px;transition:border-color .15s}.form input:focus,.form select:focus,.form textarea:focus{border-color:var(--accent)}.form textarea{min-height:120px;line-height:1.5}.toast{position:fixed;right:24px;bottom:24px;background:#111923;border:1px solid var(--line);padding:10px 18px;border-radius:12px;display:none;max-width:420px;z-index:90;box-shadow:0 10px 30px rgba(0,0,0,.5);font-size:13px;line-height:1.4}.toast.show{display:flex;align-items:center;gap:8px;animation:slideUp .18s ease-out}.danger-text{color:var(--bad)}.good-text{color:var(--good)}.warn-text{color:var(--warn)}.wf-subject{font-size:16px;font-weight:700;line-height:1.35}.wf-sub{font-size:12px;margin-top:4px;color:var(--subtle)}.wf-switcher{display:flex;align-items:center;gap:8px;margin:0 0 16px}.wf-switcher label{font-size:12px;color:var(--muted)}.wf-switcher select{background:#0d131a;color:var(--text);border:1px solid var(--line);border-radius:9px;padding:8px;max-width:520px}.fleet-table{border:1px solid var(--line);border-radius:12px;overflow:hidden;margin-top:8px}.fleet-header,.fleet-row{display:grid;grid-template-columns:120px 80px minmax(120px,1.2fr) 70px 80px minmax(120px,1.5fr);gap:8px;align-items:center;padding:10px 14px;background:var(--panel);border-bottom:1px solid var(--line);font-size:12px}.fleet-header{font-size:11px;font-weight:700;color:var(--muted);background:#0d131a;text-transform:uppercase;letter-spacing:0.5px}.fleet-row:last-child{border-bottom:0}.fleet-row:hover{background:var(--card)}.proj-box{display:grid;gap:12px}.proj-sec{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px}.proj-lbl{font-size:11px;font-weight:700;color:var(--accent);letter-spacing:0.5px;margin-bottom:6px}.proj-txt{font-size:13px;line-height:1.5;color:var(--text)}.proj-blk{background:rgba(243,107,107,0.12);border:1px solid rgba(243,107,107,0.3);border-radius:10px;padding:10px 12px;color:var(--bad);font-size:13px;display:flex;align-items:center;gap:8px}.proj-ms{display:flex;align-items:center;gap:8px;font-size:12.5px;padding:6px 8px;border-radius:8px;background:rgba(255,255,255,0.02);margin-bottom:4px}.proj-ms-dot{width:16px;height:16px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:10px;font-weight:700}.proj-ms-dot.completed{background:rgba(66,197,138,0.2);color:var(--good)}.proj-ms-dot.in_progress{background:rgba(243,185,80,0.2);color:var(--warn)}.proj-ms-dot.pending{background:rgba(255,255,255,0.05);color:var(--muted)}.proj-art{background:rgba(0,0,0,0.2);border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:12px;margin-bottom:6px}.proj-art-hd{display:flex;justify-content:space-between;align-items:center;font-weight:600;margin-bottom:2px}.proj-acts{margin:0;padding-left:16px;font-size:12px;color:var(--subtle);line-height:1.5}@keyframes fadeIn{from{opacity:0}to{opacity:1}}@keyframes slideUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}@keyframes popIn{from{opacity:0;transform:scale(0.96)}to{opacity:1;transform:scale(1)}}@media(max-width:1000px){.shell{grid-template-columns:1fr}.sidebar{position:static;height:auto;border-right:0;border-bottom:1px solid var(--line)}.projects{display:flex;gap:8px;overflow:auto}.project{min-width:180px}.grid{grid-template-columns:1fr}.metrics{grid-template-columns:repeat(2,1fr)}}
-.attention-banner{background:linear-gradient(90deg,#14243a 0%,#111a26 100%);border:1px solid var(--accent);border-radius:12px;padding:12px 18px;margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;box-shadow:0 0 16px var(--accent-glow);gap:12px}.att-badge{background:var(--accent);color:#06111f;font-weight:700;font-size:11px;padding:3px 8px;border-radius:999px;letter-spacing:0.5px;text-transform:uppercase}.att-text{font-size:13.5px;font-weight:600;color:var(--text)}.task-filters{display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap}.filter-btn{background:var(--panel);border:1px solid var(--line);color:var(--muted);border-radius:8px;padding:6px 12px;font-size:12px;cursor:pointer;transition:all .15s ease}.filter-btn:hover{color:var(--text);border-color:var(--line-focus)}.filter-btn.active{background:#14243a;border-color:var(--accent);color:var(--text);font-weight:600}.filter-cnt{background:rgba(255,255,255,0.08);border-radius:999px;padding:1px 6px;margin-left:4px;font-size:11px}.deep-drawer{position:fixed;bottom:0;left:250px;right:0;background:var(--panel);border-top:1px solid var(--line);box-shadow:0 -8px 24px rgba(0,0,0,0.5);z-index:40;transition:transform .2s ease-in-out}.deep-drawer.collapsed{transform:translateY(calc(100% - 40px))}.drawer-head{height:40px;padding:0 18px;display:flex;justify-content:space-between;align-items:center;cursor:pointer;background:#0d131a;border-bottom:1px solid var(--line);user-select:none}.drawer-head:hover{background:#121a24}.drawer-pill{background:#1a2736;border:1px solid var(--accent);color:var(--accent);font-size:11px;font-weight:700;padding:2px 8px;border-radius:6px}.drawer-body{height:280px;display:flex;flex-direction:column;background:var(--bg)}.drawer-tabs{display:flex;background:#0d131a;border-bottom:1px solid var(--line)}.dtab{padding:8px 16px;background:transparent;border:0;border-bottom:2px solid transparent;color:var(--muted);font-size:12px;cursor:pointer}.dtab:hover{color:var(--text)}.dtab.active{color:var(--accent);border-bottom-color:var(--accent);font-weight:600}.drawer-view{flex:1;overflow:auto;padding:12px 18px;background:#080b0f}.signoff-box{display:grid;gap:14px}.signoff-head{display:flex;justify-content:space-between;align-items:center;padding-bottom:12px;border-bottom:1px solid var(--line)}.signoff-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:14px;padding-top:14px;border-top:1px solid var(--line)}@media(max-width:1000px){.deep-drawer{left:0}}
+.attention-banner{background:linear-gradient(90deg,#14243a 0%,#111a26 100%);border:1px solid var(--accent);border-radius:12px;padding:12px 18px;margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;box-shadow:0 0 16px var(--accent-glow);gap:12px}.att-badge{background:var(--accent);color:#06111f;font-weight:700;font-size:11px;padding:3px 8px;border-radius:999px;letter-spacing:0.5px;text-transform:uppercase}.att-text{font-size:13.5px;font-weight:600;color:var(--text)}.task-filters{display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap}.filter-btn{background:var(--panel);border:1px solid var(--line);color:var(--muted);border-radius:8px;padding:6px 12px;font-size:12px;cursor:pointer;transition:all .15s ease}.filter-btn:hover{color:var(--text);border-color:var(--line-focus)}.filter-btn.active{background:#14243a;border-color:var(--accent);color:var(--text);font-weight:600}.filter-cnt{background:rgba(255,255,255,0.08);border-radius:999px;padding:1px 6px;margin-left:4px;font-size:11px}.deep-drawer{position:fixed;bottom:0;left:250px;right:0;background:var(--panel);border-top:1px solid var(--line);box-shadow:0 -8px 24px rgba(0,0,0,0.5);z-index:40;transition:transform .2s ease-in-out}.deep-drawer.collapsed{transform:translateY(calc(100% - 40px))}.drawer-head{height:40px;padding:0 18px;display:flex;justify-content:space-between;align-items:center;cursor:pointer;background:#0d131a;border-bottom:1px solid var(--line);user-select:none}.drawer-head:hover{background:#121a24}.drawer-pill{background:#1a2736;border:1px solid var(--accent);color:var(--accent);font-size:11px;font-weight:700;padding:2px 8px;border-radius:6px}.drawer-body{height:280px;display:flex;flex-direction:column;background:var(--bg)}.drawer-tabs{display:flex;background:#0d131a;border-bottom:1px solid var(--line)}.dtab{padding:8px 16px;background:transparent;border:0;border-bottom:2px solid transparent;color:var(--muted);font-size:12px;cursor:pointer}.dtab:hover{color:var(--text)}.dtab.active{color:var(--accent);border-bottom-color:var(--accent);font-weight:600}.drawer-view{flex:1;overflow:auto;padding:12px 18px;background:#080b0f}.signoff-box{display:grid;gap:14px}.signoff-head{display:flex;justify-content:space-between;align-items:center;padding-bottom:12px;border-bottom:1px solid var(--line)}.signoff-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:14px;padding-top:14px;border-top:1px solid var(--line)}.spinner{display:inline-block;width:14px;height:14px;border:2px solid rgba(255,255,255,0.2);border-radius:50%;border-top-color:var(--accent);animation:spin .8s linear infinite;vertical-align:middle}@keyframes spin{to{transform:rotate(360deg)}}.preflight-box{display:grid;gap:12px}.preflight-head{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 16px}.preflight-prog{height:5px;background:rgba(255,255,255,0.08);border-radius:3px;overflow:hidden;margin-top:10px}.preflight-prog-fill{height:100%;width:0%;background:var(--accent);transition:width .3s ease}.preflight-row{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px;display:flex;justify-content:space-between;gap:12px;align-items:flex-start;transition:border-color .2s,background .2s}.preflight-row:hover{background:var(--card-hover)}.preflight-row.is-ready{border-color:rgba(66,197,138,.35)}.preflight-row.is-failed{border-color:rgba(243,107,107,.35)}.preflight-row.is-warn{border-color:rgba(243,185,80,.35)}@media(max-width:1000px){.deep-drawer{left:0}}
 </style></head><body><div class="shell"><aside class="sidebar"><div class="brand">__PRODUCT_NAME__</div><div class="sub">__PRODUCT_TAGLINE__ · 控制台</div><button class="btn primary" style="width:100%;margin-bottom:12px;display:flex;align-items:center;justify-content:center;gap:6px" onclick="showNewProjectModal()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg><span>新建工厂空间</span></button><div id="projects" class="projects"></div><button class="btn" style="width:100%;margin-top:8px" onclick="refreshAll()"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.3"/></svg><span>刷新</span></button></aside><main class="main"><div class="top"><div><div class="title" id="projectTitle">选择项目</div><div id="workflowTitle"><div class="wf-subject" id="workflowSubject">—</div><div class="muted wf-sub" id="workflowSub"></div></div></div><div class="actions"><div class="btn-group factory-action"><button class="btn" onclick="advanceStage()" title="推进当前阶段">进入下一阶段</button><button class="btn" onclick="createCandidate()" title="汇总至候选分支">创建候选分支</button></div><button class="btn factory-action" onclick="runPreflight()">执行者自检</button><button class="btn factory-action" onclick="showTemplateLibrary()">模板库</button><button class="btn factory-action" onclick="showArchive()">任务归档</button><div class="dropdown factory-action" id="moreDropdown"><button class="btn icon-only" onclick="toggleMoreMenu(event)" aria-label="更多操作" title="更多操作">···</button><div class="dropdown-menu"><button class="dropdown-item" onclick="closeMoreMenu();showLogs()">查看日志</button><button class="dropdown-item" onclick="closeMoreMenu();showAgentOverride()">指定执行者</button><button class="dropdown-item" onclick="closeMoreMenu();toggleWorkflowPause()">暂停/恢复调度</button><button class="dropdown-item" onclick="closeMoreMenu();stepWorkflow()">单步推进节点</button><button class="dropdown-item" onclick="closeMoreMenu();showRollbackModal()">节点回溯 (Rollback)</button><button class="dropdown-item" onclick="closeMoreMenu();showCheckpointsModal()">快照中心 (Checkpoints)</button><div class="dropdown-divider"></div><button class="dropdown-item danger-text" onclick="closeMoreMenu();showUnregisterProjectModal()">注销项目</button></div></div><button class="btn primary factory-action" onclick="showNewWorkflow()"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg><span>新需求</span></button></div></div><div class="metrics"><div class="metric"><b id="mProjects">0</b><span>项目空间</span></div><div class="metric"><b id="mWorkflows">0</b><span>活跃工作流</span></div><div class="metric"><b id="mAgents">0</b><span>活跃执行者</span></div><div class="metric"><b id="mAlerts">0</b><span>需要关注</span></div></div><div id="stages" class="stages"></div><div id="attentionBanner" class="attention-banner" style="display:none"></div><div id="workflowSwitcher" class="wf-switcher" style="display:none"></div><div class="grid"><section class="panel"><h3>执行者与任务实时看板</h3><div class="task-filters" style="padding:10px 16px 0"><button class="filter-btn active" id="fAll" onclick="setTaskFilter('all')">全部任务 <span class="filter-cnt" id="cntAll">0</span></button><button class="filter-btn" id="fDecision" onclick="setTaskFilter('decision')">待我拍板 <span class="filter-cnt" id="cntDecision">0</span></button><button class="filter-btn" id="fAttention" onclick="setTaskFilter('attention')">需关注 <span class="filter-cnt" id="cntAttention">0</span></button><button class="filter-btn" id="fActive" onclick="setTaskFilter('active')">进行中 <span class="filter-cnt" id="cntActive">0</span></button></div><div id="tasks"></div></section><section><div class="panel"><h3>执行者阵容</h3><div id="agents"></div></div><div class="panel section-gap"><h3>常驻智能体工位</h3><div id="slots"></div></div><div class="panel section-gap"><h3>告警中心</h3><div id="alerts"></div></div></section></div></main></div><div id="modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle"><div class="modal-card"><div class="modal-head"><strong id="modalTitle">详情</strong><button class="close" aria-label="关闭弹窗" onclick="closeModal()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg></button></div><div id="modalBody" class="modal-body"></div></div></div><div id="toast" class="toast" role="alert" aria-live="polite"></div><div id="deepDrawer" class="deep-drawer collapsed"><div class="drawer-head" onclick="toggleDeepDrawer()"><div style="display:flex;align-items:center;gap:8px"><span class="drawer-pill">底层物理现场</span><span class="muted" style="font-size:12px">原生终端 · 内核日志 · 白盒遥测</span></div><div style="display:flex;align-items:center;gap:10px"><button class="mini" onclick="event.stopPropagation();refreshDeepDrawer()">刷新</button><span id="drawerToggleText" style="font-size:12px;color:var(--accent);font-weight:600">▲ 展开抽屉</span></div></div><div class="drawer-body"><div class="drawer-tabs"><button class="dtab active" id="dtabTty" onclick="switchDrawerTab('tty')">活动工位终端 (Live TTY)</button><button class="dtab" id="dtabLogs" onclick="switchDrawerTab('logs')">内核日志 (Controller Log)</button><button class="dtab" id="dtabRaw" onclick="switchDrawerTab('raw')">白盒遥测原始数据 (Raw Telemetry)</button></div><div class="drawer-view"><pre id="drawerPre">请选择活动工位或点击展开查看底层物理输出…</pre></div></div></div><script>
 let state={overview:null,project:null,workflow:null,ops:null,projectId:null,workflowId:null,spaceId:null,space:null,opsMode:false,taskFilter:'all',drawerTab:'tty'};
 const VIEW_KEY='herdrConsoleView';
@@ -1324,61 +1328,199 @@ function showNewWorkflow(){
   openModal('新建需求',`<div class="form"><label for="newProjName">项目</label><input id="newProjName" value="${esc(state.project.project.project_name)}" disabled><label for="newTitle">本次任务名称</label><input id="newTitle" placeholder="例如：适配深色模式切换 / 修复结算页面浮点精度 Bug"><label for="newTemplate">工作流模板</label><select id="newTemplate"><option value="software-development-v1">software-development-v1（默认软件开发）</option></select><label for="newAgent">执行者策略</label><select id="newAgent"><option value="auto">auto（Router 自动）</option>${['opencode','codex','claude','qodercli','agy','pi','grok'].map(a=>`<option>${a}</option>`).join('')}</select><label for="newRequirement">自然语言需求</label><textarea id="newRequirement" onblur="autoFillWorkflowTitle()"></textarea><button class="btn primary" onclick="submitNewWorkflowAsync()">启动工作流</button><div id="runWaitStatus" class="muted" style="min-height:16px;font-size:12px"></div></div>`);
   populateTemplateSelect()
 }
+let preflightRunId=0;
+const preflightState={total:0,completed:0,ready:0,warn:0,error:0,disabled:0,results:{}};
+const preflightStatusLabel=s=>({
+  READY:'就绪',
+  DISABLED:'已禁用',
+  UNKNOWN:'未知',
+  MISSING:'未安装',
+  WARN:'警告',
+  TOKEN_EXHAUSTED:'额度耗尽',
+  AUTH_REQUIRED:'需要认证',
+  PROVIDER_ERROR:'服务端繁忙',
+  LOCAL_ERROR:'本地异常',
+  TRUST_REQUIRED:'需要信任',
+  UPDATE_BLOCKED:'更新受阻',
+  TIMEOUT:'超时',
+  ERROR:'错误'
+})[s]||s;
+const preflightHardFailures=new Set([
+  'TOKEN_EXHAUSTED','AUTH_REQUIRED','PROVIDER_ERROR','LOCAL_ERROR','TRUST_REQUIRED',
+  'UPDATE_BLOCKED','TIMEOUT','ERROR','MISSING'
+]);
+function buildPreflightRowHtml(a){
+  const agent=a.agent||a;
+  const auth=authHintLabel(a.auth_hint||'unknown');
+  return `<div class="preflight-row" id="pf-row-${esc(agent)}">`
+    +`<div style="flex:1;min-width:0">`
+    +`<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">`
+    +`<i class="dot" id="pf-dot-${esc(agent)}"></i>`
+    +`<strong>${esc(agent)}</strong> `
+    +`<span id="pf-badge-${esc(agent)}" class="badge waiting">等待检测…</span>`
+    +`<span id="pf-spin-${esc(agent)}" class="spinner" style="width:11px;height:11px;border-width:1.5px;display:none"></span>`
+    +`</div>`
+    +`<div class="task-meta" id="pf-note-${esc(agent)}" style="margin-top:4px">准备执行最小探针…</div>`
+    +`<div id="pf-output-${esc(agent)}"></div>`
+    +`</div>`
+    +`<div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;flex-shrink:0">`
+    +`<span class="task-meta" id="pf-auth-${esc(agent)}">${esc(auth)}</span>`
+    +`<div id="pf-action-${esc(agent)}"></div>`
+    +`</div>`
+    +`</div>`;
+}
+function updateAgentPreflightResult(agent,row){
+  const deep=row.deep||{};
+  const final=row.final_status||row.shallow_status||'UNKNOWN';
+  let dotCls='';
+  let badgeCls='waiting';
+  let rowCls='';
+  if(final==='READY'){
+    dotCls='ready';badgeCls='cleaned';rowCls='is-ready';
+  }else if(preflightHardFailures.has(final)){
+    dotCls='failed';badgeCls='failed';rowCls='is-failed';
+  }else if(final==='WARN'){
+    dotCls='working';badgeCls='working';rowCls='is-warn';
+  }else if(final==='DISABLED'){
+    dotCls='disabled';badgeCls='superseded';
+  }
+  const note=deep.note||row.version||row.binary||(final==='MISSING'?'未安装':'');
+  const adapter=deep.adapter?(' · '+esc(deep.adapter)):'';
+  const out=(deep.output||'').slice(-800);
+  const outHtml=out?('<pre class="task-meta" style="white-space:pre-wrap;max-height:120px;overflow:auto;background:#080b0f;padding:6px 8px;border-radius:8px;margin-top:6px;border:1px solid rgba(255,255,255,0.05)">'+esc(out)+'</pre>'):'';
+  const rowEl=document.getElementById('pf-row-'+agent);
+  if(rowEl)rowEl.className='preflight-row '+rowCls;
+  const dotEl=document.getElementById('pf-dot-'+agent);
+  if(dotEl)dotEl.className='dot '+dotCls;
+  const badgeEl=document.getElementById('pf-badge-'+agent);
+  if(badgeEl){badgeEl.className='badge '+badgeCls;badgeEl.textContent=preflightStatusLabel(final)}
+  const spinEl=document.getElementById('pf-spin-'+agent);
+  if(spinEl)spinEl.style.display='none';
+  const noteEl=document.getElementById('pf-note-'+agent);
+  if(noteEl)noteEl.innerHTML=esc(note)+adapter;
+  const outEl=document.getElementById('pf-output-'+agent);
+  if(outEl)outEl.innerHTML=outHtml;
+  const authEl=document.getElementById('pf-auth-'+agent);
+  if(authEl)authEl.textContent=authHintLabel(row.auth_hint||'unknown');
+  const actEl=document.getElementById('pf-action-'+agent);
+  if(actEl)actEl.innerHTML=`<button class="mini" onclick="retrySinglePreflight('${esc(agent)}')">重试</button>`;
+  preflightState.results[agent]=row;
+  updatePreflightSummary();
+}
+function updatePreflightSummary(){
+  const rs=Object.values(preflightState.results);
+  const completed=rs.length;
+  const total=preflightState.total;
+  let ready=0,warn=0,err=0,dis=0;
+  for(const r of rs){
+    const f=r.final_status||r.shallow_status||'UNKNOWN';
+    if(f==='READY')ready++;
+    else if(preflightHardFailures.has(f))err++;
+    else if(f==='WARN')warn++;
+    else if(f==='DISABLED')dis++;
+  }
+  const pct=total?Math.min(100,Math.round((completed/total)*100)):0;
+  const bar=document.getElementById('preflightProgressBar');
+  if(bar)bar.style.width=pct+'%';
+  const cnt=document.getElementById('preflightCounter');
+  if(cnt)cnt.textContent=`${completed} / ${total}`;
+  const sReady=document.getElementById('preflightStatReady');
+  if(sReady){sReady.style.display=ready?'inline':'none';sReady.textContent=`${ready} 就绪`}
+  const sWarn=document.getElementById('preflightStatWarn');
+  if(sWarn){sWarn.style.display=warn?'inline':'none';sWarn.textContent=`${warn} 警告`}
+  const sErr=document.getElementById('preflightStatError');
+  if(sErr){sErr.style.display=err?'inline':'none';sErr.textContent=`${err} 异常`}
+  const sDis=document.getElementById('preflightStatDisabled');
+  if(sDis){sDis.style.display=dis?'inline':'none';sDis.textContent=`${dis} 已禁用`}
+  if(completed>=total&&total>0){
+    const topSpin=document.getElementById('preflightTopSpinner');
+    if(topSpin)topSpin.style.display='none';
+    const titleEl=document.getElementById('preflightSummaryTitle');
+    if(titleEl)titleEl.innerHTML=`<span class="good-text">✓ 全部执行者自检已完成</span>`;
+    const btn=document.getElementById('preflightRerunAllBtn');
+    if(btn)btn.disabled=false;
+    toast('深度自检完成');
+  }
+}
+async function executeSinglePreflight(agent,runId){
+  const dotEl=document.getElementById('pf-dot-'+agent);
+  if(dotEl)dotEl.className='dot working';
+  const badgeEl=document.getElementById('pf-badge-'+agent);
+  if(badgeEl){badgeEl.className='badge in_progress';badgeEl.textContent='检测中…'}
+  const spinEl=document.getElementById('pf-spin-'+agent);
+  if(spinEl)spinEl.style.display='inline-block';
+  const noteEl=document.getElementById('pf-note-'+agent);
+  if(noteEl)noteEl.textContent='正在发起沙盒探针与真实最小调用…';
+  const actEl=document.getElementById('pf-action-'+agent);
+  if(actEl)actEl.innerHTML='';
+  try{
+    const res=await api('/api/deep-preflight?id='+encodeURIComponent(state.projectId)+'&agent='+encodeURIComponent(agent));
+    if(runId&&runId!==preflightRunId)return;
+    const row=(res.agents&&res.agents[0])||{agent:agent,final_status:'UNKNOWN'};
+    updateAgentPreflightResult(agent,row);
+  }catch(e){
+    if(runId&&runId!==preflightRunId)return;
+    updateAgentPreflightResult(agent,{agent:agent,final_status:'ERROR',deep:{attempted:true,status:'ERROR',note:'探针执行异常: '+e.message,output:e.stack||''}});
+  }
+}
+async function retrySinglePreflight(agent){
+  if(!state.projectId)return toast('当前空间不参与工厂调度',true);
+  toast(`正在重新自检 ${agent}…`);
+  delete preflightState.results[agent];
+  updatePreflightSummary();
+  await executeSinglePreflight(agent,0);
+  toast(`${agent} 自检完成`);
+}
 async function runPreflight(){
   if(!state.projectId)return toast('当前空间不参与工厂调度',true);
-  try{
-    toast('正在执行深度自检…');
-    const d=await api('/api/deep-preflight?id='+encodeURIComponent(state.projectId));
-    const rows=d.agents||[];
-
-    const statusLabel=s=>({
-      READY:'就绪',
-      DISABLED:'已禁用',
-      UNKNOWN:'未知',
-      MISSING:'未安装',
-      WARN:'警告',
-      TOKEN_EXHAUSTED:'额度耗尽',
-      AUTH_REQUIRED:'需要认证',
-      PROVIDER_ERROR:'服务端繁忙',
-      LOCAL_ERROR:'本地异常',
-      TRUST_REQUIRED:'需要信任',
-      UPDATE_BLOCKED:'更新受阻',
-      TIMEOUT:'超时',
-      ERROR:'错误'
-    })[s]||s;
-
-    const hard=new Set([
-      'TOKEN_EXHAUSTED','AUTH_REQUIRED','PROVIDER_ERROR','LOCAL_ERROR','TRUST_REQUIRED',
-      'UPDATE_BLOCKED','TIMEOUT','ERROR','MISSING'
-    ]);
-
-    const html='<div class="muted" style="margin-bottom:8px">'
-      +'真实最小调用仅用于已确认安全非交互模式的执行者；'
-      +'UNKNOWN 表示尚未配置安全适配器，不代表不可用。'
-      +'TIMEOUT 可能是慢而非不可用（claude 冷启动常需 40–60s，已自动重试 1 次），请结合下方原始输出判断，必要时点一次“执行者自检”重试。'
-      +'</div><div>'
-      +rows.map(a=>{
-        const deep=a.deep||{};
-        const final=a.final_status||a.shallow_status||'UNKNOWN';
-        const cls=final==='READY'?'good-text':(hard.has(final)?'danger-text':'muted');
-        const note=deep.note||a.version||a.binary||'';
-        const adapter=deep.adapter?(' · '+esc(deep.adapter)):'';
-        const out=(deep.output||'').slice(-800);
-        const outHtml=out?('<pre class="task-meta" style="white-space:pre-wrap;max-height:120px;overflow:auto;background:#080b0f;padding:6px 8px;border-radius:8px;margin-top:4px">'+esc(out)+'</pre>'):'';
-        return '<div class="agent-row">'
-          +'<div><div><strong>'+esc(a.agent)+'</strong> '
-          +'<span class="'+cls+'">'+esc(statusLabel(final))+'</span></div>'
-          +'<div class="task-meta">'+esc(note)+adapter+'</div>'+outHtml+'</div>'
-          +'<div class="task-meta">'+esc(authHintLabel(a.auth_hint||'unknown'))+'</div>'
-          +'</div>';
-      }).join('')
-      +'</div>';
-
-    openModal('执行者深度自检',html);
-    toast('深度自检完成');
-  }catch(e){
-    toast(e.message,true);
-  }
+  preflightRunId=Date.now();
+  const currentRunId=preflightRunId;
+  const agentItems=(state.project&&state.project.agents&&state.project.agents.length)
+    ?state.project.agents
+    :['opencode','codex','claude','qodercli','agy','pi','grok'].map(a=>({agent:a,auth_hint:'unknown'}));
+  const agentNames=agentItems.map(a=>a.agent);
+  preflightState.total=agentNames.length;
+  preflightState.completed=0;
+  preflightState.ready=0;
+  preflightState.warn=0;
+  preflightState.error=0;
+  preflightState.disabled=0;
+  preflightState.results={};
+  const html='<div class="preflight-box">'
+    +'<div class="muted" style="font-size:12px;line-height:1.5">'
+    +'真实最小调用仅用于已确认安全非交互模式的执行者；UNKNOWN 表示尚未配置安全适配器，不代表不可用。<br>'
+    +'TIMEOUT 可能是慢而非不可用（claude 冷启动常需 40–60s，已自动重试 1 次），请结合下方原始输出判断，必要时点一次“执行者自检”重试。'
+    +'</div>'
+    +'<div class="preflight-head">'
+    +'<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">'
+    +'<div style="display:flex;align-items:center;gap:8px">'
+    +'<span id="preflightTopSpinner" class="spinner"></span>'
+    +'<strong id="preflightSummaryTitle">正在逐个自检执行者可用情况…</strong>'
+    +'<span class="muted" id="preflightCounter" style="font-size:12px">0 / '+agentNames.length+'</span>'
+    +'</div>'
+    +'<button class="mini" id="preflightRerunAllBtn" onclick="runPreflight()" disabled>全部重新自检</button>'
+    +'</div>'
+    +'<div class="preflight-prog">'
+    +'<div id="preflightProgressBar" class="preflight-prog-fill" style="width:0%"></div>'
+    +'</div>'
+    +'<div id="preflightStats" class="task-meta" style="margin-top:6px;display:flex;gap:12px;font-size:11.5px">'
+    +'<span id="preflightStatReady" class="good-text" style="display:none">0 就绪</span>'
+    +'<span id="preflightStatWarn" class="warn-text" style="display:none">0 警告</span>'
+    +'<span id="preflightStatError" class="danger-text" style="display:none">0 异常</span>'
+    +'<span id="preflightStatDisabled" class="muted" style="display:none">0 已禁用</span>'
+    +'</div>'
+    +'</div>'
+    +'<div id="preflightRows" style="display:grid;gap:8px">'
+    +agentItems.map(buildPreflightRowHtml).join('')
+    +'</div>'
+    +'</div>';
+  openModal('执行者深度自检',html);
+  agentNames.forEach((agentName,idx)=>{
+    setTimeout(()=>{
+      if(preflightRunId!==currentRunId)return;
+      executeSinglePreflight(agentName,currentRunId);
+    },idx*100);
+  });
 }
 function showAgentOverride(){if(!state.workflowId)return toast('当前没有工作流',true);const cur=state.workflow.agent_override||'auto';openModal('指定后续任务执行者',`<div class="form"><label for="overrideAgent">执行者策略</label><select id="overrideAgent">${['auto','opencode','codex','claude','qodercli','agy','pi','grok'].map(a=>`<option ${a===cur?'selected':''}>${a}</option>`).join('')}</select><button class="btn primary" onclick="saveAgentOverride()">保存</button><div class="muted">只影响后续新建任务。</div></div>`)}async function saveAgentOverride(){try{await api('/api/workflow/agent',{method:'POST',body:JSON.stringify({workflow_id:state.workflowId,agent:document.getElementById('overrideAgent').value})});closeModal();await loadWorkflow(state.workflowId);toast('执行者策略已更新')}catch(e){toast(e.message,true)}}async function showTask(id){try{const [td,proj]=await Promise.all([api('/api/task?id='+encodeURIComponent(id)).catch(()=>null),api('/api/task/projection?id='+encodeURIComponent(id)).catch(()=>null)]);const d=proj||(td&&td.task)||{};const raw=td||proj||{};const st=d.status||(td&&td.task&&td.task.status)||'unknown';const intent=d.intent||(td&&td.task&&td.task.goal)||'无明确意图描述';const blockers=Array.isArray(d.blockers)?d.blockers:(d.blocker?[d.blocker]:[]);const ms=Array.isArray(d.milestones)?d.milestones:[];const arts=Array.isArray(d.artifacts)?d.artifacts:[];const acts=Array.isArray(d.recent_activity)?d.recent_activity:(typeof d.recent_activity==='string'&&d.recent_activity?d.recent_activity.split('\n'):[]);const blkHtml=blockers.length?`<div class="proj-blk"><strong>⚠️ 卡点告警:</strong><span>${esc(blockers.join('; '))}</span></div>`:'';const msHtml=ms.length?`<div class="proj-sec"><div class="proj-lbl">动态路标</div>${ms.map(m=>`<div class="proj-ms"><span class="proj-ms-dot ${m.status}">${m.status==='completed'?'✓':(m.status==='in_progress'?'›':'·')}</span><span style="${m.status==='completed'?'color:var(--text)':(m.status==='in_progress'?'color:var(--warn);font-weight:600':'color:var(--muted)')}">${esc(m.label)}</span></div>`).join('')}</div>`:'';const artHtml=arts.length?`<div class="proj-sec"><div class="proj-lbl">核心产物</div>${arts.map(a=>`<div class="proj-art"><div class="proj-art-hd"><span>${esc(a.name||a.kind)}</span><span class="badge ${a.passed?'cleaned':(a.kind==='evaluation'?'failed':'waiting')}">${esc(a.kind)}</span></div><div class="muted">${esc(a.summary||'')}</div></div>`).join('')}</div>`:'';const actHtml=acts.length?`<div class="proj-sec"><div class="proj-lbl">近期动态提炼</div><ul class="proj-acts">${acts.map(a=>`<li>${esc(a)}</li>`).join('')}</ul></div>`:'';const body=`<div class="proj-box"><div style="display:flex;justify-content:space-between;align-items:center;padding-bottom:8px;border-bottom:1px solid var(--line)"><div><span class="badge ${st}">${esc(st)}</span><span style="margin-left:8px;font-size:12px;color:var(--muted)">执行者: <strong>${esc(d.agent||'-')}</strong></span><span style="margin-left:8px;font-size:12px;color:var(--muted)">工位: <strong>${esc(d.node||'-')}</strong></span></div><button class="mini" onclick="const el=document.getElementById('taskRawPre');if(el)el.style.display=el.style.display==='none'?'block':'none'">原始数据</button></div>${blkHtml}<div class="proj-sec"><div class="proj-lbl">当前语义意图</div><div class="proj-txt">${esc(intent)}</div></div>${msHtml}${artHtml}${actHtml}<div id="taskRawPre" style="display:none;margin-top:10px"><div class="proj-lbl">原始调试数据</div><pre>${esc(JSON.stringify(raw,null,2))}</pre></div></div>`;openModal('任务白盒简报 · '+id,body)}catch(e){toast(e.message,true)}}async function showPane(id){if(!id)return toast('没有工位',true);try{const d=await api('/api/pane/read?id='+encodeURIComponent(id));openModal('工位 '+id,`<pre>${esc(d.output)}</pre>`)}catch(e){toast(e.message,true)}}async function askCoordinator(id){try{toast('正在通知总指挥…');await api('/api/task/coordinator',{method:'POST',body:JSON.stringify({task_id:id})});toast('总指挥已处理/接收')}catch(e){toast(e.message,true)}}
 async function openSignoffChamber(taskId){try{const [td,proj]=await Promise.all([api('/api/task?id='+encodeURIComponent(taskId)).catch(()=>null),api('/api/task/projection?id='+encodeURIComponent(taskId)).catch(()=>null)]);const d=proj||(td&&td.task)||{};const t=(td&&td.task)||{};const wid=t.workflow_id||state.workflowId;const node=t.node||t.stage||'';const arts=Array.isArray(d.artifacts)?d.artifacts:[];const isBlocked=t.stage_verdict==='blocked'||t.status==='blocked';let artCards='<div class="empty">暂无生成产物</div>';if(arts.length){artCards=arts.map(a=>`<div class="proj-sec" style="margin-bottom:8px"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px"><strong>${esc(a.name||a.kind)}</strong><span class="badge ${a.passed?'cleaned':(a.kind==='evaluation'?'failed':'waiting')}">${esc(a.kind)}</span></div><div class="task-meta" style="margin-bottom:6px">${esc(a.path||'')}</div><div class="proj-txt" style="background:#080b0f;padding:8px 10px;border-radius:8px;font-family:ui-monospace,Menlo,monospace;font-size:12px;max-height:160px;overflow:auto">${esc(a.content||a.summary||'（文件产物记录正常）')}</div></div>`).join('')}const html=`<div class="signoff-box"><div class="signoff-head"><div><div style="font-size:16px;font-weight:700">${esc(taskDisplayName(t))}</div><div class="task-meta">任务 ID: ${esc(taskId)} · 执行者: <b>${esc(t.agent||'-')}</b> · 节点: <b>${esc(node)}</b></div></div><div>${badge(t.status)}</div></div>${isBlocked?'<div class="proj-blk"><strong>⚠️ 门禁会签等待:</strong> 当前节点触发门禁阻断，需要人类总指挥核查产物并决策放行或打回。</div>':''}<div class="proj-sec"><div class="proj-lbl">核心交付物与成果列表</div>${artCards}</div><div class="form"><label for="signoffFeedback">审批意见 / 批注说明（可选）</label><input id="signoffFeedback" placeholder="例如：数据核准，批准通过；或：海外收入拆解不全，请补充"></div><div class="signoff-actions"><button class="btn" onclick="closeModal()">暂不处理</button><button class="btn danger-btn" onclick="submitSignoffDecision(\'${esc(taskId)}\',\'${esc(wid)}\',\'${esc(node)}\',\'reject\')">批注打回</button><button class="btn primary" onclick="submitSignoffDecision(\'${esc(taskId)}\',\'${esc(wid)}\',\'${esc(node)}\',\'approve\')">通过并放行</button></div></div>`;openModal('成果交付会签室 (Artifact Signoff Chamber)',html)}catch(e){toast(e.message,true)}}
@@ -1656,7 +1798,8 @@ class Handler(BaseHTTPRequestHandler):
                 x=project_by_id(self.query().get('id',[''])[0])
                 if not x:
                     raise RuntimeError('项目不存在')
-                return self.send_json(200,deep_preflight(x))
+                agent=self.query().get('agent',[None])[0]
+                return self.send_json(200,deep_preflight(x,agent=agent))
             if p=='/api/preflight':
                 x=project_by_id(self.query().get('id',[''])[0]);
                 if not x:raise RuntimeError('项目不存在')
