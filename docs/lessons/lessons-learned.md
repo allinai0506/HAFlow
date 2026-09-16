@@ -2219,6 +2219,64 @@ pytest tests/
 curl -s "http://127.0.0.1:8765/api/workflow?id=wf-nexusarchive-54433229-20260913-111049" | jq '.data.stages'
 ```
 
+---
 
+## 47. LaunchAgent 精简 PATH 与多版本 CLI 遮蔽：用户主目录工具链前置注入与单一事实来源规范
 
+### 问题背景
 
+在控制台「执行者自检」中，用户反馈 `opencode` 在终端中运行完全正常，但在控制台检测中却持续报错：
+```json
+> build · deepseek-v4.1-flash
+Error: {
+  "name": "UnknownError",
+  "data": {
+    "message": "Unexpected server error. Check server logs for details.",
+    "ref": "err_e56cf20b"
+  }
+}
+```
+自检结果判定 `opencode` 不可用。
+
+排查发现其根因为**环境割裂与多版本遮蔽（Shadowing）**：
+1. **多版本共存与版本断代**：用户机器上存在两个 `opencode`：
+   - 用户目录：`~/.opencode/bin/opencode`（v1.18.31，用户通过官方安装器更新的最新版，支持最新的模型协议，测试秒级通过）；
+   - 系统目录：`/opt/homebrew/bin/opencode`（v1.18.30，Homebrew 安装残留，已过时，调用服务端触发 500 UnknownError）；
+2. **环境差异与优先级倒置**：
+   - 用户交互式终端（zsh）：`~/.zshrc` 将 `~/.opencode/bin` 置于 `$PATH` 最前，因此终端永远命中 v1.18.31；
+   - 后台常驻 LaunchAgent（`com.user.herdr-factory-console`）：plist 声明精简 `$PATH`（`/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin`），不包含用户主目录；
+   - `herdr/agent_binary.py` 的 `resolve_binary` 逻辑为：`shutil.which` -> `EXTRA_BIN_DIRS` -> login-shell。在 LaunchAgent 精简 PATH 下，`shutil.which` 优先命中 `/opt/homebrew/bin/opencode`（旧版），导致用户主目录的更新版被系统全局陈旧版本压制；
+   - 且 `EXTRA_BIN_DIRS` 遗漏了 `~/.opencode/bin`（以及 `.cargo/bin`, `.bun/bin`, `.grok/bin`, `.kimi-code/bin` 等常见 agent 目录）。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| **LaunchAgent 精简 PATH 缺少用户主目录** | 常驻守护进程不加载用户 shell RC，缺少 `~/.xxx/bin` 导致无法直接访问用户空间安装的 CLI | 系统层必须统一定义 `USER_BIN_DIRS`，在守护进程启动与模块加载时自动前置注入到 `os.environ["PATH"]` |
+| **系统旧版本遮蔽用户新版本** | 在 Unix/macOS 规范中，用户主目录工具链优先级应高于系统全局目录；若直接使用精简 PATH，会导致系统遗留旧版本抢占执行权 | 二进制解析必须保证**用户主目录安装（User-space）永远优先于系统全局目录（Homebrew/System）** |
+| **硬编码候选目录遗漏新异构 Agent** | 各 Agent CLI 官方安装器路径多样（如 `~/.opencode/bin`, `~/.kimi-code/bin`, `~/.grok/bin`），缺少一处就会退化为昂贵的进程 fork | 在 `herdr/agent_binary.py` 中完整收录主流 Agent 专属 bin 目录，作为全系统的单一事实来源 |
+
+### 操作规范（已固化到 `herdr/agent_binary.py` 与 `tests/test_agent_binary_resolution.py`）
+
+1. **统一用户目录列表与前置注入 (`ensure_user_bin_dirs`)**：
+   - 定义 `USER_BIN_DIRS`（包含 `.opencode/bin`, `.local/bin`, `.volta/bin`, `.cargo/bin`, `.bun/bin`, `.grok/bin`, `.kimi-code/bin`, `.qoder-cn/entry`, `.qoder-cn/bin`, `.qoder/bin`, `.qodersec/bin`）；
+   - 在模块导入时自动执行 `ensure_user_bin_dirs()`，将存在的主目录前置拼入 `os.environ["PATH"]`，消除 LaunchAgent 与终端的环境割裂；
+2. **构建高优先级有序 `EXTRA_BIN_DIRS`**：
+   - `EXTRA_BIN_DIRS = USER_BIN_DIRS + [/opt/homebrew/bin, /usr/local/bin]`，保证即使未命中 PATH，备选遍历也是用户主目录在前、系统目录在后；
+3. **部署热加载**：
+   - 运行 `./scripts/install-herdr-console.sh` 同步到 `~/.herdr-console` 并重启服务。
+
+### 验证命令 / 证据
+
+```bash
+# 1. 验证精简 PATH 下解析优先级
+env -i HOME=$HOME PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin python3 -c "from herdr import agent_binary; print(agent_binary.resolve_agent_binary('opencode'))"
+# 必须输出: /Users/user/.opencode/bin/opencode
+
+# 2. 验证二进制解析与路径注入测试套件（11 passed）
+pytest tests/test_agent_binary_resolution.py -v
+
+# 3. 验证控制台 deep-preflight 接口真实返回
+curl -s "http://127.0.0.1:8765/api/deep-preflight?id=nexusarchive-54433229&agent=opencode" | jq '.data.agents[0]'
+# 必须返回: final_status 为 "READY"，binary 为 "~/.opencode/bin/opencode"
+```

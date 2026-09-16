@@ -41,7 +41,7 @@ Evidence:
 ## 2. 轻量静态体检 (`herdr-preflight`)
 
 `FACT` 用于日常快速巡检，耗时毫秒级，不消耗任何模型 Token：
-1. **二进制可执行探测**: 检查 `opencode`, `codex`, `claude`, `qodercn`, `agy`, `pi`, `grok` 是否可解析。解析顺序：`shutil.which`（进程 PATH）→ 常见安装目录兜底（`~/.local/bin`、`~/.volta/bin`、`~/.qoder-cn/entry`、homebrew）→ 登录 shell `command -v` 终极兜底。LaunchAgent 服务的精简 PATH 不再导致已装 CLI 被误判为"未安装"。
+1. **二进制可执行探测**: 检查 `opencode`, `codex`, `claude`, `qodercn`, `agy`, `pi`, `grok` 是否可解析。解析顺序与机制：`herdr/agent_binary.py` 自动将用户主目录工具链（`USER_BIN_DIRS`，如 `~/.opencode/bin`, `~/.local/bin`, `~/.volta/bin` 等）前置注入当前进程 `PATH`，确保用户空间最新安装永远优先于系统/Homebrew 残留旧版本；若 PATH 未命中则遍历 `EXTRA_BIN_DIRS`，最后以登录 shell `command -v` 终极兜底。LaunchAgent 服务的精简 PATH 不再导致已装 CLI 被误判为"未安装"或命中系统陈旧版本。
 2. **版本号探测**: 带 8 秒超时的 `--version` 探活，防止二进制由于系统动态链接库缺失而僵死。
 3. **本地凭证提示 (`AUTH_HINTS`)**:
    - Codex: `~/.codex/auth.json`

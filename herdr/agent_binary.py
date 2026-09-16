@@ -26,14 +26,46 @@ AGENT_BINARIES = {
     "grok": "grok",
 }
 
-# LaunchAgent 精简 PATH 之外的常见 CLI 安装目录。
-EXTRA_BIN_DIRS = [
+# 用户主目录下的常见 Agent CLI 安装目录（按优先级排列）。
+# 优先于系统全局目录，确保用户更新的最新 CLI 优先于系统陈旧版本。
+USER_BIN_DIRS = [
+    HOME / ".opencode" / "bin",
     HOME / ".local" / "bin",
     HOME / ".volta" / "bin",
+    HOME / ".cargo" / "bin",
+    HOME / ".bun" / "bin",
+    HOME / ".grok" / "bin",
+    HOME / ".kimi-code" / "bin",
     HOME / ".qoder-cn" / "entry",
+    HOME / ".qoder-cn" / "bin",
+    HOME / ".qoder" / "bin",
+    HOME / ".qodersec" / "bin",
+]
+
+# LaunchAgent 精简 PATH 之外或顺序靠后的常见 CLI 安装目录。
+EXTRA_BIN_DIRS = USER_BIN_DIRS + [
     Path("/opt/homebrew/bin"),
     Path("/usr/local/bin"),
 ]
+
+
+def ensure_user_bin_dirs():
+    """将用户主目录下的常见 CLI 路径前置注入到 os.environ['PATH']，
+    消除 LaunchAgent 精简 PATH 与用户交互式终端之间的环境差异，
+    并保证用户级 CLI（如 ~/.opencode/bin）优先于系统级/Homebrew 残留。
+    """
+    current_path = os.environ.get("PATH", "")
+    current_parts = current_path.split(os.pathsep) if current_path else []
+    parts_to_add = []
+    for d in USER_BIN_DIRS:
+        sd = str(d)
+        if d.exists() and sd not in current_parts:
+            parts_to_add.append(sd)
+    if parts_to_add:
+        os.environ["PATH"] = os.pathsep.join(parts_to_add + current_parts)
+
+
+ensure_user_bin_dirs()
 
 
 def _find_in_dirs(binary_name, dirs):
