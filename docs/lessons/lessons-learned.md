@@ -1946,3 +1946,41 @@ rg "STAGE ADVANCED DIRECT|DIRECT DISPATCH FALLBACK|FIX LOOP SUBSET KEEP|AWAKE GU
 HERDR_DEFER_HEAVY_TESTS=1 bash scripts/check-testing-standards.sh   # 期望：延迟提示、exit 0
 SKIP_TESTING_GATE=1      bash scripts/check-testing-standards.sh   # 期望：正常测试门禁路径
 ```
+
+## 43. 跨阶段返工拓扑作废盲区与主仓脏树收尾断链死锁
+
+### 问题背景
+
+2026-09-16，在 `wf-xiyu-bid-poc-0915-01` 执行过程中，review 门禁 2 阻断项被触发，回流至 implementation 阶段修复（任务 `fix-review-blockers`）。协调器 OpenCode 验收通过并产生 `completed` 结论，宣告 Controller 即将自动执行 `commit -> integrate -> cleanup` 并推进 `test -> review`。然而系统在此处再次完全停滞，总指挥处于空闲等待状态数十分钟。
+现场取证发现两个互为交织的系统性卡点：
+1. **主仓脏树阻断 Git 集成，无重试导致任务永久悬挂**：主仓 `xiyu-bid-poc` 本地遗留了未提交的 `scripts/check-testing-standards.sh` 脚本修改（用于支持 `HERDR_DEFER_HEAVY_TESTS=1`，未经 PR 提交或 stash）。`herdr-task integrate` 执行严格的 `git status --porcelain --untracked-files=no` 守卫直接退出 5（`Main repository has tracked changes`），导致任务卡在 `status: committed`。而旧版 Controller 的 `finalize_completed_task` 仅接收 `status == "completed"`，一旦进入 `committed` 重试即被视为非法状态跳过，且主循环无已提交任务的补收尾调度，导致集成彻底断链。
+2. **跨阶段返工漏作废中间验证节点**：DAG 拓扑为 `implementation -> test -> review -> wrapup`。当 `review` 门禁回流至 `implementation` 时，旧版 `invalidate_for_fix_loop` 仅以 `gate_node_id`（`review`）作为根节点收集下游闭包，**完全遗漏了 `retry_node` 与 `gate_node_id` 之间的中间节点 `test`**。`test` 阶段上一轮的 r2 任务仍为 `cleaned`，导致 Controller 的 `is_node_complete('test')` 仍为 True。当修复任务完成后，DAG 判定 `test` 已完成，试图直奔 `review`；而 `review` 的 `notified` 锁未解除，导致总指挥永远等不到 `test` 阶段事件。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| **返工作废拓扑断层** | 回流到更上游节点时，中间经过的所有验证节点基线已作废，只作废门禁自身必然导致中间节点被"幽灵跳过" | 回流作废闭包必须包含 `retry_node` 的全部下游节点（排除 `retry_node` 自身），即 `(downstream(retry_node) - {retry_node}) ∪ downstream(gate_node)`，且跨阶段回流时中间节点不可复用 |
+| **收尾操作缺乏幂等重试** | 分布式集成容易受锁、工作区脏树、网络抖动等偶发干扰；一旦中间态（如 committed）不可重入，偶发故障即变成永久死锁 | `finalize` 必须对 `completed` 与 `committed` 幂等：若已 committed 则跳过 commit 直接重试 integrate 与 cleanup；Registry Watcher 必须为 committed 态设置 attention 慢速重试护栏 |
+| **工作区洁净度是集成红线** | 主仓库脏工作树会导致 `git switch` 与 `ff-only` 合并失败或污染现场 | 跨仓脚本变更必须通过规范沙盒分支提交合入，严禁直接在主仓库工作区修改而不提交/不暂存 |
+
+### 操作规范
+
+1. **跨阶段返工作废闭包**：`invalidate_for_fix_loop` 显式接收 `retry_node`，计算拓扑区间并联动作废；当 `retry_node != gate_node_id` 时，中间节点（如 test）的所有历史任务一律标记 `superseded`；
+2. **收尾幂等化**：`finalize_completed_task` 状态检查放宽为 `status in ("completed", "committed")`；
+3. **Committed 状态巡检自愈**：Registry Watcher 自动探测滞留在 `committed` 的 Git 集成任务，以 attention 退避周期触发补收尾，故障自愈后无需人工干预；
+4. **主仓环境规范**：严禁在作为 Git Anchor 的宿主主仓直接做未提交改动。
+
+### 验证命令 / 证据
+
+```bash
+# 1. 跨阶段中间节点作废与 committed 幂等收尾单元测试
+python3 -m unittest tests.test_fix_loop_gates.InvalidateFixLoopSubsetTest.test_intermediate_nodes_invalidated_when_gate_retries_upstream_node -v
+python3 -m unittest tests.test_fix_loop_gates.FinalizeAlreadyCommittedTaskTest -v
+
+# 2. 全量回归测试
+pytest -v tests/test_fix_loop_gates.py
+
+# 3. 现场验证：wf-xiyu-bid-poc-0915-01 自动推进并派发 r3/r4
+herdr pane read w9:p1 --lines 30
+```

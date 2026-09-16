@@ -789,6 +789,65 @@ class InvalidateFixLoopSubsetTest(unittest.TestCase):
         self.assertEqual(self.superseded, ["test-pass-git"])
         self.assertEqual(invalidated, ["test-pass-git"])
 
+    def test_intermediate_nodes_invalidated_when_gate_retries_upstream_node(self):
+        # review 门禁回流到更上游 implementation 时,
+        # 中间节点(test)与门禁节点(review)任务必须全部作废,implementation 本身不作废
+        workflow_cfg = {
+            "nodes": [
+                {"id": "implementation", "depends_on": []},
+                {"id": "test", "depends_on": ["implementation"]},
+                {"id": "review", "depends_on": ["test"]},
+            ]
+        }
+        with patch.object(
+            _ctl,
+            "load_tasks",
+            return_value=[
+                _task("impl-1", status="cleaned", stage="implementation", stage_verdict="pass"),
+                _task("test-1", status="cleaned", stage="test", stage_verdict="pass"),
+                _task("review-1", status="cleaned", stage="review", stage_verdict="blocked"),
+            ],
+        ):
+            invalidated = _ctl.invalidate_for_fix_loop(
+                "wf-1", "review", workflow_cfg, retry_node="implementation"
+            )
+
+        self.assertNotIn("impl-1", self.superseded)
+        self.assertIn("test-1", self.superseded)
+        self.assertIn("review-1", self.superseded)
+        self.assertEqual(sorted(invalidated), ["review-1", "test-1"])
+
+
+class FinalizeAlreadyCommittedTaskTest(unittest.TestCase):
+    def test_finalize_skips_commit_if_already_committed(self):
+        commands = []
+
+        def fake_run(cmd, **kwargs):
+            commands.append(cmd)
+            return _resp(0)
+
+        task = _task(
+            "task-committed",
+            status="committed",
+            integration_mode="git",
+        )
+
+        def mock_get_task(tid):
+            if any("integrate" in cmd for cmd in commands):
+                return _task(tid, status="integrated", integration_mode="git")
+            return task
+
+        with patch.object(_ctl, "get_task", side_effect=mock_get_task), \
+             patch.object(_ctl, "set_task_status", return_value=True), \
+             patch.object(_ctl, "enqueue_stage_advance"), \
+             patch.object(_ctl.subprocess, "run", side_effect=fake_run):
+            _ctl.finalize_completed_task("task-committed")
+
+        subcmds = [cmd[1] for cmd in commands]
+        self.assertNotIn("commit", subcmds)
+        self.assertIn("integrate", subcmds)
+        self.assertIn("cleanup", subcmds)
+
 
 if __name__ == "__main__":
     unittest.main()
