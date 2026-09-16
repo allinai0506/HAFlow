@@ -702,5 +702,93 @@ class ConsoleGateTest(unittest.TestCase):
         self.assertIn("rev1", str(ctx.exception))
 
 
+class InvalidateFixLoopSubsetTest(unittest.TestCase):
+    """返工只重跑受影响子集:门禁节点内 verdict=pass 的任务保留。"""
+
+    def setUp(self):
+        self.finalized = []
+        self.superseded = []
+
+        def fake_run(cmd, **kwargs):
+            if "finalize" in cmd:
+                self.finalized.append(cmd[cmd.index("finalize") + 1])
+            if "supersede" in cmd:
+                self.superseded.append(cmd[cmd.index("supersede") + 1])
+            return _resp(0)
+
+        self.patchers = [
+            patch.object(
+                _ctl,
+                "load_tasks",
+                return_value=[
+                    _task(
+                        "test-pass", status="completed", stage="test",
+                        stage_verdict="pass",
+                    ),
+                    _task(
+                        "test-blocked", status="agent_done", stage="test",
+                        stage_verdict="blocked",
+                        stage_verdict_note="B1 回填缺失",
+                    ),
+                    _task(
+                        "review-1", status="cleaned", stage="review",
+                        stage_verdict="pass",
+                    ),
+                ],
+            ),
+            patch.object(
+                _ctl, "get_task",
+                side_effect=lambda tid: {"task_id": tid, "status": "cleaned"},
+            ),
+            patch.object(_ctl.subprocess, "run", side_effect=fake_run),
+        ]
+        for p in self.patchers:
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_gate_pass_preserved_only_blocked_and_downstream_invalidated(self):
+        workflow_cfg = {
+            "nodes": [
+                {"id": "implementation", "depends_on": []},
+                {"id": "test", "depends_on": ["implementation"]},
+                {"id": "review", "depends_on": ["test"]},
+            ]
+        }
+        invalidated = _ctl.invalidate_for_fix_loop(
+            "wf-1", "test", workflow_cfg
+        )
+
+        self.assertNotIn("test-pass", self.superseded)
+        self.assertNotIn("test-pass", self.finalized)
+        self.assertEqual(
+            sorted(self.superseded),
+            ["review-1", "test-blocked"],
+        )
+        self.assertEqual(
+            sorted(invalidated),
+            ["review-1", "test-blocked"],
+        )
+
+    def test_completed_git_pass_task_still_invalidated(self):
+        # Git 集成的 pass 任务尚未落定,保留会滞留未提交 → 仍走 finalize+作废。
+        with patch.object(
+            _ctl,
+            "load_tasks",
+            return_value=[
+                _task(
+                    "test-pass-git", status="completed", stage="test",
+                    stage_verdict="pass", integration_mode="git",
+                ),
+            ],
+        ):
+            invalidated = _ctl.invalidate_for_fix_loop(
+                "wf-1", "test", {"nodes": []}
+            )
+
+        self.assertEqual(self.finalized, ["test-pass-git"])
+        self.assertEqual(self.superseded, ["test-pass-git"])
+        self.assertEqual(invalidated, ["test-pass-git"])
+
+
 if __name__ == "__main__":
     unittest.main()

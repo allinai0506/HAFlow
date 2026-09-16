@@ -61,7 +61,7 @@ Evidence:
 - `FACT` **核心职能**:
   1. **状态流转监听**: 维护与 Herdr Unix Domain Socket (`~/.config/herdr/herdr.sock`) 的持久连接，接收各 Pane 的实时 Agent 状态（如 `agent_done`, `error`）。
   2. **DAG 依赖推进**: 周期性扫描 `tasks.json`。当某节点的所有 Task 完成（状态到达 `cleaned` 或 `completed`）时，计算后续就绪节点（[[dag-workflow-engine]]）。
-  3. **协调器注入**: 向项目总指挥 Pane (`coordinator_pane_id`) 输入结构化文本提示，指导总指挥 Agent 发起下一阶段 Task 派发。
+  3. **协调器注入**: 向项目总指挥 Pane (`coordinator_pane_id`) 输入结构化文本提示，指导总指挥 Agent 发起下一阶段 Task 派发。**2026-09-16 起降级为异常路径**：常规推进会优先走规则化直接派发（见下方 Direct Stage Dispatch），仅配置不足/需求缺失/launch 失败才回落总指挥。
   4. **重复防抖**: 利用 `stage-state.json` 记录 `queued` / `notified`，杜绝重复向总指挥发送推进指令。
 - `FACT` **终态闸门（2026-09-13 幽灵推进事故后引入）**: 推进扫描只遍历注册表**非终态**条目（`herdr.projects.non_terminal_workflow_ids`，`status=="completed"` 视为终态）；`check_workflow_stage_advance` 对已关闭工作流早退；stage_advance 消费线程在**每次等待迭代**重新校验终态/注销，已入队事件在工作流关闭后被丢弃（`[STAGE ADVANCE DROP]`）。背景：零任务工作流对 `is_node_complete` 真空成立，无此闸门会被逐阶段"真空推进"并向共享协调者 Pane 注入幽灵提示，诱导其派发真实任务（wf-…-111426 事故，见 lessons §12）。
 - `FACT` **Liveness Guard 控制面存活护栏（2026-09-16 6.5h 卡死事故后引入，lessons §41）**:
@@ -70,6 +70,12 @@ Evidence:
   2. **attention episode 投递保证**：投递失败/停滞写入 `~/.herdr-controller/attention.json`（attempts / next_retry_at），registry watcher 按指数退避慢速补投；`done` / `blocked` / `interrupted|paused` 事件均受此护栏，送达即清除；
   3. **注册表卫生**：夹具/临时 workflow（pytest-*、/tmp、已删除 workflow_file、无 project_id 空壳）不进入调度 sweep；`[WORKFLOW COMPLETE]` 单次闩；僵尸 pane 订阅指数退避封顶（2s→300s，8 次后慢重试一次告警）。
   启动时执行 `herdr integration status` 健康检查，缺失集成打印 `[INTEGRATION GAP]`（缺集成 → 屏幕探测误判是本次事故直接根因）。
+- `FACT` **Direct Stage Dispatch 规则化推进会（2026-09-16 延迟优化，lessons §42）**:
+  1. **常规推进（`[STAGE ADVANCED DIRECT]`）**：`herdr/direct_dispatch.py` 纯函数按节点模板（purpose / required_outputs / rules / default_task_type / default_integration_mode）与需求正文生成 Task 规格（节点字段为空时回退 `stage-policies.json`，兼容历史 workflow.json 旧快照），Controller 直接调用 `herdr-task launch`，不再等待总指挥 LLM 回合；fix-loop 回流时只补派"被作废且无替代"的子集任务（`-rN` 命名），`verdict=pass` 且已落定的任务保留（`[FIX LOOP SUBSET KEEP]`）；
+  2. **例外回落**：节点无 purpose、需求正文缺失、legacy stages 路径、launch 非零退出才回落总指挥注入（`[DIRECT DISPATCH FALLBACK]`）；节点已有活跃任务时为 `wait` 模式（不注入、直接标记 notified）；`HERDR_DIRECT_STAGE_DISPATCH=0` 整段回退旧路径；
+  3. **决策等待校准**：`wait_for_coordinator_decision` 默认预算 30s → 180s（`HERDR_COORDINATOR_DECISION_TIMEOUT`），超时不再立即重试，写入 attention（`decision_timeout`）按 `HERDR_ATTENTION_RETRY_INTERVAL` 退避；
+  4. **提交门禁拆分**：Git 集成任务的 commit 由 Controller 下发 `HERDR_DEFER_HEAVY_TESTS=1`（目标仓 hook 识别该显式开关，不做仓库来源猜测，人类/Agent 手工提交仍走全量门禁），全量测试交给 workflow test 节点与 pre-push 门禁；
+  5. **唤醒守卫**：存在活跃 workflow 时 Controller 持有 `caffeinate -i -s -w <pid>`（`[AWAKE GUARD]`），workflow 清零或进程退出自动释放，`HERDR_AWAKE_GUARD=0` 关闭。
 - `FACT` **创建闸门（herdr-factory 侧）**: `herdr-factory run` 在注册前持 per-project flock（`~/.herdr-controller/locks/<project_id>.workflow-create.lock`）原子执行「同项目活跃工作流检查 + 注册」；同项目已有非终态工作流时拒绝创建（exit 2，列出活跃工作流与处置指引），`--force` 显式 bypass（e2e 自动 bypass）。同项目工作流共享协调者 Pane 与阶段拓扑，默认必须串行。
 
 ### 2.2 Herdr Sentinel (`services/herdr-sentinel.py`)

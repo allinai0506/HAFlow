@@ -5,6 +5,7 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import queue
+import shutil
 import socket
 import subprocess
 import threading
@@ -35,6 +36,12 @@ except ImportError:
     from herdr_workflow import find_node, get_ready_nodes, is_workflow_completed, normalize_workflow
     from herdr_state_store import get_state_store
     from herdr import liveness
+
+try:
+    from herdr import direct_dispatch as direct_dispatch_planner
+except Exception:
+    # 纯函数决策模块缺失时退回总指挥路径,绝不阻塞控制面。
+    direct_dispatch_planner = None
 
 STAGE_STATE_FILE = os.environ.get("STAGE_STATE_FILE") or os.path.expanduser(
     "~/.herdr-controller/stage-state.json"
@@ -301,6 +308,16 @@ def _collect_downstream_nodes(nodes_by_id, root_id):
     return seen
 
 
+def _fix_loop_keepable(task):
+    """verdict=pass 的任务可否保留:需已落定或无需 Git 集成。"""
+    status = task.get("status")
+    if status in ("cleaned", "cleanup_ready", "integrated", "committed"):
+        return True
+    if status == "completed" and (task.get("integration_mode") or "none") != "git":
+        return True
+    return False
+
+
 def invalidate_for_fix_loop(workflow_id, gate_node_id, workflow_cfg):
     """作废 gate 节点及其全部下游的非 superseded 任务(fix-loop 回流前提)。
 
@@ -339,8 +356,22 @@ def invalidate_for_fix_loop(workflow_id, gate_node_id, workflow_cfg):
 
         status = task.get("status")
         task_id = task["task_id"]
+        task_node = task.get("node") or task.get("stage")
 
         if status == "superseded":
+            continue
+
+        # 返工只重跑受影响子集:门禁节点内 verdict=pass 且已落定的任务保留,
+        # 只作废真正失败(blocked/无结论)的任务与全部下游。
+        if (
+            task_node == gate_node_id
+            and task.get("stage_verdict") == "pass"
+            and _fix_loop_keepable(task)
+        ):
+            print(
+                f"[FIX LOOP SUBSET KEEP] task={task_id} "
+                f"verdict=pass preserved"
+            )
             continue
 
         if status in ("completed", "cleanup_ready"):
@@ -813,6 +844,133 @@ def enqueue_stage_advance(task):
         check_workflow_stage_advance(workflow_id)
 
 
+def direct_stage_dispatch_enabled():
+    value = os.environ.get("HERDR_DIRECT_STAGE_DISPATCH", "1")
+    return value.strip().lower() not in ("0", "false", "off", "no")
+
+
+def try_direct_stage_advance(item):
+    """常规推进会:按节点模板规则化直接派发,失败回落总指挥。
+
+    返回 True 表示事件已被处理(含 wait),False 表示必须走总指挥原路径。
+    """
+    if direct_dispatch_planner is None or not direct_stage_dispatch_enabled():
+        return False
+
+    node = item.get("node")
+    workflow_id = item.get("workflow_id")
+    ready_id = item.get("node_id") or item.get("next_stage")
+
+    if not workflow_id or not ready_id:
+        return False
+
+    project_ctx = project_for_workflow(workflow_id) or {}
+    if project_ctx.get("startup_ready") is False:
+        return False
+
+    project_root = project_ctx.get("project_root") or ""
+    if not project_root or not project_ctx.get("coordinator_pane_id"):
+        return False
+
+    requirement = (project_ctx.get("requirement") or "").strip()
+
+    # 历史 workflow.json 的节点字段可能为空(旧模板快照),
+    # 与总指挥路径一致回退 stage-policies 后再做规则化决策。
+    node = direct_dispatch_planner.merge_node_policy(
+        node if node is not None else {"id": ready_id},
+        get_stage_policy(ready_id),
+    )
+    if not node.get("id"):
+        node["id"] = ready_id
+
+    plan = direct_dispatch_planner.plan_stage_dispatch(
+        workflow_id,
+        node,
+        load_tasks(),
+        requirement,
+        context_branch=latest_branch_for_node(workflow_id, ready_id),
+    )
+
+    mode = plan.get("mode")
+
+    if mode == "fallback":
+        print(
+            f"[DIRECT DISPATCH FALLBACK] "
+            f"workflow={workflow_id} "
+            f"node={ready_id} "
+            f"reason={plan.get('reason')}"
+        )
+        return False
+
+    if mode == "wait":
+        # 节点已有活跃任务:推进会自然由状态机完成,不再唤醒总指挥。
+        mark_stage_advance_notified(workflow_id, ready_id)
+        print(
+            f"[DIRECT DISPATCH WAIT] "
+            f"workflow={workflow_id} "
+            f"node={ready_id} "
+            f"reason={plan.get('reason')}"
+        )
+        return True
+
+    specs = plan.get("specs") or []
+    if not specs:
+        return False
+
+    launched = []
+
+    for spec in specs:
+        cmd = [
+            TASK_MANAGER,
+            "launch",
+            "--task-id", spec["task_id"],
+            "--workflow-id", workflow_id,
+            "--node", ready_id,
+            "--source", project_root,
+            "--agent", "auto",
+            "--task-type", spec["task_type"],
+            "--integration-mode", spec["integration_mode"],
+            "--goal", spec["goal"],
+            "--prompt", spec["prompt"],
+        ]
+
+        for line in spec["acceptance"]:
+            cmd += ["--acceptance", line]
+
+        result = subprocess.run(
+            cmd,
+            text=True,
+            capture_output=True
+        )
+
+        if result.returncode != 0:
+            print(
+                f"[DIRECT DISPATCH ERROR] "
+                f"task={spec['task_id']}: "
+                f"{result.stderr.strip() or result.stdout.strip()}"
+            )
+            if launched:
+                print(
+                    f"[DIRECT DISPATCH PARTIAL] "
+                    f"launched={','.join(launched)} "
+                    "-> fallback to coordinator for reconciliation"
+                )
+            return False
+
+        launched.append(spec["task_id"])
+
+    mark_stage_advance_notified(workflow_id, ready_id)
+
+    print(
+        f"[STAGE ADVANCED DIRECT] "
+        f"workflow={workflow_id} "
+        f"node={ready_id} "
+        f"tasks={','.join(launched)}"
+    )
+
+    return True
+
+
 def check_workflow_stage_advance(workflow_id):
     if not workflow_id:
         return
@@ -1261,7 +1419,15 @@ def handle_coordinator_delivery_stall(item, task, elapsed):
     )
 
 
-def wait_for_coordinator_decision(task_id, timeout=30):
+def wait_for_coordinator_decision(task_id, timeout=None):
+    """等待总指挥判定落盘(completed/rework/...)。
+
+    默认预算与真实回合尾部耗时对齐(env HERDR_COORDINATOR_DECISION_TIMEOUT);
+    超时不立即重试:记录 attention 退避,避免再烧一整轮 10 分钟级回合。
+    """
+    if timeout is None:
+        timeout = liveness.coordinator_decision_timeout()
+
     deadline = time.time() + timeout
 
     while time.time() < deadline:
@@ -1286,10 +1452,29 @@ def wait_for_coordinator_decision(task_id, timeout=30):
 
         time.sleep(0.5)
 
+    task = get_task(task_id)
+    key = f"{task_id}:done"
+    episode = attention_get(key) or {}
+    attempts = int(episode.get("attempts") or 0) + 1
+
+    if task:
+        attention_note(
+            key,
+            task,
+            "done",
+            reason="decision_timeout",
+            attempts=attempts,
+            next_retry_at=time.time() + liveness.attention_retry_interval(),
+            detail=f"waited={int(timeout)}s still=agent_done",
+        )
+
     print(
         f"[DECISION TIMEOUT] "
         f"task={task_id} "
-        f"still=agent_done"
+        f"still=agent_done "
+        f"attempts={attempts} "
+        f"-> attention recorded, "
+        f"retry_in={int(liveness.attention_retry_interval())}s"
     )
 
     return "agent_done"
@@ -1400,6 +1585,11 @@ def finalize_completed_task(task_id):
     if mode == "git":
 
         # 1. 将 Task 自己产生的修改安全提交
+        # 提交门禁拆分:herdr 任务克隆内只跑快速必需检查,
+        # 全量测试由 workflow test 节点与 pre-push 门禁负责。
+        commit_env = dict(os.environ)
+        commit_env["HERDR_DEFER_HEAVY_TESTS"] = "1"
+
         result = subprocess.run(
             [
                 TASK_MANAGER,
@@ -1409,7 +1599,8 @@ def finalize_completed_task(task_id):
                 f"task: {task_id}"
             ],
             text=True,
-            capture_output=True
+            capture_output=True,
+            env=commit_env
         )
 
         if result.stdout.strip():
@@ -1694,6 +1885,11 @@ def _handle_coordinator_item(item):
     # Workflow Stage Advance
     # ==============================================
     if item.get("kind") == "stage_advance":
+        # 常规推进会:优先规则化直接派发(不再等待总指挥 LLM 回合);
+        # 配置不足/需求缺失/launch 失败时回落既有总指挥路径。
+        if try_direct_stage_advance(item):
+            return
+
         workflow_id = item["workflow_id"]
         coord_pane = coordinator_pane_for_workflow(workflow_id)
         if not coord_pane:
@@ -1779,6 +1975,22 @@ Node Agent 策略
 
         wait_started = time.time()
 
+        preserved_ids = [
+            task["task_id"]
+            for task in load_tasks()
+            if task.get("workflow_id") == workflow_id
+            and next_stage in (task.get("node"), task.get("stage"))
+            and task.get("status") != "superseded"
+            and task.get("stage_verdict") == "pass"
+        ]
+        preserved_text = ""
+        if preserved_ids:
+            preserved_text = (
+                "\n已保留的有效任务（verdict=pass，禁止重复创建）：\n"
+                + "\n".join(f"- {tid}" for tid in preserved_ids)
+                + "\n只需补派缺失/被作废的 Task。\n"
+            )
+
         try:
             while True:
                 # Re-validate on every wait iteration: the workflow may be
@@ -1818,7 +2030,7 @@ node_type: {node_type}
 {project_ctx.get('requirement', '').strip() or '（未提供；请停止并等待需求正文）'}
 
 当前工作流前置依赖已全部完成。
-
+{preserved_text}
 现在进入下一节点：
 
 {next_stage} ({node_label})
@@ -2758,6 +2970,60 @@ def stop_task_listener(task_id):
 
 
 # ============================================================
+# Awake guard (长跑 workflow 防休眠)
+# ============================================================
+
+_awake_guard_proc = None
+
+
+def sync_awake_guard(active_workflows):
+    """有活跃 workflow 时持有 caffeinate,避免机器休眠冻结整条流水线。
+
+    controller 进程退出或 workflow 清零时自动释放;HERDR_AWAKE_GUARD=0 关闭。
+    """
+    global _awake_guard_proc
+
+    disabled = os.environ.get("HERDR_AWAKE_GUARD", "1").strip().lower() in (
+        "0",
+        "false",
+        "off",
+        "no",
+    )
+
+    want = (
+        not disabled
+        and bool(active_workflows)
+        and sys.platform == "darwin"
+        and shutil.which("caffeinate") is not None
+    )
+
+    if want:
+        if _awake_guard_proc is None or _awake_guard_proc.poll() is not None:
+            try:
+                _awake_guard_proc = subprocess.Popen(
+                    ["caffeinate", "-i", "-s", "-w", str(os.getpid())],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                print(
+                    f"[AWAKE GUARD] caffeinate started "
+                    f"workflows={len(active_workflows)}"
+                )
+            except Exception as exc:
+                print(f"[AWAKE GUARD ERROR] {exc}")
+                _awake_guard_proc = None
+        return
+
+    if _awake_guard_proc is not None:
+        try:
+            _awake_guard_proc.terminate()
+        except Exception:
+            pass
+        _awake_guard_proc = None
+        print("[AWAKE GUARD] caffeinate released")
+
+
+# ============================================================
 # Registry watcher
 # ============================================================
 
@@ -2778,6 +3044,7 @@ def registry_watcher():
             if now - last_advance_check >= 2:
                 last_advance_check = now
                 check_all_workflows_stage_advance()
+                sync_awake_guard(active_registered_workflows())
 
             tasks = load_tasks()
             task_ids_now = set()

@@ -1891,3 +1891,58 @@ herdr agent explain w9:p1                   # 期望 screen_detection_skip_reaso
 # 5. 新 BUSY 日志自带等待时长与升级路径（旧版没有 waited=）
 rg "COORDINATOR BUSY|COORDINATOR STALLED" ~/.herdr-controller/logs/controller.out.log | tail
 ```
+
+---
+
+## 42. 单点 LLM 协调器在热路径上 = 全流程串行税：常规推进必须规则化，等待预算必须对齐真实操作
+
+### 问题背景
+
+上一条事故（§41）修复了控制面的"无界等待"后，`wf-xiyu-bid-poc-0915-01` 的调度不再卡死，但用户仍反馈"跑一条流程比自己做一次任务慢几倍"。对 `~/.herdr-controller/state.db` + `controller.out.log` 做全量取证，数字如下：
+
+| 现象 | 证据 |
+|---|---|
+| 墙钟 10.0h 中 Agent 真正干活仅 1.18h（12%） | 事件表 union(working 区间)；其中 6.6h 为机器休眠（00:04 display off → 06:39 on，darkwake 每小时一次） |
+| 每个节点完成 / 阶段推进都要等总指挥空闲 + 跑完整 prompt 回合（单轮上限 10min） | `[STAGE ADVANCE WAIT]` 78,979 行、`[COORDINATOR BUSY]` 5,706 行；`done→completed` 常见 9-10min 等待 |
+| 决策窗口仅 30s，超时后立刻再烧一整轮 | `[DECISION TIMEOUT]` → `[COORDINATOR RETRY]` → `timed out waiting for agent status` |
+| fix-loop 门禁 blocked 后整节点重跑 | 12 次 rework；test 节点两个任务全被 superseded 后重派 `-r2`，其中前端测试与后端修复无关 |
+| 提交钩子内联跑全量测试 | `[COMMIT ERROR]` 捕获到 staged vitest 全量 stderr；每个 git 集成任务额外 1-13min |
+| 阶段切换空档：71min / 14min / 7min / 14min | dispatched→working 最长 77min；节点间全靠总指挥回合衔接 |
+
+直接根因：**协调器是一个 LLM，且被放在每一跳的同步关键路径上**。LLM 回合的分钟级延迟 × 节点数 × 返工次数 = 数倍于实际工作的放大系数。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| **LLM 进热路径** | 常规、可规则化的决策（节点完成 → 按模板派发下一节点）交给 LLM 就是为每一步支付分钟级税；LLM 的价值在异常裁量而非例行推进 | 规则化优先、异常回落：controller 直接按节点模板生成 Task，仅配置不足/需求缺失/launch 失败才唤醒协调器 |
+| **等待预算与操作不匹配** | 30s 决策窗口对分钟级 LLM 回合必然误判，误判的代价是再花一整轮 | 等待预算按真实操作耗时标定（180s），超时写入 attention 退避而非立即重试 |
+| **返工粒度** | 门禁失败按"节点"作废会让无关的通过项一起重跑，成本随重试轮数线性叠加 | 作废以"受影响子集"为准：只重派失败/无结论任务，`verdict=pass` 且已落定的保留 |
+| **同步门禁过重** | commit 时跑全量测试与 workflow test 节点职责重复，且把长任务塞进每个任务的收尾热路径 | 门禁分层：commit 快速必需检查、全量测试后置到 test 节点/pre-push/CI；延迟必须以显式开关驱动，禁止按仓库来源猜测（残留标记会误伤人类提交） |
+| **统计口径失真** | 机器休眠不属于流程耗时，但会污染"流程变慢"的判断 | 长跑持有 `caffeinate`（活跃 workflow 期），评估时长先剔除 machine sleep |
+
+### 操作规范
+
+1. **阶段推进默认规则化**：`herdr/direct_dispatch.py`（纯函数）负责决策，controller 只做 launch 装配；节点字段为空时与总指挥路径一致回退 `stage-policies.json`（`merge_node_policy`），节点与 policy 都没有 `purpose` 才回落协调器；总开关 `HERDR_DIRECT_STAGE_DISPATCH=0`；
+2. **等待预算必须标定**：任何新增 Actor 等待的预算按"真实回合尾部耗时"设置并 env 可覆盖（`HERDR_COORDINATOR_DECISION_TIMEOUT`），超时一律走 attention 退避；
+3. **返工作废按子集**：fix-loop 只作废失败任务 + 全部下游；保留项必须"已落定或无需 Git 集成"（`completed+git` 仍走 finalize+作废，防止未提交任务滞留）；
+4. **提交门禁延迟显式化**：controller 收尾 commit 下发 `HERDR_DEFER_HEAVY_TESTS=1`，目标仓 hook 只认该显式开关；
+5. **长跑防休眠**：controller 在存在活跃非夹具 workflow 时持有 `caffeinate -i -s -w <pid>`（`HERDR_AWAKE_GUARD=0` 关闭），workflow 清零/进程退出自动释放。
+
+### 验证命令 / 证据
+
+```bash
+# 1. 决策纯函数 + 控制器装配 + 门禁子集回归
+python3 -m unittest tests.test_direct_stage_dispatch tests.test_fix_loop_gates -v
+
+# 2. 全量 unittest（pytest-only 文件需本地安装 pytest）
+python3 -m unittest discover -s tests
+
+# 3. 现场验证：常规推进不再出现 STAGE ADVANCE WAIT
+rg "STAGE ADVANCED DIRECT|DIRECT DISPATCH FALLBACK|FIX LOOP SUBSET KEEP|AWAKE GUARD|DECISION TIMEOUT" \
+   ~/.herdr-controller/logs/controller.out.log | tail
+
+# 4. 目标仓门禁拆分区分度（herdr 克隆 vs 人工）
+HERDR_DEFER_HEAVY_TESTS=1 bash scripts/check-testing-standards.sh   # 期望：延迟提示、exit 0
+SKIP_TESTING_GATE=1      bash scripts/check-testing-standards.sh   # 期望：正常测试门禁路径
+```

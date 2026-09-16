@@ -29,6 +29,7 @@ DEFAULT_COORDINATOR_DELIVERY_SLA = 900.0
 DEFAULT_STAGE_ADVANCE_SLA = 600.0
 DEFAULT_ATTENTION_RETRY_INTERVAL = 600.0
 DEFAULT_ATTENTION_GRACE = 120.0
+DEFAULT_COORDINATOR_DECISION_TIMEOUT = 180.0
 DEFAULT_TASK_STALL_AFTER = 1800.0
 DEFAULT_SUBSCRIBE_BACKOFF_BASE = 2.0
 DEFAULT_SUBSCRIBE_BACKOFF_CAP = 300.0
@@ -93,6 +94,18 @@ def attention_retry_interval() -> float:
 
 def attention_grace() -> float:
     return _env_float("HERDR_ATTENTION_GRACE", DEFAULT_ATTENTION_GRACE)
+
+
+def coordinator_decision_timeout() -> float:
+    """总指挥 prompt 返回后,等待判定落盘的真实回合预算。
+
+    30s 级别窗口会把"回合尾部仍在写状态"误判为无决策,触发一次多余的
+    10 分钟级重试回合;默认对齐一次总指挥回合的常见尾部耗时。
+    """
+    return _env_float(
+        "HERDR_COORDINATOR_DECISION_TIMEOUT",
+        DEFAULT_COORDINATOR_DECISION_TIMEOUT,
+    )
 
 
 def task_stall_after() -> float:

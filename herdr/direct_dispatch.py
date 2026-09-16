@@ -1,0 +1,338 @@
+"""规则化节点派发决策（纯函数，无 I/O）。
+
+背景：阶段推进过去必须唤醒总指挥 LLM 才能创建下一节点的 Task——单轮回合
+可达数分钟，且同一 workflow 的事件全部串行排在它后面。本模块把"常规推进会"
+降级为确定性决策，只有配置不足 / 需求缺失才回落总指挥：
+
+- 首次进入节点：按节点模板（purpose / required_outputs / rules /
+  default_task_type / default_integration_mode）生成节点任务；
+- fix-loop 回流：只补派被作废且无替代的 Task（受影响子集），verdict=pass 的
+  任务由 controller 保留，不在此重复派发；
+- 节点存在活跃任务：返回 wait（不重复创建，等状态机自然推进）。
+
+本模块只消费标准 dict 结构，便于零成本单测；launch 子进程与状态持久化由
+controller 外壳完成。
+"""
+
+from __future__ import annotations
+
+import re
+
+REPLACEMENT_SUFFIX_RE = re.compile(r"-r(\d+)$")
+
+DEFAULT_TASK_TYPE = "feat"
+DEFAULT_INTEGRATION_MODE = "none"
+
+GENERIC_ACCEPTANCE = (
+    "改动范围以 herdr-task verify-baseline 为准",
+    "产物必须落盘到当前工作目录，禁止只写在回复里",
+)
+
+
+def _as_list(value):
+    if value is None:
+        return []
+    if isinstance(value, str):
+        text = value.strip()
+        return [text] if text else []
+    result = []
+    for item in value:
+        text = str(item).strip()
+        if text:
+            result.append(text)
+    return result
+
+
+def _has_value(value):
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    return bool(value)
+
+
+def merge_node_policy(node, policy):
+    """节点模板与 stage policy 合并：节点字段为空时回退 policy。
+
+    与总指挥路径的 `node.get(...) or policy.get(...)` 语义保持一致，
+    兼容历史 workflow.json 中 purpose/outputs 为空的旧快照。
+    """
+    node = node if isinstance(node, dict) else {}
+    policy = policy if isinstance(policy, dict) else {}
+
+    def pick(key, default=None):
+        if _has_value(node.get(key)):
+            return node.get(key)
+        if _has_value(policy.get(key)):
+            return policy.get(key)
+        return default
+
+    merged = dict(node)
+    merged["purpose"] = pick("purpose", "")
+    merged["label"] = pick("label")
+    merged["required_outputs"] = pick("required_outputs", [])
+    merged["rules"] = pick("rules", [])
+    merged["default_task_type"] = pick("default_task_type")
+    merged["default_integration_mode"] = pick("default_integration_mode")
+    return merged
+
+
+def normalize_node(node):
+    """节点模板 -> 决策所需的稳定结构；缺少 id 时返回 None。"""
+    if not isinstance(node, dict):
+        return None
+
+    node_id = str(node.get("id") or "").strip()
+    if not node_id:
+        return None
+
+    label = str(node.get("label") or node_id).strip()
+    purpose = str(node.get("purpose") or "").strip()
+
+    return {
+        "id": node_id,
+        "label": label,
+        "purpose": purpose,
+        "required_outputs": _as_list(node.get("required_outputs")),
+        "rules": _as_list(node.get("rules")),
+        "task_type": str(
+            node.get("default_task_type") or DEFAULT_TASK_TYPE
+        ).strip(),
+        "integration_mode": str(
+            node.get("default_integration_mode") or DEFAULT_INTEGRATION_MODE
+        ).strip(),
+    }
+
+
+def next_replacement_id(old_task_id, existing_ids):
+    """被作废任务的补派 id：x -> x-r2；x-r2 -> x-r3；冲突则递增。"""
+    match = REPLACEMENT_SUFFIX_RE.search(old_task_id)
+    if match:
+        base = old_task_id[: match.start()]
+        index = int(match.group(1)) + 1
+    else:
+        base = old_task_id
+        index = 2
+
+    while True:
+        candidate = f"{base}-r{index}"
+        if candidate not in existing_ids:
+            return candidate
+        index += 1
+
+
+def initial_task_id(workflow_id, node_id, existing_ids):
+    base = f"{workflow_id}-{node_id}-auto"
+    if base not in existing_ids:
+        return base
+    index = 2
+    while f"{base}-{index}" in existing_ids:
+        index += 1
+    return f"{base}-{index}"
+
+
+def _acceptance_lines(node, override):
+    lines = _as_list(override)
+    if not lines:
+        lines = list(node["required_outputs"])
+    for item in GENERIC_ACCEPTANCE:
+        if item not in lines:
+            lines.append(item)
+    return lines
+
+
+def _prompt(
+    node,
+    requirement,
+    goal,
+    acceptance,
+    *,
+    redispatch_of=None,
+    last_failure_note=None,
+    context_branch=None,
+):
+    outputs = "\n".join(f"- {line}" for line in node["required_outputs"]) or "- 未定义"
+    rules = "\n".join(f"- {line}" for line in node["rules"]) or "- 未定义"
+    criteria = "\n".join(f"- {line}" for line in acceptance) or "- 未定义"
+
+    redispatch_note = ""
+    if redispatch_of:
+        redispatch_note = (
+            f"\n本任务是对 {redispatch_of} 的作废补派："
+            "只重跑受影响子集，请聚焦失败项，不要扩大改动范围。\n"
+        )
+    if last_failure_note:
+        redispatch_note += f"\n上次门禁失败原因：\n{last_failure_note}\n"
+    if context_branch:
+        redispatch_note += f"\n相关既有分支（如需核对）：{context_branch}\n"
+
+    return f"""HERDR_DIRECT_DISPATCH
+
+workflow_id: {node.get("workflow_id", "")}
+node: {node["id"]} ({node["label"]})
+{redispatch_note}
+用户需求：
+{requirement}
+
+任务目标：
+{goal}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+节点职责
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+{node["purpose"]}
+
+必须产出：
+
+{outputs}
+
+执行规则：
+
+{rules}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+验收标准
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+{criteria}
+
+完成后确保产物已写入当前工作目录并结束回合；
+不要手工创建 Clone / Pane / 分支 / Agent，工位已由 Herdr 装配。""".strip()
+
+
+def _dispatch_spec(
+    node,
+    requirement,
+    goal,
+    acceptance,
+    task_id,
+    *,
+    redispatch_of=None,
+    last_failure_note=None,
+    context_branch=None,
+    integration_mode=None,
+):
+    return {
+        "task_id": task_id,
+        "goal": goal,
+        "acceptance": acceptance,
+        "prompt": _prompt(
+            node,
+            requirement,
+            goal,
+            acceptance,
+            redispatch_of=redispatch_of,
+            last_failure_note=last_failure_note,
+            context_branch=context_branch,
+        ),
+        "task_type": node["task_type"],
+        "integration_mode": integration_mode or node["integration_mode"],
+    }
+
+
+def plan_stage_dispatch(
+    workflow_id,
+    node,
+    tasks,
+    requirement,
+    *,
+    context_branch=None,
+):
+    """决定 ready 节点该派发什么。
+
+    返回 {"mode": "dispatch"|"wait"|"fallback", "reason": str, "specs": [...]}。
+    """
+    normalized = normalize_node(node)
+    if not normalized:
+        return {"mode": "fallback", "reason": "node config missing", "specs": []}
+
+    if not normalized["purpose"]:
+        return {
+            "mode": "fallback",
+            "reason": "node purpose missing",
+            "specs": [],
+        }
+
+    node_id = normalized["id"]
+    node_tasks = [
+        task
+        for task in (tasks or [])
+        if task.get("workflow_id") == workflow_id
+        and node_id in (task.get("node"), task.get("stage"))
+    ]
+
+    awaiting = [
+        task
+        for task in node_tasks
+        if task.get("status") == "superseded"
+        and not task.get("superseded_by")
+    ]
+    active = [
+        task for task in node_tasks if task.get("status") != "superseded"
+    ]
+
+    if awaiting:
+        existing_ids = {
+            str(task.get("task_id"))
+            for task in (tasks or [])
+            if task.get("task_id")
+        }
+        specs = []
+        for task in sorted(
+            awaiting, key=lambda item: (item.get("created_at") or 0, item.get("task_id") or "")
+        ):
+            old_id = str(task.get("task_id"))
+            goal = str(task.get("goal") or "").strip() or f"{normalized['label']}: {normalized['purpose']}"
+            acceptance = _acceptance_lines(
+                normalized, task.get("acceptance_criteria")
+            )
+            new_id = next_replacement_id(old_id, existing_ids)
+            existing_ids.add(new_id)
+            specs.append(
+                _dispatch_spec(
+                    normalized,
+                    requirement,
+                    goal,
+                    acceptance,
+                    new_id,
+                    redispatch_of=old_id,
+                    last_failure_note=str(
+                        task.get("stage_verdict_note") or ""
+                    ).strip()
+                    or None,
+                    context_branch=context_branch,
+                    integration_mode=task.get("integration_mode"),
+                )
+            )
+        return {"mode": "dispatch", "reason": "redispatch superseded subset", "specs": specs}
+
+    if active:
+        return {
+            "mode": "wait",
+            "reason": "node has active tasks",
+            "specs": [],
+        }
+
+    if not (requirement or "").strip():
+        return {
+            "mode": "fallback",
+            "reason": "requirement text missing",
+            "specs": [],
+        }
+
+    existing_ids = {
+        str(task.get("task_id"))
+        for task in (tasks or [])
+        if task.get("task_id")
+    }
+    acceptance = _acceptance_lines(normalized, None)
+    goal = f"{normalized['label']}: {normalized['purpose']}"
+    spec = _dispatch_spec(
+        normalized,
+        requirement.strip(),
+        goal,
+        acceptance,
+        initial_task_id(workflow_id, node_id, existing_ids),
+    )
+    return {"mode": "dispatch", "reason": "initial node dispatch", "specs": [spec]}
