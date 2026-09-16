@@ -267,3 +267,82 @@ def test_detect_workflow_stalls_normal_working(projection_env):
     assert stall["is_stalled"] is False
     assert stall["stall_type"] is None
 
+
+def test_detect_workflow_stalls_completed_workflow(projection_env):
+    now = time.time()
+    tasks = [
+        {
+            "task_id": "t_done_1",
+            "workflow_id": "wf_completed_1",
+            "stage": "requirements",
+            "status": "cleaned",
+            "updated_at": now - 120,
+        }
+    ]
+    # Explicit workflow dict
+    stall = projection.detect_workflow_stalls(
+        "wf_completed_1",
+        tasks,
+        workflow={"workflow_id": "wf_completed_1", "status": "completed", "outcome": "delivered"},
+    )
+    assert stall["is_stalled"] is False
+    assert stall["stall_type"] is None
+
+
+def test_detect_workflow_stalls_delivered_outcome(projection_env):
+    now = time.time()
+    tasks = [
+        {
+            "task_id": "t_done_2",
+            "workflow_id": "wf_delivered_1",
+            "stage": "plan",
+            "status": "cleaned",
+            "updated_at": now - 200,
+        }
+    ]
+    stall = projection.detect_workflow_stalls(
+        "wf_delivered_1",
+        tasks,
+        workflow={"workflow_id": "wf_delivered_1", "outcome": "delivered"},
+    )
+    assert stall["is_stalled"] is False
+    assert stall["stall_type"] is None
+
+
+def test_detect_workflow_stalls_paused_workflow(projection_env):
+    now = time.time()
+    tasks = [
+        {
+            "task_id": "t_done_3",
+            "workflow_id": "wf_paused_1",
+            "stage": "implementation",
+            "status": "cleaned",
+            "updated_at": now - 100,
+        }
+    ]
+    stall = projection.detect_workflow_stalls(
+        "wf_paused_1",
+        tasks,
+        workflow={"workflow_id": "wf_paused_1", "status": "paused"},
+    )
+    assert stall["is_stalled"] is False
+    assert stall["stall_type"] is None
+
+
+def test_detect_workflow_stalls_wrapup_stage_completed(projection_env):
+    now = time.time()
+    tasks = [
+        {
+            "task_id": "t_wrapup_1",
+            "workflow_id": "wf_wrapup_1",
+            "stage": "wrapup",
+            "status": "cleaned",
+            "updated_at": now - 300,
+        }
+    ]
+    # Even without explicit workflow metadata, wrapup stage completion indicates workflow finished
+    stall = projection.detect_workflow_stalls("wf_wrapup_1", tasks)
+    assert stall["is_stalled"] is False
+    assert stall["stall_type"] is None
+
+

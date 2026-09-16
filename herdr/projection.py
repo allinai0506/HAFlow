@@ -300,9 +300,42 @@ def project_task(task_id: str) -> Dict[str, Any]:
     }
 
 
-def detect_workflow_stalls(workflow_id: str, tasks: List[Dict[str, Any]]) -> Dict[str, Any]:
+def detect_workflow_stalls(
+    workflow_id: str,
+    tasks: List[Dict[str, Any]],
+    workflow: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """Detect workflow deadlocks, orphan reworks, or hanging stage transitions."""
     now = time.time()
+
+    # Resolve workflow record if not provided
+    wf_entry = workflow
+    if wf_entry is None and workflow_id:
+        try:
+            wf_data = load_workflows_data()
+            wf_entry = wf_data.get("workflows", {}).get(workflow_id)
+        except Exception:
+            wf_entry = None
+
+    # Closed, completed, closing, paused, or failed workflows cannot hang stage advancement
+    if wf_entry:
+        status = wf_entry.get("status")
+        if status in {"completed", "closing", "failed", "paused"}:
+            return {
+                "is_stalled": False,
+                "stall_type": None,
+                "message": "",
+                "suggested_action": None,
+                "target_task_id": None,
+            }
+        if wf_entry.get("outcome") in {"delivered", "abandoned"} or wf_entry.get("completed_at"):
+            return {
+                "is_stalled": False,
+                "stall_type": None,
+                "message": "",
+                "suggested_action": None,
+                "target_task_id": None,
+            }
 
     # 1. Detect rework orphan: task staying in 'rework' for > 45 seconds
     for t in tasks:
@@ -321,6 +354,39 @@ def detect_workflow_stalls(workflow_id: str, tasks: List[Dict[str, Any]]) -> Dic
     # 2. Detect stage advance hang: all current tasks done/cleaned, but workflow still running
     terminal_statuses = {"completed", "committed", "integrated", "cleanup_ready", "cleaned"}
     if tasks and all(t.get("status") in terminal_statuses for t in tasks):
+        # If terminal/wrapup stage tasks are present and complete, workflow reached end of stages
+        stages_in_tasks = {t.get("stage") or t.get("node") for t in tasks}
+        if "wrapup" in stages_in_tasks:
+            return {
+                "is_stalled": False,
+                "stall_type": None,
+                "message": "",
+                "suggested_action": None,
+                "target_task_id": None,
+            }
+
+        # Check if entire workflow DAG is complete based on workflow config
+        try:
+            from herdr.projects import workflow_config_for
+            from herdr.workflow import is_workflow_completed
+            cfg = workflow_config_for(workflow_id)
+            if cfg and cfg.get("nodes"):
+                completed_nodes = {
+                    t.get("node") or t.get("stage")
+                    for t in tasks
+                    if t.get("status") in terminal_statuses
+                }
+                if is_workflow_completed(cfg, completed_nodes):
+                    return {
+                        "is_stalled": False,
+                        "stall_type": None,
+                        "message": "",
+                        "suggested_action": None,
+                        "target_task_id": None,
+                    }
+        except Exception:
+            pass
+
         latest_finish = max(
             (t.get("updated_at") or t.get("created_at") or 0)
             for t in tasks
@@ -353,7 +419,7 @@ def project_workflow(workflow_id: str) -> Dict[str, Any]:
     tasks_data = load_tasks_data()
     wf_tasks = [t for t in tasks_data.get("tasks", []) if t.get("workflow_id") == workflow_id]
 
-    stall_info = detect_workflow_stalls(workflow_id, wf_tasks)
+    stall_info = detect_workflow_stalls(workflow_id, wf_tasks, workflow=wf_entry)
 
     task_projections = []
     completed_count = 0

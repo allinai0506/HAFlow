@@ -267,6 +267,29 @@ class TestSmokeTimeoutAndRetry(unittest.TestCase):
         self.assertEqual(adapter, "grok -p")
 
 
+class TestTargetAgentsFiltering(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.m = load_deep_preflight()
+
+    def test_inspect_filters_to_target_agent(self):
+        project = {"project_id": "p1", "project_root": "/tmp"}
+        with patch.object(self.m, "project_pool", return_value={"allowed_agents": ["opencode", "codex", "claude"]}), \
+             patch.object(self.m, "resolve_binary", return_value="/bin/true"), \
+             patch.object(self.m, "version_probe", return_value=(True, "1.0")):
+            rows = self.m.inspect(project, deep=False, target_agents=["opencode"])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["agent"], "opencode")
+
+    def test_inspect_filters_multiple_target_agents(self):
+        project = {"project_id": "p1", "project_root": "/tmp"}
+        with patch.object(self.m, "project_pool", return_value={"allowed_agents": ["opencode", "codex", "claude"]}), \
+             patch.object(self.m, "resolve_binary", return_value="/bin/true"), \
+             patch.object(self.m, "version_probe", return_value=(True, "1.0")):
+            rows = self.m.inspect(project, deep=False, target_agents=["opencode", "claude"])
+        self.assertEqual([r["agent"] for r in rows], ["opencode", "claude"])
+
+
 class TestConsoleSelfCheckEvidence(unittest.TestCase):
     def test_modal_renders_probe_output_evidence(self):
         html = load_console_html()
@@ -275,6 +298,14 @@ class TestConsoleSelfCheckEvidence(unittest.TestCase):
         self.assertIn("LOCAL_ERROR", html)
         self.assertIn("重试", html)
 
+    def test_modal_supports_dynamic_single_agent_streaming(self):
+        html = load_console_html()
+        self.assertIn("executeSinglePreflight", html)
+        self.assertIn("updateAgentPreflightResult", html)
+        self.assertIn("retrySinglePreflight", html)
+        self.assertIn("preflightProgressBar", html)
+
 
 if __name__ == "__main__":
     unittest.main()
+
