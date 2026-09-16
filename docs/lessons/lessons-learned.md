@@ -2172,7 +2172,8 @@ curl -s "http://127.0.0.1:8765/api/workflows?project_id=xiyu-bid-poc-a380753e"
 1. **启发式检测缺乏工作流生命周期前置感知（Lifecycle-Blindness）**：`herdr/projection.py:detect_workflow_stalls()` 在判定阶段推进悬挂（`stage_advance_hang`）时，代码注释写着 `# 2. Detect stage advance hang: all current tasks done/cleaned, but workflow still running`，但实际函数签名只接收 `(workflow_id, tasks)`，根本没有传入或检查 `workflow` 实体状态！只要当前传入的全部任务状态属于终态（`cleaned`/`committed` 等）且距最后完成时间超过 45 秒，函数便无条件返回 `is_stalled = True`；
 2. **已交付工作流天然符合该误报条件**：任何一个正常交付关闭的工作流，其所有任务必然早已全部完成（终态）且时间已过去很久，因此系统对所有历史已完成工作流**100% 永久误报**「推进停滞」；
 3. **拓扑终点（Terminal Stage）未排除**：在软件工程 6 阶段模板（`requirements -> plan -> impl -> test -> review -> wrapup`）中，当 `wrapup`（收尾）任务全部完成时，工作流已经到达拓扑终点，根本不存在所谓的“后继阶段”，告警文案与建议操作语义自相矛盾；
-4. **控制台缺乏已交付态势表达**：控制台在工作流已完成（`completed`/`delivered`）时，未渲染专属的交付归档横幅，导致误报横幅独占视线。
+4. **控制台缺乏已交付态势表达**：控制台在工作流已完成（`completed`/`delivered`）时，未渲染专属的交付归档横幅，导致误报横幅独占视线；
+5. **阶段状态聚合判定缺陷（`stage_summary` 中的 `committed` 陷阱）**：控制台 `stage_summary()` 之前仅在所有任务为 `cleaned` 时才判定阶段为 `cleaned`（已完成）；若任务包含 `committed`/`integrated`/`completed` 则被归类为 `finalizing`（渲染为「收尾中」并高亮显示为 active 阶段）。因代码实现任务（如 `implementation` 阶段）保留 clone 证据而天然停留在 `committed`，导致已完成工作流的阶段 3（实现）永久显示为「收尾中」，与实际交付状态完全背离。
 
 ### 经验教训
 
@@ -2182,6 +2183,7 @@ curl -s "http://127.0.0.1:8765/api/workflows?project_id=xiyu-bid-poc-a380753e"
 | **盲目假设阶段之间必有后继** | 线性推进有终点，DAG 有 Sink 节点；不是所有“当前阶段完成”都意味着“需要推进到下一阶段” | 阶段推进停滞检测必须识别拓扑终点：当全部任务已包含收尾阶段（`wrapup`）或满足 `is_workflow_completed(cfg, completed_nodes)` 时，判定流程已结束而非推进悬挂 |
 | **函数契约脱节：注释承诺与入参缺失** | 注释写着“but workflow still running”，入参却只有 `tasks` 列表，开发者随手写了 `all(t in terminal)` 导致逻辑假阳性 | 函数签名必须明确暴露依赖实体 `workflow: Optional[Dict]`，并在未传时具备自愈查询能力（从持久化 store 按 ID 补全）；编写单元测试必须覆盖终态实体与拓扑终点用例 |
 | **操作界面状态机与后台干预按钮不自洽** | 前端弹出了「推进停滞」并渲染了「尝试推进阶段」按钮，后端却因没有下一阶段而抛出 500/RuntimeError | 告警触发条件必须与干预动作的前置条件同构校验；对于已交付工作流，控制台应展示温和积极的「已交付」归档态势横幅，而非警报横幅 |
+| **阶段完成态与子任务完成态标准割裂** | Controller 判定阶段完成使用完整的 `COMPLETED_TASK_STATUSES`（含 `committed`），控制台聚合却死卡 `cleaned` | 阶段完成态判定必须与调度内核保持一致：阶段内全部 live 任务均处于 `COMPLETED_TASK_STATUSES`（`completed` / `committed` / `integrated` / `cleanup_ready` / `cleaned`）即为已完成，严禁将保留 clone 的代码提交任务误判为「收尾中」 |
 
 ### 操作规范
 
@@ -2192,9 +2194,10 @@ curl -s "http://127.0.0.1:8765/api/workflows?project_id=xiyu-bid-poc-a380753e"
    - 保证只有处于活跃运行态且中间阶段完成任务超过 45 秒未能拉起后继任务时，才告警 `stage_advance_hang`。
 2. **控制台调用链路与已交付态势呈现 (`console/herdr_factory_console.py`)**：
    - `workflow_detail(wid)` 调用 `detect_workflow_stalls(wid, ts, workflow=w)` 传递上下文；
-   - `updateAttentionHub()` 在 `w.status === 'completed' || w.outcome === 'delivered'` 时，渲染优雅温和的绿色「已交付」横幅（`🎉 工作流已顺利完成全流程闭环并交付归档`），彻底消除误报惊扰。
+   - `updateAttentionHub()` 在 `w.status === 'completed' || w.outcome === 'delivered'` 时，渲染优雅温和的绿色「已交付」横幅（`🎉 工作流已顺利完成全流程闭环并交付归档`），彻底消除误报惊扰；
+   - **阶段完成态对齐 (`stage_summary`)**：将 `all(s in COMPLETED_TASK_STATUSES)` 统一收敛判定为 `cleaned`（已完成），彻底解决实现阶段代码任务因处于 `committed` 导致阶段被永久误标为「收尾中」并错误高亮的问题。
 3. **回归测试与分发**：
-   - 在 `tests/test_projection_engine.py` 中新增已完成工作流、已交付结果、已暂停工作流、收尾阶段完成等多维用例；
+   - 在 `tests/test_projection_engine.py` 中新增已完成工作流、已交付结果、已暂停工作流、收尾阶段完成等多维用例；在 `tests/test_console_stage_summary.py` 中新增 `committed` 任务阶段完成测试；
    - 运行 `./scripts/install-herdr-console.sh` 同步到 `~/.herdr-console/` 并热重载 launchd。
 
 ### 验证命令 / 证据
@@ -2203,15 +2206,19 @@ curl -s "http://127.0.0.1:8765/api/workflows?project_id=xiyu-bid-poc-a380753e"
 # 1. 验证白盒投影与停滞检测单元测试（15 passed）
 pytest tests/test_projection_engine.py -v
 
-# 2. 验证控制台前端语法与投影 API（93 passed）
+# 2. 验证控制台阶段聚合测试（7 passed）
+pytest tests/test_console_stage_summary.py -v
+
+# 3. 验证控制台前端语法与投影 API（95 passed）
 pytest tests/test_console*.py tests/test_projection_engine.py -v
 
-# 3. 验证全仓测试套件（520 passed，0 regression）
+# 4. 验证全仓测试套件（522 passed，0 regression）
 pytest tests/
 
-# 4. 验证真实问题工作流当前 API 返回（is_stalled 必须为 False）
-curl -s "http://127.0.0.1:8765/api/workflow?id=wf-nexusarchive-54433229-20260913-111049" | jq '.data.stall'
+# 5. 验证真实问题工作流当前 API 返回（所有阶段为 cleaned，is_stalled 必须为 False）
+curl -s "http://127.0.0.1:8765/api/workflow?id=wf-nexusarchive-54433229-20260913-111049" | jq '.data.stages'
 ```
+
 
 
 

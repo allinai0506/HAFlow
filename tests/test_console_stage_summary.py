@@ -69,6 +69,26 @@ class TestStageSummarySuperseded(unittest.TestCase):
         self.assertEqual(summary["status"], "waiting")
         self.assertEqual(summary["count"], 0)
 
+    def test_committed_tasks_make_stage_cleaned(self):
+        tasks = [
+            {"task_id": "impl-1", "stage": "implementation", "status": "committed"},
+            {"task_id": "impl-2", "stage": "implementation", "status": "committed"},
+        ]
+        summary = self.module.stage_summary(tasks, "implementation")
+        self.assertEqual(summary["status"], "cleaned")
+        self.assertEqual(summary["count"], 2)
+
+    def test_completed_task_statuses_make_stage_cleaned(self):
+        tasks = [
+            {"task_id": "t1", "stage": "implementation", "status": "completed"},
+            {"task_id": "t2", "stage": "implementation", "status": "integrated"},
+            {"task_id": "t3", "stage": "implementation", "status": "cleanup_ready"},
+            {"task_id": "t4", "stage": "implementation", "status": "cleaned"},
+        ]
+        summary = self.module.stage_summary(tasks, "implementation")
+        self.assertEqual(summary["status"], "cleaned")
+        self.assertEqual(summary["count"], 4)
+
     def test_human_status_covers_new_statuses(self):
         for status, expected in (
             ("superseded", "已取代"),

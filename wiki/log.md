@@ -593,7 +593,9 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
   2. **控制台调用链路与已交付态势表达 (`console/herdr_factory_console.py`)**：
      - `workflow_detail(wid)` 传参 `workflow=w`；
      - `updateAttentionHub()` 在工作流为 `completed` / `delivered` 时，显示绿色优雅的「已交付」全流程闭环归档横幅；
+     - `stage_summary()` 修复：代码提交任务处于 `committed` 导致阶段被永久误判为「收尾中」（`finalizing`）的问题，统一按 `COMPLETED_TASK_STATUSES` 聚合为 `cleaned`（已完成）；
 - **验证与部署**：
-  - 新增 `tests/test_projection_engine.py` 4 项测试，全量 520 项测试 PASS；
-  - 部署控制台并实测 `wf-nexusarchive-54433229-20260913-111049` API，`is_stalled` 已恢复为 `False`；沉淀通用工程教训 §48。
+  - 新增 `tests/test_projection_engine.py` 4 项测试与 `tests/test_console_stage_summary.py` 2 项测试，全量 522 项测试 PASS；
+  - 部署控制台并实测 `wf-nexusarchive-54433229-20260913-111049` API，`is_stalled` 已恢复为 `False`，所有阶段均为 `cleaned`；沉淀通用工程教训 §48。
+
 

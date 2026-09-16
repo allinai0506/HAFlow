@@ -97,11 +97,10 @@ def stage_summary(ts,key):
     if not live: st='superseded'
     else:
         ss=[t.get('status','unknown') for t in live]
-        if all(s=='cleaned' for s in ss): st='cleaned'
-        elif any(s=='failed' for s in ss): st='failed'
+        if any(s=='failed' for s in ss): st='failed'
         elif any(s=='blocked' for s in ss): st='blocked'
         elif any(s in {'working','dispatched','pending','rework','agent_done'} for s in ss): st='working'
-        elif all(s in {'completed','committed','integrated','cleanup_ready','cleaned'} for s in ss): st='finalizing'
+        elif all(s in {'completed','committed','integrated','cleanup_ready','cleaned'} for s in ss): st='cleaned'
         else: st='mixed'
     return {'key':key,'count':len(live),'status':st,'tasks':xs}
 
