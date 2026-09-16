@@ -2119,3 +2119,45 @@ pytest
 pytest tests/test_agent_adapter.py tests/test_deep_preflight_accuracy.py tests/test_herdr_worker.py -v
 ```
 
+---
+
+## 47. 控制台实体筛选的人类心智对齐与上下文感知：从 ID 片段输入到级联下拉与自动预选
+
+### 问题背景
+
+控制台任务归档查询（Task Archive Query）上线后，在实际人机协同使用中暴露出严重的操作阻力：
+1. **违背人类心智模型的输入设计**：工作流筛选器被设计为让用户手输 `工作流 ID 片段` 的纯文本输入框。工作流 ID 格式为 `wf-xiyu-bid-poc-0915-01` 等 20+ 字符长串，操作员在控制台回顾历史任务时无法、也不应该去人肉记忆这串字符；
+2. **缺乏页面上下文感知（Context-Blindness）**：用户往往是在某个具体项目和具体工作流页面发现卡点或需要复盘时，点击右上角的「任务归档」按钮进入该弹窗。然而弹窗默认是全局项目与全部工作流未筛选状态，将其他工作流的所有历史任务一并混杂展示，用户必须重新手动去搜；
+3. **缺少实体级联联动与快捷聚焦能力**：项目切换后未动态级联更新对应的工作流候选列表；当用户在全部任务中浏览到某条感兴趣的任务时，也无法一键点击该任务所属的工作流来直接锁定上下文。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| **让用户手输机器 ID 片段** | 用户是以业务实体（工作流名称/需求主题）为思维锚点，而不是机器哈希或时间戳 ID | 凡跨实体筛选必须提供 `<select>` 下拉选择框，选项标签统一使用「自然语言标题/主题 (短ID)」格式 |
+| **弹窗打开后上下文丢失** | 按钮是在特定的页面语境中被触发的，弹窗不能假设自己处于孤岛 | 模态框打开时必须自动继承当前页面的 `state.projectId` 与 `state.workflowId` 作为默认筛选条件，直出当前现场数据 |
+| **首屏异步加载抖动与网络延迟** | 每次打开弹窗都重新发起网络请求拉取已知实体，会造成下拉框短暂空白或闪烁 | 优先复用前端当前已加载的 `state.project.workflows` 进行 0 延迟首屏直出，跨项目切换时再走轻量异步 API 兜底 |
+| **后端缺乏轻量元数据接口** | 旧有 `/api/project` 接口捆绑了 tabs/panes/slots 等重 I/O 检查，不适于作为频繁的联动查询源 | 必须拆出零外部 I/O、纯内存转换的轻量元数据路由（如 `/api/workflows?project_id=...`），保证交互毫秒级响应 |
+
+### 操作规范
+
+1. **工作流筛选升级为下拉选择框**：在 `console/herdr_factory_console.py` 中将 `input#arcWorkflow` 替换为 `select#arcWorkflow`，首项设为「全部工作流」；
+2. **自动预选与级联**：`showArchive()` 打开时自动读取当前全局 `state` 预选项目与工作流；`onArchiveProjectChange` 监听项目变更并级联刷新工作流选项；
+3. **轻量工作流列表接口**：提供 `GET /api/workflows` 路由，支持可选 `project_id` 查询参数，按 `created_at` 倒序返回带 `requirement_subject` 的工作流轻量字典；
+4. **归档任务卡片工作流快捷点击**：任务卡片副标题中的 `workflow_id` 渲染为可点击超链接，点击直接调用 `filterArchiveByWorkflow` 完成过滤；
+5. **内嵌脚本语法与路由双重守卫**：新增前端模板断言与 `/api/workflows` 路由测试于 `tests/test_archive_query.py`，并在合并前跑全量 `pytest`。
+
+### 验证命令 / 证据
+
+```bash
+# 1. 验证归档查询与轻量工作流路由测试
+pytest tests/test_archive_query.py -v
+
+# 2. 验证控制台前端语法
+pytest tests/test_console_frontend_syntax.py -v
+
+# 3. 验证控制台服务真实路由响应
+curl -s "http://127.0.0.1:8765/api/workflows?project_id=xiyu-bid-poc-a380753e"
+```
+
+

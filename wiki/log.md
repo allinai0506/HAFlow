@@ -569,3 +569,13 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
   - 新增 `tests/test_agent_router_stage_exclusion.py`（3 项）与 `tests/test_software_development_v1_template.py`（8 项）；更新 `tests/test_direct_stage_dispatch.py`（1 项）；
   - 全仓 512 项自动化测试 100% PASS；沉淀通用工程教训 §45。
 
+## [2026-09-16] fix | 任务归档查询按工作流级联下拉筛选与上下文预选
+- **背景**：控制台任务归档弹窗中，工作流筛选器为纯文本输入框（placeholder: `工作流 ID 片段`），缺乏下拉选择能力；且打开弹窗时未带入当前页面正在查看的项目与工作流上下文，导致用户在具体工作流下无法直观按工作流筛选已归档任务。
+- **改动与实现**：
+  - **工作流筛选升级为下拉选择框 (`<select id="arcWorkflow">`)**：显示需求主题 + 短 ID，支持「全部工作流」；
+  - **项目与工作流级联联动**：新增轻量接口 `GET /api/workflows?project_id=...`（零 I/O 纯内存字典转换）；切换项目时自动级联刷新工作流列表并自动触发查询；
+  - **页面上下文默认预选**：`showArchive` 打开时自动带入当前 `state.projectId` 与 `state.workflowId`，直出当前工作流归档结果；优先利用前端已知工作流实现 0 延迟首屏直出；
+  - **任务卡片快捷过滤**：归档列表中工作流标识支持一键点击切换到对应工作流筛选；
+- **回归与部署**：
+  - 更新 `tests/test_archive_query.py`（14 项 PASS），全量 516 项测试 PASS；
+  - 执行 `scripts/install-herdr-console.sh` 同步至 `~/.herdr-console` 并热重载控制台服务验证。
