@@ -529,6 +529,32 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
   - 现场救援：暂存主仓 `scripts/check-testing-standards.sh`、对修复任务补跑 integrate/cleanup、作废 `test` r2 任务；Controller 自动触发 `implementation -> test` 阶段推进，总指挥成功接收事件并并发派发 r3/r4 验证任务。
 - 回归：`tests/test_fix_loop_gates.py` 新增 2 项回归测试（跨阶段中间节点作废 + committed 状态幂等收尾）；全量 500 项测试全部通过；沉淀工程教训 §43。
 
+## [2026-09-16] feat | 接入新 Agent【grok】(Grok Build TUI)
+- **背景**：扩展 HAFlow 多智能体协同支持，将 xAI Grok 官方 CLI（`grok`，Grok Build TUI）作为一等公民 Agent 接入系统全链路调度。
+- **全链路适配落地**：
+  1. **二进制映射与解析单一事实来源 (`herdr/agent_binary.py`)**：在 `AGENT_BINARIES` 注册 `"grok": "grok"`，支持从 PATH、`~/.local/bin` 等目录自动解析。
+  2. **轻量与深度沙盒探针适配 (`herdr/preflight.py`, `herdr/deep_preflight.py`)**：
+     - 在 `KNOWN_AGENTS` 与 `AUTH_HINTS` 中注册 `grok`（凭据路径 `~/.grok/auth.json`，版本探测 `--version`）；
+     - 适配非交互安全探针：识别 `-p / --single` 模式（`grok -p "Reply with exactly HERDR_PREFLIGHT_OK and nothing else."`），验证返回 0 且协议标记精确。
+  3. **AgentAdapter 矩阵能力声明 (`herdr/agent_adapter.py`)**：
+     - 新增 `GrokAdapter(TTYAgentAdapter)`，明确声明 capabilities：`supports_interrupt=True`（SIGINT 打断）、`supports_soft_steer=True`（间隙插话）、`supports_resume=True`（`-r/--resume/-c/--continue` 会话恢复）、`supports_prompt_injection=True`，协议级别 `tty_prototype`；
+     - 注册至全局 `_ADAPTER_REGISTRY`，支持别名 `grokcli -> grok`。
+  4. **工位装配与工作区信任 (`services/herdr-worker.py`)**：
+     - 新增 `ensure_grok_workspace_trust(repo)` 自动在 `~/.grok/trusted_folders.toml` 中写入隔离沙盒信任标记；
+     - `start_agent` 启动参数注入 `--always-approve` 避免 TUI 交互阻断。
+  5. **路由白名单与偏好矩阵 (`herdr/agent_router.py`)**：
+     - 在 `DEFAULT_ALLOWED` 以及各阶段（`DEFAULT_STAGE_PREFERENCES`）、任务类型（`DEFAULT_TASK_TYPE_PREFERENCES`）偏好中纳入 `grok`。
+  6. **工作流模板与 CLI / 控制台**：
+     - `workflow_templates/software-development-v1.yaml` 各阶段 `preferred` 追加 `grok`；
+     - `bin/herdr-factory`（`--agent` choices 追加 `grok`）、`bin/herdr-task`（`DEFAULT_AGENT_LABELS` 追加 `grok`）；
+     - `console/herdr_factory_console.py`（`AGENTS`、`AUTH_HINTS`、前端选择器下拉选项统一同步）。
+  7. **文档与指南**：
+     - 更新 `docs/operations/deep-preflight-playbook.md`、`wiki/preflight-and-health.md`。
+- **回归与实操验证**：
+  - 更新单元测试套件：`tests/test_agent_adapter.py`、`tests/test_deep_preflight_accuracy.py`、`tests/test_herdr_worker.py`、`tests/test_console_agent_roster.py` 均新增针对 `grok` 的断言；
+  - 44 项直接相关测试 100% PASS；
+  - CLI `herdr-preflight` 实测通过：`grok READY present grok 1.0.30`；`herdr-task adapters` 矩阵正常展示。
+
 ## [2026-09-16] feat | 软件开发流程模板优化 (software-development-v1) 与跨阶段 Agent 隔离
 - **背景**：旧版 `software-development-v1.yaml` 模板中全节点声明“同一阶段允许多个 Task 并行协作”，导致协调器与总指挥在需求、计划甚至收尾阶段无序切碎任务（单个 Tab 出现 4+ 个分屏 Pane），引发终端拥挤、上下文碎片化、协调延迟与并发混乱；同时测试/评审阶段缺乏与实现者的隔离机制，易发生自审自查盲区。
 - **模板与策略重构 (`software-development-v1.yaml`)**：

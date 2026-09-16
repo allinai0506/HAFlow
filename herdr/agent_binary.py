@@ -23,6 +23,7 @@ AGENT_BINARIES = {
     "qodercli": "qodercn",
     "agy": "agy",
     "pi": "pi",
+    "grok": "grok",
 }
 
 # LaunchAgent 精简 PATH 之外的常见 CLI 安装目录。

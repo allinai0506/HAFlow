@@ -21,26 +21,26 @@ except ImportError:
     from herdr.projects import workflow_config_for
     from herdr.workflow import find_node
 
-DEFAULT_ALLOWED = ["opencode", "codex", "qodercli", "claude", "agy", "pi"]
+DEFAULT_ALLOWED = ["opencode", "codex", "qodercli", "claude", "agy", "pi", "grok"]
 
 DEFAULT_STAGE_PREFERENCES = {
-    "requirements": ["claude", "qodercli", "opencode", "codex", "agy", "pi"],
-    "plan": ["claude", "qodercli", "codex", "opencode", "agy", "pi"],
-    "implementation": ["opencode", "codex", "qodercli", "agy", "claude", "pi"],
-    "test": ["codex", "opencode", "qodercli", "claude", "agy", "pi"],
-    "review": ["claude", "codex", "qodercli", "opencode", "agy", "pi"],
-    "wrapup": ["claude", "qodercli", "opencode", "codex", "agy", "pi"],
+    "requirements": ["claude", "qodercli", "opencode", "codex", "agy", "pi", "grok"],
+    "plan": ["claude", "qodercli", "codex", "opencode", "agy", "pi", "grok"],
+    "implementation": ["opencode", "codex", "qodercli", "agy", "claude", "pi", "grok"],
+    "test": ["codex", "opencode", "qodercli", "claude", "agy", "pi", "grok"],
+    "review": ["claude", "codex", "qodercli", "opencode", "agy", "pi", "grok"],
+    "wrapup": ["claude", "qodercli", "opencode", "codex", "agy", "pi", "grok"],
 }
 
 DEFAULT_TASK_TYPE_PREFERENCES = {
-    "feat": ["opencode", "codex", "qodercli", "agy", "claude", "pi"],
-    "fix": ["opencode", "codex", "qodercli", "agy", "claude", "pi"],
-    "refactor": ["codex", "opencode", "qodercli", "claude", "agy", "pi"],
-    "docs": ["claude", "qodercli", "opencode", "codex", "agy", "pi"],
-    "test": ["codex", "opencode", "qodercli", "claude", "agy", "pi"],
-    "chore": ["codex", "opencode", "qodercli", "claude", "agy", "pi"],
-    "perf": ["codex", "opencode", "qodercli", "claude", "agy", "pi"],
-    "ci": ["codex", "opencode", "qodercli", "claude", "agy", "pi"],
+    "feat": ["opencode", "codex", "qodercli", "agy", "claude", "pi", "grok"],
+    "fix": ["opencode", "codex", "qodercli", "agy", "claude", "pi", "grok"],
+    "refactor": ["codex", "opencode", "qodercli", "claude", "agy", "pi", "grok"],
+    "docs": ["claude", "qodercli", "opencode", "codex", "agy", "pi", "grok"],
+    "test": ["codex", "opencode", "qodercli", "claude", "agy", "pi", "grok"],
+    "chore": ["codex", "opencode", "qodercli", "claude", "agy", "pi", "grok"],
+    "perf": ["codex", "opencode", "qodercli", "claude", "agy", "pi", "grok"],
+    "ci": ["codex", "opencode", "qodercli", "claude", "agy", "pi", "grok"],
 }
 
 def _load(path, default):

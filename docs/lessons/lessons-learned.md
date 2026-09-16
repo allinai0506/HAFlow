@@ -2076,3 +2076,46 @@ pytest tests/test_software_development_v1_template.py -v
 # 4. 全仓自动化回归
 pytest
 ```
+
+---
+
+## 46. 异构 AI Agent CLI 全链路接入与工位沙盒信任规范：从解析、协议适配、无副作用探针到工作区准入
+
+### 问题背景
+
+在接入新的异构 AI Coding Agent（如 xAI 的 Grok CLI）时，新 Agent 的接入往往不只是在路由列表里加一个名字，而是横跨从底层进程启动到上层 UI/控制台的完整链路。如果缺少系统化的全链路适配规范，会踩入一系列隐蔽陷阱：
+1. **进程启动与非交互参数差异**：不同 Agent CLI 的非交互运行与授权机制差异显著。例如 Grok CLI 默认会在执行工具前阻塞等待终端用户确认，自动化调度若不传递 `--always-approve` 会导致工位 TUI 永久卡死；
+2. **工作区信任机制隐性阻断**：类 Claude / Grok 等现代 Agent CLI 具备工作区信任机制，会在未信任目录下弹出交互式 Trust Dialog。如果 Worker 在 CoW 创建的临时克隆沙盒中启动该 Agent，而未提前将其写入各 Agent 的信任配置文件（如 `~/.grok/trusted_folders.toml` 或 `~/.claude.json`），工位将直接卡在交互弹窗上，使任务派发永久超时；
+3. **健康自检超时与分类器断裂**：探针若无针对新 Agent 的非交互参数分支（如 `-p / --single`），会退化为错误命令或无交互命令挂死，最终导致调度器无法感知其实际可用性（误判为 `UNKNOWN` 或 `MISSING`）；
+4. **既有项目池配置陈旧**：已创建项目的 `agent-pools.json` 在初始化时保存了旧有的 `allowed_agents` 列表，即使系统代码支持了新 Agent，老项目预检仍会因池级白名单缺失而忽略该 Agent。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| **交互式授权弹窗阻断自动化** | 后台常驻调度 Agent 时绝不能假设 TUI 会有人类交互点击确认 | Worker 启动时必须针对具体 Agent 注入全自动执行参数（如 Grok 注入 `--always-approve`，Claude 注入 `--dangerously-skip-permissions`） |
+| **CoW 临时沙盒缺少工作区信任** | 隔离克隆沙盒路径对 Agent 来说属于全新未知目录，必然触发信任拦截 | Worker 装配工位时必须在启动 Agent 前调用 `ensure_<agent>_workspace_trust` 将沙盒路径原子写入对应配置（如 `trusted_folders.toml`） |
+| **探针缺乏非交互模式适配** | 用通用 `run` 或盲目拼装命令会导致 CLI 挂起超时并产生假阳性故障 | `choose_smoke_command` 必须基于官方文档确认的安全无副作用单回合参数（如 `grok -p` + `HERDR_PREFLIGHT_OK` 协议标记） |
+| **协议层能力模型未声明** | 缺少 AgentAdapter 声明会导致系统将新 Agent 降级到 fail-closed 的 `UnknownAgentAdapter`，彻底禁用制动与插话 | 必须显式实现具体 `AgentAdapter`，明确声明 `supports_interrupt`、`supports_soft_steer`、`supports_resume` 等 capabilities |
+
+### 操作规范（已固化到 `herdr/agent_binary.py`、`herdr/agent_adapter.py`、`herdr/preflight.py`、`herdr/deep_preflight.py`、`services/herdr-worker.py`、`herdr/agent_router.py`）
+
+1. **二进制解析单一事实来源**：在 `herdr/agent_binary.py:AGENT_BINARIES` 注册 CLI 内部名与可执行文件映射，利用 `resolve_agent_binary` 兼容 LaunchAgent 精简 PATH 与 `~/.local/bin` 等目录；
+2. **协议适配与能力声明**：在 `herdr/agent_adapter.py` 实现对应 Adapter，准确声明四维 capabilities 并注册别名；
+3. **安全沙盒探活**：在 `herdr/deep_preflight.py:choose_smoke_command` 适配最轻量非交互调用，返回 `HERDR_PREFLIGHT_OK` 精确标记；并在 `preflight.py` 中补充 `AUTH_HINTS`；
+4. **沙盒信任与免密执行**：在 `services/herdr-worker.py` 实现 `ensure_<agent>_workspace_trust` 与参数自动化放行；
+5. **路由矩阵与控制台/模板同步**：在 `agent_router.py`、`software-development-v1.yaml`、`console/herdr_factory_console.py` 中全量同步。
+
+### 验证命令 / 证据
+
+```bash
+# 1. 验证轻量静态体检
+./bin/herdr-preflight
+
+# 2. 验证能力矩阵
+./bin/herdr-task adapters
+
+# 3. 验证单元测试套件
+pytest tests/test_agent_adapter.py tests/test_deep_preflight_accuracy.py tests/test_herdr_worker.py -v
+```
+

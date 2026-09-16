@@ -42,6 +42,7 @@ class TestConsoleAgentRoster(unittest.TestCase):
         self.assertNotIn("AGENT_BINARIES", vars(module))
         # qodercli -> qodercn 映射必须来自 herdr.agent_binary 单一事实来源
         self.assertEqual(agent_binary.AGENT_BINARIES["qodercli"], "qodercn")
+        self.assertEqual(agent_binary.AGENT_BINARIES["grok"], "grok")
 
 
 if __name__ == "__main__":
