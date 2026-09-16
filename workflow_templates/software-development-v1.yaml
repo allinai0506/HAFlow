@@ -8,50 +8,91 @@ nodes:
     label: 2需求分析
     node_type: agent
     depends_on: []
+    parallel: true
     purpose: 理解需求、澄清范围、识别约束、形成可验收需求。
     default_integration_mode: none
     default_task_type: docs
     agent_policy:
       preferred: [claude, qodercli, opencode, codex, agy, pi]
+      max_agents: 2
+      roles:
+        - name: executor
+          label: 需求主起草与边界澄清
+          goal: 梳理需求范围、业务规则与清晰可验收标准
+          purpose_suffix: 负责主干内容输出、需求澄清与验收方案制定
+          outputs:
+            - 需求规格与验收标准
+            - 需求目标
+            - 功能范围
+            - 非目标与边界
+            - 业务规则
+            - 关键约束
+        - name: challenger
+          label: 需求对抗性质询与漏洞挖掘
+          goal: 对抗性破防审查、挖掘隐式假设、识别未覆盖边界与潜在缺陷
+          purpose_suffix: 负责破防性质询、深挖隐式假设、漏洞挖掘与风险审查
+          outputs:
+            - 需求对抗审查与边界漏洞清单
+            - 风险与待确认事项
     required_outputs:
+      - 需求规格与验收标准
+      - 需求对抗审查与边界漏洞清单
       - 需求目标
       - 功能范围
       - 非目标与边界
       - 业务规则
       - 关键约束
       - 风险与待确认事项
-      - 明确验收标准
     rules:
-      - 以分析和方案输出为主
-      - 默认不得修改业务代码
-      - 不得直接进入实现阶段
+      - 严格限定最多 2 个 Task / 2 个 Pane：1 个主执行者（需求分析与边界澄清），1 个对抗性质询者（破防性质询、隐式假设挖掘与漏洞审查）。严禁开设第 3 个及以上 Task 或 Pane。
+      - 严禁按前端、后端、数据库、UI 切割细碎 Pane；所有需求工作收敛在双工位内完成。
+      - 以分析和方案输出为主，默认不得修改业务代码，不得直接进入实现阶段。
+      - 两份核心产出（需求规格与对抗审查清单）均完备方可通过验收推进。
       - 仅当 workflow_id 以 e2e- 开头时：验收不得依赖 Pane/TUI 是否能读到完成文本；Task 的 acceptance criteria 必须以 Herdr 生命周期到达 done/agent_done 且 verify-baseline 返回 BASELINE_MATCH 为完成依据；不得要求 E2E_*_OK 或 HERDR_TASK_DONE 必须能通过 pane read 读取；满足上述条件直接 completed，不要因为 alternate-screen 空白而 rework。
       - 创建 Task 时默认使用 --agent auto，由 Agent Router 根据当前 node、task_type 和项目 Agent Pool 动态选择；只有存在明确理由或用户显式指定时才固定具体 Agent。
-      - 同一阶段允许多个 Task 使用不同 Agent 并行协作，不得默认把所有 Task 固定给同一个 Agent。
 
   - id: plan
     label: 3计划
     node_type: agent
     depends_on: [requirements]
+    parallel: true
     purpose: 把已确认需求转化为可并行执行、可验收的工程任务。
     default_integration_mode: none
     default_task_type: docs
     agent_policy:
       preferred: [claude, qodercli, codex, opencode, agy, pi]
+      max_agents: 2
+      roles:
+        - name: executor
+          label: 技术架构与解耦拆分
+          goal: 技术方案设计、工程架构规划与可解耦独立任务拆解
+          purpose_suffix: 负责技术架构设计、工程方案与任务拆解
+          outputs:
+            - 技术架构与解耦任务拆解
+            - 实现方案
+            - 任务拆分与依赖关系
+            - 每个 Task 目标与验收标准
+        - name: challenger
+          label: 方案对抗性审查与可行性评估
+          goal: 破防式审查技术方案、审查死锁与复杂度、过度设计质询与可行性评估
+          purpose_suffix: 负责方案对抗性审查、死锁/复杂度质询与可行性风险评估
+          outputs:
+            - 方案对抗审查与可行性风险评估
+            - 风险与验证方案
     required_outputs:
+      - 技术架构与解耦任务拆解
+      - 方案对抗审查与可行性风险评估
       - 实现方案
-      - 任务拆分
-      - 任务依赖
-      - 每个 Task 的目标
-      - 每个 Task 的验收标准
+      - 任务拆分与依赖关系
+      - 每个 Task 的目标与验收标准
       - 风险与验证方案
     rules:
-      - Task 按业务目标拆分，不按固定前端后端角色拆分
-      - 允许规划多个并行 Task
-      - 默认不得修改业务代码
+      - 严格限定最多 2 个 Task / 2 个 Pane：1 个主架构师（技术方案制定与任务解耦拆分），1 个对抗性质询者（架构合理性、循环依赖、过度设计与技术风险审查）。严禁开设第 3 个及以上 Task 或 Pane。
+      - 计划阶段制定的“任务拆分”是为后续实现阶段规划的，严禁在计划阶段提前为每个拆分子任务开设 Pane！
+      - 默认不得修改业务代码。
+      - 两份核心产出均完备方可通过门禁推进。
       - 仅当 workflow_id 以 e2e- 开头时：验收不得依赖 Pane/TUI 是否能读到完成文本；Task 的 acceptance criteria 必须以 Herdr 生命周期到达 done/agent_done 且 verify-baseline 返回 BASELINE_MATCH 为完成依据；不得要求 E2E_*_OK 或 HERDR_TASK_DONE 必须能通过 pane read 读取；满足上述条件直接 completed，不要因为 alternate-screen 空白而 rework。
       - 创建 Task 时默认使用 --agent auto，由 Agent Router 根据当前 node、task_type 和项目 Agent Pool 动态选择；只有存在明确理由或用户显式指定时才固定具体 Agent。
-      - 同一阶段允许多个 Task 使用不同 Agent 并行协作，不得默认把所有 Task 固定给同一个 Agent。
 
   - id: implementation
     label: 4实现
@@ -71,24 +112,25 @@ nodes:
       - 必要测试
       - 风险说明
     rules:
-      - 严格按照 Task 定义的范围执行
-      - 必须保证修改仅局限于 Task 目标内
-      - 提交前必须自测
-      - 确保修改与验收标准一致
+      - 严格按照 Task 定义的范围执行，必须保证修改仅局限于 Task 目标内。
+      - 自适应解耦并发原则：仅当计划阶段拆解的任务完全解耦且修改文件互不重叠时，允许派发多 Agent 并发执行（上限 3 个）；若模块强耦合或属于单点重构，必须强制单 Agent 顺序执行，严禁无序切碎制造 Git 合并冲突与 Pane 膨胀。
+      - 提交前必须自测，确保修改与验收标准一致。
+      - 禁止使用普通 git status 判断修改范围，必须以 verify-baseline 为准。
       - 仅当 workflow_id 以 e2e- 开头时：验收不得依赖 Pane/TUI 是否能读到完成文本；Task 的 acceptance criteria 必须以 Herdr 生命周期到达 done/agent_done 且 verify-baseline 返回 BASELINE_MATCH 为完成依据；不得要求 E2E_*_OK 或 HERDR_TASK_DONE 必须能通过 pane read 读取；满足上述条件直接 completed，不要因为 alternate-screen 空白而 rework。
       - 创建 Task 时默认使用 --agent auto，由 Agent Router 根据当前 node、task_type 和项目 Agent Pool 动态选择；只有存在明确理由或用户显式指定时才固定具体 Agent。
-      - 同一阶段允许多个 Task 使用不同 Agent 并行协作，不得默认把所有 Task 固定给同一个 Agent。
-      - 禁止使用普通 git status 判断修改范围，必须以 verify-baseline 为准。
 
   - id: test
     label: 5测试
     node_type: agent
     depends_on: [implementation]
+    parallel: false
     purpose: 验证实现结果是否满足需求与验收标准。
     default_integration_mode: none
     default_task_type: test
     agent_policy:
       preferred: [codex, opencode, qodercli, claude, agy, pi]
+      max_agents: 1
+      exclude_stage_agents: [implementation]
     required_outputs:
       - 测试执行记录
       - 缺陷清单
@@ -96,41 +138,44 @@ nodes:
       - 边界条件验证情况
       - 测试结论（PASS / FAIL）
     rules:
-      - 以验证为主，不得随意修改代码
-      - 发现问题必须提报并指出明确缺陷
-      - 必须覆盖计划阶段制定的验证方案
-      - 仅当 workflow_id 以 e2e- 开头时：验收不得依赖 Pane/TUI 是否能读到完成文本；Task 的 acceptance criteria 必须以 Herdr 生命周期到达 done/agent_done 且 verify-baseline 返回 BASELINE_MATCH 为完成依据；不得要求 E2E_*_OK 或 HERDR_TASK_DONE 必须能通过 pane read 读取；满足上述条件直接 completed，不要因为 alternate-screen 空白而 rework。
-      - 创建 Task 时默认使用 --agent auto，由 Agent Router 根据当前 node、task_type 和项目 Agent Pool 动态选择；只有存在明确理由或用户显式指定时才固定具体 Agent。
-      - 同一阶段允许多个 Task 使用不同 Agent 并行协作，不得默认把所有 Task 固定给同一个 Agent。
+      - 单工位专注执行（严格限定 1 个 Task / 1 个 Pane）。
+      - 跨阶段 Agent 硬隔离红线（一等公民）：测试 Agent 严禁复用实现（implementation）阶段的主要 Agent！必须由不同的 Agent 独立运行测试与边界核验，杜绝思维惯性与“自证自清”。
+      - 以验证为主，不得随意修改代码；发现问题必须提报明确缺陷清单。
+      - 必须覆盖计划阶段制定的验证方案与对抗审查提出的极端边界。
       - 测试必须针对 Candidate 分支或隔离 Clone 进行验证。
+      - 仅当 workflow_id 以 e2e- 开头时：验收不得依赖 Pane/TUI 是否能读到完成文本；Task 的 acceptance criteria 必须以 Herdr 生命周期到达 done/agent_done 且 verify-baseline 返回 BASELINE_MATCH 为完成依据；不得要求 E2E_*_OK 或 HERDR_TASK_DONE 必须能通过 pane read 读取；满足上述条件直接 completed，不要因为 alternate-screen 空白而 rework。
+      - 创建 Task 时默认使用 --agent auto，由 Agent Router 根据当前 node、task_type 和项目 Agent Pool 动态选择（自动排除实现阶段 Agent）；只有存在明确理由或用户显式指定时才固定具体 Agent。
 
   - id: review
     label: 6评审
     node_type: agent
     depends_on: [test]
+    parallel: false
     purpose: 对代码质量、架构、安全性和可维护性进行独立评审。
     default_integration_mode: none
     default_task_type: test
     agent_policy:
       preferred: [claude, codex, qodercli, opencode, agy, pi]
+      max_agents: 1
+      exclude_stage_agents: [implementation]
     required_outputs:
       - 代码规范审查结论
       - 架构合理性评估
       - 安全风险评估
       - 改进建议与结论
     rules:
-      - 评审必须独立执行，评审者不得与实现者混淆
-      - 重点检查范围蔓延、未处理异常和潜在性能缺陷
-      - 结论必须明确（通过 / 需返工 / 拒绝）
+      - 单工位独立评审（严格限定 1 个 Task / 1 个 Pane）。
+      - 跨阶段 Agent 硬隔离红线（一等公民）：评审 Agent 严禁复用实现（implementation）阶段的主要 Agent！坚决杜绝实现者自己评审自己的代码。
+      - 评审必须独立执行，重点检查范围蔓延、未处理异常和潜在性能缺陷。
+      - 结论必须明确（通过 / 需返工 / 拒绝），评审未通过时触发返工流程。
       - 仅当 workflow_id 以 e2e- 开头时：验收不得依赖 Pane/TUI 是否能读到完成文本；Task 的 acceptance criteria 必须以 Herdr 生命周期到达 done/agent_done 且 verify-baseline 返回 BASELINE_MATCH 为完成依据；不得要求 E2E_*_OK 或 HERDR_TASK_DONE 必须能通过 pane read 读取；满足上述条件直接 completed，不要因为 alternate-screen 空白而 rework。
-      - 创建 Task 时默认使用 --agent auto，由 Agent Router 根据当前 node、task_type 和项目 Agent Pool 动态选择；只有存在明确理由或用户显式指定时才固定具体 Agent。
-      - 同一阶段允许多个 Task 使用不同 Agent 并行协作，不得默认把所有 Task 固定给同一个 Agent。
-      - 评审未通过时触发返工流程。
+      - 创建 Task 时默认使用 --agent auto，由 Agent Router 根据当前 node、task_type 和项目 Agent Pool 动态选择（自动排除实现阶段 Agent）；只有存在明确理由或用户显式指定时才固定具体 Agent。
 
   - id: wrapup
     label: 7收尾
     node_type: agent
     depends_on: [review]
+    parallel: false
     purpose: >
       确认整个 Workflow 完成。必须使用 six-step-finish（六步收尾）技能
       作为标准收尾程序，产出包含逐步（1-6）状态表的收尾报告。
@@ -139,6 +184,8 @@ nodes:
     default_task_type: docs
     agent_policy:
       preferred: [claude, qodercli, opencode, codex, agy, pi]
+      max_agents: 1
+      exclude_stage_agents: [implementation]
     required_outputs:
       - 最终交付成果说明
       - 修改文件清单
@@ -149,12 +196,11 @@ nodes:
       - 六步收尾报告（含逐步状态表：步骤/执行者/命令/结果/证据）
       - 总结报告
     rules:
-      - 必须核对全流程所有阶段的交付物是否完备
-      - 负责生成交付汇总和合并指引
+      - 单工位收尾（严格限定 1 个 Task / 1 个 Pane）。
+      - 执行者独立性红线：收尾 Agent 严禁复用实现阶段 Agent，由独立客观视角核查全流程交付清单并执行收尾。
+      - 必须核对全流程所有阶段的交付物是否完备，负责生成交付汇总和合并指引。
       - 必须使用 six-step-finish 技能执行收尾，禁止自创收尾流程。技能说明（仓库内）：.agents/skills/six-step-finish/SKILL.md；收尾脚本（仓库内）：.agents/skills/six-step-finish/scripts/finish-task.sh；绝对兜底：~/.agents/skills/six-step-finish/。基准分支必须显式传入：--base <本工作流 base_branch，见 stage advance 事件头部 base_branch 字段>。
       - "六步收尾执行规则：(1) 先完成步骤 1（调用 knowledge-capture），知识更新与交付物同分支提交；再执行步骤 2（wiki checkpoint），仓库无 .wiki/WIKI.md 时脚本自动跳过，但仍须按 AGENTS.md wiki 治理判断是否回填 wiki/；(2) 步骤 3 的合并确认只读执行（--dry-run），且必须先确认目标分支相对 base 至少有 1 个提交（零提交分支会被 git cherry 误判为已合入）；运行 finish-task.sh 前必须先检查目标分支是否存在（如 `git show-ref --verify --quiet refs/heads/<branch>`），分支不存在 → 报告「已清理/无资源」并跳过脚本，不得记为失败（完整清理后二次运行会被误报 ⛔ exit 1）；(3) 未合入 → 记录 ⛔ 与 DEFERRED，产出收尾计划与合并指引；严禁 --force；(4) 严禁 --yes（会丢弃未提交变更）；破坏性步骤须在 base 合入后执行；(5) 不得删除 clone / pane / 阶段 tab（close-workflow 的职责）；(6) 收尾报告必须含六步状态表；(7) workflow_id 以 e2e- 开头时，验收不得依赖 pane 文本读取（沿用既有 e2e 规则）。"
       - 仅当 workflow_id 以 e2e- 开头时：验收不得依赖 Pane/TUI 是否能读到完成文本；Task 的 acceptance criteria 必须以 Herdr 生命周期到达 done/agent_done 且 verify-baseline 返回 BASELINE_MATCH 为完成依据；不得要求 E2E_*_OK 或 HERDR_TASK_DONE 必须能通过 pane read 读取；满足上述条件直接 completed，不要因为 alternate-screen 空白而 rework。
-      - 创建 Task 时默认使用 --agent auto，由 Agent Router 根据当前 node、task_type 和项目 Agent Pool 动态选择；只有存在明确理由或用户显式指定时才固定具体 Agent。
-      - 同一阶段允许多个 Task 使用不同 Agent 并行协作，不得默认把所有 Task 固定给同一个 Agent。
-      - 收尾完成后，标记整个 Workflow 进入完成状态。
-      - 提醒用户执行物理 purge 或保留现场供复查。
+      - 创建 Task 时默认使用 --agent auto，由 Agent Router 根据当前 node、task_type 和项目 Agent Pool 动态选择（自动排除实现阶段 Agent）；只有存在明确理由或用户显式指定时才固定具体 Agent。
+      - 收尾完成后，标记整个 Workflow 进入完成状态，提醒用户执行物理 purge 或保留现场供复查。
