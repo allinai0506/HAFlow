@@ -105,8 +105,9 @@ Evidence:
 控制台壳层 `archive_query` 优先读取 StateStore（唯一事实源），`tasks.json` 仅作降级兜底，
 因此投影文件损坏或被覆盖时归档列表仍然完整。
 
-- 过滤：`project_id`（精确）、`workflow_id`（片段）、`agent`（精确）、`status`（组别名或精确状态）、
+- 过滤：`project_id`（精确选择）、`workflow_id`（工作流下拉选择/项目级联/支持当前工作流默认预选）、`agent`（精确）、`status`（组别名或精确状态）、
   `q`（task_id / goal / 节点 / 项目 / 工作流 关键词）；
+- 级联与工作流选择：提供 `GET /api/workflows?project_id=...` 轻量接口；弹窗打开时默认带入当前项目与当前工作流；项目切换时工作流下拉框自动级联更新；归档任务卡片上的 `workflow_id` 支持一键点击快速过滤；
 - 状态组：`archived`（cleaned/superseded/failed，默认）、`active`、`all`，或任意精确状态名（如 `completed`）；
 - 排序：`updated_at` 倒序（缺失回退 `last_activity_at` → `created_at`），`task_id` 升序兜底；
 - 分页：`limit` 默认 50、上限 200，`offset` 越界安全；响应含 `total/count/limit/offset/status/items`；
@@ -116,4 +117,6 @@ Evidence:
 - `herdr/archive.py#query_archived_tasks`
 - `herdr/archive.py#summarize_task`
 - `console/herdr_factory_console.py#archive_query`
+- `console/herdr_factory_console.py#api_workflows`
 - `tests/test_archive_query.py`
+

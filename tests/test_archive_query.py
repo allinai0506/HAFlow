@@ -197,7 +197,44 @@ def test_console_archive_query_filters_and_pagination(archive_console_env):
 def test_console_archive_route_is_registered():
     source = (Path(__file__).resolve().parent.parent / "console" / "herdr_factory_console.py").read_text(encoding="utf-8")
     assert "'/api/archive'" in source
+    assert "'/api/workflows'" in source
     assert "def archive_query(" in source
+    assert "def api_workflows(" in source
+
+
+def test_console_workflows_api_wiring(archive_console_env):
+    console = archive_console_env["console"]
+    wf_file = archive_console_env["console"].WORKFLOWS_FILE
+    workflows_data = {
+        "workflows": {
+            "wf-proj1-01": {
+                "project_id": "p1",
+                "title": "功能A开发",
+                "created_at": 100,
+            },
+            "wf-proj1-02": {
+                "project_id": "p1",
+                "requirement_subject": "功能B优化",
+                "created_at": 200,
+            },
+            "wf-proj2-01": {
+                "project_id": "p2",
+                "title": "项目2功能",
+                "created_at": 300,
+            },
+        }
+    }
+    Path(wf_file).write_text(json.dumps(workflows_data), encoding="utf-8")
+
+    all_wfs = console.api_workflows()
+    assert len(all_wfs) == 3
+    assert all_wfs[0]["workflow_id"] == "wf-proj2-01"
+
+    p1_wfs = console.api_workflows(pid="p1")
+    assert len(p1_wfs) == 2
+    assert [w["workflow_id"] for w in p1_wfs] == ["wf-proj1-02", "wf-proj1-01"]
+    assert p1_wfs[0]["requirement_subject"] == "功能B优化"
+    assert p1_wfs[1]["title"] == "功能A开发"
 
 
 def test_console_frontend_exposes_archive_view():
@@ -210,4 +247,10 @@ def test_console_frontend_exposes_archive_view():
     html = console.HTML_TEMPLATE
     assert "showArchive()" in html
     assert "/api/archive" in html
+    assert "/api/workflows" in html
     assert "任务归档" in html
+    assert '<select id="arcWorkflow"' in html
+    assert "onArchiveProjectChange()" in html
+    assert "onArchiveWorkflowChange()" in html
+    assert "filterArchiveByWorkflow(" in html
+
