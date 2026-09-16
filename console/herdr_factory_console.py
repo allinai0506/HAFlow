@@ -332,7 +332,7 @@ def workflow_detail(wid):
     p=project_for_workflow(wid); ts=tasks_for_workflow(wid); ss=[]
     for k,l in STAGES:
         x=stage_summary(ts,k); x['label']=l; ss.append(x)
-    stall_info=herdr_projection.detect_workflow_stalls(wid,ts)
+    stall_info=herdr_projection.detect_workflow_stalls(wid,ts,workflow=w)
     return {'workflow':{'workflow_id':wid,**_with_subject(w)},'project':p,'stages':ss,'tasks':ts,'coordinator':agent_runtime(w.get('coordinator_pane_id')),'candidate_branch':w.get('candidate_branch'),'agent_override':w.get('agent_override','auto'),'stall':stall_info}
 
 
@@ -1168,6 +1168,7 @@ function updateAttentionHub(){
   ab.style.display='flex';
   const readyCnt=Math.max(0,cntAll-decisionTasks.length-attentionTasks.length);
   const stall=state.workflow&&state.workflow.stall;
+  const w=state.workflow&&state.workflow.workflow;
   if(stall&&stall.is_stalled){
     ab.style.background='linear-gradient(90deg, #3d1c06 0%, #1f140a 100%)';
     ab.style.borderColor='var(--warn)';
@@ -1178,6 +1179,10 @@ function updateAttentionHub(){
       actBtn=`<button class="btn primary" style="background:#2563eb;border-color:#1d4ed8;padding:4px 10px;font-size:12px" onclick="retryStageAdvance('${state.workflowId}')">⚡ 尝试推进阶段</button>`;
     }
     ab.innerHTML=`<div style="display:flex;align-items:center;gap:10px"><span class="att-badge" style="background:var(--warn);color:#000">推进停滞告警</span><span class="att-text" style="color:#fef08a">⚠️ ${esc(stall.message)}</span></div><div>${actBtn}</div>`;
+  }else if(w&&(w.status==='completed'||w.outcome==='delivered')){
+    ab.style.background='linear-gradient(90deg, #0d2818 0%, #0a1a10 100%)';
+    ab.style.borderColor='var(--good)';
+    ab.innerHTML=`<div style="display:flex;align-items:center;gap:10px"><span class="att-badge" style="background:var(--good);color:#000">已交付</span><span class="att-text" style="color:#86efac">🎉 工作流已顺利完成全流程闭环并交付归档</span></div><div></div>`;
   }else{
     ab.style.background='linear-gradient(90deg,#14243a 0%,#111a26 100%)';
     ab.style.borderColor='var(--accent)';

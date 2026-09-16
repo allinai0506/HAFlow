@@ -579,3 +579,21 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - **回归与部署**：
   - 更新 `tests/test_archive_query.py`（14 项 PASS），全量 516 项测试 PASS；
   - 执行 `scripts/install-herdr-console.sh` 同步至 `~/.herdr-console` 并热重载控制台服务验证。
+
+## [2026-09-16] fix | 修复已完成工作流误报推进停滞告警（Stall Detection 终态与拓扑终点感知）
+- **背景**：已交付完成的历史工作流（如 `wf-nexusarchive-54433229-20260913-111049`）在 Web 控制台持续告警 `⚠️ 上一阶段所有任务均已完成，但后继阶段推进悬挂已超 45 秒`，并附带「⚡ 尝试推进阶段」按钮（点击会报错 `当前没有可手工推进的下一阶段`）。
+- **根因**：
+  1. `herdr/projection.py:detect_workflow_stalls()` 在检测 `stage_advance_hang` 时，虽然注释为 `but workflow still running`，但代码完全没有传入或校验 workflow 状态；对于所有任务均已完成且时间已久的历史工作流，无条件判定为挂起；
+  2. 拓扑终点未排除：当收尾阶段（`wrapup`）或全 DAG 节点都已完成时，本就不存在“后继阶段”，告警文案语义失真。
+- **改动与实现**：
+  1. **停滞检测核心修复 (`herdr/projection.py`)**：
+     - `detect_workflow_stalls()` 支持 `workflow: Optional[Dict]` 参数，缺省时自动从 store 加载；
+     - **生命周期终态守卫**：若 `status in {"completed", "closing", "failed", "paused"}`、`outcome in {"delivered", "abandoned"}` 或 `completed_at` 存在，立即判定为非停滞；
+     - **拓扑终点守卫**：当任务包含 `wrapup` 终态节点或满足 `is_workflow_completed` 时，判定流程已结束而非推进悬挂；
+  2. **控制台调用链路与已交付态势表达 (`console/herdr_factory_console.py`)**：
+     - `workflow_detail(wid)` 传参 `workflow=w`；
+     - `updateAttentionHub()` 在工作流为 `completed` / `delivered` 时，显示绿色优雅的「已交付」全流程闭环归档横幅；
+- **验证与部署**：
+  - 新增 `tests/test_projection_engine.py` 4 项测试，全量 520 项测试 PASS；
+  - 部署控制台并实测 `wf-nexusarchive-54433229-20260913-111049` API，`is_stalled` 已恢复为 `False`；沉淀通用工程教训 §48。
+
