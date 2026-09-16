@@ -1987,7 +1987,55 @@ herdr pane read w9:p1 --lines 30
 
 ---
 
-## 44. 工作流多 Agent 协同收敛、双工位对抗审查与跨阶段 Agent 隔离
+## 44. 多会话并行必须 CoW 沙盒隔离：共享主工作区没有"我的改动"边界
+
+### 问题背景
+
+2026-09-16 控制面延迟优化（§42）落地期间，同一台机器上两个 AI 会话同时操作 `/Users/user/HAFlow` 与 `/Users/user/xiyu/xiyu-bid-poc` 的主工作区：
+
+- HAFlow：第二次 `git add services/herdr-controller.py` 时，把并行会话尚未提交的 fix-loop 改动一起打进了 PR 提交；随后对方又对 lessons/tests/wiki 写入在途内容，同一文件上出现两个写者的叠加；
+- xiyu：本会话在 `main` 工作区留下的未提交 hook 改动，被工作流自身的分支切换直接冲掉（工作区切到 `herdr/wf-…-consolidated` 后改动消失），只能从零重建。
+
+两起事故的共同根因不是 git，而是流程违反 RULES.md §2「CoW 沙盒建支红线」与 unified-dev-flow S0：**在一个多写者共享的主工作区里直接开发**。`git add` 的粒度是文件，不是"会话归属"；未提交改动是工作区级共享状态，任何 `checkout/reset` 都会将其覆盖或丢弃。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| **主工作区多写者** | 多个会话/agent 同写一个 checkout 时，按文件 add 必然可能卷走他人在途改动；共享工作区不是工作单元 | 一个工作区同一时刻只允许一个写者；非平凡改动必须在 CoW 沙盒或独立 checkout 进行 |
+| **未提交改动是易失的** | 工作区级未提交内容会被他人 `checkout -f`/`reset` 静默冲掉，没有 undo 通道 | 任何有价值改动必须先落在隔离分支/沙盒内提交，再考虑合并，禁止把它留在共享工作区过夜 |
+| **CoW vs worktree** | git worktree 共享 refs/index 锁且分支互斥，不能作为并发隔离；APFS `cp -cR` 秒级克隆 + 独立 `.git` 才是物理隔离 | 并发场景一律 CoW 沙盒；worktree 仅在同分支协作明确时使用 |
+| **污染的处置** | 已推送提交混入他人 WIP 时，改写历史/强推会破坏对方基线；正确做法是新增 commit 剥离范围并保留对方改动 | 禁止 force push；污染处置 = 范围剥离 + 原样保留 + 明确通知归属 |
+| **归属审计** | `git add <file>` 不校验 hunk 归属，同一文件有并行写入时肉眼不可靠 | 提交前 `git diff --cached` 逐 hunk 校对；提交后 `git diff main...HEAD` 做范围复核 |
+
+### 操作规范
+
+1. 任何非平凡改动先建 CoW 沙盒：`cp -cR <repo> ~/.sandboxes/<task-id>`（独立 `.git`，可随意 `reset --hard`/`clean -fd`），完成 push 后 `rm -rf` 清理，零 git residue；
+2. 一个工作区一个写者：发现他人在途改动时停手确认，不得"顺手提交"；
+3. 提交前审计：`git diff --cached` 逐 hunk 确认归属，尤其同一文件可能有并行编辑；
+4. 污染处置固定动作：剥离 commit（禁止 force push / 禁止 `reset --hard` 覆盖他人改动）+ 对方改动原样留在工作区 + 明确通知归属；
+5. 发布前在沙盒内干净 checkout 上复验（测试/编译通过）再 push；目标仓专属流程（如 xiyu `scripts/pr-create.sh` + pre-push gate）在沙盒内执行。
+
+### 验证命令 / 证据
+
+```bash
+# 1. CoW 沙盒（APFS 秒级，独立 .git）
+cp -cR /Users/user/HAFlow ~/.sandboxes/<task-id>
+git -C ~/.sandboxes/<task-id> checkout <branch> && git -C ~/.sandboxes/<task-id> status --short
+
+# 2. 提交范围审计（本案使用）
+git diff --cached                                  # 逐 hunk 归属
+git diff main...HEAD -- <file> | rg "外来讲号" || echo "no foreign hunks"
+git diff main...HEAD --stat
+
+# 3. 沙盒内复验后 push，最后清理
+python3 -m unittest <相关套件>
+rm -rf ~/.sandboxes/<task-id>
+```
+
+---
+
+## 45. 工作流多 Agent 协同收敛、双工位对抗审查与跨阶段 Agent 隔离
 
 ### 问题背景
 
@@ -2028,4 +2076,3 @@ pytest tests/test_software_development_v1_template.py -v
 # 4. 全仓自动化回归
 pytest
 ```
-
