@@ -165,6 +165,40 @@ class PlanStageDispatchTest(unittest.TestCase):
         plan = dd.plan_stage_dispatch("wf-1", _node(), tasks, "需求")
         self.assertEqual(plan["mode"], "dispatch")
 
+    def test_initial_dispatch_with_roles(self):
+        node = _node(
+            id="requirements",
+            label="2需求分析",
+            purpose="理解需求并形成可验收需求。",
+            agent_policy={
+                "max_agents": 2,
+                "roles": [
+                    {
+                        "name": "executor",
+                        "label": "主执行者",
+                        "goal": "梳理需求范围、业务规则与清晰可验收标准",
+                        "outputs": ["需求规格与验收标准"],
+                    },
+                    {
+                        "name": "challenger",
+                        "label": "对抗性质询者",
+                        "goal": "对抗性破防审查、挖掘隐式假设与潜在缺陷",
+                        "outputs": ["需求对抗审查与边界漏洞清单"],
+                    },
+                ],
+            },
+        )
+        plan = dd.plan_stage_dispatch("wf-1", node, [], "用户权限系统")
+        self.assertEqual(plan["mode"], "dispatch")
+        self.assertEqual(len(plan["specs"]), 2)
+        spec0, spec1 = plan["specs"]
+        self.assertEqual(spec0["task_id"], "wf-1-requirements-executor")
+        self.assertEqual(spec1["task_id"], "wf-1-requirements-challenger")
+        self.assertIn("需求规格与验收标准", spec0["acceptance"])
+        self.assertIn("需求对抗审查与边界漏洞清单", spec1["acceptance"])
+        self.assertIn("梳理需求范围", spec0["prompt"])
+        self.assertIn("对抗性破防审查", spec1["prompt"])
+
 
 class MergeNodePolicyTest(unittest.TestCase):
     POLICY = {
