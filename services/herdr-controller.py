@@ -1171,6 +1171,8 @@ def try_direct_stage_advance(item):
         f"tasks={','.join(launched)}"
     )
 
+    maybe_compact_coordinator(workflow_id, reason=f"stage_advance:{ready_id}")
+
     return True
 
 
@@ -1441,6 +1443,120 @@ def coordinator_status(workflow_id=None):
         )
         return "unknown"
 
+
+# ============================================================
+# 总指挥上下文卫生 & 效率纪律
+# ============================================================
+#
+# 背景(2026-09-17 复盘):wf-nexusarchive-0917-01 的总指挥会话上下文从
+# 94K 一路涨到 684K,后期单回合纯 LLM 生成 27-58min;该工作流的控制面
+# 事件全部串行等待这些长回合(累计 BUSY 2.35h)。阶段/fix-loop 边界压缩
+# 上下文,可把后续回合耗时拉回分钟级;效率纪律约束"越权重活"与
+# "决策后继续空转"。
+COORDINATOR_COMPACT_AGENTS = {"opencode", "claude"}
+
+COORDINATOR_DISCIPLINE = """
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+效率纪律(硬约束)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. 决策一旦落盘(herdr-task set ...),立即结束本回合;
+   禁止在决策后继续探索、验证或执行任何命令。
+2. 禁止运行重操作: herdr-task commit / integrate / cleanup、
+   全量测试、npm/mvn 构建等;交付集成由 Controller 自动完成,
+   你只做验收判定与必要修复指引。
+3. 只读核验优先: verify-baseline / verify-metrics / 读取产物文件;
+   禁止整段读取 Pane 全文。
+4. 若你判断当前上下文已明显过大,先执行 /compact 再继续本事件。
+""".strip()
+
+
+def coordinator_compact_enabled():
+    value = os.environ.get("HERDR_COORDINATOR_COMPACT", "1")
+    return value.strip().lower() not in ("0", "false", "off", "no")
+
+
+def coordinator_agent_kind(pane_id):
+    """pane 内 agent 种类(herdr agent get -> result.agent.agent)。"""
+    try:
+        output = subprocess.check_output(
+            ["herdr", "agent", "get", pane_id],
+            text=True
+        )
+        agent = (json.loads(output).get("result") or {}).get("agent") or {}
+        return agent.get("agent") or ""
+    except Exception:
+        return ""
+
+
+def maybe_compact_coordinator(workflow_id, reason="stage_advance"):
+    """阶段/fix-loop 边界给总指挥下发 /compact(有界等待,失败不阻断)。
+
+    仅对支持 /compact 的 agent kind 生效;总指挥忙时跳过(下个边界再补)。
+    这一调用把长工作流的上下文峰值压回可控区间,直接缩短后续回合耗时。
+    """
+    if not coordinator_compact_enabled():
+        return False
+
+    pane_id = coordinator_pane_for_workflow(workflow_id)
+    if not pane_id:
+        return False
+
+    kind = coordinator_agent_kind(pane_id)
+    if kind not in COORDINATOR_COMPACT_AGENTS:
+        print(
+            f"[COORDINATOR COMPACT SKIP] "
+            f"workflow={workflow_id} pane={pane_id} "
+            f"kind={kind or 'unknown'} reason={reason}"
+        )
+        return False
+
+    if coordinator_status(workflow_id) not in ("idle", "done"):
+        print(
+            f"[COORDINATOR COMPACT SKIP] "
+            f"workflow={workflow_id} pane={pane_id} "
+            f"busy reason={reason}"
+        )
+        return False
+
+    try:
+        result = subprocess.run(
+            [
+                "herdr",
+                "agent",
+                "prompt",
+                pane_id,
+                "/compact",
+                "--wait",
+                "--timeout",
+                "300000"
+            ],
+            text=True,
+            capture_output=True
+        )
+    except Exception as exc:
+        print(
+            f"[COORDINATOR COMPACT ERROR] "
+            f"workflow={workflow_id} pane={pane_id}: {exc}"
+        )
+        return False
+
+    if result.returncode == 0:
+        print(
+            f"[COORDINATOR COMPACT] "
+            f"workflow={workflow_id} pane={pane_id} "
+            f"kind={kind} reason={reason}"
+        )
+        return True
+
+    print(
+        f"[COORDINATOR COMPACT ERROR] "
+        f"workflow={workflow_id} pane={pane_id}: "
+        f"{result.stderr.strip() or result.stdout.strip()}"
+    )
+    return False
+
+
 def build_coordinator_message(task, event_type):
     workflow_id = task.get("workflow_id", "unknown")
     task_id = task["task_id"]
@@ -1488,6 +1604,8 @@ agent_status: blocked
 8. 不要推进阶段。
 
 blocked 只表示等待处理，不代表任务结束。
+
+{COORDINATOR_DISCIPLINE}
 """.strip()
 
     if event_type == "attention":
@@ -1516,6 +1634,8 @@ task_status: {task.get('status')}
    - 无法恢复 → set failed。
 3. 严禁让任务继续停留在 interrupted / paused。
 4. 不要创建新 Task，不要推进阶段。
+
+{COORDINATOR_DISCIPLINE}
 """.strip()
 
     if event_type == "done":
@@ -1579,6 +1699,8 @@ Agent 本轮执行已经结束。
 
 只有当前 Workflow 当前阶段所有必要 Task 都 completed，
 才能进入下一阶段。
+
+{COORDINATOR_DISCIPLINE}
 """.strip()
 
     return None
@@ -1755,6 +1877,8 @@ agent: {task.get('agent', 'unknown')}
    - rework
    - failed
 6. 不要只输出文字报告而不更新 Task Registry。
+
+{COORDINATOR_DISCIPLINE}
 """.strip()
 
     print(
@@ -2041,6 +2165,8 @@ Blocker 清单(blocked 结论与修复指引):
 
 如需再次修复,对旧 fix task 使用 --supersedes。
 派发完成后结束当前回合,后续推进交给 Controller。
+
+{COORDINATOR_DISCIPLINE}
 """.strip()
 
 
@@ -2100,6 +2226,11 @@ def _handle_fix_loop_item(item):
             f"workflow={workflow_id} "
             f"gate={gate_stage} "
             f"retry={retry_node}"
+        )
+
+        maybe_compact_coordinator(
+            workflow_id,
+            reason=f"fix_loop:{gate_stage}->{retry_node}",
         )
     else:
         print(
@@ -2376,6 +2507,8 @@ task_type:
 继续交给 Controller。
 
 不要等待用户提醒。
+
+{COORDINATOR_DISCIPLINE}
 """.strip()
 
                     result = subprocess.run(
@@ -2403,6 +2536,11 @@ task_type:
                             f"[STAGE ADVANCED] "
                             f"workflow={workflow_id} "
                             f"{stage} -> {next_stage}"
+                        )
+
+                        maybe_compact_coordinator(
+                            workflow_id,
+                            reason=f"stage_advance:{next_stage}",
                         )
                     else:
                         clear_stage_advance(

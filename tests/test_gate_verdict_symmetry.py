@@ -209,6 +209,8 @@ class DirectBlockedDepTest(unittest.TestCase):
                 "mark_stage_advance_notified",
                 side_effect=lambda wf, node: self.notified.append(node),
             ),
+            # 阶段边界 /compact 注入有独立契约测试;这里打桩。
+            patch.object(self.ctrl, "maybe_compact_coordinator"),
             patch.object(self.ctrl.subprocess, "run", side_effect=fake_run),
         ]
         for p in self.patchers:

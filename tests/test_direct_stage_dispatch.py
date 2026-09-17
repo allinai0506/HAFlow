@@ -406,6 +406,9 @@ class TryDirectStageAdvanceTest(unittest.TestCase):
                 "mark_stage_advance_notified",
                 side_effect=lambda wf, node: self.notified.append(node),
             ),
+            # 阶段边界的总指挥 /compact 注入有独立契约测试;
+            # 这里打桩,保证本组测试只观察派发行为。
+            patch.object(self.ctrl, "maybe_compact_coordinator"),
             patch.object(self.ctrl.subprocess, "run", side_effect=fake_run),
         ]
         for p in self.patchers:
@@ -434,6 +437,19 @@ class TryDirectStageAdvanceTest(unittest.TestCase):
         self.assertIn("test", cmd)
         self.assertIn("--agent", cmd)
         self.assertIn("auto", cmd)
+
+    def test_direct_advance_triggers_coordinator_compaction(self):
+        # 2026-09-17 效率优化:阶段推进成功即触发总指挥 /compact 注入
+        # (上下文卫生,压长回合耗时)。
+        with patch.object(
+            self.ctrl, "maybe_compact_coordinator"
+        ) as compact_mock:
+            result = self.ctrl.try_direct_stage_advance(self._item())
+
+        self.assertTrue(result)
+        compact_mock.assert_called_once_with(
+            "wf-1", reason="stage_advance:test"
+        )
 
     def test_launch_timeout_is_bounded_and_falls_back(self):
         seen_timeouts = []

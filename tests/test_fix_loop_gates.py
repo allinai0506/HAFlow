@@ -152,6 +152,14 @@ class BuildFixLoopMessageTest(unittest.TestCase):
         self.assertIn("注意:已达 fix-loop 上限(3/3)", message)
         self.assertIn("先向用户请示", message)
 
+    def test_contains_efficiency_discipline(self):
+        # 2026-09-17 效率优化:fix-loop 事件同样携带效率纪律。
+        message = _ctl.build_fix_loop_message(self._item(), "nexusarchive")
+
+        self.assertIn("效率纪律", message)
+        self.assertIn("立即结束本回合", message)
+        self.assertIn("/compact", message)
+
 
 class GateVerdictTest(unittest.TestCase):
     def setUp(self):

@@ -2803,3 +2803,77 @@ pytest -q
 
 ---
 
+
+## 66. 总指挥回合成本治理：上下文卫生 + 效率纪律（684K 上下文 58 分钟回合的账本）
+
+### 问题背景
+
+2026-09-17 对 `wf-nexusarchive-0917-01` 总指挥会话做了全量账本还原
+（opencode session db 可按 prompt 切回合、按 message tokens 取上下文）：
+
+1. 会话跨度 7.91h，共收到 30 个 prompt（23 个 Controller 事件 + 7 个人工/控制台指令）；
+   总指挥活跃（LLM + 工具）**3.36h**，按 prompt 分组的回合累计 6.31h（含事件空窗）；
+2. 上下文**单调增长 94K → 684K**，全程无压缩机制；
+3. 后期回合耗时几乎全由 LLM 生成构成：**584K 上下文时单回合 LLM 生成 58.3min**、
+   520K 时 23.1min、684K 时 20.4min；而早期（<200K）回合普遍 0.2-4min；
+4. 单回合工具调用最多 55 次；最慢工具是**重复运行 `herdr-task commit` 重门禁**
+   （14.6/13.0/6.8/2.4min）与自写轮询脚本（10.2/9.2min）——即总指挥在替 Controller
+   做终化工作（当时终化重试护栏尚未上线，属人工救场，但仍暴露职责越界）；
+5. 控制面后果：该工作流所有事件串行等待总指挥（`[COORDINATOR BUSY]` 187 次、
+   累计 2.35h、最长 901s）——**不是全局吞吐问题，而是单工作流尾延迟被上下文拖爆**。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| **单会话上下文只增不减** | LLM 控制面的回合成本是上下文规模的函数；不做治理，长工作流必然尾部爆炸（越忙越慢的正反馈） | 在**阶段边界与 fix-loop 边界**对总指挥注入 `/compact`（上下文卫生），把后续回合耗时拉回分钟级；对 opencode / claude 均有效，env 可关 |
+| **控制面职责无硬边界** | 事件模板只写"要做什么"，没有"不许做什么"；LLM 会自然膨胀到运行重门禁、做人工救场 | 所有事件模板追加**效率纪律**硬约束：决策落盘即结束回合；禁止 commit/integrate/cleanup/全量测试（Controller 已自动化）；只读核验优先 |
+| **回合成本缺可观测口径** | 没有量化就看不见控制面开销，优化无从下手 | 复盘口径：opencode session db 按 prompt 切回合 + message tokens 取上下文；运行时看 `[COORDINATOR COMPACT]` 与 `[COORDINATOR BUSY]` 累计值 |
+
+### 操作规范（已固化到 `services/herdr-controller.py`）
+
+1. **上下文卫生 (`maybe_compact_coordinator`)**：
+   - 触发点：直接派发阶段推进（`[STAGE ADVANCED DIRECT]`）、总指挥阶段推进
+     （`[STAGE ADVANCED]`）、fix-loop 派发（`[FIX LOOP NOTIFIED]`）三处边界；
+   - 安全门：`HERDR_COORDINATOR_COMPACT=0` 整体关闭；仅对 `opencode`/`claude`
+     kind 注入（`herdr agent get -> result.agent.agent` 探测）；总指挥非
+     `idle`/`done` 时跳过（下个边界再补）；`--wait --timeout 300000` 有界，
+     失败只记日志、绝不阻断阶段推进；
+   - 日志契约：`[COORDINATOR COMPACT]` / `[COORDINATOR COMPACT SKIP]` /
+     `[COORDINATOR COMPACT ERROR]`。
+2. **效率纪律 (`COORDINATOR_DISCIPLINE`)**：注入 done / blocked / attention /
+   retry / fix-loop / stage-advance 全部事件模板（落盘即停、禁止重操作、
+   只读核验优先、上下文过大先 `/compact`）。
+3. **回归门禁**：纪律注入 2 组用例 + compact 5 例（env 关闭 / kind 不支持 /
+   忙跳过 / 成功注入 / 失败不阻断）+ 边界触发契约 1 例；同类问题复发时优先扩这组。
+
+### 验证命令 / 关联证据
+
+```bash
+# 1. compact 安全门与注入契约
+pytest tests/test_liveness_guard.py::CoordinatorCompactTest -q
+# 期望: 5 passed
+
+# 2. 边界触发 + 纪律注入
+pytest tests/test_direct_stage_dispatch.py -q -k "compaction"
+pytest tests/test_fix_loop_gates.py -q -k "discipline"
+pytest tests/test_liveness_guard.py -q -k "efficiency"
+
+# 3. 全量回归(不得有回退)
+pytest -q
+# 期望: 628 passed, 44 subtests passed
+
+# 4. 账本口径(复盘用,只读)
+#    session ses_f5242020dffehrpK6C4vhIpazg @ ~/.local/share/opencode/opencode.db
+#    30 prompts / 上下文 94K->684K / 单回合 LLM 最长 58.3min / 回合累计 6.31h
+```
+
+### 相关文档 / 关联证据
+
+- Wiki：[`wiki/architecture.md`](../../wiki/architecture.md) §2.1
+- 新增测试：`tests/test_liveness_guard.py#CoordinatorCompactTest`、
+  `tests/test_direct_stage_dispatch.py#test_direct_advance_triggers_coordinator_compaction`、
+  `tests/test_fix_loop_gates.py#test_contains_efficiency_discipline`
+- 现场日志契约：controller.out.log 的 `[COORDINATOR COMPACT]` / `[COORDINATOR BUSY]`
+
+---
