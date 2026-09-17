@@ -2408,6 +2408,14 @@ task_type:
     try:
         last_busy_log = 0
         wait_started = time.time()
+
+        # 规则化验收快路径:非门禁节点铁证齐备直接 completed,
+        # 不再排队等总指挥回合(门禁节点与证据不足者不受影响)。
+        if event_type == "done" and try_auto_accept(task_id):
+            attention_clear(key)
+            finalize_completed_task(task_id)
+            return
+
         while True:
             task = get_task(task_id)
 
@@ -2568,17 +2576,97 @@ task_type:
             queued_events.discard(key)
 
 
+# ============================================================
+# 规则化验收 (auto-accept) — 非门禁节点免除总指挥 LLM 回合
+# ============================================================
 
-# ============================================================
-# Agent events
-# ============================================================
+# 背景(lessons §61)：agent_done 后的总指挥验收回合实测占用 2.6h/8h。非门禁
+# 节点(需求/计划/实现)的验收标准本就是"产物落盘 + 变更受控"，可由
+# verify-baseline 铁证直接判定；门禁节点(test/review/wrapup)保留裁决语义。
+def auto_accept_enabled():
+    value = os.environ.get("HERDR_AUTO_ACCEPT", "1")
+    return value.strip().lower() not in ("0", "false", "off", "no")
+
+
+def node_is_gate(workflow_id, node_id):
+    """节点是否带门禁配置(含 GATE_DEFAULTS 的 test/review/wrapup)。
+
+    配置不可判定时保守返回 True(保留总指挥路径),绝不因配置异常
+    误吞门禁裁决。
+    """
+    try:
+        wf_cfg = workflow_config_for(workflow_id) or {}
+        nodes_by_id = {n["id"]: n for n in wf_cfg.get("nodes", [])}
+        return resolve_gate_config(nodes_by_id.get(node_id), node_id) is not None
+    except Exception:
+        return True
+
+
+def task_changes_recorded(task):
+    """verify-baseline 铁证：至少一个受控文件变更(TASK_CHANGED)。"""
+    task_id = task.get("task_id")
+    if not task_id:
+        return False
+    try:
+        result = subprocess.run(
+            [TASK_MANAGER, "verify-baseline", task_id],
+            text=True,
+            capture_output=True,
+            timeout=60,
+        )
+    except Exception:
+        return False
+
+    output = (result.stdout or "") + "\n" + (result.stderr or "")
+    for line in output.splitlines():
+        if line.startswith("HERDR_BASELINE_RESULT="):
+            try:
+                payload = json.loads(line.split("=", 1)[1])
+            except (ValueError, IndexError):
+                continue
+            return bool(payload.get("changes"))
+    return "TASK_CHANGED" in output
+
+
+def try_auto_accept(task_id):
+    """非门禁节点规则化验收：变更铁证齐备即 completed，免总指挥回合。
+
+    保守口径：只接管 agent_done 的非门禁节点；产物/变更证据不足、
+    门禁节点、被显式关闭(HERDR_AUTO_ACCEPT=0)时返回 False，走原路径。
+    """
+    if not auto_accept_enabled():
+        return False
+
+    task = get_task(task_id)
+    if not task or task.get("status") != "agent_done":
+        return False
+
+    workflow_id = task.get("workflow_id")
+    node_id = task.get("node") or task.get("stage")
+    if not workflow_id or not node_id:
+        return False
+
+    if node_is_gate(workflow_id, node_id):
+        return False
+
+    if not task_changes_recorded(task):
+        return False
+
+    if not set_task_status(task_id, "completed"):
+        return False
+
+    print(
+        f"[AUTO ACCEPT] task={task_id} "
+        f"node={node_id} baseline=TASK_CHANGED -> completed"
+    )
+    return True
+
 
 def check_task_deliverables_ready(task):
     """Check whether deliverables required by the task or node are present and non-empty."""
     clone_path = task.get("clone_path")
     if not clone_path or not os.path.exists(clone_path):
         return False
-
     wf_id = task.get("workflow_id")
     node_id = task.get("node") or task.get("stage")
     required_outputs = []

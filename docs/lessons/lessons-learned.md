@@ -2418,3 +2418,76 @@ pytest -q
 
 ---
 
+## 61. 补派集合无谱系去重导致指数放大 + agent_done 验收对单总指挥 LLM 的强依赖
+
+### 问题背景
+
+同日同一工作流（`wf-nexusarchive-0917-01`）在 §60 修复上线后暴露出第二组结构性浪费，
+两者共同解释了 8 小时里"只有 ~3.2h 在真实干活"的账：
+
+1. **重复补派指数放大**：fix-loop 第 2 轮触发阶段推进后，Controller 一次性派出
+   `test-auto-r4`（claude）与 `test-auto-r5`（grok）两个重复测试任务，日志铁证
+   `[STAGE ADVANCED DIRECT] node=test tasks=...-r4,...-r5`。根因：`plan_stage_dispatch`
+   的补派集合 = 全节点 `superseded 且无 superseded_by` 的历史任务——直接派发补派时
+   从不回写 `superseded_by`，于是 r2、r3 永远留在集合里；第 1 轮 awaiting={r2} 派 1 个，
+   第 2 轮 awaiting={r2,r3} 派 2 个，第 3 轮就会派 4 个。单工位（`parallel: false`,
+   `max_agents: 1`）test 节点因此并发双跑，且两个任务各自触发一轮总指挥验收。
+2. **agent_done 验收强依赖单总指挥 LLM**：任务完成后必须等总指挥写 verdict/状态，
+   而总指挥是每工作流一个 Pane 的串行 LLM。状态史聚合显示验收等待累计 **~2.6h/8h**
+   （requirements executor agent_done 74min、implementation 42min、test 33min），
+   且总指挥的长回合（566K tokens 上下文做深度核查）会阻塞排在后面的门禁事件投递
+   （`[COORDINATOR BUSY] waited=762s+`）。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| **补派集合无谱系概念** | "被作废的任务"是集合语义，但任务有替换谱系（x→x-r2→x-r3）；不按谱系去重，历史项会被反复补派，随轮次指数放大 | 补派必须按谱系取"最新一发"；谱系内只要还有非 superseded 成员（在跑/已落定）就视为已有代表，不再补派 |
+| **规划器只看 awaiting 不看 active** | 单工位节点的并发红线不能只靠模板声明，规划器必须持全局视图：awaiting 与 active 在同一谱系里互斥 | 谱系判定必须同时读取同谱系全部状态；人工手动 supersede 最新一发时，同谱系在跑成员仍要能阻止再补派 |
+| **非门禁节点的验收被 LLM 化** | 需求/计划/实现的验收标准是"产物落盘 + 变更受控"，`verify-baseline` 铁证已足够；让 LLM 做橡皮图章既慢又挤占门禁事件的投递通道 | 非门禁节点规则化验收（TASK_CHANGED → completed）；门禁节点（test/review/wrapup）与证据不足者保留总指挥裁决 |
+| **配置异常可能误吞门禁** | 自动验收若在配置读取异常时 fail-open 会绕过门禁 | 配置不可判定时保守视为门禁（fail-closed），绝不自动翻案 |
+
+### 操作规范（已固化到 `herdr/direct_dispatch.py`、`services/herdr-controller.py`）
+
+1. **谱系补派去重 (`herdr/direct_dispatch.py#lineage_redispatch_candidates`)**：
+   - 按 `lineage_key`（`x`→(x,1)，`x-r2`→(x,2)）分组；
+   - 组内存在任一非 superseded 成员 → 跳过该谱系；
+   - 全组已作废时取序号最新一发（且无 `superseded_by`）作为唯一补派对象。
+2. **规则化验收 (`services/herdr-controller.py#try_auto_accept`)**：
+   - 仅对 `agent_done` 的非门禁节点生效，`verify-baseline` 解析
+     `HERDR_BASELINE_RESULT.changes` 非空才置 `completed`；
+   - 门禁节点、`BASELINE_MATCH`、配置不可判定、`HERDR_AUTO_ACCEPT=0` 一律回落总指挥；
+   - 快路径在 `_process_coordinator_item` 的任何 coordinator prompt 之前执行。
+3. **回归门禁**：谱系去重与自动验收均有负向单测（活跃成员阻止补派、门禁不自动过、
+   证据不足回落、环境开关），同类问题升级时优先扩这两组用例。
+
+### 验证命令 / 关联证据
+
+```bash
+# 1. 谱系去重(含事故复现:r2/r3 双补派 → 只取最新一发)
+pytest tests/test_direct_stage_dispatch.py -q
+# 期望: 34 passed, 23 subtests passed
+
+# 2. 规则化验收(门禁不自动过 / TASK_CHANGED 才完成 / 开关生效)
+pytest tests/test_auto_acceptance.py -q
+# 期望: 9 passed, 5 subtests passed
+
+# 3. 全量回归
+pytest -q
+# 期望: 591 passed, 40 subtests passed
+
+# 4. 现场复现(用真实 tasks.json 模拟 test 节点决策)
+#    r4 working + r5 superseded 状态下:
+#    mode=wait | reason=node has active tasks | specs=[]   ← 旧逻辑会再派 3 个重复任务
+```
+
+### 相关文档 / 关联证据
+
+- 日志铁证：`[STAGE ADVANCED DIRECT] workflow=wf-nexusarchive-0917-01 node=test tasks=...r4,...r5`
+- 现场处置：`herdr-task supersede wf-nexusarchive-0917-01-test-auto-r5 --reason "duplicate redispatch..."`
+- 新增测试：`tests/test_auto_acceptance.py`、`tests/test_direct_stage_dispatch.py`（新增 4 例）
+- Wiki：[`wiki/dag-workflow-engine.md`](../../wiki/dag-workflow-engine.md) §4.3、
+  [`wiki/architecture.md`](../../wiki/architecture.md) §2.1
+
+---
+

@@ -76,6 +76,18 @@ Evidence:
   3. **决策等待校准**：`wait_for_coordinator_decision` 默认预算 30s → 180s（`HERDR_COORDINATOR_DECISION_TIMEOUT`），超时不再立即重试，写入 attention（`decision_timeout`）按 `HERDR_ATTENTION_RETRY_INTERVAL` 退避；
   4. **提交门禁拆分**：Git 集成任务的 commit 由 Controller 下发 `HERDR_DEFER_HEAVY_TESTS=1`（目标仓 hook 识别该显式开关，不做仓库来源猜测，人类/Agent 手工提交仍走全量门禁），全量测试交给 workflow test 节点与 pre-push 门禁；
   5. **唤醒守卫**：存在活跃 workflow 时 Controller 持有 `caffeinate -i -s -w <pid>`（`[AWAKE GUARD]`），workflow 清零或进程退出自动释放，`HERDR_AWAKE_GUARD=0` 关闭。
+- `FACT` **规则化验收 auto-accept（2026-09-17 引入，lessons §61）**:
+  非门禁节点（requirements / plan / implementation 等无 gate 配置的节点）的
+  `done` 事件不再必须排队等总指挥 LLM 回合：`herdr-task verify-baseline` 报告
+  `TASK_CHANGED`（至少一个受控文件变更）即直接置 `completed` 并走既有
+  finalize 链路（`[AUTO ACCEPT]`）。门禁节点（test/review/wrapup）与证据不足
+  （`BASELINE_MATCH`）、配置不可判定的场景一律回落总指挥，绝不自动翻案；
+  `HERDR_AUTO_ACCEPT=0` 整体关闭。背景：agent_done→completed 的总指挥验收
+  等待实测占用 2.6h/8h，且其长回合会阻塞排在后面的门禁事件投递。
+- `FACT` **被作废子集补派按谱系去重（2026-09-17 引入，lessons §61）**:
+  `herdr/direct_dispatch.py#lineage_redispatch_candidates` 保证同一替换谱系
+  （`x` / `x-r2` / …）最多只补派一发；旧逻辑会把历史作废任务反复补派，
+  fix-loop 每轮 2→4→8 放大并发重复任务（[[dag-workflow-engine]] §4.3）。
 - `FACT` **基础设施失败自动补派（2026-09-17 引入，lessons §60）**:
   registry watcher 对 `failed` 任务调用纯选择器 `herdr/liveness.py#select_infra_failures_for_recovery`
   （仅 `dispatch_delivery_fuse` / `agent_process_crash`，节点内无活跃任务，谱系失败次数 <
