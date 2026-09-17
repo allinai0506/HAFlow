@@ -105,6 +105,12 @@ Evidence:
   `HERDR_FINALIZE_RETRY_MAX`（默认 5）封顶，耗尽打印 `[FINALIZE RETRY EXHAUSTED]`
   并升级人工。背景：commit 门禁瞬时失败（flaky gate）曾让 `completed` 任务
   成为无重试死区，总指挥在一个 577K tokens 回合里手工重试 5 次、阻塞 65 分钟。
+- `FACT` **close 等待 git 终化（2026-09-17 引入，lessons §65）**:
+  `git_finalize_pending_tasks` 检查同 workflow 的 `completed`/`committed` + git 任务；
+  命中则 `maybe_close_completed_workflow` 打印一次 `[CLOSE DEFERRED]` 并推迟，
+  `close_workflow` CLI 同样 `[CLOSE ABORT]`。背景：wrapup 收官时后台 close 线程
+  把 `completed` 任务抢先推进 `cleaned`，在跑的 `herdr-task commit` 子进程撞
+  `Illegal transition: cleaned -> committed`，交付分支落不进集成链路。
 - `FACT` **基础设施失败自动补派（2026-09-17 引入，lessons §60）**:
   registry watcher 对 `failed` 任务调用纯选择器 `herdr/liveness.py#select_infra_failures_for_recovery`
   （仅 `dispatch_delivery_fuse` / `agent_process_crash`，节点内无活跃任务，谱系失败次数 <

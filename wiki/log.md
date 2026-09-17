@@ -697,3 +697,10 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
   2. **`services/herdr-controller.py`**：`_gate_verdict_file_candidates` 状态目录优先、clone 旧契约路径兼容回退（过渡期不丢信号）；
   3. **`bin/herdr-task`**：`INTERNAL_UNTRACKED_EXACT/PREFIXES` 新增 `.herdr` / `.herdr/`——commit 与 verify-baseline 均不再计入该目录（跨仓兜底防线）。
 - **验证**：新增/更新用例（结论文件路径与契约注入、状态目录读取、clone 兜底兼容、内部过滤），全量 614 项测试 PASS；现场兼容性实测：历史 wrapup 任务的状态目录为空时仍能从 clone 兜底读到 `pass`。同步更新 [[architecture]] §2.1、[[dag-workflow-engine]] §10 与 lessons §62 操作规范。
+
+## [2026-09-17] fix | 自动 close 等待 git 终化：收官最后一公里不再丢交付分支
+- **背景**：`wf-nexusarchive-0917-01` 收官（20:35-20:38）三方竞态：wrapup 判 `completed` 后，后台 close 线程把任务抢先推进 `cleanup_ready -> cleaned`，而主线程的 `herdr-task commit` 子进程（目标仓重门禁约 2m50s）仍在途；git commit 已成功（`4872b1a0`）却撞 `Illegal transition: cleaned -> committed`，`[COMMIT ERROR]` 退出，交付分支落不进集成链路（该 commit 还带入 `.herdr/gate-verdict.json`，由 §62 修订与目标仓 `6c9e48cf` 兜底清洗）。
+- **改动与实现**：
+  1. **`services/herdr-controller.py`**：新增 `git_finalize_pending_tasks(workflow_id)`（`completed`/`committed` + `integration_mode=git`）；`maybe_close_completed_workflow` 命中时打印一次 `[CLOSE DEFERRED]`（`_close_deferred_logged` 防刷屏）并跳过本轮，终化有界重试收敛后 sweep 自然放行；
+  2. **`bin/herdr-task#close_workflow`**：`TEARDOWN_BLOCKING_STATUSES` 之后追加 unsettled-git 闸门，`[CLOSE ABORT]`（exit 2）并打印处置指引（`commit` / `integrate` / `supersede`）；`completed+none` 与已 `cleaned` 任务不误伤，`dry_run` 同样闸门。
+- **验证**：Controller 侧 `AutoCloseGitFinalizeDeferralTest` 4 例 + CLI 侧 `TestCloseWorkflow` 2 例（RED 先行：无修复时 1+4 failed），全量 620 项测试 PASS；controller 已 kickstart 部署。沉淀教训 §65，更新 [[architecture]] §2.1 与 [[dag-workflow-engine]] §12。

@@ -9,6 +9,7 @@ import queue
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -847,6 +848,68 @@ class FinalizeAlreadyCommittedTaskTest(unittest.TestCase):
         self.assertNotIn("commit", subcmds)
         self.assertIn("integrate", subcmds)
         self.assertIn("cleanup", subcmds)
+
+
+class AutoCloseGitFinalizeDeferralTest(unittest.TestCase):
+    """自动 close 不得与 git 终化(commit/integrate)抢跑。
+
+    回归背景:2026-09-17 wf-nexusarchive-0917-01 wrapup 在 `herdr-task
+    commit` 子进程在途时被 close 抢先推进到 cleaned,commit 随后撞
+    'cleaned -> committed' 非法转移,交付分支落不进集成链路。
+    """
+
+    def setUp(self):
+        _ctl._workflow_close_inflight.discard("wf-1")
+        _ctl._close_deferred_logged.discard("wf-1")
+
+    def _invoke(self, tasks):
+        with patch.object(_ctl, "load_tasks", return_value=tasks), \
+             patch.object(
+                 _ctl, "_workflow_entry",
+                 return_value={"status": "in_progress"},
+             ), \
+             patch.object(
+                 _ctl.liveness, "workflow_is_foreign",
+                 return_value=False,
+             ), \
+             patch.object(
+                 _ctl.subprocess, "run",
+                 side_effect=lambda *a, **k: _resp(0),
+             ) as run_mock:
+            _ctl.maybe_close_completed_workflow("wf-1")
+            time.sleep(0.2)
+        return run_mock
+
+    def test_close_deferred_while_completed_git_task_pending(self):
+        run_mock = self._invoke([
+            _task("wrap", status="completed", stage="wrapup",
+                  integration_mode="git"),
+        ])
+        run_mock.assert_not_called()
+        self.assertNotIn("wf-1", _ctl._workflow_close_inflight)
+        self.assertIn("wf-1", _ctl._close_deferred_logged)
+
+    def test_close_deferred_while_committed_git_task_pending(self):
+        run_mock = self._invoke([
+            _task("impl", status="committed", stage="implementation",
+                  integration_mode="git"),
+        ])
+        run_mock.assert_not_called()
+
+    def test_close_proceeds_when_git_finalize_settled(self):
+        run_mock = self._invoke([
+            _task("impl", status="cleaned", stage="implementation",
+                  integration_mode="git"),
+        ])
+        self.assertTrue(run_mock.called)
+
+    def test_close_proceeds_for_completed_docs_task(self):
+        # 非 git 的 completed 任务仍按既有路径物理收尾,不被闸门误伤。
+        run_mock = self._invoke([
+            _task("docs", status="completed", stage="wrapup",
+                  integration_mode="none"),
+        ])
+        self.assertTrue(run_mock.called)
 
 
 if __name__ == "__main__":

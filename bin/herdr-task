@@ -2968,6 +2968,31 @@ def close_workflow(
         )
         sys.exit(2)
 
+    # completed/committed 且 git 集成的任务尚未走完 commit/integrate 管线;
+    # 物理收尾会把它们直接推进到 cleaned,在跑的 git 子进程随后撞
+    # 'cleaned -> committed' 非法转移,交付分支落不进集成链路
+    # (2026-09-17 wf-nexusarchive-0917-01 wrapup 实测)。
+    unsettled_git = [
+        t["task_id"] for t in tasks
+        if t.get("status") in ("completed", "committed")
+        and (t.get("integration_mode") or "none") == "git"
+    ]
+    if unsettled_git:
+        print(
+            "[CLOSE ABORT] workflow has git tasks awaiting finalize "
+            "(commit/integrate not settled): "
+            + ", ".join(unsettled_git)
+        )
+        print(
+            "  等待 Controller 终化重试收敛;或手工收口: "
+            "herdr-task commit <task_id>(completed)/ "
+            "herdr-task integrate <task_id>(committed);"
+        )
+        print(
+            "  确要丢弃交付物时: herdr-task supersede <task_id> --reason ..."
+        )
+        sys.exit(2)
+
     # 2. Acquire exclusive closing ownership via State Transition Gateway to block concurrent transitions
     if not dry_run and entry:
         from herdr import kernel

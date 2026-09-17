@@ -359,6 +359,41 @@ class TestCloseWorkflow(FinalizeTestBase):
         self.assertEqual(
             self._read_workflows()["wf-test"].get("status"), "running")
 
+    def test_blocks_on_unsettled_git_finalize(self):
+        # completed/committed 的 git 任务尚未走完 commit/integrate:
+        # close 抢先清领会撞 'cleaned -> committed' 非法转移。
+        tasks = [
+            self._mk_task("t-done", status="completed",
+                          integration_mode="git"),
+            self._mk_task("t-cm", status="committed",
+                          integration_mode="git"),
+        ]
+        self._write_tasks(tasks)
+        with self._patch_herdr():
+            with self.assertRaises(SystemExit) as ctx:
+                _ht.close_workflow("wf-test")
+        self.assertEqual(ctx.exception.code, 2)
+        self._assert_no_herdr_calls()
+        self.assertEqual(
+            self._read_workflows()["wf-test"].get("status"), "running")
+
+    def test_unsettled_git_check_ignores_non_git_and_settled(self):
+        # 不误伤:completed+none 仍按既有路径推进 cleaned;
+        # cleaned+git 不受闸门影响。
+        tasks = [
+            self._mk_task("t-c", status="completed",
+                          integration_mode="none"),
+            self._mk_task("t-git-ok", status="cleaned",
+                          integration_mode="git",
+                          integration_ref="refs/herdr/tasks/t-git-ok"),
+        ]
+        self._write_tasks(tasks)
+        with self._patch_herdr():
+            report = _ht.close_workflow("wf-test")
+        by_id = {r["task_id"]: r for r in report["tasks"]}
+        self.assertEqual(by_id["t-c"]["status"], "cleaned")
+        self.assertEqual(by_id["t-git-ok"]["status"], "cleaned")
+
     def test_full_close_retains_failed_and_never_touches_coordinator(self):
         tasks = [
             self._mk_task("t-git", status="cleaned",
