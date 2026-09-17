@@ -78,6 +78,22 @@ def merge_node_policy(node, policy):
     return merged
 
 
+def classify_dispatch(node):
+    if node.get("node_type", "agent") != "agent":
+        return "native"
+    policy = node.get("agent_policy") or node.get("worker_policy") or {}
+    if not isinstance(policy, dict):
+        return "dynamic"
+    roles = policy.get("roles") or []
+    if isinstance(roles, list) and any(
+        isinstance(role, dict) and role.get("name") for role in roles
+    ):
+        return "static_multi"
+    if policy.get("max_agents", 1) == 1 and not node.get("parallel", False):
+        return "static_single"
+    return "dynamic"
+
+
 def normalize_node(node):
     """节点模板 -> 决策所需的稳定结构；缺少 id 时返回 None。"""
     if not isinstance(node, dict):
@@ -260,6 +276,10 @@ def plan_stage_dispatch(
     if not normalized:
         return {"mode": "fallback", "reason": "node config missing", "specs": []}
 
+    dispatch_kind = classify_dispatch(node)
+    if dispatch_kind == "native":
+        return {"mode": "fallback", "reason": "non-agent node", "specs": []}
+
     if not normalized["purpose"]:
         return {
             "mode": "fallback",
@@ -326,6 +346,9 @@ def plan_stage_dispatch(
             "reason": "node has active tasks",
             "specs": [],
         }
+
+    if dispatch_kind == "dynamic":
+        return {"mode": "fallback", "reason": "dynamic node requires planning", "specs": []}
 
     if not (requirement or "").strip():
         return {
