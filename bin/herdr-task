@@ -54,7 +54,7 @@ except ImportError:
 
 TASKS_FILE = os.environ.get("TASKS_FILE") or os.path.expanduser("~/.herdr-controller/tasks.json")
 WORKFLOW_FILE = os.environ.get("WORKFLOW_FILE") or os.path.expanduser("~/.herdr-controller/workflow.json")
-DEFAULT_AGENT_LABELS = ["opencode", "codex", "qodercli", "claude", "agy", "pi", "grok"]
+DEFAULT_AGENT_LABELS = ["opencode", "codex", "qodercli", "claude", "agy", "pi", "grok", "kimi"]
 # 初次 prompt 投递必须有界:agent 无响应时不得永久阻塞 launch,
 # 超时后走既有 marker 校验 + send-text fallback。
 PROMPT_DELIVERY_TIMEOUT = 120

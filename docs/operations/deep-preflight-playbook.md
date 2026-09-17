@@ -28,6 +28,7 @@
 | `agy` | CLI 简短交互 (`agy --print "output READY..."`) | 40s | 进程返回 0 且包含 `READY` |
 | `pi` | 非交互模式 (`pi --print --no-session "READY..."`) | 40s | 进程返回 0 且包含 `READY` |
 | `grok` | 单回合模式 (`grok -p "READY..."`) | 40s | 进程返回 0 且包含 `READY` |
+| `kimi` | 单回合模式 (`kimi -p "READY..."`) | 40s | 进程返回 0 且包含 `READY` |
 
 > 校准依据（2026-09-15 实测）：`claude --print` 冷启动一次 36.9s 成功、另一次 60s 仍无输出，
 > 统一 35s 阈值会把健康但慢的执行者稳定误判为 TIMEOUT，故 claude 单独 90s + 超时重试。

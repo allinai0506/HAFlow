@@ -750,7 +750,7 @@ def main():
     run_cmd.add_argument("--workflow-id")
     run_cmd.add_argument("--project", default=None)
     run_cmd.add_argument("--title", default=None, help="需求简要标题（可选；留空时自动根据需求生成）")
-    run_cmd.add_argument("--agent", default="auto", choices=["auto", "opencode", "codex", "claude", "qodercli", "agy", "pi", "grok"])
+    run_cmd.add_argument("--agent", default="auto", choices=["auto", "opencode", "codex", "claude", "qodercli", "agy", "pi", "grok", "kimi"])
     run_cmd.add_argument("--template", default="software-development-v1")
     run_cmd.add_argument("--force", action="store_true")
 

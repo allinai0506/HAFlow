@@ -17,7 +17,8 @@ Architecture:
                 ├── QoderAdapter
                 ├── AgyAdapter
                 ├── PiAdapter
-                └── GrokAdapter
+                ├── GrokAdapter
+                └── KimiAdapter
 
 The current concrete steering implementation (TTYAgentAdapter and subclasses) is
 explicitly labelled "TTY-level steering prototype" — not a universal agent
@@ -469,6 +470,19 @@ class GrokAdapter(TTYAgentAdapter):
     )
 
 
+class KimiAdapter(TTYAgentAdapter):
+    """Adapter for Kimi Code CLI."""
+
+    name = "kimi"
+    capabilities = AgentCapability(
+        supports_interrupt=True,
+        supports_soft_steer=True,
+        supports_resume=True,
+        supports_prompt_injection=True,
+        protocol_level="tty_prototype",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Adapter registry
 # ---------------------------------------------------------------------------
@@ -482,12 +496,15 @@ _ADAPTER_REGISTRY: Dict[str, AgentAdapter] = {
     "agy": AgyAdapter(),
     "pi": PiAdapter(),
     "grok": GrokAdapter(),
+    "kimi": KimiAdapter(),
 }
 
 _ALIASES: Dict[str, str] = {
     "qoder": "qodercli",
     "qodercn": "qodercli",
     "grokcli": "grok",
+    "kimi-code": "kimi",
+    "kimicli": "kimi",
 }
 
 _UNKNOWN_ADAPTER = UnknownAgentAdapter()

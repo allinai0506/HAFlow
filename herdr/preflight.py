@@ -17,7 +17,7 @@ ROOT = HOME / ".herdr-controller"
 POOLS = ROOT / "agent-pools.json"
 PROJECTS = ROOT / "projects.json"
 
-KNOWN_AGENTS = ["opencode", "codex", "claude", "qodercli", "agy", "pi", "grok"]
+KNOWN_AGENTS = ["opencode", "codex", "claude", "qodercli", "agy", "pi", "grok", "kimi"]
 
 AUTH_HINTS = {
     "codex": [HOME / ".codex" / "auth.json"],
@@ -27,6 +27,7 @@ AUTH_HINTS = {
     "opencode": [HOME / ".config" / "opencode"],
     "qodercli": [HOME / ".qoder-cn"],
     "agy": [],
+    "kimi": [HOME / ".kimi-code" / "credentials" / "kimi-code.json", HOME / ".kimi-code" / "config.toml"],
 }
 
 VERSION_ARGS = {
@@ -37,6 +38,7 @@ VERSION_ARGS = {
     "agy": ["--version"],
     "pi": ["--version"],
     "grok": ["--version"],
+    "kimi": ["--version"],
 }
 
 def load_json(path, default):

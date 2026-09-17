@@ -21,6 +21,15 @@ Hardened HAFlow execution kernel when integrated with external Agent OS / Task O
 - Added `--permission-mode bypassPermissions`, `--no-session-persistence`, and closed stdin with EOF in `herdr/deep_preflight.py` to eliminate interactive permission hangs on Claude Code CLI.
 - Registered `agency-agents` as an official HAFlow workspace project (`agency-agents-575746af`, workspace `wH`, coordinator pane `wH:p1`).
 - Captured comprehensive cross-module lessons in `docs/lessons/lessons-learned.md` §59. Full suite: 531 passed.
+## [2026-09-16] feat | Full-chain scheduling & health probe support for Kimi Code CLI
+Integrated Kimi Code CLI (`kimi`) as a first-class supported agent across HAFlow:
+- Added `KimiAdapter` in `herdr/agent_adapter.py` declaring interrupt, soft-steer, and resume capabilities.
+- Added `kimi` in `herdr/agent_binary.py:AGENT_BINARIES` and `herdr/agent_router.py:DEFAULT_ALLOWED`.
+- Implemented `ensure_kimi_workspace_trust` in `services/herdr-worker.py` to seamlessly pre-trust CoW sandboxes via SHA256 hashed trust metadata in `~/.kimi-code/workspace-trust`.
+- Configured `--auto` Never Ask execution flag in worker pane dispatch.
+- Added non-interactive probe adapter `kimi -p` in `herdr/deep_preflight.py` and credentials hint in `herdr/preflight.py`.
+- Updated console views, CLI choices (`bin/herdr-factory`, `bin/herdr-task`), and default template (`software-development-v1.yaml`).
+- 56 agent-related regression tests passed, 531 full-suite tests green.
 
 ## [2026-09-16] fix | LaunchAgent PATH prepending for user-space agent binaries
 Console deep preflight failed for opencode with a 500 error because the
