@@ -104,6 +104,19 @@ Evidence:
 - `herdr/workflow.py#is_workflow_completed`
 - `tests/test_workflow_engine.py#test_join_waits_for_all_dependencies`
 
+### 4.3 Direct Dispatch 边界
+
+`FACT` 首次派发只接受 Agent 静态节点：有效角色列表生成固定角色 Task；无角色、`max_agents=1` 且不允许并行时生成单 Task。无固定角色但允许并行或上限不为 1 的节点回退总指挥规划，不生成通用 `-auto` Task。已有任务等待与既有被作废子集补派保持原行为。
+
+`FACT` Controller 的 `stage_advance` 入口对非 Agent 节点输出 `STAGE ADVANCE BLOCKED`，要求人工处理，不调用 Direct Dispatch 或总指挥。该阻断不受 `HERDR_DIRECT_STAGE_DISPATCH` 开关影响；事件未携带 Node 时从工作流配置解析。它不实现 human/tool/gate 原生执行器，也不限制用户手动调用 CLI。
+
+Evidence:
+- `herdr/direct_dispatch.py#classify_dispatch`
+- `herdr/direct_dispatch.py#plan_stage_dispatch`
+- `services/herdr-controller.py#_handle_coordinator_item`
+- `tests/test_direct_stage_dispatch.py#PlanStageDispatchTest`
+- `tests/test_direct_stage_dispatch.py#TryDirectStageAdvanceTest`
+
 ## 10. 门禁 verdict 与 fix-loop 回路
 
 `FACT` 阶段结论（pass/blocked）是 DAG 推进的一等输入，与任务完成态正交：

@@ -1906,6 +1906,21 @@ def _handle_coordinator_item(item):
     # Workflow Stage Advance
     # ==============================================
     if item.get("kind") == "stage_advance":
+        node = item.get("node")
+        target_node_id = item.get("node_id") or item.get("next_stage")
+        if not node:
+            config = workflow_config_for(item["workflow_id"])
+            if config:
+                node = find_node(config, target_node_id)
+        if node:
+            item = dict(item, node=node)
+            if node.get("node_type", "agent") != "agent":
+                print(
+                    f"[STAGE ADVANCE BLOCKED] workflow={item['workflow_id']} "
+                    f"node={target_node_id} node_type={node.get('node_type')}: "
+                    "native executor unavailable; manual handling required"
+                )
+                return
         # 常规推进会:优先规则化直接派发(不再等待总指挥 LLM 回合);
         # 配置不足/需求缺失/launch 失败时回落既有总指挥路径。
         if try_direct_stage_advance(item):

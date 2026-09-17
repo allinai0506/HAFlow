@@ -609,6 +609,9 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
      - `stage_summary()` 修复：代码提交任务处于 `committed` 导致阶段被永久误判为「收尾中」（`finalizing`）的问题，统一按 `COMPLETED_TASK_STATUSES` 聚合为 `cleaned`（已完成）；
 - **验证与部署**：
   - 新增 `tests/test_projection_engine.py` 4 项测试与 `tests/test_console_stage_summary.py` 2 项测试，全量 522 项测试 PASS；
-  - 部署控制台并实测 `wf-nexusarchive-54433229-20260913-111049` API，`is_stalled` 已恢复为 `False`，所有阶段均为 `cleaned`；沉淀通用工程教训 §48。
+      - 部署控制台并实测 `wf-nexusarchive-54433229-20260913-111049` API，`is_stalled` 已恢复为 `False`，所有阶段均为 `cleaned`；沉淀通用工程教训 §48。
 
-
+## [2026-09-17] fix | Direct Dispatch 静态边界与非 Agent 阻断
+- Updated [[dag-workflow-engine]]：动态节点首次派发回退规划，不生成通用单任务；静态角色、单任务和既有补派保持兼容。
+- Controller 在 stage_advance 入口阻断非 Agent 节点进入直接派发及总指挥回退；未实现原生执行器，明确要求人工处理。
+- 该变更仅为 DispatchPlan 改造的第一切片，不包含计划持久化、幂等执行或模板迁移。
