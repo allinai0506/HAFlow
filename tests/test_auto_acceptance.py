@@ -20,6 +20,7 @@ import importlib.util
 import json
 import subprocess
 import sys
+import tempfile
 import threading
 import unittest
 from pathlib import Path
@@ -136,6 +137,173 @@ class AutoAcceptUnitTest(unittest.TestCase):
         set_status.assert_called_once()
 
 
+class GateVerdictUnitTest(unittest.TestCase):
+    """Gate nodes: machine-readable verdict from report file / terminal."""
+
+    def setUp(self):
+        self.ctrl = _load_controller("ctrl_auto_verdict_test")
+        self.tmp = tempfile.TemporaryDirectory(prefix="herdr-verdict-")
+        self.clone = Path(self.tmp.name)
+        self.addCleanup(self.tmp.cleanup)
+
+    def _task(self, node="test"):
+        return {
+            "task_id": "t-gate",
+            "workflow_id": "wf-1",
+            "node": node,
+            "stage": node,
+            "status": "agent_done",
+            "clone_path": str(self.clone),
+            "pane_id": "w1:p9",
+        }
+
+    def _write_verdict_file(self, payload):
+        path = self.clone / ".herdr" / "gate-verdict.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+    def test_read_from_file(self):
+        self._write_verdict_file({"verdict": "blocked", "note": "D7 金额残留"})
+        verdict, note, source = self.ctrl.read_gate_verdict(self._task())
+        self.assertEqual(verdict, "blocked")
+        self.assertEqual(note, "D7 金额残留")
+        self.assertIn("file", source)
+
+    def test_conflicting_signals_are_ambiguous(self):
+        self._write_verdict_file({"verdict": "pass", "note": ""})
+        with patch.object(
+            self.ctrl, "_verdict_from_screen", return_value=("blocked", "x")
+        ):
+            verdict, _, _ = self.ctrl.read_gate_verdict(self._task())
+        self.assertIsNone(verdict)
+
+    def test_missing_signals_are_ambiguous(self):
+        with patch.object(
+            self.ctrl, "_verdict_from_screen", return_value=(None, "")
+        ):
+            verdict, _, _ = self.ctrl.read_gate_verdict(self._task())
+        self.assertIsNone(verdict)
+
+    def _run_verdict(self, verdict_source, node="test", env=None):
+        task = self._task(node=node)
+        with patch.object(self.ctrl, "get_task", return_value=task), \
+             patch.object(
+                 self.ctrl, "workflow_config_for",
+                 return_value={"nodes": [{"id": node}]},
+             ), \
+             patch.object(
+                 self.ctrl, "read_gate_verdict", return_value=verdict_source
+             ), \
+             patch.object(
+                 self.ctrl.subprocess,
+                 "run",
+                 return_value=subprocess.CompletedProcess([], 0, "ok", ""),
+             ) as run_mock, \
+             patch.dict("os.environ", env or {}):
+            return self.ctrl.try_auto_verdict("t-gate"), run_mock
+
+    def test_pass_verdict_completes_gate_task(self):
+        result, run_mock = self._run_verdict(("pass", "", "file"))
+        self.assertTrue(result)
+        cmd = run_mock.call_args[0][0]
+        self.assertIn("set", cmd)
+        self.assertIn("--verdict", cmd)
+        self.assertIn("pass", cmd)
+
+    def test_blocked_verdict_carries_note(self):
+        result, run_mock = self._run_verdict(("blocked", "D7 金额残留", "file"))
+        self.assertTrue(result)
+        cmd = run_mock.call_args[0][0]
+        self.assertIn("blocked", cmd)
+        self.assertIn("D7 金额残留", cmd)
+
+    def test_ambiguous_signal_falls_back(self):
+        result, run_mock = self._run_verdict((None, "", ""))
+        self.assertFalse(result)
+        run_mock.assert_not_called()
+
+    def test_non_gate_node_is_ignored(self):
+        result, run_mock = self._run_verdict(("pass", "", "file"), node="implementation")
+        self.assertFalse(result)
+        run_mock.assert_not_called()
+
+    def test_env_switch_disables_auto_verdict(self):
+        result, run_mock = self._run_verdict(
+            ("pass", "", "file"), env={"HERDR_AUTO_VERDICT": "0"}
+        )
+        self.assertFalse(result)
+        run_mock.assert_not_called()
+
+    def test_screen_marker_parsing(self):
+        screen = (
+            "some output\n"
+            "HERDR_GATE_VERDICT: blocked\n"
+            "HERDR_GATE_NOTE: D6 清空后仍为空\n"
+        )
+        with patch.object(self.ctrl, "_verdict_from_file", return_value=(None, "")), \
+             patch.object(
+                 self.ctrl.subprocess,
+                 "run",
+                 return_value=subprocess.CompletedProcess([], 0, screen, ""),
+             ):
+            verdict, note, source = self.ctrl.read_gate_verdict(self._task())
+        self.assertEqual(verdict, "blocked")
+        self.assertEqual(note, "D6 清空后仍为空")
+        self.assertEqual(source, "screen")
+
+
+class FinalizeRetryDecisionTest(unittest.TestCase):
+    """commit 门禁瞬时失败(flaky)的 completed 任务必须有有界重试路径。
+
+    背景：fix-r2 因目标仓 bugfix gate 的 frontend.test 抖动（~50% 概率）
+    提交失败，completed 任务无重试路径，只能总指挥手工重试 5 次，
+    65 分钟后才靠人工重试通过（lessons §62 关联发现）。
+    """
+
+    def setUp(self):
+        self.ctrl = _load_controller("ctrl_finalize_retry_test")
+
+    def test_completed_git_task_retries_with_commit_reason(self):
+        retry, reason, exhausted = self.ctrl.should_retry_finalize(
+            "completed", {}, now=1000.0
+        )
+        self.assertTrue(retry)
+        self.assertEqual(reason, "commit_retry")
+        self.assertFalse(exhausted)
+
+    def test_committed_task_retries_with_integration_reason(self):
+        retry, reason, exhausted = self.ctrl.should_retry_finalize(
+            "committed", {}, now=1000.0
+        )
+        self.assertTrue(retry)
+        self.assertEqual(reason, "integration_retry")
+        self.assertFalse(exhausted)
+
+    def test_backoff_window_blocks_retry(self):
+        retry, _, exhausted = self.ctrl.should_retry_finalize(
+            "completed", {"attempts": 1, "next_retry_at": 2000.0}, now=1000.0
+        )
+        self.assertFalse(retry)
+        self.assertFalse(exhausted)
+
+    def test_max_attempts_marks_exhausted(self):
+        retry, _, exhausted = self.ctrl.should_retry_finalize(
+            "completed", {"attempts": 5, "next_retry_at": 0}, now=1000.0,
+            max_attempts=5,
+        )
+        self.assertFalse(retry)
+        self.assertTrue(exhausted)
+
+    def test_other_statuses_never_retry(self):
+        for status in ("working", "agent_done", "failed", "cleaned"):
+            with self.subTest(status=status):
+                retry, _, exhausted = self.ctrl.should_retry_finalize(
+                    status, {}, now=1000.0
+                )
+                self.assertFalse(retry)
+                self.assertFalse(exhausted)
+
+
 class DoneEventWiringTest(unittest.TestCase):
     """The done-event handler must take the fast path before any prompt."""
 
@@ -151,6 +319,20 @@ class DoneEventWiringTest(unittest.TestCase):
 
     def test_auto_accept_finalizes_without_prompting_coordinator(self):
         with patch.object(self.ctrl, "try_auto_accept", return_value=True), \
+             patch.object(self.ctrl, "try_auto_verdict", return_value=False), \
+             patch.object(self.ctrl, "attention_clear"), \
+             patch.object(self.ctrl, "finalize_completed_task") as finalize, \
+             patch.object(self.ctrl, "coordinator_status") as coord_status, \
+             patch.object(self.ctrl.subprocess, "run") as run_mock:
+            self.ctrl._process_coordinator_item(self._item(), threading.Lock())
+
+        finalize.assert_called_once_with("t1")
+        coord_status.assert_not_called()
+        run_mock.assert_not_called()
+
+    def test_gate_auto_verdict_finalizes_without_prompting_coordinator(self):
+        with patch.object(self.ctrl, "try_auto_accept", return_value=False), \
+             patch.object(self.ctrl, "try_auto_verdict", return_value=True), \
              patch.object(self.ctrl, "attention_clear"), \
              patch.object(self.ctrl, "finalize_completed_task") as finalize, \
              patch.object(self.ctrl, "coordinator_status") as coord_status, \
@@ -163,6 +345,7 @@ class DoneEventWiringTest(unittest.TestCase):
 
     def test_fallback_still_prompts_coordinator(self):
         with patch.object(self.ctrl, "try_auto_accept", return_value=False), \
+             patch.object(self.ctrl, "try_auto_verdict", return_value=False), \
              patch.object(self.ctrl, "get_task", return_value=_task()), \
              patch.object(self.ctrl, "coordinator_status", return_value="idle"), \
              patch.object(

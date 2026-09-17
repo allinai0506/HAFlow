@@ -28,6 +28,16 @@ GENERIC_ACCEPTANCE = (
     "产物必须落盘到当前工作目录，禁止只写在回复里",
 )
 
+GATE_VERDICT_CONTRACT = """\
+【门禁结论契约（必须遵守，结论将被机器直接采纳）】
+1. 验证完成后，在当前工作目录写入 .herdr/gate-verdict.json，内容二选一：
+   {"verdict": "pass", "note": "一句话结论"}
+   {"verdict": "blocked", "note": "阻塞原因清单"}
+2. 同时在终端单独输出一行，便于人工对照：
+   HERDR_GATE_VERDICT: pass   或   HERDR_GATE_VERDICT: blocked
+3. verdict 只能二选一：pass = 未发现必须返工的阻塞缺陷；blocked = 存在必须返工的阻塞缺陷，且必须在 note 中列出。
+4. 结论一经写入即作为门禁裁决生效：pass 自动推进下一节点；blocked 自动触发回流返工。"""
+
 
 def _as_list(value):
     if value is None:
@@ -214,6 +224,7 @@ def _prompt(
     last_failure_note=None,
     context_branch=None,
     role_outputs=None,
+    gate_contract=False,
 ):
     target_outputs = role_outputs if role_outputs is not None else node["required_outputs"]
     outputs = "\n".join(f"- {line}" for line in target_outputs) or "- 未定义"
@@ -230,6 +241,8 @@ def _prompt(
         redispatch_note += f"\n上次门禁失败原因：\n{last_failure_note}\n"
     if context_branch:
         redispatch_note += f"\n相关既有分支（如需核对）：{context_branch}\n"
+
+    gate_note = "\n\n" + GATE_VERDICT_CONTRACT if gate_contract else ""
 
     return f"""HERDR_DIRECT_DISPATCH
 
@@ -263,7 +276,7 @@ node: {node["id"]} ({node["label"]})
 {criteria}
 
 完成后确保产物已写入当前工作目录并结束回合；
-不要手工创建 Clone / Pane / 分支 / Agent，工位已由 Herdr 装配。""".strip()
+不要手工创建 Clone / Pane / 分支 / Agent，工位已由 Herdr 装配。{gate_note}""".strip()
 
 
 def _dispatch_spec(
@@ -278,6 +291,7 @@ def _dispatch_spec(
     context_branch=None,
     integration_mode=None,
     role_outputs=None,
+    gate_contract=False,
 ):
     return {
         "task_id": task_id,
@@ -292,6 +306,7 @@ def _dispatch_spec(
             last_failure_note=last_failure_note,
             context_branch=context_branch,
             role_outputs=role_outputs,
+            gate_contract=gate_contract,
         ),
         "task_type": node["task_type"],
         "integration_mode": integration_mode or node["integration_mode"],
@@ -305,6 +320,7 @@ def plan_stage_dispatch(
     requirement,
     *,
     context_branch=None,
+    gate_contract=False,
 ):
     """决定 ready 节点该派发什么。
 
@@ -373,6 +389,7 @@ def plan_stage_dispatch(
                     or None,
                     context_branch=context_branch,
                     integration_mode=task.get("integration_mode"),
+                    gate_contract=gate_contract,
                 )
             )
         return {"mode": "dispatch", "reason": "redispatch superseded subset", "specs": specs}
@@ -426,6 +443,7 @@ def plan_stage_dispatch(
                     r_acceptance,
                     task_id,
                     role_outputs=r_outputs,
+                    gate_contract=gate_contract,
                 )
             )
         return {"mode": "dispatch", "reason": "initial node dispatch with roles", "specs": specs}
@@ -438,5 +456,6 @@ def plan_stage_dispatch(
         goal,
         acceptance,
         initial_task_id(workflow_id, node_id, existing_ids),
+        gate_contract=gate_contract,
     )
     return {"mode": "dispatch", "reason": "initial node dispatch", "specs": [spec]}

@@ -73,6 +73,9 @@ _workflow_complete_logged = set()
 _listener_backoff = {}
 _listener_giveup_logged = set()
 
+# 终化重试耗尽的任务:只告警一次,避免每轮 sweep 刷屏。
+_finalize_retry_exhausted_logged = set()
+
 # 已触发过 close-workflow 的 workflow,防止轮询期间重复派发。
 _workflow_close_inflight = set()
 
@@ -438,6 +441,31 @@ def _bump_fix_loop_count(workflow_id, retry_node):
 # 质量类失败结论(如总指挥判定 failed)绝不自动翻案。
 AUTO_RECOVER_REASONS = {"dispatch_delivery_fuse", "agent_process_crash"}
 AUTO_RECOVER_MAX_ATTEMPTS = int(os.environ.get("HERDR_AUTO_RECOVER_MAX", "2"))
+
+# 终化重试上限：commit 门禁瞬时失败(flaky)/集成冲突时按注意力退避自动重试；
+# 达到上限后停止自动重试并升级人工(避免 gate 永久失败造成的无限重试风暴)。
+FINALIZE_RETRY_MAX = int(os.environ.get("HERDR_FINALIZE_RETRY_MAX", "5"))
+
+
+def should_retry_finalize(status, episode, now, max_attempts=None):
+    """(should_retry, reason, exhausted) — committed/completed 的终化重试决策。
+
+    `completed` 且 integration_mode=git 的任务若 commit 门禁瞬时失败，此前
+    没有任何重试路径，只能人工或总指挥手工重试（实测一次 flaky gate 浪费
+    55min 并烧掉总指挥大回合）。本函数给出统一的退避重试 + 上限判定。
+    """
+    if status not in ("committed", "completed"):
+        return False, "", False
+
+    limit = FINALIZE_RETRY_MAX if max_attempts is None else int(max_attempts)
+    attempts = int((episode or {}).get("attempts") or 0)
+    if attempts >= limit:
+        return False, "", True
+
+    if float((episode or {}).get("next_retry_at") or 0) > now:
+        return False, "", False
+    reason = "integration_retry" if status == "committed" else "commit_retry"
+    return True, reason, False
 
 
 def recover_infra_failed_tasks(workflow_id, tasks=None):
@@ -1004,6 +1032,9 @@ def try_direct_stage_advance(item):
         load_tasks(),
         requirement,
         context_branch=latest_branch_for_node(workflow_id, ready_id),
+        # 门禁节点在派发时注入结论契约(.herdr/gate-verdict.json + 终端标记),
+        # 由 try_auto_verdict 直接采纳,免除总指挥裁决回合。
+        gate_contract=node_is_gate(workflow_id, ready_id),
     )
 
     mode = plan.get("mode")
@@ -2410,8 +2441,10 @@ task_type:
         wait_started = time.time()
 
         # 规则化验收快路径:非门禁节点铁证齐备直接 completed,
-        # 不再排队等总指挥回合(门禁节点与证据不足者不受影响)。
-        if event_type == "done" and try_auto_accept(task_id):
+        # 门禁节点有唯一结论标记则直接落 verdict;两者都不命中才回落总指挥。
+        if event_type == "done" and (
+            try_auto_accept(task_id) or try_auto_verdict(task_id)
+        ):
             attention_clear(key)
             finalize_completed_task(task_id)
             return
@@ -2658,6 +2691,151 @@ def try_auto_accept(task_id):
     print(
         f"[AUTO ACCEPT] task={task_id} "
         f"node={node_id} baseline=TASK_CHANGED -> completed"
+    )
+    return True
+
+
+# ============================================================
+# 门禁规则化裁决 (auto-verdict) — 门禁节点免除总指挥 LLM 回合
+# ============================================================
+
+# 契约：门禁任务在 Clone 根写入 .herdr/gate-verdict.json，并在终端输出
+# HERDR_GATE_VERDICT: pass|blocked（可选 HERDR_GATE_NOTE: <原因>）。
+# 两个通道结论一致时直接落 verdict；缺失或互相矛盾一律回落总指挥。
+GATE_VERDICT_FILE = ".herdr/gate-verdict.json"
+GATE_VERDICT_MARKER = "HERDR_GATE_VERDICT:"
+GATE_NOTE_MARKER = "HERDR_GATE_NOTE:"
+
+_GATE_VERDICT_ALIASES = {
+    "pass": "pass",
+    "passed": "pass",
+    "ok": "pass",
+    "blocked": "blocked",
+    "block": "blocked",
+    "fail": "blocked",
+    "failed": "blocked",
+}
+
+
+def auto_verdict_enabled():
+    value = os.environ.get("HERDR_AUTO_VERDICT", "1")
+    return value.strip().lower() not in ("0", "false", "off", "no")
+
+
+def _normalize_gate_verdict(value):
+    return _GATE_VERDICT_ALIASES.get(str(value or "").strip().lower())
+
+
+def _verdict_from_file(task):
+    clone_path = task.get("clone_path")
+    if not clone_path:
+        return None, ""
+    try:
+        with open(
+            os.path.join(clone_path, GATE_VERDICT_FILE), encoding="utf-8"
+        ) as handle:
+            payload = json.load(handle)
+    except Exception:
+        return None, ""
+    if not isinstance(payload, dict):
+        return None, ""
+    verdict = _normalize_gate_verdict(payload.get("verdict"))
+    return verdict, str(payload.get("note") or "").strip()
+
+
+def _verdict_from_screen(task):
+    pane_id = task.get("pane_id")
+    if not pane_id:
+        return None, ""
+    try:
+        result = subprocess.run(
+            ["herdr", "pane", "read", pane_id, "--source", "visible"],
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
+    except Exception:
+        return None, ""
+
+    screen = (result.stdout or "") + "\n" + (result.stderr or "")
+    verdicts = set()
+    note = ""
+    for line in screen.splitlines():
+        if GATE_VERDICT_MARKER in line:
+            raw = line.split(GATE_VERDICT_MARKER, 1)[1].strip()
+            normalized = _normalize_gate_verdict(raw.split()[0] if raw else "")
+            if normalized:
+                verdicts.add(normalized)
+        if GATE_NOTE_MARKER in line and not note:
+            note = line.split(GATE_NOTE_MARKER, 1)[1].strip()
+
+    if len(verdicts) != 1:
+        return None, ""
+    return verdicts.pop(), note
+
+
+def read_gate_verdict(task):
+    """(verdict, note, source)：文件与终端两路信号一致才返回 verdict。"""
+    file_verdict, file_note = _verdict_from_file(task)
+    screen_verdict, screen_note = _verdict_from_screen(task)
+
+    signals = {v for v in (file_verdict, screen_verdict) if v}
+    if len(signals) != 1:
+        return None, "", ""
+
+    verdict = signals.pop()
+    note = file_note or screen_note
+    source = "file+screen" if file_verdict and screen_verdict else (
+        "file" if file_verdict else "screen"
+    )
+    return verdict, note, source
+
+
+def try_auto_verdict(task_id):
+    """门禁节点规则化裁决：报告/终端给出唯一结论时直接落 verdict。
+
+    pass -> 推进下一节点；blocked -> 既有 fix-loop 自动回流。
+    信号缺失/冲突、非门禁节点、环境开关关闭时返回 False 回落总指挥。
+    """
+    if not auto_verdict_enabled():
+        return False
+
+    task = get_task(task_id)
+    if not task or task.get("status") != "agent_done":
+        return False
+
+    workflow_id = task.get("workflow_id")
+    node_id = task.get("node") or task.get("stage")
+    if not workflow_id or not node_id:
+        return False
+
+    if not node_is_gate(workflow_id, node_id):
+        return False
+
+    verdict, note, source = read_gate_verdict(task)
+    if verdict not in ("pass", "blocked"):
+        return False
+    if verdict == "blocked" and not note:
+        note = f"gate verdict blocked (auto-verdict via {source or 'signal'})"
+
+    result = subprocess.run(
+        [
+            TASK_MANAGER, "set", task_id, "completed",
+            "--verdict", verdict, "--note", note,
+        ],
+        text=True,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        print(
+            f"[AUTO VERDICT ERROR] task={task_id}: "
+            f"{result.stderr.strip() or result.stdout.strip()}"
+        )
+        return False
+
+    print(
+        f"[AUTO VERDICT] task={task_id} node={node_id} "
+        f"verdict={verdict} source={source}"
     )
     return True
 
@@ -3474,31 +3652,49 @@ def registry_watcher():
                 else:
                     attention_clear(f"{task_id}:attention")
 
-                # ---- committed 滞留任务:此前 integrate 失败(如主仓库脏/并发锁),补收尾护栏 ----
-                if status == "committed" and task.get("integration_mode") == "git" and not workflow_closed(task.get("workflow_id")):
+                # ---- committed 滞留 / completed 但 commit 门禁瞬时失败(flaky):
+                #      integrate 失败或 commit gate 抖动时按退避自动重试,
+                #      达到上限后停止并升级人工(避免无限重试风暴)。
+                if (
+                    task.get("integration_mode") == "git"
+                    and not workflow_closed(task.get("workflow_id"))
+                ):
                     key = f"{task_id}:finalize"
-                    if not attention_blocks_retry(key, now):
+                    retry, reason, exhausted = should_retry_finalize(
+                        status, attention_get(key), now
+                    )
+                    if exhausted:
+                        if task_id not in _finalize_retry_exhausted_logged:
+                            _finalize_retry_exhausted_logged.add(task_id)
+                            print(
+                                f"[FINALIZE RETRY EXHAUSTED] task={task_id} "
+                                f"status={status} attempts>={FINALIZE_RETRY_MAX} "
+                                "-> manual/coordinator intervention required"
+                            )
+                    elif retry:
                         print(
                             f"[REGISTRY WATCHER] "
                             f"task={task_id} "
-                            f"status=committed -> retry finalize"
+                            f"status={status} -> retry finalize ({reason})"
                         )
                         finalize_completed_task(task_id)
                         cur_t = get_task(task_id)
-                        if cur_t and cur_t.get("status") == "committed":
-                            if not attention_get(key):
-                                attention_note(
-                                    key,
-                                    task,
-                                    "finalize",
-                                    reason="integration_retry",
-                                    attempts=1,
-                                )
+                        if cur_t and cur_t.get("status") == status:
+                            episode = attention_get(key) or {}
+                            attention_note(
+                                key,
+                                task,
+                                "finalize",
+                                reason=reason,
+                                attempts=int(episode.get("attempts") or 0) + 1,
+                            )
                             attention_throttle(key, now=now)
                         else:
                             attention_clear(key)
+                            _finalize_retry_exhausted_logged.discard(task_id)
                 else:
                     attention_clear(f"{task_id}:finalize")
+                    _finalize_retry_exhausted_logged.discard(task_id)
 
                 if status == "rework" and not workflow_closed(task.get("workflow_id")):
                     pane_id = task.get("pane_id")

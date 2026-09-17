@@ -88,6 +88,21 @@ Evidence:
   `herdr/direct_dispatch.py#lineage_redispatch_candidates` 保证同一替换谱系
   （`x` / `x-r2` / …）最多只补派一发；旧逻辑会把历史作废任务反复补派，
   fix-loop 每轮 2→4→8 放大并发重复任务（[[dag-workflow-engine]] §4.3）。
+- `FACT` **门禁规则化裁决 auto-verdict（2026-09-17 引入，lessons §62）**:
+  门禁节点（test/review/wrapup）派发时注入结论契约
+  （`herdr/direct_dispatch.py#GATE_VERDICT_CONTRACT`：写 `<clone>/.herdr/gate-verdict.json`
+  + 终端输出 `HERDR_GATE_VERDICT: pass|blocked`）；`try_auto_verdict` 合并文件与屏幕
+  两路信号，结论唯一一致时直接调用既有 CLI 契约
+  `herdr-task set <task> completed --verdict ... --note ...` 落盘，blocked 自动进入既有
+  fix-loop 回流。信号缺失/冲突、非门禁节点、`HERDR_AUTO_VERDICT=0` 一律回落总指挥。
+  背景：门禁 verdict 过去必须由总指挥 LLM 从自然语言报告"转写"，566K tokens 上下文下单回合 10-20min。
+- `FACT` **终化重试护栏全覆盖（2026-09-17 引入，lessons §63）**:
+  `should_retry_finalize` 把 `committed` 与 `completed + integration_mode=git`
+  统一纳入终化重试：episode 退避窗口外自动重跑幂等的
+  `finalize_completed_task`（commit → rebase → integrate → cleanup），
+  `HERDR_FINALIZE_RETRY_MAX`（默认 5）封顶，耗尽打印 `[FINALIZE RETRY EXHAUSTED]`
+  并升级人工。背景：commit 门禁瞬时失败（flaky gate）曾让 `completed` 任务
+  成为无重试死区，总指挥在一个 577K tokens 回合里手工重试 5 次、阻塞 65 分钟。
 - `FACT` **基础设施失败自动补派（2026-09-17 引入，lessons §60）**:
   registry watcher 对 `failed` 任务调用纯选择器 `herdr/liveness.py#select_infra_failures_for_recovery`
   （仅 `dispatch_delivery_fuse` / `agent_process_crash`，节点内无活跃任务，谱系失败次数 <
