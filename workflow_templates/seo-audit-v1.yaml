@@ -1,0 +1,72 @@
+name: seo-audit-v1
+label: 搜索引擎收录诊断与SEO整改流程
+version: "1.0"
+description: 面向网站百度/谷歌收录诊断、技术抓取巡检、关键词流量规划与高管整改交付的专业工作流。
+
+nodes:
+  - id: tech_crawling_audit
+    label: 1技术抓取与合规诊断
+    node_type: agent
+    depends_on: []
+    purpose: 深度探针巡检目标站点，覆盖 HTTP 状态码、SSR 服务端渲染软 404 检测、DNS/SSL、Robots.txt 与 Sitemap 契约有效性。
+    default_integration_mode: none
+    default_task_type: docs
+    agent_policy:
+      preferred: [claude, agy, codex]
+      roles:
+        - name: crawler_inspector
+          label: 抓取探针与合规审查
+          goal: 探测目标站点服务端真实渲染内容，挖掘软 404 与收录阻塞根因
+          outputs:
+            - 技术抓取与合规诊断报告
+            - 致命缺陷与软 404 定位
+
+  - id: keyword_and_content_matrix
+    label: 2关键词矩阵与竞对规划
+    node_type: agent
+    depends_on: [tech_crawling_audit]
+    purpose: 结合行业搜索指数与产品定位，规划品牌词、品类词、蓝海词及长尾词库，制定落地页与 TDK 优化规范。
+    default_integration_mode: none
+    default_task_type: docs
+    agent_policy:
+      preferred: [claude, agy, codex]
+      roles:
+        - name: keyword_strategist
+          label: 关键词与流量架构规划
+          goal: 构建中文搜索分词词库与高质量落地页结构
+          outputs:
+            - 中文搜索关键词矩阵
+            - TDK 元素与元数据优化建议
+
+  - id: remediation_roadmap
+    label: 3落地整改与主动推送规划
+    node_type: agent
+    depends_on: [keyword_and_content_matrix]
+    purpose: 制定四阶段整改路径（P0 紧急路由修复、基础合规备案、百度 API 极速推送、持续外链与内容生态）。
+    default_integration_mode: none
+    default_task_type: docs
+    agent_policy:
+      preferred: [claude, agy, codex]
+      roles:
+        - name: seo_architect
+          label: 整改方案与实施路径设计
+          goal: 输出具备实操性、可量化指标的阶段性整改清单与 API 推送指令
+          outputs:
+            - 阶段性落地整改路线图
+            - 站长平台 API 推送脚本
+
+  - id: executive_delivery
+    label: 4高管交付报告与归档
+    node_type: agent
+    depends_on: [remediation_roadmap]
+    purpose: 汇总全维度诊断成果，生成面向企业决策者的高保真交互报告与标准化 Markdown 交付物。
+    default_integration_mode: none
+    default_task_type: docs
+    agent_policy:
+      preferred: [claude, agy, codex]
+      roles:
+        - name: deliverable_curator
+          label: 交付报告编排与会签
+          goal: 输出高管级全维度诊断与整改交付报告
+          outputs:
+            - SEO 全维度诊断与整改交付报告

@@ -8,7 +8,10 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
----
+## [2026-09-17] feat | 新增 SEO 诊断与通用数字化任务工作流模板 (seo-audit-v1 & general-task-v1)
+- 新增 `workflow_templates/seo-audit-v1.yaml`：专用于网站在百度/通用搜索引擎未收录、死链及抓取异常的诊断与整改 4 阶段 DAG 模板（技术抓取诊断 → 关键词矩阵规划 → 落地整改规划 → 高管交付报告）。
+- 新增 `workflow_templates/general-task-v1.yaml`：适用于非代码工程类数字化任务的标准 3 阶段工作流（任务理解边界 → 专项深度执行 → 成果质检交付），解除历史将所有非研发任务硬编码绑定 `software-development-v1` 的误配。
+- 新增/补充 `tests/test_workflow_engine.py` 自动化测试，验证两套模板在 Kahn DAG 拓扑校验、无环检测与工位元数据装配下 100% 绿灯。
 
 ## [2026-09-17] fix | 任务级门禁结论对称：自动推进不再越过 blocked 依赖
 - Updated [[dag-workflow-engine]] §4.4：plan/requirements 等无 gate 配置节点的 blocked 结论同样暂停自动推进（sweep 只 funnel 裁决、不销毁下游；direct 同查）；作废后自动恢复。
