@@ -1002,6 +1002,17 @@ def direct_stage_dispatch_enabled():
     return value.strip().lower() not in ("0", "false", "off", "no")
 
 
+def coordinator_intake_enabled():
+    """新工作流首个节点是否交由总指挥接单(默认开启)。
+
+    产品期望:启动时先由总指挥接收需求、理解目标与约束,再派发第一个
+    节点的 Task,而不是系统直接开始(旧直派路径跳过总指挥)。
+    设 HERDR_COORDINATOR_INTAKE=0 退回直派快路径。
+    """
+    value = os.environ.get("HERDR_COORDINATOR_INTAKE", "1")
+    return value.strip().lower() not in ("0", "false", "off", "no")
+
+
 # 单个 launch 必须有界:子进程僵死时不得永久占用调度线程
 # 与 per-workflow 锁,超时后走既有 PARTIAL→总指挥回退路径。
 DIRECT_DISPATCH_LAUNCH_TIMEOUT = 300
@@ -1549,10 +1560,20 @@ def maybe_compact_coordinator(workflow_id, reason="stage_advance"):
         )
         return True
 
+    # 空会话/无可压缩内容时 TUI 本地即时完成,herdr 观测不到 working,
+    # 返回 agent_prompt_stalled——这是良性情形,不是故障(2026-09-18 实测)。
+    detail = (result.stderr.strip() or result.stdout.strip())
+    if "agent_prompt_stalled" in detail:
+        print(
+            f"[COORDINATOR COMPACT SKIP] "
+            f"workflow={workflow_id} pane={pane_id} "
+            f"no_activity reason={reason}"
+        )
+        return False
+
     print(
         f"[COORDINATOR COMPACT ERROR] "
-        f"workflow={workflow_id} pane={pane_id}: "
-        f"{result.stderr.strip() or result.stdout.strip()}"
+        f"workflow={workflow_id} pane={pane_id}: {detail}"
     )
     return False
 
@@ -2268,9 +2289,22 @@ def _handle_coordinator_item(item):
                     "native executor unavailable; manual handling required"
                 )
                 return
+        # 总指挥接单:新工作流首个节点(start -> first)默认交总指挥理解
+        # 需求后再派发;HERDR_COORDINATOR_INTAKE=0 或非首节点保持直派。
+        if (
+            item.get("stage") in (None, "", "start")
+            and coordinator_intake_enabled()
+        ):
+            item = dict(item, intake=True)
+            print(
+                f"[COORDINATOR INTAKE] "
+                f"workflow={item['workflow_id']} "
+                f"node={target_node_id} "
+                "-> dispatch via coordinator"
+            )
         # 常规推进会:优先规则化直接派发(不再等待总指挥 LLM 回合);
         # 配置不足/需求缺失/launch 失败时回落既有总指挥路径。
-        if try_direct_stage_advance(item):
+        elif try_direct_stage_advance(item):
             return
 
         workflow_id = item["workflow_id"]
@@ -2398,10 +2432,23 @@ Node Agent 策略
                 status = coordinator_status(workflow_id)
 
                 if status in ("idle", "done"):
+                    intake = bool(item.get("intake"))
+                    event_header = (
+                        "HERDR_WORKFLOW_INTAKE_EVENT"
+                        if intake
+                        else "HERDR_STAGE_ADVANCE_EVENT"
+                    )
+                    intake_note = (
+                        "这是新工作流的接单(总指挥接单机制):\n"
+                        "请先完整阅读下方用户需求,理解目标、范围与约束,\n"
+                        "再严格按节点职责创建第一个节点的 Task。\n\n"
+                        if intake
+                        else ""
+                    )
                     message = f"""
-HERDR_STAGE_ADVANCE_EVENT
+{event_header}
 
-workflow_id: {workflow_id}
+{intake_note}workflow_id: {workflow_id}
 project_name: {project_name}
 project_root: {project_root}
 base_branch: {base_branch}

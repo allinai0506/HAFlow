@@ -405,6 +405,31 @@ class CoordinatorCompactTest(unittest.TestCase):
                 self.controller.maybe_compact_coordinator("wf-1")
             )
 
+    def test_stalled_compact_is_benign_skip(self):
+        # 2026-09-18 实测:空会话无可压缩内容时 TUI 本地即时完成,
+        # herdr 观测不到 working -> agent_prompt_stalled,属良性,不报 ERROR。
+        with patch("builtins.print") as output, \
+             patch.object(self.controller, "coordinator_pane_for_workflow",
+                          return_value="w1:p1"), \
+             patch.object(self.controller, "coordinator_agent_kind",
+                          return_value="opencode"), \
+             patch.object(self.controller, "coordinator_status",
+                          return_value="idle"), \
+             patch.object(
+                 self.controller.subprocess, "run",
+                 side_effect=lambda *a, **k: self._resp(
+                     1,
+                     stderr='{"error":{"code":"agent_prompt_stalled"}}',
+                 ),
+             ):
+            self.assertFalse(
+                self.controller.maybe_compact_coordinator("wf-1")
+            )
+
+        text = " ".join(str(c) for c in output.call_args_list)
+        self.assertIn("COMPACT SKIP", text)
+        self.assertNotIn("COMPACT ERROR", text)
+
 
 class SentinelStallGuardTest(unittest.TestCase):
     def test_check_task_stalls_alerts_and_dedupes(self):

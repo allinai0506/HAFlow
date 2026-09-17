@@ -711,3 +711,11 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
   1. **上下文卫生（`services/herdr-controller.py#maybe_compact_coordinator`）**：三处边界注入 `/compact`——直接派发阶段推进（`[STAGE ADVANCED DIRECT]`）、总指挥阶段推进（`[STAGE ADVANCED]`）、fix-loop 派发（`[FIX LOOP NOTIFIED]`）；安全门：`HERDR_COORDINATOR_COMPACT=0` 关闭、仅 `opencode`/`claude` kind（`herdr agent get` 探测）、总指挥忙则跳过、`--wait --timeout 300000` 有界且失败不阻断；
   2. **效率纪律（`COORDINATOR_DISCIPLINE`）**：done/blocked/attention/retry/fix-loop/stage-advance 全部事件模板追加硬约束——决策落盘即结束回合、禁止 commit/integrate/cleanup/全量测试、只读核验优先、上下文过大先 `/compact`。
 - **验证**：新增 compact 安全门 5 例 + 边界触发契约 1 例 + 纪律注入 2 例（含既有派发测试显式打桩保持语义），全量 **628 项测试 PASS**；controller 已 kickstart 部署。沉淀教训 §66，更新 [[architecture]] §2.1。
+
+## [2026-09-18] fix | 工作流启动路径：模板选择生效 + 总指挥接单机制
+- **背景**：`wf-nexusarchive-0918-01` 两个现场问题：① 控制台选 `general-task-v1`（3 节点），实际按 `software-development-v1`（6 阶段）运行——根因 `ensure_project` 对已注册项目直接返回旧 record、忽略 `template_name`，CLI `run --template` 默认值又掩盖了它；② 启动未经过总指挥（Direct Stage Dispatch 首节点直派，"接单"职责缺失）。
+- **改动与实现**：
+  1. **模板切换（`herdr/projects.py#reprovision_project_template`）**：显式请求不同模板且无活跃工作流时，保留 Workspace/协调者 Pane，重编节点 Tab/Anchor 并关闭旧模板节点 Tab；有活跃工作流明确拒绝；`run --template` 缺省改 `None`（不指定=沿用现有），`create_project` 同路径修复；
+  2. **总指挥接单（`services/herdr-controller.py#coordinator_intake_enabled`）**：首个节点（start）默认路由到协调者，`HERDR_WORKFLOW_INTAKE_EVENT` 要求先理解需求再派发第一个 Task；非首节点保持直派；`HERDR_COORDINATOR_INTAKE=0` 关闭；协调者不可用沿用有界等待 + attention 重试；
+  3. **`/compact` 观测分类**：空会话 `agent_prompt_stalled` 归为良性 SKIP。
+- **验证**：模板切换 5 例 + 接单路由 4 例 + compact SKIP 1 例，全量 **637 项测试 PASS**；现场实证 `wf-nexusarchive-0918-02`：`[COORDINATOR INTAKE]` 命中、总指挥自行派发首个任务、`[COORDINATOR COMPACT]` 成功注入、workflow.json 已切 general-task-v1 且协调者 Pane 保留。沉淀教训 §67，更新 [[architecture]] §2.1。
