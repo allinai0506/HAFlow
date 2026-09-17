@@ -76,6 +76,9 @@ _listener_giveup_logged = set()
 # 终化重试耗尽的任务:只告警一次,避免每轮 sweep 刷屏。
 _finalize_retry_exhausted_logged = set()
 
+# git 终化未收敛而推迟 close 的 workflow:只提示一次,避免每 sweep 刷屏。
+_close_deferred_logged = set()
+
 # 已触发过 close-workflow 的 workflow,防止轮询期间重复派发。
 _workflow_close_inflight = set()
 
@@ -161,6 +164,28 @@ def workflow_closed(workflow_id):
     return _workflow_entry(workflow_id).get("status") == "completed"
 
 
+def git_finalize_pending_tasks(workflow_id):
+    """completed/committed 且 git 集成的任务仍在 commit/integrate 终化管线中。
+
+    自动 close 若抢先推进到 cleaned,在跑的 `herdr-task commit` 子进程随后
+    撞 'cleaned -> committed' 非法转移,交付分支落不进集成链路
+    (2026-09-17 wf-nexusarchive-0917-01 wrapup 实测)。终化由其有界重试
+    自会收敛(耗尽则升级总指挥);收敛后下一轮 sweep 再 close。
+    """
+    try:
+        tasks = load_tasks()
+    except Exception:
+        return []
+
+    return [
+        t.get("task_id")
+        for t in (tasks or [])
+        if t.get("workflow_id") == workflow_id
+        and t.get("status") in ("completed", "committed")
+        and (t.get("integration_mode") or "none") == "git"
+    ]
+
+
 def maybe_close_completed_workflow(workflow_id):
     """Workflow 全部节点完成后,自动执行物理收尾(关 pane/删 clone/归档)。
 
@@ -180,6 +205,17 @@ def maybe_close_completed_workflow(workflow_id):
     # Fix-loop reopen 闩:重开后的 workflow 在首个任务进入 ACTIVE
     # 之前,旧任务仍全为完成系,必须挡住 sweep 的自消除 close。
     if entry.get("suppress_auto_close"):
+        return
+
+    # git 终化在途:必须等 commit/integrate 收敛,close 不得抢先物理收尾。
+    pending_git = git_finalize_pending_tasks(workflow_id)
+    if pending_git:
+        if workflow_id not in _close_deferred_logged:
+            _close_deferred_logged.add(workflow_id)
+            print(
+                f"[CLOSE DEFERRED] workflow={workflow_id} "
+                f"waiting git finalize: {','.join(pending_git)}"
+            )
         return
 
     _workflow_close_inflight.add(workflow_id)

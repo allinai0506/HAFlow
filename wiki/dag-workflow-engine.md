@@ -194,3 +194,28 @@ Evidence: `workflow_templates/software-development-v1.yaml#wrapup.rules`（交�
 
 Evidence: `services/herdr-controller.py` #check_workflow_stage_advance /
 #blocked_gate_dependency；`docs/walkthroughs/20260913-fix-loop-design.md`
+
+## 12. 自动 close 与 git 终化的互斥（收官最后一公里）
+
+`FACT` **close 必须等 git 终化收敛（2026-09-17 引入，lessons §65）**：
+"全节点完成"只是 DAG 语义，`completed`/`committed` + `integration_mode=git`
+的任务仍在 commit → rebase → integrate 终化管线中。两侧闸门：
+
+1. **Controller 推迟**：`git_finalize_pending_tasks(workflow_id)` 命中时
+   `maybe_close_completed_workflow` 打印一次 `[CLOSE DEFERRED]` 并跳过本轮
+   （sweep 幂等重试；终化有界重试收敛后自然放行）；
+2. **CLI 闸门**：`close_workflow` 在 `TEARDOWN_BLOCKING_STATUSES` 之外追加
+   unsettled-git 检查，`[CLOSE ABORT]`（exit 2）并给出手工收口指引
+   （`herdr-task commit` / `integrate` / `supersede`）；`completed+none` 与
+   已 `cleaned` 的任务不受影响。
+
+背景：`wf-nexusarchive-0917-01` 收官（20:35-20:38）时 close 后台线程把
+`completed` 的 wrapup 任务抢先推进到 `cleaned`，正在跑的 `herdr-task commit`
+子进程（目标仓重门禁约 2m50s）随后撞
+`Illegal transition: cleaned -> committed`——git commit 已成功却未进集成链路
+（`[COMMIT ERROR]`），交付分支最终靠人工补做。
+
+Evidence: `services/herdr-controller.py#git_finalize_pending_tasks` /
+`bin/herdr-task#close_workflow` /
+`tests/test_fix_loop_gates.py#AutoCloseGitFinalizeDeferralTest` /
+`tests/test_workflow_finalize.py#TestCloseWorkflow`

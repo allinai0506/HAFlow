@@ -2722,3 +2722,84 @@ rg -n "步骤 0" ~/.agents/skills/six-step-finish/SKILL.md
 
 ---
 
+## 65. 自动 close 与 git 终化抢跑：收官"最后一公里"的交付分支丢失
+
+### 问题背景
+
+2026-09-17 `wf-nexusarchive-0917-01` 收官时刻（20:35-20:38）实测三方竞态：
+
+1. wrapup 任务 20:35:48 被总指挥判 `completed`；
+2. `maybe_close_completed_workflow` 因"全节点完成"立刻在**后台线程**执行
+   `herdr-task close-workflow`，其中 `_finalize_one` 依据 `FINALIZE_ADVANCE`
+   把 `completed` 任务直接推进 `cleanup_ready -> cleaned`；
+3. **与此同时**主线程的 `finalize_completed_task` 正在运行 `herdr-task commit`
+   子进程（目标仓重门禁约 2m50s）。git commit 已成功（`4872b1a0`），但随后
+   的状态落盘撞 `Illegal transition: cleaned -> committed`——`[COMMIT ERROR]`
+   退出，交付分支生成却未进集成链路；这单 commit 还把 `.herdr/gate-verdict.json`
+   带入交付（§62 修订与目标仓 `6c9e48cf` 后来兜底清洗）。
+
+即"全节点完成"（DAG 语义）与"交付终化收敛"（commit → integrate 语义）之间
+缺少互斥：物理收尾可以在 git 终化在途时抢跑。本次运行 8h47m 里约 3.2h 真实
+干活，其余为 §60（2h50m 投递静默 + 38min 坏 Agent 误派）、§61（24min 补派
+放大 + 2.35h 总指挥串行）、§63（55min commit 死区）类浪费；本条是这些修复
+之外**新暴露的闭环末端缺口**。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| **"完成"与"可收尾"被当同一时刻** | 节点全完成只说明验收过了；git 任务还要 commit→integrate 才算交付闭环。把两者混同时刻，等于允许收尾线程与终化子进程赛跑 | 自动 close 必须等 git 终化收敛：存在 `completed`/`committed` + `integration_mode=git` 的任务时推迟（`[CLOSE DEFERRED]`），终化有界重试自会收敛 |
+| **物理收尾改写 git 语义** | `_finalize_one` 对 `completed` 直接推进 `cleaned`，对 git 任务等于**静默跳过 commit/integrate**；`committed` 则被留下孤儿状态 | CLI `close-workflow` 必须显式闸门：unsettled-git 任务 `[CLOSE ABORT]`（exit 2）并给出手工收口指引；`completed+none`/`cleaned+git` 不误伤 |
+| **竞态缺乏可见性** | 三方并发只留下一条 `Illegal transition` 且埋在大段门禁输出尾部，排障需翻全量日志 | 推迟 close 打印一次 `[CLOSE DEFERRED]`（防刷屏闩），现场一眼可辨；CLI abort 提示 commit/integrate/supersede 三条处置路径 |
+
+### 操作规范（已固化到 `services/herdr-controller.py`、`bin/herdr-task`）
+
+1. **Controller 推迟 (`git_finalize_pending_tasks` + `maybe_close_completed_workflow`)**：
+   - close 前查询同 workflow 的 `completed`/`committed` + git 任务；命中则打印一次
+     `[CLOSE DEFERRED] workflow=... waiting git finalize: ...` 并跳过本轮；
+   - sweep 幂等重试：终化收敛（任务进入 `cleaned`）后下一轮自然放行；
+   - 终化重试耗尽时任务留在 `completed`，close 持续推迟并已有
+     `[FINALIZE RETRY EXHAUSTED]` 升级人工——宁可工作流不自动关闭，也不静默丢交付。
+2. **CLI 闸门 (`close_workflow`)**：
+   - 在 `TEARDOWN_BLOCKING_STATUSES` 检查之后追加 unsettled-git 检查，
+     `[CLOSE ABORT]`（exit 2）并打印处置指引：
+     `herdr-task commit <task_id>`（completed）/ `herdr-task integrate <task_id>`（committed）/
+     `herdr-task supersede <task_id> --reason ...`（确要丢弃交付物）；
+   - `dry_run` 同样走闸门；`integration_mode` 缺失（legacy）视为 `none`，行为不变。
+3. **回归门禁**：Controller 侧 4 例 + CLI 侧 2 例负向/正向用例，同类问题复发时优先扩这两组。
+
+### 验证命令 / 关联证据
+
+```bash
+# 1. Controller 推迟语义(completed/committed 推迟、settled/none 放行)
+pytest tests/test_fix_loop_gates.py::AutoCloseGitFinalizeDeferralTest -q
+# 期望: 4 passed
+
+# 2. CLI 闸门(未收敛阻断不触达 teardown、非 git/settled 不误伤)
+pytest tests/test_workflow_finalize.py -q -k "unsettled or ignores"
+# 期望: 2 passed
+
+# 3. 全量回归(不得有回退)
+pytest -q
+# 期望: 620 passed, 44 subtests passed
+
+# 4. 现场铁证
+#    ~/.herdr-controller/logs/controller.out.log:
+#    [FINALIZE] task=...wrapup-auto integration_mode=git
+#    ... [agent/claude/docs-...wrapup-auto 4872b1a0] task: ...wrapup-auto
+#    Illegal transition: wf-nexusarchive-0917-01-wrapup-auto: cleaned -> committed
+#    [COMMIT ERROR] task=...wrapup-auto: → Checking Node version sources consistency...
+#    （同段含 create mode 100644 .herdr/gate-verdict.json — §62 关联污染）
+```
+
+### 相关文档 / 关联证据
+
+- 现场：`~/.herdr-controller/logs/controller.out.log`（20:38 收官段）、
+  `clones/wf-nexusarchive-0917-01-wrapup-auto`（`895de7d3` 制品、交付 PR `!1354`）
+- 新增测试：`tests/test_fix_loop_gates.py#AutoCloseGitFinalizeDeferralTest`、
+  `tests/test_workflow_finalize.py#TestCloseWorkflow`
+- Wiki：[`wiki/architecture.md`](../../wiki/architecture.md) §2.1、
+  [`wiki/dag-workflow-engine.md`](../../wiki/dag-workflow-engine.md) §12
+
+---
+
