@@ -709,12 +709,12 @@ function saveViewState(){try{localStorage.setItem(VIEW_KEY,JSON.stringify({opsMo
 function loadViewState(){try{return JSON.parse(localStorage.getItem(VIEW_KEY)||'null')}catch(e){return null}}
 async function waitForWorkflowJob(jobId){
   try{
-    for(let i=1;i<=180;i++){
+    for(let i=1;i<=620;i++){
       const job=await api('/api/run/status?id='+encodeURIComponent(jobId));
       if(job.status==='succeeded')return job;
       if(job.status==='failed')throw new Error(job.error||'工作流启动失败');
       const wait=document.getElementById('runWaitStatus');
-      if(wait)wait.textContent='深度体检与启动中… '+i+'s（深度体检约 1–2 分钟，请勿重复创建）';
+      if(wait)wait.textContent='深度体检与启动中… '+i+'s（后端最长约 10 分钟，请勿重复创建）';
       await new Promise(resolve=>setTimeout(resolve,1000));
     }
     throw new Error('工作流启动超时，请到运维驾驶舱查看状态');

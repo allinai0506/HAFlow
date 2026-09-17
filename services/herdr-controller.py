@@ -430,6 +430,18 @@ def _bump_fix_loop_count(workflow_id, retry_node):
     return count
 
 
+def blocked_verdict_dep(workflow_id, node):
+    """依赖中是否存在任务级 blocked 验收结论(不问 gate_cfg)。
+
+    plan/requirements 等节点没有 gate 配置,sweep 的 fix-loop 看不见它们,
+    但自动推进同样不得越过 blocked 结论。返回首个被阻断的依赖 id。
+    """
+    for dep in ((node or {}).get("depends_on") or []):
+        if gate_verdict(workflow_id, dep) == "blocked":
+            return dep
+    return None
+
+
 def blocked_gate_dependency(workflow_id, ready_node, workflow_cfg):
     """ready_node 的依赖中是否存在 verdict=blocked 的门禁节点。"""
     nodes_by_id = {
@@ -893,6 +905,27 @@ def try_direct_stage_advance(item):
     if not node.get("id"):
         node["id"] = ready_id
 
+    # 上游存在 blocked 验收结论时不得自动派发(与 sweep 对称),
+    # 回退总指挥裁决。依赖未知时保持原行为(fail-open)。
+    dep_ids = (item.get("node") or {}).get("depends_on")
+    if dep_ids is None:
+        try:
+            wf_cfg = workflow_config_for(workflow_id) or {}
+            found = find_node(wf_cfg, ready_id) if wf_cfg.get("nodes") else None
+            dep_ids = (found or {}).get("depends_on") or []
+        except ValueError:
+            dep_ids = []
+    verdict_dep = blocked_verdict_dep(workflow_id, {"depends_on": dep_ids})
+    if verdict_dep:
+        print(
+            f"[DIRECT DISPATCH BLOCKED] "
+            f"workflow={workflow_id} "
+            f"node={ready_id} "
+            f"blocked_dep={verdict_dep} "
+            "-> fallback to coordinator for adjudication"
+        )
+        return False
+
     plan = direct_dispatch_planner.plan_stage_dispatch(
         workflow_id,
         node,
@@ -1091,6 +1124,39 @@ def check_workflow_stage_advance(workflow_id):
                 continue
 
             ready_id = ready_node["id"]
+            verdict_dep = blocked_verdict_dep(workflow_id, ready_node)
+            if verdict_dep:
+                # 有门禁结论无门禁配置的依赖:不销毁下游,只暂停自动推进
+                # 并 funnel 给总指挥裁决;作废过期结论后自动恢复。
+                verdict_key = f"{workflow_id}:upstream_blocked:{ready_id}"
+                if not attention_blocks_retry(verdict_key):
+                    episode = attention_get(verdict_key) or {}
+                    attempts = int(episode.get("attempts") or 0) + 1
+                    attention_note(
+                        verdict_key,
+                        {"task_id": f"stage_advance:{ready_id}",
+                         "workflow_id": workflow_id},
+                        "stage_advance",
+                        reason="upstream_blocked",
+                        attempts=attempts,
+                        next_retry_at=time.time() + liveness.attention_retry_interval(),
+                        detail=f"blocked_dep={verdict_dep}",
+                    )
+                    notify_attention(
+                        "Herdr Factory · 上游门禁阻断",
+                        {"task_id": f"stage_advance:{ready_id}",
+                         "workflow_id": workflow_id},
+                        f"节点 {ready_id} 的上游 {verdict_dep} 存在 blocked 验收结论，"
+                        "已暂停自动推进等待裁决（作废过期结论或返工后自动恢复）。",
+                        "upstream_blocked",
+                    )
+                    print(
+                        f"[STAGE ADVANCE BLOCKED] "
+                        f"workflow={workflow_id} "
+                        f"{ready_id} blocked_dep={verdict_dep} "
+                        "-> awaiting adjudication"
+                    )
+                continue
             if attention_blocks_retry(f"{workflow_id}:stage_advance:{ready_id}"):
                 continue
 
