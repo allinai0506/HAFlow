@@ -719,3 +719,8 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
   2. **总指挥接单（`services/herdr-controller.py#coordinator_intake_enabled`）**：首个节点（start）默认路由到协调者，`HERDR_WORKFLOW_INTAKE_EVENT` 要求先理解需求再派发第一个 Task；非首节点保持直派；`HERDR_COORDINATOR_INTAKE=0` 关闭；协调者不可用沿用有界等待 + attention 重试；
   3. **`/compact` 观测分类**：空会话 `agent_prompt_stalled` 归为良性 SKIP。
 - **验证**：模板切换 5 例 + 接单路由 4 例 + compact SKIP 1 例，全量 **637 项测试 PASS**；现场实证 `wf-nexusarchive-0918-02`：`[COORDINATOR INTAKE]` 命中、总指挥自行派发首个任务、`[COORDINATOR COMPACT]` 成功注入、workflow.json 已切 general-task-v1 且协调者 Pane 保留。沉淀教训 §67，更新 [[architecture]] §2.1。
+
+## [2026-09-18] fix | 控制台阶段卡片跟随工作流模板（前端可见性）
+- **背景**：`wf-nexusarchive-0918-02`（general-task-v1）运行中，控制台仍渲染 software-development 的 6 阶段——`workflow_detail` 硬编码内置 `STAGES` 常量，不读 workflow.json 的 `nodes`。
+- **改动**：`console/herdr_factory_console.py` 新增 `workflow_stages(wid, p)`（优先 `workflow.json#nodes` 的 id/label，缺失回退内置 `STAGES`），`workflow_detail` 改用它；经 `scripts/install-herdr-console.sh` 部署并随 PR #55 交付。
+- **验证**：新增 `ConsoleWorkflowStagesTest` 3 例（模板节点渲染 / 无配置回退 / workflow_detail 接线），全量 **640 项测试 PASS**；实机 `GET /api/workflow?id=wf-nexusarchive-0918-02` 返回 3 节点（intake cleaned / deep_execution working / review waiting）。附录 lessons §67 操作规范第 4 条。

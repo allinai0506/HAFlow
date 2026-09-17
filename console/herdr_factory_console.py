@@ -330,11 +330,29 @@ def project_detail(pid):
     ws=workflows_for_project(pid)
     return {'project':p,'workflows':ws,'latest_workflow_id':ws[0]['workflow_id'] if ws else None,'tabs':tabs(p.get('workspace_id')),'panes':panes(p.get('workspace_id')),'slots':slots(p),'agents':preflight(p)}
 
+def workflow_stages(wid, p):
+    """阶段卡片来源:优先 workflow.json 的 nodes(id/label),回退内置 STAGES。
+
+    背景(wf-nexusarchive-0918-02):前端阶段卡片此前硬编码 software-development
+    的 6 阶段,切换模板(general-task-v1 等)后界面不跟随,必须按工作流
+    自己的节点定义渲染。
+    """
+    cfg={}
+    if p and p.get('workflow_file'):
+        cfg=load_json(Path(p.get('workflow_file')),{}) or {}
+    out=[]
+    for n in (cfg.get('nodes') or []):
+        key=n.get('id') or n.get('key')
+        if not key:continue
+        out.append((key,n.get('label') or key))
+    return out or STAGES
+
+
 def workflow_detail(wid):
     w=workflows().get(wid)
     if not w:raise RuntimeError('工作流不存在')
     p=project_for_workflow(wid); ts=tasks_for_workflow(wid); ss=[]
-    for k,l in STAGES:
+    for k,l in workflow_stages(wid,p):
         x=stage_summary(ts,k); x['label']=l; ss.append(x)
     stall_info=herdr_projection.detect_workflow_stalls(wid,ts,workflow=w)
     return {'workflow':{'workflow_id':wid,**_with_subject(w)},'project':p,'stages':ss,'tasks':ts,'coordinator':agent_runtime(w.get('coordinator_pane_id')),'candidate_branch':w.get('candidate_branch'),'agent_override':w.get('agent_override','auto'),'stall':stall_info}

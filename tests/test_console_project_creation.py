@@ -226,6 +226,80 @@ class TemplateSwitchTest(unittest.TestCase):
         register_mock.assert_not_called()
 
 
+class ConsoleWorkflowStagesTest(unittest.TestCase):
+    """前端阶段卡片必须跟随 workflow.json 的节点定义(模板切换可见)。
+
+    回归背景 wf-nexusarchive-0918-02:切换 general-task-v1 后前端仍渲染
+    software-development 的 6 阶段(workflow_detail 硬编码 STAGES)。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util
+        path = Path(__file__).resolve().parent.parent / "console" / "herdr_factory_console.py"
+        spec = importlib.util.spec_from_file_location("console_mod_stages", str(path))
+        cls.console = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.console)
+
+    def _workflow_file(self, nodes):
+        tmp = tempfile.TemporaryDirectory(prefix="herdr-console-stages-")
+        self.addCleanup(tmp.cleanup)
+        wf_file = Path(tmp.name) / "workflow.json"
+        wf_file.write_text(json.dumps({
+            "workflow_template": "general-task-v1",
+            "nodes": nodes,
+        }, ensure_ascii=False), encoding="utf-8")
+        return str(wf_file)
+
+    def test_stages_follow_template_nodes(self):
+        wf_file = self._workflow_file([
+            {"id": "intake_and_scoping", "label": "1任务理解与范围界定"},
+            {"id": "deep_execution", "label": "2专项深度执行"},
+            {"id": "review_and_delivery", "label": "3评审验收与交付归档"},
+        ])
+        stages = self.console.workflow_stages("wf-1", {"workflow_file": wf_file})
+        self.assertEqual(
+            stages,
+            [
+                ("intake_and_scoping", "1任务理解与范围界定"),
+                ("deep_execution", "2专项深度执行"),
+                ("review_and_delivery", "3评审验收与交付归档"),
+            ],
+        )
+
+    def test_fallback_to_builtin_stages_without_config(self):
+        stages = self.console.workflow_stages("wf-1", {})
+        self.assertEqual(stages, self.console.STAGES)
+        stages = self.console.workflow_stages(
+            "wf-1", {"workflow_file": "/nonexistent/workflow.json"}
+        )
+        self.assertEqual(stages, self.console.STAGES)
+
+    def test_workflow_detail_uses_template_stages(self):
+        wf_file = self._workflow_file([
+            {"id": "intake_and_scoping", "label": "1任务理解与范围界定"},
+            {"id": "deep_execution", "label": "2专项深度执行"},
+            {"id": "review_and_delivery", "label": "3评审验收与交付归档"},
+        ])
+        with patch.object(self.console, "workflows", return_value={
+            "wf-1": {"workflow_id": "wf-1", "project_id": "p-1",
+                     "requirement": "REQ"},
+        }), patch.object(self.console, "project_for_workflow",
+                         return_value={"workflow_file": wf_file}), \
+             patch.object(self.console, "tasks_for_workflow", return_value=[]), \
+             patch.object(self.console, "agent_runtime", return_value=None), \
+             patch.object(
+                 self.console.herdr_projection,
+                 "detect_workflow_stalls", return_value=None,
+             ):
+            detail = self.console.workflow_detail("wf-1")
+        self.assertEqual(
+            [s["key"] for s in detail["stages"]],
+            ["intake_and_scoping", "deep_execution", "review_and_delivery"],
+        )
+        self.assertEqual(detail["stages"][0]["label"], "1任务理解与范围界定")
+
+
 class TestConsoleProjectEndpointsAndUI(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

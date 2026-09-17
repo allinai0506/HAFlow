@@ -2930,6 +2930,9 @@ pytest -q
    - 协调者不可用：沿用 stage_advance 的有界等待 + attention 慢速重试，不空转。
 3. **`/compact` 观测分类**：`agent_prompt_stalled`（空会话无可压缩）归为良性
    `[COORDINATOR COMPACT SKIP] no_activity`，不再报 ERROR。
+4. **前端可见性（console）**：`workflow_detail` 的阶段卡片必须按
+   `workflow.json#nodes`（id/label）渲染，回退内置 `STAGES`——否则切换模板后
+   运行时已变、界面仍显示旧模板阶段（实测 general-task 运行中前端仍 6 阶段）。
 
 ### 验证命令 / 关联证据
 
