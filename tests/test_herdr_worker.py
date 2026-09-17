@@ -88,6 +88,47 @@ class TestStartAgent(unittest.TestCase):
                 self.assertIn('[folders."/path/to/myrepo"]', content)
                 self.assertIn("trusted = true", content)
 
+    def test_kimi_start_uses_auto(self):
+        worker = load_worker()
+        response = {"result": {"agent": {"agent": "kimi"}}}
+
+        with patch.object(worker, "run_json", return_value=response) as run_json:
+            agent = worker.start_agent("urgent-fix", "kimi", "w1:p2", retries=1)
+
+        self.assertEqual(agent, response["result"]["agent"])
+        self.assertEqual(
+            run_json.call_args.args[0],
+            [
+                "herdr",
+                "agent",
+                "start",
+                worker.unique_agent_name("urgent-fix", "w1:p2"),
+                "--kind",
+                "kimi",
+                "--pane",
+                "w1:p2",
+                "--timeout",
+                "120000",
+                "--",
+                "--auto",
+            ],
+        )
+
+    def test_ensure_kimi_workspace_trust(self):
+        import hashlib, json
+        worker = load_worker()
+        with tempfile.TemporaryDirectory() as td:
+            with patch.object(worker.Path, "home", return_value=Path(td)), \
+                 patch.dict(worker.os.environ, {"USER": "testuser"}):
+                repo_path = "/path/to/myrepo"
+                worker.ensure_kimi_workspace_trust(repo_path)
+                h = hashlib.sha256(str(Path(repo_path).resolve()).encode("utf-8")).hexdigest()[:12]
+                target = Path(td) / ".kimi-code" / "workspace-trust" / f"wd_testuser_{h}"
+                self.assertTrue(target.exists())
+                data = json.loads(target.read_text(encoding="utf-8"))
+                self.assertEqual(data["root"], str(Path(repo_path).resolve()))
+                self.assertIn("trustedAt", data)
+
 
 
 class TestCleanSandbox(unittest.TestCase):

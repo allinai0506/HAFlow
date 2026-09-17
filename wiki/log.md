@@ -14,6 +14,15 @@
 - Updated [[dag-workflow-engine]] §4.4：plan/requirements 等无 gate 配置节点的 blocked 结论同样暂停自动推进（sweep 只 funnel 裁决、不销毁下游；direct 同查）；作废后自动恢复。
 - 前端启动等待 180s→620s，对齐后端 600s 超时，消除误报式"启动失败"。
 - 根因：GATE_DEFAULTS 仅 test/review/wrapup，sweep fix-loop 看不见 plan 级 blocked，而 direct 完全不查结论（线上 plan blocked 时 test-auto 仍被建出）。
+## [2026-09-16] feat | Full-chain scheduling & health probe support for Kimi Code CLI
+Integrated Kimi Code CLI (`kimi`) as a first-class supported agent across HAFlow:
+- Added `KimiAdapter` in `herdr/agent_adapter.py` declaring interrupt, soft-steer, and resume capabilities.
+- Added `kimi` in `herdr/agent_binary.py:AGENT_BINARIES` and `herdr/agent_router.py:DEFAULT_ALLOWED`.
+- Implemented `ensure_kimi_workspace_trust` in `services/herdr-worker.py` to seamlessly pre-trust CoW sandboxes via SHA256 hashed trust metadata in `~/.kimi-code/workspace-trust`.
+- Configured `--auto` Never Ask execution flag in worker pane dispatch.
+- Added non-interactive probe adapter `kimi -p` in `herdr/deep_preflight.py` and credentials hint in `herdr/preflight.py`.
+- Updated console views, CLI choices (`bin/herdr-factory`, `bin/herdr-task`), and default template (`software-development-v1.yaml`).
+- 56 agent-related regression tests passed, 531 full-suite tests green.
 
 ## [2026-09-16] fix | LaunchAgent PATH prepending for user-space agent binaries
 Console deep preflight failed for opencode with a 500 error because the

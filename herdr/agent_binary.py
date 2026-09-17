@@ -24,6 +24,7 @@ AGENT_BINARIES = {
     "agy": "agy",
     "pi": "pi",
     "grok": "grok",
+    "kimi": "kimi",
 }
 
 # 用户主目录下的常见 Agent CLI 安装目录（按优先级排列）。

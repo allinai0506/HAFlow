@@ -511,6 +511,24 @@ def ensure_grok_workspace_trust(repo):
         print(f"[GROK PREFLIGHT ERROR] failed to trust {repo}: {e}")
 
 
+def ensure_kimi_workspace_trust(repo):
+    repo = str(Path(repo).expanduser().resolve())
+    trust_dir = Path.home() / ".kimi-code" / "workspace-trust"
+    try:
+        trust_dir.mkdir(parents=True, exist_ok=True)
+        user = os.environ.get("USER", "user")
+        h = hashlib.sha256(repo.encode("utf-8")).hexdigest()[:12]
+        filename = f"wd_{user}_{h}"
+        target = trust_dir / filename
+        data = {"root": repo, "trustedAt": int(time.time() * 1000)}
+        tmp = target.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(target)
+        print(f"[KIMI PREFLIGHT] trusted={repo}")
+    except Exception as e:
+        print(f"[KIMI PREFLIGHT ERROR] failed to trust {repo}: {e}")
+
+
 def unique_agent_name(task_id, pane_id):
     base = re.sub(
         r"[^a-z0-9_-]+",
@@ -559,7 +577,7 @@ def start_agent(task_id, agent_kind, pane_id, retries=10, delay=0.5):
                 "120000"
             ]
 
-            if agent_kind == "opencode":
+            if agent_kind in ("opencode", "kimi"):
                 cmd += ["--", "--auto"]
             elif agent_kind in ("qodercli", "claude", "agy"):
                 cmd += ["--", "--dangerously-skip-permissions"]
@@ -703,6 +721,10 @@ def main():
             )
         elif args.agent == "grok":
             ensure_grok_workspace_trust(
+                clone
+            )
+        elif args.agent == "kimi":
+            ensure_kimi_workspace_trust(
                 clone
             )
 

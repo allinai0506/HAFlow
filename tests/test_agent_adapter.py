@@ -16,6 +16,7 @@ from herdr.agent_adapter import (
     AgyAdapter,
     PiAdapter,
     GrokAdapter,
+    KimiAdapter,
     get_agent_adapter,
     register_agent_adapter,
     list_agent_adapters,
@@ -99,6 +100,15 @@ def test_known_agent_adapters_capability_matrix():
     assert grok.supports_resume is True
     assert grok.supports_prompt_injection is True
 
+    # Kimi
+    kimi = get_agent_adapter("kimi")
+    assert isinstance(kimi, KimiAdapter)
+    assert kimi.name == "kimi"
+    assert kimi.supports_interrupt is True
+    assert kimi.supports_soft_steer is True
+    assert kimi.supports_resume is True
+    assert kimi.supports_prompt_injection is True
+
 
 def test_adapter_registry_aliases_and_fallback():
     # Alias qoder -> qodercli
@@ -110,6 +120,12 @@ def test_adapter_registry_aliases_and_fallback():
     # Alias grokcli -> grok
     g1 = get_agent_adapter("grokcli")
     assert isinstance(g1, GrokAdapter)
+
+    # Alias kimi-code -> kimi
+    k1 = get_agent_adapter("kimi-code")
+    k2 = get_agent_adapter("kimicli")
+    assert isinstance(k1, KimiAdapter)
+    assert isinstance(k2, KimiAdapter)
 
     # Unknown agent falls back to UnknownAgentAdapter (fail closed)
     fallback = get_agent_adapter("unknown-llm-bot")
@@ -223,6 +239,7 @@ def test_list_agent_adapters():
     assert "agy" in adapters
     assert "pi" in adapters
     assert "grok" in adapters
+    assert "kimi" in adapters
     assert "tty_prototype" in adapters
 
     claude_info = adapters["claude"]
