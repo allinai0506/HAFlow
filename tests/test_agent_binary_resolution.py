@@ -69,8 +69,11 @@ class ResolveBinaryTests(unittest.TestCase):
 
     def test_user_bin_dirs_registered(self):
         opencode_bin = agent_binary.HOME / ".opencode" / "bin"
+        kimi_bin = agent_binary.HOME / ".kimi-code" / "bin"
         self.assertIn(opencode_bin, agent_binary.USER_BIN_DIRS)
         self.assertIn(opencode_bin, agent_binary.EXTRA_BIN_DIRS)
+        self.assertIn(kimi_bin, agent_binary.USER_BIN_DIRS)
+        self.assertIn(kimi_bin, agent_binary.EXTRA_BIN_DIRS)
         # 用户主目录应优先排在系统目录前面
         opencode_idx = agent_binary.EXTRA_BIN_DIRS.index(opencode_bin)
         homebrew_idx = agent_binary.EXTRA_BIN_DIRS.index(Path("/opt/homebrew/bin"))

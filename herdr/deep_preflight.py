@@ -33,6 +33,7 @@ AUTH_HINTS = {
     "agy": [],
     "pi": [HOME / ".pi" / "agent" / "auth.json"],
     "grok": [HOME / ".grok" / "auth.json"],
+    "kimi": [HOME / ".kimi-code" / "credentials" / "kimi-code.json", HOME / ".kimi-code" / "config.toml"],
 }
 
 # These patterns are intentionally conservative. We only classify an error when
@@ -66,6 +67,8 @@ AUTH_PATTERNS = [
     r"access denied",
     r"forbidden",
     r"no auth",
+    r"use /login to sign in",
+    r"no model configured",
     r"\b401\b",
     r"\b403\b",
 ]
@@ -348,6 +351,15 @@ def choose_smoke_command(agent, binary, cwd):
                 "-p",
                 prompt,
             ], "grok -p"
+
+    if agent == "kimi":
+        # Kimi CLI exposes `-p/--prompt` as single-prompt non-interactive mode.
+        if re.search(r"(^|\s)-p([,\s]|$)", help_text) or "--prompt" in help_text:
+            return [
+                binary,
+                "-p",
+                prompt,
+            ], "kimi -p"
 
     return None, "no safe non-interactive adapter"
 

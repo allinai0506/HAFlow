@@ -21,26 +21,26 @@ except ImportError:
     from herdr.projects import workflow_config_for
     from herdr.workflow import find_node
 
-DEFAULT_ALLOWED = ["opencode", "codex", "qodercli", "claude", "agy", "pi", "grok"]
+DEFAULT_ALLOWED = ["opencode", "codex", "qodercli", "claude", "agy", "pi", "grok", "kimi"]
 
 DEFAULT_STAGE_PREFERENCES = {
-    "requirements": ["claude", "qodercli", "opencode", "codex", "agy", "pi", "grok"],
-    "plan": ["claude", "qodercli", "codex", "opencode", "agy", "pi", "grok"],
-    "implementation": ["opencode", "codex", "qodercli", "agy", "claude", "pi", "grok"],
-    "test": ["codex", "opencode", "qodercli", "claude", "agy", "pi", "grok"],
-    "review": ["claude", "codex", "qodercli", "opencode", "agy", "pi", "grok"],
-    "wrapup": ["claude", "qodercli", "opencode", "codex", "agy", "pi", "grok"],
+    "requirements": ["claude", "qodercli", "opencode", "codex", "agy", "pi", "grok", "kimi"],
+    "plan": ["claude", "qodercli", "codex", "opencode", "agy", "pi", "grok", "kimi"],
+    "implementation": ["opencode", "codex", "qodercli", "agy", "claude", "pi", "grok", "kimi"],
+    "test": ["codex", "opencode", "qodercli", "claude", "agy", "pi", "grok", "kimi"],
+    "review": ["claude", "codex", "qodercli", "opencode", "agy", "pi", "grok", "kimi"],
+    "wrapup": ["claude", "qodercli", "opencode", "codex", "agy", "pi", "grok", "kimi"],
 }
 
 DEFAULT_TASK_TYPE_PREFERENCES = {
-    "feat": ["opencode", "codex", "qodercli", "agy", "claude", "pi", "grok"],
-    "fix": ["opencode", "codex", "qodercli", "agy", "claude", "pi", "grok"],
-    "refactor": ["codex", "opencode", "qodercli", "claude", "agy", "pi", "grok"],
-    "docs": ["claude", "qodercli", "opencode", "codex", "agy", "pi", "grok"],
-    "test": ["codex", "opencode", "qodercli", "claude", "agy", "pi", "grok"],
-    "chore": ["codex", "opencode", "qodercli", "claude", "agy", "pi", "grok"],
-    "perf": ["codex", "opencode", "qodercli", "claude", "agy", "pi", "grok"],
-    "ci": ["codex", "opencode", "qodercli", "claude", "agy", "pi", "grok"],
+    "feat": ["opencode", "codex", "qodercli", "agy", "claude", "pi", "grok", "kimi"],
+    "fix": ["opencode", "codex", "qodercli", "agy", "claude", "pi", "grok", "kimi"],
+    "refactor": ["codex", "opencode", "qodercli", "claude", "agy", "pi", "grok", "kimi"],
+    "docs": ["claude", "qodercli", "opencode", "codex", "agy", "pi", "grok", "kimi"],
+    "test": ["codex", "opencode", "qodercli", "claude", "agy", "pi", "grok", "kimi"],
+    "chore": ["codex", "opencode", "qodercli", "claude", "agy", "pi", "grok", "kimi"],
+    "perf": ["codex", "opencode", "qodercli", "claude", "agy", "pi", "grok", "kimi"],
+    "ci": ["codex", "opencode", "qodercli", "claude", "agy", "pi", "grok", "kimi"],
 }
 
 def _load(path, default):

@@ -266,6 +266,18 @@ class TestSmokeTimeoutAndRetry(unittest.TestCase):
         )
         self.assertEqual(adapter, "grok -p")
 
+    def test_kimi_adapter_uses_p(self):
+        m = self.m
+        help_text = "  -p, --prompt <prompt>  Run one prompt non-interactively and print the response.\n"
+        with patch.object(m, "help_probe", return_value=help_text):
+            cmd, adapter = m.choose_smoke_command("kimi", "/Users/user/.kimi-code/bin/kimi", "/tmp")
+        self.assertEqual(
+            cmd,
+            ["/Users/user/.kimi-code/bin/kimi", "-p",
+             "Reply with exactly HERDR_PREFLIGHT_OK and nothing else."],
+        )
+        self.assertEqual(adapter, "kimi -p")
+
 
 class TestTargetAgentsFiltering(unittest.TestCase):
     @classmethod
