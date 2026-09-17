@@ -237,7 +237,7 @@ def doctor():
     return 1 if failed else 0
 
 
-def run_workflow_preflight(project, workflow_id):
+def run_workflow_preflight(project, workflow_id, agent=None):
     """Run Deep Preflight once and store a workflow-scoped healthy Agent set."""
     script = HERDR_ROOT / "bin" / "herdr-deep-preflight"
     if not script.exists():
@@ -245,14 +245,18 @@ def run_workflow_preflight(project, workflow_id):
     if not script.exists():
         raise RuntimeError(f"Deep Preflight 未安装: {script}")
 
+    cmd = [
+        str(script),
+        "--project-id",
+        project["project_id"],
+        "--deep",
+        "--json",
+    ]
+    if agent and agent != "auto":
+        cmd.extend(["--agent", agent])
+
     r = run(
-        [
-            str(script),
-            "--project-id",
-            project["project_id"],
-            "--deep",
-            "--json",
-        ],
+        cmd,
         check=False,
     )
 
@@ -369,6 +373,7 @@ def start_workflow(
     healthy_agents, unhealthy_agents = run_workflow_preflight(
         project,
         workflow_id,
+        agent=agent_override if agent_override and agent_override != "auto" else None,
     )
 
     if agent_override and agent_override != "auto":

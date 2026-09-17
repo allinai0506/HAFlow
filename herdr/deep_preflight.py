@@ -197,7 +197,7 @@ def run(cmd, timeout=12, cwd=None, stdin=None):
         return subprocess.run(
             cmd,
             text=True,
-            input=stdin,
+            input=stdin if stdin is not None else "",
             capture_output=True,
             timeout=timeout,
             cwd=cwd,
@@ -301,10 +301,21 @@ def choose_smoke_command(agent, binary, cwd):
 
     if agent == "claude":
         # Claude Code commonly exposes --print / -p.
+        cmd = None
         if "--print" in help_text:
-            return [binary, "--print", prompt], "claude --print"
-        if re.search(r"(^|\s)-p([,\s]|$)", help_text):
-            return [binary, "-p", prompt], "claude -p"
+            cmd = [binary, "--print"]
+        elif re.search(r"(^|\s)-p([,\s]|$)", help_text):
+            cmd = [binary, "-p"]
+
+        if cmd:
+            if "--permission-mode" in help_text:
+                cmd.extend(["--permission-mode", "bypassPermissions"])
+            elif "--dangerously-skip-permissions" in help_text:
+                cmd.append("--dangerously-skip-permissions")
+            if "--no-session-persistence" in help_text:
+                cmd.append("--no-session-persistence")
+            cmd.append(prompt)
+            return cmd, "claude --print"
 
     if agent == "opencode":
         # OpenCode exposes `run` in current CLI builds.

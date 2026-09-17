@@ -2280,3 +2280,58 @@ pytest tests/test_agent_binary_resolution.py -v
 curl -s "http://127.0.0.1:8765/api/deep-preflight?id=nexusarchive-54433229&agent=opencode" | jq '.data.agents[0]'
 # 必须返回: final_status 为 "READY"，binary 为 "~/.opencode/bin/opencode"
 ```
+
+---
+
+## 59. 跨进程 Agent 调度中可执行文件路径解析防崩与环境自愈 (ENOENT 防御与动态兜底)
+
+### 问题背景
+
+在与外部 Agent OS / 协同中台（如 StaffAI / agency-agents）整合落地时，任务执行第一次尝试即报错：
+`Error executing claude: spawn /Users/user/.nvm/versions/node/v22.22.2/bin/claude ENOENT`。
+排查发现多重诱因：
+1. **环境变量陈旧硬编码**：`.env` 中遗留了不存在的旧 Node/nvm 版本路径，适配器代码优先读取 `process.env.AGENCY_TASK_CLAUDE_PATH` 时直接使用，未校验路径真实性；
+2. **路径解析器未校验可执行性**：`resolveExecutablePath(cmd)` 在遇到包含路径分隔符（`path.sep`）的输入时直接原样返回，导致无效路径直接被送入 `child_process.spawn` 触发 ENOENT；
+3. **模板加载器 Python 3.14 严格类型契约**：`herdr/workflow.py` 的 `load_template(None)` 在 Python 3.14 环境下执行 `Path(None).expanduser()` 抛出 `TypeError: argument should be a str or an os.PathLike object, not 'NoneType'`；
+4. **非交互 CLI 探针挂起**：Deep Preflight 探测 Claude CLI 时缺少 `--permission-mode bypassPermissions` 且子进程未显式提供空输入 EOF，导致在非 TTY 管道中阻塞。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| **环境变量配置失效硬编码导致 ENOENT** | 开发者机器迁移、多版本 node 切换会导致 `.env` 中的绝对路径失效，若直接透传会导致系统停摆 | 必须在环境读取层做真实性校验，无法执行时立即降级为通用名称重新在候选链中动态寻找 |
+| **路径解析器信任带斜杠的参数** | 带斜杠不代表文件可执行，直接返回坏路径违背了 Resolver 的职责 | `resolveExecutablePath` 必须先调用 `isExecutable()`，若不可行则提取 `path.basename()` 继续在全局/用户候选目录及 PATH 中深搜 |
+| **模板加载缺省传参在 Python 3.14 下抛错** | 早期版本允许缺省但参数未在函数签名赋初值，上游传 None 会绕过默认参数 | 必须在函数体内显式做 `name_or_path = name_or_path or DEFAULT_TEMPLATE_NAME` 兜底防卫 |
+| **非交互探针遭遇权限确认或等待输入** | 各 Agent CLI 在无 TTY 下行为各异，Claude Code 会检查权限或 stdin | 探测命令必须显式带上 `--permission-mode bypassPermissions`、`--no-session-persistence`，且 `subprocess.run` 必须显式传入空字符串以发送 EOF |
+
+### 操作规范
+
+1. **Resolver 防御闭环 (`executable-resolver.ts`)**：
+   - 即使传入绝对路径，也先检查 `isExecutable(cmd)`；
+   - 若不成立，剥离路径提取文件名 `cmd = path.basename(cmd)`，在 PATH 与预设全局目录中搜索。
+2. **模板与项目创建自愈 (`workflow.py`, `projects.py`)**：
+   - `load_template(name_or_path: Optional[str] = None)` 强制赋予 `DEFAULT_TEMPLATE_NAME = "software-development-v1"`；
+   - `provision_project` 强制赋值 `template_name = template_name or "software-development-v1"`。
+3. **精准探针参数隔离 (`deep_preflight.py`, `herdr-factory`)**：
+   - 探针调用时注入 `input=""` 确保立即 EOF；
+   - 对指定 Agent 的工作流启动，Deep Preflight 只探测目标 Agent，避免无关慢速 Agent 阻塞整体流程。
+
+### 验证命令 / 关联证据
+
+```bash
+# 1. 验证 HAFlow 全量 531 项测试全部通过
+pytest tests/
+# 必须输出: 531 passed
+
+# 2. 验证 StaffAI 后端适配器全量测试通过
+cd /Users/user/agency-agents/hq/backend
+npm run build && AGENCY_UNDER_NODE_TEST=1 AGENCY_TEST_MODE=mock node --test dist/__tests__/haflow-adapter.test.js dist/__tests__/runtime/claude-adapter.test.js
+# 必须输出: 12 passed, 0 failed
+
+# 3. 验证真实任务端到端调度成功（执行 SEO 优化任务）
+curl -s -X POST http://localhost:3333/api/tasks/20260917002/execute \
+  -H "Content-Type: application/json" \
+  -d '{"executor":"haflow","summary":"从 StaffAI 指派 百度 SEO 专家 进行网站 SEO 诊断"}'
+# 必须返回: "status":"completed", "executor":"haflow", "runtimeName":"haflow_execution_core", "degraded":false
+```
+
