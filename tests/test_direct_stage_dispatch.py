@@ -343,6 +343,50 @@ class TryDirectStageAdvanceTest(unittest.TestCase):
         self.assertIn("--agent", cmd)
         self.assertIn("auto", cmd)
 
+    def test_launch_timeout_is_bounded_and_falls_back(self):
+        seen_timeouts = []
+
+        def hung(cmd, **kwargs):
+            seen_timeouts.append(kwargs.get("timeout"))
+            raise subprocess.TimeoutExpired(cmd, timeout=kwargs.get("timeout"))
+
+        with patch.object(self.ctrl.subprocess, "run", side_effect=hung):
+            result = self.ctrl.try_direct_stage_advance(self._item())
+        self.assertFalse(result)
+        self.assertEqual(self.notified, [])
+        self.assertEqual(self.commands, [])
+        self.assertTrue(seen_timeouts)
+        self.assertTrue(all(t is not None and t > 0 for t in seen_timeouts))
+
+    def test_partial_launch_timeout_reports_partial(self):
+        node = _node(
+            id="requirements",
+            agent_policy={
+                "max_agents": 2,
+                "roles": [
+                    {"name": "executor", "goal": "做 A"},
+                    {"name": "challenger", "goal": "做 B"},
+                ],
+            },
+        )
+        calls = {"n": 0}
+
+        def flaky(cmd, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                self.commands.append(cmd)
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+            raise subprocess.TimeoutExpired(cmd, timeout=kwargs.get("timeout"))
+
+        with patch.object(self.ctrl.subprocess, "run", side_effect=flaky), \
+             patch("builtins.print") as output:
+            result = self.ctrl.try_direct_stage_advance(self._item(node=node))
+        self.assertFalse(result)
+        self.assertEqual(self.notified, [])
+        printed = " ".join(str(c) for c in output.call_args_list)
+        self.assertIn("PARTIAL", printed)
+        self.assertIn("wf-1-requirements-executor", printed)
+
     def test_dynamic_direct_dispatch_does_not_launch(self):
         result = self.ctrl.try_direct_stage_advance(self._item(node=_node(
             parallel=True, agent_policy={"max_agents": 3},

@@ -55,6 +55,9 @@ except ImportError:
 TASKS_FILE = os.environ.get("TASKS_FILE") or os.path.expanduser("~/.herdr-controller/tasks.json")
 WORKFLOW_FILE = os.environ.get("WORKFLOW_FILE") or os.path.expanduser("~/.herdr-controller/workflow.json")
 DEFAULT_AGENT_LABELS = ["opencode", "codex", "qodercli", "claude", "agy", "pi", "grok"]
+# 初次 prompt 投递必须有界:agent 无响应时不得永久阻塞 launch,
+# 超时后走既有 marker 校验 + send-text fallback。
+PROMPT_DELIVERY_TIMEOUT = 120
 
 try:
     from herdr.agent_router import DEFAULT_ALLOWED
@@ -1618,12 +1621,18 @@ def dispatch_task(task_id, prompt):
     pane_id = task["pane_id"]
     marker = "HERDR_ORCH_TASK:" + task_id
 
-    def _run(cmd):
-        return subprocess.run(
-            cmd,
-            text=True,
-            capture_output=True
-        )
+    def _run(cmd, timeout=None):
+        try:
+            return subprocess.run(
+                cmd,
+                text=True,
+                capture_output=True,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired as exc:
+            return subprocess.CompletedProcess(
+                cmd, 124, "", f"command timed out after {timeout}s: {exc}"
+            )
 
     def _status():
         r = _run(["herdr", "agent", "get", pane_id])
@@ -1681,13 +1690,18 @@ def dispatch_task(task_id, prompt):
     set_status(task_id, "dispatched")
     time.sleep(1.5)
 
-    primary = _run([
-        "herdr",
-        "agent",
-        "prompt",
-        pane_id,
-        prompt
-    ])
+    primary = _run(
+        [
+            "herdr",
+            "agent",
+            "prompt",
+            pane_id,
+            prompt,
+        ],
+        timeout=PROMPT_DELIVERY_TIMEOUT,
+    )
+    if primary.returncode == 124:
+        print(f"[PROMPT TIMEOUT] task={task_id} pane={pane_id} after={PROMPT_DELIVERY_TIMEOUT}s")
 
     deadline = time.time() + 6
     while time.time() < deadline:
