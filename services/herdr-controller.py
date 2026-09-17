@@ -430,6 +430,78 @@ def _bump_fix_loop_count(workflow_id, retry_node):
     return count
 
 
+# ============================================================
+# 基础设施失败自动补派 (auto-recover)
+# ============================================================
+
+# 仅这些失败原因属于"基础设施类"(投递熔断 / 进程崩溃),可自动作废补派;
+# 质量类失败结论(如总指挥判定 failed)绝不自动翻案。
+AUTO_RECOVER_REASONS = {"dispatch_delivery_fuse", "agent_process_crash"}
+AUTO_RECOVER_MAX_ATTEMPTS = int(os.environ.get("HERDR_AUTO_RECOVER_MAX", "2"))
+
+
+def recover_infra_failed_tasks(workflow_id, tasks=None):
+    """基础设施失败任务自动作废,交给 sweep 重新派发替代任务。
+
+    此前 failed 任务只能等人工 relaunch(--supersedes),实测造成 28 分钟级
+    空等;这里复用既有 superseded->replace 派发管线:作废后清掉该节点的
+    stage-advance 闩,下一轮 sweep 的 direct dispatch 会自动补派 -rN。
+    谱系级次数上限由纯函数 select_infra_failures_for_recovery 保证,
+    达到上限后不再自动处置(只留日志与告警)。
+    """
+    if not workflow_id:
+        return False
+
+    if workflow_closed(workflow_id):
+        return False
+
+    wf_st = _workflow_entry(workflow_id).get("status")
+    if wf_st in ("completed", "paused"):
+        return False
+
+    if tasks is None:
+        tasks = load_tasks()
+
+    candidates = liveness.select_infra_failures_for_recovery(
+        [t for t in tasks if t.get("workflow_id") == workflow_id],
+        AUTO_RECOVER_REASONS,
+        max_attempts=AUTO_RECOVER_MAX_ATTEMPTS,
+    )
+
+    recovered = False
+    for task in candidates:
+        task_id = task.get("task_id")
+        node_id = task.get("node") or task.get("stage")
+
+        result = subprocess.run(
+            [
+                TASK_MANAGER, "supersede", task_id,
+                "--reason", "auto-recover: infrastructure failure",
+            ],
+            text=True,
+            capture_output=True,
+        )
+
+        if result.returncode != 0:
+            print(
+                f"[AUTO RECOVER ERROR] supersede {task_id}: "
+                f"{result.stderr.strip() or result.stdout.strip()}"
+            )
+            continue
+
+        if node_id:
+            clear_stage_advance(workflow_id, node_id)
+
+        recovered = True
+        print(
+            f"[AUTO RECOVER] workflow={workflow_id} "
+            f"node={node_id} task={task_id} "
+            "superseded -> pending redispatch by sweep"
+        )
+
+    return recovered
+
+
 def blocked_verdict_dep(workflow_id, node):
     """依赖中是否存在任务级 blocked 验收结论(不问 gate_cfg)。
 
@@ -2336,6 +2408,14 @@ task_type:
     try:
         last_busy_log = 0
         wait_started = time.time()
+
+        # 规则化验收快路径:非门禁节点铁证齐备直接 completed,
+        # 不再排队等总指挥回合(门禁节点与证据不足者不受影响)。
+        if event_type == "done" and try_auto_accept(task_id):
+            attention_clear(key)
+            finalize_completed_task(task_id)
+            return
+
         while True:
             task = get_task(task_id)
 
@@ -2496,17 +2576,97 @@ task_type:
             queued_events.discard(key)
 
 
+# ============================================================
+# 规则化验收 (auto-accept) — 非门禁节点免除总指挥 LLM 回合
+# ============================================================
 
-# ============================================================
-# Agent events
-# ============================================================
+# 背景(lessons §61)：agent_done 后的总指挥验收回合实测占用 2.6h/8h。非门禁
+# 节点(需求/计划/实现)的验收标准本就是"产物落盘 + 变更受控"，可由
+# verify-baseline 铁证直接判定；门禁节点(test/review/wrapup)保留裁决语义。
+def auto_accept_enabled():
+    value = os.environ.get("HERDR_AUTO_ACCEPT", "1")
+    return value.strip().lower() not in ("0", "false", "off", "no")
+
+
+def node_is_gate(workflow_id, node_id):
+    """节点是否带门禁配置(含 GATE_DEFAULTS 的 test/review/wrapup)。
+
+    配置不可判定时保守返回 True(保留总指挥路径),绝不因配置异常
+    误吞门禁裁决。
+    """
+    try:
+        wf_cfg = workflow_config_for(workflow_id) or {}
+        nodes_by_id = {n["id"]: n for n in wf_cfg.get("nodes", [])}
+        return resolve_gate_config(nodes_by_id.get(node_id), node_id) is not None
+    except Exception:
+        return True
+
+
+def task_changes_recorded(task):
+    """verify-baseline 铁证：至少一个受控文件变更(TASK_CHANGED)。"""
+    task_id = task.get("task_id")
+    if not task_id:
+        return False
+    try:
+        result = subprocess.run(
+            [TASK_MANAGER, "verify-baseline", task_id],
+            text=True,
+            capture_output=True,
+            timeout=60,
+        )
+    except Exception:
+        return False
+
+    output = (result.stdout or "") + "\n" + (result.stderr or "")
+    for line in output.splitlines():
+        if line.startswith("HERDR_BASELINE_RESULT="):
+            try:
+                payload = json.loads(line.split("=", 1)[1])
+            except (ValueError, IndexError):
+                continue
+            return bool(payload.get("changes"))
+    return "TASK_CHANGED" in output
+
+
+def try_auto_accept(task_id):
+    """非门禁节点规则化验收：变更铁证齐备即 completed，免总指挥回合。
+
+    保守口径：只接管 agent_done 的非门禁节点；产物/变更证据不足、
+    门禁节点、被显式关闭(HERDR_AUTO_ACCEPT=0)时返回 False，走原路径。
+    """
+    if not auto_accept_enabled():
+        return False
+
+    task = get_task(task_id)
+    if not task or task.get("status") != "agent_done":
+        return False
+
+    workflow_id = task.get("workflow_id")
+    node_id = task.get("node") or task.get("stage")
+    if not workflow_id or not node_id:
+        return False
+
+    if node_is_gate(workflow_id, node_id):
+        return False
+
+    if not task_changes_recorded(task):
+        return False
+
+    if not set_task_status(task_id, "completed"):
+        return False
+
+    print(
+        f"[AUTO ACCEPT] task={task_id} "
+        f"node={node_id} baseline=TASK_CHANGED -> completed"
+    )
+    return True
+
 
 def check_task_deliverables_ready(task):
     """Check whether deliverables required by the task or node are present and non-empty."""
     clone_path = task.get("clone_path")
     if not clone_path or not os.path.exists(clone_path):
         return False
-
     wf_id = task.get("workflow_id")
     node_id = task.get("node") or task.get("stage")
     required_outputs = []
@@ -3177,6 +3337,19 @@ def registry_watcher():
                     attention_clear(f"{task_id}:done")
                     attention_clear(f"{task_id}:blocked")
                     attention_clear(f"{task_id}:attention")
+
+                    # 基础设施失败(投递熔断/进程崩溃)自动作废补派,
+                    # 不让整个节点空等人工 relaunch。
+                    if status == "failed" and not workflow_closed(
+                        task.get("workflow_id")
+                    ):
+                        try:
+                            recover_infra_failed_tasks(
+                                task.get("workflow_id"), tasks
+                            )
+                        except Exception as exc:
+                            print(f"[AUTO RECOVER ERROR] {exc}")
+
                     continue
 
                 # ---- listener 订阅:指数退避 + 封顶(僵尸 pane 护栏) ----

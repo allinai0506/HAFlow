@@ -110,9 +110,19 @@ Evidence:
 
 `FACT` Controller 的 `stage_advance` 入口对非 Agent 节点输出 `STAGE ADVANCE BLOCKED`，要求人工处理，不调用 Direct Dispatch 或总指挥。该阻断不受 `HERDR_DIRECT_STAGE_DISPATCH` 开关影响；事件未携带 Node 时从工作流配置解析。它不实现 human/tool/gate 原生执行器，也不限制用户手动调用 CLI。
 
+`FACT` 被作废子集补派必须按**替换谱系去重**（2026-09-17 指数放大事故后加固，
+lessons §61）：同谱系（`x` / `x-r2` / `x-r3` …）内只要还有任一非 superseded
+成员（在跑或已落定），该谱系视为已有代表，不再补派；仅当整个谱系都已作废时，
+才取序号最新一发（且无 `superseded_by`）作为补派对象，生成 `-rN+1`。
+旧逻辑直接遍历所有 `superseded` 且无替代的任务，且不看同谱系是否有在跑成员，
+fix-loop 每轮都会把历史作废任务重新补派一遍（r2/r3 → r4+r5 双跑实测），
+且随轮次 2→4→8 放大。
+
 Evidence:
 - `herdr/direct_dispatch.py#classify_dispatch`
 - `herdr/direct_dispatch.py#plan_stage_dispatch`
+- `herdr/direct_dispatch.py#lineage_redispatch_candidates`
+- `herdr/direct_dispatch.py#lineage_key`
 - `services/herdr-controller.py#_handle_coordinator_item`
 - `tests/test_direct_stage_dispatch.py#PlanStageDispatchTest`
 - `tests/test_direct_stage_dispatch.py#TryDirectStageAdvanceTest`

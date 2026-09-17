@@ -146,6 +146,44 @@ def next_replacement_id(old_task_id, existing_ids):
         index += 1
 
 
+def lineage_key(task_id):
+    """替换谱系键：(谱系根, 序号)。x -> (x, 1)；x-r2 -> (x, 2)。"""
+    text = str(task_id or "")
+    match = REPLACEMENT_SUFFIX_RE.search(text)
+    if match:
+        return text[: match.start()], int(match.group(1))
+    return text, 1
+
+
+def lineage_redispatch_candidates(node_tasks):
+    """每条替换谱系里"需要补派"的最新一发（没有则不含该谱系）。
+
+    规则：谱系内只要还有任一非 superseded 成员（在跑/已落定），该谱系就
+    已有代表，不再补派；只有当整个谱系都已作废时，才取序号最新的一发
+    作为补派对象（且它必须还没有替代者）。
+
+    补派必须按谱系去重：历史被作废任务若被反复补派，会随 fix-loop 轮次
+    指数放大（2 -> 4 -> 8 个并发重复任务，实测事故见 lessons §61）。
+    """
+    groups = {}
+    for task in node_tasks:
+        root, index = lineage_key(task.get("task_id"))
+        groups.setdefault(root, []).append(
+            (index, float(task.get("created_at") or 0), task)
+        )
+
+    candidates = []
+    for members in groups.values():
+        if any(
+            task.get("status") != "superseded" for _, _, task in members
+        ):
+            continue
+        _, _, head = max(members, key=lambda item: (item[0], item[1]))
+        if not head.get("superseded_by"):
+            candidates.append(head)
+    return candidates
+
+
 def initial_task_id(workflow_id, node_id, existing_ids):
     base = f"{workflow_id}-{node_id}-auto"
     if base not in existing_ids:
@@ -297,9 +335,8 @@ def plan_stage_dispatch(
 
     awaiting = [
         task
-        for task in node_tasks
-        if task.get("status") == "superseded"
-        and not task.get("superseded_by")
+        for task in lineage_redispatch_candidates(node_tasks)
+        if not task.get("superseded_by")
     ]
     active = [
         task for task in node_tasks if task.get("status") != "superseded"

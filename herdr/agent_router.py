@@ -3,6 +3,7 @@ import json
 import fcntl
 import os
 import time
+from datetime import datetime
 from pathlib import Path
 
 HOME = Path.home()
@@ -42,6 +43,49 @@ DEFAULT_TASK_TYPE_PREFERENCES = {
     "perf": ["codex", "opencode", "qodercli", "claude", "agy", "pi", "grok", "kimi"],
     "ci": ["codex", "opencode", "qodercli", "claude", "agy", "pi", "grok", "kimi"],
 }
+
+# Preflight 快照保鲜期:超过该秒数的 healthy_agents 名单不再被信任为
+# "当前健康"(Agent 凭证/配额会在工作流运行中途过期,如 pi AUTH_REQUIRED)。
+# 过期后路由回落到 allowed - disabled - unhealthy,而不是把任务派给一个
+# 数小时前健康、现在可能已死的 Agent。缺失/不可解析的时间戳视为新鲜,
+# 保持 legacy 记录与既有单 Agent 优雅回退语义不变。
+DEFAULT_PREFLIGHT_TTL_SECONDS = 1800.0
+
+
+def preflight_ttl_seconds() -> float:
+    raw = os.environ.get("HERDR_PREFLIGHT_TTL")
+    if raw is None:
+        return DEFAULT_PREFLIGHT_TTL_SECONDS
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_PREFLIGHT_TTL_SECONDS
+    return value if value > 0 else DEFAULT_PREFLIGHT_TTL_SECONDS
+
+
+def _preflight_checked_ts(record) -> float | None:
+    raw = (record or {}).get("preflight_checked_at")
+    if raw is None:
+        return None
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    text = str(raw).strip()
+    try:
+        return float(text)
+    except ValueError:
+        pass
+    try:
+        return datetime.fromisoformat(text).timestamp()
+    except ValueError:
+        return None
+
+
+def preflight_snapshot_fresh(record, now=None) -> bool:
+    ts = _preflight_checked_ts(record)
+    if ts is None:
+        return True
+    current = time.time() if now is None else now
+    return current - ts <= preflight_ttl_seconds()
 
 def _load(path, default):
     try:
@@ -273,6 +317,8 @@ def choose_agent(
         selected = None
 
     healthy = set(record.get("healthy_agents", []))
+    unhealthy_agents = set((record.get("unhealthy_agents") or {}).keys())
+    snapshot_fresh = preflight_snapshot_fresh(record)
 
     if selected:
         if selected in stage_used_agents:
@@ -329,7 +375,17 @@ def choose_agent(
             if (
                 agent in allowed
                 and agent not in disabled
-                and (not healthy or agent in healthy)
+                # 已知不健康的 Agent 永不自动入选:冷启动(healthy 为空)时
+                # 也不能把任务派给 AUTH_REQUIRED / TOKEN_EXHAUSTED 的 Agent。
+                and agent not in unhealthy_agents
+                # 新鲜快照才信任 healthy 名单做交集;过期快照只做减法
+                # (unhealthy),不做"只允许当时健康的集合"的限制,避免把
+                # 任务锁死在一个可能已全灭的旧集合里。
+                and (
+                    not snapshot_fresh
+                    or not healthy
+                    or agent in healthy
+                )
             )
         ]
 

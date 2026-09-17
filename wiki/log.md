@@ -639,3 +639,25 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - Updated [[dag-workflow-engine]]：动态节点首次派发回退规划，不生成通用单任务；静态角色、单任务和既有补派保持兼容。
 - Controller 在 stage_advance 入口阻断非 Agent 节点进入直接派发及总指挥回退；未实现原生执行器，明确要求人工处理。
 - 该变更仅为 DispatchPlan 改造的第一切片，不包含计划持久化、幂等执行或模板迁移。
+
+## [2026-09-17] fix | 路由健康门禁减法优先 + 投递熔断 + 基础设施失败自动补派（wf-nexusarchive-0917-01 空转事故）
+- **背景**：`wf-nexusarchive-0917-01` 需求阶段 challenger 卡 `dispatched` 2h50m（Pane 无投递痕迹）；test 节点被派给 `pi`（`AUTH_REQUIRED`）3 秒空完成 → 总指挥判 failed → 人工 28 分钟才 `--supersedes` 重派；failed 任务无任何自动补派路径。
+- **改动与实现**：
+  1. **`herdr/agent_router.py`**：候选过滤改为 `allowed - disabled - unhealthy` 减法优先，`unhealthy_agents` 永不自动入选；正向 `healthy_agents` 交集仅在 `preflight_checked_at` 处于 `HERDR_PREFLIGHT_TTL`（默认 1800s）内生效，过期快照降级为仅减法（时间戳缺失视为新鲜，保持 legacy 语义）；
+  2. **`herdr/liveness.py`**：新增纯函数 `evaluate_dispatch_fuse`（dispatched 投递 SLA 违约检测，episode 按 `(task_id, updated_at)` 去重、`requeues` 跨重派继承）与 `select_infra_failures_for_recovery`（节点无活跃任务 + 基础设施原因 + 谱系失败 < 上限）；
+  3. **`services/herdr-sentinel.py`**：`check_dispatch_fuse` 取证 `_pane_delivery_evidence`（投递标记 + Agent 状态），无标记且非 working → `[SENTINEL FUSE]` 置 failed（`dispatch_delivery_fuse`）并通知；有标记只告警；`HERDR_DISPATCH_FUSE=0` 关闭；`sentinel-state.json` 新增 `dispatch_fuse` 事件簿；
+  4. **`services/herdr-controller.py`**：`recover_infra_failed_tasks` 对基础设施 failed 任务自动 `supersede` + 清节点 stage-advance 闩，由既有 sweep 补派 `-rN`（`[AUTO RECOVER]`），谱系上限 `HERDR_AUTO_RECOVER_MAX`（默认 2），质量类失败不翻案。
+- **验证与部署**：
+  - 新增 `tests/test_agent_router_preflight.py`（7 项）与 `tests/test_dispatch_fuse.py`（18 项），全量 578 项测试 PASS；
+  - `launchctl kickstart -k` 重启 Sentinel 后实测捕获真实僵尸任务：`[SENTINEL FUSE] task=wf-agency-agents-0917-05-requirements-executor waited=2064s marker=False agent=idle action=failed`；重启 Controller 后自动接住总指挥补派任务（`[RECOVERY] ...-implementation-fix-r2 registry=dispatched agent=working`）；
+  - 沉淀通用工程教训 §60，更新 [[agent-routing-and-pools]] §4/§5 与 [[architecture]] §2.1/§2.2/§3.1。
+
+## [2026-09-17] fix | 补派谱系去重 + 非门禁节点规则化验收（同一工作流第二组浪费）
+- **背景**：`wf-nexusarchive-0917-01` 8 小时里仅 ~3.2h 真实干活。除 §60 两类浪费外，又确认两组：① fix-loop 第 2 轮一次性派出 r4+r5 两个重复测试任务（`[STAGE ADVANCED DIRECT] node=test tasks=...r4,...r5`），因补派集合从不按替换谱系去重、也从不回写 `superseded_by`，历史作废任务随轮次 2→4→8 放大；② agent_done 验收强依赖单总指挥 LLM，累计等待 ~2.6h，长回合还会阻塞后续门禁事件投递。
+- **改动与实现**：
+  1. **`herdr/direct_dispatch.py`**：新增 `lineage_key` / `lineage_redispatch_candidates`，补派按替换谱系（x / x-r2 / …）取唯一最新一发；谱系内尚有非 superseded 成员（在跑或已落定）时不再补派；修正既有 `test_redispatch_id_skips_existing` 中被放大的期望值；
+  2. **`services/herdr-controller.py`**：新增 `try_auto_accept` / `node_is_gate` / `task_changes_recorded` / `auto_accept_enabled`，非门禁节点在 `verify-baseline` 报告 `TASK_CHANGED` 时直接 `completed` 并走既有 finalize 链路（`[AUTO ACCEPT]`），在 `_process_coordinator_item` 的任何 coordinator prompt 之前生效；门禁节点、`BASELINE_MATCH`、配置不可判定（fail-closed 视为门禁）、`HERDR_AUTO_ACCEPT=0` 一律回落总指挥。
+- **验证与部署**：
+  - 新增 `tests/test_auto_acceptance.py`（9 项）与 `tests/test_direct_stage_dispatch.py` 4 项谱系用例，全量 591 项测试 PASS；
+  - 现场复现：用真实 `tasks.json`（r4 working + r5 superseded）模拟 test 节点决策 → `mode=wait / specs=[]`（旧逻辑会再派 3 个重复任务）；实况处置 `herdr-task supersede ...-r5` 保留策略 Agent claude 的 r4；
+  - `launchctl kickstart -k` 重启 Controller 后实测未再产生重复派发；沉淀教训 §61，更新 [[dag-workflow-engine]] §4.3 与 [[architecture]] §2.1。

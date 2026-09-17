@@ -181,9 +181,60 @@ class PlanStageDispatchTest(unittest.TestCase):
             _task("wf-1-test-backend-r2", "superseded"),
         ]
         plan = dd.plan_stage_dispatch("wf-1", _node(), tasks, "需求")
+        # 谱系去重：只补派最新一发（r2 -> r3），历史作废任务不得重复补派。
         self.assertEqual(
             [s["task_id"] for s in plan["specs"]],
-            ["wf-1-test-backend-r3", "wf-1-test-backend-r4"],
+            ["wf-1-test-backend-r3"],
+        )
+
+    def test_lineage_dedup_prevents_redispatch_amplification(self):
+        """Lessons §61 事故复现：r2/r3 都曾进过 awaiting，旧逻辑会一次派 2 个。
+
+        修正后：同一谱系只补派最新一发；不同角色（不同谱系根）仍各自补派。
+        """
+        tasks = [
+            _task("wf-1-test-backend", "superseded"),
+            _task("wf-1-test-backend-r2", "superseded"),
+            _task("wf-1-test-backend-r3", "superseded"),
+            _task("wf-1-test-frontend", "superseded"),
+        ]
+        plan = dd.plan_stage_dispatch("wf-1", _node(), tasks, "需求")
+        self.assertEqual(
+            [s["task_id"] for s in plan["specs"]],
+            ["wf-1-test-backend-r4", "wf-1-test-frontend-r2"],
+        )
+
+    def test_active_lineage_head_blocks_older_awaiting(self):
+        """谱系最新一发已被人工作废、但同谱系仍有在跑任务时，禁止再补派。"""
+        tasks = [
+            _task("wf-1-test-auto", "superseded"),
+            _task("wf-1-test-auto-r2", "superseded"),
+            _task("wf-1-test-auto-r3", "superseded"),
+            _task("wf-1-test-auto-r4", "working"),
+            _task("wf-1-test-auto-r5", "superseded"),
+        ]
+        plan = dd.plan_stage_dispatch("wf-1", _node(), tasks, "需求")
+        self.assertEqual(plan["mode"], "wait")
+        self.assertEqual(plan["specs"], [])
+
+    def test_fully_superseded_lineage_redispatches_newest_once(self):
+        tasks = [
+            _task("wf-1-test-auto", "superseded"),
+            _task("wf-1-test-auto-r2", "superseded"),
+            _task("wf-1-test-auto-r3", "superseded"),
+        ]
+        plan = dd.plan_stage_dispatch("wf-1", _node(), tasks, "需求")
+        self.assertEqual(
+            [s["task_id"] for s in plan["specs"]],
+            ["wf-1-test-auto-r4"],
+        )
+
+    def test_redispatch_of_plain_base_id(self):
+        tasks = [_task("wf-1-test-backend", "superseded")]
+        plan = dd.plan_stage_dispatch("wf-1", _node(), tasks, "需求")
+        self.assertEqual(
+            [s["task_id"] for s in plan["specs"]],
+            ["wf-1-test-backend-r2"],
         )
 
     def test_wait_when_active_tasks_exist(self):
