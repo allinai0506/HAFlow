@@ -27,12 +27,20 @@ class TestWorkflowTemplates(unittest.TestCase):
         self.assertIn("software-development-v1", templates)
         self.assertIn("bidding", templates)
         self.assertIn("customer-service", templates)
+        self.assertIn("seo-audit-v1", templates)
+        self.assertIn("general-task-v1", templates)
 
         dev_tmpl = templates["software-development-v1"]
         self.assertEqual(dev_tmpl["node_count"], 6)
 
         bidding_tmpl = templates["bidding"]
         self.assertEqual(bidding_tmpl["node_count"], 7)
+
+        seo_tmpl = templates["seo-audit-v1"]
+        self.assertEqual(seo_tmpl["node_count"], 4)
+
+        gen_tmpl = templates["general-task-v1"]
+        self.assertEqual(gen_tmpl["node_count"], 3)
 
     def test_load_template_content(self):
         tmpl = load_template("software-development-v1")
@@ -49,6 +57,33 @@ class TestWorkflowTemplates(unittest.TestCase):
         self.assertEqual(tmpl["nodes"][0].get("depends_on", []), [])
         # Second node depends on first
         self.assertEqual(tmpl["nodes"][1].get("depends_on", []), ["requirements"])
+
+    def test_load_seo_audit_template(self):
+        tmpl = load_template("seo-audit-v1")
+        self.assertEqual(tmpl["name"], "seo-audit-v1")
+        self.assertEqual(len(tmpl["nodes"]), 4)
+        node_ids = [n["id"] for n in tmpl["nodes"]]
+        self.assertEqual(
+            node_ids,
+            [
+                "tech_crawling_audit",
+                "keyword_and_content_matrix",
+                "remediation_roadmap",
+                "executive_delivery",
+            ],
+        )
+        validate_workflow_dag(tmpl["nodes"])
+
+    def test_load_general_task_template(self):
+        tmpl = load_template("general-task-v1")
+        self.assertEqual(tmpl["name"], "general-task-v1")
+        self.assertEqual(len(tmpl["nodes"]), 3)
+        node_ids = [n["id"] for n in tmpl["nodes"]]
+        self.assertEqual(
+            node_ids,
+            ["intake_and_scoping", "deep_execution", "review_and_delivery"],
+        )
+        validate_workflow_dag(tmpl["nodes"])
 
     def test_load_non_existent_template(self):
         with self.assertRaises(FileNotFoundError):

@@ -1,0 +1,35 @@
+name: general-task-v1
+label: 通用数字化任务协同流
+version: "1.0"
+description: 面向非软件研发类通用任务（咨询方案、文案起草、方案评估、数据分析）的轻量协同流程。
+
+nodes:
+  - id: intake_and_scoping
+    label: 1任务理解与范围界定
+    node_type: agent
+    depends_on: []
+    purpose: 理解任务目标、梳理约束条件、确定交付标准与产出物形式。
+    default_integration_mode: none
+    default_task_type: docs
+    agent_policy:
+      preferred: [claude, agy, codex]
+
+  - id: deep_execution
+    label: 2专项深度执行
+    node_type: agent
+    depends_on: [intake_and_scoping]
+    purpose: 针对核心业务目标执行专业分析、方案起草或内容产出。
+    default_integration_mode: none
+    default_task_type: docs
+    agent_policy:
+      preferred: [claude, agy, codex]
+
+  - id: review_and_delivery
+    label: 3评审验收与交付归档
+    node_type: agent
+    depends_on: [deep_execution]
+    purpose: 校验交付物完整性与排版质量，完成成果归档与交付。
+    default_integration_mode: none
+    default_task_type: docs
+    agent_policy:
+      preferred: [claude, agy, codex]
