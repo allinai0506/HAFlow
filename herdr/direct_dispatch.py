@@ -16,7 +16,9 @@ controller 外壳完成。
 
 from __future__ import annotations
 
+import os
 import re
+from pathlib import Path
 
 REPLACEMENT_SUFFIX_RE = re.compile(r"-r(\d+)$")
 
@@ -28,11 +30,33 @@ GENERIC_ACCEPTANCE = (
     "产物必须落盘到当前工作目录，禁止只写在回复里",
 )
 
-GATE_VERDICT_CONTRACT = """\
+# 门禁结论文件默认落在 clone 外的状态目录:避免被 herdr-task commit 带进
+# 交付(clone 内写 .herdr/ 虽已被内部过滤兜底,但状态目录更干净,且不依赖
+# clone 存活)。可用 HERDR_GATE_VERDICT_DIR 覆盖(测试/自定义部署)。
+GATE_VERDICT_DIR_ENV = "HERDR_GATE_VERDICT_DIR"
+DEFAULT_GATE_VERDICT_DIR = Path.home() / ".herdr-controller" / "gate-verdicts"
+
+
+def gate_verdict_dir() -> Path:
+    override = os.environ.get(GATE_VERDICT_DIR_ENV)
+    return Path(override).expanduser() if override else DEFAULT_GATE_VERDICT_DIR
+
+
+def gate_verdict_path(task_id) -> str:
+    """门禁结论文件的绝对路径(状态目录,clone 外)。"""
+    return str(gate_verdict_dir() / f"{task_id}.json")
+
+
+def gate_verdict_contract(task_id) -> str:
+    """门禁结论契约文本(含本任务的结论文件绝对路径)。"""
+    path = gate_verdict_path(task_id)
+    return f"""\
 【门禁结论契约（必须遵守，结论将被机器直接采纳）】
-1. 验证完成后，在当前工作目录写入 .herdr/gate-verdict.json，内容二选一：
-   {"verdict": "pass", "note": "一句话结论"}
-   {"verdict": "blocked", "note": "阻塞原因清单"}
+1. 验证完成后，写入门禁结论文件：{path}
+   内容二选一：
+   {{"verdict": "pass", "note": "一句话结论"}}
+   {{"verdict": "blocked", "note": "阻塞原因清单"}}
+   （若你的写权限不允许写该路径，可退回写入当前工作目录下 .herdr/gate-verdict.json，内容格式相同）
 2. 同时在终端单独输出一行，便于人工对照：
    HERDR_GATE_VERDICT: pass   或   HERDR_GATE_VERDICT: blocked
 3. verdict 只能二选一：pass = 未发现必须返工的阻塞缺陷；blocked = 存在必须返工的阻塞缺陷，且必须在 note 中列出。
@@ -220,6 +244,7 @@ def _prompt(
     goal,
     acceptance,
     *,
+    task_id=None,
     redispatch_of=None,
     last_failure_note=None,
     context_branch=None,
@@ -242,7 +267,9 @@ def _prompt(
     if context_branch:
         redispatch_note += f"\n相关既有分支（如需核对）：{context_branch}\n"
 
-    gate_note = "\n\n" + GATE_VERDICT_CONTRACT if gate_contract else ""
+    gate_note = (
+        "\n\n" + gate_verdict_contract(task_id) if gate_contract and task_id else ""
+    )
 
     return f"""HERDR_DIRECT_DISPATCH
 
@@ -302,6 +329,7 @@ def _dispatch_spec(
             requirement,
             goal,
             acceptance,
+            task_id=task_id,
             redispatch_of=redispatch_of,
             last_failure_note=last_failure_note,
             context_branch=context_branch,

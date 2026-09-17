@@ -2515,11 +2515,18 @@ Agent 的自然语言报告里，必须由另一个 LLM（总指挥）阅读并"
 
 ### 操作规范（已固化到 `herdr/direct_dispatch.py`、`services/herdr-controller.py`）
 
-1. **契约注入 (`herdr/direct_dispatch.py#GATE_VERDICT_CONTRACT`)**：
+1. **契约注入 (`herdr/direct_dispatch.py#gate_verdict_contract`)**：
    - 仅当 `plan_stage_dispatch(..., gate_contract=True)`（Controller 由
      `node_is_gate` 判定）时，在门禁任务 prompt 末尾追加契约：
-     写 `<clone>/.herdr/gate-verdict.json`（`{"verdict": "pass|blocked", "note": "..."}`）
+     写 clone 外状态目录 `~/.herdr-controller/gate-verdicts/<task_id>.json`
+     （`{"verdict": "pass|blocked", "note": "..."}`；`HERDR_GATE_VERDICT_DIR` 可覆盖；
+     权限受限时退回 `<clone>/.herdr/gate-verdict.json`）
      + 终端输出 `HERDR_GATE_VERDICT: pass|blocked`。
+   - **2026-09-17 修订（lessons §64 关联）**：结论文件从 clone 内迁到状态目录——
+     clone 内文件会被 `herdr-task commit` 带进交付（实测污染 nexusarchive 交付 PR）；
+     同时 `bin/herdr-task` 的 `INTERNAL_UNTRACKED_*` 过滤器新增 `.herdr` / `.herdr/`，
+     commit 与 verify-baseline 均不再计入该目录（兜底防线）；Controller 读取时
+     状态目录优先、clone 路径兼容回退。
 2. **规则化裁决 (`services/herdr-controller.py#try_auto_verdict`)**：
    - `read_gate_verdict` 合并文件与屏幕两路信号，归一化（pass/passed/ok → pass；
      blocked/block/fail/failed → blocked），仅当唯一结论才返回；

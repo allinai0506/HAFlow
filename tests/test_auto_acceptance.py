@@ -169,6 +169,39 @@ class GateVerdictUnitTest(unittest.TestCase):
         self.assertEqual(note, "D7 金额残留")
         self.assertIn("file", source)
 
+    def test_state_dir_file_read_without_clone(self):
+        """结论文件在 clone 外状态目录时也必须可读（clone 被清理也不丢）。"""
+        import tempfile as _tempfile
+
+        with _tempfile.TemporaryDirectory(prefix="herdr-verdict-dir-") as state_dir:
+            from herdr import direct_dispatch as dd
+
+            with patch.dict("os.environ", {"HERDR_GATE_VERDICT_DIR": state_dir}):
+                path = dd.gate_verdict_path("t-gate")
+                with open(path, "w", encoding="utf-8") as handle:
+                    json.dump({"verdict": "pass", "note": "全部关闭"}, handle)
+                task = self._task()
+                task["clone_path"] = "/nonexistent-clone-path"
+                with patch.object(
+                    self.ctrl, "_verdict_from_screen", return_value=(None, "")
+                ):
+                    verdict, note, source = self.ctrl.read_gate_verdict(task)
+        self.assertEqual(verdict, "pass")
+        self.assertEqual(note, "全部关闭")
+        self.assertIn("file", source)
+
+    def test_clone_fallback_still_supported(self):
+        """旧契约（clone 内 .herdr/）继续可读，保证过渡期兼容。"""
+        self._write_verdict_file({"verdict": "blocked", "note": "legacy"})
+        task = self._task()
+        task["task_id"] = ""
+        with patch.object(
+            self.ctrl, "_verdict_from_screen", return_value=(None, "")
+        ):
+            verdict, note, _ = self.ctrl.read_gate_verdict(task)
+        self.assertEqual(verdict, "blocked")
+        self.assertEqual(note, "legacy")
+
     def test_conflicting_signals_are_ambiguous(self):
         self._write_verdict_file({"verdict": "pass", "note": ""})
         with patch.object(

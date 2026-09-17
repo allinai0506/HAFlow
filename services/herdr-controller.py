@@ -2699,8 +2699,10 @@ def try_auto_accept(task_id):
 # 门禁规则化裁决 (auto-verdict) — 门禁节点免除总指挥 LLM 回合
 # ============================================================
 
-# 契约：门禁任务在 Clone 根写入 .herdr/gate-verdict.json，并在终端输出
-# HERDR_GATE_VERDICT: pass|blocked（可选 HERDR_GATE_NOTE: <原因>）。
+# 契约：门禁任务写入门禁结论文件，并在终端输出 HERDR_GATE_VERDICT: pass|blocked
+# （可选 HERDR_GATE_NOTE: <原因>）。结论文件默认落在 clone 外状态目录
+# （~/.herdr-controller/gate-verdicts/<task_id>.json），避免被 herdr-task commit
+# 带进交付；为兼容旧契约与权限受限场景，clone 内 .herdr/gate-verdict.json 仍可读。
 # 两个通道结论一致时直接落 verdict；缺失或互相矛盾一律回落总指挥。
 GATE_VERDICT_FILE = ".herdr/gate-verdict.json"
 GATE_VERDICT_MARKER = "HERDR_GATE_VERDICT:"
@@ -2726,21 +2728,34 @@ def _normalize_gate_verdict(value):
     return _GATE_VERDICT_ALIASES.get(str(value or "").strip().lower())
 
 
-def _verdict_from_file(task):
+def _gate_verdict_file_candidates(task):
+    """结论文件候选路径：状态目录优先，clone 内旧契约路径兜底。"""
+    candidates = []
+    task_id = task.get("task_id")
+    if task_id and direct_dispatch_planner is not None:
+        try:
+            candidates.append(direct_dispatch_planner.gate_verdict_path(task_id))
+        except Exception:
+            pass
     clone_path = task.get("clone_path")
-    if not clone_path:
-        return None, ""
-    try:
-        with open(
-            os.path.join(clone_path, GATE_VERDICT_FILE), encoding="utf-8"
-        ) as handle:
-            payload = json.load(handle)
-    except Exception:
-        return None, ""
-    if not isinstance(payload, dict):
-        return None, ""
-    verdict = _normalize_gate_verdict(payload.get("verdict"))
-    return verdict, str(payload.get("note") or "").strip()
+    if clone_path:
+        candidates.append(os.path.join(clone_path, GATE_VERDICT_FILE))
+    return candidates
+
+
+def _verdict_from_file(task):
+    for path in _gate_verdict_file_candidates(task):
+        try:
+            with open(path, encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        verdict = _normalize_gate_verdict(payload.get("verdict"))
+        if verdict:
+            return verdict, str(payload.get("note") or "").strip()
+    return None, ""
 
 
 def _verdict_from_screen(task):
