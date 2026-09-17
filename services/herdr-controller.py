@@ -1026,16 +1026,27 @@ def try_direct_stage_advance(item):
         )
         return False
 
+    gate_task = node_is_gate(workflow_id, ready_id)
+
+    # 门禁节点在派发时注入结论契约(状态目录 gate-verdicts/<task_id>.json +
+    # 终端标记),由 try_auto_verdict 直接采纳,免除总指挥裁决回合。
     plan = direct_dispatch_planner.plan_stage_dispatch(
         workflow_id,
         node,
         load_tasks(),
         requirement,
         context_branch=latest_branch_for_node(workflow_id, ready_id),
-        # 门禁节点在派发时注入结论契约(.herdr/gate-verdict.json + 终端标记),
-        # 由 try_auto_verdict 直接采纳,免除总指挥裁决回合。
-        gate_contract=node_is_gate(workflow_id, ready_id),
+        gate_contract=gate_task,
     )
+
+    if gate_task and plan.get("mode") == "dispatch":
+        # 状态目录必须先于 Agent 写入存在(结论文件落 clone 外,交付零污染)。
+        try:
+            direct_dispatch_planner.gate_verdict_dir().mkdir(
+                parents=True, exist_ok=True
+            )
+        except Exception as exc:
+            print(f"[GATE VERDICT DIR WARN] {exc}")
 
     mode = plan.get("mode")
 
