@@ -689,3 +689,11 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
   1. **模板（`workflow_templates/software-development-v1.yaml`）**：wrapup 规则新增「交付 PR 前置（必做）」——步骤 1-2 之后、步骤 3 之前，读目标仓交付约定并按其流程推送交付分支 + 创建 PR（如 `npm run pr:create`），PR URL 写入收尾报告；硬约束：只允许推送/建 PR 两类非破坏性动作，严禁自动合并、严禁 `--force`/`--yes`；未合入的 DEFERRED 记录必须含 PR URL；
   2. **技能（`.agents/skills/six-step-finish/SKILL.md`，版本 `2026.09.17-1`）**：新增「步骤 0：交付 PR 前置」+ Agent 职责「先建 PR 再做核验」+ 三条常见借口兜底；同步 `scripts/install-herdr-skills.sh` 到 `~/.agents/skills/` 并更新 `PROVENANCE.md`（sha256 + 本地修订记录）与 `tests/test_six_step_skill_provenance.py` 登记哈希。
 - **验证**：新增模板契约测试（`test_wrapup_requires_delivery_pr_before_finish`，9 passed）与 vendoring 校验（6 passed），全量 611 项测试 PASS；全局技能副本 grep「步骤 0」命中；沉淀教训 §64，更新 [[dag-workflow-engine]] §11。
+
+## [2026-09-17] fix | 门禁结论文件移出 clone + .herdr 纳入内部过滤（交付零污染）
+- **背景**：门禁契约文件 `.herdr/gate-verdict.json` 写在 clone 内，会被 `herdr-task commit` 带进交付——实测污染 nexusarchive 交付 PR（wrapup 任务的交付分支带入门禁机器产物，被迫在目标仓加 `.gitignore` 补丁）。
+- **改动与实现**：
+  1. **`herdr/direct_dispatch.py`**：`GATE_VERDICT_CONTRACT` 常量改为 `gate_verdict_contract(task_id)` 函数 + `gate_verdict_path()`——结论文件默认落 clone 外状态目录 `~/.herdr-controller/gate-verdicts/<task_id>.json`（`HERDR_GATE_VERDICT_DIR` 可覆盖），契约文本内嵌该任务的绝对路径，并保留「权限受限可退回 clone 内 `.herdr/`」兜底；
+  2. **`services/herdr-controller.py`**：`_gate_verdict_file_candidates` 状态目录优先、clone 旧契约路径兼容回退（过渡期不丢信号）；
+  3. **`bin/herdr-task`**：`INTERNAL_UNTRACKED_EXACT/PREFIXES` 新增 `.herdr` / `.herdr/`——commit 与 verify-baseline 均不再计入该目录（跨仓兜底防线）。
+- **验证**：新增/更新用例（结论文件路径与契约注入、状态目录读取、clone 兜底兼容、内部过滤），全量 614 项测试 PASS；现场兼容性实测：历史 wrapup 任务的状态目录为空时仍能从 clone 兜底读到 `pass`。同步更新 [[architecture]] §2.1、[[dag-workflow-engine]] §10 与 lessons §62 操作规范。

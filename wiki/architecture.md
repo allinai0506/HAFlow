@@ -90,9 +90,11 @@ Evidence:
   fix-loop 每轮 2→4→8 放大并发重复任务（[[dag-workflow-engine]] §4.3）。
 - `FACT` **门禁规则化裁决 auto-verdict（2026-09-17 引入，lessons §62）**:
   门禁节点（test/review/wrapup）派发时注入结论契约
-  （`herdr/direct_dispatch.py#GATE_VERDICT_CONTRACT`：写 `<clone>/.herdr/gate-verdict.json`
-  + 终端输出 `HERDR_GATE_VERDICT: pass|blocked`）；`try_auto_verdict` 合并文件与屏幕
-  两路信号，结论唯一一致时直接调用既有 CLI 契约
+  （`herdr/direct_dispatch.py#gate_verdict_contract`：写 clone 外状态目录
+  `~/.herdr-controller/gate-verdicts/<task_id>.json`（`HERDR_GATE_VERDICT_DIR` 可覆盖；
+  权限受限时可退回 `<clone>/.herdr/gate-verdict.json`，该目录已被 `herdr-task` 内部过滤、
+  不会进入交付）+ 终端输出 `HERDR_GATE_VERDICT: pass|blocked`）；`try_auto_verdict`
+  合并文件（状态目录优先、clone 兜底）与屏幕两路信号，结论唯一一致时直接调用既有 CLI 契约
   `herdr-task set <task> completed --verdict ... --note ...` 落盘，blocked 自动进入既有
   fix-loop 回流。信号缺失/冲突、非门禁节点、`HERDR_AUTO_VERDICT=0` 一律回落总指挥。
   背景：门禁 verdict 过去必须由总指挥 LLM 从自然语言报告"转写"，566K tokens 上下文下单回合 10-20min。

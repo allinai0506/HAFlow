@@ -79,6 +79,12 @@ class InternalUntrackedFilterTest(unittest.TestCase):
         (loop / "GOAL.md").write_text("# goal\n", encoding="utf-8")
         (loop / "logs").mkdir()
         (loop / "logs" / "test.log").write_text("ok\n", encoding="utf-8")
+        gate = self.repo / ".herdr"
+        gate.mkdir()
+        (gate / "gate-verdict.json").write_text(
+            '{"verdict": "pass", "note": "probe"}\n',
+            encoding="utf-8",
+        )
 
     def _committed_paths(self):
         return _git(
@@ -96,8 +102,13 @@ class InternalUntrackedFilterTest(unittest.TestCase):
         self.assertTrue(
             _ht._is_internal_untracked(".herdr-loop/logs/test.log")
         )
+        self.assertTrue(_ht._is_internal_untracked(".herdr"))
+        self.assertTrue(
+            _ht._is_internal_untracked(".herdr/gate-verdict.json")
+        )
         self.assertFalse(_ht._is_internal_untracked("delivery.txt"))
         self.assertFalse(_ht._is_internal_untracked(".agent-task-context.bak"))
+        self.assertFalse(_ht._is_internal_untracked(".herdr.bak"))
         self.assertFalse(
             _ht._is_internal_untracked("sub/.herdr-loop/GOAL.md")
         )

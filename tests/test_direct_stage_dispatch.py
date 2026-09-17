@@ -255,13 +255,35 @@ class PlanStageDispatchTest(unittest.TestCase):
         gate_plan = dd.plan_stage_dispatch(
             "wf-1", _node(), [], "需求", gate_contract=True
         )
-        self.assertIn("HERDR_GATE_VERDICT", gate_plan["specs"][0]["prompt"])
-        self.assertIn(
-            ".herdr/gate-verdict.json", gate_plan["specs"][0]["prompt"]
-        )
+        prompt = gate_plan["specs"][0]["prompt"]
+        self.assertIn("HERDR_GATE_VERDICT", prompt)
+        self.assertIn("gate-verdict.json", prompt)
 
         plain_plan = dd.plan_stage_dispatch("wf-1", _node(), [], "需求")
         self.assertNotIn("HERDR_GATE_VERDICT", plain_plan["specs"][0]["prompt"])
+
+    def test_gate_verdict_path_prefers_outside_clone_state_dir(self):
+        """门禁结论文件必须落到 clone 外状态目录（避免污染交付）。"""
+        task_id = "wf-1-test-auto"
+        default_path = dd.gate_verdict_path(task_id)
+        self.assertTrue(default_path.endswith(f"gate-verdicts/{task_id}.json"))
+        self.assertIn(".herdr-controller", default_path)
+
+        with patch.dict(
+            os.environ, {"HERDR_GATE_VERDICT_DIR": "/tmp/herdr-verdicts"}
+        ):
+            self.assertEqual(
+                dd.gate_verdict_path(task_id),
+                f"/tmp/herdr-verdicts/{task_id}.json",
+            )
+
+            # 契约把绝对路径写进 prompt（含任务 id），并保留 clone 内兜底说明
+            plan = dd.plan_stage_dispatch(
+                "wf-1", _node(), [], "需求", gate_contract=True
+            )
+            prompt = plan["specs"][0]["prompt"]
+            self.assertIn("/tmp/herdr-verdicts", prompt)
+            self.assertIn("wf-1-test-auto.json", prompt)
 
     def test_gate_contract_carried_into_redispatch(self):
         tasks = [_task("wf-1-test-backend", "superseded")]

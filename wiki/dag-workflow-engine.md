@@ -153,12 +153,15 @@ gate+下游任务 → 节点回归未完成 → 既有 `reconcile_stage_advance_
 
 `FACT` **门禁结论契约化（2026-09-17 引入，lessons §62）**：门禁节点的 verdict
 不再必须由总指挥 LLM 从自然语言报告转写。派发时（`gate_contract=True`）注入契约：
-Agent 须写 `<clone>/.herdr/gate-verdict.json` 并在终端输出
-`HERDR_GATE_VERDICT: pass|blocked`；Controller 的 `try_auto_verdict` 仅在
+Agent 须写 clone 外状态目录 `~/.herdr-controller/gate-verdicts/<task_id>.json`
+（`HERDR_GATE_VERDICT_DIR` 可覆盖；权限受限时退回 `<clone>/.herdr/gate-verdict.json`）
+并在终端输出 `HERDR_GATE_VERDICT: pass|blocked`；Controller 的 `try_auto_verdict` 仅在
 两路信号结论唯一一致时采纳，并经既有 CLI 契约
 `herdr-task set <task> completed --verdict ... --note ...` 落盘（blocked 必须带 note）。
 缺失/冲突回落总指挥；`HERDR_AUTO_VERDICT=0` 关闭。存量在跑任务可用
-`herdr-task steer` 补注入契约。
+`herdr-task steer` 补注入契约。clone 内 `.herdr/` 已被 `bin/herdr-task`
+`INTERNAL_UNTRACKED_*` 过滤（commit / verify-baseline 均不计入），
+避免门禁机器产物污染交付。
 
 Evidence: `herdr/direct_dispatch.py#GATE_VERDICT_CONTRACT` /
 `services/herdr-controller.py#read_gate_verdict` / `#try_auto_verdict` /

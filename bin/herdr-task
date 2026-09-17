@@ -1742,8 +1742,8 @@ def dispatch_task(task_id, prompt):
     print(f"Task dispatched: {task_id} -> {pane_id}")
 
 
-INTERNAL_UNTRACKED_EXACT = {".agent-task-context", ".herdr-loop"}
-INTERNAL_UNTRACKED_PREFIXES = (".herdr-loop/",)
+INTERNAL_UNTRACKED_EXACT = {".agent-task-context", ".herdr-loop", ".herdr"}
+INTERNAL_UNTRACKED_PREFIXES = (".herdr-loop/", ".herdr/")
 
 
 def _is_internal_untracked(path):
