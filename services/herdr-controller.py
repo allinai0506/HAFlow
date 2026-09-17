@@ -73,6 +73,9 @@ _workflow_complete_logged = set()
 _listener_backoff = {}
 _listener_giveup_logged = set()
 
+# 终化重试耗尽的任务:只告警一次,避免每轮 sweep 刷屏。
+_finalize_retry_exhausted_logged = set()
+
 # 已触发过 close-workflow 的 workflow,防止轮询期间重复派发。
 _workflow_close_inflight = set()
 
@@ -438,6 +441,31 @@ def _bump_fix_loop_count(workflow_id, retry_node):
 # 质量类失败结论(如总指挥判定 failed)绝不自动翻案。
 AUTO_RECOVER_REASONS = {"dispatch_delivery_fuse", "agent_process_crash"}
 AUTO_RECOVER_MAX_ATTEMPTS = int(os.environ.get("HERDR_AUTO_RECOVER_MAX", "2"))
+
+# 终化重试上限：commit 门禁瞬时失败(flaky)/集成冲突时按注意力退避自动重试；
+# 达到上限后停止自动重试并升级人工(避免 gate 永久失败造成的无限重试风暴)。
+FINALIZE_RETRY_MAX = int(os.environ.get("HERDR_FINALIZE_RETRY_MAX", "5"))
+
+
+def should_retry_finalize(status, episode, now, max_attempts=None):
+    """(should_retry, reason, exhausted) — committed/completed 的终化重试决策。
+
+    `completed` 且 integration_mode=git 的任务若 commit 门禁瞬时失败，此前
+    没有任何重试路径，只能人工或总指挥手工重试（实测一次 flaky gate 浪费
+    55min 并烧掉总指挥大回合）。本函数给出统一的退避重试 + 上限判定。
+    """
+    if status not in ("committed", "completed"):
+        return False, "", False
+
+    limit = FINALIZE_RETRY_MAX if max_attempts is None else int(max_attempts)
+    attempts = int((episode or {}).get("attempts") or 0)
+    if attempts >= limit:
+        return False, "", True
+
+    if float((episode or {}).get("next_retry_at") or 0) > now:
+        return False, "", False
+    reason = "integration_retry" if status == "committed" else "commit_retry"
+    return True, reason, False
 
 
 def recover_infra_failed_tasks(workflow_id, tasks=None):
@@ -3624,31 +3652,49 @@ def registry_watcher():
                 else:
                     attention_clear(f"{task_id}:attention")
 
-                # ---- committed 滞留任务:此前 integrate 失败(如主仓库脏/并发锁),补收尾护栏 ----
-                if status == "committed" and task.get("integration_mode") == "git" and not workflow_closed(task.get("workflow_id")):
+                # ---- committed 滞留 / completed 但 commit 门禁瞬时失败(flaky):
+                #      integrate 失败或 commit gate 抖动时按退避自动重试,
+                #      达到上限后停止并升级人工(避免无限重试风暴)。
+                if (
+                    task.get("integration_mode") == "git"
+                    and not workflow_closed(task.get("workflow_id"))
+                ):
                     key = f"{task_id}:finalize"
-                    if not attention_blocks_retry(key, now):
+                    retry, reason, exhausted = should_retry_finalize(
+                        status, attention_get(key), now
+                    )
+                    if exhausted:
+                        if task_id not in _finalize_retry_exhausted_logged:
+                            _finalize_retry_exhausted_logged.add(task_id)
+                            print(
+                                f"[FINALIZE RETRY EXHAUSTED] task={task_id} "
+                                f"status={status} attempts>={FINALIZE_RETRY_MAX} "
+                                "-> manual/coordinator intervention required"
+                            )
+                    elif retry:
                         print(
                             f"[REGISTRY WATCHER] "
                             f"task={task_id} "
-                            f"status=committed -> retry finalize"
+                            f"status={status} -> retry finalize ({reason})"
                         )
                         finalize_completed_task(task_id)
                         cur_t = get_task(task_id)
-                        if cur_t and cur_t.get("status") == "committed":
-                            if not attention_get(key):
-                                attention_note(
-                                    key,
-                                    task,
-                                    "finalize",
-                                    reason="integration_retry",
-                                    attempts=1,
-                                )
+                        if cur_t and cur_t.get("status") == status:
+                            episode = attention_get(key) or {}
+                            attention_note(
+                                key,
+                                task,
+                                "finalize",
+                                reason=reason,
+                                attempts=int(episode.get("attempts") or 0) + 1,
+                            )
                             attention_throttle(key, now=now)
                         else:
                             attention_clear(key)
+                            _finalize_retry_exhausted_logged.discard(task_id)
                 else:
                     attention_clear(f"{task_id}:finalize")
+                    _finalize_retry_exhausted_logged.discard(task_id)
 
                 if status == "rework" and not workflow_closed(task.get("workflow_id")):
                     pane_id = task.get("pane_id")

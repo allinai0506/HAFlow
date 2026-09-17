@@ -252,6 +252,58 @@ class GateVerdictUnitTest(unittest.TestCase):
         self.assertEqual(source, "screen")
 
 
+class FinalizeRetryDecisionTest(unittest.TestCase):
+    """commit 门禁瞬时失败(flaky)的 completed 任务必须有有界重试路径。
+
+    背景：fix-r2 因目标仓 bugfix gate 的 frontend.test 抖动（~50% 概率）
+    提交失败，completed 任务无重试路径，只能总指挥手工重试 5 次，
+    65 分钟后才靠人工重试通过（lessons §62 关联发现）。
+    """
+
+    def setUp(self):
+        self.ctrl = _load_controller("ctrl_finalize_retry_test")
+
+    def test_completed_git_task_retries_with_commit_reason(self):
+        retry, reason, exhausted = self.ctrl.should_retry_finalize(
+            "completed", {}, now=1000.0
+        )
+        self.assertTrue(retry)
+        self.assertEqual(reason, "commit_retry")
+        self.assertFalse(exhausted)
+
+    def test_committed_task_retries_with_integration_reason(self):
+        retry, reason, exhausted = self.ctrl.should_retry_finalize(
+            "committed", {}, now=1000.0
+        )
+        self.assertTrue(retry)
+        self.assertEqual(reason, "integration_retry")
+        self.assertFalse(exhausted)
+
+    def test_backoff_window_blocks_retry(self):
+        retry, _, exhausted = self.ctrl.should_retry_finalize(
+            "completed", {"attempts": 1, "next_retry_at": 2000.0}, now=1000.0
+        )
+        self.assertFalse(retry)
+        self.assertFalse(exhausted)
+
+    def test_max_attempts_marks_exhausted(self):
+        retry, _, exhausted = self.ctrl.should_retry_finalize(
+            "completed", {"attempts": 5, "next_retry_at": 0}, now=1000.0,
+            max_attempts=5,
+        )
+        self.assertFalse(retry)
+        self.assertTrue(exhausted)
+
+    def test_other_statuses_never_retry(self):
+        for status in ("working", "agent_done", "failed", "cleaned"):
+            with self.subTest(status=status):
+                retry, _, exhausted = self.ctrl.should_retry_finalize(
+                    status, {}, now=1000.0
+                )
+                self.assertFalse(retry)
+                self.assertFalse(exhausted)
+
+
 class DoneEventWiringTest(unittest.TestCase):
     """The done-event handler must take the fast path before any prompt."""
 

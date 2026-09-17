@@ -672,3 +672,13 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
   - 新增 `GateVerdictUnitTest` 9 项 + 门禁 wiring 1 项、门禁契约注入 2 项，全量 603 项测试 PASS；
   - 现场只读校验：review 节点 prompt 含契约标记；对 r4 任务 `read_gate_verdict()` 返回空（无标记不误判）；`node_is_gate` 分类正确（test/review/wrapup=true）；
   - 沉淀教训 §62，更新 [[dag-workflow-engine]] §10 与 [[architecture]] §2.1。
+
+## [2026-09-17] fix | 终化重试护栏全覆盖：commit 门禁瞬时失败不再成为 completed 死区
+- **背景**：`implementation-fix-r2` 验收通过后 commit 被目标仓 bugfix 门禁拦截（`frontend.test` 抖动，`ErrorBoundary.test.tsx` teardown 型，历史采样约 50% 抖动率）；`finalize_completed_task` 失败后任务停留在 `completed`——既非 `committed`（有重试护栏）也非终态，**无任何自动重试路径**，总指挥在 577K tokens 回合里手工重试 5 次、阻塞 65 分钟（期间 test 节点 done 事件一直 `[COORDINATOR BUSY]`）。叠加环境因素：系统 load 61/150/176（他项目长驻进程），门禁抖动概率被放大。
+- **改动与实现**：
+  1. **`services/herdr-controller.py`**：新增纯函数 `should_retry_finalize`（`committed`/`completed` + git + 退避窗口 + `HERDR_FINALIZE_RETRY_MAX` 默认 5 上限 + 耗尽判定）；registry watcher 的原 `committed` 重试分支扩展为统一终化重试（reason 区分 `integration_retry`/`commit_retry`），耗尽后 `[FINALIZE RETRY EXHAUSTED]` 只告警一次并升级人工；
+  2. 重试复用幂等的 `finalize_completed_task`，不引入新状态。
+- **验证与部署**：
+  - 新增 `FinalizeRetryDecisionTest` 5 项，全量 608 项测试 PASS；
+  - 现场恢复链复现：`c30d99e2` 提交 → Controller `[REGISTRY WATCHER] committed -> retry finalize` → `cleaned`；
+  - 沉淀教训 §63，更新 [[architecture]] §2.1。

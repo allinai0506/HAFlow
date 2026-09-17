@@ -2559,3 +2559,75 @@ pytest -q
 
 ---
 
+## 63. commit 门禁瞬时失败（flaky gate）无重试路径：`completed` 任务死区
+
+### 问题背景
+
+同一工作流收尾阶段实测：`implementation-fix-r2` 在 19:11 验收通过进入 `completed`，
+Controller 随即执行 `herdr-task commit` 被目标仓 bugfix 门禁拦截——
+`❌ bugfix 工程化验证失败：frontend.test ok=False`（`ErrorBoundary.test.tsx` 的
+"test environment was torn down" 型抖动，来自 `reports/verify/*-bugfix.json` 历史
+采样：同一 profile 在 11:13/11:29/11:44 UTC 失败、11:20/12:01 UTC 通过，约 50% 抖动率）。
+
+后果链：
+1. `finalize_completed_task` 打印 `[COMMIT ERROR]` 后直接 `return`，任务停留在
+   `completed`——**既不是 `committed`（有重试护栏）也不是终态**，没有任何自动重试路径；
+2. 总指挥（LLM）为救场手工重试 `herdr-task commit` **5 次**，在一个 577K tokens
+   的回合里空转 65 分钟（19:11 → 20:06），期间同一工作流 test 节点的
+   `done` 事件一直排队（`[COORDINATOR BUSY]`），门禁验收被连带阻塞；
+3. 期间正是人工重试的第 5 次运气好撞上抖动通过（`c30d99e2`），Controller 的
+   `committed -> retry finalize` 护栏才接管完成 integrate + cleanup。
+
+叠加环境因素：当时系统 load average 61/150/176（大量他项目长驻进程），
+重门禁（架构检查 6687 依赖 + 全量前端测试）在过载下抖动概率显著升高，
+且门禁输出中"❌/失败 profile"位于尾部，`[COMMIT ERROR]` 只回显首行，
+人工排障需要翻整段日志。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| **`completed` + git 是重试死区** | 中间态的"可重试"护栏必须覆盖全链路：`committed` 有护栏而 `completed`（commit 未完成）没有，等价于把最常见的第一步失败排除在自愈之外 | `committed`/`completed` 且 `integration_mode=git` 的任务统一走终化重试：退避 + 上限 + 耗尽告警 |
+| **瞬时失败不可自动重试=把抖动放大成人工阻塞** | 50% 抖动率的重门禁在没有自动重试时，只能靠人/总指挥赌运气并烧掉大回合 | 对幂等的终化步骤（commit/integrate）必须自动重试，且重试必须是有界的（上限 + 指数退避 + 耗尽升级人工） |
+| **门禁失败信息定位成本高** | 失败结论在门禁输出的尾部，调用方只回显首行，排障需翻整段日志 | 重门禁失败时必须把"失败 profile / 报告路径 / 查看命令"提炼为独立摘要行（目标仓门禁已输出，HAFlow 侧按需回显摘要） |
+| **环境过载是门禁抖动的放大器** | load 150+ 时架构检查会出现瞬时竞态（复跑 exit=0），全量前端测试超时窗口被挤压 | 长驻重进程（旧 server / 旧 Agent 会话 / 构建残留）必须定期巡检清理；排障时先看 load 与 top 进程 |
+
+### 操作规范（已固化到 `services/herdr-controller.py`）
+
+1. **统一终化重试 (`should_retry_finalize`)**：
+   - `status in (committed, completed)` 且 `integration_mode=git` 且工作流未关闭；
+   - episode 退避窗口外才重试（`attention_blocks_retry`），reason 区分
+     `integration_retry`（committed）/ `commit_retry`（completed）；
+   - 尝试次数 `HERDR_FINALIZE_RETRY_MAX`（默认 5）封顶，耗尽后打印
+     `[FINALIZE RETRY EXHAUSTED]` 并升级人工（只告警一次，不刷屏）。
+2. **重试仍复用既有幂等链路**：`finalize_completed_task`（commit → rebase → integrate →
+   cleanup）本身幂等，重试不引入新状态。
+3. **排障顺序**：`[COMMIT ERROR]` → 门禁输出尾部摘要（❌ / 失败 profile / 报告路径）
+   → `uptime` 与 `ps -Ao pid,%cpu,etime,comm -r | head` 排查系统过载。
+
+### 验证命令 / 关联证据
+
+```bash
+# 1. 终化重试决策(completed/committed/退避/上限/非 git 不重试)
+pytest tests/test_auto_acceptance.py -q
+# 期望: 24 passed, 9 subtests passed
+
+# 2. 全量回归
+pytest -q
+# 期望: 608 passed, 40 subtests passed
+
+# 3. 现场证据
+#    门禁抖动采样: reports/verify/*-bugfix.json（11:13/11:29/11:44 UTC 失败, 11:20/12:01 UTC 通过）
+#    人工重试上下文: 总指挥 pane（577.9K tokens, 第 5 次提交）
+#    恢复链: c30d99e2 提交 → Controller [REGISTRY WATCHER] committed -> retry finalize → cleaned
+```
+
+### 相关文档 / 关联证据
+
+- 现场：`~/.herdr-controller/clones/wf-nexusarchive-0917-01-implementation-fix-r2/`
+  （`reports/verify/*.json` 抖动采样、`reports/verify/logs/`）
+- 新增测试：`tests/test_auto_acceptance.py#FinalizeRetryDecisionTest`
+- Wiki：[`wiki/architecture.md`](../../wiki/architecture.md) §2.1
+
+---
+
