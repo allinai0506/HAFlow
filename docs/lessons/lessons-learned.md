@@ -2491,3 +2491,71 @@ pytest -q
 
 ---
 
+## 62. 门禁 verdict 契约化：从"LLM 转写自然语言报告"到"机器可采纳结论"
+
+### 问题背景
+
+延续 §60/§61 的同一工作流（`wf-nexusarchive-0917-01`）：非门禁节点验收已规则化后，
+剩余长尾全部集中在门禁节点（test/review/wrapup）——门禁结论（pass/blocked）只存在于
+Agent 的自然语言报告里，必须由另一个 LLM（总指挥）阅读并"转写"为
+`herdr-task set <task> completed --verdict ...`。实测代价：
+
+1. 总指挥上下文累积到 **566K tokens**（57%），单回合时长 10-20 分钟；r3 的 blocked
+   判定等待、r5 的 done 事件投递等待（`[COORDINATOR BUSY] waited=900s`）都源于此；
+2. 长回合还会阻塞排在后面的门禁事件投递，形成"越忙越慢"的正反馈；
+3. 结论信息在转写中可能被压缩/改写（r3 的 note 与报告原文并不完全一致）。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| **门禁结论无机器契约** | 结论以自然语言存在于报告里，机器无法采纳，必须再花一个 LLM 回合"转写"；这是纯粹的格式损失，不是判断损失 | 门禁结论必须契约化：固定的文件路径 + 终端标记行，写成机器可直接采纳的结论 |
+| **单通道信号易被污染** | 只看文件可能读到上一轮旧文件；只看屏幕可能读到滚动残影或历史标记 | 双通道（Clone 内 JSON + 终端标记）必须**结论一致**才采纳；缺失或冲突一律回落总指挥 |
+| **门禁自证的边界** | 让被测 Agent 自报结论存在自证风险 | blocked 结论必须带原因清单且直接触发回流返工（有真实代价）；fix-loop 后由新一发独立重测；总指挥仍是冲突/缺失时的裁决者与最终兜底 |
+
+### 操作规范（已固化到 `herdr/direct_dispatch.py`、`services/herdr-controller.py`）
+
+1. **契约注入 (`herdr/direct_dispatch.py#GATE_VERDICT_CONTRACT`)**：
+   - 仅当 `plan_stage_dispatch(..., gate_contract=True)`（Controller 由
+     `node_is_gate` 判定）时，在门禁任务 prompt 末尾追加契约：
+     写 `<clone>/.herdr/gate-verdict.json`（`{"verdict": "pass|blocked", "note": "..."}`）
+     + 终端输出 `HERDR_GATE_VERDICT: pass|blocked`。
+2. **规则化裁决 (`services/herdr-controller.py#try_auto_verdict`)**：
+   - `read_gate_verdict` 合并文件与屏幕两路信号，归一化（pass/passed/ok → pass；
+     blocked/block/fail/failed → blocked），仅当唯一结论才返回；
+   - 采纳后调用既有 CLI 契约 `herdr-task set <task> completed --verdict ... --note ...`
+     （blocked 缺 note 时自动补最小说明），随后走既有 finalize 与 fix-loop 链路；
+   - 非门禁节点、信号缺失/冲突、`HERDR_AUTO_VERDICT=0` 一律回落总指挥。
+3. **对存量在跑门禁任务**：可用 `herdr-task steer <task_id> "<契约补充说明>"` 在
+   工位空闲时补注入契约（Sentinel 的 Steering Mesh 负责投递），无需重启任务。
+
+### 验证命令 / 关联证据
+
+```bash
+# 1. 门禁契约与规则化裁决用例
+pytest tests/test_auto_acceptance.py -q
+# 期望: 19 passed, 5 subtests passed
+
+# 2. 门禁契约注入(仅门禁节点)
+pytest tests/test_direct_stage_dispatch.py -q
+# 期望: 37 passed, 28 subtests passed
+
+# 3. 全量回归
+pytest -q
+# 期望: 603 passed, 40 subtests passed
+
+# 4. 现场只读校验(真实工作流)
+#    review 节点 prompt 含 HERDR_GATE_VERDICT 与 .herdr/gate-verdict.json → True
+#    对 r4 任务 read_gate_verdict() → (None, '', '')  ← 无标记时不误判
+#    node_is_gate('wf-nexusarchive-0917-01', 'test') → True
+```
+
+### 相关文档 / 关联证据
+
+- 现场：`herdr-task steer wf-nexusarchive-0917-01-test-auto-r4 "<契约补充>"`（存量任务补契约）
+- 新增测试：`tests/test_auto_acceptance.py`（GateVerdictUnitTest 9 项 + 门禁 wiring 1 项）
+- Wiki：[`wiki/dag-workflow-engine.md`](../../wiki/dag-workflow-engine.md) §10、
+  [`wiki/architecture.md`](../../wiki/architecture.md) §2.1
+
+---
+

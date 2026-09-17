@@ -1004,6 +1004,9 @@ def try_direct_stage_advance(item):
         load_tasks(),
         requirement,
         context_branch=latest_branch_for_node(workflow_id, ready_id),
+        # 门禁节点在派发时注入结论契约(.herdr/gate-verdict.json + 终端标记),
+        # 由 try_auto_verdict 直接采纳,免除总指挥裁决回合。
+        gate_contract=node_is_gate(workflow_id, ready_id),
     )
 
     mode = plan.get("mode")
@@ -2410,8 +2413,10 @@ task_type:
         wait_started = time.time()
 
         # 规则化验收快路径:非门禁节点铁证齐备直接 completed,
-        # 不再排队等总指挥回合(门禁节点与证据不足者不受影响)。
-        if event_type == "done" and try_auto_accept(task_id):
+        # 门禁节点有唯一结论标记则直接落 verdict;两者都不命中才回落总指挥。
+        if event_type == "done" and (
+            try_auto_accept(task_id) or try_auto_verdict(task_id)
+        ):
             attention_clear(key)
             finalize_completed_task(task_id)
             return
@@ -2658,6 +2663,151 @@ def try_auto_accept(task_id):
     print(
         f"[AUTO ACCEPT] task={task_id} "
         f"node={node_id} baseline=TASK_CHANGED -> completed"
+    )
+    return True
+
+
+# ============================================================
+# 门禁规则化裁决 (auto-verdict) — 门禁节点免除总指挥 LLM 回合
+# ============================================================
+
+# 契约：门禁任务在 Clone 根写入 .herdr/gate-verdict.json，并在终端输出
+# HERDR_GATE_VERDICT: pass|blocked（可选 HERDR_GATE_NOTE: <原因>）。
+# 两个通道结论一致时直接落 verdict；缺失或互相矛盾一律回落总指挥。
+GATE_VERDICT_FILE = ".herdr/gate-verdict.json"
+GATE_VERDICT_MARKER = "HERDR_GATE_VERDICT:"
+GATE_NOTE_MARKER = "HERDR_GATE_NOTE:"
+
+_GATE_VERDICT_ALIASES = {
+    "pass": "pass",
+    "passed": "pass",
+    "ok": "pass",
+    "blocked": "blocked",
+    "block": "blocked",
+    "fail": "blocked",
+    "failed": "blocked",
+}
+
+
+def auto_verdict_enabled():
+    value = os.environ.get("HERDR_AUTO_VERDICT", "1")
+    return value.strip().lower() not in ("0", "false", "off", "no")
+
+
+def _normalize_gate_verdict(value):
+    return _GATE_VERDICT_ALIASES.get(str(value or "").strip().lower())
+
+
+def _verdict_from_file(task):
+    clone_path = task.get("clone_path")
+    if not clone_path:
+        return None, ""
+    try:
+        with open(
+            os.path.join(clone_path, GATE_VERDICT_FILE), encoding="utf-8"
+        ) as handle:
+            payload = json.load(handle)
+    except Exception:
+        return None, ""
+    if not isinstance(payload, dict):
+        return None, ""
+    verdict = _normalize_gate_verdict(payload.get("verdict"))
+    return verdict, str(payload.get("note") or "").strip()
+
+
+def _verdict_from_screen(task):
+    pane_id = task.get("pane_id")
+    if not pane_id:
+        return None, ""
+    try:
+        result = subprocess.run(
+            ["herdr", "pane", "read", pane_id, "--source", "visible"],
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
+    except Exception:
+        return None, ""
+
+    screen = (result.stdout or "") + "\n" + (result.stderr or "")
+    verdicts = set()
+    note = ""
+    for line in screen.splitlines():
+        if GATE_VERDICT_MARKER in line:
+            raw = line.split(GATE_VERDICT_MARKER, 1)[1].strip()
+            normalized = _normalize_gate_verdict(raw.split()[0] if raw else "")
+            if normalized:
+                verdicts.add(normalized)
+        if GATE_NOTE_MARKER in line and not note:
+            note = line.split(GATE_NOTE_MARKER, 1)[1].strip()
+
+    if len(verdicts) != 1:
+        return None, ""
+    return verdicts.pop(), note
+
+
+def read_gate_verdict(task):
+    """(verdict, note, source)：文件与终端两路信号一致才返回 verdict。"""
+    file_verdict, file_note = _verdict_from_file(task)
+    screen_verdict, screen_note = _verdict_from_screen(task)
+
+    signals = {v for v in (file_verdict, screen_verdict) if v}
+    if len(signals) != 1:
+        return None, "", ""
+
+    verdict = signals.pop()
+    note = file_note or screen_note
+    source = "file+screen" if file_verdict and screen_verdict else (
+        "file" if file_verdict else "screen"
+    )
+    return verdict, note, source
+
+
+def try_auto_verdict(task_id):
+    """门禁节点规则化裁决：报告/终端给出唯一结论时直接落 verdict。
+
+    pass -> 推进下一节点；blocked -> 既有 fix-loop 自动回流。
+    信号缺失/冲突、非门禁节点、环境开关关闭时返回 False 回落总指挥。
+    """
+    if not auto_verdict_enabled():
+        return False
+
+    task = get_task(task_id)
+    if not task or task.get("status") != "agent_done":
+        return False
+
+    workflow_id = task.get("workflow_id")
+    node_id = task.get("node") or task.get("stage")
+    if not workflow_id or not node_id:
+        return False
+
+    if not node_is_gate(workflow_id, node_id):
+        return False
+
+    verdict, note, source = read_gate_verdict(task)
+    if verdict not in ("pass", "blocked"):
+        return False
+    if verdict == "blocked" and not note:
+        note = f"gate verdict blocked (auto-verdict via {source or 'signal'})"
+
+    result = subprocess.run(
+        [
+            TASK_MANAGER, "set", task_id, "completed",
+            "--verdict", verdict, "--note", note,
+        ],
+        text=True,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        print(
+            f"[AUTO VERDICT ERROR] task={task_id}: "
+            f"{result.stderr.strip() or result.stdout.strip()}"
+        )
+        return False
+
+    print(
+        f"[AUTO VERDICT] task={task_id} node={node_id} "
+        f"verdict={verdict} source={source}"
     )
     return True
 

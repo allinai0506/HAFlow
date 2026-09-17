@@ -251,6 +251,25 @@ class PlanStageDispatchTest(unittest.TestCase):
         plan = dd.plan_stage_dispatch("wf-1", _node(), tasks, "需求")
         self.assertEqual(plan["mode"], "wait")
 
+    def test_gate_contract_injected_only_for_gate_nodes(self):
+        gate_plan = dd.plan_stage_dispatch(
+            "wf-1", _node(), [], "需求", gate_contract=True
+        )
+        self.assertIn("HERDR_GATE_VERDICT", gate_plan["specs"][0]["prompt"])
+        self.assertIn(
+            ".herdr/gate-verdict.json", gate_plan["specs"][0]["prompt"]
+        )
+
+        plain_plan = dd.plan_stage_dispatch("wf-1", _node(), [], "需求")
+        self.assertNotIn("HERDR_GATE_VERDICT", plain_plan["specs"][0]["prompt"])
+
+    def test_gate_contract_carried_into_redispatch(self):
+        tasks = [_task("wf-1-test-backend", "superseded")]
+        plan = dd.plan_stage_dispatch(
+            "wf-1", _node(), tasks, "需求", gate_contract=True
+        )
+        self.assertIn("HERDR_GATE_VERDICT", plan["specs"][0]["prompt"])
+
     def test_other_workflow_tasks_are_ignored(self):
         tasks = [
             {
