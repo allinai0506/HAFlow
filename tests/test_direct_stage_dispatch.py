@@ -82,6 +82,54 @@ class PlanStageDispatchTest(unittest.TestCase):
         self.assertIn("测试执行记录", spec["acceptance"])
         self.assertIn("改动范围以 herdr-task verify-baseline 为准", spec["acceptance"])
 
+    def test_dynamic_initial_dispatch_has_no_specs(self):
+        for parallel, max_agents in ((True, 3), (True, 1), (False, 3)):
+            with self.subTest(parallel=parallel, max_agents=max_agents):
+                node = _node(
+                    id="implementation", parallel=parallel,
+                    agent_policy={"max_agents": max_agents},
+                )
+                plan = dd.plan_stage_dispatch("wf-1", node, [], "需求")
+                self.assertEqual(plan["mode"], "fallback")
+                self.assertEqual(plan["specs"], [])
+
+    def test_non_agent_never_produces_specs(self):
+        for node_type in ("human", "tool", "gate", "unknown"):
+            for tasks in ([], [_task("old", "superseded")]):
+                with self.subTest(node_type=node_type, tasks=tasks):
+                    plan = dd.plan_stage_dispatch(
+                        "wf-1", _node(node_type=node_type), tasks, "需求"
+                    )
+                    self.assertEqual(plan["mode"], "fallback")
+                    self.assertEqual(plan["specs"], [])
+
+    def test_malformed_roles_cannot_enable_static_multi(self):
+        for roles in (1, "executor", {"name": "executor"}, ({"name": "executor"},)):
+            with self.subTest(roles=roles):
+                plan = dd.plan_stage_dispatch(
+                    "wf-1", _node(parallel=True, agent_policy={
+                        "max_agents": 3, "roles": roles,
+                    }), [], "需求",
+                )
+                self.assertEqual(plan["mode"], "fallback")
+                self.assertEqual(plan["specs"], [])
+
+    def test_dynamic_node_with_active_tasks_waits(self):
+        plan = dd.plan_stage_dispatch(
+            "wf-1", _node(parallel=True, agent_policy={"max_agents": 3}),
+            [_task("existing", "working")], "需求",
+        )
+        self.assertEqual(plan["mode"], "wait")
+        self.assertEqual(plan["specs"], [])
+
+    def test_explicit_static_single_dispatch(self):
+        plan = dd.plan_stage_dispatch(
+            "wf-1", _node(node_type="agent", parallel=False,
+                          agent_policy={"max_agents": 1}), [], "需求",
+        )
+        self.assertEqual(plan["mode"], "dispatch")
+        self.assertEqual(len(plan["specs"]), 1)
+
     def test_initial_dispatch_requires_requirement(self):
         plan = dd.plan_stage_dispatch("wf-1", _node(), [], "")
         self.assertEqual(plan["mode"], "fallback")
@@ -294,6 +342,43 @@ class TryDirectStageAdvanceTest(unittest.TestCase):
         self.assertIn("test", cmd)
         self.assertIn("--agent", cmd)
         self.assertIn("auto", cmd)
+
+    def test_dynamic_direct_dispatch_does_not_launch(self):
+        result = self.ctrl.try_direct_stage_advance(self._item(node=_node(
+            parallel=True, agent_policy={"max_agents": 3},
+        )))
+        self.assertFalse(result)
+        self.assertEqual(self.commands, [])
+        self.assertEqual(self.notified, [])
+
+    def test_non_agent_stage_event_blocks_all_agent_paths(self):
+        for node_type in ("human", "tool", "gate", "unknown"):
+            for enabled in ("0", "1"):
+                with self.subTest(node_type=node_type, enabled=enabled), \
+                     patch.dict(os.environ, {"HERDR_DIRECT_STAGE_DISPATCH": enabled}), \
+                     patch.object(self.ctrl, "coordinator_pane_for_workflow", return_value=None) as coordinator, \
+                     patch("builtins.print") as output:
+                    self.ctrl._handle_coordinator_item(
+                        self._item(node=_node(node_type=node_type))
+                    )
+                    coordinator.assert_not_called()
+                    self.assertEqual(self.commands, [])
+                    self.assertEqual(self.notified, [])
+                    self.assertTrue(any(
+                        "STAGE ADVANCE BLOCKED" in str(call)
+                        for call in output.call_args_list
+                    ))
+
+    def test_missing_item_node_resolves_native_workflow_node(self):
+        item = self._item()
+        item.pop("node")
+        with patch.object(self.ctrl, "workflow_config_for", return_value={
+            "nodes": [_node(node_type="human")],
+        }), patch.object(self.ctrl, "coordinator_pane_for_workflow", return_value=None) as coordinator:
+            self.ctrl._handle_coordinator_item(item)
+        coordinator.assert_not_called()
+        self.assertEqual(self.commands, [])
+        self.assertEqual(self.notified, [])
 
     def test_launch_failure_falls_back_to_coordinator(self):
         with patch.object(
