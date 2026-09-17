@@ -120,6 +120,16 @@ Evidence:
      禁止 commit/integrate/全量测试、只读核验优先。背景：`wf-nexusarchive-0917-01`
      总指挥上下文 94K→684K，584K 时单回合 LLM 生成 58.3min，事件串行等待
      累计 2.35h（`[COORDINATOR BUSY]` 187 次）。
+- `FACT` **总指挥接单与模板切换（2026-09-18 引入，lessons §67）**:
+  1. **接单机制**：新工作流首个节点（`stage=start`）默认路由协调者
+     （`coordinator_intake_enabled`，`HERDR_COORDINATOR_INTAKE=0` 关闭），
+     经 `HERDR_WORKFLOW_INTAKE_EVENT` 要求总指挥先理解需求再派发第一个 Task；
+     非首节点保持 Direct Stage Dispatch 直派；2. **模板切换**：
+     `ensure_project` 收到显式模板且与当前 `workflow.json` 不同时，若有活跃
+     工作流则拒绝，否则保留 Workspace/协调者 Pane 并重建节点 Tab/Anchor
+     （`reprovision_project_template`）；`run --template` 缺省 `None` 表示沿用。
+     背景：`wf-nexusarchive-0918-01` 选 general-task-v1 实际按
+     software-development-v1 运行，且启动未经总指挥。
 - `FACT` **基础设施失败自动补派（2026-09-17 引入，lessons §60）**:
   registry watcher 对 `failed` 任务调用纯选择器 `herdr/liveness.py#select_infra_failures_for_recovery`
   （仅 `dispatch_delivery_fuse` / `agent_process_crash`，节点内无活跃任务，谱系失败次数 <

@@ -2877,3 +2877,92 @@ pytest -q
 - 现场日志契约：controller.out.log 的 `[COORDINATOR COMPACT]` / `[COORDINATOR BUSY]`
 
 ---
+
+## 67. 工作流启动路径的两处断裂：模板选择丢失与总指挥缺席
+
+### 问题背景
+
+2026-09-18 用户反馈 `wf-nexusarchive-0918-01` 两个问题：
+
+1. 控制台选择 **general-task-v1**（通用数字化任务协同流，3 节点），实际按
+   **software-development-v1**（6 阶段）运行；
+2. 任务启动没有经过总指挥，直接进入"需求分析"。
+
+代码级根因：
+
+- **模板被静默忽略**：`herdr/projects.py#ensure_project` 对已注册项目直接
+  `return record`，完全忽略传入的 `template_name`。项目 workflow.json 生成于
+  06:37（上一次运行），06:55 新工作流沿用旧模板；CLI `run --template` 默认写死
+  `software-development-v1` 进一步掩盖了问题。
+- **接单职责缺失**：启动路径自 #35 Direct Stage Dispatch 起首节点也走直派，
+  总指挥只在任务事件（done/blocked/fix-loop）参与，"总指挥接单"这一产品职责
+  在启动阶段不存在。
+
+现场处置与验证：终止错模板工作流（`close-workflow --abandon`）后以修复版重启
+`wf-nexusarchive-0918-02`——general-task-v1 生效（3 节点新 Tab、协调者 Pane 保留），
+`[COORDINATOR INTAKE]` 命中，总指挥收到 `HERDR_WORKFLOW_INTAKE_EVENT` 并自行派发
+首个任务，随后 `[COORDINATOR COMPACT]` 成功注入。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| **参数默认值掩盖显式入参** | "已有则返回"的幂等路径把用户显式选择当成了可忽略的默认值，静默产生错误行为 | 生命周期函数必须区分"显式请求"与"未指定"（None 语义）；显式指定必须生效，冲突时明确拒绝而不是静默沿用 |
+| **快路径吞掉产品角色** | 调度优化（直派）让首节点绕过总指挥，"接单"职责随之消失 | 产品角色必须显式建模为可开关路径（首节点路由协调者），而不是优化副作用；提供 env 退回开关 |
+| **模板与运行时拓扑是一体的** | 只改 workflow.json 的模板名不够，Tab/Anchor 拓扑必须同步重编，否则运行时错位 | 模板切换 = 保留 workspace/协调者 + 重建节点 Tab/Anchor + 关闭旧节点 Tab；有活跃工作流时拒绝切换 |
+
+### 操作规范（已固化到 `herdr/projects.py`、`bin/herdr-factory`、`services/herdr-controller.py`）
+
+1. **模板切换 (`reprovision_project_template`)**：
+   - 触发：`ensure_project`/`create_project` 收到显式模板且与当前
+     `workflow.json#workflow_template` 不同；
+   - 守卫：存在活跃工作流 → `RuntimeError`（明确拒绝）；workspace 不存活 →
+     回到全量 `provision_project`；
+   - 拓扑：逐节点创建 Tab + Anchor，关闭旧模板节点 Tab（协调者 Tab 永不关闭），
+     经 `_register_project_workflow` 写回；
+   - CLI 语义：`run --template` 缺省 `None`（不指定=沿用现有），控制台显式选择
+     必然生效。
+2. **总指挥接单 (`coordinator_intake_enabled` + `item.intake`)**：
+   - 首个节点（`stage in (None, "", "start")`）且 `HERDR_COORDINATOR_INTAKE != 0`
+     → 跳过直派，走协调者路径；
+   - 消息头 `HERDR_WORKFLOW_INTAKE_EVENT` + 接单说明（先完整阅读需求，再按节点
+     职责创建第一个 Task）；
+   - 协调者不可用：沿用 stage_advance 的有界等待 + attention 慢速重试，不空转。
+3. **`/compact` 观测分类**：`agent_prompt_stalled`（空会话无可压缩）归为良性
+   `[COORDINATOR COMPACT SKIP] no_activity`，不再报 ERROR。
+4. **前端可见性（console）**：`workflow_detail` 的阶段卡片必须按
+   `workflow.json#nodes`（id/label）渲染，回退内置 `STAGES`——否则切换模板后
+   运行时已变、界面仍显示旧模板阶段（实测 general-task 运行中前端仍 6 阶段）。
+
+### 验证命令 / 关联证据
+
+```bash
+# 1. 模板切换(保留协调者/重建节点拓扑/活跃工作流拒绝)
+pytest tests/test_console_project_creation.py::TemplateSwitchTest -q   # 5 passed
+
+# 2. 接单路由(首节点走协调者 / 非首节点直派 / env 关闭)
+pytest tests/test_direct_stage_dispatch.py::CoordinatorIntakeTest -q   # 4 passed
+
+# 3. compact 空会话良性分类
+pytest tests/test_liveness_guard.py::CoordinatorCompactTest -q         # 6 passed
+
+# 4. 全量回归(不得有回退)
+pytest -q
+# 期望: 637 passed, 44 subtests passed
+
+# 5. 现场实证(wf-nexusarchive-0918-02)
+#    [COORDINATOR INTAKE] workflow=wf-nexusarchive-0918-02 node=intake_and_scoping
+#    [STAGE ADVANCED] start -> intake_and_scoping
+#    [COORDINATOR COMPACT] pane=wN:p1 kind=opencode reason=stage_advance:intake_and_scoping
+#    workflow.json: workflow_template=general-task-v1, nodes=3, coordinator=wN:p1 保留
+```
+
+### 相关文档 / 关联证据
+
+- Wiki：[`wiki/architecture.md`](../../wiki/architecture.md) §2.1
+- 新增测试：`tests/test_console_project_creation.py#TemplateSwitchTest`、
+  `tests/test_direct_stage_dispatch.py#CoordinatorIntakeTest`
+- 事故工作流：`wf-nexusarchive-0918-01`（错模板，已 abandon）→
+  `wf-nexusarchive-0918-02`（修复后重启，现场验证）
+
+---

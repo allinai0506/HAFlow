@@ -655,6 +655,8 @@ def create_project(root, project_name=None, template_name="software-development-
     root = detect_git_root(root)
     record = project_by_root(root)
     if record and _workspace_alive(record.get("workspace_id", "")):
+        if template_name and template_name != _workflow_template_of(record):
+            return reprovision_project_template(record, template_name)
         return dict(record, already_registered=True)
 
     return provision_project(root, template_name=template_name, project_name=project_name)
@@ -803,7 +805,105 @@ def unregister_project(root_or_id, close_workspace=False, force=False):
     return target_project
 
 
-def ensure_project(root, template_name="software-development-v1"):
+def _workflow_template_of(record):
+    """已有项目当前生效的模板名(读 workflow.json;缺失返回空串)。"""
+    workflow_file = record.get("workflow_file")
+    if not workflow_file:
+        return ""
+    cfg = _load(workflow_file, {}) or {}
+    return cfg.get("workflow_template") or ""
+
+
+def reprovision_project_template(record, template_name):
+    """切换已有项目的模板:保留 Workspace 与协调者 Pane,重编节点 Tab/Anchor。
+
+    背景(wf-nexusarchive-0918-01):`ensure_project` 对已注册项目直接返回旧
+    record,控制台选择的模板被静默忽略,general-task-v1 实际按
+    software-development-v1 运行。切换前必须无活跃工作流,否则拒绝。
+    """
+    root = canonical_root(record["project_root"])
+    project_id = record["project_id"]
+    project_name = record.get("project_name") or Path(root).name
+    workspace_id = record.get("workspace_id", "")
+
+    if not _workspace_alive(workspace_id):
+        return provision_project(
+            root, template_name=template_name, project_name=project_name
+        )
+
+    active = active_workflows_for_project(project_id)
+    if active:
+        raise RuntimeError(
+            "项目存在活跃工作流,拒绝切换模板: "
+            + ", ".join(e.get("workflow_id", "?") for e in active)
+            + ";请先收尾(close-workflow)后再切换。"
+        )
+
+    workflow_file = record.get("workflow_file")
+    old_cfg = _load(workflow_file, {}) if workflow_file else {}
+    old_nodes = (old_cfg or {}).get("nodes") or []
+    coordinator_cfg = (old_cfg or {}).get("coordinator") or {}
+    coordinator_tab_id = coordinator_cfg.get("tab_id") or ""
+    coordinator_pane_id = (
+        record.get("coordinator_pane_id")
+        or coordinator_cfg.get("pane_id")
+        or ""
+    )
+
+    template = load_template(template_name)
+    nodes = template.get("nodes", [])
+
+    runtime_nodes = []
+    for node in nodes:
+        created_tab = _run_json([
+            "herdr",
+            "tab",
+            "create",
+            "--workspace",
+            workspace_id,
+            "--cwd",
+            root,
+            "--label",
+            node["label"],
+            "--no-focus",
+        ])
+        tab_result = created_tab["result"]
+        tab_id = tab_result["tab"]["tab_id"]
+        anchor_pane_id = tab_result["root_pane"]["pane_id"]
+        _run([
+            "herdr",
+            "pane",
+            "rename",
+            anchor_pane_id,
+            "Anchor",
+        ], check=False)
+
+        n = dict(node)
+        n["tab_id"] = tab_id
+        n["anchor_pane_id"] = anchor_pane_id
+        runtime_nodes.append(n)
+
+    # 关闭旧模板节点 Tab(协调者 Tab 永远保留;新拓扑 Tab 刚创建)。
+    new_tab_ids = {n["tab_id"] for n in runtime_nodes}
+    for old in old_nodes:
+        tab_id = old.get("tab_id")
+        if not tab_id or tab_id in new_tab_ids or tab_id == coordinator_tab_id:
+            continue
+        _run(["herdr", "tab", "close", tab_id], check=False)
+
+    return _register_project_workflow(
+        project_id=project_id,
+        project_name=project_name,
+        root=root,
+        workspace_id=workspace_id,
+        template_name=template.get("name", template_name),
+        coordinator_tab_id=coordinator_tab_id,
+        coordinator_pane_id=coordinator_pane_id,
+        runtime_nodes=runtime_nodes,
+    )
+
+
+def ensure_project(root, template_name=None):
     root = canonical_root(root)
     record = project_by_root(root)
 
@@ -829,12 +929,21 @@ def ensure_project(root, template_name="software-development-v1"):
                     coordinator_pane_id,
                 )
 
+            # 显式请求了不同模板(如控制台 run --template)时切换节点拓扑;
+            # 未指定模板(template_name=None)保持现状。
+            if template_name and template_name != _workflow_template_of(record):
+                return reprovision_project_template(record, template_name)
+
             return record
 
         # Only a genuinely missing Workspace is provisioned again.
-        return provision_project(root, template_name=template_name)
+        return provision_project(
+            root, template_name=template_name or "software-development-v1"
+        )
 
-    return provision_project(root, template_name=template_name)
+    return provision_project(
+        root, template_name=template_name or "software-development-v1"
+    )
 
 
 def ensure_node_runtime(workflow_id_or_root, node_id):

@@ -120,14 +120,14 @@ def tasks_for(workflow_id):
         ]
 
 
-def resolve_project(explicit_path=None, create=True, template_name="software-development-v1"):
+def resolve_project(explicit_path=None, create=True, template_name=None):
     root = detect_git_root(explicit_path or os.getcwd())
     if create:
         return ensure_project(root, template_name=template_name)
     return project_by_root(root)
 
 
-def project_command(path=None, workspace=None, template="software-development-v1"):
+def project_command(path=None, workspace=None, template=None):
     if workspace:
         from herdr.projects import adopt_workspace_as_project
         project = adopt_workspace_as_project(workspace, root=path, template_name=template)
@@ -354,7 +354,7 @@ def start_workflow(
     e2e=False,
     project_path=None,
     agent_override="auto",
-    template="software-development-v1",
+    template=None,
     force=False,
     title=None,
 ):
@@ -751,7 +751,7 @@ def main():
     run_cmd.add_argument("--project", default=None)
     run_cmd.add_argument("--title", default=None, help="需求简要标题（可选；留空时自动根据需求生成）")
     run_cmd.add_argument("--agent", default="auto", choices=["auto", "opencode", "codex", "claude", "qodercli", "agy", "pi", "grok", "kimi"])
-    run_cmd.add_argument("--template", default="software-development-v1")
+    run_cmd.add_argument("--template", default=None, help="工作流模板（缺省:新项目用默认模板,已有项目沿用当前模板）")
     run_cmd.add_argument("--force", action="store_true")
 
     status_cmd = sub.add_parser("status")

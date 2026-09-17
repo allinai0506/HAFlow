@@ -19,7 +19,7 @@ import subprocess
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 HERDR_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(HERDR_ROOT))
@@ -654,6 +654,112 @@ class SyncAwakeGuardTest(unittest.TestCase):
              patch.dict(os.environ, {"HERDR_AWAKE_GUARD": "0"}):
             self.ctrl.sync_awake_guard(["wf-1"])
         self.assertEqual(popen.call_count, 0)
+
+
+class CoordinatorIntakeTest(unittest.TestCase):
+    """总指挥接单机制:新工作流首个节点默认交总指挥理解需求后派发。
+
+    回归背景(wf-nexusarchive-0918-01 用户反馈):启动直接进入需求分析,
+    没有经过总指挥接单。HERDR_COORDINATOR_INTAKE=0 可退回直派。
+    """
+
+    def setUp(self):
+        self.ctrl = _load_controller("ctrl_coordinator_intake_test")
+        self.prompts = []
+
+    def _intake_node(self):
+        return {
+            "id": "intake_and_scoping",
+            "label": "1任务理解与范围界定",
+            "node_type": "agent",
+            "purpose": "理解任务目标与约束。",
+            "default_integration_mode": "none",
+            "default_task_type": "docs",
+            "agent_policy": {"preferred": ["claude"]},
+            "required_outputs": ["任务理解备忘"],
+            "rules": ["只读"],
+        }
+
+    def _item(self, stage):
+        return {
+            "kind": "stage_advance",
+            "workflow_id": "wf-1",
+            "stage": stage,
+            "node_id": "intake_and_scoping",
+            "next_stage": "intake_and_scoping",
+            "node": self._intake_node(),
+        }
+
+    def _patchers(self, direct_result):
+        direct_mock = MagicMock(return_value=direct_result)
+
+        def fake_run(cmd, **kwargs):
+            if cmd[:3] == ["herdr", "agent", "prompt"]:
+                self.prompts.append(cmd[4])
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        patchers = [
+            patch.object(self.ctrl, "try_direct_stage_advance", direct_mock),
+            patch.object(self.ctrl, "workflow_closed", return_value=False),
+            patch.object(self.ctrl, "project_for_workflow", return_value={
+                "startup_ready": True,
+                "project_name": "p",
+                "project_root": "/tmp/p",
+                "base_branch": "dev",
+                "requirement": "REQ-1",
+            }),
+            patch.object(self.ctrl, "coordinator_pane_for_workflow",
+                         return_value="w1:p1"),
+            patch.object(self.ctrl, "coordinator_status",
+                         return_value="idle"),
+            patch.object(self.ctrl, "get_stage_policy", return_value={}),
+            patch.object(self.ctrl, "load_tasks", return_value=[]),
+            patch.object(self.ctrl, "mark_stage_advance_notified"),
+            patch.object(self.ctrl, "maybe_compact_coordinator"),
+            patch.object(self.ctrl.subprocess, "run", side_effect=fake_run),
+        ]
+        return patchers, direct_mock
+
+    def _run_item(self, stage, direct_result=True):
+        from contextlib import ExitStack
+
+        patchers, direct_mock = self._patchers(direct_result)
+        with ExitStack() as stack:
+            for p in patchers:
+                stack.enter_context(p)
+            self.ctrl._handle_coordinator_item(self._item(stage))
+        return direct_mock
+
+    def test_first_stage_routes_to_coordinator_intake(self):
+        direct_mock = self._run_item("start")
+        direct_mock.assert_not_called()
+        self.assertEqual(len(self.prompts), 1)
+        self.assertIn("HERDR_WORKFLOW_INTAKE_EVENT", self.prompts[0])
+        self.assertIn("总指挥接单机制", self.prompts[0])
+        self.assertIn("REQ-1", self.prompts[0])
+
+    def test_non_first_stage_uses_direct_dispatch(self):
+        direct_mock = self._run_item("requirements")
+        direct_mock.assert_called_once()
+        self.assertEqual(self.prompts, [])
+
+    def test_intake_can_be_disabled_by_env(self):
+        from contextlib import ExitStack
+
+        patchers, direct_mock = self._patchers(True)
+        with patch.dict(os.environ, {"HERDR_COORDINATOR_INTAKE": "0"}), \
+             ExitStack() as stack:
+            for p in patchers:
+                stack.enter_context(p)
+            self.ctrl._handle_coordinator_item(self._item("start"))
+        direct_mock.assert_called_once()
+        self.assertEqual(self.prompts, [])
+
+    def test_intake_env_default_enabled(self):
+        with patch.dict(os.environ, {"HERDR_COORDINATOR_INTAKE": ""}):
+            self.assertTrue(self.ctrl.coordinator_intake_enabled())
+        with patch.dict(os.environ, {"HERDR_COORDINATOR_INTAKE": "0"}):
+            self.assertFalse(self.ctrl.coordinator_intake_enabled())
 
 
 if __name__ == "__main__":
