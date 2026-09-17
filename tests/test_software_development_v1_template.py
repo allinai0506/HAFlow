@@ -83,3 +83,18 @@ class TestSoftwareDevelopmentV1Template(unittest.TestCase):
         self.assertEqual(policy.get("max_agents"), 1)
         self.assertFalse(node.get("parallel"))
         self.assertEqual(policy.get("exclude_stage_agents"), ["implementation"])
+
+    def test_wrapup_requires_delivery_pr_before_finish(self):
+        """交付 PR 是 wrapup 的必做前置：push + 建 PR，且严禁自动合并。
+
+        回归背景：wf-nexusarchive-0917-01 收官时 wrapup 只做只读合并确认并
+        DEFERRED，全链路（herdr-task integrate / six-step-finish）无 push 与
+        PR 创建动作，交付分支停留在目标仓本地，PR 只能由人工/总指挥补交。
+        """
+        rules = "\n".join(self.node_map["wrapup"].get("rules", []))
+        self.assertIn("交付 PR 前置", rules)
+        self.assertIn("npm run pr:create", rules)
+        self.assertIn("严禁自动合并", rules)
+        self.assertIn("PR URL", rules)
+        # 六步执行规则的未合入分支必须携带 PR URL 指引
+        self.assertIn("已建 PR 但未合入", rules)

@@ -682,3 +682,10 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
   - 新增 `FinalizeRetryDecisionTest` 5 项，全量 608 项测试 PASS；
   - 现场恢复链复现：`c30d99e2` 提交 → Controller `[REGISTRY WATCHER] committed -> retry finalize` → `cleaned`；
   - 沉淀教训 §63，更新 [[architecture]] §2.1。
+
+## [2026-09-17] fix | 工作流收官补上「交付 PR」环节（wrapup 必做前置）
+- **背景**：`wf-nexusarchive-0917-01` 20:35 收官（completed/delivered），但交付 PR 从未创建：集成分支 `herdr/integration-...-fix-r2` @ `c30d99e2` 只在目标仓本地（`ls-remote refs/heads/herdr/*` 为空）；`herdr-task integrate` 只建本地分支，全链路零 `git push`；wrapup 按模板规则只做只读合并确认即 DEFERRED，PR 最终由人工要求总指挥手工补交（目标仓 SOP 本为 `npm run pr:wrap-up`）。
+- **改动与实现**：
+  1. **模板（`workflow_templates/software-development-v1.yaml`）**：wrapup 规则新增「交付 PR 前置（必做）」——步骤 1-2 之后、步骤 3 之前，读目标仓交付约定并按其流程推送交付分支 + 创建 PR（如 `npm run pr:create`），PR URL 写入收尾报告；硬约束：只允许推送/建 PR 两类非破坏性动作，严禁自动合并、严禁 `--force`/`--yes`；未合入的 DEFERRED 记录必须含 PR URL；
+  2. **技能（`.agents/skills/six-step-finish/SKILL.md`，版本 `2026.09.17-1`）**：新增「步骤 0：交付 PR 前置」+ Agent 职责「先建 PR 再做核验」+ 三条常见借口兜底；同步 `scripts/install-herdr-skills.sh` 到 `~/.agents/skills/` 并更新 `PROVENANCE.md`（sha256 + 本地修订记录）与 `tests/test_six_step_skill_provenance.py` 登记哈希。
+- **验证**：新增模板契约测试（`test_wrapup_requires_delivery_pr_before_finish`，9 passed）与 vendoring 校验（6 passed），全量 611 项测试 PASS；全局技能副本 grep「步骤 0」命中；沉淀教训 §64，更新 [[dag-workflow-engine]] §11。

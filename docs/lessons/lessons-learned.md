@@ -2631,3 +2631,87 @@ pytest -q
 
 ---
 
+## 64. 工作流收官缺"交付 PR"环节：six-step-finish 只核验不合入，全链路无 push/PR
+
+### 问题背景
+
+`wf-nexusarchive-0917-01` 于 2026-09-17 20:35 完成（`[WORKFLOW CLOSED]`、outcome=delivered），
+wrapup（7收尾）节点严格按模板规则执行：六步收尾步骤 1-2 完成、步骤 3 只读合并确认返回
+⛔（集成分支未合入 dev）→ 记录 DEFERRED 并产出合并指引。
+
+但事后核对发现**交付 PR 从未被创建**：
+
+1. 集成分支 `herdr/integration-wf-nexusarchive-0917-01-implementation-fix-r2` @ `c30d99e2`
+   **只存在于目标仓本地**——`git ls-remote origin 'refs/heads/herdr/*'` 为空；
+2. `bin/herdr-task integrate` 仅在本地建集成分支 + herdr refs，全仓库
+   （`bin/` / `services/` / `herdr/`）**零处 `git push`**；
+3. 最终由人工要求总指挥（coordinator Pane，646K tokens 的长回合）手工补交 PR，
+   而目标仓 nexusarchive 的 AGENTS.md 本就写明标准流程：`npm run pr:wrap-up`
+   （= `scripts/gitee-pr.sh wrap-up`：push + 建 PR + 自动合并）。
+
+三层根因：
+- **模板断档**：wrapup 规则只要求 six-step-finish，并把"未合入 → DEFERRED"写死，
+  没有"创建 PR"这一步；RULES.md S7（推送专属隔离分支 + 创建标准化 PR）无节点承接；
+- **技能边界被误读**：six-step-finish 的定位是"已合入的核验与善后清理，不负责合入动作本身"，
+  其文档写"未推送、未提 PR、未合入的分支会被拒绝清理……先走项目的 PR 流程"——
+  但**流程里并不存在"项目的 PR 流程"这一步**；
+- **本地集成分支被当成交付**：没有 push，远端无从感知，PR/评审/合并的反馈循环全部断裂。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| **"交付"缺少 owner** | 规范里的交付动作（S7：推送分支 + 创建 PR）必须有明确的执行节点/步骤，否则会被技能边界悄悄漏掉 | 模板 wrapup 规则显式加入"交付 PR 前置（必做）"，位于知识沉淀之后、合并确认之前 |
+| **技能文档的隐含假设** | 技能说"先走项目的 PR 流程"时，必须回到流程定义里确认"那一步真的存在" | 引入外部技能时做一次"前置条件存在性"核对：技能要求的前置步骤必须在模板/脚本中有对应实现 |
+| **本地分支 ≠ 交付** | 无 push 的交付对远端不可见，评审/合并/反馈循环全部断裂 | 交付完成的判据 = 远端存在分支 + PR URL 已产出并写入收尾报告 |
+| **创建与合并是两种授权** | PR 创建是交付动作，合并是授权动作；自动化不应越权合入主干 | 默认只创建 PR，严禁自动合并；合并由作者/评审决定（目标仓 SOP 明确声明自动闭环时才可另行授权） |
+
+### 操作规范（已固化到 `workflow_templates/software-development-v1.yaml` 与 `.agents/skills/six-step-finish/SKILL.md`）
+
+1. **模板：交付 PR 前置（必做，wrapup 规则）**：
+   - 顺序：六步步骤 1-2（知识沉淀/wiki 回填并提交）→ **交付 PR** → 步骤 3 合并确认；
+   - 交付 PR 三步：读目标仓交付约定（AGENTS.md / CLAUDE.md / docs/guides/*wrap-up*.md /
+     package.json scripts）→ 按标准流程推送交付分支并创建 PR（如 `npm run pr:create`；
+     无脚本时用 forge CLI/API）→ PR URL 与目标 base 写入收尾报告；
+   - 硬约束：只允许"推送交付分支 + 创建 PR"两类非破坏性远端动作；严禁自动合并；
+     严禁 `--force` / `--yes`；不得改写交付分支历史；PR 无法创建时才记 DEFERRED 并说明原因；
+   - 未合入分支的 DEFERRED 记录必须携带 PR URL。
+2. **技能：six-step-finish 增加步骤 0（交付 PR 前置）**：
+   - 六步总览表新增"步骤 0 交付 PR（前置）"行；Agent 职责新增"先建 PR 再做核验"；
+   - 常见借口表新增三条：未推送/无 PR 先跑脚本、顺手帮忙 merge、脚本代劳 PR。
+3. **同步与登记**：技能为仓库单一事实源，修订后运行 `scripts/install-herdr-skills.sh`
+   同步到 `~/.agents/skills/`，并更新 `PROVENANCE.md`（sha256 + 本地修订记录）与
+   `tests/test_six_step_skill_provenance.py` 的登记哈希。
+
+### 验证命令 / 关联证据
+
+```bash
+# 1. 模板交付 PR 契约（含严禁自动合并/PR URL 要求）
+pytest tests/test_software_development_v1_template.py -q
+# 期望: 9 passed（新增 test_wrapup_requires_delivery_pr_before_finish）
+
+# 2. 技能 vendoring 完整性（哈希 = 修订后登记值）
+pytest tests/test_six_step_skill_provenance.py -q
+# 期望: 6 passed
+
+# 3. 全量回归
+pytest -q
+# 期望: 611 passed, 44 subtests passed
+
+# 4. 全局技能同步实证
+rg -n "步骤 0" ~/.agents/skills/six-step-finish/SKILL.md
+# 期望: 命中「前置条件（步骤 0：交付 PR）」与「先建 PR 再做核验（步骤 0）」
+```
+
+### 相关文档 / 关联证据
+
+- 现场报告：`clones/wf-nexusarchive-0917-01-wrapup-auto/wrapup-report/SIX-STEP-FINISH.md`
+  （步骤 3 ⛔ 原始输出与独立复核）
+- 远端实证：`git ls-remote origin 'refs/heads/herdr/*'`（事故当时为空）
+- 目标仓 SOP：`/Users/user/nexusarchive/AGENTS.md`（`npm run pr:wrap-up`）+
+  `scripts/gitee-pr.sh`（create / merge / wrap-up 语义）
+- 模板与技能：`workflow_templates/software-development-v1.yaml#wrapup.rules`、
+  `.agents/skills/six-step-finish/SKILL.md`（步骤 0）
+
+---
+
