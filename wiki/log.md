@@ -636,3 +636,15 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - Updated [[dag-workflow-engine]]：动态节点首次派发回退规划，不生成通用单任务；静态角色、单任务和既有补派保持兼容。
 - Controller 在 stage_advance 入口阻断非 Agent 节点进入直接派发及总指挥回退；未实现原生执行器，明确要求人工处理。
 - 该变更仅为 DispatchPlan 改造的第一切片，不包含计划持久化、幂等执行或模板迁移。
+
+## [2026-09-17] fix | 路由健康门禁减法优先 + 投递熔断 + 基础设施失败自动补派（wf-nexusarchive-0917-01 空转事故）
+- **背景**：`wf-nexusarchive-0917-01` 需求阶段 challenger 卡 `dispatched` 2h50m（Pane 无投递痕迹）；test 节点被派给 `pi`（`AUTH_REQUIRED`）3 秒空完成 → 总指挥判 failed → 人工 28 分钟才 `--supersedes` 重派；failed 任务无任何自动补派路径。
+- **改动与实现**：
+  1. **`herdr/agent_router.py`**：候选过滤改为 `allowed - disabled - unhealthy` 减法优先，`unhealthy_agents` 永不自动入选；正向 `healthy_agents` 交集仅在 `preflight_checked_at` 处于 `HERDR_PREFLIGHT_TTL`（默认 1800s）内生效，过期快照降级为仅减法（时间戳缺失视为新鲜，保持 legacy 语义）；
+  2. **`herdr/liveness.py`**：新增纯函数 `evaluate_dispatch_fuse`（dispatched 投递 SLA 违约检测，episode 按 `(task_id, updated_at)` 去重、`requeues` 跨重派继承）与 `select_infra_failures_for_recovery`（节点无活跃任务 + 基础设施原因 + 谱系失败 < 上限）；
+  3. **`services/herdr-sentinel.py`**：`check_dispatch_fuse` 取证 `_pane_delivery_evidence`（投递标记 + Agent 状态），无标记且非 working → `[SENTINEL FUSE]` 置 failed（`dispatch_delivery_fuse`）并通知；有标记只告警；`HERDR_DISPATCH_FUSE=0` 关闭；`sentinel-state.json` 新增 `dispatch_fuse` 事件簿；
+  4. **`services/herdr-controller.py`**：`recover_infra_failed_tasks` 对基础设施 failed 任务自动 `supersede` + 清节点 stage-advance 闩，由既有 sweep 补派 `-rN`（`[AUTO RECOVER]`），谱系上限 `HERDR_AUTO_RECOVER_MAX`（默认 2），质量类失败不翻案。
+- **验证与部署**：
+  - 新增 `tests/test_agent_router_preflight.py`（7 项）与 `tests/test_dispatch_fuse.py`（18 项），全量 578 项测试 PASS；
+  - `launchctl kickstart -k` 重启 Sentinel 后实测捕获真实僵尸任务：`[SENTINEL FUSE] task=wf-agency-agents-0917-05-requirements-executor waited=2064s marker=False agent=idle action=failed`；重启 Controller 后自动接住总指挥补派任务（`[RECOVERY] ...-implementation-fix-r2 registry=dispatched agent=working`）；
+  - 沉淀通用工程教训 §60，更新 [[agent-routing-and-pools]] §4/§5 与 [[architecture]] §2.1/§2.2/§3.1。

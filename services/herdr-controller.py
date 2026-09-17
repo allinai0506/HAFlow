@@ -430,6 +430,78 @@ def _bump_fix_loop_count(workflow_id, retry_node):
     return count
 
 
+# ============================================================
+# 基础设施失败自动补派 (auto-recover)
+# ============================================================
+
+# 仅这些失败原因属于"基础设施类"(投递熔断 / 进程崩溃),可自动作废补派;
+# 质量类失败结论(如总指挥判定 failed)绝不自动翻案。
+AUTO_RECOVER_REASONS = {"dispatch_delivery_fuse", "agent_process_crash"}
+AUTO_RECOVER_MAX_ATTEMPTS = int(os.environ.get("HERDR_AUTO_RECOVER_MAX", "2"))
+
+
+def recover_infra_failed_tasks(workflow_id, tasks=None):
+    """基础设施失败任务自动作废,交给 sweep 重新派发替代任务。
+
+    此前 failed 任务只能等人工 relaunch(--supersedes),实测造成 28 分钟级
+    空等;这里复用既有 superseded->replace 派发管线:作废后清掉该节点的
+    stage-advance 闩,下一轮 sweep 的 direct dispatch 会自动补派 -rN。
+    谱系级次数上限由纯函数 select_infra_failures_for_recovery 保证,
+    达到上限后不再自动处置(只留日志与告警)。
+    """
+    if not workflow_id:
+        return False
+
+    if workflow_closed(workflow_id):
+        return False
+
+    wf_st = _workflow_entry(workflow_id).get("status")
+    if wf_st in ("completed", "paused"):
+        return False
+
+    if tasks is None:
+        tasks = load_tasks()
+
+    candidates = liveness.select_infra_failures_for_recovery(
+        [t for t in tasks if t.get("workflow_id") == workflow_id],
+        AUTO_RECOVER_REASONS,
+        max_attempts=AUTO_RECOVER_MAX_ATTEMPTS,
+    )
+
+    recovered = False
+    for task in candidates:
+        task_id = task.get("task_id")
+        node_id = task.get("node") or task.get("stage")
+
+        result = subprocess.run(
+            [
+                TASK_MANAGER, "supersede", task_id,
+                "--reason", "auto-recover: infrastructure failure",
+            ],
+            text=True,
+            capture_output=True,
+        )
+
+        if result.returncode != 0:
+            print(
+                f"[AUTO RECOVER ERROR] supersede {task_id}: "
+                f"{result.stderr.strip() or result.stdout.strip()}"
+            )
+            continue
+
+        if node_id:
+            clear_stage_advance(workflow_id, node_id)
+
+        recovered = True
+        print(
+            f"[AUTO RECOVER] workflow={workflow_id} "
+            f"node={node_id} task={task_id} "
+            "superseded -> pending redispatch by sweep"
+        )
+
+    return recovered
+
+
 def blocked_verdict_dep(workflow_id, node):
     """依赖中是否存在任务级 blocked 验收结论(不问 gate_cfg)。
 
@@ -3177,6 +3249,19 @@ def registry_watcher():
                     attention_clear(f"{task_id}:done")
                     attention_clear(f"{task_id}:blocked")
                     attention_clear(f"{task_id}:attention")
+
+                    # 基础设施失败(投递熔断/进程崩溃)自动作废补派,
+                    # 不让整个节点空等人工 relaunch。
+                    if status == "failed" and not workflow_closed(
+                        task.get("workflow_id")
+                    ):
+                        try:
+                            recover_infra_failed_tasks(
+                                task.get("workflow_id"), tasks
+                            )
+                        except Exception as exc:
+                            print(f"[AUTO RECOVER ERROR] {exc}")
+
                     continue
 
                 # ---- listener 订阅:指数退避 + 封顶(僵尸 pane 护栏) ----

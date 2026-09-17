@@ -2335,3 +2335,86 @@ curl -s -X POST http://localhost:3333/api/tasks/20260917002/execute \
 # 必须返回: "status":"completed", "executor":"haflow", "runtimeName":"haflow_execution_core", "degraded":false
 ```
 
+---
+
+## 60. Agent 健康快照的时效边界与"投递死亡"熔断缺失：从小时级静默空等到有界自愈
+
+### 问题背景
+
+2026-09-17 工作流 `wf-nexusarchive-0917-01`（nexusarchive「编辑凭证信息」）上午 11:51 启动，到晚上 18:45
+仍在返工循环中，其中完全"空转"的浪费约 3.5 小时。三处独立断链在同一工作流叠加暴露：
+
+1. **需求阶段空等 2h50m**：`requirements-challenger` 于 11:53:30 进入 `dispatched`，直到 14:44:00 才进入
+   `working`——Pane 全程无投递痕迹（屏幕上没有 `HERDR_ORCH_TASK` 标记），Sentinel 的 Nudge 条件依赖
+   屏幕标记存在，投递完全失败时永不触发；节点因等它 join 而整体停滞。
+2. **测试阶段被派给坏 Agent**：`test-auto` 经 `--agent auto` 路由到 `pi`，而该工作流启动体检已将
+   `pi: AUTH_REQUIRED` 记录在 `unhealthy_agents`；pi 3 秒即输出空 `agent_done`，总指挥两次判定回合
+   超时后标记 failed，人工 28 分钟后才用 `--supersedes` 重新派发 r2（claude）。
+3. **失败任务无自动恢复**：任务 failed 后节点永久空转，`herdr/direct_dispatch.py` 的补派只认
+   `superseded`（无替代）的任务；`failed` 不在任何自动补派路径内，只能人工介入。
+
+同工作流另有两处非本次修复的观察（证据留档）：`[COORDINATOR BUSY] waited=901s -> [COORDINATOR STALLED]`
+显示单总指挥 LLM 串行回合仍是长尾；executor `agent_done -> completed` 间隔 73 分钟。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| **健康名单只在非空时做交集** | `healthy_agents` 是"当时健康"的正向快照，冷启动（名单为空）或快照过期时，`unhealthy_agents` 里的坏 Agent 照样入选，路由黑洞让体检数据形同虚设 | 健康门禁必须**先做减法**：`unhealthy_agents` 中的 Agent 永不自动入选；正向名单只做加法（交集）且必须校验 `preflight_checked_at` 时效（默认 1800s，env `HERDR_PREFLIGHT_TTL`），过期快照降级为"仅减去 unhealthy" |
+| **派发无投递 ack 熔断** | `dispatched` 只是"指令已发出"，不等于"Agent 已接单"；两次投递（send-text 落屏 + 回车 ack）任一失败都会留下永久 `dispatched` 僵尸任务 | 任何跨进程投递必须有 SLA 熔断：超时 + Pane 无投递痕迹 + Agent 非 working → 自动失败并通知（`HERDR_DISPATCH_DELIVERY_SLA`，默认 600s） |
+| **Nudge 条件依赖标记存在** | 屏幕标记（`HERDR_ORCH_TASK`）是"投递成功"的证据；用它做 Nudge 前置条件，恰好把"投递完全失败"这一类最需要救援的场景排除在外 | 救援路径必须区分"有标记但 Agent 假死"（Nudge）与"无标记投递失败"（熔断失败），二者证据互补 |
+| **基础设施失败混入人工恢复路径** | 投递熔断/进程崩溃属可重试的基础设施故障，与质量类失败（测试 FAIL、总指挥判 failed）完全不同，却共用"等人工 relaunch"的恢复路径 | 只有基础设施类失败（`dispatch_delivery_fuse`/`agent_process_crash`）允许自动 supersede + 补派 `-rN`；谱系（忽略 `-rN` 后缀）失败次数封顶 2 次，质量类失败绝不自动翻案 |
+
+### 操作规范（已固化到 `herdr/agent_router.py`、`herdr/liveness.py`、`services/herdr-sentinel.py`、`services/herdr-controller.py`）
+
+1. **健康门禁减法优先 + 快照时效 (`herdr/agent_router.py#choose_agent`)**：
+   - 候选过滤链固定为 `allowed - disabled - unhealthy`，正向 `healthy` 交集仅在
+     `preflight_snapshot_fresh(record)` 为真时生效；`preflight_checked_at` 缺失/不可解析视为新鲜
+     （legacy 记录与单 Agent 优雅回退语义不变）；显式指定坏 Agent 仍然抛错阻断。
+2. **投递熔断 (`herdr/liveness.py#evaluate_dispatch_fuse` + `services/herdr-sentinel.py#check_dispatch_fuse`)**：
+   - 纯函数按 `(task_id, updated_at)` episode 只告一次；`requeues` 计数跨重派继承；
+   - Sentinel 仅在"Pane 无 `HERDR_ORCH_TASK:<task_id>` 标记且 Agent 非 working"时置 failed
+     （reason `dispatch_delivery_fuse`），有标记或已在 working 只通知不处置；
+   - `HERDR_DISPATCH_FUSE=0` 可整体关闭。
+3. **基础设施失败自动补派 (`services/herdr-controller.py#recover_infra_failed_tasks`)**：
+   - registry watcher 对 failed 任务调用纯选择器
+     `herdr/liveness.py#select_infra_failures_for_recovery`（节点全无活跃任务 + 基础设施原因 +
+     谱系次数未达上限 + 未被 supersede），命中后 `herdr-task supersede` 并清除该节点
+     stage-advance 闩，由既有 sweep 自动补派替代任务；`HERDR_AUTO_RECOVER_MAX` 调整谱系上限。
+4. **门禁与回归**：上述策略均伴有负向单测（健康拓扑、过期快照、质量失败不翻案、谱系封顶、
+   标记存在只告警），同类问题第 2 次出现时按知识技能决策树升级为门禁。
+
+### 验证命令 / 关联证据
+
+```bash
+# 1. 路由健康门禁与时效（RED 先行的负向用例）
+pytest tests/test_agent_router_preflight.py -q
+# 期望：7 passed（含 stale snapshot 不锁死、unhealthy 冷启动不入选、显式请求坏 Agent 仍抛错）
+
+# 2. 投递熔断 + 自动补派纯逻辑与装配
+pytest tests/test_dispatch_fuse.py -q
+# 期望：18 passed（DISPATCH_DELIVERY_SLA 违约、episode 去重、谱系封顶、质量失败不翻案）
+
+# 3. 全量回归（不得有回退）
+pytest -q
+# 期望：578 passed, 35 subtests passed
+
+# 4. 现场激活证据（2026-09-17 实测）
+#    sentinel kickstart 后立即捕获真实僵尸任务：
+#    [SENTINEL FUSE] task=wf-agency-agents-0917-05-requirements-executor waited=2064s marker=False agent=idle action=failed
+#    [SENTINEL STATE] ...: dispatched -> failed (dispatch_delivery_fuse)
+#    controller kickstart 后自动接住总指挥补派任务：
+#    [RECOVERY] task=wf-nexusarchive-0917-01-implementation-fix-r2 registry=dispatched agent=working
+```
+
+### 相关文档 / 关联证据
+
+- 工作流现场：`~/.herdr-controller/tasks.json`（`wf-nexusarchive-0917-01-*` 任务史）
+- 日志铁证：`~/.herdr-controller/logs/controller.out.log`（`[COORDINATOR BUSY] waited=901s`、
+  `[DECISION TIMEOUT]`、`[FIX LOOP NOTIFIED]`）
+- 新增测试：`tests/test_agent_router_preflight.py`、`tests/test_dispatch_fuse.py`
+- Wiki：[`wiki/agent-routing-and-pools.md`](../../wiki/agent-routing-and-pools.md) §4、
+  [`wiki/architecture.md`](../../wiki/architecture.md) §2.1/§2.2
+
+---
+

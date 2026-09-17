@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 import threading
 import time
@@ -31,9 +32,28 @@ DEFAULT_ATTENTION_RETRY_INTERVAL = 600.0
 DEFAULT_ATTENTION_GRACE = 120.0
 DEFAULT_COORDINATOR_DECISION_TIMEOUT = 180.0
 DEFAULT_TASK_STALL_AFTER = 1800.0
+# dispatched 投递熔断:任务派发后超过该秒数仍未进入 working,视为投递死亡。
+# 正常派发 working 只需数秒;600s 内无 ack 的 pane 几乎不可能自愈
+# (wf-nexusarchive-0917-01 曾有 challenger 卡 dispatched 2h50m 的先例)。
+DEFAULT_DISPATCH_DELIVERY_SLA = 600.0
 DEFAULT_SUBSCRIBE_BACKOFF_BASE = 2.0
 DEFAULT_SUBSCRIBE_BACKOFF_CAP = 300.0
 DEFAULT_SUBSCRIBE_MAX_ATTEMPTS = 8
+
+# 自动补派判定用终态集合:这些状态的任务不会再有推进,节点可视为"已空"。
+RECOVERY_TERMINAL_STATUSES = frozenset(
+    {
+        "completed",
+        "committed",
+        "integrated",
+        "cleanup_ready",
+        "cleaned",
+        "failed",
+        "superseded",
+    }
+)
+
+REPLACEMENT_SUFFIX_RE = re.compile(r"-r(\d+)$")
 
 # 需要停滞监控的任务状态：所有"未到达终态但也没有推进"的状态。
 STALL_WATCH_STATUSES = frozenset(
@@ -110,6 +130,10 @@ def coordinator_decision_timeout() -> float:
 
 def task_stall_after() -> float:
     return _env_float("HERDR_TASK_STALL_AFTER", DEFAULT_TASK_STALL_AFTER)
+
+
+def dispatch_delivery_sla() -> float:
+    return _env_float("HERDR_DISPATCH_DELIVERY_SLA", DEFAULT_DISPATCH_DELIVERY_SLA)
 
 
 def subscribe_backoff_base() -> float:
@@ -279,6 +303,147 @@ def evaluate_task_stalls(
             episodes_out.pop(task_id, None)
 
     return alerts, episodes_out
+
+
+def evaluate_dispatch_fuse(
+    tasks: Iterable[Dict[str, Any]],
+    episodes: Dict[str, Dict[str, Any]],
+    now: float,
+    sla: Optional[float] = None,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Dict[str, Any]]]:
+    """Detect dispatched tasks whose delivery never landed (no working ack).
+
+    Only `dispatched` tasks are watched: any other status (including pending,
+    which legitimately queues before dispatch) resets its episode. Episode
+    identity is (task_id, updated_at), so a controller redispatch starts a
+    fresh episode -- but the `requeues` counter is inherited, letting the
+    caller cap repeated failovers of the same never-started task.
+    Returns (new_breaches, episodes_out) without performing I/O.
+    """
+    threshold = dispatch_delivery_sla() if sla is None else sla
+    episodes_out: Dict[str, Dict[str, Any]] = dict(episodes or {})
+    breaches: List[Dict[str, Any]] = []
+    seen = set()
+
+    for task in tasks or []:
+        task_id = task.get("task_id")
+        if not task_id:
+            continue
+        seen.add(task_id)
+
+        if task.get("status") != "dispatched":
+            episodes_out.pop(task_id, None)
+            continue
+
+        updated = float(task.get("updated_at") or task.get("last_activity_at") or 0)
+        if not updated:
+            continue
+
+        waited = now - updated
+        if waited < threshold:
+            episodes_out.pop(task_id, None)
+            continue
+
+        previous = episodes_out.get(task_id) or {}
+        if previous and float(previous.get("updated_at") or 0) == updated:
+            continue
+
+        breach = {
+            "task_id": task_id,
+            "workflow_id": task.get("workflow_id"),
+            "node": task.get("node") or task.get("stage"),
+            "status": "dispatched",
+            "agent": task.get("agent"),
+            "pane_id": task.get("pane_id"),
+            "updated_at": updated,
+            "waited_seconds": int(waited),
+            "idle_seconds": int(waited),
+            "sla_seconds": int(threshold),
+            "requeues": int(previous.get("requeues", 0)),
+            "alerted_at": now,
+        }
+        episodes_out[task_id] = breach
+        breaches.append(dict(breach))
+
+    for task_id in list(episodes_out.keys()):
+        if task_id not in seen:
+            episodes_out.pop(task_id, None)
+
+    return breaches, episodes_out
+
+
+def task_lineage_root(task_id) -> str:
+    """Replacement lineage root: x, x-r2, x-r3 all share root x."""
+    text = str(task_id or "")
+    match = REPLACEMENT_SUFFIX_RE.search(text)
+    return text[: match.start()] if match else text
+
+
+def _failure_reasons(task: Dict[str, Any]) -> List[str]:
+    return [
+        str(entry.get("reason") or "")
+        for entry in (task.get("status_history") or [])
+        if entry.get("to") == "failed"
+    ]
+
+
+def select_infra_failures_for_recovery(
+    tasks: Iterable[Dict[str, Any]],
+    reasons: Iterable[str],
+    max_attempts: int = 2,
+) -> List[Dict[str, Any]]:
+    """Pick `failed` tasks eligible for automatic supersede + re-dispatch.
+
+    A task is eligible when all of the following hold:
+    - its node has no live tasks (nothing left to race with; the node would
+      otherwise stall forever, as seen in wf-nexusarchive-0917-01),
+    - the failure reason belongs to the infrastructure `reasons` set
+      (delivery fuse / process crash -- quality verdicts are NOT recovered),
+    - its lineage (base id, ignoring -rN replacements) has fewer than
+      `max_attempts` infrastructure failures so far,
+    - it was not already superseded.
+    Returns task dicts sorted by creation time (stable redisptach order).
+    """
+    reason_set = {str(r) for r in (reasons or []) if r}
+    tasks = list(tasks or [])
+    by_node: Dict[str, List[Dict[str, Any]]] = {}
+
+    for task in tasks:
+        node = task.get("node") or task.get("stage")
+        if not node:
+            continue
+        by_node.setdefault(str(node), []).append(task)
+
+    selected = []
+    for node_tasks in by_node.values():
+        if any(
+            t.get("status") not in RECOVERY_TERMINAL_STATUSES
+            for t in node_tasks
+        ):
+            continue
+
+        attempts: Dict[str, int] = {}
+        for task in node_tasks:
+            if any(r in reason_set for r in _failure_reasons(task)):
+                root = task_lineage_root(task.get("task_id"))
+                attempts[root] = attempts.get(root, 0) + 1
+
+        for task in node_tasks:
+            if task.get("status") != "failed":
+                continue
+            if task.get("superseded_by"):
+                continue
+            if not any(r in reason_set for r in _failure_reasons(task)):
+                continue
+            root = task_lineage_root(task.get("task_id"))
+            if attempts.get(root, 0) >= max_attempts:
+                continue
+            selected.append(dict(task))
+
+    selected.sort(
+        key=lambda item: (item.get("created_at") or 0, str(item.get("task_id") or ""))
+    )
+    return selected
 
 
 class BoundedWait:

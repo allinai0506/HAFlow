@@ -29,6 +29,14 @@ CRASH_PATTERNS = (
 
 POLL_SECONDS = 3
 NUDGE_AFTER_SECONDS = 15
+# 同一任务因投递熔断被自动失败的最大次数;超过后只告警不再自动失败,
+# 防止结构性损坏的 Agent/Pane 陷入"失败->重启->再失败"的无限循环。
+DISPATCH_FUSE_MAX_REQUEUES = 2
+
+
+def dispatch_fuse_enabled():
+    value = os.environ.get("HERDR_DISPATCH_FUSE", "1")
+    return value.strip().lower() not in ("0", "false", "off", "no")
 
 
 def run(cmd, timeout=10):
@@ -193,6 +201,97 @@ def notify_stall(alert):
         print(f"[SENTINEL NOTIFY ERROR] {exc}", file=sys.stderr, flush=True)
 
 
+def notify_dispatch_fuse(breach):
+    """Deliverable-fuse notification: dispatched task never reached working."""
+    try:
+        import importlib
+
+        notifier = importlib.import_module("services.herdr-notifier")
+        url = notifier.build_console_url(
+            workflow_id=breach.get("workflow_id"),
+            task_id=breach.get("task_id"),
+        )
+        action = breach.get("action", "attention")
+        if action == "failed":
+            body = (
+                f"任务派发后 {breach.get('waited_seconds')}s 内未进入 working，"
+                f"Pane 无投递痕迹，已按投递熔断标记 failed，等待总指挥重新派发。"
+            )
+        else:
+            body = (
+                f"任务派发后 {breach.get('waited_seconds')}s 内未进入 working，"
+                "Pane 仍有活动迹象或已达自动失败上限，仅告警不处置，请人工关注。"
+            )
+        notifier.notify(
+            "Herdr Factory · 投递熔断",
+            f"{breach.get('workflow_id', 'unknown')} · {breach.get('task_id')}",
+            body,
+            url=url,
+        )
+    except Exception as exc:
+        print(f"[SENTINEL NOTIFY ERROR] {exc}", file=sys.stderr, flush=True)
+
+
+def _pane_delivery_evidence(pane_id, task_id):
+    """Evidence for whether the dispatch prompt actually landed on the pane."""
+    if not pane_id:
+        return {"has_marker": False, "agent_status": None}
+
+    screen = pane_visible(pane_id)
+    orchestration_marker = f"HERDR_ORCH_TASK:{task_id}"
+    return {
+        "has_marker": orchestration_marker in screen,
+        "agent_status": agent_status(pane_id),
+    }
+
+
+def check_dispatch_fuse(tasks, state):
+    """Fail dispatched-but-never-working tasks so the controller can requeue.
+
+    仅当 Pane 无投递痕迹且 Agent 未在 working 时才自动失败;否则只告警。
+    返回 True 表示发生了状态失败处置(调用方据此走即时保存路径)。
+    """
+    if not dispatch_fuse_enabled():
+        return False
+
+    episodes = state.get("dispatch_fuse") or {}
+    breaches, updated = liveness.evaluate_dispatch_fuse(
+        tasks, episodes, time.time()
+    )
+
+    changed = False
+    for breach in breaches:
+        evidence = _pane_delivery_evidence(
+            breach.get("pane_id"), breach.get("task_id")
+        )
+        agent_state = evidence.get("agent_status")
+        dead_delivery = not evidence.get("has_marker") and agent_state != "working"
+        can_fail = dead_delivery and breach.get("requeues", 0) < DISPATCH_FUSE_MAX_REQUEUES
+
+        breach["action"] = "failed" if can_fail else "attention"
+
+        print(
+            f"[SENTINEL FUSE] task={breach['task_id']} "
+            f"waited={breach.get('waited_seconds')}s "
+            f"marker={evidence.get('has_marker')} "
+            f"agent={agent_state} action={breach['action']}",
+            flush=True,
+        )
+
+        if can_fail:
+            if update_statuses(
+                {breach["task_id"]: ("failed", "dispatch_delivery_fuse")}
+            ):
+                changed = True
+
+        updated[breach["task_id"]]["requeues"] = breach.get("requeues", 0) + 1
+        updated[breach["task_id"]]["action"] = breach["action"]
+        notify_dispatch_fuse(breach)
+
+    state["dispatch_fuse"] = updated
+    return changed
+
+
 def check_task_stalls(tasks, state):
     """停滞检测:任务处于未终态且长时间无任何状态变迁 -> 告警一次。
 
@@ -300,7 +399,9 @@ def main():
             except Exception:
                 pass
 
-        if update_statuses(changes):
+        fuse_changed = check_dispatch_fuse(tasks, state)
+
+        if update_statuses(changes) or fuse_changed:
             check_task_stalls(tasks, state)
             save_json_atomic(STATE_FILE, state)
             print("[SENTINEL] State updated, controller will auto-sync via registry watcher", flush=True)
