@@ -68,8 +68,14 @@ def list_templates() -> Dict[str, Dict[str, Any]]:
     return templates
 
 
-def load_template(name_or_path: str) -> Dict[str, Any]:
+DEFAULT_TEMPLATE_NAME = "software-development-v1"
+
+
+def load_template(name_or_path: Optional[str] = None) -> Dict[str, Any]:
     """Load a workflow template by name or file path."""
+    if not name_or_path:
+        name_or_path = DEFAULT_TEMPLATE_NAME
+
     explicit_path = Path(name_or_path).expanduser()
     if explicit_path.exists():
         return normalize_workflow(_load_file(explicit_path))

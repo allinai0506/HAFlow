@@ -522,6 +522,7 @@ def provision_project(root, template_name="software-development-v1", project_nam
     if not project_name:
         project_name = Path(root).name
 
+    template_name = template_name or "software-development-v1"
     template = load_template(template_name)
     nodes = template.get("nodes", [])
 

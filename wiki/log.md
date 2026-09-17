@@ -14,6 +14,13 @@
 - Updated [[dag-workflow-engine]] §4.4：plan/requirements 等无 gate 配置节点的 blocked 结论同样暂停自动推进（sweep 只 funnel 裁决、不销毁下游；direct 同查）；作废后自动恢复。
 - 前端启动等待 180s→620s，对齐后端 600s 超时，消除误报式"启动失败"。
 - 根因：GATE_DEFAULTS 仅 test/review/wrapup，sweep fix-loop 看不见 plan 级 blocked，而 direct 完全不查结论（线上 plan blocked 时 test-auto 仍被建出）。
+## [2026-09-17] fix | Cross-system agent executable resolution, deep preflight isolation & project adoption resilience
+Hardened HAFlow execution kernel when integrated with external Agent OS / Task Orchestrators (e.g. StaffAI / agency-agents):
+- Fixed Python 3.14 strict Path typing TypeError in `herdr/workflow.py:load_template` and `herdr/projects.py:provision_project` when `template_name` is None or omitted during project registration.
+- Added target-agent isolation in `bin/herdr-factory:run_workflow_preflight`: when an explicit agent is chosen (e.g. `agy`), only that agent is probed, avoiding unnecessary 90s timeout delays from slow/stalled external proxies.
+- Added `--permission-mode bypassPermissions`, `--no-session-persistence`, and closed stdin with EOF in `herdr/deep_preflight.py` to eliminate interactive permission hangs on Claude Code CLI.
+- Registered `agency-agents` as an official HAFlow workspace project (`agency-agents-575746af`, workspace `wH`, coordinator pane `wH:p1`).
+- Captured comprehensive cross-module lessons in `docs/lessons/lessons-learned.md` §59. Full suite: 531 passed.
 
 ## [2026-09-16] fix | LaunchAgent PATH prepending for user-space agent binaries
 Console deep preflight failed for opencode with a 500 error because the
