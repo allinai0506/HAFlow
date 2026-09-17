@@ -704,3 +704,10 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
   1. **`services/herdr-controller.py`**：新增 `git_finalize_pending_tasks(workflow_id)`（`completed`/`committed` + `integration_mode=git`）；`maybe_close_completed_workflow` 命中时打印一次 `[CLOSE DEFERRED]`（`_close_deferred_logged` 防刷屏）并跳过本轮，终化有界重试收敛后 sweep 自然放行；
   2. **`bin/herdr-task#close_workflow`**：`TEARDOWN_BLOCKING_STATUSES` 之后追加 unsettled-git 闸门，`[CLOSE ABORT]`（exit 2）并打印处置指引（`commit` / `integrate` / `supersede`）；`completed+none` 与已 `cleaned` 任务不误伤，`dry_run` 同样闸门。
 - **验证**：Controller 侧 `AutoCloseGitFinalizeDeferralTest` 4 例 + CLI 侧 `TestCloseWorkflow` 2 例（RED 先行：无修复时 1+4 failed），全量 620 项测试 PASS；controller 已 kickstart 部署。沉淀教训 §65，更新 [[architecture]] §2.1 与 [[dag-workflow-engine]] §12。
+
+## [2026-09-17] perf | 总指挥回合成本治理：阶段边界 /compact + 效率纪律注入
+- **背景**：对 `wf-nexusarchive-0917-01` 总指挥会话的全量账本还原（opencode session db）：跨度 7.91h、30 个 prompt、活跃 3.36h；**上下文 94K→684K**，584K 时单回合纯 LLM 生成 58.3min（早期 <200K 回合仅 0.2-4min）；单回合工具调用最多 55 次，最慢为总指挥替 Controller 重复跑 `herdr-task commit` 重门禁（14.6min 级）；该工作流事件串行等待总指挥累计 2.35h（`[COORDINATOR BUSY]` 187 次、最长 901s）。
+- **改动与实现**：
+  1. **上下文卫生（`services/herdr-controller.py#maybe_compact_coordinator`）**：三处边界注入 `/compact`——直接派发阶段推进（`[STAGE ADVANCED DIRECT]`）、总指挥阶段推进（`[STAGE ADVANCED]`）、fix-loop 派发（`[FIX LOOP NOTIFIED]`）；安全门：`HERDR_COORDINATOR_COMPACT=0` 关闭、仅 `opencode`/`claude` kind（`herdr agent get` 探测）、总指挥忙则跳过、`--wait --timeout 300000` 有界且失败不阻断；
+  2. **效率纪律（`COORDINATOR_DISCIPLINE`）**：done/blocked/attention/retry/fix-loop/stage-advance 全部事件模板追加硬约束——决策落盘即结束回合、禁止 commit/integrate/cleanup/全量测试、只读核验优先、上下文过大先 `/compact`。
+- **验证**：新增 compact 安全门 5 例 + 边界触发契约 1 例 + 纪律注入 2 例（含既有派发测试显式打桩保持语义），全量 **628 项测试 PASS**；controller 已 kickstart 部署。沉淀教训 §66，更新 [[architecture]] §2.1。

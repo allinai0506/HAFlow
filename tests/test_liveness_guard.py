@@ -228,6 +228,27 @@ class ControllerLivenessWiringTest(unittest.TestCase):
         self.assertIn("interrupted", message)
         self.assertIn("t-att", message)
 
+    def test_efficiency_discipline_in_coordinator_messages(self):
+        # 2026-09-17 复盘:总指挥决策后空转/越权重活是长尾主因,
+        # 所有事件模板必须携带效率纪律(落盘即停 / 禁止重操作 / /compact)。
+        controller = importlib.import_module("services.herdr-controller")
+        task = {
+            "task_id": "t-eff",
+            "workflow_id": "wf-eff",
+            "stage": "implementation",
+            "pane_id": "w1:p2",
+            "agent": "opencode",
+            "goal": "goal",
+            "acceptance_criteria": ["a"],
+            "status": "agent_done",
+        }
+        for event_type in ("done", "blocked", "attention"):
+            message = controller.build_coordinator_message(task, event_type)
+            self.assertIn("效率纪律", message)
+            self.assertIn("立即结束本回合", message)
+            self.assertIn("/compact", message)
+            self.assertIn("禁止运行重操作", message)
+
     def test_coordinator_stall_records_attention_and_notifies(self):
         controller = importlib.import_module("services.herdr-controller")
         item = {"task_id": "t1", "event_type": "done", "key": "t1:done"}
@@ -295,6 +316,94 @@ class ControllerLivenessWiringTest(unittest.TestCase):
             controller.maybe_close_completed_workflow("wf-fixture")
             time.sleep(0.2)
             run_mock.assert_not_called()
+
+
+class CoordinatorCompactTest(unittest.TestCase):
+    """阶段/fix-loop 边界的总指挥 /compact 注入(2026-09-17 效率优化)。
+
+    回归背景:wf-nexusarchive-0917-01 总指挥上下文 94K->684K,后期单回合
+    纯 LLM 生成 27-58min;阶段边界压缩上下文把后续回合耗时拉回分钟级。
+    """
+
+    def setUp(self):
+        self.controller = importlib.import_module("services.herdr-controller")
+
+    def _resp(self, returncode=0, stdout="", stderr=""):
+        import subprocess
+        return subprocess.CompletedProcess([], returncode, stdout, stderr)
+
+    def test_disabled_by_env_never_calls_herdr(self):
+        with patch.dict("os.environ", {"HERDR_COORDINATOR_COMPACT": "0"}), \
+             patch.object(self.controller.subprocess, "run") as run_mock, \
+             patch.object(self.controller, "coordinator_pane_for_workflow",
+                          return_value="w1:p1"):
+            self.assertFalse(
+                self.controller.maybe_compact_coordinator("wf-1")
+            )
+            run_mock.assert_not_called()
+
+    def test_skips_unsupported_agent_kind(self):
+        with patch.object(self.controller, "coordinator_pane_for_workflow",
+                          return_value="w1:p1"), \
+             patch.object(self.controller, "coordinator_agent_kind",
+                          return_value="codex"), \
+             patch.object(self.controller.subprocess, "run") as run_mock:
+            self.assertFalse(
+                self.controller.maybe_compact_coordinator("wf-1")
+            )
+            run_mock.assert_not_called()
+
+    def test_skips_when_coordinator_busy(self):
+        with patch.object(self.controller, "coordinator_pane_for_workflow",
+                          return_value="w1:p1"), \
+             patch.object(self.controller, "coordinator_agent_kind",
+                          return_value="opencode"), \
+             patch.object(self.controller, "coordinator_status",
+                          return_value="working"), \
+             patch.object(self.controller.subprocess, "run") as run_mock:
+            self.assertFalse(
+                self.controller.maybe_compact_coordinator("wf-1")
+            )
+            run_mock.assert_not_called()
+
+    def test_sends_compact_when_idle_and_supported(self):
+        with patch.object(self.controller, "coordinator_pane_for_workflow",
+                          return_value="w1:p1"), \
+             patch.object(self.controller, "coordinator_agent_kind",
+                          return_value="opencode"), \
+             patch.object(self.controller, "coordinator_status",
+                          return_value="idle"), \
+             patch.object(
+                 self.controller.subprocess, "run",
+                 side_effect=lambda *a, **k: self._resp(0),
+             ) as run_mock:
+            self.assertTrue(
+                self.controller.maybe_compact_coordinator(
+                    "wf-1", reason="stage_advance:plan"
+                )
+            )
+
+        cmd = run_mock.call_args.args[0]
+        self.assertEqual(
+            cmd[:5],
+            ["herdr", "agent", "prompt", "w1:p1", "/compact"],
+        )
+        self.assertIn("--wait", cmd)
+
+    def test_compaction_failure_is_non_blocking(self):
+        with patch.object(self.controller, "coordinator_pane_for_workflow",
+                          return_value="w1:p1"), \
+             patch.object(self.controller, "coordinator_agent_kind",
+                          return_value="claude"), \
+             patch.object(self.controller, "coordinator_status",
+                          return_value="done"), \
+             patch.object(
+                 self.controller.subprocess, "run",
+                 side_effect=lambda *a, **k: self._resp(1, stderr="boom"),
+             ):
+            self.assertFalse(
+                self.controller.maybe_compact_coordinator("wf-1")
+            )
 
 
 class SentinelStallGuardTest(unittest.TestCase):

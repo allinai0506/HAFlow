@@ -111,6 +111,15 @@ Evidence:
   `close_workflow` CLI 同样 `[CLOSE ABORT]`。背景：wrapup 收官时后台 close 线程
   把 `completed` 任务抢先推进 `cleaned`，在跑的 `herdr-task commit` 子进程撞
   `Illegal transition: cleaned -> committed`，交付分支落不进集成链路。
+- `FACT` **总指挥回合成本治理（2026-09-17 引入，lessons §66）**:
+  1. **上下文卫生**：阶段边界（`[STAGE ADVANCED DIRECT]`/`[STAGE ADVANCED]`）与
+     fix-loop 边界（`[FIX LOOP NOTIFIED]`）调用 `maybe_compact_coordinator` 向总指挥
+     Pane 注入 `/compact`（仅 `opencode`/`claude` kind；忙则跳过；有界等待；
+     `HERDR_COORDINATOR_COMPACT=0` 关闭）；2. **效率纪律**
+     (`COORDINATOR_DISCIPLINE`) 注入全部事件模板：决策落盘即结束回合、
+     禁止 commit/integrate/全量测试、只读核验优先。背景：`wf-nexusarchive-0917-01`
+     总指挥上下文 94K→684K，584K 时单回合 LLM 生成 58.3min，事件串行等待
+     累计 2.35h（`[COORDINATOR BUSY]` 187 次）。
 - `FACT` **基础设施失败自动补派（2026-09-17 引入，lessons §60）**:
   registry watcher 对 `failed` 任务调用纯选择器 `herdr/liveness.py#select_infra_failures_for_recovery`
   （仅 `dispatch_delivery_fuse` / `agent_process_crash`，节点内无活跃任务，谱系失败次数 <
