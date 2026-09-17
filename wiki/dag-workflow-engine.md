@@ -164,5 +164,30 @@ Evidence: `herdr/direct_dispatch.py#GATE_VERDICT_CONTRACT` /
 `services/herdr-controller.py#read_gate_verdict` / `#try_auto_verdict` /
 `tests/test_auto_acceptance.py#GateVerdictUnitTest`
 
+## 11. 交付 PR 前置（wrapup 节点的必做步骤）
+
+`FACT` **交付 PR 前置（2026-09-17 引入，lessons §64）**：`software-development-v1`
+模板的 wrapup 节点规则要求——在六步收尾步骤 1-2（知识沉淀 / wiki 回填并提交）之后、
+步骤 3（合并确认）之前，必须完成「交付 PR」：
+
+1. 读取目标仓库交付约定（`AGENTS.md` / `CLAUDE.md` / `docs/guides/*wrap-up*.md` /
+   `package.json` scripts）；
+2. 按标准流程把交付分支（集成分支链末端）推送到远端并创建 PR
+   （如 nexusarchive：`npm run pr:create`；无项目脚本时用 forge CLI/API）；
+3. PR URL 与目标 base 写入收尾报告与交付汇总；PR 无法创建时才记 DEFERRED。
+
+硬约束：只允许「推送交付分支 + 创建 PR」两类非破坏性远端动作；**严禁自动合并**
+（合入由作者/评审决定）；严禁 `--force` / `--yes`；不得改写交付分支历史。
+`six-step-finish` 技能同步新增「步骤 0：交付 PR 前置」与三条常见借口兜底
+（不代劳 PR 创建 / 不自动合并 / 未推送无 PR 先跑脚本）。
+
+背景：HAFlow 全链路此前没有任何 `git push`（`herdr-task integrate` 只建本地集成分支），
+wrapup 只做只读合并确认，导致 `wf-nexusarchive-0917-01` 收官后交付 PR 仍须人工/总指挥补交。
+
+Evidence: `workflow_templates/software-development-v1.yaml#wrapup.rules`（交付 PR 前置）/
+`.agents/skills/six-step-finish/SKILL.md#步骤 0` /
+`tests/test_software_development_v1_template.py#test_wrapup_requires_delivery_pr_before_finish` /
+`tests/test_six_step_skill_provenance.py`
+
 Evidence: `services/herdr-controller.py` #check_workflow_stage_advance /
 #blocked_gate_dependency；`docs/walkthroughs/20260913-fix-loop-design.md`
