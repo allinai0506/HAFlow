@@ -854,6 +854,11 @@ def direct_stage_dispatch_enabled():
     return value.strip().lower() not in ("0", "false", "off", "no")
 
 
+# 单个 launch 必须有界:子进程僵死时不得永久占用调度线程
+# 与 per-workflow 锁,超时后走既有 PARTIAL→总指挥回退路径。
+DIRECT_DISPATCH_LAUNCH_TIMEOUT = 300
+
+
 def try_direct_stage_advance(item):
     """常规推进会:按节点模板规则化直接派发,失败回落总指挥。
 
@@ -942,18 +947,28 @@ def try_direct_stage_advance(item):
         for line in spec["acceptance"]:
             cmd += ["--acceptance", line]
 
-        result = subprocess.run(
-            cmd,
-            text=True,
-            capture_output=True
-        )
-
-        if result.returncode != 0:
-            print(
-                f"[DIRECT DISPATCH ERROR] "
-                f"task={spec['task_id']}: "
-                f"{result.stderr.strip() or result.stdout.strip()}"
+        try:
+            result = subprocess.run(
+                cmd,
+                text=True,
+                capture_output=True,
+                timeout=DIRECT_DISPATCH_LAUNCH_TIMEOUT,
             )
+        except subprocess.TimeoutExpired:
+            print(
+                f"[DIRECT DISPATCH TIMEOUT] "
+                f"task={spec['task_id']} "
+                f"after={DIRECT_DISPATCH_LAUNCH_TIMEOUT}s"
+            )
+            result = None
+
+        if result is None or result.returncode != 0:
+            if result is not None:
+                print(
+                    f"[DIRECT DISPATCH ERROR] "
+                    f"task={spec['task_id']}: "
+                    f"{result.stderr.strip() or result.stdout.strip()}"
+                )
             if launched:
                 print(
                     f"[DIRECT DISPATCH PARTIAL] "
