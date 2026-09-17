@@ -117,6 +117,21 @@ Evidence:
 - `tests/test_direct_stage_dispatch.py#PlanStageDispatchTest`
 - `tests/test_direct_stage_dispatch.py#TryDirectStageAdvanceTest`
 
+### 4.4 任务级门禁结论对称性
+
+`FACT` 任务级 `blocked` 验收结论对自动推进一律有效，不问节点有无 gate 配置：
+sweep 发现就绪节点的任一依赖存在未作废 blocked 结论时，不 queue、不作废下游，
+只记 attention（`upstream_blocked`，可退避）并通知总指挥裁决，作废过期结论后自动恢复；
+`try_direct_stage_advance` 在规划前复查同一条件，命中则 `DIRECT DISPATCH BLOCKED`
+回退总指挥。未知依赖时保持原行为（fail-open）。fix-loop 的销毁式回流仍仅对有
+gate 配置的节点（test/review/wrapup）触发。
+
+Evidence:
+- `services/herdr-controller.py#blocked_verdict_dep`
+- `services/herdr-controller.py#check_workflow_stage_advance`
+- `services/herdr-controller.py#try_direct_stage_advance`
+- `tests/test_gate_verdict_symmetry.py`
+
 ## 10. 门禁 verdict 与 fix-loop 回路
 
 `FACT` 阶段结论（pass/blocked）是 DAG 推进的一等输入，与任务完成态正交：
