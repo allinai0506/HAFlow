@@ -22,6 +22,8 @@ MAX_GOAL_CHARS = 600
 MAX_SUMMARY_CHARS = 400
 MAX_EVENT_ROWS = 15
 MAX_RECENT_ROW_CHARS = 120
+MAX_FACT_DICT_KEYS = 12
+MAX_CRITERIA_ITEMS = 6
 
 # Credential-shaped content: cloud keys, provider keys, bearer tokens,
 # inline key=value assignments. Patterns are conservative; a match means the
@@ -121,6 +123,18 @@ def build_supervisor_state(
         "stage_verdict": task.get("stage_verdict"),
     }
 
+    criteria = task.get("acceptance_criteria")
+    if isinstance(criteria, str) and criteria.strip():
+        state["acceptance_criteria"] = [_truncate(criteria, MAX_SUMMARY_CHARS)]
+    elif isinstance(criteria, list):
+        rows = [
+            _truncate(str(item), MAX_RECENT_ROW_CHARS)
+            for item in criteria[:MAX_CRITERIA_ITEMS]
+            if str(item).strip()
+        ]
+        if rows:
+            state["acceptance_criteria"] = rows
+
     tests = facts.get("tests")
     if isinstance(tests, dict):
         state["tests"] = {
@@ -129,7 +143,7 @@ def build_supervisor_state(
                 if isinstance(value, str)
                 else value
             )
-            for key, value in list(tests.items())[:8]
+            for key, value in list(tests.items())[:MAX_FACT_DICT_KEYS]
         }
     diff_summary = facts.get("diff_summary")
     if isinstance(diff_summary, dict):
@@ -139,7 +153,7 @@ def build_supervisor_state(
                 if isinstance(value, str)
                 else value
             )
-            for key, value in list(diff_summary.items())[:8]
+            for key, value in list(diff_summary.items())[:MAX_FACT_DICT_KEYS]
         }
     output_summary = facts.get("output_summary")
     if output_summary:
@@ -162,7 +176,7 @@ def _fit_budget(state: Dict[str, Any], max_context_size: int) -> Dict[str, Any]:
         return state
     # Drop order: history first, then summaries; identity + goal survive.
     for key in ("recent_events", "previous_signals", "diff_summary", "tests",
-                "recent_output_summary", "blocker"):
+                "recent_output_summary", "blocker", "acceptance_criteria"):
         state.pop(key, None)
         if len(json.dumps(state, ensure_ascii=False)) <= budget:
             return state

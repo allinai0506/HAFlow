@@ -35,6 +35,14 @@ MODEL_TIERS = ("FAST", "BALANCED", "STRONG")
 # Actions that must never fire on a shaky judgment.
 HIGH_RISK_ACTIONS = frozenset({RETRY, REROUTE, PAUSE, FINISH, ESCALATE})
 
+# Actions that are compatible with the caller's default continuation
+# (e.g. an agent_done checkpoint may still emit the normal done event).
+PASS_THROUGH_ACTIONS = frozenset({CONTINUE, FINISH})
+
+# Actions that, once enforced, must intercept the caller's default
+# continuation: HAFlow orchestration owns what happens instead.
+INTERVENTION_ACTIONS = frozenset(ACTIONS) - PASS_THROUGH_ACTIONS
+
 # Task statuses in which supervision may not steer anything.
 SETTLED_TASK_STATUSES = frozenset({
     "completed", "committed", "integrated", "cleanup_ready", "cleaned",

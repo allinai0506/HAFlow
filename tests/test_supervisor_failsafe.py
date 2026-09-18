@@ -8,14 +8,23 @@
                            existing-flow handlers (retry==rework etc.)
 """
 
+import json
 import os
 import unittest
+from unittest.mock import patch
 
 from herdr.decision.models import DecisionProviderError
+from herdr.decision.providers.jev import JevDecisionProvider
 from herdr.supervisor import harness
-from herdr.supervisor.config import load_config, supervisor_enabled
+from herdr.supervisor.config import (
+    load_config,
+    provider_enabled,
+    supervisor_enabled,
+)
 from herdr.supervisor.engine import SemanticSupervisor
+from herdr.supervisor.signals import SIGNAL_NAMES
 
+from tests.test_decision_providers import _jev_transport
 from tests.test_semantic_supervisor import (  # reuse doubles
     ALL_SIGNALS,
     FakeStore,
@@ -147,6 +156,114 @@ class ControllerWiringTests(unittest.TestCase):
         controller.supervisor_harness = None
         controller.supervisor_checkpoint({"task_id": "t-x"}, "agent_done")  # no raise
         self.assertTrue(callable(controller.supervisor_checkpoint))
+
+
+class JevKillSwitchTests(unittest.TestCase):
+    """HERDR_SUPERVISOR_JEV_ENABLED=false and live key revocation must stop
+    Jev traffic immediately, even in an already-running controller process."""
+
+    def setUp(self):
+        _clean_jev_env(self)
+        os.environ.pop("HERDR_SUPERVISOR_JEV_ENABLED", None)
+        self.addCleanup(os.environ.pop, "HERDR_SUPERVISOR_JEV_ENABLED", None)
+
+    def _spy(self):
+        calls = []
+
+        def post(url, headers, payload, timeout):
+            calls.append(payload)
+            return 200, json.dumps({
+                "answers": {name: {"type": "noul", "noul": 0.2}
+                            for name in SIGNAL_NAMES},
+            })
+
+        return post, calls
+
+    def test_jev_disabled_flag_blocks_all_requests(self):
+        os.environ["JEV_API_KEY"] = "test-key"
+        config = load_config(
+            path="/nonexistent-supervisor.json",
+            env={"HERDR_SUPERVISOR_JEV_ENABLED": "false"},
+        )
+        self.assertFalse(provider_enabled(config))
+        self.assertFalse(supervisor_enabled(config))
+        self.assertIsNone(harness.get_supervisor(config))
+
+        post, calls = self._spy()
+        with patch("herdr.decision.providers.jev._http_post_json",
+                   side_effect=post) as transport:
+            result = harness.run_checkpoint(
+                task=_task(), trigger="agent_done", store=FakeStore(),
+                config=config, log=lambda _m: None)
+        self.assertIsNone(result)
+        transport.assert_not_called()
+        self.assertEqual(calls, [])
+
+    def test_disabled_provider_rejects_requests_even_with_key(self):
+        os.environ["JEV_API_KEY"] = "test-key"
+        post, calls = self._spy()
+        provider = JevDecisionProvider({"enabled": False}, transport=post)
+        self.assertFalse(provider.available())
+        with self.assertRaises(DecisionProviderError) as ctx:
+            provider.judge("question", "state")
+        self.assertEqual(ctx.exception.kind, "auth")
+        self.assertEqual(calls, [])
+
+    def test_engine_reports_provider_disabled(self):
+        config = load_config(
+            path="/nonexistent-supervisor.json",
+            env={"HERDR_SUPERVISOR_JEV_ENABLED": "false"},
+        )
+        post, calls = self._spy()
+        provider = JevDecisionProvider({}, transport=post)
+        supervisor = SemanticSupervisor(config, provider)
+        self.assertEqual(
+            supervisor.should_evaluate("t-1", "agent_done"), "provider_disabled")
+
+    def test_running_controller_stops_requests_after_key_removal(self):
+        os.environ["JEV_API_KEY"] = "test-key"
+        post, calls = self._spy()
+        provider = JevDecisionProvider({}, transport=post)
+        self.assertTrue(provider.available(), "provider cached while key exists")
+
+        config = load_config(path="/nonexistent-supervisor.json")
+        config["interval"] = 0
+        config["cooldown"] = 0
+        supervisor = SemanticSupervisor(config, provider)
+
+        first = harness.run_checkpoint(
+            task=_task(), trigger="agent_done", store=FakeStore(),
+            config=config, supervisor=supervisor, log=lambda _m: None)
+        self.assertIsNotNone(first)
+        self.assertEqual(len(calls), 1)
+
+        os.environ.pop("JEV_API_KEY", None)
+        self.assertFalse(provider.available(),
+                         "revoked key must be observed immediately")
+
+        second = harness.run_checkpoint(
+            task=_task(), trigger="agent_done", store=FakeStore(),
+            config=config, supervisor=supervisor, log=lambda _m: None)
+        self.assertIsNone(second)
+        self.assertEqual(len(calls), 1,
+                         "no Jev request may happen after key removal")
+
+    def test_api_key_never_appears_in_config_or_events(self):
+        os.environ["JEV_API_KEY"] = "super-secret-key-value"
+        post, calls = self._spy()
+        provider = JevDecisionProvider({}, transport=post)
+        config = load_config(path="/nonexistent-supervisor.json")
+        config["interval"] = 0
+        config["cooldown"] = 0
+        supervisor = SemanticSupervisor(config, provider)
+        store = FakeStore()
+        result = harness.run_checkpoint(
+            task=_task(), trigger="agent_done", store=store,
+            config=config, supervisor=supervisor, log=lambda _m: None)
+        self.assertIsNotNone(result)
+        blob = json.dumps({"config": config, "events": store.events})
+        self.assertNotIn("super-secret-key-value", blob)
+        self.assertNotIn("super-secret-key-value", json.dumps(result))
 
 
 if __name__ == "__main__":

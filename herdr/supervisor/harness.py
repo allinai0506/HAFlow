@@ -12,7 +12,10 @@ Invariants enforced here:
 - actions reach HAFlow state only through handlers the orchestrator supplies;
   with enforcement off (V1 default) the decision is recorded, nothing else;
 - provider signals never bypass the policy engine: this module consumes
-  PolicyDecision, not raw results.
+  PolicyDecision, not raw results;
+- an enforced intervention (RETRY/REROUTE/PAUSE/VERIFY/ESCALATE) sets
+  ``continue_flow=False``: the caller's default continuation (the normal
+  ``done`` event) must not run while HAFlow handles the action instead.
 """
 
 from __future__ import annotations
@@ -21,8 +24,14 @@ import time
 from typing import Any, Callable, Dict, Optional
 
 from ..decision import create_provider
+from . import evidence as evidence_layer
 from . import policy as policy_engine
-from .config import jev_provider_config, load_config, supervisor_enabled
+from .config import (
+    jev_provider_config,
+    load_config,
+    provider_enabled,
+    supervisor_enabled,
+)
 from .engine import RateGate, SemanticSupervisor
 from .evaluation import (
     EVALUATION_EVENT,
@@ -32,13 +41,22 @@ from .evaluation import (
 
 EVENT_SOURCE = "semantic_supervisor"
 
+_FACT_EVIDENCE_KEYS = ("tests", "diff_summary", "output_summary")
+
 _supervisors: Dict[str, SemanticSupervisor] = {}
 
 
 def get_supervisor(config: Optional[dict] = None) -> Optional[SemanticSupervisor]:
     """Build (and memoize per config path) the supervisor for this process."""
     cfg = config or load_config()
-    key = str(cfg.get("provider")) + "|" + str(cfg.get("interval")) + "|" + str(cfg.get("enforce"))
+    if not provider_enabled(cfg):
+        return None
+    key = "|".join((
+        str(cfg.get("provider")),
+        str(cfg.get("interval")),
+        str(cfg.get("enforce")),
+        str((cfg.get("jev") or {}).get("enabled", True)),
+    ))
     cached = _supervisors.get(key)
     if cached is not None:
         return cached
@@ -47,13 +65,25 @@ def get_supervisor(config: Optional[dict] = None) -> Optional[SemanticSupervisor
         provider = create_provider("jev", jev_provider_config(cfg))
     else:
         provider = create_provider(str(cfg.get("provider")), cfg.get("provider_config") or {})
+    if provider is None:
+        return None
     supervisor = SemanticSupervisor(cfg, provider)
     _supervisors[key] = supervisor
     return supervisor
 
 
-def collect_facts(task: dict, store=None, config: Optional[dict] = None) -> Dict[str, Any]:
-    """Deterministic facts from the task record (fact layer, not provider)."""
+def collect_facts(
+    task: dict,
+    store=None,
+    config: Optional[dict] = None,
+    report_text: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Deterministic facts from the task record + real execution evidence.
+
+    Evidence sources (bounded summaries only, never raw payloads):
+    HERDR loop report (``.herdr-loop`` METRICS/STATE), git status/diff stat,
+    Agent done report (verdict/blocker/status history + report tail).
+    """
     cfg = config or {}
     runtime = task.get("runtime") if isinstance(task.get("runtime"), dict) else {}
     payload = task if isinstance(task, dict) else {}
@@ -62,12 +92,19 @@ def collect_facts(task: dict, store=None, config: Optional[dict] = None) -> Dict
     if started_at:
         elapsed = max(0.0, round(time.time() - float(started_at), 1))
     fix_loop = payload.get("fix_loop") if isinstance(payload.get("fix_loop"), dict) else {}
-    return {
+    status_history = payload.get("status_history")
+    rework_count = sum(
+        1
+        for entry in status_history
+        if isinstance(entry, dict) and entry.get("to") == "rework"
+    ) if isinstance(status_history, list) else 0
+    facts = {
         "task_status": task.get("status"),
         "runtime_status": runtime.get("status"),
         "attempt_count": int(
             payload.get("attempt_count")
             or fix_loop.get("loop_count")
+            or rework_count
             or 0
         ),
         "verification_count": int(payload.get("verification_count") or 0),
@@ -76,6 +113,13 @@ def collect_facts(task: dict, store=None, config: Optional[dict] = None) -> Dict
             (cfg.get("policy") or {}).get("allow_auto_execute", True)
         ),
     }
+    try:
+        facts.update(
+            evidence_layer.collect_execution_evidence(task, report_text=report_text)
+        )
+    except Exception:
+        pass
+    return facts
 
 
 def run_checkpoint(
@@ -86,24 +130,37 @@ def run_checkpoint(
     actions: Optional[Dict[str, Callable[[dict, dict], Any]]] = None,
     config: Optional[dict] = None,
     supervisor: Optional[SemanticSupervisor] = None,
+    report_reader: Optional[Callable[[], Optional[str]]] = None,
     log: Callable[[str], None] = print,
 ) -> Optional[Dict[str, Any]]:
-    """One supervised checkpoint. Returns {'evaluation':…, 'decision':…} or None.
+    """One supervised checkpoint. Returns None, or a dict carrying:
+
+    - ``evaluation`` / ``decision``: the persisted records;
+    - ``intercepted``: an enforced intervention owns this checkpoint, so the
+      caller must NOT run its default continuation (e.g. the ``done`` event);
+    - ``handled``: an orchestrator-supplied action handler executed;
+    - ``continue_flow``: the caller may proceed with its default flow.
 
     ``actions`` maps PolicyDecision.action -> handler(task, decision_dict);
     handlers are the orchestrator's own existing flows (rework, attention,
     coordinator events). The harness itself changes no HAFlow state.
     """
     cfg = config or load_config()
-    # Cheap global kill-switch only; provider availability is re-checked per
-    # checkpoint inside the engine so a stub/injected supervisor still runs.
-    if not cfg.get("enabled", False):
+    # Cheap kill-switches first: global enablement plus provider-specific
+    # enablement (HERDR_SUPERVISOR_JEV_ENABLED=false -> zero provider traffic).
+    if not cfg.get("enabled", False) or not provider_enabled(cfg):
         return None
     task_id = task.get("task_id")
     try:
         supervisor = supervisor or get_supervisor(cfg)
         if supervisor is None:
             return None
+        # Pre-probe (non-mutating) so gated checkpoints skip evidence I/O.
+        try:
+            if supervisor.should_evaluate(task_id, trigger) is not None:
+                return None
+        except Exception:
+            pass
         events: list = []
         previous: Optional[dict] = None
         if store is not None:
@@ -112,13 +169,20 @@ def run_checkpoint(
                 previous = latest_evaluation(events)
             except Exception:
                 events = []
-        facts = collect_facts(task, store=store, config=cfg)
+        report_text = None
+        if report_reader is not None:
+            try:
+                report_text = report_reader()
+            except Exception:
+                report_text = None
+        facts = collect_facts(task, store=store, config=cfg, report_text=report_text)
         evaluation = supervisor.evaluate(
             task,
             trigger,
             events=events,
             facts={k: v for k, v in facts.items() if k in (
-                "attempt_count", "elapsed_seconds", "verification_count")},
+                "attempt_count", "elapsed_seconds", "verification_count",
+                *_FACT_EVIDENCE_KEYS)},
             previous_evaluation=previous,
         )
         if evaluation is None:
@@ -137,11 +201,16 @@ def run_checkpoint(
             except Exception as exc:
                 log(f"[SUPERVISOR EVENT WRITE FAILED] task={task_id}: {type(exc).__name__}")
         decision = policy_engine.decide(evaluation, facts, cfg)
+        enforce_on = bool(cfg.get("enforce"))
+        intercepted = bool(
+            enforce_on and decision.action in policy_engine.INTERVENTION_ACTIONS
+        )
         payload = {
             "decision_id": evaluation["evaluation_id"],
             "evaluation_id": evaluation["evaluation_id"],
             "task_id": task_id,
             "trigger": trigger,
+            "enforced": intercepted,
             **decision.to_dict(),
         }
         if store is not None:
@@ -161,22 +230,35 @@ def run_checkpoint(
             f"provider={evaluation.get('provider')} action={decision.action} "
             f"why={'; '.join(decision.reasons)}"
         )
-        if cfg.get("enforce") and decision.action != policy_engine.CONTINUE:
+        handled = False
+        if enforce_on and decision.action != policy_engine.CONTINUE:
             handler = (actions or {}).get(decision.action)
             if handler is not None:
                 try:
                     handler(task, payload)
+                    handled = True
                 except Exception as exc:
                     log(
                         f"[SUPERVISOR ACTION FAILED] task={task_id} "
                         f"action={decision.action}: {type(exc).__name__}"
                     )
-            else:
+            elif intercepted:
                 log(
-                    f"[SUPERVISOR ACTION UNMAPPED] task={task_id} "
-                    f"action={decision.action} (no handler; observation only)"
+                    f"[SUPERVISOR INTERCEPTED-UNMAPPED] task={task_id} "
+                    f"action={decision.action} (no handler; default flow blocked)"
                 )
-        return {"evaluation": evaluation, "decision": payload}
+        if intercepted:
+            log(
+                f"[SUPERVISOR INTERCEPTED] task={task_id} action={decision.action} "
+                f"handled={handled} -> default continuation blocked"
+            )
+        return {
+            "evaluation": evaluation,
+            "decision": payload,
+            "intercepted": intercepted,
+            "handled": handled,
+            "continue_flow": not intercepted,
+        }
     except Exception as exc:
         # Supervision failure is never a task failure.
         log(f"[SUPERVISOR SKIPPED] task={task_id} trigger={trigger}: {type(exc).__name__}: {exc}")
@@ -188,12 +270,74 @@ def reset_process_state() -> None:
     _supervisors.clear()
 
 
+def _last_agent_done_at(task: dict) -> Optional[float]:
+    history = task.get("status_history") if isinstance(task, dict) else None
+    if not isinstance(history, list):
+        return None
+    for entry in reversed(history):
+        if isinstance(entry, dict) and entry.get("to") == "agent_done":
+            try:
+                value = float(entry.get("timestamp") or 0)
+            except (TypeError, ValueError):
+                return None
+            return value or None
+    return None
+
+
+def pending_intervention(task: dict, store, config: Optional[dict] = None
+                         ) -> Optional[str]:
+    """Latest enforced intervention not superseded by a newer agent_done.
+
+    Durable guard for redelivery/recovery paths where the RateGate may skip a
+    fresh evaluation: once HAFlow intercepted a completion, re-announcing it
+    as ``done`` must not silently bypass the pending action. Returns None when
+    supervision/enforcement is currently off, so disabling the supervisor
+    restores the original behavior exactly.
+    """
+    cfg = config or load_config()
+    if not cfg.get("enabled", False) or not cfg.get("enforce"):
+        return None
+    if not supervisor_enabled(cfg):
+        return None
+    task_id = task.get("task_id")
+    if not task_id or store is None:
+        return None
+    try:
+        events = store.list_events(task_id=task_id, limit=100) or []
+    except Exception:
+        return None
+
+    latest_action = None
+    latest_ts = -1.0
+    for event in events:
+        if not isinstance(event, dict) or event.get("event_type") != POLICY_EVENT:
+            continue
+        payload = event.get("payload")
+        if not isinstance(payload, dict) or payload.get("enforced") is not True:
+            # Observe-mode decisions never block the default flow.
+            continue
+        try:
+            ts = float(event.get("timestamp") or 0)
+        except (TypeError, ValueError):
+            ts = 0.0
+        if ts >= latest_ts:
+            latest_ts = ts
+            latest_action = str(payload.get("action") or "")
+    if latest_action not in policy_engine.INTERVENTION_ACTIONS:
+        return None
+    since = _last_agent_done_at(task)
+    if since is not None and latest_ts < since:
+        return None
+    return latest_action
+
+
 __all__ = [
     "EVALUATION_EVENT",
     "POLICY_EVENT",
     "RateGate",
     "collect_facts",
     "get_supervisor",
+    "pending_intervention",
     "reset_process_state",
     "run_checkpoint",
 ]

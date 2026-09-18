@@ -12,7 +12,9 @@ A single ``judge_many`` call sends all questions in ONE request over one
 bounded state. Standard library only (RULES: minimal dependencies); the
 transport is injectable so tests and alternative deployments never touch
 the network. API key comes from JEV_API_KEY (fallback TYPESAFE_API_KEY) and
-is never persisted or logged.
+is never persisted or logged: it is resolved from the environment at request
+time, so removing the variable stops traffic immediately even while the
+controller process keeps running.
 """
 
 from __future__ import annotations
@@ -83,17 +85,26 @@ class JevDecisionProvider(DecisionProvider):
         self.base_url = (cfg.get("base_url") or DEFAULT_BASE_URL).rstrip("/")
         self.model = cfg.get("model") or DEFAULT_MODEL
         self.timeout = float(cfg.get("timeout") or 20)
-        self._api_key = resolve_api_key(cfg)
+        self.enabled = bool(cfg.get("enabled", True))
+        self._api_key_env = cfg.get("api_key_env")
         self._post = transport or _http_post_json
 
+    def _resolve_api_key(self) -> Optional[str]:
+        """Read the key from the environment now; never cache a secret."""
+        config = {"api_key_env": self._api_key_env} if self._api_key_env else None
+        return resolve_api_key(config)
+
     def available(self) -> bool:
-        return bool(self._api_key)
+        return bool(self.enabled) and bool(self._resolve_api_key())
 
     # ---------------------------------------------------------- request core
 
     def _ask(self, questions: Dict[str, dict],
              state: Union[str, dict, list]) -> Tuple[Dict[str, dict], float, dict]:
-        if not self._api_key:
+        if not self.enabled:
+            raise DecisionProviderError("jev provider disabled", kind="auth")
+        api_key = self._resolve_api_key()
+        if not api_key:
             raise DecisionProviderError("jev api key not configured", kind="auth")
         if not isinstance(state, _STATE_TYPES):
             raise DecisionProviderError("state must be str/dict/list", kind="invalid")
@@ -103,7 +114,7 @@ class JevDecisionProvider(DecisionProvider):
             "questions": questions,
         }
         headers = {
-            "Authorization": f"Bearer {self._api_key}",
+            "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
         started = time.monotonic()

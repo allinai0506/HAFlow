@@ -19,6 +19,7 @@ import time
 from typing import Any, Dict, Optional
 
 from ..decision.models import DecisionProviderError
+from .config import provider_enabled
 from .evaluation import build_evaluation
 from .signals import signal_questions
 from .state import build_supervisor_state
@@ -81,6 +82,8 @@ class SemanticSupervisor:
             return "no_task_id"
         if not self.config.get("enabled", False):
             return "disabled"
+        if not provider_enabled(self.config):
+            return "provider_disabled"
         provider = self.provider
         if provider is None:
             return "no_provider"

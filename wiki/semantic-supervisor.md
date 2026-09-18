@@ -23,7 +23,9 @@ Runtime Facts ──► SupervisorState(有界/脱敏快照)
                       │
      CONTINUE/VERIFY/RETRY/REROUTE/PAUSE/FINISH/ESCALATE
                       │
-     enforcement 默认关闭；开启时动作只能经编排层既有回调(rework/attention)
+     enforcement 默认关闭；开启时动作只经编排层既有回调(rework/attention)，
+     且 intervention(RETRY/VERIFY/PAUSE/REROUTE/ESCALATE) 拦截默认 done
+     (harness 返回 continue_flow=False，由 Controller 决定下一步)
 ```
 
 ## 2. 模块地图
@@ -37,25 +39,27 @@ Runtime Facts ──► SupervisorState(有界/脱敏快照)
 | `herdr/decision/providers/rule.py` | Core | 确定性规则 provider（离线/测试替身） |
 | `herdr/supervisor/config.py` | Core | 默认值 < `~/.herdr-controller/supervisor.json` < `HERDR_SUPERVISOR_*`/`JEV_API_KEY` env |
 | `herdr/supervisor/signals.py` | Core | V1 九个 noul 信号定义 |
-| `herdr/supervisor/state.py` | Core | SupervisorState：截断、事件行数封顶、密钥形状脱敏、总大小预算 |
+| `herdr/supervisor/state.py` | Core | SupervisorState：截断、事件行数封顶、密钥形状脱敏、总大小预算；含 `tests/diff_summary/recent_output_summary/acceptance_criteria` |
+| `herdr/supervisor/evidence.py` | Core/IO | 真实执行证据有界摘要：`.herdr-loop`(STATE/METRICS 测试计数)、`git status/diff --stat`、Agent done report(verdict/blocker/status_history + 报告尾部) |
 | `herdr/supervisor/evaluation.py` | Core | SupervisorEvaluation 记录 + delta/trend；持久化为 WorkflowEvent |
-| `herdr/supervisor/engine.py` | Core | checkpoint→0/1 次评估；RateGate(interval/cooldown/max_calls)；provider 异常永不外抛 |
-| `herdr/supervisor/policy.py` | Core | 唯一"信号→动作"决策点；确定性事实一票否决；高风险动作需阈值裕度 |
-| `herdr/supervisor/harness.py` | Shell | 控制器装配：读 events、写 `supervisor_evaluation`/`supervisor_policy` 事件、enforce 时回调编排层 actions |
-| `services/herdr-controller.py#supervisor_checkpoint` | Shell | 挂点（V1：三处 agent_done 转换后）；整体 try/except |
+| `herdr/supervisor/engine.py` | Core | checkpoint→0/1 次评估；RateGate(interval/cooldown/max_calls)；provider 异常永不外抛；`should_evaluate` 先过 provider 级开关 |
+| `herdr/supervisor/policy.py` | Core | 唯一"信号→动作"决策点；确定性事实一票否决；高风险动作需阈值裕度；`PASS_THROUGH_ACTIONS`/`INTERVENTION_ACTIONS` 定义拦截集合 |
+| `herdr/supervisor/harness.py` | Shell | 控制器装配：读 events、按需采集证据、写 `supervisor_evaluation`/`supervisor_policy` 事件；enforce 时回调编排层 actions，返回 `{intercepted, handled, continue_flow}` |
+| `services/herdr-controller.py#supervisor_checkpoint` | Shell | 挂点（V1：三处 agent_done 转换后）；全动作 handler（RETRY→rework，其余→attention）；调用方按 `continue_flow` 决定是否发 done；整体 try/except |
 
 ## 3. 红线（架构不变量）
 
 1. Jev/Provider **绝不**写 task.status、runtime.status、dispatch/workflow state；
 2. Supervisor 失败 ≠ Task 失败：所有入口 fail-safe，最坏只留一条 `[SUPERVISOR SKIPPED]` 日志；
-3. 删除 `JEV_API_KEY` 或 `supervisor.enabled=false` 时，HAFlow 行为与引入前完全一致；
+3. 删除 `JEV_API_KEY` 或 `supervisor.enabled=false` 时，HAFlow 行为与引入前完全一致；key 在每次请求时从环境解析，运行中撤销立即生效；`HERDR_SUPERVISOR_JEV_ENABLED=false` 在 harness/engine/provider 三层均短路，零请求；
 4. 每条 stdout 不调用 Provider：checkpoint 驱动 + RateGate 聚合；
-5. 发送给 Provider 的只有有界结构化摘要，凭证形状内容在 state 构建期即被脱敏；
-6. 监督属于 HAFlow 控制层，不是 Agent 可调用 Tool，Agent 无权开关监督。
+5. 发送给 Provider 的只有有界结构化摘要，凭证形状内容在 state 构建期即被脱敏；不发送完整源码/完整 diff/完整 stdout；
+6. 监督属于 HAFlow 控制层，不是 Agent 可调用 Tool，Agent 无权开关监督；
+7. enforce 下的 intervention 必经编排层 handler；`continue_flow=False` 时调用方**不得**继续默认 done（未映射/崩溃同样拦截，绝不静默放行）。
 
 ## 4. 配置速查
 
-见 `herdr/supervisor/config.py::DEFAULTS`。要点：`enabled`、`provider`、`interval`(默认 300s)、`cooldown`、`max_calls_per_task`(12)、`max_context_size`(8000 字符)、`thresholds.*`、`policy.min_margin`(高风险动作置信裕度)、`enforce`(V1 默认 false=只观察记录)。密钥仅 `JEV_API_KEY`/`TYPESAFE_API_KEY` 环境变量，不落盘。
+见 `herdr/supervisor/config.py::DEFAULTS`。要点：`enabled`、`provider`、`interval`(默认 300s)、`cooldown`、`max_calls_per_task`(12)、`max_context_size`(8000 字符)、`thresholds.*`、`policy.min_margin`(高风险动作置信裕度)、`enforce`(V1 默认 false=只观察记录)。provider 级开关：`HERDR_SUPERVISOR_JEV_ENABLED=false`（配置 `jev.enabled`）。密钥仅 `JEV_API_KEY`/`TYPESAFE_API_KEY` 环境变量，请求时动态解析，不落盘、不进 config/event/log。
 
 ## 5. V1 未实现（有意留白）
 

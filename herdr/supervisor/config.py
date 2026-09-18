@@ -159,20 +159,32 @@ def jev_provider_config(config: Dict[str, Any]) -> Dict[str, Any]:
     """Provider kwargs for the jev DecisionProvider (no secret values)."""
     jev = config.get("jev") or {}
     return {
+        "enabled": bool(jev.get("enabled", True)),
         "model": jev.get("model") or "jev-latest",
         "timeout": jev.get("timeout") or 20,
         "base_url": jev.get("base_url"),
     }
 
 
-def supervisor_enabled(config: Dict[str, Any]) -> bool:
-    if not config.get("enabled", False):
-        return False
+def provider_enabled(config: Dict[str, Any]) -> bool:
+    """Provider-specific enablement only (no credential handling)."""
     provider = config.get("provider")
+    if not provider:
+        return False
     if provider == "jev":
         jev = config.get("jev") or {}
         if not jev.get("enabled", True):
             return False
+    return True
+
+
+def supervisor_enabled(config: Dict[str, Any]) -> bool:
+    if not config.get("enabled", False):
+        return False
+    if not provider_enabled(config):
+        return False
+    provider = config.get("provider")
+    if provider == "jev":
         from ..decision.providers.jev import resolve_api_key
-        return resolve_api_key(jev) is not None
+        return resolve_api_key(config.get("jev") or {}) is not None
     return bool(provider)
