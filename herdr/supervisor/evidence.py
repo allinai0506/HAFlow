@@ -16,6 +16,7 @@ truncated and credential-redacted before it can reach a provider.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -122,6 +123,131 @@ def summarize_loop(clone_path: Optional[str]) -> Optional[Dict[str, Any]]:
             facts["has_repro_test"] = True
 
     return facts or None
+
+
+def build_test_evidence_id(test_evidence: Dict[str, Any]) -> str:
+    """Stable, cross-process test evidence fingerprint (sha256).
+
+    Builds a canonical, sorted JSON string of key test metrics and computes
+    sha256. Does NOT rely on Python's process-local hash().
+    """
+    canonical = {
+        "composite_score": round(float(test_evidence.get("composite_score") or 0.0), 2),
+        "converged": bool(test_evidence.get("converged", False)),
+        "failing_count": int(test_evidence.get("failing_count") or len(test_evidence.get("failing_tests") or [])),
+        "failing_tests": sorted(str(t) for t in (test_evidence.get("failing_tests") or [])),
+        "iteration": int(test_evidence.get("iteration") or 0),
+        "lint_errors": int(test_evidence.get("lint_errors") or 0),
+        "passed_tests": int(test_evidence.get("passed_tests") or 0),
+        "total_tests": int(test_evidence.get("total_tests") or 0),
+        "type_errors": int(test_evidence.get("type_errors") or 0),
+    }
+    encoded = json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return f"tevd-{hashlib.sha256(encoded).hexdigest()[:16]}"
+
+
+def extract_test_evidence(clone_path: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Extract bounded test evidence from .herdr-loop/METRICS.json & STATE.md.
+
+    Returns None if:
+    - clone_path is invalid or .herdr-loop/METRICS.json is missing/unparseable;
+    - Loop is un-run placeholder (iteration=0, total_tests=0, score=0.0).
+    """
+    if not clone_path:
+        return None
+    loop_dir = Path(clone_path) / LOOP_DIR_NAME
+    metrics_path = loop_dir / "METRICS.json"
+    if not metrics_path.is_file():
+        return None
+
+    try:
+        metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(metrics, dict):
+        return None
+
+    try:
+        state = read_state(loop_dir)
+    except Exception:
+        state = {}
+    if not isinstance(state, dict):
+        state = {}
+
+    iteration = _int_or_none(state.get("iteration")) or 0
+    total_tests = _int_or_none(metrics.get("total_tests")) or 0
+    passed_tests = _int_or_none(metrics.get("passed_tests")) or 0
+    lint_errors = _int_or_none(metrics.get("lint_errors")) or 0
+    type_errors = _int_or_none(metrics.get("type_errors")) or 0
+    composite_score = round(float(metrics.get("composite_score") or 0.0), 2)
+    converged = bool(state.get("converged", False))
+    failing_tests = metrics.get("failing_tests") or []
+    if not isinstance(failing_tests, list):
+        failing_tests = []
+    failing_count = len(failing_tests)
+
+    # Initial placeholder check: un-evaluated state has iteration 0 and 0 tests/score
+    if (iteration == 0 and total_tests == 0 and composite_score == 0.0
+            and not failing_tests and not metrics.get("test_exit_code")):
+        return None
+
+    evidence_data: Dict[str, Any] = {
+        "iteration": iteration,
+        "max_iterations": _int_or_none(state.get("max_iterations")) or 5,
+        "converged": converged,
+        "loop_status": _clean(state.get("status") or "unknown", 40),
+        "total_tests": total_tests,
+        "passed_tests": passed_tests,
+        "failing_count": failing_count,
+        "failing_tests": [_clean(str(t), MAX_FILE_CHARS) for t in failing_tests[:MAX_FAILING]],
+        "lint_errors": lint_errors,
+        "type_errors": type_errors,
+        "composite_score": composite_score,
+        "has_repro_test": bool(metrics.get("has_repro_test")),
+    }
+    evidence_data["evidence_id"] = build_test_evidence_id(evidence_data)
+    return evidence_data
+
+
+def compute_test_progress(
+    current: Optional[Dict[str, Any]],
+    previous: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Deterministic delta math between current and previous test results."""
+    if not current:
+        return None
+    progress: Dict[str, Any] = {}
+    curr_passed = current.get("passed_tests")
+    curr_failed = current.get("failing_count")
+    if curr_failed is None and "failing_tests" in current:
+        curr_failed = len(current.get("failing_tests") or [])
+    curr_score = current.get("composite_score")
+
+    if curr_passed is not None:
+        progress["current_passed"] = int(curr_passed)
+    if curr_failed is not None:
+        progress["current_failed"] = int(curr_failed)
+    if curr_score is not None:
+        progress["current_score"] = round(float(curr_score), 2)
+
+    if isinstance(previous, dict):
+        prev_passed = previous.get("passed_tests")
+        prev_failed = previous.get("failing_count")
+        if prev_failed is None and "failing_tests" in previous:
+            prev_failed = len(previous.get("failing_tests") or [])
+        prev_score = previous.get("composite_score")
+
+        if prev_passed is not None and curr_passed is not None:
+            progress["previous_passed"] = int(prev_passed)
+            progress["passed_delta"] = int(curr_passed) - int(prev_passed)
+        if prev_failed is not None and curr_failed is not None:
+            progress["previous_failed"] = int(prev_failed)
+            progress["failed_delta"] = int(curr_failed) - int(prev_failed)
+        if prev_score is not None and curr_score is not None:
+            progress["previous_score"] = round(float(prev_score), 2)
+            progress["score_delta"] = round(float(curr_score) - float(prev_score), 2)
+
+    return progress or None
 
 
 def summarize_git(clone_path: Optional[str],
@@ -242,6 +368,7 @@ def summarize_report(task: dict,
 def collect_execution_evidence(
     task: dict,
     *,
+    trigger: Optional[str] = None,
     report_text: Optional[str] = None,
     git_runner: Optional[Callable[[str, List[str]], Optional[str]]] = None,
 ) -> Dict[str, Any]:
@@ -255,14 +382,19 @@ def collect_execution_evidence(
     diff = summarize_git(clone_path, run=git_runner)
     if diff:
         facts["diff_summary"] = diff
-    output = summarize_report(task, report_text=report_text)
-    if output:
-        facts["output_summary"] = output
+    # tests_completed checkpoint only needs tests + git summary, skips heavy transcript/terminal reads
+    if trigger != "tests_completed":
+        output = summarize_report(task, report_text=report_text)
+        if output:
+            facts["output_summary"] = output
     return facts
 
 
 __all__ = [
+    "build_test_evidence_id",
     "collect_execution_evidence",
+    "compute_test_progress",
+    "extract_test_evidence",
     "summarize_git",
     "summarize_loop",
     "summarize_report",

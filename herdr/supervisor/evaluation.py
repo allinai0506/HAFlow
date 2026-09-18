@@ -140,3 +140,34 @@ def latest_evaluation(events: List[dict]) -> Optional[dict]:
             if best is None or float(payload.get("timestamp") or 0) >= float(best.get("timestamp") or 0):
                 best = payload
     return best
+
+
+def latest_tests_completed_evidence_id(events: List[dict]) -> Optional[str]:
+    """Latest evaluated test evidence_id from supervisor_evaluation events.
+
+    Provides persistent deduplication across Controller restarts by reading
+    the task's event ledger for previous tests_completed checkpoints.
+    """
+    best_ev_id = None
+    best_ts = -1.0
+    for event in events or []:
+        if not isinstance(event, dict) or event.get("event_type") != EVALUATION_EVENT:
+            continue
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("trigger") != "tests_completed":
+            continue
+        meta = payload.get("metadata") or {}
+        ev_id = meta.get("evidence_id") or payload.get("evidence_id")
+        if not ev_id:
+            continue
+        try:
+            ts = float(payload.get("timestamp") or event.get("timestamp") or 0.0)
+        except (TypeError, ValueError):
+            ts = 0.0
+        if ts >= best_ts:
+            best_ts = ts
+            best_ev_id = str(ev_id)
+    return best_ev_id
+

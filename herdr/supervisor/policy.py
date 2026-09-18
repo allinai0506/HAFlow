@@ -102,14 +102,18 @@ def decide(
     verification_count = int(facts.get("verification_count") or 0)
     auto_allowed = bool(facts.get(
         "auto_execute_allowed", policy_cfg.get("allow_auto_execute", True)))
+    trigger = str(evaluation.get("trigger") or facts.get("trigger") or "agent_done")
 
     base_facts = {
+        "trigger": trigger,
         "task_status": task_status,
         "runtime_status": runtime_status,
         "attempt_count": attempt_count,
         "verification_count": verification_count,
         "auto_execute_allowed": auto_allowed,
     }
+    if facts.get("test_progress"):
+        base_facts["test_progress"] = dict(facts.get("test_progress"))
 
     def needs(name: str) -> float:
         return signals.get(name, 0.0)
@@ -158,6 +162,36 @@ def decide(
 
     # --- stuck: retryable only while the runtime is alive and budget remains
     if high("worker_stuck"):
+        if trigger == "tests_completed":
+            test_progress = facts.get("test_progress") or {}
+            failed_delta = test_progress.get("failed_delta")
+            score_delta = test_progress.get("score_delta")
+            is_improving = (
+                (failed_delta is not None and failed_delta < 0) or
+                (score_delta is not None and score_delta > 0) or
+                not low("meaningful_progress")
+            )
+            tests_dict = facts.get("tests") or {}
+            iteration = int(tests_dict.get("iteration") or 0)
+            max_iter = int(tests_dict.get("max_iterations") or 5)
+            exhausted_iterations = bool(iteration >= max_iter and tests_dict.get("converged") is False)
+
+            if is_improving or (runtime_status == "running" and task_status == "working" and not exhausted_iterations):
+                return PolicyDecision(action=CONTINUE, reasons=[
+                    f"tests_completed: worker_stuck {needs('worker_stuck'):.2f} high but agent is actively "
+                    f"iterating on tests (improving={is_improving}, iteration={iteration}); inner loop continues",
+                ], signals_used=signals, facts_used=base_facts)
+
+            if runtime_status == "running" and attempt_count < max_attempts:
+                return _guarded(RETRY, margin("worker_stuck"), min_margin, [
+                    f"worker_stuck {needs('worker_stuck'):.2f} >= threshold",
+                    "tests_completed: consecutive non-improving tests without progress; rework triggered",
+                    f"runtime_status == running, attempt_count {attempt_count} < {max_attempts}",
+                ], signals, base_facts)
+            return PolicyDecision(action=CONTINUE, reasons=[
+                f"worker_stuck {needs('worker_stuck'):.2f} high but attempts exhausted ({attempt_count}/{max_attempts})",
+            ], signals_used=signals, facts_used=base_facts)
+
         if runtime_status == "running" and attempt_count < max_attempts:
             return _guarded(RETRY, margin("worker_stuck"), min_margin, [
                 f"worker_stuck {needs('worker_stuck'):.2f} >= threshold",
@@ -187,6 +221,13 @@ def decide(
 
     # --- finish: all three positive gates aligned
     if high("ready_to_finish") and high("requirements_satisfied") and high("tests_sufficient"):
+        if trigger == "tests_completed":
+            return PolicyDecision(action=CONTINUE, reasons=[
+                f"tests_completed: tests sufficient ({needs('tests_sufficient'):.2f}), "
+                f"requirements satisfied ({needs('requirements_satisfied'):.2f}), "
+                f"ready_to_finish ({needs('ready_to_finish'):.2f}); "
+                "tests level satisfied, agent continues towards agent_done"
+            ], signals_used=signals, facts_used=base_facts)
         return _guarded(FINISH, margin("ready_to_finish", "requirements_satisfied",
                                        "tests_sufficient"), min_margin, [
             f"ready_to_finish {needs('ready_to_finish'):.2f} >= threshold",

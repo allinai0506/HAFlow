@@ -11,3 +11,4 @@ backups/
 .omc/
 .codegraph/
 .qoder/
+decisions.tsv

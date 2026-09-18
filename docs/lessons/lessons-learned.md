@@ -3106,3 +3106,60 @@ pytest -q
 - 关联教训 §66（回合成本治理）——RateGate 即其产物，本条为其在拦截语义下的对偶约束
 
 ---
+
+## 71. 过程持续评估检查点（tests_completed）：事实指纹去重与调用频控正交、过程测试失败抗扰与非终态铁律
+
+### 问题背景
+
+在 Semantic Supervisor 从 V1（仅在任务完成 `agent_done` 挂点评估）向 V1.1（过程持续评估 `tests_completed`）演进时，暴露出四类过程级监督的致命冲突：
+
+1. **事实去重与频控混淆（RateGate 混作 Dedup）**：如果仅依靠 RateGate 时间间隔（如 300s）限流，一旦 Agent 停止产生新测试，时间窗口滑过之后，Controller 会对**完全相同的旧测试结果重复唤起 Jev 评估**；反之，若 Controller 重启导致内存 RateGate 清零，也会无故重评历史旧结果。
+2. **频控暂缓导致证据丢失**：当 Agent 密集跑测试时被 RateGate 暂缓，若直接把最新 `evidence_id` 标记为"已处理"或丢弃，会导致当窗口放行后无法评估最新的关键事实。
+3. **过程观察篡夺终态控制权（非终态越权）**：在 `tests_completed` 阶段，Agent 内部测试即便全绿、各项语义指标极高，任务实际仍处于编码/提交/自检的进行中。若 Supervisor 在此时返回 `FINISH` 并将任务推进为 `completed`，会直接截断 Agent 的正常交付流程。
+4. **过程单轮失败粗暴打断（误判 Agent 循环卡滞）**：Agent 在常规 TDD 或红绿重构中，写新用例或初期报错是必然的正常过程；若仅看到 `tests.failed > 0` 就触发 `RETRY` 重置任务，会形成严厉的"一跑错就打断"，彻底破坏 Agent 的自主修复回路。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|---|---|---|
+| 相同测试结果重复调用 Jev | 时间限流不能代替内容身份判定；同一轮测试事实在生命周期内只能评估一次 | 构建基于测试事实（iteration, passed, failed, total, score）的稳定 SHA-256 指纹 `evidence_id`；基于 events 表持久化比对，保证同一指纹全生命周期（含 Controller 重启）只评一次 |
+| RateGate 暂缓导致漏评最新测试 | 频控是"推迟执行"，绝不是"判定已消费" | RateGate 触发 skip 时严禁持久化该 `evidence_id`；只更新最后检测到的待决证据，等待窗口冷却放行后精准消费最新事实 |
+| 过程检查点直接完成任务 | 过程观察点不是任务终态，`agent_done` 才是交付完成的唯一合法触发源 | Policy 必须具备 Trigger Awareness：在 `tests_completed` 下，任何原本指向 `FINISH` 的决策必须无条件收敛为 `CONTINUE` 放行 |
+| 修复过程中的单轮测试失败触发打断重做 | 单轮测试失败 ≠ 卡滞死循环；正在缩减失败数（failed_delta < 0）是明确的正向进展 | 只有连续多轮无改善且卡滞超时才允许考虑干预；只要 Agent 处于活跃工作态或单轮测试呈改善趋势，一律 `CONTINUE` 严禁 RETRY |
+| 过程证据采集过重拖垮性能 | 过程评估频率远高于终态；若每次都采集终端 ANSI/transcript 巨量文本，会产生严重 I/O 阻塞 | `trigger="tests_completed"` 下严格走轻量路径：仅解析 `.herdr-loop` 与 `git status/stat`，彻底跳过终端与大文本采集 |
+
+### 操作规范（已固化到 `herdr/supervisor/` 与 `services/herdr-controller.py`）
+
+1. **指纹去重与频控正交分离**：
+   - `build_test_evidence_id(test_evidence)`：基于关键事实字典生成 `test_ev_<sha256[:16]>`；
+   - `latest_tests_completed_evidence_id(events)`：从持久化 events 中倒序提取已评估的 `evidence_id`；
+   - 两者不一致才进入监督流程，进入后才交由 RateGate 判断时间窗口；窗口未到则暂缓且不落库，窗口放行后消费最新证据。
+2. **Trigger-aware 策略防篡权**：
+   - Policy 输入显式携带 `trigger` 与 `test_progress`（`passed_delta`, `failed_delta`, `score_delta`）；
+   - 在 `trigger == "tests_completed"` 下，正向高分一律收敛为 `CONTINUE`；
+   - 中间测试失败判断：若 Agent 任务处于 `working` 或 `failed_delta < 0`（改善中），强制 `CONTINUE`，严禁触发 `RETRY`。
+3. **Fail-safe 与轻量采集**：
+   - 当 `HERDR_SUPERVISOR_ENABLED=false`、`HERDR_SUPERVISOR_JEV_ENABLED=false` 或缺少 API Key 时，Controller 探针即时短路（零 Provider 调用、零多余 I/O）；
+   - `collect_execution_evidence(..., trigger="tests_completed")` 跳过终端与报告长文本读取。
+
+### 验证命令 / 守护测试
+
+```bash
+pytest tests/test_supervisor_tests_completed.py -q
+# 期望输出：10 passed in ~0.25s（A-J 十大专项对抗用例）
+
+pytest tests/ -q
+# 期望输出：789 passed
+```
+
+### 相关文档 / 关联证据
+
+- `herdr/supervisor/evidence.py` — `build_test_evidence_id` / `extract_test_evidence` / `compute_test_progress`
+- `herdr/supervisor/policy.py` — Trigger-aware CONTINUE 降级与过程测试改善保护
+- `herdr/supervisor/evaluation.py` — `latest_tests_completed_evidence_id` 扫描去重
+- `services/herdr-controller.py` — `check_task_tests_completed` 主循环无感挂点
+- `wiki/semantic-supervisor.md` 红线 #8
+- 分支 `feat/semantic-supervisor-v1`
+
+---
+

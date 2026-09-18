@@ -42,7 +42,7 @@ from .evaluation import (
 
 EVENT_SOURCE = "semantic_supervisor"
 
-_FACT_EVIDENCE_KEYS = ("tests", "diff_summary", "output_summary")
+_FACT_EVIDENCE_KEYS = ("tests", "diff_summary", "output_summary", "test_progress", "trigger")
 
 _supervisors: Dict[str, SemanticSupervisor] = {}
 
@@ -97,6 +97,9 @@ def collect_facts(
     store=None,
     config: Optional[dict] = None,
     report_text: Optional[str] = None,
+    trigger: Optional[str] = None,
+    test_evidence: Optional[Dict[str, Any]] = None,
+    previous: Optional[dict] = None,
 ) -> Dict[str, Any]:
     """Deterministic facts from the task record + real execution evidence.
 
@@ -119,6 +122,7 @@ def collect_facts(
         if isinstance(entry, dict) and entry.get("to") == "rework"
     ) if isinstance(status_history, list) else 0
     facts = {
+        "trigger": trigger or "agent_done",
         "task_status": task.get("status"),
         "runtime_status": runtime.get("status"),
         "attempt_count": int(
@@ -135,10 +139,28 @@ def collect_facts(
     }
     try:
         facts.update(
-            evidence_layer.collect_execution_evidence(task, report_text=report_text)
+            evidence_layer.collect_execution_evidence(
+                task,
+                trigger=trigger,
+                report_text=report_text,
+            )
         )
     except Exception:
         pass
+    if test_evidence:
+        facts["tests"] = test_evidence
+
+    if facts.get("tests"):
+        prev_test_summary = None
+        if isinstance(previous, dict):
+            prev_test_summary = (
+                (previous.get("metadata") or {}).get("test_summary")
+                or (previous.get("facts") or {}).get("tests")
+            )
+        progress = evidence_layer.compute_test_progress(facts["tests"], prev_test_summary)
+        if progress:
+            facts["test_progress"] = progress
+
     return facts
 
 
@@ -151,6 +173,9 @@ def run_checkpoint(
     config: Optional[dict] = None,
     supervisor: Optional[SemanticSupervisor] = None,
     report_reader: Optional[Callable[[], Optional[str]]] = None,
+    test_evidence: Optional[Dict[str, Any]] = None,
+    evidence_id: Optional[str] = None,
+    now: Optional[float] = None,
     log: Callable[[str], None] = print,
 ) -> Optional[Dict[str, Any]]:
     """One supervised checkpoint. Returns None, or a dict carrying:
@@ -177,7 +202,7 @@ def run_checkpoint(
             return None
         # Pre-probe (non-mutating) so gated checkpoints skip evidence I/O.
         try:
-            if supervisor.should_evaluate(task_id, trigger) is not None:
+            if supervisor.should_evaluate(task_id, trigger, now=now) is not None:
                 return None
         except Exception:
             pass
@@ -195,10 +220,19 @@ def run_checkpoint(
                 report_text = report_reader()
             except Exception:
                 report_text = None
-        facts = collect_facts(task, store=store, config=cfg, report_text=report_text)
+        facts = collect_facts(
+            task,
+            store=store,
+            config=cfg,
+            report_text=report_text,
+            trigger=trigger,
+            test_evidence=test_evidence,
+            previous=previous,
+        )
         evaluation = supervisor.evaluate(
             task,
             trigger,
+            now=now,
             events=events,
             facts={k: v for k, v in facts.items() if k in (
                 "attempt_count", "elapsed_seconds", "verification_count",
@@ -207,6 +241,26 @@ def run_checkpoint(
         )
         if evaluation is None:
             return None
+
+        # Augment evaluation metadata with evidence_id & test_summary for persistence & dedup
+        meta = evaluation.setdefault("metadata", {})
+        meta["trigger"] = trigger
+        if evidence_id:
+            meta["evidence_id"] = evidence_id
+            evaluation["evidence_id"] = evidence_id
+        tests_data = facts.get("tests")
+        if tests_data:
+            meta["test_summary"] = {
+                "passed_tests": tests_data.get("passed_tests"),
+                "total_tests": tests_data.get("total_tests"),
+                "failing_count": tests_data.get("failing_count", len(tests_data.get("failing_tests") or [])),
+                "composite_score": tests_data.get("composite_score"),
+                "iteration": tests_data.get("iteration"),
+                "evidence_id": evidence_id or tests_data.get("evidence_id"),
+            }
+        if facts.get("test_progress"):
+            meta["test_progress"] = dict(facts["test_progress"])
+
         if store is not None:
             try:
                 store.record_event(
@@ -233,6 +287,8 @@ def run_checkpoint(
             "enforced": intercepted,
             **decision.to_dict(),
         }
+        if evidence_id:
+            payload["evidence_id"] = evidence_id
         if store is not None:
             try:
                 store.record_event(

@@ -770,3 +770,13 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
   3. **F3/F4 证据与预算**：agent_tail 置首、删除与 State 顶层重复字段；identity 字段统一截断 + `_fit_budget` 末段折半硬收敛（预算绝对成立）。
   4. **F6-F8 收紧**：`"jev": false` 归一化为禁用；`api_key_env` 透传 provider；memo key 改为完整配置签名；error 经 redact_text；provider 值 clamp_probability；RateGate 加锁。
 - **验证**：独立 reviewer 复审 **MERGE_READY**（F1-F8 全部修复，无 P0/P1 残留）；监督六套件 96 passed；全量 **779 passed + 44 subtests**；compileall 通过。
+
+## [2026-09-19] feat | Semantic Supervisor V1.1: tests_completed 持续评估检查点
+- **背景**：HAFlow 监督从"Agent 结束时才评估"（仅 agent_done 挂点）升级为"Agent 过程中持续评估"的第一步。在工位内完成一轮真实测试后触发 `tests_completed` checkpoint，提供过程可见性与早介入能力。
+- **核心契约与设计**：
+  1. **真实测试证据与指纹（`herdr/supervisor/evidence.py`）**：严格依赖 `.herdr-loop/METRICS.json` 与 `STATE.md`，提取 iteration、total/passed/failing_tests 与 composite_score。构造稳定的 `evidence_id`（SHA-256 签名），未运行占位或缺少指标时安全 skip。跳过终端大 IO，确保轻量级采集。
+  2. **事件指纹去重与 RateGate 频控解耦（`evaluation.py`, `harness.py`）**：`latest_tests_completed_evidence_id` 基于 events 账本精准持久化比对，保证同一轮测试事实**只评估一次**且跨 Controller 重启不丢；RateGate 仅负责滑动时间窗口限频，频控暂缓不丢失最新证据。
+  3. **Trigger-aware 策略与非终态铁律（`herdr/supervisor/policy.py`）**：`tests_completed` 是过程观察点而不是终态。即使 high confidence / requirements_satisfied 也不允许直接完成 Task，FINISH 自动降级为 CONTINUE；中间过程单轮测试失败（例如 Agent 正在逐步修测且失败数改善中）绝不打断或重做，只有连续卡滞且超出容忍才允许干预。
+  4. **Controller 挂点与 Fail-safe（`services/herdr-controller.py`）**：在主轮询循环针对活跃任务（working/rework/dispatched）通过 `check_task_tests_completed` 安全探活。Kill switch 开启或无 key 时 0 开销瞬时短路。
+- **验证**：新增 `tests/test_supervisor_tests_completed.py`（10 项专项场景 A-J 全部通过）；全仓回归 789 passed，compileall 通过。
+
