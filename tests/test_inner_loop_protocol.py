@@ -8,6 +8,7 @@ Covers:
 """
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -190,6 +191,95 @@ class PromptIronRuleInjectionTest(unittest.TestCase):
         src = self._herdr_task_source()
         self.assertIn("GOAL.md", src)
         self.assertIn("herdr-loop eval", src)
+
+
+# ---------------------------------------------------------------------------
+# 5: Controller arbitration card (inner_loop_exhausted -> BLOCKER.md)
+# ---------------------------------------------------------------------------
+
+def _load_controller(name="ctrl_inner_loop_arbitration_test"):
+    import importlib.machinery
+    import importlib.util
+    spec = importlib.util.spec_from_loader(
+        name,
+        importlib.machinery.SourceFileLoader(
+            name, str(HERDR_ROOT / "services" / "herdr-controller.py")
+        ),
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class BlockerArbitrationEventTest(unittest.TestCase):
+    """内环耗尽必须走专属仲裁卡(BLOCKER.md + 三选一裁决)。
+
+    回归背景:Phase 0 内环协议(2026-09-13)的最后一跳在 stash 中丢失,
+    内环耗尽时 Controller 只发通用 blocked 卡,工位自述 BLOCKER.md 被丢弃。
+    """
+
+    def setUp(self):
+        self.ctrl = _load_controller()
+        self.tmp = tempfile.TemporaryDirectory(prefix="herdr-blocker-card-")
+        self.addCleanup(self.tmp.cleanup)
+
+    def _task(self, clone_path="", sentinel_reason="inner_loop_exhausted"):
+        return {
+            "task_id": "wf-1-impl-x",
+            "workflow_id": "wf-1",
+            "stage": "implementation",
+            "pane_id": "w1:p2",
+            "agent": "opencode",
+            "goal": "实现功能",
+            "acceptance_criteria": ["a"],
+            "clone_path": clone_path,
+            "sentinel_reason": sentinel_reason,
+        }
+
+    def _write_blocker(self, content):
+        loop_dir = Path(self.tmp.name) / ".herdr-loop"
+        loop_dir.mkdir(parents=True, exist_ok=True)
+        (loop_dir / "BLOCKER.md").write_text(content, encoding="utf-8")
+        return self.tmp.name
+
+    def test_blocked_event_type_routes_inner_loop_exhausted(self):
+        task = self._task()
+        self.assertEqual(
+            self.ctrl.blocked_event_type(task), "inner_loop_exhausted"
+        )
+        self.assertEqual(
+            self.ctrl.blocked_event_type(self._task(sentinel_reason="")),
+            "blocked",
+        )
+        self.assertEqual(self.ctrl.blocked_event_type(None), "blocked")
+
+    def test_arbitration_card_includes_blocker_md(self):
+        clone = self._write_blocker("# 求助\n\n评分停滞在 0.4,缺接口定义。")
+        message = self.ctrl.build_coordinator_message(
+            self._task(clone_path=clone), "inner_loop_exhausted"
+        )
+        self.assertIn("HERDR_CONTROLLER_BLOCKER_EVENT", message)
+        self.assertIn("inner_loop_exhausted", message)
+        self.assertIn("评分停滞在 0.4", message)
+        self.assertIn("rework", message)
+        self.assertIn("failed", message)
+        self.assertIn("仲裁前不得把 Task 置为 completed", message)
+        self.assertIn("效率纪律", message)
+        self.assertIn("~/HAFlow/bin/herdr-task", message)
+        self.assertNotIn("~/herdr/bin/herdr-task", message)
+
+    def test_arbitration_card_falls_back_without_blocker_md(self):
+        message = self.ctrl.build_coordinator_message(
+            self._task(clone_path=self.tmp.name), "inner_loop_exhausted"
+        )
+        self.assertIn("BLOCKER.md 未找到", message)
+
+    def test_generic_blocked_message_unchanged(self):
+        message = self.ctrl.build_coordinator_message(
+            self._task(sentinel_reason=""), "blocked"
+        )
+        self.assertIn("HERDR_CONTROLLER_BLOCKED_EVENT", message)
+        self.assertNotIn("HERDR_CONTROLLER_BLOCKER_EVENT", message)
 
 
 if __name__ == "__main__":
