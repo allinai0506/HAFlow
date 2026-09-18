@@ -28,13 +28,20 @@ RUNTIME_STATUSES = frozenset({
 })
 
 RUNTIME_FIELDS = (
+    # agent: agent implementation/type, e.g. claude/opencode/qodercli.
     "agent",
     "agent_session_id",
+    # agent_name: concrete Herdr-managed agent instance name
+    # (e.g. "nexusarchive-54433229-coordinato"), not the agent type.
     "agent_name",
     "workspace_id",
     "tab_id",
     "pane_id",
     "cwd",
+    # status: runtime lifecycle/availability (does the execution environment
+    # still exist and is it usable), NOT the task orchestration status.
+    # A paused task therefore still reports runtime "running": its pane and
+    # agent session are alive, only the orchestration is on hold.
     "status",
     "started_at",
     "updated_at",
