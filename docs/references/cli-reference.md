@@ -146,6 +146,32 @@ herdr-task set <task_id> completed --verdict pass|blocked [--note "<blocker 清�
 - 落盘为任务的 `stage_verdict` / `stage_verdict_note` 字段，Controller 的
   阶段推进门禁与 workflow 完成门禁据此判定；
 - 对已 `completed` 的任务补落 verdict 同样生效。
+- 写入 verdict 的同时，Controller 会自动向 workflow 共享文档区追加一条
+  `kind=gate` 的机器证据（source=controller），供下游节点与 stale 判定消费。
+
+### 2.10 `herdr-task note-add` / `note-list`（Workflow 共享文档区）
+代码在 CoW clone 中物理隔离，但文档与证据按 workflow 受控共享：追加式账本落
+在 clone 外 `~/.herdr-controller/workflows/<workflow_id>/shared/notes.jsonl`。
+```bash
+# 追加条目（append-only，禁止覆盖历史）
+herdr-task note-add --workflow-id <id> --kind <kind> --title "<标题>" \
+  [--text "<正文>" | --file <path>] [--node <node_id>] [--task <task_id>] \
+  [--agent <name>] [--source agent|human] \
+  [--base-sha <sha>] [--round <n>] [--invalidates <node_id>]...
+
+# 查看条目（stale 为读取时计算：base 漂移作废 evidence/gate；fix-loop 作废早于作废点的目标节点条目）
+herdr-task note-list <workflow_id> [--node <node_id>] [--limit <n>] \
+  [--current-base-sha <sha>] [--json]
+```
+- `--kind`：`requirement|spec|plan|decision|evidence|gate|invalidation|note|wrapup`；
+- `--source`：CLI 仅接受 `agent|human`；`controller` 机器证据由门禁 verdict
+  （`herdr-task set ... --verdict`）与 fix-loop 自动落盘，不接受手工伪造；
+- `--task <task_id>` 时自动从任务记录与 CoW clone 补全 `node/agent/base_sha`；
+- 权威层级（已注入每个节点 prompt）：`git commits / verify-baseline` >
+  `controller 机器证据` > `本区文档（仅供上下文，不得当作事实）`；
+- 运行时账本根目录可用环境变量 `HERDR_WORKFLOW_DOCS_DIR` 覆盖（默认
+  `~/.herdr-controller/workflows/<wf>/shared/`，仅测试/自定义部署使用）；
+- 工作流关闭后账本保留供复盘审计，不做自动删除。
 
 ## 3. `herdr-preflight` 命令
 

@@ -17,6 +17,7 @@ import importlib.util
 import os
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -129,6 +130,30 @@ class PlanStageDispatchTest(unittest.TestCase):
         )
         self.assertEqual(plan["mode"], "dispatch")
         self.assertEqual(len(plan["specs"]), 1)
+
+    def test_docs_block_is_injected_into_prompt(self):
+        plan = dd.plan_stage_dispatch(
+            "wf-1", _node(), [], "需求", docs_block="SHARED-DOCS-MARKER",
+        )
+        self.assertIn("SHARED-DOCS-MARKER", plan["specs"][0]["prompt"])
+
+    def test_role_dispatch_also_gets_docs_block(self):
+        node = _node(
+            id="requirements",
+            agent_policy={
+                "max_agents": 2,
+                "roles": [
+                    {"name": "executor", "goal": "做 A"},
+                    {"name": "challenger", "goal": "做 B"},
+                ],
+            },
+        )
+        plan = dd.plan_stage_dispatch(
+            "wf-1", node, [], "需求", docs_block="SHARED-DOCS-MARKER",
+        )
+        self.assertEqual(len(plan["specs"]), 2)
+        for spec in plan["specs"]:
+            self.assertIn("SHARED-DOCS-MARKER", spec["prompt"])
 
     def test_initial_dispatch_requires_requirement(self):
         plan = dd.plan_stage_dispatch("wf-1", _node(), [], "")
@@ -451,6 +476,27 @@ class TryDirectStageAdvanceTest(unittest.TestCase):
             "wf-1", reason="stage_advance:test"
         )
 
+    def test_shared_docs_block_is_injected_into_launch_prompt(self):
+        from herdr import workflow_docs as wd
+
+        tmp = tempfile.TemporaryDirectory(prefix="herdr-wfdocs-")
+        self.addCleanup(tmp.cleanup)
+        with patch.dict(os.environ, {wd.DOCS_DIR_ENV: tmp.name}):
+            wd.append_note(
+                "wf-1",
+                kind="spec",
+                title="共享规格 MARKER",
+                node="requirements",
+            )
+            result = self.ctrl.try_direct_stage_advance(self._item())
+
+        self.assertTrue(result)
+        launch_cmds = [cmd for cmd in self.commands if "--prompt" in cmd]
+        self.assertEqual(len(launch_cmds), 1)
+        prompt = launch_cmds[0][launch_cmds[0].index("--prompt") + 1]
+        self.assertIn("共享文档区", prompt)
+        self.assertIn("共享规格 MARKER", prompt)
+
     def test_launch_timeout_is_bounded_and_falls_back(self):
         seen_timeouts = []
 
@@ -737,6 +783,24 @@ class CoordinatorIntakeTest(unittest.TestCase):
         self.assertIn("HERDR_WORKFLOW_INTAKE_EVENT", self.prompts[0])
         self.assertIn("总指挥接单机制", self.prompts[0])
         self.assertIn("REQ-1", self.prompts[0])
+
+    def test_intake_prompt_includes_shared_docs(self):
+        from herdr import workflow_docs as wd
+
+        tmp = tempfile.TemporaryDirectory(prefix="herdr-wfdocs-")
+        self.addCleanup(tmp.cleanup)
+        with patch.dict(os.environ, {wd.DOCS_DIR_ENV: tmp.name}):
+            wd.append_note(
+                "wf-1",
+                kind="decision",
+                title="全局决策 MARKER",
+                node="requirements",
+            )
+            self._run_item("start")
+
+        self.assertEqual(len(self.prompts), 1)
+        self.assertIn("共享文档区", self.prompts[0])
+        self.assertIn("全局决策 MARKER", self.prompts[0])
 
     def test_non_first_stage_uses_direct_dispatch(self):
         direct_mock = self._run_item("requirements")

@@ -42,6 +42,7 @@ graph TD
         ProjectsDB[(projects.json: 项目空间映射)]
         WorkflowsDB[(workflows.json: 工作流实例)]
         TemplatesDB[(templates/: YAML 模板仓库)]
+        SharedDocs[(workflows/<wf>/shared/: 跨节点共享文档账本)]
         Locks[router.lock: 并发资源锁]
     end
 
@@ -88,3 +89,9 @@ graph TD
 ### 3.5 隔离与沙盒层
 - **CoW (Copy-on-Write) 工作区隔离**：Task 执行在独立 git clone / branch 目录中，保护主干代码。
 - **现场保留**：Agent 执行完毕后现场默认保留供审计，仅在明确指令下进行逻辑清理与物理归档。
+
+### 3.6 跨节点共享文档层 (`herdr/workflow_docs.py`)
+- **代码隔离 + 文档受控共享**：代码仍物理隔离在 CoW clone；需求规格、计划、门禁证据等文档按 workflow 收敛到 clone 外追加式账本 `~/.herdr-controller/workflows/<wf>/shared/notes.jsonl`。
+- **provenance 与 stale**：每条记录带 node/task/agent/source/base_sha；读取时计算 stale（base 漂移作废 evidence/gate；fix-loop 作废早于作废点的目标节点条目）。
+- **权威层级**：`git commits / verify-baseline` > `controller 机器证据` > `本区文档（仅上下文，不得当作事实）`；Controller 在 direct dispatch 与总指挥消息中按节点相关度注入区块。
+- **入口**：`herdr-task note-add` / `note-list`；门禁 verdict 自动落 `kind=gate` 机器证据。

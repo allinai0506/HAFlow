@@ -1209,6 +1209,9 @@ def set_status(task_id, new_status, verdict=None, note=None):
                 print(f"Error updating task {task_id}: {exc}", file=sys.stderr)
                 sys.exit(2)
 
+            if verdict:
+                _record_gate_note(task, verdict, note)
+
             print(f"{task_id}: already {new_status}; verdict/note updated")
             return
 
@@ -1248,6 +1251,9 @@ def set_status(task_id, new_status, verdict=None, note=None):
 
     if new_status in ACTIVE_TASK_STATUSES:
         _clear_suppress_auto_close(task.get("workflow_id") or res.get("workflow_id"))
+
+    if verdict:
+        _record_gate_note(task, verdict, note)
 
     print(f"{task_id}: {old_status} -> {new_status}")
 
@@ -1432,6 +1438,14 @@ def launch_task(args):
         "--task-type", args.task_type,
         "--base-branch", base_branch,
     ]
+
+    try:
+        from herdr import workflow_docs as wd
+        worker_cmd += [
+            "--shared-docs", str(wd.workflow_docs_dir(args.workflow_id))
+        ]
+    except Exception:
+        pass
 
     if onto_branch:
         worker_cmd += ["--onto", onto_branch]
@@ -3459,6 +3473,165 @@ def list_tasks(workflow_id=None):
     )
 
 
+def _task_head_sha(task):
+    """Best-effort: task branch head sha from its CoW clone (gate evidence)."""
+    task = task or {}
+    task_id = task.get("task_id") or ""
+    branch = task.get("branch") or ""
+    if not task_id or not branch:
+        return ""
+    clone_root = Path(
+        os.environ.get("HERDR_CLONES_DIR")
+        or (Path.home() / ".herdr-controller" / "clones")
+    )
+    clone = clone_root / task_id
+    if not clone.exists():
+        return ""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(clone), "rev-parse", "--short", branch],
+            text=True,
+            capture_output=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return ""
+
+
+def note_add(args):
+    from herdr import workflow_docs as wd
+
+    task = None
+    if args.task:
+        task = find_task(load_tasks(), args.task)
+        if not task:
+            print(f"Task not found: {args.task}")
+            sys.exit(1)
+
+    if args.file:
+        note_file = Path(args.file).expanduser()
+        if not note_file.exists():
+            print(f"Note file not found: {note_file}")
+            sys.exit(2)
+        try:
+            with note_file.open(encoding="utf-8") as handle:
+                body = handle.read(wd.MAX_BODY + 1)
+        except OSError as exc:
+            print(f"Error reading note file: {exc}")
+            sys.exit(2)
+    else:
+        body = args.text or ""
+
+    node = args.node or (task.get("node") or task.get("stage") if task else None)
+    agent = args.agent or (task.get("agent") if task else None)
+    base_sha = args.base_sha or _task_head_sha(task) or None
+
+    try:
+        record = wd.append_note(
+            args.workflow_id,
+            kind=args.kind,
+            title=args.title,
+            body=body,
+            node=node,
+            task_id=args.task or "",
+            agent=agent,
+            source=args.source,
+            base_sha=base_sha,
+            round=args.round,
+            invalidates=args.invalidates,
+        )
+    except ValueError as exc:
+        print(f"Error: {exc}")
+        sys.exit(2)
+
+    print(f"[NOTE_ADDED] {record['note_id']}")
+    print(f"[NOTE_DIR] {wd.workflow_docs_dir(args.workflow_id)}")
+
+
+def note_list(args):
+    from herdr import workflow_docs as wd
+
+    try:
+        annotated = wd.annotate_notes(
+            wd.load_notes(args.workflow_id),
+            current_base_sha=args.current_base_sha,
+        )
+    except ValueError as exc:
+        print(f"Error: {exc}")
+        sys.exit(2)
+    if args.node:
+        annotated = [n for n in annotated if (n.get("node") or "") == args.node]
+    if args.limit and args.limit > 0:
+        annotated = annotated[-args.limit:]
+
+    if args.json:
+        print(json.dumps(
+            {
+                "workflow_id": args.workflow_id,
+                "docs_dir": str(wd.workflow_docs_dir(args.workflow_id)),
+                "notes": annotated,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ))
+        return
+
+    print(f"=== 工作流共享文档 [{args.workflow_id}] ===")
+    print(f"目录: {wd.workflow_docs_dir(args.workflow_id)}")
+    if not annotated:
+        print("暂无条目")
+        return
+    for note in annotated:
+        stale = (
+            f"[STALE: {note.get('stale_reason') or 'stale'}] "
+            if note.get("stale")
+            else ""
+        )
+        print(
+            f"{stale}[{note.get('kind')}][{note.get('node') or '-'}] "
+            f"{note.get('title')} ({note.get('note_id')})"
+        )
+
+
+def _record_gate_note(task, verdict, note):
+    """Best-effort machine evidence: gate verdict -> workflow shared docs."""
+    try:
+        from herdr import workflow_docs as wd
+
+        workflow_id = task.get("workflow_id")
+        if not workflow_id:
+            return
+        provenance = wd.provenance_from_task(task)
+        base_sha = provenance["base_sha"] or _task_head_sha(task)
+        title = f"{provenance['node'] or '未知节点'} 门禁结论 {verdict}"
+
+        for existing in wd.load_notes(workflow_id):
+            if (
+                existing.get("kind") == "gate"
+                and existing.get("task_id") == provenance["task_id"]
+                and existing.get("title") == title
+                and (existing.get("base_sha") or "") == (base_sha or "")
+            ):
+                return
+
+        wd.append_note(
+            workflow_id,
+            kind="gate",
+            title=title,
+            body=note or "",
+            node=provenance["node"],
+            task_id=provenance["task_id"],
+            agent=provenance["agent"],
+            source=wd.SOURCE_CONTROLLER,
+            base_sha=base_sha,
+        )
+    except Exception as exc:
+        print(f"[NOTE EVIDENCE WARN] {exc}")
+
+
 def main():
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
@@ -3728,6 +3901,55 @@ def main():
     cp_fork_cmd.add_argument("checkpoint_id")
     cp_fork_cmd.add_argument("new_workflow_id")
     cp_fork_cmd.add_argument("--title", default=None, help="新工作流标题")
+
+    note_add_cmd = sub.add_parser(
+        "note-add",
+        help="向 workflow 共享文档区追加一条记录（append-only，代码隔离文档共享）",
+    )
+    note_add_cmd.add_argument("--workflow-id", required=True)
+    note_add_cmd.add_argument(
+        "--kind",
+        required=True,
+        choices=[
+            "requirement",
+            "spec",
+            "plan",
+            "decision",
+            "evidence",
+            "gate",
+            "invalidation",
+            "note",
+            "wrapup",
+        ],
+    )
+    note_add_cmd.add_argument("--title", required=True)
+    note_body = note_add_cmd.add_mutually_exclusive_group()
+    note_body.add_argument("--text", default=None, help="条目正文")
+    note_body.add_argument("--file", default=None, help="从文件读取正文（与 --text 二选一）")
+    note_add_cmd.add_argument("--node", default=None, help="来源节点 ID")
+    note_add_cmd.add_argument("--task", default=None, help="来源任务 ID（自动补全 agent/base_sha）")
+    note_add_cmd.add_argument("--agent", default=None)
+    note_add_cmd.add_argument(
+        "--source",
+        default="agent",
+        choices=["agent", "human"],
+        help="controller 机器证据由门禁 verdict 自动落盘，CLI 不接受该来源",
+    )
+    note_add_cmd.add_argument("--base-sha", default=None)
+    note_add_cmd.add_argument("--round", type=int, default=1)
+    note_add_cmd.add_argument(
+        "--invalidates",
+        action="append",
+        default=None,
+        help="仅 kind=invalidation：作废哪些节点的历史条目",
+    )
+
+    note_list_cmd = sub.add_parser("note-list", help="查看 workflow 共享文档区条目")
+    note_list_cmd.add_argument("workflow_id")
+    note_list_cmd.add_argument("--node", default=None)
+    note_list_cmd.add_argument("--limit", type=int, default=0)
+    note_list_cmd.add_argument("--current-base-sha", default=None)
+    note_list_cmd.add_argument("--json", action="store_true")
 
     args = parser.parse_args()
 
@@ -4001,6 +4223,12 @@ def main():
         except Exception as e:
             print(f"Error forking workflow: {e}")
             sys.exit(1)
+
+    elif args.command == "note-add":
+        note_add(args)
+
+    elif args.command == "note-list":
+        note_list(args)
 
 
 if __name__ == "__main__":

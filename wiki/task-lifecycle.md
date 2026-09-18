@@ -158,9 +158,21 @@ Evidence:
 
 `FACT` 任务遵循"生而隔离,死而清零"生命周期:出生时独立 pane + CoW clone +
 全新 agent 会话;验收收敛后由 `finalize` / `close-workflow` 执行物理销毁。
-上下文只在任务体内生存,跨任务唯一合法信息通道是固化产物(git commits /
-integration branch / 转写证据 / 任务记录)。pane 从不复用——
-`_claimed_panes` 的永久占用是该原则的执行机制,而非缺陷。
+上下文只在任务体内生存,跨任务合法信息通道收敛为两类:
+1. **固化产物**:git commits / integration branch / 转写证据 / 任务记录;
+2. **Workflow 共享文档区**（受控共享,2026-09-18 引入）:追加式账本
+   `~/.herdr-controller/workflows/<workflow_id>/shared/notes.jsonl`,
+   代码仍物理隔离,文档/证据按 workflow 共享。权威层级为
+   `git commits / verify-baseline > controller 机器证据 > 本区文档(仅上下文)`；
+   stale 在读取时计算(base 漂移作废 evidence/gate;fix-loop 作废早于作废点的
+   目标节点条目);controller 在派发时按节点相关度注入 prompt。
+pane 从不复用——`_claimed_panes` 的永久占用是该原则的执行机制,而非缺陷。
+
+Evidence:
+- `herdr/workflow_docs.py` (append/load/annotate/summarize/render)
+- `bin/herdr-task` #note_add/#note_list/#_record_gate_note
+- `services/herdr-controller.py` #shared_docs_block/#_record_invalidation_note
+- `services/herdr-worker.py` #write_task_context (shared_docs 注入)
 
 ### 5.1 finalize 序列(幂等)
 

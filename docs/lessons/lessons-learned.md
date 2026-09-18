@@ -3004,3 +3004,52 @@ git diff --stat 974064f...wip/phase0-inner-loop-arbitration  # 9 files, 787 line
 ```
 
 ---
+
+## 69. 跨 Clone 证据链断裂：代码物理隔离下的"受控文档共享区"设计
+
+### 问题背景
+
+2026-09-18 评估 `software-development-v1` 与 `/unified-dev-flow` 结合方案时发现：
+每个 Task 在独立 CoW clone 中运行（"生而隔离，死而清零"），而 unified-dev-flow 假设
+S0–S8 是一条连续工作区证据链——requirements 节点写在 clone 内的 Entry Gate 规格、
+test/review 节点的验证与评审证据，下一节点根本看不到；wrapup 也看不到 review clone
+的结论。门禁 verdict 之所以落在 `~/.herdr-controller/gate-verdicts/`（clone 外），
+正是对这一问题的局部规避，但文档与语义证据一直没有通道；同时治理原则写死
+"跨任务唯一合法信息通道是固化产物"，使"受控共享"成为空白。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 隔离 clone 间文档/证据不可见 | 代码隔离 ≠ 上下文必须隔离；缺少共享通道会把跨阶段证据链撕成孤岛，逼下游重推或凭记忆 | 跨任务信息通道 = 固化产物 + **受控共享文档区**；共享区必须 clone 外、append-only |
+| 自由共享盘会引入写冲突与幻觉注入 | 并发 Pane 裸写共享目录 → 文档冲突替代代码冲突；未验证的 prose 被下游当事实 | CLI 中介写入 + 单写者纪律 + 权威层级（`git/verify-baseline > controller 机器证据 > 文档`） |
+| 证据失效无标记 | 源码变化 / fix-loop 后旧证据仍可被引用，违反"改动即失效"不变量 | 记录 `base_sha`；`evidence/gate` 类在 base 漂移时读取即标 STALE；fix-loop 写 invalidation 记录作废早于作废点的目标节点条目 |
+| 共享状态无生命周期终点 | 易膨胀为"第四份状态"并污染交付 diff | 物理位置在 clone 外；随 workflow 归档保留供审计，不自动删除 |
+
+### 操作规范（已固化到 `herdr/workflow_docs.py` / `bin/herdr-task` / `services/herdr-controller.py` / `wiki/task-lifecycle.md §5`）
+
+1. 新增跨任务上下文一律走 `herdr-task note-add`（append-only，自动带 node/task/agent/base_sha provenance），禁止裸写共享目录；
+2. 下游节点与门禁不得把共享文档当事实，只作上下文；机器证据由 controller/门禁 verdict 自动落盘（`kind=gate` / `kind=invalidation`）；
+3. 源码任何相交变更 / fix-loop 后，依赖旧证据的结论必须重跑——STALE 标记只提示，不替代重新验证；
+4. 共享区严禁进入 `verify-baseline` 交付 diff；交付文档（`docs/`、`wiki/`）仍走任务分支提交。
+
+### 验证命令 / 守护测试
+
+```bash
+pytest tests/test_workflow_docs.py tests/test_workflow_docs_cli.py tests/test_direct_stage_dispatch.py -q
+# 期望输出：76 passed, 23 subtests passed（其中共享文档区新增 29 例）
+
+pytest -q
+# 期望输出：677 passed, 44 subtests passed
+```
+
+### 相关文档 / 关联证据
+
+- `herdr/workflow_docs.py` — 账本 / stale / 摘要渲染核心
+- `bin/herdr-task` #note_add / #note_list / #_record_gate_note
+- `services/herdr-controller.py` #shared_docs_block / #_record_invalidation_note
+- `wiki/task-lifecycle.md §5`、`wiki/log.md [2026-09-18]`
+- 关联教训 §44（多会话并行必须 CoW 沙盒隔离）——本条为其对偶：隔离之上补受控共享通道
+- 分支 `feat/workflow-shared-docs`（PR 编号见 PR 描述）
+
+---

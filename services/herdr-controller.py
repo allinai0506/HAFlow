@@ -326,6 +326,65 @@ def latest_branch_for_node(workflow_id, node_id):
     return best.get("branch") if best else None
 
 
+def shared_docs_block(workflow_id, node_id, related_nodes=(), project_ctx=None):
+    """跨节点共享文档区注入块:只读上下文 + 追加写入指引(best-effort)。"""
+    try:
+        from herdr import workflow_docs as wd
+        notes = wd.load_notes(workflow_id)
+    except Exception as exc:
+        print(f"[SHARED DOCS WARN] load {workflow_id}: {exc}")
+        return ""
+
+    current_base_sha = None
+    ctx = project_ctx or {}
+    project_root = ctx.get("project_root") or ""
+    base_branch = ctx.get("base_branch") or ""
+    if project_root and base_branch:
+        try:
+            result = subprocess.run(
+                ["git", "-C", project_root, "rev-parse", "--short", base_branch],
+                text=True,
+                capture_output=True,
+                timeout=5,
+            )
+            if result.returncode == 0:
+                current_base_sha = result.stdout.strip() or None
+        except Exception:
+            current_base_sha = None
+
+    try:
+        return wd.render_context_block(
+            workflow_id,
+            notes,
+            node_id=node_id,
+            related_nodes=related_nodes,
+            current_base_sha=current_base_sha,
+        )
+    except Exception as exc:
+        print(f"[SHARED DOCS WARN] render {workflow_id}: {exc}")
+        return ""
+
+
+def _record_invalidation_note(workflow_id, gate_node_id, retry_node, nodes, invalidated):
+    """fix-loop 作废时写下 controller 机器证据,供 stale 计算与下游阅读。"""
+    try:
+        from herdr import workflow_docs as wd
+        wd.append_note(
+            workflow_id,
+            kind="invalidation",
+            title=(
+                f"fix-loop 作废: gate={gate_node_id} "
+                f"retry={retry_node or gate_node_id}"
+            ),
+            body="被作废任务: " + ", ".join(sorted(invalidated)),
+            node=gate_node_id,
+            source=wd.SOURCE_CONTROLLER,
+            invalidates=sorted(node for node in nodes if node),
+        )
+    except Exception as exc:
+        print(f"[FIX LOOP NOTE WARN] {exc}")
+
+
 def _collect_downstream_nodes(nodes_by_id, root_id):
     """root 节点自身 + 传递闭包的全部下游节点。"""
     dependents = {}
@@ -386,6 +445,7 @@ def invalidate_for_fix_loop(workflow_id, gate_node_id, workflow_cfg, retry_node=
 
     supersedeable = FIX_LOOP_SUPERSEDEABLE
     invalidated = []
+    invalidated_nodes = set()
 
     for task in load_tasks():
         if task.get("workflow_id") != workflow_id:
@@ -450,11 +510,21 @@ def invalidate_for_fix_loop(workflow_id, gate_node_id, workflow_cfg, retry_node=
 
         if result.returncode == 0:
             invalidated.append(task_id)
+            if task_node:
+                invalidated_nodes.add(task_node)
         else:
             print(
                 f"[FIX LOOP INVALIDATE ERROR] supersede {task_id}: "
                 f"{result.stderr.strip() or result.stdout.strip()}"
             )
+
+    if invalidated:
+        void_nodes = invalidated_nodes | {gate_node_id}
+        if retry_node:
+            void_nodes.add(retry_node)
+        _record_invalidation_note(
+            workflow_id, gate_node_id, retry_node, void_nodes, invalidated
+        )
 
     return invalidated
 
@@ -1075,6 +1145,13 @@ def try_direct_stage_advance(item):
 
     gate_task = node_is_gate(workflow_id, ready_id)
 
+    docs_block = shared_docs_block(
+        workflow_id,
+        ready_id,
+        related_nodes=dep_ids,
+        project_ctx=project_ctx,
+    )
+
     # 门禁节点在派发时注入结论契约(状态目录 gate-verdicts/<task_id>.json +
     # 终端标记),由 try_auto_verdict 直接采纳,免除总指挥裁决回合。
     plan = direct_dispatch_planner.plan_stage_dispatch(
@@ -1084,6 +1161,7 @@ def try_direct_stage_advance(item):
         requirement,
         context_branch=latest_branch_for_node(workflow_id, ready_id),
         gate_contract=gate_task,
+        docs_block=docs_block,
     )
 
     if gate_task and plan.get("mode") == "dispatch":
@@ -2238,6 +2316,13 @@ def build_fix_loop_message(item, project_name="unknown"):
         onto_flag = ""
         branch_line = "(未找到,请自行确认 retry_node 最近 committed 任务的分支)"
 
+    docs_block = shared_docs_block(
+        workflow_id,
+        retry_node,
+        related_nodes=(gate_stage,),
+        project_ctx=project_for_workflow(workflow_id) or {},
+    )
+
     return f"""
 HERDR_CONTROLLER_FIX_LOOP_EVENT
 
@@ -2264,6 +2349,8 @@ Blocker 清单(blocked 结论与修复指引):
 
 如需再次修复,对旧 fix task 使用 --supersedes。
 派发完成后结束当前回合,后续推进交给 Controller。
+
+{docs_block}
 
 {COORDINATOR_DISCIPLINE}
 """.strip()
@@ -2523,6 +2610,12 @@ Node Agent 策略
                         if intake
                         else ""
                     )
+                    docs_block = shared_docs_block(
+                        workflow_id,
+                        next_stage,
+                        related_nodes=(node or {}).get("depends_on") or [],
+                        project_ctx=project_ctx,
+                    )
                     message = f"""
 {event_header}
 
@@ -2564,6 +2657,8 @@ task_type:
 执行规则：
 
 {rules}
+
+{docs_block}
 
 {agent_policy_text}
 

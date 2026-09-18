@@ -24,6 +24,7 @@
 ├── projects.json                 # 多项目绑定与配置中心
 ├── workflows.json                # 运行中/已归档 Workflow 元数据
 ├── stage-policies.json           # 阶段策略配置
+├── workflows/<wf>/shared/        # Workflow 共享文档区 (append-only notes.jsonl, clone 外)
 ├── logs/                         # 后台服务日志 (controller.out.log, etc.)
 └── clones/                       # Task 隔离运行的独立 Git CoW 克隆工作区
 ```
