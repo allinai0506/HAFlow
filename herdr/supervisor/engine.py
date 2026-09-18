@@ -15,6 +15,7 @@ Cost/safety contract:
 
 from __future__ import annotations
 
+import threading
 import time
 from typing import Any, Dict, Optional
 
@@ -28,15 +29,22 @@ TRIGGER_PREFIX = "supervisor:"
 
 
 class RateGate:
-    """Per-task evaluation budget and quiet windows (plain dict bookkeeping)."""
+    """Per-task evaluation budget and quiet windows (plain dict bookkeeping).
+
+    Listener threads and the registry watcher may checkpoint concurrently, so
+    bookkeeping is lock-protected; the worst remaining race is a duplicate
+    provider call inside one interval, never state corruption.
+    """
 
     def __init__(self, state: Optional[Dict[str, Dict[str, Any]]] = None) -> None:
+        self._lock = threading.Lock()
         self._tasks: Dict[str, Dict[str, Any]] = {}
         for task_id, entry in (state or {}).items():
             self._tasks[task_id] = dict(entry)
 
     def snapshot(self) -> Dict[str, Dict[str, Any]]:
-        return {task_id: dict(entry) for task_id, entry in self._tasks.items()}
+        with self._lock:
+            return {task_id: dict(entry) for task_id, entry in self._tasks.items()}
 
     def _entry(self, task_id: str) -> Dict[str, Any]:
         return self._tasks.setdefault(
@@ -47,24 +55,26 @@ class RateGate:
               now: Optional[float] = None) -> Optional[str]:
         """None = allowed; otherwise the reason evaluation is being skipped."""
         ts = now if now is not None else time.time()
-        entry = self._entry(task_id)
-        if entry["calls"] >= int(config.get("max_calls_per_task", 12)):
-            return "budget_exhausted"
-        last_at = entry.get("last_at")
-        if last_at is not None:
-            since = ts - float(last_at)
-            if since < float(config.get("interval", 300)):
-                return "min_interval"
-            if since < float(config.get("cooldown", 120)) and trigger == entry.get("last_trigger"):
-                return "cooldown_duplicate"
-        return None
+        with self._lock:
+            entry = self._entry(task_id)
+            if entry["calls"] >= int(config.get("max_calls_per_task", 12)):
+                return "budget_exhausted"
+            last_at = entry.get("last_at")
+            if last_at is not None:
+                since = ts - float(last_at)
+                if since < float(config.get("interval", 300)):
+                    return "min_interval"
+                if since < float(config.get("cooldown", 120)) and trigger == entry.get("last_trigger"):
+                    return "cooldown_duplicate"
+            return None
 
     def record(self, task_id: str, trigger: str,
                now: Optional[float] = None) -> None:
-        entry = self._entry(task_id)
-        entry["calls"] = int(entry["calls"]) + 1
-        entry["last_at"] = now if now is not None else time.time()
-        entry["last_trigger"] = trigger
+        with self._lock:
+            entry = self._entry(task_id)
+            entry["calls"] = int(entry["calls"]) + 1
+            entry["last_at"] = now if now is not None else time.time()
+            entry["last_trigger"] = trigger
 
 
 class SemanticSupervisor:

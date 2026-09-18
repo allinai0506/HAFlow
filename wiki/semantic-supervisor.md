@@ -63,4 +63,4 @@ Runtime Facts ──► SupervisorState(有界/脱敏快照)
 
 ## 5. V1 未实现（有意留白）
 
-tests_completed/meaningful_change/timeout 等更多 checkpoint、REROUTE 落地、execution_strategy/model_tier 选择、Verifier Agent 自动派发、趋势算法（现为逐次 delta）、Console 监督面板可视化。
+tests_completed/meaningful_change/timeout 等更多 checkpoint、REROUTE 落地、execution_strategy/model_tier 选择、Verifier Agent 自动派发、趋势算法（现为逐次 delta）、Console 监督面板可视化。已知 follow-up：registry watcher 的 done 网关为同步 checkpoint（provider 超时可短暂拖慢全局 sweep），后续可下沉到工作线程或收紧该路径超时；pending 判定窗口为最新 100 条事件。

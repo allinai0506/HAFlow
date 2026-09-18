@@ -79,6 +79,13 @@ def load_config(path: Optional[str] = None, env: Optional[dict] = None) -> Dict[
     except (OSError, ValueError):
         pass
 
+    # Normalize shorthand ``"jev": false`` into the dict form so every
+    # downstream reader sees one shape (and false really means off).
+    if config.get("jev") is False:
+        config["jev"] = {"enabled": False}
+    elif not isinstance(config.get("jev"), dict):
+        config["jev"] = {}
+
     enabled = _flag(environ, "HERDR_SUPERVISOR_ENABLED")
     if enabled is not None:
         config["enabled"] = enabled
@@ -155,14 +162,23 @@ def _apply_numbers(config: Dict[str, Any], environ: dict) -> None:
             pass
 
 
+def _jev_section(config: Dict[str, Any]) -> Dict[str, Any]:
+    """The jev sub-config in one shape (``"jev": false`` means disabled)."""
+    jev = config.get("jev")
+    if jev is False:
+        return {"enabled": False}
+    return jev if isinstance(jev, dict) else {}
+
+
 def jev_provider_config(config: Dict[str, Any]) -> Dict[str, Any]:
     """Provider kwargs for the jev DecisionProvider (no secret values)."""
-    jev = config.get("jev") or {}
+    jev = _jev_section(config)
     return {
         "enabled": bool(jev.get("enabled", True)),
         "model": jev.get("model") or "jev-latest",
         "timeout": jev.get("timeout") or 20,
         "base_url": jev.get("base_url"),
+        "api_key_env": jev.get("api_key_env"),
     }
 
 
@@ -172,8 +188,7 @@ def provider_enabled(config: Dict[str, Any]) -> bool:
     if not provider:
         return False
     if provider == "jev":
-        jev = config.get("jev") or {}
-        if not jev.get("enabled", True):
+        if not _jev_section(config).get("enabled", True):
             return False
     return True
 
@@ -186,5 +201,5 @@ def supervisor_enabled(config: Dict[str, Any]) -> bool:
     provider = config.get("provider")
     if provider == "jev":
         from ..decision.providers.jev import resolve_api_key
-        return resolve_api_key(config.get("jev") or {}) is not None
+        return resolve_api_key(_jev_section(config)) is not None
     return bool(provider)

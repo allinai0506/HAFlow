@@ -191,6 +191,21 @@ class SupervisorEvaluationTests(unittest.TestCase):
         # after interval passes (interval=0), a *different* trigger may proceed
         self.assertIsNone(gate.check("t", "tests_completed", config, now=now + 1))
 
+    def test_out_of_range_provider_values_are_clamped(self):
+        provider = StubProvider(signals=dict(ALL_SIGNALS, worker_stuck=1.7,
+                                             work_off_track=-0.4))
+        supervisor, _ = self._supervisor(provider)
+        evaluation = supervisor.evaluate(_task(), "agent_done", now=1000.0)
+        self.assertEqual(evaluation["signals"]["worker_stuck"], 1.0)
+        self.assertEqual(evaluation["signals"]["work_off_track"], 0.0)
+
+    def test_evaluation_error_is_redacted(self):
+        from herdr.supervisor.evaluation import redact_free_error
+
+        cleaned = redact_free_error("request failed api_key=sk-abcdefghijklmnop")
+        self.assertNotIn("sk-abcdefghijklmnop", cleaned)
+        self.assertIn("redacted", cleaned)
+
 
 class FailSafeProviderTests(unittest.TestCase):
     def test_provider_failure_yields_failed_evaluation_not_exception(self):

@@ -108,19 +108,19 @@ def build_supervisor_state(
     runtime = task.get("runtime") if isinstance(task.get("runtime"), dict) else {}
 
     state: Dict[str, Any] = {
-        "task_id": task.get("task_id"),
-        "workflow_id": task.get("workflow_id"),
+        "task_id": _truncate(task.get("task_id"), MAX_RECENT_ROW_CHARS),
+        "workflow_id": _truncate(task.get("workflow_id"), MAX_RECENT_ROW_CHARS),
         "goal": _truncate(task.get("goal"), MAX_GOAL_CHARS),
         "blocker": _truncate(task.get("blocker"), MAX_SUMMARY_CHARS),
-        "node": task.get("node") or task.get("stage"),
-        "task_status": task.get("status"),
-        "agent": runtime.get("agent") or task.get("agent"),
-        "agent_name": runtime.get("agent_name"),
-        "runtime_status": runtime.get("status"),
+        "node": _truncate(task.get("node") or task.get("stage"), MAX_RECENT_ROW_CHARS),
+        "task_status": _truncate(task.get("status"), 40),
+        "agent": _truncate(runtime.get("agent") or task.get("agent"), MAX_RECENT_ROW_CHARS),
+        "agent_name": _truncate(runtime.get("agent_name"), MAX_RECENT_ROW_CHARS),
+        "runtime_status": _truncate(runtime.get("status"), 40),
         "attempt_count": facts.get("attempt_count"),
         "elapsed_seconds": facts.get("elapsed_seconds"),
         "verification_count": facts.get("verification_count"),
-        "stage_verdict": task.get("stage_verdict"),
+        "stage_verdict": _truncate(task.get("stage_verdict"), MAX_RECENT_ROW_CHARS),
     }
 
     criteria = task.get("acceptance_criteria")
@@ -172,14 +172,23 @@ def build_supervisor_state(
 def _fit_budget(state: Dict[str, Any], max_context_size: int) -> Dict[str, Any]:
     """Shrink the snapshot until its serialized form fits the byte budget."""
     budget = max(500, int(max_context_size))
-    if len(json.dumps(state, ensure_ascii=False)) <= budget:
+    if _size(state) <= budget:
         return state
     # Drop order: history first, then summaries; identity + goal survive.
     for key in ("recent_events", "previous_signals", "diff_summary", "tests",
                 "recent_output_summary", "blocker", "acceptance_criteria"):
         state.pop(key, None)
-        if len(json.dumps(state, ensure_ascii=False)) <= budget:
+        if _size(state) <= budget:
             return state
-    goal = state.get("goal") or ""
-    state["goal"] = goal[: max(0, budget // 3)]
+    # Last resort: hard-clamp every remaining string so the budget is absolute.
+    for _ in range(10):
+        if _size(state) <= budget:
+            break
+        for key, value in list(state.items()):
+            if isinstance(value, str) and len(value) > 8:
+                state[key] = value[: max(8, len(value) // 2)]
     return state
+
+
+def _size(state: Dict[str, Any]) -> int:
+    return len(json.dumps(state, ensure_ascii=False))

@@ -139,12 +139,23 @@ class ReportEvidenceTests(unittest.TestCase):
             ],
         )
         summary = summarize_report(task, report_text=report)
-        self.assertIn("stage_verdict=pass", summary)
         self.assertIn("verdict_note=", summary)
         self.assertIn("recent_transitions=working->rework", summary)
         self.assertIn("agent_tail=", summary)
         self.assertNotIn(SECRET, summary)
         self.assertNotIn(LONG_LINE, summary)
+        self.assertLessEqual(len(summary), 400)
+
+    def test_agent_tail_survives_busy_failure_fields(self):
+        task = _task(
+            stage_verdict_note="N" * 400,
+            failure_reason="F" * 400,
+            error="E" * 400,
+            message="M" * 400,
+            last_result="L" * 400,
+        )
+        summary = summarize_report(task, report_text="agent final summary line")
+        self.assertIn("agent_tail=agent final summary line", summary)
         self.assertLessEqual(len(summary), 400)
 
     def test_collect_facts_derives_attempt_count_from_status_history(self):
@@ -211,6 +222,13 @@ class SupervisorStateEvidenceTests(unittest.TestCase):
             max_context_size=2000,
         )
         self.assertLessEqual(len(json.dumps(state, ensure_ascii=False)), 2000)
+
+    def test_budget_is_absolute_even_for_identity_fields(self):
+        task = _task(task_id="t" * 5000, node="n" * 5000, agent="a" * 5000)
+        task["runtime"] = {"status": "running", "agent_name": "x" * 5000}
+        state = build_supervisor_state(task, now=time.time(), max_context_size=500)
+        self.assertLessEqual(len(json.dumps(state, ensure_ascii=False)), 500)
+        self.assertIn("task_id", state)
 
 
 if __name__ == "__main__":

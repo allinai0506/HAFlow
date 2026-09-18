@@ -943,8 +943,13 @@ def list_events(
     source: Optional[str] = None,
     limit: Optional[int] = None,
     db_path: Optional[Path] = None,
+    desc: bool = False,
 ) -> List[Dict[str, Any]]:
-    """List WorkflowEvents in chronological order with optional filters."""
+    """List WorkflowEvents in chronological order with optional filters.
+
+    ``desc=True`` returns newest-first and makes ``limit`` select the newest
+    N events (the default ASC + LIMIT would return the oldest N).
+    """
     conn = get_db_connection(db_path)
     try:
         query = "SELECT * FROM events WHERE 1=1"
@@ -960,7 +965,8 @@ def list_events(
             if value is not None:
                 query += f" AND {column} = ?"
                 params.append(value)
-        query += " ORDER BY timestamp ASC, id ASC"
+        direction = "DESC" if desc else "ASC"
+        query += f" ORDER BY timestamp {direction}, id {direction}"
         if limit is not None:
             query += " LIMIT ?"
             params.append(int(limit))

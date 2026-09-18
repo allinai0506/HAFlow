@@ -20,6 +20,7 @@ Invariants enforced here:
 
 from __future__ import annotations
 
+import json
 import time
 from typing import Any, Callable, Dict, Optional
 
@@ -46,17 +47,36 @@ _FACT_EVIDENCE_KEYS = ("tests", "diff_summary", "output_summary")
 _supervisors: Dict[str, SemanticSupervisor] = {}
 
 
+def _supervisor_signature(cfg: dict) -> str:
+    """Fields whose change must rebuild the memoized supervisor."""
+    jev = cfg.get("jev")
+    jev_sig = (
+        {key: jev.get(key) for key in ("enabled", "model", "base_url", "api_key_env",
+                                       "timeout")}
+        if isinstance(jev, dict) else jev
+    )
+    return json.dumps({
+        "provider": cfg.get("provider"),
+        "enabled": cfg.get("enabled"),
+        "enforce": cfg.get("enforce"),
+        "interval": cfg.get("interval"),
+        "cooldown": cfg.get("cooldown"),
+        "max_calls_per_task": cfg.get("max_calls_per_task"),
+        "max_context_size": cfg.get("max_context_size"),
+        "signals": cfg.get("signals"),
+        "thresholds": cfg.get("thresholds"),
+        "policy": cfg.get("policy"),
+        "jev": jev_sig,
+        "provider_config": cfg.get("provider_config"),
+    }, sort_keys=True, default=str)
+
+
 def get_supervisor(config: Optional[dict] = None) -> Optional[SemanticSupervisor]:
-    """Build (and memoize per config path) the supervisor for this process."""
+    """Build (and memoize per effective config) the supervisor for this process."""
     cfg = config or load_config()
     if not provider_enabled(cfg):
         return None
-    key = "|".join((
-        str(cfg.get("provider")),
-        str(cfg.get("interval")),
-        str(cfg.get("enforce")),
-        str((cfg.get("jev") or {}).get("enabled", True)),
-    ))
+    key = _supervisor_signature(cfg)
     cached = _supervisors.get(key)
     if cached is not None:
         return cached
@@ -165,7 +185,7 @@ def run_checkpoint(
         previous: Optional[dict] = None
         if store is not None:
             try:
-                events = store.list_events(task_id=task_id, limit=200) or []
+                events = store.list_events(task_id=task_id, limit=200, desc=True) or []
                 previous = latest_evaluation(events)
             except Exception:
                 events = []
@@ -303,7 +323,7 @@ def pending_intervention(task: dict, store, config: Optional[dict] = None
     if not task_id or store is None:
         return None
     try:
-        events = store.list_events(task_id=task_id, limit=100) or []
+        events = store.list_events(task_id=task_id, limit=100, desc=True) or []
     except Exception:
         return None
 

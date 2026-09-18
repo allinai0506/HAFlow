@@ -199,18 +199,18 @@ def _report_tail(report_text: Optional[str]) -> Optional[str]:
 
 def summarize_report(task: dict,
                      report_text: Optional[str] = None) -> Optional[str]:
-    """Bounded Agent done report: verdict/blocker/transitions + report tail."""
+    """Bounded Agent done report: report tail + transitions + failure fields.
+
+    The actual agent output tail comes first so the 400-char budget can never
+    truncate it away behind task-record fields (stage_verdict/blocker already
+    live top-level in SupervisorState and are not duplicated here).
+    """
     parts: List[str] = []
-    verdict = task.get("stage_verdict")
-    if verdict:
-        parts.append(f"stage_verdict={_clean(verdict, 60)}")
-    note = task.get("stage_verdict_note")
-    if note:
-        parts.append(f"verdict_note={_clean(note, 160)}")
-    for key in ("blocker", "failure_reason", "error", "message", "last_result"):
-        value = task.get(key)
-        if value:
-            parts.append(f"{key}={_clean(value, 120)}")
+
+    tail = _report_tail(report_text if report_text is not None
+                        else _read_transcript_tail(task))
+    if tail:
+        parts.append(f"agent_tail={tail}")
 
     history = task.get("status_history")
     if isinstance(history, list) and history:
@@ -226,10 +226,13 @@ def summarize_report(task: dict,
         if transitions:
             parts.append("recent_transitions=" + ", ".join(transitions))
 
-    tail = _report_tail(report_text if report_text is not None
-                        else _read_transcript_tail(task))
-    if tail:
-        parts.append(f"agent_tail={tail}")
+    note = task.get("stage_verdict_note")
+    if note:
+        parts.append(f"verdict_note={_clean(note, 160)}")
+    for key in ("failure_reason", "error", "message", "last_result"):
+        value = task.get(key)
+        if value:
+            parts.append(f"{key}={_clean(value, 120)}")
 
     if not parts:
         return None

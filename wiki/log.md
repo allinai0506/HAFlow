@@ -761,3 +761,12 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
   2. **真实执行证据（新增 `herdr/supervisor/evidence.py`）**：复用 `.herdr-loop`（`evaluator.read_state` + METRICS.json 测试/静态检查/综合分）、`git status`+`git diff --stat`、Agent done report（stage_verdict/blocker/status_history 尾 3 条 + 经 `projection.strip_ansi_codes` 清洗的报告尾部 ≤4 行×120 字符）；`acceptance_criteria` 进 State；attempt_count 回退到 status_history 中 rework 次数；全部有界+脱敏，绝不发送完整源码/diff/stdout。
   3. **Jev 动态 Kill Switch（`herdr/decision/providers/jev.py`、`config.py`、`engine.py`）**：provider 不再缓存 key，`_resolve_api_key()` 每次请求读环境；新增 `enabled` 标志与 `provider_enabled()`；harness 前置检查（禁用→不建 provider 不采证据）、engine `should_evaluate` 返回 `provider_disabled`、provider `_ask` 双保险；`HERDR_SUPERVISOR_JEV_ENABLED=false` 三层短路零请求；key 不进 config/event/log。
 - **验证**：新增 `test_supervisor_interception.py`（动作集合/harness 语义/五动作 Controller 不落 done/未映射不静默/continue_flow 放行）与 `test_supervisor_evidence.py`（loop/git/report 有界解析、真实 checkpoint 证据、预算与脱敏），`test_supervisor_failsafe.py` 增 JevKillSwitchTests（禁用零请求、运行中删 key 立即停、key 不入配置/事件），全量 **766 passed + 44 subtests**；`compileall` 通过。
+
+## [2026-09-19] fix | Semantic Supervisor 独立评审整改：全 done 出口网关 + newest-N 事件窗口 + 配置收紧
+- **背景**：PR #60 加固后经独立 reviewer 子代理对抗评审（verdict: NEEDS_FIXES），发现 1 个 P0 绕过点与 7 项 P1/P2：registry watcher 的 done 补投仍直发事件（生产主路径绕过监督网关）；`list_events` 为 ASC+LIMIT 取的是**最旧 N 条**，>100 事件后 pending 拦截失效且 previous_evaluation 变旧；agent_tail 被任务字段挤出预算；identity 字段未截断使预算非绝对；`"jev": false` 被静默忽略、api_key_env 丢失、provider memo key 过窄；error 未脱敏；RateGate 无锁、provider 值未 clamp。
+- **改动与实现**：
+  1. **F1 全 done 出口网关**：registry watcher 补投收敛为 `redeliver_done_event()` → `emit_done_if_allowed()`；全仓仅网关内一处 `enqueue_coordinator_event(task,"done")`；PAUSE/VERIFY/ESCALATE/REROUTE 的 attention 首次或动作变更时发一次 macOS 通知（`HERDR_CONTROLLER_TEST` 抑制）。
+  2. **F2 newest-N 窗口**：`state_db.list_events` 新增 `desc`（`ORDER BY timestamp DESC, id DESC` + LIMIT 取最新 N），state_store 贯通；run_checkpoint/pending_intervention 均用 `desc=True`；补真实 SQLite 长历史回归。
+  3. **F3/F4 证据与预算**：agent_tail 置首、删除与 State 顶层重复字段；identity 字段统一截断 + `_fit_budget` 末段折半硬收敛（预算绝对成立）。
+  4. **F6-F8 收紧**：`"jev": false` 归一化为禁用；`api_key_env` 透传 provider；memo key 改为完整配置签名；error 经 redact_text；provider 值 clamp_probability；RateGate 加锁。
+- **验证**：独立 reviewer 复审 **MERGE_READY**（F1-F8 全部修复，无 P0/P1 残留）；监督六套件 96 passed；全量 **779 passed + 44 subtests**；compileall 通过。

@@ -3326,11 +3326,27 @@ def _supervisor_pane_report(task):
 def _supervisor_attention(task, decision, event_type):
     """Intervention ledger entry; task status is never touched here."""
     reasons = "; ".join((decision or {}).get("reasons") or ["policy intervention"])
-    return attention_note(
-        f"supervisor:{task.get('task_id')}",
+    key = f"supervisor:{task.get('task_id')}"
+    previous = attention_get(key) or {}
+    note = attention_note(key, task, event_type, reasons)
+    if previous.get("event_type") != event_type:
+        _supervisor_notify(
+            task,
+            event_type.split("_")[-1],
+            f"语义监督拦截: {reasons}",
+        )
+    return note
+
+
+def _supervisor_notify(task, action, message):
+    """Best-effort operator visibility for an enforced intervention."""
+    if os.environ.get("HERDR_CONTROLLER_TEST"):
+        return
+    notify_attention(
+        "Herdr Factory · 语义监督拦截",
         task,
-        event_type,
-        reasons,
+        message,
+        f"supervisor_{str(action).lower()}",
     )
 
 
@@ -3382,7 +3398,7 @@ def emit_done_if_allowed(task, report_text=None):
 
 
 def _supervisor_log_pending(task, action):
-    """Record/refresh the pending-intervention ledger entry (log once)."""
+    """Record/refresh the pending-intervention ledger entry (log/notify once)."""
     key = f"supervisor:{task.get('task_id')}"
     reason = f"action {action} pending; done flow blocked until resolved"
     episode = attention_get(key) or {}
@@ -3390,6 +3406,34 @@ def _supervisor_log_pending(task, action):
         return
     print(f"[SUPERVISOR PENDING] task={task.get('task_id')} {reason}")
     attention_note(key, task, "supervisor_pending", reason)
+    _supervisor_notify(task, action, reason)
+
+
+def redeliver_done_event(task, now=None):
+    """Registry-watcher done redelivery: supervisor-gated and throttled.
+
+    This is a primary production path (sentinel-driven completions only reach
+    the coordinator through here), so it must use the same gateway as
+    handle_event; an enforced intervention keeps the done event withheld.
+    """
+    task_id = task.get("task_id")
+    key = f"{task_id}:done"
+    now = time.time() if now is None else now
+    with lock:
+        if key in queued_events:
+            return False
+    if attention_blocks_retry(key, now):
+        return False
+    print(
+        f"[REGISTRY WATCHER] "
+        f"task={task_id} "
+        f"status=agent_done -> supervisor-gated done event"
+    )
+    if not emit_done_if_allowed(task):
+        return False
+    if attention_get(key):
+        attention_throttle(key, now=now)
+    return True
 
 
 def supervisor_checkpoint(task, trigger, report_text=None):
@@ -4115,23 +4159,9 @@ def registry_watcher():
                                 task_id
                             )
 
-                # ---- done 事件投递:受 attention episode 节流 ----
+                # ---- done 事件投递:受 attention episode 节流 + 监督网关把关 ----
                 if status == "agent_done":
-                    key = f"{task_id}:done"
-                    with lock:
-                        already_queued = key in queued_events
-                    if not already_queued and not attention_blocks_retry(key, now):
-                        print(
-                            f"[REGISTRY WATCHER] "
-                            f"task={task_id} "
-                            f"status=agent_done -> enqueue done event"
-                        )
-                        enqueue_coordinator_event(
-                            task,
-                            "done"
-                        )
-                        if attention_get(key):
-                            attention_throttle(key, now=now)
+                    redeliver_done_event(task, now=now)
 
                 # ---- blocked 事件:此前投递失败会被静默吞掉,这里补投递护栏 ----
                 if status == "blocked":

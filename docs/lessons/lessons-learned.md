@@ -3089,10 +3089,10 @@ pytest -q
 
 ```bash
 pytest tests/test_supervisor_interception.py tests/test_supervisor_evidence.py tests/test_supervisor_failsafe.py tests/test_semantic_supervisor.py tests/test_supervisor_policy.py tests/test_decision_providers.py -q
-# 期望输出：83 passed（本次新增 33 例：拦截语义 / 五动作不落 done / pending 持久拦截 / 真实证据 / 动态 Kill Switch）
+# 期望输出：96 passed（新增 33+ 例：拦截语义 / 全 done 出口网关 / pending 持久拦截 / 真实证据 / 动态 Kill Switch）
 
 pytest -q
-# 期望输出：766 passed, 44 subtests passed
+# 期望输出：779 passed, 44 subtests passed
 ```
 
 ### 相关文档 / 关联证据

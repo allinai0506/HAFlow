@@ -13,7 +13,8 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional
 
-from ..decision.models import DecisionResult
+from ..decision.models import DecisionResult, clamp_probability
+from .state import redact_text
 
 EVALUATION_EVENT = "supervisor_evaluation"
 POLICY_EVENT = "supervisor_policy"
@@ -43,8 +44,9 @@ def build_evaluation(
     signals: Dict[str, float] = {}
     confidences: Dict[str, float] = {}
     for name, result in results.items():
-        if isinstance(result.value, (int, float)):
-            signals[name] = round(float(result.value), 4)
+        value = clamp_probability(result.value)
+        if value is not None:
+            signals[name] = round(value, 4)
         if result.confidence is not None:
             confidences[name] = round(float(result.confidence), 4)
 
@@ -81,7 +83,9 @@ def build_evaluation(
 
 def redact_free_error(error: Optional[str]) -> Optional[str]:
     """Never carry raw provider payloads (may echo headers/keys) into records."""
-    return str(error)[:200] if error else None
+    if not error:
+        return None
+    return redact_text(str(error))[:200]
 
 
 def compute_deltas(

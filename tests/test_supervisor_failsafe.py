@@ -17,6 +17,7 @@ from herdr.decision.models import DecisionProviderError
 from herdr.decision.providers.jev import JevDecisionProvider
 from herdr.supervisor import harness
 from herdr.supervisor.config import (
+    jev_provider_config,
     load_config,
     provider_enabled,
     supervisor_enabled,
@@ -264,6 +265,40 @@ class JevKillSwitchTests(unittest.TestCase):
         blob = json.dumps({"config": config, "events": store.events})
         self.assertNotIn("super-secret-key-value", blob)
         self.assertNotIn("super-secret-key-value", json.dumps(result))
+
+
+class JevConfigTests(unittest.TestCase):
+    def test_shorthand_jev_false_disables_provider(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "supervisor.json")
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump({"supervisor": {"jev": False}}, handle)
+            config = load_config(path=path, env={})
+        self.assertEqual(config["jev"], {"enabled": False})
+        self.assertFalse(provider_enabled(config))
+        self.assertFalse(supervisor_enabled(config))
+
+    def test_api_key_env_passthrough_to_provider(self):
+        config = load_config(path="/nonexistent-supervisor.json", env={})
+        config["jev"]["api_key_env"] = "MY_JEV_KEY"
+        self.assertEqual(
+            jev_provider_config(config)["api_key_env"], "MY_JEV_KEY")
+
+    def test_supervisor_is_rebuilt_when_provider_settings_change(self):
+        base = load_config(path="/nonexistent-supervisor.json", env={})
+        updated = load_config(path="/nonexistent-supervisor.json", env={})
+        updated["jev"]["model"] = "jev-other"
+        harness.reset_process_state()
+        self.addCleanup(harness.reset_process_state)
+        first = harness.get_supervisor(base)
+        self.assertIsNotNone(first)
+        self.assertIs(first, harness.get_supervisor(base),
+                      "identical config stays memoized")
+        self.assertIsNot(
+            first, harness.get_supervisor(updated),
+            "provider setting changes must rebuild the supervisor")
 
 
 if __name__ == "__main__":

@@ -12,8 +12,11 @@ interventions and the controller's default ``agent_done -> done`` flow:
 """
 
 import importlib
+import os
+import tempfile
 import time
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from herdr.supervisor.engine import SemanticSupervisor
@@ -137,6 +140,8 @@ class ControllerDoneGatingTests(unittest.TestCase):
         self.controller = importlib.import_module("services.herdr-controller")
         self.addCleanup(setattr, self.controller, "supervisor_harness",
                         self.controller.supervisor_harness)
+        os.environ["HERDR_CONTROLLER_TEST"] = "1"
+        self.addCleanup(os.environ.pop, "HERDR_CONTROLLER_TEST", None)
 
     def _handle_done_event(self, harness_result, pending=None):
         task = {
@@ -205,6 +210,28 @@ class ControllerDoneGatingTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 self.controller._supervisor_retry({"task_id": "t-x"}, {})
 
+    def test_supervisor_attention_notifies_once_per_action(self):
+        task = {"task_id": "t-att-1", "workflow_id": "wf-int"}
+        episodes = {}
+
+        def fake_get(key):
+            return episodes.get(key)
+
+        def fake_note(key, t, event_type, reason, **kwargs):
+            episodes[key] = {"event_type": event_type, "reason": reason}
+            return episodes[key]
+
+        with patch.object(self.controller, "attention_get", side_effect=fake_get), \
+             patch.object(self.controller, "attention_note", side_effect=fake_note), \
+             patch.object(self.controller, "_supervisor_notify") as notify:
+            self.controller._supervisor_attention(
+                task, {"reasons": ["r1"]}, "supervisor_escalate")
+            self.controller._supervisor_attention(
+                task, {"reasons": ["r2"]}, "supervisor_escalate")
+            self.controller._supervisor_attention(
+                task, {"reasons": ["r3"]}, "supervisor_pause")
+        self.assertEqual(notify.call_count, 2, "one notification per distinct action")
+
     def test_controller_checkpoint_returns_harness_result(self):
         result = {"intercepted": True, "handled": True, "continue_flow": False,
                   "decision": {"action": "RETRY", "reasons": ["stuck"]}}
@@ -217,6 +244,66 @@ class ControllerDoneGatingTests(unittest.TestCase):
         self.assertEqual(returned, result)
         self.assertEqual(len(harness.calls), 1)
         self.assertIn("report_reader", harness.calls[0])
+
+
+class RegistryWatcherDoneGatingTests(unittest.TestCase):
+    """redeliver_done_event is the production redelivery path; it is gated."""
+
+    def setUp(self):
+        self.controller = importlib.import_module("services.herdr-controller")
+        self.addCleanup(setattr, self.controller, "supervisor_harness",
+                        self.controller.supervisor_harness)
+        self.addCleanup(setattr, self.controller, "queued_events",
+                        self.controller.queued_events)
+        self.controller.queued_events = set()
+        os.environ["HERDR_CONTROLLER_TEST"] = "1"
+        self.addCleanup(os.environ.pop, "HERDR_CONTROLLER_TEST", None)
+
+    def _redeliver(self, harness_result, pending=None):
+        task = {
+            "task_id": "t-watch-1",
+            "workflow_id": "wf-int",
+            "stage": "implementation",
+            "status": "agent_done",
+            "pane_id": "w1:p1",
+        }
+        harness = _FakeHarness(harness_result, pending=pending)
+        self.controller.supervisor_harness = harness
+        with patch.object(self.controller, "get_task", return_value=task), \
+             patch.object(self.controller, "_get_store", return_value=None), \
+             patch.object(self.controller, "attention_blocks_retry", return_value=False), \
+             patch.object(self.controller, "attention_get", return_value={}), \
+             patch.object(self.controller, "attention_note"), \
+             patch.object(self.controller, "attention_throttle"), \
+             patch.object(self.controller, "enqueue_coordinator_event") as enqueue:
+            delivered = self.controller.redeliver_done_event(task, now=100.0)
+        return delivered, enqueue
+
+    def test_intercepted_done_is_withheld_on_redelivery(self):
+        result = {"intercepted": True, "handled": True, "continue_flow": False,
+                  "decision": {"action": "PAUSE", "reasons": ["off track"]}}
+        delivered, enqueue = self._redeliver(result)
+        self.assertFalse(delivered)
+        enqueue.assert_not_called()
+
+    def test_unhandled_intervention_is_withheld_on_redelivery(self):
+        result = {"intercepted": True, "handled": False, "continue_flow": False,
+                  "decision": {"action": "VERIFY", "reasons": ["needs verification"]}}
+        delivered, enqueue = self._redeliver(result)
+        self.assertFalse(delivered)
+        enqueue.assert_not_called()
+
+    def test_pending_intervention_is_withheld_on_redelivery(self):
+        delivered, enqueue = self._redeliver(None, pending="ESCALATE")
+        self.assertFalse(delivered)
+        enqueue.assert_not_called()
+
+    def test_continue_flow_delivers_done(self):
+        result = {"intercepted": False, "handled": False, "continue_flow": True,
+                  "decision": {"action": "CONTINUE", "reasons": []}}
+        delivered, enqueue = self._redeliver(result)
+        self.assertTrue(delivered)
+        enqueue.assert_called_once()
 
 
 class PendingInterventionTests(unittest.TestCase):
@@ -261,6 +348,31 @@ class PendingInterventionTests(unittest.TestCase):
             {"from": "rework", "to": "agent_done", "timestamp": time.time() + 1},
         ]
         self.assertIsNone(pending_intervention(newer, store, config))
+
+    def test_pending_survives_long_event_history(self):
+        """list_events must fetch the NEWEST N; a buried intervention still blocks."""
+        from herdr.state_store import SQLiteStateStore
+        from herdr.supervisor.harness import POLICY_EVENT, pending_intervention
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SQLiteStateStore(
+                db_path=Path(tmp) / "state.db", auto_migrate_json=False)
+            task_id = "t-long-events"
+            for index in range(150):
+                store.record_event(
+                    "task_transition", {"i": index},
+                    task_id=task_id, timestamp=1000.0 + index)
+            config = load_config(path="/nonexistent-supervisor.json")
+            config["enforce"] = True
+            config["provider"] = "rule"
+            store.record_event(
+                POLICY_EVENT, {"action": "PAUSE", "enforced": True},
+                task_id=task_id, timestamp=2000.0)
+            newest = store.list_events(task_id=task_id, limit=3, desc=True)
+            self.assertEqual(newest[0]["payload"]["action"], "PAUSE")
+            self.assertEqual(
+                pending_intervention(_task(task_id=task_id), store, config),
+                "PAUSE")
 
     def test_pending_is_none_when_supervision_or_enforcement_off(self):
         from herdr.supervisor.harness import pending_intervention
