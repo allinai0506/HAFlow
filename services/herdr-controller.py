@@ -43,6 +43,12 @@ except Exception:
     # 纯函数决策模块缺失时退回总指挥路径,绝不阻塞控制面。
     direct_dispatch_planner = None
 
+try:
+    from herdr.supervisor import harness as supervisor_harness
+except Exception:
+    # Semantic Supervisor 是可选观察层;缺失或异常时原有流程完全不变。
+    supervisor_harness = None
+
 STAGE_STATE_FILE = os.environ.get("STAGE_STATE_FILE") or os.path.expanduser(
     "~/.herdr-controller/stage-state.json"
 )
@@ -3300,6 +3306,183 @@ def check_task_deliverables_ready(task):
     return False
 
 
+def _supervisor_pane_report(task):
+    """Agent done report source: bounded pane read, best-effort (never raises)."""
+    pane_id = task.get("pane_id")
+    if not pane_id:
+        return None
+    try:
+        res = subprocess.run(
+            ["herdr", "pane", "read", pane_id, "--source", "visible"],
+            text=True,
+            capture_output=True,
+            timeout=3,
+        )
+        return (res.stdout or "") + "\n" + (res.stderr or "")
+    except Exception:
+        return None
+
+
+def _supervisor_attention(task, decision, event_type):
+    """Intervention ledger entry; task status is never touched here."""
+    reasons = "; ".join((decision or {}).get("reasons") or ["policy intervention"])
+    key = f"supervisor:{task.get('task_id')}"
+    previous = attention_get(key) or {}
+    note = attention_note(key, task, event_type, reasons)
+    if previous.get("event_type") != event_type:
+        _supervisor_notify(
+            task,
+            event_type.split("_")[-1],
+            f"语义监督拦截: {reasons}",
+        )
+    return note
+
+
+def _supervisor_notify(task, action, message):
+    """Best-effort operator visibility for an enforced intervention."""
+    if os.environ.get("HERDR_CONTROLLER_TEST"):
+        return
+    notify_attention(
+        "Herdr Factory · 语义监督拦截",
+        task,
+        message,
+        f"supervisor_{str(action).lower()}",
+    )
+
+
+def _supervisor_retry(task, decision):
+    """RETRY -> existing rework flow; failure must not pass as handled."""
+    if not set_task_status(task.get("task_id"), "rework"):
+        raise RuntimeError("RETRY handler could not move task to rework")
+
+
+def supervisor_continue_flow(result):
+    """Whether the caller may run its default continuation (the done event).
+
+    Fail-safe: no supervision result (disabled / skipped / crash) continues
+    the original flow unchanged. An enforced intervention returns
+    ``continue_flow=False`` so HAFlow orchestration owns the next step.
+    """
+    if not result:
+        return True
+    return bool(result.get("continue_flow", True))
+
+
+def emit_done_if_allowed(task, report_text=None):
+    """The single gateway for agent_done -> coordinator done.
+
+    Every Controller path that would announce a task as done goes through
+    the supervisor checkpoint first; an enforced intervention blocks the
+    default flow (the action handler owns the next step instead). When the
+    checkpoint is rate-gated/skipped, a still-pending enforced intervention
+    from the events ledger keeps blocking redelivery until a newer decision
+    or a new agent_done transition supersedes it.
+    """
+    checkpoint = supervisor_checkpoint(task, "agent_done", report_text=report_text)
+    if checkpoint is None:
+        pending = None
+        if supervisor_harness is not None:
+            try:
+                pending = supervisor_harness.pending_intervention(task, _get_store())
+            except Exception:
+                pending = None
+        if pending:
+            _supervisor_log_pending(task, pending)
+            return False
+        enqueue_coordinator_event(task, "done")
+        return True
+    if not supervisor_continue_flow(checkpoint):
+        return False
+    enqueue_coordinator_event(task, "done")
+    return True
+
+
+def _supervisor_log_pending(task, action):
+    """Record/refresh the pending-intervention ledger entry (log/notify once)."""
+    key = f"supervisor:{task.get('task_id')}"
+    reason = f"action {action} pending; done flow blocked until resolved"
+    episode = attention_get(key) or {}
+    if episode.get("reason") == reason:
+        return
+    print(f"[SUPERVISOR PENDING] task={task.get('task_id')} {reason}")
+    attention_note(key, task, "supervisor_pending", reason)
+    _supervisor_notify(task, action, reason)
+
+
+def redeliver_done_event(task, now=None):
+    """Registry-watcher done redelivery: supervisor-gated and throttled.
+
+    This is a primary production path (sentinel-driven completions only reach
+    the coordinator through here), so it must use the same gateway as
+    handle_event; an enforced intervention keeps the done event withheld.
+    """
+    task_id = task.get("task_id")
+    key = f"{task_id}:done"
+    now = time.time() if now is None else now
+    with lock:
+        if key in queued_events:
+            return False
+    if attention_blocks_retry(key, now):
+        return False
+    print(
+        f"[REGISTRY WATCHER] "
+        f"task={task_id} "
+        f"status=agent_done -> supervisor-gated done event"
+    )
+    if not emit_done_if_allowed(task):
+        return False
+    if attention_get(key):
+        attention_throttle(key, now=now)
+    return True
+
+
+def supervisor_checkpoint(task, trigger, report_text=None):
+    """Semantic Supervisor 观察点:Jev/Provider 只产生信号与 Policy 结论,
+    状态推进全部走既有流程;整体 fail-safe,绝不影响任务主链路。
+
+    返回 harness 结果(None=未监督或异常)。调用方必须用
+    ``supervisor_continue_flow(result)`` 决定是否继续 done:
+    被 enforce 拦截的 intervention 绝不再走默认完成流程。
+    """
+    if supervisor_harness is None or not task:
+        return None
+    try:
+        fresh = get_task(task.get("task_id")) or task
+        actions = {
+            # Policy actions map onto existing flows only:
+            # RETRY -> rework 回流;其余 -> attention 台账(人工/总指挥可见)。
+            "RETRY": _supervisor_retry,
+            "ESCALATE": lambda t, d: _supervisor_attention(t, d, "supervisor_escalate"),
+            "VERIFY": lambda t, d: _supervisor_attention(t, d, "supervisor_verify"),
+            "PAUSE": lambda t, d: _supervisor_attention(t, d, "supervisor_pause"),
+            "REROUTE": lambda t, d: _supervisor_attention(t, d, "supervisor_reroute"),
+        }
+        if report_text is not None:
+            report_reader = lambda: report_text
+        else:
+            report_reader = lambda: _supervisor_pane_report(fresh)
+        result = supervisor_harness.run_checkpoint(
+            task=fresh,
+            trigger=trigger,
+            store=_get_store(),
+            actions=actions,
+            report_reader=report_reader,
+            log=print,
+        )
+        if result and result.get("intercepted") and not result.get("handled"):
+            action = (result.get("decision") or {}).get("action")
+            attention_note(
+                f"supervisor:{fresh.get('task_id')}",
+                fresh,
+                "supervisor_unhandled",
+                f"intercepted action {action} without a handler; done flow blocked",
+            )
+        return result
+    except Exception as e:
+        print(f"[SUPERVISOR SKIPPED] task={task.get('task_id')}: {type(e).__name__}: {e}")
+        return None
+
+
 def handle_event(task_id, agent_status):
     task = get_task(task_id)
 
@@ -3340,6 +3523,7 @@ def handle_event(task_id, agent_status):
     elif agent_status == "idle":
         pane_id = task.get("pane_id")
         has_done_marker = False
+        screen = None
         if pane_id:
             try:
                 res = subprocess.run(
@@ -3397,10 +3581,7 @@ def handle_event(task_id, agent_status):
                 "agent_done"
             ):
                 task = get_task(task_id)
-                enqueue_coordinator_event(
-                    task,
-                    "done"
-                )
+                emit_done_if_allowed(task, report_text=screen)
 
         elif current_status == "rework":
             # 自愈修复：若任务处于 rework 状态，当 Agent 输出 DONE 标记或产物已落盘就绪时，
@@ -3413,10 +3594,7 @@ def handle_event(task_id, agent_status):
                 )
                 if set_task_status(task_id, "agent_done"):
                     task = get_task(task_id)
-                    enqueue_coordinator_event(
-                        task,
-                        "done"
-                    )
+                    emit_done_if_allowed(task, report_text=screen)
 
     elif agent_status == "blocked":
         if current_status in (
@@ -3444,11 +3622,7 @@ def handle_event(task_id, agent_status):
                 "agent_done"
             ):
                 task = get_task(task_id)
-
-                enqueue_coordinator_event(
-                    task,
-                    "done"
-                )
+                emit_done_if_allowed(task)
 
 
 # ============================================================
@@ -3510,10 +3684,7 @@ def reconcile_task_state(task_id):
             f"→ restore done event"
         )
 
-        enqueue_coordinator_event(
-            task,
-            "done"
-        )
+        emit_done_if_allowed(task)
         return
 
     pane_id = task.get("pane_id")
@@ -3613,7 +3784,7 @@ def reconcile_task_state(task_id):
                 if set_task_status(task_id, "agent_done"):
                     task = get_task(task_id)
                     if task and task.get("status") == "agent_done":
-                        enqueue_coordinator_event(task, "done")
+                        emit_done_if_allowed(task)
             return
 
         if current == "working":
@@ -3626,10 +3797,7 @@ def reconcile_task_state(task_id):
         task = get_task(task_id)
 
         if task and task.get("status") == "agent_done":
-            enqueue_coordinator_event(
-                task,
-                "done"
-            )
+            emit_done_if_allowed(task)
 
         return
 
@@ -3645,10 +3813,7 @@ def reconcile_task_state(task_id):
             task = get_task(task_id)
 
             if task and task.get("status") == "agent_done":
-                enqueue_coordinator_event(
-                    task,
-                    "done"
-                )
+                emit_done_if_allowed(task)
         elif current == "rework":
             if check_task_deliverables_ready(task):
                 print(
@@ -3658,7 +3823,7 @@ def reconcile_task_state(task_id):
                 if set_task_status(task_id, "agent_done"):
                     task = get_task(task_id)
                     if task and task.get("status") == "agent_done":
-                        enqueue_coordinator_event(task, "done")
+                        emit_done_if_allowed(task)
 
         return
 
@@ -3994,23 +4159,9 @@ def registry_watcher():
                                 task_id
                             )
 
-                # ---- done 事件投递:受 attention episode 节流 ----
+                # ---- done 事件投递:受 attention episode 节流 + 监督网关把关 ----
                 if status == "agent_done":
-                    key = f"{task_id}:done"
-                    with lock:
-                        already_queued = key in queued_events
-                    if not already_queued and not attention_blocks_retry(key, now):
-                        print(
-                            f"[REGISTRY WATCHER] "
-                            f"task={task_id} "
-                            f"status=agent_done -> enqueue done event"
-                        )
-                        enqueue_coordinator_event(
-                            task,
-                            "done"
-                        )
-                        if attention_get(key):
-                            attention_throttle(key, now=now)
+                    redeliver_done_event(task, now=now)
 
                 # ---- blocked 事件:此前投递失败会被静默吞掉,这里补投递护栏 ----
                 if status == "blocked":
@@ -4129,7 +4280,7 @@ def registry_watcher():
                             )
                             if set_task_status(task_id, "agent_done"):
                                 task = get_task(task_id)
-                                enqueue_coordinator_event(task, "done")
+                                emit_done_if_allowed(task)
 
             for stale_id in list(_listener_backoff.keys()):
                 if stale_id not in task_ids_now:

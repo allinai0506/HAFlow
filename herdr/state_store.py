@@ -273,8 +273,9 @@ class StateStore(ABC):
         event_type: Optional[str] = None,
         source: Optional[str] = None,
         limit: Optional[int] = None,
+        desc: bool = False,
     ) -> List[Dict[str, Any]]:
-        """List canonical WorkflowEvent records."""
+        """List canonical WorkflowEvent records (desc=newest first)."""
         pass
 
     # Checkpoints
@@ -543,6 +544,7 @@ class SQLiteStateStore(StateStore):
         event_type: Optional[str] = None,
         source: Optional[str] = None,
         limit: Optional[int] = None,
+        desc: bool = False,
     ) -> List[Dict[str, Any]]:
         return state_db.list_events(
             workflow_id=workflow_id,
@@ -553,6 +555,7 @@ class SQLiteStateStore(StateStore):
             source=source,
             limit=limit,
             db_path=self.db_path,
+            desc=desc,
         )
 
     # Checkpoints

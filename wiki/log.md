@@ -745,3 +745,28 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
   2. `_read_loop_doc()` 读取 `<clone>/.herdr-loop/` 报告文档；`blocked_event_type()` 统一三处 blocked 事件入口（handle_event / reconcile / registry watcher）的细分路由。
 - **未纳入**：done 事件注入 METRICS.md 摘要——已被规则化验收取代（非门禁 done 不再走总指挥），注入会成死代码并增加提示词负担。
 - **验证**：`BlockerArbitrationEventTest` 4 例（路由/含 BLOCKER.md/缺省回退/通用卡不受影响），全量 **644 passed**。
+
+## [2026-09-18] feat | Semantic Supervisor V1：独立于 Agent 的语义监督层
+- **背景**：HAFlow 事实层已确定性地知道存活/状态/测试/git 结论，但答不出"有没有有效进展、是否卡死、是否偏离目标、验证是否充分"这类语义问题。第一版以 Jev(TypeSafe System One, POST /v1/systemone) 为 DecisionProvider 建立观察层，铁律：**Jev 给判断、HAFlow 做决定**，Provider 永不触碰 task/runtime/workflow 状态。
+- **改动与实现**：
+  1. **决策抽象（`herdr/decision/`）**：`DecisionProvider`(judge/score/choose + `judge_many` 单次批量) 与统一 `DecisionResult`；Noul 无 confidence 字段则保持 None 不伪造；`jev` provider 用 stdlib urllib 且 transport 可注入，401/429/522→auth、429→rate_limit、529→overloaded 分类；`rule` provider 作确定性离线替身；registry 解耦域代码与后端。
+  2. **监督核心（`herdr/supervisor/`）**：9 个 noul 语义信号（progress/stuck/off_track/requirements/complete/tests/verification/human/finish）；`SupervisorState` 有界(默认 8000 字符预算)+密钥形状脱敏+事件只留 `{type,ago}` 摘要；`SupervisorEvaluation` 携带与上次的 delta/trend，持久化复用 events 表(`supervisor_evaluation`/`supervisor_policy`, source=semantic_supervisor)，零 schema 迁移；RateGate 提供 interval/cooldown/max_calls_per_task 成本闸门；`policy.py` 为唯一信号→动作出口：确定性事实一票否决（settled 任务/非 running 运行时不干预），七动作 CONTINUE/VERIFY/RETRY/REROUTE/PAUSE/FINISH/ESCALATE，高风险动作要求阈值裕度(min_margin)否则降级 CONTINUE。
+  3. **接入（`services/herdr-controller.py`）**：V1 仅挂一个 checkpoint——三处 `working/rework→agent_done` 转换成功后 `supervisor_checkpoint()`；enforce 默认关闭（只记录），开启时 RETRY→既有 rework、ESCALATE→既有 attention 台账；整条链路 try/except，`[SUPERVISOR SKIPPED]` 是唯一允许的外伤。
+- **验证**：新增 4 个测试文件 49 例（Provider 契约与 7 种故障、State 有界/脱敏/批量、评估持久化与 delta、Policy 全动作+置信降级、Fail-safe：无 JEV_API_KEY/禁用/Provider 宕机/store 爆炸均不影响任务流），全量 **732 passed + 44 subtests**。Q1 删 key 正常运行=YES；Q2 关闭监督行为不变=YES；Q3 Jev 无状态修改权=NO 权限。
+
+## [2026-09-18] fix | Semantic Supervisor 加固：intervention 拦截 done、真实执行证据、Jev 动态 Kill Switch
+- **背景**：PR #60 评审发现三处 P1：① `supervisor_checkpoint()` 返回后 Controller 仍无条件 `enqueue_coordinator_event("done")`，enforce=true 时 RETRY/ESCALATE/VERIFY/PAUSE/REROUTE 与原 done 控制流冲突；② `SupervisorState` 虽支持 tests/diff_summary/output_summary，但 harness 从未真正采集这些事实，语义判断缺证据；③ `HERDR_SUPERVISOR_JEV_ENABLED=false` 不生效、Provider 缓存 API Key 导致运行中撤销 key 后仍发请求。
+- **改动与实现**：
+  1. **拦截语义（`herdr/supervisor/harness.py`）**：`PASS_THROUGH_ACTIONS={CONTINUE,FINISH}`、`INTERVENTION_ACTIONS=其余五动作`；`run_checkpoint` 返回 `{intercepted, handled, continue_flow}`（policy 事件带 `enforced` 字段）——enforce 下 intervention 一律 `continue_flow=False`（handler 成功=handled，未映射/崩溃同样拦截），Controller 全部 done 出口收敛到唯一网关 `emit_done_if_allowed()`；被 RateGate 跳过的补投/恢复路径由 `pending_intervention()` 依 events 账本持续拦截（新 agent_done 变迁或新决策到来才解除）；未映射拦截写 `supervisor_unhandled` attention 台账，绝不静默放行；observe 模式与 supervision 异常仍走原流程（fail-safe 不破）。
+  2. **真实执行证据（新增 `herdr/supervisor/evidence.py`）**：复用 `.herdr-loop`（`evaluator.read_state` + METRICS.json 测试/静态检查/综合分）、`git status`+`git diff --stat`、Agent done report（stage_verdict/blocker/status_history 尾 3 条 + 经 `projection.strip_ansi_codes` 清洗的报告尾部 ≤4 行×120 字符）；`acceptance_criteria` 进 State；attempt_count 回退到 status_history 中 rework 次数；全部有界+脱敏，绝不发送完整源码/diff/stdout。
+  3. **Jev 动态 Kill Switch（`herdr/decision/providers/jev.py`、`config.py`、`engine.py`）**：provider 不再缓存 key，`_resolve_api_key()` 每次请求读环境；新增 `enabled` 标志与 `provider_enabled()`；harness 前置检查（禁用→不建 provider 不采证据）、engine `should_evaluate` 返回 `provider_disabled`、provider `_ask` 双保险；`HERDR_SUPERVISOR_JEV_ENABLED=false` 三层短路零请求；key 不进 config/event/log。
+- **验证**：新增 `test_supervisor_interception.py`（动作集合/harness 语义/五动作 Controller 不落 done/未映射不静默/continue_flow 放行）与 `test_supervisor_evidence.py`（loop/git/report 有界解析、真实 checkpoint 证据、预算与脱敏），`test_supervisor_failsafe.py` 增 JevKillSwitchTests（禁用零请求、运行中删 key 立即停、key 不入配置/事件），全量 **766 passed + 44 subtests**；`compileall` 通过。
+
+## [2026-09-19] fix | Semantic Supervisor 独立评审整改：全 done 出口网关 + newest-N 事件窗口 + 配置收紧
+- **背景**：PR #60 加固后经独立 reviewer 子代理对抗评审（verdict: NEEDS_FIXES），发现 1 个 P0 绕过点与 7 项 P1/P2：registry watcher 的 done 补投仍直发事件（生产主路径绕过监督网关）；`list_events` 为 ASC+LIMIT 取的是**最旧 N 条**，>100 事件后 pending 拦截失效且 previous_evaluation 变旧；agent_tail 被任务字段挤出预算；identity 字段未截断使预算非绝对；`"jev": false` 被静默忽略、api_key_env 丢失、provider memo key 过窄；error 未脱敏；RateGate 无锁、provider 值未 clamp。
+- **改动与实现**：
+  1. **F1 全 done 出口网关**：registry watcher 补投收敛为 `redeliver_done_event()` → `emit_done_if_allowed()`；全仓仅网关内一处 `enqueue_coordinator_event(task,"done")`；PAUSE/VERIFY/ESCALATE/REROUTE 的 attention 首次或动作变更时发一次 macOS 通知（`HERDR_CONTROLLER_TEST` 抑制）。
+  2. **F2 newest-N 窗口**：`state_db.list_events` 新增 `desc`（`ORDER BY timestamp DESC, id DESC` + LIMIT 取最新 N），state_store 贯通；run_checkpoint/pending_intervention 均用 `desc=True`；补真实 SQLite 长历史回归。
+  3. **F3/F4 证据与预算**：agent_tail 置首、删除与 State 顶层重复字段；identity 字段统一截断 + `_fit_budget` 末段折半硬收敛（预算绝对成立）。
+  4. **F6-F8 收紧**：`"jev": false` 归一化为禁用；`api_key_env` 透传 provider；memo key 改为完整配置签名；error 经 redact_text；provider 值 clamp_probability；RateGate 加锁。
+- **验证**：独立 reviewer 复审 **MERGE_READY**（F1-F8 全部修复，无 P0/P1 残留）；监督六套件 96 passed；全量 **779 passed + 44 subtests**；compileall 通过。
