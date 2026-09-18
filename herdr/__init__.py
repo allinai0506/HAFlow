@@ -17,6 +17,7 @@ from . import projection
 from . import mcp
 from . import state_db
 from . import state_store
+from . import runtime_state
 from .state_store import StateStore, SQLiteStateStore, get_state_store
 
 __all__ = [
@@ -33,6 +34,7 @@ __all__ = [
     "mcp",
     "state_db",
     "state_store",
+    "runtime_state",
     "StateStore",
     "SQLiteStateStore",
     "get_state_store",
@@ -56,6 +58,7 @@ for _alias, _module in [
     ("herdr_mcp", mcp),
     ("herdr_state_db", state_db),
     ("herdr_state_store", state_store),
+    ("herdr_runtime_state", runtime_state),
 ]:
     sys.modules.setdefault(_alias, _module)
 

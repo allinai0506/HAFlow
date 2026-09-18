@@ -750,6 +750,13 @@ def main():
             pane_id
         )
 
+        session = agent.get("agent_session")
+        agent_session_id = (
+            session.get("value")
+            if isinstance(session, dict)
+            else session
+        )
+
         result = {
             "task_id": args.task_id,
             "clone": str(clone),
@@ -760,6 +767,7 @@ def main():
             "pane_source": pane_source,
             "agent": agent.get("agent"),
             "agent_name": agent.get("name"),
+            "agent_session_id": agent_session_id,
             "status": agent.get("agent_status")
         }
 
