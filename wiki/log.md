@@ -8,6 +8,11 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-09-18] feat | Task/Workflow State 与 Runtime State 分离：新增 RuntimeState 记录
+- 背景：Task 记录把编排状态（status/node/goal）与运行环境（workspace/tab/pane/agent）混在顶层扁平字段，且 `agent_session` 在落盘时被丢弃、`agent_status` 从不持久化，无法回答"这个任务到底由谁、在哪里执行的"。
+- 新增 `herdr/runtime_state.py` 纯函数核心：`build/normalize/status映射/transition`；`task["runtime"]` 嵌入 `payload_json`（零 schema 迁移）；`launch_task` 记录真实 Herdr 证据（workspace/tab/pane/cwd/agent/session）；`kernel.transition_task` 同事务同步 `runtime.status`（created/running/completed/failed/unavailable）；只记录不恢复；旧 execution 无 runtime 照读照转。
+- 测试：`tests/test_runtime_state.py` 新增 6 例；全量 683 passed；`doctor` PASS；真实 `herdr agent get` 数据 + 隔离态 DB 全生命周期验证。
+
 ## [2026-09-18] feat | Workflow 共享文档区：代码物理隔离 + 文档/证据受控共享
 - 背景：每个 Task 独立 CoW clone，unified-dev-flow 式跨阶段证据链断裂（requirements 的规格/Entry Gate、test/review 的验证证据在下一节点不可见）。
 - 新增 `herdr/workflow_docs.py`：clone 外追加式账本 `~/.herdr-controller/workflows/<wf>/shared/notes.jsonl`；provenance（node/task/agent/source/base_sha）；读取时计算 stale（base 漂移作废 evidence/gate；fix-loop 作废早于作废点的目标节点条目）；按节点相关度摘要渲染。

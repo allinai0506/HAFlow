@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional, Set
 
 from . import workflow
 from . import state_db
+from . import runtime_state
 from .state_store import (
     get_state_store,
     StateStore,
@@ -140,12 +141,24 @@ def transition_task(
 ) -> Dict[str, Any]:
     """State Transition Gateway: Atomically transition task status and append WorkflowEvent."""
     s = _get_store(store)
+    meta = dict(metadata or {})
+    # RuntimeState follows the task transition inside the same atomic write:
+    # record-only, never influences the transition outcome itself.
+    if "runtime" not in meta:
+        try:
+            current = s.get_task(task_id)
+        except Exception:
+            current = None
+        if current is not None:
+            updated_runtime = runtime_state.transition_runtime(current, to_status)
+            if updated_runtime is not None:
+                meta["runtime"] = updated_runtime
     res = s.transition_task(
         task_id=task_id,
         to_status=to_status,
         reason=reason,
         source=source,
-        metadata=metadata,
+        metadata=meta,
         force=force,
     )
     sync_tasks_projection(store=s)

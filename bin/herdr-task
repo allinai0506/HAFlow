@@ -1523,6 +1523,27 @@ def launch_task(args):
     data = load_tasks()
 
     now = _now()
+
+    # RuntimeState:只记录本次真实执行的位置证据,不改变任务编排字段。
+    try:
+        from herdr import runtime_state as _runtime_state
+    except ImportError:
+        _runtime_state = None
+
+    runtime = None
+    if _runtime_state is not None:
+        runtime = _runtime_state.build_runtime_state(
+            agent=resolved_agent,
+            agent_session_id=worker_result.get("agent_session_id"),
+            agent_name=worker_result.get("agent_name"),
+            workspace_id=workspace_id,
+            tab_id=stage_config.get("tab_id"),
+            pane_id=pane_id,
+            cwd=clone_path,
+            status="running",
+            now=now,
+        )
+
     task = {
         "task_id": args.task_id,
         "workflow_id": args.workflow_id,
@@ -1552,6 +1573,8 @@ def launch_task(args):
         "goal": args.goal,
         "acceptance_criteria": args.acceptance,
     }
+    if runtime is not None:
+        task["runtime"] = runtime
     _init_status_history(
         task,
         "pending",
