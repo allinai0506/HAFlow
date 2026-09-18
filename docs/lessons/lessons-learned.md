@@ -2966,3 +2966,41 @@ pytest -q
   `wf-nexusarchive-0918-02`（修复后重启，现场验证）
 
 ---
+
+## 68. WIP stash 净增量判定：`git stash show` 会漏 staged 内容，反向 apply 不可作"已包含"判据
+
+### 问题背景
+
+2026-09-18 处理 `wip/phase0-inner-loop-arbitration` 存档时踩到两个判定陷阱：
+
+1. `git stash show --stat "stash@{1}"` 只显示 **1 个文件**（services/herdr-controller.py，85 行），据此
+   判断 WIP 净增量只有一处；用 `git stash branch` 恢复后，三点 diff
+   （`git diff --stat <base>...<branch>`）实际显示 **9 文件 / 787 行**——stash 还包含
+   staged 部分（Phase 0 的测试与配套实现），`git stash show` 默认并未完整呈现；
+2. 反向 apply 检查（`git stash show -p | git apply -R --check`）因目标文件在两天内大量演化
+   而失败，这种失败**只说明上下文不匹配**，不能作为"内容尚未合入 main"的判据
+   （同理也不能用它的"成功"来证明已包含）。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| **`git stash show` 呈现不完整** | 它默认只呈现工作区部分，对 staged 内容可能缺失，会系统性低估 WIP 范围 | 判定 stash 净增量必须基于完整 tree：先 `git stash branch <archive>` 恢复为分支，再用 `git diff --stat <base>...<archive>`（三点）计算；或在不动工作区时用 `git diff stash@{n}^ stash@{n}` |
+| **反向 apply 判"已包含"不可靠** | 文件演化后上下文不再匹配，反向检查必然失败，与内容是否已被覆盖无关 | 用内容级判定：抽取新增行做存在性匹配（可脚本化），或逐文件与当前 HEAD diff |
+| **`git add -A` 带入运行产物** | 老的基座分支 `.gitignore` 可能未覆盖新出现的运行目录（本次 `.codegraph/`） | 存档提交前 `git status` 复核；误入的产物用独立提交移除，不 amend 已推送历史 |
+
+### 操作规范
+
+1. 处理 WIP stash：先恢复为**存档分支**（`git stash branch`），不在主工作区落地；
+2. 用三点 diff 计算净增量：为空 → 可安全 drop；非空 → 保留分支并按净增量评估补齐；
+3. 存档/提交前复核 `git status`，排除误入的运行产物；需要移除时追加一个独立提交。
+
+### 验证命令 / 关联证据
+
+```bash
+# 本次实证:两套口径的差距
+git stash show --stat "stash@{n}"                     # 1 file, 88 lines  ← 不完整
+git diff --stat 974064f...wip/phase0-inner-loop-arbitration  # 9 files, 787 lines ← 完整净增量
+```
+
+---

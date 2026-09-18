@@ -724,3 +724,11 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - **背景**：`wf-nexusarchive-0918-02`（general-task-v1）运行中，控制台仍渲染 software-development 的 6 阶段——`workflow_detail` 硬编码内置 `STAGES` 常量，不读 workflow.json 的 `nodes`。
 - **改动**：`console/herdr_factory_console.py` 新增 `workflow_stages(wid, p)`（优先 `workflow.json#nodes` 的 id/label，缺失回退内置 `STAGES`），`workflow_detail` 改用它；经 `scripts/install-herdr-console.sh` 部署并随 PR #55 交付。
 - **验证**：新增 `ConsoleWorkflowStagesTest` 3 例（模板节点渲染 / 无配置回退 / workflow_detail 接线），全量 **640 项测试 PASS**；实机 `GET /api/workflow?id=wf-nexusarchive-0918-02` 返回 3 节点（intake cleaned / deep_execution working / review waiting）。附录 lessons §67 操作规范第 4 条。
+
+## [2026-09-18] feat | 内环耗尽仲裁闭环：BLOCKER.md 升级卡 + 三选一裁决
+- **背景**：Phase 0 内环协议（2026-09-13）的最后一跳因 auto-stash 丢失未合并——内环耗尽时 Sentinel 置 `blocked(inner_loop_exhausted)`，但 Controller 只发通用 blocked 卡，工位自述的 `<clone>/.herdr-loop/BLOCKER.md` 被丢弃（WIP 存档于 `wip/phase0-inner-loop-arbitration`）。
+- **改动（`services/herdr-controller.py`）**：
+  1. `inner_loop_exhausted` 专属事件 `HERDR_CONTROLLER_BLOCKER_EVENT`：注入 BLOCKER.md 全文 + 仲裁三选一（rework 指导继续 / failed 换策略 / 调整目标重派）+ "仲裁前不得 completed" + 效率纪律；
+  2. `_read_loop_doc()` 读取 `<clone>/.herdr-loop/` 报告文档；`blocked_event_type()` 统一三处 blocked 事件入口（handle_event / reconcile / registry watcher）的细分路由。
+- **未纳入**：done 事件注入 METRICS.md 摘要——已被规则化验收取代（非门禁 done 不再走总指挥），注入会成死代码并增加提示词负担。
+- **验证**：`BlockerArbitrationEventTest` 4 例（路由/含 BLOCKER.md/缺省回退/通用卡不受影响），全量 **644 passed**。

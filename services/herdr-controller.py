@@ -1595,6 +1595,53 @@ def build_coordinator_message(task, event_type):
     if not criteria:
         criteria = "- 未定义"
 
+    if event_type == "inner_loop_exhausted":
+        blocker_content = (
+            _read_loop_doc(task, "BLOCKER.md")
+            or "（BLOCKER.md 未找到）"
+        )
+
+        return f"""
+HERDR_CONTROLLER_BLOCKER_EVENT
+
+workflow_id: {workflow_id}
+task_id: {task_id}
+stage: {task['stage']}
+pane_id: {task['pane_id']}
+agent: {task['agent']}
+agent_status: blocked (inner_loop_exhausted)
+
+任务目标：
+{goal}
+
+⚠️ 工位内循环已耗尽全部重试次数，无法自愈，主动请求总指挥仲裁。
+
+━━━━━━━━━━━━━━━━━━━━━
+工位求助单 (BLOCKER.md)
+━━━━━━━━━━━━━━━━━━━━━
+{blocker_content}
+
+━━━━━━━━━━━━━━━━━━━━━
+总指挥仲裁三选一(决策必须落盘)：
+━━━━━━━━━━━━━━━━━━━━━
+
+A. 问题可解决(提供具体指导后让工位继续)：
+   ~/HAFlow/bin/herdr-task set {task_id} rework
+   然后用 herdr agent prompt 向工位下达具体修复指令。
+
+B. 需要换策略(放弃本轮，换 Agent 或调整范围)：
+   ~/HAFlow/bin/herdr-task set {task_id} failed
+   再按需重新规划/重派。
+
+C. 目标或验收标准有歧义(调整后重新派发)：
+   ~/HAFlow/bin/herdr-task set {task_id} failed
+   修正任务目标/验收标准后重新下发。
+
+仲裁前不得把 Task 置为 completed。
+
+{COORDINATOR_DISCIPLINE}
+""".strip()
+
     if event_type == "blocked":
         return f"""
 HERDR_CONTROLLER_BLOCKED_EVENT
@@ -1725,6 +1772,37 @@ Agent 本轮执行已经结束。
 """.strip()
 
     return None
+
+
+def _read_loop_doc(task, filename, max_lines=None):
+    """读取工位内环目录(<clone>/.herdr-loop/)下的报告文档,失败返回空串。"""
+    clone_path = task.get("clone_path") or ""
+    if not clone_path:
+        return ""
+    path = Path(clone_path) / ".herdr-loop" / filename
+    if not path.exists():
+        return ""
+    try:
+        lines = path.read_text(encoding="utf-8").strip().splitlines()
+    except Exception:
+        return ""
+    if max_lines:
+        lines = lines[:max_lines]
+    return "\n".join(lines)
+
+
+def blocked_event_type(task):
+    """blocked 事件细分:内环耗尽走专属仲裁卡,其余走通用解除阻塞卡。
+
+    内环协议(herdr-loop/evaluator)在重试耗尽时写 <clone>/.herdr-loop/
+    BLOCKER.md 并输出 HERDR_TASK_BLOCKER 标记,Sentinel 置 blocked
+    (sentinel_reason=inner_loop_exhausted)。此前 Controller 只发通用
+    blocked 卡,工位自述的 BLOCKER.md 被丢弃——这是 Phase 0 设计的
+    最后一跳(2026-09-13 设计,09-18 补齐)。
+    """
+    if task and task.get("sentinel_reason") == "inner_loop_exhausted":
+        return "inner_loop_exhausted"
+    return "blocked"
 
 
 def enqueue_coordinator_event(task, event_type):
@@ -3259,7 +3337,7 @@ def handle_event(task_id, agent_status):
 
                 enqueue_coordinator_event(
                     task,
-                    "blocked"
+                    blocked_event_type(task)
                 )
 
     elif agent_status == "done":
@@ -3397,7 +3475,7 @@ def reconcile_task_state(task_id):
         if task and task.get("status") == "blocked":
             enqueue_coordinator_event(
                 task,
-                "blocked"
+                blocked_event_type(task)
             )
 
         return
@@ -3856,7 +3934,9 @@ def registry_watcher():
                             f"task={task_id} "
                             f"status=blocked -> notify coordinator"
                         )
-                        enqueue_coordinator_event(task, "blocked")
+                        enqueue_coordinator_event(
+                            task, blocked_event_type(task)
+                        )
                         if not attention_get(key):
                             attention_note(
                                 key,
