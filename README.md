@@ -77,6 +77,7 @@ HAFlow/
 │   ├── pane_pool.py              # 空间现场 Pane 槽位分配与状态绑定
 │   ├── projects.py               # 多项目元数据管理、工作流注册与运行时自愈探活
 │   ├── topology.py               # Node/Stage 拓扑现场动态自愈与 Anchor 重建
+│   ├── workflow_docs.py          # Workflow 共享文档区（clone 外 append-only 账本、stale 治理）
 │   ├── preflight.py              # Agent 基础状态检测
 │   └── deep_preflight.py         # Agent 深层沙盒探针
 ├── console/                      # Factory Console 前端 Web 界面 canonical源码

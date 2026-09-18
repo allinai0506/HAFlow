@@ -250,6 +250,7 @@ def _prompt(
     context_branch=None,
     role_outputs=None,
     gate_contract=False,
+    docs_block=None,
 ):
     target_outputs = role_outputs if role_outputs is not None else node["required_outputs"]
     outputs = "\n".join(f"- {line}" for line in target_outputs) or "- 未定义"
@@ -270,6 +271,8 @@ def _prompt(
     gate_note = (
         "\n\n" + gate_verdict_contract(task_id) if gate_contract and task_id else ""
     )
+
+    docs_section = f"\n{docs_block}\n" if docs_block else ""
 
     return f"""HERDR_DIRECT_DISPATCH
 
@@ -295,7 +298,7 @@ node: {node["id"]} ({node["label"]})
 执行规则：
 
 {rules}
-
+{docs_section}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 验收标准
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -319,6 +322,7 @@ def _dispatch_spec(
     integration_mode=None,
     role_outputs=None,
     gate_contract=False,
+    docs_block=None,
 ):
     return {
         "task_id": task_id,
@@ -335,6 +339,7 @@ def _dispatch_spec(
             context_branch=context_branch,
             role_outputs=role_outputs,
             gate_contract=gate_contract,
+            docs_block=docs_block,
         ),
         "task_type": node["task_type"],
         "integration_mode": integration_mode or node["integration_mode"],
@@ -349,6 +354,7 @@ def plan_stage_dispatch(
     *,
     context_branch=None,
     gate_contract=False,
+    docs_block=None,
 ):
     """决定 ready 节点该派发什么。
 
@@ -418,6 +424,7 @@ def plan_stage_dispatch(
                     context_branch=context_branch,
                     integration_mode=task.get("integration_mode"),
                     gate_contract=gate_contract,
+                    docs_block=docs_block,
                 )
             )
         return {"mode": "dispatch", "reason": "redispatch superseded subset", "specs": specs}
@@ -472,6 +479,7 @@ def plan_stage_dispatch(
                     task_id,
                     role_outputs=r_outputs,
                     gate_contract=gate_contract,
+                    docs_block=docs_block,
                 )
             )
         return {"mode": "dispatch", "reason": "initial node dispatch with roles", "specs": specs}
@@ -485,5 +493,6 @@ def plan_stage_dispatch(
         acceptance,
         initial_task_id(workflow_id, node_id, existing_ids),
         gate_contract=gate_contract,
+        docs_block=docs_block,
     )
     return {"mode": "dispatch", "reason": "initial node dispatch", "specs": [spec]}

@@ -8,6 +8,14 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-09-18] feat | Workflow 共享文档区：代码物理隔离 + 文档/证据受控共享
+- 背景：每个 Task 独立 CoW clone，unified-dev-flow 式跨阶段证据链断裂（requirements 的规格/Entry Gate、test/review 的验证证据在下一节点不可见）。
+- 新增 `herdr/workflow_docs.py`：clone 外追加式账本 `~/.herdr-controller/workflows/<wf>/shared/notes.jsonl`；provenance（node/task/agent/source/base_sha）；读取时计算 stale（base 漂移作废 evidence/gate；fix-loop 作废早于作废点的目标节点条目）；按节点相关度摘要渲染。
+- `bin/herdr-task` 新增 `note-add` / `note-list`；`set <task> completed --verdict` 自动落 controller 机器证据（kind=gate）；launch 将共享区路径注入 `.agent-task-context`。
+- Controller 在 direct dispatch 与总指挥消息中注入共享文档区块（目录 + 权威层级 + 写入指引 + 相关条目），fix-loop 作废时写 invalidation 证据；git/verify-baseline 仍是代码唯一事实来源。
+- Updated [[task-lifecycle]] §5：跨任务合法信息通道从"仅固化产物"扩展为"固化产物 + 受控共享文档区"。
+- 测试：`tests/test_workflow_docs.py`、`tests/test_workflow_docs_cli.py` 新增 29 例；全量 677 passed；测试套件隔离 `HERDR_WORKFLOW_DOCS_DIR`，不再污染真实状态目录。
+
 ## [2026-09-17] feat | 新增 SEO 诊断与通用数字化任务工作流模板 (seo-audit-v1 & general-task-v1)
 - 新增 `workflow_templates/seo-audit-v1.yaml`：专用于网站在百度/通用搜索引擎未收录、死链及抓取异常的诊断与整改 4 阶段 DAG 模板（技术抓取诊断 → 关键词矩阵规划 → 落地整改规划 → 高管交付报告）。
 - 新增 `workflow_templates/general-task-v1.yaml`：适用于非代码工程类数字化任务的标准 3 阶段工作流（任务理解边界 → 专项深度执行 → 成果质检交付），解除历史将所有非研发任务硬编码绑定 `software-development-v1` 的误配。

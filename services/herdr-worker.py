@@ -13,7 +13,10 @@ import time
 from pathlib import Path
 
 
-CLONE_ROOT = Path.home() / ".herdr-controller" / "clones"
+CLONE_ROOT = Path(
+    os.environ.get("HERDR_CLONES_DIR")
+    or (Path.home() / ".herdr-controller" / "clones")
+)
 
 
 def run_json(cmd):
@@ -405,16 +408,22 @@ def list_untracked(repo):
     ]
 
 
-def write_task_context(clone, agent, branch):
+def write_task_context(clone, agent, branch, shared_docs=None):
     baseline = measure_complexity_baseline(clone)
 
     ctx = Path(clone) / ".agent-task-context"
 
+    lines = [
+        f"agent={agent}",
+        f"branch={branch}",
+        f"worktree={clone}",
+        f"complexity_baseline={baseline}",
+    ]
+    if shared_docs:
+        lines.append(f"shared_docs={shared_docs}")
+
     ctx.write_text(
-        f"agent={agent}\n"
-        f"branch={branch}\n"
-        f"worktree={clone}\n"
-        f"complexity_baseline={baseline}\n",
+        "\n".join(lines) + "\n",
         encoding="utf-8"
     )
 
@@ -642,6 +651,12 @@ def main():
     )
 
     parser.add_argument(
+        "--shared-docs",
+        default=None,
+        help="Workflow shared document directory (outside the clone)."
+    )
+
+    parser.add_argument(
         "--onto",
         default=None,
         help="Checkout this existing branch instead of creating a task branch."
@@ -694,7 +709,8 @@ def main():
         ctx, complexity_baseline = write_task_context(
             clone,
             args.agent,
-            branch
+            branch,
+            shared_docs=args.shared_docs
         )
 
         print(f"[CONTEXT] {ctx}")
