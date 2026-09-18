@@ -43,6 +43,12 @@ except Exception:
     # 纯函数决策模块缺失时退回总指挥路径,绝不阻塞控制面。
     direct_dispatch_planner = None
 
+try:
+    from herdr.supervisor import harness as supervisor_harness
+except Exception:
+    # Semantic Supervisor 是可选观察层;缺失或异常时原有流程完全不变。
+    supervisor_harness = None
+
 STAGE_STATE_FILE = os.environ.get("STAGE_STATE_FILE") or os.path.expanduser(
     "~/.herdr-controller/stage-state.json"
 )
@@ -3300,6 +3306,32 @@ def check_task_deliverables_ready(task):
     return False
 
 
+def supervisor_checkpoint(task, trigger):
+    """Semantic Supervisor 观察点:Jev/Provider 只产生信号与 Policy 结论,
+    状态推进全部走既有流程;整体 fail-safe,绝不影响任务主链路。"""
+    if supervisor_harness is None or not task:
+        return
+    try:
+        fresh = get_task(task.get("task_id")) or task
+        supervisor_harness.run_checkpoint(
+            task=fresh,
+            trigger=trigger,
+            store=_get_store(),
+            actions={
+                # Policy actions map onto existing flows only:
+                # RETRY -> rework 回流; ESCALATE -> attention 台账(人工可见)。
+                "RETRY": lambda t, d: set_task_status(t.get("task_id"), "rework"),
+                "ESCALATE": lambda t, d: attention_note(
+                    f"supervisor:{t.get('task_id')}", t, "supervisor_escalate",
+                    "; ".join((d or {}).get("reasons") or ["policy escalation"]),
+                ),
+            },
+            log=print,
+        )
+    except Exception as e:
+        print(f"[SUPERVISOR SKIPPED] task={task.get('task_id')}: {type(e).__name__}: {e}")
+
+
 def handle_event(task_id, agent_status):
     task = get_task(task_id)
 
@@ -3397,6 +3429,10 @@ def handle_event(task_id, agent_status):
                 "agent_done"
             ):
                 task = get_task(task_id)
+                supervisor_checkpoint(
+                    task,
+                    "agent_done"
+                )
                 enqueue_coordinator_event(
                     task,
                     "done"
@@ -3413,6 +3449,7 @@ def handle_event(task_id, agent_status):
                 )
                 if set_task_status(task_id, "agent_done"):
                     task = get_task(task_id)
+                    supervisor_checkpoint(task, "agent_done")
                     enqueue_coordinator_event(
                         task,
                         "done"
@@ -3444,6 +3481,10 @@ def handle_event(task_id, agent_status):
                 "agent_done"
             ):
                 task = get_task(task_id)
+                supervisor_checkpoint(
+                    task,
+                    "agent_done"
+                )
 
                 enqueue_coordinator_event(
                     task,

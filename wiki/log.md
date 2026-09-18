@@ -745,3 +745,11 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
   2. `_read_loop_doc()` 读取 `<clone>/.herdr-loop/` 报告文档；`blocked_event_type()` 统一三处 blocked 事件入口（handle_event / reconcile / registry watcher）的细分路由。
 - **未纳入**：done 事件注入 METRICS.md 摘要——已被规则化验收取代（非门禁 done 不再走总指挥），注入会成死代码并增加提示词负担。
 - **验证**：`BlockerArbitrationEventTest` 4 例（路由/含 BLOCKER.md/缺省回退/通用卡不受影响），全量 **644 passed**。
+
+## [2026-09-18] feat | Semantic Supervisor V1：独立于 Agent 的语义监督层
+- **背景**：HAFlow 事实层已确定性地知道存活/状态/测试/git 结论，但答不出"有没有有效进展、是否卡死、是否偏离目标、验证是否充分"这类语义问题。第一版以 Jev(TypeSafe System One, POST /v1/systemone) 为 DecisionProvider 建立观察层，铁律：**Jev 给判断、HAFlow 做决定**，Provider 永不触碰 task/runtime/workflow 状态。
+- **改动与实现**：
+  1. **决策抽象（`herdr/decision/`）**：`DecisionProvider`(judge/score/choose + `judge_many` 单次批量) 与统一 `DecisionResult`；Noul 无 confidence 字段则保持 None 不伪造；`jev` provider 用 stdlib urllib 且 transport 可注入，401/429/522→auth、429→rate_limit、529→overloaded 分类；`rule` provider 作确定性离线替身；registry 解耦域代码与后端。
+  2. **监督核心（`herdr/supervisor/`）**：9 个 noul 语义信号（progress/stuck/off_track/requirements/complete/tests/verification/human/finish）；`SupervisorState` 有界(默认 8000 字符预算)+密钥形状脱敏+事件只留 `{type,ago}` 摘要；`SupervisorEvaluation` 携带与上次的 delta/trend，持久化复用 events 表(`supervisor_evaluation`/`supervisor_policy`, source=semantic_supervisor)，零 schema 迁移；RateGate 提供 interval/cooldown/max_calls_per_task 成本闸门；`policy.py` 为唯一信号→动作出口：确定性事实一票否决（settled 任务/非 running 运行时不干预），七动作 CONTINUE/VERIFY/RETRY/REROUTE/PAUSE/FINISH/ESCALATE，高风险动作要求阈值裕度(min_margin)否则降级 CONTINUE。
+  3. **接入（`services/herdr-controller.py`）**：V1 仅挂一个 checkpoint——三处 `working/rework→agent_done` 转换成功后 `supervisor_checkpoint()`；enforce 默认关闭（只记录），开启时 RETRY→既有 rework、ESCALATE→既有 attention 台账；整条链路 try/except，`[SUPERVISOR SKIPPED]` 是唯一允许的外伤。
+- **验证**：新增 4 个测试文件 49 例（Provider 契约与 7 种故障、State 有界/脱敏/批量、评估持久化与 delta、Policy 全动作+置信降级、Fail-safe：无 JEV_API_KEY/禁用/Provider 宕机/store 爆炸均不影响任务流），全量 **732 passed + 44 subtests**。Q1 删 key 正常运行=YES；Q2 关闭监督行为不变=YES；Q3 Jev 无状态修改权=NO 权限。
