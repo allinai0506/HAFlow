@@ -10,3 +10,4 @@ topology-selfheal-backup-*/
 backups/
 .omc/
 .codegraph/
+.qoder/

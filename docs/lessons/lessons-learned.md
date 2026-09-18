@@ -3053,3 +3053,56 @@ pytest -q
 - 分支 `feat/workflow-shared-docs`（PR 编号见 PR 描述）
 
 ---
+
+---
+
+## 70. 旁路决策层接管既有控制流：interception/handled 语义、durable 拦截与动态 Kill Switch
+
+### 问题背景
+
+2026-09-18 Semantic Supervisor V1（PR #60）评审发现三处 P1，均属"旁路观察层"被低估为纯观察所致：
+
+1. **控制流冲突**：`supervisor_checkpoint()` 返回后 Controller 仍无条件 `enqueue_coordinator_event("done")`。一旦 `enforce=true`，Policy 的 RETRY/ESCALATE/VERIFY/PAUSE/REROUTE 与原 done 流程正面冲突——RETRY 已把任务置 `rework`，done 事件仍会发出，状态机与总指挥验收全部错位。
+2. **语义判断无证据**：`SupervisorState` 声称支持 `tests/diff_summary/output_summary`，但 harness 从未采集；9 个语义信号只能靠 goal/事件"凭感觉"判断，meaningful_progress / tests_sufficient 等没有可追溯事实源。
+3. **Kill Switch 形同虚设**：`HERDR_SUPERVISOR_JEV_ENABLED=false` 无人检查；provider 构造时缓存 `JEV_API_KEY`，运行中的 Controller 撤销 key 后仍继续发请求。
+
+根因：旁路层一旦拥有 enforce 能力，就必须重新定义"它与主控制流的边界"，而不仅是"多返回一个判断"。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 旁路返回后主流程照旧执行 | 可干预的旁路层必须显式返回拦截语义，主流程的默认出口必须有且只有一个网关 | `run_checkpoint` 返回 `{intercepted, handled, continue_flow}`；默认 done 出口全部收敛到唯一网关；**未映射/崩溃同样拦截**，绝不静默放行 |
+| 成本闸门（RateGate）跳过评估 = 拦截失效 | 拦截不能依赖"每次重新评估"；补投、恢复、watchdog 路径同样会被跳过穿透，必须落在 durable 账本上 | 从 events 账本读最近一次 `enforced` intervention 作为待决标记；新 agent_done 变迁或新决策到来才解除；observe 模式与关闭监督时必须完全恢复原行为 |
+| "支持某字段"≠"采集了该字段" | 语义判断的质量上限由证据采集决定；State 声明字段而无采集实现 = 隐性幻觉入口 | 证据采集与 State 组装分层（`evidence.py`）；只发送有界摘要，禁止完整源码/diff/stdout；每个事实字段必须有采集实现 + 预算/脱敏测试 |
+| Kill Switch 只在单层检查 | 环境开关与凭据必须每次请求动态解析、多层短路；构造时缓存 secret 即等于开关失效 | provider 不缓存 secret；`*_ENABLED=false` 在 harness/engine/provider 三层短路可验证零请求；key 不落 config/event/log |
+
+### 操作规范（已固化到 `herdr/supervisor/`、`herdr/decision/providers/jev.py`、`services/herdr-controller.py`）
+
+1. 新增可干预旁路层时，先定义动作集合与 pass-through/intervention 边界，再让所有默认出口经过唯一网关（HAFlow 为 `emit_done_if_allowed()`）；
+2. 拦截三件套必须有回归断言：handler 成功 / 未映射 / handler 崩溃三种情形都不得继续默认流；
+3. 成本闸门不能使拦截失效：待决拦截需 durable 判定（events 账本 + 任务最近 agent_done 变迁时间），且关闭监督/撤销凭据时立即恢复原行为（fail-safe 红线）；
+4. Provider 不缓存 secret，凭据每次请求从环境解析；provider-specific enablement 在 harness（不建 provider、不采证据）、engine（`should_evaluate`）、provider（`_ask`）三层短路；
+5. 语义 State 的每个事实字段必须有真实采集与预算/脱敏测试，否则删除字段而不是留占位。
+
+### 验证命令 / 守护测试
+
+```bash
+pytest tests/test_supervisor_interception.py tests/test_supervisor_evidence.py tests/test_supervisor_failsafe.py tests/test_semantic_supervisor.py tests/test_supervisor_policy.py tests/test_decision_providers.py -q
+# 期望输出：83 passed（本次新增 33 例：拦截语义 / 五动作不落 done / pending 持久拦截 / 真实证据 / 动态 Kill Switch）
+
+pytest -q
+# 期望输出：766 passed, 44 subtests passed
+```
+
+### 相关文档 / 关联证据
+
+- `herdr/supervisor/harness.py` — `run_checkpoint` 拦截语义、`pending_intervention`
+- `herdr/supervisor/evidence.py` — 有界执行证据（loop/git/agent report）
+- `herdr/decision/providers/jev.py` — 请求时动态解析 key、`enabled` 短路
+- `services/herdr-controller.py` #emit_done_if_allowed / #_supervisor_retry / #_supervisor_attention
+- `wiki/semantic-supervisor.md` 红线 #3/#7、`wiki/log.md [2026-09-18] 加固条目`
+- PR #60 commit `d84f789`
+- 关联教训 §66（回合成本治理）——RateGate 即其产物，本条为其在拦截语义下的对偶约束
+
+---
