@@ -6,6 +6,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -16,9 +17,21 @@ WORKFLOWS_FILE = ROOT / "workflows.json"
 LEGACY_WORKFLOW_FILE = ROOT / "workflow.json"
 
 try:
-    from .workflow import load_template, normalize_workflow, find_node
+    from .workflow import (
+        load_template,
+        normalize_workflow,
+        find_node,
+        execution_mode,
+        validate_context_contract,
+    )
 except ImportError:
-    from herdr.workflow import load_template, normalize_workflow, find_node
+    from herdr.workflow import (
+        load_template,
+        normalize_workflow,
+        find_node,
+        execution_mode,
+        validate_context_contract,
+    )
 
 STAGES = [
     ("requirements", "2需求分析", "plan"),
@@ -341,7 +354,43 @@ def generate_workflow_id(project, prefix="wf", now=None):
     return candidate_id
 
 
-def register_workflow(workflow_id, project, requirement="", title=""):
+def _snapshot_workflow_definition(workflow_id, source_file):
+    """Workflow Run Definition Snapshot：把创建时刻的项目级定义固化为 Run 私有不可变文件。
+
+    项目共享 workflow.json 代表"下一次 Workflow 用的当前模板"，会在模板切换时被覆盖；
+    每个 Workflow Run 的执行定义必须创建即冻结。复用 workflow 级根目录
+    （~/.herdr-controller/workflows/<workflow_id>/，与 shared/ 同级互不干扰）。
+    任何失败都回退旧行为（Run 继续读共享文件）并向 stderr 告警，绝不静默、绝不阻断创建。
+    """
+    reason = None
+    if not source_file:
+        return None
+    try:
+        try:
+            from .workflow_docs import docs_root, validate_workflow_id
+        except ImportError:
+            from herdr.workflow_docs import docs_root, validate_workflow_id
+        src = Path(source_file).expanduser()
+        cfg = _load(src, None) if src.exists() else None
+        if cfg is None:
+            reason = f"定义源不可读: {source_file}"
+        else:
+            run_dir = docs_root() / validate_workflow_id(workflow_id)
+            run_dir.mkdir(parents=True, exist_ok=True)
+            snapshot = run_dir / "workflow.json"
+            _save(snapshot, cfg)
+            return str(snapshot)
+    except (ValueError, OSError) as exc:
+        reason = str(exc)
+    print(
+        f"warning: Workflow {workflow_id} 定义快照失败（{reason}），"
+        f"本次 Run 将继续读取项目共享 workflow.json，模板切换后其执行定义可能被覆盖。",
+        file=sys.stderr,
+    )
+    return None
+
+
+def register_workflow(workflow_id, project, requirement="", title="", execution=None, context=None):
     title = (title or "").strip()
     subject = title or requirement_subject(requirement) or "未命名工作流"
     wf_entry = {
@@ -359,6 +408,15 @@ def register_workflow(workflow_id, project, requirement="", title=""):
         "startup_ready": False,
         "status": "running",
     }
+    if execution:
+        wf_entry["execution"] = execution
+        snapshot_file = _snapshot_workflow_definition(
+            workflow_id, project.get("workflow_file")
+        )
+        if snapshot_file:
+            wf_entry["workflow_file"] = snapshot_file
+    if context:
+        wf_entry["context"] = context
     store = _get_store()
     store.save_workflow(wf_entry)
     try:
@@ -516,7 +574,7 @@ def import_legacy_project(root, legacy_workflow=None):
     return record
 
 
-def provision_project(root, template_name="software-development-v1", project_name=None):
+def provision_project(root, template_name="software-development-v1", project_name=None, context_bindings=None):
     root = canonical_root(root)
     project_id = project_id_for(root)
     if not project_name:
@@ -525,6 +583,7 @@ def provision_project(root, template_name="software-development-v1", project_nam
     template_name = template_name or "software-development-v1"
     template = load_template(template_name)
     nodes = template.get("nodes", [])
+    is_context = execution_mode(template) == "context"
 
     created = _run_json([
         "herdr",
@@ -598,6 +657,10 @@ def provision_project(root, template_name="software-development-v1", project_nam
         coordinator_tab_id=coordinator_tab_id,
         coordinator_pane_id=coordinator_pane_id,
         runtime_nodes=runtime_nodes,
+        base_branch="" if is_context else None,
+        execution=template.get("execution") if is_context else None,
+        context_contract=template.get("context") if is_context else None,
+        context_bindings=context_bindings if is_context else None,
     )
 
 
@@ -610,12 +673,16 @@ def _register_project_workflow(
     coordinator_tab_id,
     coordinator_pane_id,
     runtime_nodes,
+    base_branch=None,
+    execution=None,
+    context_contract=None,
+    context_bindings=None,
 ):
     workflow = {
         "project_id": project_id,
         "project_name": project_name,
         "project_root": root,
-        "base_branch": detect_base_branch(root),
+        "base_branch": detect_base_branch(root) if base_branch is None else base_branch,
         "workspace_id": workspace_id,
         "workflow_template": template_name,
         "coordinator": {
@@ -625,6 +692,12 @@ def _register_project_workflow(
         },
         "nodes": runtime_nodes,
     }
+    if execution:
+        workflow["execution"] = execution
+    if context_contract:
+        workflow["context"] = context_contract
+    if context_bindings:
+        workflow["context_bindings"] = context_bindings
     workflow = normalize_workflow(workflow)
 
     project_dir = ROOT / "projects" / project_id
@@ -644,6 +717,10 @@ def _register_project_workflow(
         "coordinator_pane_id": coordinator_pane_id,
         "workflow_file": str(workflow_file),
     }
+    if execution:
+        record["execution"] = execution
+    if context_bindings:
+        record["context_bindings"] = context_bindings
 
     data = load_projects()
     data.setdefault("projects", {})[root] = record
@@ -814,12 +891,15 @@ def _workflow_template_of(record):
     return cfg.get("workflow_template") or ""
 
 
-def reprovision_project_template(record, template_name):
+def reprovision_project_template(record, template_name, context_bindings=None):
     """切换已有项目的模板:保留 Workspace 与协调者 Pane,重编节点 Tab/Anchor。
 
     背景(wf-nexusarchive-0918-01):`ensure_project` 对已注册项目直接返回旧
     record,控制台选择的模板被静默忽略,general-task-v1 实际按
     software-development-v1 运行。切换前必须无活跃工作流,否则拒绝。
+
+    Workspace 身份与模板解耦:context 项目换模板时保留 execution/base_branch=""
+    /契约与本次绑定,绝不重新引入 Git 语义。
     """
     root = canonical_root(record["project_root"])
     project_id = record["project_id"]
@@ -828,7 +908,10 @@ def reprovision_project_template(record, template_name):
 
     if not _workspace_alive(workspace_id):
         return provision_project(
-            root, template_name=template_name, project_name=project_name
+            root,
+            template_name=template_name,
+            project_name=project_name,
+            context_bindings=context_bindings,
         )
 
     active = active_workflows_for_project(project_id)
@@ -891,6 +974,9 @@ def reprovision_project_template(record, template_name):
             continue
         _run(["herdr", "tab", "close", tab_id], check=False)
 
+    # context 模板切换不得引入 Git 语义：detect_base_branch 只属于 git 路径。
+    is_context = execution_mode(template) == "context"
+
     return _register_project_workflow(
         project_id=project_id,
         project_name=project_name,
@@ -900,6 +986,10 @@ def reprovision_project_template(record, template_name):
         coordinator_tab_id=coordinator_tab_id,
         coordinator_pane_id=coordinator_pane_id,
         runtime_nodes=runtime_nodes,
+        base_branch="" if is_context else None,
+        execution=template.get("execution") if is_context else None,
+        context_contract=template.get("context") if is_context else None,
+        context_bindings=context_bindings if is_context else None,
     )
 
 
@@ -943,6 +1033,61 @@ def ensure_project(root, template_name=None):
 
     return provision_project(
         root, template_name=template_name or "software-development-v1"
+    )
+
+
+def ensure_context_project(root, template_name, context_bindings=None):
+    """execution.mode=context 项目：任意真实目录即可注册，不要求 Git Repository。
+
+    契约校验（required 缺失 fail-fast / unknown 拒绝）在此完成；
+    binding 路径统一解析为绝对路径后写入项目与 Workflow 记录。
+    """
+    root = canonical_root(root)
+    if not Path(root).is_dir():
+        raise RuntimeError(f"Context runtime 目录不存在或不是目录: {root}")
+
+    template = load_template(template_name)
+    if execution_mode(template) != "context":
+        raise RuntimeError(
+            f"模板 {template_name} 不是 context 执行模式，无法按 Context 项目注册"
+        )
+
+    bindings = dict(context_bindings or {})
+    validate_context_contract(template, bindings)
+
+    resolved = {}
+    for ctx_id, path in bindings.items():
+        canonical = str(Path(path).expanduser().resolve())
+        # Context 是文件系统引用：目录或普通文件（Markdown/PDF/Excel/JSON…）均合法。
+        if not Path(canonical).exists():
+            raise RuntimeError(f"Context path not found: {ctx_id}={path}")
+        resolved[ctx_id] = canonical
+
+    record = project_by_root(root)
+    if record:
+        if _workspace_alive(record.get("workspace_id", "")):
+            if not _pane_alive(record.get("coordinator_pane_id", "")):
+                raise RuntimeError(
+                    "Registered Context Workspace is alive but coordinator Pane "
+                    f"is missing: workspace={record.get('workspace_id')} "
+                    f"pane={record.get('coordinator_pane_id')}. "
+                    "Refusing automatic reprovision."
+                )
+            # Workspace Identity != Workflow Template：
+            # 同一业务 Workspace 可依次运行不同 context 模板（无活跃工作流时）。
+            current_template = _workflow_template_of(record)
+            if template_name and current_template and current_template != template_name:
+                return reprovision_project_template(
+                    record,
+                    template_name,
+                    context_bindings=resolved,
+                )
+            return record
+
+    return provision_project(
+        root,
+        template_name=template_name,
+        context_bindings=resolved,
     )
 
 

@@ -7,6 +7,7 @@ and normalization between Node-centric workflows and legacy Stage representation
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
@@ -167,6 +168,147 @@ def validate_workflow_dag(nodes: List[Dict[str, Any]]) -> None:
 
 
 def normalize_workflow(workflow: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize workflow dict and apply the Execution & Context contract."""
+    return _normalize_execution_contract(_normalize_workflow_body(workflow))
+
+
+EXECUTION_MODES = {"git", "context"}
+_CONTEXT_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
+
+
+def _normalize_context_entry(entry: Any) -> Dict[str, str]:
+    if isinstance(entry, str):
+        entry = {"id": entry}
+    if not isinstance(entry, dict):
+        raise ValueError(f"invalid context entry: {entry!r}")
+    ctx_id = str(entry.get("id") or "").strip()
+    if not _CONTEXT_ID_RE.match(ctx_id):
+        raise ValueError(f"invalid context id: {entry.get('id')!r}")
+    return {"id": ctx_id, "label": str(entry.get("label") or ctx_id)}
+
+
+def _normalize_execution_contract(result: Dict[str, Any]) -> Dict[str, Any]:
+    execution = result.get("execution") or {}
+    if not isinstance(execution, dict):
+        raise ValueError("execution must be a mapping")
+    mode = str(execution.get("mode") or "git")
+    if mode not in EXECUTION_MODES:
+        raise ValueError(
+            f"unknown execution.mode: {mode!r} (supported: {', '.join(sorted(EXECUTION_MODES))})"
+        )
+    result["execution"] = {"mode": mode}
+
+    context = result.get("context") or {}
+    if not isinstance(context, dict):
+        raise ValueError("context must be a mapping")
+    normalized: Dict[str, List[Dict[str, str]]] = {}
+    seen = set()
+    for key in ("required", "optional"):
+        items = [_normalize_context_entry(e) for e in (context.get(key) or [])]
+        for item in items:
+            if item["id"] in seen:
+                raise ValueError(f"duplicate context id: {item['id']}")
+            seen.add(item["id"])
+        normalized[key] = items
+    if normalized["required"] or normalized["optional"]:
+        result["context"] = normalized
+    else:
+        result.pop("context", None)
+    return result
+
+
+def execution_mode(workflow: Optional[Dict[str, Any]]) -> str:
+    """Return the execution mode of a (normalized or raw) workflow; legacy defaults to git."""
+    execution = (workflow or {}).get("execution") or {}
+    mode = str(execution.get("mode") or "git")
+    return mode if mode in EXECUTION_MODES else "git"
+
+
+def context_contract_ids(workflow: Optional[Dict[str, Any]]) -> tuple:
+    context = (workflow or {}).get("context") or {}
+    def _ids(key: str) -> List[str]:
+        return [
+            e["id"] if isinstance(e, dict) else str(e).strip()
+            for e in (context.get(key) or [])
+        ]
+    return _ids("required"), _ids("optional")
+
+
+def validate_context_contract(
+    workflow: Dict[str, Any],
+    bindings: Dict[str, str],
+) -> None:
+    """Fail fast on missing required / unknown context bindings; optional may be absent."""
+    bindings = bindings or {}
+    required, optional = context_contract_ids(workflow)
+    declared = set(required) | set(optional)
+
+    missing = [cid for cid in required if not str(bindings.get(cid) or "").strip()]
+    if missing:
+        raise ValueError("Missing required context: " + ", ".join(missing))
+
+    unknown = sorted(str(k) for k in bindings if str(k).strip() and k not in declared)
+    if unknown:
+        declared_text = ", ".join(sorted(declared)) if declared else "none"
+        raise ValueError(
+            f"Unknown context binding(s): {', '.join(unknown)}; "
+            f"template declares: {declared_text}"
+        )
+
+
+def parse_context_binding_args(values: Optional[List[str]]) -> Dict[str, str]:
+    """Parse repeated CLI '--context id=path' arguments into a binding dict."""
+    bindings: Dict[str, str] = {}
+    for raw in values or []:
+        text = str(raw)
+        if "=" not in text:
+            raise ValueError(f"invalid --context '{raw}', expected id=path")
+        key, _, path = text.partition("=")
+        key = key.strip()
+        path = path.strip()
+        if not key or not path:
+            raise ValueError(f"invalid --context '{raw}', expected id=path")
+        if not _CONTEXT_ID_RE.match(key):
+            raise ValueError(f"invalid context id in --context '{raw}'")
+        if key in bindings:
+            raise ValueError(f"duplicate --context for id: {key}")
+        bindings[key] = path
+    return bindings
+
+
+def render_context_reference_block(bindings: Optional[Dict[str, str]]) -> str:
+    """Context Reference only: ids + absolute paths. Never expand file contents."""
+    if not bindings:
+        return ""
+    rule = "━" * 20
+    lines = [rule, "Workflow Context", rule]
+    for ctx_id in sorted(bindings):
+        lines.append(f"{ctx_id}:")
+        lines.append(f"  {bindings[ctx_id]}")
+    lines.append("")
+    lines.append("请根据当前任务需要自行读取相关文件。")
+    lines.append("不要假设不存在的事实。")
+    return "\n".join(lines)
+
+
+def validate_integration_for_execution(mode: str, integration_mode_value: Optional[str]) -> None:
+    """execution.mode and integration_mode are orthogonal; context must never take the git path."""
+    if mode == "context" and (integration_mode_value or "none") == "git":
+        raise ValueError(
+            "execution.mode=context 的任务不支持 integration_mode=git；"
+            "context 任务产出只写入 Task Workspace（integration_mode=none）"
+        )
+
+
+def validate_onto_for_execution(mode: str, onto_branch: Optional[str]) -> None:
+    """--onto 是 git 分支续接语义，context 任务没有分支，必须显式拒绝而非静默忽略。"""
+    if mode == "context" and onto_branch:
+        raise ValueError(
+            f"execution.mode=context 的任务没有 git 分支，不支持 --onto {onto_branch}"
+        )
+
+
+def _normalize_workflow_body(workflow: Dict[str, Any]) -> Dict[str, Any]:
     """Normalize workflow dict to ensure both 'nodes' and 'stages' are present and consistent."""
     result = dict(workflow)
 

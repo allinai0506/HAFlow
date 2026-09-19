@@ -19,6 +19,7 @@ try:
     from herdr.projects import (
         detect_git_root,
         ensure_project,
+        ensure_context_project,
         load_projects,
         load_workflows,
         project_by_root,
@@ -30,7 +31,13 @@ try:
         active_workflows_for_project,
         workflow_creation_lock,
     )
-    from herdr.workflow import list_templates, load_template, get_ready_nodes
+    from herdr.workflow import (
+        list_templates,
+        load_template,
+        get_ready_nodes,
+        execution_mode,
+        parse_context_binding_args,
+    )
     from herdr import kernel
 except ImportError:
     from herdr_pane_pool import list_slots_for_project, bind_pane, unbind_pane
@@ -39,6 +46,7 @@ except ImportError:
     from herdr_projects import (
         detect_git_root,
         ensure_project,
+        ensure_context_project,
         load_projects,
         load_workflows,
         project_by_root,
@@ -50,7 +58,13 @@ except ImportError:
         active_workflows_for_project,
         workflow_creation_lock,
     )
-    from herdr_workflow import list_templates, load_template, get_ready_nodes
+    from herdr_workflow import (
+        list_templates,
+        load_template,
+        get_ready_nodes,
+        execution_mode,
+        parse_context_binding_args,
+    )
 
 HOME = Path.home()
 ROOT = HOME / ".herdr-controller"
@@ -127,12 +141,26 @@ def resolve_project(explicit_path=None, create=True, template_name=None):
     return project_by_root(root)
 
 
+def resolve_project_for_template(explicit_path=None, template_name=None, context_bindings=None):
+    """execution.mode 在项目/Runtime 初始化之前参与决策：git → Git 项目；context → Context 项目。"""
+    mode = "git"
+    if template_name:
+        mode = execution_mode(load_template(template_name))
+    if mode == "context":
+        return ensure_context_project(
+            explicit_path or os.getcwd(),
+            template_name,
+            context_bindings or {},
+        )
+    return resolve_project(explicit_path, create=True, template_name=template_name)
+
+
 def project_command(path=None, workspace=None, template=None):
     if workspace:
         from herdr.projects import adopt_workspace_as_project
         project = adopt_workspace_as_project(workspace, root=path, template_name=template)
     else:
-        project = resolve_project(path, create=True, template_name=template)
+        project = resolve_project_for_template(path, template_name=template)
     print(json.dumps(project, ensure_ascii=False, indent=2))
     return 0
 
@@ -357,8 +385,25 @@ def start_workflow(
     template=None,
     force=False,
     title=None,
+    context_args=None,
 ):
-    project = resolve_project(project_path, create=True, template_name=template)
+    context_bindings = parse_context_binding_args(context_args)
+    mode = execution_mode(load_template(template)) if template else "git"
+    if context_bindings and mode != "context":
+        raise RuntimeError(
+            "--context 仅可用于 execution.mode=context 的模板（需显式 --template <context 模板>）"
+        )
+    if mode == "context":
+        context_bindings = {
+            k: str(Path(v).expanduser().resolve())
+            for k, v in context_bindings.items()
+        }
+
+    project = resolve_project_for_template(
+        project_path,
+        template_name=template,
+        context_bindings=context_bindings,
+    )
 
     if not workflow_id:
         prefix = "e2e" if e2e else "wf"
@@ -367,7 +412,15 @@ def start_workflow(
     # 检查与注册必须持同一把进程锁，否则两个并发创建都能通过活跃检查。
     with workflow_creation_lock(project["project_id"]):
         _reject_if_active_workflow(project, force=force or e2e)
-        register_workflow(workflow_id, project, requirement=requirement, title=title or "")
+        register_workflow(
+            workflow_id,
+            project,
+            requirement=requirement,
+            title=title or "",
+            execution=({"mode": "context"} | (project.get("execution") or {}))
+            if mode == "context" else None,
+            context=context_bindings if mode == "context" else None,
+        )
 
     ensure_pool_for_project(project["project_id"])
     healthy_agents, unhealthy_agents = run_workflow_preflight(
@@ -404,6 +457,15 @@ def start_workflow(
             "验收以 Agent 生命周期到 done/agent_done 且 "
             "verify-baseline=BASELINE_MATCH 为准；"
             "不得因为 OpenCode alternate-screen 读取为空白而返工。"
+        )
+
+    if mode == "context":
+        extra += (
+            "execution.mode=context：本 Workflow 不依赖 Git 项目；"
+            "Task 在独立 Task Workspace 中运行，Workflow Context 已绑定，"
+            "Agent 按任务需要自行读取 Context 文件。"
+            "不得要求 CoW Clone / Branch / git commit / integrate；"
+            "验收以 Task Workspace 产物与 verify-baseline 为准。"
         )
 
     prompt = f"""请按照 Herdr 工作流规范启动 Workflow。
@@ -447,6 +509,10 @@ workflow_config: {project['workflow_file']}
     coordinator = project["coordinator_pane_id"]
     print(f"COORDINATOR_PANE={coordinator}")
     print(f"WORKFLOW_ID={workflow_id}")
+    if mode == "context":
+        print("EXECUTION_MODE=context")
+        for ctx_id in sorted(context_bindings):
+            print(f"CONTEXT[{ctx_id}]={context_bindings[ctx_id]}")
     return workflow_id
 
 
@@ -752,6 +818,13 @@ def main():
     run_cmd.add_argument("--title", default=None, help="需求简要标题（可选；留空时自动根据需求生成）")
     run_cmd.add_argument("--agent", default="auto", choices=["auto", "opencode", "codex", "claude", "qodercli", "agy", "pi", "grok", "kimi"])
     run_cmd.add_argument("--template", default=None, help="工作流模板（缺省:新项目用默认模板,已有项目沿用当前模板）")
+    run_cmd.add_argument(
+        "--context",
+        action="append",
+        default=[],
+        metavar="ID=PATH",
+        help="绑定 Context 契约声明的业务上下文（可重复；仅 execution.mode=context 模板可用）",
+    )
     run_cmd.add_argument("--force", action="store_true")
 
     status_cmd = sub.add_parser("status")
@@ -821,16 +894,21 @@ def main():
         sys.exit(agents_command(args.project))
 
     if args.command == "run":
-        workflow_id = start_workflow(
-            " ".join(args.requirement),
-            args.workflow_id,
-            e2e=False,
-            project_path=args.project,
-            agent_override=args.agent,
-            template=args.template,
-            force=args.force,
-            title=args.title,
-        )
+        try:
+            workflow_id = start_workflow(
+                " ".join(args.requirement),
+                args.workflow_id,
+                e2e=False,
+                project_path=args.project,
+                agent_override=args.agent,
+                template=args.template,
+                force=args.force,
+                title=args.title,
+                context_args=args.context,
+            )
+        except (ValueError, RuntimeError) as e:
+            print(str(e), file=sys.stderr)
+            sys.exit(2)
         sys.exit(0 if workflow_id else 1)
 
     if args.command == "status":

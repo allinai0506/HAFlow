@@ -83,6 +83,22 @@ Evidence:
 - `tests/test_workflow_engine.py#test_normalize_legacy_stages_to_nodes`
 - `tests/test_workflow_engine.py#test_normalize_nodes_to_legacy_stages`
 
+### 3.3 Execution & Context Contract (V1)
+
+`FACT` `normalize_workflow` 在双向归一化之后叠加执行契约归一化
+(`_normalize_execution_contract`)，模板因此除"怎么做"外还能声明
+"跑在什么环境"与"需要什么业务上下文"：
+- `execution.mode` 仅 `git` / `context` 两值；**缺省 `git`，旧模板行为字节级不变**。未知 mode 归一化时 ValueError。
+- `context: {required, optional}` 声明上下文条目（`- id` 简写或 `{id, label}`），id 须匹配 `^[a-z][a-z0-9_-]{0,63}$`，跨 required/optional 去重；空声明不落地 `context` 键（保持幂等）。
+- context 模式在**项目/Runtime 初始化之前**参与决策：`herdr-factory` 的 `resolve_project_for_template` 先 `load_template` + `execution_mode` 判模式，context 走 `ensure_context_project`（任意真实目录即可注册，不要求 Git 仓库），git 走原 `resolve_project` 路径。
+- 运行期绑定经 `--context id=path`（可重复）传入，`validate_context_contract` fail-fast（required 缺失 → `Missing required context: …`；unknown 拒绝），路径解析为绝对后随 Workflow 实例持久化（StateStore `metadata_json` 自由键，无新增表）。
+- context 与 git 的隔离是强制的：`validate_integration_for_execution` 拒绝 context+`integration_mode=git`；`herdr-task` 的 commit/integrate 对 context 任务直接 exit 2。
+
+Evidence:
+- `herdr/workflow.py#_normalize_execution_contract`
+- `herdr/projects.py#ensure_context_project`
+- `tests/test_execution_context_contract.py`
+
 ---
 
 ## 4. 就绪节点计算与推进 (`get_ready_nodes`)

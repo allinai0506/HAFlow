@@ -56,6 +56,30 @@ def is_task_active_in_registry(task_id: str) -> bool:
     return False
 
 
+def create_context_task_workspace(task_id):
+    """execution.mode=context:任务独立可执行工作目录(纯目录,无 Git clone/branch)。
+
+    与 CoW clone 同根同级(clones/<task_id>),使 cleanup/retention 生命周期复用。
+    """
+    workspace = CLONE_ROOT / task_id
+
+    if workspace.exists():
+        if not is_task_active_in_registry(task_id):
+            print(
+                f"[WORKSPACE HEAL] Removing stale unmanaged context workspace: {workspace}",
+                file=sys.stderr
+            )
+            shutil.rmtree(workspace, ignore_errors=True)
+        else:
+            raise RuntimeError(
+                f"Task workspace already exists: {workspace}"
+            )
+
+    CLONE_ROOT.mkdir(parents=True, exist_ok=True)
+    workspace.mkdir(parents=True)
+    return workspace
+
+
 def sanitize_clone_sandbox(clone):
     """Purge uncommitted working tree edits and untracked files copied into the clone sandbox.
 
@@ -408,17 +432,26 @@ def list_untracked(repo):
     ]
 
 
-def write_task_context(clone, agent, branch, shared_docs=None):
-    baseline = measure_complexity_baseline(clone)
+def write_task_context(clone, agent, branch, shared_docs=None, mode="git", context=None):
+    complexity_baseline = (
+        "disabled"
+        if mode == "context"
+        else measure_complexity_baseline(clone)
+    )
 
     ctx = Path(clone) / ".agent-task-context"
 
-    lines = [
+    lines = []
+    if mode == "context":
+        lines.append("mode=context")
+    lines.extend([
         f"agent={agent}",
-        f"branch={branch}",
+        f"branch={branch or '-'}",
         f"worktree={clone}",
-        f"complexity_baseline={baseline}",
-    ]
+        f"complexity_baseline={complexity_baseline}",
+    ])
+    for ctx_id in sorted(context or {}):
+        lines.append(f"context.{ctx_id}={context[ctx_id]}")
     if shared_docs:
         lines.append(f"shared_docs={shared_docs}")
 
@@ -427,7 +460,7 @@ def write_task_context(clone, agent, branch, shared_docs=None):
         encoding="utf-8"
     )
 
-    return ctx, baseline
+    return ctx, complexity_baseline
 
 
 def create_pane(parent_pane, clone):
@@ -647,7 +680,21 @@ def main():
 
     parser.add_argument(
         "--base-branch",
-        required=True
+        required=False,
+        default=None
+    )
+
+    parser.add_argument(
+        "--execution-mode",
+        choices=["git", "context"],
+        default="git",
+        help="git: CoW clone + branch (default); context: plain task workspace, no Git."
+    )
+
+    parser.add_argument(
+        "--context-json",
+        default=None,
+        help="JSON object of context bindings {id: absolute_path} (context mode)."
     )
 
     parser.add_argument(
@@ -664,53 +711,78 @@ def main():
 
     args = parser.parse_args()
 
+    context_bindings = {}
+    if args.execution_mode == "context":
+        if args.onto:
+            # 无分支语义下静默丢弃 onto 会让调用方误以为续接成功。
+            raise RuntimeError(
+                f"--onto is not supported in context execution mode: {args.onto}"
+            )
+        context_bindings = json.loads(args.context_json or "{}")
+    elif not args.base_branch:
+        raise RuntimeError("--base-branch is required in git execution mode")
+
     clone = None
     try:
-        clone = create_clone(
-            args.source,
-            args.task_id
-        )
-
-        print(f"[CLONE] {clone}")
-
-        if args.onto:
-            # 必须先于 build_baseline_fingerprint:
-            # PR 分支的既有提交不能被记入本任务的基线变更。
-            branch = checkout_onto_branch(clone, args.onto)
+        if args.execution_mode == "context":
+            clone = create_context_task_workspace(
+                args.task_id
+            )
+            print(f"[WORKSPACE] {clone}")
+            branch = None
+            baseline_fingerprint = {
+                "tracked": {},
+                "untracked": {}
+            }
+            baseline_untracked = []
         else:
-            branch = create_task_branch(
-                clone,
-                args.task_id,
-                args.agent,
-                args.task_type,
-                args.base_branch
+            clone = create_clone(
+                args.source,
+                args.task_id
             )
 
-        print(f"[BRANCH] {branch}")
+            print(f"[CLONE] {clone}")
 
-        # 在写入 .agent-task-context 之前记录完整工作区基线。
-        # 包括：
-        # - Clone 创建时已经存在的 tracked 修改
-        # - Clone 创建时已经存在的 untracked 文件
-        baseline_fingerprint = build_baseline_fingerprint(
-            clone
-        )
+            if args.onto:
+                # 必须先于 build_baseline_fingerprint:
+                # PR 分支的既有提交不能被记入本任务的基线变更。
+                branch = checkout_onto_branch(clone, args.onto)
+            else:
+                branch = create_task_branch(
+                    clone,
+                    args.task_id,
+                    args.agent,
+                    args.task_type,
+                    args.base_branch
+                )
 
-        baseline_untracked = sorted(
-            baseline_fingerprint["untracked"].keys()
-        )
+            print(f"[BRANCH] {branch}")
 
-        print(
-            f"[BASELINE] "
-            f"tracked={len(baseline_fingerprint['tracked'])} "
-            f"untracked={len(baseline_fingerprint['untracked'])}"
-        )
+            # 在写入 .agent-task-context 之前记录完整工作区基线。
+            # 包括：
+            # - Clone 创建时已经存在的 tracked 修改
+            # - Clone 创建时已经存在的 untracked 文件
+            baseline_fingerprint = build_baseline_fingerprint(
+                clone
+            )
+
+            baseline_untracked = sorted(
+                baseline_fingerprint["untracked"].keys()
+            )
+
+            print(
+                f"[BASELINE] "
+                f"tracked={len(baseline_fingerprint['tracked'])} "
+                f"untracked={len(baseline_fingerprint['untracked'])}"
+            )
 
         ctx, complexity_baseline = write_task_context(
             clone,
             args.agent,
             branch,
-            shared_docs=args.shared_docs
+            shared_docs=args.shared_docs,
+            mode=args.execution_mode,
+            context=context_bindings
         )
 
         print(f"[CONTEXT] {ctx}")

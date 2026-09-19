@@ -24,7 +24,14 @@ try:
         detect_git_root,
         project_by_root,
     )
-    from herdr.workflow import find_node, normalize_workflow
+    from herdr.workflow import (
+        find_node,
+        normalize_workflow,
+        execution_mode,
+        render_context_reference_block,
+        validate_integration_for_execution,
+        validate_onto_for_execution,
+    )
     from herdr.topology import ensure_stage_topology
     from herdr.agent_binary import resolve_binary
     from herdr.state_store import (
@@ -43,7 +50,14 @@ except ImportError:
         detect_git_root,
         project_by_root,
     )
-    from herdr_workflow import find_node, normalize_workflow
+    from herdr_workflow import (
+        find_node,
+        normalize_workflow,
+        execution_mode,
+        render_context_reference_block,
+        validate_integration_for_execution,
+        validate_onto_for_execution,
+    )
     from herdr_topology import ensure_stage_topology
     from herdr_agent_binary import resolve_binary
     from herdr_state_store import (
@@ -1340,6 +1354,20 @@ def launch_task(args):
         args.workflow_id
     ) or {}
 
+    exec_fields = execution_fields_from_workflow(project)
+    try:
+        validate_integration_for_execution(
+            exec_fields["execution_mode"],
+            args.integration_mode,
+        )
+        validate_onto_for_execution(
+            exec_fields["execution_mode"],
+            getattr(args, "onto", None),
+        )
+    except ValueError as exc:
+        print(str(exc))
+        sys.exit(2)
+
     source_repo = os.path.realpath(
         os.path.expanduser(
             project.get("project_root")
@@ -1436,8 +1464,15 @@ def launch_task(args):
         "--source", args.source,
         "--agent", resolved_agent,
         "--task-type", args.task_type,
-        "--base-branch", base_branch,
     ]
+    if exec_fields["execution_mode"] == "context":
+        worker_cmd += [
+            "--execution-mode", "context",
+            "--context-json",
+            json.dumps(exec_fields.get("context") or {}),
+        ]
+    else:
+        worker_cmd += ["--base-branch", base_branch]
 
     try:
         from herdr import workflow_docs as wd
@@ -1573,6 +1608,10 @@ def launch_task(args):
         "goal": args.goal,
         "acceptance_criteria": args.acceptance,
     }
+    if exec_fields["execution_mode"] == "context":
+        # Git 模式任务记录保持字节级不变；context 附加字段仅在 context 模式出现。
+        task["execution_mode"] = "context"
+        task["context"] = exec_fields.get("context") or {}
     if runtime is not None:
         task["runtime"] = runtime
     _init_status_history(
@@ -1645,8 +1684,15 @@ def dispatch_task(task_id, prompt):
             + "5. 不要输出 HERDR_TASK_DONE，静默等待。\n"
         )
 
+    context_suffix = ""
+    if task.get("execution_mode") == "context":
+        block = render_context_reference_block(task.get("context") or {})
+        if block:
+            context_suffix = "\n\n" + block + "\n"
+
     prompt = (
         prompt
+        + context_suffix
         + loop_suffix
         + "\nHERDR orchestration protocol:\n"
         + "HERDR_ORCH_TASK:" + task_id + "\n"
@@ -1882,6 +1928,37 @@ def current_workspace_fingerprint(repo):
     }
 
 
+def execution_fields_from_workflow(workflow_record):
+    """Workflow 记录 → Task 继承的执行契约字段（纯函数）。
+
+    legacy/git 工作流只返回 execution_mode=git；context 工作流附带 binding。
+    """
+    record = workflow_record or {}
+    fields = {"execution_mode": execution_mode(record)}
+    if fields["execution_mode"] == "context":
+        fields["context"] = dict(record.get("context") or {})
+    return fields
+
+
+def context_workspace_fingerprint(repo):
+    """非 Git Task Workspace 的文件指纹：全部按 untracked 计，忽略内部装配文件。"""
+    repo_path = Path(repo)
+    untracked = {}
+
+    for path in sorted(repo_path.rglob("*")):
+        if path.is_dir():
+            continue
+        rel = path.relative_to(repo_path).as_posix()
+        top = rel.split("/", 1)[0]
+        if top in (".agent-task-context", ".herdr-loop", ".git"):
+            continue
+        if _is_internal_untracked(rel):
+            continue
+        untracked[rel] = fingerprint_file(repo, rel)
+
+    return {"tracked": {}, "untracked": untracked}
+
+
 def verify_baseline(task_id):
     data = load_tasks()
     task = find_task(data, task_id)
@@ -1905,7 +1982,11 @@ def verify_baseline(task_id):
         )
         sys.exit(3)
 
-    current = current_workspace_fingerprint(clone)
+    current = (
+        context_workspace_fingerprint(clone)
+        if task.get("execution_mode") == "context"
+        else current_workspace_fingerprint(clone)
+    )
 
     changes = []
 
@@ -2019,6 +2100,13 @@ def commit_task(task_id, message=None):
     if not task:
         print(f"Task not found: {task_id}")
         sys.exit(1)
+
+    if task.get("execution_mode") == "context":
+        print(
+            f"Context-mode task has no git commit path; "
+            f"deliverables live in task workspace: {task_id}"
+        )
+        sys.exit(2)
 
     if task["status"] != "completed":
         print(
@@ -2170,6 +2258,13 @@ def integrate_task(task_id):
     if not task:
         print(f"Task not found: {task_id}")
         sys.exit(1)
+
+    if task.get("execution_mode") == "context":
+        print(
+            f"Context-mode task has no git integrate path; "
+            f"deliverables live in task workspace: {task_id}"
+        )
+        sys.exit(2)
 
     if task["status"] != "committed":
         print(

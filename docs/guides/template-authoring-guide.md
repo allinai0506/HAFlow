@@ -71,6 +71,60 @@ nodes:
       - docs/review/CONTRACT_AUDIT_REPORT.md
 ```
 
+### 2.1 Context 执行模式骨架（非 Git 业务模板）
+
+模板若不需要 Git 仓库/分支/提交（如报价、方案分析），用 `execution.mode: context`
+声明运行环境，并用 `context` 声明所需业务上下文（字段契约见
+[workflow-template-schema.md §1.1/§1.2](../product-specs/workflow-template-schema.md)）：
+
+```yaml
+name: context-smoke-test        # 已内置，可直接试跑
+label: Context 执行链路冒烟
+version: "1.0"
+description: 验证 execution.mode=context 的启动、绑定与派发链路
+
+execution:
+  mode: context                 # 缺省为 git；context 不要求 Git 仓库
+
+context:
+  required:                     # 启动前必须绑定，缺失拒绝启动
+    - id: common
+      label: 公司通用资料
+    - id: workspace
+      label: 业务上下文目录
+  optional:
+    - customer
+
+nodes:
+  - id: analyze
+    label: 上下文分析
+    node_type: agent
+    purpose: 读取绑定的上下文目录，产出分析结果
+    default_task_type: docs
+    default_integration_mode: none
+    required_outputs:
+      - 分析结果
+```
+
+运行方式（绑定路径属于运行期，绝不写进模板）：
+
+```bash
+cd <任意业务目录>          # context 模式不要求 Git 仓库
+herdr-factory run "分析客户需求" --template context-smoke-test \
+  --context common=/abs/company --context workspace=/abs/workdir
+```
+
+Context 引用是文件系统引用：目录或普通文件（Markdown/PDF/Word/Excel/JSON…）
+都合法，例如 `--context contract=/contracts/福寿康.pdf`；不存在则拒绝启动。
+
+同一业务 Workspace 可依次运行不同 context 模板（Workspace Identity !=
+Workflow Template）：上一个 Workflow close 后再 run 新模板，Workspace 与
+Coordinator 保留、Node Tabs 按新模板重建，context 契约与绑定完整延续。
+
+context 模式下每个 Task 拥有独立 Task Workspace（Agent 只在其中写产物，
+不会写入客户原始目录；context 路径是只读引用），无 CoW Clone/Branch/git
+commit/integrate 路径；验收以 Task Workspace 产物与 verify-baseline 文件指纹为准。
+
 ---
 
 ## 3. 编写技巧与最佳实践

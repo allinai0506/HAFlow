@@ -12,7 +12,30 @@
 | `label` | `string` | 否 | 与 `name` 相同 | 人类可读名称，展示在 UI、通知与命令行界面中。 |
 | `version` | `string` | 否 | `"1.0"` | 模板版本，用于后续模式升级与迁移。 |
 | `description` | `string` | 否 | `""` | 模板的业务场景与流程概述。 |
+| `execution` | `ExecutionSpec` | 否 | `{"mode": "git"}` | 运行环境契约（见 1.1）。缺省即 legacy Git 执行路径，行为与旧模板完全一致。 |
+| `context` | `ContextContract` | 否 | 无 | 业务上下文契约（见 1.2），声明任务需要的业务输入（只读引用）。 |
 | `nodes` | `List[Node]` | **是** | - | 工作流包含的节点数组（定义 DAG 的拓扑图）。 |
+
+### 1.1 ExecutionSpec (执行模式)
+
+| 字段 | 类型 | 是否必填 | 默认值 | 描述 |
+| :--- | :--- | :--- | :--- | :--- |
+| `mode` | `string` | 否 | `"git"` | 仅两个取值：`git`（Git Repo → Project → Workspace → CoW Clone → Branch → 验证/提交/集成）与 `context`（任意真实目录注册 Context 项目，Task 使用独立 Task Workspace，**不创建** CoW Clone/Branch，无 git commit/integrate 路径）。未知取值在模板归一化时直接报错。 |
+
+`execution.mode` 与 `integration_mode` 正交：context 模式任务强制 `integration_mode=none`（`herdr-task` 对 context+git 组合 fail-fast）。context 模式的验收以 Task Workspace 产物与 verify-baseline（文件指纹）为准。
+
+### 1.2 ContextContract (业务上下文契约)
+
+| 字段 | 类型 | 是否必填 | 默认值 | 描述 |
+| :--- | :--- | :--- | :--- | :--- |
+| `required` | `List[ContextEntry]` | 否 | `[]` | 启动 Workflow 前必须绑定的上下文条目，缺失时拒绝启动。 |
+| `optional` | `List[ContextEntry]` | 否 | `[]` | 允许缺失的上下文条目。 |
+
+`ContextEntry` 支持简写字符串（`- company`）或对象 `{id, label}`；`id` 须匹配 `^[a-z][a-z0-9_-]{0,63}$`，required/optional 间不允许重复 id。绑定值绝不写入模板——绑定属于运行期，经 CLI `herdr-factory run --context id=/绝对路径`（可重复）传入，路径解析为绝对路径并做存在性检查（目录或普通文件——Markdown/PDF/Word/Excel/JSON 等真实文件均合法；不存在则 fail-fast），随 Workflow 实例持久化（StateStore 元数据，无新增表）。派发 Task 时 Agent 仅获得短小的 "Workflow Context" 引用块（id + 绝对路径），不展开文件内容、不做 RAG。
+
+**Workspace Identity != Workflow Template**：一个 Context 业务 Workspace（如 `customers/福寿康`）可依次运行多个 context 模板（sales-research → sales-quotation → contract-review）。换模板时 Workspace 与 Coordinator 保留，Node Tab/Anchor 按新模板重建，旧 Node Tab 关闭；复用既有 `reprovision_project_template()` 机制，存在活跃工作流时拒绝切换。`execution.mode=context`、`base_branch=""`、契约与本次绑定在切换后完整保留，全程无 Git 语义。
+
+**Workflow Run Definition Snapshot**：项目共享 `workflow.json` 只代表"下一次 Run 的当前模板"，切换时会被覆盖；context Run 在注册时把创建时刻的完整执行定义固化到 `~/.herdr-controller/workflows/<workflow_id>/workflow.json`（Run 私有、与 `shared/` 同级共存），registry 的 `workflow_file` 指向该快照，历史 Run 的 DAG 定义永不读出新模板的配置。运行期现场修复（tab/anchor 映射）写入 Run 本地快照而非共享文件。快照失败时告警并回退共享文件行为；git Run 不触发快照，行为不变。
 
 ---
 

@@ -112,6 +112,26 @@ Evidence:
 - `services/herdr-worker.py#create_task_branch`
 - `RULES.md:空间隔离红线`
 
+### 2.1 Context 模式的 Task Workspace（无 Git 执行路径）
+
+`FACT` 当模板声明 `execution.mode: context` 时，Task 不走 CoW Clone/Branch：
+- **物理路径**: 仍为 `~/.herdr-controller/clones/<task-id>`（与 CoW clone 同根同级，
+  使 `delete_clone_safely`/retention/finalize 生命周期零改动复用）。
+- **装配**: `create_context_task_workspace` 只创建纯目录；`branch=None`、
+  基线指纹为空集合（context 任务的一切文件生来都是"本任务产出"）。
+- **只读引用**: Context 绑定路径以短小 "Workflow Context" 块注入派发 prompt
+  （id + 绝对路径），Agent 按任务需要自行读取，系统不展开文件内容/不做 RAG；
+  Agent 严禁写入 context 原始目录（客户工作区），产物只落 Task Workspace。
+- **验收**: `verify-baseline` 在 context 模式改用 `context_workspace_fingerprint`
+  （全文件按 untracked 计的递归 SHA256 指纹，过滤 `.agent-task-context`/
+  `.herdr-loop`/`.git` 等内部装配文件），TASK_CHANGED/BASELINE_MATCH 协议不变。
+- **防呆**: commit/integrate 对 context 任务 fail-fast exit 2。
+
+Evidence:
+- `services/herdr-worker.py#create_context_task_workspace`
+- `bin/herdr-task#context_workspace_fingerprint`
+- `tests/test_execution_context_contract.py`
+
 ---
 
 ## 3. 基线指纹快照 (Baseline Fingerprint) 核心机制
