@@ -147,6 +147,11 @@ def latest_tests_completed_evidence_id(events: List[dict]) -> Optional[str]:
 
     Provides persistent deduplication across Controller restarts by reading
     the task's event ledger for previous tests_completed checkpoints.
+
+    Fix 3: Only events with ``status != "failed"`` are treated as consumed.
+    A Jev timeout/unavailable result records status="failed" and must NOT
+    lock out future evaluation of the same evidence.  The caller should pass
+    only supervisor_evaluation events (see Fix 4 at call site).
     """
     best_ev_id = None
     best_ts = -1.0
@@ -157,6 +162,11 @@ def latest_tests_completed_evidence_id(events: List[dict]) -> Optional[str]:
         if not isinstance(payload, dict):
             continue
         if payload.get("trigger") != "tests_completed":
+            continue
+        # Fix 3: skip failed/invalid evaluations — they do NOT consume evidence_id.
+        # A provider timeout or unavailability sets status="failed"; the same
+        # evidence_id must remain eligible for re-evaluation on the next poll.
+        if payload.get("status") == "failed":
             continue
         meta = payload.get("metadata") or {}
         ev_id = meta.get("evidence_id") or payload.get("evidence_id")

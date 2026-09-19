@@ -3495,16 +3495,19 @@ def check_task_tests_completed(task, store=None, now=None):
     """
     if supervisor_harness is None or not task:
         return None
-    # 1. Kill switches: supervisor and provider must be enabled
+
+    # 1. Kill switches — checked FIRST, before any file I/O (Fix 5).
+    #    supervisor_enabled() verifies: enabled flag + provider flag + API key.
     cfg = supervisor_harness.load_config()
-    if not cfg.get("enabled", False) or not supervisor_harness.provider_enabled(cfg):
+    from herdr.supervisor.config import supervisor_enabled
+    if not supervisor_enabled(cfg):
         return None
 
     clone_path = task.get("clone_path")
     if not clone_path or not os.path.isdir(clone_path):
         return None
 
-    # 2. Extract test evidence
+    # 2. Extract test evidence (gated by EVAL_DONE.json atomic sentinel)
     from herdr.supervisor import evidence as supervisor_evidence
     test_evidence = supervisor_evidence.extract_test_evidence(clone_path)
     if not test_evidence:
@@ -3513,11 +3516,19 @@ def check_task_tests_completed(task, store=None, now=None):
     # 3. Build deterministic evidence fingerprint
     evidence_id = supervisor_evidence.build_test_evidence_id(test_evidence)
 
-    # 4. Dedup against persisted evaluation events (restart-safe)
+    # 4. Dedup against persisted evaluation events (restart-safe).
+    #    Fix 4: query specifically for supervisor_evaluation events from the
+    #    semantic_supervisor source, so the dedup window is never squeezed out
+    #    by unrelated events flooding the ledger.
     st = store if store is not None else _get_store()
     task_id = task.get("task_id")
     try:
-        events = st.list_events(task_id=task_id, limit=50, desc=True) or []
+        events = st.list_events(
+            task_id=task_id,
+            event_type="supervisor_evaluation",
+            source="semantic_supervisor",
+            desc=True,
+        ) or []
     except Exception:
         events = []
 
@@ -4246,8 +4257,10 @@ def registry_watcher():
                                 task_id
                             )
 
-                # ---- tests_completed 连续评估检查 (仅对活跃中的任务) ----
-                if status in ("working", "rework", "dispatched"):
+                # ---- tests_completed 连续评估检查 (仅对活跃工作中的任务) ----
+                # dispatched 排除：Agent 尚未开始工作，不会有真实测试结果；
+                # rework 保留：Agent 仍在 inner loop 迭代，和 working 等价对待。
+                if status in ("working", "rework"):
                     try:
                         check_task_tests_completed(task, store=_get_store(), now=now)
                     except Exception as exc:

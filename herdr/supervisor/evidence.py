@@ -151,7 +151,9 @@ def extract_test_evidence(clone_path: Optional[str]) -> Optional[Dict[str, Any]]
 
     Returns None if:
     - clone_path is invalid or .herdr-loop/METRICS.json is missing/unparseable;
-    - Loop is un-run placeholder (iteration=0, total_tests=0, score=0.0).
+    - Loop is un-run placeholder (iteration=0, total_tests=0, score=0.0);
+    - EVAL_DONE.json sentinel is missing or iteration mismatches STATE.md,
+      meaning a torn snapshot (new METRICS.json but old STATE.md or vice-versa).
     """
     if not clone_path:
         return None
@@ -159,6 +161,17 @@ def extract_test_evidence(clone_path: Optional[str]) -> Optional[Dict[str, Any]]
     metrics_path = loop_dir / "METRICS.json"
     if not metrics_path.is_file():
         return None
+
+    # ── Fix 1: atomic sentinel guard ──────────────────────────────────────────
+    # bin/herdr-loop writes EVAL_DONE.json LAST, after STATE.md.  We only
+    # produce evidence when the sentinel is present AND its iteration matches
+    # what STATE.md reports, ensuring METRICS.json and STATE.md are coherent.
+    sentinel_path = loop_dir / "EVAL_DONE.json"
+    try:
+        sentinel = json.loads(sentinel_path.read_text(encoding="utf-8"))
+        sentinel_iteration = int(sentinel.get("iteration") or 0)
+    except Exception:
+        return None  # sentinel absent or unparseable → snapshot not yet complete
 
     try:
         metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
@@ -175,6 +188,12 @@ def extract_test_evidence(clone_path: Optional[str]) -> Optional[Dict[str, Any]]
         state = {}
 
     iteration = _int_or_none(state.get("iteration")) or 0
+
+    # If sentinel iteration doesn't match STATE.md iteration the writes are
+    # still in flight (or out of order) — defer until they converge.
+    if sentinel_iteration != iteration:
+        return None
+
     total_tests = _int_or_none(metrics.get("total_tests")) or 0
     passed_tests = _int_or_none(metrics.get("passed_tests")) or 0
     lint_errors = _int_or_none(metrics.get("lint_errors")) or 0

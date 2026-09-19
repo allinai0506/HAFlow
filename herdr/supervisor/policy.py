@@ -176,10 +176,13 @@ def decide(
             max_iter = int(tests_dict.get("max_iterations") or 5)
             exhausted_iterations = bool(iteration >= max_iter and tests_dict.get("converged") is False)
 
-            if is_improving or (runtime_status == "running" and task_status == "working" and not exhausted_iterations):
+            if is_improving or (runtime_status == "running"
+                                 and task_status in ("working", "rework")
+                                 and not exhausted_iterations):
                 return PolicyDecision(action=CONTINUE, reasons=[
                     f"tests_completed: worker_stuck {needs('worker_stuck'):.2f} high but agent is actively "
-                    f"iterating on tests (improving={is_improving}, iteration={iteration}); inner loop continues",
+                    f"iterating on tests (improving={is_improving}, iteration={iteration}, "
+                    f"task_status={task_status}); inner loop continues",
                 ], signals_used=signals, facts_used=base_facts)
 
             if runtime_status == "running" and attempt_count < max_attempts:

@@ -122,6 +122,16 @@ def run_evaluation(target_dir: Path) -> tuple[MetricVector, bool]:
     if not converged and iteration >= max_iter:
         generate_blocker_report(loop_dir, metrics, iteration, max_iter)
 
+    # Atomic completion sentinel — written LAST so Controller only fires
+    # tests_completed when ALL files (METRICS.json + STATE.md) are coherent.
+    # Any reader that checks EVAL_DONE.json first is guaranteed a consistent
+    # snapshot: if sentinel matches iteration, the rest of .herdr-loop is valid.
+    import time as _time
+    _write_atomic(
+        loop_dir / "EVAL_DONE.json",
+        json.dumps({"iteration": iteration, "ts": _time.time()}, ensure_ascii=False),
+    )
+
     return metrics, converged, new_status
 
 def main():
