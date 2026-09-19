@@ -147,74 +147,63 @@ def build_test_evidence_id(test_evidence: Dict[str, Any]) -> str:
 
 
 def extract_test_evidence(clone_path: Optional[str]) -> Optional[Dict[str, Any]]:
-    """Extract bounded test evidence from .herdr-loop/METRICS.json & STATE.md.
+    """Extract bounded test evidence exclusively from .herdr-loop/EVAL_DONE.json.
+
+    EVAL_DONE.json is the atomic evaluation snapshot written by bin/herdr-loop
+    as its very last action in run_evaluation().  Because it is replaced
+    atomically (rename over the old file), a reader always sees either the
+    *complete* previous iteration's snapshot OR the *complete* new iteration's
+    snapshot — never a mix of old STATE.md + new METRICS.json.
+
+    METRICS.json and STATE.md are NOT read here; they continue to serve
+    herdr-loop display and BLOCKER reporting.
 
     Returns None if:
-    - clone_path is invalid or .herdr-loop/METRICS.json is missing/unparseable;
-    - Loop is un-run placeholder (iteration=0, total_tests=0, score=0.0);
-    - EVAL_DONE.json sentinel is missing or iteration mismatches STATE.md,
-      meaning a torn snapshot (new METRICS.json but old STATE.md or vice-versa).
+    - clone_path is invalid or .herdr-loop does not exist;
+    - EVAL_DONE.json is absent or unparseable (loop has not run yet);
+    - Snapshot looks like an un-evaluated placeholder (iteration 0, no tests).
     """
     if not clone_path:
         return None
     loop_dir = Path(clone_path) / LOOP_DIR_NAME
-    metrics_path = loop_dir / "METRICS.json"
-    if not metrics_path.is_file():
+    if not loop_dir.is_dir():
         return None
 
-    # ── Fix 1: atomic sentinel guard ──────────────────────────────────────────
-    # bin/herdr-loop writes EVAL_DONE.json LAST, after STATE.md.  We only
-    # produce evidence when the sentinel is present AND its iteration matches
-    # what STATE.md reports, ensuring METRICS.json and STATE.md are coherent.
-    sentinel_path = loop_dir / "EVAL_DONE.json"
+    # Single-file atomic read — no cross-file consistency checks needed.
+    snap_path = loop_dir / "EVAL_DONE.json"
     try:
-        sentinel = json.loads(sentinel_path.read_text(encoding="utf-8"))
-        sentinel_iteration = int(sentinel.get("iteration") or 0)
-    except Exception:
-        return None  # sentinel absent or unparseable → snapshot not yet complete
-
-    try:
-        metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+        snap = json.loads(snap_path.read_text(encoding="utf-8"))
     except Exception:
         return None
-    if not isinstance(metrics, dict):
+    if not isinstance(snap, dict):
         return None
 
-    try:
-        state = read_state(loop_dir)
-    except Exception:
-        state = {}
-    if not isinstance(state, dict):
-        state = {}
-
-    iteration = _int_or_none(state.get("iteration")) or 0
-
-    # If sentinel iteration doesn't match STATE.md iteration the writes are
-    # still in flight (or out of order) — defer until they converge.
-    if sentinel_iteration != iteration:
+    # Require at least the iteration and total_tests fields from a full snapshot
+    # (old thin sentinels that only had {"iteration", "ts"} will miss these).
+    if "total_tests" not in snap:
         return None
 
-    total_tests = _int_or_none(metrics.get("total_tests")) or 0
-    passed_tests = _int_or_none(metrics.get("passed_tests")) or 0
-    lint_errors = _int_or_none(metrics.get("lint_errors")) or 0
-    type_errors = _int_or_none(metrics.get("type_errors")) or 0
-    composite_score = round(float(metrics.get("composite_score") or 0.0), 2)
-    converged = bool(state.get("converged", False))
-    failing_tests = metrics.get("failing_tests") or []
+    iteration = _int_or_none(snap.get("iteration")) or 0
+    total_tests = _int_or_none(snap.get("total_tests")) or 0
+    passed_tests = _int_or_none(snap.get("passed_tests")) or 0
+    lint_errors = _int_or_none(snap.get("lint_errors")) or 0
+    type_errors = _int_or_none(snap.get("type_errors")) or 0
+    composite_score = round(float(snap.get("composite_score") or 0.0), 2)
+    converged = bool(snap.get("converged", False))
+    failing_tests = snap.get("failing_tests") or []
     if not isinstance(failing_tests, list):
         failing_tests = []
     failing_count = len(failing_tests)
 
-    # Initial placeholder check: un-evaluated state has iteration 0 and 0 tests/score
-    if (iteration == 0 and total_tests == 0 and composite_score == 0.0
-            and not failing_tests and not metrics.get("test_exit_code")):
+    # Un-evaluated placeholder: iteration 0, no tests, zero score.
+    if iteration == 0 and total_tests == 0 and composite_score == 0.0 and not failing_tests:
         return None
 
     evidence_data: Dict[str, Any] = {
         "iteration": iteration,
-        "max_iterations": _int_or_none(state.get("max_iterations")) or 5,
+        "max_iterations": _int_or_none(snap.get("max_iterations")) or 5,
         "converged": converged,
-        "loop_status": _clean(state.get("status") or "unknown", 40),
+        "loop_status": _clean(snap.get("status") or "unknown", 40),
         "total_tests": total_tests,
         "passed_tests": passed_tests,
         "failing_count": failing_count,
@@ -222,7 +211,7 @@ def extract_test_evidence(clone_path: Optional[str]) -> Optional[Dict[str, Any]]
         "lint_errors": lint_errors,
         "type_errors": type_errors,
         "composite_score": composite_score,
-        "has_repro_test": bool(metrics.get("has_repro_test")),
+        "has_repro_test": bool(snap.get("has_repro_test")),
     }
     evidence_data["evidence_id"] = build_test_evidence_id(evidence_data)
     return evidence_data

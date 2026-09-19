@@ -125,11 +125,23 @@ class TestsCompletedCheckpointSuite(unittest.TestCase):
             "has_repro_test": False,
         }
         (loop_dir / "METRICS.json").write_text(json.dumps(metrics), encoding="utf-8")
-        # Write EVAL_DONE.json sentinel LAST (mirrors bin/herdr-loop write order)
+        # Write EVAL_DONE.json as a FULL snapshot (mirrors bin/herdr-loop write order).
+        # Supervisor reads ONLY from EVAL_DONE.json; METRICS.json is for herdr-loop display.
         import time as _time
-        (loop_dir / "EVAL_DONE.json").write_text(
-            json.dumps({"iteration": iteration, "ts": _time.time()}), encoding="utf-8"
-        )
+        (loop_dir / "EVAL_DONE.json").write_text(json.dumps({
+            "iteration": iteration,
+            "completed_at": _time.time(),
+            "status": "converged" if converged else "iterating",
+            "converged": converged,
+            "max_iterations": 5,
+            "total_tests": total,
+            "passed_tests": passed,
+            "failing_tests": list(failing),
+            "lint_errors": 0,
+            "type_errors": 0,
+            "composite_score": score,
+            "has_repro_test": False,
+        }), encoding="utf-8")
 
     # --- A. 新测试结果触发 ---
     def test_scenario_a_new_test_result_triggers_evaluation(self):
@@ -510,7 +522,7 @@ class TestsCompletedRegressionFixes(unittest.TestCase):
         self.tmp.cleanup()
 
     def _write_loop(self, iteration, total, passed, failing, score=80.0, converged=False):
-        """Write loop artefacts INCLUDING the EVAL_DONE.json sentinel."""
+        """Write loop artefacts including a FULL EVAL_DONE.json snapshot (sole Supervisor source)."""
         loop_dir = self.clone_dir / LOOP_DIR_NAME
         loop_dir.mkdir(parents=True, exist_ok=True)
         write_state(loop_dir, iteration=iteration, max_iter=5,
@@ -527,9 +539,20 @@ class TestsCompletedRegressionFixes(unittest.TestCase):
         }
         (loop_dir / "METRICS.json").write_text(json.dumps(metrics), encoding="utf-8")
         import time as _time
-        (loop_dir / "EVAL_DONE.json").write_text(
-            json.dumps({"iteration": iteration, "ts": _time.time()}), encoding="utf-8"
-        )
+        (loop_dir / "EVAL_DONE.json").write_text(json.dumps({
+            "iteration": iteration,
+            "completed_at": _time.time(),
+            "status": "converged" if converged else "iterating",
+            "converged": converged,
+            "max_iterations": 5,
+            "total_tests": total,
+            "passed_tests": passed,
+            "failing_tests": list(failing),
+            "lint_errors": 0,
+            "type_errors": 0,
+            "composite_score": score,
+            "has_repro_test": False,
+        }), encoding="utf-8")
 
     # --- K. 撕裂快照被 sentinel 阻止（EVAL_DONE 缺失时拒绝提取）---
     def test_k_torn_snapshot_blocked_when_sentinel_missing(self):
@@ -550,28 +573,72 @@ class TestsCompletedRegressionFixes(unittest.TestCase):
         self.assertIsNone(evidence,
             "extract_test_evidence must return None when EVAL_DONE.json is absent")
 
-    # --- L. Sentinel iteration 与 STATE.md 不一致时拒绝提取（真正的撕裂）---
-    def test_l_torn_snapshot_blocked_when_sentinel_iteration_mismatches(self):
-        """extract_test_evidence returns None when sentinel iteration != STATE.md iteration."""
+    # --- L. EVAL_DONE.json 为旧快照时，METRICS 已被覆盖仍安全（P1 race regression）---
+    def test_l_eval_done_single_source_immune_to_metrics_overwrite(self):
+        """P1 Race Regression: METRICS.json overwritten by next iteration but EVAL_DONE still has
+        iteration-1 data → Supervisor must return iteration-1 evidence, never a mixed snapshot.
+
+        Reproduces the exact torn-snapshot scenario:
+          STATE=1, EVAL_DONE=1 (full iteration-1 snapshot)
+          METRICS=2 (next iteration already started writing)
+
+        Under the old multi-file design:
+          - EVAL_DONE.iteration (1) == STATE.iteration (1) → guard PASSES
+          - METRICS.json is then read → contains iteration-2 data
+          - Result: mixed evidence (iter-1 state + iter-2 metrics) ← BUG
+
+        Under the new single-file design:
+          - Only EVAL_DONE.json is read
+          - Returns iteration-1 data from the snapshot
+          - METRICS.json overwrite is invisible → no mixed evidence ← FIXED
+        """
         loop_dir = self.clone_dir / LOOP_DIR_NAME
         loop_dir.mkdir(parents=True, exist_ok=True)
-        # STATE.md says iteration=3 (new), sentinel still says iteration=2 (stale)
-        write_state(loop_dir, iteration=3, max_iter=5, status="iterating", converged=False)
-        metrics = {
-            "iteration": 3, "total_tests": 10, "passed_tests": 9,
-            "failing_tests": [], "lint_errors": 0, "type_errors": 0,
-            "composite_score": 90.0, "has_repro_test": False,
-        }
-        (loop_dir / "METRICS.json").write_text(json.dumps(metrics), encoding="utf-8")
-        # Sentinel still has iteration=2 — simulates race between STATE.md write and sentinel
-        import time as _time
-        (loop_dir / "EVAL_DONE.json").write_text(
-            json.dumps({"iteration": 2, "ts": _time.time()}), encoding="utf-8"
-        )
 
+        # Set up state as if iteration 1 fully completed
+        write_state(loop_dir, iteration=1, max_iter=5, status="iterating", converged=False)
+        import time as _time
+
+        # EVAL_DONE.json reflects iteration 1 (correct, complete snapshot)
+        (loop_dir / "EVAL_DONE.json").write_text(json.dumps({
+            "iteration": 1,
+            "completed_at": _time.time(),
+            "status": "iterating",
+            "converged": False,
+            "max_iterations": 5,
+            "total_tests": 10,
+            "passed_tests": 8,
+            "failing_tests": ["test_foo"],
+            "lint_errors": 0,
+            "type_errors": 0,
+            "composite_score": 80.0,
+            "has_repro_test": False,
+        }), encoding="utf-8")
+
+        # Simulate race: METRICS.json has already been overwritten by iteration 2
+        # (run_evaluation writes METRICS.json FIRST, EVAL_DONE.json LAST)
+        metrics_iter2 = {
+            "iteration": 2, "total_tests": 10, "passed_tests": 10,
+            "failing_tests": [], "lint_errors": 0, "type_errors": 0,
+            "composite_score": 100.0, "has_repro_test": False,
+        }
+        (loop_dir / "METRICS.json").write_text(json.dumps(metrics_iter2), encoding="utf-8")
+
+        # extract_test_evidence must read ONLY from EVAL_DONE.json
         evidence = supervisor_evidence.extract_test_evidence(str(self.clone_dir))
-        self.assertIsNone(evidence,
-            "extract_test_evidence must return None when sentinel iteration != STATE.md iteration")
+
+        self.assertIsNotNone(evidence, "Should return evidence from EVAL_DONE.json snapshot")
+        # Must reflect iteration-1 data from EVAL_DONE, NOT iteration-2 from METRICS
+        self.assertEqual(evidence["iteration"], 1,
+            "iteration must come from EVAL_DONE.json (1), not the overwritten METRICS.json (2)")
+        self.assertEqual(evidence["passed_tests"], 8,
+            "passed_tests must come from EVAL_DONE.json iteration-1 snapshot (8), not METRICS (10)")
+        self.assertEqual(evidence["composite_score"], 80.0,
+            "composite_score must come from EVAL_DONE.json iteration-1 snapshot (80.0), not METRICS (100.0)")
+        self.assertEqual(evidence["failing_count"], 1,
+            "failing_count must reflect iteration-1 snapshot (1 failure), not iteration-2 (0)")
+
+
 
     # --- M. 失败的 SupervisorEvaluation 不消费 evidence_id ---
     def test_m_failed_evaluation_does_not_consume_evidence_id(self):
