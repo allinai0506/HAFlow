@@ -355,6 +355,140 @@ def test_ensure_context_project_skips_git(store_env, tmp_path, monkeypatch):
     assert [n["id"] for n in cfg["nodes"]] == ["analyze"]
 
 
+# ---------------------------------------------------------------- 同一 Workspace 换模板
+#
+# 业务模型：Workspace Identity != Workflow Template。
+# 一个业务 Workspace（如 customers/福寿康）可依次运行多个 context 模板。
+
+CTX_BETA_TEMPLATE = """\
+name: ctx-beta
+label: 第二阶段分析
+version: "1.0"
+description: 模板切换测试用第二 context 模板
+execution:
+  mode: context
+context:
+  required:
+    - common
+    - workspace
+nodes:
+  - id: evaluate
+    label: 评估
+    node_type: agent
+    purpose: 评估上下文产物
+    default_task_type: docs
+    default_integration_mode: none
+"""
+
+
+def _context_switch_env(store_env, tmp_path, monkeypatch):
+    """共享的 fake herdr CLI + 隔离状态 + 用户模板目录(ctx-beta)。返回 (fake, root)。"""
+    from herdr import projects as projects_mod
+    from herdr import workflow as wf_mod
+
+    fake = FakeHerdrCli()
+    monkeypatch.setattr(projects_mod, "_run", fake.run)
+    monkeypatch.setattr(projects_mod, "_run_json", fake.run_json)
+    monkeypatch.setattr(projects_mod, "ROOT", tmp_path / "ctrl")
+    monkeypatch.setattr(projects_mod, "PROJECTS_FILE", tmp_path / "ctrl" / "projects.json")
+    templates = tmp_path / "user-templates"
+    templates.mkdir()
+    (templates / "ctx-beta.yaml").write_text(CTX_BETA_TEMPLATE, encoding="utf-8")
+    monkeypatch.setattr(wf_mod, "USER_TEMPLATES_DIR", templates)
+
+    root = tmp_path / "customers-fsk"
+    root.mkdir()
+    bindings = {"common": str(root), "workspace": str(root)}
+    return fake, projects_mod, root, bindings
+
+
+def test_context_project_switches_template_keeps_workspace(store_env, tmp_path, monkeypatch):
+    fake, projects_mod, root, bindings = _context_switch_env(store_env, tmp_path, monkeypatch)
+
+    record_a = projects_mod.ensure_context_project(
+        root, template_name="context-smoke-test", context_bindings=bindings,
+    )
+    # 本次绑定与 A 不同：切换必须应用本次绑定，而非沿用旧 record。
+    company_b = tmp_path / "company-b"
+    company_b.mkdir()
+    bindings_b = {"common": str(company_b), "workspace": str(root)}
+    record_b = projects_mod.ensure_context_project(
+        root, template_name="ctx-beta", context_bindings=bindings_b,
+    )
+
+    # Workspace 与 Coordinator 保留
+    assert record_b["workspace_id"] == record_a["workspace_id"]
+    assert record_b["coordinator_pane_id"] == record_a["coordinator_pane_id"]
+    assert record_b["project_id"] == record_a["project_id"]
+
+    # 模板与节点拓扑更新为 B
+    cfg = json.loads(Path(record_b["workflow_file"]).read_text(encoding="utf-8"))
+    assert cfg["workflow_template"] == "ctx-beta"
+    assert [n["id"] for n in cfg["nodes"]] == ["evaluate"]
+
+    # context 语义在切换后完整保留，且无 Git 依赖
+    assert record_b["execution"] == {"mode": "context"}
+    assert cfg["execution"] == {"mode": "context"}
+    assert cfg["base_branch"] == ""
+    assert cfg["context"] == {
+        "required": [
+            {"id": "common", "label": "common"},
+            {"id": "workspace", "label": "workspace"},
+        ],
+        "optional": [],
+    }
+    assert cfg["context_bindings"] == bindings_b
+    assert fake.git_calls == []
+
+    # 旧模板 Node Tab 被关闭
+    assert any(c[:3] == ["herdr", "tab", "close"] for c in fake.calls)
+
+
+def test_context_project_switch_refuses_with_active_workflow(store_env, tmp_path, monkeypatch):
+    fake, projects_mod, root, bindings = _context_switch_env(store_env, tmp_path, monkeypatch)
+    record_a = projects_mod.ensure_context_project(
+        root, template_name="context-smoke-test", context_bindings=bindings,
+    )
+
+    from herdr.projects import register_workflow
+    register_workflow(
+        "wf-switch-active-01", record_a, requirement="running",
+        execution={"mode": "context"}, context=bindings,
+    )
+
+    with pytest.raises(RuntimeError, match="活跃工作流"):
+        projects_mod.ensure_context_project(
+            root, template_name="ctx-beta", context_bindings=bindings,
+        )
+
+
+def test_context_path_accepts_file_and_rejects_missing(store_env, tmp_path, monkeypatch):
+    fake, projects_mod, root, _ = _context_switch_env(store_env, tmp_path, monkeypatch)
+    contract_dir = tmp_path / "company"
+    contract_dir.mkdir()
+    quote_pdf = tmp_path / "报价单.pdf"
+    quote_pdf.write_bytes(b"%PDF-1.4 fake")
+
+    record = projects_mod.ensure_context_project(
+        root,
+        template_name="context-smoke-test",
+        context_bindings={
+            "common": str(contract_dir),
+            "workspace": str(quote_pdf),  # 普通文件也是合法 Context 引用
+        },
+    )
+    assert record["context_bindings"]["workspace"] == str(quote_pdf)
+    assert fake.git_calls == []
+
+    # 不存在的路径 fail-fast（目录/文件同理）
+    with pytest.raises(RuntimeError, match="Context path not found"):
+        projects_mod.ensure_context_project(
+            root,
+            template_name="context-smoke-test",
+            context_bindings={"common": str(contract_dir), "workspace": str(tmp_path / "nope.docx")},
+        )
+
+
 # ---------------------------------------------------------------- Worker: context 模式任务工作区
 
 

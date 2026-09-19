@@ -114,6 +114,13 @@ herdr-factory run "分析客户需求" --template context-smoke-test \
   --context common=/abs/company --context workspace=/abs/workdir
 ```
 
+Context 引用是文件系统引用：目录或普通文件（Markdown/PDF/Word/Excel/JSON…）
+都合法，例如 `--context contract=/contracts/福寿康.pdf`；不存在则拒绝启动。
+
+同一业务 Workspace 可依次运行不同 context 模板（Workspace Identity !=
+Workflow Template）：上一个 Workflow close 后再 run 新模板，Workspace 与
+Coordinator 保留、Node Tabs 按新模板重建，context 契约与绑定完整延续。
+
 context 模式下每个 Task 拥有独立 Task Workspace（Agent 只在其中写产物，
 不会写入客户原始目录；context 路径是只读引用），无 CoW Clone/Branch/git
 commit/integrate 路径；验收以 Task Workspace 产物与 verify-baseline 文件指纹为准。

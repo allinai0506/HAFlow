@@ -849,12 +849,15 @@ def _workflow_template_of(record):
     return cfg.get("workflow_template") or ""
 
 
-def reprovision_project_template(record, template_name):
+def reprovision_project_template(record, template_name, context_bindings=None):
     """切换已有项目的模板:保留 Workspace 与协调者 Pane,重编节点 Tab/Anchor。
 
     背景(wf-nexusarchive-0918-01):`ensure_project` 对已注册项目直接返回旧
     record,控制台选择的模板被静默忽略,general-task-v1 实际按
     software-development-v1 运行。切换前必须无活跃工作流,否则拒绝。
+
+    Workspace 身份与模板解耦:context 项目换模板时保留 execution/base_branch=""
+    /契约与本次绑定,绝不重新引入 Git 语义。
     """
     root = canonical_root(record["project_root"])
     project_id = record["project_id"]
@@ -863,7 +866,10 @@ def reprovision_project_template(record, template_name):
 
     if not _workspace_alive(workspace_id):
         return provision_project(
-            root, template_name=template_name, project_name=project_name
+            root,
+            template_name=template_name,
+            project_name=project_name,
+            context_bindings=context_bindings,
         )
 
     active = active_workflows_for_project(project_id)
@@ -926,6 +932,9 @@ def reprovision_project_template(record, template_name):
             continue
         _run(["herdr", "tab", "close", tab_id], check=False)
 
+    # context 模板切换不得引入 Git 语义：detect_base_branch 只属于 git 路径。
+    is_context = execution_mode(template) == "context"
+
     return _register_project_workflow(
         project_id=project_id,
         project_name=project_name,
@@ -935,6 +944,10 @@ def reprovision_project_template(record, template_name):
         coordinator_tab_id=coordinator_tab_id,
         coordinator_pane_id=coordinator_pane_id,
         runtime_nodes=runtime_nodes,
+        base_branch="" if is_context else None,
+        execution=template.get("execution") if is_context else None,
+        context_contract=template.get("context") if is_context else None,
+        context_bindings=context_bindings if is_context else None,
     )
 
 
@@ -1003,18 +1016,13 @@ def ensure_context_project(root, template_name, context_bindings=None):
     resolved = {}
     for ctx_id, path in bindings.items():
         canonical = str(Path(path).expanduser().resolve())
-        if not Path(canonical).is_dir():
-            raise RuntimeError(f"Context path not found or not a directory: {ctx_id}={path}")
+        # Context 是文件系统引用：目录或普通文件（Markdown/PDF/Excel/JSON…）均合法。
+        if not Path(canonical).exists():
+            raise RuntimeError(f"Context path not found: {ctx_id}={path}")
         resolved[ctx_id] = canonical
 
     record = project_by_root(root)
     if record:
-        current_template = _workflow_template_of(record)
-        if template_name and current_template and current_template != template_name:
-            raise RuntimeError(
-                f"Context 项目 {root} 已绑定模板 {current_template}，"
-                f"切换到 {template_name} 请先注销或换目录"
-            )
         if _workspace_alive(record.get("workspace_id", "")):
             if not _pane_alive(record.get("coordinator_pane_id", "")):
                 raise RuntimeError(
@@ -1022,6 +1030,15 @@ def ensure_context_project(root, template_name, context_bindings=None):
                     f"is missing: workspace={record.get('workspace_id')} "
                     f"pane={record.get('coordinator_pane_id')}. "
                     "Refusing automatic reprovision."
+                )
+            # Workspace Identity != Workflow Template：
+            # 同一业务 Workspace 可依次运行不同 context 模板（无活跃工作流时）。
+            current_template = _workflow_template_of(record)
+            if template_name and current_template and current_template != template_name:
+                return reprovision_project_template(
+                    record,
+                    template_name,
+                    context_bindings=resolved,
                 )
             return record
 

@@ -31,7 +31,9 @@
 | `required` | `List[ContextEntry]` | 否 | `[]` | 启动 Workflow 前必须绑定的上下文条目，缺失时拒绝启动。 |
 | `optional` | `List[ContextEntry]` | 否 | `[]` | 允许缺失的上下文条目。 |
 
-`ContextEntry` 支持简写字符串（`- company`）或对象 `{id, label}`；`id` 须匹配 `^[a-z][a-z0-9_-]{0,63}$`，required/optional 间不允许重复 id。绑定值绝不写入模板——绑定属于运行期，经 CLI `herdr-factory run --context id=/绝对路径`（可重复）传入，路径校验存在性后解析为绝对路径，随 Workflow 实例持久化（StateStore 元数据，无新增表）。派发 Task 时 Agent 仅获得短小的 "Workflow Context" 引用块（id + 绝对路径），不展开文件内容、不做 RAG。
+`ContextEntry` 支持简写字符串（`- company`）或对象 `{id, label}`；`id` 须匹配 `^[a-z][a-z0-9_-]{0,63}$`，required/optional 间不允许重复 id。绑定值绝不写入模板——绑定属于运行期，经 CLI `herdr-factory run --context id=/绝对路径`（可重复）传入，路径解析为绝对路径并做存在性检查（目录或普通文件——Markdown/PDF/Word/Excel/JSON 等真实文件均合法；不存在则 fail-fast），随 Workflow 实例持久化（StateStore 元数据，无新增表）。派发 Task 时 Agent 仅获得短小的 "Workflow Context" 引用块（id + 绝对路径），不展开文件内容、不做 RAG。
+
+**Workspace Identity != Workflow Template**：一个 Context 业务 Workspace（如 `customers/福寿康`）可依次运行多个 context 模板（sales-research → sales-quotation → contract-review）。换模板时 Workspace 与 Coordinator 保留，Node Tab/Anchor 按新模板重建，旧 Node Tab 关闭；复用既有 `reprovision_project_template()` 机制，存在活跃工作流时拒绝切换。`execution.mode=context`、`base_branch=""`、契约与本次绑定在切换后完整保留，全程无 Git 语义。
 
 ---
 
