@@ -122,6 +122,34 @@ def run_evaluation(target_dir: Path) -> tuple[MetricVector, bool]:
     if not converged and iteration >= max_iter:
         generate_blocker_report(loop_dir, metrics, iteration, max_iter)
 
+    # Atomic evaluation snapshot — written LAST after STATE.md and BLOCKER.md.
+    #
+    # This is the SOLE source of truth for Semantic Supervisor evidence.
+    # By carrying every field needed by extract_test_evidence() in one file that
+    # is replaced atomically, we eliminate the torn-snapshot window that exists
+    # when METRICS.json is overwritten at the START of a new iteration while
+    # EVAL_DONE.json / STATE.md still reflect the previous iteration.
+    #
+    # METRICS.json and STATE.md continue to serve herdr-loop (display, blocker
+    # report, etc.) — Supervisor evidence is read exclusively from EVAL_DONE.json.
+    _write_atomic(
+        loop_dir / "EVAL_DONE.json",
+        json.dumps({
+            "iteration": iteration,
+            "completed_at": time.time(),
+            "status": new_status,
+            "converged": converged,
+            "max_iterations": max_iter,
+            "total_tests": metrics.total_tests,
+            "passed_tests": metrics.passed_tests,
+            "failing_tests": list(metrics.failing_tests or []),
+            "lint_errors": metrics.lint_errors,
+            "type_errors": metrics.type_errors,
+            "composite_score": round(float(metrics.composite_score), 2),
+            "has_repro_test": bool(metrics.has_repro_test),
+        }, ensure_ascii=False),
+    )
+
     return metrics, converged, new_status
 
 def main():

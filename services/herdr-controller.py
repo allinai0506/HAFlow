@@ -3436,7 +3436,7 @@ def redeliver_done_event(task, now=None):
     return True
 
 
-def supervisor_checkpoint(task, trigger, report_text=None):
+def supervisor_checkpoint(task, trigger, report_text=None, test_evidence=None, evidence_id=None, now=None):
     """Semantic Supervisor 观察点:Jev/Provider 只产生信号与 Policy 结论,
     状态推进全部走既有流程;整体 fail-safe,绝不影响任务主链路。
 
@@ -3467,6 +3467,9 @@ def supervisor_checkpoint(task, trigger, report_text=None):
             store=_get_store(),
             actions=actions,
             report_reader=report_reader,
+            test_evidence=test_evidence,
+            evidence_id=evidence_id,
+            now=now,
             log=print,
         )
         if result and result.get("intercepted") and not result.get("handled"):
@@ -3481,6 +3484,101 @@ def supervisor_checkpoint(task, trigger, report_text=None):
     except Exception as e:
         print(f"[SUPERVISOR SKIPPED] task={task.get('task_id')}: {type(e).__name__}: {e}")
         return None
+
+
+def check_task_tests_completed(task, store=None, now=None):
+    """Continuous Evaluation Checkpoint: tests_completed.
+
+    Deterministic trigger when a real test run produces new METRICS.json evidence.
+    Does NOT complete tasks, does NOT disrupt working agents on intermediate failures,
+    uses persisted evidence_id dedup (restart-safe) and RateGate throttling.
+    """
+    if supervisor_harness is None or not task:
+        return None
+
+    # 1. Kill switches — checked FIRST, before any file I/O (Fix 5).
+    #    supervisor_enabled() verifies: enabled flag + provider flag + API key.
+    cfg = supervisor_harness.load_config()
+    from herdr.supervisor.config import supervisor_enabled
+    if not supervisor_enabled(cfg):
+        return None
+
+    clone_path = task.get("clone_path")
+    if not clone_path or not os.path.isdir(clone_path):
+        return None
+
+    # 2. Extract test evidence (gated by EVAL_DONE.json atomic sentinel)
+    from herdr.supervisor import evidence as supervisor_evidence
+    test_evidence = supervisor_evidence.extract_test_evidence(clone_path)
+    if not test_evidence:
+        return None
+
+    # 3. Build deterministic evidence fingerprint
+    evidence_id = supervisor_evidence.build_test_evidence_id(test_evidence)
+
+    # 4. Dedup against persisted evaluation events (restart-safe).
+    #    Fix 4: query specifically for supervisor_evaluation events from the
+    #    semantic_supervisor source, so the dedup window is never squeezed out
+    #    by unrelated events flooding the ledger.
+    st = store if store is not None else _get_store()
+    task_id = task.get("task_id")
+    try:
+        events = st.list_events(
+            task_id=task_id,
+            event_type="supervisor_evaluation",
+            source="semantic_supervisor",
+            desc=True,
+        ) or []
+    except Exception:
+        events = []
+
+    from herdr.supervisor.evaluation import latest_tests_completed_evidence_id
+    latest_ev_id = latest_tests_completed_evidence_id(events)
+    if latest_ev_id == evidence_id:
+        return None
+
+    # 5. RateGate check: can supervisor evaluate now?
+    # If RateGate skips, we DEFER (do not evaluate now, but keep evidence un-evaluated
+    # so it can be evaluated when RateGate interval clears).
+    sup = supervisor_harness.get_supervisor(cfg)
+    if sup is not None:
+        skip_reason = sup.should_evaluate(task_id, "tests_completed", now=now)
+        if skip_reason is not None:
+            return None
+
+    # 6. Record deterministic tests_completed event
+    try:
+        st.record_event(
+            "tests_completed",
+            {
+                "task_id": task_id,
+                "workflow_id": task.get("workflow_id"),
+                "iteration": test_evidence.get("iteration"),
+                "evidence_id": evidence_id,
+                "passed_tests": test_evidence.get("passed_tests"),
+                "total_tests": test_evidence.get("total_tests"),
+                "failing_count": test_evidence.get("failing_count", 0),
+                "lint_errors": test_evidence.get("lint_errors", 0),
+                "type_errors": test_evidence.get("type_errors", 0),
+                "composite_score": test_evidence.get("composite_score", 0.0),
+            },
+            task_id=task_id,
+            workflow_id=task.get("workflow_id"),
+            node_id=task.get("node") or task.get("stage"),
+            agent_id=task.get("agent"),
+            source="herdr-controller",
+        )
+    except Exception as exc:
+        print(f"[TESTS_COMPLETED EVENT ERROR] task={task_id}: {exc}")
+
+    # 7. Run supervisor checkpoint
+    return supervisor_checkpoint(
+        task,
+        "tests_completed",
+        test_evidence=test_evidence,
+        evidence_id=evidence_id,
+        now=now,
+    )
 
 
 def handle_event(task_id, agent_status):
@@ -4158,6 +4256,15 @@ def registry_watcher():
                             start_task_listener(
                                 task_id
                             )
+
+                # ---- tests_completed 连续评估检查 (仅对活跃工作中的任务) ----
+                # dispatched 排除：Agent 尚未开始工作，不会有真实测试结果；
+                # rework 保留：Agent 仍在 inner loop 迭代，和 working 等价对待。
+                if status in ("working", "rework"):
+                    try:
+                        check_task_tests_completed(task, store=_get_store(), now=now)
+                    except Exception as exc:
+                        print(f"[TESTS_COMPLETED CHECK ERROR] task={task_id}: {exc}")
 
                 # ---- done 事件投递:受 attention episode 节流 + 监督网关把关 ----
                 if status == "agent_done":

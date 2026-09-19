@@ -140,3 +140,44 @@ def latest_evaluation(events: List[dict]) -> Optional[dict]:
             if best is None or float(payload.get("timestamp") or 0) >= float(best.get("timestamp") or 0):
                 best = payload
     return best
+
+
+def latest_tests_completed_evidence_id(events: List[dict]) -> Optional[str]:
+    """Latest evaluated test evidence_id from supervisor_evaluation events.
+
+    Provides persistent deduplication across Controller restarts by reading
+    the task's event ledger for previous tests_completed checkpoints.
+
+    Fix 3: Only events with ``status != "failed"`` are treated as consumed.
+    A Jev timeout/unavailable result records status="failed" and must NOT
+    lock out future evaluation of the same evidence.  The caller should pass
+    only supervisor_evaluation events (see Fix 4 at call site).
+    """
+    best_ev_id = None
+    best_ts = -1.0
+    for event in events or []:
+        if not isinstance(event, dict) or event.get("event_type") != EVALUATION_EVENT:
+            continue
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("trigger") != "tests_completed":
+            continue
+        # Fix 3: skip failed/invalid evaluations — they do NOT consume evidence_id.
+        # A provider timeout or unavailability sets status="failed"; the same
+        # evidence_id must remain eligible for re-evaluation on the next poll.
+        if payload.get("status") == "failed":
+            continue
+        meta = payload.get("metadata") or {}
+        ev_id = meta.get("evidence_id") or payload.get("evidence_id")
+        if not ev_id:
+            continue
+        try:
+            ts = float(payload.get("timestamp") or event.get("timestamp") or 0.0)
+        except (TypeError, ValueError):
+            ts = 0.0
+        if ts >= best_ts:
+            best_ts = ts
+            best_ev_id = str(ev_id)
+    return best_ev_id
+

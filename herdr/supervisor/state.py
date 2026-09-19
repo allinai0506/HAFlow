@@ -30,7 +30,7 @@ MAX_CRITERIA_ITEMS = 6
 # whole value is replaced by a redaction marker.
 _SECRET_PATTERNS = (
     re.compile(r"(?i)\b(api[_-]?key|secret|token|password|passwd|authorization)\b\s*[:=]\s*\S+"),
-    re.compile(r"\bsk-[A-Za-z0-9_\-\*]{8,}\b"),
+    re.compile(r"(?i)(?:\b|(?<=_))sk-[A-Za-z0-9_\-\*]{8,}"),
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
     re.compile(r"\bbearer\s+[A-Za-z0-9\-._~\+\/]{8,}", re.IGNORECASE),
     re.compile(r"\bxox[baprs]-[A-Za-z0-9\-]{10,}\b"),
@@ -135,29 +135,44 @@ def build_supervisor_state(
         if rows:
             state["acceptance_criteria"] = rows
 
+    def _clean_fact_value(val: Any) -> Any:
+        if isinstance(val, str):
+            return _truncate(val, MAX_RECENT_ROW_CHARS)
+        if isinstance(val, list):
+            return [
+                _truncate(str(v), MAX_RECENT_ROW_CHARS) if isinstance(v, str) else v
+                for v in val
+            ]
+        return val
+
     tests = facts.get("tests")
     if isinstance(tests, dict):
         state["tests"] = {
-            str(key): (
-                _truncate(str(value), MAX_RECENT_ROW_CHARS)
-                if isinstance(value, str)
-                else value
-            )
+            str(key): _clean_fact_value(value)
             for key, value in list(tests.items())[:MAX_FACT_DICT_KEYS]
         }
     diff_summary = facts.get("diff_summary")
     if isinstance(diff_summary, dict):
         state["diff_summary"] = {
-            str(key): (
-                _truncate(str(value), MAX_RECENT_ROW_CHARS)
-                if isinstance(value, str)
-                else value
-            )
+            str(key): _clean_fact_value(value)
             for key, value in list(diff_summary.items())[:MAX_FACT_DICT_KEYS]
         }
     output_summary = facts.get("output_summary")
     if output_summary:
         state["recent_output_summary"] = _truncate(str(output_summary), MAX_SUMMARY_CHARS)
+
+    test_progress = facts.get("test_progress")
+    if isinstance(test_progress, dict):
+        state["test_progress"] = {
+            str(key): (
+                round(float(value), 2)
+                if isinstance(value, float)
+                else value
+            )
+            for key, value in list(test_progress.items())[:MAX_FACT_DICT_KEYS]
+        }
+    if facts.get("trigger"):
+        state["trigger"] = _truncate(str(facts.get("trigger")), 40)
 
     state["recent_events"] = _summarize_events(
         events or [], now, min(recent_events_limit, MAX_EVENT_ROWS)
@@ -175,7 +190,7 @@ def _fit_budget(state: Dict[str, Any], max_context_size: int) -> Dict[str, Any]:
     if _size(state) <= budget:
         return state
     # Drop order: history first, then summaries; identity + goal survive.
-    for key in ("recent_events", "previous_signals", "diff_summary", "tests",
+    for key in ("recent_events", "previous_signals", "diff_summary", "test_progress", "tests",
                 "recent_output_summary", "blocker", "acceptance_criteria"):
         state.pop(key, None)
         if _size(state) <= budget:
