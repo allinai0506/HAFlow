@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 import re
@@ -475,8 +476,7 @@ def inspect(project, deep=False, target_agents=None):
         filtered = [a for a in allowed if a in target_set]
         allowed = filtered if filtered else [a for a in target_agents if a in AGENTS]
 
-    rows = []
-    for agent in allowed:
+    def inspect_agent(agent):
         binary_name = AGENT_BINARIES.get(agent, agent)
         binary = resolve_binary(binary_name)
         row = {
@@ -493,8 +493,7 @@ def inspect(project, deep=False, target_agents=None):
         if not binary:
             row["shallow_status"] = "MISSING"
             row["final_status"] = "DISABLED" if agent in disabled else "MISSING"
-            rows.append(row)
-            continue
+            return row
 
         ok, version = version_probe(agent, binary)
         row["version"] = version
@@ -519,7 +518,13 @@ def inspect(project, deep=False, target_agents=None):
         else:
             row["final_status"] = "READY" if not deep else "UNKNOWN"
 
-        rows.append(row)
+        return row
+
+    # Agent probes are independent subprocesses. Run them concurrently while
+    # collecting in allowed-list order so routing preferences and JSON output
+    # remain deterministic.
+    with ThreadPoolExecutor(max_workers=max(1, len(allowed))) as executor:
+        rows = list(executor.map(inspect_agent, allowed))
 
     return rows
 

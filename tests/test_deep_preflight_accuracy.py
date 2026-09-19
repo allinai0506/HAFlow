@@ -8,6 +8,7 @@ Covers the 2026-09-15 report: "opencode ERROR code=1 / claude TIMEOUT 35s".
 """
 
 import importlib.util
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -301,6 +302,23 @@ class TestTargetAgentsFiltering(unittest.TestCase):
             rows = self.m.inspect(project, deep=False, target_agents=["opencode", "claude"])
         self.assertEqual([r["agent"] for r in rows], ["opencode", "claude"])
 
+    def test_deep_inspect_runs_agent_probes_concurrently(self):
+        project = {"project_id": "p1", "project_root": "/tmp"}
+        started = threading.Barrier(3)
+
+        def concurrent_probe(agent, binary, cwd):
+            started.wait(timeout=1)
+            return {"attempted": True, "status": "READY", "adapter": agent}
+
+        with patch.object(self.m, "project_pool", return_value={
+            "allowed_agents": ["opencode", "codex", "claude"]
+        }), patch.object(self.m, "resolve_binary", return_value="/bin/true"), \
+             patch.object(self.m, "version_probe", return_value=(True, "1.0")), \
+             patch.object(self.m, "smoke_probe", side_effect=concurrent_probe):
+            rows = self.m.inspect(project, deep=True)
+
+        self.assertEqual([row["final_status"] for row in rows], ["READY"] * 3)
+
 
 class TestConsoleSelfCheckEvidence(unittest.TestCase):
     def test_modal_renders_probe_output_evidence(self):
@@ -320,4 +338,3 @@ class TestConsoleSelfCheckEvidence(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
