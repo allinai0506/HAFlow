@@ -35,6 +35,8 @@
 
 **Workspace Identity != Workflow Template**：一个 Context 业务 Workspace（如 `customers/福寿康`）可依次运行多个 context 模板（sales-research → sales-quotation → contract-review）。换模板时 Workspace 与 Coordinator 保留，Node Tab/Anchor 按新模板重建，旧 Node Tab 关闭；复用既有 `reprovision_project_template()` 机制，存在活跃工作流时拒绝切换。`execution.mode=context`、`base_branch=""`、契约与本次绑定在切换后完整保留，全程无 Git 语义。
 
+**Workflow Run Definition Snapshot**：项目共享 `workflow.json` 只代表"下一次 Run 的当前模板"，切换时会被覆盖；context Run 在注册时把创建时刻的完整执行定义固化到 `~/.herdr-controller/workflows/<workflow_id>/workflow.json`（Run 私有、与 `shared/` 同级共存），registry 的 `workflow_file` 指向该快照，历史 Run 的 DAG 定义永不读出新模板的配置。运行期现场修复（tab/anchor 映射）写入 Run 本地快照而非共享文件。快照失败时告警并回退共享文件行为；git Run 不触发快照，行为不变。
+
 ---
 
 ## 2. Node (工作流节点) Schema

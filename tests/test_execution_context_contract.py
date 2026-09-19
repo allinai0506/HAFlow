@@ -489,6 +489,78 @@ def test_context_path_accepts_file_and_rejects_missing(store_env, tmp_path, monk
         )
 
 
+# ---------------------------------------------------------------- Workflow Run Definition Snapshot
+#
+# Workflow Run 一旦创建，其执行定义不可变：项目共享 workflow.json 表示
+# "下一次 Run 的当前模板"，切换覆盖它不得污染历史 Run 的 DAG。
+
+
+def test_workflow_definition_snapshot_survives_template_switch(store_env, tmp_path, monkeypatch):
+    fake, projects_mod, root, bindings = _context_switch_env(store_env, tmp_path, monkeypatch)
+    from herdr import workflow_docs as wd
+    monkeypatch.setenv(wd.DOCS_DIR_ENV, str(tmp_path / "workflows"))
+
+    record_a = projects_mod.ensure_context_project(
+        root, template_name="context-smoke-test", context_bindings=bindings,
+    )
+    projects_mod.register_workflow(
+        "wf-snap-a", record_a, requirement="A",
+        execution={"mode": "context"}, context=bindings,
+    )
+
+    # Run A 正常结束并关闭（活跃 Workflow 会拒绝切换，这是既有门禁）
+    from herdr.state_store import get_state_store
+    get_state_store().transition_workflow(
+        "wf-snap-a", "completed", "run finished", source="test", force=True,
+    )
+
+    # 切换模板并注册新 Run（项目共享文件此刻被覆盖为 B）
+    record_b = projects_mod.ensure_context_project(
+        root, template_name="ctx-beta", context_bindings=bindings,
+    )
+    projects_mod.register_workflow(
+        "wf-snap-b", record_b, requirement="B",
+        execution={"mode": "context"}, context=bindings,
+    )
+
+    reg_a = projects_mod.project_for_workflow("wf-snap-a")
+    reg_b = projects_mod.project_for_workflow("wf-snap-b")
+
+    # Registry 指向各自 Run 的私有 snapshot，而不是项目共享文件
+    assert Path(reg_a["workflow_file"]).parent == tmp_path / "workflows" / "wf-snap-a"
+    assert Path(reg_a["workflow_file"]).name == "workflow.json"
+    assert reg_a["workflow_file"] != reg_b["workflow_file"]
+    assert reg_a["workflow_file"] != record_a["workflow_file"]
+
+    cfg_a = projects_mod.workflow_config_for("wf-snap-a")
+    cfg_b = projects_mod.workflow_config_for("wf-snap-b")
+    assert cfg_a["workflow_template"] == "context-smoke-test"
+    assert [n["id"] for n in cfg_a["nodes"]] == ["analyze"]
+    assert cfg_b["workflow_template"] == "ctx-beta"
+    assert [n["id"] for n in cfg_b["nodes"]] == ["evaluate"]
+
+    # 项目共享 workflow.json 允许停留在 Template B，三者互不冲突
+    shared_cfg = json.loads(Path(record_b["workflow_file"]).read_text(encoding="utf-8"))
+    assert shared_cfg["workflow_template"] == "ctx-beta"
+
+    # 快照不破坏 workflow 级 shared/ 目录约定（同一父目录共存）
+    assert wd.workflow_docs_dir("wf-snap-a") == tmp_path / "workflows" / "wf-snap-a" / "shared"
+
+
+def test_git_workflow_registration_unchanged_by_snapshot(store_env, tmp_path):
+    """git Run（不传 execution）不触发 snapshot：registry workflow_file 语义不变。"""
+    from herdr.projects import register_workflow
+    project = {
+        "project_id": "p-git", "project_name": "n", "project_root": "/r",
+        "base_branch": "main", "workspace_id": "w", "coordinator_pane_id": "c",
+        "workflow_file": str(tmp_path / "shared-workflow.json"),
+    }
+    register_workflow("wf-git-snap-01", project, requirement="x")
+    from herdr.state_store import get_state_store
+    record = get_state_store().get_workflow("wf-git-snap-01")
+    assert record["workflow_file"] == project["workflow_file"]
+
+
 # ---------------------------------------------------------------- Worker: context 模式任务工作区
 
 

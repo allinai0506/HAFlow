@@ -8,6 +8,12 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-09-19] fix | Workflow Run Definition Snapshot：Run 创建即冻结执行定义
+- 背景：项目共享 `~/.herdr-controller/projects/<project_id>/workflow.json` 代表"下一次 Run 的当前模板"，模板切换会覆盖它，导致历史 Workflow 的 `workflow_config_for()` 可能读到新模板的 DAG，违反"Workflow Run 一旦创建，其执行定义不可变"。
+- `herdr/projects.py` 新增 `_snapshot_workflow_definition()`：context Run 在 `register_workflow` 时把创建时刻的完整定义固化到 `~/.herdr-controller/workflows/<workflow_id>/workflow.json`（复用 workflow 级根目录，与 `shared/` 同级共存），registry `workflow_file` 指向 Run 私有快照。
+- 边界：git Run（不传 execution）完全不触发快照，行为零变化；不新增数据库表、不重构 StateStore、不改 Context Contract 与 Template switch 机制；快照失败（源缺失/非法 id/IO 错误）向 stderr 告警并回退旧共享文件行为，不阻断 Run 创建；运行期现场修复（tab/anchor 映射）写入 Run 本地快照，不再污染共享文件。
+- 测试：`tests/test_execution_context_contract.py` 新增 2 例（A→关闭→切 B→B 注册后 `workflow_config_for(A)` 仍为模板 A 的 DAG、git 注册不受影响）；全量 831 passed + 44 subtests。
+
 ## [2026-09-18] feat | Task/Workflow State 与 Runtime State 分离：新增 RuntimeState 记录
 - 背景：Task 记录把编排状态（status/node/goal）与运行环境（workspace/tab/pane/agent）混在顶层扁平字段，且 `agent_session` 在落盘时被丢弃、`agent_status` 从不持久化，无法回答"这个任务到底由谁、在哪里执行的"。
 - 新增 `herdr/runtime_state.py` 纯函数核心：`build/normalize/status映射/transition`；`task["runtime"]` 嵌入 `payload_json`（零 schema 迁移）；`launch_task` 记录真实 Herdr 证据（workspace/tab/pane/cwd/agent/session）；`kernel.transition_task` 同事务同步 `runtime.status`（created/running/completed/failed/unavailable）；只记录不恢复；旧 execution 无 runtime 照读照转。

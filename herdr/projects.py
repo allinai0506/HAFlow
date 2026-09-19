@@ -6,6 +6,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -353,6 +354,42 @@ def generate_workflow_id(project, prefix="wf", now=None):
     return candidate_id
 
 
+def _snapshot_workflow_definition(workflow_id, source_file):
+    """Workflow Run Definition Snapshot：把创建时刻的项目级定义固化为 Run 私有不可变文件。
+
+    项目共享 workflow.json 代表"下一次 Workflow 用的当前模板"，会在模板切换时被覆盖；
+    每个 Workflow Run 的执行定义必须创建即冻结。复用 workflow 级根目录
+    （~/.herdr-controller/workflows/<workflow_id>/，与 shared/ 同级互不干扰）。
+    任何失败都回退旧行为（Run 继续读共享文件）并向 stderr 告警，绝不静默、绝不阻断创建。
+    """
+    reason = None
+    if not source_file:
+        return None
+    try:
+        try:
+            from .workflow_docs import docs_root, validate_workflow_id
+        except ImportError:
+            from herdr.workflow_docs import docs_root, validate_workflow_id
+        src = Path(source_file).expanduser()
+        cfg = _load(src, None) if src.exists() else None
+        if cfg is None:
+            reason = f"定义源不可读: {source_file}"
+        else:
+            run_dir = docs_root() / validate_workflow_id(workflow_id)
+            run_dir.mkdir(parents=True, exist_ok=True)
+            snapshot = run_dir / "workflow.json"
+            _save(snapshot, cfg)
+            return str(snapshot)
+    except (ValueError, OSError) as exc:
+        reason = str(exc)
+    print(
+        f"warning: Workflow {workflow_id} 定义快照失败（{reason}），"
+        f"本次 Run 将继续读取项目共享 workflow.json，模板切换后其执行定义可能被覆盖。",
+        file=sys.stderr,
+    )
+    return None
+
+
 def register_workflow(workflow_id, project, requirement="", title="", execution=None, context=None):
     title = (title or "").strip()
     subject = title or requirement_subject(requirement) or "未命名工作流"
@@ -373,6 +410,11 @@ def register_workflow(workflow_id, project, requirement="", title="", execution=
     }
     if execution:
         wf_entry["execution"] = execution
+        snapshot_file = _snapshot_workflow_definition(
+            workflow_id, project.get("workflow_file")
+        )
+        if snapshot_file:
+            wf_entry["workflow_file"] = snapshot_file
     if context:
         wf_entry["context"] = context
     store = _get_store()

@@ -417,7 +417,8 @@ def start_workflow(
             project,
             requirement=requirement,
             title=title or "",
-            execution=project.get("execution") if mode == "context" else None,
+            execution=({"mode": "context"} | (project.get("execution") or {}))
+            if mode == "context" else None,
             context=context_bindings if mode == "context" else None,
         )
 
