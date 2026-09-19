@@ -16,9 +16,21 @@ WORKFLOWS_FILE = ROOT / "workflows.json"
 LEGACY_WORKFLOW_FILE = ROOT / "workflow.json"
 
 try:
-    from .workflow import load_template, normalize_workflow, find_node
+    from .workflow import (
+        load_template,
+        normalize_workflow,
+        find_node,
+        execution_mode,
+        validate_context_contract,
+    )
 except ImportError:
-    from herdr.workflow import load_template, normalize_workflow, find_node
+    from herdr.workflow import (
+        load_template,
+        normalize_workflow,
+        find_node,
+        execution_mode,
+        validate_context_contract,
+    )
 
 STAGES = [
     ("requirements", "2需求分析", "plan"),
@@ -341,7 +353,7 @@ def generate_workflow_id(project, prefix="wf", now=None):
     return candidate_id
 
 
-def register_workflow(workflow_id, project, requirement="", title=""):
+def register_workflow(workflow_id, project, requirement="", title="", execution=None, context=None):
     title = (title or "").strip()
     subject = title or requirement_subject(requirement) or "未命名工作流"
     wf_entry = {
@@ -359,6 +371,10 @@ def register_workflow(workflow_id, project, requirement="", title=""):
         "startup_ready": False,
         "status": "running",
     }
+    if execution:
+        wf_entry["execution"] = execution
+    if context:
+        wf_entry["context"] = context
     store = _get_store()
     store.save_workflow(wf_entry)
     try:
@@ -516,7 +532,7 @@ def import_legacy_project(root, legacy_workflow=None):
     return record
 
 
-def provision_project(root, template_name="software-development-v1", project_name=None):
+def provision_project(root, template_name="software-development-v1", project_name=None, context_bindings=None):
     root = canonical_root(root)
     project_id = project_id_for(root)
     if not project_name:
@@ -525,6 +541,7 @@ def provision_project(root, template_name="software-development-v1", project_nam
     template_name = template_name or "software-development-v1"
     template = load_template(template_name)
     nodes = template.get("nodes", [])
+    is_context = execution_mode(template) == "context"
 
     created = _run_json([
         "herdr",
@@ -598,6 +615,10 @@ def provision_project(root, template_name="software-development-v1", project_nam
         coordinator_tab_id=coordinator_tab_id,
         coordinator_pane_id=coordinator_pane_id,
         runtime_nodes=runtime_nodes,
+        base_branch="" if is_context else None,
+        execution=template.get("execution") if is_context else None,
+        context_contract=template.get("context") if is_context else None,
+        context_bindings=context_bindings if is_context else None,
     )
 
 
@@ -610,12 +631,16 @@ def _register_project_workflow(
     coordinator_tab_id,
     coordinator_pane_id,
     runtime_nodes,
+    base_branch=None,
+    execution=None,
+    context_contract=None,
+    context_bindings=None,
 ):
     workflow = {
         "project_id": project_id,
         "project_name": project_name,
         "project_root": root,
-        "base_branch": detect_base_branch(root),
+        "base_branch": detect_base_branch(root) if base_branch is None else base_branch,
         "workspace_id": workspace_id,
         "workflow_template": template_name,
         "coordinator": {
@@ -625,6 +650,12 @@ def _register_project_workflow(
         },
         "nodes": runtime_nodes,
     }
+    if execution:
+        workflow["execution"] = execution
+    if context_contract:
+        workflow["context"] = context_contract
+    if context_bindings:
+        workflow["context_bindings"] = context_bindings
     workflow = normalize_workflow(workflow)
 
     project_dir = ROOT / "projects" / project_id
@@ -644,6 +675,10 @@ def _register_project_workflow(
         "coordinator_pane_id": coordinator_pane_id,
         "workflow_file": str(workflow_file),
     }
+    if execution:
+        record["execution"] = execution
+    if context_bindings:
+        record["context_bindings"] = context_bindings
 
     data = load_projects()
     data.setdefault("projects", {})[root] = record
@@ -943,6 +978,57 @@ def ensure_project(root, template_name=None):
 
     return provision_project(
         root, template_name=template_name or "software-development-v1"
+    )
+
+
+def ensure_context_project(root, template_name, context_bindings=None):
+    """execution.mode=context 项目：任意真实目录即可注册，不要求 Git Repository。
+
+    契约校验（required 缺失 fail-fast / unknown 拒绝）在此完成；
+    binding 路径统一解析为绝对路径后写入项目与 Workflow 记录。
+    """
+    root = canonical_root(root)
+    if not Path(root).is_dir():
+        raise RuntimeError(f"Context runtime 目录不存在或不是目录: {root}")
+
+    template = load_template(template_name)
+    if execution_mode(template) != "context":
+        raise RuntimeError(
+            f"模板 {template_name} 不是 context 执行模式，无法按 Context 项目注册"
+        )
+
+    bindings = dict(context_bindings or {})
+    validate_context_contract(template, bindings)
+
+    resolved = {}
+    for ctx_id, path in bindings.items():
+        canonical = str(Path(path).expanduser().resolve())
+        if not Path(canonical).is_dir():
+            raise RuntimeError(f"Context path not found or not a directory: {ctx_id}={path}")
+        resolved[ctx_id] = canonical
+
+    record = project_by_root(root)
+    if record:
+        current_template = _workflow_template_of(record)
+        if template_name and current_template and current_template != template_name:
+            raise RuntimeError(
+                f"Context 项目 {root} 已绑定模板 {current_template}，"
+                f"切换到 {template_name} 请先注销或换目录"
+            )
+        if _workspace_alive(record.get("workspace_id", "")):
+            if not _pane_alive(record.get("coordinator_pane_id", "")):
+                raise RuntimeError(
+                    "Registered Context Workspace is alive but coordinator Pane "
+                    f"is missing: workspace={record.get('workspace_id')} "
+                    f"pane={record.get('coordinator_pane_id')}. "
+                    "Refusing automatic reprovision."
+                )
+            return record
+
+    return provision_project(
+        root,
+        template_name=template_name,
+        context_bindings=resolved,
     )
 
 

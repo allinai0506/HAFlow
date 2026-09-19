@@ -3163,3 +3163,40 @@ pytest tests/ -q
 
 ---
 
+
+## 72. 模板新增契约键与既有归一化管道的冲突：双键分家与生命周期复用
+
+### 问题背景
+
+为 Workflow Template 引入 Execution & Context Contract V1（`execution.mode` + `context` 契约）时，需要在不改旧模板行为的前提下把契约、运行期绑定与 Task 记录贯穿 factory → projects → worker → herdr-task 四层：
+
+1. **契约与绑定同名冲突**：模板声明契约 `context: {required, optional}`，运行期绑定也是 `context: {id: path}`。若两者都写入项目 workflow.json 的 `context` 键，`normalize_workflow` 会把绑定 dict 按契约形状重铸（丢路径），或反之污染契约。
+2. **Git 硬依赖散布在启动链**：`resolve_project` → `detect_git_root` 在无 Git 目录直接失败，context 模式模板永远走不到 Worker。
+3. **Task Workspace 生命周期重复建设风险**：为无 Git 的任务目录另建 cleanup/retention/finalize 通道，会复制 `delete_clone_safely` 一整套已验证的防误删逻辑。
+
+### 根因与解法
+
+1. **双键分家，归一化器不知情**：项目 workflow.json 中契约存 `context`、绑定存 `context_bindings`；StateStore registry 条目（不经 normalize）用 `context` 存运行绑定。归一化只在模板/项目工作流层生效，registry 层原样透传，两个语义各得其所。
+2. **模式决策前置到最小切面**：不动 `projects.py` 的 Git 解析链，而是在 shell 层加 `resolve_project_for_template`——先 `load_template` + `execution_mode` 判模式，context 分叉到独立的 `ensure_context_project`，git 路径逐字不变。契约默认值策略同理：`normalize_workflow` 输出显式 `execution: {mode: git}`，但 `execution_mode()` 对任意缺失结构容错返回 `git`，旧数据永远读得出安全默认。
+3. **复用 `clones/<task_id>` 物理路径**：context Task Workspace 与 CoW Clone 同根同级注册，stale-heal/删除安全档位/finalize 全部零改动继承；代价是 `clone_path` 字段名对 context 任务语义略宽，换来的是单一生命周期真相。
+4. **验收协议跨模式不变**：context 模式以递归文件指纹（全按 untracked 计、过滤内部装配文件）实现 `verify-baseline`，TASK_CHANGED/BASELINE_MATCH 输出协议与 git 模式一致，上层工具无感。
+
+### 验证命令 / 守护测试
+
+```bash
+pytest tests/test_execution_context_contract.py -q
+# 期望输出：28 passed
+
+pytest -q
+# 期望输出：822 passed, 44 subtests passed（baseline 794）
+```
+
+### 相关文档 / 关联证据
+
+- `herdr/workflow.py` — `_normalize_execution_contract` / 契约纯函数族
+- `herdr/projects.py#ensure_context_project` — Context 项目注册与契约校验
+- `services/herdr-worker.py#create_context_task_workspace` — 无 Git Task Workspace
+- `docs/product-specs/workflow-template-schema.md` §1.1/§1.2、`wiki/dag-workflow-engine.md` §3.3、`wiki/task-lifecycle.md` §2.1
+- 分支 `feat/exec-context-contract-v1`
+
+---

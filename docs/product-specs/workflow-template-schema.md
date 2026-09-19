@@ -12,7 +12,26 @@
 | `label` | `string` | 否 | 与 `name` 相同 | 人类可读名称，展示在 UI、通知与命令行界面中。 |
 | `version` | `string` | 否 | `"1.0"` | 模板版本，用于后续模式升级与迁移。 |
 | `description` | `string` | 否 | `""` | 模板的业务场景与流程概述。 |
+| `execution` | `ExecutionSpec` | 否 | `{"mode": "git"}` | 运行环境契约（见 1.1）。缺省即 legacy Git 执行路径，行为与旧模板完全一致。 |
+| `context` | `ContextContract` | 否 | 无 | 业务上下文契约（见 1.2），声明任务需要的业务输入（只读引用）。 |
 | `nodes` | `List[Node]` | **是** | - | 工作流包含的节点数组（定义 DAG 的拓扑图）。 |
+
+### 1.1 ExecutionSpec (执行模式)
+
+| 字段 | 类型 | 是否必填 | 默认值 | 描述 |
+| :--- | :--- | :--- | :--- | :--- |
+| `mode` | `string` | 否 | `"git"` | 仅两个取值：`git`（Git Repo → Project → Workspace → CoW Clone → Branch → 验证/提交/集成）与 `context`（任意真实目录注册 Context 项目，Task 使用独立 Task Workspace，**不创建** CoW Clone/Branch，无 git commit/integrate 路径）。未知取值在模板归一化时直接报错。 |
+
+`execution.mode` 与 `integration_mode` 正交：context 模式任务强制 `integration_mode=none`（`herdr-task` 对 context+git 组合 fail-fast）。context 模式的验收以 Task Workspace 产物与 verify-baseline（文件指纹）为准。
+
+### 1.2 ContextContract (业务上下文契约)
+
+| 字段 | 类型 | 是否必填 | 默认值 | 描述 |
+| :--- | :--- | :--- | :--- | :--- |
+| `required` | `List[ContextEntry]` | 否 | `[]` | 启动 Workflow 前必须绑定的上下文条目，缺失时拒绝启动。 |
+| `optional` | `List[ContextEntry]` | 否 | `[]` | 允许缺失的上下文条目。 |
+
+`ContextEntry` 支持简写字符串（`- company`）或对象 `{id, label}`；`id` 须匹配 `^[a-z][a-z0-9_-]{0,63}$`，required/optional 间不允许重复 id。绑定值绝不写入模板——绑定属于运行期，经 CLI `herdr-factory run --context id=/绝对路径`（可重复）传入，路径校验存在性后解析为绝对路径，随 Workflow 实例持久化（StateStore 元数据，无新增表）。派发 Task 时 Agent 仅获得短小的 "Workflow Context" 引用块（id + 绝对路径），不展开文件内容、不做 RAG。
 
 ---
 

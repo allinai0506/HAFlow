@@ -780,3 +780,12 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
   4. **Controller 挂点与 Fail-safe（`services/herdr-controller.py`）**：在主轮询循环针对活跃任务（working/rework/dispatched）通过 `check_task_tests_completed` 安全探活。Kill switch 开启或无 key 时 0 开销瞬时短路。
 - **验证**：新增 `tests/test_supervisor_tests_completed.py`（10 项专项场景 A-J 全部通过）；全仓回归 789 passed，compileall 通过。
 
+
+## [2026-09-19] feat | Workflow Template Execution & Context Contract V1
+- **背景**：Workflow Template 此前只能声明"怎么做"（nodes/DAG/policy），无法声明"跑在什么环境"与"需要什么业务上下文"。销售报价等非 Git 场景被迫伪造 Git 项目。
+- **核心契约与设计**：
+  1. **模板契约层（`herdr/workflow.py`）**：`normalize_workflow` 叠加 `_normalize_execution_contract` —— `execution.mode` 仅 `git|context`（缺省 `git`，旧模板字节级不变）；`context: {required, optional}` 声明上下文条目（`- id` 简写或 `{id,label}`，id 正则约束、跨列表去重）。纯函数族：`execution_mode`/`context_contract_ids`/`validate_context_contract`（required 缺失/unknown 绑定 fail-fast）/`parse_context_binding_args`/`render_context_reference_block`（只给 id+绝对路径，不展开内容）/`validate_integration_for_execution`（context+git 正交拒绝）。
+  2. **模式前置决策（§15 最小切面）**：`herdr-factory#resolve_project_for_template` 在项目/Runtime 初始化之前 load_template 判模式；context 走 `projects.py#ensure_context_project`（任意真实目录注册，不要求 Git），git 路径零改动。`run --context id=path`（可重复）绑定解析为绝对路径。
+  3. **持久化（无新增表）**：execution/契约经 `provision_project` 写入项目 workflow.json（契约存 `context`、绑定存 `context_bindings`，规避归一化冲突）；运行绑定经 `register_workflow(execution=, context=)` 存入 StateStore workflows 的 `metadata_json` 自由键。Task 经 `project_for_workflow` 继承 `execution_mode`+`context`（git 任务记录字节级不变）。
+  4. **Context Task Workspace（worker 去 Git 硬依赖）**：`create_context_task_workspace` 复用 `clones/<task_id>` 路径使 cleanup/retention/finalize 零改动；branch=None、空基线、complexity disabled（不起 node 子进程）；`.agent-task-context` 增 `mode=context` + `context.{id}=path` 行。`verify-baseline` 用 `context_workspace_fingerprint`（递归文件指纹）保持 TASK_CHANGED 协议；commit/integrate 对 context fail-fast。
+- **验证**：新增 `workflow_templates/context-smoke-test.yaml` + `tests/test_execution_context_contract.py`（28 项，RED-first）；全量 822 passed + 44 subtests（baseline 794）；compileall 通过；S4-exit ai-slop-cleaner Mode B 删除双重校验与模式解析重复。

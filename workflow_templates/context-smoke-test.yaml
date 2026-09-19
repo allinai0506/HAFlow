@@ -1,0 +1,26 @@
+name: context-smoke-test
+label: Context Smoke Test
+version: "1.0"
+description: 验证 Context Runtime 机制的最小模板：不要求 Git Repository，仅声明业务上下文契约。
+
+execution:
+  mode: context
+
+context:
+  required:
+    - id: common
+      label: 公共知识
+
+    - id: workspace
+      label: 当前业务工作空间
+
+nodes:
+  - id: analyze
+    label: 信息分析
+    node_type: agent
+    depends_on: []
+    purpose: 根据提供的业务上下文完成分析。
+    default_task_type: docs
+    default_integration_mode: none
+    required_outputs:
+      - 分析结果
