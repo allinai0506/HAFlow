@@ -12,6 +12,11 @@ import sys
 import time
 from pathlib import Path
 
+try:
+    from herdr.git_coordination import ensure_branch_available
+except ImportError:
+    from herdr_git_coordination import ensure_branch_available
+
 
 CLONE_ROOT = Path(
     os.environ.get("HERDR_CLONES_DIR")
@@ -54,6 +59,19 @@ def is_task_active_in_registry(task_id: str) -> bool:
         except Exception:
             pass
     return False
+
+
+def _registered_tasks():
+    """Read task ownership without making branch creation depend on one store."""
+    try:
+        from herdr.state_store import get_state_store
+        return get_state_store().list_tasks()
+    except Exception:
+        tasks_file = Path.home() / ".herdr-controller" / "tasks.json"
+        try:
+            return json.loads(tasks_file.read_text(encoding="utf-8")).get("tasks", [])
+        except Exception:
+            return []
 
 
 def create_context_task_workspace(task_id):
@@ -142,6 +160,7 @@ def create_clone(source, task_id):
 def create_task_branch(clone, task_id, agent, task_type, base_branch):
     slug = task_id.lower().replace("_", "-")
     branch = f"agent/{agent}/{task_type}-{slug}"
+    ensure_branch_available(branch, _registered_tasks(), task_id=task_id)
 
     fetch = subprocess.run(
         [
@@ -204,6 +223,8 @@ def checkout_onto_branch(clone, onto_branch):
     基线指纹在调用方紧随其后执行,因此本函数必须完成 origin 同步,
     保证 PR 分支的既有提交不属于本任务基线。
     """
+    ensure_branch_available(onto_branch, _registered_tasks())
+
     fetch = subprocess.run(
         [
             "git", "-C", str(clone),

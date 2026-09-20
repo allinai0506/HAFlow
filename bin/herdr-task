@@ -7,6 +7,8 @@ import shutil
 import subprocess
 import sys
 import time
+from contextlib import ExitStack
+from functools import wraps
 from pathlib import Path
 
 HERDR_ROOT = Path(__file__).resolve().parent.parent
@@ -64,6 +66,25 @@ except ImportError:
         get_state_store,
         sync_tasks_projection,
         sync_workflows_projection,
+    )
+
+try:
+    from herdr.git_coordination import (
+        BranchOwnershipError,
+        GitOperationBusyError,
+        GitOperationLock,
+        GitProcessActiveError,
+        ensure_branch_available,
+        ensure_no_git_processes,
+    )
+except ImportError:
+    from herdr_git_coordination import (
+        BranchOwnershipError,
+        GitOperationBusyError,
+        GitOperationLock,
+        GitProcessActiveError,
+        ensure_branch_available,
+        ensure_no_git_processes,
     )
 
 TASKS_FILE = os.environ.get("TASKS_FILE") or os.path.expanduser("~/.herdr-controller/tasks.json")
@@ -1323,7 +1344,7 @@ def auto_init_task_loop(clone_path, goal, acceptance_list, test_cmd=None, lint_c
         print(f"[HERDR_LOOP_WARN] Failed to auto-init loop: {e}")
 
 
-def launch_task(args):
+def _launch_task(args):
     data = load_tasks()
 
     if find_task(data, args.task_id):
@@ -1383,6 +1404,16 @@ def launch_task(args):
     onto_branch = getattr(args, "onto", None)
 
     if onto_branch:
+        try:
+            ensure_branch_available(
+                onto_branch,
+                data.get("tasks", []),
+                task_id=args.task_id,
+            )
+        except BranchOwnershipError as exc:
+            print(f"[BRANCH OWNERSHIP ERROR] {exc}")
+            sys.exit(2)
+
         # Fix-loop 续接:任务必须落在既有分支(如开放中的 PR 分支)上。
         fetch = subprocess.run(
             [
@@ -1520,6 +1551,15 @@ def launch_task(args):
 
     clone_path = worker_result["clone"]
     branch = worker_result["branch"]
+    try:
+        ensure_branch_available(
+            branch,
+            data.get("tasks", []),
+            task_id=args.task_id,
+        )
+    except BranchOwnershipError as exc:
+        print(f"[BRANCH OWNERSHIP ERROR] {exc}")
+        sys.exit(2)
     baseline_untracked = worker_result.get(
         "baseline_untracked",
         []
@@ -2093,6 +2133,53 @@ def verify_metrics(task_id, min_score=99.9, if_present=False):
         sys.exit(5)
 
 
+def _with_git_operation_lock(*, include_source_repo=False):
+    """Serialize Git operations and fail closed while another Git process runs."""
+    def decorate(func):
+        @wraps(func)
+        def wrapped(task_id, *args, **kwargs):
+            task = find_task(load_tasks(), task_id)
+            paths = []
+            if task and task.get("clone_path"):
+                paths.append(task["clone_path"])
+            if include_source_repo and task:
+                project = project_for_workflow(task.get("workflow_id")) or {}
+                source = task.get("source_repo") or project.get("project_root")
+                if source:
+                    paths.append(source)
+            try:
+                with ExitStack() as stack:
+                    locks = []
+                    for path in dict.fromkeys(paths):
+                        lock = GitOperationLock(path)
+                        lock.acquire()
+                        stack.callback(lock.release)
+                        locks.append(path)
+                    for path in locks:
+                        ensure_no_git_processes(path)
+                    return func(task_id, *args, **kwargs)
+            except (GitOperationBusyError, GitProcessActiveError) as exc:
+                print(f"[GIT BUSY] task={task_id}: {exc}")
+                sys.exit(75)
+        return wrapped
+    return decorate
+
+
+def launch_task(args):
+    """Serialize launch-time branch ownership check and task registration."""
+    source = getattr(args, "source", None)
+    if not source:
+        return _launch_task(args)
+    try:
+        with GitOperationLock(source):
+            ensure_no_git_processes(source)
+            return _launch_task(args)
+    except (GitOperationBusyError, GitProcessActiveError) as exc:
+        print(f"[GIT BUSY] launch: {exc}")
+        sys.exit(75)
+
+
+@_with_git_operation_lock()
 def commit_task(task_id, message=None):
     data = load_tasks()
     task = find_task(data, task_id)
@@ -2251,6 +2338,7 @@ def commit_task(task_id, message=None):
     print(f"[COMMIT] {commit_hash}")
 
 
+@_with_git_operation_lock(include_source_repo=True)
 def integrate_task(task_id):
     data = load_tasks()
     task = find_task(data, task_id)
@@ -2337,6 +2425,16 @@ def integrate_task(task_id):
         os.path.expanduser(main_repo)
     )
 
+    try:
+        ensure_branch_available(
+            branch,
+            data.get("tasks", []),
+            task_id=task_id,
+        )
+    except BranchOwnershipError as exc:
+        print(f"[BRANCH OWNERSHIP ERROR] {exc}")
+        sys.exit(5)
+
     subprocess.run(
         [
             "git",
@@ -2412,9 +2510,8 @@ def integrate_task(task_id):
         f"herdr/integration-{task_id}"
     )
 
-    # 主仓库不要求绝对 clean。
-    # 允许保留 Task 创建前就已经存在的 untracked 基线文件；
-    # 但 tracked 修改仍然禁止，以保护用户本地工作。
+    # Integration only updates refs. Tracked edits remain protected, while
+    # unrelated untracked files no longer participate in the operation.
     tracked_status = subprocess.check_output(
         [
             "git",
@@ -2432,130 +2529,16 @@ def integrate_task(task_id):
         print(tracked_status)
         sys.exit(5)
 
-    baseline_untracked = set(
-        task.get("baseline_untracked", [])
-    )
-
-    current_untracked_raw = subprocess.check_output(
-        [
-            "git",
-            "-C",
-            main_repo,
-            "ls-files",
-            "--others",
-            "--exclude-standard",
-            "-z"
-        ],
-        text=True
-    )
-
-    current_untracked = {
-        item
-        for item in current_untracked_raw.split("\0")
-        if item
-    }
-
-    unexpected_untracked = sorted(
-        current_untracked - baseline_untracked
-    )
-
-    if unexpected_untracked:
-        print("Main repository has unexpected untracked files:")
-        for relpath in unexpected_untracked:
-            print(f"- {relpath}")
-        sys.exit(5)
-
-    current_branch = subprocess.check_output(
-        [
-            "git",
-            "-C",
-            main_repo,
-            "branch",
-            "--show-current"
-        ],
-        text=True
-    ).strip()
-
-    if current_branch != base_branch:
-        print(
-            f"Main repository must be on {base_branch}, "
-            f"current={current_branch}"
-        )
-        sys.exit(6)
-
-    # Task IDs are globally unique per Workflow after multi-project routing,
-    # so an existing integration branch indicates a previous partial attempt.
-    exists = subprocess.run(
-        [
-            "git",
-            "-C",
-            main_repo,
-            "show-ref",
-            "--verify",
-            "--quiet",
-            f"refs/heads/{integration_branch}"
-        ]
-    )
-
-    if exists.returncode == 0:
-        subprocess.run(
-            [
-                "git",
-                "-C",
-                main_repo,
-                "branch",
-                "-D",
-                integration_branch
-            ],
-            check=True
-        )
-
     subprocess.run(
         [
             "git",
             "-C",
             main_repo,
-            "switch",
-            "-c",
-            integration_branch,
-            base_branch
+            "update-ref",
+            f"refs/heads/{integration_branch}",
+            herdr_ref,
         ],
-        check=True
-    )
-
-    result = subprocess.run(
-        [
-            "git",
-            "-C",
-            main_repo,
-            "merge",
-            "--ff-only",
-            branch
-        ]
-    )
-
-    if result.returncode != 0:
-        subprocess.run(
-            [
-                "git",
-                "-C",
-                main_repo,
-                "switch",
-                base_branch
-            ]
-        )
-        print("Integration failed")
-        sys.exit(7)
-
-    subprocess.run(
-        [
-            "git",
-            "-C",
-            main_repo,
-            "switch",
-            base_branch
-        ],
-        check=True
+        check=True,
     )
 
     from herdr import kernel
