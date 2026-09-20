@@ -831,3 +831,7 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 ## [2026-09-20] fix | Trajectory Observer 收尾：no_progress episode 边界 + Provider 构造隔离 + 预算语义澄清
 - Updated [[trajectory-observer]]: `no_progress` 改为按最近一次进展边界（passed verification / artifact）计算当前 episode 的 rework 数，anchor 取当前 episode 首次 rework（历史成功不再永久屏蔽新卡死）；Provider 构造失败降级为无 Provider（证据型 Finding 照常产出、弱信号静默）；`max_calls_per_run` 明确为 process-local per-run observation budget（Controller 重启后重置，V1 不持久化）。
 - 证据：`herdr/observer/signals.py:_progress_boundary_sequence,_detect_no_progress`、`herdr/observer/harness.py:observe_run,ObservationScheduler`、`herdr/observer/config.py:max_calls_per_run`、`tests/test_trajectory_observer.py`（74 项）。
+
+## [2026-09-20] fix | Trajectory Observer Live Agent liveness：pane session 一致仍须 agent get 确认
+- Updated [[trajectory-observer]]: 对 persisted 明确有 Agent 的 Run，pane 级 session 一致不再直接判 `available`——必须继续 bounded `herdr agent get`（与 `pane_pool` 的真实 live agent 判据一致）：agent 成功且 session 一致→`identity_match`；显式 `agent_not_found`/空 agent→`unavailable`；agent session 不一致→`identity_mismatch`；timeout/parse/身份不足→`unknown`。transcript guard 仍只在最终 `available` 时 pane read。
+- 证据：`herdr/observer/live.py:_identity_result`、`tests/test_trajectory_observer.py`（75 项，含 A/B 两条 agent liveness 回归）。

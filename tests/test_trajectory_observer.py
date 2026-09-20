@@ -1472,101 +1472,101 @@ class TestLiveRuntimeProbe:
             "status": "running", "pane_id": "pane-x", "workspace_id": "ws-1",
             "agent_session_id": "session-A", "agent_name": "agent-x",
         })
-        legacy_task = _task(runtime={"status": "running", "pane_id": "pane-x",
-                                     "workspace_id": "ws-1"})
+        pane_only_task = {
+            "task_id": "task-pane-only",
+            "runtime": {"status": "running", "pane_id": "pane-x", "workspace_id": "ws-1"},
+        }
 
-        missing = observer_live.probe_live_runtime(
-            session_task,
-            runner=_StubRunner({
-                "pane list": (0, _pane_payload("other"), ""),
-                "pane get": (1, _error_payload("pane_not_found"), ""),
-            }),
-        )
-        match = observer_live.probe_live_runtime(
-            session_task,
-            runner=_StubRunner({
-                "pane list": (0, _pane_payload("pane-x"), ""),
-                "pane get": (0, _pane_info("session-A"), ""),
-            }),
-        )
-        mismatch = observer_live.probe_live_runtime(
-            session_task,
-            runner=_StubRunner({
-                "pane list": (0, _pane_payload("pane-x"), ""),
-                "pane get": (0, _pane_info("session-B"), ""),
-            }),
-        )
-        agent_not_found = observer_live.probe_live_runtime(
-            session_task,
-            runner=_StubRunner({
-                "pane list": (0, _pane_payload("pane-x"), ""),
-                "pane get": (0, _pane_info(), ""),
-                "agent get": (1, _error_payload("agent_not_found"), ""),
-            }),
-        )
-        insufficient = observer_live.probe_live_runtime(
-            session_task,
-            runner=_StubRunner({
-                "pane list": (0, _pane_payload("pane-x"), ""),
-                "pane get": (0, _pane_info(), ""),
-                "agent get": (0, _agent_info("idle"), ""),
-            }),
-        )
-        agent_garbage = observer_live.probe_live_runtime(
-            session_task,
-            runner=_StubRunner({
-                "pane list": (0, _pane_payload("pane-x"), ""),
-                "pane get": (0, _pane_info(), ""),
-                "agent get": (0, "not json", ""),
-            }),
-        )
-        agent_schema_drift = observer_live.probe_live_runtime(
-            session_task,
-            runner=_StubRunner({
-                "pane list": (0, _pane_payload("pane-x"), ""),
-                "pane get": (0, _pane_info(), ""),
-                "agent get": (0, json.dumps({"result": {}}), ""),
-            }),
-        )
-        stale_workspace = observer_live.probe_live_runtime(
-            legacy_task,
-            runner=_StubRunner({
-                "pane list": (0, _pane_payload("other"), ""),
-                "pane get": (0, _pane_info("session-A"), ""),
-            }),
-        )
-        list_failed = observer_live.probe_live_runtime(
-            session_task, runner=_StubRunner({"pane list": (1, "", "daemon down")}),
-        )
-        timed_out = observer_live.probe_live_runtime(
-            session_task, runner=_StubRunner({"pane list": TimeoutError("timeout")}),
-        )
-        unparseable = observer_live.probe_live_runtime(
-            session_task,
-            runner=_StubRunner({
-                "pane list": (0, _pane_payload("pane-x"), ""),
-                "pane get": (0, "not json", ""),
-            }),
-        )
+        def probe(task, mapping):
+            return observer_live.probe_live_runtime(task, runner=_StubRunner(mapping))
+
+        missing = probe(session_task, {
+            "pane list": (0, _pane_payload("other"), ""),
+            "pane get": (1, "", _error_payload("pane_not_found")),
+        })
+        missing_stdout_shape = probe(session_task, {
+            "pane list": (0, _pane_payload("other"), ""),
+            "pane get": (1, _error_payload("pane_not_found"), ""),
+        })
+        match = probe(session_task, {
+            "pane list": (0, _pane_payload("pane-x"), ""),
+            "pane get": (0, _pane_info("session-A"), ""),
+            "agent get": (0, _agent_info("working", "session-A"), ""),
+        })
+        pane_mismatch = probe(session_task, {
+            "pane list": (0, _pane_payload("pane-x"), ""),
+            "pane get": (0, _pane_info("session-B"), ""),
+        })
+        agent_mismatch = probe(session_task, {
+            "pane list": (0, _pane_payload("pane-x"), ""),
+            "pane get": (0, _pane_info("session-A"), ""),
+            "agent get": (0, _agent_info("working", "session-B"), ""),
+        })
+        agent_not_found = probe(session_task, {
+            "pane list": (0, _pane_payload("pane-x"), ""),
+            "pane get": (0, _pane_info("session-A"), ""),
+            "agent get": (1, "", _error_payload("agent_not_found")),
+        })
+        agent_timeout = probe(session_task, {
+            "pane list": (0, _pane_payload("pane-x"), ""),
+            "pane get": (0, _pane_info("session-A"), ""),
+            "agent get": TimeoutError("timeout"),
+        })
+        insufficient = probe(session_task, {
+            "pane list": (0, _pane_payload("pane-x"), ""),
+            "pane get": (0, _pane_info("session-A"), ""),
+            "agent get": (0, _agent_info("idle"), ""),
+        })
+        agent_garbage = probe(session_task, {
+            "pane list": (0, _pane_payload("pane-x"), ""),
+            "pane get": (0, _pane_info("session-A"), ""),
+            "agent get": (0, "not json", ""),
+        })
+        agent_schema_drift = probe(session_task, {
+            "pane list": (0, _pane_payload("pane-x"), ""),
+            "pane get": (0, _pane_info("session-A"), ""),
+            "agent get": (0, json.dumps({"result": {}}), ""),
+        })
+        pane_only = probe(pane_only_task, {
+            "pane list": (0, _pane_payload("pane-x"), ""),
+            "pane get": (0, _pane_info("session-any"), ""),
+        })
+        stale_workspace = probe(pane_only_task, {
+            "pane list": (0, _pane_payload("other"), ""),
+            "pane get": (0, _pane_info("session-any"), ""),
+        })
+        list_failed = probe(session_task, {"pane list": (1, "", "daemon down")})
+        pane_list_timeout = probe(session_task, {"pane list": TimeoutError("timeout")})
+        unparseable = probe(session_task, {
+            "pane list": (0, _pane_payload("pane-x"), ""),
+            "pane get": (0, "not json", ""),
+        })
         no_pane = observer_live.probe_live_runtime(
             _task(runtime={"status": "running"}), runner=_StubRunner({}),
         )
 
         assert missing["status"] == "unavailable" and missing["reason"] == "pane_missing"
+        assert missing_stdout_shape["status"] == "unavailable"
+        assert missing_stdout_shape["reason"] == "pane_missing"
         assert match["status"] == "available" and match["reason"] == "identity_match"
-        assert mismatch["status"] == "unavailable" and mismatch["reason"] == "identity_mismatch"
+        assert pane_mismatch["status"] == "unavailable"
+        assert pane_mismatch["reason"] == "identity_mismatch"
+        assert agent_mismatch["status"] == "unavailable"
+        assert agent_mismatch["reason"] == "identity_mismatch"
         assert agent_not_found["status"] == "unavailable"
         assert agent_not_found["reason"] == "agent_not_found"
+        assert agent_timeout["status"] == "unknown"
         assert insufficient["status"] == "unknown"
         assert insufficient["reason"] == "insufficient_identity"
         assert agent_garbage["status"] == "unknown"
         assert agent_garbage["reason"] == "agent_payload_invalid"
         assert agent_schema_drift["status"] == "unknown"
         assert agent_schema_drift["reason"] == "agent_payload_invalid"
+        assert pane_only["status"] == "available" and pane_only["reason"] == "pane_alive"
         assert stale_workspace["status"] == "available"
         assert stale_workspace["workspace_mismatch"] is True
         assert list_failed["status"] == "unknown"
-        assert timed_out["status"] == "unknown"
+        assert pane_list_timeout["status"] == "unknown"
         assert unparseable["status"] == "unknown"
         assert no_pane["status"] == "unknown"
 
@@ -1613,9 +1613,9 @@ class TestRuntimeIdentityGuard:
 
     @staticmethod
     def _pane_read_called(stub) -> bool:
-        return any(list(argv[:2]) == ["pane", "read"] for argv, _ in stub.calls)
+        return any(list(argv[:3]) == ["herdr", "pane", "read"] for argv, _ in stub.calls)
 
-    def test_identity_mismatch_marks_runtime_unavailable_and_skips_pane_read(self, tmp_path: Path):
+    def test_pane_identity_mismatch_marks_runtime_unavailable_and_skips_pane_read(self, tmp_path: Path):
         store, task = self._setup(tmp_path)
         stub = _StubRunner({
             "pane list": (0, _pane_payload("pane-x"), ""),
@@ -1630,12 +1630,14 @@ class TestRuntimeIdentityGuard:
                    for item in findings[0].evidence)
         assert not self._pane_read_called(stub)
 
-    def test_agent_not_found_marks_runtime_unavailable(self, tmp_path: Path):
+    def test_agent_not_found_marks_runtime_unavailable_and_skips_pane_read(self, tmp_path: Path):
+        # Regression A: pane session matches, but the agent registry says the
+        # pane no longer hosts the agent -> unavailable, no transcript read.
         store, task = self._setup(tmp_path)
         stub = _StubRunner({
             "pane list": (0, _pane_payload("pane-x"), ""),
-            "pane get": (0, _pane_info(), ""),
-            "agent get": (1, _error_payload("agent_not_found"), ""),
+            "pane get": (0, _pane_info("session-A"), ""),
+            "agent get": (1, "", _error_payload("agent_not_found")),
             "pane read": (0, "should not be read", ""),
         })
 
@@ -1644,6 +1646,23 @@ class TestRuntimeIdentityGuard:
         assert [finding.finding_type for finding in findings] == ["runtime_unavailable"]
         assert any(item.get("reason") == "agent_not_found" for item in findings[0].evidence)
         assert not self._pane_read_called(stub)
+
+    def test_agent_probe_timeout_is_unknown_and_skips_pane_read(self, tmp_path: Path):
+        # Regression B: pane session matches, agent probe times out -> unknown,
+        # never a fabricated runtime_unavailable, never an unverified read.
+        store, task = self._setup(tmp_path)
+        stub = _StubRunner({
+            "pane list": (0, _pane_payload("pane-x"), ""),
+            "pane get": (0, _pane_info("session-A"), ""),
+            "agent get": TimeoutError("agent probe timeout"),
+            "pane read": (0, "should not be read", ""),
+        })
+
+        findings = self._observe(store, task, stub)
+
+        assert findings == []
+        assert not self._pane_read_called(stub)
+        assert store.get_task("task-1")["status"] == "working"
 
     def test_unknown_identity_is_never_unavailable_and_never_reads_pane(self, tmp_path: Path):
         store, task = self._setup(tmp_path)
@@ -1765,7 +1784,10 @@ class TestLiveTranscript:
         secret = "ghp_abcdef1234567890secret"
         raw = "\n".join([f"line {index} padding" for index in range(5000)])
         raw += f"\nError: token={secret} denied\n" * 3
-        identity_stub = {"pane get": (0, _pane_info("sess-9", pane_id="pane-9"), "")}
+        identity_stub = {
+            "pane get": (0, _pane_info("sess-9", pane_id="pane-9"), ""),
+            "agent get": (0, _agent_info("working", "sess-9"), ""),
+        }
         runner = _StubRunner({**identity_stub, "pane read": (0, raw, "")})
         config = {
             **_base_config(),
@@ -1809,7 +1831,10 @@ class TestLiveTranscript:
         raw = "\n".join([f"Error: token={secret} denied"] * 5000)
         config = {**_base_config(), "log_tail_lines": 40, "log_tail_chars": 200}
         provider = CapturingProvider({"possible_context_problem": 0.9})
-        identity_stub = {"pane get": (0, _pane_info("sess-9", pane_id="pane-9"), "")}
+        identity_stub = {
+            "pane get": (0, _pane_info("sess-9", pane_id="pane-9"), ""),
+            "agent get": (0, _agent_info("working", "sess-9"), ""),
+        }
 
         findings = observer_harness.observe_run(
             "run-1", task=task, store=store, config=config, provider=provider,

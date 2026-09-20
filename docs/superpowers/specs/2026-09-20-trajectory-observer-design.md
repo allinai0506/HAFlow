@@ -115,10 +115,9 @@ signals:         确定性检测结果（含 evidence 引用与事实数字）
 - **Live Runtime**（`herdr/observer/live.py`，只读复用既有 herdr CLI 能力）：
   - pane 存在性：`herdr pane list --workspace <ws>` 验证 daemon/workspace 可达，`herdr pane get <pane>` 给出最终事实——**显式 `pane_not_found` 才是 unavailable**；
   - **身份校验**（persisted runtime 的 `pane_id`/`agent_session_id`/`agent_name` vs live `pane.agent_session` / `agent.agent_session`）：
-    - persisted 与 live `agent_session_id` 一致 → `available`（`identity_match`）；
-    - 两者都存在但不一致 → `unavailable`（`identity_mismatch`）；
-    - 原 Run 明确有 Agent（session 或 agent_name），但 `agent get` 显式 `agent_not_found` / 空 agent → `unavailable`（`agent_not_found`）；
-    - 旧任务无 persisted session 时，live session 存在即 `available`（仅当 pane 缺 workspace 枚举时附带 `workspace_mismatch` 标记）；
+    - pane 级 session 已矛盾（都存在但不一致）→ `unavailable`（`identity_mismatch`），无需再问 agent；
+    - **对 persisted 明确有 Agent 的 Run，pane session 一致不等于 Agent 存活**（HAFlow `pane_pool` 以 `herdr agent get` 为真实 live agent 判据）：继续 bounded `agent get` 确认——agent 成功且 live session 与 persisted 一致 → `available`（`identity_match`）；agent 显式 `agent_not_found` / 空 agent → `unavailable`（`agent_not_found`）；live agent session 与 persisted 不一致 → `unavailable`（`identity_mismatch`）；
+    - 未持久化任何 Agent 身份的任务（纯 pane 目标）才允许以 pane 存在 + live session 判 `available`（`pane_alive`；pane 缺 workspace 枚举时附 `workspace_mismatch`）；
     - **timeout / daemon error / parse error（含 agent 响应不可解析或 schema 不符）/ 无法获得足够身份信息（agent 有响应但不暴露 session）→ `unknown`，绝不当作 unavailable**；
   - live transcript 读取前必须通过同一身份 guard：只有 `available` 才允许 `herdr pane read`；`identity_mismatch` / `unavailable` / `unknown` 一律不读当前 Pane（可回退 persisted evidence / terminal.log），防止旧 `pane_id` 复用后读到其他 Run 的日志；
   - 不写 Task status，不写 persisted RuntimeState；输入中 persisted 与 live（含 `agent_session_id`/`workspace_mismatch`）明确分开。

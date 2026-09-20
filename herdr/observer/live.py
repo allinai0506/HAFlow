@@ -102,6 +102,11 @@ def _error_code(payload: str) -> Optional[str]:
     return str(error.get("code")) if isinstance(error, dict) and error.get("code") else None
 
 
+def _call_error_code(result: Tuple[int, str, str]) -> Optional[str]:
+    """herdr reports errors as JSON on stderr (rc=1); accept either stream."""
+    return _error_code(result[1]) or _error_code(result[2])
+
+
 def _pane_payload(payload: str) -> Optional[Dict[str, Any]]:
     try:
         data = json.loads(payload)
@@ -144,7 +149,7 @@ def _get_pane(
     if got[0] == 0:
         pane = _pane_payload(got[1])
         return ("ok", pane) if pane is not None else ("failed", None)
-    if _error_code(got[1]) == "pane_not_found":
+    if _call_error_code(got) == "pane_not_found":
         return "not_found", None
     return "failed", None
 
@@ -172,20 +177,34 @@ def _identity_result(
     pane_id: str, persisted: Dict[str, Any], pane_info: Dict[str, Any],
     runner: Runner, timeout: float, log=None,
 ) -> Dict[str, Any]:
-    """Validate that the live pane/agent still belongs to this run."""
+    """Validate that the live pane *and agent* still belong to this run.
+
+    A matching pane-level session is not proof of a live agent: HAFlow's
+    pane_pool uses ``herdr agent get`` as the real live-agent check, so a run
+    that explicitly persisted an agent must still confirm the agent registry.
+    """
     persisted_session = persisted["session"]
     persisted_agent = persisted["agent"]
     live_session = _session_value(pane_info.get("agent_session"))
-    if live_session:
-        if persisted_session:
-            return _session_verdict(pane_id, persisted_session, live_session)
-        # Legacy run without a persisted session: the live session is the only
-        # identity and nothing contradicts it.
+
+    if live_session and persisted_session and live_session != persisted_session:
+        # The pane itself contradicts the run identity; no agent call needed.
         return {
-            "status": AVAILABLE, "reason": "pane_alive", "pane_id": pane_id,
+            "status": UNAVAILABLE, "reason": "identity_mismatch", "pane_id": pane_id,
             "agent_session_id": live_session,
         }
-    # The pane payload carries no session: ask the agent registry explicitly.
+
+    if not (persisted_session or persisted_agent):
+        # No agent identity was persisted: pane existence (plus any live
+        # session) is the only knowable fact.
+        result: Dict[str, Any] = {
+            "status": AVAILABLE, "reason": "pane_alive", "pane_id": pane_id,
+        }
+        if live_session:
+            result["agent_session_id"] = live_session
+        return result
+
+    # The run explicitly had an Agent: always confirm it is still alive.
     agent_call = _call(runner, ["herdr", "agent", "get", pane_id], timeout, log=log)
     if agent_call is None:
         return {"status": UNKNOWN, "reason": "probe_failed", "pane_id": pane_id}
@@ -194,26 +213,25 @@ def _identity_result(
         if not valid:
             return {"status": UNKNOWN, "reason": "agent_payload_invalid", "pane_id": pane_id}
         if explicit_empty:
-            if persisted_session or persisted_agent:
-                return {"status": UNAVAILABLE, "reason": "agent_not_found", "pane_id": pane_id}
-            return {"status": AVAILABLE, "reason": "pane_alive", "pane_id": pane_id}
+            return {"status": UNAVAILABLE, "reason": "agent_not_found", "pane_id": pane_id}
         live_agent_session = _session_value(agent_info.get("agent_session"))
-        if persisted_session and live_agent_session:
+        if live_agent_session and persisted_session:
             return _session_verdict(
                 pane_id, persisted_session, live_agent_session,
                 _agent_status(agent_call[1]),
             )
-        if persisted_session:
+        if persisted_session and not live_agent_session:
             # An agent answers but exposes no session: identity is unverifiable.
             return {"status": UNKNOWN, "reason": "insufficient_identity", "pane_id": pane_id}
-        return {
-            "status": AVAILABLE, "reason": "pane_alive", "pane_id": pane_id,
-            "agent_status": _agent_status(agent_call[1]),
-        }
-    if _error_code(agent_call[1]) == "agent_not_found":
-        if persisted_session or persisted_agent:
-            return {"status": UNAVAILABLE, "reason": "agent_not_found", "pane_id": pane_id}
-        return {"status": AVAILABLE, "reason": "pane_alive", "pane_id": pane_id}
+        result = {"status": AVAILABLE, "reason": "agent_alive", "pane_id": pane_id}
+        agent_status = _agent_status(agent_call[1])
+        if agent_status is not None:
+            result["agent_status"] = agent_status
+        if live_agent_session:
+            result["agent_session_id"] = live_agent_session
+        return result
+    if _call_error_code(agent_call) == "agent_not_found":
+        return {"status": UNAVAILABLE, "reason": "agent_not_found", "pane_id": pane_id}
     return {"status": UNKNOWN, "reason": "agent_probe_failed", "pane_id": pane_id}
 
 
