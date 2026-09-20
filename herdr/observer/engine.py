@@ -105,6 +105,8 @@ class TrajectoryObserver:
         task = task if isinstance(task, dict) else None
 
         events = self.ledger.list_events(run_id)
+        if task is None:
+            task = self._resolve_task(run_id, events)
         if not events and task is None:
             return []
         runtime = (task or {}).get("runtime")
@@ -142,6 +144,41 @@ class TrajectoryObserver:
         results = self._ask_provider(signals, context, use_model=use_model)
         candidates = self._consolidate(run_id, task, runtime, events, signals, results, ts)
         return self._persist(candidates)
+
+    def _resolve_task(
+        self, run_id: str, events: List[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        """Resolve the task for a run so callers only need the run_id.
+
+        Order: the task_id carried by the run's own trajectory events, then a
+        persisted run_id match (covers a launched run whose events are not
+        written yet). A task whose persisted run_id differs from the observed
+        run (stale events after a re-launch) is never trusted; lookup failures
+        degrade to events-only observation.
+        """
+        task_id = next(
+            (event.get("task_id") for event in events if event.get("task_id")), None,
+        )
+        if task_id:
+            try:
+                task = state_db.get_task(str(task_id), db_path=self.db_path)
+                if isinstance(task, dict) and self._task_matches_run(task, run_id):
+                    return task
+            except Exception as exc:
+                self._log(f"[OBSERVER TASK LOOKUP SKIPPED] run={run_id}: {type(exc).__name__}")
+        try:
+            for candidate in state_db.list_tasks(db_path=self.db_path):
+                if isinstance(candidate, dict) and candidate.get("run_id") == run_id:
+                    return candidate
+        except Exception as exc:
+            self._log(f"[OBSERVER TASK LOOKUP SKIPPED] run={run_id}: {type(exc).__name__}")
+        return None
+
+    @staticmethod
+    def _task_matches_run(task: Dict[str, Any], run_id: str) -> bool:
+        """True when the task belongs to this run (legacy tasks have no run_id)."""
+        task_run_id = task.get("run_id")
+        return not task_run_id or str(task_run_id) == run_id
 
     def _ask_provider(
         self,
@@ -227,30 +264,30 @@ class TrajectoryObserver:
         return findings[: max(1, int(self.config.get("max_findings", 10)))]
 
     def _persist(self, findings: List[TrajectoryFinding]) -> List[TrajectoryFinding]:
-        """Write only new keys; return the current findings for this run."""
+        """Write only new keys; return each key's canonical persisted finding."""
         stored: List[TrajectoryFinding] = []
         seen = set()
         for finding in findings:
             if finding.finding_key in seen:
                 continue
             seen.add(finding.finding_key)
-            existing = None
+            canonical = None
             try:
-                existing = state_db.get_trajectory_finding(finding.finding_key, db_path=self.db_path)
-            except Exception as exc:
-                self._log(f"[OBSERVER STORE ERROR] lookup: {type(exc).__name__}: {exc}")
-            if existing is not None:
-                stored.append(TrajectoryFinding.from_mapping(existing))
-                continue
-            row = None
-            try:
-                row = state_db.record_trajectory_finding(finding.to_mapping(), db_path=self.db_path)
+                canonical = state_db.record_trajectory_finding(
+                    finding.to_mapping(), db_path=self.db_path,
+                )
             except Exception as exc:
                 self._log(f"[OBSERVER STORE ERROR] write: {type(exc).__name__}: {exc}")
-            if row is not None:
-                stored.append(TrajectoryFinding.from_mapping(row))
+                try:
+                    canonical = state_db.get_trajectory_finding(
+                        finding.finding_key, db_path=self.db_path,
+                    )
+                except Exception:
+                    canonical = None
+            if canonical is not None:
+                stored.append(TrajectoryFinding.from_mapping(canonical))
             else:
-                stored.append(finding)  # store write failed: still report it
+                stored.append(finding)  # store unavailable: report best-effort in-memory
         return stored
 
     def _log(self, message: str) -> None:

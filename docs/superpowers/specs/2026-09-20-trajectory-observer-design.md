@@ -98,11 +98,11 @@ signals:         确定性检测结果（含 evidence 引用与事实数字）
 
 ## Dedup
 
-`finding_key = sha256(run_id | finding_type | node | agent_session_id | anchor)[:20]`；`anchor` 是本次问题“episode”的稳定起点（如 stall 前最后一事件、连续失败链首个失败事件、首次 rework 事件、日志签名）。SQLite `UNIQUE(finding_key)` + `INSERT ... ON CONFLICT DO NOTHING`，跨观察周期、跨进程重启均不重复写入。
+`finding_key = sha256(run_id | finding_type | node | agent_session_id | anchor)[:20]`；`anchor` 是本次问题“episode”的稳定起点（如 stall 前最后一事件、连续失败链首个失败事件、首次 rework 事件、日志签名）。SQLite `UNIQUE(finding_key)` + `INSERT ... ON CONFLICT DO NOTHING`，跨观察周期、跨进程重启均不重复写入。并发冲突（两个进程同时对同一 key 写入）时，写入方必须重新读取并返回 canonical persisted finding（其 `finding_id` 为准），绝不返回未持久化的本地 finding。
 
 ## Trigger
 
-- 主入口 `observe_run(run_id, task=..., store=..., provider=..., now=...) -> list[TrajectoryFinding]`（同步，CLI 与测试用）。
+- 主入口 `observe_run(run_id, task=..., store=..., provider=..., now=...) -> list[TrajectoryFinding]`（同步，CLI 与测试用）。`task` 可省略：Observer 先按 run 事件中的 `task_id`、再按持久化 task 的 `run_id` 匹配自动解析 task，从而读取 Runtime State 与日志，调用者只需 `run_id`。
 - Controller `registry_watcher` 对 `working/rework/blocked` 任务调用非阻塞 `ObservationScheduler.submit`（每 Run 最小间隔 + 调用预算 + in-flight 去重；daemon 线程）；线程内异常/超时/模型失败均被吞掉，主链路零感知。
 - 本地 kill switch：`HERDR_OBSERVER_ENABLED=0` / `observer.json` / env 数值覆盖。
 

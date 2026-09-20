@@ -1186,12 +1186,14 @@ def record_trajectory_finding(
     finding: Dict[str, Any],
     db_path: Optional[Path] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Append one analysis finding; returns None when finding_key already exists.
+    """Append one analysis finding and return the canonical persisted row.
 
     Findings are deliberately separated from trajectory events: the events
     ledger records what happened, this table records what HAFlow suspects it
-    means. ``finding_key`` is the dedup contract (UNIQUE) so re-observing one
-    issue never writes a second row.
+    means. ``finding_key`` is the dedup contract (UNIQUE): when a concurrent
+    observer already persisted the same key, the existing row is re-read and
+    returned so every caller converges on one canonical ``finding_id``.
+    Returns None only when the row cannot be read back at all.
     """
     finding_key = finding.get("finding_key")
     finding_id = finding.get("finding_id")
@@ -1234,7 +1236,11 @@ def record_trajectory_finding(
             ),
         )
         if cur.rowcount == 0:
-            return None
+            # Lost a concurrent insert race: return the canonical persisted row.
+            row = conn.execute(
+                "SELECT * FROM trajectory_findings WHERE finding_key = ?", (finding_key,)
+            ).fetchone()
+            return _decode_finding_row(row) if row is not None else None
         return get_trajectory_finding(finding_key, db_path=db_path, conn=conn)
     finally:
         conn.close()

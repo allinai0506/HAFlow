@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import copy
 import json
+import multiprocessing
 import sqlite3
 import threading
 import time
@@ -130,6 +131,49 @@ def _base_config() -> Dict[str, Any]:
     return config
 
 
+def _mp_record_worker(
+    db_path: str, finding_key: str, local_finding_id: str, barrier, results
+) -> None:
+    """Spawned worker: race two INSERTs of the same finding_key."""
+    try:
+        barrier.wait(timeout=30)
+        row = record_trajectory_finding(
+            {
+                "finding_id": local_finding_id,
+                "finding_key": finding_key,
+                "run_id": "run-race",
+                "finding_type": "repeated_failure",
+                "severity": "warning",
+                "summary": f"local {local_finding_id}",
+                "created_at": 1.0,
+            },
+            db_path=Path(db_path),
+        )
+        results.put(
+            {"ok": True, "returned": (row or {}).get("finding_id"), "local": local_finding_id}
+        )
+    except Exception as exc:  # pragma: no cover - surfaced through the queue
+        results.put({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
+
+
+def _mp_observe_worker(db_path: str, run_id: str, barrier, results) -> None:
+    """Spawned worker: race full observations of the same run."""
+    try:
+        store = SQLiteStateStore(Path(db_path))
+        barrier.wait(timeout=30)
+        findings = observer_harness.observe_run(
+            run_id, store=store, config=_base_config(), use_model=False,
+        )
+        persisted = list_trajectory_findings(run_id, db_path=Path(db_path))
+        results.put({
+            "ok": True,
+            "returned": [finding.finding_id for finding in findings],
+            "persisted": [row["finding_id"] for row in persisted],
+        })
+    except Exception as exc:  # pragma: no cover - surfaced through the queue
+        results.put({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
+
+
 # ---------------------------------------------------------------------------
 # Finding storage contract
 # ---------------------------------------------------------------------------
@@ -162,7 +206,7 @@ class TestFindingStore:
         assert [row["finding_key"] for row in rows] == ["fk_1"]
         assert get_trajectory_finding("fk_1", db_path=db_path)["run_id"] == "run-1"
 
-    def test_duplicate_finding_key_is_not_inserted_twice(self, tmp_path: Path):
+    def test_duplicate_finding_key_returns_canonical_persisted_row(self, tmp_path: Path):
         db_path = tmp_path / "state.db"
         finding = {
             "finding_id": "fnd_1",
@@ -176,8 +220,9 @@ class TestFindingStore:
         first = record_trajectory_finding(finding, db_path=db_path)
         second = record_trajectory_finding({**finding, "finding_id": "fnd_2"}, db_path=db_path)
 
-        assert first is not None
-        assert second is None
+        assert first is not None and first["finding_id"] == "fnd_1"
+        assert second is not None  # canonical persisted row, not the losing local one
+        assert second["finding_id"] == "fnd_1"
         assert len(list_trajectory_findings("run-1", db_path=db_path)) == 1
 
     def test_list_filters_by_type_and_run(self, tmp_path: Path):
@@ -1056,6 +1101,198 @@ class TestHardeningRegressions:
         monkeypatch.setattr(observer_harness_module.observer_config, "load_config", explode)
 
         assert observer_harness_module.observe_run("run-1") == []
+
+
+def _run_spawned_workers(worker, per_worker_args: List[tuple]) -> List[Dict[str, Any]]:
+    """Run one real OS process per arg tuple, all racing on a shared barrier."""
+    context = multiprocessing.get_context("spawn")
+    barrier = context.Barrier(len(per_worker_args))
+    results = context.Queue()
+    processes = [
+        context.Process(target=worker, args=(*worker_args, barrier, results))
+        for worker_args in per_worker_args
+    ]
+    for process in processes:
+        process.start()
+    try:
+        payloads = [results.get(timeout=60) for _ in processes]
+    except Exception:
+        for process in processes:
+            process.terminate()
+        raise
+    for process in processes:
+        process.join(timeout=30)
+        assert not process.is_alive(), "spawned worker did not finish"
+    return payloads
+
+
+# ---------------------------------------------------------------------------
+# run_id-only resolution (no task argument required)
+# ---------------------------------------------------------------------------
+
+
+class TestRunIdOnlyResolution:
+    def test_runtime_unavailable_resolved_from_run_id_without_task(self, tmp_path: Path):
+        store = SQLiteStateStore(tmp_path / "state.db")
+        ledger = TrajectoryLedger(store.db_path)
+        _append(ledger, [
+            {"run_id": "run-1", "event_type": "run_started", "task_id": "task-1",
+             "timestamp": 100.0},
+            {"run_id": "run-1", "event_type": "agent_started", "task_id": "task-1",
+             "timestamp": 101.0},
+        ])
+        store.save_task(_task(run_id="run-1", runtime={
+            "status": "unavailable", "agent": "claude",
+            "agent_session_id": "session-r", "pane_id": "pane-r",
+        }))
+
+        findings = observer_harness.observe_run(
+            "run-1", store=store, config=_base_config(), use_model=False,
+        )
+
+        assert [finding.finding_type for finding in findings] == ["runtime_unavailable"]
+        assert findings[0].severity == "critical"
+        assert findings[0].task_id == "task-1"
+
+    def test_evidence_log_is_read_via_run_id_only(self, tmp_path: Path):
+        store = SQLiteStateStore(tmp_path / "state.db")
+        ledger = TrajectoryLedger(store.db_path)
+        _append(ledger, [
+            {"run_id": "run-1", "event_type": "run_started", "task_id": "task-1",
+             "timestamp": 100.0},
+        ])
+        log_path = tmp_path / "terminal.log"
+        log_path.write_text(
+            "\n".join(["Error: cannot find module 'herdr'"] * 3), encoding="utf-8",
+        )
+        store.save_task(_task(
+            run_id="run-1", runtime={"status": "running", "agent": "claude"},
+            evidence=str(log_path),
+        ))
+        provider = CapturingProvider({"possible_context_problem": 0.9})
+
+        findings = observer_harness.observe_run(
+            "run-1", store=store, config=_base_config(), provider=provider,
+        )
+
+        assert provider.calls, "provider must be asked after the log signal"
+        assert provider.calls[0]["state"]["logs"][0]["ref"] == str(log_path)
+        assert [finding.finding_type for finding in findings] == ["possible_context_problem"]
+
+    def test_task_found_by_persisted_run_id_when_events_carry_no_task_id(self, tmp_path: Path):
+        store = SQLiteStateStore(tmp_path / "state.db")
+        TrajectoryLedger(store.db_path).append_event({
+            "run_id": "run-1", "event_type": "run_started", "timestamp": 100.0,
+        })
+        store.save_task(_task(
+            run_id="run-1", runtime={"status": "unavailable", "agent": "claude"},
+        ))
+
+        findings = observer_harness.observe_run(
+            "run-1", store=store, config=_base_config(), use_model=False,
+        )
+
+        assert [finding.finding_type for finding in findings] == ["runtime_unavailable"]
+
+    def test_stale_run_events_never_borrow_another_runs_runtime(self, tmp_path: Path):
+        # task was re-launched as run-new; old run-old events still carry task-1
+        store = SQLiteStateStore(tmp_path / "state.db")
+        ledger = TrajectoryLedger(store.db_path)
+        _append(ledger, [
+            {"run_id": "run-old", "event_type": "run_started", "task_id": "task-1",
+             "timestamp": 100.0},
+            _verification("run-old", False, "tevd-a"),
+            _verification("run-old", False, "tevd-b"),
+        ])
+        store.save_task(_task(
+            run_id="run-new",
+            runtime={"status": "unavailable", "agent": "claude", "pane_id": "pane-new"},
+        ))
+
+        findings = observer_harness.observe_run(
+            "run-old", store=store, config=_base_config(), use_model=False,
+        )
+
+        assert [finding.finding_type for finding in findings] == ["repeated_failure"]
+        assert all("runtime" not in item.get("type", "") for f in findings for item in f.evidence)
+
+    def test_read_failure_falls_back_to_already_persisted_canonical_finding(
+        self, tmp_path: Path, monkeypatch,
+    ):
+        store = SQLiteStateStore(tmp_path / "state.db")
+        ledger = TrajectoryLedger(store.db_path)
+        _append(ledger, [
+            {"run_id": "run-1", "event_type": "run_started", "task_id": "task-1",
+             "timestamp": 100.0},
+            _verification("run-1", False, "tevd-a"),
+            _verification("run-1", False, "tevd-b"),
+        ])
+        store.save_task(_task(run_id="run-1", runtime={"status": "running", "agent": "claude"}))
+        canonical = observer_harness.observe_run(
+            "run-1", store=store, config=_base_config(), use_model=False,
+        )
+        assert len(canonical) == 1
+        persisted_id = canonical[0].finding_id
+
+        import herdr.observer.engine as observer_engine
+
+        def explode(*args, **kwargs):
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr(observer_engine.state_db, "record_trajectory_finding", explode)
+
+        findings = observer_harness.observe_run(
+            "run-1", store=store, config=_base_config(), use_model=False,
+        )
+
+        assert [finding.finding_id for finding in findings] == [persisted_id]
+
+
+# ---------------------------------------------------------------------------
+# Concurrent dedup (true multiprocessing)
+# ---------------------------------------------------------------------------
+
+
+class TestConcurrentDedup:
+    def test_concurrent_same_key_records_converge_on_canonical_finding_id(self, tmp_path: Path):
+        db_path = tmp_path / "state.db"
+        SQLiteStateStore(db_path)  # ensure schema before forking workers
+
+        payloads = _run_spawned_workers(
+            _mp_record_worker,
+            [(str(db_path), "fk_race", f"fnd_local_{index}") for index in range(4)],
+        )
+
+        assert all(payload["ok"] for payload in payloads), payloads
+        returned = {payload["returned"] for payload in payloads}
+        rows = list_trajectory_findings("run-race", db_path=db_path)
+        assert len(rows) == 1
+        assert returned == {rows[0]["finding_id"]}
+
+    def test_concurrent_observe_run_converges_on_one_persisted_finding(self, tmp_path: Path):
+        db_path = tmp_path / "state.db"
+        store = SQLiteStateStore(db_path)
+        ledger = TrajectoryLedger(db_path)
+        _append(ledger, [
+            {"run_id": "run-1", "event_type": "run_started", "task_id": "task-1",
+             "timestamp": 100.0},
+            _verification("run-1", False, "tevd-a"),
+            _verification("run-1", False, "tevd-b"),
+            _verification("run-1", False, "tevd-c"),
+        ])
+        store.save_task(_task(run_id="run-1", runtime={"status": "running", "agent": "claude"}))
+
+        payloads = _run_spawned_workers(
+            _mp_observe_worker, [(str(db_path), "run-1")] * 4,
+        )
+
+        assert all(payload["ok"] for payload in payloads), payloads
+        rows = list_trajectory_findings("run-1", db_path=db_path)
+        assert len(rows) == 1
+        canonical_id = rows[0]["finding_id"]
+        for payload in payloads:
+            assert payload["returned"] == [canonical_id]
+            assert payload["persisted"] == [canonical_id]
 
 
 # ---------------------------------------------------------------------------
