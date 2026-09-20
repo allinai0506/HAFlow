@@ -179,9 +179,19 @@ Agent 须写 clone 外状态目录 `~/.herdr-controller/gate-verdicts/<task_id>.
 `INTERNAL_UNTRACKED_*` 过滤（commit / verify-baseline 均不计入），
 避免门禁机器产物污染交付。
 
+`FACT` **verdict 就绪即放行完成（2026-09-20 引入，lessons §73）**：门禁节点的
+`required_outputs` 是人类契约标签（如"测试结论（PASS / FAIL）"）而非仓库相对路径，
+产物就绪门禁（`check_task_deliverables_ready`，其路径语义只适用于文件型产出）对门禁节点
+必然为假。`handle_event` 的完成推迟分支现改为
+`if not check_task_deliverables_ready(task) and not gate_verdict_ready(task):` 才 DEFERRED：
+门禁任务只要 `read_gate_verdict` 返回 pass/blocked 即视为完成证据，放行
+`idle → agent_done` 进入既有 `try_auto_verdict` 收口，避免
+"[COMPLETION DEFERRED] → superseded 重跑"式的既有结论丢失。不新增状态机分支。
+
 Evidence: `herdr/direct_dispatch.py#GATE_VERDICT_CONTRACT` /
 `services/herdr-controller.py#read_gate_verdict` / `#try_auto_verdict` /
-`tests/test_auto_acceptance.py#GateVerdictUnitTest`
+`#gate_verdict_ready` / `tests/test_auto_acceptance.py#GateVerdictUnitTest` /
+`tests/test_fix_loop_anti_flapping.py#ControllerReconcileReworkTest`
 
 ## 11. 交付 PR 前置（wrapup 节点的必做步骤）
 

@@ -3200,3 +3200,109 @@ pytest -q
 - 分支 `feat/exec-context-contract-v1`
 
 ---
+
+## 73. 门禁完成门禁与 verdict 契约的上下位错配：产物就绪校验必须先问节点类型
+
+### 问题背景
+
+`wf-nexusarchive-0919-01-test-auto-r2`（门禁 test 节点）在 2026-09-20 05:50 已写出合法机器 verdict
+（`~/.herdr-controller/gate-verdicts/wf-nexusarchive-0919-01-test-auto-r2.json`：
+`{"verdict":"blocked","note":"D1-D3 阻塞：retryRecords 仍传入 null……"}`），
+但 Agent 空闲退出后 Controller 打印：
+
+```
+[COMPLETION DEFERRED] task=wf-nexusarchive-0919-01-test-auto-r2 required outputs
+['测试执行记录','缺陷清单','回归测试结果','边界条件验证情况','测试结论（PASS / FAIL）'] not ready;
+treating idle as transient think time
+```
+
+任务被锁在 working，最终只能 `status=superseded action=finalized`（日志 634138 行）后另起 `-r3` 重跑——
+§62 的自动裁决链路（verdict → `try_auto_verdict` → fix-loop 回流）根本没有机会执行。
+
+根因是两层机制各自正确、组合错位：
+
+1. §31 引入的产物就绪门禁 `check_task_deliverables_ready` 把 `required_outputs` 一律当作仓库相对路径，
+   `os.path.join(clone_path, rel)` 后 `os.path.exists` 校验；
+2. 模板里门禁节点的 `required_outputs` 是人类契约标签
+   （`workflow_templates/software-development-v1.yaml` 135-139 行），永远不可能在 clone 里落成文件——
+   `idle → agent_done` 被永久 deferred；
+3. §62 的 verdict 契约只在任务到达 `agent_done` 后才被 `try_auto_verdict` 消费，
+   于是"产物路径门禁"把"verdict 契约"的整条上位流程饿死。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 产物路径门禁对门禁节点永远为假 | 同一字段（`required_outputs`）在 agent 节点是文件路径、在 gate 节点是契约标签；完成判定必须先分节点语义，再选证据形态 | 门禁节点（`node_is_gate`）在产物就绪门禁上让位于机器可读 verdict：合法 pass/blocked 即视为完成证据 |
+| 契约化结论被上游门禁饿死 | 新增"机器可采纳产出物"（§62 verdict）时必须审视链路上所有就绪门禁是否认识这种形态，否则契约永远到不了消费点 | 引入新的完成证据形态时，先枚举 `idle → agent_done` 的全部前置条件并逐一适配 |
+| 门禁任务被 superseded 而非收口 | 被 deferred 卡死的门禁任务以"重跑新任务"代替"消费已有结论"，同一结论被重复生产 | verdict 就绪即放行 `agent_done`，复用既有 `try_auto_verdict` 收口 |
+
+### 操作规范（已固化到 `services/herdr-controller.py#gate_verdict_ready`）
+
+1. `handle_event` 的完成物推迟分支改为
+   `if not check_task_deliverables_ready(task) and not verdict_ready:`，
+   其中 `gate_verdict_ready(task)` 要求：任务属于门禁节点（`node_is_gate`）且
+   `read_gate_verdict` 返回 pass/blocked；
+2. 门禁节点不新增状态机分支：verdict 就绪只是放行 `idle → agent_done`，
+   后续仍走既有 `emit_done_if_allowed` / `try_auto_verdict` 裁决与 fix-loop 回流；
+3. 修改门禁语义时必须同时检查 `check_task_deliverables_ready` 与 `gate_verdict_ready` 两处判定，
+   不允许只改一处。
+
+### 验证命令 / 证据
+
+```bash
+python3 -m unittest tests.test_fix_loop_anti_flapping -v
+# 期望：5 passed（含 test_idle_gate_verdict_closes_gate_task_without_literal_output_files）
+```
+
+- 现场证据：`~/.herdr-controller/logs/controller.out.log:632907`（COMPLETION DEFERRED）、
+  `:634138`（superseded）、`~/.herdr-controller/gate-verdicts/wf-nexusarchive-0919-01-test-auto-r2.json`（05:50 已写出的 blocked verdict）
+- PR #67 commit `2427e5c`、`tests/test_fix_loop_anti_flapping.py#ControllerReconcileReworkTest`
+
+---
+
+## 74. 可执行脚本 sys.path bootstrap 第二次复发：死 fallback import 掩盖断裂，复发即升格自动门禁
+
+### 问题背景
+
+§36 已固化规范"独立执行的守护脚本必须在顶部显式注入 `HERDR_ROOT` 到 `sys.path`"，
+但当次只修了 `services/herdr-sentinel.py`（配套一条 sentinel 专项用例）。#64（`f4754b9`）
+为 `services/herdr-worker.py` 引入 `from herdr.git_coordination import ensure_branch_available` 时：
+
+1. 没有复刻 bootstrap；
+2. 写了 `except ImportError: from herdr_git_coordination import ...` 的回退——而
+   `services/herdr_git_coordination.py` 在仓库里根本不存在，回退等价于掩埋。
+
+生产路径 `bin/herdr-task:1525` 用 `subprocess.run(worker_cmd)` 以脚本方式从任意 cwd 拉起 worker，
+`sys.path[0]` 只有 `services/`：主 import 失败 → 死回退也失败 → worker 直接崩溃。
+测试侧 `tests/test_herdr_worker.py` 用 importlib 从仓库根加载模块，sys.path 恰好包含仓库根，
+任何测试都不会变红——断裂从 #64 合入后一直静默存在，直到 PR #67（`21feb5e`）才补上。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 同一规范第二次复发（sentinel → worker） | 只修单点、不升格门禁，第二条同构路径必然再次断裂 | 复发即升格：新增 `tests/test_script_bootstrap.py` AST 静态巡检 `bin/*` 与 `services/*.py`，凡 import `herdr` 的脚本必须在其前注入 repo root；纯标准库脚本（如 `herdr-notifier.py`）自动豁免 |
+| 死 fallback import 把硬失败变成隐形炸弹 | `except ImportError` 回退到不存在的模块 = 没有回退；测试加载路径又恰好绕开真实执行路径时，故障在提交时不可见 | fallback 目标必须真实存在且有测试覆盖；独立执行路径必须有"以脚本方式、从外部 cwd、剥离 PYTHONPATH"的冒烟测试 |
+| 测试导入路径 ≠ 生产执行路径 | importlib 加载模块会注入仓库根到 sys.path，掩盖脚本独立执行时的路径差异 | 守护进程/入口脚本类改动，验证必须包含真实子进程启动（如 `python3 services/herdr-worker.py --help`，cwd 在仓库外） |
+
+### 操作规范（已固化到 `tests/test_script_bootstrap.py`）
+
+1. 新增可执行入口脚本（`bin/`、`services/`）一旦 import `herdr`，必须复刻头部：
+   `HERDR_ROOT = Path(__file__).resolve().parent.parent` + `sys.path.insert(0, str(HERDR_ROOT))`；
+   静态巡检以 AST 检查"bootstrap 语句先于第一个 herdr import"；
+2. 禁止指向不存在模块的 fallback import；回退分支必须有真实实现并被测试覆盖；
+3. worker 另配功能冒烟：剥离 PYTHONPATH、cwd 在仓库外执行 `--help` 必须 exit 0。
+
+### 验证命令 / 证据
+
+```bash
+pytest tests/test_script_bootstrap.py -q        # 期望：2 passed（静态巡检 + worker 冒烟）
+python3 -m unittest tests.test_script_bootstrap # 无 pytest 环境等价执行
+```
+
+- PR #67 commit `21feb5e fix(worker): import herdr.git_coordination on standalone launch`
+- 先例：§36 行"后台守护服务启动环境依赖脆弱"；
+  `tests/test_state_transition_gateway.py#test_sentinel_directly_bootstraps_and_imports_herdr_without_pythonpath`
+
+---
