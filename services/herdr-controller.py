@@ -3321,6 +3321,24 @@ def check_task_deliverables_ready(task):
     return False
 
 
+def gate_verdict_ready(task):
+    """Return whether a gate task has a valid machine-readable verdict.
+
+    Gate ``required_outputs`` are human-facing contract labels (for example,
+    ``测试结论（PASS / FAIL）``), not repository-relative file paths. A valid
+    verdict is therefore independent evidence that lets an idle gate task reach
+    the normal ``agent_done`` -> auto-verdict/finalize flow.
+    """
+    workflow_id = task.get("workflow_id")
+    node_id = task.get("node") or task.get("stage")
+    if not workflow_id or not node_id:
+        return False
+    if not node_is_gate(workflow_id, node_id):
+        return False
+    verdict, _, _ = read_gate_verdict(task)
+    return verdict in ("pass", "blocked")
+
+
 def _supervisor_pane_report(task):
     """Agent done report source: bounded pane read, best-effort (never raises)."""
     pane_id = task.get("pane_id")
@@ -3668,7 +3686,8 @@ def handle_event(task_id, agent_status):
                     pass
 
             if req_outputs and not has_done_marker:
-                if not check_task_deliverables_ready(task):
+                verdict_ready = gate_verdict_ready(task)
+                if not check_task_deliverables_ready(task) and not verdict_ready:
                     print(
                         f"[COMPLETION DEFERRED] "
                         f"task={task_id} "

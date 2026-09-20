@@ -168,7 +168,48 @@ class ControllerReconcileReworkTest(unittest.TestCase):
 
             mock_set_status.assert_not_called()
 
+    def test_idle_gate_verdict_closes_gate_task_without_literal_output_files(self):
+        """A gate verdict is sufficient evidence when required_outputs are prose labels.
+
+        Workflow templates describe gate outputs in human-readable Chinese labels,
+        not repository-relative filenames. Once the agent has written a valid
+        machine-readable verdict, an idle agent must be allowed to reach
+        agent_done so the normal auto-verdict path can finalize it.
+        """
+        import importlib
+        controller_mod = importlib.import_module("services.herdr-controller")
+
+        task_id = "test-gate-verdict-close"
+        task_data = {
+            "task_id": task_id,
+            "status": "working",
+            "pane_id": "w1:p5",
+            "workflow_id": "wf-01",
+            "node": "test",
+            "stage": "test",
+            "clone_path": "/tmp/test-clone-dummy",
+        }
+        mock_wf_cfg = {
+            "nodes": [
+                {
+                    "id": "test",
+                    "required_outputs": ["测试执行记录", "测试结论（PASS / FAIL）"],
+                }
+            ]
+        }
+
+        with patch.object(controller_mod, "get_task", return_value=task_data), \
+             patch.object(controller_mod, "workflow_config_for", return_value=mock_wf_cfg), \
+             patch.object(controller_mod, "check_task_deliverables_ready", return_value=False), \
+             patch.object(controller_mod, "read_gate_verdict", return_value=("blocked", "T2-T12 缺失", "file")), \
+             patch.object(controller_mod, "set_task_status", return_value=True) as mock_set_status, \
+             patch.object(controller_mod, "emit_done_if_allowed") as mock_emit_done:
+
+            controller_mod.handle_event(task_id, "idle")
+
+        mock_set_status.assert_called_once_with(task_id, "agent_done")
+        mock_emit_done.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()
-
