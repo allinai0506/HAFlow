@@ -41,6 +41,11 @@ try:
         sync_tasks_projection,
         sync_workflows_projection,
     )
+    from herdr.trajectory import (
+        TrajectoryLedger,
+        new_run_id,
+        record_trajectory_event_best_effort,
+    )
 except ImportError:
     from herdr_pane_pool import acquire_pane_for_task
     from herdr_agent_router import choose_agent, release_agent_reservation
@@ -66,6 +71,11 @@ except ImportError:
         get_state_store,
         sync_tasks_projection,
         sync_workflows_projection,
+    )
+    from herdr.trajectory import (
+        TrajectoryLedger,
+        new_run_id,
+        record_trajectory_event_best_effort,
     )
 
 try:
@@ -1155,6 +1165,7 @@ def add_task(args):
     task = {
         "task_id": args.task_id,
         "workflow_id": args.workflow_id,
+        "run_id": new_run_id(),
         "node": node_id,
         "stage": node_id,
         "workspace_id": args.workspace,
@@ -1175,6 +1186,14 @@ def add_task(args):
 
     data["tasks"].append(task)
     save_tasks(data)
+
+    trajectory_ledger = TrajectoryLedger(getattr(_get_store(), "db_path", None))
+    record_trajectory_event_best_effort(
+        task, "run_started", ledger=trajectory_ledger, status="pending"
+    )
+    record_trajectory_event_best_effort(
+        task, "task_started", ledger=trajectory_ledger, status="pending"
+    )
 
     print(f"Task registered: {args.task_id}")
 
@@ -1662,6 +1681,20 @@ def _launch_task(args):
 
     data["tasks"].append(task)
     save_tasks(data)
+
+    trajectory_ledger = TrajectoryLedger(getattr(_get_store(), "db_path", None))
+    record_trajectory_event_best_effort(
+        task, "run_started", ledger=trajectory_ledger, status="pending"
+    )
+    record_trajectory_event_best_effort(
+        task, "task_started", ledger=trajectory_ledger, status="pending"
+    )
+    record_trajectory_event_best_effort(
+        task,
+        "agent_started",
+        ledger=trajectory_ledger,
+        status=(task.get("runtime") or {}).get("status") or "running",
+    )
 
     release_agent_reservation(
         args.task_id

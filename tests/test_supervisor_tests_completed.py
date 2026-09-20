@@ -35,6 +35,7 @@ from herdr.supervisor.evaluation import (
     latest_tests_completed_evidence_id,
 )
 from herdr.supervisor.state import build_supervisor_state
+from herdr.trajectory import TrajectoryLedger
 
 
 class _MockProvider(DecisionProvider):
@@ -173,6 +174,13 @@ class TestsCompletedCheckpointSuite(unittest.TestCase):
         self.assertEqual(len(test_events), 1)
         self.assertEqual(test_events[0]["payload"]["total_tests"], 10)
         self.assertEqual(test_events[0]["payload"]["passed_tests"], 10)
+
+        trajectory_events = TrajectoryLedger(self.db_path).list_events("run_task-a")
+        self.assertEqual([event["event_type"] for event in trajectory_events], [
+            "verification_completed",
+        ])
+        self.assertEqual(trajectory_events[0]["verification"]["type"], "tests_completed")
+        self.assertTrue(trajectory_events[0]["verification"]["passed"])
 
         # Check that evaluation was recorded with evidence_id in metadata
         eval_events = [e for e in events if e.get("event_type") == EVALUATION_EVENT]

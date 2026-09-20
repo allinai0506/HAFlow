@@ -27,6 +27,7 @@ try:
     )
     from herdr.workflow import find_node, get_ready_nodes, is_workflow_completed, normalize_workflow
     from herdr.state_store import get_state_store
+    from herdr.trajectory import TrajectoryLedger, record_trajectory_event_best_effort
     from herdr import liveness
 except ImportError:
     from herdr_projects import (
@@ -35,6 +36,7 @@ except ImportError:
     )
     from herdr_workflow import find_node, get_ready_nodes, is_workflow_completed, normalize_workflow
     from herdr_state_store import get_state_store
+    from herdr.trajectory import TrajectoryLedger, record_trajectory_event_best_effort
     from herdr import liveness
 
 try:
@@ -3600,6 +3602,23 @@ def check_task_tests_completed(task, store=None, now=None):
             node_id=task.get("node") or task.get("stage"),
             agent_id=task.get("agent"),
             source="herdr-controller",
+        )
+        record_trajectory_event_best_effort(
+            task,
+            "verification_completed",
+            ledger=TrajectoryLedger(getattr(st, "db_path", None)),
+            verification={
+                "type": "tests_completed",
+                "passed": (
+                    test_evidence.get("failing_count", 0) == 0
+                    and test_evidence.get("lint_errors", 0) == 0
+                    and test_evidence.get("type_errors", 0) == 0
+                ),
+                "evidence_id": evidence_id,
+                "passed_tests": test_evidence.get("passed_tests"),
+                "total_tests": test_evidence.get("total_tests"),
+                "failing_count": test_evidence.get("failing_count", 0),
+            },
         )
     except Exception as exc:
         print(f"[TESTS_COMPLETED EVENT ERROR] task={task_id}: {exc}")

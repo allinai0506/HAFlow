@@ -20,6 +20,7 @@ from herdr.transitions import (
 from herdr.state_store import get_state_store, reset_state_store, SQLiteStateStore
 from herdr import state_db
 from herdr import kernel
+from herdr.trajectory import TrajectoryLedger
 
 
 @pytest.fixture
@@ -139,6 +140,69 @@ class TestStateTransitionGateway:
         assert ev["payload"]["to_status"] == "dispatched"
         assert ev["payload"]["reason"] == "coordinator dispatched task"
         assert ev["payload"]["pane_id"] == "p-100"
+
+    def test_transition_task_appends_ordered_trajectory_facts(self, clean_store):
+        store, db_path, _ = clean_store
+        store.save_task({
+            "task_id": "t-ledger-01",
+            "workflow_id": "wf-ledger-01",
+            "node": "implementation",
+            "stage": "implementation",
+            "agent": "claude",
+            "run_id": "run-ledger-01",
+            "runtime": {
+                "agent_session_id": "session-ledger-01",
+                "agent_name": "implementation-agent",
+                "workspace_id": "workspace-ledger-01",
+                "tab_id": "tab-ledger-01",
+                "pane_id": "pane-ledger-01",
+            },
+            "status": "pending",
+        })
+
+        for status in ("dispatched", "working", "agent_done", "completed"):
+            kernel.transition_task(
+                task_id="t-ledger-01",
+                to_status=status,
+                reason="ledger integration test",
+                store=store,
+            )
+
+        events = TrajectoryLedger(db_path).list_events("run-ledger-01")
+
+        assert [event["event_type"] for event in events] == [
+            "task_status_changed",
+            "task_status_changed",
+            "task_status_changed",
+            "task_status_changed",
+            "task_completed",
+            "run_completed",
+        ]
+        assert [event["sequence"] for event in events] == list(range(1, 7))
+        assert events[-1]["status"] == "completed"
+        assert events[0]["agent_session_id"] == "session-ledger-01"
+
+    def test_legacy_task_uses_stable_run_id_and_records_failure(self, clean_store):
+        store, db_path, _ = clean_store
+        store.save_task({
+            "task_id": "legacy-failure",
+            "workflow_id": "wf-legacy",
+            "node": "implementation",
+            "status": "pending",
+        })
+
+        kernel.transition_task("legacy-failure", "dispatched", "dispatch", store=store)
+        kernel.transition_task("legacy-failure", "failed", "agent crashed", store=store)
+
+        events = TrajectoryLedger(db_path).list_events("run_legacy-failure")
+
+        assert [event["event_type"] for event in events] == [
+            "task_status_changed",
+            "task_status_changed",
+            "task_failed",
+            "run_failed",
+        ]
+        assert events[-1]["metadata"]["reason"] == "agent crashed"
 
     def test_transition_task_illegal_rejected_and_no_event(self, clean_store):
         store, db_path, _ = clean_store
@@ -580,7 +644,7 @@ class TestStateTransitionGateway:
         }
         store.save_task(task)
 
-        for protected_field in ["task_id", "workflow_id", "status", "created_at", "updated_at"]:
+        for protected_field in ["task_id", "workflow_id", "run_id", "status", "created_at", "updated_at"]:
             with pytest.raises(ValueError, match="Cannot overwrite protected task fields via metadata"):
                 kernel.transition_task(
                     task_id="t-gw-prot",
@@ -1321,9 +1385,5 @@ class TestStateTransitionGateway:
         )
         assert res["ok"] is True
         assert store.get_workflow("wf-auto-created")["status"] == "running"
-
-
-
-
 
 

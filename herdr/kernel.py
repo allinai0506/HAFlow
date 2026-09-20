@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional, Set
 from . import workflow
 from . import state_db
 from . import runtime_state
+from .trajectory import TrajectoryLedger, record_trajectory_event_best_effort
 from .state_store import (
     get_state_store,
     StateStore,
@@ -142,13 +143,13 @@ def transition_task(
     """State Transition Gateway: Atomically transition task status and append WorkflowEvent."""
     s = _get_store(store)
     meta = dict(metadata or {})
+    try:
+        current = s.get_task(task_id)
+    except Exception:
+        current = None
     # RuntimeState follows the task transition inside the same atomic write:
     # record-only, never influences the transition outcome itself.
     if "runtime" not in meta:
-        try:
-            current = s.get_task(task_id)
-        except Exception:
-            current = None
         if current is not None:
             updated_runtime = runtime_state.transition_runtime(current, to_status)
             if updated_runtime is not None:
@@ -162,6 +163,57 @@ def transition_task(
         force=force,
     )
     sync_tasks_projection(store=s)
+
+    # Historical trajectory is best-effort and strictly after the existing
+    # transition. It must never change the state-machine result.
+    if current is not None and res.get("old_status") != res.get("new_status"):
+        trajectory_task = dict(current)
+        trajectory_task.update(meta)
+        trajectory_task["status"] = to_status
+        ledger = TrajectoryLedger(getattr(s, "db_path", None))
+        trajectory_metadata = {
+            "from_status": res.get("old_status"),
+            "to_status": res.get("new_status"),
+            "reason": reason,
+            "source": source,
+        }
+        record_trajectory_event_best_effort(
+            trajectory_task,
+            "task_status_changed",
+            ledger=ledger,
+            status=to_status,
+            metadata=trajectory_metadata,
+        )
+        if to_status == "completed":
+            record_trajectory_event_best_effort(
+                trajectory_task,
+                "task_completed",
+                ledger=ledger,
+                status=to_status,
+                metadata=trajectory_metadata,
+            )
+            record_trajectory_event_best_effort(
+                trajectory_task,
+                "run_completed",
+                ledger=ledger,
+                status=to_status,
+                metadata=trajectory_metadata,
+            )
+        elif to_status == "failed":
+            record_trajectory_event_best_effort(
+                trajectory_task,
+                "task_failed",
+                ledger=ledger,
+                status=to_status,
+                metadata=trajectory_metadata,
+            )
+            record_trajectory_event_best_effort(
+                trajectory_task,
+                "run_failed",
+                ledger=ledger,
+                status=to_status,
+                metadata=trajectory_metadata,
+            )
     return res
 
 
@@ -614,6 +666,3 @@ def fork_workflow_from_checkpoint(
     sync_workflows_projection(store=store)
     sync_tasks_projection(store=store)
     return res
-
-
-
