@@ -56,7 +56,7 @@ bounded 日志尾部(existing evidence) ──┼─► ObservationContext(有�
 2. **脱敏**：日志在 `read_log_tail` 读取时即 `redact_text`；Provider question、`metadata.facts`、evidence excerpt/signature 落库前再做防御性脱敏；密钥形状内容不离开进程。
 3. **模型边界**：Jev 契约仅支持 noul/score/choice，Observer 采用「规则检测 → noul 批量确认/否决」映射，不解析自由文本；`requires_confirmation=false` 的证据型 signal 在 Provider 不可用时仍产出，弱 signal 无确认则不产出（宁可不报）。
 4. **去重与升级**：`finding_key = sha256(run_id|finding_type|node|agent_session_id|anchor)`，anchor 是本次问题 episode 的稳定起点；SQLite `UNIQUE(finding_key)` + `ON CONFLICT DO UPDATE`——重复观察不新增第二条 Finding，同一 episode 原地刷新 severity/summary/evidence/原因/建议/置信度（如失败链 2→4 次 warning→critical），`finding_id`/`created_at` 保持 canonical，低 severity 观察不降级既有行；并发冲突后重新读取并返回 canonical persisted finding。
-5. **Live 真实性**：persisted `task["runtime"]` 之外增加只读 live 探测——`pane list` 成功枚举但缺少该 pane 才是 `unavailable`，超时/非零/解析失败一律 `unknown`；live Pane transcript 优先于 finalization 才出现的 `task["evidence"]`，读取失败回退文件；两者都只在 daemon worker 线程执行（probe ≤2s、transcript ≤3s），绝不进入 controller 主轮询。
+5. **Live 真实性**：persisted `task["runtime"]` 之外增加只读 live 探测——显式 `pane_not_found`、persisted/live `agent_session_id` 不一致（`identity_mismatch`）、或原 Run 有 Agent 而 `agent get` 显式 `agent_not_found` 才是 `unavailable`；timeout/daemon/parse/身份信息不足一律 `unknown`（绝不当 unavailable）。live Pane transcript 必须通过同一身份 guard（`available` 才允许 `pane read`），优先于 finalization 才出现的 `task["evidence"]`，未确认身份或读取失败回退文件；两者都只在 daemon worker 线程执行（probe ≤2s、transcript ≤3s），绝不进入 controller 主轮询。
 6. **失败隔离**：`observe_run` 顶层 try/except 永不外抛；调度器 daemon 线程与 controller 轮询物理隔离；只写 `trajectory_findings` 表，绝不触碰 Task/Workflow/Runtime/events。
 7. **Hard budget**：`_fit_budget` 递归 clamp 嵌套字段并按序删除低优先级块，最终 serialized ≤ `max(500, max_context_size)`；最小 identity（run_id + signal 类型）在任何输入下都保留。
 8. **CLI 契约**：`--task-id`/`--run-id` 互斥（禁止跨 Run 混用身份）；`--json` 的 stdout 只允许 JSON，诊断全部走 stderr，Provider 失败时仍 exit 0。
@@ -70,7 +70,7 @@ bounded 日志尾部(existing evidence) ──┼─► ObservationContext(有�
 | `interval` | 300 | 每个 Run 最小观察间隔（RateGate） |
 | `max_calls_per_run` | 24 | 单 Run 观察预算上限 |
 | `recent_events` / `verification_events` | 50 / 5 | Provider 窗口大小 |
-| `max_context_size` | 8000 | 序列化预算（下限 500） |
+| `max_context_size` | 8000 | 序列化预算（**最小 500，load_config 显式 clamp**） |
 | `confidence_threshold` | 0.6 | 模型确认阈值 |
 | `stall_after_seconds` | 1800 | 停滞 signal 阈值（只产生 warning，除非叠加 ≥3 连续验证失败） |
 | `repeated_failure_min` / `repeated_action_min` / `no_progress_min_reworks` / `log_repeat_min` | 2/3/3/3 | 各信号最小事实计数 |

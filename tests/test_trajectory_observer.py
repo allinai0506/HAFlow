@@ -1319,12 +1319,26 @@ class _StubRunner:
         return (1, "", "no stub for command")
 
 
-def _pane_list_payload(*pane_ids: str) -> str:
+def _pane_payload(*pane_ids: str) -> str:
     return json.dumps({"result": {"panes": [{"pane_id": pane_id} for pane_id in pane_ids]}})
 
 
-def _agent_payload(status: str) -> str:
-    return json.dumps({"result": {"agent": {"agent_status": status}}})
+def _pane_info(session: Optional[str] = None, pane_id: str = "pane-x") -> str:
+    pane: Dict[str, Any] = {"pane_id": pane_id}
+    if session is not None:
+        pane["agent_session"] = session
+    return json.dumps({"result": {"pane": pane}})
+
+
+def _agent_info(status: str = "working", session: Optional[str] = None) -> str:
+    agent: Dict[str, Any] = {"agent_status": status, "agent": "claude"}
+    if session is not None:
+        agent["agent_session"] = session
+    return json.dumps({"result": {"agent": agent}})
+
+
+def _error_payload(code: str) -> str:
+    return json.dumps({"error": {"code": code, "message": code}})
 
 
 class TestLiveRuntimeProbe:
@@ -1395,58 +1409,203 @@ class TestLiveRuntimeProbe:
         assert store.get_task("task-1")["status"] == "working"
         assert len(store.list_events(task_id="task-1")) == len(events_before)
 
-    def test_probe_live_runtime_translates_herdr_results(self):
+    def test_probe_live_runtime_validates_identity(self):
         from herdr.observer import live as observer_live
 
-        task = _task(runtime={"status": "running", "pane_id": "pane-x",
-                              "workspace_id": "ws-1"})
+        session_task = _task(runtime={
+            "status": "running", "pane_id": "pane-x", "workspace_id": "ws-1",
+            "agent_session_id": "session-A", "agent_name": "agent-x",
+        })
+        legacy_task = _task(runtime={"status": "running", "pane_id": "pane-x",
+                                     "workspace_id": "ws-1"})
 
         missing = observer_live.probe_live_runtime(
-            task,
+            session_task,
             runner=_StubRunner({
-                "pane list": (0, _pane_list_payload("other"), ""),
-                "pane get": (1, "", "pane not found"),
+                "pane list": (0, _pane_payload("other"), ""),
+                "pane get": (1, _error_payload("pane_not_found"), ""),
+            }),
+        )
+        match = observer_live.probe_live_runtime(
+            session_task,
+            runner=_StubRunner({
+                "pane list": (0, _pane_payload("pane-x"), ""),
+                "pane get": (0, _pane_info("session-A"), ""),
+            }),
+        )
+        mismatch = observer_live.probe_live_runtime(
+            session_task,
+            runner=_StubRunner({
+                "pane list": (0, _pane_payload("pane-x"), ""),
+                "pane get": (0, _pane_info("session-B"), ""),
+            }),
+        )
+        agent_not_found = observer_live.probe_live_runtime(
+            session_task,
+            runner=_StubRunner({
+                "pane list": (0, _pane_payload("pane-x"), ""),
+                "pane get": (0, _pane_info(), ""),
+                "agent get": (1, _error_payload("agent_not_found"), ""),
+            }),
+        )
+        insufficient = observer_live.probe_live_runtime(
+            session_task,
+            runner=_StubRunner({
+                "pane list": (0, _pane_payload("pane-x"), ""),
+                "pane get": (0, _pane_info(), ""),
+                "agent get": (0, _agent_info("idle"), ""),
+            }),
+        )
+        agent_garbage = observer_live.probe_live_runtime(
+            session_task,
+            runner=_StubRunner({
+                "pane list": (0, _pane_payload("pane-x"), ""),
+                "pane get": (0, _pane_info(), ""),
+                "agent get": (0, "not json", ""),
+            }),
+        )
+        agent_schema_drift = observer_live.probe_live_runtime(
+            session_task,
+            runner=_StubRunner({
+                "pane list": (0, _pane_payload("pane-x"), ""),
+                "pane get": (0, _pane_info(), ""),
+                "agent get": (0, json.dumps({"result": {}}), ""),
             }),
         )
         stale_workspace = observer_live.probe_live_runtime(
-            task,
+            legacy_task,
             runner=_StubRunner({
-                "pane list": (0, _pane_list_payload("other"), ""),
-                "pane get": (0, json.dumps({"result": {"pane": {"pane_id": "pane-x"}}}), ""),
-            }),
-        )
-        unresolved = observer_live.probe_live_runtime(
-            task,
-            runner=_StubRunner({
-                "pane list": (0, _pane_list_payload("other"), ""),
-                "pane get": TimeoutError("timeout"),
-            }),
-        )
-        alive = observer_live.probe_live_runtime(
-            task,
-            runner=_StubRunner({
-                "pane list": (0, _pane_list_payload("pane-x"), ""),
-                "agent get": (0, _agent_payload("working"), ""),
+                "pane list": (0, _pane_payload("other"), ""),
+                "pane get": (0, _pane_info("session-A"), ""),
             }),
         )
         list_failed = observer_live.probe_live_runtime(
-            task, runner=_StubRunner({"pane list": (1, "", "daemon down")}),
+            session_task, runner=_StubRunner({"pane list": (1, "", "daemon down")}),
         )
         timed_out = observer_live.probe_live_runtime(
-            task, runner=_StubRunner({"pane list": TimeoutError("timeout")}),
+            session_task, runner=_StubRunner({"pane list": TimeoutError("timeout")}),
+        )
+        unparseable = observer_live.probe_live_runtime(
+            session_task,
+            runner=_StubRunner({
+                "pane list": (0, _pane_payload("pane-x"), ""),
+                "pane get": (0, "not json", ""),
+            }),
         )
         no_pane = observer_live.probe_live_runtime(
             _task(runtime={"status": "running"}), runner=_StubRunner({}),
         )
 
         assert missing["status"] == "unavailable" and missing["reason"] == "pane_missing"
+        assert match["status"] == "available" and match["reason"] == "identity_match"
+        assert mismatch["status"] == "unavailable" and mismatch["reason"] == "identity_mismatch"
+        assert agent_not_found["status"] == "unavailable"
+        assert agent_not_found["reason"] == "agent_not_found"
+        assert insufficient["status"] == "unknown"
+        assert insufficient["reason"] == "insufficient_identity"
+        assert agent_garbage["status"] == "unknown"
+        assert agent_garbage["reason"] == "agent_payload_invalid"
+        assert agent_schema_drift["status"] == "unknown"
+        assert agent_schema_drift["reason"] == "agent_payload_invalid"
         assert stale_workspace["status"] == "available"
-        assert stale_workspace["reason"] == "pane_in_other_workspace"
-        assert unresolved["status"] == "unknown"
-        assert alive["status"] == "available" and alive["agent_status"] == "working"
+        assert stale_workspace["workspace_mismatch"] is True
         assert list_failed["status"] == "unknown"
         assert timed_out["status"] == "unknown"
+        assert unparseable["status"] == "unknown"
         assert no_pane["status"] == "unknown"
+
+
+# ---------------------------------------------------------------------------
+# Runtime identity guard (probe + transcript must never cross runs)
+# ---------------------------------------------------------------------------
+
+
+class TestRuntimeIdentityGuard:
+    def _setup(self, tmp_path: Path):
+        store = SQLiteStateStore(tmp_path / "state.db")
+        ledger = TrajectoryLedger(store.db_path)
+        _append(ledger, [
+            {"run_id": "run-1", "event_type": "run_started", "task_id": "task-1",
+             "timestamp": 100.0},
+            {"run_id": "run-1", "event_type": "agent_started", "task_id": "task-1",
+             "timestamp": 101.0},
+        ])
+        task = _task(run_id="run-1", runtime={
+            "status": "running", "agent": "claude", "pane_id": "pane-x",
+            "workspace_id": "ws-1", "agent_session_id": "session-A",
+        })
+        store.save_task(task)
+        return store, task
+
+    def _observe(self, store, task, stub):
+        from herdr.observer import live as observer_live
+
+        config = {**_base_config(), "live_probe": True}
+        return observer_harness.observe_run(
+            "run-1",
+            task=task,
+            store=store,
+            config=config,
+            use_model=False,
+            runtime_probe=lambda probe_task: observer_live.probe_live_runtime(
+                probe_task, runner=stub,
+            ),
+            transcript_reader=lambda reader_task: observer_live.read_live_transcript(
+                reader_task, config, runner=stub,
+            ),
+        )
+
+    @staticmethod
+    def _pane_read_called(stub) -> bool:
+        return any(list(argv[:2]) == ["pane", "read"] for argv, _ in stub.calls)
+
+    def test_identity_mismatch_marks_runtime_unavailable_and_skips_pane_read(self, tmp_path: Path):
+        store, task = self._setup(tmp_path)
+        stub = _StubRunner({
+            "pane list": (0, _pane_payload("pane-x"), ""),
+            "pane get": (0, _pane_info("session-B"), ""),
+            "pane read": (0, "Error: cannot find module 'herdr'\n" * 3, ""),
+        })
+
+        findings = self._observe(store, task, stub)
+
+        assert [finding.finding_type for finding in findings] == ["runtime_unavailable"]
+        assert any(item.get("type") == "runtime_live" and item.get("reason") == "identity_mismatch"
+                   for item in findings[0].evidence)
+        assert not self._pane_read_called(stub)
+
+    def test_agent_not_found_marks_runtime_unavailable(self, tmp_path: Path):
+        store, task = self._setup(tmp_path)
+        stub = _StubRunner({
+            "pane list": (0, _pane_payload("pane-x"), ""),
+            "pane get": (0, _pane_info(), ""),
+            "agent get": (1, _error_payload("agent_not_found"), ""),
+            "pane read": (0, "should not be read", ""),
+        })
+
+        findings = self._observe(store, task, stub)
+
+        assert [finding.finding_type for finding in findings] == ["runtime_unavailable"]
+        assert any(item.get("reason") == "agent_not_found" for item in findings[0].evidence)
+        assert not self._pane_read_called(stub)
+
+    def test_unknown_identity_is_never_unavailable_and_never_reads_pane(self, tmp_path: Path):
+        store, task = self._setup(tmp_path)
+        timed_out = _StubRunner({
+            "pane list": TimeoutError("identity probe timeout"),
+            "pane read": (0, "should not be read", ""),
+        })
+        unparseable = _StubRunner({
+            "pane list": (0, _pane_payload("pane-x"), ""),
+            "pane get": (0, "not json", ""),
+            "pane read": (0, "should not be read", ""),
+        })
+
+        assert self._observe(store, task, timed_out) == []
+        assert self._observe(store, task, unparseable) == []
+        assert not self._pane_read_called(timed_out)
+        assert not self._pane_read_called(unparseable)
+        assert store.get_task("task-1")["status"] == "working"
 
 
 # ---------------------------------------------------------------------------
@@ -1550,24 +1709,24 @@ class TestLiveTranscript:
         secret = "ghp_abcdef1234567890secret"
         raw = "\n".join([f"line {index} padding" for index in range(5000)])
         raw += f"\nError: token={secret} denied\n" * 3
-        runner = _StubRunner({"pane read": (0, raw, "")})
+        identity_stub = {"pane get": (0, _pane_info("sess-9", pane_id="pane-9"), "")}
+        runner = _StubRunner({**identity_stub, "pane read": (0, raw, "")})
         config = {
             **_base_config(),
             "log_tail_lines": 50,
             "log_tail_chars": 300,
             "log_tail_bytes": 4096,
         }
+        task = _task(runtime={"pane_id": "pane-9", "agent_session_id": "sess-9"})
 
-        tail = observer_live.read_live_transcript(
-            _task(runtime={"pane_id": "pane-9"}), config, runner=runner,
-        )
+        tail = observer_live.read_live_transcript(task, config, runner=runner)
         failed = observer_live.read_live_transcript(
-            _task(runtime={"pane_id": "pane-9"}), config,
-            runner=_StubRunner({"pane read": (1, "", "gone")}),
+            task, config,
+            runner=_StubRunner({**identity_stub, "pane read": (1, "", "gone")}),
         )
         crashed = observer_live.read_live_transcript(
-            _task(runtime={"pane_id": "pane-9"}), config,
-            runner=_StubRunner({"pane read": TimeoutError("timeout")}),
+            task, config,
+            runner=_StubRunner({**identity_stub, "pane read": TimeoutError("timeout")}),
         )
 
         assert tail is not None
@@ -1588,16 +1747,19 @@ class TestLiveTranscript:
              "timestamp": 100.0},
         ])
         task = _task(run_id="run-1", runtime={"status": "running", "agent": "claude",
-                                              "pane_id": "pane-9"})
+                                              "pane_id": "pane-9",
+                                              "agent_session_id": "sess-9"})
         store.save_task(task)
         raw = "\n".join([f"Error: token={secret} denied"] * 5000)
         config = {**_base_config(), "log_tail_lines": 40, "log_tail_chars": 200}
         provider = CapturingProvider({"possible_context_problem": 0.9})
+        identity_stub = {"pane get": (0, _pane_info("sess-9", pane_id="pane-9"), "")}
 
         findings = observer_harness.observe_run(
             "run-1", task=task, store=store, config=config, provider=provider,
             transcript_reader=lambda reader_task: observer_live.read_live_transcript(
-                reader_task, config, runner=_StubRunner({"pane read": (0, raw, "")}),
+                reader_task, config,
+                runner=_StubRunner({**identity_stub, "pane read": (0, raw, "")}),
             ),
         )
 
@@ -1825,6 +1987,16 @@ class TestHardContextBudget:
         ])
         events[-1]["metadata"] = {"note": huge}
         return task
+
+    def test_config_clamps_max_context_size_to_product_minimum(self):
+        clamped = observer_config.load_config(
+            path="", env={"HERDR_OBSERVER_MAX_CONTEXT_SIZE": "100"},
+        )
+        default = observer_config.load_config(path="", env={})
+
+        assert observer_config.MIN_MAX_CONTEXT_SIZE == 500
+        assert clamped["max_context_size"] == 500
+        assert default["max_context_size"] == 8000
 
     def test_hostile_nested_fields_cannot_break_the_budget(self, tmp_path: Path):
         store = SQLiteStateStore(tmp_path / "state.db")

@@ -113,18 +113,23 @@ signals:         确定性检测结果（含 evidence 引用与事实数字）
 ## Live Runtime 与 Live Transcript
 
 - **Live Runtime**（`herdr/observer/live.py`，只读复用既有 herdr CLI 能力）：
-  - 优先 `herdr pane list --workspace <ws>`（成功枚举后可证明 pane 不存在 → `unavailable`）；
-  - 无 workspace 时退回 `herdr pane get`，成功后再 `herdr agent get` 取 `agent_status`；
-  - 任何超时/非零退出/解析失败 → `unknown`，绝不据此产出 `runtime_unavailable`；
-  - 不写 Task status，不写 persisted RuntimeState；输入中 persisted 与 live 明确分开。
-- **Live Transcript**：daemon worker 内以 `herdr pane read <pane> --source recent-unwrapped --lines N`（timeout 3s）读取当前 Pane，尾部经统一的 bytes/lines/chars 三级上限 + `redact_text` 后使用；无 Pane 或读取失败时回退既有 `task["evidence"]` / terminal.log；完整 transcript 永不落库、永不整体送 Provider。
+  - pane 存在性：`herdr pane list --workspace <ws>` 验证 daemon/workspace 可达，`herdr pane get <pane>` 给出最终事实——**显式 `pane_not_found` 才是 unavailable**；
+  - **身份校验**（persisted runtime 的 `pane_id`/`agent_session_id`/`agent_name` vs live `pane.agent_session` / `agent.agent_session`）：
+    - persisted 与 live `agent_session_id` 一致 → `available`（`identity_match`）；
+    - 两者都存在但不一致 → `unavailable`（`identity_mismatch`）；
+    - 原 Run 明确有 Agent（session 或 agent_name），但 `agent get` 显式 `agent_not_found` / 空 agent → `unavailable`（`agent_not_found`）；
+    - 旧任务无 persisted session 时，live session 存在即 `available`（仅当 pane 缺 workspace 枚举时附带 `workspace_mismatch` 标记）；
+    - **timeout / daemon error / parse error（含 agent 响应不可解析或 schema 不符）/ 无法获得足够身份信息（agent 有响应但不暴露 session）→ `unknown`，绝不当作 unavailable**；
+  - live transcript 读取前必须通过同一身份 guard：只有 `available` 才允许 `herdr pane read`；`identity_mismatch` / `unavailable` / `unknown` 一律不读当前 Pane（可回退 persisted evidence / terminal.log），防止旧 `pane_id` 复用后读到其他 Run 的日志；
+  - 不写 Task status，不写 persisted RuntimeState；输入中 persisted 与 live（含 `agent_session_id`/`workspace_mismatch`）明确分开。
+- **Live Transcript**：daemon worker 内以 `herdr pane read <pane> --source recent-unwrapped --lines N`（timeout 3s）读取当前 Pane，尾部经统一的 bytes/lines/chars 三级上限 + `redact_text` 后使用；无 Pane、身份未确认或读取失败时回退既有 `task["evidence"]` / terminal.log；完整 transcript 永不落库、永不整体送 Provider。
 
 ## Failure isolation
 
 - `observe_run` 顶层 try/except，任何异常返回既有 findings 或 `[]`，从不抛出。
 - 只写 `trajectory_findings` 表；不调用任何 task/workflow 状态 API；live probe 只读且失败归 `unknown`。
 - 调度器线程与 controller 主循环物理隔离（daemon thread），阻塞 ≤ provider timeout + live probe/transcript timeout，且不影响轮询。
-- **Hard budget**：`_fit_budget` 递归 clamp 所有 nested 字段（drop logs/artifacts/verification/terminal → 收缩 recent_events → 收缩 signals → 递归字符串减半 → 最小 identity `run_id` + signal 类型）；无论输入多恶意，`json.dumps(context, ensure_ascii=False)` 最终长度必定 ≤ `max(500, max_context_size)`，函数绝不返回超预算 context。
+- **Hard budget**：`_fit_budget` 递归 clamp 所有 nested 字段（drop logs/artifacts/verification/terminal → 收缩 recent_events → 收缩 signals → 递归字符串减半 → 最小 identity `run_id` + signal 类型）；无论输入多恶意，`json.dumps(context, ensure_ascii=False)` 最终长度必定 ≤ `max_context_size`。产品最小值为 **500**：`load_config` 显式 clamp（配置里不会出现 100、内部却用 500），`_fit_budget` 只保留同值防御性下限。
 
 ## Non-goals
 

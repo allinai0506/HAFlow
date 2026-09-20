@@ -84,6 +84,139 @@ def _agent_status(payload: str) -> Optional[str]:
     return str(status) if status is not None else None
 
 
+def _session_value(value: Any) -> Optional[str]:
+    """Normalize herdr's agent_session (string or {"value": ...}) to a string."""
+    if isinstance(value, dict):
+        value = value.get("value")
+    if value is None or value == "":
+        return None
+    return str(value)
+
+
+def _error_code(payload: str) -> Optional[str]:
+    try:
+        data = json.loads(payload)
+    except (TypeError, ValueError):
+        return None
+    error = data.get("error") if isinstance(data, dict) else None
+    return str(error.get("code")) if isinstance(error, dict) and error.get("code") else None
+
+
+def _pane_payload(payload: str) -> Optional[Dict[str, Any]]:
+    try:
+        data = json.loads(payload)
+    except (TypeError, ValueError):
+        return None
+    pane = data.get("result", {}).get("pane") if isinstance(data, dict) else None
+    return pane if isinstance(pane, dict) else None
+
+
+def _agent_payload(payload: str) -> Tuple[bool, Optional[Dict[str, Any]], bool]:
+    """(valid, agent, explicit_empty) for one agent get payload.
+
+    ``valid=False`` means the payload is unparseable or uses an unexpected
+    schema: that is a probe failure (unknown), never an agentless statement.
+    ``explicit_empty=True`` means the registry explicitly returned `null`/`{}`
+    for this pane's agent.
+    """
+    try:
+        data = json.loads(payload)
+    except (TypeError, ValueError):
+        return False, None, False
+    result = data.get("result") if isinstance(data, dict) else None
+    if not isinstance(result, dict) or "agent" not in result:
+        return False, None, False
+    agent = result.get("agent")
+    if agent is None or agent == {}:
+        return True, None, True
+    if not isinstance(agent, dict):
+        return False, None, False
+    return True, agent, False
+
+
+def _get_pane(
+    runner: Runner, pane_id: str, timeout: float, log=None,
+) -> Tuple[str, Optional[Dict[str, Any]]]:
+    """(outcome, pane) where outcome is ok / not_found / failed."""
+    got = _call(runner, ["herdr", "pane", "get", pane_id], timeout, log=log)
+    if got is None:
+        return "failed", None
+    if got[0] == 0:
+        pane = _pane_payload(got[1])
+        return ("ok", pane) if pane is not None else ("failed", None)
+    if _error_code(got[1]) == "pane_not_found":
+        return "not_found", None
+    return "failed", None
+
+
+def _session_verdict(
+    pane_id: str, persisted_session: str, live_session: str,
+    agent_status: Optional[str] = None,
+) -> Dict[str, Any]:
+    if live_session == persisted_session:
+        result = {
+            "status": AVAILABLE, "reason": "identity_match", "pane_id": pane_id,
+            "agent_session_id": live_session,
+        }
+    else:
+        result = {
+            "status": UNAVAILABLE, "reason": "identity_mismatch", "pane_id": pane_id,
+            "agent_session_id": live_session,
+        }
+    if agent_status is not None:
+        result["agent_status"] = agent_status
+    return result
+
+
+def _identity_result(
+    pane_id: str, persisted: Dict[str, Any], pane_info: Dict[str, Any],
+    runner: Runner, timeout: float, log=None,
+) -> Dict[str, Any]:
+    """Validate that the live pane/agent still belongs to this run."""
+    persisted_session = persisted["session"]
+    persisted_agent = persisted["agent"]
+    live_session = _session_value(pane_info.get("agent_session"))
+    if live_session:
+        if persisted_session:
+            return _session_verdict(pane_id, persisted_session, live_session)
+        # Legacy run without a persisted session: the live session is the only
+        # identity and nothing contradicts it.
+        return {
+            "status": AVAILABLE, "reason": "pane_alive", "pane_id": pane_id,
+            "agent_session_id": live_session,
+        }
+    # The pane payload carries no session: ask the agent registry explicitly.
+    agent_call = _call(runner, ["herdr", "agent", "get", pane_id], timeout, log=log)
+    if agent_call is None:
+        return {"status": UNKNOWN, "reason": "probe_failed", "pane_id": pane_id}
+    if agent_call[0] == 0:
+        valid, agent_info, explicit_empty = _agent_payload(agent_call[1])
+        if not valid:
+            return {"status": UNKNOWN, "reason": "agent_payload_invalid", "pane_id": pane_id}
+        if explicit_empty:
+            if persisted_session or persisted_agent:
+                return {"status": UNAVAILABLE, "reason": "agent_not_found", "pane_id": pane_id}
+            return {"status": AVAILABLE, "reason": "pane_alive", "pane_id": pane_id}
+        live_agent_session = _session_value(agent_info.get("agent_session"))
+        if persisted_session and live_agent_session:
+            return _session_verdict(
+                pane_id, persisted_session, live_agent_session,
+                _agent_status(agent_call[1]),
+            )
+        if persisted_session:
+            # An agent answers but exposes no session: identity is unverifiable.
+            return {"status": UNKNOWN, "reason": "insufficient_identity", "pane_id": pane_id}
+        return {
+            "status": AVAILABLE, "reason": "pane_alive", "pane_id": pane_id,
+            "agent_status": _agent_status(agent_call[1]),
+        }
+    if _error_code(agent_call[1]) == "agent_not_found":
+        if persisted_session or persisted_agent:
+            return {"status": UNAVAILABLE, "reason": "agent_not_found", "pane_id": pane_id}
+        return {"status": AVAILABLE, "reason": "pane_alive", "pane_id": pane_id}
+    return {"status": UNKNOWN, "reason": "agent_probe_failed", "pane_id": pane_id}
+
+
 def probe_live_runtime(
     task: Dict[str, Any],
     *,
@@ -91,12 +224,14 @@ def probe_live_runtime(
     timeout: float = 2.0,
     log=None,
 ) -> Dict[str, Any]:
-    """Live availability of the task's Pane / Agent session (never raises).
+    """Live availability *and identity* of the task's Pane / Agent session.
 
-    ``unavailable`` requires positive structural evidence (a successful pane
-    listing/get that does not contain the task's pane). Every probe failure
-    (timeout, non-zero exit, unparseable output, daemon down) is ``unknown``:
-    the observer must not claim a dead runtime it cannot prove.
+    ``unavailable`` requires positive structural evidence: an explicit
+    ``pane_not_found``, a persisted/live ``agent_session_id`` mismatch, or an
+    explicit ``agent_not_found`` for a run that had an agent. Every probe
+    failure (timeout, daemon error, unparseable payload) and every
+    "not enough identity information" case degrades to ``unknown`` — unknown is
+    never reported as unavailable.
     """
     try:
         runtime = task.get("runtime") if isinstance(task.get("runtime"), dict) else {}
@@ -105,8 +240,19 @@ def probe_live_runtime(
             return {"status": UNKNOWN, "reason": "no_pane_id"}
         pane_id = str(pane_id)
         workspace_id = task.get("workspace_id") or runtime.get("workspace_id")
+        persisted = {
+            "session": _session_value(
+                task.get("agent_session_id") or runtime.get("agent_session_id")
+            ),
+            "agent": (
+                task.get("agent_name") or runtime.get("agent_name")
+                or runtime.get("agent") or task.get("agent")
+            ),
+        }
         runner = runner or _run_herdr
 
+        pane_info: Optional[Dict[str, Any]] = None
+        workspace_mismatch = False
         if workspace_id:
             listed = _call(
                 runner,
@@ -122,40 +268,27 @@ def probe_live_runtime(
             pane_ids = _pane_ids(stdout)
             if pane_ids is None:
                 return {"status": UNKNOWN, "reason": "pane_list_unparseable", "pane_id": pane_id}
-            if pane_id not in pane_ids:
-                # The workspace listing is authoritative only while the
-                # workspace binding is fresh; a stale workspace_id would
-                # otherwise produce a false "unavailable". Confirm with a
-                # direct pane get: alive -> available (stale binding), gone
-                # (non-zero while the daemon is clearly up) -> unavailable,
-                # probe failure -> unknown.
-                direct = _call(runner, ["herdr", "pane", "get", pane_id], timeout, log=log)
-                if direct is None:
-                    return {"status": UNKNOWN, "reason": "probe_failed", "pane_id": pane_id}
-                if direct[0] == 0:
-                    return {
-                        "status": AVAILABLE,
-                        "reason": "pane_in_other_workspace",
-                        "pane_id": pane_id,
-                    }
-                return {"status": UNAVAILABLE, "reason": "pane_missing", "pane_id": pane_id}
+            # The listing only proves daemon/workspace reachability; identity
+            # always comes from a direct pane get (explicit pane_not_found is
+            # the only positive evidence of a missing pane).
+            workspace_mismatch = pane_id not in pane_ids
+            outcome, pane_info = _get_pane(runner, pane_id, timeout, log=log)
         else:
-            pane = _call(runner, ["herdr", "pane", "get", pane_id], timeout, log=log)
-            if pane is None:
-                return {"status": UNKNOWN, "reason": "probe_failed", "pane_id": pane_id}
-            if pane[0] != 0:
-                # Without a workspace listing a failed pane get cannot tell
-                # "pane gone" from "daemon unreachable" -> unknown.
-                return {"status": UNKNOWN, "reason": "pane_get_failed", "pane_id": pane_id}
+            # Without a workspace listing, only an explicit pane_not_found proves
+            # the pane is gone; other failures stay unknown.
+            outcome, pane_info = _get_pane(runner, pane_id, timeout, log=log)
 
-        agent = _call(runner, ["herdr", "agent", "get", pane_id], timeout, log=log)
-        agent_status = _agent_status(agent[1]) if agent is not None and agent[0] == 0 else None
-        return {
-            "status": AVAILABLE,
-            "reason": "pane_alive",
-            "pane_id": pane_id,
-            "agent_status": agent_status,
-        }
+        if outcome == "not_found":
+            return {"status": UNAVAILABLE, "reason": "pane_missing", "pane_id": pane_id}
+        if outcome != "ok":
+            return {"status": UNKNOWN, "reason": "pane_get_failed", "pane_id": pane_id}
+
+        result = _identity_result(
+            pane_id, persisted, pane_info or {}, runner, timeout, log=log,
+        )
+        if workspace_mismatch:
+            result["workspace_mismatch"] = True
+        return result
     except Exception as exc:  # the probe is best-effort by contract
         _log(log, f"[OBSERVER LIVE PROBE SKIPPED] {type(exc).__name__}")
         return {"status": UNKNOWN, "reason": "probe_failed"}
@@ -171,10 +304,13 @@ def read_live_transcript(
 ) -> Optional[Dict[str, Any]]:
     """Bounded, redacted tail of the task's current Pane transcript.
 
-    Returns None when no pane is known or the pane read fails; the observer
-    then falls back to the persisted evidence file. The CLI call is bounded by
-    ``--lines`` and the subprocess timeout, and the returned excerpt is bounded
-    by the same bytes/lines/chars limits as the file tail reader.
+    The same identity guard as the runtime probe applies: the pane read only
+    happens when the pane is confirmed to belong to this run. An identity
+    mismatch or unavailable pane returns None so the caller falls back to the
+    persisted evidence file; an unverifiable identity also returns None rather
+    than reading a potentially reused pane. The CLI call is bounded by
+    ``--lines`` and the subprocess timeout, and the returned excerpt by the
+    same bytes/lines/chars limits as the file tail reader.
     """
     cfg = config or {}
     try:
@@ -183,12 +319,25 @@ def read_live_transcript(
         if not pane_id:
             return None
         pane_id = str(pane_id)
+        runner = runner or _run_herdr
+        identity = probe_live_runtime(
+            task,
+            runner=runner,
+            timeout=float(cfg.get("live_probe_timeout", 2.0)),
+            log=log,
+        )
+        if identity.get("status") != AVAILABLE:
+            _log(
+                log,
+                "[OBSERVER LIVE TRANSCRIPT SKIPPED] identity="
+                f"{identity.get('status')}/{identity.get('reason')}",
+            )
+            return None
         limit_seconds = (
             float(timeout) if timeout is not None
             else float(cfg.get("live_transcript_timeout", 3.0))
         )
         max_lines = int(cfg.get("log_tail_lines", 200))
-        runner = runner or _run_herdr
         read = _call(
             runner,
             ["herdr", "pane", "read", pane_id, "--source", "recent-unwrapped",

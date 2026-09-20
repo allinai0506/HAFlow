@@ -17,6 +17,10 @@ from typing import Any, Dict, Optional
 
 DEFAULT_CONFIG_PATH = os.path.expanduser("~/.herdr-controller/observer.json")
 
+# Product minimum for max_context_size: load_config clamps it explicitly so a
+# configured 100 can never silently become 500 inside _fit_budget.
+MIN_MAX_CONTEXT_SIZE = 500
+
 DEFAULTS: Dict[str, Any] = {
     "enabled": True,
     "provider": "jev",
@@ -25,7 +29,7 @@ DEFAULTS: Dict[str, Any] = {
     "recent_events": 50,          # trajectory window sent to the provider
     "verification_events": 5,     # verification rows kept in the context
     "max_findings": 10,           # cap per observation
-    "max_context_size": 8000,     # serialized ObservationContext budget (chars)
+    "max_context_size": 8000,     # serialized ObservationContext budget (min 500, clamped on load)
     "confidence_threshold": 0.6,  # provider probability required to confirm
     "stall_after_seconds": 1800,  # time-only stall suspect (never critical alone)
     "repeated_failure_min": 2,    # consecutive failed verifications
@@ -108,6 +112,11 @@ def load_config(path: Optional[str] = None, env: Optional[dict] = None) -> Dict[
     timeout = _env_num(environ, "HERDR_OBSERVER_JEV_TIMEOUT")
     if timeout is not None:
         config["jev"]["timeout"] = timeout
+    try:
+        configured = int(config.get("max_context_size", 8000))
+    except (TypeError, ValueError):
+        configured = 8000
+    config["max_context_size"] = max(MIN_MAX_CONTEXT_SIZE, configured)
     return config
 
 

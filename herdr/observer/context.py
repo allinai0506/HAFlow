@@ -237,9 +237,9 @@ def _live_runtime_facts(live_runtime: Optional[Dict[str, Any]]) -> Dict[str, Any
         return {"status": "unknown", "reason": "not_probed"}
     return {
         key: _bounded(live_runtime[key], 160)
-        for key in ("status", "reason", "pane_id", "agent_status")
+        for key in ("status", "reason", "pane_id", "agent_status", "agent_session_id")
         if live_runtime.get(key) is not None
-    }
+    } | ({"workspace_mismatch": True} if live_runtime.get("workspace_mismatch") else {})
 
 
 def build_observation_context(

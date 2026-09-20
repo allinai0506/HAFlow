@@ -823,3 +823,7 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 ## [2026-09-20] fix | Trajectory Observer 运行时真实性加固：Live Runtime / Live Transcript / 证据升级 / 硬预算
 - Updated [[trajectory-observer]]: 新增只读 `herdr/observer/live.py`（pane/agent liveness 探测失败=unknown；live Pane transcript 优先、evidence 文件兜底，均在 daemon worker 内 bounded 执行）；Finding 同 episode 原地升级（canonical finding_id，不降级）；`_fit_budget` 硬保证（递归 clamp + 最小 identity）；`--task-id/--run-id` 互斥、`--json` stdout 纯 JSON（诊断走 stderr）。
 - 证据：`herdr/observer/live.py`、`herdr/observer/context.py:bound_transcript,_fit_budget`、`herdr/observer/signals.py:_detect_runtime_unavailable`、`herdr/state_db.py:upsert_trajectory_finding`、`bin/herdr-task:cmd_observe`、`tests/test_trajectory_observer.py`（65 项）。
+
+## [2026-09-20] fix | Trajectory Observer 运行身份安全：agent_session 身份校验 + transcript guard + 上下文预算下限
+- Updated [[trajectory-observer]]: live probe 新增身份校验（pane_not_found / identity_match / identity_mismatch / agent_not_found / unknown 五态，unknown 绝不当 unavailable）；live transcript 必须通过同一身份 guard 才允许 `pane read`，未确认身份回退 persisted evidence；`max_context_size` 产品最小值 500 在 `load_config` 显式 clamp。
+- 证据：`herdr/observer/live.py:_session_verdict,_identity_result,probe_live_runtime,read_live_transcript`、`herdr/observer/config.py:MIN_MAX_CONTEXT_SIZE`、`tests/test_trajectory_observer.py`（70 项，含 A/B/C 三条身份回归）。
