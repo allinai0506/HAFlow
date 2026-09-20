@@ -813,3 +813,9 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - **问题**：① `ensure_context_project` 对模板不一致直接 raise，把 Context Workspace 绑死在首个模板上，违背"一个业务 Workspace 依次跑 sales-research/quotation/contract-review"的业务模型；② Context 绑定路径强制 `is_dir()`，PDF/Word/Excel/Markdown 等文件引用被误拒。
 - **修复**：① 复用既有 `reprovision_project_template()`（最小扩展 context_bindings 参数）：Workspace/Coordinator 保留、Node Tabs 按新模板重建、旧 Tab 关闭、活跃工作流拒绝切换；context 语义（execution.mode/base_branch=""/契约/本次绑定）经 `_register_project_workflow` 扩展参数在切换后完整保留，`detect_base_branch` 只留在 git 路径；② 绑定校验改 `exists()`（目录或文件均合法），仍 resolve 绝对路径 + 不存在 fail-fast + required 缺失拒绝。
 - **验证**：新增 3 测试（切换保 workspace/活跃流拒绝/文件+缺失路径）共 35 passed；全量 829 passed + 44 subtests；真机 E2E：非 Git 目录 `/tmp/ctx-e2e.*` 上 A(context-smoke-test, wQ/p1) → 任务 ctx-e2e-hello-a 于独立 workspace 产出 HELLO.md（读自 common 引用）→ verify-baseline 指纹 TASK_CHANGED → close → 同 workspace 跑 B(ctx-e2e-beta)：wQ/p1 不变、template 更新、review tab wQ:t3 重建、绑定含 quote.pdf 文件引用、全程零 git 调用。
+
+## [2026-09-20] feat | Trajectory Observer V1：结构化、可验证、可追溯的运行过程诊断
+- Added [[trajectory-observer]]: 旁路诊断层——`run_id` → Trajectory + Runtime + bounded 日志 → 确定性 signal → `DecisionProvider.judge_many`（noul）确认 → `TrajectoryFinding`（type/severity/evidence/cause/recommendation/confidence）；`trajectory_findings` 表与 events 事实表物理分离，`finding_key` 跨进程去重；controller registry_watcher 非阻塞 daemon 线程触发，`herdr-task observe` 人工入口。
+- Updated [[task-lifecycle]] §1.2: Ledger 之上新增 Observer 只读诊断层的说明与链接。
+- Updated [[index]]: 意图路由与知识地图新增 [[trajectory-observer]]。
+- 证据：`herdr/observer/`、`herdr/state_db.py:trajectory_findings`、`services/herdr-controller.py:registry_watcher`、`bin/herdr-task:cmd_observe`、`tests/test_trajectory_observer.py`（41 项）、`docs/superpowers/specs/2026-09-20-trajectory-observer-design.md`。

@@ -124,6 +124,11 @@ Trajectory 事件复用现有 SQLite `events` 表，由 `herdr/trajectory.py` �
 这些事件与 Runtime State 分层：Runtime State 回答“现在是什么状态”，Ledger
 回答“这次执行之前发生过什么”，Observer 或后续分析器可直接按 run 重放事实流。
 
+`FACT` 在 Ledger 之上，Trajectory Observer（[[trajectory-observer]]）按
+`run_id` 读取事实流 + Runtime + bounded 日志，输出结构化 Finding
+（`trajectory_findings` 表，与 events 事实表物理分离）；它只检测/解释/建议，
+绝不改变任务状态机或调度。
+
 Evidence:
 - `herdr/trajectory.py:TrajectoryEvent, TrajectoryLedger, run_id_for_task`
 - `bin/herdr-task:_launch_task`

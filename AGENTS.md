@@ -50,6 +50,7 @@
   - [`workflow_docs.py`](file:///Users/user/HAFlow/herdr/workflow_docs.py): Workflow 共享文档区（clone 外追加式账本、provenance 与 stale 治理）。
   - [`decision/`](file:///Users/user/HAFlow/herdr/decision): DecisionProvider 统一抽象（judge/score/choose + 批量 judge_many）、DecisionResult 与 jev/rule 可插拔后端。
   - [`supervisor/`](file:///Users/user/HAFlow/herdr/supervisor): Semantic Supervisor V1（SupervisorState 有界快照、9 语义信号、SupervisorEvaluation+delta、Policy Engine 七动作、fail-safe harness）。详见 [wiki/semantic-supervisor.md](file:///Users/user/HAFlow/wiki/semantic-supervisor.md)。
+  - [`observer/`](file:///Users/user/HAFlow/herdr/observer): Trajectory Observer V1（run_id 运行过程诊断：确定性 signal + DecisionProvider 确认 + 结构化 TrajectoryFinding，只检测/解释/建议，不执行修复；trajectory_findings 独立存储）。详见 [wiki/trajectory-observer.md](file:///Users/user/HAFlow/wiki/trajectory-observer.md)。
   - [`pane_pool.py`](file:///Users/user/HAFlow/herdr/pane_pool.py): 智能体工位 (Pane) 槽位管理。
   - [`preflight.py`](file:///Users/user/HAFlow/herdr/preflight.py) / [`deep_preflight.py`](file:///Users/user/HAFlow/herdr/deep_preflight.py): 探针实现。
 - **`workflow_templates/`**: 内置 YAML 工作流模板。

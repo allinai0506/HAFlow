@@ -56,6 +56,12 @@ except Exception:
     # Semantic Supervisor 是可选观察层;缺失或异常时原有流程完全不变。
     supervisor_harness = None
 
+try:
+    from herdr.observer import harness as observer_harness
+except Exception:
+    # Trajectory Observer 是可选旁路观察层;缺失或异常时原有流程完全不变。
+    observer_harness = None
+
 STAGE_STATE_FILE = os.environ.get("STAGE_STATE_FILE") or os.path.expanduser(
     "~/.herdr-controller/stage-state.json"
 )
@@ -4317,6 +4323,20 @@ def registry_watcher():
                         check_task_tests_completed(task, store=_get_store(), now=now)
                     except Exception as exc:
                         print(f"[TESTS_COMPLETED CHECK ERROR] task={task_id}: {exc}")
+
+                # ---- Trajectory Observer: 旁路观察,非阻塞投递 ----
+                # 观察线程与主轮询物理隔离;超时/模型失败/内部异常均不影响
+                # Task/Workflow/Runtime 与事件推进。
+                if (
+                    status in ("working", "rework", "blocked")
+                    and observer_harness is not None
+                ):
+                    try:
+                        observer_harness.submit_observation(
+                            task, store=_get_store(), now=now
+                        )
+                    except Exception as exc:
+                        print(f"[OBSERVER CHECK ERROR] task={task_id}: {exc}")
 
                 # ---- done 事件投递:受 attention episode 节流 + 监督网关把关 ----
                 if status == "agent_done":

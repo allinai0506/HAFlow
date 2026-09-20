@@ -123,6 +123,31 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
         );
     """)
 
+    # Observer analysis (NOT facts): findings are judgments derived from the
+    # trajectory/events ledger and must stay queryable apart from it.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS trajectory_findings (
+            finding_id TEXT PRIMARY KEY,
+            finding_key TEXT NOT NULL UNIQUE,
+            run_id TEXT NOT NULL,
+            task_id TEXT,
+            workflow_id TEXT,
+            node TEXT,
+            agent TEXT,
+            agent_session_id TEXT,
+            finding_type TEXT NOT NULL,
+            severity TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'open',
+            summary TEXT,
+            suspected_cause TEXT,
+            recommended_action TEXT,
+            confidence REAL,
+            evidence_json TEXT,
+            metadata_json TEXT,
+            created_at REAL
+        );
+    """)
+
     conn.execute("""
         CREATE TABLE IF NOT EXISTS steering_items (
             steer_id TEXT PRIMARY KEY,
@@ -174,6 +199,8 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type, timestamp);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_source ON events(source, timestamp);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_run_sequence ON events(run_id, sequence, id);")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_findings_run ON trajectory_findings(run_id, created_at DESC);")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_findings_type ON trajectory_findings(finding_type, created_at DESC);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_steering_task ON steering_items(task_id, status);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_steering_hist_task ON steering_history(task_id, timestamp);")
 
@@ -1128,6 +1155,133 @@ def list_trajectory_events(
                 "payload": json.loads(row["payload_json"] or "{}"),
             })
         return results
+    finally:
+        conn.close()
+
+
+def _decode_finding_row(row: sqlite3.Row) -> Dict[str, Any]:
+    return {
+        "finding_id": row["finding_id"],
+        "finding_key": row["finding_key"],
+        "run_id": row["run_id"],
+        "task_id": row["task_id"],
+        "workflow_id": row["workflow_id"],
+        "node": row["node"],
+        "agent": row["agent"],
+        "agent_session_id": row["agent_session_id"],
+        "finding_type": row["finding_type"],
+        "severity": row["severity"],
+        "status": row["status"] or "open",
+        "summary": row["summary"],
+        "suspected_cause": row["suspected_cause"],
+        "recommended_action": row["recommended_action"],
+        "confidence": row["confidence"],
+        "evidence": json.loads(row["evidence_json"] or "[]"),
+        "metadata": json.loads(row["metadata_json"] or "{}"),
+        "created_at": row["created_at"],
+    }
+
+
+def record_trajectory_finding(
+    finding: Dict[str, Any],
+    db_path: Optional[Path] = None,
+) -> Optional[Dict[str, Any]]:
+    """Append one analysis finding; returns None when finding_key already exists.
+
+    Findings are deliberately separated from trajectory events: the events
+    ledger records what happened, this table records what HAFlow suspects it
+    means. ``finding_key`` is the dedup contract (UNIQUE) so re-observing one
+    issue never writes a second row.
+    """
+    finding_key = finding.get("finding_key")
+    finding_id = finding.get("finding_id")
+    run_id = finding.get("run_id")
+    finding_type = finding.get("finding_type")
+    if not finding_key or not finding_id or not run_id or not finding_type:
+        raise ValueError("finding_id, finding_key, run_id and finding_type are required")
+
+    conn = get_db_connection(db_path)
+    try:
+        cur = conn.execute(
+            """
+            INSERT INTO trajectory_findings (
+                finding_id, finding_key, run_id, task_id, workflow_id, node,
+                agent, agent_session_id, finding_type, severity, status,
+                summary, suspected_cause, recommended_action, confidence,
+                evidence_json, metadata_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(finding_key) DO NOTHING;
+            """,
+            (
+                finding_id,
+                finding_key,
+                run_id,
+                finding.get("task_id"),
+                finding.get("workflow_id"),
+                finding.get("node"),
+                finding.get("agent"),
+                finding.get("agent_session_id"),
+                finding_type,
+                finding.get("severity") or "warning",
+                finding.get("status") or "open",
+                finding.get("summary"),
+                finding.get("suspected_cause"),
+                finding.get("recommended_action"),
+                float(finding.get("confidence") or 0.0),
+                json.dumps(finding.get("evidence") or [], ensure_ascii=False),
+                json.dumps(finding.get("metadata") or {}, ensure_ascii=False),
+                float(finding["created_at"]) if finding.get("created_at") is not None else time.time(),
+            ),
+        )
+        if cur.rowcount == 0:
+            return None
+        return get_trajectory_finding(finding_key, db_path=db_path, conn=conn)
+    finally:
+        conn.close()
+
+
+def get_trajectory_finding(
+    finding_key: str,
+    db_path: Optional[Path] = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> Optional[Dict[str, Any]]:
+    """Fetch one finding by its dedup key (None when absent)."""
+    should_close = False
+    if conn is None:
+        conn = get_db_connection(db_path)
+        should_close = True
+    try:
+        row = conn.execute(
+            "SELECT * FROM trajectory_findings WHERE finding_key = ?", (finding_key,)
+        ).fetchone()
+        return _decode_finding_row(row) if row is not None else None
+    finally:
+        if should_close:
+            conn.close()
+
+
+def list_trajectory_findings(
+    run_id: Optional[str] = None,
+    finding_type: Optional[str] = None,
+    limit: Optional[int] = None,
+    db_path: Optional[Path] = None,
+) -> List[Dict[str, Any]]:
+    """List analysis findings in stable creation order."""
+    conn = get_db_connection(db_path)
+    try:
+        query = "SELECT * FROM trajectory_findings WHERE 1=1"
+        params: List[Any] = []
+        if run_id is not None:
+            query += " AND run_id = ?"
+            params.append(run_id)
+        if finding_type is not None:
+            query += " AND finding_type = ?"
+            params.append(finding_type)
+        query += " ORDER BY created_at ASC, rowid ASC"
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(int(limit))
+        return [_decode_finding_row(row) for row in conn.execute(query, params).fetchall()]
     finally:
         conn.close()
 
