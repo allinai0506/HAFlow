@@ -1,10 +1,23 @@
+import importlib.machinery
+import importlib.util
+import json
 import threading
 import sqlite3
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from herdr.trajectory import TrajectoryEvent, TrajectoryLedger
+
+
+def _load_herdr_task_module(name):
+    path = Path(__file__).resolve().parent.parent / "bin" / "herdr-task"
+    loader = importlib.machinery.SourceFileLoader(name, str(path))
+    spec = importlib.util.spec_from_loader(name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
 
 
 def test_append_event_can_be_read_with_runtime_identity(tmp_path: Path):
@@ -175,3 +188,92 @@ def test_existing_event_table_without_trajectory_columns_is_upgraded(tmp_path: P
     ledger.append_event({"run_id": "run-upgrade", "event_type": "task_started"})
 
     assert len(ledger.list_events("run-upgrade")) == 1
+
+
+def test_normal_launch_persists_one_new_run_id_for_initial_trajectory_events(tmp_path, monkeypatch):
+    task_mod = _load_herdr_task_module("herdr_task_launch_run_id_regression")
+    db_path = tmp_path / "state.db"
+    monkeypatch.setenv("HERDR_STATE_DB", str(db_path))
+
+    worker_result = {
+        "clone": str(tmp_path / "clone"),
+        "branch": "context/task-launch-run-id",
+        "pane_id": "pane-1",
+        "agent_session_id": "session-1",
+        "agent_name": "pi-1",
+        "baseline_untracked": [],
+        "baseline_fingerprint": {"tracked": {}, "untracked": {}},
+    }
+
+    monkeypatch.setattr(
+        task_mod,
+        "ensure_stage_topology",
+        lambda workflow_id, node_id: {
+            "workspace_id": "workspace-1",
+            "tab_id": "tab-1",
+            "anchor_pane_id": "anchor-1",
+            "node_label": "Implementation",
+            "stage_label": "Implementation",
+        },
+    )
+    monkeypatch.setattr(
+        task_mod,
+        "project_for_workflow",
+        lambda workflow_id: {
+            "project_id": "project-1",
+            "project_name": "Project",
+            "project_root": str(tmp_path),
+            "execution": {"mode": "context"},
+            "context": {"company": str(tmp_path)},
+        },
+    )
+    monkeypatch.setattr(task_mod, "choose_agent", lambda *args, **kwargs: "pi")
+    monkeypatch.setattr(task_mod, "acquire_pane_for_task", lambda *args, **kwargs: None)
+    monkeypatch.setattr(task_mod, "ensure_branch_available", lambda *args, **kwargs: None)
+    monkeypatch.setattr(task_mod, "auto_init_task_loop", lambda *args, **kwargs: None)
+    monkeypatch.setattr(task_mod, "release_agent_reservation", lambda *args, **kwargs: None)
+    monkeypatch.setattr(task_mod, "dispatch_task", lambda *args, **kwargs: None)
+    monkeypatch.setattr(task_mod, "_now", lambda: 1000.0)
+    monkeypatch.setattr(
+        task_mod.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=0,
+            stdout="HERDR_WORKER_RESULT=" + json.dumps(worker_result),
+            stderr="",
+        ),
+    )
+
+    args = SimpleNamespace(
+        task_id="task-launch-run-id",
+        workflow_id="workflow-1",
+        node="implementation",
+        stage=None,
+        agent=None,
+        task_type="general",
+        integration_mode="none",
+        onto=None,
+        source=str(tmp_path),
+        goal="implement",
+        acceptance=[],
+        test_cmd=None,
+        lint_cmd=None,
+        repro_cmd=None,
+        prompt="implement the task",
+    )
+
+    task_mod._launch_task(args)
+
+    task = task_mod._get_store().get_task(args.task_id)
+    assert task is not None
+    run_id = task["run_id"]
+    assert run_id.startswith("run_")
+    assert run_id != f"run_{args.task_id}"
+
+    events = TrajectoryLedger(db_path).list_events(run_id)
+    assert [event["event_type"] for event in events] == [
+        "run_started",
+        "task_started",
+        "agent_started",
+    ]
+    assert {event["run_id"] for event in events} == {run_id}

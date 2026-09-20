@@ -3609,15 +3609,14 @@ def check_task_tests_completed(task, store=None, now=None):
             ledger=TrajectoryLedger(getattr(st, "db_path", None)),
             verification={
                 "type": "tests_completed",
-                "passed": (
-                    test_evidence.get("failing_count", 0) == 0
-                    and test_evidence.get("lint_errors", 0) == 0
-                    and test_evidence.get("type_errors", 0) == 0
-                ),
+                "passed": bool(test_evidence.get("converged", False)),
                 "evidence_id": evidence_id,
                 "passed_tests": test_evidence.get("passed_tests"),
                 "total_tests": test_evidence.get("total_tests"),
                 "failing_count": test_evidence.get("failing_count", 0),
+                "lint_errors": test_evidence.get("lint_errors", 0),
+                "type_errors": test_evidence.get("type_errors", 0),
+                "composite_score": test_evidence.get("composite_score", 0.0),
             },
         )
     except Exception as exc:

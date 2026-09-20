@@ -189,6 +189,37 @@ class TestsCompletedCheckpointSuite(unittest.TestCase):
         self.assertIn("evidence_id", meta)
         self.assertEqual(eval_events[0]["payload"]["trigger"], "tests_completed")
 
+    def test_trajectory_verification_passed_follows_evaluator_converged(self):
+        """Zero counters do not override an evaluator result of converged=false."""
+        self._write_loop(iteration=1, total=10, passed=10, failing=[], score=100.0, converged=False)
+        task = {
+            "task_id": "task-converged-false",
+            "workflow_id": "wf-converged-false",
+            "run_id": "run-converged-false",
+            "node": "impl",
+            "status": "working",
+            "clone_path": str(self.clone_dir),
+            "runtime": {"status": "running"},
+        }
+        self.store.save_task(task)
+
+        provider = _MockProvider()
+        supervisor = supervisor_harness.SemanticSupervisor(self.base_config, provider)
+
+        with patch.object(supervisor_harness, "get_supervisor", return_value=supervisor), \
+             patch.object(supervisor_harness, "load_config", return_value=self.base_config), \
+             patch.object(self.controller, "_get_store", return_value=self.store):
+            self.controller.check_task_tests_completed(task, store=self.store, now=1000.0)
+
+        trajectory_events = TrajectoryLedger(self.db_path).list_events("run-converged-false")
+        verification = trajectory_events[0]["verification"]
+        self.assertFalse(verification["passed"])
+        self.assertEqual(verification["failing_count"], 0)
+        self.assertEqual(verification["lint_errors"], 0)
+        self.assertEqual(verification["type_errors"], 0)
+        self.assertEqual(verification["composite_score"], 100.0)
+        self.assertTrue(verification["evidence_id"])
+
     # --- B. 相同测试结果不重复触发 ---
     def test_scenario_b_identical_test_result_does_not_repeat(self):
         self._write_loop(iteration=1, total=10, passed=10, failing=[], score=100.0)

@@ -1617,6 +1617,7 @@ def _launch_task(args):
     data = load_tasks()
 
     now = _now()
+    run_id = new_run_id()
 
     # RuntimeState:只记录本次真实执行的位置证据,不改变任务编排字段。
     try:
@@ -1641,6 +1642,7 @@ def _launch_task(args):
     task = {
         "task_id": args.task_id,
         "workflow_id": args.workflow_id,
+        "run_id": run_id,
         "project_id": project.get("project_id"),
         "project_name": project.get("project_name"),
         "source_repo": source_repo,

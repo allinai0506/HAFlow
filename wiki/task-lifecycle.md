@@ -97,6 +97,41 @@ Evidence:
 - `console/herdr_factory_console.py` #create_candidate / #manual_advance
 - `tests/test_fix_loop_pr1.py`、`tests/test_fix_loop_gates.py`
 
+### 1.2 Trajectory Ledger：一次执行的历史事实流
+
+`FACT` Task 的当前状态仍由 Runtime State/StateStore 表示；Trajectory Ledger
+只记录已经发生的历史事实，不参与状态机判定、调度或 Observer 决策。一次正常
+`herdr-task launch` 在构造 task 时先生成新的 `run_id`，并在 `save_tasks()`
+之前写入 task；因此 `run_id` 表示一次完整的 Workflow/Task 执行实例，不能与
+`task_id`、`agent_session_id` 或 `workspace_id` 混用。真正没有该字段的历史旧
+task 才使用 `run_<task_id>` 兼容 fallback。
+
+Trajectory 事件复用现有 SQLite `events` 表，由 `herdr/trajectory.py` 的
+`TrajectoryLedger` 提供 append-only `append_event()` 与按 run 查询的
+`list_events(run_id)`。同一 run 的事件使用持久化 sequence 恢复顺序；
+`source=trajectory` 的事件不改变既有 StateStore 通用事件查询语义。
+
+典型生命周期是：
+
+1. launch 持久化 task 后写入 `run_started`、`task_started`、`agent_started`；
+2. Task 状态真实变化时写入 `task_status_changed`；
+3. evaluator 产生 `tests_completed` 事实时写入 `verification_completed`，其中
+   `verification.passed` 直接使用 evaluator 的 `converged`，并保留有界的
+   failing/lint/type/composite/evidence_id 字段；
+4. Task/Run 终态写入 `task_completed`、`task_failed`、`run_completed` 或
+   `run_failed`（仅在现有执行路径能够确认时记录）。
+
+这些事件与 Runtime State 分层：Runtime State 回答“现在是什么状态”，Ledger
+回答“这次执行之前发生过什么”，Observer 或后续分析器可直接按 run 重放事实流。
+
+Evidence:
+- `herdr/trajectory.py:TrajectoryEvent, TrajectoryLedger, run_id_for_task`
+- `bin/herdr-task:_launch_task`
+- `services/herdr-controller.py:check_task_tests_completed`
+- `herdr/state_db.py:record_trajectory_event, list_trajectory_events`
+- `tests/test_trajectory.py`
+- `tests/test_supervisor_tests_completed.py`
+
 ---
 
 ## 2. CoW (Copy-on-Write) 沙盒隔离机制
