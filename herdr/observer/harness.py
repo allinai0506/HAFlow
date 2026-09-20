@@ -26,7 +26,7 @@ from ..decision import create_provider
 from ..trajectory import run_id_for_task
 from ..supervisor.engine import RateGate
 from . import config as observer_config
-from .engine import TrajectoryObserver
+from .engine import TrajectoryObserver, stderr_log
 from .models import TrajectoryFinding
 
 LOGGER = logging.getLogger(__name__)
@@ -65,6 +65,27 @@ def get_provider(config: Optional[Dict[str, Any]] = None):
     return provider
 
 
+def _default_probes(cfg: Dict[str, Any]):
+    """Bounded read-only live probes (pane/agent liveness + pane transcript).
+
+    Built only when ``live_probe`` is enabled; the callables are resolved at
+    call time so tests and operators can swap the live module.
+    """
+    if not cfg.get("live_probe", True):
+        return None, None
+    from . import live as live_module
+
+    probe_timeout = float(cfg.get("live_probe_timeout", 2.0))
+
+    def runtime_probe(task):
+        return live_module.probe_live_runtime(task, timeout=probe_timeout)
+
+    def transcript_reader(task):
+        return live_module.read_live_transcript(task, cfg)
+
+    return runtime_probe, transcript_reader
+
+
 def observe_run(
     run_id: str,
     *,
@@ -75,6 +96,9 @@ def observe_run(
     ledger: Any = None,
     now: Optional[float] = None,
     use_model: bool = True,
+    runtime_probe: Any = None,
+    transcript_reader: Any = None,
+    log: Any = None,
 ) -> List[TrajectoryFinding]:
     """Observe one run and return its current findings (never raises)."""
     if not run_id:
@@ -83,8 +107,16 @@ def observe_run(
         cfg = config or observer_config.load_config()
         if provider is None and use_model:
             provider = get_provider(cfg)
+        if runtime_probe is None and transcript_reader is None:
+            runtime_probe, transcript_reader = _default_probes(cfg)
         observer = TrajectoryObserver(
-            config=cfg, provider=provider, store=store, ledger=ledger,
+            config=cfg,
+            provider=provider,
+            store=store,
+            ledger=ledger,
+            runtime_probe=runtime_probe,
+            transcript_reader=transcript_reader,
+            log=log,
         )
         return observer.observe_run(run_id, task=task, now=now, use_model=use_model)
     except Exception as exc:  # the observer is best-effort by contract
@@ -101,7 +133,7 @@ class ObservationScheduler:
         observe=None,
         config: Optional[Dict[str, Any]] = None,
         max_concurrent: int = 2,
-        log=print,
+        log=stderr_log,
     ) -> None:
         self._observe = observe or observe_run
         self._config = config or observer_config.load_config()

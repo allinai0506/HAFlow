@@ -28,7 +28,8 @@ bounded 日志尾部(existing evidence) ──┼─► ObservationContext(有�
 | `herdr/observer/models.py` | Core | `TrajectoryFinding`、`FINDING_TYPES`/`SEVERITIES`/`RECOMMENDED_ACTIONS`、`finding_key_for`（去重键） |
 | `herdr/observer/config.py` | Core | 默认值 < `~/.herdr-controller/observer.json` < `HERDR_OBSERVER_*` env；`enabled` 即 kill switch |
 | `herdr/observer/signals.py` | Core | 7 个确定性 signal 检测器 + Provider noul 问题模板；无 I/O、无副作用 |
-| `herdr/observer/context.py` | Core/IO | `read_log_tail`（bytes→lines→chars，读取时脱敏）与 `build_observation_context`（预算收紧） |
+| `herdr/observer/context.py` | Core/IO | `read_log_tail`（bytes→lines→chars，读取时脱敏）、`bound_transcript`（文件/实时日志同一边界）、`build_observation_context`（persisted/live runtime 明确区分 + hard budget） |
+| `herdr/observer/live.py` | Shell-lite/IO | 只读 live Pane/Agent 探测（`pane list`/`pane get`/`agent get`，失败=unknown）与 live Pane transcript（`pane read --source recent-unwrapped`，timeout + 三级上限 + 脱敏） |
 | `herdr/observer/engine.py` | Core | `TrajectoryObserver.observe_run`：`task` 可省略（按 run 事件 `task_id` → 持久化 `run_id` 自动解析 task/runtime/日志）；检测→确认→去重→落库；顶层 fail-safe |
 | `herdr/observer/harness.py` | Shell | `observe_run` 公共 API、provider 记忆化、`ObservationScheduler`（daemon 线程、非阻塞、in-flight 去重） |
 | `services/herdr-controller.py` | Shell | registry_watcher 对 `working/rework/blocked` 任务 `submit_observation`（非阻塞） |
@@ -41,7 +42,7 @@ bounded 日志尾部(existing evidence) ──┼─► ObservationContext(有�
 | :--- | :--- | :--- | :--- |
 | A | 活跃 Run 且 `now-last_event ≥ stall_after_seconds`（默认 1800s） | `stalled_execution` | 是（时长单独永远只给 warning） |
 | B | 尾部连续 `verification_completed.passed=false ≥ 2`（任务非 done-claim） | `repeated_failure` | 否（模型可否决） |
-| C | `runtime.status=unavailable` 且 Run/Task 未终态 | `runtime_unavailable` | 否 |
+| C | `runtime.status=unavailable` **或 live Pane/Agent 探测 unavailable**（probe 失败=unknown 不判死） | `runtime_unavailable` | 否 |
 | D | `rework ≥ 3` 且首次 rework 后无成功验证、无产物事件 | `no_progress` | 是 |
 | E | 相同 action 签名连续失败 ≥ 3（仅当存在 action 事件；V1 无生产者，接口保留） | `repeated_action` | 否 |
 | F | 最新验证失败但 Run/Task 已宣告完成或 agent_done | `verification_failure` | 否 |
@@ -54,8 +55,11 @@ bounded 日志尾部(existing evidence) ──┼─► ObservationContext(有�
 1. **有界**：只送最近 N（默认 50）条 trajectory + 最近 5 条 verification + 终止/起始事件；日志只读尾部（默认末 16KB→末 200 行→≤4000 字符）；序列化预算 `max_context_size`（默认 8000 字符），超预算按 logs→artifacts→verification→recent→signals 顺序收缩。
 2. **脱敏**：日志在 `read_log_tail` 读取时即 `redact_text`；Provider question、`metadata.facts`、evidence excerpt/signature 落库前再做防御性脱敏；密钥形状内容不离开进程。
 3. **模型边界**：Jev 契约仅支持 noul/score/choice，Observer 采用「规则检测 → noul 批量确认/否决」映射，不解析自由文本；`requires_confirmation=false` 的证据型 signal 在 Provider 不可用时仍产出，弱 signal 无确认则不产出（宁可不报）。
-4. **去重**：`finding_key = sha256(run_id|finding_type|node|agent_session_id|anchor)`，anchor 是本次问题 episode 的稳定起点；SQLite `UNIQUE(finding_key)` + `ON CONFLICT DO NOTHING`，跨观察周期/进程不重复写入；并发冲突时重新读取并返回 canonical persisted finding（`finding_id` 以库内为准）。
-5. **失败隔离**：`observe_run` 顶层 try/except 永不外抛；调度器 daemon 线程与 controller 轮询物理隔离；只写 `trajectory_findings` 表，绝不触碰 Task/Workflow/Runtime/events。
+4. **去重与升级**：`finding_key = sha256(run_id|finding_type|node|agent_session_id|anchor)`，anchor 是本次问题 episode 的稳定起点；SQLite `UNIQUE(finding_key)` + `ON CONFLICT DO UPDATE`——重复观察不新增第二条 Finding，同一 episode 原地刷新 severity/summary/evidence/原因/建议/置信度（如失败链 2→4 次 warning→critical），`finding_id`/`created_at` 保持 canonical，低 severity 观察不降级既有行；并发冲突后重新读取并返回 canonical persisted finding。
+5. **Live 真实性**：persisted `task["runtime"]` 之外增加只读 live 探测——`pane list` 成功枚举但缺少该 pane 才是 `unavailable`，超时/非零/解析失败一律 `unknown`；live Pane transcript 优先于 finalization 才出现的 `task["evidence"]`，读取失败回退文件；两者都只在 daemon worker 线程执行（probe ≤2s、transcript ≤3s），绝不进入 controller 主轮询。
+6. **失败隔离**：`observe_run` 顶层 try/except 永不外抛；调度器 daemon 线程与 controller 轮询物理隔离；只写 `trajectory_findings` 表，绝不触碰 Task/Workflow/Runtime/events。
+7. **Hard budget**：`_fit_budget` 递归 clamp 嵌套字段并按序删除低优先级块，最终 serialized ≤ `max(500, max_context_size)`；最小 identity（run_id + signal 类型）在任何输入下都保留。
+8. **CLI 契约**：`--task-id`/`--run-id` 互斥（禁止跨 Run 混用身份）；`--json` 的 stdout 只允许 JSON，诊断全部走 stderr，Provider 失败时仍 exit 0。
 
 ## 5. 配置速查
 
@@ -70,7 +74,9 @@ bounded 日志尾部(existing evidence) ──┼─► ObservationContext(有�
 | `confidence_threshold` | 0.6 | 模型确认阈值 |
 | `stall_after_seconds` | 1800 | 停滞 signal 阈值（只产生 warning，除非叠加 ≥3 连续验证失败） |
 | `repeated_failure_min` / `repeated_action_min` / `no_progress_min_reworks` / `log_repeat_min` | 2/3/3/3 | 各信号最小事实计数 |
-| `log_tail_lines` / `log_tail_bytes` / `log_tail_chars` | 200 / 16384 / 4000 | 日志尾部三级上限 |
+| `log_tail_lines` / `log_tail_bytes` / `log_tail_chars` | 200 / 16384 / 4000 | 日志尾部三级上限（文件与 live transcript 共用） |
+| `live_probe` / `HERDR_OBSERVER_LIVE_PROBE` | true | 只读 live Pane/Agent 探测开关（false = 只用 persisted runtime） |
+| `live_probe_timeout` / `live_transcript_timeout` | 2.0 / 3.0 | live 子进程显式超时（秒） |
 
 ## 6. 演进方向（明确不在 V1）
 
@@ -79,7 +85,8 @@ bounded 日志尾部(existing evidence) ──┼─► ObservationContext(有�
 Evidence:
 - `herdr/observer/models.py:TrajectoryFinding, finding_key_for`
 - `herdr/observer/signals.py:detect_signals, Signal, question_for`
-- `herdr/observer/context.py:read_log_tail, build_observation_context`
+- `herdr/observer/context.py:read_log_tail, bound_transcript, build_observation_context`
+- `herdr/observer/live.py:probe_live_runtime, read_live_transcript`
 - `herdr/observer/engine.py:TrajectoryObserver`
 - `herdr/observer/harness.py:observe_run, ObservationScheduler, submit_observation`
 - `herdr/state_db.py:record_trajectory_finding, list_trajectory_findings`

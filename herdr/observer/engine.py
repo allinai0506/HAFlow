@@ -16,9 +16,10 @@ Fail-safe contract (mirrors the Semantic Supervisor harness):
 from __future__ import annotations
 
 import logging
+import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from .. import state_db
 from ..decision.models import DecisionProviderError, clamp_probability
@@ -32,6 +33,11 @@ from .models import TrajectoryFinding
 LOGGER = logging.getLogger(__name__)
 
 _REDACTED_EVIDENCE_FIELDS = ("excerpt", "signature")
+
+
+def stderr_log(message: str) -> None:
+    """Diagnostics never pollute stdout (the CLI --json contract)."""
+    print(message, file=sys.stderr)
 
 
 def _redact_evidence(evidence: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -59,12 +65,16 @@ class TrajectoryObserver:
         provider: Any = None,
         store: Any = None,
         ledger: Optional[TrajectoryLedger] = None,
-        log=print,
+        runtime_probe: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
+        transcript_reader: Optional[Callable[[Dict[str, Any]], Optional[Dict[str, Any]]]] = None,
+        log=None,
     ) -> None:
         self.config = config or load_config()
         self.provider = provider
         self.store = store
-        self.log = log
+        self.runtime_probe = runtime_probe
+        self.transcript_reader = transcript_reader
+        self.log = log or stderr_log
         self.db_path = self._resolve_db_path(store)
         self.ledger = ledger or TrajectoryLedger(self.db_path)
 
@@ -105,6 +115,8 @@ class TrajectoryObserver:
         task = task if isinstance(task, dict) else None
 
         events = self.ledger.list_events(run_id)
+        if task is not None and not self._task_matches_run(task, run_id):
+            task = None  # never borrow another run's runtime/logs
         if task is None:
             task = self._resolve_task(run_id, events)
         if not events and task is None:
@@ -112,18 +124,15 @@ class TrajectoryObserver:
         runtime = (task or {}).get("runtime")
         runtime = runtime if isinstance(runtime, dict) else {}
 
-        log_tail = None
-        if task is not None:
-            try:
-                log_tail = observation_context.read_log_tail(task, self.config)
-            except Exception:
-                log_tail = None
+        live_runtime = self._probe_runtime(task)
+        log_tail = self._read_evidence(task)
 
         signals = signal_layer.detect_signals(
             run_id=run_id,
             events=events,
             task=task,
             runtime=runtime,
+            live_runtime=live_runtime,
             log_tail=log_tail,
             now=ts,
             config=self.config,
@@ -136,6 +145,7 @@ class TrajectoryObserver:
             task=task,
             events=events,
             runtime=runtime,
+            live_runtime=live_runtime,
             log_tail=log_tail,
             signals=signals,
             config=self.config,
@@ -144,6 +154,32 @@ class TrajectoryObserver:
         results = self._ask_provider(signals, context, use_model=use_model)
         candidates = self._consolidate(run_id, task, runtime, events, signals, results, ts)
         return self._persist(candidates)
+
+    def _probe_runtime(self, task: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """Best-effort live Pane/Agent liveness (bounded, read-only, never raises)."""
+        if task is None or self.runtime_probe is None:
+            return None
+        try:
+            return self.runtime_probe(task)
+        except Exception as exc:
+            self._log(f"[OBSERVER LIVE PROBE SKIPPED] {type(exc).__name__}")
+            return None
+
+    def _read_evidence(self, task: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """Live Pane transcript first, persisted evidence file as fallback."""
+        if task is None:
+            return None
+        if self.transcript_reader is not None:
+            try:
+                live = self.transcript_reader(task)
+                if live:
+                    return live
+            except Exception as exc:
+                self._log(f"[OBSERVER LIVE TRANSCRIPT SKIPPED] {type(exc).__name__}")
+        try:
+            return observation_context.read_log_tail(task, self.config)
+        except Exception:
+            return None
 
     def _resolve_task(
         self, run_id: str, events: List[Dict[str, Any]],
@@ -273,7 +309,7 @@ class TrajectoryObserver:
             seen.add(finding.finding_key)
             canonical = None
             try:
-                canonical = state_db.record_trajectory_finding(
+                canonical = state_db.upsert_trajectory_finding(
                     finding.to_mapping(), db_path=self.db_path,
                 )
             except Exception as exc:

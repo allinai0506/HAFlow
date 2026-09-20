@@ -54,6 +54,45 @@ def _bounded_log_excerpt(
     return bounded
 
 
+def bound_transcript(
+    text: Any, *, ref: str, config: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """Bound + redact transcript text (bytes -> lines -> chars).
+
+    Shared by the file-tail reader and the live pane reader so both obey the
+    same limits. Returns None when nothing readable remains.
+    """
+    raw = str(text or "")
+    if not raw.strip():
+        return None
+    max_bytes = int(config.get("log_tail_bytes", 16384))
+    max_lines = int(config.get("log_tail_lines", 200))
+    max_chars = int(config.get("log_tail_chars", 4000))
+    size_bytes = len(raw.encode("utf-8", "replace"))
+    encoded = raw.encode("utf-8", "replace")
+    truncated = size_bytes > max_bytes
+    if truncated:
+        encoded = encoded[-max_bytes:]
+    decoded = redact_text(strip_ansi_codes(encoded.decode("utf-8", "ignore")))
+    lines = decoded.splitlines()
+    if len(lines) > max_lines:
+        lines = lines[-max_lines:]
+        truncated = True
+    tail = "\n".join(lines)
+    if len(tail) > max_chars:
+        tail = tail[-max_chars:]
+        truncated = True
+    excerpt = tail.strip()
+    if not excerpt:
+        return None
+    return {
+        "ref": str(ref),
+        "size_bytes": size_bytes,
+        "truncated": truncated,
+        "excerpt": excerpt,
+    }
+
+
 def read_log_tail(task: Optional[Dict[str, Any]], config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Read a bounded tail of the task's existing agent log evidence.
 
@@ -72,9 +111,6 @@ def read_log_tail(task: Optional[Dict[str, Any]], config: Dict[str, Any]) -> Opt
         candidates.append(Path(DEFAULT_LOG_ROOT) / str(task_id) / "terminal.log")
 
     max_bytes = int(config.get("log_tail_bytes", 16384))
-    max_lines = int(config.get("log_tail_lines", 200))
-    max_chars = int(config.get("log_tail_chars", 4000))
-
     for path in candidates:
         try:
             if not path.is_file():
@@ -84,23 +120,15 @@ def read_log_tail(task: Optional[Dict[str, Any]], config: Dict[str, Any]) -> Opt
                 if size > max_bytes:
                     handle.seek(-max_bytes, os.SEEK_END)
                 raw = handle.read()
-            text = redact_text(strip_ansi_codes(raw.decode("utf-8", "replace")))
-            lines = text.splitlines()
-            truncated = size > max_bytes or len(lines) > max_lines
-            tail = "\n".join(lines[-max_lines:])
-            if len(tail) > max_chars:
-                tail = tail[-max_chars:]
-                truncated = True
-            excerpt = tail.strip()
-            if not excerpt:
+            bounded = bound_transcript(
+                raw.decode("utf-8", "replace"), ref=str(path), config=config,
+            )
+            if bounded is None:
                 continue
-            return {
-                "ref": str(path),
-                "path": str(path),
-                "size_bytes": size,
-                "truncated": truncated,
-                "excerpt": excerpt,
-            }
+            bounded["path"] = str(path)
+            if size > max_bytes:
+                bounded["truncated"] = True
+            return bounded
         except OSError:
             continue
     return None
@@ -195,6 +223,25 @@ def _signal_summary(signal) -> Dict[str, Any]:
     }
 
 
+def _runtime_facts(runtime: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        key: _bounded(runtime[key], 160)
+        for key in ("agent", "agent_name", "agent_session_id", "workspace_id",
+                    "tab_id", "pane_id", "cwd", "status")
+        if runtime.get(key)
+    }
+
+
+def _live_runtime_facts(live_runtime: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not isinstance(live_runtime, dict) or not live_runtime:
+        return {"status": "unknown", "reason": "not_probed"}
+    return {
+        key: _bounded(live_runtime[key], 160)
+        for key in ("status", "reason", "pane_id", "agent_status")
+        if live_runtime.get(key) is not None
+    }
+
+
 def build_observation_context(
     *,
     run_id: str,
@@ -205,6 +252,7 @@ def build_observation_context(
     signals: List[Any],
     config: Dict[str, Any],
     now: float,
+    live_runtime: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Assemble the bounded provider state for one observation."""
     task = task if isinstance(task, dict) else {}
@@ -225,21 +273,23 @@ def build_observation_context(
     context: Dict[str, Any] = {
         "schema": "observation_context/v1",
         "run": {
-            "run_id": run_id,
-            "task_id": task.get("task_id") or last.get("task_id"),
-            "workflow_id": task.get("workflow_id") or last.get("workflow_id"),
-            "node": task.get("node") or task.get("stage") or last.get("node"),
-            "agent": task.get("agent") or last.get("agent"),
-            "agent_name": runtime.get("agent_name") or last.get("agent_name"),
-            "agent_session_id": runtime.get("agent_session_id") or last.get("agent_session_id"),
-            "task_status": task.get("status") or last.get("status"),
-            "runtime_status": runtime.get("status"),
+            "run_id": _bounded(run_id, 128),
+            "task_id": _bounded(task.get("task_id") or last.get("task_id"), 128),
+            "workflow_id": _bounded(task.get("workflow_id") or last.get("workflow_id"), 128),
+            "node": _bounded(task.get("node") or task.get("stage") or last.get("node"), 128),
+            "agent": _bounded(task.get("agent") or last.get("agent"), 128),
+            "agent_name": _bounded(
+                runtime.get("agent_name") or last.get("agent_name"), 128,
+            ),
+            "agent_session_id": _bounded(
+                runtime.get("agent_session_id") or last.get("agent_session_id"), 128,
+            ),
+            "task_status": _bounded(task.get("status") or last.get("status"), 40),
+            "runtime_status": _bounded(runtime.get("status"), 40),
         },
         "runtime": {
-            key: _bounded(runtime[key], 160)
-            for key in ("agent", "agent_name", "agent_session_id", "workspace_id",
-                        "tab_id", "pane_id", "cwd", "status")
-            if runtime.get(key)
+            "persisted": _runtime_facts(runtime),
+            "live": _live_runtime_facts(live_runtime),
         },
         "window": {
             "total_events": len(events),
@@ -265,20 +315,39 @@ def build_observation_context(
             context["elapsed_seconds"] = max(0.0, round(now - started, 1))
         except (TypeError, ValueError):
             pass
-    return _fit_budget(context, int(config.get("max_context_size", 8000)))
+    return _fit_budget(context, int(config.get("max_context_size", 8000)), run_id)
 
 
 def _size(context: Dict[str, Any]) -> int:
     return len(json.dumps(context, ensure_ascii=False))
 
 
-def _fit_budget(context: Dict[str, Any], max_context_size: int) -> Dict[str, Any]:
-    """Shrink the snapshot until its serialized form fits the byte budget."""
+def _clamp_strings(node: Any, cap: int) -> Any:
+    """Recursively clamp every string in a nested structure to ``cap`` chars."""
+    if isinstance(node, str):
+        return node[:cap]
+    if isinstance(node, dict):
+        return {key: _clamp_strings(value, cap) for key, value in node.items()}
+    if isinstance(node, list):
+        return [_clamp_strings(value, cap) for value in node]
+    return node
+
+
+def _fit_budget(
+    context: Dict[str, Any], max_context_size: int, run_id: str = "",
+) -> Dict[str, Any]:
+    """Shrink the snapshot until its serialized form fits the byte budget.
+
+    Hard guarantee: the returned context never serializes above
+    ``max(500, max_context_size)``. Identity (run_id + signal types/refs) is
+    preserved as long as possible; the last resort keeps run_id and signal
+    types only.
+    """
     budget = max(500, int(max_context_size))
     if _size(context) <= budget:
         return context
     # Drop order: bulk first, identity + signals last.
-    for key in ("logs", "artifacts", "verification"):
+    for key in ("logs", "artifacts", "verification", "terminal_events"):
         context.pop(key, None)
         if _size(context) <= budget:
             return context
@@ -286,23 +355,41 @@ def _fit_budget(context: Dict[str, Any], max_context_size: int) -> Dict[str, Any
     while window and _size(context) > budget:
         window = window[1:]
         context["recent_events"] = window
-        context["window"]["recent_returned"] = len(window)
+        if isinstance(context.get("window"), dict):
+            context["window"]["recent_returned"] = len(window)
+    if _size(context) <= budget:
+        return context
     signals = context.get("signals") or []
-    while signals and _size(context) > budget:
+    while len(signals) > 1 and _size(context) > budget:
         signals = signals[:-1]
         context["signals"] = signals
-    # Last resort: hard-clamp remaining strings.
-    for _ in range(10):
+    if _size(context) <= budget:
+        return context
+    # Recursive string clamp, halving the cap until it fits.
+    cap = 256
+    while _size(context) > budget and cap >= 4:
+        context = _clamp_strings(context, cap)
         if _size(context) <= budget:
-            break
-        for key, value in list(context.items()):
-            if isinstance(value, str) and len(value) > 8:
-                context[key] = value[: max(8, len(value) // 2)]
-    return context
+            return context
+        cap //= 2
+    # Last resort: minimal identity (run_id + signal types), still clamped.
+    minimal: Dict[str, Any] = {
+        "schema": "observation_context/v1",
+        "run": {"run_id": _bounded(run_id, 128)},
+        "signals": [
+            {"finding_type": str(signal.get("finding_type") or "")[:32]}
+            for signal in signals
+            if isinstance(signal, dict)
+        ],
+    }
+    while minimal["signals"] and _size(minimal) > budget:
+        minimal["signals"] = minimal["signals"][:-1]
+    return _clamp_strings(minimal, max(8, budget // 4))
 
 
 __all__ = [
     "DEFAULT_LOG_ROOT",
+    "bound_transcript",
     "build_observation_context",
     "read_log_tail",
 ]

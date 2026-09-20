@@ -42,7 +42,7 @@ from herdr.observer.models import (
 from herdr.state_db import (
     get_trajectory_finding,
     list_trajectory_findings,
-    record_trajectory_finding,
+    upsert_trajectory_finding,
 )
 from herdr.state_store import SQLiteStateStore
 from herdr.trajectory import TrajectoryLedger
@@ -128,6 +128,7 @@ def _base_config() -> Dict[str, Any]:
     config = observer_config.load_config(path="", env={})
     config["enabled"] = True
     config["provider"] = "rule"
+    config["live_probe"] = False  # hermetic tests: host processes never call herdr
     return config
 
 
@@ -137,7 +138,7 @@ def _mp_record_worker(
     """Spawned worker: race two INSERTs of the same finding_key."""
     try:
         barrier.wait(timeout=30)
-        row = record_trajectory_finding(
+        row = upsert_trajectory_finding(
             {
                 "finding_id": local_finding_id,
                 "finding_key": finding_key,
@@ -194,7 +195,7 @@ class TestFindingStore:
             "metadata": {"provider": "test"},
             "created_at": 100.0,
         }
-        stored = record_trajectory_finding(finding, db_path=db_path)
+        stored = upsert_trajectory_finding(finding, db_path=db_path)
 
         assert stored is not None
         assert stored["finding_id"] == "fnd_1"
@@ -217,8 +218,8 @@ class TestFindingStore:
             "summary": "runtime gone",
             "created_at": 1.0,
         }
-        first = record_trajectory_finding(finding, db_path=db_path)
-        second = record_trajectory_finding({**finding, "finding_id": "fnd_2"}, db_path=db_path)
+        first = upsert_trajectory_finding(finding, db_path=db_path)
+        second = upsert_trajectory_finding({**finding, "finding_id": "fnd_2"}, db_path=db_path)
 
         assert first is not None and first["finding_id"] == "fnd_1"
         assert second is not None  # canonical persisted row, not the losing local one
@@ -230,7 +231,7 @@ class TestFindingStore:
         for index, (run_id, finding_type) in enumerate(
             [("run-1", "repeated_failure"), ("run-1", "stalled_execution"), ("run-2", "repeated_failure")]
         ):
-            record_trajectory_finding(
+            upsert_trajectory_finding(
                 {
                     "finding_id": f"fnd_{index}",
                     "finding_key": f"fk_{index}",
@@ -1040,7 +1041,7 @@ class TestHardeningRegressions:
         def explode(*args, **kwargs):
             raise sqlite3.OperationalError("database is locked")
 
-        monkeypatch.setattr(observer_engine.state_db, "record_trajectory_finding", explode)
+        monkeypatch.setattr(observer_engine.state_db, "upsert_trajectory_finding", explode)
 
         findings = observer_harness.observe_run(
             "run-1",
@@ -1239,7 +1240,7 @@ class TestRunIdOnlyResolution:
         def explode(*args, **kwargs):
             raise sqlite3.OperationalError("database is locked")
 
-        monkeypatch.setattr(observer_engine.state_db, "record_trajectory_finding", explode)
+        monkeypatch.setattr(observer_engine.state_db, "upsert_trajectory_finding", explode)
 
         findings = observer_harness.observe_run(
             "run-1", store=store, config=_base_config(), use_model=False,
@@ -1296,6 +1297,629 @@ class TestConcurrentDedup:
 
 
 # ---------------------------------------------------------------------------
+# Live runtime probe (persisted vs live availability)
+# ---------------------------------------------------------------------------
+
+
+class _StubRunner:
+    """Deterministic stand-in for the bounded herdr subprocess runner."""
+
+    def __init__(self, mapping: Dict[str, Any]) -> None:
+        self.mapping = mapping
+        self.calls: List[tuple] = []
+
+    def __call__(self, argv, timeout=None):
+        self.calls.append((list(argv), timeout))
+        joined = " ".join(argv)
+        for key, result in self.mapping.items():
+            if key in joined:
+                if isinstance(result, Exception):
+                    raise result
+                return result
+        return (1, "", "no stub for command")
+
+
+def _pane_list_payload(*pane_ids: str) -> str:
+    return json.dumps({"result": {"panes": [{"pane_id": pane_id} for pane_id in pane_ids]}})
+
+
+def _agent_payload(status: str) -> str:
+    return json.dumps({"result": {"agent": {"agent_status": status}}})
+
+
+class TestLiveRuntimeProbe:
+    def test_live_unavailable_with_persisted_running_fires_runtime_unavailable(self, tmp_path: Path):
+        store = SQLiteStateStore(tmp_path / "state.db")
+        ledger = TrajectoryLedger(store.db_path)
+        _append(ledger, [
+            {"run_id": "run-1", "event_type": "run_started", "task_id": "task-1",
+             "timestamp": 100.0},
+            {"run_id": "run-1", "event_type": "agent_started", "task_id": "task-1",
+             "timestamp": 101.0},
+        ])
+        task = _task(run_id="run-1", runtime={
+            "status": "running", "agent": "claude", "pane_id": "pane-live",
+            "agent_session_id": "session-live",
+        })
+        store.save_task(task)
+        provider = CapturingProvider({"runtime_unavailable": 0.95})
+
+        findings = observer_harness.observe_run(
+            "run-1",
+            task=task,
+            store=store,
+            config=_base_config(),
+            provider=provider,
+            runtime_probe=lambda probe_task: {"status": "unavailable", "reason": "pane_missing",
+                                              "pane_id": "pane-live"},
+        )
+
+        assert [finding.finding_type for finding in findings] == ["runtime_unavailable"]
+        assert findings[0].severity == "critical"
+        assert any(item.get("type") == "runtime_live" for item in findings[0].evidence)
+        context = provider.calls[0]["state"]
+        assert context["runtime"]["persisted"]["status"] == "running"
+        assert context["runtime"]["live"]["status"] == "unavailable"
+
+    def test_live_probe_exception_or_unknown_never_fabricates_unavailable(self, tmp_path: Path):
+        store = SQLiteStateStore(tmp_path / "state.db")
+        ledger = TrajectoryLedger(store.db_path)
+        _append(ledger, [
+            {"run_id": "run-1", "event_type": "run_started", "task_id": "task-1",
+             "timestamp": 100.0},
+            {"run_id": "run-1", "event_type": "agent_started", "task_id": "task-1",
+             "timestamp": 101.0},
+        ])
+        task = _task(run_id="run-1", runtime={
+            "status": "running", "agent": "claude", "pane_id": "pane-live",
+        })
+        store.save_task(task)
+        events_before = store.list_events(task_id="task-1")
+
+        def exploding_probe(_task_arg):
+            raise RuntimeError("herdr unreachable")
+
+        failed = observer_harness.observe_run(
+            "run-1", task=task, store=store, config=_base_config(),
+            provider=CapturingProvider({"runtime_unavailable": 0.99}),
+            runtime_probe=exploding_probe,
+        )
+        unknown = observer_harness.observe_run(
+            "run-1", task=task, store=store, config=_base_config(),
+            provider=CapturingProvider({"runtime_unavailable": 0.99}),
+            runtime_probe=lambda probe_task: {"status": "unknown", "reason": "probe_timeout"},
+        )
+
+        assert failed == []
+        assert unknown == []
+        assert store.get_task("task-1")["status"] == "working"
+        assert len(store.list_events(task_id="task-1")) == len(events_before)
+
+    def test_probe_live_runtime_translates_herdr_results(self):
+        from herdr.observer import live as observer_live
+
+        task = _task(runtime={"status": "running", "pane_id": "pane-x",
+                              "workspace_id": "ws-1"})
+
+        missing = observer_live.probe_live_runtime(
+            task,
+            runner=_StubRunner({
+                "pane list": (0, _pane_list_payload("other"), ""),
+                "pane get": (1, "", "pane not found"),
+            }),
+        )
+        stale_workspace = observer_live.probe_live_runtime(
+            task,
+            runner=_StubRunner({
+                "pane list": (0, _pane_list_payload("other"), ""),
+                "pane get": (0, json.dumps({"result": {"pane": {"pane_id": "pane-x"}}}), ""),
+            }),
+        )
+        unresolved = observer_live.probe_live_runtime(
+            task,
+            runner=_StubRunner({
+                "pane list": (0, _pane_list_payload("other"), ""),
+                "pane get": TimeoutError("timeout"),
+            }),
+        )
+        alive = observer_live.probe_live_runtime(
+            task,
+            runner=_StubRunner({
+                "pane list": (0, _pane_list_payload("pane-x"), ""),
+                "agent get": (0, _agent_payload("working"), ""),
+            }),
+        )
+        list_failed = observer_live.probe_live_runtime(
+            task, runner=_StubRunner({"pane list": (1, "", "daemon down")}),
+        )
+        timed_out = observer_live.probe_live_runtime(
+            task, runner=_StubRunner({"pane list": TimeoutError("timeout")}),
+        )
+        no_pane = observer_live.probe_live_runtime(
+            _task(runtime={"status": "running"}), runner=_StubRunner({}),
+        )
+
+        assert missing["status"] == "unavailable" and missing["reason"] == "pane_missing"
+        assert stale_workspace["status"] == "available"
+        assert stale_workspace["reason"] == "pane_in_other_workspace"
+        assert unresolved["status"] == "unknown"
+        assert alive["status"] == "available" and alive["agent_status"] == "working"
+        assert list_failed["status"] == "unknown"
+        assert timed_out["status"] == "unknown"
+        assert no_pane["status"] == "unknown"
+
+
+# ---------------------------------------------------------------------------
+# Live pane transcript (live preferred, evidence file fallback)
+# ---------------------------------------------------------------------------
+
+
+class TestLiveTranscript:
+    def test_live_transcript_enables_context_finding_without_evidence_file(self, tmp_path: Path):
+        store = SQLiteStateStore(tmp_path / "state.db")
+        ledger = TrajectoryLedger(store.db_path)
+        _append(ledger, [
+            {"run_id": "run-1", "event_type": "run_started", "task_id": "task-1",
+             "timestamp": 100.0},
+            {"run_id": "run-1", "event_type": "agent_started", "task_id": "task-1",
+             "timestamp": 101.0},
+        ])
+        task = _task(run_id="run-1", runtime={"status": "running", "agent": "claude",
+                                              "pane_id": "pane-live"})
+        store.save_task(task)
+        assert not task.get("evidence")
+        provider = CapturingProvider({"possible_context_problem": 0.9})
+
+        findings = observer_harness.observe_run(
+            "run-1",
+            task=task,
+            store=store,
+            config=_base_config(),
+            provider=provider,
+            transcript_reader=lambda reader_task: {
+                "ref": (
+                    "pane:"
+                    + str(
+                        reader_task.get("pane_id")
+                        or (reader_task.get("runtime") or {}).get("pane_id")
+                    )
+                ),
+                "excerpt": "\n".join(["Error: cannot find module 'herdr'"] * 3),
+                "truncated": False,
+            },
+        )
+
+        assert [finding.finding_type for finding in findings] == ["possible_context_problem"]
+        assert provider.calls[0]["state"]["logs"][0]["ref"] == "pane:pane-live"
+        assert findings[0].evidence[0]["ref"] == "pane:pane-live"
+
+    def test_live_transcript_is_preferred_over_evidence_file(self, tmp_path: Path):
+        store = SQLiteStateStore(tmp_path / "state.db")
+        ledger = TrajectoryLedger(store.db_path)
+        _append(ledger, [
+            {"run_id": "run-1", "event_type": "run_started", "task_id": "task-1",
+             "timestamp": 100.0},
+        ])
+        stale_log = tmp_path / "terminal.log"
+        stale_log.write_text("all good here\n", encoding="utf-8")
+        task = _task(run_id="run-1", runtime={"status": "running", "agent": "claude",
+                                              "pane_id": "pane-live"},
+                     evidence=str(stale_log))
+        store.save_task(task)
+        provider = CapturingProvider({"possible_context_problem": 0.9})
+
+        observer_harness.observe_run(
+            "run-1", task=task, store=store, config=_base_config(), provider=provider,
+            transcript_reader=lambda reader_task: {
+                "ref": "pane:pane-live",
+                "excerpt": "\n".join(["Error: cannot find module 'herdr'"] * 3),
+                "truncated": False,
+            },
+        )
+
+        assert provider.calls[0]["state"]["logs"][0]["ref"] == "pane:pane-live"
+
+    def test_transcript_failure_falls_back_to_evidence_file(self, tmp_path: Path):
+        store = SQLiteStateStore(tmp_path / "state.db")
+        ledger = TrajectoryLedger(store.db_path)
+        _append(ledger, [
+            {"run_id": "run-1", "event_type": "run_started", "task_id": "task-1",
+             "timestamp": 100.0},
+        ])
+        log_path = tmp_path / "terminal.log"
+        log_path.write_text("\n".join(["Error: cannot find module 'herdr'"] * 3), encoding="utf-8")
+        task = _task(run_id="run-1", runtime={"status": "running", "agent": "claude",
+                                              "pane_id": "pane-live"},
+                     evidence=str(log_path))
+        store.save_task(task)
+        provider = CapturingProvider({"possible_context_problem": 0.9})
+
+        def exploding_reader(_task_arg):
+            raise RuntimeError("pane read timeout")
+
+        observer_harness.observe_run(
+            "run-1", task=task, store=store, config=_base_config(), provider=provider,
+            transcript_reader=exploding_reader,
+        )
+
+        assert provider.calls[0]["state"]["logs"][0]["ref"] == str(log_path)
+
+    def test_default_live_transcript_is_bounded_and_redacted(self):
+        from herdr.observer import live as observer_live
+
+        secret = "ghp_abcdef1234567890secret"
+        raw = "\n".join([f"line {index} padding" for index in range(5000)])
+        raw += f"\nError: token={secret} denied\n" * 3
+        runner = _StubRunner({"pane read": (0, raw, "")})
+        config = {
+            **_base_config(),
+            "log_tail_lines": 50,
+            "log_tail_chars": 300,
+            "log_tail_bytes": 4096,
+        }
+
+        tail = observer_live.read_live_transcript(
+            _task(runtime={"pane_id": "pane-9"}), config, runner=runner,
+        )
+        failed = observer_live.read_live_transcript(
+            _task(runtime={"pane_id": "pane-9"}), config,
+            runner=_StubRunner({"pane read": (1, "", "gone")}),
+        )
+        crashed = observer_live.read_live_transcript(
+            _task(runtime={"pane_id": "pane-9"}), config,
+            runner=_StubRunner({"pane read": TimeoutError("timeout")}),
+        )
+
+        assert tail is not None
+        assert tail["ref"] == "pane:pane-9"
+        assert len(tail["excerpt"]) <= 300
+        assert tail["truncated"] is True
+        assert secret not in tail["excerpt"]
+        assert failed is None and crashed is None
+
+    def test_oversized_live_transcript_secret_never_reaches_provider_or_db(self, tmp_path: Path):
+        from herdr.observer import live as observer_live
+
+        secret = "ghp_abcdef1234567890secret"
+        store = SQLiteStateStore(tmp_path / "state.db")
+        ledger = TrajectoryLedger(store.db_path)
+        _append(ledger, [
+            {"run_id": "run-1", "event_type": "run_started", "task_id": "task-1",
+             "timestamp": 100.0},
+        ])
+        task = _task(run_id="run-1", runtime={"status": "running", "agent": "claude",
+                                              "pane_id": "pane-9"})
+        store.save_task(task)
+        raw = "\n".join([f"Error: token={secret} denied"] * 5000)
+        config = {**_base_config(), "log_tail_lines": 40, "log_tail_chars": 200}
+        provider = CapturingProvider({"possible_context_problem": 0.9})
+
+        findings = observer_harness.observe_run(
+            "run-1", task=task, store=store, config=config, provider=provider,
+            transcript_reader=lambda reader_task: observer_live.read_live_transcript(
+                reader_task, config, runner=_StubRunner({"pane read": (0, raw, "")}),
+            ),
+        )
+
+        provider_dump = json.dumps(provider.calls[0]["state"], ensure_ascii=False)
+        db_dump = json.dumps(
+            list_trajectory_findings("run-1", db_path=store.db_path), ensure_ascii=False,
+        )
+        assert secret not in provider_dump
+        assert secret not in db_dump
+        assert findings and len(
+            [item for item in findings[0].evidence if item["type"] == "log"][0]["excerpt"]
+        ) <= 300
+
+
+# ---------------------------------------------------------------------------
+# Finding escalation (same episode, same finding_id, stronger evidence)
+# ---------------------------------------------------------------------------
+
+
+class TestFindingEscalation:
+    def test_same_episode_escalates_in_place(self, tmp_path: Path):
+        store = SQLiteStateStore(tmp_path / "state.db")
+        ledger = TrajectoryLedger(store.db_path)
+        stored = _append(ledger, [
+            {"run_id": "run-1", "event_type": "run_started", "task_id": "task-1",
+             "timestamp": 100.0},
+            _verification("run-1", False, "tevd-1"),
+            _verification("run-1", False, "tevd-2"),
+        ])
+        task = _task(run_id="run-1", runtime={"status": "running", "agent": "claude"})
+        store.save_task(task)
+
+        first = observer_harness.observe_run(
+            "run-1", task=task, store=store, config=_base_config(), use_model=False,
+        )
+        assert [finding.severity for finding in first] == ["warning"]
+        finding_id = first[0].finding_id
+
+        later = _append(ledger, [
+            _verification("run-1", False, "tevd-3"),
+            _verification("run-1", False, "tevd-4"),
+        ])
+        second = observer_harness.observe_run(
+            "run-1", task=task, store=store, config=_base_config(), use_model=False,
+        )
+
+        assert len(second) == 1
+        assert second[0].finding_id == finding_id
+        assert second[0].severity == "critical"
+        assert second[0].confidence == first[0].confidence or second[0].confidence > 0
+        assert any(item.get("event_id") == later[-1]["event_id"] for item in second[0].evidence)
+        rows = list_trajectory_findings("run-1", db_path=store.db_path)
+        assert len(rows) == 1
+        assert rows[0]["finding_id"] == finding_id
+        assert rows[0]["severity"] == "critical"
+
+    def test_upsert_never_downgrades_severity_but_refreshes_evidence(self, tmp_path: Path):
+        db_path = tmp_path / "state.db"
+        base = {
+            "finding_id": "fnd_1",
+            "finding_key": "fk_esc",
+            "run_id": "run-1",
+            "finding_type": "repeated_failure",
+            "summary": "strong",
+            "evidence": [{"type": "verification", "event_id": "evt_9"}],
+            "created_at": 1.0,
+        }
+        upsert_trajectory_finding({**base, "severity": "critical"}, db_path=db_path)
+
+        weaker = upsert_trajectory_finding(
+            {**base, "severity": "warning", "summary": "weak", "evidence": []},
+            db_path=db_path,
+        )
+        stronger = upsert_trajectory_finding(
+            {**base, "severity": "critical", "summary": "stronger",
+             "evidence": [{"type": "verification", "event_id": "evt_10"}]},
+            db_path=db_path,
+        )
+
+        assert weaker["severity"] == "critical"
+        assert weaker["summary"] == "strong"
+        assert weaker["finding_id"] == "fnd_1"
+        assert stronger["severity"] == "critical"
+        assert stronger["summary"] == "stronger"
+        assert stronger["evidence"][0]["event_id"] == "evt_10"
+        assert len(list_trajectory_findings("run-1", db_path=db_path)) == 1
+
+
+# ---------------------------------------------------------------------------
+# JSON stdout purity and task/run identity
+# ---------------------------------------------------------------------------
+
+
+class TestJsonStdoutPurity:
+    def test_engine_diagnostics_go_to_stderr_not_stdout(self, tmp_path: Path, capfd):
+        store = SQLiteStateStore(tmp_path / "state.db")
+        ledger = TrajectoryLedger(store.db_path)
+        _append(ledger, [
+            {"run_id": "run-1", "event_type": "run_started", "task_id": "task-1",
+             "timestamp": 100.0},
+            _verification("run-1", False, "tevd-a"),
+            _verification("run-1", False, "tevd-b"),
+        ])
+
+        findings = observer_harness.observe_run(
+            "run-1", store=store, config=_base_config(),
+            provider=CapturingProvider(raises=True),
+        )
+        captured = capfd.readouterr()
+
+        assert [finding.finding_type for finding in findings] == ["repeated_failure"]
+        assert captured.out == ""
+        assert "[OBSERVER PROVIDER FAILED]" in captured.err
+
+    def test_cli_json_stays_pure_when_provider_fails(self, tmp_path: Path):
+        import os
+        import subprocess
+        import sys
+
+        repo_root = Path(__file__).resolve().parent.parent
+        db_path = tmp_path / "state.db"
+        store = SQLiteStateStore(db_path)
+        _append(TrajectoryLedger(db_path), [
+            {"run_id": "run-cli-json", "event_type": "run_started", "task_id": "task-cli-json"},
+            _verification("run-cli-json", False, "tevd-j1"),
+            _verification("run-cli-json", False, "tevd-j2"),
+        ])
+        env = {
+            **os.environ,
+            "HERDR_STATE_DB": str(db_path),
+            "HERDR_OBSERVER_CONFIG": str(tmp_path / "absent.json"),
+            "HERDR_OBSERVER_ENABLED": "1",
+            "HERDR_OBSERVER_LIVE_PROBE": "0",
+            "HERDR_OBSERVER_PROVIDER": "jev",
+            "HERDR_OBSERVER_JEV_BASE_URL": "http://127.0.0.1:1",
+            "HERDR_OBSERVER_JEV_TIMEOUT": "1",
+            "JEV_API_KEY": "sk-fake-test-key",
+        }
+        command = [
+            sys.executable, str(repo_root / "bin" / "herdr-task"),
+            "observe", "--run-id", "run-cli-json", "--json",
+        ]
+
+        result = subprocess.run(command, capture_output=True, text=True, timeout=90, env=env)
+        payload = json.loads(result.stdout)
+
+        assert result.returncode == 0
+        assert payload["run_id"] == "run-cli-json"
+        assert payload["findings"][0]["finding_type"] == "repeated_failure"
+        assert "[OBSERVER PROVIDER FAILED]" in result.stderr
+
+
+class TestTaskRunIdentity:
+    def test_cli_rejects_task_id_and_run_id_together(self, tmp_path: Path):
+        import os
+        import subprocess
+        import sys
+
+        repo_root = Path(__file__).resolve().parent.parent
+        env = {
+            **os.environ,
+            "HERDR_STATE_DB": str(tmp_path / "state.db"),
+            "HERDR_OBSERVER_CONFIG": str(tmp_path / "absent.json"),
+        }
+        command = [
+            sys.executable, str(repo_root / "bin" / "herdr-task"),
+            "observe", "--task-id", "task-a", "--run-id", "run-b", "--json",
+        ]
+
+        result = subprocess.run(command, capture_output=True, text=True, timeout=60, env=env)
+
+        assert result.returncode == 2
+        assert "not allowed with" in result.stderr
+        assert result.stdout == ""
+
+    def test_engine_never_borrows_runtime_from_a_mismatched_task(self, tmp_path: Path):
+        store = SQLiteStateStore(tmp_path / "state.db")
+        ledger = TrajectoryLedger(store.db_path)
+        _append(ledger, [
+            {"run_id": "run-b", "event_type": "run_started", "task_id": "task-b",
+             "timestamp": 100.0},
+            _verification("run-b", False, "tevd-b1"),
+            _verification("run-b", False, "tevd-b2"),
+        ])
+        task_a = _task("task-a", run_id="run-a", runtime={
+            "status": "unavailable", "agent": "claude", "pane_id": "pane-a",
+        })
+        store.save_task(task_a)
+
+        findings = observer_harness.observe_run(
+            "run-b", task=task_a, store=store, config=_base_config(), use_model=False,
+        )
+
+        assert [finding.finding_type for finding in findings] == ["repeated_failure"]
+
+
+# ---------------------------------------------------------------------------
+# Hard context budget
+# ---------------------------------------------------------------------------
+
+
+class TestHardContextBudget:
+    def _hostile_inputs(self, store, ledger):
+        huge = "X" * 8000
+        task = {
+            "task_id": "task-1",
+            "workflow_id": "wf-1",
+            "node": huge,
+            "stage": huge,
+            "agent": huge,
+            "status": "working",
+            "goal": huge,
+            "run_id": "run-1",
+            "runtime": {
+                "status": "running", "agent": huge, "agent_name": huge,
+                "agent_session_id": huge, "cwd": huge, "pane_id": huge,
+                "workspace_id": huge, "tab_id": huge,
+            },
+        }
+        events = _append(ledger, [
+            {"run_id": "run-1", "event_type": "run_started", "task_id": "task-1",
+             "timestamp": 100.0, "metadata": {"note": huge}},
+            _verification("run-1", False, "tevd-a"),
+            _verification("run-1", False, "tevd-b"),
+        ])
+        events[-1]["metadata"] = {"note": huge}
+        return task
+
+    def test_hostile_nested_fields_cannot_break_the_budget(self, tmp_path: Path):
+        store = SQLiteStateStore(tmp_path / "state.db")
+        ledger = TrajectoryLedger(store.db_path)
+        task = self._hostile_inputs(store, ledger)
+        config = {**_base_config(), "max_context_size": 600,
+                  "confidence_threshold": 0.0}
+        provider = CapturingProvider({"repeated_failure": 0.9})
+
+        observer_harness.observe_run(
+            "run-1", task=task, store=store, config=config, provider=provider,
+            runtime_probe=lambda probe_task: {
+                "status": "unknown", "reason": "X" * 8000,
+            },
+        )
+
+        context = provider.calls[0]["state"]
+        serialized = json.dumps(context, ensure_ascii=False)
+        assert len(serialized) <= 600
+        assert context["run"]["run_id"] == "run-1"
+
+    def test_squeezed_context_is_kept_instead_of_collapsing_to_minimal(self, tmp_path: Path):
+        store = SQLiteStateStore(tmp_path / "state.db")
+        ledger = TrajectoryLedger(store.db_path)
+        events = [{"run_id": "run-1", "event_type": "run_started", "task_id": "task-1",
+                   "timestamp": 0.0}]
+        events += [
+            {"run_id": "run-1", "event_type": "task_status_changed", "task_id": "task-1",
+             "status": "working", "timestamp": float(index + 1),
+             "metadata": {"reason": "note-" + "x" * 140}}
+            for index in range(60)
+        ]
+        _append(ledger, events)
+        config = _base_config()
+        signal = observer_signals.Signal(
+            finding_type="repeated_failure",
+            severity="warning",
+            summary="连续验证失败",
+            suspected_cause="路径无法收敛",
+            recommended_action="replan",
+            confidence=0.8,
+            evidence=[{"type": "verification", "event_id": "evt_2"}],
+            anchor="evt_2",
+            requires_confirmation=False,
+            facts={"consecutive_failures": 2},
+        )
+
+        ctx = observation_context.build_observation_context(
+            run_id="run-1",
+            task=_task(run_id="run-1", runtime={"status": "running", "agent": "claude"}),
+            events=ledger.list_events("run-1"),
+            runtime={"status": "running", "agent": "claude"},
+            log_tail=None,
+            signals=[signal],
+            config=config,
+            now=100.0,
+        )
+
+        assert len(json.dumps(ctx, ensure_ascii=False)) <= config["max_context_size"]
+        assert "window" in ctx and "runtime" in ctx
+        assert len(ctx.get("recent_events") or []) >= 1
+        assert ctx["signals"] and "summary" in ctx["signals"][0]
+
+    def test_minimal_identity_survives_extreme_budget(self, tmp_path: Path):
+        store = SQLiteStateStore(tmp_path / "state.db")
+        ledger = TrajectoryLedger(store.db_path)
+        task = self._hostile_inputs(store, ledger)
+        config = {**_base_config(), "max_context_size": 100}
+        signals = observer_signals.detect_signals(
+            run_id="run-1",
+            events=ledger.list_events("run-1"),
+            task=task,
+            runtime=task["runtime"],
+            log_tail=None,
+            now=110.0,
+            config=config,
+        )
+
+        context = observation_context.build_observation_context(
+            run_id="run-1",
+            task=task,
+            events=ledger.list_events("run-1"),
+            runtime=task["runtime"],
+            log_tail=None,
+            signals=signals,
+            config=config,
+            now=110.0,
+        )
+
+        serialized = json.dumps(context, ensure_ascii=False)
+        assert len(serialized) <= 500
+        assert context["run"]["run_id"] == "run-1"
+
+
+# ---------------------------------------------------------------------------
 # Scheduler (controller-side, non-blocking, failure isolated)
 # ---------------------------------------------------------------------------
 
@@ -1349,3 +1973,43 @@ class TestObservationScheduler:
         scheduler.drain(timeout=5)
         assert scheduler.submit("run-1", now=1010.0) is False
         assert calls == ["run-1"]
+
+    def test_slow_live_probe_never_blocks_submit(self, tmp_path: Path, monkeypatch):
+        import herdr.observer.live as observer_live
+
+        probed: List[str] = []
+
+        def slow_probe(*args, **kwargs):
+            probed.append("probe")
+            time.sleep(1.0)
+            return {"status": "unknown", "reason": "slow"}
+
+        def slow_transcript(*args, **kwargs):
+            probed.append("transcript")
+            time.sleep(1.0)
+            return None
+
+        monkeypatch.setattr(observer_live, "probe_live_runtime", slow_probe)
+        monkeypatch.setattr(observer_live, "read_live_transcript", slow_transcript)
+
+        store = SQLiteStateStore(tmp_path / "state.db")
+        ledger = TrajectoryLedger(store.db_path)
+        _append(ledger, [
+            {"run_id": "run-1", "event_type": "run_started", "task_id": "task-1",
+             "timestamp": 100.0},
+            _verification("run-1", False, "tevd-a"),
+            _verification("run-1", False, "tevd-b"),
+        ])
+        task = _task(run_id="run-1", runtime={"status": "running", "agent": "claude",
+                                              "pane_id": "pane-9"})
+        store.save_task(task)
+        config = {**_base_config(), "live_probe": True, "interval": 0, "max_calls_per_run": 5}
+        scheduler = observer_harness.ObservationScheduler(config=config)
+
+        started = time.monotonic()
+        assert scheduler.submit("run-1", task=task, store=store) is True
+        elapsed = time.monotonic() - started
+        scheduler.drain(timeout=10)
+
+        assert elapsed < 0.5, "probe I/O must not block the submitting (polling) thread"
+        assert probed, "probes must still run on the worker thread"

@@ -35,6 +35,9 @@ DEFAULTS: Dict[str, Any] = {
     "log_tail_lines": 200,
     "log_tail_bytes": 16384,
     "log_tail_chars": 4000,
+    "live_probe": True,           # read-only pane/agent liveness probe per observation
+    "live_probe_timeout": 2.0,    # seconds per herdr subprocess (bounded)
+    "live_transcript_timeout": 3.0,
     "jev": {
         "enabled": True,
         "model": "jev-latest",
@@ -85,6 +88,9 @@ def load_config(path: Optional[str] = None, env: Optional[dict] = None) -> Dict[
     enabled = _flag(environ, "HERDR_OBSERVER_ENABLED")
     if enabled is not None:
         config["enabled"] = enabled
+    live_probe = _flag(environ, "HERDR_OBSERVER_LIVE_PROBE")
+    if live_probe is not None:
+        config["live_probe"] = live_probe
     provider = str(environ.get("HERDR_OBSERVER_PROVIDER", "")).strip()
     if provider:
         config["provider"] = provider
@@ -115,6 +121,8 @@ _NUMBER_ENV = {
     "log_tail_lines": "HERDR_OBSERVER_LOG_LINES",
     "log_tail_bytes": "HERDR_OBSERVER_LOG_BYTES",
     "log_tail_chars": "HERDR_OBSERVER_LOG_CHARS",
+    "live_probe_timeout": "HERDR_OBSERVER_LIVE_PROBE_TIMEOUT",
+    "live_transcript_timeout": "HERDR_OBSERVER_LIVE_TRANSCRIPT_TIMEOUT",
 }
 
 
@@ -140,8 +148,12 @@ def _env_num(environ: dict, name: str) -> Optional[float]:
 def _apply_numbers(config: Dict[str, Any], environ: dict) -> None:
     for key, name in _NUMBER_ENV.items():
         value = _env_num(environ, name)
-        if value is not None:
-            config[key] = int(value) if key != "confidence_threshold" else value
+        if value is None:
+            continue
+        if key == "confidence_threshold" or key.endswith("_timeout"):
+            config[key] = value
+        else:
+            config[key] = int(value)
 
 
 def _jev_section(config: Dict[str, Any]) -> Dict[str, Any]:

@@ -819,3 +819,7 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - Updated [[task-lifecycle]] §1.2: Ledger 之上新增 Observer 只读诊断层的说明与链接。
 - Updated [[index]]: 意图路由与知识地图新增 [[trajectory-observer]]。
 - 证据：`herdr/observer/`、`herdr/state_db.py:trajectory_findings`、`services/herdr-controller.py:registry_watcher`、`bin/herdr-task:cmd_observe`、`tests/test_trajectory_observer.py`（41 项）、`docs/superpowers/specs/2026-09-20-trajectory-observer-design.md`。
+
+## [2026-09-20] fix | Trajectory Observer 运行时真实性加固：Live Runtime / Live Transcript / 证据升级 / 硬预算
+- Updated [[trajectory-observer]]: 新增只读 `herdr/observer/live.py`（pane/agent liveness 探测失败=unknown；live Pane transcript 优先、evidence 文件兜底，均在 daemon worker 内 bounded 执行）；Finding 同 episode 原地升级（canonical finding_id，不降级）；`_fit_budget` 硬保证（递归 clamp + 最小 identity）；`--task-id/--run-id` 互斥、`--json` stdout 纯 JSON（诊断走 stderr）。
+- 证据：`herdr/observer/live.py`、`herdr/observer/context.py:bound_transcript,_fit_budget`、`herdr/observer/signals.py:_detect_runtime_unavailable`、`herdr/state_db.py:upsert_trajectory_finding`、`bin/herdr-task:cmd_observe`、`tests/test_trajectory_observer.py`（65 项）。

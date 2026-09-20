@@ -263,31 +263,63 @@ def _runtime_fact(runtime: Dict[str, Any]) -> Dict[str, Any]:
     return fact
 
 
+def _live_runtime_fact(live_runtime: Dict[str, Any]) -> Dict[str, Any]:
+    fact = {"type": "runtime_live", "status": live_runtime.get("status")}
+    for key in ("reason", "pane_id", "agent_status"):
+        if live_runtime.get(key) is not None:
+            fact[key] = live_runtime[key]
+    return fact
+
+
 def _detect_runtime_unavailable(
-    events: List[Dict[str, Any]], task: Optional[Dict[str, Any]], runtime: Dict[str, Any],
+    events: List[Dict[str, Any]],
+    task: Optional[Dict[str, Any]],
+    runtime: Dict[str, Any],
+    live_runtime: Optional[Dict[str, Any]],
 ) -> Optional[Signal]:
-    if runtime.get("status") != "unavailable" or not _is_active(events, task):
+    persisted_unavailable = runtime.get("status") == "unavailable"
+    live_unavailable = (live_runtime or {}).get("status") == "unavailable"
+    if not (persisted_unavailable or live_unavailable):
+        return None
+    if not _is_active(events, task):
         return None
     last = _last_event(events) if events else {}
-    evidence = [_runtime_fact(runtime)]
+    evidence = []
+    if persisted_unavailable:
+        evidence.append(_runtime_fact(runtime))
+    if isinstance(live_runtime, dict) and live_runtime:
+        evidence.append(_live_runtime_fact(live_runtime))
     if last:
         evidence.append(event_ref(last))
-    identity = runtime.get("agent_session_id") or runtime.get("pane_id") or "runtime"
+    identity = (
+        runtime.get("agent_session_id") or runtime.get("pane_id")
+        or (live_runtime or {}).get("pane_id") or "runtime"
+    )
+    if persisted_unavailable and live_unavailable:
+        source = "persisted+live"
+    elif live_unavailable:
+        source = "live"
+    else:
+        source = "persisted"
     return Signal(
         finding_type="runtime_unavailable",
         severity="critical",
         summary=(
-            f"Runtime 状态为 unavailable（agent={runtime.get('agent') or 'unknown'}，"
-            f"pane={runtime.get('pane_id') or 'unknown'}），Run 仍未终结；"
+            f"Runtime 不可用（来源：{source}，persisted.status={runtime.get('status') or 'unknown'}，"
+            f"live.status={(live_runtime or {}).get('status') or 'unknown'}），Run 仍未终结；"
             "执行环境很可能已不可用。"
         ),
-        suspected_cause="Pane/Agent 会话已消失或不可用，而任务尚未进入终态。",
+        suspected_cause="Pane 已消失或 Agent 会话不可用，而任务尚未进入终态。",
         recommended_action="request_human",
         confidence=0.9,
         evidence=evidence,
         anchor=f"runtime:{identity}",
         requires_confirmation=False,
-        facts={"runtime_status": "unavailable"},
+        facts={
+            "runtime_status": runtime.get("status"),
+            "live_status": (live_runtime or {}).get("status"),
+            "live_reason": (live_runtime or {}).get("reason"),
+        },
     )
 
 
@@ -504,6 +536,7 @@ def detect_signals(
     events: List[Dict[str, Any]],
     task: Optional[Dict[str, Any]] = None,
     runtime: Optional[Dict[str, Any]] = None,
+    live_runtime: Optional[Dict[str, Any]] = None,
     log_tail: Optional[Dict[str, Any]] = None,
     now: float,
     config: Dict[str, Any],
@@ -512,7 +545,7 @@ def detect_signals(
     runtime = runtime or {}
     events = list(events or [])
     detectors = (
-        _detect_runtime_unavailable(events, task, runtime),
+        _detect_runtime_unavailable(events, task, runtime, live_runtime),
         _detect_verification_failure(events, task),
         _detect_repeated_failure(events, task, config),
         _detect_repeated_action(events, config),

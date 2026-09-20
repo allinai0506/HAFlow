@@ -1225,7 +1225,7 @@ def cmd_observe(args):
         from herdr.observer import harness as observer_harness
         from herdr.trajectory import run_id_for_task
     except Exception as exc:
-        print(f"[OBSERVE] observer unavailable: {exc}")
+        print(f"[OBSERVE] observer unavailable: {exc}", file=sys.stderr)
         sys.exit(1)
 
     store = _get_store()
@@ -1235,7 +1235,7 @@ def cmd_observe(args):
     if args.task_id:
         task = store.get_task(args.task_id)
         if not task:
-            print(f"[OBSERVE] task not found: {args.task_id}")
+            print(f"[OBSERVE] task not found: {args.task_id}", file=sys.stderr)
             sys.exit(1)
         if not run_id:
             run_id = run_id_for_task(task)
@@ -1243,7 +1243,7 @@ def cmd_observe(args):
     # from the run's own trajectory facts.
 
     if not run_id:
-        print("[OBSERVE] --run-id or --task-id is required")
+        print("[OBSERVE] --run-id or --task-id is required", file=sys.stderr)
         sys.exit(2)
 
     findings = observer_harness.observe_run(
@@ -4146,8 +4146,9 @@ def main():
         "observe",
         help="Trajectory Observer: 观察一个 Run 并输出结构化 Finding(只读旁路)",
     )
-    observe_cmd.add_argument("--run-id", default=None)
-    observe_cmd.add_argument("--task-id", default=None)
+    observe_target = observe_cmd.add_mutually_exclusive_group(required=True)
+    observe_target.add_argument("--run-id", default=None)
+    observe_target.add_argument("--task-id", default=None)
     observe_cmd.add_argument("--json", action="store_true")
     observe_cmd.add_argument(
         "--no-model",

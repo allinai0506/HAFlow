@@ -1182,17 +1182,24 @@ def _decode_finding_row(row: sqlite3.Row) -> Dict[str, Any]:
     }
 
 
-def record_trajectory_finding(
+def upsert_trajectory_finding(
     finding: Dict[str, Any],
     db_path: Optional[Path] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Append one analysis finding and return the canonical persisted row.
+    """Record/refresh one analysis finding and return the canonical persisted row.
 
     Findings are deliberately separated from trajectory events: the events
     ledger records what happened, this table records what HAFlow suspects it
-    means. ``finding_key`` is the dedup contract (UNIQUE): when a concurrent
-    observer already persisted the same key, the existing row is re-read and
-    returned so every caller converges on one canonical ``finding_id``.
+    means. ``finding_key`` is the dedup contract (UNIQUE):
+
+    - first observation inserts the row;
+    - later observations of the SAME episode (same key) refresh the analysis
+      fields in place (severity/summary/evidence/... escalating as the chain
+      grows) while ``finding_id``/``created_at`` stay canonical;
+    - a concurrent observer that lost the insert race re-reads and returns the
+      canonical row, so every caller converges on one ``finding_id``;
+    - a lower-severity observation never downgrades a stored row.
+
     Returns None only when the row cannot be read back at all.
     """
     finding_key = finding.get("finding_key")
@@ -1204,7 +1211,7 @@ def record_trajectory_finding(
 
     conn = get_db_connection(db_path)
     try:
-        cur = conn.execute(
+        conn.execute(
             """
             INSERT INTO trajectory_findings (
                 finding_id, finding_key, run_id, task_id, workflow_id, node,
@@ -1212,7 +1219,24 @@ def record_trajectory_finding(
                 summary, suspected_cause, recommended_action, confidence,
                 evidence_json, metadata_json, created_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(finding_key) DO NOTHING;
+            ON CONFLICT(finding_key) DO UPDATE SET
+                task_id = excluded.task_id,
+                workflow_id = excluded.workflow_id,
+                node = excluded.node,
+                agent = excluded.agent,
+                agent_session_id = excluded.agent_session_id,
+                severity = excluded.severity,
+                status = excluded.status,
+                summary = excluded.summary,
+                suspected_cause = excluded.suspected_cause,
+                recommended_action = excluded.recommended_action,
+                confidence = excluded.confidence,
+                evidence_json = excluded.evidence_json,
+                metadata_json = excluded.metadata_json
+            WHERE CASE excluded.severity
+                      WHEN 'critical' THEN 3 WHEN 'warning' THEN 2 ELSE 1 END
+                  >= CASE trajectory_findings.severity
+                      WHEN 'critical' THEN 3 WHEN 'warning' THEN 2 ELSE 1 END;
             """,
             (
                 finding_id,
@@ -1235,13 +1259,12 @@ def record_trajectory_finding(
                 float(finding["created_at"]) if finding.get("created_at") is not None else time.time(),
             ),
         )
-        if cur.rowcount == 0:
-            # Lost a concurrent insert race: return the canonical persisted row.
-            row = conn.execute(
-                "SELECT * FROM trajectory_findings WHERE finding_key = ?", (finding_key,)
-            ).fetchone()
-            return _decode_finding_row(row) if row is not None else None
-        return get_trajectory_finding(finding_key, db_path=db_path, conn=conn)
+        # Whether this call inserted, updated, or lost a race, the canonical
+        # row is the single answer every caller must return.
+        row = conn.execute(
+            "SELECT * FROM trajectory_findings WHERE finding_key = ?", (finding_key,)
+        ).fetchone()
+        return _decode_finding_row(row) if row is not None else None
     finally:
         conn.close()
 
