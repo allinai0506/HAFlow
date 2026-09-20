@@ -117,7 +117,9 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
             event_type TEXT,
             payload_json TEXT,
             timestamp REAL,
-            source TEXT
+            source TEXT,
+            run_id TEXT,
+            sequence INTEGER
         );
     """)
 
@@ -171,6 +173,7 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_agent ON events(agent_id, timestamp);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type, timestamp);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_source ON events(source, timestamp);")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_events_run_sequence ON events(run_id, sequence, id);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_steering_task ON steering_items(task_id, status);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_steering_hist_task ON steering_history(task_id, timestamp);")
 
@@ -316,9 +319,27 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
 def _ensure_event_columns(conn: sqlite3.Connection) -> None:
     """Upgrade pre-WorkflowEvent event tables in place."""
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(events);")}
-    for name in ("node_id", "agent_id", "source"):
+    column_types = {
+        "node_id": "TEXT",
+        "agent_id": "TEXT",
+        "source": "TEXT",
+        "run_id": "TEXT",
+        "sequence": "INTEGER",
+    }
+    for name in ("node_id", "agent_id", "source", "run_id", "sequence"):
         if name not in columns:
-            conn.execute(f"ALTER TABLE events ADD COLUMN {name} TEXT;")
+            try:
+                conn.execute(f"ALTER TABLE events ADD COLUMN {name} {column_types[name]};")
+            except sqlite3.OperationalError as exc:
+                # Another process may have won the schema-upgrade race after
+                # this connection's PRAGMA snapshot. Only accept that exact
+                # race after confirming the target column now exists.
+                if "duplicate column name" not in str(exc).lower():
+                    raise
+                columns = {row["name"] for row in conn.execute("PRAGMA table_info(events);")}
+                if name not in columns:
+                    raise
+            columns.add(name)
 
 
 def get_db_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
@@ -954,6 +975,13 @@ def list_events(
     try:
         query = "SELECT * FROM events WHERE 1=1"
         params: List[Any] = []
+        # Keep the legacy WorkflowEvent API behavior stable: trajectory rows
+        # are queried through list_trajectory_events, unless explicitly asked
+        # for source="trajectory".
+        if source == "trajectory":
+            query += " AND source = 'trajectory'"
+        elif source is None:
+            query += " AND (source IS NULL OR source != 'trajectory')"
         for column, value in (
             ("workflow_id", workflow_id),
             ("node_id", node_id),
@@ -989,9 +1017,125 @@ def list_events(
         conn.close()
 
 
+def record_trajectory_event(
+    event: Dict[str, Any],
+    db_path: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Append one trajectory event with a transaction-local run sequence.
+
+    This is deliberately separate from the legacy WorkflowEvent API. Both use
+    the same SQLite event store, but trajectory rows carry the run/sequence
+    identity needed for deterministic replay.
+    """
+    run_id = event.get("run_id")
+    event_type = event.get("event_type")
+    if not run_id:
+        raise ValueError("run_id is required")
+    if not event_type:
+        raise ValueError("event_type is required")
+
+    payload = event.get("payload") or {}
+    if not isinstance(payload, dict):
+        raise ValueError("payload must be a dict")
+
+    conn = get_db_connection(db_path)
+    try:
+        conn.execute("BEGIN IMMEDIATE;")
+        sequence = conn.execute(
+            """
+            SELECT COALESCE(MAX(sequence), 0) + 1
+            FROM events
+            WHERE run_id = ? AND source = 'trajectory'
+            """,
+            (run_id,),
+        ).fetchone()[0]
+        timestamp = float(event["timestamp"]) if event.get("timestamp") is not None else time.time()
+        cur = conn.execute(
+            """
+            INSERT INTO events (
+                workflow_id, node_id, task_id, agent_id,
+                event_type, payload_json, timestamp, source,
+                run_id, sequence
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'trajectory', ?, ?)
+            """,
+            (
+                event.get("workflow_id"),
+                event.get("node_id") or event.get("node"),
+                event.get("task_id"),
+                event.get("agent_id") or event.get("agent"),
+                event_type,
+                json.dumps(payload, ensure_ascii=False),
+                timestamp,
+                run_id,
+                sequence,
+            ),
+        )
+        conn.execute("COMMIT;")
+        return {
+            "id": cur.lastrowid,
+            "workflow_id": event.get("workflow_id"),
+            "node_id": event.get("node_id") or event.get("node"),
+            "task_id": event.get("task_id"),
+            "agent_id": event.get("agent_id") or event.get("agent"),
+            "event_type": event_type,
+            "timestamp": timestamp,
+            "source": "trajectory",
+            "run_id": run_id,
+            "sequence": sequence,
+            "payload": payload,
+        }
+    except Exception:
+        try:
+            conn.execute("ROLLBACK;")
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
+
+
+def list_trajectory_events(
+    run_id: str,
+    event_type: Optional[str] = None,
+    task_id: Optional[str] = None,
+    db_path: Optional[Path] = None,
+) -> List[Dict[str, Any]]:
+    """Read trajectory rows in stable sequence order."""
+    conn = get_db_connection(db_path)
+    try:
+        query = "SELECT * FROM events WHERE run_id = ? AND source = 'trajectory'"
+        params: List[Any] = [run_id]
+        if event_type is not None:
+            query += " AND event_type = ?"
+            params.append(event_type)
+        if task_id is not None:
+            query += " AND task_id = ?"
+            params.append(task_id)
+        query += " ORDER BY sequence ASC, id ASC"
+        results = []
+        for row in conn.execute(query, params).fetchall():
+            results.append({
+                "id": row["id"],
+                "workflow_id": row["workflow_id"],
+                "node_id": row["node_id"],
+                "task_id": row["task_id"],
+                "agent_id": row["agent_id"],
+                "event_type": row["event_type"],
+                "timestamp": row["timestamp"],
+                "source": row["source"],
+                "run_id": row["run_id"],
+                "sequence": row["sequence"],
+                "payload": json.loads(row["payload_json"] or "{}"),
+            })
+        return results
+    finally:
+        conn.close()
+
+
 PROTECTED_TASK_METADATA_FIELDS = {
     "task_id",
     "workflow_id",
+    "run_id",
     "node",
     "stage",
     "agent",

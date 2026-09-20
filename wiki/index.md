@@ -35,6 +35,7 @@
 | 您的工作目标 | 必须优先阅读的页面 | 核心关联源码 |
 | :--- | :--- | :--- |
 | **修改任务状态流转或添加新状态** | [[task-lifecycle]] | `herdr/transitions.py`, `herdr/kernel.py:transition_task/workflow` |
+| **回放一次 Agent 执行的历史事实** | [[task-lifecycle]] §1.2 | `herdr/trajectory.py`, `herdr/state_db.py`, `bin/herdr-task`, `services/herdr-controller.py` |
 | **修改任务/工作流收尾、清理 pane 或 clone** | [[task-lifecycle]] §5 | `bin/herdr-task:finalize_task`, `close_workflow` |
 | **新增/调整工作流模板或 DAG 调度算法** | [[dag-workflow-engine]] | `herdr/workflow.py` |
 | **修改 Agent 分配算法、优先级或并发锁** | [[agent-routing-and-pools]] | `herdr/agent_router.py` |

@@ -15,7 +15,9 @@ Covers:
 """
 
 import json
+import multiprocessing
 import os
+import sqlite3
 import subprocess
 import time
 from pathlib import Path
@@ -26,6 +28,40 @@ from herdr import kernel
 
 
 HERDR_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _upgrade_event_columns_in_process(db_path, barrier, results):
+    """Force two independent processes past PRAGMA before ALTER TABLE."""
+    class BarrierConnection(sqlite3.Connection):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._schema_snapshot_barrier_used = False
+
+        def execute(self, sql, parameters=()):
+            result = super().execute(sql, parameters)
+            if (
+                not self._schema_snapshot_barrier_used
+                and sql.strip().upper().startswith("PRAGMA TABLE_INFO(EVENTS")
+            ):
+                self._schema_snapshot_barrier_used = True
+                barrier.wait(timeout=10)
+            return result
+
+    conn = sqlite3.connect(
+        str(db_path),
+        isolation_level=None,
+        timeout=10,
+        factory=BarrierConnection,
+    )
+    conn.row_factory = sqlite3.Row
+    try:
+        state_db._ensure_event_columns(conn)
+    except Exception as exc:
+        results.put(("error", type(exc).__name__, str(exc)))
+    else:
+        results.put(("ok",))
+    finally:
+        conn.close()
 
 
 @pytest.fixture
@@ -75,6 +111,60 @@ def test_init_db_and_wal_mode(state_env):
         assert {"workflows", "tasks", "checkpoints", "events"}.issubset(tables)
     finally:
         conn.close()
+
+
+def test_concurrent_legacy_event_schema_upgrade_is_idempotent(tmp_path):
+    """Two independent processes can upgrade the same legacy events table."""
+    db_path = tmp_path / "legacy-events.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            workflow_id TEXT,
+            task_id TEXT,
+            event_type TEXT,
+            payload_json TEXT,
+            timestamp REAL
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    context = multiprocessing.get_context("spawn")
+    barrier = context.Barrier(2)
+    results = context.Queue()
+    processes = [
+        context.Process(
+            target=_upgrade_event_columns_in_process,
+            args=(db_path, barrier, results),
+        )
+        for _ in range(2)
+    ]
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join(timeout=15)
+
+    assert all(not process.is_alive() for process in processes)
+    assert [process.exitcode for process in processes] == [0, 0]
+    outcomes = [results.get(timeout=2) for _ in processes]
+    assert outcomes == [("ok",), ("ok",)]
+
+    conn = sqlite3.connect(db_path)
+    columns = [row[1] for row in conn.execute("PRAGMA table_info(events)")]
+    assert columns.count("run_id") == 1
+    assert columns.count("sequence") == 1
+    conn.close()
+
+    from herdr.trajectory import TrajectoryLedger
+
+    ledger = TrajectoryLedger(db_path)
+    ledger.append_event({"run_id": "run-concurrent-upgrade", "event_type": "task_started"})
+    assert [event["event_type"] for event in ledger.list_events("run-concurrent-upgrade")] == [
+        "task_started",
+    ]
 
 
 def test_workflow_event_stream_records_full_context_and_filters(state_env):
