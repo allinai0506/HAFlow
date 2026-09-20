@@ -12,6 +12,10 @@ import sys
 import time
 from pathlib import Path
 
+HERDR_ROOT = Path(__file__).resolve().parent.parent
+if str(HERDR_ROOT) not in sys.path:
+    sys.path.insert(0, str(HERDR_ROOT))
+
 try:
     from herdr.git_coordination import ensure_branch_available
 except ImportError:
