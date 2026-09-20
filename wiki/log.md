@@ -8,6 +8,13 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-09-20] fix | 门禁 verdict 收口、worker 独立启动修复与待决策展示（PR #67）
+- 背景：门禁 test 节点已写出合法 verdict 却被 `[COMPLETION DEFERRED]` 卡死在 working（产物门禁把人类契约标签当文件路径，verdict 契约消费不到，任务最终 superseded 重跑）；#64 给 `services/herdr-worker.py` 引入 `herdr.git_coordination` 时缺 sys.path bootstrap 且回退到不存在模块，脚本方式拉起必然崩溃；Console 待决策横幅只聚合不展示明细。
+- 改动：`services/herdr-controller.py#gate_verdict_ready`——门禁节点有 pass/blocked verdict 即放行 `idle → agent_done`，进入既有 auto-verdict 收口（不新增状态机分支）；`services/herdr-worker.py` 头部注入 `HERDR_ROOT`；Console 逐条展示待决策问题与依据并补充 gate 节点元数据；新增 `tests/test_script_bootstrap.py`，把"入口脚本必须 bootstrap repo root"从单点修复升格为自动门禁（sentinel→worker 二次复发）。
+- Updated [[dag-workflow-engine]] §10：verdict 就绪即放行完成。
+- 测试：`tests/test_script_bootstrap.py` 2 passed；`tests/test_herdr_worker` + `tests/test_fix_loop_anti_flapping` 14 passed；`tests/test_console_frontend_syntax` 11 passed。
+- 知识：lessons §73 / §74。
+
 ## [2026-09-19] fix | Workflow Run Definition Snapshot：Run 创建即冻结执行定义
 - 背景：项目共享 `~/.herdr-controller/projects/<project_id>/workflow.json` 代表"下一次 Run 的当前模板"，模板切换会覆盖它，导致历史 Workflow 的 `workflow_config_for()` 可能读到新模板的 DAG，违反"Workflow Run 一旦创建，其执行定义不可变"。
 - `herdr/projects.py` 新增 `_snapshot_workflow_definition()`：context Run 在 `register_workflow` 时把创建时刻的完整定义固化到 `~/.herdr-controller/workflows/<workflow_id>/workflow.json`（复用 workflow 级根目录，与 `shared/` 同级共存），registry `workflow_file` 指向 Run 私有快照。
