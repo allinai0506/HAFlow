@@ -3306,3 +3306,41 @@ python3 -m unittest tests.test_script_bootstrap # 无 pytest 环境等价执行
   `tests/test_state_transition_gateway.py#test_sentinel_directly_bootstraps_and_imports_herdr_without_pythonpath`
 
 ---
+
+## 75. SQLite 旧 schema 自动升级的跨进程 duplicate-column 竞态
+
+### 问题背景
+
+PR #69 的 Trajectory Ledger 为旧 `events` 表补充 `run_id` 与 `sequence` 列。
+原实现先执行 `PRAGMA table_info(events)`，再逐列执行 `ALTER TABLE`；Controller、Sentinel
+和 CLI 等独立进程首次打开同一个旧数据库时，两个进程可以同时读到缺列状态，后到者会因
+`sqlite3.OperationalError: duplicate column name` 启动失败。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 进程内 `_INITIALIZED_DBS` 无法覆盖独立进程的 schema upgrade 竞争 | schema 检查与 ALTER 之间存在跨进程 TOCTOU 窗口，必须以 SQLite 实际结果为准 | 所有旧库自动升级路径都必须考虑独立连接并发首次初始化，不能只依赖进程内缓存或线程锁 |
+| 宽泛吞掉 `OperationalError` 会掩盖锁超时、损坏或语法错误 | duplicate-column 只有在重新检查确认目标列已存在时才代表竞争成功 | 仅允许“duplicate-column + 目标列已存在”通过；其他 SQLite 错误必须继续抛出 |
+
+### 操作规范（已固化到 `herdr/state_db.py::_ensure_event_columns`）
+
+1. 执行 `ALTER TABLE` 时若收到 duplicate-column，立即重新读取 `PRAGMA table_info(events)`。
+2. 只有目标列已存在时将其视为另一个进程已完成升级；目标列不存在或错误类型不同则失败。
+3. schema upgrade regression 必须使用两个独立进程和独立 SQLite connection，并在旧 schema 快照后强制并发，而不是只用线程锁。
+
+### 验证命令 / 守护测试
+
+```bash
+pytest tests/test_state_db_v2.py::test_concurrent_legacy_event_schema_upgrade_is_idempotent -q
+# 期望：1 passed；两个 spawned 进程均成功，run_id/sequence 各存在一次且 TrajectoryLedger 可读写
+```
+
+### 相关文档 / 关联证据
+
+- PR #69 — Agent Trajectory Ledger schema upgrade follow-up
+- PR #69 follow-up commit — 初始跨进程竞态修复
+- `herdr/state_db.py::_ensure_event_columns`
+- `tests/test_state_db_v2.py::test_concurrent_legacy_event_schema_upgrade_is_idempotent`
+
+---

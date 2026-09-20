@@ -328,7 +328,18 @@ def _ensure_event_columns(conn: sqlite3.Connection) -> None:
     }
     for name in ("node_id", "agent_id", "source", "run_id", "sequence"):
         if name not in columns:
-            conn.execute(f"ALTER TABLE events ADD COLUMN {name} {column_types[name]};")
+            try:
+                conn.execute(f"ALTER TABLE events ADD COLUMN {name} {column_types[name]};")
+            except sqlite3.OperationalError as exc:
+                # Another process may have won the schema-upgrade race after
+                # this connection's PRAGMA snapshot. Only accept that exact
+                # race after confirming the target column now exists.
+                if "duplicate column name" not in str(exc).lower():
+                    raise
+                columns = {row["name"] for row in conn.execute("PRAGMA table_info(events);")}
+                if name not in columns:
+                    raise
+            columns.add(name)
 
 
 def get_db_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
