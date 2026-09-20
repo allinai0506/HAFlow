@@ -188,6 +188,23 @@ class TestCleanSandbox(unittest.TestCase):
             branch = worker.checkout_onto_branch(clone, "feat/wip")
             self.assertEqual(branch, "feat/wip")
 
+    def test_checkout_onto_branch_rejects_active_branch_owner(self):
+        worker = load_worker()
+        with patch.object(
+            worker,
+            "_registered_tasks",
+            return_value=[
+                {
+                    "task_id": "existing-task",
+                    "status": "working",
+                    "branch": "feat/wip",
+                }
+            ],
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                worker.checkout_onto_branch("/tmp/unused-clone", "feat/wip")
+        self.assertIn("already owned", str(ctx.exception))
+
     def test_stale_unmanaged_clone_healed(self):
         worker = load_worker()
         clone_root = Path(self.temp_dir) / "clones"
@@ -207,5 +224,4 @@ class TestCleanSandbox(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
 

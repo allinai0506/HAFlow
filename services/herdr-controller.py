@@ -44,6 +44,11 @@ except Exception:
     direct_dispatch_planner = None
 
 try:
+    from herdr.git_coordination import ensure_no_git_processes
+except Exception:
+    ensure_no_git_processes = None
+
+try:
     from herdr.supervisor import harness as supervisor_harness
 except Exception:
     # Semantic Supervisor 是可选观察层;缺失或异常时原有流程完全不变。
@@ -2126,6 +2131,16 @@ def finalize_completed_task(task_id):
     # 需要 Git 集成
     # --------------------------------
     if mode == "git":
+
+        clone_path = task.get("clone_path")
+        if clone_path and ensure_no_git_processes is not None:
+            try:
+                ensure_no_git_processes(clone_path)
+            except Exception as exc:
+                print(
+                    f"[FINALIZE WAIT] task={task_id} git process still active: {exc}"
+                )
+                return
 
         # 1. 将 Task 自己产生的修改安全提交(若此前已 committed 则跳过)
         if task.get("status") == "completed":
