@@ -350,7 +350,7 @@ class TestUniversalSubstrateEndToEnd:
 
         # Check Attention Hub frontend categorization contract
         ts = tasks_db["tasks"]
-        decision_tasks = [t for t in ts if t.get("stage_verdict") == "blocked" or t.get("status") == "blocked" or t.get("node_type") == "gate"]
+        decision_tasks = [t for t in ts if t.get("stage_verdict") == "blocked" or t.get("status") == "blocked"]
         attention_tasks = [t for t in ts if t.get("status") in {"failed", "interrupted"} or t.get("blocker")]
         active_tasks = [t for t in ts if t.get("status") in {"dispatched", "working", "rework", "paused"}]
 
@@ -398,4 +398,3 @@ class TestUniversalSubstrateEndToEnd:
         restored_wf = json.loads(e2e_env["wf_file"].read_text(encoding="utf-8"))["workflows"][wid]
         assert restored_wf["status"] == "running"
         assert restored_wf["title"] == "检查点回溯与时间旅行测试"
-

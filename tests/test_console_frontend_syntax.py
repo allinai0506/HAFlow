@@ -6,11 +6,13 @@ or invalid JS syntax crashes the frontend on page load.
 
 import importlib.machinery
 import importlib.util
+import json
 import re
 import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -164,8 +166,39 @@ class TestConsoleFrontendSyntaxAndContracts(unittest.TestCase):
         self.assertIn("submitSignoffDecision", self.html)
         self.assertIn("成果会签", self.html)
 
+    def test_attention_hub_explains_each_pending_decision(self):
+        """The banner must identify real pending gates and explain their decision basis."""
+        self.assertIn("function isDecisionTask(t)", self.html)
+        self.assertIn("t.stage_verdict==='blocked'||t.status==='blocked'||(t.node_type==='gate'", self.html)
+        self.assertIn("t.stage_verdict!=='pass'", self.html)
+        self.assertIn("function decisionSummary(t)", self.html)
+        self.assertIn("stage_verdict_note", self.html)
+        self.assertIn("blocker", self.html)
+        self.assertIn("goal", self.html)
+        self.assertIn("待决策事项", self.html)
+        self.assertIn("查看决策项", self.html)
+
+    def test_workflow_detail_enriches_tasks_with_node_type(self):
+        """Decision detection must receive gate metadata absent from raw task records."""
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+            json.dump({"nodes": [{"id": "review", "node_type": "gate"}]}, f)
+            workflow_path = f.name
+        try:
+            with patch.object(self.console, "workflows", return_value={
+                "wf-1": {"workflow_id": "wf-1", "project_id": "p-1"},
+            }), patch.object(self.console, "project_for_workflow", return_value={
+                "workflow_file": workflow_path,
+            }), patch.object(self.console, "tasks_for_workflow", return_value=[{
+                "task_id": "t-1", "workflow_id": "wf-1", "node": "review",
+                "status": "completed",
+            }]), patch.object(self.console, "agent_runtime", return_value=None), patch.object(
+                self.console.herdr_projection, "detect_workflow_stalls", return_value=None,
+            ):
+                detail = self.console.workflow_detail("wf-1")
+        finally:
+            Path(workflow_path).unlink(missing_ok=True)
+        self.assertEqual(detail["tasks"][0]["node_type"], "gate")
+
 
 if __name__ == "__main__":
     unittest.main()
-
-
