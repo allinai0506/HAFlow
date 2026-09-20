@@ -25,7 +25,7 @@ DEFAULTS: Dict[str, Any] = {
     "enabled": True,
     "provider": "jev",
     "interval": 300,              # minimum seconds between observations per run
-    "max_calls_per_run": 24,      # hard budget per run (long-running task cap)
+    "max_calls_per_run": 24,      # process-local per-run observation budget (resets on controller restart)
     "recent_events": 50,          # trajectory window sent to the provider
     "verification_events": 5,     # verification rows kept in the context
     "max_findings": 10,           # cap per observation

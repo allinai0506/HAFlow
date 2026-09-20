@@ -827,3 +827,7 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 ## [2026-09-20] fix | Trajectory Observer 运行身份安全：agent_session 身份校验 + transcript guard + 上下文预算下限
 - Updated [[trajectory-observer]]: live probe 新增身份校验（pane_not_found / identity_match / identity_mismatch / agent_not_found / unknown 五态，unknown 绝不当 unavailable）；live transcript 必须通过同一身份 guard 才允许 `pane read`，未确认身份回退 persisted evidence；`max_context_size` 产品最小值 500 在 `load_config` 显式 clamp。
 - 证据：`herdr/observer/live.py:_session_verdict,_identity_result,probe_live_runtime,read_live_transcript`、`herdr/observer/config.py:MIN_MAX_CONTEXT_SIZE`、`tests/test_trajectory_observer.py`（70 项，含 A/B/C 三条身份回归）。
+
+## [2026-09-20] fix | Trajectory Observer 收尾：no_progress episode 边界 + Provider 构造隔离 + 预算语义澄清
+- Updated [[trajectory-observer]]: `no_progress` 改为按最近一次进展边界（passed verification / artifact）计算当前 episode 的 rework 数，anchor 取当前 episode 首次 rework（历史成功不再永久屏蔽新卡死）；Provider 构造失败降级为无 Provider（证据型 Finding 照常产出、弱信号静默）；`max_calls_per_run` 明确为 process-local per-run observation budget（Controller 重启后重置，V1 不持久化）。
+- 证据：`herdr/observer/signals.py:_progress_boundary_sequence,_detect_no_progress`、`herdr/observer/harness.py:observe_run,ObservationScheduler`、`herdr/observer/config.py:max_calls_per_run`、`tests/test_trajectory_observer.py`（74 项）。

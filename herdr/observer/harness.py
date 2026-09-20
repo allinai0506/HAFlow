@@ -106,7 +106,17 @@ def observe_run(
     try:
         cfg = config or observer_config.load_config()
         if provider is None and use_model:
-            provider = get_provider(cfg)
+            try:
+                provider = get_provider(cfg)
+            except Exception as exc:
+                # Provider construction failure must never disable the
+                # deterministic observer: evidence-backed findings
+                # (requires_confirmation=false) still flow; weak signals stay
+                # silent without a confirmer.
+                message = f"[OBSERVER PROVIDER SKIPPED] {type(exc).__name__}: {exc}"
+                LOGGER.warning(message)
+                stderr_log(message)
+                provider = None
         if runtime_probe is None and transcript_reader is None:
             runtime_probe, transcript_reader = _default_probes(cfg)
         observer = TrajectoryObserver(
@@ -125,7 +135,12 @@ def observe_run(
 
 
 class ObservationScheduler:
-    """Bounded, non-blocking, per-run-deduplicated observation dispatcher."""
+    """Bounded, non-blocking, per-run-deduplicated observation dispatcher.
+
+    The per-run budget is process-local (RateGate bookkeeping): it limits
+    provider/live-probe spend inside one controller process and resets on
+    controller restart. No observation counters are persisted in V1.
+    """
 
     def __init__(
         self,
@@ -139,6 +154,7 @@ class ObservationScheduler:
         self._config = config or observer_config.load_config()
         self._max_concurrent = max(1, int(max_concurrent))
         self._gate = RateGate()
+        # Process-local per-run observation budget (resets on restart).
         self._gate_config = {
             "interval": float(self._config.get("interval", 300)),
             "cooldown": 0,

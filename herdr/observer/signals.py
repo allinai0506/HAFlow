@@ -156,6 +156,21 @@ def _rework_events(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return reworks
 
 
+def _progress_boundary_sequence(events: List[Dict[str, Any]]) -> int:
+    """Sequence of the most recent explicit progress fact.
+
+    A passing verification or a new artifact closes the previous episode:
+    reworks before that boundary are history, not evidence of a current stall.
+    """
+    boundary = 0
+    for event in events:
+        if event.get("event_type") == "verification_completed" and _verification_passed(event):
+            boundary = max(boundary, int(event.get("sequence") or 0))
+        elif isinstance(event.get("artifact"), dict) and event.get("artifact"):
+            boundary = max(boundary, int(event.get("sequence") or 0))
+    return boundary
+
+
 def _action_signature(action: Dict[str, Any]) -> str:
     for key in _ACTION_KEYS:
         value = action.get(key)
@@ -422,20 +437,17 @@ def _detect_no_progress(
 ) -> Optional[Signal]:
     if not _is_active(events, task) or runtime.get("status") == "unavailable":
         return None
-    reworks = _rework_events(events)
+    # Episode semantics: only reworks after the most recent progress fact count;
+    # an old passing check or artifact must never mask a new rework stall.
+    boundary = _progress_boundary_sequence(events)
+    reworks = [
+        event for event in _rework_events(events)
+        if int(event.get("sequence") or 0) > boundary
+    ]
     minimum = int(config.get("no_progress_min_reworks", 3))
     if len(reworks) < minimum:
         return None
     first = reworks[0]
-    first_sequence = first.get("sequence") or 0
-    for event in events:
-        if (event.get("sequence") or 0) <= first_sequence:
-            continue
-        if (event.get("event_type") == "verification_completed"
-                and _verification_passed(event)):
-            return None  # a later passing check shows progress resumed
-        if isinstance(event.get("artifact"), dict) and event.get("artifact"):
-            return None  # new artifacts show progress even without verification
     last = _last_event(events)
     idle = max(0.0, now - _event_time(last))
     if idle >= float(config.get("stall_after_seconds", 1800)):
@@ -444,8 +456,8 @@ def _detect_no_progress(
         finding_type="no_progress",
         severity="warning",
         summary=(
-            f"任务已回流 rework {len(reworks)} 次，首次回流后既没有新的验证通过记录，"
-            "也没有新的产物事件。"
+            f"任务在当前进展边界后已回流 rework {len(reworks)} 次，"
+            "期间没有新的验证通过记录或产物事件。"
         ),
         suspected_cause="反复回流但未产生可验证的进展，可能缺少明确的收敛路径。",
         recommended_action="inspect",

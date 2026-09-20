@@ -43,7 +43,7 @@ bounded 日志尾部(existing evidence) ──┼─► ObservationContext(有�
 | A | 活跃 Run 且 `now-last_event ≥ stall_after_seconds`（默认 1800s） | `stalled_execution` | 是（时长单独永远只给 warning） |
 | B | 尾部连续 `verification_completed.passed=false ≥ 2`（任务非 done-claim） | `repeated_failure` | 否（模型可否决） |
 | C | `runtime.status=unavailable` **或 live Pane/Agent 探测 unavailable**（probe 失败=unknown 不判死） | `runtime_unavailable` | 否 |
-| D | `rework ≥ 3` 且首次 rework 后无成功验证、无产物事件 | `no_progress` | 是 |
+| D | 最近一次进展边界（passed verification 或 artifact）之后 `rework ≥ 3` 且无新进展（anchor=当前 episode 首次 rework） | `no_progress` | 是 |
 | E | 相同 action 签名连续失败 ≥ 3（仅当存在 action 事件；V1 无生产者，接口保留） | `repeated_action` | 否 |
 | F | 最新验证失败但 Run/Task 已宣告完成或 agent_done | `verification_failure` | 否 |
 | G | bounded 日志尾部同一错误签名重复 ≥ 3 次 | `possible_context_problem` | 是 |
@@ -57,7 +57,7 @@ bounded 日志尾部(existing evidence) ──┼─► ObservationContext(有�
 3. **模型边界**：Jev 契约仅支持 noul/score/choice，Observer 采用「规则检测 → noul 批量确认/否决」映射，不解析自由文本；`requires_confirmation=false` 的证据型 signal 在 Provider 不可用时仍产出，弱 signal 无确认则不产出（宁可不报）。
 4. **去重与升级**：`finding_key = sha256(run_id|finding_type|node|agent_session_id|anchor)`，anchor 是本次问题 episode 的稳定起点；SQLite `UNIQUE(finding_key)` + `ON CONFLICT DO UPDATE`——重复观察不新增第二条 Finding，同一 episode 原地刷新 severity/summary/evidence/原因/建议/置信度（如失败链 2→4 次 warning→critical），`finding_id`/`created_at` 保持 canonical，低 severity 观察不降级既有行；并发冲突后重新读取并返回 canonical persisted finding。
 5. **Live 真实性**：persisted `task["runtime"]` 之外增加只读 live 探测——显式 `pane_not_found`、persisted/live `agent_session_id` 不一致（`identity_mismatch`）、或原 Run 有 Agent 而 `agent get` 显式 `agent_not_found` 才是 `unavailable`；timeout/daemon/parse/身份信息不足一律 `unknown`（绝不当 unavailable）。live Pane transcript 必须通过同一身份 guard（`available` 才允许 `pane read`），优先于 finalization 才出现的 `task["evidence"]`，未确认身份或读取失败回退文件；两者都只在 daemon worker 线程执行（probe ≤2s、transcript ≤3s），绝不进入 controller 主轮询。
-6. **失败隔离**：`observe_run` 顶层 try/except 永不外抛；调度器 daemon 线程与 controller 轮询物理隔离；只写 `trajectory_findings` 表，绝不触碰 Task/Workflow/Runtime/events。
+6. **失败隔离**：`observe_run` 顶层 try/except 永不外抛；Provider 构造失败仅记 stderr 并降级为无 Provider（证据型 Finding 照常产出，弱信号静默）；调度器 daemon 线程与 controller 轮询物理隔离；只写 `trajectory_findings` 表，绝不触碰 Task/Workflow/Runtime/events。
 7. **Hard budget**：`_fit_budget` 递归 clamp 嵌套字段并按序删除低优先级块，最终 serialized ≤ `max(500, max_context_size)`；最小 identity（run_id + signal 类型）在任何输入下都保留。
 8. **CLI 契约**：`--task-id`/`--run-id` 互斥（禁止跨 Run 混用身份）；`--json` 的 stdout 只允许 JSON，诊断全部走 stderr，Provider 失败时仍 exit 0。
 
@@ -68,7 +68,7 @@ bounded 日志尾部(existing evidence) ──┼─► ObservationContext(有�
 | `enabled` / `HERDR_OBSERVER_ENABLED` | true | 总 kill switch（false = 零观察） |
 | `provider` / `HERDR_OBSERVER_PROVIDER` | `jev` | 复用 `herdr/decision` registry；无 key/provider 不可用时仅产出证据型 Finding |
 | `interval` | 300 | 每个 Run 最小观察间隔（RateGate） |
-| `max_calls_per_run` | 24 | 单 Run 观察预算上限 |
+| `max_calls_per_run` | 24 | **process-local** 单 Run 观察预算（RateGate 进程内计数，Controller 重启后重置，V1 不持久化） |
 | `recent_events` / `verification_events` | 50 / 5 | Provider 窗口大小 |
 | `max_context_size` | 8000 | 序列化预算（**最小 500，load_config 显式 clamp**） |
 | `confidence_threshold` | 0.6 | 模型确认阈值 |

@@ -85,7 +85,7 @@ signals:         确定性检测结果（含 evidence 引用与事实数字）
 | A | 活跃 Run 且 `now-last_event ≥ stall_after_seconds`（默认 1800s），无终止事件 | stalled_execution | 是 |
 | B | 尾部连续 `verification_completed.passed=false ≥ 2` | repeated_failure | 否（模型可否决） |
 | C | `runtime.status=unavailable` **或 live Pane/Agent 探测 unavailable**（probe 失败=unknown，不判死），且 Run 未终结且 Task 非终态 | runtime_unavailable | 否 |
-| D | `rework` 状态转移 ≥ 3 且首次 rework 后无成功验证、无产物事件、无终止 | no_progress | 是 |
+| D | 最近一次进展边界（passed verification 或 artifact）之后 `rework ≥ 3` 且无新进展 | no_progress | 是 |
 | E | 相同 action 签名连续失败 ≥ 3（仅当存在 action 事件，V1 保留接口） | repeated_action | 否 |
 | F | 最新验证失败但 Run/Task 已宣告完成或 agent_done | verification_failure | 否 |
 | G | bounded 日志尾部同一错误签名重复 ≥ 3 次 | possible_context_problem | 是 |
@@ -106,7 +106,7 @@ signals:         确定性检测结果（含 evidence 引用与事实数字）
 ## Trigger
 
 - 主入口 `observe_run(run_id, task=..., store=..., provider=..., now=...) -> list[TrajectoryFinding]`（同步，CLI 与测试用）。`task` 可省略：Observer 先按 run 事件中的 `task_id`（并以 `run_id` 匹配守卫，绝不借用重派前旧 run 的 task）、再按持久化 task 的 `run_id` 匹配自动解析 task，从而读取 Runtime State 与日志，调用者只需 `run_id`；显式传入的 task 若 `run_id` 不匹配同样被忽略。
-- Controller `registry_watcher` 对 `working/rework/blocked` 任务调用非阻塞 `ObservationScheduler.submit`（每 Run 最小间隔 + 调用预算 + in-flight 去重；daemon 线程）；线程内异常/超时/模型失败均被吞掉，主链路零感知。live pane 探测与 transcript 读取只在 daemon worker 线程执行（显式 timeout：probe 默认 2s、transcript 默认 3s），绝不进入 controller 主轮询线程。
+- Controller `registry_watcher` 对 `working/rework/blocked` 任务调用非阻塞 `ObservationScheduler.submit`（每 Run 最小间隔 + **process-local per-run observation budget**——RateGate 仅进程内计数，Controller 重启后重置，V1 不新增任何持久化计数——+ in-flight 去重；daemon 线程）；线程内异常/超时/模型失败均被吞掉，主链路零感知。live pane 探测与 transcript 读取只在 daemon worker 线程执行（显式 timeout：probe 默认 2s、transcript 默认 3s），绝不进入 controller 主轮询线程。Provider 构造失败只记 stderr 诊断并降级为无 Provider：`requires_confirmation=false` 的证据型 Finding 照常产出，弱信号保持静默。
 - CLI `herdr-task observe` 的 `--task-id` 与 `--run-id` 互斥（argparse mutually exclusive），禁止混合两个 Run 的身份；`--json` 模式下 stdout 只允许输出 JSON，所有诊断（Provider 失败/live probe 跳过等）走 stderr，退出码仍为 0。
 - 本地 kill switch：`HERDR_OBSERVER_ENABLED=0` / `HERDR_OBSERVER_LIVE_PROBE=0` / `observer.json` / env 数值覆盖。
 
@@ -137,4 +137,4 @@ signals:         确定性检测结果（含 evidence 引用与事实数字）
 
 ## Testing
 
-`tests/test_trajectory_observer.py`：正常无 Finding；连续验证失败→repeated_failure；runtime unavailable（persisted 与 live 两条路径，probe 异常/unknown 不得误报）；Observer 失败不影响 Task/Workflow/事件；重复观察不重复写入；证据升级原地更新且 finding_id 不变、不降级；evidence 含真实 event_id/sequence/evidence_id；live transcript 命中/优先/回退/超长截断/密钥不外泄；超长日志 bounded；1000 事件 bounded；恶意嵌套字段 hard budget；CLI `--json` stdout 纯 JSON（Provider 失败仍 exit 0）；`--task-id/--run-id` 互斥与 run 身份不串用；调度器隔离（含慢 live probe 不阻塞 submit）、kill switch、存储 API、去重键稳定性。
+`tests/test_trajectory_observer.py`：正常无 Finding；连续验证失败→repeated_failure；runtime unavailable（persisted 与 live 两条路径，probe 异常/unknown 不得误报）；Observer 失败不影响 Task/Workflow/事件；重复观察不重复写入；证据升级原地更新且 finding_id 不变、不降级；no_progress episode 边界（历史 passed verification/artifact 不屏蔽新 episode）；Provider 构造失败仍产出证据型 Finding；evidence 含真实 event_id/sequence/evidence_id；live transcript 命中/优先/回退/超长截断/密钥不外泄；超长日志 bounded；1000 事件 bounded；恶意嵌套字段 hard budget；CLI `--json` stdout 纯 JSON（Provider 失败仍 exit 0）；`--task-id/--run-id` 互斥与 run 身份不串用；调度器隔离（含慢 live probe 不阻塞 submit）、kill switch、存储 API、去重键稳定性。

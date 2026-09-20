@@ -966,6 +966,62 @@ class TestHardeningRegressions:
         )
         assert [s for s in with_artifact if s.finding_type == "no_progress"] == []
 
+    def test_no_progress_uses_latest_episode_boundary(self, tmp_path: Path):
+        config = _base_config()
+        store = SQLiteStateStore(tmp_path / "state.db")
+        ledger = TrajectoryLedger(store.db_path)
+        stored = _append(ledger, [
+            {"run_id": "run-1", "event_type": "run_started", "timestamp": 99.0},
+            {"run_id": "run-1", "event_type": "task_status_changed", "status": "rework",
+             "timestamp": 100.0},
+            _verification("run-1", True, "tevd-pass"),
+            {"run_id": "run-1", "event_type": "task_status_changed", "status": "rework",
+             "timestamp": 102.0},
+            {"run_id": "run-1", "event_type": "task_status_changed", "status": "rework",
+             "timestamp": 103.0},
+            {"run_id": "run-1", "event_type": "task_status_changed", "status": "rework",
+             "timestamp": 104.0},
+            {"run_id": "run-1", "event_type": "task_status_changed", "status": "working",
+             "timestamp": 105.0},
+        ])
+        task = _task(runtime={"status": "running", "agent": "claude"})
+
+        signals = _detect(store, task, now=110.0, config=config)
+        no_progress = [signal for signal in signals if signal.finding_type == "no_progress"]
+
+        assert len(no_progress) == 1
+        assert no_progress[0].facts["rework_count"] == 3
+        # anchor is the first rework of the CURRENT episode, not the historic one
+        assert no_progress[0].anchor == f"first_rework:{stored[3]['event_id']}"
+
+    def test_no_progress_episode_boundary_end_to_end(self, tmp_path: Path):
+        store = SQLiteStateStore(tmp_path / "state.db")
+        ledger = TrajectoryLedger(store.db_path)
+        stored = _append(ledger, [
+            {"run_id": "run-1", "event_type": "run_started", "task_id": "task-1",
+             "timestamp": 99.0},
+            {"run_id": "run-1", "event_type": "task_status_changed", "status": "rework",
+             "task_id": "task-1", "timestamp": 100.0},
+            _verification("run-1", True, "tevd-pass"),
+            {"run_id": "run-1", "event_type": "task_status_changed", "status": "rework",
+             "task_id": "task-1", "timestamp": 102.0},
+            {"run_id": "run-1", "event_type": "task_status_changed", "status": "rework",
+             "task_id": "task-1", "timestamp": 103.0},
+            {"run_id": "run-1", "event_type": "task_status_changed", "status": "rework",
+             "task_id": "task-1", "timestamp": 104.0},
+        ])
+        task = _task(run_id="run-1", runtime={"status": "running", "agent": "claude"})
+        store.save_task(task)
+
+        findings = observer_harness.observe_run(
+            "run-1", task=task, store=store, config=_base_config(),
+            provider=CapturingProvider({"no_progress": 0.9}), now=110.0,
+        )
+
+        assert [finding.finding_type for finding in findings] == ["no_progress"]
+        assert findings[0].metadata["anchor"] == f"first_rework:{stored[3]['event_id']}"
+        assert len(list_trajectory_findings("run-1", db_path=store.db_path)) == 1
+
     def test_done_claim_uses_verification_failure_not_repeated_failure(self, tmp_path: Path):
         config = _base_config()
         store = SQLiteStateStore(tmp_path / "state.db")
@@ -2089,6 +2145,59 @@ class TestHardContextBudget:
         serialized = json.dumps(context, ensure_ascii=False)
         assert len(serialized) <= 500
         assert context["run"]["run_id"] == "run-1"
+
+
+class TestProviderConstructionIsolation:
+    """A broken provider factory must not disable deterministic findings."""
+
+    def test_construction_failure_keeps_evidence_backed_findings(self, tmp_path: Path, monkeypatch, capfd):
+        import herdr.observer.harness as observer_harness_module
+
+        store = SQLiteStateStore(tmp_path / "state.db")
+        ledger = TrajectoryLedger(store.db_path)
+        _append(ledger, [
+            {"run_id": "run-1", "event_type": "run_started", "task_id": "task-1",
+             "timestamp": 100.0},
+            _verification("run-1", False, "tevd-a"),
+            _verification("run-1", False, "tevd-b"),
+        ])
+
+        def explode(*args, **kwargs):
+            raise RuntimeError("provider factory exploded")
+
+        monkeypatch.setattr(observer_harness_module, "get_provider", explode)
+
+        findings = observer_harness.observe_run(
+            "run-1", store=store, config=_base_config(),
+        )
+        captured = capfd.readouterr()
+
+        assert [finding.finding_type for finding in findings] == ["repeated_failure"]
+        assert len(list_trajectory_findings("run-1", db_path=store.db_path)) == 1
+        assert "[OBSERVER PROVIDER SKIPPED]" in captured.err
+
+    def test_weak_signals_stay_silent_when_construction_fails(self, tmp_path: Path, monkeypatch):
+        import herdr.observer.harness as observer_harness_module
+
+        store = SQLiteStateStore(tmp_path / "state.db")
+        ledger = TrajectoryLedger(store.db_path)
+        _append(ledger, [
+            {"run_id": "run-1", "event_type": "run_started", "task_id": "task-1",
+             "timestamp": 100.0},
+            {"run_id": "run-1", "event_type": "task_status_changed", "status": "working",
+             "task_id": "task-1", "timestamp": 200.0},
+        ])
+
+        def explode(*args, **kwargs):
+            raise RuntimeError("provider factory exploded")
+
+        monkeypatch.setattr(observer_harness_module, "get_provider", explode)
+
+        findings = observer_harness.observe_run(
+            "run-1", store=store, config=_base_config(), now=5000.0,
+        )
+
+        assert findings == []  # stalled_execution requires confirmation
 
 
 # ---------------------------------------------------------------------------
