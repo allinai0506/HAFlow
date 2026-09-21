@@ -280,7 +280,7 @@ def _runtime_fact(runtime: Dict[str, Any]) -> Dict[str, Any]:
 
 def _live_runtime_fact(live_runtime: Dict[str, Any]) -> Dict[str, Any]:
     fact = {"type": "runtime_live", "status": live_runtime.get("status")}
-    for key in ("reason", "pane_id", "agent_status", "agent_session_id"):
+    for key in ("reason", "pane_id", "agent_status", "agent_session_id", "agent_name"):
         if live_runtime.get(key) is not None:
             fact[key] = live_runtime[key]
     if live_runtime.get("workspace_mismatch"):

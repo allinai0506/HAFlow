@@ -16,6 +16,7 @@ kill-switch, and dedup-key stability:
 from __future__ import annotations
 
 import copy
+import importlib
 import json
 import multiprocessing
 import sqlite3
@@ -571,6 +572,95 @@ class TestBoundedContext:
         )
 
         assert "sk-abcdef1234567890" not in json.dumps(ctx, ensure_ascii=False)
+
+
+class TestRedactionBoundary:
+    """Redaction must see complete assignments before any byte cutoff."""
+
+    def test_bound_transcript_redacts_before_byte_cutoff(self):
+        secret = "VERYSECRET123456"
+        text = "X" * 100 + f" api_key={secret}" + "Y" * 10
+        # byte cutoff lands inside the assignment (after "ap"), so a
+        # cut-then-redact order would leak the raw secret value.
+        config = {
+            **_base_config(),
+            "log_tail_bytes": 30,
+            "log_tail_lines": 50,
+            "log_tail_chars": 200,
+        }
+
+        bounded = observation_context.bound_transcript(text, ref="live", config=config)
+
+        assert bounded is not None
+        assert secret not in bounded["excerpt"]
+        assert "SECRET123456" not in bounded["excerpt"]  # prefix-cut suffix must not leak
+
+    def test_file_tail_redacts_secret_at_byte_cutoff(self, tmp_path: Path):
+        # Craft the file so the legacy cutoff (size - log_tail_bytes) lands
+        # inside the api_key assignment, cutting its key prefix.
+        max_bytes = 512
+        prefix = "P" * 200 + "\n"
+        secret_line = "Error: api_key=VERYSECRET123456 rejected"
+        tail = "\n".join(["Error: cannot find module 'herdr'"] * 3) + "\n"
+        suffix_len = max_bytes + 10 - len(secret_line) - 1 - len(tail)
+        assert suffix_len > 0
+        log_path = tmp_path / "terminal.log"
+        log_path.write_text(
+            prefix + secret_line + "\n" + tail + "Q" * suffix_len, encoding="utf-8",
+        )
+        config = {
+            **_base_config(),
+            "log_tail_bytes": max_bytes,
+            "log_tail_lines": 200,
+            "log_tail_chars": 2000,
+        }
+
+        bounded = observation_context.read_log_tail({"evidence": str(log_path)}, config)
+
+        assert bounded is not None
+        assert "VERYSECRET123456" not in bounded["excerpt"]
+        assert "SECRET123456" not in bounded["excerpt"]
+        assert bounded["truncated"] is True
+
+    def test_cutoff_secret_never_reaches_provider_finding_or_db(self, tmp_path: Path):
+        store = SQLiteStateStore(tmp_path / "state.db")
+        ledger = TrajectoryLedger(store.db_path)
+        _append(ledger, [
+            {"run_id": "run-1", "event_type": "run_started", "task_id": "task-1",
+             "timestamp": 100.0},
+        ])
+        max_bytes = 512
+        prefix = "P" * 200 + "\n"
+        secret_line = "Error: api_key=VERYSECRET123456 rejected"
+        tail = "\n".join(["Error: cannot find module 'herdr'"] * 3) + "\n"
+        suffix_len = max_bytes + 10 - len(secret_line) - 1 - len(tail)
+        log_path = tmp_path / "terminal.log"
+        log_path.write_text(
+            prefix + secret_line + "\n" + tail + "Q" * suffix_len, encoding="utf-8",
+        )
+        task = _task(run_id="run-1", runtime={"status": "running", "agent": "claude"},
+                     evidence=str(log_path))
+        store.save_task(task)
+        config = {
+            **_base_config(),
+            "log_tail_bytes": max_bytes,
+            "log_tail_lines": 200,
+            "log_tail_chars": 2000,
+        }
+        provider = CapturingProvider({"possible_context_problem": 0.9})
+
+        findings = observer_harness.observe_run(
+            "run-1", task=task, store=store, config=config, provider=provider,
+        )
+
+        assert [finding.finding_type for finding in findings] == ["possible_context_problem"]
+        assert "SECRET123456" not in json.dumps(provider.calls[0]["state"], ensure_ascii=False)
+        assert "SECRET123456" not in json.dumps(
+            list_trajectory_findings("run-1", db_path=store.db_path), ensure_ascii=False,
+        )
+        assert "SECRET123456" not in json.dumps(
+            [finding.to_mapping() for finding in findings], ensure_ascii=False,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1531,6 +1621,14 @@ class TestLiveRuntimeProbe:
             "pane list": (0, _pane_payload("pane-x"), ""),
             "pane get": (0, _pane_info("session-any"), ""),
         })
+        type_only_task = _task(runtime={
+            "status": "running", "pane_id": "pane-x", "workspace_id": "ws-1",
+        })
+        type_only = probe(type_only_task, {
+            "pane list": (0, _pane_payload("pane-x"), ""),
+            "pane get": (0, _pane_info("session-other"), ""),
+            "agent get": (0, _agent_info("working", "session-other"), ""),
+        })
         stale_workspace = probe(pane_only_task, {
             "pane list": (0, _pane_payload("other"), ""),
             "pane get": (0, _pane_info("session-any"), ""),
@@ -1563,6 +1661,8 @@ class TestLiveRuntimeProbe:
         assert agent_schema_drift["status"] == "unknown"
         assert agent_schema_drift["reason"] == "agent_payload_invalid"
         assert pane_only["status"] == "available" and pane_only["reason"] == "pane_alive"
+        assert type_only["status"] == "unknown"
+        assert type_only["reason"] == "insufficient_identity"
         assert stale_workspace["status"] == "available"
         assert stale_workspace["workspace_mismatch"] is True
         assert list_failed["status"] == "unknown"
@@ -1656,6 +1756,40 @@ class TestRuntimeIdentityGuard:
             "pane get": (0, _pane_info("session-A"), ""),
             "agent get": TimeoutError("agent probe timeout"),
             "pane read": (0, "should not be read", ""),
+        })
+
+        findings = self._observe(store, task, stub)
+
+        assert findings == []
+        assert not self._pane_read_called(stub)
+        assert store.get_task("task-1")["status"] == "working"
+
+    def test_type_only_identity_is_unknown_and_never_reads_pane(self, tmp_path: Path):
+        # Legacy task: pane + agent type only (no session, no agent_name).
+        # The pane currently hosts a *different* claude agent; type equality
+        # must not be treated as run ownership.
+        store = SQLiteStateStore(tmp_path / "state.db")
+        ledger = TrajectoryLedger(store.db_path)
+        _append(ledger, [
+            {"run_id": "run-1", "event_type": "run_started", "task_id": "task-1",
+             "timestamp": 100.0},
+            {"run_id": "run-1", "event_type": "agent_started", "task_id": "task-1",
+             "timestamp": 101.0},
+        ])
+        task = {
+            "task_id": "task-1",
+            "workflow_id": "wf-1",
+            "node": "implementation",
+            "agent": "claude",
+            "status": "working",
+            "run_id": "run-1",
+            "runtime": {"status": "running", "agent": "claude", "pane_id": "p1"},
+        }
+        store.save_task(task)
+        stub = _StubRunner({
+            "pane get": (0, _pane_info("session-other", pane_id="p1"), ""),
+            "agent get": (0, _agent_info("working", "session-other"), ""),
+            "pane read": (0, "other run transcript", ""),
         })
 
         findings = self._observe(store, task, stub)
@@ -2319,3 +2453,99 @@ class TestObservationScheduler:
 
         assert elapsed < 0.5, "probe I/O must not block the submitting (polling) thread"
         assert probed, "probes must still run on the worker thread"
+
+    def test_terminal_observation_bypasses_periodic_gate_and_runs_once(self):
+        calls: List[str] = []
+
+        def observe(run_id, **kwargs):
+            calls.append(run_id)
+            return []
+
+        scheduler = observer_harness.ObservationScheduler(
+            observe=observe,
+            config={**_base_config(), "interval": 300, "max_calls_per_run": 1},
+        )
+        assert scheduler.submit("run-1", now=1000.0) is True
+        scheduler.drain(timeout=5)
+        assert scheduler.submit("run-1", now=1010.0) is False  # interval + budget exhausted
+        assert scheduler.submit_terminal("run-1", now=1010.0) is True  # terminal bypass
+        scheduler.drain(timeout=5)
+        assert calls == ["run-1", "run-1"]
+        assert scheduler.submit_terminal("run-1", now=1020.0) is False  # once per process
+        assert calls == ["run-1", "run-1"]
+
+    def test_agent_done_after_recent_working_observe_still_produces_finding(self, tmp_path: Path):
+        # working observation just happened (< interval), then verification
+        # failed and the task reached agent_done: the terminal checkpoint must
+        # still run and produce verification_failure.
+        store = SQLiteStateStore(tmp_path / "state.db")
+        ledger = TrajectoryLedger(store.db_path)
+        _append(ledger, [
+            {"run_id": "run-1", "event_type": "run_started", "task_id": "task-1",
+             "timestamp": 100.0},
+            {"run_id": "run-1", "event_type": "agent_started", "task_id": "task-1",
+             "timestamp": 101.0},
+            _verification("run-1", False, "tevd-last"),
+            {"run_id": "run-1", "event_type": "task_status_changed", "status": "agent_done",
+             "task_id": "task-1", "timestamp": 105.0},
+        ])
+        task = _task(run_id="run-1", status="agent_done",
+                     runtime={"status": "running", "agent": "claude"})
+        store.save_task(task)
+        scheduler = observer_harness.ObservationScheduler(
+            config={**_base_config(), "interval": 300, "max_calls_per_run": 24},
+        )
+
+        assert scheduler.submit("run-1", task=task, store=store, now=1000.0) is True
+        scheduler.drain(timeout=10)
+        assert scheduler.submit("run-1", task=task, store=store, now=1010.0) is False
+        assert scheduler.submit_terminal("run-1", task=task, store=store, now=1010.0) is True
+        scheduler.drain(timeout=10)
+
+        rows = list_trajectory_findings("run-1", db_path=store.db_path)
+        assert [row["finding_type"] for row in rows] == ["verification_failure"]
+
+    def test_terminal_observation_failure_never_raises(self):
+        def exploding(run_id, **kwargs):
+            raise RuntimeError("terminal observation exploded")
+
+        scheduler = observer_harness.ObservationScheduler(observe=exploding)
+
+        assert scheduler.submit_terminal("run-1") is True
+        scheduler.drain(timeout=5)
+        assert scheduler.in_flight() == []
+
+
+class TestControllerTerminalCheckpoint:
+    """Controller wiring: agent_done submits the terminal checkpoint fail-safe."""
+
+    def test_terminal_checkpoint_submits_terminal_observation(self, monkeypatch):
+        controller = importlib.import_module("services.herdr-controller")
+        calls: List[tuple] = []
+
+        class Recorder:
+            def submit_terminal_observation(self, task, store=None, now=None):
+                calls.append((task.get("task_id"), now))
+                return True
+
+        monkeypatch.setattr(controller, "observer_harness", Recorder())
+
+        assert controller._observer_terminal_checkpoint({"task_id": "t1"}, now=123.0) is True
+        assert calls == [("t1", 123.0)]
+
+    def test_terminal_checkpoint_failure_is_swallowed(self, monkeypatch):
+        controller = importlib.import_module("services.herdr-controller")
+
+        class Boom:
+            def submit_terminal_observation(self, *args, **kwargs):
+                raise RuntimeError("observer unavailable")
+
+        monkeypatch.setattr(controller, "observer_harness", Boom())
+
+        assert controller._observer_terminal_checkpoint({"task_id": "t1"}) is False
+
+    def test_terminal_checkpoint_is_noop_without_observer(self, monkeypatch):
+        controller = importlib.import_module("services.herdr-controller")
+        monkeypatch.setattr(controller, "observer_harness", None)
+
+        assert controller._observer_terminal_checkpoint({"task_id": "t1"}) is False

@@ -34,6 +34,9 @@ LOGGER = logging.getLogger(__name__)
 _providers: Dict[str, Any] = {}
 _providers_lock = threading.Lock()
 
+# Bound for the once-per-run terminal memory (one day is far beyond any run).
+TERMINAL_SEEN_TTL_SECONDS = 86400.0
+
 
 def _provider_signature(config: Dict[str, Any]) -> str:
     return json.dumps({
@@ -163,6 +166,7 @@ class ObservationScheduler:
         self._lock = threading.Lock()
         self._inflight: set = set()
         self._threads: List[threading.Thread] = []
+        self._terminal_seen: Dict[str, float] = {}
         self.log = log
 
     def submit(
@@ -184,31 +188,80 @@ class ObservationScheduler:
                 return False
             self._inflight.add(run_id)
             self._gate.record(run_id, "observe", now=now)
-            self._threads = [thread for thread in self._threads if thread.is_alive()]
-            thread = threading.Thread(
-                target=self._run,
-                args=(run_id, task, store),
-                name=f"trajectory-observer-{run_id}",
-                daemon=True,
+            return self._spawn_locked(run_id, run_id, task, store)
+
+    def submit_terminal(
+        self,
+        run_id: str,
+        *,
+        task: Optional[Dict[str, Any]] = None,
+        store: Any = None,
+        now: Optional[float] = None,
+    ) -> bool:
+        """One terminal (agent_done) observation per run per controller process.
+
+        Independent of the periodic interval/budget gate: a working observation
+        taken seconds earlier must not swallow the completion checkpoint where
+        ``verification_failure`` lives. Still asynchronous, bounded, and
+        deduplicated; failures can never block the caller's done flow.
+        """
+        if not run_id or not self._config.get("enabled", True):
+            return False
+        ts = now if now is not None else time.time()
+        key = f"terminal:{run_id}"
+        with self._lock:
+            self._prune_terminal_seen(ts)
+            if run_id in self._terminal_seen:
+                return False
+            terminal_inflight = sum(
+                1 for entry in self._inflight if str(entry).startswith("terminal:")
             )
-            self._threads.append(thread)
+            if terminal_inflight >= self._max_concurrent:
+                return False  # not marked seen: retried on the next tick
+            self._terminal_seen[run_id] = ts
+            self._inflight.add(key)
+            started = self._spawn_locked(key, run_id, task, store)
+            if not started:
+                self._terminal_seen.pop(run_id, None)  # retry on the next tick
+            return started
+
+    def _spawn_locked(
+        self, key: str, run_id: str, task: Optional[Dict[str, Any]], store: Any,
+    ) -> bool:
+        """Spawn the worker thread; caller holds the lock."""
+        self._threads = [thread for thread in self._threads if thread.is_alive()]
+        thread = threading.Thread(
+            target=self._run,
+            args=(key, run_id, task, store),
+            name=f"trajectory-observer-{run_id}",
+            daemon=True,
+        )
+        self._threads.append(thread)
         try:
             thread.start()
         except Exception as exc:
-            with self._lock:
-                self._inflight.discard(run_id)
+            self._inflight.discard(key)
             self._log(f"[OBSERVER WORKER START FAILED] run={run_id}: {type(exc).__name__}")
             return False
         return True
 
-    def _run(self, run_id: str, task: Optional[Dict[str, Any]], store: Any) -> None:
+    def _prune_terminal_seen(self, now: float) -> None:
+        """Bound the once-per-run memory (caller holds the lock)."""
+        cutoff = now - TERMINAL_SEEN_TTL_SECONDS
+        self._terminal_seen = {
+            run_id: seen_at
+            for run_id, seen_at in self._terminal_seen.items()
+            if seen_at >= cutoff
+        }
+
+    def _run(self, key: str, run_id: str, task: Optional[Dict[str, Any]], store: Any) -> None:
         try:
             self._observe(run_id, task=task, store=store, config=self._config)
         except Exception as exc:  # a worker failure must die here
             self._log(f"[OBSERVER WORKER FAILED] run={run_id}: {type(exc).__name__}: {exc}")
         finally:
             with self._lock:
-                self._inflight.discard(run_id)
+                self._inflight.discard(key)
 
     def in_flight(self) -> List[str]:
         with self._lock:
@@ -263,6 +316,27 @@ def submit_observation(
     return _default_scheduler().submit(run_id, task=task, store=store, now=now)
 
 
+def submit_terminal_observation(
+    task: Optional[Dict[str, Any]],
+    *,
+    store: Any = None,
+    now: Optional[float] = None,
+) -> bool:
+    """Controller-side terminal trigger for ``agent_done`` (once per run).
+
+    Independent of the periodic gate so the completion checkpoint is never
+    swallowed by an observation taken seconds earlier; failures cannot block
+    the caller's done flow.
+    """
+    if not isinstance(task, dict):
+        return False
+    try:
+        run_id = run_id_for_task(task)
+    except Exception:
+        return False
+    return _default_scheduler().submit_terminal(run_id, task=task, store=store, now=now)
+
+
 def reset_process_state() -> None:
     """Drop memoized providers/scheduler (tests / config reload)."""
     global _DEFAULT_SCHEDULER
@@ -278,4 +352,5 @@ __all__ = [
     "observe_run",
     "reset_process_state",
     "submit_observation",
+    "submit_terminal_observation",
 ]

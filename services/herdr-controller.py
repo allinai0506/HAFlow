@@ -3477,6 +3477,24 @@ def redeliver_done_event(task, now=None):
     return True
 
 
+def _observer_terminal_checkpoint(task, now=None):
+    """Terminal Trajectory Observer checkpoint for agent_done.
+
+    Fail-safe by contract: any failure only logs and returns False, so the
+    existing done flow is never blocked. The observation itself runs on the
+    observer's daemon worker (async, non-blocking).
+    """
+    if observer_harness is None or not task:
+        return False
+    try:
+        return observer_harness.submit_terminal_observation(
+            task, store=_get_store(), now=now
+        )
+    except Exception as exc:
+        print(f"[OBSERVER TERMINAL CHECK ERROR] task={task.get('task_id')}: {exc}")
+        return False
+
+
 def supervisor_checkpoint(task, trigger, report_text=None, test_evidence=None, evidence_id=None, now=None):
     """Semantic Supervisor 观察点:Jev/Provider 只产生信号与 Policy 结论,
     状态推进全部走既有流程;整体 fail-safe,绝不影响任务主链路。
@@ -4340,6 +4358,10 @@ def registry_watcher():
 
                 # ---- done 事件投递:受 attention episode 节流 + 监督网关把关 ----
                 if status == "agent_done":
+                    # Terminal Observer checkpoint (once per run per process),
+                    # BEFORE the done redelivery: verification_failure lives at
+                    # agent_done and must not be swallowed by the periodic gate.
+                    _observer_terminal_checkpoint(task, now=now)
                     redeliver_done_event(task, now=now)
 
                 # ---- blocked 事件:此前投递失败会被静默吞掉,这里补投递护栏 ----

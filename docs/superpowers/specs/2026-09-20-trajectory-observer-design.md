@@ -107,6 +107,7 @@ signals:         确定性检测结果（含 evidence 引用与事实数字）
 
 - 主入口 `observe_run(run_id, task=..., store=..., provider=..., now=...) -> list[TrajectoryFinding]`（同步，CLI 与测试用）。`task` 可省略：Observer 先按 run 事件中的 `task_id`（并以 `run_id` 匹配守卫，绝不借用重派前旧 run 的 task）、再按持久化 task 的 `run_id` 匹配自动解析 task，从而读取 Runtime State 与日志，调用者只需 `run_id`；显式传入的 task 若 `run_id` 不匹配同样被忽略。
 - Controller `registry_watcher` 对 `working/rework/blocked` 任务调用非阻塞 `ObservationScheduler.submit`（每 Run 最小间隔 + **process-local per-run observation budget**——RateGate 仅进程内计数，Controller 重启后重置，V1 不新增任何持久化计数——+ in-flight 去重；daemon 线程）；线程内异常/超时/模型失败均被吞掉，主链路零感知。live pane 探测与 transcript 读取只在 daemon worker 线程执行（显式 timeout：probe 默认 2s、transcript 默认 3s），绝不进入 controller 主轮询线程。Provider 构造失败只记 stderr 诊断并降级为无 Provider：`requires_confirmation=false` 的证据型 Finding 照常产出，弱信号保持静默。
+- **agent_done terminal checkpoint**：`verification_failure` 的核心场景恰是「最新验证失败 + task.status=agent_done」。`registry_watcher` 在 `redeliver_done_event()` **之前**调用 `submit_terminal_observation`；该 terminal trigger 使用独立 gate（不走 periodic interval/budget，避免被刚刚发生的 working observation 挡掉），每个 run 在一个 controller process 内最多执行一次（进程内 seen 集合，TTL 24h 有界；重启后重置），仍为 daemon 线程异步执行，失败只记日志、绝不阻塞既有 done flow。thread 启动失败会撤销 seen 标记，下一 tick 重试。
 - CLI `herdr-task observe` 的 `--task-id` 与 `--run-id` 互斥（argparse mutually exclusive），禁止混合两个 Run 的身份；`--json` 模式下 stdout 只允许输出 JSON，所有诊断（Provider 失败/live probe 跳过等）走 stderr，退出码仍为 0。
 - 本地 kill switch：`HERDR_OBSERVER_ENABLED=0` / `HERDR_OBSERVER_LIVE_PROBE=0` / `observer.json` / env 数值覆盖。
 
@@ -114,14 +115,18 @@ signals:         确定性检测结果（含 evidence 引用与事实数字）
 
 - **Live Runtime**（`herdr/observer/live.py`，只读复用既有 herdr CLI 能力）：
   - pane 存在性：`herdr pane list --workspace <ws>` 验证 daemon/workspace 可达，`herdr pane get <pane>` 给出最终事实——**显式 `pane_not_found` 才是 unavailable**；
-  - **身份校验**（persisted runtime 的 `pane_id`/`agent_session_id`/`agent_name` vs live `pane.agent_session` / `agent.agent_session`）：
+  - **身份优先级**（persisted runtime 的 `agent_session_id`/`agent_name`/agent type vs live `pane.agent_session` / `agent.agent_session` / `agent.name`）：
+    - **A** persisted `agent_session_id` 存在 → 必须与 live agent session 匹配；
+    - **B** 无 session 但 persisted `agent_name`（Herdr 具体实例名）存在 → 必须与 live `agent.name` 匹配；
+    - **C** 只有 agent type（claude/opencode 等）→ **不足以证明 Run ownership** → `unknown`（且禁止读取 live transcript）；绝不能因为 persisted=claude 且 live=claude 就判定同一 Run；
     - pane 级 session 已矛盾（都存在但不一致）→ `unavailable`（`identity_mismatch`），无需再问 agent；
-    - **对 persisted 明确有 Agent 的 Run，pane session 一致不等于 Agent 存活**（HAFlow `pane_pool` 以 `herdr agent get` 为真实 live agent 判据）：继续 bounded `agent get` 确认——agent 成功且 live session 与 persisted 一致 → `available`（`identity_match`）；agent 显式 `agent_not_found` / 空 agent → `unavailable`（`agent_not_found`）；live agent session 与 persisted 不一致 → `unavailable`（`identity_mismatch`）；
+    - **对 persisted 明确有 Agent 的 Run，pane session 一致不等于 Agent 存活**（HAFlow `pane_pool` 以 `herdr agent get` 为真实 live agent 判据）：继续 bounded `agent get` 确认——agent 成功且身份匹配 → `available`；agent 显式 `agent_not_found` / 空 agent → `unavailable`；身份不一致 → `unavailable`（`identity_mismatch`）；
     - 未持久化任何 Agent 身份的任务（纯 pane 目标）才允许以 pane 存在 + live session 判 `available`（`pane_alive`；pane 缺 workspace 枚举时附 `workspace_mismatch`）；
-    - **timeout / daemon error / parse error（含 agent 响应不可解析或 schema 不符）/ 无法获得足够身份信息（agent 有响应但不暴露 session）→ `unknown`，绝不当作 unavailable**；
+    - **timeout / daemon error / parse error（含 agent 响应不可解析或 schema 不符）/ 无法获得足够身份信息 → `unknown`，绝不当作 unavailable**；
   - live transcript 读取前必须通过同一身份 guard：只有 `available` 才允许 `herdr pane read`；`identity_mismatch` / `unavailable` / `unknown` 一律不读当前 Pane（可回退 persisted evidence / terminal.log），防止旧 `pane_id` 复用后读到其他 Run 的日志；
   - 不写 Task status，不写 persisted RuntimeState；输入中 persisted 与 live（含 `agent_session_id`/`workspace_mismatch`）明确分开。
-- **Live Transcript**：daemon worker 内以 `herdr pane read <pane> --source recent-unwrapped --lines N`（timeout 3s）读取当前 Pane，尾部经统一的 bytes/lines/chars 三级上限 + `redact_text` 后使用；无 Pane、身份未确认或读取失败时回退既有 `task["evidence"]` / terminal.log；完整 transcript 永不落库、永不整体送 Provider。
+- **Live Transcript**：daemon worker 内以 `herdr pane read <pane> --source recent-unwrapped --lines N`（timeout 3s）读取当前 Pane；**先 strip ANSI + redact，再做 bytes/lines/chars 三级上限**（脱敏必须看到完整语义边界，byte cutoff 不得先于脱敏切断 `api_key=...` 的 key prefix）；无 Pane、身份未确认（`unknown`/`unavailable`）或读取失败时回退既有 `task["evidence"]` / terminal.log；完整 transcript 永不落库、永不整体送 Provider。
+- **文件尾部读取**：先多读 `LOG_OVERLAP_BYTES`（8192）overlap 并丢弃首个不完整行（保证从完整行边界开始），随后 redact，最后执行正式 byte/line/char 上限；不读取整个大文件；无法建立完整行边界时跳过该候选。最终 context 大小限制不变。
 
 ## Failure isolation
 
@@ -136,4 +141,4 @@ signals:         确定性检测结果（含 evidence 引用与事实数字）
 
 ## Testing
 
-`tests/test_trajectory_observer.py`：正常无 Finding；连续验证失败→repeated_failure；runtime unavailable（persisted 与 live 两条路径，probe 异常/unknown 不得误报）；Observer 失败不影响 Task/Workflow/事件；重复观察不重复写入；证据升级原地更新且 finding_id 不变、不降级；no_progress episode 边界（历史 passed verification/artifact 不屏蔽新 episode）；Provider 构造失败仍产出证据型 Finding；evidence 含真实 event_id/sequence/evidence_id；live transcript 命中/优先/回退/超长截断/密钥不外泄；超长日志 bounded；1000 事件 bounded；恶意嵌套字段 hard budget；CLI `--json` stdout 纯 JSON（Provider 失败仍 exit 0）；`--task-id/--run-id` 互斥与 run 身份不串用；调度器隔离（含慢 live probe 不阻塞 submit）、kill switch、存储 API、去重键稳定性。
+`tests/test_trajectory_observer.py`：正常无 Finding；连续验证失败→repeated_failure；runtime unavailable（persisted 与 live 两条路径，probe 异常/unknown 不得误报）；Observer 失败不影响 Task/Workflow/事件；重复观察不重复写入；证据升级原地更新且 finding_id 不变、不降级；no_progress episode 边界（历史 passed verification/artifact 不屏蔽新 episode）；Provider 构造失败仍产出证据型 Finding；**agent_done terminal checkpoint**（working 刚 observe 过 <300s + verification failed + agent_done → terminal 仍提交并产出 verification_failure；每进程每 run 一次；失败不阻塞 done flow）；**脱敏先于 cutoff**（byte cutoff 落在 `api_key=...` 中间时不泄漏到 excerpt/Provider/Finding/SQLite）；**身份优先级 A/B/C**（type-only 跨 Run 场景 → unknown、不读 pane）；evidence 含真实 event_id/sequence/evidence_id；live transcript 命中/优先/回退/超长截断/密钥不外泄；超长日志 bounded；1000 事件 bounded；恶意嵌套字段 hard budget；CLI `--json` stdout 纯 JSON（Provider 失败仍 exit 0）；`--task-id/--run-id` 互斥与 run 身份不串用；调度器隔离（含慢 live probe 不阻塞 submit）、kill switch、存储 API、去重键稳定性。

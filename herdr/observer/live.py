@@ -173,18 +173,36 @@ def _session_verdict(
     return result
 
 
+def _agent_instance_name(agent_info: Dict[str, Any]) -> Optional[str]:
+    """Herdr's concrete agent instance name (``result.agent.name``)."""
+    name = agent_info.get("name")
+    if name is None or name == "":
+        return None
+    return str(name)
+
+
 def _identity_result(
     pane_id: str, persisted: Dict[str, Any], pane_info: Dict[str, Any],
     runner: Runner, timeout: float, log=None,
 ) -> Dict[str, Any]:
     """Validate that the live pane *and agent* still belong to this run.
 
+    Identity priority (strongest first):
+
+    A. persisted ``agent_session_id`` -> must match the live agent session;
+    B. no session but a persisted ``agent_name`` (concrete Herdr instance) ->
+       must match the live agent instance name;
+    C. only an agent *type* (claude/opencode/...) -> cannot prove run
+       ownership, so the result is ``unknown`` (and the transcript guard
+       therefore refuses to read the pane).
+
     A matching pane-level session is not proof of a live agent: HAFlow's
     pane_pool uses ``herdr agent get`` as the real live-agent check, so a run
     that explicitly persisted an agent must still confirm the agent registry.
     """
     persisted_session = persisted["session"]
-    persisted_agent = persisted["agent"]
+    persisted_name = persisted["name"]
+    persisted_type = persisted["type"]
     live_session = _session_value(pane_info.get("agent_session"))
 
     if live_session and persisted_session and live_session != persisted_session:
@@ -194,7 +212,7 @@ def _identity_result(
             "agent_session_id": live_session,
         }
 
-    if not (persisted_session or persisted_agent):
+    if not (persisted_session or persisted_name or persisted_type):
         # No agent identity was persisted: pane existence (plus any live
         # session) is the only knowable fact.
         result: Dict[str, Any] = {
@@ -203,6 +221,11 @@ def _identity_result(
         if live_session:
             result["agent_session_id"] = live_session
         return result
+
+    if not persisted_session and not persisted_name:
+        # C: agent type equality (claude == claude) proves nothing about which
+        # run owns the pane; stay unknown and never read its transcript.
+        return {"status": UNKNOWN, "reason": "insufficient_identity", "pane_id": pane_id}
 
     # The run explicitly had an Agent: always confirm it is still alive.
     agent_call = _call(runner, ["herdr", "agent", "get", pane_id], timeout, log=log)
@@ -215,20 +238,30 @@ def _identity_result(
         if explicit_empty:
             return {"status": UNAVAILABLE, "reason": "agent_not_found", "pane_id": pane_id}
         live_agent_session = _session_value(agent_info.get("agent_session"))
-        if live_agent_session and persisted_session:
-            return _session_verdict(
-                pane_id, persisted_session, live_agent_session,
-                _agent_status(agent_call[1]),
-            )
-        if persisted_session and not live_agent_session:
+        if persisted_session:
+            if live_agent_session:
+                return _session_verdict(
+                    pane_id, persisted_session, live_agent_session,
+                    _agent_status(agent_call[1]),
+                )
             # An agent answers but exposes no session: identity is unverifiable.
             return {"status": UNKNOWN, "reason": "insufficient_identity", "pane_id": pane_id}
-        result = {"status": AVAILABLE, "reason": "agent_alive", "pane_id": pane_id}
+        # B: no session persisted; the concrete instance name must match.
+        live_agent_name = _agent_instance_name(agent_info)
+        if not live_agent_name:
+            return {"status": UNKNOWN, "reason": "insufficient_identity", "pane_id": pane_id}
+        if live_agent_name != str(persisted_name):
+            return {
+                "status": UNAVAILABLE, "reason": "identity_mismatch", "pane_id": pane_id,
+                "agent_name": live_agent_name,
+            }
+        result = {
+            "status": AVAILABLE, "reason": "agent_identity_match", "pane_id": pane_id,
+            "agent_name": live_agent_name,
+        }
         agent_status = _agent_status(agent_call[1])
         if agent_status is not None:
             result["agent_status"] = agent_status
-        if live_agent_session:
-            result["agent_session_id"] = live_agent_session
         return result
     if _call_error_code(agent_call) == "agent_not_found":
         return {"status": UNAVAILABLE, "reason": "agent_not_found", "pane_id": pane_id}
@@ -262,10 +295,10 @@ def probe_live_runtime(
             "session": _session_value(
                 task.get("agent_session_id") or runtime.get("agent_session_id")
             ),
-            "agent": (
-                task.get("agent_name") or runtime.get("agent_name")
-                or runtime.get("agent") or task.get("agent")
-            ),
+            # Concrete Herdr-managed instance name (worker stores agent.name).
+            "name": task.get("agent_name") or runtime.get("agent_name") or None,
+            # Agent type only (claude/opencode/...): never proof of ownership.
+            "type": runtime.get("agent") or task.get("agent") or None,
         }
         runner = runner or _run_herdr
 

@@ -835,3 +835,7 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 ## [2026-09-20] fix | Trajectory Observer Live Agent liveness：pane session 一致仍须 agent get 确认
 - Updated [[trajectory-observer]]: 对 persisted 明确有 Agent 的 Run，pane 级 session 一致不再直接判 `available`——必须继续 bounded `herdr agent get`（与 `pane_pool` 的真实 live agent 判据一致）：agent 成功且 session 一致→`identity_match`；显式 `agent_not_found`/空 agent→`unavailable`；agent session 不一致→`identity_mismatch`；timeout/parse/身份不足→`unknown`。transcript guard 仍只在最终 `available` 时 pane read。
 - 证据：`herdr/observer/live.py:_identity_result`、`tests/test_trajectory_observer.py`（75 项，含 A/B 两条 agent liveness 回归）。
+
+## [2026-09-20] fix | Trajectory Observer 三项收尾：agent_done terminal checkpoint / 脱敏先于 cutoff / 身份优先级 A-B-C
+- Updated [[trajectory-observer]]: ① `agent_done` 在 `redeliver_done_event()` 前获得独立 terminal observation（独立 gate，每 run 每 controller 进程一次，异步不阻塞 done flow）；② `bound_transcript` 改为先脱敏再 bytes/lines/chars 截断，文件尾部先读 8192B overlap 并丢弃不完整行，杜绝 key prefix 被 cutoff 切断后泄漏；③ 身份优先级 A(session 匹配)/B(agent_name 实例名匹配)/C(仅 agent type → unknown 且禁止 pane read)。
+- 证据：`herdr/observer/harness.py:submit_terminal`、`herdr/observer/context.py:bound_transcript,read_log_tail`、`herdr/observer/live.py:_identity_result`、`services/herdr-controller.py:_observer_terminal_checkpoint`、`tests/test_trajectory_observer.py`（85 项）。

@@ -32,7 +32,7 @@ bounded 日志尾部(existing evidence) ──┼─► ObservationContext(有�
 | `herdr/observer/live.py` | Shell-lite/IO | 只读 live Pane/Agent 探测（`pane list`/`pane get`/`agent get`，失败=unknown）与 live Pane transcript（`pane read --source recent-unwrapped`，timeout + 三级上限 + 脱敏） |
 | `herdr/observer/engine.py` | Core | `TrajectoryObserver.observe_run`：`task` 可省略（按 run 事件 `task_id` → 持久化 `run_id` 自动解析 task/runtime/日志）；检测→确认→去重→落库；顶层 fail-safe |
 | `herdr/observer/harness.py` | Shell | `observe_run` 公共 API、provider 记忆化、`ObservationScheduler`（daemon 线程、非阻塞、in-flight 去重） |
-| `services/herdr-controller.py` | Shell | registry_watcher 对 `working/rework/blocked` 任务 `submit_observation`（非阻塞） |
+| `services/herdr-controller.py` | Shell | registry_watcher 对 `working/rework/blocked` 任务 `submit_observation`（非阻塞）；`agent_done` 在 done 投递前 `_observer_terminal_checkpoint`（每 run 每进程一次） |
 | `bin/herdr-task#observe` | Shell | 人工入口：`--task-id`/`--run-id`/`--json`/`--no-model` |
 | `herdr/state_db.py` | Store | `trajectory_findings` 表 + `record/get/list_trajectory_finding(s)`（UNIQUE finding_key） |
 
@@ -53,13 +53,14 @@ bounded 日志尾部(existing evidence) ──┼─► ObservationContext(有�
 ## 4. 有界与脱敏（红线）
 
 1. **有界**：只送最近 N（默认 50）条 trajectory + 最近 5 条 verification + 终止/起始事件；日志只读尾部（默认末 16KB→末 200 行→≤4000 字符）；序列化预算 `max_context_size`（默认 8000 字符），超预算按 logs→artifacts→verification→recent→signals 顺序收缩。
-2. **脱敏**：日志在 `read_log_tail` 读取时即 `redact_text`；Provider question、`metadata.facts`、evidence excerpt/signature 落库前再做防御性脱敏；密钥形状内容不离开进程。
+2. **脱敏先于截断**：`bound_transcript` 先 strip ANSI + `redact_text`，再执行 bytes/lines/chars 上限；文件尾部先多读 8192B overlap 并丢弃首个不完整行（保证完整行边界）再脱敏、再截断；Provider question、`metadata.facts`、evidence excerpt/signature 落库前再做防御性脱敏；密钥形状内容（含被 cutoff 切断 key prefix 的场景）不离开进程。
 3. **模型边界**：Jev 契约仅支持 noul/score/choice，Observer 采用「规则检测 → noul 批量确认/否决」映射，不解析自由文本；`requires_confirmation=false` 的证据型 signal 在 Provider 不可用时仍产出，弱 signal 无确认则不产出（宁可不报）。
 4. **去重与升级**：`finding_key = sha256(run_id|finding_type|node|agent_session_id|anchor)`，anchor 是本次问题 episode 的稳定起点；SQLite `UNIQUE(finding_key)` + `ON CONFLICT DO UPDATE`——重复观察不新增第二条 Finding，同一 episode 原地刷新 severity/summary/evidence/原因/建议/置信度（如失败链 2→4 次 warning→critical），`finding_id`/`created_at` 保持 canonical，低 severity 观察不降级既有行；并发冲突后重新读取并返回 canonical persisted finding。
-5. **Live 真实性**：persisted `task["runtime"]` 之外增加只读 live 探测——pane 级 session 矛盾（`identity_mismatch`）或显式 `pane_not_found` 即 `unavailable`；**对 persisted 明确有 Agent 的 Run，pane session 一致不等于 Agent 存活，必须继续 `agent get` 确认**（与 `pane_pool` 的真实 live agent 判据一致）：agent 成功且 session 一致→`identity_match`，显式 `agent_not_found`/空 agent→`unavailable`，agent session 不一致→`identity_mismatch`；timeout/daemon/parse/身份信息不足一律 `unknown`（绝不当 unavailable）。live Pane transcript 必须通过同一身份 guard（最终 probe `available` 才允许 `pane read`），优先于 finalization 才出现的 `task["evidence"]`，未确认身份或读取失败回退文件；两者都只在 daemon worker 线程执行（probe ≤2s、transcript ≤3s），绝不进入 controller 主轮询。
+5. **Live 真实性**：persisted `task["runtime"]` 之外增加只读 live 探测，身份优先级 **A** session（`agent_session_id` 必须匹配）→ **B** `agent_name`（具体实例名必须匹配 live `agent.name`）→ **C** 仅 agent type（claude 等）不足以证明 Run ownership → `unknown` 且禁止 `pane read`；pane 级 session 矛盾或显式 `pane_not_found` → `unavailable`。**对 persisted 明确有 Agent 的 Run，pane session 一致不等于 Agent 存活，必须继续 `agent get` 确认**（与 `pane_pool` 判据一致）；agent_not_found/空 agent/身份不一致→`unavailable`；timeout/daemon/parse/身份信息不足一律 `unknown`（绝不当 unavailable）。live Pane transcript 必须通过同一身份 guard（最终 probe `available` 才允许 `pane read`），优先于 finalization 才出现的 `task["evidence"]`，未确认身份或读取失败回退文件；两者都只在 daemon worker 线程执行（probe ≤2s、transcript ≤3s），绝不进入 controller 主轮询。
 6. **失败隔离**：`observe_run` 顶层 try/except 永不外抛；Provider 构造失败仅记 stderr 并降级为无 Provider（证据型 Finding 照常产出，弱信号静默）；调度器 daemon 线程与 controller 轮询物理隔离；只写 `trajectory_findings` 表，绝不触碰 Task/Workflow/Runtime/events。
 7. **Hard budget**：`_fit_budget` 递归 clamp 嵌套字段并按序删除低优先级块，最终 serialized ≤ `max(500, max_context_size)`；最小 identity（run_id + signal 类型）在任何输入下都保留。
-8. **CLI 契约**：`--task-id`/`--run-id` 互斥（禁止跨 Run 混用身份）；`--json` 的 stdout 只允许 JSON，诊断全部走 stderr，Provider 失败时仍 exit 0。
+8. **agent_done terminal checkpoint**：`registry_watcher` 在 `redeliver_done_event()` 之前调用 `submit_terminal_observation`；独立 gate 不走 periodic interval/budget（避免被刚发生的 working observation 挡掉），每 run 每 controller 进程最多一次（进程内 seen，TTL 24h；重启重置），daemon 线程异步、失败不阻塞 done flow。
+9. **CLI 契约**：`--task-id`/`--run-id` 互斥（禁止跨 Run 混用身份）；`--json` 的 stdout 只允许 JSON，诊断全部走 stderr，Provider 失败时仍 exit 0。
 
 ## 5. 配置速查
 

@@ -27,6 +27,9 @@ MAX_TERMINAL_EVENTS = 6
 MAX_ARTIFACTS = 10
 MAX_SIGNAL_REFS = 4
 DEFAULT_LOG_ROOT = os.path.expanduser("~/.herdr-controller/logs/tasks")
+# Extra bytes read before the formal tail window so a sensitive assignment is
+# never split by the byte cutoff before redaction can see it.
+LOG_OVERLAP_BYTES = 8192
 
 
 def _bounded(value: Any, limit: int) -> str:
@@ -57,10 +60,13 @@ def _bounded_log_excerpt(
 def bound_transcript(
     text: Any, *, ref: str, config: Dict[str, Any],
 ) -> Optional[Dict[str, Any]]:
-    """Bound + redact transcript text (bytes -> lines -> chars).
+    """Redact first, then bound transcript text (bytes -> lines -> chars).
 
-    Shared by the file-tail reader and the live pane reader so both obey the
-    same limits. Returns None when nothing readable remains.
+    Redaction must see complete semantic boundaries: if a byte/line/char cut
+    ran first, a credential assignment split by the cutoff would lose its key
+    prefix and survive redaction. Shared by the file-tail reader and the live
+    pane reader so both obey the same limits. Returns None when nothing
+    readable remains.
     """
     raw = str(text or "")
     if not raw.strip():
@@ -69,11 +75,14 @@ def bound_transcript(
     max_lines = int(config.get("log_tail_lines", 200))
     max_chars = int(config.get("log_tail_chars", 4000))
     size_bytes = len(raw.encode("utf-8", "replace"))
-    encoded = raw.encode("utf-8", "replace")
+    # Semantic cleanup first; every later cut operates on already-redacted text.
+    cleaned = redact_text(strip_ansi_codes(raw))
+    encoded = cleaned.encode("utf-8", "replace")
     truncated = size_bytes > max_bytes
-    if truncated:
+    if len(encoded) > max_bytes:
         encoded = encoded[-max_bytes:]
-    decoded = redact_text(strip_ansi_codes(encoded.decode("utf-8", "ignore")))
+        truncated = True
+    decoded = encoded.decode("utf-8", "ignore")
     lines = decoded.splitlines()
     if len(lines) > max_lines:
         lines = lines[-max_lines:]
@@ -111,21 +120,29 @@ def read_log_tail(task: Optional[Dict[str, Any]], config: Dict[str, Any]) -> Opt
         candidates.append(Path(DEFAULT_LOG_ROOT) / str(task_id) / "terminal.log")
 
     max_bytes = int(config.get("log_tail_bytes", 16384))
+    window_bytes = max_bytes + LOG_OVERLAP_BYTES
     for path in candidates:
         try:
             if not path.is_file():
                 continue
             size = path.stat().st_size
             with path.open("rb") as handle:
-                if size > max_bytes:
-                    handle.seek(-max_bytes, os.SEEK_END)
+                if size > window_bytes:
+                    handle.seek(-window_bytes, os.SEEK_END)
                 raw = handle.read()
-            bounded = bound_transcript(
-                raw.decode("utf-8", "replace"), ref=str(path), config=config,
-            )
+            text = raw.decode("utf-8", "replace")
+            if size > window_bytes:
+                # The window may start inside a line; drop that partial line so
+                # redaction always sees complete assignments, then bound.
+                newline = text.find("\n")
+                if newline == -1:
+                    continue  # no safe line boundary available for this file
+                text = text[newline + 1:]
+            bounded = bound_transcript(text, ref=str(path), config=config)
             if bounded is None:
                 continue
             bounded["path"] = str(path)
+            bounded["size_bytes"] = size
             if size > max_bytes:
                 bounded["truncated"] = True
             return bounded
@@ -237,7 +254,7 @@ def _live_runtime_facts(live_runtime: Optional[Dict[str, Any]]) -> Dict[str, Any
         return {"status": "unknown", "reason": "not_probed"}
     return {
         key: _bounded(live_runtime[key], 160)
-        for key in ("status", "reason", "pane_id", "agent_status", "agent_session_id")
+        for key in ("status", "reason", "pane_id", "agent_status", "agent_session_id", "agent_name")
         if live_runtime.get(key) is not None
     } | ({"workspace_mismatch": True} if live_runtime.get("workspace_mismatch") else {})
 
