@@ -39,6 +39,7 @@ MAX_VERIFIED_FACTS = 20
 MAX_NEXT_FOCUS = 3
 MAX_CONTEXT_TEXT_CHARS = 2000
 MAX_CONTEXT_REFS = 50
+MAX_CONTEXT_REF_CHARS = 512
 MAX_CONTEXT_SERIALIZED_CHARS = 20000
 
 
@@ -224,6 +225,7 @@ def _compact_input(
         "candidate_semantics": candidates,
     }
     payload = _redact_context(payload)
+    payload["goal"] = payload.get("goal") or ""
 
     def size() -> int:
         return len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
@@ -452,18 +454,25 @@ def _fallback_semantic(events: Sequence[Dict[str, Any]], findings: Sequence[Dict
     return {"completed": completed, "open_issues": open_issues, "next_focus": next_focus}
 
 
-def _bounded_semantic_items(items: Sequence[Dict[str, Any]], limit: int) -> List[Dict[str, Any]]:
+def _bounded_semantic_items(
+    items: Sequence[Dict[str, Any]],
+    limit: int,
+    allowed_fields: Sequence[str] = ("text", "refs"),
+) -> List[Dict[str, Any]]:
     bounded: List[Dict[str, Any]] = []
     for item in list(items)[:limit]:
         if not isinstance(item, dict):
             continue
-        value = dict(item)
+        value = {key: item[key] for key in allowed_fields if key in item}
         if isinstance(value.get("text"), str):
             value["text"] = value["text"][:MAX_CONTEXT_TEXT_CHARS]
         if isinstance(value.get("summary"), str):
             value["summary"] = value["summary"][:MAX_CONTEXT_TEXT_CHARS]
         if isinstance(value.get("refs"), list):
-            value["refs"] = [str(ref) for ref in value["refs"][:MAX_CONTEXT_REFS]]
+            value["refs"] = [
+                str(ref) for ref in value["refs"][:MAX_CONTEXT_REFS]
+                if len(str(ref)) <= MAX_CONTEXT_REF_CHARS
+            ]
         bounded.append(value)
     return bounded
 
@@ -490,12 +499,18 @@ def _bound_context_pack(pack: ContextPack) -> ContextPack:
             "open_issues": _bounded_semantic_items(pack.open_issues, MAX_OPEN_ISSUES),
             "next_focus": _bounded_semantic_items(pack.next_focus, MAX_NEXT_FOCUS),
             "verified_facts": list(pack.verified_facts)[:MAX_VERIFIED_FACTS],
-            "important_findings": _bounded_semantic_items(pack.important_findings, MAX_OPEN_ISSUES),
+            "important_findings": _bounded_semantic_items(
+                pack.important_findings, MAX_OPEN_ISSUES,
+                ("finding_id", "finding_type", "severity", "summary"),
+            ),
             "evidence_refs": list(pack.evidence_refs)[:MAX_CONTEXT_REFS],
             "artifact_refs": list(pack.artifact_refs)[:MAX_CONTEXT_REFS],
         }
     )
-    while len(json.dumps(pack.to_mapping(), ensure_ascii=False)) > MAX_CONTEXT_SERIALIZED_CHARS:
+    for _ in range(128):
+        before = len(json.dumps(pack.to_mapping(), ensure_ascii=False))
+        if before <= MAX_CONTEXT_SERIALIZED_CHARS:
+            return pack
         fields = ["next_focus", "open_issues", "completed", "important_findings"]
         reduced = False
         for field_name in fields:
@@ -506,10 +521,15 @@ def _bound_context_pack(pack: ContextPack) -> ContextPack:
                 reduced = True
                 break
         if reduced:
-            continue
+            after = len(json.dumps(pack.to_mapping(), ensure_ascii=False))
+            if after < before:
+                continue
+            break
         if pack.goal and len(pack.goal) > 256:
             pack = ContextPack(**{**pack.to_mapping(), "goal": pack.goal[: max(0, len(pack.goal) // 2)]})
-            continue
+            if len(json.dumps(pack.to_mapping(), ensure_ascii=False)) < before:
+                continue
+            break
         if pack.verified_facts and len(pack.verified_facts) > 1:
             pack = ContextPack(**{**pack.to_mapping(), "verified_facts": pack.verified_facts[-1:]})
             continue
@@ -524,12 +544,35 @@ def _bound_context_pack(pack: ContextPack) -> ContextPack:
             continue
         if pack.metadata:
             metadata = {key: pack.metadata[key] for key in ("analysis", "context_source_fingerprint") if key in pack.metadata}
-            pack = ContextPack(**{**pack.to_mapping(), "metadata": metadata})
-            if len(json.dumps(pack.to_mapping(), ensure_ascii=False)) <= MAX_CONTEXT_SERIALIZED_CHARS:
+            if metadata == pack.metadata:
                 break
+            pack = ContextPack(**{**pack.to_mapping(), "metadata": metadata})
             continue
         break
-    return pack
+    if len(json.dumps(pack.to_mapping(), ensure_ascii=False)) <= MAX_CONTEXT_SERIALIZED_CHARS:
+        return pack
+    # Controlled terminal fallback: retain identity, the latest fact, and one
+    # bounded semantic/reference item; never return an over-budget snapshot.
+    minimal = ContextPack(
+        context_id=pack.context_id, run_id=pack.run_id, task_id=pack.task_id,
+        workflow_id=pack.workflow_id, goal=(pack.goal or "")[:256],
+        current_state={}, completed=pack.completed[:1],
+        verified_facts=pack.verified_facts[-1:],
+        important_findings=pack.important_findings[:1],
+        evidence_refs=pack.evidence_refs[:1], artifact_refs=pack.artifact_refs[:1],
+        open_issues=pack.open_issues[:1], next_focus=pack.next_focus[:1],
+        source_event_sequence=pack.source_event_sequence, created_at=pack.created_at,
+        metadata={"context_source_fingerprint": pack.metadata.get("context_source_fingerprint", "")},
+    )
+    if len(json.dumps(minimal.to_mapping(), ensure_ascii=False)) > MAX_CONTEXT_SERIALIZED_CHARS:
+        minimal = ContextPack(
+            context_id=pack.context_id, run_id=pack.run_id, task_id=pack.task_id,
+            workflow_id=pack.workflow_id, goal="", source_event_sequence=pack.source_event_sequence,
+            created_at=pack.created_at, metadata={},
+        )
+    if len(json.dumps(minimal.to_mapping(), ensure_ascii=False)) > MAX_CONTEXT_SERIALIZED_CHARS:
+        raise ValueError("ContextPack cannot satisfy serialized size bound")
+    return minimal
 
 
 def _source_fingerprint(

@@ -3434,28 +3434,34 @@ def emit_done_if_allowed(task, report_text=None):
     and the observation must be queued before the task can advance.
     """
     observer_complete = threading.Event()
+    supervisor_complete = threading.Event()
     _observer_terminal_checkpoint(task, completion_event=observer_complete)
-    _schedule_context_compact(task, wait_for=observer_complete)
-    checkpoint = supervisor_checkpoint(task, "agent_done", report_text=report_text)
-    if checkpoint is None:
-        pending = None
-        if supervisor_harness is not None:
-            try:
-                pending = supervisor_harness.pending_intervention(task, _get_store())
-            except Exception:
-                pending = None
-        if pending:
-            _supervisor_log_pending(task, pending)
+    _schedule_context_compact(
+        task, wait_for=observer_complete, supervisor_done=supervisor_complete,
+    )
+    try:
+        checkpoint = supervisor_checkpoint(task, "agent_done", report_text=report_text)
+        if checkpoint is None:
+            pending = None
+            if supervisor_harness is not None:
+                try:
+                    pending = supervisor_harness.pending_intervention(task, _get_store())
+                except Exception:
+                    pending = None
+            if pending:
+                _supervisor_log_pending(task, pending)
+                return False
+            enqueue_coordinator_event(task, "done")
+            return True
+        if not supervisor_continue_flow(checkpoint):
             return False
         enqueue_coordinator_event(task, "done")
         return True
-    if not supervisor_continue_flow(checkpoint):
-        return False
-    enqueue_coordinator_event(task, "done")
-    return True
+    finally:
+        supervisor_complete.set()
 
 
-def _schedule_context_compact(task, wait_for=None):
+def _schedule_context_compact(task, wait_for=None, supervisor_done=None):
     """Schedule working-memory creation without joining or affecting done flow."""
     if not task:
         return False
@@ -3463,11 +3469,24 @@ def _schedule_context_compact(task, wait_for=None):
         from herdr.context_compact import compact_run_best_effort
         from herdr.trajectory import run_id_for_task
         store = _get_store()
+        target_task_id = str(task.get("task_id") or "")
+        target_run_id = str(run_id_for_task(task))
+        if not target_task_id or not target_run_id:
+            return False
 
         def worker():
             try:
                 if wait_for is not None:
                     wait_for.wait()
+                if supervisor_done is not None:
+                    supervisor_done.wait()
+                from herdr import state_db
+                fresh_task = state_db.get_task(
+                    target_task_id, db_path=getattr(store, "db_path", None),
+                )
+                if not fresh_task or str(fresh_task.get("run_id") or "") != target_run_id:
+                    print(f"[CONTEXT COMPACT SKIPPED] task={target_task_id}: task/run identity changed")
+                    return
                 provider = None
                 try:
                     from herdr.observer.harness import get_provider
@@ -3475,7 +3494,7 @@ def _schedule_context_compact(task, wait_for=None):
                 except Exception as provider_exc:
                     print(f"[CONTEXT COMPACT PROVIDER FALLBACK] task={task.get('task_id')}: {type(provider_exc).__name__}: {provider_exc}")
                 compact_run_best_effort(
-                    run_id_for_task(task), task=task, store=store, provider=provider,
+                    target_run_id, task=fresh_task, store=store, provider=provider,
                 )
             except Exception as exc:  # defensive boundary isolation
                 print(f"[CONTEXT COMPACT WORKER SKIPPED] task={task.get('task_id')}: {type(exc).__name__}: {exc}")

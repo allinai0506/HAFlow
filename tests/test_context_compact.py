@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import importlib
+import signal
 import threading
 import time
 from pathlib import Path
@@ -13,6 +14,7 @@ from herdr.context_compact import (
     MAX_CONTEXT_SERIALIZED_CHARS,
     MAX_CONTEXT_TEXT_CHARS,
     compact_run,
+    _bound_context_pack,
     get_context,
     get_latest_context,
     list_contexts,
@@ -556,6 +558,7 @@ def test_terminal_observer_barrier_persists_finding_before_compact(tmp_path: Pat
     db_path = tmp_path / "state.db"
     store = ObservationStore(db_path)
     task = {"task_id": "task-terminal-order", "run_id": "run-terminal-order", "goal": "g"}
+    state_db.save_task(dict(task, status="agent_done"), db_path=db_path)
     TrajectoryLedger(db_path).append_event({"run_id": "run-terminal-order", "task_id": "task-terminal-order", "event_type": "agent_done"})
     barrier = threading.Event()
     monkeypatch.setattr(controller, "_get_store", lambda: store)
@@ -583,9 +586,10 @@ def test_done_gateway_passes_observer_completion_barrier_to_compact(monkeypatch)
         barrier["event"] = completion_event
         return True
 
-    def compact(task, wait_for=None):
+    def compact(task, wait_for=None, supervisor_done=None):
         calls.append("compact")
         assert wait_for is barrier["event"]
+        assert supervisor_done is not None
         return True
 
     monkeypatch.setattr(controller, "_observer_terminal_checkpoint", observer)
@@ -594,3 +598,94 @@ def test_done_gateway_passes_observer_completion_barrier_to_compact(monkeypatch)
     monkeypatch.setattr(controller, "enqueue_coordinator_event", lambda *args, **kwargs: None)
     assert controller.emit_done_if_allowed({"task_id": "task-order", "run_id": "run-order"}) is True
     assert calls == ["observer", "compact"]
+
+
+def test_bound_context_pack_terminates_on_large_extra_and_long_ref():
+    pack = ContextPack(
+        context_id="ctx-bound", run_id="run-bound", task_id=None, workflow_id=None, goal="g",
+        completed=[{"text": "keep", "refs": ["evt_" + "x" * 30000], "extra": "z" * 50000}],
+        metadata={"context_source_fingerprint": "fp"},
+    )
+    def alarm_handler(signum, frame):
+        raise TimeoutError("_bound_context_pack did not terminate")
+    previous = signal.signal(signal.SIGALRM, alarm_handler)
+    signal.alarm(1)
+    try:
+        result = _bound_context_pack(pack)
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+    assert len(json.dumps(result.to_mapping(), ensure_ascii=False)) <= 20000
+    assert result.completed[0]["text"] == "keep"
+
+
+def test_goal_none_is_safe_in_over_budget_compact(tmp_path: Path):
+    db_path = tmp_path / "state.db"
+    upsert_trajectory_finding(dict(_finding(run_id="run-none-goal"), summary="f" * 10000), db_path=db_path)
+    captured = {}
+
+    class Provider:
+        def reduce(self, payload):
+            captured["payload"] = payload
+            return {"completed": [], "open_issues": [], "next_focus": []}
+
+    compact_run(
+        "run-none-goal", task={"task_id": "task-none-goal", "run_id": "run-none-goal", "goal": None},
+        store=ObservationStore(db_path), provider=Provider(), config={"max_input_chars": 300},
+    )
+    assert len(json.dumps(captured["payload"], ensure_ascii=False)) <= 300
+
+
+def test_async_compact_rereads_rework_task_after_terminal_barrier(tmp_path: Path, monkeypatch):
+    controller = importlib.import_module("services.herdr-controller")
+    db_path = tmp_path / "state.db"
+    store = ObservationStore(db_path)
+    task = {"task_id": "task-rework-order", "run_id": "run-rework-order", "status": "agent_done", "goal": "g"}
+    state_db.save_task(task, db_path=db_path)
+    TrajectoryLedger(db_path).append_event({"run_id": "run-rework-order", "task_id": "task-rework-order", "event_type": "agent_done"})
+    observer_done = threading.Event()
+    monkeypatch.setattr(controller, "_get_store", lambda: store)
+    monkeypatch.setattr("herdr.observer.harness.get_provider", lambda: None)
+    controller._schedule_context_compact(task, wait_for=observer_done)
+    state_db.save_task(dict(task, status="rework"), db_path=db_path)
+    observer_done.set()
+    deadline = time.time() + 3
+    while time.time() < deadline and state_db.get_latest_context_pack("run-rework-order", db_path=db_path) is None:
+        time.sleep(0.02)
+    latest = state_db.get_latest_context_pack("run-rework-order", db_path=db_path)
+    assert latest is not None
+    assert latest["current_state"]["task_status"] == "rework"
+
+
+@pytest.mark.parametrize("observer_mode", ["fast", "exception"])
+def test_done_flow_waits_for_supervisor_after_observer_order(tmp_path: Path, monkeypatch, observer_mode: str):
+    controller = importlib.import_module("services.herdr-controller")
+    db_path = tmp_path / f"state-{observer_mode}.db"
+    store = ObservationStore(db_path)
+    task = {"task_id": f"task-{observer_mode}", "run_id": f"run-{observer_mode}", "status": "agent_done", "goal": "g"}
+    state_db.save_task(task, db_path=db_path)
+    TrajectoryLedger(db_path).append_event({"run_id": task["run_id"], "task_id": task["task_id"], "event_type": "agent_done"})
+    monkeypatch.setattr(controller, "_get_store", lambda: store)
+    monkeypatch.setattr("herdr.observer.harness.get_provider", lambda: None)
+
+    def observer(current_task, completion_event=None, **kwargs):
+        if completion_event is not None:
+            completion_event.set()
+        if observer_mode == "exception":
+            return False
+        return True
+
+    def supervisor(current_task, trigger, **kwargs):
+        state_db.save_task(dict(task, status="rework"), db_path=db_path)
+        return None
+
+    monkeypatch.setattr(controller, "_observer_terminal_checkpoint", observer)
+    monkeypatch.setattr(controller, "supervisor_checkpoint", supervisor)
+    monkeypatch.setattr(controller, "enqueue_coordinator_event", lambda *args, **kwargs: None)
+    assert controller.emit_done_if_allowed(task) is True
+    deadline = time.time() + 3
+    while time.time() < deadline and state_db.get_latest_context_pack(task["run_id"], db_path=db_path) is None:
+        time.sleep(0.02)
+    latest = state_db.get_latest_context_pack(task["run_id"], db_path=db_path)
+    assert latest is not None
+    assert latest["current_state"]["task_status"] == "rework"
