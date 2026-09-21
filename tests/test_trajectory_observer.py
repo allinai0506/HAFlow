@@ -342,6 +342,47 @@ def _detect(store: SQLiteStateStore, task: Optional[dict], now: float, config: O
 
 
 class TestSignals:
+    def test_observation_receipts_do_not_refresh_stall_idle(self, tmp_path: Path):
+        store = SQLiteStateStore(tmp_path / "state.db")
+        ledger = TrajectoryLedger(store.db_path)
+        _append(ledger, [
+            {"run_id": "run-receipt-idle", "event_type": "task_status_changed",
+             "status": "working", "timestamp": 100.0},
+            {"run_id": "run-receipt-idle", "event_type": "observation_created", "timestamp": 1000.0},
+            {"run_id": "run-receipt-idle", "event_type": "observation_created", "timestamp": 1500.0},
+        ])
+        config = _base_config()
+        config["stall_after_seconds"] = 500
+
+        signals = _detect(
+            store, _task(run_id="run-receipt-idle", runtime={"status": "running"}),
+            now=2000.0, config=config, run_id="run-receipt-idle",
+        )
+        stalled = next(signal for signal in signals if signal.finding_type == "stalled_execution")
+        assert stalled.facts["idle_seconds"] == 1900.0
+
+    def test_observation_receipts_do_not_change_no_progress_stall_precedence(self, tmp_path: Path):
+        store = SQLiteStateStore(tmp_path / "state.db")
+        ledger = TrajectoryLedger(store.db_path)
+        _append(ledger, [
+            {"run_id": "run-receipt-precedence", "event_type": "task_status_changed",
+             "status": "rework", "timestamp": 100.0},
+            {"run_id": "run-receipt-precedence", "event_type": "task_status_changed",
+             "status": "rework", "timestamp": 200.0},
+            {"run_id": "run-receipt-precedence", "event_type": "task_status_changed",
+             "status": "rework", "timestamp": 300.0},
+            {"run_id": "run-receipt-precedence", "event_type": "observation_created", "timestamp": 1000.0},
+        ])
+        config = _base_config()
+        config["stall_after_seconds"] = 500
+
+        signals = _detect(
+            store, _task(run_id="run-receipt-precedence", runtime={"status": "running"}),
+            now=1000.0, config=config, run_id="run-receipt-precedence",
+        )
+        assert any(signal.finding_type == "stalled_execution" for signal in signals)
+        assert not any(signal.finding_type == "no_progress" for signal in signals)
+
     def test_healthy_run_produces_no_signals(self, tmp_path: Path):
         store = SQLiteStateStore(tmp_path / "state.db")
         ledger = TrajectoryLedger(store.db_path)
@@ -1916,6 +1957,30 @@ class TestLiveTranscript:
 
         assert len(list_observations(run_id="run-observation-dedup", store=ObservationStore(store.db_path))) == 1
         assert len(ledger.list_events("run-observation-dedup", event_type="observation_created")) == 1
+
+    def test_max_findings_caps_before_log_observation_side_effect(self, tmp_path: Path):
+        store = SQLiteStateStore(tmp_path / "state.db")
+        ledger = TrajectoryLedger(store.db_path)
+        _append(ledger, [
+            {"run_id": "run-finding-cap", "event_type": "run_started"},
+            _verification("run-finding-cap", False, "tevd-cap-a"),
+            _verification("run-finding-cap", False, "tevd-cap-b"),
+        ])
+        task = _task(run_id="run-finding-cap", runtime={"status": "running"})
+        config = _base_config()
+        config["max_findings"] = 1
+        findings = observer_harness.observe_run(
+            "run-finding-cap", task=task, store=store, ledger=ledger, config=config,
+            provider=CapturingProvider({"repeated_failure": 0.9, "possible_context_problem": 0.9}),
+            transcript_reader=lambda _task: {
+                "ref": "pane:p-cap", "excerpt": "\n".join(["Error: capped context"] * 3),
+            },
+        )
+
+        assert len(findings) == 1
+        assert findings[0].finding_type == "repeated_failure"
+        assert list_observations(run_id="run-finding-cap", source_type="agent_log", store=ObservationStore(store.db_path)) == []
+        assert ledger.list_events("run-finding-cap", event_type="observation_created") == []
 
     def test_dedup_observation_self_heals_missing_receipt(self, tmp_path: Path, monkeypatch):
         import herdr.trajectory as trajectory_module

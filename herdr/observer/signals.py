@@ -31,6 +31,8 @@ TERMINAL_TASK_STATUSES = frozenset({
     "cleaned", "committed",
 })
 
+NON_EXECUTION_PROGRESS_EVENT_TYPES = frozenset({"observation_created"})
+
 DONE_CLAIM_STATUSES = frozenset({
     "agent_done", "completed", "integrated", "cleanup_ready", "cleaned", "committed",
 })
@@ -120,6 +122,14 @@ def _event_time(event: Dict[str, Any]) -> float:
 
 def _last_event(events: List[Dict[str, Any]]) -> Dict[str, Any]:
     return max(events, key=lambda event: (_event_time(event), event.get("sequence") or 0))
+
+
+def _execution_events(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return [event for event in events if event.get("event_type") not in NON_EXECUTION_PROGRESS_EVENT_TYPES]
+
+
+def _last_execution_event(events: List[Dict[str, Any]]) -> Dict[str, Any]:
+    return _last_event(_execution_events(events))
 
 
 def _verification_passed(event: Dict[str, Any]) -> bool:
@@ -449,7 +459,10 @@ def _detect_no_progress(
     if len(reworks) < minimum:
         return None
     first = reworks[0]
-    last = _last_event(events)
+    execution_events = _execution_events(events)
+    if not execution_events:
+        return None
+    last = _last_execution_event(events)
     idle = max(0.0, now - _event_time(last))
     if idle >= float(config.get("stall_after_seconds", 1800)):
         return None  # stalls are the dominant diagnosis; avoid double reporting
@@ -474,9 +487,10 @@ def _detect_stalled(
     events: List[Dict[str, Any]], task: Optional[Dict[str, Any]],
     runtime: Dict[str, Any], now: float, config: Dict[str, Any],
 ) -> Optional[Signal]:
-    if not events or not _is_active(events, task) or runtime.get("status") == "unavailable":
+    execution_events = _execution_events(events)
+    if not execution_events or not _is_active(events, task) or runtime.get("status") == "unavailable":
         return None
-    last = _last_event(events)
+    last = _last_execution_event(events)
     idle = max(0.0, now - _event_time(last))
     threshold = float(config.get("stall_after_seconds", 1800))
     if idle < threshold:

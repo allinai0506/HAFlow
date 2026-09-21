@@ -263,7 +263,7 @@ class TrajectoryObserver:
         agent = task.get("agent") or last.get("agent")
         agent_session_id = runtime.get("agent_session_id") or last.get("agent_session_id")
 
-        findings: List[TrajectoryFinding] = []
+        accepted: List[tuple[signal_layer.Signal, Optional[float], float]] = []
         for signal in signals:
             result = results.get(signal.finding_type)
             probability = clamp_probability(getattr(result, "value", None))
@@ -272,6 +272,11 @@ class TrajectoryObserver:
             if probability is None and signal.requires_confirmation:
                 continue  # weak signal without model confirmation: stay quiet
             confidence = probability if probability is not None else signal.confidence
+            accepted.append((signal, probability, confidence))
+
+        accepted = accepted[: max(1, int(self.config.get("max_findings", 10)))]
+        findings: List[TrajectoryFinding] = []
+        for signal, probability, confidence in accepted:
             evidence = self._materialize_observations(run_id, task, signal, now, log_tail)
             findings.append(TrajectoryFinding(
                 run_id=run_id,
@@ -302,7 +307,7 @@ class TrajectoryObserver:
                     "total_events": len(events),
                 },
             ))
-        return findings[: max(1, int(self.config.get("max_findings", 10)))]
+        return findings
 
     def _materialize_observations(
         self,

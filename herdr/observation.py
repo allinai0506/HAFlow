@@ -281,7 +281,9 @@ class ObservationStore:
         workflow_id: Optional[str] = None,
         created_at: Optional[float] = None,
     ) -> tuple[Observation, bool]:
-        artifact = Path(path).expanduser()
+        input_path = Path(path).expanduser()
+        source_ref = source_ref or f"artifact:{input_path}"
+        artifact = input_path.resolve()
         if not artifact.is_file():
             raise FileNotFoundError(str(artifact))
         size_bytes, digest = _hash_file(artifact)
@@ -291,7 +293,7 @@ class ObservationStore:
             size_bytes=size_bytes,
             digest=digest,
             run_id=run_id,
-            source_ref=source_ref or f"artifact:{artifact}",
+            source_ref=source_ref,
             content_ref=str(artifact),
             media_type=media_type,
             metadata=metadata,

@@ -276,6 +276,26 @@ def test_artifact_adapter_references_without_copying(tmp_path: Path):
     assert not (tmp_path / "observations" / observation.observation_id).exists()
 
 
+def test_relative_artifact_path_is_stable_across_cwd_changes(tmp_path: Path, monkeypatch):
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    artifact = source_dir / "relative" / "path" / "report.json"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text('{"status":"ok"}', encoding="utf-8")
+    store = ObservationStore(tmp_path / "state.db")
+    monkeypatch.chdir(source_dir)
+
+    observation = create_artifact_observation(
+        Path("relative/path/report.json"), run_id="run-relative-artifact", store=store,
+    )
+
+    monkeypatch.chdir(tmp_path)
+    assert Path(observation.content_ref).is_absolute()
+    assert Path(observation.content_ref) == artifact.resolve()
+    assert read_observation(observation.observation_id, store=store)["content"]
+    assert verify_observation(observation.observation_id, store=store)["valid"] is True
+
+
 def test_artifact_hash_and_integrity_use_chunked_reads(tmp_path: Path, monkeypatch):
     store = ObservationStore(tmp_path / "state.db")
     artifact = tmp_path / "large-artifact.bin"
