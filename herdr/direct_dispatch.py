@@ -58,7 +58,7 @@ def gate_verdict_contract(task_id) -> str:
    {{"verdict": "blocked", "note": "阻塞原因清单"}}
    （若你的写权限不允许写该路径，可退回写入当前工作目录下 .herdr/gate-verdict.json，内容格式相同）
 2. 同时在终端单独输出一行，便于人工对照：
-   HERDR_GATE_VERDICT: pass   或   HERDR_GATE_VERDICT: blocked
+   HERDR_GATE_VERDICT: <pass|blocked>
 3. verdict 只能二选一：pass = 未发现必须返工的阻塞缺陷；blocked = 存在必须返工的阻塞缺陷，且必须在 note 中列出。
 4. 结论一经写入即作为门禁裁决生效：pass 自动推进下一节点；blocked 自动触发回流返工。"""
 

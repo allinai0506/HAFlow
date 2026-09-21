@@ -3475,3 +3475,50 @@ pytest tests/test_supervisor_*.py tests/test_fix_loop_anti_flapping.py -q  # 104
 - `services/herdr-controller.py:_observer_terminal_checkpoint`
 
 ---
+
+## 79. 终端可见输出（Screen Marker）做门禁裁决的“Prompt 回显击穿”与字串误杀防御
+
+### 问题背景
+
+在工作流门禁节点（如 `test-auto` / `review`）调度中，Controller 通过 `_verdict_from_screen()` 解析 Pane 可见屏幕输出。历史实现仅通过 `line.split("HERDR_GATE_VERDICT:", 1)[1].strip().split()[0]` 截取首词并转为 `pass`/`blocked`。
+当 Agent 工位启动时，终端回显 Prompt 中的契约说明文本：
+`HERDR_GATE_VERDICT: pass   或   HERDR_GATE_VERDICT: blocked`
+由于首词恰好是 `"pass"`，Controller 在任务启动 0~2 秒内（因短暂 idle）通过 `gate_verdict_ready` 判定门禁已通过，立即触发 `auto_verdict_and_finalize_if_ready`，将任务标记为 `completed -> cleaned`。导致：
+1. 测试/审查 Agent 尚未开始执行实际任务，工位即被提前清理，质量门禁被直接击穿（False Positive Bypass）；
+2. 用户在控制台和工作流状态中无法看到运行中的工位（Pane 早已被销毁）；
+3. 在第一版修复尝试中，引入了包含子串的对立词检测（`"ok" in line`），导致包含 `"smoke"`、`"token"`、`"broken"` 的合法阻塞报告（如 `smoke test failed`）被误杀过滤；且整行对立词集合检查导致合法说明（如 `pass - 0 tests failed`）被误判为模板歧义丢弃。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 下发给 Agent 的 Prompt 包含机器契约标记的完整字面量 | Agent 终端回显 Prompt 是常态，字面量与真实产出无从区分 | 下发契约模板必须使用语法占位符（如 `<pass\|blocked>`），禁止在说明中出现直接可匹配的字面行 |
+| 仅取标记后的首词作为裁决 | 指令行、二选一讨论行、思考行可能首词也是目标词 | 必须在行级别过滤单行多标记、二选一指示词（`或`/` or `/` / `）及占位符；且对第一词后的后续 token 校验冲突词 |
+| 文本过滤使用子串检测 (`"ok" in line`) | 英文词根广泛重叠（`smoke`/`token`/`broken` 均含 `ok`） | 必须使用严格单词边界或 `set(tokens)` 进行离散词比对，禁止子串模糊匹配 |
+| 过于宽泛的整行对立词判定 | 真实的裁决常伴随否定式说明（`0 tests failed`、`did not fail`） | 裁决行过滤不得全行匹配 `fail` 等泛化解释词，冲突检查仅限定于对立裁决关键字（`blocked` vs `pass`） |
+
+### 操作规范（已固化到 `services/herdr-controller.py` 与 `herdr/direct_dispatch.py`）
+
+1. **Prompt 模板占位符化**：`herdr/direct_dispatch.py` 中将契约格式从 `HERDR_GATE_VERDICT: pass 或 HERDR_GATE_VERDICT: blocked` 调整为 `HERDR_GATE_VERDICT: <pass|blocked>`；
+2. **歧义行过滤纯函数**：`_is_instructional_or_ambiguous_verdict_line()` 在行级别过滤多 marker、二选一指示词（`或`, ` or `, ` / `, `二选一`, `示例`, `格式`, `template`, `<pass`, `[pass` 等）；
+3. **精准 Token 冲突校验**：`_verdict_from_screen()` 提取第一词后，仅对其后续 token 集合 `trailing` 检查是否存在对立裁决词；
+4. **正向与对抗回归门禁**：在 `tests/test_auto_acceptance.py` 中固化 7 组回归用例，涵盖 Prompt 回显忽略、斜杠/二选一忽略、`smoke` 词汇免误杀、带解释合法裁决放行、以及回显与正式结论共存的生产场景。
+
+### 验证命令 / 证据
+
+```bash
+pytest tests/test_auto_acceptance.py -k test_screen_marker -q  # 8 passed
+pytest tests/test_auto_acceptance.py -q                       # 33 passed
+pytest -q                                                     # 981 passed, 44 subtests passed
+```
+
+- pre-fix RED：`FAILED test_screen_marker_ignores_prompt_template_with_alternatives` (`AssertionError: 'pass' is not None`).
+
+### 相关文档 / 关联证据
+
+- 关联缺陷：`wf-nexusarchive-0921-01` 任务秒级被放行并 clean
+- 关联代码：[`services/herdr-controller.py`](file:///Users/user/haflow/services/herdr-controller.py#L3205), [`herdr/direct_dispatch.py`](file:///Users/user/haflow/herdr/direct_dispatch.py#L61)
+- 关联测试：[`tests/test_auto_acceptance.py`](file:///Users/user/haflow/tests/test_auto_acceptance.py#L287)
+- 关联历史：lessons §62（门禁 verdict 契约化）、§73（门禁产物就绪校验上下位错配）
+
+---

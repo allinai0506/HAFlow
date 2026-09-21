@@ -5,6 +5,7 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import queue
+import re
 import shutil
 import socket
 import subprocess
@@ -3202,6 +3203,26 @@ def _verdict_from_file(task):
     return None, ""
 
 
+def _is_instructional_or_ambiguous_verdict_line(line):
+    """过滤指令模板、Prompt回显或歧义讨论行，防止误判为有效门禁结论。"""
+    if not line:
+        return True
+    # 1. 单行出现多次标记(如 'HERDR_GATE_VERDICT: pass 或 HERDR_GATE_VERDICT: blocked')
+    if line.count(GATE_VERDICT_MARKER) > 1:
+        return True
+
+    # 2. 含有二选一、条件词或模板占位符
+    line_lower = line.lower()
+    disjunctive_keywords = (
+        "或", " or ", " / ", "二选一", "示例", "example", "格式", "template",
+        "<pass", "[pass", "<blocked", "[blocked", "二者选一"
+    )
+    if any(k in line_lower for k in disjunctive_keywords):
+        return True
+
+    return False
+
+
 def _verdict_from_screen(task):
     pane_id = task.get("pane_id")
     if not pane_id:
@@ -3221,12 +3242,27 @@ def _verdict_from_screen(task):
     note = ""
     for line in screen.splitlines():
         if GATE_VERDICT_MARKER in line:
+            if _is_instructional_or_ambiguous_verdict_line(line):
+                continue
             raw = line.split(GATE_VERDICT_MARKER, 1)[1].strip()
-            normalized = _normalize_gate_verdict(raw.split()[0] if raw else "")
+            tokens = raw.split()
+            if not tokens:
+                continue
+            first_token = tokens[0].strip().rstrip(".,;:")
+            normalized = _normalize_gate_verdict(first_token)
             if normalized:
+                # 检查第一词后续 token 中是否混有对立裁决词(如 'pass blocked' 等歧义讨论)
+                if len(tokens) > 1:
+                    trailing = {t.strip(".,;:()/[]{}").lower() for t in tokens[1:]}
+                    conflicting = "blocked" if normalized == "pass" else "pass"
+                    if conflicting in trailing:
+                        continue
                 verdicts.add(normalized)
         if GATE_NOTE_MARKER in line and not note:
-            note = line.split(GATE_NOTE_MARKER, 1)[1].strip()
+            candidate_note = line.split(GATE_NOTE_MARKER, 1)[1].strip()
+            # 过滤模板占位符说明如 'HERDR_GATE_NOTE: <原因>' 或 'HERDR_GATE_NOTE: 一句话结论'
+            if candidate_note and not any(k in candidate_note for k in ("<原因>", "一句话结论", "阻塞原因清单", "note...")):
+                note = candidate_note
 
     if len(verdicts) != 1:
         return None, ""

@@ -284,6 +284,126 @@ class GateVerdictUnitTest(unittest.TestCase):
         self.assertEqual(note, "D6 清空后仍为空")
         self.assertEqual(source, "screen")
 
+    def test_screen_marker_ignores_prompt_template_with_alternatives(self):
+        """Prompt 说明中的 'HERDR_GATE_VERDICT: pass 或 HERDR_GATE_VERDICT: blocked' 严禁被误判为 pass"""
+        screen = (
+            "【门禁结论契约（必须遵守，结论将被机器直接采纳）】\n"
+            "2. 同时在终端单独输出一行，便于人工对照：\n"
+            "   HERDR_GATE_VERDICT: pass   或   HERDR_GATE_VERDICT: blocked\n"
+            "3. verdict 只能二选一：pass = 未发现必须返工的阻塞缺陷；blocked = 存在必须返工的阻塞缺陷\n"
+        )
+        with patch.object(self.ctrl, "_verdict_from_file", return_value=(None, "")), \
+             patch.object(
+                 self.ctrl.subprocess,
+                 "run",
+                 return_value=subprocess.CompletedProcess([], 0, screen, ""),
+             ):
+            verdict, note, source = self.ctrl.read_gate_verdict(self._task())
+        self.assertIsNone(verdict)
+        self.assertEqual(source, "")
+
+    def test_screen_marker_ignores_placeholder_prompt(self):
+        screen = (
+            "格式要求：HERDR_GATE_VERDICT: <pass|blocked>\n"
+        )
+        with patch.object(self.ctrl, "_verdict_from_file", return_value=(None, "")), \
+             patch.object(
+                 self.ctrl.subprocess,
+                 "run",
+                 return_value=subprocess.CompletedProcess([], 0, screen, ""),
+             ):
+            verdict, note, source = self.ctrl.read_gate_verdict(self._task())
+        self.assertIsNone(verdict)
+        self.assertEqual(source, "")
+
+    def test_screen_marker_ignores_ambiguous_thought_line(self):
+        screen = (
+            "Thinking: maybe I should output HERDR_GATE_VERDICT: pass or blocked depending on lint\n"
+        )
+        with patch.object(self.ctrl, "_verdict_from_file", return_value=(None, "")), \
+             patch.object(
+                 self.ctrl.subprocess,
+                 "run",
+                 return_value=subprocess.CompletedProcess([], 0, screen, ""),
+             ):
+            verdict, note, source = self.ctrl.read_gate_verdict(self._task())
+        self.assertIsNone(verdict)
+        self.assertEqual(source, "")
+
+    def test_screen_marker_accepts_valid_blocked_even_with_smoke_word(self):
+        """'smoke' 包含子串 'ok'，严格按单词匹配不得误伤合法 blocked 判定"""
+        screen = (
+            "HERDR_GATE_VERDICT: blocked\n"
+            "HERDR_GATE_NOTE: smoke test failed\n"
+        )
+        with patch.object(self.ctrl, "_verdict_from_file", return_value=(None, "")), \
+             patch.object(
+                 self.ctrl.subprocess,
+                 "run",
+                 return_value=subprocess.CompletedProcess([], 0, screen, ""),
+             ):
+            verdict, note, source = self.ctrl.read_gate_verdict(self._task())
+        self.assertEqual(verdict, "blocked")
+        self.assertEqual(note, "smoke test failed")
+        self.assertEqual(source, "screen")
+
+    def test_screen_marker_ignores_slash_separated_alternatives(self):
+        screen = (
+            "Select HERDR_GATE_VERDICT: pass / blocked based on acceptance test\n"
+        )
+        with patch.object(self.ctrl, "_verdict_from_file", return_value=(None, "")), \
+             patch.object(
+                 self.ctrl.subprocess,
+                 "run",
+                 return_value=subprocess.CompletedProcess([], 0, screen, ""),
+             ):
+            verdict, note, source = self.ctrl.read_gate_verdict(self._task())
+        self.assertIsNone(verdict)
+        self.assertEqual(source, "")
+
+    def test_screen_marker_accepts_verdict_with_prompt_echo_present(self):
+        """屏幕顶部有 Prompt 指令回显，底部有真实 Agent 裁决，必须准确忽略模板并采纳真实裁决"""
+        screen = (
+            "【门禁结论契约（必须遵守，结论将被机器直接采纳）】\n"
+            "2. 同时在终端单独输出一行，便于人工对照：\n"
+            "   HERDR_GATE_VERDICT: <pass|blocked>\n"
+            "   HERDR_GATE_NOTE: <原因>\n"
+            "3. verdict 只能二选一：pass 或 blocked\n"
+            "...\n"
+            "Agent working on tests...\n"
+            "Running pytest... 10 passed\n"
+            "HERDR_GATE_VERDICT: pass\n"
+            "HERDR_GATE_NOTE: all 10 acceptance tests passed without error\n"
+        )
+        with patch.object(self.ctrl, "_verdict_from_file", return_value=(None, "")), \
+             patch.object(
+                 self.ctrl.subprocess,
+                 "run",
+                 return_value=subprocess.CompletedProcess([], 0, screen, ""),
+             ):
+            verdict, note, source = self.ctrl.read_gate_verdict(self._task())
+        self.assertEqual(verdict, "pass")
+        self.assertEqual(note, "all 10 acceptance tests passed without error")
+        self.assertEqual(source, "screen")
+
+    def test_screen_marker_with_explanation(self):
+        """带常见解释词(如 '0 tests failed')的合法 pass 判定不应被误判为模板歧义"""
+        screen = (
+            "HERDR_GATE_VERDICT: pass - 0 tests failed\n"
+            "HERDR_GATE_NOTE: all suites clean\n"
+        )
+        with patch.object(self.ctrl, "_verdict_from_file", return_value=(None, "")), \
+             patch.object(
+                 self.ctrl.subprocess,
+                 "run",
+                 return_value=subprocess.CompletedProcess([], 0, screen, ""),
+             ):
+            verdict, note, source = self.ctrl.read_gate_verdict(self._task())
+        self.assertEqual(verdict, "pass")
+        self.assertEqual(note, "all suites clean")
+        self.assertEqual(source, "screen")
+
+
 
 class FinalizeRetryDecisionTest(unittest.TestCase):
     """commit 门禁瞬时失败(flaky)的 completed 任务必须有有界重试路径。
