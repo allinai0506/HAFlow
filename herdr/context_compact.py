@@ -454,6 +454,30 @@ def _fallback_semantic(events: Sequence[Dict[str, Any]], findings: Sequence[Dict
     return {"completed": completed, "open_issues": open_issues, "next_focus": next_focus}
 
 
+def _ordered_completed_items(
+    items: Sequence[Dict[str, Any]],
+    events: Sequence[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Merge historical and current milestones with current sequence priority."""
+    current_sequences = {
+        _event_id(event): int(event.get("sequence") or 0)
+        for event in events
+    }
+    historical: List[Dict[str, Any]] = []
+    current: List[tuple[int, int, Dict[str, Any]]] = []
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            continue
+        refs = [str(ref) for ref in item.get("refs", []) if ref]
+        sequences = [current_sequences[ref] for ref in refs if ref in current_sequences]
+        if sequences:
+            current.append((max(sequences), index, item))
+        else:
+            historical.append(item)
+    current.sort(key=lambda value: (value[0], value[1]))
+    return historical + [item for _, _, item in current]
+
+
 def _bounded_semantic_items(
     items: Sequence[Dict[str, Any]],
     limit: int,
@@ -545,7 +569,11 @@ def _bound_context_pack(pack: ContextPack) -> ContextPack:
             pack = ContextPack(**{**pack.to_mapping(), "artifact_refs": pack.artifact_refs[:1]})
             continue
         if pack.metadata:
-            metadata = {key: pack.metadata[key] for key in ("analysis", "context_source_fingerprint") if key in pack.metadata}
+            metadata = {
+                key: pack.metadata[key]
+                for key in ("analysis", "context_source_fingerprint", "context_source_version")
+                if key in pack.metadata
+            }
             if metadata == pack.metadata:
                 break
             pack = ContextPack(**{**pack.to_mapping(), "metadata": metadata})
@@ -564,13 +592,20 @@ def _bound_context_pack(pack: ContextPack) -> ContextPack:
         evidence_refs=pack.evidence_refs[:1], artifact_refs=pack.artifact_refs[:1],
         open_issues=pack.open_issues[:1], next_focus=pack.next_focus[:1],
         source_event_sequence=pack.source_event_sequence, created_at=pack.created_at,
-        metadata={"context_source_fingerprint": pack.metadata.get("context_source_fingerprint", "")},
+        metadata={
+            "context_source_fingerprint": pack.metadata.get("context_source_fingerprint", ""),
+            "context_source_version": pack.metadata.get("context_source_version"),
+        },
     )
     if len(json.dumps(minimal.to_mapping(), ensure_ascii=False)) > MAX_CONTEXT_SERIALIZED_CHARS:
         minimal = ContextPack(
             context_id=pack.context_id, run_id=pack.run_id, task_id=pack.task_id,
             workflow_id=pack.workflow_id, goal="", source_event_sequence=pack.source_event_sequence,
-            created_at=pack.created_at, metadata={},
+            created_at=pack.created_at,
+            metadata={
+                "context_source_fingerprint": pack.metadata.get("context_source_fingerprint", ""),
+                "context_source_version": pack.metadata.get("context_source_version"),
+            },
         )
     if len(json.dumps(minimal.to_mapping(), ensure_ascii=False)) > MAX_CONTEXT_SERIALIZED_CHARS:
         raise ValueError("ContextPack cannot satisfy serialized size bound")
@@ -672,6 +707,14 @@ def compact_run(
                 if candidate_task and candidate_task.get("run_id") and str(candidate_task["run_id"]) != str(run_id):
                     candidate_task = None
                 task = candidate_task
+        source_version = state_db.get_context_source_version(
+            run_id,
+            (task or {}).get("task_id"),
+            cfg["max_findings"],
+            db_path=db_path,
+        )
+        source_version["task_id"] = (task or {}).get("task_id")
+        source_version["trajectory_sequence"] = source_sequence
         goal = _goal(task, all_events)
         current_state = _current_state(task)
         fingerprint = _source_fingerprint(run_id, source_sequence, task, current_state, findings, observations)
@@ -745,7 +788,7 @@ def compact_run(
         important = important[:cfg["max_findings"]]
         # Candidates are ordered oldest-to-newest.  Keep the newest
         # completion milestones when the working-memory cap is reached.
-        completed = selected["completed"][-MAX_COMPLETED_ITEMS:]
+        completed = _ordered_completed_items(selected["completed"], events)[-MAX_COMPLETED_ITEMS:]
         open_issues = selected["open_issues"][:MAX_OPEN_ISSUES]
         next_focus = selected["next_focus"][:MAX_NEXT_FOCUS]
         pack = ContextPack(
@@ -761,7 +804,7 @@ def compact_run(
             # retained only for callers that explicitly provide a stable
             # logical timestamp in tests/imports.
             created_at=float(now if now is not None else request_started_at),
-            metadata=_redact_context({"analysis": {"completed": True, "open_issues": True, "next_focus": True}, "input_chars": len(json.dumps(compact_input, ensure_ascii=False)), "context_source_fingerprint": fingerprint}),
+            metadata=_redact_context({"analysis": {"completed": True, "open_issues": True, "next_focus": True}, "input_chars": len(json.dumps(compact_input, ensure_ascii=False)), "context_source_fingerprint": fingerprint, "context_source_version": source_version}),
         )
         pack = _bound_context_pack(pack)
         stored = state_db.save_context_pack(pack.to_mapping(), db_path=db_path)

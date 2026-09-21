@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import importlib
+import hashlib
 import multiprocessing
 import signal
 import threading
@@ -40,6 +41,16 @@ def _direct_pack(context_id, fingerprint, created_at, run_id="run-concurrent"):
         goal="g", source_event_sequence=7, created_at=created_at,
         metadata={"context_source_fingerprint": fingerprint},
     ).to_mapping()
+
+
+def _source_version(sequence):
+    return {
+        "task_id": None,
+        "trajectory_sequence": sequence,
+        "task_updated_at": None,
+        "finding_fingerprint": hashlib.sha256(b"[]").hexdigest(),
+        "finding_limit": 0,
+    }
 
 
 def _task(run_id: str = "run-1"):
@@ -734,6 +745,55 @@ def test_late_old_process_cannot_replace_newer_context_snapshot(tmp_path: Path):
     assert latest is not None
     assert latest["context_id"] == "ctx-new"
     assert latest["metadata"]["context_source_fingerprint"] == "B"
+
+
+def test_older_request_with_newer_source_version_can_win_after_waiting(tmp_path: Path):
+    db_path = tmp_path / "state-source-version.db"
+    ledger = TrajectoryLedger(db_path)
+    ledger.append_event({"run_id": "run-source-version", "event_type": "progress"})
+    get_db_connection(db_path).close()
+    ctx = multiprocessing.get_context("spawn")
+    gate = ctx.Event()
+    ready = ctx.Event()
+    old_payload = _direct_pack("ctx-new-source", "C", 10.0, run_id="run-source-version")
+    old_payload["source_event_sequence"] = 2
+    old_payload["metadata"]["context_source_version"] = _source_version(2)
+    old = ctx.Process(
+        target=_save_context_pack_in_process,
+        args=(str(db_path), old_payload, gate, ready),
+    )
+    old.start()
+    assert ready.wait(10)
+    new_payload = _direct_pack("ctx-old-source", "B", 20.0, run_id="run-source-version")
+    new_payload["metadata"]["context_source_version"] = _source_version(1)
+    state_db.save_context_pack(new_payload, db_path=db_path)
+    ledger.append_event({"run_id": "run-source-version", "event_type": "progress"})
+    gate.set()
+    old.join(10)
+    assert old.exitcode == 0
+    latest = state_db.get_latest_context_pack("run-source-version", db_path=db_path)
+    assert latest is not None
+    assert latest["context_id"] == "ctx-new-source"
+
+
+def test_new_completion_survives_previous_twenty_after_leaving_recent_window(tmp_path: Path):
+    db_path = tmp_path / "completion-merge-order.db"
+    store = ObservationStore(db_path)
+    ledger = TrajectoryLedger(db_path)
+    task = {"task_id": "task-merge-order", "run_id": "run-merge-order", "goal": "g"}
+    for _ in range(20):
+        ledger.append_event({"run_id": task["run_id"], "task_id": task["task_id"], "event_type": "task_completed"})
+    first = compact_run(task["run_id"], task=task, store=store, provider=None)
+    assert len(first.completed) == 20
+    for _ in range(100):
+        ledger.append_event({"run_id": task["run_id"], "task_id": task["task_id"], "event_type": "progress"})
+    newest = ledger.append_event({"run_id": task["run_id"], "task_id": task["task_id"], "event_type": "task_completed"})
+    second = compact_run(
+        task["run_id"], task=task, store=store, provider=None,
+        config={"max_recent_events": 100},
+    )
+    assert newest["event_id"] in {ref for item in second.completed for ref in item.get("refs", [])}
+    assert len(second.completed) == 20
 
 
 def test_legacy_task_without_run_id_is_accepted_after_async_refresh(tmp_path: Path, monkeypatch):

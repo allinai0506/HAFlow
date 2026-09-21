@@ -14,6 +14,7 @@ Core Capabilities:
 """
 
 import json
+import hashlib
 import os
 import sqlite3
 import time
@@ -1562,6 +1563,64 @@ def list_trajectory_findings_bounded(
         conn.close()
 
 
+def _finding_source_fingerprint(findings: List[Dict[str, Any]]) -> str:
+    payload = json.dumps(findings, sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _context_source_version_in_conn(
+    conn: sqlite3.Connection,
+    run_id: str,
+    task_id: Optional[str],
+    finding_limit: int,
+) -> Dict[str, Any]:
+    sequence_row = conn.execute(
+        "SELECT COALESCE(MAX(sequence), 0) AS sequence FROM events WHERE run_id = ? AND source = 'trajectory'",
+        (run_id,),
+    ).fetchone()
+    task_updated_at = None
+    if task_id:
+        task_row = conn.execute(
+            "SELECT updated_at FROM tasks WHERE task_id = ?", (task_id,)
+        ).fetchone()
+        if task_row is not None:
+            task_updated_at = task_row["updated_at"]
+    finding_rows = conn.execute(
+        """SELECT * FROM trajectory_findings
+           WHERE run_id = ?
+           ORDER BY CASE severity
+                      WHEN 'critical' THEN 3
+                      WHEN 'warning' THEN 2
+                      ELSE 1
+                    END DESC,
+                    created_at DESC, rowid DESC
+           LIMIT ?""",
+        (run_id, int(finding_limit)),
+    ).fetchall()
+    findings = [_decode_finding_row(row) for row in finding_rows]
+    return {
+        "task_id": task_id,
+        "trajectory_sequence": int(sequence_row["sequence"] or 0),
+        "task_updated_at": task_updated_at,
+        "finding_fingerprint": _finding_source_fingerprint(findings),
+        "finding_limit": int(finding_limit),
+    }
+
+
+def get_context_source_version(
+    run_id: str,
+    task_id: Optional[str],
+    finding_limit: int,
+    db_path: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Read the compact source watermark/revisions from one SQLite snapshot."""
+    conn = get_db_connection(db_path)
+    try:
+        return _context_source_version_in_conn(conn, run_id, task_id, finding_limit)
+    finally:
+        conn.close()
+
+
 def _decode_observation_row(row: sqlite3.Row) -> Dict[str, Any]:
     return {
         "observation_id": row["observation_id"],
@@ -1733,12 +1792,27 @@ def save_context_pack(
     try:
         conn.execute("BEGIN IMMEDIATE;")
         fingerprint = (context_pack.get("metadata") or {}).get("context_source_fingerprint")
+        source_version = (context_pack.get("metadata") or {}).get("context_source_version")
+        source_version_valid = False
         latest = conn.execute(
             """SELECT * FROM context_packs
                WHERE run_id = ?
                ORDER BY created_at DESC, rowid DESC LIMIT 1""",
             (context_pack["run_id"],),
         ).fetchone()
+        if isinstance(source_version, dict):
+            current_source_version = _context_source_version_in_conn(
+                conn,
+                context_pack["run_id"],
+                source_version.get("task_id"),
+                int(source_version.get("finding_limit") or 0),
+            )
+            if current_source_version != source_version:
+                conn.commit()
+                if latest is not None:
+                    return _decode_context_pack_row(latest)
+                raise ValueError("stale ContextPack source version")
+            source_version_valid = True
         if latest is not None:
             existing_metadata = json.loads(latest["metadata_json"] or "{}")
             if fingerprint and existing_metadata.get("context_source_fingerprint") == fingerprint:
@@ -1750,9 +1824,15 @@ def save_context_pack(
             # A->B->A request still has a newer timestamp and is appended.
             candidate_created_at = float(context_pack.get("created_at") or time.time())
             latest_created_at = float(latest["created_at"] or 0.0)
-            if latest_created_at > candidate_created_at:
+            if not source_version_valid and latest_created_at > candidate_created_at:
                 conn.commit()
                 return _decode_context_pack_row(latest)
+        insert_created_at = float(context_pack.get("created_at") or time.time())
+        if source_version_valid and latest is not None:
+            # Source-version validation, rather than request start time, is
+            # authoritative for a candidate that was read after waiting for
+            # the writer lock.  Make that accepted snapshot the SQL latest.
+            insert_created_at = max(insert_created_at, float(latest["created_at"] or 0.0) + 1e-9)
         conn.execute(
             """INSERT INTO context_packs (
                 context_id, run_id, task_id, workflow_id, goal,
@@ -1774,7 +1854,7 @@ def save_context_pack(
                 json.dumps(context_pack.get("next_focus") or [], ensure_ascii=False),
                 int(context_pack.get("source_event_sequence") or 0),
                 json.dumps(context_pack.get("metadata") or {}, ensure_ascii=False),
-                float(context_pack.get("created_at") or time.time()),
+                insert_created_at,
             ),
         )
         conn.commit()
