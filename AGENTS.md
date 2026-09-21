@@ -1,81 +1,126 @@
-# HAFlow Multi-Agent System Map
+# HAFlow Agent Guide
 
-> **公司：上海共事智能科技有限公司**  
-> **品牌：共事**  
-> **产品：HAFlow**  
-> **一句话：让人和多个 AI Agent 一起把事情做完**  
-> *Human + Agent, in Flow*  
-> 本文件仅作为 AI 注入上下文的导航目录（约 100 行），严禁展开具体实现细节。所有深度上下文必须跟随下方链接查阅。
+> 上海共事智能科技有限公司 · 共事 · HAFlow
+> 让人和多个 AI Agent 一起把事情做完。Human + Agent, in Flow.
 
----
+本文件只保留仓库导航、常驻约束和验收入口；详细规则按任务风险查阅。
+测试通过不等于任务完成：还必须验证真实调用链、关键不变量和失败边界。
 
-## 0. 知识层与持久理解 (LLM Wiki)
+## 0. 规则与阅读顺序
 
-- **知识层主索引**: [`wiki/index.md`](file:///Users/user/HAFlow/wiki/index.md) — 真实代码沉淀的知识图谱与意图寻路主入口。
-- **Wiki 治理规范**: [`wiki/WIKI.md`](file:///Users/user/HAFlow/wiki/WIKI.md) 与 [`wiki/log.md`](file:///Users/user/HAFlow/wiki/log.md) — 当变更涉及架构、模型、状态机、DAG 算法、自愈逻辑或路由时，必须同步更新对应 Wiki。
-- **工程教训知识库**: [`docs/lessons/lessons-learned.md`](file:///Users/user/HAFlow/docs/lessons/lessons-learned.md) — 跨模块可复用工程教训（四段式）。使用 `.agents/skills/knowledge-capture/` 技能在收尾时沉淀。
+- 遵守平台与当前任务的更高优先级指令；本文件不授予额外工具或交付权限。
+- 仓库红线与 S0–S8 流程以 [RULES.md](RULES.md) 为准；本文及详细协议补充执行方法。
+- 操作命令参考 [CLAUDE.md](CLAUDE.md)；修改目录前检查适用的局部指引。
+- 从 [Wiki 索引](wiki/index.md) 定位相关知识，只读本次调用链需要的页面和源码。
+- 非简单代码修改，编码前阅读[完整工程协议](docs/engineering/agent-engineering-protocol.md)的前置检查及适用章节。
+- 文档与源码不符时记录差异；源码说明实际行为，已确认的任务规格定义目标行为。
+- 不用“更严格”或“更新”自行裁决授权冲突；只暂停受影响的操作并说明冲突。
 
----
+## 1. 仓库地图
 
-## 1. 核心架构与事实来源 (Source of Truth)
+| 路径 | 职责 / 入口 |
+| --- | --- |
+| `bin/herdr-factory`、`bin/herdr-task` | Workflow / Task CLI；沿真实子命令追踪调用链。 |
+| `services/herdr-controller.py` | 调度、协调器和完成事件入口；检查所有调用来源。 |
+| `services/` | Worker 工位装配、Sentinel 存活巡检、Notifier 通知。 |
+| `herdr/workflow.py`、`herdr/agent_router.py` | DAG 与路由决策。 |
+| `herdr/projects.py`、`herdr/topology.py`、`herdr/pane_pool.py` | 项目与运行现场。 |
+| `herdr/state_db.py`、`herdr/state_store.py`、`herdr/runtime_state.py` | 持久化、状态与运行身份。 |
+| `herdr/trajectory.py`、`herdr/observation.py` | 执行历史与可引用证据。 |
+| `herdr/decision/`、`herdr/supervisor/`、`herdr/observer/` | 判断接口、监督策略、旁路诊断。 |
+| `herdr/workflow_docs.py`、`workflow_templates/` | Workflow 共享文档与 YAML 模板。 |
+| `console/`、`scripts/`、`tests/` | 控制台源码、安装运维、自动化测试。 |
 
-- **系统定位与全局架构**: [`architecture-overview.md`](file:///Users/user/HAFlow/docs/architecture/architecture-overview.md) — 分层设计、组件职责、状态机。
-- **空间现场模型**: [`tab-node-model.md`](file:///Users/user/HAFlow/docs/architecture/tab-node-model.md) — Tab=Node, Pane=Workspace, Anchor 锚点现场隔离。
-- **工作流使用手册**: [`universal-workflow-guide.md`](file:///Users/user/HAFlow/docs/guides/universal-workflow-guide.md) — 端到端工作流调度、派发与自愈实操。
-- **模板开发规范**: [`template-authoring-guide.md`](file:///Users/user/HAFlow/docs/guides/template-authoring-guide.md) 与 [`workflow-template-schema.md`](file:///Users/user/HAFlow/docs/product-specs/workflow-template-schema.md) — YAML 语法契约与 DAG 校验规则。
-- **路由与调度策略**: [`agent-policy-spec.md`](file:///Users/user/HAFlow/docs/product-specs/agent-policy-spec.md) — Node 级 Agent 策略、健康准入、锁预占。
-- **服务运维与守护排障**: [`service-management.md`](file:///Users/user/HAFlow/docs/operations/service-management.md) 与 [`troubleshooting-faq.md`](file:///Users/user/HAFlow/docs/operations/troubleshooting-faq.md) — LaunchAgent 启停与死锁救援。
-- **沙盒深度探针**: [`deep-preflight-playbook.md`](file:///Users/user/HAFlow/docs/operations/deep-preflight-playbook.md) — 各 Agent 无副作用探针机制。
-- **全量 CLI 参考**: [`cli-reference.md`](file:///Users/user/HAFlow/docs/references/cli-reference.md) — 命令行参数字典。
-- **Agent 交付演进**: [`walkthroughs/`](file:///Users/user/HAFlow/docs/walkthroughs/README.md) — 各类 Agent 任务交付演进报告与 Walkthrough 归档。
+新能力是否存在，以当前分支源码为准；未合并 PR 和规划不是已交付事实。
+Console 的规范源代码在 `console/`；部署脚本是 `scripts/install-herdr-console.sh`。
 
----
+## 2. 按需文档入口
 
-## 2. 代码分层与物理地图 (Codebase Map)
+- 架构：[全局分层](docs/architecture/architecture-overview.md)、[空间模型](docs/architecture/tab-node-model.md)。
+- Workflow：[使用手册](docs/guides/universal-workflow-guide.md)、[模板规范](docs/guides/template-authoring-guide.md)、[Schema](docs/product-specs/workflow-template-schema.md)。
+- 路由：[Agent 策略](docs/product-specs/agent-policy-spec.md)。
+- 运维：[服务管理](docs/operations/service-management.md)、[排障](docs/operations/troubleshooting-faq.md)、[深度探针](docs/operations/deep-preflight-playbook.md)。
+- 命令：[CLI 参考](docs/references/cli-reference.md)；操作前核对当前实现与 `--help`。
+- 诊断：[Supervisor](wiki/semantic-supervisor.md)、[Observer](wiki/trajectory-observer.md)。
+- 知识：[Wiki 治理](wiki/WIKI.md)、[工程教训](docs/lessons/lessons-learned.md)、[交付记录](docs/walkthroughs/README.md)。
 
-- **`bin/` (CLI 入口)**:
-  - [`herdr-factory`](file:///Users/user/HAFlow/bin/herdr-factory): 工作流与项目生命周期主入口。
-  - [`herdr-task`](file:///Users/user/HAFlow/bin/herdr-task): 任务派发、基线验收与运行时自愈工具。
-  - [`herdr-preflight`](file:///Users/user/HAFlow/bin/herdr-preflight) / [`herdr-deep-preflight`](file:///Users/user/HAFlow/bin/herdr-deep-preflight): Agent 健康体检与沙盒探活。
-- **`services/` (后台常驻守护进程)**:
-  - [`herdr-controller.py`](file:///Users/user/HAFlow/services/herdr-controller.py): DAG 依赖推进与协调器分发核心。
-  - [`herdr-sentinel.py`](file:///Users/user/HAFlow/services/herdr-sentinel.py): Tab/Pane 存活巡检看门狗。
-  - [`herdr-notifier.py`](file:///Users/user/HAFlow/services/herdr-notifier.py): macOS 原生通知广播。
-  - [`herdr-worker.py`](file:///Users/user/HAFlow/services/herdr-worker.py): 独立 CoW Git 克隆与工位装配。
-- **`herdr/` (核心业务库包)**:
-  - [`workflow.py`](file:///Users/user/HAFlow/herdr/workflow.py): Kahn 算法 DAG 拓扑校验、模板解析与就绪节点计算。
-  - [`agent_router.py`](file:///Users/user/HAFlow/herdr/agent_router.py): Node 级策略匹配、健康准入与 Reservation 并发锁。
-  - [`projects.py`](file:///Users/user/HAFlow/herdr/projects.py): 多项目注册表与 `ensure_node_runtime` 探活自愈。
-  - [`topology.py`](file:///Users/user/HAFlow/herdr/topology.py): 拓扑现场动态自愈与 Anchor 重建。
-  - [`workflow_docs.py`](file:///Users/user/HAFlow/herdr/workflow_docs.py): Workflow 共享文档区（clone 外追加式账本、provenance 与 stale 治理）。
-  - [`decision/`](file:///Users/user/HAFlow/herdr/decision): DecisionProvider 统一抽象（judge/score/choose + 批量 judge_many）、DecisionResult 与 jev/rule 可插拔后端。
-  - [`supervisor/`](file:///Users/user/HAFlow/herdr/supervisor): Semantic Supervisor V1（SupervisorState 有界快照、9 语义信号、SupervisorEvaluation+delta、Policy Engine 七动作、fail-safe harness）。详见 [wiki/semantic-supervisor.md](file:///Users/user/HAFlow/wiki/semantic-supervisor.md)。
-  - [`observer/`](file:///Users/user/HAFlow/herdr/observer): Trajectory Observer V1（run_id 运行过程诊断：确定性 signal + DecisionProvider 确认 + 结构化 TrajectoryFinding，只检测/解释/建议，不执行修复；trajectory_findings 独立存储）。详见 [wiki/trajectory-observer.md](file:///Users/user/HAFlow/wiki/trajectory-observer.md)。
-  - [`pane_pool.py`](file:///Users/user/HAFlow/herdr/pane_pool.py): 智能体工位 (Pane) 槽位管理。
-  - [`preflight.py`](file:///Users/user/HAFlow/herdr/preflight.py) / [`deep_preflight.py`](file:///Users/user/HAFlow/herdr/deep_preflight.py): 探针实现。
-- **`workflow_templates/`**: 内置 YAML 工作流模板。
-- **`console/`**: HAFlow 控制台（产品名 `PRODUCT_NAME`，见 `console/herdr_factory_console.py`）的仓库内 canonical source；通过 `scripts/install-herdr-console.sh` 部署到 `~/.herdr-console`。
-- **`scripts/install-herdr-console.sh`**: 同步 Console 前端并按需重启 LaunchAgent。
-- **`tests/`**: [`test_workflow_engine.py`](file:///Users/user/HAFlow/tests/test_workflow_engine.py) 核心算法与引擎测试。
+## 3. 开工与范围
 
----
+- 先检查已有 Task、PR 和未完成现场；修复当前 PR 时继续其已授权隔离分支，不另起重复任务。
+- 按 `RULES.md` 完成远端同步与 CoW / 沙盒隔离；不覆盖他人改动，不直接在主干开发。
+- Task 派发使用既有 `herdr-task launch`；CoW 产出用 `verify-baseline` 验收，普通 Git 状态不能替代基线。
+- 先写清：目标、非目标、真实入口、数据权威来源、适用不变量、验收测试。
+- 小改动使用短计划；状态、并发、持久化、模型调用或长任务改动按详细协议展开。
+- 抽象能力不匹配时先说明差异与最小兼容方案；禁止仅用测试替身补出生产环境不存在的功能。
+- 单一主控负责推进；仅修改本任务需要的文件，不顺手增加新框架、依赖或未来功能。
 
-## 3. 运行与开发约束指针
+## 4. 常驻工程约束
 
-- **作业规范与红线约束**: 必须严格遵循 [`RULES.md`](file:///Users/user/HAFlow/RULES.md) 执行开发。
-- **操作入口与环境避坑**: 常用命令与运维陷阱请直接参考 [`CLAUDE.md`](file:///Users/user/HAFlow/CLAUDE.md)。
+1. **权威来源**：复用现有状态、存储、Provider、脱敏和身份解析能力，不建立平行事实源。
+2. **身份隔离**：核对 run / task / workflow 及证据归属；信息不足标记 unknown，不猜测、不跨 Run 拼接。
+3. **语义分层**：Trajectory 是历史事实，Observation 是证据，Finding 是分析，ContextPack 是工作记忆。
+4. **模型边界**：ID、状态、测试结果和校验值由程序产生；引用存在不等于模型结论已被证明。
+5. **副作用顺序**：先验证、筛选、应用数量上限，再写证据或事件；不得为被丢弃结果制造副作用。
+6. **幂等与恢复**：明确去重键、事务边界和中断后的恢复路径；重试不得永久漏写或重复记账。
+7. **并发**：跨进程一致性依赖数据库 / 文件系统契约；内存锁只声明进程内保证。
+8. **有界处理**：查询尽量在数据源层过滤、排序、限量；同时检查索引、内存、输入及输出预算。
+9. **缓存与记忆**：缓存键覆盖相关可变输入；退出窗口不等于不存在，历史引用仍需归属与有效性检查。
+10. **旁路隔离**：诊断、证据采集、压缩失败不得擅自改变执行状态；外部调用有超时，后台任务有并发上限。
+11. **运行现场**：持久状态不等于实时存活；易失 Pane ID 不是所有权证明，读取现场前验证实例身份。
+12. **安全**：敏感数据出站及受管证据落盘前脱敏；持久引用稳定，不依赖未来的工作目录。
 
----
+例外、失败语义和测试样例见[工程协议](docs/engineering/agent-engineering-protocol.md#invariants)。
+外部 Artifact 的校验回执不等于脱敏副本或不可变文件；不得把原件默认送给模型。
 
-## 4. 任务收尾 SOP（合并 PR 前的强制前置步骤）
+## 5. 按风险读取完整协议
 
-### 收尾第 1 步：知识沉淀（在合并 PR 之前）
+| 变更涉及 | 编码前必读 |
+| --- | --- |
+| 所有非简单代码修改 | [前置检查](docs/engineering/agent-engineering-protocol.md#preflight)、[需求与验收](docs/engineering/agent-engineering-protocol.md#acceptance) |
+| 身份、状态、模型判断 | [系统不变量](docs/engineering/agent-engineering-protocol.md#invariants)、[模型边界](docs/engineering/agent-engineering-protocol.md#models) |
+| 持久化、幂等、文件 | [事务与恢复](docs/engineering/agent-engineering-protocol.md#persistence) |
+| 线程、守护进程、异步触发 | [并发与异步](docs/engineering/agent-engineering-protocol.md#async) |
+| 查询、缓存、上下文压缩 | [规模与快照](docs/engineering/agent-engineering-protocol.md#data) |
+| 对外日志、证据、Provider 输入 | [安全边界](docs/engineering/agent-engineering-protocol.md#security) |
+| 验证及请求评审 | [测试矩阵](docs/engineering/agent-engineering-protocol.md#testing)、[代码评审](docs/engineering/agent-engineering-protocol.md#review) |
 
-- 检查本次 session 是否排查了复杂 bug、解决了同类复发问题、或踩了技术坑；
-- 凡符合通用教训的，按四段式规范追加到 [`docs/lessons/lessons-learned.md`](file:///Users/user/HAFlow/docs/lessons/lessons-learned.md)；
-- 对 Agent 说 **"沉淀一下本次 session 的知识"** 或 **"归档教训"**，Agent 自动执行 `.agents/skills/knowledge-capture/` 流程；
-- 将知识更新与代码**一同提交到同一个 PR**（禁止事后单独补提 PR）。
+只读文档不代表已执行；交付需提供适用规则对应的测试或可核查证据。
 
-### 收尾第 2 步：验收清单
+## 6. 测试与环境隔离
 
-按 `RULES.md §3` 逐项核对后，方可合并 PR。
+- Bug 修复优先添加可复现失败的回归测试，再做最小实现；不得放宽断言掩盖缺陷。
+- 至少验证一条真实 CLI / Controller → 核心 → 持久化 → 读取链；可替换外部依赖，不替换被验收能力。
+- 测试使用临时数据库、目录和受控环境；禁止写生产状态、启动真实 Agent 或隐式调用收费模型。
+- 并发测试使用独立连接 / 进程与可控交错；单线程重复调用不能证明并发安全。
+- 修复后重跑相关专项与全量测试；结果绑定当前源码，旧提交的通过记录不能替代本轮验证。
+
+在已隔离的仓库根目录执行，专项命令按实际受影响测试补充：
+
+```bash
+pytest -q
+python3 -m compileall -q herdr services bin tests
+git diff --check
+```
+
+`bin/` 的无扩展名 Python 脚本另做对应语法 / CLI 检查；`compileall` 不能替代它们。
+按 `RULES.md`、`CLAUDE.md` 补充适用验收；缺环境或权限应报告未验证，不伪造 PASS。
+运维命令只在授权环境执行；不得为验收擅自重启生产服务或使用 `kill -9`。
+
+## 7. Code Review Rules
+
+- 对最新提交及完整受影响调用链评审；检查修复回归、权限边界和历史兼容，而非只看新增 helper。
+- 缺陷必须给出位置、触发条件、实际后果和验证方法；区分已确认缺陷、待验证风险、非阻塞建议。
+- 不把代码风格、未要求功能或推测性重构标为阻塞；新增阻塞项必须对应既有验收或实际正确性风险。
+- 尽量一次检查完整适用矩阵；不得把旧线程未 Resolve 当作缺陷仍存在的证明。
+- 自审不是独立评审；无工具或未执行测试时明确说明，禁止编造审查与测试结果。
+- 发现有效缺陷，按 S6 → S4 → S5 → S6 修复；连续三轮未收敛按 `RULES.md` 升级人工处理。
+
+## 8. 收尾与交付
+
+- 依据 `wiki/WIKI.md` 更新受影响知识；`wiki/log.md` 只追加，禁止覆盖历史条目。
+- 通用教训按[知识沉淀技能](.agents/skills/knowledge-capture/SKILL.md)归档，与代码同 PR 提交；简单改动不写重复教训。
+- 使用[交付模板](docs/engineering/agent-engineering-protocol.md#delivery)报告变更、验收证据、已知问题及未验证项。
+- 未解决的正确性 / 安全性缺陷不得标记 `MERGE_READY`；低风险建议单独记录，由负责人决定。
+- Push、合并、部署、服务重启分别遵循本次授权；“代码可合并”不等于“允许合并”。
+- 完成条件：范围内功能可用、关键不变量有证据、生产调用链已验证、回归通过、无已知阻塞缺陷。
+- 规则仅保存可复用约束；细节留在协议 / Wiki / 测试，不持续膨胀本文件。
