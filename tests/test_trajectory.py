@@ -1,6 +1,7 @@
 import importlib.machinery
 import importlib.util
 import json
+import multiprocessing
 import threading
 import sqlite3
 from pathlib import Path
@@ -8,7 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from herdr.trajectory import TrajectoryEvent, TrajectoryLedger
+from herdr.observation import ObservationStore, create_observation, list_observations
+from herdr.trajectory import TrajectoryEvent, TrajectoryLedger, record_observation_created, record_trajectory_event
 
 
 def _load_herdr_task_module(name):
@@ -157,6 +159,100 @@ def test_event_model_round_trips_structured_fields():
 
     assert event.to_mapping()["verification"]["passed"] is True
     assert event.to_mapping()["metadata"] == {"evidence_id": "e-1"}
+
+
+def test_observation_created_event_contains_receipt_only(tmp_path: Path):
+    store = ObservationStore(tmp_path / "state.db")
+    observation = create_observation(
+        run_id="run-observation-event",
+        task_id="task-observation-event",
+        workflow_id="wf-observation-event",
+        source_type="agent_log",
+        source_ref="pane:p-observation-event",
+        content="large evidence " * 1000,
+        store=store,
+    )
+    task = {
+        "run_id": "run-observation-event",
+        "task_id": "task-observation-event",
+        "workflow_id": "wf-observation-event",
+    }
+
+    record_observation_created(task, observation, ledger=TrajectoryLedger(tmp_path / "state.db"))
+    event = TrajectoryLedger(tmp_path / "state.db").list_events("run-observation-event")[0]
+
+    assert event["event_type"] == "observation_created"
+    assert event["observation"]["observation_id"] == observation.observation_id
+    assert event["observation"]["sha256"] == observation.sha256
+    assert "content" not in json.dumps(event)
+    assert len(json.dumps(event)) < 2000
+
+
+def _record_observation_receipt_worker(db_path: str, observation_id: str, queue) -> None:
+    from herdr.observation import ObservationStore, get_observation
+    from herdr.trajectory import TrajectoryLedger, record_observation_created
+
+    store = ObservationStore(Path(db_path))
+    observation = get_observation(observation_id, store=store)
+    record_observation_created(
+        {"run_id": observation.run_id, "task_id": observation.task_id},
+        observation,
+        ledger=TrajectoryLedger(Path(db_path)),
+    )
+    queue.put(True)
+
+
+def test_concurrent_observation_receipts_are_unique(tmp_path: Path):
+    db_path = tmp_path / "state.db"
+    store = ObservationStore(db_path)
+    observation = create_observation(
+        run_id="run-receipt-race", source_type="agent_log", source_ref="pane:race",
+        content="same evidence", store=store,
+    )
+    context = multiprocessing.get_context("spawn")
+    queue = context.Queue()
+    processes = [
+        context.Process(
+            target=_record_observation_receipt_worker,
+            args=(str(db_path), observation.observation_id, queue),
+        )
+        for _ in range(2)
+    ]
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join(timeout=30)
+        assert process.exitcode == 0
+    assert [queue.get(timeout=5) for _ in processes] == [True, True]
+    assert len(TrajectoryLedger(db_path).list_events("run-receipt-race", "observation_created")) == 1
+
+
+def test_artifact_created_event_gets_an_observation_reference(tmp_path: Path):
+    artifact = tmp_path / "artifact.txt"
+    artifact.write_text("artifact evidence", encoding="utf-8")
+    db_path = tmp_path / "state.db"
+    ledger = TrajectoryLedger(db_path)
+
+    stored = record_trajectory_event(
+        {
+            "run_id": "run-artifact-event",
+            "task_id": "task-artifact-event",
+            "clone_path": str(tmp_path),
+        },
+        "artifact_created",
+        ledger=ledger,
+        artifact={"ref": "artifact.txt", "kind": "file"},
+    )
+
+    assert stored["artifact"]["observation_id"].startswith("obs_")
+    observations = list_observations(
+        run_id="run-artifact-event", source_type="artifact",
+        store=ObservationStore(db_path),
+    )
+    assert len(observations) == 1
+    assert [event["event_type"] for event in ledger.list_events("run-artifact-event")] == [
+        "artifact_created", "observation_created",
+    ]
 
 
 def test_existing_event_table_without_trajectory_columns_is_upgraded(tmp_path: Path):

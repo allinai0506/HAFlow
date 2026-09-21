@@ -115,8 +115,10 @@ class TrajectoryLedger:
         self.db_path = Path(db_path) if db_path is not None else None
 
     def append_event(self, event: Union[TrajectoryEvent, Dict[str, Any]]) -> Dict[str, Any]:
+        raw_event = event if isinstance(event, dict) else event.to_mapping()
         normalized = event if isinstance(event, TrajectoryEvent) else TrajectoryEvent.from_mapping(event)
         mapping = normalized.to_mapping()
+        artifact_result = self._capture_artifact_observation(raw_event, mapping)
         with _APPEND_LOCK:
             stored = state_db.record_trajectory_event(
                 {
@@ -131,7 +133,44 @@ class TrajectoryLedger:
                 },
                 db_path=self.db_path,
             )
-        return self._decode(stored)
+        decoded = self._decode(stored)
+        if artifact_result is not None:
+            record_observation_created(
+                {"run_id": mapping["run_id"], "task_id": mapping.get("task_id"), "workflow_id": mapping.get("workflow_id")},
+                artifact_result[0],
+                ledger=self,
+            )
+        return decoded
+
+    def _capture_artifact_observation(self, raw_event: Dict[str, Any], mapping: Dict[str, Any]) -> Any:
+        if mapping.get("event_type") != "artifact_created" or not isinstance(mapping.get("artifact"), dict):
+            return None
+        artifact = dict(mapping["artifact"])
+        artifact_path = artifact.get("path") or artifact.get("ref")
+        if not artifact_path:
+            return None
+        path = Path(str(artifact_path))
+        if not path.is_absolute():
+            base = raw_event.get("clone_path") or raw_event.get("workspace_path")
+            if base:
+                path = Path(str(base)) / path
+        try:
+            from .observation import ObservationStore
+
+            observation, created = ObservationStore(self.db_path).create_external_with_status(
+                path,
+                run_id=mapping["run_id"],
+                source_ref=str(artifact.get("ref") or artifact.get("path")),
+                artifact_kind=artifact.get("kind"),
+                task_id=mapping.get("task_id"),
+                workflow_id=mapping.get("workflow_id"),
+            )
+            mapping["artifact"] = artifact
+            mapping["artifact"]["observation_id"] = observation.observation_id
+            return observation, created
+        except Exception as exc:  # pragma: no cover - best-effort evidence boundary
+            LOGGER.warning("artifact observation skipped: run=%s path=%s error=%s", mapping.get("run_id"), path, exc)
+            return None
 
     def list_events(
         self,
@@ -212,6 +251,9 @@ def record_trajectory_event(
         "metadata": metadata or {},
     }
     values.update(fields)
+    if event_type == "artifact_created":
+        values["clone_path"] = task.get("clone_path")
+        values["workspace_path"] = task.get("workspace_path")
     return (ledger or TrajectoryLedger()).append_event(values)
 
 
@@ -225,4 +267,37 @@ def record_trajectory_event_best_effort(task: Dict[str, Any], event_type: str, *
         return record_trajectory_event(task, event_type, **kwargs)
     except Exception as exc:  # pragma: no cover - exercised through integration failures
         LOGGER.warning("trajectory event skipped: task=%s type=%s error=%s", task.get("task_id"), event_type, exc)
+        return None
+
+
+def record_observation_created(
+    task: Dict[str, Any],
+    observation: Any,
+    *,
+    ledger: Optional[TrajectoryLedger] = None,
+) -> Optional[Dict[str, Any]]:
+    """Index an Observation without copying its evidence into the Ledger."""
+    mapping = observation.to_mapping() if hasattr(observation, "to_mapping") else dict(observation)
+    receipt = {
+        key: mapping[key]
+        for key in ("observation_id", "source_type", "source_ref", "size_bytes", "sha256")
+        if mapping.get(key) is not None
+    }
+    target = ledger or TrajectoryLedger()
+    try:
+        stored = state_db.record_observation_receipt(
+            {
+                "run_id": run_id_for_task(task),
+                "task_id": task.get("task_id"),
+                "workflow_id": task.get("workflow_id"),
+                "node": task.get("node") or task.get("stage"),
+                "agent": task.get("agent"),
+                "payload": {"observation": receipt},
+            },
+            receipt["observation_id"],
+            db_path=target.db_path,
+        )
+        return target._decode(stored) if stored is not None else None
+    except Exception as exc:  # pragma: no cover - telemetry remains best effort
+        LOGGER.warning("observation receipt skipped: task=%s error=%s", task.get("task_id"), exc)
         return None

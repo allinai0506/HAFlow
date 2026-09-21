@@ -27,7 +27,12 @@ try:
     )
     from herdr.workflow import find_node, get_ready_nodes, is_workflow_completed, normalize_workflow
     from herdr.state_store import get_state_store
-    from herdr.trajectory import TrajectoryLedger, record_trajectory_event_best_effort
+    from herdr.observation import ObservationStore, create_verification_observation_with_status
+    from herdr.trajectory import (
+        TrajectoryLedger,
+        record_observation_created,
+        record_trajectory_event_best_effort,
+    )
     from herdr import liveness
 except ImportError:
     from herdr_projects import (
@@ -36,7 +41,12 @@ except ImportError:
     )
     from herdr_workflow import find_node, get_ready_nodes, is_workflow_completed, normalize_workflow
     from herdr_state_store import get_state_store
-    from herdr.trajectory import TrajectoryLedger, record_trajectory_event_best_effort
+    from herdr_observation import ObservationStore, create_verification_observation_with_status
+    from herdr.trajectory import (
+        TrajectoryLedger,
+        record_observation_created,
+        record_trajectory_event_best_effort,
+    )
     from herdr import liveness
 
 try:
@@ -3610,7 +3620,36 @@ def check_task_tests_completed(task, store=None, now=None):
         if skip_reason is not None:
             return None
 
-    # 6. Record deterministic tests_completed event
+    # 6. Materialize the compact verification receipt as immutable evidence.
+    verification = {
+        "type": "tests_completed",
+        "passed": bool(test_evidence.get("converged", False)),
+        "evidence_id": evidence_id,
+        "passed_tests": test_evidence.get("passed_tests"),
+        "total_tests": test_evidence.get("total_tests"),
+        "failing_count": test_evidence.get("failing_count", 0),
+        "lint_errors": test_evidence.get("lint_errors", 0),
+        "type_errors": test_evidence.get("type_errors", 0),
+        "composite_score": test_evidence.get("composite_score", 0.0),
+    }
+    try:
+        observation, _created = create_verification_observation_with_status(
+            verification,
+            run_id=task.get("run_id") or f"run_{task_id}",
+            task_id=task_id,
+            workflow_id=task.get("workflow_id"),
+            store=ObservationStore(getattr(st, "db_path", None)),
+        )
+        verification["observation_id"] = observation.observation_id
+        record_observation_created(
+            task,
+            observation,
+            ledger=TrajectoryLedger(getattr(st, "db_path", None)),
+        )
+    except Exception as exc:
+        print(f"[VERIFICATION OBSERVATION SKIPPED] task={task_id}: {type(exc).__name__}")
+
+    # 7. Record deterministic tests_completed event
     try:
         st.record_event(
             "tests_completed",
@@ -3636,17 +3675,7 @@ def check_task_tests_completed(task, store=None, now=None):
             task,
             "verification_completed",
             ledger=TrajectoryLedger(getattr(st, "db_path", None)),
-            verification={
-                "type": "tests_completed",
-                "passed": bool(test_evidence.get("converged", False)),
-                "evidence_id": evidence_id,
-                "passed_tests": test_evidence.get("passed_tests"),
-                "total_tests": test_evidence.get("total_tests"),
-                "failing_count": test_evidence.get("failing_count", 0),
-                "lint_errors": test_evidence.get("lint_errors", 0),
-                "type_errors": test_evidence.get("type_errors", 0),
-                "composite_score": test_evidence.get("composite_score", 0.0),
-            },
+            verification=verification,
         )
     except Exception as exc:
         print(f"[TESTS_COMPLETED EVENT ERROR] task={task_id}: {exc}")

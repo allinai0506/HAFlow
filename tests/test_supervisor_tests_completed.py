@@ -25,6 +25,7 @@ from unittest.mock import patch
 from herdr.decision.base import DecisionProvider
 from herdr.decision.models import DecisionResult
 from herdr.evaluator import LOOP_DIR_NAME, init_loop, write_state
+from herdr.observation import ObservationStore, list_observations
 from herdr.state_store import SQLiteStateStore
 from herdr.supervisor import evidence as supervisor_evidence
 from herdr.supervisor import harness as supervisor_harness
@@ -177,10 +178,18 @@ class TestsCompletedCheckpointSuite(unittest.TestCase):
 
         trajectory_events = TrajectoryLedger(self.db_path).list_events("run_task-a")
         self.assertEqual([event["event_type"] for event in trajectory_events], [
-            "verification_completed",
+            "observation_created", "verification_completed",
         ])
-        self.assertEqual(trajectory_events[0]["verification"]["type"], "tests_completed")
-        self.assertTrue(trajectory_events[0]["verification"]["passed"])
+        verification_event = trajectory_events[1]
+        self.assertEqual(verification_event["verification"]["type"], "tests_completed")
+        self.assertTrue(verification_event["verification"]["passed"])
+        observation_id = verification_event["verification"].get("observation_id")
+        self.assertTrue(observation_id)
+        observations = list_observations(
+            run_id="run_task-a", source_type="verification",
+            store=ObservationStore(self.db_path),
+        )
+        self.assertEqual([item.observation_id for item in observations], [observation_id])
 
         # Check that evaluation was recorded with evidence_id in metadata
         eval_events = [e for e in events if e.get("event_type") == EVALUATION_EVENT]
@@ -212,7 +221,11 @@ class TestsCompletedCheckpointSuite(unittest.TestCase):
             self.controller.check_task_tests_completed(task, store=self.store, now=1000.0)
 
         trajectory_events = TrajectoryLedger(self.db_path).list_events("run-converged-false")
-        verification = trajectory_events[0]["verification"]
+        verification = next(
+            event["verification"]
+            for event in trajectory_events
+            if event["event_type"] == "verification_completed"
+        )
         self.assertFalse(verification["passed"])
         self.assertEqual(verification["failing_count"], 0)
         self.assertEqual(verification["lint_errors"], 0)

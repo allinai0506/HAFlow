@@ -1,6 +1,6 @@
 # Trajectory Observer（运行过程诊断层）
 
-> 状态：V1 已落地（只观察、只解释、只建议，绝不执行修复）。核心原则：**Ledger 记录事实，Observer 解释事实，Provider 只做确认，HAFlow 决定处置。**
+> 状态：V1 已落地，ObservationPack V1 已接入（只观察、只解释、只建议，绝不执行修复）。核心原则：**Ledger 记录事实，ObservationPack 保存证据，Observer 解释证据，Provider 只做确认，HAFlow 决定处置。**
 
 ## 1. 定位：事实层与语义监督层之间的诊断层
 
@@ -13,6 +13,9 @@ bounded 日志尾部(existing evidence) ──┼─► ObservationContext(有�
 确定性 signal 检测(纯函数) ────────────┘          │
                                                 ▼
                      DecisionProvider.judge_many(既有抽象,单次批量 noul 确认)
+                                                │
+                                                ▼
+                     ObservationPack(immutable content + sha256 + receipt)
                                                 │
                                                 ▼
                      TrajectoryFinding(代码生成 summary/severity/action)
@@ -32,9 +35,10 @@ bounded 日志尾部(existing evidence) ──┼─► ObservationContext(有�
 | `herdr/observer/live.py` | Shell-lite/IO | 只读 live Pane/Agent 探测（`pane list`/`pane get`/`agent get`，失败=unknown）与 live Pane transcript（`pane read --source recent-unwrapped`，timeout + 三级上限 + 脱敏） |
 | `herdr/observer/engine.py` | Core | `TrajectoryObserver.observe_run`：`task` 可省略（按 run 事件 `task_id` → 持久化 `run_id` 自动解析 task/runtime/日志）；检测→确认→去重→落库；顶层 fail-safe |
 | `herdr/observer/harness.py` | Shell | `observe_run` 公共 API、provider 记忆化、`ObservationScheduler`（daemon 线程、非阻塞、in-flight 去重） |
+| `herdr/observation.py` | Store/Core | `ObservationStore`、`Observation`、redacted immutable content、SHA-256 integrity、bounded read、dedup、verification/artifact adapters |
 | `services/herdr-controller.py` | Shell | registry_watcher 对 `working/rework/blocked` 任务 `submit_observation`（非阻塞）；统一 Done Gateway `emit_done_if_allowed` 入口调用 `_observer_terminal_checkpoint`（每 run 每进程一次，覆盖 listener/recovery/redelivery） |
 | `bin/herdr-task#observe` | Shell | 人工入口：`--task-id`/`--run-id`/`--json`/`--no-model` |
-| `herdr/state_db.py` | Store | `trajectory_findings` 表 + `record/get/list_trajectory_finding(s)`（UNIQUE finding_key） |
+| `herdr/state_db.py` | Store | `trajectory_findings` 分析表 + `observations` 证据 metadata 表；两者与 `events` 保持职责分离并按唯一键去重 |
 
 ## 3. 确定性 signal 与 Finding 语义
 
@@ -79,9 +83,15 @@ bounded 日志尾部(existing evidence) ──┼─► ObservationContext(有�
 | `live_probe` / `HERDR_OBSERVER_LIVE_PROBE` | true | 只读 live Pane/Agent 探测开关（false = 只用 persisted runtime） |
 | `live_probe_timeout` / `live_transcript_timeout` | 2.0 / 3.0 | live 子进程显式超时（秒） |
 
-## 6. 演进方向（明确不在 V1）
+## 6. ObservationPack V1 证据边界
 
-自动 remediation（terminate/retry/replan/换 Agent/修代码/改 Workflow）、ObservationPack、Context Compact、EvidenceReceipt、Dashboard、长期趋势、Agent 评分、Self-improving Harness、Finding 生命周期状态机（V1 status 恒为 `open`）。
+ObservationPack 保存证据内容，Trajectory Ledger 只保存 `observation_created` receipt，Finding 优先保存 `observation_id` 与 bounded excerpt。`herdr/observation.py` 将文本/JSON 先经 `redact_text`，把内容写到 state DB 同目录的 `observations/`，SQLite 只保存 `content_ref`、`size_bytes`、`sha256`、source 与 metadata。创建使用 `(run_id, source_type, source_ref, sha256)` 去重和独占文件创建；source_ref 上限 512 字符、脱敏 metadata 上限 16 KiB；`verify_observation` 可检测文件丢失或篡改，Artifact 哈希采用 64 KiB 分块读取；`read_observation` 默认最多读取 16 KiB、硬上限 64 KiB，二进制以 base64 返回避免损坏。Artifact 只引用已有文件，不复制大型内容；`TrajectoryLedger.append_event` 对已有 `artifact_created` 事件在文件可用时自动添加 artifact Observation 引用及 compact receipt。底层 `ObservationStore.create` 是存储 API，Observer/verification/artifact 运行时适配器负责追加 receipt。
+
+Agent log 只有在真正进入 Finding 时才创建 Observation；verification 保留原 `evidence_id` 并新增 `observation_id`；创建成功追加最小 `observation_created` 事件。ObservationStore 失败时 Observer 回退到既有短 log evidence，绝不阻塞 Workflow/Task/Agent 主链路。
+
+## 7. 演进方向（明确不在 ObservationPack V1）
+
+自动 remediation（terminate/retry/replan/换 Agent/修代码/改 Workflow）、Context Compact、Dashboard、长期趋势、Agent 评分、Self-improving Harness、Finding 生命周期状态机（V1 status 恒为 `open`）、对象存储/S3、向量数据库、Embedding、全文搜索与 GC。
 
 Evidence:
 - `herdr/observer/models.py:TrajectoryFinding, finding_key_for`
@@ -90,6 +100,7 @@ Evidence:
 - `herdr/observer/live.py:probe_live_runtime, read_live_transcript`
 - `herdr/observer/engine.py:TrajectoryObserver`
 - `herdr/observer/harness.py:observe_run, ObservationScheduler, submit_observation`
+- `herdr/observation.py:ObservationStore, create_observation, read_observation, verify_observation`
 - `herdr/state_db.py:record_trajectory_finding, list_trajectory_findings`
 - `services/herdr-controller.py:registry_watcher`
 - `bin/herdr-task:cmd_observe`

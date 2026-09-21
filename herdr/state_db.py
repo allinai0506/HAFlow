@@ -149,6 +149,35 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
     """)
 
     conn.execute("""
+        CREATE TABLE IF NOT EXISTS observations (
+            observation_id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            task_id TEXT,
+            workflow_id TEXT,
+            source_type TEXT NOT NULL,
+            source_ref TEXT NOT NULL,
+            content_ref TEXT NOT NULL,
+            media_type TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL,
+            sha256 TEXT NOT NULL,
+            excerpt TEXT,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at REAL NOT NULL,
+            UNIQUE(run_id, source_type, source_ref, sha256)
+        );
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS observation_receipts (
+            observation_id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            task_id TEXT,
+            workflow_id TEXT,
+            created_at REAL NOT NULL
+        );
+    """)
+
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS steering_items (
             steer_id TEXT PRIMARY KEY,
             task_id TEXT NOT NULL,
@@ -199,8 +228,26 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type, timestamp);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_source ON events(source, timestamp);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_run_sequence ON events(run_id, sequence, id);")
+    for row in conn.execute(
+        "SELECT run_id, task_id, workflow_id, timestamp, payload_json "
+        "FROM events WHERE source = 'trajectory' AND event_type = 'observation_created'"
+    ).fetchall():
+        try:
+            observation_id = (json.loads(row["payload_json"] or "{}").get("observation") or {}).get("observation_id")
+        except (TypeError, json.JSONDecodeError):
+            observation_id = None
+        if observation_id:
+            conn.execute(
+                "INSERT OR IGNORE INTO observation_receipts "
+                "(observation_id, run_id, task_id, workflow_id, created_at) VALUES (?, ?, ?, ?, ?)",
+                (observation_id, row["run_id"], row["task_id"], row["workflow_id"], row["timestamp"] or time.time()),
+            )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_findings_run ON trajectory_findings(run_id, created_at DESC);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_findings_type ON trajectory_findings(finding_type, created_at DESC);")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_observations_run ON observations(run_id, created_at, observation_id);")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_observations_task ON observations(task_id, created_at, observation_id);")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_observations_type ON observations(source_type, created_at, observation_id);")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_observations_sha256 ON observations(sha256);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_steering_task ON steering_items(task_id, status);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_steering_hist_task ON steering_history(task_id, timestamp);")
 
@@ -1121,6 +1168,77 @@ def record_trajectory_event(
         conn.close()
 
 
+def record_observation_receipt(
+    event: Dict[str, Any],
+    observation_id: str,
+    db_path: Optional[Path] = None,
+) -> Optional[Dict[str, Any]]:
+    """Atomically append at most one trajectory receipt for an Observation."""
+    if not observation_id:
+        raise ValueError("observation_id is required")
+    payload = event.get("payload") or {}
+    if not isinstance(payload, dict):
+        raise ValueError("payload must be a dict")
+    run_id = event.get("run_id")
+    if not run_id:
+        raise ValueError("run_id is required")
+
+    conn = get_db_connection(db_path)
+    try:
+        conn.execute("BEGIN IMMEDIATE;")
+        timestamp = float(event["timestamp"]) if event.get("timestamp") is not None else time.time()
+        inserted = conn.execute(
+            """
+            INSERT OR IGNORE INTO observation_receipts
+                (observation_id, run_id, task_id, workflow_id, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (observation_id, run_id, event.get("task_id"), event.get("workflow_id"), timestamp),
+        ).rowcount
+        if not inserted:
+            conn.execute("COMMIT;")
+            return None
+        sequence = conn.execute(
+            "SELECT COALESCE(MAX(sequence), 0) + 1 FROM events WHERE run_id = ? AND source = 'trajectory'",
+            (run_id,),
+        ).fetchone()[0]
+        cur = conn.execute(
+            """
+            INSERT INTO events (
+                workflow_id, node_id, task_id, agent_id,
+                event_type, payload_json, timestamp, source, run_id, sequence
+            ) VALUES (?, ?, ?, ?, 'observation_created', ?, ?, 'trajectory', ?, ?)
+            """,
+            (
+                event.get("workflow_id"), event.get("node_id") or event.get("node"),
+                event.get("task_id"), event.get("agent_id") or event.get("agent"),
+                json.dumps(payload, ensure_ascii=False), timestamp, run_id, sequence,
+            ),
+        )
+        conn.execute("COMMIT;")
+        return {
+            "id": cur.lastrowid,
+            "workflow_id": event.get("workflow_id"),
+            "node_id": event.get("node_id") or event.get("node"),
+            "task_id": event.get("task_id"),
+            "agent_id": event.get("agent_id") or event.get("agent"),
+            "event_type": "observation_created",
+            "timestamp": timestamp,
+            "source": "trajectory",
+            "run_id": run_id,
+            "sequence": sequence,
+            "payload": payload,
+        }
+    except Exception:
+        try:
+            conn.execute("ROLLBACK;")
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
+
+
 def list_trajectory_events(
     run_id: str,
     event_type: Optional[str] = None,
@@ -1311,6 +1429,138 @@ def list_trajectory_findings(
             query += " LIMIT ?"
             params.append(int(limit))
         return [_decode_finding_row(row) for row in conn.execute(query, params).fetchall()]
+    finally:
+        conn.close()
+
+
+def _decode_observation_row(row: sqlite3.Row) -> Dict[str, Any]:
+    return {
+        "observation_id": row["observation_id"],
+        "run_id": row["run_id"],
+        "task_id": row["task_id"],
+        "workflow_id": row["workflow_id"],
+        "source_type": row["source_type"],
+        "source_ref": row["source_ref"],
+        "content_ref": row["content_ref"],
+        "media_type": row["media_type"],
+        "size_bytes": row["size_bytes"],
+        "sha256": row["sha256"],
+        "excerpt": row["excerpt"],
+        "metadata": json.loads(row["metadata_json"] or "{}"),
+        "created_at": row["created_at"],
+    }
+
+
+def insert_observation(
+    observation: Dict[str, Any],
+    *,
+    db_path: Optional[Path] = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> Dict[str, Any]:
+    """Insert immutable Observation metadata and return the inserted row."""
+    should_close = conn is None
+    conn = conn or get_db_connection(db_path)
+    try:
+        conn.execute(
+            """
+            INSERT INTO observations (
+                observation_id, run_id, task_id, workflow_id, source_type,
+                source_ref, content_ref, media_type, size_bytes, sha256,
+                excerpt, metadata_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                observation["observation_id"],
+                observation["run_id"],
+                observation.get("task_id"),
+                observation.get("workflow_id"),
+                observation["source_type"],
+                observation["source_ref"],
+                observation["content_ref"],
+                observation["media_type"],
+                int(observation["size_bytes"]),
+                observation["sha256"],
+                observation.get("excerpt"),
+                json.dumps(observation.get("metadata") or {}, ensure_ascii=False),
+                float(observation["created_at"]),
+            ),
+        )
+        row = conn.execute(
+            "SELECT * FROM observations WHERE observation_id = ?",
+            (observation["observation_id"],),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("observation insert was not readable")
+        return _decode_observation_row(row)
+    finally:
+        if should_close:
+            conn.close()
+
+
+def get_observation(
+    observation_id: str,
+    *,
+    db_path: Optional[Path] = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> Optional[Dict[str, Any]]:
+    """Read one immutable Observation metadata row."""
+    should_close = conn is None
+    conn = conn or get_db_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT * FROM observations WHERE observation_id = ?",
+            (observation_id,),
+        ).fetchone()
+        return _decode_observation_row(row) if row is not None else None
+    finally:
+        if should_close:
+            conn.close()
+
+
+def find_observation_by_dedup(
+    run_id: str,
+    source_type: str,
+    source_ref: str,
+    sha256: str,
+    *,
+    db_path: Optional[Path] = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> Optional[Dict[str, Any]]:
+    """Find the canonical row for an Observation deduplication key."""
+    should_close = conn is None
+    conn = conn or get_db_connection(db_path)
+    try:
+        row = conn.execute(
+            """
+            SELECT * FROM observations
+            WHERE run_id = ? AND source_type = ? AND source_ref = ? AND sha256 = ?
+            """,
+            (run_id, source_type, source_ref, sha256),
+        ).fetchone()
+        return _decode_observation_row(row) if row is not None else None
+    finally:
+        if should_close:
+            conn.close()
+
+
+def list_observations(
+    *,
+    run_id: Optional[str] = None,
+    task_id: Optional[str] = None,
+    source_type: Optional[str] = None,
+    db_path: Optional[Path] = None,
+) -> List[Dict[str, Any]]:
+    """List Observation metadata with access-pattern-aligned filters."""
+    conn = get_db_connection(db_path)
+    try:
+        query = "SELECT * FROM observations WHERE 1=1"
+        params: List[Any] = []
+        for column, value in (("run_id", run_id), ("task_id", task_id), ("source_type", source_type)):
+            if value is not None:
+                query += f" AND {column} = ?"
+                params.append(value)
+        query += " ORDER BY created_at ASC, observation_id ASC"
+        return [_decode_observation_row(row) for row in conn.execute(query, params).fetchall()]
     finally:
         conn.close()
 

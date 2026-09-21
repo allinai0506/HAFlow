@@ -101,6 +101,7 @@ def observe_run(
     use_model: bool = True,
     runtime_probe: Any = None,
     transcript_reader: Any = None,
+    observation_store: Any = None,
     log: Any = None,
 ) -> List[TrajectoryFinding]:
     """Observe one run and return its current findings (never raises)."""
@@ -129,6 +130,7 @@ def observe_run(
             ledger=ledger,
             runtime_probe=runtime_probe,
             transcript_reader=transcript_reader,
+            observation_store=observation_store,
             log=log,
         )
         return observer.observe_run(run_id, task=task, now=now, use_model=use_model)

@@ -8,8 +8,8 @@ DecisionProvider to confirm, then persist deduplicated findings.
 Fail-safe contract (mirrors the Semantic Supervisor harness):
 - any failure returns the best safe answer (``[]`` on infrastructure failure,
   evidence-backed findings when only the provider failed) and never raises;
-- the observer only ever writes the ``trajectory_findings`` analysis table; it
-  never mutates tasks, workflows, runtime state, or the events ledger;
+- the observer writes only ``trajectory_findings`` analysis rows plus compact
+  ``observation_created`` receipts; it never mutates tasks, workflows, or runtime state;
 - no provider is imported here: the caller injects a ``DecisionProvider``.
 """
 
@@ -23,8 +23,9 @@ from typing import Any, Callable, Dict, List, Optional
 
 from .. import state_db
 from ..decision.models import DecisionProviderError, clamp_probability
+from ..observation import ObservationStore
 from ..supervisor.state import redact_text
-from ..trajectory import TrajectoryLedger
+from ..trajectory import TrajectoryLedger, record_observation_created
 from . import context as observation_context
 from . import signals as signal_layer
 from .config import load_config
@@ -67,6 +68,7 @@ class TrajectoryObserver:
         ledger: Optional[TrajectoryLedger] = None,
         runtime_probe: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
         transcript_reader: Optional[Callable[[Dict[str, Any]], Optional[Dict[str, Any]]]] = None,
+        observation_store: Any = None,
         log=None,
     ) -> None:
         self.config = config or load_config()
@@ -74,6 +76,7 @@ class TrajectoryObserver:
         self.store = store
         self.runtime_probe = runtime_probe
         self.transcript_reader = transcript_reader
+        self.observation_store = observation_store
         self.log = log or stderr_log
         self.db_path = self._resolve_db_path(store)
         self.ledger = ledger or TrajectoryLedger(self.db_path)
@@ -152,7 +155,7 @@ class TrajectoryObserver:
             now=ts,
         )
         results = self._ask_provider(signals, context, use_model=use_model)
-        candidates = self._consolidate(run_id, task, runtime, events, signals, results, ts)
+        candidates = self._consolidate(run_id, task, runtime, events, signals, results, ts, log_tail)
         return self._persist(candidates)
 
     def _probe_runtime(self, task: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -251,6 +254,7 @@ class TrajectoryObserver:
         signals: List[signal_layer.Signal],
         results: Dict[str, Any],
         now: float,
+        log_tail: Optional[Dict[str, Any]] = None,
     ) -> List[TrajectoryFinding]:
         threshold = float(self.config.get("confidence_threshold", 0.6))
         last = events[-1] if events else {}
@@ -259,7 +263,7 @@ class TrajectoryObserver:
         agent = task.get("agent") or last.get("agent")
         agent_session_id = runtime.get("agent_session_id") or last.get("agent_session_id")
 
-        findings: List[TrajectoryFinding] = []
+        accepted: List[tuple[signal_layer.Signal, Optional[float], float]] = []
         for signal in signals:
             result = results.get(signal.finding_type)
             probability = clamp_probability(getattr(result, "value", None))
@@ -268,6 +272,12 @@ class TrajectoryObserver:
             if probability is None and signal.requires_confirmation:
                 continue  # weak signal without model confirmation: stay quiet
             confidence = probability if probability is not None else signal.confidence
+            accepted.append((signal, probability, confidence))
+
+        accepted = accepted[: max(1, int(self.config.get("max_findings", 10)))]
+        findings: List[TrajectoryFinding] = []
+        for signal, probability, confidence in accepted:
+            evidence = self._materialize_observations(run_id, task, signal, now, log_tail)
             findings.append(TrajectoryFinding(
                 run_id=run_id,
                 finding_type=signal.finding_type,
@@ -279,7 +289,7 @@ class TrajectoryObserver:
                 agent=agent,
                 agent_session_id=agent_session_id,
                 created_at=now,
-                evidence=_redact_evidence(signal.evidence),
+                evidence=evidence,
                 suspected_cause=(
                     redact_text(signal.suspected_cause) if signal.suspected_cause
                     else signal.suspected_cause
@@ -297,7 +307,69 @@ class TrajectoryObserver:
                     "total_events": len(events),
                 },
             ))
-        return findings[: max(1, int(self.config.get("max_findings", 10)))]
+        return findings
+
+    def _materialize_observations(
+        self,
+        run_id: str,
+        task: Dict[str, Any],
+        signal: signal_layer.Signal,
+        now: float,
+        log_tail: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Best-effortly replace selected log evidence with immutable references."""
+        evidence = _redact_evidence(signal.evidence)
+        if not any(
+            item.get("type") == "log" and item.get("excerpt")
+            for item in evidence if isinstance(item, dict)
+        ):
+            return evidence
+        if self.observation_store is None:
+            try:
+                self.observation_store = ObservationStore(self.db_path)
+            except Exception as exc:
+                self._log(f"[OBSERVER OBSERVATION SKIPPED] init: {type(exc).__name__}")
+                return evidence
+
+        materialized: List[Dict[str, Any]] = []
+        for item in evidence:
+            if not isinstance(item, dict) or item.get("type") != "log" or not item.get("excerpt"):
+                materialized.append(item)
+                continue
+            try:
+                source_ref = str(item.get("ref") or f"observer:{run_id}:{signal.anchor}")
+                observation_content = item["excerpt"]
+                if signal.finding_type == "possible_context_problem" and isinstance(log_tail, dict):
+                    observation_content = log_tail.get("excerpt") or observation_content
+                observation, _created = self.observation_store.create_with_status(
+                    run_id=run_id,
+                    task_id=task.get("task_id"),
+                    workflow_id=task.get("workflow_id"),
+                    source_type="agent_log",
+                    source_ref=source_ref,
+                    content=observation_content,
+                    media_type="text/plain",
+                    metadata={
+                        "signature": item.get("signature"),
+                        "occurrences": item.get("occurrences"),
+                        "line_range": item.get("line_range"),
+                    },
+                    excerpt=item.get("excerpt"),
+                    created_at=now,
+                )
+                event_task = task or {"run_id": run_id}
+                record_observation_created(event_task, observation, ledger=self.ledger)
+                materialized.append({
+                    "type": "observation",
+                    "observation_id": observation.observation_id,
+                    "source_type": observation.source_type,
+                    "source_ref": observation.source_ref,
+                    "excerpt": observation.excerpt,
+                })
+            except Exception as exc:
+                self._log(f"[OBSERVER OBSERVATION SKIPPED] create: {type(exc).__name__}")
+                materialized.append(item)
+        return materialized
 
     def _persist(self, findings: List[TrajectoryFinding]) -> List[TrajectoryFinding]:
         """Write only new keys; return each key's canonical persisted finding."""

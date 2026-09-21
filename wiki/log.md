@@ -847,3 +847,11 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 ## [2026-09-21] fix | Trajectory Observer 测试隔离：conftest 默认关闭观察器
 - Updated [[trajectory-observer]]: 测试套件 conftest 默认 `HERDR_OBSERVER_ENABLED=0`；唯一端到端网关用例显式开启；未显式传 config 的调度器测试改为自包含；清理生产库 3 行测试残留（08:42 由 done-path 测试经默认调度器写入）。
 - 证据：`tests/conftest.py`、`tests/test_trajectory_observer.py:TestTestEnvironmentIsolation`、`docs/lessons/lessons-learned.md` §78。
+
+## [2026-09-21] feat | ObservationPack V1 Evidence Layer
+
+- 新增 `herdr/observation.py`：Observation metadata 写入 SQLite，内容写入 state DB 同目录的 `observations/`；文本/JSON 先复用 `redact_text`，记录 `content_ref`、`media_type`、`size_bytes`、`sha256`、bounded excerpt 和 metadata。
+- 证据不可变：内容文件独占创建，无 update API；`verify_observation` 检测缺失、大小变化和 SHA-256 篡改；`read_observation` 默认 16 KiB、硬上限 64 KiB。
+- 统一去重：`(run_id, source_type, source_ref, sha256)` 唯一约束与 SQLite 事务保证并发创建收敛到 canonical Observation；artifact 只引用已有文件，不复制大型内容。
+- 接入：Observer 的最终 agent log Finding 改为 `observation_id + bounded excerpt`；`verification_completed` 保留 `evidence_id` 并增加 `observation_id`；Trajectory 只追加 `observation_created` receipt，不存完整证据；ObservationStore 失败回退短 evidence，不阻塞主链路。
+- 证据：`herdr/observation.py`、`herdr/state_db.py:observations`、`herdr/observer/engine.py`、`herdr/trajectory.py`、`services/herdr-controller.py`、`tests/test_observation.py`、Trajectory/Observer/Supervisor 回归测试。

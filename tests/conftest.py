@@ -18,7 +18,6 @@ os.environ.setdefault(
     tempfile.mkdtemp(prefix="herdr-test-workflow-docs-"),
 )
 
-# Hard override (not setdefault): a developer shell exporting
-# HERDR_OBSERVER_ENABLED=1 must not silently re-enable production writes from
-# the suite. Tests that need the observer set it explicitly per test.
+# Hard override: a developer shell exporting HERDR_OBSERVER_ENABLED=1 must not
+# silently re-enable production writes from the suite.
 os.environ["HERDR_OBSERVER_ENABLED"] = "0"
