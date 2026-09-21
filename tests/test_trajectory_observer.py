@@ -29,6 +29,7 @@ import pytest
 
 from herdr.decision.base import DecisionProvider
 from herdr.decision.models import DecisionProviderError, DecisionResult
+from herdr.observation import ObservationStore, list_observations
 from herdr.observer import config as observer_config
 from herdr.observer import context as observation_context
 from herdr.observer import harness as observer_harness
@@ -842,7 +843,7 @@ class TestObserverEngine:
         assert len(state["logs"][0]["excerpt"]) <= 400
         assert "UNIQUE_HEAD_SENTINEL" not in json.dumps(state, ensure_ascii=False)
         assert [finding.finding_type for finding in findings] == ["possible_context_problem"]
-        log_evidence = [item for item in findings[0].evidence if item["type"] == "log"]
+        log_evidence = [item for item in findings[0].evidence if item["type"] == "observation"]
         assert log_evidence and len(log_evidence[0]["excerpt"]) <= 300
 
     def test_thousand_events_never_reach_provider_complete(self, tmp_path: Path):
@@ -1823,6 +1824,75 @@ class TestRuntimeIdentityGuard:
 
 
 class TestLiveTranscript:
+    def test_observation_store_failure_keeps_finding_fallback(self, tmp_path: Path):
+        store = SQLiteStateStore(tmp_path / "state.db")
+        ledger = TrajectoryLedger(store.db_path)
+        _append(ledger, [
+            {"run_id": "run-observation-failure", "event_type": "run_started", "task_id": "task-1",
+             "timestamp": 100.0},
+        ])
+        task = _task(run_id="run-observation-failure", runtime={"status": "running"})
+        provider = CapturingProvider({"possible_context_problem": 0.9})
+
+        class FailingObservationStore:
+            def create(self, **_kwargs):
+                raise OSError("evidence disk unavailable")
+
+        findings = observer_harness.observe_run(
+            "run-observation-failure",
+            task=task,
+            store=store,
+            config=_base_config(),
+            provider=provider,
+            observation_store=FailingObservationStore(),
+            transcript_reader=lambda _task: {
+                "ref": "pane:p-failure",
+                "excerpt": "\n".join(["Error: evidence unavailable"] * 3),
+                "truncated": False,
+            },
+        )
+
+        assert findings
+        assert findings[0].evidence[0]["type"] == "log"
+        assert list_trajectory_findings("run-observation-failure", db_path=store.db_path)
+
+    def test_finding_log_evidence_references_observation(self, tmp_path: Path):
+        store = SQLiteStateStore(tmp_path / "state.db")
+        ledger = TrajectoryLedger(store.db_path)
+        _append(ledger, [
+            {"run_id": "run-observation", "event_type": "run_started", "task_id": "task-1",
+             "timestamp": 100.0},
+        ])
+        task = _task(run_id="run-observation", runtime={"status": "running", "pane_id": "pane-observation"})
+        provider = CapturingProvider({"possible_context_problem": 0.9})
+
+        findings = observer_harness.observe_run(
+            "run-observation",
+            task=task,
+            store=store,
+            config=_base_config(),
+            provider=provider,
+            transcript_reader=lambda _task: {
+                "ref": "pane:pane-observation",
+                "excerpt": "\n".join(["Error: repeated evidence"] * 3),
+                "truncated": False,
+            },
+        )
+
+        evidence = findings[0].evidence[0]
+        assert evidence["type"] == "observation"
+        assert evidence["source_type"] == "agent_log"
+        assert evidence["observation_id"]
+        observations = list_observations(
+            run_id="run-observation", source_type="agent_log",
+            store=ObservationStore(store.db_path),
+        )
+        assert [item.observation_id for item in observations] == [evidence["observation_id"]]
+        ledger_events = TrajectoryLedger(store.db_path).list_events("run-observation")
+        assert [event["event_type"] for event in ledger_events] == [
+            "run_started", "observation_created",
+        ]
+
     def test_live_transcript_enables_context_finding_without_evidence_file(self, tmp_path: Path):
         store = SQLiteStateStore(tmp_path / "state.db")
         ledger = TrajectoryLedger(store.db_path)
@@ -1859,7 +1929,8 @@ class TestLiveTranscript:
 
         assert [finding.finding_type for finding in findings] == ["possible_context_problem"]
         assert provider.calls[0]["state"]["logs"][0]["ref"] == "pane:pane-live"
-        assert findings[0].evidence[0]["ref"] == "pane:pane-live"
+        assert findings[0].evidence[0]["type"] == "observation"
+        assert findings[0].evidence[0]["source_ref"] == "pane:pane-live"
 
     def test_live_transcript_is_preferred_over_evidence_file(self, tmp_path: Path):
         store = SQLiteStateStore(tmp_path / "state.db")
@@ -1985,7 +2056,7 @@ class TestLiveTranscript:
         assert secret not in provider_dump
         assert secret not in db_dump
         assert findings and len(
-            [item for item in findings[0].evidence if item["type"] == "log"][0]["excerpt"]
+            [item for item in findings[0].evidence if item["type"] == "observation"][0]["excerpt"]
         ) <= 300
 
 

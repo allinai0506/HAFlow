@@ -149,6 +149,25 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
     """)
 
     conn.execute("""
+        CREATE TABLE IF NOT EXISTS observations (
+            observation_id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            task_id TEXT,
+            workflow_id TEXT,
+            source_type TEXT NOT NULL,
+            source_ref TEXT NOT NULL,
+            content_ref TEXT NOT NULL,
+            media_type TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL,
+            sha256 TEXT NOT NULL,
+            excerpt TEXT,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at REAL NOT NULL,
+            UNIQUE(run_id, source_type, source_ref, sha256)
+        );
+    """)
+
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS steering_items (
             steer_id TEXT PRIMARY KEY,
             task_id TEXT NOT NULL,
@@ -201,6 +220,10 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_run_sequence ON events(run_id, sequence, id);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_findings_run ON trajectory_findings(run_id, created_at DESC);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_findings_type ON trajectory_findings(finding_type, created_at DESC);")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_observations_run ON observations(run_id, created_at, observation_id);")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_observations_task ON observations(task_id, created_at, observation_id);")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_observations_type ON observations(source_type, created_at, observation_id);")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_observations_sha256 ON observations(sha256);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_steering_task ON steering_items(task_id, status);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_steering_hist_task ON steering_history(task_id, timestamp);")
 
@@ -1311,6 +1334,138 @@ def list_trajectory_findings(
             query += " LIMIT ?"
             params.append(int(limit))
         return [_decode_finding_row(row) for row in conn.execute(query, params).fetchall()]
+    finally:
+        conn.close()
+
+
+def _decode_observation_row(row: sqlite3.Row) -> Dict[str, Any]:
+    return {
+        "observation_id": row["observation_id"],
+        "run_id": row["run_id"],
+        "task_id": row["task_id"],
+        "workflow_id": row["workflow_id"],
+        "source_type": row["source_type"],
+        "source_ref": row["source_ref"],
+        "content_ref": row["content_ref"],
+        "media_type": row["media_type"],
+        "size_bytes": row["size_bytes"],
+        "sha256": row["sha256"],
+        "excerpt": row["excerpt"],
+        "metadata": json.loads(row["metadata_json"] or "{}"),
+        "created_at": row["created_at"],
+    }
+
+
+def insert_observation(
+    observation: Dict[str, Any],
+    *,
+    db_path: Optional[Path] = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> Dict[str, Any]:
+    """Insert immutable Observation metadata and return the inserted row."""
+    should_close = conn is None
+    conn = conn or get_db_connection(db_path)
+    try:
+        conn.execute(
+            """
+            INSERT INTO observations (
+                observation_id, run_id, task_id, workflow_id, source_type,
+                source_ref, content_ref, media_type, size_bytes, sha256,
+                excerpt, metadata_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                observation["observation_id"],
+                observation["run_id"],
+                observation.get("task_id"),
+                observation.get("workflow_id"),
+                observation["source_type"],
+                observation["source_ref"],
+                observation["content_ref"],
+                observation["media_type"],
+                int(observation["size_bytes"]),
+                observation["sha256"],
+                observation.get("excerpt"),
+                json.dumps(observation.get("metadata") or {}, ensure_ascii=False),
+                float(observation["created_at"]),
+            ),
+        )
+        row = conn.execute(
+            "SELECT * FROM observations WHERE observation_id = ?",
+            (observation["observation_id"],),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("observation insert was not readable")
+        return _decode_observation_row(row)
+    finally:
+        if should_close:
+            conn.close()
+
+
+def get_observation(
+    observation_id: str,
+    *,
+    db_path: Optional[Path] = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> Optional[Dict[str, Any]]:
+    """Read one immutable Observation metadata row."""
+    should_close = conn is None
+    conn = conn or get_db_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT * FROM observations WHERE observation_id = ?",
+            (observation_id,),
+        ).fetchone()
+        return _decode_observation_row(row) if row is not None else None
+    finally:
+        if should_close:
+            conn.close()
+
+
+def find_observation_by_dedup(
+    run_id: str,
+    source_type: str,
+    source_ref: str,
+    sha256: str,
+    *,
+    db_path: Optional[Path] = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> Optional[Dict[str, Any]]:
+    """Find the canonical row for an Observation deduplication key."""
+    should_close = conn is None
+    conn = conn or get_db_connection(db_path)
+    try:
+        row = conn.execute(
+            """
+            SELECT * FROM observations
+            WHERE run_id = ? AND source_type = ? AND source_ref = ? AND sha256 = ?
+            """,
+            (run_id, source_type, source_ref, sha256),
+        ).fetchone()
+        return _decode_observation_row(row) if row is not None else None
+    finally:
+        if should_close:
+            conn.close()
+
+
+def list_observations(
+    *,
+    run_id: Optional[str] = None,
+    task_id: Optional[str] = None,
+    source_type: Optional[str] = None,
+    db_path: Optional[Path] = None,
+) -> List[Dict[str, Any]]:
+    """List Observation metadata with access-pattern-aligned filters."""
+    conn = get_db_connection(db_path)
+    try:
+        query = "SELECT * FROM observations WHERE 1=1"
+        params: List[Any] = []
+        for column, value in (("run_id", run_id), ("task_id", task_id), ("source_type", source_type)):
+            if value is not None:
+                query += f" AND {column} = ?"
+                params.append(value)
+        query += " ORDER BY created_at ASC, observation_id ASC"
+        return [_decode_observation_row(row) for row in conn.execute(query, params).fetchall()]
     finally:
         conn.close()
 
