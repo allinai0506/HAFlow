@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import pytest
 
 from herdr.context_compact import (
     compact_run,
@@ -11,6 +12,7 @@ from herdr.context_compact import (
 )
 from herdr.observation import ObservationStore, create_artifact_observation, create_observation
 from herdr.state_db import get_db_connection, upsert_trajectory_finding
+import herdr.state_db as state_db
 from herdr.trajectory import TrajectoryLedger
 
 
@@ -271,3 +273,92 @@ def test_existing_decision_provider_can_select_important_finding(tmp_path: Path)
         store=ObservationStore(db_path), provider=SelectionProvider(),
     )
     assert [item["finding_id"] for item in pack.important_findings] == ["finding-provider"]
+
+
+def test_previous_verified_refs_survive_bounded_window(tmp_path: Path):
+    db_path = tmp_path / "state.db"
+    store = ObservationStore(db_path)
+    ledger = TrajectoryLedger(db_path)
+    task = {"task_id": "task-memory", "run_id": "run-memory", "goal": "g"}
+    first_event = ledger.append_event({"run_id": "run-memory", "event_type": "task_completed"})
+    observation = create_observation(
+        run_id="run-memory", source_type="agent_log", source_ref="old", content="old evidence", store=store,
+    )
+    artifact = tmp_path / "old.txt"
+    artifact.write_text("old artifact", encoding="utf-8")
+    ledger.append_event({
+        "run_id": "run-memory", "event_type": "artifact_created",
+        "artifact": {"ref": "old.txt", "path": str(artifact), "observation_id": observation.observation_id},
+    })
+    first = compact_run("run-memory", task=task, store=store, provider=None)
+    assert first_event["event_id"] in {ref for item in first.completed for ref in item["refs"]}
+    assert observation.observation_id in first.evidence_refs
+    assert any(item["ref"] == "old.txt" for item in first.artifact_refs)
+    for index in range(500):
+        ledger.append_event({"run_id": "run-memory", "event_type": "progress", "metadata": {"i": index}})
+    second = compact_run("run-memory", task=task, store=store, provider=None)
+    assert first_event["event_id"] in {ref for item in second.completed for ref in item["refs"]}
+    assert observation.observation_id in second.evidence_refs
+    assert any(item["ref"] == "old.txt" for item in second.artifact_refs)
+
+
+def test_decision_provider_reduces_all_three_semantic_fields(tmp_path: Path):
+    ledger = TrajectoryLedger(tmp_path / "state.db")
+    ledger.append_event({"run_id": "run-reducer", "event_type": "task_completed"})
+    upsert_trajectory_finding(_finding(run_id="run-reducer", finding_id="finding-reducer"), db_path=tmp_path / "state.db")
+
+    class Reducer:
+        def judge_many(self, questions, state):
+            return {key: type("Result", (), {"value": 1.0})() for key in questions}
+
+        def choose(self, question, state, options):
+            return type("Result", (), {"value": next(iter(options))})()
+
+    pack = compact_run(
+        "run-reducer", task={"task_id": "task-reducer", "run_id": "run-reducer", "goal": "g"},
+        store=ObservationStore(tmp_path / "state.db"), provider=Reducer(),
+    )
+    assert pack.completed
+    assert pack.open_issues
+    assert pack.next_focus
+
+def test_fingerprint_changes_for_finding_and_task_state_without_new_trajectory(tmp_path: Path):
+    db_path = tmp_path / "state.db"
+    store = ObservationStore(db_path)
+    ledger = TrajectoryLedger(db_path)
+    ledger.append_event({"run_id": "run-fingerprint", "event_type": "task_started"})
+    first = compact_run("run-fingerprint", task={"task_id": "task-fingerprint", "run_id": "run-fingerprint", "status": "running", "goal": "g"}, store=store)
+    upsert_trajectory_finding(_finding(run_id="run-fingerprint", finding_id="finding-fingerprint"), db_path=db_path)
+    second = compact_run("run-fingerprint", task={"task_id": "task-fingerprint", "run_id": "run-fingerprint", "status": "running", "goal": "g"}, store=store)
+    assert second.context_id != first.context_id
+    third = compact_run("run-fingerprint", task={"task_id": "task-fingerprint", "run_id": "run-fingerprint", "status": "rework", "goal": "g"}, store=store)
+    assert third.context_id != second.context_id
+    assert second.metadata["context_source_fingerprint"] != first.metadata["context_source_fingerprint"]
+
+
+def test_compact_queries_findings_and_observations_with_sql_limits(tmp_path: Path, monkeypatch):
+    db_path = tmp_path / "state.db"
+    store = ObservationStore(db_path)
+    for index in range(4):
+        create_observation(run_id="run-sql", source_type="agent_log", source_ref=str(index), content="x", store=store)
+        upsert_trajectory_finding(_finding(run_id="run-sql", finding_id=f"finding-sql-{index}"), db_path=db_path)
+    traces = []
+    original = state_db.get_db_connection
+
+    def traced(path=None):
+        conn = original(path)
+        conn.set_trace_callback(traces.append)
+        return conn
+
+    monkeypatch.setattr(state_db, "get_db_connection", traced)
+    compact_run("run-sql", task={"task_id": "task-sql", "run_id": "run-sql", "goal": "g"}, store=store, provider=None, config={"max_findings": 2, "max_observations": 2})
+    sql = "\n".join(traces).upper()
+    assert "FROM TRAJECTORY_FINDINGS" in sql and "LIMIT 2" in sql
+    assert "FROM OBSERVATIONS" in sql and "LIMIT 2" in sql
+
+
+def test_mismatched_explicit_task_fails_closed(tmp_path: Path):
+    store = ObservationStore(tmp_path / "state.db")
+    with pytest.raises(ValueError, match="does not match"):
+        compact_run("run-a", task={"task_id": "task-b", "run_id": "run-b", "goal": "g"}, store=store, provider=None)
+    assert list_contexts("run-a", store=store) == []

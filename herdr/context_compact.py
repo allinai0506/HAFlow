@@ -9,6 +9,7 @@ removes every reference that cannot be resolved in the source stores.
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import threading
 import time
@@ -98,15 +99,12 @@ def _event_id(event: Dict[str, Any]) -> str:
 
 
 def _findings(run_id: str, db_path: Optional[Path], limit: int) -> List[Dict[str, Any]]:
-    rows = state_db.list_trajectory_findings(run_id=run_id, limit=None, db_path=db_path)
-    severity_rank = {"critical": 3, "warning": 2, "info": 1}
-    rows.sort(key=lambda row: (severity_rank.get(row.get("severity"), 0), row.get("created_at") or 0), reverse=True)
-    return rows[:limit]
+    return state_db.list_trajectory_findings_bounded(run_id, limit, db_path=db_path)
 
 
 def _observation_metadata(run_id: str, db_path: Optional[Path], limit: int) -> List[Dict[str, Any]]:
-    rows = state_db.list_observations(run_id=run_id, db_path=db_path)
-    return [
+    rows = state_db.list_observations(run_id=run_id, limit=limit, desc=True, db_path=db_path)
+    result = [
         {
             "observation_id": row["observation_id"],
             "source_type": row["source_type"],
@@ -114,8 +112,10 @@ def _observation_metadata(run_id: str, db_path: Optional[Path], limit: int) -> L
             "sha256": row["sha256"],
             "excerpt": row.get("excerpt"),
         }
-        for row in rows[-limit:]
+        for row in rows
     ]
+    result.reverse()
+    return result
 
 
 def _artifact_refs(events: Sequence[Dict[str, Any]], limit: int) -> List[Dict[str, Any]]:
@@ -197,6 +197,7 @@ def _compact_input(
     findings: Sequence[Dict[str, Any]],
     observations: Sequence[Dict[str, Any]],
     artifacts: Sequence[Dict[str, Any]],
+    candidates: Dict[str, List[Dict[str, Any]]],
     max_chars: int,
 ) -> Dict[str, Any]:
     payload: Dict[str, Any] = {
@@ -207,6 +208,7 @@ def _compact_input(
         "findings": list(findings),
         "observation_metadata": list(observations),
         "artifact_refs": list(artifacts),
+        "candidate_semantics": candidates,
     }
 
     def size() -> int:
@@ -244,6 +246,18 @@ def _compact_input(
         payload["goal"] = ""
         payload["current_state"] = {}
         payload["findings"] = []
+    while size() > max_chars and any(payload["candidate_semantics"].values()):
+        for category in ("next_focus", "open_issues", "completed"):
+            if payload["candidate_semantics"].get(category):
+                payload["candidate_semantics"][category].pop(0)
+                break
+    if size() > max_chars:
+        payload["candidate_semantics"] = {}
+        payload["previous_context"] = None
+    if size() > max_chars:
+        payload = {"goal": "", "current_state": {}, "recent_events": [], "findings": [], "observation_metadata": [], "artifact_refs": [], "candidate_semantics": {}}
+    while size() > max_chars and payload["goal"]:
+        payload["goal"] = payload["goal"][:-1]
     return payload
 
 
@@ -256,20 +270,51 @@ def _reducer_output(provider: Any, payload: Dict[str, Any]) -> Dict[str, Any]:
     if reducer is not None:
         result = reducer(payload)
     elif hasattr(provider, "choose"):
+        candidates = payload.get("candidate_semantics") or {}
+        output: Dict[str, Any] = {}
+        # DecisionProvider's standard judge_many path selects semantic items;
+        # the text and refs remain program-produced candidates.
+        questions = {}
+        candidate_index = {}
+        for category in ("completed", "open_issues", "next_focus"):
+            for index, item in enumerate(candidates.get(category) or []):
+                key = f"{category}:{index}"
+                questions[key] = {
+                    "instructions": f"Is this {category} item important for the next agent?",
+                    "criteria": "Return a probability from 0 to 1.",
+                }
+                candidate_index[key] = (category, item)
+        if questions and hasattr(provider, "judge_many"):
+            results = provider.judge_many(questions, payload)
+            for category in ("completed", "open_issues", "next_focus"):
+                selected_items = []
+                for key, (item_category, item) in candidate_index.items():
+                    if item_category != category:
+                        continue
+                    result = results.get(key)
+                    value = getattr(result, "value", result)
+                    try:
+                        keep = float(value) >= 0.5
+                    except (TypeError, ValueError):
+                        keep = bool(value) is True
+                    if keep:
+                        selected_items.append(item)
+                if selected_items:
+                    output[category] = selected_items[:3] if category == "next_focus" else selected_items
         findings = payload.get("findings") or []
-        if not findings:
-            return {}
         options = {
             str(item.get("finding_id")): str(item.get("summary") or item.get("finding_type") or "")
             for item in findings if item.get("finding_id")
         }
-        result = provider.choose(
-            {"instructions": "Select the single most important current finding.", "criteria": "Return one option key."},
-            payload,
-            options,
-        )
-        selected = getattr(result, "value", None)
-        return {"selected_findings": [str(selected)]} if selected in options else {}
+        if options:
+            result = provider.choose(
+                {"instructions": "Select the single most important current finding.", "criteria": "Return one option key."},
+                payload, options,
+            )
+            selected = getattr(result, "value", None)
+            if selected in options:
+                output["selected_findings"] = [str(selected)]
+        return output
     else:
         return {}
     if isinstance(result, str):
@@ -313,17 +358,102 @@ def verify_context_references(
     }
 
 
-def _fallback_semantic(events: Sequence[Dict[str, Any]], findings: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
-    completed = []
+def _semantic_candidates(
+    events: Sequence[Dict[str, Any]],
+    findings: Sequence[Dict[str, Any]],
+    previous: Optional[ContextPack],
+) -> Dict[str, List[Dict[str, Any]]]:
+    fallback = _fallback_semantic(events, findings, previous)
+    return {key: list(value) for key, value in fallback.items() if key in {"completed", "open_issues", "next_focus"}}
+
+
+def _fallback_semantic(events: Sequence[Dict[str, Any]], findings: Sequence[Dict[str, Any]], previous: Optional[ContextPack] = None) -> Dict[str, Any]:
+    completed = list(previous.completed if previous else [])
+    seen_completed = {(item.get("text"), tuple(item.get("refs") or [])) for item in completed}
     for event in events:
-        if event.get("event_type") in {"task_completed", "agent_done", "verification_completed"}:
-            completed.append({"text": str(event.get("event_type")), "refs": [_event_id(event)]})
-    open_issues = [
-        {"text": finding.get("summary") or finding.get("finding_type"), "refs": [finding["finding_id"]]}
-        for finding in findings
-        if finding.get("finding_id")
-    ]
-    return {"completed": completed, "open_issues": open_issues, "next_focus": []}
+        if event.get("event_type") in {"task_completed", "agent_done", "verification_completed", "artifact_created"}:
+            item = {"text": str(event.get("event_type")), "refs": [_event_id(event)]}
+            if (item["text"], tuple(item["refs"])) not in seen_completed:
+                completed.append(item)
+                seen_completed.add((item["text"], tuple(item["refs"])))
+    open_issues = list(previous.open_issues if previous else [])
+    seen_issues = {(item.get("text"), tuple(item.get("refs") or [])) for item in open_issues}
+    for finding in findings:
+        item = {"text": finding.get("summary") or finding.get("finding_type"), "refs": [finding["finding_id"]]}
+        if finding.get("finding_id") and (item["text"], tuple(item["refs"])) not in seen_issues:
+            open_issues.append(item)
+            seen_issues.add((item["text"], tuple(item["refs"])))
+    next_focus = list(previous.next_focus if previous else [])
+    seen_focus = {(item.get("text"), tuple(item.get("refs") or [])) for item in next_focus}
+    for finding in findings:
+        if finding.get("finding_id") and finding.get("recommended_action"):
+            item = {"text": finding["recommended_action"], "refs": [finding["finding_id"]]}
+            if (item["text"], tuple(item["refs"])) not in seen_focus:
+                next_focus.append(item)
+                seen_focus.add((item["text"], tuple(item["refs"])))
+    return {"completed": completed, "open_issues": open_issues, "next_focus": next_focus}
+
+
+def _source_fingerprint(
+    run_id: str,
+    source_sequence: int,
+    task: Optional[Dict[str, Any]],
+    current_state: Dict[str, Any],
+    db_path: Optional[Path],
+) -> str:
+    conn = state_db.get_db_connection(db_path)
+    try:
+        finding = conn.execute(
+            "SELECT COUNT(*) AS count, COALESCE(MAX(created_at), 0) AS latest, COALESCE(MAX(rowid), 0) AS rowid FROM trajectory_findings WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+        observation = conn.execute(
+            "SELECT COUNT(*) AS count, COALESCE(MAX(created_at), 0) AS latest, COALESCE(MAX(rowid), 0) AS rowid FROM observations WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    source = {
+        "run_id": run_id,
+        "trajectory_sequence": source_sequence,
+        "task": {"task_id": (task or {}).get("task_id"), "workflow_id": (task or {}).get("workflow_id"), "goal": (task or {}).get("goal")},
+        "current_state": current_state,
+        "findings": dict(finding) if finding else {},
+        "observations": dict(observation) if observation else {},
+    }
+    return hashlib.sha256(json.dumps(source, sort_keys=True, ensure_ascii=False, default=str).encode()).hexdigest()
+
+
+def _previously_verified_refs(previous: Optional[ContextPack], run_id: str, db_path: Optional[Path]) -> Dict[str, Set[str]]:
+    if previous is None:
+        return {"events": set(), "findings": set(), "observations": set(), "artifacts": set()}
+    events: Set[str] = set()
+    findings: Set[str] = {str(item.get("finding_id")) for item in previous.important_findings if item.get("finding_id")}
+    observations: Set[str] = {str(value) for value in previous.evidence_refs if value}
+    artifacts: Set[str] = set()
+    for item in previous.artifact_refs:
+        if isinstance(item, dict) and item.get("ref"):
+            artifacts.add(str(item["ref"]))
+        elif item:
+            artifacts.add(str(item))
+    for item in list(previous.completed) + list(previous.open_issues) + list(previous.next_focus):
+        for ref in item.get("refs", []) if isinstance(item, dict) else []:
+            value = str(ref)
+            if value.startswith("evt_"):
+                events.add(value)
+            elif value.startswith("finding_"):
+                findings.add(value)
+            elif value.startswith("obs_"):
+                observations.add(value)
+            else:
+                artifacts.add(value)
+    verified = {
+        "events": {ref for ref in events if state_db.trajectory_event_exists(ref, run_id, db_path=db_path)},
+        "findings": {ref for ref in findings if state_db.get_trajectory_finding_by_id(ref, run_id, db_path=db_path)},
+        "observations": {ref for ref in observations if state_db.get_observation(ref, db_path=db_path)},
+        "artifacts": {ref for ref in artifacts if state_db.artifact_ref_exists(ref, run_id, db_path=db_path)},
+    }
+    return verified
 
 
 def compact_run(
@@ -338,6 +468,8 @@ def compact_run(
     """Create or return the latest bounded ContextPack for one run."""
     if not run_id:
         raise ValueError("run_id is required")
+    if task is not None and task.get("run_id") and str(task["run_id"]) != str(run_id):
+        raise ValueError(f"task.run_id {task['run_id']} does not match run_id {run_id}")
     cfg = _config(config)
     if not cfg["enabled"]:
         raise RuntimeError("context compact is disabled")
@@ -355,8 +487,6 @@ def compact_run(
         by_id = {_event_id(event): event for event in recent_rows + verification_rows}
         all_events = sorted(by_id.values(), key=lambda event: int(event.get("sequence") or 0))
         latest = state_db.get_latest_context_pack(run_id, db_path=db_path)
-        if latest is not None and int(latest.get("source_event_sequence") or 0) == source_sequence:
-            return ContextPack.from_mapping(latest)
         previous = ContextPack.from_mapping(latest) if latest else None
         events = [event for event in all_events if event in recent_rows]
         findings = _findings(run_id, db_path, cfg["max_findings"])
@@ -368,22 +498,30 @@ def compact_run(
                 task = state_db.get_task(str(task_id), db_path=db_path)
         goal = _goal(task, all_events)
         current_state = _current_state(task)
+        fingerprint = _source_fingerprint(run_id, source_sequence, task, current_state, db_path)
+        if latest and (latest.get("metadata") or {}).get("context_source_fingerprint") == fingerprint:
+            return ContextPack.from_mapping(latest)
+        candidates = _semantic_candidates(events, findings, previous)
         compact_input = _compact_input(
             goal=goal, current_state=current_state, previous_context=previous,
             events=events, findings=findings, observations=observations,
-            artifacts=artifacts, max_chars=cfg["max_input_chars"],
+            artifacts=artifacts, candidates=candidates, max_chars=cfg["max_input_chars"],
         )
         try:
             semantic = _reducer_output(provider, compact_input)
         except Exception as exc:
             LOGGER.warning("context reducer skipped: run=%s error=%s: %s", run_id, type(exc).__name__, exc)
             semantic = {}
-        semantic = {**_fallback_semantic(events, findings), **semantic}
-        verified = _verification_facts(all_events, task)
-        event_ids = {_event_id(event) for event in all_events}
-        finding_ids = {str(finding.get("finding_id")) for finding in findings}
-        observation_ids = {str(observation["observation_id"]) for observation in observations}
-        artifact_set = {str(item["ref"]) for item in artifacts}
+        semantic = {**candidates, **semantic}
+        verified = list(previous.verified_facts if previous else [])
+        current_facts = _verification_facts(all_events, task)
+        known_fact_keys = {json.dumps(fact, sort_keys=True, default=str) for fact in verified}
+        verified.extend(fact for fact in current_facts if json.dumps(fact, sort_keys=True, default=str) not in known_fact_keys)
+        previous_refs = _previously_verified_refs(previous, run_id, db_path)
+        event_ids = {_event_id(event) for event in all_events} | previous_refs["events"]
+        finding_ids = {str(finding.get("finding_id")) for finding in findings} | previous_refs["findings"]
+        observation_ids = {str(observation["observation_id"]) for observation in observations} | previous_refs["observations"]
+        artifact_set = {str(item["ref"]) for item in artifacts} | previous_refs["artifacts"]
         selected = verify_context_references(
             semantic, event_ids=event_ids, finding_ids=finding_ids,
             observation_ids=observation_ids, artifact_refs=artifact_set,
@@ -409,8 +547,23 @@ def compact_run(
                 }
                 for finding in findings[:5]
             ]
+        if previous:
+            known = {item.get("finding_id") for item in important}
+            for old in previous.important_findings:
+                finding_id = old.get("finding_id") if isinstance(old, dict) else None
+                if finding_id and finding_id in previous_refs["findings"] and finding_id not in known:
+                    important.append(old)
+                    known.add(finding_id)
+                    if len(important) >= 5:
+                        break
         evidence_refs = selected["selected_observations"] or [str(item["observation_id"]) for item in observations]
+        evidence_refs = list(dict.fromkeys(list(previous_refs["observations"]) + evidence_refs))
         artifact_refs = [item for item in artifacts if item["ref"] in selected["selected_artifacts"] or not selected["selected_artifacts"]]
+        if previous:
+            old_artifacts = [item for item in previous.artifact_refs if isinstance(item, dict) and item.get("ref") in previous_refs["artifacts"]]
+            artifact_refs = old_artifacts + artifact_refs
+            seen_artifact_refs = set()
+            artifact_refs = [item for item in artifact_refs if not (item.get("ref") in seen_artifact_refs or seen_artifact_refs.add(item.get("ref")))]
         pack = ContextPack(
             context_id=f"ctx_{uuid.uuid4().hex}", run_id=run_id,
             task_id=(task or {}).get("task_id") or (all_events[-1].get("task_id") if all_events else None),
@@ -421,7 +574,7 @@ def compact_run(
             artifact_refs=artifact_refs, open_issues=selected["open_issues"],
             next_focus=selected["next_focus"][:3], source_event_sequence=source_sequence,
             created_at=float(now if now is not None else time.time()),
-            metadata={"analysis": {"completed": True, "open_issues": True, "next_focus": True}, "input_chars": len(json.dumps(compact_input, ensure_ascii=False))},
+            metadata={"analysis": {"completed": True, "open_issues": True, "next_focus": True}, "input_chars": len(json.dumps(compact_input, ensure_ascii=False)), "context_source_fingerprint": fingerprint},
         )
         stored = state_db.save_context_pack(pack.to_mapping(), db_path=db_path)
         return ContextPack.from_mapping(stored)

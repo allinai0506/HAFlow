@@ -271,7 +271,10 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_observations_sha256 ON observations(sha256);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_context_packs_run_created ON context_packs(run_id, created_at DESC);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_context_packs_task_created ON context_packs(task_id, created_at DESC);")
-    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_context_packs_run_sequence ON context_packs(run_id, source_event_sequence);")
+    # Deduplication is fingerprint-based, not sequence-only: a Finding or task
+    # state can change without a new Trajectory sequence.
+    conn.execute("DROP INDEX IF EXISTS ux_context_packs_run_sequence;")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_context_packs_run_sequence ON context_packs(run_id, source_event_sequence);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_steering_task ON steering_items(task_id, status);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_steering_hist_task ON steering_history(task_id, timestamp);")
 
@@ -1320,6 +1323,45 @@ def latest_trajectory_sequence(run_id: str, db_path: Optional[Path] = None) -> i
         conn.close()
 
 
+def trajectory_event_exists(event_id: str, run_id: Optional[str] = None, db_path: Optional[Path] = None) -> bool:
+    """Check one event identity without loading the trajectory window."""
+    try:
+        row_id = int(str(event_id).removeprefix("evt_"))
+    except ValueError:
+        return False
+    conn = get_db_connection(db_path)
+    try:
+        query = "SELECT 1 FROM events WHERE id = ? AND source = 'trajectory'"
+        params: List[Any] = [row_id]
+        if run_id is not None:
+            query += " AND run_id = ?"
+            params.append(run_id)
+        return conn.execute(query, params).fetchone() is not None
+    finally:
+        conn.close()
+
+
+def artifact_ref_exists(ref: str, run_id: str, db_path: Optional[Path] = None) -> bool:
+    """Check an artifact reference in trajectory payloads without full history materialization."""
+    conn = get_db_connection(db_path)
+    try:
+        rows = conn.execute(
+            """SELECT payload_json FROM events
+               WHERE run_id = ? AND source = 'trajectory'
+                 AND event_type = 'artifact_created'
+                 AND (payload_json LIKE '%"ref"%' OR payload_json LIKE '%"path"%')""",
+            (run_id,),
+        ).fetchall()
+        for row in rows:
+            payload = json.loads(row["payload_json"] or "{}")
+            artifact = payload.get("artifact") or {}
+            if str(artifact.get("ref") or artifact.get("path") or "") == str(ref):
+                return True
+        return False
+    finally:
+        conn.close()
+
+
 def _decode_finding_row(row: sqlite3.Row) -> Dict[str, Any]:
     return {
         "finding_id": row["finding_id"],
@@ -1450,6 +1492,25 @@ def get_trajectory_finding(
             conn.close()
 
 
+def get_trajectory_finding_by_id(
+    finding_id: str,
+    run_id: Optional[str] = None,
+    db_path: Optional[Path] = None,
+) -> Optional[Dict[str, Any]]:
+    """Fetch one finding by its public identity for reference verification."""
+    conn = get_db_connection(db_path)
+    try:
+        query = "SELECT * FROM trajectory_findings WHERE finding_id = ?"
+        params: List[Any] = [finding_id]
+        if run_id is not None:
+            query += " AND run_id = ?"
+            params.append(run_id)
+        row = conn.execute(query, params).fetchone()
+        return _decode_finding_row(row) if row is not None else None
+    finally:
+        conn.close()
+
+
 def list_trajectory_findings(
     run_id: Optional[str] = None,
     finding_type: Optional[str] = None,
@@ -1472,6 +1533,31 @@ def list_trajectory_findings(
             query += " LIMIT ?"
             params.append(int(limit))
         return [_decode_finding_row(row) for row in conn.execute(query, params).fetchall()]
+    finally:
+        conn.close()
+
+
+def list_trajectory_findings_bounded(
+    run_id: str,
+    limit: int,
+    db_path: Optional[Path] = None,
+) -> List[Dict[str, Any]]:
+    """Return the most important recent findings with SQL-side bounding."""
+    conn = get_db_connection(db_path)
+    try:
+        rows = conn.execute(
+            """SELECT * FROM trajectory_findings
+               WHERE run_id = ?
+               ORDER BY CASE severity
+                          WHEN 'critical' THEN 3
+                          WHEN 'warning' THEN 2
+                          ELSE 1
+                        END DESC,
+                        created_at DESC, rowid DESC
+               LIMIT ?""",
+            (run_id, int(limit)),
+        ).fetchall()
+        return [_decode_finding_row(row) for row in rows]
     finally:
         conn.close()
 
@@ -1591,6 +1677,8 @@ def list_observations(
     run_id: Optional[str] = None,
     task_id: Optional[str] = None,
     source_type: Optional[str] = None,
+    limit: Optional[int] = None,
+    desc: bool = False,
     db_path: Optional[Path] = None,
 ) -> List[Dict[str, Any]]:
     """List Observation metadata with access-pattern-aligned filters."""
@@ -1602,7 +1690,11 @@ def list_observations(
             if value is not None:
                 query += f" AND {column} = ?"
                 params.append(value)
-        query += " ORDER BY created_at ASC, observation_id ASC"
+        direction = "DESC" if desc else "ASC"
+        query += f" ORDER BY created_at {direction}, observation_id {direction}"
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(int(limit))
         return [_decode_observation_row(row) for row in conn.execute(query, params).fetchall()]
     finally:
         conn.close()
@@ -1633,22 +1725,25 @@ def save_context_pack(
     context_pack: Dict[str, Any],
     db_path: Optional[Path] = None,
 ) -> Dict[str, Any]:
-    """Append one ContextPack, returning the existing pack on same-source dedup."""
+    """Append one ContextPack, returning the existing pack on exact fingerprint dedup."""
     required = ("context_id", "run_id")
     if any(not context_pack.get(key) for key in required):
         raise ValueError("context_id and run_id are required")
     conn = get_db_connection(db_path)
     try:
         conn.execute("BEGIN IMMEDIATE;")
-        existing = conn.execute(
+        fingerprint = (context_pack.get("metadata") or {}).get("context_source_fingerprint")
+        existing_rows = conn.execute(
             """SELECT * FROM context_packs
-               WHERE run_id = ? AND source_event_sequence = ?
-               ORDER BY created_at DESC, rowid DESC LIMIT 1""",
-            (context_pack["run_id"], int(context_pack.get("source_event_sequence") or 0)),
-        ).fetchone()
-        if existing is not None:
-            conn.commit()
-            return _decode_context_pack_row(existing)
+               WHERE run_id = ?
+               ORDER BY created_at DESC, rowid DESC""",
+            (context_pack["run_id"],),
+        ).fetchall()
+        for existing in existing_rows:
+            existing_metadata = json.loads(existing["metadata_json"] or "{}")
+            if fingerprint and existing_metadata.get("context_source_fingerprint") == fingerprint:
+                conn.commit()
+                return _decode_context_pack_row(existing)
         conn.execute(
             """INSERT INTO context_packs (
                 context_id, run_id, task_id, workflow_id, goal,

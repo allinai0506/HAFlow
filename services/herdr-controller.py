@@ -3465,8 +3465,14 @@ def _schedule_context_compact(task):
 
         def worker():
             try:
+                provider = None
+                try:
+                    from herdr.observer.harness import get_provider
+                    provider = get_provider()
+                except Exception as provider_exc:
+                    print(f"[CONTEXT COMPACT PROVIDER FALLBACK] task={task.get('task_id')}: {type(provider_exc).__name__}: {provider_exc}")
                 compact_run_best_effort(
-                    run_id_for_task(task), task=task, store=store,
+                    run_id_for_task(task), task=task, store=store, provider=provider,
                 )
             except Exception as exc:  # defensive boundary isolation
                 print(f"[CONTEXT COMPACT WORKER SKIPPED] task={task.get('task_id')}: {type(exc).__name__}: {exc}")
