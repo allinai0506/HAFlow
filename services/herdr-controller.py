@@ -56,6 +56,12 @@ except Exception:
     # Semantic Supervisor 是可选观察层;缺失或异常时原有流程完全不变。
     supervisor_harness = None
 
+try:
+    from herdr.observer import harness as observer_harness
+except Exception:
+    # Trajectory Observer 是可选旁路观察层;缺失或异常时原有流程完全不变。
+    observer_harness = None
+
 STAGE_STATE_FILE = os.environ.get("STAGE_STATE_FILE") or os.path.expanduser(
     "~/.herdr-controller/stage-state.json"
 )
@@ -3412,7 +3418,12 @@ def emit_done_if_allowed(task, report_text=None):
     checkpoint is rate-gated/skipped, a still-pending enforced intervention
     from the events ledger keeps blocking redelivery until a newer decision
     or a new agent_done transition supersedes it.
+
+    The terminal Trajectory Observer checkpoint also lives here: listener,
+    recovery and registry-redelivery paths all funnel through this gateway,
+    and the observation must be queued before the task can advance.
     """
+    _observer_terminal_checkpoint(task)
     checkpoint = supervisor_checkpoint(task, "agent_done", report_text=report_text)
     if checkpoint is None:
         pending = None
@@ -3469,6 +3480,24 @@ def redeliver_done_event(task, now=None):
     if attention_get(key):
         attention_throttle(key, now=now)
     return True
+
+
+def _observer_terminal_checkpoint(task, now=None):
+    """Terminal Trajectory Observer checkpoint for agent_done.
+
+    Fail-safe by contract: any failure only logs and returns False, so the
+    existing done flow is never blocked. The observation itself runs on the
+    observer's daemon worker (async, non-blocking).
+    """
+    if observer_harness is None or not task:
+        return False
+    try:
+        return observer_harness.submit_terminal_observation(
+            task, store=_get_store(), now=now
+        )
+    except Exception as exc:
+        print(f"[OBSERVER TERMINAL CHECK ERROR] task={task.get('task_id')}: {exc}")
+        return False
 
 
 def supervisor_checkpoint(task, trigger, report_text=None, test_evidence=None, evidence_id=None, now=None):
@@ -4318,7 +4347,23 @@ def registry_watcher():
                     except Exception as exc:
                         print(f"[TESTS_COMPLETED CHECK ERROR] task={task_id}: {exc}")
 
+                # ---- Trajectory Observer: 旁路观察,非阻塞投递 ----
+                # 观察线程与主轮询物理隔离;超时/模型失败/内部异常均不影响
+                # Task/Workflow/Runtime 与事件推进。
+                if (
+                    status in ("working", "rework", "blocked")
+                    and observer_harness is not None
+                ):
+                    try:
+                        observer_harness.submit_observation(
+                            task, store=_get_store(), now=now
+                        )
+                    except Exception as exc:
+                        print(f"[OBSERVER CHECK ERROR] task={task_id}: {exc}")
+
                 # ---- done 事件投递:受 attention episode 节流 + 监督网关把关 ----
+                # terminal Observer checkpoint 已挂在统一 Done Gateway
+                # (emit_done_if_allowed) 内,覆盖 listener/recovery/redelivery 全部路径。
                 if status == "agent_done":
                     redeliver_done_event(task, now=now)
 

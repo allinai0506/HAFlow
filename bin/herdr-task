@@ -1215,6 +1215,61 @@ def get_task(task_id):
     )
 
 
+def cmd_observe(args):
+    """Trajectory Observer 只读入口: 观察一个 Run 并输出结构化 Finding。
+
+    旁路能力:只读 Trajectory/Runtime/日志,只写 trajectory_findings 分析表,
+    绝不改变 Task/Workflow/Runtime 状态;没有任何证据时输出空 findings。
+    """
+    try:
+        from herdr.observer import harness as observer_harness
+        from herdr.trajectory import run_id_for_task
+    except Exception as exc:
+        print(f"[OBSERVE] observer unavailable: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    store = _get_store()
+    task = None
+    run_id = args.run_id
+
+    if args.task_id:
+        task = store.get_task(args.task_id)
+        if not task:
+            print(f"[OBSERVE] task not found: {args.task_id}", file=sys.stderr)
+            sys.exit(1)
+        if not run_id:
+            run_id = run_id_for_task(task)
+    # --run-id alone is enough: observe_run resolves the task (runtime/logs)
+    # from the run's own trajectory facts.
+
+    if not run_id:
+        print("[OBSERVE] --run-id or --task-id is required", file=sys.stderr)
+        sys.exit(2)
+
+    findings = observer_harness.observe_run(
+        run_id,
+        task=task,
+        store=store,
+        use_model=not getattr(args, "no_model", False),
+    )
+    payload = [finding.to_mapping() for finding in findings]
+    if getattr(args, "json", False):
+        print(json.dumps({"run_id": run_id, "findings": payload}, ensure_ascii=False, indent=2))
+        return
+    if not findings:
+        print(f"[OBSERVE] run={run_id} findings=0 (no evidence-backed problem detected)")
+        return
+    for finding in findings:
+        print(
+            f"[{finding.severity.upper()}] {finding.finding_type} "
+            f"node={finding.node or '-'} action={finding.recommended_action} "
+            f"confidence={finding.confidence:.2f}"
+        )
+        print(f"  {finding.summary}")
+        for item in finding.evidence[:3]:
+            print(f"  evidence: {json.dumps(item, ensure_ascii=False)}")
+
+
 def set_status(task_id, new_status, verdict=None, note=None):
     data = load_tasks()
     task = find_task(data, task_id)
@@ -4087,6 +4142,20 @@ def main():
     note_list_cmd.add_argument("--current-base-sha", default=None)
     note_list_cmd.add_argument("--json", action="store_true")
 
+    observe_cmd = sub.add_parser(
+        "observe",
+        help="Trajectory Observer: 观察一个 Run 并输出结构化 Finding(只读旁路)",
+    )
+    observe_target = observe_cmd.add_mutually_exclusive_group(required=True)
+    observe_target.add_argument("--run-id", default=None)
+    observe_target.add_argument("--task-id", default=None)
+    observe_cmd.add_argument("--json", action="store_true")
+    observe_cmd.add_argument(
+        "--no-model",
+        action="store_true",
+        help="只用确定性规则,不调用 Provider 确认(弱信号将被丢弃)",
+    )
+
     args = parser.parse_args()
 
     if args.command == "add":
@@ -4365,6 +4434,9 @@ def main():
 
     elif args.command == "note-list":
         note_list(args)
+
+    elif args.command == "observe":
+        cmd_observe(args)
 
 
 if __name__ == "__main__":

@@ -813,3 +813,33 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - **问题**：① `ensure_context_project` 对模板不一致直接 raise，把 Context Workspace 绑死在首个模板上，违背"一个业务 Workspace 依次跑 sales-research/quotation/contract-review"的业务模型；② Context 绑定路径强制 `is_dir()`，PDF/Word/Excel/Markdown 等文件引用被误拒。
 - **修复**：① 复用既有 `reprovision_project_template()`（最小扩展 context_bindings 参数）：Workspace/Coordinator 保留、Node Tabs 按新模板重建、旧 Tab 关闭、活跃工作流拒绝切换；context 语义（execution.mode/base_branch=""/契约/本次绑定）经 `_register_project_workflow` 扩展参数在切换后完整保留，`detect_base_branch` 只留在 git 路径；② 绑定校验改 `exists()`（目录或文件均合法），仍 resolve 绝对路径 + 不存在 fail-fast + required 缺失拒绝。
 - **验证**：新增 3 测试（切换保 workspace/活跃流拒绝/文件+缺失路径）共 35 passed；全量 829 passed + 44 subtests；真机 E2E：非 Git 目录 `/tmp/ctx-e2e.*` 上 A(context-smoke-test, wQ/p1) → 任务 ctx-e2e-hello-a 于独立 workspace 产出 HELLO.md（读自 common 引用）→ verify-baseline 指纹 TASK_CHANGED → close → 同 workspace 跑 B(ctx-e2e-beta)：wQ/p1 不变、template 更新、review tab wQ:t3 重建、绑定含 quote.pdf 文件引用、全程零 git 调用。
+
+## [2026-09-20] feat | Trajectory Observer V1：结构化、可验证、可追溯的运行过程诊断
+- Added [[trajectory-observer]]: 旁路诊断层——`run_id` → Trajectory + Runtime + bounded 日志 → 确定性 signal → `DecisionProvider.judge_many`（noul）确认 → `TrajectoryFinding`（type/severity/evidence/cause/recommendation/confidence）；`trajectory_findings` 表与 events 事实表物理分离，`finding_key` 跨进程去重；controller registry_watcher 非阻塞 daemon 线程触发，`herdr-task observe` 人工入口。
+- Updated [[task-lifecycle]] §1.2: Ledger 之上新增 Observer 只读诊断层的说明与链接。
+- Updated [[index]]: 意图路由与知识地图新增 [[trajectory-observer]]。
+- 证据：`herdr/observer/`、`herdr/state_db.py:trajectory_findings`、`services/herdr-controller.py:registry_watcher`、`bin/herdr-task:cmd_observe`、`tests/test_trajectory_observer.py`（41 项）、`docs/superpowers/specs/2026-09-20-trajectory-observer-design.md`。
+
+## [2026-09-20] fix | Trajectory Observer 运行时真实性加固：Live Runtime / Live Transcript / 证据升级 / 硬预算
+- Updated [[trajectory-observer]]: 新增只读 `herdr/observer/live.py`（pane/agent liveness 探测失败=unknown；live Pane transcript 优先、evidence 文件兜底，均在 daemon worker 内 bounded 执行）；Finding 同 episode 原地升级（canonical finding_id，不降级）；`_fit_budget` 硬保证（递归 clamp + 最小 identity）；`--task-id/--run-id` 互斥、`--json` stdout 纯 JSON（诊断走 stderr）。
+- 证据：`herdr/observer/live.py`、`herdr/observer/context.py:bound_transcript,_fit_budget`、`herdr/observer/signals.py:_detect_runtime_unavailable`、`herdr/state_db.py:upsert_trajectory_finding`、`bin/herdr-task:cmd_observe`、`tests/test_trajectory_observer.py`（65 项）。
+
+## [2026-09-20] fix | Trajectory Observer 运行身份安全：agent_session 身份校验 + transcript guard + 上下文预算下限
+- Updated [[trajectory-observer]]: live probe 新增身份校验（pane_not_found / identity_match / identity_mismatch / agent_not_found / unknown 五态，unknown 绝不当 unavailable）；live transcript 必须通过同一身份 guard 才允许 `pane read`，未确认身份回退 persisted evidence；`max_context_size` 产品最小值 500 在 `load_config` 显式 clamp。
+- 证据：`herdr/observer/live.py:_session_verdict,_identity_result,probe_live_runtime,read_live_transcript`、`herdr/observer/config.py:MIN_MAX_CONTEXT_SIZE`、`tests/test_trajectory_observer.py`（70 项，含 A/B/C 三条身份回归）。
+
+## [2026-09-20] fix | Trajectory Observer 收尾：no_progress episode 边界 + Provider 构造隔离 + 预算语义澄清
+- Updated [[trajectory-observer]]: `no_progress` 改为按最近一次进展边界（passed verification / artifact）计算当前 episode 的 rework 数，anchor 取当前 episode 首次 rework（历史成功不再永久屏蔽新卡死）；Provider 构造失败降级为无 Provider（证据型 Finding 照常产出、弱信号静默）；`max_calls_per_run` 明确为 process-local per-run observation budget（Controller 重启后重置，V1 不持久化）。
+- 证据：`herdr/observer/signals.py:_progress_boundary_sequence,_detect_no_progress`、`herdr/observer/harness.py:observe_run,ObservationScheduler`、`herdr/observer/config.py:max_calls_per_run`、`tests/test_trajectory_observer.py`（74 项）。
+
+## [2026-09-20] fix | Trajectory Observer Live Agent liveness：pane session 一致仍须 agent get 确认
+- Updated [[trajectory-observer]]: 对 persisted 明确有 Agent 的 Run，pane 级 session 一致不再直接判 `available`——必须继续 bounded `herdr agent get`（与 `pane_pool` 的真实 live agent 判据一致）：agent 成功且 session 一致→`identity_match`；显式 `agent_not_found`/空 agent→`unavailable`；agent session 不一致→`identity_mismatch`；timeout/parse/身份不足→`unknown`。transcript guard 仍只在最终 `available` 时 pane read。
+- 证据：`herdr/observer/live.py:_identity_result`、`tests/test_trajectory_observer.py`（75 项，含 A/B 两条 agent liveness 回归）。
+
+## [2026-09-20] fix | Trajectory Observer 三项收尾：agent_done terminal checkpoint / 脱敏先于 cutoff / 身份优先级 A-B-C
+- Updated [[trajectory-observer]]: ① `agent_done` 在 `redeliver_done_event()` 前获得独立 terminal observation（独立 gate，每 run 每 controller 进程一次，异步不阻塞 done flow）；② `bound_transcript` 改为先脱敏再 bytes/lines/chars 截断，文件尾部先读 8192B overlap 并丢弃不完整行，杜绝 key prefix 被 cutoff 切断后泄漏；③ 身份优先级 A(session 匹配)/B(agent_name 实例名匹配)/C(仅 agent type → unknown 且禁止 pane read)。
+- 证据：`herdr/observer/harness.py:submit_terminal`、`herdr/observer/context.py:bound_transcript,read_log_tail`、`herdr/observer/live.py:_identity_result`、`services/herdr-controller.py:_observer_terminal_checkpoint`、`tests/test_trajectory_observer.py`（85 项）。
+
+## [2026-09-20] fix | Trajectory Observer terminal checkpoint 挂载统一 Done Gateway
+- Updated [[trajectory-observer]]: terminal observation 从 registry_watcher 的 agent_done 分支移入统一 Done Gateway `emit_done_if_allowed()` 入口，覆盖 listener/recovery/registry redelivery/rework heal 全部 done 路径，消除「listener 立即推进导致 verification_failure 从未被观察」的窗口；registry_watcher 不再单独调用；async/fail-safe/per-run 去重/不受 periodic gate 影响等特性不变。
+- 证据：`services/herdr-controller.py:emit_done_if_allowed,_observer_terminal_checkpoint`、`tests/test_trajectory_observer.py:TestDoneGatewayTerminalCheckpoint`（5 项）。

@@ -3344,3 +3344,88 @@ pytest tests/test_state_db_v2.py::test_concurrent_legacy_event_schema_upgrade_is
 - `tests/test_state_db_v2.py::test_concurrent_legacy_event_schema_upgrade_is_idempotent`
 
 ---
+
+## 76. 本地 main 过期导致的“前置能力不存在”误判：接单先 fetch，再谈缺件
+
+### 问题背景
+
+Trajectory Observer 任务书声明前置能力（Agent Trajectory Ledger / `run_id` /
+`TrajectoryEvent` / `TrajectoryLedger`）已完成。开工时本地 `main` 停在 PR #68
+（ab99ed9）：全仓 grep 不到 `TrajectoryEvent`/`TrajectoryLedger`/`run_id`，一度
+准备把“前置能力”本身纳入实现范围。`git fetch --all` 后发现 origin/main 已推进到
+PR #69（1817f43），且远端存在 `feat/agent-trajectory-ledger` 分支——前置能力早已
+合并，只是本地基线过期。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 用本地工作区判断“上游缺件” | 本地仓库只是远端的一个可能过期快照，不是事实来源 | 任何“缺件/不存在”结论必须先排除基线过期，再定方案 |
+| grep 不到就认定未实现 | “未实现 / 未合并 / 术语不同”是三种不同情况，处置完全不同 | 先 `git fetch` + 看远端分支与 `git log --all --grep`，再做符号级判断 |
+| 发现缺件立刻重造 | 从零实现前置能力会把 PR 膨胀成两期工程，且与上游实现冲突 | 缺件结论必须附“远端同类实现检索”证据，否则视为未验证假设 |
+
+### 操作规范
+
+1. 接单第一步固定执行：`git fetch origin` → `git status` → `git merge --ff-only origin/main` → `git log --oneline origin/main -10`。
+2. 关键符号 grep 为空时，补一条 `git log --all --oneline --grep="<关键词>" -i` 与 `git branch -r`，确认远端无同类实现后才认定为缺口。
+3. Entry Gate 的“理解和假设”必须写明基线 commit 与同步动作，避免基于过期基线开工。
+
+### 验证命令 / 守护测试
+
+```bash
+git merge --ff-only origin/main && git log --oneline -1
+# 期望：1817f43 Merge pull request #69 from allinai0506/feat/agent-trajectory-ledger
+python3 -c "from herdr.trajectory import TrajectoryLedger; print(TrajectoryLedger)"
+```
+
+### 相关文档 / 关联证据
+
+- PR #69（1817f43）— Agent Trajectory Ledger
+- `.omc/entry-gate-feat_trajectory-observer-v1.md` — 本轮基线记录
+- `herdr/trajectory.py`
+
+---
+
+## 77. 旁路 LLM 观察者的出站泄密面：脱敏必须发生在证据读取的最早时刻
+
+### 问题背景
+
+Trajectory Observer V1 独立评审（round 1）发现 critical C1：`read_log_tail`
+对日志只做 ANSI 清洗，未做凭据脱敏；原始日志文本随后出现在三处出站/持久化通道——
+Provider 问题体（`question_for` 内嵌 summary）、ObservationContext 的 logs 块、
+以及 finding 的 evidence/summary/`metadata.facts` 落库。round 2 又发现
+`repeated_action` 的原始 command 文本可经 Provider 问题体与 `metadata.facts`
+离开进程。该设计文档原本承诺“凭据形状不离开进程”，但实现只在部分字段上做了截断。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 把“有界（截断/限行）”等同于“安全” | 体积控制不解决凭据泄露，两者是正交属性 | 任何外部文本在进入系统的最早读取点即脱敏，而不是等到落库前 |
+| 只检查落库通道 | Provider 的 question/instructions、context、metadata 都是出站面 | 出站面清单化：question 体、context、evidence、metadata 一个都不能漏 |
+| 测试只断言最终返回值 | 泄密可能发生在中间通道，返回值干净不代表过程干净 | 密钥回归必须断言 question/state/db/mapping 四通道同时干净 |
+
+### 操作规范（已固化到 `herdr/observer/`）
+
+1. `context.read_log_tail` 读取即 `redact_text`；`engine._consolidate` 对 summary、`suspected_cause`、`metadata.facts` 字符串值、evidence excerpt/signature 做防御性二次脱敏。
+2. `signals.question_for` 拼装 Provider 问题前对 summary 脱敏——问题体是独立出站通道。
+3. 测试替身必须记录完整 question 体（而不只是 question id），否则问题体泄密无法被断言捕获。
+4. 新增任何“把文本送往 Provider 或落库”的路径时，回归测试用真实密钥形状（`sk-...`/`ghp_...`）断言四通道均不含明文。
+
+### 验证命令 / 守护测试
+
+```bash
+pytest tests/test_trajectory_observer.py::TestHardeningRegressions -q
+# 期望：全部通过；含 test_log_secrets_never_reach_provider_or_store 与
+# test_action_command_secrets_never_reach_provider_or_metadata
+```
+
+### 相关文档 / 关联证据
+
+- `herdr/observer/context.py:read_log_tail`
+- `herdr/observer/engine.py:_redact_evidence`
+- `herdr/observer/signals.py:question_for`
+- `herdr/supervisor/state.py:redact_text`
+- `docs/superpowers/specs/2026-09-20-trajectory-observer-design.md`
+
+---
