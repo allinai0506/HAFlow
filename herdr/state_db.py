@@ -1849,6 +1849,16 @@ def _trajectory_rows_in_conn(
     ]
 
 
+def _task_matches_run(task: Optional[Dict[str, Any]], run_id: str) -> bool:
+    if not task:
+        return False
+    try:
+        from herdr.trajectory import run_id_for_task
+        return str(run_id_for_task(task)) == str(run_id)
+    except Exception:
+        return False
+
+
 def read_context_compact_snapshot(
     run_id: str,
     *,
@@ -1883,11 +1893,11 @@ def read_context_compact_snapshot(
             ).fetchone()
             if task_row is not None:
                 candidate_task = _decode_task_row(task_row)
-                if not candidate_task.get("run_id") or str(candidate_task["run_id"]) == str(run_id):
+                if _task_matches_run(candidate_task, run_id):
                     selected_task = candidate_task
-            elif task is not None:
+            elif _task_matches_run(task, run_id):
                 selected_task = task
-        elif task is not None:
+        elif _task_matches_run(task, run_id):
             selected_task = task
 
         finding_rows = conn.execute(
