@@ -199,6 +199,7 @@ class ObservationScheduler:
         task: Optional[Dict[str, Any]] = None,
         store: Any = None,
         now: Optional[float] = None,
+        completion_event: Optional[threading.Event] = None,
     ) -> bool:
         """One terminal (agent_done) observation per run per controller process.
 
@@ -222,7 +223,7 @@ class ObservationScheduler:
                 return False  # not marked seen: a later gateway call may retry
             self._terminal_seen[run_id] = ts
             self._inflight.add(key)
-            started = self._spawn_locked(key, run_id, task, store)
+            started = self._spawn_locked(key, run_id, task, store, completion_event=completion_event)
             if not started:
                 # Not marked seen: a later gateway call may retry while the
                 # run is still agent_done (best-effort; advancing to a terminal
@@ -232,12 +233,13 @@ class ObservationScheduler:
 
     def _spawn_locked(
         self, key: str, run_id: str, task: Optional[Dict[str, Any]], store: Any,
+        completion_event: Optional[threading.Event] = None,
     ) -> bool:
         """Spawn the worker thread; caller holds the lock."""
         self._threads = [thread for thread in self._threads if thread.is_alive()]
         thread = threading.Thread(
             target=self._run,
-            args=(key, run_id, task, store),
+            args=(key, run_id, task, store, completion_event),
             name=f"trajectory-observer-{run_id}",
             daemon=True,
         )
@@ -259,7 +261,10 @@ class ObservationScheduler:
             if seen_at >= cutoff
         }
 
-    def _run(self, key: str, run_id: str, task: Optional[Dict[str, Any]], store: Any) -> None:
+    def _run(
+        self, key: str, run_id: str, task: Optional[Dict[str, Any]], store: Any,
+        completion_event: Optional[threading.Event] = None,
+    ) -> None:
         try:
             self._observe(run_id, task=task, store=store, config=self._config)
         except Exception as exc:  # a worker failure must die here
@@ -267,6 +272,8 @@ class ObservationScheduler:
         finally:
             with self._lock:
                 self._inflight.discard(key)
+            if completion_event is not None:
+                completion_event.set()
 
     def in_flight(self) -> List[str]:
         with self._lock:
@@ -326,6 +333,7 @@ def submit_terminal_observation(
     *,
     store: Any = None,
     now: Optional[float] = None,
+    completion_event: Optional[threading.Event] = None,
 ) -> bool:
     """Controller-side terminal trigger for ``agent_done`` (once per run).
 
@@ -339,7 +347,9 @@ def submit_terminal_observation(
         run_id = run_id_for_task(task)
     except Exception:
         return False
-    return _default_scheduler().submit_terminal(run_id, task=task, store=store, now=now)
+    return _default_scheduler().submit_terminal(
+        run_id, task=task, store=store, now=now, completion_event=completion_event,
+    )
 
 
 def reset_process_state() -> None:

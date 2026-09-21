@@ -1270,6 +1270,39 @@ def cmd_observe(args):
             print(f"  evidence: {json.dumps(item, ensure_ascii=False)}")
 
 
+def cmd_compact(args):
+    """Create a bounded ContextPack without mutating execution state."""
+    from herdr.context_compact import compact_run
+
+    store = _get_store()
+    task = None
+    if getattr(args, "task_id", None):
+        task = store.get_task(args.task_id)
+        if not task:
+            print(f"[COMPACT] task not found: {args.task_id}", file=sys.stderr)
+            sys.exit(1)
+    try:
+        provider = None
+        if not getattr(args, "no_model", False):
+            try:
+                from herdr.observer.harness import get_provider
+                provider = get_provider()
+            except Exception as exc:
+                print(f"[COMPACT] provider unavailable: {type(exc).__name__}: {exc}", file=sys.stderr)
+        pack = compact_run(args.run_id, task=task, store=store, provider=provider)
+    except Exception as exc:
+        print(f"[COMPACT] failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        sys.exit(1)
+    if getattr(args, "json", False):
+        print(json.dumps(pack.to_mapping(), ensure_ascii=False, indent=2))
+        return
+    print(f"ContextPack {pack.context_id} run={pack.run_id} sequence={pack.source_event_sequence}")
+    print(f"Goal: {pack.goal or '-'}")
+    print(f"State: {json.dumps(pack.current_state, ensure_ascii=False)}")
+    print(f"Verified facts: {len(pack.verified_facts)} | Findings: {len(pack.important_findings)}")
+    print(f"Evidence refs: {len(pack.evidence_refs)} | Artifact refs: {len(pack.artifact_refs)}")
+
+
 def set_status(task_id, new_status, verdict=None, note=None):
     data = load_tasks()
     task = find_task(data, task_id)
@@ -4156,6 +4189,15 @@ def main():
         help="只用确定性规则,不调用 Provider 确认(弱信号将被丢弃)",
     )
 
+    compact_cmd = sub.add_parser(
+        "compact",
+        help="为一个 Run 生成 bounded、可追溯的 Semantic ContextPack",
+    )
+    compact_cmd.add_argument("--run-id", required=True)
+    compact_cmd.add_argument("--task-id", default=None)
+    compact_cmd.add_argument("--json", action="store_true")
+    compact_cmd.add_argument("--no-model", action="store_true")
+
     args = parser.parse_args()
 
     if args.command == "add":
@@ -4437,6 +4479,9 @@ def main():
 
     elif args.command == "observe":
         cmd_observe(args)
+
+    elif args.command == "compact":
+        cmd_compact(args)
 
 
 if __name__ == "__main__":

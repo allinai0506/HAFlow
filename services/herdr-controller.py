@@ -3469,24 +3469,82 @@ def emit_done_if_allowed(task, report_text=None):
     recovery and registry-redelivery paths all funnel through this gateway,
     and the observation must be queued before the task can advance.
     """
-    _observer_terminal_checkpoint(task)
-    checkpoint = supervisor_checkpoint(task, "agent_done", report_text=report_text)
-    if checkpoint is None:
-        pending = None
-        if supervisor_harness is not None:
-            try:
-                pending = supervisor_harness.pending_intervention(task, _get_store())
-            except Exception:
-                pending = None
-        if pending:
-            _supervisor_log_pending(task, pending)
+    observer_complete = threading.Event()
+    supervisor_complete = threading.Event()
+    _observer_terminal_checkpoint(task, completion_event=observer_complete)
+    _schedule_context_compact(
+        task, wait_for=observer_complete, supervisor_done=supervisor_complete,
+    )
+    try:
+        checkpoint = supervisor_checkpoint(task, "agent_done", report_text=report_text)
+        if checkpoint is None:
+            pending = None
+            if supervisor_harness is not None:
+                try:
+                    pending = supervisor_harness.pending_intervention(task, _get_store())
+                except Exception:
+                    pending = None
+            if pending:
+                _supervisor_log_pending(task, pending)
+                return False
+            enqueue_coordinator_event(task, "done")
+            return True
+        if not supervisor_continue_flow(checkpoint):
             return False
         enqueue_coordinator_event(task, "done")
         return True
-    if not supervisor_continue_flow(checkpoint):
+    finally:
+        supervisor_complete.set()
+
+
+def _schedule_context_compact(task, wait_for=None, supervisor_done=None):
+    """Schedule working-memory creation without joining or affecting done flow."""
+    if not task:
         return False
-    enqueue_coordinator_event(task, "done")
-    return True
+    try:
+        from herdr.context_compact import compact_run_best_effort
+        from herdr.trajectory import run_id_for_task
+        store = _get_store()
+        target_task_id = str(task.get("task_id") or "")
+        target_run_id = str(run_id_for_task(task))
+        if not target_task_id or not target_run_id:
+            return False
+
+        def worker():
+            try:
+                if wait_for is not None:
+                    wait_for.wait()
+                if supervisor_done is not None:
+                    supervisor_done.wait()
+                from herdr import state_db
+                fresh_task = state_db.get_task(
+                    target_task_id, db_path=getattr(store, "db_path", None),
+                )
+                if not fresh_task or str(run_id_for_task(fresh_task)) != target_run_id:
+                    print(f"[CONTEXT COMPACT SKIPPED] task={target_task_id}: task/run identity changed")
+                    return
+                provider = None
+                try:
+                    from herdr.observer.harness import get_provider
+                    provider = get_provider()
+                except Exception as provider_exc:
+                    print(f"[CONTEXT COMPACT PROVIDER FALLBACK] task={task.get('task_id')}: {type(provider_exc).__name__}: {provider_exc}")
+                compact_run_best_effort(
+                    target_run_id, task=fresh_task, store=store, provider=provider,
+                )
+            except Exception as exc:  # defensive boundary isolation
+                print(f"[CONTEXT COMPACT WORKER SKIPPED] task={task.get('task_id')}: {type(exc).__name__}: {exc}")
+
+        thread = threading.Thread(
+            target=worker,
+            name=f"context-compact-{task.get('task_id', 'run')}",
+            daemon=True,
+        )
+        thread.start()
+        return True
+    except Exception as exc:
+        print(f"[CONTEXT COMPACT SKIPPED] task={task.get('task_id')}: {type(exc).__name__}: {exc}")
+        return False
 
 
 def _supervisor_log_pending(task, action):
@@ -3528,7 +3586,7 @@ def redeliver_done_event(task, now=None):
     return True
 
 
-def _observer_terminal_checkpoint(task, now=None):
+def _observer_terminal_checkpoint(task, now=None, completion_event=None):
     """Terminal Trajectory Observer checkpoint for agent_done.
 
     Fail-safe by contract: any failure only logs and returns False, so the
@@ -3536,12 +3594,29 @@ def _observer_terminal_checkpoint(task, now=None):
     observer's daemon worker (async, non-blocking).
     """
     if observer_harness is None or not task:
+        if completion_event is not None:
+            completion_event.set()
         return False
     try:
-        return observer_harness.submit_terminal_observation(
-            task, store=_get_store(), now=now
-        )
+        kwargs = {"store": _get_store(), "now": now}
+        if completion_event is not None:
+            kwargs["completion_event"] = completion_event
+        try:
+            submitted = observer_harness.submit_terminal_observation(task, **kwargs)
+        except TypeError as exc:
+            # Keep older test adapters/in-process integrations fail-safe while
+            # the built-in harness uses the completion barrier.
+            if completion_event is None or "completion_event" not in str(exc):
+                raise
+            kwargs.pop("completion_event", None)
+            submitted = observer_harness.submit_terminal_observation(task, **kwargs)
+            completion_event.set()
+        if not submitted and completion_event is not None:
+            completion_event.set()
+        return submitted
     except Exception as exc:
+        if completion_event is not None:
+            completion_event.set()
         print(f"[OBSERVER TERMINAL CHECK ERROR] task={task.get('task_id')}: {exc}")
         return False
 

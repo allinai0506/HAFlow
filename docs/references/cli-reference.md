@@ -199,3 +199,18 @@ herdr-deep-preflight --deep
 # 执行检测并在发现硬故障时自动剔除
 herdr-deep-preflight --deep --auto-disable
 ```
+
+## 5. `herdr-task compact` 命令
+
+为一个 Run 创建或读取 bounded、append-only 的 Semantic ContextPack。默认只保留引用和 Observation metadata；`--no-model` 使用确定性 fallback，不影响 Task/Workflow/Runtime。
+
+```bash
+herdr-task compact --run-id <run_id>
+herdr-task compact --run-id <run_id> --task-id <task_id> --json --no-model
+```
+
+- `--run-id`：必填的 Trajectory run 标识；
+- `--task-id`：可选，用于读取当前 Task goal/status/runtime；
+- `--json`：stdout 只输出 ContextPack JSON，诊断写 stderr；
+- `--no-model`：不调用 Provider，仍生成程序验证的 facts 和证据引用；
+- 相同 `source_event_sequence` 重复调用返回已有 latest ContextPack，不删除历史快照。
