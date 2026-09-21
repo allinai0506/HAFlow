@@ -473,6 +473,8 @@ def _bounded_semantic_items(
                 str(ref) for ref in value["refs"][:MAX_CONTEXT_REFS]
                 if len(str(ref)) <= MAX_CONTEXT_REF_CHARS
             ]
+            if not value["refs"]:
+                continue
         bounded.append(value)
     return bounded
 
@@ -644,6 +646,7 @@ def compact_run(
     if not cfg["enabled"]:
         raise RuntimeError("context compact is disabled")
     db_path = _db_path(store)
+    request_started_at = time.time()
     with _COMPACT_LOCK:
         source_sequence = state_db.latest_trajectory_sequence(run_id, db_path=db_path)
         recent_rows = state_db.list_trajectory_events(
@@ -740,7 +743,9 @@ def compact_run(
             artifact_refs = [item for item in artifact_refs if not (item.get("ref") in seen_artifact_refs or seen_artifact_refs.add(item.get("ref")))]
         artifact_refs = artifact_refs[:cfg["max_artifacts"]]
         important = important[:cfg["max_findings"]]
-        completed = selected["completed"][:MAX_COMPLETED_ITEMS]
+        # Candidates are ordered oldest-to-newest.  Keep the newest
+        # completion milestones when the working-memory cap is reached.
+        completed = selected["completed"][-MAX_COMPLETED_ITEMS:]
         open_issues = selected["open_issues"][:MAX_OPEN_ISSUES]
         next_focus = selected["next_focus"][:MAX_NEXT_FOCUS]
         pack = ContextPack(
@@ -752,7 +757,10 @@ def compact_run(
             important_findings=_redact_context(important), evidence_refs=evidence_refs,
             artifact_refs=_redact_context(artifact_refs), open_issues=_redact_context(open_issues),
             next_focus=_redact_context(next_focus), source_event_sequence=source_sequence,
-            created_at=float(now if now is not None else time.time()),
+            # Use request start ordering for concurrent saves.  ``now`` is
+            # retained only for callers that explicitly provide a stable
+            # logical timestamp in tests/imports.
+            created_at=float(now if now is not None else request_started_at),
             metadata=_redact_context({"analysis": {"completed": True, "open_issues": True, "next_focus": True}, "input_chars": len(json.dumps(compact_input, ensure_ascii=False)), "context_source_fingerprint": fingerprint}),
         )
         pack = _bound_context_pack(pack)

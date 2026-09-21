@@ -1744,6 +1744,15 @@ def save_context_pack(
             if fingerprint and existing_metadata.get("context_source_fingerprint") == fingerprint:
                 conn.commit()
                 return _decode_context_pack_row(latest)
+            # Compact requests may finish out of order.  The request start
+            # timestamp is the snapshot's logical ordering key, so a late
+            # older request must never become the latest snapshot.  A later
+            # A->B->A request still has a newer timestamp and is appended.
+            candidate_created_at = float(context_pack.get("created_at") or time.time())
+            latest_created_at = float(latest["created_at"] or 0.0)
+            if latest_created_at > candidate_created_at:
+                conn.commit()
+                return _decode_context_pack_row(latest)
         conn.execute(
             """INSERT INTO context_packs (
                 context_id, run_id, task_id, workflow_id, goal,

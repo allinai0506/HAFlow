@@ -3484,7 +3484,7 @@ def _schedule_context_compact(task, wait_for=None, supervisor_done=None):
                 fresh_task = state_db.get_task(
                     target_task_id, db_path=getattr(store, "db_path", None),
                 )
-                if not fresh_task or str(fresh_task.get("run_id") or "") != target_run_id:
+                if not fresh_task or str(run_id_for_task(fresh_task)) != target_run_id:
                     print(f"[CONTEXT COMPACT SKIPPED] task={target_task_id}: task/run identity changed")
                     return
                 provider = None

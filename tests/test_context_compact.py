@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import importlib
+import multiprocessing
 import signal
 import threading
 import time
@@ -23,6 +24,22 @@ from herdr.observation import ObservationStore, create_artifact_observation, cre
 from herdr.state_db import get_db_connection, upsert_trajectory_finding
 import herdr.state_db as state_db
 from herdr.trajectory import TrajectoryLedger
+
+
+def _save_context_pack_in_process(db_path, payload, gate=None, ready=None):
+    if ready is not None:
+        ready.set()
+    if gate is not None:
+        gate.wait(10)
+    state_db.save_context_pack(payload, db_path=Path(db_path))
+
+
+def _direct_pack(context_id, fingerprint, created_at, run_id="run-concurrent"):
+    return ContextPack(
+        context_id=context_id, run_id=run_id, task_id=None, workflow_id=None,
+        goal="g", source_event_sequence=7, created_at=created_at,
+        metadata={"context_source_fingerprint": fingerprint},
+    ).to_mapping()
 
 
 def _task(run_id: str = "run-1"):
@@ -616,7 +633,7 @@ def test_bound_context_pack_terminates_on_large_extra_and_long_ref():
         signal.alarm(0)
         signal.signal(signal.SIGALRM, previous)
     assert len(json.dumps(result.to_mapping(), ensure_ascii=False)) <= 20000
-    assert result.completed[0]["text"] == "keep"
+    assert result.completed == []
 
 
 def test_goal_none_is_safe_in_over_budget_compact(tmp_path: Path):
@@ -689,3 +706,77 @@ def test_done_flow_waits_for_supervisor_after_observer_order(tmp_path: Path, mon
     latest = state_db.get_latest_context_pack(task["run_id"], db_path=db_path)
     assert latest is not None
     assert latest["current_state"]["task_status"] == "rework"
+
+
+def test_late_old_process_cannot_replace_newer_context_snapshot(tmp_path: Path):
+    db_path = tmp_path / "state-concurrent.db"
+    get_db_connection(db_path).close()
+    ctx = multiprocessing.get_context("spawn")
+    gate = ctx.Event()
+    ready = ctx.Event()
+    old = ctx.Process(
+        target=_save_context_pack_in_process,
+        args=(str(db_path), _direct_pack("ctx-old", "A", 10.0), gate, ready),
+    )
+    new = ctx.Process(
+        target=_save_context_pack_in_process,
+        args=(str(db_path), _direct_pack("ctx-new", "B", 20.0)),
+    )
+    old.start()
+    assert ready.wait(10)
+    new.start()
+    new.join(10)
+    assert new.exitcode == 0
+    gate.set()
+    old.join(10)
+    assert old.exitcode == 0
+    latest = state_db.get_latest_context_pack("run-concurrent", db_path=db_path)
+    assert latest is not None
+    assert latest["context_id"] == "ctx-new"
+    assert latest["metadata"]["context_source_fingerprint"] == "B"
+
+
+def test_legacy_task_without_run_id_is_accepted_after_async_refresh(tmp_path: Path, monkeypatch):
+    controller = importlib.import_module("services.herdr-controller")
+    db_path = tmp_path / "legacy-task.db"
+    store = ObservationStore(db_path)
+    task = {"task_id": "legacy-task", "status": "agent_done", "goal": "legacy"}
+    state_db.save_task(task, db_path=db_path)
+    run_id = "run_legacy-task"
+    TrajectoryLedger(db_path).append_event({"run_id": run_id, "task_id": task["task_id"], "event_type": "agent_done"})
+    monkeypatch.setattr(controller, "_get_store", lambda: store)
+    monkeypatch.setattr("herdr.observer.harness.get_provider", lambda: None)
+    assert controller._schedule_context_compact(task)
+    deadline = time.time() + 3
+    while time.time() < deadline and state_db.get_latest_context_pack(run_id, db_path=db_path) is None:
+        time.sleep(0.02)
+    assert state_db.get_latest_context_pack(run_id, db_path=db_path) is not None
+
+
+def test_completed_cap_keeps_latest_completion_milestones(tmp_path: Path):
+    db_path = tmp_path / "latest-completed.db"
+    ledger = TrajectoryLedger(db_path)
+    for index in range(30):
+        ledger.append_event({"run_id": "run-latest-completed", "event_type": "task_completed", "metadata": {"milestone": index}})
+    pack = compact_run(
+        "run-latest-completed",
+        task={"task_id": "task-latest-completed", "run_id": "run-latest-completed", "goal": "g"},
+        store=ObservationStore(db_path), provider=None,
+    )
+    refs = [item["refs"][0] for item in pack.completed]
+    assert len(refs) == 20
+    assert "evt_30" in refs
+    assert "evt_1" not in refs
+
+
+def test_bounding_drops_semantic_items_when_all_refs_are_filtered(tmp_path: Path):
+    pack = ContextPack(
+        context_id="ctx-ref-bound", run_id="run-ref-bound", task_id=None,
+        workflow_id=None, goal="g", completed=[{"text": "done", "refs": ["x" * 513]}],
+        open_issues=[{"text": "issue", "refs": ["y" * 513]}],
+        next_focus=[{"text": "focus", "refs": ["z" * 513]}],
+    )
+    bounded = _bound_context_pack(pack)
+    assert bounded.completed == []
+    assert bounded.open_issues == []
+    assert bounded.next_focus == []
