@@ -81,6 +81,37 @@ def test_text_bytes_and_json_string_are_redacted_before_hashing(tmp_path: Path):
     assert "VERYSECRET123" not in Path(json_text.content_ref).read_text(encoding="utf-8")
 
 
+@pytest.mark.parametrize("content", [
+    "client_secret=VERYSECRET123\naccess_token=VERYSECRET123\nrefresh_token=VERYSECRET123\nprivate_key=VERYSECRET123",
+    b"client_secret=VERYSECRET123\naccess_token=VERYSECRET123\nrefresh_token=VERYSECRET123\nprivate_key=VERYSECRET123",
+    "client-secret=VERYSECRET123\naccess-token=VERYSECRET123\nrefresh-token=VERYSECRET123\nprivate-key=VERYSECRET123",
+])
+def test_plain_text_credential_aliases_redact_content_excerpt_metadata_and_hash(tmp_path: Path, content):
+    store = ObservationStore(tmp_path / "state.db")
+    excerpt = "client-secret=VERYSECRET123"
+    observation = create_observation(
+        run_id=f"run-text-alias-{hash(content)}",
+        source_type="agent_log",
+        source_ref=f"pane:text-alias-{hash(content)}",
+        content=content,
+        media_type="text/plain",
+        excerpt=excerpt,
+        metadata={"tool_output": "access-token=VERYSECRET123"},
+        store=store,
+    )
+
+    stored = Path(observation.content_ref).read_bytes()
+    with get_db_connection(store.db_path) as conn:
+        metadata_json = conn.execute(
+            "SELECT metadata_json FROM observations WHERE observation_id = ?",
+            (observation.observation_id,),
+        ).fetchone()[0]
+    assert b"VERYSECRET123" not in stored
+    assert "VERYSECRET123" not in (observation.excerpt or "")
+    assert "VERYSECRET123" not in metadata_json
+    assert observation.sha256 == hashlib.sha256(stored).hexdigest()
+
+
 def test_credential_key_variants_redact_content_metadata_and_excerpt(tmp_path: Path):
     store = ObservationStore(tmp_path / "state.db")
     keys = (

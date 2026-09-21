@@ -29,7 +29,11 @@ MAX_CRITERIA_ITEMS = 6
 # inline key=value assignments. Patterns are conservative; a match means the
 # whole value is replaced by a redaction marker.
 _SECRET_PATTERNS = (
-    re.compile(r"(?i)\b(api[_-]?key|secret|token|password|passwd|authorization)\b\s*[:=]\s*\S+"),
+    re.compile(
+        r"(?i)\b(api[_-]?key|apikey|client[_-]?secret|access[_-]?token|"
+        r"refresh[_-]?token|private[_-]?key|secret|token|password|passwd|authorization)"
+        r"\b\s*[:=]\s*\S+"
+    ),
     re.compile(r"(?i)(?:\b|(?<=_))sk-[A-Za-z0-9_\-\*]{8,}"),
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
     re.compile(r"\bbearer\s+[A-Za-z0-9\-._~\+\/]{8,}", re.IGNORECASE),
