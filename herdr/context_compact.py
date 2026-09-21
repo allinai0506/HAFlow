@@ -683,38 +683,30 @@ def compact_run(
     db_path = _db_path(store)
     request_started_at = time.time()
     with _COMPACT_LOCK:
-        source_sequence = state_db.latest_trajectory_sequence(run_id, db_path=db_path)
-        recent_rows = state_db.list_trajectory_events(
-            run_id, limit=cfg["max_recent_events"], desc=True, db_path=db_path,
+        snapshot = state_db.read_context_compact_snapshot(
+            run_id,
+            task=task,
+            max_recent_events=cfg["max_recent_events"],
+            max_findings=cfg["max_findings"],
+            max_observations=cfg["max_observations"],
+            verification_limit=10,
+            db_path=db_path,
         )
-        verification_rows = state_db.list_trajectory_events(
-            run_id, event_type="verification_completed", limit=10, desc=True, db_path=db_path,
-        )
+        source_sequence = snapshot["source_sequence"]
+        recent_rows = snapshot["recent_rows"]
+        verification_rows = snapshot["verification_rows"]
         recent_rows = [TrajectoryLedger._decode(event) for event in recent_rows]
         verification_rows = [TrajectoryLedger._decode(event) for event in verification_rows]
         by_id = {_event_id(event): event for event in recent_rows + verification_rows}
         all_events = sorted(by_id.values(), key=lambda event: int(event.get("sequence") or 0))
-        latest = state_db.get_latest_context_pack(run_id, db_path=db_path)
+        latest = snapshot["latest"]
         previous = ContextPack.from_mapping(latest) if latest else None
         events = [event for event in all_events if event in recent_rows]
-        findings = _findings(run_id, db_path, cfg["max_findings"])
-        observations = _observation_metadata(run_id, db_path, cfg["max_observations"])
+        findings = snapshot["findings"]
+        observations = snapshot["observations"]
         artifacts = _artifact_refs(events, cfg["max_artifacts"])
-        if task is None:
-            task_id = next((event.get("task_id") for event in reversed(all_events) if event.get("task_id")), None)
-            if task_id:
-                candidate_task = state_db.get_task(str(task_id), db_path=db_path)
-                if candidate_task and candidate_task.get("run_id") and str(candidate_task["run_id"]) != str(run_id):
-                    candidate_task = None
-                task = candidate_task
-        source_version = state_db.get_context_source_version(
-            run_id,
-            (task or {}).get("task_id"),
-            cfg["max_findings"],
-            db_path=db_path,
-        )
-        source_version["task_id"] = (task or {}).get("task_id")
-        source_version["trajectory_sequence"] = source_sequence
+        task = snapshot["task"]
+        source_version = snapshot["source_version"]
         goal = _goal(task, all_events)
         current_state = _current_state(task)
         fingerprint = _source_fingerprint(run_id, source_sequence, task, current_state, findings, observations)

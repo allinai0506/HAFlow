@@ -50,7 +50,33 @@ def _source_version(sequence):
         "task_updated_at": None,
         "finding_fingerprint": hashlib.sha256(b"[]").hexdigest(),
         "finding_limit": 0,
+        "observation_fingerprint": hashlib.sha256(b"[]").hexdigest(),
+        "observation_limit": 0,
     }
+
+
+class _BarrierReducer:
+    def __init__(self, started, release):
+        self.started = started
+        self.release = release
+
+    def judge_many(self, questions, state):
+        self.started.set()
+        assert self.release.wait(10)
+        return {key: type("Result", (), {"value": 1.0})() for key in questions}
+
+    def choose(self, question, state, options):
+        return type("Result", (), {"value": next(iter(options))})()
+
+
+def _compact_run_in_process(db_path, task, started, release):
+    from herdr.context_compact import compact_run
+    from herdr.observation import ObservationStore
+
+    compact_run(
+        task["run_id"], task=task, store=ObservationStore(Path(db_path)),
+        provider=_BarrierReducer(started, release),
+    )
 
 
 def _task(run_id: str = "run-1"):
@@ -774,6 +800,82 @@ def test_older_request_with_newer_source_version_can_win_after_waiting(tmp_path:
     latest = state_db.get_latest_context_pack("run-source-version", db_path=db_path)
     assert latest is not None
     assert latest["context_id"] == "ctx-new-source"
+
+
+def test_compact_snapshot_rejects_task_and_finding_revision_after_read(tmp_path: Path):
+    db_path = tmp_path / "compact-task-finding-race.db"
+    store = ObservationStore(db_path)
+    task = {"task_id": "task-race", "run_id": "run-race", "status": "running", "goal": "g"}
+    state_db.save_task(task, db_path=db_path)
+    ledger = TrajectoryLedger(db_path)
+    ledger.append_event({"run_id": task["run_id"], "task_id": task["task_id"], "event_type": "task_started"})
+    upsert_trajectory_finding(_finding(run_id=task["run_id"], finding_id="finding-race"), db_path=db_path)
+    baseline = compact_run(task["run_id"], task=task, store=store, provider=None)
+    assert baseline.metadata["context_source_version"]["observation_fingerprint"]
+    ledger.append_event({"run_id": task["run_id"], "task_id": task["task_id"], "event_type": "progress"})
+    ctx = multiprocessing.get_context("spawn")
+    started, release = ctx.Event(), ctx.Event()
+    process = ctx.Process(target=_compact_run_in_process, args=(str(db_path), task, started, release))
+    process.start()
+    assert started.wait(10)
+    state_db.save_task(dict(task, status="rework"), db_path=db_path)
+    upsert_trajectory_finding(
+        dict(_finding(run_id=task["run_id"], finding_id="finding-race"), summary="revised finding"),
+        db_path=db_path,
+    )
+    release.set()
+    process.join(10)
+    assert process.exitcode == 0
+    latest = state_db.get_latest_context_pack(task["run_id"], db_path=db_path)
+    assert latest is not None
+    assert latest["context_id"] == baseline.context_id
+
+
+def test_compact_snapshot_rejects_observation_added_after_read_without_event(tmp_path: Path):
+    db_path = tmp_path / "compact-observation-race.db"
+    store = ObservationStore(db_path)
+    task = {"task_id": "task-observation-race", "run_id": "run-observation-race", "status": "running", "goal": "g"}
+    state_db.save_task(task, db_path=db_path)
+    ledger = TrajectoryLedger(db_path)
+    ledger.append_event({"run_id": task["run_id"], "task_id": task["task_id"], "event_type": "task_started"})
+    create_observation(
+        run_id=task["run_id"], task_id=task["task_id"], source_type="agent_log",
+        source_ref="old", content="old", excerpt="old", store=store,
+    )
+    upsert_trajectory_finding(_finding(run_id=task["run_id"], finding_id="finding-observation-race"), db_path=db_path)
+    baseline = compact_run(task["run_id"], task=task, store=store, provider=None)
+    assert baseline.metadata["context_source_version"]["observation_fingerprint"]
+    ledger.append_event({"run_id": task["run_id"], "task_id": task["task_id"], "event_type": "progress"})
+    ctx = multiprocessing.get_context("spawn")
+    started, release = ctx.Event(), ctx.Event()
+    process = ctx.Process(target=_compact_run_in_process, args=(str(db_path), task, started, release))
+    process.start()
+    assert started.wait(10)
+    added = create_observation(
+        run_id=task["run_id"], task_id=task["task_id"], source_type="agent_log",
+        source_ref="new", content="new", excerpt="new", store=store,
+    )
+    release.set()
+    process.join(10)
+    assert process.exitcode == 0
+    latest = state_db.get_latest_context_pack(task["run_id"], db_path=db_path)
+    assert latest is not None
+    assert latest["context_id"] == baseline.context_id
+    assert added.observation_id not in latest["evidence_refs"]
+
+
+def test_compact_source_version_unchanged_saves_new_snapshot(tmp_path: Path):
+    db_path = tmp_path / "compact-source-stable.db"
+    store = ObservationStore(db_path)
+    task = {"task_id": "task-source-stable", "run_id": "run-source-stable", "status": "running", "goal": "g"}
+    state_db.save_task(task, db_path=db_path)
+    ledger = TrajectoryLedger(db_path)
+    ledger.append_event({"run_id": task["run_id"], "task_id": task["task_id"], "event_type": "task_started"})
+    first = compact_run(task["run_id"], task=task, store=store, provider=None)
+    ledger.append_event({"run_id": task["run_id"], "task_id": task["task_id"], "event_type": "progress"})
+    second = compact_run(task["run_id"], task=task, store=store, provider=None)
+    assert second.context_id != first.context_id
+    assert get_latest_context(task["run_id"], store=store) == second
 
 
 def test_new_completion_survives_previous_twenty_after_leaving_recent_window(tmp_path: Path):

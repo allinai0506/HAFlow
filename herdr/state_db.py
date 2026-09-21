@@ -671,32 +671,34 @@ def save_task(
             conn.close()
 
 
+def _decode_task_row(row: sqlite3.Row) -> Dict[str, Any]:
+    payload = json.loads(row["payload_json"] or "{}")
+    task = dict(payload)
+    task.update({
+        "task_id": row["task_id"],
+        "workflow_id": row["workflow_id"],
+        "node": row["node"],
+        "stage": row["stage"],
+        "agent": row["agent"],
+        "status": row["status"],
+        "stage_verdict": row["stage_verdict"],
+        "stage_verdict_note": row["stage_verdict_note"],
+        "pane_id": row["pane_id"],
+        "goal": row["goal"],
+        "blocker": row["blocker"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    })
+    return task
+
+
 def get_task(task_id: str, db_path: Optional[Path] = None) -> Optional[Dict[str, Any]]:
     """Fetch a single task by its task_id."""
     conn = get_db_connection(db_path)
     try:
         cur = conn.execute("SELECT * FROM tasks WHERE task_id = ?", (task_id,))
         row = cur.fetchone()
-        if not row:
-            return None
-        payload = json.loads(row["payload_json"] or "{}")
-        t = dict(payload)
-        t.update({
-            "task_id": row["task_id"],
-            "workflow_id": row["workflow_id"],
-            "node": row["node"],
-            "stage": row["stage"],
-            "agent": row["agent"],
-            "status": row["status"],
-            "stage_verdict": row["stage_verdict"],
-            "stage_verdict_note": row["stage_verdict_note"],
-            "pane_id": row["pane_id"],
-            "goal": row["goal"],
-            "blocker": row["blocker"],
-            "created_at": row["created_at"],
-            "updated_at": row["updated_at"],
-        })
-        return t
+        return _decode_task_row(row) if row else None
     finally:
         conn.close()
 
@@ -1568,11 +1570,30 @@ def _finding_source_fingerprint(findings: List[Dict[str, Any]]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _observation_source_fingerprint(observations: List[Dict[str, Any]]) -> str:
+    payload = json.dumps(observations, sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _compact_observation_metadata(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return [
+        {
+            "observation_id": row["observation_id"],
+            "source_type": row["source_type"],
+            "source_ref": row["source_ref"],
+            "sha256": row["sha256"],
+            "excerpt": row.get("excerpt"),
+        }
+        for row in rows
+    ]
+
+
 def _context_source_version_in_conn(
     conn: sqlite3.Connection,
     run_id: str,
     task_id: Optional[str],
     finding_limit: int,
+    observation_limit: int = 20,
 ) -> Dict[str, Any]:
     sequence_row = conn.execute(
         "SELECT COALESCE(MAX(sequence), 0) AS sequence FROM events WHERE run_id = ? AND source = 'trajectory'",
@@ -1598,12 +1619,25 @@ def _context_source_version_in_conn(
         (run_id, int(finding_limit)),
     ).fetchall()
     findings = [_decode_finding_row(row) for row in finding_rows]
+    observation_rows = conn.execute(
+        """SELECT * FROM observations
+           WHERE run_id = ?
+           ORDER BY created_at DESC, observation_id DESC
+           LIMIT ?""",
+        (run_id, int(observation_limit)),
+    ).fetchall()
+    observations = _compact_observation_metadata(
+        [_decode_observation_row(row) for row in observation_rows]
+    )
+    observations.reverse()
     return {
         "task_id": task_id,
         "trajectory_sequence": int(sequence_row["sequence"] or 0),
         "task_updated_at": task_updated_at,
         "finding_fingerprint": _finding_source_fingerprint(findings),
         "finding_limit": int(finding_limit),
+        "observation_fingerprint": _observation_source_fingerprint(observations),
+        "observation_limit": int(observation_limit),
     }
 
 
@@ -1611,12 +1645,13 @@ def get_context_source_version(
     run_id: str,
     task_id: Optional[str],
     finding_limit: int,
+    observation_limit: int = 20,
     db_path: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """Read the compact source watermark/revisions from one SQLite snapshot."""
     conn = get_db_connection(db_path)
     try:
-        return _context_source_version_in_conn(conn, run_id, task_id, finding_limit)
+        return _context_source_version_in_conn(conn, run_id, task_id, finding_limit, observation_limit)
     finally:
         conn.close()
 
@@ -1780,6 +1815,141 @@ def _decode_context_pack_row(row: sqlite3.Row) -> Dict[str, Any]:
     }
 
 
+def _trajectory_rows_in_conn(
+    conn: sqlite3.Connection,
+    run_id: str,
+    *,
+    event_type: Optional[str] = None,
+    limit: int,
+    desc: bool = True,
+) -> List[Dict[str, Any]]:
+    query = "SELECT * FROM events WHERE run_id = ? AND source = 'trajectory'"
+    params: List[Any] = [run_id]
+    if event_type is not None:
+        query += " AND event_type = ?"
+        params.append(event_type)
+    direction = "DESC" if desc else "ASC"
+    query += f" ORDER BY sequence {direction}, id {direction} LIMIT ?"
+    params.append(int(limit))
+    return [
+        {
+            "id": row["id"],
+            "workflow_id": row["workflow_id"],
+            "node_id": row["node_id"],
+            "task_id": row["task_id"],
+            "agent_id": row["agent_id"],
+            "event_type": row["event_type"],
+            "timestamp": row["timestamp"],
+            "source": row["source"],
+            "run_id": row["run_id"],
+            "sequence": row["sequence"],
+            "payload": json.loads(row["payload_json"] or "{}"),
+        }
+        for row in conn.execute(query, tuple(params)).fetchall()
+    ]
+
+
+def read_context_compact_snapshot(
+    run_id: str,
+    *,
+    task: Optional[Dict[str, Any]] = None,
+    max_recent_events: int = 100,
+    max_findings: int = 10,
+    max_observations: int = 20,
+    verification_limit: int = 10,
+    db_path: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Read all compact inputs and their source version in one SQLite snapshot."""
+    conn = get_db_connection(db_path)
+    try:
+        conn.execute("BEGIN;")
+        recent_rows = _trajectory_rows_in_conn(
+            conn, run_id, limit=max_recent_events, desc=True,
+        )
+        verification_rows = _trajectory_rows_in_conn(
+            conn, run_id, event_type="verification_completed", limit=verification_limit, desc=True,
+        )
+        all_rows = recent_rows + verification_rows
+        requested_task_id = (task or {}).get("task_id")
+        if requested_task_id is None:
+            requested_task_id = next(
+                (row.get("task_id") for row in reversed(all_rows) if row.get("task_id")),
+                None,
+            )
+        selected_task = None
+        if requested_task_id:
+            task_row = conn.execute(
+                "SELECT * FROM tasks WHERE task_id = ?", (str(requested_task_id),)
+            ).fetchone()
+            if task_row is not None:
+                candidate_task = _decode_task_row(task_row)
+                if not candidate_task.get("run_id") or str(candidate_task["run_id"]) == str(run_id):
+                    selected_task = candidate_task
+            elif task is not None:
+                selected_task = task
+        elif task is not None:
+            selected_task = task
+
+        finding_rows = conn.execute(
+            """SELECT * FROM trajectory_findings
+               WHERE run_id = ?
+               ORDER BY CASE severity
+                          WHEN 'critical' THEN 3
+                          WHEN 'warning' THEN 2
+                          ELSE 1
+                        END DESC,
+                        created_at DESC, rowid DESC
+               LIMIT ?""",
+            (run_id, int(max_findings)),
+        ).fetchall()
+        findings = [_decode_finding_row(row) for row in finding_rows]
+        observation_rows = conn.execute(
+            """SELECT * FROM observations
+               WHERE run_id = ?
+               ORDER BY created_at DESC, observation_id DESC
+               LIMIT ?""",
+            (run_id, int(max_observations)),
+        ).fetchall()
+        observations = _compact_observation_metadata(
+            [_decode_observation_row(row) for row in observation_rows]
+        )
+        observations.reverse()
+        sequence_row = conn.execute(
+            "SELECT COALESCE(MAX(sequence), 0) AS sequence FROM events WHERE run_id = ? AND source = 'trajectory'",
+            (run_id,),
+        ).fetchone()
+        source_sequence = int(sequence_row["sequence"] or 0)
+        source_version = _context_source_version_in_conn(
+            conn,
+            run_id,
+            (selected_task or {}).get("task_id"),
+            max_findings,
+            max_observations,
+        )
+        source_version["trajectory_sequence"] = source_sequence
+        latest_row = conn.execute(
+            """SELECT * FROM context_packs WHERE run_id = ?
+               ORDER BY created_at DESC, rowid DESC LIMIT 1""",
+            (run_id,),
+        ).fetchone()
+        conn.commit()
+        return {
+            "source_sequence": source_sequence,
+            "recent_rows": recent_rows,
+            "verification_rows": verification_rows,
+            "task": selected_task,
+            "findings": findings,
+            "observations": observations,
+            "source_version": source_version,
+            "latest": _decode_context_pack_row(latest_row) if latest_row is not None else None,
+        }
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def save_context_pack(
     context_pack: Dict[str, Any],
     db_path: Optional[Path] = None,
@@ -1806,6 +1976,7 @@ def save_context_pack(
                 context_pack["run_id"],
                 source_version.get("task_id"),
                 int(source_version.get("finding_limit") or 0),
+                int(source_version.get("observation_limit") or 0),
             )
             if current_source_version != source_version:
                 conn.commit()
