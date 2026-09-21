@@ -3418,7 +3418,12 @@ def emit_done_if_allowed(task, report_text=None):
     checkpoint is rate-gated/skipped, a still-pending enforced intervention
     from the events ledger keeps blocking redelivery until a newer decision
     or a new agent_done transition supersedes it.
+
+    The terminal Trajectory Observer checkpoint also lives here: listener,
+    recovery and registry-redelivery paths all funnel through this gateway,
+    and the observation must be queued before the task can advance.
     """
+    _observer_terminal_checkpoint(task)
     checkpoint = supervisor_checkpoint(task, "agent_done", report_text=report_text)
     if checkpoint is None:
         pending = None
@@ -4357,11 +4362,9 @@ def registry_watcher():
                         print(f"[OBSERVER CHECK ERROR] task={task_id}: {exc}")
 
                 # ---- done 事件投递:受 attention episode 节流 + 监督网关把关 ----
+                # terminal Observer checkpoint 已挂在统一 Done Gateway
+                # (emit_done_if_allowed) 内,覆盖 listener/recovery/redelivery 全部路径。
                 if status == "agent_done":
-                    # Terminal Observer checkpoint (once per run per process),
-                    # BEFORE the done redelivery: verification_failure lives at
-                    # agent_done and must not be swallowed by the periodic gate.
-                    _observer_terminal_checkpoint(task, now=now)
                     redeliver_done_event(task, now=now)
 
                 # ---- blocked 事件:此前投递失败会被静默吞掉,这里补投递护栏 ----

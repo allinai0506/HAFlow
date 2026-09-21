@@ -217,12 +217,15 @@ class ObservationScheduler:
                 1 for entry in self._inflight if str(entry).startswith("terminal:")
             )
             if terminal_inflight >= self._max_concurrent:
-                return False  # not marked seen: retried on the next tick
+                return False  # not marked seen: a later gateway call may retry
             self._terminal_seen[run_id] = ts
             self._inflight.add(key)
             started = self._spawn_locked(key, run_id, task, store)
             if not started:
-                self._terminal_seen.pop(run_id, None)  # retry on the next tick
+                # Not marked seen: a later gateway call may retry while the
+                # run is still agent_done (best-effort; advancing to a terminal
+                # status can end the opportunity).
+                self._terminal_seen.pop(run_id, None)
             return started
 
     def _spawn_locked(

@@ -2363,6 +2363,147 @@ class TestProviderConstructionIsolation:
 # Scheduler (controller-side, non-blocking, failure isolated)
 # ---------------------------------------------------------------------------
 
+class TestDoneGatewayTerminalCheckpoint:
+    """Terminal observation is hooked to the unified Done Gateway."""
+
+    @staticmethod
+    def _controller():
+        return importlib.import_module("services.herdr-controller")
+
+    @staticmethod
+    def _recorder(submitted):
+        class Recorder:
+            def submit_terminal_observation(self, task, store=None, now=None):
+                submitted.append(task.get("task_id"))
+                return True
+
+        return Recorder()
+
+    def test_listener_idle_path_submits_terminal_observation(self, monkeypatch):
+        controller = self._controller()
+        submitted: List[str] = []
+        state = {"status": "working"}
+        monkeypatch.setattr(controller, "observer_harness", self._recorder(submitted))
+        monkeypatch.setattr(controller, "supervisor_harness", None)
+        monkeypatch.setattr(controller, "enqueue_coordinator_event", lambda *a, **k: None)
+        monkeypatch.setattr(
+            controller, "get_task",
+            lambda task_id: {"task_id": task_id, "workflow_id": "wf", "stage": "impl",
+                             "status": state["status"]},
+        )
+
+        def fake_set_status(task_id, status, **kwargs):
+            state["status"] = status
+            return True
+
+        monkeypatch.setattr(controller, "set_task_status", fake_set_status)
+        monkeypatch.setenv("HERDR_CONTROLLER_TEST", "1")
+
+        controller.handle_event("t-listener", "idle")
+
+        assert state["status"] == "agent_done"
+        assert submitted == ["t-listener"]
+
+    def test_recovery_path_submits_terminal_observation(self, monkeypatch):
+        controller = self._controller()
+        submitted: List[str] = []
+        task = {"task_id": "t-recovery", "workflow_id": "wf", "status": "agent_done"}
+        monkeypatch.setattr(controller, "observer_harness", self._recorder(submitted))
+        monkeypatch.setattr(controller, "supervisor_harness", None)
+        monkeypatch.setattr(controller, "enqueue_coordinator_event", lambda *a, **k: None)
+        monkeypatch.setattr(controller, "get_task", lambda task_id: task)
+
+        controller.reconcile_task_state("t-recovery")
+
+        assert submitted == ["t-recovery"]
+
+    def test_repeated_done_redelivery_submits_terminal_once(self, monkeypatch):
+        controller = self._controller()
+        import herdr.observer.harness as observer_harness_module
+
+        observed: List[str] = []
+        scheduler = observer_harness_module.ObservationScheduler(
+            observe=lambda run_id, **kwargs: observed.append(run_id) or [],
+            config={**observer_config.load_config(path="", env={}),
+                    "enabled": True, "provider": "rule", "live_probe": False},
+        )
+
+        class Adapter:
+            def submit_terminal_observation(self, task, store=None, now=None):
+                return scheduler.submit_terminal(
+                    task.get("run_id"), task=task, store=store, now=now,
+                )
+
+        monkeypatch.setattr(controller, "observer_harness", Adapter())
+        monkeypatch.setattr(controller, "supervisor_harness", None)
+        monkeypatch.setattr(controller, "enqueue_coordinator_event", lambda *a, **k: None)
+        task = {"task_id": "t-redeliver", "workflow_id": "wf", "status": "agent_done",
+                "run_id": "run-redeliver"}
+
+        for _ in range(3):
+            assert controller.emit_done_if_allowed(task) is True
+        scheduler.drain(timeout=5)
+
+        assert observed == ["run-redeliver"]
+
+    def test_terminal_submit_failure_does_not_block_done_flow(self, monkeypatch):
+        controller = self._controller()
+        attempts: List[str] = []
+
+        class Boom:
+            def submit_terminal_observation(self, task, store=None, now=None):
+                attempts.append(task.get("task_id"))
+                raise RuntimeError("observer unavailable")
+
+        monkeypatch.setattr(controller, "observer_harness", Boom())
+        monkeypatch.setattr(controller, "supervisor_harness", None)
+        enqueued: List[tuple] = []
+        monkeypatch.setattr(
+            controller, "enqueue_coordinator_event",
+            lambda task, event: enqueued.append((task["task_id"], event)),
+        )
+        task = {"task_id": "t-fail", "workflow_id": "wf", "status": "agent_done"}
+
+        assert controller.emit_done_if_allowed(task) is True
+        assert attempts == ["t-fail"]  # the checkpoint was attempted...
+        assert enqueued == [("t-fail", "done")]  # ...and the done flow still ran
+
+    def test_gateway_terminal_observation_produces_verification_failure(
+        self, tmp_path: Path, monkeypatch,
+    ):
+        controller = self._controller()
+        import herdr.observer.harness as observer_harness_module
+
+        observer_harness_module.reset_process_state()
+        try:
+            store = SQLiteStateStore(tmp_path / "state.db")
+            ledger = TrajectoryLedger(store.db_path)
+            _append(ledger, [
+                {"run_id": "run-gateway", "event_type": "run_started", "task_id": "task-1",
+                 "timestamp": 100.0},
+                {"run_id": "run-gateway", "event_type": "agent_started", "task_id": "task-1",
+                 "timestamp": 101.0},
+                _verification("run-gateway", False, "tevd-last"),
+                {"run_id": "run-gateway", "event_type": "task_status_changed",
+                 "status": "agent_done", "task_id": "task-1", "timestamp": 105.0},
+            ])
+            task = _task(run_id="run-gateway", status="agent_done",
+                         runtime={"status": "running", "agent": "claude"})
+            store.save_task(task)
+            monkeypatch.setattr(controller, "observer_harness", observer_harness_module)
+            monkeypatch.setattr(controller, "supervisor_harness", None)
+            monkeypatch.setattr(controller, "_get_store", lambda: store)
+            monkeypatch.setattr(controller, "enqueue_coordinator_event", lambda *a, **k: None)
+
+            assert controller.emit_done_if_allowed(task) is True
+            observer_harness_module._default_scheduler().drain(timeout=10)
+
+            rows = list_trajectory_findings("run-gateway", db_path=store.db_path)
+            assert [row["finding_type"] for row in rows] == ["verification_failure"]
+        finally:
+            observer_harness_module.reset_process_state()
+
+
 class TestObservationScheduler:
     def test_submit_is_non_blocking_and_dedupes_in_flight_runs(self):
         gate = threading.Event()

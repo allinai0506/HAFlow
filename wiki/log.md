@@ -839,3 +839,7 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 ## [2026-09-20] fix | Trajectory Observer 三项收尾：agent_done terminal checkpoint / 脱敏先于 cutoff / 身份优先级 A-B-C
 - Updated [[trajectory-observer]]: ① `agent_done` 在 `redeliver_done_event()` 前获得独立 terminal observation（独立 gate，每 run 每 controller 进程一次，异步不阻塞 done flow）；② `bound_transcript` 改为先脱敏再 bytes/lines/chars 截断，文件尾部先读 8192B overlap 并丢弃不完整行，杜绝 key prefix 被 cutoff 切断后泄漏；③ 身份优先级 A(session 匹配)/B(agent_name 实例名匹配)/C(仅 agent type → unknown 且禁止 pane read)。
 - 证据：`herdr/observer/harness.py:submit_terminal`、`herdr/observer/context.py:bound_transcript,read_log_tail`、`herdr/observer/live.py:_identity_result`、`services/herdr-controller.py:_observer_terminal_checkpoint`、`tests/test_trajectory_observer.py`（85 项）。
+
+## [2026-09-20] fix | Trajectory Observer terminal checkpoint 挂载统一 Done Gateway
+- Updated [[trajectory-observer]]: terminal observation 从 registry_watcher 的 agent_done 分支移入统一 Done Gateway `emit_done_if_allowed()` 入口，覆盖 listener/recovery/registry redelivery/rework heal 全部 done 路径，消除「listener 立即推进导致 verification_failure 从未被观察」的窗口；registry_watcher 不再单独调用；async/fail-safe/per-run 去重/不受 periodic gate 影响等特性不变。
+- 证据：`services/herdr-controller.py:emit_done_if_allowed,_observer_terminal_checkpoint`、`tests/test_trajectory_observer.py:TestDoneGatewayTerminalCheckpoint`（5 项）。
