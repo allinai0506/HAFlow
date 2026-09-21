@@ -2474,6 +2474,11 @@ class TestDoneGatewayTerminalCheckpoint:
         controller = self._controller()
         import herdr.observer.harness as observer_harness_module
 
+        # The suite disables the observer by default (conftest); this is the one
+        # test that exercises the real default scheduler end to end.
+        monkeypatch.setenv("HERDR_OBSERVER_ENABLED", "1")
+        monkeypatch.setenv("HERDR_OBSERVER_LIVE_PROBE", "0")
+        monkeypatch.setenv("HERDR_OBSERVER_CONFIG", str(tmp_path / "absent.json"))
         observer_harness_module.reset_process_state()
         try:
             store = SQLiteStateStore(tmp_path / "state.db")
@@ -2504,6 +2509,33 @@ class TestDoneGatewayTerminalCheckpoint:
             observer_harness_module.reset_process_state()
 
 
+class TestTestEnvironmentIsolation:
+    """The suite must never let the default observer touch the real state DB.
+
+    Regression for the post-merge leak: controller done-path tests call
+    emit_done_if_allowed -> the terminal checkpoint -> the default scheduler,
+    which resolves the production state DB when no store is passed. The suite
+    therefore disables the observer by default (tests/conftest.py).
+    """
+
+    def test_default_observer_is_disabled_in_tests(self, monkeypatch):
+        import herdr.observer.harness as observer_harness_module
+
+        monkeypatch.setenv("HERDR_OBSERVER_CONFIG", "/nonexistent/observer.json")
+        observer_harness_module.reset_process_state()
+        try:
+            config = observer_config.load_config()
+            assert config["enabled"] is False, (
+                "tests must disable the observer by default so a done-path test "
+                "cannot write findings into the production state DB"
+            )
+            task = {"task_id": "t-isolation", "run_id": "run_t-isolation"}
+            assert observer_harness_module.submit_terminal_observation(task) is False
+            assert observer_harness_module.submit_observation(task) is False
+        finally:
+            observer_harness_module.reset_process_state()
+
+
 class TestObservationScheduler:
     def test_submit_is_non_blocking_and_dedupes_in_flight_runs(self):
         gate = threading.Event()
@@ -2516,7 +2548,9 @@ class TestObservationScheduler:
             release.wait(timeout=5)
             return []
 
-        scheduler = observer_harness.ObservationScheduler(observe=slow_observe)
+        scheduler = observer_harness.ObservationScheduler(
+            observe=slow_observe, config=_base_config(),
+        )
         started = time.monotonic()
         first = scheduler.submit("run-1")
         gate.wait(timeout=5)
@@ -2534,7 +2568,9 @@ class TestObservationScheduler:
         def exploding_observe(run_id, **kwargs):
             raise RuntimeError("boom")
 
-        scheduler = observer_harness.ObservationScheduler(observe=exploding_observe)
+        scheduler = observer_harness.ObservationScheduler(
+            observe=exploding_observe, config=_base_config(),
+        )
 
         assert scheduler.submit("run-1") is True
         scheduler.drain(timeout=5)
@@ -2650,7 +2686,9 @@ class TestObservationScheduler:
         def exploding(run_id, **kwargs):
             raise RuntimeError("terminal observation exploded")
 
-        scheduler = observer_harness.ObservationScheduler(observe=exploding)
+        scheduler = observer_harness.ObservationScheduler(
+            observe=exploding, config=_base_config(),
+        )
 
         assert scheduler.submit_terminal("run-1") is True
         scheduler.drain(timeout=5)

@@ -66,7 +66,7 @@ bounded 日志尾部(existing evidence) ──┼─► ObservationContext(有�
 
 | 键 / env | 默认 | 说明 |
 | :--- | :--- | :--- |
-| `enabled` / `HERDR_OBSERVER_ENABLED` | true | 总 kill switch（false = 零观察） |
+| `enabled` / `HERDR_OBSERVER_ENABLED` | true | 总 kill switch（false = 零观察）；**测试套件在 conftest 默认置 0**（避免 done-path 测试经默认调度器写生产状态库） |
 | `provider` / `HERDR_OBSERVER_PROVIDER` | `jev` | 复用 `herdr/decision` registry；无 key/provider 不可用时仅产出证据型 Finding |
 | `interval` | 300 | 每个 Run 最小观察间隔（RateGate） |
 | `max_calls_per_run` | 24 | **process-local** 单 Run 观察预算（RateGate 进程内计数，Controller 重启后重置，V1 不持久化） |
