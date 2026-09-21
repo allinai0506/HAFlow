@@ -1733,17 +1733,17 @@ def save_context_pack(
     try:
         conn.execute("BEGIN IMMEDIATE;")
         fingerprint = (context_pack.get("metadata") or {}).get("context_source_fingerprint")
-        existing_rows = conn.execute(
+        latest = conn.execute(
             """SELECT * FROM context_packs
                WHERE run_id = ?
-               ORDER BY created_at DESC, rowid DESC""",
+               ORDER BY created_at DESC, rowid DESC LIMIT 1""",
             (context_pack["run_id"],),
-        ).fetchall()
-        for existing in existing_rows:
-            existing_metadata = json.loads(existing["metadata_json"] or "{}")
+        ).fetchone()
+        if latest is not None:
+            existing_metadata = json.loads(latest["metadata_json"] or "{}")
             if fingerprint and existing_metadata.get("context_source_fingerprint") == fingerprint:
                 conn.commit()
-                return _decode_context_pack_row(existing)
+                return _decode_context_pack_row(latest)
         conn.execute(
             """INSERT INTO context_packs (
                 context_id, run_id, task_id, workflow_id, goal,

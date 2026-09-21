@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import json
+import importlib
+import threading
+import time
 from pathlib import Path
 import pytest
 
 from herdr.context_compact import (
     ContextPack,
+    MAX_CONTEXT_REFS,
+    MAX_CONTEXT_SERIALIZED_CHARS,
+    MAX_CONTEXT_TEXT_CHARS,
     compact_run,
     get_context,
     get_latest_context,
@@ -468,3 +474,123 @@ def test_reducer_result_contract_is_bounded_and_fail_safe(tmp_path: Path, mode: 
         assert pack.completed == [] and pack.open_issues == [] and pack.next_focus == []
     else:
         assert pack.completed
+
+
+def test_over_budget_branch_never_reintroduces_raw_secret(tmp_path: Path):
+    db_path = tmp_path / "state.db"
+    ledger = TrajectoryLedger(db_path)
+    secret = "sk-budget-secret-123456789"
+    ledger.append_event({"run_id": "run-budget-redact", "event_type": "progress", "metadata": {"blob": "x" * 5000, "api_key": secret}})
+    captured = {}
+
+    class Provider:
+        def reduce(self, payload):
+            captured["payload"] = payload
+            return {"completed": [], "open_issues": [], "next_focus": []}
+
+    compact_run(
+        "run-budget-redact",
+        task={"task_id": "task-budget-redact", "run_id": "run-budget-redact", "goal": f"password={secret}"},
+        store=ObservationStore(db_path), provider=Provider(), config={"max_input_chars": 300},
+    )
+    serialized = json.dumps(captured["payload"], ensure_ascii=False)
+    assert len(serialized) <= 300
+    assert secret not in serialized
+
+
+def test_context_pack_limits_text_refs_and_serialized_size(tmp_path: Path):
+    db_path = tmp_path / "state.db"
+    ledger = TrajectoryLedger(db_path)
+    events = [ledger.append_event({"run_id": "run-pack-limits", "event_type": "progress"}) for _ in range(MAX_CONTEXT_REFS + 10)]
+
+    class Provider:
+        def reduce(self, payload):
+            return {
+                "completed": [{"text": "x" * (MAX_CONTEXT_TEXT_CHARS * 3), "refs": [item["event_id"] for item in events]}],
+                "open_issues": [], "next_focus": [],
+            }
+
+    pack = compact_run(
+        "run-pack-limits", task={"task_id": "task-pack-limits", "run_id": "run-pack-limits", "goal": "g" * (MAX_CONTEXT_TEXT_CHARS * 3)},
+        store=ObservationStore(db_path), provider=Provider(),
+    )
+    assert len(pack.goal or "") <= MAX_CONTEXT_TEXT_CHARS
+    assert len(pack.completed[0]["text"]) <= MAX_CONTEXT_TEXT_CHARS
+    assert len(pack.completed[0]["refs"]) <= MAX_CONTEXT_REFS
+    assert events[0]["event_id"] in pack.completed[0]["refs"]
+    assert len(json.dumps(pack.to_mapping(), ensure_ascii=False)) <= MAX_CONTEXT_SERIALIZED_CHARS
+
+
+def test_updated_finding_supersedes_previous_semantic_items(tmp_path: Path):
+    db_path = tmp_path / "state.db"
+    store = ObservationStore(db_path)
+    old = _finding(run_id="run-supersede", finding_id="finding-supersede")
+    upsert_trajectory_finding(old, db_path=db_path)
+    first = compact_run("run-supersede", task={"task_id": "task-supersede", "run_id": "run-supersede", "goal": "g"}, store=store)
+    changed = dict(old, severity="critical", summary="new contradictory issue", recommended_action="use new recommendation")
+    upsert_trajectory_finding(changed, db_path=db_path)
+    TrajectoryLedger(db_path).append_event({"run_id": "run-supersede", "event_type": "progress"})
+    second = compact_run("run-supersede", task={"task_id": "task-supersede", "run_id": "run-supersede", "goal": "g"}, store=store)
+    assert first.open_issues and first.next_focus
+    assert [item["text"] for item in second.open_issues if "finding-supersede" in item["refs"]] == ["new contradictory issue"]
+    assert [item["text"] for item in second.next_focus if "finding-supersede" in item["refs"]] == ["use new recommendation"]
+
+
+def test_save_context_pack_dedups_only_latest_fingerprint_and_latest_matches_return(tmp_path: Path):
+    db_path = tmp_path / "state.db"
+
+    def pack(context_id, fingerprint, created_at):
+        return ContextPack(context_id=context_id, run_id="run-aba", task_id=None, workflow_id=None, goal="g", source_event_sequence=1, created_at=created_at, metadata={"context_source_fingerprint": fingerprint}).to_mapping()
+
+    first = state_db.save_context_pack(pack("ctx-a", "A", 1), db_path=db_path)
+    second = state_db.save_context_pack(pack("ctx-b", "B", 2), db_path=db_path)
+    third = state_db.save_context_pack(pack("ctx-a2", "A", 3), db_path=db_path)
+    assert first["context_id"] == "ctx-a"
+    assert second["context_id"] == "ctx-b"
+    assert third["context_id"] == "ctx-a2"
+    assert state_db.get_latest_context_pack("run-aba", db_path=db_path)["context_id"] == "ctx-a2"
+
+
+def test_terminal_observer_barrier_persists_finding_before_compact(tmp_path: Path, monkeypatch):
+    controller = importlib.import_module("services.herdr-controller")
+    db_path = tmp_path / "state.db"
+    store = ObservationStore(db_path)
+    task = {"task_id": "task-terminal-order", "run_id": "run-terminal-order", "goal": "g"}
+    TrajectoryLedger(db_path).append_event({"run_id": "run-terminal-order", "task_id": "task-terminal-order", "event_type": "agent_done"})
+    barrier = threading.Event()
+    monkeypatch.setattr(controller, "_get_store", lambda: store)
+    monkeypatch.setattr("herdr.observer.harness.get_provider", lambda: None)
+    controller._schedule_context_compact(task, wait_for=barrier)
+    time.sleep(0.05)
+    assert state_db.get_latest_context_pack("run-terminal-order", db_path=db_path) is None
+    upsert_trajectory_finding(_finding(run_id="run-terminal-order", finding_id="finding-terminal"), db_path=db_path)
+    barrier.set()
+    deadline = time.time() + 3
+    while time.time() < deadline and state_db.get_latest_context_pack("run-terminal-order", db_path=db_path) is None:
+        time.sleep(0.02)
+    latest = state_db.get_latest_context_pack("run-terminal-order", db_path=db_path)
+    assert latest is not None
+    assert latest["important_findings"][0]["finding_id"] == "finding-terminal"
+
+
+def test_done_gateway_passes_observer_completion_barrier_to_compact(monkeypatch):
+    controller = importlib.import_module("services.herdr-controller")
+    calls = []
+    barrier = {}
+
+    def observer(task, completion_event=None, **kwargs):
+        calls.append("observer")
+        barrier["event"] = completion_event
+        return True
+
+    def compact(task, wait_for=None):
+        calls.append("compact")
+        assert wait_for is barrier["event"]
+        return True
+
+    monkeypatch.setattr(controller, "_observer_terminal_checkpoint", observer)
+    monkeypatch.setattr(controller, "_schedule_context_compact", compact)
+    monkeypatch.setattr(controller, "supervisor_harness", None)
+    monkeypatch.setattr(controller, "enqueue_coordinator_event", lambda *args, **kwargs: None)
+    assert controller.emit_done_if_allowed({"task_id": "task-order", "run_id": "run-order"}) is True
+    assert calls == ["observer", "compact"]

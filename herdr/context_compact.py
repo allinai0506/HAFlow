@@ -37,6 +37,9 @@ MAX_COMPLETED_ITEMS = 20
 MAX_OPEN_ISSUES = 20
 MAX_VERIFIED_FACTS = 20
 MAX_NEXT_FOCUS = 3
+MAX_CONTEXT_TEXT_CHARS = 2000
+MAX_CONTEXT_REFS = 50
+MAX_CONTEXT_SERIALIZED_CHARS = 20000
 
 
 @dataclass(frozen=True)
@@ -242,7 +245,7 @@ def _compact_input(
     if size() > max_chars:
         payload["findings"] = payload["findings"][:1]
     if size() > max_chars:
-        payload["goal"] = (goal or "")[: max(0, max_chars // 4)]
+        payload["goal"] = payload["goal"][: max(0, max_chars // 4)]
     if size() > max_chars:
         payload["current_state"] = {
             key: str(value)[:128]
@@ -427,7 +430,12 @@ def _fallback_semantic(events: Sequence[Dict[str, Any]], findings: Sequence[Dict
         if finding.get("finding_id") and (item["text"], tuple(item["refs"])) not in seen_issues:
             open_issues.append(item)
             seen_issues.add((item["text"], tuple(item["refs"])))
-    open_issues.extend(item for item in (previous.open_issues if previous else []) if (item.get("text"), tuple(item.get("refs") or [])) not in seen_issues)
+    current_finding_ids = {str(finding.get("finding_id")) for finding in findings if finding.get("finding_id")}
+    open_issues.extend(
+        item for item in (previous.open_issues if previous else [])
+        if not current_finding_ids.intersection(str(ref) for ref in item.get("refs", []))
+        and (item.get("text"), tuple(item.get("refs") or [])) not in seen_issues
+    )
     next_focus = []
     seen_focus = {(item.get("text"), tuple(item.get("refs") or [])) for item in next_focus}
     for finding in findings:
@@ -436,8 +444,92 @@ def _fallback_semantic(events: Sequence[Dict[str, Any]], findings: Sequence[Dict
             if (item["text"], tuple(item["refs"])) not in seen_focus:
                 next_focus.append(item)
                 seen_focus.add((item["text"], tuple(item["refs"])))
-    next_focus.extend(item for item in (previous.next_focus if previous else []) if (item.get("text"), tuple(item.get("refs") or [])) not in seen_focus)
+    next_focus.extend(
+        item for item in (previous.next_focus if previous else [])
+        if not current_finding_ids.intersection(str(ref) for ref in item.get("refs", []))
+        and (item.get("text"), tuple(item.get("refs") or [])) not in seen_focus
+    )
     return {"completed": completed, "open_issues": open_issues, "next_focus": next_focus}
+
+
+def _bounded_semantic_items(items: Sequence[Dict[str, Any]], limit: int) -> List[Dict[str, Any]]:
+    bounded: List[Dict[str, Any]] = []
+    for item in list(items)[:limit]:
+        if not isinstance(item, dict):
+            continue
+        value = dict(item)
+        if isinstance(value.get("text"), str):
+            value["text"] = value["text"][:MAX_CONTEXT_TEXT_CHARS]
+        if isinstance(value.get("summary"), str):
+            value["summary"] = value["summary"][:MAX_CONTEXT_TEXT_CHARS]
+        if isinstance(value.get("refs"), list):
+            value["refs"] = [str(ref) for ref in value["refs"][:MAX_CONTEXT_REFS]]
+        bounded.append(value)
+    return bounded
+
+
+def _bounded_context_strings(value: Any) -> Any:
+    if isinstance(value, str):
+        return value[:MAX_CONTEXT_TEXT_CHARS]
+    if isinstance(value, list):
+        return [_bounded_context_strings(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _bounded_context_strings(item) for key, item in value.items()}
+    return value
+
+
+def _bound_context_pack(pack: ContextPack) -> ContextPack:
+    """Apply final presentation bounds without changing source records or refs."""
+    pack = ContextPack(
+        **{
+            **pack.to_mapping(),
+            "goal": str(pack.goal)[:MAX_CONTEXT_TEXT_CHARS] if pack.goal is not None else None,
+            "current_state": _bounded_context_strings(pack.current_state),
+            "metadata": _bounded_context_strings(pack.metadata),
+            "completed": _bounded_semantic_items(pack.completed, MAX_COMPLETED_ITEMS),
+            "open_issues": _bounded_semantic_items(pack.open_issues, MAX_OPEN_ISSUES),
+            "next_focus": _bounded_semantic_items(pack.next_focus, MAX_NEXT_FOCUS),
+            "verified_facts": list(pack.verified_facts)[:MAX_VERIFIED_FACTS],
+            "important_findings": _bounded_semantic_items(pack.important_findings, MAX_OPEN_ISSUES),
+            "evidence_refs": list(pack.evidence_refs)[:MAX_CONTEXT_REFS],
+            "artifact_refs": list(pack.artifact_refs)[:MAX_CONTEXT_REFS],
+        }
+    )
+    while len(json.dumps(pack.to_mapping(), ensure_ascii=False)) > MAX_CONTEXT_SERIALIZED_CHARS:
+        fields = ["next_focus", "open_issues", "completed", "important_findings"]
+        reduced = False
+        for field_name in fields:
+            values = list(getattr(pack, field_name))
+            if len(values) > 1:
+                values.pop()
+                pack = ContextPack(**{**pack.to_mapping(), field_name: values})
+                reduced = True
+                break
+        if reduced:
+            continue
+        if pack.goal and len(pack.goal) > 256:
+            pack = ContextPack(**{**pack.to_mapping(), "goal": pack.goal[: max(0, len(pack.goal) // 2)]})
+            continue
+        if pack.verified_facts and len(pack.verified_facts) > 1:
+            pack = ContextPack(**{**pack.to_mapping(), "verified_facts": pack.verified_facts[-1:]})
+            continue
+        if pack.current_state:
+            pack = ContextPack(**{**pack.to_mapping(), "current_state": {}})
+            continue
+        if len(pack.evidence_refs) > 1:
+            pack = ContextPack(**{**pack.to_mapping(), "evidence_refs": pack.evidence_refs[:1]})
+            continue
+        if len(pack.artifact_refs) > 1:
+            pack = ContextPack(**{**pack.to_mapping(), "artifact_refs": pack.artifact_refs[:1]})
+            continue
+        if pack.metadata:
+            metadata = {key: pack.metadata[key] for key in ("analysis", "context_source_fingerprint") if key in pack.metadata}
+            pack = ContextPack(**{**pack.to_mapping(), "metadata": metadata})
+            if len(json.dumps(pack.to_mapping(), ensure_ascii=False)) <= MAX_CONTEXT_SERIALIZED_CHARS:
+                break
+            continue
+        break
+    return pack
 
 
 def _source_fingerprint(
@@ -620,6 +712,7 @@ def compact_run(
             created_at=float(now if now is not None else time.time()),
             metadata=_redact_context({"analysis": {"completed": True, "open_issues": True, "next_focus": True}, "input_chars": len(json.dumps(compact_input, ensure_ascii=False)), "context_source_fingerprint": fingerprint}),
         )
+        pack = _bound_context_pack(pack)
         stored = state_db.save_context_pack(pack.to_mapping(), db_path=db_path)
         return ContextPack.from_mapping(stored)
 

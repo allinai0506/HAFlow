@@ -3433,8 +3433,9 @@ def emit_done_if_allowed(task, report_text=None):
     recovery and registry-redelivery paths all funnel through this gateway,
     and the observation must be queued before the task can advance.
     """
-    _schedule_context_compact(task)
-    _observer_terminal_checkpoint(task)
+    observer_complete = threading.Event()
+    _observer_terminal_checkpoint(task, completion_event=observer_complete)
+    _schedule_context_compact(task, wait_for=observer_complete)
     checkpoint = supervisor_checkpoint(task, "agent_done", report_text=report_text)
     if checkpoint is None:
         pending = None
@@ -3454,7 +3455,7 @@ def emit_done_if_allowed(task, report_text=None):
     return True
 
 
-def _schedule_context_compact(task):
+def _schedule_context_compact(task, wait_for=None):
     """Schedule working-memory creation without joining or affecting done flow."""
     if not task:
         return False
@@ -3465,6 +3466,8 @@ def _schedule_context_compact(task):
 
         def worker():
             try:
+                if wait_for is not None:
+                    wait_for.wait()
                 provider = None
                 try:
                     from herdr.observer.harness import get_provider
@@ -3528,7 +3531,7 @@ def redeliver_done_event(task, now=None):
     return True
 
 
-def _observer_terminal_checkpoint(task, now=None):
+def _observer_terminal_checkpoint(task, now=None, completion_event=None):
     """Terminal Trajectory Observer checkpoint for agent_done.
 
     Fail-safe by contract: any failure only logs and returns False, so the
@@ -3536,12 +3539,29 @@ def _observer_terminal_checkpoint(task, now=None):
     observer's daemon worker (async, non-blocking).
     """
     if observer_harness is None or not task:
+        if completion_event is not None:
+            completion_event.set()
         return False
     try:
-        return observer_harness.submit_terminal_observation(
-            task, store=_get_store(), now=now
-        )
+        kwargs = {"store": _get_store(), "now": now}
+        if completion_event is not None:
+            kwargs["completion_event"] = completion_event
+        try:
+            submitted = observer_harness.submit_terminal_observation(task, **kwargs)
+        except TypeError as exc:
+            # Keep older test adapters/in-process integrations fail-safe while
+            # the built-in harness uses the completion barrier.
+            if completion_event is None or "completion_event" not in str(exc):
+                raise
+            kwargs.pop("completion_event", None)
+            submitted = observer_harness.submit_terminal_observation(task, **kwargs)
+            completion_event.set()
+        if not submitted and completion_event is not None:
+            completion_event.set()
+        return submitted
     except Exception as exc:
+        if completion_event is not None:
+            completion_event.set()
         print(f"[OBSERVER TERMINAL CHECK ERROR] task={task.get('task_id')}: {exc}")
         return False
 
