@@ -1,6 +1,7 @@
 import importlib.machinery
 import importlib.util
 import json
+import multiprocessing
 import threading
 import sqlite3
 from pathlib import Path
@@ -185,6 +186,45 @@ def test_observation_created_event_contains_receipt_only(tmp_path: Path):
     assert event["observation"]["sha256"] == observation.sha256
     assert "content" not in json.dumps(event)
     assert len(json.dumps(event)) < 2000
+
+
+def _record_observation_receipt_worker(db_path: str, observation_id: str, queue) -> None:
+    from herdr.observation import ObservationStore, get_observation
+    from herdr.trajectory import TrajectoryLedger, record_observation_created
+
+    store = ObservationStore(Path(db_path))
+    observation = get_observation(observation_id, store=store)
+    record_observation_created(
+        {"run_id": observation.run_id, "task_id": observation.task_id},
+        observation,
+        ledger=TrajectoryLedger(Path(db_path)),
+    )
+    queue.put(True)
+
+
+def test_concurrent_observation_receipts_are_unique(tmp_path: Path):
+    db_path = tmp_path / "state.db"
+    store = ObservationStore(db_path)
+    observation = create_observation(
+        run_id="run-receipt-race", source_type="agent_log", source_ref="pane:race",
+        content="same evidence", store=store,
+    )
+    context = multiprocessing.get_context("spawn")
+    queue = context.Queue()
+    processes = [
+        context.Process(
+            target=_record_observation_receipt_worker,
+            args=(str(db_path), observation.observation_id, queue),
+        )
+        for _ in range(2)
+    ]
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join(timeout=30)
+        assert process.exitcode == 0
+    assert [queue.get(timeout=5) for _ in processes] == [True, True]
+    assert len(TrajectoryLedger(db_path).list_events("run-receipt-race", "observation_created")) == 1
 
 
 def test_artifact_created_event_gets_an_observation_reference(tmp_path: Path):

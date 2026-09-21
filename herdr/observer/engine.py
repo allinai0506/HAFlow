@@ -23,7 +23,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from .. import state_db
 from ..decision.models import DecisionProviderError, clamp_probability
-from ..observation import ObservationStore, create_observation
+from ..observation import ObservationStore
 from ..supervisor.state import redact_text
 from ..trajectory import TrajectoryLedger, record_observation_created
 from . import context as observation_context
@@ -155,7 +155,7 @@ class TrajectoryObserver:
             now=ts,
         )
         results = self._ask_provider(signals, context, use_model=use_model)
-        candidates = self._consolidate(run_id, task, runtime, events, signals, results, ts)
+        candidates = self._consolidate(run_id, task, runtime, events, signals, results, ts, log_tail)
         return self._persist(candidates)
 
     def _probe_runtime(self, task: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -254,6 +254,7 @@ class TrajectoryObserver:
         signals: List[signal_layer.Signal],
         results: Dict[str, Any],
         now: float,
+        log_tail: Optional[Dict[str, Any]] = None,
     ) -> List[TrajectoryFinding]:
         threshold = float(self.config.get("confidence_threshold", 0.6))
         last = events[-1] if events else {}
@@ -271,7 +272,7 @@ class TrajectoryObserver:
             if probability is None and signal.requires_confirmation:
                 continue  # weak signal without model confirmation: stay quiet
             confidence = probability if probability is not None else signal.confidence
-            evidence = self._materialize_observations(run_id, task, signal, now)
+            evidence = self._materialize_observations(run_id, task, signal, now, log_tail)
             findings.append(TrajectoryFinding(
                 run_id=run_id,
                 finding_type=signal.finding_type,
@@ -309,6 +310,7 @@ class TrajectoryObserver:
         task: Dict[str, Any],
         signal: signal_layer.Signal,
         now: float,
+        log_tail: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         """Best-effortly replace selected log evidence with immutable references."""
         evidence = _redact_evidence(signal.evidence)
@@ -331,13 +333,16 @@ class TrajectoryObserver:
                 continue
             try:
                 source_ref = str(item.get("ref") or f"observer:{run_id}:{signal.anchor}")
-                observation = create_observation(
+                observation_content = item["excerpt"]
+                if signal.finding_type == "possible_context_problem" and isinstance(log_tail, dict):
+                    observation_content = log_tail.get("excerpt") or observation_content
+                observation, created = self.observation_store.create_with_status(
                     run_id=run_id,
                     task_id=task.get("task_id"),
                     workflow_id=task.get("workflow_id"),
                     source_type="agent_log",
                     source_ref=source_ref,
-                    content=item["excerpt"],
+                    content=observation_content,
                     media_type="text/plain",
                     metadata={
                         "signature": item.get("signature"),
@@ -346,10 +351,10 @@ class TrajectoryObserver:
                     },
                     excerpt=item.get("excerpt"),
                     created_at=now,
-                    store=self.observation_store,
                 )
                 event_task = task or {"run_id": run_id}
-                record_observation_created(event_task, observation, ledger=self.ledger)
+                if created:
+                    record_observation_created(event_task, observation, ledger=self.ledger)
                 materialized.append({
                     "type": "observation",
                     "observation_id": observation.observation_id,

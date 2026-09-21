@@ -29,7 +29,14 @@ import pytest
 
 from herdr.decision.base import DecisionProvider
 from herdr.decision.models import DecisionProviderError, DecisionResult
-from herdr.observation import ObservationStore, list_observations
+from herdr.observation import (
+    ObservationStore,
+    create_verification_observation,
+    get_observation,
+    list_observations,
+    read_observation,
+    verify_observation,
+)
 from herdr.observer import config as observer_config
 from herdr.observer import context as observation_context
 from herdr.observer import harness as observer_harness
@@ -1892,6 +1899,83 @@ class TestLiveTranscript:
         assert [event["event_type"] for event in ledger_events] == [
             "run_started", "observation_created",
         ]
+
+    def test_repeated_log_observation_is_deduped_without_duplicate_receipt(self, tmp_path: Path):
+        store = SQLiteStateStore(tmp_path / "state.db")
+        ledger = TrajectoryLedger(store.db_path)
+        _append(ledger, [{"run_id": "run-observation-dedup", "event_type": "run_started"}])
+        task = _task(run_id="run-observation-dedup", runtime={"status": "running"})
+        transcript = {"ref": "pane:p-dedup", "excerpt": "\n".join(["Error: repeated"] * 3)}
+
+        for _ in range(2):
+            observer_harness.observe_run(
+                "run-observation-dedup", task=task, store=store, ledger=ledger,
+                config=_base_config(), provider=CapturingProvider({"possible_context_problem": 0.9}),
+                transcript_reader=lambda _task: transcript,
+            )
+
+        assert len(list_observations(run_id="run-observation-dedup", store=ObservationStore(store.db_path))) == 1
+        assert len(ledger.list_events("run-observation-dedup", event_type="observation_created")) == 1
+
+    def test_log_observation_keeps_bounded_context_and_finding_excerpt_short(self, tmp_path: Path):
+        store = SQLiteStateStore(tmp_path / "state.db")
+        ledger = TrajectoryLedger(store.db_path)
+        _append(ledger, [{"run_id": "run-log-context", "event_type": "run_started"}])
+        config = _base_config()
+        config.update({"log_tail_bytes": 512, "log_tail_lines": 20, "log_tail_chars": 400})
+        log_tail = {
+            "ref": "pane:p-context",
+            "excerpt": "context-before\n" + "\n".join(["Error: repeated with context"] * 4) + "\ncontext-after",
+            "truncated": True,
+        }
+        findings = observer_harness.observe_run(
+            "run-log-context", task=_task(run_id="run-log-context", runtime={"status": "running"}),
+            store=store, ledger=ledger, config=config,
+            provider=CapturingProvider({"possible_context_problem": 0.9}),
+            transcript_reader=lambda _task: log_tail,
+        )
+
+        evidence = findings[0].evidence[0]
+        observation = get_observation(evidence["observation_id"], store=ObservationStore(store.db_path))
+        content = read_observation(
+            evidence["observation_id"], store=ObservationStore(store.db_path), limit=4096,
+        )
+        assert len(evidence["excerpt"]) <= 300
+        assert "context-before" in content["content"]
+        assert "context-after" in content["content"]
+        assert observation is not None
+        assert observation.size_bytes <= config["log_tail_bytes"]
+        assert len(content["content"]) <= config["log_tail_chars"]
+        assert len(content["content"].splitlines()) <= config["log_tail_lines"]
+        assert len(observation.excerpt or "") <= 1000
+
+    def test_verification_finding_evidence_resolves_observation(self, tmp_path: Path):
+        store = SQLiteStateStore(tmp_path / "state.db")
+        ledger = TrajectoryLedger(store.db_path)
+        verification = create_verification_observation(
+            {"passed": False, "evidence_id": "tevd-observation", "failing_count": 2},
+            run_id="run-verification-observation", task_id="task-1", store=ObservationStore(store.db_path),
+        )
+        _append(ledger, [
+            {"run_id": "run-verification-observation", "event_type": "run_started"},
+            {"run_id": "run-verification-observation", "event_type": "verification_completed",
+             "verification": {"passed": False, "evidence_id": "tevd-observation",
+                               "observation_id": verification.observation_id, "failing_count": 2}},
+            {"run_id": "run-verification-observation", "event_type": "verification_completed",
+             "verification": {"passed": False, "evidence_id": "tevd-observation-2",
+                               "observation_id": verification.observation_id, "failing_count": 2}},
+        ])
+
+        findings = observer_harness.observe_run(
+            "run-verification-observation", task=_task(run_id="run-verification-observation"),
+            store=store, ledger=ledger, config=_base_config(),
+            provider=CapturingProvider({"repeated_failure": 0.9}), now=110.0,
+        )
+
+        evidence = findings[0].evidence[0]
+        assert evidence["observation_id"] == verification.observation_id
+        assert get_observation(evidence["observation_id"], store=ObservationStore(store.db_path)) is not None
+        assert verify_observation(evidence["observation_id"], store=ObservationStore(store.db_path))["valid"] is True
 
     def test_live_transcript_enables_context_finding_without_evidence_file(self, tmp_path: Path):
         store = SQLiteStateStore(tmp_path / "state.db")

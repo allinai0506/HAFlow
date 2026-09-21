@@ -27,7 +27,7 @@ try:
     )
     from herdr.workflow import find_node, get_ready_nodes, is_workflow_completed, normalize_workflow
     from herdr.state_store import get_state_store
-    from herdr.observation import ObservationStore, create_verification_observation
+    from herdr.observation import ObservationStore, create_verification_observation_with_status
     from herdr.trajectory import (
         TrajectoryLedger,
         record_observation_created,
@@ -41,7 +41,7 @@ except ImportError:
     )
     from herdr_workflow import find_node, get_ready_nodes, is_workflow_completed, normalize_workflow
     from herdr_state_store import get_state_store
-    from herdr_observation import ObservationStore, create_verification_observation
+    from herdr_observation import ObservationStore, create_verification_observation_with_status
     from herdr.trajectory import (
         TrajectoryLedger,
         record_observation_created,
@@ -3633,7 +3633,7 @@ def check_task_tests_completed(task, store=None, now=None):
         "composite_score": test_evidence.get("composite_score", 0.0),
     }
     try:
-        observation = create_verification_observation(
+        observation, created = create_verification_observation_with_status(
             verification,
             run_id=task.get("run_id") or f"run_{task_id}",
             task_id=task_id,
@@ -3641,11 +3641,12 @@ def check_task_tests_completed(task, store=None, now=None):
             store=ObservationStore(getattr(st, "db_path", None)),
         )
         verification["observation_id"] = observation.observation_id
-        record_observation_created(
-            task,
-            observation,
-            ledger=TrajectoryLedger(getattr(st, "db_path", None)),
-        )
+        if created:
+            record_observation_created(
+                task,
+                observation,
+                ledger=TrajectoryLedger(getattr(st, "db_path", None)),
+            )
     except Exception as exc:
         print(f"[VERIFICATION OBSERVATION SKIPPED] task={task_id}: {type(exc).__name__}")
 

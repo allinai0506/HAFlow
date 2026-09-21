@@ -18,6 +18,7 @@ from herdr.observation import (
     read_observation,
     verify_observation,
 )
+from herdr.state_db import get_db_connection
 
 
 def _create_same_observation(db_path: str, result_queue) -> None:
@@ -78,6 +79,35 @@ def test_text_bytes_and_json_string_are_redacted_before_hashing(tmp_path: Path):
 
     assert Path(text.content_ref).read_text(encoding="utf-8") == "[redacted]"
     assert "VERYSECRET123" not in Path(json_text.content_ref).read_text(encoding="utf-8")
+
+
+def test_credential_key_variants_redact_content_metadata_and_excerpt(tmp_path: Path):
+    store = ObservationStore(tmp_path / "state.db")
+    keys = (
+        "api-key", "passwd", "access_token", "refresh_token",
+        "client_secret", "private_key", "API_KEY", "client-secret",
+    )
+    payload = {key: "VERYSECRET123" for key in keys}
+    observation = create_observation(
+        run_id="run-key-variants",
+        source_type="verification",
+        source_ref="verification:key-variants",
+        content=payload,
+        media_type="application/json",
+        excerpt=json.dumps(payload),
+        metadata=payload,
+        store=store,
+    )
+
+    stored_content = Path(observation.content_ref).read_text(encoding="utf-8")
+    with get_db_connection(store.db_path) as conn:
+        metadata_json = conn.execute(
+            "SELECT metadata_json FROM observations WHERE observation_id = ?",
+            (observation.observation_id,),
+        ).fetchone()[0]
+    assert "VERYSECRET123" not in stored_content
+    assert "VERYSECRET123" not in metadata_json
+    assert "VERYSECRET123" not in (observation.excerpt or "")
 
 
 def test_metadata_and_source_ref_have_bounded_receipts(tmp_path: Path):

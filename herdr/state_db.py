@@ -168,6 +168,16 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
     """)
 
     conn.execute("""
+        CREATE TABLE IF NOT EXISTS observation_receipts (
+            observation_id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            task_id TEXT,
+            workflow_id TEXT,
+            created_at REAL NOT NULL
+        );
+    """)
+
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS steering_items (
             steer_id TEXT PRIMARY KEY,
             task_id TEXT NOT NULL,
@@ -218,6 +228,20 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type, timestamp);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_source ON events(source, timestamp);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_run_sequence ON events(run_id, sequence, id);")
+    for row in conn.execute(
+        "SELECT run_id, task_id, workflow_id, timestamp, payload_json "
+        "FROM events WHERE source = 'trajectory' AND event_type = 'observation_created'"
+    ).fetchall():
+        try:
+            observation_id = (json.loads(row["payload_json"] or "{}").get("observation") or {}).get("observation_id")
+        except (TypeError, json.JSONDecodeError):
+            observation_id = None
+        if observation_id:
+            conn.execute(
+                "INSERT OR IGNORE INTO observation_receipts "
+                "(observation_id, run_id, task_id, workflow_id, created_at) VALUES (?, ?, ?, ?, ?)",
+                (observation_id, row["run_id"], row["task_id"], row["workflow_id"], row["timestamp"] or time.time()),
+            )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_findings_run ON trajectory_findings(run_id, created_at DESC);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_findings_type ON trajectory_findings(finding_type, created_at DESC);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_observations_run ON observations(run_id, created_at, observation_id);")
@@ -1128,6 +1152,77 @@ def record_trajectory_event(
             "task_id": event.get("task_id"),
             "agent_id": event.get("agent_id") or event.get("agent"),
             "event_type": event_type,
+            "timestamp": timestamp,
+            "source": "trajectory",
+            "run_id": run_id,
+            "sequence": sequence,
+            "payload": payload,
+        }
+    except Exception:
+        try:
+            conn.execute("ROLLBACK;")
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
+
+
+def record_observation_receipt(
+    event: Dict[str, Any],
+    observation_id: str,
+    db_path: Optional[Path] = None,
+) -> Optional[Dict[str, Any]]:
+    """Atomically append at most one trajectory receipt for an Observation."""
+    if not observation_id:
+        raise ValueError("observation_id is required")
+    payload = event.get("payload") or {}
+    if not isinstance(payload, dict):
+        raise ValueError("payload must be a dict")
+    run_id = event.get("run_id")
+    if not run_id:
+        raise ValueError("run_id is required")
+
+    conn = get_db_connection(db_path)
+    try:
+        conn.execute("BEGIN IMMEDIATE;")
+        timestamp = float(event["timestamp"]) if event.get("timestamp") is not None else time.time()
+        inserted = conn.execute(
+            """
+            INSERT OR IGNORE INTO observation_receipts
+                (observation_id, run_id, task_id, workflow_id, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (observation_id, run_id, event.get("task_id"), event.get("workflow_id"), timestamp),
+        ).rowcount
+        if not inserted:
+            conn.execute("COMMIT;")
+            return None
+        sequence = conn.execute(
+            "SELECT COALESCE(MAX(sequence), 0) + 1 FROM events WHERE run_id = ? AND source = 'trajectory'",
+            (run_id,),
+        ).fetchone()[0]
+        cur = conn.execute(
+            """
+            INSERT INTO events (
+                workflow_id, node_id, task_id, agent_id,
+                event_type, payload_json, timestamp, source, run_id, sequence
+            ) VALUES (?, ?, ?, ?, 'observation_created', ?, ?, 'trajectory', ?, ?)
+            """,
+            (
+                event.get("workflow_id"), event.get("node_id") or event.get("node"),
+                event.get("task_id"), event.get("agent_id") or event.get("agent"),
+                json.dumps(payload, ensure_ascii=False), timestamp, run_id, sequence,
+            ),
+        )
+        conn.execute("COMMIT;")
+        return {
+            "id": cur.lastrowid,
+            "workflow_id": event.get("workflow_id"),
+            "node_id": event.get("node_id") or event.get("node"),
+            "task_id": event.get("task_id"),
+            "agent_id": event.get("agent_id") or event.get("agent"),
+            "event_type": "observation_created",
             "timestamp": timestamp,
             "source": "trajectory",
             "run_id": run_id,

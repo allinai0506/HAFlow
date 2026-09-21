@@ -6,6 +6,7 @@ import hashlib
 import base64
 import json
 import mimetypes
+import re
 import sqlite3
 import time
 import uuid
@@ -26,7 +27,14 @@ MAX_EXCERPT_CHARS = 1000
 MAX_SOURCE_REF_CHARS = 512
 MAX_METADATA_BYTES = 16 * 1024
 _HASH_CHUNK_SIZE = 64 * 1024
-_SENSITIVE_METADATA_KEYS = frozenset({"api_key", "apikey", "authorization", "password", "secret", "token"})
+_SENSITIVE_METADATA_KEYS = frozenset({
+    "apikey", "passwd", "accesstoken", "refreshtoken", "clientsecret",
+    "privatekey", "authorization", "password", "secret", "token",
+})
+
+
+def _normalize_key(key: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(key).casefold())
 
 
 def _redact_value(value: Any) -> Any:
@@ -38,7 +46,7 @@ def _redact_value(value: Any) -> Any:
         return [_redact_value(item) for item in value]
     if isinstance(value, dict):
         return {
-            str(key): "[redacted]" if str(key).lower() in _SENSITIVE_METADATA_KEYS else _redact_value(item)
+            str(key): "[redacted]" if _normalize_key(key) in _SENSITIVE_METADATA_KEYS else _redact_value(item)
             for key, item in value.items()
         }
     return value
@@ -69,7 +77,15 @@ def _content_bytes(content: Any, media_type: str) -> bytes:
 
 def _excerpt(content: bytes, media_type: str, explicit: Optional[str]) -> Optional[str]:
     if explicit is not None:
-        return redact_text(str(explicit)).strip()[:MAX_EXCERPT_CHARS]
+        value = str(explicit)
+        if media_type == "application/json":
+            try:
+                value = _json_bytes(json.loads(value)).decode("utf-8")
+            except (json.JSONDecodeError, TypeError):
+                value = redact_text(value)
+        else:
+            value = redact_text(value)
+        return value.strip()[:MAX_EXCERPT_CHARS]
     if not content or not media_type.startswith("text/") and media_type != "application/json":
         return None
     return content.decode("utf-8", errors="replace").strip()[:MAX_EXCERPT_CHARS]
@@ -170,7 +186,7 @@ class ObservationStore:
         row: Dict[str, Any],
         *,
         owned_content: Optional[Path] = None,
-    ) -> Observation:
+    ) -> tuple[Observation, bool]:
         conn = state_db.get_db_connection(self.db_path)
         try:
             conn.execute("BEGIN IMMEDIATE;")
@@ -181,7 +197,7 @@ class ObservationStore:
                 conn.execute("COMMIT;")
                 if owned_content is not None:
                     owned_content.unlink(missing_ok=True)
-                return Observation.from_mapping(existing)
+                return Observation.from_mapping(existing), False
             try:
                 stored = state_db.insert_observation(row, conn=conn)
             except sqlite3.IntegrityError:
@@ -194,7 +210,7 @@ class ObservationStore:
             conn.execute("COMMIT;")
             if owned_content is not None and stored["observation_id"] != row["observation_id"]:
                 owned_content.unlink(missing_ok=True)
-            return Observation.from_mapping(stored)
+            return Observation.from_mapping(stored), stored["observation_id"] == row["observation_id"]
         except Exception:
             try:
                 conn.execute("ROLLBACK;")
@@ -206,7 +222,7 @@ class ObservationStore:
         finally:
             conn.close()
 
-    def create(
+    def create_with_status(
         self,
         *,
         run_id: str,
@@ -219,7 +235,7 @@ class ObservationStore:
         metadata: Optional[Dict[str, Any]] = None,
         excerpt: Optional[str] = None,
         created_at: Optional[float] = None,
-    ) -> Observation:
+    ) -> tuple[Observation, bool]:
         run_id, source_type, source_ref = self._validate_common(run_id, source_type, source_ref)
         media_type = str(media_type or "application/octet-stream")
         metadata = _validate_metadata(metadata)
@@ -227,7 +243,7 @@ class ObservationStore:
         digest = hashlib.sha256(content_bytes).hexdigest()
         existing = state_db.find_observation_by_dedup(run_id, source_type, source_ref, digest, db_path=self.db_path)
         if existing is not None:
-            return Observation.from_mapping(existing)
+            return Observation.from_mapping(existing), False
 
         observation_id = f"obs_{uuid.uuid4().hex}"
         suffix = ".json" if media_type == "application/json" else ".txt" if media_type.startswith("text/") else ".bin"
@@ -250,7 +266,11 @@ class ObservationStore:
         }
         return self._insert_or_get(row, owned_content=content_ref)
 
-    def create_external(
+    def create(self, **kwargs: Any) -> Observation:
+        observation, _created = self.create_with_status(**kwargs)
+        return observation
+
+    def create_external_with_status(
         self,
         path: Union[str, Path],
         *,
@@ -260,7 +280,7 @@ class ObservationStore:
         task_id: Optional[str] = None,
         workflow_id: Optional[str] = None,
         created_at: Optional[float] = None,
-    ) -> Observation:
+    ) -> tuple[Observation, bool]:
         artifact = Path(path).expanduser()
         if not artifact.is_file():
             raise FileNotFoundError(str(artifact))
@@ -280,6 +300,10 @@ class ObservationStore:
             created_at=created_at,
         )
 
+    def create_external(self, path: Union[str, Path], **kwargs: Any) -> Observation:
+        observation, _created = self.create_external_with_status(path, **kwargs)
+        return observation
+
     def _create_external_receipt(
         self,
         *,
@@ -293,7 +317,7 @@ class ObservationStore:
         task_id: Optional[str],
         workflow_id: Optional[str],
         created_at: Optional[float],
-    ) -> Observation:
+    ) -> tuple[Observation, bool]:
         run_id, source_type, source_ref = self._validate_common(run_id, "artifact", source_ref)
         metadata = _validate_metadata(metadata)
         row = {
@@ -392,15 +416,15 @@ def verify_observation(observation_id: str, *, store: Optional[ObservationStore]
     return _store(store).verify(observation_id)
 
 
-def create_verification_observation(
+def create_verification_observation_with_status(
     verification: Dict[str, Any], *, run_id: str, task_id: Optional[str] = None,
     workflow_id: Optional[str] = None, store: Optional[ObservationStore] = None,
-) -> Observation:
+) -> tuple[Observation, bool]:
     evidence_id = str(verification.get("evidence_id") or "unknown")
     payload = {key: verification.get(key) for key in (
         "passed", "passed_tests", "total_tests", "failing_count", "lint_errors", "type_errors", "evidence_id",
     ) if key in verification}
-    return _store(store).create(
+    return _store(store).create_with_status(
         run_id=run_id,
         task_id=task_id,
         workflow_id=workflow_id,
@@ -410,6 +434,16 @@ def create_verification_observation(
         media_type="application/json",
         metadata={"verification_id": evidence_id},
     )
+
+
+def create_verification_observation(
+    verification: Dict[str, Any], *, run_id: str, task_id: Optional[str] = None,
+    workflow_id: Optional[str] = None, store: Optional[ObservationStore] = None,
+) -> Observation:
+    observation, _created = create_verification_observation_with_status(
+        verification, run_id=run_id, task_id=task_id, workflow_id=workflow_id, store=store,
+    )
+    return observation
 
 
 def create_artifact_observation(

@@ -79,6 +79,7 @@ def verification_ref(event: Dict[str, Any]) -> Dict[str, Any]:
         "sequence": event.get("sequence"),
         "passed": verification.get("passed"),
         "evidence_id": verification.get("evidence_id"),
+        "observation_id": verification.get("observation_id"),
     }
     failing = verification.get("failing_count")
     if failing is not None:
