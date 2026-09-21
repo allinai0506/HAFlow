@@ -855,3 +855,11 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - 统一去重：`(run_id, source_type, source_ref, sha256)` 唯一约束与 SQLite 事务保证并发创建收敛到 canonical Observation；artifact 只引用已有文件，不复制大型内容。
 - 接入：Observer 的最终 agent log Finding 改为 `observation_id + bounded excerpt`；`verification_completed` 保留 `evidence_id` 并增加 `observation_id`；Trajectory 只追加 `observation_created` receipt，不存完整证据；ObservationStore 失败回退短 evidence，不阻塞主链路。
 - 证据：`herdr/observation.py`、`herdr/state_db.py:observations`、`herdr/observer/engine.py`、`herdr/trajectory.py`、`services/herdr-controller.py`、`tests/test_observation.py`、Trajectory/Observer/Supervisor 回归测试。
+
+## [2026-09-21] feat | Semantic Context Compact V1 Working Memory Layer
+
+- 新增 `herdr/context_compact.py`：ContextPack 将 bounded Trajectory、Observation metadata、Finding 和 Runtime/Task facts 组成可追溯 working memory；`verified_facts` 由程序生成，reducer 只负责语义数组。
+- 新增 SQLite `context_packs` append-only 表、run/task 索引、latest/list/get API；相同 `source_event_sequence` 去重但不删除旧快照。
+- 新增 `herdr-task compact --run-id <run_id> [--json] [--no-model]`；agent_done Done Gateway 通过 daemon best-effort 旁路触发，失败不影响状态推进。
+- 默认输入硬预算为 12,000 字符、100 events、10 findings、20 observation metadata、20 artifact refs；Compact 不读取完整 Observation 内容。
+- 证据：`herdr/context_compact.py`、`herdr/state_db.py:context_packs`、`bin/herdr-task:cmd_compact`、`services/herdr-controller.py:_schedule_context_compact`、`tests/test_context_compact.py`。

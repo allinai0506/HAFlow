@@ -278,6 +278,27 @@ class StateStore(ABC):
         """List canonical WorkflowEvent records (desc=newest first)."""
         pass
 
+    # Semantic ContextPack working memory
+    @abstractmethod
+    def save_context_pack(self, context_pack: Dict[str, Any]) -> Dict[str, Any]:
+        """Append a ContextPack snapshot, applying source-sequence deduplication."""
+        pass
+
+    @abstractmethod
+    def get_context_pack(self, context_id: str) -> Optional[Dict[str, Any]]:
+        """Fetch one ContextPack by id."""
+        pass
+
+    @abstractmethod
+    def get_latest_context_pack(self, run_id: str) -> Optional[Dict[str, Any]]:
+        """Fetch the latest ContextPack for a run."""
+        pass
+
+    @abstractmethod
+    def list_context_packs(self, run_id: str) -> List[Dict[str, Any]]:
+        """List ContextPack snapshots for a run in creation order."""
+        pass
+
     # Checkpoints
     @abstractmethod
     def create_checkpoint(
@@ -575,6 +596,19 @@ class SQLiteStateStore(StateStore):
             metadata=metadata,
             db_path=self.db_path,
         )
+
+    # Semantic ContextPack working memory
+    def save_context_pack(self, context_pack: Dict[str, Any]) -> Dict[str, Any]:
+        return state_db.save_context_pack(context_pack, db_path=self.db_path)
+
+    def get_context_pack(self, context_id: str) -> Optional[Dict[str, Any]]:
+        return state_db.get_context_pack(context_id, db_path=self.db_path)
+
+    def get_latest_context_pack(self, run_id: str) -> Optional[Dict[str, Any]]:
+        return state_db.get_latest_context_pack(run_id, db_path=self.db_path)
+
+    def list_context_packs(self, run_id: str) -> List[Dict[str, Any]]:
+        return state_db.list_context_packs(run_id, db_path=self.db_path)
 
     def list_checkpoints(self, workflow_id: str) -> List[Dict[str, Any]]:
         return state_db.list_checkpoints(workflow_id=workflow_id, db_path=self.db_path)

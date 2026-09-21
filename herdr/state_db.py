@@ -178,6 +178,27 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
     """)
 
     conn.execute("""
+        CREATE TABLE IF NOT EXISTS context_packs (
+            context_id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            task_id TEXT,
+            workflow_id TEXT,
+            goal TEXT,
+            current_state_json TEXT NOT NULL DEFAULT '{}',
+            completed_json TEXT NOT NULL DEFAULT '[]',
+            verified_facts_json TEXT NOT NULL DEFAULT '[]',
+            important_findings_json TEXT NOT NULL DEFAULT '[]',
+            evidence_refs_json TEXT NOT NULL DEFAULT '[]',
+            artifact_refs_json TEXT NOT NULL DEFAULT '[]',
+            open_issues_json TEXT NOT NULL DEFAULT '[]',
+            next_focus_json TEXT NOT NULL DEFAULT '[]',
+            source_event_sequence INTEGER NOT NULL DEFAULT 0,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at REAL NOT NULL
+        );
+    """)
+
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS steering_items (
             steer_id TEXT PRIMARY KEY,
             task_id TEXT NOT NULL,
@@ -248,6 +269,9 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_observations_task ON observations(task_id, created_at, observation_id);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_observations_type ON observations(source_type, created_at, observation_id);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_observations_sha256 ON observations(sha256);")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_context_packs_run_created ON context_packs(run_id, created_at DESC);")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_context_packs_task_created ON context_packs(task_id, created_at DESC);")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_context_packs_run_sequence ON context_packs(run_id, source_event_sequence);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_steering_task ON steering_items(task_id, status);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_steering_hist_task ON steering_history(task_id, timestamp);")
 
@@ -1243,9 +1267,11 @@ def list_trajectory_events(
     run_id: str,
     event_type: Optional[str] = None,
     task_id: Optional[str] = None,
+    limit: Optional[int] = None,
+    desc: bool = False,
     db_path: Optional[Path] = None,
 ) -> List[Dict[str, Any]]:
-    """Read trajectory rows in stable sequence order."""
+    """Read trajectory rows with optional newest-first bounded selection."""
     conn = get_db_connection(db_path)
     try:
         query = "SELECT * FROM events WHERE run_id = ? AND source = 'trajectory'"
@@ -1256,7 +1282,11 @@ def list_trajectory_events(
         if task_id is not None:
             query += " AND task_id = ?"
             params.append(task_id)
-        query += " ORDER BY sequence ASC, id ASC"
+        direction = "DESC" if desc else "ASC"
+        query += f" ORDER BY sequence {direction}, id {direction}"
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(int(limit))
         results = []
         for row in conn.execute(query, params).fetchall():
             results.append({
@@ -1273,6 +1303,19 @@ def list_trajectory_events(
                 "payload": json.loads(row["payload_json"] or "{}"),
             })
         return results
+    finally:
+        conn.close()
+
+
+def latest_trajectory_sequence(run_id: str, db_path: Optional[Path] = None) -> int:
+    """Read only the run watermark without loading its event history."""
+    conn = get_db_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT COALESCE(MAX(sequence), 0) AS sequence FROM events WHERE run_id = ? AND source = 'trajectory'",
+            (run_id,),
+        ).fetchone()
+        return int(row["sequence"] or 0)
     finally:
         conn.close()
 
@@ -1561,6 +1604,124 @@ def list_observations(
                 params.append(value)
         query += " ORDER BY created_at ASC, observation_id ASC"
         return [_decode_observation_row(row) for row in conn.execute(query, params).fetchall()]
+    finally:
+        conn.close()
+
+
+def _decode_context_pack_row(row: sqlite3.Row) -> Dict[str, Any]:
+    return {
+        "context_id": row["context_id"],
+        "run_id": row["run_id"],
+        "task_id": row["task_id"],
+        "workflow_id": row["workflow_id"],
+        "goal": row["goal"],
+        "current_state": json.loads(row["current_state_json"] or "{}"),
+        "completed": json.loads(row["completed_json"] or "[]"),
+        "verified_facts": json.loads(row["verified_facts_json"] or "[]"),
+        "important_findings": json.loads(row["important_findings_json"] or "[]"),
+        "evidence_refs": json.loads(row["evidence_refs_json"] or "[]"),
+        "artifact_refs": json.loads(row["artifact_refs_json"] or "[]"),
+        "open_issues": json.loads(row["open_issues_json"] or "[]"),
+        "next_focus": json.loads(row["next_focus_json"] or "[]"),
+        "source_event_sequence": int(row["source_event_sequence"] or 0),
+        "metadata": json.loads(row["metadata_json"] or "{}"),
+        "created_at": float(row["created_at"]),
+    }
+
+
+def save_context_pack(
+    context_pack: Dict[str, Any],
+    db_path: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Append one ContextPack, returning the existing pack on same-source dedup."""
+    required = ("context_id", "run_id")
+    if any(not context_pack.get(key) for key in required):
+        raise ValueError("context_id and run_id are required")
+    conn = get_db_connection(db_path)
+    try:
+        conn.execute("BEGIN IMMEDIATE;")
+        existing = conn.execute(
+            """SELECT * FROM context_packs
+               WHERE run_id = ? AND source_event_sequence = ?
+               ORDER BY created_at DESC, rowid DESC LIMIT 1""",
+            (context_pack["run_id"], int(context_pack.get("source_event_sequence") or 0)),
+        ).fetchone()
+        if existing is not None:
+            conn.commit()
+            return _decode_context_pack_row(existing)
+        conn.execute(
+            """INSERT INTO context_packs (
+                context_id, run_id, task_id, workflow_id, goal,
+                current_state_json, completed_json, verified_facts_json,
+                important_findings_json, evidence_refs_json, artifact_refs_json,
+                open_issues_json, next_focus_json, source_event_sequence,
+                metadata_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                context_pack["context_id"], context_pack["run_id"],
+                context_pack.get("task_id"), context_pack.get("workflow_id"), context_pack.get("goal"),
+                json.dumps(context_pack.get("current_state") or {}, ensure_ascii=False),
+                json.dumps(context_pack.get("completed") or [], ensure_ascii=False),
+                json.dumps(context_pack.get("verified_facts") or [], ensure_ascii=False),
+                json.dumps(context_pack.get("important_findings") or [], ensure_ascii=False),
+                json.dumps(context_pack.get("evidence_refs") or [], ensure_ascii=False),
+                json.dumps(context_pack.get("artifact_refs") or [], ensure_ascii=False),
+                json.dumps(context_pack.get("open_issues") or [], ensure_ascii=False),
+                json.dumps(context_pack.get("next_focus") or [], ensure_ascii=False),
+                int(context_pack.get("source_event_sequence") or 0),
+                json.dumps(context_pack.get("metadata") or {}, ensure_ascii=False),
+                float(context_pack.get("created_at") or time.time()),
+            ),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM context_packs WHERE context_id = ?", (context_pack["context_id"],)
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("context pack insert was not readable")
+        return _decode_context_pack_row(row)
+    finally:
+        conn.close()
+
+
+def get_context_pack(
+    context_id: str,
+    db_path: Optional[Path] = None,
+) -> Optional[Dict[str, Any]]:
+    conn = get_db_connection(db_path)
+    try:
+        row = conn.execute("SELECT * FROM context_packs WHERE context_id = ?", (context_id,)).fetchone()
+        return _decode_context_pack_row(row) if row is not None else None
+    finally:
+        conn.close()
+
+
+def get_latest_context_pack(
+    run_id: str,
+    db_path: Optional[Path] = None,
+) -> Optional[Dict[str, Any]]:
+    conn = get_db_connection(db_path)
+    try:
+        row = conn.execute(
+            """SELECT * FROM context_packs WHERE run_id = ?
+               ORDER BY created_at DESC, rowid DESC LIMIT 1""", (run_id,)
+        ).fetchone()
+        return _decode_context_pack_row(row) if row is not None else None
+    finally:
+        conn.close()
+
+
+def list_context_packs(
+    run_id: str,
+    db_path: Optional[Path] = None,
+) -> List[Dict[str, Any]]:
+    conn = get_db_connection(db_path)
+    try:
+        rows = conn.execute(
+            """SELECT * FROM context_packs WHERE run_id = ?
+               ORDER BY created_at ASC, rowid ASC""", (run_id,)
+        ).fetchall()
+        return [_decode_context_pack_row(row) for row in rows]
     finally:
         conn.close()
 

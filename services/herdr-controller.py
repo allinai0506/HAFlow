@@ -3433,6 +3433,7 @@ def emit_done_if_allowed(task, report_text=None):
     recovery and registry-redelivery paths all funnel through this gateway,
     and the observation must be queued before the task can advance.
     """
+    _schedule_context_compact(task)
     _observer_terminal_checkpoint(task)
     checkpoint = supervisor_checkpoint(task, "agent_done", report_text=report_text)
     if checkpoint is None:
@@ -3451,6 +3452,35 @@ def emit_done_if_allowed(task, report_text=None):
         return False
     enqueue_coordinator_event(task, "done")
     return True
+
+
+def _schedule_context_compact(task):
+    """Schedule working-memory creation without joining or affecting done flow."""
+    if not task:
+        return False
+    try:
+        from herdr.context_compact import compact_run_best_effort
+        from herdr.trajectory import run_id_for_task
+        store = _get_store()
+
+        def worker():
+            try:
+                compact_run_best_effort(
+                    run_id_for_task(task), task=task, store=store,
+                )
+            except Exception as exc:  # defensive boundary isolation
+                print(f"[CONTEXT COMPACT WORKER SKIPPED] task={task.get('task_id')}: {type(exc).__name__}: {exc}")
+
+        thread = threading.Thread(
+            target=worker,
+            name=f"context-compact-{task.get('task_id', 'run')}",
+            daemon=True,
+        )
+        thread.start()
+        return True
+    except Exception as exc:
+        print(f"[CONTEXT COMPACT SKIPPED] task={task.get('task_id')}: {type(exc).__name__}: {exc}")
+        return False
 
 
 def _supervisor_log_pending(task, action):
