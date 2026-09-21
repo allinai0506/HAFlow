@@ -3429,3 +3429,49 @@ pytest tests/test_trajectory_observer.py::TestHardeningRegressions -q
 - `docs/superpowers/specs/2026-09-20-trajectory-observer-design.md`
 
 ---
+
+## 78. 旁路观察者挂上主流程后，测试必须默认关闭它：默认路径回落到生产状态库
+
+### 问题背景
+
+PR #70 把 terminal observation 挂到统一 Done Gateway 后，既有 controller 测试
+（`test_supervisor_interception` 的 `t-int-1`/`t-watch-1`、`test_fix_loop_anti_flapping`
+的 `test-task-rework-heal`）在调用 `handle_event`/`emit_done_if_allowed` 时触发了默认
+Observer 调度器；当 `store=None` 时 `TrajectoryObserver` 回落到
+`state_db.get_default_db_path()`，即生产库 `~/.herdr-controller/state.db`，实际写入
+3 行 `trajectory_findings` 测试残留。更隐蔽的是：在 APFS clone 中运行测试同样会写
+生产库——默认路径基于 `HOME`，与仓库位置无关。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 新挂到主流程的旁路能力会被大量既有测试间接触发 | "旁路"只是生产语义；在测试里它是新增的全局副作用源 | 新增全局副作用（观察/写入/子进程/网络）必须同步提供测试级 kill switch，并在 conftest 默认关闭 |
+| 用例用 tmp_path 隔离 DB，但默认路径仍指向 HOME | tmp_path 只覆盖显式传 store 的用例；`store=None` 的默认路径必须单独审计 | 任何"默认 DB 路径"型副作用都要在 conftest 用 env 关闭，不能依赖每个用例自觉 |
+| 评审/克隆里跑测试也会写生产库 | 测试隔离与仓库位置无关（HOME 决定路径） | 在 clone 里跑测试前必须设 `HERDR_STATE_DB` 指向临时文件 |
+
+### 操作规范（已固化到 `tests/conftest.py`）
+
+1. conftest **硬覆盖** `os.environ["HERDR_OBSERVER_ENABLED"] = "0"`（不是 setdefault：开发者 shell 导出 1 也不能让测试重新写生产库）；
+2. 需要真实默认调度器的用例显式 `setenv("HERDR_OBSERVER_ENABLED","1")` + `HERDR_OBSERVER_LIVE_PROBE=0` + `HERDR_OBSERVER_CONFIG` 指向不存在路径；
+3. 未显式传 config 的 `ObservationScheduler` 测试改为显式 `_base_config()`（测试自包含）；
+4. 新增回归 `TestTestEnvironmentIsolation` 断言测试环境默认禁用且 submit 返回 False。
+
+### 验证命令 / 证据
+
+```bash
+pytest tests/test_trajectory_observer.py -q          # 91 passed
+pytest tests/test_supervisor_*.py tests/test_fix_loop_anti_flapping.py -q  # 104 passed
+# 生产库 trajectory_findings：清理前 3 → 清理后 0；复跑 195 项测试后仍为 0
+```
+
+- pre-fix RED：`assert True is False`（测试环境默认 enabled=True）。
+
+### 相关文档 / 关联证据
+
+- PR #70 merge `aebbd69`（引入该挂载）
+- `tests/conftest.py`
+- `tests/test_trajectory_observer.py:TestTestEnvironmentIsolation`
+- `services/herdr-controller.py:_observer_terminal_checkpoint`
+
+---
