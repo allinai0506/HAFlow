@@ -336,7 +336,7 @@ class TrajectoryObserver:
                 observation_content = item["excerpt"]
                 if signal.finding_type == "possible_context_problem" and isinstance(log_tail, dict):
                     observation_content = log_tail.get("excerpt") or observation_content
-                observation, created = self.observation_store.create_with_status(
+                observation, _created = self.observation_store.create_with_status(
                     run_id=run_id,
                     task_id=task.get("task_id"),
                     workflow_id=task.get("workflow_id"),
@@ -353,8 +353,7 @@ class TrajectoryObserver:
                     created_at=now,
                 )
                 event_task = task or {"run_id": run_id}
-                if created:
-                    record_observation_created(event_task, observation, ledger=self.ledger)
+                record_observation_created(event_task, observation, ledger=self.ledger)
                 materialized.append({
                     "type": "observation",
                     "observation_id": observation.observation_id,

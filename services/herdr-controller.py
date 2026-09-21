@@ -3633,7 +3633,7 @@ def check_task_tests_completed(task, store=None, now=None):
         "composite_score": test_evidence.get("composite_score", 0.0),
     }
     try:
-        observation, created = create_verification_observation_with_status(
+        observation, _created = create_verification_observation_with_status(
             verification,
             run_id=task.get("run_id") or f"run_{task_id}",
             task_id=task_id,
@@ -3641,12 +3641,11 @@ def check_task_tests_completed(task, store=None, now=None):
             store=ObservationStore(getattr(st, "db_path", None)),
         )
         verification["observation_id"] = observation.observation_id
-        if created:
-            record_observation_created(
-                task,
-                observation,
-                ledger=TrajectoryLedger(getattr(st, "db_path", None)),
-            )
+        record_observation_created(
+            task,
+            observation,
+            ledger=TrajectoryLedger(getattr(st, "db_path", None)),
+        )
     except Exception as exc:
         print(f"[VERIFICATION OBSERVATION SKIPPED] task={task_id}: {type(exc).__name__}")
 

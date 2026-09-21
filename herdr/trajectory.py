@@ -134,7 +134,7 @@ class TrajectoryLedger:
                 db_path=self.db_path,
             )
         decoded = self._decode(stored)
-        if artifact_result is not None and artifact_result[1]:
+        if artifact_result is not None:
             record_observation_created(
                 {"run_id": mapping["run_id"], "task_id": mapping.get("task_id"), "workflow_id": mapping.get("workflow_id")},
                 artifact_result[0],

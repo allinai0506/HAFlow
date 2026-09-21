@@ -1917,6 +1917,35 @@ class TestLiveTranscript:
         assert len(list_observations(run_id="run-observation-dedup", store=ObservationStore(store.db_path))) == 1
         assert len(ledger.list_events("run-observation-dedup", event_type="observation_created")) == 1
 
+    def test_dedup_observation_self_heals_missing_receipt(self, tmp_path: Path, monkeypatch):
+        import herdr.trajectory as trajectory_module
+
+        store = SQLiteStateStore(tmp_path / "state.db")
+        ledger = TrajectoryLedger(store.db_path)
+        _append(ledger, [{"run_id": "run-receipt-recovery", "event_type": "run_started"}])
+        task = _task(run_id="run-receipt-recovery", runtime={"status": "running"})
+        transcript = {"ref": "pane:p-recovery", "excerpt": "\n".join(["Error: repeated"] * 3)}
+        original = trajectory_module.state_db.record_observation_receipt
+        calls = {"count": 0}
+
+        def fail_first_receipt(*args, **kwargs):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise OSError("simulated receipt crash")
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(trajectory_module.state_db, "record_observation_receipt", fail_first_receipt)
+        for _ in range(2):
+            observer_harness.observe_run(
+                "run-receipt-recovery", task=task, store=store, ledger=ledger,
+                config=_base_config(), provider=CapturingProvider({"possible_context_problem": 0.9}),
+                transcript_reader=lambda _task: transcript,
+            )
+
+        assert calls["count"] == 2
+        assert len(list_observations(run_id="run-receipt-recovery", store=ObservationStore(store.db_path))) == 1
+        assert len(ledger.list_events("run-receipt-recovery", event_type="observation_created")) == 1
+
     def test_log_observation_keeps_bounded_context_and_finding_excerpt_short(self, tmp_path: Path):
         store = SQLiteStateStore(tmp_path / "state.db")
         ledger = TrajectoryLedger(store.db_path)
