@@ -427,6 +427,66 @@ def test_mismatched_explicit_task_fails_closed(tmp_path: Path):
     assert list_contexts("run-a", store=store) == []
 
 
+def test_legacy_task_without_run_id_rejected_for_unrelated_run(tmp_path: Path, monkeypatch):
+    db_path = tmp_path / "state.db"
+    store = ObservationStore(db_path)
+    legacy_task = {"task_id": "legacy", "goal": "legacy goal"}
+    state_db.save_task(legacy_task, db_path=db_path)
+
+    # 1. Matching requested run_id=run_legacy is allowed
+    pack = compact_run("run_legacy", task=legacy_task, store=store, provider=None)
+    assert pack.run_id == "run_legacy"
+    assert pack.task_id == "legacy"
+
+    # 2. Unrelated requested run_id is rejected and fails closed (no ContextPack created)
+    with pytest.raises(ValueError, match="does not match"):
+        compact_run("unrelated-run", task=legacy_task, store=store, provider=None)
+    assert list_contexts("unrelated-run", store=store) == []
+
+    # 3. Snapshot reading does not attach legacy task to unrelated-run
+    snap_unrelated = state_db.read_context_compact_snapshot("unrelated-run", task=legacy_task, db_path=db_path)
+    assert snap_unrelated["task"] is None
+
+    # 4. Snapshot reading without explicit task argument also does not attach legacy task from trajectory event
+    TrajectoryLedger(db_path).append_event({"run_id": "unrelated-run", "task_id": "legacy", "event_type": "task_started"})
+    snap_auto = state_db.read_context_compact_snapshot("unrelated-run", db_path=db_path)
+    assert snap_auto["task"] is None
+
+    # 5. Snapshot reading with matching run_id does attach legacy task
+    snap_matched = state_db.read_context_compact_snapshot("run_legacy", task=legacy_task, db_path=db_path)
+    assert snap_matched["task"] is not None
+    assert snap_matched["task"]["task_id"] == "legacy"
+
+    # 6. CLI cmd_compact integration: rejects unrelated run_id with exit 1, succeeds for matching run_id
+    import importlib.machinery
+    import importlib.util
+    task_bin = Path(__file__).resolve().parent.parent / "bin" / "herdr-task"
+    spec = importlib.util.spec_from_loader(
+        "herdr_task_cli_test",
+        importlib.machinery.SourceFileLoader("herdr_task_cli_test", str(task_bin)),
+    )
+    herdr_task = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(herdr_task)
+
+    from herdr.state_store import get_state_store
+    monkeypatch.setattr(herdr_task, "_get_store", lambda: get_state_store(db_path=db_path))
+
+    class Args:
+        def __init__(self, run_id, task_id):
+            self.run_id = run_id
+            self.task_id = task_id
+            self.no_model = True
+            self.json = False
+
+    with pytest.raises(SystemExit) as exc_info:
+        herdr_task.cmd_compact(Args("unrelated-run", "legacy"))
+    assert exc_info.value.code == 1
+
+    # CLI with matching run_id succeeds without exit
+    herdr_task.cmd_compact(Args("run_legacy", "legacy"))
+
+
+
 def test_auto_task_lookup_does_not_import_task_from_another_run(tmp_path: Path):
     db_path = tmp_path / "state.db"
     store = ObservationStore(db_path)
@@ -913,6 +973,26 @@ def test_legacy_task_without_run_id_is_accepted_after_async_refresh(tmp_path: Pa
     while time.time() < deadline and state_db.get_latest_context_pack(run_id, db_path=db_path) is None:
         time.sleep(0.02)
     assert state_db.get_latest_context_pack(run_id, db_path=db_path) is not None
+
+
+def test_legacy_task_controller_skips_when_identity_changed(tmp_path: Path, monkeypatch):
+    controller = importlib.import_module("services.herdr-controller")
+    db_path = tmp_path / "legacy-mismatch.db"
+    store = ObservationStore(db_path)
+    legacy_task = {"task_id": "legacy-mismatch", "status": "agent_done", "goal": "legacy"}
+    state_db.save_task(legacy_task, db_path=db_path)
+    run_id = "run_legacy-mismatch"
+    TrajectoryLedger(db_path).append_event({"run_id": run_id, "task_id": legacy_task["task_id"], "event_type": "agent_done"})
+    monkeypatch.setattr(controller, "_get_store", lambda: store)
+    monkeypatch.setattr("herdr.observer.harness.get_provider", lambda: None)
+
+    # When fresh_task identity changed in db to another run, controller worker skips safely
+    state_db.save_task(dict(legacy_task, run_id="new-assigned-run"), db_path=db_path)
+    assert controller._schedule_context_compact(legacy_task)
+    time.sleep(0.2)
+    assert state_db.get_latest_context_pack(run_id, db_path=db_path) is None
+    assert state_db.get_latest_context_pack("new-assigned-run", db_path=db_path) is None
+
 
 
 def test_completed_cap_keeps_latest_completion_milestones(tmp_path: Path):

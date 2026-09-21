@@ -20,7 +20,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
 
 from . import state_db
 from .observation import _redact_value
-from .trajectory import TrajectoryLedger
+from .trajectory import TrajectoryLedger, run_id_for_task
 
 
 LOGGER = logging.getLogger(__name__)
@@ -675,8 +675,13 @@ def compact_run(
     """Create or return the latest bounded ContextPack for one run."""
     if not run_id:
         raise ValueError("run_id is required")
-    if task is not None and task.get("run_id") and str(task["run_id"]) != str(run_id):
-        raise ValueError(f"task.run_id {task['run_id']} does not match run_id {run_id}")
+    if task is not None:
+        try:
+            expected_run_id = run_id_for_task(task)
+        except ValueError:
+            expected_run_id = None
+        if expected_run_id and expected_run_id != str(run_id):
+            raise ValueError(f"task.run_id {task.get('run_id') or expected_run_id} does not match run_id {run_id}")
     cfg = _config(config)
     if not cfg["enabled"]:
         raise RuntimeError("context compact is disabled")
