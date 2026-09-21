@@ -8,8 +8,8 @@ removes every reference that cannot be resolved in the source stores.
 
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import logging
 import threading
 import time
@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
 
 from . import state_db
+from .observation import _redact_value
 from .trajectory import TrajectoryLedger
 
 
@@ -32,6 +33,10 @@ DEFAULT_CONFIG = {
     "max_artifacts": 20,
 }
 _COMPACT_LOCK = threading.RLock()
+MAX_COMPLETED_ITEMS = 20
+MAX_OPEN_ISSUES = 20
+MAX_VERIFIED_FACTS = 20
+MAX_NEXT_FOCUS = 3
 
 
 @dataclass(frozen=True)
@@ -96,6 +101,11 @@ def _config(config: Optional[Dict[str, Any]]) -> Dict[str, int]:
 
 def _event_id(event: Dict[str, Any]) -> str:
     return str(event.get("event_id") or f"evt_{event.get('id')}")
+
+
+def _redact_context(value: Any) -> Any:
+    """Reuse ObservationPack's recursive redaction for context text/metadata."""
+    return _redact_value(value)
 
 
 def _findings(run_id: str, db_path: Optional[Path], limit: int) -> List[Dict[str, Any]]:
@@ -210,6 +220,7 @@ def _compact_input(
         "artifact_refs": list(artifacts),
         "candidate_semantics": candidates,
     }
+    payload = _redact_context(payload)
 
     def size() -> int:
         return len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
@@ -271,7 +282,10 @@ def _reducer_output(provider: Any, payload: Dict[str, Any]) -> Dict[str, Any]:
         result = reducer(payload)
     elif hasattr(provider, "choose"):
         candidates = payload.get("candidate_semantics") or {}
-        output: Dict[str, Any] = {}
+        output: Dict[str, Any] = {
+            "completed": [], "open_issues": [], "next_focus": [],
+            "selected_findings": [], "selected_observations": [], "selected_artifacts": [],
+        }
         # DecisionProvider's standard judge_many path selects semantic items;
         # the text and refs remain program-produced candidates.
         questions = {}
@@ -314,12 +328,41 @@ def _reducer_output(provider: Any, payload: Dict[str, Any]) -> Dict[str, Any]:
             selected = getattr(result, "value", None)
             if selected in options:
                 output["selected_findings"] = [str(selected)]
-        return output
+        return _validate_reducer_output(output)
     else:
         return {}
     if isinstance(result, str):
         result = json.loads(result)
-    return dict(result) if isinstance(result, dict) else {}
+    return _validate_reducer_output(result)
+
+
+def _validate_reducer_output(result: Any) -> Dict[str, Any]:
+    """Validate the reducer contract without trusting model-shaped values."""
+    if not isinstance(result, dict):
+        raise ValueError("reducer output must be an object")
+    allowed_lists = {
+        "completed", "open_issues", "next_focus",
+        "selected_findings", "selected_observations", "selected_artifacts",
+    }
+    normalized: Dict[str, Any] = {}
+    for key in allowed_lists:
+        if key not in result:
+            continue
+        value = result[key]
+        if not isinstance(value, list):
+            raise ValueError(f"reducer field {key} must be a list")
+        if key.startswith("selected_"):
+            if not all(isinstance(item, str) for item in value):
+                raise ValueError(f"reducer field {key} must contain strings")
+        else:
+            for item in value:
+                if not isinstance(item, dict) or not isinstance(item.get("text"), str):
+                    raise ValueError(f"reducer field {key} must contain text objects")
+                refs = item.get("refs")
+                if not isinstance(refs, list) or not all(isinstance(ref, str) for ref in refs):
+                    raise ValueError(f"reducer field {key} refs must contain strings")
+        normalized[key] = value
+    return normalized
 
 
 def verify_context_references(
@@ -368,7 +411,7 @@ def _semantic_candidates(
 
 
 def _fallback_semantic(events: Sequence[Dict[str, Any]], findings: Sequence[Dict[str, Any]], previous: Optional[ContextPack] = None) -> Dict[str, Any]:
-    completed = list(previous.completed if previous else [])
+    completed = []
     seen_completed = {(item.get("text"), tuple(item.get("refs") or [])) for item in completed}
     for event in events:
         if event.get("event_type") in {"task_completed", "agent_done", "verification_completed", "artifact_created"}:
@@ -376,14 +419,16 @@ def _fallback_semantic(events: Sequence[Dict[str, Any]], findings: Sequence[Dict
             if (item["text"], tuple(item["refs"])) not in seen_completed:
                 completed.append(item)
                 seen_completed.add((item["text"], tuple(item["refs"])))
-    open_issues = list(previous.open_issues if previous else [])
+    completed.extend(item for item in (previous.completed if previous else []) if (item.get("text"), tuple(item.get("refs") or [])) not in seen_completed)
+    open_issues = []
     seen_issues = {(item.get("text"), tuple(item.get("refs") or [])) for item in open_issues}
     for finding in findings:
         item = {"text": finding.get("summary") or finding.get("finding_type"), "refs": [finding["finding_id"]]}
         if finding.get("finding_id") and (item["text"], tuple(item["refs"])) not in seen_issues:
             open_issues.append(item)
             seen_issues.add((item["text"], tuple(item["refs"])))
-    next_focus = list(previous.next_focus if previous else [])
+    open_issues.extend(item for item in (previous.open_issues if previous else []) if (item.get("text"), tuple(item.get("refs") or [])) not in seen_issues)
+    next_focus = []
     seen_focus = {(item.get("text"), tuple(item.get("refs") or [])) for item in next_focus}
     for finding in findings:
         if finding.get("finding_id") and finding.get("recommended_action"):
@@ -391,6 +436,7 @@ def _fallback_semantic(events: Sequence[Dict[str, Any]], findings: Sequence[Dict
             if (item["text"], tuple(item["refs"])) not in seen_focus:
                 next_focus.append(item)
                 seen_focus.add((item["text"], tuple(item["refs"])))
+    next_focus.extend(item for item in (previous.next_focus if previous else []) if (item.get("text"), tuple(item.get("refs") or [])) not in seen_focus)
     return {"completed": completed, "open_issues": open_issues, "next_focus": next_focus}
 
 
@@ -399,27 +445,16 @@ def _source_fingerprint(
     source_sequence: int,
     task: Optional[Dict[str, Any]],
     current_state: Dict[str, Any],
-    db_path: Optional[Path],
+    findings: Sequence[Dict[str, Any]],
+    observations: Sequence[Dict[str, Any]],
 ) -> str:
-    conn = state_db.get_db_connection(db_path)
-    try:
-        finding = conn.execute(
-            "SELECT COUNT(*) AS count, COALESCE(MAX(created_at), 0) AS latest, COALESCE(MAX(rowid), 0) AS rowid FROM trajectory_findings WHERE run_id = ?",
-            (run_id,),
-        ).fetchone()
-        observation = conn.execute(
-            "SELECT COUNT(*) AS count, COALESCE(MAX(created_at), 0) AS latest, COALESCE(MAX(rowid), 0) AS rowid FROM observations WHERE run_id = ?",
-            (run_id,),
-        ).fetchone()
-    finally:
-        conn.close()
     source = {
         "run_id": run_id,
         "trajectory_sequence": source_sequence,
         "task": {"task_id": (task or {}).get("task_id"), "workflow_id": (task or {}).get("workflow_id"), "goal": (task or {}).get("goal")},
         "current_state": current_state,
-        "findings": dict(finding) if finding else {},
-        "observations": dict(observation) if observation else {},
+        "findings": list(findings),
+        "observations": list(observations),
     }
     return hashlib.sha256(json.dumps(source, sort_keys=True, ensure_ascii=False, default=str).encode()).hexdigest()
 
@@ -495,10 +530,13 @@ def compact_run(
         if task is None:
             task_id = next((event.get("task_id") for event in reversed(all_events) if event.get("task_id")), None)
             if task_id:
-                task = state_db.get_task(str(task_id), db_path=db_path)
+                candidate_task = state_db.get_task(str(task_id), db_path=db_path)
+                if candidate_task and candidate_task.get("run_id") and str(candidate_task["run_id"]) != str(run_id):
+                    candidate_task = None
+                task = candidate_task
         goal = _goal(task, all_events)
         current_state = _current_state(task)
-        fingerprint = _source_fingerprint(run_id, source_sequence, task, current_state, db_path)
+        fingerprint = _source_fingerprint(run_id, source_sequence, task, current_state, findings, observations)
         if latest and (latest.get("metadata") or {}).get("context_source_fingerprint") == fingerprint:
             return ContextPack.from_mapping(latest)
         candidates = _semantic_candidates(events, findings, previous)
@@ -517,6 +555,7 @@ def compact_run(
         current_facts = _verification_facts(all_events, task)
         known_fact_keys = {json.dumps(fact, sort_keys=True, default=str) for fact in verified}
         verified.extend(fact for fact in current_facts if json.dumps(fact, sort_keys=True, default=str) not in known_fact_keys)
+        verified = verified[-MAX_VERIFIED_FACTS:]
         previous_refs = _previously_verified_refs(previous, run_id, db_path)
         event_ids = {_event_id(event) for event in all_events} | previous_refs["events"]
         finding_ids = {str(finding.get("finding_id")) for finding in findings} | previous_refs["findings"]
@@ -557,24 +596,29 @@ def compact_run(
                     if len(important) >= 5:
                         break
         evidence_refs = selected["selected_observations"] or [str(item["observation_id"]) for item in observations]
-        evidence_refs = list(dict.fromkeys(list(previous_refs["observations"]) + evidence_refs))
+        evidence_refs = list(dict.fromkeys(list(previous_refs["observations"]) + evidence_refs))[-cfg["max_observations"]:]
         artifact_refs = [item for item in artifacts if item["ref"] in selected["selected_artifacts"] or not selected["selected_artifacts"]]
         if previous:
             old_artifacts = [item for item in previous.artifact_refs if isinstance(item, dict) and item.get("ref") in previous_refs["artifacts"]]
-            artifact_refs = old_artifacts + artifact_refs
+            artifact_refs = artifact_refs + old_artifacts
             seen_artifact_refs = set()
             artifact_refs = [item for item in artifact_refs if not (item.get("ref") in seen_artifact_refs or seen_artifact_refs.add(item.get("ref")))]
+        artifact_refs = artifact_refs[:cfg["max_artifacts"]]
+        important = important[:cfg["max_findings"]]
+        completed = selected["completed"][:MAX_COMPLETED_ITEMS]
+        open_issues = selected["open_issues"][:MAX_OPEN_ISSUES]
+        next_focus = selected["next_focus"][:MAX_NEXT_FOCUS]
         pack = ContextPack(
             context_id=f"ctx_{uuid.uuid4().hex}", run_id=run_id,
             task_id=(task or {}).get("task_id") or (all_events[-1].get("task_id") if all_events else None),
             workflow_id=(task or {}).get("workflow_id") or (all_events[-1].get("workflow_id") if all_events else None),
-            goal=goal, current_state=current_state,
-            completed=selected["completed"], verified_facts=verified,
-            important_findings=important, evidence_refs=evidence_refs,
-            artifact_refs=artifact_refs, open_issues=selected["open_issues"],
-            next_focus=selected["next_focus"][:3], source_event_sequence=source_sequence,
+            goal=_redact_context(goal), current_state=_redact_context(current_state),
+            completed=_redact_context(completed), verified_facts=_redact_context(verified),
+            important_findings=_redact_context(important), evidence_refs=evidence_refs,
+            artifact_refs=_redact_context(artifact_refs), open_issues=_redact_context(open_issues),
+            next_focus=_redact_context(next_focus), source_event_sequence=source_sequence,
             created_at=float(now if now is not None else time.time()),
-            metadata={"analysis": {"completed": True, "open_issues": True, "next_focus": True}, "input_chars": len(json.dumps(compact_input, ensure_ascii=False)), "context_source_fingerprint": fingerprint},
+            metadata=_redact_context({"analysis": {"completed": True, "open_issues": True, "next_focus": True}, "input_chars": len(json.dumps(compact_input, ensure_ascii=False)), "context_source_fingerprint": fingerprint}),
         )
         stored = state_db.save_context_pack(pack.to_mapping(), db_path=db_path)
         return ContextPack.from_mapping(stored)

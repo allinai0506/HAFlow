@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from herdr.context_compact import (
+    ContextPack,
     compact_run,
     get_context,
     get_latest_context,
@@ -362,3 +363,108 @@ def test_mismatched_explicit_task_fails_closed(tmp_path: Path):
     with pytest.raises(ValueError, match="does not match"):
         compact_run("run-a", task={"task_id": "task-b", "run_id": "run-b", "goal": "g"}, store=store, provider=None)
     assert list_contexts("run-a", store=store) == []
+
+
+def test_auto_task_lookup_does_not_import_task_from_another_run(tmp_path: Path):
+    db_path = tmp_path / "state.db"
+    store = ObservationStore(db_path)
+    state_db.save_task({"task_id": "shared-task", "run_id": "run-new", "status": "running", "goal": "new goal"}, db_path=db_path)
+    TrajectoryLedger(db_path).append_event({"run_id": "run-old", "task_id": "shared-task", "event_type": "task_started", "metadata": {"goal": "old goal"}})
+    pack = compact_run("run-old", store=store, provider=None)
+    assert pack.current_state == {}
+    assert pack.goal == "old goal"
+
+
+def test_compact_redacts_provider_input_previous_context_and_pack_text(tmp_path: Path):
+    db_path = tmp_path / "state.db"
+    store = ObservationStore(db_path)
+    secret = "VERY-SECRET-123456"
+    ledger = TrajectoryLedger(db_path)
+    ledger.append_event({"run_id": "run-redact", "event_type": "progress", "metadata": {"nested": {"api_key": secret}}})
+    captured = {}
+
+    class Provider:
+        def reduce(self, payload):
+            captured["payload"] = payload
+            return {"completed": [{"text": f"token={secret}", "refs": ["evt_1"]}], "open_issues": [], "next_focus": []}
+
+    first = compact_run("run-redact", task={"task_id": "task-redact", "run_id": "run-redact", "goal": f"goal password={secret}"}, store=store, provider=Provider())
+    assert secret not in json.dumps(captured["payload"], ensure_ascii=False)
+    assert secret not in json.dumps(first.to_mapping(), ensure_ascii=False)
+    ledger.append_event({"run_id": "run-redact", "event_type": "progress"})
+    compact_run("run-redact", task={"task_id": "task-redact", "run_id": "run-redact", "goal": f"goal password={secret}"}, store=store, provider=Provider())
+    assert secret not in json.dumps(captured["payload"], ensure_ascii=False)
+
+
+def test_finding_mutation_changes_context_fingerprint(tmp_path: Path):
+    db_path = tmp_path / "state.db"
+    store = ObservationStore(db_path)
+    first_finding = _finding(run_id="run-finding-mutate", finding_id="finding-mutate")
+    upsert_trajectory_finding(first_finding, db_path=db_path)
+    first = compact_run("run-finding-mutate", task={"task_id": "task-mutate", "run_id": "run-finding-mutate", "goal": "g"}, store=store)
+    changed = dict(first_finding, severity="critical", summary="new summary", recommended_action="new action")
+    upsert_trajectory_finding(changed, db_path=db_path)
+    second = compact_run("run-finding-mutate", task={"task_id": "task-mutate", "run_id": "run-finding-mutate", "goal": "g"}, store=store)
+    assert second.context_id != first.context_id
+    assert second.important_findings[0]["severity"] == "critical"
+    assert second.important_findings[0]["summary"] == "new summary"
+
+
+def test_previous_merge_is_bounded_and_current_artifact_wins(tmp_path: Path):
+    db_path = tmp_path / "state.db"
+    store = ObservationStore(db_path)
+    ledger = TrajectoryLedger(db_path)
+    ledger.append_event({"run_id": "run-merge", "event_type": "task_started"})
+    old = ContextPack(
+        context_id="ctx-old", run_id="run-merge", task_id="task-merge", workflow_id=None, goal="g",
+        completed=[{"text": f"done-{i}", "refs": ["evt_1"]} for i in range(30)],
+        verified_facts=[{"fact_type": "verification", "event_id": "evt_1"} for _ in range(30)],
+        evidence_refs=[f"obs_{i}" for i in range(30)],
+        artifact_refs=[{"ref": "report.txt", "kind": "old", "observation_id": "obs_1"}],
+        open_issues=[{"text": f"issue-{i}", "refs": ["evt_1"]} for i in range(30)],
+        next_focus=[{"text": f"focus-{i}", "refs": ["evt_1"]} for i in range(10)],
+        source_event_sequence=1, created_at=1.0, metadata={"context_source_fingerprint": "old"},
+    )
+    state_db.save_context_pack(old.to_mapping(), db_path=db_path)
+    ledger.append_event({"run_id": "run-merge", "event_type": "artifact_created", "artifact": {"ref": "report.txt", "kind": "current"}})
+    pack = compact_run("run-merge", task={"task_id": "task-merge", "run_id": "run-merge", "goal": "g"}, store=store, provider=None, config={"max_observations": 2, "max_artifacts": 2})
+    assert len(pack.completed) <= 20
+    assert len(pack.open_issues) <= 20
+    assert len(pack.next_focus) <= 3
+    assert len(pack.verified_facts) <= 20
+    assert len(pack.evidence_refs) <= 2
+    assert len(pack.artifact_refs) <= 2
+    assert pack.artifact_refs[0]["kind"] == "current"
+    assert len(json.dumps(pack.to_mapping(), ensure_ascii=False)) < 20000
+
+
+@pytest.mark.parametrize("mode", ["all_accept", "partial", "all_reject", "malformed", "exception"])
+def test_reducer_result_contract_is_bounded_and_fail_safe(tmp_path: Path, mode: str):
+    ledger = TrajectoryLedger(tmp_path / "state.db")
+    ledger.append_event({"run_id": f"run-contract-{mode}", "event_type": "task_completed"})
+
+    class Provider:
+        def reduce(self, payload):
+            if mode == "exception":
+                raise RuntimeError("provider down")
+            if mode == "malformed":
+                return {"completed": None, "open_issues": 3, "next_focus": [{"text": 4, "refs": "evt_1"}]}
+            item = {"text": "selected", "refs": ["evt_1"]}
+            if mode == "all_accept":
+                return {"completed": [item], "open_issues": [], "next_focus": [item], "selected_findings": [], "selected_observations": [], "selected_artifacts": []}
+            if mode == "partial":
+                return {"completed": [item], "open_issues": [], "next_focus": []}
+            return {"completed": [], "open_issues": [], "next_focus": [], "selected_findings": [], "selected_observations": [], "selected_artifacts": []}
+
+    pack = compact_run(
+        f"run-contract-{mode}", task={"task_id": f"task-{mode}", "run_id": f"run-contract-{mode}", "goal": "g"},
+        store=ObservationStore(tmp_path / "state.db"), provider=Provider(),
+    )
+    if mode == "all_accept":
+        assert pack.completed and pack.next_focus
+    elif mode == "partial":
+        assert pack.completed and pack.open_issues == [] and pack.next_focus == []
+    elif mode == "all_reject":
+        assert pack.completed == [] and pack.open_issues == [] and pack.next_focus == []
+    else:
+        assert pack.completed
