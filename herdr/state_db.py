@@ -1313,6 +1313,96 @@ def list_trajectory_events(
         conn.close()
 
 
+def aggregate_run_metric_rows(run_id: str, db_path: Optional[Path] = None) -> Dict[str, Any]:
+    """Return scalar, run-scoped metric facts without loading evidence content."""
+    conn = get_db_connection(db_path)
+    try:
+        event_row = conn.execute(
+            """
+            SELECT COUNT(*) AS trajectory_events,
+                   MIN(timestamp) AS started_at,
+                   MAX(CASE WHEN event_type IN ('run_completed', 'run_failed') THEN timestamp END)
+                       AS finished_at,
+                   SUM(CASE WHEN event_type = 'run_completed' THEN 1 ELSE 0 END) AS run_completed,
+                   SUM(CASE WHEN event_type = 'run_failed' THEN 1 ELSE 0 END) AS run_failed,
+                   SUM(CASE WHEN event_type = 'verification_completed' THEN 1 ELSE 0 END)
+                       AS verification_total,
+                   SUM(CASE WHEN event_type = 'verification_completed'
+                              AND json_extract(payload_json, '$.verification.passed') = 1
+                            THEN 1 ELSE 0 END) AS verification_passed,
+                   SUM(CASE WHEN event_type = 'verification_completed'
+                              AND json_extract(payload_json, '$.verification.passed') = 0
+                            THEN 1 ELSE 0 END) AS verification_failed
+                   ,SUM(CASE WHEN event_type = 'task_started' THEN 1 ELSE 0 END) AS task_started
+                   ,SUM(CASE WHEN event_type = 'artifact_created' THEN 1 ELSE 0 END) AS artifact_created
+                   ,SUM(CASE WHEN event_type = 'agent_done' THEN 1 ELSE 0 END) AS agent_done
+              FROM events
+             WHERE run_id = ? AND source = 'trajectory'
+            """,
+            (run_id,),
+        ).fetchone()
+        identity = conn.execute(
+            """
+            SELECT
+              (SELECT task_id FROM events
+                WHERE run_id = ? AND source = 'trajectory' AND task_id IS NOT NULL
+                ORDER BY sequence ASC, id ASC LIMIT 1) AS task_id,
+              (SELECT workflow_id FROM events
+                WHERE run_id = ? AND source = 'trajectory' AND workflow_id IS NOT NULL
+                ORDER BY sequence ASC, id ASC LIMIT 1) AS workflow_id
+            """,
+            (run_id, run_id),
+        ).fetchone()
+        observations = conn.execute(
+            """
+            SELECT COUNT(*) AS observations_created,
+                   COALESCE(SUM(size_bytes), 0) AS observation_bytes
+              FROM observations
+             WHERE run_id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+        findings = conn.execute(
+            "SELECT COUNT(*) AS findings_created FROM trajectory_findings WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+        context_packs = conn.execute(
+            "SELECT COUNT(*) AS context_packs_created FROM context_packs WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+        latest_context = conn.execute(
+            """
+            SELECT * FROM context_packs
+             WHERE run_id = ?
+             ORDER BY created_at DESC, rowid DESC
+             LIMIT 1
+            """,
+            (run_id,),
+        ).fetchone()
+        return {
+            "trajectory_events": int(event_row["trajectory_events"] or 0),
+            "started_at": event_row["started_at"],
+            "finished_at": event_row["finished_at"],
+            "run_completed": int(event_row["run_completed"] or 0),
+            "run_failed": int(event_row["run_failed"] or 0),
+            "verification_total": int(event_row["verification_total"] or 0),
+            "verification_passed": int(event_row["verification_passed"] or 0),
+            "verification_failed": int(event_row["verification_failed"] or 0),
+            "task_started": int(event_row["task_started"] or 0),
+            "artifact_created": int(event_row["artifact_created"] or 0),
+            "agent_done": int(event_row["agent_done"] or 0),
+            "task_id": identity["task_id"] if identity else None,
+            "workflow_id": identity["workflow_id"] if identity else None,
+            "observations_created": int(observations["observations_created"] or 0),
+            "observation_bytes": int(observations["observation_bytes"] or 0),
+            "findings_created": int(findings["findings_created"] or 0),
+            "context_packs_created": int(context_packs["context_packs_created"] or 0),
+            "latest_context": dict(latest_context) if latest_context else None,
+        }
+    finally:
+        conn.close()
+
+
 def latest_trajectory_sequence(run_id: str, db_path: Optional[Path] = None) -> int:
     """Read only the run watermark without loading its event history."""
     conn = get_db_connection(db_path)

@@ -1303,6 +1303,33 @@ def cmd_compact(args):
     print(f"Evidence refs: {len(pack.evidence_refs)} | Artifact refs: {len(pack.artifact_refs)}")
 
 
+def cmd_metrics(args):
+    """Read-only, run-scoped Harness Metrics summary."""
+    from herdr.metrics import get_run_metrics
+
+    try:
+        store = _get_store()
+        metrics = get_run_metrics(args.run_id, db_path=getattr(store, "db_path", None))
+    except ValueError as exc:
+        print(f"[METRICS] {exc}", file=sys.stderr)
+        sys.exit(2)
+    except Exception as exc:
+        print(f"[METRICS] failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    if getattr(args, "json", False):
+        print(json.dumps(metrics.to_mapping(), ensure_ascii=False, indent=2, sort_keys=True))
+        return
+
+    print(f"Harness Metrics run={metrics.run_id}")
+    print(f"Status: {metrics.final_status or '-'} | completed={metrics.task_completed}")
+    print(f"Wall time: {metrics.wall_time_seconds if metrics.wall_time_seconds is not None else '-'}s")
+    print(f"Trajectory: {metrics.trajectory_events} | Observations: {metrics.observations_created} ({metrics.observation_bytes} bytes)")
+    print(f"Findings: {metrics.findings_created} | Context packs: {metrics.context_packs_created}")
+    print(f"Verification: {metrics.verification_passed}/{metrics.verification_total} passed, {metrics.verification_failed} failed")
+    print(f"Model requests: {metrics.model_requests if metrics.model_requests is not None else 'unsupported'}")
+
+
 def set_status(task_id, new_status, verdict=None, note=None):
     data = load_tasks()
     task = find_task(data, task_id)
@@ -4198,6 +4225,13 @@ def main():
     compact_cmd.add_argument("--json", action="store_true")
     compact_cmd.add_argument("--no-model", action="store_true")
 
+    metrics_cmd = sub.add_parser(
+        "metrics",
+        help="读取一个 Run 的 Harness Metrics（只读旁路）",
+    )
+    metrics_cmd.add_argument("--run-id", required=True)
+    metrics_cmd.add_argument("--json", action="store_true")
+
     args = parser.parse_args()
 
     if args.command == "add":
@@ -4482,6 +4516,9 @@ def main():
 
     elif args.command == "compact":
         cmd_compact(args)
+
+    elif args.command == "metrics":
+        cmd_metrics(args)
 
 
 if __name__ == "__main__":
