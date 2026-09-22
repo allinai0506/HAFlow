@@ -34,6 +34,12 @@ from .config import (
     supervisor_enabled,
 )
 from .engine import RateGate, SemanticSupervisor
+from ..intervention import (
+    ACTION_RETRY,
+    ACTION_VERIFY,
+    STATUS_REQUESTED,
+    request_intervention,
+)
 from .evaluation import (
     EVALUATION_EVENT,
     POLICY_EVENT,
@@ -307,9 +313,32 @@ def run_checkpoint(
             f"why={'; '.join(decision.reasons)}"
         )
         handled = False
+        durable_intervention = None
+        durable_request_attempted = False
+        if intercepted and decision.action in (ACTION_RETRY, ACTION_VERIFY):
+            if hasattr(store, "create_intervention"):
+                durable_request_attempted = True
+                try:
+                    durable_intervention = request_intervention(
+                        store, task, evaluation, payload, cfg,
+                    )
+                    if durable_intervention is not None:
+                        payload["intervention"] = durable_intervention
+                except Exception as exc:
+                    log(
+                        f"[SUPERVISOR INTERVENTION REQUEST FAILED] task={task_id}: "
+                        f"{type(exc).__name__}"
+                    )
         if enforce_on and decision.action != policy_engine.CONTINUE:
             handler = (actions or {}).get(decision.action)
-            if handler is not None:
+            can_execute = (
+                not durable_request_attempted
+                or (
+                    durable_intervention is not None
+                    and durable_intervention.get("status") == STATUS_REQUESTED
+                )
+            )
+            if handler is not None and can_execute:
                 try:
                     handler(task, payload)
                     handled = True
@@ -373,10 +402,41 @@ def pending_intervention(task: dict, store, config: Optional[dict] = None
     cfg = config or load_config()
     if not cfg.get("enabled", False) or not cfg.get("enforce"):
         return None
-    if not supervisor_enabled(cfg):
-        return None
     task_id = task.get("task_id")
     if not task_id or store is None:
+        return None
+    durable_supported = hasattr(store, "list_interventions")
+    if durable_supported:
+        try:
+            from ..trajectory import run_id_for_task
+            all_rows = store.list_interventions(
+                run_id=run_id_for_task(task), task_id=task_id,
+                limit=100,
+            ) or []
+            durable = [
+                item for item in all_rows
+                if item.get("status") in ("requested", "running")
+            ]
+            for item in durable:
+                if item.get("action") in (ACTION_RETRY, ACTION_VERIFY):
+                    return str(item["action"])
+            # A durable V1 store is authoritative for VERIFY/RETRY. Do not
+            # resurrect a completed/failed request from a legacy policy event.
+            last_done = _last_agent_done_at(task)
+            v1_rows = all_rows
+            for item in v1_rows:
+                if item.get("action") not in (ACTION_RETRY, ACTION_VERIFY):
+                    continue
+                if item.get("status") == "superseded":
+                    continue
+                boundary = float(item.get("finished_at") or item.get("requested_at") or 0)
+                if last_done is None or boundary >= last_done:
+                    return str(item["action"])
+            if any(item.get("action") in (ACTION_RETRY, ACTION_VERIFY) for item in v1_rows):
+                return None
+        except Exception:
+            return None
+    if not supervisor_enabled(cfg):
         return None
     try:
         events = store.list_events(task_id=task_id, limit=100, desc=True) or []

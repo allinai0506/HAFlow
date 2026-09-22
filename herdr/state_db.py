@@ -229,6 +229,30 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
         );
     """)
 
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS interventions (
+            intervention_id TEXT PRIMARY KEY,
+            identity_key TEXT NOT NULL UNIQUE,
+            run_id TEXT NOT NULL,
+            workflow_id TEXT,
+            task_id TEXT NOT NULL,
+            evaluation_id TEXT NOT NULL,
+            decision_id TEXT NOT NULL,
+            action TEXT NOT NULL,
+            reason TEXT NOT NULL DEFAULT '',
+            finding_refs_json TEXT NOT NULL DEFAULT '[]',
+            evidence_refs_json TEXT NOT NULL DEFAULT '[]',
+            status TEXT NOT NULL,
+            attempt INTEGER NOT NULL DEFAULT 0,
+            max_attempts INTEGER NOT NULL DEFAULT 0,
+            requested_at REAL NOT NULL,
+            started_at REAL,
+            finished_at REAL,
+            result_json TEXT,
+            error_json TEXT
+        );
+    """)
+
     # Indexes for fast lookup and DAG queries
     conn.execute("""
         CREATE TABLE IF NOT EXISTS schema_meta (
@@ -278,6 +302,8 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_context_packs_run_sequence ON context_packs(run_id, source_event_sequence);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_steering_task ON steering_items(task_id, status);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_steering_hist_task ON steering_history(task_id, timestamp);")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_interventions_run ON interventions(run_id, requested_at DESC);")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_interventions_task ON interventions(task_id, status, requested_at DESC);")
 
     # One-time atomic bootstrap migration if initializing a DB where legacy JSON exists and not yet completed
     cur = conn.execute("SELECT value FROM schema_meta WHERE key = 'v1_migration_done';")
@@ -1006,6 +1032,229 @@ def list_steering_history(
         conn.close()
 
 
+def _decode_intervention_row(row: sqlite3.Row) -> Dict[str, Any]:
+    return {
+        "intervention_id": row["intervention_id"],
+        "identity_key": row["identity_key"],
+        "run_id": row["run_id"],
+        "workflow_id": row["workflow_id"],
+        "task_id": row["task_id"],
+        "evaluation_id": row["evaluation_id"],
+        "decision_id": row["decision_id"],
+        "action": row["action"],
+        "reason": row["reason"],
+        "finding_refs": json.loads(row["finding_refs_json"] or "[]"),
+        "evidence_refs": json.loads(row["evidence_refs_json"] or "[]"),
+        "status": row["status"],
+        "attempt": row["attempt"],
+        "max_attempts": row["max_attempts"],
+        "requested_at": row["requested_at"],
+        "started_at": row["started_at"],
+        "finished_at": row["finished_at"],
+        "result": json.loads(row["result_json"]) if row["result_json"] else None,
+        "error": json.loads(row["error_json"]) if row["error_json"] else None,
+    }
+
+
+def _record_intervention_event(conn: sqlite3.Connection, item: Dict[str, Any], event_type: str) -> None:
+    record_event(
+        {
+            "workflow_id": item.get("workflow_id"),
+            "task_id": item["task_id"],
+            "event_type": event_type,
+            "payload": item,
+            "source": "intervention",
+            "run_id": item["run_id"],
+        },
+        conn=conn,
+    )
+
+
+def create_intervention(intervention: Dict[str, Any], db_path: Optional[Path] = None) -> Dict[str, Any]:
+    """Create or return the canonical Intervention under one SQLite write lock."""
+    from .intervention import Intervention, STATUS_REQUESTED
+
+    item = Intervention.from_mapping(intervention).to_mapping()
+    if item["status"] != STATUS_REQUESTED:
+        raise ValueError("new intervention must be requested")
+    if not item["intervention_id"]:
+        item["intervention_id"] = str(uuid.uuid4())
+    conn = get_db_connection(db_path)
+    try:
+        conn.execute("BEGIN IMMEDIATE;")
+        inserted = conn.execute(
+            """
+            INSERT INTO interventions (
+                intervention_id, identity_key, run_id, workflow_id, task_id,
+                evaluation_id, decision_id, action, reason, finding_refs_json,
+                evidence_refs_json, status, attempt, max_attempts, requested_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(identity_key) DO NOTHING
+            """,
+            (
+                item["intervention_id"], item["identity_key"], item["run_id"],
+                item["workflow_id"], item["task_id"], item["evaluation_id"],
+                item["decision_id"], item["action"], item["reason"],
+                json.dumps(item["finding_refs"], ensure_ascii=False),
+                json.dumps(item["evidence_refs"], ensure_ascii=False),
+                item["status"], item["attempt"], item["max_attempts"],
+                item["requested_at"] or time.time(),
+            ),
+        ).rowcount
+        row = conn.execute(
+            "SELECT * FROM interventions WHERE identity_key = ?", (item["identity_key"],)
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("intervention insert did not produce a canonical row")
+        canonical = _decode_intervention_row(row)
+        if inserted:
+            _record_intervention_event(conn, canonical, "intervention_requested")
+        conn.execute("COMMIT;")
+        return canonical
+    except Exception:
+        try:
+            conn.execute("ROLLBACK;")
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
+
+
+def get_intervention(intervention_id: str, db_path: Optional[Path] = None) -> Optional[Dict[str, Any]]:
+    conn = get_db_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT * FROM interventions WHERE intervention_id = ?", (intervention_id,)
+        ).fetchone()
+        return _decode_intervention_row(row) if row else None
+    finally:
+        conn.close()
+
+
+def list_interventions(
+    run_id: Optional[str] = None,
+    task_id: Optional[str] = None,
+    statuses: Optional[List[str]] = None,
+    limit: Optional[int] = None,
+    db_path: Optional[Path] = None,
+) -> List[Dict[str, Any]]:
+    conn = get_db_connection(db_path)
+    try:
+        query = "SELECT * FROM interventions WHERE 1=1"
+        params: List[Any] = []
+        if run_id is not None:
+            query += " AND run_id = ?"
+            params.append(run_id)
+        if task_id is not None:
+            query += " AND task_id = ?"
+            params.append(task_id)
+        if statuses:
+            query += " AND status IN (" + ",".join("?" for _ in statuses) + ")"
+            params.extend(statuses)
+        query += " ORDER BY requested_at DESC, intervention_id DESC"
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(int(limit))
+        return [_decode_intervention_row(row) for row in conn.execute(query, params).fetchall()]
+    finally:
+        conn.close()
+
+
+def claim_intervention(intervention_id: str, db_path: Optional[Path] = None) -> Optional[Dict[str, Any]]:
+    from .intervention import STATUS_REQUESTED, STATUS_RUNNING
+
+    conn = get_db_connection(db_path)
+    try:
+        conn.execute("BEGIN IMMEDIATE;")
+        row = conn.execute(
+            "SELECT * FROM interventions WHERE intervention_id = ?", (intervention_id,)
+        ).fetchone()
+        if row is None or row["status"] != STATUS_REQUESTED:
+            conn.execute("ROLLBACK;")
+            return None
+        started_at = time.time()
+        conn.execute(
+            "UPDATE interventions SET status = ?, started_at = ? WHERE intervention_id = ? AND status = ?",
+            (STATUS_RUNNING, started_at, intervention_id, STATUS_REQUESTED),
+        )
+        updated = conn.execute(
+            "SELECT * FROM interventions WHERE intervention_id = ?", (intervention_id,)
+        ).fetchone()
+        item = _decode_intervention_row(updated)
+        _record_intervention_event(conn, item, "intervention_started")
+        conn.execute("COMMIT;")
+        return item
+    except Exception:
+        try:
+            conn.execute("ROLLBACK;")
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
+
+
+def complete_intervention(
+    intervention_id: str, result: Dict[str, Any], db_path: Optional[Path] = None,
+) -> Dict[str, Any]:
+    return _finish_intervention(intervention_id, "completed", result=result, db_path=db_path,
+                                allowed=("running",))
+
+
+def fail_intervention(
+    intervention_id: str, error: Dict[str, Any], db_path: Optional[Path] = None,
+) -> Dict[str, Any]:
+    return _finish_intervention(
+        intervention_id, "failed", error=error, db_path=db_path,
+        allowed=("requested", "running"),
+    )
+
+
+def _finish_intervention(
+    intervention_id: str, status: str, *, result: Optional[Dict[str, Any]] = None,
+    error: Optional[Dict[str, Any]] = None, db_path: Optional[Path], allowed: tuple,
+) -> Dict[str, Any]:
+    conn = get_db_connection(db_path)
+    try:
+        conn.execute("BEGIN IMMEDIATE;")
+        row = conn.execute(
+            "SELECT * FROM interventions WHERE intervention_id = ?", (intervention_id,)
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"intervention '{intervention_id}' not found")
+        if row["status"] not in allowed:
+            raise ValueError(f"cannot finish intervention from {row['status']}")
+        finished_at = time.time()
+        conn.execute(
+            """UPDATE interventions SET status = ?, finished_at = ?, result_json = ?, error_json = ?
+               WHERE intervention_id = ?""",
+            (
+                status, finished_at,
+                json.dumps(result, ensure_ascii=False) if result is not None else None,
+                json.dumps(error, ensure_ascii=False) if error is not None else None,
+                intervention_id,
+            ),
+        )
+        updated = conn.execute(
+            "SELECT * FROM interventions WHERE intervention_id = ?", (intervention_id,)
+        ).fetchone()
+        item = _decode_intervention_row(updated)
+        _record_intervention_event(
+            conn, item, "intervention_completed" if status == "completed" else "intervention_failed"
+        )
+        conn.execute("COMMIT;")
+        return item
+    except Exception:
+        try:
+            conn.execute("ROLLBACK;")
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
+
+
 def record_event(
     event: Dict[str, Any],
     db_path: Optional[Path] = None,
@@ -1035,13 +1284,14 @@ def record_event(
             "timestamp": float(event["timestamp"]) if event.get("timestamp") is not None else time.time(),
             "payload": payload,
             "source": event.get("source") or "system",
+            "run_id": event.get("run_id"),
         }
 
         cur = conn.execute("""
             INSERT INTO events (
                 workflow_id, node_id, task_id, agent_id,
-                event_type, payload_json, timestamp, source
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+                event_type, payload_json, timestamp, source, run_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
         """, (
             normalized["workflow_id"],
             normalized["node_id"],
@@ -1051,6 +1301,7 @@ def record_event(
             json.dumps(normalized["payload"], ensure_ascii=False),
             normalized["timestamp"],
             normalized["source"],
+            normalized["run_id"],
         ))
         normalized["id"] = cur.lastrowid
         return normalized
@@ -1115,6 +1366,7 @@ def list_events(
                 "timestamp": row["timestamp"],
                 "payload": json.loads(row["payload_json"] or "{}"),
                 "source": row["source"] or "unknown",
+                "run_id": row["run_id"],
             })
         return results
     finally:

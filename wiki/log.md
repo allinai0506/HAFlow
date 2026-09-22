@@ -879,3 +879,9 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - 修复损坏 payload 的失败面：`aggregate_run_metric_rows` 的 `verification_completed` 聚合改为嵌套 `CASE WHEN json_valid(payload_json)`；损坏行仍计入 `verification_total`，只无法归类 passed/failed，不再让该 Run 的全部指标查询抛 `malformed JSON`。
 - 文档：`docs/architecture/harness-metrics.md` 增加两条语义说明；通用教训归档 `docs/lessons/lessons-learned.md` §81。
 - 证据：`herdr/metrics.py:get_run_metrics`、`herdr/state_db.py:aggregate_run_metric_rows`、`tests/test_metrics.py`（12 passed，含 2 项新回归）。
+
+## [2026-09-22] feat | Action Protocol V1：Supervisor → Controller VERIFY/RETRY 闭环
+- 新增同一 SQLite StateStore 内的 Intervention projection 与唯一身份 `(run_id, task_id, decision_id, action)`；请求、claim、完成、失败均写入现有 events 表。
+- `RETRY` 复用既有 `rework` 状态迁移并执行 retry budget；`VERIFY` 只进入既有 verification/rework 路径，不伪造 verification verdict。
+- Controller done/recovery 路径恢复 requested/running Intervention；跨 Run、重复决策、重复消费和并发 claim 均由持久化身份与事务保护。
+- 证据：`herdr/intervention.py`、`herdr/state_db.py`、`services/herdr-controller.py`、`tests/test_action_protocol.py`、`tests/test_intervention_store.py`、`docs/architecture/action-protocol.md`。

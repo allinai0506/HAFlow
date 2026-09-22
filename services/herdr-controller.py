@@ -3438,9 +3438,105 @@ def _supervisor_notify(task, action, message):
 
 
 def _supervisor_retry(task, decision):
-    """RETRY -> existing rework flow; failure must not pass as handled."""
+    """RETRY -> the existing rework flow; return only observed state facts."""
+    from herdr.intervention import attempt_count_for_task
+    previous_status = task.get("status")
+    if previous_status == "rework":
+        return {
+            "action": "RETRY",
+            "previous_status": previous_status,
+            "new_status": "rework",
+            "attempt_count": attempt_count_for_task(task),
+            "already_applied": True,
+        }
     if not set_task_status(task.get("task_id"), "rework"):
         raise RuntimeError("RETRY handler could not move task to rework")
+    fresh = get_task(task.get("task_id")) or {}
+    return {
+        "action": "RETRY",
+        "previous_status": previous_status,
+        "new_status": fresh.get("status", "rework"),
+        "attempt_count": attempt_count_for_task(fresh),
+    }
+
+
+def _supervisor_verify(task, decision):
+    """VERIFY -> re-enter the existing verification/rework route.
+
+    Verification facts are emitted later by the existing tests_completed and
+    verification_completed path; this handler never manufactures a verdict.
+    """
+    previous_status = task.get("status")
+    if previous_status not in ("rework", "working"):
+        if not set_task_status(task.get("task_id"), "rework"):
+            raise RuntimeError("VERIFY handler could not enter verification rework")
+    return {
+        "action": "VERIFY",
+        "previous_status": previous_status,
+        "new_status": "rework",
+        "verification_pending": True,
+    }
+
+
+def _execute_supervisor_intervention(task, decision, action_handler, store=None):
+    """Claim and execute one durable action, retaining legacy handler support."""
+    intervention = decision.get("intervention") if isinstance(decision, dict) else None
+    if not intervention:
+        return action_handler(task, decision)
+    store = store or _get_store()
+    intervention_id = intervention.get("intervention_id")
+    current = store.get_intervention(intervention_id)
+    if current is None:
+        raise RuntimeError("canonical intervention disappeared")
+    if current.get("status") in ("completed", "failed", "superseded"):
+        if current.get("status") == "failed":
+            raise RuntimeError("intervention already failed")
+        return current.get("result") or {"already_applied": True}
+    if current.get("status") == "running" and decision.get("_recovery"):
+        claimed = current
+    else:
+        claimed = store.claim_intervention(intervention_id)
+        if claimed is None:
+            return {"already_claimed": True}
+    try:
+        result = action_handler(task, decision) or {}
+        store.complete_intervention(intervention_id, result)
+        return result
+    except Exception as exc:
+        from herdr.supervisor.state import redact_text
+        store.fail_intervention(
+            intervention_id,
+            {"type": type(exc).__name__, "message": redact_text(str(exc)[:500])},
+        )
+        raise
+
+
+def recover_pending_interventions(store=None, run_id=None):
+    """Recover requested/running actions before a done redelivery can pass."""
+    store = store or _get_store()
+    recovered = []
+    pending = store.list_interventions(run_id=run_id, statuses=["requested", "running"])
+    for item in pending:
+        task = store.get_task(item.get("task_id"))
+        if not task:
+            store.fail_intervention(item["intervention_id"], {"code": "task_missing"})
+            continue
+        from herdr.trajectory import run_id_for_task
+        if str(run_id_for_task(task)) != str(item.get("run_id")):
+            store.fail_intervention(item["intervention_id"], {"code": "run_mismatch"})
+            continue
+        decision = dict(item)
+        decision["intervention"] = item
+        decision["_recovery"] = True
+        if item.get("action") == "RETRY":
+            result = _execute_supervisor_intervention(task, decision, _supervisor_retry, store=store)
+        elif item.get("action") == "VERIFY":
+            result = _execute_supervisor_intervention(task, decision, _supervisor_verify, store=store)
+        else:
+            store.fail_intervention(item["intervention_id"], {"code": "unsupported_action"})
+            continue
+        recovered.append({"intervention": item, "result": result})
+    return recovered
 
 
 def supervisor_continue_flow(result):
@@ -3471,6 +3567,15 @@ def emit_done_if_allowed(task, report_text=None):
     """
     observer_complete = threading.Event()
     supervisor_complete = threading.Event()
+    try:
+        from herdr.trajectory import run_id_for_task
+        recovered = recover_pending_interventions(
+            store=_get_store(), run_id=run_id_for_task(task),
+        )
+        if recovered:
+            return False
+    except Exception as exc:
+        print(f"[INTERVENTION RECOVERY ERROR] task={task.get('task_id')}: {type(exc).__name__}")
     _observer_terminal_checkpoint(task, completion_event=observer_complete)
     _schedule_context_compact(
         task, wait_for=observer_complete, supervisor_done=supervisor_complete,
@@ -3634,11 +3739,11 @@ def supervisor_checkpoint(task, trigger, report_text=None, test_evidence=None, e
     try:
         fresh = get_task(task.get("task_id")) or task
         actions = {
-            # Policy actions map onto existing flows only:
-            # RETRY -> rework 回流;其余 -> attention 台账(人工/总指挥可见)。
-            "RETRY": _supervisor_retry,
+            # Policy actions map onto existing flows only. Durable VERIFY/RETRY
+            # claims are owned by the Controller wrapper, not the Supervisor.
+            "RETRY": lambda t, d: _execute_supervisor_intervention(t, d, _supervisor_retry),
             "ESCALATE": lambda t, d: _supervisor_attention(t, d, "supervisor_escalate"),
-            "VERIFY": lambda t, d: _supervisor_attention(t, d, "supervisor_verify"),
+            "VERIFY": lambda t, d: _execute_supervisor_intervention(t, d, _supervisor_verify),
             "PAUSE": lambda t, d: _supervisor_attention(t, d, "supervisor_pause"),
             "REROUTE": lambda t, d: _supervisor_attention(t, d, "supervisor_reroute"),
         }

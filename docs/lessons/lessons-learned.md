@@ -3618,3 +3618,24 @@ HERDR_STATE_DB=<tmp>/state.db python3 bin/herdr-task metrics --run-id run-badver
 - `tests/test_metrics.py#test_cross_run_task_identity_is_never_borrowed`
 - `tests/test_metrics.py#test_malformed_verification_payload_degrades_without_failing`
 - `herdr/state_db.py#_task_matches_run`（既有同类判据先例，严格 `run_id_for_task` 语义）
+
+## 82. Action 执行必须把唯一身份与副作用 claim 放进同一持久化边界
+
+### 问题背景
+
+Supervisor 的 PolicyDecision 原本直接调用 Controller handler。仅靠
+`if not exists: insert` 或事件扫描无法阻止两个 Controller 同时执行
+同一个 RETRY，也无法在 Controller 崩溃后区分“已请求”与“已完成”。
+
+### 经验教训
+
+Intervention 的逻辑身份必须由数据库唯一约束保护，执行前必须使用
+事务原子 claim；执行结果和失败也必须成为同一 StateStore 中的正式事实。
+恢复逻辑还要先检查 Task 当前状态，才能在副作用已应用后安全补记完成，
+避免以“恢复”为名再次触发同一动作。
+
+### 验证
+
+`tests/test_intervention_store.py` 使用两个 SQLite 连接并发创建同一
+decision；`tests/test_action_protocol.py` 使用两个 Controller worker
+并发 claim，并覆盖 running RETRY 的崩溃恢复。
