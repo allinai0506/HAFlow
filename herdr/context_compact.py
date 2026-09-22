@@ -171,7 +171,7 @@ def _current_state(task: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
-def _verification_facts(events: Iterable[Dict[str, Any]], task: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _verification_facts(events: Iterable[Dict[str, Any]], task: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     facts: List[Dict[str, Any]] = []
     for event in events:
         verification = event.get("verification")
@@ -187,8 +187,6 @@ def _verification_facts(events: Iterable[Dict[str, Any]], task: Optional[Dict[st
             if key in verification:
                 fact[key] = verification[key]
         facts.append(fact)
-    if not facts and task and task.get("status"):
-        facts.append({"fact_type": "task_status", "status": task["status"]})
     return facts
 
 
@@ -631,6 +629,21 @@ def _source_fingerprint(
     return hashlib.sha256(json.dumps(source, sort_keys=True, ensure_ascii=False, default=str).encode()).hexdigest()
 
 
+def _cached_task_status_valid(
+    cached_verified_facts: Optional[Sequence[Dict[str, Any]]],
+    task: Optional[Dict[str, Any]],
+) -> bool:
+    """Validate cached task_status invariant before fast-path return."""
+    statuses = [
+        fact for fact in (cached_verified_facts or [])
+        if isinstance(fact, dict) and fact.get("fact_type") == "task_status"
+    ]
+    current = (task or {}).get("status") if isinstance(task, dict) else None
+    if current:
+        return len(statuses) == 1 and statuses[0].get("status") == current
+    return len(statuses) == 0
+
+
 def _previously_verified_refs(previous: Optional[ContextPack], run_id: str, db_path: Optional[Path]) -> Dict[str, Set[str]]:
     if previous is None:
         return {"events": set(), "findings": set(), "observations": set(), "artifacts": set()}
@@ -716,7 +729,8 @@ def compact_run(
         current_state = _current_state(task)
         fingerprint = _source_fingerprint(run_id, source_sequence, task, current_state, findings, observations)
         if latest and (latest.get("metadata") or {}).get("context_source_fingerprint") == fingerprint:
-            return ContextPack.from_mapping(latest)
+            if _cached_task_status_valid(latest.get("verified_facts"), task):
+                return ContextPack.from_mapping(latest)
         candidates = _semantic_candidates(events, findings, previous)
         compact_input = _compact_input(
             goal=goal, current_state=current_state, previous_context=previous,
@@ -729,10 +743,18 @@ def compact_run(
             LOGGER.warning("context reducer skipped: run=%s error=%s: %s", run_id, type(exc).__name__, exc)
             semantic = {}
         semantic = {**candidates, **semantic}
-        verified = list(previous.verified_facts if previous else [])
+        verified = [
+            fact for fact in (previous.verified_facts if previous else [])
+            if fact.get("fact_type") != "task_status"
+        ]
         current_facts = _verification_facts(all_events, task)
         known_fact_keys = {json.dumps(fact, sort_keys=True, default=str) for fact in verified}
-        verified.extend(fact for fact in current_facts if json.dumps(fact, sort_keys=True, default=str) not in known_fact_keys)
+        verified.extend(
+            fact for fact in current_facts
+            if fact.get("fact_type") != "task_status" and json.dumps(fact, sort_keys=True, default=str) not in known_fact_keys
+        )
+        if task and task.get("status"):
+            verified.append({"fact_type": "task_status", "status": task["status"]})
         verified = verified[-MAX_VERIFIED_FACTS:]
         previous_refs = _previously_verified_refs(previous, run_id, db_path)
         event_ids = {_event_id(event) for event in all_events} | previous_refs["events"]

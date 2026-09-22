@@ -1336,3 +1336,190 @@ def test_fnd_finding_reference_retained_across_bounded_compact(tmp_path: Path, m
     assert valid_event["event_id"] in [ref for item in pack.completed for ref in item.get("refs", [])]
     assert valid_obs.observation_id in pack.evidence_refs
     assert any(item["ref"] == "summary.md" for item in pack.artifact_refs)
+
+
+def test_compact_task_status_transition_running_to_rework(tmp_path: Path):
+    """Acceptance A: running -> rework keeps only rework task_status and drops running."""
+    db_path = tmp_path / "state.db"
+    store = ObservationStore(db_path)
+    ledger = TrajectoryLedger(db_path)
+    ledger.append_event({"run_id": "run-a", "task_id": "task-a", "event_type": "task_started"})
+    p1 = compact_run("run-a", task={"task_id": "task-a", "run_id": "run-a", "status": "running", "goal": "g"}, store=store)
+    assert [f for f in p1.verified_facts if f.get("fact_type") == "task_status"] == [{"fact_type": "task_status", "status": "running"}]
+
+    ledger.append_event({"run_id": "run-a", "task_id": "task-a", "event_type": "status_changed"})
+    p2 = compact_run("run-a", task={"task_id": "task-a", "run_id": "run-a", "status": "rework", "goal": "g"}, store=store)
+    task_statuses = [f for f in p2.verified_facts if f.get("fact_type") == "task_status"]
+    assert task_statuses == [{"fact_type": "task_status", "status": "rework"}]
+    assert not any(f.get("status") == "running" for f in task_statuses)
+
+
+def test_compact_task_status_transition_running_to_agent_done(tmp_path: Path):
+    """Acceptance B: running -> agent_done keeps only agent_done task_status."""
+    db_path = tmp_path / "state.db"
+    store = ObservationStore(db_path)
+    ledger = TrajectoryLedger(db_path)
+    ledger.append_event({"run_id": "run-b", "task_id": "task-b", "event_type": "task_started"})
+    p1 = compact_run("run-b", task={"task_id": "task-b", "run_id": "run-b", "status": "running", "goal": "g"}, store=store)
+    assert [f for f in p1.verified_facts if f.get("fact_type") == "task_status"] == [{"fact_type": "task_status", "status": "running"}]
+
+    ledger.append_event({"run_id": "run-b", "task_id": "task-b", "event_type": "done_requested"})
+    p2 = compact_run("run-b", task={"task_id": "task-b", "run_id": "run-b", "status": "agent_done", "goal": "g"}, store=store)
+    task_statuses = [f for f in p2.verified_facts if f.get("fact_type") == "task_status"]
+    assert task_statuses == [{"fact_type": "task_status", "status": "agent_done"}]
+
+
+def test_compact_retains_real_verification_facts_while_updating_task_status(tmp_path: Path):
+    """Acceptance C: previous contains real verification facts; on status change, verification facts are retained and task_status keeps only latest."""
+    db_path = tmp_path / "state.db"
+    store = ObservationStore(db_path)
+    ledger = TrajectoryLedger(db_path)
+    ledger.append_event({"run_id": "run-c", "task_id": "task-c", "event_type": "task_started"})
+    ver_event = ledger.append_event({
+        "run_id": "run-c",
+        "task_id": "task-c",
+        "event_type": "verification_completed",
+        "verification": {"passed": True, "passed_tests": 10, "total_tests": 10, "evidence_id": "tevd-c1"},
+    })
+    p1 = compact_run("run-c", task={"task_id": "task-c", "run_id": "run-c", "status": "running", "goal": "g"}, store=store)
+    # Verification fact exists
+    assert any(f.get("fact_type") == "verification" and f.get("event_id") == ver_event["event_id"] for f in p1.verified_facts)
+
+    ledger.append_event({"run_id": "run-c", "task_id": "task-c", "event_type": "phase_changed"})
+    p2 = compact_run("run-c", task={"task_id": "task-c", "run_id": "run-c", "status": "rework", "goal": "g"}, store=store)
+
+    # Real verification facts must be retained
+    ver_facts = [f for f in p2.verified_facts if f.get("fact_type") == "verification"]
+    assert any(f.get("event_id") == ver_event["event_id"] and f.get("passed") is True for f in ver_facts)
+
+    # task_status only keeps the latest one (rework), not running
+    task_statuses = [f for f in p2.verified_facts if f.get("fact_type") == "task_status"]
+    assert task_statuses == [{"fact_type": "task_status", "status": "rework"}]
+
+
+def test_compact_consecutive_same_status_no_duplicate_task_status(tmp_path: Path):
+    """Acceptance D: consecutive compacts with the same status do not duplicate task_status entries."""
+    db_path = tmp_path / "state.db"
+    store = ObservationStore(db_path)
+    ledger = TrajectoryLedger(db_path)
+    ledger.append_event({"run_id": "run-d", "task_id": "task-d", "event_type": "step_1"})
+    p1 = compact_run("run-d", task={"task_id": "task-d", "run_id": "run-d", "status": "running", "goal": "g"}, store=store)
+
+    ledger.append_event({"run_id": "run-d", "task_id": "task-d", "event_type": "step_2"})
+    p2 = compact_run("run-d", task={"task_id": "task-d", "run_id": "run-d", "status": "running", "goal": "g"}, store=store)
+
+    ledger.append_event({"run_id": "run-d", "task_id": "task-d", "event_type": "step_3"})
+    p3 = compact_run("run-d", task={"task_id": "task-d", "run_id": "run-d", "status": "running", "goal": "g"}, store=store)
+
+    task_statuses = [f for f in p3.verified_facts if f.get("fact_type") == "task_status"]
+    assert task_statuses == [{"fact_type": "task_status", "status": "running"}]
+
+
+def test_compact_task_without_status_drops_stale_task_status(tmp_path: Path):
+    """Acceptance E: when current task has no status, do not generate task_status and drop previous stale task_status."""
+    db_path = tmp_path / "state.db"
+    store = ObservationStore(db_path)
+    ledger = TrajectoryLedger(db_path)
+    ledger.append_event({"run_id": "run-e", "task_id": "task-e", "event_type": "task_started"})
+    p1 = compact_run("run-e", task={"task_id": "task-e", "run_id": "run-e", "status": "running", "goal": "g"}, store=store)
+    assert [f for f in p1.verified_facts if f.get("fact_type") == "task_status"] == [{"fact_type": "task_status", "status": "running"}]
+
+    ver_event = ledger.append_event({
+        "run_id": "run-e",
+        "task_id": "task-e",
+        "event_type": "verification_completed",
+        "verification": {"passed": False, "passed_tests": 1, "total_tests": 5},
+    })
+    p2 = compact_run("run-e", task={"task_id": "task-e", "run_id": "run-e", "goal": "g"}, store=store)
+
+    # Verification fact retained
+    assert any(f.get("fact_type") == "verification" and f.get("event_id") == ver_event["event_id"] for f in p2.verified_facts)
+    # Stale task_status must NOT be carried over
+    task_statuses = [f for f in p2.verified_facts if f.get("fact_type") == "task_status"]
+    assert task_statuses == []
+
+
+def test_compact_cached_stale_task_status_rebuilt_when_fingerprint_matches(tmp_path: Path):
+    """Cache invariant: stale cached pack with running+rework must not fast-return; rebuild keeps only current."""
+    db_path = tmp_path / "state.db"
+    store = ObservationStore(db_path)
+    ledger = TrajectoryLedger(db_path)
+    run_id = "run-cache-stale"
+    task = {"task_id": "task-cache-stale", "run_id": run_id, "status": "rework", "goal": "g"}
+    ledger.append_event({"run_id": run_id, "task_id": task["task_id"], "event_type": "task_started"})
+    ver_event = ledger.append_event({
+        "run_id": run_id, "task_id": task["task_id"], "event_type": "verification_completed",
+        "verification": {"passed": True, "passed_tests": 5, "total_tests": 5},
+    })
+    good = compact_run(run_id, task=task, store=store, provider=None)
+    assert [f for f in good.verified_facts if f.get("fact_type") == "task_status"] == [{"fact_type": "task_status", "status": "rework"}]
+    fingerprint = good.metadata["context_source_fingerprint"]
+
+    ver_fact = next(f for f in good.verified_facts if f.get("fact_type") == "verification")
+    bad_vf = [dict(ver_fact), {"fact_type": "task_status", "status": "running"}, {"fact_type": "task_status", "status": "rework"}]
+    conn = get_db_connection(db_path)
+    try:
+        conn.execute(
+            "UPDATE context_packs SET verified_facts_json = ? WHERE context_id = ?",
+            (json.dumps(bad_vf, ensure_ascii=False), good.context_id),
+        )
+    finally:
+        conn.close()
+    corrupted = state_db.get_latest_context_pack(run_id, db_path=db_path)
+    assert corrupted is not None
+    assert corrupted["context_id"] == good.context_id
+    assert corrupted["metadata"]["context_source_fingerprint"] == fingerprint
+    assert len([f for f in corrupted["verified_facts"] if f.get("fact_type") == "task_status"]) == 2
+
+    fixed = compact_run(run_id, task=task, store=store, provider=None)
+
+    assert fixed.context_id != good.context_id
+    task_statuses = [f for f in fixed.verified_facts if f.get("fact_type") == "task_status"]
+    assert task_statuses == [{"fact_type": "task_status", "status": "rework"}]
+    assert any(
+        f.get("fact_type") == "verification" and f.get("event_id") == ver_event["event_id"] and f.get("passed") is True
+        for f in fixed.verified_facts
+    )
+    assert get_latest_context(run_id, store=store).context_id == fixed.context_id
+
+
+def test_compact_cached_task_status_cleared_when_current_task_has_no_status(tmp_path: Path):
+    """Cache invariant: no-status task must not fast-return cached task_status; rebuild clears it."""
+    db_path = tmp_path / "state.db"
+    store = ObservationStore(db_path)
+    ledger = TrajectoryLedger(db_path)
+    run_id = "run-cache-nostatus"
+    task = {"task_id": "task-cache-nostatus", "run_id": run_id, "goal": "g"}
+    ledger.append_event({"run_id": run_id, "task_id": task["task_id"], "event_type": "task_started"})
+    ver_event = ledger.append_event({
+        "run_id": run_id, "task_id": task["task_id"], "event_type": "verification_completed",
+        "verification": {"passed": False, "passed_tests": 1, "total_tests": 5},
+    })
+    good = compact_run(run_id, task=task, store=store, provider=None)
+    assert [f for f in good.verified_facts if f.get("fact_type") == "task_status"] == []
+    fingerprint = good.metadata["context_source_fingerprint"]
+
+    ver_fact = next(f for f in good.verified_facts if f.get("fact_type") == "verification")
+    bad_vf = [dict(ver_fact), {"fact_type": "task_status", "status": "running"}]
+    conn = get_db_connection(db_path)
+    try:
+        conn.execute(
+            "UPDATE context_packs SET verified_facts_json = ? WHERE context_id = ?",
+            (json.dumps(bad_vf, ensure_ascii=False), good.context_id),
+        )
+    finally:
+        conn.close()
+    corrupted = state_db.get_latest_context_pack(run_id, db_path=db_path)
+    assert corrupted is not None
+    assert corrupted["metadata"]["context_source_fingerprint"] == fingerprint
+    assert len([f for f in corrupted["verified_facts"] if f.get("fact_type") == "task_status"]) == 1
+
+    fixed = compact_run(run_id, task=task, store=store, provider=None)
+
+    assert fixed.context_id != good.context_id
+    assert [f for f in fixed.verified_facts if f.get("fact_type") == "task_status"] == []
+    assert any(
+        f.get("fact_type") == "verification" and f.get("event_id") == ver_event["event_id"]
+        for f in fixed.verified_facts
+    )
+    assert get_latest_context(run_id, store=store).context_id == fixed.context_id
