@@ -23,6 +23,16 @@ policy.
 Aggregation uses SQL counts/sums and does not read Observation content. The
 query is scoped by `run_id` and does not write state.
 
+Run identity is ownership-checked: when a Run's Trajectory facts reference a
+Task whose persisted `run_id` belongs to another Run, the metrics report no
+`task_id` / `workflow_id` / status instead of stitching across runs. A Task
+with no persisted row yet still reports the identity carried by its own events.
+
+Verification classification is corruption-tolerant: a `verification_completed`
+row whose payload is not valid JSON still counts in `verification_total`, but
+is never classified as passed/failed (`json_extract` is guarded by `json_valid`
+inside a nested `CASE`).
+
 `context_compact.trigger_count` is the count of successful ContextPack
 creations. A skipped or attempted compact is not counted. ObservationPack uses
 the count of successfully created, deduplicated Observations. The Observer and

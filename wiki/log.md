@@ -873,3 +873,9 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - 新增 `herdr-task compact --run-id <run_id> [--json] [--no-model]`；agent_done Done Gateway 通过 daemon best-effort 旁路触发，失败不影响状态推进。
 - 默认输入硬预算为 12,000 字符、100 events、10 findings、20 observation metadata、20 artifact refs；Compact 不读取完整 Observation 内容。
 - 证据：`herdr/context_compact.py`、`herdr/state_db.py:context_packs`、`bin/herdr-task:cmd_compact`、`services/herdr-controller.py:_schedule_context_compact`、`tests/test_context_compact.py`。
+
+## [2026-09-22] fix | Harness Metrics 跨 Run 身份借用与损坏 payload 降级
+- 修复聚合读模型的身份归属：`get_run_metrics` 解析 Task 后用 `run_id_for_task(task) == run_id` 校验归属，不匹配时不借用 `task_id`/`workflow_id`/`final_status`（进行中的 Run 不再被其他 Run 的 completed Task 报成已完成）。
+- 修复损坏 payload 的失败面：`aggregate_run_metric_rows` 的 `verification_completed` 聚合改为嵌套 `CASE WHEN json_valid(payload_json)`；损坏行仍计入 `verification_total`，只无法归类 passed/failed，不再让该 Run 的全部指标查询抛 `malformed JSON`。
+- 文档：`docs/architecture/harness-metrics.md` 增加两条语义说明；通用教训归档 `docs/lessons/lessons-learned.md` §81。
+- 证据：`herdr/metrics.py:get_run_metrics`、`herdr/state_db.py:aggregate_run_metric_rows`、`tests/test_metrics.py`（12 passed，含 2 项新回归）。

@@ -1328,11 +1328,17 @@ def aggregate_run_metric_rows(run_id: str, db_path: Optional[Path] = None) -> Di
                    SUM(CASE WHEN event_type = 'verification_completed' THEN 1 ELSE 0 END)
                        AS verification_total,
                    SUM(CASE WHEN event_type = 'verification_completed'
-                              AND json_extract(payload_json, '$.verification.passed') = 1
-                            THEN 1 ELSE 0 END) AS verification_passed,
+                            THEN CASE WHEN json_valid(payload_json)
+                                      THEN CASE WHEN json_extract(payload_json, '$.verification.passed') = 1
+                                                THEN 1 ELSE 0 END
+                                      ELSE 0 END
+                            ELSE 0 END) AS verification_passed,
                    SUM(CASE WHEN event_type = 'verification_completed'
-                              AND json_extract(payload_json, '$.verification.passed') = 0
-                            THEN 1 ELSE 0 END) AS verification_failed
+                            THEN CASE WHEN json_valid(payload_json)
+                                      THEN CASE WHEN json_extract(payload_json, '$.verification.passed') = 0
+                                                THEN 1 ELSE 0 END
+                                      ELSE 0 END
+                            ELSE 0 END) AS verification_failed
                    ,SUM(CASE WHEN event_type = 'task_started' THEN 1 ELSE 0 END) AS task_started
                    ,SUM(CASE WHEN event_type = 'artifact_created' THEN 1 ELSE 0 END) AS artifact_created
                    ,SUM(CASE WHEN event_type = 'agent_done' THEN 1 ELSE 0 END) AS agent_done

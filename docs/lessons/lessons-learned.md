@@ -3567,3 +3567,54 @@ pytest -q  # 1055 passed, 44 subtests passed
 - `tests/test_metrics.py#test_run_completed_remains_completed_across_task_lifecycle`
 
 ---
+
+## 81. 聚合读模型的身份归属与 SQLite JSON 短路：两个让 Metrics 静默出错的边界
+
+### 问题背景
+
+Harness Metrics V1 合并后独立验证发现两处边界：
+
+1. `herdr/metrics.py` 直接用轨迹事件里的 `task_id` 取 Task 行并采用其 `status`，未校验该 Task 的持久化 `run_id` 是否属于当前 Run。实测：Run A 的事件引用 Run B 的 Task（completed）→ 查询 Run A 得到 `final_status=completed`、`task_completed=true`，并把 Run B 的 `task_id/workflow_id` 拼进 Run A 的指标（重新 launch 后查询旧 Run 的典型场景）。
+2. `herdr/state_db.py` 对 `verification_completed` 行使用裸 `json_extract(payload_json, ...)`；实测一条损坏 `payload_json` 即 `OperationalError: malformed JSON`，CLI exit 1，该 Run 全部指标不可得。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|---|---|---|
+| 事件携带的 `task_id` 被当作本 Run 身份 | "事件里有 task_id" ≠ "该 Task 属于这个 Run"；聚合读模型同样要做归属校验 | 用 `run_id_for_task(task) == run_id` 判定（legacy 无 run_id Task 回退 `run_<task_id>`），不匹配时不借用身份与状态 |
+| `json_valid(x) AND json_extract(x, ...)` | SQLite 的 `AND` 不保证短路，malformed 输入仍可能抛错，且会让**整条聚合查询**失败 | 必须写成嵌套 `CASE WHEN json_valid(x) THEN json_extract(...) END`；损坏行仍计入 total，只无法归类 |
+
+### 操作规范
+
+```python
+if task is not None and run_id_for_task(task) != run_id:
+    task = None  # 不借用其他 Run 的身份与状态
+```
+
+```sql
+SUM(CASE WHEN event_type = 'verification_completed'
+         THEN CASE WHEN json_valid(payload_json)
+                   THEN CASE WHEN json_extract(payload_json, '$.verification.passed') = 1
+                             THEN 1 ELSE 0 END
+                   ELSE 0 END
+         ELSE 0 END)
+```
+
+### 验证命令 / 证据
+
+```bash
+pytest -q tests/test_metrics.py -k "cross_run or malformed"          # 2 passed（修复前 2 failed）
+pytest -q tests/test_metrics.py tests/test_harness_metrics_cli.py   # 12 passed
+HERDR_STATE_DB=<tmp>/state.db python3 bin/herdr-task metrics --run-id run-mine --json
+# → task_id/workflow_id/final_status 为 null，task_completed=false
+HERDR_STATE_DB=<tmp>/state.db python3 bin/herdr-task metrics --run-id run-badver --json
+# → exit 0，verification_total=2 passed=0 failed=1
+```
+
+### 相关文档 / 关联证据
+
+- `herdr/metrics.py#get_run_metrics`
+- `herdr/state_db.py#aggregate_run_metric_rows`
+- `tests/test_metrics.py#test_cross_run_task_identity_is_never_borrowed`
+- `tests/test_metrics.py#test_malformed_verification_payload_degrades_without_failing`
+- `herdr/state_db.py#_task_matches_run`（既有同类判据先例，严格 `run_id_for_task` 语义）

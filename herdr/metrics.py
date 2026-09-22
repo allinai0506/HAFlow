@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from . import state_db
+from .trajectory import run_id_for_task
 from .transitions import COMPLETED_TASK_STATUSES
 
 
@@ -117,6 +118,13 @@ def get_run_metrics(
 
     facts = state_db.aggregate_run_metric_rows(run_id, db_path=db_path)
     task = state_db.get_task(facts["task_id"], db_path=db_path) if facts["task_id"] else None
+    task_id = facts["task_id"]
+    workflow_id = facts["workflow_id"]
+    if task is not None and run_id_for_task(task) != run_id:
+        # A task owned by another run must never leak its identity or status.
+        task = None
+        task_id = None
+        workflow_id = None
     started_at = float(facts["started_at"]) if facts["started_at"] is not None else None
     finished_at = float(facts["finished_at"]) if facts["finished_at"] is not None else None
     current_time = float(time.time() if now is None else now)
@@ -139,8 +147,8 @@ def get_run_metrics(
     packs = facts["context_packs_created"]
     return HarnessRunMetrics(
         run_id=run_id,
-        task_id=facts["task_id"],
-        workflow_id=facts["workflow_id"] or (task or {}).get("workflow_id"),
+        task_id=task_id,
+        workflow_id=workflow_id or (task or {}).get("workflow_id"),
         started_at=started_at,
         finished_at=finished_at,
         wall_time_seconds=wall_time,
