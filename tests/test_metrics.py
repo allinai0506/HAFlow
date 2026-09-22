@@ -179,3 +179,91 @@ def test_run_completed_remains_completed_across_task_lifecycle(status: str, tmp_
 
     assert metrics.final_status == status
     assert metrics.task_completed is True
+
+
+def test_cross_run_task_identity_is_never_borrowed(tmp_path: Path):
+    """A task row owned by another run must not leak its identity or status."""
+    db_path = tmp_path / "state.db"
+    state_db.save_task(_task("run-other", task_id="task-other", status="completed"), db_path=db_path)
+    ledger = TrajectoryLedger(db_path)
+    ledger.append_event({
+        "run_id": "run-mine",
+        "task_id": "task-other",
+        "workflow_id": "wf-1",
+        "event_type": "task_started",
+        "timestamp": 5.0,
+    })
+
+    metrics = get_run_metrics("run-mine", db_path=db_path, now=40.0)
+
+    assert metrics.task_id is None
+    assert metrics.workflow_id is None
+    assert metrics.final_status is None
+    assert metrics.task_completed is False
+
+
+def test_legacy_task_without_run_id_keeps_its_fallback_identity(tmp_path: Path):
+    """A pre-run_id task is owned by run_<task_id> and must keep its identity."""
+    db_path = tmp_path / "state.db"
+    state_db.save_task(
+        {"task_id": "task-legacy", "workflow_id": "wf-1", "status": "working", "created_at": 1.0},
+        db_path=db_path,
+    )
+    ledger = TrajectoryLedger(db_path)
+    ledger.append_event({
+        "run_id": "run_task-legacy", "task_id": "task-legacy", "workflow_id": "wf-1",
+        "event_type": "task_started", "timestamp": 5.0,
+    })
+
+    metrics = get_run_metrics("run_task-legacy", db_path=db_path, now=40.0)
+
+    assert metrics.task_id == "task-legacy"
+    assert metrics.workflow_id == "wf-1"
+    assert metrics.final_status == "working"
+
+
+def test_task_row_absent_keeps_event_carried_identity(tmp_path: Path):
+    """With no conflicting task row, the run's own event identity is reported."""
+    db_path = tmp_path / "state.db"
+    ledger = TrajectoryLedger(db_path)
+    ledger.append_event({
+        "run_id": "run-unregistered", "task_id": "task-unregistered",
+        "workflow_id": "wf-unregistered", "event_type": "task_started", "timestamp": 5.0,
+    })
+
+    metrics = get_run_metrics("run-unregistered", db_path=db_path, now=40.0)
+
+    assert metrics.task_id == "task-unregistered"
+    assert metrics.workflow_id == "wf-unregistered"
+    assert metrics.final_status is None
+    assert metrics.task_completed is False
+
+
+def test_malformed_verification_payload_degrades_without_failing(tmp_path: Path):
+    """One corrupt payload must not fail the whole run aggregation."""
+    db_path = tmp_path / "state.db"
+    ledger = TrajectoryLedger(db_path)
+    ledger.append_event({
+        "run_id": "run-bad-json", "event_type": "verification_completed",
+        "verification": {"passed": True}, "timestamp": 5.0,
+    })
+    ledger.append_event({
+        "run_id": "run-bad-json", "event_type": "verification_completed",
+        "verification": {"passed": False}, "timestamp": 6.0,
+    })
+    conn = state_db.get_db_connection(db_path)
+    try:
+        conn.execute(
+            "UPDATE events SET payload_json = 'not-json{' WHERE run_id = ? AND timestamp = ?",
+            ("run-bad-json", 5.0),
+        )
+    finally:
+        conn.close()
+
+    metrics = get_run_metrics("run-bad-json", db_path=db_path, now=40.0)
+
+    # The corrupt row still counts as a verification; it just cannot be
+    # classified as passed/failed.
+    assert metrics.verification_total == 2
+    assert metrics.verification_passed == 0
+    assert metrics.verification_failed == 1
