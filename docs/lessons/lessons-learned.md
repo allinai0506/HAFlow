@@ -3521,4 +3521,49 @@ pytest -q                                                     # 981 passed, 44 s
 - 关联测试：[`tests/test_auto_acceptance.py`](file:///Users/user/haflow/tests/test_auto_acceptance.py#L287)
 - 关联历史：lessons §62（门禁 verdict 契约化）、§73（门禁产物就绪校验上下位错配）
 
+## 80. Run 成功事实与 Task 生命周期状态不可混用
+
+### 问题背景
+
+Harness Metrics V1 最初用 `final_status == "completed"` 推导
+`task_completed`。HAFlow 的 Task 在成功后还会继续经过
+`committed → integrated → cleanup_ready → cleaned`，甚至可能在成功 Run
+之后进入 `superseded`。因此一个已经产生 `run_completed` 的 Run，会被错误
+报告为 `task_completed=false`。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 用当前 Task 状态代替历史 Run 事实 | Runtime State 表达当前生命周期，Trajectory 表达历史发生过什么 | 统计“Run 是否成功完成过”时必须优先读取 `run_completed` 事实 |
+| 只判断 `completed` 单一状态 | 成功任务存在多个完成态 | 复用 `COMPLETED_TASK_STATUSES`，禁止复制状态集合 |
+| `task_completed` 与 `final_status` 混为一谈 | 一个是 Run 成功事实，一个是 Task 当前状态 | Metrics 同时保留两者，分别表达历史成功与当前生命周期 |
+
+### 操作规范（已固化到 `herdr/metrics.py`）
+
+```python
+task_completed = bool(facts["run_completed"]) or final_status in COMPLETED_TASK_STATUSES
+```
+
+新增或修改 Run/Task 指标时，先明确字段是历史事实还是当前投影；跨越
+Task 生命周期的指标必须用 Trajectory 与状态机常量联合判断。
+
+### 验证命令 / 证据
+
+```bash
+pytest -q tests/test_metrics.py -k lifecycle  # 3 passed
+pytest -q tests/test_metrics.py tests/test_harness_metrics_cli.py  # 10 passed
+pytest -q  # 1055 passed, 44 subtests passed
+```
+
+回归覆盖 `committed`、`cleaned`、`superseded` 三种状态在已有
+`run_completed` 事实下均返回 `task_completed=true`。
+
+### 相关文档 / 关联证据
+
+- `herdr/metrics.py#get_run_metrics`
+- `herdr/transitions.py#COMPLETED_TASK_STATUSES`
+- `herdr/trajectory.py#TrajectoryLedger`
+- `tests/test_metrics.py#test_run_completed_remains_completed_across_task_lifecycle`
+
 ---

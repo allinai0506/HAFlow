@@ -8,6 +8,10 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-09-22] fix | Harness Metrics Run 完成事实与 Task 生命周期状态分离
+- 固化 [[task-lifecycle]] 的状态机语义：Metrics 用 Trajectory `run_completed` 表达 Run 曾成功完成，用 `COMPLETED_TASK_STATUSES` 表达当前 Task 完成态。
+- 关联教训：`docs/lessons/lessons-learned.md` §80；回归覆盖 committed、cleaned、superseded-after-completion。
+
 ## [2026-09-21] fix | 门禁裁决解析 Prompt 回显防御与字串误判修复（fix/gate-verdict-prompt-echo）
 - 背景：工作流门禁节点启动时，终端回显 Prompt 中的契约说明（`HERDR_GATE_VERDICT: pass 或 HERDR_GATE_VERDICT: blocked`），Controller `_verdict_from_screen()` 粗暴取首词导致在 0 秒内误判为 `pass`，门禁被瞬间击穿并提前清理 Pane；首次修复尝试中使用子串检测又导致 `smoke`（含 `ok`）等合法阻塞判定被误伤。
 - 改动：`herdr/direct_dispatch.py` 将契约模板改为语法占位符 `<pass|blocked>`；`services/herdr-controller.py` 增加 `_is_instructional_or_ambiguous_verdict_line()` 行级过滤多标记及二选一占位符，并在取首词后对后续 token 集合比对对立关键字；严格移除全行泛化状态词过滤与子串模糊匹配；在 `tests/test_auto_acceptance.py` 补充 7 组正向与对抗回归测试。
