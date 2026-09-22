@@ -48,6 +48,8 @@ class Intervention:
     requested_at: float = 0.0
     started_at: Optional[float] = None
     finished_at: Optional[float] = None
+    execution_owner: Optional[str] = None
+    lease_until: Optional[float] = None
     result: Optional[Dict[str, Any]] = None
     error: Optional[Dict[str, Any]] = None
 
@@ -86,6 +88,8 @@ class Intervention:
             requested_at=float(raw.get("requested_at") or 0.0),
             started_at=raw.get("started_at"),
             finished_at=raw.get("finished_at"),
+            execution_owner=raw.get("execution_owner"),
+            lease_until=raw.get("lease_until"),
             result=dict(raw["result"]) if isinstance(raw.get("result"), dict) else raw.get("result"),
             error=dict(raw["error"]) if isinstance(raw.get("error"), dict) else raw.get("error"),
         )
@@ -109,6 +113,8 @@ class Intervention:
             "requested_at": self.requested_at,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
+            "execution_owner": self.execution_owner,
+            "lease_until": self.lease_until,
             "result": self.result,
             "error": self.error,
         }
@@ -185,7 +191,12 @@ def request_intervention(store: Any, task: Dict[str, Any], evaluation: Dict[str,
         attempt=int(task_attempt),
         max_attempts=max_attempts,
     ))
-    if action == ACTION_RETRY and max_attempts > 0 and int(task_attempt) >= max_attempts:
+    if (
+        action == ACTION_RETRY
+        and requested.get("status") == STATUS_REQUESTED
+        and max_attempts > 0
+        and int(task_attempt) >= max_attempts
+    ):
         return store.fail_intervention(
             requested["intervention_id"],
             {

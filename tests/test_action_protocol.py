@@ -12,6 +12,10 @@ from herdr.intervention import (
     request_intervention,
 )
 from herdr.state_store import SQLiteStateStore
+from herdr.supervisor.engine import SemanticSupervisor
+from herdr.supervisor.harness import run_checkpoint
+from herdr.supervisor.config import load_config
+from tests.test_semantic_supervisor import ALL_SIGNALS, StubProvider
 
 
 def _task(run_id="run-1", task_id="task-1"):
@@ -109,6 +113,192 @@ def test_controller_retry_claims_existing_rework_and_completes(tmp_path):
     ]
 
 
+def test_two_recovery_controllers_claim_running_intervention_once(tmp_path):
+    controller = importlib.import_module("services.herdr-controller")
+    db_path = tmp_path / "state.db"
+    stores = [SQLiteStateStore(db_path), SQLiteStateStore(db_path)]
+    task = dict(_task(), status="working")
+    stores[0].save_task(task)
+    item = request_intervention(
+        stores[0], task, _evaluation(), _decision(),
+        {"enabled": True, "enforce": True, "policy": {"max_attempts": 2}},
+    )
+    stores[0].claim_intervention(item["intervention_id"], lease_seconds=-1)
+    calls = []
+    calls_lock = threading.Lock()
+
+    def handler(_task, _decision, **_kwargs):
+        with calls_lock:
+            calls.append(1)
+        time.sleep(0.05)
+        return {"action": ACTION_RETRY, "execution_evidence": True}
+
+    with patch.object(controller, "_supervisor_retry", side_effect=handler):
+        threads = [
+            threading.Thread(
+                target=controller.recover_pending_interventions,
+                kwargs={"store": store, "run_id": "run-1"},
+            )
+            for store in stores
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+    assert calls == [1]
+    assert stores[0].get_intervention(item["intervention_id"])["status"] == "completed"
+
+
+def test_recovery_does_not_repeat_retry_after_task_transition_evidence(tmp_path):
+    controller = importlib.import_module("services.herdr-controller")
+    store = SQLiteStateStore(tmp_path / "state.db")
+    task = dict(_task(), status="agent_done")
+    store.save_task(task)
+    item = request_intervention(
+        store, task, _evaluation(), _decision(),
+        {"enabled": True, "enforce": True, "policy": {"max_attempts": 2}},
+    )
+    store.claim_intervention(item["intervention_id"], lease_seconds=-1)
+    store.transition_task(
+        task["task_id"], "rework", "supervisor retry",
+        source="supervisor",
+        metadata={
+            "intervention_id": item["intervention_id"],
+            "decision_id": item["decision_id"],
+            "action": ACTION_RETRY,
+            "attempt_count": 1,
+        },
+    )
+    calls = []
+
+    def should_not_execute(_task, _decision):
+        calls.append(1)
+        raise AssertionError("retry was applied twice")
+
+    with patch.object(controller, "_supervisor_retry", side_effect=should_not_execute):
+        result = controller._execute_supervisor_intervention(
+            store.get_task(task["task_id"]),
+            {"intervention": item, "_recovery": True},
+            controller._supervisor_retry,
+            store=store,
+        )
+
+    assert calls == []
+    assert result["execution_evidence"] is True
+    assert store.get_intervention(item["intervention_id"])["status"] == "completed"
+
+
+def test_fresh_retry_while_task_is_rework_has_new_execution_evidence(tmp_path):
+    controller = importlib.import_module("services.herdr-controller")
+    store = SQLiteStateStore(tmp_path / "state.db")
+    task = dict(_task(), status="rework", attempt_count=1)
+    store.save_task(task)
+    item = request_intervention(
+        store, task, _evaluation(), _decision(),
+        {"enabled": True, "enforce": True, "policy": {"max_attempts": 2}},
+    )
+
+    with patch.object(controller, "_get_store", return_value=store):
+        result = controller._execute_supervisor_intervention(
+            task, {"intervention": item}, controller._supervisor_retry, store=store,
+        )
+
+    assert result.get("already_applied") is not True
+    assert result["new_status"] == "working"
+    assert result["attempt_count"] == 2
+    events = store.list_events(task_id=task["task_id"], event_type="task_transition")
+    assert any(
+        event["payload"].get("intervention_id") == item["intervention_id"]
+        and event["payload"].get("action") == ACTION_RETRY
+        for event in events
+    )
+
+
+def test_verify_result_reflects_fresh_working_task_state(tmp_path):
+    controller = importlib.import_module("services.herdr-controller")
+    store = SQLiteStateStore(tmp_path / "state.db")
+    task = dict(_task(), status="working")
+    store.save_task(task)
+    item = request_intervention(
+        store, task, _evaluation(), _decision(ACTION_VERIFY),
+        {"enabled": True, "enforce": True, "policy": {"max_verifications": 2}},
+    )
+
+    result = controller._execute_supervisor_intervention(
+        task, {"intervention": item}, controller._supervisor_verify, store=store,
+    )
+    fresh = store.get_task(task["task_id"])
+
+    assert result["verification_pending"] is True
+    assert result["new_status"] == fresh["status"]
+    assert result["new_status"] == "rework"
+    assert result["verification_requested"] is True
+
+
+def test_request_persistence_failure_is_fail_safe(tmp_path):
+    class BrokenStore:
+        def __init__(self):
+            self.events = []
+
+        def list_events(self, **_kwargs):
+            return self.events
+
+        def record_event(self, event_type, payload, **kwargs):
+            self.events.append({"event_type": event_type, "payload": payload, **kwargs})
+
+        def create_intervention(self, _item):
+            raise RuntimeError("state store unavailable")
+
+    config = load_config(path="/nonexistent-supervisor.json")
+    config.update({"provider": "rule", "enforce": True, "interval": 0, "cooldown": 0})
+    signals = dict(ALL_SIGNALS, worker_stuck=0.95, meaningful_progress=0.03)
+    supervisor = SemanticSupervisor(config, StubProvider(signals=signals))
+    executed = []
+
+    result = run_checkpoint(
+        task=_task(), trigger="agent_done", store=BrokenStore(), config=config,
+        supervisor=supervisor,
+        actions={"RETRY": lambda *_args: executed.append(1)}, log=lambda _message: None,
+    )
+
+    assert result["intercepted"] is False
+    assert result["handled"] is False
+    assert result["continue_flow"] is True
+    assert executed == []
+
+
+def test_durable_handler_failure_remains_intercepted(tmp_path):
+    controller = importlib.import_module("services.herdr-controller")
+    from herdr.supervisor.engine import SemanticSupervisor
+
+    store = SQLiteStateStore(tmp_path / "state.db")
+    config = load_config(path="/nonexistent-supervisor.json")
+    config.update({"provider": "rule", "enforce": True, "interval": 0, "cooldown": 0})
+    supervisor = SemanticSupervisor(
+        config, StubProvider(signals=dict(ALL_SIGNALS, worker_stuck=0.95, meaningful_progress=0.03)),
+    )
+    task = dict(_task(), runtime={"status": "running", "started_at": time.time() - 10})
+
+    def broken(_task, _decision):
+        raise RuntimeError("boom")
+
+    result = run_checkpoint(
+        task=task, trigger="agent_done", store=store, config=config,
+        supervisor=supervisor,
+        actions={
+            "RETRY": lambda task, decision: controller._execute_supervisor_intervention(
+                task, decision, broken, store=store,
+            ),
+        },
+        log=lambda _message: None,
+    )
+
+    assert result["intercepted"] is True
+    assert result["continue_flow"] is False
+    assert store.list_interventions(statuses=["failed"])[0]["error"]["type"] == "RuntimeError"
+
+
 def test_controller_verify_only_enters_rework_without_fabricating_verdict(tmp_path):
     controller = importlib.import_module("services.herdr-controller")
     store = SQLiteStateStore(tmp_path / "state.db")
@@ -203,19 +393,28 @@ def test_two_controllers_claim_one_intervention_and_execute_once(tmp_path):
 def test_recovery_completes_running_retry_when_rework_already_applied(tmp_path):
     controller = importlib.import_module("services.herdr-controller")
     store = SQLiteStateStore(tmp_path / "state.db")
-    task = dict(_task(), status="rework", attempt_count=1)
+    task = dict(_task(), status="agent_done")
     store.save_task(task)
     item = request_intervention(
         store, task, _evaluation(), _decision(),
         {"enabled": True, "enforce": True, "policy": {"max_attempts": 2}},
     )
-    store.claim_intervention(item["intervention_id"])
+    store.claim_intervention(item["intervention_id"], lease_seconds=-1)
+    store.transition_task(
+        task["task_id"], "rework", "supervisor retry", source="supervisor",
+        metadata={
+            "intervention_id": item["intervention_id"],
+            "decision_id": item["decision_id"],
+            "action": ACTION_RETRY,
+            "attempt_count": 1,
+        },
+    )
 
     recovered = controller.recover_pending_interventions(store=store, run_id="run-1")
 
     assert len(recovered) == 1
     assert store.get_intervention(item["intervention_id"])["status"] == "completed"
-    assert store.get_intervention(item["intervention_id"])["result"]["already_applied"] is True
+    assert store.get_intervention(item["intervention_id"])["result"]["execution_evidence"] is True
 
 
 def test_controller_checkpoint_runs_policy_to_persisted_retry_action(tmp_path):

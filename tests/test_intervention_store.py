@@ -75,6 +75,27 @@ def test_completed_intervention_cannot_be_claimed_or_completed_again(tmp_path):
         store.complete_intervention(intervention["intervention_id"], {"ok": False})
 
 
+def test_expired_running_lease_can_be_reclaimed_once(tmp_path):
+    db_path = tmp_path / "state.db"
+    first = SQLiteStateStore(db_path)
+    second = SQLiteStateStore(db_path)
+    intervention = first.create_intervention(_requested())
+    claimed = first.claim_intervention(
+        intervention["intervention_id"], execution_owner="controller-a", lease_seconds=-1,
+    )
+
+    assert claimed["execution_owner"] == "controller-a"
+    recovered = second.claim_intervention(
+        intervention["intervention_id"], execution_owner="controller-b",
+        recover_running=True, lease_seconds=30,
+    )
+    assert recovered["execution_owner"] == "controller-b"
+    assert second.claim_intervention(
+        intervention["intervention_id"], execution_owner="controller-c",
+        recover_running=True, lease_seconds=30,
+    ) is None
+
+
 def test_concurrent_creation_has_one_canonical_row(tmp_path):
     db_path = tmp_path / "state.db"
     barrier = threading.Barrier(2)

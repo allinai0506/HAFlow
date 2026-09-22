@@ -46,9 +46,12 @@ for actions outside V1.
 
 ## RETRY
 
-RETRY reuses the existing legal Task transition to `rework`. It does not create
-a second retry engine. The completed result records the previous status, new
-status, and observed attempt count.
+RETRY reuses the existing legal Task transition path and does not create a
+second retry engine. A new retry while the Task is already `rework` enters the
+legal `rework → working` next iteration; it never uses `rework → rework` as
+fake evidence. The transition carries `intervention_id`, `decision_id`,
+`action`, and the authoritative attempt count. The completed result records
+the previous status, new status, and observed attempt count.
 
 The Controller checks the persisted Task attempt count against the existing
 Supervisor policy `max_attempts` before execution. When the budget is
@@ -57,8 +60,10 @@ exhausted, the Intervention is durably marked `failed` with
 
 ## VERIFY
 
-VERIFY sends the Task into the existing `rework`/verification route. The
-Intervention result says that verification is pending. It never writes
+VERIFY sends the Task into the existing `rework`/verification route and records
+a durable `verification_requested` event carrying its Intervention identity.
+The result is based on a fresh Task read and says
+`verification_requested=true` and `verification_pending=true`. It never writes
 `passed=true` and never substitutes for the existing `tests_completed` or
 `verification_completed` facts. Those facts remain produced by the existing
 verification machinery.
@@ -66,18 +71,24 @@ verification machinery.
 ## Idempotency
 
 Creation and claim use `BEGIN IMMEDIATE` and the unique identity constraint.
-Only a requested row can be claimed. Completed, failed, and superseded rows
-cannot execute again. If two Controllers race, one claim succeeds and the
-other observes an already claimed Intervention.
+Only a requested row can be claimed immediately. A stale running row can be
+reclaimed only when its database lease has expired, using an atomic
+`execution_owner` + `lease_until` compare-and-set. A live lease makes the
+second Controller skip the row. Completion/failure also checks the owner, so a
+reclaimed stale worker cannot finalize another Controller's execution.
+Completed, failed, and superseded rows cannot execute again.
 
 ## Crash recovery
 
 Controller done/recovery handling scans requested and running rows before
 allowing normal done redelivery. Requested rows are claimed and executed.
-For a running RETRY, recovery checks the current Task state first; if rework
-was already applied, it records completion without applying it again. A
-durable pending Intervention therefore cannot be bypassed by RateGate or a
-replayed `agent_done` event.
+Running rows are recovered only after a stale lease is atomically reclaimed.
+Before executing, recovery searches the Task status history and canonical
+events for the exact `intervention_id` and action. A transition already tagged
+with that identity completes the Intervention without repeating the side
+effect; Task status alone is never treated as proof. A durable pending
+Intervention therefore cannot be bypassed by RateGate or a replayed
+`agent_done` event.
 
 ## Run isolation
 
@@ -91,8 +102,11 @@ cannot operate on a Task belonging to another Run.
 An action-handler exception writes `intervention_failed` with the exception
 type and bounded message. It does not leave the row permanently `running`.
 Supervisor/provider failure before a durable request remains fail-safe and
-does not fail the normal Task flow. Once a request is durable, the Controller
-owns its lifecycle and the default done continuation remains intercepted.
+does not fail the normal Task flow. A failure while creating a durable V1
+request is also fail-safe: no handler runs and normal continuation remains
+allowed. Once the request is persisted, the Controller owns its lifecycle and
+the default done continuation remains intercepted, including after handler
+failure.
 
 ## Metrics
 

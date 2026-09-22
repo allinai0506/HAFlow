@@ -11,6 +11,7 @@ import socket
 import subprocess
 import threading
 import time
+import uuid
 
 import sys
 HERDR_ROOT = Path(__file__).resolve().parent.parent
@@ -3437,45 +3438,184 @@ def _supervisor_notify(task, action, message):
     )
 
 
-def _supervisor_retry(task, decision):
+def _supervisor_retry(task, decision, store=None):
     """RETRY -> the existing rework flow; return only observed state facts."""
+    return _supervisor_retry_with_store(task, decision, store=store)
+
+
+def _intervention_metadata(decision, action, attempt_count=None):
+    intervention = (decision.get("intervention") or {}) if isinstance(decision, dict) else {}
+    metadata = {
+        "intervention_id": intervention.get("intervention_id"),
+        "decision_id": intervention.get("decision_id") or decision.get("decision_id"),
+        "action": action,
+    }
+    if attempt_count is not None:
+        metadata["attempt_count"] = int(attempt_count)
+    return {key: value for key, value in metadata.items() if value is not None}
+
+
+def _supervisor_retry_with_store(task, decision, store=None):
+    """Apply one new retry iteration using the existing legal task flow."""
     from herdr.intervention import attempt_count_for_task
-    previous_status = task.get("status")
-    if previous_status == "rework":
-        return {
-            "action": "RETRY",
-            "previous_status": previous_status,
-            "new_status": "rework",
-            "attempt_count": attempt_count_for_task(task),
-            "already_applied": True,
+    store = store or _get_store()
+    fresh_before = store.get_task(task.get("task_id")) if store is not None else None
+    fresh_before = fresh_before or task
+    previous_status = fresh_before.get("status")
+    current_attempt = attempt_count_for_task(fresh_before)
+    intervention = (decision.get("intervention") or {}) if isinstance(decision, dict) else {}
+    max_attempts = int(intervention.get("max_attempts") or 0)
+    if max_attempts > 0 and current_attempt >= max_attempts:
+        error = RuntimeError("RETRY budget exhausted")
+        error.intervention_error = {
+            "code": "retry_budget_exhausted",
+            "attempt_count": current_attempt,
+            "max_attempts": max_attempts,
         }
-    if not set_task_status(task.get("task_id"), "rework"):
-        raise RuntimeError("RETRY handler could not move task to rework")
-    fresh = get_task(task.get("task_id")) or {}
+        raise error
+
+    # A task already in rework is active work, not evidence that this new
+    # Intervention ran. Re-enter the legal working path to start a new
+    # iteration; never use rework -> rework as a fake retry.
+    target_status = "working" if previous_status == "rework" else "rework"
+    next_attempt = current_attempt + 1
+    metadata = _intervention_metadata(decision, "RETRY", next_attempt)
+    applied_status = target_status
+    if store is not None and store.get_task(task.get("task_id")) is not None:
+        from herdr import kernel
+        kernel.transition_task(
+            task_id=task.get("task_id"),
+            to_status=target_status,
+            reason="supervisor_retry",
+            source="supervisor",
+            metadata=metadata,
+            store=store,
+        )
+    elif not set_task_status(task.get("task_id"), target_status):
+        raise RuntimeError("RETRY handler could not enter retry flow")
+    fresh = store.get_task(task.get("task_id")) if store is not None else None
+    fresh = fresh or get_task(task.get("task_id")) or dict(fresh_before, status=applied_status)
     return {
         "action": "RETRY",
         "previous_status": previous_status,
-        "new_status": fresh.get("status", "rework"),
+        "new_status": fresh.get("status", target_status),
         "attempt_count": attempt_count_for_task(fresh),
     }
 
 
-def _supervisor_verify(task, decision):
+def _supervisor_verify(task, decision, store=None):
     """VERIFY -> re-enter the existing verification/rework route.
 
     Verification facts are emitted later by the existing tests_completed and
     verification_completed path; this handler never manufactures a verdict.
     """
-    previous_status = task.get("status")
-    if previous_status not in ("rework", "working"):
-        if not set_task_status(task.get("task_id"), "rework"):
+    store = store or _get_store()
+    fresh_before = store.get_task(task.get("task_id")) if store is not None else None
+    fresh_before = fresh_before or task
+    previous_status = fresh_before.get("status")
+    applied_status = previous_status
+    if previous_status != "rework":
+        metadata = _intervention_metadata(decision, "VERIFY")
+        if store is not None and store.get_task(task.get("task_id")) is not None:
+            from herdr import kernel
+            kernel.transition_task(
+                task_id=task.get("task_id"),
+                to_status="rework",
+                reason="supervisor_verify",
+                source="supervisor",
+                metadata=metadata,
+                store=store,
+            )
+        elif not set_task_status(task.get("task_id"), "rework"):
             raise RuntimeError("VERIFY handler could not enter verification rework")
+        else:
+            applied_status = "rework"
+    if store is not None:
+        from herdr.trajectory import run_id_for_task
+        store.record_event(
+            "verification_requested",
+            {
+                "intervention_id": (decision.get("intervention") or {}).get("intervention_id"),
+                "decision_id": (decision.get("intervention") or {}).get("decision_id"),
+                "action": "VERIFY",
+                "verification_pending": True,
+            },
+            workflow_id=fresh_before.get("workflow_id"),
+            node_id=fresh_before.get("node") or fresh_before.get("stage"),
+            task_id=fresh_before.get("task_id"),
+            agent_id=fresh_before.get("agent"),
+            source="supervisor",
+            run_id=run_id_for_task(fresh_before),
+        )
+    fresh = store.get_task(task.get("task_id")) if store is not None else None
+    fresh = fresh or get_task(task.get("task_id")) or dict(fresh_before, status=applied_status)
     return {
         "action": "VERIFY",
         "previous_status": previous_status,
-        "new_status": "rework",
+        "new_status": fresh.get("status"),
+        "verification_requested": True,
         "verification_pending": True,
     }
+
+
+def _intervention_execution_evidence(task, intervention, store):
+    """Find durable evidence for this exact Intervention, never by status alone."""
+    intervention_id = intervention.get("intervention_id")
+    action = intervention.get("action")
+    task_id = intervention.get("task_id")
+    run_id = intervention.get("run_id")
+    fresh = store.get_task(task_id) if store is not None else None
+    fresh = fresh or task
+    for entry in reversed(fresh.get("status_history") or []):
+        if (
+            entry.get("intervention_id") == intervention_id
+            and entry.get("action") == action
+        ):
+            return {
+                "action": action,
+                "previous_status": entry.get("from"),
+                "new_status": entry.get("to"),
+                "attempt_count": entry.get("attempt_count"),
+                "already_applied": True,
+                "execution_evidence": True,
+            }
+    if store is None:
+        return None
+    for event in store.list_events(task_id=task_id, event_type="task_transition", limit=200, desc=True):
+        payload = event.get("payload") or {}
+        if (
+            event.get("run_id") == run_id
+            and payload.get("intervention_id") == intervention_id
+            and payload.get("action") == action
+        ):
+            return {
+                "action": action,
+                "previous_status": payload.get("from_status"),
+                "new_status": payload.get("to_status"),
+                "attempt_count": payload.get("attempt_count"),
+                "already_applied": True,
+                "execution_evidence": True,
+            }
+    for event in store.list_events(task_id=task_id, event_type="verification_requested", limit=200, desc=True):
+        payload = event.get("payload") or {}
+        if (
+            event.get("run_id") == run_id
+            and payload.get("intervention_id") == intervention_id
+            and payload.get("action") == action
+        ):
+            return {
+                "action": action,
+                "previous_status": fresh.get("status"),
+                "new_status": fresh.get("status"),
+                "verification_requested": True,
+                "verification_pending": True,
+                "already_applied": True,
+                "execution_evidence": True,
+            }
+    return None
+
+
+_INTERVENTION_EXECUTION_OWNER = f"controller:{os.getpid()}:{uuid.uuid4()}"
 
 
 def _execute_supervisor_intervention(task, decision, action_handler, store=None):
@@ -3492,22 +3632,35 @@ def _execute_supervisor_intervention(task, decision, action_handler, store=None)
         if current.get("status") == "failed":
             raise RuntimeError("intervention already failed")
         return current.get("result") or {"already_applied": True}
-    if current.get("status") == "running" and decision.get("_recovery"):
-        claimed = current
-    else:
-        claimed = store.claim_intervention(intervention_id)
-        if claimed is None:
-            return {"already_claimed": True}
+    claimed = store.claim_intervention(
+        intervention_id,
+        execution_owner=_INTERVENTION_EXECUTION_OWNER,
+        recover_running=bool(decision.get("_recovery")),
+    )
+    if claimed is None:
+        return {"already_claimed": True}
+    owner = claimed.get("execution_owner")
     try:
-        result = action_handler(task, decision) or {}
-        store.complete_intervention(intervention_id, result)
+        evidence = _intervention_execution_evidence(task, claimed, store)
+        if evidence is not None:
+            result = evidence
+        elif action_handler in (_supervisor_retry, _supervisor_verify):
+            result = action_handler(task, decision, store=store) or {}
+        else:
+            result = action_handler(task, decision) or {}
+        store.complete_intervention(intervention_id, result, execution_owner=owner)
         return result
     except Exception as exc:
         from herdr.supervisor.state import redact_text
-        store.fail_intervention(
-            intervention_id,
-            {"type": type(exc).__name__, "message": redact_text(str(exc)[:500])},
-        )
+        error = getattr(exc, "intervention_error", None) or {
+            "type": type(exc).__name__, "message": redact_text(str(exc)[:500]),
+        }
+        try:
+            store.fail_intervention(intervention_id, error, execution_owner=owner)
+        except ValueError:
+            # A reclaimed owner or a concurrent terminal transition already
+            # owns the durable outcome; do not mask the original action error.
+            pass
         raise
 
 

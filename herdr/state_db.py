@@ -248,6 +248,8 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
             requested_at REAL NOT NULL,
             started_at REAL,
             finished_at REAL,
+            execution_owner TEXT,
+            lease_until REAL,
             result_json TEXT,
             error_json TEXT
         );
@@ -266,6 +268,7 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_cp_wf_created ON checkpoints(workflow_id, created_at DESC);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_cp_parent ON checkpoints(parent_checkpoint_id);")
     _ensure_event_columns(conn)
+    _ensure_intervention_columns(conn)
 
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_wf ON events(workflow_id, timestamp);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_node ON events(node_id, timestamp);")
@@ -468,6 +471,24 @@ def _ensure_event_columns(conn: sqlite3.Connection) -> None:
                 if name not in columns:
                     raise
             columns.add(name)
+
+
+def _ensure_intervention_columns(conn: sqlite3.Connection) -> None:
+    """Upgrade Action Protocol V1 rows with recovery ownership fields."""
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(interventions);")}
+    column_types = {"execution_owner": "TEXT", "lease_until": "REAL"}
+    for name, column_type in column_types.items():
+        if name in columns:
+            continue
+        try:
+            conn.execute(f"ALTER TABLE interventions ADD COLUMN {name} {column_type};")
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc).lower():
+                raise
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(interventions);")}
+            if name not in columns:
+                raise
+        columns.add(name)
 
 
 def get_db_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
@@ -1051,6 +1072,8 @@ def _decode_intervention_row(row: sqlite3.Row) -> Dict[str, Any]:
         "requested_at": row["requested_at"],
         "started_at": row["started_at"],
         "finished_at": row["finished_at"],
+        "execution_owner": row["execution_owner"],
+        "lease_until": row["lease_until"],
         "result": json.loads(row["result_json"]) if row["result_json"] else None,
         "error": json.loads(row["error_json"]) if row["error_json"] else None,
     }
@@ -1161,7 +1184,14 @@ def list_interventions(
         conn.close()
 
 
-def claim_intervention(intervention_id: str, db_path: Optional[Path] = None) -> Optional[Dict[str, Any]]:
+def claim_intervention(
+    intervention_id: str,
+    db_path: Optional[Path] = None,
+    *,
+    execution_owner: Optional[str] = None,
+    lease_seconds: float = 300.0,
+    recover_running: bool = False,
+) -> Optional[Dict[str, Any]]:
     from .intervention import STATUS_REQUESTED, STATUS_RUNNING
 
     conn = get_db_connection(db_path)
@@ -1170,14 +1200,36 @@ def claim_intervention(intervention_id: str, db_path: Optional[Path] = None) -> 
         row = conn.execute(
             "SELECT * FROM interventions WHERE intervention_id = ?", (intervention_id,)
         ).fetchone()
-        if row is None or row["status"] != STATUS_REQUESTED:
+        if row is None:
             conn.execute("ROLLBACK;")
             return None
-        started_at = time.time()
-        conn.execute(
-            "UPDATE interventions SET status = ?, started_at = ? WHERE intervention_id = ? AND status = ?",
-            (STATUS_RUNNING, started_at, intervention_id, STATUS_REQUESTED),
-        )
+        now = time.time()
+        if row["status"] == STATUS_REQUESTED:
+            owner = execution_owner or str(uuid.uuid4())
+            conn.execute(
+                """UPDATE interventions
+                   SET status = ?, started_at = ?, execution_owner = ?, lease_until = ?
+                   WHERE intervention_id = ? AND status = ?""",
+                (STATUS_RUNNING, now, owner, now + float(lease_seconds),
+                 intervention_id, STATUS_REQUESTED),
+            )
+        elif (
+            row["status"] == STATUS_RUNNING
+            and recover_running
+            and float(row["lease_until"] or 0.0) <= now
+        ):
+            owner = execution_owner or str(uuid.uuid4())
+            conn.execute(
+                """UPDATE interventions
+                   SET execution_owner = ?, lease_until = ?
+                   WHERE intervention_id = ? AND status = ?
+                     AND COALESCE(lease_until, 0) <= ?""",
+                (owner, now + float(lease_seconds), intervention_id,
+                 STATUS_RUNNING, now),
+            )
+        else:
+            conn.execute("ROLLBACK;")
+            return None
         updated = conn.execute(
             "SELECT * FROM interventions WHERE intervention_id = ?", (intervention_id,)
         ).fetchone()
@@ -1197,23 +1249,26 @@ def claim_intervention(intervention_id: str, db_path: Optional[Path] = None) -> 
 
 def complete_intervention(
     intervention_id: str, result: Dict[str, Any], db_path: Optional[Path] = None,
+    *, execution_owner: Optional[str] = None,
 ) -> Dict[str, Any]:
     return _finish_intervention(intervention_id, "completed", result=result, db_path=db_path,
-                                allowed=("running",))
+                                allowed=("running",), execution_owner=execution_owner)
 
 
 def fail_intervention(
     intervention_id: str, error: Dict[str, Any], db_path: Optional[Path] = None,
+    *, execution_owner: Optional[str] = None,
 ) -> Dict[str, Any]:
     return _finish_intervention(
         intervention_id, "failed", error=error, db_path=db_path,
-        allowed=("requested", "running"),
+        allowed=("requested", "running"), execution_owner=execution_owner,
     )
 
 
 def _finish_intervention(
     intervention_id: str, status: str, *, result: Optional[Dict[str, Any]] = None,
     error: Optional[Dict[str, Any]] = None, db_path: Optional[Path], allowed: tuple,
+    execution_owner: Optional[str] = None,
 ) -> Dict[str, Any]:
     conn = get_db_connection(db_path)
     try:
@@ -1226,16 +1281,27 @@ def _finish_intervention(
         if row["status"] not in allowed:
             raise ValueError(f"cannot finish intervention from {row['status']}")
         finished_at = time.time()
-        conn.execute(
-            """UPDATE interventions SET status = ?, finished_at = ?, result_json = ?, error_json = ?
-               WHERE intervention_id = ?""",
+        if execution_owner is None:
+            owner_clause = ""
+            owner_params = ()
+        else:
+            owner_clause = " AND execution_owner = ?"
+            owner_params = (execution_owner,)
+        updated = conn.execute(
+            f"""UPDATE interventions SET status = ?, finished_at = ?,
+                   result_json = ?, error_json = ?, execution_owner = NULL,
+                   lease_until = NULL
+               WHERE intervention_id = ? AND status IN ({','.join('?' for _ in allowed)})
+               {owner_clause}""",
             (
                 status, finished_at,
                 json.dumps(result, ensure_ascii=False) if result is not None else None,
                 json.dumps(error, ensure_ascii=False) if error is not None else None,
-                intervention_id,
+                intervention_id, *allowed, *owner_params,
             ),
         )
+        if updated.rowcount != 1:
+            raise ValueError(f"intervention '{intervention_id}' execution ownership changed")
         updated = conn.execute(
             "SELECT * FROM interventions WHERE intervention_id = ?", (intervention_id,)
         ).fetchone()

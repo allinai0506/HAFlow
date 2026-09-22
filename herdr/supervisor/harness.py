@@ -285,6 +285,7 @@ def run_checkpoint(
         intercepted = bool(
             enforce_on and decision.action in policy_engine.INTERVENTION_ACTIONS
         )
+        durable_action = decision.action in (ACTION_RETRY, ACTION_VERIFY)
         payload = {
             "decision_id": evaluation["evaluation_id"],
             "evaluation_id": evaluation["evaluation_id"],
@@ -315,8 +316,17 @@ def run_checkpoint(
         handled = False
         durable_intervention = None
         durable_request_attempted = False
-        if intercepted and decision.action in (ACTION_RETRY, ACTION_VERIFY):
-            if hasattr(store, "create_intervention"):
+        if intercepted and durable_action:
+            if not hasattr(store, "create_intervention"):
+                # Keep the pre-V1 handler contract for lightweight legacy
+                # stores used by integrations/tests. The production
+                # StateStore has create_intervention; a real persistence
+                # failure on that path remains fail-safe below.
+                log(
+                    f"[SUPERVISOR INTERVENTION REQUEST SKIPPED] task={task_id}: "
+                    "legacy store; using supplied handler"
+                )
+            else:
                 durable_request_attempted = True
                 try:
                     durable_intervention = request_intervention(
@@ -324,7 +334,14 @@ def run_checkpoint(
                     )
                     if durable_intervention is not None:
                         payload["intervention"] = durable_intervention
+                        if durable_intervention.get("status") == "completed":
+                            # A replay of a completed canonical action is
+                            # idempotent and may resume the default flow.
+                            intercepted = False
+                    else:
+                        intercepted = False
                 except Exception as exc:
+                    intercepted = False
                     log(
                         f"[SUPERVISOR INTERVENTION REQUEST FAILED] task={task_id}: "
                         f"{type(exc).__name__}"

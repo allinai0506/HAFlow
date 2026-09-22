@@ -299,15 +299,27 @@ class StateStore(ABC):
         pass
 
     @abstractmethod
-    def claim_intervention(self, intervention_id: str) -> Optional[Dict[str, Any]]:
+    def claim_intervention(
+        self,
+        intervention_id: str,
+        execution_owner: Optional[str] = None,
+        lease_seconds: float = 300.0,
+        recover_running: bool = False,
+    ) -> Optional[Dict[str, Any]]:
         pass
 
     @abstractmethod
-    def complete_intervention(self, intervention_id: str, result: Dict[str, Any]) -> Dict[str, Any]:
+    def complete_intervention(
+        self, intervention_id: str, result: Dict[str, Any],
+        execution_owner: Optional[str] = None,
+    ) -> Dict[str, Any]:
         pass
 
     @abstractmethod
-    def fail_intervention(self, intervention_id: str, error: Dict[str, Any]) -> Dict[str, Any]:
+    def fail_intervention(
+        self, intervention_id: str, error: Dict[str, Any],
+        execution_owner: Optional[str] = None,
+    ) -> Dict[str, Any]:
         pass
 
     # Semantic ContextPack working memory
@@ -630,14 +642,38 @@ class SQLiteStateStore(StateStore):
             run_id=run_id, task_id=task_id, statuses=statuses, limit=limit, db_path=self.db_path,
         )
 
-    def claim_intervention(self, intervention_id: str) -> Optional[Dict[str, Any]]:
-        return state_db.claim_intervention(intervention_id, db_path=self.db_path)
+    def claim_intervention(
+        self,
+        intervention_id: str,
+        execution_owner: Optional[str] = None,
+        lease_seconds: float = 300.0,
+        recover_running: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        return state_db.claim_intervention(
+            intervention_id,
+            db_path=self.db_path,
+            execution_owner=execution_owner,
+            lease_seconds=lease_seconds,
+            recover_running=recover_running,
+        )
 
-    def complete_intervention(self, intervention_id: str, result: Dict[str, Any]) -> Dict[str, Any]:
-        return state_db.complete_intervention(intervention_id, result, db_path=self.db_path)
+    def complete_intervention(
+        self, intervention_id: str, result: Dict[str, Any],
+        execution_owner: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return state_db.complete_intervention(
+            intervention_id, result, db_path=self.db_path,
+            execution_owner=execution_owner,
+        )
 
-    def fail_intervention(self, intervention_id: str, error: Dict[str, Any]) -> Dict[str, Any]:
-        return state_db.fail_intervention(intervention_id, error, db_path=self.db_path)
+    def fail_intervention(
+        self, intervention_id: str, error: Dict[str, Any],
+        execution_owner: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return state_db.fail_intervention(
+            intervention_id, error, db_path=self.db_path,
+            execution_owner=execution_owner,
+        )
 
     # Checkpoints
     def create_checkpoint(
