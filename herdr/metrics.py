@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from . import state_db
+from .transitions import COMPLETED_TASK_STATUSES
 
 
 @dataclass(frozen=True)
@@ -129,7 +130,7 @@ def get_run_metrics(
             final_status = "completed"
         elif facts["run_failed"]:
             final_status = "failed"
-    task_completed = final_status == "completed"
+    task_completed = bool(facts["run_completed"]) or final_status in COMPLETED_TASK_STATUSES
     event_counts = {
         key: int(facts.get(key, 0))
         for key in ("task_started", "verification_completed", "artifact_created", "agent_done")

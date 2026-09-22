@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from herdr import state_db
 from herdr.context_compact import ContextPack
 from herdr.metrics import get_run_metrics
@@ -158,3 +160,22 @@ def test_failed_run_is_terminal_but_not_completed(tmp_path: Path):
     assert metrics.final_status == "failed"
     assert metrics.finished_at == 8.0
     assert metrics.task_completed is False
+
+
+@pytest.mark.parametrize("status", ["committed", "cleaned", "superseded"])
+def test_run_completed_remains_completed_across_task_lifecycle(status: str, tmp_path: Path):
+    db_path = tmp_path / "state.db"
+    state_db.save_task(_task("run-lifecycle", status=status), db_path=db_path)
+    ledger = TrajectoryLedger(db_path)
+    ledger.append_event({
+        "run_id": "run-lifecycle",
+        "task_id": "task-1",
+        "workflow_id": "wf-1",
+        "event_type": "run_completed",
+        "timestamp": 8.0,
+    })
+
+    metrics = get_run_metrics("run-lifecycle", db_path=db_path, now=40.0)
+
+    assert metrics.final_status == status
+    assert metrics.task_completed is True
