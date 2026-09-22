@@ -80,3 +80,5 @@ reader 桩测试 red → 再验证 red(稳定) → 交接 → B 补齐 reader �
 ## 9. 结论
 
 **PASS**。事实依据:全新 Agent B 在零 transcript 下,仅凭 3191B 的 ContextPack + 5 次按需证据读取,8/8 理解正确、0 重复劳动、补齐唯一缺口并使测试转绿,同时用新事件与 Pack 证明链条可延续;Finding 真实、有据、被使用;四层边界无违规。压缩的字节意义在小规模下有限,导航意义已证实。已知缺口均为非阻塞优化,列入 Future Improvements,不在本次修改。
+
+自动回归测试现已覆盖 deterministic Finding propagation 与 authoritative artifact validation。
