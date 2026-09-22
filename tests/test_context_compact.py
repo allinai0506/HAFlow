@@ -1437,3 +1437,89 @@ def test_compact_task_without_status_drops_stale_task_status(tmp_path: Path):
     # Stale task_status must NOT be carried over
     task_statuses = [f for f in p2.verified_facts if f.get("fact_type") == "task_status"]
     assert task_statuses == []
+
+
+def test_compact_cached_stale_task_status_rebuilt_when_fingerprint_matches(tmp_path: Path):
+    """Cache invariant: stale cached pack with running+rework must not fast-return; rebuild keeps only current."""
+    db_path = tmp_path / "state.db"
+    store = ObservationStore(db_path)
+    ledger = TrajectoryLedger(db_path)
+    run_id = "run-cache-stale"
+    task = {"task_id": "task-cache-stale", "run_id": run_id, "status": "rework", "goal": "g"}
+    ledger.append_event({"run_id": run_id, "task_id": task["task_id"], "event_type": "task_started"})
+    ver_event = ledger.append_event({
+        "run_id": run_id, "task_id": task["task_id"], "event_type": "verification_completed",
+        "verification": {"passed": True, "passed_tests": 5, "total_tests": 5},
+    })
+    good = compact_run(run_id, task=task, store=store, provider=None)
+    assert [f for f in good.verified_facts if f.get("fact_type") == "task_status"] == [{"fact_type": "task_status", "status": "rework"}]
+    fingerprint = good.metadata["context_source_fingerprint"]
+
+    ver_fact = next(f for f in good.verified_facts if f.get("fact_type") == "verification")
+    bad_vf = [dict(ver_fact), {"fact_type": "task_status", "status": "running"}, {"fact_type": "task_status", "status": "rework"}]
+    conn = get_db_connection(db_path)
+    try:
+        conn.execute(
+            "UPDATE context_packs SET verified_facts_json = ? WHERE context_id = ?",
+            (json.dumps(bad_vf, ensure_ascii=False), good.context_id),
+        )
+    finally:
+        conn.close()
+    corrupted = state_db.get_latest_context_pack(run_id, db_path=db_path)
+    assert corrupted is not None
+    assert corrupted["context_id"] == good.context_id
+    assert corrupted["metadata"]["context_source_fingerprint"] == fingerprint
+    assert len([f for f in corrupted["verified_facts"] if f.get("fact_type") == "task_status"]) == 2
+
+    fixed = compact_run(run_id, task=task, store=store, provider=None)
+
+    assert fixed.context_id != good.context_id
+    task_statuses = [f for f in fixed.verified_facts if f.get("fact_type") == "task_status"]
+    assert task_statuses == [{"fact_type": "task_status", "status": "rework"}]
+    assert any(
+        f.get("fact_type") == "verification" and f.get("event_id") == ver_event["event_id"] and f.get("passed") is True
+        for f in fixed.verified_facts
+    )
+    assert get_latest_context(run_id, store=store).context_id == fixed.context_id
+
+
+def test_compact_cached_task_status_cleared_when_current_task_has_no_status(tmp_path: Path):
+    """Cache invariant: no-status task must not fast-return cached task_status; rebuild clears it."""
+    db_path = tmp_path / "state.db"
+    store = ObservationStore(db_path)
+    ledger = TrajectoryLedger(db_path)
+    run_id = "run-cache-nostatus"
+    task = {"task_id": "task-cache-nostatus", "run_id": run_id, "goal": "g"}
+    ledger.append_event({"run_id": run_id, "task_id": task["task_id"], "event_type": "task_started"})
+    ver_event = ledger.append_event({
+        "run_id": run_id, "task_id": task["task_id"], "event_type": "verification_completed",
+        "verification": {"passed": False, "passed_tests": 1, "total_tests": 5},
+    })
+    good = compact_run(run_id, task=task, store=store, provider=None)
+    assert [f for f in good.verified_facts if f.get("fact_type") == "task_status"] == []
+    fingerprint = good.metadata["context_source_fingerprint"]
+
+    ver_fact = next(f for f in good.verified_facts if f.get("fact_type") == "verification")
+    bad_vf = [dict(ver_fact), {"fact_type": "task_status", "status": "running"}]
+    conn = get_db_connection(db_path)
+    try:
+        conn.execute(
+            "UPDATE context_packs SET verified_facts_json = ? WHERE context_id = ?",
+            (json.dumps(bad_vf, ensure_ascii=False), good.context_id),
+        )
+    finally:
+        conn.close()
+    corrupted = state_db.get_latest_context_pack(run_id, db_path=db_path)
+    assert corrupted is not None
+    assert corrupted["metadata"]["context_source_fingerprint"] == fingerprint
+    assert len([f for f in corrupted["verified_facts"] if f.get("fact_type") == "task_status"]) == 1
+
+    fixed = compact_run(run_id, task=task, store=store, provider=None)
+
+    assert fixed.context_id != good.context_id
+    assert [f for f in fixed.verified_facts if f.get("fact_type") == "task_status"] == []
+    assert any(
+        f.get("fact_type") == "verification" and f.get("event_id") == ver_event["event_id"]
+        for f in fixed.verified_facts
+    )
+    assert get_latest_context(run_id, store=store).context_id == fixed.context_id

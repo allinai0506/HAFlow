@@ -1997,8 +1997,25 @@ def save_context_pack(
         if latest is not None:
             existing_metadata = json.loads(latest["metadata_json"] or "{}")
             if fingerprint and existing_metadata.get("context_source_fingerprint") == fingerprint:
-                conn.commit()
-                return _decode_context_pack_row(latest)
+                # Fingerprint match alone must not preserve a corrupt task_status.
+                # The candidate is built by the current cleanup logic (single
+                # current status or none); only dedup when latest carries the
+                # same task_status values.
+                try:
+                    latest_facts = json.loads(latest["verified_facts_json"] or "[]")
+                except Exception:
+                    latest_facts = []
+                candidate_facts = context_pack.get("verified_facts") or []
+                def _status_values(facts: Any) -> List[Any]:
+                    values = []
+                    if isinstance(facts, list):
+                        for fact in facts:
+                            if isinstance(fact, dict) and fact.get("fact_type") == "task_status":
+                                values.append(fact.get("status"))
+                    return values
+                if _status_values(latest_facts) == _status_values(candidate_facts):
+                    conn.commit()
+                    return _decode_context_pack_row(latest)
             # Compact requests may finish out of order.  The request start
             # timestamp is the snapshot's logical ordering key, so a late
             # older request must never become the latest snapshot.  A later
