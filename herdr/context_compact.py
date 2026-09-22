@@ -648,7 +648,7 @@ def _previously_verified_refs(previous: Optional[ContextPack], run_id: str, db_p
             value = str(ref)
             if value.startswith("evt_"):
                 events.add(value)
-            elif value.startswith("finding_"):
+            elif value.startswith(("fnd_", "finding_")):
                 findings.add(value)
             elif value.startswith("obs_"):
                 observations.add(value)

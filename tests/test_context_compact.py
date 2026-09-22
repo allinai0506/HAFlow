@@ -7,6 +7,7 @@ import multiprocessing
 import signal
 import threading
 import time
+import uuid
 from pathlib import Path
 import pytest
 
@@ -17,10 +18,12 @@ from herdr.context_compact import (
     MAX_CONTEXT_TEXT_CHARS,
     compact_run,
     _bound_context_pack,
+    _previously_verified_refs,
     get_context,
     get_latest_context,
     list_contexts,
 )
+from herdr.observer.models import new_finding_id
 from herdr.observation import ObservationStore, create_artifact_observation, create_observation
 from herdr.state_db import get_db_connection, upsert_trajectory_finding
 import herdr.state_db as state_db
@@ -1022,3 +1025,314 @@ def test_bounding_drops_semantic_items_when_all_refs_are_filtered(tmp_path: Path
     assert bounded.completed == []
     assert bounded.open_issues == []
     assert bounded.next_focus == []
+
+
+def test_previously_verified_refs_recognizes_fnd_prefix(tmp_path: Path):
+    db_path = tmp_path / "state.db"
+    store = ObservationStore(db_path)
+    ledger = TrajectoryLedger(db_path)
+
+    real_fnd_id = new_finding_id()
+    assert real_fnd_id.startswith("fnd_")
+    upsert_trajectory_finding(
+        _finding(run_id="run-prev", finding_id=real_fnd_id),
+        db_path=db_path,
+    )
+
+    other_run_fnd_id = new_finding_id()
+    upsert_trajectory_finding(
+        _finding(run_id="run-other", finding_id=other_run_fnd_id),
+        db_path=db_path,
+    )
+
+    phantom_fnd_id = new_finding_id()
+
+    legacy_fnd_id = f"finding_legacy_{uuid.uuid4().hex[:8]}"
+    upsert_trajectory_finding(
+        _finding(run_id="run-prev", finding_id=legacy_fnd_id),
+        db_path=db_path,
+    )
+
+    event = ledger.append_event({"run_id": "run-prev", "event_type": "task_completed"})
+    obs = create_observation(
+        run_id="run-prev", source_type="agent_log", source_ref="pane:1",
+        content="obs-content", excerpt="obs-content", store=store,
+    )
+    art_file = tmp_path / "art.txt"
+    art_file.write_text("art-content", encoding="utf-8")
+    ledger.append_event({
+        "run_id": "run-prev", "event_type": "artifact_created",
+        "artifact": {"ref": "art.txt", "path": str(art_file), "observation_id": obs.observation_id},
+    })
+
+    prev = ContextPack(
+        context_id="ctx_prev_refs",
+        run_id="run-prev",
+        task_id="task-prev",
+        workflow_id="wf-prev",
+        goal="g",
+        completed=[{"text": "done", "refs": [event["event_id"]]}],
+        open_issues=[
+            {"text": "real issue", "refs": [real_fnd_id]},
+            {"text": "phantom issue", "refs": [phantom_fnd_id]},
+            {"text": "other run issue", "refs": [other_run_fnd_id]},
+            {"text": "legacy issue", "refs": [legacy_fnd_id]},
+        ],
+        next_focus=[
+            {"text": "focus real", "refs": [real_fnd_id]},
+            {"text": "focus phantom", "refs": [phantom_fnd_id]},
+        ],
+        evidence_refs=[obs.observation_id],
+        artifact_refs=[{"ref": "art.txt"}],
+        important_findings=[],
+    )
+
+    verified = _previously_verified_refs(prev, "run-prev", db_path)
+
+    assert real_fnd_id in verified["findings"]
+    assert legacy_fnd_id in verified["findings"]
+    assert real_fnd_id not in verified["artifacts"]
+    assert legacy_fnd_id not in verified["artifacts"]
+    assert phantom_fnd_id not in verified["findings"]
+    assert phantom_fnd_id not in verified["artifacts"]
+    assert other_run_fnd_id not in verified["findings"]
+    assert other_run_fnd_id not in verified["artifacts"]
+    assert event["event_id"] in verified["events"]
+    assert obs.observation_id in verified["observations"]
+    assert "art.txt" in verified["artifacts"]
+
+
+def test_fnd_finding_reference_retained_across_bounded_compact(tmp_path: Path, monkeypatch):
+    db_path = tmp_path / "state.db"
+    store = ObservationStore(db_path)
+    ledger = TrajectoryLedger(db_path)
+    task = {"task_id": "task-e2e", "run_id": "run-e2e", "goal": "e2e fnd retention goal"}
+
+    # A & B: Real fnd_ ID saved to target Run
+    old_fnd_id = new_finding_id()
+    assert old_fnd_id.startswith("fnd_")
+    upsert_trajectory_finding(
+        {
+            "finding_id": old_fnd_id,
+            "finding_key": f"key-{old_fnd_id}",
+            "run_id": "run-e2e",
+            "task_id": "task-e2e",
+            "workflow_id": "wf-e2e",
+            "node": "impl",
+            "agent": "claude",
+            "finding_type": "repeated_failure",
+            "severity": "warning",
+            "status": "open",
+            "summary": "Boundary split failed on page 3",
+            "recommended_action": "Inspect heading split",
+            "confidence": 0.85,
+            "evidence": [],
+            "metadata": {},
+            "created_at": 10.0,
+        },
+        db_path=db_path,
+    )
+
+    # Negative control: finding belonging to another Run
+    other_run_fnd_id = new_finding_id()
+    upsert_trajectory_finding(
+        {
+            "finding_id": other_run_fnd_id,
+            "finding_key": f"key-{other_run_fnd_id}",
+            "run_id": "run-other",
+            "task_id": "task-other",
+            "workflow_id": "wf-other",
+            "node": "impl",
+            "agent": "claude",
+            "finding_type": "repeated_failure",
+            "severity": "warning",
+            "status": "open",
+            "summary": "Other run issue",
+            "recommended_action": "Ignore",
+            "confidence": 0.85,
+            "evidence": [],
+            "metadata": {},
+            "created_at": 10.0,
+        },
+        db_path=db_path,
+    )
+
+    # Negative control: phantom finding ID never persisted
+    phantom_fnd_id = new_finding_id()
+
+    # Positive control: legacy finding_ prefix
+    legacy_fnd_id = f"finding_legacy_{uuid.uuid4().hex[:8]}"
+    upsert_trajectory_finding(
+        {
+            "finding_id": legacy_fnd_id,
+            "finding_key": f"key-{legacy_fnd_id}",
+            "run_id": "run-e2e",
+            "task_id": "task-e2e",
+            "workflow_id": "wf-e2e",
+            "node": "impl",
+            "agent": "claude",
+            "finding_type": "repeated_failure",
+            "severity": "warning",
+            "status": "open",
+            "summary": "Legacy issue to retain",
+            "recommended_action": "Fix legacy",
+            "confidence": 0.85,
+            "evidence": [],
+            "metadata": {},
+            "created_at": 15.0,
+        },
+        db_path=db_path,
+    )
+
+    # Positive controls: event, observation, artifact
+    valid_event = ledger.append_event({"run_id": "run-e2e", "task_id": "task-e2e", "event_type": "task_completed"})
+    valid_obs = create_observation(
+        run_id="run-e2e", task_id="task-e2e", source_type="agent_log", source_ref="pane:p1",
+        content="log evidence", excerpt="log evidence", store=store,
+    )
+    art_file = tmp_path / "summary.md"
+    art_file.write_text("# summary", encoding="utf-8")
+    ledger.append_event({
+        "run_id": "run-e2e", "task_id": "task-e2e", "event_type": "artifact_created",
+        "artifact": {"ref": "summary.md", "path": str(art_file), "observation_id": valid_obs.observation_id},
+    })
+
+    # C: previous Context contains old_fnd_id in open_issues/next_focus,
+    # but NOT in important_findings
+    prev_pack = ContextPack(
+        context_id="ctx_prev_e2e",
+        run_id="run-e2e",
+        task_id="task-e2e",
+        workflow_id="wf-e2e",
+        goal=task["goal"],
+        open_issues=[
+            {"text": "Boundary split failed on page 3", "refs": [old_fnd_id]},
+            {"text": "Other run issue", "refs": [other_run_fnd_id]},
+            {"text": "Phantom issue", "refs": [phantom_fnd_id]},
+            {"text": "Legacy issue to retain", "refs": [legacy_fnd_id]},
+        ],
+        next_focus=[
+            {"text": "Inspect heading split", "refs": [old_fnd_id]},
+            {"text": "Phantom focus", "refs": [phantom_fnd_id]},
+        ],
+        completed=[{"text": "task_completed", "refs": [valid_event["event_id"]]}],
+        evidence_refs=[valid_obs.observation_id],
+        artifact_refs=[{"ref": "summary.md"}],
+        important_findings=[],  # Intentionally empty: not in important_findings!
+        source_event_sequence=2,
+        created_at=20.0,
+    )
+    state_db.save_context_pack(prev_pack.to_mapping(), db_path=db_path)
+
+    # D: Add newer findings with later created_at to push old_fnd_id out of bounded query window
+    new_1_id = new_finding_id()
+    new_2_id = new_finding_id()
+    upsert_trajectory_finding(
+        {
+            "finding_id": new_1_id,
+            "finding_key": f"key-{new_1_id}",
+            "run_id": "run-e2e",
+            "task_id": "task-e2e",
+            "workflow_id": "wf-e2e",
+            "node": "impl",
+            "agent": "claude",
+            "finding_type": "no_progress",
+            "severity": "warning",
+            "status": "open",
+            "summary": "New finding 1",
+            "recommended_action": "Action 1",
+            "confidence": 0.9,
+            "evidence": [],
+            "metadata": {},
+            "created_at": 30.0,
+        },
+        db_path=db_path,
+    )
+    upsert_trajectory_finding(
+        {
+            "finding_id": new_2_id,
+            "finding_key": f"key-{new_2_id}",
+            "run_id": "run-e2e",
+            "task_id": "task-e2e",
+            "workflow_id": "wf-e2e",
+            "node": "impl",
+            "agent": "claude",
+            "finding_type": "stalled_execution",
+            "severity": "warning",
+            "status": "open",
+            "summary": "New finding 2",
+            "recommended_action": "Action 2",
+            "confidence": 0.9,
+            "evidence": [],
+            "metadata": {},
+            "created_at": 40.0,
+        },
+        db_path=db_path,
+    )
+    ledger.append_event({"run_id": "run-e2e", "task_id": "task-e2e", "event_type": "progress"})
+
+    # Spy on artifact_ref_exists and get_trajectory_finding_by_id to verify
+    # that fnd_ IDs are verified as Findings and NEVER queried as Artifacts
+    artifact_queries = []
+    original_artifact_exists = state_db.artifact_ref_exists
+
+    def spy_artifact_ref_exists(ref, *args, **kwargs):
+        artifact_queries.append(str(ref))
+        return original_artifact_exists(ref, *args, **kwargs)
+
+    finding_queries = []
+    original_get_finding = state_db.get_trajectory_finding_by_id
+
+    def spy_get_finding(finding_id, *args, **kwargs):
+        finding_queries.append(str(finding_id))
+        return original_get_finding(finding_id, *args, **kwargs)
+
+    monkeypatch.setattr(state_db, "artifact_ref_exists", spy_artifact_ref_exists)
+    monkeypatch.setattr(state_db, "get_trajectory_finding_by_id", spy_get_finding)
+
+    # E: Compact with max_findings=2 so only new_2_id and new_1_id are in bounded query
+    pack = compact_run(
+        "run-e2e",
+        task=task,
+        store=store,
+        provider=None,
+        config={"enabled": True, "max_findings": 2},
+        now=50.0,
+    )
+
+    # Verification of queries:
+    # 1. fnd_ IDs must NOT have been checked as artifacts
+    assert old_fnd_id not in artifact_queries
+    assert phantom_fnd_id not in artifact_queries
+    assert other_run_fnd_id not in artifact_queries
+    assert legacy_fnd_id not in artifact_queries
+
+    # 2. Finding point-lookup was performed for previous finding refs
+    assert old_fnd_id in finding_queries
+    assert legacy_fnd_id in finding_queries
+
+    # 3. Old finding reference and semantic items are retained in open_issues and next_focus
+    open_issue_texts = {item["text"]: item.get("refs", []) for item in pack.open_issues}
+    assert "Boundary split failed on page 3" in open_issue_texts
+    assert old_fnd_id in open_issue_texts["Boundary split failed on page 3"]
+
+    next_focus_texts = {item["text"]: item.get("refs", []) for item in pack.next_focus}
+    assert "Inspect heading split" in next_focus_texts
+    assert old_fnd_id in next_focus_texts["Inspect heading split"]
+
+    # 4. Legacy finding_ reference is also retained
+    assert "Legacy issue to retain" in open_issue_texts
+    assert legacy_fnd_id in open_issue_texts["Legacy issue to retain"]
+
+    # F: Non-existent and other-run findings are filtered out
+    all_refs = [ref for item in pack.open_issues + pack.next_focus + pack.completed for ref in item.get("refs", [])]
+    assert phantom_fnd_id not in all_refs
+    assert other_run_fnd_id not in all_refs
+    assert "Other run issue" not in open_issue_texts
+    assert "Phantom issue" not in open_issue_texts
+    assert "Phantom focus" not in next_focus_texts
+
+    # G: Existing event / observation / artifact reference behavior unchanged
+    assert valid_event["event_id"] in [ref for item in pack.completed for ref in item.get("refs", [])]
+    assert valid_obs.observation_id in pack.evidence_refs
+    assert any(item["ref"] == "summary.md" for item in pack.artifact_refs)
