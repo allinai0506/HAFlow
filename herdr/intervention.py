@@ -196,7 +196,7 @@ def request_intervention(store: Any, task: Dict[str, Any], evaluation: Dict[str,
         verification_count = verification_count_for_task(
             store, run_id, str(task.get("task_id") or "")
         )
-    requested = store.create_intervention(build_request(
+    request = build_request(
         run_id=run_id,
         workflow_id=task.get("workflow_id"),
         task_id=str(task.get("task_id") or ""),
@@ -208,7 +208,11 @@ def request_intervention(store: Any, task: Dict[str, Any], evaluation: Dict[str,
         evidence_refs=metadata.get("evidence_refs") or decision.get("evidence_refs") or [],
         attempt=int(verification_count if action == ACTION_VERIFY else task_attempt),
         max_attempts=(max_verifications if action == ACTION_VERIFY else max_attempts),
-    ))
+    )
+    if action == ACTION_VERIFY and hasattr(store, "create_intervention_with_limit"):
+        requested = store.create_intervention_with_limit(request, max_verifications)
+    else:
+        requested = store.create_intervention(request)
     if (
         action == ACTION_RETRY
         and requested.get("status") == STATUS_REQUESTED

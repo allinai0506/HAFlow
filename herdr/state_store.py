@@ -285,6 +285,13 @@ class StateStore(ABC):
         pass
 
     @abstractmethod
+    def create_intervention_with_limit(
+        self, intervention: Dict[str, Any], verification_limit: int,
+    ) -> Dict[str, Any]:
+        """Atomically enforce the VERIFY budget while creating the row."""
+        pass
+
+    @abstractmethod
     def get_intervention(self, intervention_id: str) -> Optional[Dict[str, Any]]:
         pass
 
@@ -627,6 +634,15 @@ class SQLiteStateStore(StateStore):
 
     def create_intervention(self, intervention: Dict[str, Any]) -> Dict[str, Any]:
         return state_db.create_intervention(intervention, db_path=self.db_path)
+
+    def create_intervention_with_limit(
+        self, intervention: Dict[str, Any], verification_limit: int,
+    ) -> Dict[str, Any]:
+        return state_db.create_intervention(
+            intervention,
+            db_path=self.db_path,
+            verification_limit=verification_limit,
+        )
 
     def get_intervention(self, intervention_id: str) -> Optional[Dict[str, Any]]:
         return state_db.get_intervention(intervention_id, db_path=self.db_path)

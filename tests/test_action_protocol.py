@@ -390,6 +390,48 @@ def test_verify_budget_is_durable_and_rejects_third_request(tmp_path):
     assert rejected["error"]["verification_count"] == 2
 
 
+def test_verify_budget_is_atomic_across_two_sqlite_connections(tmp_path):
+    db_path = tmp_path / "state.db"
+    seed = SQLiteStateStore(db_path)
+    task = _task()
+    config = {"enabled": True, "enforce": True, "policy": {"max_verifications": 2}}
+    seed_item = request_intervention(
+        seed, task, {"evaluation_id": "eval-seed"},
+        {"decision_id": "decision-seed", "action": ACTION_VERIFY}, config,
+    )
+    assert seed_item["status"] == STATUS_REQUESTED
+
+    barrier = threading.Barrier(2)
+
+    class CoordinatedStore(SQLiteStateStore):
+        def list_interventions(self, *args, **kwargs):
+            rows = super().list_interventions(*args, **kwargs)
+            barrier.wait(timeout=5)
+            return rows
+
+    stores = [CoordinatedStore(db_path), CoordinatedStore(db_path)]
+    results = []
+
+    def request(store, index):
+        results.append(request_intervention(
+            store, task, {"evaluation_id": f"eval-{index}"},
+            {"decision_id": f"decision-{index}", "action": ACTION_VERIFY}, config,
+        ))
+
+    threads = [threading.Thread(target=request, args=(store, index))
+               for index, store in enumerate(stores)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert sorted(item["status"] for item in results) == ["failed", STATUS_REQUESTED]
+    assert sum(item["status"] == STATUS_REQUESTED for item in results) == 1
+    accepted = [item for item in SQLiteStateStore(db_path).list_interventions()
+                if item["status"] in {"requested", "running", "completed"}]
+    assert len(accepted) == 2
+
+
 def test_request_failure_does_not_leave_legacy_pending(tmp_path):
     from herdr.supervisor.config import load_config
     from herdr.supervisor.harness import pending_intervention

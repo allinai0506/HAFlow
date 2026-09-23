@@ -1093,9 +1093,16 @@ def _record_intervention_event(conn: sqlite3.Connection, item: Dict[str, Any], e
     )
 
 
-def create_intervention(intervention: Dict[str, Any], db_path: Optional[Path] = None) -> Dict[str, Any]:
-    """Create or return the canonical Intervention under one SQLite write lock."""
-    from .intervention import Intervention, STATUS_REQUESTED
+def create_intervention(
+    intervention: Dict[str, Any], db_path: Optional[Path] = None,
+    *, verification_limit: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Create or return the canonical Intervention under one SQLite write lock.
+
+    When ``verification_limit`` is supplied, the VERIFY budget check and the
+    identity insert happen under this same SQLite write transaction.
+    """
+    from .intervention import ACTION_VERIFY, Intervention, STATUS_REQUESTED
 
     item = Intervention.from_mapping(intervention).to_mapping()
     if item["status"] != STATUS_REQUESTED:
@@ -1105,6 +1112,23 @@ def create_intervention(intervention: Dict[str, Any], db_path: Optional[Path] = 
     conn = get_db_connection(db_path)
     try:
         conn.execute("BEGIN IMMEDIATE;")
+        existing = conn.execute(
+            "SELECT * FROM interventions WHERE identity_key = ?", (item["identity_key"],)
+        ).fetchone()
+        if existing is not None:
+            conn.execute("COMMIT;")
+            return _decode_intervention_row(existing)
+        budget_exhausted = False
+        if item["action"] == ACTION_VERIFY and verification_limit is not None:
+            statuses = ("requested", "running", "completed", "failed")
+            placeholders = ",".join("?" for _ in statuses)
+            count = conn.execute(
+                f"""SELECT COUNT(*) FROM interventions
+                    WHERE run_id = ? AND task_id = ? AND action = ?
+                      AND status IN ({placeholders})""",
+                (item["run_id"], item["task_id"], ACTION_VERIFY, *statuses),
+            ).fetchone()[0]
+            budget_exhausted = int(count) >= int(verification_limit)
         inserted = conn.execute(
             """
             INSERT INTO interventions (
@@ -1132,6 +1156,26 @@ def create_intervention(intervention: Dict[str, Any], db_path: Optional[Path] = 
         canonical = _decode_intervention_row(row)
         if inserted:
             _record_intervention_event(conn, canonical, "intervention_requested")
+        if budget_exhausted:
+            error = {
+                "code": "verification_budget_exhausted",
+                "verification_count": int(count),
+                "max_verifications": int(verification_limit),
+            }
+            finished_at = time.time()
+            conn.execute(
+                """UPDATE interventions SET status = ?, finished_at = ?, error_json = ?
+                   WHERE intervention_id = ? AND status = ?""",
+                (
+                    "failed", finished_at, json.dumps(error, ensure_ascii=False),
+                    canonical["intervention_id"], STATUS_REQUESTED,
+                ),
+            )
+            canonical = _decode_intervention_row(conn.execute(
+                "SELECT * FROM interventions WHERE intervention_id = ?",
+                (canonical["intervention_id"],),
+            ).fetchone())
+            _record_intervention_event(conn, canonical, "intervention_failed")
         conn.execute("COMMIT;")
         return canonical
     except Exception:
