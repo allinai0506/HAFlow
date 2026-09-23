@@ -54,13 +54,41 @@ def _history_run(db_path: Path):
                                           "evidence_id": "ev-hist"}})
 
 
-def test_historical_run_to_compare_chain(e2e_db: Path):
+def test_historical_run_to_compare_chain(e2e_db: Path, monkeypatch):
     from herdr import eval_engine, eval_store, replay_engine
+    from herdr.trajectory import TrajectoryLedger
+
+    launched = []
+
+    def run_external(argv, timeout=120, db_path=None):
+        launched.append(argv)
+        if argv[:2] == ["herdr-task", "launch"]:
+            options = dict(zip(argv[2::2], argv[3::2]))
+            task = {
+                "task_id": options["--task-id"],
+                "workflow_id": options["--workflow-id"],
+                "run_id": options["--run-id"],
+                "node": options["--node"], "stage": options["--node"],
+                "agent": options["--agent"], "status": "working",
+                "goal": options["--goal"], "prompt": options["--prompt"],
+                "replay_of": options["--replay-of"],
+            }
+            state_db.save_task(task, db_path=e2e_db)
+            ledger = TrajectoryLedger(e2e_db)
+            for event_type in ("run_started", "task_started"):
+                ledger.append_event({
+                    "run_id": task["run_id"], "task_id": task["task_id"],
+                    "workflow_id": task["workflow_id"], "event_type": event_type,
+                })
+        return {"argv": argv, "ok": True}
+
+    monkeypatch.setattr(replay_engine, "_run_probe_argv", run_external)
 
     _history_run(e2e_db)
 
     before = eval_engine.record_run_eval("run-hist", db_path=e2e_db)
-    assert before["verdict"] == "pass"
+    assert before["requirements_satisfied"] is True
+    assert before["verification_passed"] is True
 
     # Incomplete run stays null and never guesses.
     state_db.save_task(
@@ -76,7 +104,7 @@ def test_historical_run_to_compare_chain(e2e_db: Path):
          "workflow_id": "wf-e2e", "event_type": "task_started",
          "timestamp": 12.0})
     partial = eval_engine.evaluate_run("run-part", db_path=e2e_db)
-    assert partial["verdict"] is None
+    assert partial["requirements_satisfied"] is None
     assert "run_incomplete" in partial["warnings"]
 
     # Replay the historical run with a frozen snapshot.
@@ -84,23 +112,27 @@ def test_historical_run_to_compare_chain(e2e_db: Path):
         "run-hist", definition={"nodes": [{"id": "dev"}]},
         db_path=e2e_db,
     )
+    assert [argv[0] for argv in launched] == ["herdr-preflight", "herdr-task"]
     replay_run_id = out["spec"]["replay_run_id"]
     assert Path(str(out["snapshot"])).exists()
     assert eval_store.get_replay_lineage(
         replay_run_id, db_path=e2e_db) == ["run-hist", replay_run_id]
+    replay_task = state_db.get_task(out["task_id"], db_path=e2e_db)
+    assert replay_task["run_id"] == replay_run_id
+    assert replay_task["replay_of"] == "run-hist"
 
     # Replay eval must not see source-run steering (cross-run isolation).
     replay_eval = eval_engine.evaluate_run(replay_run_id, db_path=e2e_db)
-    assert replay_eval["steering"]["total"] == 0
+    assert replay_eval["human_intervention_count"] == 0
     assert replay_eval["task_id"] is not None
     assert replay_eval["task_id"] != "t-hist"
 
     # Record the replay eval and compare factually.
     stored_replay = eval_engine.record_run_eval(replay_run_id, db_path=e2e_db)
     diff = eval_engine.compare_evals(before, stored_replay)
-    assert diff["before"]["verdict"] == "pass"
-    assert diff["after"]["run_id"] == replay_run_id
-    assert "verdict_transition" in diff
+    assert diff["before"]["requirements_satisfied"] is True
+    assert diff["after"]["final_status"] == "working"
+    assert set(diff) == {"before", "after"}
 
     # Source history is unchanged by replay and eval writes.
     assert state_db.get_task("t-hist", db_path=e2e_db)["status"] == "completed"

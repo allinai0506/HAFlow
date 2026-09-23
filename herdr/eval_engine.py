@@ -1,8 +1,7 @@
 """Eval Engine: read-only run evaluation plus factual compare (herdr/eval_engine.py).
 
 Reads Task/Run authority, strict verification facts, and owned steering
-facts, then derives a conservative verdict. Unknown stays null; the
-engine never guesses. Only ``record_run_eval`` writes, delegating to
+facts. Unknown stays null; the engine never guesses. Only ``record_run_eval`` writes, delegating to
 ``eval_store`` idempotency on (run_id, revision).
 """
 
@@ -15,15 +14,6 @@ from typing import Any
 from . import eval_store, state_db
 from .trajectory import run_id_for_task
 from .transitions import COMPLETED_TASK_STATUSES
-
-
-def normalize_stage_verdict(value: Any) -> str | None:
-    """Map empty markers to None; pass through real verdict strings."""
-    if value is None:
-        return None
-    if isinstance(value, str) and not value.strip():
-        return None
-    return value  # type: ignore[return-value]
 
 
 def _resolve_db_path(db_path: Path | None, store: Any) -> Path | None:
@@ -84,108 +74,50 @@ def evaluate_run(
 
     task_status: str | None = None
     task_completed = False
-    task_failed = False
-    observed: str | None = None
     if task is not None:
         task_status = task.get("status")
         task_completed = task_status in COMPLETED_TASK_STATUSES
-        task_failed = task_status == "failed"
-        if task_failed:
-            pass
-        elif not task_completed:
+        if not task_completed and task_status != "failed":
             warnings.append("run_incomplete")
-        observed = normalize_stage_verdict(task.get("stage_verdict"))
 
     verification = eval_store.latest_run_verification_fact(run_id, db_path=db_path)
     if verification is None and "insufficient_verification" not in warnings:
         warnings.append("insufficient_verification")
 
-    steering: dict[str, Any] = {"total": 0, "human": 0, "task_id": None}
+    human_intervention_count: int | None = None
     if task is not None:
         try:
             items = state_db.list_steers(task_id=str(task["task_id"]), db_path=db_path)
         except sqlite3.Error:
-            items = []
-        human = sum(1 for item in items if (item.get("operator") or "human") == "human")
-        steering = {"total": len(items), "human": human, "task_id": task["task_id"]}
-
-    override: dict[str, Any] | None = None
-    if task is not None and workflow is not None:
-        node = task.get("node") or task.get("stage")
-        overrides = workflow.get("gate_overrides") or {}
-        if isinstance(overrides, dict) and node in overrides and isinstance(overrides[node], dict):
-            entry = overrides[node]
-            override = {
-                "node": node,
-                "verdict": entry.get("verdict"),
-                "operator": entry.get("operator"),
-                "timestamp": entry.get("timestamp"),
-            }
-
-    verdict: str | None = None
-    if task is not None and task_failed:
-        verdict = "fail"
-        passed = verification.get("passed") if verification is not None else None
-        if passed is True:
-            warnings.append("conflicting_facts")
-    elif task is not None and task_completed and verification is not None:
-        passed = verification.get("passed")
-        if passed is True and observed in (None, "pass"):
-            verdict = "pass"
-        elif passed is False or observed == "blocked":
-            verdict = "fail"
-            if passed is True and observed == "blocked":
-                warnings.append("conflicting_facts")
+            warnings.append("steering_unavailable")
         else:
-            warnings.append("unexpected_stage_verdict")
+            human_intervention_count = sum(
+                1 for item in items if (item.get("operator") or "human") == "human")
 
     evidence: list[dict[str, Any]] = []
     if task is not None:
-        evidence.append({"kind": "task_status", "ref": task["task_id"], "status": task_status})
+        evidence.append({"kind": "task_status", "ref": task["task_id"]})
     if verification is not None:
         evidence.append({"kind": "verification", "ref": verification.get("event_id")})
-    if observed is not None:
-        evidence.append({"kind": "stage_verdict", "ref": observed})
-    if steering["total"]:
-        evidence.append({"kind": "steering", "ref": f"{steering['task_id']}:{steering['total']}"})
-    if override is not None:
-        evidence.append({"kind": "gate_override", "ref": override["node"]})
-
-    if verdict == "pass":
-        requirements_satisfied: bool | None = True
-    elif verdict == "fail":
-        requirements_satisfied = False
-    else:
-        requirements_satisfied = None
     verification_passed: bool | None = None
     if verification is not None:
         passed_flag = verification.get("passed")
         verification_passed = passed_flag if isinstance(passed_flag, bool) else None
-    human_intervention_count = int(steering.get("human") or 0)
     final_status: str | None = task_status if task is not None else None
-    if final_status is None:
-        if facts.get("run_completed"):
-            final_status = "completed"
-        elif facts.get("run_failed"):
-            final_status = "failed"
+    requirements_satisfied: bool | None = None
+    if task_completed and verification_passed is not None:
+        requirements_satisfied = verification_passed
 
     return {
         "run_id": run_id,
         "task_id": task["task_id"] if task is not None else None,
         "workflow_id": workflow_id,
-        "verdict": verdict,
         "requirements_satisfied": requirements_satisfied,
         "verification_passed": verification_passed,
         "human_intervention_count": human_intervention_count,
         "final_status": final_status,
         "evidence": evidence,
         "warnings": warnings,
-        "task_status": task_status,
-        "task_completed": task_completed,
-        "verification": verification,
-        "steering": steering,
-        "observed_stage_verdict": observed,
-        "override": override,
     }
 
 
@@ -202,8 +134,6 @@ def record_run_eval(
     return eval_store.record_eval_result(
         result["run_id"],
         revision=revision,
-        verdict=result["verdict"],
-        scores=None,
         evidence=result["evidence"],
         eval_id=eval_id,
         db_path=_resolve_db_path(db_path, store),
@@ -212,106 +142,31 @@ def record_run_eval(
         human_intervention_count=result.get("human_intervention_count"),
         final_status=result.get("final_status"),
         warnings=result.get("warnings"),
-        task_status=result.get("task_status"),
         task_id=result.get("task_id"),
         workflow_id=result.get("workflow_id"),
     )
 
 
 def _brief(row: dict[str, Any] | None) -> dict[str, Any] | None:
-    if row is None:
-        return None
-    brief: dict[str, Any] = {
-        "run_id": row.get("run_id"),
-        "revision": row.get("revision"),
-        "verdict": row.get("verdict"),
+    row = row or {}
+    return {
+        "requirements_satisfied": row.get("requirements_satisfied"),
+        "verification_passed": row.get("verification_passed"),
+        "human_intervention_count": row.get("human_intervention_count"),
+        "final_status": row.get("final_status"),
     }
-    for key in (
-        "final_status",
-        "task_status",
-        "task_id",
-        "workflow_id",
-        "requirements_satisfied",
-        "verification_passed",
-        "human_intervention_count",
-    ):
-        if key in (row or {}):
-            brief[key] = row.get(key)
-    return brief
-
-
-def _transition(before_val: Any, after_val: Any) -> str:
-    def _fmt(value: Any) -> str:
-        if value is None:
-            return "null"
-        if isinstance(value, bool):
-            return "true" if value else "false"
-        return str(value)
-
-    return f"{_fmt(before_val)}->{_fmt(after_val)}"
 
 
 def compare_evals(
     before: dict[str, Any] | None,
     after: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """Diff two eval rows factually; either side may be null."""
-    before_verdict = (before or {}).get("verdict")
-    after_verdict = (after or {}).get("verdict")
-    before_scores = (before or {}).get("scores")
-    after_scores = (after or {}).get("scores")
-    before_final = (before or {}).get("final_status")
-    after_final = (after or {}).get("final_status")
-    before_task_status = (before or {}).get("task_status")
-    after_task_status = (after or {}).get("task_status")
-    before_task_id = (before or {}).get("task_id")
-    after_task_id = (after or {}).get("task_id")
-    before_workflow_id = (before or {}).get("workflow_id")
-    after_workflow_id = (after or {}).get("workflow_id")
-    before_req = (before or {}).get("requirements_satisfied")
-    after_req = (after or {}).get("requirements_satisfied")
-    before_vp = (before or {}).get("verification_passed")
-    after_vp = (after or {}).get("verification_passed")
-    before_hic = (before or {}).get("human_intervention_count")
-    after_hic = (after or {}).get("human_intervention_count")
-
-    def _refs(row: dict[str, Any] | None) -> set[str]:
-        items: set[str] = set()
-        for entry in (row or {}).get("evidence") or []:
-            if isinstance(entry, dict):
-                items.add(f"{entry.get('kind')}:{entry.get('ref')}")
-        return items
-
-    before_refs = _refs(before)
-    after_refs = _refs(after)
-    before_warnings = set((before or {}).get("warnings") or [])
-    after_warnings = set((after or {}).get("warnings") or [])
-
-    return {
-        "before": _brief(before),
-        "after": _brief(after),
-        "verdict_changed": before_verdict != after_verdict,
-        "verdict_transition": f"{before_verdict or 'null'}->{after_verdict or 'null'}",
-        "scores_changed": before_scores != after_scores,
-        "final_status_changed": before_final != after_final,
-        "final_status_transition": _transition(before_final, after_final),
-        "task_status_changed": before_task_status != after_task_status,
-        "task_status_transition": _transition(before_task_status, after_task_status),
-        "task_id_changed": before_task_id != after_task_id,
-        "workflow_id_changed": before_workflow_id != after_workflow_id,
-        "requirements_satisfied_changed": before_req != after_req,
-        "verification_passed_changed": before_vp != after_vp,
-        "human_intervention_count_changed": before_hic != after_hic,
-        "evidence_added": sorted(after_refs - before_refs),
-        "evidence_removed": sorted(before_refs - after_refs),
-        "warnings_added": sorted(after_warnings - before_warnings),
-        "warnings_removed": sorted(before_warnings - after_warnings),
-    }
+    """Return the four factual values on each side; null means unknown."""
+    return {"before": _brief(before), "after": _brief(after)}
 
 
 __all__ = [
     "compare_evals",
     "evaluate_run",
-    "normalize_stage_verdict",
     "record_run_eval",
 ]

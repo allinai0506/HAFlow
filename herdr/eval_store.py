@@ -51,15 +51,12 @@ def _decode_eval_row(row: sqlite3.Row) -> Dict[str, Any]:
         "eval_id": row["eval_id"],
         "run_id": row["run_id"],
         "revision": int(row["revision"]),
-        "verdict": row["verdict"],
-        "scores": _decode_json_nullable(row["scores_json"]),
         "evidence": _decode_json_nullable(row["evidence_json"]),
         "requirements_satisfied": _decode_bool(row["requirements_satisfied"]) if "requirements_satisfied" in names else None,
         "verification_passed": _decode_bool(row["verification_passed"]) if "verification_passed" in names else None,
         "human_intervention_count": row["human_intervention_count"] if "human_intervention_count" in names else None,
         "final_status": row["final_status"] if "final_status" in names else None,
         "warnings": list(warnings) if isinstance(warnings, list) else [],
-        "task_status": row["task_status"] if "task_status" in names else None,
         "task_id": row["task_id"] if "task_id" in names else None,
         "workflow_id": row["workflow_id"] if "workflow_id" in names else None,
         "created_at": float(row["created_at"]),
@@ -113,8 +110,6 @@ def record_eval_result(
     run_id: str,
     *,
     revision: Optional[int] = None,
-    verdict: Optional[str] = None,
-    scores: Optional[Any] = None,
     evidence: Optional[Any] = None,
     eval_id: Optional[str] = None,
     created_at: Optional[float] = None,
@@ -125,7 +120,6 @@ def record_eval_result(
     human_intervention_count: int | None = None,
     final_status: str | None = None,
     warnings: list | None = None,
-    task_status: str | None = None,
     task_id: str | None = None,
     workflow_id: str | None = None,
 ) -> Dict[str, Any]:
@@ -135,10 +129,16 @@ def record_eval_result(
         raise ValueError("run_id is required")
     if revision is not None and (not isinstance(revision, int) or revision < 1):
         raise ValueError("revision must be a positive int")
-    if verdict is not None and not isinstance(verdict, str):
-        raise ValueError("verdict must be a string or None")
+    for field, value in (
+        ("requirements_satisfied", requirements_satisfied),
+        ("verification_passed", verification_passed),
+    ):
+        if value is not None and not isinstance(value, bool):
+            raise ValueError(f"{field} must be a bool or None")
     if human_intervention_count is not None and (
-        not isinstance(human_intervention_count, int) or human_intervention_count < 0
+        not isinstance(human_intervention_count, int)
+        or isinstance(human_intervention_count, bool)
+        or human_intervention_count < 0
     ):
         raise ValueError("human_intervention_count must be a non-negative int or None")
 
@@ -147,8 +147,6 @@ def record_eval_result(
             conn,
             run_id,
             revision=revision,
-            verdict=verdict,
-            scores=scores,
             evidence=evidence,
             eval_id=eval_id,
             created_at=created_at,
@@ -157,7 +155,6 @@ def record_eval_result(
             human_intervention_count=human_intervention_count,
             final_status=final_status,
             warnings=warnings,
-            task_status=task_status,
             task_id=task_id,
             workflow_id=workflow_id,
         )
@@ -173,8 +170,6 @@ def record_eval_result(
                     owned,
                     run_id,
                     revision=revision,
-                    verdict=verdict,
-                    scores=scores,
                     evidence=evidence,
                     eval_id=eval_id,
                     created_at=created_at,
@@ -183,7 +178,6 @@ def record_eval_result(
                     human_intervention_count=human_intervention_count,
                     final_status=final_status,
                     warnings=warnings,
-                    task_status=task_status,
                     task_id=task_id,
                     workflow_id=workflow_id,
                 )
@@ -220,8 +214,6 @@ def _record_eval_in_conn(
     run_id: str,
     *,
     revision: Optional[int],
-    verdict: Optional[str],
-    scores: Optional[Any],
     evidence: Optional[Any],
     eval_id: Optional[str],
     created_at: Optional[float],
@@ -230,7 +222,6 @@ def _record_eval_in_conn(
     human_intervention_count: int | None = None,
     final_status: str | None = None,
     warnings: list | None = None,
-    task_status: str | None = None,
     task_id: str | None = None,
     workflow_id: str | None = None,
 ) -> Dict[str, Any]:
@@ -254,21 +245,18 @@ def _record_eval_in_conn(
         "(eval_id, run_id, revision, verdict, scores_json, "
         "evidence_json, requirements_satisfied, verification_passed, "
         "human_intervention_count, final_status, warnings_json, "
-        "task_status, task_id, workflow_id, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "task_id, workflow_id, created_at) "
+        "VALUES (?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             eval_id or _new_id("eval"),
             run_id,
             int(target),
-            verdict,
-            _encode_json(scores),
             _encode_json(evidence),
             _encode_bool(requirements_satisfied),
             _encode_bool(verification_passed),
             human_intervention_count,
             final_status,
             _encode_json(list(warnings) if warnings is not None else []),
-            task_status,
             task_id,
             workflow_id,
             now,

@@ -6,10 +6,10 @@
 
 | 维度 | Metrics (`herdr/metrics.py`) | Eval (`herdr/eval_engine.py` + `herdr/eval_store.py`) |
 | --- | --- | --- |
-| 问题 | Run 聚合了多少事实（计数与状态） | Run 是否满足完成条件（通过 / 失败 / 事实不足） |
+| 问题 | Run 聚合了多少事实（计数与状态） | Run 有哪些可验证的要求、验证、人工介入和终态事实 |
 | 写状态 | 否（纯聚合） | `evaluate_run` 否；仅 `record_run_eval` 写一条事实 |
-| 输入 | Trajectory 事件 + Task 归属 + 计数 | Task 权威状态 + 严格 verification 事实 + 自有 steering + gate override |
-| 输出 | `HarnessRunMetrics`（计数、耗时、`final_status`、`task_completed`） | Eval 结果（`verdict`、`requirements_satisfied`、`verification_passed`、`human_intervention_count`、`final_status`、`warnings`、`task_status`、`task_id`、`workflow_id`、`evidence`） |
+| 输入 | Trajectory 事件 + Task 归属 + 计数 | Task 权威状态 + 严格 verification 事实 + 自有 steering |
+| 输出 | `HarnessRunMetrics`（计数、耗时、`final_status`、`task_completed`） | Eval 结果（四项事实、`warnings`、`task_id`、`workflow_id`、`evidence`） |
 | 空值 | 缺失即零值或 `None`（聚合语义） | 缺失即 `null`（判断语义，见第 2 节） |
 
 铁律：Eval 绝不导入 `observer` / `decision` / `metrics` / `intervention`；
@@ -17,12 +17,11 @@ Eval 表与 Metrics 聚合无外键、无同步投影，删除 Workflow 不删�
 
 ## 2. Null 语义
 
-- `verdict: "pass" | "fail" | null`。`null` 只表示事实不足（任务未完成、verification 缺失或不严格、归属不明），绝不表示失败。
-- `failed` 是权威终态，必须稳定返回 `verdict: "fail"`（即使 verification 缺失也不折叠为 `null`），`final_status: "failed"`，`requirements_satisfied: false`。`failed` 与 `unknown` 可区分：`unknown`（无归属 Task）返回 `verdict: null` + `final_status: null` + `task_ownership_mismatch` / `unknown_task`。
-- `requirements_satisfied`：`verdict == "pass"` 时 `true`，`"fail"` 时 `false`，`null` 时 `null`。它是判断的投影，不是独立打分。
+- Eval 不生成 verdict。`requirements_satisfied` 仅当 Task 已完成且存在严格 verification 布尔事实时返回该布尔值；其他情况为 `null`。
 - `verification_passed: true | false | null`：仅接受严格 verification 事实（`verification.passed` 为真实布尔值）；缺失、非布尔、腐坏载荷一律 `null`，并记 `insufficient_verification`。
-- `human_intervention_count: int`：仅统计归属 Task 的 `operator == "human"` steering 条数；跨 Run 不借用。
-- 禁止 `scores` 打分：`evaluate_run` 不返回任何分数字段；`eval_store` 保留 `scores_json` 列仅为历史兼容，引擎写入恒为 `None`。
+- `human_intervention_count` 仅统计归属 Task 的人类 steering；无归属 Task 时为 `null`，跨 Run 不借用。
+- `final_status` 直接取归属 Task 的权威当前状态；没有归属 Task 时为 `null`。不从 stage verdict 或轨迹聚合状态推导。
+- 禁止 `scores` 打分：Eval 行不暴露 verdict/scores/task_status 等重复投影。SQLite 旧列只为既有数据库兼容保留，新写入为空。
 
 ## 3. Lineage（谱系）
 
@@ -33,21 +32,21 @@ Eval 表与 Metrics 聚合无外键、无同步投影，删除 Workflow 不删�
 ## 4. 冻结（Freeze）
 
 - 每个回放定义在落盘前必须冻结为 Run 私有不可变文件（`projects.freeze_run_definition`），只写文件、不碰 Run/Task 行。
-- 默认行为（`definition is None`）：从源 Run 推导定义——优先读取源 Workflow 的 `workflow_file` 内容，缺失或不可读时按源 Task 的 `node` 合成最小定义（`{"nodes": [{"id": node}], "replay_of": source_run_id, ...}`），然后冻结。默认路径的 `snapshot` 不为 `null`，不再记 `definition_not_fully_frozen`，不再回退到共享当前文件。
-- 冻结失败（返回 `None`）记 `definition_freeze_failed`；`dry_run` 只规划不写，`snapshot` 为 `None` 但返回推导后的 `definition`。
+- 默认行为（`definition is None`）：只读取源 Run 自己的 ReplaySpec 快照，或源 Workflow 指向其 run-private `workflow.json` 的路径；缺失、不可读或损坏时拒绝 Replay。显式 `definition`（CLI 的 `--definition` / `--definition-file`）可提供定义覆盖。
+- 每个目标 Replay 定义都必须成功冻结；冻结失败即拒绝创建 workflow、ReplaySpec 或 Task。`dry_run` 只规划不写，目标 `snapshot` 为 `None`；没有 source snapshot 时仍须提供显式定义。
 - `ReplaySpec` 落盘冻结引用：`snapshot` / `snapshot_path` / `frozen_config_ref`（同一路径的三别名）指向冻结文件；`workflow_file` 优先取 `snapshot`。
 
 ## 5. Override（Policy）
 
 - `replay_run(..., policy=None)` 接受映射或 JSON 对象字符串；落盘到 `replay_specs.policy_json`，读回为 `policy` / `policy_override`（同值双别名）。
 - Policy 同时写入新 Task 载荷的 `agent_policy` 字段，作为回放节点的策略覆盖；`launch_argv` 按覆盖后的 `agent` / `goal` / `prompt` 构建。
-- CLI：`herdr-task replay --policy '<JSON对象>'` 或 `--policy-file <路径>`；`--agent/--goal/--prompt/--source` 覆盖源 Run 对应字段；`--launch` / `--run-preflight` 触发真实启动链（默认仅构建参数不执行）。
+- CLI：`herdr-task replay --policy '<JSON对象>'` 或 `--policy-file <路径>`；`--agent/--goal/--prompt/--source` 覆盖源 Run 对应字段。默认执行真实 preflight 与 `herdr-task launch`；launch 接收 Replay 指定的 Run ID 与 `replay_of` 并由现有运行管线写 Task 和执行事件。`--dry-run` 不执行启动或写入。
 
 ## 6. Compare（对比）
 
 - `compare_evals(before, after)` 是纯函数事实对比，任一侧可为 `null`。
-- 对比维度：`verdict`（+ `verdict_transition`）、`final_status`、`task_status`、`task_id`、`workflow_id`、`requirements_satisfied`、`verification_passed`、`human_intervention_count`、沿用 `scores`（历史兼容）、`evidence` 增减（`kind:ref` 集合差）、`warnings` 增减。
-- CLI `herdr-task eval-compare --before-run/--before-revision --after-run/--after-revision` 只从持久化行读取（`get_eval_result` / `get_latest_eval_result`）再忠实对比；持久化行包含 `warnings` / `task_status` / `task_id` / `workflow_id` 及第 2 节新字段，对比不丢事实。
+- Compare 仅输出 `before` / `after` 两组四字段：`requirements_satisfied`、`verification_passed`、`human_intervention_count`、`final_status`。缺失侧保持四个 `null`；不输出 winner、score、rank 或 verdict。
+- CLI `herdr-task eval-compare --before-run/--before-revision --after-run/--after-revision` 只从持久化行读取再忠实输出四字段。
 
 ## 7. 隔离
 
@@ -67,4 +66,4 @@ Eval 表与 Metrics 聚合无外键、无同步投影，删除 Workflow 不删�
 - 只读评估：`herdr-task eval --run-id <run> [--json]` → `eval_engine.evaluate_run`。
 - 落盘评估：`herdr-task eval --run-id <run> --record [--revision N]` → `record_run_eval` → `eval_store.record_eval_result`。
 - 事实对比：`herdr-task eval-compare --before-run A --after-run B` → `compare_evals`。
-- 回放：`herdr-task replay --source-run <run> [--definition/--definition-file] [--policy/--policy-file] [--dry-run]` → `replay_engine.replay_run` → `freeze_run_definition` + `register_workflow` + `save_task` + `record_replay_spec`。
+- 回放：`herdr-task replay --source-run <run> [--definition/--definition-file] [--policy/--policy-file] [--dry-run]` → `replay_engine.replay_run` → preflight → `freeze_run_definition` + `register_workflow` + `record_replay_spec` → `herdr-task launch` 创建 Run/Task 并启动执行。

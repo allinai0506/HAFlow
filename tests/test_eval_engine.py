@@ -6,6 +6,7 @@ Initially fails: herdr.eval_engine does not exist.
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -74,11 +75,9 @@ def test_evaluate_pass_collects_authoritative_facts(engine_db: Path):
     result = eval_engine.evaluate_run(run_id, db_path=engine_db)
     assert result["run_id"] == run_id
     assert result["task_id"] == task_id
-    assert result["verdict"] == "pass"
-    assert result["task_completed"] is True
-    assert result["verification"] is not None
-    assert result["verification"]["passed"] is True
-    assert result["observed_stage_verdict"] == "pass"
+    assert result["requirements_satisfied"] is True
+    assert result["final_status"] == "completed"
+    assert result["verification_passed"] is True
     assert isinstance(result["evidence"], list) and result["evidence"]
 
 
@@ -88,9 +87,9 @@ def test_evaluate_null_when_verification_missing(engine_db: Path):
     _save_task(engine_db, "t-no-ver", "run-no-ver", status="completed")
     _append(engine_db, "run-no-ver", "task_started", task_id="t-no-ver")
     result = eval_engine.evaluate_run("run-no-ver", db_path=engine_db)
-    assert result["verdict"] is None
+    assert result["requirements_satisfied"] is None
     assert "insufficient_verification" in result["warnings"]
-    assert result["verification"] is None
+    assert result["verification_passed"] is None
 
 
 def test_evaluate_null_when_run_incomplete(engine_db: Path):
@@ -106,9 +105,9 @@ def test_evaluate_null_when_run_incomplete(engine_db: Path):
         verification={"passed": True},
     )
     result = eval_engine.evaluate_run("run-working", db_path=engine_db)
-    assert result["verdict"] is None
+    assert result["requirements_satisfied"] is None
     assert "run_incomplete" in result["warnings"]
-    assert result["task_completed"] is False
+    assert result["verification_passed"] is True
 
 
 def test_ownership_mismatch_never_leaks_foreign_task(engine_db: Path):
@@ -128,7 +127,8 @@ def test_ownership_mismatch_never_leaks_foreign_task(engine_db: Path):
     result = eval_engine.evaluate_run("run-B", db_path=engine_db)
     assert result["task_id"] is None
     assert result["workflow_id"] is None
-    assert result["verdict"] is None
+    assert result["requirements_satisfied"] is None
+    assert result["human_intervention_count"] is None
     assert "task_ownership_mismatch" in result["warnings"]
 
 
@@ -148,12 +148,10 @@ def test_human_attribution_counts_only_owned_task(engine_db: Path):
         db_path=engine_db,
     )
     first = eval_engine.evaluate_run("run-R1", db_path=engine_db)
-    assert first["steering"]["total"] == 1
-    assert first["steering"]["human"] == 1
-    assert first["steering"]["task_id"] == "t-R1"
+    assert first["human_intervention_count"] == 1
 
 
-def test_gate_override_is_authoritative_over_note(engine_db: Path):
+def test_eval_ignores_verdict_annotations_and_uses_verification_fact(engine_db: Path):
     from herdr import eval_engine
 
     state_db.save_workflow(
@@ -172,9 +170,8 @@ def test_gate_override_is_authoritative_over_note(engine_db: Path):
         verification={"passed": True},
     )
     result = eval_engine.evaluate_run("run-ovr", db_path=engine_db)
-    assert result["override"] is not None
-    assert result["override"]["verdict"] == "pass"
-    assert result["override"]["operator"] == "human"
+    assert result["requirements_satisfied"] is True
+    assert "verdict" not in result and "override" not in result
 
 
 def test_stage_verdict_empty_normalizes_to_null(engine_db: Path):
@@ -188,7 +185,7 @@ def test_stage_verdict_empty_normalizes_to_null(engine_db: Path):
         verification={"passed": True},
     )
     result = eval_engine.evaluate_run("run-empty", db_path=engine_db)
-    assert result["observed_stage_verdict"] is None
+    assert result["requirements_satisfied"] is True
 
 
 def test_loose_verification_never_coerced(engine_db: Path):
@@ -201,8 +198,8 @@ def test_loose_verification_never_coerced(engine_db: Path):
         verification={"evidence_id": "ev-x"},
     )
     result = eval_engine.evaluate_run("run-loose", db_path=engine_db)
-    assert result["verification"] is None
-    assert result["verdict"] is None
+    assert result["verification_passed"] is None
+    assert result["requirements_satisfied"] is None
     assert "insufficient_verification" in result["warnings"]
 
 
@@ -212,10 +209,94 @@ def test_record_run_eval_persists_via_eval_store(engine_db: Path):
     _completed_pass_run(engine_db, run_id="run-rec", task_id="t-rec")
     stored = eval_engine.record_run_eval("run-rec", db_path=engine_db)
     assert stored["run_id"] == "run-rec"
-    assert stored["verdict"] == "pass"
+    assert stored["requirements_satisfied"] is True
     fetched = eval_store.get_latest_eval_result("run-rec", db_path=engine_db)
     assert fetched is not None
     assert fetched["eval_id"] == stored["eval_id"]
+
+
+def test_eval_result_contains_only_authoritative_fact_fields(engine_db: Path):
+    from herdr import eval_engine
+
+    run_id, _ = _completed_pass_run(engine_db, run_id="run-facts", task_id="t-facts")
+    result = eval_engine.evaluate_run(run_id, db_path=engine_db)
+    assert result["requirements_satisfied"] is True
+    assert result["verification_passed"] is True
+    assert result["human_intervention_count"] == 0
+    assert result["final_status"] == "completed"
+    assert not {"verdict", "scores", "task_status", "steering",
+                "observed_stage_verdict", "task_completed"} & result.keys()
+
+
+def test_eval_incomplete_run_keeps_partial_facts_without_guessing(engine_db: Path):
+    from herdr import eval_engine
+
+    _save_task(engine_db, "t-partial", "run-partial", status="working")
+    _append(engine_db, "run-partial", "task_started", task_id="t-partial")
+    _append(engine_db, "run-partial", "verification_completed",
+            task_id="t-partial", verification={"passed": True})
+    result = eval_engine.evaluate_run("run-partial", db_path=engine_db)
+    assert result["verification_passed"] is True
+    assert result["requirements_satisfied"] is None
+    assert result["final_status"] == "working"
+    assert "run_incomplete" in result["warnings"]
+
+
+def test_eval_corrupt_verification_degrades_to_unknown(engine_db: Path):
+    from herdr import eval_engine
+
+    _save_task(engine_db, "t-corrupt-eval", "run-corrupt-eval", status="completed")
+    _append(engine_db, "run-corrupt-eval", "task_started", task_id="t-corrupt-eval")
+    _append(engine_db, "run-corrupt-eval", "verification_completed",
+            task_id="t-corrupt-eval", verification={"passed": True})
+    conn = state_db.get_db_connection(engine_db)
+    try:
+        conn.execute(
+            "UPDATE events SET payload_json = 'not-json{' WHERE run_id = ?",
+            ("run-corrupt-eval",),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = eval_engine.evaluate_run("run-corrupt-eval", db_path=engine_db)
+    assert result["verification_passed"] is None
+    assert result["requirements_satisfied"] is None
+    assert "insufficient_verification" in result["warnings"]
+
+
+def test_eval_steering_read_failure_keeps_intervention_count_unknown(
+    engine_db: Path, monkeypatch,
+):
+    from herdr import eval_engine
+
+    _completed_pass_run(engine_db, run_id="run-steering-unavailable",
+                        task_id="t-steering-unavailable")
+
+    def unavailable(*, task_id, db_path=None):
+        raise sqlite3.OperationalError("temporary read failure")
+
+    monkeypatch.setattr(state_db, "list_steers", unavailable)
+    result = eval_engine.evaluate_run("run-steering-unavailable", db_path=engine_db)
+    assert result["human_intervention_count"] is None
+    assert "steering_unavailable" in result["warnings"]
+
+
+def test_eval_record_round_trip_preserves_facts_and_warnings(engine_db: Path):
+    from herdr import eval_engine, eval_store
+
+    _completed_pass_run(engine_db, run_id="run-roundtrip", task_id="t-roundtrip")
+    state_db.save_steer(
+        {"steer_id": "s-roundtrip", "task_id": "t-roundtrip",
+         "instruction": "review", "operator": "human"}, db_path=engine_db)
+    stored = eval_engine.record_run_eval("run-roundtrip", db_path=engine_db)
+    fetched = eval_store.get_latest_eval_result("run-roundtrip", db_path=engine_db)
+    assert fetched is not None
+    for field in ("requirements_satisfied", "verification_passed",
+                  "human_intervention_count", "final_status", "warnings"):
+        assert fetched[field] == stored[field]
+    assert fetched["human_intervention_count"] == 1
+    assert "scores" not in fetched and "verdict" not in fetched
 
 
 def test_eval_engine_rejects_observer_decision_metrics_imports():

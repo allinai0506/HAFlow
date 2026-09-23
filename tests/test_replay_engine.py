@@ -22,6 +22,40 @@ def replay_engine_db(tmp_path: Path, monkeypatch):
     return db_path
 
 
+@pytest.fixture(autouse=True)
+def mock_external_replay_commands(replay_engine_db: Path, monkeypatch):
+    from herdr import replay_engine
+    from herdr.trajectory import TrajectoryLedger
+
+    def run_command(argv, timeout=120, db_path=None):
+        if argv[:2] != ["herdr-task", "launch"]:
+            return {"argv": argv, "ok": True}
+        options = dict(zip(argv[2::2], argv[3::2]))
+        task = {
+            "task_id": options["--task-id"],
+            "workflow_id": options["--workflow-id"],
+            "run_id": options["--run-id"],
+            "node": options["--node"],
+            "stage": options["--node"],
+            "agent": options["--agent"],
+            "status": "working",
+            "goal": options["--goal"],
+            "prompt": options["--prompt"],
+            "replay_of": options["--replay-of"],
+        }
+        state_db.save_task(task, db_path=replay_engine_db)
+        ledger = TrajectoryLedger(replay_engine_db)
+        for event_type in ("run_started", "task_started"):
+            ledger.append_event({
+                "run_id": task["run_id"], "task_id": task["task_id"],
+                "workflow_id": task["workflow_id"], "event_type": event_type,
+            })
+        return {"argv": argv, "ok": True}
+
+    monkeypatch.setattr(replay_engine, "_run_probe_argv", run_command)
+    return run_command
+
+
 def _source_run(db_path: Path, run_id="run-src-1", task_id="t-src-1",
                 status="completed", workflow_id="wf-replay-src"):
     state_db.save_workflow(
@@ -66,6 +100,120 @@ def test_replay_creates_spec_freeze_and_lineage(replay_engine_db: Path):
     workflow = state_db.get_workflow(out["workflow_id"], db_path=replay_engine_db)
     assert workflow is not None
     assert workflow.get("replay_of") == src
+    assert out["spec"]["snapshot"] == out["snapshot"]
+    assert out["spec"]["lineage"]["snapshot"] == out["snapshot"]
+    assert out["spec"]["policy"] is None
+
+
+def test_replay_uses_only_source_run_private_snapshot_by_default(
+    replay_engine_db: Path, monkeypatch, tmp_path: Path,
+):
+    from herdr import projects, replay_engine
+
+    monkeypatch.setenv("HERDR_WORKFLOW_DOCS_DIR", str(tmp_path / "workflows"))
+    src, _, workflow_id = _source_run(replay_engine_db)
+    source_snapshot = projects.freeze_run_definition(
+        workflow_id, definition={"nodes": [{"id": "frozen-source"}]})
+    workflow = state_db.get_workflow(workflow_id, db_path=replay_engine_db)
+    workflow["workflow_file"] = source_snapshot
+    state_db.save_workflow(workflow, db_path=replay_engine_db)
+
+    out = replay_engine.replay_run(src, policy={"mode": "strict"},
+                                   db_path=replay_engine_db)
+
+    assert out["definition"]["nodes"][0]["id"] == "frozen-source"
+    assert out["spec"]["policy"] == {"mode": "strict"}
+    assert out["spec"]["lineage"]["policy"] == {"mode": "strict"}
+    assert out["spec"]["snapshot"] == out["snapshot"]
+
+
+def test_replay_runs_preflight_then_real_launch_without_synthetic_events(
+    replay_engine_db: Path, monkeypatch, mock_external_replay_commands,
+):
+    from herdr import eval_store, replay_engine
+
+    src, _, _ = _source_run(replay_engine_db)
+    calls = []
+
+    def run_existing_chain(argv, timeout=120, db_path=None):
+        calls.append(argv)
+        return mock_external_replay_commands(argv, timeout, db_path)
+
+    monkeypatch.setattr(replay_engine, "_run_probe_argv", run_existing_chain)
+    out = replay_engine.replay_run(
+        src, definition={"nodes": [{"id": "dev"}]}, db_path=replay_engine_db,
+    )
+
+    assert calls == [out["preflight_argv"], out["launch_argv"]]
+    assert out["launch_argv"][:2] == ["herdr-task", "launch"]
+    target_events = state_db.list_trajectory_events(
+        out["replay_run_id"], db_path=replay_engine_db)
+    assert [event["event_type"] for event in target_events] == [
+        "run_started", "task_started"]
+    task = state_db.get_task(out["task_id"], db_path=replay_engine_db)
+    assert task["run_id"] == out["replay_run_id"]
+    assert task["replay_of"] == src
+    assert eval_store.get_replay_lineage(
+        out["replay_run_id"], db_path=replay_engine_db) == [src, out["replay_run_id"]]
+
+
+def test_replay_rejects_missing_source_frozen_definition(replay_engine_db: Path):
+    from herdr import eval_store, replay_engine
+
+    src, _, _ = _source_run(replay_engine_db)
+    with pytest.raises(ValueError, match="frozen definition"):
+        replay_engine.replay_run(src, db_path=replay_engine_db)
+    assert eval_store.list_replay_specs(db_path=replay_engine_db) == []
+
+
+def test_failed_launch_is_reported_without_fabricating_run_events(
+    replay_engine_db: Path, monkeypatch,
+):
+    from herdr import eval_store, replay_engine
+
+    src, _, _ = _source_run(replay_engine_db)
+
+    def fail_launch(argv, timeout=120, db_path=None):
+        return {"argv": argv, "ok": argv[0] == "herdr-preflight"}
+
+    monkeypatch.setattr(replay_engine, "_run_probe_argv", fail_launch)
+    with pytest.raises(RuntimeError, match="launch chain failed"):
+        replay_engine.replay_run(
+            src, definition={"nodes": [{"id": "dev"}]}, db_path=replay_engine_db)
+
+    specs = eval_store.list_replay_specs(db_path=replay_engine_db)
+    assert len(specs) == 1
+    assert state_db.list_tasks(
+        workflow_id=specs[0]["workflow_id"], db_path=replay_engine_db) == []
+    assert state_db.list_trajectory_events(
+        specs[0]["replay_run_id"], db_path=replay_engine_db) == []
+
+
+def test_definition_override_allows_replay_without_source_snapshot(
+    replay_engine_db: Path,
+):
+    from herdr import replay_engine
+
+    src, _, _ = _source_run(replay_engine_db)
+    out = replay_engine.replay_run(
+        src, definition={"nodes": [{"id": "override"}]}, db_path=replay_engine_db,
+    )
+    assert Path(out["snapshot"]).exists()
+    assert out["spec"]["definition"] == {"nodes": [{"id": "override"}]}
+
+
+def test_target_snapshot_freeze_failure_rejects_persisted_replay(
+    replay_engine_db: Path, monkeypatch,
+):
+    from herdr import eval_store, projects, replay_engine
+
+    src, _, _ = _source_run(replay_engine_db)
+    monkeypatch.setattr(projects, "freeze_run_definition", lambda *args, **kwargs: None)
+    with pytest.raises(ValueError, match="could not be frozen"):
+        replay_engine.replay_run(
+            src, definition={"nodes": [{"id": "dev"}]}, db_path=replay_engine_db)
+    assert eval_store.list_replay_specs(db_path=replay_engine_db) == []
+    assert len(state_db.list_workflows(db_path=replay_engine_db)) == 1
 
 
 def test_replay_does_not_mutate_source(replay_engine_db: Path):

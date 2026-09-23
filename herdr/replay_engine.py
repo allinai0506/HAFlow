@@ -10,6 +10,7 @@ only read, never written. ``dry_run`` plans without any write.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import subprocess
 import time
@@ -61,7 +62,19 @@ def _default_definition_from_source(
             str(source_task.get("workflow_id") or ""), db_path=db_path)
     except sqlite3.Error:
         source_workflow = None
-    candidate = (source_workflow or {}).get("workflow_file")
+    source_workflow_id = str(source_task.get("workflow_id") or "")
+    replay_spec = eval_store.get_replay_spec(source_run_id, db_path=db_path)
+    candidate = (replay_spec or {}).get("snapshot")
+    if not candidate and source_workflow_id:
+        candidate = (source_workflow or {}).get("workflow_file")
+        try:
+            from .workflow_docs import docs_root, validate_workflow_id
+
+            expected = docs_root() / validate_workflow_id(source_workflow_id) / "workflow.json"
+            if not candidate or Path(str(candidate)).expanduser().resolve() != expected.resolve():
+                candidate = None
+        except (OSError, ValueError):
+            candidate = None
     if candidate:
         try:
             raw = Path(str(candidate)).expanduser().read_text(encoding="utf-8")
@@ -72,18 +85,21 @@ def _default_definition_from_source(
             frozen = dict(data)
             frozen.setdefault("replay_of", source_run_id)
             return frozen
-    node = source_task.get("node") or source_task.get("stage") or "dev"
-    return {
-        "nodes": [{"id": str(node)}],
-        "replay_of": source_run_id,
-        "source_task_id": source_task.get("task_id"),
-        "source_workflow_id": source_task.get("workflow_id"),
-    }
+    raise ValueError(f"source run has no frozen definition snapshot: {source_run_id}")
 
 
-def _run_probe_argv(argv: list[str], timeout: int = 120) -> dict[str, Any]:
+def _run_probe_argv(
+    argv: list[str], timeout: int = 120, db_path: Path | None = None,
+) -> dict[str, Any]:
+    env = None
+    if db_path is not None:
+        env = os.environ.copy()
+        env["HERDR_STATE_DB"] = str(db_path)
     try:
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, check=False)
+        proc = subprocess.run(
+            argv, capture_output=True, text=True, timeout=timeout,
+            check=False, env=env,
+        )
     except (OSError, subprocess.SubprocessError) as exc:
         return {"argv": list(argv), "ok": False, "error": str(exc)}
     return {
@@ -103,6 +119,10 @@ def build_launch_argv(
     agent: str = "auto",
     goal: str = "",
     prompt: str = "",
+    node: str = "dev",
+    run_id: str = "",
+    replay_of: str = "",
+    policy: dict[str, Any] | None = None,
 ) -> list[str]:
     """Build the existing launch-chain argv without side effects."""
     return [
@@ -113,6 +133,10 @@ def build_launch_argv(
         "--agent", str(agent),
         "--goal", str(goal),
         "--prompt", str(prompt),
+        "--node", str(node),
+        "--run-id", str(run_id),
+        "--replay-of", str(replay_of),
+        "--agent-policy", json.dumps(policy, ensure_ascii=False),
     ]
 
 
@@ -133,8 +157,8 @@ def replay_run(
     goal: str | None = None,
     prompt: str | None = None,
     source: str = "replay",
-    launch: bool = False,
-    run_preflight: bool = False,
+    launch: bool = True,
+    run_preflight: bool = True,
     dry_run: bool = False,
     db_path: Path | None = None,
     store: Any | None = None,
@@ -177,6 +201,16 @@ def replay_run(
         raise ValueError(f"workflow already exists: {target_workflow}")
     if state_db.get_task(target_task, db_path=db_path) is not None:
         raise ValueError(f"task already exists: {target_task}")
+    if any(str(task.get("run_id") or "") == target_run
+           for task in state_db.list_tasks(db_path=db_path)):
+        raise ValueError(f"replay run id already exists: {target_run}")
+    if eval_store.get_replay_spec(target_run, db_path=db_path) is not None:
+        raise ValueError(f"replay run id already has a ReplaySpec: {target_run}")
+    from .workflow_docs import docs_root, validate_workflow_id
+
+    target_snapshot = docs_root() / validate_workflow_id(target_workflow) / "workflow.json"
+    if target_snapshot.exists():
+        raise ValueError(f"replay definition snapshot already exists: {target_snapshot}")
 
     warnings: list[str] = []
     effective_policy = _resolve_policy(policy)
@@ -185,11 +219,15 @@ def replay_run(
             source_task, source_run_id, db_path)
     else:
         resolved_definition = definition
-    effective_source = str(source or "replay").strip() or "replay"
     effective_agent = str(agent or source_task.get("agent") or "auto")
     effective_goal = str(goal or source_task.get("goal") or f"replay of {source_run_id}")
     effective_prompt = str(
         prompt or source_task.get("prompt") or effective_goal)
+    source_workflow = state_db.get_workflow(
+        str(source_task.get("workflow_id") or ""), db_path=db_path)
+    requested_source = str(source or "").strip()
+    effective_source = requested_source if requested_source and requested_source != "replay" else str(
+        (source_workflow or {}).get("project_root") or ".")
     launch_argv = build_launch_argv(
         task_id=target_task,
         workflow_id=target_workflow,
@@ -197,6 +235,10 @@ def replay_run(
         agent=effective_agent,
         goal=effective_goal,
         prompt=effective_prompt,
+        node=str(source_task.get("node") or source_task.get("stage") or "dev"),
+        run_id=target_run,
+        replay_of=source_run_id,
+        policy=effective_policy,
     )
     preflight_argv = build_preflight_argv(source=effective_source)
 
@@ -222,27 +264,29 @@ def replay_run(
             "warnings": warnings,
         }
 
+    preflight_result = None
+    if run_preflight:
+        preflight_result = _run_probe_argv(preflight_argv, db_path=db_path)
+        if not preflight_result.get("ok"):
+            raise ValueError("replay preflight failed; run was not created")
+
     snapshot: str | None = None
     try:
         snapshot = projects.freeze_run_definition(
             target_workflow, definition=resolved_definition)
-    except ValueError:
-        raise
     except (OSError, sqlite3.Error):
         snapshot = None
     if snapshot is None:
-        warnings.append("definition_freeze_failed")
+        raise ValueError("replay definition could not be frozen")
 
-    source_workflow = state_db.get_workflow(
-        str(source_task.get("workflow_id") or ""), db_path=db_path)
     project = {
         "project_id": f"proj-{target_workflow}",
         "project_name": target_workflow,
-        "project_root": ".",
+        "project_root": effective_source,
         "base_branch": "main",
         "workspace_id": (source_workflow or {}).get("workspace_id") or f"ws-{target_workflow}",
         "coordinator_pane_id": (source_workflow or {}).get("coordinator_pane_id") or "pane-replay",
-        "workflow_file": snapshot or (source_workflow or {}).get("workflow_file") or "workflow.json",
+        "workflow_file": snapshot,
     }
     projects.register_workflow(
         target_workflow,
@@ -258,31 +302,6 @@ def replay_run(
         },
     )
 
-    state_db.save_task(
-        {
-            "task_id": target_task,
-            "workflow_id": target_workflow,
-            "run_id": target_run,
-            "node": source_task.get("node") or source_task.get("stage") or "dev",
-            "stage": source_task.get("stage") or source_task.get("node") or "dev",
-            "agent": effective_agent,
-            "status": "pending",
-            "goal": effective_goal,
-            "prompt": effective_prompt,
-            "agent_policy": effective_policy,
-            "replay_of": source_run_id,
-        },
-        db_path=db_path,
-    )
-    from .trajectory import TrajectoryLedger
-
-    ledger = TrajectoryLedger(db_path)
-    ledger.append_event({"run_id": target_run, "task_id": target_task,
-                         "workflow_id": target_workflow,
-                         "event_type": "run_started", "timestamp": time.time()})
-    ledger.append_event({"run_id": target_run, "task_id": target_task,
-                         "workflow_id": target_workflow,
-                         "event_type": "task_started", "timestamp": time.time()})
     spec = eval_store.record_replay_spec(
         source_run_id,
         target_run,
@@ -312,16 +331,17 @@ def replay_run(
         "dry_run": False,
         "warnings": warnings,
     }
-    if run_preflight:
-        probe = _run_probe_argv(preflight_argv)
-        out["preflight"] = probe
-        if not probe.get("ok"):
-            warnings.append("preflight_failed")
+    if preflight_result is not None:
+        out["preflight"] = preflight_result
     if launch:
-        launched = _run_probe_argv(launch_argv)
+        launched = _run_probe_argv(launch_argv, db_path=db_path)
         out["launch"] = launched
         if not launched.get("ok"):
             warnings.append("launch_failed")
+            raise RuntimeError("replay launch chain failed")
+        launched_task = state_db.get_task(target_task, db_path=db_path)
+        if launched_task is None or str(launched_task.get("run_id")) != target_run:
+            raise ValueError("launch chain did not persist the replay task identity")
     return out
 
 

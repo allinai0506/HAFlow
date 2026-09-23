@@ -1357,9 +1357,8 @@ def cmd_eval(args):
     if getattr(args, "json", False):
         print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
         return
-    verdict = payload.get("verdict")
     warnings = payload.get("warnings") or []
-    print(f"[{label}] run={payload.get('run_id')} verdict={verdict} "
+    print(f"[{label}] run={payload.get('run_id')} "
           f"final_status={payload.get('final_status')} "
           f"requirements_satisfied={payload.get('requirements_satisfied')} "
           f"verification_passed={payload.get('verification_passed')} "
@@ -1480,23 +1479,10 @@ def cmd_eval_compare(args):
     if getattr(args, "json", False):
         print(json.dumps(diff, ensure_ascii=False, indent=2, sort_keys=True))
         return
-    print(f"[EVAL_COMPARE] {diff['verdict_transition']} changed={diff['verdict_changed']}")
-    if diff.get("final_status_transition"):
-        print(f"Final status: {diff['final_status_transition']} "
-              f"changed={diff.get('final_status_changed')}")
-    if diff.get("task_status_transition"):
-        print(f"Task status: {diff['task_status_transition']} "
-              f"changed={diff.get('task_status_changed')}")
-    if diff.get("task_id_changed"):
-        print(f"Task: {(diff.get('before') or {}).get('task_id')} -> "
-              f"{(diff.get('after') or {}).get('task_id')}")
-    if diff.get("workflow_id_changed"):
-        print(f"Workflow: {(diff.get('before') or {}).get('workflow_id')} -> "
-              f"{(diff.get('after') or {}).get('workflow_id')}")
-    if diff.get("warnings_added"):
-        print(f"Warnings added: {', '.join(diff['warnings_added'])}")
-    if diff.get("warnings_removed"):
-        print(f"Warnings removed: {', '.join(diff['warnings_removed'])}")
+    print("[EVAL_COMPARE] factual fields:")
+    for field in ("requirements_satisfied", "verification_passed",
+                  "human_intervention_count", "final_status"):
+        print(f"{field}: {diff['before'][field]} -> {diff['after'][field]}")
 
 
 def set_status(task_id, new_status, verdict=None, note=None):
@@ -1670,6 +1656,18 @@ def auto_init_task_loop(clone_path, goal, acceptance_list, test_cmd=None, lint_c
 
 
 def _launch_task(args):
+    agent_policy = None
+    raw_policy = getattr(args, "agent_policy", None)
+    if raw_policy:
+        try:
+            agent_policy = json.loads(raw_policy)
+        except ValueError as exc:
+            print(f"Invalid --agent-policy JSON: {exc}")
+            sys.exit(2)
+        if agent_policy is not None and not isinstance(agent_policy, dict):
+            print("--agent-policy must be a JSON object")
+            sys.exit(2)
+
     data = load_tasks()
 
     if find_task(data, args.task_id):
@@ -1923,7 +1921,7 @@ def _launch_task(args):
     data = load_tasks()
 
     now = _now()
-    run_id = new_run_id()
+    run_id = getattr(args, "run_id", None) or new_run_id()
 
     # RuntimeState:只记录本次真实执行的位置证据,不改变任务编排字段。
     try:
@@ -1975,6 +1973,11 @@ def _launch_task(args):
         "goal": args.goal,
         "acceptance_criteria": args.acceptance,
     }
+    replay_of = getattr(args, "replay_of", None)
+    if replay_of:
+        task["replay_of"] = replay_of
+    if raw_policy:
+        task["agent_policy"] = agent_policy
     if exec_fields["execution_mode"] == "context":
         # Git 模式任务记录保持字节级不变；context 附加字段仅在 context 模式出现。
         task["execution_mode"] = "context"
@@ -4132,6 +4135,12 @@ def main():
         default=[]
     )
     launch.add_argument("--prompt", required=True)
+    launch.add_argument("--run-id", default=None,
+                        help="Use a caller-assigned Run identity, e.g. for Replay lineage")
+    launch.add_argument("--replay-of", default=None,
+                        help="Source Run identity for a Replay task")
+    launch.add_argument("--agent-policy", default=None,
+                        help="JSON policy override for Replay launch")
     launch.add_argument(
         "--supersedes",
         default=None,
@@ -4451,9 +4460,9 @@ def main():
     replay_cmd.add_argument("--prompt", default=None)
     replay_cmd.add_argument("--source", default="replay")
     replay_cmd.add_argument("--launch", action="store_true",
-                            help="回放落盘后执行真实 launch 链")
+                            default=True, help="兼容参数：默认执行真实 launch 链")
     replay_cmd.add_argument("--run-preflight", action="store_true",
-                            help="回放落盘后执行真实 preflight 探针")
+                            default=True, help="兼容参数：默认执行真实 preflight 探针")
     replay_cmd.add_argument("--dry-run", action="store_true")
     replay_cmd.add_argument("--json", action="store_true")
 
