@@ -1479,6 +1479,21 @@ def try_direct_stage_advance(item):
         f"tasks={','.join(launched)}"
     )
 
+    # Collaboration accelerator: deterministic edges emit one HANDOFF each.
+    # Best-effort only: the launched tasks already carry their own prompts,
+    # so a handoff failure must never roll back the stage advance.
+    try:
+        for handoff in maybe_dispatch_node_handoffs(
+            workflow_id=workflow_id, ready_id=ready_id,
+            dep_ids=dep_ids, launched=launched,
+        ):
+            print(f"[COLLABORATION HANDOFF] {handoff}")
+    except Exception as exc:
+        print(
+            f"[COLLABORATION HANDOFF SKIPPED] "
+            f"workflow={workflow_id} node={ready_id}: {type(exc).__name__}"
+        )
+
     maybe_compact_coordinator(workflow_id, reason=f"stage_advance:{ready_id}")
 
     return True
@@ -4080,6 +4095,225 @@ def _dispatch_supervisor_verification(task, decision, store):
     return {"verification_dispatched": True}
 
 
+def _default_collab_sender(pane_id, prompt):
+    result = subprocess.run(
+        ["herdr", "agent", "prompt", str(pane_id), prompt],
+        text=True, capture_output=True, timeout=120,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "collaboration prompt failed").strip()
+        raise RuntimeError(f"collaboration dispatch failed: {detail[:400]}")
+    return {"ok": True}
+
+
+def _collab_task_pane(task):
+    pane = task.get("pane_id")
+    if pane:
+        return pane
+    runtime = task.get("runtime") or {}
+    return runtime.get("pane_id")
+
+
+def _collab_task_run(task):
+    # Fail closed on missing identity: never synthesize run_<task_id> here.
+    # Shared run scope is explicit run_id, else the workflow both tasks belong
+    # to; when neither exists the dispatch fails instead of guessing.
+    try:
+        from herdr.collaboration import collab_run_for_task
+        return collab_run_for_task(task)
+    except Exception:
+        return None
+
+
+def collaboration_enabled():
+    import os as _os
+    return _os.environ.get("HERDR_COLLABORATION_ENABLED", "1") != "0"
+
+
+def _collab_prior_intent(event_id, to_task_id, db_path):
+    from herdr import state_db as _sdb
+    try:
+        rows = _sdb.list_events(
+            event_type="collaboration_dispatch_intent",
+            task_id=to_task_id, db_path=db_path,
+        )
+    except Exception:
+        return None
+    for row in rows or []:
+        payload = row.get("payload") or {}
+        if payload.get("collaboration_event_id") == event_id:
+            return row
+    return None
+
+
+def dispatch_collaboration_event(event_id, tasks_by_id, prompt_sender=None, db_path=None):
+    """Dispatch one CollaborationEvent through the existing Herdr prompt path.
+
+    Pure assembly: identity/run/pane checks, durable intent, minimal prompt,
+    real ``herdr agent prompt`` delivery (injectable for tests). Never falls
+    back to another pane or agent: missing target fails the event.
+    """
+    from herdr import collaboration as _collab
+    from herdr import state_db as _sdb
+
+    sender = prompt_sender or _default_collab_sender
+    event = _sdb.get_collaboration_event(event_id, db_path=db_path)
+    if event is None:
+        raise ValueError(f"collaboration event '{event_id}' not found")
+    if event["status"] in ("dispatched", "acknowledged", "completed"):
+        return {"dispatched": True, "recovered": True,
+                "status": event["status"], "event_id": event_id}
+    if event["status"] == "failed":
+        return {"dispatched": False, "status": "failed", "event_id": event_id}
+
+    tasks = tasks_by_id or {}
+    target = tasks.get(event["to_task_id"])
+    if target is None:
+        return _sdb.mark_collaboration_failed(event_id, db_path=db_path)
+    if _collab_task_run(target) != event["run_id"]:
+        return _sdb.mark_collaboration_failed(event_id, db_path=db_path)
+    pane_id = _collab_task_pane(target)
+    if not pane_id:
+        return _sdb.mark_collaboration_failed(event_id, db_path=db_path)
+
+    if _collab_prior_intent(event_id, event["to_task_id"], db_path) is not None:
+        recovered = _sdb.mark_collaboration_dispatched(event_id, db_path=db_path)
+        recovered["recovered"] = True
+        recovered["dispatched"] = True
+        return recovered
+
+    _sdb.record_event(
+        {"event_type": "collaboration_dispatch_intent",
+         "workflow_id": event.get("workflow_id"),
+         "task_id": event["to_task_id"],
+         "agent_id": event.get("to_agent"),
+         "run_id": event["run_id"],
+         "payload": {"collaboration_event_id": event_id, "pane_id": pane_id},
+         "source": "collaboration"},
+        db_path=db_path,
+    )
+    prompt = _collab.build_handoff_prompt(event, next_action=f"Proceed as {event.get('to_agent') or ''}.")
+    try:
+        sender(pane_id, prompt)
+    except Exception:
+        return _sdb.mark_collaboration_failed(event_id, db_path=db_path)
+    marked = _sdb.mark_collaboration_dispatched(event_id, db_path=db_path)
+    marked["dispatched"] = True
+    return marked
+
+
+def ack_collaboration_event_for_task(to_task_id, db_path=None):
+    """ACK all dispatched handoffs targeting a task that just entered working."""
+    from herdr import state_db as _sdb
+
+    acked = []
+    for row in _sdb.list_collaboration_events(
+        task_id=to_task_id, status="dispatched", db_path=db_path,
+    ):
+        if row["to_task_id"] != to_task_id:
+            continue
+        acked.append(_sdb.mark_collaboration_acknowledged(row["event_id"], db_path=db_path))
+    return acked
+
+
+def maybe_ack_on_working(task_id, db_path=None):
+    """Accelerator hook for the working transition: never breaks the caller."""
+    if not collaboration_enabled():
+        return []
+    try:
+        return ack_collaboration_event_for_task(task_id, db_path=db_path)
+    except Exception as exc:
+        print(f"[COLLABORATION ACK SKIPPED] task={task_id}: {type(exc).__name__}")
+        return []
+
+
+_NODE_DONE_STATUSES = frozenset({
+    "completed", "committed", "integrated", "cleanup_ready", "cleaned",
+})
+
+
+def maybe_dispatch_node_handoffs(*, workflow_id, ready_id, dep_ids, launched,
+                                 tasks_by_id=None, prompt_sender=None, db_path=None):
+    """Accelerator hook for deterministic node advance.
+
+    For each newly launched task on a known edge (implementation→review,
+    review→test), creates one HANDOFF from the latest completed upstream task
+    and dispatches it through Herdr. Unknown edges return ``skipped`` so the
+    existing Coordinator path stays authoritative. Never raises: a handoff
+    failure must not break the already-launched downstream task.
+    """
+    from herdr import collaboration as _collab
+    from herdr import state_db as _sdb
+
+    launched = launched or []
+    if not collaboration_enabled():
+        return [{"task_id": t, "skipped": True, "reason": "disabled"} for t in launched]
+    try:
+        if tasks_by_id is None:
+            tasks_by_id = {t.get("task_id"): t for t in (load_tasks() or [])
+                           if isinstance(t, dict) and t.get("task_id")}
+        tasks = tasks_by_id or {}
+    except Exception as exc:
+        return [{"task_id": t, "status": "failed", "error": type(exc).__name__}
+                for t in launched]
+
+    results = []
+    for to_id in launched:
+        try:
+            target = tasks.get(to_id)
+            if target is None:
+                results.append({"task_id": to_id, "status": "failed",
+                                "reason": "target_task_missing"})
+                continue
+            dep_hit = None
+            trigger = None
+            for dep in (dep_ids or []):
+                inferred = _collab.infer_handoff_trigger(dep, ready_id)
+                if inferred is not None:
+                    dep_hit = dep
+                    trigger = inferred
+                    break
+            if trigger is None:
+                results.append({"task_id": to_id, "skipped": True,
+                                "reason": "no_deterministic_route"})
+                continue
+            route = _collab.route_deterministic_handoff(trigger=trigger)
+            upstream = [t for t in tasks.values()
+                        if isinstance(t, dict)
+                        and t.get("workflow_id") == workflow_id
+                        and (t.get("node") == dep_hit or t.get("stage") == dep_hit)
+                        and t.get("status") in _NODE_DONE_STATUSES]
+            if not upstream:
+                results.append({"task_id": to_id, "skipped": True,
+                                "reason": "no_completed_upstream"})
+                continue
+            upstream.sort(key=lambda t: float(t.get("updated_at") or 0))
+            from_task = upstream[-1]
+            run_id = _collab.collab_run_for_task(from_task)
+            branch = from_task.get("branch")
+            event = _sdb.create_collaboration_event({
+                "run_id": run_id,
+                "workflow_id": workflow_id,
+                "from_task_id": from_task.get("task_id"),
+                "from_agent": from_task.get("agent") or "",
+                "from_pane_id": _collab_task_pane(from_task),
+                "to_task_id": to_id,
+                "to_agent": target.get("agent") or (route or {}).get("to_agent") or "",
+                "type": (route or {}).get("type") or "HANDOFF",
+                "summary": str(from_task.get("goal") or f"{dep_hit} completed."),
+                "artifact_refs": ([f"branch:{branch}"] if branch else []),
+                "evidence_refs": [],
+                "source_fact_id": f"{workflow_id}:{dep_hit}:completed",
+            }, db_path=db_path)
+            dispatched = dispatch_collaboration_event(
+                event["event_id"], tasks, prompt_sender, db_path=db_path)
+            results.append({"task_id": to_id, **dispatched})
+        except Exception as exc:
+            results.append({"task_id": to_id, "status": "failed",
+                            "error": type(exc).__name__})
+    return results
+
+
 def _verification_snapshot(clone_path):
     """Return the version of EVAL_DONE visible at a dispatch boundary."""
     if not clone_path:
@@ -4850,6 +5084,8 @@ def handle_event(task_id, agent_status):
                 task_id,
                 "working"
             )
+            # Collaboration accelerator: a working target ACKs its handoff.
+            maybe_ack_on_working(task_id)
 
     elif agent_status == "idle":
         pane_id = task.get("pane_id")

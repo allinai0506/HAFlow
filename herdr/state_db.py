@@ -255,6 +255,39 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
         );
     """)
 
+    # Collaboration events: minimal cross-agent handoff facts (V1).
+    # Identity is (run_id, from_task_id, to_task_id, type, source_fact_id).
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS collaboration_events (
+            event_id TEXT PRIMARY KEY,
+            identity_key TEXT NOT NULL UNIQUE,
+            run_id TEXT NOT NULL,
+            workflow_id TEXT,
+            from_task_id TEXT NOT NULL,
+            to_task_id TEXT NOT NULL,
+            from_agent TEXT NOT NULL DEFAULT '',
+            to_agent TEXT NOT NULL DEFAULT '',
+            from_pane_id TEXT,
+            to_pane_id TEXT,
+            type TEXT NOT NULL,
+            summary TEXT NOT NULL DEFAULT '',
+            artifact_refs_json TEXT NOT NULL DEFAULT '[]',
+            evidence_refs_json TEXT NOT NULL DEFAULT '[]',
+            context_refs_json TEXT NOT NULL DEFAULT '[]',
+            requires_response INTEGER NOT NULL DEFAULT 1,
+            status TEXT NOT NULL,
+            source_fact_id TEXT NOT NULL,
+            created_at REAL NOT NULL,
+            dispatched_at REAL,
+            acknowledged_at REAL,
+            completed_at REAL,
+            handoff_created_at REAL NOT NULL,
+            handoff_dispatched_at REAL,
+            handoff_acknowledged_at REAL,
+            handoff_completed_at REAL
+        );
+    """)
+
     # Indexes for fast lookup and DAG queries
     conn.execute("""
         CREATE TABLE IF NOT EXISTS schema_meta (
@@ -307,6 +340,9 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_steering_hist_task ON steering_history(task_id, timestamp);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_interventions_run ON interventions(run_id, requested_at DESC);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_interventions_task ON interventions(task_id, status, requested_at DESC);")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_collab_run ON collaboration_events(run_id, created_at DESC);")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_collab_tasks ON collaboration_events(from_task_id, to_task_id, status);")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_collab_identity ON collaboration_events(identity_key);")
 
     # Eval results: point-in-time evaluation facts for one run revision.
     # Intentionally no FOREIGN KEY clauses: deleting a workflow must retain
@@ -1452,6 +1488,232 @@ def _finish_intervention(
         raise
     finally:
         conn.close()
+
+
+def _decode_collaboration_row(row) -> Dict[str, Any]:
+    return {
+        "event_id": row["event_id"],
+        "identity_key": row["identity_key"],
+        "run_id": row["run_id"],
+        "workflow_id": row["workflow_id"],
+        "from_task_id": row["from_task_id"],
+        "to_task_id": row["to_task_id"],
+        "from_agent": row["from_agent"] or "",
+        "to_agent": row["to_agent"] or "",
+        "from_pane_id": row["from_pane_id"],
+        "to_pane_id": row["to_pane_id"],
+        "type": row["type"],
+        "summary": row["summary"] or "",
+        "artifact_refs": json.loads(row["artifact_refs_json"] or "[]"),
+        "evidence_refs": json.loads(row["evidence_refs_json"] or "[]"),
+        "context_refs": json.loads(row["context_refs_json"] or "[]"),
+        "requires_response": bool(row["requires_response"]),
+        "status": row["status"],
+        "source_fact_id": row["source_fact_id"],
+        "created_at": row["created_at"],
+        "dispatched_at": row["dispatched_at"],
+        "acknowledged_at": row["acknowledged_at"],
+        "completed_at": row["completed_at"],
+        "handoff_created_at": row["handoff_created_at"],
+        "handoff_dispatched_at": row["handoff_dispatched_at"],
+        "handoff_acknowledged_at": row["handoff_acknowledged_at"],
+        "handoff_completed_at": row["handoff_completed_at"],
+    }
+
+
+def create_collaboration_event(
+    event: Dict[str, Any], db_path: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Create or return the canonical CollaborationEvent (idempotent).
+
+    Dedupe key is (run_id, from_task_id, to_task_id, type, source_fact_id).
+    The losing concurrent writer returns the stored canonical row.
+    """
+    from .collaboration import create_handoff
+
+    candidate = create_handoff(
+        run_id=str(event.get("run_id") or ""),
+        workflow_id=str(event.get("workflow_id") or ""),
+        from_task_id=str(event.get("from_task_id") or ""),
+        from_agent=str(event.get("from_agent") or ""),
+        to_task_id=str(event.get("to_task_id") or ""),
+        to_agent=str(event.get("to_agent") or ""),
+        summary=str(event.get("summary") or ""),
+        artifact_refs=list(event.get("artifact_refs") or []),
+        evidence_refs=list(event.get("evidence_refs") or []),
+        context_refs=list(event.get("context_refs") or []),
+        source_fact_id=str(event.get("source_fact_id") or ""),
+        event_type=str(event.get("type") or "HANDOFF"),
+        requires_response=bool(event.get("requires_response", True)),
+    )
+    if event.get("from_pane_id"):
+        candidate["from_pane_id"] = event.get("from_pane_id")
+    if event.get("to_pane_id"):
+        candidate["to_pane_id"] = event.get("to_pane_id")
+    conn = get_db_connection(db_path)
+    try:
+        conn.execute("BEGIN IMMEDIATE;")
+        existing = conn.execute(
+            "SELECT * FROM collaboration_events WHERE identity_key = ?",
+            (candidate["identity_key"],),
+        ).fetchone()
+        if existing is not None:
+            conn.execute("COMMIT;")
+            return _decode_collaboration_row(existing)
+        conn.execute(
+            """
+            INSERT INTO collaboration_events (
+                event_id, identity_key, run_id, workflow_id,
+                from_task_id, to_task_id, from_agent, to_agent,
+                from_pane_id, to_pane_id, type, summary,
+                artifact_refs_json, evidence_refs_json, context_refs_json,
+                requires_response, status, source_fact_id,
+                created_at, handoff_created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(identity_key) DO NOTHING
+            """,
+            (
+                candidate["event_id"], candidate["identity_key"],
+                candidate["run_id"], candidate["workflow_id"],
+                candidate["from_task_id"], candidate["to_task_id"],
+                candidate["from_agent"], candidate["to_agent"],
+                candidate["from_pane_id"], candidate["to_pane_id"],
+                candidate["type"], candidate["summary"],
+                json.dumps(candidate["artifact_refs"], ensure_ascii=False),
+                json.dumps(candidate["evidence_refs"], ensure_ascii=False),
+                json.dumps(candidate["context_refs"], ensure_ascii=False),
+                1 if candidate["requires_response"] else 0,
+                "created", candidate["source_fact_id"],
+                candidate["created_at"], candidate["handoff_created_at"],
+            ),
+        )
+        row = conn.execute(
+            "SELECT * FROM collaboration_events WHERE identity_key = ?",
+            (candidate["identity_key"],),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("collaboration insert did not produce a canonical row")
+        conn.execute("COMMIT;")
+        return _decode_collaboration_row(row)
+    except Exception:
+        try:
+            conn.execute("ROLLBACK;")
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
+
+
+def get_collaboration_event(
+    event_id: str, db_path: Optional[Path] = None,
+) -> Optional[Dict[str, Any]]:
+    conn = get_db_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT * FROM collaboration_events WHERE event_id = ?", (event_id,)
+        ).fetchone()
+        return _decode_collaboration_row(row) if row else None
+    finally:
+        conn.close()
+
+
+def list_collaboration_events(
+    run_id: Optional[str] = None,
+    task_id: Optional[str] = None,
+    status: Optional[str] = None,
+    limit: Optional[int] = None,
+    db_path: Optional[Path] = None,
+) -> List[Dict[str, Any]]:
+    conn = get_db_connection(db_path)
+    try:
+        query = "SELECT * FROM collaboration_events WHERE 1=1"
+        params: List[Any] = []
+        if run_id is not None:
+            query += " AND run_id = ?"
+            params.append(run_id)
+        if task_id is not None:
+            query += " AND (from_task_id = ? OR to_task_id = ?)"
+            params.extend([task_id, task_id])
+        if status is not None:
+            query += " AND status = ?"
+            params.append(status)
+        query += " ORDER BY created_at ASC, event_id ASC"
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(max(0, int(limit)))
+        return [_decode_collaboration_row(r) for r in conn.execute(query, params).fetchall()]
+    finally:
+        conn.close()
+
+
+def _transition_collaboration_event(
+    event_id: str, to_status: str, time_field: Optional[str],
+    db_path: Optional[Path] = None,
+) -> Dict[str, Any]:
+    from .collaboration import is_valid_transition
+
+    conn = get_db_connection(db_path)
+    try:
+        conn.execute("BEGIN IMMEDIATE;")
+        row = conn.execute(
+            "SELECT * FROM collaboration_events WHERE event_id = ?", (event_id,)
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"collaboration event '{event_id}' not found")
+        old = row["status"]
+        if old == to_status:
+            conn.execute("COMMIT;")
+            return _decode_collaboration_row(row)
+        if not is_valid_transition(old, to_status):
+            raise ValueError(f"cannot transition collaboration event from {old} to {to_status}")
+        now = time.time()
+        handoff_field = {
+            "dispatched": "handoff_dispatched_at",
+            "acknowledged": "handoff_acknowledged_at",
+            "completed": "handoff_completed_at",
+        }.get(to_status)
+        if time_field and handoff_field:
+            conn.execute(
+                f"""UPDATE collaboration_events SET status = ?,
+                    {time_field} = ?, {handoff_field} = ?
+                    WHERE event_id = ?""",
+                (to_status, now, now, event_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE collaboration_events SET status = ? WHERE event_id = ?",
+                (to_status, event_id),
+            )
+        updated = conn.execute(
+            "SELECT * FROM collaboration_events WHERE event_id = ?", (event_id,)
+        ).fetchone()
+        conn.execute("COMMIT;")
+        return _decode_collaboration_row(updated)
+    except Exception:
+        try:
+            conn.execute("ROLLBACK;")
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
+
+
+def mark_collaboration_dispatched(event_id: str, db_path: Optional[Path] = None) -> Dict[str, Any]:
+    return _transition_collaboration_event(event_id, "dispatched", "dispatched_at", db_path)
+
+
+def mark_collaboration_acknowledged(event_id: str, db_path: Optional[Path] = None) -> Dict[str, Any]:
+    return _transition_collaboration_event(event_id, "acknowledged", "acknowledged_at", db_path)
+
+
+def mark_collaboration_completed(event_id: str, db_path: Optional[Path] = None) -> Dict[str, Any]:
+    return _transition_collaboration_event(event_id, "completed", "completed_at", db_path)
+
+
+def mark_collaboration_failed(event_id: str, db_path: Optional[Path] = None) -> Dict[str, Any]:
+    return _transition_collaboration_event(event_id, "failed", None, db_path)
 
 
 def record_event(

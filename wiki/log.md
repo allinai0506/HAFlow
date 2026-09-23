@@ -918,3 +918,9 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 ## [2026-09-23] wrapup | wf-haflow-0923-01 Eval+Replay V1 收尾 abandon
 - fix-loop 6/3耗尽，test-auto-r6 blocked（BASELINE_MATCH @3be4362，缺Eval/Replay/Compare/CLI及专项测试）；impl-fix4实现仅存clone未集成。
 - 用户确认接受现状推进后指令直接收尾：保留blocked证据，abandon关闭，不再重派同范围fix；clones保留。
+
+## [2026-09-23] feature | HAFlow Collaboration Protocol V1（含生产接线）
+- 基于 Herdr pane/agent/prompt/runtime 建立最小协作语义，不自建通信层：`herdr/collaboration.py` 纯核（身份键/最小 prompt/确定性路由/延迟指标）+ `collaboration_events` 幂等表 + Controller 派发/ACK 装配 + 两个 guarded 生产钩子（直派后补 HANDOFF、working 后 ACK，`HERDR_COLLABORATION_ENABLED=0` 熔断）。
+- 只做 3 条自动边（implementation→review、review→tester、BLOCKER→coordinator），未知边保留 Coordinator；原 Workflow dependency 链不动。
+- S6 round 1 抓到幽灵 dispatched（D1）后修复：sender 失败落终态 failed、refs 封顶保 ID 尾、缺 run fail-closed；教训 `docs/lessons/lessons-learned.md` §87。
+- 证据：collaboration 专项 36 passed、全量 `pytest -q` 1238 passed + 44 subtests、S6 round 3 MERGE_READY；文档 `docs/architecture/collaboration-protocol.md`。
