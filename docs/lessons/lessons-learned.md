@@ -4545,3 +4545,69 @@ git merge-tree --write-tree origin/main 7a6f2ae >/dev/null; echo $?          # 0
 - `wiki/log.md`（wrapup 条目；本文件 §86 的根因是 stranded 的**成因**，本节是 stranded 的**收敛与取证**）
 - `.agents/skills/six-step-finish/SKILL.md`（步骤 0 交付 PR 前置；本技能严禁自动合并）
 - 现场：`~/.herdr-controller/workflows/wf-haflow-0923-01/shared/notes.jsonl`、PR86
+## 98. 派生运行（Replay）与验收（Eval）的双向解耦与物化时机：身份确认前不落谱系、验证事实不代行验收裁决
+
+### 问题背景
+
+在 `wf-haflow-0923-01`（Eval + Replay V1）的实现收敛过程中，前期原型代码暴露了三类隐蔽但破坏系统不变量的 correctness 缺陷（P1-1、P1-2、P2-1）：
+
+1. **验收事实与技术验证混淆（P1-1）**：`herdr/eval_engine.py` 在推导 `requirements_satisfied` 时，错误地将 `verification_passed` 作为后备或主判据，把"编译/测试脚本跑通"与"需求指标达成"画等号，导致无验收数据的运行被虚假判为通过，且无法区分技术通过但业务失败（或技术未跑但人工已签发）的情形。
+2. **派生运行策略环境逃逸（P1-2）**：`herdr/replay_engine.py` 在重构或回放一个历史 Run 时，若源 Task/Workflow 没有显式冻结策略，直接降级读取当前运行进程的全局配置或 CLI 默认策略，导致当前环境的全局策略（例如 `HERDR_STAGE_POLICIES`）向历史回放静默泄漏，破坏了“默认使用 frozen snapshot”的隔离性。
+3. **血统谱系过早落盘（P2-1）**：在启动派生任务时，先写 `ReplaySpec`（记录 parent_run_id 与 child_run_id）再执行 `herdr-task launch`。当 launch 因调度、进程崩溃或参数校验失败时，或者由于并发竞态导致生成的 Task 实际并未继承 `replay_of` 时，数据库中已留存不可逆的孤儿谱系，造成 lineage 虚假。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|---|---|---|
+| 需求验收（Requirements）借用技术验证（Verification） | 语义分层混乱：Verification 是技术证据，Requirements 是业务/阶段裁决 | `requirements_satisfied` 仅由权威验收事实（`acceptance_verdict`、`stage_verdict`）产生，无事实一律返回 `null`（保持三态），严禁反向猜测与跨层代行 |
+| 历史回放时全局配置静默污染 | 派生运行必须自闭环，当前宿主环境的动态配置不得污染历史重放 | 建立严格的 5 级策略继承链（ReplaySpec 策略 → 源快照 → Task 冻结 → Workflow 冻结 → 私有 definition），无来源时 policy 显式为 `null` 并标明 `policy_source: unavailable` |
+| 先写谱系再启动派生，失败留孤儿 | 副作用顺序颠倒：尚未确立真实身份即持久化关系 | **必须在 launch 成功且双向核验身份**（`run_id == replay_run_id` 且 `replay_of == source_run_id`）后才写入 `ReplaySpec`；launch 失败或身份不一致必须执行包含 Task/Workflow/事件/快照文件的完整级联原子补偿 |
+
+### 操作规范
+
+```bash
+# 1) 验收推导无猜想、双向解耦验证（herdr/eval_engine.py）
+# 验证：仅读取 acceptance_verdict 与 stage_verdict，无 LLM judge，无伪 score
+python3 -m pytest tests/test_eval_engine.py -k "test_eval_requirements_satisfied"
+
+# 2) 回放策略来源 5 级继承链与防泄漏验证（herdr/replay_engine.py）
+# 注入全局环境策略，确认源无 policy 时输出 policy=null / policy_source=unavailable
+HERDR_STAGE_POLICIES='{"mode":"GLOBAL-LEAK"}' python3 -m pytest tests/test_replay_engine.py -k "policy"
+
+# 3) 谱系写入时机与原子补偿验证（P2-1）
+# launch 失败或身份校验失败时，断言 ReplaySpec 行数为 0，且 Task/Workflow/Event 彻底级联清理
+python3 -m pytest tests/test_replay_engine.py -k "compensation"
+```
+
+### 验证命令 / 证据
+
+```bash
+# 1) PR86 候选提交与改动清单（7 文件 +348 -53）
+git show --stat cc5e9a0
+# bin/herdr-task                   |  10 ++-
+# docs/architecture/eval-replay.md |   8 +-
+# herdr/eval_engine.py             |  12 ++-
+# herdr/eval_store.py              |  13 ++++
+# herdr/replay_engine.py           | 157 ++++++++++++++++++++++++++++++-------
+# tests/test_eval_engine.py        |  38 +++++++--
+# tests/test_replay_engine.py      | 163 ++++++++++++++++++++++++++++++++++++---
+
+# 2) 全量测试回归与 lint 基线
+pytest -q  # 1191 passed, 44 subtests
+ruff check bin/herdr-task herdr/eval_engine.py herdr/eval_store.py herdr/replay_engine.py  # 0 errors
+
+# 3) 独立评审结论（review-auto-r3）
+# MERGE_READY 十条条件全通过，阻断缺陷 0 项，7 项非阻塞建议汇总追踪
+```
+
+- 门禁证据（shared `notes.jsonl`）：
+  - `impl-fix6`：`n-1790163114271-36f8`（P1-1 解耦、P1-2 策略继承链、P2-1 身份校验后写 spec，全量 1191/1191 绿）
+  - `test-auto-r8`：`n-1790163892258-aee0`（clone detached@cc5e9a0 验证，1191/1191 pass，触改文件零新增 lint，Compare 四字段）
+  - `review-auto-r3`：`n-1790165060831-9aed`（MERGE_READY 明确通过，阻断缺陷 0）
+
+### 相关文档 / 关联证据
+
+- `docs/architecture/eval-replay.md`（Eval Engine、Replay Engine 与 Compare 架构规范）
+- `herdr/eval_engine.py`、`herdr/replay_engine.py`、`herdr/eval_store.py`
+- `wiki/log.md`（fix6 轮收尾条目与二次收尾关系）
+- PR: https://github.com/allinai0506/HAFlow/pull/86
