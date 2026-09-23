@@ -1406,11 +1406,14 @@ button { cursor: pointer; }
   padding: 6px 16px;
   border-bottom: 1px solid var(--border-subtle);
   display: grid;
-  grid-template-columns: 20px minmax(200px, 1fr) 120px auto 28px;
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 12px;
   align-items: center;
   transition: background .12s ease;
   min-height: 44px;
+}
+.task-list .task {
+  grid-template-columns: 20px minmax(200px, 1fr) 120px auto 28px;
   cursor: pointer;
 }
 .task:last-child {
@@ -1902,7 +1905,7 @@ pre { margin: 0; white-space: pre-wrap; word-break: break-word; font-family: ui-
   .sidebar { position: static; height: auto; border-right: 0; border-bottom: 1px solid var(--border-default); }
   .deep-drawer { left: 0; }
   .decision-item { grid-template-columns: 1fr; gap: 2px; }
-  .task { grid-template-columns: 20px 1fr auto 28px; }
+  .task-list .task { grid-template-columns: 20px 1fr auto 28px; }
   .task-agent { display: none; }
 }</style></head><body>
 <div class="shell">
