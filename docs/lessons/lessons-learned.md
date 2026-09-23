@@ -3677,3 +3677,53 @@ verification receipt；Task status 本身不能替代这些事实。
 VERIFY episode、RETRY 无 dispatch 阻断和 kill switch；
 `tests/test_supervisor_tests_completed.py` 覆盖 receipt 写失败不消费
 evidence；本轮全量 `pytest -q` 为 1101 passed、44 subtests。
+
+## 84. 内环质量门禁必须对存量 lint 债务做基线分诊：只拦新增，不拦全仓
+
+### 问题背景
+
+`wf-haflow-0923-01-test-auto` 在测试全绿（专项 21/21、全量 1122 passed）
+的情况下被判 `blocked`：`herdr/evaluator.py` 的 `is_converged` 要求
+`lint_errors == 0`，而默认 lint 命令是全仓 `ruff check .`，主干基线本身
+就有 2696 个存量错误。`quality = 100 - 10 × lint` 直接归零，
+`composite` 只有 65/100，5 轮内环必然耗尽并升级总指挥仲裁。
+这是系统性误杀，不是 Agent 实现缺陷：任何工作流都会在同一门禁上卡死。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|---|---|---|
+| 全仓 `ruff check .` 要求零错误 | "当前 2562 个错误" ≠ "本次新增 2562 个缺陷"；存量债务不能计入本轮质量分 | 门禁只看增量 `new = max(0, current - baseline)`，观测总数仍全量记录 |
+| 基线只在口头，不在持久化 | 没有落盘的基线等于没有基线，复评无法重现同一判定 | `auto_init_task_loop` / `herdr-loop init` 在 init 时快照一次 `BASELINE_LINT.json`，eval 只读不写 |
+| 无基线旧 clone | 缺基线不得改变既有语义 | 缺文件/损坏时回退绝对门禁（`new=None` 即按原 `lint_errors` 判定） |
+
+### 操作规范
+
+```python
+# herdr/evaluator.py：纯函数，数字进、判定出；IO 留在 bin/ 装配层
+new_lint = effective_defects(current_lint, baseline_lint)  # 永不为负
+quality = max(0.0, 100.0 - (new_lint * 10.0 + new_type * 15.0))
+# is_converged 看 new_*（None 时回退看绝对值，保持旧 clone 兼容）
+```
+
+`bin/herdr-task:auto_init_task_loop` 与 `bin/herdr-loop:init` 快照基线
+（120s 超时、best-effort，失败只告警不阻断派发）；
+`bin/herdr-loop:run_evaluation` 读取基线并透传；
+`EVAL_DONE.json` / `METRICS.json` 新增
+`baseline_lint_errors / new_lint_errors`（加法兼容，Supervisor 白名单读取不受影响）。
+
+### 验证命令 / 证据
+
+```bash
+pytest -q tests/test_loop_evaluator.py tests/test_inner_loop_convergence.py tests/test_inner_loop_protocol.py tests/test_outer_loop_flow.py  # 38 passed
+pytest -q  # 1107 passed, 44 subtests passed
+# 真实链路：tmp clone init(lint 报 5 存量) → 快照 baseline=5 → eval 100.0 CONVERGED；
+# lint 改报 6 → new=1 → 96.5 正确阻断
+```
+
+### 相关文档 / 关联证据
+
+- `herdr/evaluator.py#effective_defects`、`#write_baseline_lint`、`#read_baseline_lint`
+- `bin/herdr-loop#run_evaluation`、`bin/herdr-task#auto_init_task_loop`
+- `tests/test_loop_evaluator.py#test_baseline_debt_does_not_block_convergence`
+- `tests/test_loop_evaluator.py#test_new_lint_still_blocks_convergence`

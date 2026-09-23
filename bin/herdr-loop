@@ -25,6 +25,7 @@ from herdr.evaluator import (
     get_loop_dir,
     init_loop,
     is_converged,
+    read_baseline_lint,
     read_state,
     render_evaluation_markdown,
     render_metrics_markdown,
@@ -74,6 +75,9 @@ def run_evaluation(target_dir: Path) -> tuple[MetricVector, bool]:
     lint_log = (log_dir / "lint.log").read_text(encoding="utf-8") if (log_dir / "lint.log").exists() else ""
     repro_log = (log_dir / "repro.log").read_text(encoding="utf-8") if (log_dir / "repro.log").exists() else None
 
+    # Baseline-aware gate: pre-existing debt recorded at init does not block.
+    baseline_lint, baseline_type = read_baseline_lint(loop_dir)
+
     # Calculate metrics
     metrics = calculate_metrics(
         test_output=test_log,
@@ -82,6 +86,8 @@ def run_evaluation(target_dir: Path) -> tuple[MetricVector, bool]:
         lint_exit_code=lint_exit,
         repro_output=repro_log,
         repro_exit_code=repro_exit if repro_log is not None else None,
+        baseline_lint_errors=baseline_lint,
+        baseline_type_errors=baseline_type,
     )
 
     state = read_state(loop_dir)
@@ -145,6 +151,10 @@ def run_evaluation(target_dir: Path) -> tuple[MetricVector, bool]:
             "failing_tests": list(metrics.failing_tests or []),
             "lint_errors": metrics.lint_errors,
             "type_errors": metrics.type_errors,
+            "baseline_lint_errors": metrics.baseline_lint_errors,
+            "baseline_type_errors": metrics.baseline_type_errors,
+            "new_lint_errors": metrics.new_lint_errors,
+            "new_type_errors": metrics.new_type_errors,
             "composite_score": round(float(metrics.composite_score), 2),
             "has_repro_test": bool(metrics.has_repro_test),
         }, ensure_ascii=False),
@@ -187,6 +197,28 @@ def main():
             max_iterations=args.max_iter,
             repro_cmd=args.repro_cmd,
         )
+        # Baseline-aware gate: snapshot pre-edit lint debt (best-effort).
+        try:
+            from herdr.evaluator import parse_lint_output as _parse_lint
+            from herdr.evaluator import write_baseline_lint as _write_baseline
+            _snapshot_cmd = (args.lint_cmd or "").strip()
+            if _snapshot_cmd:
+                _proc = subprocess.run(
+                    _snapshot_cmd,
+                    cwd=str(target_dir),
+                    text=True,
+                    capture_output=True,
+                    timeout=120,
+                    shell=True,
+                )
+                _out = (_proc.stdout or "") + (_proc.stderr or "")
+                _write_baseline(
+                    target_dir / LOOP_DIR_NAME,
+                    _parse_lint(_out, _proc.returncode),
+                    0,
+                )
+        except Exception as _exc:
+            print(f"[HERDR_LOOP_WARN] Failed to snapshot lint baseline: {_exc}")
         sys.exit(0)
 
     elif args.command == "eval":
