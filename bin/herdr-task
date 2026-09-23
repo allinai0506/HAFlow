@@ -1424,8 +1424,10 @@ def cmd_replay(args):
             goal=getattr(args, "goal", None),
             prompt=getattr(args, "prompt", None),
             source=getattr(args, "source", None) or "replay",
-            launch=bool(getattr(args, "launch", False)),
-            run_preflight=bool(getattr(args, "run_preflight", False)),
+            # Replay V1 always preflights and launches; flags remain accepted
+            # only for command-line compatibility.
+            launch=True,
+            run_preflight=True,
             dry_run=bool(getattr(args, "dry_run", False)),
             db_path=getattr(store, "db_path", None),
         )
@@ -4460,9 +4462,9 @@ def main():
     replay_cmd.add_argument("--prompt", default=None)
     replay_cmd.add_argument("--source", default="replay")
     replay_cmd.add_argument("--launch", action="store_true",
-                            default=True, help="兼容参数：默认执行真实 launch 链")
+                            default=True, help="兼容参数：Replay 始终执行真实 launch 链")
     replay_cmd.add_argument("--run-preflight", action="store_true",
-                            default=True, help="兼容参数：默认执行真实 preflight 探针")
+                            default=True, help="兼容参数：Replay 始终执行真实 preflight 探针")
     replay_cmd.add_argument("--dry-run", action="store_true")
     replay_cmd.add_argument("--json", action="store_true")
 

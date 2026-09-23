@@ -88,6 +88,70 @@ def _default_definition_from_source(
     raise ValueError(f"source run has no frozen definition snapshot: {source_run_id}")
 
 
+def _policy_in_definition(definition: Any, node: str) -> dict[str, Any] | None:
+    if not isinstance(definition, dict):
+        return None
+    for key in ("policy_snapshot", "agent_policy", "policy"):
+        value = _resolve_policy(definition.get(key))
+        if value is not None:
+            return value
+    nodes = definition.get("nodes")
+    if isinstance(nodes, list):
+        for item in nodes:
+            if isinstance(item, dict) and str(item.get("id") or item.get("node") or "") == node:
+                value = _resolve_policy(item.get("agent_policy") or item.get("worker_policy"))
+                if value is not None:
+                    return value
+    return None
+
+
+def _source_policy(source_task: dict[str, Any], source_workflow: dict[str, Any] | None,
+                   source_spec: dict[str, Any] | None) -> tuple[dict[str, Any] | None, str]:
+    node = str(source_task.get("node") or source_task.get("stage") or "")
+    value = _resolve_policy((source_spec or {}).get("policy"))
+    if value is None:
+        value = _policy_in_definition((source_spec or {}).get("definition"), node)
+    if value is None and (source_spec or {}).get("snapshot"):
+        try:
+            data = json.loads(Path(source_spec["snapshot"]).expanduser().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = None
+        value = _policy_in_definition(data, node)
+    if value is not None:
+        return value, "source_snapshot"
+    for key in ("agent_policy", "policy_snapshot"):
+        value = _resolve_policy(source_task.get(key))
+        if value is not None:
+            return value, "source_snapshot"
+    workflow = source_workflow or {}
+    for key in ("policy_snapshot", "agent_policy", "frozen_metadata"):
+        candidate = workflow.get(key)
+        value = (
+            _policy_in_definition(candidate, node)
+            if key == "frozen_metadata"
+            else _resolve_policy(candidate)
+        )
+        if value is not None:
+            return value, "source_snapshot"
+    # The workflow path is accepted only when it is the private frozen file
+    # for this source workflow; shared/current template files are not authority.
+    workflow_id = str(source_task.get("workflow_id") or "")
+    candidate = workflow.get("workflow_file")
+    if workflow_id and candidate:
+        try:
+            from .workflow_docs import docs_root, validate_workflow_id
+
+            expected = docs_root() / validate_workflow_id(workflow_id) / "workflow.json"
+            if Path(str(candidate)).expanduser().resolve() == expected.resolve():
+                data = json.loads(expected.read_text(encoding="utf-8"))
+                value = _policy_in_definition(data, node)
+                if value is not None:
+                    return value, "source_snapshot"
+        except (OSError, ValueError):
+            pass
+    return None, "unavailable"
+
+
 def _run_probe_argv(
     argv: list[str], timeout: int = 120, db_path: Path | None = None,
 ) -> dict[str, Any]:
@@ -213,7 +277,7 @@ def replay_run(
         raise ValueError(f"replay definition snapshot already exists: {target_snapshot}")
 
     warnings: list[str] = []
-    effective_policy = _resolve_policy(policy)
+    requested_policy = _resolve_policy(policy)
     if definition is None:
         resolved_definition: dict[str, Any] = _default_definition_from_source(
             source_task, source_run_id, db_path)
@@ -225,6 +289,11 @@ def replay_run(
         prompt or source_task.get("prompt") or effective_goal)
     source_workflow = state_db.get_workflow(
         str(source_task.get("workflow_id") or ""), db_path=db_path)
+    source_spec = eval_store.get_replay_spec(source_run_id, db_path=db_path)
+    inherited_policy, inherited_source = _source_policy(
+        source_task, source_workflow, source_spec)
+    effective_policy = requested_policy if requested_policy is not None else inherited_policy
+    policy_source = "explicit_override" if requested_policy is not None else inherited_source
     requested_source = str(source or "").strip()
     effective_source = requested_source if requested_source and requested_source != "replay" else str(
         (source_workflow or {}).get("project_root") or ".")
@@ -251,6 +320,7 @@ def replay_run(
                 "definition": resolved_definition,
                 "snapshot": None,
                 "policy": effective_policy,
+                "policy_source": policy_source,
             },
             "workflow_id": target_workflow,
             "task_id": target_task,
@@ -258,6 +328,7 @@ def replay_run(
             "snapshot": None,
             "definition": resolved_definition,
             "policy": effective_policy,
+            "policy_source": policy_source,
             "launch_argv": launch_argv,
             "preflight_argv": preflight_argv,
             "dry_run": True,
@@ -265,10 +336,9 @@ def replay_run(
         }
 
     preflight_result = None
-    if run_preflight:
-        preflight_result = _run_probe_argv(preflight_argv, db_path=db_path)
-        if not preflight_result.get("ok"):
-            raise ValueError("replay preflight failed; run was not created")
+    preflight_result = _run_probe_argv(preflight_argv, db_path=db_path)
+    if not preflight_result.get("ok"):
+        raise ValueError("replay preflight failed; run was not created")
 
     snapshot: str | None = None
     try:
@@ -298,34 +368,20 @@ def replay_run(
             "replay_of": source_run_id,
             "replay_run_id": target_run,
             "source_task_id": source_task.get("task_id"),
+            "policy_source": policy_source,
             "replayed_at": time.time(),
         },
     )
 
-    spec = eval_store.record_replay_spec(
-        source_run_id,
-        target_run,
-        workflow_id=target_workflow,
-        definition=resolved_definition,
-        lineage={
-            "source_run_id": source_run_id,
-            "replay_run_id": target_run,
-            "workflow_id": target_workflow,
-            "snapshot": snapshot,
-            "policy": effective_policy,
-        },
-        snapshot=snapshot,
-        policy=effective_policy,
-        db_path=db_path,
-    )
     out: dict[str, Any] = {
-        "spec": spec,
+        "spec": None,
         "workflow_id": target_workflow,
         "task_id": target_task,
         "replay_run_id": target_run,
         "snapshot": snapshot,
         "definition": resolved_definition,
         "policy": effective_policy,
+        "policy_source": policy_source,
         "launch_argv": launch_argv,
         "preflight_argv": preflight_argv,
         "dry_run": False,
@@ -333,15 +389,62 @@ def replay_run(
     }
     if preflight_result is not None:
         out["preflight"] = preflight_result
-    if launch:
-        launched = _run_probe_argv(launch_argv, db_path=db_path)
-        out["launch"] = launched
+    # Replay V1 always executes the existing launch chain. `launch` remains
+    # accepted for CLI compatibility but cannot turn a plan into a launched run.
+    launched = _run_probe_argv(launch_argv, db_path=db_path)
+    out["launch"] = launched
+    try:
         if not launched.get("ok"):
             warnings.append("launch_failed")
             raise RuntimeError("replay launch chain failed")
         launched_task = state_db.get_task(target_task, db_path=db_path)
-        if launched_task is None or str(launched_task.get("run_id")) != target_run:
-            raise ValueError("launch chain did not persist the replay task identity")
+        if (launched_task is None
+                or str(launched_task.get("run_id") or "") != target_run
+                or str(launched_task.get("replay_of") or "") != source_run_id):
+            raise ValueError("launch chain did not persist the replay task identity and source")
+        out["spec"] = eval_store.record_replay_spec(
+            source_run_id, target_run, workflow_id=target_workflow,
+            definition=resolved_definition,
+            lineage={"source_run_id": source_run_id, "replay_run_id": target_run,
+                     "workflow_id": target_workflow, "snapshot": snapshot,
+                     "policy": effective_policy, "policy_source": policy_source},
+            snapshot=snapshot, policy=effective_policy, db_path=db_path)
+    except Exception:
+        try:
+            eval_store.delete_replay_spec(target_run, db_path=db_path)
+        except sqlite3.Error:
+            pass
+        try:
+            conn = state_db.get_db_connection(db_path)
+            try:
+                conn.execute("DELETE FROM events WHERE run_id = ? AND task_id = ?",
+                             (target_run, target_task))
+                conn.commit()
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            pass
+        try:
+            state_db.delete_workflow(target_workflow, db_path=db_path)
+        except sqlite3.Error:
+            pass
+        try:
+            Path(snapshot).unlink(missing_ok=True)
+        except OSError:
+            pass
+        try:
+            from .state_store import (
+                get_state_store,
+                sync_tasks_projection,
+                sync_workflows_projection,
+            )
+
+            projection_store = get_state_store(db_path=db_path)
+            sync_tasks_projection(store=projection_store)
+            sync_workflows_projection(store=projection_store)
+        except (OSError, ValueError, sqlite3.Error):
+            pass
+        raise
     return out
 
 

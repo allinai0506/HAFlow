@@ -17,7 +17,7 @@ Eval 表与 Metrics 聚合无外键、无同步投影，删除 Workflow 不删�
 
 ## 2. Null 语义
 
-- Eval 不生成 verdict。`requirements_satisfied` 仅当 Task 已完成且存在严格 verification 布尔事实时返回该布尔值；其他情况为 `null`。
+- Eval 不生成 verdict。`requirements_satisfied` 仅由已完成 Task 上的结构化 gate acceptance（`acceptance_verdict` 布尔值或 `stage_verdict=pass|blocked`）产生；verification 只写入 `verification_passed`，不能替代验收。没有 acceptance 时保持 `null`，即使 verification 通过；verification 失败也不自动推导需求失败。
 - `verification_passed: true | false | null`：仅接受严格 verification 事实（`verification.passed` 为真实布尔值）；缺失、非布尔、腐坏载荷一律 `null`，并记 `insufficient_verification`。
 - `human_intervention_count` 仅统计归属 Task 的人类 steering；无归属 Task 时为 `null`，跨 Run 不借用。
 - `final_status` 直接取归属 Task 的权威当前状态；没有归属 Task 时为 `null`。不从 stage verdict 或轨迹聚合状态推导。
@@ -39,8 +39,8 @@ Eval 表与 Metrics 聚合无外键、无同步投影，删除 Workflow 不删�
 ## 5. Override（Policy）
 
 - `replay_run(..., policy=None)` 接受映射或 JSON 对象字符串；落盘到 `replay_specs.policy_json`，读回为 `policy` / `policy_override`（同值双别名）。
-- Policy 同时写入新 Task 载荷的 `agent_policy` 字段，作为回放节点的策略覆盖；`launch_argv` 按覆盖后的 `agent` / `goal` / `prompt` 构建。
-- CLI：`herdr-task replay --policy '<JSON对象>'` 或 `--policy-file <路径>`；`--agent/--goal/--prompt/--source` 覆盖源 Run 对应字段。默认执行真实 preflight 与 `herdr-task launch`；launch 接收 Replay 指定的 Run ID 与 `replay_of` 并由现有运行管线写 Task 和执行事件。`--dry-run` 不执行启动或写入。
+- 默认 effective policy 按来源优先级解析：源 ReplaySpec 冻结策略、源 Task 的 `agent_policy` / `policy_snapshot`、源 Workflow 冻结 metadata/definition。显式 `--policy` / `--policy-file` 才覆盖 effective policy；源快照保持不变。来源写入 ReplaySpec lineage metadata 的 `policy_source`（`source_snapshot`、`explicit_override` 或 `unavailable`）；没有来源时 policy 为 `null`，不读取当前全局 policy。effective policy 经 launch argv 的 `--agent-policy` 进入真实 Task。
+- CLI：`herdr-task replay --policy '<JSON对象>'` 或 `--policy-file <路径>`；`--agent/--goal/--prompt/--source` 覆盖源 Run 对应字段。Replay 总是执行真实 preflight 与 `herdr-task launch`；兼容参数不关闭这两步。launch 成功后必须验证目标 Task 存在、`run_id == replay_run_id`、`replay_of == source_run_id`，然后才记录 ReplaySpec/lineage。启动或校验失败时尽力清理该次 planning artifact；不会手工写入启动事件。`--dry-run` 不执行启动或写入。
 
 ## 6. Compare（对比）
 
@@ -66,4 +66,4 @@ Eval 表与 Metrics 聚合无外键、无同步投影，删除 Workflow 不删�
 - 只读评估：`herdr-task eval --run-id <run> [--json]` → `eval_engine.evaluate_run`。
 - 落盘评估：`herdr-task eval --run-id <run> --record [--revision N]` → `record_run_eval` → `eval_store.record_eval_result`。
 - 事实对比：`herdr-task eval-compare --before-run A --after-run B` → `compare_evals`。
-- 回放：`herdr-task replay --source-run <run> [--definition/--definition-file] [--policy/--policy-file] [--dry-run]` → `replay_engine.replay_run` → preflight → `freeze_run_definition` + `register_workflow` + `record_replay_spec` → `herdr-task launch` 创建 Run/Task 并启动执行。
+- 回放：`herdr-task replay --source-run <run> [--definition/--definition-file] [--policy/--policy-file] [--dry-run]` → `replay_engine.replay_run` → preflight → freeze + register workflow → `herdr-task launch` 创建真实 Run/Task → 验证任务身份与源关联 → `record_replay_spec` 写 lineage。

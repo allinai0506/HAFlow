@@ -105,8 +105,16 @@ def evaluate_run(
         verification_passed = passed_flag if isinstance(passed_flag, bool) else None
     final_status: str | None = task_status if task is not None else None
     requirements_satisfied: bool | None = None
-    if task_completed and verification_passed is not None:
-        requirements_satisfied = verification_passed
+    if task_completed and task is not None:
+        # A gate acceptance is a separate persisted fact. Verification is
+        # evidence about checks and must never stand in for requirements.
+        accepted = task.get("acceptance_verdict")
+        if isinstance(accepted, bool):
+            requirements_satisfied = accepted
+        elif task.get("stage_verdict") == "pass":
+            requirements_satisfied = True
+        elif task.get("stage_verdict") == "blocked":
+            requirements_satisfied = False
 
     return {
         "run_id": run_id,

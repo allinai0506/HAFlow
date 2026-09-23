@@ -42,6 +42,7 @@ def mock_external_replay_commands(replay_engine_db: Path, monkeypatch):
             "goal": options["--goal"],
             "prompt": options["--prompt"],
             "replay_of": options["--replay-of"],
+            "agent_policy": __import__("json").loads(options["--agent-policy"]),
         }
         state_db.save_task(task, db_path=replay_engine_db)
         ledger = TrajectoryLedger(replay_engine_db)
@@ -117,14 +118,129 @@ def test_replay_uses_only_source_run_private_snapshot_by_default(
     workflow = state_db.get_workflow(workflow_id, db_path=replay_engine_db)
     workflow["workflow_file"] = source_snapshot
     state_db.save_workflow(workflow, db_path=replay_engine_db)
-
-    out = replay_engine.replay_run(src, policy={"mode": "strict"},
-                                   db_path=replay_engine_db)
+    global_policy = tmp_path / "stage-policies.json"
+    global_policy.write_text('{"agent_policy":{"mode":"global"}}', encoding="utf-8")
+    monkeypatch.setenv("HERDR_STAGE_POLICIES", str(global_policy))
+    out = replay_engine.replay_run(src, db_path=replay_engine_db)
 
     assert out["definition"]["nodes"][0]["id"] == "frozen-source"
-    assert out["spec"]["policy"] == {"mode": "strict"}
-    assert out["spec"]["lineage"]["policy"] == {"mode": "strict"}
+    assert out["spec"]["policy"] is None
+    assert out["spec"]["lineage"]["policy"] is None
     assert out["spec"]["snapshot"] == out["snapshot"]
+    assert out["policy"] is None
+    assert out["policy_source"] == "unavailable"
+
+
+def test_definition_override_is_not_a_source_policy(replay_engine_db: Path):
+    from herdr import replay_engine
+
+    src, _, _ = _source_run(replay_engine_db)
+    out = replay_engine.replay_run(
+        src,
+        definition={"nodes": [{"id": "dev", "agent_policy": {"mode": "target-only"}}]},
+        db_path=replay_engine_db,
+    )
+    assert out["policy"] is None
+    assert out["policy_source"] == "unavailable"
+
+
+def test_replay_inherits_frozen_policy_and_launches_with_it(replay_engine_db: Path, monkeypatch, tmp_path: Path):
+    from herdr import eval_store, projects, replay_engine
+
+    monkeypatch.setenv("HERDR_WORKFLOW_DOCS_DIR", str(tmp_path / "workflows"))
+    src, _, workflow_id = _source_run(replay_engine_db)
+    source_snapshot = projects.freeze_run_definition(workflow_id, definition={
+        "nodes": [{"id": "dev", "agent_policy": {"mode": "strict"}}]})
+    workflow = state_db.get_workflow(workflow_id, db_path=replay_engine_db)
+    workflow["workflow_file"] = source_snapshot
+    state_db.save_workflow(workflow, db_path=replay_engine_db)
+    out = replay_engine.replay_run(src, db_path=replay_engine_db)
+    options = dict(zip(out["launch_argv"][2::2], out["launch_argv"][3::2]))
+    assert options["--agent-policy"] == '{"mode": "strict"}'
+    assert out["policy_source"] == "source_snapshot"
+    task = state_db.get_task(out["task_id"], db_path=replay_engine_db)
+    assert task is not None and task["agent_policy"] == {"mode": "strict"}
+    assert task["run_id"] == out["replay_run_id"]
+    assert task["replay_of"] == src
+    assert eval_store.get_replay_lineage(
+        out["replay_run_id"], db_path=replay_engine_db) == [src, out["replay_run_id"]]
+
+
+def test_source_task_policy_precedes_workflow_policy(replay_engine_db: Path, monkeypatch, tmp_path: Path):
+    from herdr import projects, replay_engine
+
+    monkeypatch.setenv("HERDR_WORKFLOW_DOCS_DIR", str(tmp_path / "workflows"))
+    src, task_id, workflow_id = _source_run(replay_engine_db)
+    task = state_db.get_task(task_id, db_path=replay_engine_db)
+    task["agent_policy"] = {"mode": "task-strict"}
+    state_db.save_task(task, db_path=replay_engine_db)
+    source_snapshot = projects.freeze_run_definition(workflow_id, definition={
+        "nodes": [{"id": "dev", "agent_policy": {"mode": "workflow-observe"}}]})
+    workflow = state_db.get_workflow(workflow_id, db_path=replay_engine_db)
+    workflow["workflow_file"] = source_snapshot
+    state_db.save_workflow(workflow, db_path=replay_engine_db)
+
+    out = replay_engine.replay_run(src, db_path=replay_engine_db)
+    assert out["policy"] == {"mode": "task-strict"}
+    assert out["policy_source"] == "source_snapshot"
+
+
+def test_source_workflow_frozen_metadata_supplies_policy(replay_engine_db: Path):
+    from herdr import replay_engine
+
+    src, _, workflow_id = _source_run(replay_engine_db)
+    workflow = state_db.get_workflow(workflow_id, db_path=replay_engine_db)
+    workflow["frozen_metadata"] = {
+        "nodes": [{"id": "dev", "agent_policy": {"mode": "workflow-strict"}}]
+    }
+    state_db.save_workflow(workflow, db_path=replay_engine_db)
+    out = replay_engine.replay_run(
+        src,
+        definition={"nodes": [{"id": "dev", "agent_policy": {"mode": "target-only"}}]},
+        db_path=replay_engine_db,
+    )
+    assert out["policy"] == {"mode": "workflow-strict"}
+    assert out["policy_source"] == "source_snapshot"
+
+
+def test_source_replay_spec_policy_precedes_task_policy(replay_engine_db: Path, monkeypatch, tmp_path: Path):
+    from herdr import eval_store, projects, replay_engine
+
+    monkeypatch.setenv("HERDR_WORKFLOW_DOCS_DIR", str(tmp_path / "workflows"))
+    src, task_id, workflow_id = _source_run(replay_engine_db)
+    task = state_db.get_task(task_id, db_path=replay_engine_db)
+    task["agent_policy"] = {"mode": "task-observe"}
+    state_db.save_task(task, db_path=replay_engine_db)
+    source_snapshot = projects.freeze_run_definition(workflow_id, definition={
+        "nodes": [{"id": "dev", "agent_policy": {"mode": "workflow-observe"}}]})
+    workflow = state_db.get_workflow(workflow_id, db_path=replay_engine_db)
+    workflow["workflow_file"] = source_snapshot
+    state_db.save_workflow(workflow, db_path=replay_engine_db)
+    eval_store.record_replay_spec(
+        "run-ancestor", src, definition={"nodes": []}, snapshot=source_snapshot,
+        policy={"mode": "replay-spec-strict"}, db_path=replay_engine_db)
+
+    out = replay_engine.replay_run(src, db_path=replay_engine_db)
+    assert out["policy"] == {"mode": "replay-spec-strict"}
+
+
+def test_explicit_policy_override_preserves_source_run(replay_engine_db: Path, monkeypatch, tmp_path: Path):
+    from herdr import projects, replay_engine
+
+    monkeypatch.setenv("HERDR_WORKFLOW_DOCS_DIR", str(tmp_path / "workflows"))
+    src, source_task_id, workflow_id = _source_run(replay_engine_db)
+    source_snapshot = projects.freeze_run_definition(workflow_id, definition={
+        "nodes": [{"id": "dev", "agent_policy": {"mode": "strict"}}]})
+    workflow = state_db.get_workflow(workflow_id, db_path=replay_engine_db)
+    workflow["workflow_file"] = source_snapshot
+    state_db.save_workflow(workflow, db_path=replay_engine_db)
+    before = state_db.get_task(source_task_id, db_path=replay_engine_db)
+    out = replay_engine.replay_run(src, policy={"mode": "observe"}, db_path=replay_engine_db)
+    assert out["policy"] == {"mode": "observe"}
+    assert out["policy_source"] == "explicit_override"
+    assert state_db.get_task(source_task_id, db_path=replay_engine_db) == before
+    assert __import__("json").loads(Path(source_snapshot).read_text())[
+        "nodes"][0]["agent_policy"] == {"mode": "strict"}
 
 
 def test_replay_runs_preflight_then_real_launch_without_synthetic_events(
@@ -174,19 +290,44 @@ def test_failed_launch_is_reported_without_fabricating_run_events(
     src, _, _ = _source_run(replay_engine_db)
 
     def fail_launch(argv, timeout=120, db_path=None):
+        if argv[:2] == ["herdr-task", "launch"]:
+            options = dict(zip(argv[2::2], argv[3::2]))
+            state_db.save_task({
+                "task_id": options["--task-id"],
+                "workflow_id": options["--workflow-id"],
+                "run_id": options["--run-id"],
+                "status": "working",
+                "replay_of": options["--replay-of"],
+            }, db_path=replay_engine_db)
+            from herdr.trajectory import TrajectoryLedger
+
+            TrajectoryLedger(replay_engine_db).append_event({
+                "run_id": options["--run-id"], "task_id": options["--task-id"],
+                "workflow_id": options["--workflow-id"], "event_type": "task_started",
+            })
+            from herdr.state_store import get_state_store, sync_tasks_projection
+
+            sync_tasks_projection(store=get_state_store(db_path=replay_engine_db))
         return {"argv": argv, "ok": argv[0] == "herdr-preflight"}
 
     monkeypatch.setattr(replay_engine, "_run_probe_argv", fail_launch)
     with pytest.raises(RuntimeError, match="launch chain failed"):
         replay_engine.replay_run(
-            src, definition={"nodes": [{"id": "dev"}]}, db_path=replay_engine_db)
+            src, replay_run_id="run-failed-target", task_id="t-failed-target",
+            workflow_id="wf-failed-target", definition={"nodes": [{"id": "dev"}]},
+            db_path=replay_engine_db)
 
     specs = eval_store.list_replay_specs(db_path=replay_engine_db)
-    assert len(specs) == 1
-    assert state_db.list_tasks(
-        workflow_id=specs[0]["workflow_id"], db_path=replay_engine_db) == []
-    assert state_db.list_trajectory_events(
-        specs[0]["replay_run_id"], db_path=replay_engine_db) == []
+    assert specs == []
+    assert state_db.get_task("t-failed-target", db_path=replay_engine_db) is None
+    assert state_db.list_trajectory_events("run-failed-target", db_path=replay_engine_db) == []
+    assert eval_store.get_replay_lineage("run-failed-target", db_path=replay_engine_db) == []
+    workflows_projection = replay_engine_db.parent / "workflows.json"
+    tasks_projection = replay_engine_db.parent / "tasks.json"
+    if workflows_projection.exists():
+        assert "wf-failed-target" not in workflows_projection.read_text(encoding="utf-8")
+    if tasks_projection.exists():
+        assert "t-failed-target" not in tasks_projection.read_text(encoding="utf-8")
 
 
 def test_definition_override_allows_replay_without_source_snapshot(

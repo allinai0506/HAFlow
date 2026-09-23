@@ -453,6 +453,18 @@ def get_replay_spec(
         conn.close()
 
 
+def delete_replay_spec(replay_run_id: str, *, db_path: Path | None = None) -> bool:
+    """Remove one replay edge during compensation before a successful return."""
+    conn = _open(db_path)
+    try:
+        cur = conn.execute("DELETE FROM replay_specs WHERE replay_run_id = ?",
+                           (str(replay_run_id),))
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
 def get_replay_spec_by_id(
     spec_id: str,
     *,
@@ -608,6 +620,7 @@ create_replay_spec = record_replay_spec
 __all__ = [
     "create_eval_result",
     "create_replay_spec",
+    "delete_replay_spec",
     "get_eval_result",
     "get_latest_eval_result",
     "get_max_eval_revision",

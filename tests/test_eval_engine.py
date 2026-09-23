@@ -32,7 +32,6 @@ def _save_task(db_path: Path, task_id: str, run_id: str, **overrides):
         "stage": overrides.get("node", "dev"),
         "agent": overrides.get("agent", "opencode"),
         "status": overrides.get("status", "completed"),
-        "stage_verdict": overrides.get("stage_verdict", "pass"),
         "goal": "ship it",
     }
     task.update({k: v for k, v in overrides.items() if k not in task})
@@ -56,7 +55,7 @@ def _append(db_path: Path, run_id: str, event_type: str, **fields):
 
 
 def _completed_pass_run(db_path: Path, run_id="run-eng-pass", task_id="t-eng-pass"):
-    _save_task(db_path, task_id, run_id, status="completed", stage_verdict="pass")
+    _save_task(db_path, task_id, run_id, status="completed", acceptance_verdict=True)
     _append(db_path, run_id, "task_started", task_id=task_id)
     _append(
         db_path,
@@ -71,14 +70,43 @@ def _completed_pass_run(db_path: Path, run_id="run-eng-pass", task_id="t-eng-pas
 def test_evaluate_pass_collects_authoritative_facts(engine_db: Path):
     from herdr import eval_engine
 
-    run_id, task_id = _completed_pass_run(engine_db)
+    task_id, run_id = "t-eng-pass", "run-eng-pass"
+    _save_task(engine_db, task_id, run_id, status="completed")
+    _append(engine_db, run_id, "task_started", task_id=task_id)
+    _append(engine_db, run_id, "verification_completed", task_id=task_id,
+            verification={"passed": True, "evidence_id": "ev-1"})
     result = eval_engine.evaluate_run(run_id, db_path=engine_db)
     assert result["run_id"] == run_id
     assert result["task_id"] == task_id
-    assert result["requirements_satisfied"] is True
+    assert result["requirements_satisfied"] is None
     assert result["final_status"] == "completed"
     assert result["verification_passed"] is True
     assert isinstance(result["evidence"], list) and result["evidence"]
+
+
+def test_acceptance_fact_is_independent_of_verification(engine_db: Path):
+    from herdr import eval_engine
+
+    _save_task(engine_db, "t-accept", "run-accept", status="completed",
+               acceptance_verdict=True)
+    _append(engine_db, "run-accept", "task_started", task_id="t-accept")
+    _append(engine_db, "run-accept", "verification_completed", task_id="t-accept",
+            verification={"passed": False})
+    result = eval_engine.evaluate_run("run-accept", db_path=engine_db)
+    assert result["requirements_satisfied"] is True
+    assert result["verification_passed"] is False
+
+
+def test_failed_verification_does_not_imply_requirements_false(engine_db: Path):
+    from herdr import eval_engine
+
+    _save_task(engine_db, "t-fail-ver", "run-fail-ver", status="completed")
+    _append(engine_db, "run-fail-ver", "task_started", task_id="t-fail-ver")
+    _append(engine_db, "run-fail-ver", "verification_completed", task_id="t-fail-ver",
+            verification={"passed": False})
+    result = eval_engine.evaluate_run("run-fail-ver", db_path=engine_db)
+    assert result["requirements_satisfied"] is None
+    assert result["verification_passed"] is False
 
 
 def test_evaluate_null_when_verification_missing(engine_db: Path):
@@ -185,7 +213,7 @@ def test_stage_verdict_empty_normalizes_to_null(engine_db: Path):
         verification={"passed": True},
     )
     result = eval_engine.evaluate_run("run-empty", db_path=engine_db)
-    assert result["requirements_satisfied"] is True
+    assert result["requirements_satisfied"] is None
 
 
 def test_loose_verification_never_coerced(engine_db: Path):
