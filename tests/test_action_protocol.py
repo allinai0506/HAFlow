@@ -225,7 +225,6 @@ def test_verify_result_reflects_fresh_working_task_state(tmp_path):
         store, task, _evaluation(), _decision(ACTION_VERIFY),
         {"enabled": True, "enforce": True, "policy": {"max_verifications": 2}},
     )
-
     with patch.object(
         controller.subprocess, "run",
         return_value=type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
@@ -339,6 +338,127 @@ def test_old_deliverables_cannot_bypass_pending_verify_in_watchdog(tmp_path):
          )()):
         controller.handle_event(task["task_id"], "idle")
     set_status.assert_called_once_with(task["task_id"], "agent_done")
+
+
+def test_old_eval_done_is_not_new_verify_evidence(tmp_path):
+    controller = importlib.import_module("services.herdr-controller")
+    loop_dir = tmp_path / ".herdr-loop"
+    loop_dir.mkdir()
+    eval_done = loop_dir / "EVAL_DONE.json"
+    eval_done.write_text(
+        '{"iteration": 4, "completed_at": 100.0, "total_tests": 10, '
+        '"passed_tests": 10, "converged": true}',
+        encoding="utf-8",
+    )
+    task = dict(_task(), clone_path=str(tmp_path))
+    baseline = controller._verification_snapshot(str(tmp_path))
+    dispatch = {
+        "timestamp": 200.0,
+        "payload": {
+            "dispatch_started_at": 200.0,
+            "evidence_baseline": baseline,
+        },
+    }
+    assert controller._verification_evidence_is_new(
+        task, dispatch, {"iteration": 4}
+    ) is False
+
+
+def test_failed_verify_remains_a_blocking_rework_condition(tmp_path):
+    controller = importlib.import_module("services.herdr-controller")
+    store = SQLiteStateStore(tmp_path / "state.db")
+    task = dict(_task(), status="rework")
+    store.save_task(task)
+    failed = request_intervention(
+        store, task, _evaluation(), _decision(ACTION_VERIFY),
+        {"enabled": True, "enforce": True, "policy": {"max_verifications": 0}},
+    )
+    assert failed["status"] == "failed"
+    assert controller._verification_execution_complete_for_rework(task, store) is False
+
+
+def test_verify_dispatch_intent_recovery_does_not_prompt_twice(tmp_path):
+    controller = importlib.import_module("services.herdr-controller")
+    store = SQLiteStateStore(tmp_path / "state.db")
+    task = dict(_task(), status="working", pane_id="w1:p1")
+    store.save_task(task)
+    item = request_intervention(
+        store, task, _evaluation(), _decision(ACTION_VERIFY),
+        {"enabled": True, "enforce": True, "policy": {"max_verifications": 2}},
+    )
+    store.claim_intervention(item["intervention_id"], lease_seconds=-1)
+    store.record_event(
+        "verification_dispatch_intent",
+        {"intervention_id": item["intervention_id"], "decision_id": "decision-1",
+         "action": ACTION_VERIFY, "pane_id": "w1:p1", "dispatch_started_at": 10.0},
+        task_id=task["task_id"], workflow_id=task["workflow_id"],
+        source="supervisor", run_id=task["run_id"],
+    )
+    calls = []
+    with patch.object(controller.subprocess, "run", side_effect=lambda *args, **kwargs: calls.append(args)):
+        result = controller._execute_supervisor_intervention(
+            task, {"intervention": item, "_recovery": True},
+            controller._supervisor_verify, store=store,
+        )
+    assert calls == []
+    assert result["dispatch_recovered"] is True
+    assert store.get_intervention(item["intervention_id"])["status"] == "completed"
+
+
+def test_verify_prompt_success_before_receipt_crash_does_not_prompt_again(tmp_path):
+    controller = importlib.import_module("services.herdr-controller")
+    store = SQLiteStateStore(tmp_path / "state.db")
+    task = dict(_task(), status="working", pane_id="w1:p1")
+    store.save_task(task)
+    item = request_intervention(
+        store, task, _evaluation(), _decision(ACTION_VERIFY),
+        {"enabled": True, "enforce": True, "policy": {"max_verifications": 2}},
+    )
+    store.claim_intervention(
+        item["intervention_id"], execution_owner="crashed-controller",
+        lease_seconds=-1,
+    )
+    original_record = store.record_event
+    calls = []
+
+    def crash_after_prompt(event_type, payload, **kwargs):
+        if event_type == "verification_dispatched":
+            raise SystemExit("controller crash after prompt acceptance")
+        return original_record(event_type, payload, **kwargs)
+
+    def prompt(command, **kwargs):
+        calls.append(command)
+        return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    with patch.object(controller.subprocess, "run", side_effect=prompt), \
+         patch.object(store, "record_event", side_effect=crash_after_prompt), \
+         pytest.raises(SystemExit):
+        controller._supervisor_verify(task, {"intervention": item}, store=store)
+    recovered = controller.recover_pending_interventions(store=store, run_id=task["run_id"])
+    assert len(calls) == 1
+    assert recovered[0]["result"]["dispatch_recovered"] is True
+    assert store.get_intervention(item["intervention_id"])["status"] == "completed"
+
+
+def test_verify_dispatch_failure_blocks_rework_healing(tmp_path):
+    controller = importlib.import_module("services.herdr-controller")
+    store = SQLiteStateStore(tmp_path / "state.db")
+    task = dict(_task(), status="working", pane_id="w1:p1")
+    store.save_task(task)
+    item = request_intervention(
+        store, task, _evaluation(), _decision(ACTION_VERIFY),
+        {"enabled": True, "enforce": True, "policy": {"max_verifications": 2}},
+    )
+    failed_result = type("Result", (), {"returncode": 1, "stdout": "", "stderr": "send failed"})()
+    with patch.object(controller.subprocess, "run", return_value=failed_result), \
+         pytest.raises(RuntimeError, match="dispatch failed"):
+        controller._execute_supervisor_intervention(
+            task, {"intervention": item}, controller._supervisor_verify, store=store,
+        )
+    assert store.get_intervention(item["intervention_id"])["status"] == "failed"
+    assert controller._verification_execution_complete_for_rework(
+        dict(task, status="rework"), store,
+    ) is False
 
 
 def test_durable_ledger_read_failure_blocks_done(tmp_path):

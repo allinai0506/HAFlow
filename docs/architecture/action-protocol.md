@@ -71,11 +71,19 @@ writes `passed=true` and never substitutes for the existing `tests_completed`
 or `verification_completed` facts.
 
 The later `tests_completed`/`verification_completed` receipt carries the same
-Intervention identity. If the Controller crashes after dispatch, recovery uses
-that dispatch event as Intervention-specific execution evidence and completes
-the row without sending a second prompt. Rework watchdog and recovery paths
-also require a matching new verification receipt; old deliverables alone
-cannot bypass a pending VERIFY.
+Intervention identity. It is accepted only when the current `EVAL_DONE.json`
+is a new version relative to the dispatch baseline (hash and evaluator
+completion time); an old snapshot cannot be relabeled as the new VERIFY
+receipt. Rework watchdog and recovery paths require a matching new
+verification receipt; old deliverables alone cannot bypass a pending VERIFY.
+
+Dispatch first records a durable `verification_dispatch_intent` containing the
+Intervention identity and evidence baseline. If the Controller crashes after
+the prompt is accepted but before `verification_dispatched` is written,
+recovery consumes that intent and completes the dispatch receipt without
+sending the prompt again. A dispatch failure leaves the latest VERIFY
+Intervention failed and keeps rework blocking; it cannot be healed to
+`agent_done` from old deliverables.
 
 VERIFY uses the policy `max_verifications` as a durable action-layer budget.
 The count is calculated from persisted VERIFY rows in requested, running,

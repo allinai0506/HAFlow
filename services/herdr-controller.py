@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import json
+import hashlib
 import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -3552,6 +3553,45 @@ def _dispatch_supervisor_verification(task, decision, store):
         raise RuntimeError("VERIFY dispatch requires task pane_id")
     intervention_id = intervention.get("intervention_id")
     decision_id = intervention.get("decision_id") or decision.get("decision_id")
+    from herdr.trajectory import run_id_for_task
+    prior_intent = _latest_verification_dispatch_intent(
+        task, store, intervention_id=intervention_id,
+    )
+    if prior_intent is not None:
+        payload = dict(prior_intent.get("payload") or {})
+        payload["dispatch_recovered"] = True
+        store.record_event(
+            "verification_dispatched",
+            payload,
+            workflow_id=task.get("workflow_id"),
+            node_id=task.get("node") or task.get("stage"),
+            task_id=task.get("task_id"),
+            agent_id=task.get("agent"),
+            source="supervisor",
+            run_id=run_id_for_task(task),
+        )
+        return {"verification_dispatched": True, "dispatch_recovered": True}
+    dispatch_started_at = time.time()
+    evidence_baseline = _verification_snapshot(task.get("clone_path"))
+    dispatch_payload = {
+        "intervention_id": intervention_id,
+        "decision_id": decision_id,
+        "action": "VERIFY",
+        "pane_id": pane_id,
+        "dispatch_started_at": dispatch_started_at,
+        "evidence_baseline": evidence_baseline,
+        "verification_pending": True,
+    }
+    store.record_event(
+        "verification_dispatch_intent",
+        dispatch_payload,
+        workflow_id=task.get("workflow_id"),
+        node_id=task.get("node") or task.get("stage"),
+        task_id=task.get("task_id"),
+        agent_id=task.get("agent"),
+        source="supervisor",
+        run_id=run_id_for_task(task),
+    )
     prompt = (
         "Supervisor requested a fresh verification execution for this task.\n"
         "Run the existing project verification/test loop now (including "
@@ -3571,16 +3611,9 @@ def _dispatch_supervisor_verification(task, decision, store):
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "verification prompt failed").strip()
         raise RuntimeError(f"VERIFY dispatch failed: {detail[:400]}")
-    from herdr.trajectory import run_id_for_task
     store.record_event(
         "verification_dispatched",
-        {
-            "intervention_id": intervention_id,
-            "decision_id": decision_id,
-            "action": "VERIFY",
-            "pane_id": pane_id,
-            "verification_pending": True,
-        },
+        dispatch_payload,
         workflow_id=task.get("workflow_id"),
         node_id=task.get("node") or task.get("stage"),
         task_id=task.get("task_id"),
@@ -3589,6 +3622,44 @@ def _dispatch_supervisor_verification(task, decision, store):
         run_id=run_id_for_task(task),
     )
     return {"verification_dispatched": True}
+
+
+def _verification_snapshot(clone_path):
+    """Return the version of EVAL_DONE visible at a dispatch boundary."""
+    if not clone_path:
+        return None
+    path = Path(clone_path) / ".herdr-loop" / "EVAL_DONE.json"
+    try:
+        raw = path.read_bytes()
+        snapshot = json.loads(raw.decode("utf-8"))
+        return {
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            "mtime_ns": path.stat().st_mtime_ns,
+            "iteration": snapshot.get("iteration"),
+            "completed_at": snapshot.get("completed_at"),
+        }
+    except Exception:
+        return None
+
+
+def _verification_evidence_is_new(task, dispatch, test_evidence):
+    """Reject EVAL_DONE evidence that predates the current VERIFY dispatch."""
+    payload = dispatch.get("payload") or {}
+    baseline = payload.get("evidence_baseline")
+    started_at = float(payload.get("dispatch_started_at") or dispatch.get("timestamp") or 0)
+    current = _verification_snapshot(task.get("clone_path"))
+    if current is None:
+        return False
+    if baseline and current.get("sha256") == baseline.get("sha256"):
+        return False
+    completed_at = current.get("completed_at")
+    if started_at and completed_at is not None:
+        try:
+            if float(completed_at) <= started_at:
+                return False
+        except (TypeError, ValueError):
+            return False
+    return True
 
 
 def _intervention_execution_evidence(task, intervention, store):
@@ -3619,6 +3690,8 @@ def _intervention_execution_evidence(task, intervention, store):
     for event in store.list_events(task_id=task_id, event_type="task_transition", limit=200, desc=True):
         payload = event.get("payload") or {}
         if (
+            action == "RETRY"
+            and
             event.get("run_id") == run_id
             and payload.get("intervention_id") == intervention_id
             and payload.get("action") == action
@@ -3665,22 +3738,59 @@ def _latest_verification_dispatch(task, store=None):
     return None
 
 
+def _latest_verification_dispatch_intent(task, store=None, intervention_id=None):
+    store = store or _get_store()
+    from herdr.trajectory import run_id_for_task
+    rows = store.list_events(
+        task_id=task.get("task_id"), event_type="verification_dispatch_intent",
+        source="supervisor", limit=100, desc=True,
+    )
+    expected_run = run_id_for_task(task)
+    for event in rows:
+        payload = event.get("payload") or {}
+        if (
+            event.get("run_id") == expected_run
+            and payload.get("action") == "VERIFY"
+            and (intervention_id is None or payload.get("intervention_id") == intervention_id)
+        ):
+            return event
+    return None
+
+
 def _verification_execution_complete_for_rework(task, store=None):
     """Old deliverables cannot heal a Task while a new VERIFY lacks evidence."""
     store = store or _get_store()
     try:
         from herdr.trajectory import run_id_for_task
+        verify_rows = store.list_interventions(
+            run_id=run_id_for_task(task),
+            task_id=task.get("task_id"),
+        )
+        active_verify = [
+            row for row in verify_rows
+            if row.get("action") == "VERIFY"
+            and row.get("status") != "superseded"
+        ]
+        latest_verify = max(
+            active_verify,
+            key=lambda row: float(row.get("requested_at") or 0),
+        ) if active_verify else None
         dispatch = _latest_verification_dispatch(task, store)
+        dispatch_intervention_id = (
+            (dispatch.get("payload") or {}).get("intervention_id")
+            if dispatch is not None else None
+        )
+        if latest_verify and latest_verify.get("status") in ("requested", "running", "failed"):
+            if dispatch_intervention_id != latest_verify.get("intervention_id"):
+                return False
         if dispatch is None:
-            verify_rows = store.list_interventions(
-                run_id=run_id_for_task(task),
-                task_id=task.get("task_id"),
+            if not active_verify:
+                return True
+            latest = max(
+                active_verify,
+                key=lambda row: float(row.get("requested_at") or 0),
             )
-            return not any(
-                row.get("action") == "VERIFY"
-                and row.get("status") in ("requested", "running")
-                for row in verify_rows
-            )
+            return latest.get("status") not in ("requested", "running", "failed")
         intervention_id = (dispatch.get("payload") or {}).get("intervention_id")
         for event in store.list_events(
             task_id=task.get("task_id"), event_type="verification_completed",
@@ -4097,6 +4207,12 @@ def check_task_tests_completed(task, store=None, now=None):
     }
     dispatch = _latest_verification_dispatch(task, st)
     if dispatch is not None:
+        if not _verification_evidence_is_new(task, dispatch, test_evidence):
+            print(
+                f"[VERIFY EVIDENCE DEFERRED] task={task_id}: "
+                "EVAL_DONE predates current VERIFY dispatch"
+            )
+            return None
         dispatch_payload = dispatch.get("payload") or {}
         verification["intervention_id"] = dispatch_payload.get("intervention_id")
         verification["decision_id"] = dispatch_payload.get("decision_id")
