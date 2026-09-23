@@ -908,3 +908,13 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - 背景：`wf-haflow-0923-01` test 三连 blocked 后零 live 任务死停——fix-loop 通知等总指挥 120s 超时即丢弃；`FIX_LOOP_MAX` 只显示不生效（走到 loop=4）；作废后 sweep 以陈旧完成越过 implementation 空推进。
 - 新增 `herdr/fix_loop.py` 纯决策函数；`handle_fix_loop` 作废前先过预算/同判据门禁，超限或重复只升级不作废；超时转 attention 持久化，sweep 补投；作废设 `pending_redo` 闩挡 advance，重做完成清闩/计数/升级。
 - 证据：`tests/test_fix_loop_recovery.py` 23 passed；全量 `pytest -q` 1130 passed + 44 subtests；教训 `docs/lessons/lessons-learned.md` §85。
+
+## [2026-09-23] fix | 直派携带候选分支 + fix 落分支 + supersede 存 WIP
+- `herdr/direct_dispatch.py`：spec 携带消毒后的 `onto_branch`（依赖链优先）；`services/herdr-controller.py` 透传 `--onto`，空候选（`rev-list base..onto==0`）直接 fallback 不烧内环，git 失败则 fail-open。
+- fix-loop 消息模板默认 `--integration-mode git`；`bin/herdr-task#supersede_task` 作废后 best-effort auto-commit WIP（不含内部目录，不 push，失败不阻断）。
+- 动因：r6 直派丢 onto 测 main 空转；fix4 七文件 stranded。
+- 证据：`tests/test_dispatch_candidate.py` 11 passed；全量 `pytest -q` 1141 passed + 44 subtests；教训 §86。
+
+## [2026-09-23] wrapup | wf-haflow-0923-01 Eval+Replay V1 收尾 abandon
+- fix-loop 6/3耗尽，test-auto-r6 blocked（BASELINE_MATCH @3be4362，缺Eval/Replay/Compare/CLI及专项测试）；impl-fix4实现仅存clone未集成。
+- 用户确认接受现状推进后指令直接收尾：保留blocked证据，abandon关闭，不再重派同范围fix；clones保留。
