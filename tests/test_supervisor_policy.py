@@ -58,6 +58,14 @@ class VerifyTests(unittest.TestCase):
         }, certainty=0.03), _facts(), CONFIG)
         self.assertEqual(decision.action, policy.VERIFY)
 
+    def test_verify_budget_exhaustion_does_not_emit_verify(self):
+        decision = policy.decide(_evaluation({
+            "requirements_satisfied": 0.71, "implementation_complete": 0.71,
+            "tests_sufficient": 0.52, "needs_verification": 0.55,
+        }), _facts(verification_count=CONFIG["policy"]["max_verifications"]), CONFIG)
+        self.assertEqual(decision.action, policy.CONTINUE)
+        self.assertIn("verification budget exhausted", " ".join(decision.reasons))
+
 
 class RetryTests(unittest.TestCase):
     STUCK = {"worker_stuck": 0.9, "meaningful_progress": 0.05}

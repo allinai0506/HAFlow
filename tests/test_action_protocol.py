@@ -24,6 +24,7 @@ def _task(run_id="run-1", task_id="task-1"):
         "workflow_id": "wf-1",
         "task_id": task_id,
         "node": "implementation",
+        "pane_id": "w1:p1",
         "status": "agent_done",
     }
 
@@ -225,15 +226,208 @@ def test_verify_result_reflects_fresh_working_task_state(tmp_path):
         {"enabled": True, "enforce": True, "policy": {"max_verifications": 2}},
     )
 
-    result = controller._execute_supervisor_intervention(
-        task, {"intervention": item}, controller._supervisor_verify, store=store,
-    )
+    with patch.object(
+        controller.subprocess, "run",
+        return_value=type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
+    ):
+        result = controller._execute_supervisor_intervention(
+            task, {"intervention": item}, controller._supervisor_verify, store=store,
+        )
     fresh = store.get_task(task["task_id"])
 
     assert result["verification_pending"] is True
     assert result["new_status"] == fresh["status"]
     assert result["new_status"] == "rework"
     assert result["verification_requested"] is True
+
+
+def test_verify_dispatches_real_agent_execution_with_provenance(tmp_path):
+    controller = importlib.import_module("services.herdr-controller")
+    store = SQLiteStateStore(tmp_path / "state.db")
+    task = dict(_task(), status="working", pane_id="w1:p1")
+    store.save_task(task)
+    item = request_intervention(
+        store, task, _evaluation(), _decision(ACTION_VERIFY),
+        {"enabled": True, "enforce": True, "policy": {"max_verifications": 2}},
+    )
+    calls = []
+
+    def prompt(command, **kwargs):
+        calls.append((command, kwargs))
+        return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    with patch.object(controller.subprocess, "run", side_effect=prompt):
+        result = controller._execute_supervisor_intervention(
+            task, {"intervention": item}, controller._supervisor_verify, store=store,
+        )
+
+    assert calls[0][0][:3] == ["herdr", "agent", "prompt"]
+    assert calls[0][0][3] == "w1:p1"
+    assert item["intervention_id"] in calls[0][0][4]
+    assert "decision-1" in calls[0][0][4]
+    assert result["verification_dispatched"] is True
+    dispatches = store.list_events(task_id="task-1", event_type="verification_dispatched")
+    assert dispatches[0]["payload"]["intervention_id"] == item["intervention_id"]
+    assert store.get_intervention(item["intervention_id"])["status"] == "completed"
+
+
+def test_verify_dispatch_evidence_prevents_recovery_redispatch(tmp_path):
+    controller = importlib.import_module("services.herdr-controller")
+    store = SQLiteStateStore(tmp_path / "state.db")
+    task = dict(_task(), status="working", pane_id="w1:p1")
+    store.save_task(task)
+    item = request_intervention(
+        store, task, _evaluation(), _decision(ACTION_VERIFY),
+        {"enabled": True, "enforce": True, "policy": {"max_verifications": 2}},
+    )
+    store.claim_intervention(item["intervention_id"], lease_seconds=-1)
+    calls = []
+
+    def prompt(command, **kwargs):
+        calls.append(command)
+        return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    with patch.object(controller.subprocess, "run", side_effect=prompt):
+        controller._supervisor_verify(task, {"intervention": item}, store=store)
+        result = controller._execute_supervisor_intervention(
+            task, {"intervention": item, "_recovery": True},
+            controller._supervisor_verify, store=store,
+        )
+
+    assert len(calls) == 1
+    assert result["execution_evidence"] is True
+    assert store.get_intervention(item["intervention_id"])["status"] == "completed"
+
+
+def test_old_deliverables_cannot_bypass_pending_verify_in_watchdog(tmp_path):
+    controller = importlib.import_module("services.herdr-controller")
+    store = SQLiteStateStore(tmp_path / "state.db")
+    task = dict(_task(), status="rework", pane_id="w1:p1")
+    store.save_task(task)
+    item = request_intervention(
+        store, task, _evaluation(), _decision(ACTION_VERIFY),
+        {"enabled": True, "enforce": True, "policy": {"max_verifications": 2}},
+    )
+    store.record_event(
+        "verification_dispatched",
+        {"intervention_id": item["intervention_id"], "action": ACTION_VERIFY},
+        task_id=task["task_id"], workflow_id=task["workflow_id"],
+        source="supervisor", run_id=task["run_id"],
+    )
+    with patch.object(controller, "_get_store", return_value=store), \
+         patch.object(controller, "get_task", return_value=task), \
+         patch.object(controller, "check_task_deliverables_ready", return_value=True), \
+         patch.object(controller, "set_task_status") as set_status, \
+         patch.object(controller.subprocess, "run", return_value=type(
+             "Result", (), {"returncode": 0, "stdout": "", "stderr": ""}
+         )()):
+        controller.handle_event(task["task_id"], "idle")
+    set_status.assert_not_called()
+
+    store.record_event(
+        "verification_completed",
+        {"verification": {"intervention_id": item["intervention_id"]}},
+        task_id=task["task_id"], workflow_id=task["workflow_id"],
+        source="trajectory", run_id=task["run_id"],
+    )
+    with patch.object(controller, "_get_store", return_value=store), \
+         patch.object(controller, "get_task", return_value=task), \
+         patch.object(controller, "check_task_deliverables_ready", return_value=True), \
+         patch.object(controller, "set_task_status", return_value=False) as set_status, \
+         patch.object(controller.subprocess, "run", return_value=type(
+             "Result", (), {"returncode": 0, "stdout": "", "stderr": ""}
+         )()):
+        controller.handle_event(task["task_id"], "idle")
+    set_status.assert_called_once_with(task["task_id"], "agent_done")
+
+
+def test_durable_ledger_read_failure_blocks_done(tmp_path):
+    controller = importlib.import_module("services.herdr-controller")
+
+    class BrokenLedger:
+        def list_interventions(self, **_kwargs):
+            raise RuntimeError("ledger unavailable")
+
+    task = dict(_task(), status="agent_done")
+    with patch.object(controller, "_get_store", return_value=BrokenLedger()), \
+         patch.object(controller, "enqueue_coordinator_event") as enqueue:
+        assert controller.emit_done_if_allowed(task) is False
+    enqueue.assert_not_called()
+
+
+def test_pending_intervention_raises_when_durable_ledger_is_unknown(tmp_path):
+    from herdr.supervisor.config import load_config
+    from herdr.supervisor.harness import pending_intervention
+
+    class BrokenLedger:
+        def list_interventions(self, **_kwargs):
+            raise RuntimeError("ledger unavailable")
+
+    config = load_config(path="/nonexistent-supervisor.json")
+    config.update({"provider": "rule", "enforce": True})
+    with pytest.raises(RuntimeError, match="ledger unavailable"):
+        pending_intervention(_task(), BrokenLedger(), config)
+
+
+def test_verify_budget_is_durable_and_rejects_third_request(tmp_path):
+    store = SQLiteStateStore(tmp_path / "state.db")
+    task = _task()
+    config = {"enabled": True, "enforce": True, "policy": {"max_verifications": 2}}
+    for index in range(2):
+        item = request_intervention(
+            store, task, {"evaluation_id": f"eval-{index}"},
+            {"decision_id": f"decision-{index}", "action": ACTION_VERIFY}, config,
+        )
+        assert item["status"] == STATUS_REQUESTED
+
+    rejected = request_intervention(
+        SQLiteStateStore(tmp_path / "state.db"), task,
+        {"evaluation_id": "eval-2"},
+        {"decision_id": "decision-2", "action": ACTION_VERIFY}, config,
+    )
+    assert rejected["status"] == "failed"
+    assert rejected["error"]["code"] == "verification_budget_exhausted"
+    assert rejected["error"]["verification_count"] == 2
+
+
+def test_request_failure_does_not_leave_legacy_pending(tmp_path):
+    from herdr.supervisor.config import load_config
+    from herdr.supervisor.harness import pending_intervention
+
+    class BrokenStore:
+        def __init__(self):
+            self.events = []
+
+        def list_events(self, **_kwargs):
+            return self.events
+
+        def record_event(self, event_type, payload, **kwargs):
+            self.events.append({"event_type": event_type, "payload": payload, **kwargs})
+
+        def create_intervention(self, _item):
+            raise RuntimeError("state store unavailable")
+
+        def list_interventions(self, **_kwargs):
+            return []
+
+    config = load_config(path="/nonexistent-supervisor.json")
+    config.update({"provider": "rule", "enforce": True, "interval": 0, "cooldown": 0})
+    supervisor = SemanticSupervisor(
+        config, StubProvider(signals=dict(ALL_SIGNALS, worker_stuck=0.95, meaningful_progress=0.03)),
+    )
+    store = BrokenStore()
+    result = run_checkpoint(
+        task=dict(_task(), runtime={"status": "running", "started_at": time.time() - 10}),
+        trigger="agent_done", store=store, config=config, supervisor=supervisor,
+        actions={"RETRY": lambda *_args: pytest.fail("handler must not run")},
+        log=lambda _message: None,
+    )
+
+    assert result["continue_flow"] is True
+    assert result["intercepted"] is False
+    assert pending_intervention(_task(), store, config) is None
+    policy_events = [event for event in store.events if event["event_type"] == "supervisor_policy"]
+    assert policy_events[-1]["payload"]["enforced"] is False
 
 
 def test_request_persistence_failure_is_fail_safe(tmp_path):
@@ -311,7 +505,11 @@ def test_controller_verify_only_enters_rework_without_fabricating_verdict(tmp_pa
     )
 
     with patch.object(controller, "_get_store", return_value=store), \
-         patch.object(controller, "set_task_status", return_value=True):
+         patch.object(controller, "set_task_status", return_value=True), \
+         patch.object(
+             controller.subprocess, "run",
+             return_value=type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
+         ):
         result = controller._execute_supervisor_intervention(
             task, {"intervention": intervention}, controller._supervisor_verify,
         )

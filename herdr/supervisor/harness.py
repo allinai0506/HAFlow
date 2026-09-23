@@ -48,6 +48,10 @@ from .evaluation import (
 
 EVENT_SOURCE = "semantic_supervisor"
 
+
+class DurableInterventionUnavailable(RuntimeError):
+    """The durable intervention ledger could not establish its state."""
+
 _FACT_EVIDENCE_KEYS = ("tests", "diff_summary", "output_summary", "test_progress", "trigger")
 
 _supervisors: Dict[str, SemanticSupervisor] = {}
@@ -143,6 +147,17 @@ def collect_facts(
             (cfg.get("policy") or {}).get("allow_auto_execute", True)
         ),
     }
+    if store is not None and hasattr(store, "list_interventions"):
+        try:
+            from ..intervention import verification_count_for_task
+            from ..trajectory import run_id_for_task
+            facts["verification_count"] = verification_count_for_task(
+                store, run_id_for_task(task), str(task.get("task_id") or "")
+            )
+        except Exception:
+            # The action layer remains the authority if the projection cannot
+            # be read; supervision itself stays fail-safe.
+            pass
     try:
         facts.update(
             evidence_layer.collect_execution_evidence(
@@ -296,18 +311,6 @@ def run_checkpoint(
         }
         if evidence_id:
             payload["evidence_id"] = evidence_id
-        if store is not None:
-            try:
-                store.record_event(
-                    POLICY_EVENT, payload,
-                    workflow_id=task.get("workflow_id"),
-                    node_id=task.get("node") or task.get("stage"),
-                    task_id=task_id,
-                    agent_id=task.get("agent"),
-                    source=EVENT_SOURCE,
-                )
-            except Exception as exc:
-                log(f"[SUPERVISOR EVENT WRITE FAILED] task={task_id}: {type(exc).__name__}")
         log(
             f"[SUPERVISOR] task={task_id} trigger={trigger} "
             f"provider={evaluation.get('provider')} action={decision.action} "
@@ -342,10 +345,30 @@ def run_checkpoint(
                         intercepted = False
                 except Exception as exc:
                     intercepted = False
+                    payload["enforced"] = False
+                    payload["durable"] = False
+                    payload["enforcement_requested"] = True
+                    payload["persistence_error"] = type(exc).__name__
                     log(
                         f"[SUPERVISOR INTERVENTION REQUEST FAILED] task={task_id}: "
                         f"{type(exc).__name__}"
                     )
+        if durable_request_attempted:
+            payload["enforced"] = bool(intercepted)
+            payload["durable"] = bool(durable_intervention is not None)
+            payload["enforcement_requested"] = True
+        if store is not None:
+            try:
+                store.record_event(
+                    POLICY_EVENT, payload,
+                    workflow_id=task.get("workflow_id"),
+                    node_id=task.get("node") or task.get("stage"),
+                    task_id=task_id,
+                    agent_id=task.get("agent"),
+                    source=EVENT_SOURCE,
+                )
+            except Exception as exc:
+                log(f"[SUPERVISOR EVENT WRITE FAILED] task={task_id}: {type(exc).__name__}")
         if enforce_on and decision.action != policy_engine.CONTINUE:
             handler = (actions or {}).get(decision.action)
             can_execute = (
@@ -451,8 +474,10 @@ def pending_intervention(task: dict, store, config: Optional[dict] = None
                     return str(item["action"])
             if any(item.get("action") in (ACTION_RETRY, ACTION_VERIFY) for item in v1_rows):
                 return None
-        except Exception:
-            return None
+        except Exception as exc:
+            raise DurableInterventionUnavailable(
+                f"durable intervention lookup failed for task {task_id}: {exc}"
+            ) from exc
     if not supervisor_enabled(cfg):
         return None
     try:
@@ -468,6 +493,12 @@ def pending_intervention(task: dict, store, config: Optional[dict] = None
         payload = event.get("payload")
         if not isinstance(payload, dict) or payload.get("enforced") is not True:
             # Observe-mode decisions never block the default flow.
+            continue
+        if payload.get("action") in (ACTION_RETRY, ACTION_VERIFY) and (
+            payload.get("durable") is False or payload.get("enforcement_requested") is True
+        ):
+            # A failed V1 persistence attempt is fail-open and must not be
+            # resurrected from this legacy projection.
             continue
         try:
             ts = float(event.get("timestamp") or 0)
@@ -485,6 +516,7 @@ def pending_intervention(task: dict, store, config: Optional[dict] = None
 
 
 __all__ = [
+    "DurableInterventionUnavailable",
     "EVALUATION_EVENT",
     "POLICY_EVENT",
     "RateGate",

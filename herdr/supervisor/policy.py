@@ -252,11 +252,23 @@ def decide(
         reasons.append(
             f"requirements_satisfied {needs('requirements_satisfied'):.2f} / "
             f"implementation_complete {needs('implementation_complete'):.2f} indicate near-done work")
+        if verification_count >= max_verifications:
+            return PolicyDecision(
+                action=CONTINUE,
+                reasons=reasons + [
+                    f"verification budget exhausted ({verification_count}/{max_verifications})",
+                ], signals_used=signals, facts_used=base_facts)
         return PolicyDecision(action=VERIFY, reasons=reasons,
                               signals_used=signals, facts_used=base_facts)
 
     # --- claim of done without substance: verify before accepting
     if high("implementation_complete") and low("requirements_satisfied"):
+        if verification_count >= max_verifications:
+            return PolicyDecision(
+                action=CONTINUE,
+                reasons=[
+                    f"verification budget exhausted ({verification_count}/{max_verifications})",
+                ], signals_used=signals, facts_used=base_facts)
         return PolicyDecision(
             action=VERIFY,
             reasons=[

@@ -60,13 +60,28 @@ exhausted, the Intervention is durably marked `failed` with
 
 ## VERIFY
 
-VERIFY sends the Task into the existing `rework`/verification route and records
-a durable `verification_requested` event carrying its Intervention identity.
-The result is based on a fresh Task read and says
-`verification_requested=true` and `verification_pending=true`. It never writes
-`passed=true` and never substitutes for the existing `tests_completed` or
-`verification_completed` facts. Those facts remain produced by the existing
-verification machinery.
+VERIFY sends the Task into the existing `rework` route and dispatches the
+existing Agent prompt path (`herdr agent prompt`) with the Intervention and
+Decision identities. The prompt asks the Agent to run the existing
+verification/test loop; it does not run a second test runner. Only a successful
+prompt dispatch writes `verification_dispatched` and allows the Intervention
+to complete. The result says `verification_requested=true`,
+`verification_dispatched=true`, and `verification_pending=true`; it never
+writes `passed=true` and never substitutes for the existing `tests_completed`
+or `verification_completed` facts.
+
+The later `tests_completed`/`verification_completed` receipt carries the same
+Intervention identity. If the Controller crashes after dispatch, recovery uses
+that dispatch event as Intervention-specific execution evidence and completes
+the row without sending a second prompt. Rework watchdog and recovery paths
+also require a matching new verification receipt; old deliverables alone
+cannot bypass a pending VERIFY.
+
+VERIFY uses the policy `max_verifications` as a durable action-layer budget.
+The count is calculated from persisted VERIFY rows in requested, running,
+completed, or failed state, so it survives process restart. Once the limit is
+reached, the request is durably failed with
+`verification_budget_exhausted` and is not dispatched.
 
 ## Idempotency
 
@@ -89,6 +104,13 @@ with that identity completes the Intervention without repeating the side
 effect; Task status alone is never treated as proof. A durable pending
 Intervention therefore cannot be bypassed by RateGate or a replayed
 `agent_done` event.
+
+For a durable-capable StateStore, an unreadable Intervention ledger is
+`UNKNOWN`, not `NO_PENDING`: done emission fails closed and no coordinator
+`done` event is sent. Legacy lightweight stores retain their pre-V1 behavior.
+For VERIFY and RETRY, the successful durable table is authoritative; a failed
+V1 request is recorded as non-durable and is never resurrected from a legacy
+policy event.
 
 ## Run isolation
 

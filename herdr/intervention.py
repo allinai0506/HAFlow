@@ -158,6 +158,18 @@ def attempt_count_for_task(task: Dict[str, Any]) -> int:
     return 0
 
 
+def verification_count_for_task(store: Any, run_id: str, task_id: str) -> int:
+    """Count durable VERIFY acceptances; the ledger is the sole authority."""
+    rows = store.list_interventions(run_id=run_id, task_id=task_id) or []
+    return sum(
+        1 for row in rows
+        if row.get("action") == ACTION_VERIFY
+        and row.get("status") in {
+            STATUS_REQUESTED, STATUS_RUNNING, STATUS_COMPLETED, STATUS_FAILED,
+        }
+    )
+
+
 def request_intervention(store: Any, task: Dict[str, Any], evaluation: Dict[str, Any],
                          decision: Dict[str, Any], config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Persist one enforced VERIFY/RETRY request without executing it."""
@@ -178,6 +190,12 @@ def request_intervention(store: Any, task: Dict[str, Any], evaluation: Dict[str,
     policy = config.get("policy") if isinstance(config.get("policy"), dict) else {}
     task_attempt = attempt_count_for_task(task)
     max_attempts = int(policy.get("max_attempts", 0))
+    verification_count = 0
+    max_verifications = int(policy.get("max_verifications", 2))
+    if action == ACTION_VERIFY:
+        verification_count = verification_count_for_task(
+            store, run_id, str(task.get("task_id") or "")
+        )
     requested = store.create_intervention(build_request(
         run_id=run_id,
         workflow_id=task.get("workflow_id"),
@@ -188,8 +206,8 @@ def request_intervention(store: Any, task: Dict[str, Any], evaluation: Dict[str,
         reason=str(decision.get("reason") or "; ".join(decision.get("reasons") or [])),
         finding_refs=metadata.get("finding_refs") or decision.get("finding_refs") or [],
         evidence_refs=metadata.get("evidence_refs") or decision.get("evidence_refs") or [],
-        attempt=int(task_attempt),
-        max_attempts=max_attempts,
+        attempt=int(verification_count if action == ACTION_VERIFY else task_attempt),
+        max_attempts=(max_verifications if action == ACTION_VERIFY else max_attempts),
     ))
     if (
         action == ACTION_RETRY
@@ -205,6 +223,20 @@ def request_intervention(store: Any, task: Dict[str, Any], evaluation: Dict[str,
                 "max_attempts": max_attempts,
             },
         )
+    if (
+        action == ACTION_VERIFY
+        and requested.get("status") == STATUS_REQUESTED
+        and max_verifications > 0
+        and verification_count >= max_verifications
+    ):
+        return store.fail_intervention(
+            requested["intervention_id"],
+            {
+                "code": "verification_budget_exhausted",
+                "verification_count": int(verification_count),
+                "max_verifications": max_verifications,
+            },
+        )
     return requested
 
 
@@ -212,5 +244,5 @@ __all__ = [
     "ACTION_RETRY", "ACTION_VERIFY", "SUPPORTED_ACTIONS", "STATUSES",
     "STATUS_COMPLETED", "STATUS_FAILED", "STATUS_REQUESTED", "STATUS_RUNNING",
     "STATUS_SUPERSEDED", "Intervention", "build_request", "identity_key",
-    "request_intervention", "attempt_count_for_task",
+    "request_intervention", "attempt_count_for_task", "verification_count_for_task",
 ]
