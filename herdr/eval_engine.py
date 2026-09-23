@@ -84,11 +84,15 @@ def evaluate_run(
 
     task_status: str | None = None
     task_completed = False
+    task_failed = False
     observed: str | None = None
     if task is not None:
         task_status = task.get("status")
         task_completed = task_status in COMPLETED_TASK_STATUSES
-        if not task_completed:
+        task_failed = task_status == "failed"
+        if task_failed:
+            pass
+        elif not task_completed:
             warnings.append("run_incomplete")
         observed = normalize_stage_verdict(task.get("stage_verdict"))
 
@@ -119,7 +123,12 @@ def evaluate_run(
             }
 
     verdict: str | None = None
-    if task is not None and task_completed and verification is not None:
+    if task is not None and task_failed:
+        verdict = "fail"
+        passed = verification.get("passed") if verification is not None else None
+        if passed is True:
+            warnings.append("conflicting_facts")
+    elif task is not None and task_completed and verification is not None:
         passed = verification.get("passed")
         if passed is True and observed in (None, "pass"):
             verdict = "pass"
@@ -142,16 +151,33 @@ def evaluate_run(
     if override is not None:
         evidence.append({"kind": "gate_override", "ref": override["node"]})
 
-    scores: dict[str, float] | None = None
+    if verdict == "pass":
+        requirements_satisfied: bool | None = True
+    elif verdict == "fail":
+        requirements_satisfied = False
+    else:
+        requirements_satisfied = None
+    verification_passed: bool | None = None
     if verification is not None:
-        scores = {"verification_passed": 1.0 if verification.get("passed") is True else 0.0}
+        passed_flag = verification.get("passed")
+        verification_passed = passed_flag if isinstance(passed_flag, bool) else None
+    human_intervention_count = int(steering.get("human") or 0)
+    final_status: str | None = task_status if task is not None else None
+    if final_status is None:
+        if facts.get("run_completed"):
+            final_status = "completed"
+        elif facts.get("run_failed"):
+            final_status = "failed"
 
     return {
         "run_id": run_id,
         "task_id": task["task_id"] if task is not None else None,
         "workflow_id": workflow_id,
         "verdict": verdict,
-        "scores": scores,
+        "requirements_satisfied": requirements_satisfied,
+        "verification_passed": verification_passed,
+        "human_intervention_count": human_intervention_count,
+        "final_status": final_status,
         "evidence": evidence,
         "warnings": warnings,
         "task_status": task_status,
@@ -177,21 +203,52 @@ def record_run_eval(
         result["run_id"],
         revision=revision,
         verdict=result["verdict"],
-        scores=result["scores"],
+        scores=None,
         evidence=result["evidence"],
         eval_id=eval_id,
         db_path=_resolve_db_path(db_path, store),
+        requirements_satisfied=result.get("requirements_satisfied"),
+        verification_passed=result.get("verification_passed"),
+        human_intervention_count=result.get("human_intervention_count"),
+        final_status=result.get("final_status"),
+        warnings=result.get("warnings"),
+        task_status=result.get("task_status"),
+        task_id=result.get("task_id"),
+        workflow_id=result.get("workflow_id"),
     )
 
 
 def _brief(row: dict[str, Any] | None) -> dict[str, Any] | None:
     if row is None:
         return None
-    return {
+    brief: dict[str, Any] = {
         "run_id": row.get("run_id"),
         "revision": row.get("revision"),
         "verdict": row.get("verdict"),
     }
+    for key in (
+        "final_status",
+        "task_status",
+        "task_id",
+        "workflow_id",
+        "requirements_satisfied",
+        "verification_passed",
+        "human_intervention_count",
+    ):
+        if key in (row or {}):
+            brief[key] = row.get(key)
+    return brief
+
+
+def _transition(before_val: Any, after_val: Any) -> str:
+    def _fmt(value: Any) -> str:
+        if value is None:
+            return "null"
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        return str(value)
+
+    return f"{_fmt(before_val)}->{_fmt(after_val)}"
 
 
 def compare_evals(
@@ -203,6 +260,20 @@ def compare_evals(
     after_verdict = (after or {}).get("verdict")
     before_scores = (before or {}).get("scores")
     after_scores = (after or {}).get("scores")
+    before_final = (before or {}).get("final_status")
+    after_final = (after or {}).get("final_status")
+    before_task_status = (before or {}).get("task_status")
+    after_task_status = (after or {}).get("task_status")
+    before_task_id = (before or {}).get("task_id")
+    after_task_id = (after or {}).get("task_id")
+    before_workflow_id = (before or {}).get("workflow_id")
+    after_workflow_id = (after or {}).get("workflow_id")
+    before_req = (before or {}).get("requirements_satisfied")
+    after_req = (after or {}).get("requirements_satisfied")
+    before_vp = (before or {}).get("verification_passed")
+    after_vp = (after or {}).get("verification_passed")
+    before_hic = (before or {}).get("human_intervention_count")
+    after_hic = (after or {}).get("human_intervention_count")
 
     def _refs(row: dict[str, Any] | None) -> set[str]:
         items: set[str] = set()
@@ -222,6 +293,15 @@ def compare_evals(
         "verdict_changed": before_verdict != after_verdict,
         "verdict_transition": f"{before_verdict or 'null'}->{after_verdict or 'null'}",
         "scores_changed": before_scores != after_scores,
+        "final_status_changed": before_final != after_final,
+        "final_status_transition": _transition(before_final, after_final),
+        "task_status_changed": before_task_status != after_task_status,
+        "task_status_transition": _transition(before_task_status, after_task_status),
+        "task_id_changed": before_task_id != after_task_id,
+        "workflow_id_changed": before_workflow_id != after_workflow_id,
+        "requirements_satisfied_changed": before_req != after_req,
+        "verification_passed_changed": before_vp != after_vp,
+        "human_intervention_count_changed": before_hic != after_hic,
         "evidence_added": sorted(after_refs - before_refs),
         "evidence_removed": sorted(before_refs - after_refs),
         "warnings_added": sorted(after_warnings - before_warnings),

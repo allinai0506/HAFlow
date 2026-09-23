@@ -45,6 +45,8 @@ def _decode_json_nullable(raw: Any) -> Optional[Any]:
 
 
 def _decode_eval_row(row: sqlite3.Row) -> Dict[str, Any]:
+    names = set(row.keys())
+    warnings = _decode_json_nullable(row["warnings_json"]) if "warnings_json" in names else None
     return {
         "eval_id": row["eval_id"],
         "run_id": row["run_id"],
@@ -52,11 +54,22 @@ def _decode_eval_row(row: sqlite3.Row) -> Dict[str, Any]:
         "verdict": row["verdict"],
         "scores": _decode_json_nullable(row["scores_json"]),
         "evidence": _decode_json_nullable(row["evidence_json"]),
+        "requirements_satisfied": _decode_bool(row["requirements_satisfied"]) if "requirements_satisfied" in names else None,
+        "verification_passed": _decode_bool(row["verification_passed"]) if "verification_passed" in names else None,
+        "human_intervention_count": row["human_intervention_count"] if "human_intervention_count" in names else None,
+        "final_status": row["final_status"] if "final_status" in names else None,
+        "warnings": list(warnings) if isinstance(warnings, list) else [],
+        "task_status": row["task_status"] if "task_status" in names else None,
+        "task_id": row["task_id"] if "task_id" in names else None,
+        "workflow_id": row["workflow_id"] if "workflow_id" in names else None,
         "created_at": float(row["created_at"]),
     }
 
 
 def _decode_replay_row(row: sqlite3.Row) -> Dict[str, Any]:
+    names = set(row.keys())
+    snapshot = row["snapshot_path"] if "snapshot_path" in names else None
+    policy = _decode_json_nullable(row["policy_json"]) if "policy_json" in names else None
     return {
         "spec_id": row["spec_id"],
         "source_run_id": row["source_run_id"],
@@ -64,8 +77,32 @@ def _decode_replay_row(row: sqlite3.Row) -> Dict[str, Any]:
         "workflow_id": row["workflow_id"],
         "definition": _decode_json_nullable(row["definition_json"]),
         "lineage": _decode_json_nullable(row["lineage_json"]),
+        "snapshot": snapshot,
+        "snapshot_path": snapshot,
+        "frozen_config_ref": snapshot,
+        "policy": policy,
+        "policy_override": policy,
         "created_at": float(row["created_at"]),
     }
+
+
+def _encode_bool(value: Any) -> int | None:
+    if value is None:
+        return None
+    return 1 if bool(value) else 0
+
+
+def _decode_bool(raw: Any) -> bool | None:
+    if raw is None:
+        return None
+    return bool(raw)
+
+
+def _ensure_eval_replay_schema(conn: sqlite3.Connection) -> None:
+    try:
+        state_db._ensure_eval_replay_columns(conn)
+    except AttributeError:
+        return
 
 
 def _open(db_path: Optional[Path] = None) -> sqlite3.Connection:
@@ -83,6 +120,14 @@ def record_eval_result(
     created_at: Optional[float] = None,
     db_path: Optional[Path] = None,
     conn: Optional[sqlite3.Connection] = None,
+    requirements_satisfied: bool | None = None,
+    verification_passed: bool | None = None,
+    human_intervention_count: int | None = None,
+    final_status: str | None = None,
+    warnings: list | None = None,
+    task_status: str | None = None,
+    task_id: str | None = None,
+    workflow_id: str | None = None,
 ) -> Dict[str, Any]:
     """Record one eval fact; same (run_id, revision) returns the existing row."""
     run_id = str(run_id or "").strip()
@@ -92,6 +137,10 @@ def record_eval_result(
         raise ValueError("revision must be a positive int")
     if verdict is not None and not isinstance(verdict, str):
         raise ValueError("verdict must be a string or None")
+    if human_intervention_count is not None and (
+        not isinstance(human_intervention_count, int) or human_intervention_count < 0
+    ):
+        raise ValueError("human_intervention_count must be a non-negative int or None")
 
     if conn is not None:
         return _record_eval_in_conn(
@@ -103,12 +152,21 @@ def record_eval_result(
             evidence=evidence,
             eval_id=eval_id,
             created_at=created_at,
+            requirements_satisfied=requirements_satisfied,
+            verification_passed=verification_passed,
+            human_intervention_count=human_intervention_count,
+            final_status=final_status,
+            warnings=warnings,
+            task_status=task_status,
+            task_id=task_id,
+            workflow_id=workflow_id,
         )
 
     last_error: Optional[Exception] = None
     for _ in range(_EVAL_RETRY_LIMIT):
         owned = _open(db_path)
         try:
+            _ensure_eval_replay_schema(owned)
             owned.execute("BEGIN IMMEDIATE;")
             try:
                 result = _record_eval_in_conn(
@@ -120,6 +178,14 @@ def record_eval_result(
                     evidence=evidence,
                     eval_id=eval_id,
                     created_at=created_at,
+                    requirements_satisfied=requirements_satisfied,
+                    verification_passed=verification_passed,
+                    human_intervention_count=human_intervention_count,
+                    final_status=final_status,
+                    warnings=warnings,
+                    task_status=task_status,
+                    task_id=task_id,
+                    workflow_id=workflow_id,
                 )
             except sqlite3.IntegrityError as exc:
                 last_error = exc
@@ -159,6 +225,14 @@ def _record_eval_in_conn(
     evidence: Optional[Any],
     eval_id: Optional[str],
     created_at: Optional[float],
+    requirements_satisfied: bool | None = None,
+    verification_passed: bool | None = None,
+    human_intervention_count: int | None = None,
+    final_status: str | None = None,
+    warnings: list | None = None,
+    task_status: str | None = None,
+    task_id: str | None = None,
+    workflow_id: str | None = None,
 ) -> Dict[str, Any]:
     target = revision
     if target is None:
@@ -178,7 +252,10 @@ def _record_eval_in_conn(
     conn.execute(
         "INSERT INTO eval_results "
         "(eval_id, run_id, revision, verdict, scores_json, "
-        "evidence_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "evidence_json, requirements_satisfied, verification_passed, "
+        "human_intervention_count, final_status, warnings_json, "
+        "task_status, task_id, workflow_id, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             eval_id or _new_id("eval"),
             run_id,
@@ -186,6 +263,14 @@ def _record_eval_in_conn(
             verdict,
             _encode_json(scores),
             _encode_json(evidence),
+            _encode_bool(requirements_satisfied),
+            _encode_bool(verification_passed),
+            human_intervention_count,
+            final_status,
+            _encode_json(list(warnings) if warnings is not None else []),
+            task_status,
+            task_id,
+            workflow_id,
             now,
         ),
     )
@@ -292,6 +377,11 @@ def record_replay_spec(
     spec_id: Optional[str] = None,
     created_at: Optional[float] = None,
     db_path: Optional[Path] = None,
+    snapshot: str | None = None,
+    snapshot_path: str | None = None,
+    frozen_config_ref: str | None = None,
+    policy: dict | None = None,
+    policy_override: dict | None = None,
 ) -> Dict[str, Any]:
     """Record one replay edge; same replay_run_id returns the existing row."""
     source_run_id = str(source_run_id or "").strip()
@@ -300,8 +390,15 @@ def record_replay_spec(
         raise ValueError("source_run_id and replay_run_id are required")
     if source_run_id == replay_run_id:
         raise ValueError("source_run_id and replay_run_id must differ")
+    resolved_snapshot = snapshot if snapshot is not None else (
+        snapshot_path if snapshot_path is not None else frozen_config_ref
+    )
+    resolved_policy = policy if policy is not None else policy_override
+    if resolved_policy is not None and not isinstance(resolved_policy, dict):
+        raise ValueError("policy must be a mapping or None")
     conn = _open(db_path)
     try:
+        _ensure_eval_replay_schema(conn)
         existing = conn.execute(
             "SELECT * FROM replay_specs WHERE replay_run_id = ?",
             (replay_run_id,),
@@ -313,8 +410,9 @@ def record_replay_spec(
             conn.execute(
                 "INSERT INTO replay_specs "
                 "(spec_id, source_run_id, replay_run_id, workflow_id, "
-                "definition_json, lineage_json, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "definition_json, lineage_json, snapshot_path, policy_json, "
+                "created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     spec_id or _new_id("rpl"),
                     source_run_id,
@@ -322,6 +420,8 @@ def record_replay_spec(
                     workflow_id,
                     _encode_json(definition),
                     _encode_json(lineage),
+                    resolved_snapshot,
+                    _encode_json(resolved_policy),
                     now,
                 ),
             )

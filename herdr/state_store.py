@@ -10,12 +10,14 @@ Design Principles:
 3. Thread and Process Safety: Backed by SQLite WAL mode with atomic transactions.
 """
 
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 import json
 import os
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 
 import fcntl
 from . import state_db
@@ -54,8 +56,8 @@ def _sync_projection_locked(file_path: Path, export_fn: Any) -> None:
 
 
 def resolve_tasks_projection_file(
-    store: Optional["StateStore"] = None,
-    tasks_file: Optional[Union[Path, str]] = None,
+    store: StateStore | None = None,
+    tasks_file: Path | str | None = None,
 ) -> Path:
     """Resolve destination tasks.json path following strict precedence:
     1. Explicit tasks_file argument
@@ -75,8 +77,8 @@ def resolve_tasks_projection_file(
 
 
 def resolve_workflows_projection_file(
-    store: Optional["StateStore"] = None,
-    wf_file: Optional[Union[Path, str]] = None,
+    store: StateStore | None = None,
+    wf_file: Path | str | None = None,
 ) -> Path:
     """Resolve destination workflows.json path following strict precedence:
     1. Explicit wf_file argument
@@ -96,8 +98,8 @@ def resolve_workflows_projection_file(
 
 
 def sync_tasks_projection(
-    store: Optional["StateStore"] = None,
-    tasks_file: Optional[Union[Path, str]] = None,
+    store: StateStore | None = None,
+    tasks_file: Path | str | None = None,
 ) -> None:
     """Safely synchronize SQLite tasks into tasks.json under cross-process lock."""
     s = store or get_state_store()
@@ -106,8 +108,8 @@ def sync_tasks_projection(
 
 
 def sync_workflows_projection(
-    store: Optional["StateStore"] = None,
-    wf_file: Optional[Union[Path, str]] = None,
+    store: StateStore | None = None,
+    wf_file: Path | str | None = None,
 ) -> None:
     """Safely synchronize SQLite workflows into workflows.json under cross-process lock."""
     s = store or get_state_store()
@@ -403,6 +405,14 @@ class StateStore(ABC):
         verdict: Optional[str] = None,
         scores: Optional[Any] = None,
         evidence: Optional[Any] = None,
+        requirements_satisfied: bool | None = None,
+        verification_passed: bool | None = None,
+        human_intervention_count: int | None = None,
+        final_status: str | None = None,
+        warnings: list[Any] | None = None,
+        task_status: str | None = None,
+        task_id: str | None = None,
+        workflow_id: str | None = None,
     ) -> Dict[str, Any]:
         """Record one eval fact; same run and revision returns existing row."""
         pass
@@ -440,6 +450,8 @@ class StateStore(ABC):
         workflow_id: Optional[str] = None,
         definition: Optional[Any] = None,
         lineage: Optional[Any] = None,
+        snapshot: str | None = None,
+        policy: dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
         """Record one replay edge; same replay run returns existing row."""
         pass
@@ -841,6 +853,14 @@ class SQLiteStateStore(StateStore):
         verdict: Optional[str] = None,
         scores: Optional[Any] = None,
         evidence: Optional[Any] = None,
+        requirements_satisfied: bool | None = None,
+        verification_passed: bool | None = None,
+        human_intervention_count: int | None = None,
+        final_status: str | None = None,
+        warnings: list[Any] | None = None,
+        task_status: str | None = None,
+        task_id: str | None = None,
+        workflow_id: str | None = None,
     ) -> Dict[str, Any]:
         return eval_store.record_eval_result(
             run_id,
@@ -848,6 +868,14 @@ class SQLiteStateStore(StateStore):
             verdict=verdict,
             scores=scores,
             evidence=evidence,
+            requirements_satisfied=requirements_satisfied,
+            verification_passed=verification_passed,
+            human_intervention_count=human_intervention_count,
+            final_status=final_status,
+            warnings=warnings,
+            task_status=task_status,
+            task_id=task_id,
+            workflow_id=workflow_id,
             db_path=self.db_path,
         )
 
@@ -875,6 +903,8 @@ class SQLiteStateStore(StateStore):
         workflow_id: Optional[str] = None,
         definition: Optional[Any] = None,
         lineage: Optional[Any] = None,
+        snapshot: str | None = None,
+        policy: dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
         return eval_store.record_replay_spec(
             source_run_id,
@@ -882,6 +912,8 @@ class SQLiteStateStore(StateStore):
             workflow_id=workflow_id,
             definition=definition,
             lineage=lineage,
+            snapshot=snapshot,
+            policy=policy,
             db_path=self.db_path,
         )
 

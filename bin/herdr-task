@@ -1359,7 +1359,11 @@ def cmd_eval(args):
         return
     verdict = payload.get("verdict")
     warnings = payload.get("warnings") or []
-    print(f"[{label}] run={payload.get('run_id')} verdict={verdict}")
+    print(f"[{label}] run={payload.get('run_id')} verdict={verdict} "
+          f"final_status={payload.get('final_status')} "
+          f"requirements_satisfied={payload.get('requirements_satisfied')} "
+          f"verification_passed={payload.get('verification_passed')} "
+          f"human_intervention_count={payload.get('human_intervention_count')}")
     if warnings:
         print(f"Warnings: {', '.join(str(w) for w in warnings)}")
 
@@ -1386,6 +1390,28 @@ def cmd_replay(args):
             print(f"[REPLAY] cannot read --definition-file: {exc}", file=sys.stderr)
             sys.exit(2)
 
+    policy = None
+    if getattr(args, "policy", None):
+        try:
+            policy = _json.loads(args.policy)
+        except ValueError as exc:
+            print(f"[REPLAY] invalid --policy JSON: {exc}", file=sys.stderr)
+            sys.exit(2)
+        if not isinstance(policy, dict):
+            print("[REPLAY] --policy must be a JSON object", file=sys.stderr)
+            sys.exit(2)
+    elif getattr(args, "policy_file", None):
+        try:
+            policy = _json.loads(
+                Path(args.policy_file).expanduser().read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError) as exc:
+            print(f"[REPLAY] cannot read --policy-file: {exc}", file=sys.stderr)
+            sys.exit(2)
+        if not isinstance(policy, dict):
+            print("[REPLAY] --policy-file must contain a JSON object", file=sys.stderr)
+            sys.exit(2)
+
     try:
         store = _get_store()
         out = replay_run(
@@ -1394,6 +1420,13 @@ def cmd_replay(args):
             workflow_id=getattr(args, "workflow_id", None),
             task_id=getattr(args, "task_id", None),
             definition=definition,
+            policy=policy,
+            agent=getattr(args, "agent", None),
+            goal=getattr(args, "goal", None),
+            prompt=getattr(args, "prompt", None),
+            source=getattr(args, "source", None) or "replay",
+            launch=bool(getattr(args, "launch", False)),
+            run_preflight=bool(getattr(args, "run_preflight", False)),
             dry_run=bool(getattr(args, "dry_run", False)),
             db_path=getattr(store, "db_path", None),
         )
@@ -1410,6 +1443,10 @@ def cmd_replay(args):
     mode = "DRY_RUN" if out.get("dry_run") else "REPLAYED"
     print(f"[REPLAY_{mode}] {out['spec']['source_run_id']} -> {out['spec']['replay_run_id']}")
     print(f"Workflow: {out.get('workflow_id')} | Snapshot: {out.get('snapshot') or '-'}")
+    if out.get("launch_argv"):
+        print(f"Launch: {' '.join(str(p) for p in out['launch_argv'])}")
+    if out.get("preflight_argv"):
+        print(f"Preflight: {' '.join(str(p) for p in out['preflight_argv'])}")
     if out.get("warnings"):
         print(f"Warnings: {', '.join(str(w) for w in out['warnings'])}")
 
@@ -1444,6 +1481,18 @@ def cmd_eval_compare(args):
         print(json.dumps(diff, ensure_ascii=False, indent=2, sort_keys=True))
         return
     print(f"[EVAL_COMPARE] {diff['verdict_transition']} changed={diff['verdict_changed']}")
+    if diff.get("final_status_transition"):
+        print(f"Final status: {diff['final_status_transition']} "
+              f"changed={diff.get('final_status_changed')}")
+    if diff.get("task_status_transition"):
+        print(f"Task status: {diff['task_status_transition']} "
+              f"changed={diff.get('task_status_changed')}")
+    if diff.get("task_id_changed"):
+        print(f"Task: {(diff.get('before') or {}).get('task_id')} -> "
+              f"{(diff.get('after') or {}).get('task_id')}")
+    if diff.get("workflow_id_changed"):
+        print(f"Workflow: {(diff.get('before') or {}).get('workflow_id')} -> "
+              f"{(diff.get('after') or {}).get('workflow_id')}")
     if diff.get("warnings_added"):
         print(f"Warnings added: {', '.join(diff['warnings_added'])}")
     if diff.get("warnings_removed"):
@@ -4393,6 +4442,18 @@ def main():
     replay_cmd.add_argument("--task-id", default=None)
     replay_cmd.add_argument("--definition", default=None)
     replay_cmd.add_argument("--definition-file", default=None)
+    replay_cmd.add_argument("--policy", default=None,
+                            help="回放 policy override（JSON 对象字符串）")
+    replay_cmd.add_argument("--policy-file", default=None,
+                            help="回放 policy override（JSON 对象文件）")
+    replay_cmd.add_argument("--agent", default=None)
+    replay_cmd.add_argument("--goal", default=None)
+    replay_cmd.add_argument("--prompt", default=None)
+    replay_cmd.add_argument("--source", default="replay")
+    replay_cmd.add_argument("--launch", action="store_true",
+                            help="回放落盘后执行真实 launch 链")
+    replay_cmd.add_argument("--run-preflight", action="store_true",
+                            help="回放落盘后执行真实 preflight 探针")
     replay_cmd.add_argument("--dry-run", action="store_true")
     replay_cmd.add_argument("--json", action="store_true")
 

@@ -319,6 +319,14 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
             verdict TEXT,
             scores_json TEXT,
             evidence_json TEXT,
+            requirements_satisfied INTEGER,
+            verification_passed INTEGER,
+            human_intervention_count INTEGER,
+            final_status TEXT,
+            warnings_json TEXT,
+            task_status TEXT,
+            task_id TEXT,
+            workflow_id TEXT,
             created_at REAL NOT NULL,
             UNIQUE(run_id, revision)
         );
@@ -335,9 +343,12 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
             workflow_id TEXT,
             definition_json TEXT,
             lineage_json TEXT,
+            snapshot_path TEXT,
+            policy_json TEXT,
             created_at REAL NOT NULL
         );
     """)
+    _ensure_eval_replay_columns(conn)
 
     conn.execute("CREATE INDEX IF NOT EXISTS idx_eval_results_run_revision ON eval_results(run_id, revision DESC);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_eval_results_created ON eval_results(created_at DESC);")
@@ -526,6 +537,47 @@ def _ensure_intervention_columns(conn: sqlite3.Connection) -> None:
             if name not in columns:
                 raise
         columns.add(name)
+
+
+def _ensure_eval_replay_columns(conn: sqlite3.Connection) -> None:
+    """Upgrade eval/replay tables with B3/B6 fact columns in place."""
+    eval_columns = {row["name"] for row in conn.execute("PRAGMA table_info(eval_results);")}
+    eval_types = {
+        "requirements_satisfied": "INTEGER",
+        "verification_passed": "INTEGER",
+        "human_intervention_count": "INTEGER",
+        "final_status": "TEXT",
+        "warnings_json": "TEXT",
+        "task_status": "TEXT",
+        "task_id": "TEXT",
+        "workflow_id": "TEXT",
+    }
+    for name, column_type in eval_types.items():
+        if name in eval_columns:
+            continue
+        try:
+            conn.execute(f"ALTER TABLE eval_results ADD COLUMN {name} {column_type};")
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc).lower():
+                raise
+            eval_columns = {row["name"] for row in conn.execute("PRAGMA table_info(eval_results);")}
+            if name not in eval_columns:
+                raise
+        eval_columns.add(name)
+    replay_columns = {row["name"] for row in conn.execute("PRAGMA table_info(replay_specs);")}
+    replay_types = {"snapshot_path": "TEXT", "policy_json": "TEXT"}
+    for name, column_type in replay_types.items():
+        if name in replay_columns:
+            continue
+        try:
+            conn.execute(f"ALTER TABLE replay_specs ADD COLUMN {name} {column_type};")
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc).lower():
+                raise
+            replay_columns = {row["name"] for row in conn.execute("PRAGMA table_info(replay_specs);")}
+            if name not in replay_columns:
+                raise
+        replay_columns.add(name)
 
 
 def get_db_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
