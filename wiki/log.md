@@ -8,6 +8,12 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-09-23] feat | Console UI V1 Linear 风格产品化视觉重构
+- 背景：原 HAFlow 控制台大面积纯黑背景与大卡片嵌套，指标卡片占据首屏高度，操作按钮无主次，执行者阵容常驻挤占主工作流视区。
+- 重构：遵循 Linear 产品化克制规范：浅色统一 Design Tokens，单行内联指标元数据，极简水平阶段步骤条，44px 紧凑表格任务行，操作按钮收敛至单一 Primary CTA + 次级 `···` 下拉菜单，执行者/工位/告警下沉至底部可折叠手风琴面板。
+- 纪律与兼容：零新增外部框架与构建链（纯原生 HTML/CSS/Vanilla JS）；保留全部 78 个 DOM ID 与已有 API 轮询、事件监听、运维驾驶舱切换逻辑；测试与合规断言 100% 通过。
+- 回归与审查：95 项 Console 专项测试 + 1202 项全库回归通过；独立 Reviewer 子 Agent 审查 APPROVED / MERGE_READY。
+
 ## [2026-09-23] fix | Console task views use StateStore
 - 背景：普通 Workflow 页面和执行者负载从兼容 `tasks.json` 读取，ops-center 从 StateStore 读取；新 Workflow 的任务只在 SQLite 中可见时，页面显示空阶段和零负载。
 - 修复：Console 统一经 `tasks()` → `herdr_kernel.load_tasks_data()` 读取权威任务；移除归档查询的陈旧 JSON fallback，并让成果会签任务定位复用同一读取入口。
