@@ -17,6 +17,58 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 LOOP_DIR_NAME = ".herdr-loop"
+BASELINE_LINT_FILENAME = "BASELINE_LINT.json"
+
+
+def effective_defects(current: int, baseline: int) -> int:
+    """New defects introduced in this loop (never negative).
+
+    Baseline debt is transparent but non-blocking; only the delta gates.
+    """
+    try:
+        cur = int(current or 0)
+    except (TypeError, ValueError):
+        cur = 0
+    try:
+        base = int(baseline or 0)
+    except (TypeError, ValueError):
+        base = 0
+    return max(0, cur - max(0, base))
+
+
+def write_baseline_lint(loop_dir: Path, lint_errors: int, type_errors: int = 0) -> Path:
+    """Persist pre-edit lint baseline once at loop init (best-effort)."""
+    loop_dir = Path(loop_dir)
+    loop_dir.mkdir(parents=True, exist_ok=True)
+    path = loop_dir / BASELINE_LINT_FILENAME
+    payload = {
+        "lint_errors": int(lint_errors or 0),
+        "type_errors": int(type_errors or 0),
+        "captured_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    tmp_path = path.with_suffix(path.suffix + f".tmp.{os.getpid()}")
+    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp_path.replace(path)
+    return path
+
+
+def read_baseline_lint(loop_dir: Path) -> Tuple[int, int]:
+    """Return (baseline_lint, baseline_type); (0, 0) when absent/corrupt."""
+    try:
+        data = json.loads((Path(loop_dir) / BASELINE_LINT_FILENAME).read_text(encoding="utf-8"))
+    except Exception:
+        return 0, 0
+    if not isinstance(data, dict):
+        return 0, 0
+    try:
+        lint_errors = int(data.get("lint_errors") or 0)
+    except (TypeError, ValueError):
+        lint_errors = 0
+    try:
+        type_errors = int(data.get("type_errors") or 0)
+    except (TypeError, ValueError):
+        type_errors = 0
+    return max(0, lint_errors), max(0, type_errors)
 
 
 def get_loop_dir(base_dir: Path) -> Path:
@@ -171,6 +223,10 @@ class MetricVector:
     lint_errors: int = 0
     type_errors: int = 0
     has_repro_test: bool = False
+    baseline_lint_errors: int = 0
+    baseline_type_errors: int = 0
+    new_lint_errors: Optional[int] = None
+    new_type_errors: Optional[int] = None
     details: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -316,16 +372,31 @@ def calculate_metrics(
     repro_exit_code: Optional[int] = None,
     modified_files: Optional[List[str]] = None,
     allowed_patterns: Optional[List[str]] = None,
+    baseline_lint_errors: int = 0,
+    baseline_type_errors: int = 0,
 ) -> MetricVector:
     """Compute the 5-dimensional metric vector from execution outputs."""
     passed, total, failing = parse_test_output(test_output, test_exit_code)
     correctness = (float(passed) / float(total) * 100.0) if total > 0 else (100.0 if test_exit_code == 0 else 0.0)
-    
+
     lint_errs = parse_lint_output(lint_output, lint_exit_code)
     type_errs = parse_lint_output(type_output, type_exit_code)
-    
-    # Quality penalty: 10 points per lint error, 15 points per type error
-    quality_penalty = (lint_errs * 10.0) + (type_errs * 15.0)
+
+    # Baseline-aware quality: pre-existing debt is recorded but only new
+    # defects penalize quality and gate convergence.
+    try:
+        baseline_lint = max(0, int(baseline_lint_errors or 0))
+    except (TypeError, ValueError):
+        baseline_lint = 0
+    try:
+        baseline_type = max(0, int(baseline_type_errors or 0))
+    except (TypeError, ValueError):
+        baseline_type = 0
+    new_lint = effective_defects(lint_errs, baseline_lint)
+    new_type = effective_defects(type_errs, baseline_type)
+
+    # Quality penalty: 10 points per NEW lint error, 15 per NEW type error
+    quality_penalty = (new_lint * 10.0) + (new_type * 15.0)
     quality = max(0.0, 100.0 - quality_penalty)
     
     # Scope check: Check if files modified exceed allowed patterns
@@ -360,8 +431,10 @@ def calculate_metrics(
         weights["repro"] * repro_val
     )
     
-    # Absolute zero-defect rule: cannot score 100.0 if any failures exist
-    if (failing or lint_errs > 0 or type_errs > 0 or (has_repro and repro_val < 100.0) or out_of_bounds) and composite >= 100.0:
+    # Absolute zero-defect rule: cannot score 100.0 if any NEW failures exist.
+    # Pre-existing baseline debt is transparent in lint_errors/type_errors
+    # but does not cap the score; only the delta gates.
+    if (failing or new_lint > 0 or new_type > 0 or (has_repro and repro_val < 100.0) or out_of_bounds) and composite >= 100.0:
         composite = 95.0
 
     return MetricVector(
@@ -376,23 +449,33 @@ def calculate_metrics(
         lint_errors=lint_errs,
         type_errors=type_errs,
         has_repro_test=has_repro,
+        baseline_lint_errors=baseline_lint,
+        baseline_type_errors=baseline_type,
+        new_lint_errors=new_lint,
+        new_type_errors=new_type,
         details={
             "out_of_bounds_files": out_of_bounds,
             "test_exit_code": test_exit_code,
             "lint_exit_code": lint_exit_code,
             "type_exit_code": type_exit_code,
             "repro_exit_code": repro_exit_code,
+            "baseline_lint_errors": baseline_lint,
+            "baseline_type_errors": baseline_type,
+            "new_lint_errors": new_lint,
+            "new_type_errors": new_type,
         }
     )
 
 
 def is_converged(metrics: MetricVector) -> bool:
-    """True if metrics satisfy complete convergence (DoD fulfilled, 0 defects)."""
+    """True if metrics satisfy complete convergence (DoD fulfilled, 0 NEW defects)."""
     if metrics.composite_score < 99.9:
         return False
     if metrics.failing_tests:
         return False
-    if metrics.lint_errors > 0 or metrics.type_errors > 0:
+    eff_lint = metrics.new_lint_errors if metrics.new_lint_errors is not None else metrics.lint_errors
+    eff_type = metrics.new_type_errors if metrics.new_type_errors is not None else metrics.type_errors
+    if eff_lint > 0 or eff_type > 0:
         return False
     if metrics.has_repro_test and metrics.repro < 99.9:
         return False
@@ -403,7 +486,19 @@ def render_metrics_markdown(metrics: MetricVector, iteration: int, max_iteration
     """Render a human and agent-readable metrics table."""
     status_icon = "🟢 达成目标 (CONVERGED)" if is_converged(metrics) else "🔴 需继续修复 (ITERATION NEEDED)"
     repro_line = f"| 靶向复现用例 (Repro) | `{metrics.repro}%` | `100.0%` | {'✅' if metrics.repro == 100 else '❌'} |" if metrics.has_repro_test else ""
-    
+    if metrics.new_lint_errors is not None or metrics.new_type_errors is not None:
+        new_lint = metrics.new_lint_errors if metrics.new_lint_errors is not None else metrics.lint_errors
+        new_type = metrics.new_type_errors if metrics.new_type_errors is not None else metrics.type_errors
+        quality_cell = (
+            f"`{metrics.quality}%` "
+            f"(Lint: {metrics.lint_errors} "
+            f"[baseline {metrics.baseline_lint_errors}, new {new_lint}], "
+            f"Type: {metrics.type_errors} "
+            f"[baseline {metrics.baseline_type_errors}, new {new_type}])"
+        )
+    else:
+        quality_cell = f"`{metrics.quality}%` (Lint: {metrics.lint_errors}, Type: {metrics.type_errors})"
+
     return f"""# 量化评估指标卡 (Metrics Scorecard)
 
 > 轮次: {iteration} / {max_iterations}  
@@ -415,7 +510,7 @@ def render_metrics_markdown(metrics: MetricVector, iteration: int, max_iteration
 | 指标维度 | 当前值 | 目标值 | 判定 |
 |---|---|---|---|
 | 正确性 (Correctness) | `{metrics.correctness}%` ({metrics.passed_tests}/{metrics.total_tests}) | `100.0%` | {'✅' if metrics.correctness == 100 else '❌'} |
-| 代码质量 (Quality) | `{metrics.quality}%` (Lint: {metrics.lint_errors}, Type: {metrics.type_errors}) | `100.0%` | {'✅' if metrics.quality == 100 else '❌'} |
+| 代码质量 (Quality) | {quality_cell} | `100.0%` | {'✅' if metrics.quality == 100 else '❌'} |
 | 边界控制 (Scope) | `{metrics.scope}%` | `100.0%` | {'✅' if metrics.scope == 100 else '❌'} |
 {repro_line}
 
@@ -445,6 +540,21 @@ def render_evaluation_markdown(
     repro_block = ""
     if metrics.has_repro_test and metrics.repro < 99.9:
         repro_block = "\n### 靶向复现用例 (Repro Defect)\n- ❌ 阻断复现用例仍未通过（缺陷未完全解决）\n"
+
+    if metrics.new_lint_errors is not None or metrics.new_type_errors is not None:
+        new_lint = metrics.new_lint_errors if metrics.new_lint_errors is not None else metrics.lint_errors
+        new_type = metrics.new_type_errors if metrics.new_type_errors is not None else metrics.type_errors
+        lint_block = (
+            f"- Lint 错误数: `{metrics.lint_errors}` "
+            f"(baseline {metrics.baseline_lint_errors}, new {new_lint})"
+        )
+        type_block = (
+            f"- 类型检查错误数: `{metrics.type_errors}` "
+            f"(baseline {metrics.baseline_type_errors}, new {new_type})"
+        )
+    else:
+        lint_block = f"- Lint 错误数: `{metrics.lint_errors}`"
+        type_block = f"- 类型检查错误数: `{metrics.type_errors}`"
     
     snippet_block = ""
     if raw_error_snippet.strip():
@@ -466,8 +576,8 @@ def render_evaluation_markdown(
 {failing_list}
 {repro_block}
 ### 2. 静态分析与类型检查
-- Lint 错误数: `{metrics.lint_errors}`
-- 类型检查错误数: `{metrics.type_errors}`
+{lint_block}
+{type_block}
 
 ### 3. 越界修改文件 (如有)
 {', '.join(f'`{f}`' for f in metrics.details.get('out_of_bounds_files', [])) or '无（边界合规）'}
@@ -492,6 +602,21 @@ def generate_blocker_report(loop_dir: Path, metrics: MetricVector, iteration: in
     if metrics.has_repro_test and metrics.repro < 99.9:
         repro_status = "❌ 未通过"
 
+    if metrics.new_lint_errors is not None or metrics.new_type_errors is not None:
+        new_lint = metrics.new_lint_errors if metrics.new_lint_errors is not None else metrics.lint_errors
+        new_type = metrics.new_type_errors if metrics.new_type_errors is not None else metrics.type_errors
+        lint_line = (
+            f"- Lint 错误数: `{metrics.lint_errors}` "
+            f"(baseline {metrics.baseline_lint_errors}, new {new_lint})"
+        )
+        type_line = (
+            f"- 类型检查错误数: `{metrics.type_errors}` "
+            f"(baseline {metrics.baseline_type_errors}, new {new_type})"
+        )
+    else:
+        lint_line = f"- Lint 错误数: `{metrics.lint_errors}`"
+        type_line = f"- 类型检查错误数: `{metrics.type_errors}`"
+
     blocker_content = f"""# 工位求助单 (Escalation Blocker Report)
 
 > **生成时间**: {time.strftime('%Y-%m-%d %H:%M:%S')}  
@@ -504,8 +629,8 @@ def generate_blocker_report(loop_dir: Path, metrics: MetricVector, iteration: in
 {failing_list}
 
 ### 静态分析
-- Lint 错误数: `{metrics.lint_errors}`
-- 类型检查错误数: `{metrics.type_errors}`
+{lint_line}
+{type_line}
 
 ### 复现测试
 - 状态: `{repro_status}`

@@ -897,3 +897,9 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - RETRY 现在必须真实 dispatch 既有 Agent prompt，并以 `retry_dispatched` 作为执行证据；VERIFY/RETRY watchdog 与 recovery 不再仅凭 `rework` 或旧 deliverables 自愈。
 - Recovery 按 `task_id` 隔离，历史 failed VERIFY 以新的 `agent_done` episode 为边界；Supervisor kill switch 在 recovery 前生效。
 - 证据：`services/herdr-controller.py`、`herdr/supervisor/evidence.py`、`tests/test_action_protocol.py`、`tests/test_supervisor_tests_completed.py`；全量 1101 passed、44 subtests。
+
+## [2026-09-23] fix | 内环质量门禁基线分诊：存量 lint 不再误杀全自动
+- `herdr/evaluator.py` 新增基线分诊：`BASELINE_LINT.json`（init 时快照一次）+ `effective_defects(current, baseline)`；`quality/composite/is_converged` 只看新增缺陷，观测总数仍全量记录；无基线旧 clone 回退绝对门禁。
+- `bin/herdr-task:auto_init_task_loop` 与 `bin/herdr-loop:init` best-effort 快照基线（120s 超时，失败只告警）；`run_evaluation` 透传基线；`EVAL_DONE.json`/`METRICS.json` 新增 `baseline_lint_errors/new_lint_errors` 加法字段。
+- 动因：`wf-haflow-0923-01-test-auto` 测试全绿但全仓 `ruff check .` 存量 2562 错误导致 65/100 耗尽仲裁；任何工作流都会在同一门禁卡死。
+- 证据：`tests/test_loop_evaluator.py`（5 项新回归）、全量 `pytest -q` 1107 passed + 44 subtests；教训 `docs/lessons/lessons-learned.md` §84。
