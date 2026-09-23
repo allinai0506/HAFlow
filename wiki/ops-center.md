@@ -102,8 +102,8 @@ Evidence:
 
 `FACT` 控制台动作区「任务归档」提供跨项目、跨 Workflow 的历史任务检索列表。
 查询核心是纯函数 `herdr/archive.py#query_archived_tasks`（过滤/排序/分页，无 I/O）；
-控制台壳层 `archive_query` 优先读取 StateStore（唯一事实源），`tasks.json` 仅作降级兜底，
-因此投影文件损坏或被覆盖时归档列表仍然完整。
+控制台壳层 `archive_query` 从 StateStore（唯一事实源）读取任务。读取失败时请求失败，
+不会把可能过时的 `tasks.json` 当作后备来源。
 
 - 过滤：`project_id`（精确选择）、`workflow_id`（工作流下拉选择/项目级联/支持当前工作流默认预选）、`agent`（精确）、`status`（组别名或精确状态）、
   `q`（task_id / goal / 节点 / 项目 / 工作流 关键词）；
@@ -120,3 +120,14 @@ Evidence:
 - `console/herdr_factory_console.py#api_workflows`
 - `tests/test_archive_query.py`
 
+## 8. Console task status reads
+
+`FACT` Console 的共享 `tasks()` 通过 `herdr_kernel.load_tasks_data()` 读取 StateStore。
+普通 Workflow 详情、执行者负载、工位占用和 Task 详情都复用该入口。JSON `tasks.json` 是兼容投影，不是这些实时视图的查询源。
+
+Evidence:
+- `console/herdr_factory_console.py#tasks`
+- `console/herdr_factory_console.py#tasks_for_workflow`
+- `console/herdr_factory_console.py#agent_loads`
+- `console/herdr_factory_console.py#task_detail`
+- `tests/test_console_project_creation.py#ConsoleWorkflowStagesTest.test_tasks_for_workflow_reads_state_store_not_json_projection`

@@ -8,6 +8,12 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-09-23] fix | Console task views use StateStore
+- 背景：普通 Workflow 页面和执行者负载从兼容 `tasks.json` 读取，ops-center 从 StateStore 读取；新 Workflow 的任务只在 SQLite 中可见时，页面显示空阶段和零负载。
+- 修复：Console 统一经 `tasks()` → `herdr_kernel.load_tasks_data()` 读取权威任务；移除归档查询的陈旧 JSON fallback，并让成果会签任务定位复用同一读取入口。
+- 更新 [[ops-center]]：记录普通 Workflow、执行者负载、工位占用、Task 详情与归档查询的权威任务来源。
+- 经验：更新 `docs/lessons/lessons-learned.md` §40；回归测试覆盖投影为空、StateStore 有任务、跨 Workflow 过滤及执行者负载统计。
+
 ## [2026-09-22] fix | Harness Metrics Run 完成事实与 Task 生命周期状态分离
 - 固化 [[task-lifecycle]] 的状态机语义：Metrics 用 Trajectory `run_completed` 表达 Run 曾成功完成，用 `COMPLETED_TASK_STATUSES` 表达当前 Task 完成态。
 - 关联教训：`docs/lessons/lessons-learned.md` §80；回归覆盖 committed、cleaned、superseded-after-completion。
@@ -891,3 +897,9 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - RETRY 现在必须真实 dispatch 既有 Agent prompt，并以 `retry_dispatched` 作为执行证据；VERIFY/RETRY watchdog 与 recovery 不再仅凭 `rework` 或旧 deliverables 自愈。
 - Recovery 按 `task_id` 隔离，历史 failed VERIFY 以新的 `agent_done` episode 为边界；Supervisor kill switch 在 recovery 前生效。
 - 证据：`services/herdr-controller.py`、`herdr/supervisor/evidence.py`、`tests/test_action_protocol.py`、`tests/test_supervisor_tests_completed.py`；全量 1101 passed、44 subtests。
+
+## [2026-09-23] fix | 内环质量门禁基线分诊：存量 lint 不再误杀全自动
+- `herdr/evaluator.py` 新增基线分诊：`BASELINE_LINT.json`（init 时快照一次）+ `effective_defects(current, baseline)`；`quality/composite/is_converged` 只看新增缺陷，观测总数仍全量记录；无基线旧 clone 回退绝对门禁。
+- `bin/herdr-task:auto_init_task_loop` 与 `bin/herdr-loop:init` best-effort 快照基线（120s 超时，失败只告警）；`run_evaluation` 透传基线；`EVAL_DONE.json`/`METRICS.json` 新增 `baseline_lint_errors/new_lint_errors` 加法字段。
+- 动因：`wf-haflow-0923-01-test-auto` 测试全绿但全仓 `ruff check .` 存量 2562 错误导致 65/100 耗尽仲裁；任何工作流都会在同一门禁卡死。
+- 证据：`tests/test_loop_evaluator.py`（5 项新回归）、全量 `pytest -q` 1107 passed + 44 subtests；教训 `docs/lessons/lessons-learned.md` §84。

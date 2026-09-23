@@ -1596,6 +1596,28 @@ def auto_init_task_loop(clone_path, goal, acceptance_list, test_cmd=None, lint_c
         )
     except Exception as e:
         print(f"[HERDR_LOOP_WARN] Failed to auto-init loop: {e}")
+        return
+
+    # Baseline-aware gate: snapshot pre-edit lint debt once at init.
+    # Eval then gates only on NEW defects (current - baseline).
+    # Best-effort: never fail task launch when snapshot is unavailable.
+    try:
+        from herdr.evaluator import parse_lint_output, write_baseline_lint
+        snapshot_cmd = (lint_cmd or "true").strip() or "true"
+        if snapshot_cmd != "true":
+            proc = subprocess.run(
+                snapshot_cmd,
+                cwd=str(clone),
+                text=True,
+                capture_output=True,
+                timeout=120,
+                shell=True,
+            )
+            snapshot_output = (proc.stdout or "") + (proc.stderr or "")
+            baseline_lint = parse_lint_output(snapshot_output, proc.returncode)
+            write_baseline_lint(clone / ".herdr-loop", baseline_lint, 0)
+    except Exception as e:
+        print(f"[HERDR_LOOP_WARN] Failed to snapshot lint baseline: {e}")
 
 
 def _launch_task(args):

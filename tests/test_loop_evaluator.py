@@ -11,11 +11,14 @@ sys.path.insert(0, str(HERDR_ROOT))
 from herdr.evaluator import (
     MetricVector,
     calculate_metrics,
+    effective_defects,
     is_converged,
     parse_lint_output,
     parse_test_output,
+    read_baseline_lint,
     render_evaluation_markdown,
     render_metrics_markdown,
+    write_baseline_lint,
 )
 
 
@@ -179,6 +182,56 @@ FAILED (failures=1)
         # Even if warning or text contains the word 'error', exit_code=0 means success
         text = "Warning: deprecated API usage, may cause an Error in future versions."
         self.assertEqual(parse_lint_output(text, 0), 0)
+
+    def test_baseline_debt_does_not_block_convergence(self):
+        # T1 case: tests green, 2562 pre-existing lint, no new defects.
+        metrics = calculate_metrics(
+            test_output="1122 passed in 51.38s",
+            test_exit_code=0,
+            lint_output="Found 2562 errors.",
+            lint_exit_code=1,
+            baseline_lint_errors=2562,
+        )
+        self.assertEqual(metrics.lint_errors, 2562)
+        self.assertEqual(metrics.new_lint_errors, 0)
+        self.assertEqual(metrics.quality, 100.0)
+        self.assertEqual(metrics.composite_score, 100.0)
+        self.assertTrue(is_converged(metrics))
+
+    def test_new_lint_still_blocks_convergence(self):
+        metrics = calculate_metrics(
+            test_output="1122 passed in 51.38s",
+            test_exit_code=0,
+            lint_output="Found 2563 errors.",
+            lint_exit_code=1,
+            baseline_lint_errors=2562,
+        )
+        self.assertEqual(metrics.new_lint_errors, 1)
+        self.assertLess(metrics.composite_score, 100.0)
+        self.assertFalse(is_converged(metrics))
+
+    def test_no_baseline_preserves_absolute_gate(self):
+        metrics = calculate_metrics(
+            test_output="10 passed in 0.1s",
+            test_exit_code=0,
+            lint_output="Found 1 error",
+            lint_exit_code=1,
+        )
+        self.assertLess(metrics.composite_score, 100.0)
+        self.assertFalse(is_converged(metrics))
+
+    def test_effective_defects_never_negative(self):
+        self.assertEqual(effective_defects(2560, 2562), 0)
+        self.assertEqual(effective_defects(2563, 2562), 1)
+        self.assertEqual(effective_defects(0, 0), 0)
+
+    def test_baseline_roundtrip_and_missing(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            loop_dir = Path(tmp) / ".herdr-loop"
+            self.assertEqual(read_baseline_lint(loop_dir), (0, 0))
+            write_baseline_lint(loop_dir, 2562, 0)
+            self.assertEqual(read_baseline_lint(loop_dir), (2562, 0))
 
 
 if __name__ == "__main__":
