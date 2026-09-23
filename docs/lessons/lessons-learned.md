@@ -3766,7 +3766,7 @@ advance 双路径: 依赖有闩且无闩后完成 → 跳过（一次性日志�
 ### 验证命令 / 证据
 
 ```bash
-pytest -q tests/test_fix_loop_recovery.py  # 24 passed（16 纯函数 + 8 装配）
+pytest -q tests/test_fix_loop_recovery.py  # 23 passed（16 纯函数 + 7 装配）
 pytest -q  # 1130 passed, 44 subtests passed
 # 场景串联：max_loops=1 时第 1 轮作废入队 → 第 2 轮升级不作废 → 第 3 轮静默
 ```

@@ -907,4 +907,4 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 ## [2026-09-23] fix | Fix-loop 死锁三件套：通知补投 + 回流预算 + 作废闩
 - 背景：`wf-haflow-0923-01` test 三连 blocked 后零 live 任务死停——fix-loop 通知等总指挥 120s 超时即丢弃；`FIX_LOOP_MAX` 只显示不生效（走到 loop=4）；作废后 sweep 以陈旧完成越过 implementation 空推进。
 - 新增 `herdr/fix_loop.py` 纯决策函数；`handle_fix_loop` 作废前先过预算/同判据门禁，超限或重复只升级不作废；超时转 attention 持久化，sweep 补投；作废设 `pending_redo` 闩挡 advance，重做完成清闩/计数/升级。
-- 证据：`tests/test_fix_loop_recovery.py` 24 passed；全量 `pytest -q` 1130 passed + 44 subtests；教训 `docs/lessons/lessons-learned.md` §85。
+- 证据：`tests/test_fix_loop_recovery.py` 23 passed；全量 `pytest -q` 1130 passed + 44 subtests；教训 `docs/lessons/lessons-learned.md` §85。
