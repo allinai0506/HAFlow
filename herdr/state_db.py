@@ -308,6 +308,43 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_interventions_run ON interventions(run_id, requested_at DESC);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_interventions_task ON interventions(task_id, status, requested_at DESC);")
 
+    # Eval results: point-in-time evaluation facts for one run revision.
+    # Intentionally no FOREIGN KEY clauses: deleting a workflow must retain
+    # eval rows for auditability. Eval is distinct from Metrics aggregation.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS eval_results (
+            eval_id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            revision INTEGER NOT NULL,
+            verdict TEXT,
+            scores_json TEXT,
+            evidence_json TEXT,
+            created_at REAL NOT NULL,
+            UNIQUE(run_id, revision)
+        );
+    """)
+
+    # Replay specs: lineage edges from a source run to a replay run.
+    # Intentionally no FOREIGN KEY clauses: specs survive workflow deletion
+    # and never imply liveness of either run.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS replay_specs (
+            spec_id TEXT PRIMARY KEY,
+            source_run_id TEXT NOT NULL,
+            replay_run_id TEXT NOT NULL UNIQUE,
+            workflow_id TEXT,
+            definition_json TEXT,
+            lineage_json TEXT,
+            created_at REAL NOT NULL
+        );
+    """)
+
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_eval_results_run_revision ON eval_results(run_id, revision DESC);")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_eval_results_created ON eval_results(created_at DESC);")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_replay_specs_source ON replay_specs(source_run_id);")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_replay_specs_replay ON replay_specs(replay_run_id);")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_replay_specs_workflow ON replay_specs(workflow_id);")
+
     # One-time atomic bootstrap migration if initializing a DB where legacy JSON exists and not yet completed
     cur = conn.execute("SELECT value FROM schema_meta WHERE key = 'v1_migration_done';")
     if not cur.fetchone():
