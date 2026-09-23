@@ -299,6 +299,35 @@ class ConsoleWorkflowStagesTest(unittest.TestCase):
         )
         self.assertEqual(detail["stages"][0]["label"], "1任务理解与范围界定")
 
+    def test_tasks_for_workflow_reads_state_store_not_json_projection(self):
+        tasks = [
+            {
+                "task_id": "task-current",
+                "workflow_id": "wf-current",
+                "project_id": "p-current",
+                "agent": "opencode",
+                "status": "blocked",
+            },
+            {
+                "task_id": "task-other",
+                "workflow_id": "wf-other",
+                "project_id": "p-current",
+                "agent": "codex",
+                "status": "working",
+            },
+        ]
+        with patch.object(
+            self.console.herdr_kernel,
+            "load_tasks_data",
+            return_value={"tasks": tasks},
+        ), patch.object(self.console, "load_json", return_value={"tasks": []}):
+            actual = self.console.tasks_for_workflow("wf-current")
+            loads = self.console.agent_loads("p-current")
+
+        self.assertEqual(actual, [tasks[0]])
+        self.assertEqual(loads["opencode"], 1)
+        self.assertEqual(loads["codex"], 1)
+
 
 class TestConsoleProjectEndpointsAndUI(unittest.TestCase):
     @classmethod

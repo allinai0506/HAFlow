@@ -65,7 +65,7 @@ def ops_center(workflow_id=None,include_tasks=False):
 
 def projects():return list(load_json(PROJECTS_FILE,{'projects':{}}).get('projects',{}).values())
 def workflows():return load_json(WORKFLOWS_FILE,{'workflows':{}}).get('workflows',{})
-def tasks():return load_json(TASKS_FILE,{'tasks':[]}).get('tasks',[])
+def tasks():return herdr_kernel.load_tasks_data().get('tasks',[])
 def project_by_id(pid):return next((p for p in projects() if p.get('project_id')==pid),None)
 def project_for_workflow(wid):
     w=workflows().get(wid); return (project_by_id(w.get('project_id')) if w else None) or w
@@ -636,11 +636,8 @@ def api_workflows(pid=None):
     return res
 
 def archive_query(project_id=None,workflow_id=None,agent=None,status=None,q=None,limit=50,offset=0):
-    """归档查询读取优先走 StateStore(唯一事实源),投影文件仅作降级兜底。"""
-    try:
-        all_tasks=herdr_kernel.load_tasks_data().get('tasks',[])
-    except Exception:
-        all_tasks=tasks()
+    """归档查询读取 StateStore(唯一事实源)。"""
+    all_tasks=tasks()
     return herdr_archive.query_archived_tasks(
         all_tasks,
         project_id=project_id or None,
@@ -663,8 +660,7 @@ def api_task_signoff(b):
 
     if not wid or not node:
         if tid:
-            tasks_data=load_json(TASKS_FILE,{'tasks':[]})
-            for t in tasks_data.get('tasks',[]):
+            for t in tasks():
                 if t.get('task_id')==tid:
                     if not wid:wid=t.get('workflow_id')
                     if not node:node=t.get('node') or t.get('stage')

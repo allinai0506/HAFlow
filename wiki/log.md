@@ -8,6 +8,12 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-09-23] fix | Console task views use StateStore
+- 背景：普通 Workflow 页面和执行者负载从兼容 `tasks.json` 读取，ops-center 从 StateStore 读取；新 Workflow 的任务只在 SQLite 中可见时，页面显示空阶段和零负载。
+- 修复：Console 统一经 `tasks()` → `herdr_kernel.load_tasks_data()` 读取权威任务；移除归档查询的陈旧 JSON fallback，并让成果会签任务定位复用同一读取入口。
+- 更新 [[ops-center]]：记录普通 Workflow、执行者负载、工位占用、Task 详情与归档查询的权威任务来源。
+- 经验：更新 `docs/lessons/lessons-learned.md` §40；回归测试覆盖投影为空、StateStore 有任务、跨 Workflow 过滤及执行者负载统计。
+
 ## [2026-09-22] fix | Harness Metrics Run 完成事实与 Task 生命周期状态分离
 - 固化 [[task-lifecycle]] 的状态机语义：Metrics 用 Trajectory `run_completed` 表达 Run 曾成功完成，用 `COMPLETED_TASK_STATUSES` 表达当前 Task 完成态。
 - 关联教训：`docs/lessons/lessons-learned.md` §80；回归覆盖 committed、cleaned、superseded-after-completion。

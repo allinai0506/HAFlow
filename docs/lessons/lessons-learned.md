@@ -1803,6 +1803,8 @@ env -u DEEPSEEK_API_KEY /opt/homebrew/bin/pi --print --no-session "Reply with ex
 
 污染链：`herdr/projects.py`、`herdr/agent_router.py`、`bin/herdr-factory` 的读取统一走 `_get_store()`（感知 `HERDR_STATE_DB` / `WORKFLOWS_FILE`），但写入兼容投影时直接 `_save(WORKFLOWS_FILE, ...)` 硬编码 `~/.herdr-controller/workflows.json`；`tests/test_state_store.py::test_end_to_end_single_source_of_truth_without_workflows_json` 只设了环境变量、未 `monkeypatch.setattr` 模块全局量，pytest 跑一次就把线上 `workflows.json` 覆盖成测试投影。另 `save_workflows()` 还是"按传入子集全量重写文件"，本身即覆盖向量。
 
+2026-09-23 再次发现同类读取分叉：普通工作流页面与执行者负载经 `tasks()` 读取 `tasks.json`，而运维驾驶舱通过 `herdr-task ops-center` 读取 StateStore。对 `wf-haflow-0923-01`，普通接口返回 `tasks=[]`，SQLite 中有任务，兼容 `tasks.json` 中却没有该 Workflow 的记录。StateStore 单一事实源改造于 2026-09-13（`d876f27`）；Console 的通用任务读取入口当时仍读投影，因此阶段、任务卡和执行者负载都可能显示为零。
+
 ### 经验教训
 
 | 问题 | 教训 | 规范 |
@@ -1811,12 +1813,14 @@ env -u DEEPSEEK_API_KEY /opt/homebrew/bin/pi --print --no-session "Reply with ex
 | **以子集全量重写** | `save_workflows(data)` 把调用方传入的部分数据整体写成文件，天然丢数据 | 投影导出永远从 SQLite 全量导出，禁止"局部数据 + 全量覆盖" |
 | **测试隔离只做一半** | 只设环境变量、不 patch 模块全局量，隔离就是纸糊的 | 测试隔离双保险：环境变量 + `monkeypatch.setattr(module, "FILE", tmp)`；再用"线上文件字节不变"断言防回归 |
 | **UI 主数据源脆弱** | 控制台以兼容投影为主数据源，投影一坏 UI 全黑，且现场难以自证 | 关键读取优先 StateStore；投影损坏可一行 `sync_workflows_projection` 从库重放（本次演练恢复 42 条） |
+| **Console 多个任务视图读了旧任务投影** | `tasks()` 被工作流详情、执行者负载、工位占用和任务详情复用，但它从 `tasks.json` 读取；StateStore 中的新任务因此不会进入这些视图 | 将共享 `tasks()` 接到 `herdr_kernel.load_tasks_data()`；调用者再按 Workflow、项目或任务 ID 过滤，JSON 只作兼容投影 |
 
 ### 操作规范
 
 1. 任何写 `workflows.json` / `tasks.json` 的代码，必须经 `herdr/state_store.py` 的 `sync_workflows_projection` / `sync_tasks_projection`；PR 审查重点 grep 硬编码直写；
 2. 触发写操作的测试必须同时隔离 env 与模块全局量；回归用例 `test_workflow_writes_never_touch_real_projection_without_global_patch`（仅 env 隔离时断言线上文件字节级不变）纳入全量套件；
 3. 现场恢复 SOP：投影与库不一致时，先备份 `workflows.json`，再从 SQLite 重放投影，严禁反向以投影覆盖库。
+4. Console 的任务视图统一通过 `tasks()` 读取 StateStore；新增读路径不得直接打开 `tasks.json`。回归测试同时断言投影为空时 Workflow 任务仍可见、执行者负载正确，并且任务不会跨 Workflow 串入。
 
 ### 验证命令 / 证据
 
@@ -1825,6 +1829,7 @@ env -u DEEPSEEK_API_KEY /opt/homebrew/bin/pi --print --no-session "Reply with ex
 # 2. 修复后回归：单测 14 项 + 全量 432 项通过
 pytest tests/test_state_store.py -x -q
 pytest -q 2>&1 | tail -n 2
+pytest -q tests/test_console_project_creation.py::ConsoleWorkflowStagesTest::test_tasks_for_workflow_reads_state_store_not_json_projection
 # 3. 现场恢复演练：从 SQLite 重放投影，42 条工作流全部回到控制台可见
 python3 -c "from herdr.state_store import get_state_store,sync_workflows_projection; sync_workflows_projection(store=get_state_store())"
 # 4. 投影与库一致性抽查
