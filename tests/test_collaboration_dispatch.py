@@ -233,3 +233,27 @@ def test_fast_path_ack_when_target_already_working(tmp_path):
     fetched = state_db.get_collaboration_event(ev["event_id"], db_path=db)
     assert fetched["status"] == "acknowledged"
     assert fetched["acknowledged_at"] is not None
+
+
+def test_recovery_reconciles_ack_when_target_already_working(tmp_path):
+    ctrl = _load_controller()
+    db = tmp_path / "state.db"
+    ev = _make_event(db)
+    tasks = _tasks()
+    tasks["task-b"] = dict(tasks["task-b"], status="working")
+    sender = FakeSender()
+    # Crash window: intent persisted + prompt reached Herdr, mark lost,
+    # and the target has since entered working.
+    state_db.record_event(
+        {"event_type": "collaboration_dispatch_intent", "task_id": "task-b",
+         "workflow_id": "wf-1", "run_id": "wf-1",
+         "payload": {"collaboration_event_id": ev["event_id"], "pane_id": "pane-b"},
+         "source": "collaboration"},
+        db_path=db,
+    )
+    out = ctrl.dispatch_collaboration_event(ev["event_id"], tasks, sender, db_path=db)
+    assert sender.calls == []
+    assert out["status"] == "acknowledged"
+    assert out.get("recovered") is True
+    done = ctrl.maybe_complete_on_task_done("task-b", db_path=db)
+    assert len(done) == 1 and done[0]["status"] == "completed"

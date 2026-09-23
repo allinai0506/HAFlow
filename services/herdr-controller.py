@@ -4175,6 +4175,23 @@ def _collab_prior_intent(event_id, to_task_id, db_path):
     return None
 
 
+def _reconcile_collaboration_ack(event_id, target, db_path):
+    """ACK reconciliation shared by the dispatch and recovery paths.
+
+    A target already working never emits another working transition, so a
+    handoff created after that point would stick at dispatched without this
+    check. Returns the acknowledged row, or None when not applicable.
+    """
+    from herdr import state_db as _sdb
+
+    try:
+        if (target.get("status") or "") == "working":
+            return _sdb.mark_collaboration_acknowledged(event_id, db_path=db_path)
+    except Exception as exc:
+        print(f"[COLLABORATION ACK RECONCILE SKIPPED] event={event_id}: {type(exc).__name__}")
+    return None
+
+
 def dispatch_collaboration_event(event_id, tasks_by_id, prompt_sender=None, db_path=None):
     """Dispatch one CollaborationEvent through the existing Herdr prompt path.
 
@@ -4209,6 +4226,11 @@ def dispatch_collaboration_event(event_id, tasks_by_id, prompt_sender=None, db_p
         recovered = _sdb.mark_collaboration_dispatched(event_id, db_path=db_path)
         recovered["recovered"] = True
         recovered["dispatched"] = True
+        acked = _reconcile_collaboration_ack(event_id, target, db_path)
+        if acked is not None:
+            acked["recovered"] = True
+            acked["dispatched"] = True
+            return acked
         return recovered
 
     _sdb.record_event(
@@ -4232,12 +4254,10 @@ def dispatch_collaboration_event(event_id, tasks_by_id, prompt_sender=None, db_p
     # before this event existed, so the working-transition hook never fired
     # for it). Reconcile immediately instead of waiting for a transition
     # that may never come.
-    try:
-        if (target.get("status") or "") == "working":
-            marked = _sdb.mark_collaboration_acknowledged(event_id, db_path=db_path)
-            marked["dispatched"] = True
-    except Exception as exc:
-        print(f"[COLLABORATION ACK FAST-PATH SKIPPED] event={event_id}: {type(exc).__name__}")
+    acked = _reconcile_collaboration_ack(event_id, target, db_path)
+    if acked is not None:
+        acked["dispatched"] = True
+        return acked
     return marked
 
 
