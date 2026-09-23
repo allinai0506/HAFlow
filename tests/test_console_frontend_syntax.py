@@ -199,6 +199,23 @@ class TestConsoleFrontendSyntaxAndContracts(unittest.TestCase):
             Path(workflow_path).unlink(missing_ok=True)
         self.assertEqual(detail["tasks"][0]["node_type"], "gate")
 
+    def test_task_row_overflow_menu_and_stepper_progress(self):
+        """Contract: task list uses compact rows with row-click details, overflow menu, and full width."""
+        # Task row click & overflow menu
+        self.assertIn("onTaskRowClick", self.html)
+        self.assertIn("toggleTaskMenu", self.html)
+        self.assertIn("closeAllTaskMenus", self.html)
+        self.assertIn("task-dropdown-menu", self.html)
+        self.assertIn("task-menu-btn", self.html)
+        self.assertIn("···", self.html)
+        # Stepper active / next badges
+        self.assertIn("stage-next", self.html)
+        self.assertIn("stage-badge next", self.html)
+        self.assertIn("下一阶段", self.html)
+        # Full width layout (no max-width: 1400px)
+        self.assertNotIn("max-width: 1400px", self.html)
+        self.assertIn("width: 100%", self.html)
+
 
 if __name__ == "__main__":
     unittest.main()
