@@ -3868,3 +3868,32 @@ pytest -q  # 1238 passed, 44 subtests passed
 - `services/herdr-controller.py#dispatch_collaboration_event`、`#maybe_dispatch_node_handoffs`、`#maybe_ack_on_working`
 - `docs/architecture/collaboration-protocol.md`（Recovery 取舍已记录）
 - 同类模式：`docs/lessons/lessons-learned.md` §83（dispatch receipt 先于事实消费）
+
+## 88. 跨 Task 协作的隔离域不能用 Task 自身的执行身份
+
+### 问题背景
+
+PR #89 的 `collab_run_for_task` 首选 `task.run_id` 做 handoff 隔离域。
+但 `bin/herdr-task:1926` 每次 launch 都生成独立 `run_id`，同 Workflow 的
+Implementation 与 Review Task 的 run 天然不同 → 生产 dispatch 恒失败。
+测试因构造的 Task 没有独立 run_id 而回退到共享 workflow_id，假绿掩盖。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|---|---|---|
+| 用 Task 执行身份做跨 Task 隔离域 | 跨 Task 事实的隔离域必须是两者共享的上级执行身份，不是各自的执行身份 | V1 取 `workflow_run_id` / `execution_id` / `workflow_id`，永不取 `task.run_id`；缺失即 fail-closed |
+| 测试 Task 缺少生产字段 | 缺字段的测试替身会走 fallback 分支，与生产走不同代码路径 | 隔离/身份类测试必须携带生产必填字段（此处为各异的 `run_id` + 共享 `workflow_id`） |
+
+### 验证命令 / 证据
+
+```bash
+pytest -q tests/test_collaboration_dispatch.py  # 含异 run_id 同 workflow 可派发、跨 workflow 拒绝
+pytest -q  # 1241 passed, 44 subtests passed
+```
+
+### 相关文档 / 关联证据
+
+- `herdr/collaboration.py#collab_scope_for_task`
+- `bin/herdr-task:1926`、`1951`
+- `docs/architecture/collaboration-protocol.md`（Run isolation）
