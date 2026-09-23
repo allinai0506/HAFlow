@@ -930,3 +930,8 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - 只做 3 条自动边（implementation→review、review→tester、BLOCKER→coordinator），未知边保留 Coordinator；原 Workflow dependency 链不动。
 - S6 round 1 抓到幽灵 dispatched（D1）后修复：sender 失败落终态 failed、refs 封顶保 ID 尾、缺 run fail-closed；教训 `docs/lessons/lessons-learned.md` §87。
 - 证据：collaboration 专项 36 passed、全量 `pytest -q` 1238 passed + 44 subtests、S6 round 3 MERGE_READY；文档 `docs/architecture/collaboration-protocol.md`。
+
+## [2026-09-23] fix | Collaboration 修复 PR：共享 workflow scope + ACK fast-path + completed 接线
+- P1：隔离域由 per-task `run_id` 改为 workflow 执行身份（`collab_scope_for_task`），否则生产 handoff 恒失败；测试补生产语义（各异 run_id + 共享 workflow）。
+- P2：dispatch 快照已 working 即补 ACK（消 launch-then-event 竞态）；`finalize_completed_task` 挂 `maybe_complete_on_task_done`（仅 acknowledged→completed）。
+- 证据：专项 39 passed、全量 1241 passed + 44 subtests、S6 MERGE_READY；教训 §88。

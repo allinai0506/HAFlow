@@ -129,9 +129,14 @@ recovery; delivery certainty is traded for no-duplicate safety.
 
 ## Run isolation
 
-All reads/writes are `run_id`-scoped. Dispatch compares the target Task's
-`run_id` with the event's `run_id` and fails on mismatch, so `run-A`
-handoffs never reach `run-B` tasks even when node/task names match.
+All reads/writes carry a collaboration scope, **not** the per-task `run_id`:
+every `herdr-task launch` mints its own run, so siblings never share it.
+V1 scope is the workflow execution identity
+(`workflow_run_id` / `execution_id` when present, else the shared
+`workflow_id`; `collab_scope_for_task`, fail-closed on unknown).
+Dispatch compares the target Task's scope with the event's scope and fails
+on mismatch, so one workflow execution's handoffs never reach another
+execution's tasks even when node/task names match.
 
 ## Metrics
 
@@ -165,4 +170,8 @@ has no authoritative fact source yet and is out of scope.
   plus guarded production hooks (accelerator, never breaking main flow):
   `try_direct_stage_advance` → `maybe_dispatch_node_handoffs` (one HANDOFF
   per launched task on known edges), `handle_event` working branch →
-  `maybe_ack_on_working`. Kill-switch: `HERDR_COLLABORATION_ENABLED=0`.
+  `maybe_ack_on_working`, `finalize_completed_task` →
+  `maybe_complete_on_task_done`. Dispatch also carries an ACK fast-path:
+  a target already `working` in the dispatch snapshot is acknowledged
+  immediately (it was launched before the event existed, so no transition
+  hook will ever fire for it). Kill-switch: `HERDR_COLLABORATION_ENABLED=0`.

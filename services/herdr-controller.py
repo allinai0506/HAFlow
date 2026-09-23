@@ -2492,6 +2492,30 @@ agent: {task.get('agent', 'unknown')}
         timeout=30
     )
 
+def maybe_complete_on_task_done(task_id, db_path=None):
+    """Complete acknowledged handoffs whose target reached terminal done.
+
+    Production hook for the authoritative task completion pipeline. Only
+    ``acknowledged`` rows transition: a handoff never ACKed stays visible as
+    stuck instead of being silently closed. Never raises.
+    """
+    if not collaboration_enabled():
+        return []
+    try:
+        from herdr import state_db as _sdb
+        done = []
+        for row in _sdb.list_collaboration_events(
+            task_id=task_id, status="acknowledged", db_path=db_path,
+        ):
+            if row["to_task_id"] != task_id:
+                continue
+            done.append(_sdb.mark_collaboration_completed(row["event_id"], db_path=db_path))
+        return done
+    except Exception as exc:
+        print(f"[COLLABORATION COMPLETE SKIPPED] task={task_id}: {type(exc).__name__}")
+        return []
+
+
 def finalize_completed_task(task_id):
     task = get_task(task_id)
 
@@ -2506,6 +2530,11 @@ def finalize_completed_task(task_id):
             f"status={task.get('status')}"
         )
         return
+
+    # Collaboration accelerator: authoritative task completion closes the
+    # handoffs targeting it, so handoff latency metrics stay trustworthy.
+    for completed in maybe_complete_on_task_done(task_id):
+        print(f"[COLLABORATION COMPLETED] {completed.get('event_id')}")
 
     mode = task.get(
         "integration_mode",
@@ -4115,12 +4144,12 @@ def _collab_task_pane(task):
 
 
 def _collab_task_run(task):
-    # Fail closed on missing identity: never synthesize run_<task_id> here.
-    # Shared run scope is explicit run_id, else the workflow both tasks belong
-    # to; when neither exists the dispatch fails instead of guessing.
+    # Collaboration scope, NOT the per-task run_id: every herdr-task launch
+    # mints its own run_id, so scope must be the shared workflow execution
+    # identity. Fail closed when nothing identifies the execution.
     try:
-        from herdr.collaboration import collab_run_for_task
-        return collab_run_for_task(task)
+        from herdr.collaboration import collab_scope_for_task
+        return collab_scope_for_task(task)
     except Exception:
         return None
 
@@ -4143,6 +4172,23 @@ def _collab_prior_intent(event_id, to_task_id, db_path):
         payload = row.get("payload") or {}
         if payload.get("collaboration_event_id") == event_id:
             return row
+    return None
+
+
+def _reconcile_collaboration_ack(event_id, target, db_path):
+    """ACK reconciliation shared by the dispatch and recovery paths.
+
+    A target already working never emits another working transition, so a
+    handoff created after that point would stick at dispatched without this
+    check. Returns the acknowledged row, or None when not applicable.
+    """
+    from herdr import state_db as _sdb
+
+    try:
+        if (target.get("status") or "") == "working":
+            return _sdb.mark_collaboration_acknowledged(event_id, db_path=db_path)
+    except Exception as exc:
+        print(f"[COLLABORATION ACK RECONCILE SKIPPED] event={event_id}: {type(exc).__name__}")
     return None
 
 
@@ -4180,6 +4226,11 @@ def dispatch_collaboration_event(event_id, tasks_by_id, prompt_sender=None, db_p
         recovered = _sdb.mark_collaboration_dispatched(event_id, db_path=db_path)
         recovered["recovered"] = True
         recovered["dispatched"] = True
+        acked = _reconcile_collaboration_ack(event_id, target, db_path)
+        if acked is not None:
+            acked["recovered"] = True
+            acked["dispatched"] = True
+            return acked
         return recovered
 
     _sdb.record_event(
@@ -4199,6 +4250,14 @@ def dispatch_collaboration_event(event_id, tasks_by_id, prompt_sender=None, db_p
         return _sdb.mark_collaboration_failed(event_id, db_path=db_path)
     marked = _sdb.mark_collaboration_dispatched(event_id, db_path=db_path)
     marked["dispatched"] = True
+    # ACK fast-path: the target may already be working (it was launched
+    # before this event existed, so the working-transition hook never fired
+    # for it). Reconcile immediately instead of waiting for a transition
+    # that may never come.
+    acked = _reconcile_collaboration_ack(event_id, target, db_path)
+    if acked is not None:
+        acked["dispatched"] = True
+        return acked
     return marked
 
 
@@ -4289,7 +4348,7 @@ def maybe_dispatch_node_handoffs(*, workflow_id, ready_id, dep_ids, launched,
                 continue
             upstream.sort(key=lambda t: float(t.get("updated_at") or 0))
             from_task = upstream[-1]
-            run_id = _collab.collab_run_for_task(from_task)
+            run_id = _collab.collab_scope_for_task(from_task)
             branch = from_task.get("branch")
             event = _sdb.create_collaboration_event({
                 "run_id": run_id,

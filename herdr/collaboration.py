@@ -126,16 +126,24 @@ def route_deterministic_handoff(*, trigger: str) -> Optional[Dict[str, str]]:
     return dict(route) if route else None
 
 
-def collab_run_for_task(task: Dict[str, Any]) -> Optional[str]:
-    """Shared run identity for handoff isolation (fail-closed).
+def collab_scope_for_task(task: Dict[str, Any]) -> Optional[str]:
+    """Shared workflow execution scope for handoff isolation (fail-closed).
 
-    Prefers an explicit run_id, then the workflow scope shared by all tasks
-    of one run. Returns None when neither exists: callers must fail rather
-    than guess identity.
+    A collaboration handoff spans tasks, but every ``herdr-task launch``
+    mints its own per-task ``run_id`` — so ``task.run_id`` must NEVER be the
+    isolation scope, or siblings would always mismatch. V1 scope is the
+    workflow execution identity: explicit ``workflow_run_id`` /
+    ``execution_id`` when present, else the shared ``workflow_id``.
+    Returns None when nothing identifies the execution: callers fail closed.
     """
     if not isinstance(task, dict):
         return None
-    return task.get("run_id") or task.get("workflow_id") or None
+    return (
+        task.get("workflow_run_id")
+        or task.get("execution_id")
+        or task.get("workflow_id")
+        or None
+    )
 
 
 def infer_handoff_trigger(from_node_id: str, to_node_id: str) -> Optional[str]:
