@@ -3639,3 +3639,36 @@ Intervention 的逻辑身份必须由数据库唯一约束保护，执行前必�
 `tests/test_intervention_store.py` 使用两个 SQLite 连接并发创建同一
 decision；`tests/test_action_protocol.py` 使用两个 Controller worker
 并发 claim，并覆盖 running RETRY 的崩溃恢复。
+
+## 83. 外部 Action 的 dispatch receipt 必须先于事实消费
+
+### 问题背景
+
+Action Protocol V1 的 VERIFY/RETRY 都跨越 Controller 与 Agent/Pane
+进程边界。复核发现：仅写入 Task 状态不能证明 Action 已执行；读取
+`EVAL_DONE.json` 后再次读取文件做 freshness 判断也会产生 TOCTOU；而
+`verification_completed` receipt 写失败后若继续 Supervisor evaluation，
+当前 evidence 会被 dedup 消费并永久丢失。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|---|---|---|
+| Task 已是 `rework` | 状态是投影，不是本次 Intervention 的执行证据 | 用当前 `intervention_id` 对应的 dispatch receipt 判定已执行 |
+| EVAL_DONE 两次读取 | metrics 与 freshness 可能来自不同文件版本 | 单次字节快照同时生成 metrics、hash、完成时间 |
+| receipt 持久化失败仍继续 | evidence 被 dedup 后无法恢复 | receipt 成功落盘前不得消费或记录 evaluation dedup |
+| 历史 failed VERIFY 阻塞新 episode | 失败事实跨 episode 泄漏 | 用新的 `agent_done` 边界限定 active Intervention |
+
+### 操作规范
+
+跨进程 Action 使用“durable intent → external dispatch → durable receipt”
+顺序；恢复时只对当前 `task_id` 查询和 claim。RETRY 必须有
+`retry_dispatched`，VERIFY 必须有 `verification_dispatched` 及后续新
+verification receipt；Task status 本身不能替代这些事实。
+
+### 验证
+
+`tests/test_action_protocol.py` 覆盖 task-scoped recovery、历史 failed
+VERIFY episode、RETRY 无 dispatch 阻断和 kill switch；
+`tests/test_supervisor_tests_completed.py` 覆盖 receipt 写失败不消费
+evidence；本轮全量 `pytest -q` 为 1101 passed、44 subtests。

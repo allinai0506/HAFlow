@@ -101,7 +101,10 @@ def test_controller_retry_claims_existing_rework_and_completes(tmp_path):
     fresh = dict(task, status="rework", attempt_count=1)
     with patch.object(controller, "_get_store", return_value=store), \
          patch.object(controller, "set_task_status", return_value=True), \
-         patch.object(controller, "get_task", return_value=fresh):
+         patch.object(controller, "get_task", return_value=fresh), \
+         patch.object(controller.subprocess, "run", return_value=type("Result", (), {
+             "returncode": 0, "stdout": "", "stderr": "",
+         })()):
         result = controller._execute_supervisor_intervention(
             task, {"intervention": intervention}, controller._supervisor_retry,
         )
@@ -173,7 +176,15 @@ def test_recovery_does_not_repeat_retry_after_task_transition_evidence(tmp_path)
     )
     calls = []
 
-    def should_not_execute(_task, _decision):
+    store.record_event(
+        "retry_dispatched",
+        {"intervention_id": item["intervention_id"], "decision_id": item["decision_id"],
+         "action": ACTION_RETRY, "attempt_count": 1},
+        task_id=task["task_id"], workflow_id=task["workflow_id"],
+        source="supervisor", run_id=task["run_id"],
+    )
+
+    def should_not_execute(_task, _decision, **_kwargs):
         calls.append(1)
         raise AssertionError("retry was applied twice")
 
@@ -200,7 +211,10 @@ def test_fresh_retry_while_task_is_rework_has_new_execution_evidence(tmp_path):
         {"enabled": True, "enforce": True, "policy": {"max_attempts": 2}},
     )
 
-    with patch.object(controller, "_get_store", return_value=store):
+    with patch.object(controller, "_get_store", return_value=store), \
+         patch.object(controller.subprocess, "run", return_value=type("Result", (), {
+             "returncode": 0, "stdout": "", "stderr": "",
+         })()):
         result = controller._execute_supervisor_intervention(
             task, {"intervention": item}, controller._supervisor_retry, store=store,
         )
@@ -360,7 +374,8 @@ def test_old_eval_done_is_not_new_verify_evidence(tmp_path):
         },
     }
     assert controller._verification_evidence_is_new(
-        task, dispatch, {"iteration": 4}
+        dispatch, {"iteration": 4, "snapshot_sha256": baseline["sha256"],
+                   "snapshot_completed_at": 100.0}
     ) is False
 
 
@@ -470,7 +485,8 @@ def test_durable_ledger_read_failure_blocks_done(tmp_path):
 
     task = dict(_task(), status="agent_done")
     with patch.object(controller, "_get_store", return_value=BrokenLedger()), \
-         patch.object(controller, "enqueue_coordinator_event") as enqueue:
+         patch.object(controller, "enqueue_coordinator_event") as enqueue, \
+         patch.object(controller, "_supervisor_action_recovery_enabled", return_value=True):
         assert controller.emit_done_if_allowed(task) is False
     enqueue.assert_not_called()
 
@@ -769,6 +785,13 @@ def test_recovery_completes_running_retry_when_rework_already_applied(tmp_path):
             "attempt_count": 1,
         },
     )
+    store.record_event(
+        "retry_dispatched",
+        {"intervention_id": item["intervention_id"], "decision_id": item["decision_id"],
+         "action": ACTION_RETRY, "attempt_count": 1},
+        task_id=task["task_id"], workflow_id=task["workflow_id"],
+        source="supervisor", run_id=task["run_id"],
+    )
 
     recovered = controller.recover_pending_interventions(store=store, run_id="run-1")
 
@@ -797,7 +820,10 @@ def test_controller_checkpoint_runs_policy_to_persisted_retry_action(tmp_path):
          patch.object(supervisor_harness, "get_supervisor", return_value=supervisor), \
          patch.object(controller, "_get_store", return_value=store), \
          patch.object(controller, "get_task", side_effect=[task, fresh]), \
-         patch.object(controller, "set_task_status", return_value=True):
+         patch.object(controller, "set_task_status", return_value=True), \
+         patch.object(controller.subprocess, "run", return_value=type("Result", (), {
+             "returncode": 0, "stdout": "", "stderr": "",
+         })()):
         result = controller.supervisor_checkpoint(task, "agent_done")
 
     assert result["decision"]["action"] == ACTION_RETRY
@@ -806,6 +832,72 @@ def test_controller_checkpoint_runs_policy_to_persisted_retry_action(tmp_path):
     assert len(interventions) == 1
     assert interventions[0]["status"] == "completed"
     assert store.list_events(task_id="task-1", event_type="intervention_completed")
+
+
+def test_recovery_done_gateway_is_task_scoped(tmp_path):
+    controller = importlib.import_module("services.herdr-controller")
+    store = SQLiteStateStore(tmp_path / "state.db")
+    task_a = dict(_task(task_id="task-a"), status="agent_done")
+    task_b = dict(_task(task_id="task-b"), status="agent_done")
+    store.save_task(task_a)
+    store.save_task(task_b)
+    item_b = request_intervention(
+        store, task_b, _evaluation(), _decision(),
+        {"enabled": True, "enforce": True, "policy": {"max_attempts": 2}},
+    )
+    with patch.object(controller, "_supervisor_retry", side_effect=AssertionError("foreign task recovered")):
+        recovered = controller.recover_pending_interventions(
+            store=store, run_id="run-1", task_id="task-a",
+        )
+    assert recovered == []
+    assert store.get_intervention(item_b["intervention_id"])["status"] == "requested"
+
+
+def test_failed_verify_from_prior_agent_done_episode_does_not_block_rework(tmp_path):
+    controller = importlib.import_module("services.herdr-controller")
+    store = SQLiteStateStore(tmp_path / "state.db")
+    task = dict(_task(), status="rework", status_history=[
+        {"from": "rework", "to": "agent_done", "timestamp": 9999999999.0},
+    ])
+    store.save_task(task)
+    item = request_intervention(
+        store, task, _evaluation(), _decision(ACTION_VERIFY),
+        {"enabled": True, "enforce": True, "policy": {"max_verifications": 2}},
+    )
+    store.fail_intervention(item["intervention_id"], {"code": "dispatch_failed"})
+    assert controller._verification_execution_complete_for_rework(task, store) is True
+
+
+def test_retry_without_dispatch_cannot_be_healed_by_old_deliverables(tmp_path):
+    controller = importlib.import_module("services.herdr-controller")
+    store = SQLiteStateStore(tmp_path / "state.db")
+    task = dict(_task(), status="rework")
+    store.save_task(task)
+    request_intervention(
+        store, task, _evaluation(), _decision(ACTION_RETRY),
+        {"enabled": True, "enforce": True, "policy": {"max_attempts": 2}},
+    )
+    assert controller._retry_execution_complete_for_rework(task, store) is False
+
+
+def test_supervisor_kill_switch_skips_existing_intervention_recovery(tmp_path):
+    controller = importlib.import_module("services.herdr-controller")
+    store = SQLiteStateStore(tmp_path / "state.db")
+    task = dict(_task(), status="agent_done")
+    store.save_task(task)
+    request_intervention(
+        store, task, _evaluation(), _decision(),
+        {"enabled": True, "enforce": True, "policy": {"max_attempts": 2}},
+    )
+    with patch.object(controller, "_get_store", return_value=store), \
+         patch.object(controller, "_supervisor_action_recovery_enabled", return_value=False), \
+         patch.object(controller, "recover_pending_interventions", side_effect=AssertionError("recovery ran")), \
+         patch.object(controller, "supervisor_checkpoint", return_value=None), \
+         patch.object(controller, "_observer_terminal_checkpoint"), \
+         patch.object(controller, "_schedule_context_compact"), \
+         patch.object(controller, "enqueue_coordinator_event") as enqueue:
+        assert controller.emit_done_if_allowed(task) is True
+    enqueue.assert_called_once_with(task, "done")
 
 
 def test_completed_v1_intervention_is_not_pending_on_legacy_event_replay(tmp_path):

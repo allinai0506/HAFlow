@@ -71,11 +71,13 @@ writes `passed=true` and never substitutes for the existing `tests_completed`
 or `verification_completed` facts.
 
 The later `tests_completed`/`verification_completed` receipt carries the same
-Intervention identity. It is accepted only when the current `EVAL_DONE.json`
-is a new version relative to the dispatch baseline (hash and evaluator
-completion time); an old snapshot cannot be relabeled as the new VERIFY
-receipt. Rework watchdog and recovery paths require a matching new
-verification receipt; old deliverables alone cannot bypass a pending VERIFY.
+Intervention identity. `extract_test_evidence()` reads one immutable
+`EVAL_DONE.json` byte snapshot and derives the metrics, hash, and completion
+metadata from that same read. It is accepted only when that snapshot is a new
+version relative to the dispatch baseline (hash and evaluator completion
+time); an old snapshot cannot be relabeled as the new VERIFY receipt. Rework
+watchdog and recovery paths require a matching new verification receipt; old
+deliverables alone cannot bypass a pending VERIFY.
 
 Dispatch first records a durable `verification_dispatch_intent` containing the
 Intervention identity and evidence baseline. If the Controller crashes after
@@ -84,6 +86,12 @@ recovery consumes that intent and completes the dispatch receipt without
 sending the prompt again. A dispatch failure leaves the latest VERIFY
 Intervention failed and keeps rework blocking; it cannot be healed to
 `agent_done` from old deliverables.
+
+The same dispatch-intent and dispatch-receipt pattern is used by RETRY. A
+RETRY is not complete merely because the Task entered `rework` or `working`;
+the Controller must successfully submit the existing Agent prompt path and
+persist `retry_dispatched`. Rework watchdogs therefore cannot promote a Task
+from old deliverables while a new RETRY lacks dispatch evidence.
 
 VERIFY uses the policy `max_verifications` as a durable action-layer budget.
 The count is calculated from persisted VERIFY rows in requested, running,
@@ -99,21 +107,31 @@ reclaimed only when its database lease has expired, using an atomic
 `execution_owner` + `lease_until` compare-and-set. A live lease makes the
 second Controller skip the row. Completion/failure also checks the owner, so a
 reclaimed stale worker cannot finalize another Controller's execution.
-Completed, failed, and superseded rows cannot execute again.
+Completed, failed, and superseded rows cannot execute again. Recovery is
+task-scoped at the done gateway, so a pending action for another parallel Task
+in the same Run cannot block or execute as part of this Task's done decision.
 
 ## Crash recovery
 
 Controller done/recovery handling scans requested and running rows before
 allowing normal done redelivery. Requested rows are claimed and executed.
 Running rows are recovered only after a stale lease is atomically reclaimed.
-Before executing, recovery searches the Task status history and canonical
-events for the exact `intervention_id` and action. A transition already tagged
-with that identity completes the Intervention without repeating the side
-effect; Task status alone is never treated as proof. A durable pending
+Before executing, recovery searches canonical dispatch evidence for the exact
+`intervention_id` and action. For RETRY, a Task transition alone is not
+execution evidence; only `retry_dispatched` is. For VERIFY, only
+`verification_dispatched` and its later completion receipt count. Task status
+alone is never treated as proof. A durable pending
 Intervention therefore cannot be bypassed by RateGate or a replayed
 `agent_done` event.
 
-For a durable-capable StateStore, an unreadable Intervention ledger is
+Failed VERIFY rows are scoped to the current execution episode. Once a later
+`agent_done` transition starts a new episode, an older failed VERIFY is no
+longer allowed to block unrelated rework.
+
+The Supervisor enabled/enforce kill switch is checked before action recovery;
+when it is off, existing pending V1 actions are not replayed and the normal
+flow is preserved. For a durable-capable StateStore, an unreadable
+Intervention ledger is
 `UNKNOWN`, not `NO_PENDING`: done emission fails closed and no coordinator
 `done` event is sent. Legacy lightweight stores retain their pre-V1 behavior.
 For VERIFY and RETRY, the successful durable table is authoritative; a failed
@@ -136,7 +154,10 @@ does not fail the normal Task flow. A failure while creating a durable V1
 request is also fail-safe: no handler runs and normal continuation remains
 allowed. Once the request is persisted, the Controller owns its lifecycle and
 the default done continuation remains intercepted, including after handler
-failure.
+failure. A `verification_completed` trajectory receipt is persisted before
+the current evidence is passed to Supervisor evaluation/deduplication. If
+that receipt write fails, the checkpoint returns without consuming the
+evidence so a later poll can retry it.
 
 ## Metrics
 

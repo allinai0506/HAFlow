@@ -885,3 +885,9 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - `RETRY` 复用既有 `rework` 状态迁移并执行 retry budget；`VERIFY` 只进入既有 verification/rework 路径，不伪造 verification verdict。
 - Controller done/recovery 路径恢复 requested/running Intervention；跨 Run、重复决策、重复消费和并发 claim 均由持久化身份与事务保护。
 - 证据：`herdr/intervention.py`、`herdr/state_db.py`、`services/herdr-controller.py`、`tests/test_action_protocol.py`、`tests/test_intervention_store.py`、`docs/architecture/action-protocol.md`。
+
+## [2026-09-23] fix | Action Protocol V1：VERIFY/RETRY 恢复与事实边界加固
+- 修复 EVAL_DONE freshness 的双读 TOCTOU：测试证据从单次字节快照生成 metrics、hash 与完成时间；receipt 未成功持久化时不消费当前 evidence。
+- RETRY 现在必须真实 dispatch 既有 Agent prompt，并以 `retry_dispatched` 作为执行证据；VERIFY/RETRY watchdog 与 recovery 不再仅凭 `rework` 或旧 deliverables 自愈。
+- Recovery 按 `task_id` 隔离，历史 failed VERIFY 以新的 `agent_done` episode 为边界；Supervisor kill switch 在 recovery 前生效。
+- 证据：`services/herdr-controller.py`、`herdr/supervisor/evidence.py`、`tests/test_action_protocol.py`、`tests/test_supervisor_tests_completed.py`；全量 1101 passed、44 subtests。
