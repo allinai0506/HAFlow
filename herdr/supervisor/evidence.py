@@ -172,7 +172,11 @@ def extract_test_evidence(clone_path: Optional[str]) -> Optional[Dict[str, Any]]
     # Single-file atomic read — no cross-file consistency checks needed.
     snap_path = loop_dir / "EVAL_DONE.json"
     try:
-        snap = json.loads(snap_path.read_text(encoding="utf-8"))
+        # Parse the exact bytes that produced the evidence. Callers must not
+        # re-read EVAL_DONE.json for freshness after this point: the loop can
+        # atomically replace it between reads.
+        raw_snapshot = snap_path.read_bytes()
+        snap = json.loads(raw_snapshot.decode("utf-8"))
     except Exception:
         return None
     if not isinstance(snap, dict):
@@ -212,6 +216,9 @@ def extract_test_evidence(clone_path: Optional[str]) -> Optional[Dict[str, Any]]
         "type_errors": type_errors,
         "composite_score": composite_score,
         "has_repro_test": bool(snap.get("has_repro_test")),
+        "snapshot_sha256": hashlib.sha256(raw_snapshot).hexdigest(),
+        "snapshot_mtime_ns": snap_path.stat().st_mtime_ns,
+        "snapshot_completed_at": snap.get("completed_at"),
     }
     evidence_data["evidence_id"] = build_test_evidence_id(evidence_data)
     return evidence_data

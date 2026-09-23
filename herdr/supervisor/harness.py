@@ -34,6 +34,12 @@ from .config import (
     supervisor_enabled,
 )
 from .engine import RateGate, SemanticSupervisor
+from ..intervention import (
+    ACTION_RETRY,
+    ACTION_VERIFY,
+    STATUS_REQUESTED,
+    request_intervention,
+)
 from .evaluation import (
     EVALUATION_EVENT,
     POLICY_EVENT,
@@ -41,6 +47,10 @@ from .evaluation import (
 )
 
 EVENT_SOURCE = "semantic_supervisor"
+
+
+class DurableInterventionUnavailable(RuntimeError):
+    """The durable intervention ledger could not establish its state."""
 
 _FACT_EVIDENCE_KEYS = ("tests", "diff_summary", "output_summary", "test_progress", "trigger")
 
@@ -137,6 +147,17 @@ def collect_facts(
             (cfg.get("policy") or {}).get("allow_auto_execute", True)
         ),
     }
+    if store is not None and hasattr(store, "list_interventions"):
+        try:
+            from ..intervention import verification_count_for_task
+            from ..trajectory import run_id_for_task
+            facts["verification_count"] = verification_count_for_task(
+                store, run_id_for_task(task), str(task.get("task_id") or "")
+            )
+        except Exception:
+            # The action layer remains the authority if the projection cannot
+            # be read; supervision itself stays fail-safe.
+            pass
     try:
         facts.update(
             evidence_layer.collect_execution_evidence(
@@ -279,6 +300,7 @@ def run_checkpoint(
         intercepted = bool(
             enforce_on and decision.action in policy_engine.INTERVENTION_ACTIONS
         )
+        durable_action = decision.action in (ACTION_RETRY, ACTION_VERIFY)
         payload = {
             "decision_id": evaluation["evaluation_id"],
             "evaluation_id": evaluation["evaluation_id"],
@@ -289,6 +311,52 @@ def run_checkpoint(
         }
         if evidence_id:
             payload["evidence_id"] = evidence_id
+        log(
+            f"[SUPERVISOR] task={task_id} trigger={trigger} "
+            f"provider={evaluation.get('provider')} action={decision.action} "
+            f"why={'; '.join(decision.reasons)}"
+        )
+        handled = False
+        durable_intervention = None
+        durable_request_attempted = False
+        if intercepted and durable_action:
+            if not hasattr(store, "create_intervention"):
+                # Keep the pre-V1 handler contract for lightweight legacy
+                # stores used by integrations/tests. The production
+                # StateStore has create_intervention; a real persistence
+                # failure on that path remains fail-safe below.
+                log(
+                    f"[SUPERVISOR INTERVENTION REQUEST SKIPPED] task={task_id}: "
+                    "legacy store; using supplied handler"
+                )
+            else:
+                durable_request_attempted = True
+                try:
+                    durable_intervention = request_intervention(
+                        store, task, evaluation, payload, cfg,
+                    )
+                    if durable_intervention is not None:
+                        payload["intervention"] = durable_intervention
+                        if durable_intervention.get("status") == "completed":
+                            # A replay of a completed canonical action is
+                            # idempotent and may resume the default flow.
+                            intercepted = False
+                    else:
+                        intercepted = False
+                except Exception as exc:
+                    intercepted = False
+                    payload["enforced"] = False
+                    payload["durable"] = False
+                    payload["enforcement_requested"] = True
+                    payload["persistence_error"] = type(exc).__name__
+                    log(
+                        f"[SUPERVISOR INTERVENTION REQUEST FAILED] task={task_id}: "
+                        f"{type(exc).__name__}"
+                    )
+        if durable_request_attempted:
+            payload["enforced"] = bool(intercepted)
+            payload["durable"] = bool(durable_intervention is not None)
+            payload["enforcement_requested"] = True
         if store is not None:
             try:
                 store.record_event(
@@ -301,15 +369,16 @@ def run_checkpoint(
                 )
             except Exception as exc:
                 log(f"[SUPERVISOR EVENT WRITE FAILED] task={task_id}: {type(exc).__name__}")
-        log(
-            f"[SUPERVISOR] task={task_id} trigger={trigger} "
-            f"provider={evaluation.get('provider')} action={decision.action} "
-            f"why={'; '.join(decision.reasons)}"
-        )
-        handled = False
         if enforce_on and decision.action != policy_engine.CONTINUE:
             handler = (actions or {}).get(decision.action)
-            if handler is not None:
+            can_execute = (
+                not durable_request_attempted
+                or (
+                    durable_intervention is not None
+                    and durable_intervention.get("status") == STATUS_REQUESTED
+                )
+            )
+            if handler is not None and can_execute:
                 try:
                     handler(task, payload)
                     handled = True
@@ -373,10 +442,43 @@ def pending_intervention(task: dict, store, config: Optional[dict] = None
     cfg = config or load_config()
     if not cfg.get("enabled", False) or not cfg.get("enforce"):
         return None
-    if not supervisor_enabled(cfg):
-        return None
     task_id = task.get("task_id")
     if not task_id or store is None:
+        return None
+    durable_supported = hasattr(store, "list_interventions")
+    if durable_supported:
+        try:
+            from ..trajectory import run_id_for_task
+            all_rows = store.list_interventions(
+                run_id=run_id_for_task(task), task_id=task_id,
+                limit=100,
+            ) or []
+            durable = [
+                item for item in all_rows
+                if item.get("status") in ("requested", "running")
+            ]
+            for item in durable:
+                if item.get("action") in (ACTION_RETRY, ACTION_VERIFY):
+                    return str(item["action"])
+            # A durable V1 store is authoritative for VERIFY/RETRY. Do not
+            # resurrect a completed/failed request from a legacy policy event.
+            last_done = _last_agent_done_at(task)
+            v1_rows = all_rows
+            for item in v1_rows:
+                if item.get("action") not in (ACTION_RETRY, ACTION_VERIFY):
+                    continue
+                if item.get("status") == "superseded":
+                    continue
+                boundary = float(item.get("finished_at") or item.get("requested_at") or 0)
+                if last_done is None or boundary >= last_done:
+                    return str(item["action"])
+            if any(item.get("action") in (ACTION_RETRY, ACTION_VERIFY) for item in v1_rows):
+                return None
+        except Exception as exc:
+            raise DurableInterventionUnavailable(
+                f"durable intervention lookup failed for task {task_id}: {exc}"
+            ) from exc
+    if not supervisor_enabled(cfg):
         return None
     try:
         events = store.list_events(task_id=task_id, limit=100, desc=True) or []
@@ -391,6 +493,12 @@ def pending_intervention(task: dict, store, config: Optional[dict] = None
         payload = event.get("payload")
         if not isinstance(payload, dict) or payload.get("enforced") is not True:
             # Observe-mode decisions never block the default flow.
+            continue
+        if payload.get("action") in (ACTION_RETRY, ACTION_VERIFY) and (
+            payload.get("durable") is False or payload.get("enforcement_requested") is True
+        ):
+            # A failed V1 persistence attempt is fail-open and must not be
+            # resurrected from this legacy projection.
             continue
         try:
             ts = float(event.get("timestamp") or 0)
@@ -408,6 +516,7 @@ def pending_intervention(task: dict, store, config: Optional[dict] = None
 
 
 __all__ = [
+    "DurableInterventionUnavailable",
     "EVALUATION_EVENT",
     "POLICY_EVENT",
     "RateGate",

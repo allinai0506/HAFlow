@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import json
+import hashlib
 import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -11,6 +12,7 @@ import socket
 import subprocess
 import threading
 import time
+import uuid
 
 import sys
 HERDR_ROOT = Path(__file__).resolve().parent.parent
@@ -32,7 +34,7 @@ try:
     from herdr.trajectory import (
         TrajectoryLedger,
         record_observation_created,
-        record_trajectory_event_best_effort,
+        record_trajectory_event,
     )
     from herdr import liveness
 except ImportError:
@@ -46,7 +48,7 @@ except ImportError:
     from herdr.trajectory import (
         TrajectoryLedger,
         record_observation_created,
-        record_trajectory_event_best_effort,
+        record_trajectory_event,
     )
     from herdr import liveness
 
@@ -1116,6 +1118,7 @@ def coordinator_intake_enabled():
 # 单个 launch 必须有界:子进程僵死时不得永久占用调度线程
 # 与 per-workflow 锁,超时后走既有 PARTIAL→总指挥回退路径。
 DIRECT_DISPATCH_LAUNCH_TIMEOUT = 300
+SUPERVISOR_VERIFY_DISPATCH_TIMEOUT = 120
 
 
 def try_direct_stage_advance(item):
@@ -3437,10 +3440,582 @@ def _supervisor_notify(task, action, message):
     )
 
 
-def _supervisor_retry(task, decision):
-    """RETRY -> existing rework flow; failure must not pass as handled."""
-    if not set_task_status(task.get("task_id"), "rework"):
-        raise RuntimeError("RETRY handler could not move task to rework")
+def _supervisor_retry(task, decision, store=None):
+    """RETRY -> the existing rework flow; return only observed state facts."""
+    return _supervisor_retry_with_store(task, decision, store=store)
+
+
+def _intervention_metadata(decision, action, attempt_count=None):
+    intervention = (decision.get("intervention") or {}) if isinstance(decision, dict) else {}
+    metadata = {
+        "intervention_id": intervention.get("intervention_id"),
+        "decision_id": intervention.get("decision_id") or decision.get("decision_id"),
+        "action": action,
+    }
+    if attempt_count is not None:
+        metadata["attempt_count"] = int(attempt_count)
+    return {key: value for key, value in metadata.items() if value is not None}
+
+
+def _supervisor_retry_with_store(task, decision, store=None):
+    """Apply one new retry iteration using the existing legal task flow."""
+    from herdr.intervention import attempt_count_for_task
+    store = store or _get_store()
+    fresh_before = store.get_task(task.get("task_id")) if store is not None else None
+    fresh_before = fresh_before or task
+    previous_status = fresh_before.get("status")
+    current_attempt = attempt_count_for_task(fresh_before)
+    intervention = (decision.get("intervention") or {}) if isinstance(decision, dict) else {}
+    max_attempts = int(intervention.get("max_attempts") or 0)
+    if max_attempts > 0 and current_attempt >= max_attempts:
+        error = RuntimeError("RETRY budget exhausted")
+        error.intervention_error = {
+            "code": "retry_budget_exhausted",
+            "attempt_count": current_attempt,
+            "max_attempts": max_attempts,
+        }
+        raise error
+
+    # A task already in rework is active work, not evidence that this new
+    # Intervention ran. Re-enter the legal working path to start a new
+    # iteration; never use rework -> rework as a fake retry.
+    target_status = "working" if previous_status == "rework" else "rework"
+    next_attempt = current_attempt + 1
+    metadata = _intervention_metadata(decision, "RETRY", next_attempt)
+    applied_status = target_status
+    if store is not None and store.get_task(task.get("task_id")) is not None:
+        from herdr import kernel
+        kernel.transition_task(
+            task_id=task.get("task_id"),
+            to_status=target_status,
+            reason="supervisor_retry",
+            source="supervisor",
+            metadata=metadata,
+            store=store,
+        )
+    elif not set_task_status(task.get("task_id"), target_status):
+        raise RuntimeError("RETRY handler could not enter retry flow")
+    fresh = store.get_task(task.get("task_id")) if store is not None else None
+    fresh = fresh or get_task(task.get("task_id")) or dict(fresh_before, status=applied_status)
+    dispatch = _dispatch_supervisor_retry(fresh_before, decision, store)
+    return {
+        "action": "RETRY",
+        "previous_status": previous_status,
+        "new_status": fresh.get("status", target_status),
+        "attempt_count": attempt_count_for_task(fresh),
+        **dispatch,
+    }
+
+
+def _dispatch_supervisor_retry(task, decision, store):
+    """Dispatch a real new retry iteration through the existing Agent path."""
+    intervention = decision.get("intervention") or {}
+    pane_id = task.get("pane_id")
+    if not pane_id:
+        raise RuntimeError("RETRY dispatch requires task pane_id")
+    intervention_id = intervention.get("intervention_id")
+    decision_id = intervention.get("decision_id") or decision.get("decision_id")
+    from herdr.trajectory import run_id_for_task
+    prior_intent = _latest_action_dispatch_intent(
+        task, store, "RETRY", intervention_id=intervention_id,
+    )
+    if prior_intent is not None:
+        payload = dict(prior_intent.get("payload") or {})
+        payload["dispatch_recovered"] = True
+        store.record_event(
+            "retry_dispatched", payload,
+            workflow_id=task.get("workflow_id"),
+            node_id=task.get("node") or task.get("stage"),
+            task_id=task.get("task_id"), agent_id=task.get("agent"),
+            source="supervisor", run_id=run_id_for_task(task),
+        )
+        return {"retry_dispatched": True, "dispatch_recovered": True}
+    payload = {
+        "intervention_id": intervention_id,
+        "decision_id": decision_id,
+        "action": "RETRY",
+        "pane_id": pane_id,
+        "attempt_count": intervention.get("attempt"),
+        "verification_pending": False,
+    }
+    store.record_event(
+        "retry_dispatch_intent", payload,
+        workflow_id=task.get("workflow_id"),
+        node_id=task.get("node") or task.get("stage"),
+        task_id=task.get("task_id"), agent_id=task.get("agent"),
+        source="supervisor", run_id=run_id_for_task(task),
+    )
+    prompt = (
+        "Supervisor requested a fresh retry iteration for this task.\n"
+        "Continue the existing rework/fix loop now, run the configured work "
+        "and verification steps, and only report completion after the new "
+        "iteration has actually executed.\n"
+        f"HERDR_RETRY_INTERVENTION_ID:{intervention_id}\n"
+        f"HERDR_RETRY_DECISION_ID:{decision_id}\n"
+        "HERDR_RETRY_ACTION:RETRY\n"
+    )
+    result = subprocess.run(
+        ["herdr", "agent", "prompt", str(pane_id), prompt],
+        text=True, capture_output=True, timeout=SUPERVISOR_VERIFY_DISPATCH_TIMEOUT,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "retry prompt failed").strip()
+        raise RuntimeError(f"RETRY dispatch failed: {detail[:400]}")
+    store.record_event(
+        "retry_dispatched", payload,
+        workflow_id=task.get("workflow_id"),
+        node_id=task.get("node") or task.get("stage"),
+        task_id=task.get("task_id"), agent_id=task.get("agent"),
+        source="supervisor", run_id=run_id_for_task(task),
+    )
+    return {"retry_dispatched": True}
+
+
+def _supervisor_verify(task, decision, store=None):
+    """VERIFY -> re-enter the existing verification/rework route.
+
+    Verification facts are emitted later by the existing tests_completed and
+    verification_completed path; this handler never manufactures a verdict.
+    """
+    store = store or _get_store()
+    fresh_before = store.get_task(task.get("task_id")) if store is not None else None
+    fresh_before = fresh_before or task
+    previous_status = fresh_before.get("status")
+    applied_status = previous_status
+    if previous_status != "rework":
+        metadata = _intervention_metadata(decision, "VERIFY")
+        if store is not None and store.get_task(task.get("task_id")) is not None:
+            from herdr import kernel
+            kernel.transition_task(
+                task_id=task.get("task_id"),
+                to_status="rework",
+                reason="supervisor_verify",
+                source="supervisor",
+                metadata=metadata,
+                store=store,
+            )
+        elif not set_task_status(task.get("task_id"), "rework"):
+            raise RuntimeError("VERIFY handler could not enter verification rework")
+        else:
+            applied_status = "rework"
+    dispatch = _dispatch_supervisor_verification(fresh_before, decision, store)
+    fresh = store.get_task(task.get("task_id")) if store is not None else None
+    fresh = fresh or get_task(task.get("task_id")) or dict(fresh_before, status=applied_status)
+    return {
+        "action": "VERIFY",
+        "previous_status": previous_status,
+        "new_status": fresh.get("status"),
+        **dispatch,
+        "verification_requested": True,
+        "verification_pending": True,
+    }
+
+
+def _dispatch_supervisor_verification(task, decision, store):
+    """Submit one real verification prompt through the existing Agent path."""
+    intervention = decision.get("intervention") or {}
+    pane_id = task.get("pane_id")
+    if not pane_id:
+        raise RuntimeError("VERIFY dispatch requires task pane_id")
+    intervention_id = intervention.get("intervention_id")
+    decision_id = intervention.get("decision_id") or decision.get("decision_id")
+    from herdr.trajectory import run_id_for_task
+    prior_intent = _latest_verification_dispatch_intent(
+        task, store, intervention_id=intervention_id,
+    )
+    if prior_intent is not None:
+        payload = dict(prior_intent.get("payload") or {})
+        payload["dispatch_recovered"] = True
+        store.record_event(
+            "verification_dispatched",
+            payload,
+            workflow_id=task.get("workflow_id"),
+            node_id=task.get("node") or task.get("stage"),
+            task_id=task.get("task_id"),
+            agent_id=task.get("agent"),
+            source="supervisor",
+            run_id=run_id_for_task(task),
+        )
+        return {"verification_dispatched": True, "dispatch_recovered": True}
+    dispatch_started_at = time.time()
+    evidence_baseline = _verification_snapshot(task.get("clone_path"))
+    dispatch_payload = {
+        "intervention_id": intervention_id,
+        "decision_id": decision_id,
+        "action": "VERIFY",
+        "pane_id": pane_id,
+        "dispatch_started_at": dispatch_started_at,
+        "evidence_baseline": evidence_baseline,
+        "verification_pending": True,
+    }
+    store.record_event(
+        "verification_dispatch_intent",
+        dispatch_payload,
+        workflow_id=task.get("workflow_id"),
+        node_id=task.get("node") or task.get("stage"),
+        task_id=task.get("task_id"),
+        agent_id=task.get("agent"),
+        source="supervisor",
+        run_id=run_id_for_task(task),
+    )
+    prompt = (
+        "Supervisor requested a fresh verification execution for this task.\n"
+        "Run the existing project verification/test loop now (including "
+        "~/HAFlow/bin/herdr-loop eval when configured), inspect the resulting "
+        ".herdr-loop/EVAL_DONE.json, and only report completion after the new "
+        "verification evidence is written.\n"
+        f"HERDR_VERIFY_INTERVENTION_ID:{intervention_id}\n"
+        f"HERDR_VERIFY_DECISION_ID:{decision_id}\n"
+        "HERDR_VERIFY_ACTION:VERIFY\n"
+    )
+    result = subprocess.run(
+        ["herdr", "agent", "prompt", str(pane_id), prompt],
+        text=True,
+        capture_output=True,
+        timeout=SUPERVISOR_VERIFY_DISPATCH_TIMEOUT,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "verification prompt failed").strip()
+        raise RuntimeError(f"VERIFY dispatch failed: {detail[:400]}")
+    store.record_event(
+        "verification_dispatched",
+        dispatch_payload,
+        workflow_id=task.get("workflow_id"),
+        node_id=task.get("node") or task.get("stage"),
+        task_id=task.get("task_id"),
+        agent_id=task.get("agent"),
+        source="supervisor",
+        run_id=run_id_for_task(task),
+    )
+    return {"verification_dispatched": True}
+
+
+def _verification_snapshot(clone_path):
+    """Return the version of EVAL_DONE visible at a dispatch boundary."""
+    if not clone_path:
+        return None
+    path = Path(clone_path) / ".herdr-loop" / "EVAL_DONE.json"
+    try:
+        raw = path.read_bytes()
+        snapshot = json.loads(raw.decode("utf-8"))
+        return {
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            "mtime_ns": path.stat().st_mtime_ns,
+            "iteration": snapshot.get("iteration"),
+            "completed_at": snapshot.get("completed_at"),
+        }
+    except Exception:
+        return None
+
+
+def _verification_evidence_is_new(dispatch, test_evidence):
+    """Reject the exact EVAL_DONE snapshot that predates VERIFY dispatch."""
+    payload = dispatch.get("payload") or {}
+    baseline = payload.get("evidence_baseline")
+    started_at = float(payload.get("dispatch_started_at") or dispatch.get("timestamp") or 0)
+    current_sha = test_evidence.get("snapshot_sha256")
+    if not current_sha:
+        return False
+    if baseline and current_sha == baseline.get("sha256"):
+        return False
+    completed_at = test_evidence.get("snapshot_completed_at")
+    if started_at:
+        if completed_at is None:
+            return False
+        try:
+            if float(completed_at) <= started_at:
+                return False
+        except (TypeError, ValueError):
+            return False
+    return True
+
+
+def _intervention_execution_evidence(task, intervention, store):
+    """Find durable evidence for this exact Intervention, never by status alone."""
+    intervention_id = intervention.get("intervention_id")
+    action = intervention.get("action")
+    task_id = intervention.get("task_id")
+    run_id = intervention.get("run_id")
+    fresh = store.get_task(task_id) if store is not None else None
+    fresh = fresh or task
+    if store is None:
+        return None
+    if action == "RETRY":
+        for event in store.list_events(
+            task_id=task_id, event_type="retry_dispatched", limit=200, desc=True,
+        ):
+            payload = event.get("payload") or {}
+            if (
+                event.get("run_id") == run_id
+                and payload.get("intervention_id") == intervention_id
+                and payload.get("action") == action
+            ):
+                return {
+                    "action": action,
+                    "previous_status": fresh.get("status"),
+                    "new_status": fresh.get("status"),
+                    "attempt_count": payload.get("attempt_count"),
+                    "retry_dispatched": True,
+                    "already_applied": True,
+                    "execution_evidence": True,
+                }
+        return None
+    for event in store.list_events(task_id=task_id, event_type="verification_dispatched", limit=200, desc=True):
+        payload = event.get("payload") or {}
+        if (
+            event.get("run_id") == run_id
+            and payload.get("intervention_id") == intervention_id
+            and payload.get("action") == action
+        ):
+            return {
+                "action": action,
+                "previous_status": fresh.get("status"),
+                "new_status": fresh.get("status"),
+                "verification_dispatched": True,
+                "verification_requested": True,
+                "verification_pending": True,
+                "already_applied": True,
+                "execution_evidence": True,
+            }
+    return None
+
+
+def _latest_verification_dispatch(task, store=None):
+    store = store or _get_store()
+    from herdr.trajectory import run_id_for_task
+    rows = store.list_events(
+        task_id=task.get("task_id"), event_type="verification_dispatched",
+        source="supervisor", limit=100, desc=True,
+    )
+    expected_run = run_id_for_task(task)
+    for event in rows:
+        if event.get("run_id") == expected_run:
+            return event
+    return None
+
+
+def _latest_action_dispatch_intent(task, store, action, intervention_id=None):
+    store = store or _get_store()
+    from herdr.trajectory import run_id_for_task
+    event_type = {
+        "VERIFY": "verification_dispatch_intent",
+        "RETRY": "retry_dispatch_intent",
+    }.get(action, f"{action.lower()}_dispatch_intent")
+    rows = store.list_events(
+        task_id=task.get("task_id"),
+        event_type=event_type,
+        source="supervisor", limit=100, desc=True,
+    )
+    expected_run = run_id_for_task(task)
+    for event in rows:
+        payload = event.get("payload") or {}
+        if (
+            event.get("run_id") == expected_run
+            and payload.get("action") == action
+            and (intervention_id is None or payload.get("intervention_id") == intervention_id)
+        ):
+            return event
+    return None
+
+
+def _latest_verification_dispatch_intent(task, store=None, intervention_id=None):
+    return _latest_action_dispatch_intent(task, store, "VERIFY", intervention_id)
+
+
+def _latest_retry_dispatch(task, store=None):
+    store = store or _get_store()
+    from herdr.trajectory import run_id_for_task
+    expected_run = run_id_for_task(task)
+    for event in store.list_events(
+        task_id=task.get("task_id"), event_type="retry_dispatched",
+        source="supervisor", limit=100, desc=True,
+    ):
+        if event.get("run_id") == expected_run:
+            return event
+    return None
+
+
+def _retry_execution_complete_for_rework(task, store=None):
+    """Old deliverables cannot heal a task while a new RETRY lacks dispatch."""
+    store = store or _get_store()
+    try:
+        from herdr.trajectory import run_id_for_task
+        rows = store.list_interventions(
+            run_id=run_id_for_task(task), task_id=task.get("task_id"),
+        )
+        active = [
+            row for row in rows
+            if row.get("action") == "RETRY" and row.get("status") != "superseded"
+        ]
+        latest_agent_done = max(
+            (
+                float(entry.get("timestamp") or 0)
+                for entry in (task.get("status_history") or [])
+                if isinstance(entry, dict) and entry.get("to") == "agent_done"
+            ),
+            default=0.0,
+        )
+        active = [
+            row for row in active
+            if float(row.get("requested_at") or 0) >= latest_agent_done
+        ]
+        if not active:
+            return True
+        latest = max(active, key=lambda row: float(row.get("requested_at") or 0))
+        if latest.get("status") in ("requested", "running", "failed"):
+            dispatch = _latest_retry_dispatch(task, store)
+            return bool(
+                dispatch
+                and (dispatch.get("payload") or {}).get("intervention_id")
+                == latest.get("intervention_id")
+            )
+        return True
+    except Exception:
+        return False
+
+
+def _verification_execution_complete_for_rework(task, store=None):
+    """Old deliverables cannot heal a Task while a new VERIFY lacks evidence."""
+    store = store or _get_store()
+    try:
+        from herdr.trajectory import run_id_for_task
+        verify_rows = store.list_interventions(
+            run_id=run_id_for_task(task),
+            task_id=task.get("task_id"),
+        )
+        active_verify = [
+            row for row in verify_rows
+            if row.get("action") == "VERIFY"
+            and row.get("status") != "superseded"
+        ]
+        latest_agent_done = max(
+            (
+                float(entry.get("timestamp") or 0)
+                for entry in (task.get("status_history") or [])
+                if isinstance(entry, dict) and entry.get("to") == "agent_done"
+            ),
+            default=0.0,
+        )
+        active_verify = [
+            row for row in active_verify
+            if float(row.get("requested_at") or 0) >= latest_agent_done
+        ]
+        if not active_verify:
+            return True
+        latest_verify = max(
+            active_verify,
+            key=lambda row: float(row.get("requested_at") or 0),
+        ) if active_verify else None
+        dispatch = _latest_verification_dispatch(task, store)
+        dispatch_intervention_id = (
+            (dispatch.get("payload") or {}).get("intervention_id")
+            if dispatch is not None else None
+        )
+        if latest_verify and latest_verify.get("status") in ("requested", "running", "failed"):
+            if dispatch_intervention_id != latest_verify.get("intervention_id"):
+                return False
+        if dispatch is None:
+            latest = max(
+                active_verify,
+                key=lambda row: float(row.get("requested_at") or 0),
+            )
+            return latest.get("status") not in ("requested", "running", "failed")
+        intervention_id = (dispatch.get("payload") or {}).get("intervention_id")
+        for event in store.list_events(
+            task_id=task.get("task_id"), event_type="verification_completed",
+            source="trajectory", limit=100, desc=True,
+        ):
+            if event.get("run_id") != run_id_for_task(task):
+                continue
+            payload = event.get("payload") or {}
+            verification = payload.get("verification") or {}
+            if (
+                verification.get("intervention_id") == intervention_id
+                and float(event.get("timestamp") or 0) >= float(dispatch.get("timestamp") or 0)
+            ):
+                return True
+        return False
+    except Exception:
+        return False
+
+
+_INTERVENTION_EXECUTION_OWNER = f"controller:{os.getpid()}:{uuid.uuid4()}"
+
+
+def _execute_supervisor_intervention(task, decision, action_handler, store=None):
+    """Claim and execute one durable action, retaining legacy handler support."""
+    intervention = decision.get("intervention") if isinstance(decision, dict) else None
+    if not intervention:
+        return action_handler(task, decision)
+    store = store or _get_store()
+    intervention_id = intervention.get("intervention_id")
+    current = store.get_intervention(intervention_id)
+    if current is None:
+        raise RuntimeError("canonical intervention disappeared")
+    if current.get("status") in ("completed", "failed", "superseded"):
+        if current.get("status") == "failed":
+            raise RuntimeError("intervention already failed")
+        return current.get("result") or {"already_applied": True}
+    claimed = store.claim_intervention(
+        intervention_id,
+        execution_owner=_INTERVENTION_EXECUTION_OWNER,
+        recover_running=bool(decision.get("_recovery")),
+    )
+    if claimed is None:
+        return {"already_claimed": True}
+    owner = claimed.get("execution_owner")
+    try:
+        evidence = _intervention_execution_evidence(task, claimed, store)
+        if evidence is not None:
+            result = evidence
+        elif action_handler in (_supervisor_retry, _supervisor_verify):
+            result = action_handler(task, decision, store=store) or {}
+        else:
+            result = action_handler(task, decision) or {}
+        store.complete_intervention(intervention_id, result, execution_owner=owner)
+        return result
+    except Exception as exc:
+        from herdr.supervisor.state import redact_text
+        error = getattr(exc, "intervention_error", None) or {
+            "type": type(exc).__name__, "message": redact_text(str(exc)[:500]),
+        }
+        try:
+            store.fail_intervention(intervention_id, error, execution_owner=owner)
+        except ValueError:
+            # A reclaimed owner or a concurrent terminal transition already
+            # owns the durable outcome; do not mask the original action error.
+            pass
+        raise
+
+
+def recover_pending_interventions(store=None, run_id=None, task_id=None):
+    """Recover requested/running actions before a done redelivery can pass."""
+    store = store or _get_store()
+    recovered = []
+    pending = store.list_interventions(
+        run_id=run_id, task_id=task_id, statuses=["requested", "running"],
+    )
+    for item in pending:
+        task = store.get_task(item.get("task_id"))
+        if not task:
+            store.fail_intervention(item["intervention_id"], {"code": "task_missing"})
+            continue
+        from herdr.trajectory import run_id_for_task
+        if str(run_id_for_task(task)) != str(item.get("run_id")):
+            store.fail_intervention(item["intervention_id"], {"code": "run_mismatch"})
+            continue
+        decision = dict(item)
+        decision["intervention"] = item
+        decision["_recovery"] = True
+        if item.get("action") == "RETRY":
+            result = _execute_supervisor_intervention(task, decision, _supervisor_retry, store=store)
+        elif item.get("action") == "VERIFY":
+            result = _execute_supervisor_intervention(task, decision, _supervisor_verify, store=store)
+        else:
+            store.fail_intervention(item["intervention_id"], {"code": "unsupported_action"})
+            continue
+        recovered.append({"intervention": item, "result": result})
+    return recovered
 
 
 def supervisor_continue_flow(result):
@@ -3453,6 +4028,18 @@ def supervisor_continue_flow(result):
     if not result:
         return True
     return bool(result.get("continue_flow", True))
+
+
+def _supervisor_action_recovery_enabled():
+    """Read the current kill switch before replaying durable actions."""
+    try:
+        if supervisor_harness is None:
+            return False
+        cfg = supervisor_harness.load_config()
+        from herdr.supervisor.config import supervisor_enabled
+        return bool(cfg.get("enforce") and supervisor_enabled(cfg))
+    except Exception:
+        return False
 
 
 def emit_done_if_allowed(task, report_text=None):
@@ -3471,6 +4058,18 @@ def emit_done_if_allowed(task, report_text=None):
     """
     observer_complete = threading.Event()
     supervisor_complete = threading.Event()
+    store = _get_store()
+    try:
+        from herdr.trajectory import run_id_for_task
+        if hasattr(store, "list_interventions") and _supervisor_action_recovery_enabled():
+            recovered = recover_pending_interventions(
+                store=store, run_id=run_id_for_task(task), task_id=task.get("task_id"),
+            )
+            if recovered:
+                return False
+    except Exception as exc:
+        print(f"[INTERVENTION RECOVERY UNAVAILABLE] task={task.get('task_id')}: {type(exc).__name__}")
+        return False
     _observer_terminal_checkpoint(task, completion_event=observer_complete)
     _schedule_context_compact(
         task, wait_for=observer_complete, supervisor_done=supervisor_complete,
@@ -3481,8 +4080,14 @@ def emit_done_if_allowed(task, report_text=None):
             pending = None
             if supervisor_harness is not None:
                 try:
-                    pending = supervisor_harness.pending_intervention(task, _get_store())
-                except Exception:
+                    pending = supervisor_harness.pending_intervention(task, store)
+                except Exception as exc:
+                    if hasattr(store, "list_interventions"):
+                        print(
+                            f"[INTERVENTION RECOVERY UNAVAILABLE] "
+                            f"task={task.get('task_id')}: {type(exc).__name__}"
+                        )
+                        return False
                     pending = None
             if pending:
                 _supervisor_log_pending(task, pending)
@@ -3634,11 +4239,11 @@ def supervisor_checkpoint(task, trigger, report_text=None, test_evidence=None, e
     try:
         fresh = get_task(task.get("task_id")) or task
         actions = {
-            # Policy actions map onto existing flows only:
-            # RETRY -> rework 回流;其余 -> attention 台账(人工/总指挥可见)。
-            "RETRY": _supervisor_retry,
+            # Policy actions map onto existing flows only. Durable VERIFY/RETRY
+            # claims are owned by the Controller wrapper, not the Supervisor.
+            "RETRY": lambda t, d: _execute_supervisor_intervention(t, d, _supervisor_retry),
             "ESCALATE": lambda t, d: _supervisor_attention(t, d, "supervisor_escalate"),
-            "VERIFY": lambda t, d: _supervisor_attention(t, d, "supervisor_verify"),
+            "VERIFY": lambda t, d: _execute_supervisor_intervention(t, d, _supervisor_verify),
             "PAUSE": lambda t, d: _supervisor_attention(t, d, "supervisor_pause"),
             "REROUTE": lambda t, d: _supervisor_attention(t, d, "supervisor_reroute"),
         }
@@ -3743,6 +4348,17 @@ def check_task_tests_completed(task, store=None, now=None):
         "type_errors": test_evidence.get("type_errors", 0),
         "composite_score": test_evidence.get("composite_score", 0.0),
     }
+    dispatch = _latest_verification_dispatch(task, st)
+    if dispatch is not None:
+        if not _verification_evidence_is_new(dispatch, test_evidence):
+            print(
+                f"[VERIFY EVIDENCE DEFERRED] task={task_id}: "
+                "EVAL_DONE predates current VERIFY dispatch"
+            )
+            return None
+        dispatch_payload = dispatch.get("payload") or {}
+        verification["intervention_id"] = dispatch_payload.get("intervention_id")
+        verification["decision_id"] = dispatch_payload.get("decision_id")
     try:
         observation, _created = create_verification_observation_with_status(
             verification,
@@ -3775,6 +4391,8 @@ def check_task_tests_completed(task, store=None, now=None):
                 "lint_errors": test_evidence.get("lint_errors", 0),
                 "type_errors": test_evidence.get("type_errors", 0),
                 "composite_score": test_evidence.get("composite_score", 0.0),
+                "intervention_id": verification.get("intervention_id"),
+                "decision_id": verification.get("decision_id"),
             },
             task_id=task_id,
             workflow_id=task.get("workflow_id"),
@@ -3782,14 +4400,19 @@ def check_task_tests_completed(task, store=None, now=None):
             agent_id=task.get("agent"),
             source="herdr-controller",
         )
-        record_trajectory_event_best_effort(
+        receipt = record_trajectory_event(
             task,
             "verification_completed",
             ledger=TrajectoryLedger(getattr(st, "db_path", None)),
             verification=verification,
         )
+        if not receipt:
+            raise RuntimeError("verification_completed receipt was not persisted")
     except Exception as exc:
         print(f"[TESTS_COMPLETED EVENT ERROR] task={task_id}: {exc}")
+        # Do not consume/deduplicate this evidence until the durable receipt
+        # exists. The next watcher pass must be able to retry the receipt.
+        return None
 
     # 7. Run supervisor checkpoint
     return supervisor_checkpoint(
@@ -3905,7 +4528,9 @@ def handle_event(task_id, agent_status):
         elif current_status == "rework":
             # 自愈修复：若任务处于 rework 状态，当 Agent 输出 DONE 标记或产物已落盘就绪时，
             # 自动推进至 agent_done，彻底避免孤儿停滞！
-            if has_done_marker or check_task_deliverables_ready(task):
+            if (has_done_marker or check_task_deliverables_ready(task)) and \
+                    _verification_execution_complete_for_rework(task) and \
+                    _retry_execution_complete_for_rework(task):
                 print(
                     f"[REWORK HEALED] "
                     f"task={task_id} "
@@ -3934,7 +4559,11 @@ def handle_event(task_id, agent_status):
 
     elif agent_status == "done":
         if current_status in ("working", "rework"):
-            if current_status == "rework" and not check_task_deliverables_ready(task):
+            if current_status == "rework" and (
+                not check_task_deliverables_ready(task)
+                or not _verification_execution_complete_for_rework(task)
+                or not _retry_execution_complete_for_rework(task)
+            ):
                 return
             if set_task_status(
                 task_id,
@@ -4095,7 +4724,11 @@ def reconcile_task_state(task_id):
         elif current == "rework":
             # 只有当产物已经真实就绪时，才允许从 rework 恢复为 agent_done；
             # 否则必须等待新派发启动后实际进入 working。
-            if check_task_deliverables_ready(task):
+            if (
+                check_task_deliverables_ready(task)
+                and _verification_execution_complete_for_rework(task)
+                and _retry_execution_complete_for_rework(task)
+            ):
                 print(
                     f"[RECOVERY REWORK HEALED] "
                     f"task={task_id} deliverables detected -> restore agent_done"
@@ -4134,7 +4767,11 @@ def reconcile_task_state(task_id):
             if task and task.get("status") == "agent_done":
                 emit_done_if_allowed(task)
         elif current == "rework":
-            if check_task_deliverables_ready(task):
+            if (
+                check_task_deliverables_ready(task)
+                and _verification_execution_complete_for_rework(task)
+                and _retry_execution_complete_for_rework(task)
+            ):
                 print(
                     f"[RECOVERY REWORK HEALED] "
                     f"task={task_id} idle + deliverables detected -> restore agent_done"
@@ -4617,7 +5254,12 @@ def registry_watcher():
                     pane_id = task.get("pane_id")
                     if pane_id:
                         runtime = get_agent_runtime_status(pane_id)
-                        if runtime in ("idle", "done") and check_task_deliverables_ready(task):
+                        if (
+                            runtime in ("idle", "done")
+                            and check_task_deliverables_ready(task)
+                            and _verification_execution_complete_for_rework(task)
+                            and _retry_execution_complete_for_rework(task)
+                        ):
                             print(
                                 f"[REWORK WATCHDOG HEAL] "
                                 f"task={task_id} deliverables detected and agent is {runtime} -> advance to agent_done"

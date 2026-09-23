@@ -792,6 +792,36 @@ class TestsCompletedRegressionFixes(unittest.TestCase):
         self.assertEqual(provider.call_count, 0,
             "No provider calls should occur for dispatched tasks without test evidence")
 
+    def test_p_receipt_failure_does_not_consume_evidence(self):
+        """A failed verification receipt remains retryable and is not evaluated."""
+        self._write_loop(iteration=1, total=3, passed=2, failing=["x"], score=66.0)
+        task = {
+            "task_id": "task-receipt-failure",
+            "workflow_id": "wf-receipt-failure",
+            "run_id": "run-receipt-failure",
+            "node": "impl",
+            "status": "working",
+            "clone_path": str(self.clone_dir),
+            "runtime": {"status": "running"},
+        }
+        self.store.save_task(task)
+        provider = _MockProvider()
+        supervisor = supervisor_harness.SemanticSupervisor(self.base_config, provider)
+
+        with patch.object(supervisor_harness, "get_supervisor", return_value=supervisor), \
+             patch.object(supervisor_harness, "load_config", return_value=self.base_config), \
+             patch.object(self.controller, "_get_store", return_value=self.store), \
+             patch.object(self.controller, "record_trajectory_event", side_effect=RuntimeError("ledger busy")), \
+             patch.object(self.controller, "supervisor_checkpoint") as checkpoint:
+            result = self.controller.check_task_tests_completed(task, store=self.store, now=1000.0)
+
+        self.assertIsNone(result)
+        checkpoint.assert_not_called()
+        self.assertFalse(
+            [event for event in self.store.list_events(task_id=task["task_id"])
+             if event.get("event_type") == EVALUATION_EVENT]
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
