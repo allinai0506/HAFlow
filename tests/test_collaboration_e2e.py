@@ -1,0 +1,142 @@
+"""Collaboration e2e tests (lifecycle, ACK-once, metrics, isolation)."""
+
+import importlib.machinery
+import importlib.util
+import sys
+from pathlib import Path
+
+HERDR_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(HERDR_ROOT))
+
+from herdr import collaboration as collab
+from herdr import state_db
+
+
+def _load_controller(name="ctrl_collab_e2e_test"):
+    spec = importlib.util.spec_from_loader(
+        name,
+        importlib.machinery.SourceFileLoader(
+            name, str(HERDR_ROOT / "services" / "herdr-controller.py")
+        ),
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class FakeSender:
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, pane_id, prompt):
+        self.calls.append((pane_id, prompt))
+        return {"ok": True}
+
+
+def _tasks(run_id="run-1"):
+    return {
+        "task-a": {"task_id": "task-a", "run_id": run_id, "workflow_id": "wf-1",
+                   "pane_id": "pane-a", "agent": "developer"},
+        "task-b": {"task_id": "task-b", "run_id": run_id, "workflow_id": "wf-1",
+                   "pane_id": "pane-b", "agent": "reviewer"},
+    }
+
+
+def test_e2e_lifecycle_dispatch_ack_complete_with_metrics(tmp_path):
+    ctrl = _load_controller()
+    db = tmp_path / "state.db"
+    ev = state_db.create_collaboration_event({
+        "run_id": "run-1", "workflow_id": "wf-1",
+        "from_task_id": "task-a", "from_agent": "developer",
+        "to_task_id": "task-b", "to_agent": "reviewer",
+        "type": "HANDOFF", "summary": "Implementation done.",
+        "artifact_refs": ["commit:abc123"], "evidence_refs": ["test:x"],
+        "source_fact_id": "fact-1",
+    }, db_path=db)
+    sender = FakeSender()
+    ctrl.dispatch_collaboration_event(ev["event_id"], _tasks(), sender, db_path=db)
+    acked = ctrl.ack_collaboration_event_for_task("task-b", db_path=db)
+    assert len(acked) == 1 and acked[0]["status"] == "acknowledged"
+    done = state_db.mark_collaboration_completed(ev["event_id"], db_path=db)
+    assert done["status"] == "completed"
+    lat = collab.handoff_latency(done)
+    assert lat["dispatch_latency"] is not None and lat["dispatch_latency"] >= 0
+    assert lat["ack_latency"] is not None and lat["ack_latency"] >= 0
+    assert lat["handoff_latency"] is not None and lat["handoff_latency"] >= 0
+
+
+def test_e2e_ack_exactly_once(tmp_path):
+    ctrl = _load_controller()
+    db = tmp_path / "state.db"
+    ev = state_db.create_collaboration_event({
+        "run_id": "run-1", "workflow_id": "wf-1",
+        "from_task_id": "task-a", "from_agent": "developer",
+        "to_task_id": "task-b", "to_agent": "reviewer",
+        "type": "HANDOFF", "summary": "Done.",
+        "source_fact_id": "fact-1",
+    }, db_path=db)
+    sender = FakeSender()
+    ctrl.dispatch_collaboration_event(ev["event_id"], _tasks(), sender, db_path=db)
+    first = ctrl.ack_collaboration_event_for_task("task-b", db_path=db)
+    second = ctrl.ack_collaboration_event_for_task("task-b", db_path=db)
+    assert len(first) == 1
+    assert second == []
+
+
+def test_e2e_prompt_never_carries_full_history(tmp_path):
+    ctrl = _load_controller()
+    db = tmp_path / "state.db"
+    big = "implementation detail line " * 200
+    ev = state_db.create_collaboration_event({
+        "run_id": "run-1", "workflow_id": "wf-1",
+        "from_task_id": "task-a", "from_agent": "developer",
+        "to_task_id": "task-b", "to_agent": "reviewer",
+        "type": "HANDOFF", "summary": big,
+        "artifact_refs": ["commit:abc123"], "evidence_refs": ["verification:ver-456"],
+        "source_fact_id": "fact-1",
+    }, db_path=db)
+    sender = FakeSender()
+    ctrl.dispatch_collaboration_event(ev["event_id"], _tasks(), sender, db_path=db)
+    prompt = sender.calls[0][1]
+    assert len(prompt) <= 2000
+    assert "terminal transcript" not in prompt.lower()
+    stored = state_db.get_collaboration_event(ev["event_id"], db_path=db)
+    assert stored["artifact_refs"] == ["commit:abc123"]
+    assert len(stored["summary"]) <= 500
+
+
+def test_e2e_cross_run_parallel_isolation(tmp_path):
+    ctrl = _load_controller()
+    db = tmp_path / "state.db"
+    ea = state_db.create_collaboration_event({
+        "run_id": "run-A", "workflow_id": "wf-1",
+        "from_task_id": "task-a", "from_agent": "developer",
+        "to_task_id": "task-b", "to_agent": "reviewer",
+        "type": "HANDOFF", "summary": "A done.",
+        "source_fact_id": "fact-1",
+    }, db_path=db)
+    eb = state_db.create_collaboration_event({
+        "run_id": "run-B", "workflow_id": "wf-1",
+        "from_task_id": "task-a", "from_agent": "developer",
+        "to_task_id": "task-b", "to_agent": "reviewer",
+        "type": "HANDOFF", "summary": "B done.",
+        "source_fact_id": "fact-1",
+    }, db_path=db)
+    tasks_a = _tasks(run_id="run-A")
+    tasks_b = _tasks(run_id="run-B")
+    # Same task names, different runs: each resolves within its own run.
+    sender = FakeSender()
+    ctrl.dispatch_collaboration_event(ea["event_id"], tasks_a, sender, db_path=db)
+    ctrl.dispatch_collaboration_event(eb["event_id"], tasks_b, sender, db_path=db)
+    assert len(sender.calls) == 2
+    # Crossed lookup must fail, never cross-deliver.
+    ec = state_db.create_collaboration_event({
+        "run_id": "run-A", "workflow_id": "wf-1",
+        "from_task_id": "task-a", "from_agent": "developer",
+        "to_task_id": "task-b", "to_agent": "reviewer",
+        "type": "HANDOFF", "summary": "A2.",
+        "source_fact_id": "fact-2",
+    }, db_path=db)
+    out = ctrl.dispatch_collaboration_event(ec["event_id"], tasks_b, sender, db_path=db)
+    assert out["status"] == "failed"
+    assert len(sender.calls) == 2

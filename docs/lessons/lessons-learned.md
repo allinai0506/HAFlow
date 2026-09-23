@@ -3824,3 +3824,47 @@ pytest -q  # 1141 passed, 44 subtests passed
 - `bin/herdr-task#_autosave_clone_wip`
 - `tests/test_dispatch_candidate.py`
 - 事故现场：`wf-haflow-0923-01-test-auto-r6`（测 main）、`impl-fix4`（7 文件 stranded）
+
+## 87. Intent 存在不等于已送达：sender 失败与 crash 恢复必须走不同分支
+
+### 问题背景
+
+Collaboration Protocol V1 复用 Supervisor 的
+`dispatch_intent → prompt → dispatched` durable 模式。S6 round 1 独立评审
+用实证抓到阻塞缺陷 D1：`dispatch_collaboration_event` 在 sender 显式抛错后，
+intent 已落盘，重试时命中“既有 intent 即恢复”分支，零调用 sender 直接返回
+`dispatched/recovered=True`——交付从未发生却被记为送达（幽灵 dispatched）。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|---|---|---|
+| intent 存在即视为已发送 | intent 只证明“尝试开始”，不能证明“对方收到”；crash-after-success 与 fail-before-send 共用同一分支必然误判其一 | 恢复分支仅用于 crash（无失败证据）；sender 显式失败必须落终态 `failed`，不得留可恢复的 `created` |
+| 失败留 `created` 等重试 | 重试命中 intent 恢复分支，失败被洗成成功 | 失败即 `mark_failed`（终态，不再重发）；重发需求由上游按新 `source_fact` 发起新事件 |
+| 超长 refs 截断丢关联 ID | 先拼全文后截断，切掉的恰是尾部 `HANDOFF_ID` | 先截 body（refs 封顶 10×200）再追加 ID 尾，截断永不断关联 |
+| 缺身份时合成 `run_<task>` | 合成身份让 fail-closed 变成 fail-open，跨 run 串扰 | 缺 run_id 取共享 workflow 域，再缺返回 None 并 mark failed，永不猜测 |
+
+### 操作规范
+
+```python
+# services/herdr-controller.py#dispatch_collaboration_event
+# prior intent → 补标 dispatched + recovered（不重发）
+# sender 异常 → mark_collaboration_failed（终态）
+# 缺 pane / 跨 run / 缺 run → failed，永不 fallback
+# herdr/collaboration.py#build_handoff_prompt：先截 body，后保 HANDOFF_ID 尾
+```
+
+### 验证命令 / 证据
+
+```bash
+pytest -q tests/test_collaboration.py tests/test_collaboration_store.py tests/test_collaboration_dispatch.py tests/test_collaboration_e2e.py tests/test_collaboration_wiring.py  # 36 passed
+pytest -q  # 1238 passed, 44 subtests passed
+```
+
+### 相关文档 / 关联证据
+
+- `herdr/collaboration.py#identity_key`、`#build_handoff_prompt`、`#collab_run_for_task`
+- `herdr/state_db.py#create_collaboration_event`（identity 唯一 + canonical 重读）
+- `services/herdr-controller.py#dispatch_collaboration_event`、`#maybe_dispatch_node_handoffs`、`#maybe_ack_on_working`
+- `docs/architecture/collaboration-protocol.md`（Recovery 取舍已记录）
+- 同类模式：`docs/lessons/lessons-learned.md` §83（dispatch receipt 先于事实消费）
