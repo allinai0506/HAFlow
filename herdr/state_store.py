@@ -10,15 +10,18 @@ Design Principles:
 3. Thread and Process Safety: Backed by SQLite WAL mode with atomic transactions.
 """
 
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 import json
 import os
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 
 import fcntl
 from . import state_db
+from . import eval_store
 
 
 def _atomic_write_json(file_path: Path, data: Any) -> None:
@@ -53,8 +56,8 @@ def _sync_projection_locked(file_path: Path, export_fn: Any) -> None:
 
 
 def resolve_tasks_projection_file(
-    store: Optional["StateStore"] = None,
-    tasks_file: Optional[Union[Path, str]] = None,
+    store: StateStore | None = None,
+    tasks_file: Path | str | None = None,
 ) -> Path:
     """Resolve destination tasks.json path following strict precedence:
     1. Explicit tasks_file argument
@@ -74,8 +77,8 @@ def resolve_tasks_projection_file(
 
 
 def resolve_workflows_projection_file(
-    store: Optional["StateStore"] = None,
-    wf_file: Optional[Union[Path, str]] = None,
+    store: StateStore | None = None,
+    wf_file: Path | str | None = None,
 ) -> Path:
     """Resolve destination workflows.json path following strict precedence:
     1. Explicit wf_file argument
@@ -95,8 +98,8 @@ def resolve_workflows_projection_file(
 
 
 def sync_tasks_projection(
-    store: Optional["StateStore"] = None,
-    tasks_file: Optional[Union[Path, str]] = None,
+    store: StateStore | None = None,
+    tasks_file: Path | str | None = None,
 ) -> None:
     """Safely synchronize SQLite tasks into tasks.json under cross-process lock."""
     s = store or get_state_store()
@@ -105,8 +108,8 @@ def sync_tasks_projection(
 
 
 def sync_workflows_projection(
-    store: Optional["StateStore"] = None,
-    wf_file: Optional[Union[Path, str]] = None,
+    store: StateStore | None = None,
+    wf_file: Path | str | None = None,
 ) -> None:
     """Safely synchronize SQLite workflows into workflows.json under cross-process lock."""
     s = store or get_state_store()
@@ -391,6 +394,98 @@ class StateStore(ABC):
     @abstractmethod
     def get_checkpoint_lineage(self, workflow_id: str) -> List[Dict[str, Any]]:
         """Retrieve checkpoint DAG lineage."""
+        pass
+
+    # Eval results (point-in-time facts, distinct from Metrics aggregation)
+    @abstractmethod
+    def record_eval_result(
+        self,
+        run_id: str,
+        revision: Optional[int] = None,
+        evidence: Optional[Any] = None,
+        requirements_satisfied: bool | None = None,
+        verification_passed: bool | None = None,
+        human_intervention_count: int | None = None,
+        final_status: str | None = None,
+        warnings: list[Any] | None = None,
+        task_id: str | None = None,
+        workflow_id: str | None = None,
+    ) -> Dict[str, Any]:
+        """Record one eval fact; same run and revision returns existing row."""
+        pass
+
+    @abstractmethod
+    def get_eval_result(
+        self, run_id: str, revision: int,
+    ) -> Optional[Dict[str, Any]]:
+        """Fetch one eval row; absent rows return None."""
+        pass
+
+    @abstractmethod
+    def get_latest_eval_result(self, run_id: str) -> Optional[Dict[str, Any]]:
+        """Fetch the max-revision eval row; absent runs return None."""
+        pass
+
+    @abstractmethod
+    def list_eval_results(
+        self, run_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """List eval rows ordered by revision."""
+        pass
+
+    @abstractmethod
+    def get_max_eval_revision(self, run_id: str) -> Optional[int]:
+        """Return max revision for a run; absent runs return None."""
+        pass
+
+    # Replay specs (lineage edges, never write source run state)
+    @abstractmethod
+    def record_replay_spec(
+        self,
+        source_run_id: str,
+        replay_run_id: str,
+        workflow_id: Optional[str] = None,
+        definition: Optional[Any] = None,
+        lineage: Optional[Any] = None,
+        snapshot: str | None = None,
+        policy: dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        """Record one replay edge; same replay run returns existing row."""
+        pass
+
+    @abstractmethod
+    def get_replay_spec(
+        self, replay_run_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Fetch one replay spec by replay run."""
+        pass
+
+    @abstractmethod
+    def get_replay_spec_by_id(
+        self, spec_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Fetch one replay spec by primary key."""
+        pass
+
+    @abstractmethod
+    def list_replay_specs(
+        self,
+        source_run_id: Optional[str] = None,
+        workflow_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """List replay specs with optional filters."""
+        pass
+
+    @abstractmethod
+    def get_replay_lineage(self, replay_run_id: str) -> List[str]:
+        """Walk source edges back to the origin run."""
+        pass
+
+    @abstractmethod
+    def latest_run_verification_fact(
+        self, run_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Return latest strict verification fact for one run."""
         pass
 
     # Export & Compatibility
@@ -746,6 +841,99 @@ class SQLiteStateStore(StateStore):
 
     def get_checkpoint_lineage(self, workflow_id: str) -> List[Dict[str, Any]]:
         return state_db.get_checkpoint_lineage(workflow_id=workflow_id, db_path=self.db_path)
+
+    # Eval results (delegated without side effects on projections)
+    def record_eval_result(
+        self,
+        run_id: str,
+        revision: Optional[int] = None,
+        evidence: Optional[Any] = None,
+        requirements_satisfied: bool | None = None,
+        verification_passed: bool | None = None,
+        human_intervention_count: int | None = None,
+        final_status: str | None = None,
+        warnings: list[Any] | None = None,
+        task_id: str | None = None,
+        workflow_id: str | None = None,
+    ) -> Dict[str, Any]:
+        return eval_store.record_eval_result(
+            run_id,
+            revision=revision,
+            evidence=evidence,
+            requirements_satisfied=requirements_satisfied,
+            verification_passed=verification_passed,
+            human_intervention_count=human_intervention_count,
+            final_status=final_status,
+            warnings=warnings,
+            task_id=task_id,
+            workflow_id=workflow_id,
+            db_path=self.db_path,
+        )
+
+    def get_eval_result(
+        self, run_id: str, revision: int,
+    ) -> Optional[Dict[str, Any]]:
+        return eval_store.get_eval_result(run_id, revision, db_path=self.db_path)
+
+    def get_latest_eval_result(self, run_id: str) -> Optional[Dict[str, Any]]:
+        return eval_store.get_latest_eval_result(run_id, db_path=self.db_path)
+
+    def list_eval_results(
+        self, run_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        return eval_store.list_eval_results(run_id, db_path=self.db_path)
+
+    def get_max_eval_revision(self, run_id: str) -> Optional[int]:
+        return eval_store.get_max_eval_revision(run_id, db_path=self.db_path)
+
+    # Replay specs (delegated without touching source run state)
+    def record_replay_spec(
+        self,
+        source_run_id: str,
+        replay_run_id: str,
+        workflow_id: Optional[str] = None,
+        definition: Optional[Any] = None,
+        lineage: Optional[Any] = None,
+        snapshot: str | None = None,
+        policy: dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        return eval_store.record_replay_spec(
+            source_run_id,
+            replay_run_id,
+            workflow_id=workflow_id,
+            definition=definition,
+            lineage=lineage,
+            snapshot=snapshot,
+            policy=policy,
+            db_path=self.db_path,
+        )
+
+    def get_replay_spec(
+        self, replay_run_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        return eval_store.get_replay_spec(replay_run_id, db_path=self.db_path)
+
+    def get_replay_spec_by_id(
+        self, spec_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        return eval_store.get_replay_spec_by_id(spec_id, db_path=self.db_path)
+
+    def list_replay_specs(
+        self,
+        source_run_id: Optional[str] = None,
+        workflow_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        return eval_store.list_replay_specs(
+            source_run_id, workflow_id=workflow_id, db_path=self.db_path,
+        )
+
+    def get_replay_lineage(self, replay_run_id: str) -> List[str]:
+        return eval_store.get_replay_lineage(replay_run_id, db_path=self.db_path)
+
+    def latest_run_verification_fact(
+        self, run_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        return eval_store.latest_run_verification_fact(run_id, db_path=self.db_path)
 
     # Export & Compatibility
     def export_workflows_json(self) -> Dict[str, Any]:

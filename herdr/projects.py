@@ -390,9 +390,53 @@ def _snapshot_workflow_definition(workflow_id, source_file):
     return None
 
 
-def register_workflow(workflow_id, project, requirement="", title="", execution=None, context=None):
+def freeze_run_definition(workflow_id, definition=None, *, source_file=None):
+    """Freeze one run definition into an immutable run-private file.
+
+    Either ``definition`` (a mapping) or ``source_file`` supplies the content.
+    When both are absent, the project record for ``workflow_id`` provides the
+    source file. Only file state is written; no run or task rows are touched.
+    Returns the snapshot path string, or None when freezing is impossible.
+    """
+    if not str(workflow_id or "").strip():
+        raise ValueError("workflow_id is required")
+    if definition is not None:
+        if not isinstance(definition, dict):
+            raise ValueError("definition must be a mapping or None")
+        try:
+            try:
+                from .workflow_docs import docs_root, validate_workflow_id
+            except ImportError:
+                from herdr.workflow_docs import docs_root, validate_workflow_id
+            run_dir = docs_root() / validate_workflow_id(workflow_id)
+            run_dir.mkdir(parents=True, exist_ok=True)
+            snapshot = run_dir / "workflow.json"
+            _save(snapshot, definition)
+            return str(snapshot)
+        except (ValueError, OSError) as exc:
+            print(
+                f"warning: Workflow {workflow_id} definition freeze failed ({exc})",
+                file=sys.stderr,
+            )
+            return None
+    if source_file is not None:
+        return _snapshot_workflow_definition(workflow_id, source_file)
+    try:
+        record = project_for_workflow(workflow_id)
+    except Exception:
+        record = None
+    source = (record or {}).get("workflow_file")
+    if not source:
+        return None
+    return _snapshot_workflow_definition(workflow_id, source)
+
+
+def register_workflow(workflow_id, project, requirement="", title="", execution=None, context=None, workflow_file=None, metadata=None):
     title = (title or "").strip()
     subject = title or requirement_subject(requirement) or "未命名工作流"
+    # Single-write contract: workflow_file and metadata are merged into the
+    # entry before the one save_workflow call below. No second write follows.
+    resolved_workflow_file = workflow_file or project["workflow_file"]
     wf_entry = {
         "workflow_id": workflow_id,
         "title": title,
@@ -403,17 +447,21 @@ def register_workflow(workflow_id, project, requirement="", title="", execution=
         "base_branch": project.get("base_branch"),
         "workspace_id": project["workspace_id"],
         "coordinator_pane_id": project["coordinator_pane_id"],
-        "workflow_file": project["workflow_file"],
+        "workflow_file": resolved_workflow_file,
         "requirement": requirement,
         "startup_ready": False,
         "status": "running",
     }
+    if isinstance(metadata, dict):
+        for key, value in metadata.items():
+            if key not in wf_entry:
+                wf_entry[key] = value
     if execution:
         wf_entry["execution"] = execution
         snapshot_file = _snapshot_workflow_definition(
             workflow_id, project.get("workflow_file")
         )
-        if snapshot_file:
+        if snapshot_file and not workflow_file:
             wf_entry["workflow_file"] = snapshot_file
     if context:
         wf_entry["context"] = context

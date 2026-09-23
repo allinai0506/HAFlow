@@ -1330,6 +1330,163 @@ def cmd_metrics(args):
     print(f"Model requests: {metrics.model_requests if metrics.model_requests is not None else 'unsupported'}")
 
 
+def cmd_eval(args):
+    """Evaluate one run; --record persists the fact via eval_store."""
+    from herdr.eval_engine import evaluate_run, record_run_eval
+
+    try:
+        store = _get_store()
+        db_path = getattr(store, "db_path", None)
+        if getattr(args, "record", False):
+            stored = record_run_eval(
+                args.run_id, revision=getattr(args, "revision", None),
+                db_path=db_path,
+            )
+            payload = stored
+            label = "EVAL_RECORDED"
+        else:
+            payload = evaluate_run(args.run_id, db_path=db_path)
+            label = "EVAL"
+    except ValueError as exc:
+        print(f"[EVAL] {exc}", file=sys.stderr)
+        sys.exit(2)
+    except Exception as exc:  # noqa: BLE001 -- CLI boundary reports and exits nonzero
+        print(f"[EVAL] failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    if getattr(args, "json", False):
+        print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+        return
+    warnings = payload.get("warnings") or []
+    print(f"[{label}] run={payload.get('run_id')} "
+          f"final_status={payload.get('final_status')} "
+          f"requirements_satisfied={payload.get('requirements_satisfied')} "
+          f"verification_passed={payload.get('verification_passed')} "
+          f"human_intervention_count={payload.get('human_intervention_count')}")
+    if warnings:
+        print(f"Warnings: {', '.join(str(w) for w in warnings)}")
+
+
+def cmd_replay(args):
+    """Replay a historical run; --dry-run plans without any write."""
+    import json as _json
+
+    from herdr.replay_engine import replay_run
+
+    definition = None
+    if getattr(args, "definition", None):
+        try:
+            definition = _json.loads(args.definition)
+        except ValueError as exc:
+            print(f"[REPLAY] invalid --definition JSON: {exc}", file=sys.stderr)
+            sys.exit(2)
+    elif getattr(args, "definition_file", None):
+        try:
+            definition = _json.loads(
+                Path(args.definition_file).expanduser().read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError) as exc:
+            print(f"[REPLAY] cannot read --definition-file: {exc}", file=sys.stderr)
+            sys.exit(2)
+
+    policy = None
+    if getattr(args, "policy", None):
+        try:
+            policy = _json.loads(args.policy)
+        except ValueError as exc:
+            print(f"[REPLAY] invalid --policy JSON: {exc}", file=sys.stderr)
+            sys.exit(2)
+        if not isinstance(policy, dict):
+            print("[REPLAY] --policy must be a JSON object", file=sys.stderr)
+            sys.exit(2)
+    elif getattr(args, "policy_file", None):
+        try:
+            policy = _json.loads(
+                Path(args.policy_file).expanduser().read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError) as exc:
+            print(f"[REPLAY] cannot read --policy-file: {exc}", file=sys.stderr)
+            sys.exit(2)
+        if not isinstance(policy, dict):
+            print("[REPLAY] --policy-file must contain a JSON object", file=sys.stderr)
+            sys.exit(2)
+
+    try:
+        store = _get_store()
+        out = replay_run(
+            args.source_run,
+            replay_run_id=getattr(args, "replay_run", None),
+            workflow_id=getattr(args, "workflow_id", None),
+            task_id=getattr(args, "task_id", None),
+            definition=definition,
+            policy=policy,
+            agent=getattr(args, "agent", None),
+            goal=getattr(args, "goal", None),
+            prompt=getattr(args, "prompt", None),
+            source=getattr(args, "source", None) or "replay",
+            # Replay V1 always preflights and launches; flags remain accepted
+            # only for command-line compatibility.
+            launch=True,
+            run_preflight=True,
+            dry_run=bool(getattr(args, "dry_run", False)),
+            db_path=getattr(store, "db_path", None),
+        )
+    except ValueError as exc:
+        print(f"[REPLAY] {exc}", file=sys.stderr)
+        sys.exit(2)
+    except Exception as exc:  # noqa: BLE001 -- CLI boundary reports and exits nonzero
+        print(f"[REPLAY] failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    if getattr(args, "json", False):
+        print(json.dumps(out, ensure_ascii=False, indent=2, sort_keys=True, default=str))
+        return
+    mode = "DRY_RUN" if out.get("dry_run") else "REPLAYED"
+    print(f"[REPLAY_{mode}] {out['spec']['source_run_id']} -> {out['spec']['replay_run_id']}")
+    print(f"Workflow: {out.get('workflow_id')} | Snapshot: {out.get('snapshot') or '-'}")
+    if out.get("launch_argv"):
+        print(f"Launch: {' '.join(str(p) for p in out['launch_argv'])}")
+    if out.get("preflight_argv"):
+        print(f"Preflight: {' '.join(str(p) for p in out['preflight_argv'])}")
+    if out.get("warnings"):
+        print(f"Warnings: {', '.join(str(w) for w in out['warnings'])}")
+
+
+def cmd_eval_compare(args):
+    """Compare two recorded eval rows factually."""
+    from herdr.eval_engine import compare_evals
+    from herdr.eval_store import get_eval_result, get_latest_eval_result
+
+    try:
+        store = _get_store()
+        db_path = getattr(store, "db_path", None)
+        if getattr(args, "before_revision", None) is not None:
+            before = get_eval_result(
+                args.before_run, int(args.before_revision), db_path=db_path)
+        else:
+            before = get_latest_eval_result(args.before_run, db_path=db_path)
+        if getattr(args, "after_revision", None) is not None:
+            after = get_eval_result(
+                args.after_run, int(args.after_revision), db_path=db_path)
+        else:
+            after = get_latest_eval_result(args.after_run, db_path=db_path)
+        diff = compare_evals(before, after)
+    except ValueError as exc:
+        print(f"[EVAL_COMPARE] {exc}", file=sys.stderr)
+        sys.exit(2)
+    except Exception as exc:  # noqa: BLE001 -- CLI boundary reports and exits nonzero
+        print(f"[EVAL_COMPARE] failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    if getattr(args, "json", False):
+        print(json.dumps(diff, ensure_ascii=False, indent=2, sort_keys=True))
+        return
+    print("[EVAL_COMPARE] factual fields:")
+    for field in ("requirements_satisfied", "verification_passed",
+                  "human_intervention_count", "final_status"):
+        print(f"{field}: {diff['before'][field]} -> {diff['after'][field]}")
+
+
 def set_status(task_id, new_status, verdict=None, note=None):
     data = load_tasks()
     task = find_task(data, task_id)
@@ -1501,6 +1658,18 @@ def auto_init_task_loop(clone_path, goal, acceptance_list, test_cmd=None, lint_c
 
 
 def _launch_task(args):
+    agent_policy = None
+    raw_policy = getattr(args, "agent_policy", None)
+    if raw_policy:
+        try:
+            agent_policy = json.loads(raw_policy)
+        except ValueError as exc:
+            print(f"Invalid --agent-policy JSON: {exc}")
+            sys.exit(2)
+        if agent_policy is not None and not isinstance(agent_policy, dict):
+            print("--agent-policy must be a JSON object")
+            sys.exit(2)
+
     data = load_tasks()
 
     if find_task(data, args.task_id):
@@ -1754,7 +1923,7 @@ def _launch_task(args):
     data = load_tasks()
 
     now = _now()
-    run_id = new_run_id()
+    run_id = getattr(args, "run_id", None) or new_run_id()
 
     # RuntimeState:只记录本次真实执行的位置证据,不改变任务编排字段。
     try:
@@ -1806,6 +1975,11 @@ def _launch_task(args):
         "goal": args.goal,
         "acceptance_criteria": args.acceptance,
     }
+    replay_of = getattr(args, "replay_of", None)
+    if replay_of:
+        task["replay_of"] = replay_of
+    if raw_policy:
+        task["agent_policy"] = agent_policy
     if exec_fields["execution_mode"] == "context":
         # Git 模式任务记录保持字节级不变；context 附加字段仅在 context 模式出现。
         task["execution_mode"] = "context"
@@ -4013,6 +4187,12 @@ def main():
         default=[]
     )
     launch.add_argument("--prompt", required=True)
+    launch.add_argument("--run-id", default=None,
+                        help="Use a caller-assigned Run identity, e.g. for Replay lineage")
+    launch.add_argument("--replay-of", default=None,
+                        help="Source Run identity for a Replay task")
+    launch.add_argument("--agent-policy", default=None,
+                        help="JSON policy override for Replay launch")
     launch.add_argument(
         "--supersedes",
         default=None,
@@ -4304,6 +4484,50 @@ def main():
     metrics_cmd.add_argument("--run-id", required=True)
     metrics_cmd.add_argument("--json", action="store_true")
 
+    eval_cmd = sub.add_parser(
+        "eval",
+        help="评估一个 Run（只读；--record 落盘一条 eval 事实）",
+    )
+    eval_cmd.add_argument("--run-id", required=True)
+    eval_cmd.add_argument("--json", action="store_true")
+    eval_cmd.add_argument("--record", action="store_true")
+    eval_cmd.add_argument("--revision", type=int, default=None)
+
+    replay_cmd = sub.add_parser(
+        "replay",
+        help="从历史 Run 回放出新 Run（默认落盘；--dry-run 只规划不写）",
+    )
+    replay_cmd.add_argument("--source-run", required=True)
+    replay_cmd.add_argument("--replay-run", default=None)
+    replay_cmd.add_argument("--workflow-id", default=None)
+    replay_cmd.add_argument("--task-id", default=None)
+    replay_cmd.add_argument("--definition", default=None)
+    replay_cmd.add_argument("--definition-file", default=None)
+    replay_cmd.add_argument("--policy", default=None,
+                            help="回放 policy override（JSON 对象字符串）")
+    replay_cmd.add_argument("--policy-file", default=None,
+                            help="回放 policy override（JSON 对象文件）")
+    replay_cmd.add_argument("--agent", default=None)
+    replay_cmd.add_argument("--goal", default=None)
+    replay_cmd.add_argument("--prompt", default=None)
+    replay_cmd.add_argument("--source", default="replay")
+    replay_cmd.add_argument("--launch", action="store_true",
+                            default=True, help="兼容参数：Replay 始终执行真实 launch 链")
+    replay_cmd.add_argument("--run-preflight", action="store_true",
+                            default=True, help="兼容参数：Replay 始终执行真实 preflight 探针")
+    replay_cmd.add_argument("--dry-run", action="store_true")
+    replay_cmd.add_argument("--json", action="store_true")
+
+    eval_compare_cmd = sub.add_parser(
+        "eval-compare",
+        help="事实对比两条已落盘 eval（只读）",
+    )
+    eval_compare_cmd.add_argument("--before-run", required=True)
+    eval_compare_cmd.add_argument("--before-revision", type=int, default=None)
+    eval_compare_cmd.add_argument("--after-run", required=True)
+    eval_compare_cmd.add_argument("--after-revision", type=int, default=None)
+    eval_compare_cmd.add_argument("--json", action="store_true")
+
     args = parser.parse_args()
 
     if args.command == "add":
@@ -4591,6 +4815,15 @@ def main():
 
     elif args.command == "metrics":
         cmd_metrics(args)
+
+    elif args.command == "eval":
+        cmd_eval(args)
+
+    elif args.command == "replay":
+        cmd_replay(args)
+
+    elif args.command == "eval-compare":
+        cmd_eval_compare(args)
 
 
 if __name__ == "__main__":
