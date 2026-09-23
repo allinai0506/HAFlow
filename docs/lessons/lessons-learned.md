@@ -3777,3 +3777,50 @@ pytest -q  # 1130 passed, 44 subtests passed
 - `services/herdr-controller.py#handle_fix_loop`、`#_handle_fix_loop_item`、`#redeliver_pending_fix_loop`、`#_fix_loop_latch_blocks`
 - `tests/test_fix_loop_recovery.py`
 - 事故现场：`wf-haflow-0923-01`（test-auto-r3 / impl-fix2 / FIX LOOP WAIT TIMEOUT）
+
+## 86. 直派必须携带候选分支：测试测错分支的 verdict 毫无信息量
+
+### 问题背景
+
+`wf-haflow-0923-01-test-auto-r6` 被 `STAGE ADVANCED DIRECT` 派发时丢了
+`--onto`，clone 停在 main（`3be4362`）而非 T1 特性分支，verdict
+“候选无实现改动”恒成立，白烧一轮。与此同时 fix 任务以默认
+`integration-mode none` 运行，`impl-fix4` 的 7 个文件（含 review 点名的
+架构文档）以未提交形态 stranded 在 retained clone 里——和 fix1 同一剧本。
+
+根因两处都在“分支上下文掉了”：`context_branch` 只写进 prompt 备注，
+从不进 launch 命令；fix-loop 消息模板的 launch 骨架缺
+`--integration-mode git`。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|---|---|---|
+| 测试节点用了本节点旧分支 | 候选分支必须取自依赖链（实现分支），不是本节点 | `candidate_branch_for_node` 依赖优先、本节点回退 |
+| 非法分支值进 shell 命令 | 分支名是外部输入，必须先消毒 | `sanitize_branch_name`，非法即无 onto（fail-open） |
+| 空候选也进内环 | 无差异的候选必 blocked，烧 5 轮毫无意义 | 派发前 `rev-list base..onto` 预检，全空即 fallback |
+| fix 默认不落分支 | integration none 的 fix 对候选贡献恒为 0 | 消息模板默认 `--integration-mode git` |
+| supersede 丢 WIP | 作废≠删除工作，WIP 必须先落盘 | 作废后 best-effort auto-commit（不含内部目录，不 push，不阻断） |
+
+### 操作规范
+
+```python
+# herdr/direct_dispatch.py（纯函数）：spec 携带 onto_branch
+# services/herdr-controller.py：launch 透传 --onto；空候选 fallback
+# bin/herdr-task#supersede_task：作废成功后 _autosave_clone_wip（warn-only）
+```
+
+### 验证命令 / 证据
+
+```bash
+pytest -q tests/test_dispatch_candidate.py  # 11 passed（planner/装配/超集）
+pytest -q  # 1141 passed, 44 subtests passed
+```
+
+### 相关文档 / 关联证据
+
+- `herdr/direct_dispatch.py#candidate_branch_for_node`、`#sanitize_branch_name`
+- `services/herdr-controller.py#_dispatch_candidate_ready`
+- `bin/herdr-task#_autosave_clone_wip`
+- `tests/test_dispatch_candidate.py`
+- 事故现场：`wf-haflow-0923-01-test-auto-r6`（测 main）、`impl-fix4`（7 文件 stranded）
