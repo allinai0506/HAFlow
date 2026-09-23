@@ -3727,3 +3727,53 @@ pytest -q  # 1107 passed, 44 subtests passed
 - `bin/herdr-loop#run_evaluation`、`bin/herdr-task#auto_init_task_loop`
 - `tests/test_loop_evaluator.py#test_baseline_debt_does_not_block_convergence`
 - `tests/test_loop_evaluator.py#test_new_lint_still_blocks_convergence`
+
+## 85. Fix-loop 三类死锁：通知丢失、回流无界、作废后空推进
+
+### 问题背景
+
+`wf-haflow-0923-01` 在 test 门禁三连 blocked 后进入零 live 任务死停，
+实测链条（`controller.out.log` 原文可查）：
+
+1. `test-auto-r3` 走完 `agent_done→completed→cleaned`，`AUTO VERDICT blocked` →
+   fix-loop 作废 → `QUEUED loop=3/4` → `_handle_fix_loop_item` 等总指挥 120s →
+   `[FIX LOOP WAIT TIMEOUT]` 直接 return，通知丢弃无重试；
+2. `FIX_LOOP_MAX` 默认 3 只透传显示不生效，实际走到 `loop=4`；
+3. `impl-fix2` 被熔断 supersede 后，sweep 以陈旧 T1 完成判定
+   implementation complete，直接 advance 到 test 重测同一候选 → 必 blocked →
+   再作废，确定性空转。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|---|---|---|
+| 恢复通知 fire-and-forget | 恢复关键路径的消息丢失 = 死锁，必须持久化 + 补投 | 超时转 attention episode（`coordinator_busy` + 退避），sweep 在总指挥 idle 后补投 |
+| 预算只显示不执行 | 不 Vergleich 的计数器等于没有预算 | 作废前先比 `count >= max_loops`，超限只升级不作废；同 verdict 指纹直接升级 |
+| 作废后不设闩 | 陈旧完成会让 sweep 越过待重做节点空推进 | 作废即设 `pending_redo` 闩，有真正重做完成才清除（含计数/指纹/升级记录 for 下一轮） |
+| 升级记录不清零条件 | 新判据会被旧升级静默吞掉 | 升级记录带 verdict 指纹，指纹变化即重新升级 |
+
+### 操作规范
+
+```python
+# 决策纯函数收敛 herdr/fix_loop.py（无 IO，标准库 only）；
+# services/herdr-controller.py 只做编排装配
+handle_fix_loop: 预算/指纹门禁 → 作废 → 计数+闩+指纹 → 入队
+_handle_fix_loop_item: 120s 超时 → attention 持久化（不再直接丢弃）
+check_all_workflows_stage_advance: 每轮 redeliver_pending_fix_loop
+advance 双路径: 依赖有闩且无闩后完成 → 跳过（一次性日志）
+```
+
+### 验证命令 / 证据
+
+```bash
+pytest -q tests/test_fix_loop_recovery.py  # 24 passed（16 纯函数 + 8 装配）
+pytest -q  # 1130 passed, 44 subtests passed
+# 场景串联：max_loops=1 时第 1 轮作废入队 → 第 2 轮升级不作废 → 第 3 轮静默
+```
+
+### 相关文档 / 关联证据
+
+- `herdr/fix_loop.py`（新增，~200 行纯函数）
+- `services/herdr-controller.py#handle_fix_loop`、`#_handle_fix_loop_item`、`#redeliver_pending_fix_loop`、`#_fix_loop_latch_blocks`
+- `tests/test_fix_loop_recovery.py`
+- 事故现场：`wf-haflow-0923-01`（test-auto-r3 / impl-fix2 / FIX LOOP WAIT TIMEOUT）

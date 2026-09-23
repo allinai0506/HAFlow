@@ -571,6 +571,49 @@ def _bump_fix_loop_count(workflow_id, retry_node):
     return count
 
 
+def _fix_loop_count(workflow_id, retry_node):
+    with lock:
+        state = load_stage_state()
+        try:
+            return int(state.get(f"{workflow_id}|fixloop|{retry_node}", 0))
+        except (TypeError, ValueError):
+            return 0
+
+
+def _fix_loop_exhaustion_episode(workflow_id, gate_node_id):
+    return attention_get(f"{workflow_id}:fix_loop_exhausted:{gate_node_id}")
+
+
+def _exhaustion_fingerprint(episode):
+    if not isinstance(episode, dict):
+        return None
+    try:
+        detail = json.loads(episode.get("detail") or "{}")
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(detail, dict):
+        return None
+    return detail.get("fingerprint")
+
+
+def _record_fix_loop_exhaustion(
+    workflow_id, gate_node_id, retry_node, reason, summary, fingerprint
+):
+    import json as _json
+
+    record = dict(summary)
+    record["fingerprint"] = fingerprint
+    attention_note(
+        f"{workflow_id}:fix_loop_exhausted:{gate_node_id}",
+        {"task_id": f"fix_loop:{gate_node_id}:{retry_node}",
+         "workflow_id": workflow_id},
+        "fix_loop",
+        reason=reason,
+        attempts=_fix_loop_count(workflow_id, retry_node),
+        detail=_json.dumps(record, ensure_ascii=False)[:2000],
+    )
+
+
 # ============================================================
 # 基础设施失败自动补派 (auto-recover)
 # ============================================================
@@ -734,6 +777,87 @@ def handle_fix_loop(workflow_id, gate_node_id, gate_cfg, workflow_cfg):
                 }
             )
 
+    from herdr import fix_loop as fix_loop_core
+
+    try:
+        max_loops = int((gate_cfg or {}).get("max_loops", FIX_LOOP_MAX))
+    except (TypeError, ValueError):
+        max_loops = FIX_LOOP_MAX
+    suggested_branch = latest_branch_for_node(workflow_id, retry_node)
+    fingerprint = fix_loop_core.verdict_fingerprint(
+        suggested_branch, blockers
+    )
+
+    with lock:
+        _state = load_stage_state()
+        prior_count = _state.get(f"{workflow_id}|fixloop|{retry_node}", 0)
+        try:
+            prior_count = int(prior_count)
+        except (TypeError, ValueError):
+            prior_count = 0
+        stored_fp = _state.get(f"{workflow_id}|fixloop|{retry_node}|fp")
+
+    if _exhaustion_fingerprint(
+        _fix_loop_exhaustion_episode(workflow_id, gate_node_id)
+    ) == fingerprint:
+        return
+
+    if fix_loop_core.fix_loop_exhausted(
+        prior_count, max_loops
+    ) or fix_loop_core.is_repeat_verdict(fingerprint, stored_fp):
+        reason = (
+            "max_loops_exhausted"
+            if fix_loop_core.fix_loop_exhausted(prior_count, max_loops)
+            else "repeat_verdict"
+        )
+        summary = fix_loop_core.summarize_fix_loop_item(
+            {
+                "workflow_id": workflow_id,
+                "gate_stage": gate_node_id,
+                "retry_node": retry_node,
+                "loop_count": prior_count,
+                "max_loops": max_loops,
+                "suggested_branch": suggested_branch,
+                "blockers": blockers,
+                "exhausted": True,
+            }
+        )
+        _record_fix_loop_exhaustion(
+            workflow_id, gate_node_id, retry_node, reason, summary,
+            fingerprint,
+        )
+        with lock:
+            _state = load_stage_state()
+            _state[f"{workflow_id}|fixloop|{retry_node}|pending_redo"] = {
+                "ts": time.time(),
+                "gate": gate_node_id,
+            }
+            save_stage_state(_state)
+        coordinator_queue.put(
+            {
+                "kind": "fix_loop",
+                "workflow_id": workflow_id,
+                "gate_stage": gate_node_id,
+                "retry_node": retry_node,
+                "blockers": blockers,
+                "invalidated": [],
+                "loop_count": prior_count,
+                "max_loops": max_loops,
+                "suggested_branch": suggested_branch,
+                "exhausted": True,
+                "escalation_reason": reason,
+            }
+        )
+        print(
+            f"[FIX LOOP EXHAUSTED] "
+            f"workflow={workflow_id} "
+            f"gate={gate_node_id} "
+            f"retry={retry_node} "
+            f"reason={reason} "
+            f"loops={prior_count}/{max_loops}"
+        )
+        return
+
     invalidated = invalidate_for_fix_loop(
         workflow_id, gate_node_id, workflow_cfg, retry_node=retry_node
     )
@@ -742,6 +866,15 @@ def handle_fix_loop(workflow_id, gate_node_id, gate_cfg, workflow_cfg):
         return
 
     loop_count = _bump_fix_loop_count(workflow_id, retry_node)
+
+    with lock:
+        _state = load_stage_state()
+        _state[f"{workflow_id}|fixloop|{retry_node}|pending_redo"] = {
+            "ts": time.time(),
+            "gate": gate_node_id,
+        }
+        _state[f"{workflow_id}|fixloop|{retry_node}|fp"] = fingerprint
+        save_stage_state(_state)
 
     coordinator_queue.put(
         {
@@ -753,9 +886,7 @@ def handle_fix_loop(workflow_id, gate_node_id, gate_cfg, workflow_cfg):
             "invalidated": invalidated,
             "loop_count": loop_count,
             "max_loops": gate_cfg.get("max_loops", FIX_LOOP_MAX),
-            "suggested_branch": latest_branch_for_node(
-                workflow_id, retry_node
-            ),
+            "suggested_branch": suggested_branch,
         }
     )
 
@@ -1387,6 +1518,24 @@ def check_workflow_stage_advance(workflow_id):
 
         ready_nodes = get_ready_nodes(workflow_cfg, completed_nodes)
         for ready_node in ready_nodes:
+            latched_dep = next(
+                (
+                    dep
+                    for dep in (ready_node.get("depends_on") or [])
+                    if _fix_loop_latch_blocks(workflow_id, dep)
+                ),
+                None,
+            )
+            if latched_dep:
+                latch_key = f"{workflow_id}:{latched_dep}"
+                if latch_key not in _fix_latch_logged:
+                    _fix_latch_logged.add(latch_key)
+                    print(
+                        f"[FIX LOOP LATCH] "
+                        f"workflow={workflow_id} "
+                        f"{ready_node['id']} waits for redo of {latched_dep}"
+                    )
+                continue
             blocked_dep = blocked_gate_dependency(
                 workflow_id, ready_node, workflow_cfg
             )
@@ -1477,6 +1626,17 @@ def check_workflow_stage_advance(workflow_id):
         if attention_blocks_retry(f"{workflow_id}:stage_advance:{next_stage}"):
             continue
 
+        if _fix_loop_latch_blocks(workflow_id, stage_key):
+            latch_key = f"{workflow_id}:{stage_key}"
+            if latch_key not in _fix_latch_logged:
+                _fix_latch_logged.add(latch_key)
+                print(
+                    f"[FIX LOOP LATCH] "
+                    f"workflow={workflow_id} "
+                    f"{next_stage} waits for redo of {stage_key}"
+                )
+            continue
+
         if not mark_stage_advance_queued(workflow_id, next_stage):
             continue
 
@@ -1522,8 +1682,147 @@ def active_registered_workflows():
     return workflows
 
 
+# fix-loop 作废闩去重日志:闩存续期间只提示一次,清除后下轮可再提示。
+_fix_latch_logged = set()
+
+
+def _fix_loop_latch_info(workflow_id, node_id):
+    """Return (latch_ts, gate_node_id); accepts legacy float values."""
+    with lock:
+        state = load_stage_state()
+        raw = state.get(f"{workflow_id}|fixloop|{node_id}|pending_redo")
+    gate = None
+    ts = 0.0
+    if isinstance(raw, dict):
+        gate = raw.get("gate")
+        try:
+            ts = float(raw.get("ts") or 0)
+        except (TypeError, ValueError):
+            ts = 0.0
+    else:
+        try:
+            ts = float(raw or 0)
+        except (TypeError, ValueError):
+            ts = 0.0
+    return ts, gate
+
+
+def _fix_loop_latch_blocks(workflow_id, node_id, tasks=None):
+    """作废闩:被回流作废的节点在出现真正重做完成前挡住自动推进。
+
+    有重做完成时顺带清除闩、指纹、计数与升级记录,下一轮阻断重新计数。
+    """
+    latch_ts, latch_gate = _fix_loop_latch_info(workflow_id, node_id)
+    if not latch_ts:
+        return False
+    if tasks is None:
+        tasks = load_tasks()
+    from herdr import fix_loop as fix_loop_core
+
+    if not fix_loop_core.latch_blocks_advance(tasks, node_id, latch_ts):
+        with lock:
+            state = load_stage_state()
+            state.pop(
+                f"{workflow_id}|fixloop|{node_id}|pending_redo", None
+            )
+            state.pop(f"{workflow_id}|fixloop|{node_id}|fp", None)
+            state.pop(f"{workflow_id}|fixloop|{node_id}", None)
+            save_stage_state(state)
+        if latch_gate:
+            attention_clear(
+                f"{workflow_id}:fix_loop_exhausted:{latch_gate}"
+            )
+        _fix_latch_logged.discard(f"{workflow_id}:{node_id}")
+        return False
+    return True
+
+
+def redeliver_pending_fix_loop(workflow_id):
+    """补投因总指挥忙而持久化的 fix-loop 通知(sweep 每轮调用,有界)。"""
+    if workflow_closed(workflow_id):
+        return False
+    from herdr import fix_loop as fix_loop_core
+
+    try:
+        episodes = _attention_store.all()
+    except Exception:
+        return False
+    now = time.time()
+    redelivered = False
+    for key, episode in episodes.items():
+        if not key.startswith(f"{workflow_id}:fix_loop:"):
+            continue
+        if not isinstance(episode, dict):
+            continue
+        if (episode.get("event_type") or "") != "fix_loop":
+            continue
+        if (episode.get("reason") or "") != "coordinator_busy":
+            continue
+        try:
+            summary = json.loads(episode.get("detail") or "{}")
+        except (TypeError, ValueError):
+            attention_clear(key)
+            continue
+        if not isinstance(summary, dict) or not summary.get("retry_node"):
+            attention_clear(key)
+            continue
+        tasks = load_tasks()
+        if fix_loop_core.redelivery_handled(
+            tasks, summary["retry_node"], episode.get("first_seen_at")
+        ):
+            attention_clear(key)
+            print(
+                f"[FIX LOOP REDELIVERY SKIP] "
+                f"workflow={workflow_id} "
+                f"retry={summary['retry_node']} "
+                "coordinator already dispatched follow-up"
+            )
+            continue
+        if not fix_loop_core.redelivery_due(episode, now):
+            continue
+        if coordinator_status(workflow_id) not in ("idle", "done"):
+            continue
+        coordinator_queue.put(
+            {
+                "kind": "fix_loop",
+                "workflow_id": workflow_id,
+                "gate_stage": summary.get("gate_stage", ""),
+                "retry_node": summary["retry_node"],
+                "blockers": summary.get("blockers") or [],
+                "invalidated": [],
+                "loop_count": summary.get("loop_count", 0),
+                "max_loops": summary.get("max_loops", FIX_LOOP_MAX),
+                "suggested_branch": summary.get("suggested_branch"),
+                "exhausted": bool(summary.get("exhausted")),
+                "redelivered": True,
+            }
+        )
+        attention_note(
+            key,
+            {"task_id": f"fix_loop:{summary.get('gate_stage')}",
+             "workflow_id": workflow_id},
+            "fix_loop",
+            reason="coordinator_busy",
+            attempts=int(episode.get("attempts") or 0),
+            next_retry_at=now + liveness.attention_retry_interval(),
+            detail=episode.get("detail"),
+        )
+        print(
+            f"[FIX LOOP REDELIVERED] "
+            f"workflow={workflow_id} "
+            f"gate={summary.get('gate_stage')} "
+            f"retry={summary['retry_node']}"
+        )
+        redelivered = True
+    return redelivered
+
+
 def check_all_workflows_stage_advance():
     for wf in active_registered_workflows():
+        try:
+            redeliver_pending_fix_loop(wf)
+        except Exception as e:
+            print(f"[REDELIVER ERROR] workflow={wf}: {e}")
         try:
             check_workflow_stage_advance(wf)
         except Exception as e:
@@ -2352,6 +2651,15 @@ def build_fix_loop_message(item, project_name="unknown"):
             "未经用户确认不得派发。\n"
         )
 
+    if item.get("exhausted"):
+        escalation = (
+            f"\n⛔ 回流预算已耗尽(loops={loop_count}/{max_loops},"
+            f"原因={item.get('escalation_reason', 'unknown')})。"
+            "Controller 已停止自动作废/重派。"
+            "只允许三选一并落盘:接受现状推进 / 缩小范围重派 / 关闭工作流。"
+            "禁止再次派发同范围 fix task。\n"
+        )
+
     if suggested_branch:
         onto_flag = f"--onto {suggested_branch} "
         branch_line = suggested_branch
@@ -2425,9 +2733,34 @@ def _handle_fix_loop_item(item):
 
     while coordinator_status(workflow_id) not in ("idle", "done"):
         if waited >= 120:
+            import json as _json
+
+            from herdr import fix_loop as fix_loop_core
+
+            summary = fix_loop_core.summarize_fix_loop_item(item)
+            episode_key = f"{workflow_id}:fix_loop:{gate_stage}"
+            episode = attention_get(episode_key) or {}
+            try:
+                attempts = int(episode.get("attempts") or 0) + 1
+            except (TypeError, ValueError):
+                attempts = 1
+            attention_note(
+                episode_key,
+                {"task_id": f"fix_loop:{gate_stage}:{retry_node}",
+                 "workflow_id": workflow_id},
+                "fix_loop",
+                reason="coordinator_busy",
+                attempts=attempts,
+                next_retry_at=(
+                    time.time() + liveness.attention_retry_interval()
+                ),
+                detail=_json.dumps(summary, ensure_ascii=False),
+            )
             print(
                 f"[FIX LOOP WAIT TIMEOUT] "
-                f"workflow={workflow_id}"
+                f"workflow={workflow_id} "
+                f"-> persisted for redelivery "
+                f"(attempts={attempts})"
             )
             return
 
@@ -2450,6 +2783,7 @@ def _handle_fix_loop_item(item):
     )
 
     if result.returncode == 0:
+        attention_clear(f"{workflow_id}:fix_loop:{gate_stage}")
         print(
             f"[FIX LOOP NOTIFIED] "
             f"workflow={workflow_id} "
