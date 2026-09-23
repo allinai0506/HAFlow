@@ -33,11 +33,13 @@ class FakeSender:
         return {"ok": True}
 
 
-def _tasks(run_id="run-1"):
+def _tasks(run_id="run-1", workflow_id="wf-1"):
+    # Production-faithful: sibling tasks carry distinct per-launch run_ids;
+    # the shared collaboration scope is the workflow.
     return {
-        "task-a": {"task_id": "task-a", "run_id": run_id, "workflow_id": "wf-1",
+        "task-a": {"task_id": "task-a", "run_id": "run-A", "workflow_id": workflow_id,
                    "pane_id": "pane-a", "agent": "developer"},
-        "task-b": {"task_id": "task-b", "run_id": run_id, "workflow_id": "wf-1",
+        "task-b": {"task_id": "task-b", "run_id": "run-B", "workflow_id": workflow_id,
                    "pane_id": "pane-b", "agent": "reviewer"},
     }
 
@@ -46,7 +48,7 @@ def test_e2e_lifecycle_dispatch_ack_complete_with_metrics(tmp_path):
     ctrl = _load_controller()
     db = tmp_path / "state.db"
     ev = state_db.create_collaboration_event({
-        "run_id": "run-1", "workflow_id": "wf-1",
+        "run_id": "wf-1", "workflow_id": "wf-1",
         "from_task_id": "task-a", "from_agent": "developer",
         "to_task_id": "task-b", "to_agent": "reviewer",
         "type": "HANDOFF", "summary": "Implementation done.",
@@ -69,7 +71,7 @@ def test_e2e_ack_exactly_once(tmp_path):
     ctrl = _load_controller()
     db = tmp_path / "state.db"
     ev = state_db.create_collaboration_event({
-        "run_id": "run-1", "workflow_id": "wf-1",
+        "run_id": "wf-1", "workflow_id": "wf-1",
         "from_task_id": "task-a", "from_agent": "developer",
         "to_task_id": "task-b", "to_agent": "reviewer",
         "type": "HANDOFF", "summary": "Done.",
@@ -88,7 +90,7 @@ def test_e2e_prompt_never_carries_full_history(tmp_path):
     db = tmp_path / "state.db"
     big = "implementation detail line " * 200
     ev = state_db.create_collaboration_event({
-        "run_id": "run-1", "workflow_id": "wf-1",
+        "run_id": "wf-1", "workflow_id": "wf-1",
         "from_task_id": "task-a", "from_agent": "developer",
         "to_task_id": "task-b", "to_agent": "reviewer",
         "type": "HANDOFF", "summary": big,
@@ -109,29 +111,29 @@ def test_e2e_cross_run_parallel_isolation(tmp_path):
     ctrl = _load_controller()
     db = tmp_path / "state.db"
     ea = state_db.create_collaboration_event({
-        "run_id": "run-A", "workflow_id": "wf-1",
+        "run_id": "wf-A", "workflow_id": "wf-A",
         "from_task_id": "task-a", "from_agent": "developer",
         "to_task_id": "task-b", "to_agent": "reviewer",
         "type": "HANDOFF", "summary": "A done.",
         "source_fact_id": "fact-1",
     }, db_path=db)
     eb = state_db.create_collaboration_event({
-        "run_id": "run-B", "workflow_id": "wf-1",
+        "run_id": "wf-B", "workflow_id": "wf-B",
         "from_task_id": "task-a", "from_agent": "developer",
         "to_task_id": "task-b", "to_agent": "reviewer",
         "type": "HANDOFF", "summary": "B done.",
         "source_fact_id": "fact-1",
     }, db_path=db)
-    tasks_a = _tasks(run_id="run-A")
-    tasks_b = _tasks(run_id="run-B")
-    # Same task names, different runs: each resolves within its own run.
+    tasks_a = _tasks(workflow_id="wf-A")
+    tasks_b = _tasks(workflow_id="wf-B")
+    # Same task names, different workflow executions: each resolves within its own scope.
     sender = FakeSender()
     ctrl.dispatch_collaboration_event(ea["event_id"], tasks_a, sender, db_path=db)
     ctrl.dispatch_collaboration_event(eb["event_id"], tasks_b, sender, db_path=db)
     assert len(sender.calls) == 2
     # Crossed lookup must fail, never cross-deliver.
     ec = state_db.create_collaboration_event({
-        "run_id": "run-A", "workflow_id": "wf-1",
+        "run_id": "wf-A", "workflow_id": "wf-A",
         "from_task_id": "task-a", "from_agent": "developer",
         "to_task_id": "task-b", "to_agent": "reviewer",
         "type": "HANDOFF", "summary": "A2.",
@@ -140,3 +142,43 @@ def test_e2e_cross_run_parallel_isolation(tmp_path):
     out = ctrl.dispatch_collaboration_event(ec["event_id"], tasks_b, sender, db_path=db)
     assert out["status"] == "failed"
     assert len(sender.calls) == 2
+
+
+def _handoff(db, to_task="task-b", source_fact="fact-1", scope="wf-1"):
+    return state_db.create_collaboration_event({
+        "run_id": scope, "workflow_id": scope,
+        "from_task_id": "task-a", "from_agent": "developer",
+        "to_task_id": to_task, "to_agent": "reviewer",
+        "type": "HANDOFF", "summary": "Done.",
+        "source_fact_id": source_fact,
+    }, db_path=db)
+
+
+def test_e2e_complete_on_authoritative_task_done(tmp_path):
+    ctrl = _load_controller()
+    db = tmp_path / "state.db"
+    ev = _handoff(db)
+    sender = FakeSender()
+    ctrl.dispatch_collaboration_event(ev["event_id"], _tasks(), sender, db_path=db)
+    ctrl.ack_collaboration_event_for_task("task-b", db_path=db)
+    done = ctrl.maybe_complete_on_task_done("task-b", db_path=db)
+    assert len(done) == 1 and done[0]["status"] == "completed"
+    assert done[0]["completed_at"] is not None
+    assert done[0]["handoff_completed_at"] is not None
+
+
+def test_e2e_complete_leaves_unacked_and_unrelated_untouched(tmp_path):
+    ctrl = _load_controller()
+    db = tmp_path / "state.db"
+    ev1 = _handoff(db, source_fact="fact-1")
+    ev2 = _handoff(db, to_task="task-c", source_fact="fact-2")
+    sender = FakeSender()
+    tasks = _tasks()
+    tasks["task-c"] = {"task_id": "task-c", "run_id": "run-C",
+                       "workflow_id": "wf-1", "pane_id": "pane-c", "agent": "reviewer"}
+    ctrl.dispatch_collaboration_event(ev1["event_id"], tasks, sender, db_path=db)
+    ctrl.dispatch_collaboration_event(ev2["event_id"], tasks, sender, db_path=db)
+    done = ctrl.maybe_complete_on_task_done("task-b", db_path=db)
+    assert done == []
+    assert state_db.get_collaboration_event(
+        ev1["event_id"], db_path=db)["status"] == "dispatched"

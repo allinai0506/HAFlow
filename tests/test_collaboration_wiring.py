@@ -38,10 +38,15 @@ class FakeSender:
         return {"ok": True}
 
 
-def test_run_derivation_prefers_run_then_workflow_then_none():
-    assert collab.collab_run_for_task({"run_id": "r", "workflow_id": "w"}) == "r"
-    assert collab.collab_run_for_task({"workflow_id": "w"}) == "w"
-    assert collab.collab_run_for_task({}) is None
+def test_scope_is_workflow_execution_identity_not_task_run():
+    # Collaboration scope is the shared workflow execution identity, NOT the
+    # per-task run_id (each herdr-task launch mints its own run_id).
+    assert collab.collab_scope_for_task({"run_id": "r", "workflow_id": "w"}) == "w"
+    assert collab.collab_scope_for_task({"workflow_id": "w"}) == "w"
+    assert collab.collab_scope_for_task({"workflow_run_id": "wr", "workflow_id": "w"}) == "wr"
+    assert collab.collab_scope_for_task(
+        {"execution_id": "e", "workflow_id": "w"}) == "e"
+    assert collab.collab_scope_for_task({}) is None
 
 
 def test_infer_trigger_only_known_edges():
