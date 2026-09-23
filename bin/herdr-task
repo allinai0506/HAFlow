@@ -3493,6 +3493,51 @@ def node_status(workflow_id, node_key):
 stage_status = node_status
 
 
+def _autosave_clone_wip(task):
+    """Supersede 前把 clone 工作树变更存成 WIP commit(best-effort)。
+
+    fix1/fix4 的实现曾以未提交形态 stranded 在 retained clone 里。
+    只含工作树文件变更,不含 .herdr-loop 等内部装配目录;失败只告警，
+    永不阻断作废本身。不 push（分支归属与网络留给集成流程）。
+    """
+    task_id = (task or {}).get("task_id") or "unknown-task"
+    clone = (task or {}).get("clone_path") or ""
+    branch = (task or {}).get("branch") or ""
+    if not clone or not branch:
+        return False
+    if not os.path.isdir(os.path.join(clone, ".git")):
+        return False
+
+    def _git(*args, timeout=15):
+        return subprocess.run(
+            ["git", "-C", clone, *args],
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+        )
+
+    try:
+        status = _git("status", "--porcelain")
+        if status.returncode != 0 or not (status.stdout or "").strip():
+            return False
+        add = _git("add", "-A", ":!.herdr-loop", ":!.agent-task-context")
+        if add.returncode != 0:
+            print(f"[WIP AUTOSAVE WARN] {task_id}: git add failed")
+            return False
+        staged = _git("diff", "--cached", "--quiet")
+        if staged.returncode == 0:
+            return False
+        commit = _git("commit", "-m", f"wip: auto-save {task_id} on supersede")
+        if commit.returncode != 0:
+            print(f"[WIP AUTOSAVE WARN] {task_id}: git commit failed")
+            return False
+    except Exception as exc:
+        print(f"[WIP AUTOSAVE WARN] {task_id}: {exc}")
+        return False
+    print(f"[WIP AUTOSAVE] {task_id}: work saved on {branch}")
+    return True
+
+
 def supersede_task(task_id, new_task_id=None, reason=None):
     """Mark a task as superseded (replaced by another task or abandoned).
 
@@ -3537,6 +3582,11 @@ def supersede_task(task_id, new_task_id=None, reason=None):
 
     t_file = globals().get("TASKS_FILE") or os.environ.get("TASKS_FILE")
     sync_tasks_projection(store=store, tasks_file=Path(t_file) if t_file else None)
+
+    try:
+        _autosave_clone_wip(task)
+    except Exception as exc:
+        print(f"[WIP AUTOSAVE WARN] {task_id}: {exc}")
 
     msg = f"{task_id}: {old_status} -> superseded"
     if new_task_id:

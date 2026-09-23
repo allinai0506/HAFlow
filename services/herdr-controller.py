@@ -1252,6 +1252,50 @@ DIRECT_DISPATCH_LAUNCH_TIMEOUT = 300
 SUPERVISOR_VERIFY_DISPATCH_TIMEOUT = 120
 
 
+def _dispatch_candidate_ready(project_root, base_branch, specs):
+    """候选非空预检:onto 分支相对基线无提交时拒绝派发(转总指挥)。
+
+    r6 曾直派测试 main 空候选并恒 blocked，白烧内环。未知情况
+    （缺 refs、git 失败）一律 fail-open 照常派发。
+    """
+    ontos = sorted(
+        {s.get("onto_branch") for s in (specs or []) if s.get("onto_branch")}
+    )
+    if not ontos:
+        return True
+    base = (base_branch or "dev").strip() or "dev"
+    checked = 0
+    empty = 0
+    for onto in ontos:
+        try:
+            result = subprocess.run(
+                ["git", "-C", project_root, "rev-list", "--count",
+                 f"{base}..{onto}", "--"],
+                text=True,
+                capture_output=True,
+                timeout=10,
+            )
+        except Exception:
+            return True
+        if result.returncode != 0:
+            return True
+        try:
+            is_empty = int(result.stdout.strip()) == 0
+        except (TypeError, ValueError):
+            return True
+        checked += 1
+        if is_empty:
+            empty += 1
+    if checked and empty == checked:
+        print(
+            f"[DIRECT DISPATCH CANDIDATE EMPTY] "
+            f"onto={','.join(ontos)} has no commits beyond {base} "
+            "-> fallback to coordinator for adjudication"
+        )
+        return False
+    return True
+
+
 def try_direct_stage_advance(item):
     """常规推进会:按节点模板规则化直接派发,失败回落总指挥。
 
@@ -1318,12 +1362,15 @@ def try_direct_stage_advance(item):
 
     # 门禁节点在派发时注入结论契约(状态目录 gate-verdicts/<task_id>.json +
     # 终端标记),由 try_auto_verdict 直接采纳,免除总指挥裁决回合。
+    candidate_branch = direct_dispatch_planner.candidate_branch_for_node(
+        load_tasks(), workflow_id, ready_id, dep_ids
+    )
     plan = direct_dispatch_planner.plan_stage_dispatch(
         workflow_id,
         node,
         load_tasks(),
         requirement,
-        context_branch=latest_branch_for_node(workflow_id, ready_id),
+        context_branch=candidate_branch,
         gate_contract=gate_task,
         docs_block=docs_block,
     )
@@ -1363,6 +1410,11 @@ def try_direct_stage_advance(item):
     if not specs:
         return False
 
+    if not _dispatch_candidate_ready(
+        project_root, project_ctx.get("base_branch"), specs
+    ):
+        return False
+
     launched = []
 
     for spec in specs:
@@ -1379,6 +1431,9 @@ def try_direct_stage_advance(item):
             "--goal", spec["goal"],
             "--prompt", spec["prompt"],
         ]
+
+        if spec.get("onto_branch"):
+            cmd += ["--onto", spec["onto_branch"]]
 
         for line in spec["acceptance"]:
             cmd += ["--acceptance", line]
@@ -2693,11 +2748,12 @@ Blocker 清单(blocked 结论与修复指引):
 你现在只需派发修复 Task(禁止新建 workflow、禁止放弃本 workflow):
 
 ~/HAFlow/bin/herdr-task launch --workflow-id {workflow_id} --stage {retry_node} \\
-  {onto_flag}--agent auto --task-type fix \\
+  {onto_flag}--agent auto --task-type fix --integration-mode git \\
   --goal "修复 gate {gate_stage} 的阻断项" \\
   --acceptance "<逐条对应 Blocker 清单>" \\
   --prompt "<blocker 详情、修复范围与验证方式>"
 
+fix 产出必须落分支("--integration-mode git"),否则测试仍测旧候选而恒 blocked。
 如需再次修复,对旧 fix task 使用 --supersedes。
 派发完成后结束当前回合,后续推进交给 Controller。
 

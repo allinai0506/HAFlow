@@ -22,6 +22,57 @@ from pathlib import Path
 
 REPLACEMENT_SUFFIX_RE = re.compile(r"-r(\d+)$")
 
+# onto 只接受合法分支名:非法值一律丢弃(fail-open 原行为)。
+# 允许 slash（agent/... 功能分支常见），拒绝路径穿越/空白/shell 元字符。
+_BAD_BRANCH_RE = re.compile(r"(\.\.|[\s~^:?*\[\\]|^[/.-]|/$)")
+
+
+def sanitize_branch_name(value):
+    """Return a safe branch name, or None when unusable."""
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text or len(text) > 256:
+        return None
+    if _BAD_BRANCH_RE.search(text):
+        return None
+    return text
+
+
+def candidate_branch_for_node(tasks, workflow_id, node_id, dep_ids):
+    """派发候选分支:依赖链最新分支优先,回退本节点自身。
+
+    test 类节点必须测实现分支而非自己的旧任务分支；依赖无分支时
+    返回 None（调用方保持原行为）。
+    """
+    best = None
+    for task in tasks or []:
+        if not isinstance(task, dict):
+            continue
+        if task.get("workflow_id") != workflow_id:
+            continue
+        if (dep_ids or []) and task.get("node") not in dep_ids \
+                and task.get("stage") not in dep_ids:
+            continue
+        if not (dep_ids or []) and node_id not in (
+            task.get("node"), task.get("stage")
+        ):
+            continue
+        branch = sanitize_branch_name(task.get("branch"))
+        if not branch:
+            continue
+        try:
+            updated = float(task.get("updated_at") or 0)
+        except (TypeError, ValueError):
+            updated = 0.0
+        if best is None or updated > best[0]:
+            best = (updated, branch)
+    if best is not None:
+        return best[1]
+    if dep_ids:
+        return candidate_branch_for_node(tasks, workflow_id, node_id, [])
+    return None
+
 DEFAULT_TASK_TYPE = "feat"
 DEFAULT_INTEGRATION_MODE = "none"
 
@@ -323,8 +374,11 @@ def _dispatch_spec(
     role_outputs=None,
     gate_contract=False,
     docs_block=None,
+    onto_branch=None,
 ):
-    return {
+    if onto_branch is None:
+        onto_branch = sanitize_branch_name(context_branch)
+    spec = {
         "task_id": task_id,
         "goal": goal,
         "acceptance": acceptance,
@@ -344,6 +398,9 @@ def _dispatch_spec(
         "task_type": node["task_type"],
         "integration_mode": integration_mode or node["integration_mode"],
     }
+    if onto_branch:
+        spec["onto_branch"] = onto_branch
+    return spec
 
 
 def plan_stage_dispatch(
@@ -478,6 +535,7 @@ def plan_stage_dispatch(
                     r_acceptance,
                     task_id,
                     role_outputs=r_outputs,
+                    context_branch=context_branch,
                     gate_contract=gate_contract,
                     docs_block=docs_block,
                 )
@@ -492,6 +550,7 @@ def plan_stage_dispatch(
         goal,
         acceptance,
         initial_task_id(workflow_id, node_id, existing_ids),
+        context_branch=context_branch,
         gate_contract=gate_contract,
         docs_block=docs_block,
     )
