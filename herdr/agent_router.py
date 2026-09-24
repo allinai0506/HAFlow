@@ -2,6 +2,7 @@
 import json
 import fcntl
 import os
+import sqlite3
 import time
 from datetime import datetime
 from pathlib import Path
@@ -278,21 +279,41 @@ def _isolation_opt_out(node_policy=None):
     return enabled, reason
 
 
-def _record_router_opt_out(workflow_id, stage, selected, reason, excluded):
+def _record_router_opt_out(
+    workflow_id,
+    stage,
+    selected,
+    reason,
+    excluded,
+    *,
+    task_id="",
+    run_id="",
+):
     """Persist the opt-out audit or fail closed before reusing an agent."""
     try:
         store = _get_store()
-        store.record_event(
+        receipt = store.record_event(
             "router_opt_out_used",
-            {"stage": stage, "selected": selected or "",
-             "reason": reason, "excluded": sorted(set(excluded or [])),
-             "audit_required": True},
+            {
+                "workflow_id": workflow_id,
+                "run_id": run_id or "",
+                "task_id": task_id or "",
+                "stage": stage,
+                "selected": selected or "",
+                "reason": reason,
+                "excluded": sorted(set(excluded or [])),
+                "audit_required": True,
+            },
             workflow_id=workflow_id,
             node_id=stage,
+            task_id=task_id or None,
+            run_id=run_id or None,
             source="agent-router",
         )
+        if receipt is False:
+            raise RuntimeError("router opt-out audit was not durably recorded")
         return True
-    except (OSError, ValueError, RuntimeError, AttributeError) as exc:
+    except (OSError, ValueError, RuntimeError, AttributeError, sqlite3.Error) as exc:
         raise RuntimeError(
             "FR-6 isolation opt-out audit persistence failed; refusing "
             f"agent reuse ({type(exc).__name__}: {exc})"
@@ -304,6 +325,7 @@ def choose_agent(
     task_type,
     requested="auto",
     reservation_key=None,
+    run_id=None,
 ):
     if workflow_id:
         record = workflow_record(workflow_id)
@@ -403,7 +425,13 @@ def choose_agent(
         if selected in stage_used_agents:
             _opt_out, _opt_reason = _isolation_opt_out(node_policy)
             _record_router_opt_out(
-                workflow_id, stage, selected, _opt_reason, stage_used_agents
+                workflow_id,
+                stage,
+                selected,
+                _opt_reason,
+                stage_used_agents,
+                task_id=reservation_key or "",
+                run_id=run_id or "",
             )
         return selected
 
@@ -458,7 +486,13 @@ def choose_agent(
                         "a non-empty reuse_reason (R9 fail-closed)"
                     )
                 _record_router_opt_out(
-                    workflow_id, stage, None, _opt_reason, stage_used_agents
+                    workflow_id,
+                    stage,
+                    None,
+                    _opt_reason,
+                    stage_used_agents,
+                    task_id=reservation_key or "",
+                    run_id=run_id or "",
                 )
             else:
                 filtered = [a for a in candidates if a not in stage_used_agents]

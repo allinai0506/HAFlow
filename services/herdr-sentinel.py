@@ -154,6 +154,22 @@ def update_statuses(changes, expected=None, epochs=None, versions=None):
         observed_updated = None
         if epoch_pair is not None:
             observed_updated = epoch_pair[1]
+        if reason == "completion_sentinel":
+            try:
+                completion = store.compare_and_set_completion_transition(
+                    task_id,
+                    reason=reason,
+                    source="herdr-sentinel",
+                    expected_status=observed_status,
+                    expected_version=observed_version,
+                    expected_updated_at=observed_updated,
+                    now=time.time(),
+                )
+            except (AttributeError, NotImplementedError, TypeError, ValueError, RuntimeError):
+                completion = {"accepted": False, "reason": "atomic_completion_unavailable"}
+            if completion.get("accepted", False):
+                changed = True
+            continue
         try:
             result = store.compare_and_set_task_transition(
                 task_id=task_id,
@@ -226,6 +242,28 @@ def update_statuses(changes, expected=None, epochs=None, versions=None):
         )
 
     return changed
+
+
+def observe_crash_pattern(task, *, changes, expected, versions):
+    """Record and enqueue an infrastructure crash transition atomically later."""
+    task_id = (task or {}).get("task_id")
+    if not task_id:
+        return False
+    _record_sentinel_event(
+        _get_store(),
+        task,
+        "agent_process_crash_observed",
+        {
+            "next_status": "failed",
+            "reason": "agent_process_crash",
+            "observed_status": task.get("status"),
+            "observed_version": task.get("version"),
+        },
+    )
+    changes[task_id] = ("failed", "agent_process_crash")
+    expected[task_id] = task.get("status")
+    versions[task_id] = task.get("version")
+    return True
 
 
 def _record_sentinel_event(store, task, event_type, payload):
@@ -516,11 +554,11 @@ def main():
                 continue
 
             if any(pattern in screen for pattern in CRASH_PATTERNS):
-                _record_sentinel_event(
-                    store,
+                observe_crash_pattern(
                     task,
-                    "agent_process_crash_observed",
-                    {"next_status": "failed"},
+                    changes=changes,
+                    expected=state.setdefault("crash_expected", {}),
+                    versions=state.setdefault("crash_versions", {}),
                 )
                 continue
 
@@ -556,20 +594,31 @@ def main():
 
         expected = state.get("completion_expected") or {}
         epochs = state.get("completion_epochs") or {}
+        versions = state.get("crash_versions") or {}
         elapsed_map = state.get("completion_elapsed") or {}
         # Only completion_sentinel writes carry CAS context; other reasons
         # (blocker/crash/fuse) keep the legacy authoritative re-check.
         cas_expected = {
             tid: expected.get(tid)
             for tid, (_st, reason) in changes.items()
-            if reason == "completion_sentinel" and tid in expected
+            if tid in expected
+        }
+        cas_versions = {
+            tid: versions.get(tid)
+            for tid, (_st, reason) in changes.items()
+            if tid in versions
         }
         cas_epochs = {
             tid: epochs.get(tid)
             for tid, (_st, reason) in changes.items()
             if reason == "completion_sentinel" and tid in epochs
         }
-        wrote = update_statuses(changes, expected=cas_expected, epochs=cas_epochs)
+        wrote = update_statuses(
+            changes,
+            expected=cas_expected,
+            epochs=cas_epochs,
+            versions=cas_versions,
+        )
         if wrote:
             for tid, (_st, reason) in changes.items():
                 if reason != "completion_sentinel":
@@ -590,7 +639,13 @@ def main():
                     comp_bucket["first_seen_at"] = None
                     comp_bucket["epoch_updated_at"] = None
                     comp_bucket["early_count"] = 0
-            for key in ("completion_expected", "completion_epochs", "completion_elapsed"):
+            for key in (
+                "completion_expected",
+                "completion_epochs",
+                "completion_elapsed",
+                "crash_expected",
+                "crash_versions",
+            ):
                 state.pop(key, None)
         if wrote or fuse_changed:
             check_task_stalls(tasks, state)

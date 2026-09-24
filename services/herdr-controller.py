@@ -114,6 +114,46 @@ _close_deferred_logged = set()
 # 已触发过 close-workflow 的 workflow,防止轮询期间重复派发。
 _workflow_close_inflight = set()
 
+# Blocked prompt delivery can wait on an external Agent transport.  Keep it
+# off the registry watcher thread so one stalled pane cannot freeze completion,
+# retry, escalation, and Observer sweeps for every other task.
+_BLOCKED_SLA_EXECUTOR = ThreadPoolExecutor(
+    max_workers=4,
+    thread_name_prefix="blocked-sla",
+)
+_blocked_sla_scheduled = set()
+_blocked_sla_schedule_lock = threading.Lock()
+
+
+def schedule_blocked_sla_task(task, now=None):
+    """Schedule one bounded blocked-SLA step without blocking the watcher."""
+    task_id = str((task or {}).get("task_id") or "")
+    if not task_id:
+        return False
+    with _blocked_sla_schedule_lock:
+        if task_id in _blocked_sla_scheduled:
+            return False
+        _blocked_sla_scheduled.add(task_id)
+
+    snapshot = dict(task or {})
+
+    def _run():
+        try:
+            process_blocked_sla_task(snapshot, now=now)
+        except (OSError, RuntimeError, ValueError, AttributeError) as exc:
+            print(f"[BLOCKED SLA ASYNC ERROR] task={task_id}: {exc}")
+        finally:
+            with _blocked_sla_schedule_lock:
+                _blocked_sla_scheduled.discard(task_id)
+
+    try:
+        _BLOCKED_SLA_EXECUTOR.submit(_run)
+    except (RuntimeError, OSError):
+        with _blocked_sla_schedule_lock:
+            _blocked_sla_scheduled.discard(task_id)
+        return False
+    return True
+
 
 def attention_get(key):
     return _attention_store.get(key)
@@ -196,15 +236,15 @@ def _notify_blocked_human_upgrade(task, episode_id, active_seconds):
         )
         notify_fn = getattr(notifier, "notify_human_upgrade", None)
         if callable(notify_fn):
-            notify_fn(task_id, workflow_id, body, url=url)
+            delivered = notify_fn(task_id, workflow_id, body, url=url)
         else:
-            notifier.notify(
+            delivered = notifier.notify(
                 "Herdr Factory · 阻塞升级（需人工）",
                 f"{workflow_id} · {task_id}",
                 body,
                 url=url,
             )
-        return True
+        return delivered is not False
     except (OSError, ValueError, RuntimeError, AttributeError) as exc:
         print(f"[BLOCKED SLA NOTIFY ERROR] {exc}")
         return False
@@ -243,50 +283,225 @@ def _send_blocked_repush(task, decision):
 
 
 def _blocked_sla_step(task, now, poll_seconds=3.0):
-    """Advance one blocked episode's active clock and return its next action."""
+    """Compatibility read/advance helper; production claims use the atomic path."""
     from herdr import blocked_sla as _sla
 
-    task_id = task.get("task_id", "")
+    task = task or {}
+    key = _blocked_sla_key(str(task.get("task_id") or ""))
+    with _attention_store.transaction() as episodes:
+        episode = dict(episodes.get(key) or {})
+        if not _blocked_episode_matches_task(episode, task):
+            episode = _sla.new_episode(task, now)
+        else:
+            episode["run_id"] = task.get("run_id")
+            episode["workflow_id"] = task.get("workflow_id")
+            try:
+                last_tick = float(episode.get("last_tick_at") or now)
+                active = float(episode.get("active_seconds") or 0)
+            except (TypeError, ValueError):
+                last_tick = now
+                active = 0.0
+            episode["active_seconds"] = active + _sla.active_tick_increment(
+                max(0.0, now - last_tick), poll_seconds=poll_seconds
+            )
+            episode["last_tick_at"] = now
+        decision = _sla.decide_blocked_action(
+            task=task, episode=episode, now=now
+        )
+        decision["claimed"] = False
+        episodes[key] = episode
+        return decision
+
+
+def _blocked_episode_matches_task(episode, task):
+    """Return whether a persisted SLA episode belongs to this task epoch."""
+    if not isinstance(episode, dict) or not episode:
+        return False
+    try:
+        same_entry = float(episode.get("entry_updated_at")) == float(task.get("updated_at"))
+    except (TypeError, ValueError):
+        same_entry = False
+    try:
+        same_version = int(episode.get("entry_version")) == int(task.get("version"))
+    except (TypeError, ValueError):
+        same_version = episode.get("entry_version") is None and task.get("version") is None
+    episode_run = episode.get("run_id")
+    task_run = task.get("run_id")
+    same_run = not episode_run or str(episode_run) == str(task_run)
+    episode_workflow = episode.get("workflow_id")
+    task_workflow = task.get("workflow_id")
+    same_workflow = not episode_workflow or str(episode_workflow) == str(task_workflow)
+    return same_entry and same_version and same_run and same_workflow
+
+
+def _claim_blocked_sla_action(task, now, poll_seconds=3.0):
+    """Atomically advance and claim one SLA side effect for an episode.
+
+    The episode file is the cross-process authority.  Selection, budget
+    reservation, and the claim lease happen under one EpisodeStore transaction
+    so two Controller instances cannot both send the one permitted prompt.
+    """
+    from herdr import blocked_sla as _sla
+
+    task = task or {}
+    task_id = str(task.get("task_id") or "")
     key = _blocked_sla_key(task_id)
-    episode = attention_get(key) or {}
+    now = float(now)
+    claim_id = uuid.uuid4().hex
+    with _attention_store.transaction() as episodes:
+        episode = dict(episodes.get(key) or {})
+        if not _blocked_episode_matches_task(episode, task):
+            episode = _sla.new_episode(task, now)
+        else:
+            episode["run_id"] = task.get("run_id")
+            episode["workflow_id"] = task.get("workflow_id")
+            try:
+                last_tick = float(episode.get("last_tick_at") or now)
+            except (TypeError, ValueError):
+                last_tick = now
+            episode["active_seconds"] = float(episode.get("active_seconds") or 0) + _sla.active_tick_increment(
+                max(0.0, now - last_tick), poll_seconds=poll_seconds
+            )
+            episode["last_tick_at"] = now
+
+        decision = _sla.decide_blocked_action(
+            task=task, episode=episode, now=now
+        )
+        action = decision.get("action")
+        decision["claimed"] = False
+
+        # A live claim blocks every competing side effect for the episode,
+        # including a later SLA escalation.
+        active_repush_claim = episode.get("repush_claim")
+        active_human_claim = episode.get("human_escalation_claim")
+        if (
+            _sla.claim_is_active(
+                active_repush_claim,
+                now,
+                lease_seconds=_sla.REPUSH_CLAIM_LEASE_SECONDS,
+            )
+            or _sla.claim_is_active(
+                active_human_claim,
+                now,
+                lease_seconds=_sla.HUMAN_ESCALATION_CLAIM_LEASE_SECONDS,
+            )
+        ):
+            decision["action"] = "suppressed_inflight"
+            decision["reason"] = "durable_sla_claim_inflight"
+            episodes[key] = episode
+            return episode, decision
+
+        if action in {"repush", "repush_recover"}:
+            previous_state = str(episode.get("repush_state") or "pending")
+            recovery = (
+                action == "repush_recover"
+                or previous_state == "failed"
+                or previous_state == "in_flight"
+            )
+            attempts = int(episode.get("recovery_attempts") or 0)
+            if recovery and attempts >= _sla.MAX_REPUSH_DELIVERY_RETRIES:
+                decision["action"] = "suppressed_bounds"
+                decision["reason"] = "repush_recovery_budget_exhausted"
+            else:
+                if recovery:
+                    episode["recovery_attempts"] = attempts + 1
+                episode["repush_claim"] = _sla.new_claim(
+                    claim_id,
+                    now,
+                    lease_seconds=_sla.REPUSH_CLAIM_LEASE_SECONDS,
+                )
+                episode["repush_state"] = "in_flight"
+                episode["last_action_at"] = now
+                episode["last_repush_at"] = now
+                decision["claim_id"] = claim_id
+                decision["recovery"] = recovery
+                if recovery:
+                    decision["action"] = "repush_recover"
+                decision["claimed"] = True
+        elif action == "escalate":
+            attempts = int(episode.get("human_escalation_attempts") or 0)
+            if attempts > _sla.MAX_HUMAN_ESCALATION_DELIVERY_RETRIES:
+                decision["action"] = "suppressed_bounds"
+                decision["reason"] = "human_escalation_delivery_budget_exhausted"
+            else:
+                episode["human_escalation_attempts"] = attempts + 1
+                episode["human_escalation_claim"] = _sla.new_claim(
+                    claim_id,
+                    now,
+                    lease_seconds=_sla.HUMAN_ESCALATION_CLAIM_LEASE_SECONDS,
+                )
+                episode["human_escalation_state"] = "in_flight"
+                episode["last_action_at"] = now
+                decision["claim_id"] = claim_id
+                decision["claimed"] = True
+
+        episodes[key] = episode
+        return episode, decision
+
+
+def _blocked_task_claim_is_current(task, decision):
+    """Revalidate task/run/pane identity immediately before external I/O."""
+    if not decision.get("claimed"):
+        return True, "not_claimed"
+    task_id = str(task.get("task_id") or "")
     try:
-        entry_updated = float(task.get("updated_at") or now)
-    except (TypeError, ValueError):
-        entry_updated = float(now)
-    stored_entry = episode.get("entry_updated_at")
-    try:
-        stored_entry_f = float(stored_entry) if stored_entry is not None else None
-    except (TypeError, ValueError):
-        stored_entry_f = None
-    if not episode or stored_entry_f != entry_updated:
-        episode = _sla.new_episode(task, now)
-        _attention_store.upsert(key, episode)
-        return _sla.decide_blocked_action(task=task, episode=episode, now=now)
-    try:
-        last_tick = float(episode.get("last_tick_at") or now)
-    except (TypeError, ValueError):
-        last_tick = now
-    increment = _sla.active_tick_increment(
-        max(0.0, now - last_tick), poll_seconds=poll_seconds
+        authoritative = _get_store().get_task(task_id)
+    except (AttributeError, OSError, RuntimeError, ValueError):
+        return False, "task_read_failed"
+    if not authoritative:
+        return False, "task_missing"
+    if authoritative.get("status") != "blocked":
+        return False, "task_status_changed"
+    if _task_version(authoritative) != _task_version(task):
+        return False, "task_version_changed"
+    if authoritative.get("pane_id") != task.get("pane_id"):
+        return False, "task_pane_changed"
+    if task.get("run_id") and authoritative.get("run_id") != task.get("run_id"):
+        return False, "task_run_changed"
+    if task.get("workflow_id") and authoritative.get("workflow_id") != task.get("workflow_id"):
+        return False, "task_workflow_changed"
+    return True, "current"
+
+
+def _release_stale_blocked_claim(task, decision, reason):
+    """Release a claim without charging its one-shot budget."""
+    key = _blocked_sla_key(str(task.get("task_id") or ""))
+    claim_id = decision.get("claim_id")
+    with _attention_store.transaction() as episodes:
+        episode = dict(episodes.get(key) or {})
+        claim = episode.get("repush_claim") or episode.get("human_escalation_claim") or {}
+        if claim_id and claim.get("claim_id") == claim_id:
+            if "repush_claim" in episode:
+                episode["repush_claim"] = None
+                episode["repush_state"] = "pending"
+            if "human_escalation_claim" in episode:
+                episode["human_escalation_claim"] = None
+                episode["human_escalation_state"] = "pending"
+            episodes[key] = episode
+    _record_blocked_event(
+        task,
+        "blocked_sla_claim_aborted",
+        {"episode_id": decision.get("episode_id", ""), "claim_id": claim_id, "reason": reason},
     )
-    try:
-        episode["active_seconds"] = float(episode.get("active_seconds") or 0) + increment
-    except (TypeError, ValueError):
-        episode["active_seconds"] = increment
-    episode["last_tick_at"] = now
-    _attention_store.upsert(key, episode)
-    return _sla.decide_blocked_action(task=task, episode=episode, now=now)
+    decision["action"] = "suppressed_stale_task"
+    decision["reason"] = reason
+    decision["claimed"] = False
+    return decision
 
 
 def _record_blocked_event(task, event_type, payload):
+    event_payload = dict(payload or {})
+    event_payload.setdefault("task_id", task.get("task_id"))
+    event_payload.setdefault("run_id", task.get("run_id"))
     try:
         _get_store().record_event(
             event_type,
-            payload,
+            event_payload,
             workflow_id=task.get("workflow_id"),
             node_id=task.get("node") or task.get("stage"),
             task_id=task.get("task_id"),
             agent_id=task.get("agent"),
+            run_id=task.get("run_id"),
             source="herdr-controller",
         )
         return True
@@ -338,22 +553,41 @@ def _blocked_sla_record_action(task, decision, now):
 
 
 def _blocked_sla_record_repush(task, decision, success, detail, now):
-    """Persist the single re-push attempt and its observable delivery result."""
-    from herdr import blocked_sla as _sla
-
+    """Finalize only the claim that owns this prompt attempt."""
     task_id = task.get("task_id", "")
     key = _blocked_sla_key(task_id)
-    episode = attention_get(key) or {}
-    updated = _sla.mark_repush_result(
-        episode,
-        success=bool(success),
-        now=now,
-        detail=detail,
-        recovery=decision.get("action") == "repush_recover",
-    )
-    _attention_store.upsert(key, updated)
+    claim_id = decision.get("claim_id")
+    stale = False
+    updated = {}
+    with _attention_store.transaction() as episodes:
+        episode = dict(episodes.get(key) or {})
+        claim = episode.get("repush_claim") or {}
+        if claim_id and claim.get("claim_id") != claim_id:
+            stale = True
+        else:
+            episode["repushes"] = 1
+            episode["delivery_attempts"] = int(episode.get("delivery_attempts") or 0) + 1
+            episode["repush_state"] = "delivered" if success else "failed"
+            episode["repush_claim"] = None
+            episode["last_action_at"] = now
+            episode["last_repush_at"] = now
+            if detail:
+                key_name = "last_repush_receipt" if success else "last_repush_error"
+                episode[key_name] = str(detail)[:500]
+            episodes[key] = episode
+            updated = dict(episode)
+
+    if stale:
+        _record_blocked_event(
+            task,
+            "blocked_repush_stale_result",
+            {"episode_id": decision.get("episode_id", ""), "claim_id": claim_id},
+        )
+        return {}
+
     payload = {
         "episode_id": decision.get("episode_id", ""),
+        "claim_id": decision.get("claim_id", ""),
         "repush_number": decision.get("repush_number", 1),
         "count": updated.get("repushes", 1),
         "delivered": bool(success),
@@ -373,16 +607,63 @@ def _blocked_sla_record_repush(task, decision, success, detail, now):
     return updated
 
 
+def _blocked_sla_record_escalation(task, decision, delivered, now):
+    """Finalize a claimed human escalation without duplicate notification."""
+    key = _blocked_sla_key(task.get("task_id", ""))
+    claim_id = decision.get("claim_id")
+    stale = False
+    with _attention_store.transaction() as episodes:
+        episode = dict(episodes.get(key) or {})
+        claim = episode.get("human_escalation_claim") or {}
+        if claim_id and claim.get("claim_id") != claim_id:
+            stale = True
+        else:
+            episode["human_escalation_state"] = "delivered" if delivered else "failed"
+            episode["human_escalation_claim"] = None
+            episode["last_action_at"] = now
+            if delivered:
+                episode["human_escalations"] = max(
+                    1, int(episode.get("human_escalations") or 0)
+                )
+            episodes[key] = episode
+    if stale:
+        _record_blocked_event(
+            task,
+            "blocked_human_escalation_stale_result",
+            {"episode_id": decision.get("episode_id", ""), "claim_id": claim_id},
+        )
+        return False
+    _record_blocked_event(
+        task,
+        "blocked_human_escalated" if delivered else "blocked_human_escalation_failed",
+        {
+            "episode_id": decision.get("episode_id", ""),
+            "claim_id": decision.get("claim_id", ""),
+            "count": int(episode.get("human_escalations") or 1),
+            "active_seconds": episode.get("active_seconds"),
+            "delivered": bool(delivered),
+        },
+    )
+    return bool(delivered)
+
+
 def process_blocked_sla_task(task, now=None, send_prompt=None):
     """Run one Controller-owned blocked SLA step, including prompt delivery."""
     now = time.time() if now is None else float(now)
-    decision = _blocked_sla_step(task, now, poll_seconds=3.0)
-    if decision.get("action") in {"repush", "repush_recover"}:
+    _episode, decision = _claim_blocked_sla_action(task, now, poll_seconds=3.0)
+    if decision.get("claimed"):
+        current, reason = _blocked_task_claim_is_current(task, decision)
+        if not current:
+            return _release_stale_blocked_claim(task, decision, reason)
+    if decision.get("claimed") and decision.get("action") in {"repush", "repush_recover"}:
         sender = send_prompt or _send_blocked_repush
         try:
             success, detail = sender(task, decision)
         except Exception as exc:  # delivery boundary is observable, not fatal
             success, detail = False, str(exc)[:500]
+        current, reason = _blocked_task_claim_is_current(task, decision)
+        if not current:
+            return _release_stale_blocked_claim(task, decision, reason)
         _blocked_sla_record_repush(
             task, decision, bool(success), detail, now,
         )
@@ -393,7 +674,19 @@ def process_blocked_sla_task(task, now=None, send_prompt=None):
                 enqueue_coordinator_event(task, "inner_loop_exhausted")
             except (OSError, RuntimeError, ValueError, AttributeError):
                 pass
-    elif decision.get("action") in {"escalate", "notice", "suppressed_human"}:
+    elif decision.get("claimed") and decision.get("action") == "escalate":
+        try:
+            active = float(_episode.get("active_seconds") or 0)
+        except (TypeError, ValueError):
+            active = 0.0
+        delivered = _notify_blocked_human_upgrade(
+            task, decision.get("episode_id", ""), active
+        )
+        current, reason = _blocked_task_claim_is_current(task, decision)
+        if not current:
+            return _release_stale_blocked_claim(task, decision, reason)
+        _blocked_sla_record_escalation(task, decision, delivered, now)
+    elif decision.get("action") in {"notice", "suppressed_human"}:
         _blocked_sla_record_action(task, decision, now)
     return decision
 
@@ -980,6 +1273,55 @@ def recover_infra_failed_tasks(workflow_id, tasks=None):
     return recovered
 
 
+def recover_router_isolation_tasks(workflow_id, tasks=None):
+    """Retry a router-rejected task only after an eligible pool exists."""
+    from herdr.agent_router import choose_agent
+
+    if not workflow_id or workflow_closed(workflow_id):
+        return False
+    if tasks is None:
+        tasks = load_tasks()
+    recovered = False
+    for task in tasks or []:
+        if (
+            task.get("workflow_id") != workflow_id
+            or task.get("status") != "failed"
+            or task.get("failure_reason") != "router_isolation_rejected"
+            or task.get("superseded_by")
+        ):
+            continue
+        try:
+            choose_agent(
+                workflow_id,
+                task.get("node") or task.get("stage"),
+                task.get("task_type") or "test",
+                requested=task.get("agent") or "auto",
+            )
+        except (OSError, RuntimeError, ValueError, AttributeError):
+            continue
+        result = subprocess.run(
+            [
+                TASK_MANAGER, "supersede", task.get("task_id"),
+                "--reason", "router pool recovered; replacement eligible",
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode == 0:
+            recovered = True
+            print(
+                f"[ROUTER RECOVERY] workflow={workflow_id} "
+                f"task={task.get('task_id')} eligible pool restored"
+            )
+        else:
+            print(
+                f"[ROUTER RECOVERY ERROR] task={task.get('task_id')}: "
+                f"{result.stderr.strip() or result.stdout.strip()}"
+            )
+    return recovered
+
+
 def blocked_verdict_dep(workflow_id, node):
     """依赖中是否存在任务级 blocked 验收结论(不问 gate_cfg)。
 
@@ -1317,59 +1659,62 @@ def process_completion_observation(task, now=None):
     the resulting ``working/dispatched -> agent_done`` transition and always
     supplies the observed status/version to the StateStore CAS.
     """
-    from herdr import completion as completion_policy
-    from herdr import kernel
-
     task = task or {}
     task_id = task.get("task_id")
     if not task_id:
         return False
     store = _get_store()
-    try:
-        observation = store.get_completion_observation(task_id)
-    except (AttributeError, OSError, RuntimeError, ValueError):
-        observation = None
-    if not observation:
-        return False
     now = time.time() if now is None else float(now)
-    ready = completion_policy.observation_ready(
-        observation,
-        task_status=task.get("status"),
-        elapsed_seconds=_completion_elapsed(task, now),
-    )
-    if not ready:
+    expected_status = task.get("status")
+    expected_version = _task_version(task)
+    try:
+        result = store.compare_and_set_completion_transition(
+            task_id,
+            reason="completion_sentinel",
+            source="herdr-controller",
+            metadata={"sentinel_reason": "completion_sentinel"},
+            expected_status=expected_status,
+            expected_version=expected_version,
+            now=now,
+        )
+    except (AttributeError, NotImplementedError):
+        # A store without the atomic observation gateway is unsupported; never
+        # fall back to a weaker status-only CAS.
         return False
-    result = kernel.transition_task(
-        task_id=task_id,
-        to_status="agent_done",
-        reason="completion_sentinel",
-        source="herdr-controller",
-        metadata={
-            "sentinel_reason": "completion_sentinel",
-            "completion_version": observation.get("observed_version"),
-            "completion_confirmations": observation.get("consecutive_samples"),
-        },
-        expected_status=observation.get("observed_status") or task.get("status"),
-        expected_version=observation.get("observed_version"),
-        store=store,
-    )
+    observation = result.get("observation") or {}
     if not result.get("accepted", True):
-        try:
-            store.record_event(
-                "completion_sentinel_cas_rejected",
-                {
-                    "task_id": task_id,
-                    "expected_status": observation.get("observed_status"),
-                    "expected_version": observation.get("observed_version"),
-                    "authoritative": result.get("current") or {},
-                },
-                workflow_id=task.get("workflow_id"),
-                node_id=task.get("node") or task.get("stage"),
-                task_id=task_id,
-                source="herdr-controller",
-            )
-        except (OSError, RuntimeError, ValueError, AttributeError):
-            pass
+        quiet_reasons = {
+            "completion_observation_missing",
+            "completion_marker_absent",
+            "completion_marker_vanished",
+            "completion_first_sample_missing",
+            "completion_confirmation_missing",
+            "completion_sample_interval_short",
+            "agent_not_idle",
+            "completion_elapsed_short",
+            "completion_status_inactive",
+            "completion_epoch_unstable",
+            "observation_epoch_stale",
+            "completion_observation_stale",
+        }
+        if result.get("reason") not in quiet_reasons:
+            try:
+                store.record_event(
+                    "completion_sentinel_cas_rejected",
+                    {
+                        "task_id": task_id,
+                        "reason": result.get("reason"),
+                        "expected_status": observation.get("observed_status"),
+                        "expected_version": observation.get("observed_version"),
+                        "authoritative": result.get("current") or {},
+                    },
+                    workflow_id=task.get("workflow_id"),
+                    node_id=task.get("node") or task.get("stage"),
+                    task_id=task_id,
+                    source="herdr-controller",
+                )
+            except (OSError, RuntimeError, ValueError, AttributeError):
+                pass
         return False
     try:
         store.record_event(
@@ -1385,7 +1730,6 @@ def process_completion_observation(task, now=None):
             task_id=task_id,
             source="herdr-controller",
         )
-        store.clear_completion_observation(task_id)
     except (OSError, RuntimeError, ValueError, AttributeError):
         pass
     enqueue_coordinator_event(result.get("task") or task, "done")
@@ -5983,6 +6327,51 @@ def check_task_tests_completed(task, store=None, now=None):
     )
 
 
+def _completion_marker_snapshot(task):
+    """Read the task-owned completion marker without treating idle as done."""
+    task = task or {}
+    pane_id = task.get("pane_id")
+    task_id = task.get("task_id")
+    if not pane_id or not task_id:
+        return False, ""
+    try:
+        result = subprocess.run(
+            ["herdr", "pane", "read", pane_id, "--source", "visible"],
+            text=True,
+            capture_output=True,
+            timeout=3,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False, ""
+    screen = (result.stdout or "") + (result.stderr or "")
+    return f"HERDR_TASK_DONE:{task_id}" in screen, screen
+
+
+def _record_completion_sample(
+    task,
+    marker_present,
+    now=None,
+    agent_status="idle",
+):
+    """Persist one Controller/Sentinel sample and arbitrate it atomically."""
+    task = task or {}
+    task_id = task.get("task_id")
+    if not task_id:
+        return False
+    now = time.time() if now is None else float(now)
+    try:
+        _get_store().observe_completion(
+            task_id,
+            marker_present=bool(marker_present),
+            agent_status=agent_status,
+            observed_at=now,
+        )
+    except (AttributeError, OSError, RuntimeError, ValueError):
+        return False
+    return process_completion_observation(task, now=now)
+
+
 def handle_event(task_id, agent_status):
     task = get_task(task_id)
 
@@ -6019,93 +6408,37 @@ def handle_event(task_id, agent_status):
             # Collaboration accelerator: a working target ACKs its handoff.
             maybe_ack_on_working(task_id)
 
-    elif agent_status == "idle":
-        pane_id = task.get("pane_id")
-        has_done_marker = False
-        screen = None
-        if pane_id:
-            try:
-                res = subprocess.run(
-                    ["herdr", "pane", "read", pane_id, "--source", "visible"],
-                    text=True,
-                    capture_output=True,
-                    timeout=3
-                )
-                screen = (res.stdout or "") + (res.stderr or "")
-                if f"HERDR_TASK_DONE:{task_id}" in screen:
-                    has_done_marker = True
-            except Exception:
-                pass
-
-        if current_status == "working":
-            if has_done_marker and not os.environ.get("HERDR_CONTROLLER_TEST"):
-                try:
-                    _get_store().observe_completion(
-                        task_id,
-                        marker_present=True,
-                        agent_status="idle",
-                        observed_at=time.time(),
-                    )
-                except (AttributeError, OSError, RuntimeError, ValueError):
-                    pass
-                process_completion_observation(task, now=time.time())
-                return
-            # 契约驱动前置检验：若任务有明确 required_outputs 但尚未生成，且无显式 DONE 标记，
-            # 说明 Agent 正在长推理或多阶段阅读中，暂缓判定为完成，防止提前触发 rework
-            wf_id = task.get("workflow_id")
-            node_id = task.get("node") or task.get("stage")
-            req_outputs = []
-            if wf_id and node_id:
-                try:
-                    wf_cfg = workflow_config_for(wf_id)
-                    if wf_cfg:
-                        node = find_node(wf_cfg, node_id)
-                        if node:
-                            req_outputs = node.get("required_outputs", [])
-                except Exception:
-                    pass
-
-            if req_outputs and not has_done_marker:
-                verdict_ready = gate_verdict_ready(task)
-                if not check_task_deliverables_ready(task) and not verdict_ready:
-                    print(
-                        f"[COMPLETION DEFERRED] "
-                        f"task={task_id} "
-                        f"required outputs {req_outputs} not ready; "
-                        f"treating idle as transient think time"
-                    )
+    elif agent_status in {"idle", "done"}:
+        if current_status in {"dispatched", "working", "rework"}:
+            has_done_marker, screen = _completion_marker_snapshot(task)
+            if agent_status == "idle" and not has_done_marker:
+                # A gate verdict is an explicit machine recovery source for
+                # prose-only gate outputs; it is not a Sentinel completion
+                # sample and still uses the versioned task CAS.
+                if current_status == "working" and gate_verdict_ready(task):
+                    if _set_observed_status(task, "agent_done", "gate_verdict_recovery"):
+                        emit_done_if_allowed(get_task(task_id), report_text=screen)
                     return
-
-            if not has_done_marker and not os.environ.get("HERDR_CONTROLLER_TEST"):
-                # 屏幕上无明确完成标记，进行短暂防抖二次确认，防止推理/长命令间歇抖动
-                time.sleep(3)
-                runtime_check = get_agent_runtime_status(pane_id) if pane_id else None
-                if runtime_check == "working":
-                    print(
-                        f"[AGENT JITTER FILTERED] "
-                        f"task={task_id} "
-                        f"recovered to working from idle"
-                    )
+                # Rework recovery is allowed only after the existing
+                # verification/retry evidence gates have passed.
+                if (
+                    current_status == "rework"
+                    and check_task_deliverables_ready(task)
+                    and _verification_execution_complete_for_rework(task)
+                    and _retry_execution_complete_for_rework(task)
+                ):
+                    if _set_observed_status(task, "agent_done", "rework_recovery"):
+                        emit_done_if_allowed(get_task(task_id), report_text=screen)
                     return
-
-            if _set_observed_status(task, "agent_done", "idle_marker"):
-                task = get_task(task_id)
-                emit_done_if_allowed(task, report_text=screen)
-
-        elif current_status == "rework":
-            # 自愈修复：若任务处于 rework 状态，当 Agent 输出 DONE 标记或产物已落盘就绪时，
-            # 自动推进至 agent_done，彻底避免孤儿停滞！
-            if (has_done_marker or check_task_deliverables_ready(task)) and \
-                    _verification_execution_complete_for_rework(task) and \
-                    _retry_execution_complete_for_rework(task):
-                print(
-                    f"[REWORK HEALED] "
-                    f"task={task_id} "
-                    f"deliverables verified, advancing rework -> agent_done"
-                )
-                if _set_observed_status(task, "agent_done", "rework_idle"):
-                    task = get_task(task_id)
-                    emit_done_if_allowed(task, report_text=screen)
+            # ``done`` is not an idle confirmation.  It may record a sample
+            # for observability, but only the durable idle+marker path can
+            # transition the task.
+            _record_completion_sample(
+                task,
+                has_done_marker,
+                agent_status="idle" if agent_status == "idle" else "done",
+            )
+        return
 
     elif agent_status == "blocked":
         if current_status in (
@@ -6120,18 +6453,6 @@ def handle_event(task_id, agent_status):
                     task,
                     blocked_event_type(task)
                 )
-
-    elif agent_status == "done":
-        if current_status in ("working", "rework"):
-            if current_status == "rework" and (
-                not check_task_deliverables_ready(task)
-                or not _verification_execution_complete_for_rework(task)
-                or not _retry_execution_complete_for_rework(task)
-            ):
-                return
-            if _set_observed_status(task, "agent_done", "agent_status_done"):
-                task = get_task(task_id)
-                emit_done_if_allowed(task)
 
 
 # ============================================================
@@ -6259,47 +6580,40 @@ def reconcile_task_state(task_id):
         )
 
         if current == "dispatched":
-            if not set_task_status(
-                task_id,
-                "working"
+            if not _set_observed_status(
+                task,
+                "working",
+                "recovery_working",
             ):
                 return
-
             current = "working"
 
         elif current == "blocked":
-            if not set_task_status(
-                task_id,
-                "working"
+            if not _set_observed_status(
+                task,
+                "working",
+                "recovery_working",
             ):
                 return
-
             current = "working"
 
         elif current == "rework":
-            # 只有当产物已经真实就绪时，才允许从 rework 恢复为 agent_done；
-            # 否则必须等待新派发启动后实际进入 working。
-            if (
-                check_task_deliverables_ready(task)
-                and _verification_execution_complete_for_rework(task)
-                and _retry_execution_complete_for_rework(task)
-            ):
-                print(
-                    f"[RECOVERY REWORK HEALED] "
-                    f"task={task_id} deliverables detected -> restore agent_done"
-                )
-                if set_task_status(task_id, "agent_done"):
-                    task = get_task(task_id)
-                    if task and task.get("status") == "agent_done":
-                        emit_done_if_allowed(task)
+            has_done_marker, _screen = _completion_marker_snapshot(task)
+            _record_completion_sample(
+                task,
+                has_done_marker,
+                agent_status="idle" if runtime == "idle" else "done",
+            )
             return
 
         if current == "working":
-            if not os.environ.get("HERDR_CONTROLLER_TEST"):
-                process_completion_observation(task)
-                return
-            if not _set_observed_status(task, "agent_done", "recovery_done"):
-                return
+            has_done_marker, _screen = _completion_marker_snapshot(task)
+            _record_completion_sample(
+                task,
+                has_done_marker,
+                agent_status="idle" if runtime == "idle" else "done",
+            )
+            return
 
         task = get_task(task_id)
 
@@ -6310,32 +6624,9 @@ def reconcile_task_state(task_id):
 
     # Agent 曾经进入 working/rework，随后 Controller 重启时发现已经 idle
     if runtime == "idle":
-        if current == "working":
-            if not os.environ.get("HERDR_CONTROLLER_TEST"):
-                process_completion_observation(task)
-                return
-            if not _set_observed_status(task, "agent_done", "recovery_done"):
-                return
-
-            task = get_task(task_id)
-
-            if task and task.get("status") == "agent_done":
-                emit_done_if_allowed(task)
-        elif current == "rework":
-            if (
-                check_task_deliverables_ready(task)
-                and _verification_execution_complete_for_rework(task)
-                and _retry_execution_complete_for_rework(task)
-            ):
-                print(
-                    f"[RECOVERY REWORK HEALED] "
-                    f"task={task_id} idle + deliverables detected -> restore agent_done"
-                )
-                if set_task_status(task_id, "agent_done"):
-                    task = get_task(task_id)
-                    if task and task.get("status") == "agent_done":
-                        emit_done_if_allowed(task)
-
+        if current in {"working", "rework"}:
+            has_done_marker, _screen = _completion_marker_snapshot(task)
+            _record_completion_sample(task, has_done_marker, agent_status="idle")
         return
 
     # dispatched -> idle 不自动推断完成；
@@ -6623,10 +6914,13 @@ def registry_watcher():
                         task.get("workflow_id")
                     ):
                         try:
+                            recover_router_isolation_tasks(
+                                task.get("workflow_id"), tasks
+                            )
                             recover_infra_failed_tasks(
                                 task.get("workflow_id"), tasks
                             )
-                        except Exception as exc:
+                        except (OSError, RuntimeError, ValueError, AttributeError) as exc:
                             print(f"[AUTO RECOVER ERROR] {exc}")
 
                     # completed + git 的终化重试必须在这里驱动:
@@ -6715,7 +7009,7 @@ def registry_watcher():
 
                 # ---- blocked SLA: Controller owns the one re-push and escalation ----
                 if status == "blocked":
-                    process_blocked_sla_task(task, now=now)
+                    schedule_blocked_sla_task(task, now=now)
                 else:
                     attention_clear(f"{task_id}:blocked")
                     attention_clear(_blocked_sla_key(task_id))
@@ -6767,13 +7061,12 @@ def registry_watcher():
                             and _verification_execution_complete_for_rework(task)
                             and _retry_execution_complete_for_rework(task)
                         ):
-                            print(
-                                f"[REWORK WATCHDOG HEAL] "
-                                f"task={task_id} deliverables detected and agent is {runtime} -> advance to agent_done"
+                            has_done_marker, _screen = _completion_marker_snapshot(task)
+                            _record_completion_sample(
+                                task,
+                                has_done_marker,
+                                agent_status="idle" if runtime == "idle" else "done",
                             )
-                            if set_task_status(task_id, "agent_done"):
-                                task = get_task(task_id)
-                                emit_done_if_allowed(task)
 
             for stale_id in list(_listener_backoff.keys()):
                 if stale_id not in task_ids_now:

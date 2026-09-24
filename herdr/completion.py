@@ -19,6 +19,11 @@ import os
 from collections.abc import Sequence
 
 MIN_COMPLETION_SECONDS = 60.0
+# Sentinel polls once every three seconds.  A second marker sighting is only
+# a confirmation when it comes from a later poll, not from a repeated read in
+# the same sweep.
+MIN_SAMPLE_INTERVAL_SECONDS = 3.0
+MAX_OBSERVATION_AGE_SECONDS = 10.0
 REQUIRED_CONFIRMATIONS = 2
 NEUTRAL_TOKEN = "HERDR_TASK_DONE:<TASK_ID>"
 
@@ -37,6 +42,30 @@ def min_completion_seconds() -> float:
     if math.isnan(value):
         return MIN_COMPLETION_SECONDS
     return max(MIN_COMPLETION_SECONDS, value)
+
+
+def observation_age_satisfied(last_observed_at: float | None, now: float) -> bool:
+    """Return whether a ready observation is still fresh enough to consume."""
+    if last_observed_at is None:
+        return False
+    try:
+        age = float(now) - float(last_observed_at)
+    except (TypeError, ValueError):
+        return False
+    return 0 <= age <= MAX_OBSERVATION_AGE_SECONDS
+
+
+def sample_interval_satisfied(
+    first_seen_at: float | None,
+    last_sample_at: float | None,
+) -> bool:
+    """Return whether two counted samples span at least one Sentinel poll."""
+    if first_seen_at is None or last_sample_at is None:
+        return False
+    try:
+        return float(last_sample_at) - float(first_seen_at) >= MIN_SAMPLE_INTERVAL_SECONDS
+    except (TypeError, ValueError):
+        return False
 
 
 def sanitize_completion_marker(text: str, task_id: str) -> tuple[str, int]:
@@ -220,6 +249,14 @@ def stable_confirmation(
     recent = list(samples[-required:])
     if not all(bool(sample.get("marker_present")) for sample in recent):
         return False
+    if sample_interval_satisfied(
+        recent[0].get("first_seen_at", recent[0].get("observed_at")),
+        recent[-1].get("last_sample_at", recent[-1].get("observed_at")),
+    ) is False and all(
+        "first_seen_at" in sample or "last_sample_at" in sample
+        for sample in recent
+    ):
+        return False
     epochs = {
         sample.get("observed_version")
         for sample in recent
@@ -246,6 +283,10 @@ def observation_ready(
         is_new_or_tracked=(
             observation.get("first_seen_at") is not None
             and int(observation.get("consecutive_samples") or 0) >= REQUIRED_CONFIRMATIONS
+            and sample_interval_satisfied(
+                observation.get("first_seen_at"),
+                observation.get("last_sample_at"),
+            )
             and not observation.get("vanished")
         ),
         stale_epoch=bool(observation.get("epoch_changed")),

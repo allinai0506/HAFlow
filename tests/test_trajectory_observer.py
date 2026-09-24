@@ -2646,7 +2646,18 @@ class TestDoneGatewayTerminalCheckpoint:
             return True
 
         monkeypatch.setattr(controller, "set_task_status", fake_set_status)
-        monkeypatch.setenv("HERDR_CONTROLLER_TEST", "1")
+
+        def accept_durable_completion(*_args, **_kwargs):
+            fake_set_status("t-listener", "agent_done")
+            controller.emit_done_if_allowed(
+                {"task_id": "t-listener", "workflow_id": "wf", "stage": "impl",
+                 "status": state["status"]}
+            )
+            return True
+
+        monkeypatch.setattr(
+            controller, "_record_completion_sample", accept_durable_completion
+        )
 
         controller.handle_event("t-listener", "idle")
 

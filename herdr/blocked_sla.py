@@ -26,7 +26,10 @@ POLL_CAP_MULTIPLIER = 3.0
 MAX_AUTO_REPUSHES_PER_EPISODE = 1
 MAX_REPUSH_DELIVERY_RETRIES = 1
 MAX_HUMAN_ESCALATIONS_PER_EPISODE = 1
+MAX_HUMAN_ESCALATION_DELIVERY_RETRIES = 1
 MAX_COORDINATOR_NOTICES_PER_EPISODE = 1
+REPUSH_CLAIM_LEASE_SECONDS = 180.0
+HUMAN_ESCALATION_CLAIM_LEASE_SECONDS = 60.0
 
 
 def _env_float(name: str, default: float) -> float:
@@ -182,6 +185,51 @@ def should_recover_repush(
     return True
 
 
+def claim_is_active(
+    claim: object,
+    now: float,
+    *,
+    lease_seconds: float,
+) -> bool:
+    """Return whether a side-effect claim still owns its lease.
+
+    Malformed non-empty claims fail closed: an operator must be able to recover
+    them explicitly rather than accidentally launching a second prompt.
+    """
+    if not isinstance(claim, dict) or not claim:
+        return False
+    try:
+        lease_until = float(claim["lease_until"])
+    except (KeyError, TypeError, ValueError):
+        return True
+    return lease_until > float(now)
+
+
+def claim_is_expired(
+    claim: object,
+    now: float,
+    *,
+    lease_seconds: float,
+) -> bool:
+    """Inverse of :func:`claim_is_active` for a known claim shape."""
+    if not isinstance(claim, dict) or not claim:
+        return True
+    try:
+        lease_until = float(claim["lease_until"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return lease_until <= float(now)
+
+
+def new_claim(claim_id: str, now: float, *, lease_seconds: float) -> dict:
+    """Create a bounded, observable side-effect lease."""
+    return {
+        "claim_id": str(claim_id),
+        "claimed_at": float(now),
+        "lease_until": float(now) + float(lease_seconds),
+    }
+
+
 def should_notice_coordinator(
     *,
     active_seconds: float,
@@ -241,6 +289,7 @@ def new_episode(task: dict | None, now: float) -> dict:
     return {
         "task_id": str(task.get("task_id") or ""),
         "workflow_id": task.get("workflow_id"),
+        "run_id": task.get("run_id"),
         "entry_updated_at": entry,
         "entry_version": version,
         "episode_id": blocked_episode_id(

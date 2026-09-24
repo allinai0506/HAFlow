@@ -217,6 +217,23 @@ class StateStore(ABC):
         """Atomically transition a task only when its observed epoch matches."""
         pass
 
+    def compare_and_set_completion_transition(
+        self,
+        task_id: str,
+        *,
+        reason: str = "completion_sentinel",
+        source: str = "herdr-controller",
+        metadata: dict[str, Any] | None = None,
+        expected_status: str | None = None,
+        expected_version: int | None = None,
+        expected_updated_at: float | None = None,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        """Consume a confirmed completion observation atomically, if supported."""
+        raise NotImplementedError(
+            "completion observation CAS is not implemented by this StateStore"
+        )
+
     @abstractmethod
     def observe_completion(
         self,
@@ -301,8 +318,8 @@ class StateStore(ABC):
         source: str = "system",
         timestamp: Optional[float] = None,
         run_id: Optional[str] = None,
-    ) -> None:
-        """Record a generic lifecycle event."""
+    ) -> Any:
+        """Record a generic lifecycle event and return its receipt, if any."""
         pass
 
     @abstractmethod
@@ -698,6 +715,30 @@ class SQLiteStateStore(StateStore):
             db_path=self.db_path,
         )
 
+    def compare_and_set_completion_transition(
+        self,
+        task_id: str,
+        *,
+        reason: str = "completion_sentinel",
+        source: str = "herdr-controller",
+        metadata: dict[str, Any] | None = None,
+        expected_status: str | None = None,
+        expected_version: int | None = None,
+        expected_updated_at: float | None = None,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        return state_db.compare_and_set_completion_transition(
+            task_id,
+            reason=reason,
+            source=source,
+            metadata=metadata,
+            expected_status=expected_status,
+            expected_version=expected_version,
+            expected_updated_at=expected_updated_at,
+            now=now,
+            db_path=self.db_path,
+        )
+
     def observe_completion(
         self,
         task_id: str,
@@ -778,8 +819,8 @@ class SQLiteStateStore(StateStore):
         source: str = "system",
         timestamp: Optional[float] = None,
         run_id: Optional[str] = None,
-    ) -> None:
-        state_db.record_event({
+    ) -> Any:
+        return state_db.record_event({
             "workflow_id": workflow_id,
             "node_id": node_id,
             "task_id": task_id,

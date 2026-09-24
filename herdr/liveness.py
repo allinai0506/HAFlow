@@ -497,15 +497,19 @@ class EpisodeStore:
         self._lock_path = str(self.path) + ".lock"
 
     @contextlib.contextmanager
-    def _file_lock(self):
+    def _file_lock(self, *, strict=False):
         """Exclusive cross-process guard for one read-modify-write cycle."""
         if fcntl is None:
+            if strict:
+                raise RuntimeError("episode file locking is unavailable")
             yield None
             return
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             fd = os.open(self._lock_path, os.O_RDWR | os.O_CREAT, 0o644)
         except OSError:
+            if strict:
+                raise RuntimeError("episode file lock could not be opened")
             yield None
             return
         try:
@@ -518,6 +522,19 @@ class EpisodeStore:
                 pass
             os.close(fd)
 
+    @contextlib.contextmanager
+    def transaction(self):
+        """Expose one locked read-modify-write episode transaction.
+
+        The yielded mapping is the authoritative in-file episode table.  It is
+        saved only when the block exits normally, so a crashed/raising caller
+        cannot publish a half-applied SLA claim.
+        """
+        with self._lock, self._file_lock(strict=True):
+            episodes = self._load(strict=True)
+            yield episodes
+            self._save()
+
     def _stat_sig(self):
         try:
             st = os.stat(self.path)
@@ -525,16 +542,24 @@ class EpisodeStore:
             return None
         return (st.st_mtime_ns, st.st_size)
 
-    def _load(self) -> Dict[str, Dict[str, Any]]:
+    def _load(self, *, strict=False) -> Dict[str, Dict[str, Any]]:
         sig = self._stat_sig()
         if self._cache is not None and sig == self._loaded_sig:
             return self._cache
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
-        except Exception:
+        except FileNotFoundError:
+            data = {}
+        except (OSError, TypeError, ValueError) as exc:
+            if strict:
+                raise RuntimeError("episode ledger could not be read") from exc
             data = {}
         episodes = data.get("episodes") if isinstance(data, dict) else None
-        self._cache = dict(episodes) if isinstance(episodes, dict) else {}
+        if not isinstance(episodes, dict):
+            if strict:
+                raise RuntimeError("episode ledger has an invalid shape")
+            episodes = {}
+        self._cache = dict(episodes)
         self._loaded_sig = sig
         return self._cache
 

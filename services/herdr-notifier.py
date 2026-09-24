@@ -44,7 +44,7 @@ def notify_human_upgrade(task_id, workflow_id, body, url=None):
     blocked_episode_id, so a long-blocked task escalates exactly once per
     episode. Body carries copy-paste commands only, never auto-executes.
     """
-    notify(
+    return notify(
         "Herdr Factory · 阻塞升级（需人工）",
         f"{workflow_id} · {task_id}",
         str(body),
@@ -65,8 +65,8 @@ def notify(title, subtitle, message, url=None):
         ]
         if url:
             cmd += ["-open", str(url)]
-        subprocess.run(cmd, capture_output=True, text=True)
-        return
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        return result.returncode == 0
 
     if not _HINT_SHOWN:
         print(
@@ -80,7 +80,10 @@ def notify(title, subtitle, message, url=None):
         f'with title "{esc(title)}" '
         f'subtitle "{esc(subtitle)}" sound name "Glass"'
     )
-    subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
+    result = subprocess.run(
+        ["osascript", "-e", script], capture_output=True, text=True
+    )
+    return result.returncode == 0
 
 def project(task):
     return (

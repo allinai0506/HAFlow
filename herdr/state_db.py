@@ -13,8 +13,9 @@ Core Capabilities:
 - Lossless bi-directional migration between V1 JSON files and V2 SQLite DB
 """
 
-import json
 import hashlib
+import json
+import math
 import os
 import sqlite3
 import time
@@ -106,6 +107,7 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
             first_seen_at REAL,
             last_seen_at REAL,
             last_sample_at REAL,
+            last_observed_at REAL,
             consecutive_samples INTEGER NOT NULL DEFAULT 0,
             vanished INTEGER NOT NULL DEFAULT 0,
             epoch_changed INTEGER NOT NULL DEFAULT 0,
@@ -324,6 +326,7 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_cp_parent ON checkpoints(parent_checkpoint_id);")
     _ensure_event_columns(conn)
     _ensure_task_columns(conn)
+    _ensure_completion_columns(conn)
     _ensure_intervention_columns(conn)
 
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_wf ON events(workflow_id, timestamp);")
@@ -568,6 +571,24 @@ def _ensure_task_columns(conn: sqlite3.Connection) -> None:
             raise
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(tasks);")}
         if "version" not in columns:
+            raise
+
+
+def _ensure_completion_columns(conn: sqlite3.Connection) -> None:
+    """Add ordering metadata to completion observations from older databases."""
+    columns = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(completion_observations);")
+    }
+    if "last_observed_at" in columns:
+        return
+    try:
+        conn.execute(
+            "ALTER TABLE completion_observations "
+            "ADD COLUMN last_observed_at REAL;"
+        )
+    except sqlite3.OperationalError as exc:
+        if "duplicate column name" not in str(exc).lower():
             raise
 
 
@@ -979,6 +1000,7 @@ def _decode_completion_observation(row: sqlite3.Row) -> Dict[str, Any]:
         "first_seen_at": row["first_seen_at"],
         "last_seen_at": row["last_seen_at"],
         "last_sample_at": row["last_sample_at"],
+        "last_observed_at": row["last_observed_at"],
         "consecutive_samples": int(row["consecutive_samples"] or 0),
         "vanished": bool(row["vanished"]),
         "uncertain": bool(row["vanished"]),
@@ -1003,6 +1025,8 @@ def observe_completion(
     from . import completion as completion_policy
 
     now = float(observed_at if observed_at is not None else time.time())
+    if not math.isfinite(now):
+        raise ValueError("observed_at must be finite")
     conn = get_db_connection(db_path)
     try:
         conn.execute("BEGIN IMMEDIATE;")
@@ -1027,41 +1051,116 @@ def observe_completion(
             )
         )
         marker = bool(marker_present)
+        sample_stale = False
+        if previous is not None:
+            previous_observed = previous.get("last_observed_at")
+            if previous_observed is None:
+                previous_observed = previous.get("last_sample_at")
+            if previous_observed is not None:
+                try:
+                    if float(previous_observed) > now or (
+                        float(previous_observed) == now
+                        and (
+                            bool(previous.get("marker_present")) != marker
+                            or previous.get("agent_status") != agent_status
+                        )
+                    ):
+                        sample_stale = True
+                except (TypeError, ValueError):
+                    sample_stale = True
+        if sample_stale:
+            saved = conn.execute(
+                "SELECT * FROM completion_observations WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+            result = _decode_completion_observation(saved)
+            try:
+                elapsed = now - float(
+                    task.get("started_at") or task.get("created_at") or now
+                )
+            except (TypeError, ValueError):
+                elapsed = 0.0
+            result.update({
+                "ready": False,
+                "stale_sample": True,
+                "elapsed_seconds": elapsed,
+                "task_status": current_status,
+            })
+            conn.execute("COMMIT;")
+            return result
         first_seen = None
         last_seen = None
         last_sample = now
         consecutive = 0
         vanished = False
-        if previous is not None and not epoch_changed:
+        was_present = bool(previous.get("marker_present")) if previous else False
+        if previous is not None and epoch_changed:
+            # A task rewrite starts a fresh epoch.  If the marker is already on
+            # the pane at the first sample of that epoch, treat it as the first
+            # *new-epoch* sample; the version binding prevents the old sample
+            # from completing the reopened task.  Requiring an artificial
+            # absent poll here would deadlock a restarted Controller when the
+            # pane still contains the marker.
+            if marker:
+                first_seen = now
+                last_seen = now
+                last_sample = now
+                consecutive = 1
+            else:
+                vanished = was_present
+        elif previous is not None:
             first_seen = previous.get("first_seen_at")
             last_seen = previous.get("last_seen_at")
             last_sample = previous.get("last_sample_at")
             consecutive = int(previous.get("consecutive_samples") or 0)
             vanished = bool(previous.get("vanished"))
-            was_present = bool(previous.get("marker_present"))
             if marker and not was_present:
                 first_seen = now
                 last_seen = now
+                last_sample = now
                 consecutive = 1
                 vanished = False
             elif marker and was_present:
-                # A repeated sample in the same poll is not a second round.
-                if last_sample is None or now > float(last_sample):
-                    consecutive += 1
+                # Repeated reads in one sweep do not count as a second poll.
+                # If an older row was left with first_seen_at=NULL by the
+                # pre-fix state machine, initialize it here rather than
+                # allowing consecutive_samples to grow forever without ever
+                # becoming ready.
+                if first_seen is None:
+                    first_seen = now
+                    last_sample = now
+                    consecutive = 1
+                else:
+                    if last_sample is None:
+                        last_sample = last_seen
+                    try:
+                        interval_ok = (
+                            last_sample is None
+                            or float(now) - float(last_sample)
+                            >= completion_policy.MIN_SAMPLE_INTERVAL_SECONDS
+                        )
+                    except (TypeError, ValueError):
+                        interval_ok = False
+                    if interval_ok and (
+                        last_sample is None or float(now) >= float(last_sample)
+                    ):
+                        consecutive += 1
+                        last_sample = now
                 last_seen = now
             elif not marker and was_present:
-                # Keep the uncertainty durable; a later appearance starts a
-                # new absent -> present cycle rather than reviving old data.
+                # A later appearance starts a new absent -> present cycle;
+                # never revive the old confirmation run.
                 first_seen = None
                 last_seen = None
+                last_sample = now
                 consecutive = 0
                 vanished = True
         elif marker:
             # A marker already visible at the first observation is residue.
             first_seen = None
             last_seen = now
+            last_sample = now
             consecutive = 0
-            vanished = False
         if marker and first_seen is not None:
             last_seen = now
         elapsed = now - float(
@@ -1074,6 +1173,7 @@ def observe_completion(
             and marker
             and first_seen is not None
             and consecutive >= 2
+            and completion_policy.sample_interval_satisfied(first_seen, last_sample)
             and not vanished
             and agent_status == "idle"
             and elapsed >= completion_policy.min_completion_seconds()
@@ -1088,6 +1188,7 @@ def observe_completion(
             agent_status,
             first_seen,
             last_seen,
+            last_sample,
             now,
             consecutive,
             int(vanished),
@@ -1098,9 +1199,9 @@ def observe_completion(
             """INSERT INTO completion_observations (
                 task_id, workflow_id, observed_status, observed_version,
                 observed_updated_at, marker_present, agent_status,
-                first_seen_at, last_seen_at, last_sample_at,
+                first_seen_at, last_seen_at, last_sample_at, last_observed_at,
                 consecutive_samples, vanished, epoch_changed, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(task_id) DO UPDATE SET
                 workflow_id=excluded.workflow_id,
                 observed_status=excluded.observed_status,
@@ -1111,6 +1212,7 @@ def observe_completion(
                 first_seen_at=excluded.first_seen_at,
                 last_seen_at=excluded.last_seen_at,
                 last_sample_at=excluded.last_sample_at,
+                last_observed_at=excluded.last_observed_at,
                 consecutive_samples=excluded.consecutive_samples,
                 vanished=excluded.vanished,
                 epoch_changed=excluded.epoch_changed,
@@ -1125,6 +1227,7 @@ def observe_completion(
         result = _decode_completion_observation(saved)
         result.update({
             "ready": ready,
+            "stale_sample": False,
             "uncertain": vanished,
             "elapsed_seconds": elapsed,
             "task_status": current_status,
@@ -3352,6 +3455,7 @@ def transition_task(
                 "event_type": "task_transition",
                 "payload": event_payload,
                 "source": source,
+                "run_id": task_dict.get("run_id"),
                 "timestamp": now,
             },
             conn=conn,
@@ -3416,6 +3520,201 @@ def compare_and_set_task_transition(
         expected_version=expected_version,
         expected_updated_at=expected_updated_at,
     )
+
+
+def compare_and_set_completion_transition(
+    task_id: str,
+    *,
+    reason: str = "completion_sentinel",
+    source: str = "herdr-controller",
+    metadata: dict[str, Any] | None = None,
+    expected_status: str | None = None,
+    expected_version: int | None = None,
+    expected_updated_at: float | None = None,
+    now: float | None = None,
+    db_path: Path | None = None,
+) -> dict[str, Any]:
+    """Atomically validate a durable completion observation and transition.
+
+    The observation check, task CAS, canonical transition event, and removal of
+    the consumed observation all happen under one SQLite write transaction.
+    A Controller therefore cannot commit a ready result after the marker has
+    vanished, and two Controllers can consume one observation only once.
+    """
+    from . import completion as completion_policy
+
+    conn = get_db_connection(db_path)
+    try:
+        conn.execute("BEGIN IMMEDIATE;")
+        task_row = conn.execute(
+            "SELECT * FROM tasks WHERE task_id = ?", (task_id,)
+        ).fetchone()
+        if task_row is None:
+            raise ValueError(f"Task '{task_id}' not found")
+        current = _decode_task_row(task_row)
+        current_status = str(current.get("status") or "")
+        current_version = int(current.get("version") or 0)
+        mismatch = None
+        if expected_status is not None and current_status != expected_status:
+            mismatch = {
+                "reason": "cas_mismatch",
+                "field": "status",
+                "expected": expected_status,
+                "actual": current_status,
+            }
+        elif expected_version is not None and current_version != int(expected_version):
+            mismatch = {
+                "reason": "cas_mismatch",
+                "field": "version",
+                "expected": int(expected_version),
+                "actual": current_version,
+            }
+        elif expected_updated_at is not None:
+            try:
+                actual_updated = float(task_row["updated_at"] or 0)
+                expected_float = float(expected_updated_at)
+            except (TypeError, ValueError):
+                actual_updated = task_row["updated_at"]
+                expected_float = expected_updated_at
+            if actual_updated != expected_float:
+                mismatch = {
+                    "reason": "cas_mismatch",
+                    "field": "updated_at",
+                    "expected": expected_updated_at,
+                    "actual": actual_updated,
+                }
+        if mismatch is not None:
+            conn.execute("ROLLBACK;")
+            return {
+                "ok": False,
+                "accepted": False,
+                "task_id": task_id,
+                "reason": mismatch["reason"],
+                "mismatch": mismatch,
+                "current": current,
+                "current_status": current_status,
+                "current_version": current_version,
+            }
+
+        observation_row = conn.execute(
+            "SELECT * FROM completion_observations WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()
+        observation = (
+            _decode_completion_observation(observation_row)
+            if observation_row is not None
+            else None
+        )
+        effective_now = float(now if now is not None else time.time())
+        if not math.isfinite(effective_now):
+            conn.execute("ROLLBACK;")
+            return {
+                "ok": False,
+                "accepted": False,
+                "task_id": task_id,
+                "reason": "completion_clock_invalid",
+                "current": current,
+                "current_status": current_status,
+                "current_version": current_version,
+            }
+        rejection = None
+        if current_status not in {"dispatched", "working"}:
+            rejection = "completion_status_inactive"
+        elif observation is None:
+            rejection = "completion_observation_missing"
+        elif observation.get("epoch_changed"):
+            rejection = "completion_epoch_unstable"
+        elif observation.get("observed_status") != current_status:
+            rejection = "observation_status_stale"
+        elif int(observation.get("observed_version") or 0) != current_version:
+            rejection = "observation_version_stale"
+        elif not observation.get("marker_present"):
+            rejection = "completion_marker_absent"
+        elif observation.get("vanished"):
+            rejection = "completion_marker_vanished"
+        elif observation.get("first_seen_at") is None:
+            rejection = "completion_first_sample_missing"
+        elif int(observation.get("consecutive_samples") or 0) < 2:
+            rejection = "completion_confirmation_missing"
+        elif not completion_policy.sample_interval_satisfied(
+            observation.get("first_seen_at"),
+            observation.get("last_sample_at"),
+        ):
+            rejection = "completion_sample_interval_short"
+        elif not completion_policy.observation_age_satisfied(
+            observation.get("last_observed_at"), effective_now
+        ):
+            rejection = "completion_observation_stale"
+        elif observation.get("agent_status") != "idle":
+            rejection = "agent_not_idle"
+        else:
+            started = current.get("started_at") or current.get("created_at") or effective_now
+            try:
+                elapsed = effective_now - float(started)
+            except (TypeError, ValueError):
+                elapsed = 0.0
+            if elapsed < completion_policy.min_completion_seconds():
+                rejection = "completion_elapsed_short"
+
+        if rejection is None and observation is not None:
+            observed_updated = observation.get("observed_updated_at")
+            if observed_updated is not None and task_row["updated_at"] is not None:
+                try:
+                    if float(observed_updated) != float(task_row["updated_at"]):
+                        rejection = "observation_epoch_stale"
+                except (TypeError, ValueError):
+                    rejection = "observation_epoch_stale"
+
+        if rejection is not None:
+            conn.execute("ROLLBACK;")
+            return {
+                "ok": False,
+                "accepted": False,
+                "task_id": task_id,
+                "reason": rejection,
+                "current": current,
+                "current_status": current_status,
+                "current_version": current_version,
+                "observation": observation,
+            }
+
+        transition_metadata = dict(metadata or {})
+        transition_metadata.setdefault("completion_confirmations", observation.get("consecutive_samples"))
+        transition_metadata.setdefault("completion_version", observation.get("observed_version"))
+        transition_metadata.setdefault("completion_first_seen_at", observation.get("first_seen_at"))
+        transition_metadata.setdefault("completion_last_sample_at", observation.get("last_sample_at"))
+        result = transition_task(
+            task_id=task_id,
+            to_status="agent_done",
+            reason=reason,
+            source=source,
+            metadata=transition_metadata,
+            force=False,
+            db_path=None,
+            conn=conn,
+            expected_status=expected_status or current_status,
+            expected_version=(
+                current_version if expected_version is None else int(expected_version)
+            ),
+            expected_updated_at=expected_updated_at,
+        )
+        if not result.get("accepted", True):
+            conn.execute("ROLLBACK;")
+            return result
+        conn.execute(
+            "DELETE FROM completion_observations WHERE task_id = ?", (task_id,)
+        )
+        conn.execute("COMMIT;")
+        result["observation"] = observation
+        return result
+    except Exception:
+        try:
+            conn.execute("ROLLBACK;")
+        except (OSError, sqlite3.Error):
+            pass
+        raise
+    finally:
+        conn.close()
 
 
 def transition_workflow(

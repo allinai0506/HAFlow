@@ -1705,13 +1705,22 @@ def _record_router_failure_task(args, node_id, error):
     except (OSError, ValueError, RuntimeError, AttributeError):
         pass
     payload = {
+        "workflow_id": workflow_id,
+        "run_id": task.get("run_id"),
+        "task_id": task_id,
         "error": detail,
         "stage": node_id,
         "result": "failed",
+        "failure_code": (
+            "router_opt_out_audit_failed"
+            if "audit" in detail.lower()
+            else "empty_review_pool"
+        ),
         "actionable": True,
         "pane_dispatched": False,
         "remediation": "add an eligible Agent or explicitly opt out with --allow-reuse-implementation-agents --reuse-reason",
     }
+    lifecycle_errors = []
     try:
         store.record_event(
             "router_isolation_rejected",
@@ -1719,18 +1728,50 @@ def _record_router_failure_task(args, node_id, error):
             workflow_id=workflow_id,
             node_id=node_id,
             task_id=task_id,
+            run_id=task.get("run_id"),
             source="herdr-task",
         )
     except (OSError, ValueError, RuntimeError, AttributeError) as exc:
+        lifecycle_errors.append(f"event: {exc}")
         print(f"[ROUTER AUDIT WRITE ERROR] {exc}")
     try:
         store.update_workflow_metadata(
             workflow_id,
             {"last_dispatch_failure": payload},
         )
-    except (OSError, ValueError, RuntimeError, AttributeError):
-        pass
+    except (OSError, ValueError, RuntimeError, AttributeError) as exc:
+        lifecycle_errors.append(f"workflow: {exc}")
+    if lifecycle_errors:
+        raise RuntimeError(
+            "router failure lifecycle persistence failed: "
+            + "; ".join(lifecycle_errors)
+        )
     return task
+
+
+def _preflight_delivery_identity(workflow_id, node_id, task_id):
+    """Reject ambiguous/invalidated delivery before creating runtime resources."""
+    if node_id not in {"test", "review"}:
+        return None
+    from herdr import delivery_record as _dr
+    from herdr import workflow_docs as _wd
+
+    notes = _wd.load_notes(workflow_id)
+    delivery_notes = [note for note in notes if note.get("kind") == "delivery"]
+    if not delivery_notes:
+        return None
+    try:
+        effective = _dr.select_effective_delivery(notes)
+    except _dr.DeliveryAmbiguityError as exc:
+        print(f"[DELIVERY AMBIGUOUS] {exc}; launch refused")
+        raise SystemExit(2) from exc
+    if effective is None:
+        print(
+            f"[DELIVERY INVALIDATED] workflow={workflow_id} "
+            f"task={task_id}; launch refused before Pane creation"
+        )
+        raise SystemExit(2)
+    return effective
 
 
 def _launch_task(args):
@@ -1756,13 +1797,16 @@ def _launch_task(args):
     if not node_id:
         print("Error: either --node or --stage is required")
         sys.exit(1)
+    run_id = getattr(args, "run_id", None) or new_run_id()
+    args.run_id = run_id
 
     # Project/workflow identity is read before routing.  Pane topology is
     # intentionally deferred until the router has accepted the task, so an
     # empty review pool cannot create a Pane as a side effect.
-    project = project_for_workflow(
-        args.workflow_id
-    ) or {}
+    project = project_for_workflow(args.workflow_id)
+    if not project:
+        print(f"[WORKFLOW NOT FOUND] {args.workflow_id}; refusing launch")
+        sys.exit(2)
 
     exec_fields = execution_fields_from_workflow(project)
     try:
@@ -1880,9 +1924,14 @@ def _launch_task(args):
                         args.task_type,
                         requested_agent,
                         reservation_key=args.task_id,
+                        run_id=getattr(args, "run_id", None),
                     )
                 except RuntimeError as exc:
-                    _record_router_failure_task(args, node_id, exc)
+                    try:
+                        _record_router_failure_task(args, node_id, exc)
+                    except RuntimeError as persist_exc:
+                        print(f"[ROUTER LIFECYCLE ERROR] {persist_exc}")
+                        sys.exit(2)
                     print(f"[ROUTER OPT-OUT REJECTED] {exc}")
                     sys.exit(2)
             finally:
@@ -1901,11 +1950,16 @@ def _launch_task(args):
                 args.task_type,
                 requested_agent,
                 reservation_key=args.task_id,
+                run_id=getattr(args, "run_id", None),
             )
         except RuntimeError as exc:
             # Fail-closed lifecycle: persist a task-level actionable failure;
             # topology/Pane creation has not happened yet.
-            _record_router_failure_task(args, node_id, exc)
+            try:
+                _record_router_failure_task(args, node_id, exc)
+            except RuntimeError as persist_exc:
+                print(f"[ROUTER LIFECYCLE ERROR] {persist_exc}")
+                sys.exit(2)
             print(f"[ROUTER REJECTED] {exc}")
             print(
                 "Isolation is fail-closed. Re-launch with explicit "
@@ -1914,8 +1968,9 @@ def _launch_task(args):
             )
             sys.exit(2)
 
-    # Only after routing succeeds do we repair/create runtime topology.  This
-    # ordering is the FR-6 empty-pool boundary: no Pane on a rejected launch.
+    # Only after routing and delivery identity checks succeed do we create
+    # runtime resources.  Both gates are deliberately before topology/Panes.
+    _preflight_delivery_identity(args.workflow_id, node_id, args.task_id)
     stage_config = ensure_stage_topology(
         args.workflow_id,
         node_id,
@@ -2156,7 +2211,6 @@ def _launch_task(args):
     data = load_tasks()
 
     now = _now()
-    run_id = getattr(args, "run_id", None) or new_run_id()
 
     # RuntimeState:只记录本次真实执行的位置证据,不改变任务编排字段。
     try:
@@ -4315,7 +4369,6 @@ def close_workflow(
     abandon=False,
     force=False,
     accept_escalated=False,
-    confirm_force=False,
 ):
     data = load_tasks()
     tasks = [
@@ -4427,9 +4480,8 @@ def close_workflow(
         and (t.get("integration_mode") or "none") == "git"
         and t.get("finalize_escalated")
     ]
-    # --force is the explicitly confirmed direct escape hatch.  The historical
-    # ``confirm_force`` keyword is accepted for callers from the short-lived
-    # compatibility release, but it is intentionally not a second gate.
+    # --force is the explicitly confirmed direct escape hatch.  It is the
+    # historical command-line contract; no second confirmation flag is needed.
     escalated_via = "accept-escalated" if accept_escalated else ("force" if force else ("abandon" if abandon else ""))
     if escalated_git and not (accept_escalated or force or abandon):
         print(
@@ -4746,21 +4798,43 @@ def supersede_task(task_id, new_task_id=None, reason=None):
     meta = {}
     if new_task_id:
         meta["superseded_by"] = new_task_id
+        replacement = find_task(data, new_task_id)
+        if replacement:
+            if replacement.get("workflow_id") != task.get("workflow_id"):
+                print(
+                    f"[SUPERSEDE REJECTED] replacement {new_task_id} "
+                    "belongs to another workflow"
+                )
+                sys.exit(2)
+            if task.get("run_id") and replacement.get("run_id") != task.get("run_id"):
+                print(
+                    f"[SUPERSEDE REJECTED] replacement {new_task_id} "
+                    "belongs to another run"
+                )
+                sys.exit(2)
     if reason:
         meta["supersede_reason"] = reason
 
     store = _get_store()
     try:
         from herdr import kernel
-        kernel.transition_task(
+        result = kernel.transition_task(
             task_id=task_id,
             to_status="superseded",
             reason=reason or "superseded",
             source="herdr-task",
             metadata=meta,
             store=store,
+            expected_status=old_status,
+            expected_version=task.get("version"),
         )
-    except Exception as exc:
+        if not result.get("accepted", True):
+            print(
+                f"[SUPERSEDE CAS REJECTED] {task_id} changed during supersede",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+    except (OSError, RuntimeError, ValueError, AttributeError) as exc:
         print(f"Error superseding task {task_id}: {exc}", file=sys.stderr)
         sys.exit(2)
 
@@ -5196,8 +5270,9 @@ def record_delivery_note(
     from herdr import delivery_record as _dr
     from herdr import workflow_docs as wd
 
+    candidate_sha = str(candidate_sha)
     payload = {
-        "delivery_id": f"candidate-{str(candidate_sha)[:12]}",
+        "delivery_id": f"candidate-{candidate_sha}",
         "delivery_branch": delivery_branch,
         "candidate_sha": candidate_sha,
         "review_task": review_task,
@@ -5209,35 +5284,76 @@ def record_delivery_note(
     if not ok:
         print(f"delivery payload missing fields: {missing}")
         sys.exit(2)
-    notes = wd.load_notes(workflow_id)
-    annotated = wd.annotate_notes(notes, current_base_sha=base or None)
     identity = _dr.candidate_identity(payload)
-    for existing in annotated:
-        if existing.get("kind") != "delivery":
-            continue
-        if _dr.candidate_identity(existing) == identity:
-            print(f"[DELIVERY EXISTS] {existing.get('note_id')}")
+
+    def _find_existing(existing_notes):
+        annotated = wd.annotate_notes(
+            existing_notes, current_base_sha=base or None
+        )
+        for existing in annotated:
+            if existing.get("kind") != "delivery":
+                continue
+            if _dr.candidate_identity(existing) != identity:
+                continue
+            if existing.get("stale"):
+                print(
+                    f"[DELIVERY INVALIDATED] {identity} cannot be replayed; "
+                    "record a new candidate identity"
+                )
+                sys.exit(2)
+            if _dr._delivery_fingerprint(existing) != _dr._delivery_fingerprint(payload):
+                print(f"[DELIVERY CONFLICT] identity {identity} has different payload")
+                sys.exit(2)
             return existing
-    try:
-        active = _dr.select_effective_delivery(annotated)
-    except _dr.DeliveryAmbiguityError as exc:
-        print(f"[DELIVERY AMBIGUOUS] {exc}")
-        sys.exit(2)
-    if active is not None and not supersedes:
-        print(
-            "[DELIVERY AMBIGUOUS] an active delivery candidate already exists; "
-            "provide an explicit supersedes relation before replacing it"
+        return None
+
+    def _can_append(existing_notes):
+        if _find_existing(existing_notes) is not None:
+            return False
+        annotated = wd.annotate_notes(
+            existing_notes, current_base_sha=base or None
         )
-        sys.exit(2)
-    prior_candidates = [
-        item for item in annotated if item.get("kind") == "delivery"
-    ]
-    if prior_candidates and not supersedes:
-        print(
-            "[DELIVERY REPLACEMENT REQUIRED] a prior delivery candidate exists; "
-            "provide --supersedes even when it was invalidated"
-        )
-        sys.exit(2)
+        if supersedes:
+            known_aliases = {
+                alias
+                for existing in annotated
+                if existing.get("kind") == "delivery"
+                for alias in _dr._candidate_aliases(existing)
+            }
+            if str(supersedes) not in known_aliases:
+                print(
+                    f"[DELIVERY SUPERSEDES UNKNOWN] {supersedes}; "
+                    "refusing an unverifiable replacement edge"
+                )
+                sys.exit(2)
+        try:
+            active = _dr.select_effective_delivery(annotated)
+        except _dr.DeliveryAmbiguityError as exc:
+            print(f"[DELIVERY AMBIGUOUS] {exc}")
+            sys.exit(2)
+        if active is not None and not supersedes:
+            print(
+                "[DELIVERY AMBIGUOUS] an active delivery candidate already exists; "
+                "provide an explicit supersedes relation before replacing it"
+            )
+            sys.exit(2)
+        prior_candidates = [
+            item for item in annotated if item.get("kind") == "delivery"
+        ]
+        if prior_candidates and not supersedes:
+            print(
+                "[DELIVERY REPLACEMENT REQUIRED] a prior delivery candidate exists; "
+                "provide --supersedes even when it was invalidated"
+            )
+            sys.exit(2)
+        return True
+
+    initial_notes = wd.load_notes(workflow_id)
+    existing = _find_existing(initial_notes)
+    if existing is not None:
+        print(f"[DELIVERY EXISTS] {existing.get('note_id')}")
+        return existing
+    _can_append(initial_notes)
     title = _dr.delivery_note_title(delivery_branch, candidate_sha)
     body_text = _dr.delivery_note_body(payload)
     fields = {
@@ -5249,18 +5365,26 @@ def record_delivery_note(
     }
     if supersedes:
         fields["supersedes"] = supersedes
-    record = wd.append_note(
-        workflow_id,
-        kind="delivery",
-        title=title,
-        body=body_text,
-        node=node or "wrapup",
-        task_id=review_task,
-        agent=agent,
-        source=wd.SOURCE_CONTROLLER,
-        base_sha=base or None,
-        fields=fields,
-    )
+    try:
+        record = wd.append_note(
+            workflow_id,
+            kind="delivery",
+            title=title,
+            body=body_text,
+            node=node or "wrapup",
+            task_id=review_task,
+            agent=agent,
+            source=wd.SOURCE_CONTROLLER,
+            base_sha=base or None,
+            fields=fields,
+            precondition=lambda existing_notes, _record: _can_append(existing_notes),
+        )
+    except ValueError:
+        existing = _find_existing(wd.load_notes(workflow_id))
+        if existing is None:
+            raise
+        print(f"[DELIVERY EXISTS] {existing.get('note_id')}")
+        return existing
     print(f"[DELIVERY RECORDED] {record['note_id']} {delivery_branch}@{candidate_sha}")
     return record
 
@@ -5527,14 +5651,6 @@ def main():
         help="directly bypass the whole human-confirmation contract, "
              "including escalated tasks (keeps the historical force escape "
              "hatch; differs from scoped --accept-escalated)",
-    )
-    # Kept as a hidden no-op for scripts written during the short-lived
-    # confirm-force experiment.  FR-5 restores --force as the direct choice.
-    close_wf.add_argument(
-        "--confirm-force",
-        dest="confirm_force",
-        action="store_true",
-        help=argparse.SUPPRESS,
     )
     close_wf.add_argument(
         "--accept-escalated",
@@ -5882,7 +5998,6 @@ def main():
                 abandon=args.abandon,
                 force=args.force,
                 accept_escalated=getattr(args, "accept_escalated", False),
-                confirm_force=getattr(args, "confirm_force", False),
             )
         except Exception as exc:
             print(f"Error closing workflow {target_wid}: {exc}", file=sys.stderr)
