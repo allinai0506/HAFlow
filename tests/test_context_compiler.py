@@ -956,6 +956,22 @@ def test_task_workflow_move_advances_old_workflow_clock(tmp_path: Path):
     assert _source_clock_revision(db, "shared-exec", "wf-b") > 0
 
 
+def test_taskless_reused_run_source_is_rejected_across_execution_scopes(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db, workflow_id="wf-reused", scope="scope-a")
+    target_a = _seed_task(db, _task("task-reused-scope-a", workflow_id="wf-reused", scope="scope-a", run_id="shared-taskless"))
+    target_b = _seed_task(db, _task("task-reused-scope-b", workflow_id="wf-reused", scope="scope-b", run_id="shared-taskless"))
+    observation = create_observation(
+        run_id="shared-taskless", task_id=None, workflow_id="wf-reused",
+        source_type="verification", source_ref="verification:reused-taskless",
+        content="SECRET", store=ObservationStore(db),
+    )
+    context_a = _compile(db, target_a, "developer")
+    context_b = _compile(db, target_b, "developer")
+    assert all(item.get("source_ref") != f"observation:{observation.observation_id}" for item in context_a.evidence)
+    assert all(item.get("source_ref") != f"observation:{observation.observation_id}" for item in context_b.evidence)
+
+
 def test_taskless_source_with_reused_run_advances_all_workflow_scopes(tmp_path: Path):
     db = tmp_path / "state.db"
     _seed_workflow(db, workflow_id="wf-a", scope="scope-a")

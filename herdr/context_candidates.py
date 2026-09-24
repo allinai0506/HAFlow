@@ -6,7 +6,7 @@ validated source snapshot and the bounded item helper.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Mapping, Sequence, Set, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 from .context_sources import _source_allowed, _task_value
 from .context_models import (
@@ -35,6 +35,7 @@ def _finding_candidates(
     valid_evidence_refs: Set[str],
     workflow_id: str,
     run_scope: str,
+    taskless_scope_by_run: Optional[Mapping[str, Optional[str]]] = None,
 ) -> List[Dict[str, Any]]:
     valid = [
         finding for finding in findings
@@ -44,6 +45,7 @@ def _finding_candidates(
             allowed_runs=allowed_runs,
             workflow_id=workflow_id,
             run_scope=run_scope,
+            taskless_scope_by_run=taskless_scope_by_run,
         )
     ]
     by_id = {str(item.get("finding_id")): item for item in valid if item.get("finding_id")}
@@ -122,6 +124,8 @@ def _finding_candidates(
         for key in ("supersedes", "superseded_by"):
             if metadata.get(key):
                 item_metadata[key] = _relation_ids(metadata, key)
+        if metadata.get("source_truncated") is True:
+            item_metadata["source_truncated"] = True
         result.append(_item(
             "finding",
             value,
@@ -142,6 +146,7 @@ def _observation_candidates(
     allowed_runs: Set[str],
     workflow_id: str,
     run_scope: str,
+    taskless_scope_by_run: Optional[Mapping[str, Optional[str]]] = None,
 ) -> List[Dict[str, Any]]:
     result = []
     for observation in observations:
@@ -151,6 +156,7 @@ def _observation_candidates(
             allowed_runs=allowed_runs,
             workflow_id=workflow_id,
             run_scope=run_scope,
+            taskless_scope_by_run=taskless_scope_by_run,
         ):
             continue
         observation_id = str(observation.get("observation_id") or "")
@@ -181,6 +187,7 @@ def _eval_candidates(
     valid_evidence_refs: Set[str],
     workflow_id: str,
     run_scope: str,
+    taskless_scope_by_run: Optional[Mapping[str, Optional[str]]] = None,
 ) -> List[Dict[str, Any]]:
     result: List[Dict[str, Any]] = []
     for evaluation in evals:
@@ -195,6 +202,7 @@ def _eval_candidates(
             allowed_runs=allowed_runs,
             workflow_id=workflow_id,
             run_scope=run_scope,
+            taskless_scope_by_run=taskless_scope_by_run,
         ):
             continue
         passed = evaluation.get("verification_passed")
@@ -252,6 +260,7 @@ def _event_candidates(
     valid_evidence_refs: Set[str],
     workflow_id: str,
     run_scope: str,
+    taskless_scope_by_run: Optional[Mapping[str, Optional[str]]] = None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Return artifacts, completed, verification, decisions, and blockers."""
     artifacts: List[Dict[str, Any]] = []
@@ -267,6 +276,7 @@ def _event_candidates(
             allowed_runs=allowed_runs,
             workflow_id=workflow_id,
             run_scope=run_scope,
+            taskless_scope_by_run=taskless_scope_by_run,
         )
     ]
     active_failures: Dict[Tuple[str, str], Set[str]] = {}
@@ -512,7 +522,7 @@ def _task_candidates(
                 blocker_values.extend(
                     value for value in _as_list(task.get(key)) if value not in (None, "")
                 )
-            if status == "blocked" and not blocker_values:
+            if status in {"blocked", "failed"} and not blocker_values:
                 blocker_values.append(status)
             for reason_index, reason in enumerate(blocker_values):
                 blockers.append(_item(

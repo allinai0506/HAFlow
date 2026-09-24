@@ -129,6 +129,7 @@ def compile_working_context(
                 allowed_runs=snapshot["allowed_runs"],
                 workflow_id=str(workflow_id),
                 run_scope=snapshot["run_scope"],
+                taskless_scope_by_run=snapshot["taskless_scope_by_run"],
             ):
                 continue
             valid_evidence_refs.add(f"{prefix}:{item[key]}")
@@ -223,6 +224,7 @@ def compile_working_context(
         valid_evidence_refs=valid_evidence_refs,
         workflow_id=str(workflow_id),
         run_scope=snapshot["run_scope"],
+        taskless_scope_by_run=snapshot["taskless_scope_by_run"],
     )
     eval_verification = _eval_candidates(
         snapshot["evals"],
@@ -231,6 +233,7 @@ def compile_working_context(
         valid_evidence_refs=valid_evidence_refs,
         workflow_id=str(workflow_id),
         run_scope=snapshot["run_scope"],
+        taskless_scope_by_run=snapshot["taskless_scope_by_run"],
     )
     event_artifacts.extend(_task_artifact_candidates(snapshot["tasks"]))
     findings = _finding_candidates(
@@ -240,6 +243,7 @@ def compile_working_context(
         valid_evidence_refs=valid_evidence_refs,
         workflow_id=str(workflow_id),
         run_scope=snapshot["run_scope"],
+        taskless_scope_by_run=snapshot["taskless_scope_by_run"],
     )
     evidence = _observation_candidates(
         snapshot["observations"],
@@ -247,6 +251,7 @@ def compile_working_context(
         allowed_runs=snapshot["allowed_runs"],
         workflow_id=str(workflow_id),
         run_scope=snapshot["run_scope"],
+        taskless_scope_by_run=snapshot["taskless_scope_by_run"],
     )
     handoffs = _handoff_candidates(
         snapshot["collaborations"],

@@ -147,7 +147,10 @@ def _ensure_working_context_source_clock_schema(conn: sqlite3.Connection) -> Non
             PRIMARY KEY (run_scope, workflow_id)
         );
     """)
-    if legacy_clock_table:
+    legacy_clock_exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'working_context_source_clock_legacy'"
+    ).fetchone() is not None
+    if legacy_clock_table or legacy_clock_exists:
         legacy_columns = {
             str(row["name"])
             for row in conn.execute(
@@ -622,6 +625,10 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
             if operation == "UPDATE":
                 old_scope_expr = source_clock_scope("OLD", source_table)
                 old_workflow_expr = source_clock_workflow("OLD", source_table)
+                old_head_filter = (
+                    "" if source_table == "workflows"
+                    else f" AND NOT {source_clock_has_task('OLD', source_table)}"
+                )
                 statements.append(
                     f"""
                     INSERT INTO working_context_source_clock (run_scope, workflow_id, revision)
@@ -639,7 +646,7 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
                         INSERT INTO working_context_source_clock (run_scope, workflow_id, revision)
                         SELECT h.run_scope, h.workflow_id, 1
                         FROM working_context_source_heads h
-                        WHERE h.workflow_id = {old_workflow_expr}
+                        WHERE h.workflow_id = {old_workflow_expr}{old_head_filter}
                         ON CONFLICT(run_scope, workflow_id) DO UPDATE SET revision = revision + 1;
                         """
                     )
@@ -1947,10 +1954,7 @@ def attach_working_context_ref(
             raise ValueError("working context does not contain the handoff fact")
         if event["status"] != "created":
             raise ValueError("cannot attach context to a dispatched handoff")
-        refs = list(dict.fromkeys(
-            [str(ref) for ref in json.loads(event["context_refs_json"] or "[]") if ref]
-            + [str(context_id)]
-        ))[:3]
+        refs = [str(context_id)]
         conn.execute(
             "UPDATE collaboration_events SET context_refs_json = ? WHERE event_id = ?",
             (json.dumps(refs, ensure_ascii=False), str(event_id)),
@@ -3644,8 +3648,8 @@ def _validate_context_source_existence(
             blockers = []
             for key in ("blocker", "blocked_reason", "open_blockers", "blockers"):
                 blockers.extend(value for value in values(key) if value not in (None, ""))
-            if not blockers and data.get("status") == "blocked":
-                blockers = ["blocked"]
+            if not blockers and data.get("status") in {"blocked", "failed"}:
+                blockers = [str(data.get("status"))]
             if len(parts) == 2:
                 return bool(blockers)
             if parts[2] == "current":
@@ -3690,6 +3694,8 @@ def _validate_context_source_existence(
         bound_task = record.get("task_id") or record.get("to_task_id")
         bound_run = record.get("run_id")
         for source_task, source_run in item_bindings.get(ref, []):
+            if prefix == "workflow" and (source_task or source_run):
+                raise ValueError(f"working context workflow item cannot carry task/run provenance: {ref}")
             if bound_task:
                 if str(source_task or "") != str(bound_task):
                     raise ValueError(f"working context item source_task does not match reference: {ref}")
@@ -3776,7 +3782,9 @@ def save_working_context(
                 raise ValueError(f"working context item in {field_name} has invalid source_ref")
             if field_name == "verification":
                 value = item.get("value")
-                if isinstance(value, dict):
+                if not isinstance(value, Mapping):
+                    raise ValueError("working context verification value must be an object")
+                if isinstance(value, Mapping):
                     for key in ("passed", "verification_passed", "requirements_satisfied"):
                         if key in value and value[key] is not None and not isinstance(value[key], bool):
                             raise ValueError("working context verification values must be strict booleans")

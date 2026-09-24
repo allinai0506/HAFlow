@@ -121,6 +121,7 @@ def _merge_verification_events(
     allowed_runs: Set[str] | None = None,
     workflow_id: str | None = None,
     run_scope: str | None = None,
+    taskless_scope_by_run: Mapping[str, Optional[str]] | None = None,
     target_task_id: str | None = None,
     limit: int = 500,
 ) -> List[Dict[str, Any]]:
@@ -245,6 +246,10 @@ def _merge_verification_events(
              ORDER BY CASE WHEN e.event_type IN (
                                   'task_failed', 'agent_failed', 'run_failed', 'blocker'
                               ) THEN 0
+                            WHEN e.event_type IN (
+                                'task_started', 'task_completed', 'run_completed',
+                                'agent_done', 'task_status_changed'
+                            ) THEN 1
                             WHEN e.event_type IN ('verification_completed', 'tests_completed')
                                  AND (
                                      json_type(e.payload_json, '$.verification.passed') = 'false'
@@ -309,6 +314,7 @@ def _merge_verification_events(
                 allowed_runs=allowed_runs,
                 workflow_id=workflow_id,
                 run_scope=run_scope,
+                taskless_scope_by_run=taskless_scope_by_run,
             )
         ):
             continue
@@ -331,6 +337,7 @@ def _merge_verification_events(
                 allowed_runs=allowed_runs,
                 workflow_id=workflow_id,
                 run_scope=run_scope,
+                taskless_scope_by_run=taskless_scope_by_run,
             )
         ):
             continue
@@ -350,6 +357,7 @@ def _merge_verification_events(
                 allowed_runs=allowed_runs,
                 workflow_id=workflow_id,
                 run_scope=run_scope,
+                taskless_scope_by_run=taskless_scope_by_run,
             )
         ):
             continue
@@ -573,6 +581,17 @@ def _read_source_snapshot(
         tasks = [state_db._decode_task_row(row) for row in task_rows]
         if not any(str(item.get("task_id")) == str(task_id) for item in tasks):
             tasks.append(dict(task))
+        taskless_scope_by_run: Dict[str, Optional[str]] = {}
+        for item in tasks:
+            item_run = _task_run(item)
+            item_scope = collab_scope_for_task(item) or item_run
+            if not item_run or not item_scope:
+                continue
+            previous_scope = taskless_scope_by_run.get(item_run, "__missing__")
+            if previous_scope != "__missing__" and previous_scope != item_scope:
+                taskless_scope_by_run[item_run] = None
+            elif previous_scope == "__missing__":
+                taskless_scope_by_run[item_run] = item_scope
         run_scope = collab_scope_for_task(task) or _task_run(task)
         if not run_scope:
             raise ValueError("task has no resolvable workflow execution scope")
@@ -648,6 +667,7 @@ def _read_source_snapshot(
             allowed_runs=allowed_runs,
             workflow_id=str(workflow_id),
             run_scope=run_scope,
+            taskless_scope_by_run=taskless_scope_by_run,
             target_task_id=str(task_id),
             limit=int(max_events),
         )
@@ -799,6 +819,7 @@ def _read_source_snapshot(
                     allowed_runs=allowed_runs,
                     workflow_id=str(workflow_id),
                     run_scope=run_scope,
+                    taskless_scope_by_run=taskless_scope_by_run,
                 )
                 findings = [
                     safe_decode_finding_row(row) for row in conn.execute(
@@ -968,6 +989,7 @@ def _read_source_snapshot(
                 allowed_runs=allowed_runs,
                 workflow_id=str(workflow_id),
                 run_scope=run_scope,
+                taskless_scope_by_run=taskless_scope_by_run,
             ):
                 continue
             key = (str(decoded.get("run_id") or ""), str(decoded.get("task_id") or ""))
@@ -997,6 +1019,7 @@ def _read_source_snapshot(
                 allowed_runs=allowed_runs,
                 workflow_id=str(workflow_id),
                 run_scope=run_scope,
+                taskless_scope_by_run=taskless_scope_by_run,
             ):
                 continue
             key = (str(decoded.get("run_id") or ""), str(decoded.get("task_id") or ""))
@@ -1068,6 +1091,7 @@ def _read_source_snapshot(
         "workflow": workflow,
         "tasks": scoped_tasks,
         "task_by_id": task_by_id,
+        "taskless_scope_by_run": taskless_scope_by_run,
         "allowed_runs": allowed_runs,
         "run_scope": run_scope,
         "events": events,
@@ -1206,6 +1230,7 @@ def _source_allowed(
     allowed_runs: Set[str],
     workflow_id: str,
     run_scope: str,
+    taskless_scope_by_run: Optional[Mapping[str, Optional[str]]] = None,
 ) -> bool:
     task_id = record.get("task_id")
     run_id = record.get("run_id")
@@ -1222,11 +1247,12 @@ def _source_allowed(
         if run_id and _task_run(task) != str(run_id):
             return False
         return True
-    return bool(
-        record.get("workflow_id")
-        and run_id
-        and str(run_id) in allowed_runs
-    )
+    if not (record.get("workflow_id") and run_id):
+        return False
+    if taskless_scope_by_run is None:
+        return str(run_id) in allowed_runs
+    mapped_scope = taskless_scope_by_run.get(str(run_id))
+    return mapped_scope is not None and str(mapped_scope) == str(run_scope)
 
 
 def _task_value(task: Mapping[str, Any], *, include_goal: bool = True) -> Dict[str, Any]:
