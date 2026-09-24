@@ -307,6 +307,11 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - 修复：taskless identity 从全量 workflow Task 行建立唯一映射；无 Task source metrics 一律 unknown/零聚合；legacy clock 使用 max upsert；recovery/completed 独立进入 completed；critical Finding SQL 优先 direct dependency/Handoff；storage 强制 verification object 并禁止 Workflow item run provenance；failed 状态和 derived question 规则补齐。
 - 回归：全量 `1547 passed, 44 subtests passed`；专项 `301 passed`；compileall、AST、ruff、diff 和凭据扫描均通过。
 
+## [2026-09-25] fix | Context Compiler pre-hash source filtering closure
+- 背景：复审发现被 scope 排除的 raw Event/Finding/Observation 仍参与 source projection/hash，造成跨 scope 写入改变 context identity；ContextPack metrics 未纳入无 Task identity 扫描；legacy stage id fallback 和非 dict Mapping 持久化仍有边界缺口。
+- 修复：所有 source snapshot 在 hash 前完成 taskless scope 过滤；ContextPack 纳入 metrics identity scan；Mapping 在 fingerprint 前递归规范化；legacy stage fallback 使用 `key or id` 并跳过空 ID；补充跨 scope hash 稳定性和 ghost ContextPack/Mapping 回归。
+- 回归：全量 `1550 passed, 44 subtests passed`；专项 `304 passed`；compileall、AST、ruff、diff 和凭据扫描均通过。
+
 ## [2026-09-13] feat | Console URL Deep-Link & Notifier Click-to-Open Integration
 解决 macOS CLI 通知默认归属“脚本编辑器”且无法定位到具体任务/工作流页面的痛点：
 - [[architecture]] §2.3 更新 Herdr Notifier 架构描述：优先使用 `terminal-notifier` 附带 `-open` 直达链接，未安装时安全降级为 `osascript`；
