@@ -364,11 +364,14 @@ class StateStore(ABC):
 
     def get_latest_working_context(
         self, task_id: str, agent_role: Optional[str] = None,
+        run_scope: Optional[str] = None, workflow_id: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         raise NotImplementedError
 
     def list_working_contexts(
         self, task_id: str, agent_role: Optional[str] = None,
+        run_scope: Optional[str] = None, workflow_id: Optional[str] = None,
+        limit: int = 1000, offset: int = 0,
     ) -> List[Dict[str, Any]]:
         raise NotImplementedError
 
@@ -844,16 +847,22 @@ class SQLiteStateStore(StateStore):
 
     def get_latest_working_context(
         self, task_id: str, agent_role: Optional[str] = None,
+        run_scope: Optional[str] = None, workflow_id: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         return state_db.get_latest_working_context(
             task_id, agent_role=agent_role, db_path=self.db_path,
+            run_scope=run_scope, workflow_id=workflow_id,
         )
 
     def list_working_contexts(
         self, task_id: str, agent_role: Optional[str] = None,
+        run_scope: Optional[str] = None, workflow_id: Optional[str] = None,
+        limit: int = 1000, offset: int = 0,
     ) -> List[Dict[str, Any]]:
         return state_db.list_working_contexts(
             task_id, agent_role=agent_role, db_path=self.db_path,
+            run_scope=run_scope, workflow_id=workflow_id,
+            limit=limit, offset=offset,
         )
 
     def list_checkpoints(self, workflow_id: str) -> List[Dict[str, Any]]:

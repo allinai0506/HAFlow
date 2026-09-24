@@ -12,7 +12,7 @@ import json
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from . import state_db
 from .context_models import (
@@ -31,16 +31,19 @@ from .context_models import (
     infer_agent_role,
     normalize_agent_role,
 )
+from .transitions import COMPLETED_TASK_STATUSES
 from .context_sources import (
     _dependency_ids,
     _read_source_snapshot,
     _requirements,
     _scope_task_for_node,
+    _source_allowed,
     _workflow_node,
 )
 
 
 from .context_projection import (
+    _calibrate_context_metrics,
     _config,
     _fit_budget,
     _fit_final_budget,
@@ -77,6 +80,7 @@ def compile_working_context(
     store: Any = None,
     task: Optional[Mapping[str, Any]] = None,
     workflow: Optional[Mapping[str, Any]] = None,
+    planned_links: Optional[Sequence[Mapping[str, Any]]] = None,
     db_path: Optional[Path] = None,
     boundary: str = "execution",
     config: Optional[Mapping[str, Any]] = None,
@@ -94,21 +98,31 @@ def compile_working_context(
         db_path=db_path,
         explicit_task=task,
         explicit_workflow=workflow,
+        planned_links=planned_links,
+    )
+    snapshot["source_revision"] = state_db.register_working_context_source(
+        run_scope=str(snapshot["run_scope"]),
+        workflow_id=str(workflow_id),
+        source_version=str(snapshot["source_version"]),
+        db_path=db_path or _db_path(store),
     )
     target = snapshot["task"]
-    valid_evidence_refs = {
-        f"observation:{item['observation_id']}"
-        for item in snapshot["observations"]
-        if item.get("observation_id")
-    } | {
-        f"trajectory:{item['event_id']}"
-        for item in snapshot["events"]
-        if item.get("event_id")
-    } | {
-        f"eval:{item['eval_id']}"
-        for item in snapshot["evals"]
-        if item.get("eval_id")
-    }
+    valid_evidence_refs = set()
+    for collection, prefix, key in (
+        (snapshot["observations"], "observation", "observation_id"),
+        (snapshot["events"], "trajectory", "event_id"),
+        (snapshot["evals"], "eval", "eval_id"),
+    ):
+        for item in collection:
+            if not item.get(key) or not _source_allowed(
+                item,
+                task_by_id=snapshot["task_by_id"],
+                allowed_runs=snapshot["allowed_runs"],
+                workflow_id=str(workflow_id),
+                run_scope=snapshot["run_scope"],
+            ):
+                continue
+            valid_evidence_refs.add(f"{prefix}:{item[key]}")
     current_task_id = str(target.get("task_id") or task_id)
     node_id = _clip_text(target.get("node") or target.get("stage") or "") or None
     current_state: Dict[str, Any] = {
@@ -149,9 +163,23 @@ def compile_working_context(
     current_state["dependency_state"] = dependency_state
     current_state_refs["dependency_state"] = f"workflow:{workflow_id}"
     requirements = _requirements(target, node)
+    has_task_requirements = any(
+        target.get(key) for key in ("acceptance_criteria", "requirements", "acceptance")
+    )
+    has_workflow_requirements = bool(node.get("purpose") or node.get("rules"))
+    workflow_requirements = (
+        ([node.get("purpose")] if node.get("purpose") else [])
+        + list(node.get("rules") or [])
+    )
+    requirements_ref = (
+        f"task:{current_task_id}" if has_task_requirements else f"workflow:{workflow_id}"
+    )
     if role == "developer":
         current_state["requirements"] = requirements
-        current_state_refs["requirements"] = f"task:{current_task_id}"
+        current_state_refs["requirements"] = requirements_ref
+        if has_task_requirements and has_workflow_requirements:
+            current_state["requirements_workflow"] = workflow_requirements
+            current_state_refs["requirements_workflow"] = f"workflow:{workflow_id}"
     elif role == "reviewer":
         current_state["review_scope"] = {
             "node": node_id,
@@ -162,8 +190,11 @@ def compile_working_context(
     elif role == "tester":
         current_state["acceptance_criteria"] = requirements
         current_state["verification_targets"] = list(node.get("rules") or [])
-        current_state_refs["acceptance_criteria"] = f"task:{current_task_id}"
+        current_state_refs["acceptance_criteria"] = requirements_ref
         current_state_refs["verification_targets"] = f"workflow:{workflow_id}"
+        if has_task_requirements and has_workflow_requirements:
+            current_state["acceptance_criteria_workflow"] = workflow_requirements
+            current_state_refs["acceptance_criteria_workflow"] = f"workflow:{workflow_id}"
     else:
         current_state["dependency_state"] = dependency_state
         current_state["workflow_stage"] = snapshot["workflow"].get("current_stage")
@@ -209,19 +240,24 @@ def compile_working_context(
         snapshot["collaborations"],
         target_task_id=current_task_id,
         task_by_id=snapshot["task_by_id"],
+        valid_evidence_refs=valid_evidence_refs,
         workflow_id=str(workflow_id),
         run_scope=snapshot["run_scope"],
     )
     blockers = [*task_blockers, *event_blockers]
     # Explicit current task blocker is always retained, including when it is
     # not represented by a status transition event.
-    if target.get("blocker") and not any(
-        item.get("source_task") == current_task_id for item in blockers
+    if (
+        str(target.get("status") or "") not in COMPLETED_TASK_STATUSES
+        and target.get("blocker")
+        and not any(
+            item.get("source_task") == current_task_id for item in blockers
+        )
     ):
         blockers.append(_item(
             "blocker",
             {"reason": target.get("blocker"), "task_id": current_task_id},
-            f"task:{current_task_id}",
+            f"task:{current_task_id}:blocker:current",
             source_task=current_task_id,
             source_run=_task_run(target),
             created_at=target.get("updated_at"),
@@ -260,6 +296,10 @@ def compile_working_context(
     ]
     raw_candidate_items = len(all_candidates)
     now_value = float(now if now is not None else time.time())
+    selection_now = max(
+        (_safe_float(item.get("created_at")) for item in all_candidates),
+        default=0.0,
+    )
     selected: Dict[str, List[Dict[str, Any]]] = {}
     for field_name, kind in (
         ("completed", "completed"),
@@ -291,16 +331,16 @@ def compile_working_context(
             target_task_id=current_task_id,
             dependency_ids=dependency_task_ids,
             limit=int(cfg["max_items_per_kind"].get(field_name, 0)),
-            now=now_value,
+            now=selection_now,
         )
 
     # Verification is latest-per-task/source, not a historical pass/fail dump.
     def verification_order(item: Mapping[str, Any]) -> Tuple[float, int, int, str]:
         metadata = item.get("metadata") if isinstance(item.get("metadata"), Mapping) else {}
         return (
-            _safe_float(item.get("created_at")),
             int(metadata.get("sequence") or 0),
             int(metadata.get("revision") or 0),
+            _safe_float(item.get("created_at")),
             str(item.get("source_ref") or ""),
         )
 
@@ -312,7 +352,13 @@ def compile_working_context(
             latest_verification[key] = item
     selected["verification"] = sorted(
         latest_verification.values(),
-        key=lambda item: str(item.get("source_ref") or ""),
+        key=lambda item: (
+            0 if item.get("source_task") == current_task_id else 1,
+            -verification_order(item)[0],
+            -verification_order(item)[1],
+            -verification_order(item)[2],
+            str(item.get("source_ref") or ""),
+        ),
     )[: int(cfg["max_items_per_kind"]["verification"])]
 
     # Explicitly keep the latest incoming handoff first, then bounded history.
@@ -343,7 +389,7 @@ def compile_working_context(
         next_action_source_ref=f"policy:context_compiler_v1:{role}",
         source_refs=[],
         source_version=str(snapshot["source_version"]),
-        source_watermark=int(snapshot.get("source_watermark") or 0),
+        source_watermark=int(snapshot.get("source_revision") or 0),
         compiled_at=now_value,
         **selected,
     )
@@ -389,6 +435,7 @@ def compile_working_context(
         **context.to_mapping(),
         "context_fingerprint": _hash(_fingerprint_payload(context, cfg)),
     })
+    context = _calibrate_context_metrics(context)
     if len(json.dumps(context.to_mapping(), ensure_ascii=False)) > int(cfg["max_chars"]):
         raise ValueError("max_chars is too small for the required WorkingContext identity")
     if _retry < 1:
@@ -399,6 +446,13 @@ def compile_working_context(
             db_path=db_path,
             explicit_task=task,
             explicit_workflow=workflow,
+            planned_links=planned_links,
+        )
+        fresh_snapshot["source_revision"] = state_db.register_working_context_source(
+            run_scope=str(fresh_snapshot["run_scope"]),
+            workflow_id=str(workflow_id),
+            source_version=str(fresh_snapshot["source_version"]),
+            db_path=db_path or _db_path(store),
         )
         if fresh_snapshot.get("source_version") != snapshot.get("source_version"):
             return compile_working_context(
@@ -408,15 +462,52 @@ def compile_working_context(
                 store=store,
                 task=task,
                 workflow=workflow,
+                planned_links=planned_links,
                 db_path=db_path,
                 boundary=boundary,
                 config=config,
                 now=now,
                 _retry=_retry + 1,
             )
+    if not state_db.working_context_source_is_current(
+        context.to_mapping(), db_path=db_path or _db_path(store),
+    ):
+        if _retry < 1:
+            return compile_working_context(
+                workflow_id=workflow_id,
+                task_id=task_id,
+                agent_role=role,
+                store=store,
+                task=task,
+                workflow=workflow,
+                planned_links=planned_links,
+                db_path=db_path,
+                boundary=boundary,
+                config=config,
+                now=now,
+                _retry=_retry + 1,
+            )
+        raise RuntimeError("WorkingContext source changed before persistence")
     stored = state_db.save_working_context(
         context.to_mapping(), db_path=db_path or _db_path(store),
     )
+    if stored.pop("_stale_snapshot", False):
+        if _retry < 1:
+            return compile_working_context(
+                workflow_id=workflow_id,
+                task_id=task_id,
+                agent_role=role,
+                store=store,
+                task=task,
+                workflow=workflow,
+                planned_links=planned_links,
+                db_path=db_path,
+                boundary=boundary,
+                config=config,
+                now=now,
+                _retry=_retry + 1,
+            )
+        raise RuntimeError("WorkingContext candidate remained stale after retry")
     same_fingerprint = str(stored.get("context_fingerprint")) == context.context_fingerprint
     if not same_fingerprint and str(stored.get("context_id")) != context.context_id and _retry < 1:
         return compile_working_context(
@@ -426,6 +517,7 @@ def compile_working_context(
             store=store,
             task=task,
             workflow=workflow,
+            planned_links=planned_links,
             db_path=db_path,
             boundary=boundary,
             config=config,
@@ -440,12 +532,20 @@ def compile_working_context(
     result_mapping = dict(stored)
     result_mapping["metrics"] = metrics
     result_mapping["context_fingerprint"] = stored.get("context_fingerprint", context.context_fingerprint)
-    state_db.record_working_context_metric(
-        result_mapping,
-        reused=reused,
-        db_path=db_path or _db_path(store),
+    try:
+        state_db.record_working_context_metric(
+            result_mapping,
+            reused=reused,
+            db_path=db_path or _db_path(store),
+        )
+    except Exception:
+        # Metrics are diagnostic side effects; an unavailable sink must not
+        # invalidate an already persisted immutable context.
+        pass
+    result_context = _fit_final_budget(
+        WorkingContext.from_mapping(result_mapping), int(cfg["max_chars"]),
     )
-    return _fit_final_budget(WorkingContext.from_mapping(result_mapping), int(cfg["max_chars"]))
+    return _calibrate_context_metrics(result_context)
 
 
 def get_working_context(
@@ -467,11 +567,15 @@ def get_latest_working_context(
     agent_role: Optional[str] = None,
     store: Any = None,
     db_path: Optional[Path] = None,
+    run_scope: Optional[str] = None,
+    workflow_id: Optional[str] = None,
 ) -> Optional[WorkingContext]:
     row = state_db.get_latest_working_context(
         task_id,
         agent_role=normalize_agent_role(agent_role) if agent_role else None,
         db_path=Path(db_path) if db_path is not None else _db_path(store),
+        run_scope=run_scope,
+        workflow_id=workflow_id,
     )
     return WorkingContext.from_mapping(row) if row is not None else None
 
@@ -482,11 +586,19 @@ def list_working_contexts(
     agent_role: Optional[str] = None,
     store: Any = None,
     db_path: Optional[Path] = None,
+    run_scope: Optional[str] = None,
+    workflow_id: Optional[str] = None,
+    limit: int = 1000,
+    offset: int = 0,
 ) -> List[WorkingContext]:
     rows = state_db.list_working_contexts(
         task_id,
         agent_role=normalize_agent_role(agent_role) if agent_role else None,
         db_path=Path(db_path) if db_path is not None else _db_path(store),
+        run_scope=run_scope,
+        workflow_id=workflow_id,
+        limit=limit,
+        offset=offset,
     )
     return [WorkingContext.from_mapping(row) for row in rows]
 

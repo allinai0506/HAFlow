@@ -131,6 +131,23 @@ def _compile(db: Path, task: dict, role: str, **kwargs):
     )
 
 
+def test_storage_rejects_nonexistent_typed_source_ref(tmp_path: Path):
+    db = tmp_path / "state.db"
+    with pytest.raises(ValueError, match="does not exist"):
+        state_db.save_working_context(
+            {
+                "context_id": "wc_forged", "run_scope": "scope", "run_id": "run",
+                "workflow_id": "wf", "task_id": "task", "node_id": "review",
+                "agent_role": "reviewer", "goal": "goal", "current_state": {},
+                "findings": [{"kind": "finding", "value": "x", "source_ref": "finding:missing"}],
+                "artifacts": [], "evidence": [], "completed": [], "decisions": [], "blockers": [],
+                "open_questions": [], "verification": [], "handoffs": [], "next_action": "review",
+                "source_refs": [], "context_fingerprint": "f", "source_version": "v",
+                "metrics": {}, "compiled_at": 1.0,
+            }, db_path=db,
+        )
+
+
 def test_relevance_uses_state_role_and_dependency_before_recency():
     from herdr.context_compiler import context_relevance
 
@@ -309,6 +326,20 @@ def test_budget_keeps_blocker_before_completed_history(tmp_path: Path):
     assert all(item.get("source_task") != upstream["task_id"] for item in context.completed)
 
 
+def test_global_item_budget_keeps_blocker_and_failure_verification(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, dict(_task("task-item-required", node="test", role="tester", status="blocked"), blocker="required blocker"))
+    TrajectoryLedger(db).append_event({
+        "run_id": target["run_id"], "task_id": target["task_id"],
+        "workflow_id": target["workflow_id"], "event_type": "verification_completed",
+        "verification": {"passed": False},
+    })
+    context = _compile(db, target, "tester", config={"max_items": 1})
+    assert context.blockers
+    assert any(item.get("value", {}).get("passed") is False for item in context.verification)
+
+
 def test_total_character_budget_is_hard_for_large_goal_and_refs(tmp_path: Path):
     db = tmp_path / "state.db"
     _seed_workflow(db)
@@ -327,12 +358,84 @@ def test_total_character_budget_is_hard_for_large_goal_and_refs(tmp_path: Path):
     assert context.current_state.get("task_status") == "working"
 
 
+def test_required_verification_cap_cannot_be_configured_to_zero(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-zero-verification-cap"))
+    with pytest.raises(ValueError, match="verification"):
+        _compile(db, target, "tester", config={"max_items_per_kind": {"verification": 0}})
+
+
 def test_impossible_context_budget_fails_closed_instead_of_dropping_goal(tmp_path: Path):
     db = tmp_path / "state.db"
     _seed_workflow(db)
     target = _seed_task(db, _task("task-impossible-budget"))
     with pytest.raises(ValueError, match="max_chars"):
         _compile(db, target, "developer", config={"max_chars": 500})
+
+
+def test_late_old_source_candidate_is_not_latest_after_revision_change(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    upstream = _seed_task(db, _task("task-late-source-upstream"))
+    target = _seed_task(db, _task("task-late-source-target"))
+    state_db.upsert_trajectory_finding(
+        _finding(upstream["run_id"], "fnd-late-source", task_id=upstream["task_id"], summary="old"),
+        db_path=db,
+    )
+    old = _compile(db, target, "reviewer")
+    state_db.upsert_trajectory_finding(
+        _finding(upstream["run_id"], "fnd-late-source", task_id=upstream["task_id"], summary="new"),
+        db_path=db,
+    )
+    new = _compile(db, target, "reviewer")
+    late_payload = dict(old.to_mapping())
+    late_payload["context_id"] = "wc_late_old_candidate"
+    late = state_db.save_working_context(late_payload, db_path=db)
+    assert late.get("_stale_snapshot") is True
+    assert state_db.get_latest_working_context(target["task_id"], db_path=db)["context_id"] == new.context_id
+
+
+def test_source_revision_advances_for_artifact_update(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, dict(_task("task-artifact-revision"), artifacts=[{"ref": "a"}]))
+    first = _compile(db, target, "reviewer")
+    state_db.save_task(dict(target, artifacts=[{"ref": "b"}]), db_path=db)
+    second = _compile(db, target, "reviewer")
+    assert second.source_watermark > first.source_watermark
+
+
+def test_source_revision_advances_for_in_place_finding_update(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    upstream = _seed_task(db, _task("task-source-revision-upstream"))
+    target = _seed_task(db, _task("task-source-revision-target"))
+    original = _finding(upstream["run_id"], "fnd-revision", task_id=upstream["task_id"], summary="old")
+    state_db.upsert_trajectory_finding(original, db_path=db)
+    first = _compile(db, target, "reviewer")
+    updated = dict(original, summary="new")
+    state_db.upsert_trajectory_finding(updated, db_path=db)
+    second = _compile(db, target, "reviewer")
+    assert second.source_watermark > first.source_watermark
+    from herdr.context_compiler import get_latest_working_context
+    assert get_latest_working_context(target["task_id"], db_path=db).context_id == second.context_id
+
+
+def test_fingerprint_is_independent_of_compile_wall_clock(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    upstream = _seed_task(db, _task("task-clock-upstream", node="implementation"))
+    target = _seed_task(db, _task("task-clock-target", node="review"))
+    for index in range(3):
+        state_db.upsert_trajectory_finding(
+            _finding(upstream["run_id"], f"fnd-clock-{index}", task_id=upstream["task_id"], created_at=float(index)),
+            db_path=db,
+        )
+    first = _compile(db, target, "reviewer", now=1000.0)
+    second = _compile(db, target, "reviewer", now=200000.0)
+    assert first.context_id == second.context_id
+    assert first.context_fingerprint == second.context_fingerprint
 
 
 def test_fingerprint_ignores_updated_at_only_task_resave(tmp_path: Path):
@@ -344,6 +447,16 @@ def test_fingerprint_ignores_updated_at_only_task_resave(tmp_path: Path):
     second = _compile(db, target, "developer")
     assert second.context_id == first.context_id
     assert second.context_fingerprint == first.context_fingerprint
+
+
+def test_workflow_only_requirements_keep_workflow_provenance(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _task("task-workflow-requirements", node="review")
+    target.pop("acceptance_criteria")
+    _seed_task(db, target)
+    context = _compile(db, target, "developer")
+    assert context.current_state_refs["requirements"].startswith("workflow:")
 
 
 def test_state_aware_context_changes_after_node_transition(tmp_path: Path):
@@ -509,6 +622,20 @@ def test_run_isolation_rejects_other_run_sources(tmp_path: Path):
         }
     )
 
+    mismatched_observation = create_observation(
+        run_id=target["run_id"], task_id=target["task_id"],
+        workflow_id="wf-other", source_type="verification",
+        source_ref="verification:other-workflow", content="other evidence",
+        store=ObservationStore(db),
+    )
+    state_db.upsert_trajectory_finding(
+        _finding(
+            target["run_id"], "fnd-mismatched-evidence", task_id=target["task_id"],
+            evidence=[{"observation_id": mismatched_observation.observation_id}],
+        ),
+        db_path=db,
+    )
+
     context = _compile(db, target, "coordinator")
     serialized = json.dumps(context.to_mapping(), ensure_ascii=False)
     assert "fnd-other" not in serialized
@@ -516,6 +643,7 @@ def test_run_isolation_rejects_other_run_sources(tmp_path: Path):
     assert "other completion" not in serialized
     assert mismatched_event["event_id"] not in serialized
     assert "mismatched-workflow-artifact" not in serialized
+    assert mismatched_observation.observation_id not in serialized
     assert context.run_scope == "wf-exec-1"
     assert context.run_id == "run-target"
 
@@ -616,6 +744,75 @@ def test_context_contains_no_raw_history_or_transcript(tmp_path: Path):
     assert "chat_history" not in serialized
 
 
+def test_out_of_scope_completion_cannot_clear_real_failure(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-failure-scope", status="working"))
+    ledger = TrajectoryLedger(db)
+    failed = ledger.append_event({
+        "run_id": target["run_id"], "task_id": target["task_id"],
+        "workflow_id": target["workflow_id"], "event_type": "task_failed",
+        "metadata": {"reason": "real failure"},
+    })
+    ledger.append_event({
+        "run_id": target["run_id"], "task_id": target["task_id"],
+        "workflow_id": "wf-other", "event_type": "task_completed",
+    })
+    context = _compile(db, target, "developer")
+    assert any(failed["event_id"] in ref for ref in context.source_refs)
+    assert context.blockers
+
+
+def test_completed_task_does_not_project_stale_persisted_blocker(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, dict(_task("task-completed-blocker", status="completed"), blocker="stale"))
+    context = _compile(db, target, "developer")
+    assert not context.blockers
+
+
+def test_verification_cap_prioritizes_target_failure(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-verification-cap-target", node="test", role="tester"))
+    sibling = _seed_task(db, _task("task-verification-cap-sibling", node="implementation"))
+    ledger = TrajectoryLedger(db)
+    ledger.append_event({
+        "run_id": sibling["run_id"], "task_id": sibling["task_id"],
+        "workflow_id": sibling["workflow_id"], "event_type": "verification_completed",
+        "verification": {"passed": True},
+    })
+    target_event = ledger.append_event({
+        "run_id": target["run_id"], "task_id": target["task_id"],
+        "workflow_id": target["workflow_id"], "event_type": "verification_completed",
+        "verification": {"passed": False},
+    })
+    context = _compile(db, target, "tester", config={"max_items_per_kind": {"verification": 1}})
+    assert any(target_event["event_id"] in ref for ref in context.source_refs)
+    assert context.verification[0].get("value", {}).get("passed") is False
+
+
+def test_verification_reserved_window_survives_event_noise(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-verification-window", node="test", role="tester"))
+    ledger = TrajectoryLedger(db)
+    verification = ledger.append_event({
+        "run_id": target["run_id"], "task_id": target["task_id"],
+        "workflow_id": target["workflow_id"], "event_type": "verification_completed",
+        "verification": {"passed": False},
+    })
+    for index in range(301):
+        ledger.append_event({
+            "run_id": target["run_id"], "task_id": target["task_id"],
+            "workflow_id": target["workflow_id"], "event_type": "decision",
+            "decision": f"noise-{index}",
+        })
+    context = _compile(db, target, "tester")
+    assert any(verification["event_id"] in ref for ref in context.source_refs)
+    assert any(item.get("value", {}).get("passed") is False for item in context.verification)
+
+
 def test_recovered_failure_event_is_not_current_blocker(tmp_path: Path):
     db = tmp_path / "state.db"
     _seed_workflow(db)
@@ -705,10 +902,10 @@ def test_storage_fingerprint_does_not_cross_run_scope(tmp_path: Path):
             "metrics": {},
         }
 
-    first = state_db.save_working_context(payload("wc-scope-a", "scope-a", "same", 1.0), db_path=db)
-    second = state_db.save_working_context(payload("wc-scope-b", "scope-b", "same", 2.0), db_path=db)
-    assert first["context_id"] == "wc-scope-a"
-    assert second["context_id"] == "wc-scope-b"
+    first = state_db.save_working_context(payload("wc_scope_a", "scope-a", "same", 1.0), db_path=db)
+    second = state_db.save_working_context(payload("wc_scope_b", "scope-b", "same", 2.0), db_path=db)
+    assert first["context_id"] == "wc_scope_a"
+    assert second["context_id"] == "wc_scope_b"
     assert len(state_db.list_working_contexts("task-reused", db_path=db)) == 2
 
 
@@ -767,23 +964,23 @@ def test_concurrent_context_writers_do_not_replace_newer_latest(tmp_path: Path):
     ready = ctx.Event()
     old = ctx.Process(
         target=_save_working_context_in_process,
-        args=(str(db), payload("wc-old", "old", 10.0), gate, ready),
+        args=(str(db), payload("wc_old", "old", 10.0), gate, ready),
     )
     old.start()
     assert ready.wait(10)
-    state_db.save_working_context(payload("wc-new", "new", 20.0), db_path=db)
+    state_db.save_working_context(payload("wc_new", "new", 20.0), db_path=db)
     gate.set()
     old.join(10)
     assert old.exitcode == 0
     latest = state_db.get_latest_working_context("task-concurrent", db_path=db)
-    assert latest["context_id"] == "wc-new"
+    assert latest["context_id"] == "wc_new"
 
 
 def test_storage_rejects_old_source_watermark_after_newer_snapshot(tmp_path: Path):
     db = tmp_path / "state.db"
     state_db.save_working_context(
         {
-            "context_id": "wc-v2", "run_scope": "scope", "run_id": "run",
+            "context_id": "wc_v2", "run_scope": "scope", "run_id": "run",
             "workflow_id": "wf", "task_id": "task-version", "node_id": "review",
             "agent_role": "reviewer", "goal": "goal", "current_state": {},
             "findings": [], "artifacts": [], "evidence": [], "completed": [],
@@ -796,7 +993,7 @@ def test_storage_rejects_old_source_watermark_after_newer_snapshot(tmp_path: Pat
     )
     returned = state_db.save_working_context(
         {
-            "context_id": "wc-v1-late", "run_scope": "scope", "run_id": "run",
+            "context_id": "wc_v1_late", "run_scope": "scope", "run_id": "run",
             "workflow_id": "wf", "task_id": "task-version", "node_id": "review",
             "agent_role": "reviewer", "goal": "goal", "current_state": {},
             "findings": [], "artifacts": [], "evidence": [], "completed": [],
@@ -807,8 +1004,8 @@ def test_storage_rejects_old_source_watermark_after_newer_snapshot(tmp_path: Pat
         },
         db_path=db,
     )
-    assert returned["context_id"] == "wc-v2"
-    assert state_db.get_latest_working_context("task-version", db_path=db)["context_id"] == "wc-v2"
+    assert returned["context_id"] == "wc_v1_late"
+    assert state_db.get_latest_working_context("task-version", db_path=db)["context_id"] == "wc_v2"
 
 
 def test_storage_rejects_items_without_provenance(tmp_path: Path):
@@ -816,8 +1013,10 @@ def test_storage_rejects_items_without_provenance(tmp_path: Path):
     with pytest.raises(ValueError, match="source_ref"):
         state_db.save_working_context(
             {
-                "context_id": "wc-invalid",
+                "context_id": "wc_invalid",
                 "run_scope": "scope",
+                "run_id": "run-invalid",
+                "workflow_id": "wf-invalid",
                 "task_id": "task-invalid",
                 "agent_role": "developer",
                 "context_fingerprint": "fingerprint",
@@ -856,6 +1055,19 @@ def test_run_metrics_count_reused_compile_invocations(tmp_path: Path):
     assert first.context_id == second.context_id
 
 
+def test_run_metrics_aggregate_sibling_tasks_in_explicit_scope(tmp_path: Path):
+    from herdr.metrics import get_run_metrics
+
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    first = _seed_task(db, _task("task-metrics-sibling-a", scope="wf-exec-shared"))
+    second = _seed_task(db, _task("task-metrics-sibling-b", scope="wf-exec-shared"))
+    _compile(db, first, "developer")
+    _compile(db, second, "developer")
+    metrics = get_run_metrics(first["run_id"], db_path=db)
+    assert metrics.working_context_compiles >= 2
+
+
 def test_metrics_report_reuse_and_changed_without_quality_score(tmp_path: Path):
     db = tmp_path / "state.db"
     _seed_workflow(db)
@@ -866,6 +1078,7 @@ def test_metrics_report_reuse_and_changed_without_quality_score(tmp_path: Path):
     assert second.metrics["context_reuse"] is True
     assert second.metrics["context_changed"] is False
     assert "quality_score" not in second.metrics
+    assert second.metrics["context_chars"] == len(json.dumps(second.to_mapping(), ensure_ascii=False))
 
     state_db.save_task(dict(target, status="rework"), db_path=db)
     changed = _compile(db, dict(target, status="rework"), "developer")
@@ -909,7 +1122,7 @@ def test_latest_verification_failure_wins_over_old_success(tmp_path: Path):
         "run_id": target["run_id"], "task_id": target["task_id"],
         "workflow_id": target["workflow_id"], "event_type": "verification_completed",
         "verification": {"passed": False},
-        "timestamp": 1000.0,
+        "timestamp": 1.0,
     })
     context = _compile(db, target, "tester")
     values = [item.get("value", {}).get("passed") for item in context.verification]
@@ -962,12 +1175,31 @@ def test_a_b_a_source_cycle_keeps_append_only_history(tmp_path: Path):
 def test_task_derived_items_have_distinct_source_refs_for_diff(tmp_path: Path):
     db = tmp_path / "state.db"
     _seed_workflow(db)
-    target = dict(_task("task-derived-diff"))
+    target = dict(_task("task-derived-diff", status="blocked"))
     target["artifacts"] = [{"ref": "artifact-a"}, {"ref": "artifact-b"}]
+    target["blockers"] = ["blocker-a", "blocker-b"]
+    target["open_questions"] = ["question-a", "question-b"]
     _seed_task(db, target)
     context = _compile(db, target, "reviewer")
-    refs = [item["source_ref"] for item in context.artifacts]
-    assert len(refs) == len(set(refs))
+    for values in (context.artifacts, context.blockers, context.open_questions):
+        refs = [item["source_ref"] for item in values]
+        assert len(refs) == len(set(refs))
+
+
+def test_corrupt_eval_verification_value_is_not_coerced_to_true(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-corrupt-eval", node="test", role="tester"))
+    from herdr.eval_store import record_eval_result
+    record_eval_result(
+        target["run_id"], task_id=target["task_id"],
+        workflow_id=target["workflow_id"], verification_passed=True, db_path=db,
+    )
+    with state_db.get_db_connection(db) as conn:
+        conn.execute("UPDATE eval_results SET verification_passed = 'false'")
+        conn.commit()
+    context = _compile(db, target, "tester")
+    assert all(item.get("value", {}).get("verification_passed") is not True for item in context.verification)
 
 
 def test_diff_reports_added_removed_superseded_and_changed(tmp_path: Path):
@@ -1034,6 +1266,17 @@ def test_diff_reports_added_removed_superseded_and_changed(tmp_path: Path):
     assert any(row["source_ref"] == "context:goal" for row in state_diff["changed"])
     assert any(row["source_ref"] == "context:current_state" for row in state_diff["changed"])
 
+    one_way_old = context([item("finding", "finding:fnd-one-way-old", "old", metadata={"superseded_by": "fnd-one-way-new"})])
+    one_way_new = context([item("finding", "finding:fnd-one-way-new", "new")])
+    one_way_diff = diff_working_context(one_way_old, one_way_new)
+    assert any(row["source_ref"] == "finding:fnd-one-way-old" for row in one_way_diff["superseded"])
+
+    provenance_old = context(old_items)
+    provenance_new = context(old_items).to_mapping()
+    provenance_new["goal_source_ref"] = "workflow:wf-new"
+    provenance_diff = diff_working_context(provenance_old, provenance_new)
+    assert any(row["source_ref"] == "context:goal_source_ref" for row in provenance_diff["changed"])
+
 
 def test_handoff_event_can_load_target_working_context(tmp_path: Path):
     from herdr.context_compiler import get_working_context
@@ -1063,6 +1306,49 @@ def test_handoff_event_can_load_target_working_context(tmp_path: Path):
     assert loaded.run_scope == "wf-exec-1"
     assert "Implementation is ready" in event["summary"]
     assert "goal" not in event
+
+
+def test_explicit_task_fallback_cannot_substitute_another_task(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    other = _seed_task(db, _task("task-explicit-other"))
+    from herdr.context_compiler import compile_working_context
+
+    with pytest.raises(ValueError, match="task_id"):
+        compile_working_context(
+            workflow_id=other["workflow_id"],
+            task_id="task-requested",
+            agent_role="developer",
+            task=other,
+            db_path=db,
+        )
+
+
+def test_handoff_evidence_refs_are_scope_filtered(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-handoff-evidence", node="review", role="reviewer"))
+    source = _seed_task(db, _task("task-handoff-source", scope="wf-exec-1"))
+    foreign_observation = create_observation(
+        run_id="run-foreign", task_id="task-foreign",
+        source_type="verification", source_ref="verification:foreign-handoff",
+        content="foreign", store=ObservationStore(db),
+    )
+    state_db.create_collaboration_event(
+        {
+            "run_id": "wf-exec-1", "workflow_id": "wf-context",
+            "from_task_id": source["task_id"], "to_task_id": target["task_id"],
+            "evidence_refs": [foreign_observation.observation_id],
+            "source_fact_id": "fact-handoff-evidence",
+        },
+        db_path=db,
+    )
+    context = _compile(db, target, "reviewer")
+    assert all(
+        foreign_observation.observation_id not in ref
+        for item in context.handoffs
+        for ref in item.get("value", {}).get("evidence_refs", [])
+    )
 
 
 def test_unknown_role_fails_closed(tmp_path: Path):

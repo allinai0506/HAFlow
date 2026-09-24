@@ -199,6 +199,14 @@ def _eval_candidates(
             continue
         passed = evaluation.get("verification_passed")
         requirements = evaluation.get("requirements_satisfied")
+        if passed is not None and not (
+            isinstance(passed, (bool, int)) and int(passed) in (0, 1)
+        ):
+            passed = None
+        if requirements is not None and not (
+            isinstance(requirements, (bool, int)) and int(requirements) in (0, 1)
+        ):
+            requirements = None
         value = {
             "verification_passed": bool(passed) if passed is not None else None,
             "requirements_satisfied": bool(requirements) if requirements is not None else None,
@@ -245,9 +253,19 @@ def _event_candidates(
     verification: List[Dict[str, Any]] = []
     decisions: List[Dict[str, Any]] = []
     blockers: List[Dict[str, Any]] = []
+    scoped_events = [
+        event for event in events
+        if _source_allowed(
+            event,
+            task_by_id=task_by_id,
+            allowed_runs=allowed_runs,
+            workflow_id=workflow_id,
+            run_scope=run_scope,
+        )
+    ]
     active_failures: Dict[Tuple[str, str], Set[str]] = {}
     recovery_types = {"task_started", "task_completed", "run_completed", "agent_done"}
-    for event in sorted(events, key=lambda item: int(item.get("sequence") or 0)):
+    for event in sorted(scoped_events, key=lambda item: int(item.get("sequence") or 0)):
         event_key = (str(event.get("run_id") or ""), str(event.get("task_id") or ""))
         event_id = str(event.get("event_id") or "")
         event_type = str(event.get("event_type") or "")
@@ -259,15 +277,7 @@ def _event_candidates(
             status = str(_event_payload(event).get("status") or "")
             if status and status not in {"blocked", "failed"}:
                 active_failures.pop(event_key, None)
-    for event in events:
-        if not _source_allowed(
-            event,
-            task_by_id=task_by_id,
-            allowed_runs=allowed_runs,
-            workflow_id=workflow_id,
-            run_scope=run_scope,
-        ):
-            continue
+    for event in scoped_events:
         event_type = str(event.get("event_type") or "")
         payload = _event_payload(event)
         event_ref = f"trajectory:{event.get('event_id')}"
@@ -416,21 +426,22 @@ def _task_candidates(
                 created_at=task.get("updated_at"),
                 metadata={"node": task.get("node") or task.get("stage"), "status": status},
             ))
-        blocker_values = []
-        for key in ("blocker", "blocked_reason", "open_blockers", "blockers"):
-            blocker_values.extend(_as_list(task.get(key)))
-        if status == "blocked" and not blocker_values:
-            blocker_values.append(status)
-        for reason in blocker_values:
-            blockers.append(_item(
-                "blocker",
-                str(reason),
-                blocker_ref,
-                source_task=task_id,
-                source_run=_task_run(task),
-                created_at=task.get("updated_at"),
-                metadata={"node": task.get("node") or task.get("stage"), "status": status},
-            ))
+        if status not in COMPLETED_TASK_STATUSES:
+            blocker_values = []
+            for key in ("blocker", "blocked_reason", "open_blockers", "blockers"):
+                blocker_values.extend(_as_list(task.get(key)))
+            if status == "blocked" and not blocker_values:
+                blocker_values.append(status)
+            for reason_index, reason in enumerate(blocker_values):
+                blockers.append(_item(
+                    "blocker",
+                    str(reason),
+                    f"{blocker_ref}:{reason_index}",
+                    source_task=task_id,
+                    source_run=_task_run(task),
+                    created_at=task.get("updated_at"),
+                    metadata={"node": task.get("node") or task.get("stage"), "status": status},
+                ))
         if task.get("stage_verdict") or task.get("decision"):
             value = {
                 "verdict": task.get("stage_verdict") or task.get("decision"),
@@ -445,12 +456,14 @@ def _task_candidates(
                 created_at=task.get("updated_at"),
                 metadata={"node": task.get("node") or task.get("stage"), "status": status},
             ))
-        for key in ("open_questions", "questions", "question", "decision_question", "acceptance_gap"):
-            for value in _as_list(task.get(key)):
+        for question_index, key in enumerate((
+            "open_questions", "questions", "question", "decision_question", "acceptance_gap",
+        )):
+            for value_index, value in enumerate(_as_list(task.get(key))):
                 questions.append(_item(
                     "open_question",
                     str(value),
-                    question_ref,
+                    f"{question_ref}:{question_index}:{value_index}",
                     source_task=task_id,
                     source_run=_task_run(task),
                     created_at=task.get("updated_at"),
@@ -464,6 +477,7 @@ def _handoff_candidates(
     *,
     target_task_id: str,
     task_by_id: Mapping[str, Mapping[str, Any]],
+    valid_evidence_refs: Set[str],
     workflow_id: str,
     run_scope: str,
 ) -> List[Dict[str, Any]]:
@@ -479,6 +493,11 @@ def _handoff_candidates(
         to_id = str(event.get("to_task_id") or "")
         if from_id not in task_by_id or to_id not in task_by_id:
             continue
+        evidence_refs = []
+        for raw_ref in event.get("evidence_refs") or []:
+            ref = _canonical_evidence_ref(raw_ref)
+            if ref in valid_evidence_refs and ref not in evidence_refs:
+                evidence_refs.append(ref)
         value = {
             "type": event.get("type"),
             "status": event.get("status"),
@@ -486,7 +505,7 @@ def _handoff_candidates(
             "from_task_id": from_id,
             "to_task_id": to_id,
             "artifact_refs": list(event.get("artifact_refs") or []),
-            "evidence_refs": list(event.get("evidence_refs") or []),
+            "evidence_refs": evidence_refs,
         }
         candidates.append(_item(
             "handoff",

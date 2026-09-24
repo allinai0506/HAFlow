@@ -111,35 +111,36 @@ def _decode_eval_row(row: Any) -> Dict[str, Any]:
     }
 
 
-def _source_watermark_in_conn(conn: Any, allowed_runs: Set[str]) -> int:
-    placeholders = ",".join("?" for _ in allowed_runs)
-    values = list(allowed_runs)
-    event_row = conn.execute(
-        f"SELECT COALESCE(MAX(sequence), 0) FROM events WHERE run_id IN ({placeholders}) AND source = 'trajectory'",
-        tuple(values),
-    ).fetchone()
-    finding_row = conn.execute(
-        f"SELECT COALESCE(MAX(rowid), 0) FROM trajectory_findings WHERE run_id IN ({placeholders})",
-        tuple(values),
-    ).fetchone()
-    observation_row = conn.execute(
-        f"SELECT COALESCE(MAX(rowid), 0) FROM observations WHERE run_id IN ({placeholders})",
-        tuple(values),
-    ).fetchone()
-    collaboration_row = conn.execute(
-        "SELECT COALESCE(MAX(rowid), 0) FROM collaboration_events",
-    ).fetchone()
-    eval_row = conn.execute(
-        f"SELECT COALESCE(MAX(rowid), 0) FROM eval_results WHERE run_id IN ({placeholders})",
-        tuple(values),
-    ).fetchone()
-    return max(
-        int(event_row[0] or 0),
-        int(finding_row[0] or 0),
-        int(observation_row[0] or 0),
-        int(collaboration_row[0] or 0),
-        int(eval_row[0] or 0),
-    )
+def _merge_verification_events(
+    conn: Any,
+    run_values: Sequence[str],
+    events: List[Dict[str, Any]],
+    *,
+    limit: int = 500,
+) -> List[Dict[str, Any]]:
+    if not run_values:
+        return events
+    placeholders = ",".join("?" for _ in run_values)
+    rows = conn.execute(
+        f"""SELECT * FROM (
+                SELECT e.*, ROW_NUMBER() OVER (
+                    PARTITION BY e.run_id, COALESCE(e.task_id, '')
+                    ORDER BY e.sequence DESC, e.id DESC
+                ) AS source_rank
+                  FROM events e
+                 WHERE e.source = 'trajectory'
+                   AND e.run_id IN ({placeholders})
+                   AND e.event_type IN ('verification_completed', 'tests_completed')
+                   AND length(e.payload_json) <= 20000
+            ) WHERE source_rank = 1
+            ORDER BY sequence DESC, id DESC LIMIT ?""",
+        (*run_values, int(limit)),
+    ).fetchall()
+    merged = {str(event.get("event_id")): event for event in events}
+    for row in rows:
+        event = _decode_event_row(row)
+        merged[str(event.get("event_id"))] = event
+    return sorted(merged.values(), key=lambda item: (int(item.get("sequence") or 0), str(item.get("event_id"))), reverse=True)
 
 
 def _read_source_snapshot(
@@ -150,6 +151,7 @@ def _read_source_snapshot(
     db_path: Optional[Path] = None,
     explicit_task: Optional[Mapping[str, Any]] = None,
     explicit_workflow: Optional[Mapping[str, Any]] = None,
+    planned_links: Optional[Sequence[Mapping[str, Any]]] = None,
     max_events: int = 300,
     max_findings: int = 500,
     max_observations: int = 300,
@@ -163,6 +165,8 @@ def _read_source_snapshot(
         task = state_db._decode_task_row(task_row) if task_row is not None else dict(explicit_task or {})
         if not task:
             raise ValueError(f"task not found: {task_id}")
+        if str(task.get("task_id") or "") != str(task_id):
+            raise ValueError("explicit task does not match requested task_id")
         if str(task.get("workflow_id") or "") != str(workflow_id):
             raise ValueError("task does not belong to requested workflow")
 
@@ -202,6 +206,22 @@ def _read_source_snapshot(
         if not allowed_runs:
             raise ValueError("workflow execution scope has no run identity")
         task_by_id = {str(item.get("task_id")): item for item in scoped_tasks}
+        if not explicit_execution_scope and planned_links:
+            for link in planned_links:
+                from_id = str(link.get("from_task_id") or "")
+                to_id = str(link.get("to_task_id") or "")
+                if str(task_id) not in {from_id, to_id}:
+                    continue
+                linked_id = to_id if from_id == str(task_id) else from_id
+                linked_task = task_by_id.get(linked_id)
+                linked_run = _task_run(linked_task) if linked_task else None
+                if linked_run:
+                    allowed_runs.add(linked_run)
+            if allowed_runs:
+                scoped_tasks = [
+                    item for item in scoped_tasks if _task_run(item) in allowed_runs
+                ]
+                task_by_id = {str(item.get("task_id")): item for item in scoped_tasks}
 
         placeholders = ",".join("?" for _ in allowed_runs)
         run_values = list(allowed_runs)
@@ -210,14 +230,20 @@ def _read_source_snapshot(
                 WHERE source = 'trajectory'
                   AND run_id IN ({placeholders})
                   AND event_type IN ({",".join("?" for _ in RELEVANT_EVENT_TYPES)})
+                  AND length(payload_json) <= 20000
                 ORDER BY sequence DESC, id DESC LIMIT ?""",
             (*run_values, *sorted(RELEVANT_EVENT_TYPES), int(max_events)),
         ).fetchall()
-        events = [_decode_event_row(row) for row in event_rows]
+        events = _merge_verification_events(
+            conn, run_values, [_decode_event_row(row) for row in event_rows],
+        )
 
         finding_rows = conn.execute(
             f"""SELECT * FROM trajectory_findings
                 WHERE run_id IN ({placeholders})
+                  AND length(COALESCE(summary, '')) <= 20000
+                  AND length(COALESCE(metadata_json, '{{}}')) <= 20000
+                  AND length(COALESCE(evidence_json, '[]')) <= 20000
                 ORDER BY created_at DESC, rowid DESC LIMIT ?""",
             (*run_values, int(max_findings)),
         ).fetchall()
@@ -279,20 +305,28 @@ def _read_source_snapshot(
             if len(allowed_runs) > 1:
                 placeholders = ",".join("?" for _ in allowed_runs)
                 run_values = list(allowed_runs)
-                events = [
-                    _decode_event_row(row) for row in conn.execute(
-                        f"""SELECT * FROM events
-                            WHERE source = 'trajectory'
-                              AND run_id IN ({placeholders})
-                              AND event_type IN ({",".join("?" for _ in RELEVANT_EVENT_TYPES)})
-                            ORDER BY sequence DESC, id DESC LIMIT ?""",
-                        (*run_values, *sorted(RELEVANT_EVENT_TYPES), int(max_events)),
-                    ).fetchall()
-                ]
+                events = _merge_verification_events(
+                    conn,
+                    run_values,
+                    [
+                        _decode_event_row(row) for row in conn.execute(
+                            f"""SELECT * FROM events
+                                WHERE source = 'trajectory'
+                                  AND run_id IN ({placeholders})
+                                  AND event_type IN ({",".join("?" for _ in RELEVANT_EVENT_TYPES)})
+                                  AND length(payload_json) <= 20000
+                                ORDER BY sequence DESC, id DESC LIMIT ?""",
+                            (*run_values, *sorted(RELEVANT_EVENT_TYPES), int(max_events)),
+                        ).fetchall()
+                    ],
+                )
                 findings = [
                     state_db._decode_finding_row(row) for row in conn.execute(
                         f"""SELECT * FROM trajectory_findings
                             WHERE run_id IN ({placeholders})
+                              AND length(COALESCE(summary, '')) <= 20000
+                              AND length(COALESCE(metadata_json, '{{}}')) <= 20000
+                              AND length(COALESCE(evidence_json, '[]')) <= 20000
                             ORDER BY created_at DESC, rowid DESC LIMIT ?""",
                         (*run_values, int(max_findings)),
                     ).fetchall()
@@ -320,6 +354,8 @@ def _read_source_snapshot(
         eval_rows = conn.execute(
             f"""SELECT * FROM eval_results
                 WHERE run_id IN ({placeholders})
+                  AND length(COALESCE(evidence_json, 'null')) <= 20000
+                  AND length(COALESCE(warnings_json, '[]')) <= 20000
                 ORDER BY run_id ASC, revision DESC, rowid DESC LIMIT ?""",
             (*run_values, int(max_evals)),
         ).fetchall()
@@ -330,10 +366,6 @@ def _read_source_snapshot(
             if run_id and run_id not in evals_by_run:
                 evals_by_run[run_id] = decoded
         evals = list(evals_by_run.values())
-        source_watermark = max(
-            _source_watermark_in_conn(conn, allowed_runs),
-            *(int(_safe_float(item.get("updated_at")) * 1_000_000) for item in scoped_tasks),
-        )
         conn.commit()
     except Exception:
         try:
@@ -356,7 +388,6 @@ def _read_source_snapshot(
         "observations": observations,
         "collaborations": collaborations,
         "evals": evals,
-        "source_watermark": source_watermark,
     }
     snapshot["source_version"] = _hash(_source_projection(snapshot))
     return snapshot
@@ -370,7 +401,9 @@ def _source_projection(snapshot: Mapping[str, Any]) -> Dict[str, Any]:
             for key in (
                 "task_id", "workflow_id", "run_id", "workflow_run_id", "execution_id",
                 "node", "stage", "agent", "agent_role", "status", "goal", "blocker",
-                "acceptance_criteria", "stage_verdict", "stage_verdict_note",
+                "acceptance_criteria", "stage_verdict", "stage_verdict_note", "artifacts",
+                "blockers", "open_questions", "questions", "question", "decision_question",
+                "acceptance_gap", "decision", "runtime",
             )
         },
         "workflow": {
@@ -381,14 +414,19 @@ def _source_projection(snapshot: Mapping[str, Any]) -> Dict[str, Any]:
             {key: item.get(key) for key in (
                 "task_id", "run_id", "workflow_run_id", "execution_id", "node", "stage",
                 "agent", "agent_role", "status", "goal", "blocker", "acceptance_criteria",
-                "stage_verdict", "stage_verdict_note",
+                "stage_verdict", "stage_verdict_note", "artifacts", "blockers",
+                "open_questions", "questions", "question", "decision_question", "acceptance_gap",
+                "decision", "runtime",
             )}
             for item in snapshot.get("tasks", [])
         ],
         "events": snapshot.get("events", []),
         "findings": snapshot.get("findings", []),
         "observations": snapshot.get("observations", []),
-        "collaborations": snapshot.get("collaborations", []),
+        "collaborations": [
+            {key: value for key, value in event.items() if key != "context_refs"}
+            for event in snapshot.get("collaborations", [])
+        ],
         "evals": snapshot.get("evals", []),
     }
 
@@ -420,7 +458,11 @@ def _source_allowed(
         if run_id and _task_run(task) != str(run_id):
             return False
         return True
-    return bool(run_id and str(run_id) in allowed_runs)
+    return bool(
+        record.get("workflow_id")
+        and run_id
+        and str(run_id) in allowed_runs
+    )
 
 
 def _task_value(task: Mapping[str, Any], *, include_goal: bool = True) -> Dict[str, Any]:

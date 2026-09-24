@@ -961,3 +961,10 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - 收紧 supersession/evidence 引用、递归脱敏、角色过滤、预算必保留状态、verification latest-wins、Handoff context ref 身份校验和 Supervisor RETRY 引用。
 - 增加 `source_watermark`、append-only A→B→A、编译调用指标事件、并发 writer 与真实 verification event 回归。
 - 证据：`tests/test_context_compiler.py`、`tests/test_collaboration_wiring.py`、`herdr/context_sources.py`、`herdr/state_db.py`、`services/herdr-controller.py`；全量 `1417 passed, 44 subtests passed`。
+
+## [2026-09-24] fix | Context Compiler V1：source revision 与首次 Handoff 闭环
+- `working_context_source_heads` 为每个 scope 维护单调 source revision；编译器保存前校验 revision，迟到旧 source candidate 只能保留历史而不能成为 latest。
+- Controller 先创建 Handoff 事实，再通过 `attach_working_context_ref` 绑定目标快照；legacy planned link 只扩展目标直接关联的 sibling Run，快照可包含本次 Handoff 与上游事实。
+- Verification 事件使用独立有界窗口并按 sequence/revision 选最新项；预算保护 blocker/verification/open question，source version、fingerprint、provenance 和指标字符数保持一致。
+- 持久化入口增加 context identity、source-ref 形状/存在性和 Handoff 来源 Task scope 校验；prompt 只发送经过 context provenance 过滤的 evidence refs。
+- 证据：`tests/test_context_compiler.py`、`tests/test_collaboration_wiring.py`、`herdr/context_projection.py`、`herdr/context_sources.py`、`herdr/state_db.py`、`services/herdr-controller.py`。

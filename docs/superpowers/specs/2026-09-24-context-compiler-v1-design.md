@@ -1,6 +1,6 @@
 # HAFlow Context Compiler V1 设计
 
-> 状态：已获用户确认，进入实现计划阶段
+> 状态：已获用户确认，已实现并进入交付验证阶段
 > 基线：`437b33504804f0e210c2caa39e33e2c12f4a13ba`
 > 范围：确定性、状态感知、角色感知、可追溯的 WorkingContext 投影
 
@@ -41,6 +41,7 @@ Task launch / retry / handoff / review request / verification request
   -> 读取同一 SQLite 一致性快照
   -> Context Compiler 选择与投影
   -> working_contexts 不可变写入
+  -> Controller 先建立 Handoff 事实，再 attach 已编译的 context_id
   -> prompt / CollaborationEvent 只携带 context_id
   -> Agent 按 context_id 读取快照
 ```
@@ -107,7 +108,7 @@ Task launch / retry / handoff / review request / verification request
 }
 ```
 
-`source_ref` 允许的 V1 前缀：`task:`、`workflow:`、`trajectory:`、`finding:`、`observation:`、`collaboration:`、`eval:`、`policy:`。编译器拒绝没有 `source_ref` 的内容项。
+`source_ref` 允许的 V1 前缀：`task:`、`workflow:`、`trajectory:`、`finding:`、`observation:`、`collaboration:`、`eval:`、`policy:`；派生的 `evidence:`/`artifact:` 只用于已有引用的稳定别名。编译器拒绝没有 `source_ref` 的内容项，存储边界同时校验非空对象 ID、角色、身份和引用存在性。
 
 ## 4. 范围与身份
 
@@ -118,6 +119,7 @@ Task launch / retry / handoff / review request / verification request
 - Finding/Observation 若带 `task_id`，必须能对应到 scope 内任务；若不带 task，则其 `run_id` 必须属于 scope。
 - CollaborationEvent 必须同时满足 `run_id == run_scope`、`workflow_id == workflow_id`，且 from/to Task 在 scope 内。
 - 信息不足时丢弃受影响来源或 fail closed，不猜测、不跨 Run 拼接。
+- `working_context_source_heads` 按 `run_scope` 维护单调 source revision；source projection 变化时递增，编译器保存前必须在同一 source revision 上，迟到旧候选只能成为历史而不能成为 latest。
 
 ## 5. 选择规则
 
@@ -202,7 +204,7 @@ BLOCKER > OPEN QUESTION > CURRENT GOAL > VERIFICATION
        > FINDING > ARTIFACT > HANDOFF > HISTORY
 ```
 
-超预算时先删除低优先级候选，再缩短单行文本，最后保留身份、当前状态和最新验证；不得静默丢失 goal/current state/next action。序列化结果必须不超过 `max_chars`。
+超预算时先删除低优先级候选，再缩短单行文本；`blockers`、`verification` 和 `open_questions` 的配置 cap 不能设为 0，必要事实无法容纳时 fail closed。验证事件使用独立有界窗口并按 Ledger sequence/revision 选择最新项；不得静默丢失 goal/current state/next action，序列化结果必须不超过 `max_chars`。
 
 ## 9. 持久化与不可变性
 
@@ -210,8 +212,9 @@ BLOCKER > OPEN QUESTION > CURRENT GOAL > VERIFICATION
 
 - `context_id` 主键；
 - `run_scope`、`run_id`、`workflow_id`、`task_id`、`node_id`、`agent_role`；
-- `context_fingerprint`、`source_version`、`source_watermark`；
+- `context_fingerprint`、`source_version`、`source_watermark`（当前 source revision）；
 - `payload_json`、`metrics_json`、`compiled_at`；
+- `working_context_source_heads` 保存每个 scope 的 source version 与单调 revision；
 - 按 task/role/compiled_at 和 task/compiled_at 建索引；
 - 不设置指向 workflow/task 的外键，保留审计快照。
 
@@ -222,7 +225,8 @@ BLOCKER > OPEN QUESTION > CURRENT GOAL > VERIFICATION
 - `BEGIN IMMEDIATE` 下检查最新行，竞争请求返回数据库 canonical row；
 - 不提供 update/delete API；
 - `get_working_context(context_id)`、`get_latest_working_context(task_id)`、`list_working_contexts(task_id)` 为公开读取入口；
-- 保存前完成身份、引用、脱敏和预算检查。
+- 保存前完成身份、引用存在性、scope、脱敏和预算检查；旧 source revision 的迟到写入保留为历史但不能成为 latest。
+- Handoff 先创建 `CollaborationEvent`，再在事件仍为 `created` 时 attach 编译后的 context ref，确保快照包含该 Handoff 事实。
 
 ## 10. Fingerprint、Diff 与指标
 
@@ -245,7 +249,7 @@ BLOCKER > OPEN QUESTION > CURRENT GOAL > VERIFICATION
 
 - 以 `(kind, source_ref)` 作为项身份；
 - `superseded` 只由显式 supersession 关系产生；
-- `changed` 只报告同一 source_ref 下规范 value 变化；
+- `changed` 报告同一 source_ref 下规范 value/provenance 变化，并覆盖 goal/current-state/source-ref 等 scalar provenance 变化；
 - 不生成自然语言总结。
 
 ### 10.3 指标
@@ -267,7 +271,8 @@ BLOCKER > OPEN QUESTION > CURRENT GOAL > VERIFICATION
 
 - `CollaborationEvent.context_refs` 继续只保存引用；Handoff 的 `context_id` 不展开到事件 payload。
 - `build_handoff_prompt` 增加 `WORKING_CONTEXT_REF` 行和加载提示，不嵌入完整 WorkingContext。
-- dispatch 前校验 context ref 存在、目标 Task 和 run scope 匹配；旧事件没有 ref 时保持兼容。
+- dispatch 前校验 context ref 存在、目标 Task、来源 Task、workflow 和 run scope 匹配；旧事件没有 ref 时保持兼容。
+- Handoff prompt 只携带经过 context provenance 过滤的 evidence refs 和 context_id 加载提示。
 - Task launch、retry（复用 dispatch）、handoff、verification dispatch 触发编译。
 - review request 由现有 handoff/Controller 路径携带目标 Agent 的 context ref。
 - Context 编译失败不得改变 Task/Workflow 状态；dispatch 记录 warning 并按既有路径继续，除非显式 ref 校验失败。
@@ -284,7 +289,7 @@ BLOCKER > OPEN QUESTION > CURRENT GOAL > VERIFICATION
 - H：V1 保存后源数据改变，V1 不变；再次编译生成 V2。
 - I：V1→V2 准确返回 added/removed/superseded/changed。
 - J：Handoff→CollaborationEvent→目标 Agent 可由 context_id 读取快照。
-- 额外：source_ref 缺失、跨 scope、未知角色、存储竞争、编译失败均有确定行为。
+- 额外：source_ref 缺失/伪造、跨 scope、未知角色、存储竞争、source revision 迟到写、Handoff 来源身份、预算必要事实、编译失败均有确定行为。
 
 ## 13. 不做事项与已知限制
 

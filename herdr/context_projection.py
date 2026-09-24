@@ -27,6 +27,8 @@ def _config(value: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
     for key, cap in supplied.items():
         if key in caps:
             cap = int(cap)
+            if key in {"blockers", "verification", "open_questions"} and cap < 1:
+                raise ValueError(f"max_items_per_kind[{key}] must preserve at least one item")
             if cap < 0:
                 raise ValueError(f"max_items_per_kind[{key}] must be non-negative")
             caps[key] = cap
@@ -93,8 +95,11 @@ def _fit_budget(context: WorkingContext, config: Mapping[str, Any]) -> WorkingCo
         "completed", "handoffs", "artifacts", "findings", "evidence", "decisions",
         "verification", "open_questions", "blockers",
     ]
+    protected = {"blockers", "verification", "open_questions"}
     while sum(len(getattr(context, field)) for field in priority) > max_items:
         for field_name in priority:
+            if field_name in protected:
+                continue
             if getattr(context, field_name):
                 values[field_name] = list(getattr(context, field_name))[:-1]
                 context = WorkingContext(**{**context.to_mapping(), **values})
@@ -106,7 +111,6 @@ def _fit_budget(context: WorkingContext, config: Mapping[str, Any]) -> WorkingCo
         return len(json.dumps(candidate.to_mapping(), ensure_ascii=False))
 
     # Reduce bulky values and low-priority history while retaining identity/state.
-    protected = {"blockers", "verification", "open_questions"}
     for field_name in priority:
         if field_name in protected:
             continue
@@ -137,6 +141,24 @@ def _fit_budget(context: WorkingContext, config: Mapping[str, Any]) -> WorkingCo
     return context
 
 
+def _calibrate_context_metrics(context: WorkingContext) -> WorkingContext:
+    """Keep context_chars equal to the actual default JSON serialization size."""
+    metrics = dict(context.metrics)
+    metrics["context_chars"] = 0
+    context = WorkingContext(**{**context.to_mapping(), "metrics": metrics})
+    zero_size = len(json.dumps(context.to_mapping(), ensure_ascii=False))
+    estimate = zero_size
+    for _ in range(5):
+        estimate = zero_size + len(str(estimate)) - 1
+        metrics["context_chars"] = estimate
+        context = WorkingContext(**{**context.to_mapping(), "metrics": metrics})
+        actual = len(json.dumps(context.to_mapping(), ensure_ascii=False))
+        if actual == estimate:
+            return context
+        zero_size = actual - len(str(actual)) + 1
+    return context
+
+
 def _fit_final_budget(context: WorkingContext, max_chars: int) -> WorkingContext:
     """Fit the serialized snapshot after metrics are attached."""
     role_state_key = {
@@ -156,12 +178,12 @@ def _fit_final_budget(context: WorkingContext, max_chars: int) -> WorkingContext
             key: value for key, value in state.items() if key in state_keys
         }
         for key, value in list(result.items()):
-            if isinstance(value, list) and len(value) > 5:
-                result[key] = value[:5]
+            if isinstance(value, list) and len(value) > 3:
+                result[key] = value[:3]
         if role_state_key and role_state_key in result:
             value = result[role_state_key]
-            result[role_state_key] = value[:5] if isinstance(value, list) else value
-        return _bound_value(result, 64)
+            result[role_state_key] = value[:3] if isinstance(value, list) else value
+        return _bound_value(result, 56)
 
     def compact_item(item: Mapping[str, Any]) -> Dict[str, Any]:
         keys = ("kind", "value", "source_ref", "source_task", "source_run", "evidence_refs")
@@ -196,14 +218,22 @@ def _fit_final_budget(context: WorkingContext, max_chars: int) -> WorkingContext
             )
         )
         context = WorkingContext(**{**context.to_mapping(), "metrics": metrics})
+        context = _calibrate_context_metrics(context)
         if len(json.dumps(context.to_mapping(), ensure_ascii=False)) <= max_chars:
             return context
         context = WorkingContext(**{
             **context.to_mapping(),
-            "goal": _clip_text(context.goal, 64),
-            "next_action": "Continue.",
-            "source_version": "",
-            "source_watermark": 0,
+            "goal": _clip_text(context.goal, 56),
+            "next_action": (
+                "Resolve blocker."
+                if context.blockers
+                else "Resolve failed verification."
+                if any(
+                    item.get("value", {}).get("passed") is False
+                    for item in context.verification
+                )
+                else "Continue."
+            ),
             "compiled_at": round(context.compiled_at),
             "current_state": compact_state(context.current_state),
             "current_state_refs": {

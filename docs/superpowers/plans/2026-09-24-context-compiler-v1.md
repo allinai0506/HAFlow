@@ -78,7 +78,7 @@ git commit -m "test: define context compiler acceptance matrix"
 - Test: `tests/test_context_compiler.py`
 
 **Interfaces:**
-- Add table `working_contexts(context_id, run_scope, run_id, workflow_id, task_id, node_id, agent_role, context_fingerprint, source_version, payload_json, metrics_json, compiled_at)`.
+- Add table `working_contexts(context_id, run_scope, run_id, workflow_id, task_id, node_id, agent_role, context_fingerprint, source_version, source_watermark, payload_json, metrics_json, compiled_at)` and `working_context_source_heads(run_scope, workflow_id, source_version, revision, updated_at)`.
 - Add state_db functions:
 
 ```python
@@ -104,7 +104,7 @@ Expected: FAIL because the table/accessors do not exist.
 
 - [ ] **Step 3: Add schema and bounded accessors**
 
-Use `BEGIN IMMEDIATE` for writes. Read the latest row for `(task_id, agent_role)` ordered by `compiled_at, rowid`; if its fingerprint equals the candidate, return it. Otherwise insert a new `context_id`. Never issue UPDATE/DELETE for snapshot rows. Keep JSON decoding defensive and return no fake row on absence.
+Use `BEGIN IMMEDIATE` for writes. Read the latest row for `(task_id, agent_role, run_scope, workflow_id)` ordered by source revision/compiled time; if its fingerprint equals the candidate, return it. Otherwise insert a new `context_id`. A stale source revision is retained as history but cannot become latest. Validate identity, source-ref shape/existence, and role before writing. Never issue UPDATE/DELETE for snapshot rows. Keep JSON decoding defensive and return no fake row on absence.
 
 - [ ] **Step 4: Add indexes and StateStore delegation**
 
@@ -170,7 +170,7 @@ Use `collab_scope_for_task`, `_redact_value`, canonical JSON, SHA-256, and the e
 
 - [ ] **Step 3: Implement source snapshot reads**
 
-Within one SQLite read transaction, load target task/workflow, same-scope tasks, bounded relevant trajectory events, findings, observation metadata, collaboration events, and latest eval facts. Filter by scope/task/run at the query or immediately after decode. Never call `ObservationStore.read()`.
+Within one SQLite read transaction, load target task/workflow, same-scope tasks, bounded relevant trajectory events plus an independent latest-verification window, findings, observation metadata, collaboration events, and latest eval facts. Filter by scope/task/run at the query or immediately after decode, enforce payload byte bounds, and never call `ObservationStore.read()`.
 
 - [ ] **Step 4: Implement candidate construction**
 
@@ -186,7 +186,7 @@ Use the pure relevance function and role-specific profiles from the design. Sele
 
 - [ ] **Step 7: Implement fingerprint, snapshot write, and public getters**
 
-Fingerprint excludes random IDs and compile time. Persist through `state_db.save_working_context`; return the canonical row on reuse. Record the six requested metrics in `metrics_json`/snapshot.
+Fingerprint excludes random IDs and compile time but includes compiler version, stable source projection/revision, role, selected refs/values, and budget config. Persist through `state_db.save_working_context`; return the canonical row on reuse. Record the six requested metrics in `metrics_json`/snapshot and append a separate metric event per invocation.
 
 - [ ] **Step 8: Implement deterministic diff**
 
@@ -221,7 +221,7 @@ git commit -m "feat: compile state and role aware working context"
 - `build_handoff_prompt(event, next_action="", working_context=None)` adds a bounded `WORKING_CONTEXT_REF` line only.
 - `dispatch_collaboration_event` validates an existing context ref against the target Task and `run_scope`.
 - `dispatch_task` compiles a context at launch/retry and appends its ref to the prompt without changing task state.
-- `maybe_dispatch_node_handoffs` compiles the target context before creating a handoff and stores only its ID in `context_refs`.
+- `maybe_dispatch_node_handoffs` creates the Handoff fact first, compiles the target context with the planned direct link, then attaches only its ID to the still-`created` event before dispatch.
 
 - [ ] **Step 1: Add integration RED tests**
 
@@ -241,7 +241,7 @@ Keep `SUMMARY_MAX`, artifact/evidence limits, and existing event identity unchan
 
 - [ ] **Step 4: Wire target compilation into handoff creation**
 
-Use deterministic role inference from target node/agent (`review`, `test`, `coord`, otherwise `developer`). Compile before `create_collaboration_event`; pass `context_refs=[context.context_id]`. Compilation failure is best-effort for handoff creation, but a supplied invalid ref is a dispatch failure.
+Use deterministic role inference from target node/agent (`review`, `test`, `coord`, otherwise `developer`). Create the event with an empty ref list, compile using the direct planned link, and call `attach_working_context_ref` only while the event is `created`; compilation failure remains best-effort, but a supplied invalid ref is a dispatch failure.
 
 - [ ] **Step 5: Wire launch/retry/verification boundaries**
 

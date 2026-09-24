@@ -7,6 +7,7 @@ wiring never breaks the main flow.
 
 import importlib.machinery
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -123,6 +124,49 @@ def test_wiring_handoff_carries_target_working_context_ref(tmp_path):
     loaded = get_working_context(row["context_refs"][0], db_path=db)
     assert loaded.task_id == "wf-1-test-auto"
     assert "WORKING_CONTEXT_REF:" in sender.calls[0][1]
+
+
+def test_wiring_legacy_handoff_planned_link_preloads_upstream_facts(tmp_path):
+    from herdr.context_compiler import get_working_context
+
+    ctrl = _load_controller()
+    db = tmp_path / "state.db"
+    state_db.save_workflow(
+        {
+            "workflow_id": "wf-legacy", "title": "fixture", "status": "running",
+            "config": {"nodes": [
+                {"id": "implementation", "depends_on": []},
+                {"id": "test", "depends_on": ["implementation"]},
+            ]},
+        },
+        db_path=db,
+    )
+    upstream = dict(
+        _wf_tasks()["wf-1-impl"], task_id="legacy-impl", workflow_id="wf-legacy",
+        run_id="run-legacy-upstream", goal="Build upstream",
+        artifacts=[{"ref": "legacy-artifact"}],
+    )
+    target = dict(
+        _wf_tasks()["wf-1-test-auto"], task_id="legacy-test", workflow_id="wf-legacy",
+        run_id="run-legacy-target", agent_role="tester",
+    )
+    upstream.pop("workflow_run_id", None)
+    target.pop("workflow_run_id", None)
+    for task in (upstream, target):
+        state_db.save_task(task, db_path=db)
+    sender = FakeSender()
+    out = ctrl.maybe_dispatch_node_handoffs(
+        workflow_id="wf-legacy", ready_id="test", dep_ids=["implementation"],
+        launched=[target["task_id"]], tasks_by_id={
+            upstream["task_id"]: upstream, target["task_id"]: target,
+        },
+        prompt_sender=sender, db_path=db,
+    )
+    assert out[0].get("dispatched") is True
+    row = state_db.list_collaboration_events(run_id="wf-legacy", db_path=db)[0]
+    loaded = get_working_context(row["context_refs"][0], db_path=db)
+    assert "legacy-artifact" in json.dumps(loaded.to_mapping(), ensure_ascii=False)
+    assert loaded.handoffs
 
 
 def test_wiring_selects_upstream_in_target_execution_scope(tmp_path):

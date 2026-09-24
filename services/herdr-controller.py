@@ -6,7 +6,6 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import queue
-import re
 import shutil
 import socket
 import subprocess
@@ -28,7 +27,7 @@ try:
         project_for_workflow,
         workflow_config_for,
     )
-    from herdr.workflow import find_node, get_ready_nodes, is_workflow_completed, normalize_workflow
+    from herdr.workflow import find_node, get_ready_nodes, is_workflow_completed
     from herdr.state_store import get_state_store
     from herdr.observation import ObservationStore, create_verification_observation_with_status
     from herdr.trajectory import (
@@ -42,7 +41,7 @@ except ImportError:
         project_for_workflow,
         workflow_config_for,
     )
-    from herdr_workflow import find_node, get_ready_nodes, is_workflow_completed, normalize_workflow
+    from herdr_workflow import find_node, get_ready_nodes, is_workflow_completed
     from herdr_state_store import get_state_store
     from herdr_observation import ObservationStore, create_verification_observation_with_status
     from herdr.trajectory import (
@@ -4641,6 +4640,12 @@ def _working_context_ref_valid(event, target_task, db_path=None):
         context = _sdb.get_working_context(value, db_path=db_path)
         if context is None:
             return False
+        try:
+            source_watermark = int(context.get("source_watermark") or 0)
+        except (TypeError, ValueError):
+            return False
+        if len(value) <= 3 or not context.get("source_version") or source_watermark <= 0:
+            return False
         if str(context.get("task_id") or "") != str(event.get("to_task_id") or ""):
             return False
         if str(context.get("workflow_id") or "") != str(event.get("workflow_id") or ""):
@@ -4693,6 +4698,18 @@ def dispatch_collaboration_event(event_id, tasks_by_id, prompt_sender=None, db_p
         return _sdb.mark_collaboration_failed(event_id, db_path=db_path)
     if not _working_context_ref_valid(event, target, db_path=db_path):
         return _sdb.mark_collaboration_failed(event_id, db_path=db_path)
+    prompt_event = dict(event)
+    context_refs = event.get("context_refs") or []
+    allowed_evidence_refs = set()
+    for context_ref in context_refs:
+        context_row = _sdb.get_working_context(context_ref, db_path=db_path)
+        if context_row is not None:
+            allowed_evidence_refs.update(context_row.get("source_refs") or [])
+    if context_refs:
+        prompt_event["evidence_refs"] = [
+            ref for ref in event.get("evidence_refs") or []
+            if ref in allowed_evidence_refs
+        ]
 
     if _collab_prior_intent(event_id, event["to_task_id"], db_path) is not None:
         recovered = _sdb.mark_collaboration_dispatched(event_id, db_path=db_path)
@@ -4715,7 +4732,9 @@ def dispatch_collaboration_event(event_id, tasks_by_id, prompt_sender=None, db_p
          "source": "collaboration"},
         db_path=db_path,
     )
-    prompt = _collab.build_handoff_prompt(event, next_action=f"Proceed as {event.get('to_agent') or ''}.")
+    prompt = _collab.build_handoff_prompt(
+        prompt_event, next_action=f"Proceed as {event.get('to_agent') or ''}.",
+    )
     try:
         sender(pane_id, prompt)
     except Exception:
@@ -4824,18 +4843,6 @@ def maybe_dispatch_node_handoffs(*, workflow_id, ready_id, dep_ids, launched,
             from_task = upstream[-1]
             run_id = _collab.collab_scope_for_task(from_task)
             branch = from_task.get("branch")
-            context_refs = []
-            try:
-                from herdr.context_compiler import compile_working_context, infer_agent_role
-                target_context = compile_working_context(
-                    workflow_id=workflow_id,
-                    task_id=to_id,
-                    agent_role=infer_agent_role(target),
-                    db_path=db_path,
-                )
-                context_refs = [target_context.context_id]
-            except Exception as exc:
-                print(f"[WORKING_CONTEXT SKIPPED] task={to_id}: {type(exc).__name__}")
             event = _sdb.create_collaboration_event({
                 "run_id": run_id,
                 "workflow_id": workflow_id,
@@ -4848,9 +4855,26 @@ def maybe_dispatch_node_handoffs(*, workflow_id, ready_id, dep_ids, launched,
                 "summary": str(from_task.get("goal") or f"{dep_hit} completed."),
                 "artifact_refs": ([f"branch:{branch}"] if branch else []),
                 "evidence_refs": [],
-                "context_refs": context_refs,
+                "context_refs": [],
                 "source_fact_id": f"{workflow_id}:{dep_hit}:completed",
             }, db_path=db_path)
+            try:
+                from herdr.context_compiler import compile_working_context, infer_agent_role
+                target_context = compile_working_context(
+                    workflow_id=workflow_id,
+                    task_id=to_id,
+                    agent_role=infer_agent_role(target),
+                    planned_links=[{
+                        "from_task_id": from_task.get("task_id"),
+                        "to_task_id": to_id,
+                    }],
+                    db_path=db_path,
+                )
+                event = _sdb.attach_working_context_ref(
+                    event["event_id"], target_context.context_id, db_path=db_path,
+                )
+            except Exception as exc:
+                print(f"[WORKING_CONTEXT SKIPPED] task={to_id}: {type(exc).__name__}")
             dispatched = dispatch_collaboration_event(
                 event["event_id"], tasks, prompt_sender, db_path=db_path)
             results.append({"task_id": to_id, **dispatched})

@@ -93,13 +93,33 @@ def diff_working_context(
                         "new": new_item,
                     })
                     superseded_old_keys.add(old_key)
+    for old_key, old_item in old_items.items():
+        if old_key[0] != "finding":
+            continue
+        for new_ref in _relation_refs(old_item, "superseded_by"):
+            new_key = ("finding", new_ref)
+            new_item = new_items.get(new_key)
+            if new_item is not None:
+                superseded.append({
+                    "kind": "finding",
+                    "source_ref": old_key[1],
+                    "old": old_item,
+                    "new": new_item,
+                })
+                superseded_old_keys.add(old_key)
     removed = [item for item in removed if (str(item.get("kind")), str(item.get("source_ref"))) not in superseded_old_keys]
-    for field_name in ("goal", "current_state", "next_action", "node_id", "agent_role"):
+    for field_name in (
+        "goal", "current_state", "next_action", "node_id", "agent_role",
+        "goal_source_ref", "next_action_source_ref", "current_state_refs",
+        "source_refs", "source_version",
+    ):
         old_value = old_map.get(field_name)
         new_value = new_map.get(field_name)
         if _canonical_json(old_value) != _canonical_json(new_value):
             changed.append({
-                "kind": "context",
+                "kind": "context" if field_name in {
+                    "goal", "current_state", "next_action", "node_id", "agent_role",
+                } else "provenance",
                 "source_ref": f"context:{field_name}",
                 "old": old_value,
                 "new": new_value,
