@@ -3161,7 +3161,7 @@ def record_working_context_metric(
             "agent_role": str(context.get("agent_role") or ""),
             "reused": 1 if reused else 0,
             "changed": 0 if reused else 1,
-            "created_at": float(context.get("compiled_at") or time.time()),
+            "created_at": time.time(),
         }
         if not metric["context_id"] or not metric["run_scope"] or not metric["task_id"]:
             raise ValueError("context metric identity is incomplete")

@@ -98,6 +98,7 @@ def _selected_refs(context: WorkingContext) -> List[str]:
 
 def _fingerprint_payload(context: WorkingContext, config: Mapping[str, Any]) -> Dict[str, Any]:
     return {
+        "compiler_version": "context_compiler_v1",
         "run_scope": context.run_scope,
         "run_id": context.run_id,
         "workflow_id": context.workflow_id,
