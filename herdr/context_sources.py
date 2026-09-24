@@ -13,14 +13,8 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Set
 
 from . import state_db
 from .collaboration import collab_scope_for_task
+from .context_models import RELEVANT_EVENT_TYPES
 from .trajectory import run_id_for_task
-
-RELEVANT_EVENT_TYPES = frozenset({
-    "run_started", "run_completed", "run_failed", "task_started", "task_completed",
-    "task_failed", "task_status_changed", "agent_done", "agent_failed",
-    "artifact_created", "verification_completed", "tests_completed", "blocker",
-    "decision", "decision_completed", "review_requested", "verification_requested",
-})
 
 
 def _task_run(task: Mapping[str, Any]) -> Optional[str]:
