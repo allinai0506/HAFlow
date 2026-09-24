@@ -1086,7 +1086,7 @@ def _event_candidates(
     allowed_runs: Set[str],
     workflow_id: str,
     run_scope: str,
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Return artifacts, completed, verification, decisions, and blockers."""
     artifacts: List[Dict[str, Any]] = []
     completed: List[Dict[str, Any]] = []
