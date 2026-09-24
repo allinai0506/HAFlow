@@ -93,6 +93,8 @@ def classify_commit_state(
     head_history=None,
     baseline_is_ancestor=True,
     skew_seconds=None,
+    remote_shas=None,
+    enumeration_failed=False,
 ):
     """Classify an empty-index commit attempt.
 
@@ -108,11 +110,18 @@ def classify_commit_state(
             each ``{"sha": str, "committer_ts": float, "parents": [...],
             "paths": [...]}``. ``parents``/``paths`` may be absent on legacy
             callers and are treated as unknown-but-benign for merge/internal
-            checks (missing ``paths`` never counts as empty).
+            checks (missing ``paths`` never counts as empty). ``None``
+            means enumeration failed (M-4) and must fail closed, never EMPTY.
         head_history: first-parent chain from HEAD (newest first), same item
-            shape. Used only for legacy time-basis classification.
+            shape. Used only for legacy time-basis classification. ``None``
+            means enumeration failed.
         baseline_is_ancestor: result of ``git merge-base --is-ancestor``.
         skew_seconds: clock tolerance; defaults to ``adoption_skew_seconds()``.
+        remote_shas: shas known reachable from ``origin/*`` remote-tracking
+            refs (H-2 fetch/rebase/ff-merge guard). Any interval commit in
+            this set is foreign and refuses. ``None`` means unknown (skip).
+        enumeration_failed: explicit M-4 signal that git enumeration failed
+            while ``head != baseline``. Forces REFUSED ``enumeration_failed``.
 
     Returns:
         ``(verdict, detail)`` where verdict is ``adopt``/``empty``/``refused``
@@ -140,6 +149,8 @@ def classify_commit_state(
             cutoff=cutoff,
             interval_commits=interval_commits,
             baseline_is_ancestor=baseline_is_ancestor,
+            remote_shas=remote_shas,
+            enumeration_failed=enumeration_failed,
         )
     return _classify_by_time(
         head=head,
@@ -148,6 +159,8 @@ def classify_commit_state(
         task_id=task_id,
         cutoff=cutoff,
         head_history=head_history,
+        remote_shas=remote_shas,
+        enumeration_failed=enumeration_failed,
     )
 
 
@@ -179,6 +192,41 @@ def _check_merge(commits):
         if len(_commit_parents(item)) >= 2:
             return item.get("sha")
     return None
+
+
+def _check_remote_contained(commits, remote_shas):
+    """H-2: any interval commit reachable from origin/* is foreign."""
+    if not remote_shas:
+        return None
+    try:
+        remote = {str(s).strip() for s in remote_shas if str(s).strip()}
+    except TypeError:
+        return None
+    if not remote:
+        return None
+    for item in commits or []:
+        sha = (item or {}).get("sha")
+        if isinstance(sha, str) and sha.strip() in remote:
+            return sha.strip()
+    return None
+
+
+def _stale_commits(commits, cutoff):
+    """Commits predating the task: committer OR author timestamp old.
+
+    H-2 rebase rewrites ``%ct`` (committer) to now while ``%at`` (author)
+    stays old. Either timestamp predating the cutoff refuses.
+    Missing ``author_ts`` is benign (legacy callers).
+    """
+    stale = []
+    for item in commits or []:
+        cts = _coerce_epoch((item or {}).get("committer_ts"))
+        ats = _coerce_epoch((item or {}).get("author_ts"))
+        if cts is None or cts < cutoff:
+            stale.append(item.get("sha"))
+        elif ats is not None and ats < cutoff:
+            stale.append(item.get("sha"))
+    return stale
 
 
 def _check_internal(commits):
@@ -224,6 +272,8 @@ def _classify_with_anchor(
     cutoff,
     interval_commits,
     baseline_is_ancestor,
+    remote_shas=None,
+    enumeration_failed=False,
 ):
     if not _valid_sha(head):
         return REFUSED, {
@@ -243,8 +293,39 @@ def _classify_with_anchor(
             "noop_commits": [],
             "changed_paths": [],
         }
+    # M-4: enumeration failure must fail closed, never EMPTY, when head moved.
+    if interval_commits is None or enumeration_failed:
+        if head.strip() == baseline_commit and not enumeration_failed:
+            return EMPTY, {
+                "reason": "no_new_commits",
+                "commits": 0,
+                "baseline": baseline_commit,
+                "basis": "baseline_commit",
+                "noop_commits": [],
+                "changed_paths": [],
+            }
+        return REFUSED, {
+            "reason": "enumeration_failed",
+            "commits": 0,
+            "baseline": baseline_commit,
+            "basis": "baseline_commit",
+            "noop_commits": [],
+            "changed_paths": [],
+        }
     commits = list(interval_commits or [])
     if head.strip() == baseline_commit or not commits:
+        # M-4: head moved but interval empty due to collection failure is
+        # handled above via None; an empty list with head != baseline can
+        # only happen when enumeration silently dropped rows, so refuse.
+        if head.strip() != baseline_commit:
+            return REFUSED, {
+                "reason": "enumeration_failed",
+                "commits": 0,
+                "baseline": baseline_commit,
+                "basis": "baseline_commit",
+                "noop_commits": [],
+                "changed_paths": [],
+            }
         return EMPTY, {
             "reason": "no_new_commits",
             "commits": 0,
@@ -288,12 +369,22 @@ def _classify_with_anchor(
             "noop_commits": noops,
             "changed_paths": [],
         }
-    stale = [
-        item.get("sha")
-        for item in commits
-        if _coerce_epoch(item.get("committer_ts")) is None
-        or _coerce_epoch(item.get("committer_ts")) < cutoff
-    ]
+    # H-2: fetch/rebase/fast-forward merge brings foreign commits that are
+    # reachable from origin/* into baseline..HEAD. They carry no merge
+    # commit and may carry rewritten committer timestamps, so they must be
+    # refused explicitly before the staleness check.
+    foreign_sha = _check_remote_contained(commits, remote_shas)
+    if foreign_sha:
+        return REFUSED, {
+            "reason": "foreign_commit_in_range",
+            "commits": len(commits),
+            "baseline": baseline_commit,
+            "basis": "baseline_commit",
+            "offending": [foreign_sha],
+            "noop_commits": noops,
+            "changed_paths": changed,
+        }
+    stale = _stale_commits(commits, cutoff)
     if stale:
         return REFUSED, {
             "reason": "commit_predates_task",
@@ -314,7 +405,10 @@ def _classify_with_anchor(
     }
 
 
-def _classify_by_time(*, head, onto_branch, branch, task_id, cutoff, head_history):
+def _classify_by_time(
+    *, head, onto_branch, branch, task_id, cutoff, head_history,
+    remote_shas=None, enumeration_failed=False,
+):
     if not is_task_branch(branch, task_id):
         return REFUSED, {
             "reason": "legacy_branch_not_task_branch",
@@ -336,6 +430,16 @@ def _classify_by_time(*, head, onto_branch, branch, task_id, cutoff, head_histor
     if not _valid_sha(head):
         return REFUSED, {
             "reason": "missing_head",
+            "commits": 0,
+            "baseline": None,
+            "basis": "time",
+            "noop_commits": [],
+            "changed_paths": [],
+        }
+    # M-4: history enumeration failure must fail closed, never EMPTY.
+    if head_history is None or enumeration_failed:
+        return REFUSED, {
+            "reason": "enumeration_failed",
             "commits": 0,
             "baseline": None,
             "basis": "time",
@@ -417,12 +521,19 @@ def _classify_by_time(*, head, onto_branch, branch, task_id, cutoff, head_histor
             "noop_commits": noops,
             "changed_paths": [],
         }
-    stale = [
-        item.get("sha")
-        for item in attributable
-        if _coerce_epoch(item.get("committer_ts")) is None
-        or _coerce_epoch(item.get("committer_ts")) < cutoff
-    ]
+    # H-2 legacy path: same remote-containment guard as anchored path.
+    foreign_sha = _check_remote_contained(attributable, remote_shas)
+    if foreign_sha:
+        return REFUSED, {
+            "reason": "foreign_commit_in_range",
+            "commits": len(attributable),
+            "baseline": implicit.get("sha"),
+            "basis": "time",
+            "offending": [foreign_sha],
+            "noop_commits": noops,
+            "changed_paths": changed,
+        }
+    stale = _stale_commits(attributable, cutoff)
     if stale:
         return REFUSED, {
             "reason": "unattributable_commits",

@@ -2393,25 +2393,40 @@ def verify_baseline(task_id):
                     "commit_result"
                 ) in ("adopted", "created")
                 interval = _git_interval_commits(clone, anchor, anchor_head)
-                commits_ahead = len(interval)
-                if not adopted:
-                    seen_paths = set()
-                    for item in interval:
-                        sha = item.get("sha")
-                        for path in item.get("paths") or []:
-                            if path not in seen_paths:
-                                seen_paths.add(path)
-                                committed_changes.append(
-                                    {
-                                        "type": "committed",
-                                        "path": path,
-                                        "commit": sha,
-                                        "baseline": anchor,
-                                        "current": anchor_head,
-                                    }
-                                )
-                    # Pure --allow-empty interval: no paths -> no committed
-                    # entries; verdict falls through to worktree-only.
+                if interval is None:
+                    # M-4: enumeration failure must fail closed, never
+                    # BASELINE_MATCH. Record an unknown committed entry.
+                    commits_ahead = 0
+                    if not adopted:
+                        committed_changes.append(
+                            {
+                                "type": "committed",
+                                "path": "__enumeration_failed__",
+                                "commit": anchor_head,
+                                "baseline": anchor,
+                                "current": anchor_head,
+                            }
+                        )
+                else:
+                    commits_ahead = len(interval)
+                    if not adopted:
+                        seen_paths = set()
+                        for item in interval:
+                            sha = item.get("sha")
+                            for path in item.get("paths") or []:
+                                if path not in seen_paths:
+                                    seen_paths.add(path)
+                                    committed_changes.append(
+                                        {
+                                            "type": "committed",
+                                            "path": path,
+                                            "commit": sha,
+                                            "baseline": anchor,
+                                            "current": anchor_head,
+                                        }
+                                    )
+                        # Pure --allow-empty interval: no paths -> no committed
+                        # entries; verdict falls through to worktree-only.
             else:
                 commits_ahead = 0
         # Stash for the union below (worktree changes computed next).
@@ -2842,7 +2857,7 @@ def _git_is_ancestor(clone, baseline, head):
 
 
 def _git_log_commits(clone, rev, limit=None, first_parent=False):
-    cmd = ["git", "-C", clone, "log", "--format=%H %P %ct"]
+    cmd = ["git", "-C", clone, "log", "--format=%H%x1f%P%x1f%at%x1f%ct"]
     if first_parent:
         cmd.append("--first-parent")
     if limit is not None:
@@ -2858,24 +2873,42 @@ def _git_log_commits(clone, rev, limit=None, first_parent=False):
         return None
     commits = []
     for line in result.stdout.splitlines():
-        parts = line.strip().split()
-        if len(parts) < 2:
+        if not line.strip():
             continue
-        sha = parts[0]
-        raw_ts = parts[-1]
-        parents = parts[1:-1]
+        parts = line.split("\x1f")
+        if len(parts) != 4:
+            continue
+        sha, raw_parents, raw_at, raw_ct = parts
+        sha = sha.strip()
+        if not sha:
+            continue
+        parents = [p for p in raw_parents.strip().split() if p]
         try:
-            ts = float(raw_ts)
+            author_ts = float(raw_at.strip())
         except ValueError:
             continue
-        commits.append({"sha": sha, "committer_ts": ts, "parents": parents})
+        try:
+            committer_ts = float(raw_ct.strip())
+        except ValueError:
+            continue
+        commits.append({
+            "sha": sha,
+            "author_ts": author_ts,
+            "committer_ts": committer_ts,
+            "parents": parents,
+        })
     return commits
 
 
 def _git_commit_paths(clone, sha):
-    """Paths changed by a single commit; [] for --allow-empty commits."""
+    """Paths changed by a single commit; [] for --allow-empty, None on failure.
+
+    M-4: enumeration failure must be distinguishable from a true empty
+    commit, otherwise ``head != baseline`` with a failed ``diff-tree``
+    is misclassified as EMPTY and the deliverable is silently dropped.
+    """
     if not sha:
-        return []
+        return None
     result = subprocess.run(
         ["git", "-C", clone, "diff-tree", "--no-commit-id", "--name-only",
          "-r", "--root", sha, "--"],
@@ -2884,33 +2917,47 @@ def _git_commit_paths(clone, sha):
         check=False,
     )
     if result.returncode != 0:
-        return []
+        return None
     return [line for line in result.stdout.splitlines() if line]
 
 
-def _git_diff_name_only(clone, baseline, head):
-    """Aggregated changed paths for baseline..HEAD; [] on failure/empty."""
-    if not baseline or not head:
-        return []
-    result = subprocess.run(
-        ["git", "-C", clone, "diff", "--name-only",
-         f"{baseline}..{head}", "--"],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    if result.returncode != 0:
-        return []
-    return [line for line in result.stdout.splitlines() if line]
+def _git_remote_contained_shas(clone, shas):
+    """H-2: subset of *shas* reachable from any ``origin/*`` tracking ref.
+
+    Single-commit ``git branch -r --contains`` probes keep the check to
+    O(interval) processes; interval is typically 1-3 commits. Empty set
+    when no remotes exist or nothing is contained. Never fails closed
+    here: on git errors return empty set and let timestamp guards decide.
+    """
+    contained = set()
+    candidates = [s for s in (shas or []) if s]
+    if not candidates:
+        return contained
+    for sha in candidates:
+        try:
+            result = subprocess.run(
+                ["git", "-C", clone, "branch", "-r", "--contains", sha],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+        except OSError:
+            continue
+        if result.returncode == 0 and result.stdout.strip():
+            contained.add(sha)
+    return contained
 
 
 def _git_interval_commits(clone, baseline, head):
-    """baseline..HEAD 区间提交(oldest first);失败返回空列表。
+    """baseline..HEAD 区间提交(oldest first);失败返回 None (M-4)。
 
-    每项含 parents 与 paths，供收编判定 (merge/内部文件/空提交) 与
-    verify-baseline 路径级并集共用，避免两次 subprocess 漂移。
+    每项含 parents、author_ts/committer_ts 与 paths，供收编判定
+    (merge/内部文件/空提交/远端外来) 与 verify-baseline 路径级并集共用。
+    单个 ``diff-tree`` 失败时该提交 paths 置 None (unknown)，不与真空混淆。
     """
     commits = _git_log_commits(clone, f"{baseline}..{head}")
+    if commits is None:
+        return None
     if not commits:
         return []
     commits.reverse()
@@ -2920,8 +2967,10 @@ def _git_interval_commits(clone, baseline, head):
 
 
 def _git_head_history(clone, head, limit=100):
-    """HEAD 起 first-parent 链(newest first);失败返回空列表。"""
+    """HEAD 起 first-parent 链(newest first);失败返回 None (M-4)。"""
     commits = _git_log_commits(clone, head, limit=limit, first_parent=True)
+    if commits is None:
+        return None
     for item in commits or []:
         item["paths"] = _git_commit_paths(clone, item["sha"])
     return commits or []
@@ -2940,15 +2989,32 @@ def _adopt_head_if_attributable(task_id, task, clone):
     interval = None
     history = None
     ancestor = True
+    remote_shas = set()
+    enumeration_failed = False
     if baseline:
         ancestor = _git_is_ancestor(clone, baseline, head)
-        interval = (
-            _git_interval_commits(clone, baseline, head)
-            if (ancestor and head)
-            else []
-        )
+        if ancestor and head:
+            interval = _git_interval_commits(clone, baseline, head)
+            if interval is None:
+                enumeration_failed = True
+            elif interval:
+                try:
+                    remote_shas = _git_remote_contained_shas(
+                        clone, [c.get("sha") for c in interval])
+                except Exception:
+                    remote_shas = set()
+        else:
+            interval = []
     else:
         history = _git_head_history(clone, head) if head else []
+        if history is None:
+            enumeration_failed = True
+        elif history:
+            try:
+                remote_shas = _git_remote_contained_shas(
+                    clone, [c.get("sha") for c in history])
+            except Exception:
+                remote_shas = set()
 
     verdict, detail = classify_commit_state(
         baseline_commit=baseline,
@@ -2961,6 +3027,8 @@ def _adopt_head_if_attributable(task_id, task, clone):
         head_history=history,
         baseline_is_ancestor=ancestor,
         skew_seconds=skew,
+        remote_shas=remote_shas,
+        enumeration_failed=enumeration_failed,
     )
     basis = detail.get("basis") or "none"
     reason = detail.get("reason") or "unknown"
@@ -3305,6 +3373,19 @@ def integrate_task(task_id):
             "Task branch is not based cleanly "
             f"on latest origin/{base_branch}"
         )
+        print(
+            "HERDR_INTEGRATE_RESULT="
+            + json.dumps(
+                {
+                    "task_id": task_id,
+                    "result": "not_based_cleanly",
+                    "branch": branch,
+                    "base_branch": base_branch,
+                    "relation": relation,
+                },
+                ensure_ascii=False,
+            )
+        )
         sys.exit(4)
 
     herdr_ref = f"refs/herdr/tasks/{task_id}"
@@ -3356,6 +3437,17 @@ def integrate_task(task_id):
     if tracked_status:
         print("Main repository has tracked changes")
         print(tracked_status)
+        print(
+            "HERDR_INTEGRATE_RESULT="
+            + json.dumps(
+                {
+                    "task_id": task_id,
+                    "result": "main_dirty",
+                    "tracked_status": tracked_status[:2000],
+                },
+                ensure_ascii=False,
+            )
+        )
         sys.exit(5)
 
     subprocess.run(
@@ -3845,6 +3937,7 @@ def close_workflow(
     dry_run=False,
     abandon=False,
     force=False,
+    accept_escalated=False,
 ):
     data = load_tasks()
     tasks = [
@@ -3938,6 +4031,33 @@ def close_workflow(
         )
         print(
             "  确要丢弃交付物时: herdr-task supersede <task_id> --reason ..."
+        )
+        sys.exit(2)
+
+    # H-1: machine-set finalize_escalated no longer implies closable.
+    # Escalated git tasks stay unclosable until a human explicitly confirms
+    # via --accept-escalated/--force/--abandon or supersedes the task.
+    escalated_git = [
+        t["task_id"] for t in tasks
+        if t.get("status") in ("completed", "committed")
+        and (t.get("integration_mode") or "none") == "git"
+        and t.get("finalize_escalated")
+    ]
+    if escalated_git and not (accept_escalated or force or abandon):
+        print(
+            "[CLOSE ABORT] workflow has escalated git tasks "
+            "requiring human confirmation: " + ", ".join(escalated_git)
+        )
+        print(
+            "  finalize_escalated is machine-set and revocable; "
+            "it does not imply the deliverable is safe to close."
+        )
+        print(
+            "  Confirm explicitly: "
+            f"herdr-task close-workflow {workflow_id} --accept-escalated "
+            "(or --force/--abandon), "
+            "or herdr-task supersede <task_id> --reason ..., "
+            "or herdr-task clear-escalation <task_id> after recovery."
         )
         sys.exit(2)
 
@@ -4253,6 +4373,36 @@ def supersede_task(task_id, new_task_id=None, reason=None):
     if new_task_id:
         msg += f" (by {new_task_id})"
     print(msg)
+
+
+def clear_finalize_escalation(task_id):
+    """H-1: revoke machine-set finalize_escalated so finalize can re-drive.
+
+    Human recovery path after the cause (dirty main repo, flaky gate) is
+    fixed. Clears the flag and reason; the next controller sweep re-drives
+    finalize instead of treating the task as settled.
+    """
+    data = load_tasks()
+    task = find_task(data, task_id)
+    if not task:
+        print(f"Task not found: {task_id}")
+        sys.exit(1)
+    if not task.get("finalize_escalated"):
+        print(f"[ESCALATION CLEAR SKIP] {task_id}: not escalated")
+        return
+    from herdr import kernel
+    try:
+        kernel.update_task_metadata(
+            task_id,
+            {"finalize_escalated": False,
+             "finalize_escalate_reason": None},
+            store=_get_store(),
+        )
+    except Exception as exc:
+        print(f"Error clearing escalation for {task_id}: {exc}",
+              file=sys.stderr)
+        sys.exit(2)
+    print(f"[ESCALATION CLEARED] {task_id}")
 
 
 def pause_task(task_id, reason=None):
@@ -4787,6 +4937,14 @@ def main():
         action="store_true",
         help="force close workflow bypassing normal status transition checks",
     )
+    close_wf.add_argument(
+        "--accept-escalated",
+        dest="accept_escalated",
+        action="store_true",
+        help="human confirmation: close despite machine-set "
+             "finalize_escalated tasks (H-1; use after verifying deliverables, "
+             "or supersede/clear-escalation instead)",
+    )
 
     reopen_wf = sub.add_parser("reopen-workflow")
     reopen_wf.add_argument("workflow_id")
@@ -4833,6 +4991,12 @@ def main():
     supersede_cmd.add_argument("task_id")
     supersede_cmd.add_argument("--by", dest="new_task_id", default=None)
     supersede_cmd.add_argument("--reason", default=None)
+
+    clear_esc_cmd = sub.add_parser(
+        "clear-escalation",
+        help="revoke machine-set finalize_escalated so finalize re-drives (H-1)",
+    )
+    clear_esc_cmd.add_argument("task_id")
 
     stage_reset_cmd = sub.add_parser("stage-reset")
     stage_reset_cmd.add_argument("workflow_id")
@@ -5080,6 +5244,7 @@ def main():
                 dry_run=args.dry_run,
                 abandon=args.abandon,
                 force=args.force,
+                accept_escalated=getattr(args, "accept_escalated", False),
             )
         except Exception as exc:
             print(f"Error closing workflow {target_wid}: {exc}", file=sys.stderr)
@@ -5125,6 +5290,9 @@ def main():
             new_task_id=args.new_task_id,
             reason=args.reason
         )
+
+    elif args.command == "clear-escalation":
+        clear_finalize_escalation(args.task_id)
 
     elif args.command == "stage-reset":
         stage_reset(args.workflow_id, args.stage)
