@@ -54,6 +54,52 @@ def get_default_db_path() -> Path:
 _INITIALIZED_DBS: set = set()
 
 
+def _ensure_working_context_source_clock_schema(conn: sqlite3.Connection) -> None:
+    """Create or migrate the source clock to execution-scope granularity."""
+    columns = {
+        str(row["name"])
+        for row in conn.execute("PRAGMA table_info(working_context_source_clock)")
+    }
+    legacy_revision = 0
+    if columns and not {"run_scope", "workflow_id"}.issubset(columns):
+        row = (
+            conn.execute(
+                "SELECT revision FROM working_context_source_clock WHERE id = 1"
+            ).fetchone()
+            if "id" in columns else None
+        )
+        legacy_revision = int(row["revision"] or 0) if row is not None else 0
+        for source_table in (
+            "workflows", "tasks", "events", "trajectory_findings", "observations",
+            "observation_receipts", "eval_results", "collaboration_events",
+        ):
+            for operation in ("insert", "update", "delete"):
+                conn.execute(
+                    f"DROP TRIGGER IF EXISTS trg_working_context_source_clock_{source_table}_{operation}"
+                )
+        conn.execute(
+            "ALTER TABLE working_context_source_clock RENAME TO working_context_source_clock_legacy"
+        )
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS working_context_source_clock (
+            run_scope TEXT NOT NULL,
+            workflow_id TEXT NOT NULL DEFAULT '',
+            revision INTEGER NOT NULL,
+            PRIMARY KEY (run_scope, workflow_id)
+        );
+    """)
+    if legacy_revision:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO working_context_source_clock
+                (run_scope, workflow_id, revision)
+            SELECT run_scope, COALESCE(workflow_id, ''), ?
+            FROM working_context_source_heads
+            """,
+            (legacy_revision,),
+        )
+
+
 def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
     """Execute table and index creation DDL once per database path."""
     if path_key in _INITIALIZED_DBS:
@@ -227,15 +273,7 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
         );
     """);
 
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS working_context_source_clock (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
-            revision INTEGER NOT NULL
-        );
-    """);
-    conn.execute(
-        "INSERT OR IGNORE INTO working_context_source_clock (id, revision) VALUES (1, 0)"
-    )
+    _ensure_working_context_source_clock_schema(conn)
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS working_context_metric_events (
@@ -427,21 +465,91 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
             UNIQUE(run_id, revision)
         );
     """)
-    for source_table in (
+    source_clock_tables = (
         "workflows", "tasks", "events", "trajectory_findings", "observations",
         "observation_receipts", "eval_results", "collaboration_events",
-    ):
+    )
+    task_scoped_tables = {
+        "events", "trajectory_findings", "observations", "observation_receipts", "eval_results",
+    }
+
+    def source_clock_workflow(alias: str, source_table: str) -> str:
+        if source_table in {"workflows", "tasks", "collaboration_events"}:
+            return f"COALESCE({alias}.workflow_id, '')"
+        task_workflow = (
+            f"(SELECT t.workflow_id FROM tasks t WHERE t.task_id = {alias}.task_id LIMIT 1)"
+        )
+        return f"COALESCE({alias}.workflow_id, {task_workflow}, '')"
+
+    def source_clock_scope(alias: str, source_table: str) -> str:
+        if source_table == "workflows":
+            return f"COALESCE({alias}.workflow_id, '')"
+        if source_table == "tasks":
+            return (
+                f"COALESCE(json_extract({alias}.payload_json, '$.workflow_run_id'), "
+                f"json_extract({alias}.payload_json, '$.execution_id'), "
+                f"{alias}.workflow_id, '')"
+            )
+        if source_table == "collaboration_events":
+            return f"COALESCE({alias}.run_id, {alias}.workflow_id, '')"
+        task_scope = (
+            "(SELECT COALESCE(json_extract(t.payload_json, '$.workflow_run_id'), "
+            "json_extract(t.payload_json, '$.execution_id'), t.workflow_id, '') "
+            f"FROM tasks t WHERE t.task_id = {alias}.task_id LIMIT 1)"
+        )
+        run_scope = (
+            "(SELECT COALESCE(json_extract(t.payload_json, '$.workflow_run_id'), "
+            "json_extract(t.payload_json, '$.execution_id'), t.workflow_id, '') "
+            f"FROM tasks t WHERE json_extract(t.payload_json, '$.run_id') = {alias}.run_id LIMIT 1)"
+        )
+        return (
+            f"COALESCE({task_scope}, {run_scope}, {alias}.workflow_id, "
+            f"{alias}.run_id, '')"
+        )
+
+    def source_clock_has_task(alias: str, source_table: str) -> str:
+        if source_table not in task_scoped_tables:
+            return "0"
+        return (
+            f"(EXISTS(SELECT 1 FROM tasks t WHERE t.task_id = {alias}.task_id) "
+            f"OR EXISTS(SELECT 1 FROM tasks t "
+            f"WHERE json_extract(t.payload_json, '$.run_id') = {alias}.run_id))"
+        )
+
+    for source_table in source_clock_tables:
         for operation in ("INSERT", "UPDATE", "DELETE"):
             trigger_name = f"trg_working_context_source_clock_{source_table}_{operation.lower()}"
-            conn.execute(f"""
+            alias = "OLD" if operation == "DELETE" else "NEW"
+            scope_expr = source_clock_scope(alias, source_table)
+            workflow_expr = source_clock_workflow(alias, source_table)
+            statements = [
+                f"""
+                INSERT INTO working_context_source_clock (run_scope, workflow_id, revision)
+                SELECT {scope_expr}, {workflow_expr}, 1
+                WHERE {scope_expr} <> ''
+                ON CONFLICT(run_scope, workflow_id) DO UPDATE SET revision = revision + 1;
+                """
+            ]
+            if source_table in task_scoped_tables:
+                statements.append(
+                    f"""
+                    INSERT INTO working_context_source_clock (run_scope, workflow_id, revision)
+                    SELECT h.run_scope, h.workflow_id, 1
+                    FROM working_context_source_heads h
+                    WHERE h.workflow_id = {workflow_expr}
+                      AND NOT {source_clock_has_task(alias, source_table)}
+                    ON CONFLICT(run_scope, workflow_id) DO UPDATE SET revision = revision + 1;
+                    """
+                )
+            conn.execute(
+                f"""
                 CREATE TRIGGER IF NOT EXISTS {trigger_name}
                 AFTER {operation} ON {source_table}
                 BEGIN
-                    UPDATE working_context_source_clock
-                    SET revision = revision + 1
-                    WHERE id = 1;
+                    {''.join(statements)}
                 END;
-            """)
+                """
+            )
 
     # Replay specs: lineage edges from a source run to a replay run.
     # Intentionally no FOREIGN KEY clauses: specs survive workflow deletion
@@ -3470,7 +3578,15 @@ def save_working_context(
         source_clock = context.get("metrics", {}).get("source_clock")
         if source_backed:
             clock_row = conn.execute(
-                "SELECT revision FROM working_context_source_clock WHERE id = 1",
+                """
+                SELECT revision
+                FROM working_context_source_clock
+                WHERE run_scope = ? AND workflow_id = ?
+                """,
+                (
+                    str(context.get("run_scope") or ""),
+                    str(context.get("workflow_id") or ""),
+                ),
             ).fetchone()
             current_clock = int(clock_row["revision"] if clock_row else 0)
             if current_clock != int(source_clock):
@@ -3591,10 +3707,7 @@ def register_working_context_source(
         if row is not None and row["source_version"] == str(source_version):
             revision = int(row["revision"] or 0)
         else:
-            max_row = conn.execute(
-                "SELECT COALESCE(MAX(revision), 0) FROM working_context_source_heads",
-            ).fetchone()
-            revision = max(int(max_row[0] or 0) + 1, int(row["revision"] or 0) + 1 if row is not None else 1)
+            revision = int(row["revision"] or 0) + 1 if row is not None else 1
             conn.execute(
                 """
                 INSERT INTO working_context_source_heads

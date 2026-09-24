@@ -113,6 +113,36 @@ def test_init_db_and_wal_mode(state_env):
         conn.close()
 
 
+def test_global_source_clock_schema_migrates_to_execution_scope(tmp_path):
+    db_path = tmp_path / "legacy-source-clock.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE working_context_source_clock (id INTEGER PRIMARY KEY, revision INTEGER NOT NULL)"
+    )
+    conn.execute(
+        "INSERT INTO working_context_source_clock (id, revision) VALUES (1, 7)"
+    )
+    conn.commit()
+    conn.close()
+
+    migrated = state_db.get_db_connection(db_path)
+    try:
+        columns = {
+            row["name"]
+            for row in migrated.execute(
+                "PRAGMA table_info(working_context_source_clock)"
+            ).fetchall()
+        }
+        assert {"run_scope", "workflow_id", "revision"}.issubset(columns)
+        assert "id" not in columns
+        legacy = migrated.execute(
+            "SELECT revision FROM working_context_source_clock_legacy WHERE id = 1"
+        ).fetchone()
+        assert int(legacy["revision"]) == 7
+    finally:
+        migrated.close()
+
+
 def test_concurrent_legacy_event_schema_upgrade_is_idempotent(tmp_path):
     """Two independent processes can upgrade the same legacy events table."""
     db_path = tmp_path / "legacy-events.db"

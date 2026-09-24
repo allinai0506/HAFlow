@@ -145,7 +145,14 @@ def _merge_verification_events(
                             json_type(e.payload_json, '$.verification.passed') = 'false'
                             OR json_type(e.payload_json, '$.verification_passed') = 'false'
                         ) THEN 0 ELSE 1 END, e.sequence DESC, e.id DESC
-                    ) AS strict_rank
+                    ) AS strict_rank,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY e.run_id, COALESCE(e.task_id, '')
+                        ORDER BY CASE WHEN (
+                            json_type(e.payload_json, '$.verification.passed') = 'true'
+                            OR json_type(e.payload_json, '$.verification_passed') = 'true'
+                        ) THEN 0 ELSE 1 END, e.sequence DESC, e.id DESC
+                    ) AS pass_rank
                   FROM events e
                  WHERE e.source = 'trajectory'
                    AND e.run_id IN ({placeholders})
@@ -153,7 +160,7 @@ def _merge_verification_events(
                    AND e.workflow_id = ?
                    AND ({task_filter})
                    AND length(e.payload_json) <= 20000
-            ) WHERE latest_rank = 1 OR strict_rank = 1
+            ) WHERE latest_rank = 1 OR strict_rank = 1 OR pass_rank = 1
             ORDER BY sequence DESC, id DESC""",
         (*run_values, workflow_id, *task_ids),
     ).fetchall()
@@ -486,14 +493,19 @@ def _read_source_snapshot(
                             PARTITION BY er.run_id, COALESCE(er.task_id, '')
                             ORDER BY CASE WHEN er.verification_passed = 0 THEN 0 ELSE 1 END,
                                      er.revision DESC, er.rowid DESC
-                        ) AS strict_rank
+                        ) AS strict_rank,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY er.run_id, COALESCE(er.task_id, '')
+                            ORDER BY CASE WHEN er.verification_passed = 1 THEN 0 ELSE 1 END,
+                                     er.revision DESC, er.rowid DESC
+                        ) AS pass_rank
                       FROM eval_results er
                      WHERE er.run_id IN ({placeholders})
                        AND er.workflow_id = ?
                        AND ({eval_task_filter})
                        AND length(COALESCE(er.evidence_json, 'null')) <= 20000
                        AND length(COALESCE(er.warnings_json, '[]')) <= 20000
-                ) WHERE latest_rank = 1 OR strict_rank = 1
+                ) WHERE latest_rank = 1 OR strict_rank = 1 OR pass_rank = 1
                 ORDER BY run_id ASC, revision DESC, eval_id ASC""",
             (*run_values, str(workflow_id), *eval_task_ids),
         ).fetchall()
@@ -516,7 +528,12 @@ def _read_source_snapshot(
             evals_by_key.setdefault(key, []).append(decoded)
         evals = [item for items in evals_by_key.values() for item in items]
         source_clock_row = conn.execute(
-            "SELECT revision FROM working_context_source_clock WHERE id = 1",
+            """
+            SELECT revision
+            FROM working_context_source_clock
+            WHERE run_scope = ? AND workflow_id = ?
+            """,
+            (str(run_scope), str(workflow_id)),
         ).fetchone()
         source_clock = int(source_clock_row["revision"] if source_clock_row else 0)
         conn.commit()

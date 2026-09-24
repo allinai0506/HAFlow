@@ -31,6 +31,18 @@ def _save_working_context_in_process(db_path, payload, gate=None, ready=None):
     state_db.save_working_context(payload, db_path=Path(db_path))
 
 
+def _source_clock_revision(db: Path, run_scope: str, workflow_id: str) -> int:
+    row = state_db.get_db_connection(db).execute(
+        """
+        SELECT revision
+        FROM working_context_source_clock
+        WHERE run_scope = ? AND workflow_id = ?
+        """,
+        (run_scope, workflow_id),
+    ).fetchone()
+    return int(row["revision"] or 0) if row is not None else 0
+
+
 def _seed_workflow(db: Path, *, workflow_id: str = "wf-context", scope: str = "wf-exec-1") -> None:
     state_db.save_workflow(
         {
@@ -650,6 +662,58 @@ def test_source_clock_rejects_toctou_candidate_after_source_write(tmp_path: Path
     late_payload["_fingerprint_config"] = _config(None)
     late = state_db.save_working_context(late_payload, db_path=db)
     assert late.get("_stale_snapshot") is True
+
+
+def test_source_clock_ignores_writes_from_another_workflow(tmp_path: Path):
+    from herdr.context_projection import _config
+
+    db = tmp_path / "state.db"
+    _seed_workflow(db, workflow_id="wf-a", scope="scope-a")
+    _seed_workflow(db, workflow_id="wf-b", scope="scope-b")
+    target_a = _seed_task(db, _task("task-clock-a", workflow_id="wf-a", scope="scope-a"))
+    target_b = _seed_task(db, _task("task-clock-b", workflow_id="wf-b", scope="scope-b"))
+    context = _compile(db, target_a, "developer")
+    a_clock = _source_clock_revision(db, "scope-a", "wf-a")
+    state_db.save_task(
+        dict(target_b, goal=f"{target_b['goal']} updated"),
+        db_path=db,
+    )
+    TrajectoryLedger(db).append_event({
+        "run_id": target_b["run_id"], "task_id": target_b["task_id"],
+        "workflow_id": target_b["workflow_id"], "event_type": "task_started",
+    })
+    state_db.upsert_trajectory_finding(
+        _finding(target_b["run_id"], "fnd-other-workflow", task_id=target_b["task_id"]),
+        db_path=db,
+    )
+    assert _source_clock_revision(db, "scope-a", "wf-a") == a_clock
+    assert _source_clock_revision(db, "scope-b", "wf-b") > 0
+    candidate = dict(context.to_mapping())
+    candidate["context_id"] = "wc_scope_clock_cross_workflow"
+    saved = state_db.save_working_context(
+        candidate, db_path=db, fingerprint_config=_config(None),
+    )
+    assert saved.get("_stale_snapshot") is not True
+    assert state_db.get_working_context(saved["context_id"], db_path=db) is not None
+
+
+def test_source_clock_still_detects_writes_in_same_workflow_scope(tmp_path: Path):
+    from herdr.context_projection import _config
+
+    db = tmp_path / "state.db"
+    _seed_workflow(db, workflow_id="wf-a", scope="scope-a")
+    target = _seed_task(db, _task("task-clock-same-scope", workflow_id="wf-a", scope="scope-a"))
+    context = _compile(db, target, "developer")
+    state_db.save_task(
+        dict(target, goal=f"{target['goal']} updated"),
+        db_path=db,
+    )
+    candidate = dict(context.to_mapping())
+    candidate["context_id"] = "wc_scope_clock_same_workflow"
+    saved = state_db.save_working_context(
+        candidate, db_path=db, fingerprint_config=_config(None),
+    )
+    assert saved.get("_stale_snapshot") is True
 
 
 def test_source_backed_context_cannot_use_null_clock(tmp_path: Path):
@@ -1312,10 +1376,7 @@ def test_storage_fingerprint_does_not_cross_run_scope(tmp_path: Path):
         run_scope="scope-a", workflow_id="wf", source_version="source", db_path=db,
     )
 
-    clock_row = state_db.get_db_connection(db).execute(
-        "SELECT revision FROM working_context_source_clock WHERE id = 1",
-    ).fetchone()
-    clock = int(clock_row["revision"])
+    clock = _source_clock_revision(db, "scope-a", "wf")
 
     def payload(context_id: str, fingerprint: str, created_at: float):
         result = {
@@ -1440,10 +1501,7 @@ def test_concurrent_context_writers_do_not_replace_newer_latest(tmp_path: Path):
     state_db.register_working_context_source(
         run_scope="scope", workflow_id="wf", source_version="source", db_path=db,
     )
-    clock_row = state_db.get_db_connection(db).execute(
-        "SELECT revision FROM working_context_source_clock WHERE id = 1",
-    ).fetchone()
-    clock = int(clock_row["revision"])
+    clock = _source_clock_revision(db, "scope", "wf")
 
     def payload(context_id: str, fingerprint: str, created_at: float, source_watermark: int = 1):
         result = {
@@ -1505,10 +1563,7 @@ def test_storage_rejects_old_source_watermark_after_newer_snapshot(tmp_path: Pat
     state_db.register_working_context_source(
         run_scope="scope", workflow_id="wf", source_version="v2", db_path=db,
     )
-    clock_row = state_db.get_db_connection(db).execute(
-        "SELECT revision FROM working_context_source_clock WHERE id = 1",
-    ).fetchone()
-    clock = int(clock_row["revision"])
+    clock = _source_clock_revision(db, "scope", "wf")
     def payload(context_id: str, fingerprint: str, version: str, watermark: int, created_at: float):
         result = {
             "context_id": context_id, "run_scope": "scope", "run_id": "run",
@@ -1770,6 +1825,50 @@ def test_newer_pass_replaces_old_failure_after_recovery(tmp_path: Path):
     context = _compile(db, target, "tester")
     assert any(item.get("value", {}).get("passed") is True for item in context.verification)
     assert not any(item.get("value", {}).get("passed") is False for item in context.verification)
+
+
+def test_verification_unknown_after_pass_does_not_reactivate_failure(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-recovery-unknown-trajectory", node="test", role="tester"))
+    ledger = TrajectoryLedger(db)
+    for value in (False, True, {"status": "unknown"}):
+        verification = {"passed": value} if isinstance(value, bool) else value
+        ledger.append_event({
+            "run_id": target["run_id"], "task_id": target["task_id"],
+            "workflow_id": target["workflow_id"], "event_type": "verification_completed",
+            "verification": verification,
+        })
+    context = _compile(db, target, "tester")
+    assert not any(item.get("value", {}).get("passed") is False for item in context.verification)
+    assert any(
+        item.get("value", {}).get("status") == "unknown"
+        or item.get("value", {}).get("passed") is True
+        for item in context.verification
+    )
+
+
+def test_eval_unknown_after_pass_does_not_reactivate_failure(tmp_path: Path):
+    from herdr.eval_store import record_eval_result
+
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-recovery-unknown-eval", node="test", role="tester"))
+    record_eval_result(
+        target["run_id"], task_id=target["task_id"], workflow_id=target["workflow_id"],
+        revision=1, verification_passed=False, db_path=db,
+    )
+    record_eval_result(
+        target["run_id"], task_id=target["task_id"], workflow_id=target["workflow_id"],
+        revision=2, verification_passed=True, db_path=db,
+    )
+    record_eval_result(
+        target["run_id"], task_id=target["task_id"], workflow_id=target["workflow_id"],
+        revision=3, requirements_satisfied=True, db_path=db,
+    )
+    context = _compile(db, target, "tester")
+    assert not any(item.get("value", {}).get("verification_passed") is False for item in context.verification)
+    assert any(item.get("value", {}).get("verification_passed") is None for item in context.verification)
 
 
 def test_unknown_latest_verification_does_not_erase_strict_failure(tmp_path: Path):

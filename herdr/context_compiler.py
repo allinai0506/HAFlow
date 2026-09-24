@@ -354,6 +354,17 @@ def compile_working_context(
         )
 
     latest_verification: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
+    latest_failure: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
+    latest_pass: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
+
+    def verification_strength(item: Mapping[str, Any]) -> int:
+        value = item.get("value") if isinstance(item.get("value"), Mapping) else {}
+        if value.get("passed") is False or value.get("verification_passed") is False:
+            return 2
+        if value.get("passed") is True or value.get("verification_passed") is True:
+            return 1
+        return 0
+
     for item in all_verification:
         source_ref = str(item.get("source_ref") or "")
         source_kind = "eval" if source_ref.startswith("eval:") else "trajectory"
@@ -362,32 +373,30 @@ def compile_working_context(
             str(item.get("source_task") or ""),
             source_kind,
         )
-        old = latest_verification.get(key)
-        if old is None:
+        order = verification_order(item)
+        current = latest_verification.get(key)
+        if current is None or order >= verification_order(current):
             latest_verification[key] = item
+        strength = verification_strength(item)
+        if strength == 2:
+            previous = latest_failure.get(key)
+            if previous is None or order >= verification_order(previous):
+                latest_failure[key] = item
+        elif strength == 1:
+            previous = latest_pass.get(key)
+            if previous is None or order >= verification_order(previous):
+                latest_pass[key] = item
+
+    for key, latest in list(latest_verification.items()):
+        if verification_strength(latest) != 0:
             continue
-        item_value = item.get("value") if isinstance(item.get("value"), Mapping) else {}
-        old_value = old.get("value") if isinstance(old.get("value"), Mapping) else {}
-
-        def strictness(value: Mapping[str, Any]) -> int:
-            if value.get("passed") is False or value.get("verification_passed") is False:
-                return 2
-            if value.get("passed") is True or value.get("verification_passed") is True:
-                return 1
-            return 0
-
-        item_strength = strictness(item_value)
-        old_strength = strictness(old_value)
-        item_order = verification_order(item)
-        old_order = verification_order(old)
-        if item_order > old_order:
-            if not (item_strength == 0 and old_strength == 2):
-                latest_verification[key] = item
-        elif item_order == old_order:
-            if item_strength >= old_strength:
-                latest_verification[key] = item
-        elif item_strength == 2 and old_strength == 0:
-            latest_verification[key] = item
+        failure = latest_failure.get(key)
+        recovery = latest_pass.get(key)
+        if failure is not None and (
+            recovery is None
+            or verification_order(recovery) <= verification_order(failure)
+        ):
+            latest_verification[key] = failure
     def verification_failed(item: Mapping[str, Any]) -> bool:
         value = item.get("value") if isinstance(item.get("value"), Mapping) else {}
         return (
