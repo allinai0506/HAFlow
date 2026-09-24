@@ -147,7 +147,9 @@ def get_run_metrics(
         wall_time = round(max(0.0, (finished_at if finished_at is not None else current_time) - started_at), 6)
 
     final_status = task.get("status") if task else None
-    if final_status is None:
+    if facts["run_failed"] and final_status not in COMPLETED_TASK_STATUSES:
+        final_status = "failed"
+    elif final_status is None:
         if facts["run_completed"]:
             final_status = "completed"
         elif facts["run_failed"]:

@@ -397,6 +397,24 @@ def _merge_verification_events(
             return 1
         return 0
 
+    if (
+        task_by_id is not None
+        and allowed_runs is not None
+        and workflow_id is not None
+        and run_scope is not None
+    ):
+        merged = {
+            event_id: event
+            for event_id, event in merged.items()
+            if _source_allowed(
+                event,
+                task_by_id=task_by_id,
+                allowed_runs=allowed_runs,
+                workflow_id=workflow_id,
+                run_scope=run_scope,
+                taskless_scope_by_run=taskless_scope_by_run,
+            )
+        }
     reserved_by_key: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
     for event_id in reserved_event_ids:
         event = merged.get(event_id)
@@ -537,7 +555,7 @@ def _read_source_snapshot(
                     ORDER BY {priority_order} CASE WHEN task_id = ? THEN 0 ELSE 1 END,
                              created_at DESC, rowid DESC
                     LIMIT ?""",
-                (*run_values, *priority_ids, *scope_params, str(task_id), int(limit)),
+                (*run_values, *scope_params, *priority_ids, str(task_id), int(limit)),
             ).fetchall()
             def marker(row: sqlite3.Row) -> Dict[str, Any]:
                 return {
@@ -574,7 +592,7 @@ def _read_source_snapshot(
                      ORDER BY {priority_order} CASE WHEN task_id = ? THEN 0 ELSE 1 END,
                               created_at DESC, rowid DESC
                      LIMIT ?""",
-                (*run_values, *priority_ids, *scope_params, str(task_id), int(limit)),
+                (*run_values, *scope_params, *priority_ids, str(task_id), int(limit)),
             ).fetchall()
             result.extend(marker(row) for row in oversized)
             return result
@@ -651,6 +669,27 @@ def _read_source_snapshot(
             run for run, scope in taskless_scope_by_run.items()
             if scope is not None and str(scope) == str(run_scope)
         }
+
+        def _build_scope_filter() -> Tuple[str, List[Any]]:
+            parts: List[str] = []
+            params: List[Any] = []
+            for scoped_task_id, scoped_task in task_by_id.items():
+                scoped_run = _task_run(scoped_task)
+                if not scoped_run:
+                    continue
+                parts.append(
+                    "(task_id = ? AND run_id = ? "
+                    "AND (workflow_id = ? OR workflow_id IS NULL OR workflow_id = ''))"
+                )
+                params.extend([scoped_task_id, scoped_run, str(workflow_id)])
+            if taskless_allowed_runs:
+                parts.append(
+                    f"(task_id IS NULL AND workflow_id = ? "
+                    f"AND run_id IN ({','.join('?' for _ in taskless_allowed_runs)}))"
+                )
+                params.extend([str(workflow_id), *sorted(taskless_allowed_runs)])
+            return " OR ".join(parts) or "0", params
+
         scoped_tasks = [
             item for item in tasks
             if (collab_scope_for_task(item) or _task_run(item)) == run_scope
@@ -724,32 +763,9 @@ def _read_source_snapshot(
 
         placeholders = ",".join("?" for _ in allowed_runs)
         run_values = list(allowed_runs)
-        event_scope_parts = []
-        event_scope_params = []
-        if task_by_id:
-            event_scope_parts.append(
-                f"task_id IN ({','.join('?' for _ in task_by_id)})"
-            )
-            event_scope_params.extend(task_by_id)
-        if taskless_allowed_runs:
-            event_scope_parts.append(
-                f"(task_id IS NULL AND workflow_id = ? AND run_id IN ({','.join('?' for _ in taskless_allowed_runs)}))"
-            )
-            event_scope_params.extend([str(workflow_id), *sorted(taskless_allowed_runs)])
-        event_scope_filter = " OR ".join(event_scope_parts) or "0"
-        source_scope_parts = []
-        source_scope_params = []
-        if task_by_id:
-            source_scope_parts.append(
-                f"task_id IN ({','.join('?' for _ in task_by_id)})"
-            )
-            source_scope_params.extend(task_by_id)
-        if taskless_allowed_runs:
-            source_scope_parts.append(
-                f"(task_id IS NULL AND workflow_id = ? AND run_id IN ({','.join('?' for _ in taskless_allowed_runs)}))"
-            )
-            source_scope_params.extend([str(workflow_id), *sorted(taskless_allowed_runs)])
-        source_scope_filter = " OR ".join(source_scope_parts) or "0"
+        source_scope_filter, source_scope_params = _build_scope_filter()
+        event_scope_filter = source_scope_filter
+        event_scope_params = list(source_scope_params)
         event_rows = conn.execute(
             f"""SELECT * FROM events
                 WHERE source = 'trajectory'
@@ -828,9 +844,10 @@ def _read_source_snapshot(
                 f"""SELECT * FROM trajectory_findings
                     WHERE finding_id IN ({relation_placeholders})
                       AND run_id IN ({placeholders})
+                      AND ({source_scope_filter})
                       AND (workflow_id = ? OR ((workflow_id IS NULL OR workflow_id = '') AND task_id IS NOT NULL))
                     ORDER BY created_at ASC, rowid ASC LIMIT ?""",
-                (*missing_relation_ids, *run_values, str(workflow_id), int(max_findings)),
+                (*missing_relation_ids, *run_values, *source_scope_params, str(workflow_id), int(max_findings)),
             ).fetchall()
             findings.extend(safe_decode_finding_row(row) for row in relation_rows)
 
@@ -856,52 +873,61 @@ def _read_source_snapshot(
                 "created_at": decoded.get("created_at"),
             })
 
-        task_ids = list(task_by_id)
-        task_placeholders = ",".join("?" for _ in task_ids) or "NULL"
-        collab_rows = conn.execute(
-            f"""SELECT * FROM collaboration_events
-                WHERE run_id = ? AND workflow_id = ?
-                  AND from_task_id IN ({task_placeholders})
-                  AND to_task_id IN ({task_placeholders})
-                ORDER BY created_at DESC, event_id DESC LIMIT ?""",
-            (run_scope, str(workflow_id), *task_ids, *task_ids, int(max_collaborations)),
-        ).fetchall()
-        incoming_collab_rows = conn.execute(
-            """SELECT * FROM collaboration_events
-                WHERE run_id = ? AND workflow_id = ? AND to_task_id = ?
-                ORDER BY created_at DESC, event_id DESC LIMIT ?""",
-            (run_scope, str(workflow_id), str(task_id), int(max_collaborations)),
-        ).fetchall()
-        collaborations_by_id = {
-            str(state_db._decode_collaboration_row(row)["event_id"]): state_db._decode_collaboration_row(row)
-            for row in collab_rows
-        }
-        for row in incoming_collab_rows:
-            decoded = state_db._decode_collaboration_row(row)
-            collaborations_by_id[str(decoded["event_id"])] = decoded
-        collaborations = list(collaborations_by_id.values())
-        collaborations.sort(key=lambda event: (
-            0 if str(event.get("to_task_id") or "") == str(task_id) else 1,
-            -float(event.get("created_at") or 0.0),
-            str(event.get("event_id") or ""),
-        ))
-        collaborations = collaborations[:max_collaborations]
+        def _load_scoped_collaborations() -> List[Dict[str, Any]]:
+            current_task_ids = list(task_by_id)
+            current_placeholders = ",".join("?" for _ in current_task_ids) or "NULL"
+            collab_rows = conn.execute(
+                f"""SELECT * FROM collaboration_events
+                    WHERE run_id = ? AND workflow_id = ?
+                      AND from_task_id IN ({current_placeholders})
+                      AND to_task_id IN ({current_placeholders})
+                    ORDER BY created_at DESC, event_id DESC LIMIT ?""",
+                (run_scope, str(workflow_id), *current_task_ids, *current_task_ids, int(max_collaborations)),
+            ).fetchall()
+            incoming_rows = conn.execute(
+                f"""SELECT * FROM collaboration_events
+                    WHERE run_id = ? AND workflow_id = ? AND to_task_id = ?
+                      AND from_task_id IN ({current_placeholders})
+                    ORDER BY created_at DESC, event_id DESC LIMIT ?""",
+                (run_scope, str(workflow_id), str(task_id), *current_task_ids, int(max_collaborations)),
+            ).fetchall()
+            by_id = {
+                str(state_db._decode_collaboration_row(row)["event_id"]): state_db._decode_collaboration_row(row)
+                for row in collab_rows
+            }
+            for row in incoming_rows:
+                decoded = state_db._decode_collaboration_row(row)
+                by_id[str(decoded["event_id"])] = decoded
+            result = list(by_id.values())
+            result.sort(key=lambda event: (
+                0 if str(event.get("to_task_id") or "") == str(task_id) else 1,
+                -float(event.get("created_at") or 0.0),
+                str(event.get("event_id") or ""),
+            ))
+            return result[:max_collaborations]
+
+        collaborations = _load_scoped_collaborations()
         if not explicit_execution_scope:
             linked_task_ids = {
-                linked_id
-                for event in collaborations
-                if str(event.get("type") or "").upper() == "HANDOFF"
-                for linked_id in (
-                    str(event.get("from_task_id") or ""),
-                    str(event.get("to_task_id") or ""),
-                )
-                if str(task_id) in {
-                    str(event.get("from_task_id") or ""),
-                    str(event.get("to_task_id") or ""),
-                }
+                str(linked_id)
+                for linked_row in conn.execute(
+                    """
+                    SELECT from_task_id, to_task_id
+                      FROM collaboration_events
+                     WHERE run_id = ? AND workflow_id = ?
+                       AND UPPER(type) = 'HANDOFF'
+                       AND (from_task_id = ? OR to_task_id = ?)
+                    """,
+                    (str(run_scope), str(workflow_id), str(task_id), str(task_id)),
+                ).fetchall()
+                for linked_id in (linked_row["from_task_id"], linked_row["to_task_id"])
+                if linked_id and str(linked_id) != str(task_id)
             }
             for linked_id in linked_task_ids:
-                linked_task = task_by_id.get(linked_id)
+                linked_task = task_by_id.get(linked_id) or next(
+                    (item for item in tasks if str(item.get("task_id") or "") == linked_id),
+                    None,
+                )
                 linked_run = _task_run(linked_task) if linked_task else None
                 if linked_run:
                     allowed_runs.add(linked_run)
@@ -909,6 +935,10 @@ def _read_source_snapshot(
                 item for item in scoped_tasks if _task_run(item) in allowed_runs
             ]
             task_by_id = {str(item.get("task_id")): item for item in scoped_tasks}
+            collaborations = _load_scoped_collaborations()
+            source_scope_filter, source_scope_params = _build_scope_filter()
+            event_scope_filter = source_scope_filter
+            event_scope_params = list(source_scope_params)
             if len(allowed_runs) > 1:
                 placeholders = ",".join("?" for _ in allowed_runs)
                 run_values = list(allowed_runs)
@@ -921,9 +951,10 @@ def _read_source_snapshot(
                                 WHERE source = 'trajectory'
                                   AND run_id IN ({placeholders})
                                   AND event_type IN ({",".join("?" for _ in RELEVANT_EVENT_TYPES)})
+                                  AND ({event_scope_filter})
                                   AND length(payload_json) <= 20000
                                 ORDER BY sequence DESC, id DESC LIMIT ?""",
-                            (*run_values, *sorted(RELEVANT_EVENT_TYPES), int(max_events)),
+                            (*run_values, *sorted(RELEVANT_EVENT_TYPES), *event_scope_params, int(max_events)),
                         ).fetchall()
                     ],
                     task_by_id=task_by_id,
@@ -985,9 +1016,10 @@ def _read_source_snapshot(
                         f"""SELECT * FROM trajectory_findings
                             WHERE finding_id IN ({relation_placeholders})
                               AND run_id IN ({placeholders})
+                              AND ({source_scope_filter})
                               AND (workflow_id = ? OR ((workflow_id IS NULL OR workflow_id = '') AND task_id IS NOT NULL))
                             ORDER BY created_at ASC, rowid ASC LIMIT ?""",
-                        (*missing_relation_ids, *run_values, str(workflow_id), int(max_findings)),
+                        (*missing_relation_ids, *run_values, *source_scope_params, str(workflow_id), int(max_findings)),
                     ).fetchall()
                     findings.extend(safe_decode_finding_row(row) for row in relation_rows)
                 observations = []
@@ -1012,20 +1044,8 @@ def _read_source_snapshot(
                     })
 
         eval_task_ids = list(task_by_id)
-        eval_task_filter_parts = []
-        eval_task_filter_params = []
-        if taskless_allowed_runs:
-            eval_task_filter_parts.append(
-                f"(task_id IS NULL AND run_id IN ({','.join('?' for _ in taskless_allowed_runs)}))"
-            )
-            eval_task_filter_params.extend(sorted(taskless_allowed_runs))
-        if eval_task_ids:
-            eval_task_filter_parts.append(
-                f"task_id IN ({','.join('?' for _ in eval_task_ids)})"
-            )
-        if not eval_task_filter_parts:
-            eval_task_filter_parts.append("0")
-        eval_task_filter = " OR ".join(eval_task_filter_parts)
+        eval_task_filter = source_scope_filter
+        eval_task_filter_params = list(source_scope_params)
         eval_limit = max(0, int(max_evals))
         if eval_limit == 0:
             eval_rows = []
@@ -1067,7 +1087,6 @@ def _read_source_snapshot(
                     *run_values,
                     str(workflow_id),
                     *eval_task_filter_params,
-                    *eval_task_ids,
                     str(task_id),
                     eval_window_limit,
                 ),
@@ -1096,7 +1115,6 @@ def _read_source_snapshot(
                     *run_values,
                     str(workflow_id),
                     *eval_task_filter_params,
-                    *eval_task_ids,
                     str(task_id),
                     eval_window_limit,
                 ),

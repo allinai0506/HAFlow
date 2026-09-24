@@ -349,6 +349,49 @@ def test_source_clock_intermediate_primary_key_is_rebuilt(tmp_path):
         migrated.close()
 
 
+def test_residual_legacy_source_head_uses_max_revision(tmp_path):
+    db_path = tmp_path / "residual-source-head.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """CREATE TABLE working_context_source_heads (
+               run_scope TEXT NOT NULL, workflow_id TEXT NOT NULL,
+               source_version TEXT NOT NULL, revision INTEGER NOT NULL,
+               updated_at REAL NOT NULL,
+               PRIMARY KEY (run_scope, workflow_id)
+           )"""
+    )
+    conn.execute(
+        "INSERT INTO working_context_source_heads VALUES (?, ?, ?, ?, ?)",
+        ("scope", "wf", "current", 2, 2.0),
+    )
+    conn.execute(
+        """CREATE TABLE working_context_source_heads_legacy (
+               run_scope TEXT NOT NULL, workflow_id TEXT,
+               source_version TEXT NOT NULL, revision INTEGER NOT NULL,
+               updated_at REAL NOT NULL
+           )"""
+    )
+    conn.execute(
+        "INSERT INTO working_context_source_heads_legacy VALUES (?, ?, ?, ?, ?)",
+        ("scope", "wf", "legacy", 9, 9.0),
+    )
+    conn.commit()
+    conn.close()
+    state_db.init_db(db_path)
+    migrated = state_db.get_db_connection(db_path)
+    try:
+        row = migrated.execute(
+            """SELECT source_version, revision, updated_at
+                 FROM working_context_source_heads
+                WHERE run_scope = 'scope' AND workflow_id = 'wf'"""
+        ).fetchone()
+        assert row["source_version"] == "legacy"
+        assert row["revision"] == 9
+        assert row["updated_at"] == 9.0
+    finally:
+        migrated.close()
+
+
 def test_residual_legacy_source_clock_uses_max_revision(tmp_path):
     db_path = tmp_path / "residual-source-clock.db"
     conn = sqlite3.connect(db_path)

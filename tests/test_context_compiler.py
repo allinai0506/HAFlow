@@ -996,7 +996,7 @@ def test_task_scope_update_advances_old_and_new_source_clocks(tmp_path: Path):
     target = _seed_task(db, _task("task-scope-move", workflow_id="wf-a", scope="scope-a"))
     _compile(db, target, "developer")
     old_clock = _source_clock_revision(db, "scope-a", "wf-a")
-    sibling = _seed_task(db, _task("task-scope-sibling", workflow_id="wf-a", scope="scope-b"))
+    _seed_task(db, _task("task-scope-sibling", workflow_id="wf-a", scope="scope-b"))
     sibling_clock = _source_clock_revision(db, "scope-b", "wf-a")
     state_db.save_task(dict(target, goal="target update"), db_path=db)
     assert _source_clock_revision(db, "scope-a", "wf-a") > old_clock
@@ -1079,6 +1079,96 @@ def test_foreign_event_noise_cannot_starve_target_source_window(tmp_path: Path):
         )
     context = _compile(db, target, "developer")
     assert any(item.get("value", {}).get("ref") == "target-artifact" for item in context.artifacts)
+
+
+def test_scope_invalid_event_cannot_change_context_identity(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db, workflow_id="wf-invalid-event", scope="scope-a")
+    target = _seed_task(db, _task(
+        "task-invalid-event", workflow_id="wf-invalid-event", scope="scope-a"
+    ))
+    before = _compile(db, target, "developer")
+    state_db.record_trajectory_event(
+        {
+            "run_id": target["run_id"], "task_id": target["task_id"],
+            "workflow_id": "wf-other", "event_type": "decision",
+            "payload": {"decision": "cross-workflow"},
+        },
+        db_path=db,
+    )
+    after = _compile(db, target, "developer")
+    assert after.source_version == before.source_version
+    assert after.context_fingerprint == before.context_fingerprint
+    assert after.context_id == before.context_id
+
+
+def test_scope_invalid_collaboration_cannot_change_context_identity(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db, workflow_id="wf-invalid-collab", scope="scope-a")
+    target = _seed_task(db, _task(
+        "task-invalid-collab", workflow_id="wf-invalid-collab", scope="scope-a"
+    ))
+    foreign = _seed_task(db, _task(
+        "task-invalid-collab-foreign", workflow_id="wf-invalid-collab", scope="scope-b"
+    ))
+    before = _compile(db, target, "developer")
+    state_db.create_collaboration_event(
+        {
+            "run_id": "scope-a", "workflow_id": target["workflow_id"],
+            "from_task_id": foreign["task_id"], "to_task_id": target["task_id"],
+            "type": "HANDOFF", "source_fact_id": "fact-invalid-collab",
+        },
+        db_path=db,
+    )
+    after = _compile(db, target, "developer")
+    assert after.source_version == before.source_version
+    assert after.context_fingerprint == before.context_fingerprint
+    assert after.context_id == before.context_id
+    assert not any("fact-invalid-collab" in json.dumps(item, ensure_ascii=False) for item in after.handoffs)
+
+
+def test_wrong_workflow_observation_noise_cannot_starve_target_evidence(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db, workflow_id="wf-invalid-observation", scope="scope-a")
+    target = _seed_task(db, _task(
+        "task-invalid-observation", workflow_id="wf-invalid-observation", scope="scope-a"
+    ))
+    valid = create_observation(
+        run_id=target["run_id"], task_id=target["task_id"],
+        workflow_id=target["workflow_id"], source_type="verification",
+        source_ref="verification:valid-observation", content="valid",
+        store=ObservationStore(db),
+    )
+    for index in range(301):
+        create_observation(
+            run_id=target["run_id"], task_id=target["task_id"],
+            workflow_id="wf-other", source_type="agent_log",
+            source_ref=f"pane:noise-{index}", content="noise",
+            store=ObservationStore(db),
+        )
+    context = _compile(db, target, "developer")
+    assert any(item.get("source_ref") == f"observation:{valid.observation_id}" for item in context.evidence)
+
+
+def test_wrong_workflow_finding_noise_cannot_starve_target_finding(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db, workflow_id="wf-invalid-finding", scope="scope-a")
+    target = _seed_task(db, _task(
+        "task-invalid-finding", workflow_id="wf-invalid-finding", scope="scope-a"
+    ))
+    valid_finding = _finding(
+        target["run_id"], "fnd-valid-window", task_id=target["task_id"], severity="critical"
+    )
+    valid_finding["workflow_id"] = target["workflow_id"]
+    state_db.upsert_trajectory_finding(valid_finding, db_path=db)
+    for index in range(500):
+        foreign_finding = _finding(
+            target["run_id"], f"fnd-invalid-window-{index}", task_id=target["task_id"]
+        )
+        foreign_finding["workflow_id"] = "wf-other"
+        state_db.upsert_trajectory_finding(foreign_finding, db_path=db)
+    context = _compile(db, target, "developer")
+    assert "finding:fnd-valid-window" in context.source_refs
 
 
 def test_taskless_source_with_reused_run_advances_all_workflow_scopes(tmp_path: Path):
@@ -1476,6 +1566,14 @@ def test_legacy_finding_without_workflow_can_be_supersession_target(tmp_path: Pa
             _finding(sibling["run_id"], f"fnd-legacy-noise-{index}", task_id=sibling["task_id"]),
             db_path=db,
         )
+    state_db.create_collaboration_event(
+        {
+            "run_id": "wf-context", "workflow_id": "wf-context",
+            "from_task_id": upstream["task_id"], "to_task_id": target["task_id"],
+            "type": "HANDOFF", "source_fact_id": "fact-legacy-finding-link",
+        },
+        db_path=db,
+    )
     context = _compile(db, target, "developer")
     assert "finding:fnd-legacy-new" in context.source_refs
 
@@ -1698,6 +1796,40 @@ def test_legacy_planned_link_keeps_critical_finding_window(tmp_path: Path):
     assert any(
         item.get("source_ref") == "finding:fnd-planned-critical"
         for item in context.blockers
+    )
+
+
+def test_legacy_handoff_scope_filter_survives_taskless_event_noise(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _task("task-legacy-noise-target", node="test")
+    target.pop("workflow_run_id")
+    upstream = _task("task-legacy-noise-upstream", node="implementation")
+    upstream.pop("workflow_run_id")
+    upstream["artifacts"] = [{"ref": "legacy-upstream-artifact"}]
+    _seed_task(db, target)
+    _seed_task(db, upstream)
+    state_db.create_collaboration_event(
+        {
+            "run_id": "wf-context", "workflow_id": "wf-context",
+            "from_task_id": upstream["task_id"], "to_task_id": target["task_id"],
+            "type": "HANDOFF", "source_fact_id": "fact-legacy-noise-link",
+        },
+        db_path=db,
+    )
+    for index in range(301):
+        state_db.record_trajectory_event(
+            {
+                "run_id": "unlinked-external-run", "task_id": None,
+                "workflow_id": "wf-context", "event_type": "decision",
+                "payload": {"decision": f"external-{index}"},
+            },
+            db_path=db,
+        )
+    context = _compile(db, target, "tester")
+    assert any(
+        item.get("value", {}).get("ref") == "legacy-upstream-artifact"
+        for item in context.artifacts
     )
 
 
@@ -2638,7 +2770,7 @@ def test_storage_rejects_old_source_watermark_after_newer_snapshot(tmp_path: Pat
         result["metrics"]["payload_digest"] = _payload_digest(result)
         return _bind_storage_fingerprint(result)
 
-    first = state_db.save_working_context(
+    state_db.save_working_context(
         payload("wc_v2", "b" * 64, "v2", 1, 20.0), db_path=db,
     )
     returned = state_db.save_working_context(

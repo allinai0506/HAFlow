@@ -151,6 +151,51 @@ def test_latest_context_pack_and_incomplete_run(tmp_path: Path):
     assert metrics.latest_context_pack_bytes is not None
 
 
+def test_legacy_task_without_events_uses_authoritative_identity(tmp_path: Path):
+    db_path = tmp_path / "legacy-no-events.db"
+    state_db.save_task(
+        {"task_id": "task-legacy-no-events", "workflow_id": "wf-1", "status": "working"},
+        db_path=db_path,
+    )
+    metrics = get_run_metrics("run_task-legacy-no-events", db_path=db_path, now=20.0)
+    assert metrics.task_id == "task-legacy-no-events"
+    assert metrics.workflow_id == "wf-1"
+    assert metrics.final_status == "working"
+    assert metrics.trajectory_events == 0
+
+
+def test_malformed_task_payload_fails_closed_without_sqlite_error(tmp_path: Path):
+    db_path = tmp_path / "malformed-task.db"
+    state_db.save_workflow(
+        {"workflow_id": "wf-malformed", "title": "fixture", "status": "running", "config": {}},
+        db_path=db_path,
+    )
+    state_db.save_task(
+        {"task_id": "task-malformed", "workflow_id": "wf-malformed", "status": "working"},
+        db_path=db_path,
+    )
+    conn = state_db.get_db_connection(db_path)
+    try:
+        trigger_names = [
+            row["name"] for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'trigger'"
+            ).fetchall()
+        ]
+        for trigger_name in trigger_names:
+            conn.execute(f'DROP TRIGGER "{trigger_name}"')
+        conn.execute(
+            "UPDATE tasks SET payload_json = ? WHERE task_id = ?",
+            ("{not-json", "task-malformed"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    metrics = get_run_metrics("run_task-malformed", db_path=db_path, now=20.0)
+    assert metrics.task_id is None
+    assert metrics.workflow_id is None
+    assert metrics.trajectory_events == 0
+
+
 def test_context_pack_without_authoritative_task_is_unknown_metrics(tmp_path: Path):
     db_path = tmp_path / "state.db"
     state_db.save_context_pack(_pack("run-ghost-pack", "ctx-ghost", 10.0), db_path=db_path)

@@ -97,10 +97,23 @@ def _ensure_working_context_source_heads_schema(conn: sqlite3.Connection) -> Non
     ).fetchone():
         conn.execute(
             """
-            INSERT OR IGNORE INTO working_context_source_heads
+            INSERT INTO working_context_source_heads
                 (run_scope, workflow_id, source_version, revision, updated_at)
             SELECT run_scope, COALESCE(workflow_id, ''), source_version, revision, updated_at
             FROM working_context_source_heads_legacy
+            WHERE 1
+            ON CONFLICT(run_scope, workflow_id) DO UPDATE SET
+                source_version = CASE
+                    WHEN excluded.revision > working_context_source_heads.revision
+                    THEN excluded.source_version
+                    ELSE working_context_source_heads.source_version
+                END,
+                revision = MAX(working_context_source_heads.revision, excluded.revision),
+                updated_at = CASE
+                    WHEN excluded.revision > working_context_source_heads.revision
+                    THEN excluded.updated_at
+                    ELSE working_context_source_heads.updated_at
+                END
             """
         )
 
@@ -165,6 +178,7 @@ def _ensure_working_context_source_clock_schema(conn: sqlite3.Connection) -> Non
                 SELECT COALESCE(run_scope, ''), COALESCE(workflow_id, ''),
                        COALESCE(MAX(revision), 0)
                 FROM working_context_source_clock_legacy
+                WHERE 1
                 GROUP BY run_scope, workflow_id
                 ON CONFLICT(run_scope, workflow_id) DO UPDATE SET
                     revision = MAX(revision, excluded.revision)
@@ -2397,7 +2411,7 @@ def aggregate_run_metric_rows(run_id: str, db_path: Optional[Path] = None) -> Di
             try:
                 task_payload = json.loads(task_identity["payload_json"] or "{}")
             except (TypeError, json.JSONDecodeError):
-                task_payload = {}
+                continue
             try:
                 effective_run_id = str(run_id_for_task({
                     **task_payload, "task_id": task_identity["task_id"]
@@ -2414,6 +2428,10 @@ def aggregate_run_metric_rows(run_id: str, db_path: Optional[Path] = None) -> Di
                     task_payload.get("workflow_run_id")
                     or task_payload.get("execution_id")
                     or task_identity["workflow_id"] or ""
+                ),
+                "explicit_scope": bool(
+                    task_payload.get("workflow_run_id")
+                    or task_payload.get("execution_id")
                 ),
             })
         identity_ambiguous = len(scope_rows) > 1
@@ -2526,39 +2544,35 @@ def aggregate_run_metric_rows(run_id: str, db_path: Optional[Path] = None) -> Di
             """,
             (run_id,),
         ).fetchone()
-        identity = conn.execute(
-            """
-            SELECT
-              (SELECT task_id FROM events
-                WHERE run_id = ? AND source = 'trajectory' AND task_id IS NOT NULL
-                ORDER BY sequence ASC, id ASC LIMIT 1) AS task_id,
-              (SELECT workflow_id FROM events
-                WHERE run_id = ? AND source = 'trajectory' AND workflow_id IS NOT NULL
-                ORDER BY sequence ASC, id ASC LIMIT 1) AS workflow_id
-            """,
-            (run_id, run_id),
-        ).fetchone()
-        scope_row = conn.execute(
-            """
-            SELECT workflow_id, payload_json
-              FROM tasks
-             WHERE json_extract(payload_json, '$.run_id') = ?
-             ORDER BY updated_at DESC, task_id ASC LIMIT 1
-            """,
-            (run_id,),
-        ).fetchone()
-        metric_scope = run_id
-        if scope_row is not None:
-            payload = json.loads(scope_row["payload_json"] or "{}")
+        if len(scope_rows) == 1:
+            authoritative_scope = scope_rows[0]
+            identity = {
+                "task_id": authoritative_scope["task_id"],
+                "workflow_id": authoritative_scope["workflow_id"],
+            }
             metric_scope = (
-                payload.get("workflow_run_id")
-                or payload.get("execution_id")
-                or run_id
+                str(authoritative_scope["scope"] or run_id)
+                if authoritative_scope["explicit_scope"]
+                else str(run_id)
             )
-        metric_workflow_id = (
-            scope_row["workflow_id"] if scope_row is not None
-            else (identity["workflow_id"] if identity is not None else None)
-        )
+            metric_workflow_id = str(authoritative_scope["workflow_id"] or "") or None
+        else:
+            identity = conn.execute(
+                """
+                SELECT
+                  (SELECT task_id FROM events
+                    WHERE run_id = ? AND source = 'trajectory' AND task_id IS NOT NULL
+                    ORDER BY sequence ASC, id ASC LIMIT 1) AS task_id,
+                  (SELECT workflow_id FROM events
+                    WHERE run_id = ? AND source = 'trajectory' AND workflow_id IS NOT NULL
+                    ORDER BY sequence ASC, id ASC LIMIT 1) AS workflow_id
+                """,
+                (run_id, run_id),
+            ).fetchone()
+            metric_scope = run_id
+            metric_workflow_id = (
+                identity["workflow_id"] if identity is not None else None
+            )
         observations = conn.execute(
             """
             SELECT COUNT(*) AS observations_created,
