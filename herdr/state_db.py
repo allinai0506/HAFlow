@@ -2418,8 +2418,11 @@ def aggregate_run_metric_rows(run_id: str, db_path: Optional[Path] = None) -> Di
                 UNION ALL
                 SELECT 'trajectory_findings', run_id, task_id, workflow_id
                   FROM trajectory_findings WHERE run_id = ?
+                UNION ALL
+                SELECT 'context_packs', run_id, task_id, workflow_id
+                  FROM context_packs WHERE run_id = ?
                 """,
-                (run_id, run_id, run_id, run_id),
+                (run_id, run_id, run_id, run_id, run_id),
             ).fetchall()
             observed_task_ids: set[str] = set()
             observed_workflow_ids: set[str] = set()
@@ -3808,6 +3811,14 @@ def save_working_context(
         context = _redact_value(dict(context))
     except ImportError:
         context = dict(context)
+    def _normalize_json_value(value: Any) -> Any:
+        if isinstance(value, Mapping):
+            return {str(key): _normalize_json_value(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [_normalize_json_value(item) for item in value]
+        return value
+
+    context = _normalize_json_value(context)
     if context.get("agent_role") not in {"developer", "reviewer", "tester", "coordinator"}:
         raise ValueError("working context agent_role is invalid")
     for field_name in (

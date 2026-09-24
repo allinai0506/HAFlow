@@ -443,6 +443,24 @@ def test_storage_rejects_reused_taskless_source_across_execution_scopes(tmp_path
         state_db.save_working_context(payload, db_path=db)
 
 
+def test_storage_normalizes_non_dict_verification_mapping(tmp_path: Path):
+    from collections import UserDict
+
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-userdict-verification", node="test", role="tester"))
+    payload = dict(_compile(db, target, "tester").to_mapping())
+    payload["context_id"] = "wc_userdict_verification"
+    payload["verification"] = [{
+        "kind": "verification", "source_ref": f"task:{target['task_id']}",
+        "source_task": target["task_id"], "source_run": target["run_id"],
+        "value": {"passed": False},
+    }]
+    _bind_storage_fingerprint(payload)
+    payload["verification"][0]["value"] = UserDict({"passed": False})
+    state_db.save_working_context(payload, db_path=db)
+
+
 def test_storage_rejects_incomplete_aggregate_source_refs(tmp_path: Path):
     db = tmp_path / "state.db"
     _seed_workflow(db)
@@ -1012,6 +1030,15 @@ def test_taskless_reused_run_source_is_rejected_across_execution_scopes(tmp_path
     context_b = _compile(db, target_b, "developer")
     assert all(item.get("source_ref") != f"observation:{observation.observation_id}" for item in context_a.evidence)
     assert all(item.get("source_ref") != f"observation:{observation.observation_id}" for item in context_b.evidence)
+    create_observation(
+        run_id="shared-taskless", task_id=None, workflow_id="wf-reused",
+        source_type="verification", source_ref="verification:reused-taskless-2",
+        content="SECRET-2", store=ObservationStore(db),
+    )
+    context_a_again = _compile(db, target_a, "developer")
+    assert context_a_again.source_version == context_a.source_version
+    assert context_a_again.context_fingerprint == context_a.context_fingerprint
+    assert context_a_again.context_id == context_a.context_id
 
 
 def test_taskless_source_with_reused_run_advances_all_workflow_scopes(tmp_path: Path):
@@ -1164,6 +1191,21 @@ def test_source_revision_covers_legacy_stages_beyond_projection_cap(tmp_path: Pa
     second = _compile(db, target, "reviewer")
     assert second.source_version != first.source_version
     assert second.source_watermark > first.source_watermark
+
+
+def test_id_form_legacy_stages_use_previous_stage_id(tmp_path: Path):
+    db = tmp_path / "state.db"
+    state_db.save_workflow(
+        {
+            "workflow_id": "wf-id-stages", "title": "fixture", "status": "running",
+            "config": {"stages": [{"id": "impl"}, {"id": "review"}]},
+        },
+        db_path=db,
+    )
+    target = _seed_task(db, _task("task-id-stages", workflow_id="wf-id-stages", node="review"))
+    context = _compile(db, target, "reviewer")
+    assert context.current_state["dependency_state"] == {"impl": "unknown"}
+    assert "None" not in context.current_state["review_scope"]["dependency_nodes"]
 
 
 def test_key_form_workflow_nodes_preserve_dependencies_and_rules(tmp_path: Path):

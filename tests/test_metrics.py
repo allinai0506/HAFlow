@@ -151,6 +151,14 @@ def test_latest_context_pack_and_incomplete_run(tmp_path: Path):
     assert metrics.latest_context_pack_bytes is not None
 
 
+def test_context_pack_without_authoritative_task_is_unknown_metrics(tmp_path: Path):
+    db_path = tmp_path / "state.db"
+    state_db.save_context_pack(_pack("run-ghost-pack", "ctx-ghost", 10.0), db_path=db_path)
+    metrics = get_run_metrics("run-ghost-pack", db_path=db_path, now=20.0)
+    assert metrics.context_packs_created == 0
+    assert metrics.latest_context_pack_bytes is None
+
+
 def test_failed_run_is_terminal_but_not_completed(tmp_path: Path):
     db_path = tmp_path / "state.db"
     state_db.save_task(_task("run-failed", status="working"), db_path=db_path)

@@ -1140,6 +1140,28 @@ def _read_source_snapshot(
     finally:
         conn.close()
 
+    findings = [
+        finding for finding in findings
+        if _source_allowed(
+            finding,
+            task_by_id=task_by_id,
+            allowed_runs=allowed_runs,
+            workflow_id=str(workflow_id),
+            run_scope=run_scope,
+            taskless_scope_by_run=taskless_scope_by_run,
+        )
+    ]
+    observations = [
+        observation for observation in observations
+        if _source_allowed(
+            observation,
+            task_by_id=task_by_id,
+            allowed_runs=allowed_runs,
+            workflow_id=str(workflow_id),
+            run_scope=run_scope,
+            taskless_scope_by_run=taskless_scope_by_run,
+        )
+    ]
     snapshot = {
         "task": task,
         "workflow": workflow,
@@ -1336,7 +1358,9 @@ def _workflow_node(workflow: Mapping[str, Any], node_id: Optional[str]) -> Dict[
         if stage_id == str(node_id):
             result = dict(stage)
             result.setdefault("id", stage_id)
-            result.setdefault("depends_on", [str(stages[index - 1].get("key"))] if index else [])
+            if "depends_on" not in result and index:
+                previous_id = stages[index - 1].get("key") or stages[index - 1].get("id") if isinstance(stages[index - 1], Mapping) else None
+                result["depends_on"] = [str(previous_id)] if previous_id else []
             return result
     return {}
 
