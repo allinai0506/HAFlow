@@ -170,6 +170,41 @@ def test_storage_rejects_scope_foreign_finding_even_when_row_exists(tmp_path: Pa
         state_db.save_working_context(forged, db_path=db)
 
 
+def test_storage_rejects_empty_provenance_with_foreign_identity(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db, workflow_id="wf")
+    task = _task("task-empty-provenance", scope="scope-a", run_id="run-a")
+    task["workflow_id"] = "wf"
+    _seed_task(db, task)
+    state_db.register_working_context_source(
+        run_scope="scope-a", workflow_id="wf", source_version="source", db_path=db,
+    )
+    with pytest.raises(ValueError, match="target task scope|run_id"):
+        state_db.save_working_context({
+            "context_id": "wc_empty_forged", "run_scope": "scope-a", "run_id": "run-b",
+            "workflow_id": "wf", "task_id": task["task_id"], "node_id": "review",
+            "agent_role": "developer", "goal": "goal", "current_state": {},
+            "findings": [], "artifacts": [], "evidence": [], "completed": [],
+            "decisions": [], "blockers": [], "open_questions": [], "verification": [],
+            "handoffs": [], "next_action": "continue", "source_refs": [],
+            "context_fingerprint": "a" * 64, "source_version": "source",
+            "source_watermark": 1, "metrics": {}, "compiled_at": 1.0,
+        }, db_path=db)
+
+
+def test_legacy_task_without_run_id_uses_stable_fallback_for_storage(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _task("task-legacy-missing-run")
+    target.pop("run_id", None)
+    target.pop("workflow_run_id", None)
+    _seed_task(db, target)
+    context = _compile(db, target, "developer")
+    from herdr.context_compiler import get_working_context
+    assert context.run_id == "run_task-legacy-missing-run"
+    assert get_working_context(context.context_id, db_path=db) is not None
+
+
 def test_storage_rejects_payload_changed_without_digest_refresh(tmp_path: Path):
     db = tmp_path / "state.db"
     _seed_workflow(db)
@@ -790,6 +825,26 @@ def test_run_isolation_rejects_other_run_sources(tmp_path: Path):
     assert context.run_id == "run-target"
 
 
+def test_non_handoff_collaboration_does_not_change_source_fingerprint(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _task("task-request-fingerprint-target", node="review")
+    target.pop("workflow_run_id", None)
+    other = _task("task-request-fingerprint-other", node="implementation")
+    other.pop("workflow_run_id", None)
+    _seed_task(db, target)
+    _seed_task(db, other)
+    first = _compile(db, target, "reviewer")
+    state_db.create_collaboration_event({
+        "run_id": target["workflow_id"], "workflow_id": target["workflow_id"],
+        "from_task_id": other["task_id"], "to_task_id": target["task_id"],
+        "type": "REQUEST", "source_fact_id": "request-only",
+    }, db_path=db)
+    second = _compile(db, target, "reviewer")
+    assert second.source_version == first.source_version
+    assert second.context_id == first.context_id
+
+
 def test_legacy_planned_link_does_not_authorize_distinct_runs(tmp_path: Path):
     db = tmp_path / "state.db"
     _seed_workflow(db)
@@ -1046,12 +1101,19 @@ def test_snapshot_is_immutable_and_recompiles_after_source_change(tmp_path: Path
 
 def test_storage_fingerprint_does_not_cross_run_scope(tmp_path: Path):
     db = tmp_path / "state.db"
+    _seed_workflow(db, workflow_id="wf")
+    target = _task("task-reused", scope="scope-a", run_id="run-scope-a")
+    target["workflow_id"] = "wf"
+    _seed_task(db, target)
+    state_db.register_working_context_source(
+        run_scope="scope-a", workflow_id="wf", source_version="source", db_path=db,
+    )
 
-    def payload(context_id: str, scope: str, fingerprint: str, created_at: float):
+    def payload(context_id: str, fingerprint: str, created_at: float):
         return {
             "context_id": context_id,
-            "run_scope": scope,
-            "run_id": f"run-{scope}",
+            "run_scope": "scope-a",
+            "run_id": "run-scope-a",
             "workflow_id": "wf",
             "task_id": "task-reused",
             "node_id": "review",
@@ -1070,16 +1132,43 @@ def test_storage_fingerprint_does_not_cross_run_scope(tmp_path: Path):
             "next_action": "review",
             "source_refs": [],
             "context_fingerprint": fingerprint,
-            "source_version": fingerprint,
+            "source_version": "source",
+            "source_watermark": 1,
             "compiled_at": created_at,
             "metrics": {},
         }
 
-    first = state_db.save_working_context(payload("wc_scope_a", "scope-a", "a" * 64, 1.0), db_path=db)
-    second = state_db.save_working_context(payload("wc_scope_b", "scope-b", "a" * 64, 2.0), db_path=db)
+    first = state_db.save_working_context(payload("wc_scope_a", "a" * 64, 1.0), db_path=db)
+    second = state_db.save_working_context(payload("wc_scope_b", "b" * 64, 2.0), db_path=db)
     assert first["context_id"] == "wc_scope_a"
     assert second["context_id"] == "wc_scope_b"
     assert len(state_db.list_working_contexts("task-reused", db_path=db)) == 2
+
+
+def test_supersession_target_outside_finding_window_is_loaded(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-supersession-window", node="review"))
+    upstream = _seed_task(db, _task("task-supersession-window-upstream"))
+    old = _finding(
+        upstream["run_id"], "fnd-window-old", task_id=upstream["task_id"], created_at=1.0,
+    )
+    successor = _finding(
+        upstream["run_id"], "fnd-window-new", task_id=upstream["task_id"], created_at=1000.0,
+    )
+    successor["metadata"] = {"supersedes": "fnd-window-old"}
+    state_db.upsert_trajectory_finding(old, db_path=db)
+    state_db.upsert_trajectory_finding(successor, db_path=db)
+    for index in range(501):
+        state_db.upsert_trajectory_finding(
+            _finding(
+                upstream["run_id"], f"fnd-window-noise-{index}",
+                task_id=upstream["task_id"], created_at=10.0 + index,
+            ), db_path=db,
+        )
+    context = _compile(db, target, "reviewer")
+    assert any("fnd-window-new" in ref for ref in context.source_refs)
+    assert any("fnd-window-old" in ref for ref in context.source_refs) is False
 
 
 def test_missing_finding_evidence_is_not_emitted_as_a_valid_reference(tmp_path: Path):
@@ -1102,8 +1191,15 @@ def test_missing_finding_evidence_is_not_emitted_as_a_valid_reference(tmp_path: 
 
 def test_concurrent_context_writers_do_not_replace_newer_latest(tmp_path: Path):
     db = tmp_path / "state.db"
+    _seed_workflow(db, workflow_id="wf")
+    concurrent_task = _task("task-concurrent", scope="scope", run_id="run")
+    concurrent_task["workflow_id"] = "wf"
+    _seed_task(db, concurrent_task)
+    state_db.register_working_context_source(
+        run_scope="scope", workflow_id="wf", source_version="source", db_path=db,
+    )
 
-    def payload(context_id: str, fingerprint: str, created_at: float, source_watermark: int = 0):
+    def payload(context_id: str, fingerprint: str, created_at: float, source_watermark: int = 1):
         return {
             "context_id": context_id,
             "run_scope": "scope",
@@ -1126,7 +1222,7 @@ def test_concurrent_context_writers_do_not_replace_newer_latest(tmp_path: Path):
             "next_action": "continue",
             "source_refs": [],
             "context_fingerprint": fingerprint,
-            "source_version": fingerprint,
+            "source_version": "source",
             "source_watermark": source_watermark,
             "compiled_at": created_at,
             "metrics": {},
@@ -1151,6 +1247,13 @@ def test_concurrent_context_writers_do_not_replace_newer_latest(tmp_path: Path):
 
 def test_storage_rejects_old_source_watermark_after_newer_snapshot(tmp_path: Path):
     db = tmp_path / "state.db"
+    _seed_workflow(db, workflow_id="wf")
+    version_task = _task("task-version", scope="scope", run_id="run")
+    version_task["workflow_id"] = "wf"
+    _seed_task(db, version_task)
+    state_db.register_working_context_source(
+        run_scope="scope", workflow_id="wf", source_version="v2", db_path=db,
+    )
     state_db.save_working_context(
         {
             "context_id": "wc_v2", "run_scope": "scope", "run_id": "run",
@@ -1159,7 +1262,7 @@ def test_storage_rejects_old_source_watermark_after_newer_snapshot(tmp_path: Pat
             "findings": [], "artifacts": [], "evidence": [], "completed": [],
             "decisions": [], "blockers": [], "open_questions": [], "verification": [],
             "handoffs": [], "next_action": "review", "source_refs": [],
-            "context_fingerprint": "b" * 64, "source_version": "v2", "source_watermark": 20,
+            "context_fingerprint": "b" * 64, "source_version": "v2", "source_watermark": 1,
             "compiled_at": 20.0, "metrics": {},
         },
         db_path=db,
@@ -1172,7 +1275,7 @@ def test_storage_rejects_old_source_watermark_after_newer_snapshot(tmp_path: Pat
             "findings": [], "artifacts": [], "evidence": [], "completed": [],
             "decisions": [], "blockers": [], "open_questions": [], "verification": [],
             "handoffs": [], "next_action": "review", "source_refs": [],
-            "context_fingerprint": "a" * 64, "source_version": "v1", "source_watermark": 10,
+            "context_fingerprint": "a" * 64, "source_version": "v1", "source_watermark": 0,
             "compiled_at": 30.0, "metrics": {},
         },
         db_path=db,
@@ -1521,6 +1624,14 @@ def test_diff_reports_added_removed_superseded_and_changed(tmp_path: Path):
     duplicate_new = context([item("artifact", "artifact:same", "one")])
     duplicate_diff = diff_working_context(duplicate_old, duplicate_new)
     assert duplicate_diff["removed"]
+    duplicate_reorder = diff_working_context(
+        duplicate_old,
+        context([
+            item("artifact", "artifact:same", "two"),
+            item("artifact", "artifact:same", "one"),
+        ]),
+    )
+    assert not duplicate_reorder["changed"]
 
     identity_new = context([]).to_mapping()
     identity_new["context_id"] = "wc-new"

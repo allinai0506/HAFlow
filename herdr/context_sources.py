@@ -291,6 +291,29 @@ def _read_source_snapshot(
             (*run_values, int(max_findings)),
         ).fetchall()
         findings = [state_db._decode_finding_row(row) for row in finding_rows]
+        relation_targets = set()
+        for finding in findings:
+            metadata = finding.get("metadata") if isinstance(finding.get("metadata"), Mapping) else {}
+            for key in ("supersedes", "superseded_by"):
+                values = finding.get(key) if finding.get(key) is not None else metadata.get(key)
+                if isinstance(values, (str, Mapping)):
+                    values = [values]
+                for value in values or []:
+                    if isinstance(value, Mapping):
+                        value = value.get("finding_id") or value.get("id")
+                    if value:
+                        relation_targets.add(str(value))
+        known_finding_ids = {str(item.get("finding_id")) for item in findings}
+        missing_relation_ids = sorted(relation_targets - known_finding_ids)
+        if missing_relation_ids:
+            relation_placeholders = ",".join("?" for _ in missing_relation_ids)
+            relation_rows = conn.execute(
+                f"""SELECT * FROM trajectory_findings
+                    WHERE finding_id IN ({relation_placeholders})
+                    ORDER BY created_at ASC, rowid ASC LIMIT ?""",
+                (*missing_relation_ids, int(max_findings)),
+            ).fetchall()
+            findings.extend(state_db._decode_finding_row(row) for row in relation_rows)
 
         observation_rows = conn.execute(
             f"""SELECT * FROM observations
@@ -379,6 +402,29 @@ def _read_source_snapshot(
                         (*run_values, int(max_findings)),
                     ).fetchall()
                 ]
+                relation_targets = set()
+                for finding in findings:
+                    metadata = finding.get("metadata") if isinstance(finding.get("metadata"), Mapping) else {}
+                    for key in ("supersedes", "superseded_by"):
+                        values = finding.get(key) if finding.get(key) is not None else metadata.get(key)
+                        if isinstance(values, (str, Mapping)):
+                            values = [values]
+                        for value in values or []:
+                            if isinstance(value, Mapping):
+                                value = value.get("finding_id") or value.get("id")
+                            if value:
+                                relation_targets.add(str(value))
+                known_finding_ids = {str(item.get("finding_id")) for item in findings}
+                missing_relation_ids = sorted(relation_targets - known_finding_ids)
+                if missing_relation_ids:
+                    relation_placeholders = ",".join("?" for _ in missing_relation_ids)
+                    relation_rows = conn.execute(
+                        f"""SELECT * FROM trajectory_findings
+                            WHERE finding_id IN ({relation_placeholders})
+                            ORDER BY created_at ASC, rowid ASC LIMIT ?""",
+                        (*missing_relation_ids, int(max_findings)),
+                    ).fetchall()
+                    findings.extend(state_db._decode_finding_row(row) for row in relation_rows)
                 observations = []
                 for row in conn.execute(
                     f"""SELECT * FROM observations
@@ -508,6 +554,7 @@ def _source_projection(snapshot: Mapping[str, Any]) -> Dict[str, Any]:
         "collaborations": [
             {key: value for key, value in event.items() if key != "context_refs"}
             for event in snapshot.get("collaborations", [])
+            if str(event.get("type") or "").upper() == "HANDOFF"
         ],
         "evals": snapshot.get("evals", []),
     }

@@ -3151,9 +3151,11 @@ def _validate_context_source_existence(
             refs.add(str(item.get("source_ref") or ""))
             refs.update(str(ref) for ref in (item.get("evidence_refs") or []))
 
+    from herdr.trajectory import run_id_for_task
+
     scope_run_ids = set()
     for task_row in conn.execute(
-        "SELECT payload_json FROM tasks WHERE workflow_id = ?",
+        "SELECT task_id, payload_json FROM tasks WHERE workflow_id = ?",
         (str(context.get("workflow_id") or ""),),
     ).fetchall():
         try:
@@ -3165,8 +3167,13 @@ def _validate_context_source_existence(
             or task_payload.get("execution_id")
             or task_payload.get("workflow_id")
         )
-        if str(task_scope or "") == str(context.get("run_scope") or "") and task_payload.get("run_id"):
-            scope_run_ids.add(str(task_payload["run_id"]))
+        if str(task_scope or "") == str(context.get("run_scope") or ""):
+            try:
+                scope_run_ids.add(str(run_id_for_task({
+                    **task_payload, "task_id": task_row["task_id"],
+                })))
+            except ValueError:
+                continue
 
     def task_record(task_id: str):
         row = conn.execute(
@@ -3179,13 +3186,17 @@ def _validate_context_source_existence(
             payload = json.loads(row["payload_json"] or "{}")
         except (TypeError, json.JSONDecodeError):
             payload = {}
+        try:
+            effective_run_id = str(run_id_for_task({**payload, "task_id": task_id}))
+        except ValueError:
+            effective_run_id = ""
         return {
             "task_id": task_id,
             "workflow_id": row["workflow_id"] or payload.get("workflow_id"),
             "node": row["node"] or payload.get("node"),
             "stage": row["stage"] or payload.get("stage"),
             "agent": row["agent"] or payload.get("agent"),
-            "run_id": payload.get("run_id"),
+            "run_id": effective_run_id,
             "agent_role": payload.get("agent_role"),
             "scope": payload.get("workflow_run_id") or payload.get("execution_id") or row["workflow_id"],
         }
@@ -3258,8 +3269,10 @@ def _validate_context_source_existence(
         return {key: row[key] for key in row.keys()}
 
     for ref in sorted(refs):
-        if not ref or ref.startswith(("policy:", "artifact:", "evidence:")):
+        if not ref or ref.startswith("policy:"):
             continue
+        if ref.startswith(("artifact:", "evidence:")):
+            raise ValueError(f"working context source reference is not a stored source: {ref}")
         prefix, remainder = ref.split(":", 1)
         object_id = remainder.split(":", 1)[0]
         if not object_id:
@@ -3278,24 +3291,19 @@ def _validate_context_source_existence(
         elif prefix != "workflow" and not record_scope(record):
             raise ValueError(f"working context source reference crosses run scope: {ref}")
 
-    source_backed = any(
-        not ref.startswith(("policy:", "artifact:", "evidence:"))
-        for ref in refs
-    )
-    if source_backed:
-        head = conn.execute(
-            "SELECT 1 FROM working_context_source_heads WHERE run_scope = ? LIMIT 1",
-            (str(context.get("run_scope") or ""),),
-        ).fetchone()
-        if head is None:
-            raise ValueError("working context source revision is not registered")
-        target_task = task_record(str(context.get("task_id") or ""))
-        if target_task is None or str(target_task.get("workflow_id") or "") != str(context.get("workflow_id") or ""):
-            raise ValueError("working context target task is not in the requested workflow")
-        if str(target_task.get("scope") or "") != str(context.get("run_scope") or ""):
-            raise ValueError("working context target task scope does not match run_scope")
-        if str(target_task.get("run_id") or "") != str(context.get("run_id") or ""):
-            raise ValueError("working context run_id does not match target task")
+    head = conn.execute(
+        "SELECT 1 FROM working_context_source_heads WHERE run_scope = ? LIMIT 1",
+        (str(context.get("run_scope") or ""),),
+    ).fetchone()
+    if head is None:
+        raise ValueError("working context source revision is not registered")
+    target_task = task_record(str(context.get("task_id") or ""))
+    if target_task is None or str(target_task.get("workflow_id") or "") != str(context.get("workflow_id") or ""):
+        raise ValueError("working context target task is not in the requested workflow")
+    if str(target_task.get("scope") or "") != str(context.get("run_scope") or ""):
+        raise ValueError("working context target task scope does not match run_scope")
+    if str(target_task.get("run_id") or "") != str(context.get("run_id") or ""):
+        raise ValueError("working context run_id does not match target task")
 
 def save_working_context(
     context: Dict[str, Any], db_path: Optional[Path] = None,
@@ -3389,8 +3397,15 @@ def save_working_context(
                 or str(existing_id["workflow_id"] or "") != str(context.get("workflow_id") or "")
             ):
                 raise ValueError("context_id is already used by another WorkingContext scope")
+            from .context_models import _payload_digest
+            existing_mapping = _decode_working_context_row(existing_id)
+            if (
+                str(existing_id["context_fingerprint"]) != str(context["context_fingerprint"])
+                or _payload_digest(existing_mapping) != _payload_digest(context)
+            ):
+                raise ValueError("context_id is already used by a different WorkingContext payload")
             conn.commit()
-            return _decode_working_context_row(existing_id)
+            return existing_mapping
         source_head = conn.execute(
             "SELECT source_version, revision FROM working_context_source_heads WHERE run_scope = ?",
             (str(context["run_scope"]),),

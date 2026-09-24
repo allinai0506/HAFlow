@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+
 from typing import Any, Dict, List, Mapping, Set, Tuple
 
 from .context_models import (
@@ -21,7 +23,7 @@ def _as_context_mapping(value: Any) -> Dict[str, Any]:
 
 
 def _item_maps(context: Mapping[str, Any]) -> Dict[Tuple[str, str], Dict[str, Any]]:
-    result: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    grouped: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
     for field_name in (
         "completed", "artifacts", "evidence", "findings", "decisions", "blockers",
         "open_questions", "verification", "handoffs",
@@ -32,17 +34,30 @@ def _item_maps(context: Mapping[str, Any]) -> Dict[Tuple[str, str], Dict[str, An
             item = dict(raw)
             kind = str(item.get("kind") or field_name)
             ref = str(item.get("source_ref") or "")
-            if not ref:
-                continue
-            key = (kind, ref)
-            if key in result:
-                suffix = 2
-                while (kind, f"{ref}#{suffix}") in result:
-                    suffix += 1
-                item = dict(item)
-                item["source_ref"] = f"{ref}#{suffix}"
-                key = (kind, item["source_ref"])
-            result[key] = item
+            if ref:
+                grouped.setdefault((kind, ref), []).append(item)
+
+    result: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for (kind, ref), items in grouped.items():
+        unique = {}
+        for item in items:
+            unique.setdefault(_canonical_json(item), item)
+        if len(unique) == 1:
+            result[(kind, ref)] = next(iter(unique.values()))
+            continue
+        for item in sorted(unique.values(), key=_canonical_json):
+            suffix = hashlib.sha256(
+                _canonical_json(item).encode("utf-8")
+            ).hexdigest()[:8]
+            stable_item = dict(item)
+            stable_item["source_ref"] = f"{ref}#{suffix}"
+            key = (kind, stable_item["source_ref"])
+            collision = 2
+            while key in result:
+                stable_item["source_ref"] = f"{ref}#{suffix}-{collision}"
+                key = (kind, stable_item["source_ref"])
+                collision += 1
+            result[key] = stable_item
     return result
 
 
