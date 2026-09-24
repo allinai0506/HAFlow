@@ -309,6 +309,38 @@ def test_schema_init_replaces_legacy_source_clock_trigger(tmp_path):
         refreshed.close()
 
 
+def test_source_clock_intermediate_primary_key_is_rebuilt(tmp_path):
+    db_path = tmp_path / "intermediate-source-clock.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """CREATE TABLE working_context_source_heads (
+               run_scope TEXT PRIMARY KEY, workflow_id TEXT,
+               source_version TEXT NOT NULL, revision INTEGER NOT NULL, updated_at REAL NOT NULL
+           )"""
+    )
+    conn.execute(
+        """CREATE TABLE working_context_source_clock (
+               run_scope TEXT PRIMARY KEY, workflow_id TEXT,
+               revision INTEGER NOT NULL
+           )"""
+    )
+    conn.commit()
+    conn.close()
+    state_db.init_db(db_path)
+    migrated = state_db.get_db_connection(db_path)
+    try:
+        primary_key = {
+            row["name"]
+            for row in migrated.execute(
+                "PRAGMA table_info(working_context_source_clock)"
+            ).fetchall()
+            if int(row["pk"] or 0) > 0
+        }
+        assert primary_key == {"run_scope", "workflow_id"}
+    finally:
+        migrated.close()
+
+
 def test_global_source_clock_schema_migrates_to_execution_scope(tmp_path):
     db_path = tmp_path / "legacy-source-clock.db"
     conn = sqlite3.connect(db_path)

@@ -918,6 +918,25 @@ def test_task_workflow_move_advances_old_workflow_clock(tmp_path: Path):
     assert _source_clock_revision(db, "shared-exec", "wf-b") > 0
 
 
+def test_taskless_source_with_reused_run_advances_all_workflow_scopes(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db, workflow_id="wf-a", scope="scope-a")
+    _seed_workflow(db, workflow_id="wf-b", scope="scope-b")
+    _seed_task(db, _task("task-reused-run-a", workflow_id="wf-a", scope="scope-a", run_id="reused-run"))
+    target_b = _seed_task(db, _task("task-reused-run-b", workflow_id="wf-b", scope="scope-b", run_id="reused-run"))
+    _compile(db, target_b, "developer")
+    before = _source_clock_revision(db, "scope-b", "wf-b")
+    state_db.record_trajectory_event(
+        {
+            "run_id": "reused-run", "task_id": None, "workflow_id": "wf-b",
+            "event_type": "verification_completed", "payload": {"verification": {"passed": False}},
+        },
+        db_path=db,
+    )
+    assert _source_clock_revision(db, "scope-b", "wf-b") > before
+    assert _source_clock_revision(db, "scope-a", "wf-a") > 0
+
+
 def test_same_execution_scope_source_heads_are_isolated_by_workflow(tmp_path: Path):
     from herdr.context_projection import _config
 

@@ -107,12 +107,18 @@ def _ensure_working_context_source_heads_schema(conn: sqlite3.Connection) -> Non
 
 def _ensure_working_context_source_clock_schema(conn: sqlite3.Connection) -> None:
     """Create or migrate the source clock to execution-scope granularity."""
-    columns = {
-        str(row["name"])
-        for row in conn.execute("PRAGMA table_info(working_context_source_clock)")
+    table_info = conn.execute(
+        "PRAGMA table_info(working_context_source_clock)"
+    ).fetchall()
+    columns = {str(row["name"]) for row in table_info}
+    primary_key = {
+        str(row["name"]) for row in table_info if int(row["pk"] or 0) > 0
     }
     legacy_revision = 0
-    if columns and not {"run_scope", "workflow_id"}.issubset(columns):
+    if columns and (
+        not {"run_scope", "workflow_id"}.issubset(columns)
+        or primary_key != {"run_scope", "workflow_id"}
+    ):
         row = (
             conn.execute(
                 "SELECT revision FROM working_context_source_clock WHERE id = 1"
@@ -543,7 +549,8 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
         run_scope = (
             "(SELECT COALESCE(NULLIF(json_extract(t.payload_json, '$.workflow_run_id'), ''), "
             "NULLIF(json_extract(t.payload_json, '$.execution_id'), ''), NULLIF(t.workflow_id, ''), '') "
-            f"FROM tasks t WHERE json_extract(t.payload_json, '$.run_id') = {alias}.run_id LIMIT 1)"
+            f"FROM tasks t WHERE {alias}.task_id IS NOT NULL "
+            f"AND json_extract(t.payload_json, '$.run_id') = {alias}.run_id LIMIT 1)"
         )
         return (
             f"COALESCE({task_scope}, {run_scope}, NULLIF({alias}.workflow_id, ''), "
@@ -553,11 +560,7 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
     def source_clock_has_task(alias: str, source_table: str) -> str:
         if source_table not in task_scoped_tables:
             return "0"
-        return (
-            f"(EXISTS(SELECT 1 FROM tasks t WHERE t.task_id = {alias}.task_id) "
-            f"OR EXISTS(SELECT 1 FROM tasks t "
-            f"WHERE json_extract(t.payload_json, '$.run_id') = {alias}.run_id))"
-        )
+        return f"EXISTS(SELECT 1 FROM tasks t WHERE t.task_id = {alias}.task_id)"
 
     for source_table in source_clock_tables:
         for operation in ("INSERT", "UPDATE", "DELETE"):
