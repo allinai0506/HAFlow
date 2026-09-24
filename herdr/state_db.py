@@ -200,6 +200,23 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
     """)
 
     conn.execute("""
+        CREATE TABLE IF NOT EXISTS working_contexts (
+            context_id TEXT PRIMARY KEY,
+            run_scope TEXT NOT NULL,
+            run_id TEXT,
+            workflow_id TEXT,
+            task_id TEXT NOT NULL,
+            node_id TEXT,
+            agent_role TEXT NOT NULL,
+            context_fingerprint TEXT NOT NULL,
+            source_version TEXT,
+            payload_json TEXT NOT NULL,
+            metrics_json TEXT NOT NULL DEFAULT '{}',
+            compiled_at REAL NOT NULL
+        );
+    """);
+
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS steering_items (
             steer_id TEXT PRIMARY KEY,
             task_id TEXT NOT NULL,
@@ -332,6 +349,8 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_observations_sha256 ON observations(sha256);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_context_packs_run_created ON context_packs(run_id, created_at DESC);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_context_packs_task_created ON context_packs(task_id, created_at DESC);")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_working_contexts_task_role ON working_contexts(task_id, agent_role, compiled_at DESC);")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_working_contexts_task_created ON working_contexts(task_id, compiled_at DESC);")
     # Deduplication is fingerprint-based, not sequence-only: a Finding or task
     # state can change without a new Trajectory sequence.
     conn.execute("DROP INDEX IF EXISTS ux_context_packs_run_sequence;")
@@ -2913,6 +2932,146 @@ def list_context_packs(
                ORDER BY created_at ASC, rowid ASC""", (run_id,)
         ).fetchall()
         return [_decode_context_pack_row(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def _decode_working_context_row(row: sqlite3.Row) -> Dict[str, Any]:
+    payload = json.loads(row["payload_json"] or "{}")
+    metrics = json.loads(row["metrics_json"] or "{}")
+    payload.update({
+        "context_id": row["context_id"],
+        "run_scope": row["run_scope"],
+        "run_id": row["run_id"],
+        "workflow_id": row["workflow_id"],
+        "task_id": row["task_id"],
+        "node_id": row["node_id"],
+        "agent_role": row["agent_role"],
+        "context_fingerprint": row["context_fingerprint"],
+        "source_version": row["source_version"],
+        "metrics": metrics,
+        "compiled_at": row["compiled_at"],
+    })
+    return payload
+
+
+def save_working_context(
+    context: Dict[str, Any], db_path: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Append an immutable WorkingContext, reusing the latest equal fingerprint."""
+    required = ("context_id", "run_scope", "task_id", "agent_role", "context_fingerprint")
+    if any(not context.get(key) for key in required):
+        raise ValueError("context_id, run_scope, task_id, agent_role and context_fingerprint are required")
+    payload_json = json.dumps(
+        context, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    )
+    metrics_json = json.dumps(
+        context.get("metrics") or {}, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    )
+    conn = get_db_connection(db_path)
+    try:
+        conn.execute("BEGIN IMMEDIATE;")
+        existing_id = conn.execute(
+            "SELECT * FROM working_contexts WHERE context_id = ?",
+            (str(context["context_id"]),),
+        ).fetchone()
+        if existing_id is not None:
+            conn.commit()
+            return _decode_working_context_row(existing_id)
+        latest = conn.execute(
+            """SELECT * FROM working_contexts
+               WHERE task_id = ? AND agent_role = ?
+               ORDER BY compiled_at DESC, rowid DESC LIMIT 1""",
+            (str(context["task_id"]), str(context["agent_role"])),
+        ).fetchone()
+        if latest is not None and latest["context_fingerprint"] == context["context_fingerprint"]:
+            conn.commit()
+            return _decode_working_context_row(latest)
+        # A late request with an older logical timestamp must not replace a
+        # newer snapshot as latest.  It remains unreadable only by this write
+        # path; the caller's source version is never silently relabeled.
+        candidate_time = float(context.get("compiled_at") or time.time())
+        if latest is not None and float(latest["compiled_at"] or 0.0) > candidate_time:
+            conn.commit()
+            return _decode_working_context_row(latest)
+        conn.execute(
+            """INSERT INTO working_contexts (
+                context_id, run_scope, run_id, workflow_id, task_id, node_id,
+                agent_role, context_fingerprint, source_version, payload_json,
+                metrics_json, compiled_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                context["context_id"], context["run_scope"], context.get("run_id"),
+                context.get("workflow_id"), context["task_id"], context.get("node_id"),
+                context["agent_role"], context["context_fingerprint"],
+                context.get("source_version"), payload_json, metrics_json,
+                candidate_time,
+            ),
+        )
+        row = conn.execute(
+            "SELECT * FROM working_contexts WHERE context_id = ?",
+            (str(context["context_id"]),),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("working context insert was not readable")
+        conn.commit()
+        return _decode_working_context_row(row)
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
+
+
+def get_working_context(
+    context_id: str, db_path: Optional[Path] = None,
+) -> Optional[Dict[str, Any]]:
+    conn = get_db_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT * FROM working_contexts WHERE context_id = ?", (str(context_id),),
+        ).fetchone()
+        return _decode_working_context_row(row) if row is not None else None
+    finally:
+        conn.close()
+
+
+def get_latest_working_context(
+    task_id: str,
+    agent_role: Optional[str] = None,
+    db_path: Optional[Path] = None,
+) -> Optional[Dict[str, Any]]:
+    conn = get_db_connection(db_path)
+    try:
+        query = "SELECT * FROM working_contexts WHERE task_id = ?"
+        params: List[Any] = [str(task_id)]
+        if agent_role is not None:
+            query += " AND agent_role = ?"
+            params.append(str(agent_role))
+        query += " ORDER BY compiled_at DESC, rowid DESC LIMIT 1"
+        row = conn.execute(query, params).fetchone()
+        return _decode_working_context_row(row) if row is not None else None
+    finally:
+        conn.close()
+
+
+def list_working_contexts(
+    task_id: str,
+    agent_role: Optional[str] = None,
+    db_path: Optional[Path] = None,
+) -> List[Dict[str, Any]]:
+    conn = get_db_connection(db_path)
+    try:
+        query = "SELECT * FROM working_contexts WHERE task_id = ?"
+        params: List[Any] = [str(task_id)]
+        if agent_role is not None:
+            query += " AND agent_role = ?"
+            params.append(str(agent_role))
+        query += " ORDER BY compiled_at ASC, rowid ASC"
+        return [_decode_working_context_row(row) for row in conn.execute(query, params).fetchall()]
     finally:
         conn.close()
 

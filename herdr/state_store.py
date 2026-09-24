@@ -353,6 +353,25 @@ class StateStore(ABC):
         """List ContextPack snapshots for a run in creation order."""
         pass
 
+    # Immutable WorkingContext projections.  These are concrete on
+    # SQLiteStateStore; the base interface stays compatible with existing
+    # lightweight test doubles.
+    def save_working_context(self, context: Dict[str, Any]) -> Dict[str, Any]:
+        raise NotImplementedError
+
+    def get_working_context(self, context_id: str) -> Optional[Dict[str, Any]]:
+        raise NotImplementedError
+
+    def get_latest_working_context(
+        self, task_id: str, agent_role: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        raise NotImplementedError
+
+    def list_working_contexts(
+        self, task_id: str, agent_role: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        raise NotImplementedError
+
     # Checkpoints
     @abstractmethod
     def create_checkpoint(
@@ -816,6 +835,26 @@ class SQLiteStateStore(StateStore):
 
     def list_context_packs(self, run_id: str) -> List[Dict[str, Any]]:
         return state_db.list_context_packs(run_id, db_path=self.db_path)
+
+    def save_working_context(self, context: Dict[str, Any]) -> Dict[str, Any]:
+        return state_db.save_working_context(context, db_path=self.db_path)
+
+    def get_working_context(self, context_id: str) -> Optional[Dict[str, Any]]:
+        return state_db.get_working_context(context_id, db_path=self.db_path)
+
+    def get_latest_working_context(
+        self, task_id: str, agent_role: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        return state_db.get_latest_working_context(
+            task_id, agent_role=agent_role, db_path=self.db_path,
+        )
+
+    def list_working_contexts(
+        self, task_id: str, agent_role: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        return state_db.list_working_contexts(
+            task_id, agent_role=agent_role, db_path=self.db_path,
+        )
 
     def list_checkpoints(self, workflow_id: str) -> List[Dict[str, Any]]:
         return state_db.list_checkpoints(workflow_id=workflow_id, db_path=self.db_path)

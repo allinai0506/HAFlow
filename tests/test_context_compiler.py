@@ -392,14 +392,14 @@ def test_diff_reports_added_removed_superseded_and_changed(tmp_path: Path):
 
     old = context([
         item("finding", "finding:fnd-old", "old"),
+        item("finding", "finding:fnd-same", "before"),
         item("artifact", "artifact:old", "old artifact"),
     ])
     new = context([
         item("finding", "finding:fnd-new", "new", metadata={"supersedes": "fnd-old"}),
-        item("finding", "finding:fnd-same", "before"),
+        item("finding", "finding:fnd-same", "after"),
     ])
-    # Same source ref with a changed value is a changed item.
-    new.findings[2].value = "after"
+    # The same source ref with a changed value is a changed item.
     diff = diff_working_context(old, new)
 
     assert any(row["source_ref"] == "artifact:old" for row in diff["removed"])
