@@ -11,6 +11,18 @@ from herdr.observation import ObservationStore, create_observation
 from herdr.trajectory import TrajectoryLedger
 
 
+def _bind_storage_fingerprint(payload):
+    from herdr.context_models import WorkingContext, _hash, _payload_digest
+    from herdr.context_projection import _config, _fingerprint_payload
+    config = _config(None)
+    payload["_fingerprint_config"] = config
+    payload["context_fingerprint"] = _hash(
+        _fingerprint_payload(WorkingContext.from_mapping(payload), config)
+    )
+    payload.setdefault("metrics", {})["payload_digest"] = _payload_digest(payload)
+    return payload
+
+
 def _save_working_context_in_process(db_path, payload, gate=None, ready=None):
     if ready is not None:
         ready.set()
@@ -178,9 +190,7 @@ def test_storage_rejects_scope_foreign_finding_even_when_row_exists(tmp_path: Pa
         "source_ref": "finding:fnd-storage-foreign",
     }]
     forged["source_refs"] = ["finding:fnd-storage-foreign"]
-    from herdr.context_models import _payload_digest
-    forged["metrics"] = dict(forged.get("metrics") or {})
-    forged["metrics"]["payload_digest"] = _payload_digest(forged)
+    _bind_storage_fingerprint(forged)
     with pytest.raises(ValueError, match="crosses run scope"):
         state_db.save_working_context(forged, db_path=db)
 
@@ -195,9 +205,7 @@ def test_storage_rejects_item_source_identity_mismatch(tmp_path: Path):
     forged = dict(context.to_mapping())
     forged["context_id"] = "wc_item_binding_forged"
     forged["findings"] = [dict(forged["findings"][0], source_task="foreign-task", source_run="foreign-run")]
-    from herdr.context_models import _payload_digest
-    forged["metrics"] = dict(forged.get("metrics") or {})
-    forged["metrics"]["payload_digest"] = _payload_digest(forged)
+    _bind_storage_fingerprint(forged)
     with pytest.raises(ValueError, match="source_task|source_run"):
         state_db.save_working_context(forged, db_path=db)
 
@@ -211,7 +219,7 @@ def test_storage_rejects_empty_provenance_with_foreign_identity(tmp_path: Path):
     state_db.register_working_context_source(
         run_scope="scope-a", workflow_id="wf", source_version="source", db_path=db,
     )
-    with pytest.raises(ValueError, match="target task scope|run_id"):
+    with pytest.raises(ValueError, match="goal_source_ref|target task scope|run_id|fingerprint configuration"):
         state_db.save_working_context({
             "context_id": "wc_empty_forged", "run_scope": "scope-a", "run_id": "run-b",
             "workflow_id": "wf", "task_id": task["task_id"], "node_id": "review",
@@ -245,7 +253,9 @@ def test_storage_rejects_payload_changed_without_digest_refresh(tmp_path: Path):
     forged = dict(context.to_mapping())
     forged["context_id"] = "wc_payload_digest_forged"
     forged["goal"] = forged["goal"] + " tampered"
-    with pytest.raises(ValueError, match="payload digest"):
+    from herdr.context_projection import _config
+    forged["_fingerprint_config"] = _config(None)
+    with pytest.raises(ValueError, match="fingerprint"):
         state_db.save_working_context(forged, db_path=db)
 
 
@@ -258,11 +268,11 @@ def test_storage_rejects_nonexistent_typed_source_ref(tmp_path: Path):
         "findings": [{"kind": "finding", "value": "x", "source_ref": "finding:missing"}],
         "artifacts": [], "evidence": [], "completed": [], "decisions": [], "blockers": [],
         "open_questions": [], "verification": [], "handoffs": [], "next_action": "review",
+        "goal_source_ref": "task:task",
         "source_refs": [], "context_fingerprint": "f" * 64, "source_version": "v",
         "metrics": {"source_clock": 0}, "compiled_at": 1.0,
     }
-    from herdr.context_models import _payload_digest
-    payload["metrics"]["payload_digest"] = _payload_digest(payload)
+    _bind_storage_fingerprint(payload)
     with pytest.raises(ValueError, match="does not exist"):
         state_db.save_working_context(payload, db_path=db)
 
@@ -562,6 +572,8 @@ def test_source_clock_rejects_toctou_candidate_after_source_write(tmp_path: Path
     )
     late_payload = dict(old.to_mapping())
     late_payload["context_id"] = "wc_clock_race_late"
+    from herdr.context_projection import _config
+    late_payload["_fingerprint_config"] = _config(None)
     late = state_db.save_working_context(late_payload, db_path=db)
     assert late.get("_stale_snapshot") is True
 
@@ -575,6 +587,8 @@ def test_source_backed_context_cannot_use_null_clock(tmp_path: Path):
     forged["context_id"] = "wc_clock_null_forged"
     forged["metrics"] = dict(forged.get("metrics") or {})
     forged["metrics"]["source_clock"] = None
+    from herdr.context_projection import _config
+    forged["_fingerprint_config"] = _config(None)
     with pytest.raises(ValueError, match="source_clock"):
         state_db.save_working_context(forged, db_path=db)
 
@@ -588,6 +602,8 @@ def test_source_backed_context_cannot_omit_clock(tmp_path: Path):
     forged["context_id"] = "wc_clock_required_forged"
     forged["metrics"] = dict(forged.get("metrics") or {})
     forged["metrics"].pop("source_clock", None)
+    from herdr.context_projection import _config
+    forged["_fingerprint_config"] = _config(None)
     with pytest.raises(ValueError, match="source_clock"):
         state_db.save_working_context(forged, db_path=db)
 
@@ -609,6 +625,8 @@ def test_late_old_source_candidate_is_not_latest_after_revision_change(tmp_path:
     new = _compile(db, target, "reviewer")
     late_payload = dict(old.to_mapping())
     late_payload["context_id"] = "wc_late_old_candidate"
+    from herdr.context_projection import _config
+    late_payload["_fingerprint_config"] = _config(None)
     late = state_db.save_working_context(late_payload, db_path=db)
     assert late.get("_stale_snapshot") is True
     assert state_db.get_latest_working_context(target["task_id"], db_path=db)["context_id"] == new.context_id
@@ -1175,8 +1193,13 @@ def test_storage_fingerprint_does_not_cross_run_scope(tmp_path: Path):
         run_scope="scope-a", workflow_id="wf", source_version="source", db_path=db,
     )
 
+    clock_row = state_db.get_db_connection(db).execute(
+        "SELECT revision FROM working_context_source_clock WHERE id = 1",
+    ).fetchone()
+    clock = int(clock_row["revision"])
+
     def payload(context_id: str, fingerprint: str, created_at: float):
-        return {
+        result = {
             "context_id": context_id,
             "run_scope": "scope-a",
             "run_id": "run-scope-a",
@@ -1196,16 +1219,24 @@ def test_storage_fingerprint_does_not_cross_run_scope(tmp_path: Path):
             "verification": [],
             "handoffs": [],
             "next_action": "review",
-            "source_refs": [],
+            "goal_source_ref": "task:task-reused",
+            "current_state_refs": {"task_id": "task:task-reused"},
+            "source_refs": ["task:task-reused"],
             "context_fingerprint": fingerprint,
             "source_version": "source",
             "source_watermark": 1,
             "compiled_at": created_at,
-            "metrics": {},
+            "metrics": {"source_clock": clock},
         }
+        from herdr.context_models import _payload_digest
+        result["metrics"]["payload_digest"] = _payload_digest(result)
+        return _bind_storage_fingerprint(result)
 
     first = state_db.save_working_context(payload("wc_scope_a", "a" * 64, 1.0), db_path=db)
-    second = state_db.save_working_context(payload("wc_scope_b", "b" * 64, 2.0), db_path=db)
+    second_payload = payload("wc_scope_b", "b" * 64, 2.0)
+    second_payload["goal"] = "changed goal"
+    _bind_storage_fingerprint(second_payload)
+    second = state_db.save_working_context(second_payload, db_path=db)
     assert first["context_id"] == "wc_scope_a"
     assert second["context_id"] == "wc_scope_b"
     assert len(state_db.list_working_contexts("task-reused", db_path=db)) == 2
@@ -1290,9 +1321,13 @@ def test_concurrent_context_writers_do_not_replace_newer_latest(tmp_path: Path):
     state_db.register_working_context_source(
         run_scope="scope", workflow_id="wf", source_version="source", db_path=db,
     )
+    clock_row = state_db.get_db_connection(db).execute(
+        "SELECT revision FROM working_context_source_clock WHERE id = 1",
+    ).fetchone()
+    clock = int(clock_row["revision"])
 
     def payload(context_id: str, fingerprint: str, created_at: float, source_watermark: int = 1):
-        return {
+        result = {
             "context_id": context_id,
             "run_scope": "scope",
             "run_id": "run",
@@ -1312,13 +1347,18 @@ def test_concurrent_context_writers_do_not_replace_newer_latest(tmp_path: Path):
             "verification": [],
             "handoffs": [],
             "next_action": "continue",
-            "source_refs": [],
+            "goal_source_ref": "task:task-concurrent",
+            "current_state_refs": {"task_id": "task:task-concurrent"},
+            "source_refs": ["task:task-concurrent"],
             "context_fingerprint": fingerprint,
             "source_version": "source",
             "source_watermark": source_watermark,
             "compiled_at": created_at,
-            "metrics": {},
+            "metrics": {"source_clock": clock},
         }
+        from herdr.context_models import _payload_digest
+        result["metrics"]["payload_digest"] = _payload_digest(result)
+        return _bind_storage_fingerprint(result)
 
     ctx = multiprocessing.get_context("spawn")
     gate = ctx.Event()
@@ -1346,31 +1386,34 @@ def test_storage_rejects_old_source_watermark_after_newer_snapshot(tmp_path: Pat
     state_db.register_working_context_source(
         run_scope="scope", workflow_id="wf", source_version="v2", db_path=db,
     )
-    state_db.save_working_context(
-        {
-            "context_id": "wc_v2", "run_scope": "scope", "run_id": "run",
+    clock_row = state_db.get_db_connection(db).execute(
+        "SELECT revision FROM working_context_source_clock WHERE id = 1",
+    ).fetchone()
+    clock = int(clock_row["revision"])
+    def payload(context_id: str, fingerprint: str, version: str, watermark: int, created_at: float):
+        result = {
+            "context_id": context_id, "run_scope": "scope", "run_id": "run",
             "workflow_id": "wf", "task_id": "task-version", "node_id": "review",
             "agent_role": "reviewer", "goal": "goal", "current_state": {},
             "findings": [], "artifacts": [], "evidence": [], "completed": [],
             "decisions": [], "blockers": [], "open_questions": [], "verification": [],
-            "handoffs": [], "next_action": "review", "source_refs": [],
-            "context_fingerprint": "b" * 64, "source_version": "v2", "source_watermark": 1,
-            "compiled_at": 20.0, "metrics": {},
-        },
-        db_path=db,
+            "handoffs": [], "next_action": "review",
+            "goal_source_ref": "task:task-version",
+            "current_state_refs": {"task_id": "task:task-version"},
+            "source_refs": ["task:task-version"],
+            "context_fingerprint": fingerprint, "source_version": version,
+            "source_watermark": watermark, "compiled_at": created_at,
+            "metrics": {"source_clock": clock},
+        }
+        from herdr.context_models import _payload_digest
+        result["metrics"]["payload_digest"] = _payload_digest(result)
+        return _bind_storage_fingerprint(result)
+
+    first = state_db.save_working_context(
+        payload("wc_v2", "b" * 64, "v2", 1, 20.0), db_path=db,
     )
     returned = state_db.save_working_context(
-        {
-            "context_id": "wc_v1_late", "run_scope": "scope", "run_id": "run",
-            "workflow_id": "wf", "task_id": "task-version", "node_id": "review",
-            "agent_role": "reviewer", "goal": "goal", "current_state": {},
-            "findings": [], "artifacts": [], "evidence": [], "completed": [],
-            "decisions": [], "blockers": [], "open_questions": [], "verification": [],
-            "handoffs": [], "next_action": "review", "source_refs": [],
-            "context_fingerprint": "a" * 64, "source_version": "v1", "source_watermark": 0,
-            "compiled_at": 30.0, "metrics": {},
-        },
-        db_path=db,
+        payload("wc_v1_late", "a" * 64, "v1", 0, 30.0), db_path=db,
     )
     assert returned["context_id"] == "wc_v1_late"
     assert state_db.get_latest_working_context("task-version", db_path=db)["context_id"] == "wc_v2"
@@ -1588,6 +1631,39 @@ def test_taskless_verification_survives_related_event_noise(tmp_path: Path):
     context = _compile(db, target, "tester")
     assert any(valid["event_id"] in ref for ref in context.source_refs)
     assert any(item.get("value", {}).get("passed") is False for item in context.verification)
+
+
+def test_unknown_latest_verification_does_not_erase_strict_failure(tmp_path: Path):
+    from herdr.eval_store import record_eval_result
+
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-unknown-verification", node="test", role="tester"))
+    ledger = TrajectoryLedger(db)
+    ledger.append_event({
+        "run_id": target["run_id"], "task_id": target["task_id"],
+        "workflow_id": target["workflow_id"], "event_type": "verification_completed",
+        "verification": {"passed": False},
+    })
+    ledger.append_event({
+        "run_id": target["run_id"], "task_id": target["task_id"],
+        "workflow_id": target["workflow_id"], "event_type": "verification_completed",
+        "verification": {"passed": "false"},
+    })
+    record_eval_result(
+        target["run_id"], task_id=target["task_id"], workflow_id=target["workflow_id"],
+        revision=1, verification_passed=False, db_path=db,
+    )
+    record_eval_result(
+        target["run_id"], task_id=target["task_id"], workflow_id=target["workflow_id"],
+        revision=2, requirements_satisfied=True, db_path=db,
+    )
+    context = _compile(db, target, "tester")
+    assert any(
+        item.get("value", {}).get("passed") is False
+        or item.get("value", {}).get("verification_passed") is False
+        for item in context.verification
+    )
 
 
 def test_foreign_verification_event_cannot_shadow_valid_failure(tmp_path: Path):

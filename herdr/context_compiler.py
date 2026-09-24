@@ -363,7 +363,24 @@ def compile_working_context(
             source_kind,
         )
         old = latest_verification.get(key)
-        if old is None or verification_order(item) >= verification_order(old):
+        if old is None:
+            latest_verification[key] = item
+            continue
+        item_value = item.get("value") if isinstance(item.get("value"), Mapping) else {}
+        old_value = old.get("value") if isinstance(old.get("value"), Mapping) else {}
+
+        def strictness(value: Mapping[str, Any]) -> int:
+            if value.get("passed") is False or value.get("verification_passed") is False:
+                return 2
+            if value.get("passed") is True or value.get("verification_passed") is True:
+                return 1
+            return 0
+
+        item_strength = strictness(item_value)
+        old_strength = strictness(old_value)
+        if item_strength > old_strength:
+            latest_verification[key] = item
+        elif item_strength == old_strength and verification_order(item) >= verification_order(old):
             latest_verification[key] = item
     def verification_failed(item: Mapping[str, Any]) -> bool:
         value = item.get("value") if isinstance(item.get("value"), Mapping) else {}
@@ -528,6 +545,7 @@ def compile_working_context(
         raise RuntimeError("WorkingContext source changed before persistence")
     stored = state_db.save_working_context(
         context.to_mapping(), db_path=db_path or _db_path(store),
+        fingerprint_config=cfg,
     )
     if stored.pop("_stale_snapshot", False):
         if _retry < 1:

@@ -183,7 +183,7 @@ def _fit_final_budget(context: WorkingContext, max_chars: int) -> WorkingContext
         if role_state_key and role_state_key in result:
             value = result[role_state_key]
             result[role_state_key] = value[:1] if isinstance(value, list) else value
-        return _bound_value(result, 32)
+        return _bound_value(result, 24)
 
     def compact_item(item: Mapping[str, Any]) -> Dict[str, Any]:
         keys = ("kind", "value", "source_ref", "source_task", "source_run", "evidence_refs")
@@ -200,7 +200,7 @@ def _fit_final_budget(context: WorkingContext, max_chars: int) -> WorkingContext
             for item in getattr(candidate, field_name)[:1]:
                 refs.append(str(item.get("source_ref") or ""))
                 refs.extend(str(value) for value in item.get("evidence_refs") or [])
-        return list(dict.fromkeys(ref for ref in refs if ref))
+        return list(dict.fromkeys(ref for ref in refs if ref))[:12]
 
     def verification_failed(item: Mapping[str, Any]) -> bool:
         value = item.get("value") if isinstance(item.get("value"), Mapping) else {}
@@ -232,7 +232,7 @@ def _fit_final_budget(context: WorkingContext, max_chars: int) -> WorkingContext
             return context
         context = WorkingContext(**{
             **context.to_mapping(),
-            "goal": _clip_text(context.goal, 32),
+            "goal": _clip_text(context.goal, 24),
             "next_action": (
                 "Resolve blocker."
                 if context.blockers

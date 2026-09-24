@@ -515,6 +515,7 @@ def _handoff_candidates(
             f"collaboration:{event.get('event_id')}",
             source_task=to_id,
             source_run=run_scope,
+            evidence_refs=evidence_refs,
             created_at=event.get("created_at"),
             metadata={
                 "type": event.get("type"),

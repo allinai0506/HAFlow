@@ -1724,6 +1724,10 @@ def attach_working_context_ref(
             raise ValueError("working context workflow does not match handoff")
         if str(context["run_scope"]) != str(event["run_id"]):
             raise ValueError("working context scope does not match handoff")
+        context_payload = json.loads(context["payload_json"] or "{}")
+        event_source_ref = f"collaboration:{event_id}"
+        if event_source_ref not in set(context_payload.get("source_refs") or []):
+            raise ValueError("working context does not contain the handoff fact")
         if event["status"] != "created":
             raise ValueError("cannot attach context to a dispatched handoff")
         refs = list(dict.fromkeys(
@@ -3157,17 +3161,10 @@ def _validate_context_source_existence(
             ))
             for evidence_ref in item.get("evidence_refs") or []:
                 refs.add(str(evidence_ref))
-                item_bindings.setdefault(str(evidence_ref), []).append((
-                    str(item.get("source_task")) if item.get("source_task") else None,
-                    str(item.get("source_run")) if item.get("source_run") else None,
-                ))
 
     from herdr.trajectory import run_id_for_task
 
-    taskless_allowed_runs = {
-        str(value) for value in ((context.get("metrics") or {}).get("source_run_ids") or [])
-        if value
-    }
+    taskless_allowed_runs: set[str] = set()
     def task_record(task_id: str):
         row = conn.execute(
             "SELECT task_id, workflow_id, node, stage, agent, payload_json FROM tasks WHERE task_id = ? LIMIT 1",
@@ -3193,6 +3190,27 @@ def _validate_context_source_existence(
             "agent_role": payload.get("agent_role"),
             "scope": payload.get("workflow_run_id") or payload.get("execution_id") or row["workflow_id"],
         }
+
+    target_record = task_record(str(context.get("task_id") or ""))
+    if (
+        target_record
+        and str(target_record.get("workflow_id") or "") == str(context.get("workflow_id") or "")
+        and str(target_record.get("scope") or "") == str(context.get("run_scope") or "")
+    ):
+        taskless_allowed_runs.add(str(target_record.get("run_id") or ""))
+    if str(context.get("run_scope") or "") != str(context.get("workflow_id") or ""):
+        for scoped_task_id in (
+            row["task_id"] for row in conn.execute(
+                "SELECT task_id FROM tasks WHERE workflow_id = ?",
+                (str(context.get("workflow_id") or ""),),
+            ).fetchall()
+        ):
+            scoped_task = task_record(str(scoped_task_id))
+            if (
+                scoped_task
+                and str(scoped_task.get("scope") or "") == str(context.get("run_scope") or "")
+            ):
+                taskless_allowed_runs.add(str(scoped_task.get("run_id") or ""))
 
     def record_scope(record):
         task_id = record.get("task_id")
@@ -3242,12 +3260,12 @@ def _validate_context_source_existence(
             event_number = object_id.removeprefix("evt_")
             try:
                 row = conn.execute(
-                    "SELECT run_id, task_id, workflow_id FROM events WHERE id = ? LIMIT 1",
+                    "SELECT run_id, task_id, workflow_id FROM events WHERE id = ? AND source = 'trajectory' LIMIT 1",
                     (int(event_number),),
                 ).fetchone()
             except ValueError:
                 row = conn.execute(
-                    "SELECT run_id, task_id, workflow_id FROM events WHERE json_extract(payload_json, '$.event_id') = ? LIMIT 1",
+                    "SELECT run_id, task_id, workflow_id FROM events WHERE source = 'trajectory' AND json_extract(payload_json, '$.event_id') = ? LIMIT 1",
                     (object_id,),
                 ).fetchone()
         elif prefix == "collaboration":
@@ -3262,7 +3280,11 @@ def _validate_context_source_existence(
         return {key: row[key] for key in row.keys()}
 
     for ref in sorted(refs):
-        if not ref or ref.startswith("policy:"):
+        if not ref:
+            continue
+        if ref.startswith("policy:"):
+            if ref in item_bindings:
+                raise ValueError(f"working context item cannot use a policy source: {ref}")
             continue
         if ref.startswith(("artifact:", "evidence:")):
             raise ValueError(f"working context source reference is not a stored source: {ref}")
@@ -3282,6 +3304,19 @@ def _validate_context_source_existence(
                 raise ValueError(f"working context item source_task does not match reference: {ref}")
             if source_run and bound_run and str(source_run) != str(bound_run):
                 raise ValueError(f"working context item source_run does not match reference: {ref}")
+        referenced_tasks = [bound_task] if bound_task else []
+        if prefix == "collaboration":
+            referenced_tasks.extend(
+                task_id for task_id in (record.get("from_task_id"), record.get("to_task_id")) if task_id
+            )
+        for referenced_task in referenced_tasks:
+            task = task_record(str(referenced_task))
+            if (
+                task
+                and str(task.get("workflow_id") or "") == str(context.get("workflow_id") or "")
+                and str(task.get("scope") or "") == str(context.get("run_scope") or "")
+            ):
+                taskless_allowed_runs.add(str(task.get("run_id") or ""))
         if prefix == "collaboration":
             if str(record.get("run_id") or "") != str(context.get("run_scope") or ""):
                 raise ValueError(f"working context collaboration scope mismatch: {ref}")
@@ -3307,6 +3342,7 @@ def _validate_context_source_existence(
 
 def save_working_context(
     context: Dict[str, Any], db_path: Optional[Path] = None,
+    *, fingerprint_config: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Append an immutable WorkingContext, reusing the latest equal fingerprint."""
     required = (
@@ -3347,6 +3383,19 @@ def save_working_context(
             raise ValueError("working context current_state_refs contains an invalid reference")
     if not re.fullmatch(r"[0-9a-f]{64}", str(context.get("context_fingerprint") or "")):
         raise ValueError("working context fingerprint is invalid")
+    if fingerprint_config is None:
+        fingerprint_config = context.get("_fingerprint_config")
+    if not isinstance(fingerprint_config, dict):
+        raise ValueError("working context requires fingerprint configuration")
+    from .context_models import WorkingContext, _hash
+    from .context_projection import _fingerprint_payload
+    try:
+        fingerprint_candidate = WorkingContext.from_mapping(context)
+        expected_fingerprint = _hash(_fingerprint_payload(fingerprint_candidate, fingerprint_config))
+    except Exception as exc:
+        raise ValueError("working context fingerprint input is invalid") from exc
+    if str(expected_fingerprint) != str(context.get("context_fingerprint") or ""):
+        raise ValueError("working context fingerprint does not match payload")
     all_source_refs = set(context.get("source_refs") or [])
     all_source_refs.update(str(ref) for ref in (context.get("goal_source_ref"), context.get("next_action_source_ref")) if ref)
     all_source_refs.update(str(ref) for ref in (context.get("current_state_refs") or {}).values())
@@ -3356,10 +3405,13 @@ def save_working_context(
     ):
         for item in context.get(field_name) or []:
             all_source_refs.add(str(item.get("source_ref") or ""))
-    source_backed = any(
-        not ref.startswith(("policy:", "artifact:", "evidence:"))
-        for ref in all_source_refs
-    )
+    goal_source_ref = str(context.get("goal_source_ref") or "")
+    if (
+        not goal_source_ref
+        or goal_source_ref.startswith(("policy:", "artifact:", "evidence:"))
+    ):
+        raise ValueError("working context requires a stored goal_source_ref")
+    source_backed = True
     if source_backed:
         source_clock_value = (context.get("metrics") or {}).get("source_clock")
         if (

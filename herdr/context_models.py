@@ -337,14 +337,14 @@ def _payload_digest(value: Any) -> str:
     raw = value.to_mapping() if isinstance(value, WorkingContext) else dict(value)
     metrics = raw.get("metrics")
     source_run_ids = metrics.get("source_run_ids") if isinstance(metrics, Mapping) else None
-    for key in ("context_id", "context_fingerprint", "metrics", "compiled_at"):
+    for key in ("context_id", "context_fingerprint", "metrics", "compiled_at", "_fingerprint_config"):
         raw.pop(key, None)
     if source_run_ids is not None:
         raw["_bound_source_run_ids"] = list(source_run_ids)
     canonical = json.dumps(
         raw, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str,
     )
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:32]
 
 
 def _task_run(task: Mapping[str, Any]) -> Optional[str]:

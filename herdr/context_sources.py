@@ -9,7 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Set
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 from . import state_db
 from .collaboration import collab_scope_for_task
@@ -134,10 +134,18 @@ def _merge_verification_events(
     task_filter = " OR ".join(task_filter_parts)
     rows = conn.execute(
         f"""SELECT * FROM (
-                SELECT e.*, ROW_NUMBER() OVER (
-                    PARTITION BY e.run_id, COALESCE(e.task_id, '')
-                    ORDER BY e.sequence DESC, e.id DESC
-                ) AS source_rank
+                SELECT e.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY e.run_id, COALESCE(e.task_id, '')
+                        ORDER BY e.sequence DESC, e.id DESC
+                    ) AS latest_rank,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY e.run_id, COALESCE(e.task_id, '')
+                        ORDER BY CASE WHEN (
+                            json_extract(e.payload_json, '$.verification.passed') = 'false'
+                            OR json_extract(e.payload_json, '$.verification_passed') = 0
+                        ) THEN 0 ELSE 1 END, e.sequence DESC, e.id DESC
+                    ) AS strict_rank
                   FROM events e
                  WHERE e.source = 'trajectory'
                    AND e.run_id IN ({placeholders})
@@ -145,9 +153,9 @@ def _merge_verification_events(
                    AND e.workflow_id = ?
                    AND ({task_filter})
                    AND length(e.payload_json) <= 20000
-            ) WHERE source_rank = 1
-            ORDER BY sequence DESC, id DESC LIMIT ?""",
-        (*run_values, workflow_id, *task_ids, int(limit)),
+            ) WHERE latest_rank = 1 OR strict_rank = 1
+            ORDER BY sequence DESC, id DESC""",
+        (*run_values, workflow_id, *task_ids),
     ).fetchall()
     merged = {str(event.get("event_id")): event for event in events}
     for row in rows:
@@ -188,7 +196,10 @@ def _read_source_snapshot(
     conn = state_db.get_db_connection(db_path or _db_path(store))
     try:
         conn.execute("BEGIN;")
-        task_row = conn.execute("SELECT * FROM tasks WHERE task_id = ?", (str(task_id),)).fetchone()
+        task_row = conn.execute(
+            "SELECT * FROM tasks WHERE task_id = ? AND length(payload_json) <= 200000",
+            (str(task_id),),
+        ).fetchone()
         task = state_db._decode_task_row(task_row) if task_row is not None else dict(explicit_task or {})
         if not task:
             raise ValueError(f"task not found: {task_id}")
@@ -466,21 +477,27 @@ def _read_source_snapshot(
         eval_task_filter = " OR ".join(eval_task_filter_parts)
         eval_rows = conn.execute(
             f"""SELECT * FROM (
-                    SELECT er.*, ROW_NUMBER() OVER (
-                        PARTITION BY er.run_id, COALESCE(er.task_id, '')
-                        ORDER BY er.revision DESC, er.rowid DESC
-                    ) AS source_rank
+                    SELECT er.*,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY er.run_id, COALESCE(er.task_id, '')
+                            ORDER BY er.revision DESC, er.rowid DESC
+                        ) AS latest_rank,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY er.run_id, COALESCE(er.task_id, '')
+                            ORDER BY CASE WHEN er.verification_passed = 0 THEN 0 ELSE 1 END,
+                                     er.revision DESC, er.rowid DESC
+                        ) AS strict_rank
                       FROM eval_results er
                      WHERE er.run_id IN ({placeholders})
                        AND er.workflow_id = ?
                        AND ({eval_task_filter})
                        AND length(COALESCE(er.evidence_json, 'null')) <= 20000
                        AND length(COALESCE(er.warnings_json, '[]')) <= 20000
-                ) WHERE source_rank = 1
-                ORDER BY run_id ASC, revision DESC, eval_id ASC LIMIT ?""",
-            (*run_values, str(workflow_id), *eval_task_ids, int(max_evals)),
+                ) WHERE latest_rank = 1 OR strict_rank = 1
+                ORDER BY run_id ASC, revision DESC, eval_id ASC""",
+            (*run_values, str(workflow_id), *eval_task_ids),
         ).fetchall()
-        evals_by_run: Dict[str, Dict[str, Any]] = {}
+        evals_by_key: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
         for row in eval_rows:
             decoded = _decode_eval_row(row)
             if not _source_allowed(
@@ -495,10 +512,9 @@ def _read_source_snapshot(
                 run_scope=run_scope,
             ):
                 continue
-            run_id = str(decoded.get("run_id") or "")
-            if run_id and run_id not in evals_by_run:
-                evals_by_run[run_id] = decoded
-        evals = list(evals_by_run.values())
+            key = (str(decoded.get("run_id") or ""), str(decoded.get("task_id") or ""))
+            evals_by_key.setdefault(key, []).append(decoded)
+        evals = [item for items in evals_by_key.values() for item in items]
         source_clock_row = conn.execute(
             "SELECT revision FROM working_context_source_clock WHERE id = 1",
         ).fetchone()
