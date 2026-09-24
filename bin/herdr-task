@@ -1896,6 +1896,8 @@ def _launch_task(args):
             "untracked": {}
         }
     )
+    baseline_commit = worker_result.get("baseline_commit")
+    recorded_onto = worker_result.get("onto_branch", onto_branch)
     pane_id = worker_result["pane_id"]
     pane_source = worker_result.get(
         "pane_source",
@@ -1970,6 +1972,8 @@ def _launch_task(args):
         "branch": branch,
         "baseline_untracked": baseline_untracked,
         "baseline_fingerprint": baseline_fingerprint,
+        "baseline_commit": baseline_commit,
+        "onto_branch": recorded_onto,
         "integration_mode": args.integration_mode,
         "status": "pending",
         "goal": args.goal,
@@ -2368,6 +2372,61 @@ def verify_baseline(task_id):
         )
         sys.exit(3)
 
+    if task.get("execution_mode") != "context":
+        # Path-level union (plan-arch §2 AR-2, §3.4): verdict is driven by the
+        # union of worktree-vs-HEAD paths and anchor..HEAD interval paths, not
+        # by commit existence. Pure --allow-empty intervals carry no paths and
+        # stay BASELINE_MATCH. Already-adopted HEAD (commit==HEAD) is
+        # registered deliverable, not unregistered change, and stays
+        # BASELINE_MATCH. Anchor-less tasks keep commit分量 closed
+        # (commits_ahead=0, basis="absent", AC3-8).
+        anchor = task.get("baseline_commit")
+        anchor_head = _git_head_sha(clone) if anchor else None
+        committed_changes = []
+        commits_ahead = 0
+        basis = "absent"
+        head_for_payload = anchor_head
+        if anchor:
+            basis = "baseline_commit"
+            if anchor_head and anchor_head != anchor:
+                adopted = task.get("commit") == anchor_head and task.get(
+                    "commit_result"
+                ) in ("adopted", "created")
+                interval = _git_interval_commits(clone, anchor, anchor_head)
+                commits_ahead = len(interval)
+                if not adopted:
+                    seen_paths = set()
+                    for item in interval:
+                        sha = item.get("sha")
+                        for path in item.get("paths") or []:
+                            if path not in seen_paths:
+                                seen_paths.add(path)
+                                committed_changes.append(
+                                    {
+                                        "type": "committed",
+                                        "path": path,
+                                        "commit": sha,
+                                        "baseline": anchor,
+                                        "current": anchor_head,
+                                    }
+                                )
+                    # Pure --allow-empty interval: no paths -> no committed
+                    # entries; verdict falls through to worktree-only.
+            else:
+                commits_ahead = 0
+        # Stash for the union below (worktree changes computed next).
+        _vb_committed = committed_changes
+        _vb_commits_ahead = commits_ahead
+        _vb_basis = basis
+        _vb_anchor = anchor
+        _vb_head = head_for_payload
+    else:
+        _vb_committed = []
+        _vb_commits_ahead = 0
+        _vb_basis = "absent"
+        _vb_anchor = None
+        _vb_head = None
+
     current = (
         context_workspace_fingerprint(clone)
         if task.get("execution_mode") == "context"
@@ -2402,8 +2461,30 @@ def verify_baseline(task_id):
                     "current": new
                 })
 
+    worktree_changed = bool(changes)
+    if task.get("execution_mode") != "context":
+        changes = changes + list(_vb_committed)
+    else:
+        _vb_committed = []
+        _vb_commits_ahead = 0
+        _vb_basis = "absent"
+        _vb_anchor = None
+        _vb_head = None
+
+    payload = {
+        "task_id": task_id,
+        "baseline_match": not bool(changes),
+        "changes": changes,
+        "worktree_changed": worktree_changed,
+        "commits_ahead": int(_vb_commits_ahead),
+        "baseline_commit": _vb_anchor,
+        "head": _vb_head,
+        "basis": _vb_basis,
+    }
+
     if not changes:
         print("BASELINE_MATCH")
+        print("HERDR_BASELINE_RESULT=" + json.dumps(payload, ensure_ascii=False))
         return
 
     print("TASK_CHANGED:")
@@ -2417,11 +2498,7 @@ def verify_baseline(task_id):
     print(
         "HERDR_BASELINE_RESULT="
         + json.dumps(
-            {
-                "task_id": task_id,
-                "baseline_match": False,
-                "changes": changes
-            },
+            payload,
             ensure_ascii=False
         )
     )
@@ -2542,6 +2619,31 @@ def commit_task(task_id, message=None):
         sys.exit(2)
 
     if task["status"] != "completed":
+        existing = task.get("commit")
+        if task.get("status") in (
+            "committed",
+            "integrated",
+            "cleanup_ready",
+            "cleaned",
+        ) and existing:
+            print(f"[COMMITTED] {task_id}")
+            print(f"[COMMIT] {existing}")
+            stored_result = task.get("commit_result")
+            if stored_result not in ("created", "adopted"):
+                stored_result = "created"
+            print(
+                "HERDR_COMMIT_RESULT="
+                + json.dumps(
+                    {
+                        "task_id": task_id,
+                        "result": stored_result,
+                        "commit": existing,
+                        "status": task.get("status"),
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            return
         print(
             f"Task cannot commit from status: "
             f"{task['status']}"
@@ -2629,15 +2731,15 @@ def commit_task(task_id, message=None):
             "diff",
             "--cached",
             "--quiet"
-        ]
+        ],
+        check=False
     )
 
     if staged.returncode == 0:
-        print(
-            f"Task has no changes to commit: "
-            f"{task_id}"
-        )
-        sys.exit(3)
+        # 空 index:可能是 Agent 直接提交后的干净工作区,尝试收编 HEAD。
+        # 真空任务仍 exit 3,无法归属的推进 exit 4,状态一律不变(除收编成功)。
+        _adopt_head_if_attributable(task_id, task, clone)
+        return
 
     if message is None:
         message = f"task: {task_id}"
@@ -2651,7 +2753,8 @@ def commit_task(task_id, message=None):
             "-m",
             message
         ],
-        text=True
+        text=True,
+        check=False
     )
 
     if result.returncode != 0:
@@ -2673,7 +2776,15 @@ def commit_task(task_id, message=None):
 
     # 保存 commit hash
     from herdr import kernel
-    kernel.update_task_metadata(task_id, {"commit": commit_hash}, store=_get_store())
+    kernel.update_task_metadata(
+        task_id,
+        {
+            "commit": commit_hash,
+            "commit_result": "created",
+            "commit_basis": "baseline_commit",
+        },
+        store=_get_store(),
+    )
 
     set_status(
         task_id,
@@ -2682,6 +2793,274 @@ def commit_task(task_id, message=None):
 
     print(f"[COMMITTED] {task_id}")
     print(f"[COMMIT] {commit_hash}")
+    print(
+        "HERDR_COMMIT_RESULT="
+        + json.dumps(
+            {
+                "task_id": task_id,
+                "result": "created",
+                "commit": commit_hash,
+                "basis": "staged",
+            },
+            ensure_ascii=False,
+        )
+    )
+
+
+def _adoption_skew_seconds():
+    try:
+        return max(
+            0,
+            int(os.environ.get("HERDR_ADOPT_SKEW_SECONDS", "120")),
+        )
+    except (TypeError, ValueError):
+        return 120
+
+
+def _git_head_sha(clone):
+    result = subprocess.run(
+        ["git", "-C", clone, "rev-parse", "HEAD"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def _git_is_ancestor(clone, baseline, head):
+    if not baseline or not head:
+        return False
+    result = subprocess.run(
+        ["git", "-C", clone, "merge-base", "--is-ancestor", baseline, head],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def _git_log_commits(clone, rev, limit=None, first_parent=False):
+    cmd = ["git", "-C", clone, "log", "--format=%H %P %ct"]
+    if first_parent:
+        cmd.append("--first-parent")
+    if limit is not None:
+        cmd += ["-n", str(limit)]
+    cmd += [rev, "--"]
+    result = subprocess.run(
+        cmd,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    commits = []
+    for line in result.stdout.splitlines():
+        parts = line.strip().split()
+        if len(parts) < 2:
+            continue
+        sha = parts[0]
+        raw_ts = parts[-1]
+        parents = parts[1:-1]
+        try:
+            ts = float(raw_ts)
+        except ValueError:
+            continue
+        commits.append({"sha": sha, "committer_ts": ts, "parents": parents})
+    return commits
+
+
+def _git_commit_paths(clone, sha):
+    """Paths changed by a single commit; [] for --allow-empty commits."""
+    if not sha:
+        return []
+    result = subprocess.run(
+        ["git", "-C", clone, "diff-tree", "--no-commit-id", "--name-only",
+         "-r", "--root", sha, "--"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return []
+    return [line for line in result.stdout.splitlines() if line]
+
+
+def _git_diff_name_only(clone, baseline, head):
+    """Aggregated changed paths for baseline..HEAD; [] on failure/empty."""
+    if not baseline or not head:
+        return []
+    result = subprocess.run(
+        ["git", "-C", clone, "diff", "--name-only",
+         f"{baseline}..{head}", "--"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return []
+    return [line for line in result.stdout.splitlines() if line]
+
+
+def _git_interval_commits(clone, baseline, head):
+    """baseline..HEAD 区间提交(oldest first);失败返回空列表。
+
+    每项含 parents 与 paths，供收编判定 (merge/内部文件/空提交) 与
+    verify-baseline 路径级并集共用，避免两次 subprocess 漂移。
+    """
+    commits = _git_log_commits(clone, f"{baseline}..{head}")
+    if not commits:
+        return []
+    commits.reverse()
+    for item in commits:
+        item["paths"] = _git_commit_paths(clone, item["sha"])
+    return commits
+
+
+def _git_head_history(clone, head, limit=100):
+    """HEAD 起 first-parent 链(newest first);失败返回空列表。"""
+    commits = _git_log_commits(clone, head, limit=limit, first_parent=True)
+    for item in commits or []:
+        item["paths"] = _git_commit_paths(clone, item["sha"])
+    return commits or []
+
+
+def _adopt_head_if_attributable(task_id, task, clone):
+    """空 index 收编:ADOPT 登记 HEAD,EMPTY exit 3,REFUSED exit 4。"""
+    from herdr.git_adoption import classify_commit_state, explain
+
+    head = _git_head_sha(clone)
+    baseline = task.get("baseline_commit")
+    onto = task.get("onto_branch")
+    created = _coerce_epoch(task.get("created_at"))
+    skew = _adoption_skew_seconds()
+
+    interval = None
+    history = None
+    ancestor = True
+    if baseline:
+        ancestor = _git_is_ancestor(clone, baseline, head)
+        interval = (
+            _git_interval_commits(clone, baseline, head)
+            if (ancestor and head)
+            else []
+        )
+    else:
+        history = _git_head_history(clone, head) if head else []
+
+    verdict, detail = classify_commit_state(
+        baseline_commit=baseline,
+        head=head,
+        onto_branch=onto,
+        branch=task.get("branch"),
+        task_id=task_id,
+        created_at=created,
+        interval_commits=interval,
+        head_history=history,
+        baseline_is_ancestor=ancestor,
+        skew_seconds=skew,
+    )
+    basis = detail.get("basis") or "none"
+    reason = detail.get("reason") or "unknown"
+    commits = int(detail.get("commits") or 0)
+    noop_commits = list(detail.get("noop_commits") or [])
+    from herdr import kernel
+
+    if verdict == "adopt":
+        kernel.update_task_metadata(
+            task_id,
+            {
+                "commit": head,
+                "commit_result": "adopted",
+                "commit_basis": basis,
+                "commit_baseline": detail.get("baseline"),
+                "commit_commits": commits,
+            },
+            store=_get_store(),
+        )
+        set_status(task_id, "committed")
+        short_base = str(detail.get("baseline") or "")[:8]
+        print(
+            f"[ADOPTED] task={task_id} "
+            f"commits={commits} baseline={short_base} basis={basis}"
+        )
+        print(f"[COMMITTED] {task_id}")
+        print(f"[COMMIT] {head}")
+        print(
+            "HERDR_COMMIT_RESULT="
+            + json.dumps(
+                {
+                    "task_id": task_id,
+                    "result": "adopted",
+                    "commit": head,
+                    "commits": commits,
+                    "baseline": detail.get("baseline"),
+                    "basis": basis,
+                    "noop_commits": noop_commits,
+                },
+                ensure_ascii=False,
+            )
+        )
+        return
+
+    if verdict == "empty":
+        kernel.update_task_metadata(
+            task_id,
+            {
+                "commit_result": "empty",
+                "commit_head": head,
+                "commit_basis": basis,
+            },
+            store=_get_store(),
+        )
+        print(f"Task has no changes to commit: {task_id}")
+        print(f"[EMPTY] task={task_id} head={head} basis={basis}")
+        print(
+            "HERDR_COMMIT_RESULT="
+            + json.dumps(
+                {
+                    "task_id": task_id,
+                    "result": "empty",
+                    "head": head,
+                    "basis": basis,
+                },
+                ensure_ascii=False,
+            )
+        )
+        sys.exit(3)
+
+    kernel.update_task_metadata(
+        task_id,
+        {
+            "commit_result": "refused",
+            "commit_refuse_reason": reason,
+            "commit_head": head,
+            "commit_basis": basis,
+        },
+        store=_get_store(),
+    )
+    line = (
+        f"[REFUSED] task={task_id} reason={reason} "
+        f"head={head} basis={basis} detail={explain(verdict, detail)}"
+    )
+    print(line)
+    print(line, file=sys.stderr)
+    print(
+        "HERDR_COMMIT_RESULT="
+        + json.dumps(
+            {
+                "task_id": task_id,
+                "result": "refused",
+                "reason": reason,
+                "head": head,
+                "basis": basis,
+            },
+            ensure_ascii=False,
+        )
+    )
+    sys.exit(4)
 
 
 @_with_git_operation_lock(include_source_repo=True)
@@ -2697,6 +3076,28 @@ def integrate_task(task_id):
         print(
             f"Context-mode task has no git integrate path; "
             f"deliverables live in task workspace: {task_id}"
+        )
+        sys.exit(2)
+
+    if task["status"] == "integrated":
+        if task.get("commit") and task.get("integration_ref"):
+            print(f"[INTEGRATED] {task_id} (already)")
+            print(f"[HERDR REF] {task.get('integration_ref')}")
+            print(
+                "HERDR_INTEGRATE_RESULT="
+                + json.dumps(
+                    {
+                        "task_id": task_id,
+                        "result": "already_integrated",
+                        "integration_ref": task.get("integration_ref"),
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            return
+        print(
+            f"Task cannot integrate from status: "
+            f"{task['status']}"
         )
         sys.exit(2)
 
@@ -2793,7 +3194,61 @@ def integrate_task(task_id):
         check=True
     )
 
+    # FR-8 pre-check: remote task branch equivalence (L-4). Best-effort fetch
+    # of the同名远端分支; if it already contains HEAD, the deliverable is
+    # already published -> idempotent success path (no extra push). If it
+    # exists but diverges from HEAD, fail once with a clear reason instead
+    # of entering a retry loop.
     subprocess.run(
+        ["git", "-C", clone, "fetch", "origin", branch],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    remote_ref = f"origin/{branch}"
+    remote_exists = subprocess.run(
+        ["git", "-C", clone, "show-ref", "--verify", "--quiet",
+         f"refs/remotes/{remote_ref}"],
+        check=False,
+    ).returncode == 0
+    if remote_exists:
+        local_head = _git_head_sha(clone)
+        head_in_remote = (
+            _git_is_ancestor(clone, local_head, remote_ref)
+            if local_head else False
+        )
+        remote_in_head = (
+            _git_is_ancestor(clone, remote_ref, local_head)
+            if local_head else False
+        )
+        if head_in_remote:
+            print(
+                f"[INTEGRATE REMOTE EQUIVALENT] task={task_id} "
+                f"branch={branch} already contains HEAD; idempotent"
+            )
+        elif not remote_in_head:
+            print(
+                f"[INTEGRATE REMOTE DIVERGED] task={task_id} "
+                f"branch={branch} diverged from {remote_ref}; "
+                "needs human confirmation"
+            )
+            print(
+                "HERDR_INTEGRATE_RESULT="
+                + json.dumps(
+                    {
+                        "task_id": task_id,
+                        "result": "remote_diverged",
+                        "branch": branch,
+                        "remote": remote_ref,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            sys.exit(4)
+
+    integration_head_before_rebase = _git_head_sha(clone)
+
+    rebase = subprocess.run(
         [
             "git",
             "-C",
@@ -2801,8 +3256,36 @@ def integrate_task(task_id):
             "rebase",
             f"origin/{base_branch}"
         ],
-        check=True
+        text=True,
+        capture_output=True,
+        check=False
     )
+
+    if rebase.returncode != 0:
+        subprocess.run(
+            ["git", "-C", clone, "rebase", "--abort"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        print(
+            f"[INTEGRATE REBASE CONFLICT] task={task_id} "
+            f"branch={branch} base=origin/{base_branch}: "
+            f"{(rebase.stderr.strip() or rebase.stdout.strip())[:500]}"
+        )
+        print(
+            "HERDR_INTEGRATE_RESULT="
+            + json.dumps(
+                {
+                    "task_id": task_id,
+                    "result": "rebase_conflict",
+                    "branch": branch,
+                    "base_branch": base_branch,
+                },
+                ensure_ascii=False,
+            )
+        )
+        sys.exit(6)
 
     relation = subprocess.check_output(
         [
@@ -2888,11 +3371,14 @@ def integrate_task(task_id):
     )
 
     from herdr import kernel
+    integrated_commit = _git_head_sha(clone)
     kernel.update_task_metadata(task_id, {
         "integration_branch": integration_branch,
         "integration_ref": herdr_ref,
         "base_branch": base_branch,
         "source_repo": main_repo,
+        "integrated_commit": integrated_commit,
+        "integration_head_before_rebase": integration_head_before_rebase,
     }, store=_get_store())
 
     set_status(
@@ -3437,6 +3923,7 @@ def close_workflow(
         t["task_id"] for t in tasks
         if t.get("status") in ("completed", "committed")
         and (t.get("integration_mode") or "none") == "git"
+        and not t.get("finalize_escalated")
     ]
     if unsettled_git:
         print(
