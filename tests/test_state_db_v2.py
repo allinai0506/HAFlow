@@ -143,6 +143,33 @@ def _run_concurrent_state_db_open(db_path, count=4):
     return [results.get(timeout=2) for _ in processes]
 
 
+def _run_concurrent_state_db_open_paths(db_paths):
+    context = multiprocessing.get_context("spawn")
+    start_event = context.Event()
+    results = context.Queue()
+    processes = [
+        context.Process(
+            target=_open_state_db_worker,
+            args=(str(db_path), start_event, results),
+        )
+        for db_path in db_paths
+    ]
+    for process in processes:
+        process.start()
+    start_event.set()
+    for process in processes:
+        process.join(20)
+    return [results.get(timeout=2) for _ in processes]
+
+
+def test_schema_lock_uses_resolved_database_identity_for_path_aliases(tmp_path):
+    real_path = tmp_path / "real-clock-path.db"
+    alias_path = tmp_path / "alias-clock-path.db"
+    alias_path.symlink_to(real_path)
+    results = _run_concurrent_state_db_open_paths([real_path, alias_path] * 3)
+    assert all(result[0] == "ok" for result in results), results
+
+
 def test_empty_database_concurrent_initialization_is_reentrant(tmp_path):
     db_path = tmp_path / "concurrent-empty.db"
     results = _run_concurrent_state_db_open(db_path)
@@ -162,6 +189,50 @@ def test_legacy_source_clock_concurrent_migration_is_reentrant(tmp_path):
     conn.close()
     results = _run_concurrent_state_db_open(db_path)
     assert all(result[0] == "ok" for result in results), results
+
+
+def test_legacy_source_head_primary_key_migrates_to_scope_workflow(tmp_path):
+    db_path = tmp_path / "legacy-source-head.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE working_context_source_heads (
+            run_scope TEXT PRIMARY KEY,
+            workflow_id TEXT,
+            source_version TEXT NOT NULL,
+            revision INTEGER NOT NULL,
+            updated_at REAL NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO working_context_source_heads
+            (run_scope, workflow_id, source_version, revision, updated_at)
+        VALUES ('legacy-scope', 'legacy-wf', 'v1', 3, 1.0)
+        """
+    )
+    conn.commit()
+    conn.close()
+    migrated = state_db.get_db_connection(db_path)
+    try:
+        primary_key = {
+            row["name"]
+            for row in migrated.execute(
+                "PRAGMA table_info(working_context_source_heads)"
+            ).fetchall()
+            if int(row["pk"] or 0) > 0
+        }
+        assert primary_key == {"run_scope", "workflow_id"}
+        row = migrated.execute(
+            """
+            SELECT run_scope, workflow_id, source_version, revision
+            FROM working_context_source_heads
+            """
+        ).fetchone()
+        assert tuple(row) == ("legacy-scope", "legacy-wf", "v1", 3)
+    finally:
+        migrated.close()
 
 
 def test_global_source_clock_schema_migrates_to_execution_scope(tmp_path):

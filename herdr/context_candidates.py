@@ -312,11 +312,13 @@ def _event_candidates(
             if not verification_value:
                 continue
             value = {key: verification_value.get(key) for key in (
-                "passed", "passed_tests", "total_tests", "failing_count", "lint_errors",
-                "type_errors", "evidence_id", "observation_id", "status",
+                "passed", "verification_passed", "passed_tests", "total_tests", "failing_count",
+                "lint_errors", "type_errors", "evidence_id", "observation_id", "status",
             ) if key in verification_value}
             if "passed" in value and not isinstance(value["passed"], bool):
                 value.pop("passed", None)
+            if "verification_passed" in value and not isinstance(value["verification_passed"], bool):
+                value.pop("verification_passed", None)
             evidence_refs = []
             for key in ("observation_id", "evidence_id"):
                 ref = _canonical_evidence_ref(verification_value.get(key))

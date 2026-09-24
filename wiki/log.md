@@ -237,6 +237,11 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - `console/herdr_factory_console.py` 新建模态框表单重构为「项目 → 本次任务名称 → 模板 → 执行者策略 → 自然语言需求」，支持需求失焦智能自动提取标题，工作流切换器格式升级为「任务名称 (短ID)」。
 - 质量防护与门禁：沉淀教训 §14，新增 `tests/test_console_frontend_syntax.py`（raw string 声明守卫 + `node -c` 无头 JS 编译验证），新增 `tests/test_workflow_naming_and_title.py`，全量 197 个测试 100% 通过。
 
+## [2026-09-24] fix | Context Compiler execution-scoped source consistency
+- 背景：Context Compiler 的 source clock/head 原先会把其他 Workflow 的写入误判为 stale；并发 schema 初始化、旧 schema 迁移、Handoff stale Task snapshot 和小 verification window 也存在边界竞态。
+- 修复：source head/clock 按 `(run_scope, workflow_id)` 隔离；schema 初始化使用 resolved-path lock；Workflow/Task/Event/Finding source trigger 按 scope 更新；dispatch 重新读取权威 Task；Verification/Eval 窗口保留 latest/strict/recovery facts 并遵守 limit；补齐 alternate verification payload、source projection 稳定字段、taskless workflow fail-closed 和 context_id 幂等重试。
+- 回归：跨 Workflow/同 execution scope、A 自身写入、旧 schema/空库并发、路径别名、Handoff stale snapshot、limit 0/1、恢复序列和 provenance 边界均有测试；交付验证见 `.omc/verify-ses_f2d90b418ffePthpvvnlqq6gVw.md`。
+
 ## [2026-09-13] feat | Console URL Deep-Link & Notifier Click-to-Open Integration
 解决 macOS CLI 通知默认归属“脚本编辑器”且无法定位到具体任务/工作流页面的痛点：
 - [[architecture]] §2.3 更新 Herdr Notifier 架构描述：优先使用 `terminal-notifier` 附带 `-open` 直达链接，未安装时安全降级为 `osascript`；

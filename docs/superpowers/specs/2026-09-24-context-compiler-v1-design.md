@@ -117,10 +117,10 @@ Task launch / retry / handoff / review request / verification request
 - 编译时先读取目标 Task，再解析其 workflow execution scope。
 - 只允许同一 scope 下的任务事实；每个来源的 `run_id` 必须属于该 scope 的任务集合。
 - Finding/Observation 若带 `task_id`，必须能对应到 scope 内任务；若不带 task，则其 `run_id` 必须属于 scope。
-- CollaborationEvent 必须同时满足 `run_id == run_scope`、`workflow_id == workflow_id`，且 from/to Task 在 scope 内。
+- CollaborationEvent 必须同时满足 `run_id == run_scope`、`workflow_id == workflow_id`，且 from/to Task 在 scope 内；dispatch 必须重新读取 StateStore 中的当前 Task，不能信任调用方传入的旧 Task snapshot。
 - 信息不足时丢弃受影响来源或 fail closed，不猜测、不跨 Run 拼接。
 - legacy 自动 Handoff 若上下游只有不同的 per-task `run_id` 且没有同一 execution 证据，则跳过；不能把节点依赖当作跨 Run 授权。
-- `working_context_source_heads` 按 `run_scope` 维护单调 source revision；source projection 变化时递增，编译器保存前必须在同一 source revision 上，迟到旧候选只能成为历史而不能成为 latest。
+- `working_context_source_heads` 按 `(run_scope, workflow_id)` 维护单调 source revision；source projection 变化时递增，编译器保存前必须在同一 source revision 上，迟到旧候选只能成为历史而不能成为 latest。
 - `working_context_source_clock` 按 `(run_scope, workflow_id)` 维护；源表写入触发器只递增所属 execution scope，编译快照记录该 scope 的 clock，保存事务发现同一 scope 的 clock 变化即重试，防止最终复读与写入之间的 TOCTOU，同时不把其他 Workflow 的写入误判为 stale。
 
 ## 5. 选择规则
@@ -175,7 +175,7 @@ V1 支持两种确定性关系：
 - `verification.passed` 只有严格布尔值才可出现；缺失不推断为失败或成功。
 - Finding 的 `evidence` 仅保留合法引用并解析到 Observation/Event；引用存在不升级为业务结论。
 - 旧 verification 不覆盖同来源较新的失败 verification。
-- `context_fingerprint` 不包含随机 `context_id` 或 `compiled_at`，只包含影响选择结果的规范输入、source ref/version、角色和预算配置。
+- `context_fingerprint` 不包含随机 `context_id` 或 `compiled_at`，只包含影响选择结果的规范输入、source ref/version、角色和预算配置；source projection 覆盖 requirements/acceptance、blocked/artifact 字段及 Workflow title 等所有稳定输出输入。
 
 ## 8. 预算与排序
 
@@ -216,7 +216,7 @@ BLOCKER > OPEN QUESTION > CURRENT GOAL > VERIFICATION
 - `run_scope`、`run_id`、`workflow_id`、`task_id`、`node_id`、`agent_role`；
 - `context_fingerprint`、`source_version`、`source_watermark`（当前 source revision）；
 - `payload_json`、`metrics_json`、`compiled_at`；
-- `working_context_source_heads` 保存每个 scope 的 source version 与单调 revision；`working_context_source_clock(run_scope, workflow_id, revision)` 由源表触发器维护并参与同一 execution scope 的保存竞态检查；
+- `working_context_source_heads` 保存每个 `(run_scope, workflow_id)` 的 source version 与单调 revision；`working_context_source_clock(run_scope, workflow_id, revision)` 由源表触发器维护并参与同一 execution scope 的保存竞态检查；
 - 按 task/role/compiled_at 和 task/compiled_at 建索引；
 - 不设置指向 workflow/task 的外键，保留审计快照。
 

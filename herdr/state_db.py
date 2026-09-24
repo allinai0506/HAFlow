@@ -68,6 +68,43 @@ def _schema_initialization_lock(path: Path):
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
+def _ensure_working_context_source_heads_schema(conn: sqlite3.Connection) -> None:
+    """Create or migrate source heads to scope-plus-workflow identity."""
+    table_info = conn.execute(
+        "PRAGMA table_info(working_context_source_heads)"
+    ).fetchall()
+    columns = {str(row["name"]) for row in table_info}
+    primary_key = {
+        str(row["name"]) for row in table_info if int(row["pk"] or 0) > 0
+    }
+    if columns and primary_key != {"run_scope", "workflow_id"}:
+        conn.execute(
+            "ALTER TABLE working_context_source_heads RENAME TO working_context_source_heads_legacy"
+        )
+        columns = set()
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS working_context_source_heads (
+            run_scope TEXT NOT NULL,
+            workflow_id TEXT NOT NULL DEFAULT '',
+            source_version TEXT NOT NULL,
+            revision INTEGER NOT NULL,
+            updated_at REAL NOT NULL,
+            PRIMARY KEY (run_scope, workflow_id)
+        );
+    """)
+    if not columns and conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'working_context_source_heads_legacy'"
+    ).fetchone():
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO working_context_source_heads
+                (run_scope, workflow_id, source_version, revision, updated_at)
+            SELECT run_scope, COALESCE(workflow_id, ''), source_version, revision, updated_at
+            FROM working_context_source_heads_legacy
+            """
+        )
+
+
 def _ensure_working_context_source_clock_schema(conn: sqlite3.Connection) -> None:
     """Create or migrate the source clock to execution-scope granularity."""
     columns = {
@@ -277,16 +314,7 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
         );
     """);
 
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS working_context_source_heads (
-            run_scope TEXT PRIMARY KEY,
-            workflow_id TEXT,
-            source_version TEXT NOT NULL,
-            revision INTEGER NOT NULL,
-            updated_at REAL NOT NULL
-        );
-    """);
-
+    _ensure_working_context_source_heads_schema(conn)
     _ensure_working_context_source_clock_schema(conn)
 
     conn.execute("""
@@ -851,7 +879,7 @@ def get_db_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
     schema_lock = (
         nullcontext()
         if path_key in _INITIALIZED_DBS
-        else _schema_initialization_lock(path)
+        else _schema_initialization_lock(Path(path_key))
     )
     try:
         with schema_lock:
@@ -3370,6 +3398,8 @@ def _validate_context_source_existence(
             if record.get("run_id") and str(task.get("run_id") or "") != str(record["run_id"]):
                 return False
             return True
+        if not record.get("workflow_id"):
+            return False
         run_id = str(record.get("run_id") or "")
         if not run_id:
             return False
@@ -3499,8 +3529,15 @@ def _validate_context_source_existence(
             raise ValueError(f"working context source reference crosses run scope: {ref}")
 
     head = conn.execute(
-        "SELECT 1 FROM working_context_source_heads WHERE run_scope = ? LIMIT 1",
-        (str(context.get("run_scope") or ""),),
+        """
+        SELECT 1 FROM working_context_source_heads
+        WHERE run_scope = ? AND workflow_id = ?
+        LIMIT 1
+        """,
+        (
+            str(context.get("run_scope") or ""),
+            str(context.get("workflow_id") or ""),
+        ),
     ).fetchone()
     if head is None:
         raise ValueError("working context source revision is not registered")
@@ -3606,26 +3643,6 @@ def save_working_context(
     conn = get_db_connection(db_path)
     try:
         conn.execute("BEGIN IMMEDIATE;")
-        source_clock = context.get("metrics", {}).get("source_clock")
-        if source_backed:
-            clock_row = conn.execute(
-                """
-                SELECT revision
-                FROM working_context_source_clock
-                WHERE run_scope = ? AND workflow_id = ?
-                """,
-                (
-                    str(context.get("run_scope") or ""),
-                    str(context.get("workflow_id") or ""),
-                ),
-            ).fetchone()
-            current_clock = int(clock_row["revision"] if clock_row else 0)
-            if current_clock != int(source_clock):
-                conn.commit()
-                result = dict(context)
-                result["_stale_snapshot"] = True
-                return result
-        _validate_context_source_existence(conn, context)
         existing_id = conn.execute(
             "SELECT * FROM working_contexts WHERE context_id = ?",
             (str(context["context_id"]),),
@@ -3647,9 +3664,36 @@ def save_working_context(
                 raise ValueError("context_id is already used by a different WorkingContext payload")
             conn.commit()
             return existing_mapping
+        source_clock = context.get("metrics", {}).get("source_clock")
+        if source_backed:
+            clock_row = conn.execute(
+                """
+                SELECT revision
+                FROM working_context_source_clock
+                WHERE run_scope = ? AND workflow_id = ?
+                """,
+                (
+                    str(context.get("run_scope") or ""),
+                    str(context.get("workflow_id") or ""),
+                ),
+            ).fetchone()
+            current_clock = int(clock_row["revision"] if clock_row else 0)
+            if current_clock != int(source_clock):
+                conn.commit()
+                result = dict(context)
+                result["_stale_snapshot"] = True
+                return result
+        _validate_context_source_existence(conn, context)
         source_head = conn.execute(
-            "SELECT source_version, revision FROM working_context_source_heads WHERE run_scope = ?",
-            (str(context["run_scope"]),),
+            """
+            SELECT source_version, revision
+            FROM working_context_source_heads
+            WHERE run_scope = ? AND workflow_id = ?
+            """,
+            (
+                str(context["run_scope"]),
+                str(context.get("workflow_id") or ""),
+            ),
         ).fetchone()
         if source_head is not None and (
             str(source_head["source_version"]) != str(context.get("source_version") or "")
@@ -3731,9 +3775,14 @@ def register_working_context_source(
     conn = get_db_connection(db_path)
     try:
         conn.execute("BEGIN IMMEDIATE;")
+        normalized_workflow_id = str(workflow_id or "")
         row = conn.execute(
-            "SELECT source_version, revision FROM working_context_source_heads WHERE run_scope = ?",
-            (str(run_scope),),
+            """
+            SELECT source_version, revision
+            FROM working_context_source_heads
+            WHERE run_scope = ? AND workflow_id = ?
+            """,
+            (str(run_scope), normalized_workflow_id),
         ).fetchone()
         if row is not None and row["source_version"] == str(source_version):
             revision = int(row["revision"] or 0)
@@ -3744,13 +3793,18 @@ def register_working_context_source(
                 INSERT INTO working_context_source_heads
                     (run_scope, workflow_id, source_version, revision, updated_at)
                 VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(run_scope) DO UPDATE SET
-                    workflow_id = excluded.workflow_id,
+                ON CONFLICT(run_scope, workflow_id) DO UPDATE SET
                     source_version = excluded.source_version,
                     revision = excluded.revision,
                     updated_at = excluded.updated_at
                 """,
-                (str(run_scope), workflow_id, str(source_version), revision, time.time()),
+                (
+                    str(run_scope),
+                    normalized_workflow_id,
+                    str(source_version),
+                    revision,
+                    time.time(),
+                ),
             )
         conn.commit()
         return revision
@@ -3771,8 +3825,15 @@ def working_context_source_is_current(
     conn = get_db_connection(db_path)
     try:
         row = conn.execute(
-            "SELECT source_version, revision FROM working_context_source_heads WHERE run_scope = ?",
-            (str(context.get("run_scope") or ""),),
+            """
+            SELECT source_version, revision
+            FROM working_context_source_heads
+            WHERE run_scope = ? AND workflow_id = ?
+            """,
+            (
+                str(context.get("run_scope") or ""),
+                str(context.get("workflow_id") or ""),
+            ),
         ).fetchone()
         return bool(
             row is not None

@@ -207,6 +207,29 @@ def test_storage_rejects_scope_foreign_finding_even_when_row_exists(tmp_path: Pa
         state_db.save_working_context(forged, db_path=db)
 
 
+def test_storage_rejects_taskless_source_without_workflow_identity(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-taskless-workflow-identity"))
+    observation = create_observation(
+        run_id=target["run_id"], task_id=None, workflow_id=None,
+        source_type="verification", source_ref="verification:missing-workflow",
+        content="ambiguous", store=ObservationStore(db),
+    )
+    context = _compile(db, target, "developer")
+    forged = dict(context.to_mapping())
+    forged["context_id"] = "wc_taskless_missing_workflow"
+    forged["evidence"] = [{
+        "kind": "evidence", "value": "ambiguous",
+        "source_ref": f"observation:{observation.observation_id}",
+        "source_run": target["run_id"],
+    }]
+    forged["source_refs"] = [f"observation:{observation.observation_id}"]
+    _bind_storage_fingerprint(forged)
+    with pytest.raises(ValueError, match="workflow|run scope"):
+        state_db.save_working_context(forged, db_path=db)
+
+
 def test_storage_rejects_unlinked_legacy_sibling_finding(tmp_path: Path):
     db = tmp_path / "state.db"
     _seed_workflow(db)
@@ -664,6 +687,21 @@ def test_source_clock_rejects_toctou_candidate_after_source_write(tmp_path: Path
     assert late.get("_stale_snapshot") is True
 
 
+def test_existing_context_id_retry_is_idempotent_after_source_clock_change(tmp_path: Path):
+    from herdr.context_projection import _config
+
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-idempotent-clock"))
+    context = _compile(db, target, "developer")
+    state_db.save_task(dict(target, goal="changed after compile"), db_path=db)
+    retried = state_db.save_working_context(
+        context.to_mapping(), db_path=db, fingerprint_config=_config(None),
+    )
+    assert retried["context_id"] == context.context_id
+    assert retried.get("_stale_snapshot") is not True
+
+
 def test_source_clock_ignores_writes_from_another_workflow(tmp_path: Path):
     from herdr.context_projection import _config
 
@@ -714,6 +752,24 @@ def test_source_clock_still_detects_writes_in_same_workflow_scope(tmp_path: Path
         candidate, db_path=db, fingerprint_config=_config(None),
     )
     assert saved.get("_stale_snapshot") is True
+
+
+def test_same_execution_scope_source_heads_are_isolated_by_workflow(tmp_path: Path):
+    from herdr.context_projection import _config
+
+    db = tmp_path / "state.db"
+    _seed_workflow(db, workflow_id="wf-a", scope="same-exec")
+    _seed_workflow(db, workflow_id="wf-b", scope="same-exec")
+    target_a = _seed_task(db, _task("task-head-a", workflow_id="wf-a", scope="same-exec"))
+    target_b = _seed_task(db, _task("task-head-b", workflow_id="wf-b", scope="same-exec"))
+    context_a = _compile(db, target_a, "developer")
+    _compile(db, target_b, "developer")
+    candidate = dict(context_a.to_mapping())
+    candidate["context_id"] = "wc_same_exec_other_workflow"
+    saved = state_db.save_working_context(
+        candidate, db_path=db, fingerprint_config=_config(None),
+    )
+    assert saved.get("_stale_snapshot") is not True
 
 
 def test_workflow_update_makes_same_execution_scope_candidate_stale(tmp_path: Path):
@@ -787,6 +843,21 @@ def test_late_old_source_candidate_is_not_latest_after_revision_change(tmp_path:
     late = state_db.save_working_context(late_payload, db_path=db)
     assert late.get("_stale_snapshot") is True
     assert state_db.get_latest_working_context(target["task_id"], db_path=db)["context_id"] == new.context_id
+
+
+def test_source_revision_advances_for_requirement_update(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = dict(_task("task-requirement-revision"), requirements=["first requirement"])
+    target = _seed_task(db, target)
+    first = _compile(db, target, "developer")
+    state_db.save_task(
+        dict(target, requirements=["second requirement"]),
+        db_path=db,
+    )
+    second = _compile(db, target, "developer")
+    assert second.source_watermark > first.source_watermark
+    assert second.source_version != first.source_version
 
 
 def test_source_revision_advances_for_artifact_update(tmp_path: Path):
@@ -1330,6 +1401,46 @@ def test_source_windows_apply_requested_limits_to_verification_and_eval(tmp_path
     )
     assert len(snapshot["events"]) <= 2
     assert len(snapshot["evals"]) <= 2
+    empty_window = _read_source_snapshot(
+        workflow_id=target["workflow_id"], task_id=target["task_id"],
+        store=ObservationStore(db), db_path=db, max_events=0, max_evals=0,
+    )
+    assert empty_window["events"] == []
+    assert empty_window["evals"] == []
+
+
+def test_single_slot_preserves_strict_failure_without_recovery(tmp_path: Path):
+    from herdr.context_sources import _read_source_snapshot
+    from herdr.eval_store import record_eval_result
+
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-single-slot-strict", node="test", role="tester"))
+    ledger = TrajectoryLedger(db)
+    failure = ledger.append_event({
+        "run_id": target["run_id"], "task_id": target["task_id"],
+        "workflow_id": target["workflow_id"], "event_type": "verification_completed",
+        "verification": {"passed": False},
+    })
+    ledger.append_event({
+        "run_id": target["run_id"], "task_id": target["task_id"],
+        "workflow_id": target["workflow_id"], "event_type": "verification_completed",
+        "verification": {"status": "unknown"},
+    })
+    record_eval_result(
+        target["run_id"], task_id=target["task_id"], workflow_id=target["workflow_id"],
+        revision=1, verification_passed=False, db_path=db,
+    )
+    record_eval_result(
+        target["run_id"], task_id=target["task_id"], workflow_id=target["workflow_id"],
+        revision=2, requirements_satisfied=True, db_path=db,
+    )
+    snapshot = _read_source_snapshot(
+        workflow_id=target["workflow_id"], task_id=target["task_id"],
+        store=ObservationStore(db), db_path=db, max_events=1, max_evals=1,
+    )
+    assert any(item.get("event_id") == failure["event_id"] for item in snapshot["events"])
+    assert any(item.get("verification_passed") == 0 for item in snapshot["evals"])
 
 
 def test_strict_failure_window_ignores_non_boolean_verification_values(tmp_path: Path):
@@ -1855,6 +1966,23 @@ def test_taskless_verification_survives_related_event_noise(tmp_path: Path):
     context = _compile(db, target, "tester")
     assert any(valid["event_id"] in ref for ref in context.source_refs)
     assert any(item.get("value", {}).get("passed") is False for item in context.verification)
+
+
+def test_alternate_verification_passed_payload_preserves_strict_failure(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-alternate-verification", node="test", role="tester"))
+    event = state_db.record_trajectory_event(
+        {
+            "run_id": target["run_id"], "task_id": target["task_id"],
+            "workflow_id": target["workflow_id"], "event_type": "verification_completed",
+            "payload": {"verification_passed": False},
+        },
+        db_path=db,
+    )
+    context = _compile(db, target, "tester")
+    assert any(item.get("source_ref") == f"trajectory:evt_{event['id']}" for item in context.verification)
+    assert any(item.get("value", {}).get("verification_passed") is False for item in context.verification)
 
 
 def test_newer_pass_replaces_old_failure_after_recovery(tmp_path: Path):
@@ -2398,6 +2526,55 @@ def test_dispatch_does_not_treat_context_source_refs_as_evidence(tmp_path: Path)
     )
     assert result["dispatched"] is True
     assert "EVIDENCE:\n- task:task-dispatch-evidence-target" not in calls[0][1]
+
+
+def test_dispatch_rejects_stale_caller_task_snapshot(tmp_path: Path):
+    import importlib.machinery
+    import importlib.util
+
+    controller_path = Path(__file__).resolve().parent.parent / "services" / "herdr-controller.py"
+    spec = importlib.util.spec_from_loader(
+        "context_compiler_stale_task_test",
+        importlib.machinery.SourceFileLoader(
+            "context_compiler_stale_task_test", str(controller_path)
+        ),
+    )
+    controller = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(controller)
+
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _task("task-stale-dispatch-target", node="review", role="reviewer", run_id="run-old")
+    target["pane_id"] = "pane-stale-dispatch"
+    target = _seed_task(db, target)
+    source = _task("task-stale-dispatch-source", node="implementation", role="developer")
+    source["pane_id"] = "pane-stale-dispatch-source"
+    source = _seed_task(db, source)
+    context = _compile(db, target, "reviewer")
+    stale_target = dict(target)
+    state_db.save_task(dict(target, run_id="run-new"), db_path=db)
+    event = state_db.create_collaboration_event(
+        {
+            "run_id": "wf-exec-1",
+            "workflow_id": "wf-context",
+            "from_task_id": source["task_id"],
+            "to_task_id": target["task_id"],
+            "to_agent": "reviewer",
+            "type": "HANDOFF",
+            "context_refs": [context.context_id],
+            "source_fact_id": "fact-stale-task",
+        },
+        db_path=db,
+    )
+    calls = []
+    result = controller.dispatch_collaboration_event(
+        event["event_id"],
+        {target["task_id"]: stale_target, source["task_id"]: source},
+        lambda pane, prompt: calls.append((pane, prompt)),
+        db_path=db,
+    )
+    assert result["status"] == "failed"
+    assert calls == []
 
 
 def test_dispatch_rejects_unknown_nonempty_context_ref(tmp_path: Path):

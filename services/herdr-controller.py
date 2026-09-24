@@ -4629,6 +4629,9 @@ def _working_context_ref_valid(event, target_task, db_path=None):
     refs = list(event.get("context_refs") or [])
     if not refs:
         return True
+    authoritative_task = _sdb.get_task(str(event.get("to_task_id") or ""), db_path=db_path)
+    if authoritative_task is not None:
+        target_task = authoritative_task
     try:
         expected_role = infer_agent_role(target_task)
     except ValueError:
@@ -4681,7 +4684,9 @@ def dispatch_collaboration_event(event_id, tasks_by_id, prompt_sender=None, db_p
         return {"dispatched": False, "status": "failed", "event_id": event_id}
 
     tasks = tasks_by_id or {}
-    target = tasks.get(event["to_task_id"])
+    target = _sdb.get_task(str(event["to_task_id"]), db_path=db_path)
+    if target is None:
+        target = tasks.get(event["to_task_id"])
     if target is None:
         return _sdb.mark_collaboration_failed(event_id, db_path=db_path)
     if _collab_task_run(target) != event["run_id"]:
@@ -4689,7 +4694,9 @@ def dispatch_collaboration_event(event_id, tasks_by_id, prompt_sender=None, db_p
     pane_id = _collab_task_pane(target)
     if not pane_id:
         return _sdb.mark_collaboration_failed(event_id, db_path=db_path)
-    source_task = tasks_by_id.get(event.get("from_task_id"))
+    source_task = _sdb.get_task(str(event.get("from_task_id") or ""), db_path=db_path)
+    if source_task is None:
+        source_task = tasks.get(event.get("from_task_id"))
     if (
         source_task is None
         or str(source_task.get("workflow_id") or "") != str(event.get("workflow_id") or "")

@@ -123,7 +123,9 @@ def _merge_verification_events(
     target_task_id: str | None = None,
     limit: int = 500,
 ) -> List[Dict[str, Any]]:
-    bounded_limit = max(1, int(limit))
+    bounded_limit = max(0, int(limit))
+    if bounded_limit == 0:
+        return []
     if not run_values:
         return events[:bounded_limit]
     placeholders = ",".join("?" for _ in run_values)
@@ -134,6 +136,10 @@ def _merge_verification_events(
             f"e.task_id IN ({','.join('?' for _ in task_ids)})"
         )
     task_filter = " OR ".join(task_filter_parts)
+    window_limit = max(
+        bounded_limit,
+        max(1, len(task_ids), len(run_values)) * 3,
+    )
     rows = conn.execute(
         f"""SELECT * FROM (
                 SELECT e.*,
@@ -166,7 +172,7 @@ def _merge_verification_events(
             ORDER BY CASE WHEN task_id = ? THEN 0 ELSE 1 END,
                      sequence DESC, id DESC
             LIMIT ?""",
-        (*run_values, workflow_id, *task_ids, target_task_id, bounded_limit),
+        (*run_values, workflow_id, *task_ids, target_task_id, window_limit),
     ).fetchall()
     merged = {str(event.get("event_id")): event for event in events}
     reserved_event_ids: set[str] = set()
@@ -189,9 +195,56 @@ def _merge_verification_events(
         event_id = str(event.get("event_id"))
         reserved_event_ids.add(event_id)
         merged[event_id] = event
+    def verification_order(event: Mapping[str, Any]) -> Tuple[int, str]:
+        return (
+            int(event.get("sequence") or 0),
+            str(event.get("event_id") or ""),
+        )
+
+    def verification_value(event: Mapping[str, Any]) -> Mapping[str, Any]:
+        payload = event.get("payload") if isinstance(event.get("payload"), Mapping) else {}
+        nested = payload.get("verification")
+        return nested if isinstance(nested, Mapping) else payload
+
+    def verification_strength(event: Mapping[str, Any]) -> int:
+        value = verification_value(event)
+        if value.get("passed") is False or value.get("verification_passed") is False:
+            return 2
+        if value.get("passed") is True or value.get("verification_passed") is True:
+            return 1
+        return 0
+
+    reserved_by_key: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+    for event_id in reserved_event_ids:
+        event = merged.get(event_id)
+        if event is None:
+            continue
+        key = (str(event.get("run_id") or ""), str(event.get("task_id") or ""))
+        reserved_by_key.setdefault(key, []).append(event)
+    preferred_event_ids: set[str] = set()
+    for key_events in reserved_by_key.values():
+        latest = max(key_events, key=verification_order)
+        failure = max(
+            (event for event in key_events if verification_strength(event) == 2),
+            key=verification_order,
+            default=None,
+        )
+        recovery = max(
+            (event for event in key_events if verification_strength(event) == 1),
+            key=verification_order,
+            default=None,
+        )
+        selected = latest
+        if verification_strength(latest) == 0 and failure is not None and (
+            recovery is None or verification_order(recovery) <= verification_order(failure)
+        ):
+            selected = failure
+        preferred_event_ids.add(str(selected.get("event_id")))
+
     ordered = sorted(
         merged.values(),
         key=lambda item: (
+            0 if str(item.get("event_id")) in preferred_event_ids else 1,
             0 if str(item.get("event_id")) in reserved_event_ids else 1,
             0 if target_task_id and str(item.get("task_id") or "") == str(target_task_id) else 1,
             -int(item.get("sequence") or 0),
@@ -500,41 +553,49 @@ def _read_source_snapshot(
                 f"task_id IN ({','.join('?' for _ in eval_task_ids)})"
             )
         eval_task_filter = " OR ".join(eval_task_filter_parts)
-        eval_rows = conn.execute(
-            f"""SELECT * FROM (
-                    SELECT er.*,
-                        ROW_NUMBER() OVER (
-                            PARTITION BY er.run_id, COALESCE(er.task_id, '')
-                            ORDER BY er.revision DESC, er.rowid DESC
-                        ) AS latest_rank,
-                        ROW_NUMBER() OVER (
-                            PARTITION BY er.run_id, COALESCE(er.task_id, '')
-                            ORDER BY CASE WHEN er.verification_passed = 0 THEN 0 ELSE 1 END,
-                                     er.revision DESC, er.rowid DESC
-                        ) AS strict_rank,
-                        ROW_NUMBER() OVER (
-                            PARTITION BY er.run_id, COALESCE(er.task_id, '')
-                            ORDER BY CASE WHEN er.verification_passed = 1 THEN 0 ELSE 1 END,
-                                     er.revision DESC, er.rowid DESC
-                        ) AS pass_rank
-                      FROM eval_results er
-                     WHERE er.run_id IN ({placeholders})
-                       AND er.workflow_id = ?
-                       AND ({eval_task_filter})
-                       AND length(COALESCE(er.evidence_json, 'null')) <= 20000
-                       AND length(COALESCE(er.warnings_json, '[]')) <= 20000
-                ) WHERE latest_rank = 1 OR strict_rank = 1 OR pass_rank = 1
-                ORDER BY CASE WHEN task_id = ? THEN 0 ELSE 1 END,
-                         run_id ASC, revision DESC, eval_id ASC
-                LIMIT ?""",
-            (
-                *run_values,
-                str(workflow_id),
-                *eval_task_ids,
-                str(task_id),
-                max(1, int(max_evals)),
-            ),
-        ).fetchall()
+        eval_limit = max(0, int(max_evals))
+        if eval_limit == 0:
+            eval_rows = []
+        else:
+            eval_window_limit = max(
+                eval_limit,
+                max(1, len(eval_task_ids), len(run_values)) * 3,
+            )
+            eval_rows = conn.execute(
+                f"""SELECT * FROM (
+                        SELECT er.*,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY er.run_id, COALESCE(er.task_id, '')
+                                ORDER BY er.revision DESC, er.rowid DESC
+                            ) AS latest_rank,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY er.run_id, COALESCE(er.task_id, '')
+                                ORDER BY CASE WHEN er.verification_passed = 0 THEN 0 ELSE 1 END,
+                                         er.revision DESC, er.rowid DESC
+                            ) AS strict_rank,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY er.run_id, COALESCE(er.task_id, '')
+                                ORDER BY CASE WHEN er.verification_passed = 1 THEN 0 ELSE 1 END,
+                                         er.revision DESC, er.rowid DESC
+                            ) AS pass_rank
+                          FROM eval_results er
+                         WHERE er.run_id IN ({placeholders})
+                           AND er.workflow_id = ?
+                           AND ({eval_task_filter})
+                           AND length(COALESCE(er.evidence_json, 'null')) <= 20000
+                           AND length(COALESCE(er.warnings_json, '[]')) <= 20000
+                    ) WHERE latest_rank = 1 OR strict_rank = 1 OR pass_rank = 1
+                    ORDER BY CASE WHEN task_id = ? THEN 0 ELSE 1 END,
+                             run_id ASC, revision DESC, eval_id ASC
+                    LIMIT ?""",
+                (
+                    *run_values,
+                    str(workflow_id),
+                    *eval_task_ids,
+                    str(task_id),
+                    eval_window_limit,
+                ),
+            ).fetchall()
         evals_by_key: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
         for row in eval_rows:
             decoded = _decode_eval_row(row)
@@ -553,12 +614,36 @@ def _read_source_snapshot(
             key = (str(decoded.get("run_id") or ""), str(decoded.get("task_id") or ""))
             evals_by_key.setdefault(key, []).append(decoded)
         evals = [item for items in evals_by_key.values() for item in items]
+        preferred_eval_ids: set[str] = set()
+        for key_evals in evals_by_key.values():
+            latest = max(key_evals, key=lambda item: (
+                int(item.get("revision") or 0), str(item.get("eval_id") or "")
+            ))
+            failure = max(
+                (item for item in key_evals if item.get("verification_passed") == 0),
+                key=lambda item: (int(item.get("revision") or 0), str(item.get("eval_id") or "")),
+                default=None,
+            )
+            recovery = max(
+                (item for item in key_evals if item.get("verification_passed") == 1),
+                key=lambda item: (int(item.get("revision") or 0), str(item.get("eval_id") or "")),
+                default=None,
+            )
+            selected = latest
+            if latest.get("verification_passed") not in (0, 1) and failure is not None and (
+                recovery is None
+                or (int(recovery.get("revision") or 0), str(recovery.get("eval_id") or ""))
+                <= (int(failure.get("revision") or 0), str(failure.get("eval_id") or ""))
+            ):
+                selected = failure
+            preferred_eval_ids.add(str(selected.get("eval_id")))
         evals.sort(key=lambda item: (
+            0 if str(item.get("eval_id")) in preferred_eval_ids else 1,
             0 if str(item.get("task_id") or "") == str(task_id) else 1,
             -int(item.get("revision") or 0),
             str(item.get("eval_id") or ""),
         ))
-        evals = evals[:max(1, int(max_evals))]
+        evals = evals[:eval_limit]
         source_clock_row = conn.execute(
             """
             SELECT revision
@@ -630,24 +715,26 @@ def _source_projection(snapshot: Mapping[str, Any]) -> Dict[str, Any]:
             for key in (
                 "task_id", "workflow_id", "run_id", "workflow_run_id", "execution_id",
                 "node", "stage", "agent", "agent_role", "status", "goal", "blocker",
-                "acceptance_criteria", "stage_verdict", "stage_verdict_note", "artifacts",
-                "blockers", "open_questions", "questions", "question", "decision_question",
-                "acceptance_gap", "decision",
+                "blocked_reason", "open_blockers", "acceptance_criteria", "requirements",
+                "acceptance", "stage_verdict", "stage_verdict_note", "artifacts", "artifact_refs",
+                "changed_artifacts", "deliverables", "blockers", "open_questions", "questions",
+                "question", "decision_question", "acceptance_gap", "decision",
             )
         },
         "runtime": _stable_runtime_projection(snapshot["task"]),
         "workflow": {
             key: snapshot["workflow"].get(key)
-            for key in ("workflow_id", "status", "current_stage", "config")
+            for key in ("workflow_id", "title", "status", "current_stage", "config")
         },
         "tasks": [
             {
                 **{key: item.get(key) for key in (
                     "task_id", "run_id", "workflow_run_id", "execution_id", "node", "stage",
-                    "agent", "agent_role", "status", "goal", "blocker", "acceptance_criteria",
-                    "stage_verdict", "stage_verdict_note", "artifacts", "blockers",
-                    "open_questions", "questions", "question", "decision_question", "acceptance_gap",
-                    "decision",
+                    "agent", "agent_role", "status", "goal", "blocker", "blocked_reason",
+                    "open_blockers", "acceptance_criteria", "requirements", "acceptance",
+                    "stage_verdict", "stage_verdict_note", "artifacts", "artifact_refs",
+                    "changed_artifacts", "deliverables", "blockers", "open_questions", "questions",
+                    "question", "decision_question", "acceptance_gap", "decision",
                 )},
                 "runtime": _stable_runtime_projection(item),
             }
