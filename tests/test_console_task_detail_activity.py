@@ -137,6 +137,79 @@ class TestTaskDetailActivity(unittest.TestCase):
         evs = json.loads(res.stdout.strip())
         self.assertEqual(evs, [])
 
+    def test_task_created_dedupe_via_node(self):
+        node_bin = shutil.which("node")
+        if not node_bin:
+            self.skipTest("node not found; skipping JS execution test")
+        src = _extract_fn(self.html, "buildTaskEvents")
+        self.assertIsNotNone(src)
+        num_src = _extract_fn(self.html, "taskDrawerNumTs")
+        upd_src = _extract_fn(self.html, "taskUpdatedAt")
+        harness = (
+            STUB_GLOBALS
+            + "\n" + num_src
+            + "\n" + upd_src
+            + "\n" + src
+            + "\nconst dup=buildTaskEvents({created_at:1000,status_history:[{to:'pending',at:1000}]},{});"
+            + "\nconst distinct=buildTaskEvents({created_at:1000,status_history:[{to:'working',at:2000}]},{});"
+            + "\nconsole.log(JSON.stringify(["
+            + "dup.filter(e=>e.type==='task_created').length,"
+            + "distinct.map(e=>e.type)]));"
+        )
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as f:
+            f.write(harness)
+            p = f.name
+        try:
+            res = subprocess.run([node_bin, p], capture_output=True, text=True, timeout=15)
+        finally:
+            Path(p).unlink(missing_ok=True)
+        self.assertEqual(res.returncode, 0, f"node failed: {res.stderr}")
+        dup_count, distinct_types = json.loads(res.stdout.strip())
+        self.assertEqual(dup_count, 1, "created_at + pending history must not duplicate 任务已创建")
+        self.assertEqual(distinct_types.count("task_created"), 1)
+        self.assertIn("agent_started", distinct_types)
+
+    def test_start_time_semantics_via_node(self):
+        node_bin = shutil.which("node")
+        if not node_bin:
+            self.skipTest("node not found; skipping JS execution test")
+        parts = []
+        for fn in ["taskDrawerNumTs", "taskExecStart", "taskStartedAt", "taskDisplayStart"]:
+            src = _extract_fn(self.html, fn)
+            self.assertIsNotNone(src, f"{fn} not found")
+            parts.append(src)
+        harness = (
+            STUB_GLOBALS
+            + "\n" + "\n".join(parts)
+            + "\nconsole.log(JSON.stringify(["
+            + "taskExecStart({started_at:900,created_at:1000,runtime:{started_at:1200}}),"
+            + "taskStartedAt({started_at:900,created_at:1000,runtime:{started_at:1200}}),"
+            + "taskExecStart({created_at:1000,runtime:{started_at:1200}}),"
+            + "taskDisplayStart({created_at:1000,runtime:{started_at:1200}}),"
+            + "taskExecStart({created_at:1000}),"
+            + "taskDisplayStart({created_at:1000}),"
+            + "taskDisplayStart({})]));"
+        )
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as f:
+            f.write(harness)
+            p = f.name
+        try:
+            res = subprocess.run([node_bin, p], capture_output=True, text=True, timeout=15)
+        finally:
+            Path(p).unlink(missing_ok=True)
+        self.assertEqual(res.returncode, 0, f"node failed: {res.stderr}")
+        vals = json.loads(res.stdout.strip())
+        # explicit started_at wins over runtime and creation
+        self.assertEqual(vals[0], 900)
+        self.assertEqual(vals[1], 900)
+        # runtime start beats creation time and is labeled 开始时间
+        self.assertEqual(vals[2], 1200)
+        self.assertEqual(vals[3], {"label": "开始时间", "ts": 1200})
+        # creation-only falls back with honest 创建时间 label, never faked as 开始时间
+        self.assertIsNone(vals[4])
+        self.assertEqual(vals[5], {"label": "创建时间", "ts": 1000})
+        self.assertIsNone(vals[6])
+
     def test_runtime_missing_fields_no_throw_via_node(self):
         node_bin = shutil.which("node")
         if not node_bin:
@@ -147,6 +220,8 @@ class TestTaskDetailActivity(unittest.TestCase):
         harness = (
             STUB_GLOBALS
             + "\n" + _extract_fn(self.html, "taskDrawerNumTs")
+            + "\n" + _extract_fn(self.html, "taskExecStart")
+            + "\n" + _extract_fn(self.html, "taskDisplayStart")
             + "\n" + _extract_fn(self.html, "fmtClock")
             + "\n" + _extract_fn(self.html, "taskStartedAt")
             + "\n" + _extract_fn(self.html, "taskUpdatedAt")

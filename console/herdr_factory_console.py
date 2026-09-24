@@ -2281,11 +2281,16 @@ document.addEventListener('click',e=>{
   const dd=document.getElementById('moreDropdown');
   if(dd&&!dd.contains(e.target))dd.classList.remove('open');
   if(!e.target.closest('.task-menu'))closeAllTaskMenus();
+  if(!e.target.closest('.task-drawer-menu-wrap'))closeTaskDrawerMenu();
 });
 document.addEventListener('keydown',e=>{
   if(e.key==='Escape'){
-    closeModal();
-    closeTaskDrawer();
+    const modal=document.getElementById('modal');
+    if(modal&&modal.classList.contains('open')){closeModal();return}
+    const dm=document.getElementById('taskDrawerMenu');
+    if(dm&&dm.classList.contains('open')){closeTaskDrawerMenu();return}
+    const td=document.getElementById('taskDrawer');
+    if(td&&!td.hidden){closeTaskDrawer();return}
     closeMoreMenu();
     closeAllTaskMenus();
     const d=document.getElementById('deepDrawer');
@@ -3184,7 +3189,9 @@ async function runPreflight(){
 }
 function showAgentOverride(){if(!state.workflowId)return toast('当前没有工作流',true);const cur=state.workflow.agent_override||'auto';openModal('指定后续任务执行者',`<div class="form"><label for="overrideAgent">执行者策略</label><select id="overrideAgent">${['auto','opencode','codex','claude','qodercli','agy','pi','grok','kimi'].map(a=>`<option ${a===cur?'selected':''}>${a}</option>`).join('')}</select><button class="btn primary" onclick="saveAgentOverride()">保存</button><div class="muted">只影响后续新建任务。</div></div>`)}async function saveAgentOverride(){try{await api('/api/workflow/agent',{method:'POST',body:JSON.stringify({workflow_id:state.workflowId,agent:document.getElementById('overrideAgent').value})});closeModal();await loadWorkflow(state.workflowId);toast('执行者策略已更新')}catch(e){toast(e.message,true)}}function taskDrawerNumTs(v){const n=parseFloat(v);return Number.isFinite(n)?n:null}
 function fmtClock(ts){const n=taskDrawerNumTs(ts);if(n===null)return '';const ms=n>1e12?n:n*1000;const d=new Date(ms);if(isNaN(d.getTime()))return '';return d.toLocaleTimeString('zh-CN',{hour12:false})}
-function taskStartedAt(t){t=t||{};const rt=t.runtime||{};return taskDrawerNumTs(t.started_at??t.created_at??rt.started_at)}
+function taskExecStart(t){t=t||{};const rt=t.runtime||{};return taskDrawerNumTs(t.started_at??rt.started_at)}
+function taskStartedAt(t){const e=taskExecStart(t);if(e!==null)return e;return taskDrawerNumTs((t||{}).created_at)}
+function taskDisplayStart(t){const e=taskExecStart(t);if(e!==null)return {label:'开始时间',ts:e};const c=taskDrawerNumTs((t||{}).created_at);if(c!==null)return {label:'创建时间',ts:c};return null}
 function taskUpdatedAt(t){t=t||{};return taskDrawerNumTs(t.updated_at??t.last_activity_at)}
 function taskDurationSecs(t){const s=taskStartedAt(t);const u=taskUpdatedAt(t);if(s===null||u===null)return null;return Math.max(0,Math.round(u-s))}
 function canSteerTask(t){return ['working','dispatched','rework','blocked','paused'].includes((t||{}).status)}
@@ -3204,6 +3211,7 @@ function buildTaskEvents(task,proj){
     const at=taskDrawerNumTs(h.at);
     if(!st||at===null)continue;
     const m=MAP[st]||['status_changed',humanStatus(st)];
+    if(m[0]==='task_created'&&evs.some(e=>e.type==='task_created'&&e.timestamp!==null&&Math.abs(e.timestamp-at)<2))continue;
     const tone=st==='failed'?'bad':(st==='blocked'?'warn':(['completed','committed','integrated','cleaned'].includes(st)?'done':(['working','dispatched','rework'].includes(st)?'info':'default')));
     const from=h.from?('由 '+h.from+' → '+st):'';
     push(m[0],at,m[1],from,tone);
@@ -3277,8 +3285,8 @@ function renderTaskRuntime(task,proj){
   add('运行 ID',task.run_id||'');
   add('分支',task.branch||'');
   add('运行状态',rt.status||live.agent_status||'');
-  const st=taskStartedAt(task);
-  if(st!==null)add('开始时间',fmtClock(st));
+  const ds=taskDisplayStart(task);
+  if(ds)add(ds.label,fmtClock(ds.ts));
   if(task.clone_path)add('代码目录',task.clone_path);
   if(!rows.length)return '<div class="empty">暂无运行时信息</div>';
   return `<div class="td-attrs">${rows.map(r=>`<div class="td-attr-k">${esc(r[0])}</div><div class="td-attr-v">${esc(r[1])}</div>`).join('')}</div>`;
@@ -3286,7 +3294,10 @@ function renderTaskRuntime(task,proj){
 function taskDrawerMenuHtml(t){
   t=t||{};
   const id=esc(t.task_id||'');
-  let h=`<button class="task-dropdown-item" onclick="closeTaskDrawerMenu();showPane('${id}')">查看工位</button>`;
+  const rt=(t.runtime||{});
+  const paneId=esc(t.pane_id||rt.pane_id||'');
+  let h='';
+  if(paneId)h+=`<button class="task-dropdown-item" onclick="closeTaskDrawerMenu();showPane('${paneId}')">查看工位</button>`;
   h+=`<button class="task-dropdown-item" onclick="closeTaskDrawerMenu();askCoordinator('${id}')">让总指挥处理</button>`;
   if(canSteerTask(t)){h+=`<div class="task-dropdown-divider"></div><button class="task-dropdown-item" style="color:var(--primary)" onclick="closeTaskDrawerMenu();showSteerModal('${id}')">实时插话</button><button class="task-dropdown-item danger" onclick="closeTaskDrawerMenu();haltTaskPrompt('${id}')">紧急制动</button>`}
   if(canForceReviewTask(t)){h+=`<div class="task-dropdown-divider"></div><button class="task-dropdown-item" style="color:var(--warning);font-weight:600" onclick="closeTaskDrawerMenu();forceReviewTask('${id}')">唤醒评审</button>`}
@@ -3316,13 +3327,13 @@ function renderTaskDrawer(){
   const stage=task.stage_label||task.stage||task.node_label||task.node||'';
   const rt=task.runtime||{};
   const rtShort=[task.workspace_id||rt.workspace_id||'',task.pane_id||rt.pane_id||''].filter(Boolean).join(' / ');
-  const st=taskStartedAt(task);
+  const ds=taskDisplayStart(task);
   const attrRows=[];
   if(task.agent)attrRows.push(['执行者',task.agent]);
   if(stage)attrRows.push(['阶段',stage]);
   if(task.status)attrRows.push(['状态',humanStatus(task.status)]);
   if(rtShort)attrRows.push(['运行现场',rtShort]);
-  if(st!==null)attrRows.push(['开始时间',fmtClock(st)]);
+  if(ds)attrRows.push([ds.label,fmtClock(ds.ts)]);
   if(dur!==null)attrRows.push(['耗时',formatElapsed(dur)]);
   const tabs=['overview','activity','artifacts','runtime'];
   const labels={overview:'tdTabOverview',activity:'tdTabActivity',artifacts:'tdTabArtifacts',runtime:'tdTabRuntime'};

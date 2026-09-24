@@ -2,7 +2,11 @@
 
 import importlib.machinery
 import importlib.util
+import json
 import re
+import shutil
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -18,6 +22,31 @@ def _load_console(name):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _extract_fn(html, name):
+    start = html.find(f"function {name}(")
+    if start < 0:
+        return None
+    i = html.find("{", start)
+    if i < 0:
+        return None
+    depth = 0
+    for j in range(i, len(html)):
+        if html[j] == "{":
+            depth += 1
+        elif html[j] == "}":
+            depth -= 1
+            if depth == 0:
+                return html[start:j + 1]
+    return None
+
+
+STUB_GLOBALS = (
+    "function esc(s){return String(s??'');}"
+    "function humanStatus(s){return s||'unknown';}"
+    "var state={selectedTaskDetail:null,workflowId:null};"
+)
 
 
 class TestTaskDetailDrawer(unittest.TestCase):
@@ -78,6 +107,48 @@ class TestTaskDetailDrawer(unittest.TestCase):
     def test_no_fake_metadata(self):
         # drawer must not render dash-filled placeholders or hard-coded fake durations
         self.assertNotIn("4m 18s", self.html)
+
+    def _menu_html_via_node(self, task):
+        node_bin = shutil.which("node")
+        if not node_bin:
+            self.skipTest("node not found; skipping JS execution test")
+        fns = ["taskDrawerMenuHtml", "canSteerTask", "canForceReviewTask", "canForcePassTask"]
+        parts = []
+        for fn in fns:
+            src = _extract_fn(self.html, fn)
+            self.assertIsNotNone(src, f"{fn} not found")
+            parts.append(src)
+        harness = STUB_GLOBALS + "\n" + "\n".join(parts) + f"\nconsole.log(taskDrawerMenuHtml({task}));"
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as f:
+            f.write(harness)
+            p = f.name
+        try:
+            res = subprocess.run([node_bin, p], capture_output=True, text=True, timeout=15)
+        finally:
+            Path(p).unlink(missing_ok=True)
+        self.assertEqual(res.returncode, 0, f"node failed: {res.stderr}")
+        return res.stdout
+
+    def test_view_pane_uses_pane_id(self):
+        html = self._menu_html_via_node(json.dumps({"task_id": "T1", "pane_id": "p9", "status": "working"}))
+        self.assertIn("showPane('p9')", html)
+        self.assertNotIn("showPane('T1')", html)
+        self.assertIn("查看工位", html)
+
+    def test_view_pane_hidden_without_pane_id(self):
+        html = self._menu_html_via_node(json.dumps({"task_id": "T1", "status": "working"}))
+        self.assertNotIn("查看工位", html)
+        self.assertNotIn("showPane", html)
+
+    def test_escape_closes_topmost_layer_first(self):
+        seg_start = self.html.find("if(e.key==='Escape')")
+        self.assertNotEqual(seg_start, -1, "Escape handler not found")
+        seg = self.html[seg_start:seg_start + 1200]
+        self.assertIn("modal.classList.contains('open')", seg)
+        p1 = seg.find("closeModal();return")
+        p2 = seg.find("closeTaskDrawerMenu();return")
+        p3 = seg.find("closeTaskDrawer();return")
+        self.assertTrue(-1 < p1 < p2 < p3, "Escape must unwind modal -> drawer menu -> drawer in order")
 
 
 if __name__ == "__main__":
