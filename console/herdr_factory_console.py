@@ -3345,6 +3345,16 @@ function renderTaskDrawer(){
   else body+=renderTaskOverview(task,proj);
   document.getElementById('taskDrawerBody').innerHTML=body;
 }
+function resolveTaskDetail(tid,td,proj,tdError,projError,rowTask){
+  const fetched=(td&&td.task)||{};
+  const task=Object.assign({},rowTask||{},fetched);
+  if(!Object.keys(task).length&&proj)Object.assign(task,{task_id:proj.task_id,workflow_id:proj.workflow_id,node:proj.node,agent:proj.agent,status:proj.status,goal:proj.goal});
+  if(!td&&!proj&&!Object.keys(task).length){
+    const msg=(tdError&&tdError.message)||(projError&&projError.message)||'任务详情加载失败';
+    return {status:'error',message:msg};
+  }
+  return {status:'ok',task,proj:proj||{},live:((td&&td.runtime)||{})};
+}
 async function openTaskDrawer(tid){
   if(!tid)return;
   state.selectedTaskId=tid;state.taskDrawerTab='overview';
@@ -3358,14 +3368,24 @@ async function openTaskDrawer(tid){
   const row=document.querySelector(`[data-task-id="${CSS.escape?CSS.escape(tid):tid}"]`);
   if(row)row.classList.add('task-highlight');
   try{
-    const [td,proj]=await Promise.all([api('/api/task?id='+encodeURIComponent(tid)).catch(()=>null),api('/api/task/projection?id='+encodeURIComponent(tid)).catch(()=>null)]);
+    const [tdRes,projRes]=await Promise.all([
+      api('/api/task?id='+encodeURIComponent(tid)).then(d=>({ok:true,data:d}),e=>({ok:false,error:e})),
+      api('/api/task/projection?id='+encodeURIComponent(tid)).then(d=>({ok:true,data:d}),e=>({ok:false,error:e}))
+    ]);
     if(state.selectedTaskId!==tid)return;
+    const td=tdRes.ok?tdRes.data:null;
+    const proj=projRes.ok?projRes.data:null;
     let rowTask=null;
     try{rowTask=((state.workflow&&state.workflow.tasks)||[]).find(t=>t.task_id===tid)||null}catch(e){rowTask=null}
-    const fetched=(td&&td.task)||{};
-    const task=Object.assign({},rowTask||{},fetched);
-    if(!Object.keys(task).length&&proj)Object.assign(task,{task_id:proj.task_id,workflow_id:proj.workflow_id,node:proj.node,agent:proj.agent,status:proj.status,goal:proj.goal});
-    state.selectedTaskDetail={task,proj:proj||{},live:((td&&td.runtime)||{})};
+    const r=resolveTaskDetail(tid,td,proj,tdRes.ok?null:tdRes.error,projRes.ok?null:projRes.error,rowTask);
+    if(r.status==='error'){
+      document.getElementById('taskDrawerTitle').textContent='任务详情加载失败';
+      document.getElementById('taskDrawerMeta').textContent='';
+      document.getElementById('taskDrawerBody').innerHTML=`<div class="empty">加载失败：${esc(r.message)}</div>`;
+      state.selectedTaskDetail=null;
+      return;
+    }
+    state.selectedTaskDetail={task:r.task,proj:r.proj,live:r.live};
     renderTaskDrawer();
   }catch(e){document.getElementById('taskDrawerBody').innerHTML=`<div class="empty">加载失败：${esc(e.message)}</div>`}
 }

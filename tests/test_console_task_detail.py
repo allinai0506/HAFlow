@@ -150,6 +150,64 @@ class TestTaskDetailDrawer(unittest.TestCase):
         p3 = seg.find("closeTaskDrawer();return")
         self.assertTrue(-1 < p1 < p2 < p3, "Escape must unwind modal -> drawer menu -> drawer in order")
 
+    def _resolve_via_node(self, exprs):
+        node_bin = shutil.which("node")
+        if not node_bin:
+            self.skipTest("node not found; skipping JS execution test")
+        src = _extract_fn(self.html, "resolveTaskDetail")
+        self.assertIsNotNone(src, "resolveTaskDetail not found")
+        harness = src + "\nconsole.log(JSON.stringify([" + ",".join(exprs) + "]));"
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as f:
+            f.write(harness)
+            p = f.name
+        try:
+            res = subprocess.run([node_bin, p], capture_output=True, text=True, timeout=15)
+        finally:
+            Path(p).unlink(missing_ok=True)
+        self.assertEqual(res.returncode, 0, f"node failed: {res.stderr}")
+        return json.loads(res.stdout.strip())
+
+    def test_degrade_task_ok_proj_fail(self):
+        (r,) = self._resolve_via_node([
+            "resolveTaskDetail('T',{task:{task_id:'T',status:'working'}},null,{message:'p'},null,null)",
+        ])
+        self.assertEqual(r["status"], "ok")
+        self.assertEqual(r["task"]["task_id"], "T")
+
+    def test_degrade_task_fail_proj_ok(self):
+        (r,) = self._resolve_via_node([
+            "resolveTaskDetail('T',null,{task_id:'T',status:'working',goal:'g'},{message:'t'},null,null)",
+        ])
+        self.assertEqual(r["status"], "ok")
+        self.assertEqual(r["task"]["task_id"], "T")
+
+    def test_both_fail_no_row_is_error_not_empty_task(self):
+        (r,) = self._resolve_via_node([
+            "resolveTaskDetail('T',null,null,{message:'Task 不存在'},{message:'nope'},null)",
+        ])
+        self.assertEqual(r["status"], "error")
+        self.assertEqual(r["message"], "Task 不存在")
+        self.assertNotIn("task", r)
+
+    def test_both_fail_with_row_renders_cached_data(self):
+        (r,) = self._resolve_via_node([
+            "resolveTaskDetail('T',null,null,{message:'a'},{message:'b'},{task_id:'T',status:'working'})",
+        ])
+        self.assertEqual(r["status"], "ok")
+        self.assertEqual(r["task"]["task_id"], "T")
+
+    def test_failure_header_not_stuck_on_loading(self):
+        seg_start = self.html.find("async function openTaskDrawer(")
+        self.assertNotEqual(seg_start, -1)
+        seg = self.html[seg_start:seg_start + 4000]
+        self.assertIn("taskDrawerTitle').textContent='任务详情加载失败'", seg)
+
+    def test_stale_response_guard_intact(self):
+        seg_start = self.html.find("async function openTaskDrawer(")
+        self.assertNotEqual(seg_start, -1)
+        seg = self.html[seg_start:seg_start + 4000]
+        self.assertIn("if(state.selectedTaskId!==tid)return;", seg)
+
 
 if __name__ == "__main__":
     unittest.main()
