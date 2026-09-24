@@ -24,7 +24,7 @@ from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
 import fcntl
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from herdr.transitions import (
     ACTIVE_TASK_STATUSES,
@@ -603,11 +603,14 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
                     f"""
                     INSERT INTO working_context_source_clock (run_scope, workflow_id, revision)
                     SELECT {old_scope_expr}, {old_workflow_expr}, 1
-                    WHERE {old_scope_expr} <> '' AND {old_scope_expr} <> {scope_expr}
+                    WHERE {old_scope_expr} <> '' AND (
+                        {old_scope_expr} <> {scope_expr}
+                        OR {old_workflow_expr} <> {workflow_expr}
+                    )
                     ON CONFLICT(run_scope, workflow_id) DO UPDATE SET revision = revision + 1;
                     """
                 )
-                if source_table in {"workflows", "tasks"} | task_scoped_tables:
+                if source_table in {"workflows"} | task_scoped_tables:
                     statements.append(
                         f"""
                         INSERT INTO working_context_source_clock (run_scope, workflow_id, revision)
@@ -3376,7 +3379,7 @@ def _validate_context_source_existence(
     taskless_allowed_runs: set[str] = set()
     def task_record(task_id: str):
         row = conn.execute(
-            "SELECT task_id, workflow_id, node, stage, agent, payload_json FROM tasks WHERE task_id = ? LIMIT 1",
+            "SELECT task_id, workflow_id, node, stage, agent, status, stage_verdict, blocker, goal, payload_json FROM tasks WHERE task_id = ? LIMIT 1",
             (task_id,),
         ).fetchone()
         if row is None:
@@ -3389,6 +3392,13 @@ def _validate_context_source_existence(
             effective_run_id = str(run_id_for_task({**payload, "task_id": task_id}))
         except ValueError:
             effective_run_id = ""
+        task_payload = {
+            **payload,
+            "status": row["status"] or payload.get("status"),
+            "stage_verdict": row["stage_verdict"] or payload.get("stage_verdict"),
+            "blocker": row["blocker"] or payload.get("blocker"),
+            "goal": row["goal"] or payload.get("goal"),
+        }
         return {
             "task_id": task_id,
             "workflow_id": row["workflow_id"] or payload.get("workflow_id"),
@@ -3398,6 +3408,7 @@ def _validate_context_source_existence(
             "run_id": effective_run_id,
             "agent_role": payload.get("agent_role"),
             "scope": payload.get("workflow_run_id") or payload.get("execution_id") or row["workflow_id"],
+            "payload": task_payload,
         }
 
     target_record = task_record(str(context.get("task_id") or ""))
@@ -3515,6 +3526,45 @@ def _validate_context_source_existence(
                 continue
             verified_handoff_tasks.update(endpoints - {target_task_id})
 
+    def _task_derived_ref_valid(task: Mapping[str, Any], remainder: str) -> bool:
+        parts = remainder.split(":")
+        if len(parts) == 1:
+            return True
+        kind = parts[1]
+        data = task.get("payload") if isinstance(task.get("payload"), Mapping) else task
+        values = lambda key: (
+            data.get(key) if isinstance(data.get(key), list) else [data.get(key)]
+            if data.get(key) is not None else []
+        )
+        if kind == "artifact":
+            artifacts = []
+            for key in ("artifacts", "artifact_refs", "changed_artifacts", "deliverables"):
+                artifacts.extend(values(key))
+            return len(parts) == 2 or (
+                len(parts) == 3 and parts[2].isdigit() and int(parts[2]) < len(artifacts)
+            )
+        if kind == "blocker":
+            blockers = []
+            for key in ("blocker", "blocked_reason", "open_blockers", "blockers"):
+                blockers.extend(values(key))
+            if len(parts) == 2:
+                return bool(blockers)
+            if parts[2] == "current":
+                return bool(blockers)
+            return len(parts) == 3 and parts[2].isdigit() and int(parts[2]) < len(blockers)
+        if kind == "completed":
+            return len(parts) == 2 and data.get("status") in COMPLETED_TASK_STATUSES
+        if kind == "decision":
+            return len(parts) == 2 and bool(data.get("stage_verdict") or data.get("decision"))
+        if kind == "open_question":
+            if len(parts) != 4 or not parts[2].isdigit() or not parts[3].isdigit():
+                return False
+            keys = ("open_questions", "questions", "question", "decision_question", "acceptance_gap")
+            if int(parts[2]) >= len(keys):
+                return False
+            return int(parts[3]) < len(values(keys[int(parts[2])]))
+        return False
+
     for ref in sorted(refs):
         if not ref:
             continue
@@ -3531,6 +3581,8 @@ def _validate_context_source_existence(
         record = fetch_record(prefix, object_id)
         if record is None:
             raise ValueError(f"working context source reference does not exist: {ref}")
+        if prefix == "task" and not _task_derived_ref_valid(record, remainder):
+            raise ValueError(f"working context task source reference has an invalid derived target: {ref}")
         if record.get("workflow_id") and str(record["workflow_id"]) != str(context.get("workflow_id") or ""):
             raise ValueError(f"working context source reference crosses workflow: {ref}")
         bound_task = record.get("task_id") or record.get("to_task_id")
@@ -3626,6 +3678,14 @@ def save_working_context(
                     for key in ("passed", "verification_passed", "requirements_satisfied"):
                         if key in value and value[key] is not None and not isinstance(value[key], bool):
                             raise ValueError("working context verification values must be strict booleans")
+                    if (
+                        "passed" in value
+                        and "verification_passed" in value
+                        and value["passed"] is not None
+                        and value["verification_passed"] is not None
+                        and value["passed"] != value["verification_passed"]
+                    ):
+                        raise ValueError("working context verification aliases must agree")
             for ref in item.get("evidence_refs") or []:
                 if not _valid_context_source_ref(ref):
                     raise ValueError(f"working context item in {field_name} has invalid evidence_ref")
@@ -3685,6 +3745,8 @@ def save_working_context(
     ):
         for item in context.get(field_name) or []:
             all_source_refs.add(str(item.get("source_ref") or ""))
+            all_source_refs.update(str(ref) for ref in item.get("evidence_refs") or [])
+    declared_source_refs = set(context.get("source_refs") or [])
     goal_source_ref = str(context.get("goal_source_ref") or "")
     if (
         not goal_source_ref
@@ -3755,6 +3817,8 @@ def save_working_context(
                 result["_stale_snapshot"] = True
                 return result
         _validate_context_source_existence(conn, context)
+        if not all_source_refs.issubset(declared_source_refs):
+            raise ValueError("working context source_refs does not cover all provenance")
         source_head = conn.execute(
             """
             SELECT source_version, revision

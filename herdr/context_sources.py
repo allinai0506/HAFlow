@@ -235,7 +235,11 @@ def _merge_verification_events(
                ))
                AND ({task_filter})
                AND length(e.payload_json) > 20000
-             ORDER BY CASE WHEN e.task_id = ? THEN 0 ELSE 1 END,
+             ORDER BY CASE WHEN e.event_type IN (
+                                  'task_failed', 'agent_failed', 'run_failed', 'blocker',
+                                  'verification_completed', 'tests_completed'
+                              ) THEN 0 ELSE 1 END,
+                      CASE WHEN e.task_id = ? THEN 0 ELSE 1 END,
                       e.sequence DESC, e.id DESC
              LIMIT ?""",
         (

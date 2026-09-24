@@ -346,6 +346,36 @@ def test_low_level_storage_normalizes_empty_fingerprint_config(tmp_path: Path):
         state_db.save_working_context(payload, db_path=db, fingerprint_config={})
 
 
+def test_storage_rejects_conflicting_verification_aliases(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-storage-conflicting-verification"))
+    payload = dict(_compile(db, target, "tester").to_mapping())
+    payload["context_id"] = "wc_storage_conflicting_verification"
+    payload["verification"] = [{
+        "kind": "verification", "source_ref": f"task:{target['task_id']}",
+        "source_task": target["task_id"], "source_run": target["run_id"],
+        "value": {"passed": True, "verification_passed": False},
+    }]
+    _bind_storage_fingerprint(payload)
+    with pytest.raises(ValueError, match="verification aliases"):
+        state_db.save_working_context(payload, db_path=db)
+
+
+def test_storage_rejects_incomplete_aggregate_source_refs(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-storage-source-ref-closure"))
+    payload = dict(_compile(db, target, "developer").to_mapping())
+    payload["context_id"] = "wc_storage_source_ref_closure"
+    item_ref = payload["blockers"][0]["source_ref"] if payload.get("blockers") else None
+    if item_ref:
+        payload["source_refs"] = [ref for ref in payload.get("source_refs", []) if ref != item_ref]
+        _bind_storage_fingerprint(payload)
+        with pytest.raises(ValueError, match="source_refs"):
+            state_db.save_working_context(payload, db_path=db)
+
+
 def test_storage_rejects_kind_cap_violation(tmp_path: Path):
     from herdr.context_models import WorkingContext, _hash, _payload_digest
     from herdr.context_projection import _config, _fingerprint_payload
@@ -468,7 +498,7 @@ def test_storage_rejects_nonexistent_typed_source_ref(tmp_path: Path):
         "metrics": {"source_clock": 0}, "compiled_at": 1.0,
     }
     _bind_storage_fingerprint(payload)
-    with pytest.raises(ValueError, match="does not exist"):
+    with pytest.raises(ValueError, match="does not exist|source_refs"):
         state_db.save_working_context(payload, db_path=db)
 
 
@@ -846,12 +876,17 @@ def test_task_scope_update_advances_old_and_new_source_clocks(tmp_path: Path):
     target = _seed_task(db, _task("task-scope-move", workflow_id="wf-a", scope="scope-a"))
     _compile(db, target, "developer")
     old_clock = _source_clock_revision(db, "scope-a", "wf-a")
+    sibling = _seed_task(db, _task("task-scope-sibling", workflow_id="wf-a", scope="scope-b"))
+    sibling_clock = _source_clock_revision(db, "scope-b", "wf-a")
+    state_db.save_task(dict(target, goal="target update"), db_path=db)
+    assert _source_clock_revision(db, "scope-a", "wf-a") > old_clock
+    assert _source_clock_revision(db, "scope-b", "wf-a") == sibling_clock
     state_db.save_task(
-        dict(target, workflow_run_id="scope-b"),
+        dict(target, workflow_run_id="scope-b", goal="scope move"),
         db_path=db,
     )
     assert _source_clock_revision(db, "scope-a", "wf-a") > old_clock
-    assert _source_clock_revision(db, "scope-b", "wf-a") > 0
+    assert _source_clock_revision(db, "scope-b", "wf-a") > sibling_clock
 
 
 def test_task_workflow_move_advances_old_workflow_clock(tmp_path: Path):
@@ -1530,6 +1565,35 @@ def test_completed_task_does_not_project_stale_persisted_blocker(tmp_path: Path)
     assert not context.blockers
 
 
+def test_oversized_failure_survives_oversized_decision_noise(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-oversized-critical-noise", node="implementation"))
+    state_db.record_trajectory_event(
+        {
+            "run_id": target["run_id"], "task_id": target["task_id"],
+            "workflow_id": target["workflow_id"], "event_type": "task_failed",
+            "payload": {"reason": "x" * 21000},
+        },
+        db_path=db,
+    )
+    for index in range(300):
+        state_db.record_trajectory_event(
+            {
+                "run_id": target["run_id"], "task_id": target["task_id"],
+                "workflow_id": target["workflow_id"], "event_type": "decision",
+                "payload": {"decision": "x" * 21000},
+            },
+            db_path=db,
+        )
+    context = _compile(db, target, "developer")
+    assert context.blockers
+    assert any(
+        item.get("value", {}).get("source_truncated") is True
+        for item in context.blockers
+    )
+
+
 def test_oversized_decision_payload_is_retained_as_truncated_marker(tmp_path: Path):
     db = tmp_path / "state.db"
     _seed_workflow(db)
@@ -1777,6 +1841,16 @@ def test_single_slot_preserves_strict_failure_without_recovery(tmp_path: Path):
     )
     assert any(item.get("event_id") == failure["event_id"] for item in snapshot["events"])
     assert any(item.get("verification_passed") == 0 for item in snapshot["evals"])
+
+
+def test_tight_budget_compile_preserves_compiled_at_precision(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-compiled-at-precision"))
+    first = _compile(db, target, "developer", now=1000.1)
+    second = _compile(db, target, "developer", config={"max_chars": 2500}, now=1000.2)
+    assert first.compiled_at == 1000.1
+    assert second.compiled_at == 1000.2
 
 
 def test_oversized_eval_evidence_cannot_clear_failure(tmp_path: Path):

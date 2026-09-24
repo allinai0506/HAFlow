@@ -214,6 +214,7 @@ def _fit_final_budget(context: WorkingContext, max_chars: int) -> WorkingContext
             in {"failed", "failure", "blocked"}
         )
 
+    fit_limit = max(300, max_chars - 64)
     for _ in range(4):
         metrics = dict(context.metrics)
         metrics.pop("boundary", None)
@@ -231,7 +232,7 @@ def _fit_final_budget(context: WorkingContext, max_chars: int) -> WorkingContext
         )
         context = WorkingContext(**{**context.to_mapping(), "metrics": metrics})
         context = _calibrate_context_metrics(context)
-        if len(json.dumps(context.to_mapping(), ensure_ascii=False)) <= max_chars:
+        if len(json.dumps(context.to_mapping(), ensure_ascii=False)) <= fit_limit:
             return context
         context = WorkingContext(**{
             **context.to_mapping(),
@@ -243,7 +244,7 @@ def _fit_final_budget(context: WorkingContext, max_chars: int) -> WorkingContext
                 if any(verification_failed(item) for item in context.verification)
                 else "Continue."
             ),
-            "compiled_at": round(context.compiled_at),
+            "compiled_at": context.compiled_at,
             "current_state": compact_state(context.current_state),
             "current_state_refs": {
                 key: value for key, value in context.current_state_refs.items()
@@ -273,4 +274,29 @@ def _fit_final_budget(context: WorkingContext, max_chars: int) -> WorkingContext
             **context.to_mapping(),
             "source_refs": compact_refs(context),
         })
+    if len(json.dumps(context.to_mapping(), ensure_ascii=False)) > fit_limit:
+        compact_metrics = {
+            key: context.metrics[key]
+            for key in ("source_clock", "context_reuse", "context_changed", "selected_items")
+            if key in context.metrics
+        }
+        compact_state_refs = {
+            key: value for key, value in context.current_state_refs.items()
+            if key in state_keys
+        }
+        context = WorkingContext(**{
+            **context.to_mapping(),
+            "goal": _clip_text(context.goal, 16),
+            "next_action": _clip_text(context.next_action, 64),
+            "current_state": _bound_value(context.current_state, 16),
+            "current_state_refs": compact_state_refs,
+            "metrics": compact_metrics,
+        })
+        context = WorkingContext(**{
+            **context.to_mapping(),
+            "source_refs": compact_refs(context),
+        })
+        context = _calibrate_context_metrics(context)
+    if len(json.dumps(context.to_mapping(), ensure_ascii=False)) <= fit_limit:
+        return context
     raise ValueError("max_chars is too small for the required WorkingContext identity")
