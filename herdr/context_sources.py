@@ -165,7 +165,9 @@ def _merge_verification_events(
                  WHERE e.source = 'trajectory'
                    AND e.run_id IN ({placeholders})
                    AND e.event_type IN ('verification_completed', 'tests_completed')
-                   AND e.workflow_id = ?
+                   AND (e.workflow_id = ? OR (
+                       e.task_id IS NOT NULL AND (e.workflow_id IS NULL OR e.workflow_id = '')
+                   ))
                    AND ({task_filter})
                    AND length(e.payload_json) <= 20000
             ) WHERE latest_rank = 1 OR strict_rank = 1 OR pass_rank = 1
@@ -197,7 +199,9 @@ def _merge_verification_events(
                  WHERE e.source = 'trajectory'
                    AND e.run_id IN ({placeholders})
                    AND e.event_type IN ({critical_placeholders})
-                   AND e.workflow_id = ?
+                   AND (e.workflow_id = ? OR (
+                       e.task_id IS NOT NULL AND (e.workflow_id IS NULL OR e.workflow_id = '')
+                   ))
                    AND ({task_filter})
                    AND length(e.payload_json) <= 20000
             ) WHERE latest_rank = 1 OR failure_rank = 1
@@ -222,7 +226,9 @@ def _merge_verification_events(
              WHERE e.source = 'trajectory'
                AND e.run_id IN ({placeholders})
                AND e.event_type IN ({oversized_placeholders})
-               AND e.workflow_id = ?
+               AND (e.workflow_id = ? OR (
+                   e.task_id IS NOT NULL AND (e.workflow_id IS NULL OR e.workflow_id = '')
+               ))
                AND ({task_filter})
                AND length(e.payload_json) > 20000
              ORDER BY CASE WHEN e.task_id = ? THEN 0 ELSE 1 END,
@@ -515,6 +521,33 @@ def _read_source_snapshot(
             (*run_values, int(max_findings)),
         ).fetchall()
         findings = [state_db._decode_finding_row(row) for row in finding_rows]
+        critical_finding_rows = conn.execute(
+            f"""SELECT * FROM trajectory_findings
+                WHERE run_id IN ({placeholders})
+                  AND (LOWER(COALESCE(severity, '')) = 'critical'
+                       OR finding_type IN ('verification_failure', 'repeated_failure'))
+                  AND LOWER(COALESCE(status, 'open')) NOT IN ('resolved', 'closed', 'superseded')
+                ORDER BY CASE WHEN task_id = ? THEN 0 ELSE 1 END,
+                         created_at DESC, rowid DESC
+                LIMIT ?""",
+            (*run_values, str(task_id), int(max_findings)),
+        ).fetchall()
+        findings_by_id = {
+            str(finding.get("finding_id")): finding for finding in findings
+        }
+        for row in critical_finding_rows:
+            finding = state_db._decode_finding_row(row)
+            findings_by_id[str(finding.get("finding_id"))] = finding
+        findings = list(findings_by_id.values())
+        findings.sort(key=lambda finding: (
+            0 if str(finding.get("task_id") or "") == str(task_id)
+            and (str(finding.get("severity") or "").lower() == "critical"
+                 or finding.get("finding_type") in {"verification_failure", "repeated_failure"})
+            else 1,
+            -float(finding.get("created_at") or 0.0),
+            str(finding.get("finding_id") or ""),
+        ))
+        findings = findings[:max_findings]
         relation_targets = set()
         for finding in findings:
             metadata = finding.get("metadata") if isinstance(finding.get("metadata"), Mapping) else {}
@@ -571,7 +604,26 @@ def _read_source_snapshot(
                 ORDER BY created_at DESC, event_id DESC LIMIT ?""",
             (run_scope, str(workflow_id), *task_ids, *task_ids, int(max_collaborations)),
         ).fetchall()
-        collaborations = [state_db._decode_collaboration_row(row) for row in collab_rows]
+        incoming_collab_rows = conn.execute(
+            """SELECT * FROM collaboration_events
+                WHERE run_id = ? AND workflow_id = ? AND to_task_id = ?
+                ORDER BY created_at DESC, event_id DESC LIMIT ?""",
+            (run_scope, str(workflow_id), str(task_id), int(max_collaborations)),
+        ).fetchall()
+        collaborations_by_id = {
+            str(state_db._decode_collaboration_row(row)["event_id"]): state_db._decode_collaboration_row(row)
+            for row in collab_rows
+        }
+        for row in incoming_collab_rows:
+            decoded = state_db._decode_collaboration_row(row)
+            collaborations_by_id[str(decoded["event_id"])] = decoded
+        collaborations = list(collaborations_by_id.values())
+        collaborations.sort(key=lambda event: (
+            0 if str(event.get("to_task_id") or "") == str(task_id) else 1,
+            -float(event.get("created_at") or 0.0),
+            str(event.get("event_id") or ""),
+        ))
+        collaborations = collaborations[:max_collaborations]
         if not explicit_execution_scope:
             linked_task_ids = {
                 linked_id
@@ -707,7 +759,9 @@ def _read_source_snapshot(
                             ) AS pass_rank
                           FROM eval_results er
                          WHERE er.run_id IN ({placeholders})
-                           AND er.workflow_id = ?
+                           AND (er.workflow_id = ? OR (
+                               er.task_id IS NOT NULL AND (er.workflow_id IS NULL OR er.workflow_id = '')
+                           ))
                            AND ({eval_task_filter})
                            AND length(COALESCE(er.evidence_json, 'null')) <= 20000
                            AND length(COALESCE(er.warnings_json, '[]')) <= 20000
@@ -731,7 +785,9 @@ def _read_source_snapshot(
                            er.workflow_id, er.created_at
                       FROM eval_results er
                      WHERE er.run_id IN ({placeholders})
-                       AND er.workflow_id = ?
+                       AND (er.workflow_id = ? OR (
+                           er.task_id IS NOT NULL AND (er.workflow_id IS NULL OR er.workflow_id = '')
+                       ))
                        AND ({eval_task_filter})
                        AND (length(COALESCE(er.evidence_json, 'null')) > 20000
                             OR length(COALESCE(er.warnings_json, '[]')) > 20000)
@@ -891,6 +947,35 @@ def _bounded_source_value(value: Any, depth: int = 0) -> Any:
     return value
 
 
+def _workflow_config_projection(
+    workflow: Mapping[str, Any], task: Mapping[str, Any],
+) -> Any:
+    config = workflow.get("config")
+    if not isinstance(config, Mapping):
+        return config
+    nodes = config.get("nodes")
+    if not isinstance(nodes, list):
+        return config
+    relevant_ids = {
+        str(value)
+        for value in (
+            task.get("node"), task.get("stage"),
+            *(task.get("depends_on") or [] if isinstance(task.get("depends_on"), list) else []),
+        )
+        if value
+    }
+    relevant_nodes = [
+        node for node in nodes
+        if isinstance(node, Mapping) and str(node.get("id") or "") in relevant_ids
+    ]
+    canonical_nodes = json.dumps(nodes, ensure_ascii=False, sort_keys=True, default=str)
+    return {
+        **{key: value for key, value in config.items() if key != "nodes"},
+        "nodes": relevant_nodes,
+        "all_nodes_sha256": hashlib.sha256(canonical_nodes.encode("utf-8")).hexdigest(),
+    }
+
+
 def _source_projection(snapshot: Mapping[str, Any]) -> Dict[str, Any]:
     """Keep the source-version hash bounded to fields that affect compilation."""
     return _bounded_source_value({
@@ -908,8 +993,13 @@ def _source_projection(snapshot: Mapping[str, Any]) -> Dict[str, Any]:
         },
         "runtime": _stable_runtime_projection(snapshot["task"]),
         "workflow": {
-            key: snapshot["workflow"].get(key)
-            for key in ("workflow_id", "title", "status", "current_stage", "config")
+            **{
+                key: snapshot["workflow"].get(key)
+                for key in ("workflow_id", "title", "status", "current_stage")
+            },
+            "config": _workflow_config_projection(
+                snapshot["workflow"], snapshot["task"],
+            ),
         },
         "tasks": [
             {

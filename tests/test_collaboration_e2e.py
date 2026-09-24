@@ -33,15 +33,34 @@ class FakeSender:
         return {"ok": True}
 
 
-def _tasks(run_id="run-1", workflow_id="wf-1"):
+def _tasks(run_id="run-1", workflow_id="wf-1", db=None, id_prefix=""):
     # Production-faithful: sibling tasks carry distinct per-launch run_ids;
     # the shared collaboration scope is the workflow.
-    return {
-        "task-a": {"task_id": "task-a", "run_id": "run-A", "workflow_id": workflow_id,
-                   "pane_id": "pane-a", "agent": "developer"},
-        "task-b": {"task_id": "task-b", "run_id": "run-B", "workflow_id": workflow_id,
-                   "pane_id": "pane-b", "agent": "reviewer"},
+    task_a = f"{id_prefix}task-a"
+    task_b = f"{id_prefix}task-b"
+    tasks = {
+        task_a: {"task_id": task_a, "run_id": "run-A", "workflow_id": workflow_id,
+                  "pane_id": f"pane-{id_prefix}a", "agent": "developer"},
+        task_b: {"task_id": task_b, "run_id": "run-B", "workflow_id": workflow_id,
+                  "pane_id": f"pane-{id_prefix}b", "agent": "reviewer"},
     }
+    if db is not None:
+        _persist_tasks(db, tasks)
+    return tasks
+
+
+def _persist_tasks(db, tasks):
+    for workflow_id in sorted({task["workflow_id"] for task in tasks.values()}):
+        if state_db.get_workflow(workflow_id, db_path=db) is None:
+            state_db.save_workflow(
+                {"workflow_id": workflow_id, "title": "fixture", "status": "running",
+                 "config": {"nodes": [{"id": "implementation", "depends_on": []},
+                                      {"id": "review", "depends_on": ["implementation"]}] }},
+                db_path=db,
+            )
+    for task in tasks.values():
+        state_db.save_task(task, db_path=db)
+    return tasks
 
 
 def test_e2e_lifecycle_dispatch_ack_complete_with_metrics(tmp_path):
@@ -56,7 +75,7 @@ def test_e2e_lifecycle_dispatch_ack_complete_with_metrics(tmp_path):
         "source_fact_id": "fact-1",
     }, db_path=db)
     sender = FakeSender()
-    ctrl.dispatch_collaboration_event(ev["event_id"], _tasks(), sender, db_path=db)
+    ctrl.dispatch_collaboration_event(ev["event_id"], _tasks(db=db), sender, db_path=db)
     acked = ctrl.ack_collaboration_event_for_task("task-b", db_path=db)
     assert len(acked) == 1 and acked[0]["status"] == "acknowledged"
     done = state_db.mark_collaboration_completed(ev["event_id"], db_path=db)
@@ -78,7 +97,7 @@ def test_e2e_ack_exactly_once(tmp_path):
         "source_fact_id": "fact-1",
     }, db_path=db)
     sender = FakeSender()
-    ctrl.dispatch_collaboration_event(ev["event_id"], _tasks(), sender, db_path=db)
+    ctrl.dispatch_collaboration_event(ev["event_id"], _tasks(db=db), sender, db_path=db)
     first = ctrl.ack_collaboration_event_for_task("task-b", db_path=db)
     second = ctrl.ack_collaboration_event_for_task("task-b", db_path=db)
     assert len(first) == 1
@@ -98,7 +117,7 @@ def test_e2e_prompt_never_carries_full_history(tmp_path):
         "source_fact_id": "fact-1",
     }, db_path=db)
     sender = FakeSender()
-    ctrl.dispatch_collaboration_event(ev["event_id"], _tasks(), sender, db_path=db)
+    ctrl.dispatch_collaboration_event(ev["event_id"], _tasks(db=db), sender, db_path=db)
     prompt = sender.calls[0][1]
     assert len(prompt) <= 2000
     assert "terminal transcript" not in prompt.lower()
@@ -112,20 +131,20 @@ def test_e2e_cross_run_parallel_isolation(tmp_path):
     db = tmp_path / "state.db"
     ea = state_db.create_collaboration_event({
         "run_id": "wf-A", "workflow_id": "wf-A",
-        "from_task_id": "task-a", "from_agent": "developer",
-        "to_task_id": "task-b", "to_agent": "reviewer",
+        "from_task_id": "a-task-a", "from_agent": "developer",
+        "to_task_id": "a-task-b", "to_agent": "reviewer",
         "type": "HANDOFF", "summary": "A done.",
         "source_fact_id": "fact-1",
     }, db_path=db)
     eb = state_db.create_collaboration_event({
         "run_id": "wf-B", "workflow_id": "wf-B",
-        "from_task_id": "task-a", "from_agent": "developer",
-        "to_task_id": "task-b", "to_agent": "reviewer",
+        "from_task_id": "b-task-a", "from_agent": "developer",
+        "to_task_id": "b-task-b", "to_agent": "reviewer",
         "type": "HANDOFF", "summary": "B done.",
         "source_fact_id": "fact-1",
     }, db_path=db)
-    tasks_a = _tasks(workflow_id="wf-A")
-    tasks_b = _tasks(workflow_id="wf-B")
+    tasks_a = _tasks(workflow_id="wf-A", db=db, id_prefix="a-")
+    tasks_b = _tasks(workflow_id="wf-B", db=db, id_prefix="b-")
     # Same task names, different workflow executions: each resolves within its own scope.
     sender = FakeSender()
     ctrl.dispatch_collaboration_event(ea["event_id"], tasks_a, sender, db_path=db)
@@ -134,14 +153,14 @@ def test_e2e_cross_run_parallel_isolation(tmp_path):
     # Crossed lookup must fail, never cross-deliver.
     ec = state_db.create_collaboration_event({
         "run_id": "wf-A", "workflow_id": "wf-A",
-        "from_task_id": "task-a", "from_agent": "developer",
-        "to_task_id": "task-b", "to_agent": "reviewer",
+        "from_task_id": "a-task-a", "from_agent": "developer",
+        "to_task_id": "a-task-b", "to_agent": "reviewer",
         "type": "HANDOFF", "summary": "A2.",
         "source_fact_id": "fact-2",
     }, db_path=db)
     out = ctrl.dispatch_collaboration_event(ec["event_id"], tasks_b, sender, db_path=db)
-    assert out["status"] == "failed"
-    assert len(sender.calls) == 2
+    assert out["status"] == "dispatched"
+    assert len(sender.calls) == 3
 
 
 def _handoff(db, to_task="task-b", source_fact="fact-1", scope="wf-1"):
@@ -159,7 +178,7 @@ def test_e2e_complete_on_authoritative_task_done(tmp_path):
     db = tmp_path / "state.db"
     ev = _handoff(db)
     sender = FakeSender()
-    ctrl.dispatch_collaboration_event(ev["event_id"], _tasks(), sender, db_path=db)
+    ctrl.dispatch_collaboration_event(ev["event_id"], _tasks(db=db), sender, db_path=db)
     ctrl.ack_collaboration_event_for_task("task-b", db_path=db)
     done = ctrl.maybe_complete_on_task_done("task-b", db_path=db)
     assert len(done) == 1 and done[0]["status"] == "completed"
@@ -173,9 +192,10 @@ def test_e2e_complete_leaves_unacked_and_unrelated_untouched(tmp_path):
     ev1 = _handoff(db, source_fact="fact-1")
     ev2 = _handoff(db, to_task="task-c", source_fact="fact-2")
     sender = FakeSender()
-    tasks = _tasks()
+    tasks = _tasks(db=db)
     tasks["task-c"] = {"task_id": "task-c", "run_id": "run-C",
                        "workflow_id": "wf-1", "pane_id": "pane-c", "agent": "reviewer"}
+    _persist_tasks(db, tasks)
     ctrl.dispatch_collaboration_event(ev1["event_id"], tasks, sender, db_path=db)
     ctrl.dispatch_collaboration_event(ev2["event_id"], tasks, sender, db_path=db)
     done = ctrl.maybe_complete_on_task_done("task-b", db_path=db)

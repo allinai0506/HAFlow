@@ -4571,23 +4571,9 @@ def _collab_task_pane(task):
     return runtime.get("pane_id")
 
 
-def _has_persisted_tasks(db_path=None):
-    from herdr import state_db as _sdb
-    conn = _sdb.get_db_connection(db_path=db_path)
-    try:
-        return bool(conn.execute("SELECT 1 FROM tasks LIMIT 1").fetchone())
-    finally:
-        conn.close()
-
-
 def _authoritative_task(task_id, fallback, db_path=None):
     from herdr import state_db as _sdb
-    current = _sdb.get_task(str(task_id or ""), db_path=db_path)
-    if current is not None:
-        return current
-    if _has_persisted_tasks(db_path=db_path):
-        return None
-    return fallback
+    return _sdb.get_task(str(task_id or ""), db_path=db_path)
 
 
 def _legacy_evidence_allowed(event, raw_ref, db_path=None):
@@ -4627,7 +4613,11 @@ def _legacy_evidence_allowed(event, raw_ref, db_path=None):
         task_id = row["task_id"]
         if task_id:
             task = _sdb.get_task(str(task_id), db_path=db_path)
-            return bool(task and collab_scope_for_task(task) == str(event.get("run_id") or ""))
+            return bool(
+                task
+                and collab_scope_for_task(task) == str(event.get("run_id") or "")
+                and str(task.get("run_id") or "") == str(row["run_id"] or "")
+            )
         return str(row["run_id"] or "") == str(event.get("run_id") or "")
     finally:
         conn.close()
@@ -4892,12 +4882,11 @@ def maybe_dispatch_node_handoffs(*, workflow_id, ready_id, dep_ids, launched,
             tasks_by_id = {t.get("task_id"): t for t in (load_tasks() or [])
                            if isinstance(t, dict) and t.get("task_id")}
         authoritative_tasks = {}
-        has_persisted_tasks = _has_persisted_tasks(db_path=db_path)
         for task_id in (tasks_by_id or {}):
             current_task = _sdb.get_task(str(task_id), db_path=db_path)
             if current_task is not None:
                 authoritative_tasks[task_id] = current_task
-        tasks = authoritative_tasks if has_persisted_tasks else (tasks_by_id or {})
+        tasks = authoritative_tasks
     except Exception as exc:
         return [{"task_id": t, "status": "failed", "error": type(exc).__name__}
                 for t in launched]

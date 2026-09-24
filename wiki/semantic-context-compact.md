@@ -33,7 +33,7 @@ herdr-task compact --run-id <run_id> --json --no-model
 
 - 每个内容项都有 `source_ref`；Observation 只投影 metadata/excerpt，不读取正文。
 - Finding 的 `metadata.supersedes` / `superseded_by` 参与当前版本选择；历史 Finding 保留在 `trajectory_findings`。
-- `working_contexts` 是不可变快照表；`working_context_source_heads` 为每个 `(run_scope, workflow_id)` 维护单调 source revision，`working_context_source_clock(run_scope, workflow_id, revision)` 由源表触发器按 execution scope 维护，最新相同 fingerprint 复用旧 `context_id`，事实变化或 A→B→A 追加新快照；迟到旧 revision 不能成为 latest，同一 scope 的保存竞态会重试，其他 Workflow 的写入不会误触发 stale；dispatch 重新读取权威 Task 身份。
+- `working_contexts` 是不可变快照表；`working_context_source_heads` 为每个 `(run_scope, workflow_id)` 维护单调 source revision，`working_context_source_clock(run_scope, workflow_id, revision)` 由源表触发器按 execution scope 维护，最新相同 fingerprint 复用旧 `context_id`，事实变化或 A→B→A 追加新快照；迟到旧 revision 不能成为 latest，同一 scope 的保存竞态会重试，其他 Workflow 的写入不会误触发 stale；dispatch 重新读取权威 Task 身份，task-bound legacy source 缺 workflow 时仍必须由 Task/run 证明 scope；critical Finding、超限 source 与目标 incoming Handoff 使用显式保留/截断标记。
 - `context_fingerprint` 覆盖编译器版本、角色、范围、稳定的 source projection/revision、选中的事实版本和预算策略；`diff_working_context` 只返回结构化的 added/removed/superseded/changed，并包含 scalar provenance 变化。
 - Task launch/retry、Handoff、verification dispatch 只传 `context_id`，不把完整 WorkingContext 塞入 CollaborationEvent 或 prompt；首次 Handoff 先建立 CollaborationEvent，再 attach 快照 ref。
 - V1 禁止跨 Run；没有显式 workflow execution id 的旧任务只读取自身 Run，只有目标直接参与的 planned/direct Handoff 才扩展 sibling Run；仅有不同 per-task `run_id` 且无 execution 证据的自动 Handoff 会跳过。

@@ -314,8 +314,10 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
         );
     """);
 
+    conn.execute("BEGIN IMMEDIATE;")
     _ensure_working_context_source_heads_schema(conn)
     _ensure_working_context_source_clock_schema(conn)
+    conn.execute("COMMIT;")
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS working_context_metric_events (
@@ -558,6 +560,7 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
             f"WHERE json_extract(t.payload_json, '$.run_id') = {alias}.run_id))"
         )
 
+    conn.execute("BEGIN IMMEDIATE;")
     for source_table in source_clock_tables:
         for operation in ("INSERT", "UPDATE", "DELETE"):
             trigger_name = f"trg_working_context_source_clock_{source_table}_{operation.lower()}"
@@ -604,6 +607,7 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
                 END;
                 """
             )
+    conn.execute("COMMIT;")
 
     # Replay specs: lineage edges from a source run to a replay run.
     # Intentionally no FOREIGN KEY clauses: specs survive workflow deletion
@@ -3589,7 +3593,7 @@ def save_working_context(
             if field_name == "verification":
                 value = item.get("value")
                 if isinstance(value, dict):
-                    for key in ("passed", "verification_passed"):
+                    for key in ("passed", "verification_passed", "requirements_satisfied"):
                         if key in value and value[key] is not None and not isinstance(value[key], bool):
                             raise ValueError("working context verification values must be strict booleans")
             for ref in item.get("evidence_refs") or []:
@@ -3613,6 +3617,24 @@ def save_working_context(
     max_chars = int(fingerprint_config.get("max_chars", 20000))
     if max_chars < 1 or len(json.dumps(context, ensure_ascii=False)) > max_chars:
         raise ValueError("working context exceeds fingerprint configuration budget")
+    max_items = int(fingerprint_config.get("max_items", 20000))
+    item_fields = (
+        "completed", "artifacts", "evidence", "findings", "decisions", "blockers",
+        "open_questions", "verification", "handoffs",
+    )
+    protected_fields = {"blockers", "verification", "open_questions"}
+    nonprotected_count = sum(
+        len(context.get(field) or [])
+        for field in item_fields
+        if field not in protected_fields
+    )
+    if max_items < 1 or nonprotected_count > max_items:
+        raise ValueError("working context exceeds fingerprint item budget")
+    kind_caps = fingerprint_config.get("max_items_per_kind") or {}
+    for field in item_fields:
+        cap = kind_caps.get(field)
+        if cap is not None and len(context.get(field) or []) > int(cap):
+            raise ValueError(f"working context exceeds fingerprint cap for {field}")
     from .context_models import WorkingContext, _hash
     from .context_projection import _fingerprint_payload
     try:

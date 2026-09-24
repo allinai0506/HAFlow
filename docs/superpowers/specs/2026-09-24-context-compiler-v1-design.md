@@ -121,7 +121,8 @@ Task launch / retry / handoff / review request / verification request
 - 信息不足时丢弃受影响来源或 fail closed，不猜测、不跨 Run 拼接。
 - legacy 自动 Handoff 若上下游只有不同的 per-task `run_id` 且没有同一 execution 证据，则跳过；不能把节点依赖当作跨 Run 授权。
 - `working_context_source_heads` 按 `(run_scope, workflow_id)` 维护单调 source revision；source projection 变化时递增，编译器保存前必须在同一 source revision 上，迟到旧候选只能成为历史而不能成为 latest。
-- `working_context_source_clock` 按 `(run_scope, workflow_id)` 维护；源表写入触发器只递增所属 execution scope，编译快照记录该 scope 的 clock，保存事务发现同一 scope 的 clock 变化即重试，防止最终复读与写入之间的 TOCTOU，同时不把其他 Workflow 的写入误判为 stale。Schema 初始化使用 resolved-path lock，旧 schema/旧 trigger/中断迁移均可恢复。
+- `working_context_source_clock` 按 `(run_scope, workflow_id)` 维护；源表写入触发器只递增所属 execution scope，编译快照记录该 scope 的 clock，保存事务发现同一 scope 的 clock 变化即重试，防止最终复读与写入之间的 TOCTOU，同时不把其他 Workflow 的写入误判为 stale。Schema 初始化使用 resolved-path lock，migration/trigger replacement 在写事务内完成，旧 schema/旧 trigger/中断迁移均可恢复。
+- task-bound legacy source 可以缺少 `workflow_id`，但必须由持久化 Task 的 `task_id` 与 `run_id` 证明 execution scope；超限或未知 source 使用显式 truncated/fail-closed 事实。
 
 ## 5. 选择规则
 

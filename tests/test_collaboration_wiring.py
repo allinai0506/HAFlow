@@ -57,26 +57,38 @@ def test_infer_trigger_only_known_edges():
     assert collab.infer_handoff_trigger("", "review") is None
 
 
-def _wf_tasks():
-    return {
+def _wf_tasks(db=None):
+    tasks = {
         "wf-1-impl": {"task_id": "wf-1-impl", "workflow_id": "wf-1",
                       "node": "implementation", "stage": "implementation",
                       "status": "completed", "pane_id": "pane-impl",
                       "agent": "developer", "goal": "Build rate limiter.",
-                      "updated_at": 200.0},
+                      "updated_at": 200.0, "run_id": "run-impl"},
         "wf-1-test-auto": {"task_id": "wf-1-test-auto", "workflow_id": "wf-1",
                            "node": "test", "stage": "test",
                            "status": "dispatched", "pane_id": "pane-test",
-                           "agent": "tester"},
+                           "agent": "tester", "run_id": "run-test"},
     }
+    if db is not None:
+        if state_db.get_workflow("wf-1", db_path=db) is None:
+            state_db.save_workflow(
+                {"workflow_id": "wf-1", "title": "fixture", "status": "running",
+                 "config": {"nodes": [{"id": "implementation", "depends_on": []},
+                                      {"id": "test", "depends_on": ["implementation"]}] }},
+                db_path=db,
+            )
+        for task in tasks.values():
+            state_db.save_task(task, db_path=db)
+    return tasks
 
 
 def test_wiring_dispatches_handoff_on_deterministic_advance(tmp_path):
     ctrl = _load_controller()
     db = tmp_path / "state.db"
-    tasks = _wf_tasks()
+    tasks = _wf_tasks(db=db)
     for task in tasks.values():
         task["run_id"] = "legacy-shared"
+        state_db.save_task(task, db_path=db)
     sender = FakeSender()
     out = ctrl.maybe_dispatch_node_handoffs(
         workflow_id="wf-1", ready_id="test",
@@ -103,8 +115,8 @@ def test_wiring_rechecks_authoritative_upstream_status(tmp_path):
         },
         db_path=db,
     )
-    target = dict(_wf_tasks()["wf-1-test-auto"], run_id="run-target", workflow_run_id="scope-a", agent_role="tester")
-    upstream = dict(_wf_tasks()["wf-1-impl"], run_id="run-upstream", workflow_run_id="scope-a", status="completed", agent_role="developer")
+    target = dict(_wf_tasks(db=db)["wf-1-test-auto"], run_id="run-target", workflow_run_id="scope-a", agent_role="tester")
+    upstream = dict(_wf_tasks(db=db)["wf-1-impl"], run_id="run-upstream", workflow_run_id="scope-a", status="completed", agent_role="developer")
     state_db.save_task(target, db_path=db)
     state_db.save_task(upstream, db_path=db)
     stale_upstream = dict(upstream)
@@ -138,7 +150,7 @@ def test_wiring_handoff_carries_target_working_context_ref(tmp_path):
         },
         db_path=db,
     )
-    tasks = _wf_tasks()
+    tasks = _wf_tasks(db=db)
     for task_id, task in tasks.items():
         task = dict(task)
         task["run_id"] = f"run-{task_id}"
@@ -163,7 +175,7 @@ def test_wiring_handoff_carries_target_working_context_ref(tmp_path):
 def test_wiring_legacy_distinct_runs_do_not_cross_execute(tmp_path):
     ctrl = _load_controller()
     db = tmp_path / "state.db"
-    tasks = _wf_tasks()
+    tasks = _wf_tasks(db=db)
     tasks["wf-1-impl"]["run_id"] = "run-old"
     tasks["wf-1-test-auto"]["run_id"] = "run-new"
     out = ctrl.maybe_dispatch_node_handoffs(
@@ -180,7 +192,7 @@ def test_wiring_legacy_missing_run_ids_do_not_cross_execute(tmp_path):
     db = tmp_path / "state.db"
     out = ctrl.maybe_dispatch_node_handoffs(
         workflow_id="wf-1", ready_id="test", dep_ids=["implementation"],
-        launched=["wf-1-test-auto"], tasks_by_id=_wf_tasks(),
+        launched=["wf-1-test-auto"], tasks_by_id=_wf_tasks(db=db),
         prompt_sender=FakeSender(), db_path=db,
     )
     assert out[0].get("skipped") is True
@@ -203,12 +215,12 @@ def test_wiring_legacy_handoff_planned_link_preloads_upstream_facts(tmp_path):
         db_path=db,
     )
     upstream = dict(
-        _wf_tasks()["wf-1-impl"], task_id="legacy-impl", workflow_id="wf-legacy",
+        _wf_tasks(db=db)["wf-1-impl"], task_id="legacy-impl", workflow_id="wf-legacy",
         run_id="run-legacy-shared", goal="Build upstream",
         artifacts=[{"ref": "legacy-artifact"}],
     )
     target = dict(
-        _wf_tasks()["wf-1-test-auto"], task_id="legacy-test", workflow_id="wf-legacy",
+        _wf_tasks(db=db)["wf-1-test-auto"], task_id="legacy-test", workflow_id="wf-legacy",
         run_id="run-legacy-shared", agent_role="tester",
     )
     upstream.pop("workflow_run_id", None)
@@ -243,8 +255,8 @@ def test_wiring_selects_upstream_in_target_execution_scope(tmp_path):
         },
         db_path=db,
     )
-    target = dict(_wf_tasks()["wf-1-test-auto"], run_id="run-target", workflow_run_id="scope-a", agent_role="tester")
-    upstream_a = dict(_wf_tasks()["wf-1-impl"], run_id="run-a", workflow_run_id="scope-a", updated_at=100.0, agent_role="developer")
+    target = dict(_wf_tasks(db=db)["wf-1-test-auto"], run_id="run-target", workflow_run_id="scope-a", agent_role="tester")
+    upstream_a = dict(_wf_tasks(db=db)["wf-1-impl"], run_id="run-a", workflow_run_id="scope-a", updated_at=100.0, agent_role="developer")
     upstream_b = dict(upstream_a, task_id="wf-1-impl-b", run_id="run-b", workflow_run_id="scope-b", updated_at=200.0)
     for task in (target, upstream_a, upstream_b):
         state_db.save_task(task, db_path=db)
@@ -265,7 +277,7 @@ def test_wiring_skips_unknown_route_keeps_coordinator(tmp_path):
     ctrl = _load_controller()
     db = tmp_path / "state.db"
     sender = FakeSender()
-    tasks = _wf_tasks()
+    tasks = _wf_tasks(db=db)
     tasks["wf-1-impl"]["node"] = "plan"
     tasks["wf-1-impl"]["stage"] = "plan"
     out = ctrl.maybe_dispatch_node_handoffs(
@@ -300,7 +312,7 @@ def test_wiring_ack_on_working(tmp_path):
         "source_fact_id": "wf-1:implementation:completed",
     }, db_path=db)
     sender = FakeSender()
-    tasks = _wf_tasks()
+    tasks = _wf_tasks(db=db)
     ctrl.dispatch_collaboration_event(ev["event_id"], tasks, sender, db_path=db)
     acked = ctrl.maybe_ack_on_working("wf-1-test-auto", db_path=db)
     assert len(acked) == 1 and acked[0]["status"] == "acknowledged"
@@ -314,7 +326,7 @@ def test_wiring_disabled_by_env_flag(tmp_path, monkeypatch):
     out = ctrl.maybe_dispatch_node_handoffs(
         workflow_id="wf-1", ready_id="test",
         dep_ids=["implementation"], launched=["wf-1-test-auto"],
-        tasks_by_id=_wf_tasks(), prompt_sender=sender, db_path=db,
+        tasks_by_id=_wf_tasks(db=db), prompt_sender=sender, db_path=db,
     )
     assert out[0].get("skipped") is True
     assert sender.calls == []

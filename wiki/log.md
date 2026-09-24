@@ -250,7 +250,12 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 ## [2026-09-24] fix | Context Compiler final fail-closed review closure
 - 背景：复审继续发现旧 trigger/partial migration、删除 Task fallback、failure/verification 超限、alternate verification、legacy evidence、storage schema/budget 和 metrics scope 边界。
 - 修复：权威 Task/upstream dispatch、resolved-path schema lock 与 trigger replacement、legacy source-head row recovery、critical/oversized source marker、canonical alternate verification、legacy evidence scope filter、strict verification/budget validation、workflow-scoped metrics 和空 scope 归一化。
-- 回归：全量 `1501 passed, 44 subtests passed`；专项、AST、compileall、ruff、diff 和凭据扫描均通过，验证 artifact 已更新。
+- 回归：全量 `1507 passed, 44 subtests passed`；专项、AST、compileall、ruff、diff 和凭据扫描均通过，验证 artifact 已更新。
+
+## [2026-09-24] fix | Context Compiler final adversarial window closure
+- 背景：复审发现 trigger 替换窗口、Task 全表删除 fallback、legacy old-run evidence、缺 workflow 的 task-bound failure/verification、critical Finding/Handoff 噪声、source projection 截断和 storage cap 边界。
+- 修复：trigger 替换使用 `BEGIN IMMEDIATE`；dispatch/wiring 只接受持久化权威 Task；legacy evidence 绑定当前 Task run；task-bound legacy source 允许缺 workflow 但仍校验 scope；critical Finding 与目标 incoming Handoff 使用保留窗口；Workflow node projection 使用完整节点摘要；storage 强制非保护项预算和 kind caps。
+- 回归：新增删除 Task、old-run evidence、缺 workflow source、critical Finding/Handoff noise、超大 source、storage cap、projection cap 和并发相关测试；验证结果与 PR 状态以当前交付 artifact 为准。
 
 ## [2026-09-13] feat | Console URL Deep-Link & Notifier Click-to-Open Integration
 解决 macOS CLI 通知默认归属“脚本编辑器”且无法定位到具体任务/工作流页面的痛点：
