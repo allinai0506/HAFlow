@@ -517,9 +517,29 @@ def _stable_runtime_projection(task: Mapping[str, Any]) -> Dict[str, Any]:
     return {"status": status} if status is not None else {}
 
 
+def _bounded_source_value(value: Any, depth: int = 0) -> Any:
+    if depth > 5:
+        return "[bounded]"
+    if isinstance(value, str):
+        if len(value) <= 4000:
+            return value
+        return {
+            "bounded_sha256": hashlib.sha256(value.encode("utf-8")).hexdigest(),
+            "original_chars": len(value),
+        }
+    if isinstance(value, list):
+        return [_bounded_source_value(item, depth + 1) for item in value[:100]]
+    if isinstance(value, dict):
+        return {
+            str(key): _bounded_source_value(item, depth + 1)
+            for key, item in list(value.items())[:100]
+        }
+    return value
+
+
 def _source_projection(snapshot: Mapping[str, Any]) -> Dict[str, Any]:
     """Keep the source-version hash bounded to fields that affect compilation."""
-    return {
+    return _bounded_source_value({
         "task": {
             key: snapshot["task"].get(key)
             for key in (
@@ -557,7 +577,7 @@ def _source_projection(snapshot: Mapping[str, Any]) -> Dict[str, Any]:
             if str(event.get("type") or "").upper() == "HANDOFF"
         ],
         "evals": snapshot.get("evals", []),
-    }
+    })
 
 
 # ---------------------------------------------------------------------------
