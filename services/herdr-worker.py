@@ -429,6 +429,21 @@ def build_baseline_fingerprint(repo):
     }
 
 
+def _rev_parse_head(repo):
+    """Baseline anchor: HEAD sha right after branch checkout, before any work."""
+    result = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            result.stderr.strip() or result.stdout.strip() or "rev-parse HEAD failed"
+        )
+    return result.stdout.strip()
+
+
 def list_untracked(repo):
     result = subprocess.run(
         [
@@ -760,6 +775,7 @@ def main():
                 "untracked": {}
             }
             baseline_untracked = []
+            baseline_commit = None
         else:
             clone = create_clone(
                 args.source,
@@ -800,6 +816,10 @@ def main():
                 f"tracked={len(baseline_fingerprint['tracked'])} "
                 f"untracked={len(baseline_fingerprint['untracked'])}"
             )
+
+            baseline_commit = _rev_parse_head(clone)
+
+            print(f"[BASELINE COMMIT] {baseline_commit}")
 
         ctx, complexity_baseline = write_task_context(
             clone,
@@ -860,6 +880,8 @@ def main():
             "branch": branch,
             "baseline_untracked": baseline_untracked,
             "baseline_fingerprint": baseline_fingerprint,
+            "baseline_commit": baseline_commit if args.execution_mode != "context" else None,
+            "onto_branch": args.onto,
             "pane_id": pane_id,
             "pane_source": pane_source,
             "agent": agent.get("agent"),

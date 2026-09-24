@@ -215,6 +215,7 @@ def git_finalize_pending_tasks(workflow_id):
         if t.get("workflow_id") == workflow_id
         and t.get("status") in ("completed", "committed")
         and (t.get("integration_mode") or "none") == "git"
+        and not t.get("finalize_escalated")
     ]
 
 
@@ -2516,12 +2517,165 @@ def maybe_complete_on_task_done(task_id, db_path=None):
         return []
 
 
+def _parse_commit_result(output):
+    """Extract HERDR_COMMIT_RESULT JSON from `herdr-task commit` output."""
+    for line in (output or "").splitlines():
+        if line.startswith("HERDR_COMMIT_RESULT="):
+            try:
+                payload = json.loads(line.split("=", 1)[1])
+            except ValueError:
+                return {}
+            return payload if isinstance(payload, dict) else {}
+    return {}
+
+
+def _record_finalize_event(task, event_type, payload):
+    """Best-effort finalize observability event; never breaks finalization."""
+    try:
+        from herdr.trajectory import run_id_for_task
+
+        store = _get_store()
+        store.record_event(
+            event_type,
+            dict(payload or {}),
+            workflow_id=(task or {}).get("workflow_id"),
+            node_id=(task or {}).get("node") or (task or {}).get("stage"),
+            task_id=(task or {}).get("task_id"),
+            agent_id=(task or {}).get("agent"),
+            source="controller",
+            run_id=run_id_for_task(task or {}),
+        )
+    except (OSError, ValueError, RuntimeError, AttributeError) as exc:
+        print(f"[FINALIZE EVENT ERROR] {event_type}: {exc}")
+
+
+def _escalate_finalize(task, reason, detail=None):
+    """Mark a git task escalated-to-human so close stops deferring on it."""
+    task_id = (task or {}).get("task_id") or "unknown"
+    payload = {"reason": reason, "status": (task or {}).get("status")}
+    if detail:
+        payload["detail"] = detail
+    print(f"[FINALIZE ESCALATED] task={task_id} reason={reason}")
+    _record_finalize_event(task, "finalize_escalated", payload)
+    try:
+        from herdr import kernel
+
+        kernel.update_task_metadata(
+            task_id,
+            {
+                "finalize_escalated": True,
+                "finalize_escalate_reason": reason,
+            },
+            store=_get_store(),
+        )
+    except (OSError, ValueError, RuntimeError, AttributeError) as exc:
+        print(f"[FINALIZE ESCALATE ERROR] task={task_id}: {exc}")
+
+
+def _empty_auto_releasable(task):
+    """Credible-evidence empty tasks may auto-advance; others need a human.
+
+    D-4: a trustworthy basis releases even without an anchor. Legacy
+    time-basis empties (commit_basis=="time") carry the same fail-closed
+    timestamp guard as adoption, so they release; basis-absent empties
+    escalate.
+    """
+    task = task or {}
+    if task.get("baseline_commit"):
+        return True
+    return task.get("commit_basis") == "time"
+
+
+def _check_finalize_retry(task, status, now):
+    """Shared finalize-retry driver for completed/commit Retry paths.
+
+    Returns True when a finalize attempt was made or exhaustion was recorded.
+
+    M-2 (AC4-2/AC4-3): deterministic outcomes (rc=3 EMPTY, rc=4 REFUSED)
+    never consume retry budget and rc=4 never emits a ``commit_retry``
+    log. ``finalize_completed_task`` reports ``retryable``; only retryable
+    attempts log ``[REGISTRY WATCHER] ... retry finalize`` and increment
+    the attention episode. Already-escalated tasks are settled and skip
+    re-driving entirely.
+    """
+    task = task or {}
+    task_id = task.get("task_id")
+    if not task_id:
+        return False
+    if task.get("finalize_escalated"):
+        return True
+    if task.get("integration_mode") != "git" or workflow_closed(
+        task.get("workflow_id")
+    ):
+        attention_clear(f"{task_id}:finalize")
+        _finalize_retry_exhausted_logged.discard(task_id)
+        return False
+    key = f"{task_id}:finalize"
+    retry, reason, exhausted = should_retry_finalize(
+        status, attention_get(key), now
+    )
+    if exhausted:
+        if task_id not in _finalize_retry_exhausted_logged:
+            _finalize_retry_exhausted_logged.add(task_id)
+            print(
+                f"[FINALIZE RETRY EXHAUSTED] task={task_id} "
+                f"status={status} attempts>={FINALIZE_RETRY_MAX} "
+                "-> manual/coordinator intervention required"
+            )
+            _escalate_finalize(
+                get_task(task_id) or task,
+                "retry_exhausted",
+                {"status": status, "reason": reason},
+            )
+        return True
+    if not retry:
+        return False
+    outcome = finalize_completed_task(task_id)
+    retryable = True
+    if isinstance(outcome, dict) and "retryable" in outcome:
+        retryable = bool(outcome.get("retryable"))
+    cur_t = get_task(task_id)
+    if not retryable:
+        # Deterministic failure (EMPTY/REFUSED): settled via escalation or
+        # auto-release, no budget consumed, no retry log (AC4-2/AC4-3).
+        if cur_t and cur_t.get("status") != status:
+            attention_clear(key)
+            _finalize_retry_exhausted_logged.discard(task_id)
+        return True
+    print(
+        f"[REGISTRY WATCHER] "
+        f"task={task_id} "
+        f"status={status} -> retry finalize ({reason})"
+    )
+    if cur_t and cur_t.get("status") == status:
+        episode = attention_get(key) or {}
+        attention_note(
+            key,
+            task,
+            "finalize",
+            reason=reason,
+            attempts=int(episode.get("attempts") or 0) + 1,
+        )
+        attention_throttle(key, now=now)
+    else:
+        attention_clear(key)
+        _finalize_retry_exhausted_logged.discard(task_id)
+    return True
+
+
 def finalize_completed_task(task_id):
+    """Drive one git-finalize step; returns ``{"retryable": bool, ...}``.
+
+    M-2: deterministic outcomes (rc=3 EMPTY, rc=4 REFUSED, rc=6 conflict)
+    report ``retryable=False`` so ``_check_finalize_retry`` never consumes
+    budget or logs a retry for them; only transient/unknown failures
+    (rc=75, unexpected rc, state-transition failures) report True.
+    """
     task = get_task(task_id)
 
     if not task:
         print(f"[FINALIZE SKIP] task={task_id} missing")
-        return
+        return {"retryable": False, "kind": "skip"}
 
     if task.get("status") not in ("completed", "committed"):
         print(
@@ -2529,7 +2683,7 @@ def finalize_completed_task(task_id):
             f"task={task_id} "
             f"status={task.get('status')}"
         )
-        return
+        return {"retryable": False, "kind": "skip"}
 
     # Collaboration accelerator: authoritative task completion closes the
     # handoffs targeting it, so handoff latency metrics stay trustworthy.
@@ -2560,9 +2714,10 @@ def finalize_completed_task(task_id):
                 print(
                     f"[FINALIZE WAIT] task={task_id} git process still active: {exc}"
                 )
-                return
+                return {"retryable": True, "kind": "wait"}
 
         # 1. 将 Task 自己产生的修改安全提交(若此前已 committed 则跳过)
+        skip_integrate = False
         if task.get("status") == "completed":
             # 提交门禁拆分:herdr 任务克隆内只跑快速必需检查,
             # 全量测试由 workflow test 节点与 pre-push 门禁负责。
@@ -2585,62 +2740,167 @@ def finalize_completed_task(task_id):
             if result.stdout.strip():
                 print(result.stdout.strip())
 
-            if result.returncode != 0:
+            commit_payload = _parse_commit_result(result.stdout)
+
+            if result.returncode == 3:
+                fresh = get_task(task_id) or task
+                print(
+                    f"[FINALIZE EMPTY] "
+                    f"task={task_id} "
+                    f"head={commit_payload.get('head')} "
+                    f"basis={commit_payload.get('basis')}"
+                )
+                _record_finalize_event(
+                    fresh, "finalize_empty", commit_payload
+                )
+                if not _empty_auto_releasable(fresh):
+                    _escalate_finalize(
+                        fresh,
+                        "empty_unreleasable",
+                        commit_payload,
+                    )
+                    return {"retryable": False, "kind": "empty", "rc": 3}
+                if not set_task_status(task_id, "cleanup_ready"):
+                    print(
+                        f"[FINALIZE ERROR] "
+                        f"task={task_id} "
+                        f"empty release did not reach cleanup_ready"
+                    )
+                    return {"retryable": True, "kind": "error", "rc": 3}
+                skip_integrate = True
+                task = get_task(task_id)
+            elif result.returncode == 4:
+                print(
+                    f"[FINALIZE REFUSED] "
+                    f"task={task_id} "
+                    f"reason={commit_payload.get('reason')}"
+                )
+                _escalate_finalize(
+                    get_task(task_id) or task,
+                    "commit_refused",
+                    commit_payload,
+                )
+                return {"retryable": False, "kind": "refused", "rc": 4}
+            elif result.returncode == 75:
+                print(
+                    f"[FINALIZE WAIT] "
+                    f"task={task_id} "
+                    f"reason=git_busy retry later"
+                )
+                return {"retryable": True, "kind": "wait", "rc": 75}
+            elif result.returncode != 0:
                 print(
                     f"[COMMIT ERROR] "
-                    f"task={task_id}: "
+                    f"task={task_id} "
+                    f"rc={result.returncode}: "
                     f"{result.stderr.strip() or result.stdout.strip()}"
                 )
-                return
+                _record_finalize_event(
+                    task,
+                    "finalize_commit_error",
+                    {
+                        "rc": result.returncode,
+                        "detail": (
+                            result.stderr.strip()
+                            or result.stdout.strip()
+                        )[:500],
+                    },
+                )
+                return {"retryable": True, "kind": "error", "rc": result.returncode}
+            else:
+                task = get_task(task_id)
+
+                if not task or task.get("status") != "committed":
+                    print(
+                        f"[FINALIZE ERROR] "
+                        f"task={task_id} "
+                        f"did not reach committed"
+                    )
+                    return {"retryable": True, "kind": "error"}
+
+        if skip_integrate:
+            print(
+                f"[FINALIZE EMPTY RELEASED] "
+                f"task={task_id} "
+                f"completed -> cleanup_ready"
+            )
+        else:
+            # 2. Rebase + 导入主仓库 + Integration Branch
+            result = subprocess.run(
+                [
+                    TASK_MANAGER,
+                    "integrate",
+                    task_id
+                ],
+                text=True,
+                capture_output=True
+            )
+
+            if result.stdout.strip():
+                print(result.stdout.strip())
+
+            if result.returncode == 6:
+                print(
+                    f"[FINALIZE REFUSED] "
+                    f"task={task_id} "
+                    f"reason=integrate_rebase_conflict"
+                )
+                _escalate_finalize(
+                    get_task(task_id) or task,
+                    "integrate_rebase_conflict",
+                    _parse_commit_result(result.stdout),
+                )
+                return {"retryable": False, "kind": "refused", "rc": 6}
+
+            if result.returncode == 4:
+                print(
+                    f"[FINALIZE REFUSED] "
+                    f"task={task_id} "
+                    f"reason=integrate_remote_diverged"
+                )
+                _escalate_finalize(
+                    get_task(task_id) or task,
+                    "integrate_remote_diverged",
+                    _parse_commit_result(result.stdout),
+                )
+                return {"retryable": False, "kind": "refused", "rc": 4}
+
+            if result.returncode != 0:
+                print(
+                    f"[INTEGRATE ERROR] "
+                    f"task={task_id} "
+                    f"rc={result.returncode}: "
+                    f"{result.stderr.strip() or result.stdout.strip()}"
+                )
+                _record_finalize_event(
+                    task,
+                    "finalize_integrate_error",
+                    {
+                        "rc": result.returncode,
+                        "detail": (
+                            result.stderr.strip()
+                            or result.stdout.strip()
+                        )[:500],
+                    },
+                )
+                return {"retryable": True, "kind": "error", "rc": result.returncode}
 
             task = get_task(task_id)
 
-            if not task or task.get("status") != "committed":
+            if not task or task.get("status") != "integrated":
                 print(
                     f"[FINALIZE ERROR] "
                     f"task={task_id} "
-                    f"did not reach committed"
+                    f"did not reach integrated"
                 )
-                return
+                return {"retryable": True, "kind": "error"}
 
-        # 2. Rebase + 导入主仓库 + Integration Branch
-        result = subprocess.run(
-            [
-                TASK_MANAGER,
-                "integrate",
-                task_id
-            ],
-            text=True,
-            capture_output=True
-        )
-
-        if result.stdout.strip():
-            print(result.stdout.strip())
-
-        if result.returncode != 0:
-            print(
-                f"[INTEGRATE ERROR] "
-                f"task={task_id}: "
-                f"{result.stderr.strip() or result.stdout.strip()}"
-            )
-            return
-
-        task = get_task(task_id)
-
-        if not task or task.get("status") != "integrated":
-            print(
-                f"[FINALIZE ERROR] "
-                f"task={task_id} "
-                f"did not reach integrated"
-            )
-            return
-
-        # 3. 允许清理
-        if not set_task_status(
-            task_id,
-            "cleanup_ready"
-        ):
-            return
+            # 3. 允许清理
+            if not set_task_status(
+                task_id,
+                "cleanup_ready"
+            ):
+                return {"retryable": True, "kind": "error"}
 
     # --------------------------------
     # 不需要 Git 集成
@@ -2650,7 +2910,7 @@ def finalize_completed_task(task_id):
             task_id,
             "cleanup_ready"
         ):
-            return
+            return {"retryable": True, "kind": "error"}
 
     else:
         print(
@@ -2658,7 +2918,7 @@ def finalize_completed_task(task_id):
             f"task={task_id} "
             f"unknown integration_mode={mode}"
         )
-        return
+        return {"retryable": False, "kind": "error"}
 
     # --------------------------------
     # 自动 Cleanup
@@ -2682,7 +2942,7 @@ def finalize_completed_task(task_id):
             f"task={task_id}: "
             f"{result.stderr.strip() or result.stdout.strip()}"
         )
-        return
+        return {"retryable": True, "kind": "error", "rc": result.returncode}
 
     print(
         f"[FINALIZED] task={task_id}"
@@ -2695,6 +2955,7 @@ def finalize_completed_task(task_id):
         enqueue_stage_advance(
             task
         )
+    return {"retryable": False, "kind": "finalized"}
 
 
 def coordinator_worker():
@@ -5754,6 +6015,14 @@ def registry_watcher():
                         except Exception as exc:
                             print(f"[AUTO RECOVER ERROR] {exc}")
 
+                    # completed + git 的终化重试必须在这里驱动:
+                    # 该分支随即 continue,走不到后方的重试块。
+                    if status == "completed":
+                        try:
+                            _check_finalize_retry(task, status, now)
+                        except (OSError, RuntimeError, ValueError, KeyError) as exc:
+                            print(f"[FINALIZE RETRY ERROR] {exc}")
+
                     continue
 
                 # ---- listener 订阅:指数退避 + 封顶(僵尸 pane 护栏) ----
@@ -5894,46 +6163,9 @@ def registry_watcher():
                 # ---- committed 滞留 / completed 但 commit 门禁瞬时失败(flaky):
                 #      integrate 失败或 commit gate 抖动时按退避自动重试,
                 #      达到上限后停止并升级人工(避免无限重试风暴)。
-                if (
-                    task.get("integration_mode") == "git"
-                    and not workflow_closed(task.get("workflow_id"))
-                ):
-                    key = f"{task_id}:finalize"
-                    retry, reason, exhausted = should_retry_finalize(
-                        status, attention_get(key), now
-                    )
-                    if exhausted:
-                        if task_id not in _finalize_retry_exhausted_logged:
-                            _finalize_retry_exhausted_logged.add(task_id)
-                            print(
-                                f"[FINALIZE RETRY EXHAUSTED] task={task_id} "
-                                f"status={status} attempts>={FINALIZE_RETRY_MAX} "
-                                "-> manual/coordinator intervention required"
-                            )
-                    elif retry:
-                        print(
-                            f"[REGISTRY WATCHER] "
-                            f"task={task_id} "
-                            f"status={status} -> retry finalize ({reason})"
-                        )
-                        finalize_completed_task(task_id)
-                        cur_t = get_task(task_id)
-                        if cur_t and cur_t.get("status") == status:
-                            episode = attention_get(key) or {}
-                            attention_note(
-                                key,
-                                task,
-                                "finalize",
-                                reason=reason,
-                                attempts=int(episode.get("attempts") or 0) + 1,
-                            )
-                            attention_throttle(key, now=now)
-                        else:
-                            attention_clear(key)
-                            _finalize_retry_exhausted_logged.discard(task_id)
-                else:
-                    attention_clear(f"{task_id}:finalize")
-                    _finalize_retry_exhausted_logged.discard(task_id)
+                #      completed 分支在上方的 terminal 分支内已驱动(随即
+                #      continue,走不到这里);这里覆盖 committed 等终化中状态。
+                _check_finalize_retry(task, status, now)
 
                 if status == "rework" and not workflow_closed(task.get("workflow_id")):
                     pane_id = task.get("pane_id")

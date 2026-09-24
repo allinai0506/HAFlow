@@ -931,7 +931,11 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - S6 round 1 抓到幽灵 dispatched（D1）后修复：sender 失败落终态 failed、refs 封顶保 ID 尾、缺 run fail-closed；教训 `docs/lessons/lessons-learned.md` §87。
 - 证据：collaboration 专项 36 passed、全量 `pytest -q` 1238 passed + 44 subtests、S6 round 3 MERGE_READY；文档 `docs/architecture/collaboration-protocol.md`。
 
-## [2026-09-23] fix | Collaboration 修复 PR：共享 workflow scope + ACK fast-path + completed 接线
+<## [2026-09-23] fix | Collaboration 修复 PR：共享 workflow scope + ACK fast-path + completed 接线
 - P1：隔离域由 per-task `run_id` 改为 workflow 执行身份（`collab_scope_for_task`），否则生产 handoff 恒失败；测试补生产语义（各异 run_id + 共享 workflow）。
 - P2：dispatch 快照已 working 即补 ACK（消 launch-then-event 竞态）；`finalize_completed_task` 挂 `maybe_complete_on_task_done`（仅 acknowledged→completed）。
 - 证据：专项 39 passed、全量 1241 passed + 44 subtests、S6 MERGE_READY；教训 §88。
+## [2026-09-24] fix | Git 终化收编 HEAD（commit 空 index 死锁修复）
+- 背景：Agent 在 clone 内直接 `git commit` 后工作区干净，`herdr-task commit` 空 index 恒 exit 3，终化永不收敛（test-t1 FAIL，阻塞 D1-D7）。
+- 修复：`herdr/git_adoption.py` 纯判定（ADOPT/EMPTY/REFUSED，锚点优先、时间兜底、onto 禁时间判定）；`commit_task` 空 index 收编（ADOPT 登记 HEAD 不建提交、真空仍 exit 3、无法归属 exit 4）；任务记录新增 `baseline_commit`/`onto_branch`（worker 检出后采集）；`verify-baseline` HEAD 锚点感知（未收编推进报 TASK_CHANGED，收编后仍 BASELINE_MATCH）；Controller 终化分级（empty/refused/rebase-conflict 升级事件、commit_retry 可达、`git_finalize_pending_tasks` 排除已升级）；输出契约 `HERDR_COMMIT_RESULT`/`[ADOPTED]`/`exit 4`；`integrate` 幂等（已集成重入成功、rebase 冲突 exit 6 一次性失败）。
+- 回归：新增 `tests/test_git_adoption.py`、`tests/test_commit_adopt.py`、`tests/test_legacy_adopt_converge.py`、`tests/test_finalize_empty.py`（32 用例，覆盖 AC-1/AC-2/AC-3/AC-4）。
