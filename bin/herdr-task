@@ -2987,9 +2987,12 @@ def _git_remote_contained_shas(clone, shas, exclude_branches=None):
     via the task's own branch (or its onto branch) does not count: an
     agent-side push of the task branch publishes the deliverable, it does
     not import foreign history. ``origin/HEAD`` symrefs never count.
-    Empty set when no remotes exist or nothing foreign contains the sha.
-    Never fails closed here: on git errors return empty set and let the
-    timestamp guards decide.
+
+    Returns None when any probe fails (unknown): callers must fail closed
+    (``remote_probe_failed``), because an empty set would otherwise read
+    "no foreign commits" for what was never actually inspected. An empty
+    set is returned ONLY when every probe succeeded and nothing foreign
+    matched (or there was nothing to probe).
     """
     contained = set()
     candidates = [s for s in (shas or []) if s]
@@ -3009,8 +3012,10 @@ def _git_remote_contained_shas(clone, shas, exclude_branches=None):
                 check=False,
             )
         except OSError:
-            continue
-        if result.returncode != 0 or not (result.stdout or "").strip():
+            return None
+        if result.returncode != 0:
+            return None
+        if not (result.stdout or "").strip():
             continue
         for line in result.stdout.splitlines():
             ref = line.strip()
@@ -3073,6 +3078,7 @@ def _adopt_head_if_attributable(task_id, task, clone):
     ancestor = True
     remote_shas = set()
     enumeration_failed = False
+    remote_probe_failed = False
     if baseline:
         ancestor = _git_is_ancestor(clone, baseline, head)
         if ancestor and head:
@@ -3081,12 +3087,18 @@ def _adopt_head_if_attributable(task_id, task, clone):
                 enumeration_failed = True
             elif interval:
                 try:
-                    remote_shas = _git_remote_contained_shas(
+                    probed = _git_remote_contained_shas(
                         clone, [c.get("sha") for c in interval],
                         exclude_branches=exclude_branches)
                 except (OSError, ValueError, RuntimeError,
                         subprocess.SubprocessError):
-                    remote_shas = set()
+                    probed = None
+                if probed is None:
+                    # P1: unknown foreignness must fail closed, never be
+                    # read as "no foreign commits".
+                    remote_probe_failed = True
+                else:
+                    remote_shas = probed
         else:
             interval = []
     else:
@@ -3095,12 +3107,16 @@ def _adopt_head_if_attributable(task_id, task, clone):
             enumeration_failed = True
         elif history:
             try:
-                remote_shas = _git_remote_contained_shas(
+                probed = _git_remote_contained_shas(
                     clone, [c.get("sha") for c in history],
                     exclude_branches=exclude_branches)
             except (OSError, ValueError, RuntimeError,
                     subprocess.SubprocessError):
-                remote_shas = set()
+                probed = None
+            if probed is None:
+                remote_probe_failed = True
+            else:
+                remote_shas = probed
 
     verdict, detail = classify_commit_state(
         baseline_commit=baseline,
@@ -3115,6 +3131,7 @@ def _adopt_head_if_attributable(task_id, task, clone):
         skew_seconds=skew,
         remote_shas=remote_shas,
         enumeration_failed=enumeration_failed,
+        remote_probe_failed=remote_probe_failed,
         current_branch=current_branch,
     )
     basis = detail.get("basis") or "none"
@@ -4479,9 +4496,11 @@ def clear_finalize_escalation(task_id):
     if not task:
         print(f"Task not found: {task_id}")
         sys.exit(1)
-    if not task.get("finalize_escalated"):
-        print(f"[ESCALATION CLEAR SKIP] {task_id}: not escalated")
-        return
+    # P1 normalization: never early-return when the flag is already false.
+    # A partially-failed escalation can leave attempts >= MAX in the
+    # attention episode while finalize_escalated=false; skipping cleanup
+    # then leaves the task wedged forever. Always clear + normalize.
+    was_escalated = bool(task.get("finalize_escalated"))
     from herdr import kernel
     from herdr import liveness
     try:
@@ -4505,7 +4524,8 @@ def clear_finalize_escalation(task_id):
               file=sys.stderr)
         sys.exit(2)
     print(f"[ESCALATION CLEARED] {task_id} "
-          f"attention_cleared={bool(attention_cleared)}")
+          f"attention_cleared={bool(attention_cleared)} "
+          f"was_escalated={was_escalated}")
 
 
 def pause_task(task_id, reason=None):

@@ -198,6 +198,22 @@ class ClassifyWithAnchorTest(unittest.TestCase):
         self.assertEqual(detail["reason"], "commit_paths_unknown")
         self.assertIn("c1", detail["offending"])
 
+    def test_refused_when_remote_probe_failed(self):
+        # P1: unknown foreignness (containment probe failed) must fail
+        # closed even though every commit is fresh, known and attributable.
+        verdict, detail = classify_commit_state(
+            baseline_commit="base",
+            head="head",
+            created_at=1000,
+            interval_commits=[_commit("c1", 1100, paths=["a.txt"])],
+            baseline_is_ancestor=True,
+            remote_shas=set(),
+            remote_probe_failed=True,
+            **_branch_kwargs("t1"),
+        )
+        self.assertEqual(verdict, REFUSED)
+        self.assertEqual(detail["reason"], "remote_probe_failed")
+
 
 class ClassifyByTimeTest(unittest.TestCase):
     def test_refused_onto_without_anchor(self):
@@ -262,6 +278,20 @@ class ClassifyByTimeTest(unittest.TestCase):
         )
         self.assertEqual(verdict, REFUSED)
         self.assertEqual(detail["reason"], "current_branch_mismatch")
+
+    def test_refused_when_time_basis_remote_probe_failed(self):
+        # P1 legacy path: unknown foreignness fails closed as well.
+        verdict, detail = classify_commit_state(
+            head="head",
+            branch="agent/opencode/docs-t1",
+            task_id="t1",
+            created_at=1000,
+            head_history=[_commit("head", 1200), _commit("c1", 1100), _commit("old", 500)],
+            current_branch="agent/opencode/docs-t1",
+            remote_probe_failed=True,
+        )
+        self.assertEqual(verdict, REFUSED)
+        self.assertEqual(detail["reason"], "remote_probe_failed")
 
     def test_missing_created_at_refuses(self):
         verdict, detail = classify_commit_state(

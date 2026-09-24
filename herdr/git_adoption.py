@@ -139,6 +139,7 @@ def classify_commit_state(
     skew_seconds=None,
     remote_shas=None,
     enumeration_failed=False,
+    remote_probe_failed=False,
     current_branch=None,
 ):
     """Classify an empty-index commit attempt.
@@ -169,6 +170,10 @@ def classify_commit_state(
             this set is foreign and refuses. ``None`` means unknown (skip).
         enumeration_failed: explicit M-4 signal that git enumeration failed
             while ``head != baseline``. Forces REFUSED ``enumeration_failed``.
+        remote_probe_failed: the ``origin/*`` containment probe failed, so
+            foreignness is unknown. Forces REFUSED ``remote_probe_failed``:
+            an empty remote set means "inspected, nothing foreign" and must
+            never also mean "inspection failed".
         current_branch: actually checked-out branch (``git branch
             --show-current``) at adoption time. P1 identity guard: must
             equal ``task['branch']`` (ordinary tasks) or one of
@@ -203,6 +208,7 @@ def classify_commit_state(
             baseline_is_ancestor=baseline_is_ancestor,
             remote_shas=remote_shas,
             enumeration_failed=enumeration_failed,
+            remote_probe_failed=remote_probe_failed,
             branch=branch,
             onto_branch=onto_branch,
             current_branch=current_branch,
@@ -216,6 +222,7 @@ def classify_commit_state(
         head_history=head_history,
         remote_shas=remote_shas,
         enumeration_failed=enumeration_failed,
+        remote_probe_failed=remote_probe_failed,
         current_branch=current_branch,
     )
 
@@ -328,6 +335,7 @@ def _classify_with_anchor(
     baseline_is_ancestor,
     remote_shas=None,
     enumeration_failed=False,
+    remote_probe_failed=False,
     branch=None,
     onto_branch=None,
     current_branch=None,
@@ -461,7 +469,18 @@ def _classify_with_anchor(
     # H-2: fetch/rebase/fast-forward merge brings foreign commits that are
     # reachable from origin/* into baseline..HEAD. They carry no merge
     # commit and may carry rewritten committer timestamps, so they must be
-    # refused explicitly before the staleness check.
+    # refused explicitly before the staleness check. When the containment
+    # probe itself failed, foreignness is unknown and must fail closed
+    # rather than be read as "no foreign commits".
+    if remote_probe_failed:
+        return REFUSED, {
+            "reason": "remote_probe_failed",
+            "commits": len(commits),
+            "baseline": baseline_commit,
+            "basis": "baseline_commit",
+            "noop_commits": noops,
+            "changed_paths": changed,
+        }
     foreign_sha = _check_remote_contained(commits, remote_shas)
     if foreign_sha:
         return REFUSED, {
@@ -496,7 +515,8 @@ def _classify_with_anchor(
 
 def _classify_by_time(
     *, head, onto_branch, branch, task_id, cutoff, head_history,
-    remote_shas=None, enumeration_failed=False, current_branch=None,
+    remote_shas=None, enumeration_failed=False, remote_probe_failed=False,
+    current_branch=None,
 ):
     if not is_task_branch(branch, task_id):
         return REFUSED, {
@@ -638,6 +658,16 @@ def _classify_by_time(
             "changed_paths": [],
         }
     # H-2 legacy path: same remote-containment guard as anchored path.
+    # A failed probe fails closed here as well (unknown != clean).
+    if remote_probe_failed:
+        return REFUSED, {
+            "reason": "remote_probe_failed",
+            "commits": len(attributable),
+            "baseline": implicit.get("sha"),
+            "basis": "time",
+            "noop_commits": noops,
+            "changed_paths": changed,
+        }
     foreign_sha = _check_remote_contained(attributable, remote_shas)
     if foreign_sha:
         return REFUSED, {

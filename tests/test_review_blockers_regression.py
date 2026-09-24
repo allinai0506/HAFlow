@@ -312,6 +312,48 @@ class F3PathsUnknownE2E(GitBase):
                       [c["path"] for c in payload["changes"]])
 
 
+class RemoteProbeFailedE2E(GitBase):
+    """P1: containment-probe failure is unknown, never 'no foreign'."""
+
+    def test_probe_none_on_git_failure(self):
+        with patch.object(_ht.subprocess, "run",
+                          return_value=subprocess.CompletedProcess(
+                              [], 128, "", "fatal: no such commit")):
+            self.assertIsNone(
+                _ht._git_remote_contained_shas(str(self.clone), ["abc"]))
+
+    def test_probe_none_on_spawn_failure(self):
+        with patch.object(_ht.subprocess, "run",
+                          side_effect=OSError("cannot spawn git")):
+            self.assertIsNone(
+                _ht._git_remote_contained_shas(str(self.clone), ["abc"]))
+
+    def test_probe_empty_set_only_on_success(self):
+        # No remotes here: a real sha probes successfully with no match.
+        self.assertEqual(
+            _ht._git_remote_contained_shas(str(self.clone), [self.baseline]),
+            set())
+
+    def test_adopt_refuses_when_probe_fails(self):
+        task_id = "t-rp"
+        branch = "agent/opencode/docs-t-rp"
+        self._save_task(task_id, baseline_commit=self.baseline,
+                         branch=branch)
+        self._git("checkout", "-b", branch)
+        self._direct_commit("work.txt", "work\n")
+
+        with patch.object(_ht, "_git_remote_contained_shas",
+                          return_value=None):
+            code, output = self._run_commit(task_id)
+
+        self.assertEqual(code, 4)
+        payload = self._payload(output, "HERDR_COMMIT_RESULT")
+        self.assertEqual(payload["result"], "refused")
+        self.assertEqual(payload["reason"], "remote_probe_failed")
+        stored = _ht._get_store().get_task(task_id)
+        self.assertIsNone(stored.get("commit"))
+
+
 class F1OwnBranchPushScope(GitBase):
     """F-1: pushing the task branch is publication, not foreign history."""
 
@@ -388,12 +430,107 @@ class EpisodeStoreCoherence(unittest.TestCase):
         self.assertIsNone(s2.get("t-x:finalize"))
 
 
+try:
+    import fcntl as _fcntl_check
+    _HAS_FCNTL = True
+except ImportError:  # pragma: no cover - non-POSIX platforms
+    _HAS_FCNTL = False
+
+
+@unittest.skipUnless(_HAS_FCNTL, "cross-process lock needs fcntl")
+class EpisodeStoreFileLock(unittest.TestCase):
+    """P1: concurrent controller + CLI writers must not lose episodes."""
+
+    def test_upsert_blocks_while_lock_held(self):
+        # Mechanism: while another process holds the sidecar LOCK_EX, an
+        # upsert cannot complete (kernel-guaranteed, not timing-based).
+        from herdr.liveness import EpisodeStore
+        tmp = Path(tempfile.mkdtemp(prefix="herdr-lock-"))
+        path = tmp / "attention.json"
+        store = EpisodeStore(str(path))
+        store.upsert("seed", {"v": 1})
+        lock_path = str(path) + ".lock"
+        child_code = (
+            f"import sys; sys.path.insert(0, {str(HERDR_ROOT)!r});"
+            "from herdr.liveness import EpisodeStore;"
+            f"EpisodeStore({str(path)!r}).upsert('child', {{'v': 2}});"
+            "print('CHILD DONE')"
+        )
+        with open(lock_path, "a+") as guard:
+            _fcntl_check.flock(guard.fileno(), _fcntl_check.LOCK_EX)
+            try:
+                proc = subprocess.Popen(
+                    [sys.executable, "-c", child_code],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    cwd=str(HERDR_ROOT),
+                )
+                try:
+                    time.sleep(1.5)
+                    self.assertIsNone(
+                        proc.poll(),
+                        "upsert completed while LOCK_EX held elsewhere",
+                    )
+                finally:
+                    pass
+            finally:
+                _fcntl_check.flock(guard.fileno(), _fcntl_check.LOCK_UN)
+        out, _ = proc.communicate(timeout=30)
+        self.assertEqual(proc.returncode, 0)
+        self.assertIn(b"CHILD DONE", out)
+        self.assertEqual(EpisodeStore(str(path)).get("child")["v"], 2)
+
+    def test_concurrent_processes_no_lost_updates(self):
+        # Effect: N processes hammering distinct keys converge with every
+        # key present. Without the cross-process lock, interleaved
+        # read-modify-write cycles drop keys.
+        from herdr.liveness import EpisodeStore
+        tmp = Path(tempfile.mkdtemp(prefix="herdr-stress-"))
+        path = tmp / "attention.json"
+        workers, per_worker = 6, 10
+        worker_code = (
+            f"import sys; sys.path.insert(0, {str(HERDR_ROOT)!r});"
+            "from herdr.liveness import EpisodeStore;"
+            f"store = EpisodeStore({str(path)!r}); wid = sys.argv[1];"
+            f"[store.upsert('k-%s-%d' % (wid, i), {{'w': wid, 'i': i}})"
+            f" for i in range({per_worker:d})]"
+        )
+        procs = [
+            subprocess.Popen(
+                [sys.executable, "-c", worker_code, str(w)],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                cwd=str(HERDR_ROOT),
+            )
+            for w in range(workers)
+        ]
+        try:
+            for proc in procs:
+                _out, err = proc.communicate(timeout=60)
+                self.assertEqual(
+                    proc.returncode, 0,
+                    msg=f"worker failed: {err.decode()[:500]}",
+                )
+        finally:
+            for proc in procs:
+                if proc.poll() is None:
+                    proc.kill()
+        final = EpisodeStore(str(path)).all()
+        missing = [
+            f"k-{w}-{i}"
+            for w in range(workers)
+            for i in range(per_worker)
+            if f"k-{w}-{i}" not in final
+        ]
+        self.assertEqual(missing, [])
+
+
 class ClearEscalationRecovery(GitBase):
     """P1: `clear-escalation` must truly resume finalize after retry_exhausted."""
 
     def tearDown(self):
         _ctrl._finalize_retry_exhausted_logged.discard("t-clr")
+        _ctrl._finalize_retry_exhausted_logged.discard("t-clr2")
         _ctrl.attention_clear("t-clr:finalize")
+        _ctrl.attention_clear("t-clr2:finalize")
         super().tearDown()
 
     def _escalated_task(self):
@@ -428,6 +565,33 @@ class ClearEscalationRecovery(GitBase):
         self.assertIsNone(_ctrl.attention_get("t-clr:finalize"))
         self.assertIn("[ESCALATION CLEARED]", buf.getvalue())
         self.assertIn("attention_cleared=True", buf.getvalue())
+
+    def test_cli_clear_normalizes_when_flag_already_false(self):
+        # P1: partially-failed escalation (stale attempts>=MAX episode but
+        # flag already false) must still be normalized, never skipped.
+        task = self._save_task(
+            "t-clr2",
+            baseline_commit=self.baseline,
+            branch="agent/opencode/docs-t-clr2",
+            status="completed",
+        )
+        self.assertFalse(task.get("finalize_escalated"))
+        _ctrl.attention_note(
+            "t-clr2:finalize", task, "finalize",
+            reason="commit_retry", attempts=5,
+        )
+        self.assertIsNotNone(_ctrl.attention_get("t-clr2:finalize"))
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            _ht.clear_finalize_escalation("t-clr2")
+
+        stored = _ht._get_store().get_task("t-clr2")
+        self.assertFalse(stored.get("finalize_escalated"))
+        self.assertIsNone(stored.get("finalize_escalate_reason"))
+        self.assertIsNone(_ctrl.attention_get("t-clr2:finalize"))
+        self.assertIn("[ESCALATION CLEARED]", buf.getvalue())
+        self.assertIn("was_escalated=False", buf.getvalue())
 
     def test_sweep_redrives_finalize_after_clear(self):
         self._escalated_task()
