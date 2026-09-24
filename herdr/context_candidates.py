@@ -298,18 +298,18 @@ def _event_candidates(
             ))
         elif event_type in VERIFICATION_EVENTS:
             raw_verification = payload.get("verification")
-            verification = dict(raw_verification) if isinstance(raw_verification, Mapping) else payload
-            if not verification:
+            verification_value = dict(raw_verification) if isinstance(raw_verification, Mapping) else payload
+            if not verification_value:
                 continue
-            value = {key: verification.get(key) for key in (
+            value = {key: verification_value.get(key) for key in (
                 "passed", "passed_tests", "total_tests", "failing_count", "lint_errors",
                 "type_errors", "evidence_id", "observation_id", "status",
-            ) if key in verification}
+            ) if key in verification_value}
             if "passed" in value and not isinstance(value["passed"], bool):
                 value.pop("passed", None)
             evidence_refs = []
             for key in ("observation_id", "evidence_id"):
-                ref = _canonical_evidence_ref(verification.get(key))
+                ref = _canonical_evidence_ref(verification_value.get(key))
                 if ref and ref in valid_evidence_refs and ref not in evidence_refs:
                     evidence_refs.append(ref)
             verification.append(_item(

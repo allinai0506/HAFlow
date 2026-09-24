@@ -801,6 +801,26 @@ def test_metrics_report_reuse_and_changed_without_quality_score(tmp_path: Path):
     assert changed.metrics["context_changed"] is True
 
 
+def test_trajectory_verification_event_is_projected_and_does_not_shadow_list(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-verification-event", node="test", role="tester"))
+    observation = create_observation(
+        run_id=target["run_id"], task_id=target["task_id"],
+        source_type="verification", source_ref="verification:event-test",
+        content="failed test", store=ObservationStore(db),
+    )
+    TrajectoryLedger(db).append_event({
+        "run_id": target["run_id"], "task_id": target["task_id"],
+        "workflow_id": target["workflow_id"],
+        "event_type": "verification_completed",
+        "verification": {"passed": False, "observation_id": observation.observation_id},
+    })
+    context = _compile(db, target, "tester")
+    assert any(item.get("value", {}).get("passed") is False for item in context.verification)
+    assert any(observation.observation_id in ref for item in context.verification for ref in item.get("evidence_refs", []))
+
+
 def test_eval_verification_is_available_as_bounded_evidence(tmp_path: Path):
     db = tmp_path / "state.db"
     _seed_workflow(db)
