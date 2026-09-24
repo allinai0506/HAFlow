@@ -213,6 +213,9 @@ def compile_working_context(
         snapshot["tasks"],
         dependency_ids=dependency_ids,
     )
+    for blocker in task_blockers:
+        if blocker.get("source_task") == current_task_id:
+            blocker.setdefault("metadata", {})["current_task_blocker"] = True
     event_artifacts, event_completed, event_verification, event_decisions, event_blockers = _event_candidates(
         snapshot["events"],
         task_by_id=snapshot["task_by_id"],
@@ -270,7 +273,11 @@ def compile_working_context(
             source_task=current_task_id,
             source_run=_task_run(target),
             created_at=target.get("created_at"),
-            metadata={"status": str(target.get("status") or ""), "node": node_id},
+            metadata={
+                "status": str(target.get("status") or ""),
+                "node": node_id,
+                "current_task_blocker": True,
+            },
         ))
     for finding in findings:
         metadata = finding.get("metadata") or {}

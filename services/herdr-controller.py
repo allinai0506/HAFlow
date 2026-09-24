@@ -4608,7 +4608,11 @@ def _legacy_evidence_allowed(event, raw_ref, db_path=None):
                 ).fetchone()
             except ValueError:
                 row = None
-        if row is None or str(row["workflow_id"] or "") != str(event.get("workflow_id") or ""):
+        if row is None:
+            return False
+        row_workflow = str(row["workflow_id"] or "")
+        event_workflow = str(event.get("workflow_id") or "")
+        if row_workflow and row_workflow != event_workflow:
             return False
         task_id = row["task_id"]
         if task_id:
@@ -4679,13 +4683,16 @@ def _working_context_ref_valid(event, target_task, db_path=None):
     from herdr.trajectory import run_id_for_task
 
     refs = list(event.get("context_refs") or [])
-    if not refs:
-        return True
     authoritative_task = _authoritative_task(
         event.get("to_task_id"), target_task, db_path=db_path,
     )
-    if authoritative_task is not None:
-        target_task = authoritative_task
+    if authoritative_task is None:
+        return False
+    target_task = authoritative_task
+    if str(target_task.get("workflow_id") or "") != str(event.get("workflow_id") or ""):
+        return False
+    if not refs:
+        return True
     try:
         expected_role = infer_agent_role(target_task)
     except ValueError:
@@ -4742,7 +4749,10 @@ def dispatch_collaboration_event(event_id, tasks_by_id, prompt_sender=None, db_p
     )
     if target is None:
         return _sdb.mark_collaboration_failed(event_id, db_path=db_path)
-    if _collab_task_run(target) != event["run_id"]:
+    if (
+        _collab_task_run(target) != event["run_id"]
+        or str(target.get("workflow_id") or "") != str(event.get("workflow_id") or "")
+    ):
         return _sdb.mark_collaboration_failed(event_id, db_path=db_path)
     pane_id = _collab_task_pane(target)
     if not pane_id:

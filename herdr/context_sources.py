@@ -152,6 +152,7 @@ def _merge_verification_events(
                         ORDER BY CASE WHEN (
                             json_type(e.payload_json, '$.verification.passed') = 'false'
                             OR json_type(e.payload_json, '$.verification_passed') = 'false'
+                            OR json_type(e.payload_json, '$.verification.verification_passed') = 'false'
                         ) THEN 0 ELSE 1 END, e.sequence DESC, e.id DESC
                     ) AS strict_rank,
                     ROW_NUMBER() OVER (
@@ -159,6 +160,7 @@ def _merge_verification_events(
                         ORDER BY CASE WHEN (
                             json_type(e.payload_json, '$.verification.passed') = 'true'
                             OR json_type(e.payload_json, '$.verification_passed') = 'true'
+                            OR json_type(e.payload_json, '$.verification.verification_passed') = 'true'
                         ) THEN 0 ELSE 1 END, e.sequence DESC, e.id DESC
                     ) AS pass_rank
                   FROM events e
@@ -217,7 +219,9 @@ def _merge_verification_events(
             window_limit,
         ),
     ).fetchall()
-    oversized_types = tuple(dict.fromkeys(critical_types + ("verification_completed", "tests_completed")))
+    oversized_types = tuple(dict.fromkeys(
+        critical_types + ("verification_completed", "tests_completed") + tuple(RELEVANT_EVENT_TYPES)
+    ))
     oversized_placeholders = ",".join("?" for _ in oversized_types)
     oversized_rows = conn.execute(
         f"""SELECT e.id, e.run_id, e.task_id, e.workflow_id, e.node_id,
@@ -953,9 +957,12 @@ def _workflow_config_projection(
     config = workflow.get("config")
     if not isinstance(config, Mapping):
         return config
-    nodes = config.get("nodes")
-    if not isinstance(nodes, list):
+    item_key = "nodes" if isinstance(config.get("nodes"), list) else (
+        "stages" if isinstance(config.get("stages"), list) else None
+    )
+    if item_key is None:
         return config
+    items = config[item_key]
     relevant_ids = {
         str(value)
         for value in (
@@ -964,15 +971,16 @@ def _workflow_config_projection(
         )
         if value
     }
-    relevant_nodes = [
-        node for node in nodes
-        if isinstance(node, Mapping) and str(node.get("id") or "") in relevant_ids
+    relevant_items = [
+        item for item in items
+        if isinstance(item, Mapping)
+        and str(item.get("id") or item.get("stage") or item.get("name") or "") in relevant_ids
     ]
-    canonical_nodes = json.dumps(nodes, ensure_ascii=False, sort_keys=True, default=str)
+    canonical_items = json.dumps(items, ensure_ascii=False, sort_keys=True, default=str)
     return {
-        **{key: value for key, value in config.items() if key != "nodes"},
-        "nodes": relevant_nodes,
-        "all_nodes_sha256": hashlib.sha256(canonical_nodes.encode("utf-8")).hexdigest(),
+        **{key: value for key, value in config.items() if key != item_key},
+        item_key: relevant_items,
+        f"all_{item_key}_sha256": hashlib.sha256(canonical_items.encode("utf-8")).hexdigest(),
     }
 
 

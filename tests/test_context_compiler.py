@@ -321,6 +321,31 @@ def test_storage_rejects_non_boolean_verification_value(tmp_path: Path):
         state_db.save_working_context(forged, db_path=db)
 
 
+def test_low_level_storage_normalizes_empty_fingerprint_config(tmp_path: Path):
+    from herdr.context_models import _hash, _payload_digest
+    from herdr.context_projection import _config, _fingerprint_payload
+    from herdr.context_models import WorkingContext
+
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-storage-empty-config"))
+    payload = dict(_compile(db, target, "developer").to_mapping())
+    payload["context_id"] = "wc_storage_empty_config"
+    config = _config({})
+    payload["artifacts"] = [
+        {"kind": "artifact", "value": {"ref": f"empty-config-{index}"},
+         "source_ref": f"task:{target['task_id']}"}
+        for index in range(50)
+    ]
+    payload["_fingerprint_config"] = config
+    payload["context_fingerprint"] = _hash(
+        _fingerprint_payload(WorkingContext.from_mapping(payload), config)
+    )
+    payload.setdefault("metrics", {})["payload_digest"] = _payload_digest(payload)
+    with pytest.raises(ValueError, match="cap|budget"):
+        state_db.save_working_context(payload, db_path=db, fingerprint_config={})
+
+
 def test_storage_rejects_kind_cap_violation(tmp_path: Path):
     from herdr.context_models import WorkingContext, _hash, _payload_digest
     from herdr.context_projection import _config, _fingerprint_payload
@@ -815,6 +840,20 @@ def test_source_clock_still_detects_writes_in_same_workflow_scope(tmp_path: Path
     assert saved.get("_stale_snapshot") is True
 
 
+def test_task_scope_update_advances_old_and_new_source_clocks(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db, workflow_id="wf-a", scope="scope-a")
+    target = _seed_task(db, _task("task-scope-move", workflow_id="wf-a", scope="scope-a"))
+    _compile(db, target, "developer")
+    old_clock = _source_clock_revision(db, "scope-a", "wf-a")
+    state_db.save_task(
+        dict(target, workflow_run_id="scope-b"),
+        db_path=db,
+    )
+    assert _source_clock_revision(db, "scope-a", "wf-a") > old_clock
+    assert _source_clock_revision(db, "scope-b", "wf-a") > 0
+
+
 def test_same_execution_scope_source_heads_are_isolated_by_workflow(tmp_path: Path):
     from herdr.context_projection import _config
 
@@ -920,6 +959,27 @@ def test_source_revision_covers_workflow_nodes_beyond_projection_cap(tmp_path: P
     nodes[-1]["purpose"] = "second purpose"
     state_db.save_workflow(
         {"workflow_id": "wf-node-cap", "title": "fixture", "status": "running", "config": {"nodes": nodes}},
+        db_path=db,
+    )
+    second = _compile(db, target, "reviewer")
+    assert second.source_version != first.source_version
+    assert second.source_watermark > first.source_watermark
+
+
+def test_source_revision_covers_legacy_stages_beyond_projection_cap(tmp_path: Path):
+    db = tmp_path / "state.db"
+    stages = [{"id": f"stage-{index}", "depends_on": []} for index in range(101)]
+    stages[-1]["id"] = "review"
+    stages[-1]["purpose"] = "first purpose"
+    state_db.save_workflow(
+        {"workflow_id": "wf-stage-cap", "title": "fixture", "status": "running", "config": {"stages": stages}},
+        db_path=db,
+    )
+    target = _seed_task(db, _task("task-stage-cap", workflow_id="wf-stage-cap", node="review"))
+    first = _compile(db, target, "reviewer")
+    stages[-1]["purpose"] = "second purpose"
+    state_db.save_workflow(
+        {"workflow_id": "wf-stage-cap", "title": "fixture", "status": "running", "config": {"stages": stages}},
         db_path=db,
     )
     second = _compile(db, target, "reviewer")
@@ -1434,6 +1494,25 @@ def test_completed_task_does_not_project_stale_persisted_blocker(tmp_path: Path)
     assert not context.blockers
 
 
+def test_oversized_decision_payload_is_retained_as_truncated_marker(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-oversized-decision", node="implementation"))
+    state_db.record_trajectory_event(
+        {
+            "run_id": target["run_id"], "task_id": target["task_id"],
+            "workflow_id": target["workflow_id"], "event_type": "decision",
+            "payload": {"decision": "x" * 21000},
+        },
+        db_path=db,
+    )
+    context = _compile(db, target, "developer")
+    assert any(
+        item.get("value", {}).get("source_truncated") is True
+        for item in context.decisions
+    )
+
+
 def test_oversized_failure_payload_is_retained_as_truncated_blocker(tmp_path: Path):
     db = tmp_path / "state.db"
     _seed_workflow(db)
@@ -1512,6 +1591,34 @@ def test_failure_window_survives_unrelated_event_noise(tmp_path: Path):
         })
     context = _compile(db, target, "developer")
     assert any(item.get("value", {}).get("reason") == "real failure" for item in context.blockers)
+
+
+def test_current_task_blocker_survives_sibling_failure_cap(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, dict(
+        _task("task-current-blocker-cap", node="implementation"),
+        blocker="TARGET BLOCKER",
+    ))
+    for index in range(6):
+        sibling = _seed_task(db, _task(f"task-blocker-noise-{index}", node="implementation"))
+        state_db.record_trajectory_event(
+            {
+                "run_id": sibling["run_id"], "task_id": sibling["task_id"],
+                "workflow_id": sibling["workflow_id"], "event_type": "task_failed",
+                "payload": {"metadata": {"reason": f"sibling failure {index}"}},
+            },
+            db_path=db,
+        )
+    context = _compile(
+        db, target, "developer",
+        config={"max_items_per_kind": {"blockers": 5}},
+    )
+    assert any(
+        item.get("value") == "TARGET BLOCKER"
+        or item.get("value", {}).get("reason") == "TARGET BLOCKER"
+        for item in context.blockers
+    )
 
 
 def test_verification_cap_prioritizes_target_failure(tmp_path: Path):
@@ -2018,6 +2125,25 @@ def test_state_store_exposes_working_context_readers(tmp_path: Path):
     assert [item.context_id for item in list_working_contexts(target["task_id"], db_path=db)] == [context.context_id]
 
 
+def test_run_metrics_count_alternate_verification_failure(tmp_path: Path):
+    from herdr.metrics import get_run_metrics
+
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-metrics-alternate-verification"))
+    state_db.record_trajectory_event(
+        {
+            "run_id": target["run_id"], "task_id": target["task_id"],
+            "workflow_id": target["workflow_id"], "event_type": "verification_completed",
+            "payload": {"verification": {"passed": True}, "verification_passed": False},
+        },
+        db_path=db,
+    )
+    metrics = get_run_metrics(target["run_id"], db_path=db)
+    assert metrics.verification_failed == 1
+    assert metrics.verification_passed == 0
+
+
 def test_run_metrics_count_reused_compile_invocations(tmp_path: Path):
     from herdr.metrics import get_run_metrics
 
@@ -2223,6 +2349,28 @@ def test_conflicting_verification_fields_cannot_hide_failure(tmp_path: Path):
         "workflow_id": target["workflow_id"], "event_type": "verification_completed",
         "verification": {"passed": True}, "verification_passed": False,
     })
+    context = _compile(db, target, "tester")
+    assert any(
+        item.get("value", {}).get("verification_passed") is False
+        for item in context.verification
+    )
+
+
+def test_nested_and_top_level_verification_conflict_prefers_failure(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-nested-verification-conflict", node="test", role="tester"))
+    state_db.record_trajectory_event(
+        {
+            "run_id": target["run_id"], "task_id": target["task_id"],
+            "workflow_id": target["workflow_id"], "event_type": "verification_completed",
+            "payload": {
+                "verification": {"verification_passed": False},
+                "verification_passed": True,
+            },
+        },
+        db_path=db,
+    )
     context = _compile(db, target, "tester")
     assert any(
         item.get("value", {}).get("verification_passed") is False
@@ -2802,6 +2950,43 @@ def test_dispatch_does_not_treat_context_source_refs_as_evidence(tmp_path: Path)
     assert "EVIDENCE:\n- task:task-dispatch-evidence-target" not in calls[0][1]
 
 
+def test_dispatch_rejects_cross_workflow_target_in_shared_scope(tmp_path: Path):
+    import importlib.machinery
+    import importlib.util
+
+    controller_path = Path(__file__).resolve().parent.parent / "services" / "herdr-controller.py"
+    spec = importlib.util.spec_from_loader(
+        "context_compiler_cross_workflow_dispatch_test",
+        importlib.machinery.SourceFileLoader(
+            "context_compiler_cross_workflow_dispatch_test", str(controller_path)
+        ),
+    )
+    controller = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(controller)
+    db = tmp_path / "state.db"
+    _seed_workflow(db, workflow_id="wf-a", scope="shared-exec")
+    _seed_workflow(db, workflow_id="wf-b", scope="shared-exec")
+    source = _seed_task(db, _task("task-cross-source", workflow_id="wf-a", scope="shared-exec"))
+    target = _seed_task(db, _task("task-cross-target", workflow_id="wf-b", scope="shared-exec"))
+    target["pane_id"] = "pane-cross-target"
+    state_db.save_task(target, db_path=db)
+    event = state_db.create_collaboration_event(
+        {
+            "run_id": "shared-exec", "workflow_id": "wf-a",
+            "from_task_id": source["task_id"], "to_task_id": target["task_id"],
+            "type": "HANDOFF", "source_fact_id": "fact-cross-workflow",
+        },
+        db_path=db,
+    )
+    calls = []
+    result = controller.dispatch_collaboration_event(
+        event["event_id"], {source["task_id"]: source, target["task_id"]: target},
+        lambda pane, prompt: calls.append((pane, prompt)), db_path=db,
+    )
+    assert result["status"] == "failed"
+    assert calls == []
+
+
 def test_legacy_handoff_filters_task_evidence_from_old_run(tmp_path: Path):
     import importlib.machinery
     import importlib.util
@@ -2843,6 +3028,47 @@ def test_legacy_handoff_filters_task_evidence_from_old_run(tmp_path: Path):
         lambda pane, prompt: calls.append((pane, prompt)), db_path=db,
     )
     assert old_observation.observation_id not in calls[0][1]
+
+
+def test_legacy_task_evidence_without_workflow_is_scope_validated(tmp_path: Path):
+    import importlib.machinery
+    import importlib.util
+
+    controller_path = Path(__file__).resolve().parent.parent / "services" / "herdr-controller.py"
+    spec = importlib.util.spec_from_loader(
+        "context_compiler_missing_workflow_evidence_test",
+        importlib.machinery.SourceFileLoader(
+            "context_compiler_missing_workflow_evidence_test", str(controller_path)
+        ),
+    )
+    controller = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(controller)
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _task("task-missing-workflow-evidence-target", node="review", role="reviewer")
+    target["pane_id"] = "pane-missing-workflow-evidence"
+    target = _seed_task(db, target)
+    source = _seed_task(db, _task("task-missing-workflow-evidence-source", node="implementation"))
+    observation = create_observation(
+        run_id=target["run_id"], task_id=target["task_id"], workflow_id=None,
+        source_type="verification", source_ref="verification:missing-workflow-valid",
+        content="valid legacy evidence", store=ObservationStore(db),
+    )
+    event = state_db.create_collaboration_event(
+        {
+            "run_id": "wf-exec-1", "workflow_id": "wf-context",
+            "from_task_id": source["task_id"], "to_task_id": target["task_id"],
+            "type": "HANDOFF", "evidence_refs": [observation.observation_id],
+            "source_fact_id": "fact-missing-workflow-valid",
+        },
+        db_path=db,
+    )
+    calls = []
+    controller.dispatch_collaboration_event(
+        event["event_id"], {target["task_id"]: target, source["task_id"]: source},
+        lambda pane, prompt: calls.append((pane, prompt)), db_path=db,
+    )
+    assert observation.observation_id in calls[0][1]
 
 
 def test_legacy_handoff_without_context_filters_unverified_evidence(tmp_path: Path):

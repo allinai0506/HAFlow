@@ -33,6 +33,8 @@ def context_relevance(
     state = 0.0
     if kind in {"blocker", "open_question"}:
         state += 5.0
+    if metadata.get("current_task_blocker") is True:
+        state += 1000.0
     if kind == "verification":
         state += 4.0
     if kind == "finding":

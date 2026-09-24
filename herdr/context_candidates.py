@@ -214,7 +214,11 @@ def _eval_candidates(
         }
         if evaluation.get("source_truncated") is True:
             value["source_truncated"] = True
-        if value["verification_passed"] is None and value["requirements_satisfied"] is None:
+        if (
+            value["verification_passed"] is None
+            and value["requirements_satisfied"] is None
+            and value.get("source_truncated") is not True
+        ):
             continue
         evidence_refs: List[str] = []
         raw_evidence = evaluation.get("evidence")
@@ -289,6 +293,32 @@ def _event_candidates(
             "source_run": str(event.get("run_id") or "") or None,
             "created_at": event.get("timestamp"),
         }
+        if payload.get("source_truncated") is True and event_type not in VERIFICATION_EVENTS:
+            if event_type in {"blocker", "task_failed", "agent_failed", "run_failed"}:
+                blockers.append(_item(
+                    "blocker",
+                    {"reason": "source payload truncated", "source_truncated": True},
+                    event_ref,
+                    metadata={"event_type": event_type, "status": "blocked", "node": event.get("node_id")},
+                    **common,
+                ))
+            elif event_type == "artifact_created":
+                artifacts.append(_item(
+                    "artifact",
+                    {"ref": f"source-truncated:{event_id}", "source_truncated": True},
+                    event_ref,
+                    metadata={"event_type": event_type, "node": event.get("node_id")},
+                    **common,
+                ))
+            else:
+                decisions.append(_item(
+                    "decision",
+                    {"reason": "source payload truncated", "source_truncated": True},
+                    event_ref,
+                    metadata={"event_type": event_type, "node": event.get("node_id")},
+                    **common,
+                ))
+            continue
         if event_type == "artifact_created":
             artifact = payload.get("artifact") if isinstance(payload.get("artifact"), Mapping) else {}
             ref = artifact.get("ref") or artifact.get("path")
@@ -312,7 +342,12 @@ def _event_candidates(
             raw_verification = payload.get("verification")
             verification_value = dict(raw_verification) if isinstance(raw_verification, Mapping) else dict(payload)
             if "verification_passed" in payload:
-                verification_value["verification_passed"] = payload["verification_passed"]
+                nested_value = verification_value.get("verification_passed")
+                top_value = payload.get("verification_passed")
+                if nested_value is False or top_value is False:
+                    verification_value["verification_passed"] = False
+                else:
+                    verification_value["verification_passed"] = top_value
             if not verification_value:
                 continue
             value = {key: verification_value.get(key) for key in (

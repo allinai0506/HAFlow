@@ -317,7 +317,6 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
     conn.execute("BEGIN IMMEDIATE;")
     _ensure_working_context_source_heads_schema(conn)
     _ensure_working_context_source_clock_schema(conn)
-    conn.execute("COMMIT;")
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS working_context_metric_events (
@@ -560,7 +559,6 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
             f"WHERE json_extract(t.payload_json, '$.run_id') = {alias}.run_id))"
         )
 
-    conn.execute("BEGIN IMMEDIATE;")
     for source_table in source_clock_tables:
         for operation in ("INSERT", "UPDATE", "DELETE"):
             trigger_name = f"trg_working_context_source_clock_{source_table}_{operation.lower()}"
@@ -598,6 +596,28 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
                     ON CONFLICT(run_scope, workflow_id) DO UPDATE SET revision = revision + 1;
                     """
                 )
+            if operation == "UPDATE":
+                old_scope_expr = source_clock_scope("OLD", source_table)
+                old_workflow_expr = source_clock_workflow("OLD", source_table)
+                statements.append(
+                    f"""
+                    INSERT INTO working_context_source_clock (run_scope, workflow_id, revision)
+                    SELECT {old_scope_expr}, {old_workflow_expr}, 1
+                    WHERE {old_scope_expr} <> '' AND {old_scope_expr} <> {scope_expr}
+                    ON CONFLICT(run_scope, workflow_id) DO UPDATE SET revision = revision + 1;
+                    """
+                )
+                if source_table in {"workflows"} | task_scoped_tables:
+                    statements.append(
+                        f"""
+                        INSERT INTO working_context_source_clock (run_scope, workflow_id, revision)
+                        SELECT h.run_scope, h.workflow_id, 1
+                        FROM working_context_source_heads h
+                        WHERE h.workflow_id = {old_workflow_expr}
+                          AND h.run_scope <> {old_scope_expr}
+                        ON CONFLICT(run_scope, workflow_id) DO UPDATE SET revision = revision + 1;
+                        """
+                    )
             conn.execute(
                 f"""
                 CREATE TRIGGER IF NOT EXISTS {trigger_name}
@@ -2349,14 +2369,25 @@ def aggregate_run_metric_rows(run_id: str, db_path: Optional[Path] = None) -> Di
                        AS verification_total,
                    SUM(CASE WHEN event_type = 'verification_completed'
                             THEN CASE WHEN json_valid(payload_json)
-                                      THEN CASE WHEN json_extract(payload_json, '$.verification.passed') = 1
-                                                THEN 1 ELSE 0 END
+                                      THEN CASE WHEN (
+                                          json_type(payload_json, '$.verification.passed') = 'false'
+                                          OR json_type(payload_json, '$.verification_passed') = 'false'
+                                          OR json_type(payload_json, '$.verification.verification_passed') = 'false'
+                                      ) THEN 0
+                                                WHEN (
+                                          json_type(payload_json, '$.verification.passed') = 'true'
+                                          OR json_type(payload_json, '$.verification_passed') = 'true'
+                                          OR json_type(payload_json, '$.verification.verification_passed') = 'true'
+                                      ) THEN 1 ELSE 0 END
                                       ELSE 0 END
                             ELSE 0 END) AS verification_passed,
                    SUM(CASE WHEN event_type = 'verification_completed'
                             THEN CASE WHEN json_valid(payload_json)
-                                      THEN CASE WHEN json_extract(payload_json, '$.verification.passed') = 0
-                                                THEN 1 ELSE 0 END
+                                      THEN CASE WHEN (
+                                          json_type(payload_json, '$.verification.passed') = 'false'
+                                          OR json_type(payload_json, '$.verification_passed') = 'false'
+                                          OR json_type(payload_json, '$.verification.verification_passed') = 'false'
+                                      ) THEN 1 ELSE 0 END
                                       ELSE 0 END
                             ELSE 0 END) AS verification_failed
                    ,SUM(CASE WHEN event_type = 'task_started' THEN 1 ELSE 0 END) AS task_started
@@ -3614,6 +3645,8 @@ def save_working_context(
         fingerprint_config = context.get("_fingerprint_config")
     if not isinstance(fingerprint_config, dict):
         raise ValueError("working context requires fingerprint configuration")
+    from .context_projection import _config as normalize_fingerprint_config
+    fingerprint_config = normalize_fingerprint_config(fingerprint_config)
     max_chars = int(fingerprint_config.get("max_chars", 20000))
     if max_chars < 1 or len(json.dumps(context, ensure_ascii=False)) > max_chars:
         raise ValueError("working context exceeds fingerprint configuration budget")
