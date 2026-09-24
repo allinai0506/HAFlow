@@ -267,6 +267,11 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - 修复：所有已识别 verification false 统一输出 false；legacy evidence 校验 task Workflow；truncated marker 提高相关性并驱动 next action；UPDATE 推进旧/新 workflow heads；nodes/stages 分别生成摘要；storage config 统一规范化。
 - 回归：全量 `1519 passed, 44 subtests passed`；专项、compileall、AST、ruff、diff 和凭据扫描均通过。
 
+## [2026-09-25] fix | Context Compiler provenance closure final pass
+- 背景：复审发现 oversized critical facts 可被普通噪声挤出、紧预算 `compiled_at` 舍入导致 stale loop、verification alias 可在 storage 中矛盾、source_refs 未闭环，以及 derived task refs/metrics 边界。
+- 修复：超限 critical/verification 优先保留；保留 `compiled_at` 精度；storage 拒绝 alias 冲突并要求 aggregate provenance 覆盖所有 item/evidence refs；task derived refs 校验真实目标；低层 source/config 边界继续规范化。
+- 回归：全量 `1523 passed, 44 subtests passed`；专项 `277 passed`；compileall、AST、ruff、diff 和凭据扫描均通过。
+
 ## [2026-09-13] feat | Console URL Deep-Link & Notifier Click-to-Open Integration
 解决 macOS CLI 通知默认归属“脚本编辑器”且无法定位到具体任务/工作流页面的痛点：
 - [[architecture]] §2.3 更新 Herdr Notifier 架构描述：优先使用 `terminal-notifier` 附带 `-open` 直达链接，未安装时安全降级为 `osascript`；
