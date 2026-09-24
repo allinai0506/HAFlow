@@ -222,6 +222,53 @@ def test_storage_rejects_unlinked_legacy_sibling_finding(tmp_path: Path):
         state_db.save_working_context(forged, db_path=db)
 
 
+def test_storage_rejects_unrelated_legacy_collaboration_scope_expansion(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _task("task-legacy-unrelated-target")
+    target.pop("workflow_run_id", None)
+    source = _task("task-legacy-unrelated-source")
+    source.pop("workflow_run_id", None)
+    other = _task("task-legacy-unrelated-other")
+    other.pop("workflow_run_id", None)
+    target = _seed_task(db, target)
+    source = _seed_task(db, source)
+    other = _seed_task(db, other)
+    state_db.upsert_trajectory_finding(
+        _finding(source["run_id"], "fnd-unrelated-legacy", task_id=source["task_id"]),
+        db_path=db,
+    )
+    unrelated = state_db.create_collaboration_event(
+        {
+            "run_id": "wf-context",
+            "workflow_id": "wf-context",
+            "from_task_id": source["task_id"],
+            "to_task_id": other["task_id"],
+            "type": "REQUEST",
+            "summary": "Unrelated request",
+            "source_fact_id": "fact-unrelated-legacy",
+        },
+        db_path=db,
+    )
+    context = _compile(db, target, "developer")
+    forged = dict(context.to_mapping())
+    forged["context_id"] = "wc_unrelated_legacy_scope"
+    forged["findings"] = [{
+        "kind": "finding",
+        "value": "unrelated sibling",
+        "source_ref": "finding:fnd-unrelated-legacy",
+        "source_task": source["task_id"],
+        "source_run": source["run_id"],
+    }]
+    forged["source_refs"] = [
+        "finding:fnd-unrelated-legacy",
+        f"collaboration:{unrelated['event_id']}",
+    ]
+    _bind_storage_fingerprint(forged)
+    with pytest.raises(ValueError, match="handoff|crosses run scope|collaboration task scope"):
+        state_db.save_working_context(forged, db_path=db)
+
+
 def test_storage_rejects_item_source_identity_mismatch(tmp_path: Path):
     db = tmp_path / "state.db"
     _seed_workflow(db)
@@ -683,6 +730,25 @@ def test_source_revision_advances_for_in_place_finding_update(tmp_path: Path):
     assert second.source_watermark > first.source_watermark
     from herdr.context_compiler import get_latest_working_context
     assert get_latest_working_context(target["task_id"], db_path=db).context_id == second.context_id
+
+
+def test_fingerprint_binds_scalar_provenance_fields(tmp_path: Path):
+    from herdr.context_models import WorkingContext, _hash
+    from herdr.context_projection import _config, _fingerprint_payload
+
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-scalar-provenance"))
+    context = _compile(db, target, "developer")
+    mutated = dict(context.to_mapping())
+    mutated["goal_source_ref"] = "workflow:wf-context"
+    mutated["source_refs"] = list(dict.fromkeys(
+        [*mutated.get("source_refs", []), "workflow:wf-context"]
+    ))
+    mutated_fingerprint = _hash(
+        _fingerprint_payload(WorkingContext.from_mapping(mutated), _config(None))
+    )
+    assert mutated_fingerprint != context.context_fingerprint
 
 
 def test_fingerprint_is_independent_of_compile_wall_clock(tmp_path: Path):
@@ -1149,6 +1215,32 @@ def test_verification_reserved_window_survives_event_noise(tmp_path: Path):
         })
     context = _compile(db, target, "tester")
     assert any(verification["event_id"] in ref for ref in context.source_refs)
+    assert any(item.get("value", {}).get("passed") is False for item in context.verification)
+
+
+def test_strict_failure_window_ignores_non_boolean_verification_values(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-verification-type-window", node="test", role="tester"))
+    ledger = TrajectoryLedger(db)
+    valid_failure = ledger.append_event({
+        "run_id": target["run_id"], "task_id": target["task_id"],
+        "workflow_id": target["workflow_id"], "event_type": "verification_completed",
+        "verification": {"passed": False},
+    })
+    ledger.append_event({
+        "run_id": target["run_id"], "task_id": target["task_id"],
+        "workflow_id": target["workflow_id"], "event_type": "verification_completed",
+        "verification": {"passed": "false"},
+    })
+    for index in range(301):
+        ledger.append_event({
+            "run_id": target["run_id"], "task_id": target["task_id"],
+            "workflow_id": target["workflow_id"], "event_type": "decision",
+            "decision": f"type-noise-{index}",
+        })
+    context = _compile(db, target, "tester")
+    assert any(valid_failure["event_id"] in ref for ref in context.source_refs)
     assert any(item.get("value", {}).get("passed") is False for item in context.verification)
 
 
@@ -2109,6 +2201,54 @@ def test_supervisor_retry_prompt_carries_working_context_ref(monkeypatch):
     assert result["retry_dispatched"] is True
     assert events
     assert any("WORKING_CONTEXT_REF:wc_retry" in str(item) for item in prompts)
+
+
+def test_dispatch_does_not_treat_context_source_refs_as_evidence(tmp_path: Path):
+    import importlib.machinery
+    import importlib.util
+
+    controller_path = Path(__file__).resolve().parent.parent / "services" / "herdr-controller.py"
+    spec = importlib.util.spec_from_loader(
+        "context_compiler_evidence_scope_test",
+        importlib.machinery.SourceFileLoader(
+            "context_compiler_evidence_scope_test", str(controller_path)
+        ),
+    )
+    controller = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(controller)
+
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _task("task-dispatch-evidence-target", node="review", role="reviewer")
+    target["pane_id"] = "pane-evidence-target"
+    target = _seed_task(db, target)
+    source = _task("task-dispatch-evidence-source", node="implementation", role="developer")
+    source["pane_id"] = "pane-evidence-source"
+    source = _seed_task(db, source)
+    context = _compile(db, target, "reviewer")
+    event = state_db.create_collaboration_event(
+        {
+            "run_id": "wf-exec-1",
+            "workflow_id": "wf-context",
+            "from_task_id": source["task_id"],
+            "to_task_id": target["task_id"],
+            "to_agent": "reviewer",
+            "type": "HANDOFF",
+            "evidence_refs": [f"task:{target['task_id']}"],
+            "context_refs": [context.context_id],
+            "source_fact_id": "fact-evidence-scope",
+        },
+        db_path=db,
+    )
+    calls = []
+    result = controller.dispatch_collaboration_event(
+        event["event_id"],
+        {target["task_id"]: target, source["task_id"]: source},
+        lambda pane, prompt: calls.append((pane, prompt)),
+        db_path=db,
+    )
+    assert result["dispatched"] is True
+    assert "EVIDENCE:\n- task:task-dispatch-evidence-target" not in calls[0][1]
 
 
 def test_dispatch_rejects_unknown_nonempty_context_ref(tmp_path: Path):

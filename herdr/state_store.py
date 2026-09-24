@@ -844,6 +844,9 @@ class SQLiteStateStore(StateStore):
     def save_working_context(
         self, context: Dict[str, Any], *, fingerprint_config: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
+        if fingerprint_config is None:
+            from .context_projection import _config
+            fingerprint_config = _config(None)
         return state_db.save_working_context(
             context, db_path=self.db_path, fingerprint_config=fingerprint_config,
         )

@@ -62,6 +62,8 @@ def _fingerprint_payload(context: WorkingContext, config: Mapping[str, Any]) -> 
         "goal": context.goal,
         "current_state": context.current_state,
         "current_state_refs": context.current_state_refs,
+        "goal_source_ref": context.goal_source_ref,
+        "next_action_source_ref": context.next_action_source_ref,
         "completed": context.completed,
         "artifacts": context.artifacts,
         "evidence": context.evidence,

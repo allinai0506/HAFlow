@@ -142,9 +142,8 @@ def _merge_verification_events(
                     ROW_NUMBER() OVER (
                         PARTITION BY e.run_id, COALESCE(e.task_id, '')
                         ORDER BY CASE WHEN (
-                            json_extract(e.payload_json, '$.verification.passed') = 'false'
-                            OR json_extract(e.payload_json, '$.verification.passed') = 0
-                            OR json_extract(e.payload_json, '$.verification_passed') = 0
+                            json_type(e.payload_json, '$.verification.passed') = 'false'
+                            OR json_type(e.payload_json, '$.verification_passed') = 'false'
                         ) THEN 0 ELSE 1 END, e.sequence DESC, e.id DESC
                     ) AS strict_rank
                   FROM events e

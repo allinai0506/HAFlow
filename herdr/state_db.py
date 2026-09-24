@@ -3276,7 +3276,7 @@ def _validate_context_source_existence(
                 ).fetchone()
         elif prefix == "collaboration":
             row = conn.execute(
-                "SELECT run_id, workflow_id, from_task_id, to_task_id FROM collaboration_events WHERE event_id = ? LIMIT 1",
+                "SELECT run_id, workflow_id, from_task_id, to_task_id, type, status FROM collaboration_events WHERE event_id = ? LIMIT 1",
                 (object_id,),
             ).fetchone()
         else:
@@ -3287,17 +3287,22 @@ def _validate_context_source_existence(
 
     verified_handoff_tasks: set[str] = set()
     if str(context.get("run_scope") or "") == str(context.get("workflow_id") or ""):
+        target_task_id = str(context.get("task_id") or "")
         for ref in refs:
             if not ref.startswith("collaboration:"):
                 continue
             object_id = ref.split(":", 1)[1].split(":", 1)[0]
             handoff = fetch_record("collaboration", object_id)
-            if handoff:
-                verified_handoff_tasks.update(
-                    str(value) for value in (
-                        handoff.get("from_task_id"), handoff.get("to_task_id")
-                    ) if value
-                )
+            if not handoff or str(handoff.get("type") or "").upper() != "HANDOFF":
+                continue
+            endpoints = {
+                str(value) for value in (
+                    handoff.get("from_task_id"), handoff.get("to_task_id")
+                ) if value
+            }
+            if target_task_id not in endpoints:
+                continue
+            verified_handoff_tasks.update(endpoints - {target_task_id})
 
     for ref in sorted(refs):
         if not ref:

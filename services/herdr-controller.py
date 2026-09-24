@@ -4703,8 +4703,18 @@ def dispatch_collaboration_event(event_id, tasks_by_id, prompt_sender=None, db_p
     allowed_evidence_refs = set()
     for context_ref in context_refs:
         context_row = _sdb.get_working_context(context_ref, db_path=db_path)
-        if context_row is not None:
-            allowed_evidence_refs.update(context_row.get("source_refs") or [])
+        if context_row is None:
+            continue
+        for field_name in (
+            "completed", "artifacts", "evidence", "findings", "decisions", "blockers",
+            "open_questions", "verification", "handoffs",
+        ):
+            for item in context_row.get(field_name) or []:
+                if field_name == "evidence" and item.get("source_ref"):
+                    allowed_evidence_refs.add(str(item["source_ref"]))
+                allowed_evidence_refs.update(
+                    str(ref) for ref in item.get("evidence_refs") or [] if ref
+                )
     if context_refs:
         from herdr.context_models import _canonical_evidence_ref
         filtered_evidence_refs = []
