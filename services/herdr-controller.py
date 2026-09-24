@@ -4376,6 +4376,9 @@ def _dispatch_supervisor_retry(task, decision, store):
         "attempt_count": intervention.get("attempt"),
         "verification_pending": False,
     }
+    working_context_ref = _working_context_ref_for_task(task, store=store)
+    if working_context_ref:
+        payload["working_context_id"] = working_context_ref
     store.record_event(
         "retry_dispatch_intent", payload,
         workflow_id=task.get("workflow_id"),
@@ -4391,6 +4394,8 @@ def _dispatch_supervisor_retry(task, decision, store):
         f"HERDR_RETRY_INTERVENTION_ID:{intervention_id}\n"
         f"HERDR_RETRY_DECISION_ID:{decision_id}\n"
         "HERDR_RETRY_ACTION:RETRY\n"
+        + (f"WORKING_CONTEXT_REF:{working_context_ref}\n" if working_context_ref else "")
+        + "Load the immutable context by reference before retrying.\n"
     )
     result = subprocess.run(
         ["herdr", "agent", "prompt", str(pane_id), prompt],
@@ -4616,20 +4621,34 @@ def _reconcile_collaboration_ack(event_id, target, db_path):
     return None
 
 
-def _working_context_ref_valid(event, db_path=None):
-    """Validate only V1 WorkingContext refs; preserve legacy ref compatibility."""
+def _working_context_ref_valid(event, target_task, db_path=None):
+    """Validate V1 refs strictly; only an absent ref is legacy-compatible."""
     from herdr import state_db as _sdb
+    from herdr.context_compiler import infer_agent_role
 
-    for ref in event.get("context_refs") or []:
+    refs = list(event.get("context_refs") or [])
+    if not refs:
+        return True
+    try:
+        expected_role = infer_agent_role(target_task)
+    except ValueError:
+        return False
+    for ref in refs:
         value = str(ref or "")
         if not value.startswith("wc_"):
-            continue
+            return False
         context = _sdb.get_working_context(value, db_path=db_path)
         if context is None:
             return False
         if str(context.get("task_id") or "") != str(event.get("to_task_id") or ""):
             return False
+        if str(context.get("workflow_id") or "") != str(event.get("workflow_id") or ""):
+            return False
         if str(context.get("run_scope") or "") != str(event.get("run_id") or ""):
+            return False
+        if str(context.get("run_id") or "") != str(target_task.get("run_id") or ""):
+            return False
+        if str(context.get("agent_role") or "") != expected_role:
             return False
     return True
 
@@ -4663,7 +4682,7 @@ def dispatch_collaboration_event(event_id, tasks_by_id, prompt_sender=None, db_p
     pane_id = _collab_task_pane(target)
     if not pane_id:
         return _sdb.mark_collaboration_failed(event_id, db_path=db_path)
-    if not _working_context_ref_valid(event, db_path=db_path):
+    if not _working_context_ref_valid(event, target, db_path=db_path):
         return _sdb.mark_collaboration_failed(event_id, db_path=db_path)
 
     if _collab_prior_intent(event_id, event["to_task_id"], db_path) is not None:
@@ -4781,11 +4800,13 @@ def maybe_dispatch_node_handoffs(*, workflow_id, ready_id, dep_ids, launched,
                                 "reason": "no_deterministic_route"})
                 continue
             route = _collab.route_deterministic_handoff(trigger=trigger)
+            target_scope = _collab.collab_scope_for_task(target)
             upstream = [t for t in tasks.values()
                         if isinstance(t, dict)
                         and t.get("workflow_id") == workflow_id
                         and (t.get("node") == dep_hit or t.get("stage") == dep_hit)
-                        and t.get("status") in _NODE_DONE_STATUSES]
+                        and t.get("status") in _NODE_DONE_STATUSES
+                        and (not target_scope or _collab.collab_scope_for_task(t) == target_scope)]
             if not upstream:
                 results.append({"task_id": to_id, "skipped": True,
                                 "reason": "no_completed_upstream"})

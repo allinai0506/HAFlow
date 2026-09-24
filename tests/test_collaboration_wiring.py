@@ -125,6 +125,37 @@ def test_wiring_handoff_carries_target_working_context_ref(tmp_path):
     assert "WORKING_CONTEXT_REF:" in sender.calls[0][1]
 
 
+def test_wiring_selects_upstream_in_target_execution_scope(tmp_path):
+    ctrl = _load_controller()
+    db = tmp_path / "state.db"
+    state_db.save_workflow(
+        {
+            "workflow_id": "wf-1", "title": "fixture", "status": "running",
+            "config": {"nodes": [
+                {"id": "implementation", "depends_on": []},
+                {"id": "test", "depends_on": ["implementation"]},
+            ]},
+        },
+        db_path=db,
+    )
+    target = dict(_wf_tasks()["wf-1-test-auto"], run_id="run-target", workflow_run_id="scope-a", agent_role="tester")
+    upstream_a = dict(_wf_tasks()["wf-1-impl"], run_id="run-a", workflow_run_id="scope-a", updated_at=100.0, agent_role="developer")
+    upstream_b = dict(upstream_a, task_id="wf-1-impl-b", run_id="run-b", workflow_run_id="scope-b", updated_at=200.0)
+    for task in (target, upstream_a, upstream_b):
+        state_db.save_task(task, db_path=db)
+    sender = FakeSender()
+    out = ctrl.maybe_dispatch_node_handoffs(
+        workflow_id="wf-1", ready_id="test", dep_ids=["implementation"],
+        launched=[target["task_id"]], tasks_by_id={
+            target["task_id"]: target, upstream_a["task_id"]: upstream_a, upstream_b["task_id"]: upstream_b,
+        },
+        prompt_sender=sender, db_path=db,
+    )
+    assert out[0].get("dispatched") is True
+    row = state_db.list_collaboration_events(run_id="scope-a", db_path=db)[0]
+    assert row["from_task_id"] == upstream_a["task_id"]
+
+
 def test_wiring_skips_unknown_route_keeps_coordinator(tmp_path):
     ctrl = _load_controller()
     db = tmp_path / "state.db"

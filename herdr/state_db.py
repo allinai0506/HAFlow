@@ -210,9 +210,25 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
             agent_role TEXT NOT NULL,
             context_fingerprint TEXT NOT NULL,
             source_version TEXT,
+            source_watermark INTEGER NOT NULL DEFAULT 0,
             payload_json TEXT NOT NULL,
             metrics_json TEXT NOT NULL DEFAULT '{}',
             compiled_at REAL NOT NULL
+        );
+    """);
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS working_context_metric_events (
+            metric_id TEXT PRIMARY KEY,
+            context_id TEXT NOT NULL,
+            run_scope TEXT NOT NULL,
+            run_id TEXT,
+            workflow_id TEXT,
+            task_id TEXT NOT NULL,
+            agent_role TEXT NOT NULL,
+            reused INTEGER NOT NULL DEFAULT 0,
+            changed INTEGER NOT NULL DEFAULT 0,
+            created_at REAL NOT NULL
         );
     """);
 
@@ -319,6 +335,7 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_cp_parent ON checkpoints(parent_checkpoint_id);")
     _ensure_event_columns(conn)
     _ensure_intervention_columns(conn)
+    _ensure_working_context_columns(conn)
 
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_wf ON events(workflow_id, timestamp);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_node ON events(node_id, timestamp);")
@@ -351,6 +368,9 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_context_packs_task_created ON context_packs(task_id, created_at DESC);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_working_contexts_task_role ON working_contexts(task_id, agent_role, compiled_at DESC);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_working_contexts_task_created ON working_contexts(task_id, compiled_at DESC);")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_working_contexts_scope_version ON working_contexts(run_scope, source_watermark DESC, compiled_at DESC);")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_working_context_metrics_scope ON working_context_metric_events(run_scope, created_at DESC);")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_working_context_metrics_run ON working_context_metric_events(run_id, created_at DESC);")
     # Deduplication is fingerprint-based, not sequence-only: a Finding or task
     # state can change without a new Trajectory sequence.
     conn.execute("DROP INDEX IF EXISTS ux_context_packs_run_sequence;")
@@ -592,6 +612,16 @@ def _ensure_intervention_columns(conn: sqlite3.Connection) -> None:
             if name not in columns:
                 raise
         columns.add(name)
+
+
+def _ensure_working_context_columns(conn: sqlite3.Connection) -> None:
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(working_contexts);")}
+    if "source_watermark" not in columns:
+        try:
+            conn.execute("ALTER TABLE working_contexts ADD COLUMN source_watermark INTEGER NOT NULL DEFAULT 0;")
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc).lower():
+                raise
 
 
 def _ensure_eval_replay_columns(conn: sqlite3.Connection) -> None:
@@ -2117,13 +2147,19 @@ def aggregate_run_metric_rows(run_id: str, db_path: Optional[Path] = None) -> Di
             """,
             (run_id,),
         ).fetchone()
-        working_contexts = conn.execute(
+        working_context_metrics = conn.execute(
             """
-            SELECT COUNT(*) AS working_context_compiles,
-                   SUM(CASE WHEN json_extract(metrics_json, '$.context_reuse') = 1 THEN 1 ELSE 0 END)
-                       AS working_context_reused,
-                   SUM(CASE WHEN json_extract(metrics_json, '$.context_changed') = 1 THEN 1 ELSE 0 END)
-                       AS working_context_changed
+            SELECT COUNT(*) AS metric_count,
+                   COALESCE(SUM(reused), 0) AS reused_count,
+                   COALESCE(SUM(changed), 0) AS changed_count
+              FROM working_context_metric_events
+             WHERE run_id = ? OR run_scope = ?
+            """,
+            (run_id, run_id),
+        ).fetchone()
+        working_context_snapshots = conn.execute(
+            """
+            SELECT COUNT(*) AS snapshot_count
               FROM working_contexts
              WHERE run_id = ? OR run_scope = ?
             """,
@@ -2133,11 +2169,17 @@ def aggregate_run_metric_rows(run_id: str, db_path: Optional[Path] = None) -> Di
             """
             SELECT * FROM working_contexts
              WHERE run_id = ? OR run_scope = ?
-             ORDER BY compiled_at DESC, rowid DESC
+             ORDER BY source_watermark DESC, compiled_at DESC, rowid DESC
              LIMIT 1
             """,
             (run_id, run_id),
         ).fetchone()
+        working_context_compile_count = max(
+            int(working_context_metrics["metric_count"] or 0),
+            int(working_context_snapshots["snapshot_count"] or 0),
+        )
+        working_context_reuse_count = int(working_context_metrics["reused_count"] or 0)
+        working_context_change_count = int(working_context_metrics["changed_count"] or 0)
         return {
             "trajectory_events": int(event_row["trajectory_events"] or 0),
             "started_at": event_row["started_at"],
@@ -2156,9 +2198,9 @@ def aggregate_run_metric_rows(run_id: str, db_path: Optional[Path] = None) -> Di
             "observation_bytes": int(observations["observation_bytes"] or 0),
             "findings_created": int(findings["findings_created"] or 0),
             "context_packs_created": int(context_packs["context_packs_created"] or 0),
-            "working_context_compiles": int(working_contexts["working_context_compiles"] or 0),
-            "working_context_reused": int(working_contexts["working_context_reused"] or 0),
-            "working_context_changed": int(working_contexts["working_context_changed"] or 0),
+            "working_context_compiles": working_context_compile_count,
+            "working_context_reused": working_context_reuse_count,
+            "working_context_changed": working_context_change_count,
             "latest_working_context": dict(latest_working_context) if latest_working_context else None,
             "latest_context": dict(latest_context) if latest_context else None,
         }
@@ -2267,6 +2309,10 @@ def upsert_trajectory_finding(
     finding_type = finding.get("finding_type")
     if not finding_key or not finding_id or not run_id or not finding_type:
         raise ValueError("finding_id, finding_key, run_id and finding_type are required")
+    metadata = dict(finding.get("metadata") or {})
+    for relation_key in ("supersedes", "superseded_by"):
+        if finding.get(relation_key) is not None and relation_key not in metadata:
+            metadata[relation_key] = finding[relation_key]
 
     conn = get_db_connection(db_path)
     try:
@@ -2314,7 +2360,7 @@ def upsert_trajectory_finding(
                 finding.get("recommended_action"),
                 float(finding.get("confidence") or 0.0),
                 json.dumps(finding.get("evidence") or [], ensure_ascii=False),
-                json.dumps(finding.get("metadata") or {}, ensure_ascii=False),
+                json.dumps(metadata, ensure_ascii=False),
                 float(finding["created_at"]) if finding.get("created_at") is not None else time.time(),
             ),
         )
@@ -2974,6 +3020,7 @@ def _decode_working_context_row(row: sqlite3.Row) -> Dict[str, Any]:
         "agent_role": row["agent_role"],
         "context_fingerprint": row["context_fingerprint"],
         "source_version": row["source_version"],
+        "source_watermark": int(row["source_watermark"] or 0),
         "metrics": metrics,
         "compiled_at": row["compiled_at"],
     })
@@ -2987,6 +3034,14 @@ def save_working_context(
     required = ("context_id", "run_scope", "task_id", "agent_role", "context_fingerprint")
     if any(not context.get(key) for key in required):
         raise ValueError("context_id, run_scope, task_id, agent_role and context_fingerprint are required")
+    try:
+        from .observation import _redact_value
+        context = _redact_value(dict(context))
+    except ImportError:
+        context = dict(context)
+    if context.get("agent_role") not in {"developer", "reviewer", "tester", "coordinator"}:
+        raise ValueError("working context agent_role is invalid")
+    prefixes = ("task:", "workflow:", "trajectory:", "finding:", "observation:", "collaboration:", "eval:", "policy:", "evidence:", "artifact:")
     for field_name in (
         "completed", "artifacts", "evidence", "findings", "decisions", "blockers",
         "open_questions", "verification", "handoffs",
@@ -2994,9 +3049,22 @@ def save_working_context(
         for item in context.get(field_name) or []:
             if not isinstance(item, dict) or not item.get("source_ref"):
                 raise ValueError(f"working context item in {field_name} requires source_ref")
+            if not str(item["source_ref"]).startswith(prefixes):
+                raise ValueError(f"working context item in {field_name} has invalid source_ref")
+    for ref in context.get("source_refs") or []:
+        if not str(ref).startswith(prefixes):
+            raise ValueError("working context source_refs contains an invalid reference")
+    for ref in (context.get("goal_source_ref"), context.get("next_action_source_ref")):
+        if ref and not str(ref).startswith(prefixes):
+            raise ValueError("working context scalar source_ref is invalid")
+    for ref in (context.get("current_state_refs") or {}).values():
+        if not str(ref).startswith(prefixes):
+            raise ValueError("working context current_state_refs contains an invalid reference")
     payload_json = json.dumps(
         context, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
     )
+    if len(json.dumps(context, ensure_ascii=False)) > 20000:
+        raise ValueError("working context exceeds the storage size limit")
     metrics_json = json.dumps(
         context.get("metrics") or {}, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
     )
@@ -3008,13 +3076,24 @@ def save_working_context(
             (str(context["context_id"]),),
         ).fetchone()
         if existing_id is not None:
+            if (
+                str(existing_id["run_scope"]) != str(context["run_scope"])
+                or str(existing_id["task_id"]) != str(context["task_id"])
+                or str(existing_id["agent_role"]) != str(context["agent_role"])
+                or str(existing_id["workflow_id"] or "") != str(context.get("workflow_id") or "")
+            ):
+                raise ValueError("context_id is already used by another WorkingContext scope")
             conn.commit()
             return _decode_working_context_row(existing_id)
         latest = conn.execute(
             """SELECT * FROM working_contexts
                WHERE task_id = ? AND agent_role = ?
-               ORDER BY compiled_at DESC, rowid DESC LIMIT 1""",
-            (str(context["task_id"]), str(context["agent_role"])),
+                 AND run_scope = ? AND workflow_id IS ?
+               ORDER BY source_watermark DESC, compiled_at DESC, rowid DESC LIMIT 1""",
+            (
+                str(context["task_id"]), str(context["agent_role"]),
+                str(context["run_scope"]), context.get("workflow_id"),
+            ),
         ).fetchone()
         if latest is not None and latest["context_fingerprint"] == context["context_fingerprint"]:
             conn.commit()
@@ -3023,21 +3102,26 @@ def save_working_context(
         # newer snapshot as latest.  It remains unreadable only by this write
         # path; the caller's source version is never silently relabeled.
         candidate_time = float(context.get("compiled_at") or time.time())
-        if latest is not None and float(latest["compiled_at"] or 0.0) > candidate_time:
+        candidate_watermark = int(context.get("source_watermark") or 0)
+        latest_watermark = int(latest["source_watermark"] or 0) if latest is not None else 0
+        if latest is not None and (
+            latest_watermark > candidate_watermark
+            or (latest_watermark == candidate_watermark and float(latest["compiled_at"] or 0.0) > candidate_time)
+        ):
             conn.commit()
             return _decode_working_context_row(latest)
         conn.execute(
             """INSERT INTO working_contexts (
                 context_id, run_scope, run_id, workflow_id, task_id, node_id,
-                agent_role, context_fingerprint, source_version, payload_json,
-                metrics_json, compiled_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                agent_role, context_fingerprint, source_version, source_watermark,
+                payload_json, metrics_json, compiled_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 context["context_id"], context["run_scope"], context.get("run_id"),
                 context.get("workflow_id"), context["task_id"], context.get("node_id"),
                 context["agent_role"], context["context_fingerprint"],
-                context.get("source_version"), payload_json, metrics_json,
-                candidate_time,
+                context.get("source_version"), int(context.get("source_watermark") or 0),
+                payload_json, metrics_json, candidate_time,
             ),
         )
         row = conn.execute(
@@ -3054,6 +3138,42 @@ def save_working_context(
         except Exception:
             pass
         raise
+    finally:
+        conn.close()
+
+
+def record_working_context_metric(
+    context: Dict[str, Any],
+    *,
+    reused: bool,
+    db_path: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Record one compile invocation separately from immutable snapshots."""
+    conn = get_db_connection(db_path)
+    try:
+        metric = {
+            "metric_id": f"wcm_{uuid.uuid4().hex}",
+            "context_id": str(context.get("context_id") or ""),
+            "run_scope": str(context.get("run_scope") or ""),
+            "run_id": context.get("run_id"),
+            "workflow_id": context.get("workflow_id"),
+            "task_id": str(context.get("task_id") or ""),
+            "agent_role": str(context.get("agent_role") or ""),
+            "reused": 1 if reused else 0,
+            "changed": 0 if reused else 1,
+            "created_at": float(context.get("compiled_at") or time.time()),
+        }
+        if not metric["context_id"] or not metric["run_scope"] or not metric["task_id"]:
+            raise ValueError("context metric identity is incomplete")
+        conn.execute(
+            """INSERT INTO working_context_metric_events (
+                metric_id, context_id, run_scope, run_id, workflow_id, task_id,
+                agent_role, reused, changed, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            tuple(metric.values()),
+        )
+        conn.commit()
+        return metric
     finally:
         conn.close()
 
@@ -3083,7 +3203,7 @@ def get_latest_working_context(
         if agent_role is not None:
             query += " AND agent_role = ?"
             params.append(str(agent_role))
-        query += " ORDER BY compiled_at DESC, rowid DESC LIMIT 1"
+        query += " ORDER BY source_watermark DESC, compiled_at DESC, rowid DESC LIMIT 1"
         row = conn.execute(query, params).fetchone()
         return _decode_working_context_row(row) if row is not None else None
     finally:

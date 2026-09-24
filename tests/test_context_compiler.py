@@ -210,6 +210,55 @@ def test_state_aware_contexts_are_distinct(tmp_path: Path):
     assert "review_scope" in reviewer.current_state
     assert any("fnd-upstream" in ref for ref in reviewer.source_refs)
 
+    state_db.upsert_trajectory_finding(
+        _finding(
+            target["run_id"], "fnd-target-implementation",
+            task_id=target["task_id"], node="implementation", severity="critical",
+        ),
+        db_path=db,
+    )
+    developer_with_target = compile_working_context(
+        workflow_id=target["workflow_id"], task_id=target["task_id"],
+        agent_role="developer", store=ObservationStore(db),
+    )
+    reviewer_with_target = compile_working_context(
+        workflow_id=target["workflow_id"], task_id=target["task_id"],
+        agent_role="reviewer", store=ObservationStore(db),
+    )
+    assert any("fnd-target-implementation" in ref for ref in developer_with_target.source_refs)
+    assert all("fnd-target-implementation" not in item.get("source_ref", "") for item in reviewer_with_target.findings)
+
+
+def test_global_item_budget_updates_reported_metrics(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-item-budget"))
+    upstream = _seed_task(db, _task("task-upstream"))
+    for index in range(8):
+        state_db.upsert_trajectory_finding(
+            _finding(upstream["run_id"], f"fnd-item-{index}", task_id=upstream["task_id"]),
+            db_path=db,
+        )
+    context = _compile(db, target, "developer", config={"max_items": 1})
+    assert context.metrics["selected_items"] <= 1
+    assert sum(len(value) for value in (
+        context.completed, context.artifacts, context.evidence, context.findings,
+        context.decisions, context.blockers, context.open_questions,
+        context.verification, context.handoffs,
+    )) <= 1
+
+
+def test_budget_keeps_blocker_before_completed_history(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    upstream = _seed_task(db, _task("task-history", node="implementation", status="completed"))
+    target = _seed_task(db, dict(_task("task-blocker-priority", node="review", status="blocked"), blocker="critical blocker"))
+    context = _compile(db, target, "developer", config={"max_items": 1})
+    assert context.blockers
+    assert context.completed == []
+    assert any(item.get("value") == "critical blocker" for item in context.blockers)
+    assert all(item.get("source_task") != upstream["task_id"] for item in context.completed)
+
 
 def test_total_character_budget_is_hard_for_large_goal_and_refs(tmp_path: Path):
     db = tmp_path / "state.db"
@@ -222,9 +271,19 @@ def test_total_character_budget_is_hard_for_large_goal_and_refs(tmp_path: Path):
         _finding(upstream["run_id"], "fnd-large", task_id=upstream["task_id"], summary="s" * 5000),
         db_path=db,
     )
-    context = _compile(db, target, "reviewer", config={"max_chars": 1200})
-    assert context.metrics["context_chars"] <= 1200
-    assert len(json.dumps(context.to_mapping(), ensure_ascii=False)) <= 1200
+    context = _compile(db, target, "reviewer", config={"max_chars": 2000})
+    assert context.metrics["context_chars"] <= 2000
+    assert len(json.dumps(context.to_mapping(), ensure_ascii=False)) <= 2000
+    assert context.goal
+    assert context.current_state.get("task_status") == "working"
+
+
+def test_impossible_context_budget_fails_closed_instead_of_dropping_goal(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-impossible-budget"))
+    with pytest.raises(ValueError, match="max_chars"):
+        _compile(db, target, "developer", config={"max_chars": 500})
 
 
 def test_state_aware_context_changes_after_node_transition(tmp_path: Path):
@@ -271,6 +330,24 @@ def test_superseded_finding_is_excluded_but_history_remains(tmp_path: Path):
     assert state_db.get_trajectory_finding_by_id("fnd-new", db_path=db) is not None
 
 
+def test_invalid_or_cyclic_supersession_is_excluded(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-invalid-supersession"))
+    upstream = _seed_task(db, _task("task-upstream"))
+    missing = _finding(upstream["run_id"], "fnd-missing-relation", task_id=upstream["task_id"], summary="missing")
+    missing["metadata"] = {"supersedes": "does-not-exist"}
+    cycle_a = _finding(upstream["run_id"], "fnd-cycle-a", task_id=upstream["task_id"], summary="cycle a")
+    cycle_b = _finding(upstream["run_id"], "fnd-cycle-b", task_id=upstream["task_id"], summary="cycle b")
+    cycle_a["metadata"] = {"supersedes": "fnd-cycle-b"}
+    cycle_b["metadata"] = {"supersedes": "fnd-cycle-a"}
+    for finding in (missing, cycle_a, cycle_b):
+        state_db.upsert_trajectory_finding(finding, db_path=db)
+
+    context = _compile(db, target, "reviewer")
+    assert not any(any(token in ref for token in ("missing-relation", "cycle-a", "cycle-b")) for ref in context.source_refs)
+
+
 def test_top_level_finding_supersession_is_normalized(tmp_path: Path):
     db = tmp_path / "state.db"
     _seed_workflow(db)
@@ -287,6 +364,16 @@ def test_top_level_finding_supersession_is_normalized(tmp_path: Path):
     context = _compile(db, target, "developer")
     assert not any("fnd-top-old" in ref for ref in context.source_refs)
     assert any("fnd-top-new" in ref for ref in context.source_refs)
+
+
+def test_context_metadata_is_redacted_before_persistence(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-secret-metadata"))
+    target["node"] = "password=metadata-secret"
+    _seed_task(db, target)
+    context = _compile(db, target, "developer")
+    assert "metadata-secret" not in json.dumps(context.to_mapping(), ensure_ascii=False)
 
 
 def test_finding_preserves_evidence_ref_without_reading_content(tmp_path: Path):
@@ -456,6 +543,26 @@ def test_context_contains_no_raw_history_or_transcript(tmp_path: Path):
     assert "chat_history" not in serialized
 
 
+def test_recovered_failure_event_is_not_current_blocker(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-recovered-failure", status="completed"))
+    ledger = TrajectoryLedger(db)
+    failed = ledger.append_event({
+        "run_id": target["run_id"], "task_id": target["task_id"],
+        "workflow_id": target["workflow_id"], "event_type": "task_failed",
+        "metadata": {"reason": "old failure"},
+    })
+    ledger.append_event({
+        "run_id": target["run_id"], "task_id": target["task_id"],
+        "workflow_id": target["workflow_id"], "event_type": "task_completed",
+    })
+    context = _compile(db, target, "developer")
+    assert failed["event_id"] not in json.dumps(context.to_mapping(), ensure_ascii=False)
+    assert "old failure" not in json.dumps(context.to_mapping(), ensure_ascii=False)
+    assert not context.blockers
+
+
 def test_compile_does_not_write_source_fact_tables(tmp_path: Path):
     db = tmp_path / "state.db"
     _seed_workflow(db)
@@ -494,10 +601,66 @@ def test_snapshot_is_immutable_and_recompiles_after_source_change(tmp_path: Path
     assert any(item.get("value") == "new blocker" for item in second.blockers)
 
 
+def test_storage_fingerprint_does_not_cross_run_scope(tmp_path: Path):
+    db = tmp_path / "state.db"
+
+    def payload(context_id: str, scope: str, fingerprint: str, created_at: float):
+        return {
+            "context_id": context_id,
+            "run_scope": scope,
+            "run_id": f"run-{scope}",
+            "workflow_id": "wf",
+            "task_id": "task-reused",
+            "node_id": "review",
+            "agent_role": "reviewer",
+            "goal": "goal",
+            "current_state": {},
+            "findings": [],
+            "artifacts": [],
+            "evidence": [],
+            "completed": [],
+            "decisions": [],
+            "blockers": [],
+            "open_questions": [],
+            "verification": [],
+            "handoffs": [],
+            "next_action": "review",
+            "source_refs": [],
+            "context_fingerprint": fingerprint,
+            "source_version": fingerprint,
+            "compiled_at": created_at,
+            "metrics": {},
+        }
+
+    first = state_db.save_working_context(payload("wc-scope-a", "scope-a", "same", 1.0), db_path=db)
+    second = state_db.save_working_context(payload("wc-scope-b", "scope-b", "same", 2.0), db_path=db)
+    assert first["context_id"] == "wc-scope-a"
+    assert second["context_id"] == "wc-scope-b"
+    assert len(state_db.list_working_contexts("task-reused", db_path=db)) == 2
+
+
+def test_missing_finding_evidence_is_not_emitted_as_a_valid_reference(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-missing-evidence"))
+    upstream = _seed_task(db, _task("task-upstream"))
+    state_db.upsert_trajectory_finding(
+        _finding(
+            upstream["run_id"], "fnd-missing-evidence",
+            task_id=upstream["task_id"],
+            evidence=[{"observation_id": "obs_missing"}],
+        ),
+        db_path=db,
+    )
+    context = _compile(db, target, "reviewer")
+    assert not any("obs_missing" in ref for ref in context.source_refs)
+    assert not any("obs_missing" in ref for item in context.findings for ref in item.get("evidence_refs", []))
+
+
 def test_concurrent_context_writers_do_not_replace_newer_latest(tmp_path: Path):
     db = tmp_path / "state.db"
 
-    def payload(context_id: str, fingerprint: str, created_at: float):
+    def payload(context_id: str, fingerprint: str, created_at: float, source_watermark: int = 0):
         return {
             "context_id": context_id,
             "run_scope": "scope",
@@ -521,6 +684,7 @@ def test_concurrent_context_writers_do_not_replace_newer_latest(tmp_path: Path):
             "source_refs": [],
             "context_fingerprint": fingerprint,
             "source_version": fingerprint,
+            "source_watermark": source_watermark,
             "compiled_at": created_at,
             "metrics": {},
         }
@@ -540,6 +704,38 @@ def test_concurrent_context_writers_do_not_replace_newer_latest(tmp_path: Path):
     assert old.exitcode == 0
     latest = state_db.get_latest_working_context("task-concurrent", db_path=db)
     assert latest["context_id"] == "wc-new"
+
+
+def test_storage_rejects_old_source_watermark_after_newer_snapshot(tmp_path: Path):
+    db = tmp_path / "state.db"
+    state_db.save_working_context(
+        {
+            "context_id": "wc-v2", "run_scope": "scope", "run_id": "run",
+            "workflow_id": "wf", "task_id": "task-version", "node_id": "review",
+            "agent_role": "reviewer", "goal": "goal", "current_state": {},
+            "findings": [], "artifacts": [], "evidence": [], "completed": [],
+            "decisions": [], "blockers": [], "open_questions": [], "verification": [],
+            "handoffs": [], "next_action": "review", "source_refs": [],
+            "context_fingerprint": "v2", "source_version": "v2", "source_watermark": 20,
+            "compiled_at": 20.0, "metrics": {},
+        },
+        db_path=db,
+    )
+    returned = state_db.save_working_context(
+        {
+            "context_id": "wc-v1-late", "run_scope": "scope", "run_id": "run",
+            "workflow_id": "wf", "task_id": "task-version", "node_id": "review",
+            "agent_role": "reviewer", "goal": "goal", "current_state": {},
+            "findings": [], "artifacts": [], "evidence": [], "completed": [],
+            "decisions": [], "blockers": [], "open_questions": [], "verification": [],
+            "handoffs": [], "next_action": "review", "source_refs": [],
+            "context_fingerprint": "v1", "source_version": "v1", "source_watermark": 10,
+            "compiled_at": 30.0, "metrics": {},
+        },
+        db_path=db,
+    )
+    assert returned["context_id"] == "wc-v2"
+    assert state_db.get_latest_working_context("task-version", db_path=db)["context_id"] == "wc-v2"
 
 
 def test_storage_rejects_items_without_provenance(tmp_path: Path):
@@ -572,6 +768,21 @@ def test_state_store_exposes_working_context_readers(tmp_path: Path):
     assert [item.context_id for item in list_working_contexts(target["task_id"], db_path=db)] == [context.context_id]
 
 
+def test_run_metrics_count_reused_compile_invocations(tmp_path: Path):
+    from herdr.metrics import get_run_metrics
+
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-run-metrics"))
+    first = _compile(db, target, "developer")
+    second = _compile(db, target, "developer")
+    metrics = get_run_metrics(target["run_id"], db_path=db)
+    assert metrics.working_context_compiles >= 2
+    assert metrics.working_context_reused >= 1
+    assert metrics.working_context_changed >= 1
+    assert first.context_id == second.context_id
+
+
 def test_metrics_report_reuse_and_changed_without_quality_score(tmp_path: Path):
     db = tmp_path / "state.db"
     _seed_workflow(db)
@@ -596,19 +807,24 @@ def test_eval_verification_is_available_as_bounded_evidence(tmp_path: Path):
     target = _seed_task(db, _task("task-eval", node="test", role="tester"))
     state_db.get_db_connection(db).close()
     from herdr.eval_store import record_eval_result
+    observation = create_observation(
+        run_id=target["run_id"], task_id=target["task_id"],
+        source_type="verification", source_ref="verification:eval-test",
+        content="verified", store=ObservationStore(db),
+    )
 
     record_eval_result(
         target["run_id"],
         task_id=target["task_id"],
         workflow_id=target["workflow_id"],
         verification_passed=True,
-        evidence={"observation_id": "obs-eval"},
+        evidence={"observation_id": observation.observation_id},
         db_path=db,
     )
     context = _compile(db, target, "tester")
     assert context.verification
     assert any("eval:" in ref for ref in context.source_refs)
-    assert any("obs-eval" in ref for item in context.verification for ref in item.get("evidence_refs", []))
+    assert any(observation.observation_id in ref for item in context.verification for ref in item.get("evidence_refs", []))
 
 
 def test_diff_reports_added_removed_superseded_and_changed(tmp_path: Path):
@@ -738,6 +954,24 @@ def test_launch_boundary_compiles_context_reference(tmp_path: Path, monkeypatch)
     assert ref and get_working_context(ref, db_path=db).task_id == target["task_id"]
 
 
+def test_handoff_prompt_preserves_context_ref_at_size_limit():
+    from herdr.collaboration import build_handoff_prompt, create_handoff
+
+    event = create_handoff(
+        run_id="wf-exec-1", workflow_id="wf-context",
+        from_task_id="task-upstream", to_task_id="task-target",
+        summary="s" * 500,
+        artifact_refs=["a" * 200 for _ in range(10)],
+        evidence_refs=["e" * 200 for _ in range(10)],
+        context_refs=["wc_important"],
+        source_fact_id="fact-size",
+    )
+    prompt = build_handoff_prompt(event, next_action="n" * 500)
+    assert len(prompt) <= 2000
+    assert "WORKING_CONTEXT_REF: wc_important" in prompt
+    assert "HANDOFF_ID:" in prompt
+
+
 def test_handoff_prompt_contains_only_bounded_context_reference(tmp_path: Path):
     from herdr.collaboration import build_handoff_prompt, create_handoff
 
@@ -754,6 +988,109 @@ def test_handoff_prompt_contains_only_bounded_context_reference(tmp_path: Path):
     assert "WORKING_CONTEXT_REF: wc_123" in prompt
     assert "WorkingContext" not in prompt
     assert "goal" not in prompt.lower()
+
+
+def test_supervisor_retry_prompt_carries_working_context_ref(monkeypatch):
+    import importlib.machinery
+    import importlib.util
+
+    controller_path = Path(__file__).resolve().parent.parent / "services" / "herdr-controller.py"
+    spec = importlib.util.spec_from_loader(
+        "context_compiler_retry_test",
+        importlib.machinery.SourceFileLoader("context_compiler_retry_test", str(controller_path)),
+    )
+    controller = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(controller)
+    events = []
+    prompts = []
+
+    class Store:
+        def record_event(self, *args, **kwargs):
+            events.append((args, kwargs))
+
+    def fake_run(command, *args, **kwargs):
+        prompts.append(command)
+        return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    monkeypatch.setattr(controller, "_latest_action_dispatch_intent", lambda *args, **kwargs: None)
+    monkeypatch.setattr(controller, "_working_context_ref_for_task", lambda *args, **kwargs: "wc_retry")
+    monkeypatch.setattr(controller.subprocess, "run", fake_run)
+    result = controller._dispatch_supervisor_retry(
+        {"task_id": "task-retry", "workflow_id": "wf", "run_id": "run", "pane_id": "pane", "node": "implementation"},
+        {"intervention": {"intervention_id": "int", "decision_id": "dec"}},
+        Store(),
+    )
+    assert result["retry_dispatched"] is True
+    assert events
+    assert any("WORKING_CONTEXT_REF:wc_retry" in str(item) for item in prompts)
+
+
+def test_dispatch_rejects_unknown_nonempty_context_ref(tmp_path: Path):
+    import importlib.machinery
+    import importlib.util
+
+    controller_path = Path(__file__).resolve().parent.parent / "services" / "herdr-controller.py"
+    spec = importlib.util.spec_from_loader(
+        "context_compiler_invalid_ref_test",
+        importlib.machinery.SourceFileLoader("context_compiler_invalid_ref_test", str(controller_path)),
+    )
+    controller = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(controller)
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-invalid-ref", node="review", role="reviewer"))
+    target["pane_id"] = "pane-invalid-ref"
+    state_db.save_task(target, db_path=db)
+    event = state_db.create_collaboration_event(
+        {
+            "run_id": "wf-exec-1", "workflow_id": "wf-context",
+            "from_task_id": "task-upstream", "to_task_id": target["task_id"],
+            "context_refs": ["not-a-working-context"],
+            "source_fact_id": "fact-invalid-ref",
+        },
+        db_path=db,
+    )
+    calls = []
+    result = controller.dispatch_collaboration_event(
+        event["event_id"], {target["task_id"]: target},
+        lambda pane, prompt: calls.append((pane, prompt)), db_path=db,
+    )
+    assert result["status"] == "failed"
+    assert calls == []
+
+
+def test_dispatch_rejects_context_role_workflow_mismatch(tmp_path: Path):
+    import importlib.machinery
+    import importlib.util
+
+    controller_path = Path(__file__).resolve().parent.parent / "services" / "herdr-controller.py"
+    spec = importlib.util.spec_from_loader(
+        "context_compiler_ref_identity_test",
+        importlib.machinery.SourceFileLoader("context_compiler_ref_identity_test", str(controller_path)),
+    )
+    controller = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(controller)
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-ref-role", node="review", role="reviewer"))
+    target["pane_id"] = "pane-ref-role"
+    state_db.save_task(target, db_path=db)
+    context = _compile(db, target, "developer")
+    event = state_db.create_collaboration_event(
+        {
+            "run_id": "wf-exec-1", "workflow_id": "wf-context",
+            "from_task_id": "task-upstream", "to_task_id": target["task_id"],
+            "context_refs": [context.context_id], "source_fact_id": "fact-ref-role",
+        },
+        db_path=db,
+    )
+    calls = []
+    result = controller.dispatch_collaboration_event(
+        event["event_id"], {target["task_id"]: target},
+        lambda pane, prompt: calls.append((pane, prompt)), db_path=db,
+    )
+    assert result["status"] == "failed"
+    assert calls == []
 
 
 def test_dispatch_rejects_context_ref_for_wrong_target(tmp_path: Path):

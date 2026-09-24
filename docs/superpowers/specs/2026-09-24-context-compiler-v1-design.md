@@ -160,7 +160,7 @@ Task launch / retry / handoff / review request / verification request
 V1 支持两种确定性关系：
 
 1. 同一 `finding_key` 的更新：沿用现有 Finding 身份，数据库只保留当前版本；历史分析由原存储契约负责。
-2. 显式关系：Finding `metadata.supersedes` 或 `metadata.superseded_by` 指向同一 scope 内的 Finding ID。编译器构建 supersession 图，选择没有有效后继且未被标记 `superseded_by` 的最新 Finding。
+2. 显式关系：Finding `metadata.supersedes` / `metadata.superseded_by`（写入时也接受顶层同名字段并归一化到 metadata）指向同一 scope 内的 Finding ID。编译器构建 supersession 图，选择没有有效后继且未被标记 `superseded_by` 的最新 Finding。
 
 若引用不存在、跨 scope 或形成环，来源被标记无效并不进入当前上下文。历史 Finding 不删除。
 

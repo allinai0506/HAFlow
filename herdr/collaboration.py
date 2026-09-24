@@ -108,11 +108,16 @@ def build_handoff_prompt(
             context_id = working_context.get("context_id")
         if context_id:
             context_refs.insert(0, str(context_id))
-    context_refs = list(dict.fromkeys(str(ref) for ref in context_refs if ref))[:REFS_MAX]
+    context_refs = list(dict.fromkeys(str(ref) for ref in context_refs if ref))[:3]
     context_refs = [_clip(ref, REF_ITEM_MAX) for ref in context_refs]
-    # Tail carries the correlation id: clip the body first so truncation
-    # can never amputate HANDOFF_ID.
+    # Tail carries correlation and the context reference: reserve them before
+    # clipping the body so a large summary/ref list cannot remove context_id.
+    context_tail = "\n".join(
+        f"WORKING_CONTEXT_REF: {ref}" for ref in context_refs
+    )
     tail = f"HANDOFF_ID: {event.get('event_id') or ''}"
+    if context_tail:
+        tail += "\n" + context_tail
     body = "\n".join([
         f"HANDOFF FROM: {event.get('from_agent') or ''}",
         f"TASK: {event.get('from_task_id') or ''}",
@@ -125,9 +130,6 @@ def build_handoff_prompt(
         "",
         "EVIDENCE:",
         *["- " + str(e) for e in evidence],
-        "",
-        "WORKING CONTEXT:",
-        *["- WORKING_CONTEXT_REF: " + str(ref) for ref in context_refs],
         "",
         "NEXT ACTION:",
         str(action or ""),
