@@ -37,6 +37,21 @@ def build_console_url(workflow_id=None, task_id=None):
         return f"{CONSOLE_BASE_URL}/?{'&'.join(params)}"
     return f"{CONSOLE_BASE_URL}/"
 
+def notify_human_upgrade(task_id, workflow_id, body, url=None):
+    """Dedicated human-escalation channel (T4).
+
+    Separate from scan() state-change dedup (:129): callers dedup by
+    blocked_episode_id, so a long-blocked task escalates exactly once per
+    episode. Body carries copy-paste commands only, never auto-executes.
+    """
+    notify(
+        "Herdr Factory · 阻塞升级（需人工）",
+        f"{workflow_id} · {task_id}",
+        str(body),
+        url=url,
+    )
+
+
 def notify(title, subtitle, message, url=None):
     global _HINT_SHOWN
     tn = shutil.which("terminal-notifier")

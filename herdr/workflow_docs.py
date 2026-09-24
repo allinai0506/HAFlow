@@ -34,6 +34,7 @@ NOTE_KINDS = (
     "decision",
     "evidence",
     "gate",
+    "delivery",
     "invalidation",
     "note",
     "wrapup",
@@ -44,7 +45,7 @@ SOURCE_CONTROLLER = "controller"
 SOURCE_HUMAN = "human"
 SOURCES = (SOURCE_AGENT, SOURCE_CONTROLLER, SOURCE_HUMAN)
 
-EVIDENCE_KINDS = frozenset({"evidence", "gate"})
+EVIDENCE_KINDS = frozenset({"evidence", "gate", "delivery"})
 CONTEXT_KINDS = frozenset(
     {"requirement", "spec", "plan", "decision", "invalidation", "wrapup"}
 )

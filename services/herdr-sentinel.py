@@ -118,12 +118,14 @@ def _get_store():
     return get_state_store()
 
 
-def update_statuses(changes):
+def update_statuses(changes, expected=None, epochs=None):
     if not changes:
         return False
 
     store = _get_store()
     changed = False
+    expected = expected or {}
+    epochs = epochs or {}
 
     for task_id, (new_status, reason) in changes.items():
         authoritative = store.get_task(task_id)
@@ -134,6 +136,50 @@ def update_statuses(changes):
         old_status = authoritative.get("status")
         if old_status not in ACTIVE:
             continue
+
+        # CAS: observation-epoch guard (B-1b). Same status value after a
+        # human re-open still bumps updated_at, so the stale marker epoch
+        # fails closed instead of re-accepting an old marker.
+        exp_status = expected.get(task_id)
+        if exp_status is not None and old_status != exp_status:
+            _record_sentinel_event(
+                store,
+                authoritative,
+                "completion_sentinel_cas_rejected",
+                {"expected": exp_status, "authoritative": old_status, "reason": reason},
+            )
+            print(
+                f"[SENTINEL CAS REJECTED] task {task_id}: "
+                f"expected {exp_status} but authoritative is {old_status}",
+                flush=True,
+            )
+            continue
+        epoch_pair = epochs.get(task_id)
+        if epoch_pair is not None:
+            epoch_updated, observed_updated = epoch_pair
+            try:
+                current_updated = float(authoritative.get("updated_at") or 0)
+            except (TypeError, ValueError):
+                current_updated = 0.0
+            try:
+                obs_updated = float(observed_updated or 0)
+            except (TypeError, ValueError):
+                obs_updated = 0.0
+            if obs_updated and current_updated != obs_updated:
+                _record_sentinel_event(
+                    store,
+                    authoritative,
+                    "completion_sentinel_cas_rejected",
+                    {"epoch_updated": epoch_updated, "observed_updated": obs_updated,
+                     "current_updated": current_updated, "reason": reason},
+                )
+                print(
+                    f"[SENTINEL CAS REJECTED] task {task_id}: "
+                    f"task rewritten after observation "
+                    f"(observed updated_at={obs_updated}, now {current_updated})",
+                    flush=True,
+                )
+                continue
 
         try:
             from herdr import kernel
@@ -162,6 +208,23 @@ def update_statuses(changes):
             )
 
     return changed
+
+
+def _record_sentinel_event(store, task, event_type, payload):
+    """Best-effort observation event (never blocks the sweep)."""
+    try:
+        task = task or {}
+        store.record_event(
+            event_type,
+            dict(payload or {}),
+            workflow_id=task.get("workflow_id"),
+            node_id=task.get("node") or task.get("stage"),
+            task_id=task.get("task_id"),
+            agent_id=task.get("agent"),
+            source="herdr-sentinel",
+        )
+    except (OSError, ValueError, RuntimeError, AttributeError) as exc:
+        print(f"[SENTINEL EVENT WARN] {event_type}: {exc}", file=sys.stderr, flush=True)
 
 
 def restart_controller():
@@ -344,12 +407,127 @@ def main():
             blocker_marker = f"HERDR_TASK_BLOCKER:{task_id}"
             orchestration_marker = f"HERDR_ORCH_TASK:{task_id}"
 
-            if status in {"dispatched", "working"} and done_marker in screen:
-                changes[task_id] = (
-                    "agent_done",
-                    "completion_sentinel",
+            # FR-1 triple condition (herdr/completion.py, pure).
+            # Sentinel owns pane-marker detection; Controller owns final
+            # arbitration of blocked upgrades (A1). Completion writes stay
+            # here but are gated by absent->present + idle + 60s + epoch CAS.
+            if status in {"dispatched", "working"}:
+                from herdr import completion as _comp
+
+                marker_present = done_marker in screen
+                comp_state = state.setdefault("completion", {}).setdefault(
+                    task_id, {}
                 )
-                continue
+                current_updated = task.get("updated_at") or 0
+                if "was_present" not in comp_state:
+                    # First sight: a marker already on screen is pane-reuse
+                    # residue, never a fresh completion signal.
+                    comp_state["was_present"] = bool(marker_present)
+                    comp_state["first_seen_at"] = None
+                    comp_state["epoch_updated_at"] = (
+                        current_updated if marker_present else None
+                    )
+                    comp_state["early_count"] = 0
+                was_present = bool(comp_state.get("was_present"))
+                if marker_present and not was_present:
+                    comp_state["was_present"] = True
+                    comp_state["first_seen_at"] = now
+                    comp_state["epoch_updated_at"] = current_updated
+                    comp_state["early_count"] = 0
+                elif not marker_present and was_present:
+                    comp_state["was_present"] = False
+                    comp_state["first_seen_at"] = None
+                    comp_state["epoch_updated_at"] = None
+                    comp_state["early_count"] = 0
+                    _record_sentinel_event(
+                        store,
+                        task,
+                        "completion_uncertain",
+                        {"reason": "marker_vanished", "task_id": task_id},
+                    )
+                    print(
+                        f"[SENTINEL UNCERTAIN] task={task_id} marker vanished; "
+                        "attention registered, no deadlock",
+                        flush=True,
+                    )
+                    continue
+                if marker_present:
+                    epoch_updated = comp_state.get("epoch_updated_at")
+                    try:
+                        cur_upd = float(current_updated or 0)
+                        epoch_upd = float(epoch_updated) if epoch_updated is not None else None
+                    except (TypeError, ValueError):
+                        cur_upd = 0.0
+                        epoch_upd = None
+                    if epoch_upd is not None and cur_upd != epoch_upd:
+                        # B-1b: human re-opened the task after the marker
+                        # epoch; the old marker is stale evidence.
+                        comp_state["first_seen_at"] = None
+                        comp_state["epoch_updated_at"] = cur_upd
+                        comp_state["was_present"] = True
+                        print(
+                            f"[SENTINEL STALE] task={task_id} marker epoch moved "
+                            f"(human re-open); old marker ignored",
+                            flush=True,
+                        )
+                        continue
+                    agent_state = agent_status(pane_id)
+                    signal = _comp.classify_signal(marker_present, agent_state)
+                    if signal == "unknown":
+                        _record_sentinel_event(
+                            store,
+                            task,
+                            "agent_status_unknown",
+                            {"task_id": task_id, "reason": "agent_status_unreadable"},
+                        )
+                        continue
+                    if signal == "early":
+                        early_n = int(comp_state.get("early_count") or 0) + 1
+                        comp_state["early_count"] = early_n
+                        _record_sentinel_event(
+                            store,
+                            task,
+                            "early_done_signal",
+                            {"task_id": task_id, "count": early_n, "agent_status": agent_state},
+                        )
+                        if early_n == 3:
+                            print(
+                                f"[SENTINEL EARLY] task={task_id} marker present "
+                                "while agent busy x3; coordinator hinted, no flip",
+                                flush=True,
+                            )
+                        continue
+                    # Idle path: enforce the 60s delay floor.
+                    try:
+                        started = float(
+                            task.get("started_at")
+                            or task.get("created_at")
+                            or state["seen"][task_id]
+                        )
+                    except (TypeError, ValueError):
+                        started = now
+                    elapsed = now - started
+                    first_seen = comp_state.get("first_seen_at")
+                    if first_seen is None:
+                        # Present since first sight (residue): require a fresh
+                        # absent->present cycle before any accept.
+                        continue
+                    if _comp.should_accept(
+                        marker_present=True,
+                        agent_status=agent_state,
+                        elapsed_seconds=elapsed,
+                        is_new_or_tracked=True,
+                        stale_epoch=False,
+                    ):
+                        changes[task_id] = ("agent_done", "completion_sentinel")
+                        # Attach CAS context for update_statuses.
+                        state.setdefault("completion_expected", {})[task_id] = status
+                        state.setdefault("completion_epochs", {})[task_id] = (
+                            comp_state.get("epoch_updated_at"),
+                            current_updated,
+                        )
+                        state.setdefault("completion_elapsed", {})[task_id] = elapsed
+                    continue
 
             # Inner loop exhausted: agent self-reported a blocker escalation.
             # Transition to 'blocked' so the Coordinator can route to human/Coordinator.
@@ -401,7 +579,45 @@ def main():
 
         fuse_changed = check_dispatch_fuse(tasks, state)
 
-        if update_statuses(changes) or fuse_changed:
+        expected = state.get("completion_expected") or {}
+        epochs = state.get("completion_epochs") or {}
+        elapsed_map = state.get("completion_elapsed") or {}
+        # Only completion_sentinel writes carry CAS context; other reasons
+        # (blocker/crash/fuse) keep the legacy authoritative re-check.
+        cas_expected = {
+            tid: expected.get(tid)
+            for tid, (_st, reason) in changes.items()
+            if reason == "completion_sentinel" and tid in expected
+        }
+        cas_epochs = {
+            tid: epochs.get(tid)
+            for tid, (_st, reason) in changes.items()
+            if reason == "completion_sentinel" and tid in epochs
+        }
+        wrote = update_statuses(changes, expected=cas_expected, epochs=cas_epochs)
+        if wrote:
+            for tid, (_st, reason) in changes.items():
+                if reason != "completion_sentinel":
+                    continue
+                elapsed = elapsed_map.get(tid)
+                task_row = store.get_task(tid)
+                if task_row is not None:
+                    _record_sentinel_event(
+                        store,
+                        task_row,
+                        "completion_sentinel_accepted",
+                        {"task_id": tid, "elapsed_seconds": elapsed,
+                         "reason": "triple_condition_met"},
+                    )
+                comp_bucket = state.get("completion", {}).get(tid)
+                if isinstance(comp_bucket, dict):
+                    comp_bucket["was_present"] = False
+                    comp_bucket["first_seen_at"] = None
+                    comp_bucket["epoch_updated_at"] = None
+                    comp_bucket["early_count"] = 0
+            for key in ("completion_expected", "completion_epochs", "completion_elapsed"):
+                state.pop(key, None)
+        if wrote or fuse_changed:
             check_task_stalls(tasks, state)
             save_json_atomic(STATE_FILE, state)
             print("[SENTINEL] State updated, controller will auto-sync via registry watcher", flush=True)

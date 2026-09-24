@@ -167,6 +167,165 @@ def notify_attention(title, task, message, reason):
         print(f"[ATTENTION NOTIFY ERROR] {exc}")
 
 
+def _blocked_sla_key(task_id):
+    return f"{task_id}:blocked_sla"
+
+
+def _notify_blocked_human_upgrade(task, episode_id, active_seconds):
+    """Human escalation channel (T4, bypasses notifier state-change dedup).
+
+    Uses the dedicated ``notify_human_upgrade`` channel with copy-paste
+    commands only (B-4: never auto-executes supersede/rework). Dedicated
+    episode dedup lives in the blocked-SLA episode (human_escalations<=1),
+    never in ``services/herdr-notifier.py:129``.
+    """
+    try:
+        import importlib
+
+        notifier = importlib.import_module("services.herdr-notifier")
+        task_id = task.get("task_id", "unknown")
+        workflow_id = task.get("workflow_id", "unknown")
+        url = notifier.build_console_url(workflow_id=workflow_id, task_id=task_id)
+        body = (
+            f"Task {task_id} blocked {int(active_seconds)}s "
+            f"(episode {episode_id}); coordinator notices exhausted.\n"
+            f"Copy-paste (human confirms in foreground):\n"
+            f"  herdr-task set {task_id} rework  # after guidance via herdr agent prompt\n"
+            f"  herdr-task supersede {task_id} --reason ...  # discards branch commits\n"
+            f"  herdr-task close-workflow {workflow_id} --accept-escalated  # if escalated"
+        )
+        notify_fn = getattr(notifier, "notify_human_upgrade", None)
+        if callable(notify_fn):
+            notify_fn(task_id, workflow_id, body, url=url)
+        else:
+            notifier.notify(
+                "Herdr Factory · 阻塞升级（需人工）",
+                f"{workflow_id} · {task_id}",
+                body,
+                url=url,
+            )
+    except (OSError, ValueError, RuntimeError, AttributeError) as exc:
+        print(f"[BLOCKED SLA NOTIFY ERROR] {exc}")
+
+
+def _blocked_sla_step(task, now, poll_seconds=3.0):
+    """One active-clock sweep for a blocked task (pure policy + episode I/O).
+
+    Returns the decision dict from herdr.blocked_sla plus persistence.
+    Never transitions task status (blocked semantics preserved).
+    """
+    from herdr import blocked_sla as _sla
+
+    task_id = task.get("task_id", "")
+    key = _blocked_sla_key(task_id)
+    episode = attention_get(key) or {}
+    try:
+        entry_updated = float(task.get("updated_at") or 0)
+    except (TypeError, ValueError):
+        entry_updated = 0.0
+    stored_entry = episode.get("entry_updated_at")
+    try:
+        stored_entry_f = float(stored_entry) if stored_entry is not None else None
+    except (TypeError, ValueError):
+        stored_entry_f = None
+    if not episode or stored_entry_f != entry_updated:
+        episode = {
+            "task_id": task_id,
+            "workflow_id": task.get("workflow_id"),
+            "entry_updated_at": entry_updated,
+            "active_seconds": 0.0,
+            "last_tick_at": now,
+            "coordinator_notices": 0,
+            "human_escalations": 0,
+            "last_action_at": None,
+        }
+        _attention_store.upsert(key, episode)
+        return _sla.decide_blocked_action(task=task, episode=episode, now=now)
+    try:
+        last_tick = float(episode.get("last_tick_at") or now)
+    except (TypeError, ValueError):
+        last_tick = now
+    tick_dt = now - last_tick
+    if tick_dt < 0:
+        tick_dt = 0.0
+    increment = _sla.active_tick_increment(tick_dt, poll_seconds=poll_seconds)
+    try:
+        active = float(episode.get("active_seconds") or 0) + increment
+    except (TypeError, ValueError):
+        active = increment
+    episode["active_seconds"] = active
+    episode["last_tick_at"] = now
+    _attention_store.upsert(key, episode)
+    return _sla.decide_blocked_action(task=task, episode=episode, now=now)
+
+
+def _blocked_sla_record_action(task, decision, now):
+    """Persist notice/escalate counts and emit canonical events."""
+    task_id = task.get("task_id", "")
+    key = _blocked_sla_key(task_id)
+    episode = attention_get(key) or {}
+    action = decision.get("action")
+    episode_id = decision.get("episode_id", "")
+    store = _get_store()
+    if action == "notice":
+        try:
+            coord_n = int(episode.get("coordinator_notices") or 0)
+        except (TypeError, ValueError):
+            coord_n = 0
+        episode["coordinator_notices"] = coord_n + 1
+        episode["last_action_at"] = now
+        _attention_store.upsert(key, episode)
+        try:
+            store.record_event(
+                "blocked_coordinator_notice",
+                {"episode_id": episode_id, "count": coord_n + 1,
+                 "active_seconds": episode.get("active_seconds")},
+                workflow_id=task.get("workflow_id"),
+                node_id=task.get("node") or task.get("stage"),
+                task_id=task_id,
+                source="herdr-controller",
+            )
+        except (OSError, ValueError, RuntimeError, AttributeError) as exc:
+            print(f"[BLOCKED SLA EVENT WARN] {exc}")
+    elif action == "escalate":
+        try:
+            human_n = int(episode.get("human_escalations") or 0)
+        except (TypeError, ValueError):
+            human_n = 0
+        episode["human_escalations"] = human_n + 1
+        episode["last_action_at"] = now
+        _attention_store.upsert(key, episode)
+        try:
+            active = float(episode.get("active_seconds") or 0)
+        except (TypeError, ValueError):
+            active = 0.0
+        _notify_blocked_human_upgrade(task, episode_id, active)
+        try:
+            store.record_event(
+                "blocked_human_escalated",
+                {"episode_id": episode_id, "count": human_n + 1,
+                 "active_seconds": active},
+                workflow_id=task.get("workflow_id"),
+                node_id=task.get("node") or task.get("stage"),
+                task_id=task_id,
+                source="herdr-controller",
+            )
+        except (OSError, ValueError, RuntimeError, AttributeError) as exc:
+            print(f"[BLOCKED SLA EVENT WARN] {exc}")
+    elif action == "suppressed_human":
+        try:
+            store.record_event(
+                "auto_action_suppressed_human_present",
+                {"episode_id": episode_id},
+                workflow_id=task.get("workflow_id"),
+                node_id=task.get("node") or task.get("stage"),
+                task_id=task_id,
+                source="herdr-controller",
+            )
+        except (OSError, ValueError, RuntimeError, AttributeError):
+            pass
+
+
 def _get_store():
     if os.environ.get("HERDR_STATE_DB"):
         return get_state_store(Path(os.environ["HERDR_STATE_DB"]))
@@ -6242,37 +6401,44 @@ def registry_watcher():
                 if status == "agent_done":
                     redeliver_done_event(task, now=now)
 
-                # ---- blocked 事件:此前投递失败会被静默吞掉,这里补投递护栏 ----
+                # ---- blocked SLA (T4): active wall-clock + episode dedup ----
+                # Replaces the legacy wall-clock + 600s-throttle path that
+                # produced 48 duplicate coordinator cards over 8h (N-1).
+                # Automatic herdr-agent-prompt re-push is cancelled (N=0);
+                # this path only notices/escalates, never rewrites status.
                 if status == "blocked":
-                    key = f"{task_id}:blocked"
-                    updated = float(task.get("updated_at") or 0)
-                    with lock:
-                        already_queued = key in queued_events
-                    if (
-                        updated
-                        and now - updated >= liveness.attention_grace()
-                        and not already_queued
-                        and not attention_blocks_retry(key, now)
-                    ):
+                    decision = _blocked_sla_step(task, now, poll_seconds=3.0)
+                    action = decision.get("action")
+                    if action == "notice":
+                        with lock:
+                            already_queued = f"{task_id}:blocked" in queued_events
+                        if not already_queued:
+                            print(
+                                f"[REGISTRY WATCHER] "
+                                f"task={task_id} "
+                                f"status=blocked -> notify coordinator "
+                                f"({decision.get('episode_id')})"
+                            )
+                            enqueue_coordinator_event(
+                                task, blocked_event_type(task)
+                            )
+                        _blocked_sla_record_action(task, decision, now)
+                    elif action == "escalate":
                         print(
                             f"[REGISTRY WATCHER] "
                             f"task={task_id} "
-                            f"status=blocked -> notify coordinator"
+                            f"status=blocked -> human escalation "
+                            f"({decision.get('episode_id')})"
                         )
-                        enqueue_coordinator_event(
-                            task, blocked_event_type(task)
-                        )
-                        if not attention_get(key):
-                            attention_note(
-                                key,
-                                task,
-                                "blocked",
-                                reason="blocked_unhandled",
-                                attempts=1,
-                            )
-                        attention_throttle(key, now=now)
+                        _blocked_sla_record_action(task, decision, now)
+                    elif action in ("suppressed_human", "suppressed_jitter",
+                                    "suppressed_cooldown", "suppressed_bounds",
+                                    "none"):
+                        if action == "suppressed_human":
+                            _blocked_sla_record_action(task, decision, now)
                 else:
                     attention_clear(f"{task_id}:blocked")
+                    attention_clear(_blocked_sla_key(task_id))
 
                 # ---- interrupted / paused 死区:超时未裁决即升级给总指挥 ----
                 if status in ("interrupted", "paused"):

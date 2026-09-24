@@ -256,6 +256,43 @@ def _candidate_order(pool, stage, task_type, node_policy=None):
             ordered.append(agent)
     return ordered
 
+
+def _isolation_opt_out(node_policy=None):
+    """Return (opt_out_enabled, reason) for FR-6.1 isolation bypass (R9).
+
+    Enabled only when allow_reuse_implementation_agents (or legacy
+    opt_out_isolation) is truthy AND a non-empty reuse reason is present.
+    No approval workflow; the reason + event留痕 is the audit trail.
+    """
+    policy = node_policy or {}
+    enabled = bool(
+        policy.get("allow_reuse_implementation_agents")
+        or policy.get("opt_out_isolation")
+    )
+    reason = str(
+        policy.get("reuse_reason")
+        or policy.get("opt_out_reason")
+        or policy.get("reason")
+        or ""
+    ).strip()
+    return enabled, reason
+
+
+def _record_router_opt_out(workflow_id, stage, selected, reason, excluded):
+    """Best-effort opt-out audit event (never blocks routing)."""
+    try:
+        store = _get_store()
+        store.record_event(
+            "router_opt_out_used",
+            {"stage": stage, "selected": selected or "",
+             "reason": reason, "excluded": sorted(set(excluded or []))},
+            workflow_id=workflow_id,
+            node_id=stage,
+            source="agent-router",
+        )
+    except (OSError, ValueError, RuntimeError, AttributeError):
+        pass
+
 def choose_agent(
     workflow_id,
     stage,
@@ -271,9 +308,15 @@ def choose_agent(
                 f"Workflow not found in authoritative StateStore: {workflow_id}"
             )
     else:
-        record = {}
-        project_id = None
-        return requested if requested and requested != "auto" else "opencode"
+        # FR-6.3: no workflow context must never silently return the
+        # implementation default. Explicit requests still pass through;
+        # auto without context fails closed.
+        if requested and requested != "auto":
+            return requested
+        raise RuntimeError(
+            "Agent selection requires explicit --agent when workflow_id is absent; "
+            "refusing to default to 'opencode' (FR-6.3 fail-closed)"
+        )
 
     node_policy = {}
     if workflow_id:
@@ -290,6 +333,10 @@ def choose_agent(
     )
     if isinstance(exclude_stages, str):
         exclude_stages = [exclude_stages]
+    # FR-6.1 default: test/review automatically exclude implementation
+    # agents even without explicit node_policy (fail-closed by default).
+    if not exclude_stages and stage in ("test", "review"):
+        exclude_stages = ["implementation"]
 
     stage_used_agents = set()
     if workflow_id and exclude_stages:
@@ -322,13 +369,19 @@ def choose_agent(
 
     if selected:
         if selected in stage_used_agents:
-            other_available = [
-                a for a in allowed
-                if a not in disabled and (not healthy or a in healthy) and a not in stage_used_agents
-            ]
-            if other_available:
+            _opt_out, _opt_reason = _isolation_opt_out(node_policy)
+            if _opt_out and _opt_reason:
+                _record_router_opt_out(
+                    workflow_id, stage, selected, _opt_reason, stage_used_agents
+                )
+            else:
                 raise RuntimeError(
-                    f"Agent '{selected}' is prohibited for stage '{stage}' because it was used in stage(s): {', '.join(exclude_stages)}"
+                    f"Agent '{selected}' is prohibited for stage '{stage}' "
+                    f"because it was used in stage(s): {', '.join(exclude_stages)} "
+                    f"(excluded agents: {sorted(stage_used_agents)}). "
+                    "Provide explicit opt-out with reason "
+                    "(agent_policy.allow_reuse_implementation_agents=true + "
+                    "reuse_reason) to bypass."
                 )
         if selected not in allowed:
             raise RuntimeError(
@@ -390,8 +443,30 @@ def choose_agent(
         ]
 
         if stage_used_agents:
-            filtered = [a for a in candidates if a not in stage_used_agents]
-            if filtered:
+            _opt_out, _opt_reason = _isolation_opt_out(node_policy)
+            if _opt_out:
+                if not _opt_reason:
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+                    raise RuntimeError(
+                        f"Isolation opt-out for stage '{stage}' requires "
+                        "a non-empty reuse_reason (R9 fail-closed)"
+                    )
+                _record_router_opt_out(
+                    workflow_id, stage, None, _opt_reason, stage_used_agents
+                )
+            else:
+                filtered = [a for a in candidates if a not in stage_used_agents]
+                if not filtered:
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+                    raise RuntimeError(
+                        f"No available Agent for stage '{stage}': all candidates "
+                        f"{candidates} were used in stage(s) "
+                        f"{', '.join(exclude_stages)} "
+                        f"(excluded: {sorted(stage_used_agents)}). "
+                        "Isolation is fail-closed; provide explicit opt-out "
+                        "(agent_policy.allow_reuse_implementation_agents=true + "
+                        "reuse_reason) to bypass."
+                    )
                 candidates = filtered
 
         if not candidates:

@@ -1774,13 +1774,102 @@ def _launch_task(args):
 
     requested_agent = args.agent if args.agent else "auto"
 
-    resolved_agent = choose_agent(
-        args.workflow_id,
-        node_id,
-        args.task_type,
-        requested_agent,
-        reservation_key=args.task_id,
-    )
+    # FR-6.1 opt-out via launch flags (R9: reason required, no approval).
+    # Injected into the workflow node_policy for this routing decision only.
+    _opt_out_active = bool(getattr(args, "allow_reuse", False))
+    _opt_reason = str(getattr(args, "reuse_reason", "") or "").strip()
+    if _opt_out_active and not _opt_reason:
+        print(
+            "Isolation opt-out requires --reuse-reason "
+            "(R9: reason field mandatory, no approval needed)"
+        )
+        sys.exit(2)
+    if _opt_out_active:
+        _orig_wcf = workflow_config_for
+
+        def _patched_wcf(wid, _orig=_orig_wcf, _node=node_id,
+                         _reason=_opt_reason):
+            cfg = _orig(wid)
+            if not cfg or wid != args.workflow_id:
+                return cfg
+            try:
+                import copy as _copy
+
+                cfg = _copy.deepcopy(cfg)
+                for _n in cfg.get("nodes", []):
+                    if _n.get("id") == _node:
+                        _pol = dict(_n.get("agent_policy") or {})
+                        _pol["allow_reuse_implementation_agents"] = True
+                        _pol["reuse_reason"] = _reason
+                        _n["agent_policy"] = _pol
+            except (TypeError, AttributeError, ValueError):
+                pass
+            return cfg
+
+        import herdr.agent_router as _router
+
+        _orig_router_wcf = _router.workflow_config_for
+        _router.workflow_config_for = _patched_wcf
+        try:
+            from herdr import projects as _projects
+
+            _orig_proj_wcf = _projects.workflow_config_for
+            _projects.workflow_config_for = _patched_wcf
+            try:
+                resolved_agent = choose_agent(
+                    args.workflow_id,
+                    node_id,
+                    args.task_type,
+                    requested_agent,
+                    reservation_key=args.task_id,
+                )
+            finally:
+                _projects.workflow_config_for = _orig_proj_wcf
+        finally:
+            _router.workflow_config_for = _orig_router_wcf
+        try:
+            _get_store().record_event(
+                "router_opt_out_used",
+                {"reason": _opt_reason, "stage": node_id,
+                 "selected": resolved_agent},
+                workflow_id=args.workflow_id,
+                node_id=node_id,
+                task_id=args.task_id,
+                source="herdr-task",
+            )
+        except (OSError, ValueError, RuntimeError, AttributeError):
+            pass
+    else:
+        try:
+            resolved_agent = choose_agent(
+                args.workflow_id,
+                node_id,
+                args.task_type,
+                requested_agent,
+                reservation_key=args.task_id,
+            )
+        except RuntimeError as exc:
+            # A7: real launch-chain fail-closed. No pane dispatched, no task
+            # registered; the workflow stays pending with a visible,
+            # actionable rejection (not a silent retry/deadlock).
+            try:
+                _get_store().record_event(
+                    "router_isolation_rejected",
+                    {"error": str(exc)[:500], "stage": node_id},
+                    workflow_id=args.workflow_id,
+                    node_id=node_id,
+                    task_id=args.task_id,
+                    source="herdr-task",
+                )
+            except (OSError, ValueError, RuntimeError, AttributeError):
+                pass
+            print(f"[ROUTER REJECTED] {exc}")
+            print(
+                "Isolation is fail-closed. Re-launch with explicit "
+                "--allow-reuse-implementation-agents --reuse-reason '<why>' "
+                "to opt out (event留痕)."
+            )
+            sys.exit(2)
 
     prebuilt_pane = acquire_pane_for_task(
         args.workflow_id,
@@ -1791,6 +1880,8 @@ def _launch_task(args):
     # integration_mode=git 时，
     # 源仓库 tracked 文件必须 clean。
     # untracked 文件允许存在，因为 CoW Clone 需要保留完整上下文。
+    # FR-3.2: launch-time precheck is warning-only; the blocking gate stays
+    # at integrate (TOCTOU-safe: precheck pass never promises later clean).
     if args.integration_mode == "git":
         source = os.path.realpath(
             os.path.expanduser(args.source)
@@ -1809,12 +1900,24 @@ def _launch_task(args):
         ).strip()
 
         if tracked_status:
-            print(
-                "Source repository has tracked changes; "
-                "refusing git-integrated Task:"
-            )
+            try:
+                from herdr import repo_hygiene as _pre_hygiene
+
+                _warn = _pre_hygiene.launch_precheck_message(
+                    porcelain=tracked_status,
+                    task_id=args.task_id,
+                    integration_mode=args.integration_mode,
+                )
+            except (ImportError, AttributeError, ValueError):
+                _warn = None
+            if _warn:
+                print(_warn)
+            else:
+                print(
+                    "[PRECHECK WARNING] source has tracked changes; "
+                    "launch continues, integrate will gate with exit 5."
+                )
             print(tracked_status)
-            sys.exit(3)
 
     # 1. 创建 Clone + Pane + Agent
     worker_script = HERDR_ROOT / "services" / "herdr-worker.py"
@@ -1906,6 +2009,62 @@ def _launch_task(args):
     baseline_commit = worker_result.get("baseline_commit")
     recorded_onto = worker_result.get("onto_branch", onto_branch)
     pane_id = worker_result["pane_id"]
+    # FR-6.2: test/review must be based on a recorded candidate when a
+    # delivery identity exists. Fail-closed: mismatch or unprovable
+    # baseline rejects the launch (exit 2, actionable). No delivery yet
+    # -> router isolation (FR-6.1) is the guard; no silent pass is claimed.
+    if node_id in ("test", "review"):
+        try:
+            from herdr import delivery_record as _dr2
+            from herdr import workflow_docs as _wd2
+
+            _notes = _wd2.load_notes(args.workflow_id)
+            _effective = _dr2.select_effective_delivery(
+                _wd2.annotate_notes(_notes, current_base_sha=baseline_commit)
+            )
+            if _effective is not None:
+                _body = _effective.get("body") or ""
+                _cand = ""
+                for _line in _body.splitlines():
+                    if _line.startswith("candidate_sha:"):
+                        _cand = _line.split(":", 1)[1].strip()
+                        break
+                if not _cand:
+                    _cand = str(_effective.get("base_sha") or "")
+                _ok = bool(_cand and baseline_commit and _cand == baseline_commit)
+                if not _ok and _cand and baseline_commit:
+                    try:
+                        _probe = subprocess.run(
+                            ["git", "-C", source_repo, "merge-base",
+                             "--is-ancestor", _cand, baseline_commit],
+                            text=True, capture_output=True, check=False,
+                        )
+                        _ok = _probe.returncode == 0
+                    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+                        _ok = False
+                if not _ok:
+                    try:
+                        _get_store().record_event(
+                            "test_baseline_rejected",
+                            {"candidate_sha": _cand, "baseline_commit": baseline_commit or "",
+                             "stage": node_id},
+                            workflow_id=args.workflow_id,
+                            node_id=node_id,
+                            task_id=args.task_id,
+                            source="herdr-task",
+                        )
+                    except (OSError, ValueError, RuntimeError, AttributeError):
+                        pass
+                    print(
+                        f"[BASELINE REJECTED] test/review task {args.task_id} "
+                        f"baseline {baseline_commit} does not contain candidate {_cand}; "
+                        "launch refused (FR-6.2 fail-closed)."
+                    )
+                    sys.exit(2)
+        except SystemExit:
+            raise
+        except (ImportError, AttributeError, ValueError):
+            pass
     pane_source = worker_result.get(
         "pane_source",
         "dynamic"
@@ -2097,6 +2256,29 @@ def dispatch_task(task_id, prompt):
         + "the prefix HERDR_TASK_DONE: followed immediately by this task id. "
         + "Do not quote it and do not output it before the task is complete.\n"
     )
+
+    # T3b prompt hygiene (FR-1.3): strip literal task-id markers from every
+    # upstream source at the single delivery choke point. The orchestration
+    # protocol above intentionally carries no task-id marker.
+    try:
+        from herdr import completion as _completion
+
+        prompt, _sanitized_n = _completion.sanitize_prompt(prompt, task_id)
+        if _sanitized_n:
+            try:
+                _get_store().record_event(
+                    "prompt_marker_sanitized",
+                    {"task_id": task_id, "replaced": _sanitized_n},
+                    workflow_id=task.get("workflow_id"),
+                    node_id=task.get("node") or task.get("stage"),
+                    task_id=task_id,
+                    source="herdr-task",
+                )
+            except (OSError, ValueError, RuntimeError, AttributeError):
+                pass
+            print(f"[PROMPT HYGIENE] task={task_id} sanitized_markers={_sanitized_n}")
+    except (ImportError, AttributeError):
+        pass
 
     pane_id = task["pane_id"]
     marker = "HERDR_ORCH_TASK:" + task_id
@@ -3526,6 +3708,8 @@ def integrate_task(task_id):
 
     # Integration only updates refs. Tracked edits remain protected, while
     # unrelated untracked files no longer participate in the operation.
+    # FR-3.3: --untracked-files=no is load-bearing; clone-infra untracked
+    # entries (e.g. ?? .agent-task-context) never trip this gate.
     tracked_status = subprocess.check_output(
         [
             "git",
@@ -3539,8 +3723,27 @@ def integrate_task(task_id):
     ).strip()
 
     if tracked_status:
+        from herdr import repo_hygiene as _hygiene
+
+        try:
+            _email = subprocess.check_output(
+                ["git", "-C", main_repo, "config", "user.email"],
+                text=True,
+            ).strip()
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+            _email = ""
+        diagnosis = _hygiene.diagnose_main_dirty(
+            porcelain=tracked_status,
+            configured_email=_email,
+            task_branch=None,
+            task_id=task_id,
+        )
         print("Main repository has tracked changes")
         print(tracked_status)
+        print(f"blocked_files={diagnosis['blocked_files']}")
+        print(f"blocked_total={diagnosis['blocked_total']}")
+        print(f"owner={diagnosis['owner']} owner_source={diagnosis['owner_source']}")
+        print(f"remediation_cmd={diagnosis['remediation_cmd']}")
         print(
             "HERDR_INTEGRATE_RESULT="
             + json.dumps(
@@ -3548,6 +3751,11 @@ def integrate_task(task_id):
                     "task_id": task_id,
                     "result": "main_dirty",
                     "tracked_status": tracked_status[:2000],
+                    "blocked_files": diagnosis["blocked_files"],
+                    "blocked_total": diagnosis["blocked_total"],
+                    "owner": diagnosis["owner"],
+                    "owner_source": diagnosis["owner_source"],
+                    "remediation_cmd": diagnosis["remediation_cmd"],
                 },
                 ensure_ascii=False,
             )
@@ -4042,6 +4250,7 @@ def close_workflow(
     abandon=False,
     force=False,
     accept_escalated=False,
+    confirm_force=False,
 ):
     data = load_tasks()
     tasks = [
@@ -4141,12 +4350,33 @@ def close_workflow(
     # H-1: machine-set finalize_escalated no longer implies closable.
     # Escalated git tasks stay unclosable until a human explicitly confirms
     # via --accept-escalated/--force/--abandon or supersedes the task.
+    # Five choices cost model (FR-5.3, shown in help + abort text):
+    # --accept-escalated keeps deliverables, scoped to escalated only;
+    # --force bypasses the whole human-confirmation contract (needs
+    # --confirm-force); --abandon discards the entire workflow deliverable;
+    # supersede permanently discards that branch commits;
+    # clear-escalation revokes the flag and re-drives integrate (may re-conflict).
     escalated_git = [
         t["task_id"] for t in tasks
         if t.get("status") in ("completed", "committed")
         and (t.get("integration_mode") or "none") == "git"
         and t.get("finalize_escalated")
     ]
+    if escalated_git and force and not (accept_escalated or abandon):
+        confirmed = bool(confirm_force) or os.environ.get("HERDR_CONFIRM_FORCE") == "1"
+        if not confirmed:
+            print(
+                "[CLOSE ABORT] --force on escalated workflow requires "
+                "--confirm-force (or HERDR_CONFIRM_FORCE=1); "
+                "escalated tasks: " + ", ".join(escalated_git)
+            )
+            print(
+                "  --accept-escalated only confirms escalated tasks; "
+                "--force bypasses all human-confirmation gates; "
+                "re-run with --force --confirm-force to proceed."
+            )
+            sys.exit(2)
+    escalated_via = "accept-escalated" if accept_escalated else ("force" if force else ("abandon" if abandon else ""))
     if escalated_git and not (accept_escalated or force or abandon):
         print(
             "[CLOSE ABORT] workflow has escalated git tasks "
@@ -4157,11 +4387,17 @@ def close_workflow(
             "it does not imply the deliverable is safe to close."
         )
         print(
-            "  Confirm explicitly: "
+            "  Five choices (costs differ, choose explicitly): "
             f"herdr-task close-workflow {workflow_id} --accept-escalated "
-            "(or --force/--abandon), "
-            "or herdr-task supersede <task_id> --reason ..., "
-            "or herdr-task clear-escalation <task_id> after recovery."
+            "(keeps deliverables, scoped to escalated only) | "
+            f"herdr-task close-workflow {workflow_id} --force --confirm-force "
+            "(bypasses the whole human-confirmation contract) | "
+            f"herdr-task close-workflow {workflow_id} --abandon "
+            "(discards the entire workflow deliverable) | "
+            "herdr-task supersede <task_id> --reason ... "
+            "(permanently discards that branch commits) | "
+            "herdr-task clear-escalation <task_id> after recovery "
+            "(revokes flag, re-drives integrate, may re-conflict)."
         )
         sys.exit(2)
 
@@ -4189,6 +4425,11 @@ def close_workflow(
         "tabs_skipped": {},
         "coordinator_closed": False,
         "include_coordinator": include_coordinator,
+        "escalated_accepted": [
+            {"task_id": tid, "via": escalated_via}
+            for tid in escalated_git
+            if escalated_via
+        ],
     }
 
     for task in tasks:
@@ -4257,6 +4498,10 @@ def close_workflow(
         if row.get("clone_retained_reason"):
             line += f" clone_retained({row['clone_retained_reason']})"
         print(line)
+    if report.get("escalated_accepted"):
+        print("  [ESCALATED ACCEPTED] human-claimed escalated tasks (not ordinary cleaned):")
+        for item in report["escalated_accepted"]:
+            print(f"    {item.get('task_id')} via={item.get('via')}")
     print(f"  tabs_closed={report['tabs_closed'] or '[]'}")
     if report.get("tabs_skipped"):
         for tab_id, reason in report["tabs_skipped"].items():
@@ -4889,6 +5134,105 @@ def _record_gate_note(task, verdict, note):
         print(f"[NOTE EVIDENCE WARN] {exc}")
 
 
+def record_delivery_note(
+    workflow_id, delivery_branch, candidate_sha, review_task, test_gate,
+    base="", node="", agent="",
+):
+    """Thin assembly for FR-4.1 delivery identity (pure validation in herdr)."""
+    from herdr import delivery_record as _dr
+    from herdr import workflow_docs as wd
+
+    payload = {
+        "delivery_branch": delivery_branch,
+        "candidate_sha": candidate_sha,
+        "review_task": review_task,
+        "test_gate": test_gate,
+        "base": base,
+    }
+    ok, missing = _dr.validate_delivery_payload(payload)
+    if not ok:
+        print(f"delivery payload missing fields: {missing}")
+        sys.exit(2)
+    # Idempotency: same (branch, sha, review) never duplicates (A5 crash-safe).
+    for existing in wd.load_notes(workflow_id):
+        if existing.get("kind") != "delivery":
+            continue
+        try:
+            body = existing.get("body") or ""
+            if candidate_sha in body and delivery_branch in body and review_task in body:
+                print(f"[DELIVERY EXISTS] {existing.get('note_id')}")
+                return existing
+        except (TypeError, AttributeError):
+            continue
+    title = _dr.delivery_note_title(delivery_branch, candidate_sha)
+    body_text = _dr.delivery_note_body(payload)
+    record = wd.append_note(
+        workflow_id,
+        kind="delivery",
+        title=title,
+        body=body_text,
+        node=node or "wrapup",
+        task_id=review_task,
+        agent=agent,
+        source=wd.SOURCE_CONTROLLER,
+        base_sha=candidate_sha,
+    )
+    print(f"[DELIVERY RECORDED] {record['note_id']} {delivery_branch}@{candidate_sha}")
+    return record
+
+
+def check_delivery_for_pr(
+    workflow_id, head_sha, head_ref_name="",
+    merged_prs=None, cherry_lines=None,
+    head_tree=None, candidate_tree=None,
+):
+    """Thin PR gate (FR-4.2/4.3/4.4): equivalence + template + same-branch warn."""
+    from herdr import delivery_record as _dr
+    from herdr import workflow_docs as wd
+
+    notes = wd.load_notes(workflow_id)
+    effective = _dr.select_effective_delivery(
+        wd.annotate_notes(notes, current_base_sha=head_sha)
+    )
+    if effective is None:
+        print("[DELIVERY CHECK] no effective delivery note; refusing ambiguous PR")
+        sys.exit(2)
+    body = effective.get("body") or ""
+    candidate_sha = ""
+    for line in body.splitlines():
+        if line.startswith("candidate_sha:"):
+            candidate_sha = line.split(":", 1)[1].strip()
+            break
+    if not candidate_sha:
+        candidate_sha = str(effective.get("base_sha") or "")
+    equivalent, eq_reason = _dr.candidates_equivalent(
+        candidate_sha=candidate_sha,
+        head_sha=head_sha,
+        cherry_lines=cherry_lines,
+        head_tree=head_tree,
+        candidate_tree=candidate_tree,
+    )
+    warn = _dr.same_branch_warning(
+        head_ref_name=head_ref_name,
+        merged_prs=merged_prs,
+        candidate_sha=candidate_sha,
+    )
+    fields = _dr.pr_template_fields(
+        branch=head_ref_name,
+        head_sha=head_sha,
+        base="main",
+        review_ref=effective.get("task_id") or "",
+    )
+    print(_dr.format_pr_body(fields))
+    print(f"equivalent={equivalent} reason={eq_reason}")
+    print(f"same_branch_warn={warn['warn']} detail={warn['detail']}")
+    if not equivalent:
+        print("[DELIVERY CHECK] head not equivalent to candidate; warn (not block)")
+    if warn["warn"]:
+        print(f"[DELIVERY WARN] {warn['detail']}")
+    return {"equivalent": equivalent, "warn": warn, "fields": fields}
+
+
 def main():
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
@@ -4980,6 +5324,20 @@ def main():
         default=None,
         help="Target reproduction test command for fix-loop automated evaluation",
     )
+    launch.add_argument(
+        "--allow-reuse-implementation-agents",
+        dest="allow_reuse",
+        action="store_true",
+        default=False,
+        help="FR-6.1 opt-out: allow test/review to reuse implementation agents "
+             "(requires --reuse-reason; event留痕, no approval; R9)",
+    )
+    launch.add_argument(
+        "--reuse-reason",
+        dest="reuse_reason",
+        default=None,
+        help="Reason for isolation opt-out (required with --allow-reuse-*, R9)",
+    )
 
     dispatch = sub.add_parser("dispatch")
     dispatch.add_argument("task_id")
@@ -5052,21 +5410,38 @@ def main():
     close_wf.add_argument(
         "--abandon",
         action="store_true",
-        help="explicitly abandon a workflow whose gate verdicts are blocked "
-             "(records outcome=abandoned; never triggered automatically)",
+        help="abandon the entire workflow deliverable "
+             "(records outcome=abandoned; discards all deliverables; "
+             "never triggered automatically; differs from --accept-escalated "
+             "which keeps deliverables and --force which bypasses all gates)",
     )
     close_wf.add_argument(
         "--force",
         action="store_true",
-        help="force close workflow bypassing normal status transition checks",
+        help="bypass the whole human-confirmation contract including "
+             "escalated gate (requires --confirm-force or "
+             "HERDR_CONFIRM_FORCE=1 when escalated tasks exist; "
+             "differs from --accept-escalated which is scoped to escalated "
+             "only and keeps deliverables)",
+    )
+    close_wf.add_argument(
+        "--confirm-force",
+        dest="confirm_force",
+        action="store_true",
+        help="second confirmation for --force on escalated workflows "
+             "(R8: without it --force on escalated tasks exits 2)",
     )
     close_wf.add_argument(
         "--accept-escalated",
         dest="accept_escalated",
         action="store_true",
-        help="human confirmation: close despite machine-set "
-             "finalize_escalated tasks (H-1; use after verifying deliverables, "
-             "or supersede/clear-escalation instead)",
+        help="human confirmation scoped to machine-set finalize_escalated "
+             "tasks only (keeps deliverables; use after verifying them; "
+             "differs from --force which bypasses all gates, --abandon "
+             "which discards the whole workflow, supersede which "
+             "permanently discards that branch commits, clear-escalation "
+             "which revokes the flag and re-drives integrate and may "
+             "re-conflict)",
     )
 
     reopen_wf = sub.add_parser("reopen-workflow")
@@ -5110,14 +5485,23 @@ def main():
     list_cmd = sub.add_parser("list")
     list_cmd.add_argument("--workflow-id")
 
-    supersede_cmd = sub.add_parser("supersede")
+    supersede_cmd = sub.add_parser(
+        "supersede",
+        help="permanently discard that task branch commits (superseded tasks "
+             "are excluded from completion; differs from --accept-escalated "
+             "which keeps deliverables and clear-escalation which re-drives)",
+    )
     supersede_cmd.add_argument("task_id")
     supersede_cmd.add_argument("--by", dest="new_task_id", default=None)
     supersede_cmd.add_argument("--reason", default=None)
 
     clear_esc_cmd = sub.add_parser(
         "clear-escalation",
-        help="revoke machine-set finalize_escalated so finalize re-drives (H-1)",
+        help="revoke machine-set finalize_escalated so finalize re-drives "
+             "(H-1; clears flag plus finalize attention episode; re-driven "
+             "integrate may re-conflict and re-escalate; differs from "
+             "supersede which discards commits and --accept-escalated which "
+             "keeps them for close)",
     )
     clear_esc_cmd.add_argument("task_id")
 
@@ -5194,6 +5578,7 @@ def main():
             "decision",
             "evidence",
             "gate",
+            "delivery",
             "invalidation",
             "note",
             "wrapup",
@@ -5227,6 +5612,26 @@ def main():
     note_list_cmd.add_argument("--limit", type=int, default=0)
     note_list_cmd.add_argument("--current-base-sha", default=None)
     note_list_cmd.add_argument("--json", action="store_true")
+
+    delivery_cmd = sub.add_parser(
+        "record-delivery",
+        help="记录 workflow 唯一交付身份 (FR-4.1: delivery_branch/candidate_sha/review_task/test_gate)",
+    )
+    delivery_cmd.add_argument("--workflow-id", required=True)
+    delivery_cmd.add_argument("--delivery-branch", required=True)
+    delivery_cmd.add_argument("--candidate-sha", required=True)
+    delivery_cmd.add_argument("--review-task", required=True)
+    delivery_cmd.add_argument("--test-gate", required=True)
+    delivery_cmd.add_argument("--base", default="")
+    delivery_cmd.add_argument("--node", default="wrapup")
+
+    check_delivery_cmd = sub.add_parser(
+        "check-delivery",
+        help="建 PR 前校验: 内容等价 + 四要素模板 + 同分支已合入告警 (FR-4.2/4.3/4.4, 告警不阻断)",
+    )
+    check_delivery_cmd.add_argument("--workflow-id", required=True)
+    check_delivery_cmd.add_argument("--head-sha", required=True)
+    check_delivery_cmd.add_argument("--head-ref", default="")
 
     observe_cmd = sub.add_parser(
         "observe",
@@ -5368,6 +5773,7 @@ def main():
                 abandon=args.abandon,
                 force=args.force,
                 accept_escalated=getattr(args, "accept_escalated", False),
+                confirm_force=getattr(args, "confirm_force", False),
             )
         except Exception as exc:
             print(f"Error closing workflow {target_wid}: {exc}", file=sys.stderr)
@@ -5584,6 +5990,24 @@ def main():
 
     elif args.command == "note-list":
         note_list(args)
+
+    elif args.command == "record-delivery":
+        record_delivery_note(
+            args.workflow_id,
+            args.delivery_branch,
+            args.candidate_sha,
+            args.review_task,
+            args.test_gate,
+            base=getattr(args, "base", ""),
+            node=getattr(args, "node", "wrapup"),
+        )
+
+    elif args.command == "check-delivery":
+        check_delivery_for_pr(
+            args.workflow_id,
+            args.head_sha,
+            head_ref_name=getattr(args, "head_ref", ""),
+        )
 
     elif args.command == "observe":
         cmd_observe(args)

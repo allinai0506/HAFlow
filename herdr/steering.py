@@ -144,6 +144,17 @@ def queue_steer(
     if not instruction:
         raise ValueError("Instruction cannot be empty")
 
+    # T3b hygiene: steering is a second prompt sink; strip task-id markers.
+    sanitized_markers = 0
+    try:
+        from herdr import completion as _completion
+
+        instruction, sanitized_markers = _completion.sanitize_completion_marker(
+            instruction, task_id
+        )
+    except (ImportError, AttributeError, ValueError):
+        sanitized_markers = 0
+
     tasks_data = load_tasks_data()
     task = next((t for t in tasks_data.get("tasks", []) if t.get("task_id") == task_id), None)
     if not task:
@@ -164,6 +175,8 @@ def queue_steer(
         "status": "pending",
         "dispatched_at": None,
     }
+    if sanitized_markers:
+        steer_item["sanitized_markers"] = sanitized_markers
 
     s_data = load_steering_data()
     q = s_data.setdefault("steering_queues", {}).setdefault(task_id, [])
