@@ -143,6 +143,7 @@ def _merge_verification_events(
                         PARTITION BY e.run_id, COALESCE(e.task_id, '')
                         ORDER BY CASE WHEN (
                             json_extract(e.payload_json, '$.verification.passed') = 'false'
+                            OR json_extract(e.payload_json, '$.verification.passed') = 0
                             OR json_extract(e.payload_json, '$.verification_passed') = 0
                         ) THEN 0 ELSE 1 END, e.sequence DESC, e.id DESC
                     ) AS strict_rank
@@ -215,7 +216,7 @@ def _read_source_snapshot(
         workflow.setdefault("workflow_id", workflow_id)
 
         task_rows = conn.execute(
-            "SELECT * FROM tasks WHERE workflow_id = ? ORDER BY created_at ASC, task_id ASC LIMIT 1001",
+            "SELECT * FROM tasks WHERE workflow_id = ? AND length(payload_json) <= 200000 ORDER BY created_at ASC, task_id ASC LIMIT 1001",
             (str(workflow_id),),
         ).fetchall()
         if len(task_rows) > 1000:

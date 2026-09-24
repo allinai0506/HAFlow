@@ -3218,6 +3218,12 @@ def _validate_context_source_existence(
             task = task_record(str(task_id))
             if task is None:
                 return False
+            if (
+                str(context.get("run_scope") or "") == str(context.get("workflow_id") or "")
+                and str(task_id) != str(context.get("task_id") or "")
+                and str(task_id) not in verified_handoff_tasks
+            ):
+                return False
             if str(task.get("workflow_id") or "") != str(context.get("workflow_id") or ""):
                 return False
             if str(task.get("scope") or "") != str(context.get("run_scope") or ""):
@@ -3279,6 +3285,20 @@ def _validate_context_source_existence(
             return None
         return {key: row[key] for key in row.keys()}
 
+    verified_handoff_tasks: set[str] = set()
+    if str(context.get("run_scope") or "") == str(context.get("workflow_id") or ""):
+        for ref in refs:
+            if not ref.startswith("collaboration:"):
+                continue
+            object_id = ref.split(":", 1)[1].split(":", 1)[0]
+            handoff = fetch_record("collaboration", object_id)
+            if handoff:
+                verified_handoff_tasks.update(
+                    str(value) for value in (
+                        handoff.get("from_task_id"), handoff.get("to_task_id")
+                    ) if value
+                )
+
     for ref in sorted(refs):
         if not ref:
             continue
@@ -3300,9 +3320,12 @@ def _validate_context_source_existence(
         bound_task = record.get("task_id") or record.get("to_task_id")
         bound_run = record.get("run_id")
         for source_task, source_run in item_bindings.get(ref, []):
-            if source_task and bound_task and str(source_task) != str(bound_task):
-                raise ValueError(f"working context item source_task does not match reference: {ref}")
-            if source_run and bound_run and str(source_run) != str(bound_run):
+            if bound_task:
+                if str(source_task or "") != str(bound_task):
+                    raise ValueError(f"working context item source_task does not match reference: {ref}")
+            elif source_task:
+                raise ValueError(f"working context taskless item has a source_task: {ref}")
+            if bound_run and str(source_run or "") != str(bound_run):
                 raise ValueError(f"working context item source_run does not match reference: {ref}")
         referenced_tasks = [bound_task] if bound_task else []
         if prefix == "collaboration":
@@ -3315,6 +3338,11 @@ def _validate_context_source_existence(
                 task
                 and str(task.get("workflow_id") or "") == str(context.get("workflow_id") or "")
                 and str(task.get("scope") or "") == str(context.get("run_scope") or "")
+                and (
+                    str(context.get("run_scope") or "") != str(context.get("workflow_id") or "")
+                    or str(referenced_task) == str(context.get("task_id") or "")
+                    or str(referenced_task) in verified_handoff_tasks
+                )
             ):
                 taskless_allowed_runs.add(str(task.get("run_id") or ""))
         if prefix == "collaboration":

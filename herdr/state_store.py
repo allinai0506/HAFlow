@@ -356,7 +356,9 @@ class StateStore(ABC):
     # Immutable WorkingContext projections.  These are concrete on
     # SQLiteStateStore; the base interface stays compatible with existing
     # lightweight test doubles.
-    def save_working_context(self, context: Dict[str, Any]) -> Dict[str, Any]:
+    def save_working_context(
+        self, context: Dict[str, Any], *, fingerprint_config: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         raise NotImplementedError
 
     def get_working_context(self, context_id: str) -> Optional[Dict[str, Any]]:
@@ -839,8 +841,12 @@ class SQLiteStateStore(StateStore):
     def list_context_packs(self, run_id: str) -> List[Dict[str, Any]]:
         return state_db.list_context_packs(run_id, db_path=self.db_path)
 
-    def save_working_context(self, context: Dict[str, Any]) -> Dict[str, Any]:
-        return state_db.save_working_context(context, db_path=self.db_path)
+    def save_working_context(
+        self, context: Dict[str, Any], *, fingerprint_config: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        return state_db.save_working_context(
+            context, db_path=self.db_path, fingerprint_config=fingerprint_config,
+        )
 
     def get_working_context(self, context_id: str) -> Optional[Dict[str, Any]]:
         return state_db.get_working_context(context_id, db_path=self.db_path)

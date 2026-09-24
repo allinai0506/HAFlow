@@ -378,9 +378,15 @@ def compile_working_context(
 
         item_strength = strictness(item_value)
         old_strength = strictness(old_value)
-        if item_strength > old_strength:
-            latest_verification[key] = item
-        elif item_strength == old_strength and verification_order(item) >= verification_order(old):
+        item_order = verification_order(item)
+        old_order = verification_order(old)
+        if item_order > old_order:
+            if not (item_strength == 0 and old_strength == 2):
+                latest_verification[key] = item
+        elif item_order == old_order:
+            if item_strength >= old_strength:
+                latest_verification[key] = item
+        elif item_strength == 2 and old_strength == 0:
             latest_verification[key] = item
     def verification_failed(item: Mapping[str, Any]) -> bool:
         value = item.get("value") if isinstance(item.get("value"), Mapping) else {}

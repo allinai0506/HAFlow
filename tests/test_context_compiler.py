@@ -191,6 +191,33 @@ def test_storage_rejects_scope_foreign_finding_even_when_row_exists(tmp_path: Pa
     }]
     forged["source_refs"] = ["finding:fnd-storage-foreign"]
     _bind_storage_fingerprint(forged)
+    with pytest.raises(ValueError, match="crosses run scope|source_task|source_run"):
+        state_db.save_working_context(forged, db_path=db)
+
+
+def test_storage_rejects_unlinked_legacy_sibling_finding(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _task("task-legacy-storage-target")
+    target.pop("workflow_run_id", None)
+    sibling = _task("task-legacy-storage-sibling")
+    sibling.pop("workflow_run_id", None)
+    target = _seed_task(db, target)
+    sibling = _seed_task(db, sibling)
+    state_db.upsert_trajectory_finding(
+        _finding(sibling["run_id"], "fnd-unlinked-storage", task_id=sibling["task_id"]),
+        db_path=db,
+    )
+    context = _compile(db, target, "developer")
+    forged = dict(context.to_mapping())
+    forged["context_id"] = "wc_unlinked_legacy_storage"
+    forged["findings"] = [{
+        "kind": "finding", "value": "unlinked",
+        "source_ref": "finding:fnd-unlinked-storage",
+        "source_task": sibling["task_id"], "source_run": sibling["run_id"],
+    }]
+    forged["source_refs"] = ["finding:fnd-unlinked-storage"]
+    _bind_storage_fingerprint(forged)
     with pytest.raises(ValueError, match="crosses run scope"):
         state_db.save_working_context(forged, db_path=db)
 
@@ -1631,6 +1658,26 @@ def test_taskless_verification_survives_related_event_noise(tmp_path: Path):
     context = _compile(db, target, "tester")
     assert any(valid["event_id"] in ref for ref in context.source_refs)
     assert any(item.get("value", {}).get("passed") is False for item in context.verification)
+
+
+def test_newer_pass_replaces_old_failure_after_recovery(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-recovered-verification", node="test", role="tester"))
+    ledger = TrajectoryLedger(db)
+    ledger.append_event({
+        "run_id": target["run_id"], "task_id": target["task_id"],
+        "workflow_id": target["workflow_id"], "event_type": "verification_completed",
+        "verification": {"passed": False},
+    })
+    ledger.append_event({
+        "run_id": target["run_id"], "task_id": target["task_id"],
+        "workflow_id": target["workflow_id"], "event_type": "verification_completed",
+        "verification": {"passed": True},
+    })
+    context = _compile(db, target, "tester")
+    assert any(item.get("value", {}).get("passed") is True for item in context.verification)
+    assert not any(item.get("value", {}).get("passed") is False for item in context.verification)
 
 
 def test_unknown_latest_verification_does_not_erase_strict_failure(tmp_path: Path):
