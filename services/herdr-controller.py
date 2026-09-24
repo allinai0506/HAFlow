@@ -4829,12 +4829,24 @@ def maybe_dispatch_node_handoffs(*, workflow_id, ready_id, dep_ids, launched,
                 continue
             route = _collab.route_deterministic_handoff(trigger=trigger)
             target_scope = _collab.collab_scope_for_task(target)
+            target_has_explicit_scope = bool(
+                target.get("workflow_run_id") or target.get("execution_id")
+            )
+
+            def legacy_pair_is_proven(candidate):
+                if target_has_explicit_scope or candidate.get("workflow_run_id") or candidate.get("execution_id"):
+                    return _collab.collab_scope_for_task(candidate) == target_scope
+                if not target.get("run_id") and not candidate.get("run_id"):
+                    return True
+                return str(target.get("run_id") or "") == str(candidate.get("run_id") or "")
+
             upstream = [t for t in tasks.values()
                         if isinstance(t, dict)
                         and t.get("workflow_id") == workflow_id
                         and (t.get("node") == dep_hit or t.get("stage") == dep_hit)
                         and t.get("status") in _NODE_DONE_STATUSES
-                        and (not target_scope or _collab.collab_scope_for_task(t) == target_scope)]
+                        and (not target_scope or _collab.collab_scope_for_task(t) == target_scope)
+                        and legacy_pair_is_proven(t)]
             if not upstream:
                 results.append({"task_id": to_id, "skipped": True,
                                 "reason": "no_completed_upstream"})

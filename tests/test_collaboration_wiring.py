@@ -126,6 +126,21 @@ def test_wiring_handoff_carries_target_working_context_ref(tmp_path):
     assert "WORKING_CONTEXT_REF:" in sender.calls[0][1]
 
 
+def test_wiring_legacy_distinct_runs_do_not_cross_execute(tmp_path):
+    ctrl = _load_controller()
+    db = tmp_path / "state.db"
+    tasks = _wf_tasks()
+    tasks["wf-1-impl"]["run_id"] = "run-old"
+    tasks["wf-1-test-auto"]["run_id"] = "run-new"
+    out = ctrl.maybe_dispatch_node_handoffs(
+        workflow_id="wf-1", ready_id="test", dep_ids=["implementation"],
+        launched=["wf-1-test-auto"], tasks_by_id=tasks,
+        prompt_sender=FakeSender(), db_path=db,
+    )
+    assert out[0].get("skipped") is True
+    assert state_db.list_collaboration_events(run_id="wf-1", db_path=db) == []
+
+
 def test_wiring_legacy_handoff_planned_link_preloads_upstream_facts(tmp_path):
     from herdr.context_compiler import get_working_context
 
@@ -143,12 +158,12 @@ def test_wiring_legacy_handoff_planned_link_preloads_upstream_facts(tmp_path):
     )
     upstream = dict(
         _wf_tasks()["wf-1-impl"], task_id="legacy-impl", workflow_id="wf-legacy",
-        run_id="run-legacy-upstream", goal="Build upstream",
+        run_id="run-legacy-shared", goal="Build upstream",
         artifacts=[{"ref": "legacy-artifact"}],
     )
     target = dict(
         _wf_tasks()["wf-1-test-auto"], task_id="legacy-test", workflow_id="wf-legacy",
-        run_id="run-legacy-target", agent_role="tester",
+        run_id="run-legacy-shared", agent_role="tester",
     )
     upstream.pop("workflow_run_id", None)
     target.pop("workflow_run_id", None)

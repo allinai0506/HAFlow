@@ -220,6 +220,7 @@ git commit -m "feat: compile state and role aware working context"
 **Interfaces:**
 - `build_handoff_prompt(event, next_action="", working_context=None)` adds a bounded `WORKING_CONTEXT_REF` line only.
 - `dispatch_collaboration_event` validates an existing context ref against the target Task and `run_scope`.
+- Legacy automatic Handoff with distinct per-task `run_id` values and no execution evidence is skipped rather than treated as a cross-Run link.
 - `dispatch_task` compiles a context at launch/retry and appends its ref to the prompt without changing task state.
 - `maybe_dispatch_node_handoffs` creates the Handoff fact first, compiles the target context with the planned direct link, then attaches only its ID to the still-`created` event before dispatch.
 

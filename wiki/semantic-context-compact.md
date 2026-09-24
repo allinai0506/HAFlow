@@ -36,7 +36,7 @@ herdr-task compact --run-id <run_id> --json --no-model
 - `working_contexts` 是不可变快照表；`working_context_source_heads` 为每个 scope 维护单调 source revision，最新相同 fingerprint 复用旧 `context_id`，事实变化或 A→B→A 追加新快照；迟到旧 revision 不能成为 latest。
 - `context_fingerprint` 覆盖编译器版本、角色、范围、稳定的 source projection/revision、选中的事实版本和预算策略；`diff_working_context` 只返回结构化的 added/removed/superseded/changed，并包含 scalar provenance 变化。
 - Task launch/retry、Handoff、verification dispatch 只传 `context_id`，不把完整 WorkingContext 塞入 CollaborationEvent 或 prompt；首次 Handoff 先建立 CollaborationEvent，再 attach 快照 ref。
-- V1 禁止跨 Run；没有显式 workflow execution id 的旧任务只读取自身 Run，只有目标直接参与的 planned/direct Handoff 才扩展 sibling Run。
+- V1 禁止跨 Run；没有显式 workflow execution id 的旧任务只读取自身 Run，只有目标直接参与的 planned/direct Handoff 才扩展 sibling Run；仅有不同 per-task `run_id` 且无 execution 证据的自动 Handoff 会跳过。
 
 FACT：实现与测试见 `herdr/context_compiler.py`、`herdr/context_models.py`、`herdr/context_sources.py`、`herdr/context_candidates.py`、`herdr/context_selection.py`、`herdr/context_projection.py`、`herdr/context_diff.py`、`herdr/state_db.py:working_contexts`、`tests/test_context_compiler.py`、`tests/test_collaboration_wiring.py`。
 UNKNOWN：Context Diff 尚未接入 Dependency Wakeup；V1 不提供实时重写或跨 Workflow experience retrieval。
