@@ -676,7 +676,7 @@ def diff_working_context(
     superseded_old_keys: Set[Tuple[str, str]] = set()
     for key, new_item in new_items.items():
         old_item = old_items.get(key)
-        if old_item is not None and _canonical_json(old_item.get("value")) != _canonical_json(new_item.get("value")):
+        if old_item is not None and _canonical_json(old_item) != _canonical_json(new_item):
             changed.append({
                 "kind": key[0],
                 "source_ref": key[1],
