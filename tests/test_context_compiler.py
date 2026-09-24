@@ -269,6 +269,34 @@ def test_budget_preserves_role_state_blockers_and_failed_verification(tmp_path: 
     assert any(item.get("value", {}).get("passed") is False for item in context.verification)
 
 
+def test_large_candidate_budget_keeps_required_state_and_failure_evidence(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    upstream = _seed_task(db, _task("task-budget-upstream", node="implementation"))
+    target = dict(
+        _task("task-budget-state", node="test", role="tester", status="blocked"),
+        acceptance_criteria=[f"criterion-{index}" for index in range(20)],
+        blockers=[f"blocker-{index}" for index in range(5)],
+    )
+    _seed_task(db, target)
+    for index in range(120):
+        state_db.upsert_trajectory_finding(
+            _finding(upstream["run_id"], f"fnd-state-budget-{index}", task_id=upstream["task_id"]),
+            db_path=db,
+        )
+    TrajectoryLedger(db).append_event({
+        "run_id": target["run_id"], "task_id": target["task_id"],
+        "workflow_id": target["workflow_id"], "event_type": "verification_completed",
+        "verification": {"passed": False},
+    })
+    context = _compile(db, target, "tester")
+    assert context.goal
+    assert context.current_state.get("acceptance_criteria")
+    assert context.blockers
+    assert any(item.get("value", {}).get("passed") is False for item in context.verification)
+    assert context.metrics["context_chars"] <= 12000
+
+
 def test_budget_keeps_blocker_before_completed_history(tmp_path: Path):
     db = tmp_path / "state.db"
     _seed_workflow(db)
