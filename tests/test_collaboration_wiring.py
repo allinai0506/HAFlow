@@ -90,6 +90,37 @@ def test_wiring_dispatches_handoff_on_deterministic_advance(tmp_path):
     assert rows[0]["from_task_id"] == "wf-1-impl"
 
 
+def test_wiring_rechecks_authoritative_upstream_status(tmp_path):
+    ctrl = _load_controller()
+    db = tmp_path / "state.db"
+    state_db.save_workflow(
+        {
+            "workflow_id": "wf-1", "title": "fixture", "status": "running",
+            "config": {"nodes": [
+                {"id": "implementation", "depends_on": []},
+                {"id": "test", "depends_on": ["implementation"]},
+            ]},
+        },
+        db_path=db,
+    )
+    target = dict(_wf_tasks()["wf-1-test-auto"], run_id="run-target", workflow_run_id="scope-a", agent_role="tester")
+    upstream = dict(_wf_tasks()["wf-1-impl"], run_id="run-upstream", workflow_run_id="scope-a", status="completed", agent_role="developer")
+    state_db.save_task(target, db_path=db)
+    state_db.save_task(upstream, db_path=db)
+    stale_upstream = dict(upstream)
+    state_db.save_task(dict(upstream, status="working"), db_path=db)
+    sender = FakeSender()
+    out = ctrl.maybe_dispatch_node_handoffs(
+        workflow_id="wf-1", ready_id="test", dep_ids=["implementation"],
+        launched=[target["task_id"]],
+        tasks_by_id={target["task_id"]: target, upstream["task_id"]: stale_upstream},
+        prompt_sender=sender, db_path=db,
+    )
+    assert out[0].get("skipped") is True
+    assert sender.calls == []
+    assert state_db.list_collaboration_events(run_id="scope-a", db_path=db) == []
+
+
 def test_wiring_handoff_carries_target_working_context_ref(tmp_path):
     from herdr.context_compiler import get_working_context
 

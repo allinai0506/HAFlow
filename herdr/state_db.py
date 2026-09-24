@@ -92,7 +92,7 @@ def _ensure_working_context_source_heads_schema(conn: sqlite3.Connection) -> Non
             PRIMARY KEY (run_scope, workflow_id)
         );
     """)
-    if not columns and conn.execute(
+    if conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'working_context_source_heads_legacy'"
     ).fetchone():
         conn.execute(
@@ -517,36 +517,36 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
 
     def source_clock_workflow(alias: str, source_table: str) -> str:
         if source_table in {"workflows", "tasks", "collaboration_events"}:
-            return f"COALESCE({alias}.workflow_id, '')"
+            return f"COALESCE(NULLIF({alias}.workflow_id, ''), '')"
         task_workflow = (
             f"(SELECT t.workflow_id FROM tasks t WHERE t.task_id = {alias}.task_id LIMIT 1)"
         )
-        return f"COALESCE({alias}.workflow_id, {task_workflow}, '')"
+        return f"COALESCE(NULLIF({alias}.workflow_id, ''), NULLIF({task_workflow}, ''), '')"
 
     def source_clock_scope(alias: str, source_table: str) -> str:
         if source_table == "workflows":
-            return f"COALESCE({alias}.workflow_id, '')"
+            return f"COALESCE(NULLIF({alias}.workflow_id, ''), '')"
         if source_table == "tasks":
             return (
-                f"COALESCE(json_extract({alias}.payload_json, '$.workflow_run_id'), "
-                f"json_extract({alias}.payload_json, '$.execution_id'), "
-                f"{alias}.workflow_id, '')"
+                f"COALESCE(NULLIF(json_extract({alias}.payload_json, '$.workflow_run_id'), ''), "
+                f"NULLIF(json_extract({alias}.payload_json, '$.execution_id'), ''), "
+                f"NULLIF({alias}.workflow_id, ''), '')"
             )
         if source_table == "collaboration_events":
-            return f"COALESCE({alias}.run_id, {alias}.workflow_id, '')"
+            return f"COALESCE(NULLIF({alias}.run_id, ''), NULLIF({alias}.workflow_id, ''), '')"
         task_scope = (
-            "(SELECT COALESCE(json_extract(t.payload_json, '$.workflow_run_id'), "
-            "json_extract(t.payload_json, '$.execution_id'), t.workflow_id, '') "
+            "(SELECT COALESCE(NULLIF(json_extract(t.payload_json, '$.workflow_run_id'), ''), "
+            "NULLIF(json_extract(t.payload_json, '$.execution_id'), ''), NULLIF(t.workflow_id, ''), '') "
             f"FROM tasks t WHERE t.task_id = {alias}.task_id LIMIT 1)"
         )
         run_scope = (
-            "(SELECT COALESCE(json_extract(t.payload_json, '$.workflow_run_id'), "
-            "json_extract(t.payload_json, '$.execution_id'), t.workflow_id, '') "
+            "(SELECT COALESCE(NULLIF(json_extract(t.payload_json, '$.workflow_run_id'), ''), "
+            "NULLIF(json_extract(t.payload_json, '$.execution_id'), ''), NULLIF(t.workflow_id, ''), '') "
             f"FROM tasks t WHERE json_extract(t.payload_json, '$.run_id') = {alias}.run_id LIMIT 1)"
         )
         return (
-            f"COALESCE({task_scope}, {run_scope}, {alias}.workflow_id, "
-            f"{alias}.run_id, '')"
+            f"COALESCE({task_scope}, {run_scope}, NULLIF({alias}.workflow_id, ''), "
+            f"NULLIF({alias}.run_id, ''), '')"
         )
 
     def source_clock_has_task(alias: str, source_table: str) -> str:
@@ -561,6 +561,7 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
     for source_table in source_clock_tables:
         for operation in ("INSERT", "UPDATE", "DELETE"):
             trigger_name = f"trg_working_context_source_clock_{source_table}_{operation.lower()}"
+            conn.execute(f"DROP TRIGGER IF EXISTS {trigger_name}")
             alias = "OLD" if operation == "DELETE" else "NEW"
             scope_expr = source_clock_scope(alias, source_table)
             workflow_expr = source_clock_workflow(alias, source_table)
@@ -2391,6 +2392,10 @@ def aggregate_run_metric_rows(run_id: str, db_path: Optional[Path] = None) -> Di
                 or payload.get("execution_id")
                 or run_id
             )
+        metric_workflow_id = (
+            scope_row["workflow_id"] if scope_row is not None
+            else (identity["workflow_id"] if identity is not None else None)
+        )
         observations = conn.execute(
             """
             SELECT COUNT(*) AS observations_created,
@@ -2423,26 +2428,29 @@ def aggregate_run_metric_rows(run_id: str, db_path: Optional[Path] = None) -> Di
                    COALESCE(SUM(reused), 0) AS reused_count,
                    COALESCE(SUM(changed), 0) AS changed_count
               FROM working_context_metric_events
-             WHERE run_id = ? OR run_scope = ?
+             WHERE (run_id = ? OR run_scope = ?)
+               AND workflow_id IS ?
             """,
-            (run_id, metric_scope),
+            (run_id, metric_scope, metric_workflow_id),
         ).fetchone()
         working_context_snapshots = conn.execute(
             """
             SELECT COUNT(*) AS snapshot_count
               FROM working_contexts
-             WHERE run_id = ? OR run_scope = ?
+             WHERE (run_id = ? OR run_scope = ?)
+               AND workflow_id IS ?
             """,
-            (run_id, metric_scope),
+            (run_id, metric_scope, metric_workflow_id),
         ).fetchone()
         latest_working_context = conn.execute(
             """
             SELECT * FROM working_contexts
-             WHERE run_id = ? OR run_scope = ?
+             WHERE (run_id = ? OR run_scope = ?)
+               AND workflow_id IS ?
              ORDER BY source_watermark DESC, compiled_at DESC, rowid DESC
              LIMIT 1
             """,
-            (run_id, metric_scope),
+            (run_id, metric_scope, metric_workflow_id),
         ).fetchone()
         working_context_compile_count = max(
             int(working_context_metrics["metric_count"] or 0),
@@ -2463,7 +2471,7 @@ def aggregate_run_metric_rows(run_id: str, db_path: Optional[Path] = None) -> Di
             "artifact_created": int(event_row["artifact_created"] or 0),
             "agent_done": int(event_row["agent_done"] or 0),
             "task_id": identity["task_id"] if identity else None,
-            "workflow_id": identity["workflow_id"] if identity else None,
+            "workflow_id": metric_workflow_id,
             "observations_created": int(observations["observations_created"] or 0),
             "observation_bytes": int(observations["observation_bytes"] or 0),
             "findings_created": int(findings["findings_created"] or 0),
@@ -3578,6 +3586,12 @@ def save_working_context(
                 raise ValueError(f"working context item in {field_name} requires source_ref")
             if not _valid_context_source_ref(item["source_ref"]):
                 raise ValueError(f"working context item in {field_name} has invalid source_ref")
+            if field_name == "verification":
+                value = item.get("value")
+                if isinstance(value, dict):
+                    for key in ("passed", "verification_passed"):
+                        if key in value and value[key] is not None and not isinstance(value[key], bool):
+                            raise ValueError("working context verification values must be strict booleans")
             for ref in item.get("evidence_refs") or []:
                 if not _valid_context_source_ref(ref):
                     raise ValueError(f"working context item in {field_name} has invalid evidence_ref")
@@ -3596,6 +3610,9 @@ def save_working_context(
         fingerprint_config = context.get("_fingerprint_config")
     if not isinstance(fingerprint_config, dict):
         raise ValueError("working context requires fingerprint configuration")
+    max_chars = int(fingerprint_config.get("max_chars", 20000))
+    if max_chars < 1 or len(json.dumps(context, ensure_ascii=False)) > max_chars:
+        raise ValueError("working context exceeds fingerprint configuration budget")
     from .context_models import WorkingContext, _hash
     from .context_projection import _fingerprint_payload
     try:

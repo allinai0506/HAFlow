@@ -242,6 +242,16 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - 修复：source head/clock 按 `(run_scope, workflow_id)` 隔离；schema 初始化使用 resolved-path lock；Workflow/Task/Event/Finding source trigger 按 scope 更新；dispatch 重新读取权威 Task；Verification/Eval 窗口保留 latest/strict/recovery facts 并遵守 limit；补齐 alternate verification payload、source projection 稳定字段、taskless workflow fail-closed 和 context_id 幂等重试。
 - 回归：跨 Workflow/同 execution scope、A 自身写入、旧 schema/空库并发、路径别名、Handoff stale snapshot、limit 0/1、恢复序列和 provenance 边界均有测试；交付验证见 `.omc/verify-ses_f2d90b418ffePthpvvnlqq6gVw.md`。
 
+## [2026-09-24] fix | Context Compiler authority, migration recovery, and fail-closed source facts
+- 背景：独立复审发现旧 trigger/partial migration、删除 Task snapshot、legacy evidence、超限 failure/verification、alternate verification 和 scope metrics 仍可能 fail-open。
+- 修复：dispatch 对数据库已有 Task 时强制权威读取；source-head 复合迁移可从 legacy 表恢复；schema lock/旧 trigger replacement 可重入；failure/critical event 与 oversized verification 使用有界保留和 truncated fail-closed marker；legacy Handoff evidence 只接受 scope 内已存事实；storage 强制 verification bool、配置预算和 workflow-scoped metrics。
+- 回归：新增删除 Task、stale upstream、legacy evidence、旧 trigger、partial migration、oversized source、冲突 verification、source projection 和 storage adversarial 测试；全量验证见 `.omc/verify-ses_f2d90b418ffePthpvvnlqq6gVw.md`。
+
+## [2026-09-24] fix | Context Compiler final fail-closed review closure
+- 背景：复审继续发现旧 trigger/partial migration、删除 Task fallback、failure/verification 超限、alternate verification、legacy evidence、storage schema/budget 和 metrics scope 边界。
+- 修复：权威 Task/upstream dispatch、resolved-path schema lock 与 trigger replacement、legacy source-head row recovery、critical/oversized source marker、canonical alternate verification、legacy evidence scope filter、strict verification/budget validation、workflow-scoped metrics 和空 scope 归一化。
+- 回归：全量 `1501 passed, 44 subtests passed`；专项、AST、compileall、ruff、diff 和凭据扫描均通过，验证 artifact 已更新。
+
 ## [2026-09-13] feat | Console URL Deep-Link & Notifier Click-to-Open Integration
 解决 macOS CLI 通知默认归属“脚本编辑器”且无法定位到具体任务/工作流页面的痛点：
 - [[architecture]] §2.3 更新 Herdr Notifier 架构描述：优先使用 `terminal-notifier` 附带 `-open` 直达链接，未安装时安全降级为 `osascript`；

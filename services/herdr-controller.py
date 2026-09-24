@@ -4571,6 +4571,68 @@ def _collab_task_pane(task):
     return runtime.get("pane_id")
 
 
+def _has_persisted_tasks(db_path=None):
+    from herdr import state_db as _sdb
+    conn = _sdb.get_db_connection(db_path=db_path)
+    try:
+        return bool(conn.execute("SELECT 1 FROM tasks LIMIT 1").fetchone())
+    finally:
+        conn.close()
+
+
+def _authoritative_task(task_id, fallback, db_path=None):
+    from herdr import state_db as _sdb
+    current = _sdb.get_task(str(task_id or ""), db_path=db_path)
+    if current is not None:
+        return current
+    if _has_persisted_tasks(db_path=db_path):
+        return None
+    return fallback
+
+
+def _legacy_evidence_allowed(event, raw_ref, db_path=None):
+    from herdr import state_db as _sdb
+    from herdr.context_models import _canonical_evidence_ref
+    from herdr.collaboration import collab_scope_for_task
+
+    ref = _canonical_evidence_ref(raw_ref) or str(raw_ref or "")
+    if ":" not in ref:
+        return False
+    prefix, object_id = ref.split(":", 1)
+    if prefix not in {"observation", "trajectory", "eval"} or not object_id:
+        return False
+    conn = _sdb.get_db_connection(db_path=db_path)
+    try:
+        if prefix == "observation":
+            row = conn.execute(
+                "SELECT run_id, task_id, workflow_id FROM observations WHERE observation_id = ?",
+                (object_id,),
+            ).fetchone()
+        elif prefix == "eval":
+            row = conn.execute(
+                "SELECT run_id, task_id, workflow_id FROM eval_results WHERE eval_id = ?",
+                (object_id,),
+            ).fetchone()
+        else:
+            event_number = object_id.removeprefix("evt_")
+            try:
+                row = conn.execute(
+                    "SELECT run_id, task_id, workflow_id FROM events WHERE id = ? AND source = 'trajectory'",
+                    (int(event_number),),
+                ).fetchone()
+            except ValueError:
+                row = None
+        if row is None or str(row["workflow_id"] or "") != str(event.get("workflow_id") or ""):
+            return False
+        task_id = row["task_id"]
+        if task_id:
+            task = _sdb.get_task(str(task_id), db_path=db_path)
+            return bool(task and collab_scope_for_task(task) == str(event.get("run_id") or ""))
+        return str(row["run_id"] or "") == str(event.get("run_id") or "")
+    finally:
+        conn.close()
+
+
 def _collab_task_run(task):
     # Collaboration scope, NOT the per-task run_id: every herdr-task launch
     # mints its own run_id, so scope must be the shared workflow execution
@@ -4629,7 +4691,9 @@ def _working_context_ref_valid(event, target_task, db_path=None):
     refs = list(event.get("context_refs") or [])
     if not refs:
         return True
-    authoritative_task = _sdb.get_task(str(event.get("to_task_id") or ""), db_path=db_path)
+    authoritative_task = _authoritative_task(
+        event.get("to_task_id"), target_task, db_path=db_path,
+    )
     if authoritative_task is not None:
         target_task = authoritative_task
     try:
@@ -4683,10 +4747,9 @@ def dispatch_collaboration_event(event_id, tasks_by_id, prompt_sender=None, db_p
     if event["status"] == "failed":
         return {"dispatched": False, "status": "failed", "event_id": event_id}
 
-    tasks = tasks_by_id or {}
-    target = _sdb.get_task(str(event["to_task_id"]), db_path=db_path)
-    if target is None:
-        target = tasks.get(event["to_task_id"])
+    target = _authoritative_task(
+        event["to_task_id"], (tasks_by_id or {}).get(event["to_task_id"]), db_path=db_path,
+    )
     if target is None:
         return _sdb.mark_collaboration_failed(event_id, db_path=db_path)
     if _collab_task_run(target) != event["run_id"]:
@@ -4694,9 +4757,9 @@ def dispatch_collaboration_event(event_id, tasks_by_id, prompt_sender=None, db_p
     pane_id = _collab_task_pane(target)
     if not pane_id:
         return _sdb.mark_collaboration_failed(event_id, db_path=db_path)
-    source_task = _sdb.get_task(str(event.get("from_task_id") or ""), db_path=db_path)
-    if source_task is None:
-        source_task = tasks.get(event.get("from_task_id"))
+    source_task = _authoritative_task(
+        event.get("from_task_id"), (tasks_by_id or {}).get(event.get("from_task_id")), db_path=db_path,
+    )
     if (
         source_task is None
         or str(source_task.get("workflow_id") or "") != str(event.get("workflow_id") or "")
@@ -4730,6 +4793,12 @@ def dispatch_collaboration_event(event_id, tasks_by_id, prompt_sender=None, db_p
             if canonical_ref in allowed_evidence_refs:
                 filtered_evidence_refs.append(canonical_ref)
         prompt_event["evidence_refs"] = filtered_evidence_refs
+    else:
+        prompt_event["evidence_refs"] = [
+            str(raw_ref)
+            for raw_ref in event.get("evidence_refs") or []
+            if _legacy_evidence_allowed(event, raw_ref, db_path=db_path)
+        ]
 
     if _collab_prior_intent(event_id, event["to_task_id"], db_path) is not None:
         recovered = _sdb.mark_collaboration_dispatched(event_id, db_path=db_path)
@@ -4822,7 +4891,13 @@ def maybe_dispatch_node_handoffs(*, workflow_id, ready_id, dep_ids, launched,
         if tasks_by_id is None:
             tasks_by_id = {t.get("task_id"): t for t in (load_tasks() or [])
                            if isinstance(t, dict) and t.get("task_id")}
-        tasks = tasks_by_id or {}
+        authoritative_tasks = {}
+        has_persisted_tasks = _has_persisted_tasks(db_path=db_path)
+        for task_id in (tasks_by_id or {}):
+            current_task = _sdb.get_task(str(task_id), db_path=db_path)
+            if current_task is not None:
+                authoritative_tasks[task_id] = current_task
+        tasks = authoritative_tasks if has_persisted_tasks else (tasks_by_id or {})
     except Exception as exc:
         return [{"task_id": t, "status": "failed", "error": type(exc).__name__}
                 for t in launched]

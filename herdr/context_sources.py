@@ -174,8 +174,127 @@ def _merge_verification_events(
             LIMIT ?""",
         (*run_values, workflow_id, *task_ids, target_task_id, window_limit),
     ).fetchall()
+    critical_types = (
+        "task_failed", "agent_failed", "run_failed", "blocker",
+        "task_started", "task_completed", "run_completed", "agent_done",
+        "task_status_changed",
+    )
+    critical_placeholders = ",".join("?" for _ in critical_types)
+    critical_rows = conn.execute(
+        f"""SELECT * FROM (
+                SELECT e.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY e.run_id, COALESCE(e.task_id, '')
+                        ORDER BY e.sequence DESC, e.id DESC
+                    ) AS latest_rank,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY e.run_id, COALESCE(e.task_id, '')
+                        ORDER BY CASE WHEN e.event_type IN (
+                            'task_failed', 'agent_failed', 'run_failed', 'blocker'
+                        ) THEN 0 ELSE 1 END, e.sequence DESC, e.id DESC
+                    ) AS failure_rank
+                  FROM events e
+                 WHERE e.source = 'trajectory'
+                   AND e.run_id IN ({placeholders})
+                   AND e.event_type IN ({critical_placeholders})
+                   AND e.workflow_id = ?
+                   AND ({task_filter})
+                   AND length(e.payload_json) <= 20000
+            ) WHERE latest_rank = 1 OR failure_rank = 1
+            ORDER BY CASE WHEN task_id = ? THEN 0 ELSE 1 END,
+                     sequence DESC, id DESC
+            LIMIT ?""",
+        (
+            *run_values,
+            *critical_types,
+            workflow_id,
+            *task_ids,
+            target_task_id,
+            window_limit,
+        ),
+    ).fetchall()
+    oversized_types = tuple(dict.fromkeys(critical_types + ("verification_completed", "tests_completed")))
+    oversized_placeholders = ",".join("?" for _ in oversized_types)
+    oversized_rows = conn.execute(
+        f"""SELECT e.id, e.run_id, e.task_id, e.workflow_id, e.node_id,
+                   e.event_type, e.sequence, e.timestamp
+              FROM events e
+             WHERE e.source = 'trajectory'
+               AND e.run_id IN ({placeholders})
+               AND e.event_type IN ({oversized_placeholders})
+               AND e.workflow_id = ?
+               AND ({task_filter})
+               AND length(e.payload_json) > 20000
+             ORDER BY CASE WHEN e.task_id = ? THEN 0 ELSE 1 END,
+                      e.sequence DESC, e.id DESC
+             LIMIT ?""",
+        (
+            *run_values,
+            *oversized_types,
+            workflow_id,
+            *task_ids,
+            target_task_id,
+            window_limit,
+        ),
+    ).fetchall()
     merged = {str(event.get("event_id")): event for event in events}
     reserved_event_ids: set[str] = set()
+    critical_event_ids: set[str] = set()
+    for row in oversized_rows:
+        event = {
+            "event_id": f"evt_{row['id']}",
+            "run_id": row["run_id"],
+            "task_id": row["task_id"],
+            "workflow_id": row["workflow_id"],
+            "node_id": row["node_id"],
+            "event_type": row["event_type"],
+            "sequence": row["sequence"],
+            "timestamp": row["timestamp"],
+            "payload": (
+                {"verification": {"status": "unknown", "source_truncated": True}}
+                if row["event_type"] in {"verification_completed", "tests_completed"}
+                else {"metadata": {"reason": "source payload truncated"}, "source_truncated": True}
+            ),
+        }
+        if (
+            task_by_id is not None
+            and allowed_runs is not None
+            and workflow_id is not None
+            and run_scope is not None
+            and not _source_allowed(
+                event,
+                task_by_id=task_by_id,
+                allowed_runs=allowed_runs,
+                workflow_id=workflow_id,
+                run_scope=run_scope,
+            )
+        ):
+            continue
+        event_id = str(event["event_id"])
+        merged[event_id] = event
+        if event["event_type"] in {"verification_completed", "tests_completed"}:
+            reserved_event_ids.add(event_id)
+        else:
+            critical_event_ids.add(event_id)
+    for row in critical_rows:
+        event = _decode_event_row(row)
+        if (
+            task_by_id is not None
+            and allowed_runs is not None
+            and workflow_id is not None
+            and run_scope is not None
+            and not _source_allowed(
+                event,
+                task_by_id=task_by_id,
+                allowed_runs=allowed_runs,
+                workflow_id=workflow_id,
+                run_scope=run_scope,
+            )
+        ):
+            continue
+        event_id = str(event.get("event_id"))
+        critical_event_ids.add(event_id)
+        merged[event_id] = event
     for row in rows:
         event = _decode_event_row(row)
         if (
@@ -208,6 +327,8 @@ def _merge_verification_events(
 
     def verification_strength(event: Mapping[str, Any]) -> int:
         value = verification_value(event)
+        if value.get("source_truncated") is True:
+            return 3
         if value.get("passed") is False or value.get("verification_passed") is False:
             return 2
         if value.get("passed") is True or value.get("verification_passed") is True:
@@ -234,8 +355,13 @@ def _merge_verification_events(
             key=verification_order,
             default=None,
         )
-        selected = latest
-        if verification_strength(latest) == 0 and failure is not None and (
+        truncated = max(
+            (event for event in key_events if verification_strength(event) == 3),
+            key=verification_order,
+            default=None,
+        )
+        selected = truncated or latest
+        if truncated is None and verification_strength(latest) == 0 and failure is not None and (
             recovery is None or verification_order(recovery) <= verification_order(failure)
         ):
             selected = failure
@@ -244,6 +370,7 @@ def _merge_verification_events(
     ordered = sorted(
         merged.values(),
         key=lambda item: (
+            0 if str(item.get("event_id")) in critical_event_ids else 1,
             0 if str(item.get("event_id")) in preferred_event_ids else 1,
             0 if str(item.get("event_id")) in reserved_event_ids else 1,
             0 if target_task_id and str(item.get("task_id") or "") == str(target_task_id) else 1,
@@ -596,9 +723,61 @@ def _read_source_snapshot(
                     eval_window_limit,
                 ),
             ).fetchall()
+        oversized_eval_rows = []
+        if eval_limit:
+            oversized_eval_rows = conn.execute(
+                f"""SELECT er.eval_id, er.run_id, er.revision, er.verification_passed,
+                           er.requirements_satisfied, er.final_status, er.task_id,
+                           er.workflow_id, er.created_at
+                      FROM eval_results er
+                     WHERE er.run_id IN ({placeholders})
+                       AND er.workflow_id = ?
+                       AND ({eval_task_filter})
+                       AND (length(COALESCE(er.evidence_json, 'null')) > 20000
+                            OR length(COALESCE(er.warnings_json, '[]')) > 20000)
+                     ORDER BY CASE WHEN er.task_id = ? THEN 0 ELSE 1 END,
+                              er.revision DESC, er.eval_id ASC
+                     LIMIT ?""",
+                (
+                    *run_values,
+                    str(workflow_id),
+                    *eval_task_ids,
+                    str(task_id),
+                    eval_window_limit,
+                ),
+            ).fetchall()
         evals_by_key: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
         for row in eval_rows:
             decoded = _decode_eval_row(row)
+            if not _source_allowed(
+                {
+                    "run_id": decoded.get("run_id"),
+                    "task_id": decoded.get("task_id"),
+                    "workflow_id": decoded.get("workflow_id"),
+                },
+                task_by_id=task_by_id,
+                allowed_runs=allowed_runs,
+                workflow_id=str(workflow_id),
+                run_scope=run_scope,
+            ):
+                continue
+            key = (str(decoded.get("run_id") or ""), str(decoded.get("task_id") or ""))
+            evals_by_key.setdefault(key, []).append(decoded)
+        for row in oversized_eval_rows:
+            decoded = {
+                "eval_id": row["eval_id"],
+                "run_id": row["run_id"],
+                "revision": int(row["revision"] or 0),
+                "task_id": row["task_id"],
+                "workflow_id": row["workflow_id"],
+                "verification_passed": 0 if row["verification_passed"] in (0, False) else None,
+                "requirements_satisfied": row["requirements_satisfied"],
+                "final_status": row["final_status"],
+                "evidence": None,
+                "warnings": [],
+                "created_at": row["created_at"],
+                "source_truncated": True,
+            }
             if not _source_allowed(
                 {
                     "run_id": decoded.get("run_id"),
@@ -629,8 +808,13 @@ def _read_source_snapshot(
                 key=lambda item: (int(item.get("revision") or 0), str(item.get("eval_id") or "")),
                 default=None,
             )
-            selected = latest
-            if latest.get("verification_passed") not in (0, 1) and failure is not None and (
+            truncated = max(
+                (item for item in key_evals if item.get("source_truncated") is True),
+                key=lambda item: (int(item.get("revision") or 0), str(item.get("eval_id") or "")),
+                default=None,
+            )
+            selected = truncated or latest
+            if truncated is None and latest.get("verification_passed") not in (0, 1) and failure is not None and (
                 recovery is None
                 or (int(recovery.get("revision") or 0), str(recovery.get("eval_id") or ""))
                 <= (int(failure.get("revision") or 0), str(failure.get("eval_id") or ""))
@@ -716,6 +900,7 @@ def _source_projection(snapshot: Mapping[str, Any]) -> Dict[str, Any]:
                 "task_id", "workflow_id", "run_id", "workflow_run_id", "execution_id",
                 "node", "stage", "agent", "agent_role", "status", "goal", "blocker",
                 "blocked_reason", "open_blockers", "acceptance_criteria", "requirements",
+                "depends_on", "created_at",
                 "acceptance", "stage_verdict", "stage_verdict_note", "artifacts", "artifact_refs",
                 "changed_artifacts", "deliverables", "blockers", "open_questions", "questions",
                 "question", "decision_question", "acceptance_gap", "decision",
@@ -732,6 +917,7 @@ def _source_projection(snapshot: Mapping[str, Any]) -> Dict[str, Any]:
                     "task_id", "run_id", "workflow_run_id", "execution_id", "node", "stage",
                     "agent", "agent_role", "status", "goal", "blocker", "blocked_reason",
                     "open_blockers", "acceptance_criteria", "requirements", "acceptance",
+                    "depends_on", "created_at",
                     "stage_verdict", "stage_verdict_note", "artifacts", "artifact_refs",
                     "changed_artifacts", "deliverables", "blockers", "open_questions", "questions",
                     "question", "decision_question", "acceptance_gap", "decision",

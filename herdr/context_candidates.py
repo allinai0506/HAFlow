@@ -212,6 +212,8 @@ def _eval_candidates(
             "requirements_satisfied": bool(requirements) if requirements is not None else None,
             "final_status": evaluation.get("final_status"),
         }
+        if evaluation.get("source_truncated") is True:
+            value["source_truncated"] = True
         if value["verification_passed"] is None and value["requirements_satisfied"] is None:
             continue
         evidence_refs: List[str] = []
@@ -308,12 +310,15 @@ def _event_candidates(
             ))
         elif event_type in VERIFICATION_EVENTS:
             raw_verification = payload.get("verification")
-            verification_value = dict(raw_verification) if isinstance(raw_verification, Mapping) else payload
+            verification_value = dict(raw_verification) if isinstance(raw_verification, Mapping) else dict(payload)
+            if "verification_passed" in payload:
+                verification_value["verification_passed"] = payload["verification_passed"]
             if not verification_value:
                 continue
             value = {key: verification_value.get(key) for key in (
                 "passed", "verification_passed", "passed_tests", "total_tests", "failing_count",
                 "lint_errors", "type_errors", "evidence_id", "observation_id", "status",
+                "source_truncated",
             ) if key in verification_value}
             if "passed" in value and not isinstance(value["passed"], bool):
                 value.pop("passed", None)

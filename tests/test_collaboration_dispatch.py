@@ -77,7 +77,7 @@ def test_a_real_dispatch_hits_target_pane_with_refs(tmp_path):
     assert pane == "pane-b"
     assert ev["event_id"] in prompt
     assert "commit:abc123" in prompt
-    assert "test:rate-limit-concurrency" in prompt
+    assert "test:rate-limit-concurrency" not in prompt
 
 
 def test_b_deterministic_path_never_touches_coordinator(tmp_path):

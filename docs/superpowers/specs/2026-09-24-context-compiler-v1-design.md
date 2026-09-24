@@ -117,11 +117,11 @@ Task launch / retry / handoff / review request / verification request
 - 编译时先读取目标 Task，再解析其 workflow execution scope。
 - 只允许同一 scope 下的任务事实；每个来源的 `run_id` 必须属于该 scope 的任务集合。
 - Finding/Observation 若带 `task_id`，必须能对应到 scope 内任务；若不带 task，则其 `run_id` 必须属于 scope。
-- CollaborationEvent 必须同时满足 `run_id == run_scope`、`workflow_id == workflow_id`，且 from/to Task 在 scope 内；dispatch 必须重新读取 StateStore 中的当前 Task，不能信任调用方传入的旧 Task snapshot。
+- CollaborationEvent 必须同时满足 `run_id == run_scope`、`workflow_id == workflow_id`，且 from/to Task 在 scope 内；dispatch 必须重新读取 StateStore 中的当前 Task，不能信任调用方传入的旧 Task snapshot；无 context ref 的 legacy Handoff 也不能转发未在权威 scope 中验证的 evidence。
 - 信息不足时丢弃受影响来源或 fail closed，不猜测、不跨 Run 拼接。
 - legacy 自动 Handoff 若上下游只有不同的 per-task `run_id` 且没有同一 execution 证据，则跳过；不能把节点依赖当作跨 Run 授权。
 - `working_context_source_heads` 按 `(run_scope, workflow_id)` 维护单调 source revision；source projection 变化时递增，编译器保存前必须在同一 source revision 上，迟到旧候选只能成为历史而不能成为 latest。
-- `working_context_source_clock` 按 `(run_scope, workflow_id)` 维护；源表写入触发器只递增所属 execution scope，编译快照记录该 scope 的 clock，保存事务发现同一 scope 的 clock 变化即重试，防止最终复读与写入之间的 TOCTOU，同时不把其他 Workflow 的写入误判为 stale。
+- `working_context_source_clock` 按 `(run_scope, workflow_id)` 维护；源表写入触发器只递增所属 execution scope，编译快照记录该 scope 的 clock，保存事务发现同一 scope 的 clock 变化即重试，防止最终复读与写入之间的 TOCTOU，同时不把其他 Workflow 的写入误判为 stale。Schema 初始化使用 resolved-path lock，旧 schema/旧 trigger/中断迁移均可恢复。
 
 ## 5. 选择规则
 
@@ -206,7 +206,7 @@ BLOCKER > OPEN QUESTION > CURRENT GOAL > VERIFICATION
        > FINDING > ARTIFACT > HANDOFF > HISTORY
 ```
 
-超预算时先删除低优先级候选，再缩短单行文本；`blockers`、`verification` 和 `open_questions` 的配置 cap 不能设为 0，必要事实无法容纳时 fail closed。验证事件使用独立有界窗口并按 Ledger sequence/revision 选择最新项；不得静默丢失 goal/current state/next action，序列化结果必须不超过 `max_chars`。
+超预算时先删除低优先级候选，再缩短单行文本；`blockers`、`verification` 和 `open_questions` 的配置 cap 不能设为 0，必要事实无法容纳时 fail closed。验证事件使用独立有界窗口并按 Ledger sequence/revision 选择最新项；failure/blocker 与 oversized source 使用显式保留/truncated fail-closed marker，不得静默丢失 goal/current state/next action，序列化结果必须不超过 `max_chars`。
 
 ## 9. 持久化与不可变性
 

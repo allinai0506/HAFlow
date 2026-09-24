@@ -359,6 +359,8 @@ def compile_working_context(
 
     def verification_strength(item: Mapping[str, Any]) -> int:
         value = item.get("value") if isinstance(item.get("value"), Mapping) else {}
+        if value.get("source_truncated") is True:
+            return 3
         if value.get("passed") is False or value.get("verification_passed") is False:
             return 2
         if value.get("passed") is True or value.get("verification_passed") is True:
@@ -375,9 +377,19 @@ def compile_working_context(
         )
         order = verification_order(item)
         current = latest_verification.get(key)
-        if current is None or order >= verification_order(current):
-            latest_verification[key] = item
         strength = verification_strength(item)
+        current_strength = verification_strength(current) if current is not None else 0
+        current_order = verification_order(current) if current is not None else None
+        if (
+            current is None
+            or (strength == 3 and current_strength != 3)
+            or (
+                current_order is not None
+                and order >= current_order
+                and not (current_strength == 3 and strength < 3)
+            )
+        ):
+            latest_verification[key] = item
         if strength == 2:
             previous = latest_failure.get(key)
             if previous is None or order >= verification_order(previous):
@@ -402,6 +414,7 @@ def compile_working_context(
         return (
             value.get("passed") is False
             or value.get("verification_passed") is False
+            or value.get("source_truncated") is True
             or str(value.get("status") or item.get("status") or "").lower()
             in {"failed", "failure", "blocked"}
         )

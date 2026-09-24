@@ -304,6 +304,43 @@ def test_storage_rejects_unrelated_legacy_collaboration_scope_expansion(tmp_path
         state_db.save_working_context(forged, db_path=db)
 
 
+def test_storage_rejects_non_boolean_verification_value(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-storage-verification-schema"))
+    context = _compile(db, target, "tester")
+    forged = dict(context.to_mapping())
+    forged["context_id"] = "wc_storage_verification_schema"
+    forged["verification"] = [{
+        "kind": "verification", "value": {"passed": "false"},
+        "source_ref": f"task:{target['task_id']}",
+        "source_task": target["task_id"], "source_run": target["run_id"],
+    }]
+    _bind_storage_fingerprint(forged)
+    with pytest.raises(ValueError, match="verification|bool"):
+        state_db.save_working_context(forged, db_path=db)
+
+
+def test_storage_enforces_fingerprint_config_budget(tmp_path: Path):
+    from herdr.context_models import WorkingContext, _hash, _payload_digest
+    from herdr.context_projection import _config, _fingerprint_payload
+
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-storage-budget-schema"))
+    context = _compile(db, target, "developer")
+    payload = dict(context.to_mapping())
+    payload["context_id"] = "wc_storage_budget_schema"
+    config = _config({"max_chars": 500})
+    payload["_fingerprint_config"] = config
+    payload["context_fingerprint"] = _hash(
+        _fingerprint_payload(WorkingContext.from_mapping(payload), config)
+    )
+    payload.setdefault("metrics", {})["payload_digest"] = _payload_digest(payload)
+    with pytest.raises(ValueError, match="max_chars|budget|size"):
+        state_db.save_working_context(payload, db_path=db, fingerprint_config=config)
+
+
 def test_storage_rejects_item_source_identity_mismatch(tmp_path: Path):
     db = tmp_path / "state.db"
     _seed_workflow(db)
@@ -1330,6 +1367,49 @@ def test_completed_task_does_not_project_stale_persisted_blocker(tmp_path: Path)
     assert not context.blockers
 
 
+def test_oversized_failure_payload_is_retained_as_truncated_blocker(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-oversized-failure", node="implementation"))
+    state_db.record_trajectory_event(
+        {
+            "run_id": target["run_id"], "task_id": target["task_id"],
+            "workflow_id": target["workflow_id"], "event_type": "task_failed",
+            "payload": {
+                "metadata": {"reason": "real failure"},
+                "oversized": "x" * 21000,
+            },
+        },
+        db_path=db,
+    )
+    context = _compile(db, target, "developer")
+    assert context.blockers
+    assert any(
+        item.get("value", {}).get("reason") in {"real failure", "source payload truncated"}
+        for item in context.blockers
+    )
+
+
+def test_failure_window_survives_unrelated_event_noise(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-failure-window", node="implementation"))
+    ledger = TrajectoryLedger(db)
+    ledger.append_event({
+        "run_id": target["run_id"], "task_id": target["task_id"],
+        "workflow_id": target["workflow_id"], "event_type": "task_failed",
+        "metadata": {"reason": "real failure"},
+    })
+    for index in range(301):
+        ledger.append_event({
+            "run_id": target["run_id"], "task_id": target["task_id"],
+            "workflow_id": target["workflow_id"], "event_type": "decision",
+            "decision": f"failure-noise-{index}",
+        })
+    context = _compile(db, target, "developer")
+    assert any(item.get("value", {}).get("reason") == "real failure" for item in context.blockers)
+
+
 def test_verification_cap_prioritizes_target_failure(tmp_path: Path):
     db = tmp_path / "state.db"
     _seed_workflow(db)
@@ -1441,6 +1521,54 @@ def test_single_slot_preserves_strict_failure_without_recovery(tmp_path: Path):
     )
     assert any(item.get("event_id") == failure["event_id"] for item in snapshot["events"])
     assert any(item.get("verification_passed") == 0 for item in snapshot["evals"])
+
+
+def test_oversized_eval_evidence_cannot_clear_failure(tmp_path: Path):
+    from herdr.eval_store import record_eval_result
+
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-oversized-eval", node="test", role="tester"))
+    record_eval_result(
+        target["run_id"], task_id=target["task_id"], workflow_id=target["workflow_id"],
+        revision=1, verification_passed=False,
+        evidence=[{"blob": "x" * 21000}], db_path=db,
+    )
+    record_eval_result(
+        target["run_id"], task_id=target["task_id"], workflow_id=target["workflow_id"],
+        revision=2, verification_passed=True, db_path=db,
+    )
+    context = _compile(db, target, "tester")
+    assert not any(item.get("value", {}).get("verification_passed") is True for item in context.verification)
+    assert context.verification
+
+
+def test_oversized_verification_payload_cannot_clear_failure(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-oversized-verification", node="test", role="tester"))
+    state_db.record_trajectory_event(
+        {
+            "run_id": target["run_id"], "task_id": target["task_id"],
+            "workflow_id": target["workflow_id"], "event_type": "verification_completed",
+            "payload": {
+                "verification": {"passed": False},
+                "oversized": "x" * 21000,
+            },
+        },
+        db_path=db,
+    )
+    state_db.record_trajectory_event(
+        {
+            "run_id": target["run_id"], "task_id": target["task_id"],
+            "workflow_id": target["workflow_id"], "event_type": "verification_completed",
+            "payload": {"verification": {"passed": True}},
+        },
+        db_path=db,
+    )
+    context = _compile(db, target, "tester")
+    assert not any(item.get("value", {}).get("passed") is True for item in context.verification)
+    assert context.verification
 
 
 def test_strict_failure_window_ignores_non_boolean_verification_values(tmp_path: Path):
@@ -1972,17 +2100,30 @@ def test_alternate_verification_passed_payload_preserves_strict_failure(tmp_path
     db = tmp_path / "state.db"
     _seed_workflow(db)
     target = _seed_task(db, _task("task-alternate-verification", node="test", role="tester"))
-    event = state_db.record_trajectory_event(
-        {
-            "run_id": target["run_id"], "task_id": target["task_id"],
-            "workflow_id": target["workflow_id"], "event_type": "verification_completed",
-            "payload": {"verification_passed": False},
-        },
-        db_path=db,
-    )
+    event = TrajectoryLedger(db).append_event({
+        "run_id": target["run_id"], "task_id": target["task_id"],
+        "workflow_id": target["workflow_id"], "event_type": "verification_completed",
+        "verification_passed": False,
+    })
     context = _compile(db, target, "tester")
-    assert any(item.get("source_ref") == f"trajectory:evt_{event['id']}" for item in context.verification)
+    assert any(item.get("source_ref") == f"trajectory:{event['event_id']}" for item in context.verification)
     assert any(item.get("value", {}).get("verification_passed") is False for item in context.verification)
+
+
+def test_conflicting_verification_fields_cannot_hide_failure(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-conflicting-verification", node="test", role="tester"))
+    TrajectoryLedger(db).append_event({
+        "run_id": target["run_id"], "task_id": target["task_id"],
+        "workflow_id": target["workflow_id"], "event_type": "verification_completed",
+        "verification": {"passed": True}, "verification_passed": False,
+    })
+    context = _compile(db, target, "tester")
+    assert any(
+        item.get("value", {}).get("verification_passed") is False
+        for item in context.verification
+    )
 
 
 def test_newer_pass_replaces_old_failure_after_recovery(tmp_path: Path):
@@ -2528,6 +2669,50 @@ def test_dispatch_does_not_treat_context_source_refs_as_evidence(tmp_path: Path)
     assert "EVIDENCE:\n- task:task-dispatch-evidence-target" not in calls[0][1]
 
 
+def test_legacy_handoff_without_context_filters_unverified_evidence(tmp_path: Path):
+    import importlib.machinery
+    import importlib.util
+
+    controller_path = Path(__file__).resolve().parent.parent / "services" / "herdr-controller.py"
+    spec = importlib.util.spec_from_loader(
+        "context_compiler_legacy_evidence_test",
+        importlib.machinery.SourceFileLoader(
+            "context_compiler_legacy_evidence_test", str(controller_path)
+        ),
+    )
+    controller = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(controller)
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _task("task-legacy-evidence-target", node="review", role="reviewer")
+    target["pane_id"] = "pane-legacy-evidence"
+    target = _seed_task(db, target)
+    source = _task("task-legacy-evidence-source", node="implementation", role="developer")
+    source["pane_id"] = "pane-legacy-evidence-source"
+    source = _seed_task(db, source)
+    foreign = create_observation(
+        run_id="run-foreign", task_id=None, workflow_id="wf-other",
+        source_type="verification", source_ref="verification:foreign-legacy",
+        content="foreign", store=ObservationStore(db),
+    )
+    event = state_db.create_collaboration_event(
+        {
+            "run_id": "wf-exec-1", "workflow_id": "wf-context",
+            "from_task_id": source["task_id"], "to_task_id": target["task_id"],
+            "type": "HANDOFF", "evidence_refs": [foreign.observation_id],
+            "source_fact_id": "fact-legacy-evidence",
+        },
+        db_path=db,
+    )
+    calls = []
+    result = controller.dispatch_collaboration_event(
+        event["event_id"], {target["task_id"]: target, source["task_id"]: source},
+        lambda pane, prompt: calls.append((pane, prompt)), db_path=db,
+    )
+    assert result["dispatched"] is True
+    assert foreign.observation_id not in calls[0][1]
+
+
 def test_dispatch_rejects_stale_caller_task_snapshot(tmp_path: Path):
     import importlib.machinery
     import importlib.util
@@ -2572,6 +2757,47 @@ def test_dispatch_rejects_stale_caller_task_snapshot(tmp_path: Path):
         {target["task_id"]: stale_target, source["task_id"]: source},
         lambda pane, prompt: calls.append((pane, prompt)),
         db_path=db,
+    )
+    assert result["status"] == "failed"
+    assert calls == []
+
+
+def test_dispatch_rejects_deleted_target_task(tmp_path: Path):
+    import importlib.machinery
+    import importlib.util
+
+    controller_path = Path(__file__).resolve().parent.parent / "services" / "herdr-controller.py"
+    spec = importlib.util.spec_from_loader(
+        "context_compiler_deleted_target_test",
+        importlib.machinery.SourceFileLoader(
+            "context_compiler_deleted_target_test", str(controller_path)
+        ),
+    )
+    controller = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(controller)
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _task("task-deleted-dispatch-target", node="review", role="reviewer")
+    target["pane_id"] = "pane-deleted-target"
+    target = _seed_task(db, target)
+    source = _task("task-deleted-dispatch-source", node="implementation", role="developer")
+    source = _seed_task(db, source)
+    context = _compile(db, target, "reviewer")
+    stale_target = dict(target)
+    state_db.delete_task(target["task_id"], db_path=db)
+    event = state_db.create_collaboration_event(
+        {
+            "run_id": "wf-exec-1", "workflow_id": "wf-context",
+            "from_task_id": source["task_id"], "to_task_id": target["task_id"],
+            "type": "HANDOFF", "context_refs": [context.context_id],
+            "source_fact_id": "fact-deleted-target",
+        },
+        db_path=db,
+    )
+    calls = []
+    result = controller.dispatch_collaboration_event(
+        event["event_id"], {target["task_id"]: stale_target, source["task_id"]: source},
+        lambda pane, prompt: calls.append((pane, prompt)), db_path=db,
     )
     assert result["status"] == "failed"
     assert calls == []

@@ -191,6 +191,48 @@ def test_legacy_source_clock_concurrent_migration_is_reentrant(tmp_path):
     assert all(result[0] == "ok" for result in results), results
 
 
+def test_partial_source_head_migration_recovers_legacy_rows(tmp_path):
+    db_path = tmp_path / "partial-source-head-migration.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE working_context_source_heads (
+            run_scope TEXT NOT NULL,
+            workflow_id TEXT NOT NULL DEFAULT '',
+            source_version TEXT NOT NULL,
+            revision INTEGER NOT NULL,
+            updated_at REAL NOT NULL,
+            PRIMARY KEY (run_scope, workflow_id)
+        );
+        CREATE TABLE working_context_source_heads_legacy (
+            run_scope TEXT PRIMARY KEY,
+            workflow_id TEXT,
+            source_version TEXT NOT NULL,
+            revision INTEGER NOT NULL,
+            updated_at REAL NOT NULL
+        );
+        INSERT INTO working_context_source_heads_legacy
+            (run_scope, workflow_id, source_version, revision, updated_at)
+        VALUES ('recover-scope', 'recover-wf', 'v1', 5, 1.0);
+        """
+    )
+    conn.commit()
+    conn.close()
+    state_db.init_db(db_path)
+    recovered = state_db.get_db_connection(db_path)
+    try:
+        row = recovered.execute(
+            """
+            SELECT run_scope, workflow_id, revision
+            FROM working_context_source_heads
+            WHERE run_scope = 'recover-scope'
+            """
+        ).fetchone()
+        assert tuple(row) == ("recover-scope", "recover-wf", 5)
+    finally:
+        recovered.close()
+
+
 def test_legacy_source_head_primary_key_migrates_to_scope_workflow(tmp_path):
     db_path = tmp_path / "legacy-source-head.db"
     conn = sqlite3.connect(db_path)
@@ -233,6 +275,38 @@ def test_legacy_source_head_primary_key_migrates_to_scope_workflow(tmp_path):
         assert tuple(row) == ("legacy-scope", "legacy-wf", "v1", 3)
     finally:
         migrated.close()
+
+
+def test_schema_init_replaces_legacy_source_clock_trigger(tmp_path):
+    db_path = tmp_path / "legacy-trigger.db"
+    state_db.init_db(db_path)
+    conn = state_db.get_db_connection(db_path)
+    conn.execute("DROP TRIGGER trg_working_context_source_clock_workflows_update")
+    conn.execute(
+        """
+        CREATE TRIGGER trg_working_context_source_clock_workflows_update
+        AFTER UPDATE ON workflows
+        BEGIN
+            UPDATE working_context_source_clock
+            SET revision = revision + 1
+            WHERE run_scope = NEW.workflow_id;
+        END;
+        """
+    )
+    conn.close()
+    state_db.init_db(db_path)
+    refreshed = state_db.get_db_connection(db_path)
+    try:
+        sql = refreshed.execute(
+            """
+            SELECT sql FROM sqlite_master
+            WHERE type = 'trigger'
+              AND name = 'trg_working_context_source_clock_workflows_update'
+            """
+        ).fetchone()["sql"]
+        assert "working_context_source_heads" in sql
+    finally:
+        refreshed.close()
 
 
 def test_global_source_clock_schema_migrates_to_execution_scope(tmp_path):
