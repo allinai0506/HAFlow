@@ -185,6 +185,46 @@ def should_recover_repush(
     return True
 
 
+def repush_inflight_timeout_seconds() -> float:
+    """Return the lease after which an interrupted worker may be retried."""
+    return _env_float(
+        "HERDR_BLOCKED_REPUSH_TIMEOUT", REPUSH_CLAIM_LEASE_SECONDS
+    )
+
+
+def repush_inflight_is_stale(
+    episode: dict | None,
+    *,
+    now: float,
+    timeout_seconds: float | None = None,
+) -> bool:
+    """Detect a worker lease left behind by a Controller restart."""
+    episode = episode or {}
+    if episode.get("repush_state") != "in_flight":
+        return False
+    started = episode.get("repush_inflight_at")
+    if started is None:
+        return True
+    try:
+        timeout = (
+            repush_inflight_timeout_seconds()
+            if timeout_seconds is None
+            else float(timeout_seconds)
+        )
+        return float(now) - float(started) >= timeout
+    except (TypeError, ValueError):
+        return True
+
+
+def recover_stale_repush(episode: dict, *, now: float) -> dict:
+    """Release an abandoned worker lease so one bounded retry can run."""
+    updated = dict(episode or {})
+    updated["repush_state"] = "failed"
+    updated["repush_inflight_at"] = None
+    updated["last_repush_recovery_at"] = now
+    return updated
+
+
 def claim_is_active(
     claim: object,
     now: float,
@@ -300,6 +340,8 @@ def new_episode(task: dict | None, now: float) -> dict:
         "coordinator_notices": 0,
         "repushes": 0,
         "repush_state": "pending",
+        "repush_inflight_at": None,
+        "last_repush_recovery_at": None,
         "delivery_attempts": 0,
         "recovery_attempts": 0,
         "human_escalations": 0,
