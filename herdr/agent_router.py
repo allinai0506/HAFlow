@@ -485,15 +485,7 @@ def choose_agent(
                         f"Isolation opt-out for stage '{stage}' requires "
                         "a non-empty reuse_reason (R9 fail-closed)"
                     )
-                _record_router_opt_out(
-                    workflow_id,
-                    stage,
-                    None,
-                    _opt_reason,
-                    stage_used_agents,
-                    task_id=reservation_key or "",
-                    run_id=run_id or "",
-                )
+                # Defer the audit until ranking identifies the reused agent.
             else:
                 filtered = [a for a in candidates if a not in stage_used_agents]
                 if not filtered:
@@ -525,6 +517,19 @@ def choose_agent(
         )
 
         selected = ranked[0][1]
+
+        if selected in stage_used_agents:
+            _opt_out, _opt_reason = _isolation_opt_out(node_policy)
+            if _opt_out and _opt_reason:
+                _record_router_opt_out(
+                    workflow_id,
+                    stage,
+                    selected,
+                    _opt_reason,
+                    stage_used_agents,
+                    task_id=reservation_key or "",
+                    run_id=run_id or "",
+                )
 
         if reservation_key:
             reservations.setdefault("reservations", {})[reservation_key] = {

@@ -32,6 +32,14 @@ class DeliveryAmbiguityError(ValueError):
         )
 
 
+class DeliveryIdentityError(DeliveryAmbiguityError):
+    """Raised when a delivery edge or identity cannot be trusted."""
+
+    def __init__(self, message: str, candidates: list[dict] | None = None):
+        self.candidates = candidates or []
+        ValueError.__init__(self, message)
+
+
 def _body_value(note: dict, field: str) -> str:
     value = note.get(field)
     if value not in (None, ""):
@@ -69,6 +77,8 @@ def _candidate_aliases(note: dict) -> set[str]:
         str(note.get("note_id") or ""),
         str(note.get("delivery_id") or ""),
         str(note.get("candidate_id") or ""),
+        str(note.get("task_id") or ""),
+        _body_value(note, "delivery_id"),
         _body_value(note, "candidate_sha"),
     }
     return {value for value in values if value}
@@ -89,6 +99,7 @@ def _supersedes(note: dict) -> set[str]:
         "supersedes_id", "replaces", "replaced_candidate",
     ):
         values.update(_list(note.get(field)))
+        values.update(_list(_body_value(note, field)))
     return {value for value in values if value}
 
 
@@ -99,6 +110,7 @@ def _superseded_by(note: dict) -> set[str]:
         "invalidated_by", "invalidated_by_candidate",
     ):
         values.update(_list(note.get(field)))
+        values.update(_list(_body_value(note, field)))
     return {value for value in values if value}
 
 
@@ -185,7 +197,10 @@ def same_branch_warning(
     related = []
     warning = False
     for pr in scoped:
-        sha = str(pr.get("head_sha") or pr.get("headSha") or "")
+        sha = str(
+            pr.get("head_sha") or pr.get("headSha")
+            or pr.get("headRefOid") or ""
+        )
         related.append({"number": pr.get("number"), "head_sha": sha})
         if sha and candidate and sha != candidate:
             warning = True
@@ -375,10 +390,10 @@ def select_effective_delivery(
             ):
                 invalidated.add(candidate_identity(candidate))
     if unresolved:
-        raise DeliveryAmbiguityError([
-            {"delivery_id": target, "reason": "unknown_candidate_target"}
-            for target in sorted(set(unresolved))
-        ])
+        # Unknown graph edges are not an effective candidate.  Returning no
+        # candidate is deterministic fail-closed and keeps the predecessor
+        # from being resurrected.
+        return None
 
     eligible = []
     for identity, note in canonical.items():
@@ -432,9 +447,9 @@ def supersede_delivery_note(
             for alias in _candidate_aliases(note)
         }
         if supersedes not in aliases:
-            raise DeliveryAmbiguityError([
-                {"delivery_id": supersedes, "reason": "unknown_candidate_target"}
-            ])
+            raise DeliveryIdentityError(
+                f"unknown delivery identity to supersede: {supersedes}"
+            )
         for note in existing_notes:
             if note.get("kind") != "delivery":
                 continue

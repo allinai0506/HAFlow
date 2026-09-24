@@ -2,6 +2,7 @@
 
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -279,7 +280,7 @@ def _record_sentinel_event(store, task, event_type, payload):
             agent_id=task.get("agent"),
             source="herdr-sentinel",
         )
-    except (OSError, ValueError, RuntimeError, AttributeError) as exc:
+    except (OSError, ValueError, RuntimeError, AttributeError, sqlite3.Error) as exc:
         print(f"[SENTINEL EVENT WARN] {event_type}: {exc}", file=sys.stderr, flush=True)
 
 
@@ -441,7 +442,16 @@ def main():
 
     while True:
         store = _get_store()
-        tasks = store.list_tasks()
+        try:
+            tasks = store.list_tasks()
+        except sqlite3.Error as exc:
+            print(
+                f"[SENTINEL DB WARN] list_tasks failed; preserving the loop: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+            time.sleep(POLL_SECONDS)
+            continue
         now = time.time()
         changes = {}
 
@@ -478,7 +488,7 @@ def main():
                         agent_status=agent_state,
                         observed_at=now,
                     )
-                except (AttributeError, OSError, RuntimeError, ValueError) as exc:
+                except (AttributeError, OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
                     _record_sentinel_event(
                         store,
                         task,

@@ -11,8 +11,6 @@ import importlib.machinery
 import importlib.util
 import os
 import sqlite3
-import sys
-import tempfile
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,7 +18,7 @@ from unittest.mock import patch
 
 import pytest
 
-from herdr import agent_router, delivery_record, liveness, workflow_docs
+from herdr import agent_router, delivery_record, liveness, repo_hygiene, workflow_docs
 from herdr.state_store import SQLiteStateStore, reset_state_store
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -106,6 +104,28 @@ def test_fr1_epoch_change_restarts_double_sampling_and_controller_commits_once(t
     assert store.get_task(task["task_id"])["status"] == "agent_done"
 
 
+def test_fr1_conditional_clear_cannot_delete_a_new_epoch_observation(tmp_path):
+    store = SQLiteStateStore(tmp_path / "state.db")
+    task = seed_task(store, "task-clear-race")
+    store.observe_completion(
+        task_id=task["task_id"], marker_present=False,
+        agent_status="working", observed_at=100.0,
+    )
+    old_version = task["version"]
+    store.update_task_metadata(task["task_id"], {"human_touch": "reopen"})
+    store.observe_completion(
+        task_id=task["task_id"], marker_present=True,
+        agent_status="idle", observed_at=103.0,
+    )
+    assert store.clear_completion_observation(
+        task["task_id"],
+        expected_status="working",
+        expected_version=old_version,
+    ) is False
+    current = store.get_completion_observation(task["task_id"])
+    assert current["observed_version"] == store.get_task(task["task_id"])["version"]
+
+
 def test_fr1_requires_a_full_poll_interval_between_stable_samples(tmp_path):
     store = SQLiteStateStore(tmp_path / "state.db")
     task = seed_task(store, "task-interval")
@@ -186,7 +206,7 @@ def test_fr2_concurrent_controller_sweeps_claim_one_repush(tmp_path):
             results.append(controller.process_blocked_sla_task(
                 task, now=entry + 1801.0, send_prompt=send_prompt,
             ))
-        except BaseException as exc:  # surfaced by the assertion below
+        except (OSError, RuntimeError, ValueError, AssertionError) as exc:
             results.append(exc)
 
     with patch.object(controller, "_attention_store", episode_store), patch.object(
@@ -209,6 +229,84 @@ def test_fr2_concurrent_controller_sweeps_claim_one_repush(tmp_path):
         if event["event_type"] == "blocked_auto_repush"
     ]
     assert len(repush_events) == 1
+
+
+def test_crash_observation_reaches_controller_auto_recovery_path(tmp_path):
+    controller = load_script("herdr_controller_crash_fix4", "services/herdr-controller.py")
+    store = SQLiteStateStore(tmp_path / "state.db")
+    task = seed_task(store, "task-crash")
+    store.record_event(
+        "agent_process_crash_observed",
+        {
+            "next_status": "failed",
+            "observed_status": task["status"],
+            "observed_version": task["version"],
+        },
+        workflow_id=task["workflow_id"],
+        node_id=task["node"],
+        task_id=task["task_id"],
+        source="herdr-sentinel",
+    )
+    with patch.object(controller, "_get_store", return_value=store):
+        assert controller.process_crash_observations() == 1
+    failed = store.get_task(task["task_id"])
+    assert failed["status"] == "failed"
+    reasons = [
+        entry.get("reason")
+        for entry in failed.get("status_history", [])
+        if entry.get("to") == "failed"
+    ]
+    assert "agent_process_crash" in reasons
+    assert task["task_id"] in {
+        item["task_id"]
+        for item in liveness.select_infra_failures_for_recovery(
+            [failed], {"agent_process_crash"}, max_attempts=2
+        )
+    }
+
+
+def test_fr2_new_task_epoch_discards_an_old_action_lease(tmp_path, monkeypatch):
+    controller = load_script("herdr_controller_fr2_epoch_fix4", "services/herdr-controller.py")
+    store = SQLiteStateStore(tmp_path / "state.db")
+    store.save_workflow({"workflow_id": "wf-fix4", "status": "running"})
+    store.save_task({
+        "task_id": "task-lease",
+        "workflow_id": "wf-fix4",
+        "status": "blocked",
+        "node": "implementation",
+        "stage": "implementation",
+        "pane_id": "pane-lease",
+        "sentinel_reason": "inner_loop_exhausted",
+    })
+    task = store.get_task("task-lease")
+    old_entry = float(task["updated_at"])
+    attention = liveness.EpisodeStore(tmp_path / "attention.json")
+    attention.upsert("task-lease:blocked_sla", {
+        "task_id": task["task_id"], "entry_updated_at": old_entry,
+        "entry_version": task["version"], "active_seconds": 1800,
+        "last_tick_at": old_entry, "repushes": 0, "human_escalations": 0,
+        "last_action_at": None, "episode_id": "old-episode",
+        "action_claim": {"claim_id": "old", "action": "repush", "claimed_at": old_entry,
+                          "lease_until": old_entry + 10000},
+    })
+    store.update_task_metadata(task["task_id"], {"human_touch": "reopen"})
+    monkeypatch.setenv("HERDR_BLOCKED_FIRST_SLA", "3")
+    monkeypatch.setenv("HERDR_BLOCKED_JITTER_WINDOW", "1")
+    current = store.get_task(task["task_id"])
+    with patch.object(controller, "_attention_store", attention), patch.object(
+        controller, "_get_store", return_value=store
+    ), patch.object(controller, "_send_blocked_repush", return_value=(True, "new")) as sender, patch.object(
+        controller, "enqueue_coordinator_event"
+    ):
+        assert controller.process_blocked_sla_task(
+            current, now=float(current["updated_at"]) + 1,
+        )["action"] == "none"
+        decision = controller.process_blocked_sla_task(
+            current, now=float(current["updated_at"]) + 4,
+        )
+    assert decision["action"] == "repush"
+    sender.assert_called_once()
+    assert "action_claim" not in attention.get("task-lease:blocked_sla")
 
 
 def test_fr2_repush_failure_recovers_once_after_controller_restart_and_escalates(tmp_path):
@@ -273,7 +371,7 @@ def test_fr2_repush_failure_recovers_once_after_controller_restart_and_escalates
         )["action"] == "escalate"
 
     event_types = [event["event_type"] for event in store.list_events(task_id=task["task_id"])]
-    assert event_types.count("blocked_auto_repush") == 1
+    assert event_types.count("prompt_delivery_failed") == 1
     assert event_types.count("blocked_auto_repush_recovered") == 1
     assert event_types.count("blocked_human_escalated") == 1
 
@@ -302,6 +400,36 @@ def test_fr4_rejects_identity_payload_conflicts_and_unknown_supersede():
     }]
     with pytest.raises(ValueError):
         delivery_record.select_effective_delivery(unknown_replacement)
+
+
+def test_fr4_cli_rejects_unknown_supersede_target(tmp_path):
+    module = load_script("herdr_task_delivery_fix4", "bin/herdr-task")
+    docs_dir = tmp_path / "workflow-docs"
+    with patch.dict(os.environ, {workflow_docs.DOCS_DIR_ENV: str(docs_dir)}):
+        workflow_docs.append_note(
+            "wf-delivery-cli",
+            kind="delivery",
+            title="old",
+            node="wrapup",
+            fields={
+                "delivery_id": "candidate-old",
+                "candidate_sha": "sha-old",
+                "delivery_branch": "branch",
+                "review_task": "review",
+                "test_gate": "test",
+            },
+        )
+        with pytest.raises(SystemExit) as exc:
+            module.record_delivery_note(
+                "wf-delivery-cli",
+                "branch",
+                "sha-new",
+                "review",
+                "test",
+                supersedes="candidate-missing",
+            )
+        assert exc.value.code == 2
+        assert len(workflow_docs.load_notes("wf-delivery-cli")) == 1
 
 
 def test_fr4_invalidation_is_scoped_to_its_node_and_candidate():
@@ -349,7 +477,7 @@ def test_fr4_concurrent_shared_note_appends_remain_fail_closed(tmp_path):
                         "test_gate": "test",
                     },
                 )
-            except BaseException as exc:
+            except (OSError, RuntimeError, ValueError) as exc:
                 errors.append(exc)
 
         workers = [threading.Thread(target=append, args=(index,)) for index in range(2)]
@@ -362,6 +490,14 @@ def test_fr4_concurrent_shared_note_appends_remain_fail_closed(tmp_path):
         assert len(notes) == 2
         with pytest.raises(delivery_record.DeliveryAmbiguityError):
             delivery_record.select_effective_delivery(notes)
+
+
+def test_fr3_porcelain_parser_preserves_paths_with_spaces():
+    porcelain = " M src/a file.txt\n?? ignored.txt\nR  old name.py -> new name.py\n"
+    assert repo_hygiene.parse_porcelain_paths(porcelain) == [
+        "src/a file.txt",
+        "new name.py",
+    ]
 
 
 def test_fr5_legacy_force_remains_a_direct_cli_choice():
@@ -483,9 +619,8 @@ def test_fr6_opt_out_audit_failure_is_fail_closed_before_topology(tmp_path, monk
         module, "release_agent_reservation"
     ), patch.object(agent_router, "_get_store", return_value=audit_store), patch.object(
         agent_router, "workflow_config_for", return_value=config
-    ), patch.object(agent_router, "ensure_pool_for_project", return_value=pool):
-        with pytest.raises(SystemExit) as exc:
-            module._launch_task(args)
+    ), patch.object(agent_router, "ensure_pool_for_project", return_value=pool), pytest.raises(SystemExit) as exc:
+        module._launch_task(args)
     assert exc.value.code == 2
     failed = store.get_task("task-audit-failure")
     assert failed["status"] == "failed"
@@ -510,9 +645,8 @@ def test_fr6_empty_review_pool_has_real_cli_to_store_lifecycle(tmp_path, monkeyp
         module, "release_agent_reservation"
     ), patch.object(agent_router, "_get_store", return_value=store), patch.object(
         agent_router, "workflow_config_for", return_value=config
-    ), patch.object(agent_router, "ensure_pool_for_project", return_value=pool):
-        with pytest.raises(SystemExit) as exc:
-            module._launch_task(args)
+    ), patch.object(agent_router, "ensure_pool_for_project", return_value=pool), pytest.raises(SystemExit) as exc:
+        module._launch_task(args)
     assert exc.value.code == 2
     failed = store.get_task("task-empty-review")
     assert failed["status"] == "failed"
@@ -521,5 +655,6 @@ def test_fr6_empty_review_pool_has_real_cli_to_store_lifecycle(tmp_path, monkeyp
     events = store.list_events(task_id="task-empty-review", event_type="router_isolation_rejected")
     assert events and events[-1]["payload"]["pane_dispatched"] is False
     workflow = store.get_workflow("wf-empty-review")
-    assert workflow["last_dispatch_failure"]["task_id"] if "task_id" in workflow["last_dispatch_failure"] else True
+    assert workflow["last_dispatch_failure"].get("result") == "failed"
+    assert workflow["last_dispatch_failure"].get("task_id") == "task-empty-review"
     reset_state_store()

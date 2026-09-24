@@ -30,14 +30,13 @@ def parse_porcelain_paths(porcelain: str) -> list[str]:
     """
     paths: list[str] = []
     for line in str(porcelain or "").splitlines():
-        stripped = line.strip()
-        if not stripped:
+        if len(line) < 4 or line[:2] in {"??", "!!"}:
             continue
-        # Porcelain: XY<space>path[ -> newpath]. Take the tail path.
-        parts = stripped.split()
-        if not parts:
-            continue
-        candidate = parts[-1]
+        # Porcelain v1: XY<space>path.  Do not split on whitespace: paths
+        # may legally contain spaces.  Rename/copy records use ``old -> new``.
+        candidate = line[3:].strip()
+        if " -> " in candidate:
+            candidate = candidate.split(" -> ", 1)[1].strip()
         if candidate and candidate not in paths:
             paths.append(candidate)
     return paths

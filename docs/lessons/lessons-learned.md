@@ -3966,3 +3966,37 @@ pytest -q tests/test_t3_probes.py::L2EmptyReleasable \
 - `wiki/dag-workflow-engine.md` §12/§13；shared notes `n-1790229087315-5429`（review-t2）、
   `n-1790228635198-359f`（test 门禁 pass）
 - 同类模式：`docs/lessons/lessons-learned.md` §87（收尾条目固定交付物身份 / 分叉内容等价性）
+
+---
+
+## 90. Fix-loop 证据门禁：采样、episode 与候选身份必须可重放
+
+### 问题背景
+
+`wf-haflow-0924-01` 的独立 test gate 在候选 `4721d6b` 上稳定复现了五类阻断：
+完成观察在任务 epoch 变化后把 `first_seen` 留在 NULL；两个 Controller sweep
+可对同一 blocked episode 各发一次重推；同刻 delivery 候选按 note_id 静默择一；
+`--force` 被额外确认参数破坏；opt-out 审计异常越过路由边界。修复过程中还在
+`fbebbb1` review 锚点复现了崩溃观察无消费者和过期 action lease 残留。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|---|---|---|
+| 读两次 marker 就能完成 | 采样必须是同一 task/version epoch 的持久状态机，且两次有效样本至少间隔一个轮询周期 | `StateStore.observe_completion` 持久化采样；Controller 只用 `expected_status + expected_version` 的事务 CAS 提交 |
+| episode 只在单个进程内记计数 | JSON 读改写和外部 prompt 之间存在竞态，单纯 `attention.json` 不是动作锁 | 先用跨进程文件锁原子 claim，再发送；失败保留可恢复状态，预算耗尽只允许一次人工升级 |
+| 候选按时间/字典序选择 | append-only 记录的身份边必须先解析；同身份冲突、未知 supersede、同刻多候选都应拒绝 | `delivery_record` 以显式 identity/alias 图选择唯一有效候选，失效 replacement 不回退 predecessor |
+| 审计 best-effort | 隔离 opt-out 没有可验证回执就等于没有授权 | 审计异常、空 review 池和未知 delivery identity 均 fail-closed；失败 Task/event/workflow metadata 必须在 topology/Pane 前落盘 |
+| 修复测试只调用 helper | 状态、路由和 CLI 边界之间的接线错误仍会进入生产 | 每个 blocker 至少有一条经过真实 StateStore/Controller/CLI 与临时 SQLite/共享文档的回归；并发用独立连接/受控交错 |
+
+### 验证命令 / 关联证据
+
+- 修复前专项复现：`tests/test_impl_fix4_blocker_regression.py` 的 FR-1/FR-2/FR-4/FR-6 用例分别以 exit 1 暴露 NULL epoch、重复 repush、身份冲突和审计异常；FR-5 在隔离 `4721d6b` 快照运行 `tests/test_t3_probes.py::M3CloseWorkflowGate::test_accept_escalated_or_force_or_abandon_closes`，exit 1（直接 `--force` 被 `SystemExit(2)` 拒绝）。
+- 修复后专项：`python3.13 -m pytest -q tests/test_impl_fix1_regression.py tests/test_impl_fix4_blocker_regression.py tests/test_dispatch_fuse.py`，exit 0，46 passed。
+- 全量与循环门禁：`~/HAFlow/bin/herdr-loop eval`，score 100.0，1398/1398 tests，lint 2817（baseline 2844，new 0）。
+- 关联实现：`herdr/state_db.py`、`herdr/liveness.py`、`services/herdr-controller.py`、`herdr/delivery_record.py`、`herdr/workflow_docs.py`、`herdr/agent_router.py`、`bin/herdr-task`。
+
+### 相关文档 / 关联证据
+
+- 共享 spec/旧修复说明：`wf-haflow-0924-01/shared/notes.jsonl` 的 `FR-spec草稿`、`req-spec需求规格`、`test-0924测试报告`、`review-0924独立评审报告`、`impl-fix1修复说明`。
+- 回归入口：`tests/test_impl_fix4_blocker_regression.py`、`tests/test_impl_fix1_regression.py`。

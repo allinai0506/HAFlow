@@ -608,7 +608,7 @@ class EpisodeStore:
             self._save()
             return True
 
-    def mutate(self, key: str, updater) -> Optional[Dict[str, Any]]:
+    def mutate(self, key: str, updater) -> dict[str, Any] | None:
         """Atomically read-modify-write one episode.
 
         ``updater`` receives a copy of the current episode and returns the
@@ -624,7 +624,13 @@ class EpisodeStore:
                 return dict(current) if current else None
             if not isinstance(fields, dict):
                 raise TypeError("episode updater must return a dict or None")
-            current.update(fields)
+            if "__replace__" in fields:
+                replacement = fields["__replace__"]
+                if not isinstance(replacement, dict):
+                    raise TypeError("episode replacement must be a dict")
+                current = dict(replacement)
+            else:
+                current.update(fields)
             episodes[key] = current
             self._save()
             return dict(current)
@@ -637,8 +643,8 @@ class EpisodeStore:
         action: str,
         now: float,
         lease_seconds: float,
-        expected: Optional[Dict[str, Any]] = None,
-    ) -> Optional[Dict[str, Any]]:
+        expected: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
         """Atomically claim one external action for an episode.
 
         The claim is a short durable lease, not a second status machine.  It
@@ -651,8 +657,19 @@ class EpisodeStore:
             if not current:
                 return None
             for field, expected_value in (expected or {}).items():
-                if current.get(field) != expected_value:
-                    return None
+                actual = current.get(field)
+                # Older episodes may omit a zero-valued counter.  Treat that
+                # legacy shape as its documented zero default, but never
+                # coerce an unknown non-empty value.
+                if actual != expected_value and (
+                    field in current or expected_value not in (0, False)
+                ):
+                    if not (
+                        field == "repush_state"
+                        and field not in current
+                        and expected_value in {"pending", "failed"}
+                    ):
+                        return None
             previous = current.get("action_claim")
             if isinstance(previous, dict):
                 try:
@@ -678,8 +695,8 @@ class EpisodeStore:
         key: str,
         *,
         claim_id: str,
-        updates: Optional[Dict[str, Any]] = None,
-    ) -> Optional[Dict[str, Any]]:
+        updates: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
         """Finalize a claim only when its owner still owns the lease."""
         with self._lock, self._file_lock():
             episodes = self._load()
@@ -694,7 +711,7 @@ class EpisodeStore:
             return dict(current)
 
 
-def blocks_retry(store: EpisodeStore, key: str, now: Optional[float] = None) -> bool:
+def blocks_retry(store: EpisodeStore, key: str, now: float | None = None) -> bool:
     """True while an open episode throttles the next retry."""
     episode = store.get(key)
     if not episode:
@@ -705,8 +722,8 @@ def blocks_retry(store: EpisodeStore, key: str, now: Optional[float] = None) -> 
 def throttle_retry(
     store: EpisodeStore,
     key: str,
-    interval: Optional[float] = None,
-    now: Optional[float] = None,
+    interval: float | None = None,
+    now: float | None = None,
 ) -> None:
     """Push the next allowed retry of an already-open episode into the future."""
     current = time.time() if now is None else now

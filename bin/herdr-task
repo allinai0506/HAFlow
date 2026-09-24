@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 import time
@@ -1758,20 +1759,84 @@ def _preflight_delivery_identity(workflow_id, node_id, task_id):
 
     notes = _wd.load_notes(workflow_id)
     delivery_notes = [note for note in notes if note.get("kind") == "delivery"]
+    def reject(code, detail):
+        payload = {
+            "workflow_id": workflow_id,
+            "task_id": task_id,
+            "stage": node_id,
+            "failure_code": code,
+            "detail": str(detail)[:500],
+            "actionable": True,
+            "remediation": (
+                "record a valid delivery with herdr-task record-delivery "
+                "before launching test/review"
+            ),
+        }
+        try:
+            _get_store().record_event(
+                "test_baseline_rejected", payload,
+                workflow_id=workflow_id, node_id=node_id, task_id=task_id,
+                source="herdr-task",
+            )
+        except (OSError, ValueError, RuntimeError, AttributeError, sqlite3.Error) as exc:
+            print(f"[BASELINE EVENT WARN] rejection audit unavailable: {exc}", file=sys.stderr)
+        print(
+            f"[BASELINE REJECTED] {code}: workflow={workflow_id} "
+            f"task={task_id}; {detail}; launch refused (FR-6.2 fail-closed)."
+        )
+        raise SystemExit(2)
+
     if not delivery_notes:
-        return None
+        reject("delivery_missing", "no valid delivery baseline exists")
     try:
         effective = _dr.select_effective_delivery(notes)
     except _dr.DeliveryAmbiguityError as exc:
-        print(f"[DELIVERY AMBIGUOUS] {exc}; launch refused")
-        raise SystemExit(2) from exc
+        reject("delivery_ambiguous", exc)
     if effective is None:
-        print(
-            f"[DELIVERY INVALIDATED] workflow={workflow_id} "
-            f"task={task_id}; launch refused before Pane creation"
-        )
-        raise SystemExit(2)
+        reject("delivery_invalidated", "delivery candidate was invalidated")
     return effective
+
+
+def _validate_test_delivery_baseline(args, candidate_sha, baseline_commit, source_repo):
+    """Require an independently provable delivery ancestor for test/review."""
+    candidate_sha = str(candidate_sha or "").strip()
+    baseline_commit = str(baseline_commit or "").strip()
+    matches = bool(candidate_sha and baseline_commit and candidate_sha == baseline_commit)
+    if not matches and candidate_sha and baseline_commit:
+        try:
+            probe = subprocess.run(
+                ["git", "-C", source_repo, "merge-base", "--is-ancestor",
+                 candidate_sha, baseline_commit],
+                text=True, capture_output=True, check=False,
+            )
+            matches = probe.returncode == 0
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+            matches = False
+    if matches:
+        return
+    try:
+        _get_store().record_event(
+            "test_baseline_rejected",
+            {"candidate_sha": candidate_sha, "baseline_commit": baseline_commit,
+             "stage": getattr(args, "node", "") or getattr(args, "stage", ""),
+             "failure_code": "baseline_unproven", "actionable": True,
+             "remediation": "rebase the test/review clone onto the recorded delivery candidate and relaunch"},
+            workflow_id=args.workflow_id,
+            node_id=getattr(args, "node", "") or getattr(args, "stage", ""),
+            task_id=args.task_id,
+            source="herdr-task",
+        )
+    except (OSError, ValueError, RuntimeError, AttributeError, sqlite3.Error) as event_exc:
+        print(
+            f"[BASELINE EVENT WARN] could not persist rejection: {event_exc}",
+            file=sys.stderr,
+        )
+    print(
+        f"[BASELINE REJECTED] test/review task {args.task_id} baseline "
+        f"{baseline_commit} does not contain candidate {candidate_sha}; "
+        "launch refused (FR-6.2 fail-closed)."
+    )
+    raise SystemExit(2)
 
 
 def _launch_task(args):
@@ -2151,40 +2216,33 @@ def _launch_task(args):
                             break
                 if not _cand:
                     _cand = str(_effective.get("base_sha") or "")
-                _ok = bool(_cand and baseline_commit and _cand == baseline_commit)
-                if not _ok and _cand and baseline_commit:
-                    try:
-                        _probe = subprocess.run(
-                            ["git", "-C", source_repo, "merge-base",
-                             "--is-ancestor", _cand, baseline_commit],
-                            text=True, capture_output=True, check=False,
-                        )
-                        _ok = _probe.returncode == 0
-                    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
-                        _ok = False
-                if not _ok:
-                    try:
-                        _get_store().record_event(
-                            "test_baseline_rejected",
-                            {"candidate_sha": _cand, "baseline_commit": baseline_commit or "",
-                             "stage": node_id},
-                            workflow_id=args.workflow_id,
-                            node_id=node_id,
-                            task_id=args.task_id,
-                            source="herdr-task",
-                        )
-                    except (OSError, ValueError, RuntimeError, AttributeError):
-                        pass
-                    print(
-                        f"[BASELINE REJECTED] test/review task {args.task_id} "
-                        f"baseline {baseline_commit} does not contain candidate {_cand}; "
-                        "launch refused (FR-6.2 fail-closed)."
-                    )
-                    sys.exit(2)
+                _validate_test_delivery_baseline(
+                    args, _cand, baseline_commit, source_repo
+                )
         except SystemExit:
             raise
-        except (ImportError, AttributeError, ValueError):
-            pass
+        except (ImportError, AttributeError, OSError, ValueError, RuntimeError,
+                sqlite3.Error, subprocess.SubprocessError) as exc:
+            try:
+                _get_store().record_event(
+                    "test_baseline_rejected",
+                    {"stage": node_id, "failure_code": "baseline_check_unavailable",
+                     "detail": str(exc)[:300], "actionable": True,
+                     "remediation": "repair workflow delivery metadata and relaunch"},
+                    workflow_id=args.workflow_id, node_id=node_id,
+                    task_id=args.task_id, source="herdr-task",
+                )
+            except (OSError, ValueError, RuntimeError, AttributeError,
+                    sqlite3.Error) as event_exc:
+                print(
+                    f"[BASELINE EVENT WARN] could not persist rejection: {event_exc}",
+                    file=sys.stderr,
+                )
+            print(
+                f"[BASELINE REJECTED] could not prove test/review baseline: {exc}; "
+                "launch refused (FR-6.2 fail-closed)."
+            )
+            sys.exit(2)
     pane_source = worker_result.get(
         "pane_source",
         "dynamic"
@@ -3645,6 +3703,60 @@ def integrate_task(task_id):
         os.path.expanduser(main_repo)
     )
 
+    tracked_status = subprocess.check_output(
+        [
+            "git",
+            "-C",
+            main_repo,
+            "status",
+            "--porcelain",
+            "--untracked-files=no"
+        ],
+        text=True
+    ).strip()
+
+    if tracked_status:
+        from herdr import repo_hygiene as _hygiene
+
+        try:
+            _email = subprocess.check_output(
+                ["git", "-C", main_repo, "config", "user.email"],
+                text=True,
+            ).strip()
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+            _email = ""
+        diagnosis = _hygiene.diagnose_main_dirty(
+            porcelain=tracked_status,
+            configured_email=_email,
+            task_branch=branch,
+            task_id=task_id,
+        )
+        print("Main repository has tracked changes")
+        print(tracked_status)
+        print(f"blocked_files={diagnosis['blocked_files']}")
+        print(f"blocked_total={diagnosis['blocked_total']}")
+        print(f"owner={diagnosis['owner']} owner_source={diagnosis['owner_source']}")
+        print(f"remediation_cmd={diagnosis['remediation_cmd']}")
+        print(
+            "HERDR_INTEGRATE_RESULT="
+            + json.dumps(
+                {
+                    "task_id": task_id,
+                    "result": "main_dirty",
+                    "tracked_status": tracked_status[:2000],
+                    "blocked_files": diagnosis["blocked_files"],
+                    "blocked_total": diagnosis["blocked_total"],
+                    "owner": diagnosis["owner"],
+                    "owner_source": diagnosis["owner_source"],
+                    "task_branch": diagnosis["task_branch"],
+                    "remediation_cmd": diagnosis["remediation_cmd"],
+                },
+                ensure_ascii=False,
+            )
+        )
+        sys.exit(5)
+
+
     try:
         ensure_branch_available(
             branch,
@@ -3824,62 +3936,6 @@ def integrate_task(task_id):
     integration_branch = (
         f"herdr/integration-{task_id}"
     )
-
-    # Integration only updates refs. Tracked edits remain protected, while
-    # unrelated untracked files no longer participate in the operation.
-    # FR-3.3: --untracked-files=no is load-bearing; clone-infra untracked
-    # entries (e.g. ?? .agent-task-context) never trip this gate.
-    tracked_status = subprocess.check_output(
-        [
-            "git",
-            "-C",
-            main_repo,
-            "status",
-            "--porcelain",
-            "--untracked-files=no"
-        ],
-        text=True
-    ).strip()
-
-    if tracked_status:
-        from herdr import repo_hygiene as _hygiene
-
-        try:
-            _email = subprocess.check_output(
-                ["git", "-C", main_repo, "config", "user.email"],
-                text=True,
-            ).strip()
-        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
-            _email = ""
-        diagnosis = _hygiene.diagnose_main_dirty(
-            porcelain=tracked_status,
-            configured_email=_email,
-            task_branch=None,
-            task_id=task_id,
-        )
-        print("Main repository has tracked changes")
-        print(tracked_status)
-        print(f"blocked_files={diagnosis['blocked_files']}")
-        print(f"blocked_total={diagnosis['blocked_total']}")
-        print(f"owner={diagnosis['owner']} owner_source={diagnosis['owner_source']}")
-        print(f"remediation_cmd={diagnosis['remediation_cmd']}")
-        print(
-            "HERDR_INTEGRATE_RESULT="
-            + json.dumps(
-                {
-                    "task_id": task_id,
-                    "result": "main_dirty",
-                    "tracked_status": tracked_status[:2000],
-                    "blocked_files": diagnosis["blocked_files"],
-                    "blocked_total": diagnosis["blocked_total"],
-                    "owner": diagnosis["owner"],
-                    "owner_source": diagnosis["owner_source"],
-                    "remediation_cmd": diagnosis["remediation_cmd"],
-                },
-                ensure_ascii=False,
-            )
-        )
-        sys.exit(5)
 
     subprocess.run(
         [
@@ -4369,6 +4425,7 @@ def close_workflow(
     abandon=False,
     force=False,
     accept_escalated=False,
+    confirm_force=None,
 ):
     data = load_tasks()
     tasks = [
@@ -4483,6 +4540,11 @@ def close_workflow(
     # --force is the explicitly confirmed direct escape hatch.  It is the
     # historical command-line contract; no second confirmation flag is needed.
     escalated_via = "accept-escalated" if accept_escalated else ("force" if force else ("abandon" if abandon else ""))
+    close_outcome = (
+        "abandoned" if abandon else
+        "escalated_accepted" if escalated_git and accept_escalated else
+        "delivered"
+    )
     if escalated_git and not (accept_escalated or force or abandon):
         print(
             "[CLOSE ABORT] workflow has escalated git tasks "
@@ -4526,6 +4588,7 @@ def close_workflow(
     report = {
         "workflow_id": workflow_id,
         "dry_run": dry_run,
+        "outcome": close_outcome,
         "tasks": [],
         "tabs_closed": [],
         "tabs_skipped": {},
@@ -4580,7 +4643,7 @@ def close_workflow(
     if not dry_run:
         _mark_workflow_completed(
             workflow_id,
-            outcome="abandoned" if abandon else "delivered",
+            outcome=close_outcome,
             force=force,
         )
         stage_reset(workflow_id)
@@ -4597,7 +4660,7 @@ def close_workflow(
     for row in report["tasks"]:
         line = (
             f"  {row.get('task_id')} status={row.get('status')} "
-            f"action={row.get('action')}"
+            f"action={row.get('action')} pane_closed={row.get('pane_closed')}"
         )
         if row.get("evidence"):
             line += f" evidence={row['evidence']}"
@@ -4608,6 +4671,10 @@ def close_workflow(
         print("  [ESCALATED ACCEPTED] human-claimed escalated tasks (not ordinary cleaned):")
         for item in report["escalated_accepted"]:
             print(f"    {item.get('task_id')} via={item.get('via')}")
+        print(
+            "  [DELIVERABLE STATUS] workflow close was accepted with escalation; "
+            "task commit/integration status and retained Clone are reported per task."
+        )
     print(f"  tabs_closed={report['tabs_closed'] or '[]'}")
     if report.get("tabs_skipped"):
         for tab_id, reason in report["tabs_skipped"].items():
@@ -5392,7 +5459,7 @@ def record_delivery_note(
 def check_delivery_for_pr(
     workflow_id, head_sha, head_ref_name="",
     merged_prs=None, cherry_lines=None,
-    head_tree=None, candidate_tree=None,
+    head_tree=None, candidate_tree=None, repo_path=None,
 ):
     """Thin PR gate (FR-4.2/4.3/4.4): equivalence + template + same-branch warn."""
     from herdr import delivery_record as _dr
@@ -5434,6 +5501,38 @@ def check_delivery_for_pr(
                 break
     if not candidate_sha:
         candidate_sha = str(effective.get("base_sha") or "")
+    repo_path = os.path.realpath(repo_path or os.getcwd())
+    if merged_prs is None and head_ref_name:
+        proc = subprocess.run(
+            ["gh", "pr", "list", "--state", "merged", "--head",
+             head_ref_name, "--json", "number,headRefName,headRefOid,state"],
+            cwd=repo_path, text=True, capture_output=True, check=False,
+        )
+        if proc.returncode == 0:
+            try:
+                merged_prs = json.loads(proc.stdout or "[]")
+            except (TypeError, ValueError):
+                merged_prs = []
+                print("[DELIVERY INPUT WARN] gh returned invalid merged-PR JSON")
+        else:
+            merged_prs = []
+            print(
+                "[DELIVERY INPUT WARN] merged PR history unavailable; "
+                f"gh exit={proc.returncode}: {(proc.stderr or '').strip()[:300]}"
+            )
+    if head_tree is None or candidate_tree is None:
+        def tree_for(sha):
+            if not sha:
+                return None
+            proc = subprocess.run(
+                ["git", "-C", repo_path, "rev-parse", "--verify", f"{sha}^{{tree}}"],
+                text=True, capture_output=True, check=False,
+            )
+            return proc.stdout.strip() if proc.returncode == 0 else None
+        head_tree = head_tree if head_tree is not None else tree_for(head_sha)
+        candidate_tree = (
+            candidate_tree if candidate_tree is not None else tree_for(candidate_sha)
+        )
     equivalent, eq_reason = _dr.candidates_equivalent(
         candidate_sha=candidate_sha,
         head_sha=head_sha,
@@ -5857,6 +5956,10 @@ def main():
     check_delivery_cmd.add_argument("--workflow-id", required=True)
     check_delivery_cmd.add_argument("--head-sha", required=True)
     check_delivery_cmd.add_argument("--head-ref", default="")
+    check_delivery_cmd.add_argument(
+        "--repo-path", default=None,
+        help="GitHub repository working tree for merged-PR and tree-equivalence evidence",
+    )
 
     observe_cmd = sub.add_parser(
         "observe",
@@ -6232,6 +6335,7 @@ def main():
             args.workflow_id,
             args.head_sha,
             head_ref_name=getattr(args, "head_ref", ""),
+            repo_path=getattr(args, "repo_path", None),
         )
 
     elif args.command == "observe":

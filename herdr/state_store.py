@@ -210,8 +210,8 @@ class StateStore(ABC):
         source: str = "system",
         metadata: Optional[Dict[str, Any]] = None,
         force: bool = False,
-        expected_status: Optional[str] = None,
-        expected_version: Optional[int] = None,
+        expected_status: str | None = None,
+        expected_version: int | None = None,
         expected_updated_at: Optional[float] = None,
     ) -> Dict[str, Any]:
         """Atomically transition a task only when its observed epoch matches."""
@@ -253,7 +253,13 @@ class StateStore(ABC):
         pass
 
     @abstractmethod
-    def clear_completion_observation(self, task_id: str) -> bool:
+    def clear_completion_observation(
+        self,
+        task_id: str,
+        *,
+        expected_status: str | None = None,
+        expected_version: int | None = None,
+    ) -> bool:
         pass
 
     @abstractmethod
@@ -567,11 +573,11 @@ class StateStore(ABC):
     @abstractmethod
     def import_from_json(
         self,
-        workflows_file: Optional[Path] = None,
-        tasks_file: Optional[Path] = None,
-        steering_file: Optional[Path] = None,
-        checkpoints_dir: Optional[Path] = None,
-    ) -> Dict[str, Any]:
+        workflows_file: Path | None = None,
+        tasks_file: Path | None = None,
+        steering_file: Path | None = None,
+        checkpoints_dir: Path | None = None,
+    ) -> dict[str, Any]:
         """Migrate legacy JSON files into SQLite database."""
         pass
 
@@ -698,8 +704,8 @@ class SQLiteStateStore(StateStore):
         source: str = "system",
         metadata: Optional[Dict[str, Any]] = None,
         force: bool = False,
-        expected_status: Optional[str] = None,
-        expected_version: Optional[int] = None,
+        expected_status: str | None = None,
+        expected_version: int | None = None,
         expected_updated_at: Optional[float] = None,
     ) -> Dict[str, Any]:
         return state_db.compare_and_set_task_transition(
@@ -760,8 +766,19 @@ class SQLiteStateStore(StateStore):
     ) -> Optional[Dict[str, Any]]:
         return state_db.get_completion_observation(task_id, db_path=self.db_path)
 
-    def clear_completion_observation(self, task_id: str) -> bool:
-        return state_db.clear_completion_observation(task_id, db_path=self.db_path)
+    def clear_completion_observation(
+        self,
+        task_id: str,
+        *,
+        expected_status: str | None = None,
+        expected_version: int | None = None,
+    ) -> bool:
+        return state_db.clear_completion_observation(
+            task_id,
+            db_path=self.db_path,
+            expected_status=expected_status,
+            expected_version=expected_version,
+        )
 
     def update_task_metadata(
         self,
@@ -1104,11 +1121,11 @@ class SQLiteStateStore(StateStore):
 
     def import_from_json(
         self,
-        workflows_file: Optional[Path] = None,
-        tasks_file: Optional[Path] = None,
-        steering_file: Optional[Path] = None,
-        checkpoints_dir: Optional[Path] = None,
-    ) -> Dict[str, Any]:
+        workflows_file: Path | None = None,
+        tasks_file: Path | None = None,
+        steering_file: Path | None = None,
+        checkpoints_dir: Path | None = None,
+    ) -> dict[str, Any]:
         return state_db.migrate_v1_to_v2(
             workflows_file=workflows_file,
             tasks_file=tasks_file,
@@ -1118,10 +1135,10 @@ class SQLiteStateStore(StateStore):
         )
 
 
-_GLOBAL_STATE_STORE: Optional[StateStore] = None
+_GLOBAL_STATE_STORE: StateStore | None = None
 
 
-def get_state_store(db_path: Optional[Path] = None) -> StateStore:
+def get_state_store(db_path: Path | None = None) -> StateStore:
     """Get or instantiate global StateStore singleton."""
     global _GLOBAL_STATE_STORE
     resolved_path = Path(db_path) if db_path else state_db.get_default_db_path()
@@ -1134,7 +1151,7 @@ def get_state_store(db_path: Optional[Path] = None) -> StateStore:
     return _GLOBAL_STATE_STORE
 
 
-def set_state_store(store: Optional[StateStore]) -> None:
+def set_state_store(store: StateStore | None) -> None:
     """Explicitly set global StateStore (useful for testing or mocking)."""
     global _GLOBAL_STATE_STORE
     _GLOBAL_STATE_STORE = store
