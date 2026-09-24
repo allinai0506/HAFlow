@@ -2697,6 +2697,13 @@ def _check_finalize_retry(task, status, now):
         _finalize_retry_exhausted_logged.discard(task_id)
         return False
     key = f"{task_id}:finalize"
+    # P1 recovery coherence: `herdr-task clear-escalation` (or any external
+    # recovery) removes the shared attention episode from another process.
+    # The in-memory exhausted latch must follow the episode: otherwise a
+    # later re-exhaustion would stall silently with no log and no
+    # re-escalation because the stale latch suppresses both.
+    if attention_get(key) is None:
+        _finalize_retry_exhausted_logged.discard(task_id)
     try:
         retry, reason, exhausted = should_retry_finalize(
             status, attention_get(key), now

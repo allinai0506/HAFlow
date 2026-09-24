@@ -469,15 +469,29 @@ class EpisodeStore:
     Atomic writes + process-wide lock keep concurrent controller threads from
     clobbering each other. Cross-process ownership is split by file path:
     controller owns attention.json, sentinel owns stalls.json.
+
+    The in-memory cache is invalidated by file identity (mtime_ns + size):
+    a CLI recovery command such as ``herdr-task clear-escalation`` runs in
+    its own process, so a long-lived controller must observe its writes on
+    the next sweep instead of serving a stale snapshot forever.
     """
 
     def __init__(self, path):
         self.path = Path(path)
         self._lock = threading.Lock()
         self._cache: Optional[Dict[str, Dict[str, Any]]] = None
+        self._loaded_sig = None
+
+    def _stat_sig(self):
+        try:
+            st = os.stat(self.path)
+        except OSError:
+            return None
+        return (st.st_mtime_ns, st.st_size)
 
     def _load(self) -> Dict[str, Dict[str, Any]]:
-        if self._cache is not None:
+        sig = self._stat_sig()
+        if self._cache is not None and sig == self._loaded_sig:
             return self._cache
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
@@ -485,6 +499,7 @@ class EpisodeStore:
             data = {}
         episodes = data.get("episodes") if isinstance(data, dict) else None
         self._cache = dict(episodes) if isinstance(episodes, dict) else {}
+        self._loaded_sig = sig
         return self._cache
 
     def _save(self) -> None:
@@ -503,6 +518,7 @@ class EpisodeStore:
                 os.unlink(tmp_name)
             except FileNotFoundError:
                 pass
+        self._loaded_sig = self._stat_sig()
 
     def all(self) -> Dict[str, Dict[str, Any]]:
         with self._lock:

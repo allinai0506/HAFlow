@@ -153,7 +153,7 @@ class Fix4GitBase(unittest.TestCase):
         """Bare origin + seed advance producing foreign other.txt."""
         origin = self.root / "origin.git"
         seed = self.root / "seed"
-        subprocess.run(["git", "init", "--bare", str(origin)],
+        subprocess.run(["git", "init", "--bare", "-b", "main", str(origin)],
                        text=True, capture_output=True, check=True)
         seed.mkdir()
         self._git("init", "-b", "main", cwd=seed)

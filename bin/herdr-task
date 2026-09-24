@@ -99,6 +99,13 @@ except ImportError:
 
 TASKS_FILE = os.environ.get("TASKS_FILE") or os.path.expanduser("~/.herdr-controller/tasks.json")
 WORKFLOW_FILE = os.environ.get("WORKFLOW_FILE") or os.path.expanduser("~/.herdr-controller/workflow.json")
+# Same resolution as services/herdr-controller.py::ATTENTION_FILE, captured
+# at import like the controller captures it: the CLI and the controller run
+# in different processes but inherit the same environment, so both must
+# address the same shared attention.json for clear-escalation recovery.
+ATTENTION_FILE = os.environ.get("HERDR_ATTENTION_FILE") or os.path.expanduser(
+    "~/.herdr-controller/attention.json"
+)
 DEFAULT_AGENT_LABELS = ["opencode", "codex", "qodercli", "claude", "agy", "pi", "grok", "kimi"]
 # 初次 prompt 投递必须有界:agent 无响应时不得永久阻塞 launch,
 # 超时后走既有 marker 校验 + send-text fallback。
@@ -4459,8 +4466,13 @@ def clear_finalize_escalation(task_id):
     """H-1: revoke machine-set finalize_escalated so finalize can re-drive.
 
     Human recovery path after the cause (dirty main repo, flaky gate) is
-    fixed. Clears the flag and reason; the next controller sweep re-drives
-    finalize instead of treating the task as settled.
+    fixed. Clears the flag and reason **plus** the shared
+    ``<task_id>:finalize`` attention episode, so the next controller sweep
+    recomputes retry budget from scratch instead of seeing the stale
+    ``attempts >= FINALIZE_RETRY_MAX`` snapshot and immediately
+    re-escalating. (P1: flag-only clearing could never actually resume
+    a retry_exhausted task.) The controller additionally drops its
+    in-memory exhausted latch once the episode is gone.
     """
     data = load_tasks()
     task = find_task(data, task_id)
@@ -4471,6 +4483,15 @@ def clear_finalize_escalation(task_id):
         print(f"[ESCALATION CLEAR SKIP] {task_id}: not escalated")
         return
     from herdr import kernel
+    from herdr import liveness
+    try:
+        attention_cleared = liveness.EpisodeStore(ATTENTION_FILE).clear(
+            f"{task_id}:finalize"
+        )
+    except (OSError, ValueError, RuntimeError, AttributeError) as exc:
+        print(f"Error clearing attention for {task_id}: {exc}",
+              file=sys.stderr)
+        sys.exit(2)
     try:
         kernel.update_task_metadata(
             task_id,
@@ -4483,7 +4504,8 @@ def clear_finalize_escalation(task_id):
         print(f"Error clearing escalation for {task_id}: {exc}",
               file=sys.stderr)
         sys.exit(2)
-    print(f"[ESCALATION CLEARED] {task_id}")
+    print(f"[ESCALATION CLEARED] {task_id} "
+          f"attention_cleared={bool(attention_cleared)}")
 
 
 def pause_task(task_id, reason=None):

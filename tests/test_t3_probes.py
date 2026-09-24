@@ -582,7 +582,7 @@ class L3IntegratedCommit(GitBase):
         seed = self.root / "seed"
         main_repo = self.root / "mrepo"
         self.clone = self.root / "tclone"
-        subprocess.run(["git", "init", "--bare", str(origin)],
+        subprocess.run(["git", "init", "--bare", "-b", "main", str(origin)],
                        text=True, capture_output=True, check=True)
         seed.mkdir()
         self._git("init", "-b", "main", cwd=seed)

@@ -219,7 +219,7 @@ class IntegrateOutcomeBase(LegacyBase):
         main_repo = self.root / "mrepo"
         self.clone = self.root / "tclone"
         subprocess.run(
-            ["git", "init", "--bare", str(origin)],
+            ["git", "init", "--bare", "-b", "main", str(origin)],
             text=True, capture_output=True, check=True,
         )
         seed.mkdir()

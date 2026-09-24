@@ -40,7 +40,20 @@ def _load_herdr_task(name="herdr_task_blockers"):
     return mod
 
 
+def _load_controller(name="ctrl_blockers"):
+    spec = importlib.util.spec_from_loader(
+        name,
+        importlib.machinery.SourceFileLoader(
+            name, str(HERDR_ROOT / "services" / "herdr-controller.py"),
+        ),
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 _ht = _load_herdr_task()
+_ctrl = _load_controller()
 
 from herdr.git_adoption import classify_commit_state
 
@@ -304,7 +317,7 @@ class F1OwnBranchPushScope(GitBase):
 
     def _origin_clone(self):
         origin = self.root / "origin.git"
-        subprocess.run(["git", "init", "--bare", str(origin)],
+        subprocess.run(["git", "init", "--bare", "-b", "main", str(origin)],
                        text=True, capture_output=True, check=True)
         task_clone = self.root / "tclone"
         subprocess.run(["git", "clone", str(self.clone), str(task_clone)],
@@ -356,6 +369,111 @@ class F1OwnBranchPushScope(GitBase):
         )
         self.assertEqual(verdict, "adopt")
         self.assertEqual(detail["reason"], "attributable_commits")
+
+
+class EpisodeStoreCoherence(unittest.TestCase):
+    """EpisodeStore instances in different processes see each other's writes."""
+
+    def test_cross_instance_upsert_and_clear_visible(self):
+        from herdr.liveness import EpisodeStore
+        path = Path(tempfile.mkdtemp(prefix="herdr-episode-")) / "attention.json"
+        s1 = EpisodeStore(str(path))
+        s2 = EpisodeStore(str(path))
+        s1.upsert("t-x:finalize",
+                  {"task_id": "t-x", "attempts": 5, "reason": "retry_exhausted"})
+        self.assertEqual(s2.get("t-x:finalize")["attempts"], 5)
+        s2.upsert("t-x:finalize", {"attempts": 6})
+        self.assertEqual(s1.get("t-x:finalize")["attempts"], 6)
+        s1.clear("t-x:finalize")
+        self.assertIsNone(s2.get("t-x:finalize"))
+
+
+class ClearEscalationRecovery(GitBase):
+    """P1: `clear-escalation` must truly resume finalize after retry_exhausted."""
+
+    def tearDown(self):
+        _ctrl._finalize_retry_exhausted_logged.discard("t-clr")
+        _ctrl.attention_clear("t-clr:finalize")
+        super().tearDown()
+
+    def _escalated_task(self):
+        task = self._save_task(
+            "t-clr",
+            baseline_commit=self.baseline,
+            branch="agent/opencode/docs-t-clr",
+            status="completed",
+            finalize_escalated=True,
+            finalize_escalate_reason="retry_exhausted",
+        )
+        _ctrl.attention_note(
+            "t-clr:finalize", task, "finalize",
+            reason="commit_retry", attempts=5,
+        )
+        _ctrl._finalize_retry_exhausted_logged.add("t-clr")
+        return task
+
+    def test_cli_clear_removes_flags_and_attention(self):
+        self._escalated_task()
+        self.assertIsNotNone(_ctrl.attention_get("t-clr:finalize"))
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            _ht.clear_finalize_escalation("t-clr")
+
+        stored = _ht._get_store().get_task("t-clr")
+        self.assertFalse(stored.get("finalize_escalated"))
+        self.assertIsNone(stored.get("finalize_escalate_reason"))
+        # A *different* EpisodeStore instance (the controller's own) must
+        # observe the removal: otherwise the next sweep re-escalates.
+        self.assertIsNone(_ctrl.attention_get("t-clr:finalize"))
+        self.assertIn("[ESCALATION CLEARED]", buf.getvalue())
+        self.assertIn("attention_cleared=True", buf.getvalue())
+
+    def test_sweep_redrives_finalize_after_clear(self):
+        self._escalated_task()
+        with contextlib.redirect_stdout(io.StringIO()):
+            _ht.clear_finalize_escalation("t-clr")
+        task = _ht._get_store().get_task("t-clr")
+        progressed = dict(task, status="committed")
+        with patch.object(_ctrl, "should_retry_finalize",
+                          return_value=(True, "commit_retry", False)), \
+             patch.object(_ctrl, "finalize_completed_task",
+                          return_value={"retryable": True,
+                                        "kind": "test"}) as fin, \
+             patch.object(_ctrl, "get_task",
+                          return_value=progressed):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                reached = _ctrl._check_finalize_retry(
+                    dict(task), "completed", time.time())
+        self.assertTrue(reached)
+        fin.assert_called_once_with("t-clr")
+        self.assertNotIn("t-clr", _ctrl._finalize_retry_exhausted_logged)
+
+    def test_reexhaustion_reescalates_after_clear(self):
+        # The stale in-memory latch must not swallow a later genuine
+        # re-exhaustion: with the episode cleared, a fresh exhausted
+        # verdict logs and escalates again instead of stalling silently.
+        self._escalated_task()
+        with contextlib.redirect_stdout(io.StringIO()):
+            _ht.clear_finalize_escalation("t-clr")
+        # Latch is still set in this process (simulating the running
+        # controller that the CLI could not IPC); the episode is gone.
+        _ctrl._finalize_retry_exhausted_logged.add("t-clr")
+        task = _ht._get_store().get_task("t-clr")
+        with patch.object(_ctrl, "should_retry_finalize",
+                          return_value=(False, "retry_exhausted", True)), \
+             patch.object(_ctrl, "get_task",
+                          return_value=dict(task)), \
+             patch.object(_ctrl, "_escalate_finalize") as esc:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                reached = _ctrl._check_finalize_retry(
+                    dict(task), "completed", time.time())
+        self.assertTrue(reached)
+        esc.assert_called_once()
+        self.assertEqual(esc.call_args.args[1], "retry_exhausted")
+        self.assertIn("[FINALIZE RETRY EXHAUSTED]", buf.getvalue())
 
 
 if __name__ == "__main__":
