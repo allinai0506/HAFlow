@@ -292,6 +292,11 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - 修复：oversized window 保留 strict failure marker；metrics 对重复 Task/跨 Workflow taskless source fail closed；legacy scope expansion 重用 critical Finding 保留窗口；relation 接受 NULL/空 workflow 并继续 scope 校验；候选构造先过滤空 artifact/blocker 再编号。
 - 回归：全量 `1536 passed, 44 subtests passed`；专项 `290 passed`；compileall、AST、ruff、diff 和凭据扫描均通过。
 
+## [2026-09-25] fix | Context Compiler cross-partition window and recovery closure
+- 背景：复审发现 strict verification 在跨 Task critical noise 下被总窗口挤出、legacy linked critical Finding 被普通 warning 挤出、oversized failure marker 绕过 recovery、无 Task 行跨 Workflow taskless metrics 仍混叠，以及 open-question/迁移 revision/node key/top-level passed/超限 Finding 边界缺口。
+- 修复：strict verification 使用独立优先槽位；所有 critical Finding 跨 Task 优先；oversized failure 经过 recovery/completed 状态过滤；无 Task 行也扫描多 Workflow source identity；过滤 derived questions；迁移复制中间 clock revision；支持 node key；对 top-level passed 统一 fail-closed；critical Finding fallback 有大小/损坏 marker。
+- 回归：全量 `1543 passed, 44 subtests passed`；专项 `297 passed`；compileall、AST、ruff、diff 和凭据扫描均通过。
+
 ## [2026-09-13] feat | Console URL Deep-Link & Notifier Click-to-Open Integration
 解决 macOS CLI 通知默认归属“脚本编辑器”且无法定位到具体任务/工作流页面的痛点：
 - [[architecture]] §2.3 更新 Herdr Notifier 架构描述：优先使用 `terminal-notifier` 附带 `-open` 直达链接，未安装时安全降级为 `osascript`；
