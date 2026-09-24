@@ -21,7 +21,7 @@ import sqlite3
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from herdr.transitions import (
     ACTIVE_TASK_STATUSES,
@@ -3140,6 +3140,7 @@ def _validate_context_source_existence(
     conn: sqlite3.Connection, context: Dict[str, Any],
 ) -> None:
     refs = set()
+    item_bindings: Dict[str, List[Tuple[Optional[str], Optional[str]]]] = {}
     refs.update(str(ref) for ref in (context.get("source_refs") or []))
     refs.update(str(ref) for ref in (context.get("goal_source_ref"), context.get("next_action_source_ref")) if ref)
     refs.update(str(ref) for ref in (context.get("current_state_refs") or {}).values())
@@ -3148,8 +3149,18 @@ def _validate_context_source_existence(
         "open_questions", "verification", "handoffs",
     ):
         for item in context.get(field_name) or []:
-            refs.add(str(item.get("source_ref") or ""))
-            refs.update(str(ref) for ref in (item.get("evidence_refs") or []))
+            item_ref = str(item.get("source_ref") or "")
+            refs.add(item_ref)
+            item_bindings.setdefault(item_ref, []).append((
+                str(item.get("source_task")) if item.get("source_task") else None,
+                str(item.get("source_run")) if item.get("source_run") else None,
+            ))
+            for evidence_ref in item.get("evidence_refs") or []:
+                refs.add(str(evidence_ref))
+                item_bindings.setdefault(str(evidence_ref), []).append((
+                    str(item.get("source_task")) if item.get("source_task") else None,
+                    str(item.get("source_run")) if item.get("source_run") else None,
+                ))
 
     from herdr.trajectory import run_id_for_task
 
@@ -3264,6 +3275,13 @@ def _validate_context_source_existence(
             raise ValueError(f"working context source reference does not exist: {ref}")
         if record.get("workflow_id") and str(record["workflow_id"]) != str(context.get("workflow_id") or ""):
             raise ValueError(f"working context source reference crosses workflow: {ref}")
+        bound_task = record.get("task_id") or record.get("to_task_id")
+        bound_run = record.get("run_id")
+        for source_task, source_run in item_bindings.get(ref, []):
+            if source_task and bound_task and str(source_task) != str(bound_task):
+                raise ValueError(f"working context item source_task does not match reference: {ref}")
+            if source_run and bound_run and str(source_run) != str(bound_run):
+                raise ValueError(f"working context item source_run does not match reference: {ref}")
         if prefix == "collaboration":
             if str(record.get("run_id") or "") != str(context.get("run_scope") or ""):
                 raise ValueError(f"working context collaboration scope mismatch: {ref}")

@@ -185,6 +185,23 @@ def test_storage_rejects_scope_foreign_finding_even_when_row_exists(tmp_path: Pa
         state_db.save_working_context(forged, db_path=db)
 
 
+def test_storage_rejects_item_source_identity_mismatch(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-item-binding-target"))
+    finding = _finding(target["run_id"], "fnd-item-binding", task_id=target["task_id"])
+    state_db.upsert_trajectory_finding(finding, db_path=db)
+    context = _compile(db, target, "developer")
+    forged = dict(context.to_mapping())
+    forged["context_id"] = "wc_item_binding_forged"
+    forged["findings"] = [dict(forged["findings"][0], source_task="foreign-task", source_run="foreign-run")]
+    from herdr.context_models import _payload_digest
+    forged["metrics"] = dict(forged.get("metrics") or {})
+    forged["metrics"]["payload_digest"] = _payload_digest(forged)
+    with pytest.raises(ValueError, match="source_task|source_run"):
+        state_db.save_working_context(forged, db_path=db)
+
+
 def test_storage_rejects_empty_provenance_with_foreign_identity(tmp_path: Path):
     db = tmp_path / "state.db"
     _seed_workflow(db, workflow_id="wf")
@@ -346,6 +363,27 @@ def test_state_aware_contexts_are_distinct(tmp_path: Path):
     )
     assert any("fnd-target-implementation" in ref for ref in developer_with_target.source_refs)
     assert all("fnd-target-implementation" not in item.get("source_ref", "") for item in reviewer_with_target.findings)
+
+
+def test_tight_budget_prefers_target_failure_when_both_fail(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = dict(
+        _task("task-verification-target-failure", node="test", role="tester"),
+        acceptance_criteria=[f"criterion-{index}" for index in range(20)],
+    )
+    sibling = _seed_task(db, _task("task-verification-sibling-failure", node="review"))
+    _seed_task(db, target)
+    ledger = TrajectoryLedger(db)
+    for task in (target, sibling):
+        ledger.append_event({
+            "run_id": task["run_id"], "task_id": task["task_id"],
+            "workflow_id": task["workflow_id"], "event_type": "verification_completed",
+            "verification": {"passed": False},
+        })
+    context = _compile(db, target, "tester", config={"max_chars": 2000})
+    assert context.verification
+    assert context.verification[0].get("source_task") == target["task_id"]
 
 
 def test_tight_budget_keeps_failed_sibling_verification(tmp_path: Path):
@@ -1199,6 +1237,32 @@ def test_supersession_target_outside_finding_window_is_loaded(tmp_path: Path):
     assert any("fnd-window-old" in ref for ref in context.source_refs) is False
 
 
+def test_supersession_relation_does_not_import_foreign_scope_finding(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-relation-scope-target", scope="scope-a"))
+    local_task = _seed_task(db, _task("task-relation-scope-local", scope="scope-a"))
+    foreign_task = _seed_task(db, _task("task-relation-scope-foreign", scope="scope-b"))
+    foreign = _finding(
+        foreign_task["run_id"], "fnd-relation-foreign",
+        task_id=foreign_task["task_id"], summary="foreign",
+    )
+    state_db.upsert_trajectory_finding(foreign, db_path=db)
+    local = _finding(
+        local_task["run_id"], "fnd-relation-local",
+        task_id=local_task["task_id"], summary="local",
+    )
+    local["metadata"] = {"supersedes": "fnd-relation-foreign"}
+    state_db.upsert_trajectory_finding(local, db_path=db)
+    first = _compile(db, target, "reviewer")
+    state_db.upsert_trajectory_finding(
+        {**foreign, "summary": "foreign changed"}, db_path=db,
+    )
+    second = _compile(db, target, "reviewer")
+    assert "fnd-relation-foreign" not in json.dumps(second.to_mapping(), ensure_ascii=False)
+    assert second.source_version == first.source_version
+
+
 def test_missing_finding_evidence_is_not_emitted_as_a_valid_reference(tmp_path: Path):
     db = tmp_path / "state.db"
     _seed_workflow(db)
@@ -1468,6 +1532,40 @@ def test_eval_failure_is_not_replaced_by_trajectory_pass_for_same_task(tmp_path:
     context = _compile(db, target, "tester")
     values = [item.get("value", {}) for item in context.verification]
     assert any(value.get("passed") is True for value in values)
+    assert any(value.get("verification_passed") is False for value in values)
+
+
+def test_verification_windows_are_per_run_not_global(tmp_path: Path):
+    from herdr.eval_store import record_eval_result
+
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-window-target", node="test", role="tester", scope="scope-window"))
+    sibling = _seed_task(db, _task("task-window-sibling", node="implementation", scope="scope-window"))
+    ledger = TrajectoryLedger(db)
+    for index in range(101):
+        ledger.append_event({
+            "run_id": sibling["run_id"], "task_id": sibling["task_id"],
+            "workflow_id": sibling["workflow_id"], "event_type": "verification_completed",
+            "verification": {"passed": True}, "timestamp": float(index),
+        })
+        record_eval_result(
+            sibling["run_id"], task_id=sibling["task_id"],
+            workflow_id=sibling["workflow_id"], revision=index + 1,
+            verification_passed=True, db_path=db,
+        )
+    ledger.append_event({
+        "run_id": target["run_id"], "task_id": target["task_id"],
+        "workflow_id": target["workflow_id"], "event_type": "verification_completed",
+        "verification": {"passed": False}, "timestamp": 1000.0,
+    })
+    record_eval_result(
+        target["run_id"], task_id=target["task_id"], workflow_id=target["workflow_id"],
+        revision=1, verification_passed=False, db_path=db,
+    )
+    context = _compile(db, target, "tester")
+    values = [item.get("value", {}) for item in context.verification]
+    assert any(value.get("passed") is False for value in values)
     assert any(value.get("verification_passed") is False for value in values)
 
 

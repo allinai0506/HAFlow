@@ -133,14 +133,20 @@ def _merge_verification_events(
         )
     task_filter = " OR ".join(task_filter_parts)
     rows = conn.execute(
-        f"""SELECT e.* FROM events e
-            WHERE e.source = 'trajectory'
-              AND e.run_id IN ({placeholders})
-              AND e.event_type IN ('verification_completed', 'tests_completed')
-              AND e.workflow_id = ?
-              AND ({task_filter})
-              AND length(e.payload_json) <= 20000
-            ORDER BY e.sequence DESC, e.id DESC LIMIT ?""",
+        f"""SELECT * FROM (
+                SELECT e.*, ROW_NUMBER() OVER (
+                    PARTITION BY e.run_id, COALESCE(e.task_id, '')
+                    ORDER BY e.sequence DESC, e.id DESC
+                ) AS source_rank
+                  FROM events e
+                 WHERE e.source = 'trajectory'
+                   AND e.run_id IN ({placeholders})
+                   AND e.event_type IN ('verification_completed', 'tests_completed')
+                   AND e.workflow_id = ?
+                   AND ({task_filter})
+                   AND length(e.payload_json) <= 20000
+            ) WHERE source_rank = 1
+            ORDER BY sequence DESC, id DESC LIMIT ?""",
         (*run_values, workflow_id, *task_ids, int(limit)),
     ).fetchall()
     merged = {str(event.get("event_id")): event for event in events}
@@ -312,8 +318,10 @@ def _read_source_snapshot(
             relation_rows = conn.execute(
                 f"""SELECT * FROM trajectory_findings
                     WHERE finding_id IN ({relation_placeholders})
+                      AND run_id IN ({placeholders})
+                      AND workflow_id = ?
                     ORDER BY created_at ASC, rowid ASC LIMIT ?""",
-                (*missing_relation_ids, int(max_findings)),
+                (*missing_relation_ids, *run_values, str(workflow_id), int(max_findings)),
             ).fetchall()
             findings.extend(state_db._decode_finding_row(row) for row in relation_rows)
 
@@ -423,8 +431,10 @@ def _read_source_snapshot(
                     relation_rows = conn.execute(
                         f"""SELECT * FROM trajectory_findings
                             WHERE finding_id IN ({relation_placeholders})
+                              AND run_id IN ({placeholders})
+                              AND workflow_id = ?
                             ORDER BY created_at ASC, rowid ASC LIMIT ?""",
-                        (*missing_relation_ids, int(max_findings)),
+                        (*missing_relation_ids, *run_values, str(workflow_id), int(max_findings)),
                     ).fetchall()
                     findings.extend(state_db._decode_finding_row(row) for row in relation_rows)
                 observations = []
@@ -455,13 +465,19 @@ def _read_source_snapshot(
             )
         eval_task_filter = " OR ".join(eval_task_filter_parts)
         eval_rows = conn.execute(
-            f"""SELECT * FROM eval_results
-                WHERE run_id IN ({placeholders})
-                  AND workflow_id = ?
-                  AND ({eval_task_filter})
-                  AND length(COALESCE(evidence_json, 'null')) <= 20000
-                  AND length(COALESCE(warnings_json, '[]')) <= 20000
-                ORDER BY run_id ASC, revision DESC, rowid DESC LIMIT ?""",
+            f"""SELECT * FROM (
+                    SELECT er.*, ROW_NUMBER() OVER (
+                        PARTITION BY er.run_id, COALESCE(er.task_id, '')
+                        ORDER BY er.revision DESC, er.rowid DESC
+                    ) AS source_rank
+                      FROM eval_results er
+                     WHERE er.run_id IN ({placeholders})
+                       AND er.workflow_id = ?
+                       AND ({eval_task_filter})
+                       AND length(COALESCE(er.evidence_json, 'null')) <= 20000
+                       AND length(COALESCE(er.warnings_json, '[]')) <= 20000
+                ) WHERE source_rank = 1
+                ORDER BY run_id ASC, revision DESC, eval_id ASC LIMIT ?""",
             (*run_values, str(workflow_id), *eval_task_ids, int(max_evals)),
         ).fetchall()
         evals_by_run: Dict[str, Dict[str, Any]] = {}

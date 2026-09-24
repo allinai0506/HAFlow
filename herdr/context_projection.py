@@ -258,7 +258,11 @@ def _fit_final_budget(context: WorkingContext, max_chars: int) -> WorkingContext
                 compact_item(item)
                 for item in sorted(
                     context.verification,
-                    key=lambda item: (not verification_failed(item), str(item.get("source_ref") or "")),
+                    key=lambda item: (
+                        not verification_failed(item),
+                        str(item.get("source_task") or "") != str(context.task_id or ""),
+                        str(item.get("source_ref") or ""),
+                    ),
                 )[:1]
             ],
         })
