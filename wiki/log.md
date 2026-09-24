@@ -940,3 +940,10 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - 背景：Agent 在 clone 内直接 `git commit` 后工作区干净，`herdr-task commit` 空 index 恒 exit 3，终化永不收敛（test-t1 FAIL，阻塞 D1-D7）。
 - 修复：`herdr/git_adoption.py` 纯判定（ADOPT/EMPTY/REFUSED，锚点优先、时间兜底、onto 禁时间判定）；`commit_task` 空 index 收编（ADOPT 登记 HEAD 不建提交、真空仍 exit 3、无法归属 exit 4）；任务记录新增 `baseline_commit`/`onto_branch`（worker 检出后采集）；`verify-baseline` HEAD 锚点感知（未收编推进报 TASK_CHANGED，收编后仍 BASELINE_MATCH）；Controller 终化分级（empty/refused/rebase-conflict 升级事件、commit_retry 可达、`git_finalize_pending_tasks` 排除已升级）；输出契约 `HERDR_COMMIT_RESULT`/`[ADOPTED]`/`exit 4`；`integrate` 幂等（已集成重入成功、rebase 冲突 exit 6 一次性失败）。
 - 回归：新增 `tests/test_git_adoption.py`、`tests/test_commit_adopt.py`、`tests/test_legacy_adopt_converge.py`、`tests/test_finalize_empty.py`（32 用例，覆盖 AC-1/AC-2/AC-3/AC-4）。
+
+## [2026-09-24] wrapup | wf-haflow-0923-02 Git 终化收编 HEAD 收尾（交付 PR 待合入）
+- 交付物身份：`agent/opencode/fix-wf-haflow-0923-02-impl-fix2@33a1f1d`，base `c66fc46`（相对 base 8 文件 +1193/-118：`bin/herdr-task` / `herdr/git_adoption.py` / `services/herdr-controller.py` / 4 个 tests / `wiki/log.md`）。
+- 收尾独立复证（收尾 Agent 自测，非实现方自述）：全量 `pytest -q` 1321 passed + 44 subtests；`ruff check` 基线 2768 == 候选 2768 且 (文件,规则) 多重集差异为空；`compileall`、`git diff --check`、`bin/herdr-task` AST 均通过。
+- 交付 PR：只推送交付链末端分支并创建 PR（base `main`），不合并；URL 见 shared note `wrapup-t1收尾报告`。六步步骤 3 因 PR 未合入记 DEFERRED（收尾脚本 `--dry-run` 只读）。
+- 知识沉淀：`docs/lessons/lessons-learned.md` §89（收尾节点分支 ≠ 交付物分支；有锚任务空终化不自动放行）；wiki 回填本文与 [[dag-workflow-engine]] §13（收编 fail-closed 守卫 + close 第二道闸 `escalated_git`）。
+- 遗留：`impl-fix1`（`committed` + `finalize_escalated`，原因 `integrate_rebase_conflict`）不阻塞 `unsettled_git`（已排除已升级），但命中 `escalated_git` 闸门；其内容已被本次交付取代，处置建议 `--accept-escalated`（须在 base 合入后由 Controller/人类执行）。

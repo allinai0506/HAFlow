@@ -245,3 +245,40 @@ Evidence: `services/herdr-controller.py#git_finalize_pending_tasks` /
 `bin/herdr-task#close_workflow` /
 `tests/test_fix_loop_gates.py#AutoCloseGitFinalizeDeferralTest` /
 `tests/test_workflow_finalize.py#TestCloseWorkflow`
+
+## 13. 收编 fail-closed 守卫与 close 第二道闸（`finalize_escalated` 不再等于可收口）
+
+`FACT` **收编判定 fail-closed（2026-09-24 引入，lessons §89）**：`herdr/git_adoption.py`
+对「clone 内直接提交被收编」的区间逐项守卫，任一命中即 `REFUSED`（CLI exit 4），不再收编——
+`baseline_not_ancestor`、`merge_commit_in_range`、`internal_path_in_range`、
+`foreign_commit_in_range`（判据：该提交出现在**任意** `origin/*` 引用可达集合）、
+`enumeration_failed`（git 枚举失败不等价于 EMPTY）。判据为纯函数：`classify_commit_state`
+的锚点路径与无锚 legacy 时间路径**对称**实现；`bin/herdr-task` 侧
+`_git_commit_paths` / `_git_interval_commits` / `_git_remote_contained_shas` 负责采集
+（失败返回 `None` 而非 `[]`），`_adopt_head_if_attributable` 负责编排。
+`commit_task` 结果收敛为四值域 `created` / `adopted` / `empty`(exit 3) / `refused`(exit 4)，
+经 `HERDR_COMMIT_RESULT` 输出。
+
+`FACT` **有锚任务的 EMPTY 不自动放行（H-3）**：`_empty_auto_releasable` 对带
+`baseline_commit` 的任务返回 False——锚点只证明**判据**可信，不证明**空结果**可信，
+该分支升级为 `empty_unreleasable` 等人类裁决；仅无锚的 legacy 时间判定任务
+（`commit_basis == "time"`）可自动推进 `cleanup_ready`，basis 缺失即升级。
+
+`FACT` **close 的第二道闸 `escalated_git`（H-1）**：`close_workflow` 现按
+`finalize_escalated` 拆成两闸——`unsettled_git`（`completed`/`committed` + git + **未**升级，
+`[CLOSE ABORT]` 给手工收口指引）与 `escalated_git`（同条件但**已**升级，`[CLOSE ABORT]`
+要求人类显式确认 `--accept-escalated` / `--force` / `--abandon`，或先
+`herdr-task supersede <task>` 作废交付物，或修因后
+`herdr-task clear-escalation <task>` 撤销机器标志）。两闸都在
+`transition_workflow` 与任何 pane/clone teardown **之前**判定，abort 无副作用；
+Controller 自动收口路径 `git_escalated_tasks` 同条件提前 defer。
+机器置位的 `finalize_escalated`（rebase 冲突 / 空提交 / 子进程异常）从此不再蕴含「可以收口」。
+
+Evidence: `herdr/git_adoption.py#classify_commit_state` / `#_check_remote_contained` /
+`#_stale_commits` / `#_check_merge` / `#_check_internal` /
+`bin/herdr-task#commit_task` / `#_adopt_head_if_attributable` / `#close_workflow` /
+`#clear_finalize_escalation` /
+`services/herdr-controller.py#_empty_auto_releasable` / `#_parse_integrate_result` /
+`#git_escalated_tasks` / `#git_finalize_pending_tasks` /
+`tests/test_t3_probes.py#L2EmptyReleasable` / `#M3CloseWorkflowGate` /
+`tests/test_impl_fix4_regression.py`
