@@ -31,6 +31,50 @@ def _valid_sha(value):
     return isinstance(value, str) and bool(value.strip())
 
 
+def _normalize_branch(value):
+    if not isinstance(value, str):
+        return ""
+    return value.strip()
+
+
+def _allowed_adoption_branches(branch, onto_branch):
+    """P1 ownership set: ordinary tasks allow only ``task['branch']``.
+
+    Onto-mode tasks check out the existing onto branch, so both the
+    recorded task branch and the persisted ``onto_branch`` are legitimate
+    checkout identities. Anything else (including detached HEAD / probe
+    failure, normalized to "") never matches.
+    """
+    allowed = []
+    for candidate in (_normalize_branch(branch), _normalize_branch(onto_branch)):
+        if candidate and candidate not in allowed:
+            allowed.append(candidate)
+    return allowed
+
+
+def _check_current_branch(current_branch, branch, onto_branch):
+    """P1: verify the actually checked-out branch owns the task.
+
+    Returns ``(ok, allowed, current)`` where ``ok`` is True only when the
+    probed ``current_branch`` equals an allowed ownership branch. Unknown
+    (None/empty/detached) never matches: callers must refuse, never guess.
+    """
+    allowed = _allowed_adoption_branches(branch, onto_branch)
+    current = _normalize_branch(current_branch)
+    if not current or current not in allowed:
+        return False, allowed, current
+    return True, allowed, current
+
+
+def _unknown_paths_shas(commits):
+    """Shas whose changed paths could not be enumerated (None, not [])."""
+    return [
+        (item or {}).get("sha")
+        for item in commits or []
+        if _commit_paths(item) is None
+    ]
+
+
 def is_internal_path(path):
     """Mirror of bin/herdr-task `_is_internal_untracked` (single semantics).
 
@@ -95,6 +139,7 @@ def classify_commit_state(
     skew_seconds=None,
     remote_shas=None,
     enumeration_failed=False,
+    current_branch=None,
 ):
     """Classify an empty-index commit attempt.
 
@@ -108,10 +153,12 @@ def classify_commit_state(
         created_at: task creation epoch seconds.
         interval_commits: commits in ``baseline_commit..HEAD`` (oldest first),
             each ``{"sha": str, "committer_ts": float, "parents": [...],
-            "paths": [...]}``. ``parents``/``paths`` may be absent on legacy
-            callers and are treated as unknown-but-benign for merge/internal
-            checks (missing ``paths`` never counts as empty). ``None``
+            "paths": [...]}``. Absent ``parents`` are treated as
+            unknown-but-benign for the merge check; absent/None ``paths``
+            are unknown (never empty) and fail closed. ``None``
             means enumeration failed (M-4) and must fail closed, never EMPTY.
+            A single commit with ``paths`` None (unknown) fails closed with
+            ``commit_paths_unknown`` (F-3), never ADOPT.
         head_history: first-parent chain from HEAD (newest first), same item
             shape. Used only for legacy time-basis classification. ``None``
             means enumeration failed.
@@ -122,6 +169,11 @@ def classify_commit_state(
             this set is foreign and refuses. ``None`` means unknown (skip).
         enumeration_failed: explicit M-4 signal that git enumeration failed
             while ``head != baseline``. Forces REFUSED ``enumeration_failed``.
+        current_branch: actually checked-out branch (``git branch
+            --show-current``) at adoption time. P1 identity guard: must
+            equal ``task['branch']`` (ordinary tasks) or one of
+            ``{task['branch'], onto_branch}`` (onto mode). Unknown or
+            mismatched refuses with ``current_branch_mismatch``; never guess.
 
     Returns:
         ``(verdict, detail)`` where verdict is ``adopt``/``empty``/``refused``
@@ -151,6 +203,9 @@ def classify_commit_state(
             baseline_is_ancestor=baseline_is_ancestor,
             remote_shas=remote_shas,
             enumeration_failed=enumeration_failed,
+            branch=branch,
+            onto_branch=onto_branch,
+            current_branch=current_branch,
         )
     return _classify_by_time(
         head=head,
@@ -161,6 +216,7 @@ def classify_commit_state(
         head_history=head_history,
         remote_shas=remote_shas,
         enumeration_failed=enumeration_failed,
+        current_branch=current_branch,
     )
 
 
@@ -272,6 +328,9 @@ def _classify_with_anchor(
     baseline_is_ancestor,
     remote_shas=None,
     enumeration_failed=False,
+    branch=None,
+    onto_branch=None,
+    current_branch=None,
 ):
     if not _valid_sha(head):
         return REFUSED, {
@@ -279,6 +338,23 @@ def _classify_with_anchor(
             "commits": 0,
             "baseline": baseline_commit,
             "basis": "baseline_commit",
+            "noop_commits": [],
+            "changed_paths": [],
+        }
+    # P1: the recorded deliverable commit and the branch integrate_task
+    # will fetch must be the same git identity. Refuse when the clone is
+    # not actually checked out on the task's ownership branch.
+    _ok, _allowed, _current = _check_current_branch(
+        current_branch, branch, onto_branch
+    )
+    if not _ok:
+        return REFUSED, {
+            "reason": "current_branch_mismatch",
+            "commits": 0,
+            "baseline": baseline_commit,
+            "basis": "baseline_commit",
+            "current_branch": _current or None,
+            "expected_branches": _allowed,
             "noop_commits": [],
             "changed_paths": [],
         }
@@ -358,6 +434,21 @@ def _classify_with_anchor(
         }
     changed, unknown = _union_changed_paths(commits)
     noops = _noop_commits(commits)
+    # F-3: a single commit whose paths failed to enumerate must fail
+    # closed. The internal-path guard above skips unknown paths, so an
+    # uninspectable commit could otherwise carry .herdr-loop/.herdr files
+    # into ADOPT. Never adopt what cannot be inspected.
+    unknown_shas = _unknown_paths_shas(commits)
+    if unknown or unknown_shas:
+        return REFUSED, {
+            "reason": "commit_paths_unknown",
+            "commits": len(commits),
+            "baseline": baseline_commit,
+            "basis": "baseline_commit",
+            "offending": unknown_shas,
+            "noop_commits": noops,
+            "changed_paths": changed,
+        }
     if not changed and not unknown:
         return EMPTY, {
             "reason": "only_noop_commits",
@@ -405,7 +496,7 @@ def _classify_with_anchor(
 
 def _classify_by_time(
     *, head, onto_branch, branch, task_id, cutoff, head_history,
-    remote_shas=None, enumeration_failed=False,
+    remote_shas=None, enumeration_failed=False, current_branch=None,
 ):
     if not is_task_branch(branch, task_id):
         return REFUSED, {
@@ -422,6 +513,21 @@ def _classify_by_time(
             "commits": 0,
             "baseline": None,
             "basis": "time",
+            "noop_commits": [],
+            "changed_paths": [],
+        }
+    # P1 legacy path: same checkout-ownership guard as the anchored path.
+    _ok, _allowed, _current = _check_current_branch(
+        current_branch, branch, onto_branch
+    )
+    if not _ok:
+        return REFUSED, {
+            "reason": "current_branch_mismatch",
+            "commits": 0,
+            "baseline": None,
+            "basis": "time",
+            "current_branch": _current or None,
+            "expected_branches": _allowed,
             "noop_commits": [],
             "changed_paths": [],
         }
@@ -510,6 +616,18 @@ def _classify_by_time(
         }
     changed, unknown = _union_changed_paths(attributable)
     noops = _noop_commits(attributable)
+    # F-3 legacy path: same fail-closed rule as the anchored path.
+    unknown_shas = _unknown_paths_shas(attributable)
+    if unknown or unknown_shas:
+        return REFUSED, {
+            "reason": "commit_paths_unknown",
+            "commits": len(attributable),
+            "baseline": implicit.get("sha"),
+            "basis": "time",
+            "offending": unknown_shas,
+            "noop_commits": noops,
+            "changed_paths": changed,
+        }
     if not changed and not unknown:
         return EMPTY, {
             "reason": "only_noop_commits",

@@ -2376,10 +2376,10 @@ def verify_baseline(task_id):
         # Path-level union (plan-arch §2 AR-2, §3.4): verdict is driven by the
         # union of worktree-vs-HEAD paths and anchor..HEAD interval paths, not
         # by commit existence. Pure --allow-empty intervals carry no paths and
-        # stay BASELINE_MATCH. Already-adopted HEAD (commit==HEAD) is
-        # registered deliverable, not unregistered change, and stays
-        # BASELINE_MATCH. Anchor-less tasks keep commit分量 closed
-        # (commits_ahead=0, basis="absent", AC3-8).
+        # stay BASELINE_MATCH. An already-registered HEAD (task commit, or
+        # the post-rebase integrated_commit) is registered deliverable, not
+        # unregistered change, and stays BASELINE_MATCH. Anchor-less tasks
+        # keep commit分量 closed (commits_ahead=0, basis="absent", AC3-8).
         anchor = task.get("baseline_commit")
         anchor_head = _git_head_sha(clone) if anchor else None
         committed_changes = []
@@ -2389,15 +2389,27 @@ def verify_baseline(task_id):
         if anchor:
             basis = "baseline_commit"
             if anchor_head and anchor_head != anchor:
-                adopted = task.get("commit") == anchor_head and task.get(
-                    "commit_result"
-                ) in ("adopted", "created")
+                # P2: integrate may rebase the deliverable (commit=A,
+                # HEAD=integrated_commit=B). Either registered identity
+                # counts; anything else is unregistered change. Status
+                # guards the integrated identity so a stray
+                # integrated_commit value on a non-integrated task cannot
+                # launder unrelated HEADs.
+                commit_registered = (
+                    task.get("commit") == anchor_head
+                    and task.get("commit_result") in ("adopted", "created")
+                )
+                integrated_registered = (
+                    task.get("integrated_commit") == anchor_head
+                    and task.get("status") in ("committed", "integrated")
+                )
+                registered = commit_registered or integrated_registered
                 interval = _git_interval_commits(clone, anchor, anchor_head)
                 if interval is None:
                     # M-4: enumeration failure must fail closed, never
                     # BASELINE_MATCH. Record an unknown committed entry.
                     commits_ahead = 0
-                    if not adopted:
+                    if not registered:
                         committed_changes.append(
                             {
                                 "type": "committed",
@@ -2409,7 +2421,23 @@ def verify_baseline(task_id):
                         )
                 else:
                     commits_ahead = len(interval)
-                    if not adopted:
+                    if not registered:
+                        unknown_shas = [
+                            item.get("sha") for item in interval
+                            if item.get("paths") is None
+                        ]
+                        if unknown_shas:
+                            # F-3: uninspectable interval commits fail
+                            # closed, never BASELINE_MATCH.
+                            committed_changes.append(
+                                {
+                                    "type": "committed",
+                                    "path": "__commit_paths_unknown__",
+                                    "commit": anchor_head,
+                                    "baseline": anchor,
+                                    "current": anchor_head,
+                                }
+                            )
                         seen_paths = set()
                         for item in interval:
                             sha = item.get("sha")
@@ -2921,18 +2949,50 @@ def _git_commit_paths(clone, sha):
     return [line for line in result.stdout.splitlines() if line]
 
 
-def _git_remote_contained_shas(clone, shas):
-    """H-2: subset of *shas* reachable from any ``origin/*`` tracking ref.
+def _git_current_branch(clone):
+    """P1: actually checked-out branch of *clone* (short name) or None.
+
+    ``git branch --show-current`` prints empty on detached HEAD and
+    non-zero on git failure; both normalize to None so the pure
+    classifier refuses (``current_branch_mismatch``) instead of guessing
+    which branch HEAD belongs to.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "-C", clone, "branch", "--show-current"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    name = (result.stdout or "").strip()
+    return name or None
+
+
+def _git_remote_contained_shas(clone, shas, exclude_branches=None):
+    """H-2: subset of *shas* reachable from foreign ``origin/*`` refs.
 
     Single-commit ``git branch -r --contains`` probes keep the check to
-    O(interval) processes; interval is typically 1-3 commits. Empty set
-    when no remotes exist or nothing is contained. Never fails closed
-    here: on git errors return empty set and let timestamp guards decide.
+    O(interval) processes; interval is typically 1-3 commits. Containment
+    via the task's own branch (or its onto branch) does not count: an
+    agent-side push of the task branch publishes the deliverable, it does
+    not import foreign history. ``origin/HEAD`` symrefs never count.
+    Empty set when no remotes exist or nothing foreign contains the sha.
+    Never fails closed here: on git errors return empty set and let the
+    timestamp guards decide.
     """
     contained = set()
     candidates = [s for s in (shas or []) if s]
     if not candidates:
         return contained
+    excluded = set()
+    for branch in (exclude_branches or []):
+        name = branch.strip() if isinstance(branch, str) else ""
+        if name:
+            excluded.add(f"origin/{name}")
     for sha in candidates:
         try:
             result = subprocess.run(
@@ -2943,8 +3003,16 @@ def _git_remote_contained_shas(clone, shas):
             )
         except OSError:
             continue
-        if result.returncode == 0 and result.stdout.strip():
+        if result.returncode != 0 or not (result.stdout or "").strip():
+            continue
+        for line in result.stdout.splitlines():
+            ref = line.strip()
+            if not ref or ref == "origin/HEAD" or "->" in ref:
+                continue
+            if ref in excluded:
+                continue
             contained.add(sha)
+            break
     return contained
 
 
@@ -2983,8 +3051,15 @@ def _adopt_head_if_attributable(task_id, task, clone):
     head = _git_head_sha(clone)
     baseline = task.get("baseline_commit")
     onto = task.get("onto_branch")
+    branch = task.get("branch")
     created = _coerce_epoch(task.get("created_at"))
     skew = _adoption_skew_seconds()
+    # P1: record which branch is actually checked out; the pure
+    # classifier refuses when it is not the task's ownership branch.
+    current_branch = _git_current_branch(clone)
+    # F-1: the task's own (and onto) branch never counts as foreign, so
+    # a legitimate agent-side push of the task branch cannot refuse.
+    exclude_branches = [b for b in (branch, onto) if b]
 
     interval = None
     history = None
@@ -3000,7 +3075,8 @@ def _adopt_head_if_attributable(task_id, task, clone):
             elif interval:
                 try:
                     remote_shas = _git_remote_contained_shas(
-                        clone, [c.get("sha") for c in interval])
+                        clone, [c.get("sha") for c in interval],
+                        exclude_branches=exclude_branches)
                 except (OSError, ValueError, RuntimeError,
                         subprocess.SubprocessError):
                     remote_shas = set()
@@ -3013,7 +3089,8 @@ def _adopt_head_if_attributable(task_id, task, clone):
         elif history:
             try:
                 remote_shas = _git_remote_contained_shas(
-                    clone, [c.get("sha") for c in history])
+                    clone, [c.get("sha") for c in history],
+                    exclude_branches=exclude_branches)
             except (OSError, ValueError, RuntimeError,
                     subprocess.SubprocessError):
                 remote_shas = set()
@@ -3022,7 +3099,7 @@ def _adopt_head_if_attributable(task_id, task, clone):
         baseline_commit=baseline,
         head=head,
         onto_branch=onto,
-        branch=task.get("branch"),
+        branch=branch,
         task_id=task_id,
         created_at=created,
         interval_commits=interval,
@@ -3031,6 +3108,7 @@ def _adopt_head_if_attributable(task_id, task, clone):
         skew_seconds=skew,
         remote_shas=remote_shas,
         enumeration_failed=enumeration_failed,
+        current_branch=current_branch,
     )
     basis = detail.get("basis") or "none"
     reason = detail.get("reason") or "unknown"

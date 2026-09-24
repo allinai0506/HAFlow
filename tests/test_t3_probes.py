@@ -270,6 +270,8 @@ class H2MergeCommitE2E(GitBase):
                              paths=["a.txt"]),
             ],
             baseline_is_ancestor=True,
+            branch="agent/opencode/docs-t1",
+            current_branch="agent/opencode/docs-t1",
         )
         self.assertEqual(verdict, "refused")
         self.assertEqual(detail["reason"], "merge_commit_in_range")

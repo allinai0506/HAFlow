@@ -213,6 +213,7 @@ class H2FetchRebaseProbe(Fix4GitBase):
             branch="agent/opencode/docs-t-h2r", task_id="t_h2r",
             created_at=created, interval_commits=interval,
             baseline_is_ancestor=True, remote_shas=remote,
+            current_branch="agent/opencode/docs-t-h2r",
         )
         self.assertIn(verdict, ("refused", "empty"))
         # Foreign deliverable must never be adopted: refused carries the
@@ -263,6 +264,7 @@ class H2FastForwardMergeProbe(Fix4GitBase):
             branch="agent/opencode/docs-t-h2m", task_id="t_h2m",
             created_at=created, interval_commits=interval,
             baseline_is_ancestor=True, remote_shas=remote,
+            current_branch="agent/opencode/docs-t-h2m",
         )
         self.assertIn(verdict, ("refused", "empty"))
         if verdict == "refused":
@@ -285,6 +287,7 @@ class H2PureGuards(unittest.TestCase):
                 "sha": "foreign", "committer_ts": now, "author_ts": now,
                 "parents": ["base"], "paths": ["other.txt"]}],
             baseline_is_ancestor=True, remote_shas={"foreign"},
+            current_branch="agent/opencode/docs-t-x",
         )
         self.assertEqual(verdict, "refused")
         self.assertEqual(detail["reason"], "foreign_commit_in_range")
@@ -301,6 +304,7 @@ class H2PureGuards(unittest.TestCase):
                 "author_ts": now - 7200, "parents": ["base"],
                 "paths": ["other.txt"]}],
             baseline_is_ancestor=True, remote_shas=set(),
+            current_branch="agent/opencode/docs-t-x",
         )
         self.assertEqual(verdict, "refused")
         self.assertEqual(detail["reason"], "commit_predates_task")
@@ -420,6 +424,7 @@ class M4EnumerationFailed(unittest.TestCase):
             branch="agent/opencode/docs-t-m4", task_id="t_m4",
             created_at=time.time(), interval_commits=None,
             baseline_is_ancestor=True,
+            current_branch="agent/opencode/docs-t-m4",
         )
         self.assertEqual(verdict, "refused")
         self.assertEqual(detail["reason"], "enumeration_failed")
@@ -432,6 +437,7 @@ class M4EnumerationFailed(unittest.TestCase):
             interval_commits=[{"sha": "x", "committer_ts": time.time(),
                                "parents": ["base"], "paths": ["a.txt"]}],
             baseline_is_ancestor=True, enumeration_failed=True,
+            current_branch="agent/opencode/docs-t-m4",
         )
         self.assertEqual(verdict, "refused")
         self.assertEqual(detail["reason"], "enumeration_failed")
