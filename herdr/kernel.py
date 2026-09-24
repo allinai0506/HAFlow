@@ -12,12 +12,10 @@ Provides first-class runtime control primitives for human and automated steering
 import json
 import os
 import time
-import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
 from . import workflow
-from . import state_db
 from . import runtime_state
 from .trajectory import TrajectoryLedger, record_trajectory_event_best_effort
 from .state_store import (
@@ -139,9 +137,9 @@ def transition_task(
     metadata: Optional[Dict[str, Any]] = None,
     force: bool = False,
     store: Optional[StateStore] = None,
-    expected_status: Optional[str] = None,
-    expected_version: Optional[int] = None,
-    expected_updated_at: Optional[float] = None,
+    expected_status: str | None = None,
+    expected_version: int | None = None,
+    expected_updated_at: float | None = None,
 ) -> Dict[str, Any]:
     """State Transition Gateway: Atomically transition task status and append WorkflowEvent."""
     s = _get_store(store)

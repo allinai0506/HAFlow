@@ -7,6 +7,7 @@ under the file-health budget and stays unit-testable without git.
 
 from __future__ import annotations
 
+import ast
 import os
 
 MAX_LISTED_FILES = 10
@@ -22,21 +23,48 @@ def is_internal_untracked(path: str) -> bool:
     return text.startswith(INTERNAL_PREFIXES)
 
 
-def parse_porcelain_paths(porcelain: str) -> list[str]:
-    """Parse ``git status --porcelain`` lines into paths (tracked only).
+def _decode_git_path(value: str) -> str:
+    """Decode Git's optional C-style quoted path without losing spaces."""
+    text = str(value or "").strip()
+    if len(text) >= 2 and text[0] == '"' and text[-1] == '"':
+        try:
+            decoded = ast.literal_eval(text)
+        except (SyntaxError, ValueError):
+            return text
+        if isinstance(decoded, str):
+            return decoded
+    return text
 
-    Input is already ``--untracked-files=no``, so every line is a tracked
-    entry. Malformed lines are skipped, never guessed.
+
+def parse_porcelain_paths(porcelain: str) -> list[str]:
+    """Parse tracked ``git status --porcelain`` lines without splitting paths.
+
+    Porcelain reserves the first two columns for status and the third for a
+    separator; everything after that separator is a path and may contain
+    spaces.  Rename/copy records use ``old -> new`` in the human-readable
+    format, so only the new path is relevant to the blocked-file diagnosis.
+    Malformed lines are skipped rather than guessed.
     """
     paths: list[str] = []
-    for line in str(porcelain or "").splitlines():
-        if len(line) < 4 or line[:2] in {"??", "!!"}:
+    for raw_line in str(porcelain or "").splitlines():
+        line = raw_line.rstrip("\r")
+        if len(line) >= 3 and line[1] == " " and line[0] != " ":
+            # Be tolerant of callers that trimmed the leading porcelain pad
+            # from the first line; retain the two-column status semantics.
+            status = f"{line[0]} "
+            payload = line[2:].strip()
+        elif len(line) >= 4 and line[2] == " ":
+            status = line[:2]
+            payload = line[3:].strip()
+        else:
             continue
-        # Porcelain v1: XY<space>path.  Do not split on whitespace: paths
-        # may legally contain spaces.  Rename/copy records use ``old -> new``.
-        candidate = line[3:].strip()
-        if " -> " in candidate:
-            candidate = candidate.split(" -> ", 1)[1].strip()
+        if status in {"??", "!!"}:
+            continue
+        if not payload:
+            continue
+        if "R" in status or "C" in status:
+            payload = payload.rsplit(" -> ", 1)[-1].strip()
+        candidate = _decode_git_path(payload)
         if candidate and candidate not in paths:
             paths.append(candidate)
     return paths
@@ -52,28 +80,25 @@ def diagnose_main_dirty(
     """Build the exit-5 three-element diagnosis (pure).
 
     Returns ``{"blocked_files": [...], "blocked_total": int,
-    "owner": str, "owner_source": str, "remediation_cmd": str,
-    "task_id": str}``. ``owner`` is ``unknown`` unless a real traceable
-    source exists (never guessed from the local git config alone).
+    "owner": str, "owner_source": str, "task_branch": str,
+    "remediation_cmd": str, "task_id": str}``. ``owner`` is ``unknown``
+    unless both a local configured email and the integrating task branch are
+    available; the result never invents an author.
     """
     paths = parse_porcelain_paths(porcelain)
     total = len(paths)
     listed = paths[:MAX_LISTED_FILES]
     email = str(configured_email or "").strip()
-    if email and task_branch and email not in ("", "unknown"):
-        # Config email alone does not prove authorship of the WIP; it is
-        # reported as a hint source, but the owner stays unknown unless a
-        # stronger trace exists. This keeps the "unknown, don't guess"
-        # invariant (AGENTS.md #2, plan-attack FR-3 critique).
-        owner = "unknown"
-        owner_source = "unavailable"
-    elif email:
-        owner = "unknown"
-        owner_source = "unavailable"
+    branch = str(task_branch or "").strip()
+    if email and branch and email != "unknown":
+        # This is an explicit, reproducible hint: the main repository's
+        # configured identity plus the task branch being integrated.  It is
+        # not inferred from an unrelated global Git configuration.
+        owner = email
+        owner_source = "git_config_user_email"
     else:
         owner = "unknown"
         owner_source = "unavailable"
-    _ = task_branch
     remediation = (
         f"herdr-task integrate {task_id}"
         if task_id
@@ -84,6 +109,7 @@ def diagnose_main_dirty(
         "blocked_total": total,
         "owner": owner,
         "owner_source": owner_source,
+        "task_branch": branch,
         "remediation_cmd": remediation,
         "task_id": str(task_id or ""),
     }
@@ -102,11 +128,10 @@ def launch_precheck_message(
     paths = parse_porcelain_paths(porcelain)
     if not paths:
         return None
-    _ = task_id
     shown = ", ".join(paths[:MAX_LISTED_FILES])
     suffix = f" (+{len(paths) - MAX_LISTED_FILES} more)" if len(paths) > 10 else ""
     return (
-        "[PRECHECK WARNING] main repo has tracked changes "
+        f"[PRECHECK WARNING] task={task_id} main repo has tracked changes "
         f"({shown}{suffix}); launch continues, integrate will gate with exit 5."
     )
 

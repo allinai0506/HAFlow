@@ -208,14 +208,13 @@ class StateStore(ABC):
         to_status: str,
         reason: str,
         source: str = "system",
-        metadata: Optional[Dict[str, Any]] = None,
+        metadata: dict[str, Any] | None = None,
         force: bool = False,
         expected_status: str | None = None,
         expected_version: int | None = None,
-        expected_updated_at: Optional[float] = None,
-    ) -> Dict[str, Any]:
+        expected_updated_at: float | None = None,
+    ) -> dict[str, Any]:
         """Atomically transition a task only when its observed epoch matches."""
-        pass
 
     def compare_and_set_completion_transition(
         self,
@@ -240,17 +239,16 @@ class StateStore(ABC):
         task_id: str,
         *,
         marker_present: bool,
-        agent_status: Optional[str],
-        observed_at: Optional[float] = None,
-    ) -> Dict[str, Any]:
+        agent_status: str | None,
+        observed_at: float | None = None,
+    ) -> dict[str, Any]:
         """Record a durable completion observation."""
-        pass
 
     @abstractmethod
     def get_completion_observation(
         self, task_id: str,
-    ) -> Optional[Dict[str, Any]]:
-        pass
+    ) -> dict[str, Any] | None:
+        """Return the durable completion observation, if present."""
 
     @abstractmethod
     def clear_completion_observation(
@@ -260,7 +258,7 @@ class StateStore(ABC):
         expected_status: str | None = None,
         expected_version: int | None = None,
     ) -> bool:
-        pass
+        """Clear a consumed observation only when its epoch still matches."""
 
     @abstractmethod
     def update_task_metadata(
@@ -573,11 +571,11 @@ class StateStore(ABC):
     @abstractmethod
     def import_from_json(
         self,
-        workflows_file: Path | None = None,
-        tasks_file: Path | None = None,
-        steering_file: Path | None = None,
-        checkpoints_dir: Path | None = None,
-    ) -> dict[str, Any]:
+        workflows_file: Optional[Path] = None,
+        tasks_file: Optional[Path] = None,
+        steering_file: Optional[Path] = None,
+        checkpoints_dir: Optional[Path] = None,
+    ) -> Dict[str, Any]:
         """Migrate legacy JSON files into SQLite database."""
         pass
 
@@ -702,12 +700,12 @@ class SQLiteStateStore(StateStore):
         to_status: str,
         reason: str,
         source: str = "system",
-        metadata: Optional[Dict[str, Any]] = None,
+        metadata: dict[str, Any] | None = None,
         force: bool = False,
         expected_status: str | None = None,
         expected_version: int | None = None,
-        expected_updated_at: Optional[float] = None,
-    ) -> Dict[str, Any]:
+        expected_updated_at: float | None = None,
+    ) -> dict[str, Any]:
         return state_db.compare_and_set_task_transition(
             task_id=task_id,
             to_status=to_status,
@@ -750,9 +748,9 @@ class SQLiteStateStore(StateStore):
         task_id: str,
         *,
         marker_present: bool,
-        agent_status: Optional[str],
-        observed_at: Optional[float] = None,
-    ) -> Dict[str, Any]:
+        agent_status: str | None,
+        observed_at: float | None = None,
+    ) -> dict[str, Any]:
         return state_db.observe_completion(
             task_id,
             marker_present=marker_present,
@@ -763,7 +761,7 @@ class SQLiteStateStore(StateStore):
 
     def get_completion_observation(
         self, task_id: str,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         return state_db.get_completion_observation(task_id, db_path=self.db_path)
 
     def clear_completion_observation(
@@ -1121,11 +1119,11 @@ class SQLiteStateStore(StateStore):
 
     def import_from_json(
         self,
-        workflows_file: Path | None = None,
-        tasks_file: Path | None = None,
-        steering_file: Path | None = None,
-        checkpoints_dir: Path | None = None,
-    ) -> dict[str, Any]:
+        workflows_file: Optional[Path] = None,
+        tasks_file: Optional[Path] = None,
+        steering_file: Optional[Path] = None,
+        checkpoints_dir: Optional[Path] = None,
+    ) -> Dict[str, Any]:
         return state_db.migrate_v1_to_v2(
             workflows_file=workflows_file,
             tasks_file=tasks_file,
@@ -1135,10 +1133,10 @@ class SQLiteStateStore(StateStore):
         )
 
 
-_GLOBAL_STATE_STORE: StateStore | None = None
+_GLOBAL_STATE_STORE: Optional[StateStore] = None
 
 
-def get_state_store(db_path: Path | None = None) -> StateStore:
+def get_state_store(db_path: Optional[Path] = None) -> StateStore:
     """Get or instantiate global StateStore singleton."""
     global _GLOBAL_STATE_STORE
     resolved_path = Path(db_path) if db_path else state_db.get_default_db_path()
@@ -1151,7 +1149,7 @@ def get_state_store(db_path: Path | None = None) -> StateStore:
     return _GLOBAL_STATE_STORE
 
 
-def set_state_store(store: StateStore | None) -> None:
+def set_state_store(store: Optional[StateStore]) -> None:
     """Explicitly set global StateStore (useful for testing or mocking)."""
     global _GLOBAL_STATE_STORE
     _GLOBAL_STATE_STORE = store

@@ -138,9 +138,8 @@ class PreflightHardeningTest(unittest.TestCase):
         with patch(
             "herdr.agent_router.workflow_config_for",
             return_value=self._node_cfg("test", ["codex"], exclude=["implementation"]),
-        ):
-            with self.assertRaises(RuntimeError) as ctx:
-                agent_router.choose_agent(self.wf_id, "test", "test", requested="auto")
+        ), self.assertRaises(RuntimeError) as ctx:
+            agent_router.choose_agent(self.wf_id, "test", "test", requested="auto")
         self.assertIn("fail-closed", str(ctx.exception).lower())
 
     def test_missing_timestamp_treated_as_fresh(self):
@@ -158,9 +157,8 @@ class PreflightHardeningTest(unittest.TestCase):
         with patch(
             "herdr.agent_router.workflow_config_for",
             return_value=self._node_cfg("test", ["codex"], exclude=["implementation"]),
-        ):
-            with self.assertRaises(RuntimeError) as ctx:
-                agent_router.choose_agent(self.wf_id, "test", "test", requested="auto")
+        ), self.assertRaises(RuntimeError) as ctx:
+            agent_router.choose_agent(self.wf_id, "test", "test", requested="auto")
         self.assertIn("fail-closed", str(ctx.exception).lower())
 
     def test_ttl_env_override_controls_freshness(self):
@@ -180,11 +178,11 @@ class PreflightHardeningTest(unittest.TestCase):
         cfg = self._node_cfg("test", ["codex", "claude"], exclude=["implementation"])
         with patch(
             "herdr.agent_router.workflow_config_for", return_value=cfg
-        ), patch.dict("os.environ", {"HERDR_PREFLIGHT_TTL": "3600"}):
+        ), patch.dict("os.environ", {"HERDR_PREFLIGHT_TTL": "3600"}), \
+                self.assertRaises(RuntimeError):
             # FR-6.1 breaking change: fresh + single healthy fully excluded
             # -> fail-closed, not fallback to codex.
-            with self.assertRaises(RuntimeError):
-                agent_router.choose_agent(self.wf_id, "test", "test", requested="auto")
+            agent_router.choose_agent(self.wf_id, "test", "test", requested="auto")
         with patch(
             "herdr.agent_router.workflow_config_for", return_value=cfg
         ), patch.dict("os.environ", {"HERDR_PREFLIGHT_TTL": "600"}):
@@ -202,9 +200,8 @@ class PreflightHardeningTest(unittest.TestCase):
         with patch(
             "herdr.agent_router.workflow_config_for",
             return_value=self._node_cfg("test", ["pi", "claude"]),
-        ):
-            with self.assertRaises(RuntimeError) as ctx:
-                agent_router.choose_agent(self.wf_id, "test", "test", requested="pi")
+        ), self.assertRaises(RuntimeError) as ctx:
+            agent_router.choose_agent(self.wf_id, "test", "test", requested="pi")
         self.assertIn("preflight", str(ctx.exception).lower())
 
 

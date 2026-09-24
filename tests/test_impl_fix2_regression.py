@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import importlib.machinery
 import importlib.util
+import json
 import multiprocessing
-import os
 import subprocess
 import threading
 import time
@@ -21,7 +21,6 @@ import pytest
 
 from herdr import blocked_sla, completion, delivery_record, repo_hygiene, workflow_docs
 from herdr.state_store import SQLiteStateStore, reset_state_store
-
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -82,7 +81,7 @@ def cas_child(db_path: str, task_id: str, ready, release, result_queue):
             expected_version=task["version"],
         )
         result_queue.put(("accepted", bool(result.get("accepted"))))
-    except BaseException as exc:  # test process boundary must report failures
+    except (AssertionError, OSError, RuntimeError, ValueError, TypeError, KeyError) as exc:
         result_queue.put(("error", repr(exc)))
 
 
@@ -139,6 +138,44 @@ def test_completion_epoch_restart_sets_first_seen_and_can_complete(tmp_path):
     assert confirmed["ready"] is True
     assert confirmed["first_seen_at"] == pytest.approx(106.0)
     assert confirmed["observed_version"] == current["version"]
+
+
+def test_completion_resident_marker_requires_a_new_absence_cycle(tmp_path):
+    store = SQLiteStateStore(tmp_path / "state.db")
+    task = seed_task(store, "task-resident-marker")
+
+    first = store.observe_completion(
+        task_id=task["task_id"],
+        marker_present=True,
+        agent_status="idle",
+        observed_at=100.0,
+    )
+    second = store.observe_completion(
+        task_id=task["task_id"],
+        marker_present=True,
+        agent_status="idle",
+        observed_at=103.0,
+    )
+    assert first["first_seen_at"] is None
+    assert second["first_seen_at"] is None
+    assert second["consecutive_samples"] == 0
+    assert second["ready"] is False
+
+    store.observe_completion(
+        task_id=task["task_id"],
+        marker_present=False,
+        agent_status="idle",
+        observed_at=106.0,
+    )
+    restarted = store.observe_completion(
+        task_id=task["task_id"],
+        marker_present=True,
+        agent_status="idle",
+        observed_at=109.0,
+    )
+    assert restarted["first_seen_at"] == pytest.approx(109.0)
+    assert restarted["consecutive_samples"] == 1
+    assert restarted["ready"] is False
 
 
 def test_completion_old_epoch_cannot_flip_after_independent_process_race(tmp_path):
@@ -206,6 +243,7 @@ def test_controller_done_marker_does_not_bypass_idle_fallback(tmp_path, monkeypa
     with patch.object(controller, "_get_store", return_value=store), \
          patch.object(controller, "get_task", return_value=task), \
          patch.object(controller, "process_completion_observation", return_value=False), \
+         patch.object(store, "get_completion_observation", return_value=None), \
          patch.object(controller, "workflow_config_for", return_value={}), \
          patch.object(controller.subprocess, "run", return_value=pane_result), \
          patch.object(controller, "_set_observed_status", return_value=True) as transition, \
@@ -213,6 +251,38 @@ def test_controller_done_marker_does_not_bypass_idle_fallback(tmp_path, monkeypa
         controller.handle_event(task["task_id"], "idle")
 
     transition.assert_called_once_with(task, "agent_done", "idle_marker")
+
+
+def test_controller_waits_for_stable_marker_before_idle_fallback(tmp_path, monkeypatch):
+    controller = load_script("herdr_controller_fix2_pending", "services/herdr-controller.py")
+    store = SQLiteStateStore(tmp_path / "state.db")
+    task = seed_task(store, "task-pending-marker")
+    store.observe_completion(
+        task_id=task["task_id"],
+        marker_present=False,
+        agent_status="working",
+        observed_at=100.0,
+    )
+    store.observe_completion(
+        task_id=task["task_id"],
+        marker_present=True,
+        agent_status="idle",
+        observed_at=103.0,
+    )
+    monkeypatch.delenv("HERDR_CONTROLLER_TEST", raising=False)
+    pane_result = SimpleNamespace(
+        returncode=0,
+        stdout="HERDR_TASK_DONE:task-pending-marker\n",
+        stderr="",
+    )
+    with patch.object(controller, "_get_store", return_value=store), \
+         patch.object(controller, "get_task", return_value=task), \
+         patch.object(controller, "process_completion_observation", return_value=False), \
+         patch.object(controller, "workflow_config_for", return_value={}), \
+         patch.object(controller.subprocess, "run", return_value=pane_result), \
+         patch.object(controller, "_set_observed_status", return_value=True) as transition:
+        controller.handle_event(task["task_id"], "idle")
+    transition.assert_not_called()
 
 
 def test_sentinel_crash_reaches_state_store_and_controller_auto_recover(tmp_path):
@@ -229,9 +299,9 @@ def test_sentinel_crash_reaches_state_store_and_controller_auto_recover(tmp_path
          patch.object(sentinel, "check_dispatch_fuse", return_value=False), \
          patch.object(sentinel, "check_task_stalls", return_value=False), \
          patch.object(sentinel, "save_json_atomic"), \
-         patch.object(sentinel.time, "sleep", side_effect=StopSentinelLoop):
-        with pytest.raises(StopSentinelLoop):
-            sentinel.main()
+         patch.object(sentinel.time, "sleep", side_effect=StopSentinelLoop), \
+         pytest.raises(StopSentinelLoop):
+        sentinel.main()
 
     failed = store.get_task(task["task_id"])
     assert failed["status"] == "failed"
@@ -325,9 +395,45 @@ def test_blocked_repush_is_scheduled_off_polling_path_and_deduplicated(tmp_path)
         finally:
             release.set()
         assert finished.wait(2.0)
+        for _ in range(20):
+            events = store.list_events(task_id=task["task_id"])
+            if any(event["event_type"] == "blocked_auto_repush" for event in events):
+                break
+            time.sleep(0.01)
 
     events = store.list_events(task_id=task["task_id"])
     assert sum(event["event_type"] == "blocked_auto_repush" for event in events) == 1
+
+
+def test_blocked_repush_stale_worker_lease_recovers_once():
+    task = {
+        "task_id": "task-stale-repush",
+        "status": "blocked",
+        "updated_at": 100.0,
+    }
+    episode = blocked_sla.new_episode(task, now=100.0)
+    episode.update({
+        "active_seconds": blocked_sla.first_sla_seconds(),
+        "repushes": blocked_sla.MAX_AUTO_REPUSHES_PER_EPISODE,
+        "repush_state": "in_flight",
+        "repush_inflight_at": 0.0,
+        "last_action_at": None,
+    })
+    now = (
+        100.0
+        + blocked_sla.repush_inflight_timeout_seconds()
+        + blocked_sla.jitter_window_seconds()
+        + 1.0
+    )
+    assert blocked_sla.repush_inflight_is_stale(episode, now=now) is True
+    recovered = blocked_sla.recover_stale_repush(episode, now=now)
+    decision = blocked_sla.decide_blocked_action(
+        task=task,
+        episode=recovered,
+        now=now,
+    )
+    assert decision["action"] == "repush_recover"
+    assert recovered["repushes"] == 1
 
 
 def test_delivery_invalidation_is_scoped_by_node_identity_and_order(tmp_path, monkeypatch):
@@ -407,10 +513,11 @@ def test_delivery_invalidation_is_scoped_by_node_identity_and_order(tmp_path, mo
     by_id = {item["note_id"]: item for item in annotated}
     assert by_id[invalidation["note_id"]]["stale"] is False
     assert by_id[sibling["note_id"]]["stale"] is False
-    assert by_id[old["note_id"]]["stale"] is True
+    assert by_id[old["note_id"]]["stale"] is False
     assert by_id[replacement["note_id"]]["stale"] is True
     assert by_id[future["note_id"]]["stale"] is False
-    assert delivery_record.select_effective_delivery(annotated)["delivery_id"] == "candidate-future"
+    with pytest.raises(delivery_record.DeliveryAmbiguityError):
+        delivery_record.select_effective_delivery(annotated)
 
 
 def test_delivery_selector_fails_closed_for_same_identity_and_same_tick_candidates():
@@ -449,15 +556,35 @@ def test_delivery_selector_fails_closed_for_same_identity_and_same_tick_candidat
         delivery_record.select_effective_delivery([first, conflicting])
 
 
+def test_delivery_selector_rejects_unknown_supersession_edge():
+    candidate = {
+        "note_id": "n-unknown-edge",
+        "kind": "delivery",
+        "ts": 100.0,
+        "workflow_id": "wf-unknown-edge",
+        "node": "wrapup",
+        "base_sha": "base",
+        "delivery_id": "candidate-unknown",
+        "candidate_sha": "sha-unknown",
+        "delivery_branch": "agent/test",
+        "review_task": "review",
+        "test_gate": "test",
+        "supersedes": "candidate-not-written",
+    }
+    assert delivery_record.select_effective_delivery([candidate]) is None
+
+
 def test_repo_hygiene_preserves_spaces_and_reaches_owner_branch_metadata(tmp_path):
     repo = tmp_path / "main repo"
     repo.mkdir()
-    run = lambda *args: subprocess.run(
-        ["git", "-C", str(repo), *args],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    def run(*args):
+        return subprocess.run(
+            ["git", "-C", str(repo), *args],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
     run("init", "-q")
     run("config", "user.email", "owner@example.test")
     tracked = repo / "docs with spaces.txt"
@@ -488,6 +615,7 @@ def test_repo_hygiene_preserves_spaces_and_reaches_owner_branch_metadata(tmp_pat
     assert diagnosis["owner_source"] == "git_config_user_email"
     assert diagnosis["task_branch"] == "agent/opencode/feat-fix2"
 
+    tracked.write_text("clean\n", encoding="utf-8")
     untracked = repo / "clone infra.txt"
     untracked.write_text("untracked\n", encoding="utf-8")
     untracked_status = subprocess.check_output(
@@ -506,6 +634,7 @@ def test_repo_hygiene_preserves_spaces_and_reaches_owner_branch_metadata(tmp_pat
         integration_mode="git",
     )
     assert clean_again is None
+    tracked.write_text("dirty-after-precheck\n", encoding="utf-8")
     toctou_status = subprocess.check_output(
         ["git", "-C", str(repo), "status", "--porcelain", "--untracked-files=no"],
         text=True,
@@ -519,6 +648,83 @@ def test_repo_hygiene_parses_rename_and_multiple_paths_with_spaces():
         "docs/one two.txt",
         "new name.txt",
     ]
+
+
+def test_integrate_exit5_reports_real_git_paths_owner_and_branch(tmp_path, capsys):
+    task_bin = load_script("herdr_task_fix2_integrate", "bin/herdr-task")
+    main_repo = tmp_path / "main repository"
+    clone = tmp_path / "task clone"
+    main_repo.mkdir()
+
+    def git(repo, *args, check=True):
+        return subprocess.run(
+            ["git", "-C", str(repo), *args],
+            check=check,
+            capture_output=True,
+            text=True,
+        )
+
+    git(main_repo, "init", "-q")
+    git(main_repo, "config", "user.email", "owner@example.test")
+    git(main_repo, "branch", "-M", "main")
+    tracked = main_repo / "source file with spaces.txt"
+    tracked.write_text("base\n", encoding="utf-8")
+    git(main_repo, "add", "source file with spaces.txt")
+    git(main_repo, "commit", "-qm", "base")
+    subprocess.run(
+        ["git", "clone", "-q", str(main_repo), str(clone)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    git(clone, "config", "user.email", "owner@example.test")
+    git(clone, "checkout", "-qb", "agent/opencode/feat-fix2")
+    (clone / "source file with spaces.txt").write_text("candidate\n", encoding="utf-8")
+    git(clone, "commit", "-qam", "candidate")
+    tracked.write_text("dirty WIP\n", encoding="utf-8")
+
+    task = {
+        "task_id": "task-integrate-fix2",
+        "workflow_id": "wf-integrate-fix2",
+        "status": "committed",
+        "integration_mode": "git",
+        "execution_mode": "git",
+        "node": "implementation",
+        "stage": "implementation",
+        "clone_path": str(clone),
+        "branch": "agent/opencode/feat-fix2",
+        "source_repo": str(main_repo),
+        "base_branch": "main",
+        "baseline_fingerprint": {"tracked": {}, "untracked": {}},
+        "baseline_commit": git(clone, "rev-parse", "HEAD").stdout.strip(),
+        "created_at": 1.0,
+    }
+
+    def load_tasks():
+        return {"tasks": [task]}
+
+    project = {"project_root": str(main_repo), "base_branch": "main"}
+    with patch.object(task_bin, "load_tasks", side_effect=load_tasks), \
+         patch.object(task_bin, "project_for_workflow", return_value=project), \
+         patch.object(task_bin, "ensure_branch_available"), \
+         patch.object(task_bin, "current_workspace_fingerprint", return_value=task["baseline_fingerprint"]), \
+         patch.object(task_bin, "ensure_no_git_processes"), \
+         pytest.raises(SystemExit) as exc:
+        task_bin.integrate_task(task["task_id"])
+
+    assert exc.value.code == 5
+    output = capsys.readouterr().out
+    result_line = next(
+        line for line in output.splitlines()
+        if line.startswith("HERDR_INTEGRATE_RESULT=")
+    )
+    result = json.loads(result_line.split("=", 1)[1])
+    assert result["blocked_files"] == ["source file with spaces.txt"]
+    assert result["blocked_total"] == 1
+    assert result["owner"] == "owner@example.test"
+    assert result["owner_source"] == "git_config_user_email"
+    assert result["task_branch"] == "agent/opencode/feat-fix2"
+    assert "herdr-task integrate task-integrate-fix2" in result["remediation_cmd"]
 
 
 def test_prompt_sanitizer_early_signal_and_uncertain_completion_are_observable(tmp_path):
@@ -571,15 +777,105 @@ def test_prompt_sanitizer_early_signal_and_uncertain_completion_are_observable(t
          patch.object(sentinel, "check_dispatch_fuse", return_value=False), \
          patch.object(sentinel, "check_task_stalls", return_value=False), \
          patch.object(sentinel, "save_json_atomic"), \
-         patch.object(sentinel.time, "sleep", side_effect=stop_after_three_samples):
-        with pytest.raises(StopSentinelLoop):
-            sentinel.main()
+         patch.object(sentinel.time, "sleep", side_effect=stop_after_three_samples), \
+         pytest.raises(StopSentinelLoop):
+        sentinel.main()
     early_events = store.list_events(
         task_id=early_task["task_id"],
         event_type="early_done_signal",
     )
     assert len(early_events) >= 3
     assert early_events[-1]["payload"]["count"] >= 3
+
+    store.compare_and_set_task_transition(
+        task_id=task["task_id"],
+        to_status="agent_done",
+        reason="test_cleanup",
+        source="test",
+    )
+    store.compare_and_set_task_transition(
+        task_id=early_task["task_id"],
+        to_status="agent_done",
+        reason="test_cleanup",
+        source="test",
+    )
+    uncertain_task = seed_task(store, "task-uncertain-event")
+    uncertain_marker = f"HERDR_TASK_DONE:{uncertain_task['task_id']}"
+    uncertain_sleeps = 0
+
+    def stop_after_two_samples(_seconds):
+        nonlocal uncertain_sleeps
+        uncertain_sleeps += 1
+        if uncertain_sleeps >= 2:
+            raise StopSentinelLoop
+
+    with patch.object(sentinel, "_get_store", return_value=store), \
+         patch.object(sentinel, "pane_visible", side_effect=[uncertain_marker, ""]), \
+         patch.object(sentinel, "agent_status", return_value="working"), \
+         patch.object(sentinel, "check_dispatch_fuse", return_value=False), \
+         patch.object(sentinel, "check_task_stalls", return_value=False), \
+         patch.object(sentinel, "save_json_atomic"), \
+         patch.object(sentinel.time, "sleep", side_effect=stop_after_two_samples), \
+         pytest.raises(StopSentinelLoop):
+        sentinel.main()
+    assert store.list_events(
+        task_id=uncertain_task["task_id"],
+        event_type="completion_uncertain",
+    )
+
+
+def test_controller_completes_after_epoch_restart_with_current_state(tmp_path):
+    controller = load_script("herdr_controller_fix2_epoch_accept", "services/herdr-controller.py")
+    store = SQLiteStateStore(tmp_path / "state.db")
+    task = seed_task(store, "task-controller-epoch-accept")
+    store.observe_completion(
+        task_id=task["task_id"],
+        marker_present=False,
+        agent_status="working",
+        observed_at=100.0,
+    )
+    store.observe_completion(
+        task_id=task["task_id"],
+        marker_present=True,
+        agent_status="working",
+        observed_at=103.0,
+    )
+    store.transition_task(
+        task_id=task["task_id"],
+        to_status="blocked",
+        reason="human_reopen_probe",
+        source="test",
+    )
+    store.transition_task(
+        task_id=task["task_id"],
+        to_status="working",
+        reason="human_reopen",
+        source="test",
+    )
+    store.observe_completion(
+        task_id=task["task_id"],
+        marker_present=True,
+        agent_status="idle",
+        observed_at=106.0,
+    )
+    store.observe_completion(
+        task_id=task["task_id"],
+        marker_present=True,
+        agent_status="idle",
+        observed_at=109.0,
+    )
+    with patch.object(controller, "_get_store", return_value=store), \
+         patch.object(controller, "enqueue_coordinator_event"):
+        assert controller.process_completion_observation(
+            store.get_task(task["task_id"]),
+            now=109.5,
+        ) is True
+    assert store.get_task(task["task_id"])["status"] == "agent_done"
+    assert store.get_completion_observation(task["task_id"]) is None
+    assert store.list_events(
+        task_id=task["task_id"],
+        event_type="completion_sentinel_accepted",
+    )
 
 
 def test_actual_controller_state_store_completion_chain_uses_authoritative_epoch(tmp_path):

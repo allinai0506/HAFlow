@@ -8,19 +8,18 @@ from __future__ import annotations
 
 import importlib.machinery
 import importlib.util
-import json
 import multiprocessing
 import os
 import tempfile
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
-from herdr import blocked_sla, completion, delivery_record, workflow_docs
+from herdr import blocked_sla, delivery_record, workflow_docs
 from herdr.state_store import SQLiteStateStore
-
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -67,7 +66,7 @@ def cas_child(db_path: str, task_id: str, ready, release, result_queue):
             expected_version=task["version"],
         )
         result_queue.put(("accepted", bool(result.get("accepted"))))
-    except BaseException as exc:
+    except (AssertionError, OSError, RuntimeError, ValueError, TypeError, KeyError) as exc:
         result_queue.put(("error", repr(exc)))
 
 
@@ -271,10 +270,19 @@ def test_controller_records_failed_repush_and_later_human_escalation(tmp_path):
         decision = controller.process_blocked_sla_task(
             store.get_task("t-sla"), now=entry + 1801,
         )
-    assert decision["action"] == "repush"
-    event_types = [event["event_type"] for event in store.list_events(task_id="t-sla")]
-    assert "prompt_delivery_failed" in event_types
-    assert "blocked_repush_failed" in event_types
+        assert decision["action"] == "repush"
+        for _ in range(100):
+            event_types = [
+                event["event_type"] for event in store.list_events(task_id="t-sla")
+            ]
+            if (
+                "prompt_delivery_failed" in event_types
+                and "blocked_repush_failed" in event_types
+            ):
+                break
+            time.sleep(0.01)
+        assert "prompt_delivery_failed" in event_types
+        assert "blocked_repush_failed" in event_types
     episode_store.upsert("t-sla:blocked_sla", {
         "active_seconds": 3600, "last_tick_at": entry + 1801,
         "last_action_at": entry + 1801,
@@ -286,10 +294,15 @@ def test_controller_records_failed_repush_and_later_human_escalation(tmp_path):
         decision = controller.process_blocked_sla_task(
             store.get_task("t-sla"), now=entry + 2401,
         )
-    assert decision["action"] == "repush_recover"
-    assert "blocked_auto_repush_recovered" in [
-        event["event_type"] for event in store.list_events(task_id="t-sla")
-    ]
+        assert decision["action"] == "repush_recover"
+        for _ in range(100):
+            event_types = [
+                event["event_type"] for event in store.list_events(task_id="t-sla")
+            ]
+            if "blocked_auto_repush_recovered" in event_types:
+                break
+            time.sleep(0.01)
+        assert "blocked_auto_repush_recovered" in event_types
     episode_store.upsert("t-sla:blocked_sla", {
         "active_seconds": 3600, "last_tick_at": entry + 2401,
         "last_action_at": entry + 2401, "recovery_attempts": 1,
@@ -307,8 +320,8 @@ def test_controller_records_failed_repush_and_later_human_escalation(tmp_path):
 
 
 def test_delivery_selector_rejects_ambiguous_active_candidates(tmp_path):
-    with tempfile.TemporaryDirectory() as directory:
-        with patch.dict(os.environ, {workflow_docs.DOCS_DIR_ENV: directory}):
+    with tempfile.TemporaryDirectory() as directory, \
+            patch.dict(os.environ, {workflow_docs.DOCS_DIR_ENV: directory}):
             a = workflow_docs.append_note(
                 "wf-delivery", kind="delivery", title="a", node="wrapup",
                 fields={"delivery_id": "candidate-a", "candidate_sha": "a"},
@@ -322,8 +335,8 @@ def test_delivery_selector_rejects_ambiguous_active_candidates(tmp_path):
 
 
 def test_delivery_supersede_and_fix_loop_invalidation_never_fallback(tmp_path):
-    with tempfile.TemporaryDirectory() as directory:
-        with patch.dict(os.environ, {workflow_docs.DOCS_DIR_ENV: directory}):
+    with tempfile.TemporaryDirectory() as directory, \
+            patch.dict(os.environ, {workflow_docs.DOCS_DIR_ENV: directory}):
             old = workflow_docs.append_note(
                 "wf-delivery", kind="delivery", title="old", node="wrapup",
                 fields={"delivery_id": "candidate-a", "candidate_sha": "a"},
@@ -401,9 +414,8 @@ def test_router_opt_out_audit_failure_is_fail_closed(tmp_path):
              "allowed_agents": ["codex"], "disabled_agents": [],
              "stage_preferences": {"test": ["codex"]},
              "task_type_preferences": {"test": ["codex"]},
-         }):
-        with pytest.raises(RuntimeError, match="audit"):
-            agent_router.choose_agent("wf-audit", "test", "test", requested="auto")
+         }), pytest.raises(RuntimeError, match="audit"):
+        agent_router.choose_agent("wf-audit", "test", "test", requested="auto")
 
 
 def test_router_failure_does_not_acquire_a_pane(tmp_path, monkeypatch):
@@ -422,9 +434,9 @@ def test_router_failure_does_not_acquire_a_pane(tmp_path, monkeypatch):
     with patch.object(module, "project_for_workflow", return_value=project), \
          patch.object(module, "ensure_stage_topology", side_effect=AssertionError("pane topology called")), \
          patch.object(module, "choose_agent", side_effect=RuntimeError("empty review pool")), \
-         patch.object(module, "acquire_pane_for_task", side_effect=AssertionError("pane acquired")):
-        with pytest.raises(SystemExit) as exc:
-            module._launch_task(args)
+         patch.object(module, "acquire_pane_for_task", side_effect=AssertionError("pane acquired")), \
+         pytest.raises(SystemExit) as exc:
+        module._launch_task(args)
     assert exc.value.code == 2
     store = SQLiteStateStore(db_path)
     task = store.get_task("task-no-pane")
