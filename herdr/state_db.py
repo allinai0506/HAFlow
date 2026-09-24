@@ -114,7 +114,7 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
             updated_at REAL NOT NULL,
             FOREIGN KEY (task_id) REFERENCES tasks(task_id) ON DELETE CASCADE
         );
-    """);
+    """)
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS checkpoints (

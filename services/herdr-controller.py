@@ -253,7 +253,6 @@ def _notify_blocked_human_upgrade(task, episode_id, active_seconds):
 def _send_blocked_repush(task, decision):
     """Send the one permitted automatic prompt re-push."""
     pane_id = task.get("pane_id")
-    task_id = task.get("task_id", "")
     if not pane_id:
         return False, "pane_id_missing"
     number = int(decision.get("repush_number") or 1)
