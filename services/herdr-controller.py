@@ -4684,6 +4684,13 @@ def dispatch_collaboration_event(event_id, tasks_by_id, prompt_sender=None, db_p
     pane_id = _collab_task_pane(target)
     if not pane_id:
         return _sdb.mark_collaboration_failed(event_id, db_path=db_path)
+    source_task = tasks_by_id.get(event.get("from_task_id"))
+    if (
+        source_task is None
+        or str(source_task.get("workflow_id") or "") != str(event.get("workflow_id") or "")
+        or _collab.collab_scope_for_task(source_task) != str(event.get("run_id") or "")
+    ):
+        return _sdb.mark_collaboration_failed(event_id, db_path=db_path)
     if not _working_context_ref_valid(event, target, db_path=db_path):
         return _sdb.mark_collaboration_failed(event_id, db_path=db_path)
 

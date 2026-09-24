@@ -317,7 +317,11 @@ def _event_candidates(
                 value,
                 event_ref,
                 evidence_refs=evidence_refs,
-                metadata={"event_type": event_type, "node": event.get("node_id")},
+                metadata={
+                    "event_type": event_type,
+                    "node": event.get("node_id"),
+                    "sequence": event.get("sequence"),
+                },
                 **common,
             ))
         elif event_type in {"decision", "decision_completed", "review_requested", "verification_requested"}:
@@ -360,11 +364,11 @@ def _task_artifact_candidates(tasks: Sequence[Mapping[str, Any]]) -> List[Dict[s
     result: List[Dict[str, Any]] = []
     for task in tasks:
         task_id = str(task.get("task_id") or "")
-        task_ref = f"task:{task_id}"
+        task_ref = f"task:{task_id}:artifact"
         raw_artifacts: List[Any] = []
         for key in ("artifacts", "artifact_refs", "changed_artifacts", "deliverables"):
             raw_artifacts.extend(_as_list(task.get(key)))
-        for artifact in raw_artifacts:
+        for artifact_index, artifact in enumerate(raw_artifacts):
             if isinstance(artifact, Mapping):
                 ref = artifact.get("ref") or artifact.get("path") or artifact.get("name")
                 kind = artifact.get("kind")
@@ -376,7 +380,7 @@ def _task_artifact_candidates(tasks: Sequence[Mapping[str, Any]]) -> List[Dict[s
             result.append(_item(
                 "artifact",
                 {"ref": str(ref), "kind": kind},
-                task_ref,
+                f"{task_ref}:{artifact_index}",
                 source_task=task_id,
                 source_run=_task_run(task),
                 created_at=task.get("updated_at"),
@@ -398,11 +402,15 @@ def _task_candidates(
         task_id = str(task.get("task_id") or "")
         task_ref = f"task:{task_id}"
         status = str(task.get("status") or "")
+        completed_ref = f"{task_ref}:completed"
+        blocker_ref = f"{task_ref}:blocker"
+        decision_ref = f"{task_ref}:decision"
+        question_ref = f"{task_ref}:open_question"
         if status in COMPLETED_TASK_STATUSES:
             completed.append(_item(
                 "completed",
                 _task_value(task, include_goal=False),
-                task_ref,
+                completed_ref,
                 source_task=task_id,
                 source_run=_task_run(task),
                 created_at=task.get("updated_at"),
@@ -417,7 +425,7 @@ def _task_candidates(
             blockers.append(_item(
                 "blocker",
                 str(reason),
-                task_ref,
+                blocker_ref,
                 source_task=task_id,
                 source_run=_task_run(task),
                 created_at=task.get("updated_at"),
@@ -431,7 +439,7 @@ def _task_candidates(
             decisions.append(_item(
                 "decision",
                 value,
-                task_ref,
+                decision_ref,
                 source_task=task_id,
                 source_run=_task_run(task),
                 created_at=task.get("updated_at"),
@@ -442,7 +450,7 @@ def _task_candidates(
                 questions.append(_item(
                     "open_question",
                     str(value),
-                    task_ref,
+                    question_ref,
                     source_task=task_id,
                     source_run=_task_run(task),
                     created_at=task.get("updated_at"),
@@ -513,4 +521,3 @@ def _next_action(role: str, task: Mapping[str, Any], blockers: Sequence[Mapping[
 
 # ---------------------------------------------------------------------------
 # Public compiler and storage facade
-

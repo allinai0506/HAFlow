@@ -143,5 +143,3 @@ def _select_items(
         )
     )
     return filtered[: max(0, int(limit))]
-
-

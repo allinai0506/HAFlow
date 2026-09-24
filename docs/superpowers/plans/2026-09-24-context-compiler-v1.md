@@ -4,7 +4,7 @@
 
 **Goal:** 从现有 Task/Workflow/Trajectory/Observation/Finding/Collaboration/Eval 事实中，确定性编译出按状态和角色选择、可追溯、不可变且有预算的 WorkingContext。
 
-**Architecture:** `herdr/context_compiler.py` 负责公共编译入口、预算、fingerprint 和 diff；`herdr/context_models.py` 负责不可变值对象与基础规范化；`herdr/context_sources.py` 负责同一 SQLite source snapshot 与 scope 校验；`herdr/context_candidates.py` 负责纯候选构造；`herdr/context_selection.py` 负责 role relevance/filter；`herdr/state_db.py` 负责不可变投影写入与读取。CLI/Controller 只在执行边界调用编译器并传递 `context_id`。WorkingContext 不写回 Task、Trajectory、Finding 或 Observation。
+**Architecture:** `herdr/context_compiler.py` 负责公共编译入口与存储 facade；`herdr/context_models.py` 负责不可变值对象与基础规范化；`herdr/context_sources.py` 负责同一 SQLite source snapshot 与 scope 校验；`herdr/context_candidates.py` 负责纯候选构造；`herdr/context_selection.py` 负责 role relevance/filter；`herdr/context_projection.py` 负责预算/指纹；`herdr/context_diff.py` 负责结构化 diff；`herdr/state_db.py` 负责不可变投影写入与读取。CLI/Controller 只在执行边界调用编译器并传递 `context_id`。WorkingContext 不写回 Task、Trajectory、Finding 或 Observation。
 
 **Tech Stack:** Python 3 标准库、SQLite（现有 `state_db` WAL/事务）、pytest、现有 `redact_text`/`Observation` 脱敏能力。
 

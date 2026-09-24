@@ -289,12 +289,12 @@ def test_large_candidate_budget_keeps_required_state_and_failure_evidence(tmp_pa
         "workflow_id": target["workflow_id"], "event_type": "verification_completed",
         "verification": {"passed": False},
     })
-    context = _compile(db, target, "tester")
+    context = _compile(db, target, "tester", config={"max_chars": 2000})
     assert context.goal
     assert context.current_state.get("acceptance_criteria")
     assert context.blockers
     assert any(item.get("value", {}).get("passed") is False for item in context.verification)
-    assert context.metrics["context_chars"] <= 12000
+    assert context.metrics["context_chars"] <= 2000
 
 
 def test_budget_keeps_blocker_before_completed_history(tmp_path: Path):
@@ -333,6 +333,17 @@ def test_impossible_context_budget_fails_closed_instead_of_dropping_goal(tmp_pat
     target = _seed_task(db, _task("task-impossible-budget"))
     with pytest.raises(ValueError, match="max_chars"):
         _compile(db, target, "developer", config={"max_chars": 500})
+
+
+def test_fingerprint_ignores_updated_at_only_task_resave(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-resave-fingerprint", status="working"))
+    first = _compile(db, target, "developer")
+    state_db.save_task(dict(target), db_path=db)
+    second = _compile(db, target, "developer")
+    assert second.context_id == first.context_id
+    assert second.context_fingerprint == first.context_fingerprint
 
 
 def test_state_aware_context_changes_after_node_transition(tmp_path: Path):
@@ -892,11 +903,13 @@ def test_latest_verification_failure_wins_over_old_success(tmp_path: Path):
         "run_id": target["run_id"], "task_id": target["task_id"],
         "workflow_id": target["workflow_id"], "event_type": "verification_completed",
         "verification": {"passed": True},
+        "timestamp": 1000.0,
     })
     ledger.append_event({
         "run_id": target["run_id"], "task_id": target["task_id"],
         "workflow_id": target["workflow_id"], "event_type": "verification_completed",
         "verification": {"passed": False},
+        "timestamp": 1000.0,
     })
     context = _compile(db, target, "tester")
     values = [item.get("value", {}).get("passed") for item in context.verification]
@@ -944,6 +957,17 @@ def test_a_b_a_source_cycle_keeps_append_only_history(tmp_path: Path):
     assert [item.context_id for item in list_working_contexts(target["task_id"], db_path=db)] == [
         first.context_id, second.context_id, third.context_id,
     ]
+
+
+def test_task_derived_items_have_distinct_source_refs_for_diff(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = dict(_task("task-derived-diff"))
+    target["artifacts"] = [{"ref": "artifact-a"}, {"ref": "artifact-b"}]
+    _seed_task(db, target)
+    context = _compile(db, target, "reviewer")
+    refs = [item["source_ref"] for item in context.artifacts]
+    assert len(refs) == len(set(refs))
 
 
 def test_diff_reports_added_removed_superseded_and_changed(tmp_path: Path):
@@ -1211,6 +1235,41 @@ def test_dispatch_rejects_context_role_workflow_mismatch(tmp_path: Path):
     calls = []
     result = controller.dispatch_collaboration_event(
         event["event_id"], {target["task_id"]: target},
+        lambda pane, prompt: calls.append((pane, prompt)), db_path=db,
+    )
+    assert result["status"] == "failed"
+    assert calls == []
+
+
+def test_dispatch_rejects_foreign_source_task_scope(tmp_path: Path):
+    import importlib.machinery
+    import importlib.util
+
+    controller_path = Path(__file__).resolve().parent.parent / "services" / "herdr-controller.py"
+    spec = importlib.util.spec_from_loader(
+        "context_compiler_foreign_source_test",
+        importlib.machinery.SourceFileLoader("context_compiler_foreign_source_test", str(controller_path)),
+    )
+    controller = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(controller)
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-foreign-target", node="review", role="reviewer"))
+    target["pane_id"] = "pane-foreign-target"
+    state_db.save_task(target, db_path=db)
+    foreign = _seed_task(db, _task("task-foreign-source", scope="wf-exec-2"))
+    context = _compile(db, target, "reviewer")
+    event = state_db.create_collaboration_event(
+        {
+            "run_id": "wf-exec-1", "workflow_id": "wf-context",
+            "from_task_id": foreign["task_id"], "to_task_id": target["task_id"],
+            "context_refs": [context.context_id], "source_fact_id": "fact-foreign-source",
+        },
+        db_path=db,
+    )
+    calls = []
+    result = controller.dispatch_collaboration_event(
+        event["event_id"], {target["task_id"]: target, foreign["task_id"]: foreign},
         lambda pane, prompt: calls.append((pane, prompt)), db_path=db,
     )
     assert result["status"] == "failed"

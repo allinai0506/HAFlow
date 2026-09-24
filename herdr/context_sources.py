@@ -370,18 +370,18 @@ def _source_projection(snapshot: Mapping[str, Any]) -> Dict[str, Any]:
             for key in (
                 "task_id", "workflow_id", "run_id", "workflow_run_id", "execution_id",
                 "node", "stage", "agent", "agent_role", "status", "goal", "blocker",
-                "acceptance_criteria", "stage_verdict", "stage_verdict_note", "updated_at",
+                "acceptance_criteria", "stage_verdict", "stage_verdict_note",
             )
         },
         "workflow": {
             key: snapshot["workflow"].get(key)
-            for key in ("workflow_id", "status", "current_stage", "updated_at", "config")
+            for key in ("workflow_id", "status", "current_stage", "config")
         },
         "tasks": [
             {key: item.get(key) for key in (
                 "task_id", "run_id", "workflow_run_id", "execution_id", "node", "stage",
                 "agent", "agent_role", "status", "goal", "blocker", "acceptance_criteria",
-                "stage_verdict", "stage_verdict_note", "updated_at",
+                "stage_verdict", "stage_verdict_note",
             )}
             for item in snapshot.get("tasks", [])
         ],
@@ -483,4 +483,3 @@ def _requirements(task: Mapping[str, Any], node: Mapping[str, Any]) -> List[str]
         for value in _as_list(node.get(key)):
             values.append(str(value))
     return list(dict.fromkeys(value for value in values if value.strip()))
-

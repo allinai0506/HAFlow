@@ -380,4 +380,3 @@ def _relation_ids(metadata: Mapping[str, Any], key: str) -> List[str]:
         if value:
             result.append(str(value))
     return result
-

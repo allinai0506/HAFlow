@@ -47,7 +47,7 @@ Task launch / retry / handoff / review request / verification request
 
 ## 3. 数据模型
 
-新增 `herdr/context_compiler.py` 作为公共编译入口，并按职责拆分：`context_models.py`（不可变值对象与基础脱敏/规范化）、`context_sources.py`（同一 SQLite 快照与 scope 校验）、`context_candidates.py`（纯候选构造）、`context_selection.py`（纯 relevance/role 过滤）。`context_compiler.py` 负责编排、预算、指纹、存储 facade 与 diff。
+新增 `herdr/context_compiler.py` 作为公共编译入口，并按职责拆分：`context_models.py`（不可变值对象与基础脱敏/规范化）、`context_sources.py`（同一 SQLite 快照与 scope 校验）、`context_candidates.py`（纯候选构造）、`context_selection.py`（纯 relevance/role 过滤）、`context_projection.py`（预算/指纹投影）和 `context_diff.py`（结构化 diff）。`context_compiler.py` 负责编译编排、存储 facade 与公共入口。
 
 ### 3.1 WorkingContext 字段
 
