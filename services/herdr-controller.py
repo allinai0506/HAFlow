@@ -4580,6 +4580,7 @@ def _legacy_evidence_allowed(event, raw_ref, db_path=None):
     from herdr import state_db as _sdb
     from herdr.context_models import _canonical_evidence_ref
     from herdr.collaboration import collab_scope_for_task
+    from herdr.trajectory import run_id_for_task
 
     ref = _canonical_evidence_ref(raw_ref) or str(raw_ref or "")
     if ":" not in ref:
@@ -4621,7 +4622,7 @@ def _legacy_evidence_allowed(event, raw_ref, db_path=None):
                 task
                 and str(task.get("workflow_id") or "") == event_workflow
                 and collab_scope_for_task(task) == str(event.get("run_id") or "")
-                and str(task.get("run_id") or "") == str(row["run_id"] or "")
+                and str(run_id_for_task(task)) == str(row["run_id"] or "")
             )
         if not row_workflow:
             return False

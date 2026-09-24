@@ -415,6 +415,24 @@ def test_storage_rejects_conflicting_verification_aliases(tmp_path: Path):
         state_db.save_working_context(payload, db_path=db)
 
 
+def test_legacy_fallback_taskless_source_compiles_and_persists(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db, workflow_id="wf-legacy-fallback")
+    target = _task("task-legacy-fallback", workflow_id="wf-legacy-fallback", run_id=None)
+    target.pop("run_id", None)
+    target.pop("workflow_run_id", None)
+    _seed_task(db, target)
+    observation = create_observation(
+        run_id="run_task-legacy-fallback", task_id="task-legacy-fallback", workflow_id="wf-legacy-fallback",
+        source_type="verification", source_ref="verification:legacy-fallback",
+        content="legacy", store=ObservationStore(db),
+    )
+    context = _compile(db, target, "developer")
+    assert any(item.get("source_ref") == f"observation:{observation.observation_id}" for item in context.evidence)
+    from herdr.context_projection import _config
+    state_db.save_working_context(context.to_mapping(), db_path=db, fingerprint_config=_config(None))
+
+
 def test_storage_rejects_reused_taskless_source_across_execution_scopes(tmp_path: Path):
     db = tmp_path / "state.db"
     _seed_workflow(db, workflow_id="wf-reused", scope="scope-a")
@@ -458,7 +476,8 @@ def test_storage_normalizes_non_dict_verification_mapping(tmp_path: Path):
     }]
     _bind_storage_fingerprint(payload)
     payload["verification"][0]["value"] = UserDict({"passed": False})
-    state_db.save_working_context(payload, db_path=db)
+    saved = state_db.save_working_context(payload, db_path=db)
+    assert saved["verification"][0]["value"]["passed"] is False
 
 
 def test_storage_rejects_incomplete_aggregate_source_refs(tmp_path: Path):
@@ -1039,6 +1058,27 @@ def test_taskless_reused_run_source_is_rejected_across_execution_scopes(tmp_path
     assert context_a_again.source_version == context_a.source_version
     assert context_a_again.context_fingerprint == context_a.context_fingerprint
     assert context_a_again.context_id == context_a.context_id
+
+
+def test_foreign_event_noise_cannot_starve_target_source_window(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db, workflow_id="wf-event-window", scope="scope-a")
+    target = _seed_task(db, dict(
+        _task("task-event-window-a", workflow_id="wf-event-window", scope="scope-a", run_id="shared-event"),
+        artifacts=[{"ref": "target-artifact"}],
+    ))
+    foreign = _seed_task(db, _task("task-event-window-b", workflow_id="wf-event-window", scope="scope-b", run_id="shared-event"))
+    for index in range(301):
+        state_db.record_trajectory_event(
+            {
+                "run_id": "shared-event", "task_id": foreign["task_id"],
+                "workflow_id": foreign["workflow_id"], "event_type": "decision",
+                "payload": {"decision": f"foreign-{index}"},
+            },
+            db_path=db,
+        )
+    context = _compile(db, target, "developer")
+    assert any(item.get("value", {}).get("ref") == "target-artifact" for item in context.artifacts)
 
 
 def test_taskless_source_with_reused_run_advances_all_workflow_scopes(tmp_path: Path):

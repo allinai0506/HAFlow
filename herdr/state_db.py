@@ -2388,19 +2388,34 @@ def aggregate_run_metric_rows(run_id: str, db_path: Optional[Path] = None) -> Di
     """Return scalar, run-scoped metric facts without loading evidence content."""
     conn = get_db_connection(db_path)
     try:
-        scope_rows = conn.execute(
-            """
-            SELECT task_id, workflow_id,
-                   CASE WHEN json_valid(payload_json)
-                        THEN json_extract(payload_json, '$.run_id') END AS run_id,
-                   COALESCE(json_extract(payload_json, '$.workflow_run_id'),
-                            json_extract(payload_json, '$.execution_id'),
-                            workflow_id, '') AS scope
-              FROM tasks
-             WHERE json_extract(payload_json, '$.run_id') = ?
-            """,
-            (run_id,),
-        ).fetchall()
+        from herdr.trajectory import run_id_for_task
+
+        scope_rows = []
+        for task_identity in conn.execute(
+            "SELECT task_id, workflow_id, payload_json FROM tasks"
+        ).fetchall():
+            try:
+                task_payload = json.loads(task_identity["payload_json"] or "{}")
+            except (TypeError, json.JSONDecodeError):
+                task_payload = {}
+            try:
+                effective_run_id = str(run_id_for_task({
+                    **task_payload, "task_id": task_identity["task_id"]
+                }))
+            except (TypeError, ValueError):
+                continue
+            if effective_run_id != str(run_id):
+                continue
+            scope_rows.append({
+                "task_id": task_identity["task_id"],
+                "workflow_id": task_identity["workflow_id"],
+                "run_id": effective_run_id,
+                "scope": (
+                    task_payload.get("workflow_run_id")
+                    or task_payload.get("execution_id")
+                    or task_identity["workflow_id"] or ""
+                ),
+            })
         identity_ambiguous = len(scope_rows) > 1
         allowed_task_ids = {str(row["task_id"] or "") for row in scope_rows}
         allowed_workflow_ids = {str(row["workflow_id"] or "") for row in scope_rows}
@@ -3524,23 +3539,21 @@ def _validate_context_source_existence(
 
     taskless_scope_by_run: Dict[str, Optional[str]] = {}
     for identity_row in conn.execute(
-        """
-        SELECT workflow_id,
-               CASE WHEN json_valid(payload_json)
-                    THEN json_extract(payload_json, '$.run_id') END AS run_id,
-               CASE WHEN json_valid(payload_json)
-                    THEN COALESCE(
-                        json_extract(payload_json, '$.workflow_run_id'),
-                        json_extract(payload_json, '$.execution_id'),
-                        workflow_id, ''
-                    ) END AS scope
-          FROM tasks
-         WHERE workflow_id = ?
-        """,
+        "SELECT task_id, workflow_id, payload_json FROM tasks WHERE workflow_id = ?",
         (str(context.get("workflow_id") or ""),),
     ).fetchall():
-        identity_run = str(identity_row["run_id"] or "")
-        identity_scope = str(identity_row["scope"] or "")
+        try:
+            identity_payload = json.loads(identity_row["payload_json"] or "{}")
+            identity_run = str(run_id_for_task({
+                **identity_payload, "task_id": identity_row["task_id"]
+            }))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        identity_scope = str(
+            identity_payload.get("workflow_run_id")
+            or identity_payload.get("execution_id")
+            or identity_row["workflow_id"] or ""
+        )
         if not identity_run or not identity_scope:
             continue
         previous = taskless_scope_by_run.get(identity_run, "__missing__")
@@ -3806,11 +3819,6 @@ def save_working_context(
         raise ValueError("WorkingContext identity and fingerprint are required")
     if not re.fullmatch(r"wc_[A-Za-z0-9_-]+", str(context["context_id"])):
         raise ValueError("working context context_id is invalid")
-    try:
-        from .observation import _redact_value
-        context = _redact_value(dict(context))
-    except ImportError:
-        context = dict(context)
     def _normalize_json_value(value: Any) -> Any:
         if isinstance(value, Mapping):
             return {str(key): _normalize_json_value(item) for key, item in value.items()}
@@ -3819,6 +3827,11 @@ def save_working_context(
         return value
 
     context = _normalize_json_value(context)
+    try:
+        from .observation import _redact_value
+        context = _normalize_json_value(_redact_value(context))
+    except ImportError:
+        context = _normalize_json_value(context)
     if context.get("agent_role") not in {"developer", "reviewer", "tester", "coordinator"}:
         raise ValueError("working context agent_role is invalid")
     for field_name in (

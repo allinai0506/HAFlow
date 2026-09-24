@@ -228,10 +228,10 @@ def test_legacy_task_without_run_id_keeps_its_fallback_identity(tmp_path: Path):
 
     metrics = get_run_metrics("run_task-legacy", db_path=db_path, now=40.0)
 
-    assert metrics.task_id is None
-    assert metrics.workflow_id is None
-    assert metrics.final_status is None
-    assert metrics.trajectory_events == 0
+    assert metrics.task_id == "task-legacy"
+    assert metrics.workflow_id == "wf-1"
+    assert metrics.final_status == "working"
+    assert metrics.trajectory_events == 1
 
 
 def test_task_row_absent_keeps_event_carried_identity(tmp_path: Path):
