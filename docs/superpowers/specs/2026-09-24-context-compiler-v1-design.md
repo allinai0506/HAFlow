@@ -47,7 +47,7 @@ Task launch / retry / handoff / review request / verification request
 
 ## 3. 数据模型
 
-新增 `herdr/context_compiler.py`，提供 `WorkingContext` 与 `ContextItem`。
+新增 `herdr/context_compiler.py` 作为公共编译入口，并按职责拆分：`context_models.py`（不可变值对象与基础脱敏/规范化）、`context_sources.py`（同一 SQLite 快照与 scope 校验）、`context_candidates.py`（纯候选构造）、`context_selection.py`（纯 relevance/role 过滤）。`context_compiler.py` 负责编排、预算、指纹、存储 facade 与 diff。
 
 ### 3.1 WorkingContext 字段
 
@@ -210,7 +210,7 @@ BLOCKER > OPEN QUESTION > CURRENT GOAL > VERIFICATION
 
 - `context_id` 主键；
 - `run_scope`、`run_id`、`workflow_id`、`task_id`、`node_id`、`agent_role`；
-- `context_fingerprint`、`source_version`；
+- `context_fingerprint`、`source_version`、`source_watermark`；
 - `payload_json`、`metrics_json`、`compiled_at`；
 - 按 task/role/compiled_at 和 task/compiled_at 建索引；
 - 不设置指向 workflow/task 的外键，保留审计快照。
@@ -258,6 +258,8 @@ BLOCKER > OPEN QUESTION > CURRENT GOAL > VERIFICATION
 - `compile_latency_ms`
 - `context_reuse`
 - `context_changed`
+
+编译调用另写一条 `working_context_metric_events`，使重复编译的 reuse/changed 事实不会被不可变快照行的首次指标覆盖。
 
 不记录质量评分。Context Compiler 的指标读取保持无副作用；现有 Harness metrics 可在后续同一 PR 中增加聚合计数，但不改变 Task 状态。
 

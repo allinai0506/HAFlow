@@ -29,7 +29,7 @@ herdr-task compact --run-id <run_id> --json --no-model
 
 ## Context Compiler V1（WorkingContext）
 
-`herdr/context_compiler.py` 是 ContextPack 之后的执行边界投影，不是新的事实源。它从当前 Task/Workflow 状态、同一 workflow execution scope 内的 Trajectory/Observation/Finding/Collaboration/Eval 记录，按 `developer`、`reviewer`、`tester`、`coordinator` 角色选择最小上下文。
+`herdr/context_compiler.py` 是 ContextPack 之后的执行边界投影，不是新的事实源。实现按职责拆为 `context_models.py`（值对象）、`context_sources.py`（有界 SQLite source snapshot）、`context_candidates.py`（候选构造）、`context_selection.py`（role relevance）；入口模块负责编排、预算、指纹和 diff。它从当前 Task/Workflow 状态、同一 workflow execution scope 内的 Trajectory/Observation/Finding/Collaboration/Eval 记录，按 `developer`、`reviewer`、`tester`、`coordinator` 角色选择最小上下文。
 
 - 每个内容项都有 `source_ref`；Observation 只投影 metadata/excerpt，不读取正文。
 - Finding 的 `metadata.supersedes` / `superseded_by` 参与当前版本选择；历史 Finding 保留在 `trajectory_findings`。
