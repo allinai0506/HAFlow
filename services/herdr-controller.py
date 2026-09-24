@@ -4625,6 +4625,7 @@ def _working_context_ref_valid(event, target_task, db_path=None):
     """Validate V1 refs strictly; only an absent ref is legacy-compatible."""
     from herdr import state_db as _sdb
     from herdr.context_compiler import infer_agent_role
+    from herdr.trajectory import run_id_for_task
 
     refs = list(event.get("context_refs") or [])
     if not refs:
@@ -4646,7 +4647,8 @@ def _working_context_ref_valid(event, target_task, db_path=None):
             return False
         if str(context.get("run_scope") or "") != str(event.get("run_id") or ""):
             return False
-        if str(context.get("run_id") or "") != str(target_task.get("run_id") or ""):
+        expected_run_id = run_id_for_task(dict(target_task))
+        if str(context.get("run_id") or "") != str(expected_run_id or ""):
             return False
         if str(context.get("agent_role") or "") != expected_role:
             return False

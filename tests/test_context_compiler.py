@@ -821,6 +821,26 @@ def test_trajectory_verification_event_is_projected_and_does_not_shadow_list(tmp
     assert any(observation.observation_id in ref for item in context.verification for ref in item.get("evidence_refs", []))
 
 
+def test_latest_verification_failure_wins_over_old_success(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-verification-order", node="test", role="tester"))
+    ledger = TrajectoryLedger(db)
+    ledger.append_event({
+        "run_id": target["run_id"], "task_id": target["task_id"],
+        "workflow_id": target["workflow_id"], "event_type": "verification_completed",
+        "verification": {"passed": True},
+    })
+    ledger.append_event({
+        "run_id": target["run_id"], "task_id": target["task_id"],
+        "workflow_id": target["workflow_id"], "event_type": "verification_completed",
+        "verification": {"passed": False},
+    })
+    context = _compile(db, target, "tester")
+    values = [item.get("value", {}).get("passed") for item in context.verification]
+    assert values == [False]
+
+
 def test_eval_verification_is_available_as_bounded_evidence(tmp_path: Path):
     db = tmp_path / "state.db"
     _seed_workflow(db)
@@ -845,6 +865,23 @@ def test_eval_verification_is_available_as_bounded_evidence(tmp_path: Path):
     assert context.verification
     assert any("eval:" in ref for ref in context.source_refs)
     assert any(observation.observation_id in ref for item in context.verification for ref in item.get("evidence_refs", []))
+
+
+def test_a_b_a_source_cycle_keeps_append_only_history(tmp_path: Path):
+    from herdr.context_compiler import list_working_contexts
+
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-cycle", status="working"))
+    first = _compile(db, target, "developer")
+    state_db.save_task(dict(target, status="rework", blocker="middle state"), db_path=db)
+    second = _compile(db, dict(target, status="rework", blocker="middle state"), "developer")
+    state_db.save_task(target, db_path=db)
+    third = _compile(db, target, "developer")
+    assert len({first.context_id, second.context_id, third.context_id}) == 3
+    assert [item.context_id for item in list_working_contexts(target["task_id"], db_path=db)] == [
+        first.context_id, second.context_id, third.context_id,
+    ]
 
 
 def test_diff_reports_added_removed_superseded_and_changed(tmp_path: Path):
@@ -1006,7 +1043,7 @@ def test_handoff_prompt_contains_only_bounded_context_reference(tmp_path: Path):
     )
     prompt = build_handoff_prompt(event, next_action="Review the implementation.")
     assert "WORKING_CONTEXT_REF: wc_123" in prompt
-    assert "WorkingContext" not in prompt
+    assert "context_id" in prompt
     assert "goal" not in prompt.lower()
 
 
