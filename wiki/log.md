@@ -257,6 +257,11 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - 修复：trigger 替换使用 `BEGIN IMMEDIATE`；dispatch/wiring 只接受持久化权威 Task；legacy evidence 绑定当前 Task run；task-bound legacy source 允许缺 workflow 但仍校验 scope；critical Finding 与目标 incoming Handoff 使用保留窗口；Workflow node projection 使用完整节点摘要；storage 强制非保护项预算和 kind caps。
 - 回归：新增删除 Task、old-run evidence、缺 workflow source、critical Finding/Handoff noise、超大 source、storage cap、projection cap 和并发相关测试；验证结果与 PR 状态以当前交付 artifact 为准。
 
+## [2026-09-25] fix | Context Compiler final identity/retention closure
+- 背景：复审发现 migration/trigger 两阶段窗口、跨 Workflow target dispatch、nested verification conflict、oversized Eval unknown、current blocker cap、scope UPDATE、legacy stages、legacy missing-workflow evidence、ordinary oversized source 和 metrics/config 边界。
+- 修复：迁移与 trigger replacement 合并为同一写事务；dispatch 强制 target workflow；冲突 verification 以 strict failure 优先；oversized Eval/普通 event 保留 fail-closed marker；current Task blocker 受保护；UPDATE 同时推进旧/新 scope；`nodes`/`stages` 使用完整摘要；legacy evidence 支持 task-bound 缺 workflow；metrics 读取 alternate verification；低层 storage 规范化空 config。
+- 回归：全量 `1516 passed, 44 subtests passed`；专项、compileall、AST、ruff、diff 和凭据扫描均通过。
+
 ## [2026-09-13] feat | Console URL Deep-Link & Notifier Click-to-Open Integration
 解决 macOS CLI 通知默认归属“脚本编辑器”且无法定位到具体任务/工作流页面的痛点：
 - [[architecture]] §2.3 更新 Herdr Notifier 架构描述：优先使用 `terminal-notifier` 附带 `-open` 直达链接，未安装时安全降级为 `osascript`；
