@@ -456,6 +456,26 @@ def test_context_contains_no_raw_history_or_transcript(tmp_path: Path):
     assert "chat_history" not in serialized
 
 
+def test_compile_does_not_write_source_fact_tables(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-no-source-write"))
+    upstream = _seed_task(db, _task("task-upstream"))
+    state_db.upsert_trajectory_finding(
+        _finding(upstream["run_id"], "fnd-no-write", task_id=upstream["task_id"]),
+        db_path=db,
+    )
+    before = {}
+    with state_db.get_db_connection(db) as conn:
+        for table in ("tasks", "events", "trajectory_findings", "observations", "collaboration_events"):
+            before[table] = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+    _compile(db, target, "reviewer")
+    with state_db.get_db_connection(db) as conn:
+        for table, count in before.items():
+            assert conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == count
+        assert conn.execute("SELECT COUNT(*) FROM working_contexts").fetchone()[0] == 1
+
+
 def test_snapshot_is_immutable_and_recompiles_after_source_change(tmp_path: Path):
     from herdr.context_compiler import get_working_context
 

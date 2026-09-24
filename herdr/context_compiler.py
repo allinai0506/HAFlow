@@ -734,6 +734,16 @@ def _workflow_node(workflow: Mapping[str, Any], node_id: Optional[str]) -> Dict[
     for node in nodes or []:
         if isinstance(node, Mapping) and str(node.get("id")) == str(node_id):
             return dict(node)
+    stages = config.get("stages") if isinstance(config, dict) else None
+    for index, stage in enumerate(stages or []):
+        if not isinstance(stage, Mapping):
+            continue
+        stage_id = str(stage.get("key") or stage.get("id") or "")
+        if stage_id == str(node_id):
+            result = dict(stage)
+            result.setdefault("id", stage_id)
+            result.setdefault("depends_on", [str(stages[index - 1].get("key"))] if index else [])
+            return result
     return {}
 
 
@@ -758,8 +768,9 @@ def _scope_task_for_node(
 
 def _requirements(task: Mapping[str, Any], node: Mapping[str, Any]) -> List[str]:
     values: List[str] = []
-    for value in _as_list(task.get("acceptance_criteria")):
-        values.append(str(value))
+    for key in ("acceptance_criteria", "requirements", "acceptance"):
+        for value in _as_list(task.get(key)):
+            values.append(str(value))
     for key in ("purpose", "rules"):
         for value in _as_list(node.get(key)):
             values.append(str(value))
@@ -1238,8 +1249,12 @@ def _task_candidates(
                 created_at=task.get("updated_at"),
                 metadata={"node": task.get("node") or task.get("stage"), "status": status},
             ))
-        if status == "blocked" or task.get("blocker") or task.get("blocked_reason"):
-            reason = task.get("blocker") or task.get("blocked_reason") or status
+        blocker_values = []
+        for key in ("blocker", "blocked_reason", "open_blockers", "blockers"):
+            blocker_values.extend(_as_list(task.get(key)))
+        if status == "blocked" and not blocker_values:
+            blocker_values.append(status)
+        for reason in blocker_values:
             blockers.append(_item(
                 "blocker",
                 str(reason),
@@ -1263,7 +1278,7 @@ def _task_candidates(
                 created_at=task.get("updated_at"),
                 metadata={"node": task.get("node") or task.get("stage"), "status": status},
             ))
-        for key in ("open_questions", "question", "decision_question", "acceptance_gap"):
+        for key in ("open_questions", "questions", "question", "decision_question", "acceptance_gap"):
             for value in _as_list(task.get(key)):
                 questions.append(_item(
                     "open_question",
