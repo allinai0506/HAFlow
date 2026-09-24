@@ -346,6 +346,31 @@ def test_low_level_storage_normalizes_empty_fingerprint_config(tmp_path: Path):
         state_db.save_working_context(payload, db_path=db, fingerprint_config={})
 
 
+def test_oversized_critical_finding_uses_truncated_marker(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-oversized-critical-finding"))
+    finding = _finding(
+        target["run_id"], "fnd-oversized-critical", task_id=target["task_id"],
+        severity="critical", summary="x" * 21000,
+    )
+    state_db.upsert_trajectory_finding(finding, db_path=db)
+    context = _compile(db, target, "developer")
+    assert "finding:fnd-oversized-critical" in context.source_refs
+    assert context.blockers
+
+
+def test_invalid_derived_questions_are_filtered_before_indexing(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, dict(
+        _task("task-invalid-derived-questions"),
+        open_questions=[None, "REAL"],
+    ))
+    context = _compile(db, target, "developer")
+    assert [item.get("value") for item in context.open_questions] == ["REAL"]
+
+
 def test_invalid_derived_task_entries_are_filtered_before_indexing(tmp_path: Path):
     db = tmp_path / "state.db"
     _seed_workflow(db)
@@ -1083,6 +1108,24 @@ def test_source_revision_covers_legacy_stages_beyond_projection_cap(tmp_path: Pa
     assert second.source_watermark > first.source_watermark
 
 
+def test_key_form_workflow_nodes_preserve_dependencies_and_rules(tmp_path: Path):
+    db = tmp_path / "state.db"
+    state_db.save_workflow(
+        {
+            "workflow_id": "wf-key-nodes", "title": "fixture", "status": "running",
+            "config": {"nodes": [
+                {"key": "impl", "depends_on": []},
+                {"key": "review", "depends_on": ["impl"], "rules": ["check evidence"]},
+            ]},
+        },
+        db_path=db,
+    )
+    target = _seed_task(db, _task("task-key-nodes", workflow_id="wf-key-nodes", node="review"))
+    context = _compile(db, target, "reviewer")
+    assert context.current_state["dependency_state"]["impl"] == "unknown"
+    assert context.current_state["review_scope"]["rules"] == ["check evidence"]
+
+
 def test_source_revision_covers_mixed_nodes_and_stages_projection(tmp_path: Path):
     db = tmp_path / "state.db"
     nodes = [{"id": f"node-{index}"} for index in range(101)]
@@ -1726,6 +1769,56 @@ def test_oversized_failure_survives_same_source_verification_noise(tmp_path: Pat
     )
     assert context.verification
     assert context.next_action != "Continue."
+
+
+def test_strict_verification_survives_cross_task_critical_noise(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-strict-window-target", node="test", role="tester"))
+    state_db.record_trajectory_event(
+        {
+            "run_id": target["run_id"], "task_id": target["task_id"],
+            "workflow_id": target["workflow_id"], "event_type": "verification_completed",
+            "payload": {"verification": {"passed": False}, "blob": "x" * 21000},
+        },
+        db_path=db,
+    )
+    for index in range(350):
+        sibling = _seed_task(db, _task(f"task-strict-window-sibling-{index}", node="implementation"))
+        state_db.record_trajectory_event(
+            {
+                "run_id": sibling["run_id"], "task_id": sibling["task_id"],
+                "workflow_id": sibling["workflow_id"], "event_type": "task_started",
+                "payload": {},
+            },
+            db_path=db,
+        )
+    context = _compile(db, target, "tester")
+    assert any(item.get("value", {}).get("passed") is False for item in context.verification)
+
+
+def test_oversized_failure_marker_respects_recovery(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-oversized-failure-recovery", status="completed"))
+    state_db.record_trajectory_event(
+        {
+            "run_id": target["run_id"], "task_id": target["task_id"],
+            "workflow_id": target["workflow_id"], "event_type": "task_failed",
+            "payload": {"reason": "x" * 21000},
+        },
+        db_path=db,
+    )
+    state_db.record_trajectory_event(
+        {
+            "run_id": target["run_id"], "task_id": target["task_id"],
+            "workflow_id": target["workflow_id"], "event_type": "task_completed",
+            "payload": {},
+        },
+        db_path=db,
+    )
+    context = _compile(db, target, "developer")
+    assert not context.blockers
 
 
 def test_oversized_strict_verification_survives_same_source_unknown_noise(tmp_path: Path):
@@ -2477,6 +2570,26 @@ def test_run_metrics_fail_closed_for_same_scope_duplicate_run_tasks(tmp_path: Pa
     assert metrics.trajectory_events == 0
 
 
+def test_run_metrics_fail_closed_for_cross_workflow_taskless_sources(tmp_path: Path):
+    from herdr.metrics import get_run_metrics
+
+    db = tmp_path / "state.db"
+    _seed_workflow(db, workflow_id="wf-a")
+    _seed_workflow(db, workflow_id="wf-b")
+    state_db.record_trajectory_event(
+        {"run_id": "reused-taskless", "task_id": None, "workflow_id": "wf-a", "event_type": "task_started", "payload": {}},
+        db_path=db,
+    )
+    state_db.record_trajectory_event(
+        {"run_id": "reused-taskless", "task_id": None, "workflow_id": "wf-b", "event_type": "task_started", "payload": {}},
+        db_path=db,
+    )
+    metrics = get_run_metrics("reused-taskless", db_path=db)
+    assert metrics.task_id is None
+    assert metrics.workflow_id is None
+    assert metrics.trajectory_events == 0
+
+
 def test_run_metrics_count_alternate_verification_failure(tmp_path: Path):
     from herdr.metrics import get_run_metrics
 
@@ -2728,6 +2841,22 @@ def test_nested_and_top_level_verification_conflict_prefers_failure(tmp_path: Pa
         item.get("value", {}).get("verification_passed") is False
         for item in context.verification
     )
+
+
+def test_top_level_passed_conflict_prefers_nested_failure(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-top-level-passed-conflict", node="test", role="tester"))
+    state_db.record_trajectory_event(
+        {
+            "run_id": target["run_id"], "task_id": target["task_id"],
+            "workflow_id": target["workflow_id"], "event_type": "verification_completed",
+            "payload": {"verification": {"passed": True}, "passed": False},
+        },
+        db_path=db,
+    )
+    context = _compile(db, target, "tester")
+    assert any(item.get("value", {}).get("passed") is False for item in context.verification)
 
 
 def test_newer_pass_replaces_old_failure_after_recovery(tmp_path: Path):

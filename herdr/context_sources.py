@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
@@ -152,6 +153,7 @@ def _merge_verification_events(
                         ORDER BY CASE WHEN (
                             json_type(e.payload_json, '$.verification.passed') = 'false'
                             OR json_type(e.payload_json, '$.verification_passed') = 'false'
+                            OR json_type(e.payload_json, '$.passed') = 'false'
                             OR json_type(e.payload_json, '$.verification.verification_passed') = 'false'
                         ) THEN 0 ELSE 1 END, e.sequence DESC, e.id DESC
                     ) AS strict_rank,
@@ -160,6 +162,7 @@ def _merge_verification_events(
                         ORDER BY CASE WHEN (
                             json_type(e.payload_json, '$.verification.passed') = 'true'
                             OR json_type(e.payload_json, '$.verification_passed') = 'true'
+                            OR json_type(e.payload_json, '$.passed') = 'true'
                             OR json_type(e.payload_json, '$.verification.verification_passed') = 'true'
                         ) THEN 0 ELSE 1 END, e.sequence DESC, e.id DESC
                     ) AS pass_rank
@@ -228,7 +231,8 @@ def _merge_verification_events(
                    e.event_type, e.sequence, e.timestamp,
                    json_type(e.payload_json, '$.verification.passed') AS passed_type,
                    json_type(e.payload_json, '$.verification_passed') AS alternate_type,
-                   json_type(e.payload_json, '$.verification.verification_passed') AS nested_type
+                   json_type(e.payload_json, '$.verification.verification_passed') AS nested_type,
+                   json_type(e.payload_json, '$.passed') AS top_passed_type
               FROM events e
              WHERE e.source = 'trajectory'
                AND e.run_id IN ({placeholders})
@@ -246,6 +250,7 @@ def _merge_verification_events(
                                      json_type(e.payload_json, '$.verification.passed') = 'false'
                                      OR json_type(e.payload_json, '$.verification_passed') = 'false'
                                      OR json_type(e.payload_json, '$.verification.verification_passed') = 'false'
+                                     OR json_type(e.payload_json, '$.passed') = 'false'
                                  ) THEN 1
                             WHEN e.event_type IN ('verification_completed', 'tests_completed') THEN 2
                             ELSE 3 END,
@@ -280,7 +285,8 @@ def _merge_verification_events(
                         "passed": (
                             False
                             if "false" in {
-                                row["passed_type"], row["alternate_type"], row["nested_type"]
+                                row["passed_type"], row["alternate_type"],
+                                row["nested_type"], row["top_passed_type"]
                             }
                             else None
                         ),
@@ -379,6 +385,7 @@ def _merge_verification_events(
         key = (str(event.get("run_id") or ""), str(event.get("task_id") or ""))
         reserved_by_key.setdefault(key, []).append(event)
     preferred_event_ids: set[str] = set()
+    strict_failure_event_ids: set[str] = set()
     for key_events in reserved_by_key.values():
         latest = max(key_events, key=verification_order)
         failure = max(
@@ -421,10 +428,17 @@ def _merge_verification_events(
             elif verification_strength(latest) == 1:
                 selected = latest
         preferred_event_ids.add(str(selected.get("event_id")))
+        selected_value = verification_value(selected)
+        if (
+            selected_value.get("passed") is False
+            or selected_value.get("verification_passed") is False
+        ):
+            strict_failure_event_ids.add(str(selected.get("event_id")))
 
     ordered = sorted(
         merged.values(),
         key=lambda item: (
+            0 if str(item.get("event_id")) in strict_failure_event_ids else 1,
             0 if str(item.get("event_id")) in critical_event_ids else 1,
             0 if str(item.get("event_id")) in preferred_event_ids else 1,
             0 if str(item.get("event_id")) in reserved_event_ids else 1,
@@ -454,6 +468,84 @@ def _read_source_snapshot(
     conn = state_db.get_db_connection(db_path or _db_path(store))
     try:
         conn.execute("BEGIN;")
+
+        def safe_decode_finding_row(row: sqlite3.Row) -> Dict[str, Any]:
+            try:
+                return state_db._decode_finding_row(row)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                return {
+                    "finding_id": row["finding_id"],
+                    "finding_key": row["finding_key"],
+                    "run_id": row["run_id"],
+                    "task_id": row["task_id"],
+                    "workflow_id": row["workflow_id"],
+                    "node_id": row["node_id"] if "node_id" in row.keys() else row["node"] if "node" in row.keys() else None,
+                    "agent_id": row["agent_id"] if "agent_id" in row.keys() else row["agent"] if "agent" in row.keys() else None,
+                    "finding_type": row["finding_type"],
+                    "severity": row["severity"],
+                    "status": row["status"] or "open",
+                    "summary": "source payload truncated or malformed",
+                    "recommended_action": "inspect the original finding source",
+                    "evidence": [],
+                    "metadata": {"source_truncated": True},
+                    "created_at": row["created_at"],
+                }
+
+        def critical_finding_rows_for_runs(run_values: Sequence[str], limit: int) -> List[Dict[str, Any]]:
+            placeholders = ",".join("?" for _ in run_values)
+            bounded = conn.execute(
+                f"""SELECT * FROM trajectory_findings
+                    WHERE run_id IN ({placeholders})
+                      AND (LOWER(COALESCE(severity, '')) = 'critical'
+                           OR finding_type IN ('verification_failure', 'repeated_failure'))
+                      AND LOWER(COALESCE(status, 'open')) NOT IN ('resolved', 'closed', 'superseded')
+                      AND length(COALESCE(summary, '')) <= 20000
+                      AND length(COALESCE(metadata_json, '{{}}')) <= 20000
+                      AND length(COALESCE(evidence_json, '[]')) <= 20000
+                    ORDER BY CASE WHEN task_id = ? THEN 0 ELSE 1 END,
+                             created_at DESC, rowid DESC
+                    LIMIT ?""",
+                (*run_values, str(task_id), int(limit)),
+            ).fetchall()
+            def marker(row: sqlite3.Row) -> Dict[str, Any]:
+                return {
+                    "finding_id": row["finding_id"],
+                    "finding_key": row["finding_key"],
+                    "run_id": row["run_id"],
+                    "task_id": row["task_id"],
+                    "workflow_id": row["workflow_id"],
+                    "node_id": row["node_id"] if "node_id" in row.keys() else None,
+                    "agent_id": row["agent_id"] if "agent_id" in row.keys() else None,
+                    "finding_type": row["finding_type"],
+                    "severity": row["severity"],
+                    "status": row["status"] or "open",
+                    "summary": "source payload truncated or malformed",
+                    "recommended_action": "inspect the original finding source",
+                    "evidence": [],
+                    "metadata": {"source_truncated": True},
+                    "created_at": row["created_at"],
+                }
+
+            result = [safe_decode_finding_row(row) for row in bounded]
+            oversized = conn.execute(
+                f"""SELECT finding_id, finding_key, run_id, task_id, workflow_id,
+                           node AS node_id, agent AS agent_id, finding_type, severity, status, created_at
+                      FROM trajectory_findings
+                     WHERE run_id IN ({placeholders})
+                       AND (LOWER(COALESCE(severity, '')) = 'critical'
+                            OR finding_type IN ('verification_failure', 'repeated_failure'))
+                       AND LOWER(COALESCE(status, 'open')) NOT IN ('resolved', 'closed', 'superseded')
+                       AND (length(COALESCE(summary, '')) > 20000
+                            OR length(COALESCE(metadata_json, '{{}}')) > 20000
+                            OR length(COALESCE(evidence_json, '[]')) > 20000)
+                     ORDER BY CASE WHEN task_id = ? THEN 0 ELSE 1 END,
+                              created_at DESC, rowid DESC
+                     LIMIT ?""",
+                (*run_values, str(task_id), int(limit)),
+            ).fetchall()
+            result.extend(marker(row) for row in oversized)
+            return result
+
         task_row = conn.execute(
             "SELECT * FROM tasks WHERE task_id = ? AND length(payload_json) <= 200000",
             (str(task_id),),
@@ -569,30 +661,20 @@ def _read_source_snapshot(
                 ORDER BY created_at DESC, rowid DESC LIMIT ?""",
             (*run_values, int(max_findings)),
         ).fetchall()
-        findings = [state_db._decode_finding_row(row) for row in finding_rows]
-        critical_finding_rows = conn.execute(
-            f"""SELECT * FROM trajectory_findings
-                WHERE run_id IN ({placeholders})
-                  AND (LOWER(COALESCE(severity, '')) = 'critical'
-                       OR finding_type IN ('verification_failure', 'repeated_failure'))
-                  AND LOWER(COALESCE(status, 'open')) NOT IN ('resolved', 'closed', 'superseded')
-                ORDER BY CASE WHEN task_id = ? THEN 0 ELSE 1 END,
-                         created_at DESC, rowid DESC
-                LIMIT ?""",
-            (*run_values, str(task_id), int(max_findings)),
-        ).fetchall()
+        findings = [safe_decode_finding_row(row) for row in finding_rows]
+        critical_findings = critical_finding_rows_for_runs(run_values, int(max_findings))
         findings_by_id = {
             str(finding.get("finding_id")): finding for finding in findings
         }
-        for row in critical_finding_rows:
-            finding = state_db._decode_finding_row(row)
+        for finding in critical_findings:
             findings_by_id[str(finding.get("finding_id"))] = finding
         findings = list(findings_by_id.values())
         findings.sort(key=lambda finding: (
-            0 if str(finding.get("task_id") or "") == str(task_id)
-            and (str(finding.get("severity") or "").lower() == "critical"
-                 or finding.get("finding_type") in {"verification_failure", "repeated_failure"})
-            else 1,
+            0 if (
+                str(finding.get("severity") or "").lower() == "critical"
+                or finding.get("finding_type") in {"verification_failure", "repeated_failure"}
+            ) else 1,
+            0 if str(finding.get("task_id") or "") == str(task_id) else 1,
             -float(finding.get("created_at") or 0.0),
             str(finding.get("finding_id") or ""),
         ))
@@ -621,7 +703,7 @@ def _read_source_snapshot(
                     ORDER BY created_at ASC, rowid ASC LIMIT ?""",
                 (*missing_relation_ids, *run_values, str(workflow_id), int(max_findings)),
             ).fetchall()
-            findings.extend(state_db._decode_finding_row(row) for row in relation_rows)
+            findings.extend(safe_decode_finding_row(row) for row in relation_rows)
 
         observation_rows = conn.execute(
             f"""SELECT * FROM observations
@@ -719,7 +801,7 @@ def _read_source_snapshot(
                     run_scope=run_scope,
                 )
                 findings = [
-                    state_db._decode_finding_row(row) for row in conn.execute(
+                    safe_decode_finding_row(row) for row in conn.execute(
                         f"""SELECT * FROM trajectory_findings
                             WHERE run_id IN ({placeholders})
                               AND length(COALESCE(summary, '')) <= 20000
@@ -729,29 +811,21 @@ def _read_source_snapshot(
                         (*run_values, int(max_findings)),
                     ).fetchall()
                 ]
-                critical_finding_rows = conn.execute(
-                    f"""SELECT * FROM trajectory_findings
-                        WHERE run_id IN ({placeholders})
-                          AND (LOWER(COALESCE(severity, '')) = 'critical'
-                               OR finding_type IN ('verification_failure', 'repeated_failure'))
-                          AND LOWER(COALESCE(status, 'open')) NOT IN ('resolved', 'closed', 'superseded')
-                        ORDER BY CASE WHEN task_id = ? THEN 0 ELSE 1 END,
-                                 created_at DESC, rowid DESC
-                        LIMIT ?""",
-                    (*run_values, str(task_id), int(max_findings)),
-                ).fetchall()
+                critical_findings = critical_finding_rows_for_runs(
+                    run_values, int(max_findings)
+                )
                 findings_by_id = {
                     str(finding.get("finding_id")): finding for finding in findings
                 }
-                for row in critical_finding_rows:
-                    finding = state_db._decode_finding_row(row)
+                for finding in critical_findings:
                     findings_by_id[str(finding.get("finding_id"))] = finding
                 findings = list(findings_by_id.values())
                 findings.sort(key=lambda finding: (
-                    0 if str(finding.get("task_id") or "") == str(task_id)
-                    and (str(finding.get("severity") or "").lower() == "critical"
-                         or finding.get("finding_type") in {"verification_failure", "repeated_failure"})
-                    else 1,
+                    0 if (
+                        str(finding.get("severity") or "").lower() == "critical"
+                        or finding.get("finding_type") in {"verification_failure", "repeated_failure"}
+                    ) else 1,
+                    0 if str(finding.get("task_id") or "") == str(task_id) else 1,
                     -float(finding.get("created_at") or 0.0),
                     str(finding.get("finding_id") or ""),
                 ))
@@ -780,7 +854,7 @@ def _read_source_snapshot(
                             ORDER BY created_at ASC, rowid ASC LIMIT ?""",
                         (*missing_relation_ids, *run_values, str(workflow_id), int(max_findings)),
                     ).fetchall()
-                    findings.extend(state_db._decode_finding_row(row) for row in relation_rows)
+                    findings.extend(safe_decode_finding_row(row) for row in relation_rows)
                 observations = []
                 for row in conn.execute(
                     f"""SELECT * FROM observations
@@ -1059,7 +1133,7 @@ def _workflow_config_projection(
         relevant_items = [
             item for item in items
             if isinstance(item, Mapping)
-            and str(item.get("id") or item.get("stage") or item.get("name") or "") in relevant_ids
+            and str(item.get("id") or item.get("key") or item.get("stage") or item.get("name") or "") in relevant_ids
         ]
         canonical_items = json.dumps(items, ensure_ascii=False, sort_keys=True, default=str)
         projection[item_key] = relevant_items
@@ -1172,7 +1246,7 @@ def _workflow_node(workflow: Mapping[str, Any], node_id: Optional[str]) -> Dict[
     config = workflow.get("config") or {}
     nodes = config.get("nodes") if isinstance(config, dict) else None
     for node in nodes or []:
-        if isinstance(node, Mapping) and str(node.get("id")) == str(node_id):
+        if isinstance(node, Mapping) and str(node.get("id") or node.get("key") or "") == str(node_id):
             return dict(node)
     stages = config.get("stages") if isinstance(config, dict) else None
     for index, stage in enumerate(stages or []):

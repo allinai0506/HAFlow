@@ -324,6 +324,10 @@ def test_source_clock_intermediate_primary_key_is_rebuilt(tmp_path):
                revision INTEGER NOT NULL
            )"""
     )
+    conn.execute(
+        "INSERT INTO working_context_source_clock (run_scope, workflow_id, revision) VALUES (?, ?, ?)",
+        ("intermediate-scope", "wf-intermediate", 9),
+    )
     conn.commit()
     conn.close()
     state_db.init_db(db_path)
@@ -337,6 +341,10 @@ def test_source_clock_intermediate_primary_key_is_rebuilt(tmp_path):
             if int(row["pk"] or 0) > 0
         }
         assert primary_key == {"run_scope", "workflow_id"}
+        assert migrated.execute(
+            "SELECT revision FROM working_context_source_clock WHERE run_scope = ? AND workflow_id = ?",
+            ("intermediate-scope", "wf-intermediate"),
+        ).fetchone()["revision"] == 9
     finally:
         migrated.close()
 

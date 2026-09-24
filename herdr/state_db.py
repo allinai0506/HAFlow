@@ -115,6 +115,7 @@ def _ensure_working_context_source_clock_schema(conn: sqlite3.Connection) -> Non
         str(row["name"]) for row in table_info if int(row["pk"] or 0) > 0
     }
     legacy_revision = 0
+    legacy_clock_table = False
     if columns and (
         not {"run_scope", "workflow_id"}.issubset(columns)
         or primary_key != {"run_scope", "workflow_id"}
@@ -137,6 +138,7 @@ def _ensure_working_context_source_clock_schema(conn: sqlite3.Connection) -> Non
         conn.execute(
             "ALTER TABLE working_context_source_clock RENAME TO working_context_source_clock_legacy"
         )
+        legacy_clock_table = True
     conn.execute("""
         CREATE TABLE IF NOT EXISTS working_context_source_clock (
             run_scope TEXT NOT NULL,
@@ -145,16 +147,34 @@ def _ensure_working_context_source_clock_schema(conn: sqlite3.Connection) -> Non
             PRIMARY KEY (run_scope, workflow_id)
         );
     """)
-    if legacy_revision:
-        conn.execute(
-            """
-            INSERT OR IGNORE INTO working_context_source_clock
-                (run_scope, workflow_id, revision)
-            SELECT run_scope, COALESCE(workflow_id, ''), ?
-            FROM working_context_source_heads
-            """,
-            (legacy_revision,),
-        )
+    if legacy_clock_table:
+        legacy_columns = {
+            str(row["name"])
+            for row in conn.execute(
+                "PRAGMA table_info(working_context_source_clock_legacy)"
+            ).fetchall()
+        }
+        if {"run_scope", "workflow_id", "revision"}.issubset(legacy_columns):
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO working_context_source_clock
+                    (run_scope, workflow_id, revision)
+                SELECT COALESCE(run_scope, ''), COALESCE(workflow_id, ''),
+                       COALESCE(MAX(revision), 0)
+                FROM working_context_source_clock_legacy
+                GROUP BY run_scope, workflow_id
+                """
+            )
+        elif legacy_revision:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO working_context_source_clock
+                    (run_scope, workflow_id, revision)
+                SELECT run_scope, COALESCE(workflow_id, ''), ?
+                FROM working_context_source_heads
+                """,
+                (legacy_revision,),
+            )
 
 
 def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
@@ -2376,7 +2396,7 @@ def aggregate_run_metric_rows(run_id: str, db_path: Optional[Path] = None) -> Di
         identity_ambiguous = len(scope_rows) > 1
         allowed_task_ids = {str(row["task_id"] or "") for row in scope_rows}
         allowed_workflow_ids = {str(row["workflow_id"] or "") for row in scope_rows}
-        if scope_rows and not identity_ambiguous:
+        if not identity_ambiguous:
             source_identity_rows = conn.execute(
                 """
                 SELECT 'events' AS source_table, task_id, workflow_id
@@ -2393,18 +2413,28 @@ def aggregate_run_metric_rows(run_id: str, db_path: Optional[Path] = None) -> Di
                 """,
                 (run_id, run_id, run_id, run_id),
             ).fetchall()
+            observed_task_ids: set[str] = set()
+            observed_workflow_ids: set[str] = set()
             for row in source_identity_rows:
                 task_id = str(row["task_id"] or "")
                 workflow_id = str(row["workflow_id"] or "")
-                if task_id and task_id not in allowed_task_ids:
+                if task_id:
+                    observed_task_ids.add(task_id)
+                if workflow_id:
+                    observed_workflow_ids.add(workflow_id)
+                if scope_rows and task_id and task_id not in allowed_task_ids:
                     identity_ambiguous = True
                     break
-                if workflow_id and workflow_id not in allowed_workflow_ids:
+                if scope_rows and workflow_id and workflow_id not in allowed_workflow_ids:
                     identity_ambiguous = True
                     break
-                if not task_id and workflow_id not in allowed_workflow_ids:
+                if scope_rows and not task_id and workflow_id not in allowed_workflow_ids:
                     identity_ambiguous = True
                     break
+            if not scope_rows and (
+                len(observed_task_ids) > 1 or len(observed_workflow_ids) > 1
+            ):
+                identity_ambiguous = True
         if identity_ambiguous:
             return {
                 "trajectory_events": 0, "started_at": None, "finished_at": None,
@@ -2433,11 +2463,13 @@ def aggregate_run_metric_rows(run_id: str, db_path: Optional[Path] = None) -> Di
                                           json_type(payload_json, '$.verification.passed') = 'false'
                                           OR json_type(payload_json, '$.verification_passed') = 'false'
                                           OR json_type(payload_json, '$.verification.verification_passed') = 'false'
+                                          OR json_type(payload_json, '$.passed') = 'false'
                                       ) THEN 0
                                                 WHEN (
                                           json_type(payload_json, '$.verification.passed') = 'true'
                                           OR json_type(payload_json, '$.verification_passed') = 'true'
                                           OR json_type(payload_json, '$.verification.verification_passed') = 'true'
+                                          OR json_type(payload_json, '$.passed') = 'true'
                                       ) THEN 1 ELSE 0 END
                                       ELSE 0 END
                             ELSE 0 END) AS verification_passed,
@@ -2447,6 +2479,7 @@ def aggregate_run_metric_rows(run_id: str, db_path: Optional[Path] = None) -> Di
                                           json_type(payload_json, '$.verification.passed') = 'false'
                                           OR json_type(payload_json, '$.verification_passed') = 'false'
                                           OR json_type(payload_json, '$.verification.verification_passed') = 'false'
+                                          OR json_type(payload_json, '$.passed') = 'false'
                                       ) THEN 1 ELSE 0 END
                                       ELSE 0 END
                             ELSE 0 END) AS verification_failed
@@ -3628,7 +3661,10 @@ def _validate_context_source_existence(
             keys = ("open_questions", "questions", "question", "decision_question", "acceptance_gap")
             if int(parts[2]) >= len(keys):
                 return False
-            return int(parts[3]) < len(values(keys[int(parts[2])]))
+            question_values = [
+                value for value in values(keys[int(parts[2])]) if value not in (None, "")
+            ]
+            return int(parts[3]) < len(question_values)
         return False
 
     for ref in sorted(refs):

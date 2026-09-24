@@ -287,6 +287,7 @@ def _event_candidates(
         event_type = str(event.get("event_type") or "")
         payload = _event_payload(event)
         event_ref = f"trajectory:{event.get('event_id')}"
+        event_id = str(event.get("event_id") or "")
         source_task = str(event.get("task_id") or "") or None
         common = {
             "source_task": source_task,
@@ -295,6 +296,12 @@ def _event_candidates(
         }
         if payload.get("source_truncated") is True and event_type not in VERIFICATION_EVENTS:
             if event_type in {"blocker", "task_failed", "agent_failed", "run_failed"}:
+                event_key = (str(event.get("run_id") or ""), str(event.get("task_id") or ""))
+                if event_id not in active_failures.get(event_key, set()):
+                    continue
+                task = task_by_id.get(event_key[1])
+                if task and str(task.get("status") or "") in COMPLETED_TASK_STATUSES:
+                    continue
                 blockers.append(_item(
                     "blocker",
                     {"reason": "source payload truncated", "source_truncated": True},
@@ -361,6 +368,13 @@ def _event_candidates(
                     verification_value["verification_passed"] = False
                 else:
                     verification_value["verification_passed"] = top_value
+            if "passed" in payload:
+                nested_value = verification_value.get("passed")
+                top_value = payload.get("passed")
+                if nested_value is False or top_value is False:
+                    verification_value["passed"] = False
+                else:
+                    verification_value["passed"] = top_value
             verification_flags = [
                 verification_value.get(key)
                 for key in ("passed", "verification_passed")
@@ -527,7 +541,10 @@ def _task_candidates(
         for question_index, key in enumerate((
             "open_questions", "questions", "question", "decision_question", "acceptance_gap",
         )):
-            for value_index, value in enumerate(_as_list(task.get(key))):
+            question_values = [
+                value for value in _as_list(task.get(key)) if value not in (None, "")
+            ]
+            for value_index, value in enumerate(question_values):
                 questions.append(_item(
                     "open_question",
                     str(value),
