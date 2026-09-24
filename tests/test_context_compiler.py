@@ -131,6 +131,20 @@ def _compile(db: Path, task: dict, role: str, **kwargs):
     )
 
 
+def test_explicit_scope_accepts_taskless_source_from_allowed_run(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    _seed_task(db, _task("task-scope-target", scope="scope-a"))
+    _seed_task(db, _task("task-scope-sibling", scope="scope-a", run_id="run-sibling"))
+    observation = create_observation(
+        run_id="run-sibling", task_id=None, workflow_id="wf-context",
+        source_type="verification", source_ref="verification:taskless",
+        content="bounded", store=ObservationStore(db),
+    )
+    context = _compile(db, _task("task-scope-target", scope="scope-a"), "reviewer")
+    assert observation.observation_id in json.dumps(context.to_mapping(), ensure_ascii=False)
+
+
 def test_storage_rejects_scope_foreign_finding_even_when_row_exists(tmp_path: Path):
     db = tmp_path / "state.db"
     _seed_workflow(db)
@@ -149,26 +163,41 @@ def test_storage_rejects_scope_foreign_finding_even_when_row_exists(tmp_path: Pa
         "source_ref": "finding:fnd-storage-foreign",
     }]
     forged["source_refs"] = ["finding:fnd-storage-foreign"]
+    from herdr.context_models import _payload_digest
+    forged["metrics"] = dict(forged.get("metrics") or {})
+    forged["metrics"]["payload_digest"] = _payload_digest(forged)
     with pytest.raises(ValueError, match="crosses run scope"):
+        state_db.save_working_context(forged, db_path=db)
+
+
+def test_storage_rejects_payload_changed_without_digest_refresh(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-payload-digest"))
+    context = _compile(db, target, "developer")
+    forged = dict(context.to_mapping())
+    forged["context_id"] = "wc_payload_digest_forged"
+    forged["goal"] = forged["goal"] + " tampered"
+    with pytest.raises(ValueError, match="payload digest"):
         state_db.save_working_context(forged, db_path=db)
 
 
 def test_storage_rejects_nonexistent_typed_source_ref(tmp_path: Path):
     db = tmp_path / "state.db"
+    payload = {
+        "context_id": "wc_forged", "run_scope": "scope", "run_id": "run",
+        "workflow_id": "wf", "task_id": "task", "node_id": "review",
+        "agent_role": "reviewer", "goal": "goal", "current_state": {},
+        "findings": [{"kind": "finding", "value": "x", "source_ref": "finding:missing"}],
+        "artifacts": [], "evidence": [], "completed": [], "decisions": [], "blockers": [],
+        "open_questions": [], "verification": [], "handoffs": [], "next_action": "review",
+        "source_refs": [], "context_fingerprint": "f" * 64, "source_version": "v",
+        "metrics": {"source_clock": 0}, "compiled_at": 1.0,
+    }
+    from herdr.context_models import _payload_digest
+    payload["metrics"]["payload_digest"] = _payload_digest(payload)
     with pytest.raises(ValueError, match="does not exist"):
-        state_db.save_working_context(
-            {
-                "context_id": "wc_forged", "run_scope": "scope", "run_id": "run",
-                "workflow_id": "wf", "task_id": "task", "node_id": "review",
-                "source_run_ids": ["run"],
-                "agent_role": "reviewer", "goal": "goal", "current_state": {},
-                "findings": [{"kind": "finding", "value": "x", "source_ref": "finding:missing"}],
-                "artifacts": [], "evidence": [], "completed": [], "decisions": [], "blockers": [],
-                "open_questions": [], "verification": [], "handoffs": [], "next_action": "review",
-                "source_refs": [], "context_fingerprint": "f" * 64, "source_version": "v",
-                "metrics": {}, "compiled_at": 1.0,
-            }, db_path=db,
-        )
+        state_db.save_working_context(payload, db_path=db)
 
 
 def test_relevance_uses_state_role_and_dependency_before_recency():
@@ -267,6 +296,36 @@ def test_state_aware_contexts_are_distinct(tmp_path: Path):
     )
     assert any("fnd-target-implementation" in ref for ref in developer_with_target.source_refs)
     assert all("fnd-target-implementation" not in item.get("source_ref", "") for item in reviewer_with_target.findings)
+
+
+def test_tight_budget_keeps_failed_sibling_verification(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = dict(
+        _task("task-verification-budget-target", node="test", role="tester"),
+        acceptance_criteria=[f"criterion-{index}" for index in range(20)],
+    )
+    sibling = _seed_task(db, _task("task-verification-budget-sibling", node="review"))
+    _seed_task(db, target)
+    for index in range(100):
+        state_db.upsert_trajectory_finding(
+            _finding(sibling["run_id"], f"fnd-verification-budget-{index}", task_id=sibling["task_id"]),
+            db_path=db,
+        )
+    ledger = TrajectoryLedger(db)
+    ledger.append_event({
+        "run_id": target["run_id"], "task_id": target["task_id"],
+        "workflow_id": target["workflow_id"], "event_type": "verification_completed",
+        "verification": {"passed": True},
+    })
+    ledger.append_event({
+        "run_id": sibling["run_id"], "task_id": sibling["task_id"],
+        "workflow_id": sibling["workflow_id"], "event_type": "verification_completed",
+        "verification": {"passed": False},
+    })
+    context = _compile(db, target, "tester", config={"max_chars": 2000})
+    assert any(item.get("value", {}).get("passed") is False for item in context.verification)
+    assert context.next_action == "Resolve failed verification."
 
 
 def test_global_item_budget_updates_reported_metrics(tmp_path: Path):
@@ -419,6 +478,19 @@ def test_source_clock_rejects_toctou_candidate_after_source_write(tmp_path: Path
     assert late.get("_stale_snapshot") is True
 
 
+def test_source_backed_context_cannot_omit_clock(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-clock-required"))
+    context = _compile(db, target, "developer")
+    forged = dict(context.to_mapping())
+    forged["context_id"] = "wc_clock_required_forged"
+    forged["metrics"] = dict(forged.get("metrics") or {})
+    forged["metrics"].pop("source_clock", None)
+    with pytest.raises(ValueError, match="source_clock"):
+        state_db.save_working_context(forged, db_path=db)
+
+
 def test_late_old_source_candidate_is_not_latest_after_revision_change(tmp_path: Path):
     db = tmp_path / "state.db"
     _seed_workflow(db)
@@ -492,6 +564,31 @@ def test_fingerprint_ignores_updated_at_only_task_resave(tmp_path: Path):
     second = _compile(db, target, "developer")
     assert second.context_id == first.context_id
     assert second.context_fingerprint == first.context_fingerprint
+
+
+def test_completed_task_resave_does_not_change_derived_context(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-resave-completed", status="completed"))
+    first = _compile(db, target, "developer")
+    state_db.save_task(dict(target), db_path=db)
+    second = _compile(db, target, "developer")
+    assert second.context_id == first.context_id
+    assert second.context_fingerprint == first.context_fingerprint
+
+
+def test_runtime_timestamp_only_resave_does_not_change_context(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = dict(_task("task-resave-runtime", status="working"), runtime={"status": "running", "updated_at": 1.0})
+    target = _seed_task(db, target)
+    first = _compile(db, target, "developer")
+    changed_runtime = dict(target)
+    changed_runtime["runtime"] = {"status": "running", "updated_at": 999.0}
+    state_db.save_task(changed_runtime, db_path=db)
+    second = _compile(db, changed_runtime, "developer")
+    assert second.context_id == first.context_id
+    assert second.source_version == first.source_version
 
 
 def test_workflow_only_requirements_keep_workflow_provenance(tmp_path: Path):
@@ -691,6 +788,26 @@ def test_run_isolation_rejects_other_run_sources(tmp_path: Path):
     assert mismatched_observation.observation_id not in serialized
     assert context.run_scope == "wf-exec-1"
     assert context.run_id == "run-target"
+
+
+def test_legacy_planned_link_does_not_authorize_distinct_runs(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _task("task-planned-legacy-target", node="test")
+    target.pop("workflow_run_id")
+    upstream = _task("task-planned-legacy-upstream", node="implementation")
+    upstream.pop("workflow_run_id")
+    upstream["artifacts"] = [{"ref": "planned-foreign-artifact"}]
+    _seed_task(db, target)
+    _seed_task(db, upstream)
+    context = _compile(
+        db, target, "tester",
+        planned_links=[{
+            "from_task_id": upstream["task_id"],
+            "to_task_id": target["task_id"],
+        }],
+    )
+    assert "planned-foreign-artifact" not in json.dumps(context.to_mapping(), ensure_ascii=False)
 
 
 def test_legacy_scope_does_not_mix_unlinked_task_runs(tmp_path: Path):
@@ -1212,11 +1329,12 @@ def test_foreign_verification_event_cannot_shadow_valid_failure(tmp_path: Path):
         "workflow_id": target["workflow_id"], "event_type": "verification_completed",
         "verification": {"passed": False}, "timestamp": 1000.0,
     })
-    ledger.append_event({
-        "run_id": target["run_id"], "task_id": target["task_id"],
-        "workflow_id": "wf-other", "event_type": "verification_completed",
-        "verification": {"passed": True}, "timestamp": 2000.0,
-    })
+    for index in range(500):
+        ledger.append_event({
+            "run_id": target["run_id"], "task_id": target["task_id"],
+            "workflow_id": "wf-other", "event_type": "verification_completed",
+            "verification": {"passed": True}, "timestamp": 2000.0 + index,
+        })
     context = _compile(db, target, "tester")
     assert any(valid["event_id"] in ref for ref in context.source_refs)
     assert any(item.get("value", {}).get("passed") is False for item in context.verification)
@@ -1238,6 +1356,12 @@ def test_foreign_eval_cannot_shadow_valid_failure(tmp_path: Path):
         workflow_id="wf-other", revision=2,
         verification_passed=True, db_path=db,
     )
+    for revision in range(3, 153):
+        record_eval_result(
+            target["run_id"], task_id=target["task_id"],
+            workflow_id="wf-other", revision=revision,
+            verification_passed=True, db_path=db,
+        )
     context = _compile(db, target, "tester")
     assert any(item.get("value", {}).get("verification_passed") is False for item in context.verification)
 

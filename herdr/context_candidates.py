@@ -393,7 +393,7 @@ def _task_artifact_candidates(tasks: Sequence[Mapping[str, Any]]) -> List[Dict[s
                 f"{task_ref}:{artifact_index}",
                 source_task=task_id,
                 source_run=_task_run(task),
-                created_at=task.get("updated_at"),
+                created_at=task.get("created_at"),
                 metadata={"node": task.get("node") or task.get("stage"), "source_field": "task"},
             ))
     return result
@@ -423,7 +423,7 @@ def _task_candidates(
                 completed_ref,
                 source_task=task_id,
                 source_run=_task_run(task),
-                created_at=task.get("updated_at"),
+                created_at=task.get("created_at"),
                 metadata={"node": task.get("node") or task.get("stage"), "status": status},
             ))
         if status not in COMPLETED_TASK_STATUSES:
@@ -439,7 +439,7 @@ def _task_candidates(
                     f"{blocker_ref}:{reason_index}",
                     source_task=task_id,
                     source_run=_task_run(task),
-                    created_at=task.get("updated_at"),
+                    created_at=task.get("created_at"),
                     metadata={"node": task.get("node") or task.get("stage"), "status": status},
                 ))
         if task.get("stage_verdict") or task.get("decision"):
@@ -453,7 +453,7 @@ def _task_candidates(
                 decision_ref,
                 source_task=task_id,
                 source_run=_task_run(task),
-                created_at=task.get("updated_at"),
+                created_at=task.get("created_at"),
                 metadata={"node": task.get("node") or task.get("stage"), "status": status},
             ))
         for question_index, key in enumerate((
@@ -466,7 +466,7 @@ def _task_candidates(
                     f"{question_ref}:{question_index}:{value_index}",
                     source_task=task_id,
                     source_run=_task_run(task),
-                    created_at=task.get("updated_at"),
+                    created_at=task.get("created_at"),
                     metadata={"field": key, "node": task.get("node") or task.get("stage")},
                 ))
     return completed, blockers, decisions, questions

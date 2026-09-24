@@ -26,6 +26,7 @@ from .context_models import (
     _db_path,
     _hash,
     _item,
+    _payload_digest,
     _safe_float,
     _task_run,
     infer_agent_role,
@@ -70,6 +71,14 @@ from .context_selection import (
 
 # ---------------------------------------------------------------------------
 # Public compiler and storage facade
+
+
+def _attach_payload_digest(context: WorkingContext) -> WorkingContext:
+    metrics = dict(context.metrics)
+    metrics["payload_digest"] = _payload_digest(context)
+    return _calibrate_context_metrics(
+        WorkingContext(**{**context.to_mapping(), "metrics": metrics})
+    )
 
 
 def compile_working_context(
@@ -260,7 +269,7 @@ def compile_working_context(
             f"task:{current_task_id}:blocker:current",
             source_task=current_task_id,
             source_run=_task_run(target),
-            created_at=target.get("updated_at"),
+            created_at=target.get("created_at"),
             metadata={"status": str(target.get("status") or ""), "node": node_id},
         ))
     for finding in findings:
@@ -350,9 +359,18 @@ def compile_working_context(
         old = latest_verification.get(key)
         if old is None or verification_order(item) >= verification_order(old):
             latest_verification[key] = item
+    def verification_failed(item: Mapping[str, Any]) -> bool:
+        value = item.get("value") if isinstance(item.get("value"), Mapping) else {}
+        return (
+            value.get("passed") is False
+            or value.get("verification_passed") is False
+            or str(item.get("status") or "").lower() in {"failed", "failure", "blocked"}
+        )
+
     selected["verification"] = sorted(
         latest_verification.values(),
         key=lambda item: (
+            0 if verification_failed(item) else 1,
             0 if item.get("source_task") == current_task_id else 1,
             -verification_order(item)[0],
             -verification_order(item)[1],
@@ -437,6 +455,7 @@ def compile_working_context(
         "context_fingerprint": _hash(_fingerprint_payload(context, cfg)),
     })
     context = _calibrate_context_metrics(context)
+    context = _attach_payload_digest(context)
     if len(json.dumps(context.to_mapping(), ensure_ascii=False)) > int(cfg["max_chars"]):
         raise ValueError("max_chars is too small for the required WorkingContext identity")
     if _retry < 1:
@@ -546,7 +565,7 @@ def compile_working_context(
     result_context = _fit_final_budget(
         WorkingContext.from_mapping(result_mapping), int(cfg["max_chars"]),
     )
-    return _calibrate_context_metrics(result_context)
+    return _attach_payload_digest(_calibrate_context_metrics(result_context))
 
 
 def get_working_context(

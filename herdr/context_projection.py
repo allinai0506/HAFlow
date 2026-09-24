@@ -178,12 +178,12 @@ def _fit_final_budget(context: WorkingContext, max_chars: int) -> WorkingContext
             key: value for key, value in state.items() if key in state_keys
         }
         for key, value in list(result.items()):
-            if isinstance(value, list) and len(value) > 2:
-                result[key] = value[:2]
+            if isinstance(value, list) and len(value) > 1:
+                result[key] = value[:1]
         if role_state_key and role_state_key in result:
             value = result[role_state_key]
-            result[role_state_key] = value[:2] if isinstance(value, list) else value
-        return _bound_value(result, 40)
+            result[role_state_key] = value[:1] if isinstance(value, list) else value
+        return _bound_value(result, 32)
 
     def compact_item(item: Mapping[str, Any]) -> Dict[str, Any]:
         keys = ("kind", "value", "source_ref", "source_task", "source_run", "evidence_refs")
@@ -201,6 +201,14 @@ def _fit_final_budget(context: WorkingContext, max_chars: int) -> WorkingContext
                 refs.append(str(item.get("source_ref") or ""))
                 refs.extend(str(value) for value in item.get("evidence_refs") or [])
         return list(dict.fromkeys(ref for ref in refs if ref))
+
+    def verification_failed(item: Mapping[str, Any]) -> bool:
+        value = item.get("value") if isinstance(item.get("value"), Mapping) else {}
+        return (
+            value.get("passed") is False
+            or value.get("verification_passed") is False
+            or str(item.get("status") or "").lower() in {"failed", "failure", "blocked"}
+        )
 
     for _ in range(4):
         metrics = dict(context.metrics)
@@ -223,15 +231,12 @@ def _fit_final_budget(context: WorkingContext, max_chars: int) -> WorkingContext
             return context
         context = WorkingContext(**{
             **context.to_mapping(),
-            "goal": _clip_text(context.goal, 40),
+            "goal": _clip_text(context.goal, 32),
             "next_action": (
                 "Resolve blocker."
                 if context.blockers
                 else "Resolve failed verification."
-                if any(
-                    item.get("value", {}).get("passed") is False
-                    for item in context.verification
-                )
+                if any(verification_failed(item) for item in context.verification)
                 else "Continue."
             ),
             "compiled_at": round(context.compiled_at),
@@ -248,7 +253,13 @@ def _fit_final_budget(context: WorkingContext, max_chars: int) -> WorkingContext
             "open_questions": [compact_item(item) for item in context.open_questions[:1]],
             "handoffs": [compact_item(item) for item in context.handoffs[:1]],
             "blockers": [compact_item(item) for item in context.blockers[:1]],
-            "verification": [compact_item(item) for item in context.verification[:1]],
+            "verification": [
+                compact_item(item)
+                for item in sorted(
+                    context.verification,
+                    key=lambda item: (not verification_failed(item), str(item.get("source_ref") or "")),
+                )[:1]
+            ],
         })
         context = WorkingContext(**{
             **context.to_mapping(),

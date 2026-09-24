@@ -332,6 +332,17 @@ def _as_list(value: Any) -> List[Any]:
     return [value]
 
 
+def _payload_digest(value: Any) -> str:
+    """Return a stable consistency digest for the semantic snapshot payload."""
+    raw = value.to_mapping() if isinstance(value, WorkingContext) else dict(value)
+    for key in ("context_id", "context_fingerprint", "metrics", "compiled_at"):
+        raw.pop(key, None)
+    canonical = json.dumps(
+        raw, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+
+
 def _task_run(task: Mapping[str, Any]) -> Optional[str]:
     try:
         return str(run_id_for_task(dict(task)))

@@ -125,14 +125,21 @@ def _merge_verification_events(
     if not run_values:
         return events
     placeholders = ",".join("?" for _ in run_values)
+    task_ids = list(task_by_id or {})
+    task_filter = (
+        f"e.task_id IN ({','.join('?' for _ in task_ids)})"
+        if task_ids else "e.task_id IS NULL"
+    )
     rows = conn.execute(
-        f"""SELECT * FROM events
-            WHERE source = 'trajectory'
-              AND run_id IN ({placeholders})
-              AND event_type IN ('verification_completed', 'tests_completed')
-              AND length(payload_json) <= 20000
-            ORDER BY sequence DESC, id DESC LIMIT ?""",
-        (*run_values, int(limit)),
+        f"""SELECT e.* FROM events e
+            WHERE e.source = 'trajectory'
+              AND e.run_id IN ({placeholders})
+              AND e.event_type IN ('verification_completed', 'tests_completed')
+              AND e.workflow_id = ?
+              AND ({task_filter})
+              AND length(e.payload_json) <= 20000
+            ORDER BY e.sequence DESC, e.id DESC LIMIT ?""",
+        (*run_values, workflow_id, *task_ids, int(limit)),
     ).fetchall()
     merged = {str(event.get("event_id")): event for event in events}
     for row in rows:
@@ -229,6 +236,20 @@ def _read_source_snapshot(
                 linked_task = task_by_id.get(linked_id)
                 linked_node = str((linked_task or {}).get("node") or (linked_task or {}).get("stage") or "")
                 if linked_task is None or linked_node not in allowed_link_nodes:
+                    continue
+                target_legacy_run = task.get("run_id")
+                linked_legacy_run = linked_task.get("run_id")
+                if (
+                    not task.get("workflow_run_id")
+                    and not task.get("execution_id")
+                    and not linked_task.get("workflow_run_id")
+                    and not linked_task.get("execution_id")
+                    and (
+                        not target_legacy_run
+                        or not linked_legacy_run
+                        or str(target_legacy_run) != str(linked_legacy_run)
+                    )
+                ):
                     continue
                 linked_run = _task_run(linked_task)
                 if linked_run:
@@ -378,13 +399,20 @@ def _read_source_snapshot(
                         "created_at": decoded.get("created_at"),
                     })
 
+        eval_task_ids = list(task_by_id)
+        eval_task_filter = (
+            f"task_id IN ({','.join('?' for _ in eval_task_ids)})"
+            if eval_task_ids else "task_id IS NULL"
+        )
         eval_rows = conn.execute(
             f"""SELECT * FROM eval_results
                 WHERE run_id IN ({placeholders})
+                  AND workflow_id = ?
+                  AND ({eval_task_filter})
                   AND length(COALESCE(evidence_json, 'null')) <= 20000
                   AND length(COALESCE(warnings_json, '[]')) <= 20000
                 ORDER BY run_id ASC, revision DESC, rowid DESC LIMIT ?""",
-            (*run_values, max(int(max_evals), 1000)),
+            (*run_values, str(workflow_id), *eval_task_ids, int(max_evals)),
         ).fetchall()
         evals_by_run: Dict[str, Dict[str, Any]] = {}
         for row in eval_rows:
@@ -437,6 +465,12 @@ def _read_source_snapshot(
     return snapshot
 
 
+def _stable_runtime_projection(task: Mapping[str, Any]) -> Dict[str, Any]:
+    runtime = task.get("runtime") if isinstance(task.get("runtime"), Mapping) else {}
+    status = runtime.get("status")
+    return {"status": status} if status is not None else {}
+
+
 def _source_projection(snapshot: Mapping[str, Any]) -> Dict[str, Any]:
     """Keep the source-version hash bounded to fields that affect compilation."""
     return {
@@ -447,21 +481,25 @@ def _source_projection(snapshot: Mapping[str, Any]) -> Dict[str, Any]:
                 "node", "stage", "agent", "agent_role", "status", "goal", "blocker",
                 "acceptance_criteria", "stage_verdict", "stage_verdict_note", "artifacts",
                 "blockers", "open_questions", "questions", "question", "decision_question",
-                "acceptance_gap", "decision", "runtime",
+                "acceptance_gap", "decision",
             )
         },
+        "runtime": _stable_runtime_projection(snapshot["task"]),
         "workflow": {
             key: snapshot["workflow"].get(key)
             for key in ("workflow_id", "status", "current_stage", "config")
         },
         "tasks": [
-            {key: item.get(key) for key in (
-                "task_id", "run_id", "workflow_run_id", "execution_id", "node", "stage",
-                "agent", "agent_role", "status", "goal", "blocker", "acceptance_criteria",
-                "stage_verdict", "stage_verdict_note", "artifacts", "blockers",
-                "open_questions", "questions", "question", "decision_question", "acceptance_gap",
-                "decision", "runtime",
-            )}
+            {
+                **{key: item.get(key) for key in (
+                    "task_id", "run_id", "workflow_run_id", "execution_id", "node", "stage",
+                    "agent", "agent_role", "status", "goal", "blocker", "acceptance_criteria",
+                    "stage_verdict", "stage_verdict_note", "artifacts", "blockers",
+                    "open_questions", "questions", "question", "decision_question", "acceptance_gap",
+                    "decision",
+                )},
+                "runtime": _stable_runtime_projection(item),
+            }
             for item in snapshot.get("tasks", [])
         ],
         "events": snapshot.get("events", []),
@@ -557,7 +595,13 @@ def _scope_task_for_node(
     ]
     if not candidates:
         return None
-    return sorted(candidates, key=lambda item: _safe_float(item.get("updated_at")))[-1]
+    return sorted(
+        candidates,
+        key=lambda item: (
+            _safe_float(item.get("created_at")),
+            str(item.get("task_id") or ""),
+        ),
+    )[-1]
 
 
 def _requirements(task: Mapping[str, Any], node: Mapping[str, Any]) -> List[str]:

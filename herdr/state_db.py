@@ -3151,6 +3151,23 @@ def _validate_context_source_existence(
             refs.add(str(item.get("source_ref") or ""))
             refs.update(str(ref) for ref in (item.get("evidence_refs") or []))
 
+    scope_run_ids = set()
+    for task_row in conn.execute(
+        "SELECT payload_json FROM tasks WHERE workflow_id = ?",
+        (str(context.get("workflow_id") or ""),),
+    ).fetchall():
+        try:
+            task_payload = json.loads(task_row["payload_json"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            task_payload = {}
+        task_scope = (
+            task_payload.get("workflow_run_id")
+            or task_payload.get("execution_id")
+            or task_payload.get("workflow_id")
+        )
+        if str(task_scope or "") == str(context.get("run_scope") or "") and task_payload.get("run_id"):
+            scope_run_ids.add(str(task_payload["run_id"]))
+
     def task_record(task_id: str):
         row = conn.execute(
             "SELECT task_id, workflow_id, node, stage, agent, payload_json FROM tasks WHERE task_id = ? LIMIT 1",
@@ -3186,10 +3203,12 @@ def _validate_context_source_existence(
             if record.get("run_id") and str(task.get("run_id") or "") != str(record["run_id"]):
                 return False
             return True
-        return bool(
-            record.get("run_id")
-            and str(record["run_id"]) == str(context.get("run_scope") or "")
-        )
+        run_id = str(record.get("run_id") or "")
+        if not run_id:
+            return False
+        if str(context.get("run_scope") or "") == str(context.get("workflow_id") or ""):
+            return run_id == str(context.get("run_scope") or "")
+        return run_id in scope_run_ids
 
     def fetch_record(prefix: str, object_id: str):
         if prefix == "task":
@@ -3320,6 +3339,21 @@ def save_working_context(
             raise ValueError("working context current_state_refs contains an invalid reference")
     if not re.fullmatch(r"[0-9a-f]{64}", str(context.get("context_fingerprint") or "")):
         raise ValueError("working context fingerprint is invalid")
+    all_source_refs = set(context.get("source_refs") or [])
+    all_source_refs.update(str(ref) for ref in (context.get("goal_source_ref"), context.get("next_action_source_ref")) if ref)
+    all_source_refs.update(str(ref) for ref in (context.get("current_state_refs") or {}).values())
+    for field_name in (
+        "completed", "artifacts", "evidence", "findings", "decisions", "blockers",
+        "open_questions", "verification", "handoffs",
+    ):
+        for item in context.get(field_name) or []:
+            all_source_refs.add(str(item.get("source_ref") or ""))
+    if any(not ref.startswith(("policy:", "artifact:", "evidence:")) for ref in all_source_refs):
+        if "source_clock" not in (context.get("metrics") or {}):
+            raise ValueError("source-backed working context requires source_clock")
+        from .context_models import _payload_digest
+        if (context.get("metrics") or {}).get("payload_digest") != _payload_digest(context):
+            raise ValueError("working context payload digest does not match fingerprint input")
     payload_json = json.dumps(
         context, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
     )
