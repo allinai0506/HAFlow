@@ -954,3 +954,10 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - Handoff、Task launch/retry、verification dispatch 只传 `context_id`；dispatch 校验 context ref 的目标 Task 与 run scope，旧无 ref 事件保持兼容。
 - 证据：`herdr/context_compiler.py`、`herdr/state_db.py:working_contexts`、`herdr/collaboration.py`、`services/herdr-controller.py`、`bin/herdr-task`、`tests/test_context_compiler.py`、`tests/test_collaboration_wiring.py`。
 - V1 限制：不做 RAG/向量检索/长期记忆/跨 Run 检索；Context Diff 尚未接入 Dependency Wakeup。
+
+## [2026-09-24] fix | Context Compiler V1：审查闭环与边界加固
+- legacy workflow execution 无显式 scope 时，仅允许目标 Task 自身 Run；只有与目标直接相连的 Collaboration Handoff 才扩展 sibling Run，避免无关任务事实串入。
+- `context_models.py`、`context_sources.py`、`context_candidates.py`、`context_selection.py` 拆分核心职责；source snapshot、候选构造和 selection 均有专项回归。
+- 收紧 supersession/evidence 引用、递归脱敏、角色过滤、预算必保留状态、verification latest-wins、Handoff context ref 身份校验和 Supervisor RETRY 引用。
+- 增加 `source_watermark`、append-only A→B→A、编译调用指标事件、并发 writer 与真实 verification event 回归。
+- 证据：`tests/test_context_compiler.py`、`tests/test_collaboration_wiring.py`、`herdr/context_sources.py`、`herdr/state_db.py`、`services/herdr-controller.py`；全量 `1417 passed, 44 subtests passed`。
