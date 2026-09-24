@@ -122,7 +122,28 @@ def _compile(db: Path, task: dict, role: str, **kwargs):
     )
 
 
-def test_role_aware_contexts_are_distinct(tmp_path: Path):
+def test_direct_dependency_state_has_task_provenance(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    upstream = _seed_task(db, _task("task-dependency", node="implementation", status="completed"))
+    target = _seed_task(db, _task("task-dependency-target", node="review"))
+    context = _compile(db, target, "reviewer")
+    assert context.current_state["dependency_state"]["implementation"] == "completed"
+    assert f"task:{upstream['task_id']}" in context.source_refs
+
+
+def test_task_artifact_fields_are_projected_without_body(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = dict(_task("task-artifact-fields", node="review"))
+    target["artifacts"] = [{"ref": "reports/review.md", "kind": "report", "content": "SECRET BODY"}]
+    _seed_task(db, target)
+    context = _compile(db, target, "reviewer")
+    assert any(item.get("value", {}).get("ref") == "reports/review.md" for item in context.artifacts)
+    assert "SECRET BODY" not in json.dumps(context.to_mapping(), ensure_ascii=False)
+
+
+def test_state_aware_contexts_are_distinct(tmp_path: Path):
     from herdr.context_compiler import compile_working_context
 
     db = tmp_path / "state.db"
@@ -155,6 +176,22 @@ def test_role_aware_contexts_are_distinct(tmp_path: Path):
     assert "requirements" in developer.current_state
     assert "review_scope" in reviewer.current_state
     assert any("fnd-upstream" in ref for ref in reviewer.source_refs)
+
+
+def test_total_character_budget_is_hard_for_large_goal_and_refs(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    upstream = _seed_task(db, _task("task-large-source"))
+    target = dict(_task("task-large-context", node="review"), goal="g" * 50000)
+    target["artifacts"] = [{"ref": f"artifact-{i}", "kind": "report"} for i in range(50)]
+    _seed_task(db, target)
+    state_db.upsert_trajectory_finding(
+        _finding(upstream["run_id"], "fnd-large", task_id=upstream["task_id"], summary="s" * 5000),
+        db_path=db,
+    )
+    context = _compile(db, target, "reviewer", config={"max_chars": 1200})
+    assert context.metrics["context_chars"] <= 1200
+    assert len(json.dumps(context.to_mapping(), ensure_ascii=False)) <= 1200
 
 
 def test_state_aware_context_changes_after_node_transition(tmp_path: Path):
@@ -477,6 +514,14 @@ def test_diff_reports_added_removed_superseded_and_changed(tmp_path: Path):
     assert any(row["source_ref"] == "finding:fnd-new" for row in diff["added"])
     assert any(row["source_ref"] == "finding:fnd-old" for row in diff["superseded"])
     assert any(row["source_ref"] == "finding:fnd-same" for row in diff["changed"])
+
+    old_state = old.to_mapping()
+    new_state = new.to_mapping()
+    new_state["goal"] = "updated goal"
+    new_state["current_state"] = {"task_status": "rework"}
+    state_diff = diff_working_context(old_state, new_state)
+    assert any(row["source_ref"] == "context:goal" for row in state_diff["changed"])
+    assert any(row["source_ref"] == "context:current_state" for row in state_diff["changed"])
 
 
 def test_handoff_event_can_load_target_working_context(tmp_path: Path):

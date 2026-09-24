@@ -1180,6 +1180,35 @@ def _event_candidates(
     return artifacts, completed, verification, decisions, blockers
 
 
+def _task_artifact_candidates(tasks: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    result: List[Dict[str, Any]] = []
+    for task in tasks:
+        task_id = str(task.get("task_id") or "")
+        task_ref = f"task:{task_id}"
+        raw_artifacts: List[Any] = []
+        for key in ("artifacts", "artifact_refs", "changed_artifacts", "deliverables"):
+            raw_artifacts.extend(_as_list(task.get(key)))
+        for artifact in raw_artifacts:
+            if isinstance(artifact, Mapping):
+                ref = artifact.get("ref") or artifact.get("path") or artifact.get("name")
+                kind = artifact.get("kind")
+            else:
+                ref = str(artifact)
+                kind = None
+            if not ref:
+                continue
+            result.append(_item(
+                "artifact",
+                {"ref": str(ref), "kind": kind},
+                task_ref,
+                source_task=task_id,
+                source_run=_task_run(task),
+                created_at=task.get("updated_at"),
+                metadata={"node": task.get("node") or task.get("stage"), "source_field": "task"},
+            ))
+    return result
+
+
 def _task_candidates(
     tasks: Sequence[Mapping[str, Any]],
     *,
@@ -1413,7 +1442,17 @@ def _fit_budget(context: WorkingContext, config: Mapping[str, Any]) -> WorkingCo
         context = WorkingContext(**{
             **context.to_mapping(),
             "goal": "",
-            "next_action": _clip_text(context.next_action, 128),
+            "next_action": "Continue with the next required action.",
+            "current_state": {
+                key: context.current_state.get(key)
+                for key in ("task_id", "task_status", "current_node", "dependency_state")
+                if context.current_state.get(key) is not None
+            },
+            "current_state_refs": {
+                key: context.current_state_refs[key]
+                for key in ("task_id", "task_status", "current_node", "dependency_state")
+                if key in context.current_state_refs
+            },
             "completed": [],
             "artifacts": [],
             "evidence": [],
@@ -1422,9 +1461,48 @@ def _fit_budget(context: WorkingContext, config: Mapping[str, Any]) -> WorkingCo
             "open_questions": [],
             "verification": [],
             "handoffs": [],
-            "blockers": list(context.blockers[:1]),
+            "blockers": [],
+        })
+    if size(context) > max_chars:
+        context = WorkingContext(**{
+            **context.to_mapping(),
+            "source_refs": list(context.source_refs[:12]),
         })
     return context
+
+
+def _fit_final_budget(context: WorkingContext, max_chars: int) -> WorkingContext:
+    """Fit the serialized snapshot after metrics are attached."""
+    for _ in range(4):
+        metrics = dict(context.metrics)
+        metrics.pop("boundary", None)
+        metrics["context_chars"] = 0
+        context = WorkingContext(**{**context.to_mapping(), "metrics": metrics})
+        size = len(json.dumps(context.to_mapping(), ensure_ascii=False, separators=(",", ":")))
+        metrics["context_chars"] = size
+        context = WorkingContext(**{**context.to_mapping(), "metrics": metrics})
+        if len(json.dumps(context.to_mapping(), ensure_ascii=False, separators=(",", ":"))) <= max_chars:
+            return context
+        context = WorkingContext(**{
+            **context.to_mapping(),
+            "goal": "",
+            "next_action": "Continue.",
+            "source_version": "",
+            "current_state": {
+                key: context.current_state.get(key)
+                for key in ("task_id", "task_status", "current_node")
+                if context.current_state.get(key) is not None
+            },
+            "current_state_refs": {
+                key: context.current_state_refs[key]
+                for key in ("task_id", "task_status", "current_node")
+                if key in context.current_state_refs
+            },
+            "source_refs": [
+                ref for ref in (context.goal_source_ref, context.next_action_source_ref) if ref
+            ],
+        })
+    raise ValueError("max_chars is too small for the required WorkingContext identity")
 
 
 def compile_working_context(
@@ -1485,6 +1563,9 @@ def compile_working_context(
     for dependency_id in dependency_ids:
         dependency_task = _scope_task_for_node(dependency_id, snapshot["tasks"])
         dependency_state[dependency_id] = str(dependency_task.get("status")) if dependency_task else "unknown"
+        current_state_refs[f"dependency:{dependency_id}"] = (
+            f"task:{dependency_task.get('task_id')}" if dependency_task else f"workflow:{workflow_id}"
+        )
     current_state["dependency_state"] = dependency_state
     current_state_refs["dependency_state"] = f"workflow:{workflow_id}"
     requirements = _requirements(target, node)
@@ -1526,6 +1607,7 @@ def compile_working_context(
         workflow_id=str(workflow_id),
         run_scope=snapshot["run_scope"],
     )
+    event_artifacts.extend(_task_artifact_candidates(snapshot["tasks"]))
     findings = _finding_candidates(
         snapshot["findings"],
         task_by_id=snapshot["task_by_id"],
@@ -1697,6 +1779,12 @@ def compile_working_context(
     context = WorkingContext(**{**context.to_mapping(), "metrics": metrics})
     metrics["context_chars"] = len(json.dumps(context.to_mapping(), ensure_ascii=False, separators=(",", ":")))
     context = WorkingContext(**{**context.to_mapping(), "metrics": metrics})
+    context = _fit_final_budget(context, int(cfg["max_chars"]))
+    context = WorkingContext(**{
+        **context.to_mapping(),
+        "context_fingerprint": _hash(_fingerprint_payload(context, cfg)),
+    })
+    context = _fit_final_budget(context, int(cfg["max_chars"]))
     if _retry < 1:
         fresh_snapshot = _read_source_snapshot(
             workflow_id=str(workflow_id),
@@ -1729,7 +1817,7 @@ def compile_working_context(
     result_mapping = dict(stored)
     result_mapping["metrics"] = metrics
     result_mapping["context_fingerprint"] = stored.get("context_fingerprint", context.context_fingerprint)
-    return WorkingContext.from_mapping(result_mapping)
+    return _fit_final_budget(WorkingContext.from_mapping(result_mapping), int(cfg["max_chars"]))
 
 
 def get_working_context(
@@ -1860,6 +1948,16 @@ def diff_working_context(
                     })
                     superseded_old_keys.add(old_key)
     removed = [item for item in removed if (str(item.get("kind")), str(item.get("source_ref"))) not in superseded_old_keys]
+    for field_name in ("goal", "current_state", "next_action", "node_id", "agent_role"):
+        old_value = old_map.get(field_name)
+        new_value = new_map.get(field_name)
+        if _canonical_json(old_value) != _canonical_json(new_value):
+            changed.append({
+                "kind": "context",
+                "source_ref": f"context:{field_name}",
+                "old": old_value,
+                "new": new_value,
+            })
     return {
         "added": sorted(added, key=lambda item: (item.get("kind", ""), item.get("source_ref", ""))),
         "removed": sorted(removed, key=lambda item: (item.get("kind", ""), item.get("source_ref", ""))),
