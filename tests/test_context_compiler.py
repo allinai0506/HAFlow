@@ -248,6 +248,27 @@ def test_global_item_budget_updates_reported_metrics(tmp_path: Path):
     )) <= 1
 
 
+def test_budget_preserves_role_state_blockers_and_failed_verification(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = dict(
+        _task("task-budget-priority-state", node="test", role="tester", status="blocked"),
+        acceptance_criteria=[f"criterion-{index}" for index in range(20)],
+        blockers=[f"blocker-{index}" for index in range(5)],
+    )
+    _seed_task(db, target)
+    TrajectoryLedger(db).append_event({
+        "run_id": target["run_id"], "task_id": target["task_id"],
+        "workflow_id": target["workflow_id"], "event_type": "verification_completed",
+        "verification": {"passed": False},
+    })
+    context = _compile(db, target, "tester")
+    assert context.goal
+    assert context.current_state.get("acceptance_criteria")
+    assert context.blockers
+    assert any(item.get("value", {}).get("passed") is False for item in context.verification)
+
+
 def test_budget_keeps_blocker_before_completed_history(tmp_path: Path):
     db = tmp_path / "state.db"
     _seed_workflow(db)
@@ -471,6 +492,19 @@ def test_legacy_scope_does_not_mix_unlinked_task_runs(tmp_path: Path):
     _seed_task(db, upstream)
     state_db.upsert_trajectory_finding(
         _finding(upstream["run_id"], "fnd-unlinked", task_id=upstream["task_id"]),
+        db_path=db,
+    )
+    unrelated_task = _task("task-legacy-unrelated")
+    unrelated_task.pop("workflow_run_id")
+    unrelated = _seed_task(db, unrelated_task)
+    state_db.create_collaboration_event(
+        {
+            "run_id": "wf-context",
+            "workflow_id": "wf-context",
+            "from_task_id": upstream["task_id"],
+            "to_task_id": unrelated["task_id"],
+            "source_fact_id": "unrelated-handoff",
+        },
         db_path=db,
     )
 
@@ -934,6 +968,11 @@ def test_diff_reports_added_removed_superseded_and_changed(tmp_path: Path):
     assert any(row["source_ref"] == "finding:fnd-new" for row in diff["added"])
     assert any(row["source_ref"] == "finding:fnd-old" for row in diff["superseded"])
     assert any(row["source_ref"] == "finding:fnd-same" for row in diff["changed"])
+
+    old_items = [item("artifact", "artifact:a", "a"), item("artifact", "artifact:b", "b")]
+    new_items = [item("artifact", "artifact:a", "a"), item("artifact", "artifact:c", "c"), item("artifact", "artifact:b", "b")]
+    insertion_diff = diff_working_context(context(old_items), context(new_items))
+    assert any(row["source_ref"] == "artifact:c" for row in insertion_diff["added"])
 
     old_state = old.to_mapping()
     new_state = new.to_mapping()

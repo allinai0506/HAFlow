@@ -173,9 +173,11 @@ def _read_source_snapshot(
         workflow.setdefault("workflow_id", workflow_id)
 
         task_rows = conn.execute(
-            "SELECT * FROM tasks WHERE workflow_id = ? ORDER BY created_at ASC, task_id ASC",
+            "SELECT * FROM tasks WHERE workflow_id = ? ORDER BY created_at ASC, task_id ASC LIMIT 1001",
             (str(workflow_id),),
         ).fetchall()
+        if len(task_rows) > 1000:
+            raise ValueError("workflow task set exceeds the bounded WorkingContext source limit")
         tasks = [state_db._decode_task_row(row) for row in task_rows]
         if not any(str(item.get("task_id")) == str(task_id) for item in tasks):
             tasks.append(dict(task))
@@ -254,9 +256,16 @@ def _read_source_snapshot(
         collaborations = [state_db._decode_collaboration_row(row) for row in collab_rows]
         if not explicit_execution_scope:
             linked_task_ids = {
-                str(event.get("to_task_id") or "") for event in collaborations
-            } | {
-                str(event.get("from_task_id") or "") for event in collaborations
+                linked_id
+                for event in collaborations
+                for linked_id in (
+                    str(event.get("from_task_id") or ""),
+                    str(event.get("to_task_id") or ""),
+                )
+                if str(task_id) in {
+                    str(event.get("from_task_id") or ""),
+                    str(event.get("to_task_id") or ""),
+                }
             }
             for linked_id in linked_task_ids:
                 linked_task = task_by_id.get(linked_id)

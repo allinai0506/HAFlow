@@ -199,16 +199,8 @@ def _fit_final_budget(context: WorkingContext, max_chars: int) -> WorkingContext
             "goal": _clip_text(context.goal, 128),
             "next_action": "Continue.",
             "source_version": "",
-            "current_state": {
-                key: context.current_state.get(key)
-                for key in ("task_id", "task_status", "current_node")
-                if context.current_state.get(key) is not None
-            },
-            "current_state_refs": {
-                key: context.current_state_refs[key]
-                for key in ("task_id", "task_status", "current_node")
-                if key in context.current_state_refs
-            },
+            "current_state": _bound_value(context.current_state, 128),
+            "current_state_refs": dict(context.current_state_refs),
             "source_refs": [
                 ref for ref in (context.goal_source_ref, context.next_action_source_ref) if ref
             ],
