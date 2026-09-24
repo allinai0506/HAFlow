@@ -2362,6 +2362,29 @@ def aggregate_run_metric_rows(run_id: str, db_path: Optional[Path] = None) -> Di
     """Return scalar, run-scoped metric facts without loading evidence content."""
     conn = get_db_connection(db_path)
     try:
+        scope_rows = conn.execute(
+            """
+            SELECT workflow_id,
+                   COALESCE(json_extract(payload_json, '$.workflow_run_id'),
+                            json_extract(payload_json, '$.execution_id'),
+                            workflow_id, '') AS scope
+              FROM tasks
+             WHERE json_extract(payload_json, '$.run_id') = ?
+            """,
+            (run_id,),
+        ).fetchall()
+        if len({(str(row["workflow_id"] or ""), str(row["scope"] or "")) for row in scope_rows}) > 1:
+            return {
+                "trajectory_events": 0, "started_at": None, "finished_at": None,
+                "run_completed": 0, "run_failed": 0, "verification_total": 0,
+                "verification_passed": 0, "verification_failed": 0,
+                "task_started": 0, "artifact_created": 0, "agent_done": 0,
+                "task_id": None, "workflow_id": None, "observations_created": 0,
+                "observation_bytes": 0, "findings_created": 0, "context_packs_created": 0,
+                "working_context_compiles": 0, "working_context_reused": 0,
+                "working_context_changed": 0, "latest_working_context": None,
+                "latest_context": None, "identity_ambiguous": True,
+            }
         event_row = conn.execute(
             """
             SELECT COUNT(*) AS trajectory_events,

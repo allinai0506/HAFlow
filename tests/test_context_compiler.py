@@ -1260,6 +1260,29 @@ def test_superseded_finding_is_excluded_but_history_remains(tmp_path: Path):
     assert state_db.get_trajectory_finding_by_id("fnd-new", db_path=db) is not None
 
 
+def test_legacy_finding_without_workflow_can_be_supersession_target(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-legacy-finding-target"))
+    upstream = _seed_task(db, _task("task-legacy-finding-source", node="implementation"))
+    old = _finding(upstream["run_id"], "fnd-legacy-old", task_id=upstream["task_id"])
+    old["workflow_id"] = None
+    state_db.upsert_trajectory_finding(old, db_path=db)
+    new = _finding(
+        upstream["run_id"], "fnd-legacy-new", task_id=upstream["task_id"],
+        metadata={"supersedes": "fnd-legacy-old"}, severity="critical",
+    )
+    state_db.upsert_trajectory_finding(new, db_path=db)
+    for index in range(520):
+        sibling = _seed_task(db, _task(f"task-legacy-finding-noise-{index}", node="implementation"))
+        state_db.upsert_trajectory_finding(
+            _finding(sibling["run_id"], f"fnd-legacy-noise-{index}", task_id=sibling["task_id"]),
+            db_path=db,
+        )
+    context = _compile(db, target, "developer")
+    assert "finding:fnd-legacy-new" in context.source_refs
+
+
 def test_invalid_or_cyclic_supersession_is_excluded(tmp_path: Path):
     db = tmp_path / "state.db"
     _seed_workflow(db)
@@ -2345,6 +2368,24 @@ def test_state_store_exposes_working_context_readers(tmp_path: Path):
     assert store.get_working_context(context.context_id)["task_id"] == target["task_id"]
     assert get_latest_working_context(target["task_id"], db_path=db).context_id == context.context_id
     assert [item.context_id for item in list_working_contexts(target["task_id"], db_path=db)] == [context.context_id]
+
+
+def test_run_metrics_fail_closed_for_reused_run_identity(tmp_path: Path):
+    from herdr.metrics import get_run_metrics
+
+    db = tmp_path / "state.db"
+    _seed_workflow(db, workflow_id="wf-a", scope="scope-a")
+    _seed_workflow(db, workflow_id="wf-b", scope="scope-b")
+    _seed_task(db, _task("task-reused-metrics-a", workflow_id="wf-a", scope="scope-a", run_id="reused-metrics"))
+    _seed_task(db, _task("task-reused-metrics-b", workflow_id="wf-b", scope="scope-b", run_id="reused-metrics"))
+    state_db.record_trajectory_event(
+        {"run_id": "reused-metrics", "task_id": "task-reused-metrics-a", "workflow_id": "wf-a", "event_type": "task_started", "payload": {}},
+        db_path=db,
+    )
+    metrics = get_run_metrics("reused-metrics", db_path=db)
+    assert metrics.task_id is None
+    assert metrics.workflow_id is None
+    assert metrics.trajectory_events == 0
 
 
 def test_run_metrics_count_alternate_verification_failure(tmp_path: Path):

@@ -225,7 +225,10 @@ def _merge_verification_events(
     oversized_placeholders = ",".join("?" for _ in oversized_types)
     oversized_rows = conn.execute(
         f"""SELECT e.id, e.run_id, e.task_id, e.workflow_id, e.node_id,
-                   e.event_type, e.sequence, e.timestamp
+                   e.event_type, e.sequence, e.timestamp,
+                   json_type(e.payload_json, '$.verification.passed') AS passed_type,
+                   json_type(e.payload_json, '$.verification_passed') AS alternate_type,
+                   json_type(e.payload_json, '$.verification.verification_passed') AS nested_type
               FROM events e
              WHERE e.source = 'trajectory'
                AND e.run_id IN ({placeholders})
@@ -238,8 +241,14 @@ def _merge_verification_events(
              ORDER BY CASE WHEN e.event_type IN (
                                   'task_failed', 'agent_failed', 'run_failed', 'blocker'
                               ) THEN 0
-                            WHEN e.event_type IN ('verification_completed', 'tests_completed') THEN 1
-                            ELSE 2 END,
+                            WHEN e.event_type IN ('verification_completed', 'tests_completed')
+                                 AND (
+                                     json_type(e.payload_json, '$.verification.passed') = 'false'
+                                     OR json_type(e.payload_json, '$.verification_passed') = 'false'
+                                     OR json_type(e.payload_json, '$.verification.verification_passed') = 'false'
+                                 ) THEN 1
+                            WHEN e.event_type IN ('verification_completed', 'tests_completed') THEN 2
+                            ELSE 3 END,
                       CASE WHEN e.task_id = ? THEN 0 ELSE 1 END,
                       e.sequence DESC, e.id DESC
              LIMIT ?""",
@@ -266,7 +275,19 @@ def _merge_verification_events(
             "sequence": row["sequence"],
             "timestamp": row["timestamp"],
             "payload": (
-                {"verification": {"status": "unknown", "source_truncated": True}}
+                {
+                    "verification": {
+                        "passed": (
+                            False
+                            if "false" in {
+                                row["passed_type"], row["alternate_type"], row["nested_type"]
+                            }
+                            else None
+                        ),
+                        "status": "unknown",
+                        "source_truncated": True,
+                    }
+                }
                 if row["event_type"] in {"verification_completed", "tests_completed"}
                 else {"metadata": {"reason": "source payload truncated"}, "source_truncated": True}
             ),
@@ -375,15 +396,16 @@ def _merge_verification_events(
             key=verification_order,
             default=None,
         )
-        selected = latest
-        if failure is not None and (
-            recovery is None or verification_order(recovery) <= verification_order(failure)
-        ):
-            selected = failure
-        elif verification_strength(latest) == 1:
-            selected = latest
-        elif truncated is not None:
+        if truncated is not None:
             selected = truncated
+        else:
+            selected = latest
+            if failure is not None and (
+                recovery is None or verification_order(recovery) <= verification_order(failure)
+            ):
+                selected = failure
+            elif verification_strength(latest) == 1:
+                selected = latest
         preferred_event_ids.add(str(selected.get("event_id")))
 
     ordered = sorted(
@@ -581,7 +603,7 @@ def _read_source_snapshot(
                 f"""SELECT * FROM trajectory_findings
                     WHERE finding_id IN ({relation_placeholders})
                       AND run_id IN ({placeholders})
-                      AND workflow_id = ?
+                      AND (workflow_id = ? OR (workflow_id IS NULL AND task_id IS NOT NULL))
                     ORDER BY created_at ASC, rowid ASC LIMIT ?""",
                 (*missing_relation_ids, *run_values, str(workflow_id), int(max_findings)),
             ).fetchall()
@@ -713,7 +735,7 @@ def _read_source_snapshot(
                         f"""SELECT * FROM trajectory_findings
                             WHERE finding_id IN ({relation_placeholders})
                               AND run_id IN ({placeholders})
-                              AND workflow_id = ?
+                              AND (workflow_id = ? OR (workflow_id IS NULL AND task_id IS NOT NULL))
                             ORDER BY created_at ASC, rowid ASC LIMIT ?""",
                         (*missing_relation_ids, *run_values, str(workflow_id), int(max_findings)),
                     ).fetchall()
@@ -804,7 +826,10 @@ def _read_source_snapshot(
                        AND ({eval_task_filter})
                        AND (length(COALESCE(er.evidence_json, 'null')) > 20000
                             OR length(COALESCE(er.warnings_json, '[]')) > 20000)
-                     ORDER BY CASE WHEN er.task_id = ? THEN 0 ELSE 1 END,
+                     ORDER BY CASE WHEN er.verification_passed = 0 THEN 0
+                                   WHEN er.verification_passed = 1 THEN 2
+                                   ELSE 1 END,
+                              CASE WHEN er.task_id = ? THEN 0 ELSE 1 END,
                               er.revision DESC, er.eval_id ASC
                      LIMIT ?""",
                 (
@@ -882,17 +907,18 @@ def _read_source_snapshot(
                 key=lambda item: (int(item.get("revision") or 0), str(item.get("eval_id") or "")),
                 default=None,
             )
-            selected = latest
-            if failure is not None and (
-                recovery is None
-                or (int(recovery.get("revision") or 0), str(recovery.get("eval_id") or ""))
-                <= (int(failure.get("revision") or 0), str(failure.get("eval_id") or ""))
-            ):
-                selected = failure
-            elif latest.get("verification_passed") == 1:
-                selected = latest
-            elif truncated is not None:
+            if truncated is not None:
                 selected = truncated
+            else:
+                selected = latest
+                if failure is not None and (
+                    recovery is None
+                    or (int(recovery.get("revision") or 0), str(recovery.get("eval_id") or ""))
+                    <= (int(failure.get("revision") or 0), str(failure.get("eval_id") or ""))
+                ):
+                    selected = failure
+                elif latest.get("verification_passed") == 1:
+                    selected = latest
             preferred_eval_ids.add(str(selected.get("eval_id")))
         evals.sort(key=lambda item: (
             0 if str(item.get("eval_id")) in preferred_eval_ids else 1,
