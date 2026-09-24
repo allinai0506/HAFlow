@@ -3277,8 +3277,6 @@ def _validate_context_source_existence(
             raise ValueError("working context target task scope does not match run_scope")
         if str(target_task.get("run_id") or "") != str(context.get("run_id") or ""):
             raise ValueError("working context run_id does not match target task")
-        if not re.fullmatch(r"[0-9a-f]{64}", str(context.get("context_fingerprint") or "")):
-            raise ValueError("working context fingerprint is invalid")
 
 def save_working_context(
     context: Dict[str, Any], db_path: Optional[Path] = None,
@@ -3320,6 +3318,8 @@ def save_working_context(
     for ref in (context.get("current_state_refs") or {}).values():
         if not _valid_context_source_ref(ref):
             raise ValueError("working context current_state_refs contains an invalid reference")
+    if not re.fullmatch(r"[0-9a-f]{64}", str(context.get("context_fingerprint") or "")):
+        raise ValueError("working context fingerprint is invalid")
     payload_json = json.dumps(
         context, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
     )

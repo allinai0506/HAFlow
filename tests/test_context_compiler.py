@@ -958,8 +958,8 @@ def test_storage_fingerprint_does_not_cross_run_scope(tmp_path: Path):
             "metrics": {},
         }
 
-    first = state_db.save_working_context(payload("wc_scope_a", "scope-a", "same", 1.0), db_path=db)
-    second = state_db.save_working_context(payload("wc_scope_b", "scope-b", "same", 2.0), db_path=db)
+    first = state_db.save_working_context(payload("wc_scope_a", "scope-a", "a" * 64, 1.0), db_path=db)
+    second = state_db.save_working_context(payload("wc_scope_b", "scope-b", "a" * 64, 2.0), db_path=db)
     assert first["context_id"] == "wc_scope_a"
     assert second["context_id"] == "wc_scope_b"
     assert len(state_db.list_working_contexts("task-reused", db_path=db)) == 2
@@ -1020,11 +1020,11 @@ def test_concurrent_context_writers_do_not_replace_newer_latest(tmp_path: Path):
     ready = ctx.Event()
     old = ctx.Process(
         target=_save_working_context_in_process,
-        args=(str(db), payload("wc_old", "old", 10.0), gate, ready),
+        args=(str(db), payload("wc_old", "a" * 64, 10.0), gate, ready),
     )
     old.start()
     assert ready.wait(10)
-    state_db.save_working_context(payload("wc_new", "new", 20.0), db_path=db)
+    state_db.save_working_context(payload("wc_new", "b" * 64, 20.0), db_path=db)
     gate.set()
     old.join(10)
     assert old.exitcode == 0
@@ -1042,7 +1042,7 @@ def test_storage_rejects_old_source_watermark_after_newer_snapshot(tmp_path: Pat
             "findings": [], "artifacts": [], "evidence": [], "completed": [],
             "decisions": [], "blockers": [], "open_questions": [], "verification": [],
             "handoffs": [], "next_action": "review", "source_refs": [],
-            "context_fingerprint": "v2", "source_version": "v2", "source_watermark": 20,
+            "context_fingerprint": "b" * 64, "source_version": "v2", "source_watermark": 20,
             "compiled_at": 20.0, "metrics": {},
         },
         db_path=db,
@@ -1055,7 +1055,7 @@ def test_storage_rejects_old_source_watermark_after_newer_snapshot(tmp_path: Pat
             "findings": [], "artifacts": [], "evidence": [], "completed": [],
             "decisions": [], "blockers": [], "open_questions": [], "verification": [],
             "handoffs": [], "next_action": "review", "source_refs": [],
-            "context_fingerprint": "v1", "source_version": "v1", "source_watermark": 10,
+            "context_fingerprint": "a" * 64, "source_version": "v1", "source_watermark": 10,
             "compiled_at": 30.0, "metrics": {},
         },
         db_path=db,
