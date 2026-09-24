@@ -947,3 +947,10 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - 交付 PR：只推送交付链末端分支并创建 PR（base `main`），不合并；URL 见 shared note `wrapup-t1收尾报告`。六步步骤 3 因 PR 未合入记 DEFERRED（收尾脚本 `--dry-run` 只读）。
 - 知识沉淀：`docs/lessons/lessons-learned.md` §89（收尾节点分支 ≠ 交付物分支；有锚任务空终化不自动放行）；wiki 回填本文与 [[dag-workflow-engine]] §13（收编 fail-closed 守卫 + close 第二道闸 `escalated_git`）。
 - 遗留：`impl-fix1`（`committed` + `finalize_escalated`，原因 `integrate_rebase_conflict`）不阻塞 `unsettled_git`（已排除已升级），但命中 `escalated_git` 闸门；其内容已被本次交付取代，处置建议 `--accept-escalated`（须在 base 合入后由 Controller/人类执行）。
+
+## [2026-09-24] feat | Context Compiler V1：State-Aware WorkingContext
+- 新增 `herdr/context_compiler.py`：按 Task/Workflow 状态、节点依赖、Agent 角色和同一 execution scope 确定性选择最小上下文；每个内容项保留 `source_ref`，Observation 只投影 metadata/excerpt，不读取正文。
+- 新增 SQLite `working_contexts` 不可变快照、fingerprint/latest/list 读取、supersession、role-aware relevance、预算、结构化 diff 和事实指标；不改变既有 Task/Trajectory/Observation/Finding 事实源。
+- Handoff、Task launch/retry、verification dispatch 只传 `context_id`；dispatch 校验 context ref 的目标 Task 与 run scope，旧无 ref 事件保持兼容。
+- 证据：`herdr/context_compiler.py`、`herdr/state_db.py:working_contexts`、`herdr/collaboration.py`、`services/herdr-controller.py`、`bin/herdr-task`、`tests/test_context_compiler.py`、`tests/test_collaboration_wiring.py`。
+- V1 限制：不做 RAG/向量检索/长期记忆/跨 Run 检索；Context Diff 尚未接入 Dependency Wakeup。

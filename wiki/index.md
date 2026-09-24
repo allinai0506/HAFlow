@@ -38,6 +38,7 @@
 | **回放一次 Agent 执行的历史事实** | [[task-lifecycle]] §1.2 | `herdr/trajectory.py`, `herdr/state_db.py`, `bin/herdr-task`, `services/herdr-controller.py` |
 | **诊断一次运行是否卡住/异常/重复失败 (Trajectory Observer)** | [[trajectory-observer]] | `herdr/observer/`, `herdr/state_db.py:trajectory_findings`, `services/herdr-controller.py:registry_watcher`, `bin/herdr-task:observe` |
 | **为下一 Agent 生成可追溯的当前工作记忆 (Semantic Context Compact)** | [[semantic-context-compact]] | `herdr/context_compact.py`, `herdr/state_db.py:context_packs`, `bin/herdr-task:compact` |
+| **按 Task 状态和 Agent 角色编译 WorkingContext** | [[semantic-context-compact]] | `herdr/context_compiler.py`, `herdr/state_db.py:working_contexts`, `herdr/collaboration.py` |
 | **修改任务/工作流收尾、清理 pane 或 clone** | [[task-lifecycle]] §5 | `bin/herdr-task:finalize_task`, `close_workflow` |
 | **新增/调整工作流模板或 DAG 调度算法** | [[dag-workflow-engine]] | `herdr/workflow.py` |
 | **修改 Agent 分配算法、优先级或并发锁** | [[agent-routing-and-pools]] | `herdr/agent_router.py` |
@@ -73,6 +74,7 @@
 ### 3.3 开发者与 Agent 实操层
 - **[[trajectory-observer]]**: 运行过程诊断层——确定性 signal + Provider 确认 + 结构化 Finding（只检测/解释/建议，不执行修复）
 - **[[semantic-context-compact]]**: Working Memory 层——bounded Trajectory/Observation/Finding 输入、程序验证引用和 append-only ContextPack（不删除原始历史）
+- **[[semantic-context-compact]] §Context Compiler V1**: 按 Task/Workflow 状态、依赖和 Agent 角色编译带 provenance 的不可变 WorkingContext；Handoff 只传 `context_id`
 - **[[common-change-paths]]**: 常见业务修改的完整关联文件、注意陷阱与验证命令
 - **[[ops-center]]**: 分层 Agent 运维视图、运行时/任务状态对照、时长与异常聚合
 - **[[WIKI]]**: Wiki 维护规范、证据契约与更新触发条件

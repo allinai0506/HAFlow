@@ -86,6 +86,45 @@ def test_wiring_dispatches_handoff_on_deterministic_advance(tmp_path):
     assert rows[0]["from_task_id"] == "wf-1-impl"
 
 
+def test_wiring_handoff_carries_target_working_context_ref(tmp_path):
+    from herdr.context_compiler import get_working_context
+
+    ctrl = _load_controller()
+    db = tmp_path / "state.db"
+    state_db.save_workflow(
+        {
+            "workflow_id": "wf-1",
+            "title": "fixture",
+            "status": "running",
+            "config": {"nodes": [
+                {"id": "implementation", "depends_on": []},
+                {"id": "test", "depends_on": ["implementation"]},
+            ]},
+        },
+        db_path=db,
+    )
+    tasks = _wf_tasks()
+    for task_id, task in tasks.items():
+        task = dict(task)
+        task["run_id"] = f"run-{task_id}"
+        task["workflow_run_id"] = "wf-exec-1"
+        task["agent_role"] = "tester" if task_id.endswith("test-auto") else "developer"
+        state_db.save_task(task, db_path=db)
+        tasks[task_id] = task
+    sender = FakeSender()
+    out = ctrl.maybe_dispatch_node_handoffs(
+        workflow_id="wf-1", ready_id="test",
+        dep_ids=["implementation"], launched=["wf-1-test-auto"],
+        tasks_by_id=tasks, prompt_sender=sender, db_path=db,
+    )
+    assert out[0].get("dispatched") is True
+    row = state_db.list_collaboration_events(run_id="wf-exec-1", db_path=db)[0]
+    assert len(row["context_refs"]) == 1
+    loaded = get_working_context(row["context_refs"][0], db_path=db)
+    assert loaded.task_id == "wf-1-test-auto"
+    assert "WORKING_CONTEXT_REF:" in sender.calls[0][1]
+
+
 def test_wiring_skips_unknown_route_keeps_coordinator(tmp_path):
     ctrl = _load_controller()
     db = tmp_path / "state.db"

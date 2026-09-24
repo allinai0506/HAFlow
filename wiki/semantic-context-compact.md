@@ -26,3 +26,17 @@ herdr-task compact --run-id <run_id> --json --no-model
 ```
 
 `--no-model` 仍会生成 goal、current_state、verified_facts、finding/evidence/artifact refs；语义数组可为空。`agent_done` Done Gateway 以 daemon best-effort 方式触发 Compact，provider、JSON、读取或存储失败都不能改变 Task、Workflow、Runtime、Coordinator 状态。
+
+## Context Compiler V1（WorkingContext）
+
+`herdr/context_compiler.py` 是 ContextPack 之后的执行边界投影，不是新的事实源。它从当前 Task/Workflow 状态、同一 workflow execution scope 内的 Trajectory/Observation/Finding/Collaboration/Eval 记录，按 `developer`、`reviewer`、`tester`、`coordinator` 角色选择最小上下文。
+
+- 每个内容项都有 `source_ref`；Observation 只投影 metadata/excerpt，不读取正文。
+- Finding 的 `metadata.supersedes` / `superseded_by` 参与当前版本选择；历史 Finding 保留在 `trajectory_findings`。
+- `working_contexts` 是不可变快照表；最新相同 fingerprint 复用旧 `context_id`，事实变化追加新快照。
+- `context_fingerprint` 覆盖角色、范围、选中的事实版本和预算策略；`diff_working_context` 只返回结构化的 added/removed/superseded/changed。
+- Task launch/retry、Handoff、verification dispatch 只传 `context_id`，不把完整 WorkingContext 塞入 CollaborationEvent 或 prompt。
+- V1 禁止跨 Run；没有显式 workflow execution id 的旧任务只读取自身 Run，除非已有 CollaborationEvent 证明 handoff 链接。
+
+FACT：实现与测试见 `herdr/context_compiler.py`、`herdr/state_db.py:working_contexts`、`tests/test_context_compiler.py`。
+UNKNOWN：Context Diff 尚未接入 Dependency Wakeup；V1 不提供实时重写或跨 Workflow experience retrieval。

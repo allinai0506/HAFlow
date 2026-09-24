@@ -34,6 +34,10 @@ class HarnessRunMetrics:
     context_packs_created: int = 0
     context_compactions: Optional[int] = None
     latest_context_pack_bytes: Optional[int] = None
+    working_context_compiles: int = 0
+    working_context_reused: int = 0
+    working_context_changed: int = 0
+    latest_working_context_bytes: Optional[int] = None
     verification_total: int = 0
     verification_passed: int = 0
     verification_failed: int = 0
@@ -67,6 +71,10 @@ class HarnessRunMetrics:
             "context_packs_created": self.context_packs_created,
             "context_compactions": self.context_compactions,
             "latest_context_pack_bytes": self.latest_context_pack_bytes,
+            "working_context_compiles": self.working_context_compiles,
+            "working_context_reused": self.working_context_reused,
+            "working_context_changed": self.working_context_changed,
+            "latest_working_context_bytes": self.latest_working_context_bytes,
             "verification_total": self.verification_total,
             "verification_passed": self.verification_passed,
             "verification_failed": self.verification_failed,
@@ -103,6 +111,12 @@ def _latest_context_pack_bytes(row: Optional[Dict[str, Any]]) -> Optional[int]:
         "created_at": float(row["created_at"]),
     }
     return len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+
+
+def _latest_working_context_bytes(row: Optional[Dict[str, Any]]) -> Optional[int]:
+    if row is None:
+        return None
+    return len(str(row.get("payload_json") or "").encode("utf-8"))
 
 
 def get_run_metrics(
@@ -162,6 +176,10 @@ def get_run_metrics(
         context_packs_created=packs,
         context_compactions=packs if packs else 0,
         latest_context_pack_bytes=_latest_context_pack_bytes(facts["latest_context"]),
+        working_context_compiles=facts.get("working_context_compiles", 0),
+        working_context_reused=facts.get("working_context_reused", 0),
+        working_context_changed=facts.get("working_context_changed", 0),
+        latest_working_context_bytes=_latest_working_context_bytes(facts.get("latest_working_context")),
         verification_total=facts["verification_total"],
         verification_passed=facts["verification_passed"],
         verification_failed=facts["verification_failed"],

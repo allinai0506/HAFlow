@@ -2032,6 +2032,22 @@ def _launch_task(args):
         args.prompt
     )
 
+def _compile_working_context_ref(task):
+    """Compile a launch-boundary context without changing task state."""
+    try:
+        from herdr.context_compiler import compile_working_context, infer_agent_role
+        context = compile_working_context(
+            workflow_id=task.get("workflow_id"),
+            task_id=task.get("task_id"),
+            agent_role=infer_agent_role(task),
+            store=_get_store(),
+        )
+        return context.context_id
+    except Exception as exc:
+        print(f"[WORKING_CONTEXT SKIPPED] task={task.get('task_id')}: {type(exc).__name__}")
+        return None
+
+
 def dispatch_task(task_id, prompt):
     # Reliable delivery protocol:
     # 1) try herdr agent prompt
@@ -2087,9 +2103,19 @@ def dispatch_task(task_id, prompt):
         if block:
             context_suffix = "\n\n" + block + "\n"
 
+    working_context_ref = _compile_working_context_ref(task)
+    working_context_suffix = ""
+    if working_context_ref:
+        working_context_suffix = (
+            "\n\nWORKING_CONTEXT REF:\n"
+            f"WORKING_CONTEXT_REF:{working_context_ref}\n"
+            "Load this immutable context by reference before continuing.\n"
+        )
+
     prompt = (
         prompt
         + context_suffix
+        + working_context_suffix
         + loop_suffix
         + "\nHERDR orchestration protocol:\n"
         + "HERDR_ORCH_TASK:" + task_id + "\n"

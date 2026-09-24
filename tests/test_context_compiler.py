@@ -274,6 +274,24 @@ def test_run_isolation_rejects_other_run_sources(tmp_path: Path):
     assert context.run_id == "run-target"
 
 
+def test_legacy_scope_does_not_mix_unlinked_task_runs(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = dict(_task("task-legacy-target"), workflow_run_id=None)
+    target.pop("workflow_run_id")
+    upstream = dict(_task("task-legacy-upstream"), workflow_run_id=None)
+    upstream.pop("workflow_run_id")
+    _seed_task(db, target)
+    _seed_task(db, upstream)
+    state_db.upsert_trajectory_finding(
+        _finding(upstream["run_id"], "fnd-unlinked", task_id=upstream["task_id"]),
+        db_path=db,
+    )
+
+    context = _compile(db, target, "developer")
+    assert not any("fnd-unlinked" in ref for ref in context.source_refs)
+
+
 def test_budget_limits_hundreds_of_findings_and_total_chars(tmp_path: Path):
     db = tmp_path / "state.db"
     _seed_workflow(db)
@@ -354,6 +372,59 @@ def test_snapshot_is_immutable_and_recompiles_after_source_change(tmp_path: Path
     assert get_working_context(first.context_id, db_path=db).to_mapping() == first_payload
     assert second.current_state["task_status"] == "rework"
     assert any(item.get("value") == "new blocker" for item in second.blockers)
+
+
+def test_state_store_exposes_working_context_readers(tmp_path: Path):
+    from herdr.context_compiler import get_latest_working_context, list_working_contexts
+    from herdr.state_store import SQLiteStateStore
+
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-store-readers"))
+    context = _compile(db, target, "developer")
+    store = SQLiteStateStore(db_path=db)
+    assert store.get_working_context(context.context_id)["task_id"] == target["task_id"]
+    assert get_latest_working_context(target["task_id"], db_path=db).context_id == context.context_id
+    assert [item.context_id for item in list_working_contexts(target["task_id"], db_path=db)] == [context.context_id]
+
+
+def test_metrics_report_reuse_and_changed_without_quality_score(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-metrics", status="working"))
+    first = _compile(db, target, "developer")
+    second = _compile(db, target, "developer")
+    assert first.context_id == second.context_id
+    assert second.metrics["context_reuse"] is True
+    assert second.metrics["context_changed"] is False
+    assert "quality_score" not in second.metrics
+
+    state_db.save_task(dict(target, status="rework"), db_path=db)
+    changed = _compile(db, dict(target, status="rework"), "developer")
+    assert changed.context_id != first.context_id
+    assert changed.metrics["context_reuse"] is False
+    assert changed.metrics["context_changed"] is True
+
+
+def test_eval_verification_is_available_as_bounded_evidence(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-eval", node="test", role="tester"))
+    state_db.get_db_connection(db).close()
+    from herdr.eval_store import record_eval_result
+
+    record_eval_result(
+        target["run_id"],
+        task_id=target["task_id"],
+        workflow_id=target["workflow_id"],
+        verification_passed=True,
+        evidence={"observation_id": "obs-eval"},
+        db_path=db,
+    )
+    context = _compile(db, target, "tester")
+    assert context.verification
+    assert any("eval:" in ref for ref in context.source_refs)
+    assert any("obs-eval" in ref for item in context.verification for ref in item.get("evidence_refs", []))
 
 
 def test_diff_reports_added_removed_superseded_and_changed(tmp_path: Path):
@@ -452,3 +523,84 @@ def test_unknown_role_fails_closed(tmp_path: Path):
             agent_role="unknown",
             store=ObservationStore(db),
         )
+
+
+def test_launch_boundary_compiles_context_reference(tmp_path: Path, monkeypatch):
+    import importlib.machinery
+    import importlib.util
+
+    from herdr.context_compiler import get_working_context
+
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-launch", node="implementation", role="developer"))
+    monkeypatch.setenv("HERDR_STATE_DB", str(db))
+    module_path = Path(__file__).resolve().parent.parent / "bin" / "herdr-task"
+    spec = importlib.util.spec_from_loader(
+        "context_compiler_task_cli_test",
+        importlib.machinery.SourceFileLoader("context_compiler_task_cli_test", str(module_path)),
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    ref = module._compile_working_context_ref(target)
+    assert ref and get_working_context(ref, db_path=db).task_id == target["task_id"]
+
+
+def test_handoff_prompt_contains_only_bounded_context_reference(tmp_path: Path):
+    from herdr.collaboration import build_handoff_prompt, create_handoff
+
+    event = create_handoff(
+        run_id="wf-exec-1",
+        workflow_id="wf-context",
+        from_task_id="task-upstream",
+        to_task_id="task-target",
+        to_agent="reviewer",
+        context_refs=["wc_123"],
+        source_fact_id="fact-context",
+    )
+    prompt = build_handoff_prompt(event, next_action="Review the implementation.")
+    assert "WORKING_CONTEXT_REF: wc_123" in prompt
+    assert "WorkingContext" not in prompt
+    assert "goal" not in prompt.lower()
+
+
+def test_dispatch_rejects_context_ref_for_wrong_target(tmp_path: Path):
+    import importlib.machinery
+    import importlib.util
+
+    controller_path = Path(__file__).resolve().parent.parent / "services" / "herdr-controller.py"
+    spec = importlib.util.spec_from_loader(
+        "context_compiler_controller_test",
+        importlib.machinery.SourceFileLoader("context_compiler_controller_test", str(controller_path)),
+    )
+    controller = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(controller)
+
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-dispatch-target", node="review", role="reviewer"))
+    target["pane_id"] = "pane-target"
+    state_db.save_task(target, db_path=db)
+    other = _seed_task(db, _task("task-dispatch-other", node="implementation", role="developer"))
+    other_context = _compile(db, other, "developer")
+    event = state_db.create_collaboration_event(
+        {
+            "run_id": "wf-exec-1",
+            "workflow_id": "wf-context",
+            "from_task_id": other["task_id"],
+            "to_task_id": target["task_id"],
+            "to_agent": "reviewer",
+            "context_refs": [other_context.context_id],
+            "source_fact_id": "fact-wrong-context",
+        },
+        db_path=db,
+    )
+    calls = []
+    result = controller.dispatch_collaboration_event(
+        event["event_id"],
+        {target["task_id"]: target},
+        lambda pane, prompt: calls.append((pane, prompt)),
+        db_path=db,
+    )
+    assert result["status"] == "failed"
+    assert calls == []

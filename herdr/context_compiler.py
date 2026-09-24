@@ -10,10 +10,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 import time
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
@@ -468,6 +467,7 @@ def _read_source_snapshot(
     workflow_id: str,
     task_id: str,
     store: Any = None,
+    db_path: Optional[Path] = None,
     explicit_task: Optional[Mapping[str, Any]] = None,
     explicit_workflow: Optional[Mapping[str, Any]] = None,
     max_events: int = 300,
@@ -476,7 +476,7 @@ def _read_source_snapshot(
     max_collaborations: int = 50,
     max_evals: int = 100,
 ) -> Dict[str, Any]:
-    conn = state_db.get_db_connection(_db_path(store))
+    conn = state_db.get_db_connection(db_path or _db_path(store))
     try:
         conn.execute("BEGIN;")
         task_row = conn.execute("SELECT * FROM tasks WHERE task_id = ?", (str(task_id),)).fetchone()
@@ -506,11 +506,20 @@ def _read_source_snapshot(
             item for item in tasks
             if (collab_scope_for_task(item) or _task_run(item)) == run_scope
         ]
-        task_by_id = {str(item.get("task_id")): item for item in scoped_tasks}
-        allowed_runs = {_task_run(item) for item in scoped_tasks if _task_run(item)}
+        explicit_execution_scope = bool(task.get("workflow_run_id") or task.get("execution_id"))
+        if explicit_execution_scope:
+            allowed_runs = {_task_run(item) for item in scoped_tasks if _task_run(item)}
+        else:
+            # Legacy tasks may share a workflow_id while belonging to distinct
+            # execution runs.  Without an explicit workflow execution id,
+            # only the target run is authoritative until a collaboration event
+            # proves a sibling handoff link.
+            target_run = _task_run(task)
+            allowed_runs = {target_run} if target_run else set()
         allowed_runs.discard(None)
         if not allowed_runs:
             raise ValueError("workflow execution scope has no run identity")
+        task_by_id = {str(item.get("task_id")): item for item in scoped_tasks}
 
         placeholders = ",".join("?" for _ in allowed_runs)
         run_values = list(allowed_runs)
@@ -563,6 +572,61 @@ def _read_source_snapshot(
             (run_scope, str(workflow_id), *task_ids, *task_ids, int(max_collaborations)),
         ).fetchall()
         collaborations = [state_db._decode_collaboration_row(row) for row in collab_rows]
+        if not explicit_execution_scope:
+            linked_task_ids = {
+                str(event.get("to_task_id") or "") for event in collaborations
+            } | {
+                str(event.get("from_task_id") or "") for event in collaborations
+            }
+            for linked_id in linked_task_ids:
+                linked_task = task_by_id.get(linked_id)
+                linked_run = _task_run(linked_task) if linked_task else None
+                if linked_run:
+                    allowed_runs.add(linked_run)
+            if len(allowed_runs) > 1:
+                scoped_tasks = [
+                    item for item in scoped_tasks if _task_run(item) in allowed_runs
+                ]
+                task_by_id = {str(item.get("task_id")): item for item in scoped_tasks}
+                placeholders = ",".join("?" for _ in allowed_runs)
+                run_values = list(allowed_runs)
+                events = [
+                    _decode_event_row(row) for row in conn.execute(
+                        f"""SELECT * FROM events
+                            WHERE source = 'trajectory'
+                              AND run_id IN ({placeholders})
+                              AND event_type IN ({",".join("?" for _ in RELEVANT_EVENT_TYPES)})
+                            ORDER BY sequence DESC, id DESC LIMIT ?""",
+                        (*run_values, *sorted(RELEVANT_EVENT_TYPES), int(max_events)),
+                    ).fetchall()
+                ]
+                findings = [
+                    state_db._decode_finding_row(row) for row in conn.execute(
+                        f"""SELECT * FROM trajectory_findings
+                            WHERE run_id IN ({placeholders})
+                            ORDER BY created_at DESC, rowid DESC LIMIT ?""",
+                        (*run_values, int(max_findings)),
+                    ).fetchall()
+                ]
+                observations = []
+                for row in conn.execute(
+                    f"""SELECT * FROM observations
+                        WHERE run_id IN ({placeholders})
+                        ORDER BY created_at DESC, observation_id DESC LIMIT ?""",
+                    (*run_values, int(max_observations)),
+                ).fetchall():
+                    decoded = state_db._decode_observation_row(row)
+                    observations.append({
+                        "observation_id": decoded.get("observation_id"),
+                        "run_id": decoded.get("run_id"),
+                        "task_id": decoded.get("task_id"),
+                        "workflow_id": decoded.get("workflow_id"),
+                        "source_type": decoded.get("source_type"),
+                        "source_ref": decoded.get("source_ref"),
+                        "sha256": decoded.get("sha256"),
+                        "excerpt": decoded.get("excerpt"),
+                        "created_at": decoded.get("created_at"),
+                    })
 
         eval_rows = conn.execute(
             f"""SELECT * FROM eval_results
@@ -973,6 +1037,62 @@ def _observation_candidates(
     return result
 
 
+def _eval_candidates(
+    evals: Sequence[Mapping[str, Any]],
+    *,
+    task_by_id: Mapping[str, Mapping[str, Any]],
+    allowed_runs: Set[str],
+    workflow_id: str,
+    run_scope: str,
+) -> List[Dict[str, Any]]:
+    result: List[Dict[str, Any]] = []
+    for evaluation in evals:
+        record = {
+            "run_id": evaluation.get("run_id"),
+            "task_id": evaluation.get("task_id"),
+            "workflow_id": evaluation.get("workflow_id"),
+        }
+        if not _source_allowed(
+            record,
+            task_by_id=task_by_id,
+            allowed_runs=allowed_runs,
+            workflow_id=workflow_id,
+            run_scope=run_scope,
+        ):
+            continue
+        passed = evaluation.get("verification_passed")
+        requirements = evaluation.get("requirements_satisfied")
+        value = {
+            "verification_passed": bool(passed) if passed is not None else None,
+            "requirements_satisfied": bool(requirements) if requirements is not None else None,
+            "final_status": evaluation.get("final_status"),
+        }
+        if value["verification_passed"] is None and value["requirements_satisfied"] is None:
+            continue
+        evidence_refs: List[str] = []
+        raw_evidence = evaluation.get("evidence")
+        for raw in _as_list(raw_evidence):
+            if isinstance(raw, Mapping):
+                raw_values = [raw.get(key) for key in ("observation_id", "evidence_id", "event_id", "ref")]
+            else:
+                raw_values = [raw]
+            for raw_value in raw_values:
+                ref = _canonical_evidence_ref(raw_value)
+                if ref and ref not in evidence_refs:
+                    evidence_refs.append(ref)
+        result.append(_item(
+            "verification",
+            value,
+            f"eval:{evaluation.get('eval_id')}",
+            source_task=str(evaluation.get("task_id") or "") or None,
+            source_run=str(evaluation.get("run_id") or "") or None,
+            created_at=evaluation.get("created_at"),
+            evidence_refs=evidence_refs,
+            metadata={"source_kind": "eval", "revision": evaluation.get("revision")},
+        ))
+    return result
+
+
 def _event_candidates(
     events: Sequence[Mapping[str, Any]],
     *,
@@ -1343,9 +1463,11 @@ def compile_working_context(
     store: Any = None,
     task: Optional[Mapping[str, Any]] = None,
     workflow: Optional[Mapping[str, Any]] = None,
+    db_path: Optional[Path] = None,
     boundary: str = "execution",
     config: Optional[Mapping[str, Any]] = None,
     now: Optional[float] = None,
+    _retry: int = 0,
 ) -> WorkingContext:
     """Compile one deterministic, role-aware execution-boundary snapshot."""
     started = time.perf_counter()
@@ -1355,6 +1477,7 @@ def compile_working_context(
         workflow_id=str(workflow_id),
         task_id=str(task_id),
         store=store,
+        db_path=db_path,
         explicit_task=task,
         explicit_workflow=workflow,
     )
@@ -1426,6 +1549,13 @@ def compile_working_context(
         workflow_id=str(workflow_id),
         run_scope=snapshot["run_scope"],
     )
+    eval_verification = _eval_candidates(
+        snapshot["evals"],
+        task_by_id=snapshot["task_by_id"],
+        allowed_runs=snapshot["allowed_runs"],
+        workflow_id=str(workflow_id),
+        run_scope=snapshot["run_scope"],
+    )
     findings = _finding_candidates(
         snapshot["findings"],
         task_by_id=snapshot["task_by_id"],
@@ -1488,9 +1618,10 @@ def compile_working_context(
 
     decisions = [*task_decisions, *event_decisions]
     completed = [*completed_tasks, *event_completed]
+    all_verification = [*event_verification, *eval_verification]
     all_candidates = [
         *completed, *event_artifacts, *evidence, *findings, *decisions,
-        *blockers, *questions, *event_verification, *handoffs, *dependency_items,
+        *blockers, *questions, *all_verification, *handoffs, *dependency_items,
     ]
     raw_candidate_items = len(all_candidates)
     now_value = float(now if now is not None else time.time())
@@ -1514,7 +1645,7 @@ def compile_working_context(
             "decisions": decisions,
             "blockers": blockers,
             "open_questions": questions,
-            "verification": event_verification,
+            "verification": all_verification,
             "handoffs": handoffs,
         }[field_name]
         selected[field_name] = _select_items(
@@ -1530,7 +1661,7 @@ def compile_working_context(
 
     # Verification is latest-per-task/source, not a historical pass/fail dump.
     latest_verification: Dict[Tuple[str, str], Dict[str, Any]] = {}
-    for item in event_verification:
+    for item in all_verification:
         key = (str(item.get("source_run") or ""), str(item.get("source_task") or ""))
         old = latest_verification.get(key)
         if old is None or _safe_float(item.get("created_at")) >= _safe_float(old.get("created_at")):
@@ -1596,7 +1727,32 @@ def compile_working_context(
     context = WorkingContext(**{**context.to_mapping(), "metrics": metrics})
     metrics["context_chars"] = len(json.dumps(context.to_mapping(), ensure_ascii=False, separators=(",", ":")))
     context = WorkingContext(**{**context.to_mapping(), "metrics": metrics})
-    stored = state_db.save_working_context(context.to_mapping(), db_path=_db_path(store))
+    if _retry < 1:
+        fresh_snapshot = _read_source_snapshot(
+            workflow_id=str(workflow_id),
+            task_id=str(task_id),
+            store=store,
+            db_path=db_path,
+            explicit_task=task,
+            explicit_workflow=workflow,
+        )
+        if fresh_snapshot.get("source_version") != snapshot.get("source_version"):
+            return compile_working_context(
+                workflow_id=workflow_id,
+                task_id=task_id,
+                agent_role=role,
+                store=store,
+                task=task,
+                workflow=workflow,
+                db_path=db_path,
+                boundary=boundary,
+                config=config,
+                now=now,
+                _retry=_retry + 1,
+            )
+    stored = state_db.save_working_context(
+        context.to_mapping(), db_path=db_path or _db_path(store),
+    )
     reused = str(stored.get("context_id")) != context.context_id
     metrics["context_reuse"] = reused
     metrics["context_changed"] = not reused

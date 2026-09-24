@@ -2117,6 +2117,27 @@ def aggregate_run_metric_rows(run_id: str, db_path: Optional[Path] = None) -> Di
             """,
             (run_id,),
         ).fetchone()
+        working_contexts = conn.execute(
+            """
+            SELECT COUNT(*) AS working_context_compiles,
+                   SUM(CASE WHEN json_extract(metrics_json, '$.context_reuse') = 1 THEN 1 ELSE 0 END)
+                       AS working_context_reused,
+                   SUM(CASE WHEN json_extract(metrics_json, '$.context_changed') = 1 THEN 1 ELSE 0 END)
+                       AS working_context_changed
+              FROM working_contexts
+             WHERE run_id = ? OR run_scope = ?
+            """,
+            (run_id, run_id),
+        ).fetchone()
+        latest_working_context = conn.execute(
+            """
+            SELECT * FROM working_contexts
+             WHERE run_id = ? OR run_scope = ?
+             ORDER BY compiled_at DESC, rowid DESC
+             LIMIT 1
+            """,
+            (run_id, run_id),
+        ).fetchone()
         return {
             "trajectory_events": int(event_row["trajectory_events"] or 0),
             "started_at": event_row["started_at"],
@@ -2135,6 +2156,10 @@ def aggregate_run_metric_rows(run_id: str, db_path: Optional[Path] = None) -> Di
             "observation_bytes": int(observations["observation_bytes"] or 0),
             "findings_created": int(findings["findings_created"] or 0),
             "context_packs_created": int(context_packs["context_packs_created"] or 0),
+            "working_context_compiles": int(working_contexts["working_context_compiles"] or 0),
+            "working_context_reused": int(working_contexts["working_context_reused"] or 0),
+            "working_context_changed": int(working_contexts["working_context_changed"] or 0),
+            "latest_working_context": dict(latest_working_context) if latest_working_context else None,
             "latest_context": dict(latest_context) if latest_context else None,
         }
     finally:

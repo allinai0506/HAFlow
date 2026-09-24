@@ -4449,6 +4449,21 @@ def _supervisor_verify(task, decision, store=None):
     }
 
 
+def _working_context_ref_for_task(task, store=None):
+    try:
+        from herdr.context_compiler import compile_working_context, infer_agent_role
+        context = compile_working_context(
+            workflow_id=task.get("workflow_id"),
+            task_id=task.get("task_id"),
+            agent_role=infer_agent_role(task),
+            store=store,
+        )
+        return context.context_id
+    except Exception as exc:
+        print(f"[WORKING_CONTEXT SKIPPED] task={task.get('task_id')}: {type(exc).__name__}")
+        return None
+
+
 def _dispatch_supervisor_verification(task, decision, store):
     """Submit one real verification prompt through the existing Agent path."""
     intervention = decision.get("intervention") or {}
@@ -4486,6 +4501,9 @@ def _dispatch_supervisor_verification(task, decision, store):
         "evidence_baseline": evidence_baseline,
         "verification_pending": True,
     }
+    working_context_ref = _working_context_ref_for_task(task, store=store)
+    if working_context_ref:
+        dispatch_payload["working_context_id"] = working_context_ref
     store.record_event(
         "verification_dispatch_intent",
         dispatch_payload,
@@ -4505,6 +4523,8 @@ def _dispatch_supervisor_verification(task, decision, store):
         f"HERDR_VERIFY_INTERVENTION_ID:{intervention_id}\n"
         f"HERDR_VERIFY_DECISION_ID:{decision_id}\n"
         "HERDR_VERIFY_ACTION:VERIFY\n"
+        + (f"WORKING_CONTEXT_REF:{working_context_ref}\n" if working_context_ref else "")
+        + "Load the immutable context by reference before verification.\n"
     )
     result = subprocess.run(
         ["herdr", "agent", "prompt", str(pane_id), prompt],
@@ -4596,6 +4616,24 @@ def _reconcile_collaboration_ack(event_id, target, db_path):
     return None
 
 
+def _working_context_ref_valid(event, target_task, db_path=None):
+    """Validate only V1 WorkingContext refs; preserve legacy ref compatibility."""
+    from herdr import state_db as _sdb
+
+    for ref in event.get("context_refs") or []:
+        value = str(ref or "")
+        if not value.startswith("wc_"):
+            continue
+        context = _sdb.get_working_context(value, db_path=db_path)
+        if context is None:
+            return False
+        if str(context.get("task_id") or "") != str(event.get("to_task_id") or ""):
+            return False
+        if str(context.get("run_scope") or "") != str(event.get("run_id") or ""):
+            return False
+    return True
+
+
 def dispatch_collaboration_event(event_id, tasks_by_id, prompt_sender=None, db_path=None):
     """Dispatch one CollaborationEvent through the existing Herdr prompt path.
 
@@ -4624,6 +4662,8 @@ def dispatch_collaboration_event(event_id, tasks_by_id, prompt_sender=None, db_p
         return _sdb.mark_collaboration_failed(event_id, db_path=db_path)
     pane_id = _collab_task_pane(target)
     if not pane_id:
+        return _sdb.mark_collaboration_failed(event_id, db_path=db_path)
+    if not _working_context_ref_valid(event, target, db_path=db_path):
         return _sdb.mark_collaboration_failed(event_id, db_path=db_path)
 
     if _collab_prior_intent(event_id, event["to_task_id"], db_path) is not None:
@@ -4754,6 +4794,18 @@ def maybe_dispatch_node_handoffs(*, workflow_id, ready_id, dep_ids, launched,
             from_task = upstream[-1]
             run_id = _collab.collab_scope_for_task(from_task)
             branch = from_task.get("branch")
+            context_refs = []
+            try:
+                from herdr.context_compiler import compile_working_context, infer_agent_role
+                target_context = compile_working_context(
+                    workflow_id=workflow_id,
+                    task_id=to_id,
+                    agent_role=infer_agent_role(target),
+                    db_path=db_path,
+                )
+                context_refs = [target_context.context_id]
+            except Exception as exc:
+                print(f"[WORKING_CONTEXT SKIPPED] task={to_id}: {type(exc).__name__}")
             event = _sdb.create_collaboration_event({
                 "run_id": run_id,
                 "workflow_id": workflow_id,
@@ -4766,6 +4818,7 @@ def maybe_dispatch_node_handoffs(*, workflow_id, ready_id, dep_ids, launched,
                 "summary": str(from_task.get("goal") or f"{dep_hit} completed."),
                 "artifact_refs": ([f"branch:{branch}"] if branch else []),
                 "evidence_refs": [],
+                "context_refs": context_refs,
                 "source_fact_id": f"{workflow_id}:{dep_hit}:completed",
             }, db_path=db_path)
             dispatched = dispatch_collaboration_event(

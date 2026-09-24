@@ -92,11 +92,24 @@ def create_handoff(*, run_id: str, workflow_id: str, from_task_id: str,
     }
 
 
-def build_handoff_prompt(event: Dict[str, Any], next_action: str = "") -> str:
+def build_handoff_prompt(
+    event: Dict[str, Any],
+    next_action: str = "",
+    working_context: Any = None,
+) -> str:
     summary = _clip(event.get("summary") or "", SUMMARY_MAX)
     artifacts = [_clip(a, REF_ITEM_MAX) for a in (event.get("artifact_refs") or [])[:REFS_MAX]]
     evidence = [_clip(e, REF_ITEM_MAX) for e in (event.get("evidence_refs") or [])[:REFS_MAX]]
     action = _clip(next_action, NEXT_ACTION_MAX)
+    context_refs = list(event.get("context_refs") or [])
+    if working_context is not None:
+        context_id = getattr(working_context, "context_id", None)
+        if context_id is None and isinstance(working_context, dict):
+            context_id = working_context.get("context_id")
+        if context_id:
+            context_refs.insert(0, str(context_id))
+    context_refs = list(dict.fromkeys(str(ref) for ref in context_refs if ref))[:REFS_MAX]
+    context_refs = [_clip(ref, REF_ITEM_MAX) for ref in context_refs]
     # Tail carries the correlation id: clip the body first so truncation
     # can never amputate HANDOFF_ID.
     tail = f"HANDOFF_ID: {event.get('event_id') or ''}"
@@ -112,6 +125,9 @@ def build_handoff_prompt(event: Dict[str, Any], next_action: str = "") -> str:
         "",
         "EVIDENCE:",
         *["- " + str(e) for e in evidence],
+        "",
+        "WORKING CONTEXT:",
+        *["- WORKING_CONTEXT_REF: " + str(ref) for ref in context_refs],
         "",
         "NEXT ACTION:",
         str(action or ""),
