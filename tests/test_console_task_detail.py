@@ -189,12 +189,13 @@ class TestTaskDetailDrawer(unittest.TestCase):
         self.assertEqual(r["message"], "Task 不存在")
         self.assertNotIn("task", r)
 
-    def test_both_fail_with_row_renders_cached_data(self):
+    def test_both_fail_with_row_still_error(self):
         (r,) = self._resolve_via_node([
             "resolveTaskDetail('T',null,null,{message:'a'},{message:'b'},{task_id:'T',status:'working'})",
         ])
-        self.assertEqual(r["status"], "ok")
-        self.assertEqual(r["task"]["task_id"], "T")
+        self.assertEqual(r["status"], "error")
+        self.assertEqual(r["message"], "a")
+        self.assertNotIn("task", r)
 
     def test_failure_header_not_stuck_on_loading(self):
         seg_start = self.html.find("async function openTaskDrawer(")

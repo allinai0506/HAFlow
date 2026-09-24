@@ -3346,13 +3346,13 @@ function renderTaskDrawer(){
   document.getElementById('taskDrawerBody').innerHTML=body;
 }
 function resolveTaskDetail(tid,td,proj,tdError,projError,rowTask){
-  const fetched=(td&&td.task)||{};
-  const task=Object.assign({},rowTask||{},fetched);
-  if(!Object.keys(task).length&&proj)Object.assign(task,{task_id:proj.task_id,workflow_id:proj.workflow_id,node:proj.node,agent:proj.agent,status:proj.status,goal:proj.goal});
-  if(!td&&!proj&&!Object.keys(task).length){
+  if(!td&&!proj){
     const msg=(tdError&&tdError.message)||(projError&&projError.message)||'任务详情加载失败';
     return {status:'error',message:msg};
   }
+  const fetched=(td&&td.task)||{};
+  const task=Object.assign({},rowTask||{},fetched);
+  if(!Object.keys(task).length&&proj)Object.assign(task,{task_id:proj.task_id,workflow_id:proj.workflow_id,node:proj.node,agent:proj.agent,status:proj.status,goal:proj.goal});
   return {status:'ok',task,proj:proj||{},live:((td&&td.runtime)||{})};
 }
 async function openTaskDrawer(tid){
