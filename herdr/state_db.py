@@ -2987,6 +2987,13 @@ def save_working_context(
     required = ("context_id", "run_scope", "task_id", "agent_role", "context_fingerprint")
     if any(not context.get(key) for key in required):
         raise ValueError("context_id, run_scope, task_id, agent_role and context_fingerprint are required")
+    for field_name in (
+        "completed", "artifacts", "evidence", "findings", "decisions", "blockers",
+        "open_questions", "verification", "handoffs",
+    ):
+        for item in context.get(field_name) or []:
+            if not isinstance(item, dict) or not item.get("source_ref"):
+                raise ValueError(f"working context item in {field_name} requires source_ref")
     payload_json = json.dumps(
         context, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
     )

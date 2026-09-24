@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
 from pathlib import Path
 
 import pytest
@@ -8,6 +9,14 @@ import pytest
 from herdr import state_db
 from herdr.observation import ObservationStore, create_observation
 from herdr.trajectory import TrajectoryLedger
+
+
+def _save_working_context_in_process(db_path, payload, gate=None, ready=None):
+    if ready is not None:
+        ready.set()
+    if gate is not None:
+        gate.wait(10)
+    state_db.save_working_context(payload, db_path=Path(db_path))
 
 
 def _seed_workflow(db: Path, *, workflow_id: str = "wf-context", scope: str = "wf-exec-1") -> None:
@@ -301,12 +310,23 @@ def test_run_isolation_rejects_other_run_sources(tmp_path: Path):
             "metadata": {"text": "other completion"},
         }
     )
+    mismatched_event = ledger.append_event(
+        {
+            "run_id": target["run_id"],
+            "task_id": target["task_id"],
+            "workflow_id": "wf-other",
+            "event_type": "artifact_created",
+            "artifact": {"ref": "mismatched-workflow-artifact"},
+        }
+    )
 
     context = _compile(db, target, "coordinator")
     serialized = json.dumps(context.to_mapping(), ensure_ascii=False)
     assert "fnd-other" not in serialized
     assert other_obs.observation_id not in serialized
     assert "other completion" not in serialized
+    assert mismatched_event["event_id"] not in serialized
+    assert "mismatched-workflow-artifact" not in serialized
     assert context.run_scope == "wf-exec-1"
     assert context.run_id == "run-target"
 
@@ -316,7 +336,7 @@ def test_legacy_scope_does_not_mix_unlinked_task_runs(tmp_path: Path):
     _seed_workflow(db)
     target = dict(_task("task-legacy-target"), workflow_run_id=None)
     target.pop("workflow_run_id")
-    upstream = dict(_task("task-legacy-upstream"), workflow_run_id=None)
+    upstream = dict(_task("task-legacy-upstream"), workflow_run_id=None, status="completed", blocker="unlinked blocker")
     upstream.pop("workflow_run_id")
     _seed_task(db, target)
     _seed_task(db, upstream)
@@ -327,6 +347,7 @@ def test_legacy_scope_does_not_mix_unlinked_task_runs(tmp_path: Path):
 
     context = _compile(db, target, "developer")
     assert not any("fnd-unlinked" in ref for ref in context.source_refs)
+    assert "unlinked blocker" not in json.dumps(context.to_mapping(), ensure_ascii=False)
 
 
 def test_budget_limits_hundreds_of_findings_and_total_chars(tmp_path: Path):
@@ -409,6 +430,70 @@ def test_snapshot_is_immutable_and_recompiles_after_source_change(tmp_path: Path
     assert get_working_context(first.context_id, db_path=db).to_mapping() == first_payload
     assert second.current_state["task_status"] == "rework"
     assert any(item.get("value") == "new blocker" for item in second.blockers)
+
+
+def test_concurrent_context_writers_do_not_replace_newer_latest(tmp_path: Path):
+    db = tmp_path / "state.db"
+
+    def payload(context_id: str, fingerprint: str, created_at: float):
+        return {
+            "context_id": context_id,
+            "run_scope": "scope",
+            "run_id": "run",
+            "workflow_id": "wf",
+            "task_id": "task-concurrent",
+            "node_id": "review",
+            "agent_role": "developer",
+            "goal": "goal",
+            "current_state": {},
+            "findings": [],
+            "artifacts": [],
+            "evidence": [],
+            "completed": [],
+            "decisions": [],
+            "blockers": [],
+            "open_questions": [],
+            "verification": [],
+            "handoffs": [],
+            "next_action": "continue",
+            "source_refs": [],
+            "context_fingerprint": fingerprint,
+            "source_version": fingerprint,
+            "compiled_at": created_at,
+            "metrics": {},
+        }
+
+    ctx = multiprocessing.get_context("spawn")
+    gate = ctx.Event()
+    ready = ctx.Event()
+    old = ctx.Process(
+        target=_save_working_context_in_process,
+        args=(str(db), payload("wc-old", "old", 10.0), gate, ready),
+    )
+    old.start()
+    assert ready.wait(10)
+    state_db.save_working_context(payload("wc-new", "new", 20.0), db_path=db)
+    gate.set()
+    old.join(10)
+    assert old.exitcode == 0
+    latest = state_db.get_latest_working_context("task-concurrent", db_path=db)
+    assert latest["context_id"] == "wc-new"
+
+
+def test_storage_rejects_items_without_provenance(tmp_path: Path):
+    db = tmp_path / "state.db"
+    with pytest.raises(ValueError, match="source_ref"):
+        state_db.save_working_context(
+            {
+                "context_id": "wc-invalid",
+                "run_scope": "scope",
+                "task_id": "task-invalid",
+                "agent_role": "developer",
+                "context_fingerprint": "fingerprint",
+                "findings": [{"kind": "finding", "value": "unproven"}],
+            },
+            db_path=db,
+        )
 
 
 def test_state_store_exposes_working_context_readers(tmp_path: Path):

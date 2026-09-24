@@ -569,11 +569,11 @@ def _read_source_snapshot(
                 linked_run = _task_run(linked_task) if linked_task else None
                 if linked_run:
                     allowed_runs.add(linked_run)
+            scoped_tasks = [
+                item for item in scoped_tasks if _task_run(item) in allowed_runs
+            ]
+            task_by_id = {str(item.get("task_id")): item for item in scoped_tasks}
             if len(allowed_runs) > 1:
-                scoped_tasks = [
-                    item for item in scoped_tasks if _task_run(item) in allowed_runs
-                ]
-                task_by_id = {str(item.get("task_id")): item for item in scoped_tasks}
                 placeholders = ",".join("?" for _ in allowed_runs)
                 run_values = list(allowed_runs)
                 events = [
@@ -699,6 +699,8 @@ def _source_allowed(
 ) -> bool:
     task_id = record.get("task_id")
     run_id = record.get("run_id")
+    if record.get("workflow_id") and str(record["workflow_id"]) != str(workflow_id):
+        return False
     if task_id:
         task = task_by_id.get(str(task_id))
         if task is None:
@@ -710,8 +712,6 @@ def _source_allowed(
         if run_id and _task_run(task) != str(run_id):
             return False
         return True
-    if record.get("workflow_id") and str(record["workflow_id"]) != str(workflow_id):
-        return False
     return bool(run_id and str(run_id) in allowed_runs)
 
 
