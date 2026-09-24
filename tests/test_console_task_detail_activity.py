@@ -174,19 +174,23 @@ class TestTaskDetailActivity(unittest.TestCase):
         if not node_bin:
             self.skipTest("node not found; skipping JS execution test")
         parts = []
-        for fn in ["taskDrawerNumTs", "taskExecStart", "taskStartedAt", "taskDisplayStart"]:
+        for fn in ["taskDrawerNumTs", "taskExecStart", "taskUpdatedAt", "taskDurationSecs", "taskDisplayStart"]:
             src = _extract_fn(self.html, fn)
             self.assertIsNotNone(src, f"{fn} not found")
             parts.append(src)
+        self.assertIsNone(_extract_fn(self.html, "taskStartedAt"),
+                          "taskStartedAt (created_at fallback) must stay deleted: duration gets no fallback")
         harness = (
             STUB_GLOBALS
             + "\n" + "\n".join(parts)
             + "\nconsole.log(JSON.stringify(["
             + "taskExecStart({started_at:900,created_at:1000,runtime:{started_at:1200}}),"
-            + "taskStartedAt({started_at:900,created_at:1000,runtime:{started_at:1200}}),"
+            + "taskDurationSecs({started_at:900,created_at:1000,runtime:{started_at:1200},updated_at:1500}),"
             + "taskExecStart({created_at:1000,runtime:{started_at:1200}}),"
+            + "taskDurationSecs({created_at:1000,runtime:{started_at:1200},updated_at:1500}),"
             + "taskDisplayStart({created_at:1000,runtime:{started_at:1200}}),"
             + "taskExecStart({created_at:1000}),"
+            + "taskDurationSecs({created_at:1000,updated_at:1500}),"
             + "taskDisplayStart({created_at:1000}),"
             + "taskDisplayStart({})]));"
         )
@@ -201,14 +205,16 @@ class TestTaskDetailActivity(unittest.TestCase):
         vals = json.loads(res.stdout.strip())
         # explicit started_at wins over runtime and creation
         self.assertEqual(vals[0], 900)
-        self.assertEqual(vals[1], 900)
+        self.assertEqual(vals[1], 600)
         # runtime start beats creation time and is labeled 开始时间
         self.assertEqual(vals[2], 1200)
-        self.assertEqual(vals[3], {"label": "开始时间", "ts": 1200})
-        # creation-only falls back with honest 创建时间 label, never faked as 开始时间
-        self.assertIsNone(vals[4])
-        self.assertEqual(vals[5], {"label": "创建时间", "ts": 1000})
+        self.assertEqual(vals[3], 300)
+        self.assertEqual(vals[4], {"label": "开始时间", "ts": 1200})
+        # creation-only yields no duration: existing-time is not execution time
+        self.assertIsNone(vals[5])
         self.assertIsNone(vals[6])
+        self.assertEqual(vals[7], {"label": "创建时间", "ts": 1000})
+        self.assertIsNone(vals[8])
 
     def test_runtime_missing_fields_no_throw_via_node(self):
         node_bin = shutil.which("node")
@@ -223,7 +229,6 @@ class TestTaskDetailActivity(unittest.TestCase):
             + "\n" + _extract_fn(self.html, "taskExecStart")
             + "\n" + _extract_fn(self.html, "taskDisplayStart")
             + "\n" + _extract_fn(self.html, "fmtClock")
-            + "\n" + _extract_fn(self.html, "taskStartedAt")
             + "\n" + _extract_fn(self.html, "taskUpdatedAt")
             + "\n" + _extract_fn(self.html, "taskDurationSecs")
             + "\n" + _extract_fn(self.html, "renderTaskRuntime")

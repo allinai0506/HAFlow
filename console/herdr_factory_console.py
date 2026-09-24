@@ -3190,10 +3190,9 @@ async function runPreflight(){
 function showAgentOverride(){if(!state.workflowId)return toast('当前没有工作流',true);const cur=state.workflow.agent_override||'auto';openModal('指定后续任务执行者',`<div class="form"><label for="overrideAgent">执行者策略</label><select id="overrideAgent">${['auto','opencode','codex','claude','qodercli','agy','pi','grok','kimi'].map(a=>`<option ${a===cur?'selected':''}>${a}</option>`).join('')}</select><button class="btn primary" onclick="saveAgentOverride()">保存</button><div class="muted">只影响后续新建任务。</div></div>`)}async function saveAgentOverride(){try{await api('/api/workflow/agent',{method:'POST',body:JSON.stringify({workflow_id:state.workflowId,agent:document.getElementById('overrideAgent').value})});closeModal();await loadWorkflow(state.workflowId);toast('执行者策略已更新')}catch(e){toast(e.message,true)}}function taskDrawerNumTs(v){const n=parseFloat(v);return Number.isFinite(n)?n:null}
 function fmtClock(ts){const n=taskDrawerNumTs(ts);if(n===null)return '';const ms=n>1e12?n:n*1000;const d=new Date(ms);if(isNaN(d.getTime()))return '';return d.toLocaleTimeString('zh-CN',{hour12:false})}
 function taskExecStart(t){t=t||{};const rt=t.runtime||{};return taskDrawerNumTs(t.started_at??rt.started_at)}
-function taskStartedAt(t){const e=taskExecStart(t);if(e!==null)return e;return taskDrawerNumTs((t||{}).created_at)}
 function taskDisplayStart(t){const e=taskExecStart(t);if(e!==null)return {label:'开始时间',ts:e};const c=taskDrawerNumTs((t||{}).created_at);if(c!==null)return {label:'创建时间',ts:c};return null}
 function taskUpdatedAt(t){t=t||{};return taskDrawerNumTs(t.updated_at??t.last_activity_at)}
-function taskDurationSecs(t){const s=taskStartedAt(t);const u=taskUpdatedAt(t);if(s===null||u===null)return null;return Math.max(0,Math.round(u-s))}
+function taskDurationSecs(t){const s=taskExecStart(t);const u=taskUpdatedAt(t);if(s===null||u===null)return null;return Math.max(0,Math.round(u-s))}
 function canSteerTask(t){return ['working','dispatched','rework','blocked','paused'].includes((t||{}).status)}
 function canForceReviewTask(t){return (t||{}).status==='rework'}
 function canForcePassTask(t){return (t||{}).stage_verdict==='blocked'}
