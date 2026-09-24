@@ -119,6 +119,7 @@ def test_complete_run_aggregates_existing_authoritative_facts(tmp_path: Path):
 def test_observation_dedup_and_run_isolation(tmp_path: Path):
     db_path = tmp_path / "state.db"
     store = ObservationStore(db_path)
+    state_db.save_task(_task("run-a", status="working"), db_path=db_path)
     create_observation(run_id="run-a", source_type="agent_log", source_ref="same",
                        content="same", store=store)
     create_observation(run_id="run-a", source_type="agent_log", source_ref="same",
@@ -134,6 +135,7 @@ def test_observation_dedup_and_run_isolation(tmp_path: Path):
 
 def test_latest_context_pack_and_incomplete_run(tmp_path: Path):
     db_path = tmp_path / "state.db"
+    state_db.save_task(_task("run-open", status="working"), db_path=db_path)
     state_db.save_context_pack(_pack("run-open", "ctx-old", 10.0), db_path=db_path)
     state_db.save_context_pack(_pack("run-open", "ctx-new", 20.0), db_path=db_path)
     ledger = TrajectoryLedger(db_path)
@@ -151,6 +153,7 @@ def test_latest_context_pack_and_incomplete_run(tmp_path: Path):
 
 def test_failed_run_is_terminal_but_not_completed(tmp_path: Path):
     db_path = tmp_path / "state.db"
+    state_db.save_task(_task("run-failed", status="working"), db_path=db_path)
     ledger = TrajectoryLedger(db_path)
     ledger.append_event({"run_id": "run-failed", "event_type": "run_started", "timestamp": 5.0})
     ledger.append_event({"run_id": "run-failed", "event_type": "run_failed", "timestamp": 8.0})
@@ -217,9 +220,10 @@ def test_legacy_task_without_run_id_keeps_its_fallback_identity(tmp_path: Path):
 
     metrics = get_run_metrics("run_task-legacy", db_path=db_path, now=40.0)
 
-    assert metrics.task_id == "task-legacy"
-    assert metrics.workflow_id == "wf-1"
-    assert metrics.final_status == "working"
+    assert metrics.task_id is None
+    assert metrics.workflow_id is None
+    assert metrics.final_status is None
+    assert metrics.trajectory_events == 0
 
 
 def test_task_row_absent_keeps_event_carried_identity(tmp_path: Path):
@@ -233,15 +237,17 @@ def test_task_row_absent_keeps_event_carried_identity(tmp_path: Path):
 
     metrics = get_run_metrics("run-unregistered", db_path=db_path, now=40.0)
 
-    assert metrics.task_id == "task-unregistered"
-    assert metrics.workflow_id == "wf-unregistered"
+    assert metrics.task_id is None
+    assert metrics.workflow_id is None
     assert metrics.final_status is None
     assert metrics.task_completed is False
+    assert metrics.trajectory_events == 0
 
 
 def test_malformed_verification_payload_degrades_without_failing(tmp_path: Path):
     """One corrupt payload must not fail the whole run aggregation."""
     db_path = tmp_path / "state.db"
+    state_db.save_task(_task("run-bad-json", status="working"), db_path=db_path)
     ledger = TrajectoryLedger(db_path)
     ledger.append_event({
         "run_id": "run-bad-json", "event_type": "verification_completed",

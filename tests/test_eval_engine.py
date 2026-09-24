@@ -157,7 +157,7 @@ def test_ownership_mismatch_never_leaks_foreign_task(engine_db: Path):
     assert result["workflow_id"] is None
     assert result["requirements_satisfied"] is None
     assert result["human_intervention_count"] is None
-    assert "task_ownership_mismatch" in result["warnings"]
+    assert "unknown_task" in result["warnings"]
 
 
 def test_human_attribution_counts_only_owned_task(engine_db: Path):

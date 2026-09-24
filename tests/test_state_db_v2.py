@@ -349,6 +349,33 @@ def test_source_clock_intermediate_primary_key_is_rebuilt(tmp_path):
         migrated.close()
 
 
+def test_residual_legacy_source_clock_uses_max_revision(tmp_path):
+    db_path = tmp_path / "residual-source-clock.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE working_context_source_clock (run_scope TEXT, workflow_id TEXT, revision INTEGER NOT NULL, PRIMARY KEY (run_scope, workflow_id))"
+    )
+    conn.execute(
+        "INSERT INTO working_context_source_clock (run_scope, workflow_id, revision) VALUES ('scope', 'wf', 2)"
+    )
+    conn.execute(
+        "CREATE TABLE working_context_source_clock_legacy (run_scope TEXT, workflow_id TEXT, revision INTEGER NOT NULL)"
+    )
+    conn.execute(
+        "INSERT INTO working_context_source_clock_legacy (run_scope, workflow_id, revision) VALUES ('scope', 'wf', 9)"
+    )
+    conn.commit()
+    conn.close()
+    state_db.init_db(db_path)
+    migrated = state_db.get_db_connection(db_path)
+    try:
+        assert migrated.execute(
+            "SELECT revision FROM working_context_source_clock WHERE run_scope = 'scope' AND workflow_id = 'wf'"
+        ).fetchone()["revision"] == 9
+    finally:
+        migrated.close()
+
+
 def test_global_source_clock_schema_migrates_to_execution_scope(tmp_path):
     db_path = tmp_path / "legacy-source-clock.db"
     conn = sqlite3.connect(db_path)

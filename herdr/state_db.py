@@ -160,12 +160,14 @@ def _ensure_working_context_source_clock_schema(conn: sqlite3.Connection) -> Non
         if {"run_scope", "workflow_id", "revision"}.issubset(legacy_columns):
             conn.execute(
                 """
-                INSERT OR IGNORE INTO working_context_source_clock
+                INSERT INTO working_context_source_clock
                     (run_scope, workflow_id, revision)
                 SELECT COALESCE(run_scope, ''), COALESCE(workflow_id, ''),
                        COALESCE(MAX(revision), 0)
                 FROM working_context_source_clock_legacy
                 GROUP BY run_scope, workflow_id
+                ON CONFLICT(run_scope, workflow_id) DO UPDATE SET
+                    revision = MAX(revision, excluded.revision)
                 """
             )
         elif legacy_revision:
@@ -2389,6 +2391,8 @@ def aggregate_run_metric_rows(run_id: str, db_path: Optional[Path] = None) -> Di
         scope_rows = conn.execute(
             """
             SELECT task_id, workflow_id,
+                   CASE WHEN json_valid(payload_json)
+                        THEN json_extract(payload_json, '$.run_id') END AS run_id,
                    COALESCE(json_extract(payload_json, '$.workflow_run_id'),
                             json_extract(payload_json, '$.execution_id'),
                             workflow_id, '') AS scope
@@ -2403,23 +2407,29 @@ def aggregate_run_metric_rows(run_id: str, db_path: Optional[Path] = None) -> Di
         if not identity_ambiguous:
             source_identity_rows = conn.execute(
                 """
-                SELECT 'events' AS source_table, task_id, workflow_id
+                SELECT 'events' AS source_table, run_id, task_id, workflow_id
                   FROM events WHERE run_id = ? AND source = 'trajectory'
                 UNION ALL
-                SELECT 'observations', task_id, workflow_id
+                SELECT 'observations', run_id, task_id, workflow_id
                   FROM observations WHERE run_id = ?
                 UNION ALL
-                SELECT 'eval_results', task_id, workflow_id
+                SELECT 'eval_results', run_id, task_id, workflow_id
                   FROM eval_results WHERE run_id = ?
                 UNION ALL
-                SELECT 'trajectory_findings', task_id, workflow_id
+                SELECT 'trajectory_findings', run_id, task_id, workflow_id
                   FROM trajectory_findings WHERE run_id = ?
                 """,
                 (run_id, run_id, run_id, run_id),
             ).fetchall()
             observed_task_ids: set[str] = set()
             observed_workflow_ids: set[str] = set()
+            if not scope_rows and source_identity_rows:
+                identity_ambiguous = True
+            allowed_run_ids = {
+                str(row["run_id"] or "") for row in scope_rows if row["run_id"]
+            }
             for row in source_identity_rows:
+                source_run = str(row["run_id"] or "")
                 task_id = str(row["task_id"] or "")
                 workflow_id = str(row["workflow_id"] or "")
                 if task_id:
@@ -2432,7 +2442,10 @@ def aggregate_run_metric_rows(run_id: str, db_path: Optional[Path] = None) -> Di
                 if scope_rows and workflow_id and workflow_id not in allowed_workflow_ids:
                     identity_ambiguous = True
                     break
-                if scope_rows and not task_id and workflow_id not in allowed_workflow_ids:
+                if scope_rows and not task_id and workflow_id and workflow_id not in allowed_workflow_ids:
+                    identity_ambiguous = True
+                    break
+                if scope_rows and not task_id and not workflow_id and source_run not in allowed_run_ids:
                     identity_ambiguous = True
                     break
             if not scope_rows and (
@@ -3506,6 +3519,33 @@ def _validate_context_source_existence(
             "payload": task_payload,
         }
 
+    taskless_scope_by_run: Dict[str, Optional[str]] = {}
+    for identity_row in conn.execute(
+        """
+        SELECT workflow_id,
+               CASE WHEN json_valid(payload_json)
+                    THEN json_extract(payload_json, '$.run_id') END AS run_id,
+               CASE WHEN json_valid(payload_json)
+                    THEN COALESCE(
+                        json_extract(payload_json, '$.workflow_run_id'),
+                        json_extract(payload_json, '$.execution_id'),
+                        workflow_id, ''
+                    ) END AS scope
+          FROM tasks
+         WHERE workflow_id = ?
+        """,
+        (str(context.get("workflow_id") or ""),),
+    ).fetchall():
+        identity_run = str(identity_row["run_id"] or "")
+        identity_scope = str(identity_row["scope"] or "")
+        if not identity_run or not identity_scope:
+            continue
+        previous = taskless_scope_by_run.get(identity_run, "__missing__")
+        if previous != "__missing__" and previous != identity_scope:
+            taskless_scope_by_run[identity_run] = None
+        elif previous == "__missing__":
+            taskless_scope_by_run[identity_run] = identity_scope
+
     target_record = task_record(str(context.get("task_id") or ""))
     if (
         target_record
@@ -3551,9 +3591,8 @@ def _validate_context_source_existence(
         run_id = str(record.get("run_id") or "")
         if not run_id:
             return False
-        if taskless_allowed_runs:
-            return run_id in taskless_allowed_runs
-        return False
+        mapped_scope = taskless_scope_by_run.get(run_id)
+        return mapped_scope is not None and str(mapped_scope) == str(context.get("run_scope") or "")
 
     def fetch_record(prefix: str, object_id: str):
         if prefix == "task":
@@ -3784,6 +3823,8 @@ def save_working_context(
                 value = item.get("value")
                 if not isinstance(value, Mapping):
                     raise ValueError("working context verification value must be an object")
+                if not isinstance(value, dict):
+                    item["value"] = value = dict(value)
                 if isinstance(value, Mapping):
                     for key in ("passed", "verification_passed", "requirements_satisfied"):
                         if key in value and value[key] is not None and not isinstance(value[key], bool):

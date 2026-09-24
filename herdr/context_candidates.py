@@ -305,6 +305,21 @@ def _event_candidates(
             "created_at": event.get("timestamp"),
         }
         if payload.get("source_truncated") is True and event_type not in VERIFICATION_EVENTS:
+            if event_type in TERMINAL_COMPLETION_EVENTS:
+                completed.append(_item(
+                    "completed",
+                    {"event_type": event_type, "source_truncated": True},
+                    event_ref,
+                    metadata={
+                        "event_type": event_type,
+                        "node": event.get("node_id"),
+                        "source_truncated": True,
+                    },
+                    **common,
+                ))
+                continue
+            if event_type in {"task_started", "task_status_changed"}:
+                continue
             if event_type in {"blocker", "task_failed", "agent_failed", "run_failed"}:
                 event_key = (str(event.get("run_id") or ""), str(event.get("task_id") or ""))
                 if event_id not in active_failures.get(event_key, set()):

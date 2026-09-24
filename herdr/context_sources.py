@@ -499,8 +499,17 @@ def _read_source_snapshot(
                     "created_at": row["created_at"],
                 }
 
-        def critical_finding_rows_for_runs(run_values: Sequence[str], limit: int) -> List[Dict[str, Any]]:
+        def critical_finding_rows_for_runs(
+            run_values: Sequence[str], limit: int,
+            priority_task_ids: Sequence[str] = (),
+        ) -> List[Dict[str, Any]]:
             placeholders = ",".join("?" for _ in run_values)
+            priority_ids = [str(value) for value in priority_task_ids if value]
+            priority_placeholders = ",".join("?" for _ in priority_ids)
+            priority_order = (
+                f"CASE WHEN task_id IN ({priority_placeholders}) THEN 0 ELSE 1 END,"
+                if priority_ids else ""
+            )
             bounded = conn.execute(
                 f"""SELECT * FROM trajectory_findings
                     WHERE run_id IN ({placeholders})
@@ -510,10 +519,10 @@ def _read_source_snapshot(
                       AND length(COALESCE(summary, '')) <= 20000
                       AND length(COALESCE(metadata_json, '{{}}')) <= 20000
                       AND length(COALESCE(evidence_json, '[]')) <= 20000
-                    ORDER BY CASE WHEN task_id = ? THEN 0 ELSE 1 END,
+                    ORDER BY {priority_order} CASE WHEN task_id = ? THEN 0 ELSE 1 END,
                              created_at DESC, rowid DESC
                     LIMIT ?""",
-                (*run_values, str(task_id), int(limit)),
+                (*run_values, *priority_ids, str(task_id), int(limit)),
             ).fetchall()
             def marker(row: sqlite3.Row) -> Dict[str, Any]:
                 return {
@@ -546,10 +555,10 @@ def _read_source_snapshot(
                        AND (length(COALESCE(summary, '')) > 20000
                             OR length(COALESCE(metadata_json, '{{}}')) > 20000
                             OR length(COALESCE(evidence_json, '[]')) > 20000)
-                     ORDER BY CASE WHEN task_id = ? THEN 0 ELSE 1 END,
+                     ORDER BY {priority_order} CASE WHEN task_id = ? THEN 0 ELSE 1 END,
                               created_at DESC, rowid DESC
                      LIMIT ?""",
-                (*run_values, str(task_id), int(limit)),
+                (*run_values, *priority_ids, str(task_id), int(limit)),
             ).fetchall()
             result.extend(marker(row) for row in oversized)
             return result
@@ -592,6 +601,31 @@ def _read_source_snapshot(
                 taskless_scope_by_run[item_run] = None
             elif previous_scope == "__missing__":
                 taskless_scope_by_run[item_run] = item_scope
+        for identity_row in conn.execute(
+            """
+            SELECT workflow_id,
+                   CASE WHEN json_valid(payload_json)
+                        THEN json_extract(payload_json, '$.run_id') END AS run_id,
+                   CASE WHEN json_valid(payload_json)
+                        THEN COALESCE(
+                            json_extract(payload_json, '$.workflow_run_id'),
+                            json_extract(payload_json, '$.execution_id'),
+                            workflow_id, ''
+                        ) END AS scope
+              FROM tasks
+             WHERE workflow_id = ?
+            """,
+            (str(workflow_id),),
+        ).fetchall():
+            identity_run = str(identity_row["run_id"] or "")
+            identity_scope = str(identity_row["scope"] or "")
+            if not identity_run or not identity_scope:
+                continue
+            previous_scope = taskless_scope_by_run.get(identity_run, "__missing__")
+            if previous_scope != "__missing__" and previous_scope != identity_scope:
+                taskless_scope_by_run[identity_run] = None
+            elif previous_scope == "__missing__":
+                taskless_scope_by_run[identity_run] = identity_scope
         run_scope = collab_scope_for_task(task) or _task_run(task)
         if not run_scope:
             raise ValueError("task has no resolvable workflow execution scope")
@@ -613,6 +647,23 @@ def _read_source_snapshot(
         if not allowed_runs:
             raise ValueError("workflow execution scope has no run identity")
         task_by_id = {str(item.get("task_id")): item for item in scoped_tasks}
+        priority_task_ids = {str(task_id)}
+        for dependency_id in _dependency_ids(task, workflow):
+            dependency_task = _scope_task_for_node(dependency_id, scoped_tasks)
+            if dependency_task and dependency_task.get("task_id"):
+                priority_task_ids.add(str(dependency_task["task_id"]))
+        for linked_row in conn.execute(
+            """
+            SELECT from_task_id, to_task_id
+              FROM collaboration_events
+             WHERE run_id = ? AND workflow_id = ?
+               AND (from_task_id = ? OR to_task_id = ?)
+            """,
+            (str(run_scope), str(workflow_id), str(task_id), str(task_id)),
+        ).fetchall():
+            for linked_id in (linked_row["from_task_id"], linked_row["to_task_id"]):
+                if linked_id and str(linked_id) != str(task_id):
+                    priority_task_ids.add(str(linked_id))
         if not explicit_execution_scope and planned_links:
             allowed_link_nodes = set(_dependency_ids(task, workflow))
             for link in planned_links:
@@ -642,6 +693,7 @@ def _read_source_snapshot(
                 linked_run = _task_run(linked_task)
                 if linked_run:
                     allowed_runs.add(linked_run)
+                    priority_task_ids.add(str(linked_id))
             if allowed_runs:
                 scoped_tasks = [
                     item for item in scoped_tasks if _task_run(item) in allowed_runs
@@ -682,7 +734,9 @@ def _read_source_snapshot(
             (*run_values, int(max_findings)),
         ).fetchall()
         findings = [safe_decode_finding_row(row) for row in finding_rows]
-        critical_findings = critical_finding_rows_for_runs(run_values, int(max_findings))
+        critical_findings = critical_finding_rows_for_runs(
+            run_values, int(max_findings), priority_task_ids
+        )
         findings_by_id = {
             str(finding.get("finding_id")): finding for finding in findings
         }
@@ -694,7 +748,7 @@ def _read_source_snapshot(
                 str(finding.get("severity") or "").lower() == "critical"
                 or finding.get("finding_type") in {"verification_failure", "repeated_failure"}
             ) else 1,
-            0 if str(finding.get("task_id") or "") == str(task_id) else 1,
+            0 if str(finding.get("task_id") or "") in priority_task_ids else 1,
             -float(finding.get("created_at") or 0.0),
             str(finding.get("finding_id") or ""),
         ))
@@ -833,7 +887,7 @@ def _read_source_snapshot(
                     ).fetchall()
                 ]
                 critical_findings = critical_finding_rows_for_runs(
-                    run_values, int(max_findings)
+                    run_values, int(max_findings), priority_task_ids
                 )
                 findings_by_id = {
                     str(finding.get("finding_id")): finding for finding in findings
@@ -846,7 +900,7 @@ def _read_source_snapshot(
                         str(finding.get("severity") or "").lower() == "critical"
                         or finding.get("finding_type") in {"verification_failure", "repeated_failure"}
                     ) else 1,
-                    0 if str(finding.get("task_id") or "") == str(task_id) else 1,
+                    0 if str(finding.get("task_id") or "") in priority_task_ids else 1,
                     -float(finding.get("created_at") or 0.0),
                     str(finding.get("finding_id") or ""),
                 ))

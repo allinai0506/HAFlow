@@ -415,6 +415,34 @@ def test_storage_rejects_conflicting_verification_aliases(tmp_path: Path):
         state_db.save_working_context(payload, db_path=db)
 
 
+def test_storage_rejects_reused_taskless_source_across_execution_scopes(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db, workflow_id="wf-reused", scope="scope-a")
+    target = _seed_task(db, _task("task-reused-storage-a", workflow_id="wf-reused", scope="scope-a", run_id="shared-storage"))
+    _seed_task(db, dict(
+        _task("task-reused-storage-b", workflow_id="wf-reused", scope="scope-b", run_id="shared-storage"),
+        goal="x" * 210000,
+    ))
+    observation = create_observation(
+        run_id="shared-storage", task_id=None, workflow_id="wf-reused",
+        source_type="verification", source_ref="verification:storage-reused",
+        content="secret", store=ObservationStore(db),
+    )
+    payload = dict(_compile(db, target, "developer").to_mapping())
+    payload["context_id"] = "wc_storage_reused_taskless"
+    payload["evidence"] = [{
+        "kind": "evidence", "value": {"excerpt": "secret"},
+        "source_ref": f"observation:{observation.observation_id}",
+        "source_run": "shared-storage",
+    }]
+    payload["source_refs"] = list(dict.fromkeys(
+        [*payload.get("source_refs", []), f"observation:{observation.observation_id}"]
+    ))
+    _bind_storage_fingerprint(payload)
+    with pytest.raises(ValueError, match="run scope"):
+        state_db.save_working_context(payload, db_path=db)
+
+
 def test_storage_rejects_incomplete_aggregate_source_refs(tmp_path: Path):
     db = tmp_path / "state.db"
     _seed_workflow(db)
@@ -942,6 +970,20 @@ def test_task_scope_update_advances_old_and_new_source_clocks(tmp_path: Path):
     )
     assert _source_clock_revision(db, "scope-a", "wf-a") > old_clock
     assert _source_clock_revision(db, "scope-b", "wf-a") > sibling_clock
+
+
+def test_same_workflow_other_scope_finding_update_does_not_advance_clock(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db, workflow_id="wf-two-scopes", scope="scope-a")
+    target = _seed_task(db, _task("task-two-scope-a", workflow_id="wf-two-scopes", scope="scope-a"))
+    _seed_task(db, _task("task-two-scope-b", workflow_id="wf-two-scopes", scope="scope-b"))
+    _compile(db, target, "developer")
+    before = _source_clock_revision(db, "scope-b", "wf-two-scopes")
+    state_db.upsert_trajectory_finding(
+        _finding(target["run_id"], "fnd-two-scope-update", task_id=target["task_id"]),
+        db_path=db,
+    )
+    assert _source_clock_revision(db, "scope-b", "wf-two-scopes") == before
 
 
 def test_task_workflow_move_advances_old_workflow_clock(tmp_path: Path):
@@ -1570,7 +1612,11 @@ def test_legacy_planned_link_keeps_critical_finding_window(tmp_path: Path):
         db_path=db,
     )
     context = _compile(db, target, "tester")
-    assert context.blockers
+    assert "finding:fnd-planned-critical" in context.source_refs
+    assert any(
+        item.get("source_ref") == "finding:fnd-planned-critical"
+        for item in context.blockers
+    )
 
 
 def test_legacy_planned_link_does_not_authorize_distinct_runs(tmp_path: Path):
@@ -1816,7 +1862,7 @@ def test_strict_verification_survives_cross_task_critical_noise(tmp_path: Path):
 def test_oversized_failure_marker_respects_recovery(tmp_path: Path):
     db = tmp_path / "state.db"
     _seed_workflow(db)
-    target = _seed_task(db, _task("task-oversized-failure-recovery", status="completed"))
+    target = _seed_task(db, _task("task-oversized-failure-recovery"))
     state_db.record_trajectory_event(
         {
             "run_id": target["run_id"], "task_id": target["task_id"],
@@ -1829,12 +1875,13 @@ def test_oversized_failure_marker_respects_recovery(tmp_path: Path):
         {
             "run_id": target["run_id"], "task_id": target["task_id"],
             "workflow_id": target["workflow_id"], "event_type": "task_completed",
-            "payload": {},
+            "payload": {"blob": "x" * 21000},
         },
         db_path=db,
     )
     context = _compile(db, target, "developer")
     assert not context.blockers
+    assert any(item.get("value", {}).get("source_truncated") is True for item in context.completed)
 
 
 def test_oversized_strict_verification_survives_same_source_unknown_noise(tmp_path: Path):
