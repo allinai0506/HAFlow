@@ -16,8 +16,10 @@ HERDR_MIN_COMPLETION_SECONDS may raise it, never lower it, so the
 from __future__ import annotations
 
 import os
+from collections.abc import Sequence
 
 MIN_COMPLETION_SECONDS = 60.0
+REQUIRED_CONFIRMATIONS = 2
 NEUTRAL_TOKEN = "HERDR_TASK_DONE:<TASK_ID>"
 
 
@@ -189,3 +191,62 @@ def describe_decision(
     if marker_present:
         return {"action": "debounce", "reason": "elapsed_below_floor_or_not_idle"}
     return {"action": "debounce", "reason": "no_marker"}
+
+
+def stable_confirmation(
+    samples: Sequence[dict],
+    *,
+    agent_status: str | None,
+    elapsed_seconds: float,
+    min_confirmations: int = REQUIRED_CONFIRMATIONS,
+) -> bool:
+    """Pure two-round gate used by both the store and service adapters.
+
+    Samples must be in observation order and each must contain a true marker.
+    A missing sample, an unknown agent state, or a short elapsed duration keeps
+    the decision closed.  The function deliberately does not inspect task
+    identity; callers bind samples to one task/version epoch before invoking it.
+    """
+    if agent_status != "idle":
+        return False
+    try:
+        if float(elapsed_seconds) < min_completion_seconds():
+            return False
+    except (TypeError, ValueError):
+        return False
+    required = max(REQUIRED_CONFIRMATIONS, int(min_confirmations or 0))
+    if len(samples) < required:
+        return False
+    recent = list(samples[-required:])
+    if not all(bool(sample.get("marker_present")) for sample in recent):
+        return False
+    epochs = {
+        sample.get("observed_version")
+        for sample in recent
+        if sample.get("observed_version") is not None
+    }
+    return len(epochs) <= 1
+
+
+def observation_ready(
+    observation: dict | None,
+    *,
+    task_status: str | None,
+    elapsed_seconds: float,
+    agent_status: str | None = None,
+) -> bool:
+    """Evaluate a durable observation without performing any I/O."""
+    if not isinstance(observation, dict):
+        return False
+    status = agent_status or observation.get("agent_status")
+    return should_accept(
+        marker_present=bool(observation.get("marker_present")),
+        agent_status=status,
+        elapsed_seconds=elapsed_seconds,
+        is_new_or_tracked=(
+            observation.get("first_seen_at") is not None
+            and int(observation.get("consecutive_samples") or 0) >= REQUIRED_CONFIRMATIONS
+            and not observation.get("vanished")
+        ),
+        stale_epoch=bool(observation.get("epoch_changed")),
+    ) and task_status in {"dispatched", "working"}

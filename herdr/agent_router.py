@@ -279,19 +279,24 @@ def _isolation_opt_out(node_policy=None):
 
 
 def _record_router_opt_out(workflow_id, stage, selected, reason, excluded):
-    """Best-effort opt-out audit event (never blocks routing)."""
+    """Persist the opt-out audit or fail closed before reusing an agent."""
     try:
         store = _get_store()
         store.record_event(
             "router_opt_out_used",
             {"stage": stage, "selected": selected or "",
-             "reason": reason, "excluded": sorted(set(excluded or []))},
+             "reason": reason, "excluded": sorted(set(excluded or [])),
+             "audit_required": True},
             workflow_id=workflow_id,
             node_id=stage,
             source="agent-router",
         )
-    except (OSError, ValueError, RuntimeError, AttributeError):
-        pass
+        return True
+    except (OSError, ValueError, RuntimeError, AttributeError) as exc:
+        raise RuntimeError(
+            "FR-6 isolation opt-out audit persistence failed; refusing "
+            f"agent reuse ({type(exc).__name__}: {exc})"
+        ) from exc
 
 def choose_agent(
     workflow_id,
@@ -370,11 +375,7 @@ def choose_agent(
     if selected:
         if selected in stage_used_agents:
             _opt_out, _opt_reason = _isolation_opt_out(node_policy)
-            if _opt_out and _opt_reason:
-                _record_router_opt_out(
-                    workflow_id, stage, selected, _opt_reason, stage_used_agents
-                )
-            else:
+            if not (_opt_out and _opt_reason):
                 raise RuntimeError(
                     f"Agent '{selected}' is prohibited for stage '{stage}' "
                     f"because it was used in stage(s): {', '.join(exclude_stages)} "
@@ -398,6 +399,11 @@ def choose_agent(
             )
             raise RuntimeError(
                 f"Agent '{selected}' failed Workflow Deep Preflight: {status}"
+            )
+        if selected in stage_used_agents:
+            _opt_out, _opt_reason = _isolation_opt_out(node_policy)
+            _record_router_opt_out(
+                workflow_id, stage, selected, _opt_reason, stage_used_agents
             )
         return selected
 

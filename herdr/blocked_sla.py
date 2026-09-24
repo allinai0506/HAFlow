@@ -1,24 +1,17 @@
 """FR-2 blocked-SLA policy (pure, no I/O).
 
-Design (plan-arch T4 + plan-attack A4/B-2/B-3裁定):
-  * Cancel automatic ``herdr agent prompt`` re-push (N=0). Re-prompting an
-    ``inner_loop_exhausted`` pane repeats the exhausted loop (B-4 proven).
-  * Active wall-clock SLA: only sweep ticks with ``tick_dt <= POLL_CAP``
-    accumulate. Offline/sleep gaps (tick_dt >> POLL) do not count, so the
-    8h overnight segment never fires on recovery.
-  * Episode dedup key = ``blocked_episode_id`` = task_id + entry updated_at.
-    One human escalation per episode, plus one bounded coordinator notice.
-    Never reuses ``services/herdr-notifier.py:129`` state-change dedup.
-  * Human-machine mutex: skip automatic action while a human is present
-    (task ``interrupted``/``paused`` or recent human status write).
+The policy is deliberately separate from the Controller shell:
 
-Policy values (explicit, failable):
-  FIRST_SLA_SECONDS   = 1800 (30min, matches liveness stall threshold)
-  SECOND_SLA_SECONDS  = 1800 (one more cycle -> human escalation)
-  COOLDOWN_SECONDS    = 600  (matches attention retry interval)
-  JITTER_WINDOW       = 120  (reuses liveness.attention_grace, no new magic)
-  MAX_HUMAN_ESCALATIONS_PER_EPISODE = 1
-  MAX_COORDINATOR_NOTICES_PER_EPISODE = 2
+* one automatic ``herdr agent prompt`` re-push per blocked episode (N=1);
+* an absent/present task episode boundary prevents dispatch flapping from
+  consuming the budget;
+* active-clock credit is bounded per sweep, so sleep/offline time does not
+  cause a recovery-time storm;
+* the second SLA is a separate, once-per-episode human escalation; and
+* prompt delivery is a recoverable state transition with an observable result.
+
+No function in this module sends a prompt or writes state.  The Controller
+owns those side effects and records the corresponding events.
 """
 
 from __future__ import annotations
@@ -30,8 +23,10 @@ SECOND_SLA_SECONDS = 1800.0
 COOLDOWN_SECONDS = 600.0
 JITTER_WINDOW_SECONDS = 120.0
 POLL_CAP_MULTIPLIER = 3.0
+MAX_AUTO_REPUSHES_PER_EPISODE = 1
+MAX_REPUSH_DELIVERY_RETRIES = 1
 MAX_HUMAN_ESCALATIONS_PER_EPISODE = 1
-MAX_COORDINATOR_NOTICES_PER_EPISODE = 2
+MAX_COORDINATOR_NOTICES_PER_EPISODE = 1
 
 
 def _env_float(name: str, default: float) -> float:
@@ -40,42 +35,54 @@ def _env_float(name: str, default: float) -> float:
         return default
     try:
         value = float(raw)
-    except ValueError:
+    except (TypeError, ValueError):
         return default
-    return value if value > 0 else default
+    if value <= 0:
+        return default
+    return value
 
 
 def first_sla_seconds() -> float:
-    """First SLA threshold (blocked entry -> coordinator notice)."""
+    """First SLA threshold for the one automatic re-push."""
     return _env_float("HERDR_BLOCKED_FIRST_SLA", FIRST_SLA_SECONDS)
 
 
 def second_sla_seconds() -> float:
-    """Second SLA window (coordinator notice -> human escalation)."""
+    """Additional SLA window before human escalation."""
     return _env_float("HERDR_BLOCKED_SECOND_SLA", SECOND_SLA_SECONDS)
 
 
 def cooldown_seconds() -> float:
-    """Minimum interval between two automatic actions on one episode."""
+    """Minimum spacing between side effects in one episode."""
     return _env_float("HERDR_BLOCKED_COOLDOWN", COOLDOWN_SECONDS)
 
 
 def jitter_window_seconds() -> float:
-    """Debounce for dispatch-time blocked flapping (reuses grace)."""
+    """Short dispatch/blocked flap window excluded from automatic action."""
     return _env_float("HERDR_BLOCKED_JITTER_WINDOW", JITTER_WINDOW_SECONDS)
 
 
-def blocked_episode_id(task_id: str, entry_updated_at: float) -> str:
-    """Stable dedup key: reset (not accumulate) on re-entry."""
+def blocked_episode_id(
+    task_id: str,
+    entry_updated_at: float,
+    entry_version: int | None = None,
+) -> str:
+    """Return a stable episode key, including the task epoch when available."""
     try:
         entry_ts = int(float(entry_updated_at))
     except (TypeError, ValueError):
         entry_ts = 0
-    return f"{task_id}:{entry_ts}"
+    key = f"{task_id}:{entry_ts}"
+    if entry_version is not None:
+        try:
+            key = f"{key}:{int(entry_version)}"
+        except (TypeError, ValueError):
+            pass
+    return key
 
 
 def is_jitter(entry_age_seconds: float) -> bool:
-    """True inside the dispatch-flap debounce window."""
+    """True only inside the short dispatch-time flapping window."""
     try:
         return float(entry_age_seconds) < jitter_window_seconds()
     except (TypeError, ValueError):
@@ -83,35 +90,96 @@ def is_jitter(entry_age_seconds: float) -> bool:
 
 
 def active_tick_increment(tick_dt: float, poll_seconds: float = 3.0) -> float:
-    """Active wall-clock increment for one sweep tick.
-
-    Caps a single tick at ``POLL_CAP_MULTIPLIER * poll`` so controller
-    downtime/sleep never accrues SLA credit (B-3).
-    """
+    """Credit one active sweep, capped across sleep/offline gaps."""
     try:
-        dt = float(tick_dt)
+        delta = float(tick_dt)
         poll = float(poll_seconds)
     except (TypeError, ValueError):
         return 0.0
-    if dt <= 0 or poll <= 0:
+    if delta <= 0 or poll <= 0:
         return 0.0
-    return min(dt, POLL_CAP_MULTIPLIER * poll)
+    return min(delta, POLL_CAP_MULTIPLIER * poll)
+
+
+def _int(value, default=0) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return default
 
 
 def human_present(task: dict | None) -> bool:
-    """True when a human is already handling the task (mutex)."""
+    """Detect a human handling signal without treating machine writes as human."""
     if not isinstance(task, dict):
         return False
-    status = task.get("status")
-    if status in ("interrupted", "paused"):
+    if task.get("status") in {"interrupted", "paused"}:
         return True
-    # A recent human status write is recorded via sentinel_reason/source.
-    # Only explicit human sources count; machine re-pushes do not.
-    for key in ("last_human_action_at", "human_present"):
-        if task.get(key):
-            return True
-    source = str(task.get("last_action_source") or "")
-    return source in ("human", "cli_set_status_human")
+    if task.get("human_present") or task.get("last_human_action_at"):
+        return True
+    if str(task.get("last_action_source") or "") in {
+        "human", "cli_set_status_human", "operator",
+    }:
+        return True
+    history = task.get("status_history")
+    if isinstance(history, list) and history:
+        latest = history[-1]
+        if not isinstance(latest, dict):
+            return False
+        source = str(latest.get("source") or "")
+        reason = str(latest.get("reason") or "")
+        return source in {"human", "cli_set_status_human"} or reason in {
+            "cli_set_status", "human_set_status",
+        }
+    return False
+
+
+def should_repush(
+    *,
+    active_seconds: float,
+    repushes: int,
+    last_action_at: float | None,
+    now: float,
+) -> bool:
+    """Guard the single logical automatic re-push for an episode."""
+    try:
+        active = float(active_seconds)
+    except (TypeError, ValueError):
+        return False
+    if active < first_sla_seconds() or _int(repushes) >= MAX_AUTO_REPUSHES_PER_EPISODE:
+        return False
+    if last_action_at is not None:
+        try:
+            if float(now) - float(last_action_at) < cooldown_seconds():
+                return False
+        except (TypeError, ValueError):
+            return False
+    return True
+
+
+def should_recover_repush(
+    *,
+    active_seconds: float,
+    repush_state: str,
+    recovery_attempts: int,
+    last_action_at: float | None,
+    now: float,
+) -> bool:
+    """Allow one transport retry without spending a second logical re-push."""
+    try:
+        active = float(active_seconds)
+    except (TypeError, ValueError):
+        return False
+    if active < first_sla_seconds() or repush_state != "failed":
+        return False
+    if _int(recovery_attempts) >= MAX_REPUSH_DELIVERY_RETRIES:
+        return False
+    if last_action_at is not None:
+        try:
+            if float(now) - float(last_action_at) < cooldown_seconds():
+                return False
+        except (TypeError, ValueError):
+            return False
+    return True
 
 
 def should_notice_coordinator(
@@ -121,10 +189,12 @@ def should_notice_coordinator(
     last_action_at: float | None,
     now: float,
 ) -> bool:
-    """First-level notice (to coordinator queue) guard."""
-    if active_seconds < first_sla_seconds():
+    """Compatibility guard for a bounded coordinator notice."""
+    try:
+        active = float(active_seconds)
+    except (TypeError, ValueError):
         return False
-    if coordinator_notices >= MAX_COORDINATOR_NOTICES_PER_EPISODE:
+    if active < first_sla_seconds() or _int(coordinator_notices) >= MAX_COORDINATOR_NOTICES_PER_EPISODE:
         return False
     if last_action_at is not None:
         try:
@@ -142,11 +212,14 @@ def should_escalate_human(
     last_action_at: float | None,
     now: float,
 ) -> bool:
-    """Second-level human escalation guard (exactly once per episode)."""
-    threshold = first_sla_seconds() + second_sla_seconds()
-    if active_seconds < threshold:
+    """Guard the independent second-SLA human escalation."""
+    try:
+        active = float(active_seconds)
+    except (TypeError, ValueError):
         return False
-    if human_escalations >= MAX_HUMAN_ESCALATIONS_PER_EPISODE:
+    if active < first_sla_seconds() + second_sla_seconds():
+        return False
+    if _int(human_escalations) >= MAX_HUMAN_ESCALATIONS_PER_EPISODE:
         return False
     if last_action_at is not None:
         try:
@@ -157,33 +230,64 @@ def should_escalate_human(
     return True
 
 
+def new_episode(task: dict | None, now: float) -> dict:
+    """Create the durable episode shell used by the Controller."""
+    task = task or {}
+    try:
+        entry = float(task.get("updated_at") or now)
+    except (TypeError, ValueError):
+        entry = float(now)
+    version = task.get("version")
+    return {
+        "task_id": str(task.get("task_id") or ""),
+        "workflow_id": task.get("workflow_id"),
+        "entry_updated_at": entry,
+        "entry_version": version,
+        "episode_id": blocked_episode_id(
+            str(task.get("task_id") or ""), entry, version
+        ),
+        "active_seconds": 0.0,
+        "last_tick_at": now,
+        "coordinator_notices": 0,
+        "repushes": 0,
+        "repush_state": "pending",
+        "delivery_attempts": 0,
+        "recovery_attempts": 0,
+        "human_escalations": 0,
+        "last_action_at": None,
+    }
+
+
 def decide_blocked_action(
     *,
     task: dict | None,
     episode: dict | None,
     now: float,
 ) -> dict:
-    """Pure per-episode decision (no I/O, no prompt send).
+    """Return the next side-effect decision for one blocked episode.
 
-    Returns ``{"action": "none"|"notice"|"escalate"|"suppressed_human"|
-    "suppressed_jitter"|"suppressed_cooldown"|"suppressed_bounds",
-    "episode_id": ..., "reason": ...}``.
-    Automatic ``herdr agent prompt`` re-push is intentionally absent
-    (N=0 by design; see module docstring).
+    ``repush`` is attempted before ``escalate`` so a Controller that was
+    offline across both deadlines performs the required one re-push first;
+    the next sweep can then perform the one human escalation.
     """
     task = task or {}
     episode = episode or {}
     task_id = str(task.get("task_id") or episode.get("task_id") or "")
-    entry_updated_at = episode.get("entry_updated_at", task.get("updated_at") or 0)
-    episode_id = blocked_episode_id(task_id, entry_updated_at or 0)
+    entry = episode.get("entry_updated_at", task.get("updated_at") or now)
+    version = episode.get("entry_version", task.get("version"))
+    episode_id = str(
+        episode.get("episode_id")
+        or blocked_episode_id(task_id, entry, version)
+    )
     try:
         active = float(episode.get("active_seconds") or 0)
     except (TypeError, ValueError):
         active = 0.0
     try:
-        entry_age = float(now) - float(entry_updated_at or now)
+        entry_age = float(now) - float(entry)
     except (TypeError, ValueError):
         entry_age = 0.0
+
     if is_jitter(entry_age):
         return {
             "action": "suppressed_jitter",
@@ -196,15 +300,35 @@ def decide_blocked_action(
             "episode_id": episode_id,
             "reason": "human_present_mutex",
         }
-    try:
-        human_n = int(episode.get("human_escalations") or 0)
-    except (TypeError, ValueError):
-        human_n = 0
-    try:
-        coord_n = int(episode.get("coordinator_notices") or 0)
-    except (TypeError, ValueError):
-        coord_n = 0
+
+    repushes = _int(episode.get("repushes"))
+    human_n = _int(episode.get("human_escalations"))
     last_action = episode.get("last_action_at")
+    if should_repush(
+        active_seconds=active,
+        repushes=repushes,
+        last_action_at=last_action,
+        now=now,
+    ):
+        return {
+            "action": "repush",
+            "episode_id": episode_id,
+            "repush_number": repushes + 1,
+            "reason": "first_sla_automatic_repush",
+        }
+    if should_recover_repush(
+        active_seconds=active,
+        repush_state=str(episode.get("repush_state") or "pending"),
+        recovery_attempts=_int(episode.get("recovery_attempts")),
+        last_action_at=last_action,
+        now=now,
+    ):
+        return {
+            "action": "repush_recover",
+            "episode_id": episode_id,
+            "repush_number": 1,
+            "reason": "prompt_delivery_recovery",
+        }
     if should_escalate_human(
         active_seconds=active,
         human_escalations=human_n,
@@ -216,23 +340,17 @@ def decide_blocked_action(
             "episode_id": episode_id,
             "reason": "second_sla_human_upgrade",
         }
-    if should_notice_coordinator(
-        active_seconds=active,
-        coordinator_notices=coord_n,
-        last_action_at=last_action,
-        now=now,
-    ):
-        return {
-            "action": "notice",
-            "episode_id": episode_id,
-            "reason": "first_sla_coordinator_notice",
-        }
-    # Distinguish bounds vs cooldown for observability.
-    if active >= first_sla_seconds() + second_sla_seconds() and human_n >= 1:
+    if active >= first_sla_seconds() and repushes >= MAX_AUTO_REPUSHES_PER_EPISODE:
         return {
             "action": "suppressed_bounds",
             "episode_id": episode_id,
-            "reason": "episode_already_escalated_once",
+            "reason": "repush_budget_exhausted",
+        }
+    if human_n >= MAX_HUMAN_ESCALATIONS_PER_EPISODE:
+        return {
+            "action": "suppressed_bounds",
+            "episode_id": episode_id,
+            "reason": "human_escalation_already_sent",
         }
     if last_action is not None:
         try:
@@ -245,3 +363,30 @@ def decide_blocked_action(
         except (TypeError, ValueError):
             pass
     return {"action": "none", "episode_id": episode_id, "reason": "sla_not_reached"}
+
+
+def mark_repush_result(
+    episode: dict,
+    *,
+    success: bool,
+    now: float,
+    detail: str = "",
+    recovery: bool = False,
+) -> dict:
+    """Return the durable episode update after a prompt attempt.
+
+    The logical N=1 budget is consumed even when delivery fails.  The failure
+    is retained as ``repush_state=failed`` so a later sweep can escalate and a
+    recovery/reconciliation tool can inspect the exact error without guessing.
+    """
+    updated = dict(episode or {})
+    updated["repushes"] = MAX_AUTO_REPUSHES_PER_EPISODE
+    updated["delivery_attempts"] = _int(updated.get("delivery_attempts")) + 1
+    if recovery:
+        updated["recovery_attempts"] = _int(updated.get("recovery_attempts")) + 1
+    updated["repush_state"] = "delivered" if success else "failed"
+    updated["last_action_at"] = now
+    updated["last_repush_at"] = now
+    if detail:
+        updated["last_repush_error" if not success else "last_repush_receipt"] = str(detail)[:500]
+    return updated

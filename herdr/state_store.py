@@ -202,6 +202,44 @@ class StateStore(ABC):
         pass
 
     @abstractmethod
+    def compare_and_set_task_transition(
+        self,
+        task_id: str,
+        to_status: str,
+        reason: str,
+        source: str = "system",
+        metadata: Optional[Dict[str, Any]] = None,
+        force: bool = False,
+        expected_status: Optional[str] = None,
+        expected_version: Optional[int] = None,
+        expected_updated_at: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Atomically transition a task only when its observed epoch matches."""
+        pass
+
+    @abstractmethod
+    def observe_completion(
+        self,
+        task_id: str,
+        *,
+        marker_present: bool,
+        agent_status: Optional[str],
+        observed_at: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Record a durable completion observation."""
+        pass
+
+    @abstractmethod
+    def get_completion_observation(
+        self, task_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        pass
+
+    @abstractmethod
+    def clear_completion_observation(self, task_id: str) -> bool:
+        pass
+
+    @abstractmethod
     def update_task_metadata(
         self,
         task_id: str,
@@ -634,6 +672,55 @@ class SQLiteStateStore(StateStore):
             force=force,
             db_path=self.db_path,
         )
+
+    def compare_and_set_task_transition(
+        self,
+        task_id: str,
+        to_status: str,
+        reason: str,
+        source: str = "system",
+        metadata: Optional[Dict[str, Any]] = None,
+        force: bool = False,
+        expected_status: Optional[str] = None,
+        expected_version: Optional[int] = None,
+        expected_updated_at: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        return state_db.compare_and_set_task_transition(
+            task_id=task_id,
+            to_status=to_status,
+            reason=reason,
+            source=source,
+            metadata=metadata,
+            force=force,
+            expected_status=expected_status,
+            expected_version=expected_version,
+            expected_updated_at=expected_updated_at,
+            db_path=self.db_path,
+        )
+
+    def observe_completion(
+        self,
+        task_id: str,
+        *,
+        marker_present: bool,
+        agent_status: Optional[str],
+        observed_at: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        return state_db.observe_completion(
+            task_id,
+            marker_present=marker_present,
+            agent_status=agent_status,
+            observed_at=observed_at,
+            db_path=self.db_path,
+        )
+
+    def get_completion_observation(
+        self, task_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        return state_db.get_completion_observation(task_id, db_path=self.db_path)
+
+    def clear_completion_observation(self, task_id: str) -> bool:
+        return state_db.clear_completion_observation(task_id, db_path=self.db_path)
 
     def update_task_metadata(
         self,

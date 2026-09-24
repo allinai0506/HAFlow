@@ -89,9 +89,30 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
             payload_json TEXT,
             created_at REAL,
             updated_at REAL,
+            version INTEGER NOT NULL DEFAULT 0,
             FOREIGN KEY (workflow_id) REFERENCES workflows(workflow_id) ON DELETE CASCADE
         );
     """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS completion_observations (
+            task_id TEXT PRIMARY KEY,
+            workflow_id TEXT,
+            observed_status TEXT,
+            observed_version INTEGER,
+            observed_updated_at REAL,
+            marker_present INTEGER NOT NULL DEFAULT 0,
+            agent_status TEXT,
+            first_seen_at REAL,
+            last_seen_at REAL,
+            last_sample_at REAL,
+            consecutive_samples INTEGER NOT NULL DEFAULT 0,
+            vanished INTEGER NOT NULL DEFAULT 0,
+            epoch_changed INTEGER NOT NULL DEFAULT 0,
+            updated_at REAL NOT NULL,
+            FOREIGN KEY (task_id) REFERENCES tasks(task_id) ON DELETE CASCADE
+        );
+    """);
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS checkpoints (
@@ -299,8 +320,10 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_wf ON tasks(workflow_id);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_cp_wf_created ON checkpoints(workflow_id, created_at DESC);")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_completion_observations_task ON completion_observations(task_id);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_cp_parent ON checkpoints(parent_checkpoint_id);")
     _ensure_event_columns(conn)
+    _ensure_task_columns(conn)
     _ensure_intervention_columns(conn)
 
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_wf ON events(workflow_id, timestamp);")
@@ -529,6 +552,23 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
                     raise
     else:
         _INITIALIZED_DBS.add(path_key)
+
+
+def _ensure_task_columns(conn: sqlite3.Connection) -> None:
+    """Add the monotonic task version used by compare-and-set callers."""
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(tasks);")}
+    if "version" in columns:
+        return
+    try:
+        conn.execute(
+            "ALTER TABLE tasks ADD COLUMN version INTEGER NOT NULL DEFAULT 0;"
+        )
+    except sqlite3.OperationalError as exc:
+        if "duplicate column name" not in str(exc).lower():
+            raise
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(tasks);")}
+        if "version" not in columns:
+            raise
 
 
 def _ensure_event_columns(conn: sqlite3.Connection) -> None:
@@ -816,14 +856,15 @@ def save_task(
 
     payload = {k: v for k, v in task_dict.items() if k not in {
         "task_id", "workflow_id", "node", "stage", "agent", "status",
-        "stage_verdict", "stage_verdict_note", "pane_id", "goal", "blocker", "created_at"
+        "stage_verdict", "stage_verdict_note", "pane_id", "goal", "blocker",
+        "created_at", "version"
     }}
     payload_json = json.dumps(payload, ensure_ascii=False)
 
     try:
         conn.execute("""
-            INSERT INTO tasks (task_id, workflow_id, node, stage, agent, status, stage_verdict, stage_verdict_note, pane_id, goal, blocker, payload_json, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO tasks (task_id, workflow_id, node, stage, agent, status, stage_verdict, stage_verdict_note, pane_id, goal, blocker, payload_json, created_at, updated_at, version)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
             ON CONFLICT(task_id) DO UPDATE SET
                 workflow_id=excluded.workflow_id,
                 node=excluded.node,
@@ -836,7 +877,8 @@ def save_task(
                 goal=excluded.goal,
                 blocker=excluded.blocker,
                 payload_json=excluded.payload_json,
-                updated_at=excluded.updated_at;
+                updated_at=excluded.updated_at,
+                version=COALESCE(tasks.version, 0) + 1;
         """, (tid, wid, node, stage, agent, status, verdict, verdict_note, pane_id, goal, blocker, payload_json, created_at, now))
     finally:
         if should_close:
@@ -860,6 +902,7 @@ def _decode_task_row(row: sqlite3.Row) -> Dict[str, Any]:
         "blocker": row["blocker"],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
+        "version": int(row["version"] or 0),
     })
     return task
 
@@ -916,9 +959,211 @@ def list_tasks(
                 "blocker": row["blocker"],
                 "created_at": row["created_at"],
                 "updated_at": row["updated_at"],
+                "version": int(row["version"] or 0),
             })
             tasks.append(t)
         return tasks
+    finally:
+        conn.close()
+
+
+def _decode_completion_observation(row: sqlite3.Row) -> Dict[str, Any]:
+    return {
+        "task_id": row["task_id"],
+        "workflow_id": row["workflow_id"],
+        "observed_status": row["observed_status"],
+        "observed_version": int(row["observed_version"] or 0),
+        "observed_updated_at": row["observed_updated_at"],
+        "marker_present": bool(row["marker_present"]),
+        "agent_status": row["agent_status"],
+        "first_seen_at": row["first_seen_at"],
+        "last_seen_at": row["last_seen_at"],
+        "last_sample_at": row["last_sample_at"],
+        "consecutive_samples": int(row["consecutive_samples"] or 0),
+        "vanished": bool(row["vanished"]),
+        "uncertain": bool(row["vanished"]),
+        "epoch_changed": bool(row["epoch_changed"]),
+    }
+
+
+def observe_completion(
+    task_id: str,
+    *,
+    marker_present: bool,
+    agent_status: Optional[str],
+    observed_at: Optional[float] = None,
+    db_path: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Record one pane observation and return the durable confirmation state.
+
+    Observations are serialized in SQLite.  A task rewrite (including a
+    human ``blocked -> working`` reopen) resets the marker epoch, so an old
+    screen can never be replayed as evidence for the new execution attempt.
+    """
+    from . import completion as completion_policy
+
+    now = float(observed_at if observed_at is not None else time.time())
+    conn = get_db_connection(db_path)
+    try:
+        conn.execute("BEGIN IMMEDIATE;")
+        task_row = conn.execute(
+            "SELECT * FROM tasks WHERE task_id = ?", (task_id,)
+        ).fetchone()
+        if task_row is None:
+            raise ValueError(f"Task '{task_id}' not found")
+        task = _decode_task_row(task_row)
+        current_status = str(task.get("status") or "")
+        current_version = int(task.get("version") or 0)
+        row = conn.execute(
+            "SELECT * FROM completion_observations WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()
+        previous = _decode_completion_observation(row) if row is not None else None
+        epoch_changed = bool(
+            previous
+            and (
+                previous.get("observed_status") != current_status
+                or previous.get("observed_version") != current_version
+            )
+        )
+        marker = bool(marker_present)
+        first_seen = None
+        last_seen = None
+        last_sample = now
+        consecutive = 0
+        vanished = False
+        if previous is not None and not epoch_changed:
+            first_seen = previous.get("first_seen_at")
+            last_seen = previous.get("last_seen_at")
+            last_sample = previous.get("last_sample_at")
+            consecutive = int(previous.get("consecutive_samples") or 0)
+            vanished = bool(previous.get("vanished"))
+            was_present = bool(previous.get("marker_present"))
+            if marker and not was_present:
+                first_seen = now
+                last_seen = now
+                consecutive = 1
+                vanished = False
+            elif marker and was_present:
+                # A repeated sample in the same poll is not a second round.
+                if last_sample is None or now > float(last_sample):
+                    consecutive += 1
+                last_seen = now
+            elif not marker and was_present:
+                # Keep the uncertainty durable; a later appearance starts a
+                # new absent -> present cycle rather than reviving old data.
+                first_seen = None
+                last_seen = None
+                consecutive = 0
+                vanished = True
+        elif marker:
+            # A marker already visible at the first observation is residue.
+            first_seen = None
+            last_seen = now
+            consecutive = 0
+            vanished = False
+        if marker and first_seen is not None:
+            last_seen = now
+        elapsed = now - float(
+            task.get("started_at")
+            or task.get("created_at")
+            or now
+        )
+        ready = bool(
+            current_status in {"dispatched", "working"}
+            and marker
+            and first_seen is not None
+            and consecutive >= 2
+            and not vanished
+            and agent_status == "idle"
+            and elapsed >= completion_policy.min_completion_seconds()
+        )
+        values = (
+            task_id,
+            task.get("workflow_id"),
+            current_status,
+            current_version,
+            task.get("updated_at"),
+            int(marker),
+            agent_status,
+            first_seen,
+            last_seen,
+            now,
+            consecutive,
+            int(vanished),
+            int(epoch_changed),
+            now,
+        )
+        conn.execute(
+            """INSERT INTO completion_observations (
+                task_id, workflow_id, observed_status, observed_version,
+                observed_updated_at, marker_present, agent_status,
+                first_seen_at, last_seen_at, last_sample_at,
+                consecutive_samples, vanished, epoch_changed, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(task_id) DO UPDATE SET
+                workflow_id=excluded.workflow_id,
+                observed_status=excluded.observed_status,
+                observed_version=excluded.observed_version,
+                observed_updated_at=excluded.observed_updated_at,
+                marker_present=excluded.marker_present,
+                agent_status=excluded.agent_status,
+                first_seen_at=excluded.first_seen_at,
+                last_seen_at=excluded.last_seen_at,
+                last_sample_at=excluded.last_sample_at,
+                consecutive_samples=excluded.consecutive_samples,
+                vanished=excluded.vanished,
+                epoch_changed=excluded.epoch_changed,
+                updated_at=excluded.updated_at;
+            """,
+            values,
+        )
+        saved = conn.execute(
+            "SELECT * FROM completion_observations WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()
+        result = _decode_completion_observation(saved)
+        result.update({
+            "ready": ready,
+            "uncertain": vanished,
+            "elapsed_seconds": elapsed,
+            "task_status": current_status,
+        })
+        conn.execute("COMMIT;")
+        return result
+    except Exception:
+        try:
+            conn.execute("ROLLBACK;")
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
+
+
+def get_completion_observation(
+    task_id: str, db_path: Optional[Path] = None,
+) -> Optional[Dict[str, Any]]:
+    conn = get_db_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT * FROM completion_observations WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()
+        return _decode_completion_observation(row) if row is not None else None
+    finally:
+        conn.close()
+
+
+def clear_completion_observation(
+    task_id: str, db_path: Optional[Path] = None,
+) -> bool:
+    conn = get_db_connection(db_path)
+    try:
+        conn.execute(
+            "DELETE FROM completion_observations WHERE task_id = ?", (task_id,)
+        )
+        return conn.execute("SELECT changes()").fetchone()[0] == 1
     finally:
         conn.close()
 
@@ -2927,6 +3172,7 @@ PROTECTED_TASK_METADATA_FIELDS = {
     "status",
     "created_at",
     "updated_at",
+    "version",
 }
 
 PROTECTED_WORKFLOW_METADATA_FIELDS = {
@@ -2957,6 +3203,9 @@ def transition_task(
     force: bool = False,
     db_path: Optional[Path] = None,
     conn: Optional[sqlite3.Connection] = None,
+    expected_status: Optional[str] = None,
+    expected_version: Optional[int] = None,
+    expected_updated_at: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Atomically validate and transition a task status, appending a canonical WorkflowEvent."""
     should_close = False
@@ -2974,6 +3223,53 @@ def transition_task(
             raise ValueError(f"Task '{task_id}' not found")
 
         old_status = row["status"]
+        current_version = int(row["version"] or 0)
+        mismatch = None
+        if expected_status is not None and old_status != expected_status:
+            mismatch = {
+                "reason": "cas_mismatch",
+                "field": "status",
+                "expected": expected_status,
+                "actual": old_status,
+            }
+        elif expected_version is not None and current_version != int(expected_version):
+            mismatch = {
+                "reason": "cas_mismatch",
+                "field": "version",
+                "expected": int(expected_version),
+                "actual": current_version,
+            }
+        elif expected_updated_at is not None:
+            try:
+                actual_updated = float(row["updated_at"] or 0)
+                if actual_updated != float(expected_updated_at):
+                    mismatch = {
+                        "reason": "cas_mismatch",
+                        "field": "updated_at",
+                        "expected": float(expected_updated_at),
+                        "actual": actual_updated,
+                    }
+            except (TypeError, ValueError):
+                mismatch = {
+                    "reason": "cas_mismatch",
+                    "field": "updated_at",
+                    "expected": expected_updated_at,
+                    "actual": row["updated_at"],
+                }
+        if mismatch is not None:
+            current = _decode_task_row(row)
+            if should_close:
+                conn.execute("ROLLBACK;")
+            return {
+                "ok": False,
+                "accepted": False,
+                "task_id": task_id,
+                "reason": mismatch["reason"],
+                "mismatch": mismatch,
+                "current": current,
+                "current_status": old_status,
+                "current_version": current_version,
+            }
         validate_task_transition(old_status, to_status, force=force)
 
         meta = dict(metadata or {})
@@ -3001,6 +3297,7 @@ def transition_task(
             "blocker": row["blocker"],
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
+            "version": current_version,
         })
 
         if force:
@@ -3034,6 +3331,10 @@ def transition_task(
         task_dict["status_history"] = status_history
 
         save_task(task_dict, db_path=None, conn=conn)
+        canonical_row = conn.execute(
+            "SELECT * FROM tasks WHERE task_id = ?", (task_id,)
+        ).fetchone()
+        canonical_task = _decode_task_row(canonical_row)
 
         event_payload = {
             **meta,
@@ -3061,6 +3362,7 @@ def transition_task(
 
         return {
             "ok": True,
+            "accepted": True,
             "task_id": task_id,
             "workflow_id": task_dict.get("workflow_id"),
             "old_status": old_status,
@@ -3068,7 +3370,8 @@ def transition_task(
             "reason": reason,
             "source": source,
             "event_id": event.get("id"),
-            "task": task_dict,
+            "current_version": int(canonical_task.get("version") or 0),
+            "task": canonical_task,
         }
     except Exception:
         if should_close:
@@ -3080,6 +3383,39 @@ def transition_task(
     finally:
         if should_close:
             conn.close()
+
+
+def compare_and_set_task_transition(
+    task_id: str,
+    to_status: str,
+    reason: str,
+    source: str = "system",
+    metadata: Optional[Dict[str, Any]] = None,
+    force: bool = False,
+    expected_status: Optional[str] = None,
+    expected_version: Optional[int] = None,
+    expected_updated_at: Optional[float] = None,
+    db_path: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Atomically transition only when the observed task epoch still matches.
+
+    The status and monotonic version are checked inside the same
+    ``BEGIN IMMEDIATE`` transaction as the task update and canonical event.
+    A rejected compare returns an authoritative snapshot; it never raises a
+    stale write or appends a transition event.
+    """
+    return transition_task(
+        task_id=task_id,
+        to_status=to_status,
+        reason=reason,
+        source=source,
+        metadata=metadata,
+        force=force,
+        db_path=db_path,
+        expected_status=expected_status,
+        expected_version=expected_version,
+        expected_updated_at=expected_updated_at,
+    )
 
 
 def transition_workflow(

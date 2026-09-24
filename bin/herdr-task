@@ -1664,6 +1664,75 @@ def auto_init_task_loop(clone_path, goal, acceptance_list, test_cmd=None, lint_c
         print(f"[HERDR_LOOP_WARN] Failed to snapshot lint baseline: {e}")
 
 
+def _record_router_failure_task(args, node_id, error):
+    """Persist one actionable no-Pane launch failure for FR-6."""
+    now = _now()
+    task_id = getattr(args, "task_id", "")
+    workflow_id = getattr(args, "workflow_id", "")
+    detail = str(error)[:1000]
+    task = {
+        "task_id": task_id,
+        "workflow_id": workflow_id,
+        "run_id": getattr(args, "run_id", None) or new_run_id(),
+        "node": node_id,
+        "stage": node_id,
+        "agent": getattr(args, "agent", None) or "auto",
+        "status": "failed",
+        "pane_id": "",
+        "clone_path": "",
+        "integration_mode": getattr(args, "integration_mode", "none"),
+        "goal": getattr(args, "goal", ""),
+        "acceptance_criteria": list(getattr(args, "acceptance", []) or []),
+        "failure_reason": "router_isolation_rejected",
+        "failure_detail": detail,
+        "actionable": True,
+        "pane_dispatched": False,
+        "created_at": now,
+        "updated_at": now,
+        "status_history": [{
+            "from": "pending",
+            "to": "failed",
+            "reason": "router_isolation_rejected",
+            "source": "herdr-task",
+            "timestamp": now,
+            "detail": detail,
+        }],
+    }
+    store = _get_store()
+    store.save_task(task)
+    try:
+        release_agent_reservation(task_id)
+    except (OSError, ValueError, RuntimeError, AttributeError):
+        pass
+    payload = {
+        "error": detail,
+        "stage": node_id,
+        "result": "failed",
+        "actionable": True,
+        "pane_dispatched": False,
+        "remediation": "add an eligible Agent or explicitly opt out with --allow-reuse-implementation-agents --reuse-reason",
+    }
+    try:
+        store.record_event(
+            "router_isolation_rejected",
+            payload,
+            workflow_id=workflow_id,
+            node_id=node_id,
+            task_id=task_id,
+            source="herdr-task",
+        )
+    except (OSError, ValueError, RuntimeError, AttributeError) as exc:
+        print(f"[ROUTER AUDIT WRITE ERROR] {exc}")
+    try:
+        store.update_workflow_metadata(
+            workflow_id,
+            {"last_dispatch_failure": payload},
+        )
+    except (OSError, ValueError, RuntimeError, AttributeError):
+        pass
+    return task
+
+
 def _launch_task(args):
     agent_policy = None
     raw_policy = getattr(args, "agent_policy", None)
@@ -1688,21 +1757,9 @@ def _launch_task(args):
         print("Error: either --node or --stage is required")
         sys.exit(1)
 
-    # Live topology is the source of truth.
-    # Internal tab/pane IDs are repaired immediately before every Task launch.
-    stage_config = ensure_stage_topology(
-        args.workflow_id,
-        node_id,
-    )
-
-    workspace_id = stage_config[
-        "workspace_id"
-    ]
-
-    parent_pane = stage_config[
-        "anchor_pane_id"
-    ]
-
+    # Project/workflow identity is read before routing.  Pane topology is
+    # intentionally deferred until the router has accepted the task, so an
+    # empty review pool cannot create a Pane as a side effect.
     project = project_for_workflow(
         args.workflow_id
     ) or {}
@@ -1816,29 +1873,26 @@ def _launch_task(args):
             _orig_proj_wcf = _projects.workflow_config_for
             _projects.workflow_config_for = _patched_wcf
             try:
-                resolved_agent = choose_agent(
-                    args.workflow_id,
-                    node_id,
-                    args.task_type,
-                    requested_agent,
-                    reservation_key=args.task_id,
-                )
+                try:
+                    resolved_agent = choose_agent(
+                        args.workflow_id,
+                        node_id,
+                        args.task_type,
+                        requested_agent,
+                        reservation_key=args.task_id,
+                    )
+                except RuntimeError as exc:
+                    _record_router_failure_task(args, node_id, exc)
+                    print(f"[ROUTER OPT-OUT REJECTED] {exc}")
+                    sys.exit(2)
             finally:
                 _projects.workflow_config_for = _orig_proj_wcf
         finally:
             _router.workflow_config_for = _orig_router_wcf
-        try:
-            _get_store().record_event(
-                "router_opt_out_used",
-                {"reason": _opt_reason, "stage": node_id,
-                 "selected": resolved_agent},
-                workflow_id=args.workflow_id,
-                node_id=node_id,
-                task_id=args.task_id,
-                source="herdr-task",
-            )
-        except (OSError, ValueError, RuntimeError, AttributeError):
-            pass
+        # ``choose_agent`` already persists the required audit event before
+        # returning.  Do not write a second event here: one opt-out decision
+        # has one authoritative audit row, and a failed write has already
+        # caused the branch above to fail closed.
     else:
         try:
             resolved_agent = choose_agent(
@@ -1849,27 +1903,25 @@ def _launch_task(args):
                 reservation_key=args.task_id,
             )
         except RuntimeError as exc:
-            # A7: real launch-chain fail-closed. No pane dispatched, no task
-            # registered; the workflow stays pending with a visible,
-            # actionable rejection (not a silent retry/deadlock).
-            try:
-                _get_store().record_event(
-                    "router_isolation_rejected",
-                    {"error": str(exc)[:500], "stage": node_id},
-                    workflow_id=args.workflow_id,
-                    node_id=node_id,
-                    task_id=args.task_id,
-                    source="herdr-task",
-                )
-            except (OSError, ValueError, RuntimeError, AttributeError):
-                pass
+            # Fail-closed lifecycle: persist a task-level actionable failure;
+            # topology/Pane creation has not happened yet.
+            _record_router_failure_task(args, node_id, exc)
             print(f"[ROUTER REJECTED] {exc}")
             print(
                 "Isolation is fail-closed. Re-launch with explicit "
                 "--allow-reuse-implementation-agents --reuse-reason '<why>' "
-                "to opt out (event留痕)."
+                "to opt out (the opt-out audit must persist)."
             )
             sys.exit(2)
+
+    # Only after routing succeeds do we repair/create runtime topology.  This
+    # ordering is the FR-6 empty-pool boundary: no Pane on a rejected launch.
+    stage_config = ensure_stage_topology(
+        args.workflow_id,
+        node_id,
+    )
+    workspace_id = stage_config["workspace_id"]
+    parent_pane = stage_config["anchor_pane_id"]
 
     prebuilt_pane = acquire_pane_for_task(
         args.workflow_id,
@@ -2019,16 +2071,29 @@ def _launch_task(args):
             from herdr import workflow_docs as _wd2
 
             _notes = _wd2.load_notes(args.workflow_id)
-            _effective = _dr2.select_effective_delivery(
-                _wd2.annotate_notes(_notes, current_base_sha=baseline_commit)
-            )
+            try:
+                _effective = _dr2.select_effective_delivery(_notes)
+            except _dr2.DeliveryAmbiguityError as exc:
+                print(f"[DELIVERY AMBIGUOUS] {exc}; launch refused")
+                sys.exit(2)
             if _effective is not None:
-                _body = _effective.get("body") or ""
-                _cand = ""
-                for _line in _body.splitlines():
-                    if _line.startswith("candidate_sha:"):
-                        _cand = _line.split(":", 1)[1].strip()
-                        break
+                _base = str(
+                    _effective.get("base")
+                    or _dr2._body_value(_effective, "base")
+                    or _effective.get("base_sha")
+                    or ""
+                )
+                _effective = _dr2.select_effective_delivery(
+                    _wd2.annotate_notes(_notes, current_base_sha=_base or None)
+                )
+            if _effective is not None:
+                _cand = str(_effective.get("candidate_sha") or "")
+                if not _cand:
+                    _body = _effective.get("body") or ""
+                    for _line in _body.splitlines():
+                        if _line.startswith("candidate_sha:"):
+                            _cand = _line.split(":", 1)[1].strip()
+                            break
                 if not _cand:
                     _cand = str(_effective.get("base_sha") or "")
                 _ok = bool(_cand and baseline_commit and _cand == baseline_commit)
@@ -4352,8 +4417,8 @@ def close_workflow(
     # via --accept-escalated/--force/--abandon or supersedes the task.
     # Five choices cost model (FR-5.3, shown in help + abort text):
     # --accept-escalated keeps deliverables, scoped to escalated only;
-    # --force bypasses the whole human-confirmation contract (needs
-    # --confirm-force); --abandon discards the entire workflow deliverable;
+    # --force directly bypasses the human-confirmation contract;
+    # --abandon discards the entire workflow deliverable;
     # supersede permanently discards that branch commits;
     # clear-escalation revokes the flag and re-drives integrate (may re-conflict).
     escalated_git = [
@@ -4362,20 +4427,9 @@ def close_workflow(
         and (t.get("integration_mode") or "none") == "git"
         and t.get("finalize_escalated")
     ]
-    if escalated_git and force and not (accept_escalated or abandon):
-        confirmed = bool(confirm_force) or os.environ.get("HERDR_CONFIRM_FORCE") == "1"
-        if not confirmed:
-            print(
-                "[CLOSE ABORT] --force on escalated workflow requires "
-                "--confirm-force (or HERDR_CONFIRM_FORCE=1); "
-                "escalated tasks: " + ", ".join(escalated_git)
-            )
-            print(
-                "  --accept-escalated only confirms escalated tasks; "
-                "--force bypasses all human-confirmation gates; "
-                "re-run with --force --confirm-force to proceed."
-            )
-            sys.exit(2)
+    # --force is the explicitly confirmed direct escape hatch.  The historical
+    # ``confirm_force`` keyword is accepted for callers from the short-lived
+    # compatibility release, but it is intentionally not a second gate.
     escalated_via = "accept-escalated" if accept_escalated else ("force" if force else ("abandon" if abandon else ""))
     if escalated_git and not (accept_escalated or force or abandon):
         print(
@@ -4390,8 +4444,8 @@ def close_workflow(
             "  Five choices (costs differ, choose explicitly): "
             f"herdr-task close-workflow {workflow_id} --accept-escalated "
             "(keeps deliverables, scoped to escalated only) | "
-            f"herdr-task close-workflow {workflow_id} --force --confirm-force "
-            "(bypasses the whole human-confirmation contract) | "
+            f"herdr-task close-workflow {workflow_id} --force "
+            "(directly bypasses the whole human-confirmation contract) | "
             f"herdr-task close-workflow {workflow_id} --abandon "
             "(discards the entire workflow deliverable) | "
             "herdr-task supersede <task_id> --reason ... "
@@ -5136,36 +5190,65 @@ def _record_gate_note(task, verdict, note):
 
 def record_delivery_note(
     workflow_id, delivery_branch, candidate_sha, review_task, test_gate,
-    base="", node="", agent="",
+    base="", node="", agent="", supersedes=None,
 ):
-    """Thin assembly for FR-4.1 delivery identity (pure validation in herdr)."""
+    """Record one explicit candidate identity, rejecting implicit ambiguity."""
     from herdr import delivery_record as _dr
     from herdr import workflow_docs as wd
 
     payload = {
+        "delivery_id": f"candidate-{str(candidate_sha)[:12]}",
         "delivery_branch": delivery_branch,
         "candidate_sha": candidate_sha,
         "review_task": review_task,
         "test_gate": test_gate,
         "base": base,
+        "supersedes": supersedes or "",
     }
     ok, missing = _dr.validate_delivery_payload(payload)
     if not ok:
         print(f"delivery payload missing fields: {missing}")
         sys.exit(2)
-    # Idempotency: same (branch, sha, review) never duplicates (A5 crash-safe).
-    for existing in wd.load_notes(workflow_id):
+    notes = wd.load_notes(workflow_id)
+    annotated = wd.annotate_notes(notes, current_base_sha=base or None)
+    identity = _dr.candidate_identity(payload)
+    for existing in annotated:
         if existing.get("kind") != "delivery":
             continue
-        try:
-            body = existing.get("body") or ""
-            if candidate_sha in body and delivery_branch in body and review_task in body:
-                print(f"[DELIVERY EXISTS] {existing.get('note_id')}")
-                return existing
-        except (TypeError, AttributeError):
-            continue
+        if _dr.candidate_identity(existing) == identity:
+            print(f"[DELIVERY EXISTS] {existing.get('note_id')}")
+            return existing
+    try:
+        active = _dr.select_effective_delivery(annotated)
+    except _dr.DeliveryAmbiguityError as exc:
+        print(f"[DELIVERY AMBIGUOUS] {exc}")
+        sys.exit(2)
+    if active is not None and not supersedes:
+        print(
+            "[DELIVERY AMBIGUOUS] an active delivery candidate already exists; "
+            "provide an explicit supersedes relation before replacing it"
+        )
+        sys.exit(2)
+    prior_candidates = [
+        item for item in annotated if item.get("kind") == "delivery"
+    ]
+    if prior_candidates and not supersedes:
+        print(
+            "[DELIVERY REPLACEMENT REQUIRED] a prior delivery candidate exists; "
+            "provide --supersedes even when it was invalidated"
+        )
+        sys.exit(2)
     title = _dr.delivery_note_title(delivery_branch, candidate_sha)
     body_text = _dr.delivery_note_body(payload)
+    fields = {
+        "delivery_id": payload["delivery_id"],
+        "delivery_branch": delivery_branch,
+        "candidate_sha": candidate_sha,
+        "review_task": review_task,
+        "test_gate": test_gate,
+    }
+    if supersedes:
+        fields["supersedes"] = supersedes
     record = wd.append_note(
         workflow_id,
         kind="delivery",
@@ -5175,7 +5258,8 @@ def record_delivery_note(
         task_id=review_task,
         agent=agent,
         source=wd.SOURCE_CONTROLLER,
-        base_sha=candidate_sha,
+        base_sha=base or None,
+        fields=fields,
     )
     print(f"[DELIVERY RECORDED] {record['note_id']} {delivery_branch}@{candidate_sha}")
     return record
@@ -5191,18 +5275,39 @@ def check_delivery_for_pr(
     from herdr import workflow_docs as wd
 
     notes = wd.load_notes(workflow_id)
-    effective = _dr.select_effective_delivery(
-        wd.annotate_notes(notes, current_base_sha=head_sha)
-    )
-    if effective is None:
+    # Candidate base identity is the recorded base, not the PR head.  First
+    # select the raw identity, then apply base/invalidation annotations and
+    # select again so a stale replacement cannot fall back to its predecessor.
+    try:
+        raw_effective = _dr.select_effective_delivery(notes)
+    except _dr.DeliveryAmbiguityError as exc:
+        print(f"[DELIVERY AMBIGUOUS] {exc}; refusing PR")
+        sys.exit(2)
+    if raw_effective is None:
         print("[DELIVERY CHECK] no effective delivery note; refusing ambiguous PR")
         sys.exit(2)
+    current_base = str(
+        raw_effective.get("base")
+        or _dr._body_value(raw_effective, "base")
+        or raw_effective.get("base_sha")
+        or ""
+    )
+    annotated = wd.annotate_notes(notes, current_base_sha=current_base or None)
+    try:
+        effective = _dr.select_effective_delivery(annotated)
+    except _dr.DeliveryAmbiguityError as exc:
+        print(f"[DELIVERY AMBIGUOUS] {exc}; refusing PR")
+        sys.exit(2)
+    if effective is None:
+        print("[DELIVERY CHECK] delivery candidate was invalidated; refusing PR")
+        sys.exit(2)
     body = effective.get("body") or ""
-    candidate_sha = ""
-    for line in body.splitlines():
-        if line.startswith("candidate_sha:"):
-            candidate_sha = line.split(":", 1)[1].strip()
-            break
+    candidate_sha = str(effective.get("candidate_sha") or "")
+    if not candidate_sha:
+        for line in body.splitlines():
+            if line.startswith("candidate_sha:"):
+                candidate_sha = line.split(":", 1)[1].strip()
+                break
     if not candidate_sha:
         candidate_sha = str(effective.get("base_sha") or "")
     equivalent, eq_reason = _dr.candidates_equivalent(
@@ -5220,8 +5325,9 @@ def check_delivery_for_pr(
     fields = _dr.pr_template_fields(
         branch=head_ref_name,
         head_sha=head_sha,
-        base="main",
+        base=current_base or "main",
         review_ref=effective.get("task_id") or "",
+        delivery_id=_dr.candidate_identity(effective),
     )
     print(_dr.format_pr_body(fields))
     print(f"equivalent={equivalent} reason={eq_reason}")
@@ -5418,18 +5524,17 @@ def main():
     close_wf.add_argument(
         "--force",
         action="store_true",
-        help="bypass the whole human-confirmation contract including "
-             "escalated gate (requires --confirm-force or "
-             "HERDR_CONFIRM_FORCE=1 when escalated tasks exist; "
-             "differs from --accept-escalated which is scoped to escalated "
-             "only and keeps deliverables)",
+        help="directly bypass the whole human-confirmation contract, "
+             "including escalated tasks (keeps the historical force escape "
+             "hatch; differs from scoped --accept-escalated)",
     )
+    # Kept as a hidden no-op for scripts written during the short-lived
+    # confirm-force experiment.  FR-5 restores --force as the direct choice.
     close_wf.add_argument(
         "--confirm-force",
         dest="confirm_force",
         action="store_true",
-        help="second confirmation for --force on escalated workflows "
-             "(R8: without it --force on escalated tasks exits 2)",
+        help=argparse.SUPPRESS,
     )
     close_wf.add_argument(
         "--accept-escalated",
@@ -5624,6 +5729,10 @@ def main():
     delivery_cmd.add_argument("--test-gate", required=True)
     delivery_cmd.add_argument("--base", default="")
     delivery_cmd.add_argument("--node", default="wrapup")
+    delivery_cmd.add_argument(
+        "--supersedes", default=None,
+        help="explicit prior delivery identity replaced by this candidate",
+    )
 
     check_delivery_cmd = sub.add_parser(
         "check-delivery",
@@ -6000,6 +6109,7 @@ def main():
             args.test_gate,
             base=getattr(args, "base", ""),
             node=getattr(args, "node", "wrapup"),
+            supersedes=getattr(args, "supersedes", None),
         )
 
     elif args.command == "check-delivery":
