@@ -297,6 +297,11 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - 修复：strict verification 使用独立优先槽位；所有 critical Finding 跨 Task 优先；oversized failure 经过 recovery/completed 状态过滤；无 Task 行也扫描多 Workflow source identity；过滤 derived questions；迁移复制中间 clock revision；支持 node key；对 top-level passed 统一 fail-closed；critical Finding fallback 有大小/损坏 marker。
 - 回归：全量 `1543 passed, 44 subtests passed`；专项 `297 passed`；compileall、AST、ruff、diff 和凭据扫描均通过。
 
+## [2026-09-25] fix | Context Compiler taskless identity and recovery closure
+- 背景：复审发现复用 run_id 的 taskless source 可跨 execution scope 泄漏、无 Task metrics 对缺失/ghost identity 未完全 fail closed、不同 scope UPDATE 广播、残留 legacy clock revision、oversized recovery 挤出，以及 malformed verification/provenance 边界。
+- 修复：taskless source 使用全局唯一 run→scope 映射；metrics 对无 Task/缺失 Workflow/ghost Task 返回 unknown；UPDATE 仅在实际 scope 变化或旧 taskless 时广播；残留 legacy clock 合并；oversized recovery 独立保留；storage 强制 verification Mapping、Workflow item 不得伪造 run provenance；failed 状态合成 blocker；Handoff attach 保持单一 context ref。
+- 回归：全量 `1544 passed, 44 subtests passed`；专项 `298 passed`；compileall、AST、ruff、diff 和凭据扫描均通过。
+
 ## [2026-09-13] feat | Console URL Deep-Link & Notifier Click-to-Open Integration
 解决 macOS CLI 通知默认归属“脚本编辑器”且无法定位到具体任务/工作流页面的痛点：
 - [[architecture]] §2.3 更新 Herdr Notifier 架构描述：优先使用 `terminal-notifier` 附带 `-open` 直达链接，未安装时安全降级为 `osascript`；
