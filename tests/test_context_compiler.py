@@ -346,6 +346,19 @@ def test_low_level_storage_normalizes_empty_fingerprint_config(tmp_path: Path):
         state_db.save_working_context(payload, db_path=db, fingerprint_config={})
 
 
+def test_invalid_derived_task_entries_are_filtered_before_indexing(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, dict(
+        _task("task-invalid-derived-entries"),
+        artifacts=[None, {"ref": "real-artifact"}],
+        blockers=[None, "real-blocker"],
+    ))
+    context = _compile(db, target, "developer")
+    assert any(item.get("value", {}).get("ref") == "real-artifact" for item in context.artifacts)
+    assert any(item.get("value") == "real-blocker" for item in context.blockers)
+
+
 def test_storage_rejects_phantom_task_artifact_ref(tmp_path: Path):
     db = tmp_path / "state.db"
     _seed_workflow(db)
@@ -1260,13 +1273,14 @@ def test_superseded_finding_is_excluded_but_history_remains(tmp_path: Path):
     assert state_db.get_trajectory_finding_by_id("fnd-new", db_path=db) is not None
 
 
-def test_legacy_finding_without_workflow_can_be_supersession_target(tmp_path: Path):
+@pytest.mark.parametrize("legacy_workflow", [None, ""])
+def test_legacy_finding_without_workflow_can_be_supersession_target(tmp_path: Path, legacy_workflow):
     db = tmp_path / "state.db"
     _seed_workflow(db)
     target = _seed_task(db, _task("task-legacy-finding-target"))
     upstream = _seed_task(db, _task("task-legacy-finding-source", node="implementation"))
     old = _finding(upstream["run_id"], "fnd-legacy-old", task_id=upstream["task_id"])
-    old["workflow_id"] = None
+    old["workflow_id"] = legacy_workflow
     state_db.upsert_trajectory_finding(old, db_path=db)
     new = _finding(
         upstream["run_id"], "fnd-legacy-new", task_id=upstream["task_id"],
@@ -1468,6 +1482,36 @@ def test_non_handoff_collaboration_does_not_change_source_fingerprint(tmp_path: 
     second = _compile(db, target, "reviewer")
     assert second.source_version == first.source_version
     assert second.context_id == first.context_id
+
+
+def test_legacy_planned_link_keeps_critical_finding_window(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _task("task-planned-critical-target", node="test")
+    target.pop("workflow_run_id")
+    upstream = _task("task-planned-critical-upstream", node="implementation")
+    upstream.pop("workflow_run_id")
+    _seed_task(db, target)
+    _seed_task(db, upstream)
+    state_db.upsert_trajectory_finding(
+        _finding(upstream["run_id"], "fnd-planned-critical", task_id=upstream["task_id"], severity="critical"),
+        db_path=db,
+    )
+    for index in range(520):
+        state_db.upsert_trajectory_finding(
+            _finding(upstream["run_id"], f"fnd-planned-noise-{index}", task_id=upstream["task_id"]),
+            db_path=db,
+        )
+    state_db.create_collaboration_event(
+        {
+            "run_id": "wf-context", "workflow_id": "wf-context",
+            "from_task_id": upstream["task_id"], "to_task_id": target["task_id"],
+            "type": "HANDOFF", "source_fact_id": "fact-legacy-critical-link",
+        },
+        db_path=db,
+    )
+    context = _compile(db, target, "tester")
+    assert context.blockers
 
 
 def test_legacy_planned_link_does_not_authorize_distinct_runs(tmp_path: Path):
@@ -1681,6 +1725,35 @@ def test_oversized_failure_survives_same_source_verification_noise(tmp_path: Pat
         for item in context.blockers
     )
     assert context.verification
+    assert context.next_action != "Continue."
+
+
+def test_oversized_strict_verification_survives_same_source_unknown_noise(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-oversized-strict-verification-noise", node="test", role="tester"))
+    state_db.record_trajectory_event(
+        {
+            "run_id": target["run_id"], "task_id": target["task_id"],
+            "workflow_id": target["workflow_id"], "event_type": "verification_completed",
+            "payload": {"verification": {"passed": False}, "blob": "x" * 21000},
+        },
+        db_path=db,
+    )
+    for _ in range(350):
+        state_db.record_trajectory_event(
+            {
+                "run_id": target["run_id"], "task_id": target["task_id"],
+                "workflow_id": target["workflow_id"], "event_type": "verification_completed",
+                "payload": {"verification": {"status": "unknown"}, "blob": "x" * 21000},
+            },
+            db_path=db,
+        )
+    context = _compile(db, target, "tester")
+    assert any(
+        item.get("value", {}).get("passed") is False
+        for item in context.verification
+    )
     assert context.next_action != "Continue."
 
 
@@ -1993,7 +2066,6 @@ def test_oversized_eval_failure_survives_same_source_unknown_noise(tmp_path: Pat
     context = _compile(db, target, "tester")
     assert any(
         item.get("value", {}).get("verification_passed") is False
-        or item.get("value", {}).get("source_truncated") is True
         for item in context.verification
     )
     assert not any(item.get("value", {}).get("verification_passed") is True for item in context.verification)
@@ -2383,6 +2455,23 @@ def test_run_metrics_fail_closed_for_reused_run_identity(tmp_path: Path):
         db_path=db,
     )
     metrics = get_run_metrics("reused-metrics", db_path=db)
+    assert metrics.task_id is None
+    assert metrics.workflow_id is None
+    assert metrics.trajectory_events == 0
+
+
+def test_run_metrics_fail_closed_for_same_scope_duplicate_run_tasks(tmp_path: Path):
+    from herdr.metrics import get_run_metrics
+
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    _seed_task(db, _task("task-reused-same-scope-a", scope="shared", run_id="reused-same"))
+    _seed_task(db, _task("task-reused-same-scope-b", scope="shared", run_id="reused-same"))
+    state_db.record_trajectory_event(
+        {"run_id": "reused-same", "task_id": None, "workflow_id": "wf-context", "event_type": "task_started", "payload": {}},
+        db_path=db,
+    )
+    metrics = get_run_metrics("reused-same", db_path=db)
     assert metrics.task_id is None
     assert metrics.workflow_id is None
     assert metrics.trajectory_events == 0

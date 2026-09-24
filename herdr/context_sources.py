@@ -396,7 +396,21 @@ def _merge_verification_events(
             key=verification_order,
             default=None,
         )
-        if truncated is not None:
+        truncated_failure = max(
+            (
+                event for event in key_events
+                if verification_strength(event) == 3
+                and (
+                    verification_value(event).get("passed") is False
+                    or verification_value(event).get("verification_passed") is False
+                )
+            ),
+            key=verification_order,
+            default=None,
+        )
+        if truncated_failure is not None:
+            selected = truncated_failure
+        elif truncated is not None:
             selected = truncated
         else:
             selected = latest
@@ -603,7 +617,7 @@ def _read_source_snapshot(
                 f"""SELECT * FROM trajectory_findings
                     WHERE finding_id IN ({relation_placeholders})
                       AND run_id IN ({placeholders})
-                      AND (workflow_id = ? OR (workflow_id IS NULL AND task_id IS NOT NULL))
+                      AND (workflow_id = ? OR ((workflow_id IS NULL OR workflow_id = '') AND task_id IS NOT NULL))
                     ORDER BY created_at ASC, rowid ASC LIMIT ?""",
                 (*missing_relation_ids, *run_values, str(workflow_id), int(max_findings)),
             ).fetchall()
@@ -715,6 +729,33 @@ def _read_source_snapshot(
                         (*run_values, int(max_findings)),
                     ).fetchall()
                 ]
+                critical_finding_rows = conn.execute(
+                    f"""SELECT * FROM trajectory_findings
+                        WHERE run_id IN ({placeholders})
+                          AND (LOWER(COALESCE(severity, '')) = 'critical'
+                               OR finding_type IN ('verification_failure', 'repeated_failure'))
+                          AND LOWER(COALESCE(status, 'open')) NOT IN ('resolved', 'closed', 'superseded')
+                        ORDER BY CASE WHEN task_id = ? THEN 0 ELSE 1 END,
+                                 created_at DESC, rowid DESC
+                        LIMIT ?""",
+                    (*run_values, str(task_id), int(max_findings)),
+                ).fetchall()
+                findings_by_id = {
+                    str(finding.get("finding_id")): finding for finding in findings
+                }
+                for row in critical_finding_rows:
+                    finding = state_db._decode_finding_row(row)
+                    findings_by_id[str(finding.get("finding_id"))] = finding
+                findings = list(findings_by_id.values())
+                findings.sort(key=lambda finding: (
+                    0 if str(finding.get("task_id") or "") == str(task_id)
+                    and (str(finding.get("severity") or "").lower() == "critical"
+                         or finding.get("finding_type") in {"verification_failure", "repeated_failure"})
+                    else 1,
+                    -float(finding.get("created_at") or 0.0),
+                    str(finding.get("finding_id") or ""),
+                ))
+                findings = findings[:max_findings]
                 relation_targets = set()
                 for finding in findings:
                     metadata = finding.get("metadata") if isinstance(finding.get("metadata"), Mapping) else {}
@@ -735,7 +776,7 @@ def _read_source_snapshot(
                         f"""SELECT * FROM trajectory_findings
                             WHERE finding_id IN ({relation_placeholders})
                               AND run_id IN ({placeholders})
-                              AND (workflow_id = ? OR (workflow_id IS NULL AND task_id IS NOT NULL))
+                              AND (workflow_id = ? OR ((workflow_id IS NULL OR workflow_id = '') AND task_id IS NOT NULL))
                             ORDER BY created_at ASC, rowid ASC LIMIT ?""",
                         (*missing_relation_ids, *run_values, str(workflow_id), int(max_findings)),
                     ).fetchall()
@@ -907,7 +948,9 @@ def _read_source_snapshot(
                 key=lambda item: (int(item.get("revision") or 0), str(item.get("eval_id") or "")),
                 default=None,
             )
-            if truncated is not None:
+            if truncated is not None and failure is not None and failure.get("source_truncated") is True:
+                selected = failure
+            elif truncated is not None:
                 selected = truncated
             else:
                 selected = latest

@@ -2364,7 +2364,7 @@ def aggregate_run_metric_rows(run_id: str, db_path: Optional[Path] = None) -> Di
     try:
         scope_rows = conn.execute(
             """
-            SELECT workflow_id,
+            SELECT task_id, workflow_id,
                    COALESCE(json_extract(payload_json, '$.workflow_run_id'),
                             json_extract(payload_json, '$.execution_id'),
                             workflow_id, '') AS scope
@@ -2373,7 +2373,39 @@ def aggregate_run_metric_rows(run_id: str, db_path: Optional[Path] = None) -> Di
             """,
             (run_id,),
         ).fetchall()
-        if len({(str(row["workflow_id"] or ""), str(row["scope"] or "")) for row in scope_rows}) > 1:
+        identity_ambiguous = len(scope_rows) > 1
+        allowed_task_ids = {str(row["task_id"] or "") for row in scope_rows}
+        allowed_workflow_ids = {str(row["workflow_id"] or "") for row in scope_rows}
+        if scope_rows and not identity_ambiguous:
+            source_identity_rows = conn.execute(
+                """
+                SELECT 'events' AS source_table, task_id, workflow_id
+                  FROM events WHERE run_id = ? AND source = 'trajectory'
+                UNION ALL
+                SELECT 'observations', task_id, workflow_id
+                  FROM observations WHERE run_id = ?
+                UNION ALL
+                SELECT 'eval_results', task_id, workflow_id
+                  FROM eval_results WHERE run_id = ?
+                UNION ALL
+                SELECT 'trajectory_findings', task_id, workflow_id
+                  FROM trajectory_findings WHERE run_id = ?
+                """,
+                (run_id, run_id, run_id, run_id),
+            ).fetchall()
+            for row in source_identity_rows:
+                task_id = str(row["task_id"] or "")
+                workflow_id = str(row["workflow_id"] or "")
+                if task_id and task_id not in allowed_task_ids:
+                    identity_ambiguous = True
+                    break
+                if workflow_id and workflow_id not in allowed_workflow_ids:
+                    identity_ambiguous = True
+                    break
+                if not task_id and workflow_id not in allowed_workflow_ids:
+                    identity_ambiguous = True
+                    break
+        if identity_ambiguous:
             return {
                 "trajectory_events": 0, "started_at": None, "finished_at": None,
                 "run_completed": 0, "run_failed": 0, "verification_total": 0,

@@ -442,18 +442,20 @@ def _task_artifact_candidates(tasks: Sequence[Mapping[str, Any]]) -> List[Dict[s
         raw_artifacts: List[Any] = []
         for key in ("artifacts", "artifact_refs", "changed_artifacts", "deliverables"):
             raw_artifacts.extend(_as_list(task.get(key)))
-        for artifact_index, artifact in enumerate(raw_artifacts):
+        valid_artifacts: List[Tuple[str, Any]] = []
+        for artifact in raw_artifacts:
             if isinstance(artifact, Mapping):
                 ref = artifact.get("ref") or artifact.get("path") or artifact.get("name")
                 kind = artifact.get("kind")
             else:
-                ref = str(artifact)
+                ref = artifact
                 kind = None
-            if not ref:
-                continue
+            if ref not in (None, ""):
+                valid_artifacts.append((str(ref), kind))
+        for artifact_index, (ref, kind) in enumerate(valid_artifacts):
             result.append(_item(
                 "artifact",
-                {"ref": str(ref), "kind": kind},
+                {"ref": ref, "kind": kind},
                 f"{task_ref}:{artifact_index}",
                 source_task=task_id,
                 source_run=_task_run(task),
@@ -493,7 +495,9 @@ def _task_candidates(
         if status not in COMPLETED_TASK_STATUSES:
             blocker_values = []
             for key in ("blocker", "blocked_reason", "open_blockers", "blockers"):
-                blocker_values.extend(_as_list(task.get(key)))
+                blocker_values.extend(
+                    value for value in _as_list(task.get(key)) if value not in (None, "")
+                )
             if status == "blocked" and not blocker_values:
                 blocker_values.append(status)
             for reason_index, reason in enumerate(blocker_values):

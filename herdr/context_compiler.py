@@ -397,7 +397,13 @@ def compile_working_context(
             )
         ):
             latest_verification[key] = item
-        if strength == 2:
+        if strength == 2 or (
+            strength == 3
+            and (
+                item.get("value", {}).get("passed") is False
+                or item.get("value", {}).get("verification_passed") is False
+            )
+        ):
             previous = latest_failure.get(key)
             if previous is None or order >= verification_order(previous):
                 latest_failure[key] = item
@@ -412,8 +418,10 @@ def compile_working_context(
             continue
         failure = latest_failure.get(key)
         recovery = latest_pass.get(key)
+        failure_value = failure.get("value") if isinstance(failure, Mapping) else {}
         if failure is not None and (
-            recovery is None
+            failure_value.get("source_truncated") is True
+            or recovery is None
             or verification_order(recovery) <= verification_order(failure)
         ):
             latest_verification[key] = failure
