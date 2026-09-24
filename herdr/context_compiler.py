@@ -805,7 +805,7 @@ def context_relevance(
         state += 0.5
 
     role_kinds = {
-        "developer": {"completed", "artifacts", "findings", "blockers", "open_questions", "verification", "handoffs"},
+        "developer": {"completed", "artifacts", "evidence", "findings", "blockers", "open_questions", "verification", "handoffs"},
         "reviewer": {"artifacts", "findings", "evidence", "verification", "handoffs", "blockers", "open_questions"},
         "tester": {"artifacts", "evidence", "findings", "verification", "blockers", "handoffs"},
         "coordinator": {"completed", "decisions", "blockers", "open_questions", "handoffs", "findings", "verification"},
@@ -934,7 +934,10 @@ def _finding_candidates(
     by_id = {str(item.get("finding_id")): item for item in valid if item.get("finding_id")}
     superseded: Set[str] = set()
     for finding in valid:
-        metadata = finding.get("metadata") if isinstance(finding.get("metadata"), Mapping) else {}
+        metadata = dict(finding.get("metadata") or {}) if isinstance(finding.get("metadata"), Mapping) else {}
+        for relation_key in ("supersedes", "superseded_by"):
+            if finding.get(relation_key) is not None and relation_key not in metadata:
+                metadata[relation_key] = finding[relation_key]
         for target in _relation_ids(metadata, "supersedes"):
             target_finding = by_id.get(target)
             if target_finding is not None:
@@ -949,7 +952,10 @@ def _finding_candidates(
             continue
         if str(finding.get("status") or "open") in {"superseded", "closed", "resolved"}:
             continue
-        metadata = finding.get("metadata") if isinstance(finding.get("metadata"), Mapping) else {}
+        metadata = dict(finding.get("metadata") or {}) if isinstance(finding.get("metadata"), Mapping) else {}
+        for relation_key in ("supersedes", "superseded_by"):
+            if finding.get(relation_key) is not None and relation_key not in metadata:
+                metadata[relation_key] = finding[relation_key]
         evidence_refs = []
         for raw in _as_list(finding.get("evidence")):
             ref = _canonical_evidence_ref(raw)
@@ -1560,9 +1566,12 @@ def compile_working_context(
     node = _workflow_node(snapshot["workflow"], node_id)
     dependency_ids = _dependency_ids(target, snapshot["workflow"])
     dependency_state: Dict[str, str] = {}
+    dependency_task_ids: List[str] = []
     for dependency_id in dependency_ids:
         dependency_task = _scope_task_for_node(dependency_id, snapshot["tasks"])
         dependency_state[dependency_id] = str(dependency_task.get("status")) if dependency_task else "unknown"
+        if dependency_task and dependency_task.get("task_id"):
+            dependency_task_ids.append(str(dependency_task["task_id"]))
         current_state_refs[f"dependency:{dependency_id}"] = (
             f"task:{dependency_task.get('task_id')}" if dependency_task else f"workflow:{workflow_id}"
         )
@@ -1706,7 +1715,7 @@ def compile_working_context(
             role=role,
             current_state=current_state,
             target_task_id=current_task_id,
-            dependency_ids=dependency_ids,
+            dependency_ids=dependency_task_ids,
             limit=int(cfg["max_items_per_kind"].get(field_name, 0)),
             now=now_value,
         )
@@ -1893,7 +1902,8 @@ def _item_maps(context: Mapping[str, Any]) -> Dict[Tuple[str, str], Dict[str, An
 
 
 def _relation_refs(item: Mapping[str, Any], key: str) -> Set[str]:
-    values = item.get("metadata", {}).get(key) if isinstance(item.get("metadata"), Mapping) else None
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), Mapping) else {}
+    values = item.get(key) or metadata.get(key)
     refs: Set[str] = set()
     for value in _as_list(values):
         text = str(value)

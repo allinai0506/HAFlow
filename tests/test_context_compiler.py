@@ -131,6 +131,30 @@ def _compile(db: Path, task: dict, role: str, **kwargs):
     )
 
 
+def test_relevance_uses_state_role_and_dependency_before_recency():
+    from herdr.context_compiler import context_relevance
+
+    base = {"kind": "finding", "source_task": "other", "created_at": 1.0, "metadata": {}}
+    dependency = dict(base, source_task="dependency-task")
+    recent_irrelevant = dict(base, source_task="unrelated", created_at=999.0)
+    state = {"task_id": "target", "task_status": "working", "current_node": "review"}
+    assert context_relevance(
+        dependency,
+        agent_role="reviewer",
+        current_state=state,
+        dependency_ids=("dependency-task",),
+        current_node_id="implementation",
+        now=1000.0,
+    ) > context_relevance(
+        recent_irrelevant,
+        agent_role="reviewer",
+        current_state=state,
+        dependency_ids=("dependency-task",),
+        current_node_id="implementation",
+        now=1000.0,
+    )
+
+
 def test_direct_dependency_state_has_task_provenance(tmp_path: Path):
     db = tmp_path / "state.db"
     _seed_workflow(db)
@@ -245,6 +269,24 @@ def test_superseded_finding_is_excluded_but_history_remains(tmp_path: Path):
     assert any("fnd-new" in ref for ref in context.source_refs)
     assert state_db.get_trajectory_finding_by_id("fnd-old", db_path=db) is not None
     assert state_db.get_trajectory_finding_by_id("fnd-new", db_path=db) is not None
+
+
+def test_top_level_finding_supersession_is_normalized(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-top-level-supersede"))
+    upstream = _seed_task(db, _task("task-upstream"))
+    old = _finding(upstream["run_id"], "fnd-top-old", task_id=upstream["task_id"])
+    state_db.upsert_trajectory_finding(old, db_path=db)
+    new = _finding(upstream["run_id"], "fnd-top-new", task_id=upstream["task_id"], summary="fixed")
+    new["supersedes"] = "fnd-top-old"
+    state_db.upsert_trajectory_finding(new, db_path=db)
+
+    stored = state_db.get_trajectory_finding_by_id("fnd-top-new", db_path=db)
+    assert stored["metadata"]["supersedes"] == "fnd-top-old"
+    context = _compile(db, target, "developer")
+    assert not any("fnd-top-old" in ref for ref in context.source_refs)
+    assert any("fnd-top-new" in ref for ref in context.source_refs)
 
 
 def test_finding_preserves_evidence_ref_without_reading_content(tmp_path: Path):
