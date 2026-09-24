@@ -4616,7 +4616,7 @@ def _reconcile_collaboration_ack(event_id, target, db_path):
     return None
 
 
-def _working_context_ref_valid(event, target_task, db_path=None):
+def _working_context_ref_valid(event, db_path=None):
     """Validate only V1 WorkingContext refs; preserve legacy ref compatibility."""
     from herdr import state_db as _sdb
 
@@ -4663,7 +4663,7 @@ def dispatch_collaboration_event(event_id, tasks_by_id, prompt_sender=None, db_p
     pane_id = _collab_task_pane(target)
     if not pane_id:
         return _sdb.mark_collaboration_failed(event_id, db_path=db_path)
-    if not _working_context_ref_valid(event, target, db_path=db_path):
+    if not _working_context_ref_valid(event, db_path=db_path):
         return _sdb.mark_collaboration_failed(event_id, db_path=db_path)
 
     if _collab_prior_intent(event_id, event["to_task_id"], db_path) is not None:

@@ -91,20 +91,6 @@ RELEVANT_EVENT_TYPES = frozenset({
     "review_requested",
     "verification_requested",
 })
-DEPENDENCY_STATUSES = frozenset({
-    "pending",
-    "dispatched",
-    "working",
-    "blocked",
-    "agent_done",
-    "rework",
-    "completed",
-    "committed",
-    "integrated",
-    "failed",
-    "superseded",
-})
-
 
 # ---------------------------------------------------------------------------
 # Public value objects
@@ -1197,15 +1183,12 @@ def _event_candidates(
 def _task_candidates(
     tasks: Sequence[Mapping[str, Any]],
     *,
-    target_task: Mapping[str, Any],
-    task_by_id: Mapping[str, Mapping[str, Any]],
     dependency_ids: Sequence[str],
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
     completed: List[Dict[str, Any]] = []
     blockers: List[Dict[str, Any]] = []
     decisions: List[Dict[str, Any]] = []
     questions: List[Dict[str, Any]] = []
-    dependency_items: List[Dict[str, Any]] = []
     for task in tasks:
         task_id = str(task.get("task_id") or "")
         task_ref = f"task:{task_id}"
@@ -1256,18 +1239,7 @@ def _task_candidates(
                     created_at=task.get("updated_at"),
                     metadata={"field": key, "node": task.get("node") or task.get("stage")},
                 ))
-        node = str(task.get("node") or task.get("stage") or "")
-        if node in set(str(value) for value in dependency_ids):
-            dependency_items.append(_item(
-                "dependency",
-                {"node": node, "status": status, "task_id": task_id},
-                task_ref,
-                source_task=task_id,
-                source_run=_task_run(task),
-                created_at=task.get("updated_at"),
-                metadata={"node": node, "status": status, "dependency_relevant": True},
-            ))
-    return completed, blockers, decisions, questions, dependency_items
+    return completed, blockers, decisions, questions
 
 
 def _handoff_candidates(
@@ -1536,10 +1508,8 @@ def compile_working_context(
         current_state["workflow_stage"] = snapshot["workflow"].get("current_stage")
         current_state_refs["workflow_stage"] = f"workflow:{workflow_id}"
 
-    completed_tasks, task_blockers, task_decisions, questions, dependency_items = _task_candidates(
+    completed_tasks, task_blockers, task_decisions, questions = _task_candidates(
         snapshot["tasks"],
-        target_task=target,
-        task_by_id=snapshot["task_by_id"],
         dependency_ids=dependency_ids,
     )
     event_artifacts, event_completed, event_verification, event_decisions, event_blockers = _event_candidates(
@@ -1621,7 +1591,7 @@ def compile_working_context(
     all_verification = [*event_verification, *eval_verification]
     all_candidates = [
         *completed, *event_artifacts, *evidence, *findings, *decisions,
-        *blockers, *questions, *all_verification, *handoffs, *dependency_items,
+        *blockers, *questions, *all_verification, *handoffs,
     ]
     raw_candidate_items = len(all_candidates)
     now_value = float(now if now is not None else time.time())
