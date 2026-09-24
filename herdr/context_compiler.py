@@ -353,9 +353,15 @@ def compile_working_context(
             str(item.get("source_ref") or ""),
         )
 
-    latest_verification: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    latest_verification: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
     for item in all_verification:
-        key = (str(item.get("source_run") or ""), str(item.get("source_task") or ""))
+        source_ref = str(item.get("source_ref") or "")
+        source_kind = "eval" if source_ref.startswith("eval:") else "trajectory"
+        key = (
+            str(item.get("source_run") or ""),
+            str(item.get("source_task") or ""),
+            source_kind,
+        )
         old = latest_verification.get(key)
         if old is None or verification_order(item) >= verification_order(old):
             latest_verification[key] = item
@@ -364,7 +370,8 @@ def compile_working_context(
         return (
             value.get("passed") is False
             or value.get("verification_passed") is False
-            or str(item.get("status") or "").lower() in {"failed", "failure", "blocked"}
+            or str(value.get("status") or item.get("status") or "").lower()
+            in {"failed", "failure", "blocked"}
         )
 
     selected["verification"] = sorted(
@@ -431,6 +438,15 @@ def compile_working_context(
             "open_questions", "verification", "handoffs",
         )
     )
+    taskless_source_runs = sorted({
+        str(item.get("source_run"))
+        for field_name in (
+            "completed", "artifacts", "evidence", "findings", "decisions", "blockers",
+            "open_questions", "verification", "handoffs",
+        )
+        for item in selected.get(field_name, [])
+        if not item.get("source_task") and item.get("source_run")
+    })
     metrics = {
         "raw_candidate_items": raw_candidate_items,
         "selected_items": actual_selected_items,
@@ -441,6 +457,8 @@ def compile_working_context(
         "boundary": str(boundary),
         "source_clock": int(snapshot.get("source_clock") or 0),
     }
+    if taskless_source_runs:
+        metrics["source_run_ids"] = taskless_source_runs
     context = WorkingContext(**{**context.to_mapping(), "metrics": metrics})
     metrics["context_chars"] = len(json.dumps(context.to_mapping(), ensure_ascii=False))
     context = WorkingContext(**{**context.to_mapping(), "metrics": metrics})

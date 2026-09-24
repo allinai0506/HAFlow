@@ -3153,28 +3153,10 @@ def _validate_context_source_existence(
 
     from herdr.trajectory import run_id_for_task
 
-    scope_run_ids = set()
-    for task_row in conn.execute(
-        "SELECT task_id, payload_json FROM tasks WHERE workflow_id = ?",
-        (str(context.get("workflow_id") or ""),),
-    ).fetchall():
-        try:
-            task_payload = json.loads(task_row["payload_json"] or "{}")
-        except (TypeError, json.JSONDecodeError):
-            task_payload = {}
-        task_scope = (
-            task_payload.get("workflow_run_id")
-            or task_payload.get("execution_id")
-            or task_payload.get("workflow_id")
-        )
-        if str(task_scope or "") == str(context.get("run_scope") or ""):
-            try:
-                scope_run_ids.add(str(run_id_for_task({
-                    **task_payload, "task_id": task_row["task_id"],
-                })))
-            except ValueError:
-                continue
-
+    taskless_allowed_runs = {
+        str(value) for value in ((context.get("metrics") or {}).get("source_run_ids") or [])
+        if value
+    }
     def task_record(task_id: str):
         row = conn.execute(
             "SELECT task_id, workflow_id, node, stage, agent, payload_json FROM tasks WHERE task_id = ? LIMIT 1",
@@ -3217,9 +3199,9 @@ def _validate_context_source_existence(
         run_id = str(record.get("run_id") or "")
         if not run_id:
             return False
-        if str(context.get("run_scope") or "") == str(context.get("workflow_id") or ""):
-            return run_id == str(context.get("run_scope") or "")
-        return run_id in scope_run_ids
+        if taskless_allowed_runs:
+            return run_id in taskless_allowed_runs
+        return False
 
     def fetch_record(prefix: str, object_id: str):
         if prefix == "task":
@@ -3356,9 +3338,18 @@ def save_working_context(
     ):
         for item in context.get(field_name) or []:
             all_source_refs.add(str(item.get("source_ref") or ""))
-    if any(not ref.startswith(("policy:", "artifact:", "evidence:")) for ref in all_source_refs):
-        if "source_clock" not in (context.get("metrics") or {}):
-            raise ValueError("source-backed working context requires source_clock")
+    source_backed = any(
+        not ref.startswith(("policy:", "artifact:", "evidence:"))
+        for ref in all_source_refs
+    )
+    if source_backed:
+        source_clock_value = (context.get("metrics") or {}).get("source_clock")
+        if (
+            isinstance(source_clock_value, bool)
+            or not isinstance(source_clock_value, int)
+            or source_clock_value < 0
+        ):
+            raise ValueError("source-backed working context requires a non-negative integer source_clock")
         from .context_models import _payload_digest
         if (context.get("metrics") or {}).get("payload_digest") != _payload_digest(context):
             raise ValueError("working context payload digest does not match fingerprint input")
@@ -3374,7 +3365,7 @@ def save_working_context(
     try:
         conn.execute("BEGIN IMMEDIATE;")
         source_clock = context.get("metrics", {}).get("source_clock")
-        if source_clock is not None:
+        if source_backed:
             clock_row = conn.execute(
                 "SELECT revision FROM working_context_source_clock WHERE id = 1",
             ).fetchone()

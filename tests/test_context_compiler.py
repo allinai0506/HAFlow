@@ -131,6 +131,21 @@ def _compile(db: Path, task: dict, role: str, **kwargs):
     )
 
 
+def test_legacy_scope_accepts_taskless_source_from_target_run(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _task("task-legacy-taskless", node="review")
+    target.pop("workflow_run_id", None)
+    target = _seed_task(db, target)
+    observation = create_observation(
+        run_id=target["run_id"], task_id=None, workflow_id=target["workflow_id"],
+        source_type="verification", source_ref="verification:legacy-taskless",
+        content="bounded", store=ObservationStore(db),
+    )
+    context = _compile(db, target, "reviewer")
+    assert observation.observation_id in json.dumps(context.to_mapping(), ensure_ascii=False)
+
+
 def test_explicit_scope_accepts_taskless_source_from_allowed_run(tmp_path: Path):
     db = tmp_path / "state.db"
     _seed_workflow(db)
@@ -511,6 +526,19 @@ def test_source_clock_rejects_toctou_candidate_after_source_write(tmp_path: Path
     late_payload["context_id"] = "wc_clock_race_late"
     late = state_db.save_working_context(late_payload, db_path=db)
     assert late.get("_stale_snapshot") is True
+
+
+def test_source_backed_context_cannot_use_null_clock(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-clock-null"))
+    context = _compile(db, target, "developer")
+    forged = dict(context.to_mapping())
+    forged["context_id"] = "wc_clock_null_forged"
+    forged["metrics"] = dict(forged.get("metrics") or {})
+    forged["metrics"]["source_clock"] = None
+    with pytest.raises(ValueError, match="source_clock"):
+        state_db.save_working_context(forged, db_path=db)
 
 
 def test_source_backed_context_cannot_omit_clock(tmp_path: Path):
@@ -1420,6 +1448,48 @@ def test_latest_verification_failure_wins_over_old_success(tmp_path: Path):
     context = _compile(db, target, "tester")
     values = [item.get("value", {}).get("passed") for item in context.verification]
     assert values == [False]
+
+
+def test_eval_failure_is_not_replaced_by_trajectory_pass_for_same_task(tmp_path: Path):
+    from herdr.eval_store import record_eval_result
+
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-eval-vs-trajectory", node="test", role="tester"))
+    TrajectoryLedger(db).append_event({
+        "run_id": target["run_id"], "task_id": target["task_id"],
+        "workflow_id": target["workflow_id"], "event_type": "verification_completed",
+        "verification": {"passed": True}, "timestamp": 1.0,
+    })
+    record_eval_result(
+        target["run_id"], task_id=target["task_id"], workflow_id=target["workflow_id"],
+        revision=1, verification_passed=False, db_path=db,
+    )
+    context = _compile(db, target, "tester")
+    values = [item.get("value", {}) for item in context.verification]
+    assert any(value.get("passed") is True for value in values)
+    assert any(value.get("verification_passed") is False for value in values)
+
+
+def test_taskless_verification_survives_related_event_noise(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-taskless-verification", node="test", role="tester"))
+    ledger = TrajectoryLedger(db)
+    valid = ledger.append_event({
+        "run_id": target["run_id"], "task_id": None,
+        "workflow_id": target["workflow_id"], "event_type": "verification_completed",
+        "verification": {"passed": False}, "timestamp": 1.0,
+    })
+    for index in range(320):
+        ledger.append_event({
+            "run_id": target["run_id"], "task_id": target["task_id"],
+            "workflow_id": target["workflow_id"], "event_type": "verification_completed",
+            "verification": {"passed": True}, "timestamp": 10.0 + index,
+        })
+    context = _compile(db, target, "tester")
+    assert any(valid["event_id"] in ref for ref in context.source_refs)
+    assert any(item.get("value", {}).get("passed") is False for item in context.verification)
 
 
 def test_foreign_verification_event_cannot_shadow_valid_failure(tmp_path: Path):

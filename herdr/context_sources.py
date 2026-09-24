@@ -126,10 +126,12 @@ def _merge_verification_events(
         return events
     placeholders = ",".join("?" for _ in run_values)
     task_ids = list(task_by_id or {})
-    task_filter = (
-        f"e.task_id IN ({','.join('?' for _ in task_ids)})"
-        if task_ids else "e.task_id IS NULL"
-    )
+    task_filter_parts = ["e.task_id IS NULL"]
+    if task_ids:
+        task_filter_parts.append(
+            f"e.task_id IN ({','.join('?' for _ in task_ids)})"
+        )
+    task_filter = " OR ".join(task_filter_parts)
     rows = conn.execute(
         f"""SELECT e.* FROM events e
             WHERE e.source = 'trajectory'
@@ -446,10 +448,12 @@ def _read_source_snapshot(
                     })
 
         eval_task_ids = list(task_by_id)
-        eval_task_filter = (
-            f"task_id IN ({','.join('?' for _ in eval_task_ids)})"
-            if eval_task_ids else "task_id IS NULL"
-        )
+        eval_task_filter_parts = ["task_id IS NULL"]
+        if eval_task_ids:
+            eval_task_filter_parts.append(
+                f"task_id IN ({','.join('?' for _ in eval_task_ids)})"
+            )
+        eval_task_filter = " OR ".join(eval_task_filter_parts)
         eval_rows = conn.execute(
             f"""SELECT * FROM eval_results
                 WHERE run_id IN ({placeholders})

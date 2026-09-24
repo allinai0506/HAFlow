@@ -335,8 +335,12 @@ def _as_list(value: Any) -> List[Any]:
 def _payload_digest(value: Any) -> str:
     """Return a stable consistency digest for the semantic snapshot payload."""
     raw = value.to_mapping() if isinstance(value, WorkingContext) else dict(value)
+    metrics = raw.get("metrics")
+    source_run_ids = metrics.get("source_run_ids") if isinstance(metrics, Mapping) else None
     for key in ("context_id", "context_fingerprint", "metrics", "compiled_at"):
         raw.pop(key, None)
+    if source_run_ids is not None:
+        raw["_bound_source_run_ids"] = list(source_run_ids)
     canonical = json.dumps(
         raw, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str,
     )

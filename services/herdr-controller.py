@@ -4706,10 +4706,13 @@ def dispatch_collaboration_event(event_id, tasks_by_id, prompt_sender=None, db_p
         if context_row is not None:
             allowed_evidence_refs.update(context_row.get("source_refs") or [])
     if context_refs:
-        prompt_event["evidence_refs"] = [
-            ref for ref in event.get("evidence_refs") or []
-            if ref in allowed_evidence_refs
-        ]
+        from herdr.context_models import _canonical_evidence_ref
+        filtered_evidence_refs = []
+        for raw_ref in event.get("evidence_refs") or []:
+            canonical_ref = _canonical_evidence_ref(raw_ref) or str(raw_ref)
+            if canonical_ref in allowed_evidence_refs:
+                filtered_evidence_refs.append(canonical_ref)
+        prompt_event["evidence_refs"] = filtered_evidence_refs
 
     if _collab_prior_intent(event_id, event["to_task_id"], db_path) is not None:
         recovered = _sdb.mark_collaboration_dispatched(event_id, db_path=db_path)

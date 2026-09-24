@@ -207,7 +207,8 @@ def _fit_final_budget(context: WorkingContext, max_chars: int) -> WorkingContext
         return (
             value.get("passed") is False
             or value.get("verification_passed") is False
-            or str(item.get("status") or "").lower() in {"failed", "failure", "blocked"}
+            or str(value.get("status") or item.get("status") or "").lower()
+            in {"failed", "failure", "blocked"}
         )
 
     for _ in range(4):
