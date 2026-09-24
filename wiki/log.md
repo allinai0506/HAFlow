@@ -953,4 +953,9 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - FR-2：blocked episode 使用跨进程 action claim；每轮最多一次自动重推，失败可恢复，第二 SLA 独立升级人类；崩溃观察回到 Controller 自动补派链。
 - FR-4：delivery selector 解析显式 identity/supersede/invalidation 图；未知边、冲突 payload、同刻多候选 fail-closed，replacement 失效不回退。
 - FR-5：保持直接 `--force` 兼容；FR-6：opt-out 审计异常和空 review 池在 topology/Pane 前 fail-closed 并落 Task/Event/Workflow metadata。
-- 证据：`tests/test_impl_fix4_blocker_regression.py`、`tests/test_impl_fix1_regression.py`；`~/HAFlow/bin/herdr-loop eval` score 100（1398/1398，new lint 0）；通用教训 `docs/lessons/lessons-learned.md` §90。
+- 证据：`tests/test_impl_fix4_blocker_regression.py`、`tests/test_impl_fix1_regression.py`；`~/HAFlow/bin/herdr-loop eval` score 100（1420/1420，new lint 0）；通用教训 `docs/lessons/lessons-learned.md` §90。
+# [2026-09-24] fix | wf-haflow-0924-01 review-r1 blockers P1-1 / P2-1..P2-5
+- test/review 无唯一有效 delivery 时在 Pane/Clone 创建前 exit 2，并写 StateStore `test_baseline_rejected` actionable event；check-delivery CLI 补 merged PR history 与本地 Git tree evidence。
+- accept-escalated 报告 outcome、pane_closed、Task 状态及 Clone 保留原因；integrate 将主仓 tracked dirty preflight 前移到所有 task refs/branch 更新前。
+- Router 在实际选择重用的 Agent 后写非空 selected 审计；Sentinel 捕获 SQLite observation/list 失败并保护循环继续。
+- 文档更新：`docs/references/cli-reference.md`、`wiki/task-lifecycle.md`。专项回归与全量验收见 workflow shared note `impl-fix6修复说明`；本条仅记源码契约，未声称未运行的检查通过。

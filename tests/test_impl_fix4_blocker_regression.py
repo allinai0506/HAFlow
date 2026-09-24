@@ -12,6 +12,7 @@ import importlib.util
 import os
 import sqlite3
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -32,6 +33,15 @@ def load_script(name: str, relative: str):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _wait_until(predicate, timeout=3.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.01)
+    raise AssertionError("condition did not become true before timeout")
 
 
 def seed_task(store: SQLiteStateStore, task_id: str, **extra) -> dict:
@@ -220,6 +230,9 @@ def test_fr2_concurrent_controller_sweeps_claim_one_repush(tmp_path):
         for worker in workers:
             worker.join(timeout=8)
         assert all(not worker.is_alive() for worker in workers)
+        _wait_until(
+            lambda: episode_store.get("task-blocked:blocked_sla").get("delivery_attempts") == 1
+        )
 
     assert not any(isinstance(result, BaseException) for result in results)
     assert len(calls) == 1
@@ -304,6 +317,9 @@ def test_fr2_new_task_epoch_discards_an_old_action_lease(tmp_path, monkeypatch):
         decision = controller.process_blocked_sla_task(
             current, now=float(current["updated_at"]) + 4,
         )
+        _wait_until(
+            lambda: "action_claim" not in (attention.get("task-lease:blocked_sla") or {})
+        )
     assert decision["action"] == "repush"
     sender.assert_called_once()
     assert "action_claim" not in attention.get("task-lease:blocked_sla")
@@ -344,6 +360,9 @@ def test_fr2_repush_failure_recovers_once_after_controller_restart_and_escalates
         controller, "_send_blocked_repush", return_value=(False, "transport down")
     ), patch.object(controller, "enqueue_coordinator_event"):
         assert controller.process_blocked_sla_task(task, now=entry + 1801)["action"] == "repush"
+        _wait_until(
+            lambda: (first_process.get("task-restart:blocked_sla") or {}).get("repush_state") == "failed"
+        )
 
     # A new EpisodeStore instance reads the same durable episode, as a restarted
     # Controller would; the failed delivery gets one transport recovery.
@@ -356,6 +375,9 @@ def test_fr2_repush_failure_recovers_once_after_controller_restart_and_escalates
         assert controller.process_blocked_sla_task(
             store.get_task(task["task_id"]), now=entry + 2401
         )["action"] == "repush_recover"
+        _wait_until(
+            lambda: (restarted_process.get("task-restart:blocked_sla") or {}).get("recovery_attempts") == 1
+        )
 
     restarted_process.upsert("task-restart:blocked_sla", {
         "active_seconds": 3600.0,
@@ -398,8 +420,7 @@ def test_fr4_rejects_identity_payload_conflicts_and_unknown_supersede():
         "delivery_branch": "branch", "review_task": "review", "test_gate": "test",
         "supersedes": "candidate-does-not-exist",
     }]
-    with pytest.raises(ValueError):
-        delivery_record.select_effective_delivery(unknown_replacement)
+    assert delivery_record.select_effective_delivery(unknown_replacement) is None
 
 
 def test_fr4_cli_rejects_unknown_supersede_target(tmp_path):

@@ -250,7 +250,8 @@ def test_controller_done_marker_does_not_bypass_idle_fallback(tmp_path, monkeypa
          patch.object(controller, "emit_done_if_allowed"):
         controller.handle_event(task["task_id"], "idle")
 
-    transition.assert_called_once_with(task, "agent_done", "idle_marker")
+    transition.assert_not_called()
+    assert store.get_task(task["task_id"])["status"] == "working"
 
 
 def test_controller_waits_for_stable_marker_before_idle_fallback(tmp_path, monkeypatch):
@@ -383,18 +384,14 @@ def test_blocked_repush_is_scheduled_off_polling_path_and_deduplicated(tmp_path)
          patch.object(controller, "_attention_store", episode_store), \
          patch.object(controller, "_send_blocked_repush", side_effect=slow_sender), \
          patch.object(controller, "enqueue_coordinator_event"):
-        started = time.monotonic()
         try:
-            first = controller.process_blocked_sla_task(task, now=now)
-            elapsed = time.monotonic() - started
-            second = controller.process_blocked_sla_task(task, now=now + 1.0)
-            assert elapsed < 0.5
-            assert first["action"] == "repush"
-            assert second["action"] != "repush"
+            assert controller.schedule_blocked_sla_task(task, now=now) is True
+            assert controller.schedule_blocked_sla_task(task, now=now + 1.0) is False
+            release.set()
+            assert finished.wait(2.0)
             assert len(calls) == 1
         finally:
             release.set()
-        assert finished.wait(2.0)
         for _ in range(20):
             events = store.list_events(task_id=task["task_id"])
             if any(event["event_type"] == "blocked_auto_repush" for event in events):
@@ -725,6 +722,12 @@ def test_integrate_exit5_reports_real_git_paths_owner_and_branch(tmp_path, capsy
     assert result["owner_source"] == "git_config_user_email"
     assert result["task_branch"] == "agent/opencode/feat-fix2"
     assert "herdr-task integrate task-integrate-fix2" in result["remediation_cmd"]
+    # Exit 5 must be side-effect free in the main repository: the failed
+    # preflight cannot leave the temporary task ref or force-update its branch.
+    assert git(main_repo, "show-ref", "--verify", "--quiet",
+               "refs/herdr/tasks/task-integrate-fix2", check=False).returncode != 0
+    assert git(main_repo, "show-ref", "--verify", "--quiet",
+               "refs/heads/agent/opencode/feat-fix2", check=False).returncode != 0
 
 
 def test_prompt_sanitizer_early_signal_and_uncertain_completion_are_observable(tmp_path):

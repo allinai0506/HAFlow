@@ -199,7 +199,7 @@ def update_statuses(changes, expected=None, epochs=None, versions=None):
                     metadata={"sentinel_reason": reason},
                     store=store,
                 )
-            except (OSError, RuntimeError, ValueError, TypeError, KeyError, AttributeError, sqlite3.Error) as exc:
+            except Exception as exc:
                 print(
                     f"[SENTINEL ERROR] transition failed for {task_id}: {exc}; "
                     "task status preserved",
@@ -207,7 +207,7 @@ def update_statuses(changes, expected=None, epochs=None, versions=None):
                     flush=True,
                 )
                 continue
-        except (OSError, RuntimeError, ValueError, KeyError, sqlite3.Error) as exc:
+        except Exception as exc:
             print(
                 f"[SENTINEL ERROR] transition failed for {task_id}: {exc}; "
                 "task status preserved",

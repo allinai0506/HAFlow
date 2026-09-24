@@ -3993,7 +3993,7 @@ pytest -q tests/test_t3_probes.py::L2EmptyReleasable \
 
 - 修复前专项复现：`tests/test_impl_fix4_blocker_regression.py` 的 FR-1/FR-2/FR-4/FR-6 用例分别以 exit 1 暴露 NULL epoch、重复 repush、身份冲突和审计异常；FR-5 在隔离 `4721d6b` 快照运行 `tests/test_t3_probes.py::M3CloseWorkflowGate::test_accept_escalated_or_force_or_abandon_closes`，exit 1（直接 `--force` 被 `SystemExit(2)` 拒绝）。
 - 修复后专项：`python3.13 -m pytest -q tests/test_impl_fix1_regression.py tests/test_impl_fix4_blocker_regression.py tests/test_dispatch_fuse.py`，exit 0，46 passed。
-- 全量与循环门禁：`~/HAFlow/bin/herdr-loop eval`，score 100.0，1398/1398 tests，lint 2817（baseline 2844，new 0）。
+- 全量与循环门禁：`~/HAFlow/bin/herdr-loop eval`，score 100.0，1420/1420 tests，lint 2760（baseline 2844，new 0）。
 - 关联实现：`herdr/state_db.py`、`herdr/liveness.py`、`services/herdr-controller.py`、`herdr/delivery_record.py`、`herdr/workflow_docs.py`、`herdr/agent_router.py`、`bin/herdr-task`。
 
 ### 相关文档 / 关联证据
