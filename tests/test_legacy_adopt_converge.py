@@ -57,6 +57,9 @@ class LegacyBase(unittest.TestCase):
         self._git("add", "base.txt")
         self._git("commit", "-m", "baseline", env=self._date_env(self.now - 7200))
         self.created_at = self.now - 3600
+        # P1: the worker leaves the clone checked out on the task branch,
+        # so legacy time-basis fixtures reproduce that checkout identity.
+        self._git("checkout", "-b", "agent/opencode/test-t-legacy")
 
     def tearDown(self):
         if self.old_state_db is None:
@@ -216,7 +219,7 @@ class IntegrateOutcomeBase(LegacyBase):
         main_repo = self.root / "mrepo"
         self.clone = self.root / "tclone"
         subprocess.run(
-            ["git", "init", "--bare", str(origin)],
+            ["git", "init", "--bare", "-b", "main", str(origin)],
             text=True, capture_output=True, check=True,
         )
         seed.mkdir()

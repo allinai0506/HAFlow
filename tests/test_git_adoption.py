@@ -24,8 +24,21 @@ from herdr.git_adoption import (
 )
 
 
-def _commit(sha, ts):
-    return {"sha": sha, "committer_ts": float(ts)}
+def _commit(sha, ts, paths=("a.txt",)):
+    # NOTE: paths default to a known non-empty list. A commit without
+    # paths is "unknown" (not empty) and fails closed with
+    # commit_paths_unknown; pass paths=[] explicitly for --allow-empty.
+    return {
+        "sha": sha,
+        "committer_ts": float(ts),
+        "parents": ["base"],
+        "paths": list(paths),
+    }
+
+
+def _branch_kwargs(task_id="t1"):
+    branch = "agent/opencode/docs-" + task_id.lower().replace("_", "-")
+    return {"branch": branch, "current_branch": branch}
 
 
 class ClassifyWithAnchorTest(unittest.TestCase):
@@ -36,6 +49,7 @@ class ClassifyWithAnchorTest(unittest.TestCase):
             created_at=1000,
             interval_commits=[_commit("c1", 1100), _commit("c2", 1200)],
             baseline_is_ancestor=True,
+            **_branch_kwargs("t1"),
         )
         self.assertEqual(verdict, ADOPT)
         self.assertEqual(detail["commits"], 2)
@@ -49,19 +63,24 @@ class ClassifyWithAnchorTest(unittest.TestCase):
             created_at=1000,
             interval_commits=[],
             baseline_is_ancestor=True,
+            **_branch_kwargs("t1"),
         )
         self.assertEqual(verdict, EMPTY)
         self.assertEqual(detail["reason"], "no_new_commits")
 
     def test_empty_when_interval_count_zero(self):
-        verdict, _ = classify_commit_state(
+        # M-4: head moved but interval enumerates to nothing must fail
+        # closed (enumeration failure), never EMPTY.
+        verdict, detail = classify_commit_state(
             baseline_commit="base",
             head="other",
             created_at=1000,
             interval_commits=[],
             baseline_is_ancestor=True,
+            **_branch_kwargs("t1"),
         )
-        self.assertEqual(verdict, EMPTY)
+        self.assertEqual(verdict, REFUSED)
+        self.assertEqual(detail["reason"], "enumeration_failed")
 
     def test_refused_when_baseline_not_ancestor(self):
         verdict, detail = classify_commit_state(
@@ -70,6 +89,7 @@ class ClassifyWithAnchorTest(unittest.TestCase):
             created_at=1000,
             interval_commits=[_commit("c1", 1100)],
             baseline_is_ancestor=False,
+            **_branch_kwargs("t1"),
         )
         self.assertEqual(verdict, REFUSED)
         self.assertEqual(detail["reason"], "baseline_not_ancestor")
@@ -81,6 +101,7 @@ class ClassifyWithAnchorTest(unittest.TestCase):
             created_at=1000,
             interval_commits=[_commit("c1", 1100), _commit("c0", 500)],
             baseline_is_ancestor=True,
+            **_branch_kwargs("t1"),
         )
         self.assertEqual(verdict, REFUSED)
         self.assertEqual(detail["reason"], "commit_predates_task")
@@ -94,6 +115,7 @@ class ClassifyWithAnchorTest(unittest.TestCase):
             interval_commits=[_commit("c1", 950)],
             baseline_is_ancestor=True,
             skew_seconds=120,
+            **_branch_kwargs("t1"),
         )
         self.assertEqual(verdict, ADOPT)
 
@@ -105,9 +127,92 @@ class ClassifyWithAnchorTest(unittest.TestCase):
             interval_commits=[_commit("c1", 800)],
             baseline_is_ancestor=True,
             skew_seconds=120,
+            **_branch_kwargs("t1"),
         )
         self.assertEqual(verdict, REFUSED)
         self.assertEqual(detail["reason"], "commit_predates_task")
+
+    def test_refused_when_current_branch_mismatch(self):
+        # P1: HEAD attributable to the task but checked out on another
+        # branch must not be adopted as this task's deliverable.
+        verdict, detail = classify_commit_state(
+            baseline_commit="base",
+            head="head",
+            created_at=1000,
+            interval_commits=[_commit("c1", 1100)],
+            baseline_is_ancestor=True,
+            branch="agent/opencode/docs-t1",
+            current_branch="other",
+        )
+        self.assertEqual(verdict, REFUSED)
+        self.assertEqual(detail["reason"], "current_branch_mismatch")
+
+    def test_refused_when_current_branch_unknown(self):
+        # P1: detached HEAD / probe failure (None) never guesses.
+        verdict, detail = classify_commit_state(
+            baseline_commit="base",
+            head="head",
+            created_at=1000,
+            interval_commits=[_commit("c1", 1100)],
+            baseline_is_ancestor=True,
+            branch="agent/opencode/docs-t1",
+            current_branch=None,
+        )
+        self.assertEqual(verdict, REFUSED)
+        self.assertEqual(detail["reason"], "current_branch_mismatch")
+
+    def test_onto_mode_accepts_onto_branch(self):
+        # P1 onto mode: checkout on the persisted onto branch is a
+        # legitimate ownership identity.
+        verdict, _ = classify_commit_state(
+            baseline_commit="base",
+            head="head",
+            created_at=1000,
+            interval_commits=[_commit("c1", 1100)],
+            baseline_is_ancestor=True,
+            branch="fix/pr-1",
+            onto_branch="fix/pr-1",
+            current_branch="fix/pr-1",
+        )
+        self.assertEqual(verdict, ADOPT)
+
+    def test_refused_when_paths_unknown(self):
+        # F-3: an uninspectable commit must fail closed, never ADOPT,
+        # even though timestamps and ancestry are attributable.
+        verdict, detail = classify_commit_state(
+            baseline_commit="base",
+            head="head",
+            created_at=1000,
+            interval_commits=[
+                {
+                    "sha": "c1",
+                    "committer_ts": 1100.0,
+                    "parents": ["base"],
+                    "paths": None,
+                }
+            ],
+            baseline_is_ancestor=True,
+            **_branch_kwargs("t1"),
+        )
+        self.assertEqual(verdict, REFUSED)
+        self.assertEqual(detail["reason"], "commit_paths_unknown")
+        self.assertIn("c1", detail["offending"])
+
+    def test_refused_when_remote_probe_failed(self):
+        # P1: unknown foreignness (containment probe failed) must fail
+        # closed even though every commit is fresh, known and attributable.
+        verdict, detail = classify_commit_state(
+            baseline_commit="base",
+            head="head",
+            created_at=1000,
+            interval_commits=[_commit("c1", 1100, paths=["a.txt"])],
+            baseline_is_ancestor=True,
+            remote_shas=set(),
+            remote_probe_failed=True,
+            **_branch_kwargs("t1"),
+        )
+        self.assertEqual(verdict, REFUSED)
+        self.assertEqual(detail["reason"], "remote_probe_failed")
 
 
 class ClassifyByTimeTest(unittest.TestCase):
@@ -130,6 +235,7 @@ class ClassifyByTimeTest(unittest.TestCase):
             task_id="t1",
             created_at=1000,
             head_history=[_commit("head", 1200), _commit("c1", 1100), _commit("old", 500)],
+            current_branch="agent/opencode/docs-t1",
         )
         self.assertEqual(verdict, ADOPT)
         self.assertEqual(detail["basis"], "time")
@@ -143,6 +249,7 @@ class ClassifyByTimeTest(unittest.TestCase):
             task_id="t1",
             created_at=1000,
             head_history=[_commit("old", 500)],
+            current_branch="agent/opencode/docs-t1",
         )
         self.assertEqual(verdict, EMPTY)
 
@@ -153,9 +260,38 @@ class ClassifyByTimeTest(unittest.TestCase):
             task_id="t1",
             created_at=1000,
             head_history=[_commit("head", 1100)],
+            current_branch="agent/opencode/docs-t1",
         )
         self.assertEqual(verdict, REFUSED)
         self.assertEqual(detail["reason"], "no_attributable_baseline")
+
+    def test_refused_when_time_basis_branch_mismatch(self):
+        # P1 legacy path: attributable history on the wrong checkout
+        # must not adopt.
+        verdict, detail = classify_commit_state(
+            head="head",
+            branch="agent/opencode/docs-t1",
+            task_id="t1",
+            created_at=1000,
+            head_history=[_commit("head", 1200), _commit("c1", 1100), _commit("old", 500)],
+            current_branch="other",
+        )
+        self.assertEqual(verdict, REFUSED)
+        self.assertEqual(detail["reason"], "current_branch_mismatch")
+
+    def test_refused_when_time_basis_remote_probe_failed(self):
+        # P1 legacy path: unknown foreignness fails closed as well.
+        verdict, detail = classify_commit_state(
+            head="head",
+            branch="agent/opencode/docs-t1",
+            task_id="t1",
+            created_at=1000,
+            head_history=[_commit("head", 1200), _commit("c1", 1100), _commit("old", 500)],
+            current_branch="agent/opencode/docs-t1",
+            remote_probe_failed=True,
+        )
+        self.assertEqual(verdict, REFUSED)
+        self.assertEqual(detail["reason"], "remote_probe_failed")
 
     def test_missing_created_at_refuses(self):
         verdict, detail = classify_commit_state(

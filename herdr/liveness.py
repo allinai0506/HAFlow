@@ -13,6 +13,7 @@ HAFlow 控制面铁律（本模块是唯一策略来源）:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -21,6 +22,11 @@ import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX platforms
+    fcntl = None  # type: ignore[assignment]
 
 # ============================================================
 # Defaults (env-overridable for tests / operations)
@@ -469,15 +475,59 @@ class EpisodeStore:
     Atomic writes + process-wide lock keep concurrent controller threads from
     clobbering each other. Cross-process ownership is split by file path:
     controller owns attention.json, sentinel owns stalls.json.
+
+    The in-memory cache is invalidated by file identity (mtime_ns + size):
+    a CLI recovery command such as ``herdr-task clear-escalation`` runs in
+    its own process, so a long-lived controller must observe its writes on
+    the next sweep instead of serving a stale snapshot forever.
+
+    Read-modify-write cycles (upsert/clear) hold an exclusive advisory
+    lock on a sidecar ``<file>.lock`` across load+mutate+save: ``os.replace``
+    alone only makes single writes atomic, it cannot stop two processes
+    from interleaving read-modify-write and resurrecting deleted episodes
+    (or dropping fresh ones). On platforms without ``fcntl`` the lock is a
+    best-effort no-op and only the thread lock applies.
     """
 
     def __init__(self, path):
         self.path = Path(path)
         self._lock = threading.Lock()
         self._cache: Optional[Dict[str, Dict[str, Any]]] = None
+        self._loaded_sig = None
+        self._lock_path = str(self.path) + ".lock"
+
+    @contextlib.contextmanager
+    def _file_lock(self):
+        """Exclusive cross-process guard for one read-modify-write cycle."""
+        if fcntl is None:
+            yield None
+            return
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(self._lock_path, os.O_RDWR | os.O_CREAT, 0o644)
+        except OSError:
+            yield None
+            return
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield fd
+        finally:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            os.close(fd)
+
+    def _stat_sig(self):
+        try:
+            st = os.stat(self.path)
+        except OSError:
+            return None
+        return (st.st_mtime_ns, st.st_size)
 
     def _load(self) -> Dict[str, Dict[str, Any]]:
-        if self._cache is not None:
+        sig = self._stat_sig()
+        if self._cache is not None and sig == self._loaded_sig:
             return self._cache
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
@@ -485,6 +535,7 @@ class EpisodeStore:
             data = {}
         episodes = data.get("episodes") if isinstance(data, dict) else None
         self._cache = dict(episodes) if isinstance(episodes, dict) else {}
+        self._loaded_sig = sig
         return self._cache
 
     def _save(self) -> None:
@@ -503,6 +554,7 @@ class EpisodeStore:
                 os.unlink(tmp_name)
             except FileNotFoundError:
                 pass
+        self._loaded_sig = self._stat_sig()
 
     def all(self) -> Dict[str, Dict[str, Any]]:
         with self._lock:
@@ -514,7 +566,7 @@ class EpisodeStore:
             return dict(episode) if episode else None
 
     def upsert(self, key: str, fields: Dict[str, Any]) -> Dict[str, Any]:
-        with self._lock:
+        with self._lock, self._file_lock():
             episodes = self._load()
             episode = dict(episodes.get(key) or {})
             episode.update(fields or {})
@@ -523,7 +575,7 @@ class EpisodeStore:
             return dict(episode)
 
     def clear(self, key: str) -> bool:
-        with self._lock:
+        with self._lock, self._file_lock():
             episodes = self._load()
             if key not in episodes:
                 return False

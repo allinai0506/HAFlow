@@ -219,6 +219,28 @@ def git_finalize_pending_tasks(workflow_id):
     ]
 
 
+def git_escalated_tasks(workflow_id):
+    """H-1: machine-escalated git tasks still holding undelivered commits.
+
+    Escalation is observability + retry-stop, never a closability proof.
+    Auto-close must defer on these; manual close requires explicit
+    ``--accept-escalated``/``--force``/``--abandon`` or ``supersede``.
+    """
+    try:
+        tasks = load_tasks()
+    except (OSError, ValueError, RuntimeError, AttributeError,
+            subprocess.SubprocessError):
+        return []
+    return [
+        t.get("task_id")
+        for t in (tasks or [])
+        if t.get("workflow_id") == workflow_id
+        and t.get("status") in ("completed", "committed")
+        and (t.get("integration_mode") or "none") == "git"
+        and t.get("finalize_escalated")
+    ]
+
+
 def maybe_close_completed_workflow(workflow_id):
     """Workflow 全部节点完成后,自动执行物理收尾(关 pane/删 clone/归档)。
 
@@ -248,6 +270,21 @@ def maybe_close_completed_workflow(workflow_id):
             print(
                 f"[CLOSE DEFERRED] workflow={workflow_id} "
                 f"waiting git finalize: {','.join(pending_git)}"
+            )
+        return
+
+    # H-1: auto-close never carries human confirmation, so escalated git
+    # tasks (retry-exhausted / refused / main-dirty) must also defer.
+    # Silent delivered with a never-integrated committed task is the exact
+    # failure this blocks.
+    escalated_git = git_escalated_tasks(workflow_id)
+    if escalated_git:
+        if workflow_id not in _close_deferred_logged:
+            _close_deferred_logged.add(workflow_id)
+            print(
+                f"[CLOSE DEFERRED] workflow={workflow_id} "
+                f"waiting human confirm for escalated: "
+                f"{','.join(escalated_git)}"
             )
         return
 
@@ -2529,6 +2566,18 @@ def _parse_commit_result(output):
     return {}
 
 
+def _parse_integrate_result(output):
+    """M-7: extract HERDR_INTEGRATE_RESULT JSON from integrate output."""
+    for line in (output or "").splitlines():
+        if line.startswith("HERDR_INTEGRATE_RESULT="):
+            try:
+                payload = json.loads(line.split("=", 1)[1])
+            except ValueError:
+                return {}
+            return payload if isinstance(payload, dict) else {}
+    return {}
+
+
 def _record_finalize_event(task, event_type, payload):
     """Best-effort finalize observability event; never breaks finalization."""
     try:
@@ -2545,7 +2594,8 @@ def _record_finalize_event(task, event_type, payload):
             source="controller",
             run_id=run_id_for_task(task or {}),
         )
-    except (OSError, ValueError, RuntimeError, AttributeError) as exc:
+    except (OSError, ValueError, RuntimeError, AttributeError,
+             subprocess.SubprocessError) as exc:
         print(f"[FINALIZE EVENT ERROR] {event_type}: {exc}")
 
 
@@ -2568,22 +2618,55 @@ def _escalate_finalize(task, reason, detail=None):
             },
             store=_get_store(),
         )
-    except (OSError, ValueError, RuntimeError, AttributeError) as exc:
+    except (OSError, ValueError, RuntimeError, AttributeError,
+             subprocess.SubprocessError) as exc:
         print(f"[FINALIZE ESCALATE ERROR] task={task_id}: {exc}")
 
 
 def _empty_auto_releasable(task):
-    """Credible-evidence empty tasks may auto-advance; others need a human.
+    """H-3: anchored empties never auto-release; legacy time empties may.
 
-    D-4: a trustworthy basis releases even without an anchor. Legacy
-    time-basis empties (commit_basis=="time") carry the same fail-closed
-    timestamp guard as adoption, so they release; basis-absent empties
-    escalate.
+    The old判据 returned True for any task with ``baseline_commit``, but
+    ``commit_task`` EMPTY always persists ``commit_basis`` as
+    ``baseline_commit``/``time``, so the ``empty_unreleasable`` branch was
+    dead and every true vacuum task auto-advanced to ``cleanup_ready``.
+    An anchor proves the *method* is credible, not that the *empty result*
+    is credible: a completed git task that produced nothing needs a human.
+    Only legacy anchor-less time-basis empties (same fail-closed timestamp
+    guard as adoption) release; basis-absent records escalate.
     """
     task = task or {}
     if task.get("baseline_commit"):
-        return True
+        return False
     return task.get("commit_basis") == "time"
+
+
+def clear_finalize_escalation(task_id):
+    """H-1: revoke machine-set finalize_escalated so finalize re-drives."""
+    task = get_task(task_id)
+    if not task:
+        return False
+    if not task.get("finalize_escalated"):
+        return True
+    try:
+        from herdr import kernel
+        kernel.update_task_metadata(
+            task_id,
+            {"finalize_escalated": False,
+             "finalize_escalate_reason": None},
+            store=_get_store(),
+        )
+    except (OSError, ValueError, RuntimeError, AttributeError,
+            subprocess.SubprocessError) as exc:
+        print(f"[FINALIZE UNCLEAR ERROR] task={task_id}: {exc}")
+        return False
+    attention_clear(f"{task_id}:finalize")
+    try:
+        _finalize_retry_exhausted_logged.discard(task_id)
+    except AttributeError:
+        pass
+    print(f"[FINALIZE UNESCALATED] task={task_id}")
+    return True
 
 
 def _check_finalize_retry(task, status, now):
@@ -2591,12 +2674,15 @@ def _check_finalize_retry(task, status, now):
 
     Returns True when a finalize attempt was made or exhaustion was recorded.
 
-    M-2 (AC4-2/AC4-3): deterministic outcomes (rc=3 EMPTY, rc=4 REFUSED)
-    never consume retry budget and rc=4 never emits a ``commit_retry``
-    log. ``finalize_completed_task`` reports ``retryable``; only retryable
-    attempts log ``[REGISTRY WATCHER] ... retry finalize`` and increment
-    the attention episode. Already-escalated tasks are settled and skip
-    re-driving entirely.
+    M-2 (AC4-2/AC4-3): deterministic outcomes (rc=3 EMPTY, rc=4 REFUSED,
+    rc=5 integrate-blocked, rc=6 conflict) never consume retry budget and
+    rc=4 never emits a ``commit_retry`` log. ``finalize_completed_task``
+    reports ``retryable``; only retryable attempts log
+    ``[REGISTRY WATCHER] ... retry finalize`` and increment the attention
+    episode. Already-escalated tasks are settled and skip re-driving
+    entirely (revoke via ``clear_finalize_escalation``). M-6:
+    ``subprocess.CalledProcessError`` from ``check=True``/``check_output``
+    paths is escalated immediately instead of bypassing budget accounting.
     """
     task = task or {}
     task_id = task.get("task_id")
@@ -2611,9 +2697,23 @@ def _check_finalize_retry(task, status, now):
         _finalize_retry_exhausted_logged.discard(task_id)
         return False
     key = f"{task_id}:finalize"
-    retry, reason, exhausted = should_retry_finalize(
-        status, attention_get(key), now
-    )
+    # P1 recovery coherence: `herdr-task clear-escalation` (or any external
+    # recovery) removes the shared attention episode from another process.
+    # The in-memory exhausted latch must follow the episode: otherwise a
+    # later re-exhaustion would stall silently with no log and no
+    # re-escalation because the stale latch suppresses both.
+    if attention_get(key) is None:
+        _finalize_retry_exhausted_logged.discard(task_id)
+    try:
+        retry, reason, exhausted = should_retry_finalize(
+            status, attention_get(key), now
+        )
+    except (OSError, RuntimeError, ValueError, KeyError,
+            subprocess.SubprocessError) as exc:
+        print(f"[FINALIZE RETRY ERROR] task={task_id}: {exc}")
+        _escalate_finalize(get_task(task_id) or task, "retry_driver_error",
+                           {"error": f"{type(exc).__name__}: {exc}"})
+        return True
     if exhausted:
         if task_id not in _finalize_retry_exhausted_logged:
             _finalize_retry_exhausted_logged.add(task_id)
@@ -2630,7 +2730,20 @@ def _check_finalize_retry(task, status, now):
         return True
     if not retry:
         return False
-    outcome = finalize_completed_task(task_id)
+    try:
+        outcome = finalize_completed_task(task_id)
+    except (OSError, RuntimeError, ValueError, KeyError,
+            subprocess.SubprocessError) as exc:
+        # M-6: integrate check=True / check_output raises
+        # CalledProcessError (SubprocessError, not OSError). Without this
+        # the exception escapes to registry_watcher, skips attention
+        # budgeting, and retries every ~1s with no backoff.
+        print(f"[FINALIZE SUBPROCESS ERROR] task={task_id}: "
+              f"{type(exc).__name__}: {exc}")
+        _escalate_finalize(get_task(task_id) or task,
+                           "finalize_subprocess_error",
+                           {"error": f"{type(exc).__name__}: {exc}"[:500]})
+        return True
     retryable = True
     if isinstance(outcome, dict) and "retryable" in outcome:
         retryable = bool(outcome.get("retryable"))
@@ -2666,10 +2779,14 @@ def _check_finalize_retry(task, status, now):
 def finalize_completed_task(task_id):
     """Drive one git-finalize step; returns ``{"retryable": bool, ...}``.
 
-    M-2: deterministic outcomes (rc=3 EMPTY, rc=4 REFUSED, rc=6 conflict)
-    report ``retryable=False`` so ``_check_finalize_retry`` never consumes
+    M-2: deterministic outcomes (rc=3 EMPTY, rc=4 REFUSED, rc=5
+    integrate-blocked/main-dirty, rc=6 conflict) report
+    ``retryable=False`` so ``_check_finalize_retry`` never consumes
     budget or logs a retry for them; only transient/unknown failures
     (rc=75, unexpected rc, state-transition failures) report True.
+    H-1: rc=5 (main repo tracked changes) is persistent, never self-heals,
+    so it escalates immediately instead of retrying 5x into
+    ``finalize_escalated`` + silent ``delivered``.
     """
     task = get_task(task_id)
 
@@ -2848,22 +2965,48 @@ def finalize_completed_task(task_id):
                 _escalate_finalize(
                     get_task(task_id) or task,
                     "integrate_rebase_conflict",
-                    _parse_commit_result(result.stdout),
+                    _parse_integrate_result(result.stdout),
                 )
                 return {"retryable": False, "kind": "refused", "rc": 6}
 
             if result.returncode == 4:
+                # M-7: two exit-4 sources carry different payloads:
+                # remote_diverged (explicit HERDR_INTEGRATE_RESULT) vs
+                # not_based_cleanly (relation check). Do not conflate.
+                integrate_payload = _parse_integrate_result(result.stdout)
+                if integrate_payload.get("result") == "remote_diverged":
+                    reason = "integrate_remote_diverged"
+                else:
+                    reason = "integrate_not_based_cleanly"
                 print(
                     f"[FINALIZE REFUSED] "
                     f"task={task_id} "
-                    f"reason=integrate_remote_diverged"
+                    f"reason={reason}"
                 )
                 _escalate_finalize(
                     get_task(task_id) or task,
-                    "integrate_remote_diverged",
-                    _parse_commit_result(result.stdout),
+                    reason,
+                    integrate_payload,
                 )
                 return {"retryable": False, "kind": "refused", "rc": 4}
+
+            if result.returncode == 5:
+                # H-1: main-repo tracked changes are persistent (never
+                # self-heal). Escalate deterministically; retrying 5x
+                # then auto-closing as delivered would silently drop
+                # the never-integrated deliverable.
+                integrate_payload = _parse_integrate_result(result.stdout)
+                print(
+                    f"[FINALIZE REFUSED] "
+                    f"task={task_id} "
+                    f"reason=integrate_main_dirty"
+                )
+                _escalate_finalize(
+                    get_task(task_id) or task,
+                    "integrate_main_dirty",
+                    integrate_payload,
+                )
+                return {"retryable": False, "kind": "refused", "rc": 5}
 
             if result.returncode != 0:
                 print(
@@ -6020,7 +6163,8 @@ def registry_watcher():
                     if status == "completed":
                         try:
                             _check_finalize_retry(task, status, now)
-                        except (OSError, RuntimeError, ValueError, KeyError) as exc:
+                        except (OSError, RuntimeError, ValueError, KeyError,
+                                subprocess.SubprocessError) as exc:
                             print(f"[FINALIZE RETRY ERROR] {exc}")
 
                     continue

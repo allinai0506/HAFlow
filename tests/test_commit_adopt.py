@@ -57,6 +57,9 @@ class CommitAdoptBase(unittest.TestCase):
         self._git("commit", "-m", "baseline")
         self.baseline = self._rev("HEAD")
         self.created_at = time.time()
+        # P1: the worker leaves the clone checked out on the task branch,
+        # so adoption fixtures must reproduce that checkout identity.
+        self._git("checkout", "-b", "agent/opencode/test-t-adopt")
         self._save_task()
 
     def tearDown(self):

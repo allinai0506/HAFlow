@@ -3897,3 +3897,72 @@ pytest -q  # 1241 passed, 44 subtests passed
 - `herdr/collaboration.py#collab_scope_for_task`
 - `bin/herdr-task:1926`、`1951`
 - `docs/architecture/collaboration-protocol.md`（Run isolation）
+
+## 89. 收尾节点的分支不是交付物分支：链末端交付 + 有锚任务空终化的双重约束
+
+### 问题背景
+
+`wf-haflow-0923-02`（Git 终化收编 HEAD，候选
+`agent/opencode/fix-wf-haflow-0923-02-impl-fix2@33a1f1d`，base `c66fc46`）收尾时，
+收尾节点 `wrapup-t1` 的分支 `agent/claude/docs-wf-haflow-0923-02-wrapup-t1` 被三件事同时拉扯：
+交付 PR 从哪条分支开、知识沉淀提交落在哪、以及收尾任务**自身**的 git 终化锚点。
+
+实测拓扑：`git merge-base --is-ancestor c66fc46 33a1f1d` 为假，
+`git rev-list --left-right --count c66fc46...33a1f1d` 为 `1  2`，merge-base 是 `adf8a32`——
+候选**不是 base 的后代**：`adf8a32`（fix2）已由 PR #92 合入 `main`，而 base `c66fc46` 正是
+`46a31f1` 与 `adf8a32` 的**合并提交**，候选只是在这条旧线上继续提交。于是「把候选 merge 进
+收尾节点分支、由收尾分支一次性交付」这条最直觉的路径，被本工作流自己刚交付的 fail-closed
+守卫堵死：`herdr/git_adoption.py` 的 `merge_commit_in_range`(:338/:490) 与
+`baseline_not_ancestor`(:287) 会把「区间内含合并提交」或「baseline 非 HEAD 祖先」的收编
+一律 REFUSED。
+
+第二重约束来自收尾任务自己的终化记录：`wrapup-t1` 带 `baseline_commit=c66fc46`（锚点存在）。
+若收尾节点分支零提交，终化判 EMPTY，而 `_empty_auto_releasable`（H-3）对**有锚任务恒返回
+False** → 收尾任务自己 `finalize_escalated` → `close_workflow` 撞第二道闸 `escalated_git`
+（H-1），整个工作流最后一步卡在「需人类显式确认」上。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|---|---|---|
+| 把「交付分支（集成分支链末端）」读成「本节点分支」 | 收尾节点分支是**终化锚点**，不是交付链末端；两者可以同名不同源 | 交付 PR 的 head 必须是链末端提交所在的分支（此处 `...impl-fix2@33a1f1d`）；收尾节点分支只承载收尾文档提交 |
+| 收尾节点分支零提交 | 有锚任务的 EMPTY 不再自动放行（H-3），零提交会把收尾任务自己推进 escalation | 收尾必须在本节点分支留下至少一个实质提交（知识沉淀 + wiki 回填）后再报完成 |
+| 想把候选并入收尾分支以「带着交付物一起交付」 | 收编侧对 merge 提交与 baseline 非祖先 fail-closed，合并只会让本节点终化被 REFUSED | 禁止在收尾分支 merge/rebase 交付分支；同名分叉用内容等价判定（§87），权威 head 由 PR 指向决定 |
+| 以为「推交付分支」= 推自己的分支 | 收编侧把「出现在任意 `origin/*` 可达集合」当外来源（wf-haflow-0923-02 review-t2 F-1） | 只推链末端交付分支；收尾节点自己的分支不推 origin，避免自身终化被判外来 |
+
+### 操作规范
+
+1. 先固定交付物身份：基准分支显式传入（收尾脚本 `--base <base_branch>`），并核对候选相对 base
+   的提交数 > 0（零提交分支会被 `git cherry` 误判为已合入）。
+2. 知识沉淀 / wiki 回填写**两次相同内容**：一次在链末端交付分支（进 PR），一次在收尾节点分支
+   （供本节点终化收编）；**新增条目逐字一致**，两分支既有的历史行差异不得回灌（本轮
+   `wiki/log.md` 的 `<##` 修复属候选自身改动，收尾分支不回灌）。
+3. 交付 PR 只做「推送链末端分支 + 创建 PR」，禁止合并、禁止 `--force` / `--yes`。
+4. 收尾节点自己的分支**不推送**（见 F-1：推送会让自身终化被判 `foreign_commit_in_range`）。
+
+### 验证命令 / 证据
+
+```bash
+# 交付物身份与拓扑（只读）
+git merge-base --is-ancestor <base> <candidate>; echo $?    # 1 ⇒ 候选不是 base 后代
+git rev-list --left-right --count <base>...<candidate>      # 1  2
+git show-ref --verify --quiet refs/heads/<delivery_branch>  # 分支存在才可跑收尾脚本
+
+# 有锚任务空终化 / close 第二道闸的行为断言
+pytest -q tests/test_t3_probes.py::L2EmptyReleasable \
+          tests/test_t3_probes.py::M3CloseWorkflowGate \
+          tests/test_finalize_empty.py::FinalizeEmptyTest  # 10 passed
+```
+
+- 本轮独立复证（收尾 Agent 自测，非实现方自述）：`pytest -q` **1321 passed + 44 subtests**、
+  `ruff check` 基线 `c66fc46` 2768 == 候选 `33a1f1d` 2768 且 `(文件,规则)` 多重集差异为空。
+
+### 相关文档 / 关联证据
+
+- `services/herdr-controller.py#_empty_auto_releasable`（H-3：有锚任务 EMPTY 不放行）
+- `bin/herdr-task#close_workflow`（H-1：`escalated_git` 闸门；`unsettled_git` 已排除 `finalize_escalated`）
+- `herdr/git_adoption.py`（`baseline_not_ancestor` / `merge_commit_in_range` / `foreign_commit_in_range`）
+- `tests/test_t3_probes.py#L2EmptyReleasable`、`#M3CloseWorkflowGate`、`tests/test_impl_fix4_regression.py`
+- `wiki/dag-workflow-engine.md` §12/§13；shared notes `n-1790229087315-5429`（review-t2）、
+  `n-1790228635198-359f`（test 门禁 pass）
+- 同类模式：`docs/lessons/lessons-learned.md` §87（收尾条目固定交付物身份 / 分叉内容等价性）
