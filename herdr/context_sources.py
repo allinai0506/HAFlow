@@ -957,12 +957,12 @@ def _workflow_config_projection(
     config = workflow.get("config")
     if not isinstance(config, Mapping):
         return config
-    item_key = "nodes" if isinstance(config.get("nodes"), list) else (
-        "stages" if isinstance(config.get("stages"), list) else None
-    )
-    if item_key is None:
+    item_keys = [
+        key for key in ("nodes", "stages")
+        if isinstance(config.get(key), list)
+    ]
+    if not item_keys:
         return config
-    items = config[item_key]
     relevant_ids = {
         str(value)
         for value in (
@@ -971,17 +971,20 @@ def _workflow_config_projection(
         )
         if value
     }
-    relevant_items = [
-        item for item in items
-        if isinstance(item, Mapping)
-        and str(item.get("id") or item.get("stage") or item.get("name") or "") in relevant_ids
-    ]
-    canonical_items = json.dumps(items, ensure_ascii=False, sort_keys=True, default=str)
-    return {
-        **{key: value for key, value in config.items() if key != item_key},
-        item_key: relevant_items,
-        f"all_{item_key}_sha256": hashlib.sha256(canonical_items.encode("utf-8")).hexdigest(),
-    }
+    projection = {key: value for key, value in config.items() if key not in item_keys}
+    for item_key in item_keys:
+        items = config[item_key]
+        relevant_items = [
+            item for item in items
+            if isinstance(item, Mapping)
+            and str(item.get("id") or item.get("stage") or item.get("name") or "") in relevant_ids
+        ]
+        canonical_items = json.dumps(items, ensure_ascii=False, sort_keys=True, default=str)
+        projection[item_key] = relevant_items
+        projection[f"all_{item_key}_sha256"] = hashlib.sha256(
+            canonical_items.encode("utf-8")
+        ).hexdigest()
+    return projection
 
 
 def _source_projection(snapshot: Mapping[str, Any]) -> Dict[str, Any]:

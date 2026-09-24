@@ -299,7 +299,12 @@ def _event_candidates(
                     "blocker",
                     {"reason": "source payload truncated", "source_truncated": True},
                     event_ref,
-                    metadata={"event_type": event_type, "status": "blocked", "node": event.get("node_id")},
+                    metadata={
+                        "event_type": event_type,
+                        "status": "blocked",
+                        "node": event.get("node_id"),
+                        "source_truncated": True,
+                    },
                     **common,
                 ))
             elif event_type == "artifact_created":
@@ -307,7 +312,11 @@ def _event_candidates(
                     "artifact",
                     {"ref": f"source-truncated:{event_id}", "source_truncated": True},
                     event_ref,
-                    metadata={"event_type": event_type, "node": event.get("node_id")},
+                    metadata={
+                        "event_type": event_type,
+                        "node": event.get("node_id"),
+                        "source_truncated": True,
+                    },
                     **common,
                 ))
             else:
@@ -315,7 +324,11 @@ def _event_candidates(
                     "decision",
                     {"reason": "source payload truncated", "source_truncated": True},
                     event_ref,
-                    metadata={"event_type": event_type, "node": event.get("node_id")},
+                    metadata={
+                        "event_type": event_type,
+                        "node": event.get("node_id"),
+                        "source_truncated": True,
+                    },
                     **common,
                 ))
             continue
@@ -348,6 +361,15 @@ def _event_candidates(
                     verification_value["verification_passed"] = False
                 else:
                     verification_value["verification_passed"] = top_value
+            verification_flags = [
+                verification_value.get(key)
+                for key in ("passed", "verification_passed")
+                if key in verification_value
+            ]
+            if any(flag is False for flag in verification_flags):
+                for key in ("passed", "verification_passed"):
+                    if key in verification_value:
+                        verification_value[key] = False
             if not verification_value:
                 continue
             value = {key: verification_value.get(key) for key in (

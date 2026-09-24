@@ -35,6 +35,8 @@ def context_relevance(
         state += 5.0
     if metadata.get("current_task_blocker") is True:
         state += 1000.0
+    if metadata.get("source_truncated") is True:
+        state += 1000.0
     if kind == "verification":
         state += 4.0
     if kind == "finding":

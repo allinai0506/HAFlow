@@ -607,14 +607,13 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
                     ON CONFLICT(run_scope, workflow_id) DO UPDATE SET revision = revision + 1;
                     """
                 )
-                if source_table in {"workflows"} | task_scoped_tables:
+                if source_table in {"workflows", "tasks"} | task_scoped_tables:
                     statements.append(
                         f"""
                         INSERT INTO working_context_source_clock (run_scope, workflow_id, revision)
                         SELECT h.run_scope, h.workflow_id, 1
                         FROM working_context_source_heads h
                         WHERE h.workflow_id = {old_workflow_expr}
-                          AND h.run_scope <> {old_scope_expr}
                         ON CONFLICT(run_scope, workflow_id) DO UPDATE SET revision = revision + 1;
                         """
                     )

@@ -854,6 +854,18 @@ def test_task_scope_update_advances_old_and_new_source_clocks(tmp_path: Path):
     assert _source_clock_revision(db, "scope-b", "wf-a") > 0
 
 
+def test_task_workflow_move_advances_old_workflow_clock(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db, workflow_id="wf-a", scope="shared-exec")
+    _seed_workflow(db, workflow_id="wf-b", scope="shared-exec")
+    target = _seed_task(db, _task("task-workflow-move", workflow_id="wf-a", scope="shared-exec"))
+    _compile(db, target, "developer")
+    old_clock = _source_clock_revision(db, "shared-exec", "wf-a")
+    state_db.save_task(dict(target, workflow_id="wf-b"), db_path=db)
+    assert _source_clock_revision(db, "shared-exec", "wf-a") > old_clock
+    assert _source_clock_revision(db, "shared-exec", "wf-b") > 0
+
+
 def test_same_execution_scope_source_heads_are_isolated_by_workflow(tmp_path: Path):
     from herdr.context_projection import _config
 
@@ -980,6 +992,30 @@ def test_source_revision_covers_legacy_stages_beyond_projection_cap(tmp_path: Pa
     stages[-1]["purpose"] = "second purpose"
     state_db.save_workflow(
         {"workflow_id": "wf-stage-cap", "title": "fixture", "status": "running", "config": {"stages": stages}},
+        db_path=db,
+    )
+    second = _compile(db, target, "reviewer")
+    assert second.source_version != first.source_version
+    assert second.source_watermark > first.source_watermark
+
+
+def test_source_revision_covers_mixed_nodes_and_stages_projection(tmp_path: Path):
+    db = tmp_path / "state.db"
+    nodes = [{"id": f"node-{index}"} for index in range(101)]
+    stages = [{"id": f"stage-{index}", "depends_on": []} for index in range(101)]
+    nodes[-1]["id"] = "review"
+    stages[-1]["id"] = "review"
+    stages[-1]["rules"] = "first rule"
+    config = {"nodes": nodes, "stages": stages}
+    state_db.save_workflow(
+        {"workflow_id": "wf-mixed-cap", "title": "fixture", "status": "running", "config": config},
+        db_path=db,
+    )
+    target = _seed_task(db, _task("task-mixed-cap", workflow_id="wf-mixed-cap", node="review"))
+    first = _compile(db, target, "reviewer")
+    stages[-1]["rules"] = "second rule"
+    state_db.save_workflow(
+        {"workflow_id": "wf-mixed-cap", "title": "fixture", "status": "running", "config": config},
         db_path=db,
     )
     second = _compile(db, target, "reviewer")
@@ -1506,6 +1542,15 @@ def test_oversized_decision_payload_is_retained_as_truncated_marker(tmp_path: Pa
         },
         db_path=db,
     )
+    for index in range(300):
+        state_db.record_trajectory_event(
+            {
+                "run_id": target["run_id"], "task_id": target["task_id"],
+                "workflow_id": target["workflow_id"], "event_type": "decision",
+                "payload": {"decision": f"ordinary-{index}"},
+            },
+            db_path=db,
+        )
     context = _compile(db, target, "developer")
     assert any(
         item.get("value", {}).get("source_truncated") is True
@@ -1752,6 +1797,8 @@ def test_oversized_eval_evidence_cannot_clear_failure(tmp_path: Path):
     context = _compile(db, target, "tester")
     assert not any(item.get("value", {}).get("verification_passed") is True for item in context.verification)
     assert context.verification
+    tight = _compile(db, target, "tester", config={"max_chars": 2500})
+    assert tight.next_action != "Continue."
 
 
 def test_oversized_verification_payload_cannot_clear_failure(tmp_path: Path):
@@ -3069,6 +3116,51 @@ def test_legacy_task_evidence_without_workflow_is_scope_validated(tmp_path: Path
         lambda pane, prompt: calls.append((pane, prompt)), db_path=db,
     )
     assert observation.observation_id in calls[0][1]
+
+
+def test_legacy_evidence_missing_workflow_cannot_cross_event_workflow(tmp_path: Path):
+    import importlib.machinery
+    import importlib.util
+
+    controller_path = Path(__file__).resolve().parent.parent / "services" / "herdr-controller.py"
+    spec = importlib.util.spec_from_loader(
+        "context_compiler_cross_workflow_evidence_test",
+        importlib.machinery.SourceFileLoader(
+            "context_compiler_cross_workflow_evidence_test", str(controller_path)
+        ),
+    )
+    controller = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(controller)
+    db = tmp_path / "state.db"
+    _seed_workflow(db, workflow_id="wf-a", scope="shared-exec")
+    _seed_workflow(db, workflow_id="wf-b", scope="shared-exec")
+    source = _task("task-evidence-source-a", workflow_id="wf-a", scope="shared-exec")
+    source["pane_id"] = "pane-evidence-source-a"
+    source = _seed_task(db, source)
+    target = _task("task-evidence-target-a", workflow_id="wf-a", scope="shared-exec")
+    target["pane_id"] = "pane-evidence-target-a"
+    target = _seed_task(db, target)
+    foreign_task = _seed_task(db, _task("task-evidence-foreign-b", workflow_id="wf-b", scope="shared-exec"))
+    observation = create_observation(
+        run_id=foreign_task["run_id"], task_id=foreign_task["task_id"], workflow_id=None,
+        source_type="verification", source_ref="verification:foreign-workflow",
+        content="foreign", store=ObservationStore(db),
+    )
+    event = state_db.create_collaboration_event(
+        {
+            "run_id": "shared-exec", "workflow_id": "wf-a",
+            "from_task_id": source["task_id"], "to_task_id": target["task_id"],
+            "type": "HANDOFF", "evidence_refs": [observation.observation_id],
+            "source_fact_id": "fact-cross-workflow-evidence",
+        },
+        db_path=db,
+    )
+    calls = []
+    controller.dispatch_collaboration_event(
+        event["event_id"], {source["task_id"]: source, target["task_id"]: target},
+        lambda pane, prompt: calls.append((pane, prompt)), db_path=db,
+    )
+    assert observation.observation_id not in calls[0][1]
 
 
 def test_legacy_handoff_without_context_filters_unverified_evidence(tmp_path: Path):

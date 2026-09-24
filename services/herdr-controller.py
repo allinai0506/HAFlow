@@ -4619,9 +4619,12 @@ def _legacy_evidence_allowed(event, raw_ref, db_path=None):
             task = _sdb.get_task(str(task_id), db_path=db_path)
             return bool(
                 task
+                and str(task.get("workflow_id") or "") == event_workflow
                 and collab_scope_for_task(task) == str(event.get("run_id") or "")
                 and str(task.get("run_id") or "") == str(row["run_id"] or "")
             )
+        if not row_workflow:
+            return False
         return str(row["run_id"] or "") == str(event.get("run_id") or "")
     finally:
         conn.close()
