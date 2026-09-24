@@ -395,15 +395,83 @@ class L1ResultDomain(GitBase):
 
 
 class M3CloseWorkflowGate(unittest.TestCase):
-    """M-3 probe l: CLI close gate must exclude finalized-escalated tasks."""
+    """M-3/L-10: escalated git tasks block close without human confirm.
 
-    def test_unsettled_git_filter_excludes_escalated(self):
-        source = (HERDR_ROOT / "bin" / "herdr-task").read_text(
-            encoding="utf-8")
-        block_start = source.find("unsettled_git = [")
-        self.assertNotEqual(block_start, -1)
-        block = source[block_start:block_start + 600]
-        self.assertIn('not t.get("finalize_escalated")', block)
+    Behavior assertion (not source grep): an escalated completed+git task
+    aborts close_workflow, while --accept-escalated/--force/--abandon or
+    supersede clears the gate.
+    """
+
+    def _tasks(self, escalated=True):
+        return {
+            "tasks": [
+                {
+                    "task_id": "t-m3",
+                    "workflow_id": "wf-m3",
+                    "status": "completed",
+                    "integration_mode": "git",
+                    "finalize_escalated": escalated,
+                }
+            ]
+        }
+
+    def test_escalated_blocks_close_without_confirm(self):
+        with patch.object(_ht, "load_tasks",
+                          return_value=self._tasks(True)), \
+             patch.object(_ht, "_load_workflow_entry",
+                          return_value=(None, {})), \
+             patch.object(_ht, "load_workflows",
+                          return_value={"workflows": {}}):
+            with self.assertRaises(SystemExit) as cm:
+                _ht.close_workflow("wf-m3")
+            self.assertEqual(cm.exception.code, 2)
+
+    def test_accept_escalated_or_force_or_abandon_closes(self):
+        for kwargs in ({"accept_escalated": True}, {"force": True},
+                       {"abandon": True}):
+            with patch.object(_ht, "load_tasks",
+                              return_value=self._tasks(True)), \
+                 patch.object(_ht, "_load_workflow_entry",
+                              return_value=(None, {})), \
+                 patch.object(_ht, "_finalize_one",
+                              return_value={"task_id": "t-m3",
+                                            "status": "completed",
+                                            "action": "finalized"}), \
+                 patch.object(_ht, "_workflow_stage_tabs",
+                              return_value={"tab_ids": [],
+                                            "workspace_id": None,
+                                            "coordinator_pane": None,
+                                            "owned_pane_ids": set()}), \
+                 patch.object(_ht, "_mark_workflow_completed"), \
+                 patch.object(_ht, "stage_reset"):
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    _ht.close_workflow("wf-m3", **kwargs)
+                self.assertIn("[CLOSE REPORT]", buf.getvalue())
+
+    def test_superseded_escalated_does_not_block(self):
+        tasks = {"tasks": [
+            {"task_id": "t-m3", "workflow_id": "wf-m3",
+             "status": "superseded", "integration_mode": "git",
+             "finalize_escalated": True}]}
+        with patch.object(_ht, "load_tasks", return_value=tasks), \
+             patch.object(_ht, "_load_workflow_entry",
+                          return_value=(None, {})), \
+             patch.object(_ht, "_finalize_one",
+                          return_value={"task_id": "t-m3",
+                                        "status": "superseded",
+                                        "action": "retained"}), \
+             patch.object(_ht, "_workflow_stage_tabs",
+                          return_value={"tab_ids": [],
+                                        "workspace_id": None,
+                                        "coordinator_pane": None,
+                                        "owned_pane_ids": set()}), \
+             patch.object(_ht, "_mark_workflow_completed"), \
+             patch.object(_ht, "stage_reset"):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                _ht.close_workflow("wf-m3")
+            self.assertIn("[CLOSE REPORT]", buf.getvalue())
 
 
 class M2RetryAccounting(unittest.TestCase):
@@ -487,10 +555,20 @@ class M2RetryAccounting(unittest.TestCase):
 
 class L2EmptyReleasable(unittest.TestCase):
     def test_time_basis_releasable_without_anchor(self):
+        # H-3: only legacy anchor-less time-basis empties release.
         self.assertTrue(
             _ctrl._empty_auto_releasable({"commit_basis": "time"}))
-        self.assertTrue(
+
+    def test_anchored_empty_requires_human(self):
+        # H-3: anchored EMPTY (the only form commit_task persists for
+        # modern git tasks) never auto-releases to cleanup_ready.
+        self.assertFalse(
             _ctrl._empty_auto_releasable({"baseline_commit": "abc"}))
+        self.assertFalse(
+            _ctrl._empty_auto_releasable(
+                {"baseline_commit": "abc", "commit_basis": "baseline_commit"}))
+
+    def test_basis_absent_escalates(self):
         self.assertFalse(_ctrl._empty_auto_releasable({}))
 
 

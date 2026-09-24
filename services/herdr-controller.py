@@ -228,7 +228,8 @@ def git_escalated_tasks(workflow_id):
     """
     try:
         tasks = load_tasks()
-    except Exception:
+    except (OSError, ValueError, RuntimeError, AttributeError,
+            subprocess.SubprocessError):
         return []
     return [
         t.get("task_id")
@@ -2662,7 +2663,7 @@ def clear_finalize_escalation(task_id):
     attention_clear(f"{task_id}:finalize")
     try:
         _finalize_retry_exhausted_logged.discard(task_id)
-    except Exception:
+    except AttributeError:
         pass
     print(f"[FINALIZE UNESCALATED] task={task_id}")
     return True

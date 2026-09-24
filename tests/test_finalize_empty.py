@@ -96,24 +96,44 @@ def _run_with_commit(task, commit_rc, commit_payload, get_sequence):
 
 
 class FinalizeEmptyTest(unittest.TestCase):
-    def test_empty_with_anchor_auto_releases(self):
+    def test_empty_with_anchor_escalates_unreleasable(self):
+        # H-3 real disk form: commit_task EMPTY persists commit_basis, so
+        # fresh carries baseline_commit + commit_basis=baseline_commit and
+        # must escalate (never auto-release to cleanup_ready).
         task = _task(baseline_commit="base" * 10)
-        released = _task(status="cleanup_ready", baseline_commit="base" * 10)
-        output, calls, set_status, store = _run_with_commit(
-            task, 3, _commit_result_payload(),
-            [task, task, released, released],
-        )
+        fresh = _task(status="completed", baseline_commit="base" * 10,
+                      commit_basis="baseline_commit", commit_head="abc123",
+                      commit_result="empty")
+        with patch("herdr.kernel.update_task_metadata",
+                   return_value={}) as meta:
+            output, calls, set_status, _store = _run_with_commit(
+                task, 3, _commit_result_payload(),
+                [task, fresh],
+            )
 
         self.assertIn("[FINALIZE EMPTY]", output)
+        self.assertIn("[FINALIZE ESCALATED]", output)
+        self.assertNotIn("[FINALIZED]", output)
+        set_status.assert_not_called()
+        self.assertFalse(any("cleanup" in cmd for cmd in calls))
+        self.assertFalse(any("integrate" in cmd for cmd in calls))
+        meta.assert_called_once()
+        updates = meta.call_args.args[1]
+        self.assertTrue(updates.get("finalize_escalated"))
+        self.assertEqual(updates.get("finalize_escalate_reason"),
+                         "empty_unreleasable")
+
+    def test_empty_legacy_time_basis_releases(self):
+        # Legacy anchor-less time-basis EMPTY keeps the old release path.
+        task = _task(commit_basis="time")
+        released = _task(status="cleanup_ready", commit_basis="time")
+        output, _calls, set_status, _store = _run_with_commit(
+            task, 3, _commit_result_payload(basis="time"),
+            [task, task, released, released],
+        )
+        self.assertIn("[FINALIZE EMPTY]", output)
         self.assertIn("[FINALIZE EMPTY RELEASED]", output)
-        self.assertIn("[FINALIZED]", output)
         set_status.assert_called_once_with("t-empty", "cleanup_ready")
-        kinds = [cmd for cmd in calls]
-        self.assertTrue(any("commit" in cmd for cmd in kinds))
-        self.assertTrue(any("cleanup" in cmd for cmd in kinds))
-        self.assertFalse(any("integrate" in cmd for cmd in kinds))
-        event_types = [call.args[0] for call in store.record_event.call_args_list]
-        self.assertIn("finalize_empty", event_types)
 
     def test_empty_without_anchor_escalates(self):
         task = _task()

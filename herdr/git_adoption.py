@@ -222,9 +222,7 @@ def _stale_commits(commits, cutoff):
     for item in commits or []:
         cts = _coerce_epoch((item or {}).get("committer_ts"))
         ats = _coerce_epoch((item or {}).get("author_ts"))
-        if cts is None or cts < cutoff:
-            stale.append(item.get("sha"))
-        elif ats is not None and ats < cutoff:
+        if cts is None or cts < cutoff or (ats is not None and ats < cutoff):
             stale.append(item.get("sha"))
     return stale
 

@@ -3001,7 +3001,8 @@ def _adopt_head_if_attributable(task_id, task, clone):
                 try:
                     remote_shas = _git_remote_contained_shas(
                         clone, [c.get("sha") for c in interval])
-                except Exception:
+                except (OSError, ValueError, RuntimeError,
+                        subprocess.SubprocessError):
                     remote_shas = set()
         else:
             interval = []
@@ -3013,7 +3014,8 @@ def _adopt_head_if_attributable(task_id, task, clone):
             try:
                 remote_shas = _git_remote_contained_shas(
                     clone, [c.get("sha") for c in history])
-            except Exception:
+            except (OSError, ValueError, RuntimeError,
+                    subprocess.SubprocessError):
                 remote_shas = set()
 
     verdict, detail = classify_commit_state(
@@ -4398,7 +4400,8 @@ def clear_finalize_escalation(task_id):
              "finalize_escalate_reason": None},
             store=_get_store(),
         )
-    except Exception as exc:
+    except (OSError, ValueError, RuntimeError, AttributeError,
+            subprocess.SubprocessError) as exc:
         print(f"Error clearing escalation for {task_id}: {exc}",
               file=sys.stderr)
         sys.exit(2)

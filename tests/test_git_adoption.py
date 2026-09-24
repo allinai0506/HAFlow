@@ -54,14 +54,17 @@ class ClassifyWithAnchorTest(unittest.TestCase):
         self.assertEqual(detail["reason"], "no_new_commits")
 
     def test_empty_when_interval_count_zero(self):
-        verdict, _ = classify_commit_state(
+        # M-4: head moved but interval enumerates to nothing must fail
+        # closed (enumeration failure), never EMPTY.
+        verdict, detail = classify_commit_state(
             baseline_commit="base",
             head="other",
             created_at=1000,
             interval_commits=[],
             baseline_is_ancestor=True,
         )
-        self.assertEqual(verdict, EMPTY)
+        self.assertEqual(verdict, REFUSED)
+        self.assertEqual(detail["reason"], "enumeration_failed")
 
     def test_refused_when_baseline_not_ancestor(self):
         verdict, detail = classify_commit_state(
