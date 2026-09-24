@@ -228,6 +228,16 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
     """);
 
     conn.execute("""
+        CREATE TABLE IF NOT EXISTS working_context_source_clock (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            revision INTEGER NOT NULL
+        );
+    """);
+    conn.execute(
+        "INSERT OR IGNORE INTO working_context_source_clock (id, revision) VALUES (1, 0)"
+    )
+
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS working_context_metric_events (
             metric_id TEXT PRIMARY KEY,
             context_id TEXT NOT NULL,
@@ -417,6 +427,21 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
             UNIQUE(run_id, revision)
         );
     """)
+    for source_table in (
+        "workflows", "tasks", "events", "trajectory_findings", "observations",
+        "observation_receipts", "eval_results", "collaboration_events",
+    ):
+        for operation in ("INSERT", "UPDATE", "DELETE"):
+            trigger_name = f"trg_working_context_source_clock_{source_table}_{operation.lower()}"
+            conn.execute(f"""
+                CREATE TRIGGER IF NOT EXISTS {trigger_name}
+                AFTER {operation} ON {source_table}
+                BEGIN
+                    UPDATE working_context_source_clock
+                    SET revision = revision + 1
+                    WHERE id = 1;
+                END;
+            """)
 
     # Replay specs: lineage edges from a source run to a replay run.
     # Intentionally no FOREIGN KEY clauses: specs survive workflow deletion
@@ -2193,7 +2218,6 @@ def aggregate_run_metric_rows(run_id: str, db_path: Optional[Path] = None) -> Di
             metric_scope = (
                 payload.get("workflow_run_id")
                 or payload.get("execution_id")
-                or scope_row["workflow_id"]
                 or run_id
             )
         observations = conn.execute(
@@ -3126,6 +3150,94 @@ def _validate_context_source_existence(
         for item in context.get(field_name) or []:
             refs.add(str(item.get("source_ref") or ""))
             refs.update(str(ref) for ref in (item.get("evidence_refs") or []))
+
+    def task_record(task_id: str):
+        row = conn.execute(
+            "SELECT task_id, workflow_id, node, stage, agent, payload_json FROM tasks WHERE task_id = ? LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            payload = json.loads(row["payload_json"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            payload = {}
+        return {
+            "task_id": task_id,
+            "workflow_id": row["workflow_id"] or payload.get("workflow_id"),
+            "node": row["node"] or payload.get("node"),
+            "stage": row["stage"] or payload.get("stage"),
+            "agent": row["agent"] or payload.get("agent"),
+            "run_id": payload.get("run_id"),
+            "agent_role": payload.get("agent_role"),
+            "scope": payload.get("workflow_run_id") or payload.get("execution_id") or row["workflow_id"],
+        }
+
+    def record_scope(record):
+        task_id = record.get("task_id")
+        if task_id:
+            task = task_record(str(task_id))
+            if task is None:
+                return False
+            if str(task.get("workflow_id") or "") != str(context.get("workflow_id") or ""):
+                return False
+            if str(task.get("scope") or "") != str(context.get("run_scope") or ""):
+                return False
+            if record.get("run_id") and str(task.get("run_id") or "") != str(record["run_id"]):
+                return False
+            return True
+        return bool(
+            record.get("run_id")
+            and str(record["run_id"]) == str(context.get("run_scope") or "")
+        )
+
+    def fetch_record(prefix: str, object_id: str):
+        if prefix == "task":
+            return task_record(object_id)
+        if prefix == "workflow":
+            row = conn.execute(
+                "SELECT workflow_id FROM workflows WHERE workflow_id = ? LIMIT 1",
+                (object_id,),
+            ).fetchone()
+            return {"workflow_id": row["workflow_id"]} if row is not None else None
+        if prefix == "observation":
+            row = conn.execute(
+                "SELECT run_id, task_id, workflow_id FROM observations WHERE observation_id = ? LIMIT 1",
+                (object_id,),
+            ).fetchone()
+        elif prefix == "finding":
+            row = conn.execute(
+                "SELECT run_id, task_id, workflow_id FROM trajectory_findings WHERE finding_id = ? LIMIT 1",
+                (object_id,),
+            ).fetchone()
+        elif prefix == "eval":
+            row = conn.execute(
+                "SELECT run_id, task_id, workflow_id FROM eval_results WHERE eval_id = ? LIMIT 1",
+                (object_id,),
+            ).fetchone()
+        elif prefix == "trajectory":
+            event_number = object_id.removeprefix("evt_")
+            try:
+                row = conn.execute(
+                    "SELECT run_id, task_id, workflow_id FROM events WHERE id = ? LIMIT 1",
+                    (int(event_number),),
+                ).fetchone()
+            except ValueError:
+                row = conn.execute(
+                    "SELECT run_id, task_id, workflow_id FROM events WHERE json_extract(payload_json, '$.event_id') = ? LIMIT 1",
+                    (object_id,),
+                ).fetchone()
+        elif prefix == "collaboration":
+            row = conn.execute(
+                "SELECT run_id, workflow_id, from_task_id, to_task_id FROM collaboration_events WHERE event_id = ? LIMIT 1",
+                (object_id,),
+            ).fetchone()
+        else:
+            return {"synthetic": True}
+        if row is None:
+            return None
+        return {key: row[key] for key in row.keys()}
+
     for ref in sorted(refs):
         if not ref or ref.startswith(("policy:", "artifact:", "evidence:")):
             continue
@@ -3133,46 +3245,40 @@ def _validate_context_source_existence(
         object_id = remainder.split(":", 1)[0]
         if not object_id:
             raise ValueError("working context source reference has no object id")
-        if prefix == "task":
-            found = conn.execute(
-                "SELECT 1 FROM tasks WHERE task_id = ? LIMIT 1", (object_id,),
-            ).fetchone()
-        elif prefix == "workflow":
-            found = conn.execute(
-                "SELECT 1 FROM workflows WHERE workflow_id = ? LIMIT 1", (object_id,),
-            ).fetchone()
-        elif prefix == "observation":
-            found = conn.execute(
-                "SELECT 1 FROM observations WHERE observation_id = ? LIMIT 1", (object_id,),
-            ).fetchone()
-        elif prefix == "finding":
-            found = conn.execute(
-                "SELECT 1 FROM trajectory_findings WHERE finding_id = ? LIMIT 1", (object_id,),
-            ).fetchone()
-        elif prefix == "eval":
-            found = conn.execute(
-                "SELECT 1 FROM eval_results WHERE eval_id = ? LIMIT 1", (object_id,),
-            ).fetchone()
-        elif prefix == "trajectory":
-            event_number = object_id.removeprefix("evt_")
-            try:
-                found = conn.execute(
-                    "SELECT 1 FROM events WHERE id = ? LIMIT 1", (int(event_number),),
-                ).fetchone()
-            except ValueError:
-                found = conn.execute(
-                    "SELECT 1 FROM events WHERE json_extract(payload_json, '$.event_id') = ? LIMIT 1",
-                    (object_id,),
-                ).fetchone()
-        elif prefix == "collaboration":
-            found = conn.execute(
-                "SELECT 1 FROM collaboration_events WHERE event_id = ? LIMIT 1", (object_id,),
-            ).fetchone()
-        else:
-            found = True
-        if found is None:
+        record = fetch_record(prefix, object_id)
+        if record is None:
             raise ValueError(f"working context source reference does not exist: {ref}")
+        if record.get("workflow_id") and str(record["workflow_id"]) != str(context.get("workflow_id") or ""):
+            raise ValueError(f"working context source reference crosses workflow: {ref}")
+        if prefix == "collaboration":
+            if str(record.get("run_id") or "") != str(context.get("run_scope") or ""):
+                raise ValueError(f"working context collaboration scope mismatch: {ref}")
+            for task_id in (record.get("from_task_id"), record.get("to_task_id")):
+                if not record_scope({"task_id": task_id}):
+                    raise ValueError(f"working context collaboration task scope mismatch: {ref}")
+        elif prefix != "workflow" and not record_scope(record):
+            raise ValueError(f"working context source reference crosses run scope: {ref}")
 
+    source_backed = any(
+        not ref.startswith(("policy:", "artifact:", "evidence:"))
+        for ref in refs
+    )
+    if source_backed:
+        head = conn.execute(
+            "SELECT 1 FROM working_context_source_heads WHERE run_scope = ? LIMIT 1",
+            (str(context.get("run_scope") or ""),),
+        ).fetchone()
+        if head is None:
+            raise ValueError("working context source revision is not registered")
+        target_task = task_record(str(context.get("task_id") or ""))
+        if target_task is None or str(target_task.get("workflow_id") or "") != str(context.get("workflow_id") or ""):
+            raise ValueError("working context target task is not in the requested workflow")
+        if str(target_task.get("scope") or "") != str(context.get("run_scope") or ""):
+            raise ValueError("working context target task scope does not match run_scope")
+        if str(target_task.get("run_id") or "") != str(context.get("run_id") or ""):
+            raise ValueError("working context run_id does not match target task")
+        if not re.fullmatch(r"[0-9a-f]{64}", str(context.get("context_fingerprint") or "")):
+            raise ValueError("working context fingerprint is invalid")
 
 def save_working_context(
     context: Dict[str, Any], db_path: Optional[Path] = None,
@@ -3225,6 +3331,17 @@ def save_working_context(
     conn = get_db_connection(db_path)
     try:
         conn.execute("BEGIN IMMEDIATE;")
+        source_clock = context.get("metrics", {}).get("source_clock")
+        if source_clock is not None:
+            clock_row = conn.execute(
+                "SELECT revision FROM working_context_source_clock WHERE id = 1",
+            ).fetchone()
+            current_clock = int(clock_row["revision"] if clock_row else 0)
+            if current_clock != int(source_clock):
+                conn.commit()
+                result = dict(context)
+                result["_stale_snapshot"] = True
+                return result
         _validate_context_source_existence(conn, context)
         existing_id = conn.execute(
             "SELECT * FROM working_contexts WHERE context_id = ?",

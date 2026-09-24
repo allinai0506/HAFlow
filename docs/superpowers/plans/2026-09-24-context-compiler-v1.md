@@ -78,7 +78,7 @@ git commit -m "test: define context compiler acceptance matrix"
 - Test: `tests/test_context_compiler.py`
 
 **Interfaces:**
-- Add table `working_contexts(context_id, run_scope, run_id, workflow_id, task_id, node_id, agent_role, context_fingerprint, source_version, source_watermark, payload_json, metrics_json, compiled_at)` and `working_context_source_heads(run_scope, workflow_id, source_version, revision, updated_at)`.
+- Add table `working_contexts(context_id, run_scope, run_id, workflow_id, task_id, node_id, agent_role, context_fingerprint, source_version, source_watermark, payload_json, metrics_json, compiled_at)`, `working_context_source_heads(run_scope, workflow_id, source_version, revision, updated_at)` and a trigger-backed `working_context_source_clock`.
 - Add state_db functions:
 
 ```python

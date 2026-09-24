@@ -32,8 +32,17 @@ def _item_maps(context: Mapping[str, Any]) -> Dict[Tuple[str, str], Dict[str, An
             item = dict(raw)
             kind = str(item.get("kind") or field_name)
             ref = str(item.get("source_ref") or "")
-            if ref:
-                result[(kind, ref)] = item
+            if not ref:
+                continue
+            key = (kind, ref)
+            if key in result:
+                suffix = 2
+                while (kind, f"{ref}#{suffix}") in result:
+                    suffix += 1
+                item = dict(item)
+                item["source_ref"] = f"{ref}#{suffix}"
+                key = (kind, item["source_ref"])
+            result[key] = item
     return result
 
 
@@ -61,6 +70,20 @@ def diff_working_context(
     changed: List[Dict[str, Any]] = []
     superseded: List[Dict[str, Any]] = []
     superseded_old_keys: Set[Tuple[str, str]] = set()
+    superseded_pairs: Set[Tuple[str, str]] = set()
+
+    def add_superseded(old_ref: str, old_item: Mapping[str, Any], new_item: Mapping[str, Any]) -> None:
+        pair = (old_ref, str(new_item.get("source_ref") or ""))
+        if pair in superseded_pairs:
+            return
+        superseded_pairs.add(pair)
+        superseded.append({
+            "kind": "finding",
+            "source_ref": old_ref,
+            "old": dict(old_item),
+            "new": dict(new_item),
+        })
+        superseded_old_keys.add(("finding", old_ref))
     for key, new_item in new_items.items():
         old_item = old_items.get(key)
         if old_item is not None and _canonical_json(old_item) != _canonical_json(new_item):
@@ -76,23 +99,11 @@ def diff_working_context(
                 old_key = ("finding", old_ref)
                 old_candidate = old_items.get(old_key)
                 if old_candidate is not None:
-                    superseded.append({
-                        "kind": "finding",
-                        "source_ref": old_ref,
-                        "old": old_candidate,
-                        "new": new_item,
-                    })
-                    superseded_old_keys.add(old_key)
+                    add_superseded(old_ref, old_candidate, new_item)
             for old_ref in _relation_refs(new_item, "superseded_by"):
                 old_key = ("finding", old_ref)
                 if old_key in old_items:
-                    superseded.append({
-                        "kind": "finding",
-                        "source_ref": old_ref,
-                        "old": old_items[old_key],
-                        "new": new_item,
-                    })
-                    superseded_old_keys.add(old_key)
+                    add_superseded(old_ref, old_items[old_key], new_item)
     for old_key, old_item in old_items.items():
         if old_key[0] != "finding":
             continue
@@ -100,15 +111,10 @@ def diff_working_context(
             new_key = ("finding", new_ref)
             new_item = new_items.get(new_key)
             if new_item is not None:
-                superseded.append({
-                    "kind": "finding",
-                    "source_ref": old_key[1],
-                    "old": old_item,
-                    "new": new_item,
-                })
-                superseded_old_keys.add(old_key)
+                add_superseded(old_key[1], old_item, new_item)
     removed = [item for item in removed if (str(item.get("kind")), str(item.get("source_ref"))) not in superseded_old_keys]
     for field_name in (
+        "context_id", "run_scope", "run_id", "workflow_id", "task_id",
         "goal", "current_state", "next_action", "node_id", "agent_role",
         "goal_source_ref", "next_action_source_ref", "current_state_refs",
         "source_refs", "source_version",

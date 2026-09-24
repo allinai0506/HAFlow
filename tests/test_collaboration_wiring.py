@@ -74,11 +74,14 @@ def _wf_tasks():
 def test_wiring_dispatches_handoff_on_deterministic_advance(tmp_path):
     ctrl = _load_controller()
     db = tmp_path / "state.db"
+    tasks = _wf_tasks()
+    for task in tasks.values():
+        task["run_id"] = "legacy-shared"
     sender = FakeSender()
     out = ctrl.maybe_dispatch_node_handoffs(
         workflow_id="wf-1", ready_id="test",
         dep_ids=["implementation"], launched=["wf-1-test-auto"],
-        tasks_by_id=_wf_tasks(), prompt_sender=sender, db_path=db,
+        tasks_by_id=tasks, prompt_sender=sender, db_path=db,
     )
     assert len(out) == 1 and out[0].get("dispatched") is True
     assert sender.calls[0][0] == "pane-test"
@@ -135,6 +138,18 @@ def test_wiring_legacy_distinct_runs_do_not_cross_execute(tmp_path):
     out = ctrl.maybe_dispatch_node_handoffs(
         workflow_id="wf-1", ready_id="test", dep_ids=["implementation"],
         launched=["wf-1-test-auto"], tasks_by_id=tasks,
+        prompt_sender=FakeSender(), db_path=db,
+    )
+    assert out[0].get("skipped") is True
+    assert state_db.list_collaboration_events(run_id="wf-1", db_path=db) == []
+
+
+def test_wiring_legacy_missing_run_ids_do_not_cross_execute(tmp_path):
+    ctrl = _load_controller()
+    db = tmp_path / "state.db"
+    out = ctrl.maybe_dispatch_node_handoffs(
+        workflow_id="wf-1", ready_id="test", dep_ids=["implementation"],
+        launched=["wf-1-test-auto"], tasks_by_id=_wf_tasks(),
         prompt_sender=FakeSender(), db_path=db,
     )
     assert out[0].get("skipped") is True

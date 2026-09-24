@@ -116,29 +116,41 @@ def _merge_verification_events(
     run_values: Sequence[str],
     events: List[Dict[str, Any]],
     *,
+    task_by_id: Mapping[str, Mapping[str, Any]] | None = None,
+    allowed_runs: Set[str] | None = None,
+    workflow_id: str | None = None,
+    run_scope: str | None = None,
     limit: int = 500,
 ) -> List[Dict[str, Any]]:
     if not run_values:
         return events
     placeholders = ",".join("?" for _ in run_values)
     rows = conn.execute(
-        f"""SELECT * FROM (
-                SELECT e.*, ROW_NUMBER() OVER (
-                    PARTITION BY e.run_id, COALESCE(e.task_id, '')
-                    ORDER BY e.sequence DESC, e.id DESC
-                ) AS source_rank
-                  FROM events e
-                 WHERE e.source = 'trajectory'
-                   AND e.run_id IN ({placeholders})
-                   AND e.event_type IN ('verification_completed', 'tests_completed')
-                   AND length(e.payload_json) <= 20000
-            ) WHERE source_rank = 1
+        f"""SELECT * FROM events
+            WHERE source = 'trajectory'
+              AND run_id IN ({placeholders})
+              AND event_type IN ('verification_completed', 'tests_completed')
+              AND length(payload_json) <= 20000
             ORDER BY sequence DESC, id DESC LIMIT ?""",
         (*run_values, int(limit)),
     ).fetchall()
     merged = {str(event.get("event_id")): event for event in events}
     for row in rows:
         event = _decode_event_row(row)
+        if (
+            task_by_id is not None
+            and allowed_runs is not None
+            and workflow_id is not None
+            and run_scope is not None
+            and not _source_allowed(
+                event,
+                task_by_id=task_by_id,
+                allowed_runs=allowed_runs,
+                workflow_id=workflow_id,
+                run_scope=run_scope,
+            )
+        ):
+            continue
         merged[str(event.get("event_id"))] = event
     return sorted(merged.values(), key=lambda item: (int(item.get("sequence") or 0), str(item.get("event_id"))), reverse=True)
 
@@ -207,6 +219,7 @@ def _read_source_snapshot(
             raise ValueError("workflow execution scope has no run identity")
         task_by_id = {str(item.get("task_id")): item for item in scoped_tasks}
         if not explicit_execution_scope and planned_links:
+            allowed_link_nodes = set(_dependency_ids(task, workflow))
             for link in planned_links:
                 from_id = str(link.get("from_task_id") or "")
                 to_id = str(link.get("to_task_id") or "")
@@ -214,7 +227,10 @@ def _read_source_snapshot(
                     continue
                 linked_id = to_id if from_id == str(task_id) else from_id
                 linked_task = task_by_id.get(linked_id)
-                linked_run = _task_run(linked_task) if linked_task else None
+                linked_node = str((linked_task or {}).get("node") or (linked_task or {}).get("stage") or "")
+                if linked_task is None or linked_node not in allowed_link_nodes:
+                    continue
+                linked_run = _task_run(linked_task)
                 if linked_run:
                     allowed_runs.add(linked_run)
             if allowed_runs:
@@ -235,7 +251,13 @@ def _read_source_snapshot(
             (*run_values, *sorted(RELEVANT_EVENT_TYPES), int(max_events)),
         ).fetchall()
         events = _merge_verification_events(
-            conn, run_values, [_decode_event_row(row) for row in event_rows],
+            conn,
+            run_values,
+            [_decode_event_row(row) for row in event_rows],
+            task_by_id=task_by_id,
+            allowed_runs=allowed_runs,
+            workflow_id=str(workflow_id),
+            run_scope=run_scope,
         )
 
         finding_rows = conn.execute(
@@ -284,6 +306,7 @@ def _read_source_snapshot(
             linked_task_ids = {
                 linked_id
                 for event in collaborations
+                if str(event.get("type") or "").upper() == "HANDOFF"
                 for linked_id in (
                     str(event.get("from_task_id") or ""),
                     str(event.get("to_task_id") or ""),
@@ -319,6 +342,10 @@ def _read_source_snapshot(
                             (*run_values, *sorted(RELEVANT_EVENT_TYPES), int(max_events)),
                         ).fetchall()
                     ],
+                    task_by_id=task_by_id,
+                    allowed_runs=allowed_runs,
+                    workflow_id=str(workflow_id),
+                    run_scope=run_scope,
                 )
                 findings = [
                     state_db._decode_finding_row(row) for row in conn.execute(
@@ -357,15 +384,31 @@ def _read_source_snapshot(
                   AND length(COALESCE(evidence_json, 'null')) <= 20000
                   AND length(COALESCE(warnings_json, '[]')) <= 20000
                 ORDER BY run_id ASC, revision DESC, rowid DESC LIMIT ?""",
-            (*run_values, int(max_evals)),
+            (*run_values, max(int(max_evals), 1000)),
         ).fetchall()
         evals_by_run: Dict[str, Dict[str, Any]] = {}
         for row in eval_rows:
             decoded = _decode_eval_row(row)
+            if not _source_allowed(
+                {
+                    "run_id": decoded.get("run_id"),
+                    "task_id": decoded.get("task_id"),
+                    "workflow_id": decoded.get("workflow_id"),
+                },
+                task_by_id=task_by_id,
+                allowed_runs=allowed_runs,
+                workflow_id=str(workflow_id),
+                run_scope=run_scope,
+            ):
+                continue
             run_id = str(decoded.get("run_id") or "")
             if run_id and run_id not in evals_by_run:
                 evals_by_run[run_id] = decoded
         evals = list(evals_by_run.values())
+        source_clock_row = conn.execute(
+            "SELECT revision FROM working_context_source_clock WHERE id = 1",
+        ).fetchone()
+        source_clock = int(source_clock_row["revision"] if source_clock_row else 0)
         conn.commit()
     except Exception:
         try:
@@ -388,6 +431,7 @@ def _read_source_snapshot(
         "observations": observations,
         "collaborations": collaborations,
         "evals": evals,
+        "source_clock": source_clock,
     }
     snapshot["source_version"] = _hash(_source_projection(snapshot))
     return snapshot

@@ -169,7 +169,7 @@ def _fit_final_budget(context: WorkingContext, max_chars: int) -> WorkingContext
     }.get(context.agent_role)
 
     state_keys = {
-        "task_id", "task_status", "current_node", "workflow_status", "dependency_state",
+        "task_id", "task_status", "current_node", "workflow_status", "runtime_status", "dependency_state",
         role_state_key,
     }
 
@@ -178,19 +178,19 @@ def _fit_final_budget(context: WorkingContext, max_chars: int) -> WorkingContext
             key: value for key, value in state.items() if key in state_keys
         }
         for key, value in list(result.items()):
-            if isinstance(value, list) and len(value) > 3:
-                result[key] = value[:3]
+            if isinstance(value, list) and len(value) > 2:
+                result[key] = value[:2]
         if role_state_key and role_state_key in result:
             value = result[role_state_key]
-            result[role_state_key] = value[:3] if isinstance(value, list) else value
-        return _bound_value(result, 56)
+            result[role_state_key] = value[:2] if isinstance(value, list) else value
+        return _bound_value(result, 40)
 
     def compact_item(item: Mapping[str, Any]) -> Dict[str, Any]:
         keys = ("kind", "value", "source_ref", "source_task", "source_run", "evidence_refs")
         return {key: item[key] for key in keys if key in item}
 
     def compact_refs(candidate: WorkingContext) -> list[str]:
-        state_keys = {"task_id", "task_status", "current_node", "dependency_state", role_state_key}
+        state_keys = {"task_id", "task_status", "current_node", "workflow_status", "runtime_status", "dependency_state", role_state_key}
         refs = [candidate.goal_source_ref, candidate.next_action_source_ref]
         refs.extend(
             value for key, value in candidate.current_state_refs.items()
@@ -223,7 +223,7 @@ def _fit_final_budget(context: WorkingContext, max_chars: int) -> WorkingContext
             return context
         context = WorkingContext(**{
             **context.to_mapping(),
-            "goal": _clip_text(context.goal, 56),
+            "goal": _clip_text(context.goal, 40),
             "next_action": (
                 "Resolve blocker."
                 if context.blockers

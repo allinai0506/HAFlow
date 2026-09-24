@@ -121,6 +121,7 @@ Task launch / retry / handoff / review request / verification request
 - 信息不足时丢弃受影响来源或 fail closed，不猜测、不跨 Run 拼接。
 - legacy 自动 Handoff 若上下游只有不同的 per-task `run_id` 且没有同一 execution 证据，则跳过；不能把节点依赖当作跨 Run 授权。
 - `working_context_source_heads` 按 `run_scope` 维护单调 source revision；source projection 变化时递增，编译器保存前必须在同一 source revision 上，迟到旧候选只能成为历史而不能成为 latest。
+- `working_context_source_clock` 由源表写入触发器维护；编译快照记录 clock，保存事务发现 clock 变化即重试，防止最终复读与写入之间的 TOCTOU。
 
 ## 5. 选择规则
 
@@ -215,7 +216,7 @@ BLOCKER > OPEN QUESTION > CURRENT GOAL > VERIFICATION
 - `run_scope`、`run_id`、`workflow_id`、`task_id`、`node_id`、`agent_role`；
 - `context_fingerprint`、`source_version`、`source_watermark`（当前 source revision）；
 - `payload_json`、`metrics_json`、`compiled_at`；
-- `working_context_source_heads` 保存每个 scope 的 source version 与单调 revision；
+- `working_context_source_heads` 保存每个 scope 的 source version 与单调 revision；`working_context_source_clock` 由源表触发器维护并参与保存竞态检查；
 - 按 task/role/compiled_at 和 task/compiled_at 建索引；
 - 不设置指向 workflow/task 的外键，保留审计快照。
 
@@ -226,7 +227,7 @@ BLOCKER > OPEN QUESTION > CURRENT GOAL > VERIFICATION
 - `BEGIN IMMEDIATE` 下检查最新行，竞争请求返回数据库 canonical row；
 - 不提供 update/delete API；
 - `get_working_context(context_id)`、`get_latest_working_context(task_id)`、`list_working_contexts(task_id)` 为公开读取入口；
-- 保存前完成身份、引用存在性、scope、脱敏和预算检查；旧 source revision 的迟到写入保留为历史但不能成为 latest。
+- 保存前完成身份、引用存在性、scope、脱敏和预算检查；旧 source revision 的迟到写入保留为历史但不能成为 latest。验证和 Eval 的 foreign 最新项不能遮蔽同 scope 的有效失败项。
 - Handoff 先创建 `CollaborationEvent`，再在事件仍为 `created` 时 attach 编译后的 context ref，确保快照包含该 Handoff 事实。
 
 ## 10. Fingerprint、Diff 与指标

@@ -421,6 +421,7 @@ def compile_working_context(
         "context_reuse": False,
         "context_changed": True,
         "boundary": str(boundary),
+        "source_clock": int(snapshot.get("source_clock") or 0),
     }
     context = WorkingContext(**{**context.to_mapping(), "metrics": metrics})
     metrics["context_chars"] = len(json.dumps(context.to_mapping(), ensure_ascii=False))

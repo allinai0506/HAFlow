@@ -483,6 +483,8 @@ def _handoff_candidates(
 ) -> List[Dict[str, Any]]:
     candidates = []
     for event in events:
+        if str(event.get("type") or "").upper() != "HANDOFF":
+            continue
         if not event.get("event_id"):
             continue
         if str(event.get("workflow_id") or "") != str(workflow_id):

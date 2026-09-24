@@ -4836,9 +4836,9 @@ def maybe_dispatch_node_handoffs(*, workflow_id, ready_id, dep_ids, launched,
             def legacy_pair_is_proven(candidate):
                 if target_has_explicit_scope or candidate.get("workflow_run_id") or candidate.get("execution_id"):
                     return _collab.collab_scope_for_task(candidate) == target_scope
-                if not target.get("run_id") and not candidate.get("run_id"):
-                    return True
-                return str(target.get("run_id") or "") == str(candidate.get("run_id") or "")
+                if not target.get("run_id") or not candidate.get("run_id"):
+                    return False
+                return str(target.get("run_id")) == str(candidate.get("run_id"))
 
             upstream = [t for t in tasks.values()
                         if isinstance(t, dict)
