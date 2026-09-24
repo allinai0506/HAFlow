@@ -411,6 +411,7 @@ def _claim_blocked_sla_action(task, now, poll_seconds=3.0):
                     lease_seconds=_sla.REPUSH_CLAIM_LEASE_SECONDS,
                 )
                 episode["repush_state"] = "in_flight"
+                episode["repush_inflight_at"] = now
                 episode["last_action_at"] = now
                 episode["last_repush_at"] = now
                 decision["claim_id"] = claim_id
@@ -474,6 +475,7 @@ def _release_stale_blocked_claim(task, decision, reason):
             if "repush_claim" in episode:
                 episode["repush_claim"] = None
                 episode["repush_state"] = "pending"
+                episode["repush_inflight_at"] = None
             if "human_escalation_claim" in episode:
                 episode["human_escalation_claim"] = None
                 episode["human_escalation_state"] = "pending"
@@ -568,6 +570,7 @@ def _blocked_sla_record_repush(task, decision, success, detail, now):
             episode["repushes"] = 1
             episode["delivery_attempts"] = int(episode.get("delivery_attempts") or 0) + 1
             episode["repush_state"] = "delivered" if success else "failed"
+            episode["repush_inflight_at"] = None
             episode["repush_claim"] = None
             episode["last_action_at"] = now
             episode["last_repush_at"] = now
@@ -1271,6 +1274,51 @@ def recover_infra_failed_tasks(workflow_id, tasks=None):
         )
 
     return recovered
+
+
+def process_crash_observations():
+    """Consume durable Sentinel crash observations through the task CAS."""
+    store = _get_store()
+    try:
+        events = store.list_events(event_type="agent_process_crash_observed")
+    except (AttributeError, OSError, RuntimeError, ValueError):
+        return 0
+    processed = 0
+    for event in events:
+        task_id = event.get("task_id")
+        if not task_id:
+            continue
+        task = store.get_task(task_id)
+        if not task or task.get("status") not in {
+            "dispatched", "working", "rework", "blocked"
+        }:
+            continue
+        payload = event.get("payload") or {}
+        try:
+            expected_status = payload.get("observed_status") or task.get("status")
+            expected_version = int(
+                payload.get("observed_version", task.get("version"))
+            )
+        except (TypeError, ValueError):
+            continue
+        try:
+            result = store.compare_and_set_task_transition(
+                task_id,
+                to_status="failed",
+                reason="agent_process_crash",
+                source="herdr-controller",
+                metadata={
+                    "sentinel_reason": "agent_process_crash",
+                    "crash_event_id": event.get("id"),
+                },
+                expected_status=expected_status,
+                expected_version=expected_version,
+            )
+        except (AttributeError, OSError, RuntimeError, ValueError):
+            continue
+        if result.get("accepted", False):
+            processed += 1
+    return processed
 
 
 def recover_router_isolation_tasks(workflow_id, tasks=None):

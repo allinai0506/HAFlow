@@ -24,6 +24,7 @@ MIN_COMPLETION_SECONDS = 60.0
 # the same sweep.
 MIN_SAMPLE_INTERVAL_SECONDS = 3.0
 MAX_OBSERVATION_AGE_SECONDS = 10.0
+MIN_CONFIRMATION_INTERVAL_SECONDS = 3.0
 REQUIRED_CONFIRMATIONS = 2
 NEUTRAL_TOKEN = "HERDR_TASK_DONE:<TASK_ID>"
 
@@ -55,6 +56,22 @@ def observation_age_satisfied(last_observed_at: float | None, now: float) -> boo
     return 0 <= age <= MAX_OBSERVATION_AGE_SECONDS
 
 
+def min_sample_interval_seconds() -> float:
+    """Return the minimum interval between two stable marker samples."""
+    import math
+
+    raw = os.environ.get("HERDR_MIN_SAMPLE_INTERVAL_SECONDS")
+    if raw is None:
+        return MIN_CONFIRMATION_INTERVAL_SECONDS
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return MIN_CONFIRMATION_INTERVAL_SECONDS
+    if math.isnan(value):
+        return MIN_CONFIRMATION_INTERVAL_SECONDS
+    return max(MIN_CONFIRMATION_INTERVAL_SECONDS, value)
+
+
 def sample_interval_satisfied(
     first_seen_at: float | None,
     last_sample_at: float | None,
@@ -63,7 +80,7 @@ def sample_interval_satisfied(
     if first_seen_at is None or last_sample_at is None:
         return False
     try:
-        return float(last_sample_at) - float(first_seen_at) >= MIN_SAMPLE_INTERVAL_SECONDS
+        return float(last_sample_at) - float(first_seen_at) >= min_sample_interval_seconds()
     except (TypeError, ValueError):
         return False
 

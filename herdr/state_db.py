@@ -1122,22 +1122,16 @@ def observe_completion(
                 vanished = False
             elif marker and was_present:
                 # Repeated reads in one sweep do not count as a second poll.
-                # If an older row was left with first_seen_at=NULL by the
-                # pre-fix state machine, initialize it here rather than
-                # allowing consecutive_samples to grow forever without ever
-                # becoming ready.
-                if first_seen is None:
-                    first_seen = now
-                    last_sample = now
-                    consecutive = 1
-                else:
+                # A marker already resident at the first observation remains
+                # residue until an explicit absent -> present cycle is seen.
+                if first_seen is not None:
                     if last_sample is None:
                         last_sample = last_seen
                     try:
                         interval_ok = (
                             last_sample is None
                             or float(now) - float(last_sample)
-                            >= completion_policy.MIN_SAMPLE_INTERVAL_SECONDS
+                            >= completion_policy.min_sample_interval_seconds()
                         )
                     except (TypeError, ValueError):
                         interval_ok = False
@@ -1259,13 +1253,24 @@ def get_completion_observation(
 
 
 def clear_completion_observation(
-    task_id: str, db_path: Optional[Path] = None,
+    task_id: str,
+    db_path: Optional[Path] = None,
+    *,
+    expected_status: str | None = None,
+    expected_version: int | None = None,
 ) -> bool:
+    """Clear an observation only when its observed task epoch still matches."""
     conn = get_db_connection(db_path)
     try:
-        conn.execute(
-            "DELETE FROM completion_observations WHERE task_id = ?", (task_id,)
-        )
+        query = "DELETE FROM completion_observations WHERE task_id = ?"
+        params: list[Any] = [task_id]
+        if expected_status is not None:
+            query += " AND observed_status = ?"
+            params.append(str(expected_status))
+        if expected_version is not None:
+            query += " AND observed_version = ?"
+            params.append(int(expected_version))
+        conn.execute(query, params)
         return conn.execute("SELECT changes()").fetchone()[0] == 1
     finally:
         conn.close()
