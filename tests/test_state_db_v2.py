@@ -113,6 +113,57 @@ def test_init_db_and_wal_mode(state_env):
         conn.close()
 
 
+def _open_state_db_worker(db_path, start_event, results):
+    start_event.wait(10)
+    try:
+        conn = state_db.get_db_connection(Path(db_path))
+        conn.execute("SELECT 1 FROM working_context_source_clock LIMIT 1").fetchall()
+        conn.close()
+        results.put(("ok", ""))
+    except Exception as exc:
+        results.put(("error", f"{type(exc).__name__}: {exc}"))
+
+
+def _run_concurrent_state_db_open(db_path, count=4):
+    context = multiprocessing.get_context("spawn")
+    start_event = context.Event()
+    results = context.Queue()
+    processes = [
+        context.Process(
+            target=_open_state_db_worker,
+            args=(str(db_path), start_event, results),
+        )
+        for _ in range(count)
+    ]
+    for process in processes:
+        process.start()
+    start_event.set()
+    for process in processes:
+        process.join(20)
+    return [results.get(timeout=2) for _ in processes]
+
+
+def test_empty_database_concurrent_initialization_is_reentrant(tmp_path):
+    db_path = tmp_path / "concurrent-empty.db"
+    results = _run_concurrent_state_db_open(db_path)
+    assert all(result[0] == "ok" for result in results), results
+
+
+def test_legacy_source_clock_concurrent_migration_is_reentrant(tmp_path):
+    db_path = tmp_path / "concurrent-legacy-clock.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE working_context_source_clock (id INTEGER PRIMARY KEY, revision INTEGER NOT NULL)"
+    )
+    conn.execute(
+        "INSERT INTO working_context_source_clock (id, revision) VALUES (1, 4)"
+    )
+    conn.commit()
+    conn.close()
+    results = _run_concurrent_state_db_open(db_path)
+    assert all(result[0] == "ok" for result in results), results
+
+
 def test_global_source_clock_schema_migrates_to_execution_scope(tmp_path):
     db_path = tmp_path / "legacy-source-clock.db"
     conn = sqlite3.connect(db_path)

@@ -716,6 +716,25 @@ def test_source_clock_still_detects_writes_in_same_workflow_scope(tmp_path: Path
     assert saved.get("_stale_snapshot") is True
 
 
+def test_workflow_update_makes_same_execution_scope_candidate_stale(tmp_path: Path):
+    from herdr.context_projection import _config
+
+    db = tmp_path / "state.db"
+    _seed_workflow(db, workflow_id="wf-a", scope="scope-a")
+    target = _seed_task(db, _task("task-workflow-clock", workflow_id="wf-a", scope="scope-a"))
+    context = _compile(db, target, "developer")
+    workflow = state_db.get_workflow("wf-a", db_path=db)
+    workflow["status"] = "paused"
+    workflow["current_stage"] = "test"
+    state_db.save_workflow(workflow, db_path=db)
+    candidate = dict(context.to_mapping())
+    candidate["context_id"] = "wc_workflow_scope_stale"
+    saved = state_db.save_working_context(
+        candidate, db_path=db, fingerprint_config=_config(None),
+    )
+    assert saved.get("_stale_snapshot") is True
+
+
 def test_source_backed_context_cannot_use_null_clock(tmp_path: Path):
     db = tmp_path / "state.db"
     _seed_workflow(db)
@@ -1280,6 +1299,37 @@ def test_verification_reserved_window_survives_event_noise(tmp_path: Path):
     context = _compile(db, target, "tester")
     assert any(verification["event_id"] in ref for ref in context.source_refs)
     assert any(item.get("value", {}).get("passed") is False for item in context.verification)
+
+
+def test_source_windows_apply_requested_limits_to_verification_and_eval(tmp_path: Path):
+    from herdr.context_sources import _read_source_snapshot
+    from herdr.eval_store import record_eval_result
+
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-source-window-limit", node="test", role="tester"))
+    ledger = TrajectoryLedger(db)
+    values = (False, True, "unknown", False, True, "unknown")
+    for index, value in enumerate(values):
+        verification = {"passed": value} if isinstance(value, bool) else {"status": value}
+        ledger.append_event({
+            "run_id": target["run_id"], "task_id": target["task_id"],
+            "workflow_id": target["workflow_id"], "event_type": "verification_completed",
+            "verification": verification, "timestamp": float(index),
+        })
+        record_eval_result(
+            target["run_id"], task_id=target["task_id"], workflow_id=target["workflow_id"],
+            revision=index + 1,
+            verification_passed=value if isinstance(value, bool) else None,
+            requirements_satisfied=True if not isinstance(value, bool) else None,
+            db_path=db,
+        )
+    snapshot = _read_source_snapshot(
+        workflow_id=target["workflow_id"], task_id=target["task_id"],
+        store=ObservationStore(db), db_path=db, max_events=2, max_evals=2,
+    )
+    assert len(snapshot["events"]) <= 2
+    assert len(snapshot["evals"]) <= 2
 
 
 def test_strict_failure_window_ignores_non_boolean_verification_values(tmp_path: Path):

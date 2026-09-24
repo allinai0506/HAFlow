@@ -20,7 +20,10 @@ import re
 import sqlite3
 import time
 import uuid
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
+
+import fcntl
 from typing import Any, Dict, List, Optional, Tuple
 
 from herdr.transitions import (
@@ -52,6 +55,17 @@ def get_default_db_path() -> Path:
 
 
 _INITIALIZED_DBS: set = set()
+
+
+@contextmanager
+def _schema_initialization_lock(path: Path):
+    lock_path = Path(f"{path}.schema.lock")
+    with lock_path.open("a+") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def _ensure_working_context_source_clock_schema(conn: sqlite3.Connection) -> None:
@@ -530,6 +544,17 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
                 ON CONFLICT(run_scope, workflow_id) DO UPDATE SET revision = revision + 1;
                 """
             ]
+            if source_table == "workflows":
+                statements.append(
+                    f"""
+                    INSERT INTO working_context_source_clock (run_scope, workflow_id, revision)
+                    SELECT h.run_scope, h.workflow_id, 1
+                    FROM working_context_source_heads h
+                    WHERE h.workflow_id = {workflow_expr}
+                      AND h.run_scope <> {scope_expr}
+                    ON CONFLICT(run_scope, workflow_id) DO UPDATE SET revision = revision + 1;
+                    """
+                )
             if source_table in task_scoped_tables:
                 statements.append(
                     f"""
@@ -822,15 +847,21 @@ def get_db_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
     )
     conn.row_factory = sqlite3.Row
     
-    # Configure high-concurrency PRAGMAs
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA busy_timeout=5000;")
-    conn.execute("PRAGMA synchronous=NORMAL;")
-    conn.execute("PRAGMA foreign_keys=ON;")
-
     path_key = str(path.resolve())
+    schema_lock = (
+        nullcontext()
+        if path_key in _INITIALIZED_DBS
+        else _schema_initialization_lock(path)
+    )
     try:
-        _ensure_schema(conn, path_key)
+        with schema_lock:
+            # Configure high-concurrency PRAGMAs while first-time schema
+            # initialization is serialized across processes.
+            conn.execute("PRAGMA busy_timeout=10000;")
+            conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute("PRAGMA synchronous=NORMAL;")
+            conn.execute("PRAGMA foreign_keys=ON;")
+            _ensure_schema(conn, path_key)
     except Exception:
         try:
             conn.close()

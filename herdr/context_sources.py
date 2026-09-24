@@ -120,10 +120,12 @@ def _merge_verification_events(
     allowed_runs: Set[str] | None = None,
     workflow_id: str | None = None,
     run_scope: str | None = None,
+    target_task_id: str | None = None,
     limit: int = 500,
 ) -> List[Dict[str, Any]]:
+    bounded_limit = max(1, int(limit))
     if not run_values:
-        return events
+        return events[:bounded_limit]
     placeholders = ",".join("?" for _ in run_values)
     task_ids = list(task_by_id or {})
     task_filter_parts = ["e.task_id IS NULL"]
@@ -161,10 +163,13 @@ def _merge_verification_events(
                    AND ({task_filter})
                    AND length(e.payload_json) <= 20000
             ) WHERE latest_rank = 1 OR strict_rank = 1 OR pass_rank = 1
-            ORDER BY sequence DESC, id DESC""",
-        (*run_values, workflow_id, *task_ids),
+            ORDER BY CASE WHEN task_id = ? THEN 0 ELSE 1 END,
+                     sequence DESC, id DESC
+            LIMIT ?""",
+        (*run_values, workflow_id, *task_ids, target_task_id, bounded_limit),
     ).fetchall()
     merged = {str(event.get("event_id")): event for event in events}
+    reserved_event_ids: set[str] = set()
     for row in rows:
         event = _decode_event_row(row)
         if (
@@ -181,8 +186,19 @@ def _merge_verification_events(
             )
         ):
             continue
-        merged[str(event.get("event_id"))] = event
-    return sorted(merged.values(), key=lambda item: (int(item.get("sequence") or 0), str(item.get("event_id"))), reverse=True)
+        event_id = str(event.get("event_id"))
+        reserved_event_ids.add(event_id)
+        merged[event_id] = event
+    ordered = sorted(
+        merged.values(),
+        key=lambda item: (
+            0 if str(item.get("event_id")) in reserved_event_ids else 1,
+            0 if target_task_id and str(item.get("task_id") or "") == str(target_task_id) else 1,
+            -int(item.get("sequence") or 0),
+            str(item.get("event_id")),
+        )
+    )
+    return ordered[:bounded_limit]
 
 
 def _read_source_snapshot(
@@ -305,6 +321,8 @@ def _read_source_snapshot(
             allowed_runs=allowed_runs,
             workflow_id=str(workflow_id),
             run_scope=run_scope,
+            target_task_id=str(task_id),
+            limit=int(max_events),
         )
 
         finding_rows = conn.execute(
@@ -506,8 +524,16 @@ def _read_source_snapshot(
                        AND length(COALESCE(er.evidence_json, 'null')) <= 20000
                        AND length(COALESCE(er.warnings_json, '[]')) <= 20000
                 ) WHERE latest_rank = 1 OR strict_rank = 1 OR pass_rank = 1
-                ORDER BY run_id ASC, revision DESC, eval_id ASC""",
-            (*run_values, str(workflow_id), *eval_task_ids),
+                ORDER BY CASE WHEN task_id = ? THEN 0 ELSE 1 END,
+                         run_id ASC, revision DESC, eval_id ASC
+                LIMIT ?""",
+            (
+                *run_values,
+                str(workflow_id),
+                *eval_task_ids,
+                str(task_id),
+                max(1, int(max_evals)),
+            ),
         ).fetchall()
         evals_by_key: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
         for row in eval_rows:
@@ -527,6 +553,12 @@ def _read_source_snapshot(
             key = (str(decoded.get("run_id") or ""), str(decoded.get("task_id") or ""))
             evals_by_key.setdefault(key, []).append(decoded)
         evals = [item for items in evals_by_key.values() for item in items]
+        evals.sort(key=lambda item: (
+            0 if str(item.get("task_id") or "") == str(task_id) else 1,
+            -int(item.get("revision") or 0),
+            str(item.get("eval_id") or ""),
+        ))
+        evals = evals[:max(1, int(max_evals))]
         source_clock_row = conn.execute(
             """
             SELECT revision
