@@ -236,9 +236,10 @@ def _merge_verification_events(
                AND ({task_filter})
                AND length(e.payload_json) > 20000
              ORDER BY CASE WHEN e.event_type IN (
-                                  'task_failed', 'agent_failed', 'run_failed', 'blocker',
-                                  'verification_completed', 'tests_completed'
-                              ) THEN 0 ELSE 1 END,
+                                  'task_failed', 'agent_failed', 'run_failed', 'blocker'
+                              ) THEN 0
+                            WHEN e.event_type IN ('verification_completed', 'tests_completed') THEN 1
+                            ELSE 2 END,
                       CASE WHEN e.task_id = ? THEN 0 ELSE 1 END,
                       e.sequence DESC, e.id DESC
              LIMIT ?""",
@@ -374,11 +375,15 @@ def _merge_verification_events(
             key=verification_order,
             default=None,
         )
-        selected = truncated or latest
-        if truncated is None and verification_strength(latest) == 0 and failure is not None and (
+        selected = latest
+        if failure is not None and (
             recovery is None or verification_order(recovery) <= verification_order(failure)
         ):
             selected = failure
+        elif verification_strength(latest) == 1:
+            selected = latest
+        elif truncated is not None:
+            selected = truncated
         preferred_event_ids.add(str(selected.get("event_id")))
 
     ordered = sorted(
@@ -877,13 +882,17 @@ def _read_source_snapshot(
                 key=lambda item: (int(item.get("revision") or 0), str(item.get("eval_id") or "")),
                 default=None,
             )
-            selected = truncated or latest
-            if truncated is None and latest.get("verification_passed") not in (0, 1) and failure is not None and (
+            selected = latest
+            if failure is not None and (
                 recovery is None
                 or (int(recovery.get("revision") or 0), str(recovery.get("eval_id") or ""))
                 <= (int(failure.get("revision") or 0), str(failure.get("eval_id") or ""))
             ):
                 selected = failure
+            elif latest.get("verification_passed") == 1:
+                selected = latest
+            elif truncated is not None:
+                selected = truncated
             preferred_eval_ids.add(str(selected.get("eval_id")))
         evals.sort(key=lambda item: (
             0 if str(item.get("eval_id")) in preferred_eval_ids else 1,

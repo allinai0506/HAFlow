@@ -3539,14 +3539,22 @@ def _validate_context_source_existence(
         if kind == "artifact":
             artifacts = []
             for key in ("artifacts", "artifact_refs", "changed_artifacts", "deliverables"):
-                artifacts.extend(values(key))
-            return len(parts) == 2 or (
-                len(parts) == 3 and parts[2].isdigit() and int(parts[2]) < len(artifacts)
+                for value in values(key):
+                    if isinstance(value, Mapping):
+                        value = value.get("ref") or value.get("path") or value.get("name")
+                    if value not in (None, ""):
+                        artifacts.append(value)
+            return (
+                len(parts) == 3
+                and parts[2].isdigit()
+                and int(parts[2]) < len(artifacts)
             )
         if kind == "blocker":
             blockers = []
             for key in ("blocker", "blocked_reason", "open_blockers", "blockers"):
-                blockers.extend(values(key))
+                blockers.extend(value for value in values(key) if value not in (None, ""))
+            if not blockers and data.get("status") == "blocked":
+                blockers = ["blocked"]
             if len(parts) == 2:
                 return bool(blockers)
             if parts[2] == "current":

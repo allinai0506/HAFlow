@@ -407,7 +407,8 @@ def compile_working_context(
                 latest_pass[key] = item
 
     for key, latest in list(latest_verification.items()):
-        if verification_strength(latest) != 0:
+        strength = verification_strength(latest)
+        if strength not in {0, 3}:
             continue
         failure = latest_failure.get(key)
         recovery = latest_pass.get(key)

@@ -346,6 +346,21 @@ def test_low_level_storage_normalizes_empty_fingerprint_config(tmp_path: Path):
         state_db.save_working_context(payload, db_path=db, fingerprint_config={})
 
 
+def test_storage_rejects_phantom_task_artifact_ref(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-storage-phantom-artifact"))
+    payload = dict(_compile(db, target, "developer").to_mapping())
+    payload["context_id"] = "wc_storage_phantom_artifact"
+    payload["artifacts"] = [{
+        "kind": "artifact", "value": {"ref": "phantom"},
+        "source_ref": f"task:{target['task_id']}:artifact:0",
+    }]
+    _bind_storage_fingerprint(payload)
+    with pytest.raises(ValueError, match="invalid derived target"):
+        state_db.save_working_context(payload, db_path=db)
+
+
 def test_storage_rejects_conflicting_verification_aliases(tmp_path: Path):
     db = tmp_path / "state.db"
     _seed_workflow(db)
@@ -365,15 +380,17 @@ def test_storage_rejects_conflicting_verification_aliases(tmp_path: Path):
 def test_storage_rejects_incomplete_aggregate_source_refs(tmp_path: Path):
     db = tmp_path / "state.db"
     _seed_workflow(db)
-    target = _seed_task(db, _task("task-storage-source-ref-closure"))
+    target = _seed_task(db, dict(
+        _task("task-storage-source-ref-closure"),
+        artifacts=[{"ref": "artifact-source-ref-closure"}],
+    ))
     payload = dict(_compile(db, target, "developer").to_mapping())
     payload["context_id"] = "wc_storage_source_ref_closure"
-    item_ref = payload["blockers"][0]["source_ref"] if payload.get("blockers") else None
-    if item_ref:
-        payload["source_refs"] = [ref for ref in payload.get("source_refs", []) if ref != item_ref]
-        _bind_storage_fingerprint(payload)
-        with pytest.raises(ValueError, match="source_refs"):
-            state_db.save_working_context(payload, db_path=db)
+    item_ref = payload["artifacts"][0]["source_ref"]
+    payload["source_refs"] = [ref for ref in payload.get("source_refs", []) if ref != item_ref]
+    _bind_storage_fingerprint(payload)
+    with pytest.raises(ValueError, match="source_refs"):
+        state_db.save_working_context(payload, db_path=db)
 
 
 def test_storage_rejects_kind_cap_violation(tmp_path: Path):
@@ -1594,6 +1611,37 @@ def test_oversized_failure_survives_oversized_decision_noise(tmp_path: Path):
     )
 
 
+def test_oversized_failure_survives_same_source_verification_noise(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-oversized-same-class-noise", node="test", role="tester"))
+    state_db.record_trajectory_event(
+        {
+            "run_id": target["run_id"], "task_id": target["task_id"],
+            "workflow_id": target["workflow_id"], "event_type": "task_failed",
+            "payload": {"reason": "x" * 21000},
+        },
+        db_path=db,
+    )
+    for index in range(301):
+        state_db.record_trajectory_event(
+            {
+                "run_id": target["run_id"], "task_id": target["task_id"],
+                "workflow_id": target["workflow_id"], "event_type": "verification_completed",
+                "payload": {"verification": {"status": "unknown"}, "blob": "x" * 21000},
+            },
+            db_path=db,
+        )
+    context = _compile(db, target, "tester")
+    assert context.blockers
+    assert any(
+        item.get("value", {}).get("source_truncated") is True
+        for item in context.blockers
+    )
+    assert context.verification
+    assert context.next_action != "Continue."
+
+
 def test_oversized_decision_payload_is_retained_as_truncated_marker(tmp_path: Path):
     db = tmp_path / "state.db"
     _seed_workflow(db)
@@ -1700,6 +1748,14 @@ def test_failure_window_survives_unrelated_event_noise(tmp_path: Path):
         })
     context = _compile(db, target, "developer")
     assert any(item.get("value", {}).get("reason") == "real failure" for item in context.blockers)
+
+
+def test_status_only_blocked_task_compiles_synthetic_blocker(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-status-only-blocked", status="blocked"))
+    context = _compile(db, target, "developer")
+    assert any(item.get("value") == "blocked" for item in context.blockers)
 
 
 def test_current_task_blocker_survives_sibling_failure_cap(tmp_path: Path):
@@ -1873,6 +1929,32 @@ def test_oversized_eval_evidence_cannot_clear_failure(tmp_path: Path):
     assert context.verification
     tight = _compile(db, target, "tester", config={"max_chars": 2500})
     assert tight.next_action != "Continue."
+
+
+def test_oversized_eval_failure_survives_same_source_unknown_noise(tmp_path: Path):
+    from herdr.eval_store import record_eval_result
+
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-oversized-eval-noise", node="test", role="tester"))
+    record_eval_result(
+        target["run_id"], task_id=target["task_id"], workflow_id=target["workflow_id"],
+        revision=1, verification_passed=False,
+        evidence=[{"blob": "x" * 21000}], db_path=db,
+    )
+    for revision in range(2, 103):
+        record_eval_result(
+            target["run_id"], task_id=target["task_id"], workflow_id=target["workflow_id"],
+            revision=revision, requirements_satisfied=True,
+            evidence=[{"blob": "x" * 21000}], db_path=db,
+        )
+    context = _compile(db, target, "tester")
+    assert any(
+        item.get("value", {}).get("verification_passed") is False
+        or item.get("value", {}).get("source_truncated") is True
+        for item in context.verification
+    )
+    assert not any(item.get("value", {}).get("verification_passed") is True for item in context.verification)
 
 
 def test_oversized_verification_payload_cannot_clear_failure(tmp_path: Path):
