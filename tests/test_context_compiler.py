@@ -635,7 +635,8 @@ def test_storage_rejects_empty_provenance_with_foreign_identity(tmp_path: Path):
     task["workflow_id"] = "wf"
     _seed_task(db, task)
     state_db.register_working_context_source(
-        run_scope="scope-a", workflow_id="wf", source_version="source", db_path=db,
+        run_scope="scope-a", workflow_id="wf", task_id="task-empty-provenance",
+        source_version="source", db_path=db,
     )
     with pytest.raises(ValueError, match="goal_source_ref|target task scope|run_id|fingerprint configuration"):
         state_db.save_working_context({
@@ -1817,6 +1818,112 @@ def test_same_execution_scope_source_heads_are_isolated_by_workflow(tmp_path: Pa
         candidate, db_path=db, fingerprint_config=_config(None),
     )
     assert saved.get("_stale_snapshot") is not True
+
+
+def test_parallel_tasks_in_same_execution_do_not_mark_each_other_stale(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db, workflow_id="wf-parallel", scope="exec-parallel")
+    task_a = _seed_task(db, _task("task-parallel-a", workflow_id="wf-parallel", scope="exec-parallel"))
+    task_b = _seed_task(db, _task("task-parallel-b", workflow_id="wf-parallel", scope="exec-parallel"))
+    context_a = _compile(db, task_a, "developer")
+    context_b = _compile(db, task_b, "developer")
+    assert context_a.source_version != context_b.source_version
+    candidate_a = dict(context_a.to_mapping())
+    candidate_a["context_id"] = "wc_parallel_a_replay"
+    candidate_b = dict(context_b.to_mapping())
+    candidate_b["context_id"] = "wc_parallel_b_replay"
+    from herdr.context_projection import _config
+    saved_a = state_db.save_working_context(
+        candidate_a, db_path=db, fingerprint_config=_config(None),
+    )
+    saved_b = state_db.save_working_context(
+        candidate_b, db_path=db, fingerprint_config=_config(None),
+    )
+    assert saved_a.get("_stale_snapshot") is not True
+    assert saved_b.get("_stale_snapshot") is not True
+    assert saved_a["context_id"] == context_a.context_id
+    assert saved_b["context_id"] == context_b.context_id
+
+
+def test_storage_rejects_total_items_over_budget_including_protected(tmp_path: Path):
+    from herdr.context_projection import _config
+
+    db = tmp_path / "state.db"
+    _seed_workflow(db, workflow_id="wf")
+    target = _task("task-budget-protected", scope="scope-a", run_id="run-a")
+    target["workflow_id"] = "wf"
+    _seed_task(db, target)
+    state_db.register_working_context_source(
+        run_scope="scope-a", workflow_id="wf", task_id="task-budget-protected",
+        source_version="source", db_path=db,
+    )
+    clock = _source_clock_revision(db, "scope-a", "wf")
+    payload = {
+        "context_id": "wc_budget_protected", "run_scope": "scope-a", "run_id": "run-a",
+        "workflow_id": "wf", "task_id": "task-budget-protected", "node_id": "review",
+        "agent_role": "developer", "goal": "goal", "current_state": {},
+        "findings": [], "artifacts": [], "evidence": [], "completed": [],
+        "decisions": [],
+        "blockers": [{"kind": "blocker", "value": "b", "source_ref": "task:task-budget-protected"}],
+        "open_questions": [{"kind": "open_question", "value": "q", "source_ref": "task:task-budget-protected"}],
+        "verification": [{"kind": "verification", "value": {"passed": True}, "source_ref": "task:task-budget-protected"}],
+        "handoffs": [], "next_action": "continue",
+        "goal_source_ref": "task:task-budget-protected",
+        "current_state_refs": {"task_id": "task:task-budget-protected"},
+        "source_refs": ["task:task-budget-protected"],
+        "context_fingerprint": "a" * 64, "source_version": "source",
+        "source_watermark": 1, "compiled_at": 1.0,
+        "metrics": {"source_clock": clock},
+    }
+    from herdr.context_models import _payload_digest
+    payload["metrics"]["payload_digest"] = _payload_digest(payload)
+    _bind_storage_fingerprint(payload)
+    with pytest.raises(ValueError, match="item budget"):
+        state_db.save_working_context(
+            payload, db_path=db,
+            fingerprint_config=_config({"max_items": 1}),
+        )
+
+
+def test_persistence_validation_does_not_decode_referenced_huge_payload(tmp_path, monkeypatch):
+    import json as json_module
+
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    upstream = _task("task-huge-upstream", node="implementation")
+    upstream["artifacts"] = ["artifact-huge-ref"]
+    upstream["notes"] = "x" * (5 * 1024 * 1024)
+    upstream = _seed_task(db, upstream)
+    target = _seed_task(db, _task("task-huge-downstream", node="review"))
+    context = _compile(db, target, "developer")
+    assert any(
+        str(item.get("source_task") or "") == upstream["task_id"]
+        for field in ("artifacts", "completed", "findings", "evidence", "decisions")
+        for item in getattr(context, field)
+    ) or "task-huge-upstream" in " ".join(context.source_refs), (
+        "expected downstream context to reference upstream task"
+    )
+    payload = dict(context.to_mapping())
+    payload["context_id"] = "wc_huge_ref_probe"
+    payload["goal"] = str(payload.get("goal") or "") + " "
+    _bind_storage_fingerprint(payload)
+
+    parsed_sizes = []
+    real_loads = json_module.loads
+
+    def spy_loads(s, *args, **kwargs):
+        if isinstance(s, str):
+            parsed_sizes.append(len(s))
+        return real_loads(s, *args, **kwargs)
+
+    monkeypatch.setattr(json_module, "loads", spy_loads)
+    from herdr.context_projection import _config
+    saved = state_db.save_working_context(
+        payload, db_path=db, fingerprint_config=_config(None)
+    )
+    assert saved["context_id"] == "wc_huge_ref_probe"
+    assert parsed_sizes, "expected some JSON parsing during save"
+    assert max(parsed_sizes) < 1024 * 1024
 
 
 def test_workflow_update_makes_same_execution_scope_candidate_stale(tmp_path: Path):
@@ -3232,7 +3339,8 @@ def test_storage_fingerprint_does_not_cross_run_scope(tmp_path: Path):
     target["workflow_id"] = "wf"
     _seed_task(db, target)
     state_db.register_working_context_source(
-        run_scope="scope-a", workflow_id="wf", source_version="source", db_path=db,
+        run_scope="scope-a", workflow_id="wf", task_id="task-reused",
+        source_version="source", db_path=db,
     )
 
     clock = _source_clock_revision(db, "scope-a", "wf")
@@ -3358,7 +3466,8 @@ def test_concurrent_context_writers_do_not_replace_newer_latest(tmp_path: Path):
     concurrent_task["workflow_id"] = "wf"
     _seed_task(db, concurrent_task)
     state_db.register_working_context_source(
-        run_scope="scope", workflow_id="wf", source_version="source", db_path=db,
+        run_scope="scope", workflow_id="wf", task_id="task-concurrent",
+        source_version="source", db_path=db,
     )
     clock = _source_clock_revision(db, "scope", "wf")
 
@@ -3420,7 +3529,8 @@ def test_storage_rejects_old_source_watermark_after_newer_snapshot(tmp_path: Pat
     version_task["workflow_id"] = "wf"
     _seed_task(db, version_task)
     state_db.register_working_context_source(
-        run_scope="scope", workflow_id="wf", source_version="v2", db_path=db,
+        run_scope="scope", workflow_id="wf", task_id="task-version",
+        source_version="v2", db_path=db,
     )
     clock = _source_clock_revision(db, "scope", "wf")
     def payload(context_id: str, fingerprint: str, version: str, watermark: int, created_at: float):

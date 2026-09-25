@@ -69,7 +69,7 @@ def _schema_initialization_lock(path: Path):
 
 
 def _ensure_working_context_source_heads_schema(conn: sqlite3.Connection) -> None:
-    """Create or migrate source heads to scope-plus-workflow identity."""
+    """Create or migrate source heads to task-specific identity."""
     table_info = conn.execute(
         "PRAGMA table_info(working_context_source_heads)"
     ).fetchall()
@@ -77,45 +77,39 @@ def _ensure_working_context_source_heads_schema(conn: sqlite3.Connection) -> Non
     primary_key = {
         str(row["name"]) for row in table_info if int(row["pk"] or 0) > 0
     }
-    if columns and primary_key != {"run_scope", "workflow_id"}:
-        conn.execute(
-            "ALTER TABLE working_context_source_heads RENAME TO working_context_source_heads_legacy"
-        )
+    if columns and (
+        primary_key != {"run_scope", "workflow_id", "task_id"}
+        or "task_id" not in columns
+    ):
+        legacy_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'working_context_source_heads_legacy'"
+        ).fetchone() is not None
+        if legacy_exists:
+            conn.execute("DROP TABLE IF EXISTS working_context_source_heads_legacy_main")
+            conn.execute(
+                "ALTER TABLE working_context_source_heads RENAME TO working_context_source_heads_legacy_main"
+            )
+        else:
+            conn.execute(
+                "ALTER TABLE working_context_source_heads RENAME TO working_context_source_heads_legacy"
+            )
         columns = set()
     conn.execute("""
         CREATE TABLE IF NOT EXISTS working_context_source_heads (
             run_scope TEXT NOT NULL,
             workflow_id TEXT NOT NULL DEFAULT '',
+            task_id TEXT NOT NULL DEFAULT '',
             source_version TEXT NOT NULL,
             revision INTEGER NOT NULL,
             updated_at REAL NOT NULL,
-            PRIMARY KEY (run_scope, workflow_id)
+            PRIMARY KEY (run_scope, workflow_id, task_id)
         );
     """)
-    if conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'working_context_source_heads_legacy'"
-    ).fetchone():
-        conn.execute(
-            """
-            INSERT INTO working_context_source_heads
-                (run_scope, workflow_id, source_version, revision, updated_at)
-            SELECT run_scope, COALESCE(workflow_id, ''), source_version, revision, updated_at
-            FROM working_context_source_heads_legacy
-            WHERE 1
-            ON CONFLICT(run_scope, workflow_id) DO UPDATE SET
-                source_version = CASE
-                    WHEN excluded.revision > working_context_source_heads.revision
-                    THEN excluded.source_version
-                    ELSE working_context_source_heads.source_version
-                END,
-                revision = MAX(working_context_source_heads.revision, excluded.revision),
-                updated_at = CASE
-                    WHEN excluded.revision > working_context_source_heads.revision
-                    THEN excluded.updated_at
-                    ELSE working_context_source_heads.updated_at
-                END
-            """
-        )
+    # NOTE: legacy execution-shared rows (run_scope, workflow_id) lack task_id
+    # and their source_version covers a different (pre-relevant-projection)
+    # identity. They are retained in *_legacy for audit but never promoted
+    # into the task-specific heads: each task registers its own projection
+    # version independently so parallel tasks cannot mark each other stale.
 
 
 def _ensure_working_context_source_clock_schema(conn: sqlite3.Connection) -> None:
@@ -620,7 +614,7 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
                 statements.append(
                     f"""
                     INSERT INTO working_context_source_clock (run_scope, workflow_id, revision)
-                    SELECT h.run_scope, h.workflow_id, 1
+                    SELECT DISTINCT h.run_scope, h.workflow_id, 1
                     FROM working_context_source_heads h
                     WHERE h.workflow_id = {workflow_expr}
                       AND h.run_scope <> {scope_expr}
@@ -631,7 +625,7 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
                 statements.append(
                     f"""
                     INSERT INTO working_context_source_clock (run_scope, workflow_id, revision)
-                    SELECT h.run_scope, h.workflow_id, 1
+                    SELECT DISTINCT h.run_scope, h.workflow_id, 1
                     FROM working_context_source_heads h
                     WHERE h.workflow_id = {workflow_expr}
                       AND NOT {source_clock_has_task(alias, source_table)}
@@ -660,7 +654,7 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
                     statements.append(
                         f"""
                         INSERT INTO working_context_source_clock (run_scope, workflow_id, revision)
-                        SELECT h.run_scope, h.workflow_id, 1
+                        SELECT DISTINCT h.run_scope, h.workflow_id, 1
                         FROM working_context_source_heads h
                         WHERE h.workflow_id = {old_workflow_expr}{old_head_filter}
                         ON CONFLICT(run_scope, workflow_id) DO UPDATE SET revision = revision + 1;
@@ -3495,42 +3489,262 @@ def _validate_context_source_existence(
             for evidence_ref in item.get("evidence_refs") or []:
                 refs.add(str(evidence_ref))
 
-    from herdr.trajectory import run_id_for_task
-
     taskless_allowed_runs: set[str] = set()
+    _ARTIFACT_KEYS = ("artifacts", "artifact_refs", "changed_artifacts", "deliverables")
+    _BLOCKER_KEYS = ("blocker", "blocked_reason", "open_blockers", "blockers")
+    _QUESTION_KEYS = ("open_questions", "questions", "question", "decision_question", "acceptance_gap")
+
+    def _length_expr(key: str) -> str:
+        return (
+            "COALESCE(CASE WHEN payload_json IS NULL THEN 0 "
+            "WHEN NOT json_valid(payload_json) THEN 0 "
+            f"WHEN json_type(payload_json, '$.{key}') = 'array' "
+            f"THEN COALESCE(json_array_length(payload_json, '$.{key}'), 0) "
+            f"WHEN json_extract(payload_json, '$.{key}') IS NULL THEN 0 "
+            f"WHEN json_extract(payload_json, '$.{key}') = '' THEN 0 "
+            "ELSE 1 END, 0)"
+        )
+
+    def _scalar_expr(key: str) -> str:
+        return (
+            "CASE WHEN json_valid(payload_json) "
+            f"THEN substr(json_extract(payload_json, '$.{key}'), 1, 4000) END"
+        )
+
+    def _raw_expr(key: str) -> str:
+        return (
+            "CASE WHEN json_valid(payload_json) "
+            f"THEN json_extract(payload_json, '$.{key}') END"
+        )
+
+    def _decode_list_field(raw):
+        if raw is None:
+            return []
+        if isinstance(raw, (int, float)):
+            return [raw] if raw not in (None, "") else []
+        if isinstance(raw, str):
+            stripped = raw.strip()
+            if stripped == "":
+                return []
+            if stripped.startswith("["):
+                if len(stripped) > 512 * 1024:
+                    return None
+                try:
+                    arr = json.loads(stripped)
+                except (TypeError, json.JSONDecodeError):
+                    return []
+                if isinstance(arr, list):
+                    return list(arr)
+                return [arr]
+            if stripped.startswith("{"):
+                if len(stripped) > 512 * 1024:
+                    return None
+                try:
+                    obj = json.loads(stripped)
+                except (TypeError, json.JSONDecodeError):
+                    return [raw]
+                return [obj]
+            return [raw]
+        return [raw]
+
     def task_record(task_id: str):
         row = conn.execute(
-            "SELECT task_id, workflow_id, node, stage, agent, status, stage_verdict, blocker, goal, payload_json FROM tasks WHERE task_id = ? LIMIT 1",
+            f"""SELECT task_id, workflow_id, node, stage, agent, status,
+                        stage_verdict, blocker, goal,
+                        {_scalar_expr("run_id")} AS j_run_id,
+                        {_scalar_expr("workflow_run_id")} AS j_workflow_run_id,
+                        {_scalar_expr("execution_id")} AS j_execution_id,
+                        {_scalar_expr("agent_role")} AS j_agent_role,
+                        {_scalar_expr("status")} AS j_status,
+                        {_scalar_expr("stage_verdict")} AS j_stage_verdict,
+                        {_scalar_expr("decision")} AS j_decision,
+                        {_scalar_expr("goal")} AS j_goal,
+                        {_scalar_expr("workflow_id")} AS j_workflow_id,
+                        {_scalar_expr("node")} AS j_node,
+                        {_scalar_expr("stage")} AS j_stage,
+                        {_scalar_expr("agent")} AS j_agent,
+                        {_length_expr("artifacts")} AS len_artifacts,
+                        {_length_expr("artifact_refs")} AS len_artifact_refs,
+                        {_length_expr("changed_artifacts")} AS len_changed_artifacts,
+                        {_length_expr("deliverables")} AS len_deliverables,
+                        {_length_expr("blocker")} AS len_blocker,
+                        {_length_expr("blocked_reason")} AS len_blocked_reason,
+                        {_length_expr("open_blockers")} AS len_open_blockers,
+                        {_length_expr("blockers")} AS len_blockers,
+                        {_length_expr("open_questions")} AS len_open_questions,
+                        {_length_expr("questions")} AS len_questions,
+                        {_length_expr("question")} AS len_question,
+                        {_length_expr("decision_question")} AS len_decision_question,
+                        {_length_expr("acceptance_gap")} AS len_acceptance_gap,
+                        {_raw_expr("artifacts")} AS raw_artifacts,
+                        {_raw_expr("artifact_refs")} AS raw_artifact_refs,
+                        {_raw_expr("changed_artifacts")} AS raw_changed_artifacts,
+                        {_raw_expr("deliverables")} AS raw_deliverables,
+                        {_raw_expr("blocker")} AS raw_blocker,
+                        {_raw_expr("blocked_reason")} AS raw_blocked_reason,
+                        {_raw_expr("open_blockers")} AS raw_open_blockers,
+                        {_raw_expr("blockers")} AS raw_blockers,
+                        {_raw_expr("open_questions")} AS raw_open_questions,
+                        {_raw_expr("questions")} AS raw_questions,
+                        {_raw_expr("question")} AS raw_question,
+                        {_raw_expr("decision_question")} AS raw_decision_question,
+                        {_raw_expr("acceptance_gap")} AS raw_acceptance_gap,
+                        CASE WHEN payload_json IS NULL OR json_valid(payload_json)
+                             THEN 1 ELSE 0 END AS payload_valid
+                 FROM tasks WHERE task_id = ? LIMIT 1""",
             (task_id,),
         ).fetchone()
         if row is None:
             return None
-        try:
-            payload = json.loads(row["payload_json"] or "{}")
-        except (TypeError, json.JSONDecodeError):
-            payload = {}
-        try:
-            effective_run_id = str(run_id_for_task({**payload, "task_id": task_id}))
-        except ValueError:
-            effective_run_id = ""
+        payload_valid = bool(row["payload_valid"])
+        def _pick(column_value, json_value):
+            if column_value not in (None, ""):
+                return column_value
+            if not payload_valid:
+                return json_value if json_value not in (None, "") else ""
+            return json_value if json_value not in (None, "") else ""
+        status_value = _pick(row["status"], row["j_status"])
+        stage_verdict_value = _pick(row["stage_verdict"], row["j_stage_verdict"])
+        blocker_value = _pick(row["blocker"], None)
+        goal_value = _pick(row["goal"], row["j_goal"])
+        run_value = row["j_run_id"] if payload_valid and row["j_run_id"] not in (None, "") else ""
+        effective_run_id = str(run_value) if run_value else f"run_{task_id}"
+        scope_value = (
+            (row["j_workflow_run_id"] if payload_valid else None)
+            or (row["j_execution_id"] if payload_valid else None)
+            or row["workflow_id"] or ""
+        )
+        lengths = {
+            "artifacts": int(row["len_artifacts"] or 0),
+            "artifact_refs": int(row["len_artifact_refs"] or 0),
+            "changed_artifacts": int(row["len_changed_artifacts"] or 0),
+            "deliverables": int(row["len_deliverables"] or 0),
+            "blocker": int(row["len_blocker"] or 0),
+            "blocked_reason": int(row["len_blocked_reason"] or 0),
+            "open_blockers": int(row["len_open_blockers"] or 0),
+            "blockers": int(row["len_blockers"] or 0),
+            "open_questions": int(row["len_open_questions"] or 0),
+            "questions": int(row["len_questions"] or 0),
+            "question": int(row["len_question"] or 0),
+            "decision_question": int(row["len_decision_question"] or 0),
+            "acceptance_gap": int(row["len_acceptance_gap"] or 0),
+        }
+        raw_map = {
+            "artifacts": row["raw_artifacts"],
+            "artifact_refs": row["raw_artifact_refs"],
+            "changed_artifacts": row["raw_changed_artifacts"],
+            "deliverables": row["raw_deliverables"],
+            "blocker": row["raw_blocker"],
+            "blocked_reason": row["raw_blocked_reason"],
+            "open_blockers": row["raw_open_blockers"],
+            "blockers": row["raw_blockers"],
+            "open_questions": row["raw_open_questions"],
+            "questions": row["raw_questions"],
+            "question": row["raw_question"],
+            "decision_question": row["raw_decision_question"],
+            "acceptance_gap": row["raw_acceptance_gap"],
+        }
+        lists: Dict[str, Optional[List[Any]]] = {}
+        if payload_valid:
+            for key, raw in raw_map.items():
+                lists[key] = _decode_list_field(raw)
+        else:
+            for key in raw_map:
+                lists[key] = []
+        # Column-backed blocker replaces payload blocker (OR semantics in
+        # legacy task_record): when the tasks.blocker column is set, it is
+        # the authoritative blocker value, not an addition to payload lists.
+        if row["blocker"] not in (None, ""):
+            lists["blocker"] = [row["blocker"]]
+            lengths["blocker"] = 1
         task_payload = {
-            **payload,
-            "status": row["status"] or payload.get("status"),
-            "stage_verdict": row["stage_verdict"] or payload.get("stage_verdict"),
-            "blocker": row["blocker"] or payload.get("blocker"),
-            "goal": row["goal"] or payload.get("goal"),
+            "status": status_value,
+            "stage_verdict": stage_verdict_value,
+            "blocker": blocker_value,
+            "goal": goal_value,
+            "decision": row["j_decision"] if payload_valid else None,
         }
         return {
             "task_id": task_id,
-            "workflow_id": row["workflow_id"] or payload.get("workflow_id"),
-            "node": row["node"] or payload.get("node"),
-            "stage": row["stage"] or payload.get("stage"),
-            "agent": row["agent"] or payload.get("agent"),
+            "workflow_id": row["workflow_id"] or (row["j_workflow_id"] if payload_valid else None),
+            "node": row["node"] or (row["j_node"] if payload_valid else None),
+            "stage": row["stage"] or (row["j_stage"] if payload_valid else None),
+            "agent": row["agent"] or (row["j_agent"] if payload_valid else None),
             "run_id": effective_run_id,
-            "agent_role": payload.get("agent_role"),
-            "scope": payload.get("workflow_run_id") or payload.get("execution_id") or row["workflow_id"],
+            "agent_role": row["j_agent_role"] if payload_valid else None,
+            "scope": scope_value,
             "payload": task_payload,
+            "_lengths": lengths,
+            "_lists": lists,
+            "_payload_valid": payload_valid,
         }
+
+    def _task_list_element_valid(task_id: str, key: str, local_idx: int, *, artifact: bool = False) -> bool:
+        if local_idx < 0:
+            return False
+        safe_key = str(key)
+        if safe_key not in {
+            "artifacts", "artifact_refs", "changed_artifacts", "deliverables",
+            "blocker", "blocked_reason", "open_blockers", "blockers",
+            "open_questions", "questions", "question", "decision_question",
+            "acceptance_gap",
+        }:
+            return False
+        row = conn.execute(
+            f"""SELECT
+                    CASE WHEN json_valid(payload_json)
+                         THEN json_type(payload_json, '$.{safe_key}') END AS jtype,
+                    CASE WHEN json_valid(payload_json)
+                         THEN json_extract(payload_json, '$.{safe_key}[{int(local_idx)}]') END AS arr_elem,
+                    CASE WHEN json_valid(payload_json)
+                         THEN substr(json_extract(payload_json, '$.{safe_key}'), 1, 4000) END AS scalar_val,
+                    CASE WHEN json_valid(payload_json)
+                         THEN length(COALESCE(json_extract(payload_json, '$.{safe_key}[{int(local_idx)}]'), '')) END AS arr_len
+                 FROM tasks WHERE task_id = ? LIMIT 1""",
+            (task_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        jtype = row["jtype"]
+        if jtype == "array":
+            elem = row["arr_elem"]
+            if elem is None:
+                return False
+            if isinstance(elem, str) and elem == "":
+                return False
+            if artifact and isinstance(elem, str) and elem.lstrip().startswith("{"):
+                try:
+                    decoded = json.loads(elem)
+                except (TypeError, json.JSONDecodeError):
+                    return True
+                if isinstance(decoded, Mapping):
+                    ref = decoded.get("ref") or decoded.get("path") or decoded.get("name")
+                    return ref not in (None, "")
+                return True
+            if artifact and isinstance(elem, str) and len(elem) >= 4000:
+                return True
+            return True
+        if int(local_idx) != 0:
+            return False
+        scalar = row["scalar_val"]
+        if scalar is None:
+            return False
+        if isinstance(scalar, str):
+            if scalar == "":
+                return False
+            if artifact and scalar.lstrip().startswith("{"):
+                if len(scalar) >= 4000:
+                    return True
+                try:
+                    decoded = json.loads(scalar)
+                except (TypeError, json.JSONDecodeError):
+                    return True
+                if isinstance(decoded, Mapping):
+                    ref = decoded.get("ref") or decoded.get("path") or decoded.get("name")
+                    return ref not in (None, "")
+                return True
+            return True
+        return True
 
     taskless_scope_by_run: Dict[str, Optional[str]] = {}
     for identity_row in conn.execute(
@@ -3669,35 +3883,117 @@ def _validate_context_source_existence(
         if len(parts) == 1:
             return True
         kind = parts[1]
+        task_id = str(task.get("task_id") or "")
         data = task.get("payload") if isinstance(task.get("payload"), Mapping) else task
-        values = lambda key: (
-            data.get(key) if isinstance(data.get(key), list) else [data.get(key)]
-            if data.get(key) is not None else []
-        )
+        raw_lists = task.get("_lists") if isinstance(task.get("_lists"), Mapping) else {}
+        lengths = task.get("_lengths") if isinstance(task.get("_lengths"), Mapping) else {}
+        def _values(key: str):
+            items = raw_lists.get(key)
+            if items is None:
+                return None
+            if isinstance(items, list):
+                return list(items)
+            return [items]
+        def _filtered(key: str, *, artifact: bool = False):
+            values = _values(key)
+            if values is None:
+                return None
+            result = []
+            for value in values:
+                item = value
+                if artifact and isinstance(item, Mapping):
+                    item = item.get("ref") or item.get("path") or item.get("name")
+                if item not in (None, ""):
+                    result.append(item)
+            return result
+        def _length(key: str) -> int:
+            filtered = _filtered(key)
+            if filtered is not None:
+                return len(filtered)
+            try:
+                return int(lengths.get(key) or 0)
+            except (TypeError, ValueError):
+                return 0
+        def _element_valid(key: str, filtered_index: int, *, artifact: bool = False) -> bool:
+            filtered = _filtered(key)
+            if filtered is not None:
+                if filtered_index < 0 or filtered_index >= len(filtered):
+                    return False
+                if artifact:
+                    item = filtered[filtered_index]
+                    if isinstance(item, Mapping):
+                        item = item.get("ref") or item.get("path") or item.get("name")
+                    return item not in (None, "")
+                return True
+            try:
+                size = int(lengths.get(key) or 0)
+            except (TypeError, ValueError):
+                return False
+            if filtered_index < 0 or filtered_index >= size:
+                return False
+            return _task_list_element_valid(task_id, key, filtered_index, artifact=artifact)
         if kind == "artifact":
-            artifacts = []
-            for key in ("artifacts", "artifact_refs", "changed_artifacts", "deliverables"):
-                for value in values(key):
-                    if isinstance(value, Mapping):
-                        value = value.get("ref") or value.get("path") or value.get("name")
-                    if value not in (None, ""):
-                        artifacts.append(value)
-            return (
-                len(parts) == 3
-                and parts[2].isdigit()
-                and int(parts[2]) < len(artifacts)
-            )
+            if len(parts) != 3 or not parts[2].isdigit():
+                return False
+            remaining = int(parts[2])
+            for key in _ARTIFACT_KEYS:
+                # Rebuild per-key filtered values exactly like candidates:
+                # Mapping artifacts count only when ref/path/name is present.
+                values = _values(key)
+                if values is None:
+                    size = _length(key)
+                    if remaining < size:
+                        return _task_list_element_valid(task_id, key, remaining, artifact=True)
+                    remaining -= size
+                    continue
+                filtered_count = 0
+                for value in values:
+                    item = value
+                    if isinstance(item, Mapping):
+                        item = item.get("ref") or item.get("path") or item.get("name")
+                    if item in (None, ""):
+                        continue
+                    if remaining == filtered_count:
+                        return True
+                    filtered_count += 1
+                remaining -= filtered_count
+            return False
         if kind == "blocker":
-            blockers = []
-            for key in ("blocker", "blocked_reason", "open_blockers", "blockers"):
-                blockers.extend(value for value in values(key) if value not in (None, ""))
-            if not blockers and data.get("status") in {"blocked", "failed"}:
-                blockers = [str(data.get("status"))]
-            if len(parts) == 2:
-                return bool(blockers)
-            if parts[2] == "current":
-                return bool(blockers)
-            return len(parts) == 3 and parts[2].isdigit() and int(parts[2]) < len(blockers)
+            collections = []
+            fallback_to_lengths = False
+            for key in _BLOCKER_KEYS:
+                filtered = _filtered(key)
+                if filtered is None:
+                    fallback_to_lengths = True
+                    break
+                collections.append(filtered)
+            if not fallback_to_lengths:
+                blockers: List[Any] = [item for group in collections for item in group]
+                if not blockers and str(data.get("status") or "") in {"blocked", "failed"}:
+                    blockers = [str(data.get("status"))]
+                if len(parts) == 2 or (len(parts) == 3 and parts[2] == "current"):
+                    return bool(blockers)
+                if len(parts) != 3 or not parts[2].isdigit():
+                    return False
+                index = int(parts[2])
+                return 0 <= index < len(blockers)
+            total = sum(_length(key) for key in _BLOCKER_KEYS)
+            has_status_fallback = (
+                total == 0 and str(data.get("status") or "") in {"blocked", "failed"}
+            )
+            if len(parts) == 2 or (len(parts) == 3 and parts[2] == "current"):
+                return bool(total > 0 or has_status_fallback)
+            if len(parts) != 3 or not parts[2].isdigit():
+                return False
+            remaining = int(parts[2])
+            if has_status_fallback:
+                return remaining == 0
+            for key in _BLOCKER_KEYS:
+                size = _length(key)
+                if remaining < size:
+                    return _task_list_element_valid(task_id, key, remaining, artifact=False)
+                remaining -= size
+            return False
         if kind == "completed":
             return len(parts) == 2 and data.get("status") in COMPLETED_TASK_STATUSES
         if kind == "decision":
@@ -3705,13 +4001,11 @@ def _validate_context_source_existence(
         if kind == "open_question":
             if len(parts) != 4 or not parts[2].isdigit() or not parts[3].isdigit():
                 return False
-            keys = ("open_questions", "questions", "question", "decision_question", "acceptance_gap")
-            if int(parts[2]) >= len(keys):
+            if int(parts[2]) >= len(_QUESTION_KEYS):
                 return False
-            question_values = [
-                value for value in values(keys[int(parts[2])]) if value not in (None, "")
-            ]
-            return int(parts[3]) < len(question_values)
+            key = _QUESTION_KEYS[int(parts[2])]
+            index = int(parts[3])
+            return _element_valid(key, index, artifact=False)
         return False
 
     for ref in sorted(refs):
@@ -3776,12 +4070,13 @@ def _validate_context_source_existence(
     head = conn.execute(
         """
         SELECT 1 FROM working_context_source_heads
-        WHERE run_scope = ? AND workflow_id = ?
+        WHERE run_scope = ? AND workflow_id = ? AND task_id = ?
         LIMIT 1
         """,
         (
             str(context.get("run_scope") or ""),
             str(context.get("workflow_id") or ""),
+            str(context.get("task_id") or ""),
         ),
     ).fetchone()
     if head is None:
@@ -3877,13 +4172,11 @@ def save_working_context(
         "completed", "artifacts", "evidence", "findings", "decisions", "blockers",
         "open_questions", "verification", "handoffs",
     )
-    protected_fields = {"blockers", "verification", "open_questions"}
-    nonprotected_count = sum(
+    total_items = sum(
         len(context.get(field) or [])
         for field in item_fields
-        if field not in protected_fields
     )
-    if max_items < 1 or nonprotected_count > max_items:
+    if max_items < 1 or total_items > max_items:
         raise ValueError("working context exceeds fingerprint item budget")
     kind_caps = fingerprint_config.get("max_items_per_kind") or {}
     for field in item_fields:
@@ -3986,11 +4279,12 @@ def save_working_context(
             """
             SELECT source_version, revision
             FROM working_context_source_heads
-            WHERE run_scope = ? AND workflow_id = ?
+            WHERE run_scope = ? AND workflow_id = ? AND task_id = ?
             """,
             (
                 str(context["run_scope"]),
                 str(context.get("workflow_id") or ""),
+                str(context["task_id"]),
             ),
         ).fetchone()
         if source_head is not None and (
@@ -4064,23 +4358,27 @@ def register_working_context_source(
     *,
     run_scope: str,
     workflow_id: Optional[str],
+    task_id: str,
     source_version: str,
     db_path: Optional[Path] = None,
 ) -> int:
-    """Register a source projection and return its monotonic scope revision."""
+    """Register a task-specific source projection and return its revision."""
     if not run_scope or not source_version:
         raise ValueError("source scope and version are required")
+    if not task_id:
+        raise ValueError("task-specific source head requires task_id")
     conn = get_db_connection(db_path)
     try:
         conn.execute("BEGIN IMMEDIATE;")
         normalized_workflow_id = str(workflow_id or "")
+        normalized_task_id = str(task_id)
         row = conn.execute(
             """
             SELECT source_version, revision
             FROM working_context_source_heads
-            WHERE run_scope = ? AND workflow_id = ?
+            WHERE run_scope = ? AND workflow_id = ? AND task_id = ?
             """,
-            (str(run_scope), normalized_workflow_id),
+            (str(run_scope), normalized_workflow_id, normalized_task_id),
         ).fetchone()
         if row is not None and row["source_version"] == str(source_version):
             revision = int(row["revision"] or 0)
@@ -4089,9 +4387,9 @@ def register_working_context_source(
             conn.execute(
                 """
                 INSERT INTO working_context_source_heads
-                    (run_scope, workflow_id, source_version, revision, updated_at)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(run_scope, workflow_id) DO UPDATE SET
+                    (run_scope, workflow_id, task_id, source_version, revision, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(run_scope, workflow_id, task_id) DO UPDATE SET
                     source_version = excluded.source_version,
                     revision = excluded.revision,
                     updated_at = excluded.updated_at
@@ -4099,6 +4397,7 @@ def register_working_context_source(
                 (
                     str(run_scope),
                     normalized_workflow_id,
+                    normalized_task_id,
                     str(source_version),
                     revision,
                     time.time(),
@@ -4126,11 +4425,12 @@ def working_context_source_is_current(
             """
             SELECT source_version, revision
             FROM working_context_source_heads
-            WHERE run_scope = ? AND workflow_id = ?
+            WHERE run_scope = ? AND workflow_id = ? AND task_id = ?
             """,
             (
                 str(context.get("run_scope") or ""),
                 str(context.get("workflow_id") or ""),
+                str(context.get("task_id") or ""),
             ),
         ).fetchone()
         return bool(

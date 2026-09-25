@@ -221,14 +221,31 @@ def test_partial_source_head_migration_recovers_legacy_rows(tmp_path):
     state_db.init_db(db_path)
     recovered = state_db.get_db_connection(db_path)
     try:
-        row = recovered.execute(
-            """
-            SELECT run_scope, workflow_id, revision
-            FROM working_context_source_heads
-            WHERE run_scope = 'recover-scope'
-            """
-        ).fetchone()
-        assert tuple(row) == ("recover-scope", "recover-wf", 5)
+        primary_key = {
+            row["name"]
+            for row in recovered.execute(
+                "PRAGMA table_info(working_context_source_heads)"
+            ).fetchall()
+            if int(row["pk"] or 0) > 0
+        }
+        assert primary_key == {"run_scope", "workflow_id", "task_id"}
+        # Execution-shared legacy rows lack task_id and are never promoted
+        # into task-specific heads; they stay in *_legacy for audit.
+        assert recovered.execute(
+            "SELECT COUNT(*) FROM working_context_source_heads"
+        ).fetchone()[0] == 0
+        legacy = recovered.execute(
+            "SELECT run_scope, workflow_id, revision FROM working_context_source_heads_legacy"
+        ).fetchall()
+        assert {(row["run_scope"], row["workflow_id"], row["revision"]) for row in legacy} >= {
+            ("recover-scope", "recover-wf", 5)
+        }
+        # Fresh per-task registration works after migration.
+        assert state_db.register_working_context_source(
+            run_scope="recover-scope", workflow_id="recover-wf",
+            task_id="task-after-migration", source_version="v2",
+            db_path=db_path,
+        ) == 1
     finally:
         recovered.close()
 
@@ -265,14 +282,17 @@ def test_legacy_source_head_primary_key_migrates_to_scope_workflow(tmp_path):
             ).fetchall()
             if int(row["pk"] or 0) > 0
         }
-        assert primary_key == {"run_scope", "workflow_id"}
-        row = migrated.execute(
+        assert primary_key == {"run_scope", "workflow_id", "task_id"}
+        assert migrated.execute(
+            "SELECT COUNT(*) FROM working_context_source_heads"
+        ).fetchone()[0] == 0
+        legacy_row = migrated.execute(
             """
             SELECT run_scope, workflow_id, source_version, revision
-            FROM working_context_source_heads
+            FROM working_context_source_heads_legacy
             """
         ).fetchone()
-        assert tuple(row) == ("legacy-scope", "legacy-wf", "v1", 3)
+        assert tuple(legacy_row) == ("legacy-scope", "legacy-wf", "v1", 3)
     finally:
         migrated.close()
 
@@ -380,14 +400,31 @@ def test_residual_legacy_source_head_uses_max_revision(tmp_path):
     state_db.init_db(db_path)
     migrated = state_db.get_db_connection(db_path)
     try:
-        row = migrated.execute(
+        primary_key = {
+            row["name"]
+            for row in migrated.execute(
+                "PRAGMA table_info(working_context_source_heads)"
+            ).fetchall()
+            if int(row["pk"] or 0) > 0
+        }
+        assert primary_key == {"run_scope", "workflow_id", "task_id"}
+        assert migrated.execute(
+            "SELECT COUNT(*) FROM working_context_source_heads"
+        ).fetchone()[0] == 0
+        legacy_row = migrated.execute(
             """SELECT source_version, revision, updated_at
-                 FROM working_context_source_heads
+                 FROM working_context_source_heads_legacy
                 WHERE run_scope = 'scope' AND workflow_id = 'wf'"""
         ).fetchone()
-        assert row["source_version"] == "legacy"
-        assert row["revision"] == 9
-        assert row["updated_at"] == 9.0
+        assert legacy_row["source_version"] == "legacy"
+        assert legacy_row["revision"] == 9
+        main_row = migrated.execute(
+            """SELECT source_version, revision, updated_at
+                 FROM working_context_source_heads_legacy_main
+                WHERE run_scope = 'scope' AND workflow_id = 'wf'"""
+        ).fetchone()
+        assert main_row["source_version"] == "current"
+        assert main_row["revision"] == 2
     finally:
         migrated.close()
 

@@ -113,6 +113,7 @@ def compile_working_context(
     snapshot["source_revision"] = state_db.register_working_context_source(
         run_scope=str(snapshot["run_scope"]),
         workflow_id=str(workflow_id),
+        task_id=str(task_id),
         source_version=str(snapshot["source_version"]),
         db_path=db_path or _db_path(store),
     )
@@ -567,6 +568,7 @@ def compile_working_context(
         fresh_snapshot["source_revision"] = state_db.register_working_context_source(
             run_scope=str(fresh_snapshot["run_scope"]),
             workflow_id=str(workflow_id),
+            task_id=str(task_id),
             source_version=str(fresh_snapshot["source_version"]),
             db_path=db_path or _db_path(store),
         )
