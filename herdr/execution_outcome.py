@@ -139,17 +139,22 @@ def _run_sibling_count(run_id: str, task_id: str, db_path: Optional[Path]) -> in
 def _latest_owned_eval(
     run_id: str,
     task_id: str,
+    workflow_id: str,
     *,
     before: float,
     db_path: Optional[Path],
 ) -> Optional[Dict[str, Any]]:
     """Latest eval before ``before`` attributable to this task, else None.
 
-    Ownership is proven per row: a task-specific eval must match BOTH
-    run_id and task_id; a taskless (legacy, task_id IS NULL) eval counts
-    only when no sibling task claims the same run_id. Newest non-owned
-    revisions are skipped, never borrowed.
+    Ownership is proven per row: a task-specific eval must match run_id,
+    task_id, AND explicit workflow_id; a taskless (legacy, task_id IS NULL)
+    eval counts only when no sibling task claims the same run_id AND its
+    explicit workflow_id matches. Newest non-owned revisions are skipped,
+    never borrowed. Unknown workflow_id never proves attribution.
     """
+    expected_wf = str(workflow_id or "")
+    if not expected_wf:
+        return None
     conn = state_db.get_db_connection(db_path)
     try:
         rows = conn.execute(
@@ -162,6 +167,8 @@ def _latest_owned_eval(
     sole_owner: Optional[bool] = None
     for row in rows:
         fact = _decode_eval_fact(row)
+        if str(fact.get("workflow_id") or "") != expected_wf:
+            continue
         owner = fact["task_id"]
         if owner:
             if str(owner) == str(task_id) and str(fact["run_id"]) == str(run_id):
@@ -207,20 +214,24 @@ def resolve_execution_outcome(
     if verdict is None:  # defensive; inputs checked above
         return None, "eval_incomplete"
     started, finished, wall = _wall_time(task)
+    human_raw = eval_fact.get("human_intervention_count")
+    if human_raw is None or isinstance(human_raw, bool):
+        return None, "eval_incomplete"
     try:
-        human = eval_fact.get("human_intervention_count")
-        human = int(human) if human is not None else 0
-        if human < 0:
-            human = 0
+        human = int(human_raw)
     except (TypeError, ValueError):
-        human = 0
+        return None, "eval_incomplete"
+    if human < 0:
+        return None, "eval_incomplete"
     history = task.get("status_history")
+    if not isinstance(history, list):
+        return None, "history_missing"
     try:
         version = int(task.get("version") or 0)
     except (TypeError, ValueError):
         version = 0
     outcome = {
-        "outcome_id": f"outcome_{task_id}",
+        "outcome_id": f"outcome_{task_id}_{run_id}",
         "run_id": run_id,
         "task_id": task_id,
         "workflow_id": workflow_id,
@@ -268,7 +279,13 @@ def finalize_execution_outcome(
         if existing is not None:
             return {"status": "exists", "reason": "already_settled", "outcome": existing}
     eval_fact = (
-        _latest_owned_eval(run_id, str(task_id), before=now, db_path=db_path)
+        _latest_owned_eval(
+            run_id,
+            str(task_id),
+            str(task.get("workflow_id") or ""),
+            before=now,
+            db_path=db_path,
+        )
         if run_id
         else None
     )

@@ -358,6 +358,69 @@ class OutcomeReadinessTest(unittest.TestCase):
         self.assertEqual(rankings[0]["blocked_rate"], 1.0)
 
 
+class OutcomeIdentityHotfixTest(unittest.TestCase):
+    """PR #100: outcome identity + fact-semantics hotfix (3 items only)."""
+
+    def setUp(self):
+        self.store, self.db_path = _make_env(self)
+
+    def test_outcome_id_binds_task_and_run(self):
+        _save_task(self.store, "t-hf1", "run-hf1a", "codex")
+        _record_eval(self.db_path, "run-hf1a", "t-hf1")
+        first = _settle(self.db_path, "t-hf1")
+        self.assertEqual(first["status"], "created")
+        self.assertEqual(first["outcome"]["outcome_id"],
+                         "outcome_t-hf1_run-hf1a")
+        _save_task(self.store, "t-hf1", "run-hf1b", "codex")
+        _record_eval(self.db_path, "run-hf1b", "t-hf1")
+        second = outcome.finalize_execution_outcome(
+            "t-hf1", db_path=self.db_path, finalized_at=CUTOFF - 9_000.0)
+        self.assertEqual(second["status"], "created")
+        self.assertEqual(second["outcome"]["outcome_id"],
+                         "outcome_t-hf1_run-hf1b")
+        self.assertIsNotNone(outcome.get_execution_outcome(
+            "t-hf1", "run-hf1a", self.db_path))
+        self.assertIsNotNone(outcome.get_execution_outcome(
+            "t-hf1", "run-hf1b", self.db_path))
+
+    def test_cross_workflow_eval_never_settles(self):
+        _save_task(self.store, "t-hf2", "run-hf2", "codex")
+        eval_store.record_eval_result(
+            "run-hf2", requirements_satisfied=True,
+            verification_passed=True, human_intervention_count=0,
+            final_status="completed", task_id="t-hf2",
+            workflow_id="wf-other", created_at=BASE_TS + 700.0,
+            db_path=self.db_path,
+        )
+        result = _settle(self.db_path, "t-hf2")
+        self.assertEqual(result["status"], "not_ready")
+        self.assertIsNone(result["outcome"])
+        self.assertIsNone(outcome.get_execution_outcome(
+            "t-hf2", "run-hf2", self.db_path))
+
+    def test_unknown_facts_never_solidify_to_zero(self):
+        _save_task(self.store, "t-hf3", "run-hf3", "codex")
+        eval_store.record_eval_result(
+            "run-hf3", requirements_satisfied=True,
+            verification_passed=True, human_intervention_count=None,
+            final_status="completed", task_id="t-hf3",
+            workflow_id="wf-hist", created_at=BASE_TS + 700.0,
+            db_path=self.db_path,
+        )
+        human_none = _settle(self.db_path, "t-hf3")
+        self.assertEqual(human_none["status"], "not_ready")
+        self.assertEqual(human_none["reason"], "eval_incomplete")
+        task = self.store.get_task("t-hf4")  # absent -> build without history
+        self.assertIsNone(task)
+        raw = dict(_save_task(self.store, "t-hf4", "run-hf4", "codex"))
+        raw.pop("status_history", None)
+        self.store.save_task(raw)
+        _record_eval(self.db_path, "run-hf4", "t-hf4")
+        missing_history = _settle(self.db_path, "t-hf4")
+        self.assertEqual(missing_history["status"], "not_ready")
+        self.assertEqual(missing_history["reason"], "history_missing")
+
+
 class OutcomeIndexTest(unittest.TestCase):
     def setUp(self):
         self.store, self.db_path = _make_env(self)
