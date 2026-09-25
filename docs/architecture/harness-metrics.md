@@ -17,13 +17,17 @@ policy.
 | observation count and bytes | `observations` metadata (`size_bytes`) |
 | findings | `trajectory_findings` |
 | ContextPack count/latest size | `context_packs` metadata and serialized fields |
-| WorkingContext compiles/reuse/change/latest size | `working_context_metric_events` and `working_contexts` |
+| WorkingContext compiles/reuse/change/latest size | `working_context_metric_events` and `working_contexts`, scoped strictly by `run_id` |
 | verification totals | `verification_completed` Trajectory payloads |
 | task status | Runtime `tasks` projection |
 
 Aggregation uses SQL counts/sums and does not read Observation content. Scalar
 fact queries are scoped by `run_id`; identity resolution additionally checks the
-persisted Task projection to prove unique ownership. Metrics do not write state.
+persisted Task projection to prove unique ownership. Task identity is resolved
+through SQL identity projection (`run_id` / `execution_id` / `workflow_run_id`
+via guarded `json_extract`); full Task payloads are never decoded during
+aggregation. WorkingContext metrics count only the queried Run's own compiles:
+sibling Tasks in the same execution are excluded. Metrics do not write state.
 
 Run identity is ownership-checked from the persisted Task projection: when a
 Run's Trajectory facts reference a Task whose persisted `run_id` belongs to

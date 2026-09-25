@@ -486,11 +486,16 @@ def _event_candidates(
     return artifacts, completed, verification, decisions, blockers
 
 
-# Source window for task payload artifacts: bounded before ContextItem
-# materialization. Role/state selection below keeps at most the per-kind
-# cap; this window only prevents unbounded fan-out from large payloads.
+# Source windows for list-like task payload fields: bounded before
+# ContextItem materialization. Role/state selection below keeps at most
+# the per-kind cap; these windows only prevent unbounded fan-out from
+# large payloads.
 TASK_ARTIFACT_SOURCE_PER_TASK = 64
 TASK_ARTIFACT_SOURCE_TOTAL = 1024
+TASK_BLOCKER_SOURCE_PER_TASK = 64
+TASK_BLOCKER_SOURCE_TOTAL = 512
+TASK_QUESTION_SOURCE_PER_TASK = 64
+TASK_QUESTION_SOURCE_TOTAL = 512
 
 
 def _task_artifact_candidates(tasks: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
@@ -541,6 +546,11 @@ def _task_candidates(
     decisions: List[Dict[str, Any]] = []
     questions: List[Dict[str, Any]] = []
     for task in tasks:
+        if (
+            len(blockers) >= TASK_BLOCKER_SOURCE_TOTAL
+            and len(questions) >= TASK_QUESTION_SOURCE_TOTAL
+        ):
+            break
         task_id = str(task.get("task_id") or "")
         task_ref = f"task:{task_id}"
         status = str(task.get("status") or "")
@@ -564,9 +574,14 @@ def _task_candidates(
                 blocker_values.extend(
                     value for value in _as_list(task.get(key)) if value not in (None, "")
                 )
+                if len(blocker_values) >= TASK_BLOCKER_SOURCE_PER_TASK:
+                    blocker_values = blocker_values[:TASK_BLOCKER_SOURCE_PER_TASK]
+                    break
             if status in {"blocked", "failed"} and not blocker_values:
                 blocker_values.append(status)
             for reason_index, reason in enumerate(blocker_values):
+                if len(blockers) >= TASK_BLOCKER_SOURCE_TOTAL:
+                    break
                 blockers.append(_item(
                     "blocker",
                     str(reason),
@@ -593,9 +608,11 @@ def _task_candidates(
         for question_index, key in enumerate((
             "open_questions", "questions", "question", "decision_question", "acceptance_gap",
         )):
+            if len(questions) >= TASK_QUESTION_SOURCE_TOTAL:
+                break
             question_values = [
                 value for value in _as_list(task.get(key)) if value not in (None, "")
-            ]
+            ][:TASK_QUESTION_SOURCE_PER_TASK]
             for value_index, value in enumerate(question_values):
                 questions.append(_item(
                     "open_question",

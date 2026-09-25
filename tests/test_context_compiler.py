@@ -509,6 +509,50 @@ def test_context_item_normalizes_nested_mappings_and_validates_evidence_refs():
         ContextItem.from_mapping([])
 
 
+def test_persistence_validation_does_not_decode_unrelated_payloads(tmp_path, monkeypatch):
+    import json as json_module
+
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-persist-bounded"))
+    conn = state_db.get_db_connection(db)
+    try:
+        conn.execute(
+            "INSERT INTO tasks (task_id, workflow_id, payload_json) VALUES (?, ?, ?)",
+            ("task-unrelated-huge", "wf-context", json_module.dumps({
+                "run_id": "run-unrelated-huge",
+                "notes": "x" * (5 * 1024 * 1024),
+            })),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    context = _compile(db, target, "developer")
+    # _compile already persists under its own context_id; forge a fresh id
+    # so this save runs the full persistence validation path.
+    payload = dict(context.to_mapping())
+    payload["context_id"] = "wc_persist_bounded_probe"
+    payload["goal"] = str(payload.get("goal") or "") + " "
+    _bind_storage_fingerprint(payload)
+
+    parsed_sizes = []
+    real_loads = json_module.loads
+
+    def spy_loads(s, *args, **kwargs):
+        if isinstance(s, str):
+            parsed_sizes.append(len(s))
+        return real_loads(s, *args, **kwargs)
+
+    monkeypatch.setattr(json_module, "loads", spy_loads)
+    from herdr.context_projection import _config
+    saved = state_db.save_working_context(
+        payload, db_path=db, fingerprint_config=_config(None)
+    )
+    assert saved["context_id"] == "wc_persist_bounded_probe"
+    assert parsed_sizes, "expected some JSON parsing during save"
+    assert max(parsed_sizes) < 1024 * 1024
+
+
 def test_storage_rejects_incomplete_aggregate_source_refs(tmp_path: Path):
     db = tmp_path / "state.db"
     _seed_workflow(db)
@@ -1134,6 +1178,22 @@ def test_malformed_observation_metadata_does_not_fail_compile(tmp_path: Path):
         conn.close()
     context = _compile(db, target, "developer")
     assert context.task_id == "task-bad-observation"
+
+
+def test_task_blocker_and_question_candidates_are_source_bounded():
+    from herdr.context_candidates import _task_candidates
+
+    tasks = [{
+        "task_id": "task-noisy",
+        "run_id": "run-noisy",
+        "status": "blocked",
+        "open_blockers": [f"blocker-{index}" for index in range(5000)],
+        "open_questions": [f"question-{index}" for index in range(5000)],
+        "created_at": 1.0,
+    }]
+    _, blockers, _, questions = _task_candidates(tasks, dependency_ids=[])
+    assert len(blockers) <= 512
+    assert len(questions) <= 512
 
 
 def test_task_artifact_candidates_are_source_bounded():
@@ -3513,7 +3573,7 @@ def test_run_metrics_count_reused_compile_invocations(tmp_path: Path):
     assert first.context_id == second.context_id
 
 
-def test_run_metrics_aggregate_sibling_tasks_in_explicit_scope(tmp_path: Path):
+def test_run_metrics_count_only_own_run_in_explicit_scope(tmp_path: Path):
     from herdr.metrics import get_run_metrics
 
     db = tmp_path / "state.db"
@@ -3523,7 +3583,8 @@ def test_run_metrics_aggregate_sibling_tasks_in_explicit_scope(tmp_path: Path):
     _compile(db, first, "developer")
     _compile(db, second, "developer")
     metrics = get_run_metrics(first["run_id"], db_path=db)
-    assert metrics.working_context_compiles >= 2
+    assert metrics.working_context_compiles == 1
+    assert metrics.task_id == "task-metrics-sibling-a"
 
 
 def test_legacy_run_metrics_do_not_aggregate_other_per_task_runs(tmp_path: Path):

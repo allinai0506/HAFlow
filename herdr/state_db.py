@@ -2402,37 +2402,24 @@ def aggregate_run_metric_rows(run_id: str, db_path: Optional[Path] = None) -> Di
     """Return scalar, run-scoped metric facts without loading evidence content."""
     conn = get_db_connection(db_path)
     try:
-        from herdr.trajectory import run_id_for_task
-
         scope_rows = []
         for task_identity in conn.execute(
-            "SELECT task_id, workflow_id, payload_json FROM tasks"
+            """SELECT task_id, workflow_id,
+                      COALESCE(NULLIF(CASE WHEN json_valid(payload_json) THEN json_extract(payload_json, '$.run_id') END, ''), 'run_' || task_id) AS run_id,
+                      COALESCE(NULLIF(CASE WHEN json_valid(payload_json) THEN json_extract(payload_json, '$.workflow_run_id') END, ''), NULLIF(CASE WHEN json_valid(payload_json) THEN json_extract(payload_json, '$.execution_id') END, ''), workflow_id, '') AS scope,
+                      CASE WHEN NULLIF(CASE WHEN json_valid(payload_json) THEN json_extract(payload_json, '$.workflow_run_id') END, '') IS NOT NULL OR NULLIF(CASE WHEN json_valid(payload_json) THEN json_extract(payload_json, '$.execution_id') END, '') IS NOT NULL
+                           THEN 1 ELSE 0 END AS explicit_scope
+               FROM tasks
+              WHERE COALESCE(NULLIF(CASE WHEN json_valid(payload_json) THEN json_extract(payload_json, '$.run_id') END, ''), 'run_' || task_id) = ?
+                AND (payload_json IS NULL OR json_valid(payload_json))""",
+            (str(run_id),),
         ).fetchall():
-            try:
-                task_payload = json.loads(task_identity["payload_json"] or "{}")
-            except (TypeError, json.JSONDecodeError):
-                continue
-            try:
-                effective_run_id = str(run_id_for_task({
-                    **task_payload, "task_id": task_identity["task_id"]
-                }))
-            except (TypeError, ValueError):
-                continue
-            if effective_run_id != str(run_id):
-                continue
             scope_rows.append({
                 "task_id": task_identity["task_id"],
                 "workflow_id": task_identity["workflow_id"],
-                "run_id": effective_run_id,
-                "scope": (
-                    task_payload.get("workflow_run_id")
-                    or task_payload.get("execution_id")
-                    or task_identity["workflow_id"] or ""
-                ),
-                "explicit_scope": bool(
-                    task_payload.get("workflow_run_id")
-                    or task_payload.get("execution_id")
-                ),
+                "run_id": str(task_identity["run_id"] or ""),
+                "scope": str(task_identity["scope"] or ""),
+                "explicit_scope": bool(task_identity["explicit_scope"]),
             })
         identity_ambiguous = len(scope_rows) > 1
         allowed_task_ids = {str(row["task_id"] or "") for row in scope_rows}
@@ -2550,11 +2537,6 @@ def aggregate_run_metric_rows(run_id: str, db_path: Optional[Path] = None) -> Di
                 "task_id": authoritative_scope["task_id"],
                 "workflow_id": authoritative_scope["workflow_id"],
             }
-            metric_scope = (
-                str(authoritative_scope["scope"] or run_id)
-                if authoritative_scope["explicit_scope"]
-                else str(run_id)
-            )
             metric_workflow_id = str(authoritative_scope["workflow_id"] or "") or None
         else:
             identity = conn.execute(
@@ -2569,7 +2551,6 @@ def aggregate_run_metric_rows(run_id: str, db_path: Optional[Path] = None) -> Di
                 """,
                 (run_id, run_id),
             ).fetchone()
-            metric_scope = run_id
             metric_workflow_id = (
                 identity["workflow_id"] if identity is not None else None
             )
@@ -2605,29 +2586,29 @@ def aggregate_run_metric_rows(run_id: str, db_path: Optional[Path] = None) -> Di
                    COALESCE(SUM(reused), 0) AS reused_count,
                    COALESCE(SUM(changed), 0) AS changed_count
               FROM working_context_metric_events
-             WHERE (run_id = ? OR run_scope = ?)
+             WHERE run_id = ?
                AND workflow_id IS ?
             """,
-            (run_id, metric_scope, metric_workflow_id),
+            (run_id, metric_workflow_id),
         ).fetchone()
         working_context_snapshots = conn.execute(
             """
             SELECT COUNT(*) AS snapshot_count
               FROM working_contexts
-             WHERE (run_id = ? OR run_scope = ?)
+             WHERE run_id = ?
                AND workflow_id IS ?
             """,
-            (run_id, metric_scope, metric_workflow_id),
+            (run_id, metric_workflow_id),
         ).fetchone()
         latest_working_context = conn.execute(
             """
             SELECT * FROM working_contexts
-             WHERE (run_id = ? OR run_scope = ?)
+             WHERE run_id = ?
                AND workflow_id IS ?
              ORDER BY source_watermark DESC, compiled_at DESC, rowid DESC
              LIMIT 1
             """,
-            (run_id, metric_scope, metric_workflow_id),
+            (run_id, metric_workflow_id),
         ).fetchone()
         working_context_compile_count = max(
             int(working_context_metrics["metric_count"] or 0),
@@ -3553,21 +3534,18 @@ def _validate_context_source_existence(
 
     taskless_scope_by_run: Dict[str, Optional[str]] = {}
     for identity_row in conn.execute(
-        "SELECT task_id, workflow_id, payload_json FROM tasks WHERE workflow_id = ?",
+        """SELECT task_id,
+                  COALESCE(NULLIF(CASE WHEN json_valid(payload_json) THEN json_extract(payload_json, '$.run_id') END, ''), 'run_' || task_id) AS run_id,
+                  COALESCE(NULLIF(CASE WHEN json_valid(payload_json) THEN json_extract(payload_json, '$.workflow_run_id') END, ''), NULLIF(CASE WHEN json_valid(payload_json) THEN json_extract(payload_json, '$.execution_id') END, ''), workflow_id, '') AS scope,
+                  CASE WHEN payload_json IS NULL OR json_valid(payload_json)
+                       THEN 1 ELSE 0 END AS identity_valid
+           FROM tasks WHERE workflow_id = ?""",
         (str(context.get("workflow_id") or ""),),
     ).fetchall():
-        try:
-            identity_payload = json.loads(identity_row["payload_json"] or "{}")
-            identity_run = str(run_id_for_task({
-                **identity_payload, "task_id": identity_row["task_id"]
-            }))
-        except (TypeError, ValueError, json.JSONDecodeError):
+        if not identity_row["identity_valid"]:
             continue
-        identity_scope = str(
-            identity_payload.get("workflow_run_id")
-            or identity_payload.get("execution_id")
-            or identity_row["workflow_id"] or ""
-        )
+        identity_run = str(identity_row["run_id"] or "")
+        identity_scope = str(identity_row["scope"] or "")
         if not identity_run or not identity_scope:
             continue
         previous = taskless_scope_by_run.get(identity_run, "__missing__")
@@ -3584,18 +3562,14 @@ def _validate_context_source_existence(
     ):
         taskless_allowed_runs.add(str(target_record.get("run_id") or ""))
     if str(context.get("run_scope") or "") != str(context.get("workflow_id") or ""):
-        for scoped_task_id in (
-            row["task_id"] for row in conn.execute(
-                "SELECT task_id FROM tasks WHERE workflow_id = ?",
-                (str(context.get("workflow_id") or ""),),
-            ).fetchall()
-        ):
-            scoped_task = task_record(str(scoped_task_id))
-            if (
-                scoped_task
-                and str(scoped_task.get("scope") or "") == str(context.get("run_scope") or "")
-            ):
-                taskless_allowed_runs.add(str(scoped_task.get("run_id") or ""))
+        for scoped_row in conn.execute(
+            """SELECT COALESCE(NULLIF(CASE WHEN json_valid(payload_json) THEN json_extract(payload_json, '$.run_id') END, ''), 'run_' || task_id) AS run_id
+               FROM tasks WHERE workflow_id = ?
+                 AND COALESCE(NULLIF(CASE WHEN json_valid(payload_json) THEN json_extract(payload_json, '$.workflow_run_id') END, ''), NULLIF(CASE WHEN json_valid(payload_json) THEN json_extract(payload_json, '$.execution_id') END, ''), workflow_id, '') = ?
+                 AND (payload_json IS NULL OR json_valid(payload_json))""",
+            (str(context.get("workflow_id") or ""), str(context.get("run_scope") or "")),
+        ).fetchall():
+            taskless_allowed_runs.add(str(scoped_row["run_id"] or ""))
 
     def record_scope(record):
         task_id = record.get("task_id")

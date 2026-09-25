@@ -297,6 +297,73 @@ def test_task_row_absent_fails_closed_without_event_identity(tmp_path: Path):
     assert metrics.trajectory_events == 0
 
 
+def test_metrics_identity_lookup_does_not_decode_unrelated_payloads(tmp_path, monkeypatch):
+    import json as json_module
+
+    db_path = tmp_path / "state.db"
+    state_db.save_task(_task("run-measured", task_id="task-measured"), db_path=db_path)
+    conn = state_db.get_db_connection(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO tasks (task_id, workflow_id, payload_json) VALUES (?, ?, ?)",
+            ("task-unrelated-huge", "wf-1", json_module.dumps({
+                "run_id": "run-unrelated-huge",
+                "notes": "x" * (5 * 1024 * 1024),
+            })),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    parsed_sizes = []
+    real_loads = json_module.loads
+
+    def spy_loads(s, *args, **kwargs):
+        if isinstance(s, str):
+            parsed_sizes.append(len(s))
+        return real_loads(s, *args, **kwargs)
+
+    monkeypatch.setattr(json_module, "loads", spy_loads)
+    metrics = get_run_metrics("run-measured", db_path=db_path, now=20.0)
+    assert metrics.task_id == "task-measured"
+    assert parsed_sizes, "expected some JSON parsing during aggregation"
+    assert max(parsed_sizes) < 1024 * 1024
+
+
+def test_run_metrics_count_only_own_run_working_contexts(tmp_path: Path):
+    from herdr.context_compiler import compile_working_context
+    from herdr.context_projection import _config
+    from herdr.observation import ObservationStore
+
+    db_path = tmp_path / "state.db"
+    state_db.save_workflow(
+        {"workflow_id": "wf-1", "title": "run scope", "status": "running",
+         "config": {"nodes": [{"id": "implementation"}, {"id": "review"}]}},
+        db_path=db_path,
+    )
+    for task_id, run_id, node in (
+        ("task-a", "run-a", "implementation"),
+        ("task-b", "run-b", "review"),
+    ):
+        state_db.save_task({
+            "task_id": task_id, "run_id": run_id, "workflow_id": "wf-1",
+            "execution_id": "exec-1", "node": node, "agent": "developer",
+            "status": "dispatched", "goal": "scope check", "created_at": 1.0,
+        }, db_path=db_path)
+        context = compile_working_context(
+            workflow_id="wf-1", task_id=task_id, agent_role="developer",
+            store=ObservationStore(db_path),
+        )
+        state_db.save_working_context(
+            dict(context.to_mapping()), db_path=db_path,
+            fingerprint_config=_config(None),
+        )
+
+    metrics = get_run_metrics("run-a", db_path=db_path, now=20.0)
+    assert metrics.working_context_compiles == 1
+    assert metrics.task_id == "task-a"
+
+
 def test_malformed_context_pack_degrades_only_latest_size_metric(tmp_path: Path):
     db_path = tmp_path / "bad-context-pack.db"
     state_db.save_task(_task("run-bad-context-pack", status="working"), db_path=db_path)
