@@ -2,6 +2,7 @@
 
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -118,26 +119,60 @@ def _get_store():
     return get_state_store()
 
 
-def update_statuses(changes):
+def update_statuses(changes, expected=None, epochs=None, versions=None):
+    """Apply legacy Sentinel changes through one atomic status/version CAS.
+
+    The read above the call is only used to build an audit snapshot.  The
+    authoritative compare and transition happen in the StateStore transaction;
+    a concurrent human/Controller write therefore rejects the candidate rather
+    than overwriting it.
+    """
     if not changes:
         return False
 
     store = _get_store()
     changed = False
+    expected = expected or {}
+    epochs = epochs or {}
+    versions = versions or {}
 
     for task_id, (new_status, reason) in changes.items():
         authoritative = store.get_task(task_id)
         if not authoritative:
-            print(f"[SENTINEL SKIP] task {task_id} missing from authoritative StateStore", file=sys.stderr, flush=True)
+            print(
+                f"[SENTINEL SKIP] task {task_id} missing from authoritative StateStore",
+                file=sys.stderr,
+                flush=True,
+            )
             continue
 
         old_status = authoritative.get("status")
         if old_status not in ACTIVE:
             continue
-
+        observed_status = expected.get(task_id, old_status)
+        observed_version = versions.get(task_id, authoritative.get("version"))
+        epoch_pair = epochs.get(task_id)
+        observed_updated = None
+        if epoch_pair is not None:
+            observed_updated = epoch_pair[1]
+        if reason == "completion_sentinel":
+            try:
+                completion = store.compare_and_set_completion_transition(
+                    task_id,
+                    reason=reason,
+                    source="herdr-sentinel",
+                    expected_status=observed_status,
+                    expected_version=observed_version,
+                    expected_updated_at=observed_updated,
+                    now=time.time(),
+                )
+            except (AttributeError, NotImplementedError, TypeError, ValueError, RuntimeError):
+                completion = {"accepted": False, "reason": "atomic_completion_unavailable"}
+            if completion.get("accepted", False):
+                changed = True
+            continue
         try:
-            from herdr import kernel
-            kernel.transition_task(
+            result = store.compare_and_set_task_transition(
                 task_id=task_id,
                 to_status=new_status,
                 reason=reason,
@@ -146,22 +181,107 @@ def update_statuses(changes):
                     "sentinel_reason": reason,
                     "sentinel_updated_at": int(time.time()),
                 },
-                store=store,
+                expected_status=observed_status,
+                expected_version=observed_version,
+                expected_updated_at=observed_updated,
             )
-            changed = True
-            print(
-                f"[SENTINEL STATE] {task_id}: "
-                f"{old_status} -> {new_status} ({reason})",
-                flush=True,
-            )
+        except (AttributeError, TypeError):
+            # Small test doubles from older integrations may not expose CAS;
+            # production StateStore always does.  Keep the compatibility path
+            # explicit rather than silently falling back in the real store.
+            from herdr import kernel
+            try:
+                result = kernel.transition_task(
+                    task_id=task_id,
+                    to_status=new_status,
+                    reason=reason,
+                    source="herdr-sentinel",
+                    metadata={"sentinel_reason": reason},
+                    store=store,
+                )
+            except Exception as exc:
+                print(
+                    f"[SENTINEL ERROR] transition failed for {task_id}: {exc}; "
+                    "task status preserved",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                continue
         except Exception as exc:
             print(
-                f"[SENTINEL ERROR] transition failed for {task_id}: {exc}; task status preserved as {old_status}",
+                f"[SENTINEL ERROR] transition failed for {task_id}: {exc}; "
+                "task status preserved",
                 file=sys.stderr,
                 flush=True,
             )
+            continue
+        if not result.get("accepted", True):
+            _record_sentinel_event(
+                store,
+                authoritative,
+                "completion_sentinel_cas_rejected",
+                {
+                    "expected_status": observed_status,
+                    "expected_version": observed_version,
+                    "authoritative_status": old_status,
+                    "authoritative_version": authoritative.get("version"),
+                    "reason": reason,
+                },
+            )
+            print(
+                f"[SENTINEL CAS REJECTED] task={task_id} "
+                f"expected={observed_status}@{observed_version} "
+                f"authoritative={old_status}@{authoritative.get('version')}",
+                flush=True,
+            )
+            continue
+        changed = True
+        print(
+            f"[SENTINEL STATE] {task_id}: "
+            f"{old_status} -> {new_status} ({reason})",
+            flush=True,
+        )
 
     return changed
+
+
+def observe_crash_pattern(task, *, changes, expected, versions):
+    """Record and enqueue an infrastructure crash transition atomically later."""
+    task_id = (task or {}).get("task_id")
+    if not task_id:
+        return False
+    _record_sentinel_event(
+        _get_store(),
+        task,
+        "agent_process_crash_observed",
+        {
+            "next_status": "failed",
+            "reason": "agent_process_crash",
+            "observed_status": task.get("status"),
+            "observed_version": task.get("version"),
+        },
+    )
+    changes[task_id] = ("failed", "agent_process_crash")
+    expected[task_id] = task.get("status")
+    versions[task_id] = task.get("version")
+    return True
+
+
+def _record_sentinel_event(store, task, event_type, payload):
+    """Best-effort observation event (never blocks the sweep)."""
+    try:
+        task = task or {}
+        store.record_event(
+            event_type,
+            dict(payload or {}),
+            workflow_id=task.get("workflow_id"),
+            node_id=task.get("node") or task.get("stage"),
+            task_id=task.get("task_id"),
+            agent_id=task.get("agent"),
+            source="herdr-sentinel",
+        )
+    except (OSError, ValueError, RuntimeError, AttributeError, sqlite3.Error) as exc:
+        print(f"[SENTINEL EVENT WARN] {event_type}: {exc}", file=sys.stderr, flush=True)
 
 
 def restart_controller():
@@ -322,7 +442,16 @@ def main():
 
     while True:
         store = _get_store()
-        tasks = store.list_tasks()
+        try:
+            tasks = store.list_tasks()
+        except sqlite3.Error as exc:
+            print(
+                f"[SENTINEL DB WARN] list_tasks failed; preserving the loop: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+            time.sleep(POLL_SECONDS)
+            continue
         now = time.time()
         changes = {}
 
@@ -344,30 +473,102 @@ def main():
             blocker_marker = f"HERDR_TASK_BLOCKER:{task_id}"
             orchestration_marker = f"HERDR_ORCH_TASK:{task_id}"
 
-            if status in {"dispatched", "working"} and done_marker in screen:
-                changes[task_id] = (
-                    "agent_done",
-                    "completion_sentinel",
-                )
-                continue
+            # FR-1: Sentinel is an observer.  It records a durable sample and
+            # never promotes a task; Controller consumes the sample and owns
+            # the final CAS-backed transition.
+            if status in {"dispatched", "working"}:
+                from herdr import completion as _comp
 
-            # Inner loop exhausted: agent self-reported a blocker escalation.
-            # Transition to 'blocked' so the Coordinator can route to human/Coordinator.
+                marker_present = done_marker in screen
+                agent_state = agent_status(pane_id)
+                try:
+                    observation = store.observe_completion(
+                        task_id,
+                        marker_present=marker_present,
+                        agent_status=agent_state,
+                        observed_at=now,
+                    )
+                except (AttributeError, OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
+                    _record_sentinel_event(
+                        store,
+                        task,
+                        "completion_observation_failed",
+                        {"reason": str(exc)[:300]},
+                    )
+                    observation = {}
+                if observation.get("epoch_changed"):
+                    _record_sentinel_event(
+                        store,
+                        task,
+                        "completion_observation_reset",
+                        {"reason": "task_epoch_changed", "version": task.get("version")},
+                    )
+                if observation.get("uncertain"):
+                    _record_sentinel_event(
+                        store,
+                        task,
+                        "completion_uncertain",
+                        {"reason": "marker_vanished", "task_id": task_id},
+                    )
+                signal = _comp.classify_signal(marker_present, agent_state)
+                if signal == "unknown" and marker_present:
+                    _record_sentinel_event(
+                        store,
+                        task,
+                        "agent_status_unknown",
+                        {"task_id": task_id, "reason": "agent_status_unreadable"},
+                    )
+                elif signal == "early":
+                    early_state = state.setdefault("completion", {}).setdefault(task_id, {})
+                    early_n = int(early_state.get("early_count") or 0) + 1
+                    early_state["early_count"] = early_n
+                    _record_sentinel_event(
+                        store,
+                        task,
+                        "early_done_signal",
+                        {"task_id": task_id, "count": early_n, "agent_status": agent_state},
+                    )
+                    if early_n >= 3:
+                        print(
+                            f"[SENTINEL EARLY] task={task_id} marker present while busy; "
+                            "Controller will arbitrate, no Sentinel flip",
+                            flush=True,
+                        )
+                if observation.get("ready"):
+                    print(
+                        f"[SENTINEL COMPLETION READY] task={task_id} "
+                        f"version={observation.get('observed_version')}; "
+                        "Controller CAS pending",
+                        flush=True,
+                    )
+
+            # Inner loop exhausted: record the observation only.  The
+            # Controller transitions the task to blocked and owns arbitration.
             if status in {"dispatched", "working"} and blocker_marker in screen:
-                changes[task_id] = (
-                    "blocked",
-                    "inner_loop_exhausted",
+                _record_sentinel_event(
+                    store,
+                    task,
+                    "blocked_marker_observed",
+                    {
+                        "next_status": "blocked",
+                        "reason": "inner_loop_exhausted",
+                        "observed_status": status,
+                        "observed_version": task.get("version"),
+                        "observed_updated_at": task.get("updated_at"),
+                    },
                 )
                 print(
-                    f"[SENTINEL BLOCKER] task={task_id} pane={pane_id} — inner loop exhausted, escalating to Coordinator",
+                    f"[SENTINEL BLOCKER] task={task_id} pane={pane_id} — inner loop exhausted, observation sent to Controller",
                     flush=True,
                 )
                 continue
 
             if any(pattern in screen for pattern in CRASH_PATTERNS):
-                changes[task_id] = (
-                    "failed",
-                    "agent_process_crash",
+                observe_crash_pattern(
+                    task,
+                    changes=changes,
+                    expected=state.setdefault("crash_expected", {}),
+                    versions=state.setdefault("crash_versions", {}),
                 )
                 continue
 
@@ -401,7 +602,62 @@ def main():
 
         fuse_changed = check_dispatch_fuse(tasks, state)
 
-        if update_statuses(changes) or fuse_changed:
+        expected = state.get("completion_expected") or {}
+        epochs = state.get("completion_epochs") or {}
+        versions = state.get("crash_versions") or {}
+        elapsed_map = state.get("completion_elapsed") or {}
+        # Only completion_sentinel writes carry CAS context; other reasons
+        # (blocker/crash/fuse) keep the legacy authoritative re-check.
+        cas_expected = {
+            tid: expected.get(tid)
+            for tid, (_st, reason) in changes.items()
+            if tid in expected
+        }
+        cas_versions = {
+            tid: versions.get(tid)
+            for tid, (_st, reason) in changes.items()
+            if tid in versions
+        }
+        cas_epochs = {
+            tid: epochs.get(tid)
+            for tid, (_st, reason) in changes.items()
+            if reason == "completion_sentinel" and tid in epochs
+        }
+        wrote = update_statuses(
+            changes,
+            expected=cas_expected,
+            epochs=cas_epochs,
+            versions=cas_versions,
+        )
+        if wrote:
+            for tid, (_st, reason) in changes.items():
+                if reason != "completion_sentinel":
+                    continue
+                elapsed = elapsed_map.get(tid)
+                task_row = store.get_task(tid)
+                if task_row is not None:
+                    _record_sentinel_event(
+                        store,
+                        task_row,
+                        "completion_sentinel_accepted",
+                        {"task_id": tid, "elapsed_seconds": elapsed,
+                         "reason": "triple_condition_met"},
+                    )
+                comp_bucket = state.get("completion", {}).get(tid)
+                if isinstance(comp_bucket, dict):
+                    comp_bucket["was_present"] = False
+                    comp_bucket["first_seen_at"] = None
+                    comp_bucket["epoch_updated_at"] = None
+                    comp_bucket["early_count"] = 0
+            for key in (
+                "completion_expected",
+                "completion_epochs",
+                "completion_elapsed",
+                "crash_expected",
+                "crash_versions",
+            ):
+                state.pop(key, None)
+        if wrote or fuse_changed:
             check_task_stalls(tasks, state)
             save_json_atomic(STATE_FILE, state)
             print("[SENTINEL] State updated, controller will auto-sync via registry watcher", flush=True)

@@ -497,15 +497,19 @@ class EpisodeStore:
         self._lock_path = str(self.path) + ".lock"
 
     @contextlib.contextmanager
-    def _file_lock(self):
+    def _file_lock(self, *, strict=False):
         """Exclusive cross-process guard for one read-modify-write cycle."""
         if fcntl is None:
+            if strict:
+                raise RuntimeError("episode file locking is unavailable")
             yield None
             return
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             fd = os.open(self._lock_path, os.O_RDWR | os.O_CREAT, 0o644)
         except OSError:
+            if strict:
+                raise RuntimeError("episode file lock could not be opened")
             yield None
             return
         try:
@@ -518,6 +522,19 @@ class EpisodeStore:
                 pass
             os.close(fd)
 
+    @contextlib.contextmanager
+    def transaction(self):
+        """Expose one locked read-modify-write episode transaction.
+
+        The yielded mapping is the authoritative in-file episode table.  It is
+        saved only when the block exits normally, so a crashed/raising caller
+        cannot publish a half-applied SLA claim.
+        """
+        with self._lock, self._file_lock(strict=True):
+            episodes = self._load(strict=True)
+            yield episodes
+            self._save()
+
     def _stat_sig(self):
         try:
             st = os.stat(self.path)
@@ -525,16 +542,24 @@ class EpisodeStore:
             return None
         return (st.st_mtime_ns, st.st_size)
 
-    def _load(self) -> Dict[str, Dict[str, Any]]:
+    def _load(self, *, strict=False) -> Dict[str, Dict[str, Any]]:
         sig = self._stat_sig()
         if self._cache is not None and sig == self._loaded_sig:
             return self._cache
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
-        except Exception:
+        except FileNotFoundError:
+            data = {}
+        except (OSError, TypeError, ValueError) as exc:
+            if strict:
+                raise RuntimeError("episode ledger could not be read") from exc
             data = {}
         episodes = data.get("episodes") if isinstance(data, dict) else None
-        self._cache = dict(episodes) if isinstance(episodes, dict) else {}
+        if not isinstance(episodes, dict):
+            if strict:
+                raise RuntimeError("episode ledger has an invalid shape")
+            episodes = {}
+        self._cache = dict(episodes)
         self._loaded_sig = sig
         return self._cache
 
@@ -583,8 +608,110 @@ class EpisodeStore:
             self._save()
             return True
 
+    def mutate(self, key: str, updater) -> dict[str, Any] | None:
+        """Atomically read-modify-write one episode.
 
-def blocks_retry(store: EpisodeStore, key: str, now: Optional[float] = None) -> bool:
+        ``updater`` receives a copy of the current episode and returns the
+        fields to merge.  Returning ``None`` leaves the episode untouched.
+        The file lock spans the read, callback, and replace, so independent
+        Controller processes cannot lose an SLA clock update or action claim.
+        """
+        with self._lock, self._file_lock():
+            episodes = self._load()
+            current = dict(episodes.get(key) or {})
+            fields = updater(current)
+            if fields is None:
+                return dict(current) if current else None
+            if not isinstance(fields, dict):
+                raise TypeError("episode updater must return a dict or None")
+            if "__replace__" in fields:
+                replacement = fields["__replace__"]
+                if not isinstance(replacement, dict):
+                    raise TypeError("episode replacement must be a dict")
+                current = dict(replacement)
+            else:
+                current.update(fields)
+            episodes[key] = current
+            self._save()
+            return dict(current)
+
+    def claim_action(
+        self,
+        key: str,
+        *,
+        claim_id: str,
+        action: str,
+        now: float,
+        lease_seconds: float,
+        expected: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """Atomically claim one external action for an episode.
+
+        The claim is a short durable lease, not a second status machine.  It
+        prevents two Controller processes from sending the same bounded
+        prompt; an expired lease is reclaimable after a process crash.
+        """
+        with self._lock, self._file_lock():
+            episodes = self._load()
+            current = dict(episodes.get(key) or {})
+            if not current:
+                return None
+            for field, expected_value in (expected or {}).items():
+                actual = current.get(field)
+                # Older episodes may omit a zero-valued counter.  Treat that
+                # legacy shape as its documented zero default, but never
+                # coerce an unknown non-empty value.
+                if actual != expected_value and (
+                    field in current or expected_value not in (0, False)
+                ):
+                    if not (
+                        field == "repush_state"
+                        and field not in current
+                        and expected_value in {"pending", "failed"}
+                    ):
+                        return None
+            previous = current.get("action_claim")
+            if isinstance(previous, dict):
+                try:
+                    claimed_at = float(previous.get("claimed_at") or 0)
+                    if now - claimed_at < float(lease_seconds):
+                        return None
+                except (TypeError, ValueError):
+                    # An unreadable lease is stale rather than a permission to
+                    # duplicate a prompt.
+                    return None
+            current["action_claim"] = {
+                "claim_id": str(claim_id),
+                "action": str(action),
+                "claimed_at": float(now),
+                "lease_until": float(now) + float(lease_seconds),
+            }
+            episodes[key] = current
+            self._save()
+            return dict(current)
+
+    def complete_action(
+        self,
+        key: str,
+        *,
+        claim_id: str,
+        updates: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """Finalize a claim only when its owner still owns the lease."""
+        with self._lock, self._file_lock():
+            episodes = self._load()
+            current = dict(episodes.get(key) or {})
+            claim = current.get("action_claim")
+            if not isinstance(claim, dict) or claim.get("claim_id") != claim_id:
+                return None
+            current.update(dict(updates or {}))
+            current.pop("action_claim", None)
+            episodes[key] = current
+            self._save()
+            return dict(current)
+
+
+def blocks_retry(store: EpisodeStore, key: str, now: float | None = None) -> bool:
     """True while an open episode throttles the next retry."""
     episode = store.get(key)
     if not episode:
@@ -595,8 +722,8 @@ def blocks_retry(store: EpisodeStore, key: str, now: Optional[float] = None) -> 
 def throttle_retry(
     store: EpisodeStore,
     key: str,
-    interval: Optional[float] = None,
-    now: Optional[float] = None,
+    interval: float | None = None,
+    now: float | None = None,
 ) -> None:
     """Push the next allowed retry of an already-open episode into the future."""
     current = time.time() if now is None else now

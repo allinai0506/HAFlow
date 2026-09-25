@@ -202,6 +202,65 @@ class StateStore(ABC):
         pass
 
     @abstractmethod
+    def compare_and_set_task_transition(
+        self,
+        task_id: str,
+        to_status: str,
+        reason: str,
+        source: str = "system",
+        metadata: dict[str, Any] | None = None,
+        force: bool = False,
+        expected_status: str | None = None,
+        expected_version: int | None = None,
+        expected_updated_at: float | None = None,
+    ) -> dict[str, Any]:
+        """Atomically transition a task only when its observed epoch matches."""
+
+    def compare_and_set_completion_transition(
+        self,
+        task_id: str,
+        *,
+        reason: str = "completion_sentinel",
+        source: str = "herdr-controller",
+        metadata: dict[str, Any] | None = None,
+        expected_status: str | None = None,
+        expected_version: int | None = None,
+        expected_updated_at: float | None = None,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        """Consume a confirmed completion observation atomically, if supported."""
+        raise NotImplementedError(
+            "completion observation CAS is not implemented by this StateStore"
+        )
+
+    @abstractmethod
+    def observe_completion(
+        self,
+        task_id: str,
+        *,
+        marker_present: bool,
+        agent_status: str | None,
+        observed_at: float | None = None,
+    ) -> dict[str, Any]:
+        """Record a durable completion observation."""
+
+    @abstractmethod
+    def get_completion_observation(
+        self, task_id: str,
+    ) -> dict[str, Any] | None:
+        """Return the durable completion observation, if present."""
+
+    @abstractmethod
+    def clear_completion_observation(
+        self,
+        task_id: str,
+        *,
+        expected_status: str | None = None,
+        expected_version: int | None = None,
+    ) -> bool:
+        """Clear a consumed observation only when its epoch still matches."""
+
+    @abstractmethod
     def update_task_metadata(
         self,
         task_id: str,
@@ -263,8 +322,8 @@ class StateStore(ABC):
         source: str = "system",
         timestamp: Optional[float] = None,
         run_id: Optional[str] = None,
-    ) -> None:
-        """Record a generic lifecycle event."""
+    ) -> Any:
+        """Record a generic lifecycle event and return its receipt, if any."""
         pass
 
     @abstractmethod
@@ -659,6 +718,90 @@ class SQLiteStateStore(StateStore):
             db_path=self.db_path,
         )
 
+    def compare_and_set_task_transition(
+        self,
+        task_id: str,
+        to_status: str,
+        reason: str,
+        source: str = "system",
+        metadata: dict[str, Any] | None = None,
+        force: bool = False,
+        expected_status: str | None = None,
+        expected_version: int | None = None,
+        expected_updated_at: float | None = None,
+    ) -> dict[str, Any]:
+        return state_db.compare_and_set_task_transition(
+            task_id=task_id,
+            to_status=to_status,
+            reason=reason,
+            source=source,
+            metadata=metadata,
+            force=force,
+            expected_status=expected_status,
+            expected_version=expected_version,
+            expected_updated_at=expected_updated_at,
+            db_path=self.db_path,
+        )
+
+    def compare_and_set_completion_transition(
+        self,
+        task_id: str,
+        *,
+        reason: str = "completion_sentinel",
+        source: str = "herdr-controller",
+        metadata: dict[str, Any] | None = None,
+        expected_status: str | None = None,
+        expected_version: int | None = None,
+        expected_updated_at: float | None = None,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        return state_db.compare_and_set_completion_transition(
+            task_id,
+            reason=reason,
+            source=source,
+            metadata=metadata,
+            expected_status=expected_status,
+            expected_version=expected_version,
+            expected_updated_at=expected_updated_at,
+            now=now,
+            db_path=self.db_path,
+        )
+
+    def observe_completion(
+        self,
+        task_id: str,
+        *,
+        marker_present: bool,
+        agent_status: str | None,
+        observed_at: float | None = None,
+    ) -> dict[str, Any]:
+        return state_db.observe_completion(
+            task_id,
+            marker_present=marker_present,
+            agent_status=agent_status,
+            observed_at=observed_at,
+            db_path=self.db_path,
+        )
+
+    def get_completion_observation(
+        self, task_id: str,
+    ) -> dict[str, Any] | None:
+        return state_db.get_completion_observation(task_id, db_path=self.db_path)
+
+    def clear_completion_observation(
+        self,
+        task_id: str,
+        *,
+        expected_status: str | None = None,
+        expected_version: int | None = None,
+    ) -> bool:
+        return state_db.clear_completion_observation(
+            task_id,
+            db_path=self.db_path,
+            expected_status=expected_status,
+            expected_version=expected_version,
+        )
+
     def update_task_metadata(
         self,
         task_id: str,
@@ -715,8 +858,8 @@ class SQLiteStateStore(StateStore):
         source: str = "system",
         timestamp: Optional[float] = None,
         run_id: Optional[str] = None,
-    ) -> None:
-        state_db.record_event({
+    ) -> Any:
+        return state_db.record_event({
             "workflow_id": workflow_id,
             "node_id": node_id,
             "task_id": task_id,

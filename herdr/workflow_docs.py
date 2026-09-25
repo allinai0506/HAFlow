@@ -17,6 +17,7 @@ void earlier notes of the affected nodes (fix-loop 改动即失效).
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
@@ -34,6 +35,7 @@ NOTE_KINDS = (
     "decision",
     "evidence",
     "gate",
+    "delivery",
     "invalidation",
     "note",
     "wrapup",
@@ -44,7 +46,7 @@ SOURCE_CONTROLLER = "controller"
 SOURCE_HUMAN = "human"
 SOURCES = (SOURCE_AGENT, SOURCE_CONTROLLER, SOURCE_HUMAN)
 
-EVIDENCE_KINDS = frozenset({"evidence", "gate"})
+EVIDENCE_KINDS = frozenset({"evidence", "gate", "delivery"})
 CONTEXT_KINDS = frozenset(
     {"requirement", "spec", "plan", "decision", "invalidation", "wrapup"}
 )
@@ -111,8 +113,7 @@ def _clean_list(value) -> list:
     return result
 
 
-def load_notes(workflow_id) -> list:
-    path = notes_path(workflow_id)
+def _read_notes_unlocked(path: Path) -> list:
     if not path.exists():
         return []
     notes = []
@@ -129,6 +130,19 @@ def load_notes(workflow_id) -> list:
     return notes
 
 
+def load_notes(workflow_id) -> list:
+    path = notes_path(workflow_id)
+    if not path.exists():
+        return []
+    lock_path = path.with_name(f".{path.name}.lock")
+    with open(lock_path, "a+", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_SH)
+        try:
+            return _read_notes_unlocked(path)
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
 def append_note(
     workflow_id,
     *,
@@ -142,6 +156,8 @@ def append_note(
     base_sha=None,
     round=1,
     invalidates=None,
+    fields=None,
+    precondition=None,
 ) -> dict:
     wf = validate_workflow_id(workflow_id)
 
@@ -165,6 +181,19 @@ def append_note(
     if invalidated and kind_text != "invalidation":
         raise ValueError("invalidates only applies to invalidation notes")
 
+    extra_fields = dict(fields or {})
+    reserved_fields = {
+        "note_id", "ts", "workflow_id", "kind", "title", "body",
+        "node", "task_id", "agent", "source", "base_sha", "round",
+        "invalidates", "stale", "stale_reason",
+    }
+    blocked_fields = reserved_fields & set(extra_fields)
+    if blocked_fields:
+        raise ValueError(f"fields cannot overwrite note metadata: {sorted(blocked_fields)}")
+    for key, value in extra_fields.items():
+        if not re.match(r"^[A-Za-z_][A-Za-z0-9_.-]{0,63}$", str(key)):
+            raise ValueError(f"invalid note field name: {key!r}")
+
     try:
         round_number = max(1, int(round))
     except (TypeError, ValueError):
@@ -187,23 +216,61 @@ def append_note(
     }
     if invalidated:
         record["invalidates"] = invalidated
+    record.update(extra_fields)
 
     path = notes_path(wf)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "a", encoding="utf-8") as handle:
-        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    lock_path = path.with_name(f".{path.name}.lock")
+    with open(lock_path, "a+", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            if precondition is not None and not precondition(
+                _read_notes_unlocked(path), record
+            ):
+                raise ValueError("workflow note precondition rejected append")
+            with open(path, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
     return record
 
 
 def annotate_notes(notes, current_base_sha=None) -> list:
-    invalidation_windows = [
-        (_safe_float(note.get("ts")), set(_clean_list(note.get("invalidates"))))
-        for note in notes
-        if note.get("kind") == "invalidation" and note.get("invalidates")
+    """Return copies annotated with scoped base and invalidation state.
+
+    An invalidation with explicit candidate identities only affects those
+    identities.  A node-scoped invalidation affects older evidence in that
+    node, but never uses an equal base SHA as a blanket invalidation key.  The
+    invalidation record itself is context, not an invalidation target.
+    """
+    notes = list(notes or [])
+    invalidations = [
+        note for note in notes
+        if isinstance(note, dict) and note.get("kind") == "invalidation"
     ]
+
+    def _field_values(note, names):
+        values = set()
+        for name in names:
+            values.update(_clean_list(note.get(name)))
+        return values
+
+    candidate_names = (
+        "delivery_id", "delivery_ids", "candidate_id", "candidate_ids",
+        "candidate_sha", "candidate_shas",
+    )
+    invalidated_names = (
+        "invalidated_candidates", "invalidates_candidates", "delivery_ids",
+        "candidate_ids", "candidate_sha", "candidate_shas",
+        "invalidated_candidate_shas", "invalidated_delivery_ids",
+    )
 
     annotated = []
     for note in notes:
+        if not isinstance(note, dict):
+            continue
         item = dict(note)
         stale = False
         reason = ""
@@ -217,11 +284,31 @@ def annotate_notes(notes, current_base_sha=None) -> list:
         ):
             stale = True
             reason = "base sha changed"
-        if not stale:
+        if not stale and kind != "invalidation":
             note_ts = _safe_float(item.get("ts"))
             note_node = str(item.get("node") or "")
-            for invalidation_ts, invalidated_nodes in invalidation_windows:
-                if note_ts < invalidation_ts and note_node in invalidated_nodes:
+            note_candidates = _field_values(item, candidate_names)
+            for invalidation in invalidations:
+                inv_wf = str(invalidation.get("workflow_id") or "")
+                note_wf = str(item.get("workflow_id") or "")
+                if inv_wf and note_wf and inv_wf != note_wf:
+                    continue
+                inv_ts = _safe_float(invalidation.get("ts"))
+                invalidated_nodes = set(_clean_list(invalidation.get("invalidates")))
+                invalidated_candidates = _field_values(invalidation, invalidated_names)
+                if invalidated_candidates:
+                    if note_candidates & invalidated_candidates:
+                        stale = True
+                        reason = "fix-loop candidate invalidation"
+                        break
+                    # An explicitly candidate-scoped invalidation must not
+                    # degrade into a node-wide invalidation.
+                    continue
+                if (
+                    invalidated_nodes
+                    and note_ts < inv_ts
+                    and note_node in invalidated_nodes
+                ):
                     stale = True
                     reason = "fix-loop invalidation"
                     break

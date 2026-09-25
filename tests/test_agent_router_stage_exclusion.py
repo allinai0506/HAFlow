@@ -74,6 +74,10 @@ class TestAgentRouterStageExclusion(unittest.TestCase):
     @patch("herdr.agent_router._get_store")
     @patch("herdr.agent_router.workflow_config_for")
     def test_single_agent_environment_graceful_fallback(self, mock_wf_cfg, mock_get_store):
+        # FR-6.1 breaking change (fail-closed): single-agent pool fully
+        # covered by implementation exclusion must REJECT, not silently
+        # fall back to the excluded agent. Opt-out with reason is the
+        # only bypass (R9).
         self.store.save_workflow({
             "workflow_id": self.wf_id,
             "project_id": "test-proj",
@@ -93,5 +97,7 @@ class TestAgentRouterStageExclusion(unittest.TestCase):
                 }
             ]
         }
-        chosen = agent_router.choose_agent(self.wf_id, "test", "test", requested="auto")
-        self.assertEqual(chosen, "codex")
+        with self.assertRaises(RuntimeError) as ctx:
+            agent_router.choose_agent(self.wf_id, "test", "test", requested="auto")
+        self.assertIn("fail-closed", str(ctx.exception).lower())
+        self.assertIn("opt-out", str(ctx.exception).lower())

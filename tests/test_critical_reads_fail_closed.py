@@ -179,9 +179,11 @@ def test_choose_agent_fails_closed_on_unknown_workflow(isolated_env):
         agent_router.choose_agent("wf-non-existent-999", stage="implementation", task_type="dev")
     assert "Workflow not found in authoritative StateStore: wf-non-existent-999" in str(exc_info.value)
 
-    # 2. Standalone task without workflow_id is permitted and returns fallback / requested agent
-    res = agent_router.choose_agent(None, stage="implementation", task_type="dev", requested="auto")
-    assert res == "opencode"
+    # 2. FR-6.3 breaking change: standalone task without workflow_id and
+    # auto selection must fail-closed (no silent 'opencode' default).
+    with pytest.raises(RuntimeError) as exc_none:
+        agent_router.choose_agent(None, stage="implementation", task_type="dev", requested="auto")
+    assert "explicit" in str(exc_none.value).lower()
 
     res_req = agent_router.choose_agent(None, stage="implementation", task_type="dev", requested="claude")
     assert res_req == "claude"
