@@ -1026,6 +1026,26 @@ def test_source_version_covers_list_overflow_beyond_first_100():
     assert before != after
 
 
+def test_source_version_covers_mapping_overflow_beyond_first_100():
+    from herdr.context_sources import _bounded_source_value, _hash
+
+    small = {f"key{index:03d}": index for index in range(100)}
+    assert isinstance(_bounded_source_value(small), dict)
+    assert "total_count" not in _bounded_source_value(small)
+    big = {f"key{index:03d}": index for index in range(101)}
+    big["path"] = "a.pdf"
+    overflowed = _bounded_source_value(big)
+    assert overflowed["total_count"] == 102
+    assert len(overflowed["first_100"]) == 100
+    assert len(overflowed["overflow_sha256"]) == 64
+    renamed = dict(big)
+    renamed["path"] = "b.pdf"
+    assert _hash(_bounded_source_value(big)) != _hash(_bounded_source_value(renamed))
+    # Stable key sorting: insertion order alone must not move the version.
+    reordered = dict(reversed(list(big.items())))
+    assert _hash(_bounded_source_value(big)) == _hash(_bounded_source_value(reordered))
+
+
 def test_relevant_write_followed_by_recompile_marks_old_candidate_stale(tmp_path: Path):
     db = tmp_path / "state.db"
     _seed_workflow(db)
@@ -3837,16 +3857,25 @@ def test_legacy_run_metrics_do_not_aggregate_other_per_task_runs(tmp_path: Path)
 
 
 def test_metrics_report_reuse_and_changed_without_quality_score(tmp_path: Path):
+    from herdr.context_compiler import get_working_context
+
     db = tmp_path / "state.db"
     _seed_workflow(db)
     target = _seed_task(db, _task("task-metrics", status="working"))
     first = _compile(db, target, "developer")
     second = _compile(db, target, "developer")
     assert first.context_id == second.context_id
-    assert second.metrics["context_reuse"] is True
-    assert second.metrics["context_changed"] is False
+    # The reused id must resolve to the identical payload: per-call reuse
+    # flags live in metric events, never in the returned snapshot.
+    assert second.to_mapping() == get_working_context(second.context_id, db_path=db).to_mapping()
+    assert second.metrics["context_reuse"] is False
     assert "quality_score" not in second.metrics
     assert second.metrics["context_chars"] == len(json.dumps(second.to_mapping(), ensure_ascii=False))
+    calls = state_db.get_db_connection(db).execute(
+        "SELECT reused, changed FROM working_context_metric_events WHERE run_id = ? ORDER BY rowid ASC",
+        (target["run_id"],),
+    ).fetchall()
+    assert [tuple(call) for call in calls] == [(0, 1), (1, 0)]
 
     state_db.save_task(dict(target, status="rework"), db_path=db)
     changed = _compile(db, dict(target, status="rework"), "developer")

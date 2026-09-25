@@ -655,14 +655,13 @@ def compile_working_context(
     if not same_fingerprint and str(stored.get("context_id")) != context.context_id:
         raise RuntimeError("WorkingContext candidate was superseded before persistence")
     reused = same_fingerprint and str(stored.get("context_id")) != context.context_id
-    metrics["context_reuse"] = reused
-    metrics["context_changed"] = not reused
-    result_mapping = dict(stored)
-    result_mapping["metrics"] = metrics
-    result_mapping["context_fingerprint"] = stored.get("context_fingerprint", context.context_fingerprint)
+    # A context_id must always resolve to the same payload: per-call metrics
+    # (reuse flags, latency) belong to working_context_metric_events, never
+    # to the returned snapshot. Both the fresh and the reuse path return the
+    # canonical stored row verbatim.
     try:
         state_db.record_working_context_metric(
-            result_mapping,
+            stored,
             reused=reused,
             db_path=db_path or _db_path(store),
         )
@@ -670,10 +669,7 @@ def compile_working_context(
         # Metrics are diagnostic side effects; an unavailable sink must not
         # invalidate an already persisted immutable context.
         pass
-    result_context = _fit_final_budget(
-        WorkingContext.from_mapping(result_mapping), int(cfg["max_chars"]),
-    )
-    return _attach_payload_digest(_calibrate_context_metrics(result_context))
+    return WorkingContext.from_mapping(dict(stored))
 
 
 def get_working_context(

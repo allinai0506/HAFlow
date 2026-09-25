@@ -1573,9 +1573,31 @@ def _bounded_source_value(value: Any, depth: int = 0) -> Any:
             "overflow_sha256": hashlib.sha256(tail_canonical.encode("utf-8")).hexdigest(),
         }
     if isinstance(value, dict):
+        keys = sorted(value.keys(), key=str)
+        if len(keys) <= 100:
+            return {
+                str(key): _bounded_source_value(value[key], depth + 1)
+                for key in keys
+            }
+        # Same bounded-projection + overflow-digest contract as lists: keys
+        # past 100 still move the version. Stable key sorting keeps dict
+        # insertion order from causing spurious version flaps.
+        head = {
+            str(key): _bounded_source_value(value[key], depth + 1)
+            for key in keys[:100]
+        }
+        tail_canonical = json.dumps(
+            {
+                str(key): _bounded_source_value(value[key], depth + 1)
+                for key in keys[100:]
+            },
+            ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            default=str,
+        )
         return {
-            str(key): _bounded_source_value(item, depth + 1)
-            for key, item in list(value.items())[:100]
+            "first_100": head,
+            "total_count": len(keys),
+            "overflow_sha256": hashlib.sha256(tail_canonical.encode("utf-8")).hexdigest(),
         }
     return value
 
