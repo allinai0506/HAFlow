@@ -2209,6 +2209,70 @@ pre { margin: 0; white-space: pre-wrap; word-break: break-word; font-family: ui-
 .ops-card-head { display: flex; justify-content: space-between; align-items: center; font-size: 13px; font-weight: 600; margin-bottom: 4px; }
 .ops-nodes { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
 
+/* Controller cockpit — light high-contrast redesign (Linear clean) */
+code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; background: var(--bg-subtle); border: 1px solid var(--border-subtle); border-radius: 4px; padding: 1px 5px; color: var(--text-primary); }
+.ctl-wrap { display: grid; gap: 14px; line-height: 1.5; max-height: 75vh; overflow-y: auto; padding-right: 4px; }
+.ctl-status { background: var(--bg-surface); border: 1px solid var(--border-default); border-left: 3px solid var(--success); border-radius: var(--radius-md); padding: 12px 14px; box-shadow: var(--shadow-sm); }
+.ctl-status.is-stalled { border-left-color: var(--warning); background: var(--warning-bg); }
+.ctl-status-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 10px; }
+.ctl-status-title { font-weight: 600; font-size: 13px; color: var(--text-primary); display: inline-flex; align-items: center; gap: 8px; }
+.ctl-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--success); display: inline-block; flex-shrink: 0; }
+.ctl-status.is-stalled .ctl-dot { background: var(--warning); }
+.ctl-status-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 16px; }
+.ctl-status-item { background: var(--bg-subtle); border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); padding: 8px 10px; font-size: 12px; color: var(--text-secondary); }
+.ctl-status.is-stalled .ctl-status-item { background: rgba(255,255,255,.65); }
+.ctl-status-item.is-full { grid-column: 1 / -1; }
+.ctl-k { display: block; font-size: 11px; color: var(--text-tertiary); font-weight: 600; letter-spacing: .3px; margin-bottom: 2px; }
+.ctl-status-item strong { color: var(--text-primary); font-size: 12.5px; }
+.ctl-note { font-size: 12px; color: var(--text-secondary); line-height: 1.6; }
+.ctl-section-title { font-weight: 600; font-size: 13px; color: var(--text-primary); margin-bottom: 4px; display: flex; align-items: center; gap: 8px; }
+.ctl-count { font-size: 11px; color: var(--text-secondary); font-weight: 600; background: var(--bg-subtle); border: 1px solid var(--border-subtle); padding: 1px 7px; border-radius: 999px; }
+.ctl-sub { font-size: 12px; color: var(--text-secondary); margin-bottom: 10px; line-height: 1.5; }
+.ctl-actions { display: grid; gap: 10px; }
+.ctl-card { background: var(--bg-surface); border: 1px solid var(--border-default); border-radius: var(--radius-md); padding: 12px 14px; box-shadow: var(--shadow-sm); }
+.ctl-card.is-recommended { border-color: rgba(94,106,210,.45); box-shadow: 0 0 0 1px rgba(94,106,210,.15), var(--shadow-sm); }
+.ctl-card-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; flex-wrap: wrap; }
+.ctl-index { font-size: 11px; font-weight: 700; color: var(--primary); background: var(--primary-subtle); border: 1px solid rgba(94,106,210,.25); border-radius: 6px; padding: 1px 7px; white-space: nowrap; }
+.ctl-card-title { font-size: 13px; font-weight: 600; color: var(--text-primary); flex: 1; min-width: 140px; }
+.ctl-badges { display: inline-flex; gap: 6px; align-items: center; }
+.ctl-rec { font-size: 11px; font-weight: 700; color: #ffffff; background: var(--primary); border-radius: 999px; padding: 2px 8px; }
+.ctl-card-desc { font-size: 12px; color: var(--text-secondary); margin-bottom: 10px; line-height: 1.6; }
+.ctl-cmd { background: var(--bg-subtle); border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); padding: 8px 10px; margin-bottom: 10px; }
+.ctl-cmd-label { display: flex; justify-content: space-between; align-items: center; font-size: 11px; font-weight: 600; color: var(--text-tertiary); letter-spacing: .3px; margin-bottom: 6px; }
+.ctl-cmd code { display: block; background: #ffffff; border: 1px solid var(--border-default); border-radius: 6px; padding: 7px 9px; font-size: 11.5px; line-height: 1.6; color: var(--text-primary); white-space: pre-wrap; word-break: break-all; user-select: all; }
+.ctl-card-foot { display: flex; justify-content: flex-end; gap: 8px; align-items: center; flex-wrap: wrap; }
+.ctl-empty { background: var(--success-bg); border: 1px solid rgba(22,163,74,.25); border-radius: var(--radius-md); padding: 12px 14px; font-size: 12.5px; color: var(--text-primary); line-height: 1.6; }
+.ctl-empty .muted { margin-top: 4px; }
+.ctl-cheatsheet { background: var(--bg-surface); border: 1px solid var(--border-default); border-radius: var(--radius-md); padding: 12px 14px; box-shadow: var(--shadow-sm); }
+.ctl-cheat-list { display: grid; }
+.ctl-cheat-row { display: grid; grid-template-columns: 24px minmax(0,1fr); gap: 10px; padding: 10px 0; border-top: 1px solid var(--border-subtle); }
+.ctl-cheat-row:first-of-type { border-top: 0; padding-top: 6px; }
+.ctl-cheat-num { width: 20px; height: 20px; border-radius: 6px; background: var(--bg-subtle); border: 1px solid var(--border-default); color: var(--text-secondary); font-size: 11px; font-weight: 700; display: inline-flex; align-items: center; justify-content: center; margin-top: 1px; }
+.ctl-cheat-name { font-size: 12.5px; font-weight: 600; color: var(--text-primary); display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 6px; }
+.ctl-cheat-cmd { background: var(--bg-subtle); border: 1px solid var(--border-subtle); border-radius: 6px; padding: 7px 9px; }
+.ctl-cheat-cmd code { display: block; background: #ffffff; border: 1px solid var(--border-default); border-radius: 6px; padding: 6px 8px; white-space: pre-wrap; word-break: break-all; line-height: 1.6; user-select: all; }
+.ctl-cheat-desc { font-size: 12px; color: var(--text-secondary); margin-top: 6px; line-height: 1.5; }
+.ctl-mini-card { margin-top: 6px; padding: 8px 10px; background: var(--bg-surface); border: 1px solid var(--border-default); border-radius: var(--radius-sm); }
+.ctl-mini-card.is-recommended { border-color: rgba(94,106,210,.4); }
+.ctl-mini-cmd { display: flex; align-items: flex-start; gap: 6px; background: var(--bg-subtle); padding: 6px 8px; border-radius: 6px; border: 1px solid var(--border-subtle); margin: 6px 0; }
+.ctl-mini-cmd code { flex: 1; background: #fff; border: 1px solid var(--border-default); border-radius: 4px; padding: 4px 6px; font-size: 11px; white-space: pre-wrap; word-break: break-all; line-height: 1.5; user-select: all; }
+.ctl-pre-light { white-space: pre-wrap; max-height: 160px; overflow: auto; background: var(--bg-subtle); color: var(--text-primary); padding: 8px 10px; border-radius: 8px; margin-top: 6px; border: 1px solid var(--border-subtle); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 1.5; }
+/* Task-bound unblocking (end-user oriented, buttons first) */
+.ctl-blocker { background: var(--bg-surface); border: 1px solid var(--border-default); border-radius: var(--radius-md); padding: 12px 14px; box-shadow: var(--shadow-sm); }
+.ctl-blocker-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }
+.ctl-blocker-id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; color: var(--text-secondary); margin-top: 2px; word-break: break-all; }
+.ctl-blocker-title { font-size: 13px; font-weight: 600; color: var(--text-primary); }
+.ctl-blocker-reason { font-size: 12px; color: var(--text-secondary); background: var(--bg-subtle); border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); padding: 7px 9px; margin: 8px 0 10px; line-height: 1.6; }
+.ctl-effect { font-size: 12px; color: var(--text-primary); background: var(--primary-subtle); border: 1px solid rgba(94,106,210,.25); border-radius: var(--radius-sm); padding: 7px 9px; margin-bottom: 10px; line-height: 1.6; }
+.ctl-card.is-destructive .ctl-effect { background: var(--danger-bg); border-color: rgba(220,38,38,.25); }
+.ctl-tech { margin-bottom: 10px; border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); background: var(--bg-surface); }
+.ctl-tech summary { cursor: pointer; font-size: 11.5px; color: var(--text-tertiary); padding: 6px 10px; user-select: none; }
+.ctl-tech summary:hover { color: var(--text-secondary); }
+.ctl-tech-body { padding: 0 10px 10px; }
+.ctl-meta-chips { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+.ctl-chip { font-size: 11px; color: var(--text-secondary); background: var(--bg-subtle); border: 1px solid var(--border-subtle); border-radius: 999px; padding: 1px 8px; }
+.ctl-chip strong { color: var(--text-primary); font-weight: 600; }
+
 @media (max-width: 1000px) {
   .shell { grid-template-columns: 1fr; }
   .sidebar { position: static; height: auto; border-right: 0; border-bottom: 1px solid var(--border-default); }
@@ -2216,6 +2280,9 @@ pre { margin: 0; white-space: pre-wrap; word-break: break-word; font-family: ui-
   .decision-item { grid-template-columns: 1fr; gap: 2px; }
   .task-list .task { grid-template-columns: 20px 1fr auto 28px; }
   .task-agent { display: none; }
+  .ctl-status-grid { grid-template-columns: 1fr; }
+  .ctl-card-foot { justify-content: stretch; }
+  .ctl-card-foot .btn { flex: 1; justify-content: center; }
 }</style></head><body>
 <div class="shell">
   <aside class="sidebar">
@@ -2886,26 +2953,36 @@ async function executeControllerAction(actId,wid){
   const payload=act.api_payload||{type:actId,workflow_id:wid};
   const endpoint=act.api_endpoint||'/api/controller/execute-action';
   const cmdLine=act.command_line||actId;
-  showConfirmModal({
-    title:'执行 Controller 解卡操作',
-    message:`确定要通过 Controller 执行【${act.title||actId}】吗？\n\n对应底层命令:\n${cmdLine}`,
-    confirmText:'立即执行',
-    danger:Boolean(act.is_destructive),
-    onConfirm:async()=>{
-      try{
-        toast('正在调度 Controller 执行…');
-        await api(endpoint,{
-          method:'POST',
-          body:JSON.stringify(payload)
-        });
-        toast('Controller 解卡命令已执行！正在刷新现场…');
-        await loadWorkflow(wid);
-        if(state.spaceId)await refreshAll();
-      }catch(e){
-        toast('执行失败: '+e.message,true);
-      }
+  const effect=act.effect||act.description||'';
+  const targetTask=act.blocker_task_id||act.old_task_id||(act.api_payload&&act.api_payload.task_id)||'';
+  const summaryHtml=`<div style="line-height:1.6"><div style="font-size:13.5px;font-weight:600;margin-bottom:8px;color:var(--text-primary)">将执行：${esc(act.title||actId)}</div>${targetTask?`<div class="muted" style="font-size:12px;margin-bottom:6px">针对卡点任务：<code>${esc(targetTask)}</code></div>`:''}${effect?`<div class="ctl-effect" style="margin-bottom:8px">${esc(effect)}</div>`:''}${act.is_destructive?'<div style="font-size:12px;color:var(--danger);font-weight:600;margin-bottom:8px">高风险豁免操作，请确认已人工核查产物。</div>':''}<details class="ctl-tech"><summary>工程师技术详情（可选展开）</summary><div class="ctl-tech-body"><div class="muted" style="font-size:11.5px;margin-bottom:4px">对应底层命令（仅审计 standby，点按钮即可执行，无需手动敲）：</div><div class="ctl-cheat-cmd"><code>${esc(cmdLine)}</code></div><div style="display:flex;justify-content:flex-end;margin-top:6px"><button class="mini" onclick="copyCliCommandByActionId('${esc(act.action_id||actId)}')">复制命令</button></div></div></details></div>`;
+  openModal('执行 Controller 解卡操作',`${summaryHtml}<div style="display:flex;justify-content:flex-end;gap:10px;margin-top:14px"><button class="btn" onclick="closeModal()">取消</button><button id="ctlExecConfirmBtn" class="btn ${act.is_destructive?'danger-btn':'primary'}">立即执行</button></div>`);
+  const confirmBtn=document.getElementById('ctlExecConfirmBtn');
+  if(confirmBtn)confirmBtn.onclick=async()=>{
+    closeModal();
+    try{
+      toast('正在调度 Controller 执行…');
+      await api(endpoint,{
+        method:'POST',
+        body:JSON.stringify(payload)
+      });
+      toast('Controller 解卡命令已执行！正在刷新现场…');
+      await loadWorkflow(wid);
+      if(state.spaceId)await refreshAll();
+    }catch(e){
+      toast('执行失败: '+e.message,true);
     }
-  });
+  };
+}
+function controllerBlockerTask(actionId){
+  const act=(state.controllerActionsMap&&state.controllerActionsMap[actionId])||{};
+  return act.blocker_task_id||act.old_task_id||'';
+}
+function locateControllerTask(taskId){
+  if(!taskId)return;
+  closeModal();
+  try{if(state.taskFilter&&state.taskFilter!=='all'){setTaskFilter('all')}}catch(e){}
+  setTimeout(()=>{try{openTaskDrawer(taskId)}catch(e){toast('任务详情打开失败: '+e.message,true)}},60);
 }
 function updateAttentionHub(){
   const ts=(state.workflow&&state.workflow.tasks)||[];
@@ -2949,20 +3026,21 @@ function updateAttentionHub(){
       const d=decisionSummary(t);
       let actionsHtml='';
       if(acts.length){
-        const cardRows=acts.slice(0,3).map(act=>`
-          <div class="action-card" style="margin-top:6px;padding:7px 10px;background:#0d131a;border:1px solid rgba(255,255,255,0.08);border-radius:8px">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:3px">
+        const catMeta=c=>({fix:['修复','working'],rework:['换人重派','rework'],bypass:['豁免推进','cleaned'],recovery:['恢复','waiting']}[c]||[c,'waiting']);
+        const mine=acts.filter(a=>((a.blocker_task_id||a.old_task_id||String(a.action_id||'').split(':')[0])===t.task_id));
+        const shown=(mine.length?mine:acts).slice(0,2);
+        const cardRows=shown.map(act=>`
+          <div class="ctl-mini-card${act.recommended?' is-recommended':''}">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:2px">
               <strong style="color:var(--text-primary);font-size:12px">${act.recommended?'⭐ ':''}${esc(act.title)}</strong>
-              <span class="badge ${act.category==='fix'?'working':act.category==='rework'?'waiting':'cleaned'}" style="font-size:10px">${esc(act.category)}</span>
+              <span class="ctl-badges"><span class="badge ${catMeta(act.category)[1]}" style="font-size:10px">${esc(catMeta(act.category)[0])}</span></span>
             </div>
-            <div class="task-meta" style="margin-bottom:5px;font-size:11px">${esc(act.description)}</div>
-            <div style="display:flex;align-items:center;gap:6px;background:#05080c;padding:4px 8px;border-radius:6px;border:1px solid rgba(255,255,255,0.05);margin-bottom:5px">
-              <code style="flex:1;font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#93c5fd;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(act.command_line)}</code>
-              <button class="mini" style="padding:2px 6px;font-size:10.5px" onclick="copyCliCommandByActionId('${esc(act.action_id)}')">📋 复制</button>
+            <div class="muted" style="margin-bottom:4px;font-size:11px;line-height:1.5">${esc(act.effect||act.description)}</div>
+            <div style="display:flex;justify-content:flex-end;gap:6px;align-items:center">
+              <button class="mini" style="padding:2px 8px;font-size:10.5px;flex-shrink:0" onclick="locateControllerTask('${esc(t.task_id)}')">查看任务</button>
+              <button class="btn primary" style="padding:3px 10px;font-size:11.5px" onclick="executeControllerAction('${esc(act.action_id)}','${esc(state.workflowId)}')">一键执行</button>
             </div>
-            <div style="display:flex;justify-content:flex-end">
-              <button class="btn primary" style="padding:3px 10px;font-size:11.5px" onclick="executeControllerAction('${esc(act.action_id)}','${esc(state.workflowId)}')">🚀 一键执行</button>
-            </div>
+            <details class="ctl-tech" style="margin-top:6px"><summary>技术详情</summary><div class="ctl-tech-body"><div class="ctl-mini-cmd"><code>${esc(act.command_line)}</code><button class="mini" style="padding:2px 6px;font-size:10.5px;flex-shrink:0" onclick="copyCliCommandByActionId('${esc(act.action_id)}')">复制</button></div></div></details>
           </div>
         `).join('');
         actionsHtml=`<div class="controller-actions-wrap" style="margin-top:4px">${cardRows}</div>`;
@@ -3042,6 +3120,9 @@ function renderTasks(){
           <button class="task-dropdown-item primary" onclick="closeAllTaskMenus();openSignoffChamber('${esc(t.task_id)}')">成果会签</button>
           <button class="task-dropdown-item" onclick="closeAllTaskMenus();showPane('${esc(t.pane_id||'')}')">查看工位</button>
           <button class="task-dropdown-item" onclick="closeAllTaskMenus();askCoordinator('${esc(t.task_id)}')">让总指挥处理</button>
+          ${['blocked','failed','rework'].includes(t.status)||t.stage_verdict==='blocked'||(t.blocker&&t.blocker.length)?`
+            <button class="task-dropdown-item" style="color:var(--primary);font-weight:600" onclick="closeAllTaskMenus();openControllerCockpitModal()">⚡ 查看解卡方案</button>
+          `:''}
           ${['working','dispatched','rework','blocked','paused'].includes(t.status)?`
             <div class="task-dropdown-divider"></div>
             <button class="task-dropdown-item" style="color:var(--primary)" onclick="closeAllTaskMenus();showSteerModal('${esc(t.task_id)}')">实时插话</button>
@@ -3126,7 +3207,7 @@ async function submitAdoptSpace(wid){
 function showUnregisterProjectModal(){
   if(!state.project||!state.projectId)return toast('请先选择当前工厂项目',true);
   const p=state.project.project;
-  openModal('注销工厂项目',`<div style="line-height:1.6"><div style="font-size:15px;font-weight:650;margin-bottom:8px">确定要注销项目【${esc(p.project_name||p.project_id)}】吗？</div><div class="muted" style="font-size:13px;margin-bottom:14px">项目目录：<code>${esc(p.project_root)}</code><br>当前空间：<b>${esc(p.workspace_id||'')}</b></div><div style="background:#131a23;border:1px solid var(--line);border-radius:10px;padding:12px;font-size:12px;margin-bottom:14px"><div style="font-weight:600;margin-bottom:4px">注销影响说明：</div><div>1. <b>本地代码仓库绝对不碰</b>，保留所有代码与 Git 提交。</div><div>2. 工厂调度器将停止对该项目的自动任务派发与状态巡检。</div><div>3. 终端空间将从【当前工厂 <span class="dot ready" style="vertical-align:middle"></span>】退回为【独立终端 <span class="dot working" style="vertical-align:middle"></span>】。</div></div><label for="unregCloseSpace" style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;margin-bottom:16px"><input type="checkbox" id="unregCloseSpace"> 同时关闭终端工作区（仅关闭窗口标签页，不删除代码）</label><div style="display:flex;justify-content:flex-end;gap:8px"><button class="btn" onclick="closeModal()">取消</button><button class="btn danger-btn" onclick="submitUnregisterProject()">确认注销</button></div></div>`);
+  openModal('注销工厂项目',`<div style="line-height:1.6"><div style="font-size:15px;font-weight:650;margin-bottom:8px">确定要注销项目【${esc(p.project_name||p.project_id)}】吗？</div><div class="muted" style="font-size:13px;margin-bottom:14px">项目目录：<code>${esc(p.project_root)}</code><br>当前空间：<b>${esc(p.workspace_id||'')}</b></div><div style="background:var(--bg-subtle);border:1px solid var(--border-default);border-radius:10px;padding:12px;font-size:12px;margin-bottom:14px;color:var(--text-primary)"><div style="font-weight:600;margin-bottom:4px">注销影响说明：</div><div>1. <b>本地代码仓库绝对不碰</b>，保留所有代码与 Git 提交。</div><div>2. 工厂调度器将停止对该项目的自动任务派发与状态巡检。</div><div>3. 终端空间将从【当前工厂 <span class="dot ready" style="vertical-align:middle"></span>】退回为【独立终端 <span class="dot working" style="vertical-align:middle"></span>】。</div></div><label for="unregCloseSpace" style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;margin-bottom:16px"><input type="checkbox" id="unregCloseSpace"> 同时关闭终端工作区（仅关闭窗口标签页，不删除代码）</label><div style="display:flex;justify-content:flex-end;gap:8px"><button class="btn" onclick="closeModal()">取消</button><button class="btn danger-btn" onclick="submitUnregisterProject()">确认注销</button></div></div>`);
 }
 async function submitUnregisterProject(){
   if(!state.project||!state.projectId)return;
@@ -3209,7 +3290,7 @@ function updateAgentPreflightResult(agent,row){
   const note=deep.note||row.version||row.binary||(final==='MISSING'?'未安装':'');
   const adapter=deep.adapter?(' · '+esc(deep.adapter)):'';
   const out=(deep.output||'').slice(-800);
-  const outHtml=out?('<pre class="task-meta" style="white-space:pre-wrap;max-height:120px;overflow:auto;background:#080b0f;padding:6px 8px;border-radius:8px;margin-top:6px;border:1px solid rgba(255,255,255,0.05)">'+esc(out)+'</pre>'):'';
+  const outHtml=out?('<pre class="ctl-pre-light">'+esc(out)+'</pre>'):'';
   const rowEl=document.getElementById('pf-row-'+agent);
   if(rowEl)rowEl.className='preflight-row '+rowCls;
   const dotEl=document.getElementById('pf-dot-'+agent);
@@ -3560,7 +3641,7 @@ function switchTaskDrawerTab(tab){
   if(drawer&&drawer.hidden){drawer.hidden=false;drawer.classList.add('open')}
 }
 async function showTask(id){try{const [td,proj]=await Promise.all([api('/api/task?id='+encodeURIComponent(id)).catch(()=>null),api('/api/task/projection?id='+encodeURIComponent(id)).catch(()=>null)]);const d=proj||(td&&td.task)||{};const raw=td||proj||{};const st=d.status||(td&&td.task&&td.task.status)||'unknown';const intent=d.intent||(td&&td.task&&td.task.goal)||'无明确意图描述';const blockers=Array.isArray(d.blockers)?d.blockers:(d.blocker?[d.blocker]:[]);const ms=Array.isArray(d.milestones)?d.milestones:[];const arts=Array.isArray(d.artifacts)?d.artifacts:[];const acts=Array.isArray(d.recent_activity)?d.recent_activity:(typeof d.recent_activity==='string'&&d.recent_activity?d.recent_activity.split('\n'):[]);const blkHtml=blockers.length?`<div class="proj-blk"><strong>⚠️ 卡点告警:</strong><span>${esc(blockers.join('; '))}</span></div>`:'';const msHtml=ms.length?`<div class="proj-sec"><div class="proj-lbl">动态路标</div>${ms.map(m=>`<div class="proj-ms"><span class="proj-ms-dot ${m.status}">${m.status==='completed'?'✓':(m.status==='in_progress'?'›':'·')}</span><span style="${m.status==='completed'?'color:var(--text)':(m.status==='in_progress'?'color:var(--warn);font-weight:600':'color:var(--muted)')}">${esc(m.label)}</span></div>`).join('')}</div>`:'';const artHtml=arts.length?`<div class="proj-sec"><div class="proj-lbl">核心产物</div>${arts.map(a=>`<div class="proj-art"><div class="proj-art-hd"><span>${esc(a.name||a.kind)}</span><span class="badge ${a.passed?'cleaned':(a.kind==='evaluation'?'failed':'waiting')}">${esc(a.kind)}</span></div><div class="muted">${esc(a.summary||'')}</div></div>`).join('')}</div>`:'';const actHtml=acts.length?`<div class="proj-sec"><div class="proj-lbl">近期动态提炼</div><ul class="proj-acts">${acts.map(a=>`<li>${esc(a)}</li>`).join('')}</ul></div>`:'';const body=`<div class="proj-box"><div style="display:flex;justify-content:space-between;align-items:center;padding-bottom:8px;border-bottom:1px solid var(--line)"><div><span class="badge ${st}">${esc(st)}</span><span style="margin-left:8px;font-size:12px;color:var(--muted)">执行者: <strong>${esc(d.agent||'-')}</strong></span><span style="margin-left:8px;font-size:12px;color:var(--muted)">工位: <strong>${esc(d.node||'-')}</strong></span></div><button class="mini" onclick="const el=document.getElementById('taskRawPre');if(el)el.style.display=el.style.display==='none'?'block':'none'">原始数据</button></div>${blkHtml}<div class="proj-sec"><div class="proj-lbl">当前语义意图</div><div class="proj-txt">${esc(intent)}</div></div>${msHtml}${artHtml}${actHtml}<div id="taskRawPre" style="display:none;margin-top:10px"><div class="proj-lbl">原始调试数据</div><pre>${esc(JSON.stringify(raw,null,2))}</pre></div></div>`;openModal('任务白盒简报 · '+id,body)}catch(e){toast(e.message,true)}}async function showPane(id){if(!id)return toast('没有工位',true);try{const d=await api('/api/pane/read?id='+encodeURIComponent(id));openModal('工位 '+id,`<pre>${esc(d.output)}</pre>`)}catch(e){toast(e.message,true)}}async function askCoordinator(id){try{toast('正在通知总指挥…');await api('/api/task/coordinator',{method:'POST',body:JSON.stringify({task_id:id})});toast('总指挥已处理/接收')}catch(e){toast(e.message,true)}}
-async function openSignoffChamber(taskId){try{const [td,proj]=await Promise.all([api('/api/task?id='+encodeURIComponent(taskId)).catch(()=>null),api('/api/task/projection?id='+encodeURIComponent(taskId)).catch(()=>null)]);const d=proj||(td&&td.task)||{};const t=(td&&td.task)||{};const wid=t.workflow_id||state.workflowId;const node=t.node||t.stage||'';const arts=Array.isArray(d.artifacts)?d.artifacts:[];const isBlocked=t.stage_verdict==='blocked'||t.status==='blocked';let artCards='<div class="empty">暂无生成产物</div>';if(arts.length){artCards=arts.map(a=>`<div class="proj-sec" style="margin-bottom:8px"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px"><strong>${esc(a.name||a.kind)}</strong><span class="badge ${a.passed?'cleaned':(a.kind==='evaluation'?'failed':'waiting')}">${esc(a.kind)}</span></div><div class="task-meta" style="margin-bottom:6px">${esc(a.path||'')}</div><div class="proj-txt" style="background:#080b0f;padding:8px 10px;border-radius:8px;font-family:ui-monospace,Menlo,monospace;font-size:12px;max-height:160px;overflow:auto">${esc(a.content||a.summary||'（文件产物记录正常）')}</div></div>`).join('')}const html=`<div class="signoff-box"><div class="signoff-head"><div><div style="font-size:16px;font-weight:700">${esc(taskDisplayName(t))}</div><div class="task-meta">任务 ID: ${esc(taskId)} · 执行者: <b>${esc(t.agent||'-')}</b> · 节点: <b>${esc(node)}</b></div></div><div>${badge(t.status)}</div></div>${isBlocked?'<div class="proj-blk"><strong>⚠️ 门禁会签等待:</strong> 当前节点触发门禁阻断，需要人类总指挥核查产物并决策放行或打回。</div>':''}<div class="proj-sec"><div class="proj-lbl">核心交付物与成果列表</div>${artCards}</div><div class="form"><label for="signoffFeedback">审批意见 / 批注说明（可选）</label><input id="signoffFeedback" placeholder="例如：数据核准，批准通过；或：海外收入拆解不全，请补充"></div><div class="signoff-actions"><button class="btn" onclick="closeModal()">暂不处理</button><button class="btn danger-btn" onclick="submitSignoffDecision(\'${esc(taskId)}\',\'${esc(wid)}\',\'${esc(node)}\',\'reject\')">批注打回</button><button class="btn primary" onclick="submitSignoffDecision(\'${esc(taskId)}\',\'${esc(wid)}\',\'${esc(node)}\',\'approve\')">通过并放行</button></div></div>`;openModal('成果交付会签室 (Artifact Signoff Chamber)',html)}catch(e){toast(e.message,true)}}
+async function openSignoffChamber(taskId){try{const [td,proj]=await Promise.all([api('/api/task?id='+encodeURIComponent(taskId)).catch(()=>null),api('/api/task/projection?id='+encodeURIComponent(taskId)).catch(()=>null)]);const d=proj||(td&&td.task)||{};const t=(td&&td.task)||{};const wid=t.workflow_id||state.workflowId;const node=t.node||t.stage||'';const arts=Array.isArray(d.artifacts)?d.artifacts:[];const isBlocked=t.stage_verdict==='blocked'||t.status==='blocked';let artCards='<div class="empty">暂无生成产物</div>';if(arts.length){artCards=arts.map(a=>`<div class="proj-sec" style="margin-bottom:8px"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px"><strong>${esc(a.name||a.kind)}</strong><span class="badge ${a.passed?'cleaned':(a.kind==='evaluation'?'failed':'waiting')}">${esc(a.kind)}</span></div><div class="task-meta" style="margin-bottom:6px">${esc(a.path||'')}</div><div class="proj-txt ctl-pre-light">${esc(a.content||a.summary||'（文件产物记录正常）')}</div></div>`).join('')}const html=`<div class="signoff-box"><div class="signoff-head"><div><div style="font-size:16px;font-weight:700">${esc(taskDisplayName(t))}</div><div class="task-meta">任务 ID: ${esc(taskId)} · 执行者: <b>${esc(t.agent||'-')}</b> · 节点: <b>${esc(node)}</b></div></div><div>${badge(t.status)}</div></div>${isBlocked?'<div class="proj-blk"><strong>⚠️ 门禁会签等待:</strong> 当前节点触发门禁阻断，需要人类总指挥核查产物并决策放行或打回。</div>':''}<div class="proj-sec"><div class="proj-lbl">核心交付物与成果列表</div>${artCards}</div><div class="form"><label for="signoffFeedback">审批意见 / 批注说明（可选）</label><input id="signoffFeedback" placeholder="例如：数据核准，批准通过；或：海外收入拆解不全，请补充"></div><div class="signoff-actions"><button class="btn" onclick="closeModal()">暂不处理</button><button class="btn danger-btn" onclick="submitSignoffDecision(\'${esc(taskId)}\',\'${esc(wid)}\',\'${esc(node)}\',\'reject\')">批注打回</button><button class="btn primary" onclick="submitSignoffDecision(\'${esc(taskId)}\',\'${esc(wid)}\',\'${esc(node)}\',\'approve\')">通过并放行</button></div></div>`;openModal('成果交付会签室 (Artifact Signoff Chamber)',html)}catch(e){toast(e.message,true)}}
 async function submitSignoffDecision(taskId,wid,node,act){const feedback=(document.getElementById('signoffFeedback')?.value||'').trim();closeModal();try{toast(act==='approve'?'正在通过并放行…':'正在批注打回…');const res=await api('/api/task/signoff',{method:'POST',body:JSON.stringify({task_id:taskId,workflow_id:wid,node:node,action:act,feedback:feedback,operator:'总指挥'})});if(res.ok){await loadWorkflow(wid);toast(act==='approve'?'已通过并放行门禁！':'已完成批注打回，已回退至上游重新推进')}else{toast('操作失败: '+(res.error||'未知错误'),true)}}catch(e){toast(e.message,true)}}
 async function forceReviewTask(tid){
   try{
@@ -3618,18 +3699,41 @@ function openControllerCockpitModal(){
   acts.forEach(a=>{state.controllerActionsMap[a.action_id]=a;});
   const curStage=state.workflow&&state.workflow.stages?state.workflow.stages.find(s=>['working','failed','blocked'].includes(s.status)):null;
   const stageName=curStage?(curStage.label||curStage.key):'就绪/空闲';
+  const isStalled=Boolean(stall&&stall.is_stalled);
+  const catMeta=c=>({fix:['修复','working'],rework:['换人重派','rework'],bypass:['豁免推进','cleaned'],recovery:['恢复','waiting']}[c]||[c||'操作','waiting']);
 
-  let statusCard=`<div style="background:#090d13;border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:12px 14px;margin-bottom:14px"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px"><span style="font-weight:600;font-size:13px;color:var(--text-primary)">调度状态与等待条件</span><span class="badge ${stall&&stall.is_stalled?'failed':'cleaned'}">${stall&&stall.is_stalled?'推进停滞':'调度运转中'}</span></div><div class="task-meta" style="line-height:1.6"><div>当前关注阶段: <strong style="color:var(--text-primary)">${esc(stageName)}</strong> · 活跃卡点: <strong style="color:${blockers.length?'var(--accent)':'var(--good)'}">${blockers.length} 项</strong></div><div style="margin-top:4px">${stall&&stall.is_stalled?`⚠️ 停滞原因: ${esc(stall.message)}`:'✓ Controller 后台轮询正常，正在监控 DAG 拓扑门禁'}</div></div></div>`;
+  let statusCard=`<section class="ctl-status${isStalled?' is-stalled':''}"><div class="ctl-status-head"><span class="ctl-status-title"><span class="ctl-dot"></span>调度状态与等待条件</span><span class="badge ${isStalled?'failed':'cleaned'}">${isStalled?'推进停滞':'调度运转中'}</span></div><div class="ctl-status-grid"><div class="ctl-status-item"><span class="ctl-k">当前关注阶段</span><strong>${esc(stageName)}</strong></div><div class="ctl-status-item"><span class="ctl-k">活跃卡点</span><strong>${blockers.length} 项</strong></div><div class="ctl-status-item is-full"><span class="ctl-k">${isStalled?'停滞原因':'轮询状态'}</span><span class="ctl-note">${isStalled?`⚠️ ${esc(stall.message)}`:'✓ Controller 后台轮询正常，正在监控 DAG 拓扑门禁'}</span></div></div></section>`;
 
   let unblockSection='';
-  if(acts.length){
-    const cards=acts.map(act=>`<div style="background:#0d131a;border:1px solid rgba(255,255,255,0.08);border-radius:8px;padding:10px;margin-bottom:10px"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px"><strong style="color:var(--text-primary);font-size:13px">${act.recommended?'⭐ ':''}${esc(act.title)}</strong><span class="badge ${act.category==='fix'?'working':act.category==='rework'?'waiting':'cleaned'}">${esc(act.category)}</span></div><div class="task-meta" style="font-size:12px;margin-bottom:6px">${esc(act.description)}</div><div style="display:flex;align-items:center;gap:6px;background:#05080c;padding:5px 8px;border-radius:6px;border:1px solid rgba(255,255,255,0.05);margin-bottom:8px"><code style="flex:1;font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#93c5fd;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(act.command_line)}</code><button class="mini" style="padding:2px 8px" onclick="copyCliCommandByActionId('${esc(act.action_id)}')">📋 复制命令</button></div><div style="display:flex;justify-content:flex-end"><button class="btn primary" style="padding:4px 12px;font-size:12px" onclick="closeModal();executeControllerAction('${esc(act.action_id)}','${esc(wid)}')">🚀 立即执行该方案</button></div></div>`).join('');
-    unblockSection=`<div style="margin-bottom:16px"><div style="font-weight:600;font-size:13px;margin-bottom:8px;color:var(--text-primary)">⚡ 针对当前卡点的推荐解卡动作</div>${cards}</div>`;
+  if(blockers.length||acts.length){
+    const actionKey=a=>a.blocker_task_id||a.old_task_id||String(a.action_id||'').split(':')[0]||'';
+    const groups=blockers.length?blockers.map(b=>({blocker:b,items:acts.filter(a=>actionKey(a)===b.task_id)})):[{blocker:null,items:acts}];
+    if(!blockers.length&&acts.length)groups[0].items=acts;
+    const sections=groups.map((g,gi)=>{
+      const b=g.blocker||{};
+      const tid=b.task_id||(g.items[0]?actionKey(g.items[0]):'')||'';
+      const reason=b.stage_verdict_note||b.blocker||b.blocked_reason||'';
+      const st=b.status||'';
+      const ag=b.agent||'';
+      const stageLabel=b.stage_label||b.stage||b.node||'';
+      const head=tid?`<div class="ctl-blocker" style="margin-bottom:10px"><div class="ctl-blocker-head"><div style="min-width:0"><div class="ctl-blocker-title">卡点任务 ${gi+1} · ${esc(taskDisplayName(b)||stageLabel||'任务')}</div><div class="ctl-blocker-id">${esc(tid)}${ag?` · 执行者 ${esc(ag)}`:''}${st?` · ${esc(humanStatus(st))}`:''}${stageLabel?` · ${esc(stageLabel)}`:''}</div></div><div style="display:flex;gap:6px;flex-shrink:0"><button class="mini" onclick="locateControllerTask('${esc(tid)}')">查看任务详情</button></div></div>${reason?`<div class="ctl-blocker-reason">卡点原因：${esc(reason)}</div>`:''}</div>`:`<div class="ctl-sub">以下为当前可执行的一键解卡操作（已按推荐度排序）。</div>`;
+      const cards=(g.items.length?g.items:[]).map((act,i)=>{const m=catMeta(act.category);const fx=act.effect||act.description||'';return `<article class="ctl-card${act.recommended?' is-recommended':''}${act.is_destructive?' is-destructive':''}"><div class="ctl-card-head"><span class="ctl-index">操作 ${i+1}</span><span class="ctl-card-title">${act.recommended?'⭐ ':''}${esc(act.title)}</span><span class="ctl-badges">${act.recommended?'<span class="ctl-rec">推荐</span>':''}<span class="badge ${m[1]}">${esc(m[0])}</span></span></div><p class="ctl-card-desc">${esc(act.description)}</p>${fx?`<div class="ctl-effect">点按钮后：${esc(fx)}</div>`:''}${act.new_task_id||act.new_agent?`<div class="ctl-meta-chips">${act.old_task_id?`<span class="ctl-chip">旧任务 <strong>${esc(act.old_task_id)}</strong></span>`:''}${act.new_task_id?`<span class="ctl-chip">新任务 <strong>${esc(act.new_task_id)}</strong></span>`:''}${act.new_agent?`<span class="ctl-chip">执行者 <strong>${esc(act.new_agent)}</strong></span>`:''}</div>`:''}<div class="ctl-card-foot"><button class="btn" onclick="locateControllerTask('${esc(tid||actionKey(act))}')">查看任务</button><button class="btn primary" onclick="executeControllerAction('${esc(act.action_id)}','${esc(wid)}')">一键执行</button></div><details class="ctl-tech"><summary>工程师技术详情（可选）</summary><div class="ctl-tech-body"><div class="ctl-cheat-cmd"><code>${esc(act.command_line)}</code></div><div style="display:flex;justify-content:flex-end;margin-top:6px"><button class="mini" onclick="copyCliCommandByActionId('${esc(act.action_id)}')">复制命令</button></div></div></details></article>`}).join('')||'<div class="muted" style="font-size:12px">该卡点暂无自动解卡按钮，请查看任务详情人工处理。</div>';
+      return `<section style="margin-bottom:16px">${head}<div class="ctl-actions">${cards}</div></section>`;
+    }).join('');
+    unblockSection=`<section><div class="ctl-section-title">按卡点任务一键解卡 <span class="ctl-count">${blockers.length||acts.length}</span></div><div class="ctl-sub">每个卡点任务独立分组：先看“卡点原因”，再点对应按钮即可执行，无需手动敲命令。</div>${sections}</section>`;
+  } else {
+    unblockSection=`<div class="ctl-empty">✓ 当前暂无活跃卡点，无需解卡。<div class="muted">Controller 仍在后台监控 DAG 门禁；若出现停滞，这里会按任务分组给出可一键执行的按钮。</div></div>`;
   }
 
-  let cheatSheet=`<div style="background:#090d13;border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:12px 14px"><div style="font-weight:600;font-size:13px;margin-bottom:8px;color:var(--text-primary)">🛠️ Controller 常用底层操作速查手册</div><div class="task-meta" style="display:grid;gap:8px;font-size:11.5px"><div><code>bin/herdr-task launch --task-id &lt;new-task-id&gt; --workflow-id ${esc(wid)} --stage &lt;stage&gt; --source . --agent &lt;agent&gt; --goal &lt;goal&gt; --prompt &lt;prompt&gt; --supersedes &lt;old-task-id&gt;</code><div style="margin-top:2px;color:var(--text-secondary)">作废指定卡点旧任务，换执行者重派新任务</div></div><div><code>bin/herdr-task advance ${esc(wid)}</code><div style="margin-top:2px;color:var(--text-secondary)">检查并强制推进工作流至下一阶段</div></div><div><code>bin/herdr-task clear-escalation &lt;task-id&gt;</code><div style="margin-top:2px;color:var(--text-secondary)">撤销机器终化升级锁，解除阻断重新流转</div></div><div><code>bin/herdr-task steer &lt;task-id&gt; "提示内容"</code><div style="margin-top:2px;color:var(--text-secondary)">向正在执行的智能体工位注入实时插话指导</div></div></div></div>`;
+  const cheatRows=[
+    {name:'换执行者重派',cmd:`bin/herdr-task launch --task-id <new-task-id> --workflow-id ${wid} --stage <stage> --source . --agent <agent> --goal <goal> --prompt <prompt> --supersedes <old-task-id>`,desc:'作废指定卡点旧任务，换执行者重派新任务'},
+    {name:'强制推进阶段',cmd:`bin/herdr-task advance ${wid}`,desc:'检查并强制推进工作流至下一阶段'},
+    {name:'解除升级锁定',cmd:'bin/herdr-task clear-escalation <task-id>',desc:'撤销机器终化升级锁，解除阻断重新流转'},
+    {name:'实时插话指导',cmd:'bin/herdr-task steer <task-id> "提示内容"',desc:'向正在执行的智能体工位注入实时插话指导'},
+  ];
+  let cheatSheet=`<details class="ctl-tech"><summary>工程师命令参考（可选展开，终端用户无需使用）</summary><div class="ctl-tech-body"><section class="ctl-cheatsheet" style="box-shadow:none"><div class="ctl-sub">以下命令仅供审计与排查；日常使用请点上面的“一键执行”按钮。</div><div class="ctl-cheat-list">${cheatRows.map((r,i)=>`<div class="ctl-cheat-row"><span class="ctl-cheat-num">${i+1}</span><div><div class="ctl-cheat-name"><span>${esc(r.name)}</span><button class="mini" onclick="copyCliCommand(document.getElementById('ctlCheat${i}').textContent)">复制</button></div><div class="ctl-cheat-cmd"><code id="ctlCheat${i}">${esc(r.cmd)}</code></div><div class="ctl-cheat-desc">${esc(r.desc)}</div></div></div>`).join('')}</div></section></div></details>`;
 
-  const html=`<div style="line-height:1.5;max-height:75vh;overflow-y:auto;padding-right:4px">${statusCard}${unblockSection}${cheatSheet}</div>`;
+  const html=`<div class="ctl-wrap">${statusCard}${unblockSection}${cheatSheet}</div>`;
   openModal(`Controller 调度与解卡控制台 · ${wid}`,html);
 }
 async function advanceStage(){

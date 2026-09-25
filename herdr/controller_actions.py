@@ -31,6 +31,14 @@ class ControllerAction:
     api_payload: Dict[str, Any] = field(default_factory=dict)
     is_destructive: bool = False
     recommended: bool = False
+    # Task binding for end-user console: which blocked task this resolves,
+    # and a plain-language consequence shown on buttons (no CLI needed).
+    blocker_task_id: str = ""
+    effect: str = ""
+    old_task_id: str = ""
+    new_task_id: str = ""
+    new_agent: str = ""
+    stage: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -161,6 +169,12 @@ def generate_controller_actions(
                     "source": proj_root,
                 },
                 recommended=True,
+                blocker_task_id=tid,
+                effect=f"在实现阶段新建修复任务 {fix_task_id}（执行者 {alt_agent}），修完自动回测；原失败测试任务 {tid or '—'} 保留备查，无需你敲命令。",
+                old_task_id="",
+                new_task_id=fix_task_id,
+                new_agent=alt_agent,
+                stage="implementation",
             )
         )
 
@@ -195,6 +209,12 @@ def generate_controller_actions(
                     "prompt": "重新运行测试套件并出具完整验证报告",
                     "source": proj_root,
                 },
+                blocker_task_id=tid,
+                effect=f"将作废旧测试任务 {tid or '—'}，用 {alt_agent} 新建 {retest_task_id} 重跑测试门禁；旧任务标记取代，可回溯。",
+                old_task_id=tid,
+                new_task_id=retest_task_id,
+                new_agent=alt_agent,
+                stage="test",
             )
         )
 
@@ -231,6 +251,12 @@ def generate_controller_actions(
                     "source": proj_root,
                 },
                 recommended=True,
+                blocker_task_id=tid,
+                effect=f"将作废卡点任务 {tid or '—'}，用 {alt_agent} 新建 {relaunch_task_id} 重跑 {stage}；旧任务标记取代，可回溯。",
+                old_task_id=tid,
+                new_task_id=relaunch_task_id,
+                new_agent=alt_agent,
+                stage=stage,
             )
         )
 
@@ -256,6 +282,12 @@ def generate_controller_actions(
             },
             is_destructive=True,
             recommended=False,
+            blocker_task_id=tid,
+            effect=f"将把卡点任务 {tid or '当前阶段'} 标记通过并尝试推进工作流到下一阶段；属高风险豁免，请确认已人工核查产物。",
+            old_task_id=tid,
+            new_task_id="",
+            new_agent="",
+            stage=stage,
         )
     )
 
