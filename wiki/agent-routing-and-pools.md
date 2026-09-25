@@ -150,3 +150,20 @@ Evidence:
 - `herdr/preflight.py` / `herdr/deep_preflight.py`
 - `CLAUDE.md:坑点 4：No READY Agent found 路由阻断`
 - [[preflight-and-health]]
+
+---
+
+## 7. 自适应路由影子层（Adaptive Router v1, Shadow Mode）
+
+`FACT` 每次 `choose_agent` 返回后，影子层基于 (agent × node/stage × task_type)
+历史桶计算推荐并持久化 `route_decision` 事件；实际派发恒为旧 Router 结果，
+影子异常时记 `route_decision_error` 并 fail-open。Qualified Success 要求
+requirements + verification 双 true 且终态为 completed 类；未知 outcome 永不
+默认成功；历史查询带 cutoff 并排除当前 run，防未来信息泄漏。
+
+Evidence:
+- `herdr/adaptive_router.py`
+- `herdr/state_db.py#query_adaptive_history`
+- `herdr/agent_router.py#choose_agent`
+- `tests/test_adaptive_router.py`
+- `docs/architecture/adaptive-agent-router.md`

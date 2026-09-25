@@ -3061,6 +3061,169 @@ def aggregate_run_metric_rows(run_id: str, db_path: Optional[Path] = None) -> Di
         conn.close()
 
 
+ADAPTIVE_HISTORY_DEFAULT_LIMIT = 2000
+
+_RUN_ID_EXPR = (
+    "COALESCE(NULLIF(CASE WHEN json_valid(t.payload_json) "
+    "THEN json_extract(t.payload_json, '$.run_id') END, ''), "
+    "'run_' || t.task_id)"
+)
+_TASK_TYPE_EXPR = (
+    "COALESCE(NULLIF(CASE WHEN json_valid(t.payload_json) "
+    "THEN json_extract(t.payload_json, '$.task_type') END, ''), '')"
+)
+_NODE_EXPR = "COALESCE(NULLIF(t.node, ''), t.stage, '')"
+
+
+def _adaptive_bool(raw: Any) -> Optional[bool]:
+    if raw is None:
+        return None
+    return bool(raw)
+
+
+def query_adaptive_history(
+    node: str,
+    task_type: str,
+    *,
+    cutoff: float,
+    exclude_run_id: Optional[str] = None,
+    limit: Optional[int] = None,
+    lookback_days: Optional[float] = None,
+    db_path: Optional[Path] = None,
+) -> List[Dict[str, Any]]:
+    """Read a bounded, cutoff-gated slice of routing history.
+
+    One row per historical task in the (node/stage x task_type) bucket.
+    Only facts durable before ``cutoff`` are returned; the caller's own
+    ``exclude_run_id`` never appears. Eval attribution joins on run_id AND
+    owning task_id (NULL eval task_id tolerated for legacy rows), so one
+    run's eval can never leak into another run's sample. Unknown eval facts
+    stay NULL; callers must not default them to success.
+
+    Bounded by ORDER BY created_at DESC + LIMIT (newest-first window), so
+    routing cost stays flat as history grows.
+    """
+    bounded = int(limit) if limit is not None else ADAPTIVE_HISTORY_DEFAULT_LIMIT
+    if bounded < 1:
+        raise ValueError("limit must be a positive int")
+    if not str(node or "").strip():
+        raise ValueError("node is required")
+    normalized_type = str(task_type or "")
+    cutoff = float(cutoff)
+
+    query = f"""
+        SELECT
+          t.task_id AS task_id,
+          t.workflow_id AS workflow_id,
+          t.agent AS agent,
+          t.status AS status,
+          t.stage_verdict AS stage_verdict,
+          t.created_at AS created_at,
+          t.updated_at AS updated_at,
+          {_NODE_EXPR} AS node,
+          {_TASK_TYPE_EXPR} AS task_type,
+          {_RUN_ID_EXPR} AS run_id,
+          CASE WHEN json_valid(t.payload_json)
+               THEN json_extract(t.payload_json, '$.status_history') END
+            AS status_history_json,
+          CASE WHEN json_valid(t.payload_json)
+               THEN json_extract(t.payload_json, '$.started_at') END
+            AS started_at,
+          CASE WHEN json_valid(t.payload_json)
+               THEN json_extract(t.payload_json, '$.finished_at') END
+            AS finished_at,
+          CASE WHEN json_valid(t.payload_json)
+               THEN json_extract(t.payload_json, '$.acceptance_verdict') END
+            AS acceptance_verdict,
+          ev.requirements_satisfied AS eval_requirements_satisfied,
+          ev.verification_passed AS eval_verification_passed,
+          ev.human_intervention_count AS eval_human_intervention_count,
+          ev.final_status AS eval_final_status,
+          ev.created_at AS eval_created_at
+        FROM tasks t
+        LEFT JOIN (
+          SELECT e.* FROM eval_results e
+          WHERE e.created_at < ?
+            AND e.revision = (
+              SELECT MAX(e2.revision) FROM eval_results e2
+              WHERE e2.run_id = e.run_id
+            )
+        ) ev ON ev.run_id = {_RUN_ID_EXPR}
+            AND (ev.task_id IS NULL OR ev.task_id = t.task_id)
+        WHERE {_NODE_EXPR} = ?
+          AND {_TASK_TYPE_EXPR} = ?
+          AND t.agent IS NOT NULL AND t.agent <> ''
+          AND t.created_at < ?
+    """
+    params: List[Any] = [cutoff, str(node), normalized_type, cutoff]
+    if exclude_run_id:
+        query += f" AND {_RUN_ID_EXPR} <> ?"
+        params.append(str(exclude_run_id))
+    if lookback_days is not None:
+        floor = float(cutoff) - float(lookback_days) * 86400.0
+        query += " AND t.created_at >= ?"
+        params.append(floor)
+    query += " ORDER BY t.created_at DESC, t.task_id DESC LIMIT ?"
+    params.append(bounded)
+
+    conn = get_db_connection(db_path)
+    try:
+        rows = conn.execute(query, tuple(params)).fetchall()
+    finally:
+        conn.close()
+
+    samples: List[Dict[str, Any]] = []
+    for row in rows:
+        history: List[str] = []
+        raw_history = row["status_history_json"]
+        if raw_history is not None:
+            try:
+                decoded = json.loads(raw_history) if isinstance(raw_history, str) else raw_history
+            except (TypeError, ValueError):
+                decoded = None
+            if isinstance(decoded, list):
+                for entry in decoded:
+                    status = entry.get("to") if isinstance(entry, dict) else entry
+                    if status:
+                        history.append(str(status))
+        wall: Optional[float] = None
+        try:
+            start = row["started_at"] if row["started_at"] is not None else row["created_at"]
+            end = row["finished_at"] if row["finished_at"] is not None else row["updated_at"]
+            if start is not None and end is not None:
+                wall = float(end) - float(start)
+                if not math.isfinite(wall) or wall < 0:
+                    wall = None
+        except (TypeError, ValueError):
+            wall = None
+        human = row["eval_human_intervention_count"]
+        try:
+            human = int(human) if human is not None else None
+        except (TypeError, ValueError):
+            human = None
+        final_status = row["eval_final_status"] or row["status"] or None
+        samples.append({
+            "agent": str(row["agent"]),
+            "run_id": str(row["run_id"]),
+            "task_id": str(row["task_id"]),
+            "workflow_id": row["workflow_id"],
+            "node": str(row["node"] or ""),
+            "task_type": str(row["task_type"] or ""),
+            "status": row["status"],
+            "stage_verdict": row["stage_verdict"],
+            "acceptance_verdict": row["acceptance_verdict"],
+            "status_history": history,
+            "has_history": bool(history),
+            "wall_time_seconds": wall,
+            "requirements_satisfied": _adaptive_bool(row["eval_requirements_satisfied"]),
+            "verification_passed": _adaptive_bool(row["eval_verification_passed"]),
+            "human_intervention_count": human,
+            "final_status": str(final_status) if final_status else None,
+            "created_at": row["created_at"],
+        })
+    return samples
+
+
 def latest_trajectory_sequence(run_id: str, db_path: Optional[Path] = None) -> int:
     """Read only the run watermark without loading its event history."""
     conn = get_db_connection(db_path)

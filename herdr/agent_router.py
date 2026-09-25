@@ -319,7 +319,7 @@ def _record_router_opt_out(
             f"agent reuse ({type(exc).__name__}: {exc})"
         ) from exc
 
-def choose_agent(
+def _choose_agent_impl(
     workflow_id,
     stage,
     task_type,
@@ -339,7 +339,16 @@ def choose_agent(
         # implementation default. Explicit requests still pass through;
         # auto without context fails closed.
         if requested and requested != "auto":
-            return requested
+            return requested, {
+                "workflow_id": "",
+                "stage": stage,
+                "task_type": task_type,
+                "candidates": [requested],
+                "active_loads": {},
+                "reserved_loads": {},
+                "run_id": run_id or "",
+                "task_id": reservation_key or "",
+            }
         raise RuntimeError(
             "Agent selection requires explicit --agent when workflow_id is absent; "
             "refusing to default to 'opencode' (FR-6.3 fail-closed)"
@@ -433,7 +442,16 @@ def choose_agent(
                 task_id=reservation_key or "",
                 run_id=run_id or "",
             )
-        return selected
+        return selected, {
+            "workflow_id": workflow_id or "",
+            "stage": stage,
+            "task_type": task_type,
+            "candidates": [selected],
+            "active_loads": {},
+            "reserved_loads": {},
+            "run_id": run_id or "",
+            "task_id": reservation_key or "",
+        }
 
     ROUTER_LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
 
@@ -544,6 +562,98 @@ def choose_agent(
 
         fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
+    return selected, {
+        "workflow_id": workflow_id or "",
+        "stage": stage,
+        "task_type": task_type,
+        "candidates": list(candidates),
+        "active_loads": dict(active_loads),
+        "reserved_loads": dict(reserved_loads),
+        "run_id": run_id or "",
+        "task_id": reservation_key or "",
+    }
+
+
+def _record_shadow_best_effort(selected, shadow_ctx, decided_at):
+    """Persist the Adaptive Router shadow recommendation (fail-open).
+
+    Any failure is recorded as a route_decision_error event on a
+    best-effort basis and never propagates: production routing always
+    falls back to the legacy decision.
+    """
+    try:
+        try:
+            from . import adaptive_router as _adaptive
+        except ImportError:  # pragma: no cover - script-style import fallback
+            from herdr import adaptive_router as _adaptive
+        store = _get_store()
+        context = _adaptive.ShadowContext(
+            workflow_id=shadow_ctx.get("workflow_id", ""),
+            stage=shadow_ctx.get("stage", ""),
+            task_type=shadow_ctx.get("task_type", ""),
+            candidates=list(shadow_ctx.get("candidates", [])),
+            active_loads=dict(shadow_ctx.get("active_loads", {})),
+            reserved_loads=dict(shadow_ctx.get("reserved_loads", {})),
+            run_id=shadow_ctx.get("run_id", ""),
+            task_id=shadow_ctx.get("task_id", ""),
+        )
+        _adaptive.record_shadow_decision(
+            store=store,
+            decided_at=decided_at,
+            actual_agent=selected,
+            context=context,
+        )
+    except Exception as exc:
+        ctx = shadow_ctx or {}
+        try:
+            store = _get_store()
+            store.record_event(
+                "route_decision_error",
+                {
+                    "mode": "shadow",
+                    "workflow_id": ctx.get("workflow_id", ""),
+                    "run_id": ctx.get("run_id", ""),
+                    "task_id": ctx.get("task_id", ""),
+                    "actual_agent": selected,
+                    "algorithm_version": "adaptive-router-v1",
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "created_at": decided_at,
+                },
+                workflow_id=ctx.get("workflow_id") or None,
+                node_id=ctx.get("stage") or None,
+                task_id=ctx.get("task_id") or None,
+                agent_id=selected or None,
+                source="adaptive-router-shadow",
+                timestamp=decided_at,
+                run_id=ctx.get("run_id") or None,
+            )
+        except Exception:
+            pass
+
+
+def choose_agent(
+    workflow_id,
+    stage,
+    task_type,
+    requested="auto",
+    reservation_key=None,
+    run_id=None,
+):
+    """Select the production agent (legacy semantics, unchanged).
+
+    The Adaptive Router v1 shadow runs after the decision, persists a
+    ``route_decision`` event, and can never alter the returned agent.
+    """
+    decided_at = time.time()
+    selected, shadow_ctx = _choose_agent_impl(
+        workflow_id,
+        stage,
+        task_type,
+        requested=requested,
+        reservation_key=reservation_key,
+        run_id=run_id,
+    )
+    _record_shadow_best_effort(selected, shadow_ctx, decided_at)
     return selected
 
 
