@@ -501,6 +501,48 @@ def test_task_head_migration_seeds_baseline_from_historical_watermarks(tmp_path)
     ) == 8
 
 
+def test_malformed_task_payload_does_not_block_repair_via_save_task(tmp_path):
+    db_path = tmp_path / "malformed-task-repair.db"
+    state_db.init_db(db_path)
+    state_db.save_workflow(
+        {"workflow_id": "wf", "title": "repair", "status": "running"},
+        db_path=db_path,
+    )
+    conn = state_db.get_db_connection(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO tasks (task_id, workflow_id, status, payload_json) VALUES (?, ?, ?, ?)",
+            ("task-broken", "wf", "working", "{"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    # Repairing the damaged row through the public API must succeed: trigger
+    # scope expressions read OLD.payload_json and must tolerate malformed JSON
+    # instead of raising OperationalError on the repair itself.
+    state_db.save_task(
+        {
+            "task_id": "task-broken", "workflow_id": "wf",
+            "run_id": "run-broken", "workflow_run_id": "exec-1",
+            "node": "review", "status": "working", "goal": "repaired",
+        },
+        db_path=db_path,
+    )
+    repaired = state_db.get_task("task-broken", db_path=db_path)
+    assert repaired is not None
+    assert repaired["goal"] == "repaired"
+    assert repaired["run_id"] == "run-broken"
+    check = state_db.get_db_connection(db_path)
+    try:
+        clock = check.execute(
+            "SELECT revision FROM working_context_source_clock WHERE run_scope = ? AND workflow_id = ?",
+            ("exec-1", "wf"),
+        ).fetchone()
+    finally:
+        check.close()
+    assert clock is not None and int(clock["revision"]) >= 1
+
+
 def test_get_latest_orders_by_time_across_scopes_not_watermark(tmp_path):
     db_path = tmp_path / "cross-scope-latest.db"
     state_db.init_db(db_path)
@@ -526,6 +568,41 @@ def test_get_latest_orders_by_time_across_scopes_not_watermark(tmp_path):
     assert state_db.get_latest_working_context(
         "task-x", db_path=db_path, run_scope="exec-old",
     )["context_id"] == "wc_old_exec"
+
+
+def test_get_latest_with_scope_but_no_workflow_orders_by_time_across_heads(tmp_path):
+    db_path = tmp_path / "cross-workflow-latest.db"
+    state_db.init_db(db_path)
+    conn = state_db.get_db_connection(db_path)
+    try:
+        for context_id, workflow_id, watermark, compiled_at in (
+            ("wc_head_a", "wf-a", 20, 10.0),
+            ("wc_head_b", "wf-b", 3, 20.0),
+        ):
+            conn.execute(
+                """INSERT INTO working_contexts
+                       (context_id, run_scope, run_id, workflow_id, task_id,
+                        agent_role, context_fingerprint, source_version,
+                        source_watermark, payload_json, compiled_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (context_id, "exec-1", "run-x", workflow_id, "task-x",
+                 "developer", "f" * 64, "v", watermark, "{}", compiled_at),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    # Watermarks belong to independent (run_scope, workflow_id, task_id)
+    # heads, so a scope-only lookup must not compare them: wall clock wins.
+    assert state_db.get_latest_working_context(
+        "task-x", db_path=db_path, run_scope="exec-1",
+    )["context_id"] == "wc_head_b"
+    # Pinning the full head identity restores watermark ordering.
+    assert state_db.get_latest_working_context(
+        "task-x", db_path=db_path, run_scope="exec-1", workflow_id="wf-a",
+    )["context_id"] == "wc_head_a"
+    assert state_db.get_latest_working_context(
+        "task-x", db_path=db_path, run_scope="exec-1", workflow_id="wf-b",
+    )["context_id"] == "wc_head_b"
 
 
 def test_residual_legacy_source_clock_uses_max_revision(tmp_path):

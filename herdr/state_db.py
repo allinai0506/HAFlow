@@ -601,27 +601,40 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
         )
         return f"COALESCE(NULLIF({alias}.workflow_id, ''), NULLIF({task_workflow}, ''), '')"
 
+    def _safe_task_json(column: str, path: str) -> str:
+        """Null-safe JSON extraction for trigger bodies.
+
+        A malformed historical payload must never break source writes:
+        without the json_valid guard, repairing a damaged task row via
+        save_task would crash inside the AFTER UPDATE trigger while it
+        reads OLD.payload_json.
+        """
+        return (
+            f"CASE WHEN json_valid({column}) "
+            f"THEN json_extract({column}, '{path}') END"
+        )
+
     def source_clock_scope(alias: str, source_table: str) -> str:
         if source_table == "workflows":
             return f"COALESCE(NULLIF({alias}.workflow_id, ''), '')"
         if source_table == "tasks":
             return (
-                f"COALESCE(NULLIF(json_extract({alias}.payload_json, '$.workflow_run_id'), ''), "
-                f"NULLIF(json_extract({alias}.payload_json, '$.execution_id'), ''), "
+                f"COALESCE(NULLIF({_safe_task_json(f'{alias}.payload_json', '$.workflow_run_id')}, ''), "
+                f"NULLIF({_safe_task_json(f'{alias}.payload_json', '$.execution_id')}, ''), "
                 f"NULLIF({alias}.workflow_id, ''), '')"
             )
         if source_table == "collaboration_events":
             return f"COALESCE(NULLIF({alias}.run_id, ''), NULLIF({alias}.workflow_id, ''), '')"
         task_scope = (
-            "(SELECT COALESCE(NULLIF(json_extract(t.payload_json, '$.workflow_run_id'), ''), "
-            "NULLIF(json_extract(t.payload_json, '$.execution_id'), ''), NULLIF(t.workflow_id, ''), '') "
+            f"(SELECT COALESCE(NULLIF({_safe_task_json('t.payload_json', '$.workflow_run_id')}, ''), "
+            f"NULLIF({_safe_task_json('t.payload_json', '$.execution_id')}, ''), NULLIF(t.workflow_id, ''), '') "
             f"FROM tasks t WHERE t.task_id = {alias}.task_id LIMIT 1)"
         )
         run_scope = (
-            "(SELECT COALESCE(NULLIF(json_extract(t.payload_json, '$.workflow_run_id'), ''), "
-            "NULLIF(json_extract(t.payload_json, '$.execution_id'), ''), NULLIF(t.workflow_id, ''), '') "
+            f"(SELECT COALESCE(NULLIF({_safe_task_json('t.payload_json', '$.workflow_run_id')}, ''), "
+            f"NULLIF({_safe_task_json('t.payload_json', '$.execution_id')}, ''), NULLIF(t.workflow_id, ''), '') "
             f"FROM tasks t WHERE {alias}.task_id IS NOT NULL "
-            f"AND json_extract(t.payload_json, '$.run_id') = {alias}.run_id LIMIT 1)"
+            f"AND {_safe_task_json('t.payload_json', '$.run_id')} = {alias}.run_id LIMIT 1)"
         )
         return (
             f"COALESCE({task_scope}, {run_scope}, NULLIF({alias}.workflow_id, ''), "
@@ -3902,7 +3915,7 @@ def _validate_context_source_existence(
                 ).fetchone()
             except ValueError:
                 row = conn.execute(
-                    "SELECT run_id, task_id, workflow_id FROM events WHERE source = 'trajectory' AND json_extract(payload_json, '$.event_id') = ? LIMIT 1",
+                    "SELECT run_id, task_id, workflow_id FROM events WHERE source = 'trajectory' AND CASE WHEN json_valid(payload_json) THEN json_extract(payload_json, '$.event_id') END = ? LIMIT 1",
                     (object_id,),
                 ).fetchone()
         elif prefix == "collaboration":
@@ -4581,23 +4594,32 @@ def get_latest_working_context(
 ) -> Optional[Dict[str, Any]]:
     conn = get_db_connection(db_path)
     try:
-        query = "SELECT * FROM working_contexts WHERE task_id = ?"
+        query = "SELECT * FROM working_contexts wc WHERE wc.task_id = ?"
         params: List[Any] = [str(task_id)]
         if agent_role is not None:
-            query += " AND agent_role = ?"
+            query += " AND wc.agent_role = ?"
             params.append(str(agent_role))
         if run_scope is not None:
-            query += " AND run_scope = ?"
+            query += " AND wc.run_scope = ?"
             params.append(str(run_scope))
         if workflow_id is not None:
-            query += " AND workflow_id = ?"
+            query += " AND wc.workflow_id IS ?"
             params.append(str(workflow_id))
-        # source_watermark is only comparable within one source head/scope.
-        # Across scopes (run_scope not pinned), wall-clock order decides.
-        if run_scope is not None:
-            query += " ORDER BY source_watermark DESC, compiled_at DESC, rowid DESC LIMIT 1"
+        # source_watermark is only comparable within one source head, whose
+        # identity is (run_scope, workflow_id, task_id). Across heads
+        # (scope or workflow unpinned), wall-clock order decides; rows that
+        # are stale within their own head are excluded so a late old write
+        # can never become latest.
+        if run_scope is not None and workflow_id is not None:
+            query += " ORDER BY wc.source_watermark DESC, wc.compiled_at DESC, wc.rowid DESC LIMIT 1"
         else:
-            query += " ORDER BY compiled_at DESC, rowid DESC LIMIT 1"
+            query += """ AND wc.source_watermark = (
+                SELECT MAX(w2.source_watermark) FROM working_contexts w2
+                WHERE w2.task_id = wc.task_id
+                  AND w2.run_scope = wc.run_scope
+                  AND w2.workflow_id IS wc.workflow_id
+                  AND w2.agent_role = wc.agent_role
+            ) ORDER BY wc.compiled_at DESC, wc.rowid DESC LIMIT 1"""
         row = conn.execute(query, params).fetchone()
         return _decode_working_context_row(row) if row is not None else None
     finally:
