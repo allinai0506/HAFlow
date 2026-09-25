@@ -694,8 +694,8 @@ def _read_source_snapshot(
                FROM tasks
               WHERE workflow_id = ?
                 AND COALESCE(
-                        NULLIF(json_extract(payload_json, '$.workflow_run_id'), ''),
-                        NULLIF(json_extract(payload_json, '$.execution_id'), ''),
+                        NULLIF(CASE WHEN json_valid(payload_json) THEN json_extract(payload_json, '$.workflow_run_id') END, ''),
+                        NULLIF(CASE WHEN json_valid(payload_json) THEN json_extract(payload_json, '$.execution_id') END, ''),
                         workflow_id, ''
                     ) = ?
               LIMIT 1001""",
@@ -742,14 +742,14 @@ def _read_source_snapshot(
                             CASE WHEN json_valid(payload_json)
                                  THEN json_extract(payload_json, '$.run_id') END AS run_id,
                             COALESCE(
-                                NULLIF(json_extract(payload_json, '$.workflow_run_id'), ''),
-                                NULLIF(json_extract(payload_json, '$.execution_id'), ''),
+                                NULLIF(CASE WHEN json_valid(payload_json) THEN json_extract(payload_json, '$.workflow_run_id') END, ''),
+                                NULLIF(CASE WHEN json_valid(payload_json) THEN json_extract(payload_json, '$.execution_id') END, ''),
                                 workflow_id, ''
                             ) AS scope
                        FROM tasks
                       WHERE workflow_id = ?
                         AND COALESCE(
-                                NULLIF(json_extract(payload_json, '$.run_id'), ''),
+                                NULLIF(CASE WHEN json_valid(payload_json) THEN json_extract(payload_json, '$.run_id') END, ''),
                                 'run_' || task_id
                             ) IN ({run_placeholders})
                       LIMIT 1001""",
