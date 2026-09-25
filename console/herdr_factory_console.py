@@ -23,6 +23,7 @@ from herdr import kernel as herdr_kernel
 from herdr import steering as herdr_steering
 from herdr import projection as herdr_projection
 from herdr import archive as herdr_archive
+from herdr import controller_actions as herdr_controller_actions
 from herdr.agent_binary import resolve_agent_binary
 PROJECTS_FILE=ROOT/'projects.json'; WORKFLOWS_FILE=ROOT/'workflows.json'; TASKS_FILE=ROOT/'tasks.json'; POOLS_FILE=ROOT/'agent-pools.json'; SLOTS_FILE=ROOT/'pane-slots.json'; LOG_DIR=ROOT/'logs'
 HOST='127.0.0.1'; PORT=int(os.environ.get('HERDR_CONSOLE_PORT','8765'))
@@ -607,6 +608,70 @@ def api_workflow_retry_advance(b):
     wid=str(b.get('workflow_id') or '').strip()
     if not wid:raise RuntimeError('workflow_id 不能为空')
     return manual_advance(wid)
+
+def api_workflow_controller_actions(wid):
+    wid = str(wid or '').strip()
+    if not wid: raise RuntimeError('workflow_id 不能为空')
+    wf = workflows().get(wid) or {}
+    ts = tasks_for_workflow(wid)
+    blockers = herdr_controller_actions.resolve_workflow_blockers(ts, wf)
+    p = project_for_workflow(wid) or {}
+    proj_root = p.get('project_root') or wf.get('project_root') or ''
+    actions_list = []
+    seen_action_ids = set()
+    for b in blockers:
+        acts = herdr_controller_actions.generate_controller_actions(b, wf, project_root=proj_root)
+        for act in acts:
+            if act.action_id not in seen_action_ids:
+                seen_action_ids.add(act.action_id)
+                actions_list.append(act.to_dict())
+    return {
+        'workflow_id': wid,
+        'blockers': blockers,
+        'actions': actions_list,
+    }
+
+def api_controller_execute_action(payload):
+    payload = payload or {}
+    act_type = str(payload.get('type') or payload.get('action_type') or '').strip()
+    wid = str(payload.get('workflow_id') or '').strip()
+    if not wid: raise RuntimeError('workflow_id 不能为空')
+
+    if act_type == 'launch':
+        stage = str(payload.get('stage') or 'implementation').strip()
+        agent = str(payload.get('agent') or 'auto').strip()
+        supersedes = str(payload.get('supersedes') or '').strip()
+        prompt = str(payload.get('prompt') or f'执行 {stage} 阶段任务').strip()
+        goal = str(payload.get('goal') or prompt).strip()
+        wf = workflows().get(wid) or {}
+        p = project_for_workflow(wid) or {}
+        proj_root = str(payload.get('source') or p.get('project_root') or wf.get('project_root') or '.').strip()
+
+        cmd = [
+            str(HERDR_TASK), 'launch',
+            '--workflow-id', wid,
+            '--stage', stage,
+            '--source', proj_root,
+            '--agent', agent,
+            '--goal', goal,
+            '--prompt', prompt,
+        ]
+        if supersedes:
+            cmd += ['--supersedes', supersedes]
+        r = run(cmd, timeout=30, check=True)
+        return {'ok': True, 'output': r.stdout.strip()}
+
+    elif act_type == 'force_pass':
+        gate = str(payload.get('gate_node_id') or payload.get('node') or '').strip()
+        note = str(payload.get('note') or '人类在控制台强制放行').strip()
+        op = str(payload.get('operator') or 'human').strip()
+        res = herdr_kernel.force_pass_gate(wid, gate_node_id=gate, note=note, operator=op)
+        return {'ok': True, 'result': res}
+
+    elif act_type == 'advance':
+        return manual_advance(wid)
+
+    raise RuntimeError(f'未知的控制器动作类型: {act_type}')
 
 
 def api_task_projection(tid):
@@ -3702,6 +3767,9 @@ class Handler(BaseHTTPRequestHandler):
                 wid=self.query().get('id',[''])[0] or self.query().get('workflow_id',[''])[0]
                 if not wid:raise RuntimeError('workflow_id 不能为空')
                 return self.send_json(200,api_workflow_projection(wid))
+            if p=='/api/workflow/controller-actions':
+                wid=self.query().get('workflow_id',[''])[0] or self.query().get('id',[''])[0]
+                return self.send_json(200,api_workflow_controller_actions(wid))
             return self.send_json(404,error='Not Found')
         except Exception as e:
             self.log_message('GET %s failed: %s', self.path, e)
@@ -3747,6 +3815,7 @@ class Handler(BaseHTTPRequestHandler):
             if p=='/api/kernel/force-pass':return self.send_json(200,api_kernel_force_pass(b))
             if p=='/api/kernel/checkpoint':return self.send_json(200,api_kernel_checkpoint_create(b))
             if p=='/api/kernel/checkpoint/restore':return self.send_json(200,api_kernel_checkpoint_restore(b))
+            if p=='/api/controller/execute-action':return self.send_json(200,api_controller_execute_action(b))
             return self.send_json(404,error='Not Found')
         except Exception as e:
             self.log_message('POST %s failed: %s', self.path, e)
