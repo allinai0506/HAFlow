@@ -4069,14 +4069,32 @@ tests/test_trajectory.py:361
 ```bash
 # ① 钉 env 跑全量：注册表安全，但打破 3 个用例
 TASKS_FILE=/tmp/x/tasks.json WORKFLOWS_FILE=/tmp/x/workflows.json pytest -q
-# → 3 failed, 1462 passed, 44 subtests passed
+# → 3 failed, 1462 passed, 44 subtests passed（本轮实测）
 #    FAILED tests/test_fix_loop_gates.py::SetVerdictTest::test_same_status_completed_still_persists_verdict
 #    FAILED tests/test_fix_loop_pr1.py::SuppressAutoCloseLatchTest::test_controller_skips_auto_close_while_latched
 #    FAILED tests/test_fix_loop_pr1.py::SuppressAutoCloseLatchTest::test_first_active_task_clears_latch
-#    两次实测注册表均保持 313 条（该 env 确实挡住了写穿，代价是打破用例）
+#    注册表保持 313 条（该 env 确实挡住了写穿，代价是打破用例）
 # ② 不钉 env 跑全量：3 个用例恢复
 pytest -q  # → 1465 passed, 44 subtests passed
 ```
+
+**失败条数随"被重定向的库是否干净"变化，不要把它当作固定值**（独立审阅者用全新 `mktemp -d`
+只跑那 3 条用例时得到的是 `2 failed, 1 passed`，与上面的 `3 failed` 都对，条件不同）：
+
+```bash
+T3=(tests/test_fix_loop_gates.py::SetVerdictTest::test_same_status_completed_still_persists_verdict \
+    tests/test_fix_loop_pr1.py::SuppressAutoCloseLatchTest::test_controller_skips_auto_close_while_latched \
+    tests/test_fix_loop_pr1.py::SuppressAutoCloseLatchTest::test_first_active_task_clears_latch)
+B=$(mktemp -d); TASKS_FILE=$B/tasks.json WORKFLOWS_FILE=$B/workflows.json pytest -q "${T3[@]}"
+# → 2 failed, 1 passed（test_controller_skips_auto_close_while_latched 通过）
+# 复用上一轮跑过的同一份 /tmp 目录（库中已有状态）再跑：
+TASKS_FILE=/tmp/x/tasks.json WORKFLOWS_FILE=/tmp/x/workflows.json pytest -q "${T3[@]}"
+# → 3 failed
+```
+
+统一解释：**被重定向的那个库里已有的内容会串味**。全量运行时是同一进程内其它用例先写进去了，
+单跑时则是上一轮跑剩的——所以 `2 failed` 与 `3 failed` 是同一机制在两个"脏度"下的表现，
+指向的结论相同。**判定该缺陷是否被 env 钉住，用全量跑 + 校验注册表条数（313）即可，不要拿固定失败数当判据。**
 
 为什么会打破用例：本仓库测试的隔离风格是改写**模块全局**（`_ht.TASKS_FILE` / `_ctl.WORKFLOWS_FILE`），
 而 `herdr/kernel.py::_get_store()` 是**直接读 `os.environ`**（`kernel.py:64` `tasks_file = os.environ.get("TASKS_FILE")`、
