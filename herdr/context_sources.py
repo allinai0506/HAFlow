@@ -678,8 +678,9 @@ def _read_source_snapshot(
         if not run_scope:
             raise ValueError("task has no resolvable workflow execution scope")
         # Scope before limit: the identity pass reads only indexed columns
-        # plus three JSON identity fields, never full payloads. Full task
-        # rows are fetched afterwards for in-scope tasks only.
+        # plus three JSON identity fields, never full payloads, and is
+        # itself restricted to the current execution scope. Full task rows
+        # are fetched afterwards for in-scope tasks only.
         identity_rows = conn.execute(
             """SELECT task_id, workflow_id,
                       CASE WHEN json_valid(payload_json)
@@ -690,14 +691,32 @@ def _read_source_snapshot(
                            THEN json_extract(payload_json, '$.execution_id') END AS execution_id,
                       CASE WHEN payload_json IS NULL OR json_valid(payload_json)
                            THEN 1 ELSE 0 END AS identity_valid
-               FROM tasks WHERE workflow_id = ? LIMIT 10001""",
-            (str(workflow_id),),
+               FROM tasks
+              WHERE workflow_id = ?
+                AND COALESCE(
+                        NULLIF(json_extract(payload_json, '$.workflow_run_id'), ''),
+                        NULLIF(json_extract(payload_json, '$.execution_id'), ''),
+                        workflow_id, ''
+                    ) = ?
+              LIMIT 1001""",
+            (str(workflow_id), str(run_scope)),
         ).fetchall()
-        if len(identity_rows) > 10000:
-            raise ValueError("workflow task identity set exceeds the bounded WorkingContext source limit")
+        if len(identity_rows) > 1000:
+            raise ValueError("execution task identity set exceeds the bounded WorkingContext source limit")
+        # Reused-run ambiguity cannot be seen from inside one scope alone: a
+        # second pass checks whether any in-scope run is also claimed by a
+        # task outside this execution scope.
+        in_scope_runs = set()
+        for identity_row in identity_rows:
+            if not identity_row["identity_valid"]:
+                continue
+            run_value = str(identity_row["run_id"] or "")
+            in_scope_runs.add(
+                run_value or f"run_{identity_row['task_id']}"
+            )
         taskless_scope_by_run: Dict[str, Optional[str]] = {}
         in_scope_task_ids: List[str] = []
-        for identity_row in identity_rows:
+        for identity_row in list(identity_rows):
             if not identity_row["identity_valid"]:
                 continue
             identity_task_id = str(identity_row["task_id"] or "")
@@ -716,6 +735,30 @@ def _read_source_snapshot(
                 taskless_scope_by_run[identity_run] = identity_scope
             if identity_scope == str(run_scope):
                 in_scope_task_ids.append(identity_task_id)
+        if in_scope_runs:
+            run_placeholders = ",".join("?" for _ in in_scope_runs)
+            for foreign_row in conn.execute(
+                f"""SELECT task_id,
+                            CASE WHEN json_valid(payload_json)
+                                 THEN json_extract(payload_json, '$.run_id') END AS run_id,
+                            COALESCE(
+                                NULLIF(json_extract(payload_json, '$.workflow_run_id'), ''),
+                                NULLIF(json_extract(payload_json, '$.execution_id'), ''),
+                                workflow_id, ''
+                            ) AS scope
+                       FROM tasks
+                      WHERE workflow_id = ?
+                        AND COALESCE(
+                                NULLIF(json_extract(payload_json, '$.run_id'), ''),
+                                'run_' || task_id
+                            ) IN ({run_placeholders})
+                      LIMIT 1001""",
+                (str(workflow_id), *sorted(in_scope_runs)),
+            ).fetchall():
+                foreign_scope = str(foreign_row["scope"] or "")
+                foreign_run = str(foreign_row["run_id"] or "") or f"run_{foreign_row['task_id']}"
+                if foreign_scope and foreign_scope != str(run_scope):
+                    taskless_scope_by_run[foreign_run] = None
         task_rows = []
         if in_scope_task_ids:
             scope_placeholders = ",".join("?" for _ in in_scope_task_ids)
@@ -847,6 +890,16 @@ def _read_source_snapshot(
                 linked_id = to_id if from_id == str(task_id) else from_id
                 if linked_id and linked_id in task_by_id:
                     priority_task_ids.add(str(linked_id))
+        # Relevant closure is the source boundary: restrict the scoped task
+        # set BEFORE any source query so SQL windows cannot be filled by
+        # tasks outside current task + dependency closure + handoff peers.
+        # Taskless scope facts still pass through the taskless branch below.
+        closure_task_ids = {str(value) for value in priority_task_ids if value}
+        scoped_tasks = [
+            item for item in scoped_tasks
+            if str(item.get("task_id") or "") in closure_task_ids
+        ]
+        task_by_id = {str(item.get("task_id")): item for item in scoped_tasks}
 
         placeholders = ",".join("?" for _ in allowed_runs)
         run_values = list(allowed_runs)

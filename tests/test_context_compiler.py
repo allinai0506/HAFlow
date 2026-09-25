@@ -1639,6 +1639,89 @@ def test_production_chain_review_sees_dependency_not_parallel_branch(tmp_path: P
             }, source_task
 
 
+def test_irrelevant_branch_noise_cannot_starve_or_reversion_relevant_context(tmp_path: Path):
+    db = tmp_path / "state.db"
+    state_db.save_workflow(
+        {
+            "workflow_id": "wf-relevant-source", "title": "relevant source",
+            "status": "running",
+            "config": {"nodes": [
+                {"id": "implementation", "depends_on": []},
+                {"id": "implementation-b", "depends_on": []},
+                {"id": "review", "depends_on": ["implementation"]},
+            ]},
+        },
+        db_path=db,
+    )
+    impl_a = _seed_task(db, dict(
+        _task("task-relevant-a", workflow_id="wf-relevant-source", scope="exec-relevant",
+              node="implementation", status="completed"),
+        artifacts=[{"ref": "artifact-a"}],
+    ))
+    impl_b = _seed_task(db, dict(
+        _task("task-noise-b", workflow_id="wf-relevant-source", scope="exec-relevant",
+              node="implementation-b", status="blocked"),
+        blocker="noise branch blocked",
+    ))
+    observation_a = create_observation(
+        run_id=impl_a["run_id"], task_id=impl_a["task_id"],
+        workflow_id=impl_a["workflow_id"], source_type="verification",
+        source_ref="verification:relevant-a", content="relevant evidence",
+        created_at=1.0, store=ObservationStore(db),
+    )
+    finding_a = _finding(
+        impl_a["run_id"], "fnd-relevant-a", task_id=impl_a["task_id"],
+        evidence=[{"observation_id": observation_a.observation_id}],
+        created_at=1.0,
+    )
+    finding_a["workflow_id"] = impl_a["workflow_id"]
+    state_db.upsert_trajectory_finding(finding_a, db_path=db)
+    for index in range(1000):
+        state_db.record_trajectory_event(
+            {
+                "run_id": impl_b["run_id"], "task_id": impl_b["task_id"],
+                "workflow_id": impl_b["workflow_id"], "event_type": "decision",
+                "payload": {"decision": f"noise-{index}"},
+            },
+            db_path=db,
+        )
+        noise_finding = _finding(
+            impl_b["run_id"], f"fnd-noise-{index}", task_id=impl_b["task_id"],
+            created_at=float(index + 2),
+        )
+        noise_finding["workflow_id"] = impl_b["workflow_id"]
+        state_db.upsert_trajectory_finding(noise_finding, db_path=db)
+        create_observation(
+            run_id=impl_b["run_id"], task_id=impl_b["task_id"],
+            workflow_id=impl_b["workflow_id"], source_type="agent_log",
+            source_ref=f"pane:noise-{index}", content="noise",
+            created_at=float(index + 2), store=ObservationStore(db),
+        )
+    review_a = _seed_task(db, _task(
+        "task-relevant-review", workflow_id="wf-relevant-source",
+        scope="exec-relevant", node="review",
+    ))
+    first = _compile(db, review_a, "reviewer")
+    rendered = json.dumps(first.to_mapping(), ensure_ascii=False)
+    assert "artifact-a" in rendered
+    assert observation_a.observation_id in rendered
+    assert "fnd-relevant-a" in rendered
+    assert "noise branch blocked" not in rendered
+    assert "fnd-noise-0" not in rendered
+    for index in range(10):
+        state_db.record_trajectory_event(
+            {
+                "run_id": impl_b["run_id"], "task_id": impl_b["task_id"],
+                "workflow_id": impl_b["workflow_id"], "event_type": "decision",
+                "payload": {"decision": f"more-noise-{index}"},
+            },
+            db_path=db,
+        )
+    second = _compile(db, review_a, "reviewer")
+    assert second.context_fingerprint == first.context_fingerprint
+    assert second.context_id == first.context_id
+
+
 def test_taskless_source_with_reused_run_advances_all_workflow_scopes(tmp_path: Path):
     db = tmp_path / "state.db"
     _seed_workflow(db, workflow_id="wf-a", scope="scope-a")
