@@ -1082,3 +1082,9 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
   删除 `query_adaptive_history` 及 JSON/ownership/cutoff 重建 SQL。
 - 验收：outcome 22 + router 15 passed，全量 1732→1748 passed + 44 subtests；
   S6 round 3 MERGE_READY。ETQS 公式、UI、Workflow、Scheduler 未动。
+
+## [2026-09-25] merge | PR #99 已合并（Outcome Fact Layer + Adaptive Router v1 Shadow）
+- merge `4da5085`：main 现含 `herdr/execution_outcome.py`、`agent_execution_outcomes`
+  表 + covering bucket index、只读 Outcome 的 Adaptive Router、13 用例 outcome 测试。
+- main 树验证：outcome 22 + router 15 passed；compileall OK；diff-check OK。
+- 后续：v2 是否接管流量待 shadow 数据证明 ETQS 真实下降后另行决策。
