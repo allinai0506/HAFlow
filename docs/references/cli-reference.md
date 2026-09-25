@@ -110,10 +110,13 @@ herdr-task finalize <task_id> [--force] [--purge-clones]
 ### 2.7 `herdr-task close-workflow`
 工作流一键收尾(自动+手动两用):闸门校验 → 逐任务 finalize → 关阶段 tab → 标记完成 → 输出收尾报告。幂等。
 ```bash
-herdr-task close-workflow <workflow_id> [--include-coordinator] [--purge-clones] [--dry-run]
+herdr-task close-workflow <workflow_id> [--include-coordinator] [--purge-clones] [--dry-run] [--accept-escalated]
 ```
 - 闸门:存在活跃任务(`pending`/`dispatched`/`working`/`blocked`/`agent_done`/`rework`)时中止。
 - `failed` 任务默认保留现场,报告中列 `retained-failed`。
+- `--accept-escalated` 显式接受已升级 Git Task 的当前结果；报告 outcome 为
+  `escalated_accepted`，逐项报告 pane 是否关闭、Task 最终状态及未集成 Clone 保留原因。
+  该确认不会把 `committed` 伪报为 `integrated`，也不会删除未集成 Clone。
 - 关阶段 tab 前校验 tab 内无其他 workflow 的外来 pane,否则跳过并写入报告 `tabs_skipped`。
 - 总指挥 pane 默认保留;知识沉淀并合并 PR 后用 `--include-coordinator` 一并关闭。
 - 收尾后六步法：close-workflow 完成后（总指挥 pane 保留期间），用户/总指挥应先运行
@@ -125,9 +128,19 @@ herdr-task close-workflow <workflow_id> [--include-coordinator] [--purge-clones]
 - 自动触发:Controller 在 `[WORKFLOW COMPLETE]` 时自动调用(等价于不带 flags)。
 - 零任务的已登记 workflow 视为平凡完成,直接标记。
 
+### 2.8 `herdr-task check-delivery`
+校验交付候选并输出 PR 模板；读取当前 GitHub 分支已合并 PR 和本地 Git tree，
+检查相同分支不同 SHA 的历史交付告警。该告警不阻断，但 transport 不可用时会输出输入缺失提示。
+```bash
+herdr-task check-delivery --workflow-id <id> --head-sha <sha> --head-ref <branch> [--repo-path <git-repo>]
+```
+- 缺少或歧义的有效 delivery、被 invalidation 的候选：exit 2。
+- test/review launch 没有有效 delivery baseline 或 baseline 不包含候选：exit 2，
+  写入 StateStore `test_baseline_rejected` actionable event；先运行 `record-delivery` 补齐身份。
+
 ---
 
-### 2.8 `herdr-task reopen-workflow`
+### 2.9 `herdr-task reopen-workflow`
 重开已关闭（completed）的 workflow，续用原有 workflow/PR 上下文做 fix-loop。
 ```bash
 herdr-task reopen-workflow <workflow_id>

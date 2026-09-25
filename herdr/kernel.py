@@ -12,12 +12,10 @@ Provides first-class runtime control primitives for human and automated steering
 import json
 import os
 import time
-import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
 from . import workflow
-from . import state_db
 from . import runtime_state
 from .trajectory import TrajectoryLedger, record_trajectory_event_best_effort
 from .state_store import (
@@ -139,6 +137,9 @@ def transition_task(
     metadata: Optional[Dict[str, Any]] = None,
     force: bool = False,
     store: Optional[StateStore] = None,
+    expected_status: str | None = None,
+    expected_version: int | None = None,
+    expected_updated_at: float | None = None,
 ) -> Dict[str, Any]:
     """State Transition Gateway: Atomically transition task status and append WorkflowEvent."""
     s = _get_store(store)
@@ -154,14 +155,33 @@ def transition_task(
             updated_runtime = runtime_state.transition_runtime(current, to_status)
             if updated_runtime is not None:
                 meta["runtime"] = updated_runtime
-    res = s.transition_task(
-        task_id=task_id,
-        to_status=to_status,
-        reason=reason,
-        source=source,
-        metadata=meta,
-        force=force,
-    )
+    if (
+        expected_status is not None
+        or expected_version is not None
+        or expected_updated_at is not None
+    ):
+        res = s.compare_and_set_task_transition(
+            task_id=task_id,
+            to_status=to_status,
+            reason=reason,
+            source=source,
+            metadata=meta,
+            force=force,
+            expected_status=expected_status,
+            expected_version=expected_version,
+            expected_updated_at=expected_updated_at,
+        )
+    else:
+        res = s.transition_task(
+            task_id=task_id,
+            to_status=to_status,
+            reason=reason,
+            source=source,
+            metadata=meta,
+            force=force,
+        )
+    if not res.get("accepted", True):
+        return res
     sync_tasks_projection(store=s)
 
     # Historical trajectory is best-effort and strictly after the existing

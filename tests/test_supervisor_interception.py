@@ -153,11 +153,21 @@ class ControllerDoneGatingTests(unittest.TestCase):
         }
         harness = _FakeHarness(harness_result, pending=pending)
         self.controller.supervisor_harness = harness
+        def accept_durable_completion(*_args, **_kwargs):
+            task["status"] = "agent_done"
+            self.controller.emit_done_if_allowed(task)
+            return True
+
         with patch.object(self.controller, "get_task", return_value=task), \
              patch.object(self.controller, "set_task_status", return_value=True), \
              patch.object(self.controller, "_get_store", return_value=None), \
              patch.object(self.controller, "attention_get", return_value={}), \
              patch.object(self.controller, "attention_note"), \
+             patch.object(
+                 self.controller,
+                 "_record_completion_sample",
+                 side_effect=accept_durable_completion,
+             ), \
              patch.object(self.controller, "enqueue_coordinator_event") as enqueue:
             self.controller.handle_event("t-int-1", "done")
         return enqueue, harness

@@ -3966,3 +3966,159 @@ pytest -q tests/test_t3_probes.py::L2EmptyReleasable \
 - `wiki/dag-workflow-engine.md` §12/§13；shared notes `n-1790229087315-5429`（review-t2）、
   `n-1790228635198-359f`（test 门禁 pass）
 - 同类模式：`docs/lessons/lessons-learned.md` §87（收尾条目固定交付物身份 / 分叉内容等价性）
+
+---
+
+## 90. Fix-loop 证据门禁：采样、episode 与候选身份必须可重放
+
+### 问题背景
+
+`wf-haflow-0924-01` 的独立 test gate 在候选 `4721d6b` 上稳定复现了五类阻断：
+完成观察在任务 epoch 变化后把 `first_seen` 留在 NULL；两个 Controller sweep
+可对同一 blocked episode 各发一次重推；同刻 delivery 候选按 note_id 静默择一；
+`--force` 被额外确认参数破坏；opt-out 审计异常越过路由边界。修复过程中还在
+`fbebbb1` review 锚点复现了崩溃观察无消费者和过期 action lease 残留。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|---|---|---|
+| 读两次 marker 就能完成 | 采样必须是同一 task/version epoch 的持久状态机，且两次有效样本至少间隔一个轮询周期 | `StateStore.observe_completion` 持久化采样；Controller 只用 `expected_status + expected_version` 的事务 CAS 提交 |
+| episode 只在单个进程内记计数 | JSON 读改写和外部 prompt 之间存在竞态，单纯 `attention.json` 不是动作锁 | 先用跨进程文件锁原子 claim，再发送；失败保留可恢复状态，预算耗尽只允许一次人工升级 |
+| 候选按时间/字典序选择 | append-only 记录的身份边必须先解析；同身份冲突、未知 supersede、同刻多候选都应拒绝 | `delivery_record` 以显式 identity/alias 图选择唯一有效候选，失效 replacement 不回退 predecessor |
+| 审计 best-effort | 隔离 opt-out 没有可验证回执就等于没有授权 | 审计异常、空 review 池和未知 delivery identity 均 fail-closed；失败 Task/event/workflow metadata 必须在 topology/Pane 前落盘 |
+| 修复测试只调用 helper | 状态、路由和 CLI 边界之间的接线错误仍会进入生产 | 每个 blocker 至少有一条经过真实 StateStore/Controller/CLI 与临时 SQLite/共享文档的回归；并发用独立连接/受控交错 |
+
+### 验证命令 / 关联证据
+
+- 修复前专项复现：`tests/test_impl_fix4_blocker_regression.py` 的 FR-1/FR-2/FR-4/FR-6 用例分别以 exit 1 暴露 NULL epoch、重复 repush、身份冲突和审计异常；FR-5 在隔离 `4721d6b` 快照运行 `tests/test_t3_probes.py::M3CloseWorkflowGate::test_accept_escalated_or_force_or_abandon_closes`，exit 1（直接 `--force` 被 `SystemExit(2)` 拒绝）。
+- 修复后专项：`python3.13 -m pytest -q tests/test_impl_fix1_regression.py tests/test_impl_fix4_blocker_regression.py tests/test_dispatch_fuse.py`，exit 0，46 passed。
+- 全量与循环门禁：`~/HAFlow/bin/herdr-loop eval`，score 100.0，1420/1420 tests，lint 2760（baseline 2844，new 0）。
+- 关联实现：`herdr/state_db.py`、`herdr/liveness.py`、`services/herdr-controller.py`、`herdr/delivery_record.py`、`herdr/workflow_docs.py`、`herdr/agent_router.py`、`bin/herdr-task`。
+
+### 相关文档 / 关联证据
+
+- 共享 spec/旧修复说明：`wf-haflow-0924-01/shared/notes.jsonl` 的 `FR-spec草稿`、`req-spec需求规格`、`test-0924测试报告`、`review-0924独立评审报告`、`impl-fix1修复说明`。
+- 回归入口：`tests/test_impl_fix4_blocker_regression.py`、`tests/test_impl_fix1_regression.py`。
+
+---
+
+## 91. 测试进程会写穿实盘注册表：JSON 投影的回落地不能是用户 HOME
+
+### 问题背景
+
+`wf-haflow-0924-01` 收尾节点在 clone 内执行标准验收命令 `pytest -q` 后，操作者的实盘任务
+注册表 `~/.herdr-controller/tasks.json` 被整体覆写为单条测试 fixture 记录（313 → 1）。
+权威库 `state.db` 未被破坏（313 条完好），受损的只有 JSON 投影——但投影正是人工排查与
+`herdr-task` 部分读取路径的入口，操作者视角就是"我的任务账本没了"。
+
+最小复现（该用例本身与门禁无关，1 passed，副作用才是问题）：
+
+```bash
+pytest -q "tests/test_trajectory.py::test_normal_launch_persists_one_new_run_id_for_initial_trajectory_events"
+```
+
+### 根因
+
+审计钩子捕获的真实调用栈（`sys.addaudithook` 监听 `os.replace`）：
+
+```
+tests/test_trajectory.py:361
+ → bin/herdr-task:2343 _launch_task
+ → bin/herdr-task:1151 save_tasks                    # 此处 tasks_file=None
+ → herdr/state_store.py:107 sync_tasks_projection(store=store, tasks_file=None)
+ → herdr/state_store.py:49  _sync_projection_locked
+ → herdr/state_store.py:37  _atomic_write_json → os.replace(tmp, ~/.herdr-controller/tasks.json)
+```
+
+用例已用 `monkeypatch.setenv("HERDR_STATE_DB", tmp)` 隔离了数据库，但没有隔离投影目标：
+`tasks_file=None` 让 `resolve_tasks_projection_file()` 逐级回落（显式参数 → `TASKS_FILE`
+→ `store.db_path.parent` → `state_db.CONTROLLER_DIR`），最终落回实盘
+`~/.herdr-controller/tasks.json`。`tests/conftest.py` 只隔离了 `HERDR_WORKFLOW_DOCS_DIR`，
+未覆盖注册表投影。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|---|---|---|
+| 隔离了 DB 就以为隔离了整个状态 | 「权威库 SQLite」与「JSON 投影」是两条独立写路径，隔离前者不保证后者 | 测试凡间接触碰 `sync_*_projection`，必须让投影跟随已隔离的 store（见下「修复方案实测」——**不要**用 conftest 钉 `TASKS_FILE`/`WORKFLOWS_FILE`） |
+| 回落链末端是用户 HOME | 回落链最后一级指向实盘目录时，任何"忘了传参"都会静默写穿 | `resolve_*_projection_file` 在"已设 `HERDR_STATE_DB` 却未设 `TASKS_FILE`"时应拒绝或强制跟随 store，不回落到 HOME |
+| 写入异常被吞 | `_sync_projection_locked` 的 `except Exception: pass` 让失败与成功同样不可观测 | 投影写入失败必须留可观测事件或告警，不能静默 |
+| 排查时信 stderr | pytest 会捕获 `sys.stderr`，写在其中的诊断输出在用例通过时被丢弃 | 诊断钩子必须写独立文件，不要写 stderr |
+| 只靠"文件没变"下结论 | 拿 `chflags uchg` 让目标文件不可变，才能把"谁在写"从推测变成证据 | 存疑时用不可变/只读对照实验做反证 |
+
+### 验证命令 / 关联证据
+
+- 覆写复现：先 `sync_tasks_projection()` 复原到 313，再跑上面那条用例，之后
+  `python3 -c "import json;print(len(json.load(open('$HOME/.herdr-controller/tasks.json'))['tasks']))"`
+  → `1`（预期 313）。
+- 反证（证明写入目标就是该文件）：`chflags uchg ~/.herdr-controller/tasks.json` 后重跑同一用例，
+  注册表保持 313 且用例仍 `1 passed` —— 说明写入目标确为实盘路径，且失败被静默吞掉。
+- 权威栈追踪：`sys.addaudithook` 记录 `os.replace(src, dst)`，输出写文件后得到上文调用链。
+- 恢复：`python3 -c "from herdr.state_store import sync_tasks_projection; sync_tasks_projection()"`
+  （从 `state.db` 重投影，313 条复原；`state.db` 全程未受损）。
+- 归因：`git diff 437b335..34bfd30 -- bin/herdr-task herdr/state_store.py tests/test_trajectory.py`
+  → 调用点（`save_tasks` 的 `sync_tasks_projection`）与回落逻辑在 base 上已存在，
+  `tests/test_trajectory.py` 本分支零改动，**存量缺陷，非本次交付引入**。
+
+### 修复方案实测：不要用 conftest 钉 `TASKS_FILE` / `WORKFLOWS_FILE`
+
+上面初稿的第一条"规范"（在 `tests/conftest.py` 全局钉住 `TASKS_FILE` / `WORKFLOWS_FILE` 指向 tmp）
+**已被实测证伪**，请勿照做：
+
+```bash
+# ① 钉 env 跑全量：注册表安全，但打破 3 个用例
+TASKS_FILE=/tmp/x/tasks.json WORKFLOWS_FILE=/tmp/x/workflows.json pytest -q
+# → 3 failed, 1462 passed, 44 subtests passed（本轮实测）
+#    FAILED tests/test_fix_loop_gates.py::SetVerdictTest::test_same_status_completed_still_persists_verdict
+#    FAILED tests/test_fix_loop_pr1.py::SuppressAutoCloseLatchTest::test_controller_skips_auto_close_while_latched
+#    FAILED tests/test_fix_loop_pr1.py::SuppressAutoCloseLatchTest::test_first_active_task_clears_latch
+#    注册表保持 313 条（该 env 确实挡住了写穿，代价是打破用例）
+# ② 不钉 env 跑全量：3 个用例恢复
+pytest -q  # → 1465 passed, 44 subtests passed
+```
+
+**失败条数随"被重定向的库是否干净"变化，不要把它当作固定值**（独立审阅者用全新 `mktemp -d`
+只跑那 3 条用例时得到的是 `2 failed, 1 passed`，与上面的 `3 failed` 都对，条件不同）：
+
+```bash
+T3=(tests/test_fix_loop_gates.py::SetVerdictTest::test_same_status_completed_still_persists_verdict \
+    tests/test_fix_loop_pr1.py::SuppressAutoCloseLatchTest::test_controller_skips_auto_close_while_latched \
+    tests/test_fix_loop_pr1.py::SuppressAutoCloseLatchTest::test_first_active_task_clears_latch)
+B=$(mktemp -d); TASKS_FILE=$B/tasks.json WORKFLOWS_FILE=$B/workflows.json pytest -q "${T3[@]}"
+# → 2 failed, 1 passed（test_controller_skips_auto_close_while_latched 通过）
+# 复用上一轮跑过的同一份 /tmp 目录（库中已有状态）再跑：
+TASKS_FILE=/tmp/x/tasks.json WORKFLOWS_FILE=/tmp/x/workflows.json pytest -q "${T3[@]}"
+# → 3 failed
+```
+
+统一解释：**被重定向的那个库里已有的内容会串味**。全量运行时是同一进程内其它用例先写进去了，
+单跑时则是上一轮跑剩的——所以 `2 failed` 与 `3 failed` 是同一机制在两个"脏度"下的表现，
+指向的结论相同。**判定该缺陷是否被 env 钉住，用全量跑 + 校验注册表条数（313）即可，不要拿固定失败数当判据。**
+
+为什么会打破用例：本仓库测试的隔离风格是改写**模块全局**（`_ht.TASKS_FILE` / `_ctl.WORKFLOWS_FILE`），
+而 `herdr/kernel.py::_get_store()` 是**直接读 `os.environ`**（`kernel.py:64` `tasks_file = os.environ.get("TASKS_FILE")`、
+`kernel.py:70` 同理 `WORKFLOWS_FILE`），并且在命中时按 `p.parent / "state.db"` **另开一个权威库**
+（`kernel.py:66-73`）。于是全局钉 env 之后，这些用例的写入落到被钉的库、而断言读的是自己那份 tmp JSON，
+`set_status` / 清 latch 的结果不复现——`globals()` 优先的 `herdr/agent_router.py:132-150` 不受影响，
+唯独 `_get_store()` 这条直读 env 的路径被劫持。
+
+**结论**：`TASKS_FILE` / `WORKFLOWS_FILE` 在本仓库不只是"投影路径"，它同时是**权威库的选址开关**。
+修这个缺陷要走**收窄回落链**（让投影跟随已隔离的 store），而不是全局改环境变量：
+
+1. `resolve_tasks_projection_file()` / `_sync_projection_locked`：已设 `HERDR_STATE_DB` 时投影必须跟随
+   该 store，禁止回落到 `state_db.CONTROLLER_DIR`（治本，且不触碰 store 选址）；
+2. `_sync_projection_locked` 的 `except Exception: pass` 改为可观测（否则改错了也看不出来）；
+3. 若将来确实要钉 env，必须**同时**钉 `HERDR_STATE_DB` 到同一目录，否则 `_get_store()` 会另开库
+   （`kernel.py:66-73`）——这是本条的实测教训，也是判断"能否用 env 兜底"的判据。
+
+### 相关文档 / 关联证据
+
+- `herdr/state_store.py#resolve_tasks_projection_file` `#sync_tasks_projection` `#_sync_projection_locked`
+- `herdr/kernel.py#_get_store`（直读 env 并另开库，是"钉 env"方案证伪的关键）
+- `bin/herdr-task#save_tasks` `#_launch_task`
+- `tests/conftest.py`（仅 `HERDR_WORKFLOW_DOCS_DIR` 隔离）
+- 同类模式（同一"默认路径回落到生产状态库"根因，本条是 JSON 投影侧的实例）：
+  §78（`store=None` 回落到生产 `state.db`，已用 conftest kill switch 收口——但该 kill switch
+  只覆盖 observer，覆盖不到本条的投影回落，且**不能**靠钉 `TASKS_FILE`/`WORKFLOWS_FILE` 补，见上节实测）、
+  §89（收尾节点分支 ≠ 交付物分支：收尾侧必须对"看似无关"的实盘副作用保持警惕）

@@ -257,6 +257,10 @@ Evidence:
 3. **关阶段 tab（共享 tab 守卫）**: 连续 workflow 常复用同一 workspace 的阶段 tab, 关 tab 前必须校验 tab 内全部存活 pane 均属本 workflow(锚点 + 本 workflow 任务); 有外来 pane 或 pane list 不可用时跳过该 tab 并写入报告 `tabs_skipped`；
 4. **终态流转**: 物理资源销毁完成后，通过 Gateway 将工作流从 `closing` 原子推进为 `completed`；
 5. **清 stage-state 并输出收尾报告**。
+- `--accept-escalated` 是对已升级 Git Task 的人工确认，报告 outcome 为
+  `escalated_accepted`；它允许物理收尾，但不提升 Task 集成状态。已提交未集成的
+  Clone 必须保留，报告逐项列出 Pane 关闭结果、Task 状态和 Clone 保留原因；工作流
+  完成 outcome 同样记录为 `escalated_accepted`。
 - **总指挥 pane 例外**: 默认保留至知识沉淀 + PR 合并后由 `--include-coordinator` 关闭。
 - **自动触发**: Controller 在 `is_workflow_completed` 时后台调用 `close-workflow`(in-flight 防重入 + status=completed/closing 短路); 零任务的已登记运行视为平凡完成。
 
@@ -264,3 +268,19 @@ Evidence:
 - `bin/herdr-task#finalize_task` `#close_workflow` `#_tab_foreign_panes` `#dump_transcript`
 - `services/herdr-controller.py#maybe_close_completed_workflow`
 - `docs/walkthroughs/20260913-workflow-finalize.md`
+
+### 5.4 Test/review delivery baseline 与 PR 交付核对
+
+- test/review 在运行时资源创建前必须解析到唯一、有效的 workflow delivery；缺失、歧义或
+  invalidated 候选一律 exit 2，并通过 StateStore 写 `test_baseline_rejected` actionable event。
+- delivery 候选必须是 clone baseline 的 ancestor；无法证明时拒绝派发，不以 Agent 隔离策略
+  替代 FR-6.2 baseline 门禁。
+- `herdr-task check-delivery` 查询指定 head branch 的已合并 GitHub PR，并从 repo path 解析
+  candidate/head tree。相同分支旧 PR SHA 与当前候选不同时输出非阻断 review warning；查询失败
+  必须显式报告 evidence unavailable，不能声称无历史 PR。
+- `integrate` 在写 `refs/herdr/tasks/<task>`、force branch 或 integration ref 前检查主仓 tracked
+  状态；脏仓 exit 5 且不写 ref。
+- Router 的 `router_opt_out_used` event 在实际选择 reused agent 后写入，`selected` 必须与返回
+  给 CLI 的 agent 相同；审计失败仍 fail-closed。
+- Sentinel SQLite 观察失败按旁路故障记录并继续下一轮；记录本身也失败时只写 stderr，不能让
+  单次 SQLite 异常退出哨兵主循环。

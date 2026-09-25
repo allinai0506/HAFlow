@@ -947,3 +947,21 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - 交付 PR：只推送交付链末端分支并创建 PR（base `main`），不合并；URL 见 shared note `wrapup-t1收尾报告`。六步步骤 3 因 PR 未合入记 DEFERRED（收尾脚本 `--dry-run` 只读）。
 - 知识沉淀：`docs/lessons/lessons-learned.md` §89（收尾节点分支 ≠ 交付物分支；有锚任务空终化不自动放行）；wiki 回填本文与 [[dag-workflow-engine]] §13（收编 fail-closed 守卫 + close 第二道闸 `escalated_git`）。
 - 遗留：`impl-fix1`（`committed` + `finalize_escalated`，原因 `integrate_rebase_conflict`）不阻塞 `unsettled_git`（已排除已升级），但命中 `escalated_git` 闸门；其内容已被本次交付取代，处置建议 `--accept-escalated`（须在 base 合入后由 Controller/人类执行）。
+
+## [2026-09-24] fix | wf-haflow-0924-01 fix-loop 候选门禁修复
+- FR-1：完成观察按 task version 持久化双采样；Controller 通过 StateStore 原子 CAS 提交，旧 epoch 与同刻重复 sweep 不可完成。
+- FR-2：blocked episode 使用跨进程 action claim；每轮最多一次自动重推，失败可恢复，第二 SLA 独立升级人类；崩溃观察回到 Controller 自动补派链。
+- FR-4：delivery selector 解析显式 identity/supersede/invalidation 图；未知边、冲突 payload、同刻多候选 fail-closed，replacement 失效不回退。
+- FR-5：保持直接 `--force` 兼容；FR-6：opt-out 审计异常和空 review 池在 topology/Pane 前 fail-closed 并落 Task/Event/Workflow metadata。
+- 证据：`tests/test_impl_fix4_blocker_regression.py`、`tests/test_impl_fix1_regression.py`；`~/HAFlow/bin/herdr-loop eval` score 100（1420/1420，new lint 0）；通用教训 `docs/lessons/lessons-learned.md` §90。
+# [2026-09-24] fix | wf-haflow-0924-01 review-r1 blockers P1-1 / P2-1..P2-5
+- test/review 无唯一有效 delivery 时在 Pane/Clone 创建前 exit 2，并写 StateStore `test_baseline_rejected` actionable event；check-delivery CLI 补 merged PR history 与本地 Git tree evidence。
+- accept-escalated 报告 outcome、pane_closed、Task 状态及 Clone 保留原因；integrate 将主仓 tracked dirty preflight 前移到所有 task refs/branch 更新前。
+- Router 在实际选择重用的 Agent 后写非空 selected 审计；Sentinel 捕获 SQLite observation/list 失败并保护循环继续。
+- 文档更新：`docs/references/cli-reference.md`、`wiki/task-lifecycle.md`。专项回归与全量验收见 workflow shared note `impl-fix6修复说明`；本条仅记源码契约，未声称未运行的检查通过。
+
+## [2026-09-25] wrapup | wf-haflow-0924-01 故障自愈规范（FR-1..FR-6）交付收尾
+- 交付身份：分支 `agent/opencode/feat-wf-haflow-0924-01-impl` @ `34bfd30`（= 集成分支链末端 `herdr/integration-wf-haflow-0924-01-impl-fix8`），base `main` @ `437b335`；12 提交 / 31 文件 / +8807-378。
+- 上游门禁：`test-r11` = pass、`review-auto-r2` = pass；`verify-baseline` = `BASELINE_MATCH`。六步收尾步骤 3 因 PR 未合入记 DEFERRED（`--dry-run` 只读）。
+- 知识沉淀：`docs/lessons/lessons-learned.md` §91（测试进程写穿实盘 `tasks.json` 投影的根因、反证与恢复方式）。
+- 本文条目为 append-only 收尾记录；交付 PR 与收尾报告外链见 workflow `wf-haflow-0924-01` 共享文档区 `wrapup-auto收尾报告`，不在本文件重复易漂移的 URL。
