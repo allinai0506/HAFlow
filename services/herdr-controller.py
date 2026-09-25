@@ -1467,6 +1467,9 @@ def try_direct_stage_advance(item):
             "--integration-mode", spec["integration_mode"],
             "--goal", spec["goal"],
             "--prompt", spec["prompt"],
+            # Workflow execution identity: sibling launches keep distinct
+            # run_ids but share one execution_id for the same execution.
+            "--execution-id", workflow_id,
         ]
 
         if spec.get("onto_branch"):
@@ -3196,6 +3199,7 @@ Blocker 清单(blocked 结论与修复指引):
 
 ~/HAFlow/bin/herdr-task launch --workflow-id {workflow_id} --stage {retry_node} \\
   {onto_flag}--agent auto --task-type fix --integration-mode git \\
+  --execution-id {workflow_id} \\
   --goal "修复 gate {gate_stage} 的阻断项" \\
   --acceptance "<逐条对应 Blocker 清单>" \\
   --prompt "<blocker 详情、修复范围与验证方式>"
@@ -4395,6 +4399,8 @@ def _dispatch_supervisor_retry(task, decision, store):
         "HERDR_RETRY_ACTION:RETRY\n"
         + (f"WORKING_CONTEXT_REF:{working_context_ref}\n" if working_context_ref else "")
         + "Load the immutable context by reference before retrying.\n"
+        + (f"herdr-task working-context get --context-id {working_context_ref}\n"
+           if working_context_ref else "")
     )
     result = subprocess.run(
         ["herdr", "agent", "prompt", str(pane_id), prompt],
@@ -4529,6 +4535,8 @@ def _dispatch_supervisor_verification(task, decision, store):
         "HERDR_VERIFY_ACTION:VERIFY\n"
         + (f"WORKING_CONTEXT_REF:{working_context_ref}\n" if working_context_ref else "")
         + "Load the immutable context by reference before verification.\n"
+        + (f"herdr-task working-context get --context-id {working_context_ref}\n"
+           if working_context_ref else "")
     )
     result = subprocess.run(
         ["herdr", "agent", "prompt", str(pane_id), prompt],

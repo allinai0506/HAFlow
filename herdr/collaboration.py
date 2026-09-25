@@ -119,6 +119,7 @@ def build_handoff_prompt(
     if context_tail:
         tail += "\n" + context_tail
         tail += "\nLoad the immutable WorkingContext by context_id before continuing."
+        tail += "\nherdr-task working-context get --context-id " + context_refs[0]
     body = "\n".join([
         f"HANDOFF FROM: {event.get('from_agent') or ''}",
         f"TASK: {event.get('from_task_id') or ''}",
