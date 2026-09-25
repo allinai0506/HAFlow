@@ -235,6 +235,17 @@ class TestConsoleFrontendSyntaxAndContracts(unittest.TestCase):
         self.assertIn("openControllerCockpitModal", js)
         self.assertIn("bin/herdr-task", js)
 
+    def test_controller_cockpit_is_button_first_and_task_bound(self):
+        """End-user console: buttons first, grouped by blocked task; CLI only in collapsed tech details."""
+        script_match = re.search(r"<script>(.*?)</script>", self.html, re.DOTALL)
+        self.assertIsNotNone(script_match)
+        js = script_match.group(1)
+        for token in ("locateControllerTask", "一键执行", "查看任务详情", "卡点任务", "卡点原因", "工程师命令参考"):
+            self.assertIn(token, js, f"missing task-bound button UI token: {token}")
+        self.assertNotIn("底层命令 · 可全选复制", js)
+        self.assertIn("copyCliCommandByActionId", js)
+        self.assertIn("executeControllerAction", js)
+
 
 if __name__ == "__main__":
     unittest.main()

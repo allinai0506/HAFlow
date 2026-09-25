@@ -102,6 +102,28 @@ def test_generate_actions_for_test_failure():
     assert advance_act.is_destructive is True
 
 
+def test_generate_actions_carry_task_binding_and_effect():
+    """End-user console needs task-bound buttons: blocker id + plain-language effect, no CLI reading."""
+    task = {
+        "task_id": "wf-001-test-r1",
+        "workflow_id": "wf-001",
+        "node": "test",
+        "stage": "test",
+        "status": "failed",
+        "stage_verdict": "blocked",
+        "stage_verdict_note": "FAIL blocking defects=3",
+        "agent": "qodercli",
+    }
+    workflow = {"workflow_id": "wf-001", "project_root": "/tmp/p"}
+    actions = generate_controller_actions(task, workflow, project_root="/tmp/p")
+    assert actions, "expected actions for failed test blocker"
+    for a in actions:
+        d = a.to_dict()
+        assert d["blocker_task_id"] == "wf-001-test-r1"
+        assert d["effect"], f"missing human-readable effect for {a.action_id}"
+        assert "wf-001-test-r1" in d["effect"] or "当前阶段" in d["effect"]
+
+
 def test_generate_actions_for_plan_rework_spin():
     task = {
         "task_id": "wf-001-plan-spin",
