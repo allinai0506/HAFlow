@@ -17,9 +17,11 @@ AND verification_passed == true
 AND final_status ∈ {completed, committed, integrated, cleanup_ready, cleaned}
 ```
 
-事实来源是 `eval_results` 最新 revision（`herdr/eval_store.py`）。
-没有完整 eval 行的 Run 是 outcome-unknown：不计入分母，绝不默认成功，
-也绝不明示 `Task done == qualified success`。
+事实来源是 `eval_results` 中归属可证明的最新 revision；归属判定只在
+Outcome Finalization 时做一次（`herdr/execution_outcome.py`），结果以
+`qualified_success` 持久化。没有完整 eval 行的 Run 永远不会产生
+Outcome：不计入分母，绝不默认成功，也绝不明示
+`Task done == qualified success`。
 
 ## 3. ETQS 是什么
 
@@ -51,25 +53,56 @@ choose_agent → _choose_agent_impl → actual_agent (唯一执行依据)
   （再失败则静默），绝不阻断派发（fail-open to legacy）。
 - 测试 `test_case9/10` 把这两条锁死为硬门禁。
 
-## 5. 数据来源
+## 5. 数据来源：Write-time truth
 
-全部复用既有事实源，不建新 source of truth：
+```text
+Runtime / Task / Eval / Verification
+                │
+                ▼
+      Outcome Finalizer (herdr/execution_outcome.py)
+                │
+                ▼
+   agent_execution_outcomes (immutable facts)
+                │
+                ▼
+       Adaptive Router (aggregate → score → rank)
+                │
+                ▼
+      Shadow Recommendation (route_decision)
+```
+
+> Adaptive Router never reconstructs historical task outcomes from
+> mutable runtime state.
 
 | 指标 | 来源 |
 | --- | --- |
-| agent/node/stage/status/wall | `tasks` 表（`state_db.query_adaptive_history`）；`task_type` 由 launch 持久化（`bin/herdr-task`），缺失的 legacy 行归入 `""` 桶 |
-| requirements/verification/human/final | `eval_results` 在 cutoff 之前的最新 revision，按 run_id + task_id 双归属；taskless eval（task_id IS NULL）仅当 run_id 可证明唯一属于一个 Task 时归属，否则 unknown；`final_status` 只取 eval 行，绝不用 task.status 回填 |
-| rework / blocked | task `status_history` 中的状态机枚举值（非字符串猜测） |
+| agent/node/task_type/wall | `agent_execution_outcomes` 表（finalize 时固化；`task_type` 由 launch 持久化，`""` 缺失值自成一桶） |
+| requirements/verification/human/final/qualified | Outcome 行内持久化值；Router 只读不算 |
+| rework / blocked | Outcome 行内冻结的 `rework_count` / `blocked_count`（finalize 前该 Run 自身历史） |
 | 持久化 | `StateStore.record_event("route_decision")`，source=`adaptive-router-shadow` |
 
-查询按当前候选 agents 分片：每个 candidate 独立 newest-first 窗口
-（默认 500 条），高频 Agent 挤不掉低频候选的历史。分片由
-`idx_tasks_agent_node_created(agent, node, created_at)` 索引服务
-（EXPLAIN 回归锁定无全表扫描），处在 dispatch 热路径上的同步查询
-成本只与该 Agent 自身历史成正比。
+查询（`state_db.query_execution_outcomes`）只碰 Outcome 表：
 
-`task_type` 缺失的 legacy task 归入 `""` 桶独立统计，不猜测。
-`agent` 只取 `tasks.agent`（路由标签），不与 agent_name/type 混淆。
+```sql
+SELECT ... FROM agent_execution_outcomes
+WHERE agent = ? AND node = ? AND task_type = ? AND recorded_at < ?
+ORDER BY recorded_at DESC, outcome_id DESC LIMIT ?
+```
+
+按当前候选 agents 分片：每个 candidate 独立 newest-first 窗口
+（默认 500 条），高频 Agent 挤不掉低频候选的历史。分片由覆盖索引
+`idx_outcomes_bucket(agent, node, task_type, recorded_at, outcome_id)`
+服务（EXPLAIN 回归锁定：COVERING INDEX、无 SCAN、无 TEMP B-TREE、
+无 JSON 提取），dispatch 热路径成本只与该 Agent 自身窗口成正比。
+
+Outcome 生成规则（fail-closed，任一未知即不建行）：Task 已进入
+terminal（`TERMINAL_TASK_STATUSES`）+ Eval 存在且归属可证明 +
+requirements / verification / final_status 全部已知。taskless eval
+（`task_id IS NULL`）仅当 run_id 可证明唯一属于一个 Task 时归属；
+`final_status` 只取 eval 行，绝不用 task.status 回填；revision 取
+finalize 时刻之前该 Task owner 的最新版，之后的新 revision 不改旧行。
+同一 `(task_id, run_id)` 重复 finalize 返回已有行（immutable insert，
+无 update 接口）。
 
 ## 6. Ranking 公式
 
@@ -88,14 +121,17 @@ queue、confidence、fallback_reason），无 opaque score。
 
 ## 8. Known limitations
 
-1. 每 candidate newest-first 窗口默认 500 条；更老样本自然遗忘
-   （lookback_days 可选开启时间下限）。
-2. wall time 取 task 时间戳差，是执行时长近似，不是 Pane 真实存活测量。
+1. 每 candidate newest-first Outcome 窗口默认 500 条；更老 Outcome
+   仍在表内（聚合窗口外自然遗忘，lookback_days 可选开启时间下限）。
+2. wall time 取 Task 自有 started_at/finished_at 差；缺端点时为 NULL
+  （回退估算），绝不用 `updated_at` 猜测完成时间。
 3. queue delay 是负载线性估算，不是观测到的排队事实。
-4. task_type 未持久化的老数据只能按 `""` 桶统计，跨桶不可比。
-   2026-09-25 起 launch 持久化 task_type，此后新数据逐桶可用。
-5. `herdr-task route-shadow` 未指定 `--agents` 时，候选集按项目池偏好顺序
+4. Outcome 表只含已结算执行：working/pending Task 天然不参与，
+   rework/blocked 率不会被稀释；反之冷启动期样本少，blended 先验主导。
+5. 旧历史默认不迁移；backfill 只对身份可证明的行 best-effort 结算，
+   不可证明的一律 skip（`backfill_execution_outcomes` 报告 skip_reasons）。
+6. `herdr-task route-shadow` 未指定 `--agents` 时，候选集按项目池偏好顺序
    近似推导，未复刻 health/disabled/isolation 硬约束过滤；其输出是
    “历史表现排名”，不是“生产可派发集合”。
-6. 本版只 Observe→Measure→Recommend；v2 是否接管流量需 shadow 数据证明
+7. 本版只 Observe→Measure→Recommend；v2 是否接管流量需 shadow 数据证明
    ETQS 真实下降后另行决策。

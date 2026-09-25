@@ -155,15 +155,19 @@ Evidence:
 
 ## 7. 自适应路由影子层（Adaptive Router v1, Shadow Mode）
 
-`FACT` 每次 `choose_agent` 返回后，影子层基于 (agent × node/stage × task_type)
-历史桶计算推荐并持久化 `route_decision` 事件；实际派发恒为旧 Router 结果，
-影子异常时记 `route_decision_error` 并 fail-open。Qualified Success 要求
-requirements + verification 双 true 且终态为 completed 类；未知 outcome 永不
-默认成功；历史查询带 cutoff 并排除当前 run，防未来信息泄漏。
+`FACT` 每次 `choose_agent` 返回后，影子层基于已结算的
+AgentExecutionOutcome 不可变事实计算推荐并持久化 `route_decision` 事件；
+实际派发恒为旧 Router 结果，影子异常时记 `route_decision_error` 并
+fail-open。Qualified Success 在 Outcome 固化时一次算定（requirements +
+verification 双 true 且终态为 completed 类），Router 只读不算；未结算的
+Run 永不进入统计；Outcome 查询带 recorded_at cutoff 并排除当前 run，
+防未来信息泄漏。
 
 Evidence:
+- `herdr/execution_outcome.py`
+- `herdr/state_db.py#query_execution_outcomes`
 - `herdr/adaptive_router.py`
-- `herdr/state_db.py#query_adaptive_history`
 - `herdr/agent_router.py#choose_agent`
+- `tests/test_execution_outcome.py`
 - `tests/test_adaptive_router.py`
 - `docs/architecture/adaptive-agent-router.md`

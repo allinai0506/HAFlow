@@ -189,6 +189,20 @@ def record_eval_result(
                     pass
                 continue
             owned.execute("COMMIT;")
+            # Outcome choke point (write path only): a newly landed eval may
+            # settle its task. Best-effort; the canonical resolver lives in
+            # herdr.execution_outcome and never breaks eval recording.
+            if result.get("task_id"):
+                try:
+                    from .execution_outcome import try_autofinalize_for_task
+                except ImportError:  # pragma: no cover - fallback
+                    from herdr.execution_outcome import try_autofinalize_for_task
+                try:
+                    try_autofinalize_for_task(
+                        str(result["task_id"]), db_path=db_path
+                    )
+                except Exception:
+                    pass
             return result
         except sqlite3.IntegrityError as exc:
             last_error = exc

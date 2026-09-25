@@ -2,20 +2,26 @@
 """Adaptive Agent Router v1 -- Shadow Mode (herdr/adaptive_router.py).
 
 Functional Core: deterministic, explainable shadow ranking of candidate
-agents from historical (agent x node/stage x task_type) performance.
-No LLM, no embeddings, no network, no randomness: identical inputs always
-produce identical outputs.
+agents from settled AgentExecutionOutcome facts. No LLM, no embeddings,
+no network, no randomness: identical inputs always produce identical
+outputs.
 
 Shadow First, Decision Later: this module never selects the production
 agent. Callers (agent_router.choose_agent) keep their own decision and
 persist this module's recommendation as a ``route_decision`` event only.
 
+Write-time truth: this module NEVER reconstructs history from mutable
+runtime state. All inputs come from the immutable
+agent_execution_outcomes table (see herdr/execution_outcome.py):
+Qualified Success, rework/blocked counts, and wall times were frozen at
+finalization time. Unknown outcomes cannot exist here -- rows without a
+complete eval fact are never finalized, so every row counts.
+
 Definitions:
-- Qualified Success: requirements_satisfied is True AND
-  verification_passed is True AND final_status is in the completed family
-  (herdr.transitions.COMPLETED_TASK_STATUSES). Rows without a complete
-  eval fact are outcome-unknown and excluded from the denominator; they
-  are never defaulted to success or failure.
+- Qualified Success (persisted at finalization, only read here):
+  requirements_satisfied is True AND verification_passed is True AND
+  final_status is in the completed family
+  (herdr.transitions.COMPLETED_TASK_STATUSES).
 - ETQS (Expected Time To Qualified Success):
     ETQS = queue_delay_est
          + expected_execution_time (p50 wall, observed; else fallback estimate)
@@ -28,7 +34,7 @@ Definitions:
 - Cold start: blended_success_rate = (n*observed + K*prior) / (n + K)
   with K = MIN_SAMPLES_FOR_FULL_CONFIDENCE. Fewer samples -> the prior
   dominates -> ranking falls back toward the existing candidate order.
-  Zero determined samples -> deterministic fallback to candidate order.
+  Zero settled outcomes -> deterministic fallback to candidate order.
 """
 
 from __future__ import annotations
@@ -39,7 +45,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from . import state_db
-from .transitions import COMPLETED_TASK_STATUSES
 
 ALGORITHM_VERSION = "adaptive-router-v1"
 
@@ -56,10 +61,10 @@ REWORK_PENALTY_SECONDS = 300.0
 QUEUE_SECONDS_PER_LOAD = 30.0
 #: Assumed execution time when an agent has no observed wall times here.
 FALLBACK_EXECUTION_SECONDS = 600.0
-#: Newest-first history cap per candidate agent. Each candidate gets its
-#: own window so a high-frequency agent cannot crowd others out.
+#: Newest-first settled-outcome cap per candidate agent. Each candidate
+#: gets its own window so a high-frequency agent cannot crowd others out.
 DEFAULT_HISTORY_LIMIT = 500
-#: Optional age floor for history; None disables time filtering.
+#: Optional age floor for outcomes; None disables time filtering.
 DEFAULT_LOOKBACK_DAYS: Optional[float] = None
 
 
@@ -68,16 +73,6 @@ def normalize_task_type(task_type: Any) -> str:
     if task_type is None:
         return ""
     return str(task_type)
-
-
-def qualified_success(sample: Dict[str, Any]) -> Optional[bool]:
-    """True/False for determined outcomes, None for unknown (never defaulted)."""
-    req = sample.get("requirements_satisfied")
-    passed = sample.get("verification_passed")
-    final = sample.get("final_status")
-    if req is None or passed is None or final is None:
-        return None
-    return bool(req) and bool(passed) and str(final) in COMPLETED_TASK_STATUSES
 
 
 def _percentile(sorted_vals: List[float], fraction: float) -> Optional[float]:
@@ -106,15 +101,23 @@ def collect_samples(
     limit: Optional[int] = None,
     lookback_days: Optional[float] = None,
 ) -> List[Dict[str, Any]]:
-    """Fetch bounded, cutoff-gated history slices, one window per agent."""
-    return state_db.query_adaptive_history(
-        str(node),
-        normalize_task_type(task_type),
-        cutoff=float(cutoff),
+    """Fetch settled outcomes, one newest-first window per agent.
+
+    Reads ONLY agent_execution_outcomes (recorded_at < cutoff). No task
+    state, no eval revisions, no status_history enter this function.
+    """
+    resolved_days = lookback_days if lookback_days is not None else DEFAULT_LOOKBACK_DAYS
+    return state_db.query_execution_outcomes(
         agents=list(agents) if agents is not None else None,
+        node=str(node),
+        task_type=normalize_task_type(task_type),
+        before=float(cutoff),
         exclude_run_id=exclude_run_id,
-        limit=int(limit) if limit is not None else DEFAULT_HISTORY_LIMIT,
-        lookback_days=lookback_days if lookback_days is not None else DEFAULT_LOOKBACK_DAYS,
+        per_agent_limit=int(limit) if limit is not None else DEFAULT_HISTORY_LIMIT,
+        lookback_floor=(
+            float(cutoff) - float(resolved_days) * 86400.0
+            if resolved_days is not None else None
+        ),
         db_path=db_path,
     )
 
@@ -127,35 +130,35 @@ def _score_agent(
     active_load: int = 0,
     reserved_load: int = 0,
 ) -> Dict[str, Any]:
-    """Score one candidate from its bucket rows (pure function)."""
-    verdicts = [(row, qualified_success(row)) for row in rows]
-    determined = [row for row, verdict in verdicts if verdict is not None]
-    qualified = [row for row, verdict in verdicts if verdict is True]
-    n = len(determined)
-    observed_rate = _rate(len(qualified), n)
+    """Score one candidate from its settled outcome rows (pure function).
+
+    Every row is a finalized fact: qualified_success, rework/blocked
+    counts, and wall time were frozen at finalization and are read here,
+    never recomputed from mutable state.
+    """
+    n = len(rows)
+    qualified = sum(1 for row in rows if row.get("qualified_success"))
+    observed_rate = _rate(qualified, n)
 
     walls = sorted(
-        float(row["wall_time_seconds"]) for row in determined
+        float(row["wall_time_seconds"]) for row in rows
         if row.get("wall_time_seconds") is not None
     )
     p50 = _percentile(walls, 0.5)
     p90 = _percentile(walls, 0.9)
 
-    history_rows = [row for row in rows if row.get("has_history")]
-    rework = sum(1 for row in history_rows if "rework" in row["status_history"])
-    blocked = sum(1 for row in history_rows if "blocked" in row["status_history"])
-    rework_rate = _rate(rework, len(history_rows))
-    blocked_rate = _rate(blocked, len(history_rows))
+    rework = sum(1 for row in rows if int(row.get("rework_count") or 0) > 0)
+    blocked = sum(1 for row in rows if int(row.get("blocked_count") or 0) > 0)
+    rework_rate = _rate(rework, n)
+    blocked_rate = _rate(blocked, n)
 
-    verified_rows = [row for row in rows if row.get("verification_passed") is not None]
     verification_failure_rate = _rate(
-        sum(1 for row in verified_rows if row["verification_passed"] is False),
-        len(verified_rows),
+        sum(1 for row in rows if row.get("verification_passed") is False),
+        n,
     )
-    human_rows = [row for row in rows if row.get("human_intervention_count") is not None]
     human_intervention_rate = _rate(
-        sum(1 for row in human_rows if int(row["human_intervention_count"] or 0) > 0),
-        len(human_rows),
+        sum(1 for row in rows if int(row.get("human_intervention_count") or 0) > 0),
+        n,
     )
 
     confidence = n / (n + MIN_SAMPLES_FOR_FULL_CONFIDENCE)
@@ -181,15 +184,16 @@ def _score_agent(
 
     if n > 0:
         fallback_reason = None
-    elif rows:
-        fallback_reason = "unknown_outcome_no_determined_samples"
     else:
+        # Settled-only table: no rows means no history. There is no
+        # "rows but unknown" state anymore -- incomplete runs are never
+        # finalized, so working tasks cannot dilute any rate.
         fallback_reason = "no_history"
 
     return {
         "agent": agent,
         "sample_count": n,
-        "qualified_success_count": len(qualified),
+        "qualified_success_count": qualified,
         "qualified_success_rate": observed_rate,
         "qualified_success_rate_source": "observed" if n else None,
         "blended_success_rate": round(blended, 6),
@@ -253,8 +257,8 @@ def rank_candidates(
 ) -> List[Dict[str, Any]]:
     """Rank candidates by ETQS; ties keep the existing candidate order.
 
-    History is strictly before ``cutoff`` and never includes
-    ``exclude_run_id`` (no look-ahead from the run being routed now).
+    Outcomes are strictly those recorded before ``cutoff`` and never
+    include ``exclude_run_id`` (no look-ahead from the run being routed).
     """
     samples = collect_samples(
         db_path, node=node, task_type=task_type, cutoff=cutoff,
@@ -400,7 +404,6 @@ __all__ = [
     "collect_samples",
     "explain_ranking",
     "normalize_task_type",
-    "qualified_success",
     "rank_candidates",
     "record_shadow_decision",
     "score_candidates",

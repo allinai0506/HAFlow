@@ -2,16 +2,23 @@
 
 Contract under test:
 - herdr/adaptive_router.py: deterministic, explainable shadow ranking over
-  historical (agent x node/stage x task_type) performance. No LLM, no network,
-  no randomness. Unknown outcomes stay unknown.
+  settled AgentExecutionOutcome facts. No LLM, no network, no randomness.
 - herdr/agent_router.choose_agent: production selection is unchanged; shadow
   runs fail-open and persists a route_decision event.
-- herdr/state_db.query_adaptive_history: bounded, cutoff-gated history reads.
+- herdr/state_db.query_execution_outcomes: bounded, cutoff-gated outcome
+  reads, one newest-first window per candidate.
+
+The router never sees mutable tasks, eval revisions, or status_history:
+every seed below settles through the canonical
+herdr.execution_outcome.finalize_execution_outcome. Outcome-layer edge
+cases (ownership, revision, immutability, cutoff) live in
+tests/test_execution_outcome.py.
 
 Cases map to task spec section 19 (Case 1..10).
 """
 
 import json as _json
+import os as _os
 import tempfile
 import time as _time
 import unittest
@@ -19,7 +26,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from herdr import adaptive_router, agent_router, eval_store, state_db
+from herdr import adaptive_router, agent_router, eval_store, execution_outcome
 from herdr.state_store import get_state_store
 from herdr.transitions import COMPLETED_TASK_STATUSES
 
@@ -33,6 +40,12 @@ def _make_env(test):
     tmp = tempfile.TemporaryDirectory(prefix="herdr-adaptive-")
     test.addCleanup(tmp.cleanup)
     tmp_path = Path(tmp.name)
+    # Hooks off: seeds settle through the explicit canonical finalizer
+    # with controlled historical timestamps (see test_execution_outcome.py
+    # for hook-wiring coverage).
+    env_patch = patch.dict(_os.environ, {"HERDR_OUTCOME_AUTOFINALIZE": "0"})
+    env_patch.start()
+    test.addCleanup(env_patch.stop)
     store = get_state_store(tmp_path / "state.db")
     test.patchers = [
         patch("herdr.agent_router._get_store", return_value=store),
@@ -51,7 +64,7 @@ def _seed_sample(store, db_path, idx, agent, *, success=True,
                  blocked=False, human=0, node=NODE, task_type=TASK_TYPE,
                  run_prefix="run", final_status=None, ts=None,
                  with_eval=True):
-    """Seed one historical task + (optionally) its eval fact."""
+    """Seed one settled outcome: task + eval + canonical finalization."""
     ts = BASE_TS + idx if ts is None else ts
     run_id = f"{run_prefix}-{agent}-{idx}"
     task_id = f"task-{agent}-{idx}"
@@ -91,6 +104,9 @@ def _seed_sample(store, db_path, idx, agent, *, success=True,
             created_at=ts + wall + 1.0,
             db_path=db_path,
         )
+        settled = execution_outcome.finalize_execution_outcome(
+            task_id, db_path=db_path, finalized_at=ts + wall + 5.0)
+        assert settled["status"] == "created", settled
     return run_id, task_id
 
 
@@ -146,16 +162,18 @@ class AdaptiveRankingTest(unittest.TestCase):
         second = _rank(self.db_path, ["opencode", "codex", "claude"])
         self.assertEqual(first, second)
 
-    def test_case4_unknown_outcome_is_not_success(self):
+    def test_case4_unsettled_runs_have_no_history(self):
+        # Runs without a complete owned eval are never finalized, so the
+        # router sees no rows at all (settled-only table: no unknown state).
         _seed_sample(self.store, self.db_path, 1, "codex", success=True, with_eval=False)
         _seed_sample(self.store, self.db_path, 2, "codex", success=True, with_eval=False)
         rankings = _rank(self.db_path, ["codex", "opencode"])
         codex = next(r for r in rankings if r["agent"] == "codex")
         self.assertEqual(codex["sample_count"], 0)
         self.assertIsNone(codex["qualified_success_rate"])
-        # Unknown rows must not silently become the recommendation.
+        # Unsettled rows must not silently become the recommendation.
         self.assertEqual(rankings[0]["agent"], "codex")  # tie -> candidate order
-        self.assertIn("fallback_reason", rankings[0])
+        self.assertEqual(rankings[0]["fallback_reason"], "no_history")
 
     def test_case5_loaded_agent_ranks_lower(self):
         for i in range(10):
@@ -338,13 +356,33 @@ class LaunchPathIntegrationTest(unittest.TestCase):
         # The production record itself must carry task_type (was missing).
         self.assertEqual(task.get("task_type"), "fix")
 
+        # Settle the launched task through the canonical finalizer: the
+        # launch record must carry everything an outcome needs.
+        store = get_state_store(self.db_path)
+        task["status"] = "completed"
+        task["finished_at"] = _time.time()
+        task["status_history"] = [{"to": s} for s in
+                                  ("pending", "working", "agent_done",
+                                   "completed")]
+        store.save_task(task)
+        eval_store.record_eval_result(
+            task.get("run_id"), requirements_satisfied=True,
+            verification_passed=True, human_intervention_count=0,
+            final_status="completed", task_id="t-launch-tt",
+            workflow_id="wf-launch-tt", db_path=self.db_path,
+        )
+        settled = execution_outcome.finalize_execution_outcome(
+            "t-launch-tt", db_path=self.db_path)
+        self.assertEqual(settled["status"], "created")
+        self.assertEqual(settled["outcome"]["task_type"], "fix")
+
         found = adaptive_router.collect_samples(
             self.db_path, node="implementation", task_type="fix",
             cutoff=_time.time() + 60.0, agents=[task.get("agent")],
         )
         self.assertTrue(
             any(row["task_id"] == "t-launch-tt" for row in found),
-            "launch → save_task → query_adaptive_history chain broken",
+            "launch → save_task → outcome → query_execution_outcomes broken",
         )
         missing = adaptive_router.collect_samples(
             self.db_path, node="implementation", task_type="docs",
@@ -436,137 +474,3 @@ class HistoryBoundsTest(unittest.TestCase):
                          final_status=status)
         rankings = _rank(self.db_path, ["codex"])
         self.assertAlmostEqual(rankings[0]["qualified_success_rate"], 1.0)
-
-
-class ReviewFixRegressionTest(unittest.TestCase):
-    """PR #99 reviewer fixes: trust the history fact chain."""
-
-    def setUp(self):
-        self.store, self.db_path = _make_env(self)
-
-    def _unique_task(self, idx, agent, run_id, **kwargs):
-        ts = BASE_TS + idx
-        task_id = f"task-manual-{idx}"
-        task = {
-            "task_id": task_id,
-            "workflow_id": "wf-hist",
-            "run_id": run_id,
-            "node": NODE,
-            "stage": NODE,
-            "task_type": TASK_TYPE,
-            "agent": agent,
-            "status": kwargs.get("status", "completed"),
-            "stage_verdict": "pass",
-            "acceptance_verdict": True,
-            "status_history": [{"to": s} for s in ("pending", "agent_done", "completed")],
-            "started_at": ts,
-            "finished_at": ts + 600.0,
-            "created_at": ts,
-        }
-        self.store.save_task(task)
-        return task_id
-
-    def test_taskless_eval_shared_run_stays_unknown(self):
-        shared = "run-shared-1"
-        self._unique_task(1, "codex", shared)
-        self._unique_task(2, "opencode", shared)
-        eval_store.record_eval_result(
-            shared, requirements_satisfied=True, verification_passed=True,
-            human_intervention_count=0, final_status="completed",
-            task_id=None, workflow_id="wf-hist",
-            created_at=BASE_TS + 700.0, db_path=self.db_path,
-        )
-        rows = adaptive_router.collect_samples(
-            self.db_path, node=NODE, task_type=TASK_TYPE, cutoff=CUTOFF,
-            agents=["codex", "opencode"])
-        by_task = {row["task_id"]: row for row in rows}
-        self.assertIsNone(by_task["task-manual-1"]["requirements_satisfied"])
-        self.assertIsNone(by_task["task-manual-2"]["requirements_satisfied"])
-
-    def test_taskless_eval_unique_run_is_attributed(self):
-        self._unique_task(10, "codex", "run-unique-1")
-        eval_store.record_eval_result(
-            "run-unique-1", requirements_satisfied=True,
-            verification_passed=True, human_intervention_count=0,
-            final_status="completed", task_id=None, workflow_id="wf-hist",
-            created_at=BASE_TS + 700.0, db_path=self.db_path,
-        )
-        rows = adaptive_router.collect_samples(
-            self.db_path, node=NODE, task_type=TASK_TYPE, cutoff=CUTOFF,
-            agents=["codex"])
-        self.assertEqual(len(rows), 1)
-        self.assertTrue(rows[0]["requirements_satisfied"])
-        self.assertEqual(rows[0]["final_status"], "completed")
-
-    def test_eval_final_status_never_backfilled_from_task(self):
-        self._unique_task(20, "codex", "run-nofinal-1", status="completed")
-        eval_store.record_eval_result(
-            "run-nofinal-1", requirements_satisfied=True,
-            verification_passed=True, human_intervention_count=0,
-            final_status=None, task_id="task-manual-20",
-            workflow_id="wf-hist", created_at=BASE_TS + 700.0,
-            db_path=self.db_path,
-        )
-        rankings = _rank(self.db_path, ["codex"])
-        codex = rankings[0]
-        self.assertEqual(codex["sample_count"], 0)
-        self.assertIsNone(codex["qualified_success_rate"])
-        self.assertEqual(
-            codex["fallback_reason"], "unknown_outcome_no_determined_samples")
-
-    def test_revision_is_latest_before_cutoff(self):
-        self._unique_task(30, "codex", "run-rev-1", status="completed")
-        eval_store.record_eval_result(
-            "run-rev-1", requirements_satisfied=True,
-            verification_passed=True, human_intervention_count=0,
-            final_status="completed", task_id="task-manual-30",
-            workflow_id="wf-hist", created_at=CUTOFF - 100.0,
-            db_path=self.db_path,
-        )
-        eval_store.record_eval_result(
-            "run-rev-1", requirements_satisfied=False,
-            verification_passed=False, human_intervention_count=0,
-            final_status="failed", task_id="task-manual-30",
-            workflow_id="wf-hist", created_at=CUTOFF + 100.0,
-            db_path=self.db_path,
-        )
-        before = adaptive_router.rank_candidates(
-            ["codex"], db_path=self.db_path, node=NODE, task_type=TASK_TYPE,
-            cutoff=CUTOFF, active_loads={}, reserved_loads={},
-        )
-        self.assertAlmostEqual(before[0]["qualified_success_rate"], 1.0)
-        after = adaptive_router.rank_candidates(
-            ["codex"], db_path=self.db_path, node=NODE, task_type=TASK_TYPE,
-            cutoff=CUTOFF + 200.0, active_loads={}, reserved_loads={},
-        )
-        self.assertAlmostEqual(after[0]["qualified_success_rate"], 0.0)
-
-    def test_slice_query_uses_index_not_full_scan(self):
-        import sqlite3
-
-        query, params = state_db._adaptive_slice_query(
-            "codex", NODE, TASK_TYPE, CUTOFF, None, None, 500)
-        conn = sqlite3.connect(str(self.db_path))
-        try:
-            plan = " ".join(
-                str(row) for row in
-                conn.execute("EXPLAIN QUERY PLAN " + query, tuple(params)).fetchall()
-            )
-        finally:
-            conn.close()
-        self.assertIn("USING INDEX", plan)
-        self.assertNotIn("SCAN t", plan)
-
-    def test_per_agent_windows_not_crowded_out(self):
-        for i in range(20):
-            _seed_sample(self.store, self.db_path, i, "kimi", success=True)
-        for i in range(20, 23):
-            _seed_sample(self.store, self.db_path, i, "codex", success=True)
-        rankings = adaptive_router.rank_candidates(
-            ["kimi", "codex"], db_path=self.db_path, node=NODE,
-            task_type=TASK_TYPE, cutoff=CUTOFF, active_loads={},
-            reserved_loads={}, limit=5,
-        )
-        by_agent = {row["agent"]: row for row in rankings}
-        self.assertEqual(by_agent["kimi"]["sample_count"], 5)
-        self.assertEqual(by_agent["codex"]["sample_count"], 3)

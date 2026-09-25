@@ -30,6 +30,7 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 from herdr.transitions import (
     ACTIVE_TASK_STATUSES,
     COMPLETED_TASK_STATUSES,
+    TERMINAL_TASK_STATUSES,
     validate_task_transition,
     validate_workflow_transition,
 )
@@ -533,16 +534,6 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_wf ON tasks(workflow_id);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_wf_created ON tasks(workflow_id, created_at, task_id);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);")
-    # Adaptive Router hot path: per-agent newest-first slices filter on
-    # (agent, effective node) with ORDER BY created_at DESC LIMIT, so the
-    # composite index serves them without scanning the tasks table.
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_agent_node_created ON tasks(agent, node, created_at DESC);")
-    # Run-ownership probe for taskless eval attribution (fail-closed when
-    # a run_id is shared by several tasks).
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_tasks_run_id_expr "
-        f"ON tasks({_RUN_ID_EXPR_BARE});"
-    )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_cp_wf_created ON checkpoints(workflow_id, created_at DESC);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_completion_observations_task ON completion_observations(task_id);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_cp_parent ON checkpoints(parent_checkpoint_id);")
@@ -778,6 +769,51 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
 
     conn.execute("CREATE INDEX IF NOT EXISTS idx_eval_results_run_revision ON eval_results(run_id, revision DESC);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_eval_results_created ON eval_results(created_at DESC);")
+    # Immutable Agent Execution Outcome facts (write-time truth for the
+    # Adaptive Router; see herdr/execution_outcome.py). No foreign keys:
+    # outcomes survive workflow deletion like eval rows do.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS agent_execution_outcomes (
+            outcome_id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            task_id TEXT NOT NULL,
+            workflow_id TEXT NOT NULL,
+            agent TEXT NOT NULL,
+            node TEXT NOT NULL,
+            task_type TEXT NOT NULL DEFAULT '',
+            started_at REAL,
+            finished_at REAL,
+            wall_time_seconds REAL,
+            final_status TEXT NOT NULL,
+            requirements_satisfied INTEGER NOT NULL,
+            verification_passed INTEGER NOT NULL,
+            qualified_success INTEGER NOT NULL,
+            rework_count INTEGER NOT NULL DEFAULT 0,
+            blocked_count INTEGER NOT NULL DEFAULT 0,
+            human_intervention_count INTEGER NOT NULL DEFAULT 0,
+            recorded_at REAL NOT NULL,
+            source_eval_id TEXT NOT NULL,
+            source_eval_revision INTEGER NOT NULL,
+            source_task_version INTEGER NOT NULL DEFAULT 0,
+            schema_version INTEGER NOT NULL DEFAULT 1,
+            UNIQUE(task_id, run_id)
+        );
+    """)
+    existing_bucket = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE name = 'idx_outcomes_bucket'"
+    ).fetchone()
+    if existing_bucket is not None and "outcome_id" not in str(
+        existing_bucket["sql"] or ""
+    ):
+        # Mid-branch DBs may carry the first 4-column revision; rebuild so
+        # the ORDER BY tiebreaker stays index-served (no temp B-tree).
+        conn.execute("DROP INDEX idx_outcomes_bucket")
+        existing_bucket = None
+    if existing_bucket is None:
+        conn.execute(
+            "CREATE INDEX idx_outcomes_bucket "
+            "ON agent_execution_outcomes(agent, node, task_type, recorded_at DESC, outcome_id DESC);"
+        )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_replay_specs_source ON replay_specs(source_run_id);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_replay_specs_replay ON replay_specs(replay_run_id);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_replay_specs_workflow ON replay_specs(workflow_id);")
@@ -1281,6 +1317,22 @@ def save_task(
                 updated_at=excluded.updated_at,
                 version=COALESCE(tasks.version, 0) + 1;
         """, (tid, wid, node, stage, agent, status, verdict, verdict_note, pane_id, goal, blocker, payload_json, created_at, now))
+        # Outcome choke point (write path only): a task reaching a terminal
+        # status may now be settleable. Best-effort and fail-open; the
+        # canonical resolver lives in herdr.execution_outcome.
+        if (
+            should_close
+            and str(status) in TERMINAL_TASK_STATUSES
+            and _outcome_autofinalize_enabled()
+        ):
+            try:
+                from .execution_outcome import try_autofinalize_for_task
+            except ImportError:  # pragma: no cover - script-style fallback
+                from herdr.execution_outcome import try_autofinalize_for_task
+            try:
+                try_autofinalize_for_task(str(tid), db_path=db_path)
+            except Exception:
+                pass
     finally:
         if should_close:
             conn.close()
@@ -3071,235 +3123,198 @@ def aggregate_run_metric_rows(run_id: str, db_path: Optional[Path] = None) -> Di
         conn.close()
 
 
-ADAPTIVE_HISTORY_PER_AGENT_LIMIT = 500
+OUTCOME_SCHEMA_VERSION = 1
 
-_RUN_ID_EXPR = (
-    "COALESCE(NULLIF(CASE WHEN json_valid(t.payload_json) "
-    "THEN json_extract(t.payload_json, '$.run_id') END, ''), "
-    "'run_' || t.task_id)"
-)
-_RUN_ID_EXPR_T2 = (
-    "COALESCE(NULLIF(CASE WHEN json_valid(t2.payload_json) "
-    "THEN json_extract(t2.payload_json, '$.run_id') END, ''), "
-    "'run_' || t2.task_id)"
-)
-# Bare-column twin of _RUN_ID_EXPR for the expression index definition.
-_RUN_ID_EXPR_BARE = (
-    "COALESCE(NULLIF(CASE WHEN json_valid(payload_json) "
-    "THEN json_extract(payload_json, '$.run_id') END, ''), "
-    "'run_' || task_id)"
-)
-_TASK_TYPE_EXPR = (
-    "COALESCE(NULLIF(CASE WHEN json_valid(t.payload_json) "
-    "THEN json_extract(t.payload_json, '$.task_type') END, ''), '')"
-)
-_NODE_EXPR = "COALESCE(NULLIF(t.node, ''), t.stage, '')"
+#: Newest-first outcome cap per candidate agent. Each candidate gets its
+#: own window so a high-frequency agent cannot crowd others out.
+OUTCOME_PER_AGENT_LIMIT = 500
 
 
-def _adaptive_bool(raw: Any) -> Optional[bool]:
-    if raw is None:
-        return None
-    return bool(raw)
+def _outcome_autofinalize_enabled() -> bool:
+    """Kill-switch for write-path auto-finalization.
 
-
-_ADAPTIVE_SLICE_COLUMNS = f"""
-          t.task_id AS task_id,
-          t.workflow_id AS workflow_id,
-          t.agent AS agent,
-          t.status AS status,
-          t.stage_verdict AS stage_verdict,
-          t.created_at AS created_at,
-          t.updated_at AS updated_at,
-          {_NODE_EXPR} AS node,
-          {_TASK_TYPE_EXPR} AS task_type,
-          {_RUN_ID_EXPR} AS run_id,
-          CASE WHEN json_valid(t.payload_json)
-               THEN json_extract(t.payload_json, '$.status_history') END
-            AS status_history_json,
-          CASE WHEN json_valid(t.payload_json)
-               THEN json_extract(t.payload_json, '$.started_at') END
-            AS started_at,
-          CASE WHEN json_valid(t.payload_json)
-               THEN json_extract(t.payload_json, '$.finished_at') END
-            AS finished_at,
-          CASE WHEN json_valid(t.payload_json)
-               THEN json_extract(t.payload_json, '$.acceptance_verdict') END
-            AS acceptance_verdict,
-          ev.requirements_satisfied AS eval_requirements_satisfied,
-          ev.verification_passed AS eval_verification_passed,
-          ev.human_intervention_count AS eval_human_intervention_count,
-          ev.final_status AS eval_final_status,
-          ev.created_at AS eval_created_at
-"""
-
-
-def _adaptive_slice_query(
-    agent: Optional[str],
-    node: str,
-    normalized_type: str,
-    cutoff: float,
-    exclude_run_id: Optional[str],
-    lookback_floor: Optional[float],
-    slice_limit: int,
-) -> Tuple[str, List[Any]]:
-    """Build one per-agent newest-first slice query with its parameters.
-
-    The (agent, node, created_at) composite index serves the equality
-    filters plus ORDER BY/LIMIT directly, so cost stays proportional to
-    the agent's own history instead of a full tasks scan. The eval join
-    takes the latest revision *before* cutoff (never the global MAX),
-    and a taskless eval (task_id IS NULL) is attributed only when no
-    sibling task claims the same run_id.
+    Tests seed historical timestamps and finalize explicitly; production
+    leaves the default on so terminal task/eval writes settle outcomes.
     """
-    query = f"""
-        SELECT {_ADAPTIVE_SLICE_COLUMNS}
-        FROM tasks t
-        LEFT JOIN (
-          SELECT e.* FROM eval_results e
-          WHERE e.created_at < ?
-            AND e.revision = (
-              SELECT MAX(e2.revision) FROM eval_results e2
-              WHERE e2.run_id = e.run_id AND e2.created_at < ?
-            )
-        ) ev ON ev.run_id = {_RUN_ID_EXPR}
-            AND (
-              ev.task_id = t.task_id
-              OR (
-                ev.task_id IS NULL
-                AND NOT EXISTS (
-                  SELECT 1 FROM tasks t2
-                  WHERE t2.task_id <> t.task_id
-                    AND {_RUN_ID_EXPR_T2} = {_RUN_ID_EXPR}
-                )
-              )
-            )
-        WHERE {_NODE_EXPR} = ?
-          AND {_TASK_TYPE_EXPR} = ?
-          AND t.agent IS NOT NULL AND t.agent <> ''
-    """
-    params: List[Any] = [cutoff, cutoff, str(node), normalized_type]
-    if agent is not None:
-        query += " AND t.agent = ?"
-        params.append(str(agent))
-    query += " AND t.created_at < ?"
-    params.append(cutoff)
-    if exclude_run_id:
-        query += f" AND {_RUN_ID_EXPR} <> ?"
-        params.append(str(exclude_run_id))
-    if lookback_floor is not None:
-        query += " AND t.created_at >= ?"
-        params.append(lookback_floor)
-    query += " ORDER BY t.created_at DESC, t.task_id DESC LIMIT ?"
-    params.append(slice_limit)
-    return query, params
+    return os.environ.get("HERDR_OUTCOME_AUTOFINALIZE", "1") != "0"
 
 
-def query_adaptive_history(
-    node: str,
-    task_type: str,
-    *,
-    cutoff: float,
-    agents: Optional[List[str]] = None,
-    exclude_run_id: Optional[str] = None,
-    limit: Optional[int] = None,
-    lookback_days: Optional[float] = None,
+_OUTCOME_COLUMNS = (
+    "outcome_id, run_id, task_id, workflow_id, agent, node, task_type, "
+    "started_at, finished_at, wall_time_seconds, final_status, "
+    "requirements_satisfied, verification_passed, qualified_success, "
+    "rework_count, blocked_count, human_intervention_count, recorded_at, "
+    "source_eval_id, source_eval_revision, source_task_version, schema_version"
+)
+
+
+def _decode_outcome_row(row: sqlite3.Row) -> Dict[str, Any]:
+    return {
+        "outcome_id": row["outcome_id"],
+        "run_id": row["run_id"],
+        "task_id": row["task_id"],
+        "workflow_id": row["workflow_id"],
+        "agent": row["agent"],
+        "node": row["node"],
+        "task_type": row["task_type"] or "",
+        "started_at": row["started_at"],
+        "finished_at": row["finished_at"],
+        "wall_time_seconds": row["wall_time_seconds"],
+        "final_status": row["final_status"],
+        "requirements_satisfied": bool(row["requirements_satisfied"]),
+        "verification_passed": bool(row["verification_passed"]),
+        "qualified_success": bool(row["qualified_success"]),
+        "rework_count": int(row["rework_count"] or 0),
+        "blocked_count": int(row["blocked_count"] or 0),
+        "human_intervention_count": int(row["human_intervention_count"] or 0),
+        "recorded_at": float(row["recorded_at"]),
+        "source_eval_id": row["source_eval_id"],
+        "source_eval_revision": int(row["source_eval_revision"]),
+        "source_task_version": int(row["source_task_version"] or 0),
+        "schema_version": int(row["schema_version"] or 0),
+    }
+
+
+def insert_execution_outcome(
+    outcome: Dict[str, Any],
     db_path: Optional[Path] = None,
-) -> List[Dict[str, Any]]:
-    """Read bounded, cutoff-gated history slices for the given candidates.
+    conn: Optional[sqlite3.Connection] = None,
+) -> Dict[str, Any]:
+    """Immutable insert of one settled execution outcome.
 
-    One newest-first slice per agent in ``agents`` (each capped by
-    ``limit``), so a high-frequency agent can never crowd a low-frequency
-    candidate out of the window. ``agents=None`` keeps a single unscoped
-    slice for debug/CLI use.
-
-    Only facts durable before ``cutoff`` are returned; the caller's own
-    ``exclude_run_id`` never appears. Eval attribution is fail-closed:
-    a taskless eval (task_id IS NULL) counts only when its run_id is
-    provably owned by exactly one task, otherwise the sample stays
-    outcome-unknown. ``final_status`` comes from the eval row alone and
-    is never backfilled from task status. Unknown eval facts stay NULL;
-    callers must not default them to success.
+    There is deliberately no update path. A repeat insert for the same
+    (task_id, run_id) is an idempotent no-op returning the stored row.
     """
-    per_slice = int(limit) if limit is not None else ADAPTIVE_HISTORY_PER_AGENT_LIMIT
-    if per_slice < 1:
-        raise ValueError("limit must be a positive int")
-    if not str(node or "").strip():
-        raise ValueError("node is required")
-    normalized_type = str(task_type or "")
-    cutoff = float(cutoff)
-    lookback_floor: Optional[float] = None
-    if lookback_days is not None:
-        lookback_floor = float(cutoff) - float(lookback_days) * 86400.0
-
-    scopes: List[Optional[str]] = (
-        [str(agent) for agent in agents] if agents is not None else [None]
+    required = (
+        "outcome_id", "run_id", "task_id", "workflow_id", "agent", "node",
+        "final_status", "source_eval_id", "source_eval_revision",
+        "recorded_at",
     )
+    missing = [key for key in required if outcome.get(key) in (None, "")]
+    if missing:
+        raise ValueError(f"outcome missing required fields: {missing}")
 
+    should_close = False
+    if conn is None:
+        conn = get_db_connection(db_path)
+        should_close = True
+    try:
+        conn.execute(
+            "INSERT INTO agent_execution_outcomes "
+            f"({_OUTCOME_COLUMNS}) VALUES ("
+            + ", ".join(["?"] * 22) + ") "
+            "ON CONFLICT(task_id, run_id) DO NOTHING",
+            (
+                str(outcome["outcome_id"]),
+                str(outcome["run_id"]),
+                str(outcome["task_id"]),
+                str(outcome.get("workflow_id") or ""),
+                str(outcome["agent"]),
+                str(outcome["node"]),
+                str(outcome.get("task_type") or ""),
+                outcome.get("started_at"),
+                outcome.get("finished_at"),
+                outcome.get("wall_time_seconds"),
+                str(outcome["final_status"]),
+                1 if outcome.get("requirements_satisfied") else 0,
+                1 if outcome.get("verification_passed") else 0,
+                1 if outcome.get("qualified_success") else 0,
+                int(outcome.get("rework_count") or 0),
+                int(outcome.get("blocked_count") or 0),
+                int(outcome.get("human_intervention_count") or 0),
+                float(outcome["recorded_at"]),
+                str(outcome["source_eval_id"]),
+                int(outcome["source_eval_revision"]),
+                int(outcome.get("source_task_version") or 0),
+                int(outcome.get("schema_version") or OUTCOME_SCHEMA_VERSION),
+            ),
+        )
+        if should_close:
+            conn.commit()
+        row = conn.execute(
+            "SELECT * FROM agent_execution_outcomes "
+            "WHERE task_id = ? AND run_id = ?",
+            (str(outcome["task_id"]), str(outcome["run_id"])),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("outcome insert was not readable")
+        return _decode_outcome_row(row)
+    finally:
+        if should_close:
+            conn.close()
+
+
+def get_execution_outcome(
+    task_id: str,
+    run_id: str,
+    db_path: Optional[Path] = None,
+) -> Optional[Dict[str, Any]]:
+    """Fetch one immutable outcome by identity; absent pairs return None."""
     conn = get_db_connection(db_path)
     try:
-        rows = []
-        for agent in scopes:
-            query, params = _adaptive_slice_query(
-                agent, str(node), normalized_type, cutoff,
-                exclude_run_id, lookback_floor, per_slice,
-            )
-            rows.extend(conn.execute(query, tuple(params)).fetchall())
+        row = conn.execute(
+            "SELECT * FROM agent_execution_outcomes "
+            "WHERE task_id = ? AND run_id = ?",
+            (str(task_id), str(run_id)),
+        ).fetchone()
+        return _decode_outcome_row(row) if row is not None else None
     finally:
         conn.close()
 
-    samples: List[Dict[str, Any]] = []
-    for row in rows:
-        history: List[str] = []
-        raw_history = row["status_history_json"]
-        if raw_history is not None:
-            try:
-                decoded = json.loads(raw_history) if isinstance(raw_history, str) else raw_history
-            except (TypeError, ValueError):
-                decoded = None
-            if isinstance(decoded, list):
-                for entry in decoded:
-                    status = entry.get("to") if isinstance(entry, dict) else entry
-                    if status:
-                        history.append(str(status))
-        wall: Optional[float] = None
-        try:
-            start = row["started_at"] if row["started_at"] is not None else row["created_at"]
-            end = row["finished_at"] if row["finished_at"] is not None else row["updated_at"]
-            if start is not None and end is not None:
-                wall = float(end) - float(start)
-                if not math.isfinite(wall) or wall < 0:
-                    wall = None
-        except (TypeError, ValueError):
-            wall = None
-        human = row["eval_human_intervention_count"]
-        try:
-            human = int(human) if human is not None else None
-        except (TypeError, ValueError):
-            human = None
-        # Eval-only: a missing eval final_status stays unknown and is
-        # never backfilled from task status.
-        eval_final = row["eval_final_status"]
-        final_status = str(eval_final) if eval_final else None
-        samples.append({
-            "agent": str(row["agent"]),
-            "run_id": str(row["run_id"]),
-            "task_id": str(row["task_id"]),
-            "workflow_id": row["workflow_id"],
-            "node": str(row["node"] or ""),
-            "task_type": str(row["task_type"] or ""),
-            "status": row["status"],
-            "stage_verdict": row["stage_verdict"],
-            "acceptance_verdict": row["acceptance_verdict"],
-            "status_history": history,
-            "has_history": bool(history),
-            "wall_time_seconds": wall,
-            "requirements_satisfied": _adaptive_bool(row["eval_requirements_satisfied"]),
-            "verification_passed": _adaptive_bool(row["eval_verification_passed"]),
-            "human_intervention_count": human,
-            "final_status": str(final_status) if final_status else None,
-            "created_at": row["created_at"],
-        })
-    return samples
+
+def query_execution_outcomes(
+    *,
+    agents: Optional[List[str]],
+    node: str,
+    task_type: str,
+    before: float,
+    exclude_run_id: Optional[str] = None,
+    per_agent_limit: Optional[int] = None,
+    lookback_floor: Optional[float] = None,
+    db_path: Optional[Path] = None,
+) -> List[Dict[str, Any]]:
+    """Read settled outcomes: one newest-first slice per candidate agent.
+
+    The router hot path only ever touches this table. Bucket equality on
+    (agent, node, task_type) plus recorded_at ordering is served by
+    idx_outcomes_bucket; no JSON extraction, no ownership joins, no
+    mutable-state reconstruction at query time.
+    """
+    capped = int(per_agent_limit) if per_agent_limit is not None else OUTCOME_PER_AGENT_LIMIT
+    if capped < 1:
+        raise ValueError("per_agent_limit must be a positive int")
+    if not str(node or "").strip():
+        raise ValueError("node is required")
+    scopes: List[Optional[str]] = (
+        [str(agent) for agent in agents] if agents is not None else [None]
+    )
+    conn = get_db_connection(db_path)
+    try:
+        outcomes: List[Dict[str, Any]] = []
+        for agent in scopes:
+            query = (
+                f"SELECT {_OUTCOME_COLUMNS} FROM agent_execution_outcomes "
+                "WHERE node = ? AND task_type = ? AND recorded_at < ?"
+            )
+            params: List[Any] = [str(node), str(task_type or ""), float(before)]
+            if agent is not None:
+                query += " AND agent = ?"
+                params.append(str(agent))
+            else:
+                query += " AND agent IS NOT NULL AND agent <> ''"
+            if exclude_run_id:
+                query += " AND run_id <> ?"
+                params.append(str(exclude_run_id))
+            if lookback_floor is not None:
+                query += " AND recorded_at >= ?"
+                params.append(float(lookback_floor))
+            query += " ORDER BY recorded_at DESC, outcome_id DESC LIMIT ?"
+            params.append(capped)
+            for row in conn.execute(query, tuple(params)).fetchall():
+                outcomes.append(_decode_outcome_row(row))
+        return outcomes
+    finally:
+        conn.close()
 
 
 def latest_trajectory_sequence(run_id: str, db_path: Optional[Path] = None) -> int:
@@ -5447,6 +5462,23 @@ def transition_task(
 
         if should_close:
             conn.execute("COMMIT;")
+
+        # Outcome choke point: a terminal transition settles here when the
+        # eval already landed (the reverse order is covered by the
+        # record_eval_result hook). Best-effort, never breaks transitions.
+        if (
+            should_close
+            and str(to_status) in TERMINAL_TASK_STATUSES
+            and _outcome_autofinalize_enabled()
+        ):
+            try:
+                from .execution_outcome import try_autofinalize_for_task
+            except ImportError:  # pragma: no cover - script-style fallback
+                from herdr.execution_outcome import try_autofinalize_for_task
+            try:
+                try_autofinalize_for_task(str(task_id), db_path=db_path)
+            except Exception:
+                pass
 
         return {
             "ok": True,
