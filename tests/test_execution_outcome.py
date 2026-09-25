@@ -370,18 +370,49 @@ class OutcomeIdentityHotfixTest(unittest.TestCase):
         first = _settle(self.db_path, "t-hf1")
         self.assertEqual(first["status"], "created")
         self.assertEqual(first["outcome"]["outcome_id"],
-                         "outcome_t-hf1_run-hf1a")
+                         outcome.outcome_id_for("t-hf1", "run-hf1a"))
         _save_task(self.store, "t-hf1", "run-hf1b", "codex")
         _record_eval(self.db_path, "run-hf1b", "t-hf1")
         second = outcome.finalize_execution_outcome(
             "t-hf1", db_path=self.db_path, finalized_at=CUTOFF - 9_000.0)
         self.assertEqual(second["status"], "created")
         self.assertEqual(second["outcome"]["outcome_id"],
-                         "outcome_t-hf1_run-hf1b")
+                         outcome.outcome_id_for("t-hf1", "run-hf1b"))
+        self.assertNotEqual(first["outcome"]["outcome_id"],
+                            second["outcome"]["outcome_id"])
         self.assertIsNotNone(outcome.get_execution_outcome(
             "t-hf1", "run-hf1a", self.db_path))
         self.assertIsNotNone(outcome.get_execution_outcome(
             "t-hf1", "run-hf1b", self.db_path))
+
+    def test_outcome_id_delimiter_collision(self):
+        # ("a_b", "c") vs ("a", "b_c"): naive f"outcome_{t}_{r}"
+        # collides on "outcome_a_b_c"; hashed identity must not.
+        self.assertEqual(
+            outcome.outcome_id_for("t_ab", "c"),
+            outcome.outcome_id_for("t_ab", "c"))
+        self.assertNotEqual(
+            outcome.outcome_id_for("a_b", "c"),
+            outcome.outcome_id_for("a", "b_c"))
+        _save_task(self.store, "t-ab", "run-c", "codex")
+        _record_eval(self.db_path, "run-c", "t-ab")
+        first = _settle(self.db_path, "t-ab")
+        self.assertEqual(first["status"], "created")
+        # A second logical pair with colliding naive encoding settles
+        # independently and stays readable under its own (task_id, run_id).
+        _save_task(self.store, "t-a", "run-bc", "codex")
+        eval_store.record_eval_result(
+            "run-bc", requirements_satisfied=True,
+            verification_passed=True, human_intervention_count=0,
+            final_status="completed", task_id="t-a",
+            workflow_id="wf-hist", created_at=BASE_TS + 700.0,
+            db_path=self.db_path,
+        )
+        second = outcome.finalize_execution_outcome(
+            "t-a", db_path=self.db_path, finalized_at=CUTOFF - 9_000.0)
+        self.assertEqual(second["status"], "created")
+        self.assertNotEqual(first["outcome"]["outcome_id"],
+                            second["outcome"]["outcome_id"])
 
     def test_cross_workflow_eval_never_settles(self):
         _save_task(self.store, "t-hf2", "run-hf2", "codex")

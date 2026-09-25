@@ -23,6 +23,8 @@ reconstruct history from mutable tasks / eval revisions / status_history.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -31,6 +33,22 @@ from . import state_db
 from .transitions import COMPLETED_TASK_STATUSES, TERMINAL_TASK_STATUSES
 
 OUTCOME_SCHEMA_VERSION = state_db.OUTCOME_SCHEMA_VERSION
+
+
+def outcome_id_for(task_id: str, run_id: str) -> str:
+    """Deterministic, unambiguous outcome identity for (task_id, run_id).
+
+    Plain f"outcome_{task_id}_{run_id}" is ambiguous: ("a_b", "c") and
+    ("a", "b_c") collide. JSON canonical encoding keeps the pair
+    boundary; sha256 keeps the PRIMARY KEY fixed-length.
+    """
+    identity = json.dumps(
+        [str(task_id), str(run_id)],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    return f"outcome_{digest}"
 
 #: Eval columns needed to settle one outcome (never SELECT *; the set of
 #: facts the resolver depends on stays explicit and reviewable).
@@ -231,7 +249,7 @@ def resolve_execution_outcome(
     except (TypeError, ValueError):
         version = 0
     outcome = {
-        "outcome_id": f"outcome_{task_id}_{run_id}",
+        "outcome_id": outcome_id_for(task_id, run_id),
         "run_id": run_id,
         "task_id": task_id,
         "workflow_id": workflow_id,
@@ -379,6 +397,7 @@ __all__ = [
     "compute_qualified_success",
     "finalize_execution_outcome",
     "get_execution_outcome",
+    "outcome_id_for",
     "resolve_execution_outcome",
     "try_autofinalize_for_task",
 ]
