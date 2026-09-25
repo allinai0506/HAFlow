@@ -9,9 +9,8 @@ Responsible for:
 
 from __future__ import annotations
 
-import shlex
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 
 AGENT_CANDIDATE_POOL = ["codex", "claude", "opencode", "qodercli", "agy"]
