@@ -1065,3 +1065,8 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - 上游门禁：`test-r11` = pass、`review-auto-r2` = pass；`verify-baseline` = `BASELINE_MATCH`。六步收尾步骤 3 因 PR 未合入记 DEFERRED（`--dry-run` 只读）。
 - 知识沉淀：`docs/lessons/lessons-learned.md` §91（测试进程写穿实盘 `tasks.json` 投影的根因、反证与恢复方式）。
 - 本文条目为 append-only 收尾记录；交付 PR 与收尾报告外链见 workflow `wf-haflow-0924-01` 共享文档区 `wrapup-auto收尾报告`，不在本文件重复易漂移的 URL。
+
+## [2026-09-25] feat | Adaptive Agent Router v1 (Shadow Mode) PR #99
+- 分支 `agent/opencode/adaptive-router-v1-shadow` → PR #99（base main）；7 文件 / +~1100。
+- 内容：影子排名（agent × node/stage × task_type）+ ETQS + Qualified Success + route_decision 事件；生产选择零改变（Case 9/10 硬门禁）。
+- 验收：专项 14 passed，全量 1725 passed + 44 subtests，compileall/diff-check OK；S6 MERGE_READY（同模型自审）。
