@@ -1075,3 +1075,10 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - commit `849c89b`：launch 持久化 task_type（RED-proven 集成测试）、taskless eval 唯一归属、eval final 禁止回填、cutoff 前最新 revision、per-agent 索引分片（EXPLAIN 回归）、独立窗口。
 - 验收：专项 21 passed，全量 1732 passed + 44 subtests；S6 round 2 MERGE_READY。ETQS/UI/Workflow/Scheduler 未动。
 - 说明：仓库无 .github workflows，上述为本地运行结果，无 Actions 可引用。
+
+## [2026-09-25] feat | PR #99 重构为 Immutable Outcome Fact Layer 已推送
+- commit `08cabb8`：新增 `herdr/execution_outcome.py` + `agent_execution_outcomes` 表；
+  Router 只读 Outcome（`query_execution_outcomes` + covering bucket index）；
+  删除 `query_adaptive_history` 及 JSON/ownership/cutoff 重建 SQL。
+- 验收：outcome 22 + router 15 passed，全量 1732→1748 passed + 44 subtests；
+  S6 round 3 MERGE_READY。ETQS 公式、UI、Workflow、Scheduler 未动。
