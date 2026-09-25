@@ -4041,7 +4041,7 @@ tests/test_trajectory.py:361
 
 | 问题 | 教训 | 规范 |
 |---|---|---|
-| 隔离了 DB 就以为隔离了整个状态 | 「权威库 SQLite」与「JSON 投影」是两条独立写路径，隔离前者不保证后者 | 测试凡间接触碰 `sync_*_projection`，必须同时把 `TASKS_FILE` / `WORKFLOWS_FILE` 钉到 tmp |
+| 隔离了 DB 就以为隔离了整个状态 | 「权威库 SQLite」与「JSON 投影」是两条独立写路径，隔离前者不保证后者 | 测试凡间接触碰 `sync_*_projection`，必须让投影跟随已隔离的 store（见下「修复方案实测」——**不要**用 conftest 钉 `TASKS_FILE`/`WORKFLOWS_FILE`） |
 | 回落链末端是用户 HOME | 回落链最后一级指向实盘目录时，任何"忘了传参"都会静默写穿 | `resolve_*_projection_file` 在"已设 `HERDR_STATE_DB` 却未设 `TASKS_FILE`"时应拒绝或强制跟随 store，不回落到 HOME |
 | 写入异常被吞 | `_sync_projection_locked` 的 `except Exception: pass` 让失败与成功同样不可观测 | 投影写入失败必须留可观测事件或告警，不能静默 |
 | 排查时信 stderr | pytest 会捕获 `sys.stderr`，写在其中的诊断输出在用例通过时被丢弃 | 诊断钩子必须写独立文件，不要写 stderr |
@@ -4061,9 +4061,46 @@ tests/test_trajectory.py:361
   → 调用点（`save_tasks` 的 `sync_tasks_projection`）与回落逻辑在 base 上已存在，
   `tests/test_trajectory.py` 本分支零改动，**存量缺陷，非本次交付引入**。
 
+### 修复方案实测：不要用 conftest 钉 `TASKS_FILE` / `WORKFLOWS_FILE`
+
+上面初稿的第一条"规范"（在 `tests/conftest.py` 全局钉住 `TASKS_FILE` / `WORKFLOWS_FILE` 指向 tmp）
+**已被实测证伪**，请勿照做：
+
+```bash
+# ① 钉 env 跑全量：注册表安全，但打破 3 个用例
+TASKS_FILE=/tmp/x/tasks.json WORKFLOWS_FILE=/tmp/x/workflows.json pytest -q
+# → 3 failed, 1462 passed, 44 subtests passed
+#    FAILED tests/test_fix_loop_gates.py::SetVerdictTest::test_same_status_completed_still_persists_verdict
+#    FAILED tests/test_fix_loop_pr1.py::SuppressAutoCloseLatchTest::test_controller_skips_auto_close_while_latched
+#    FAILED tests/test_fix_loop_pr1.py::SuppressAutoCloseLatchTest::test_first_active_task_clears_latch
+#    两次实测注册表均保持 313 条（该 env 确实挡住了写穿，代价是打破用例）
+# ② 不钉 env 跑全量：3 个用例恢复
+pytest -q  # → 1465 passed, 44 subtests passed
+```
+
+为什么会打破用例：本仓库测试的隔离风格是改写**模块全局**（`_ht.TASKS_FILE` / `_ctl.WORKFLOWS_FILE`），
+而 `herdr/kernel.py::_get_store()` 是**直接读 `os.environ`**（`kernel.py:64` `tasks_file = os.environ.get("TASKS_FILE")`、
+`kernel.py:70` 同理 `WORKFLOWS_FILE`），并且在命中时按 `p.parent / "state.db"` **另开一个权威库**
+（`kernel.py:66-73`）。于是全局钉 env 之后，这些用例的写入落到被钉的库、而断言读的是自己那份 tmp JSON，
+`set_status` / 清 latch 的结果不复现——`globals()` 优先的 `herdr/agent_router.py:132-150` 不受影响，
+唯独 `_get_store()` 这条直读 env 的路径被劫持。
+
+**结论**：`TASKS_FILE` / `WORKFLOWS_FILE` 在本仓库不只是"投影路径"，它同时是**权威库的选址开关**。
+修这个缺陷要走**收窄回落链**（让投影跟随已隔离的 store），而不是全局改环境变量：
+
+1. `resolve_tasks_projection_file()` / `_sync_projection_locked`：已设 `HERDR_STATE_DB` 时投影必须跟随
+   该 store，禁止回落到 `state_db.CONTROLLER_DIR`（治本，且不触碰 store 选址）；
+2. `_sync_projection_locked` 的 `except Exception: pass` 改为可观测（否则改错了也看不出来）；
+3. 若将来确实要钉 env，必须**同时**钉 `HERDR_STATE_DB` 到同一目录，否则 `_get_store()` 会另开库
+   （`kernel.py:66-73`）——这是本条的实测教训，也是判断"能否用 env 兜底"的判据。
+
 ### 相关文档 / 关联证据
 
 - `herdr/state_store.py#resolve_tasks_projection_file` `#sync_tasks_projection` `#_sync_projection_locked`
+- `herdr/kernel.py#_get_store`（直读 env 并另开库，是"钉 env"方案证伪的关键）
 - `bin/herdr-task#save_tasks` `#_launch_task`
 - `tests/conftest.py`（仅 `HERDR_WORKFLOW_DOCS_DIR` 隔离）
-- 同类模式：本文件 §89（收尾节点分支 ≠ 交付物分支：收尾侧必须对"看似无关"的实盘副作用保持警惕）
+- 同类模式（同一"默认路径回落到生产状态库"根因，本条是 JSON 投影侧的实例）：
+  §78（`store=None` 回落到生产 `state.db`，已用 conftest kill switch 收口——但该 kill switch
+  只覆盖 observer，覆盖不到本条的投影回落，且**不能**靠钉 `TASKS_FILE`/`WORKFLOWS_FILE` 补，见上节实测）、
+  §89（收尾节点分支 ≠ 交付物分支：收尾侧必须对"看似无关"的实盘副作用保持警惕）
