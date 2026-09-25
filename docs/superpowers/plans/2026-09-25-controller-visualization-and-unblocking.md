@@ -4,7 +4,7 @@
 
 **Goal:** 将 Controller 的后台调度与卡点控制能力前台可视化，在出现工作流卡点（测试失败、Agent 空转、门禁阻断、终化挂起等）时，将决策建议转化为带具体 CLI 命令行透出与一键执行的结构化解卡方案，彻底解决“工作流卡住不知道怎么控制”的痛点。
 
-**Architecture:** 
+**Architecture:**
 1. **控制动作解析引擎 (`herdr/controller_actions.py`)**：纯函数/领域核心，根据工作流当前阻塞态（`stage_verdict=='blocked'`、`failed`、`rework`、`is_stalled`、`superseded` 关系）生成结构化的解卡方案（`ControllerAction`），包含方案分类、人类解释、对应的精准 CLI 命令行代码（`bin/herdr-task ...`）以及可执行的 API 参数。
 2. **控制台 API 扩展 (`console/herdr_factory_console.py`)**：暴露 `/api/workflow/controller-actions`（查询当前活跃阻塞与推荐控制方案）与 `/api/controller/execute-action`（执行解卡操作并记录 Trajectory 审计事件），并修复后端 `_blocked_verdict_tasks` 与前端 `isDecisionTask` 漏过滤已取代（`superseded`）任务造成的幽灵决策 Bug。
 3. **前台解卡卡片与控制台驾驶舱 (Console UI)**：在“人机协同态势”告警条中增加可交互的决策卡片（方案标题、依据、命令行代码块、复制按钮、一键执行按钮）；在顶部新增“🎮 Controller 调度控制台”抽屉，提供调度器等待状态观测与常用控制指令速查面板。
@@ -29,7 +29,7 @@
 
 **Interfaces:**
 - Consumes: Task mappings, Workflow mappings from StateStore.
-- Produces: 
+- Produces:
   - `ControllerAction` (dataclass)
   - `resolve_workflow_blockers(tasks: list[dict], workflow: dict) -> list[dict]`
   - `generate_controller_actions(task: dict, workflow: dict, project_root: str) -> list[ControllerAction]`
