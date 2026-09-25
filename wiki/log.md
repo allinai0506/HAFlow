@@ -1070,3 +1070,8 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - 分支 `agent/opencode/adaptive-router-v1-shadow` → PR #99（base main）；7 文件 / +~1100。
 - 内容：影子排名（agent × node/stage × task_type）+ ETQS + Qualified Success + route_decision 事件；生产选择零改变（Case 9/10 硬门禁）。
 - 验收：专项 14 passed，全量 1725 passed + 44 subtests，compileall/diff-check OK；S6 MERGE_READY（同模型自审）。
+
+## [2026-09-25] fix | PR #99 reviewer 6 项历史事实链修复已推送
+- commit `849c89b`：launch 持久化 task_type（RED-proven 集成测试）、taskless eval 唯一归属、eval final 禁止回填、cutoff 前最新 revision、per-agent 索引分片（EXPLAIN 回归）、独立窗口。
+- 验收：专项 21 passed，全量 1732 passed + 44 subtests；S6 round 2 MERGE_READY。ETQS/UI/Workflow/Scheduler 未动。
+- 说明：仓库无 .github workflows，上述为本地运行结果，无 Actions 可引用。
