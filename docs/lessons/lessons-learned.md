@@ -4000,3 +4000,70 @@ pytest -q tests/test_t3_probes.py::L2EmptyReleasable \
 
 - 共享 spec/旧修复说明：`wf-haflow-0924-01/shared/notes.jsonl` 的 `FR-spec草稿`、`req-spec需求规格`、`test-0924测试报告`、`review-0924独立评审报告`、`impl-fix1修复说明`。
 - 回归入口：`tests/test_impl_fix4_blocker_regression.py`、`tests/test_impl_fix1_regression.py`。
+
+---
+
+## 91. 测试进程会写穿实盘注册表：JSON 投影的回落地不能是用户 HOME
+
+### 问题背景
+
+`wf-haflow-0924-01` 收尾节点在 clone 内执行标准验收命令 `pytest -q` 后，操作者的实盘任务
+注册表 `~/.herdr-controller/tasks.json` 被整体覆写为单条测试 fixture 记录（313 → 1）。
+权威库 `state.db` 未被破坏（313 条完好），受损的只有 JSON 投影——但投影正是人工排查与
+`herdr-task` 部分读取路径的入口，操作者视角就是"我的任务账本没了"。
+
+最小复现（该用例本身与门禁无关，1 passed，副作用才是问题）：
+
+```bash
+pytest -q "tests/test_trajectory.py::test_normal_launch_persists_one_new_run_id_for_initial_trajectory_events"
+```
+
+### 根因
+
+审计钩子捕获的真实调用栈（`sys.addaudithook` 监听 `os.replace`）：
+
+```
+tests/test_trajectory.py:361
+ → bin/herdr-task:2343 _launch_task
+ → bin/herdr-task:1151 save_tasks                    # 此处 tasks_file=None
+ → herdr/state_store.py:107 sync_tasks_projection(store=store, tasks_file=None)
+ → herdr/state_store.py:49  _sync_projection_locked
+ → herdr/state_store.py:37  _atomic_write_json → os.replace(tmp, ~/.herdr-controller/tasks.json)
+```
+
+用例已用 `monkeypatch.setenv("HERDR_STATE_DB", tmp)` 隔离了数据库，但没有隔离投影目标：
+`tasks_file=None` 让 `resolve_tasks_projection_file()` 逐级回落（显式参数 → `TASKS_FILE`
+→ `store.db_path.parent` → `state_db.CONTROLLER_DIR`），最终落回实盘
+`~/.herdr-controller/tasks.json`。`tests/conftest.py` 只隔离了 `HERDR_WORKFLOW_DOCS_DIR`，
+未覆盖注册表投影。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|---|---|---|
+| 隔离了 DB 就以为隔离了整个状态 | 「权威库 SQLite」与「JSON 投影」是两条独立写路径，隔离前者不保证后者 | 测试凡间接触碰 `sync_*_projection`，必须同时把 `TASKS_FILE` / `WORKFLOWS_FILE` 钉到 tmp |
+| 回落链末端是用户 HOME | 回落链最后一级指向实盘目录时，任何"忘了传参"都会静默写穿 | `resolve_*_projection_file` 在"已设 `HERDR_STATE_DB` 却未设 `TASKS_FILE`"时应拒绝或强制跟随 store，不回落到 HOME |
+| 写入异常被吞 | `_sync_projection_locked` 的 `except Exception: pass` 让失败与成功同样不可观测 | 投影写入失败必须留可观测事件或告警，不能静默 |
+| 排查时信 stderr | pytest 会捕获 `sys.stderr`，写在其中的诊断输出在用例通过时被丢弃 | 诊断钩子必须写独立文件，不要写 stderr |
+| 只靠"文件没变"下结论 | 拿 `chflags uchg` 让目标文件不可变，才能把"谁在写"从推测变成证据 | 存疑时用不可变/只读对照实验做反证 |
+
+### 验证命令 / 关联证据
+
+- 覆写复现：先 `sync_tasks_projection()` 复原到 313，再跑上面那条用例，之后
+  `python3 -c "import json;print(len(json.load(open('$HOME/.herdr-controller/tasks.json'))['tasks']))"`
+  → `1`（预期 313）。
+- 反证（证明写入目标就是该文件）：`chflags uchg ~/.herdr-controller/tasks.json` 后重跑同一用例，
+  注册表保持 313 且用例仍 `1 passed` —— 说明写入目标确为实盘路径，且失败被静默吞掉。
+- 权威栈追踪：`sys.addaudithook` 记录 `os.replace(src, dst)`，输出写文件后得到上文调用链。
+- 恢复：`python3 -c "from herdr.state_store import sync_tasks_projection; sync_tasks_projection()"`
+  （从 `state.db` 重投影，313 条复原；`state.db` 全程未受损）。
+- 归因：`git diff 437b335..34bfd30 -- bin/herdr-task herdr/state_store.py tests/test_trajectory.py`
+  → 调用点（`save_tasks` 的 `sync_tasks_projection`）与回落逻辑在 base 上已存在，
+  `tests/test_trajectory.py` 本分支零改动，**存量缺陷，非本次交付引入**。
+
+### 相关文档 / 关联证据
+
+- `herdr/state_store.py#resolve_tasks_projection_file` `#sync_tasks_projection` `#_sync_projection_locked`
+- `bin/herdr-task#save_tasks` `#_launch_task`
+- `tests/conftest.py`（仅 `HERDR_WORKFLOW_DOCS_DIR` 隔离）
+- 同类模式：本文件 §89（收尾节点分支 ≠ 交付物分支：收尾侧必须对"看似无关"的实盘副作用保持警惕）

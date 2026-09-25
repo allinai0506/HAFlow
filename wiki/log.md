@@ -959,3 +959,9 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - accept-escalated 报告 outcome、pane_closed、Task 状态及 Clone 保留原因；integrate 将主仓 tracked dirty preflight 前移到所有 task refs/branch 更新前。
 - Router 在实际选择重用的 Agent 后写非空 selected 审计；Sentinel 捕获 SQLite observation/list 失败并保护循环继续。
 - 文档更新：`docs/references/cli-reference.md`、`wiki/task-lifecycle.md`。专项回归与全量验收见 workflow shared note `impl-fix6修复说明`；本条仅记源码契约，未声称未运行的检查通过。
+
+## [2026-09-25] wrapup | wf-haflow-0924-01 故障自愈规范（FR-1..FR-6）交付收尾
+- 交付身份：分支 `agent/opencode/feat-wf-haflow-0924-01-impl` @ `34bfd30`（= 集成分支链末端 `herdr/integration-wf-haflow-0924-01-impl-fix8`），base `main` @ `437b335`；12 提交 / 31 文件 / +8807-378。
+- 上游门禁：`test-r11` = pass、`review-auto-r2` = pass；`verify-baseline` = `BASELINE_MATCH`。六步收尾步骤 3 因 PR 未合入记 DEFERRED（`--dry-run` 只读）。
+- 知识沉淀：`docs/lessons/lessons-learned.md` §91（测试进程写穿实盘 `tasks.json` 投影的根因、反证与恢复方式）。
+- 本文条目为 append-only 收尾记录；交付 PR 与收尾报告外链见 workflow `wf-haflow-0924-01` 共享文档区 `wrapup-auto收尾报告`，不在本文件重复易漂移的 URL。
