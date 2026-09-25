@@ -439,7 +439,7 @@ def supersede_delivery_note(
         raise ValueError(f"delivery payload missing fields: {missing}")
     identity = candidate_identity(payload)
 
-    def _precondition(existing_notes):
+    def _precondition(existing_notes, _record=None):
         aliases = {
             alias
             for note in existing_notes
