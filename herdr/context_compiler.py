@@ -538,6 +538,15 @@ def compile_working_context(
     }
     if taskless_source_runs:
         metrics["source_run_ids"] = taskless_source_runs
+    if planned_links:
+        # The save-time relevant-source guard recomputes the source version;
+        # it must rebuild the same closure, so the declared links travel here.
+        metrics["planned_links"] = [
+            {"from_task_id": str(link.get("from_task_id") or ""),
+             "to_task_id": str(link.get("to_task_id") or "")}
+            for link in planned_links
+            if isinstance(link, Mapping) and link.get("from_task_id") and link.get("to_task_id")
+        ]
     context = WorkingContext(**{**context.to_mapping(), "metrics": metrics})
     metrics["context_chars"] = len(json.dumps(context.to_mapping(), ensure_ascii=False))
     context = WorkingContext(**{**context.to_mapping(), "metrics": metrics})

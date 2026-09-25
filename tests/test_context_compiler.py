@@ -1048,6 +1048,43 @@ def test_unrelated_sibling_write_does_not_mark_candidate_stale(tmp_path: Path):
     assert again.context_id == old.context_id
 
 
+def test_relevant_write_between_fresh_read_and_save_retries_to_new_version(tmp_path, monkeypatch):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    upstream = _seed_task(db, _task("task-guard-upstream", node="implementation"))
+    target = _seed_task(db, _task("task-guard-target", node="review"))
+    state_db.upsert_trajectory_finding(
+        _finding(upstream["run_id"], "fnd-guard-race", task_id=upstream["task_id"], summary="v1"),
+        db_path=db,
+    )
+    old = _compile(db, target, "reviewer")
+    real_save = state_db.save_working_context
+    poisoned = {"armed": True}
+
+    def save_with_race(payload, db_path=None, **kwargs):
+        if poisoned["armed"]:
+            # A relevant dependency write landing after the compiler's last
+            # fresh read but before the save transaction's guard re-read.
+            poisoned["armed"] = False
+            state_db.upsert_trajectory_finding(
+                _finding(upstream["run_id"], "fnd-guard-race", task_id=upstream["task_id"], summary="v2"),
+                db_path=db_path,
+            )
+        return real_save(payload, db_path=db_path, **kwargs)
+
+    monkeypatch.setattr(state_db, "save_working_context", save_with_race)
+    new = _compile(db, target, "reviewer")
+    assert not poisoned["armed"], "expected the race hook to fire once"
+    assert new.source_version != old.source_version
+    assert new.context_id != old.context_id
+    assert any(
+        isinstance(item.get("value"), dict) and item["value"].get("summary") == "v2"
+        for item in new.findings
+    ), "retried compile must carry the raced-in finding"
+    from herdr.context_compiler import get_latest_working_context
+    assert get_latest_working_context(target["task_id"], db_path=db).context_id == new.context_id
+
+
 def test_existing_context_id_retry_is_idempotent_after_source_clock_change(tmp_path: Path):
     from herdr.context_projection import _config
 
@@ -3389,54 +3426,10 @@ def test_storage_fingerprint_does_not_cross_run_scope(tmp_path: Path):
     target = _task("task-reused", scope="scope-a", run_id="run-scope-a")
     target["workflow_id"] = "wf"
     _seed_task(db, target)
-    state_db.register_working_context_source(
-        run_scope="scope-a", workflow_id="wf", task_id="task-reused",
-        source_version="source", db_path=db,
-    )
-
-    clock = _source_clock_revision(db, "scope-a", "wf")
-
-    def payload(context_id: str, fingerprint: str, created_at: float):
-        result = {
-            "context_id": context_id,
-            "run_scope": "scope-a",
-            "run_id": "run-scope-a",
-            "workflow_id": "wf",
-            "task_id": "task-reused",
-            "node_id": "review",
-            "agent_role": "reviewer",
-            "goal": "goal",
-            "current_state": {},
-            "findings": [],
-            "artifacts": [],
-            "evidence": [],
-            "completed": [],
-            "decisions": [],
-            "blockers": [],
-            "open_questions": [],
-            "verification": [],
-            "handoffs": [],
-            "next_action": "review",
-            "goal_source_ref": "task:task-reused",
-            "current_state_refs": {"task_id": "task:task-reused"},
-            "source_refs": ["task:task-reused"],
-            "context_fingerprint": fingerprint,
-            "source_version": "source",
-            "source_watermark": 1,
-            "compiled_at": created_at,
-            "metrics": {"source_clock": clock},
-        }
-        from herdr.context_models import _payload_digest
-        result["metrics"]["payload_digest"] = _payload_digest(result)
-        return _bind_storage_fingerprint(result)
-
-    first = state_db.save_working_context(payload("wc_scope_a", "a" * 64, 1.0), db_path=db)
-    second_payload = payload("wc_scope_b", "b" * 64, 2.0)
-    second_payload["goal"] = "changed goal"
-    _bind_storage_fingerprint(second_payload)
-    second = state_db.save_working_context(second_payload, db_path=db)
-    assert first["context_id"] == "wc_scope_a"
-    assert second["context_id"] == "wc_scope_b"
+    first = _compile(db, target, "reviewer")
+    state_db.save_task(dict(target, goal="changed goal"), db_path=db)
+    second = _compile(db, target, "reviewer")
+    assert first.context_id != second.context_id
     assert len(state_db.list_working_contexts("task-reused", db_path=db)) == 2
 
 
@@ -3511,106 +3504,58 @@ def test_missing_finding_evidence_is_not_emitted_as_a_valid_reference(tmp_path: 
 
 
 def test_concurrent_context_writers_do_not_replace_newer_latest(tmp_path: Path):
+    from herdr.context_projection import _config
+
     db = tmp_path / "state.db"
     _seed_workflow(db, workflow_id="wf")
     concurrent_task = _task("task-concurrent", scope="scope", run_id="run")
     concurrent_task["workflow_id"] = "wf"
     _seed_task(db, concurrent_task)
-    state_db.register_working_context_source(
-        run_scope="scope", workflow_id="wf", task_id="task-concurrent",
-        source_version="source", db_path=db,
-    )
-    clock = _source_clock_revision(db, "scope", "wf")
-
-    def payload(context_id: str, fingerprint: str, created_at: float, source_watermark: int = 1):
-        result = {
-            "context_id": context_id,
-            "run_scope": "scope",
-            "run_id": "run",
-            "workflow_id": "wf",
-            "task_id": "task-concurrent",
-            "node_id": "review",
-            "agent_role": "developer",
-            "goal": "goal",
-            "current_state": {},
-            "findings": [],
-            "artifacts": [],
-            "evidence": [],
-            "completed": [],
-            "decisions": [],
-            "blockers": [],
-            "open_questions": [],
-            "verification": [],
-            "handoffs": [],
-            "next_action": "continue",
-            "goal_source_ref": "task:task-concurrent",
-            "current_state_refs": {"task_id": "task:task-concurrent"},
-            "source_refs": ["task:task-concurrent"],
-            "context_fingerprint": fingerprint,
-            "source_version": "source",
-            "source_watermark": source_watermark,
-            "compiled_at": created_at,
-            "metrics": {"source_clock": clock},
-        }
-        from herdr.context_models import _payload_digest
-        result["metrics"]["payload_digest"] = _payload_digest(result)
-        return _bind_storage_fingerprint(result)
+    first = _compile(db, concurrent_task, "developer")
+    state_db.save_task(dict(concurrent_task, goal="updated goal"), db_path=db)
+    second = _compile(db, concurrent_task, "developer")
+    assert first.context_id != second.context_id
+    # A late-arriving copy of the older candidate must not replace the newer
+    # latest, even when saved from another process.
+    late = dict(first.to_mapping())
+    late["context_id"] = "wc_old_late"
+    late["_fingerprint_config"] = _config(None)
 
     ctx = multiprocessing.get_context("spawn")
     gate = ctx.Event()
     ready = ctx.Event()
     old = ctx.Process(
         target=_save_working_context_in_process,
-        args=(str(db), payload("wc_old", "a" * 64, 10.0), gate, ready),
+        args=(str(db), late, gate, ready),
     )
     old.start()
     assert ready.wait(10)
-    state_db.save_working_context(payload("wc_new", "b" * 64, 20.0), db_path=db)
     gate.set()
     old.join(10)
     assert old.exitcode == 0
     latest = state_db.get_latest_working_context("task-concurrent", db_path=db)
-    assert latest["context_id"] == "wc_new"
+    assert latest["context_id"] == second.context_id
 
 
 def test_storage_rejects_old_source_watermark_after_newer_snapshot(tmp_path: Path):
+    from herdr.context_projection import _config
+
     db = tmp_path / "state.db"
     _seed_workflow(db, workflow_id="wf")
     version_task = _task("task-version", scope="scope", run_id="run")
     version_task["workflow_id"] = "wf"
     _seed_task(db, version_task)
-    state_db.register_working_context_source(
-        run_scope="scope", workflow_id="wf", task_id="task-version",
-        source_version="v2", db_path=db,
-    )
-    clock = _source_clock_revision(db, "scope", "wf")
-    def payload(context_id: str, fingerprint: str, version: str, watermark: int, created_at: float):
-        result = {
-            "context_id": context_id, "run_scope": "scope", "run_id": "run",
-            "workflow_id": "wf", "task_id": "task-version", "node_id": "review",
-            "agent_role": "reviewer", "goal": "goal", "current_state": {},
-            "findings": [], "artifacts": [], "evidence": [], "completed": [],
-            "decisions": [], "blockers": [], "open_questions": [], "verification": [],
-            "handoffs": [], "next_action": "review",
-            "goal_source_ref": "task:task-version",
-            "current_state_refs": {"task_id": "task:task-version"},
-            "source_refs": ["task:task-version"],
-            "context_fingerprint": fingerprint, "source_version": version,
-            "source_watermark": watermark, "compiled_at": created_at,
-            "metrics": {"source_clock": clock},
-        }
-        from herdr.context_models import _payload_digest
-        result["metrics"]["payload_digest"] = _payload_digest(result)
-        return _bind_storage_fingerprint(result)
-
-    state_db.save_working_context(
-        payload("wc_v2", "b" * 64, "v2", 1, 20.0), db_path=db,
-    )
-    returned = state_db.save_working_context(
-        payload("wc_v1_late", "a" * 64, "v1", 0, 30.0), db_path=db,
-    )
+    first = _compile(db, version_task, "reviewer")
+    state_db.save_task(dict(version_task, goal="updated goal"), db_path=db)
+    second = _compile(db, version_task, "reviewer")
+    assert first.context_id != second.context_id
+    late = dict(first.to_mapping())
+    late["context_id"] = "wc_v1_late"
+    late["_fingerprint_config"] = _config(None)
+    returned = state_db.save_working_context(late, db_path=db)
     assert returned["context_id"] == "wc_v1_late"
-    assert state_db.get_latest_working_context("task-version", db_path=db)["context_id"] == "wc_v2"
+    assert returned.get("_stale_snapshot") is True
+    assert state_db.get_latest_working_context("task-version", db_path=db)["context_id"] == second.context_id
 
 
 def test_storage_rejects_items_without_provenance(tmp_path: Path):

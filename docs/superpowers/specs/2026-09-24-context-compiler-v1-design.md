@@ -121,7 +121,7 @@ Task launch / retry / handoff / review request / verification request
 - 信息不足时丢弃受影响来源或 fail closed，不猜测、不跨 Run 拼接。
 - legacy 自动 Handoff 若上下游只有不同的 per-task `run_id` 且没有同一 execution 证据，则跳过；不能把节点依赖当作跨 Run 授权。
 - `working_context_source_heads` 按 `(run_scope, workflow_id, task_id)` 维护单调 source revision；source projection 是 task-specific（current task + dependency closure + handoff peers），不同 Task 独立递增，互不判 stale；迁移时按各 Task 历史 `working_contexts` 的最大 watermark 建 baseline，保证单调递增不掉回 1；编译器保存前必须在同一 task 的 source revision 上，迟到旧候选只能成为历史而不能成为 latest。
-- `working_context_source_clock` 按 `(run_scope, workflow_id)` 维护，作为 metrics 中的信息性逻辑水位；保存时的 staleness 只由 task-specific source version/head（relevant-aware）与编译器的 fresh re-read 版本比较决定，不再以 execution-wide clock 相等性判 stale——无关平行任务的写入不得 invalidate 当前 Task。Schema 初始化使用 resolved-path lock，migration/trigger replacement 在同一写事务内完成，旧 schema/旧 trigger/中断迁移均可恢复。
+- `working_context_source_clock` 按 `(run_scope, workflow_id)` 维护，作为 metrics 中的信息性逻辑水位；保存时的 staleness 由 task-specific source version/head（relevant-aware）决定：`save_working_context` 在写事务内按 candidate 的 `task_id`/`relevant` 闭包（含 metrics 中的 `planned_links`）重新计算轻量 relevant source version，与 candidate 的 `source_version` 一致才 INSERT——最后一次 relevant 读取与 INSERT 之间无其它 writer 可提交，不存在 TOCTOU。无关写入不改变 relevant version，直接通过。Schema 初始化使用 resolved-path lock，migration/trigger replacement 在同一写事务内完成，旧 schema/旧 trigger/中断迁移均可恢复。
 - task-bound legacy source 可以缺少 `workflow_id`，但必须由持久化 Task 的 `task_id` 与 `run_id` 证明 execution scope；超限或未知 source 使用显式 truncated/fail-closed 事实。
 
 ## 5. 选择规则
