@@ -36,8 +36,9 @@ from .transitions import COMPLETED_TASK_STATUSES
 from .context_sources import (
     _dependency_ids,
     _read_source_snapshot,
-    _requirements,
     _scope_task_for_node,
+    _task_requirements,
+    _workflow_requirements,
     _source_allowed,
     _workflow_node,
 )
@@ -116,6 +117,11 @@ def compile_working_context(
         db_path=db_path or _db_path(store),
     )
     target = snapshot["task"]
+    relevant_task_ids = set(snapshot.get("relevant_task_ids") or ())
+    closure_tasks = [
+        item for item in snapshot["tasks"]
+        if str(item.get("task_id") or "") in relevant_task_ids
+    ]
     valid_evidence_refs = set()
     for collection, prefix, key in (
         (snapshot["observations"], "observation", "observation_id"),
@@ -130,6 +136,7 @@ def compile_working_context(
                 workflow_id=str(workflow_id),
                 run_scope=snapshot["run_scope"],
                 taskless_scope_by_run=snapshot["taskless_scope_by_run"],
+                relevant_task_ids=relevant_task_ids,
             ):
                 continue
             valid_evidence_refs.add(f"{prefix}:{item[key]}")
@@ -163,7 +170,7 @@ def compile_working_context(
     dependency_state: Dict[str, str] = {}
     dependency_task_ids: List[str] = []
     for dependency_id in dependency_ids:
-        dependency_task = _scope_task_for_node(dependency_id, snapshot["tasks"])
+        dependency_task = _scope_task_for_node(dependency_id, closure_tasks)
         dependency_state[dependency_id] = str(dependency_task.get("status")) if dependency_task else "unknown"
         if dependency_task and dependency_task.get("task_id"):
             dependency_task_ids.append(str(dependency_task["task_id"]))
@@ -172,22 +179,18 @@ def compile_working_context(
         )
     current_state["dependency_state"] = dependency_state
     current_state_refs["dependency_state"] = f"workflow:{workflow_id}"
-    requirements = _requirements(target, node)
-    has_task_requirements = any(
-        target.get(key) for key in ("acceptance_criteria", "requirements", "acceptance")
-    )
-    has_workflow_requirements = bool(node.get("purpose") or node.get("rules"))
-    workflow_requirements = (
-        ([node.get("purpose")] if node.get("purpose") else [])
-        + list(node.get("rules") or [])
-    )
-    requirements_ref = (
-        f"task:{current_task_id}" if has_task_requirements else f"workflow:{workflow_id}"
-    )
+    task_requirements = _task_requirements(target)
+    workflow_requirements = _workflow_requirements(node)
+    has_task_requirements = bool(task_requirements)
+    has_workflow_requirements = bool(workflow_requirements)
     if role == "developer":
-        current_state["requirements"] = requirements
-        current_state_refs["requirements"] = requirements_ref
-        if has_task_requirements and has_workflow_requirements:
+        if has_task_requirements:
+            current_state["requirements"] = task_requirements
+            current_state_refs["requirements"] = f"task:{current_task_id}"
+        elif has_workflow_requirements:
+            current_state["requirements"] = workflow_requirements
+            current_state_refs["requirements"] = f"workflow:{workflow_id}"
+        if has_workflow_requirements:
             current_state["requirements_workflow"] = workflow_requirements
             current_state_refs["requirements_workflow"] = f"workflow:{workflow_id}"
     elif role == "reviewer":
@@ -198,11 +201,15 @@ def compile_working_context(
         }
         current_state_refs["review_scope"] = f"workflow:{workflow_id}"
     elif role == "tester":
-        current_state["acceptance_criteria"] = requirements
+        if has_task_requirements:
+            current_state["acceptance_criteria"] = task_requirements
+            current_state_refs["acceptance_criteria"] = f"task:{current_task_id}"
+        elif has_workflow_requirements:
+            current_state["acceptance_criteria"] = workflow_requirements
+            current_state_refs["acceptance_criteria"] = f"workflow:{workflow_id}"
         current_state["verification_targets"] = list(node.get("rules") or [])
-        current_state_refs["acceptance_criteria"] = requirements_ref
         current_state_refs["verification_targets"] = f"workflow:{workflow_id}"
-        if has_task_requirements and has_workflow_requirements:
+        if has_workflow_requirements:
             current_state["acceptance_criteria_workflow"] = workflow_requirements
             current_state_refs["acceptance_criteria_workflow"] = f"workflow:{workflow_id}"
     else:
@@ -211,7 +218,7 @@ def compile_working_context(
         current_state_refs["workflow_stage"] = f"workflow:{workflow_id}"
 
     completed_tasks, task_blockers, task_decisions, questions = _task_candidates(
-        snapshot["tasks"],
+        closure_tasks,
         dependency_ids=dependency_ids,
     )
     for blocker in task_blockers:
@@ -225,6 +232,7 @@ def compile_working_context(
         workflow_id=str(workflow_id),
         run_scope=snapshot["run_scope"],
         taskless_scope_by_run=snapshot["taskless_scope_by_run"],
+        relevant_task_ids=relevant_task_ids,
     )
     eval_verification = _eval_candidates(
         snapshot["evals"],
@@ -234,8 +242,9 @@ def compile_working_context(
         workflow_id=str(workflow_id),
         run_scope=snapshot["run_scope"],
         taskless_scope_by_run=snapshot["taskless_scope_by_run"],
+        relevant_task_ids=relevant_task_ids,
     )
-    event_artifacts.extend(_task_artifact_candidates(snapshot["tasks"]))
+    event_artifacts.extend(_task_artifact_candidates(closure_tasks))
     findings = _finding_candidates(
         snapshot["findings"],
         task_by_id=snapshot["task_by_id"],
@@ -244,6 +253,7 @@ def compile_working_context(
         workflow_id=str(workflow_id),
         run_scope=snapshot["run_scope"],
         taskless_scope_by_run=snapshot["taskless_scope_by_run"],
+        relevant_task_ids=relevant_task_ids,
     )
     evidence = _observation_candidates(
         snapshot["observations"],
@@ -252,6 +262,7 @@ def compile_working_context(
         workflow_id=str(workflow_id),
         run_scope=snapshot["run_scope"],
         taskless_scope_by_run=snapshot["taskless_scope_by_run"],
+        relevant_task_ids=relevant_task_ids,
     )
     handoffs = _handoff_candidates(
         snapshot["collaborations"],
@@ -260,6 +271,7 @@ def compile_working_context(
         valid_evidence_refs=valid_evidence_refs,
         workflow_id=str(workflow_id),
         run_scope=snapshot["run_scope"],
+        relevant_task_ids=relevant_task_ids,
     )
     blockers = [*task_blockers, *event_blockers]
     # Explicit current task blocker is always retained, including when it is

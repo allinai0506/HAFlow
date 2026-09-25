@@ -36,6 +36,7 @@ def _finding_candidates(
     workflow_id: str,
     run_scope: str,
     taskless_scope_by_run: Optional[Mapping[str, Optional[str]]] = None,
+    relevant_task_ids: Optional[Set[str]] = None,
 ) -> List[Dict[str, Any]]:
     valid = [
         finding for finding in findings
@@ -46,6 +47,7 @@ def _finding_candidates(
             workflow_id=workflow_id,
             run_scope=run_scope,
             taskless_scope_by_run=taskless_scope_by_run,
+            relevant_task_ids=relevant_task_ids,
         )
     ]
     by_id = {str(item.get("finding_id")): item for item in valid if item.get("finding_id")}
@@ -60,18 +62,20 @@ def _finding_candidates(
                 metadata[relation_key] = finding[relation_key]
         supersedes_targets = _relation_ids(metadata, "supersedes")
         superseded_by_targets = _relation_ids(metadata, "superseded_by")
-        targets = [*supersedes_targets, *superseded_by_targets]
-        if targets:
-            relations[finding_id] = set(targets)
+        # Directed normalization: both spellings describe one edge new -> old.
+        # `supersedes` on self means self is newer than target;
+        # `superseded_by` on self means target is newer than self.
         for target in supersedes_targets:
             if target not in by_id:
                 invalid.add(finding_id)
             else:
+                relations.setdefault(finding_id, set()).add(target)
                 superseded.add(target)
         for target in superseded_by_targets:
             if target not in by_id:
                 invalid.add(finding_id)
             else:
+                relations.setdefault(target, set()).add(finding_id)
                 superseded.add(finding_id)
     visiting: Set[str] = set()
     visited: Set[str] = set()
@@ -147,6 +151,7 @@ def _observation_candidates(
     workflow_id: str,
     run_scope: str,
     taskless_scope_by_run: Optional[Mapping[str, Optional[str]]] = None,
+    relevant_task_ids: Optional[Set[str]] = None,
 ) -> List[Dict[str, Any]]:
     result = []
     for observation in observations:
@@ -157,6 +162,7 @@ def _observation_candidates(
             workflow_id=workflow_id,
             run_scope=run_scope,
             taskless_scope_by_run=taskless_scope_by_run,
+            relevant_task_ids=relevant_task_ids,
         ):
             continue
         observation_id = str(observation.get("observation_id") or "")
@@ -191,6 +197,7 @@ def _eval_candidates(
     workflow_id: str,
     run_scope: str,
     taskless_scope_by_run: Optional[Mapping[str, Optional[str]]] = None,
+    relevant_task_ids: Optional[Set[str]] = None,
 ) -> List[Dict[str, Any]]:
     result: List[Dict[str, Any]] = []
     for evaluation in evals:
@@ -206,6 +213,7 @@ def _eval_candidates(
             workflow_id=workflow_id,
             run_scope=run_scope,
             taskless_scope_by_run=taskless_scope_by_run,
+            relevant_task_ids=relevant_task_ids,
         ):
             continue
         passed = evaluation.get("verification_passed")
@@ -264,6 +272,7 @@ def _event_candidates(
     workflow_id: str,
     run_scope: str,
     taskless_scope_by_run: Optional[Mapping[str, Optional[str]]] = None,
+    relevant_task_ids: Optional[Set[str]] = None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Return artifacts, completed, verification, decisions, and blockers."""
     artifacts: List[Dict[str, Any]] = []
@@ -280,6 +289,7 @@ def _event_candidates(
             workflow_id=workflow_id,
             run_scope=run_scope,
             taskless_scope_by_run=taskless_scope_by_run,
+            relevant_task_ids=relevant_task_ids,
         )
     ]
     active_failures: Dict[Tuple[str, str], Set[str]] = {}
@@ -476,14 +486,26 @@ def _event_candidates(
     return artifacts, completed, verification, decisions, blockers
 
 
+# Source window for task payload artifacts: bounded before ContextItem
+# materialization. Role/state selection below keeps at most the per-kind
+# cap; this window only prevents unbounded fan-out from large payloads.
+TASK_ARTIFACT_SOURCE_PER_TASK = 64
+TASK_ARTIFACT_SOURCE_TOTAL = 1024
+
+
 def _task_artifact_candidates(tasks: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
     result: List[Dict[str, Any]] = []
     for task in tasks:
+        if len(result) >= TASK_ARTIFACT_SOURCE_TOTAL:
+            break
         task_id = str(task.get("task_id") or "")
         task_ref = f"task:{task_id}:artifact"
         raw_artifacts: List[Any] = []
         for key in ("artifacts", "artifact_refs", "changed_artifacts", "deliverables"):
             raw_artifacts.extend(_as_list(task.get(key)))
+            if len(raw_artifacts) >= TASK_ARTIFACT_SOURCE_PER_TASK:
+                raw_artifacts = raw_artifacts[:TASK_ARTIFACT_SOURCE_PER_TASK]
+                break
         valid_artifacts: List[Tuple[str, Any]] = []
         for artifact in raw_artifacts:
             if isinstance(artifact, Mapping):
@@ -495,6 +517,8 @@ def _task_artifact_candidates(tasks: Sequence[Mapping[str, Any]]) -> List[Dict[s
             if ref not in (None, ""):
                 valid_artifacts.append((str(ref), kind))
         for artifact_index, (ref, kind) in enumerate(valid_artifacts):
+            if len(result) >= TASK_ARTIFACT_SOURCE_TOTAL:
+                break
             result.append(_item(
                 "artifact",
                 {"ref": ref, "kind": kind},
@@ -593,8 +617,12 @@ def _handoff_candidates(
     valid_evidence_refs: Set[str],
     workflow_id: str,
     run_scope: str,
+    relevant_task_ids: Optional[Set[str]] = None,
 ) -> List[Dict[str, Any]]:
     candidates = []
+    endpoint_scope = (
+        relevant_task_ids if relevant_task_ids is not None else set(task_by_id)
+    )
     for event in events:
         if str(event.get("type") or "").upper() != "HANDOFF":
             continue
@@ -606,7 +634,7 @@ def _handoff_candidates(
             continue
         from_id = str(event.get("from_task_id") or "")
         to_id = str(event.get("to_task_id") or "")
-        if from_id not in task_by_id or to_id not in task_by_id:
+        if from_id not in endpoint_scope or to_id not in endpoint_scope:
             continue
         evidence_refs = []
         for raw_ref in event.get("evidence_refs") or []:

@@ -108,6 +108,11 @@ def _fit_budget(context: WorkingContext, config: Mapping[str, Any]) -> WorkingCo
                 break
         else:
             break
+    if sum(len(getattr(context, field)) for field in priority) > max_items:
+        raise ValueError(
+            "context budget cannot preserve mandatory items "
+            f"within max_items={max_items}"
+        )
 
     def size(candidate: WorkingContext) -> int:
         return len(json.dumps(candidate.to_mapping(), ensure_ascii=False))

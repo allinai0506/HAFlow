@@ -891,9 +891,16 @@ def test_global_item_budget_keeps_blocker_and_failure_verification(tmp_path: Pat
         "workflow_id": target["workflow_id"], "event_type": "verification_completed",
         "verification": {"passed": False},
     })
-    context = _compile(db, target, "tester", config={"max_items": 1})
+    context = _compile(db, target, "tester", config={"max_items": 2})
     assert context.blockers
     assert any(item.get("value", {}).get("passed") is False for item in context.verification)
+    assert (
+        len(context.blockers) + len(context.verification)
+        + len(context.completed) + len(context.artifacts)
+        + len(context.evidence) + len(context.findings)
+        + len(context.decisions) + len(context.open_questions)
+        + len(context.handoffs)
+    ) <= 2
 
 
 def test_total_character_budget_is_hard_for_large_goal_and_refs(tmp_path: Path):
@@ -1050,6 +1057,96 @@ def test_same_workflow_other_scope_finding_update_does_not_advance_clock(tmp_pat
         db_path=db,
     )
     assert _source_clock_revision(db, "scope-b", "wf-two-scopes") == before
+
+
+def test_out_of_scope_task_history_does_not_break_scope_limit(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db, workflow_id="wf-scope-limit", scope="scope-a")
+    target = _seed_task(db, _task(
+        "task-scope-limit", workflow_id="wf-scope-limit", scope="scope-a"
+    ))
+    conn = state_db.get_db_connection(db)
+    try:
+        for index in range(1005):
+            conn.execute(
+                "INSERT INTO tasks (task_id, workflow_id, payload_json) VALUES (?, ?, ?)",
+                (
+                    f"task-history-{index}", "wf-scope-limit",
+                    json.dumps({"run_id": f"run-history-{index}", "workflow_run_id": "scope-old"}),
+                ),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    context = _compile(db, target, "developer")
+    assert context.task_id == "task-scope-limit"
+
+
+def test_oversized_dependency_task_keeps_true_status(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db, workflow_id="wf-oversized-task", scope="scope-a")
+    impl = _task(
+        "task-oversized-impl", workflow_id="wf-oversized-task",
+        scope="scope-a", node="implementation", status="working",
+    )
+    _seed_task(db, impl)
+    conn = state_db.get_db_connection(db)
+    try:
+        conn.execute(
+            "UPDATE tasks SET payload_json = ? WHERE task_id = ?",
+            (json.dumps({
+                "run_id": impl["run_id"],
+                "workflow_run_id": "scope-a",
+                "goal": "g" * 200001,
+            }), impl["task_id"]),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    target = _seed_task(db, _task(
+        "task-oversized-review", workflow_id="wf-oversized-task",
+        scope="scope-a", node="review",
+    ))
+    context = _compile(db, target, "reviewer")
+    assert context.current_state["dependency_state"] == {"implementation": "working"}
+
+
+def test_malformed_observation_metadata_does_not_fail_compile(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db, workflow_id="wf-bad-observation", scope="scope-a")
+    target = _seed_task(db, _task(
+        "task-bad-observation", workflow_id="wf-bad-observation", scope="scope-a"
+    ))
+    observation = create_observation(
+        run_id=target["run_id"], task_id=target["task_id"],
+        workflow_id=target["workflow_id"], source_type="agent_log",
+        source_ref="pane:bad-metadata", content="evidence",
+        store=ObservationStore(db),
+    )
+    conn = state_db.get_db_connection(db)
+    try:
+        conn.execute(
+            "UPDATE observations SET metadata_json = ? WHERE observation_id = ?",
+            ("{", observation.observation_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    context = _compile(db, target, "developer")
+    assert context.task_id == "task-bad-observation"
+
+
+def test_task_artifact_candidates_are_source_bounded():
+    from herdr.context_candidates import _task_artifact_candidates
+
+    tasks = [{
+        "task_id": f"task-artifact-{index}",
+        "run_id": f"run-artifact-{index}",
+        "created_at": 1.0,
+        "artifacts": [{"ref": f"artifact-{index}-{slot}"} for slot in range(5000)],
+    } for index in range(3)]
+    result = _task_artifact_candidates(tasks)
+    assert len(result) <= 1024
 
 
 def test_task_workflow_move_advances_old_workflow_clock(tmp_path: Path):
@@ -1386,6 +1483,162 @@ def test_handoff_survives_non_handoff_collaboration_window_noise(tmp_path: Path)
     )
 
 
+def test_parallel_branch_facts_are_excluded_from_relevant_scope(tmp_path: Path):
+    db = tmp_path / "state.db"
+    state_db.save_workflow(
+        {
+            "workflow_id": "wf-parallel",
+            "title": "parallel branches",
+            "status": "running",
+            "config": {"nodes": [
+                {"id": "implementation", "depends_on": []},
+                {"id": "implementation-b", "depends_on": []},
+                {"id": "review", "depends_on": ["implementation"]},
+                {"id": "review-b", "depends_on": ["implementation-b"]},
+            ]},
+        },
+        db_path=db,
+    )
+    impl_a = _seed_task(db, dict(
+        _task("task-impl-a", workflow_id="wf-parallel", scope="scope-a", node="implementation"),
+        status="completed",
+        artifacts=[{"ref": "artifact-a"}],
+    ))
+    review_a = _seed_task(db, _task(
+        "task-review-a", workflow_id="wf-parallel", scope="scope-a", node="review"
+    ))
+    impl_b = _seed_task(db, dict(
+        _task("task-impl-b", workflow_id="wf-parallel", scope="scope-a", node="implementation-b"),
+        status="blocked",
+        blocker="branch-b blocked",
+        artifacts=[{"ref": "artifact-b"}],
+    ))
+    review_b = _seed_task(db, _task(
+        "task-review-b", workflow_id="wf-parallel", scope="scope-a", node="review-b"
+    ))
+    branch_finding = _finding(impl_b["run_id"], "fnd-branch-b", task_id=impl_b["task_id"])
+    branch_finding["workflow_id"] = impl_b["workflow_id"]
+    state_db.upsert_trajectory_finding(branch_finding, db_path=db)
+    assert impl_a and review_b
+    context = _compile(db, review_a, "reviewer")
+    rendered = json.dumps(context.to_mapping(), ensure_ascii=False)
+    assert "branch-b blocked" not in rendered
+    assert "artifact-b" not in rendered
+    assert "fnd-branch-b" not in rendered
+    assert "artifact-a" in rendered
+
+
+def test_production_chain_review_sees_dependency_not_parallel_branch(tmp_path: Path):
+    from herdr.context_compiler import get_working_context
+    from herdr.context_models import _valid_source_ref
+    from herdr.context_projection import _config
+
+    db = tmp_path / "state.db"
+    state_db.save_workflow(
+        {
+            "workflow_id": "wf-production", "title": "production chain",
+            "status": "running",
+            "config": {"nodes": [
+                {"id": "implementation", "depends_on": []},
+                {"id": "implementation-b", "depends_on": []},
+                {"id": "review", "depends_on": ["implementation"]},
+            ]},
+        },
+        db_path=db,
+    )
+    impl_a = _seed_task(db, dict(
+        _task("task-prod-impl-a", workflow_id="wf-production", scope="exec-prod",
+              node="implementation", status="completed"),
+        artifacts=[{"ref": "artifact-a"}],
+    ))
+    impl_b = _seed_task(db, dict(
+        _task("task-prod-impl-b", workflow_id="wf-production", scope="exec-prod",
+              node="implementation-b", status="blocked"),
+        blocker="branch-b blocked",
+        artifacts=[{"ref": "artifact-b"}],
+    ))
+    observation_a = create_observation(
+        run_id=impl_a["run_id"], task_id=impl_a["task_id"],
+        workflow_id=impl_a["workflow_id"], source_type="verification",
+        source_ref="verification:evidence-a", content="evidence a",
+        store=ObservationStore(db),
+    )
+    finding_a = _finding(
+        impl_a["run_id"], "fnd-prod-a", task_id=impl_a["task_id"],
+        evidence=[{"observation_id": observation_a.observation_id}],
+    )
+    finding_a["workflow_id"] = impl_a["workflow_id"]
+    state_db.upsert_trajectory_finding(finding_a, db_path=db)
+    finding_b = _finding(impl_b["run_id"], "fnd-prod-b", task_id=impl_b["task_id"])
+    finding_b["workflow_id"] = impl_b["workflow_id"]
+    state_db.upsert_trajectory_finding(finding_b, db_path=db)
+    state_db.record_trajectory_event(
+        {
+            "run_id": impl_a["run_id"], "task_id": impl_a["task_id"],
+            "workflow_id": impl_a["workflow_id"], "event_type": "verification_completed",
+            "payload": {"verification": {"passed": True}},
+        },
+        db_path=db,
+    )
+    review_a = _seed_task(db, dict(
+        _task("task-prod-review-a", workflow_id="wf-production", scope="exec-prod",
+              node="review", status="dispatched"),
+    ))
+
+    impl_context = _compile(db, impl_a, "developer")
+    state_db.save_working_context(
+        dict(impl_context.to_mapping()), db_path=db,
+        fingerprint_config=_config(None),
+    )
+    loaded_impl = get_working_context(impl_context.context_id, db_path=db)
+    assert loaded_impl is not None
+    assert loaded_impl.context_id == impl_context.context_id
+
+    state_db.create_collaboration_event(
+        {
+            "run_id": "exec-prod", "workflow_id": "wf-production",
+            "from_task_id": impl_a["task_id"], "to_task_id": review_a["task_id"],
+            "type": "HANDOFF", "source_fact_id": "fact-prod-handoff",
+        },
+        db_path=db,
+    )
+    review_context = _compile(
+        db, review_a, "reviewer",
+        planned_links=[{
+            "from_task_id": impl_a["task_id"], "to_task_id": review_a["task_id"],
+        }],
+    )
+    mapping = review_context.to_mapping()
+    rendered = json.dumps(mapping, ensure_ascii=False)
+    assert review_context.run_scope == "exec-prod"
+
+    assert "artifact-a" in rendered
+    assert observation_a.observation_id in rendered
+    assert "fnd-prod-a" in rendered
+    assert review_context.verification
+    assert "branch-b blocked" not in rendered
+    assert "artifact-b" not in rendered
+    assert "fnd-prod-b" not in rendered
+
+    items = (
+        review_context.completed + review_context.artifacts
+        + review_context.evidence + review_context.findings
+        + review_context.decisions + review_context.blockers
+        + review_context.open_questions + review_context.verification
+        + review_context.handoffs
+    )
+    assert len(items) <= 40
+    assert len(json.dumps(mapping, ensure_ascii=False)) <= 12000
+    for item in items:
+        ref = item.get("source_ref") or ""
+        assert _valid_source_ref(ref), ref
+        source_task = item.get("source_task")
+        if source_task:
+            assert source_task in {
+                "task-prod-impl-a", "task-prod-review-a",
+            }, source_task
+
+
 def test_taskless_source_with_reused_run_advances_all_workflow_scopes(tmp_path: Path):
     db = tmp_path / "state.db"
     _seed_workflow(db, workflow_id="wf-a", scope="scope-a")
@@ -1623,7 +1876,7 @@ def test_source_revision_advances_for_artifact_update(tmp_path: Path):
 def test_source_revision_advances_for_in_place_finding_update(tmp_path: Path):
     db = tmp_path / "state.db"
     _seed_workflow(db)
-    upstream = _seed_task(db, _task("task-source-revision-upstream"))
+    upstream = _seed_task(db, _task("task-source-revision-upstream", node="implementation"))
     target = _seed_task(db, _task("task-source-revision-target"))
     original = _finding(upstream["run_id"], "fnd-revision", task_id=upstream["task_id"], summary="old")
     state_db.upsert_trajectory_finding(original, db_path=db)
@@ -1740,7 +1993,7 @@ def test_superseded_finding_is_excluded_but_history_remains(tmp_path: Path):
     db = tmp_path / "state.db"
     _seed_workflow(db)
     target = _seed_task(db, _task("task-supersede"))
-    upstream = _seed_task(db, _task("task-upstream"))
+    upstream = _seed_task(db, _task("task-upstream", node="implementation"))
     old = _finding(upstream["run_id"], "fnd-old", task_id=upstream["task_id"], summary="old timeout exists")
     state_db.upsert_trajectory_finding(old, db_path=db)
     new = _finding(
@@ -1793,6 +2046,24 @@ def test_legacy_finding_without_workflow_can_be_supersession_target(tmp_path: Pa
     assert "finding:fnd-legacy-new" in context.source_refs
 
 
+def test_reciprocal_supersession_normalizes_to_single_directed_edge(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-reciprocal-supersede"))
+    upstream = _seed_task(db, _task("task-reciprocal-upstream", node="implementation"))
+    old = _finding(upstream["run_id"], "fnd-reciprocal-old", task_id=upstream["task_id"])
+    old["metadata"] = {"superseded_by": "fnd-reciprocal-new"}
+    new = _finding(
+        upstream["run_id"], "fnd-reciprocal-new", task_id=upstream["task_id"],
+        metadata={"supersedes": "fnd-reciprocal-old"},
+    )
+    state_db.upsert_trajectory_finding(old, db_path=db)
+    state_db.upsert_trajectory_finding(new, db_path=db)
+    context = _compile(db, target, "developer")
+    assert not any("fnd-reciprocal-old" in ref for ref in context.source_refs)
+    assert any("fnd-reciprocal-new" in ref for ref in context.source_refs)
+
+
 def test_invalid_or_cyclic_supersession_is_excluded(tmp_path: Path):
     db = tmp_path / "state.db"
     _seed_workflow(db)
@@ -1815,7 +2086,7 @@ def test_top_level_finding_supersession_is_normalized(tmp_path: Path):
     db = tmp_path / "state.db"
     _seed_workflow(db)
     target = _seed_task(db, _task("task-top-level-supersede"))
-    upstream = _seed_task(db, _task("task-upstream"))
+    upstream = _seed_task(db, _task("task-upstream", node="implementation"))
     old = _finding(upstream["run_id"], "fnd-top-old", task_id=upstream["task_id"])
     state_db.upsert_trajectory_finding(old, db_path=db)
     new = _finding(upstream["run_id"], "fnd-top-new", task_id=upstream["task_id"], summary="fixed")
@@ -1827,6 +2098,26 @@ def test_top_level_finding_supersession_is_normalized(tmp_path: Path):
     context = _compile(db, target, "developer")
     assert not any("fnd-top-old" in ref for ref in context.source_refs)
     assert any("fnd-top-new" in ref for ref in context.source_refs)
+
+
+def test_mixed_requirements_keep_separate_provenance(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, dict(
+        _task("task-mixed-requirements"),
+        acceptance_criteria="task acceptance",
+    ))
+    context = _compile(db, target, "developer")
+    state = context.current_state
+    refs = context.current_state_refs
+    assert state["requirements"] == ["task acceptance"]
+    assert refs["requirements"] == "task:task-mixed-requirements"
+    assert refs["requirements_workflow"] == "workflow:wf-context"
+    assert all("task acceptance" != str(value) for value in state["requirements_workflow"])
+    assert all(
+        "Implement the requested behavior" not in str(value)
+        for value in state["requirements"]
+    )
 
 
 def test_context_metadata_is_redacted_before_persistence(tmp_path: Path):
@@ -1865,7 +2156,7 @@ def test_finding_preserves_evidence_ref_without_reading_content(tmp_path: Path):
     db = tmp_path / "state.db"
     _seed_workflow(db)
     target = _seed_task(db, _task("task-evidence"))
-    upstream = _seed_task(db, _task("task-upstream"))
+    upstream = _seed_task(db, _task("task-upstream", node="implementation"))
     observation = create_observation(
         run_id=upstream["run_id"],
         task_id=upstream["task_id"],
@@ -2109,6 +2400,29 @@ def test_legacy_scope_does_not_mix_unlinked_task_runs(tmp_path: Path):
     context = _compile(db, target, "developer")
     assert not any("fnd-unlinked" in ref for ref in context.source_refs)
     assert "unlinked blocker" not in json.dumps(context.to_mapping(), ensure_ascii=False)
+
+
+def test_budget_refuses_mandatory_items_above_max_items(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, dict(
+        _task("task-budget-hard", node="test", role="tester"),
+        status="blocked",
+        blocker="hard blocker",
+    ))
+    state_db.record_trajectory_event(
+        {
+            "run_id": target["run_id"], "task_id": target["task_id"],
+            "workflow_id": target["workflow_id"], "event_type": "verification_completed",
+            "payload": {"verification": {"passed": True}},
+        },
+        db_path=db,
+    )
+    with pytest.raises(ValueError, match="budget"):
+        _compile(
+            db, target, "tester",
+            config={"max_items": 1, "max_chars": 12000},
+        )
 
 
 def test_budget_limits_hundreds_of_findings_and_total_chars(tmp_path: Path):
@@ -2828,7 +3142,7 @@ def test_supersession_target_outside_finding_window_is_loaded(tmp_path: Path):
     db = tmp_path / "state.db"
     _seed_workflow(db)
     target = _seed_task(db, _task("task-supersession-window", node="review"))
-    upstream = _seed_task(db, _task("task-supersession-window-upstream"))
+    upstream = _seed_task(db, _task("task-supersession-window-upstream", node="implementation"))
     old = _finding(
         upstream["run_id"], "fnd-window-old", task_id=upstream["task_id"], created_at=1.0,
     )

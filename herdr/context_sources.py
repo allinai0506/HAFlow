@@ -123,6 +123,7 @@ def _merge_verification_events(
     run_scope: str | None = None,
     taskless_scope_by_run: Mapping[str, Optional[str]] | None = None,
     taskless_allowed_runs: Set[str] | None = None,
+    relevant_task_ids: Set[str] | None = None,
     target_task_id: str | None = None,
     limit: int = 500,
 ) -> List[Dict[str, Any]]:
@@ -327,6 +328,7 @@ def _merge_verification_events(
                 workflow_id=workflow_id,
                 run_scope=run_scope,
                 taskless_scope_by_run=taskless_scope_by_run,
+                relevant_task_ids=relevant_task_ids,
             )
         ):
             continue
@@ -350,6 +352,7 @@ def _merge_verification_events(
                 workflow_id=workflow_id,
                 run_scope=run_scope,
                 taskless_scope_by_run=taskless_scope_by_run,
+                relevant_task_ids=relevant_task_ids,
             )
         ):
             continue
@@ -370,6 +373,7 @@ def _merge_verification_events(
                 workflow_id=workflow_id,
                 run_scope=run_scope,
                 taskless_scope_by_run=taskless_scope_by_run,
+                relevant_task_ids=relevant_task_ids,
             )
         ):
             continue
@@ -413,6 +417,7 @@ def _merge_verification_events(
                 workflow_id=workflow_id,
                 run_scope=run_scope,
                 taskless_scope_by_run=taskless_scope_by_run,
+                relevant_task_ids=relevant_task_ids,
             )
         }
     reserved_by_key: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
@@ -507,6 +512,22 @@ def _read_source_snapshot(
     try:
         conn.execute("BEGIN;")
 
+        def decode_observation_light(row: sqlite3.Row) -> Dict[str, Any]:
+            # The compiler only needs scalar identity/content fields. Metadata
+            # is never decoded here, so one malformed metadata_json cannot
+            # fail the whole compilation.
+            return {
+                "observation_id": row["observation_id"],
+                "run_id": row["run_id"],
+                "task_id": row["task_id"],
+                "workflow_id": row["workflow_id"],
+                "source_type": row["source_type"],
+                "source_ref": row["source_ref"],
+                "sha256": row["sha256"],
+                "excerpt": row["excerpt"],
+                "created_at": row["created_at"],
+            }
+
         def safe_decode_finding_row(row: sqlite3.Row) -> Dict[str, Any]:
             try:
                 return state_db._decode_finding_row(row)
@@ -598,10 +619,48 @@ def _read_source_snapshot(
             return result
 
         task_row = conn.execute(
-            "SELECT * FROM tasks WHERE task_id = ? AND length(payload_json) <= 200000",
+            """SELECT task_id, workflow_id, node, stage, agent, status,
+                      stage_verdict, stage_verdict_note, pane_id, goal, blocker,
+                      created_at, updated_at,
+                      CASE WHEN length(payload_json) <= 200000
+                           THEN payload_json END AS payload_json,
+                      CASE WHEN json_valid(payload_json)
+                           THEN json_extract(payload_json, '$.run_id') END AS explicit_run_id,
+                      CASE WHEN json_valid(payload_json)
+                           THEN json_extract(payload_json, '$.workflow_run_id') END AS explicit_workflow_run_id,
+                      CASE WHEN json_valid(payload_json)
+                           THEN json_extract(payload_json, '$.execution_id') END AS explicit_execution_id
+               FROM tasks WHERE task_id = ?""",
             (str(task_id),),
         ).fetchone()
-        task = state_db._decode_task_row(task_row) if task_row is not None else dict(explicit_task or {})
+
+        def _task_from_bounded_row(row: sqlite3.Row) -> Dict[str, Any]:
+            if row["payload_json"] is not None:
+                return state_db._decode_task_row(row)
+            # Oversized payload: identity/status/column facts stay available,
+            # payload-only facts are absent instead of the task vanishing.
+            explicit_run = str(row["explicit_run_id"] or "") or None
+            return {
+                "task_id": row["task_id"],
+                "workflow_id": row["workflow_id"],
+                "node": row["node"],
+                "stage": row["stage"],
+                "agent": row["agent"],
+                "status": row["status"],
+                "stage_verdict": row["stage_verdict"],
+                "stage_verdict_note": row["stage_verdict_note"],
+                "pane_id": row["pane_id"],
+                "goal": row["goal"],
+                "blocker": row["blocker"],
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+                "run_id": explicit_run or f"run_{row['task_id']}",
+                "workflow_run_id": row["explicit_workflow_run_id"],
+                "execution_id": row["explicit_execution_id"],
+                "source_truncated": True,
+            }
+
+        task = _task_from_bounded_row(task_row) if task_row is not None else dict(explicit_task or {})
         if not task:
             raise ValueError(f"task not found: {task_id}")
         if str(task.get("task_id") or "") != str(task_id):
@@ -615,56 +674,72 @@ def _read_source_snapshot(
         workflow = _decode_workflow_row(workflow_row) if workflow_row is not None else dict(explicit_workflow or {})
         workflow.setdefault("workflow_id", workflow_id)
 
-        task_rows = conn.execute(
-            "SELECT * FROM tasks WHERE workflow_id = ? AND length(payload_json) <= 200000 ORDER BY created_at ASC, task_id ASC LIMIT 1001",
+        run_scope = collab_scope_for_task(task) or _task_run(task)
+        if not run_scope:
+            raise ValueError("task has no resolvable workflow execution scope")
+        # Scope before limit: the identity pass reads only indexed columns
+        # plus three JSON identity fields, never full payloads. Full task
+        # rows are fetched afterwards for in-scope tasks only.
+        identity_rows = conn.execute(
+            """SELECT task_id, workflow_id,
+                      CASE WHEN json_valid(payload_json)
+                           THEN json_extract(payload_json, '$.run_id') END AS run_id,
+                      CASE WHEN json_valid(payload_json)
+                           THEN json_extract(payload_json, '$.workflow_run_id') END AS workflow_run_id,
+                      CASE WHEN json_valid(payload_json)
+                           THEN json_extract(payload_json, '$.execution_id') END AS execution_id,
+                      CASE WHEN payload_json IS NULL OR json_valid(payload_json)
+                           THEN 1 ELSE 0 END AS identity_valid
+               FROM tasks WHERE workflow_id = ? LIMIT 10001""",
             (str(workflow_id),),
         ).fetchall()
-        if len(task_rows) > 1000:
-            raise ValueError("workflow task set exceeds the bounded WorkingContext source limit")
-        tasks = [state_db._decode_task_row(row) for row in task_rows]
-        if not any(str(item.get("task_id")) == str(task_id) for item in tasks):
-            tasks.append(dict(task))
+        if len(identity_rows) > 10000:
+            raise ValueError("workflow task identity set exceeds the bounded WorkingContext source limit")
         taskless_scope_by_run: Dict[str, Optional[str]] = {}
-        for item in tasks:
-            item_run = _task_run(item)
-            item_scope = collab_scope_for_task(item) or item_run
-            if not item_run or not item_scope:
+        in_scope_task_ids: List[str] = []
+        for identity_row in identity_rows:
+            if not identity_row["identity_valid"]:
                 continue
-            previous_scope = taskless_scope_by_run.get(item_run, "__missing__")
-            if previous_scope != "__missing__" and previous_scope != item_scope:
-                taskless_scope_by_run[item_run] = None
-            elif previous_scope == "__missing__":
-                taskless_scope_by_run[item_run] = item_scope
-        for identity_row in conn.execute(
-            """
-            SELECT task_id, workflow_id, payload_json
-              FROM tasks
-             WHERE workflow_id = ?
-            """,
-            (str(workflow_id),),
-        ).fetchall():
-            try:
-                identity_payload = json.loads(identity_row["payload_json"] or "{}")
-                identity_run = str(run_id_for_task({
-                    **identity_payload, "task_id": identity_row["task_id"]
-                }))
-            except (TypeError, ValueError, json.JSONDecodeError):
-                continue
+            identity_task_id = str(identity_row["task_id"] or "")
+            identity_run = str(identity_row["run_id"] or "") or f"run_{identity_task_id}"
             identity_scope = str(
-                identity_payload.get("workflow_run_id")
-                or identity_payload.get("execution_id")
+                identity_row["workflow_run_id"]
+                or identity_row["execution_id"]
                 or identity_row["workflow_id"] or ""
             )
-            if not identity_run or not identity_scope:
+            if not identity_task_id or not identity_run or not identity_scope:
                 continue
             previous_scope = taskless_scope_by_run.get(identity_run, "__missing__")
             if previous_scope != "__missing__" and previous_scope != identity_scope:
                 taskless_scope_by_run[identity_run] = None
             elif previous_scope == "__missing__":
                 taskless_scope_by_run[identity_run] = identity_scope
-        run_scope = collab_scope_for_task(task) or _task_run(task)
-        if not run_scope:
-            raise ValueError("task has no resolvable workflow execution scope")
+            if identity_scope == str(run_scope):
+                in_scope_task_ids.append(identity_task_id)
+        task_rows = []
+        if in_scope_task_ids:
+            scope_placeholders = ",".join("?" for _ in in_scope_task_ids)
+            task_rows = conn.execute(
+                f"""SELECT task_id, workflow_id, node, stage, agent, status,
+                            stage_verdict, stage_verdict_note, pane_id, goal, blocker,
+                            created_at, updated_at,
+                            CASE WHEN length(payload_json) <= 200000
+                                 THEN payload_json END AS payload_json,
+                            CASE WHEN json_valid(payload_json)
+                                 THEN json_extract(payload_json, '$.run_id') END AS explicit_run_id,
+                            CASE WHEN json_valid(payload_json)
+                                 THEN json_extract(payload_json, '$.workflow_run_id') END AS explicit_workflow_run_id,
+                            CASE WHEN json_valid(payload_json)
+                                 THEN json_extract(payload_json, '$.execution_id') END AS explicit_execution_id
+                       FROM tasks WHERE task_id IN ({scope_placeholders})
+                       ORDER BY created_at ASC, task_id ASC LIMIT 1001""",
+                (*in_scope_task_ids,),
+            ).fetchall()
+        if len(task_rows) > 1000:
+            raise ValueError("execution task set exceeds the bounded WorkingContext source limit")
+        tasks = [_task_from_bounded_row(row) for row in task_rows]
+        if not any(str(item.get("task_id")) == str(task_id) for item in tasks):
+            tasks.append(dict(task))
         taskless_allowed_runs = {
             run for run, scope in taskless_scope_by_run.items()
             if scope is not None and str(scope) == str(run_scope)
@@ -760,6 +835,18 @@ def _read_source_snapshot(
                     item for item in scoped_tasks if _task_run(item) in allowed_runs
                 ]
                 task_by_id = {str(item.get("task_id")): item for item in scoped_tasks}
+        if planned_links:
+            # A caller-declared link counterpart is a direct handoff peer and
+            # belongs to the relevant closure in every scope mode. Run
+            # authorization stays untouched; only closure membership is added.
+            for link in planned_links:
+                from_id = str(link.get("from_task_id") or "")
+                to_id = str(link.get("to_task_id") or "")
+                if str(task_id) not in {from_id, to_id}:
+                    continue
+                linked_id = to_id if from_id == str(task_id) else from_id
+                if linked_id and linked_id in task_by_id:
+                    priority_task_ids.add(str(linked_id))
 
         placeholders = ",".join("?" for _ in allowed_runs)
         run_values = list(allowed_runs)
@@ -797,6 +884,7 @@ def _read_source_snapshot(
             run_scope=run_scope,
             taskless_scope_by_run=taskless_scope_by_run,
             taskless_allowed_runs=taskless_allowed_runs,
+            relevant_task_ids=set(priority_task_ids),
             target_task_id=str(task_id),
             limit=int(max_events),
         )
@@ -865,7 +953,9 @@ def _read_source_snapshot(
             findings.extend(safe_decode_finding_row(row) for row in relation_rows)
 
         observation_rows = conn.execute(
-            f"""SELECT * FROM observations
+            f"""SELECT observation_id, run_id, task_id, workflow_id,
+                          source_type, source_ref, sha256, excerpt,
+                          created_at FROM observations
                 WHERE run_id IN ({placeholders})
                   AND ({source_scope_filter})
                 ORDER BY CASE WHEN task_id = ? THEN 0 ELSE 1 END,
@@ -874,7 +964,7 @@ def _read_source_snapshot(
         ).fetchall()
         observations = []
         for row in observation_rows:
-            decoded = state_db._decode_observation_row(row)
+            decoded = decode_observation_light(row)
             observations.append({
                 "observation_id": decoded.get("observation_id"),
                 "run_id": decoded.get("run_id"),
@@ -951,6 +1041,7 @@ def _read_source_snapshot(
                 linked_run = _task_run(linked_task) if linked_task else None
                 if linked_run:
                     allowed_runs.add(linked_run)
+                    priority_task_ids.add(str(linked_id))
             scoped_tasks = [
                 item for item in scoped_tasks if _task_run(item) in allowed_runs
             ]
@@ -991,6 +1082,7 @@ def _read_source_snapshot(
                     run_scope=run_scope,
                     taskless_scope_by_run=taskless_scope_by_run,
                     taskless_allowed_runs=taskless_allowed_runs,
+                    relevant_task_ids=set(priority_task_ids),
                 )
                 findings = [
                     safe_decode_finding_row(row) for row in conn.execute(
@@ -1057,14 +1149,16 @@ def _read_source_snapshot(
                     findings.extend(safe_decode_finding_row(row) for row in relation_rows)
                 observations = []
                 for row in conn.execute(
-                    f"""SELECT * FROM observations
+                    f"""SELECT observation_id, run_id, task_id, workflow_id,
+                          source_type, source_ref, sha256, excerpt,
+                          created_at FROM observations
                         WHERE run_id IN ({placeholders})
                           AND ({source_scope_filter})
                         ORDER BY CASE WHEN task_id = ? THEN 0 ELSE 1 END,
                                  created_at DESC, observation_id DESC LIMIT ?""",
                     (*run_values, *source_scope_params, str(task_id), int(max_observations)),
                 ).fetchall():
-                    decoded = state_db._decode_observation_row(row)
+                    decoded = decode_observation_light(row)
                     observations.append({
                         "observation_id": decoded.get("observation_id"),
                         "run_id": decoded.get("run_id"),
@@ -1175,6 +1269,7 @@ def _read_source_snapshot(
                 workflow_id=str(workflow_id),
                 run_scope=run_scope,
                 taskless_scope_by_run=taskless_scope_by_run,
+                relevant_task_ids=set(priority_task_ids),
             ):
                 continue
             key = (str(decoded.get("run_id") or ""), str(decoded.get("task_id") or ""))
@@ -1205,6 +1300,7 @@ def _read_source_snapshot(
                 workflow_id=str(workflow_id),
                 run_scope=run_scope,
                 taskless_scope_by_run=taskless_scope_by_run,
+                relevant_task_ids=set(priority_task_ids),
             ):
                 continue
             key = (str(decoded.get("run_id") or ""), str(decoded.get("task_id") or ""))
@@ -1242,7 +1338,9 @@ def _read_source_snapshot(
             if referenced_ids:
                 observation_placeholders = ",".join("?" for _ in referenced_ids)
                 referenced_rows = conn.execute(
-                    f"""SELECT * FROM observations
+                    f"""SELECT observation_id, run_id, task_id, workflow_id,
+                          source_type, source_ref, sha256, excerpt,
+                          created_at FROM observations
                         WHERE observation_id IN ({observation_placeholders})
                           AND run_id IN ({placeholders})
                           AND ({source_scope_filter})
@@ -1257,7 +1355,7 @@ def _read_source_snapshot(
                     observation_id = str(row["observation_id"] or "")
                     if not observation_id or observation_id in existing_observation_ids:
                         continue
-                    decoded = state_db._decode_observation_row(row)
+                    decoded = decode_observation_light(row)
                     observations.append({
                         "observation_id": decoded.get("observation_id"),
                         "run_id": decoded.get("run_id"),
@@ -1349,6 +1447,7 @@ def _read_source_snapshot(
             workflow_id=str(workflow_id),
             run_scope=run_scope,
             taskless_scope_by_run=taskless_scope_by_run,
+            relevant_task_ids=set(priority_task_ids),
         )
     ]
     observations = [
@@ -1360,13 +1459,18 @@ def _read_source_snapshot(
             workflow_id=str(workflow_id),
             run_scope=run_scope,
             taskless_scope_by_run=taskless_scope_by_run,
+            relevant_task_ids=set(priority_task_ids),
         )
     ]
+    relevant_task_ids = sorted(
+        str(value) for value in priority_task_ids if value
+    )
     snapshot = {
         "task": task,
         "workflow": workflow,
         "tasks": scoped_tasks,
         "task_by_id": task_by_id,
+        "relevant_task_ids": relevant_task_ids,
         "taskless_scope_by_run": taskless_scope_by_run,
         "allowed_runs": allowed_runs,
         "run_scope": run_scope,
@@ -1507,6 +1611,7 @@ def _source_allowed(
     workflow_id: str,
     run_scope: str,
     taskless_scope_by_run: Optional[Mapping[str, Optional[str]]] = None,
+    relevant_task_ids: Optional[Set[str]] = None,
 ) -> bool:
     task_id = record.get("task_id")
     run_id = record.get("run_id")
@@ -1521,6 +1626,8 @@ def _source_allowed(
         if (collab_scope_for_task(task) or _task_run(task)) != run_scope:
             return False
         if run_id and _task_run(task) != str(run_id):
+            return False
+        if relevant_task_ids is not None and str(task_id) not in relevant_task_ids:
             return False
         return True
     if not (record.get("workflow_id") and run_id):
@@ -1590,12 +1697,21 @@ def _scope_task_for_node(
     )[-1]
 
 
-def _requirements(task: Mapping[str, Any], node: Mapping[str, Any]) -> List[str]:
+def _task_requirements(task: Mapping[str, Any]) -> List[str]:
     values: List[str] = []
     for key in ("acceptance_criteria", "requirements", "acceptance"):
         for value in _as_list(task.get(key)):
             values.append(str(value))
+    return list(dict.fromkeys(value for value in values if value.strip()))
+
+
+def _workflow_requirements(node: Mapping[str, Any]) -> List[str]:
+    values: List[str] = []
     for key in ("purpose", "rules"):
         for value in _as_list(node.get(key)):
             values.append(str(value))
     return list(dict.fromkeys(value for value in values if value.strip()))
+
+
+def _requirements(task: Mapping[str, Any], node: Mapping[str, Any]) -> List[str]:
+    return list(dict.fromkeys([*_task_requirements(task), *_workflow_requirements(node)]))
