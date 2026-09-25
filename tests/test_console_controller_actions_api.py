@@ -79,19 +79,42 @@ def test_api_workflow_controller_actions_query(console_actions_env):
     actions = res["actions"]
     assert len(actions) >= 1
     assert any("bin/herdr-task launch" in a["command_line"] for a in actions)
-    assert any(a["action_id"] == "dispatch_fix_loop" for a in actions)
+    assert any(a["action_id"].endswith(":dispatch_fix_loop") for a in actions)
 
 
 def test_api_controller_execute_action_launch(console_actions_env):
     payload = {
         "type": "launch",
+        "task_id": "wf-test-01-fix-1",
         "workflow_id": "wf-test-01",
         "stage": "implementation",
         "agent": "codex",
         "prompt": "修复测试缺陷",
     }
     with patch.object(c, "run") as mock_run:
-        mock_run.return_value = MagicMock(returncode=0, stdout='{"task_id": "new-t"}', stderr="")
+        mock_run.return_value = MagicMock(returncode=0, stdout='{"task_id": "wf-test-01-fix-1"}', stderr="")
         res = c.api_controller_execute_action(payload)
         assert res.get("ok") is True
+        assert res.get("task_id") == "wf-test-01-fix-1"
         assert mock_run.called
+        cmd_args = mock_run.call_args[0][0]
+        assert "--task-id" in cmd_args
+        assert "wf-test-01-fix-1" in cmd_args
+        assert "--workflow-id" in cmd_args
+        assert "wf-test-01" in cmd_args
+
+
+def test_api_controller_execute_action_force_pass_advance(console_actions_env):
+    payload = {
+        "type": "force_pass_advance",
+        "workflow_id": "wf-test-01",
+        "stage": "test",
+        "gate_node_id": "test",
+    }
+    with patch.object(c.herdr_kernel, "force_pass_gate") as mock_gate, patch.object(c, "manual_advance") as mock_adv:
+        mock_adv.return_value = {"ok": True, "advanced": True}
+        res = c.api_controller_execute_action(payload)
+        assert res.get("ok") is True
+        assert res.get("advanced") == {"ok": True, "advanced": True}
+        mock_gate.assert_called_once()
+        mock_adv.assert_called_once_with("wf-test-01")

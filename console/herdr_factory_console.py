@@ -643,12 +643,16 @@ def api_controller_execute_action(payload):
         supersedes = str(payload.get('supersedes') or '').strip()
         prompt = str(payload.get('prompt') or f'执行 {stage} 阶段任务').strip()
         goal = str(payload.get('goal') or prompt).strip()
+        task_id = str(payload.get('task_id') or '').strip()
+        if not task_id:
+            task_id = f'{wid}-{stage}-{int(time.time())}'
         wf = workflows().get(wid) or {}
         p = project_for_workflow(wid) or {}
         proj_root = str(payload.get('source') or p.get('project_root') or wf.get('project_root') or '.').strip()
 
         cmd = [
             str(HERDR_TASK), 'launch',
+            '--task-id', task_id,
             '--workflow-id', wid,
             '--stage', stage,
             '--source', proj_root,
@@ -659,14 +663,19 @@ def api_controller_execute_action(payload):
         if supersedes:
             cmd += ['--supersedes', supersedes]
         r = run(cmd, timeout=30, check=True)
-        return {'ok': True, 'output': r.stdout.strip()}
+        return {'ok': True, 'task_id': task_id, 'output': r.stdout.strip()}
 
-    elif act_type == 'force_pass':
-        gate = str(payload.get('gate_node_id') or payload.get('node') or '').strip()
-        note = str(payload.get('note') or '人类在控制台强制放行').strip()
+    elif act_type in ('force_pass', 'force_pass_advance'):
+        gate = str(payload.get('gate_node_id') or payload.get('node') or payload.get('stage') or '').strip()
+        note = str(payload.get('note') or '人类在控制台强制放行并推进').strip()
         op = str(payload.get('operator') or 'human').strip()
-        res = herdr_kernel.force_pass_gate(wid, gate_node_id=gate, note=note, operator=op)
-        return {'ok': True, 'result': res}
+        if gate:
+            herdr_kernel.force_pass_gate(wid, gate_node_id=gate, note=note, operator=op)
+        else:
+            for t in _blocked_verdict_tasks(wid):
+                herdr_kernel.force_pass_gate(wid, gate_node_id=t.get('stage') or t.get('node') or '', note=note, operator=op)
+        adv_res = manual_advance(wid)
+        return {'ok': True, 'advanced': adv_res}
 
     elif act_type == 'advance':
         return manual_advance(wid)
@@ -2867,9 +2876,15 @@ function copyCliCommand(cmd){
     document.body.removeChild(ta);
   }
 }
+function copyCliCommandByActionId(actId){
+  const act=(state.controllerActionsMap&&state.controllerActionsMap[actId])||{};
+  const cmd=act.command_line||actId;
+  copyCliCommand(cmd);
+}
 async function executeControllerAction(actId,wid){
   const act=(state.controllerActionsMap&&state.controllerActionsMap[actId])||{};
   const payload=act.api_payload||{type:actId,workflow_id:wid};
+  const endpoint=act.api_endpoint||'/api/controller/execute-action';
   const cmdLine=act.command_line||actId;
   showConfirmModal({
     title:'执行 Controller 解卡操作',
@@ -2879,7 +2894,7 @@ async function executeControllerAction(actId,wid){
     onConfirm:async()=>{
       try{
         toast('正在调度 Controller 执行…');
-        await api('/api/controller/execute-action',{
+        await api(endpoint,{
           method:'POST',
           body:JSON.stringify(payload)
         });
@@ -2943,7 +2958,7 @@ function updateAttentionHub(){
             <div class="task-meta" style="margin-bottom:5px;font-size:11px">${esc(act.description)}</div>
             <div style="display:flex;align-items:center;gap:6px;background:#05080c;padding:4px 8px;border-radius:6px;border:1px solid rgba(255,255,255,0.05);margin-bottom:5px">
               <code style="flex:1;font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#93c5fd;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(act.command_line)}</code>
-              <button class="mini" style="padding:2px 6px;font-size:10.5px" onclick="copyCliCommand('${esc(act.command_line)}')">📋 复制</button>
+              <button class="mini" style="padding:2px 6px;font-size:10.5px" onclick="copyCliCommandByActionId('${esc(act.action_id)}')">📋 复制</button>
             </div>
             <div style="display:flex;justify-content:flex-end">
               <button class="btn primary" style="padding:3px 10px;font-size:11.5px" onclick="executeControllerAction('${esc(act.action_id)}','${esc(state.workflowId)}')">🚀 一键执行</button>
@@ -3599,6 +3614,8 @@ function openControllerCockpitModal(){
   const stall=state.workflow&&state.workflow.stall;
   const acts=(state.controllerActionsData&&state.controllerActionsData.actions)||[];
   const blockers=(state.controllerActionsData&&state.controllerActionsData.blockers)||[];
+  if(!state.controllerActionsMap)state.controllerActionsMap={};
+  acts.forEach(a=>{state.controllerActionsMap[a.action_id]=a;});
   const curStage=state.workflow&&state.workflow.stages?state.workflow.stages.find(s=>['working','failed','blocked'].includes(s.status)):null;
   const stageName=curStage?(curStage.label||curStage.key):'就绪/空闲';
 
@@ -3606,11 +3623,11 @@ function openControllerCockpitModal(){
 
   let unblockSection='';
   if(acts.length){
-    const cards=acts.map(act=>`<div style="background:#0d131a;border:1px solid rgba(255,255,255,0.08);border-radius:8px;padding:10px;margin-bottom:10px"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px"><strong style="color:var(--text-primary);font-size:13px">${act.recommended?'⭐ ':''}${esc(act.title)}</strong><span class="badge ${act.category==='fix'?'working':act.category==='rework'?'waiting':'cleaned'}">${esc(act.category)}</span></div><div class="task-meta" style="font-size:12px;margin-bottom:6px">${esc(act.description)}</div><div style="display:flex;align-items:center;gap:6px;background:#05080c;padding:5px 8px;border-radius:6px;border:1px solid rgba(255,255,255,0.05);margin-bottom:8px"><code style="flex:1;font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#93c5fd;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(act.command_line)}</code><button class="mini" style="padding:2px 8px" onclick="copyCliCommand('${esc(act.command_line)}')">📋 复制命令</button></div><div style="display:flex;justify-content:flex-end"><button class="btn primary" style="padding:4px 12px;font-size:12px" onclick="closeModal();executeControllerAction('${esc(act.action_id)}','${esc(wid)}')">🚀 立即执行该方案</button></div></div>`).join('');
+    const cards=acts.map(act=>`<div style="background:#0d131a;border:1px solid rgba(255,255,255,0.08);border-radius:8px;padding:10px;margin-bottom:10px"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px"><strong style="color:var(--text-primary);font-size:13px">${act.recommended?'⭐ ':''}${esc(act.title)}</strong><span class="badge ${act.category==='fix'?'working':act.category==='rework'?'waiting':'cleaned'}">${esc(act.category)}</span></div><div class="task-meta" style="font-size:12px;margin-bottom:6px">${esc(act.description)}</div><div style="display:flex;align-items:center;gap:6px;background:#05080c;padding:5px 8px;border-radius:6px;border:1px solid rgba(255,255,255,0.05);margin-bottom:8px"><code style="flex:1;font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#93c5fd;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(act.command_line)}</code><button class="mini" style="padding:2px 8px" onclick="copyCliCommandByActionId('${esc(act.action_id)}')">📋 复制命令</button></div><div style="display:flex;justify-content:flex-end"><button class="btn primary" style="padding:4px 12px;font-size:12px" onclick="closeModal();executeControllerAction('${esc(act.action_id)}','${esc(wid)}')">🚀 立即执行该方案</button></div></div>`).join('');
     unblockSection=`<div style="margin-bottom:16px"><div style="font-weight:600;font-size:13px;margin-bottom:8px;color:var(--text-primary)">⚡ 针对当前卡点的推荐解卡动作</div>${cards}</div>`;
   }
 
-  let cheatSheet=`<div style="background:#090d13;border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:12px 14px"><div style="font-weight:600;font-size:13px;margin-bottom:8px;color:var(--text-primary)">🛠️ Controller 常用底层操作速查手册</div><div class="task-meta" style="display:grid;gap:8px;font-size:11.5px"><div><code>bin/herdr-task launch --workflow-id ${esc(wid)} --stage &lt;stage&gt; --supersedes &lt;task-id&gt; --agent &lt;agent&gt;</code><div style="margin-top:2px;color:var(--text-secondary)">作废指定卡点旧任务，换执行者重派新任务</div></div><div><code>bin/herdr-task advance --workflow-id ${esc(wid)}</code><div style="margin-top:2px;color:var(--text-secondary)">检查并强制推进工作流至下一阶段</div></div><div><code>bin/herdr-task clear-escalation --task-id &lt;task-id&gt;</code><div style="margin-top:2px;color:var(--text-secondary)">撤销机器终化升级锁，解除阻断重新流转</div></div><div><code>bin/herdr-task steer --task-id &lt;task-id&gt; --instruction "提示内容"</code><div style="margin-top:2px;color:var(--text-secondary)">向正在执行的智能体工位注入实时插话指导</div></div></div></div>`;
+  let cheatSheet=`<div style="background:#090d13;border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:12px 14px"><div style="font-weight:600;font-size:13px;margin-bottom:8px;color:var(--text-primary)">🛠️ Controller 常用底层操作速查手册</div><div class="task-meta" style="display:grid;gap:8px;font-size:11.5px"><div><code>bin/herdr-task launch --task-id &lt;new-task-id&gt; --workflow-id ${esc(wid)} --stage &lt;stage&gt; --source . --agent &lt;agent&gt; --goal &lt;goal&gt; --prompt &lt;prompt&gt; --supersedes &lt;old-task-id&gt;</code><div style="margin-top:2px;color:var(--text-secondary)">作废指定卡点旧任务，换执行者重派新任务</div></div><div><code>bin/herdr-task advance ${esc(wid)}</code><div style="margin-top:2px;color:var(--text-secondary)">检查并强制推进工作流至下一阶段</div></div><div><code>bin/herdr-task clear-escalation &lt;task-id&gt;</code><div style="margin-top:2px;color:var(--text-secondary)">撤销机器终化升级锁，解除阻断重新流转</div></div><div><code>bin/herdr-task steer &lt;task-id&gt; "提示内容"</code><div style="margin-top:2px;color:var(--text-secondary)">向正在执行的智能体工位注入实时插话指导</div></div></div></div>`;
 
   const html=`<div style="line-height:1.5;max-height:75vh;overflow-y:auto;padding-right:4px">${statusCard}${unblockSection}${cheatSheet}</div>`;
   openModal(`Controller 调度与解卡控制台 · ${wid}`,html);

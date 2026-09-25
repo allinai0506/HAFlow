@@ -13,7 +13,15 @@ from herdr.controller_actions import (
     resolve_workflow_blockers,
     generate_controller_actions,
     build_cli_command,
+    next_replacement_id,
 )
+
+
+def test_next_replacement_id_lineage():
+    assert next_replacement_id("wf-01-test") == "wf-01-test-r2"
+    assert next_replacement_id("wf-01-test-r2") == "wf-01-test-r3"
+    assert next_replacement_id("wf-01-test-r9") == "wf-01-test-r10"
+    assert next_replacement_id("", "fallback-r2") == "fallback-r2"
 
 
 def test_resolve_workflow_blockers_excludes_superseded():
@@ -68,20 +76,30 @@ def test_generate_actions_for_test_failure():
 
     # Should offer Fix-Loop, Relaunch with alternative agent, and Gate Bypass
     action_ids = [a.action_id for a in actions]
-    assert "dispatch_fix_loop" in action_ids
-    assert "relaunch_with_agent" in action_ids
-    assert "force_pass_advance" in action_ids
+    assert "wf-001-test-r1:dispatch_fix_loop" in action_ids
+    assert "wf-001-test-r1:retest_with_agent" in action_ids
+    assert "wf-001-test-r1:force_pass_advance" in action_ids
 
-    fix_act = next(a for a in actions if a.action_id == "dispatch_fix_loop")
+    fix_act = next(a for a in actions if a.action_id.endswith(":dispatch_fix_loop"))
+    assert "--task-id wf-001-impl-fix" in fix_act.command_line
     assert "--stage implementation" in fix_act.command_line
     assert "--workflow-id wf-001" in fix_act.command_line
     assert fix_act.category == "fix"
     assert fix_act.recommended is True
+    assert fix_act.api_payload["task_id"] == "wf-001-impl-fix"
 
-    retest_act = next(a for a in actions if a.action_id == "relaunch_with_agent")
+    retest_act = next(a for a in actions if a.action_id.endswith(":retest_with_agent"))
+    assert "--task-id wf-001-test-r2" in retest_act.command_line
     assert "--stage test" in retest_act.command_line
     assert "--supersedes wf-001-test-r1" in retest_act.command_line
     assert retest_act.category == "rework"
+    assert "换执行者" in retest_act.title
+    assert retest_act.api_payload["task_id"] == "wf-001-test-r2"
+
+    advance_act = next(a for a in actions if a.action_id.endswith(":force_pass_advance"))
+    assert "bin/herdr-task advance wf-001" in advance_act.command_line
+    assert advance_act.api_payload["type"] == "force_pass_advance"
+    assert advance_act.is_destructive is True
 
 
 def test_generate_actions_for_plan_rework_spin():
@@ -101,17 +119,20 @@ def test_generate_actions_for_plan_rework_spin():
     }
     actions = generate_controller_actions(task, workflow, project_root="/path/to/project")
     action_ids = [a.action_id for a in actions]
-    assert "relaunch_with_agent" in action_ids
-    assert "force_pass_advance" in action_ids
+    assert "wf-001-plan-spin:relaunch_with_agent" in action_ids
+    assert "wf-001-plan-spin:force_pass_advance" in action_ids
 
-    relaunch = next(a for a in actions if a.action_id == "relaunch_with_agent")
+    relaunch = next(a for a in actions if a.action_id.endswith(":relaunch_with_agent"))
+    assert "--task-id wf-001-plan-spin-r2" in relaunch.command_line
     assert "--supersedes wf-001-plan-spin" in relaunch.command_line
     # Suggested agent should not be the failed one (qodercli)
     assert "--agent qodercli" not in relaunch.command_line
+    assert "换执行者" in relaunch.title
 
 
 def test_build_cli_command_formatting():
     cmd = build_cli_command("launch", {
+        "task-id": "wf-100-impl",
         "workflow-id": "wf-100",
         "stage": "implementation",
         "agent": "codex",
@@ -119,8 +140,16 @@ def test_build_cli_command_formatting():
         "prompt": "修复缺陷: A & B",
     })
     assert cmd.startswith("bin/herdr-task launch")
+    assert "--task-id wf-100-impl" in cmd
     assert "--workflow-id wf-100" in cmd
     assert "--stage implementation" in cmd
     assert "--agent codex" in cmd
     assert "--supersedes wf-100-old" in cmd
-    assert '--prompt "修复缺陷: A & B"' in cmd
+    assert "'修复缺陷: A & B'" in cmd
+
+    # Test positional arguments
+    adv_cmd = build_cli_command("advance", positionals=["wf-100"])
+    assert adv_cmd == "bin/herdr-task advance wf-100"
+
+    clear_cmd = build_cli_command("clear-escalation", positionals=["task-123"])
+    assert clear_cmd == "bin/herdr-task clear-escalation task-123"
