@@ -995,6 +995,37 @@ def test_max_chars_above_storage_limit_fails_fast_before_compilation(tmp_path: P
         _compile(db, target, "developer", config={"max_chars": MAX_STORAGE_CONTEXT_CHARS + 1})
 
 
+def test_source_version_covers_list_overflow_beyond_first_100():
+    from herdr.context_sources import _bounded_source_value, _hash, _source_projection
+
+    assert isinstance(_bounded_source_value([{"i": n} for n in range(100)]), list)
+    overflowed = _bounded_source_value([{"i": n} for n in range(101)])
+    assert overflowed["total_count"] == 101
+    assert len(overflowed["first_100"]) == 100
+    assert len(overflowed["overflow_sha256"]) == 64
+
+    def snapshot_with(tasks):
+        return {
+            "task": {"task_id": "t", "workflow_id": "wf"},
+            "workflow": {"workflow_id": "wf"},
+            "tasks": tasks,
+            "events": [],
+            "findings": [],
+            "observations": [],
+            "collaborations": [],
+            "evals": [],
+        }
+
+    base_tasks = [
+        {"task_id": f"task-{index}", "status": "working"} for index in range(101)
+    ]
+    before = _hash(_source_projection(snapshot_with(base_tasks)))
+    changed = [dict(item) for item in base_tasks]
+    changed[100] = dict(changed[100], status="blocked", blocker="late blocker")
+    after = _hash(_source_projection(snapshot_with(changed)))
+    assert before != after
+
+
 def test_relevant_write_followed_by_recompile_marks_old_candidate_stale(tmp_path: Path):
     db = tmp_path / "state.db"
     _seed_workflow(db)
@@ -1639,6 +1670,88 @@ def test_handoff_survives_non_handoff_collaboration_window_noise(tmp_path: Path)
         item.get("source_ref") == f"collaboration:{handoff['event_id']}"
         for item in context.handoffs
     )
+
+
+def test_latest_incoming_handoff_survives_item_budget_trimming(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db, workflow_id="wf-handoff-budget", scope="scope-a")
+    source = _seed_task(db, _task(
+        "task-handoff-budget-source", workflow_id="wf-handoff-budget",
+        scope="scope-a", node="implementation",
+    ))
+    target = _seed_task(db, _task(
+        "task-handoff-budget-target", workflow_id="wf-handoff-budget",
+        scope="scope-a", node="review",
+    ))
+    handoff = state_db.create_collaboration_event(
+        {
+            "run_id": "scope-a", "workflow_id": target["workflow_id"],
+            "from_task_id": source["task_id"], "to_task_id": target["task_id"],
+            "type": "HANDOFF", "source_fact_id": "fact-budget-handoff",
+        },
+        db_path=db,
+    )
+    for index in range(30):
+        state_db.upsert_trajectory_finding(
+            _finding(
+                target["run_id"], f"fnd-budget-noise-{index}",
+                task_id=target["task_id"], summary=f"noise {index}",
+            ),
+            db_path=db,
+        )
+    context = _compile(db, target, "reviewer", config={"max_items": 6})
+    total = sum(
+        len(getattr(context, field)) for field in (
+            "completed", "artifacts", "evidence", "findings", "decisions",
+            "blockers", "open_questions", "verification", "handoffs",
+        )
+    )
+    assert total <= 6
+    assert any(
+        item.get("source_ref") == f"collaboration:{handoff['event_id']}"
+        for item in context.handoffs
+    )
+
+
+def test_malformed_collaboration_refs_fail_closed_without_breaking_compile(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db, workflow_id="wf-collab-corrupt", scope="scope-a")
+    source = _seed_task(db, _task(
+        "task-collab-corrupt-source", workflow_id="wf-collab-corrupt",
+        scope="scope-a", node="implementation",
+    ))
+    target = _seed_task(db, _task(
+        "task-collab-corrupt-target", workflow_id="wf-collab-corrupt",
+        scope="scope-a", node="review",
+    ))
+    handoff = state_db.create_collaboration_event(
+        {
+            "run_id": "scope-a", "workflow_id": target["workflow_id"],
+            "from_task_id": source["task_id"], "to_task_id": target["task_id"],
+            "type": "HANDOFF", "source_fact_id": "fact-corrupt-handoff",
+            "artifact_refs": ["artifact-a"],
+        },
+        db_path=db,
+    )
+    conn = state_db.get_db_connection(db)
+    try:
+        conn.execute(
+            "UPDATE collaboration_events SET artifact_refs_json = '{', evidence_refs_json = '\"x\"' WHERE event_id = ?",
+            (handoff["event_id"],),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    # A damaged refs column must fail closed to [] with a truncation marker
+    # instead of raising JSONDecodeError on every later compile.
+    context = _compile(db, target, "reviewer")
+    matches = [
+        item for item in context.handoffs
+        if item.get("source_ref") == f"collaboration:{handoff['event_id']}"
+    ]
+    assert len(matches) == 1
+    assert matches[0].get("value", {}).get("artifact_refs") == []
+    assert matches[0].get("value", {}).get("source_truncated") is True
 
 
 def test_parallel_branch_facts_are_excluded_from_relevant_scope(tmp_path: Path):

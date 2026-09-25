@@ -1848,6 +1848,21 @@ def _finish_intervention(
 
 
 def _decode_collaboration_row(row) -> Dict[str, Any]:
+    def _decode_ref_list(raw: Any) -> Tuple[List[Any], bool]:
+        """Decode a refs JSON column; corrupt payloads fail closed to []."""
+        if raw is None or raw == "":
+            return [], False
+        try:
+            decoded = json.loads(raw)
+        except (TypeError, ValueError):
+            return [], True
+        if isinstance(decoded, list):
+            return decoded, False
+        return [], True
+
+    artifact_refs, artifacts_corrupt = _decode_ref_list(row["artifact_refs_json"])
+    evidence_refs, evidence_corrupt = _decode_ref_list(row["evidence_refs_json"])
+    context_refs, context_corrupt = _decode_ref_list(row["context_refs_json"])
     return {
         "event_id": row["event_id"],
         "identity_key": row["identity_key"],
@@ -1861,9 +1876,13 @@ def _decode_collaboration_row(row) -> Dict[str, Any]:
         "to_pane_id": row["to_pane_id"],
         "type": row["type"],
         "summary": row["summary"] or "",
-        "artifact_refs": json.loads(row["artifact_refs_json"] or "[]"),
-        "evidence_refs": json.loads(row["evidence_refs_json"] or "[]"),
-        "context_refs": json.loads(row["context_refs_json"] or "[]"),
+        "artifact_refs": artifact_refs,
+        "evidence_refs": evidence_refs,
+        "context_refs": context_refs,
+        # A corrupt refs column must never break compilation for every later
+        # context: refs fail closed to [] and the corruption is marked so the
+        # source version still moves instead of silently matching.
+        "source_truncated": bool(artifacts_corrupt or evidence_corrupt or context_corrupt),
         "requires_response": bool(row["requires_response"]),
         "status": row["status"],
         "source_fact_id": row["source_fact_id"],

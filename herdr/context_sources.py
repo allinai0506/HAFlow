@@ -1555,7 +1555,23 @@ def _bounded_source_value(value: Any, depth: int = 0) -> Any:
             "original_chars": len(value),
         }
     if isinstance(value, list):
-        return [_bounded_source_value(item, depth + 1) for item in value[:100]]
+        if len(value) <= 100:
+            return [_bounded_source_value(item, depth + 1) for item in value]
+        # Bounded projection + overflow digest: the version hash stays small
+        # but every relevant source still moves it. A silent [:100] would let
+        # a change past item 100 (e.g. a dependency's blocker) through with
+        # an unchanged source_version, defeating the save-time TOCTOU guard.
+        head = [_bounded_source_value(item, depth + 1) for item in value[:100]]
+        tail_canonical = json.dumps(
+            [_bounded_source_value(item, depth + 1) for item in value[100:]],
+            ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            default=str,
+        )
+        return {
+            "first_100": head,
+            "total_count": len(value),
+            "overflow_sha256": hashlib.sha256(tail_canonical.encode("utf-8")).hexdigest(),
+        }
     if isinstance(value, dict):
         return {
             str(key): _bounded_source_value(item, depth + 1)

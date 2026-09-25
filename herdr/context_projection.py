@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from .context_models import (
     DEFAULT_MAX_CHARS,
@@ -93,14 +93,72 @@ def _fit_budget(context: WorkingContext, config: Mapping[str, Any]) -> WorkingCo
     max_chars = int(config["max_chars"])
     max_items = int(config["max_items"])
     caps = config["max_items_per_kind"]
+
+    def _created_at(item: Any) -> float:
+        try:
+            return float(item.get("created_at") or 0.0)
+        except (TypeError, ValueError, AttributeError):
+            return 0.0
+
+    def _latest_incoming_handoff(items: Sequence[Any]) -> Any:
+        """Return the single mandatory incoming handoff, if any is present."""
+        best = None
+        for item in items:
+            if not isinstance(item, Mapping):
+                continue
+            if not bool((item.get("metadata") or {}).get("incoming")):
+                continue
+            if best is None or (
+                _created_at(item),
+                str(item.get("source_ref") or ""),
+            ) > (
+                _created_at(best),
+                str(best.get("source_ref") or ""),
+            ):
+                best = item
+        return best
+
     # Per-kind caps first, then global priority trimming.
     values = {}
     for field_name in (
         "completed", "artifacts", "evidence", "findings", "decisions", "blockers",
         "open_questions", "verification", "handoffs",
     ):
-        values[field_name] = list(getattr(context, field_name))[: int(caps.get(field_name, 0))]
+        cap = int(caps.get(field_name, 0))
+        items = list(getattr(context, field_name))
+        # The latest incoming handoff is mandatory for proving the current
+        # handoff fact downstream: keep one slot for it even when the
+        # per-kind cap would drop all handoffs. It still counts toward
+        # max_items, and an over-budget mandatory set fails closed below.
+        if field_name == "handoffs":
+            retained = _latest_incoming_handoff(items)
+            if retained is not None:
+                cap = max(cap, 1)
+        post = items[:cap]
+        if (
+            field_name == "handoffs"
+            and retained is not None
+            and all(id(candidate) != id(retained) for candidate in post)
+        ):
+            post = [retained, *post]
+        values[field_name] = post
+    retained_handoff = _latest_incoming_handoff(values["handoffs"])
+    retained_ids = {id(retained_handoff)} if retained_handoff is not None else set()
     context = WorkingContext(**{**context.to_mapping(), **values})
+
+    def _drop_last_trimmable(field_name: str) -> bool:
+        items = list(values[field_name])
+        keep = retained_ids if field_name == "handoffs" else set()
+        for index in range(len(items) - 1, -1, -1):
+            if id(items[index]) not in keep:
+                del items[index]
+                values[field_name] = items
+                return True
+        return False
+
+    def _rebuild() -> None:
+        nonlocal context
+        context = WorkingContext(**{**context.to_mapping(), **values})
 
     priority = [
         "completed", "handoffs", "artifacts", "findings", "evidence", "decisions",
@@ -111,9 +169,8 @@ def _fit_budget(context: WorkingContext, config: Mapping[str, Any]) -> WorkingCo
         for field_name in priority:
             if field_name in protected:
                 continue
-            if getattr(context, field_name):
-                values[field_name] = list(getattr(context, field_name))[:-1]
-                context = WorkingContext(**{**context.to_mapping(), **values})
+            if _drop_last_trimmable(field_name):
+                _rebuild()
                 break
         else:
             break
@@ -133,8 +190,11 @@ def _fit_budget(context: WorkingContext, config: Mapping[str, Any]) -> WorkingCo
         if size(context) <= max_chars:
             break
         while getattr(context, field_name) and size(context) > max_chars:
-            values[field_name] = list(getattr(context, field_name))[:-1]
-            context = WorkingContext(**{**context.to_mapping(), **values})
+            if not _drop_last_trimmable(field_name):
+                break
+            _rebuild()
+            if size(context) <= max_chars:
+                break
     if size(context) > max_chars:
         context = WorkingContext(**{
             **context.to_mapping(),

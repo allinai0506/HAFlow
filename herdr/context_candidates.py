@@ -667,6 +667,8 @@ def _handoff_candidates(
             "artifact_refs": list(event.get("artifact_refs") or []),
             "evidence_refs": evidence_refs,
         }
+        if event.get("source_truncated") is True:
+            value["source_truncated"] = True
         candidates.append(_item(
             "handoff",
             value,
