@@ -73,8 +73,7 @@ def resolve_workflow_blockers(tasks: List[Dict[str, Any]], workflow: Dict[str, A
 
         is_blocked = (
             verdict == "blocked"
-            or status in {"blocked", "failed"}
-            or (status == "rework" and t.get("rework_count", 0) >= 1)
+            or status in {"blocked", "failed", "rework"}
             or has_blocker_reason
         )
 
