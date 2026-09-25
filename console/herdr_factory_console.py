@@ -2228,11 +2228,13 @@ pre { margin: 0; white-space: pre-wrap; word-break: break-word; font-family: ui-
         </div>
       </div>
       <div class="actions">
+        <button class="btn factory-action" onclick="openControllerCockpitModal()" title="Controller 调度与解卡控制台">🎮 Controller 控制台</button>
         <button class="btn factory-action" onclick="advanceStage()" title="推进当前阶段">进入下一阶段</button>
         <button class="btn factory-action" onclick="showTemplateLibrary()">模板库</button>
         <div class="dropdown factory-action" id="moreDropdown">
           <button class="btn icon-only" onclick="toggleMoreMenu(event)" aria-label="更多操作" title="更多操作">···</button>
           <div class="dropdown-menu">
+            <button class="dropdown-item" onclick="closeMoreMenu();openControllerCockpitModal()">🎮 Controller 控制台</button>
             <button class="dropdown-item" onclick="closeMoreMenu();createCandidate()">创建候选分支</button>
             <button class="dropdown-item" onclick="closeMoreMenu();runPreflight()">执行者自检</button>
             <button class="dropdown-item" onclick="closeMoreMenu();showArchive()">任务归档</button>
@@ -3590,6 +3592,28 @@ async function createCandidate(){
       }catch(e){toast(e.message,true)}
     }
   });
+}
+function openControllerCockpitModal(){
+  const w=state.workflow&&state.workflow.workflow;
+  const wid=state.workflowId||(w&&w.workflow_id)||'未选择工作流';
+  const stall=state.workflow&&state.workflow.stall;
+  const acts=(state.controllerActionsData&&state.controllerActionsData.actions)||[];
+  const blockers=(state.controllerActionsData&&state.controllerActionsData.blockers)||[];
+  const curStage=state.workflow&&state.workflow.stages?state.workflow.stages.find(s=>['working','failed','blocked'].includes(s.status)):null;
+  const stageName=curStage?(curStage.label||curStage.key):'就绪/空闲';
+
+  let statusCard=`<div style="background:#090d13;border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:12px 14px;margin-bottom:14px"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px"><span style="font-weight:600;font-size:13px;color:var(--text-primary)">调度状态与等待条件</span><span class="badge ${stall&&stall.is_stalled?'failed':'cleaned'}">${stall&&stall.is_stalled?'推进停滞':'调度运转中'}</span></div><div class="task-meta" style="line-height:1.6"><div>当前关注阶段: <strong style="color:var(--text-primary)">${esc(stageName)}</strong> · 活跃卡点: <strong style="color:${blockers.length?'var(--accent)':'var(--good)'}">${blockers.length} 项</strong></div><div style="margin-top:4px">${stall&&stall.is_stalled?`⚠️ 停滞原因: ${esc(stall.message)}`:'✓ Controller 后台轮询正常，正在监控 DAG 拓扑门禁'}</div></div></div>`;
+
+  let unblockSection='';
+  if(acts.length){
+    const cards=acts.map(act=>`<div style="background:#0d131a;border:1px solid rgba(255,255,255,0.08);border-radius:8px;padding:10px;margin-bottom:10px"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px"><strong style="color:var(--text-primary);font-size:13px">${act.recommended?'⭐ ':''}${esc(act.title)}</strong><span class="badge ${act.category==='fix'?'working':act.category==='rework'?'waiting':'cleaned'}">${esc(act.category)}</span></div><div class="task-meta" style="font-size:12px;margin-bottom:6px">${esc(act.description)}</div><div style="display:flex;align-items:center;gap:6px;background:#05080c;padding:5px 8px;border-radius:6px;border:1px solid rgba(255,255,255,0.05);margin-bottom:8px"><code style="flex:1;font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#93c5fd;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(act.command_line)}</code><button class="mini" style="padding:2px 8px" onclick="copyCliCommand('${esc(act.command_line)}')">📋 复制命令</button></div><div style="display:flex;justify-content:flex-end"><button class="btn primary" style="padding:4px 12px;font-size:12px" onclick="closeModal();executeControllerAction('${esc(act.action_id)}','${esc(wid)}')">🚀 立即执行该方案</button></div></div>`).join('');
+    unblockSection=`<div style="margin-bottom:16px"><div style="font-weight:600;font-size:13px;margin-bottom:8px;color:var(--text-primary)">⚡ 针对当前卡点的推荐解卡动作</div>${cards}</div>`;
+  }
+
+  let cheatSheet=`<div style="background:#090d13;border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:12px 14px"><div style="font-weight:600;font-size:13px;margin-bottom:8px;color:var(--text-primary)">🛠️ Controller 常用底层操作速查手册</div><div class="task-meta" style="display:grid;gap:8px;font-size:11.5px"><div><code>bin/herdr-task launch --workflow-id ${esc(wid)} --stage &lt;stage&gt; --supersedes &lt;task-id&gt; --agent &lt;agent&gt;</code><div style="margin-top:2px;color:var(--text-secondary)">作废指定卡点旧任务，换 Agent 重派新任务</div></div><div><code>bin/herdr-task advance --workflow-id ${esc(wid)}</code><div style="margin-top:2px;color:var(--text-secondary)">检查并强制推进工作流至下一阶段</div></div><div><code>bin/herdr-task clear-escalation --task-id &lt;task-id&gt;</code><div style="margin-top:2px;color:var(--text-secondary)">撤销机器终化升级锁，解除阻断重新流转</div></div><div><code>bin/herdr-task steer --task-id &lt;task-id&gt; --instruction "提示内容"</code><div style="margin-top:2px;color:var(--text-secondary)">向正在执行的智能体工位注入实时插话指导</div></div></div></div>`;
+
+  const html=`<div style="line-height:1.5;max-height:75vh;overflow-y:auto;padding-right:4px">${statusCard}${unblockSection}${cheatSheet}</div>`;
+  openModal(`Controller 调度与解卡控制台 · ${wid}`,html);
 }
 async function advanceStage(){
   showConfirmModal({
