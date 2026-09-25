@@ -92,25 +92,30 @@ class HarnessRunMetrics:
 def _latest_context_pack_bytes(row: Optional[Dict[str, Any]]) -> Optional[int]:
     if row is None:
         return None
-    payload = {
-        "context_id": row["context_id"],
-        "run_id": row["run_id"],
-        "task_id": row["task_id"],
-        "workflow_id": row["workflow_id"],
-        "goal": row["goal"],
-        "current_state": json.loads(row["current_state_json"] or "{}"),
-        "completed": json.loads(row["completed_json"] or "[]"),
-        "verified_facts": json.loads(row["verified_facts_json"] or "[]"),
-        "important_findings": json.loads(row["important_findings_json"] or "[]"),
-        "evidence_refs": json.loads(row["evidence_refs_json"] or "[]"),
-        "artifact_refs": json.loads(row["artifact_refs_json"] or "[]"),
-        "open_issues": json.loads(row["open_issues_json"] or "[]"),
-        "next_focus": json.loads(row["next_focus_json"] or "[]"),
-        "source_event_sequence": int(row["source_event_sequence"] or 0),
-        "metadata": json.loads(row["metadata_json"] or "{}"),
-        "created_at": float(row["created_at"]),
-    }
-    return len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    try:
+        payload = {
+            "context_id": row["context_id"],
+            "run_id": row["run_id"],
+            "task_id": row["task_id"],
+            "workflow_id": row["workflow_id"],
+            "goal": row["goal"],
+            "current_state": json.loads(row["current_state_json"] or "{}"),
+            "completed": json.loads(row["completed_json"] or "[]"),
+            "verified_facts": json.loads(row["verified_facts_json"] or "[]"),
+            "important_findings": json.loads(row["important_findings_json"] or "[]"),
+            "evidence_refs": json.loads(row["evidence_refs_json"] or "[]"),
+            "artifact_refs": json.loads(row["artifact_refs_json"] or "[]"),
+            "open_issues": json.loads(row["open_issues_json"] or "[]"),
+            "next_focus": json.loads(row["next_focus_json"] or "[]"),
+            "source_event_sequence": int(row["source_event_sequence"] or 0),
+            "metadata": json.loads(row["metadata_json"] or "{}"),
+            "created_at": float(row["created_at"]),
+        }
+        return len(json.dumps(
+            payload, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8"))
+    except (TypeError, ValueError):
+        return None
 
 
 def _latest_working_context_bytes(row: Optional[Dict[str, Any]]) -> Optional[int]:

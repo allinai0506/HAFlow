@@ -174,7 +174,10 @@ def _observation_candidates(
             source_task=str(observation.get("task_id") or "") or None,
             source_run=str(observation.get("run_id") or "") or None,
             created_at=observation.get("created_at"),
-            metadata={"observation_id": observation_id},
+            metadata={
+                "observation_id": observation_id,
+                "dependency_relevant": bool(observation.get("referenced_by_source")),
+            },
         ))
     return result
 

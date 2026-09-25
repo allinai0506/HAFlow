@@ -480,6 +480,35 @@ def test_storage_normalizes_non_dict_verification_mapping(tmp_path: Path):
     assert saved["verification"][0]["value"]["passed"] is False
 
 
+def test_context_item_normalizes_nested_mappings_and_validates_evidence_refs():
+    from collections import UserDict
+    from herdr.context_models import ContextItem
+
+    item = ContextItem(
+        kind="evidence",
+        value=UserDict({"nested": UserDict({"secret": "value"})}),
+        source_ref="observation:o1",
+        evidence_refs=("observation:o2",),
+        metadata=UserDict({"source": UserDict({"kind": "test"})}),
+    )
+    assert json.dumps(item.to_mapping(), ensure_ascii=False)
+    assert isinstance(item.value, dict)
+    assert isinstance(item.metadata, dict)
+
+    with pytest.raises(ValueError, match="evidence_refs"):
+        ContextItem(
+            kind="evidence", value={}, source_ref="observation:o1",
+            evidence_refs="observation:o2",
+        )
+    with pytest.raises(ValueError, match="evidence_refs"):
+        ContextItem.from_mapping({
+            "kind": "evidence", "value": {}, "source_ref": "observation:o1",
+            "evidence_refs": "observation:o2",
+        })
+    with pytest.raises(TypeError, match="mapping"):
+        ContextItem.from_mapping([])
+
+
 def test_storage_rejects_incomplete_aggregate_source_refs(tmp_path: Path):
     db = tmp_path / "state.db"
     _seed_workflow(db)
@@ -1169,6 +1198,192 @@ def test_wrong_workflow_finding_noise_cannot_starve_target_finding(tmp_path: Pat
         state_db.upsert_trajectory_finding(foreign_finding, db_path=db)
     context = _compile(db, target, "developer")
     assert "finding:fnd-valid-window" in context.source_refs
+
+
+def test_event_artifact_survives_same_scope_event_window_noise(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db, workflow_id="wf-event-window-semantic", scope="scope-a")
+    target = _seed_task(db, _task(
+        "task-event-window-semantic", workflow_id="wf-event-window-semantic", scope="scope-a"
+    ))
+    state_db.record_trajectory_event(
+        {
+            "run_id": target["run_id"], "task_id": target["task_id"],
+            "workflow_id": target["workflow_id"], "event_type": "artifact_created",
+            "payload": {"artifact": {"ref": "semantic-window-artifact"}}, "timestamp": 1.0,
+        },
+        db_path=db,
+    )
+    for index in range(301):
+        state_db.record_trajectory_event(
+            {
+                "run_id": target["run_id"], "task_id": target["task_id"],
+                "workflow_id": target["workflow_id"], "event_type": "task_started",
+                "payload": {"index": index}, "timestamp": float(index + 2),
+            },
+            db_path=db,
+        )
+    context = _compile(db, target, "developer")
+    assert any(
+        item.get("value", {}).get("ref") == "semantic-window-artifact"
+        for item in context.artifacts
+    )
+
+
+def test_active_finding_survives_closed_same_scope_window_noise(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db, workflow_id="wf-finding-window-semantic", scope="scope-a")
+    target = _seed_task(db, _task(
+        "task-finding-window-semantic", workflow_id="wf-finding-window-semantic", scope="scope-a"
+    ))
+    sibling = _seed_task(db, _task(
+        "task-finding-window-sibling", workflow_id="wf-finding-window-semantic", scope="scope-a"
+    ))
+    active = _finding(
+        target["run_id"], "fnd-active-window", task_id=target["task_id"],
+        summary="active target finding", created_at=1.0,
+    )
+    active["workflow_id"] = target["workflow_id"]
+    state_db.upsert_trajectory_finding(active, db_path=db)
+    for index in range(500):
+        noise = _finding(
+            sibling["run_id"], f"fnd-closed-window-{index}",
+            task_id=sibling["task_id"], created_at=float(index + 2),
+        )
+        noise["workflow_id"] = sibling["workflow_id"]
+        noise["status"] = "closed"
+        state_db.upsert_trajectory_finding(noise, db_path=db)
+    context = _compile(db, target, "developer")
+    assert "finding:fnd-active-window" in context.source_refs
+
+
+def test_referenced_observation_survives_sibling_observation_window_noise(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db, workflow_id="wf-observation-window-semantic", scope="scope-a")
+    target = _seed_task(db, _task(
+        "task-observation-window-semantic", workflow_id="wf-observation-window-semantic", scope="scope-a"
+    ))
+    sibling = _seed_task(db, _task(
+        "task-observation-window-sibling", workflow_id="wf-observation-window-semantic", scope="scope-a"
+    ))
+    referenced = create_observation(
+        run_id=target["run_id"], task_id=target["task_id"],
+        workflow_id=target["workflow_id"], source_type="verification",
+        source_ref="verification:referenced-window", content="referenced",
+        created_at=1.0, store=ObservationStore(db),
+    )
+    state_db.upsert_trajectory_finding(
+        _finding(
+            target["run_id"], "fnd-observation-window",
+            task_id=target["task_id"],
+            evidence=[{"observation_id": referenced.observation_id}],
+        ),
+        db_path=db,
+    )
+    for index in range(301):
+        create_observation(
+            run_id=sibling["run_id"], task_id=sibling["task_id"],
+            workflow_id=sibling["workflow_id"], source_type="agent_log",
+            source_ref=f"pane:sibling-window-{index}", content="noise",
+            created_at=float(index + 2), store=ObservationStore(db),
+        )
+    context = _compile(db, target, "developer")
+    assert any(
+        item.get("source_ref") == f"observation:{referenced.observation_id}"
+        for item in context.evidence
+    )
+
+
+def test_taskless_referenced_observation_survives_scope_window_noise(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db, workflow_id="wf-taskless-observation-window", scope="scope-a")
+    target = _seed_task(db, _task(
+        "task-taskless-observation-window", workflow_id="wf-taskless-observation-window", scope="scope-a"
+    ))
+    sibling = _seed_task(db, _task(
+        "task-taskless-observation-sibling", workflow_id="wf-taskless-observation-window", scope="scope-a"
+    ))
+    referenced = create_observation(
+        run_id=target["run_id"], task_id=None,
+        workflow_id=target["workflow_id"], source_type="verification",
+        source_ref="verification:taskless-referenced", content="referenced",
+        created_at=1.0, store=ObservationStore(db),
+    )
+    referenced_finding = _finding(
+        target["run_id"], "fnd-taskless-observation-window",
+        task_id=target["task_id"],
+        evidence=[{"observation_id": referenced.observation_id}],
+    )
+    referenced_finding["workflow_id"] = target["workflow_id"]
+    state_db.upsert_trajectory_finding(referenced_finding, db_path=db)
+    for index in range(301):
+        create_observation(
+            run_id=sibling["run_id"], task_id=sibling["task_id"],
+            workflow_id=sibling["workflow_id"], source_type="agent_log",
+            source_ref=f"pane:taskless-noise-{index}", content="noise",
+            created_at=float(index + 2), store=ObservationStore(db),
+        )
+    context = _compile(db, target, "developer")
+    assert any(
+        item.get("source_ref") == f"observation:{referenced.observation_id}"
+        for item in context.evidence
+    )
+
+
+def test_meaningful_eval_survives_null_eval_window_noise(tmp_path: Path):
+    from herdr import eval_store
+
+    db = tmp_path / "state.db"
+    _seed_workflow(db, workflow_id="wf-eval-window-semantic", scope="scope-a")
+    target = _seed_task(db, _task(
+        "task-eval-window-semantic", workflow_id="wf-eval-window-semantic", scope="scope-a"
+    ))
+    valid = eval_store.record_eval_result(
+        target["run_id"], revision=1, requirements_satisfied=True,
+        task_id=target["task_id"], workflow_id=target["workflow_id"],
+        created_at=1.0, db_path=db,
+    )
+    for revision in range(2, 103):
+        eval_store.record_eval_result(
+            target["run_id"], revision=revision,
+            task_id=target["task_id"], workflow_id=target["workflow_id"],
+            created_at=float(revision), db_path=db,
+        )
+    context = _compile(db, target, "tester")
+    assert any(item.get("source_ref") == f"eval:{valid['eval_id']}" for item in context.verification)
+
+
+def test_handoff_survives_non_handoff_collaboration_window_noise(tmp_path: Path):
+    db = tmp_path / "state.db"
+    _seed_workflow(db, workflow_id="wf-collab-window-semantic", scope="scope-a")
+    source = _seed_task(db, _task(
+        "task-collab-window-source", workflow_id="wf-collab-window-semantic", scope="scope-a"
+    ))
+    target = _seed_task(db, _task(
+        "task-collab-window-target", workflow_id="wf-collab-window-semantic", scope="scope-a"
+    ))
+    handoff = state_db.create_collaboration_event(
+        {
+            "run_id": "scope-a", "workflow_id": target["workflow_id"],
+            "from_task_id": source["task_id"], "to_task_id": target["task_id"],
+            "type": "HANDOFF", "source_fact_id": "fact-semantic-handoff",
+        },
+        db_path=db,
+    )
+    for index in range(60):
+        state_db.create_collaboration_event(
+            {
+                "run_id": "scope-a", "workflow_id": target["workflow_id"],
+                "from_task_id": source["task_id"], "to_task_id": target["task_id"],
+                "type": "REQUEST", "source_fact_id": f"fact-semantic-request-{index}",
+            },
+            db_path=db,
+        )
+    context = _compile(db, target, "reviewer")
+    assert any(
+        item.get("source_ref") == f"collaboration:{handoff['event_id']}"
+        for item in context.handoffs
+    )
 
 
 def test_taskless_source_with_reused_run_advances_all_workflow_scopes(tmp_path: Path):

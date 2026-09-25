@@ -279,8 +279,8 @@ def test_legacy_task_without_run_id_keeps_its_fallback_identity(tmp_path: Path):
     assert metrics.trajectory_events == 1
 
 
-def test_task_row_absent_keeps_event_carried_identity(tmp_path: Path):
-    """With no conflicting task row, the run's own event identity is reported."""
+def test_task_row_absent_fails_closed_without_event_identity(tmp_path: Path):
+    """Source-only runs do not acquire task identity from events."""
     db_path = tmp_path / "state.db"
     ledger = TrajectoryLedger(db_path)
     ledger.append_event({
@@ -295,6 +295,35 @@ def test_task_row_absent_keeps_event_carried_identity(tmp_path: Path):
     assert metrics.final_status is None
     assert metrics.task_completed is False
     assert metrics.trajectory_events == 0
+
+
+def test_malformed_context_pack_degrades_only_latest_size_metric(tmp_path: Path):
+    db_path = tmp_path / "bad-context-pack.db"
+    state_db.save_task(_task("run-bad-context-pack", status="working"), db_path=db_path)
+    state_db.save_context_pack(
+        _pack("run-bad-context-pack", "ctx-bad-json", 10.0), db_path=db_path
+    )
+    ledger = TrajectoryLedger(db_path)
+    ledger.append_event({
+        "run_id": "run-bad-context-pack", "task_id": "task-1",
+        "workflow_id": "wf-1", "event_type": "run_started", "timestamp": 5.0,
+    })
+    conn = state_db.get_db_connection(db_path)
+    try:
+        conn.execute(
+            "UPDATE context_packs SET current_state_json = ? WHERE context_id = ?",
+            ("{not-json", "ctx-bad-json"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    metrics = get_run_metrics("run-bad-context-pack", db_path=db_path, now=40.0)
+
+    assert metrics.latest_context_pack_bytes is None
+    assert metrics.context_packs_created == 1
+    assert metrics.context_compactions == 1
+    assert metrics.trajectory_events == 1
 
 
 def test_malformed_verification_payload_degrades_without_failing(tmp_path: Path):

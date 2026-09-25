@@ -85,6 +85,14 @@ RELEVANT_EVENT_TYPES = frozenset({
 # Public value objects
 
 
+def _normalize_json_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(key): _normalize_json_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_normalize_json_value(item) for item in value]
+    return value
+
+
 @dataclass(frozen=True)
 class ContextItem:
     """One bounded, provenance-bearing context item."""
@@ -103,11 +111,16 @@ class ContextItem:
             raise ValueError("context item kind is required")
         if not _valid_source_ref(self.source_ref):
             raise ValueError(f"invalid context source_ref: {self.source_ref!r}")
+        if isinstance(self.evidence_refs, (str, bytes, bytearray, Mapping)):
+            raise ValueError("context item evidence_refs must be a list or tuple")
+        if not isinstance(self.evidence_refs, (list, tuple)):
+            raise ValueError("context item evidence_refs must be a list or tuple")
         object.__setattr__(self, "evidence_refs", tuple(str(ref) for ref in self.evidence_refs if ref))
-        if not isinstance(self.metadata, dict):
-            raise ValueError("context item metadata must be a dict")
-        object.__setattr__(self, "value", _redact_value(self.value))
-        object.__setattr__(self, "metadata", _redact_value(dict(self.metadata)))
+        if not isinstance(self.metadata, Mapping):
+            raise ValueError("context item metadata must be a mapping")
+        normalized_metadata = _normalize_json_value(self.metadata)
+        object.__setattr__(self, "value", _redact_value(_normalize_json_value(self.value)))
+        object.__setattr__(self, "metadata", _redact_value(normalized_metadata))
 
     def to_mapping(self) -> Dict[str, Any]:
         value = {
@@ -124,6 +137,8 @@ class ContextItem:
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> "ContextItem":
+        if not isinstance(raw, Mapping):
+            raise TypeError("ContextItem.from_mapping expects a mapping")
         return cls(
             kind=str(raw.get("kind") or ""),
             value=raw.get("value"),
@@ -131,8 +146,8 @@ class ContextItem:
             source_task=raw.get("source_task"),
             source_run=raw.get("source_run"),
             created_at=raw.get("created_at"),
-            evidence_refs=tuple(raw.get("evidence_refs") or ()),
-            metadata=dict(raw.get("metadata") or {}),
+            evidence_refs=raw.get("evidence_refs") or (),
+            metadata=raw.get("metadata") or {},
         )
 
 

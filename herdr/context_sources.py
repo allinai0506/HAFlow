@@ -773,10 +773,18 @@ def _read_source_snapshot(
                   AND event_type IN ({",".join("?" for _ in RELEVANT_EVENT_TYPES)})
                   AND ({event_scope_filter})
                   AND length(payload_json) <= 20000
-                ORDER BY sequence DESC, id DESC LIMIT ?""",
+                ORDER BY CASE WHEN event_type IN (
+                    'task_failed', 'agent_failed', 'run_failed', 'blocker',
+                    'artifact_created', 'verification_completed', 'tests_completed',
+                    'decision', 'decision_completed', 'review_requested',
+                    'verification_requested', 'task_completed', 'run_completed',
+                    'agent_done', 'task_status_changed'
+                ) THEN 0 ELSE 1 END,
+                         CASE WHEN task_id = ? THEN 0 ELSE 1 END,
+                         sequence DESC, id DESC LIMIT ?""",
             (
                 *run_values, *sorted(RELEVANT_EVENT_TYPES),
-                *event_scope_params, int(max_events),
+                *event_scope_params, str(task_id), int(max_events),
             ),
         ).fetchall()
         events = _merge_verification_events(
@@ -800,8 +808,13 @@ def _read_source_snapshot(
                   AND length(COALESCE(metadata_json, '{{}}')) <= 20000
                   AND length(COALESCE(evidence_json, '[]')) <= 20000
                   AND ({source_scope_filter})
-                ORDER BY created_at DESC, rowid DESC LIMIT ?""",
-            (*run_values, *source_scope_params, int(max_findings)),
+                  AND LOWER(COALESCE(status, 'open')) NOT IN ('resolved', 'closed', 'superseded')
+                ORDER BY CASE WHEN task_id = ? THEN 0 ELSE 1 END,
+                         CASE WHEN LOWER(COALESCE(severity, '')) = 'critical'
+                                   OR finding_type IN ('verification_failure', 'repeated_failure')
+                              THEN 0 ELSE 1 END,
+                         created_at DESC, rowid DESC LIMIT ?""",
+            (*run_values, *source_scope_params, str(task_id), int(max_findings)),
         ).fetchall()
         findings = [safe_decode_finding_row(row) for row in finding_rows]
         critical_findings = critical_finding_rows_for_runs(
@@ -855,8 +868,9 @@ def _read_source_snapshot(
             f"""SELECT * FROM observations
                 WHERE run_id IN ({placeholders})
                   AND ({source_scope_filter})
-                ORDER BY created_at DESC, observation_id DESC LIMIT ?""",
-            (*run_values, *source_scope_params, int(max_observations)),
+                ORDER BY CASE WHEN task_id = ? THEN 0 ELSE 1 END,
+                         created_at DESC, observation_id DESC LIMIT ?""",
+            (*run_values, *source_scope_params, str(task_id), int(max_observations)),
         ).fetchall()
         observations = []
         for row in observation_rows:
@@ -879,14 +893,20 @@ def _read_source_snapshot(
             collab_rows = conn.execute(
                 f"""SELECT * FROM collaboration_events
                     WHERE run_id = ? AND workflow_id = ?
+                      AND UPPER(type) = 'HANDOFF'
                       AND from_task_id IN ({current_placeholders})
                       AND to_task_id IN ({current_placeholders})
-                    ORDER BY created_at DESC, event_id DESC LIMIT ?""",
-                (run_scope, str(workflow_id), *current_task_ids, *current_task_ids, int(max_collaborations)),
+                    ORDER BY CASE WHEN to_task_id = ? THEN 0 ELSE 1 END,
+                             created_at DESC, event_id DESC LIMIT ?""",
+                (
+                    run_scope, str(workflow_id), *current_task_ids, *current_task_ids,
+                    str(task_id), int(max_collaborations),
+                ),
             ).fetchall()
             incoming_rows = conn.execute(
                 f"""SELECT * FROM collaboration_events
                     WHERE run_id = ? AND workflow_id = ? AND to_task_id = ?
+                      AND UPPER(type) = 'HANDOFF'
                       AND from_task_id IN ({current_placeholders})
                     ORDER BY created_at DESC, event_id DESC LIMIT ?""",
                 (run_scope, str(workflow_id), str(task_id), *current_task_ids, int(max_collaborations)),
@@ -953,8 +973,16 @@ def _read_source_snapshot(
                                   AND event_type IN ({",".join("?" for _ in RELEVANT_EVENT_TYPES)})
                                   AND ({event_scope_filter})
                                   AND length(payload_json) <= 20000
-                                ORDER BY sequence DESC, id DESC LIMIT ?""",
-                            (*run_values, *sorted(RELEVANT_EVENT_TYPES), *event_scope_params, int(max_events)),
+                                ORDER BY CASE WHEN event_type IN (
+                                    'task_failed', 'agent_failed', 'run_failed', 'blocker',
+                                    'artifact_created', 'verification_completed', 'tests_completed',
+                                    'decision', 'decision_completed', 'review_requested',
+                                    'verification_requested', 'task_completed', 'run_completed',
+                                    'agent_done', 'task_status_changed'
+                                ) THEN 0 ELSE 1 END,
+                                         CASE WHEN task_id = ? THEN 0 ELSE 1 END,
+                                         sequence DESC, id DESC LIMIT ?""",
+                            (*run_values, *sorted(RELEVANT_EVENT_TYPES), *event_scope_params, str(task_id), int(max_events)),
                         ).fetchall()
                     ],
                     task_by_id=task_by_id,
@@ -972,8 +1000,13 @@ def _read_source_snapshot(
                               AND length(COALESCE(metadata_json, '{{}}')) <= 20000
                               AND length(COALESCE(evidence_json, '[]')) <= 20000
                               AND ({source_scope_filter})
-                            ORDER BY created_at DESC, rowid DESC LIMIT ?""",
-                        (*run_values, *source_scope_params, int(max_findings)),
+                              AND LOWER(COALESCE(status, 'open')) NOT IN ('resolved', 'closed', 'superseded')
+                            ORDER BY CASE WHEN task_id = ? THEN 0 ELSE 1 END,
+                                     CASE WHEN LOWER(COALESCE(severity, '')) = 'critical'
+                                               OR finding_type IN ('verification_failure', 'repeated_failure')
+                                          THEN 0 ELSE 1 END,
+                                     created_at DESC, rowid DESC LIMIT ?""",
+                        (*run_values, *source_scope_params, str(task_id), int(max_findings)),
                     ).fetchall()
                 ]
                 critical_findings = critical_finding_rows_for_runs(
@@ -1027,8 +1060,9 @@ def _read_source_snapshot(
                     f"""SELECT * FROM observations
                         WHERE run_id IN ({placeholders})
                           AND ({source_scope_filter})
-                        ORDER BY created_at DESC, observation_id DESC LIMIT ?""",
-                    (*run_values, *source_scope_params, int(max_observations)),
+                        ORDER BY CASE WHEN task_id = ? THEN 0 ELSE 1 END,
+                                 created_at DESC, observation_id DESC LIMIT ?""",
+                    (*run_values, *source_scope_params, str(task_id), int(max_observations)),
                 ).fetchall():
                     decoded = state_db._decode_observation_row(row)
                     observations.append({
@@ -1077,6 +1111,10 @@ def _read_source_snapshot(
                                er.task_id IS NOT NULL AND (er.workflow_id IS NULL OR er.workflow_id = '')
                            ))
                            AND ({eval_task_filter})
+                           AND (
+                               er.verification_passed IN (0, 1)
+                               OR er.requirements_satisfied IN (0, 1)
+                           )
                            AND length(COALESCE(er.evidence_json, 'null')) <= 20000
                            AND length(COALESCE(er.warnings_json, '[]')) <= 20000
                     ) WHERE latest_rank = 1 OR strict_rank = 1 OR pass_rank = 1
@@ -1103,6 +1141,10 @@ def _read_source_snapshot(
                            er.task_id IS NOT NULL AND (er.workflow_id IS NULL OR er.workflow_id = '')
                        ))
                        AND ({eval_task_filter})
+                       AND (
+                           er.verification_passed IN (0, 1)
+                           OR er.requirements_satisfied IN (0, 1)
+                       )
                        AND (length(COALESCE(er.evidence_json, 'null')) > 20000
                             OR length(COALESCE(er.warnings_json, '[]')) > 20000)
                      ORDER BY CASE WHEN er.verification_passed = 0 THEN 0
@@ -1168,6 +1210,75 @@ def _read_source_snapshot(
             key = (str(decoded.get("run_id") or ""), str(decoded.get("task_id") or ""))
             evals_by_key.setdefault(key, []).append(decoded)
         evals = [item for items in evals_by_key.values() for item in items]
+
+        referenced_observation_ids: set[str] = set()
+
+        def _collect_observation_refs(value: Any, depth: int = 0) -> None:
+            if depth > 5 or len(referenced_observation_ids) >= max_observations * 4:
+                return
+            if isinstance(value, Mapping):
+                observation_id = value.get("observation_id")
+                if observation_id:
+                    referenced_observation_ids.add(str(observation_id))
+                for key in ("ref", "source_ref"):
+                    ref = str(value.get(key) or "")
+                    if ref.startswith("observation:"):
+                        referenced_observation_ids.add(ref.split(":", 1)[1])
+                for nested in value.values():
+                    _collect_observation_refs(nested, depth + 1)
+            elif isinstance(value, (list, tuple)):
+                for nested in value:
+                    _collect_observation_refs(nested, depth + 1)
+
+        if max_observations > 0:
+            for source_collection in (events, findings, evals, collaborations):
+                for record in source_collection:
+                    _collect_observation_refs(record)
+            referenced_ids = sorted(
+                observation_id
+                for observation_id in referenced_observation_ids
+                if observation_id
+            )[:max_observations]
+            if referenced_ids:
+                observation_placeholders = ",".join("?" for _ in referenced_ids)
+                referenced_rows = conn.execute(
+                    f"""SELECT * FROM observations
+                        WHERE observation_id IN ({observation_placeholders})
+                          AND run_id IN ({placeholders})
+                          AND ({source_scope_filter})
+                        ORDER BY created_at DESC, observation_id DESC""",
+                    (*referenced_ids, *run_values, *source_scope_params),
+                ).fetchall()
+                existing_observation_ids = {
+                    str(observation.get("observation_id") or "")
+                    for observation in observations
+                }
+                for row in referenced_rows:
+                    observation_id = str(row["observation_id"] or "")
+                    if not observation_id or observation_id in existing_observation_ids:
+                        continue
+                    decoded = state_db._decode_observation_row(row)
+                    observations.append({
+                        "observation_id": decoded.get("observation_id"),
+                        "run_id": decoded.get("run_id"),
+                        "task_id": decoded.get("task_id"),
+                        "workflow_id": decoded.get("workflow_id"),
+                        "source_type": decoded.get("source_type"),
+                        "source_ref": decoded.get("source_ref"),
+                        "sha256": decoded.get("sha256"),
+                        "excerpt": decoded.get("excerpt"),
+                        "created_at": decoded.get("created_at"),
+                        "referenced_by_source": True,
+                    })
+                    existing_observation_ids.add(observation_id)
+                referenced_id_set = set(referenced_ids)
+                observations.sort(key=lambda observation: (
+                    0 if str(observation.get("observation_id") or "") in referenced_id_set else 1,
+                    -float(observation.get("created_at") or 0.0),
+                    str(observation.get("observation_id") or ""),
+                ))
+                observations = observations[:max_observations]
+
         preferred_eval_ids: set[str] = set()
         for key_evals in evals_by_key.values():
             latest = max(key_evals, key=lambda item: (

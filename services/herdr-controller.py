@@ -4624,9 +4624,12 @@ def _legacy_evidence_allowed(event, raw_ref, db_path=None):
                 and collab_scope_for_task(task) == str(event.get("run_id") or "")
                 and str(run_id_for_task(task)) == str(row["run_id"] or "")
             )
-        if not row_workflow:
-            return False
-        return str(row["run_id"] or "") == str(event.get("run_id") or "")
+        # A taskless fact has no persisted Task identity to bind it to this
+        # Handoff. Compiler/storage accept taskless facts only through a
+        # verified run-to-execution-scope map; the legacy prompt path has no
+        # such snapshot, so fail closed instead of treating string equality as
+        # provenance.
+        return False
     finally:
         conn.close()
 

@@ -81,6 +81,29 @@ class FakeSender:
         return {"ok": True}
 
 
+def test_legacy_taskless_evidence_is_filtered_without_authoritative_task(tmp_path):
+    from herdr.observation import ObservationStore, create_observation
+
+    ctrl = _load_controller()
+    db = tmp_path / "state.db"
+    tasks = _tasks(db=db)
+    observation = create_observation(
+        run_id="wf-1", task_id=None, workflow_id="wf-1",
+        source_type="verification", source_ref="verification:taskless",
+        content="foreign taskless evidence", store=ObservationStore(db),
+    )
+    ref = f"observation:{observation.observation_id}"
+    event = _make_event(db, evidence_refs=[ref], context_refs=[])
+    sender = FakeSender()
+
+    out = ctrl.dispatch_collaboration_event(event["event_id"], tasks, sender, db_path=db)
+
+    assert out["dispatched"] is True
+    assert len(sender.calls) == 1
+    assert ref not in sender.calls[0][1]
+    assert ctrl._legacy_evidence_allowed(event, ref, db_path=db) is False
+
+
 def test_a_real_dispatch_hits_target_pane_with_refs(tmp_path):
     ctrl = _load_controller()
     db = tmp_path / "state.db"

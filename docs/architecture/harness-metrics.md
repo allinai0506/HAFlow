@@ -13,25 +13,31 @@ policy.
 
 | Metric | Source |
 | --- | --- |
-| run identity, start/finish, event counts | Trajectory `events` |
+| run identity, task/workflow ownership, start/finish, event counts | Task identity projection plus Trajectory `events` |
 | observation count and bytes | `observations` metadata (`size_bytes`) |
 | findings | `trajectory_findings` |
 | ContextPack count/latest size | `context_packs` metadata and serialized fields |
+| WorkingContext compiles/reuse/change/latest size | `working_context_metric_events` and `working_contexts` |
 | verification totals | `verification_completed` Trajectory payloads |
 | task status | Runtime `tasks` projection |
 
-Aggregation uses SQL counts/sums and does not read Observation content. The
-query is scoped by `run_id` and does not write state.
+Aggregation uses SQL counts/sums and does not read Observation content. Scalar
+fact queries are scoped by `run_id`; identity resolution additionally checks the
+persisted Task projection to prove unique ownership. Metrics do not write state.
 
-Run identity is ownership-checked: when a Run's Trajectory facts reference a
-Task whose persisted `run_id` belongs to another Run, the metrics report no
-`task_id` / `workflow_id` / status instead of stitching across runs. A Task
-with no persisted row yet still reports the identity carried by its own events.
+Run identity is ownership-checked from the persisted Task projection: when a
+Run's Trajectory facts reference a Task whose persisted `run_id` belongs to
+another Run, the metrics report no `task_id` / `workflow_id` / status instead
+of stitching across runs. A source-only Run with no authoritative Task row is
+reported as unknown with zero source aggregates; event-carried identity is not
+used as a substitute.
 
 Verification classification is corruption-tolerant: a `verification_completed`
 row whose payload is not valid JSON still counts in `verification_total`, but
-is never classified as passed/failed (`json_extract` is guarded by `json_valid`
-inside a nested `CASE`).
+is never classified as passed/failed. SQLite JSON predicates guard the
+classification queries. If the latest ContextPack cannot be normalized, only
+`latest_context_pack_bytes` becomes `null`; independent metrics remain
+available.
 
 `context_compact.trigger_count` is the count of successful ContextPack
 creations. A skipped or attempted compact is not counted. ObservationPack uses
