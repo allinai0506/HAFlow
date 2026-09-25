@@ -216,6 +216,16 @@ class TestConsoleFrontendSyntaxAndContracts(unittest.TestCase):
         self.assertNotIn("max-width: 1400px", self.html)
         self.assertIn("width: 100%", self.html)
 
+    def test_decision_task_excludes_superseded_and_renders_actions(self):
+        """Ensure isDecisionTask filters out superseded tasks and CLI command preview functions exist."""
+        script_match = re.search(r"<script>(.*?)</script>", self.html, re.DOTALL)
+        self.assertIsNotNone(script_match)
+        js = script_match.group(1)
+        self.assertIn("function isDecisionTask", js)
+        self.assertIn("status==='superseded'", js)
+        self.assertIn("copyCliCommand", js)
+        self.assertIn("executeControllerAction", js)
+
 
 if __name__ == "__main__":
     unittest.main()

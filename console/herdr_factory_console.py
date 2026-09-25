@@ -2828,10 +2828,22 @@ function renderWorkflowSwitcher(){
   box.style.display='flex';
   box.innerHTML='<label>工作流</label><select id="wfSelect" onchange="state.workflowId=this.value;loadWorkflow(this.value)">'+ws.map(x=>`<option value="${esc(x.workflow_id)}"${x.workflow_id===state.workflowId?' selected':''}>${esc(workflowDisplayName(x))}</option>`).join('')+'</select>'
 }
-async function loadWorkflow(id){state.workflowId=id;state.workflow=await api('/api/workflow?id='+encodeURIComponent(id));const w=state.workflow.workflow;saveViewState();renderWorkflowHead(w);renderStages();renderTasks()}
+async function loadWorkflow(id){
+  state.workflowId=id;
+  state.workflow=await api('/api/workflow?id='+encodeURIComponent(id));
+  try{state.controllerActionsData=await api('/api/workflow/controller-actions?workflow_id='+encodeURIComponent(id))}catch(e){state.controllerActionsData=null}
+  const w=state.workflow.workflow;
+  saveViewState();
+  renderWorkflowHead(w);
+  renderStages();
+  renderTasks();
+}
 function clearWorkflow(){state.workflow=null;state.workflowId=null;saveViewState();document.getElementById('workflowSubject').textContent='暂无工作流';document.getElementById('workflowSub').textContent='';document.getElementById('stages').innerHTML='';const ab=document.getElementById('attentionBanner');if(ab)ab.style.display='none';document.getElementById('tasks').innerHTML='<div class="empty">暂无任务</div>'}
 function setTaskFilter(f){state.taskFilter=f;['All','Decision','Attention','Active'].forEach(k=>{const el=document.getElementById('f'+k);if(el)el.classList.toggle('active',f.toLowerCase()===k.toLowerCase())});renderTasks()}
-function isDecisionTask(t){return t.stage_verdict==='blocked'||t.status==='blocked'||(t.node_type==='gate'&&['agent_done','completed'].includes(t.status)&&t.stage_verdict!=='pass')}
+function isDecisionTask(t){
+  if(t.status==='superseded'||t.status==='cleaned')return false;
+  return t.stage_verdict==='blocked'||t.status==='blocked'||(t.node_type==='gate'&&['agent_done','completed'].includes(t.status)&&t.stage_verdict!=='pass');
+}
 function decisionSummary(t){
   const title=taskDisplayName(t);
   const blocker=Array.isArray(t.blocker)?t.blocker.join('; '):t.blocker;
@@ -2840,6 +2852,43 @@ function decisionSummary(t){
     question:t.decision_question||`是否批准“${title}”继续推进？`,
     basis:t.stage_verdict_note||blocker||t.blocked_reason||t.goal||'请核查成果后选择通过并放行或批注打回'
   };
+}
+function copyCliCommand(cmd){
+  if(navigator.clipboard&&navigator.clipboard.writeText){
+    navigator.clipboard.writeText(cmd).then(()=>{toast('已复制 Controller 命令到剪贴板！')}).catch(()=>{toast('复制失败',true)});
+  }else{
+    const ta=document.createElement('textarea');
+    ta.value=cmd;
+    document.body.appendChild(ta);
+    ta.select();
+    try{document.execCommand('copy');toast('已复制 Controller 命令到剪贴板！')}catch(e){toast('命令: '+cmd)}
+    document.body.removeChild(ta);
+  }
+}
+async function executeControllerAction(actId,wid){
+  const act=(state.controllerActionsMap&&state.controllerActionsMap[actId])||{};
+  const payload=act.api_payload||{type:actId,workflow_id:wid};
+  const cmdLine=act.command_line||actId;
+  showConfirmModal({
+    title:'执行 Controller 解卡操作',
+    message:`确定要通过 Controller 执行【${act.title||actId}】吗？\n\n对应底层命令:\n${cmdLine}`,
+    confirmText:'立即执行',
+    danger:Boolean(act.is_destructive),
+    onConfirm:async()=>{
+      try{
+        toast('正在调度 Controller 执行…');
+        await api('/api/controller/execute-action',{
+          method:'POST',
+          body:JSON.stringify(payload)
+        });
+        toast('Controller 解卡命令已执行！正在刷新现场…');
+        await loadWorkflow(wid);
+        if(state.spaceId)await refreshAll();
+      }catch(e){
+        toast('执行失败: '+e.message,true);
+      }
+    }
+  });
 }
 function updateAttentionHub(){
   const ts=(state.workflow&&state.workflow.tasks)||[];
@@ -2876,7 +2925,33 @@ function updateAttentionHub(){
     ab.style.background='var(--bg-surface)';
     ab.style.borderColor='var(--border-default)';
     ab.style.borderLeft='3px solid var(--primary)';
-    const detailRows=decisionTasks.slice(0,3).map(t=>{const d=decisionSummary(t);return `<div class="decision-item"><strong>${esc(d.title)}</strong><span>${esc(d.question)}</span><small>依据：${esc(d.basis)}</small></div>`}).join('');
+    state.controllerActionsMap={};
+    const acts=(state.controllerActionsData&&state.controllerActionsData.actions)||[];
+    acts.forEach(a=>{state.controllerActionsMap[a.action_id]=a;});
+    const detailRows=decisionTasks.slice(0,3).map(t=>{
+      const d=decisionSummary(t);
+      let actionsHtml='';
+      if(acts.length){
+        const cardRows=acts.slice(0,3).map(act=>`
+          <div class="action-card" style="margin-top:6px;padding:7px 10px;background:#0d131a;border:1px solid rgba(255,255,255,0.08);border-radius:8px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:3px">
+              <strong style="color:var(--text-primary);font-size:12px">${act.recommended?'⭐ ':''}${esc(act.title)}</strong>
+              <span class="badge ${act.category==='fix'?'working':act.category==='rework'?'waiting':'cleaned'}" style="font-size:10px">${esc(act.category)}</span>
+            </div>
+            <div class="task-meta" style="margin-bottom:5px;font-size:11px">${esc(act.description)}</div>
+            <div style="display:flex;align-items:center;gap:6px;background:#05080c;padding:4px 8px;border-radius:6px;border:1px solid rgba(255,255,255,0.05);margin-bottom:5px">
+              <code style="flex:1;font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#93c5fd;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(act.command_line)}</code>
+              <button class="mini" style="padding:2px 6px;font-size:10.5px" onclick="copyCliCommand('${esc(act.command_line)}')">📋 复制</button>
+            </div>
+            <div style="display:flex;justify-content:flex-end">
+              <button class="btn primary" style="padding:3px 10px;font-size:11.5px" onclick="executeControllerAction('${esc(act.action_id)}','${esc(state.workflowId)}')">🚀 一键执行</button>
+            </div>
+          </div>
+        `).join('');
+        actionsHtml=`<div class="controller-actions-wrap" style="margin-top:4px">${cardRows}</div>`;
+      }
+      return `<div class="decision-item"><strong>${esc(d.title)}</strong><span>${esc(d.question)}</span><small>依据：${esc(d.basis)}</small>${actionsHtml}</div>`;
+    }).join('');
     const more=decisionTasks.length>3?`<div class="decision-more">还有 ${decisionTasks.length-3} 项，请查看全部决策项。</div>`:'';
     const details=decisionTasks.length?`<div class="decision-list"><div class="decision-list-label">待决策事项</div>${detailRows}${more}</div>`:'';
     ab.innerHTML=`<div style="min-width:0;flex:1"><div style="display:flex;align-items:center;gap:10px"><span class="att-badge">人机协同态势</span><span class="att-text">${activeTasks.length} 个执行者正在协同 · ${readyCnt} 个正常推进 · ${attentionTasks.length} 个需关注 · <strong style="color:${decisionTasks.length?'var(--accent)':'var(--text)'}">${decisionTasks.length} 个待你拍板</strong></span></div>${details}</div><div>${decisionTasks.length?`<button class="btn primary" style="padding:4px 10px;font-size:12px" onclick="setTaskFilter('decision')">查看决策项</button>`:''}</div>`;
