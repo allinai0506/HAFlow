@@ -429,6 +429,105 @@ def test_residual_legacy_source_head_uses_max_revision(tmp_path):
         migrated.close()
 
 
+def test_task_head_migration_seeds_baseline_from_historical_watermarks(tmp_path):
+    db_path = tmp_path / "head-baseline.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """CREATE TABLE working_context_source_heads (
+               run_scope TEXT NOT NULL, workflow_id TEXT NOT NULL,
+               source_version TEXT NOT NULL, revision INTEGER NOT NULL,
+               updated_at REAL NOT NULL,
+               PRIMARY KEY (run_scope, workflow_id)
+           )"""
+    )
+    conn.execute(
+        "INSERT INTO working_context_source_heads VALUES (?, ?, ?, ?, ?)",
+        ("exec-1", "wf", "shared-v7", 7, 7.0),
+    )
+    conn.execute(
+        """CREATE TABLE working_contexts (
+               context_id TEXT PRIMARY KEY, run_scope TEXT NOT NULL,
+               run_id TEXT, workflow_id TEXT, task_id TEXT NOT NULL,
+               node_id TEXT, agent_role TEXT NOT NULL,
+               context_fingerprint TEXT NOT NULL, source_version TEXT,
+               source_watermark INTEGER NOT NULL DEFAULT 0,
+               payload_json TEXT NOT NULL, metrics_json TEXT NOT NULL DEFAULT '{}',
+               compiled_at REAL NOT NULL
+           )"""
+    )
+    conn.execute(
+        """INSERT INTO working_contexts
+               (context_id, run_scope, run_id, workflow_id, task_id, agent_role,
+                context_fingerprint, source_version, source_watermark,
+                payload_json, compiled_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        ("wc_old_a", "exec-1", "run-a", "wf", "task-a", "developer",
+         "f" * 64, "shared-v7", 7, "{}", 10.0),
+    )
+    conn.execute(
+        """INSERT INTO working_contexts
+               (context_id, run_scope, run_id, workflow_id, task_id, agent_role,
+                context_fingerprint, source_version, source_watermark,
+                payload_json, compiled_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        ("wc_old_b", "exec-1", "run-b", "wf", "task-b", "developer",
+         "e" * 64, "shared-v7", 7, "{}", 11.0),
+    )
+    conn.commit()
+    conn.close()
+    state_db.init_db(db_path)
+    migrated = state_db.get_db_connection(db_path)
+    try:
+        for task_id in ("task-a", "task-b"):
+            row = migrated.execute(
+                """SELECT source_version, revision FROM working_context_source_heads
+                    WHERE run_scope = 'exec-1' AND workflow_id = 'wf' AND task_id = ?""",
+                (task_id,),
+            ).fetchone()
+            assert row is not None
+            assert row["revision"] == 7
+            assert row["source_version"] == "shared-v7"
+    finally:
+        migrated.close()
+    # Same version re-registers at the baseline instead of dropping to 1,
+    # so a fresh candidate is not stale against retained history.
+    assert state_db.register_working_context_source(
+        run_scope="exec-1", workflow_id="wf", task_id="task-a",
+        source_version="shared-v7", db_path=db_path,
+    ) == 7
+    assert state_db.register_working_context_source(
+        run_scope="exec-1", workflow_id="wf", task_id="task-a",
+        source_version="shared-v8", db_path=db_path,
+    ) == 8
+
+
+def test_get_latest_orders_by_time_across_scopes_not_watermark(tmp_path):
+    db_path = tmp_path / "cross-scope-latest.db"
+    state_db.init_db(db_path)
+    conn = state_db.get_db_connection(db_path)
+    try:
+        for context_id, scope, watermark, compiled_at in (
+            ("wc_old_exec", "exec-old", 20, 10.0),
+            ("wc_new_exec", "exec-new", 3, 20.0),
+        ):
+            conn.execute(
+                """INSERT INTO working_contexts
+                       (context_id, run_scope, run_id, workflow_id, task_id,
+                        agent_role, context_fingerprint, source_version,
+                        source_watermark, payload_json, compiled_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (context_id, scope, f"run-{scope}", "wf", "task-x",
+                 "developer", "f" * 64, "v", watermark, "{}", compiled_at),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    assert state_db.get_latest_working_context("task-x", db_path=db_path)["context_id"] == "wc_new_exec"
+    assert state_db.get_latest_working_context(
+        "task-x", db_path=db_path, run_scope="exec-old",
+    )["context_id"] == "wc_old_exec"
+
+
 def test_residual_legacy_source_clock_uses_max_revision(tmp_path):
     db_path = tmp_path / "residual-source-clock.db"
     conn = sqlite3.connect(db_path)

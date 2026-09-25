@@ -77,10 +77,12 @@ def _ensure_working_context_source_heads_schema(conn: sqlite3.Connection) -> Non
     primary_key = {
         str(row["name"]) for row in table_info if int(row["pk"] or 0) > 0
     }
+    migrated = False
     if columns and (
         primary_key != {"run_scope", "workflow_id", "task_id"}
         or "task_id" not in columns
     ):
+        migrated = True
         legacy_exists = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'working_context_source_heads_legacy'"
         ).fetchone() is not None
@@ -110,6 +112,42 @@ def _ensure_working_context_source_heads_schema(conn: sqlite3.Connection) -> Non
     # identity. They are retained in *_legacy for audit but never promoted
     # into the task-specific heads: each task registers its own projection
     # version independently so parallel tasks cannot mark each other stale.
+    if not migrated:
+        # Fresh database or already task-specific: no history to seed and
+        # live heads must never be overwritten.
+        return
+    if (
+        conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'working_contexts'"
+        ).fetchone()
+        is None
+    ):
+        return
+    # P1-1 baseline: historical working_contexts rows carry watermarks from the
+    # execution-shared era. Seed each task-specific head at its task's maximum
+    # historical watermark (with that row's source_version) so the next
+    # registration continues monotonically (7 -> 8) instead of dropping to 1,
+    # which would mark fresh candidates stale against retained history.
+    conn.execute("""
+        INSERT OR IGNORE INTO working_context_source_heads
+            (run_scope, workflow_id, task_id, source_version, revision, updated_at)
+        SELECT run_scope, COALESCE(workflow_id, ''), task_id,
+               COALESCE(source_version, ''),
+               COALESCE(source_watermark, 0),
+               COALESCE(compiled_at, 0)
+          FROM (
+                SELECT run_scope, workflow_id, task_id, source_version,
+                       source_watermark, compiled_at,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY run_scope, COALESCE(workflow_id, ''), task_id
+                           ORDER BY COALESCE(source_watermark, 0) DESC,
+                                    COALESCE(compiled_at, 0) DESC,
+                                    rowid DESC
+                       ) AS rn
+                  FROM working_contexts
+               )
+         WHERE rn = 1
+    """)
 
 
 def _ensure_working_context_source_clock_schema(conn: sqlite3.Connection) -> None:
@@ -4253,25 +4291,13 @@ def save_working_context(
                 raise ValueError("context_id is already used by a different WorkingContext payload")
             conn.commit()
             return existing_mapping
-        source_clock = context.get("metrics", {}).get("source_clock")
-        if source_backed:
-            clock_row = conn.execute(
-                """
-                SELECT revision
-                FROM working_context_source_clock
-                WHERE run_scope = ? AND workflow_id = ?
-                """,
-                (
-                    str(context.get("run_scope") or ""),
-                    str(context.get("workflow_id") or ""),
-                ),
-            ).fetchone()
-            current_clock = int(clock_row["revision"] if clock_row else 0)
-            if current_clock != int(source_clock):
-                conn.commit()
-                result = dict(context)
-                result["_stale_snapshot"] = True
-                return result
+        # NOTE: staleness is decided by the task-specific source version/head
+        # (relevant-aware: current task + dependency closure + handoff peers)
+        # plus the compiler's fresh re-read version check. The execution-wide
+        # source_clock stays in metrics as an informational watermark but is
+        # intentionally NOT a save gate: any source write in the execution
+        # (including unrelated sibling tasks) bumps it, so gating on it marks
+        # relevant candidates stale and forces futile retries.
         _validate_context_source_existence(conn, context)
         if not all_source_refs.issubset(declared_source_refs):
             raise ValueError("working context source_refs does not cover all provenance")
@@ -4511,7 +4537,12 @@ def get_latest_working_context(
         if workflow_id is not None:
             query += " AND workflow_id = ?"
             params.append(str(workflow_id))
-        query += " ORDER BY source_watermark DESC, compiled_at DESC, rowid DESC LIMIT 1"
+        # source_watermark is only comparable within one source head/scope.
+        # Across scopes (run_scope not pinned), wall-clock order decides.
+        if run_scope is not None:
+            query += " ORDER BY source_watermark DESC, compiled_at DESC, rowid DESC LIMIT 1"
+        else:
+            query += " ORDER BY compiled_at DESC, rowid DESC LIMIT 1"
         row = conn.execute(query, params).fetchone()
         return _decode_working_context_row(row) if row is not None else None
     finally:

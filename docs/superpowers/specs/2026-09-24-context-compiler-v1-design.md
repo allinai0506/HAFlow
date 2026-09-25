@@ -120,8 +120,8 @@ Task launch / retry / handoff / review request / verification request
 - CollaborationEvent 必须同时满足 `run_id == run_scope`、`workflow_id == workflow_id`，且 from/to Task 在 scope 内；dispatch 必须重新读取 StateStore 中的当前 Task，不能信任调用方传入的旧 Task snapshot；无 context ref 的 legacy Handoff 也不能转发未在权威 scope 中验证的 evidence。
 - 信息不足时丢弃受影响来源或 fail closed，不猜测、不跨 Run 拼接。
 - legacy 自动 Handoff 若上下游只有不同的 per-task `run_id` 且没有同一 execution 证据，则跳过；不能把节点依赖当作跨 Run 授权。
-- `working_context_source_heads` 按 `(run_scope, workflow_id, task_id)` 维护单调 source revision；source projection 是 task-specific（current task + dependency closure + handoff peers），不同 Task 独立递增，互不判 stale；编译器保存前必须在同一 task 的 source revision 上，迟到旧候选只能成为历史而不能成为 latest。
-- `working_context_source_clock` 按 `(run_scope, workflow_id)` 维护；源表写入触发器只递增所属 execution scope，编译快照记录该 scope 的 clock，保存事务发现同一 scope 的 clock 变化即重试，防止最终复读与写入之间的 TOCTOU，同时不把其他 Workflow 的写入误判为 stale。Schema 初始化使用 resolved-path lock，migration/trigger replacement 在同一写事务内完成，旧 schema/旧 trigger/中断迁移均可恢复。
+- `working_context_source_heads` 按 `(run_scope, workflow_id, task_id)` 维护单调 source revision；source projection 是 task-specific（current task + dependency closure + handoff peers），不同 Task 独立递增，互不判 stale；迁移时按各 Task 历史 `working_contexts` 的最大 watermark 建 baseline，保证单调递增不掉回 1；编译器保存前必须在同一 task 的 source revision 上，迟到旧候选只能成为历史而不能成为 latest。
+- `working_context_source_clock` 按 `(run_scope, workflow_id)` 维护，作为 metrics 中的信息性逻辑水位；保存时的 staleness 只由 task-specific source version/head（relevant-aware）与编译器的 fresh re-read 版本比较决定，不再以 execution-wide clock 相等性判 stale——无关平行任务的写入不得 invalidate 当前 Task。Schema 初始化使用 resolved-path lock，migration/trigger replacement 在同一写事务内完成，旧 schema/旧 trigger/中断迁移均可恢复。
 - task-bound legacy source 可以缺少 `workflow_id`，但必须由持久化 Task 的 `task_id` 与 `run_id` 证明 execution scope；超限或未知 source 使用显式 truncated/fail-closed 事实。
 
 ## 5. 选择规则
@@ -228,7 +228,7 @@ BLOCKER > OPEN QUESTION > CURRENT GOAL > VERIFICATION
 - `BEGIN IMMEDIATE` 下检查最新行，竞争请求返回数据库 canonical row；
 - 不提供 update/delete API；
 - `get_working_context(context_id)`、`get_latest_working_context(task_id)`、`list_working_contexts(task_id)` 为公开读取入口；
-- 保存前完成身份、引用存在性、scope、脱敏和预算检查；旧 source revision 的迟到写入保留为历史但不能成为 latest。验证和 Eval 的 foreign 最新项不能遮蔽同 scope 的有效失败项。
+- 保存前完成身份、引用存在性、scope、脱敏和预算检查；旧 source revision 的迟到写入保留为历史但不能成为 latest（同 scope 内按 watermark，新 scope 选择不以跨 scope watermark 比较，`get_latest_working_context` 未指定 `run_scope` 时按 `compiled_at` 排序）。验证和 Eval 的 foreign 最新项不能遮蔽同 scope 的有效失败项。
 - Handoff 先创建 `CollaborationEvent`，再在事件仍为 `created` 时 attach 编译后的 context ref，确保快照包含该 Handoff 事实。
 
 ## 10. Fingerprint、Diff 与指标

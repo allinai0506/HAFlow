@@ -982,11 +982,11 @@ def test_impossible_context_budget_fails_closed_instead_of_dropping_goal(tmp_pat
         _compile(db, target, "developer", config={"max_chars": 500})
 
 
-def test_source_clock_rejects_toctou_candidate_after_source_write(tmp_path: Path):
+def test_relevant_write_followed_by_recompile_marks_old_candidate_stale(tmp_path: Path):
     db = tmp_path / "state.db"
     _seed_workflow(db)
-    upstream = _seed_task(db, _task("task-clock-race-upstream"))
-    target = _seed_task(db, _task("task-clock-race-target"))
+    upstream = _seed_task(db, _task("task-clock-race-upstream", node="implementation"))
+    target = _seed_task(db, _task("task-clock-race-target", node="review"))
     state_db.upsert_trajectory_finding(
         _finding(upstream["run_id"], "fnd-clock-race", task_id=upstream["task_id"], summary="old"),
         db_path=db,
@@ -996,12 +996,56 @@ def test_source_clock_rejects_toctou_candidate_after_source_write(tmp_path: Path
         _finding(upstream["run_id"], "fnd-clock-race", task_id=upstream["task_id"], summary="new"),
         db_path=db,
     )
+    # The upstream task is a dependency of the review target, so the finding
+    # change alters the target's relevant source version. Recompiling
+    # registers the new task-specific head; the pre-write candidate is stale.
+    _compile(db, target, "reviewer")
     late_payload = dict(old.to_mapping())
     late_payload["context_id"] = "wc_clock_race_late"
     from herdr.context_projection import _config
     late_payload["_fingerprint_config"] = _config(None)
     late = state_db.save_working_context(late_payload, db_path=db)
     assert late.get("_stale_snapshot") is True
+
+
+def test_unrelated_sibling_write_does_not_mark_candidate_stale(tmp_path: Path):
+    from herdr.context_projection import _config
+
+    db = tmp_path / "state.db"
+    _seed_workflow(db, workflow_id="wf-a", scope="scope-a")
+    dependency = _seed_task(db, _task(
+        "task-sibling-dependency", workflow_id="wf-a", scope="scope-a", node="implementation",
+    ))
+    target = _seed_task(db, _task(
+        "task-sibling-target", workflow_id="wf-a", scope="scope-a", node="review",
+    ))
+    sibling = _seed_task(db, _task(
+        "task-sibling-unrelated", workflow_id="wf-a", scope="scope-a", node="test",
+    ))
+    old = _compile(db, target, "reviewer")
+    state_db.save_task(dict(sibling, goal="sibling updated"), db_path=db)
+    TrajectoryLedger(db).append_event({
+        "run_id": sibling["run_id"], "task_id": sibling["task_id"],
+        "workflow_id": sibling["workflow_id"], "event_type": "task_started",
+    })
+    state_db.upsert_trajectory_finding(
+        _finding(sibling["run_id"], "fnd-sibling-noise", task_id=sibling["task_id"]),
+        db_path=db,
+    )
+    # The sibling is outside the target's relevant closure, so its writes
+    # must not invalidate the target candidate even after the sibling itself
+    # recompiles (per-task heads are independent).
+    _compile(db, sibling, "tester")
+    candidate = dict(old.to_mapping())
+    candidate["context_id"] = "wc_sibling_unrelated_replay"
+    saved = state_db.save_working_context(
+        candidate, db_path=db, fingerprint_config=_config(None),
+    )
+    assert saved.get("_stale_snapshot") is not True
+    # Recompiling the target after unrelated writes reuses the same snapshot:
+    # no relevant source changed, so version, watermark and fingerprint hold.
+    again = _compile(db, target, "reviewer")
+    assert again.context_id == old.context_id
 
 
 def test_existing_context_id_retry_is_idempotent_after_source_clock_change(tmp_path: Path):
@@ -1052,7 +1096,7 @@ def test_source_clock_ignores_writes_from_another_workflow(tmp_path: Path):
     assert state_db.get_working_context(saved["context_id"], db_path=db) is not None
 
 
-def test_source_clock_still_detects_writes_in_same_workflow_scope(tmp_path: Path):
+def test_own_task_write_followed_by_recompile_marks_old_candidate_stale(tmp_path: Path):
     from herdr.context_projection import _config
 
     db = tmp_path / "state.db"
@@ -1063,6 +1107,9 @@ def test_source_clock_still_detects_writes_in_same_workflow_scope(tmp_path: Path
         dict(target, goal=f"{target['goal']} updated"),
         db_path=db,
     )
+    # The task itself is always relevant: recompiling registers the new
+    # task-specific head, so the pre-write candidate is stale.
+    _compile(db, target, "developer")
     candidate = dict(context.to_mapping())
     candidate["context_id"] = "wc_scope_clock_same_workflow"
     saved = state_db.save_working_context(
@@ -1937,6 +1984,10 @@ def test_workflow_update_makes_same_execution_scope_candidate_stale(tmp_path: Pa
     workflow["status"] = "paused"
     workflow["current_stage"] = "test"
     state_db.save_workflow(workflow, db_path=db)
+    # Workflow state is part of every relevant projection: recompiling
+    # registers the new task-specific head, so the pre-update candidate is
+    # stale.
+    _compile(db, target, "developer")
     candidate = dict(context.to_mapping())
     candidate["context_id"] = "wc_workflow_scope_stale"
     saved = state_db.save_working_context(
@@ -1978,8 +2029,8 @@ def test_source_backed_context_cannot_omit_clock(tmp_path: Path):
 def test_late_old_source_candidate_is_not_latest_after_revision_change(tmp_path: Path):
     db = tmp_path / "state.db"
     _seed_workflow(db)
-    upstream = _seed_task(db, _task("task-late-source-upstream"))
-    target = _seed_task(db, _task("task-late-source-target"))
+    upstream = _seed_task(db, _task("task-late-source-upstream", node="implementation"))
+    target = _seed_task(db, _task("task-late-source-target", node="review"))
     state_db.upsert_trajectory_finding(
         _finding(upstream["run_id"], "fnd-late-source", task_id=upstream["task_id"], summary="old"),
         db_path=db,
