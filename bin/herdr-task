@@ -1311,6 +1311,59 @@ def cmd_compact(args):
     print(f"Evidence refs: {len(pack.evidence_refs)} | Artifact refs: {len(pack.artifact_refs)}")
 
 
+def cmd_route_shadow(args):
+    """Read-only Adaptive Router v1 shadow ranking (never dispatches)."""
+    from herdr import adaptive_router
+
+    try:
+        store = _get_store()
+        db_path = getattr(store, "db_path", None)
+        candidates = [
+            part.strip()
+            for part in str(getattr(args, "agents", "") or "").split(",")
+            if part.strip()
+        ]
+        if not candidates:
+            try:
+                from herdr.agent_router import _candidate_order, ensure_pool_for_project
+                from herdr.projects import project_for_workflow
+                project = project_for_workflow(args.workflow_id)
+                pool = ensure_pool_for_project(project.get("project_id"))
+                candidates = _candidate_order(pool, args.node, args.task_type)
+            except Exception:
+                candidates = []
+        if not candidates:
+            try:
+                from herdr.agent_router import DEFAULT_ALLOWED
+            except Exception:
+                DEFAULT_ALLOWED = list(KNOWN_AGENTS)
+            candidates = list(DEFAULT_ALLOWED)
+        rankings = adaptive_router.rank_candidates(
+            candidates,
+            db_path=db_path,
+            node=args.node,
+            task_type=args.task_type,
+            cutoff=time.time(),
+            active_loads={},
+            reserved_loads={},
+        )
+    except ValueError as exc:
+        print(f"[ROUTE-SHADOW] {exc}", file=sys.stderr)
+        sys.exit(2)
+    except Exception as exc:  # noqa: BLE001 -- CLI boundary reports and exits nonzero
+        print(f"[ROUTE-SHADOW] failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    if getattr(args, "json", False):
+        print(json.dumps(
+            {"node": args.node, "task_type": args.task_type,
+             "rankings": rankings,
+             "algorithm_version": adaptive_router.ALGORITHM_VERSION},
+            ensure_ascii=False, indent=2))
+        return
+    print(adaptive_router.explain_ranking(rankings))
+
+
 def cmd_metrics(args):
     """Read-only, run-scoped Harness Metrics summary."""
     from herdr.metrics import get_run_metrics
@@ -2340,6 +2393,7 @@ def _launch_task(args):
         "baseline_commit": baseline_commit,
         "onto_branch": recorded_onto,
         "integration_mode": args.integration_mode,
+        "task_type": args.task_type,
         "status": "pending",
         "goal": args.goal,
         "acceptance_criteria": args.acceptance,
@@ -6119,6 +6173,19 @@ def main():
     eval_compare_cmd.add_argument("--after-revision", type=int, default=None)
     eval_compare_cmd.add_argument("--json", action="store_true")
 
+    route_shadow_cmd = sub.add_parser(
+        "route-shadow",
+        help="Adaptive Router v1 影子排名（只读，不派发）",
+    )
+    route_shadow_cmd.add_argument("--workflow-id", default=None)
+    route_shadow_cmd.add_argument("--node", required=True)
+    route_shadow_cmd.add_argument("--task-type", default="docs")
+    route_shadow_cmd.add_argument(
+        "--agents", default=None,
+        help="逗号分隔候选集；缺省按项目池偏好顺序近似",
+    )
+    route_shadow_cmd.add_argument("--json", action="store_true")
+
     args = parser.parse_args()
 
     if args.command == "add":
@@ -6442,6 +6509,9 @@ def main():
 
     elif args.command == "eval-compare":
         cmd_eval_compare(args)
+
+    elif args.command == "route-shadow":
+        cmd_route_shadow(args)
 
 
 if __name__ == "__main__":

@@ -30,6 +30,7 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 from herdr.transitions import (
     ACTIVE_TASK_STATUSES,
     COMPLETED_TASK_STATUSES,
+    TERMINAL_TASK_STATUSES,
     validate_task_transition,
     validate_workflow_transition,
 )
@@ -768,6 +769,51 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
 
     conn.execute("CREATE INDEX IF NOT EXISTS idx_eval_results_run_revision ON eval_results(run_id, revision DESC);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_eval_results_created ON eval_results(created_at DESC);")
+    # Immutable Agent Execution Outcome facts (write-time truth for the
+    # Adaptive Router; see herdr/execution_outcome.py). No foreign keys:
+    # outcomes survive workflow deletion like eval rows do.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS agent_execution_outcomes (
+            outcome_id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            task_id TEXT NOT NULL,
+            workflow_id TEXT NOT NULL,
+            agent TEXT NOT NULL,
+            node TEXT NOT NULL,
+            task_type TEXT NOT NULL DEFAULT '',
+            started_at REAL,
+            finished_at REAL,
+            wall_time_seconds REAL,
+            final_status TEXT NOT NULL,
+            requirements_satisfied INTEGER NOT NULL,
+            verification_passed INTEGER NOT NULL,
+            qualified_success INTEGER NOT NULL,
+            rework_count INTEGER NOT NULL DEFAULT 0,
+            blocked_count INTEGER NOT NULL DEFAULT 0,
+            human_intervention_count INTEGER NOT NULL DEFAULT 0,
+            recorded_at REAL NOT NULL,
+            source_eval_id TEXT NOT NULL,
+            source_eval_revision INTEGER NOT NULL,
+            source_task_version INTEGER NOT NULL DEFAULT 0,
+            schema_version INTEGER NOT NULL DEFAULT 1,
+            UNIQUE(task_id, run_id)
+        );
+    """)
+    existing_bucket = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE name = 'idx_outcomes_bucket'"
+    ).fetchone()
+    if existing_bucket is not None and "outcome_id" not in str(
+        existing_bucket["sql"] or ""
+    ):
+        # Mid-branch DBs may carry the first 4-column revision; rebuild so
+        # the ORDER BY tiebreaker stays index-served (no temp B-tree).
+        conn.execute("DROP INDEX idx_outcomes_bucket")
+        existing_bucket = None
+    if existing_bucket is None:
+        conn.execute(
+            "CREATE INDEX idx_outcomes_bucket "
+            "ON agent_execution_outcomes(agent, node, task_type, recorded_at DESC, outcome_id DESC);"
+        )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_replay_specs_source ON replay_specs(source_run_id);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_replay_specs_replay ON replay_specs(replay_run_id);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_replay_specs_workflow ON replay_specs(workflow_id);")
@@ -1271,6 +1317,22 @@ def save_task(
                 updated_at=excluded.updated_at,
                 version=COALESCE(tasks.version, 0) + 1;
         """, (tid, wid, node, stage, agent, status, verdict, verdict_note, pane_id, goal, blocker, payload_json, created_at, now))
+        # Outcome choke point (write path only): a task reaching a terminal
+        # status may now be settleable. Best-effort and fail-open; the
+        # canonical resolver lives in herdr.execution_outcome.
+        if (
+            should_close
+            and str(status) in TERMINAL_TASK_STATUSES
+            and _outcome_autofinalize_enabled()
+        ):
+            try:
+                from .execution_outcome import try_autofinalize_for_task
+            except ImportError:  # pragma: no cover - script-style fallback
+                from herdr.execution_outcome import try_autofinalize_for_task
+            try:
+                try_autofinalize_for_task(str(tid), db_path=db_path)
+            except Exception:
+                pass
     finally:
         if should_close:
             conn.close()
@@ -3057,6 +3119,200 @@ def aggregate_run_metric_rows(run_id: str, db_path: Optional[Path] = None) -> Di
             "latest_working_context": dict(latest_working_context) if latest_working_context else None,
             "latest_context": dict(latest_context) if latest_context else None,
         }
+    finally:
+        conn.close()
+
+
+OUTCOME_SCHEMA_VERSION = 1
+
+#: Newest-first outcome cap per candidate agent. Each candidate gets its
+#: own window so a high-frequency agent cannot crowd others out.
+OUTCOME_PER_AGENT_LIMIT = 500
+
+
+def _outcome_autofinalize_enabled() -> bool:
+    """Kill-switch for write-path auto-finalization.
+
+    Tests seed historical timestamps and finalize explicitly; production
+    leaves the default on so terminal task/eval writes settle outcomes.
+    """
+    return os.environ.get("HERDR_OUTCOME_AUTOFINALIZE", "1") != "0"
+
+
+_OUTCOME_COLUMNS = (
+    "outcome_id, run_id, task_id, workflow_id, agent, node, task_type, "
+    "started_at, finished_at, wall_time_seconds, final_status, "
+    "requirements_satisfied, verification_passed, qualified_success, "
+    "rework_count, blocked_count, human_intervention_count, recorded_at, "
+    "source_eval_id, source_eval_revision, source_task_version, schema_version"
+)
+
+
+def _decode_outcome_row(row: sqlite3.Row) -> Dict[str, Any]:
+    return {
+        "outcome_id": row["outcome_id"],
+        "run_id": row["run_id"],
+        "task_id": row["task_id"],
+        "workflow_id": row["workflow_id"],
+        "agent": row["agent"],
+        "node": row["node"],
+        "task_type": row["task_type"] or "",
+        "started_at": row["started_at"],
+        "finished_at": row["finished_at"],
+        "wall_time_seconds": row["wall_time_seconds"],
+        "final_status": row["final_status"],
+        "requirements_satisfied": bool(row["requirements_satisfied"]),
+        "verification_passed": bool(row["verification_passed"]),
+        "qualified_success": bool(row["qualified_success"]),
+        "rework_count": int(row["rework_count"] or 0),
+        "blocked_count": int(row["blocked_count"] or 0),
+        "human_intervention_count": int(row["human_intervention_count"] or 0),
+        "recorded_at": float(row["recorded_at"]),
+        "source_eval_id": row["source_eval_id"],
+        "source_eval_revision": int(row["source_eval_revision"]),
+        "source_task_version": int(row["source_task_version"] or 0),
+        "schema_version": int(row["schema_version"] or 0),
+    }
+
+
+def insert_execution_outcome(
+    outcome: Dict[str, Any],
+    db_path: Optional[Path] = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> Dict[str, Any]:
+    """Immutable insert of one settled execution outcome.
+
+    There is deliberately no update path. A repeat insert for the same
+    (task_id, run_id) is an idempotent no-op returning the stored row.
+    """
+    required = (
+        "outcome_id", "run_id", "task_id", "workflow_id", "agent", "node",
+        "final_status", "source_eval_id", "source_eval_revision",
+        "recorded_at",
+    )
+    missing = [key for key in required if outcome.get(key) in (None, "")]
+    if missing:
+        raise ValueError(f"outcome missing required fields: {missing}")
+
+    should_close = False
+    if conn is None:
+        conn = get_db_connection(db_path)
+        should_close = True
+    try:
+        conn.execute(
+            "INSERT INTO agent_execution_outcomes "
+            f"({_OUTCOME_COLUMNS}) VALUES ("
+            + ", ".join(["?"] * 22) + ") "
+            "ON CONFLICT(task_id, run_id) DO NOTHING",
+            (
+                str(outcome["outcome_id"]),
+                str(outcome["run_id"]),
+                str(outcome["task_id"]),
+                str(outcome.get("workflow_id") or ""),
+                str(outcome["agent"]),
+                str(outcome["node"]),
+                str(outcome.get("task_type") or ""),
+                outcome.get("started_at"),
+                outcome.get("finished_at"),
+                outcome.get("wall_time_seconds"),
+                str(outcome["final_status"]),
+                1 if outcome.get("requirements_satisfied") else 0,
+                1 if outcome.get("verification_passed") else 0,
+                1 if outcome.get("qualified_success") else 0,
+                int(outcome.get("rework_count") or 0),
+                int(outcome.get("blocked_count") or 0),
+                int(outcome.get("human_intervention_count") or 0),
+                float(outcome["recorded_at"]),
+                str(outcome["source_eval_id"]),
+                int(outcome["source_eval_revision"]),
+                int(outcome.get("source_task_version") or 0),
+                int(outcome.get("schema_version") or OUTCOME_SCHEMA_VERSION),
+            ),
+        )
+        if should_close:
+            conn.commit()
+        row = conn.execute(
+            "SELECT * FROM agent_execution_outcomes "
+            "WHERE task_id = ? AND run_id = ?",
+            (str(outcome["task_id"]), str(outcome["run_id"])),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("outcome insert was not readable")
+        return _decode_outcome_row(row)
+    finally:
+        if should_close:
+            conn.close()
+
+
+def get_execution_outcome(
+    task_id: str,
+    run_id: str,
+    db_path: Optional[Path] = None,
+) -> Optional[Dict[str, Any]]:
+    """Fetch one immutable outcome by identity; absent pairs return None."""
+    conn = get_db_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT * FROM agent_execution_outcomes "
+            "WHERE task_id = ? AND run_id = ?",
+            (str(task_id), str(run_id)),
+        ).fetchone()
+        return _decode_outcome_row(row) if row is not None else None
+    finally:
+        conn.close()
+
+
+def query_execution_outcomes(
+    *,
+    agents: Optional[List[str]],
+    node: str,
+    task_type: str,
+    before: float,
+    exclude_run_id: Optional[str] = None,
+    per_agent_limit: Optional[int] = None,
+    lookback_floor: Optional[float] = None,
+    db_path: Optional[Path] = None,
+) -> List[Dict[str, Any]]:
+    """Read settled outcomes: one newest-first slice per candidate agent.
+
+    The router hot path only ever touches this table. Bucket equality on
+    (agent, node, task_type) plus recorded_at ordering is served by
+    idx_outcomes_bucket; no JSON extraction, no ownership joins, no
+    mutable-state reconstruction at query time.
+    """
+    capped = int(per_agent_limit) if per_agent_limit is not None else OUTCOME_PER_AGENT_LIMIT
+    if capped < 1:
+        raise ValueError("per_agent_limit must be a positive int")
+    if not str(node or "").strip():
+        raise ValueError("node is required")
+    scopes: List[Optional[str]] = (
+        [str(agent) for agent in agents] if agents is not None else [None]
+    )
+    conn = get_db_connection(db_path)
+    try:
+        outcomes: List[Dict[str, Any]] = []
+        for agent in scopes:
+            query = (
+                f"SELECT {_OUTCOME_COLUMNS} FROM agent_execution_outcomes "
+                "WHERE node = ? AND task_type = ? AND recorded_at < ?"
+            )
+            params: List[Any] = [str(node), str(task_type or ""), float(before)]
+            if agent is not None:
+                query += " AND agent = ?"
+                params.append(str(agent))
+            else:
+                query += " AND agent IS NOT NULL AND agent <> ''"
+            if exclude_run_id:
+                query += " AND run_id <> ?"
+                params.append(str(exclude_run_id))
+            if lookback_floor is not None:
+                query += " AND recorded_at >= ?"
+                params.append(float(lookback_floor))
+            query += " ORDER BY recorded_at DESC, outcome_id DESC LIMIT ?"
+            params.append(capped)
+            for row in conn.execute(query, tuple(params)).fetchall():
+                outcomes.append(_decode_outcome_row(row))
+        return outcomes
     finally:
         conn.close()
 
@@ -5206,6 +5462,23 @@ def transition_task(
 
         if should_close:
             conn.execute("COMMIT;")
+
+        # Outcome choke point: a terminal transition settles here when the
+        # eval already landed (the reverse order is covered by the
+        # record_eval_result hook). Best-effort, never breaks transitions.
+        if (
+            should_close
+            and str(to_status) in TERMINAL_TASK_STATUSES
+            and _outcome_autofinalize_enabled()
+        ):
+            try:
+                from .execution_outcome import try_autofinalize_for_task
+            except ImportError:  # pragma: no cover - script-style fallback
+                from herdr.execution_outcome import try_autofinalize_for_task
+            try:
+                try_autofinalize_for_task(str(task_id), db_path=db_path)
+            except Exception:
+                pass
 
         return {
             "ok": True,
