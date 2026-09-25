@@ -982,6 +982,19 @@ def test_impossible_context_budget_fails_closed_instead_of_dropping_goal(tmp_pat
         _compile(db, target, "developer", config={"max_chars": 500})
 
 
+def test_max_chars_above_storage_limit_fails_fast_before_compilation(tmp_path: Path):
+    from herdr.context_projection import MAX_STORAGE_CONTEXT_CHARS, _config
+
+    assert _config({"max_chars": MAX_STORAGE_CONTEXT_CHARS})["max_chars"] == MAX_STORAGE_CONTEXT_CHARS
+    with pytest.raises(ValueError, match="storage limit"):
+        _config({"max_chars": MAX_STORAGE_CONTEXT_CHARS + 1})
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    target = _seed_task(db, _task("task-oversize-config"))
+    with pytest.raises(ValueError, match="storage limit"):
+        _compile(db, target, "developer", config={"max_chars": MAX_STORAGE_CONTEXT_CHARS + 1})
+
+
 def test_relevant_write_followed_by_recompile_marks_old_candidate_stale(tmp_path: Path):
     db = tmp_path / "state.db"
     _seed_workflow(db)

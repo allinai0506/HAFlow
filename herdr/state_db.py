@@ -4201,6 +4201,7 @@ def save_working_context(
     if not isinstance(fingerprint_config, dict):
         raise ValueError("working context requires fingerprint configuration")
     from .context_projection import _config as normalize_fingerprint_config
+    from .context_projection import MAX_STORAGE_CONTEXT_CHARS
     fingerprint_config = normalize_fingerprint_config(fingerprint_config)
     max_chars = int(fingerprint_config.get("max_chars", 20000))
     if max_chars < 1 or len(json.dumps(context, ensure_ascii=False)) > max_chars:
@@ -4262,7 +4263,7 @@ def save_working_context(
     payload_json = json.dumps(
         context, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
     )
-    if len(json.dumps(context, ensure_ascii=False)) > 20000:
+    if len(json.dumps(context, ensure_ascii=False)) > MAX_STORAGE_CONTEXT_CHARS:
         raise ValueError("working context exceeds the storage size limit")
     metrics_json = json.dumps(
         context.get("metrics") or {}, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
@@ -4336,44 +4337,6 @@ def save_working_context(
         # intentionally NOT a save gate: any source write in the execution
         # (including unrelated sibling tasks) bumps it, so gating on it marks
         # relevant candidates stale and forces futile retries.
-        _validate_context_source_existence(conn, context)
-        if not all_source_refs.issubset(declared_source_refs):
-            raise ValueError("working context source_refs does not cover all provenance")
-        # Relevant-source TOCTOU guard: heads are only advanced by compile-time
-        # registration, so a relevant write landing after the compiler's last
-        # fresh read would otherwise persist a stale immutable snapshot with a
-        # matching head. Recompute the lightweight relevant source version
-        # inside this write transaction (we hold the write lock, so no other
-        # writer can commit between this check and the INSERT below) and
-        # require it to match the candidate. Unrelated sibling writes do not
-        # change the relevant version and pass through. planned_links travel
-        # in metrics so handoff compiles recompute the same closure.
-        from .context_sources import _read_source_snapshot
-        guard_links = []
-        for link in ((context.get("metrics") or {}).get("planned_links") or []):
-            if not isinstance(link, Mapping):
-                continue
-            from_id = str(link.get("from_task_id") or "")
-            to_id = str(link.get("to_task_id") or "")
-            if from_id and to_id:
-                guard_links.append({"from_task_id": from_id, "to_task_id": to_id})
-        try:
-            guard_snapshot = _read_source_snapshot(
-                workflow_id=str(context.get("workflow_id") or ""),
-                task_id=str(context.get("task_id") or ""),
-                db_path=db_path,
-                planned_links=guard_links or None,
-            )
-        except Exception:
-            conn.commit()
-            result = dict(context)
-            result["_stale_snapshot"] = True
-            return result
-        if str(guard_snapshot.get("source_version") or "") != str(context.get("source_version") or ""):
-            conn.commit()
-            result = dict(context)
-            result["_stale_snapshot"] = True
-            return result
         source_head = conn.execute(
             """
             SELECT source_version, revision

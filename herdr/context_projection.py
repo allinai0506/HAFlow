@@ -14,12 +14,21 @@ from .context_models import (
     _clip_text,
 )
 
+#: Hard storage ceiling enforced by `save_working_context`. Compiler budgets
+#: above this could produce contexts persistence must reject, so configuration
+#: fails fast here instead of compiling an unsavable snapshot.
+MAX_STORAGE_CONTEXT_CHARS = 20_000
+
 
 def _config(value: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
     max_chars = int((value or {}).get("max_chars", DEFAULT_MAX_CHARS))
     max_items = int((value or {}).get("max_items", DEFAULT_MAX_ITEMS))
     if max_chars < 500:
         raise ValueError("max_chars must be at least 500")
+    if max_chars > MAX_STORAGE_CONTEXT_CHARS:
+        raise ValueError(
+            f"max_chars must not exceed the {MAX_STORAGE_CONTEXT_CHARS}-char storage limit"
+        )
     if max_items < 1:
         raise ValueError("max_items must be positive")
     caps = dict(DEFAULT_MAX_ITEMS_PER_KIND)
