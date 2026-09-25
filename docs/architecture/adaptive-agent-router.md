@@ -57,10 +57,16 @@ choose_agent → _choose_agent_impl → actual_agent (唯一执行依据)
 
 | 指标 | 来源 |
 | --- | --- |
-| agent/node/stage/status/wall | `tasks` 表（`state_db.query_adaptive_history`） |
-| requirements/verification/human/final | `eval_results` 最新 revision（run 归属 + task 归属双校验） |
+| agent/node/stage/status/wall | `tasks` 表（`state_db.query_adaptive_history`）；`task_type` 由 launch 持久化（`bin/herdr-task`），缺失的 legacy 行归入 `""` 桶 |
+| requirements/verification/human/final | `eval_results` 在 cutoff 之前的最新 revision，按 run_id + task_id 双归属；taskless eval（task_id IS NULL）仅当 run_id 可证明唯一属于一个 Task 时归属，否则 unknown；`final_status` 只取 eval 行，绝不用 task.status 回填 |
 | rework / blocked | task `status_history` 中的状态机枚举值（非字符串猜测） |
 | 持久化 | `StateStore.record_event("route_decision")`，source=`adaptive-router-shadow` |
+
+查询按当前候选 agents 分片：每个 candidate 独立 newest-first 窗口
+（默认 500 条），高频 Agent 挤不掉低频候选的历史。分片由
+`idx_tasks_agent_node_created(agent, node, created_at)` 索引服务
+（EXPLAIN 回归锁定无全表扫描），处在 dispatch 热路径上的同步查询
+成本只与该 Agent 自身历史成正比。
 
 `task_type` 缺失的 legacy task 归入 `""` 桶独立统计，不猜测。
 `agent` 只取 `tasks.agent`（路由标签），不与 agent_name/type 混淆。
@@ -82,11 +88,12 @@ queue、confidence、fallback_reason），无 opaque score。
 
 ## 8. Known limitations
 
-1. 历史查询按 `created_at DESC LIMIT 2000` 取最新窗口；超大规模历史
-   下更老的样本会被自然遗忘（lookback_days 可选开启时间下限）。
+1. 每 candidate newest-first 窗口默认 500 条；更老样本自然遗忘
+   （lookback_days 可选开启时间下限）。
 2. wall time 取 task 时间戳差，是执行时长近似，不是 Pane 真实存活测量。
 3. queue delay 是负载线性估算，不是观测到的排队事实。
 4. task_type 未持久化的老数据只能按 `""` 桶统计，跨桶不可比。
+   2026-09-25 起 launch 持久化 task_type，此后新数据逐桶可用。
 5. `herdr-task route-shadow` 未指定 `--agents` 时，候选集按项目池偏好顺序
    近似推导，未复刻 health/disabled/isolation 硬约束过滤；其输出是
    “历史表现排名”，不是“生产可派发集合”。

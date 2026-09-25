@@ -2393,6 +2393,7 @@ def _launch_task(args):
         "baseline_commit": baseline_commit,
         "onto_branch": recorded_onto,
         "integration_mode": args.integration_mode,
+        "task_type": args.task_type,
         "status": "pending",
         "goal": args.goal,
         "acceptance_criteria": args.acceptance,

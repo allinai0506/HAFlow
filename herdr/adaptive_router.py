@@ -56,8 +56,9 @@ REWORK_PENALTY_SECONDS = 300.0
 QUEUE_SECONDS_PER_LOAD = 30.0
 #: Assumed execution time when an agent has no observed wall times here.
 FALLBACK_EXECUTION_SECONDS = 600.0
-#: Bounded history window per ranking (newest-first); see also lookback.
-DEFAULT_HISTORY_LIMIT = 2000
+#: Newest-first history cap per candidate agent. Each candidate gets its
+#: own window so a high-frequency agent cannot crowd others out.
+DEFAULT_HISTORY_LIMIT = 500
 #: Optional age floor for history; None disables time filtering.
 DEFAULT_LOOKBACK_DAYS: Optional[float] = None
 
@@ -100,15 +101,17 @@ def collect_samples(
     node: str,
     task_type: str,
     cutoff: float,
+    agents: Optional[List[str]] = None,
     exclude_run_id: Optional[str] = None,
     limit: Optional[int] = None,
     lookback_days: Optional[float] = None,
 ) -> List[Dict[str, Any]]:
-    """Fetch the bounded, cutoff-gated history slice for one bucket."""
+    """Fetch bounded, cutoff-gated history slices, one window per agent."""
     return state_db.query_adaptive_history(
         str(node),
         normalize_task_type(task_type),
         cutoff=float(cutoff),
+        agents=list(agents) if agents is not None else None,
         exclude_run_id=exclude_run_id,
         limit=int(limit) if limit is not None else DEFAULT_HISTORY_LIMIT,
         lookback_days=lookback_days if lookback_days is not None else DEFAULT_LOOKBACK_DAYS,
@@ -255,6 +258,7 @@ def rank_candidates(
     """
     samples = collect_samples(
         db_path, node=node, task_type=task_type, cutoff=cutoff,
+        agents=list(candidates),
         exclude_run_id=exclude_run_id, limit=limit,
         lookback_days=lookback_days,
     )

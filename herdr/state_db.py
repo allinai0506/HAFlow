@@ -533,6 +533,16 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_wf ON tasks(workflow_id);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_wf_created ON tasks(workflow_id, created_at, task_id);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);")
+    # Adaptive Router hot path: per-agent newest-first slices filter on
+    # (agent, effective node) with ORDER BY created_at DESC LIMIT, so the
+    # composite index serves them without scanning the tasks table.
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_agent_node_created ON tasks(agent, node, created_at DESC);")
+    # Run-ownership probe for taskless eval attribution (fail-closed when
+    # a run_id is shared by several tasks).
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_tasks_run_id_expr "
+        f"ON tasks({_RUN_ID_EXPR_BARE});"
+    )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_cp_wf_created ON checkpoints(workflow_id, created_at DESC);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_completion_observations_task ON completion_observations(task_id);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_cp_parent ON checkpoints(parent_checkpoint_id);")
@@ -3061,12 +3071,23 @@ def aggregate_run_metric_rows(run_id: str, db_path: Optional[Path] = None) -> Di
         conn.close()
 
 
-ADAPTIVE_HISTORY_DEFAULT_LIMIT = 2000
+ADAPTIVE_HISTORY_PER_AGENT_LIMIT = 500
 
 _RUN_ID_EXPR = (
     "COALESCE(NULLIF(CASE WHEN json_valid(t.payload_json) "
     "THEN json_extract(t.payload_json, '$.run_id') END, ''), "
     "'run_' || t.task_id)"
+)
+_RUN_ID_EXPR_T2 = (
+    "COALESCE(NULLIF(CASE WHEN json_valid(t2.payload_json) "
+    "THEN json_extract(t2.payload_json, '$.run_id') END, ''), "
+    "'run_' || t2.task_id)"
+)
+# Bare-column twin of _RUN_ID_EXPR for the expression index definition.
+_RUN_ID_EXPR_BARE = (
+    "COALESCE(NULLIF(CASE WHEN json_valid(payload_json) "
+    "THEN json_extract(payload_json, '$.run_id') END, ''), "
+    "'run_' || task_id)"
 )
 _TASK_TYPE_EXPR = (
     "COALESCE(NULLIF(CASE WHEN json_valid(t.payload_json) "
@@ -3081,38 +3102,7 @@ def _adaptive_bool(raw: Any) -> Optional[bool]:
     return bool(raw)
 
 
-def query_adaptive_history(
-    node: str,
-    task_type: str,
-    *,
-    cutoff: float,
-    exclude_run_id: Optional[str] = None,
-    limit: Optional[int] = None,
-    lookback_days: Optional[float] = None,
-    db_path: Optional[Path] = None,
-) -> List[Dict[str, Any]]:
-    """Read a bounded, cutoff-gated slice of routing history.
-
-    One row per historical task in the (node/stage x task_type) bucket.
-    Only facts durable before ``cutoff`` are returned; the caller's own
-    ``exclude_run_id`` never appears. Eval attribution joins on run_id AND
-    owning task_id (NULL eval task_id tolerated for legacy rows), so one
-    run's eval can never leak into another run's sample. Unknown eval facts
-    stay NULL; callers must not default them to success.
-
-    Bounded by ORDER BY created_at DESC + LIMIT (newest-first window), so
-    routing cost stays flat as history grows.
-    """
-    bounded = int(limit) if limit is not None else ADAPTIVE_HISTORY_DEFAULT_LIMIT
-    if bounded < 1:
-        raise ValueError("limit must be a positive int")
-    if not str(node or "").strip():
-        raise ValueError("node is required")
-    normalized_type = str(task_type or "")
-    cutoff = float(cutoff)
-
-    query = f"""
-        SELECT
+_ADAPTIVE_SLICE_COLUMNS = f"""
           t.task_id AS task_id,
           t.workflow_id AS workflow_id,
           t.agent AS agent,
@@ -3140,35 +3130,120 @@ def query_adaptive_history(
           ev.human_intervention_count AS eval_human_intervention_count,
           ev.final_status AS eval_final_status,
           ev.created_at AS eval_created_at
+"""
+
+
+def _adaptive_slice_query(
+    agent: Optional[str],
+    node: str,
+    normalized_type: str,
+    cutoff: float,
+    exclude_run_id: Optional[str],
+    lookback_floor: Optional[float],
+    slice_limit: int,
+) -> Tuple[str, List[Any]]:
+    """Build one per-agent newest-first slice query with its parameters.
+
+    The (agent, node, created_at) composite index serves the equality
+    filters plus ORDER BY/LIMIT directly, so cost stays proportional to
+    the agent's own history instead of a full tasks scan. The eval join
+    takes the latest revision *before* cutoff (never the global MAX),
+    and a taskless eval (task_id IS NULL) is attributed only when no
+    sibling task claims the same run_id.
+    """
+    query = f"""
+        SELECT {_ADAPTIVE_SLICE_COLUMNS}
         FROM tasks t
         LEFT JOIN (
           SELECT e.* FROM eval_results e
           WHERE e.created_at < ?
             AND e.revision = (
               SELECT MAX(e2.revision) FROM eval_results e2
-              WHERE e2.run_id = e.run_id
+              WHERE e2.run_id = e.run_id AND e2.created_at < ?
             )
         ) ev ON ev.run_id = {_RUN_ID_EXPR}
-            AND (ev.task_id IS NULL OR ev.task_id = t.task_id)
+            AND (
+              ev.task_id = t.task_id
+              OR (
+                ev.task_id IS NULL
+                AND NOT EXISTS (
+                  SELECT 1 FROM tasks t2
+                  WHERE t2.task_id <> t.task_id
+                    AND {_RUN_ID_EXPR_T2} = {_RUN_ID_EXPR}
+                )
+              )
+            )
         WHERE {_NODE_EXPR} = ?
           AND {_TASK_TYPE_EXPR} = ?
           AND t.agent IS NOT NULL AND t.agent <> ''
-          AND t.created_at < ?
     """
-    params: List[Any] = [cutoff, str(node), normalized_type, cutoff]
+    params: List[Any] = [cutoff, cutoff, str(node), normalized_type]
+    if agent is not None:
+        query += " AND t.agent = ?"
+        params.append(str(agent))
+    query += " AND t.created_at < ?"
+    params.append(cutoff)
     if exclude_run_id:
         query += f" AND {_RUN_ID_EXPR} <> ?"
         params.append(str(exclude_run_id))
-    if lookback_days is not None:
-        floor = float(cutoff) - float(lookback_days) * 86400.0
+    if lookback_floor is not None:
         query += " AND t.created_at >= ?"
-        params.append(floor)
+        params.append(lookback_floor)
     query += " ORDER BY t.created_at DESC, t.task_id DESC LIMIT ?"
-    params.append(bounded)
+    params.append(slice_limit)
+    return query, params
+
+
+def query_adaptive_history(
+    node: str,
+    task_type: str,
+    *,
+    cutoff: float,
+    agents: Optional[List[str]] = None,
+    exclude_run_id: Optional[str] = None,
+    limit: Optional[int] = None,
+    lookback_days: Optional[float] = None,
+    db_path: Optional[Path] = None,
+) -> List[Dict[str, Any]]:
+    """Read bounded, cutoff-gated history slices for the given candidates.
+
+    One newest-first slice per agent in ``agents`` (each capped by
+    ``limit``), so a high-frequency agent can never crowd a low-frequency
+    candidate out of the window. ``agents=None`` keeps a single unscoped
+    slice for debug/CLI use.
+
+    Only facts durable before ``cutoff`` are returned; the caller's own
+    ``exclude_run_id`` never appears. Eval attribution is fail-closed:
+    a taskless eval (task_id IS NULL) counts only when its run_id is
+    provably owned by exactly one task, otherwise the sample stays
+    outcome-unknown. ``final_status`` comes from the eval row alone and
+    is never backfilled from task status. Unknown eval facts stay NULL;
+    callers must not default them to success.
+    """
+    per_slice = int(limit) if limit is not None else ADAPTIVE_HISTORY_PER_AGENT_LIMIT
+    if per_slice < 1:
+        raise ValueError("limit must be a positive int")
+    if not str(node or "").strip():
+        raise ValueError("node is required")
+    normalized_type = str(task_type or "")
+    cutoff = float(cutoff)
+    lookback_floor: Optional[float] = None
+    if lookback_days is not None:
+        lookback_floor = float(cutoff) - float(lookback_days) * 86400.0
+
+    scopes: List[Optional[str]] = (
+        [str(agent) for agent in agents] if agents is not None else [None]
+    )
 
     conn = get_db_connection(db_path)
     try:
-        rows = conn.execute(query, tuple(params)).fetchall()
+        rows = []
+        for agent in scopes:
+            query, params = _adaptive_slice_query(
+                agent, str(node), normalized_type, cutoff,
+                exclude_run_id, lookback_floor, per_slice,
+            )
+            rows.extend(conn.execute(query, tuple(params)).fetchall())
     finally:
         conn.close()
 
@@ -3201,7 +3276,10 @@ def query_adaptive_history(
             human = int(human) if human is not None else None
         except (TypeError, ValueError):
             human = None
-        final_status = row["eval_final_status"] or row["status"] or None
+        # Eval-only: a missing eval final_status stays unknown and is
+        # never backfilled from task status.
+        eval_final = row["eval_final_status"]
+        final_status = str(eval_final) if eval_final else None
         samples.append({
             "agent": str(row["agent"]),
             "run_id": str(row["run_id"]),
