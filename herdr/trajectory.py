@@ -40,6 +40,7 @@ _EVENT_FIELDS = (
     "observation",
     "artifact",
     "verification",
+    "verification_passed",
     "usage",
     "metadata",
 )
@@ -73,6 +74,7 @@ class TrajectoryEvent:
     observation: Optional[Dict[str, Any]] = None
     artifact: Optional[Dict[str, Any]] = None
     verification: Optional[Dict[str, Any]] = None
+    verification_passed: Optional[bool] = None
     usage: Optional[Dict[str, Any]] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
 

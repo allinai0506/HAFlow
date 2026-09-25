@@ -34,6 +34,10 @@ class HarnessRunMetrics:
     context_packs_created: int = 0
     context_compactions: Optional[int] = None
     latest_context_pack_bytes: Optional[int] = None
+    working_context_compiles: int = 0
+    working_context_reused: int = 0
+    working_context_changed: int = 0
+    latest_working_context_bytes: Optional[int] = None
     verification_total: int = 0
     verification_passed: int = 0
     verification_failed: int = 0
@@ -67,6 +71,10 @@ class HarnessRunMetrics:
             "context_packs_created": self.context_packs_created,
             "context_compactions": self.context_compactions,
             "latest_context_pack_bytes": self.latest_context_pack_bytes,
+            "working_context_compiles": self.working_context_compiles,
+            "working_context_reused": self.working_context_reused,
+            "working_context_changed": self.working_context_changed,
+            "latest_working_context_bytes": self.latest_working_context_bytes,
             "verification_total": self.verification_total,
             "verification_passed": self.verification_passed,
             "verification_failed": self.verification_failed,
@@ -84,25 +92,36 @@ class HarnessRunMetrics:
 def _latest_context_pack_bytes(row: Optional[Dict[str, Any]]) -> Optional[int]:
     if row is None:
         return None
-    payload = {
-        "context_id": row["context_id"],
-        "run_id": row["run_id"],
-        "task_id": row["task_id"],
-        "workflow_id": row["workflow_id"],
-        "goal": row["goal"],
-        "current_state": json.loads(row["current_state_json"] or "{}"),
-        "completed": json.loads(row["completed_json"] or "[]"),
-        "verified_facts": json.loads(row["verified_facts_json"] or "[]"),
-        "important_findings": json.loads(row["important_findings_json"] or "[]"),
-        "evidence_refs": json.loads(row["evidence_refs_json"] or "[]"),
-        "artifact_refs": json.loads(row["artifact_refs_json"] or "[]"),
-        "open_issues": json.loads(row["open_issues_json"] or "[]"),
-        "next_focus": json.loads(row["next_focus_json"] or "[]"),
-        "source_event_sequence": int(row["source_event_sequence"] or 0),
-        "metadata": json.loads(row["metadata_json"] or "{}"),
-        "created_at": float(row["created_at"]),
-    }
-    return len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    try:
+        payload = {
+            "context_id": row["context_id"],
+            "run_id": row["run_id"],
+            "task_id": row["task_id"],
+            "workflow_id": row["workflow_id"],
+            "goal": row["goal"],
+            "current_state": json.loads(row["current_state_json"] or "{}"),
+            "completed": json.loads(row["completed_json"] or "[]"),
+            "verified_facts": json.loads(row["verified_facts_json"] or "[]"),
+            "important_findings": json.loads(row["important_findings_json"] or "[]"),
+            "evidence_refs": json.loads(row["evidence_refs_json"] or "[]"),
+            "artifact_refs": json.loads(row["artifact_refs_json"] or "[]"),
+            "open_issues": json.loads(row["open_issues_json"] or "[]"),
+            "next_focus": json.loads(row["next_focus_json"] or "[]"),
+            "source_event_sequence": int(row["source_event_sequence"] or 0),
+            "metadata": json.loads(row["metadata_json"] or "{}"),
+            "created_at": float(row["created_at"]),
+        }
+        return len(json.dumps(
+            payload, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _latest_working_context_bytes(row: Optional[Dict[str, Any]]) -> Optional[int]:
+    if row is None:
+        return None
+    return len(str(row.get("payload_json") or "").encode("utf-8"))
 
 
 def get_run_metrics(
@@ -133,7 +152,9 @@ def get_run_metrics(
         wall_time = round(max(0.0, (finished_at if finished_at is not None else current_time) - started_at), 6)
 
     final_status = task.get("status") if task else None
-    if final_status is None:
+    if facts["run_failed"] and final_status not in COMPLETED_TASK_STATUSES:
+        final_status = "failed"
+    elif final_status is None:
         if facts["run_completed"]:
             final_status = "completed"
         elif facts["run_failed"]:
@@ -162,6 +183,10 @@ def get_run_metrics(
         context_packs_created=packs,
         context_compactions=packs if packs else 0,
         latest_context_pack_bytes=_latest_context_pack_bytes(facts["latest_context"]),
+        working_context_compiles=facts.get("working_context_compiles", 0),
+        working_context_reused=facts.get("working_context_reused", 0),
+        working_context_changed=facts.get("working_context_changed", 0),
+        latest_working_context_bytes=_latest_working_context_bytes(facts.get("latest_working_context")),
         verification_total=facts["verification_total"],
         verification_passed=facts["verification_passed"],
         verification_failed=facts["verification_failed"],

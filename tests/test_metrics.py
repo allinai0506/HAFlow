@@ -119,6 +119,7 @@ def test_complete_run_aggregates_existing_authoritative_facts(tmp_path: Path):
 def test_observation_dedup_and_run_isolation(tmp_path: Path):
     db_path = tmp_path / "state.db"
     store = ObservationStore(db_path)
+    state_db.save_task(_task("run-a", status="working"), db_path=db_path)
     create_observation(run_id="run-a", source_type="agent_log", source_ref="same",
                        content="same", store=store)
     create_observation(run_id="run-a", source_type="agent_log", source_ref="same",
@@ -134,6 +135,7 @@ def test_observation_dedup_and_run_isolation(tmp_path: Path):
 
 def test_latest_context_pack_and_incomplete_run(tmp_path: Path):
     db_path = tmp_path / "state.db"
+    state_db.save_task(_task("run-open", status="working"), db_path=db_path)
     state_db.save_context_pack(_pack("run-open", "ctx-old", 10.0), db_path=db_path)
     state_db.save_context_pack(_pack("run-open", "ctx-new", 20.0), db_path=db_path)
     ledger = TrajectoryLedger(db_path)
@@ -149,8 +151,62 @@ def test_latest_context_pack_and_incomplete_run(tmp_path: Path):
     assert metrics.latest_context_pack_bytes is not None
 
 
+def test_legacy_task_without_events_uses_authoritative_identity(tmp_path: Path):
+    db_path = tmp_path / "legacy-no-events.db"
+    state_db.save_task(
+        {"task_id": "task-legacy-no-events", "workflow_id": "wf-1", "status": "working"},
+        db_path=db_path,
+    )
+    metrics = get_run_metrics("run_task-legacy-no-events", db_path=db_path, now=20.0)
+    assert metrics.task_id == "task-legacy-no-events"
+    assert metrics.workflow_id == "wf-1"
+    assert metrics.final_status == "working"
+    assert metrics.trajectory_events == 0
+
+
+def test_malformed_task_payload_fails_closed_without_sqlite_error(tmp_path: Path):
+    db_path = tmp_path / "malformed-task.db"
+    state_db.save_workflow(
+        {"workflow_id": "wf-malformed", "title": "fixture", "status": "running", "config": {}},
+        db_path=db_path,
+    )
+    state_db.save_task(
+        {"task_id": "task-malformed", "workflow_id": "wf-malformed", "status": "working"},
+        db_path=db_path,
+    )
+    conn = state_db.get_db_connection(db_path)
+    try:
+        trigger_names = [
+            row["name"] for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'trigger'"
+            ).fetchall()
+        ]
+        for trigger_name in trigger_names:
+            conn.execute(f'DROP TRIGGER "{trigger_name}"')
+        conn.execute(
+            "UPDATE tasks SET payload_json = ? WHERE task_id = ?",
+            ("{not-json", "task-malformed"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    metrics = get_run_metrics("run_task-malformed", db_path=db_path, now=20.0)
+    assert metrics.task_id is None
+    assert metrics.workflow_id is None
+    assert metrics.trajectory_events == 0
+
+
+def test_context_pack_without_authoritative_task_is_unknown_metrics(tmp_path: Path):
+    db_path = tmp_path / "state.db"
+    state_db.save_context_pack(_pack("run-ghost-pack", "ctx-ghost", 10.0), db_path=db_path)
+    metrics = get_run_metrics("run-ghost-pack", db_path=db_path, now=20.0)
+    assert metrics.context_packs_created == 0
+    assert metrics.latest_context_pack_bytes is None
+
+
 def test_failed_run_is_terminal_but_not_completed(tmp_path: Path):
     db_path = tmp_path / "state.db"
+    state_db.save_task(_task("run-failed", status="working"), db_path=db_path)
     ledger = TrajectoryLedger(db_path)
     ledger.append_event({"run_id": "run-failed", "event_type": "run_started", "timestamp": 5.0})
     ledger.append_event({"run_id": "run-failed", "event_type": "run_failed", "timestamp": 8.0})
@@ -220,10 +276,11 @@ def test_legacy_task_without_run_id_keeps_its_fallback_identity(tmp_path: Path):
     assert metrics.task_id == "task-legacy"
     assert metrics.workflow_id == "wf-1"
     assert metrics.final_status == "working"
+    assert metrics.trajectory_events == 1
 
 
-def test_task_row_absent_keeps_event_carried_identity(tmp_path: Path):
-    """With no conflicting task row, the run's own event identity is reported."""
+def test_task_row_absent_fails_closed_without_event_identity(tmp_path: Path):
+    """Source-only runs do not acquire task identity from events."""
     db_path = tmp_path / "state.db"
     ledger = TrajectoryLedger(db_path)
     ledger.append_event({
@@ -233,15 +290,113 @@ def test_task_row_absent_keeps_event_carried_identity(tmp_path: Path):
 
     metrics = get_run_metrics("run-unregistered", db_path=db_path, now=40.0)
 
-    assert metrics.task_id == "task-unregistered"
-    assert metrics.workflow_id == "wf-unregistered"
+    assert metrics.task_id is None
+    assert metrics.workflow_id is None
     assert metrics.final_status is None
     assert metrics.task_completed is False
+    assert metrics.trajectory_events == 0
+
+
+def test_metrics_identity_lookup_does_not_decode_unrelated_payloads(tmp_path, monkeypatch):
+    import json as json_module
+
+    db_path = tmp_path / "state.db"
+    state_db.save_task(_task("run-measured", task_id="task-measured"), db_path=db_path)
+    conn = state_db.get_db_connection(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO tasks (task_id, workflow_id, payload_json) VALUES (?, ?, ?)",
+            ("task-unrelated-huge", "wf-1", json_module.dumps({
+                "run_id": "run-unrelated-huge",
+                "notes": "x" * (5 * 1024 * 1024),
+            })),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    parsed_sizes = []
+    real_loads = json_module.loads
+
+    def spy_loads(s, *args, **kwargs):
+        if isinstance(s, str):
+            parsed_sizes.append(len(s))
+        return real_loads(s, *args, **kwargs)
+
+    monkeypatch.setattr(json_module, "loads", spy_loads)
+    metrics = get_run_metrics("run-measured", db_path=db_path, now=20.0)
+    assert metrics.task_id == "task-measured"
+    assert parsed_sizes, "expected some JSON parsing during aggregation"
+    assert max(parsed_sizes) < 1024 * 1024
+
+
+def test_run_metrics_count_only_own_run_working_contexts(tmp_path: Path):
+    from herdr.context_compiler import compile_working_context
+    from herdr.context_projection import _config
+    from herdr.observation import ObservationStore
+
+    db_path = tmp_path / "state.db"
+    state_db.save_workflow(
+        {"workflow_id": "wf-1", "title": "run scope", "status": "running",
+         "config": {"nodes": [{"id": "implementation"}, {"id": "review"}]}},
+        db_path=db_path,
+    )
+    for task_id, run_id, node in (
+        ("task-a", "run-a", "implementation"),
+        ("task-b", "run-b", "review"),
+    ):
+        state_db.save_task({
+            "task_id": task_id, "run_id": run_id, "workflow_id": "wf-1",
+            "execution_id": "exec-1", "node": node, "agent": "developer",
+            "status": "dispatched", "goal": "scope check", "created_at": 1.0,
+        }, db_path=db_path)
+        context = compile_working_context(
+            workflow_id="wf-1", task_id=task_id, agent_role="developer",
+            store=ObservationStore(db_path),
+        )
+        state_db.save_working_context(
+            dict(context.to_mapping()), db_path=db_path,
+            fingerprint_config=_config(None),
+        )
+
+    metrics = get_run_metrics("run-a", db_path=db_path, now=20.0)
+    assert metrics.working_context_compiles == 1
+    assert metrics.task_id == "task-a"
+
+
+def test_malformed_context_pack_degrades_only_latest_size_metric(tmp_path: Path):
+    db_path = tmp_path / "bad-context-pack.db"
+    state_db.save_task(_task("run-bad-context-pack", status="working"), db_path=db_path)
+    state_db.save_context_pack(
+        _pack("run-bad-context-pack", "ctx-bad-json", 10.0), db_path=db_path
+    )
+    ledger = TrajectoryLedger(db_path)
+    ledger.append_event({
+        "run_id": "run-bad-context-pack", "task_id": "task-1",
+        "workflow_id": "wf-1", "event_type": "run_started", "timestamp": 5.0,
+    })
+    conn = state_db.get_db_connection(db_path)
+    try:
+        conn.execute(
+            "UPDATE context_packs SET current_state_json = ? WHERE context_id = ?",
+            ("{not-json", "ctx-bad-json"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    metrics = get_run_metrics("run-bad-context-pack", db_path=db_path, now=40.0)
+
+    assert metrics.latest_context_pack_bytes is None
+    assert metrics.context_packs_created == 1
+    assert metrics.context_compactions == 1
+    assert metrics.trajectory_events == 1
 
 
 def test_malformed_verification_payload_degrades_without_failing(tmp_path: Path):
     """One corrupt payload must not fail the whole run aggregation."""
     db_path = tmp_path / "state.db"
+    state_db.save_task(_task("run-bad-json", status="working"), db_path=db_path)
     ledger = TrajectoryLedger(db_path)
     ledger.append_event({
         "run_id": "run-bad-json", "event_type": "verification_completed",

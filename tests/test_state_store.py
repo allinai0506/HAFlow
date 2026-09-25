@@ -44,6 +44,46 @@ def test_sqlite_state_store_is_instance_of_state_store(store_env):
     assert isinstance(store, StateStore)
 
 
+def test_sqlite_state_store_saves_ordinary_working_context_mapping(store_env):
+    from herdr.context_compiler import compile_working_context
+    from herdr.observation import ObservationStore
+    from herdr.state_db import save_task, save_workflow
+
+    db_file = store_env["db_file"]
+    save_workflow(
+        {
+            "workflow_id": "wf-context-store",
+            "title": "Context Store",
+            "status": "running",
+            "config": {"nodes": [{"id": "review", "depends_on": []}]},
+        },
+        db_path=db_file,
+    )
+    task = {
+        "task_id": "task-context-store",
+        "workflow_id": "wf-context-store",
+        "run_id": "run-context-store",
+        "workflow_run_id": "scope-context-store",
+        "node": "review",
+        "stage": "review",
+        "agent": "developer",
+        "agent_role": "developer",
+        "status": "working",
+        "goal": "Store a context",
+    }
+    save_task(task, db_path=db_file)
+    context = compile_working_context(
+        workflow_id=task["workflow_id"],
+        task_id=task["task_id"],
+        agent_role="developer",
+        store=ObservationStore(db_file),
+        db_path=db_file,
+    )
+    store = SQLiteStateStore(db_path=db_file)
+    saved = store.save_working_context(context.to_mapping())
+    assert saved["context_id"] == context.context_id
+
+
 def test_workflow_crud_operations(store_env):
     store = SQLiteStateStore(db_path=store_env["db_file"])
 

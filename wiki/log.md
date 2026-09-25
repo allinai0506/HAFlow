@@ -237,6 +237,86 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - `console/herdr_factory_console.py` 新建模态框表单重构为「项目 → 本次任务名称 → 模板 → 执行者策略 → 自然语言需求」，支持需求失焦智能自动提取标题，工作流切换器格式升级为「任务名称 (短ID)」。
 - 质量防护与门禁：沉淀教训 §14，新增 `tests/test_console_frontend_syntax.py`（raw string 声明守卫 + `node -c` 无头 JS 编译验证），新增 `tests/test_workflow_naming_and_title.py`，全量 197 个测试 100% 通过。
 
+## [2026-09-24] fix | Context Compiler execution-scoped source consistency
+- 背景：Context Compiler 的 source clock/head 原先会把其他 Workflow 的写入误判为 stale；并发 schema 初始化、旧 schema 迁移、Handoff stale Task snapshot 和小 verification window 也存在边界竞态。
+- 修复：source head/clock 按 `(run_scope, workflow_id)` 隔离；schema 初始化使用 resolved-path lock；Workflow/Task/Event/Finding source trigger 按 scope 更新；dispatch 重新读取权威 Task；Verification/Eval 窗口保留 latest/strict/recovery facts 并遵守 limit；补齐 alternate verification payload、source projection 稳定字段、taskless workflow fail-closed 和 context_id 幂等重试。
+- 回归：跨 Workflow/同 execution scope、A 自身写入、旧 schema/空库并发、路径别名、Handoff stale snapshot、limit 0/1、恢复序列和 provenance 边界均有测试；交付验证见 `.omc/verify-ses_f2d90b418ffePthpvvnlqq6gVw.md`。
+
+## [2026-09-24] fix | Context Compiler authority, migration recovery, and fail-closed source facts
+- 背景：独立复审发现旧 trigger/partial migration、删除 Task snapshot、legacy evidence、超限 failure/verification、alternate verification 和 scope metrics 仍可能 fail-open。
+- 修复：dispatch 对数据库已有 Task 时强制权威读取；source-head 复合迁移可从 legacy 表恢复；schema lock/旧 trigger replacement 可重入；failure/critical event 与 oversized verification 使用有界保留和 truncated fail-closed marker；legacy Handoff evidence 只接受 scope 内已存事实；storage 强制 verification bool、配置预算和 workflow-scoped metrics。
+- 回归：新增删除 Task、stale upstream、legacy evidence、旧 trigger、partial migration、oversized source、冲突 verification、source projection 和 storage adversarial 测试；全量验证见 `.omc/verify-ses_f2d90b418ffePthpvvnlqq6gVw.md`。
+
+## [2026-09-24] fix | Context Compiler final fail-closed review closure
+- 背景：复审继续发现旧 trigger/partial migration、删除 Task fallback、failure/verification 超限、alternate verification、legacy evidence、storage schema/budget 和 metrics scope 边界。
+- 修复：权威 Task/upstream dispatch、resolved-path schema lock 与 trigger replacement、legacy source-head row recovery、critical/oversized source marker、canonical alternate verification、legacy evidence scope filter、strict verification/budget validation、workflow-scoped metrics 和空 scope 归一化。
+- 回归：全量 `1507 passed, 44 subtests passed`；专项、AST、compileall、ruff、diff 和凭据扫描均通过，验证 artifact 已更新。
+
+## [2026-09-24] fix | Context Compiler final adversarial window closure
+- 背景：复审发现 trigger 替换窗口、Task 全表删除 fallback、legacy old-run evidence、缺 workflow 的 task-bound failure/verification、critical Finding/Handoff 噪声、source projection 截断和 storage cap 边界。
+- 修复：trigger 替换使用 `BEGIN IMMEDIATE`；dispatch/wiring 只接受持久化权威 Task；legacy evidence 绑定当前 Task run；task-bound legacy source 允许缺 workflow 但仍校验 scope；critical Finding 与目标 incoming Handoff 使用保留窗口；Workflow node projection 使用完整节点摘要；storage 强制非保护项预算和 kind caps。
+- 回归：新增删除 Task、old-run evidence、缺 workflow source、critical Finding/Handoff noise、超大 source、storage cap、projection cap 和并发相关测试；验证结果与 PR 状态以当前交付 artifact 为准。
+
+## [2026-09-25] fix | Context Compiler final identity/retention closure
+- 背景：复审发现 migration/trigger 两阶段窗口、跨 Workflow target dispatch、nested verification conflict、oversized Eval unknown、current blocker cap、scope UPDATE、legacy stages、legacy missing-workflow evidence、ordinary oversized source 和 metrics/config 边界。
+- 修复：迁移与 trigger replacement 合并为同一写事务；dispatch 强制 target workflow；冲突 verification 以 strict failure 优先；oversized Eval/普通 event 保留 fail-closed marker；current Task blocker 受保护；UPDATE 同时推进旧/新 scope；`nodes`/`stages` 使用完整摘要；legacy evidence 支持 task-bound 缺 workflow；metrics 读取 alternate verification；低层 storage 规范化空 config。
+- 回归：全量 `1516 passed, 44 subtests passed`；专项、compileall、AST、ruff、diff 和凭据扫描均通过。
+
+## [2026-09-25] fix | Context Compiler final provenance and retention closure
+- 背景：复审发现 verification alias conflict、跨 Workflow missing-workflow evidence、普通 oversized marker、未知 Eval next action、同 scope Workflow UPDATE、混合 nodes/stages projection 和低层 config 边界。
+- 修复：所有已识别 verification false 统一输出 false；legacy evidence 校验 task Workflow；truncated marker 提高相关性并驱动 next action；UPDATE 推进旧/新 workflow heads；nodes/stages 分别生成摘要；storage config 统一规范化。
+- 回归：全量 `1519 passed, 44 subtests passed`；专项、compileall、AST、ruff、diff 和凭据扫描均通过。
+
+## [2026-09-25] fix | Context Compiler provenance closure final pass
+- 背景：复审发现 oversized critical facts 可被普通噪声挤出、紧预算 `compiled_at` 舍入导致 stale loop、verification alias 可在 storage 中矛盾、source_refs 未闭环，以及 derived task refs/metrics 边界。
+- 修复：超限 critical/verification 优先保留；保留 `compiled_at` 精度；storage 拒绝 alias 冲突并要求 aggregate provenance 覆盖所有 item/evidence refs；task derived refs 校验真实目标；低层 source/config 边界继续规范化。
+- 回归：全量 `1523 passed, 44 subtests passed`；专项 `277 passed`；compileall、AST、ruff、diff 和凭据扫描均通过。
+
+## [2026-09-25] fix | Context Compiler critical window and derived-ref closure
+- 背景：复审发现 status-only blocked derived ref 被 storage 拒绝、同源 oversized verification 噪声可挤出 strict failure、phantom artifact ref 和 aggregate provenance 回归测试为空。
+- 修复：derived blocker 与 compiler 合成规则一致；critical/failure/truncated verification 优先于同类 unknown 噪声；artifact derived ref 校验真实非空目标；aggregate source_refs 测试改用稳定 artifact fixture。
+- 回归：全量 `1527 passed, 44 subtests passed`；专项 `281 passed`；compileall、AST、ruff、diff 和凭据扫描均通过。
+
+## [2026-09-25] fix | Context Compiler same-source clock and migration closure
+- 背景：复审发现 oversized strict failure 自身可能被同源 unknown 挤出、复用 run_id 的 taskless source clock 归错 scope，以及 source-clock 中间 schema 未校验复合主键。
+- 修复：oversized SQL 读取有限 strict-failure 分类并优先保留；taskless source 按 workflow heads 广播并消除复用 run_id 的任意 scope lookup；source-clock migration 同时校验列和复合主键。
+- 回归：全量 `1529 passed, 44 subtests passed`；专项 `283 passed`；compileall、AST、ruff、diff 和凭据扫描均通过。
+
+## [2026-09-25] fix | Context Compiler strict oversized verification closure
+- 背景：复审发现 oversized strict verification 自身可能被同源 unknown 挤出，legacy missing-workflow Finding supersession 回源失败，重复 run_id metrics 仍猜测身份。
+- 修复：oversized SQL 读取有限 strict-failure 分类并优先保留；legacy Finding relation 允许 task-bound 缺 workflow 后由 scope 校验；metrics 遇到多 execution scope 复用 run_id 直接返回 unknown/零聚合。
+- 回归：全量 `1531 passed, 44 subtests passed`；专项 `285 passed`；compileall、AST、ruff、diff 和凭据扫描均通过。
+
+## [2026-09-25] fix | Context Compiler final identity and derived-source closure
+- 背景：复审发现 oversized strict verification 在同源 unknown 噪声下仍被替换、重复 run_id metrics 仍会聚合未知身份、legacy planned-link critical Finding 窗口丢失、空字符串 workflow supersession target 无法回源，以及无效 derived task entries 导致索引错位。
+- 修复：oversized window 保留 strict failure marker；metrics 对重复 Task/跨 Workflow taskless source fail closed；legacy scope expansion 重用 critical Finding 保留窗口；relation 接受 NULL/空 workflow 并继续 scope 校验；候选构造先过滤空 artifact/blocker 再编号。
+- 回归：全量 `1536 passed, 44 subtests passed`；专项 `290 passed`；compileall、AST、ruff、diff 和凭据扫描均通过。
+
+## [2026-09-25] fix | Context Compiler cross-partition window and recovery closure
+- 背景：复审发现 strict verification 在跨 Task critical noise 下被总窗口挤出、legacy linked critical Finding 被普通 warning 挤出、oversized failure marker 绕过 recovery、无 Task 行跨 Workflow taskless metrics 仍混叠，以及 open-question/迁移 revision/node key/top-level passed/超限 Finding 边界缺口。
+- 修复：strict verification 使用独立优先槽位；所有 critical Finding 跨 Task 优先；oversized failure 经过 recovery/completed 状态过滤；无 Task 行也扫描多 Workflow source identity；过滤 derived questions；迁移复制中间 clock revision；支持 node key；对 top-level passed 统一 fail-closed；critical Finding fallback 有大小/损坏 marker。
+- 回归：全量 `1543 passed, 44 subtests passed`；专项 `297 passed`；compileall、AST、ruff、diff 和凭据扫描均通过。
+
+## [2026-09-25] fix | Context Compiler taskless identity and recovery closure
+- 背景：复审发现复用 run_id 的 taskless source 可跨 execution scope 泄漏、无 Task metrics 对缺失/ghost identity 未完全 fail closed、不同 scope UPDATE 广播、残留 legacy clock revision、oversized recovery 挤出，以及 malformed verification/provenance 边界。
+- 修复：taskless source 使用全局唯一 run→scope 映射；metrics 对无 Task/缺失 Workflow/ghost Task 返回 unknown；UPDATE 仅在实际 scope 变化或旧 taskless 时广播；残留 legacy clock 合并；oversized recovery 独立保留；storage 强制 verification Mapping、Workflow item 不得伪造 run provenance；failed 状态合成 blocker；Handoff attach 保持单一 context ref。
+- 回归：全量 `1544 passed, 44 subtests passed`；专项 `298 passed`；compileall、AST、ruff、diff 和凭据扫描均通过。
+
+## [2026-09-25] fix | Context Compiler unique taskless identity and source recovery
+- 背景：复审发现超大 payload Task 会绕过 taskless run→scope 唯一映射、无 Task metrics 对 ghost/缺失身份未完全 fail closed、残留 legacy clock 未取 max、oversized recovery fact 丢失、direct linked critical Finding 仍可能被挤出，以及 storage 对 Mapping/Workflow provenance 边界不完整。
+- 修复：taskless identity 从全量 workflow Task 行建立唯一映射；无 Task source metrics 一律 unknown/零聚合；legacy clock 使用 max upsert；recovery/completed 独立进入 completed；critical Finding SQL 优先 direct dependency/Handoff；storage 强制 verification object 并禁止 Workflow item run provenance；failed 状态和 derived question 规则补齐。
+- 回归：全量 `1547 passed, 44 subtests passed`；专项 `301 passed`；compileall、AST、ruff、diff 和凭据扫描均通过。
+
+## [2026-09-25] fix | Context Compiler pre-hash source filtering closure
+- 背景：复审发现被 scope 排除的 raw Event/Finding/Observation 仍参与 source projection/hash，造成跨 scope 写入改变 context identity；ContextPack metrics 未纳入无 Task identity 扫描；legacy stage id fallback 和非 dict Mapping 持久化仍有边界缺口。
+- 修复：所有 source snapshot 在 hash 前完成 taskless scope 过滤；ContextPack 纳入 metrics identity scan；Mapping 在 fingerprint 前递归规范化；legacy stage fallback 使用 `key or id` 并跳过空 ID；补充跨 scope hash 稳定性和 ghost ContextPack/Mapping 回归。
+- 回归：全量 `1550 passed, 44 subtests passed`；专项 `304 passed`；compileall、AST、ruff、diff 和凭据扫描均通过。
+
+## [2026-09-25] fix | Context Compiler pre-limit scope and legacy identity closure
+- 背景：复审发现 Event/Collaboration 仍在 scope 过滤前 LIMIT、legacy fallback run_id compiler/storage 不一致、Mapping 脱敏顺序和 legacy Handoff evidence fallback 仍有缺口。
+- 修复：Event/Finding/Observation/Eval/Collaboration 使用 taskless scope filter pre-limit；compiler/storage 共享 `run_id_for_task` fallback identity；Mapping 先递归规范化再脱敏；legacy evidence 使用 fallback run；补充跨 scope hash/window、ghost ContextPack、Mapping、fallback provenance 回归。
+- 回归：全量 `1552 passed, 44 subtests passed`；专项 `306 passed`；compileall、AST、ruff、diff 和凭据扫描均通过。
+
 ## [2026-09-13] feat | Console URL Deep-Link & Notifier Click-to-Open Integration
 解决 macOS CLI 通知默认归属“脚本编辑器”且无法定位到具体任务/工作流页面的痛点：
 - [[architecture]] §2.3 更新 Herdr Notifier 架构描述：优先使用 `terminal-notifier` 附带 `-open` 直达链接，未安装时安全降级为 `osascript`；
@@ -948,6 +1028,26 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - 知识沉淀：`docs/lessons/lessons-learned.md` §89（收尾节点分支 ≠ 交付物分支；有锚任务空终化不自动放行）；wiki 回填本文与 [[dag-workflow-engine]] §13（收编 fail-closed 守卫 + close 第二道闸 `escalated_git`）。
 - 遗留：`impl-fix1`（`committed` + `finalize_escalated`，原因 `integrate_rebase_conflict`）不阻塞 `unsettled_git`（已排除已升级），但命中 `escalated_git` 闸门；其内容已被本次交付取代，处置建议 `--accept-escalated`（须在 base 合入后由 Controller/人类执行）。
 
+## [2026-09-24] feat | Context Compiler V1：State-Aware WorkingContext
+- 新增 `herdr/context_compiler.py`：按 Task/Workflow 状态、节点依赖、Agent 角色和同一 execution scope 确定性选择最小上下文；每个内容项保留 `source_ref`，Observation 只投影 metadata/excerpt，不读取正文。
+- 新增 SQLite `working_contexts` 不可变快照、fingerprint/latest/list 读取、supersession、role-aware relevance、预算、结构化 diff 和事实指标；不改变既有 Task/Trajectory/Observation/Finding 事实源。
+- Handoff、Task launch/retry、verification dispatch 只传 `context_id`；dispatch 校验 context ref 的目标 Task 与 run scope，旧无 ref 事件保持兼容。
+- 证据：`herdr/context_compiler.py`、`herdr/state_db.py:working_contexts`、`herdr/collaboration.py`、`services/herdr-controller.py`、`bin/herdr-task`、`tests/test_context_compiler.py`、`tests/test_collaboration_wiring.py`。
+- V1 限制：不做 RAG/向量检索/长期记忆/跨 Run 检索；Context Diff 尚未接入 Dependency Wakeup。
+
+## [2026-09-24] fix | Context Compiler V1：审查闭环与边界加固
+- legacy workflow execution 无显式 scope 时，仅允许目标 Task 自身 Run；只有与目标直接相连的 Collaboration Handoff 才扩展 sibling Run，避免无关任务事实串入。
+- `context_models.py`、`context_sources.py`、`context_candidates.py`、`context_selection.py` 拆分核心职责；source snapshot、候选构造和 selection 均有专项回归。
+- 收紧 supersession/evidence 引用、递归脱敏、角色过滤、预算必保留状态、verification latest-wins、Handoff context ref 身份校验和 Supervisor RETRY 引用。
+- 增加 `source_watermark`、append-only A→B→A、编译调用指标事件、并发 writer 与真实 verification event 回归。
+- 证据：`tests/test_context_compiler.py`、`tests/test_collaboration_wiring.py`、`herdr/context_sources.py`、`herdr/state_db.py`、`services/herdr-controller.py`；全量 `1417 passed, 44 subtests passed`。
+
+## [2026-09-24] fix | Context Compiler V1：source revision 与首次 Handoff 闭环
+- `working_context_source_heads` 为每个 scope 维护单调 source revision；编译器保存前校验 revision，迟到旧 source candidate 只能保留历史而不能成为 latest。
+- Controller 先创建 Handoff 事实，再通过 `attach_working_context_ref` 绑定目标快照；legacy planned link 只扩展目标直接关联的 sibling Run，快照可包含本次 Handoff 与上游事实。
+- Verification 事件使用独立有界窗口并按 sequence/revision 选最新项；预算保护 blocker/verification/open question，source version、fingerprint、provenance 和指标字符数保持一致。
+- 持久化入口增加 context identity、source-ref 形状/存在性和 Handoff 来源 Task scope 校验；prompt 只发送经过 context provenance 过滤的 evidence refs。
+- 证据：`tests/test_context_compiler.py`、`tests/test_collaboration_wiring.py`、`herdr/context_projection.py`、`herdr/context_sources.py`、`herdr/state_db.py`、`services/herdr-controller.py`。
 ## [2026-09-24] fix | wf-haflow-0924-01 fix-loop 候选门禁修复
 - FR-1：完成观察按 task version 持久化双采样；Controller 通过 StateStore 原子 CAS 提交，旧 epoch 与同刻重复 sweep 不可完成。
 - FR-2：blocked episode 使用跨进程 action claim；每轮最多一次自动重推，失败可恢复，第二 SLA 独立升级人类；崩溃观察回到 Controller 自动补派链。

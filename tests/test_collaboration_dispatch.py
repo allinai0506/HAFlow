@@ -26,10 +26,10 @@ def _load_controller(name="ctrl_collab_dispatch_test"):
     return mod
 
 
-def _tasks(run_id="run-1"):
+def _tasks(run_id="run-1", db=None):
     # Production-faithful: every herdr-task launch mints its own run_id,
     # so sibling tasks NEVER share run_id. Shared scope is the workflow.
-    return {
+    tasks = {
         "task-a": {"task_id": "task-a", "run_id": "run-A", "workflow_id": "wf-1",
                    "pane_id": "pane-a", "agent": "developer"},
         "task-b": {"task_id": "task-b", "run_id": "run-B", "workflow_id": "wf-1",
@@ -37,6 +37,22 @@ def _tasks(run_id="run-1"):
         "coord": {"task_id": "coord", "run_id": "run-C", "workflow_id": "wf-1",
                   "pane_id": "pane-coord", "agent": "coordinator"},
     }
+    if db is not None:
+        _persist_tasks(db, tasks)
+    return tasks
+
+
+def _persist_tasks(db, tasks):
+    if state_db.get_workflow("wf-1", db_path=db) is None:
+        state_db.save_workflow(
+            {"workflow_id": "wf-1", "title": "fixture", "status": "running",
+             "config": {"nodes": [{"id": "implementation", "depends_on": []},
+                                  {"id": "review", "depends_on": ["implementation"]}] }},
+            db_path=db,
+        )
+    for task in tasks.values():
+        state_db.save_task(task, db_path=db)
+    return tasks
 
 
 def _make_event(db, **overrides):
@@ -65,19 +81,42 @@ class FakeSender:
         return {"ok": True}
 
 
+def test_legacy_taskless_evidence_is_filtered_without_authoritative_task(tmp_path):
+    from herdr.observation import ObservationStore, create_observation
+
+    ctrl = _load_controller()
+    db = tmp_path / "state.db"
+    tasks = _tasks(db=db)
+    observation = create_observation(
+        run_id="wf-1", task_id=None, workflow_id="wf-1",
+        source_type="verification", source_ref="verification:taskless",
+        content="foreign taskless evidence", store=ObservationStore(db),
+    )
+    ref = f"observation:{observation.observation_id}"
+    event = _make_event(db, evidence_refs=[ref], context_refs=[])
+    sender = FakeSender()
+
+    out = ctrl.dispatch_collaboration_event(event["event_id"], tasks, sender, db_path=db)
+
+    assert out["dispatched"] is True
+    assert len(sender.calls) == 1
+    assert ref not in sender.calls[0][1]
+    assert ctrl._legacy_evidence_allowed(event, ref, db_path=db) is False
+
+
 def test_a_real_dispatch_hits_target_pane_with_refs(tmp_path):
     ctrl = _load_controller()
     db = tmp_path / "state.db"
     ev = _make_event(db)
     sender = FakeSender()
-    out = ctrl.dispatch_collaboration_event(ev["event_id"], _tasks(), sender, db_path=db)
+    out = ctrl.dispatch_collaboration_event(ev["event_id"], _tasks(db=db), sender, db_path=db)
     assert out["dispatched"] is True
     assert len(sender.calls) == 1
     pane, prompt = sender.calls[0]
     assert pane == "pane-b"
     assert ev["event_id"] in prompt
     assert "commit:abc123" in prompt
-    assert "test:rate-limit-concurrency" in prompt
+    assert "test:rate-limit-concurrency" not in prompt
 
 
 def test_b_deterministic_path_never_touches_coordinator(tmp_path):
@@ -85,7 +124,7 @@ def test_b_deterministic_path_never_touches_coordinator(tmp_path):
     db = tmp_path / "state.db"
     ev = _make_event(db)
     sender = FakeSender()
-    ctrl.dispatch_collaboration_event(ev["event_id"], _tasks(), sender, db_path=db)
+    ctrl.dispatch_collaboration_event(ev["event_id"], _tasks(db=db), sender, db_path=db)
     panes = [c[0] for c in sender.calls]
     assert panes == ["pane-b"]
     assert "pane-coord" not in panes
@@ -98,7 +137,7 @@ def test_c_duplicate_event_single_prompt(tmp_path):
     second = _make_event(db)
     assert second["event_id"] == first["event_id"]
     sender = FakeSender()
-    tasks = _tasks()
+    tasks = _tasks(db=db)
     ctrl.dispatch_collaboration_event(first["event_id"], tasks, sender, db_path=db)
     out = ctrl.dispatch_collaboration_event(second["event_id"], tasks, sender, db_path=db)
     assert out.get("recovered") is True
@@ -120,7 +159,7 @@ def test_d_crash_recovery_no_second_prompt(tmp_path):
     )
     sender("pane-b", f"manual prompt {ev['event_id']}")
     assert len(sender.calls) == 1
-    out = ctrl.dispatch_collaboration_event(ev["event_id"], _tasks(), sender, db_path=db)
+    out = ctrl.dispatch_collaboration_event(ev["event_id"], _tasks(db=db), sender, db_path=db)
     assert out["dispatched"] is True and out.get("recovered") is True
     assert len(sender.calls) == 1
     fetched = state_db.get_collaboration_event(ev["event_id"], db_path=db)
@@ -131,8 +170,9 @@ def test_e_target_pane_missing_fails_without_fallback(tmp_path):
     ctrl = _load_controller()
     db = tmp_path / "state.db"
     ev = _make_event(db)
-    tasks = _tasks()
+    tasks = _tasks(db=db)
     tasks["task-b"] = dict(tasks["task-b"], pane_id=None, runtime={})
+    _persist_tasks(db, tasks)
     sender = FakeSender()
     out = ctrl.dispatch_collaboration_event(ev["event_id"], tasks, sender, db_path=db)
     assert out["status"] == "failed"
@@ -145,10 +185,11 @@ def test_f_cross_workflow_rejected(tmp_path):
     ctrl = _load_controller()
     db = tmp_path / "state.db"
     ev = _make_event(db)  # scope wf-1
-    tasks = _tasks()
+    tasks = _tasks(db=db)
     for key in tasks:
         tasks[key] = dict(tasks[key], workflow_id="wf-2",
                           run_id=tasks[key]["run_id"] + "-other")
+    _persist_tasks(db, tasks)
     sender = FakeSender()
     out = ctrl.dispatch_collaboration_event(ev["event_id"], tasks, sender, db_path=db)
     assert out["status"] == "failed"
@@ -161,7 +202,7 @@ def test_h_blocker_to_coordinator_allowed(tmp_path):
     ev = _make_event(db, type="BLOCKER", to_task_id="coord",
                      to_agent="coordinator", source_fact_id="fact-blocker")
     sender = FakeSender()
-    out = ctrl.dispatch_collaboration_event(ev["event_id"], _tasks(), sender, db_path=db)
+    out = ctrl.dispatch_collaboration_event(ev["event_id"], _tasks(db=db), sender, db_path=db)
     assert out["dispatched"] is True
     assert sender.calls[0][0] == "pane-coord"
 
@@ -173,11 +214,12 @@ def test_j_parallel_handoffs_no_cross(tmp_path):
                       source_fact_id="fact-a")
     ev2 = _make_event(db, from_task_id="task-c", to_task_id="task-d",
                       to_agent="reviewer-2", source_fact_id="fact-c")
-    tasks = _tasks()
+    tasks = _tasks(db=db)
     tasks["task-c"] = {"task_id": "task-c", "run_id": "run-1",
                        "workflow_id": "wf-1", "pane_id": "pane-c", "agent": "developer2"}
     tasks["task-d"] = {"task_id": "task-d", "run_id": "run-1",
                        "workflow_id": "wf-1", "pane_id": "pane-d", "agent": "reviewer2"}
+    _persist_tasks(db, tasks)
     sender = FakeSender()
     ctrl.dispatch_collaboration_event(ev1["event_id"], tasks, sender, db_path=db)
     ctrl.dispatch_collaboration_event(ev2["event_id"], tasks, sender, db_path=db)
@@ -199,10 +241,10 @@ def test_sender_failure_marks_failed_no_ghost_dispatch(tmp_path):
     db = tmp_path / "state.db"
     ev = _make_event(db)
     sender = ExplodingSender()
-    out = ctrl.dispatch_collaboration_event(ev["event_id"], _tasks(), sender, db_path=db)
+    out = ctrl.dispatch_collaboration_event(ev["event_id"], _tasks(db=db), sender, db_path=db)
     assert out["status"] == "failed"
     assert len(sender.calls) == 1
-    again = ctrl.dispatch_collaboration_event(ev["event_id"], _tasks(), sender, db_path=db)
+    again = ctrl.dispatch_collaboration_event(ev["event_id"], _tasks(db=db), sender, db_path=db)
     assert again["status"] == "failed"
     assert len(sender.calls) == 1
 
@@ -211,8 +253,9 @@ def test_missing_scope_identity_fails_closed(tmp_path):
     ctrl = _load_controller()
     db = tmp_path / "state.db"
     ev = _make_event(db)
-    tasks = _tasks()
+    tasks = _tasks(db=db)
     tasks["task-b"] = {"task_id": "task-b", "pane_id": "pane-b", "agent": "reviewer"}
+    _persist_tasks(db, tasks)
     sender = FakeSender()
     out = ctrl.dispatch_collaboration_event(ev["event_id"], tasks, sender, db_path=db)
     assert out["status"] == "failed"
@@ -223,8 +266,9 @@ def test_fast_path_ack_when_target_already_working(tmp_path):
     ctrl = _load_controller()
     db = tmp_path / "state.db"
     ev = _make_event(db)
-    tasks = _tasks()
+    tasks = _tasks(db=db)
     tasks["task-b"] = dict(tasks["task-b"], status="working")
+    _persist_tasks(db, tasks)
     sender = FakeSender()
     out = ctrl.dispatch_collaboration_event(ev["event_id"], tasks, sender, db_path=db)
     assert out["dispatched"] is True
@@ -239,8 +283,9 @@ def test_recovery_reconciles_ack_when_target_already_working(tmp_path):
     ctrl = _load_controller()
     db = tmp_path / "state.db"
     ev = _make_event(db)
-    tasks = _tasks()
+    tasks = _tasks(db=db)
     tasks["task-b"] = dict(tasks["task-b"], status="working")
+    _persist_tasks(db, tasks)
     sender = FakeSender()
     # Crash window: intent persisted + prompt reached Herdr, mark lost,
     # and the target has since entered working.

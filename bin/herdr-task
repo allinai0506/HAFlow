@@ -1338,6 +1338,28 @@ def cmd_metrics(args):
     print(f"Model requests: {metrics.model_requests if metrics.model_requests is not None else 'unsupported'}")
 
 
+def cmd_working_context(args):
+    """Read-only WorkingContext loader for agents holding a context ref."""
+    from herdr.context_compiler import get_working_context
+
+    try:
+        store = _get_store()
+        context = get_working_context(
+            args.context_id, db_path=getattr(store, "db_path", None)
+        )
+    except ValueError as exc:
+        print(f"[WORKING-CONTEXT] {exc}", file=sys.stderr)
+        sys.exit(2)
+    except Exception as exc:
+        print(f"[WORKING-CONTEXT] failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        sys.exit(1)
+    if context is None:
+        print(f"[WORKING-CONTEXT] not found: {args.context_id}", file=sys.stderr)
+        sys.exit(2)
+
+    print(json.dumps(context.to_mapping(), ensure_ascii=False, indent=2, sort_keys=True))
+
+
 def cmd_eval(args):
     """Evaluate one run; --record persists the fact via eval_store."""
     from herdr.eval_engine import evaluate_run, record_run_eval
@@ -2325,6 +2347,7 @@ def _launch_task(args):
     replay_of = getattr(args, "replay_of", None)
     if replay_of:
         task["replay_of"] = replay_of
+    _apply_execution_identity(task, args)
     if raw_policy:
         task["agent_policy"] = agent_policy
     if exec_fields["execution_mode"] == "context":
@@ -2368,6 +2391,34 @@ def _launch_task(args):
         args.prompt
     )
 
+def _apply_execution_identity(task, args):
+    """Persist the caller's workflow execution identity on a launched Task.
+
+    The per-task run_id stays independent; execution_id is the shared
+    proof that sibling launches belong to one workflow execution.
+    Absent flag preserves legacy tasks without execution identity.
+    """
+    execution_id = str(getattr(args, "execution_id", None) or "").strip()
+    if execution_id:
+        task["execution_id"] = execution_id
+
+
+def _compile_working_context_ref(task):
+    """Compile a launch-boundary context without changing task state."""
+    try:
+        from herdr.context_compiler import compile_working_context, infer_agent_role
+        context = compile_working_context(
+            workflow_id=task.get("workflow_id"),
+            task_id=task.get("task_id"),
+            agent_role=infer_agent_role(task),
+            store=_get_store(),
+        )
+        return context.context_id
+    except Exception as exc:
+        print(f"[WORKING_CONTEXT SKIPPED] task={task.get('task_id')}: {type(exc).__name__}")
+        return None
+
+
 def dispatch_task(task_id, prompt):
     # Reliable delivery protocol:
     # 1) try herdr agent prompt
@@ -2387,6 +2438,15 @@ def dispatch_task(task_id, prompt):
             f"{task['status']}"
         )
         sys.exit(2)
+
+    # Runtime closure: the dispatched transition happens before context
+    # compilation and prompt delivery, so the compiled context never
+    # carries a stale pending task_status.
+    set_status(task_id, "dispatched")
+    task = find_task(load_tasks(), task_id)
+    if not task:
+        print(f"Task not found after dispatch transition: {task_id}")
+        sys.exit(1)
 
     loop_dir = Path(task.get("clone_path", "")) / ".herdr-loop"
     loop_suffix = ""
@@ -2423,9 +2483,20 @@ def dispatch_task(task_id, prompt):
         if block:
             context_suffix = "\n\n" + block + "\n"
 
+    working_context_ref = _compile_working_context_ref(task)
+    working_context_suffix = ""
+    if working_context_ref:
+        working_context_suffix = (
+            "\n\nWORKING_CONTEXT REF:\n"
+            f"WORKING_CONTEXT_REF:{working_context_ref}\n"
+            "Load this immutable context by reference before continuing:\n"
+            f"herdr-task working-context get --context-id {working_context_ref}\n"
+        )
+
     prompt = (
         prompt
         + context_suffix
+        + working_context_suffix
         + loop_suffix
         + "\nHERDR orchestration protocol:\n"
         + "HERDR_ORCH_TASK:" + task_id + "\n"
@@ -2526,7 +2597,6 @@ def dispatch_task(task_id, prompt):
             break
         time.sleep(0.4)
 
-    set_status(task_id, "dispatched")
     time.sleep(1.5)
 
     primary = _run(
@@ -5622,6 +5692,10 @@ def main():
     launch.add_argument("--prompt", required=True)
     launch.add_argument("--run-id", default=None,
                         help="Use a caller-assigned Run identity, e.g. for Replay lineage")
+    launch.add_argument("--execution-id", default=None,
+                        help="Workflow execution identity inherited by the Task. "
+                             "Tasks with distinct run_id values but the same "
+                             "execution_id are provably one execution.")
     launch.add_argument("--replay-of", default=None,
                         help="Source Run identity for a Replay task")
     launch.add_argument("--agent-policy", default=None,
@@ -5991,6 +6065,16 @@ def main():
     metrics_cmd.add_argument("--run-id", required=True)
     metrics_cmd.add_argument("--json", action="store_true")
 
+    working_context_cmd = sub.add_parser(
+        "working-context",
+        help="按 context_id 读取不可变 WorkingContext（只读旁路）",
+    )
+    working_context_cmd.add_argument(
+        "action", choices=["get"],
+        help="读取动作：get 按 context_id 返回完整快照",
+    )
+    working_context_cmd.add_argument("--context-id", required=True)
+
     eval_cmd = sub.add_parser(
         "eval",
         help="评估一个 Run（只读；--record 落盘一条 eval 事实）",
@@ -6346,6 +6430,9 @@ def main():
 
     elif args.command == "metrics":
         cmd_metrics(args)
+
+    elif args.command == "working-context":
+        cmd_working_context(args)
 
     elif args.command == "eval":
         cmd_eval(args)

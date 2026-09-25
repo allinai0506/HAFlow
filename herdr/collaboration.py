@@ -92,14 +92,34 @@ def create_handoff(*, run_id: str, workflow_id: str, from_task_id: str,
     }
 
 
-def build_handoff_prompt(event: Dict[str, Any], next_action: str = "") -> str:
+def build_handoff_prompt(
+    event: Dict[str, Any],
+    next_action: str = "",
+    working_context: Any = None,
+) -> str:
     summary = _clip(event.get("summary") or "", SUMMARY_MAX)
     artifacts = [_clip(a, REF_ITEM_MAX) for a in (event.get("artifact_refs") or [])[:REFS_MAX]]
     evidence = [_clip(e, REF_ITEM_MAX) for e in (event.get("evidence_refs") or [])[:REFS_MAX]]
     action = _clip(next_action, NEXT_ACTION_MAX)
-    # Tail carries the correlation id: clip the body first so truncation
-    # can never amputate HANDOFF_ID.
+    context_refs = list(event.get("context_refs") or [])
+    if working_context is not None:
+        context_id = getattr(working_context, "context_id", None)
+        if context_id is None and isinstance(working_context, dict):
+            context_id = working_context.get("context_id")
+        if context_id:
+            context_refs.insert(0, str(context_id))
+    context_refs = list(dict.fromkeys(str(ref) for ref in context_refs if ref))[:3]
+    context_refs = [_clip(ref, REF_ITEM_MAX) for ref in context_refs]
+    # Tail carries correlation and the context reference: reserve them before
+    # clipping the body so a large summary/ref list cannot remove context_id.
+    context_tail = "\n".join(
+        f"WORKING_CONTEXT_REF: {ref}" for ref in context_refs
+    )
     tail = f"HANDOFF_ID: {event.get('event_id') or ''}"
+    if context_tail:
+        tail += "\n" + context_tail
+        tail += "\nLoad the immutable WorkingContext by context_id before continuing."
+        tail += "\nherdr-task working-context get --context-id " + context_refs[0]
     body = "\n".join([
         f"HANDOFF FROM: {event.get('from_agent') or ''}",
         f"TASK: {event.get('from_task_id') or ''}",

@@ -113,6 +113,555 @@ def test_init_db_and_wal_mode(state_env):
         conn.close()
 
 
+def _open_state_db_worker(db_path, start_event, results):
+    start_event.wait(10)
+    try:
+        conn = state_db.get_db_connection(Path(db_path))
+        conn.execute("SELECT 1 FROM working_context_source_clock LIMIT 1").fetchall()
+        conn.close()
+        results.put(("ok", ""))
+    except Exception as exc:
+        results.put(("error", f"{type(exc).__name__}: {exc}"))
+
+
+def _run_concurrent_state_db_open(db_path, count=4):
+    context = multiprocessing.get_context("spawn")
+    start_event = context.Event()
+    results = context.Queue()
+    processes = [
+        context.Process(
+            target=_open_state_db_worker,
+            args=(str(db_path), start_event, results),
+        )
+        for _ in range(count)
+    ]
+    for process in processes:
+        process.start()
+    start_event.set()
+    for process in processes:
+        process.join(20)
+    return [results.get(timeout=2) for _ in processes]
+
+
+def _run_concurrent_state_db_open_paths(db_paths):
+    context = multiprocessing.get_context("spawn")
+    start_event = context.Event()
+    results = context.Queue()
+    processes = [
+        context.Process(
+            target=_open_state_db_worker,
+            args=(str(db_path), start_event, results),
+        )
+        for db_path in db_paths
+    ]
+    for process in processes:
+        process.start()
+    start_event.set()
+    for process in processes:
+        process.join(20)
+    return [results.get(timeout=2) for _ in processes]
+
+
+def test_schema_lock_uses_resolved_database_identity_for_path_aliases(tmp_path):
+    real_path = tmp_path / "real-clock-path.db"
+    alias_path = tmp_path / "alias-clock-path.db"
+    alias_path.symlink_to(real_path)
+    results = _run_concurrent_state_db_open_paths([real_path, alias_path] * 3)
+    assert all(result[0] == "ok" for result in results), results
+
+
+def test_empty_database_concurrent_initialization_is_reentrant(tmp_path):
+    db_path = tmp_path / "concurrent-empty.db"
+    results = _run_concurrent_state_db_open(db_path)
+    assert all(result[0] == "ok" for result in results), results
+
+
+def test_legacy_source_clock_concurrent_migration_is_reentrant(tmp_path):
+    db_path = tmp_path / "concurrent-legacy-clock.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE working_context_source_clock (id INTEGER PRIMARY KEY, revision INTEGER NOT NULL)"
+    )
+    conn.execute(
+        "INSERT INTO working_context_source_clock (id, revision) VALUES (1, 4)"
+    )
+    conn.commit()
+    conn.close()
+    results = _run_concurrent_state_db_open(db_path)
+    assert all(result[0] == "ok" for result in results), results
+
+
+def test_partial_source_head_migration_recovers_legacy_rows(tmp_path):
+    db_path = tmp_path / "partial-source-head-migration.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE working_context_source_heads (
+            run_scope TEXT NOT NULL,
+            workflow_id TEXT NOT NULL DEFAULT '',
+            source_version TEXT NOT NULL,
+            revision INTEGER NOT NULL,
+            updated_at REAL NOT NULL,
+            PRIMARY KEY (run_scope, workflow_id)
+        );
+        CREATE TABLE working_context_source_heads_legacy (
+            run_scope TEXT PRIMARY KEY,
+            workflow_id TEXT,
+            source_version TEXT NOT NULL,
+            revision INTEGER NOT NULL,
+            updated_at REAL NOT NULL
+        );
+        INSERT INTO working_context_source_heads_legacy
+            (run_scope, workflow_id, source_version, revision, updated_at)
+        VALUES ('recover-scope', 'recover-wf', 'v1', 5, 1.0);
+        """
+    )
+    conn.commit()
+    conn.close()
+    state_db.init_db(db_path)
+    recovered = state_db.get_db_connection(db_path)
+    try:
+        primary_key = {
+            row["name"]
+            for row in recovered.execute(
+                "PRAGMA table_info(working_context_source_heads)"
+            ).fetchall()
+            if int(row["pk"] or 0) > 0
+        }
+        assert primary_key == {"run_scope", "workflow_id", "task_id"}
+        # Execution-shared legacy rows lack task_id and are never promoted
+        # into task-specific heads; they stay in *_legacy for audit.
+        assert recovered.execute(
+            "SELECT COUNT(*) FROM working_context_source_heads"
+        ).fetchone()[0] == 0
+        legacy = recovered.execute(
+            "SELECT run_scope, workflow_id, revision FROM working_context_source_heads_legacy"
+        ).fetchall()
+        assert {(row["run_scope"], row["workflow_id"], row["revision"]) for row in legacy} >= {
+            ("recover-scope", "recover-wf", 5)
+        }
+        # Fresh per-task registration works after migration.
+        assert state_db.register_working_context_source(
+            run_scope="recover-scope", workflow_id="recover-wf",
+            task_id="task-after-migration", source_version="v2",
+            db_path=db_path,
+        ) == 1
+    finally:
+        recovered.close()
+
+
+def test_legacy_source_head_primary_key_migrates_to_scope_workflow(tmp_path):
+    db_path = tmp_path / "legacy-source-head.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE working_context_source_heads (
+            run_scope TEXT PRIMARY KEY,
+            workflow_id TEXT,
+            source_version TEXT NOT NULL,
+            revision INTEGER NOT NULL,
+            updated_at REAL NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO working_context_source_heads
+            (run_scope, workflow_id, source_version, revision, updated_at)
+        VALUES ('legacy-scope', 'legacy-wf', 'v1', 3, 1.0)
+        """
+    )
+    conn.commit()
+    conn.close()
+    migrated = state_db.get_db_connection(db_path)
+    try:
+        primary_key = {
+            row["name"]
+            for row in migrated.execute(
+                "PRAGMA table_info(working_context_source_heads)"
+            ).fetchall()
+            if int(row["pk"] or 0) > 0
+        }
+        assert primary_key == {"run_scope", "workflow_id", "task_id"}
+        assert migrated.execute(
+            "SELECT COUNT(*) FROM working_context_source_heads"
+        ).fetchone()[0] == 0
+        legacy_row = migrated.execute(
+            """
+            SELECT run_scope, workflow_id, source_version, revision
+            FROM working_context_source_heads_legacy
+            """
+        ).fetchone()
+        assert tuple(legacy_row) == ("legacy-scope", "legacy-wf", "v1", 3)
+    finally:
+        migrated.close()
+
+
+def test_schema_init_replaces_legacy_source_clock_trigger(tmp_path):
+    db_path = tmp_path / "legacy-trigger.db"
+    state_db.init_db(db_path)
+    conn = state_db.get_db_connection(db_path)
+    conn.execute("DROP TRIGGER trg_working_context_source_clock_workflows_update")
+    conn.execute(
+        """
+        CREATE TRIGGER trg_working_context_source_clock_workflows_update
+        AFTER UPDATE ON workflows
+        BEGIN
+            UPDATE working_context_source_clock
+            SET revision = revision + 1
+            WHERE run_scope = NEW.workflow_id;
+        END;
+        """
+    )
+    conn.close()
+    state_db.init_db(db_path)
+    refreshed = state_db.get_db_connection(db_path)
+    try:
+        sql = refreshed.execute(
+            """
+            SELECT sql FROM sqlite_master
+            WHERE type = 'trigger'
+              AND name = 'trg_working_context_source_clock_workflows_update'
+            """
+        ).fetchone()["sql"]
+        assert "working_context_source_heads" in sql
+    finally:
+        refreshed.close()
+
+
+def test_source_clock_intermediate_primary_key_is_rebuilt(tmp_path):
+    db_path = tmp_path / "intermediate-source-clock.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """CREATE TABLE working_context_source_heads (
+               run_scope TEXT PRIMARY KEY, workflow_id TEXT,
+               source_version TEXT NOT NULL, revision INTEGER NOT NULL, updated_at REAL NOT NULL
+           )"""
+    )
+    conn.execute(
+        """CREATE TABLE working_context_source_clock (
+               run_scope TEXT PRIMARY KEY, workflow_id TEXT,
+               revision INTEGER NOT NULL
+           )"""
+    )
+    conn.execute(
+        "INSERT INTO working_context_source_clock (run_scope, workflow_id, revision) VALUES (?, ?, ?)",
+        ("intermediate-scope", "wf-intermediate", 9),
+    )
+    conn.commit()
+    conn.close()
+    state_db.init_db(db_path)
+    migrated = state_db.get_db_connection(db_path)
+    try:
+        primary_key = {
+            row["name"]
+            for row in migrated.execute(
+                "PRAGMA table_info(working_context_source_clock)"
+            ).fetchall()
+            if int(row["pk"] or 0) > 0
+        }
+        assert primary_key == {"run_scope", "workflow_id"}
+        assert migrated.execute(
+            "SELECT revision FROM working_context_source_clock WHERE run_scope = ? AND workflow_id = ?",
+            ("intermediate-scope", "wf-intermediate"),
+        ).fetchone()["revision"] == 9
+    finally:
+        migrated.close()
+
+
+def test_residual_legacy_source_head_uses_max_revision(tmp_path):
+    db_path = tmp_path / "residual-source-head.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """CREATE TABLE working_context_source_heads (
+               run_scope TEXT NOT NULL, workflow_id TEXT NOT NULL,
+               source_version TEXT NOT NULL, revision INTEGER NOT NULL,
+               updated_at REAL NOT NULL,
+               PRIMARY KEY (run_scope, workflow_id)
+           )"""
+    )
+    conn.execute(
+        "INSERT INTO working_context_source_heads VALUES (?, ?, ?, ?, ?)",
+        ("scope", "wf", "current", 2, 2.0),
+    )
+    conn.execute(
+        """CREATE TABLE working_context_source_heads_legacy (
+               run_scope TEXT NOT NULL, workflow_id TEXT,
+               source_version TEXT NOT NULL, revision INTEGER NOT NULL,
+               updated_at REAL NOT NULL
+           )"""
+    )
+    conn.execute(
+        "INSERT INTO working_context_source_heads_legacy VALUES (?, ?, ?, ?, ?)",
+        ("scope", "wf", "legacy", 9, 9.0),
+    )
+    conn.commit()
+    conn.close()
+    state_db.init_db(db_path)
+    migrated = state_db.get_db_connection(db_path)
+    try:
+        primary_key = {
+            row["name"]
+            for row in migrated.execute(
+                "PRAGMA table_info(working_context_source_heads)"
+            ).fetchall()
+            if int(row["pk"] or 0) > 0
+        }
+        assert primary_key == {"run_scope", "workflow_id", "task_id"}
+        assert migrated.execute(
+            "SELECT COUNT(*) FROM working_context_source_heads"
+        ).fetchone()[0] == 0
+        legacy_row = migrated.execute(
+            """SELECT source_version, revision, updated_at
+                 FROM working_context_source_heads_legacy
+                WHERE run_scope = 'scope' AND workflow_id = 'wf'"""
+        ).fetchone()
+        assert legacy_row["source_version"] == "legacy"
+        assert legacy_row["revision"] == 9
+        main_row = migrated.execute(
+            """SELECT source_version, revision, updated_at
+                 FROM working_context_source_heads_legacy_main
+                WHERE run_scope = 'scope' AND workflow_id = 'wf'"""
+        ).fetchone()
+        assert main_row["source_version"] == "current"
+        assert main_row["revision"] == 2
+    finally:
+        migrated.close()
+
+
+def test_task_head_migration_seeds_baseline_from_historical_watermarks(tmp_path):
+    db_path = tmp_path / "head-baseline.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """CREATE TABLE working_context_source_heads (
+               run_scope TEXT NOT NULL, workflow_id TEXT NOT NULL,
+               source_version TEXT NOT NULL, revision INTEGER NOT NULL,
+               updated_at REAL NOT NULL,
+               PRIMARY KEY (run_scope, workflow_id)
+           )"""
+    )
+    conn.execute(
+        "INSERT INTO working_context_source_heads VALUES (?, ?, ?, ?, ?)",
+        ("exec-1", "wf", "shared-v7", 7, 7.0),
+    )
+    conn.execute(
+        """CREATE TABLE working_contexts (
+               context_id TEXT PRIMARY KEY, run_scope TEXT NOT NULL,
+               run_id TEXT, workflow_id TEXT, task_id TEXT NOT NULL,
+               node_id TEXT, agent_role TEXT NOT NULL,
+               context_fingerprint TEXT NOT NULL, source_version TEXT,
+               source_watermark INTEGER NOT NULL DEFAULT 0,
+               payload_json TEXT NOT NULL, metrics_json TEXT NOT NULL DEFAULT '{}',
+               compiled_at REAL NOT NULL
+           )"""
+    )
+    conn.execute(
+        """INSERT INTO working_contexts
+               (context_id, run_scope, run_id, workflow_id, task_id, agent_role,
+                context_fingerprint, source_version, source_watermark,
+                payload_json, compiled_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        ("wc_old_a", "exec-1", "run-a", "wf", "task-a", "developer",
+         "f" * 64, "shared-v7", 7, "{}", 10.0),
+    )
+    conn.execute(
+        """INSERT INTO working_contexts
+               (context_id, run_scope, run_id, workflow_id, task_id, agent_role,
+                context_fingerprint, source_version, source_watermark,
+                payload_json, compiled_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        ("wc_old_b", "exec-1", "run-b", "wf", "task-b", "developer",
+         "e" * 64, "shared-v7", 7, "{}", 11.0),
+    )
+    conn.commit()
+    conn.close()
+    state_db.init_db(db_path)
+    migrated = state_db.get_db_connection(db_path)
+    try:
+        for task_id in ("task-a", "task-b"):
+            row = migrated.execute(
+                """SELECT source_version, revision FROM working_context_source_heads
+                    WHERE run_scope = 'exec-1' AND workflow_id = 'wf' AND task_id = ?""",
+                (task_id,),
+            ).fetchone()
+            assert row is not None
+            assert row["revision"] == 7
+            assert row["source_version"] == "shared-v7"
+    finally:
+        migrated.close()
+    # Same version re-registers at the baseline instead of dropping to 1,
+    # so a fresh candidate is not stale against retained history.
+    assert state_db.register_working_context_source(
+        run_scope="exec-1", workflow_id="wf", task_id="task-a",
+        source_version="shared-v7", db_path=db_path,
+    ) == 7
+    assert state_db.register_working_context_source(
+        run_scope="exec-1", workflow_id="wf", task_id="task-a",
+        source_version="shared-v8", db_path=db_path,
+    ) == 8
+
+
+def test_malformed_task_payload_does_not_block_repair_via_save_task(tmp_path):
+    db_path = tmp_path / "malformed-task-repair.db"
+    state_db.init_db(db_path)
+    state_db.save_workflow(
+        {"workflow_id": "wf", "title": "repair", "status": "running"},
+        db_path=db_path,
+    )
+    conn = state_db.get_db_connection(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO tasks (task_id, workflow_id, status, payload_json) VALUES (?, ?, ?, ?)",
+            ("task-broken", "wf", "working", "{"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    # Repairing the damaged row through the public API must succeed: trigger
+    # scope expressions read OLD.payload_json and must tolerate malformed JSON
+    # instead of raising OperationalError on the repair itself.
+    state_db.save_task(
+        {
+            "task_id": "task-broken", "workflow_id": "wf",
+            "run_id": "run-broken", "workflow_run_id": "exec-1",
+            "node": "review", "status": "working", "goal": "repaired",
+        },
+        db_path=db_path,
+    )
+    repaired = state_db.get_task("task-broken", db_path=db_path)
+    assert repaired is not None
+    assert repaired["goal"] == "repaired"
+    assert repaired["run_id"] == "run-broken"
+    check = state_db.get_db_connection(db_path)
+    try:
+        clock = check.execute(
+            "SELECT revision FROM working_context_source_clock WHERE run_scope = ? AND workflow_id = ?",
+            ("exec-1", "wf"),
+        ).fetchone()
+    finally:
+        check.close()
+    assert clock is not None and int(clock["revision"]) >= 1
+
+
+def test_get_latest_orders_by_time_across_scopes_not_watermark(tmp_path):
+    db_path = tmp_path / "cross-scope-latest.db"
+    state_db.init_db(db_path)
+    conn = state_db.get_db_connection(db_path)
+    try:
+        for context_id, scope, watermark, compiled_at in (
+            ("wc_old_exec", "exec-old", 20, 10.0),
+            ("wc_new_exec", "exec-new", 3, 20.0),
+        ):
+            conn.execute(
+                """INSERT INTO working_contexts
+                       (context_id, run_scope, run_id, workflow_id, task_id,
+                        agent_role, context_fingerprint, source_version,
+                        source_watermark, payload_json, compiled_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (context_id, scope, f"run-{scope}", "wf", "task-x",
+                 "developer", "f" * 64, "v", watermark, "{}", compiled_at),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    assert state_db.get_latest_working_context("task-x", db_path=db_path)["context_id"] == "wc_new_exec"
+    assert state_db.get_latest_working_context(
+        "task-x", db_path=db_path, run_scope="exec-old",
+    )["context_id"] == "wc_old_exec"
+
+
+def test_get_latest_with_scope_but_no_workflow_orders_by_time_across_heads(tmp_path):
+    db_path = tmp_path / "cross-workflow-latest.db"
+    state_db.init_db(db_path)
+    conn = state_db.get_db_connection(db_path)
+    try:
+        for context_id, workflow_id, watermark, compiled_at in (
+            ("wc_head_a", "wf-a", 20, 10.0),
+            ("wc_head_b", "wf-b", 3, 20.0),
+        ):
+            conn.execute(
+                """INSERT INTO working_contexts
+                       (context_id, run_scope, run_id, workflow_id, task_id,
+                        agent_role, context_fingerprint, source_version,
+                        source_watermark, payload_json, compiled_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (context_id, "exec-1", "run-x", workflow_id, "task-x",
+                 "developer", "f" * 64, "v", watermark, "{}", compiled_at),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    # Watermarks belong to independent (run_scope, workflow_id, task_id)
+    # heads, so a scope-only lookup must not compare them: wall clock wins.
+    assert state_db.get_latest_working_context(
+        "task-x", db_path=db_path, run_scope="exec-1",
+    )["context_id"] == "wc_head_b"
+    # Pinning the full head identity restores watermark ordering.
+    assert state_db.get_latest_working_context(
+        "task-x", db_path=db_path, run_scope="exec-1", workflow_id="wf-a",
+    )["context_id"] == "wc_head_a"
+    assert state_db.get_latest_working_context(
+        "task-x", db_path=db_path, run_scope="exec-1", workflow_id="wf-b",
+    )["context_id"] == "wc_head_b"
+
+
+def test_residual_legacy_source_clock_uses_max_revision(tmp_path):
+    db_path = tmp_path / "residual-source-clock.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE working_context_source_clock (run_scope TEXT, workflow_id TEXT, revision INTEGER NOT NULL, PRIMARY KEY (run_scope, workflow_id))"
+    )
+    conn.execute(
+        "INSERT INTO working_context_source_clock (run_scope, workflow_id, revision) VALUES ('scope', 'wf', 2)"
+    )
+    conn.execute(
+        "CREATE TABLE working_context_source_clock_legacy (run_scope TEXT, workflow_id TEXT, revision INTEGER NOT NULL)"
+    )
+    conn.execute(
+        "INSERT INTO working_context_source_clock_legacy (run_scope, workflow_id, revision) VALUES ('scope', 'wf', 9)"
+    )
+    conn.commit()
+    conn.close()
+    state_db.init_db(db_path)
+    migrated = state_db.get_db_connection(db_path)
+    try:
+        assert migrated.execute(
+            "SELECT revision FROM working_context_source_clock WHERE run_scope = 'scope' AND workflow_id = 'wf'"
+        ).fetchone()["revision"] == 9
+    finally:
+        migrated.close()
+
+
+def test_global_source_clock_schema_migrates_to_execution_scope(tmp_path):
+    db_path = tmp_path / "legacy-source-clock.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE working_context_source_clock (id INTEGER PRIMARY KEY, revision INTEGER NOT NULL)"
+    )
+    conn.execute(
+        "INSERT INTO working_context_source_clock (id, revision) VALUES (1, 7)"
+    )
+    conn.commit()
+    conn.close()
+
+    migrated = state_db.get_db_connection(db_path)
+    try:
+        columns = {
+            row["name"]
+            for row in migrated.execute(
+                "PRAGMA table_info(working_context_source_clock)"
+            ).fetchall()
+        }
+        assert {"run_scope", "workflow_id", "revision"}.issubset(columns)
+        assert "id" not in columns
+        legacy = migrated.execute(
+            "SELECT revision FROM working_context_source_clock_legacy WHERE id = 1"
+        ).fetchone()
+        assert int(legacy["revision"]) == 7
+    finally:
+        migrated.close()
+
+
 def test_concurrent_legacy_event_schema_upgrade_is_idempotent(tmp_path):
     """Two independent processes can upgrade the same legacy events table."""
     db_path = tmp_path / "legacy-events.db"
