@@ -833,6 +833,34 @@ class ShadowEvalCliTest(unittest.TestCase):
     def setUp(self):
         self.store, self.db_path = _make_env(self)
 
+    def test_invalid_args_never_touch_db(self):
+        import subprocess as _subprocess
+        import sys as _sys
+
+        root = Path(__file__).resolve().parent.parent
+        fresh_db = Path(tempfile.mkdtemp(prefix="herdr-shadow-ro-")) / "fresh.db"
+        env = dict(_os.environ, HERDR_STATE_DB=str(fresh_db))
+        self.assertFalse(fresh_db.exists())
+        for bad in (["--since", "abc"], ["--limit", "xyz"]):
+            proc = _subprocess.run(
+                [_sys.executable, str(root / "bin" / "herdr-task"),
+                 "shadow-eval"] + bad,
+                capture_output=True, text=True, env=env, timeout=120,
+            )
+            self.assertEqual(proc.returncode, 2, proc.stderr)
+            # Read-only promise: arg validation precedes store open, so
+            # no database file (schema init/migration) may appear.
+            self.assertFalse(fresh_db.exists())
+        # Control: a valid run does open (and create) the store, proving
+        # the assertion above is non-vacuous.
+        ok = _subprocess.run(
+            [_sys.executable, str(root / "bin" / "herdr-task"),
+             "shadow-eval", "--json"],
+            capture_output=True, text=True, env=env, timeout=120,
+        )
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        self.assertTrue(fresh_db.exists())
+
     def test_cli_text_and_json_are_read_only(self):
         import subprocess as _subprocess
         import sys as _sys

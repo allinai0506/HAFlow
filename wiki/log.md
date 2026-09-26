@@ -1135,3 +1135,7 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - Pagination：每页min(page,remaining)，4种stop_reason进collection meta。
 - 验收：shadow 34 passed；专项75 passed；全量1786 passed + 44 subtests；
   S6聚焦复审MERGE_READY。§24禁改项零diff。
+
+## [2026-09-27] fix | PR #101 只读承诺补齐（参数校验前移）
+- `cmd_shadow_eval` 先验证 --since/--limit 再 `_get_store()`，非法参数 exit 2
+  不建库；--limit help 同步 filter-then-limit 文案。统计逻辑零改动。
