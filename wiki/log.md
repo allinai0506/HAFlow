@@ -1159,3 +1159,13 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - 最终证据：全量1788 passed + 44 subtests；S6 MERGE_READY。
 - 约定：One execution, one authoritative prediction, one immutable outcome.
   后续Canary另行决策，不在本PR。
+
+## [2026-09-26] fix | PR #102 评审 P1：WAL 缺边车时只读路径 fail-closed
+- 缺陷：`mode=ro` 对边车缺失、目录可写的 WAL 库会由 SQLite 实体化 `-wal`/`-shm`（OS 级副作用）。
+- 修复：`get_readonly_db_connection` 先以原始字节读文件头 18/19 判 WAL，再查边车对；
+  缺失即 `ReadonlyWalSidecarError`（CLI exit 1，不建任何文件）。不采用 `immutable=1`：
+  生产库随时可能被并发提交，会读到过期快照。
+- fixture：`_make_env` 保一条打开的 WAL 连接（keeper，无数据写）模拟 live 在场态；
+  case3b 关闭 keeper 验证 fail-closed + 目录零新增，case3c 验证边车在场字节一致。
+- 证据：`tests/test_shadow_evaluation.py` 47 passed；全量 1799 passed + 44 subtests；
+  通用教训归档 lessons §92。

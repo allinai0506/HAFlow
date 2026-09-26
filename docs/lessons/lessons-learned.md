@@ -4122,3 +4122,41 @@ TASKS_FILE=/tmp/x/tasks.json WORKFLOWS_FILE=/tmp/x/workflows.json pytest -q "${T
   §78（`store=None` 回落到生产 `state.db`，已用 conftest kill switch 收口——但该 kill switch
   只覆盖 observer，覆盖不到本条的投影回落，且**不能**靠钉 `TASKS_FILE`/`WORKFLOWS_FILE` 补，见上节实测）、
   §89（收尾节点分支 ≠ 交付物分支：收尾侧必须对"看似无关"的实盘副作用保持警惕）
+
+## 92. SQLite `mode=ro` 并非无副作用：WAL 缺边车时打开会实体化 `-wal`/`-shm`
+
+### 问题背景
+
+PR #102 把 shadow-eval 切到只读连接（`mode=ro` + `query_only`），测试证明"主库字节不变、
+零业务写"后仍被评审揪出 P1：对一个 WAL-mode 数据库（所有连接关闭后 last-close checkpoint
+已删除边车，文件头仍是 WAL），只要父目录可写，`sqlite3.connect("file:...?mode=ro", uri=True)`
+会由 SQLite **创建** `-wal`/`-shm`——一个只读诊断工具在盘上留下了文件。
+
+### 根因
+
+`mode=ro` 只约束主库可写性；读 WAL 库仍需 WAL 索引（`-shm`）。按 sqlite.org/wal.html
+"read-only WAL"，SQLite 仅在 `-shm` **无法以读写方式打开**（目录不可写）时才走堆内存
+模拟路径；目录可写时优先实体化真实文件。此前"没留下文件"的用例是**假阳性**：fixture 在
+run 前用 `mode=ro` 连接做快照，快照自己先把边车建了出来，掩盖了被测进程的行为。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|---|---|---|
+| `mode=ro` = 不写主库 = 无副作用 | 主库不变 ≠ 不落任何文件；WAL 读取必须先有边车对 | 只读入口打开前用原始字节读文件头 18/19 判定 WAL（不经 SQLite，零副作用），WAL 且边车缺失即 `ReadonlyWalSidecarError` fail-closed，绝不让 SQLite 建文件 |
+| `immutable=1` 能绕过 | 它跳过 WAL/shm 检查，但生产 `state.db` 随时可能被并发提交，会读到过期/撕裂快照 | 对活库禁用 immutable；fail-closed + 边车在场才是正确取舍 |
+| 快照辅助连接自己开库 | 快照污染被测现场，制造假阳性 | run 前快照用原始字节 + 目录集合 before/after 全量比对；能不开 SQLite 就不开 |
+| quiescent WAL 库被拒读是否过严 | 边车缺失 ⟺ 无存活连接；HAFlow 诊断的真实场景与 controller/worker 并发、边车在场 | 宁可拒读不脏盘：CLI exit 1，消息点明 "refusing to create -wal/-shm" |
+| fixture 天然 quiescent | store 每次调用独立开关连接，最后一次 close 把边车 checkpoint 掉，进程内只读用例全部被 fail-closed 拒绝 | `_make_env` 保一条打开的 WAL 连接（keeper，无数据写）维持 live 态；专测缺失态的用例先显式关 keeper 再断言 |
+
+### 验证命令 / 关联证据
+
+- 复现：`init_db` 后关闭全部连接 → 目录无 `-wal`/`-shm`、文件头 18/19 = 2/2 →
+  再开一个 `mode=ro` URI 连接 → 目录出现两个边车文件（本仓库实测）。
+- 回归：`pytest -q tests/test_shadow_evaluation.py` → 47 passed；其中 case3b 断言
+  fail-closed（exit 1、stderr 含 `no existing read-only sidecars`、目录文件集合逐字不变），
+  case3c 断言边车在场时读取成功且主库字节一致。
+- 全量：`pytest -q` → 1799 passed + 44 subtests。
+- 关联：`herdr/state_db.py#get_readonly_db_connection` `_is_wal_mode_database`
+  `_has_readable_wal_sidecars`；sqlite.org/wal.html#readonly；§91 同族
+  （测试 fixture 的隐式文件系统副作用）。

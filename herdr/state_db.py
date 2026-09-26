@@ -1168,10 +1168,22 @@ def get_readonly_db_connection(
     never creates it), plus ``PRAGMA query_only=ON`` so a future
     statement cannot write through this connection either. No WAL
     reconfiguration, no ``.schema.lock`` sidecar, no schema init.
+
+    WAL precondition (fail closed): ``mode=ro`` alone does not stop
+    SQLite from creating ``-wal``/``-shm`` when it opens a WAL-mode DB
+    whose sidecars are absent, so a WAL DB without readable
+    ``-wal``/``-shm`` next to it raises ``ReadonlyWalSidecarError``
+    instead of letting SQLite materialize them. Rollback-journal DBs
+    have no sidecars to create and read normally.
     """
     path = resolve_state_db_path(db_path)
     if not path.is_file():
         raise FileNotFoundError(f"state database not found: {path}")
+    if _is_wal_mode_database(path) and not _has_readable_wal_sidecars(path):
+        raise ReadonlyWalSidecarError(
+            "WAL database has no existing read-only sidecars; "
+            f"refusing to create -wal/-shm next to {path}"
+        )
     conn = sqlite3.connect(
         f"{path.resolve().as_uri()}?mode=ro",
         uri=True,
@@ -1192,6 +1204,47 @@ def get_readonly_db_connection(
             pass
         raise
     return conn
+
+
+class ReadonlyWalSidecarError(RuntimeError):
+    """A WAL-mode DB cannot be read without creating -wal/-shm sidecars.
+
+    SQLite needs the ``-wal``/``-shm`` pair (or a writable directory to
+    build them) before it can read a WAL-mode database, so opening one
+    whose sidecars are absent is inherently not side-effect free. The
+    read-only path fails closed here instead of letting SQLite create
+    files: diagnostics observe state, never mutate it. A later snapshot
+    or exported diagnostic DB is the right tool when a live WAL DB must
+    be readable in every state.
+    """
+
+
+def _is_wal_mode_database(path: Path) -> bool:
+    """Report the persisted journal mode from the 100-byte DB header.
+
+    Byte 18/19 of a SQLite file is the file-format read/write version;
+    WAL mode persists as ``2``/``2``. Reading 20 raw bytes cannot create
+    sidecars, unlike opening the file through SQLite itself.
+    """
+    try:
+        with open(path, "rb") as handle:
+            header = handle.read(20)
+    except OSError:
+        return False
+    return (
+        len(header) == 20
+        and header[:16] == b"SQLite format 3\x00"
+        and header[18] == 2
+        and header[19] == 2
+    )
+
+
+def _has_readable_wal_sidecars(path: Path) -> bool:
+    """Check the -wal/-shm pair exists (and is not a directory)."""
+    return all(
+        (path.parent / f"{path.name}{suffix}").is_file()
+        for suffix in ("-wal", "-shm")
+    )
 
 
 #: Read-only capability contract for Shadow Evaluation: every table and

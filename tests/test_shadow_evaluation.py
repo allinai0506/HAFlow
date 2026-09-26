@@ -35,6 +35,20 @@ def _make_env(test):
     env_patch.start()
     test.addCleanup(env_patch.stop)
     store = get_state_store(tmp_path / "state.db")
+    # Keep the WAL sidecar pair present for the fail-closed read path:
+    # mode=ro on a WAL DB whose -wal/-shm are absent would make SQLite
+    # materialize them (a side effect the read-only contract forbids),
+    # so such a quiesced DB is refused with ReadonlyWalSidecarError.
+    # One open WAL connection has SQLite create and retain the pair --
+    # the fixture then mirrors a live deployment. The connection writes
+    # no data rows. Tests that must exercise the sidecar-absent state
+    # close ``test._keeper`` first (see case3b).
+    import sqlite3 as _sqlite3
+    keeper = _sqlite3.connect(str(tmp_path / "state.db"), timeout=10.0,
+                              isolation_level=None, check_same_thread=False)
+    keeper.execute("PRAGMA journal_mode=WAL;")
+    test.addCleanup(keeper.close)
+    test._keeper = keeper
     return store, tmp_path / "state.db"
 
 
@@ -868,6 +882,11 @@ class ShadowEvalCliTest(unittest.TestCase):
     """Real CLI chain: herdr-task shadow-eval -> core -> db -> report."""
 
     def setUp(self):
+        # _make_env keeps one WAL connection open, so the sidecar pair
+        # stays present: the fail-closed read path refuses WAL DBs
+        # without -wal/-shm (the SQLite mode=ro sidecar-creation trap),
+        # and these CLI runs must observe the same sidecar-present state
+        # a live deployment has.
         self.store, self.db_path = _make_env(self)
 
     def test_invalid_args_never_touch_db(self):
@@ -977,6 +996,7 @@ class ShadowEvalTrueReadOnlyTest(unittest.TestCase):
 
         self._sqlite3 = _sqlite3
         self.store, self.db_path = _make_env(self)
+        # _make_env attaches the WAL keeper connection as self._keeper.
         self.addCleanup(
             lambda: _os.chmod(self.db_path, 0o644)
             if self.db_path.exists() else None)
@@ -1026,41 +1046,50 @@ class ShadowEvalTrueReadOnlyTest(unittest.TestCase):
                         "opencode", success=True)
 
         def snapshot():
-            conn = self._sqlite3.connect(
-                f"file:{self.db_path.resolve()}?mode=ro", uri=True)
+            # NOTE: the pre/post reads must not use mode=ro SELECTs: on a
+            # WAL DB whose sidecars are absent, the snapshot itself would
+            # materialize -wal/-shm and hide exactly the side effect this
+            # test must catch. One short-lived writable inspection
+            # connection (closed before the run) plus raw file bytes are
+            # side-effect free with respect to the shadow-eval CLI.
+            probe = self._sqlite3.connect(str(self.db_path), timeout=10.0)
             try:
                 ddl = sorted(
-                    row[0] for row in conn.execute(
+                    row[0] for row in probe.execute(
                         "SELECT sql FROM sqlite_master "
                         "WHERE sql IS NOT NULL"))
-                tables = sorted(
-                    row[0] for row in conn.execute(
+                names = sorted(
+                    row[0] for row in probe.execute(
+                        "SELECT type || ':' || name FROM sqlite_master"))
+                tables = [
+                    row[0] for row in probe.execute(
                         "SELECT name FROM sqlite_master "
-                        "WHERE type = 'table'"))
-                indexes = sorted(
-                    row[0] for row in conn.execute(
-                        "SELECT name FROM sqlite_master "
-                        "WHERE type = 'index'"))
+                        "WHERE type = 'table' "
+                        "AND name NOT LIKE 'sqlite_%'")]
                 counts = {
-                    table: conn.execute(
+                    table: probe.execute(
                         f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
                     for table in tables
-                    if not table.startswith("sqlite_")
                 }
                 meta = sorted(
-                    tuple(row) for row in conn.execute(
+                    tuple(row) for row in probe.execute(
                         "SELECT * FROM schema_meta"))
-                return {
-                    "ddl": ddl, "counts": counts,
-                    "table_count": len(tables),
-                    "index_count": len(indexes),
-                    "schema_meta": meta,
-                    "bytes": self.db_path.read_bytes(),
-                }
             finally:
-                conn.close()
+                probe.close()
+            return {
+                "ddl": ddl, "names": names, "counts": counts,
+                "schema_meta": meta,
+                "bytes": self.db_path.read_bytes(),
+            }
 
         before = snapshot()
+        # The fixture keeper keeps a readable sidecar pair present (the
+        # sidecar-absent trap is case3b's territory); this case proves the
+        # shadow read adds nothing and mutates nothing.
+        self.assertIn(str(self.db_path.parent / "state.db-wal"),
+                      [str(p) for p in self.db_path.parent.iterdir()])
+        self.assertIn(str(self.db_path.parent / "state.db-shm"),
+                      [str(p) for p in self.db_path.parent.iterdir()])
         files_before = sorted(
             str(p) for p in self.db_path.parent.rglob("*") if p.is_file())
         proc = self._run_shadow_eval(self.db_path, "--json")
@@ -1083,6 +1112,61 @@ class ShadowEvalTrueReadOnlyTest(unittest.TestCase):
                 conn.execute("PRAGMA journal_mode").fetchone()[0], "wal")
         finally:
             conn.close()
+
+    def test_case3b_wal_without_sidecars_fails_closed_without_creating(self):
+        # P1: a WAL DB whose -wal/-shm are absent is the trap that plain
+        # mode=ro falls into (SQLite would materialize the sidecars on
+        # open). The read-only path must fail closed instead. Every writer
+        # (including the fixture keeper) is closed first so this DB
+        # really has no sidecars at read time.
+        self._keeper.close()
+        _record_decision(self.store, task_id="t-clean", run_id="run-clean",
+                         actual="opencode", recommended="codex")
+        _settle_outcome(self.store, self.db_path, "t-clean", "run-clean",
+                        "opencode", success=True)
+        with open(self.db_path, "rb") as handle:
+            header = handle.read(20)
+        self.assertEqual(header[:16], b"SQLite format 3\x00")
+        self.assertEqual((header[18], header[19]), (2, 2))
+        wal = self.db_path.parent / "state.db-wal"
+        shm = self.db_path.parent / "state.db-shm"
+        self.assertFalse(wal.exists())
+        self.assertFalse(shm.exists())
+        files_before = sorted(
+            str(p) for p in self.db_path.parent.rglob("*") if p.is_file())
+        proc = self._run_shadow_eval(self.db_path, "--json")
+        self.assertNotEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("no existing read-only sidecars", proc.stderr)
+        self.assertFalse(wal.exists())
+        self.assertFalse(shm.exists())
+        self.assertEqual(
+            sorted(
+                str(p)
+                for p in self.db_path.parent.rglob("*") if p.is_file()),
+            files_before)
+
+    def test_case3c_wal_with_sidecars_reads_normally(self):
+        # Companion: WAL + a present, readable -wal/-shm pair reads fine
+        # and leaves the persisted content byte-identical. The fixture
+        # keeper (open writer from setUp, holding WAL frames) is what
+        # keeps the pair present: its close would checkpoint them away.
+        _record_decision(self.store, task_id="t-pair", run_id="run-pair",
+                         actual="opencode", recommended="codex")
+        _settle_outcome(self.store, self.db_path, "t-pair", "run-pair",
+                        "opencode", success=True)
+        wal = self.db_path.parent / "state.db-wal"
+        shm = self.db_path.parent / "state.db-shm"
+        self.assertTrue(wal.is_file())
+        self.assertTrue(shm.is_file())
+        bytes_before = self.db_path.read_bytes()
+        proc = self._run_shadow_eval(self.db_path, "--json")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        report = _json.loads(proc.stdout)
+        self.assertGreaterEqual(
+            report["coverage"]["total_route_decisions"], 1)
+        self.assertEqual(self.db_path.read_bytes(), bytes_before)
+        self.assertTrue(wal.is_file())
+        self.assertTrue(shm.is_file())
 
     def test_case5_legacy_schema_fails_without_migrating(self):
         workdir = Path(tempfile.mkdtemp(prefix="herdr-shadow-legacy-"))
