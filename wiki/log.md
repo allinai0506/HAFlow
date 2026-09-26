@@ -1088,3 +1088,26 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
   表 + covering bucket index、只读 Outcome 的 Adaptive Router、13 用例 outcome 测试。
 - main 树验证：outcome 22 + router 15 passed；compileall OK；diff-check OK。
 - 后续：v2 是否接管流量待 shadow 数据证明 ETQS 真实下降后另行决策。
+
+## [2026-09-25] feat | Adaptive Router Shadow Evaluation v1（工作树，未合并）
+- 新增 `herdr/shadow_evaluation.py`（只读评估纯核心：coverage/agreement/actual
+  outcome/calibration+Brier/ETQS 近似/disagreement分组/predicted uplift/
+  sufficiency/canary readiness + text/JSON render）；
+  `herdr/state_db.py` 追加 `query_route_decisions`（bounded newest-first）+
+  `batch_get_execution_outcomes`（chunked，防 N+1）；
+  `bin/herdr-task shadow-eval` 只读 CLI（--node/--task-type/--agent/--since/--limit/--json）；
+  新增 `docs/architecture/adaptive-router-evaluation.md` + `tests/test_shadow_evaluation.py`（19 用例，覆盖任务 §19 Case 1–14）。
+- 边界：frozen candidate_rankings 评估（禁重算）、(task_id,run_id)+workflow 关联、
+  无反事实胜率口径、Adaptive Router/ETQS/生产路由零改动。
+- 验收：专项 60 passed（含 outcome/router 回归），全量 1771 passed + 44 subtests；
+  S6 round 2 MERGE_READY（同模型双轴评审，working_tree 交付，无 push/PR）。
+
+## [2026-09-26] refactor | shadow_evaluation.py 765行拆分为4模块（工作树，未合并）
+- herdr/shadow_rows.py（192：frozen决策×outcome join）+
+  herdr/shadow_metrics.py（456：纯聚合+报告）+
+  herdr/shadow_render.py（124：文本呈现）；
+  herdr/shadow_evaluation.py（100：管线组装+稳定公开API门面）。
+- 纯移动零语义改动：调用方（tests/bin/herdr-task）零改动，`__all__` 19名与拆分前一致；
+  无重复定义，导入无环。
+- 验收：表征19 passed前后一致，全量 1771 passed + 44 subtests；
+  S6聚焦评审 MERGE_READY。生产路由零改动。

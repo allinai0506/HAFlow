@@ -3317,6 +3317,114 @@ def query_execution_outcomes(
         conn.close()
 
 
+#: Default newest-first window for shadow-evaluation decision reads.
+ROUTE_DECISION_DEFAULT_LIMIT = 1000
+
+#: Hard cap: evaluation never loads unbounded event history in one call.
+ROUTE_DECISION_MAX_LIMIT = 10000
+
+#: Chunk size for batched (task_id, run_id) point lookups (2 bind vars
+#: per pair; stays far below SQLite's variable limit).
+OUTCOME_LOOKUP_CHUNK = 400
+
+
+def query_route_decisions(
+    *,
+    limit: Optional[int] = None,
+    since: Optional[float] = None,
+    before: Optional[float] = None,
+    db_path: Optional[Path] = None,
+) -> List[Dict[str, Any]]:
+    """Read frozen route_decision events, newest-first, bounded.
+
+    Only the ``route_decision`` event type, served by
+    ``idx_events_type(event_type, timestamp)``. Payloads are decoded in
+    Python (no SQL JSON extraction). Callers must pass an explicit
+    ``limit`` for large histories; the hard cap keeps evaluation off
+    the dispatch hot path and far from unbounded loads.
+    """
+    capped = ROUTE_DECISION_DEFAULT_LIMIT if limit is None else int(limit)
+    if capped < 1:
+        raise ValueError("limit must be a positive int")
+    capped = min(capped, ROUTE_DECISION_MAX_LIMIT)
+    query = (
+        "SELECT id, workflow_id, node_id, task_id, agent_id, timestamp, "
+        "source, run_id, payload_json FROM events "
+        "WHERE event_type = 'route_decision'"
+    )
+    params: List[Any] = []
+    if since is not None:
+        query += " AND timestamp >= ?"
+        params.append(float(since))
+    if before is not None:
+        query += " AND timestamp < ?"
+        params.append(float(before))
+    query += " ORDER BY timestamp DESC, id DESC LIMIT ?"
+    params.append(capped)
+    conn = get_db_connection(db_path)
+    try:
+        decisions: List[Dict[str, Any]] = []
+        for row in conn.execute(query, tuple(params)).fetchall():
+            try:
+                payload = json.loads(row["payload_json"] or "{}")
+            except (ValueError, TypeError):
+                payload = {}
+            decisions.append({
+                "decision_event_id": int(row["id"]),
+                "decision_at": float(row["timestamp"]),
+                "workflow_id": row["workflow_id"] or "",
+                "node_id": row["node_id"] or "",
+                "task_id": row["task_id"] or "",
+                "agent_id": row["agent_id"] or "",
+                "source": row["source"] or "",
+                "run_id": row["run_id"] or "",
+                "payload": payload if isinstance(payload, dict) else {},
+            })
+        return decisions
+    finally:
+        conn.close()
+
+
+def batch_get_execution_outcomes(
+    pairs: List[Any],
+    db_path: Optional[Path] = None,
+) -> Dict[Any, Dict[str, Any]]:
+    """Point-lookup many (task_id, run_id) outcomes in chunked queries.
+
+    One SELECT per chunk (no N+1 per-decision round trips). Missing
+    pairs are absent from the result; callers treat absence as
+    "no settled outcome", never as failure.
+    """
+    normalized: List[Any] = []
+    seen = set()
+    for pair in pairs or []:
+        key = (str(pair[0]), str(pair[1]))
+        if key[0] and key[1] and key not in seen:
+            seen.add(key)
+            normalized.append(key)
+    found: Dict[Any, Dict[str, Any]] = {}
+    if not normalized:
+        return found
+    conn = get_db_connection(db_path)
+    try:
+        for offset in range(0, len(normalized), OUTCOME_LOOKUP_CHUNK):
+            chunk = normalized[offset:offset + OUTCOME_LOOKUP_CHUNK]
+            placeholders = ", ".join(["(?, ?)"] * len(chunk))
+            params: List[Any] = []
+            for task_id, run_id in chunk:
+                params.extend([task_id, run_id])
+            for row in conn.execute(
+                f"SELECT {_OUTCOME_COLUMNS} FROM agent_execution_outcomes "
+                f"WHERE (task_id, run_id) IN ({placeholders})",
+                tuple(params),
+            ).fetchall():
+                decoded = _decode_outcome_row(row)
+                found[(decoded["task_id"], decoded["run_id"])] = decoded
+        return found
+    finally:
+        conn.close()
+
+
 def latest_trajectory_sequence(run_id: str, db_path: Optional[Path] = None) -> int:
     """Read only the run watermark without loading its event history."""
     conn = get_db_connection(db_path)
