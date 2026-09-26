@@ -8,6 +8,12 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-09-27] feat | PR #102 Shadow Evaluation 真只读 DB（分支 feat/shadow-eval-readonly-db）
+- 背景：`herdr-task shadow-eval` 号称只读，但经 `_get_store()` → `get_db_connection()` 会 mkdir/建库/切 WAL/跑 `_ensure_schema` DDL 与 migration——“无业务写”不等于“无副作用”。
+- 实现：新增独立只读入口 `state_db.get_readonly_db_connection()`（URI `mode=ro` + `PRAGMA query_only=ON`，无 mkdir/建库/WAL/schema init/schema lock）；`query_route_decisions`/`batch_get_execution_outcomes` 统一走 `_open_shadow_read_connection`（连接 + SELECT-only 能力检查）；CLI 改纯路径解析 `resolve_state_db_path()`，不再建 StateStore。
+- 语义：DB 不存在 → `[SHADOW-EVAL] state database not found` 非零退出且不建库；旧 schema 缺表缺列 → `ReadonlySchemaError`（`not compatible with shadow evaluation`）非零退出且不 migration——诊断只观察，不修库。
+- 证据：shadow 专项 45 passed；全量 1797 passed + 44 subtests；生产连接行为零改动；指标/Router 口径零改动（§24/§25）。
+
 ## [2026-09-23] feat | Console UI V1 Linear 风格产品化视觉重构
 - 背景：原 HAFlow 控制台大面积纯黑背景与大卡片嵌套，指标卡片占据首屏高度，操作按钮无主次，执行者阵容常驻挤占主工作流视区。
 - 重构：遵循 Linear 产品化克制规范：浅色统一 Design Tokens，单行内联指标元数据，极简水平阶段步骤条，44px 紧凑表格任务行，操作按钮收敛至单一 Primary CTA + 次级 `···` 下拉菜单，执行者/工位/告警下沉至底部可折叠手风琴面板。
