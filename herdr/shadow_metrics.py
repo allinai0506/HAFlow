@@ -17,6 +17,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
 
+from .shadow_rows import _predicted_probability
+
 #: Calibration buckets over the predicted success probability.
 CALIBRATION_BUCKETS: Tuple[Tuple[float, float], ...] = (
     (0.0, 0.2),
@@ -25,20 +27,6 @@ CALIBRATION_BUCKETS: Tuple[Tuple[float, float], ...] = (
     (0.6, 0.8),
     (0.8, 1.0),
 )
-
-#: Data-sufficiency cutoffs on settled samples per agent x node x task_type.
-COLD_THRESHOLD = 10
-SUFFICIENT_THRESHOLD = 30
-
-
-def sufficiency_status(sample_count: int) -> str:
-    """Bucket a settled-sample count: cold / warming / sufficient."""
-    n = int(sample_count)
-    if n < COLD_THRESHOLD:
-        return "cold"
-    if n < SUFFICIENT_THRESHOLD:
-        return "warming"
-    return "sufficient"
 
 
 def _percentile(sorted_vals: List[float], fraction: float) -> Optional[float]:
@@ -92,14 +80,40 @@ def evaluate_coverage(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+def _agreement_of(row: Dict[str, Any]) -> str:
+    """Row agreement state: same / different / unknown.
+
+    Falls back to the legacy ``same_decision`` bool for rows built
+    outside ``herdr.shadow_rows`` (unknown then reads as different,
+    matching the pre-tri-state behavior).
+    """
+    status = row.get("agreement_status")
+    if status in ("same", "different", "unknown"):
+        return str(status)
+    return "same" if row.get("same_decision") else "different"
+
+
+def _is_different(row: Dict[str, Any]) -> bool:
+    return _agreement_of(row) == "different"
+
+
 def evaluate_agreement(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Same vs different decisions over ALL route decisions."""
-    same = sum(1 for row in rows if row.get("same_decision"))
-    different = len(rows) - same
+    """Same vs different over KNOWN decisions; unknown stays separate.
+
+    ``disagreement_rate = different / (same + different)``: rows whose
+    recommendation is unknown are counted but never enter the
+    denominator, so "no recommendation" cannot read as "disagreed".
+    """
+    same = sum(1 for row in rows if _agreement_of(row) == "same")
+    different = sum(1 for row in rows if _agreement_of(row) == "different")
+    unknown = len(rows) - same - different
+    known = same + different
     return {
         "same_decision_count": same,
         "different_decision_count": different,
-        "disagreement_rate": _round6(_rate(different, len(rows))),
+        "unknown_decision_count": unknown,
+        "agreement_known_count": known,
+        "disagreement_rate": _round6(_rate(different, known)),
     }
 
 
@@ -147,27 +161,6 @@ def evaluate_actual_outcome(
         "actual_blocked_rate": _round6(_rate(blocked, n)),
         "actual_human_intervention_rate": _round6(_rate(human, n)),
     }
-
-
-def _predicted_probability(prediction: Optional[Dict[str, Any]]) -> Optional[float]:
-    """Router belief used for calibration: blended success rate.
-
-    Blended is the prior-smoothed rate the router actually prices into
-    ETQS; it is always present when the ranking entry exists, while the
-    raw observed rate may legitimately be None for cold agents.
-    """
-    if not prediction:
-        return None
-    value = prediction.get("blended_success_rate")
-    if value is None:
-        return None
-    try:
-        prob = float(value)
-    except (TypeError, ValueError):
-        return None
-    if prob != prob:  # NaN never calibrates
-        return None
-    return prob
 
 
 def evaluate_calibration(
@@ -225,6 +218,8 @@ def evaluate_etqs_approximation(
     success_walls: List[float] = []
     paired_errors: List[float] = []
     paired_ratios: List[float] = []
+    paired_predicted: List[float] = []
+    paired_observed: List[float] = []
     for row in rows:
         outcome = row.get("actual_outcome")
         prediction = row.get("actual_prediction") or {}
@@ -248,12 +243,16 @@ def evaluate_etqs_approximation(
             success_walls.append(wall_f)
         if etqs_f is not None:
             paired_errors.append(abs(etqs_f - wall_f))
+            paired_predicted.append(etqs_f)
+            paired_observed.append(wall_f)
             if wall_f > 0:
                 paired_ratios.append(etqs_f / wall_f)
     return {
         "n_paired": len(paired_errors),
         "predicted_actual_agent_etqs_p50": _median(predicted),
         "observed_success_wall_time_p50": _median(success_walls),
+        "paired_predicted_etqs_p50": _median(paired_predicted),
+        "paired_observed_wall_time_p50": _median(paired_observed),
         "median_absolute_error_seconds": _median(paired_errors),
         "p50_prediction_ratio": _median(paired_ratios),
         "p90_prediction_ratio": _percentile(sorted(paired_ratios), 0.9),
@@ -267,10 +266,14 @@ def evaluate_etqs_approximation(
 def evaluate_disagreement(
     rows: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
-    """Group actual != recommended decisions by node/task_type/pair."""
+    """Group known-different decisions by node/task_type/pair.
+
+    Unknown recommendations are excluded: "no recommendation" is not
+    a disagreement and must not appear as an ``actual -> ""`` group.
+    """
     groups: Dict[Tuple[str, str, str, str], Dict[str, int]] = {}
     for row in rows:
-        if row.get("same_decision"):
+        if not _is_different(row):
             continue
         key = (
             str(row.get("node") or ""),
@@ -306,16 +309,16 @@ def evaluate_disagreement(
 def evaluate_predicted_uplift(
     rows: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
-    """Predicted (counterfactual) uplift on disagreement rows only.
+    """Predicted (counterfactual) uplift on known-different rows only.
 
     NEVER an observed win rate: recommended_agent never executed.
     Positive medians mean the frozen model *believed* it could do
-    better, not that it did.
+    better, not that it did. Unknown recommendations are excluded.
     """
     success_gaps: List[float] = []
     etqs_gaps: List[float] = []
     for row in rows:
-        if row.get("same_decision"):
+        if not _is_different(row):
             continue
         actual = row.get("actual_prediction") or {}
         recommended = row.get("recommended_prediction") or {}
@@ -346,111 +349,15 @@ def evaluate_predicted_uplift(
     }
 
 
-def evaluate_data_sufficiency(
-    rows: List[Dict[str, Any]],
-) -> List[Dict[str, Any]]:
-    """Settled samples per agent x node x task_type (actual executions).
-
-    Status follows cold (<10) / warming (10-29) / sufficient (>=30).
-    Frozen sample_count/confidence ride along as context only; the
-    status key is the trustworthy settled count from this evaluation.
-    """
-    cells: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
-    for row in rows:
-        if not row.get("actual_outcome"):
-            continue
-        key = (
-            str(row.get("actual_agent") or ""),
-            str(row.get("node") or ""),
-            str(row.get("task_type") or ""),
-        )
-        if not key[0]:
-            continue
-        cell = cells.setdefault(key, {
-            "n_with_outcome": 0,
-            "max_frozen_sample_count": 0,
-            "max_frozen_confidence": 0.0,
-        })
-        cell["n_with_outcome"] += 1
-        prediction = row.get("actual_prediction") or {}
-        try:
-            frozen_n = int(prediction.get("sample_count") or 0)
-        except (TypeError, ValueError):
-            frozen_n = 0
-        try:
-            frozen_c = float(prediction.get("confidence") or 0.0)
-        except (TypeError, ValueError):
-            frozen_c = 0.0
-        cell["max_frozen_sample_count"] = max(
-            cell["max_frozen_sample_count"], frozen_n
-        )
-        cell["max_frozen_confidence"] = max(
-            cell["max_frozen_confidence"], frozen_c
-        )
-    buckets = [
-        {
-            "bucket_key": f"{agent}/{node}/{task_type}",
-            "agent": agent,
-            "node": node,
-            "task_type": task_type,
-            "n_with_outcome": cell["n_with_outcome"],
-            "max_frozen_sample_count": cell["max_frozen_sample_count"],
-            "max_frozen_confidence": round(
-                cell["max_frozen_confidence"], 6
-            ),
-            "status": sufficiency_status(cell["n_with_outcome"]),
-        }
-        for (agent, node, task_type), cell in cells.items()
-    ]
-    buckets.sort(key=lambda b: (b["bucket_key"]))
-    return buckets
-
-
-def build_shadow_evaluation_report(
-    rows: List[Dict[str, Any]],
-) -> Dict[str, Any]:
-    """Compose the deterministic machine-readable evaluation report."""
-    coverage = evaluate_coverage(rows)
-    agreement = evaluate_agreement(rows)
-    actual_outcome = evaluate_actual_outcome(rows)
-    calibration = evaluate_calibration(rows)
-    etqs = evaluate_etqs_approximation(rows)
-    disagreement = evaluate_disagreement(rows)
-    predicted_uplift = evaluate_predicted_uplift(rows)
-    sufficiency = evaluate_data_sufficiency(rows)
-    eligible = sum(1 for b in sufficiency if b["status"] == "sufficient")
-    return {
-        "coverage": coverage,
-        "agreement": agreement,
-        "actual_outcome": actual_outcome,
-        "calibration": calibration,
-        "etqs": etqs,
-        "disagreement": disagreement,
-        "predicted_uplift": predicted_uplift,
-        "data_sufficiency": sufficiency,
-        "canary_readiness": {
-            "eligible_bucket_count": eligible,
-            "insufficient_bucket_count": len(sufficiency) - eligible,
-            "note": (
-                "facts only: no automatic promotion to adaptive routing; "
-                "canary entry is a separate human decision."
-            ),
-        },
-    }
 
 
 __all__ = [
     "CALIBRATION_BUCKETS",
-    "COLD_THRESHOLD",
-    "SUFFICIENT_THRESHOLD",
-    "build_shadow_evaluation_report",
     "evaluate_actual_outcome",
     "evaluate_agreement",
     "evaluate_calibration",
     "evaluate_coverage",
-    "evaluate_data_sufficiency",
     "evaluate_disagreement",
     "evaluate_etqs_approximation",
     "evaluate_predicted_uplift",
-    "sufficiency_status",
 ]

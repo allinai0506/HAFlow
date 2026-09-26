@@ -34,19 +34,32 @@ def render_shadow_report(report: Dict[str, Any]) -> str:
     uplift = report.get("predicted_uplift") or {}
     sufficiency = report.get("data_sufficiency") or []
     readiness = report.get("canary_readiness") or {}
+    collection = report.get("collection") or {}
     lines = [
         "Adaptive Router Shadow Evaluation",
         "",
+    ]
+    if collection.get("source_window_size") is not None:
+        window_note = (
+            f"Source window: scanned {collection.get('source_window_size')}"
+            f", matched {collection.get('matched_rows')}"
+            f" (limit {collection.get('requested_limit')})"
+        )
+        if collection.get("truncated"):
+            window_note += " [TRUNCATED: older matching history unscanned]"
+        lines += [window_note, ""]
+    lines += [
         "Coverage",
         "--------",
         f"Route decisions:          {coverage.get('total_route_decisions', 0)}",
         f"With settled outcome:     {coverage.get('route_decisions_with_outcome', 0)}",
         f"Coverage:                 {_pct(coverage.get('outcome_coverage_rate'))}",
         "",
-        "Agreement",
-        "---------",
+        "Agreement (known decisions only)",
+        "--------------------------------",
         f"Same decision:            {agreement.get('same_decision_count', 0)}",
         f"Different decision:       {agreement.get('different_decision_count', 0)}",
+        f"Unknown recommendation:   {agreement.get('unknown_decision_count', 0)}",
         f"Disagreement rate:        {_pct(agreement.get('disagreement_rate'))}",
         "",
         "Observed Actual Outcome",
@@ -74,8 +87,10 @@ def render_shadow_report(report: Dict[str, Any]) -> str:
         "",
         "ETQS Approximation (wall time is one attempt, not full TTQS)",
         "------------------------------------------------------------",
-        f"Predicted ETQS P50:       {_secs(etqs.get('predicted_actual_agent_etqs_p50'))}",
+        f"Predicted ETQS P50 (all): {_secs(etqs.get('predicted_actual_agent_etqs_p50'))}",
         f"Observed success wall P50:{_secs(etqs.get('observed_success_wall_time_p50'))}",
+        f"Paired predicted P50:     {_secs(etqs.get('paired_predicted_etqs_p50'))}",
+        f"Paired observed P50:      {_secs(etqs.get('paired_observed_wall_time_p50'))}",
         f"Median absolute error:    {_secs(etqs.get('median_absolute_error_seconds'))}",
         "",
         "Disagreement",
@@ -98,23 +113,29 @@ def render_shadow_report(report: Dict[str, Any]) -> str:
         "-----------------------------------------------",
         f"Median predicted success uplift: {uplift_text}",
         f"Median predicted ETQS improvement: {_secs(uplift.get('median_predicted_etqs_improvement_seconds'))}",
+        f"Predicted samples (success/ETQS): {uplift.get('n_success', 0)}/{uplift.get('n_etqs', 0)}",
         "",
-        "Data Sufficiency",
-        "----------------",
+        "Data Sufficiency (model history vs calibration evidence)",
+        "--------------------------------------------------------",
     ]
     if not sufficiency:
         lines.append("(no settled buckets)")
     for bucket in sufficiency:
         lines.append(
-            f"{bucket.get('bucket_key')}   {bucket.get('n_with_outcome')}"
-            f"   {bucket.get('status')}"
+            f"{bucket.get('bucket_key')}"
+            f"   model={bucket.get('model_sample_count')}"
+            f"/{bucket.get('model_data_status')}"
+            f"   eval={bucket.get('evaluation_sample_count')}"
+            f"+calib={bucket.get('calibration_sample_count')}"
+            f"/{bucket.get('evaluation_data_status')}"
         )
     lines += [
         "",
-        "Canary Readiness",
-        "----------------",
-        f"Eligible buckets:         {readiness.get('eligible_bucket_count', 0)}",
-        f"Insufficient buckets:     {readiness.get('insufficient_bucket_count', 0)}",
+        "Canary Readiness (facts only, no eligibility verdict)",
+        "-----------------------------------------------------",
+        f"Model-sufficient buckets:      {readiness.get('model_sufficient_bucket_count', 0)}",
+        f"Evaluation-sufficient buckets: {readiness.get('evaluation_sufficient_bucket_count', 0)}",
+        f"Sufficient on both:            {readiness.get('sufficient_both_bucket_count', 0)}",
     ]
     return "\n".join(lines) + "\n"
 

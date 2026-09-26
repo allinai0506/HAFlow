@@ -9,7 +9,8 @@ no writes: identical inputs always produce identical reports.
 Layout (one lifecycle stage per module):
 
 - ``herdr.shadow_rows``: frozen decision x outcome join into rows.
-- ``herdr.shadow_metrics``: pure aggregations over rows + report.
+- ``herdr.shadow_metrics``: pure aggregations over rows.
+- ``herdr.shadow_sufficiency``: model vs evaluation evidence + statuses.
 - ``herdr.shadow_render``: human-readable text rendering.
 - This module: pipeline composition (collect rows, build report) and
   the stable public surface (``__all__`` unchanged since v1).
@@ -32,30 +33,81 @@ skipped, never guessed.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from .shadow_metrics import (
     CALIBRATION_BUCKETS,
-    COLD_THRESHOLD,
-    SUFFICIENT_THRESHOLD,
-    build_shadow_evaluation_report,
     evaluate_actual_outcome,
     evaluate_agreement,
     evaluate_calibration,
     evaluate_coverage,
-    evaluate_data_sufficiency,
     evaluate_disagreement,
     evaluate_etqs_approximation,
     evaluate_predicted_uplift,
-    sufficiency_status,
 )
 from .shadow_render import render_shadow_report
 from .shadow_rows import (
     ShadowEvaluationFilters,
+    _collect_rows_with_meta,
     build_evaluation_row,
     collect_evaluation_rows,
     extract_prediction,
 )
+from .shadow_sufficiency import (
+    COLD_THRESHOLD,
+    SUFFICIENT_THRESHOLD,
+    evaluate_data_sufficiency,
+    sufficiency_status,
+)
+
+
+def build_shadow_evaluation_report(
+    rows: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Compose the deterministic machine-readable evaluation report."""
+    coverage = evaluate_coverage(rows)
+    agreement = evaluate_agreement(rows)
+    actual_outcome = evaluate_actual_outcome(rows)
+    calibration = evaluate_calibration(rows)
+    etqs = evaluate_etqs_approximation(rows)
+    disagreement = evaluate_disagreement(rows)
+    predicted_uplift = evaluate_predicted_uplift(rows)
+    sufficiency = evaluate_data_sufficiency(rows)
+    model_ok = sum(
+        1 for b in sufficiency if b["model_data_status"] == "sufficient"
+    )
+    eval_ok = sum(
+        1 for b in sufficiency
+        if b["evaluation_data_status"] == "sufficient"
+    )
+    both = sorted(
+        b["bucket_key"] for b in sufficiency
+        if b["model_data_status"] == "sufficient"
+        and b["evaluation_data_status"] == "sufficient"
+    )
+    return {
+        "coverage": coverage,
+        "agreement": agreement,
+        "actual_outcome": actual_outcome,
+        "calibration": calibration,
+        "etqs": etqs,
+        "disagreement": disagreement,
+        "predicted_uplift": predicted_uplift,
+        "data_sufficiency": sufficiency,
+        "canary_readiness": {
+            "model_sufficient_bucket_count": model_ok,
+            "evaluation_sufficient_bucket_count": eval_ok,
+            "sufficient_both_bucket_count": len(both),
+            "sufficient_both_buckets": both,
+            "note": (
+                "facts only, no eligibility verdict: a bucket counts as "
+                "sufficient on both sides only when the model predicted "
+                "with history AND the prediction has been calibrated "
+                "against settled outcomes; canary entry remains a "
+                "separate human decision."
+            ),
+        },
+    }
 
 
 def run_shadow_evaluation(
@@ -64,7 +116,7 @@ def run_shadow_evaluation(
 ) -> Dict[str, Any]:
     """Collect rows and build the report in one read-only call."""
     active = filters or ShadowEvaluationFilters()
-    rows = collect_evaluation_rows(
+    rows, collection = _collect_rows_with_meta(
         db_path,
         node=active.node,
         task_type=active.task_type,
@@ -72,8 +124,10 @@ def run_shadow_evaluation(
         since=active.since,
         before=active.before,
         limit=active.limit,
+        scan_cap=active.scan_cap,
     )
     report = build_shadow_evaluation_report(rows)
+    report["collection"] = collection
     return {"rows": rows, "report": report}
 
 

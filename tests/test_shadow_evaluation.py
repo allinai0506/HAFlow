@@ -406,9 +406,14 @@ class GroupingAndSufficiencyTest(unittest.TestCase):
             shadow_evaluation.sufficiency_status(29), "warming")
         self.assertEqual(
             shadow_evaluation.sufficiency_status(30), "sufficient")
-        statuses = {b["bucket_key"].split("/")[0]: b["status"]
-                    for b in report["data_sufficiency"]}
-        self.assertTrue(statuses)  # report carries per-bucket rows
+        buckets = {b["bucket_key"]: b
+                   for b in report["data_sufficiency"]}
+        # All rows share one actual bucket: 78 settled outcomes, all
+        # carrying a frozen actual prediction.
+        only = buckets[f"opencode/{NODE}/{TASK_TYPE}"]
+        self.assertEqual(only["evaluation_sample_count"], 78)
+        self.assertEqual(only["calibration_sample_count"], 78)
+        self.assertEqual(only["evaluation_data_status"], "sufficient")
 
     def test_case14_json_report_deterministic(self):
         _record_decision(self.store, task_id="t-j", run_id="run-j",
@@ -506,6 +511,154 @@ class ReviewFixRegressionTest(unittest.TestCase):
         self.assertEqual(rows[0]["recommended_agent"], "")
         self.assertFalse(rows[0]["same_decision"])
         self.assertIsNone(rows[0]["recommended_prediction"])
+
+
+class ReviewFeedbackRegressionTest(unittest.TestCase):
+    """PR #101 human-review fixes: tri-state, model/eval split,
+    filter-then-limit, paired ETQS."""
+
+    def setUp(self):
+        self.store, self.db_path = _make_env(self)
+
+    def _unknown_payload(self, task_id, run_id):
+        return {
+            "mode": "shadow",
+            "workflow_id": "wf-shadow",
+            "run_id": run_id,
+            "task_id": task_id,
+            "node": NODE,
+            "task_type": TASK_TYPE,
+            "actual_agent": "opencode",
+            "candidate_rankings": [
+                _ranking_entry("opencode", blended=0.7, rank=1)
+            ],
+            "algorithm_version": adaptive_router.ALGORITHM_VERSION,
+            "created_at": BASE_TS + 50.0,
+        }
+
+    def test_unknown_excluded_from_disagreement_denominator(self):
+        _record_decision(self.store, task_id="t-s", run_id="run-s",
+                         actual="codex", recommended="codex")
+        _record_decision(self.store, task_id="t-d", run_id="run-d",
+                         actual="opencode", recommended="codex")
+        self.store.record_event(
+            "route_decision", self._unknown_payload("t-u", "run-u"),
+            workflow_id="wf-shadow", node_id=NODE, task_id="t-u",
+            agent_id="opencode", source="adaptive-router-shadow",
+            timestamp=BASE_TS + 50.0, run_id="run-u")
+        rows = shadow_evaluation.collect_evaluation_rows(self.db_path)
+        by_task = {r["task_id"]: r for r in rows}
+        self.assertEqual(by_task["t-u"]["agreement_status"], "unknown")
+        self.assertEqual(by_task["t-s"]["agreement_status"], "same")
+        self.assertEqual(by_task["t-d"]["agreement_status"], "different")
+        report = shadow_evaluation.build_shadow_evaluation_report(rows)
+        agreement = report["agreement"]
+        self.assertEqual(agreement["same_decision_count"], 1)
+        self.assertEqual(agreement["different_decision_count"], 1)
+        self.assertEqual(agreement["unknown_decision_count"], 1)
+        # different / (same + different): unknown stays out of denominator.
+        self.assertAlmostEqual(agreement["disagreement_rate"], 0.5)
+        groups = report["disagreement"]["groups"]
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0]["actual_agent"], "opencode")
+        self.assertEqual(groups[0]["recommended_agent"], "codex")
+
+    def test_model_evidence_not_replaced_by_evaluation_window(self):
+        # Reviewer's scenario: router saw 50 history samples for codex,
+        # but the evaluation window holds a single settled outcome.
+        codex = _ranking_entry("codex", blended=0.9, etqs=710.0,
+                               samples=50, rank=1)
+        opencode = _ranking_entry("opencode", blended=0.7, etqs=980.0,
+                                  samples=5, rank=2)
+        payload = {
+            "mode": "shadow",
+            "workflow_id": "wf-shadow",
+            "run_id": "run-m",
+            "task_id": "t-m",
+            "node": NODE,
+            "task_type": TASK_TYPE,
+            "actual_agent": "opencode",
+            "recommended_agent": "codex",
+            "same_decision": False,
+            "candidate_rankings": [codex, opencode],
+            "algorithm_version": adaptive_router.ALGORITHM_VERSION,
+            "created_at": BASE_TS + 50.0,
+        }
+        self.store.record_event(
+            "route_decision", payload, workflow_id="wf-shadow",
+            node_id=NODE, task_id="t-m", agent_id="opencode",
+            source="adaptive-router-shadow", timestamp=BASE_TS + 50.0,
+            run_id="run-m")
+        _settle_outcome(self.store, self.db_path, "t-m", "run-m",
+                        "opencode", success=True)
+        rows = shadow_evaluation.collect_evaluation_rows(self.db_path)
+        report = shadow_evaluation.build_shadow_evaluation_report(rows)
+        buckets = {b["bucket_key"]: b
+                   for b in report["data_sufficiency"]}
+        codex_bucket = buckets[f"codex/{NODE}/{TASK_TYPE}"]
+        self.assertEqual(codex_bucket["model_sample_count"], 50)
+        self.assertEqual(codex_bucket["model_data_status"], "sufficient")
+        self.assertEqual(codex_bucket["evaluation_sample_count"], 0)
+        self.assertEqual(codex_bucket["evaluation_data_status"], "cold")
+        opencode_bucket = buckets[f"opencode/{NODE}/{TASK_TYPE}"]
+        self.assertEqual(opencode_bucket["evaluation_sample_count"], 1)
+        readiness = report["canary_readiness"]
+        self.assertNotIn("eligible_bucket_count", readiness)
+
+    def test_filter_applies_before_limit(self):
+        for i in range(5):
+            _record_decision(
+                self.store, task_id=f"t-r{i}", run_id=f"run-r{i}",
+                node="review", task_type="docs",
+                decided_at=BASE_TS + 1000.0 + i)
+        for i in range(3):
+            _record_decision(
+                self.store, task_id=f"t-f{i}", run_id=f"run-f{i}",
+                node=NODE, task_type=TASK_TYPE,
+                decided_at=BASE_TS + 50.0 + i)
+        # Newest 4 decisions are all review/docs: fetch-then-filter
+        # would silently return 0 rows here.
+        rows = shadow_evaluation.collect_evaluation_rows(
+            self.db_path, node=NODE, task_type=TASK_TYPE, limit=4)
+        self.assertEqual(len(rows), 3)
+        bundle = shadow_evaluation.run_shadow_evaluation(
+            self.db_path,
+            filters=shadow_evaluation.ShadowEvaluationFilters(
+                node=NODE, task_type=TASK_TYPE, limit=4),
+        )
+        collection = bundle["report"]["collection"]
+        self.assertEqual(collection["matched_rows"], 3)
+        self.assertFalse(collection["truncated"])
+        self.assertGreaterEqual(
+            collection["source_window_size"], 8)
+
+    def test_paired_etqs_compares_same_rows(self):
+        for i in range(2):
+            _record_decision(
+                self.store, task_id=f"t-n{i}", run_id=f"run-n{i}",
+                actual="opencode", recommended="opencode",
+                actual_blended=0.7, decided_at=BASE_TS + 50.0 + i)
+        _record_decision(self.store, task_id="t-p", run_id="run-p",
+                         actual="opencode", recommended="opencode",
+                         actual_blended=0.9, decided_at=BASE_TS + 60.0)
+        _settle_outcome(self.store, self.db_path, "t-p", "run-p",
+                        "opencode", success=True, wall=1200.0)
+        # Force the settled row's frozen ETQS to 1200s so the paired
+        # comparison is exact while the overall P50 stays skewed.
+        rows = shadow_evaluation.collect_evaluation_rows(self.db_path)
+        for row in rows:
+            if row["task_id"] == "t-p":
+                row["actual_prediction"]["etqs_seconds"] = 1200.0
+            else:
+                row["actual_prediction"]["etqs_seconds"] = 500.0
+        report = shadow_evaluation.build_shadow_evaluation_report(rows)
+        etqs = report["etqs"]
+        self.assertAlmostEqual(
+            etqs["predicted_actual_agent_etqs_p50"], 500.0)
+        self.assertAlmostEqual(
+            etqs["paired_predicted_etqs_p50"], 1200.0)
+        self.assertAlmostEqual(
+            etqs["paired_observed_wall_time_p50"], 1200.0)
 
 
 class ShadowEvalCliTest(unittest.TestCase):

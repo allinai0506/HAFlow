@@ -3333,6 +3333,7 @@ def query_route_decisions(
     limit: Optional[int] = None,
     since: Optional[float] = None,
     before: Optional[float] = None,
+    before_id: Optional[int] = None,
     db_path: Optional[Path] = None,
 ) -> List[Dict[str, Any]]:
     """Read frozen route_decision events, newest-first, bounded.
@@ -3342,6 +3343,11 @@ def query_route_decisions(
     Python (no SQL JSON extraction). Callers must pass an explicit
     ``limit`` for large histories; the hard cap keeps evaluation off
     the dispatch hot path and far from unbounded loads.
+
+    ``before_id`` pairs with ``before`` as an exact keyset cursor
+    ((timestamp, id) paging): ``timestamp < before OR (timestamp =
+    before AND id < before_id)``. Without it, ``before`` stays a plain
+    timestamp floor for backward compatibility.
     """
     capped = ROUTE_DECISION_DEFAULT_LIMIT if limit is None else int(limit)
     if capped < 1:
@@ -3357,8 +3363,12 @@ def query_route_decisions(
         query += " AND timestamp >= ?"
         params.append(float(since))
     if before is not None:
-        query += " AND timestamp < ?"
-        params.append(float(before))
+        if before_id is not None:
+            query += " AND (timestamp < ? OR (timestamp = ? AND id < ?))"
+            params.extend([float(before), float(before), int(before_id)])
+        else:
+            query += " AND timestamp < ?"
+            params.append(float(before))
     query += " ORDER BY timestamp DESC, id DESC LIMIT ?"
     params.append(capped)
     conn = get_db_connection(db_path)

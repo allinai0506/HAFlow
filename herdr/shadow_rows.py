@@ -46,6 +46,27 @@ def extract_prediction(
     return None
 
 
+def _predicted_probability(prediction: Optional[Dict[str, Any]]) -> Optional[float]:
+    """Router belief used for calibration: blended success rate.
+
+    Blended is the prior-smoothed rate the router actually prices into
+    ETQS; it is always present when the ranking entry exists, while the
+    raw observed rate may legitimately be None for cold agents.
+    """
+    if not prediction:
+        return None
+    value = prediction.get("blended_success_rate")
+    if value is None:
+        return None
+    try:
+        prob = float(value)
+    except (TypeError, ValueError):
+        return None
+    if prob != prob:  # NaN never calibrates
+        return None
+    return prob
+
+
 def _decision_identity(payload: Dict[str, Any], event: Dict[str, Any]) -> Dict[str, str]:
     return {
         "workflow_id": str(payload.get("workflow_id") or event.get("workflow_id") or ""),
@@ -69,8 +90,25 @@ def build_evaluation_row(
     actual_agent = str(payload.get("actual_agent") or "")
     # A missing recommendation is unknown, never defaulted to actual:
     # defaulting would fabricate same_decision=True for legacy payloads.
+    # Unknown is its own agreement state: it must not count as either
+    # agreement or disagreement downstream.
     recommended_agent = str(payload.get("recommended_agent") or "")
-    same_decision = bool(recommended_agent and recommended_agent == actual_agent)
+    if recommended_agent and recommended_agent == actual_agent:
+        agreement_status = "same"
+    elif recommended_agent:
+        agreement_status = "different"
+    else:
+        agreement_status = "unknown"
+    ranking_list = rankings if isinstance(rankings, list) else []
+    model_evidence = [
+        {
+            "agent": str(entry.get("agent") or ""),
+            "sample_count": entry.get("sample_count"),
+            "confidence": entry.get("confidence"),
+        }
+        for entry in ranking_list
+        if isinstance(entry, dict) and str(entry.get("agent") or "")
+    ]
     actual_prediction = extract_prediction(rankings, actual_agent)
     if recommended_agent and recommended_agent == actual_agent:
         recommended_prediction = actual_prediction
@@ -97,7 +135,9 @@ def build_evaluation_row(
         "task_type": identity["task_type"],
         "actual_agent": actual_agent,
         "recommended_agent": recommended_agent,
-        "same_decision": same_decision,
+        "same_decision": agreement_status == "same",
+        "agreement_status": agreement_status,
+        "model_evidence": model_evidence,
         "actual_prediction": actual_prediction,
         "recommended_prediction": recommended_prediction,
         "actual_outcome": actual_outcome,
@@ -114,7 +154,37 @@ def _outcome_matches(
     return True
 
 
-def collect_evaluation_rows(
+#: Default cap on route_decision events scanned while paginating for
+#: filtered matches. Pagination stops at matched ``limit`` or at this
+#: many scanned events, whichever comes first; the collection meta
+#: reports which bound stopped the scan.
+DEFAULT_SCAN_CAP = 10000
+
+#: Newest-first page size for filtered decision scans.
+SCAN_PAGE_SIZE = 1000
+
+
+def _matches_filters(
+    row: Dict[str, Any],
+    *,
+    node: Optional[str],
+    task_type: Optional[str],
+    agent: Optional[str],
+) -> bool:
+    if node is not None and row["node"] != str(node):
+        return False
+    if task_type is not None and row["task_type"] != str(task_type):
+        return False
+    if (
+        agent is not None
+        and row["actual_agent"] != str(agent)
+        and row["recommended_agent"] != str(agent)
+    ):
+        return False
+    return True
+
+
+def _collect_rows_with_meta(
     db_path: Optional[Path] = None,
     *,
     node: Optional[str] = None,
@@ -123,18 +193,73 @@ def collect_evaluation_rows(
     since: Optional[float] = None,
     before: Optional[float] = None,
     limit: Optional[int] = None,
-) -> List[Dict[str, Any]]:
-    """Join frozen decisions to settled outcomes (bounded, read-only).
+    page_size: int = SCAN_PAGE_SIZE,
+    scan_cap: Optional[int] = None,
+) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """Paginate newest-first, filter during the scan, then limit matches.
 
-    Decisions come newest-first from ``state_db.query_route_decisions``;
-    outcomes resolve in one chunked batch (no N+1). Python-side filters
-    (node/task_type/agent) apply after the join so ``limit`` always
-    bounds storage reads. ``agent`` matches either side of the decision.
+    Filters apply BEFORE the limit: pages accumulate until ``limit``
+    matched rows exist, the event stream is exhausted, or ``scan_cap``
+    events have been scanned. ``limit`` therefore counts matched rows,
+    never raw pre-filter reads. Each page is one bounded indexed query,
+    so storage reads stay bounded even though matching rows may sit
+    deep in history.
     """
-    events = state_db.query_route_decisions(
-        limit=limit, since=since, before=before, db_path=db_path
+    effective_limit = (
+        state_db.ROUTE_DECISION_DEFAULT_LIMIT if limit is None else int(limit)
     )
-    pairs = []
+    if effective_limit < 1:
+        raise ValueError("limit must be a positive int")
+    page = max(1, min(int(page_size or SCAN_PAGE_SIZE), SCAN_PAGE_SIZE))
+    cap = DEFAULT_SCAN_CAP if scan_cap is None else int(scan_cap)
+    if cap < 1:
+        raise ValueError("scan_cap must be a positive int")
+    pairs: List[Any] = []
+    events: List[Dict[str, Any]] = []
+    seen_ids = set()
+    scanned = 0
+    exhausted = False
+    cursor_ts: Optional[float] = None
+    cursor_id: Optional[int] = None
+    while True:
+        # The explicit ``before`` floor composes with the keyset cursor:
+        # the query is bounded by whichever is older.
+        query_before: Optional[float] = cursor_ts
+        query_before_id: Optional[int] = cursor_id
+        if before is not None and (
+            cursor_ts is None or cursor_ts > float(before)
+        ):
+            query_before = float(before)
+            query_before_id = None
+        chunk = state_db.query_route_decisions(
+            limit=page, since=since, before=query_before,
+            before_id=query_before_id, db_path=db_path,
+        )
+        if not chunk:
+            exhausted = True
+            break
+        fresh = [event for event in chunk
+                 if event.get("decision_event_id") not in seen_ids]
+        for event in fresh:
+            seen_ids.add(event.get("decision_event_id"))
+        if not fresh:  # cursor made no progress; avoid an infinite loop
+            break
+        events.extend(fresh)
+        scanned += len(fresh)
+        if len(chunk) < page:
+            exhausted = True
+        cursor_ts = min(float(event["decision_at"]) for event in fresh)
+        cursor_id = min(int(event["decision_event_id"]) for event in fresh
+                        if float(event["decision_at"]) == cursor_ts)
+        if scanned >= cap:
+            break
+        # Cheap exit: enough raw events that the match target is
+        # plausibly reachable is NOT assumed; keep scanning until the
+        # matched limit is met, the stream ends, or the cap hits.
+        if len(chunk) < page:
+            break
+    # Join outcomes for the scanned window in one chunked batch (no N+1),
+    # then filter and cut to matched ``limit``.
     for event in events:
         payload = event.get("payload")
         if not isinstance(payload, dict):
@@ -144,7 +269,7 @@ def collect_evaluation_rows(
             str(payload.get("run_id") or event.get("run_id") or ""),
         ))
     outcomes = state_db.batch_get_execution_outcomes(pairs, db_path=db_path)
-    rows: List[Dict[str, Any]] = []
+    matched: List[Dict[str, Any]] = []
     for event in events:
         payload = event.get("payload") or {}
         if not isinstance(payload, dict):
@@ -160,15 +285,49 @@ def collect_evaluation_rows(
             ):
                 outcome = candidate
         row = build_evaluation_row(event, outcome)
-        if node is not None and row["node"] != str(node):
-            continue
-        if task_type is not None and row["task_type"] != str(task_type):
-            continue
-        if agent is not None and row["actual_agent"] != str(agent) and row[
-            "recommended_agent"
-        ] != str(agent):
-            continue
-        rows.append(row)
+        if _matches_filters(
+            row, node=node, task_type=task_type, agent=agent
+        ):
+            matched.append(row)
+        if len(matched) >= effective_limit:
+            break
+    matched = matched[:effective_limit]
+    meta = {
+        "source_window_size": scanned,
+        "matched_rows": len(matched),
+        "requested_limit": effective_limit,
+        "scan_cap": cap,
+        "truncated": len(matched) < effective_limit and not exhausted,
+        "exhausted": exhausted,
+        "filter_mode": "filter-then-limit",
+    }
+    return matched, meta
+
+
+def collect_evaluation_rows(
+    db_path: Optional[Path] = None,
+    *,
+    node: Optional[str] = None,
+    task_type: Optional[str] = None,
+    agent: Optional[str] = None,
+    since: Optional[float] = None,
+    before: Optional[float] = None,
+    limit: Optional[int] = None,
+    page_size: int = SCAN_PAGE_SIZE,
+    scan_cap: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """Join frozen decisions to settled outcomes (bounded, read-only).
+
+    Filters apply during a newest-first paginated scan BEFORE ``limit``,
+    so ``limit`` counts matched rows: deep-history matches are found
+    instead of silently dropped. See ``_collect_rows_with_meta`` for
+    the scan bounds and collection metadata.
+    """
+    rows, _ = _collect_rows_with_meta(
+        db_path, node=node, task_type=task_type, agent=agent,
+        since=since, before=before, limit=limit,
+        page_size=page_size, scan_cap=scan_cap,
+    )
     return rows
 
 
@@ -182,6 +341,7 @@ class ShadowEvaluationFilters:
     since: Optional[float] = None
     before: Optional[float] = None
     limit: Optional[int] = None
+    scan_cap: Optional[int] = None
 
 
 __all__ = [

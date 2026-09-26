@@ -1116,3 +1116,12 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - branch `feat/shadow-evaluation-v1`（基线 origin/main ea86b1c，无漂移）→
   https://github.com/allinai0506/HAFlow/pull/101（9文件，+1773，纯加法）。
 - 最终树证据：专项60 passed；全量1771 passed + 44 subtests。
+
+## [2026-09-27] fix | PR #101 review fixes已推同分支（待合入）
+- 4项口径修复：agreement三态（unknown不进分母/分组/uplift）；sufficiency拆
+  model证据与evaluation证据双status（canary只给事实计数，无eligible verdict）；
+  filter-then-limit分页（keyset cursor，limit计匹配数，collection meta披露窗口）；
+  ETQS加paired双P50。另将metrics二次拆出shadow_sufficiency.py，全模块≤500行。
+- Brier/ETQS公式/Router/Outcome/Canary机制未动；未新增CI workflow。
+- 验收：新23用例（含4 RED-first回归）+专项64 passed；全量1775 passed + 44 subtests；
+  S6聚焦复审MERGE_READY。生产路由零改动。
