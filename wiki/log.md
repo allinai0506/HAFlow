@@ -1145,3 +1145,11 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
   无Outcome决策的model桶不再消失。
 - `--limit 0/-1` 在_open store_前拒绝（exit 2，不建库）。
 - 验收待全量回归确认后收口。
+
+## [2026-09-26] merge | PR #101 已合并（Shadow Evaluation v1 收口完成）
+- merge `b9fb57c`：main 现含 shadow-eval 只读评估（frozen预测×immutable outcome，
+  三态agreement，双证据sufficiency，filter-then-limit分页，paired ETQS，
+  authoritative execution去重，标准median，只读CLI）。
+- 最终证据：全量1788 passed + 44 subtests；S6 MERGE_READY。
+- 约定：One execution, one authoritative prediction, one immutable outcome.
+  后续Canary另行决策，不在本PR。
