@@ -8,6 +8,17 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-09-27] fix | PR #102 只读边界重划：HAFlow 持久状态只读，容忍 SQLite WAL 协调文件
+- 评审结论：撤回当日早些引入的 `ReadonlyWalSidecarError` fail-closed preflight——「检查边车缺失再打开」是 TOCTOU 竞态，且 `-wal`/`-shm` 是 SQLite 自身连接协调文件，不应由应用层契约治理。
+- 变更：只读契约重划为「不改 HAFlow 持久数据与 schema」（不建库、无 DDL/migration、无业务写、不翻 journal_mode）；`mode=ro` + `query_only` 防写不变；删除 preflight、CLI catch、fixture WAL keeper 与 case3b/case3c，新增 case3 断言「边车被清空的 WAL 库读取成功、应用数据不变、SQLite 关闭后自清协调文件」。
+- 证据：shadow 专项 46 passed；教训 §92 追加修正节（append-only）；架构文档 §8 重写只读边界描述。
+
+## [2026-09-27] feat | PR #102 Shadow Evaluation 真只读 DB（分支 feat/shadow-eval-readonly-db）
+- 背景：`herdr-task shadow-eval` 号称只读，但经 `_get_store()` → `get_db_connection()` 会 mkdir/建库/切 WAL/跑 `_ensure_schema` DDL 与 migration——“无业务写”不等于“无副作用”。
+- 实现：新增独立只读入口 `state_db.get_readonly_db_connection()`（URI `mode=ro` + `PRAGMA query_only=ON`，无 mkdir/建库/WAL/schema init/schema lock）；`query_route_decisions`/`batch_get_execution_outcomes` 统一走 `_open_shadow_read_connection`（连接 + SELECT-only 能力检查）；CLI 改纯路径解析 `resolve_state_db_path()`，不再建 StateStore。
+- 语义：DB 不存在 → `[SHADOW-EVAL] state database not found` 非零退出且不建库；旧 schema 缺表缺列 → `ReadonlySchemaError`（`not compatible with shadow evaluation`）非零退出且不 migration——诊断只观察，不修库。
+- 证据：shadow 专项 45 passed；全量 1797 passed + 44 subtests；生产连接行为零改动；指标/Router 口径零改动（§24/§25）。
+
 ## [2026-09-23] feat | Console UI V1 Linear 风格产品化视觉重构
 - 背景：原 HAFlow 控制台大面积纯黑背景与大卡片嵌套，指标卡片占据首屏高度，操作按钮无主次，执行者阵容常驻挤占主工作流视区。
 - 重构：遵循 Linear 产品化克制规范：浅色统一 Design Tokens，单行内联指标元数据，极简水平阶段步骤条，44px 紧凑表格任务行，操作按钮收敛至单一 Primary CTA + 次级 `···` 下拉菜单，执行者/工位/告警下沉至底部可折叠手风琴面板。
@@ -1153,3 +1164,13 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - 最终证据：全量1788 passed + 44 subtests；S6 MERGE_READY。
 - 约定：One execution, one authoritative prediction, one immutable outcome.
   后续Canary另行决策，不在本PR。
+
+## [2026-09-26] fix | PR #102 评审 P1：WAL 缺边车时只读路径 fail-closed
+- 缺陷：`mode=ro` 对边车缺失、目录可写的 WAL 库会由 SQLite 实体化 `-wal`/`-shm`（OS 级副作用）。
+- 修复：`get_readonly_db_connection` 先以原始字节读文件头 18/19 判 WAL，再查边车对；
+  缺失即 `ReadonlyWalSidecarError`（CLI exit 1，不建任何文件）。不采用 `immutable=1`：
+  生产库随时可能被并发提交，会读到过期快照。
+- fixture：`_make_env` 保一条打开的 WAL 连接（keeper，无数据写）模拟 live 在场态；
+  case3b 关闭 keeper 验证 fail-closed + 目录零新增，case3c 验证边车在场字节一致。
+- 证据：`tests/test_shadow_evaluation.py` 47 passed；全量 1799 passed + 44 subtests；
+  通用教训归档 lessons §92。

@@ -886,18 +886,20 @@ class ShadowEvalCliTest(unittest.TestCase):
                 capture_output=True, text=True, env=env, timeout=120,
             )
             self.assertEqual(proc.returncode, 2, proc.stderr)
-            # Read-only promise: arg validation precedes store open, so
+            # Read-only promise: arg validation precedes any DB access, so
             # no database file (schema init/migration) may appear.
             self.assertFalse(fresh_db.exists())
-        # Control: a valid run does open (and create) the store, proving
-        # the assertion above is non-vacuous.
-        ok = _subprocess.run(
+        # Case 1: an absent DB is a hard error, never an empty report.
+        # The read-only diagnostic must not create the database file it
+        # was asked to observe.
+        missing = _subprocess.run(
             [_sys.executable, str(root / "bin" / "herdr-task"),
              "shadow-eval", "--json"],
             capture_output=True, text=True, env=env, timeout=120,
         )
-        self.assertEqual(ok.returncode, 0, ok.stderr)
-        self.assertTrue(fresh_db.exists())
+        self.assertNotEqual(missing.returncode, 0, missing.stderr)
+        self.assertIn("state database not found", missing.stderr)
+        self.assertFalse(fresh_db.exists())
 
     def test_cli_text_and_json_are_read_only(self):
         import subprocess as _subprocess
@@ -935,6 +937,305 @@ class ShadowEvalCliTest(unittest.TestCase):
             len(state_db.query_execution_outcomes(
                 agents=None, node=NODE, task_type=TASK_TYPE,
                 before=BASE_TS + 1_000_000.0, db_path=self.db_path)), 1)
+
+
+def _db_sidecars(db_path):
+    """Sidecar files a read-only run must never leave behind.
+
+    SQLite may transiently materialize ``-wal``/``-shm`` while reading a
+    WAL-mode DB and removes them again on a clean last-connection close
+    (OS-level coordination, not HAFlow state); the assertions using this
+    helper target absent or rollback-journal databases, where such files
+    cannot appear at all. Note: the production StateStore legitimately
+    creates ``state.db.schema.lock`` when a test fixture first builds
+    the DB; that belongs to the write path, not to the shadow read under
+    test, so "untouched" assertions below compare before/after file sets
+    instead of demanding absence.
+    """
+    return [
+        db_path.parent / f"{db_path.name}{suffix}"
+        for suffix in ("-wal", "-shm", ".schema.lock")
+    ]
+
+
+def _assert_no_db_artifacts(test_case, db_path):
+    db_path = Path(db_path)
+    test_case.assertFalse(
+        db_path.exists(), f"read-only run must not create {db_path}")
+    for sidecar in _db_sidecars(db_path):
+        test_case.assertFalse(
+            sidecar.exists(), f"read-only run must not create {sidecar}")
+
+
+class ShadowEvalTrueReadOnlyTest(unittest.TestCase):
+    """PR #102: shadow-eval opens the state DB strictly read-only.
+
+    The boundary is HAFlow persistent state, not the file system in
+    general: the run must not create the DB (or its directory), migrate
+    schema, write schema_meta, flip the journal mode, or leave a schema
+    lock file. SQLite's own ``-wal``/``-shm`` coordination files are
+    tolerated by design -- they are transient WAL bookkeeping SQLite
+    owns and removes on a clean close, and gating them with a pre-open
+    existence check would be a TOCTOU race anyway.
+    """
+
+    def setUp(self):
+        import sqlite3 as _sqlite3
+
+        self._sqlite3 = _sqlite3
+        self.store, self.db_path = _make_env(self)
+        self.addCleanup(
+            lambda: _os.chmod(self.db_path, 0o644)
+            if self.db_path.exists() else None)
+        self.root = Path(__file__).resolve().parent.parent
+
+    def _run_shadow_eval(self, db_path, *extra):
+        import subprocess as _subprocess
+        import sys as _sys
+
+        env = dict(_os.environ, HERDR_STATE_DB=str(db_path))
+        return _subprocess.run(
+            [_sys.executable, str(self.root / "bin" / "herdr-task"),
+             "shadow-eval"] + list(extra),
+            capture_output=True, text=True, env=env, timeout=120,
+        )
+
+    def test_case1_missing_db_fails_without_creating_anything(self):
+        workdir = Path(tempfile.mkdtemp(prefix="herdr-shadow-missing-"))
+        db_path = workdir / "sub" / "state.db"
+        before = sorted(
+            str(p) for p in workdir.rglob("*") if p.is_file())
+        proc = self._run_shadow_eval(db_path, "--json")
+        self.assertNotEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("state database not found", proc.stderr)
+        self.assertFalse(db_path.exists())
+        self.assertFalse((workdir / "sub").exists())
+        for sidecar in _db_sidecars(db_path):
+            self.assertFalse(sidecar.exists())
+        # Nothing else may appear in the directory either.
+        self.assertEqual(
+            sorted(str(p) for p in workdir.rglob("*") if p.is_file()),
+            before)
+
+    def test_case2_invalid_args_fail_before_any_db_access(self):
+        workdir = Path(tempfile.mkdtemp(prefix="herdr-shadow-invalid-"))
+        db_path = workdir / "state.db"
+        for bad in (["--since", "nope"], ["--limit", "0"],
+                    ["--limit", "-3"]):
+            proc = self._run_shadow_eval(db_path, *bad)
+            self.assertEqual(proc.returncode, 2, proc.stderr)
+            _assert_no_db_artifacts(self, db_path)
+
+    def test_case4_query_leaves_schema_rows_and_metadata_untouched(self):
+        _record_decision(self.store, task_id="t-ro", run_id="run-ro",
+                         actual="opencode", recommended="codex")
+        _settle_outcome(self.store, self.db_path, "t-ro", "run-ro",
+                        "opencode", success=True)
+
+        def snapshot():
+            # One short-lived writable inspection connection (opened and
+            # closed around the snapshot) plus raw file bytes: the state
+            # the shadow-eval CLI must not change is HAFlow state -- DDL,
+            # object names, row counts, schema_meta rows and the
+            # persisted database bytes.
+            probe = self._sqlite3.connect(str(self.db_path), timeout=10.0)
+            try:
+                ddl = sorted(
+                    row[0] for row in probe.execute(
+                        "SELECT sql FROM sqlite_master "
+                        "WHERE sql IS NOT NULL"))
+                names = sorted(
+                    row[0] for row in probe.execute(
+                        "SELECT type || ':' || name FROM sqlite_master"))
+                tables = [
+                    row[0] for row in probe.execute(
+                        "SELECT name FROM sqlite_master "
+                        "WHERE type = 'table' "
+                        "AND name NOT LIKE 'sqlite_%'")]
+                counts = {
+                    table: probe.execute(
+                        f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
+                    for table in tables
+                }
+                meta = sorted(
+                    tuple(row) for row in probe.execute(
+                        "SELECT * FROM schema_meta"))
+            finally:
+                probe.close()
+            return {
+                "ddl": ddl, "names": names, "counts": counts,
+                "schema_meta": meta,
+                "bytes": self.db_path.read_bytes(),
+            }
+
+        before = snapshot()
+        files_before = sorted(
+            str(p) for p in self.db_path.parent.rglob("*") if p.is_file())
+        proc = self._run_shadow_eval(self.db_path, "--json")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        report = _json.loads(proc.stdout)
+        self.assertEqual(report["coverage"]["total_route_decisions"], 1)
+        after = snapshot()
+        self.assertEqual(after, before)
+        # The read-only run left no new files behind (no -wal / -shm /
+        # .schema.lock of its own; the fixture's own lock predates it).
+        self.assertEqual(
+            sorted(
+                str(p)
+                for p in self.db_path.parent.rglob("*") if p.is_file()),
+            files_before)
+        # Journal mode still serves reads and was never reconfigured.
+        conn = self._sqlite3.connect(str(self.db_path))
+        try:
+            self.assertEqual(
+                conn.execute("PRAGMA journal_mode").fetchone()[0], "wal")
+        finally:
+            conn.close()
+
+    def test_case3_quiesced_wal_db_reads_with_app_data_unchanged(self):
+        # Rescoped contract (PR #102 review): the read-only promise
+        # covers HAFlow persistent state, not SQLite's own coordination
+        # files. A quiesced WAL DB (no live connection -> no -wal/-shm
+        # right now) must read successfully: SQLite may materialize the
+        # pair for the run's duration and removes it again on a clean
+        # last-connection close. Gating that with a pre-open existence
+        # check would be a TOCTOU race, so the contract deliberately
+        # tolerates the files -- while application data stays strictly
+        # invariant.
+        _record_decision(self.store, task_id="t-quiet", run_id="run-quiet",
+                         actual="opencode", recommended="codex")
+        _settle_outcome(self.store, self.db_path, "t-quiet", "run-quiet",
+                        "opencode", success=True)
+        wal = self.db_path.parent / "state.db-wal"
+        shm = self.db_path.parent / "state.db-shm"
+        with open(self.db_path, "rb") as handle:
+            header = handle.read(20)
+        self.assertEqual(header[:16], b"SQLite format 3\x00")
+        self.assertEqual((header[18], header[19]), (2, 2))  # WAL header
+        self.assertFalse(wal.exists())
+        self.assertFalse(shm.exists())
+        proc = self._run_shadow_eval(self.db_path, "--json")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        report = _json.loads(proc.stdout)
+        self.assertEqual(report["coverage"]["total_route_decisions"], 1)
+        # Application data invariance: rows unchanged and the journal
+        # mode was never reconfigured by the read.
+        self.assertEqual(
+            len(state_db.query_route_decisions(db_path=self.db_path)), 1)
+        conn = self._sqlite3.connect(str(self.db_path))
+        try:
+            self.assertEqual(
+                conn.execute("PRAGMA journal_mode").fetchone()[0], "wal")
+        finally:
+            conn.close()
+        # SQLite's coordination files are SQLite's own business: a clean
+        # last-connection close removed them again -- no residue.
+        self.assertFalse(wal.exists())
+        self.assertFalse(shm.exists())
+
+    def test_case5_legacy_schema_fails_without_migrating(self):
+        workdir = Path(tempfile.mkdtemp(prefix="herdr-shadow-legacy-"))
+        db_path = workdir / "state.db"
+        conn = self._sqlite3.connect(str(db_path))
+        conn.execute(
+            "CREATE TABLE events ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "workflow_id TEXT, task_id TEXT, event_type TEXT, "
+            "payload_json TEXT, timestamp REAL)")
+        conn.commit()
+        ddl_before = sorted(
+            row[0] for row in conn.execute(
+                "SELECT sql FROM sqlite_master WHERE sql IS NOT NULL"))
+        conn.close()
+        proc = self._run_shadow_eval(db_path, "--json")
+        self.assertNotEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("not compatible with shadow evaluation", proc.stderr)
+        conn = self._sqlite3.connect(
+            f"file:{db_path.resolve()}?mode=ro", uri=True)
+        try:
+            tables = {
+                row[0] for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'")}
+            self.assertNotIn("agent_execution_outcomes", tables)
+            ddl_after = sorted(
+                row[0] for row in conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE sql IS NOT NULL"))
+            self.assertEqual(ddl_after, ddl_before)
+        finally:
+            conn.close()
+        for sidecar in _db_sidecars(db_path):
+            self.assertFalse(sidecar.exists())
+
+    def test_case6_read_only_file_still_serves_queries(self):
+        _record_decision(self.store, task_id="t-chmod", run_id="run-chmod",
+                         actual="opencode", recommended="codex")
+        _settle_outcome(self.store, self.db_path, "t-chmod", "run-chmod",
+                        "opencode", success=True)
+        _os.chmod(self.db_path, 0o444)
+        proc = self._run_shadow_eval(self.db_path, "--json")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        report = _json.loads(proc.stdout)
+        self.assertEqual(report["coverage"]["total_route_decisions"], 1)
+
+    def test_case7_readonly_connection_blocks_writes(self):
+        _record_decision(self.store, task_id="t-block", run_id="run-block")
+        conn = state_db.get_readonly_db_connection(self.db_path)
+        try:
+            self.assertEqual(
+                conn.execute("PRAGMA query_only").fetchone()[0], 1)
+            with self.assertRaises(self._sqlite3.OperationalError):
+                conn.execute(
+                    "INSERT INTO events (workflow_id) VALUES ('nope')")
+            with self.assertRaises(self._sqlite3.OperationalError):
+                conn.execute("CREATE TABLE shadow_probe (id INTEGER)")
+        finally:
+            conn.close()
+
+    def test_readonly_connection_never_touches_a_missing_db(self):
+        workdir = Path(tempfile.mkdtemp(prefix="herdr-shadow-never-"))
+        db_path = workdir / "nested" / "state.db"
+        with self.assertRaises(FileNotFoundError):
+            state_db.get_readonly_db_connection(db_path)
+        self.assertFalse(db_path.exists())
+        self.assertFalse((workdir / "nested").exists())
+        for sidecar in _db_sidecars(db_path):
+            self.assertFalse(sidecar.exists())
+
+    def test_shadow_chain_never_uses_the_writable_connection(self):
+        _record_decision(self.store, task_id="t-chain", run_id="run-chain",
+                         actual="opencode", recommended="codex")
+        _settle_outcome(self.store, self.db_path, "t-chain", "run-chain",
+                        "opencode", success=True)
+        writable = patch.object(
+            state_db, "get_db_connection",
+            side_effect=AssertionError(
+                "shadow read opened a writable connection"))
+        initializer = patch.object(
+            state_db, "init_db",
+            side_effect=AssertionError(
+                "shadow read triggered schema init"))
+        writable.start()
+        self.addCleanup(writable.stop)
+        initializer.start()
+        self.addCleanup(initializer.stop)
+        rows = shadow_evaluation.collect_evaluation_rows(self.db_path)
+        self.assertEqual(len(rows), 1)
+        bundle = shadow_evaluation.run_shadow_evaluation(self.db_path)
+        self.assertEqual(
+            bundle["report"]["coverage"]["total_route_decisions"], 1)
+
+    def test_production_writable_connection_behavior_is_unchanged(self):
+        workdir = Path(tempfile.mkdtemp(prefix="herdr-shadow-prod-"))
+        db_path = workdir / "deep" / "state.db"
+        conn = state_db.get_db_connection(db_path)
+        try:
+            conn.execute(
+                "INSERT INTO events (workflow_id, event_type) "
+                "VALUES ('wf-prod', 'route_decision')")
+            conn.commit()
+        finally:
+            conn.close()
+        self.assertTrue(db_path.exists())
 
 
 if __name__ == "__main__":

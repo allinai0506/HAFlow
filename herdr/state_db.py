@@ -1134,6 +1134,158 @@ def init_db(db_path: Optional[Path] = None) -> Path:
     return path
 
 
+class ReadonlySchemaError(RuntimeError):
+    """The existing database cannot serve a read-only diagnostic read.
+
+    Raised instead of migrating: a read-only tool observes state but
+    never repairs it, so a missing table/column fails cleanly instead of
+    triggering ``_ensure_schema`` DDL.
+    """
+
+
+def resolve_state_db_path(db_path: Optional[Path] = None) -> Path:
+    """Resolve the active state DB file path without touching the disk.
+
+    Pure path arithmetic: never mkdirs, creates, opens or initializes
+    anything. Diagnostics use this; only the production runtime goes
+    through ``get_state_store`` / ``get_db_connection``.
+    """
+    return Path(db_path) if db_path is not None else get_default_db_path()
+
+
+def get_readonly_db_connection(
+    db_path: Optional[Path] = None,
+) -> sqlite3.Connection:
+    """Open an existing state DB strictly read-only (diagnostics only).
+
+    Independent entry point: it deliberately does not delegate to
+    ``get_db_connection``, which mkdir's the parent, creates the file,
+    switches the journal to WAL and runs ``_ensure_schema`` DDL /
+    migrations before returning. "No business writes" is not the same
+    as "no side effects".
+
+    Read-only means exactly: no HAFlow persistent state changes. The
+    file must already exist (``mode=ro`` never creates it), plus
+    ``PRAGMA query_only=ON`` so a future statement cannot write through
+    this connection either. No WAL reconfiguration, no ``.schema.lock``
+    sidecar, no schema init.
+
+    SQLite's own ``-wal``/``-shm`` coordination files are deliberately
+    out of scope: opening a WAL-mode DB whose sidecars are absent lets
+    SQLite materialize them for the connection's lifetime (removed again
+    on a clean last-connection close). They are transient OS-level WAL
+    coordination, not application data, and any pre-open existence check
+    would be a TOCTOU race anyway -- so this contract tolerates them by
+    design instead of attempting to govern them.
+    """
+    path = resolve_state_db_path(db_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"state database not found: {path}")
+    conn = sqlite3.connect(
+        f"{path.resolve().as_uri()}?mode=ro",
+        uri=True,
+        timeout=10.0,
+        isolation_level=None,  # autocommit mode; reads need no transactions
+        check_same_thread=False,
+    )
+    conn.row_factory = sqlite3.Row
+    try:
+        # mode=ro is the file-level guarantee; query_only adds the
+        # statement-level guard against future accidental writes.
+        conn.execute("PRAGMA query_only=ON;")
+        conn.execute("PRAGMA busy_timeout=10000;")
+    except Exception:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        raise
+    return conn
+
+
+#: Read-only capability contract for Shadow Evaluation: every table and
+#: column the evaluation's bounded reads bind against. Checked with pure
+#: SELECT/PRAGMA introspection only -- never with DDL.
+#:
+#: NOTE: outcome SELECT column names live in ``_OUTCOME_COLUMN_NAMES``
+#: (derived from ``_OUTCOME_COLUMNS``) further below; resolution happens
+#: at use time in ``_resolve_shadow_read_capability`` so the check can
+#: never drift from what shadow reads actually bind against.
+SHADOW_READ_CAPABILITY: Dict[str, Tuple[str, ...]] = {
+    "events": (
+        "id", "workflow_id", "node_id", "task_id", "agent_id",
+        "event_type", "timestamp", "source", "run_id", "payload_json",
+    ),
+    # Placeholder: ``_OUTCOME_COLUMN_NAMES`` is defined further below
+    # and bound by ``_resolve_shadow_read_capability`` on first use.
+    "agent_execution_outcomes": (),
+}
+
+
+def _resolve_shadow_read_capability() -> Dict[str, Tuple[str, ...]]:
+    """Capability contract with outcome columns bound to the SELECT list.
+
+    ``_OUTCOME_COLUMN_NAMES`` is defined further below in this module,
+    so the names resolve on first use after import completes.
+    """
+    capability = dict(SHADOW_READ_CAPABILITY)
+    capability["agent_execution_outcomes"] = _OUTCOME_COLUMN_NAMES
+    return capability
+
+
+def assert_shadow_read_capability(conn: sqlite3.Connection) -> None:
+    """Verify the open DB can serve shadow evaluation, without migrating.
+
+    SELECT-only (``sqlite_master`` + ``PRAGMA table_info``): a legacy DB
+    missing a table or column raises ``ReadonlySchemaError`` so the CLI
+    fails cleanly instead of auto-creating or ALTER-ing anything.
+    """
+    tables = {
+        str(row[0])
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).fetchall()
+    }
+    missing: List[str] = []
+    capability = _resolve_shadow_read_capability()
+    for table, columns in capability.items():
+        if table not in tables:
+            missing.append(table)
+            continue
+        present = {
+            str(row["name"])
+            for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        missing.extend(f"{table}.{name}" for name in columns if name not in present)
+    if missing:
+        raise ReadonlySchemaError(
+            "database schema is not compatible with shadow evaluation: "
+            f"missing {', '.join(missing)} "
+            "(read-only mode never migrates or repairs the database)"
+        )
+
+
+def _open_shadow_read_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
+    """Open the single read-only connection Shadow Evaluation reads through.
+
+    ``mode=ro`` + ``query_only`` plus the capability check above: this
+    path never writes application data and never touches schema (see
+    ``get_readonly_db_connection`` for the SQLite coordination-file
+    boundary). There is exactly one such entry point so the full
+    CLI -> core -> DB chain can be audited by grep.
+    """
+    conn = get_readonly_db_connection(db_path)
+    try:
+        assert_shadow_read_capability(conn)
+    except Exception:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        raise
+    return conn
+
+
 
 def save_workflow(
     wf_dict: Dict[str, Any],
@@ -3147,6 +3299,14 @@ _OUTCOME_COLUMNS = (
     "source_eval_id, source_eval_revision, source_task_version, schema_version"
 )
 
+#: Outcome column names in SELECT order: the read-only capability
+#: contract ``SHADOW_READ_CAPABILITY`` (defined near ``init_db``) binds
+#: these names lazily (``_resolve_shadow_read_capability``) so the check
+#: can never drift from what shadow reads actually bind against.
+_OUTCOME_COLUMN_NAMES: Tuple[str, ...] = tuple(
+    name.strip() for name in _OUTCOME_COLUMNS.split(",")
+)
+
 
 def _decode_outcome_row(row: sqlite3.Row) -> Dict[str, Any]:
     return {
@@ -3338,6 +3498,11 @@ def query_route_decisions(
 ) -> List[Dict[str, Any]]:
     """Read frozen route_decision events, newest-first, bounded.
 
+    Shadow Evaluation's bounded read path: always observe-only. The
+    connection comes from ``_open_shadow_read_connection`` (``mode=ro`` +
+    ``query_only`` + capability check), so this query never creates,
+    initializes or migrates the database it reads.
+
     Only the ``route_decision`` event type, served by
     ``idx_events_type(event_type, timestamp)``. Payloads are decoded in
     Python (no SQL JSON extraction). Callers must pass an explicit
@@ -3371,7 +3536,7 @@ def query_route_decisions(
             params.append(float(before))
     query += " ORDER BY timestamp DESC, id DESC LIMIT ?"
     params.append(capped)
-    conn = get_db_connection(db_path)
+    conn = _open_shadow_read_connection(db_path)
     try:
         decisions: List[Dict[str, Any]] = []
         for row in conn.execute(query, tuple(params)).fetchall():
@@ -3401,6 +3566,11 @@ def batch_get_execution_outcomes(
 ) -> Dict[Any, Dict[str, Any]]:
     """Point-lookup many (task_id, run_id) outcomes in chunked queries.
 
+    Shadow Evaluation's bounded read path: always observe-only. The
+    connection comes from ``_open_shadow_read_connection`` (``mode=ro`` +
+    ``query_only`` + capability check), so this lookup never creates,
+    initializes or migrates the database it reads.
+
     One SELECT per chunk (no N+1 per-decision round trips). Missing
     pairs are absent from the result; callers treat absence as
     "no settled outcome", never as failure.
@@ -3415,7 +3585,7 @@ def batch_get_execution_outcomes(
     found: Dict[Any, Dict[str, Any]] = {}
     if not normalized:
         return found
-    conn = get_db_connection(db_path)
+    conn = _open_shadow_read_connection(db_path)
     try:
         for offset in range(0, len(normalized), OUTCOME_LOOKUP_CHUNK):
             chunk = normalized[offset:offset + OUTCOME_LOOKUP_CHUNK]

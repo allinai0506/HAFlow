@@ -196,3 +196,43 @@ filtered report can never be mistaken for "all of history".
 CLI and module are read-only: no inserts, no updates, no router or
 outcome writes. Filters apply in Python after bounded reads so
 `limit` always bounds storage I/O.
+
+## 8. True read-only DB access
+
+Shadow Evaluation opens the HAFlow state database in SQLite read-only
+mode and never initializes or migrates schema. The full chain is:
+
+```text
+herdr-task shadow-eval
+  -> resolve_state_db_path() (pure path math, no StateStore, no init_db)
+  -> shadow_evaluation.run_shadow_evaluation
+    -> shadow_rows._collect_rows_with_meta
+      -> state_db.query_route_decisions / batch_get_execution_outcomes
+        -> state_db._open_shadow_read_connection
+          -> get_readonly_db_connection (URI mode=ro + PRAGMA query_only=ON)
+          -> assert_shadow_read_capability (SELECT-only sqlite_master /
+             PRAGMA table_info check)
+```
+
+Consequences:
+
+- The boundary is HAFlow persistent state: `shadow-eval` never creates
+  the DB, its directory or the `state.db.schema.lock` file, and never
+  runs `_ensure_schema` DDL, migrations, `schema_meta` writes or
+  `journal_mode` changes. SQLite's own `-wal`/`-shm` coordination files
+  are explicitly out of scope: opening a WAL-mode DB in `mode=ro` may
+  let SQLite materialize them for the connection's lifetime and remove
+  them again on a clean close. They are transient OS-level WAL
+  coordination, not application data, and a pre-open check gating them
+  would be a TOCTOU race anyway -- the contract tolerates them by
+  design. Application rows, schema and journal mode stay invariant.
+- An absent DB fails with `[SHADOW-EVAL] state database not found:
+  ...` (nonzero exit), never with an auto-created empty database.
+- A legacy DB missing a table or column fails with
+  `[SHADOW-EVAL] database schema is not compatible with shadow
+  evaluation: ...` (nonzero exit) -- schema incompatible always means
+  fail, never migrate. A read-only diagnostic observes state; it never
+  repairs the database it is observing.
+- The production runtime (`get_db_connection`, `SQLiteStateStore`,
+  `init_db`) is untouched: only the shadow evaluation read path uses
+  the read-only connection.
