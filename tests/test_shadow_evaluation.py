@@ -35,20 +35,6 @@ def _make_env(test):
     env_patch.start()
     test.addCleanup(env_patch.stop)
     store = get_state_store(tmp_path / "state.db")
-    # Keep the WAL sidecar pair present for the fail-closed read path:
-    # mode=ro on a WAL DB whose -wal/-shm are absent would make SQLite
-    # materialize them (a side effect the read-only contract forbids),
-    # so such a quiesced DB is refused with ReadonlyWalSidecarError.
-    # One open WAL connection has SQLite create and retain the pair --
-    # the fixture then mirrors a live deployment. The connection writes
-    # no data rows. Tests that must exercise the sidecar-absent state
-    # close ``test._keeper`` first (see case3b).
-    import sqlite3 as _sqlite3
-    keeper = _sqlite3.connect(str(tmp_path / "state.db"), timeout=10.0,
-                              isolation_level=None, check_same_thread=False)
-    keeper.execute("PRAGMA journal_mode=WAL;")
-    test.addCleanup(keeper.close)
-    test._keeper = keeper
     return store, tmp_path / "state.db"
 
 
@@ -882,11 +868,6 @@ class ShadowEvalCliTest(unittest.TestCase):
     """Real CLI chain: herdr-task shadow-eval -> core -> db -> report."""
 
     def setUp(self):
-        # _make_env keeps one WAL connection open, so the sidecar pair
-        # stays present: the fail-closed read path refuses WAL DBs
-        # without -wal/-shm (the SQLite mode=ro sidecar-creation trap),
-        # and these CLI runs must observe the same sidecar-present state
-        # a live deployment has.
         self.store, self.db_path = _make_env(self)
 
     def test_invalid_args_never_touch_db(self):
@@ -959,12 +940,16 @@ class ShadowEvalCliTest(unittest.TestCase):
 
 
 def _db_sidecars(db_path):
-    """Sidecar files a read-only run itself must never create.
+    """Sidecar files a read-only run must never leave behind.
 
-    Note: the production StateStore legitimately creates
-    ``state.db.schema.lock`` when a test fixture first builds the DB;
-    that belongs to the write path, not to the shadow read under test,
-    so "untouched" assertions below compare before/after file sets
+    SQLite may transiently materialize ``-wal``/``-shm`` while reading a
+    WAL-mode DB and removes them again on a clean last-connection close
+    (OS-level coordination, not HAFlow state); the assertions using this
+    helper target absent or rollback-journal databases, where such files
+    cannot appear at all. Note: the production StateStore legitimately
+    creates ``state.db.schema.lock`` when a test fixture first builds
+    the DB; that belongs to the write path, not to the shadow read under
+    test, so "untouched" assertions below compare before/after file sets
     instead of demanding absence.
     """
     return [
@@ -985,10 +970,13 @@ def _assert_no_db_artifacts(test_case, db_path):
 class ShadowEvalTrueReadOnlyTest(unittest.TestCase):
     """PR #102: shadow-eval opens the state DB strictly read-only.
 
-    Read-only means no side effects, not "no business writes": the run
-    must not create the DB (or its directory), migrate schema, write
-    schema_meta, flip the journal mode, or leave a schema lock file --
-    only open the existing file, SELECT, and close.
+    The boundary is HAFlow persistent state, not the file system in
+    general: the run must not create the DB (or its directory), migrate
+    schema, write schema_meta, flip the journal mode, or leave a schema
+    lock file. SQLite's own ``-wal``/``-shm`` coordination files are
+    tolerated by design -- they are transient WAL bookkeeping SQLite
+    owns and removes on a clean close, and gating them with a pre-open
+    existence check would be a TOCTOU race anyway.
     """
 
     def setUp(self):
@@ -996,7 +984,6 @@ class ShadowEvalTrueReadOnlyTest(unittest.TestCase):
 
         self._sqlite3 = _sqlite3
         self.store, self.db_path = _make_env(self)
-        # _make_env attaches the WAL keeper connection as self._keeper.
         self.addCleanup(
             lambda: _os.chmod(self.db_path, 0o644)
             if self.db_path.exists() else None)
@@ -1046,12 +1033,11 @@ class ShadowEvalTrueReadOnlyTest(unittest.TestCase):
                         "opencode", success=True)
 
         def snapshot():
-            # NOTE: the pre/post reads must not use mode=ro SELECTs: on a
-            # WAL DB whose sidecars are absent, the snapshot itself would
-            # materialize -wal/-shm and hide exactly the side effect this
-            # test must catch. One short-lived writable inspection
-            # connection (closed before the run) plus raw file bytes are
-            # side-effect free with respect to the shadow-eval CLI.
+            # One short-lived writable inspection connection (opened and
+            # closed around the snapshot) plus raw file bytes: the state
+            # the shadow-eval CLI must not change is HAFlow state -- DDL,
+            # object names, row counts, schema_meta rows and the
+            # persisted database bytes.
             probe = self._sqlite3.connect(str(self.db_path), timeout=10.0)
             try:
                 ddl = sorted(
@@ -1083,13 +1069,6 @@ class ShadowEvalTrueReadOnlyTest(unittest.TestCase):
             }
 
         before = snapshot()
-        # The fixture keeper keeps a readable sidecar pair present (the
-        # sidecar-absent trap is case3b's territory); this case proves the
-        # shadow read adds nothing and mutates nothing.
-        self.assertIn(str(self.db_path.parent / "state.db-wal"),
-                      [str(p) for p in self.db_path.parent.iterdir()])
-        self.assertIn(str(self.db_path.parent / "state.db-shm"),
-                      [str(p) for p in self.db_path.parent.iterdir()])
         files_before = sorted(
             str(p) for p in self.db_path.parent.rglob("*") if p.is_file())
         proc = self._run_shadow_eval(self.db_path, "--json")
@@ -1113,60 +1092,46 @@ class ShadowEvalTrueReadOnlyTest(unittest.TestCase):
         finally:
             conn.close()
 
-    def test_case3b_wal_without_sidecars_fails_closed_without_creating(self):
-        # P1: a WAL DB whose -wal/-shm are absent is the trap that plain
-        # mode=ro falls into (SQLite would materialize the sidecars on
-        # open). The read-only path must fail closed instead. Every writer
-        # (including the fixture keeper) is closed first so this DB
-        # really has no sidecars at read time.
-        self._keeper.close()
-        _record_decision(self.store, task_id="t-clean", run_id="run-clean",
+    def test_case3_quiesced_wal_db_reads_with_app_data_unchanged(self):
+        # Rescoped contract (PR #102 review): the read-only promise
+        # covers HAFlow persistent state, not SQLite's own coordination
+        # files. A quiesced WAL DB (no live connection -> no -wal/-shm
+        # right now) must read successfully: SQLite may materialize the
+        # pair for the run's duration and removes it again on a clean
+        # last-connection close. Gating that with a pre-open existence
+        # check would be a TOCTOU race, so the contract deliberately
+        # tolerates the files -- while application data stays strictly
+        # invariant.
+        _record_decision(self.store, task_id="t-quiet", run_id="run-quiet",
                          actual="opencode", recommended="codex")
-        _settle_outcome(self.store, self.db_path, "t-clean", "run-clean",
+        _settle_outcome(self.store, self.db_path, "t-quiet", "run-quiet",
                         "opencode", success=True)
+        wal = self.db_path.parent / "state.db-wal"
+        shm = self.db_path.parent / "state.db-shm"
         with open(self.db_path, "rb") as handle:
             header = handle.read(20)
         self.assertEqual(header[:16], b"SQLite format 3\x00")
-        self.assertEqual((header[18], header[19]), (2, 2))
-        wal = self.db_path.parent / "state.db-wal"
-        shm = self.db_path.parent / "state.db-shm"
+        self.assertEqual((header[18], header[19]), (2, 2))  # WAL header
         self.assertFalse(wal.exists())
         self.assertFalse(shm.exists())
-        files_before = sorted(
-            str(p) for p in self.db_path.parent.rglob("*") if p.is_file())
-        proc = self._run_shadow_eval(self.db_path, "--json")
-        self.assertNotEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("no existing read-only sidecars", proc.stderr)
-        self.assertFalse(wal.exists())
-        self.assertFalse(shm.exists())
-        self.assertEqual(
-            sorted(
-                str(p)
-                for p in self.db_path.parent.rglob("*") if p.is_file()),
-            files_before)
-
-    def test_case3c_wal_with_sidecars_reads_normally(self):
-        # Companion: WAL + a present, readable -wal/-shm pair reads fine
-        # and leaves the persisted content byte-identical. The fixture
-        # keeper (open writer from setUp, holding WAL frames) is what
-        # keeps the pair present: its close would checkpoint them away.
-        _record_decision(self.store, task_id="t-pair", run_id="run-pair",
-                         actual="opencode", recommended="codex")
-        _settle_outcome(self.store, self.db_path, "t-pair", "run-pair",
-                        "opencode", success=True)
-        wal = self.db_path.parent / "state.db-wal"
-        shm = self.db_path.parent / "state.db-shm"
-        self.assertTrue(wal.is_file())
-        self.assertTrue(shm.is_file())
-        bytes_before = self.db_path.read_bytes()
         proc = self._run_shadow_eval(self.db_path, "--json")
         self.assertEqual(proc.returncode, 0, proc.stderr)
         report = _json.loads(proc.stdout)
-        self.assertGreaterEqual(
-            report["coverage"]["total_route_decisions"], 1)
-        self.assertEqual(self.db_path.read_bytes(), bytes_before)
-        self.assertTrue(wal.is_file())
-        self.assertTrue(shm.is_file())
+        self.assertEqual(report["coverage"]["total_route_decisions"], 1)
+        # Application data invariance: rows unchanged and the journal
+        # mode was never reconfigured by the read.
+        self.assertEqual(
+            len(state_db.query_route_decisions(db_path=self.db_path)), 1)
+        conn = self._sqlite3.connect(str(self.db_path))
+        try:
+            self.assertEqual(
+                conn.execute("PRAGMA journal_mode").fetchone()[0], "wal")
+        finally:
+            conn.close()
+        # SQLite's coordination files are SQLite's own business: a clean
+        # last-connection close removed them again -- no residue.
+        self.assertFalse(wal.exists())
+        self.assertFalse(shm.exists())
 
     def test_case5_legacy_schema_fails_without_migrating(self):
         workdir = Path(tempfile.mkdtemp(prefix="herdr-shadow-legacy-"))
