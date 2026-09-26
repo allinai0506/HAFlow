@@ -1111,3 +1111,8 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
   无重复定义，导入无环。
 - 验收：表征19 passed前后一致，全量 1771 passed + 44 subtests；
   S6聚焦评审 MERGE_READY。生产路由零改动。
+
+## [2026-09-26] pr | Shadow Evaluation v1 已提交 PR #101
+- branch `feat/shadow-evaluation-v1`（基线 origin/main ea86b1c，无漂移）→
+  https://github.com/allinai0506/HAFlow/pull/101（9文件，+1773，纯加法）。
+- 最终树证据：专项60 passed；全量1771 passed + 44 subtests。
