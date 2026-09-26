@@ -4160,3 +4160,22 @@ run 前用 `mode=ro` 连接做快照，快照自己先把边车建了出来，�
 - 关联：`herdr/state_db.py#get_readonly_db_connection` `_is_wal_mode_database`
   `_has_readable_wal_sidecars`；sqlite.org/wal.html#readonly；§91 同族
   （测试 fixture 的隐式文件系统副作用）。
+
+### 修正（2026-09-27, PR #102 评审）：撤回 fail-closed preflight，边界重划为「HAFlow 持久状态只读」
+
+本教训引入的 `ReadonlyWalSidecarError` preflight（含 `_is_wal_mode_database` /
+`_has_readable_wal_sidecars` / fixture keeper / case3b–case3c）经评审撤回，上表
+「宁可拒读不脏盘」「fixture 保 keeper」两行以本修正为准：
+
+- **TOCTOU 不可解**：「检查边车缺失 → 再打开」非原子；并发进程恰可在窗口内创建或删除
+  边车，pre-flight 结论在执行时可能已过期，不构成 race-free 的保证，只是把竞态换成
+  偶发拒读。
+- **边界划错**：`-wal`/`-shm` 是 SQLite 自己的连接协调文件，属 OS/数据库协调层，不是
+  HAFlow 持久数据。只读契约应定义为「不改 HAFlow 的应用数据与 schema」——`mode=ro` +
+  `query_only` 已挡住应用层写入与建库；「该目录一个文件都不许出现」over-scope 了。
+- **利弊失衡**：容忍边车不削弱任何真实不变量（不建库、无 DDL/migration、无业务写、
+  journal_mode 不翻转，全部保留并有测试覆盖）；fail-closed 反而把「静置库但 WAL 头」
+  的合法读取（边车已被最后一次 close checkpoint 清掉，库内容完整可读）也拒掉。
+
+核心结论仍然成立且不受本修正影响：`get_db_connection` 有建库/迁移副作用，只读入口必须
+独立于它；fixture 快照自开 SQLite 连接会污染被测现场、制造假阳性。

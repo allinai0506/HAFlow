@@ -216,10 +216,16 @@ herdr-task shadow-eval
 
 Consequences:
 
-- `shadow-eval` never creates the DB, its directory, `-wal`/`-shm`
-  sidecars or the `state.db.schema.lock` file, and never runs
-  `_ensure_schema` DDL, migrations, `schema_meta` writes or
-  `journal_mode` changes.
+- The boundary is HAFlow persistent state: `shadow-eval` never creates
+  the DB, its directory or the `state.db.schema.lock` file, and never
+  runs `_ensure_schema` DDL, migrations, `schema_meta` writes or
+  `journal_mode` changes. SQLite's own `-wal`/`-shm` coordination files
+  are explicitly out of scope: opening a WAL-mode DB in `mode=ro` may
+  let SQLite materialize them for the connection's lifetime and remove
+  them again on a clean close. They are transient OS-level WAL
+  coordination, not application data, and a pre-open check gating them
+  would be a TOCTOU race anyway -- the contract tolerates them by
+  design. Application rows, schema and journal mode stay invariant.
 - An absent DB fails with `[SHADOW-EVAL] state database not found:
   ...` (nonzero exit), never with an auto-created empty database.
 - A legacy DB missing a table or column fails with
