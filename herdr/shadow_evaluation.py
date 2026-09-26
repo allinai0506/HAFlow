@@ -52,6 +52,7 @@ from .shadow_rows import (
     build_evaluation_row,
     collect_evaluation_rows,
     extract_prediction,
+    select_authoritative_execution_rows,
 )
 from .shadow_sufficiency import (
     COLD_THRESHOLD,
@@ -61,18 +62,37 @@ from .shadow_sufficiency import (
 )
 
 
+def _execution_ids(rows: List[Dict[str, Any]]) -> set:
+    return {
+        (str(row.get("task_id") or ""), str(row.get("run_id") or ""))
+        for row in rows
+        if str(row.get("task_id") or "")
+        and str(row.get("run_id") or "")
+    }
+
+
 def build_shadow_evaluation_report(
     rows: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
-    """Compose the deterministic machine-readable evaluation report."""
+    """Compose the deterministic machine-readable evaluation report.
+
+    Two explicit sample units: decision-level metrics (coverage,
+    agreement, disagreement distribution, predicted uplift) read
+    ``rows``; Outcome-level metrics (actual outcome, calibration,
+    Brier, ETQS, sufficiency, canary) read the authoritative
+    execution rows (at most one per execution).
+    """
+    execution_rows = select_authoritative_execution_rows(rows)
     coverage = evaluate_coverage(rows)
+    coverage["unique_executions"] = len(_execution_ids(rows))
+    coverage["settled_executions"] = len(_execution_ids(execution_rows))
     agreement = evaluate_agreement(rows)
-    actual_outcome = evaluate_actual_outcome(rows)
-    calibration = evaluate_calibration(rows)
-    etqs = evaluate_etqs_approximation(rows)
+    actual_outcome = evaluate_actual_outcome(execution_rows)
+    calibration = evaluate_calibration(execution_rows)
+    etqs = evaluate_etqs_approximation(execution_rows)
     disagreement = evaluate_disagreement(rows)
     predicted_uplift = evaluate_predicted_uplift(rows)
-    sufficiency = evaluate_data_sufficiency(rows)
+    sufficiency = evaluate_data_sufficiency(execution_rows)
     model_ok = sum(
         1 for b in sufficiency if b["model_data_status"] == "sufficient"
     )
@@ -128,7 +148,11 @@ def run_shadow_evaluation(
     )
     report = build_shadow_evaluation_report(rows)
     report["collection"] = collection
-    return {"rows": rows, "report": report}
+    return {
+        "rows": rows,
+        "execution_rows": select_authoritative_execution_rows(rows),
+        "report": report,
+    }
 
 
 __all__ = [

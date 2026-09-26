@@ -145,11 +145,37 @@ def build_evaluation_row(
 
 
 def _outcome_matches(
-    identity: Dict[str, str], outcome: Dict[str, Any]
+    identity: Dict[str, str],
+    actual_agent: str,
+    outcome: Dict[str, Any],
 ) -> bool:
+    """Single Outcome attribution contract (fail-closed).
+
+    A prediction belongs to one execution identity; only an Outcome
+    produced by that same identity may evaluate it:
+
+    - (task_id, run_id) equal (checked by the caller keying);
+    - workflow_id equal when both sides carry one;
+    - decision.actual_agent == outcome.agent (no fallback);
+    - node equal when both sides carry one;
+    - task_type equal when both sides carry one.
+
+    Anything uncertain returns False: the decision keeps its coverage
+    count but never receives an Outcome.
+    """
     decision_wf = identity["workflow_id"]
     outcome_wf = str(outcome.get("workflow_id") or "")
     if decision_wf and outcome_wf and decision_wf != outcome_wf:
+        return False
+    if str(actual_agent or "") != str(outcome.get("agent") or ""):
+        return False
+    decision_node = identity["node"]
+    outcome_node = str(outcome.get("node") or "")
+    if decision_node and outcome_node and decision_node != outcome_node:
+        return False
+    decision_type = identity["task_type"]
+    outcome_type = str(outcome.get("task_type") or "")
+    if decision_type and outcome_type and decision_type != outcome_type:
         return False
     return True
 
@@ -184,6 +210,44 @@ def _matches_filters(
     return True
 
 
+def _page_pairs(page: List[Dict[str, Any]]) -> List[Any]:
+    pairs: List[Any] = []
+    for event in page:
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            payload = {}
+        pairs.append((
+            str(payload.get("task_id") or event.get("task_id") or ""),
+            str(payload.get("run_id") or event.get("run_id") or ""),
+        ))
+    return pairs
+
+
+def _build_page_rows(
+    page: List[Dict[str, Any]],
+    outcomes: Dict[Any, Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for event in page:
+        payload = event.get("payload") or {}
+        if not isinstance(payload, dict):
+            payload = {}
+        identity = _decision_identity(payload, event)
+        outcome: Optional[Dict[str, Any]] = None
+        if identity["task_id"] and identity["run_id"]:
+            candidate = outcomes.get(
+                (identity["task_id"], identity["run_id"])
+            )
+            if candidate is not None and _outcome_matches(
+                identity,
+                str((payload.get("actual_agent")) or ""),
+                candidate,
+            ):
+                outcome = candidate
+        rows.append(build_evaluation_row(event, outcome))
+    return rows
+
+
 def _collect_rows_with_meta(
     db_path: Optional[Path] = None,
     *,
@@ -196,14 +260,18 @@ def _collect_rows_with_meta(
     page_size: int = SCAN_PAGE_SIZE,
     scan_cap: Optional[int] = None,
 ) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    """Paginate newest-first, filter during the scan, then limit matches.
+    """Scan pages newest-first; join, filter and stop per page.
 
-    Filters apply BEFORE the limit: pages accumulate until ``limit``
-    matched rows exist, the event stream is exhausted, or ``scan_cap``
-    events have been scanned. ``limit`` therefore counts matched rows,
-    never raw pre-filter reads. Each page is one bounded indexed query,
-    so storage reads stay bounded even though matching rows may sit
-    deep in history.
+    Each iteration reads at most ``min(page_size, scan_cap - scanned)``
+    events, batch-joins that page's Outcomes (no N+1), builds rows,
+    applies filters, and stops immediately once ``limit`` matched rows
+    exist. ``limit`` therefore counts matched rows, never raw
+    pre-filter reads. Exactly one of four stop reasons is reported:
+
+    - ``matched_limit``: matched target reached (not truncated);
+    - ``scan_cap``: hard scan budget hit first (truncated);
+    - ``exhausted``: event stream ended (not truncated);
+    - ``cursor_stalled``: cursor made no progress (truncated).
     """
     effective_limit = (
         state_db.ROUTE_DECISION_DEFAULT_LIMIT if limit is None else int(limit)
@@ -214,14 +282,17 @@ def _collect_rows_with_meta(
     cap = DEFAULT_SCAN_CAP if scan_cap is None else int(scan_cap)
     if cap < 1:
         raise ValueError("scan_cap must be a positive int")
-    pairs: List[Any] = []
-    events: List[Dict[str, Any]] = []
+    matched: List[Dict[str, Any]] = []
     seen_ids = set()
     scanned = 0
-    exhausted = False
+    stop_reason = "exhausted"
     cursor_ts: Optional[float] = None
     cursor_id: Optional[int] = None
     while True:
+        remaining = cap - scanned
+        if remaining <= 0:
+            stop_reason = "scan_cap"
+            break
         # The explicit ``before`` floor composes with the keyset cursor:
         # the query is bounded by whichever is older.
         query_before: Optional[float] = cursor_ts
@@ -231,74 +302,52 @@ def _collect_rows_with_meta(
         ):
             query_before = float(before)
             query_before_id = None
+        query_limit = min(page, remaining)
         chunk = state_db.query_route_decisions(
-            limit=page, since=since, before=query_before,
+            limit=query_limit, since=since, before=query_before,
             before_id=query_before_id, db_path=db_path,
         )
         if not chunk:
-            exhausted = True
+            stop_reason = "exhausted"
             break
         fresh = [event for event in chunk
                  if event.get("decision_event_id") not in seen_ids]
+        if not fresh:  # cursor made no progress; avoid an infinite loop
+            stop_reason = "cursor_stalled"
+            break
         for event in fresh:
             seen_ids.add(event.get("decision_event_id"))
-        if not fresh:  # cursor made no progress; avoid an infinite loop
-            break
-        events.extend(fresh)
+        outcomes = state_db.batch_get_execution_outcomes(
+            _page_pairs(fresh), db_path=db_path)
+        for row in _build_page_rows(fresh, outcomes):
+            if _matches_filters(
+                row, node=node, task_type=task_type, agent=agent
+            ):
+                matched.append(row)
+                if len(matched) >= effective_limit:
+                    break
         scanned += len(fresh)
-        if len(chunk) < page:
-            exhausted = True
+        if len(matched) >= effective_limit:
+            stop_reason = "matched_limit"
+            break
+        if scanned >= cap:
+            stop_reason = "scan_cap"
+            break
+        if len(chunk) < query_limit:
+            stop_reason = "exhausted"
+            break
         cursor_ts = min(float(event["decision_at"]) for event in fresh)
         cursor_id = min(int(event["decision_event_id"]) for event in fresh
                         if float(event["decision_at"]) == cursor_ts)
-        if scanned >= cap:
-            break
-        # Cheap exit: enough raw events that the match target is
-        # plausibly reachable is NOT assumed; keep scanning until the
-        # matched limit is met, the stream ends, or the cap hits.
-        if len(chunk) < page:
-            break
-    # Join outcomes for the scanned window in one chunked batch (no N+1),
-    # then filter and cut to matched ``limit``.
-    for event in events:
-        payload = event.get("payload")
-        if not isinstance(payload, dict):
-            payload = {}
-        pairs.append((
-            str(payload.get("task_id") or event.get("task_id") or ""),
-            str(payload.get("run_id") or event.get("run_id") or ""),
-        ))
-    outcomes = state_db.batch_get_execution_outcomes(pairs, db_path=db_path)
-    matched: List[Dict[str, Any]] = []
-    for event in events:
-        payload = event.get("payload") or {}
-        if not isinstance(payload, dict):
-            payload = {}
-        identity = _decision_identity(payload, event)
-        outcome: Optional[Dict[str, Any]] = None
-        if identity["task_id"] and identity["run_id"]:
-            candidate = outcomes.get(
-                (identity["task_id"], identity["run_id"])
-            )
-            if candidate is not None and _outcome_matches(
-                identity, candidate
-            ):
-                outcome = candidate
-        row = build_evaluation_row(event, outcome)
-        if _matches_filters(
-            row, node=node, task_type=task_type, agent=agent
-        ):
-            matched.append(row)
-        if len(matched) >= effective_limit:
-            break
     matched = matched[:effective_limit]
     meta = {
         "source_window_size": scanned,
         "matched_rows": len(matched),
         "requested_limit": effective_limit,
         "scan_cap": cap,
-        "truncated": len(matched) < effective_limit and not exhausted,
-        "exhausted": exhausted,
+        "stop_reason": stop_reason,
+        "truncated": stop_reason in ("scan_cap", "cursor_stalled"),
+        "exhausted": stop_reason == "exhausted",
         "filter_mode": "filter-then-limit",
     }
     return matched, meta
@@ -331,6 +380,46 @@ def collect_evaluation_rows(
     return rows
 
 
+def select_authoritative_execution_rows(
+    rows: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Dedup decision rows to one authoritative row per execution.
+
+    Execution identity is (task_id, run_id); rows without both never
+    enter settled-execution evaluation (they keep their decision-level
+    coverage only). Attribution already guarantees an attached Outcome
+    was produced by the row's own actual_agent, so selection is:
+
+    1. keep rows with a settled ``actual_outcome``;
+    2. group by (task_id, run_id);
+    3. keep the latest ``decision_at``, tie-broken by the larger
+       ``decision_event_id`` (``ORDER BY decision_at DESC,
+       decision_event_id DESC LIMIT 1``).
+
+    Pure function, order-independent: one execution yields at most one
+    calibration sample no matter how many retries were decided.
+    """
+    best: Dict[Any, Dict[str, Any]] = {}
+    for row in rows:
+        if not row.get("actual_outcome"):
+            continue
+        task_id = str(row.get("task_id") or "")
+        run_id = str(row.get("run_id") or "")
+        if not task_id or not run_id:
+            continue
+        key = (task_id, run_id)
+        current = best.get(key)
+        if current is None or (
+            float(row.get("decision_at") or 0.0),
+            int(row.get("decision_event_id") or 0),
+        ) > (
+            float(current.get("decision_at") or 0.0),
+            int(current.get("decision_event_id") or 0),
+        ):
+            best[key] = row
+    return [best[key] for key in sorted(best)]
+
+
 @dataclass(frozen=True)
 class ShadowEvaluationFilters:
     """Read-only CLI filter set (never mutates router or outcome data)."""
@@ -349,4 +438,5 @@ __all__ = [
     "build_evaluation_row",
     "collect_evaluation_rows",
     "extract_prediction",
+    "select_authoritative_execution_rows",
 ]

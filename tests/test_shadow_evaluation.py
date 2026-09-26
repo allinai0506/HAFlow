@@ -653,12 +653,178 @@ class ReviewFeedbackRegressionTest(unittest.TestCase):
                 row["actual_prediction"]["etqs_seconds"] = 500.0
         report = shadow_evaluation.build_shadow_evaluation_report(rows)
         etqs = report["etqs"]
+        # Only the settled execution evaluates: the two unsettled 500s
+        # predictions never enter any headline population.
         self.assertAlmostEqual(
-            etqs["predicted_actual_agent_etqs_p50"], 500.0)
+            etqs["predicted_actual_agent_etqs_p50"], 1200.0)
         self.assertAlmostEqual(
             etqs["paired_predicted_etqs_p50"], 1200.0)
         self.assertAlmostEqual(
             etqs["paired_observed_wall_time_p50"], 1200.0)
+
+
+class CloseoutRegressionTest(unittest.TestCase):
+    """PR #101 closeout: identity, dedup, median, pagination bounds."""
+
+    def setUp(self):
+        self.store, self.db_path = _make_env(self)
+
+    def test_caseA_agent_mismatch_never_attaches(self):
+        _record_decision(self.store, task_id="T", run_id="R",
+                         actual="opencode", recommended="opencode",
+                         decided_at=BASE_TS + 50.0)
+        _record_decision(self.store, task_id="T", run_id="R",
+                         actual="codex", recommended="codex",
+                         decided_at=BASE_TS + 60.0)
+        _settle_outcome(self.store, self.db_path, "T", "R", "codex")
+        bundle = shadow_evaluation.run_shadow_evaluation(self.db_path)
+        opencode_row = next(r for r in bundle["rows"]
+                            if r["actual_agent"] == "opencode")
+        codex_row = next(r for r in bundle["rows"]
+                         if r["actual_agent"] == "codex")
+        self.assertIsNone(opencode_row["actual_outcome"])
+        self.assertIsNotNone(codex_row["actual_outcome"])
+        self.assertEqual(len(bundle["execution_rows"]), 1)
+        self.assertEqual(
+            bundle["execution_rows"][0]["actual_agent"], "codex")
+        report = bundle["report"]
+        self.assertEqual(report["calibration"]["n"], 1)
+        self.assertEqual(report["coverage"]["settled_executions"], 1)
+        self.assertEqual(report["coverage"]["unique_executions"], 1)
+
+    def test_node_mismatch_never_attaches(self):
+        _record_decision(self.store, task_id="t-n", run_id="run-n",
+                         node="implementation", task_type=TASK_TYPE)
+        _settle_outcome(self.store, self.db_path, "t-n", "run-n",
+                        "opencode", node="review", task_type=TASK_TYPE)
+        rows = shadow_evaluation.collect_evaluation_rows(self.db_path)
+        self.assertEqual(len(rows), 1)
+        self.assertIsNone(rows[0]["actual_outcome"])
+
+    def test_task_type_mismatch_never_attaches(self):
+        _record_decision(self.store, task_id="t-t", run_id="run-t",
+                         node=NODE, task_type="fix")
+        _settle_outcome(self.store, self.db_path, "t-t", "run-t",
+                        "opencode", node=NODE, task_type="docs")
+        rows = shadow_evaluation.collect_evaluation_rows(self.db_path)
+        self.assertEqual(len(rows), 1)
+        self.assertIsNone(rows[0]["actual_outcome"])
+
+    def test_dedup_same_agent_keeps_latest_frozen_prediction(self):
+        for i, blended in enumerate((0.5, 0.6, 0.7)):
+            _record_decision(self.store, task_id="t-e", run_id="run-e",
+                             actual="opencode", recommended="opencode",
+                             actual_blended=blended,
+                             decided_at=BASE_TS + 50.0 + i * 10.0)
+        _settle_outcome(self.store, self.db_path, "t-e", "run-e",
+                        "opencode", success=True)
+        bundle = shadow_evaluation.run_shadow_evaluation(self.db_path)
+        self.assertEqual(len(bundle["rows"]), 3)
+        self.assertEqual(len(bundle["execution_rows"]), 1)
+        only = bundle["execution_rows"][0]
+        self.assertAlmostEqual(only["decision_at"], BASE_TS + 70.0)
+        self.assertAlmostEqual(
+            only["actual_prediction"]["blended_success_rate"], 0.7)
+
+    def test_dedup_retry_picks_latest_matching_agent(self):
+        _record_decision(self.store, task_id="t-r", run_id="run-r",
+                         actual="opencode", recommended="codex",
+                         actual_blended=0.2,
+                         decided_at=BASE_TS + 50.0)
+        _record_decision(self.store, task_id="t-r", run_id="run-r",
+                         actual="codex", recommended="codex",
+                         actual_blended=0.6,
+                         decided_at=BASE_TS + 60.0)
+        _record_decision(self.store, task_id="t-r", run_id="run-r",
+                         actual="codex", recommended="codex",
+                         actual_blended=0.9,
+                         decided_at=BASE_TS + 70.0)
+        _settle_outcome(self.store, self.db_path, "t-r", "run-r",
+                        "codex", success=True)
+        bundle = shadow_evaluation.run_shadow_evaluation(self.db_path)
+        self.assertEqual(len(bundle["execution_rows"]), 1)
+        only = bundle["execution_rows"][0]
+        self.assertEqual(only["actual_agent"], "codex")
+        self.assertAlmostEqual(only["decision_at"], BASE_TS + 70.0)
+        self.assertAlmostEqual(
+            only["actual_prediction"]["blended_success_rate"], 0.9)
+
+    def test_median_is_standard_math(self):
+        from herdr.shadow_metrics import _median
+        self.assertEqual(_median([1]), 1)
+        self.assertAlmostEqual(_median([1, 100]), 50.5)
+        self.assertEqual(_median([1, 2, 3]), 2)
+        self.assertAlmostEqual(_median([1, 2, 3, 4]), 2.5)
+        self.assertIsNone(_median([]))
+
+    def test_pagination_stops_at_matched_limit(self):
+        for i in range(10):
+            _record_decision(
+                self.store, task_id=f"t-m{i}", run_id=f"run-m{i}",
+                decided_at=BASE_TS + 50.0 + i)
+        bundle = shadow_evaluation.run_shadow_evaluation(
+            self.db_path,
+            filters=shadow_evaluation.ShadowEvaluationFilters(limit=3),
+        )
+        collection = bundle["report"]["collection"]
+        self.assertEqual(collection["matched_rows"], 3)
+        self.assertEqual(collection["stop_reason"], "matched_limit")
+        self.assertFalse(collection["truncated"])
+
+    def test_pagination_finds_deep_matches(self):
+        for i in range(100):
+            _record_decision(
+                self.store, task_id=f"t-x{i}", run_id=f"run-x{i}",
+                node="review", task_type="docs",
+                decided_at=BASE_TS + 1000.0 + i)
+        for i in range(2):
+            _record_decision(
+                self.store, task_id=f"t-f{i}", run_id=f"run-f{i}",
+                node=NODE, task_type=TASK_TYPE,
+                decided_at=BASE_TS + 50.0 + i)
+        rows = shadow_evaluation.collect_evaluation_rows(
+            self.db_path, node=NODE, task_type=TASK_TYPE, limit=2,
+            page_size=20)
+        self.assertEqual(len(rows), 2)
+
+    def test_scan_cap_is_hard_bound(self):
+        from herdr.shadow_rows import _collect_rows_with_meta
+        for i in range(8):
+            _record_decision(
+                self.store, task_id=f"t-c{i}", run_id=f"run-c{i}",
+                decided_at=BASE_TS + 50.0 + i)
+        rows, meta = _collect_rows_with_meta(
+            self.db_path, limit=100, page_size=1000, scan_cap=5)
+        self.assertLessEqual(meta["source_window_size"], 5)
+        self.assertEqual(meta["stop_reason"], "scan_cap")
+        self.assertTrue(meta["truncated"])
+        self.assertLessEqual(len(rows), 5)
+        _, meta_one = _collect_rows_with_meta(
+            self.db_path, limit=100, page_size=1000, scan_cap=1)
+        self.assertLessEqual(meta_one["source_window_size"], 1)
+
+    def test_scan_cap_splits_pages(self):
+        from herdr.shadow_rows import _collect_rows_with_meta
+        for i in range(60):
+            _record_decision(
+                self.store, task_id=f"t-p{i}", run_id=f"run-p{i}",
+                decided_at=BASE_TS + 50.0 + i)
+        _, meta = _collect_rows_with_meta(
+            self.db_path, limit=100, page_size=20, scan_cap=50)
+        self.assertLessEqual(meta["source_window_size"], 50)
+        self.assertEqual(meta["stop_reason"], "scan_cap")
+
+    def test_scan_cap_exact_page_split(self):
+        from herdr.shadow_rows import _collect_rows_with_meta
+        for i in range(40):
+            _record_decision(
+                self.store, task_id=f"t-e{i}", run_id=f"run-e{i}",
+                decided_at=BASE_TS + 50.0 + i)
+        _, meta = _collect_rows_with_meta(
+            self.db_path, limit=100, page_size=20, scan_cap=30)
+        # 20 + 10, never 20 + 20.
+        self.assertEqual(meta["source_window_size"], 30)
+        self.assertEqual(meta["stop_reason"], "scan_cap")
 
 
 class ShadowEvalCliTest(unittest.TestCase):

@@ -1125,3 +1125,13 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - Brier/ETQS公式/Router/Outcome/Canary机制未动；未新增CI workflow。
 - 验收：新23用例（含4 RED-first回归）+专项64 passed；全量1775 passed + 44 subtests；
   S6聚焦复审MERGE_READY。生产路由零改动。
+
+## [2026-09-27] fix | PR #101 closeout收口已推同分支（4项全收）
+- Identity：`_outcome_matches(identity, actual_agent, outcome)`唯一归属contract，
+  actual==agent无fallback + workflow/node/task_type双方非空校验。
+- Dedup：`select_authoritative_execution_rows`按(task,run)取最新agent一致决策；
+  decision_rows与execution_rows分离；coverage加unique/settled_executions。
+- Median：标准数学中位数；P90保持nearest-rank。
+- Pagination：每页min(page,remaining)，4种stop_reason进collection meta。
+- 验收：shadow 34 passed；专项75 passed；全量1786 passed + 44 subtests；
+  S6聚焦复审MERGE_READY。§24禁改项零diff。

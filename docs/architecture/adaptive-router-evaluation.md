@@ -50,6 +50,31 @@ disagreement_rate = different / (same + different)
 
 "Unknown recommendation" ≠ "router disagreed".
 
+## 2b. Outcome 归属只认执行身份
+
+`_outcome_matches` 是唯一的归属contract（fail-closed）：
+
+```text
+(task_id, run_id) 相等
++ workflow_id 双方非空时相等
++ decision.actual_agent == outcome.agent（无fallback）
++ node 双方非空时相等
++ task_type 双方非空时相等
+```
+
+Prediction属于哪个执行身份，Outcome必须由同一身份产生；
+不确定一律不关联（保留decision覆盖计数，不进Outcome评估）。
+
+## 2c. 一个 execution 最多一个评估样本
+
+`select_authoritative_execution_rows` 按 `(task_id, run_id)` 去重：
+仅保留带Outcome的行，取 `decision_at` 最大（`decision_event_id`
+tie-break），即最后一次与真实执行者一致的决策。报告明确区分
+`decision_rows`（coverage/agreement/disagreement/uplift）与
+`execution_rows`（actual outcome/calibration/Brier/ETQS/
+sufficiency/canary）；coverage同时给出 `total_route_decisions`、
+`unique_executions`、`settled_executions`。
+
 ## 3. Prediction Calibration
 
 For `actual_agent` we own both sides: the frozen prediction and the
@@ -104,6 +129,8 @@ paired_predicted_etqs_p50 / paired_observed_wall_time_p50
 ```
 
 Compare paired-against-paired; the overall P50s are context only.
+`_median` is the standard mathematical median (even count averages
+the two middle values); `_percentile` stays nearest-rank for P90.
 
 ## 6. Data Sufficiency：模型证据与校准证据是两回事
 
@@ -156,13 +183,14 @@ route_decision events (state_db.query_route_decisions, bounded, newest-first)
 ```
 
 Filters apply DURING a newest-first paginated scan (exact keyset
-cursor on `(timestamp, id)`), BEFORE the limit: `limit` counts
-matched rows, and deep-history matches are found instead of silently
-dropped. The scan stops at matched `limit`, stream exhaustion, or
-`scan_cap` (default 10000); `report["collection"]` discloses
-`source_window_size / matched_rows / requested_limit / scan_cap /
-truncated / exhausted` so a filtered report can never be mistaken
-for "all of history".
+cursor on `(timestamp, id)`), BEFORE the limit: each page reads at
+most `min(page_size, scan_cap - scanned)` events, batch-joins that
+page's Outcomes, builds rows, filters, and stops the moment matched
+`limit` is reached. Exactly one stop reason is reported —
+`matched_limit` / `scan_cap` / `exhausted` / `cursor_stalled` — in
+`report["collection"]` (`source_window_size / matched_rows /
+requested_limit / scan_cap / stop_reason / truncated / ...`), so a
+filtered report can never be mistaken for "all of history".
 
 CLI and module are read-only: no inserts, no updates, no router or
 outcome writes. Filters apply in Python after bounded reads so

@@ -53,6 +53,8 @@ def render_shadow_report(report: Dict[str, Any]) -> str:
         "--------",
         f"Route decisions:          {coverage.get('total_route_decisions', 0)}",
         f"With settled outcome:     {coverage.get('route_decisions_with_outcome', 0)}",
+        f"Unique executions:        {coverage.get('unique_executions', 0)}",
+        f"Settled executions:       {coverage.get('settled_executions', 0)}",
         f"Coverage:                 {_pct(coverage.get('outcome_coverage_rate'))}",
         "",
         "Agreement (known decisions only)",

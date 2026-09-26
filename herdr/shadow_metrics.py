@@ -39,9 +39,20 @@ def _percentile(sorted_vals: List[float], fraction: float) -> Optional[float]:
 
 
 def _median(values: List[float]) -> Optional[float]:
+    """Standard mathematical median (does NOT reuse nearest-rank).
+
+    Odd count takes the middle value; even count averages the two
+    middle values. ``_percentile`` stays nearest-rank and remains the
+    helper for true quantiles such as P90.
+    """
     if not values:
         return None
-    return _percentile(sorted(values), 0.5)
+    ordered = sorted(float(v) for v in values)
+    n = len(ordered)
+    mid = n // 2
+    if n % 2 == 1:
+        return ordered[mid]
+    return (ordered[mid - 1] + ordered[mid]) / 2.0
 
 
 def _rate(numerator: int, denominator: int) -> Optional[float]:
