@@ -140,7 +140,8 @@ evidence sides (never conflated):
 ```text
 Model evidence:      model_sample_count / model_confidence
                      (frozen history the router predicted with;
-                      max over candidates in the evaluated window)
+                      max over candidates across ALL decision rows,
+                      no Outcome required)
 Evaluation evidence: evaluation_sample_count (settled outcomes)
                      calibration_sample_count (frozen prediction
                        paired with a settled outcome)

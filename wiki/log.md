@@ -1139,3 +1139,9 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 ## [2026-09-27] fix | PR #101 只读承诺补齐（参数校验前移）
 - `cmd_shadow_eval` 先验证 --since/--limit 再 `_get_store()`，非法参数 exit 2
   不建库；--limit help 同步 filter-then-limit 文案。统计逻辑零改动。
+
+## [2026-09-27] fix | PR #101 最后两项已推（可合并）
+- Sufficiency双输入：model证据取全部decision rows，evaluation取execution rows；
+  无Outcome决策的model桶不再消失。
+- `--limit 0/-1` 在_open store_前拒绝（exit 2，不建库）。
+- 验收待全量回归确认后收口。

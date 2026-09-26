@@ -827,6 +827,43 @@ class CloseoutRegressionTest(unittest.TestCase):
         self.assertEqual(meta["stop_reason"], "scan_cap")
 
 
+    def test_model_evidence_survives_without_outcome(self):
+        codex = _ranking_entry("codex", blended=0.9, etqs=710.0,
+                               samples=50, rank=1)
+        opencode = _ranking_entry("opencode", blended=0.7, etqs=980.0,
+                                  samples=5, rank=2)
+        payload = {
+            "mode": "shadow",
+            "workflow_id": "wf-shadow",
+            "run_id": "run-o",
+            "task_id": "t-o",
+            "node": NODE,
+            "task_type": TASK_TYPE,
+            "actual_agent": "opencode",
+            "recommended_agent": "codex",
+            "same_decision": False,
+            "candidate_rankings": [codex, opencode],
+            "algorithm_version": adaptive_router.ALGORITHM_VERSION,
+            "created_at": BASE_TS + 50.0,
+        }
+        self.store.record_event(
+            "route_decision", payload, workflow_id="wf-shadow",
+            node_id=NODE, task_id="t-o", agent_id="opencode",
+            source="adaptive-router-shadow", timestamp=BASE_TS + 50.0,
+            run_id="run-o")
+        # Deliberately no settled outcome for this decision.
+        bundle = shadow_evaluation.run_shadow_evaluation(self.db_path)
+        self.assertEqual(len(bundle["rows"]), 1)
+        self.assertEqual(len(bundle["execution_rows"]), 0)
+        buckets = {b["bucket_key"]: b
+                   for b in bundle["report"]["data_sufficiency"]}
+        codex_bucket = buckets[f"codex/{NODE}/{TASK_TYPE}"]
+        self.assertEqual(codex_bucket["model_sample_count"], 50)
+        self.assertEqual(codex_bucket["model_data_status"], "sufficient")
+        self.assertEqual(codex_bucket["evaluation_sample_count"], 0)
+        self.assertEqual(codex_bucket["evaluation_data_status"], "cold")
+
+
 class ShadowEvalCliTest(unittest.TestCase):
     """Real CLI chain: herdr-task shadow-eval -> core -> db -> report."""
 
@@ -841,7 +878,8 @@ class ShadowEvalCliTest(unittest.TestCase):
         fresh_db = Path(tempfile.mkdtemp(prefix="herdr-shadow-ro-")) / "fresh.db"
         env = dict(_os.environ, HERDR_STATE_DB=str(fresh_db))
         self.assertFalse(fresh_db.exists())
-        for bad in (["--since", "abc"], ["--limit", "xyz"]):
+        for bad in (["--since", "abc"], ["--limit", "xyz"],
+                    ["--limit", "0"], ["--limit", "-1"]):
             proc = _subprocess.run(
                 [_sys.executable, str(root / "bin" / "herdr-task"),
                  "shadow-eval"] + bad,

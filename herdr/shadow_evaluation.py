@@ -92,7 +92,7 @@ def build_shadow_evaluation_report(
     etqs = evaluate_etqs_approximation(execution_rows)
     disagreement = evaluate_disagreement(rows)
     predicted_uplift = evaluate_predicted_uplift(rows)
-    sufficiency = evaluate_data_sufficiency(execution_rows)
+    sufficiency = evaluate_data_sufficiency(rows, execution_rows)
     model_ok = sum(
         1 for b in sufficiency if b["model_data_status"] == "sufficient"
     )

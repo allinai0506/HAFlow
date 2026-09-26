@@ -45,28 +45,30 @@ def _frozen_float(prediction: Dict[str, Any], key: str) -> float:
 
 
 def evaluate_data_sufficiency(
-    rows: List[Dict[str, Any]],
+    decision_rows: List[Dict[str, Any]],
+    execution_rows: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
     """Model evidence vs evaluation evidence per agent x node x task_type.
 
-    Two deliberately separate concepts share one bucket list:
+    Two deliberately separate inputs share one bucket list:
 
     - Model evidence (``model_sample_count`` / ``model_confidence``):
       the frozen history size the router actually predicted with, taken
-      as the max over every candidate's frozen ranking entry in the
-      evaluated window. Answers "did the model have history?".
+      as the max over every candidate's frozen ranking entry across ALL
+      decision rows -- no Outcome required. Answers "did the model
+      have history?".
     - Evaluation evidence (``evaluation_sample_count`` /
-      ``calibration_sample_count``): settled actual outcomes, and the
-      subset pairing a frozen actual prediction with a settled
+      ``calibration_sample_count``): settled authoritative executions,
+      and the subset pairing a frozen actual prediction with a settled
       outcome. Answers "can we calibrate the prediction?".
 
     Each side gets its own cold (<10) / warming (10-29) / sufficient
     (>=30) status; a missing side reports ``None`` / ``"unknown"``,
     never a guess. Buckets union every agent seen in frozen rankings
-    or in settled outcomes.
+    or in settled executions.
     """
     model: Dict[Tuple[str, str, str], Dict[str, float]] = {}
-    for row in rows:
+    for row in decision_rows:
         node = str(row.get("node") or "")
         task_type = str(row.get("task_type") or "")
         evidence = row.get("model_evidence")
@@ -90,9 +92,7 @@ def evaluate_data_sufficiency(
             )
     evaluated: Dict[Tuple[str, str, str], Dict[str, int]] = {}
     calibrated: Dict[Tuple[str, str, str], int] = {}
-    for row in rows:
-        if not row.get("actual_outcome"):
-            continue
+    for row in execution_rows:
         key = (
             str(row.get("actual_agent") or ""),
             str(row.get("node") or ""),

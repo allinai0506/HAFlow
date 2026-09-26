@@ -1403,6 +1403,10 @@ def cmd_shadow_eval(args):
         print("[SHADOW-EVAL] --limit must be an int",
               file=sys.stderr)
         sys.exit(2)
+    if limit <= 0:
+        print("[SHADOW-EVAL] --limit must be a positive int",
+              file=sys.stderr)
+        sys.exit(2)
 
     try:
         store = _get_store()
