@@ -22,8 +22,9 @@ always wins.):
   evaluation/DB outage all resolve to "do not expand" (effective 0 or
   the conservative fallback), never to more Adaptive traffic.
 - Every state change appends exactly one immutable audit row in the
-  same SQLite transaction as the state upsert (see
-  ``state_db.apply_rollout_stage_atomic``).
+  same SQLite transaction as the state upsert, and both the change and
+  the no-op decision are re-verified against the exact snapshot they
+  were computed from (see ``state_db.transact_rollout_stage``).
 """
 
 from __future__ import annotations
@@ -215,7 +216,9 @@ def get_stage(
     """Current staged percentage; unknown buckets read as off (0).
 
     Invalid bucket identity is a caller error (raise); storage errors
-    resolve to 0 so callers fail safe without extra branches.
+    resolve to 0 so callers fail safe without extra branches. Anything
+    that decides whether to write must use the full snapshot
+    (``state_db.read_rollout_snapshot``) instead.
     """
     bucket = normalize_bucket(agent, node, task_type)
     try:
@@ -283,6 +286,69 @@ def effective_percentage(
         return 0
 
 
+@dataclass(frozen=True)
+class RolloutDecision:
+    """Pure verdict for one requested change against a given snapshot."""
+
+    snapshot: state_db.RolloutSnapshot
+    #: Staged ladder position (0 when absent or corrupt).
+    staged: int
+    #: Percentage actually being diverted right now.
+    effective_prev: int
+    new_percentage: int
+    is_noop: bool
+    action: str
+
+
+def decide_rollout_change(
+    snapshot: state_db.RolloutSnapshot,
+    *,
+    new_percentage: Any,
+    automatic: bool = False,
+    config_fallback: Optional[int] = None,
+) -> RolloutDecision:
+    """Decide what one requested change means (pure, no I/O).
+
+    Everything that can reject a change happens here, before any write:
+    the transition ladder, the no-op question, and the audit action. The
+    caller passes the returned decision to a single transaction that
+    re-verifies ``snapshot``, so a decision can never be applied to a
+    state it was not made against.
+    """
+    nxt = normalize_percentage(new_percentage)
+    try:
+        staged = normalize_percentage(snapshot.percentage)
+    except ValueError as exc:
+        # Corrupt staged value: only a rollback to off may proceed.
+        if nxt != 0:
+            raise ValueError(
+                "corrupt rollout state; only rollback to off is allowed"
+            ) from exc
+        staged = 0
+        snapshot = state_db.RolloutSnapshot(exists=False, percentage=0)
+    # What is actually being diverted right now: the staged row when one
+    # exists (explicit off included), otherwise the canary config.
+    effective_prev = (
+        staged if snapshot.exists else _safe_fallback(config_fallback))
+    if nxt == effective_prev:
+        return RolloutDecision(
+            snapshot=snapshot, staged=staged, effective_prev=effective_prev,
+            new_percentage=nxt, is_noop=True, action="noop")
+    if not is_valid_transition(staged, nxt):
+        raise ValueError(
+            f"rollout transition {staged} -> {nxt} is not allowed: "
+            "promote one stage at a time (off->5->10->25->50); "
+            "rollback may go directly to off")
+    return RolloutDecision(
+        snapshot=snapshot, staged=staged, effective_prev=effective_prev,
+        new_percentage=nxt, is_noop=False,
+        # The ladder is validated against the staged value (a first
+        # migration still starts at stage 5), but the audit action must
+        # describe the real traffic direction: taking a 50% config bucket
+        # down to stage 5 is a rollback, not a promotion.
+        action=_action_for(effective_prev, nxt, automatic=automatic))
+
+
 def set_stage(
     db_path: Optional[Path],
     *,
@@ -299,9 +365,9 @@ def set_stage(
     """Manually promote or roll back one bucket (atomic + audited).
 
     ``config_fallback`` is the percentage the canary config would serve
-    for this bucket while it has no staged row. It is only used to make
-    the audit fact and the no-op decision truthful — the transition
-    ladder is always evaluated against the staged value.
+    for this bucket while it has no staged row. It only informs the
+    no-op decision and the audit fact; the transition ladder is always
+    evaluated against the staged value.
 
     **Absent is not explicit off.** A bucket with no staged row still
     runs at the canary config percentage, so ``rollout off`` on such a
@@ -309,75 +375,57 @@ def set_stage(
     fallback; treating it as a no-op would report success while Adaptive
     traffic kept flowing.
 
+    Read, decide, and write are one verified cycle: the snapshot this
+    decision was made against is re-checked inside the write
+    transaction, presence included, so a concurrent emergency rollback
+    can never be silently overwritten by a promotion that read "absent"
+    and a no-op can never be reported from a stale read.
+
     Raises ValueError on invalid bucket/stage/transition/empty reason,
-    and on a concurrent-writer conflict (someone else already moved the
-    bucket past the expected previous stage). Storage errors propagate
-    so the CLI can report failure; the atomic helper guarantees no
-    partial state without its audit row.
+    and on a concurrent-writer conflict. Storage errors propagate so the
+    CLI can report failure; no partial state is ever visible.
     """
     bucket = normalize_bucket(agent, node, task_type)
-    nxt = normalize_percentage(new_percentage)
+    normalize_percentage(new_percentage)  # reject before any I/O
     if not str(reason or "").strip():
         raise ValueError("reason is required for every rollout change")
     if not str(source or "").strip():
         raise ValueError("source is required for every rollout change")
-    try:
-        staged = normalize_percentage(state_db.get_rollout_stage(
-            bucket["agent"], bucket["node"], bucket["task_type"],
-            db_path=db_path))
-        row_exists = state_db.rollout_stage_known(
-            bucket["agent"], bucket["node"], bucket["task_type"],
-            db_path=db_path)
-    except ValueError as exc:
-        # Corrupt staged value: only a rollback to off may proceed.
-        if nxt != 0:
-            raise ValueError(
-                "corrupt rollout state; only rollback to off is allowed"
-            ) from exc
-        staged, row_exists = 0, False
-    # What is actually being diverted right now: the staged row when one
-    # exists (explicit off included), otherwise the canary config.
-    effective_prev = staged if row_exists else _safe_fallback(
-        config_fallback)
-    if nxt == effective_prev:
-        # Idempotent repeat: nothing is diverted differently, so there is
-        # no state change and no audit fact.
+    now = float(created_at) if created_at is not None else time.time()
+    snapshot = state_db.read_rollout_snapshot(
+        bucket["agent"], bucket["node"], bucket["task_type"], db_path=db_path)
+    decision = decide_rollout_change(
+        snapshot, new_percentage=new_percentage, automatic=automatic,
+        config_fallback=config_fallback)
+    write = None
+    if not decision.is_noop:
+        write = state_db.RolloutWrite(
+            new_percentage=decision.new_percentage,
+            previous_percentage=decision.effective_prev,
+            action=decision.action, reason=str(reason).strip(),
+            source=str(source).strip(), algorithm_version=ALGORITHM_VERSION,
+            created_at=now)
+    record = state_db.transact_rollout_stage(
+        agent=bucket["agent"], node=bucket["node"],
+        task_type=bucket["task_type"], expected=decision.snapshot,
+        write=write, db_path=db_path)
+    if record is None:
+        # Verified inside the transaction: nothing to change right now.
         return {
             "bucket_key": state_db.rollout_bucket_key(
                 bucket["agent"], bucket["node"], bucket["task_type"]),
             "recommended_agent": bucket["agent"],
             "node": bucket["node"],
             "task_type": bucket["task_type"],
-            "previous_percentage": effective_prev,
-            "new_percentage": nxt,
+            "previous_percentage": decision.effective_prev,
+            "new_percentage": decision.new_percentage,
             "action": "noop",
             "changed": False,
             "reason": str(reason).strip(),
             "source": str(source).strip(),
             "algorithm_version": ALGORITHM_VERSION,
-            "created_at": (
-                float(created_at) if created_at is not None else time.time()),
+            "created_at": now,
         }
-    if not is_valid_transition(staged, nxt):
-        raise ValueError(
-            f"rollout transition {staged} -> {nxt} is not allowed: "
-            "promote one stage at a time (off->5->10->25->50); "
-            "rollback may go directly to off")
-    # The ladder is validated against the staged value (a first
-    # migration still starts at stage 5), but the audit action must
-    # describe the real traffic direction: taking a 50% config bucket
-    # down to stage 5 is a rollback, not a promotion.
-    action = _action_for(effective_prev, nxt, automatic=automatic)
-    record = state_db.apply_rollout_stage_atomic(
-        agent=bucket["agent"], node=bucket["node"],
-        task_type=bucket["task_type"],
-        expected_staged_percentage=staged,
-        previous_percentage=effective_prev,
-        new_percentage=nxt, action=action, reason=str(reason).strip(),
-        source=str(source).strip(), algorithm_version=ALGORITHM_VERSION,
-        created_at=float(created_at) if created_at is not None else time.time(),
-        db_path=db_path,
-    )
     record["changed"] = True
     return record
 
@@ -427,17 +475,21 @@ def _bucket_report(
 ) -> Optional[Dict[str, Any]]:
     """Fetch this bucket's canary evaluation report (read-only reuse).
 
-    Filters on node/task_type only: filtering by agent would also match
-    this agent appearing as a bucket's ``legacy_agent`` and produce a
-    different bucket split than the one the guard is judging. The
-    requested bucket is then selected by exact identity. ``agent=None``
-    is deliberate so no other bucket's rows are dropped from coverage.
+    The read is scoped to the exact bucket with the dedicated
+    ``recommended_agent`` filter, which is applied before the
+    matched-row budget. Filtering by ``agent`` instead would be both too
+    wide (it also matches actual/legacy agent) and too narrow in the
+    worst way: ``node``/``task_type`` alone let a busier sibling
+    recommendation consume the whole budget, so this bucket would read
+    as "no samples" and the guard would stay quiet while the bucket was
+    actually failing.
     """
     from . import canary_evaluation
     bundle = canary_evaluation.run_canary_evaluation(
         db_path,
         filters=canary_evaluation.CanaryEvaluationFilters(
             node=node, task_type=task_type, agent=None,
+            recommended_agent=agent,
             limit=GUARD_DECISION_LIMIT, scan_cap=GUARD_SCAN_CAP),
     )
     for bucket in bundle["report"].get("buckets") or []:
@@ -635,6 +687,8 @@ __all__ = [
     "GUARD_ENABLED_ENV_VAR",
     "ROLLOUT_ENABLED_ENV_VAR",
     "GuardConfig",
+    "RolloutDecision",
+    "decide_rollout_change",
     "effective_percentage",
     "evaluate_guard",
     "get_history",

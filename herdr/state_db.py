@@ -21,6 +21,7 @@ import re
 import sqlite3
 import time
 import uuid
+from dataclasses import dataclass
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
@@ -3548,6 +3549,63 @@ def _rollout_read_connection(
     return conn
 
 
+@dataclass(frozen=True)
+class RolloutSnapshot:
+    """The full identity of one bucket's staged state at a point in time.
+
+    ``exists`` is part of the identity, not a detail. An absent row and a
+    row holding 0 are different worlds: the absent bucket still runs at
+    the canary config percentage, the explicit-off bucket does not. A
+    compare-and-swap that only looks at ``percentage`` cannot tell them
+    apart, so a promotion that read "absent" would silently overwrite an
+    emergency rollback that wrote an explicit 0 in the meantime.
+    """
+
+    exists: bool
+    percentage: int
+
+
+@dataclass(frozen=True)
+class RolloutWrite:
+    """One requested state change, decided from a :class:`RolloutSnapshot`."""
+
+    new_percentage: int
+    #: Percentage that was actually being diverted, for the audit fact.
+    previous_percentage: int
+    action: str
+    reason: str
+    source: str
+    algorithm_version: str
+    created_at: float
+
+
+def read_rollout_snapshot(
+    agent: str,
+    node: str,
+    task_type: str,
+    db_path: Optional[Path] = None,
+    *,
+    readonly: bool = False,
+) -> RolloutSnapshot:
+    """Read one bucket's staged state in a single query.
+
+    One row read yields both fields, so a caller can never observe an
+    ``exists``/``percentage`` pair stitched together from two different
+    points in time.
+    """
+    conn = _rollout_read_connection(db_path, readonly)
+    try:
+        row = conn.execute(
+            "SELECT percentage FROM rollout_state WHERE bucket_key = ?",
+            (rollout_bucket_key(agent, node, task_type or ""),),
+        ).fetchone()
+        if row is None:
+            return RolloutSnapshot(exists=False, percentage=0)
+        return RolloutSnapshot(exists=True, percentage=int(row["percentage"]))
+    finally:
+        conn.close()
+
+
 def get_rollout_stage(
     agent: str,
     node: str,
@@ -3556,17 +3614,13 @@ def get_rollout_stage(
     *,
     readonly: bool = False,
 ) -> int:
-    """Read the current staged percentage for one bucket (0 when absent)."""
-    conn = _rollout_read_connection(db_path, readonly)
-    try:
-        key = rollout_bucket_key(agent, node, task_type or "")
-        row = conn.execute(
-            "SELECT percentage FROM rollout_state WHERE bucket_key = ?",
-            (key,),
-        ).fetchone()
-        return int(row["percentage"]) if row is not None else 0
-    finally:
-        conn.close()
+    """Read the current staged percentage for one bucket (0 when absent).
+
+    Presence-independent convenience view. Anything that decides whether
+    to write must use :func:`read_rollout_snapshot` instead.
+    """
+    return read_rollout_snapshot(
+        agent, node, task_type, db_path, readonly=readonly).percentage
 
 
 def list_rollout_states(
@@ -3661,49 +3715,59 @@ def rollout_stage_known(
     readonly: bool = False,
 ) -> bool:
     """True when the bucket has an explicit staged row (off counts)."""
-    conn = _rollout_read_connection(db_path, readonly)
-    try:
-        row = conn.execute(
-            "SELECT 1 FROM rollout_state WHERE bucket_key = ?",
-            (rollout_bucket_key(agent, node, task_type or ""),),
-        ).fetchone()
-        return row is not None
-    finally:
-        conn.close()
+    return read_rollout_snapshot(
+        agent, node, task_type, db_path, readonly=readonly).exists
 
 
-def apply_rollout_stage_atomic(
+def _decode_rollout_audit_row(row: sqlite3.Row) -> Dict[str, Any]:
+    return {
+        "id": int(row["id"]),
+        "bucket_key": row["bucket_key"],
+        "recommended_agent": row["agent"],
+        "agent": row["agent"],
+        "node": row["node"],
+        "task_type": row["task_type"] or "",
+        "previous_percentage": int(row["previous_percentage"]),
+        "new_percentage": int(row["new_percentage"]),
+        "action": row["action"],
+        "reason": row["reason"] or "",
+        "source": row["source"] or "",
+        "algorithm_version": row["algorithm_version"] or "",
+        "created_at": float(row["created_at"]),
+    }
+
+
+def transact_rollout_stage(
     *,
     agent: str,
     node: str,
     task_type: str,
-    expected_staged_percentage: int,
-    previous_percentage: int,
-    new_percentage: int,
-    action: str,
-    reason: str,
-    source: str,
-    algorithm_version: str,
-    created_at: float,
+    expected: RolloutSnapshot,
+    write: Optional[RolloutWrite],
     db_path: Optional[Path] = None,
-) -> Dict[str, Any]:
-    """Atomically upsert current state and append exactly one audit row.
+) -> Optional[Dict[str, Any]]:
+    """Verify a snapshot and apply one change inside a single transaction.
 
-    One ``BEGIN IMMEDIATE`` transaction covers the expected-previous
-    check plus both writes: a crash can never leave a staged value
-    without its audit fact, and a concurrent operator can never have
-    an old state silently overwrite a new one (stale writers get a
-    ValueError conflict instead of a lost update, so the CLI exits
-    nonzero and no partial change is visible).
+    The whole read-decide-write cycle is one boundary:
 
-    Two previous values, deliberately:
-    - ``expected_staged_percentage`` is the staged row this call is
-      replacing and is what the concurrency check compares against;
-    - ``previous_percentage`` is the percentage that was actually
-      being diverted (it differs only when a bucket is migrated from
-      the canary config fallback for the first time) and is what the
-      audit fact records, so an auditor can reconstruct the traffic
-      change rather than only the stage change.
+    ``BEGIN IMMEDIATE`` -> read the live snapshot -> require it to equal
+    ``expected`` -> upsert state -> append exactly one audit row ->
+    ``COMMIT``.
+
+    Two properties the previous implementation did not have:
+
+    1. **The CAS covers presence, not just the number.** ``expected``
+       carries ``exists`` alongside ``percentage``, so a promotion that
+       observed an absent bucket cannot commit over an emergency
+       rollback that created an explicit 0 row in the meantime.
+    2. **A no-op needs the same CAS.** Callers pass ``write=None`` when
+       nothing needs to change; the transaction still verifies the
+       snapshot, so "already off" can never be reported from a stale
+       read taken before a concurrent promotion.
+
+    ``expected=None`` skips verification for callers that deliberately
+    read inside their own transaction. Returns the new audit row, or
+    ``None`` when ``write`` was ``None`` (nothing was written).
     """
     conn = get_db_connection(Path(db_path) if db_path else None)
     try:
@@ -3715,36 +3779,45 @@ def apply_rollout_stage_atomic(
                 "SELECT percentage FROM rollout_state WHERE bucket_key = ?",
                 (key,),
             ).fetchone()
-            disk_previous = int(current["percentage"]) if current else 0
-            if disk_previous != int(expected_staged_percentage):
+            live = (
+                RolloutSnapshot(exists=True, percentage=int(current["percentage"]))
+                if current is not None
+                else RolloutSnapshot(exists=False, percentage=0)
+            )
+            if expected is not None and live != expected:
                 raise ValueError(
                     f"rollout conflict: bucket {key} is now "
-                    f"{disk_previous}, expected {expected_staged_percentage}"
+                    f"{'stage=' + str(live.percentage) if live.exists else 'absent'}"
+                    f", expected "
+                    f"{'stage=' + str(expected.percentage) if expected.exists else 'absent'}"
                     "; reload state and retry")
-            conn.execute(
-                "INSERT INTO rollout_state "
-                "(bucket_key, agent, node, task_type, percentage, "
-                "updated_at, updated_by, reason) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(bucket_key) DO UPDATE SET "
-                "percentage = excluded.percentage, "
-                "updated_at = excluded.updated_at, "
-                "updated_by = excluded.updated_by, "
-                "reason = excluded.reason",
-                (key, agent, node, task_type or "", int(new_percentage),
-                 float(created_at), str(source), str(reason)),
-            )
-            cur = conn.execute(
-                "INSERT INTO rollout_audit "
-                "(bucket_key, agent, node, task_type, previous_percentage, "
-                "new_percentage, action, reason, source, algorithm_version, "
-                "created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (key, agent, node, task_type or "",
-                 int(previous_percentage), int(new_percentage), str(action),
-                 str(reason), str(source), str(algorithm_version),
-                 float(created_at)),
-            )
-            audit_id = int(cur.lastrowid)
+            audit_id: Optional[int] = None
+            if write is not None:
+                conn.execute(
+                    "INSERT INTO rollout_state "
+                    "(bucket_key, agent, node, task_type, percentage, "
+                    "updated_at, updated_by, reason) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT(bucket_key) DO UPDATE SET "
+                    "percentage = excluded.percentage, "
+                    "updated_at = excluded.updated_at, "
+                    "updated_by = excluded.updated_by, "
+                    "reason = excluded.reason",
+                    (key, agent, node, task_type or "",
+                     int(write.new_percentage), float(write.created_at),
+                     str(write.source), str(write.reason)),
+                )
+                cur = conn.execute(
+                    "INSERT INTO rollout_audit "
+                    "(bucket_key, agent, node, task_type, previous_percentage, "
+                    "new_percentage, action, reason, source, algorithm_version, "
+                    "created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (key, agent, node, task_type or "",
+                     int(write.previous_percentage), int(write.new_percentage),
+                     str(write.action), str(write.reason), str(write.source),
+                     str(write.algorithm_version), float(write.created_at)),
+                )
+                audit_id = int(cur.lastrowid)
             conn.execute("COMMIT;")
         except Exception:
             try:
@@ -3752,27 +3825,15 @@ def apply_rollout_stage_atomic(
             except Exception:
                 pass
             raise
+        if audit_id is None:
+            return None
         row = conn.execute(
             "SELECT id, bucket_key, agent, node, task_type, "
             "previous_percentage, new_percentage, action, reason, source, "
             "algorithm_version, created_at FROM rollout_audit WHERE id = ?",
             (audit_id,),
         ).fetchone()
-        return {
-            "id": int(row["id"]),
-            "bucket_key": row["bucket_key"],
-            "recommended_agent": row["agent"],
-            "agent": row["agent"],
-            "node": row["node"],
-            "task_type": row["task_type"] or "",
-            "previous_percentage": int(row["previous_percentage"]),
-            "new_percentage": int(row["new_percentage"]),
-            "action": row["action"],
-            "reason": row["reason"] or "",
-            "source": row["source"] or "",
-            "algorithm_version": row["algorithm_version"] or "",
-            "created_at": float(row["created_at"]),
-        }
+        return _decode_rollout_audit_row(row)
     finally:
         conn.close()
 

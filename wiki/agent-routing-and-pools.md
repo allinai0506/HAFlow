@@ -215,24 +215,33 @@ Evidence:
 行的 bucket 仍按 canary 配置分流，所以 `rollout off` 会写入显式 `0` 行压制
 fallback（否则 CLI 会报告“已关闭”而流量照旧）。当前状态与历史事实分离：
 `state_db.rollout_state`（当前值）与 `rollout_audit`（不可变，每次变化恰好一条）
-在同一个 `BEGIN IMMEDIATE` 事务内写入，败者拿到冲突错误，不存在无审计的变化或
-旧状态覆盖新状态。审计的 `previous_percentage` 记录当时真正在分流的比例，
-`action` 亦按真实流量方向判定（`promote` ⟺ new > previous），所以首次接管旧配置的
-`50 → 5` 记 `rollback` 而非自相矛盾的 `promote`；过渡合法性仍按 staged 阶梯校验。
+在同一个 `BEGIN IMMEDIATE` 事务内写入。并发身份是**快照** `RolloutSnapshot(exists,
+percentage)`：`exists` 是身份的一部分，因为 absent 与显式 off 是两个世界（前者
+仍按配置分流）。CAS 比对存在性 + 百分比，紧急回退不会被读到过期的 promotion 覆盖；
+no-op 也走同一事务校验，不会从过期读报告 “already off”。事务里只做快照校验与写入，
+判定是纯函数 `rollout_policy.decide_rollout_change(snapshot, ...)`。审计的
+`previous_percentage` 记录当时真正在分流的比例，`action` 亦按真实流量方向判定
+（`promote` ⟺ new > previous），所以首次接管旧配置的 `50 → 5` 记 `rollback`；
+过渡合法性仍按 staged 阶梯校验。
 `rollout_enabled` 未设置即生效，因此“空 rollout + 无 canary 配置”仍是 0
 （默认关闭）；`HERDR_ADAPTIVE_ROLLOUT_ENABLED=false` 立即全 bucket Legacy 且保留
 全部历史。解析失败/损坏/非法阶段/DB 异常一律 0 —— rollout 控制失败永远不能让
 生产路由更激进。Safety Guard 只读消费 `canary_evaluation` 两臂 facts，阈值集中
 可调、样本不足安静、可关闭；判定用 `status` 区分“评过了”与“评不了”，热路径
-guard 开启后**评不了（DB 不可用/schema 错误）一律走 Legacy**。自动止损默认由
-`herdr-task rollout check-guard --auto-rollback` 执行，每次派发的热路径 guard 需
-显式 `HERDR_ROLLOUT_HOT_GUARD=1` 开启（用延迟换即时止损）。`status` / `history`
-/ `check-guard` 走 #102 只读连接（不建表不迁移），读取失败报 `unavailable`
-而不是伪装成“全部 off”。
+guard 开启后**评不了（DB 不可用/schema 错误）一律走 Legacy**。guard 读取用
+`recommended_agent` 精确 bucket 过滤（**在 limit 之前生效**），否则同一
+node/task_type 下更活跃的兄弟 bucket 会吃光决策预算、把目标 bucket 读成“无样本”
+而漏掉止损。自动止损默认由 `herdr-task rollout check-guard --auto-rollback` 执行，
+每次派发的热路径 guard 需显式 `HERDR_ROLLOUT_HOT_GUARD=1` 开启（用延迟换即时止损）。
+`check-guard` 在 unavailable 时退出 1（监控不能把“无法判定”读成“检查通过”）。
+`status` / `history` 走 #102 只读连接（不建表不迁移），读取失败报 `unavailable`
+而不是伪装成“全部 off”；rollout 读写共用唯一 DB 解析器
+（`state_db.resolve_state_db_path()`），杜绝 set 写一个库、status 读另一个库。
 
 Evidence:
 - `herdr/rollout_policy.py`
-- `herdr/state_db.py#apply_rollout_stage_atomic` / `#_ensure_rollout_schema`
+- `herdr/state_db.py#transact_rollout_stage` / `#read_rollout_snapshot` / `#_ensure_rollout_schema`
+- `herdr/rollout_policy.py#decide_rollout_change`（纯判定）
 - `herdr/canary_router.py#plan_canary`（只消费 `effective_percentage`）
 - `tests/test_rollout_policy.py`
 - `docs/architecture/adaptive-router-rollout.md`

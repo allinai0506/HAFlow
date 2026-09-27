@@ -24,8 +24,15 @@ Bucket = `recommended_agent × node × task_type`，独立维护状态。
 - `rollout_state(bucket_key PK, agent, node, task_type, percentage, updated_at, updated_by, reason)` —— 当前值；
 - `rollout_audit(id PK, bucket_key, agent, node, task_type, previous_percentage, new_percentage, action, reason, source, algorithm_version, created_at)` —— 每次变化恰好一条，只增不改。
 
-`state_db.apply_rollout_stage_atomic` 用 `BEGIN IMMEDIATE` 把 upsert + audit
-包进同一事务：崩溃与并发双写都不会留下无审计的状态或半写。
+`state_db.transact_rollout_stage` 把**读-判-写**收敛进一个事务：
+
+```text
+BEGIN IMMEDIATE
+  ↓ 读取真实快照 (exists, percentage)
+  ↓ 校验 == 决策所依据的快照
+  ↓ upsert state + append audit
+COMMIT
+```
 
 Audit 契约字段：`recommended_agent/node/task_type/previous_percentage/new_percentage/action(promote|rollback|auto_rollback)/reason/source/created_at/algorithm_version=adaptive-router-rollout-v1`。
 
@@ -33,6 +40,30 @@ Audit 契约字段：`recommended_agent/node/task_type/previous_percentage/new_p
 两者只在首次接管旧 canary 配置时才可能“看着矛盾”，而那正是必须说真话的场景 ——
 `50 → 5` 记 `rollback`（不是 `promote`）。过渡合法性仍按 staged 阶梯校验
 （首次接管只能从 stage 5 起步），只有 action 的判定基准是有效比例。
+
+## 2a. 并发：快照即身份
+
+`RolloutSnapshot(exists, percentage)` 是 bucket 的完整状态身份，**`exists` 是身份
+的一部分，不是细节**：
+
+| 状态 | 含义 | 正在分流的百分比 |
+| --- | --- | --- |
+| `exists=False, 0` | 尚未接管 | canary 配置 fallback |
+| `exists=True, 0` | 显式 off | 0 |
+
+只比 `percentage` 的 CAS 分不清这两者，于是「读到 absent 的 promotion」可以静默
+覆盖「刚写入 explicit 0 的紧急回退」。因此：
+
+- **CAS 覆盖存在性**：事务内比对 `exists` + `percentage`；不匹配 → 冲突错误，
+  紧急回退存活；
+- **no-op 也要 CAS**：`write=None` 同样走事务校验，绝不在事务外判定“无需修改”
+  再直接返回 —— 否则「读到 0 的 off」会在并发 promotion 之后仍报告 “already off”。
+
+判定的纯函数是 `rollout_policy.decide_rollout_change(snapshot, ...)` → `RolloutDecision`；
+持久化只负责事务与快照校验，业务判断不落在 `state_db`。
+
+未来若要更强的并发控制，可在 `rollout_state` 增加 `revision` 列并纳入 CAS 身份
+（当前 `BEGIN IMMEDIATE` + 全量快照比对已足够）。
 
 ## 3. 与 Canary 的集成
 
@@ -84,11 +115,10 @@ rollout 模块本身不可用 → 0（percentage_source=rollout_unavailable）
 `config_percentage` / `percentage_source` / `guard_forced_legacy` 供审计），
 评分公式、准入、池/健康/隔离过滤、显式指定 bypass 均不动。
 
-## 3a. 幂等与并发
+## 3a. 幂等
 
 - 重复设置当前阶段是 `action="noop"`：不是状态变化，不写审计；
-- `apply_rollout_stage_atomic` 在 `BEGIN IMMEDIATE` 内校验 expected-previous：
-  并发写者中败者拿到明确冲突错误，**不会有“旧状态覆盖新状态”或无审计的变化**；
+- no-op 仍经过 §2a 的快照校验，不会从过期读取得出「已经 off」；
 - Router 只读 staged 值，SQLite 单条读要么看到旧值要么看到新值，不存在中间态。
 
 ## 4. Safety Guard（只自动止损，不自动扩量）
@@ -102,7 +132,12 @@ rollout 模块本身不可用 → 0（percentage_source=rollout_unavailable）
 - 样本不足 → 安静（不定罪），可关闭（`HERDR_ROLLOUT_GUARD_ENABLED=0`）；
 - 触发 → `maybe_auto_rollback` 持久化 `→off`（`action=auto_rollback`）；
 - 读预算有界：`GUARD_DECISION_LIMIT=200` 匹配决策、`GUARD_SCAN_CAP=400` 扫描预算；
-- 触发判定只覆盖本 bucket（node/task_type 过滤后按精确身份选桶，不跨 bucket 牵连）。
+- 触发判定只覆盖本 bucket，且用 `recommended_agent` 精确过滤（**在 limit 之前生效**）。
+只按 node/task_type 过滤是不够的：同一 `implementation/fix` 下可能有 codex/claude/
+opencode 多个 bucket，若更活跃的兄弟 bucket 吃掉全部 200 条决策预算，目标 bucket
+就会读成「无样本」→ guard 安静 → 目标 bucket 明明在恶化却继续放行 Adaptive。
+`agent` 过滤器语义太宽（同时匹配 actual/recommended/legacy），因此单独提供
+`recommended_agent`。
 
 判定结果用 `status` 区分「评过了」与「评不了」，因为两者要求的路由方向相反：
 
@@ -153,10 +188,18 @@ herdr-task rollout check-guard --agent codex --node implementation \
 而读取失败（locked/corrupt/无权限）**不会**被压成“全部 off”，而是 exit 1 并
 明确报 “unavailable”。
 
+**唯一 DB 解析器**：读写共用 `state_db.resolve_state_db_path()`，写路径不再经
+`_get_store()` 二次猜测 —— 否则在 `WORKFLOW_FILE` / `CHECKPOINTS_DIR` 等非默认
+布局下可能出现「set 写库 A、status 读库 B」的 split-brain。
+
+`check-guard` 在 `status=unavailable` 时**退出 1**（JSON 走 stderr）：监控系统
+绝不能把「无法判定」读成「检查通过」。样本不足（`insufficient_samples`）仍是
+正常判断，退出 0。
+
 ## 7. 文件边界
 
-- `herdr/rollout_policy.py` —— 阶段/过渡/审计/ effective/guard（唯一状态管理器）；
-- `herdr/state_db.py` —— 追加两表 DDL + 原子 helper（无业务判断）；
+- `herdr/rollout_policy.py` —— 阶段/过渡判定（纯函数）/effective/guard（唯一状态管理器）；
+- `herdr/state_db.py` —— 追加两表 DDL + 快照/事务（无业务判断）；
 - `herdr/canary_router.py` —— 消费 effective + guard 只读（最小接入）；
 - `herdr/agent_router.py` —— 无改动（经 canary plumbing 间接消费）；
 - `bin/herdr-task` —— rollout 子命令；

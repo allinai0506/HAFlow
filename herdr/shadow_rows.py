@@ -196,10 +196,18 @@ def _matches_filters(
     node: Optional[str],
     task_type: Optional[str],
     agent: Optional[str],
+    recommended_agent: Optional[str] = None,
 ) -> bool:
     if node is not None and row["node"] != str(node):
         return False
     if task_type is not None and row["task_type"] != str(task_type):
+        return False
+    if recommended_agent is not None and \
+            row["recommended_agent"] != str(recommended_agent):
+        # Narrow, exact match on the recommended agent only. The `agent`
+        # filter below also matches actual_agent and legacy_agent, which
+        # is too wide to scope a per-bucket read: a busy sibling bucket
+        # would consume the matched-row budget and starve this one.
         return False
     if agent is not None:
         wanted = str(agent)
@@ -242,6 +250,7 @@ def _collect_rows_with_meta(
     node: Optional[str] = None,
     task_type: Optional[str] = None,
     agent: Optional[str] = None,
+    recommended_agent: Optional[str] = None,
     since: Optional[float] = None,
     before: Optional[float] = None,
     limit: Optional[int] = None,
@@ -276,6 +285,12 @@ def _collect_rows_with_meta(
     ``row_builder(event, outcome) -> row | None`` builds one row from
     one event; rows may be dropped by returning None. It defaults to
     the shadow row builder; canary callers inject their own.
+
+    ``recommended_agent`` is an exact bucket filter, distinct from the
+    broader ``agent`` (which also matches actual/legacy agent). Every
+    filter is applied before the matched-row budget, so a per-bucket
+    read spends its whole budget on that bucket instead of letting a
+    busier sibling consume it.
     """
     if mode not in ("shadow", "canary", "all"):
         raise ValueError(f"unknown collection mode: {mode!r}")
@@ -348,7 +363,8 @@ def _collect_rows_with_meta(
                     outcome = candidate
             row = row_builder(event, outcome)
             if row is not None and _matches_filters(
-                row, node=node, task_type=task_type, agent=agent
+                row, node=node, task_type=task_type, agent=agent,
+                recommended_agent=recommended_agent,
             ):
                 matched.append(row)
                 if len(matched) >= effective_limit:

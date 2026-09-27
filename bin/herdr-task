@@ -1511,10 +1511,18 @@ def cmd_canary_eval(args):
     print(canary_evaluation.render_canary_report(report))
 
 
-def _rollout_write_db_path():
-    """Resolve the writable state DB path (writes may init schema)."""
-    store = _get_store()
-    return getattr(store, "db_path", None)
+def _rollout_db_path():
+    """The single resolver for every rollout read and write.
+
+    Read and write MUST agree on which database holds rollout state, or
+    ``rollout set`` could succeed against one database while
+    ``rollout status`` reports an empty state from another. This is the
+    same pure resolver the read-only evaluation commands use
+    (``state_db.resolve_state_db_path``); the write path deliberately
+    does not go back through ``_get_store()`` to guess a second time.
+    """
+    from herdr import state_db
+    return state_db.resolve_state_db_path()
 
 
 def _rollout_stage_label(value):
@@ -1559,7 +1567,7 @@ def _rollout_change(args, new_percentage, reason, source, *, verb):
         print(f"[ROLLOUT] --reason is required for {verb}", file=sys.stderr)
         sys.exit(2)
     try:
-        db_path = _rollout_write_db_path()
+        db_path = _rollout_db_path()
         record = rollout_policy.set_stage(
             db_path, agent=bucket["agent"], node=bucket["node"],
             task_type=bucket["task_type"], new_percentage=new_percentage,
@@ -1717,10 +1725,9 @@ def _cmd_rollout_check_guard(args):
     auto = bool(getattr(args, "auto_rollback", False))
     reason = (getattr(args, "reason", None) or "safety guard triggered").strip()
     source = (getattr(args, "source", None) or "guard").strip()
-    # Read-only evaluation must not create or migrate the database, so
-    # it resolves the path purely; only --auto-rollback opens it.
-    db_path = state_db.resolve_state_db_path() if not auto \
-        else _rollout_write_db_path()
+    # Read-only evaluation must not create or migrate the database; the
+    # path comes from the same single resolver the write path uses.
+    db_path = _rollout_db_path()
     try:
         if auto:
             result = rollout_policy.maybe_auto_rollback(
@@ -1740,12 +1747,23 @@ def _cmd_rollout_check_guard(args):
         print(f"[ROLLOUT] failed: {type(exc).__name__}: {exc}",
               file=sys.stderr)
         sys.exit(1)
+    # "Could not evaluate" is not "no problem": a monitoring job must
+    # never read an unavailable guard as a passing check.
+    if result.get("status") == "unavailable":
+        if getattr(args, "json", False):
+            print(json.dumps(result, ensure_ascii=False, indent=2,
+                             sort_keys=True), file=sys.stderr)
+        else:
+            print(f"[ROLLOUT] guard could not evaluate "
+                  f"(status=unavailable): {result.get('reason')}",
+                  file=sys.stderr)
+        sys.exit(1)
     if getattr(args, "json", False):
         print(json.dumps(result, ensure_ascii=False, indent=2,
                          sort_keys=True))
         return
     print(f"[ROLLOUT] guard action={result.get('action')} "
-          f"reason={result.get('reason')}")
+          f"status={result.get('status')} reason={result.get('reason')}")
 
 
 def cmd_metrics(args):

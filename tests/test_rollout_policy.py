@@ -57,6 +57,52 @@ def _make_store(test):
     return store, tmp_path / "state.db"
 
 
+def _seed_collapsed_bucket(store, db_path, *, test):
+    """A canary bucket whose adaptive arm collapsed (guard triggers)."""
+    from herdr import adaptive_router, eval_store, execution_outcome
+    base = 1_700_000_000.0
+    for index in range(12):
+        for agent, diverted, success in (
+            ("codex", True, index >= 12),     # adaptive: all failures
+            ("opencode", False, True),        # legacy: all successes
+        ):
+            run_id = f"run-coll-{agent}-{index}"
+            task_id = f"task-coll-{agent}-{index}"
+            ts = base + index
+            status = "completed" if success else "failed"
+            store.save_task({
+                "task_id": task_id, "workflow_id": "wf-coll",
+                "run_id": run_id, "node": "implementation",
+                "stage": "implementation", "task_type": "fix",
+                "agent": agent, "status": status,
+                "status_history": [{"to": s} for s in (
+                    "pending", "dispatched", "working", "agent_done",
+                    status)],
+                "started_at": ts, "finished_at": ts + 100.0,
+                "created_at": ts,
+            })
+            eval_store.record_eval_result(
+                run_id, requirements_satisfied=bool(success),
+                verification_passed=True, human_intervention_count=0,
+                final_status=status, task_id=task_id,
+                workflow_id="wf-coll", created_at=ts + 101.0,
+                db_path=db_path)
+            settled = execution_outcome.finalize_execution_outcome(
+                task_id, db_path=db_path, finalized_at=ts + 105.0)
+            test.assertEqual(settled["status"], "created")
+            payload = adaptive_router.build_canary_decision(
+                workflow_id="wf-coll", run_id=run_id, task_id=task_id,
+                node="implementation", task_type="fix",
+                actual_agent=agent, recommended_agent="codex",
+                legacy_agent="opencode", diverted=diverted, rankings=[],
+                gate={}, created_at=ts + 200.0)
+            store.record_event(
+                "route_decision", payload, workflow_id="wf-coll",
+                node_id="implementation", task_id=task_id,
+                agent_id=agent, source="adaptive-router-canary",
+                timestamp=ts + 200.0, run_id=run_id)
+
+
 class TestStages(unittest.TestCase):
     def test_allowed_stages_exact(self):
         self.assertEqual(
@@ -438,7 +484,7 @@ class TestFailSafe(unittest.TestCase):
     def test_auto_rollback_suppresses_config_only_traffic(self):
         # Reviewer P1: the guard must not report "already off" for a
         # config-only bucket that is still diverting.
-        self._seed_collapsed_bucket_for_auto_rollback()
+        _seed_collapsed_bucket(self.store, self.db_path, test=self)
         result = rollout_policy.maybe_auto_rollback(
             self.db_path, agent="codex", node="implementation",
             task_type="fix", reason="guard", config_fallback=50)
@@ -462,52 +508,6 @@ class TestFailSafe(unittest.TestCase):
         with patch.dict("os.environ",
                         {"HERDR_ADAPTIVE_ROLLOUT_ENABLED": "false"}):
             self.assertFalse(rollout_policy.rollout_enabled())
-
-    def _seed_collapsed_bucket_for_auto_rollback(self):
-        """A canary bucket whose adaptive arm collapsed (guard triggers)."""
-        from herdr import adaptive_router, eval_store, execution_outcome
-        base = 1_700_000_000.0
-        for index in range(12):
-            for agent, diverted, success in (
-                ("codex", True, index >= 12),     # adaptive: all failures
-                ("opencode", False, True),        # legacy: all successes
-            ):
-                run_id = f"run-coll-{agent}-{index}"
-                task_id = f"task-coll-{agent}-{index}"
-                ts = base + index
-                status = "completed" if success else "failed"
-                self.store.save_task({
-                    "task_id": task_id, "workflow_id": "wf-coll",
-                    "run_id": run_id, "node": "implementation",
-                    "stage": "implementation", "task_type": "fix",
-                    "agent": agent, "status": status,
-                    "status_history": [{"to": s} for s in (
-                        "pending", "dispatched", "working", "agent_done",
-                        status)],
-                    "started_at": ts, "finished_at": ts + 100.0,
-                    "created_at": ts,
-                })
-                eval_store.record_eval_result(
-                    run_id, requirements_satisfied=bool(success),
-                    verification_passed=True, human_intervention_count=0,
-                    final_status=status, task_id=task_id,
-                    workflow_id="wf-coll", created_at=ts + 101.0,
-                    db_path=self.db_path)
-                settled = execution_outcome.finalize_execution_outcome(
-                    task_id, db_path=self.db_path, finalized_at=ts + 105.0)
-                self.assertEqual(settled["status"], "created")
-                payload = adaptive_router.build_canary_decision(
-                    workflow_id="wf-coll", run_id=run_id, task_id=task_id,
-                    node="implementation", task_type="fix",
-                    actual_agent=agent, recommended_agent="codex",
-                    legacy_agent="opencode", diverted=diverted, rankings=[],
-                    gate={}, created_at=ts + 200.0)
-                self.store.record_event(
-                    "route_decision", payload, workflow_id="wf-coll",
-                    node_id="implementation", task_id=task_id,
-                    agent_id=agent, source="adaptive-router-canary",
-                    timestamp=ts + 200.0, run_id=run_id)
-
 
 class TestNoAutoPromotion(unittest.TestCase):
     def setUp(self):
@@ -593,7 +593,8 @@ class TestGuard(unittest.TestCase):
         self.store, self.db_path = _make_store(self)
 
     def _seed_canary_bucket(self, adaptive_success, legacy_success,
-                            adaptive_n=12, legacy_n=12):
+                            adaptive_n=12, legacy_n=12,
+                            recommended="codex"):
         from herdr import adaptive_router, eval_store, execution_outcome
         base = 1_700_000_000.0
         idx = 0
@@ -624,7 +625,7 @@ class TestGuard(unittest.TestCase):
             payload = adaptive_router.build_canary_decision(
                 workflow_id="wf-guard", run_id=run_id, task_id=task_id,
                 node="implementation", task_type="fix", actual_agent=actual,
-                recommended_agent="codex", legacy_agent="opencode",
+                recommended_agent=recommended, legacy_agent="opencode",
                 diverted=diverted, rankings=[], gate={}, created_at=ts)
             self.store.record_event(
                 "route_decision", payload, workflow_id="wf-guard",
@@ -635,8 +636,8 @@ class TestGuard(unittest.TestCase):
             ok = i < int(adaptive_n * adaptive_success)
             run_id, task_id = f"run-a-{idx}", f"task-a-{idx}"
             ts = base + idx
-            settle("codex", ok, run_id, task_id, ts)
-            decide(run_id, task_id, "codex", True, ts + 200.0)
+            settle(recommended, ok, run_id, task_id, ts)
+            decide(run_id, task_id, recommended, True, ts + 200.0)
             idx += 1
         for i in range(legacy_n):
             ok = i < int(legacy_n * legacy_success)
@@ -687,6 +688,31 @@ class TestGuard(unittest.TestCase):
                 self.db_path, agent="codex", node="implementation",
                 task_type="fix")
         self.assertFalse(verdict["triggered"])
+
+    def test_guard_read_is_not_starved_by_a_busy_sibling_bucket(self):
+        # Reviewer P1: the guard must scope its matched-row budget to
+        # the target bucket. With only node/task_type filtering, a busy
+        # sibling recommendation consumes the whole budget and the
+        # target reads as "no samples" -> guard stays quiet while the
+        # target is actually collapsing.
+        _seed_collapsed_bucket(self.store, self.db_path, test=self)  # codex
+        # A much busier sibling bucket: same node/task_type, a different
+        # recommendation, and 240 decisions — more than the guard's
+        # 200-decision budget. Scanned newest-first without an exact
+        # bucket filter, all 200 matched slots go to claude and codex is
+        # never reached, so the guard would read "no samples" and stay
+        # quiet while codex is collapsing.
+        self._seed_canary_bucket(
+            adaptive_success=1.0, legacy_success=1.0,
+            adaptive_n=120, legacy_n=120, recommended="claude")
+        verdict = rollout_policy.evaluate_guard(
+            self.db_path, agent="codex", node="implementation",
+            task_type="fix")
+        self.assertIsNotNone(verdict["bucket"],
+                             "the target bucket must be scanned, not starved")
+        self.assertEqual(verdict["bucket"]["recommended_agent"], "codex")
+        self.assertTrue(verdict["triggered"],
+                        "a starved read would wrongly report quiet")
 
     def test_guard_is_scoped_to_its_own_bucket(self):
         # A collapsed codex/implementation/fix bucket must not condemn a
@@ -938,6 +964,74 @@ class TestRolloutCLI(unittest.TestCase):
         payload = json.loads(out)
         self.assertTrue(payload["killed"])
         self.assertEqual(payload["states"][0]["percentage"], 5)
+
+    def test_read_and_write_share_one_db_resolver(self):
+        # Reviewer P1: rollout must not resolve its database twice. With
+        # a non-default layout, a write going through _get_store() and a
+        # read going through resolve_state_db_path() can land on two
+        # different files: "set" succeeds, "status" shows nothing.
+        with tempfile.TemporaryDirectory(prefix="herdr-rollout-split-") as tmp:
+            layout = Path(tmp) / "layout"
+            layout.mkdir()
+            env = {"HERDR_STATE_DB": "", "TASKS_FILE": "",
+                   "WORKFLOW_FILE": str(layout / "workflow.json"),
+                   "WORKFLOWS_FILE": "", "CHECKPOINTS_DIR": ""}
+            with patch.dict("os.environ", env):
+                self._run(["set", "--agent", "codex", "--node", "n",
+                           "--task-type", "t", "--percentage", "5",
+                           "--reason", "r"])
+                code, out, err = self._run(["status"])
+            self.assertEqual(code, 0, err)
+            self.assertIn("codex / n / t current: 5%", out)
+
+    def test_check_guard_exits_nonzero_when_unavailable(self):
+        # Reviewer P2: an unavailable guard must never look like a
+        # passing check to a monitoring job.
+        verdict = {
+            "triggered": False, "status": "unavailable",
+            "reason": "canary evaluation unavailable: OperationalError",
+            "bucket": None, "config": {},
+        }
+        with patch("herdr.rollout_policy.evaluate_guard",
+                   return_value=verdict):
+            code, out, err = self._run([
+                "check-guard", "--agent", "codex", "--node", "implementation",
+                "--task-type", "fix"])
+        self.assertEqual(code, 1)
+        self.assertIn("could not evaluate", err)
+        self.assertIn("unavailable", err)
+        self.assertEqual(out, "")
+
+    def test_check_guard_exits_nonzero_when_unavailable_json(self):
+        verdict = {
+            "triggered": False, "status": "unavailable",
+            "reason": "canary evaluation unavailable: OperationalError",
+            "bucket": None, "config": {},
+        }
+        with patch("herdr.rollout_policy.evaluate_guard",
+                   return_value=verdict):
+            code, out, err = self._run([
+                "check-guard", "--agent", "codex", "--node", "implementation",
+                "--task-type", "fix", "--json"])
+        self.assertEqual(code, 1)
+        # The machine-readable verdict goes to stderr so stdout stays
+        # clean for anything parsing it.
+        self.assertEqual(out, "")
+        self.assertEqual(json.loads(err)["status"], "unavailable")
+
+    def test_check_guard_still_exits_zero_when_merely_insufficient(self):
+        verdict = {
+            "triggered": False, "status": "insufficient_samples",
+            "reason": "insufficient samples: settled=0 < min=20",
+            "bucket": None, "config": {},
+        }
+        with patch("herdr.rollout_policy.evaluate_guard",
+                   return_value=verdict):
+            code, out, _ = self._run([
+                "check-guard", "--agent", "codex", "--node", "implementation",
+                "--task-type", "fix"])
+        self.assertEqual(code, 0)
+        self.assertIn("insufficient_samples", out)
 
     def test_status_does_not_manufacture_schema(self):
         # Reviewer P2: a read must not create tables or migrate. #102
@@ -1202,15 +1296,17 @@ class TestRolloutRouterIntegration(unittest.TestCase):
             self.db_path, agent="codex", node="implementation",
             task_type="fix", new_percentage=10, reason="fresh",
             source="cli:test")
-        # A stale operator holding previous=5 must not overwrite 10.
+        # A stale operator holding the 5% snapshot must not overwrite 10.
         with self.assertRaises(ValueError):
-            _sdb.apply_rollout_stage_atomic(
+            _sdb.transact_rollout_stage(
                 agent="codex", node="implementation", task_type="fix",
-                expected_staged_percentage=5, previous_percentage=5,
-                new_percentage=25, action="promote", reason="stale",
-                source="cli:stale",
-                algorithm_version=rollout_policy.ALGORITHM_VERSION,
-                created_at=1_700_000_000.0, db_path=self.db_path)
+                expected=_sdb.RolloutSnapshot(exists=True, percentage=5),
+                write=_sdb.RolloutWrite(
+                    new_percentage=25, previous_percentage=5,
+                    action="promote", reason="stale", source="cli:stale",
+                    algorithm_version=rollout_policy.ALGORITHM_VERSION,
+                    created_at=1_700_000_000.0),
+                db_path=self.db_path)
         self.assertEqual(
             rollout_policy.get_stage(
                 self.db_path, "codex", "implementation", "fix"), 10)
@@ -1219,6 +1315,93 @@ class TestRolloutRouterIntegration(unittest.TestCase):
             self.db_path, agent="codex", node="implementation",
             task_type="fix")
         self.assertEqual(len(history), 2)
+
+    def test_stale_promotion_cannot_overwrite_emergency_rollback(self):
+        # Reviewer P1: presence must be part of the CAS identity.
+        # T1 (promotion) reads "absent"; T2 (emergency off) writes an
+        # explicit 0 row; T1's percentage still looks like 0, so a
+        # percentage-only CAS would happily overwrite the rollback.
+        from herdr import state_db as _sdb
+        stale = _sdb.read_rollout_snapshot(
+            "codex", "implementation", "fix", self.db_path)
+        self.assertFalse(stale.exists)
+        # T2: the emergency rollback lands first.
+        rollout_policy.set_stage(
+            self.db_path, agent="codex", node="implementation",
+            task_type="fix", new_percentage=0, reason="emergency",
+            source="cli:rollback", config_fallback=50)
+        # T1: decided against the "absent" snapshot it observed.
+        decision = rollout_policy.decide_rollout_change(
+            stale, new_percentage=5, config_fallback=50)
+        self.assertFalse(decision.is_noop)
+        with self.assertRaises(ValueError) as raised:
+            _sdb.transact_rollout_stage(
+                agent="codex", node="implementation", task_type="fix",
+                expected=stale,
+                write=_sdb.RolloutWrite(
+                    new_percentage=5,
+                    previous_percentage=decision.effective_prev,
+                    action=decision.action, reason="stale promotion",
+                    source="cli:stale",
+                    algorithm_version=rollout_policy.ALGORITHM_VERSION,
+                    created_at=1_700_000_000.0),
+                db_path=self.db_path)
+        self.assertIn("conflict", str(raised.exception))
+        # The rollback survives untouched.
+        self.assertEqual(
+            rollout_policy.get_stage(
+                self.db_path, "codex", "implementation", "fix"), 0)
+        self.assertEqual(rollout_policy.effective_percentage(
+            self.db_path, agent="codex", node="implementation",
+            task_type="fix", config_fallback=50), 0)
+        history = rollout_policy.get_history(
+            self.db_path, agent="codex", node="implementation",
+            task_type="fix")
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0]["action"], "rollback")
+
+    def test_noop_rollback_is_also_compare_and_swap(self):
+        # Reviewer P1: a no-op must be re-verified inside the
+        # transaction, never returned from a stale pre-read.
+        from herdr import state_db as _sdb
+        stale = _sdb.read_rollout_snapshot(
+            "codex", "implementation", "fix", self.db_path)
+        # Someone promotes 0 -> 5 after our read.
+        rollout_policy.set_stage(
+            self.db_path, agent="codex", node="implementation",
+            task_type="fix", new_percentage=5, reason="racer",
+            source="cli:racer")
+        decision = rollout_policy.decide_rollout_change(
+            stale, new_percentage=0)
+        self.assertTrue(decision.is_noop,
+                        "against the stale snapshot this is a no-op")
+        with self.assertRaises(ValueError):
+            _sdb.transact_rollout_stage(
+                agent="codex", node="implementation", task_type="fix",
+                expected=stale, write=None, db_path=self.db_path)
+        # The live 5% is never reported as "already off".
+        self.assertEqual(
+            rollout_policy.get_stage(
+                self.db_path, "codex", "implementation", "fix"), 5)
+        self.assertEqual(len(rollout_policy.get_history(
+            self.db_path, agent="codex", node="implementation",
+            task_type="fix")), 1)
+
+    def test_single_snapshot_read_covers_both_fields(self):
+        # One query, one point in time: the caller can never stitch
+        # exists/percentage from two different reads.
+        from herdr import state_db as _sdb
+        snapshot = _sdb.read_rollout_snapshot(
+            "codex", "implementation", "fix", self.db_path)
+        self.assertEqual(
+            snapshot, _sdb.RolloutSnapshot(exists=False, percentage=0))
+        rollout_policy.set_stage(
+            self.db_path, agent="codex", node="implementation",
+            task_type="fix", new_percentage=5, reason="r", source="cli")
+        self.assertEqual(
+            _sdb.read_rollout_snapshot(
+                "codex", "implementation", "fix", self.db_path),
+            _sdb.RolloutSnapshot(exists=True, percentage=5))
 
 
 if __name__ == "__main__":

@@ -296,10 +296,15 @@ herdr-task rollout check-guard --agent codex --node implementation \
   `--auto-rollback` 触发时持久化 `→off`（`action=auto_rollback`）；
 - `set` / `off`：非法阶段或开放百分比、跨级推进、缺 `--reason`、并发冲突
   一律 exit 2（状态未变）；存储失败 exit 1（无部分生效）；
+- 并发保护：CAS 覆盖「行是否存在 + 百分比」，紧急回退不会被读到过期的 promotion
+  覆盖，no-op 同样校验（不会从过期读报告 “already off”）；
+- 读写共用同一个 DB 解析器，不会出现 set 写一个库、status 读另一个库；
 - `off` 对**没有 staged 行**的 bucket 会写入显式 `0` 行来覆盖 canary 配置
   fallback（absent ≠ explicit off），否则该 bucket 仍按配置分流；
 - `status` / `history` / `check-guard` 走只读连接，不建表不迁移；读取失败
   返回 exit 1 并报 `unavailable`，不会显示为“全部 off”；
+- `check-guard` 在 `status=unavailable`（评不了）时退出 1，JSON 写 stderr；
+  样本不足（`insufficient_samples`）属正常判断，退出 0；
 - Kill：`HERDR_ADAPTIVE_ROLLOUT_ENABLED=false` 立即全 bucket Legacy，历史保留；
 - 热路径 guard 默认关闭，需要时用 `HERDR_ROLLOUT_HOT_GUARD=1` 开启；
   自动止损默认由 `rollout check-guard --auto-rollback` 显式执行。

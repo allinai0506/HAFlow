@@ -1282,3 +1282,33 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
   “action=promote ⟺ 记录的方向确实是增加”这一不变量）；真实 CLI 复现
   `50% -> 5% action=rollback`、`100% -> 5% action=rollback`，经典阶梯仍全为 promote。
   rollout 专项 58 passed + 6 subtests；全量 1913 passed + 50 subtests。
+
+## [2026-09-27] fix | PR #106 评审修复三：快照即身份、guard 精确 bucket、单一 DB 解析器
+- 评审结论：上轮 audit action 已修好；本轮 4 P1 + 1 P2，其中 3 个 P1 直接威胁
+  “Safety always wins”。
+- P1（紧急 off 被 stale promotion 覆盖）：CAS 只比 `percentage`，分不清
+  `absent` 与「显式 0 行」——而前者仍按 canary 配置分流。读到 absent 的 promotion
+  会在事务里看到 percentage 仍为 0，判定无冲突，直接覆盖刚写入的紧急回退。
+  修复：引入 `RolloutSnapshot(exists, percentage)`，**存在性进入 CAS 身份**。
+- P1（no-op rollback 在事务外直接返回）：`get_rollout_stage()` 与
+  `rollout_stage_known()` 两次独立读取后判 no-op 并直接返回，并发 promotion 之后
+  仍会报告 “already off”。修复：读-判-写收敛进 `state_db.transact_rollout_stage`
+  一个 `BEGIN IMMEDIATE`（读快照 → 校验 == 决策依据的快照 → upsert + audit → COMMIT）；
+  `write=None` 的 no-op 同样校验。判定下沉为纯函数
+  `rollout_policy.decide_rollout_change(snapshot, ...)`，state_db 不含业务判断。
+- P1（guard 被兄弟 bucket 饿死）：`_bucket_report` 只按 node/task_type 过滤，
+  200 条决策预算会被同一 node/task_type 下更活跃的兄弟 recommendation 吃光，
+  目标 bucket 读成「无样本」→ guard 安静 → 明显恶化却继续放行。修复：给
+  canary collection 增加专用 `recommended_agent` 精确过滤（`agent` 语义太宽，
+  同时匹配 actual/recommended/legacy），且**在 limit 之前生效**。
+  回归测试已验证：撤掉修复即复现「目标 bucket 读成 None」。
+- P1（读写两套 DB resolver）：`set/off` 经 `_get_store()`，`status/history` 经
+  `state_db.resolve_state_db_path()`，非默认布局（WORKFLOW_FILE / CHECKPOINTS_DIR）
+  下可能 set 写库 A、status 读库 B。修复：统一为 `_rollout_db_path()`
+  = `resolve_state_db_path()`，写路径不再二次猜测。回归测试已验证：恢复旧行为
+  即复现 split-brain。
+- P2（check-guard unavailable 仍退出 0）：监控系统会把「无法判定」读成「检查通过」。
+  修复：`status=unavailable` → stderr + exit 1（JSON 走 stderr）；样本不足
+  （`insufficient_samples`）仍是正常判断，退出 0。
+- 证据：rollout 专项 66 passed + 6 subtests（新增快照 CAS/no-op CAS/单次快照读/
+  guard 饿死/split-brain/check-guard 退出码等回归）；全量 1921 passed + 50 subtests。
