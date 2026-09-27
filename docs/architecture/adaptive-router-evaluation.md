@@ -170,6 +170,17 @@ It is facts only: no automatic promotion, no traffic change.
 4. Production selection stays untouched: `choose_agent` returns the
    legacy decision; shadow only appends `route_decision` events.
 
+### 7a. Canary 时代的边界（v2 更新）
+
+#103 起 `mode="canary"` 的决策存在且 recommendation 会真实执行。为保持
+本报告"recommended 从未执行"的语义纯净，Shadow Evaluation 的共享扫描
+（`shadow_rows._collect_rows_with_meta`）跳过 canary 事件并在 collection
+meta 计数（`skipped_canary_events`）；canary 事件的 observed 对比由
+`herdr/canary_evaluation.py` / `herdr-task canary-eval` 独占（adaptive
+arm = diverted，legacy arm = 未分流，同 bucket 同时间窗的确定性对照）。
+Canary 准入扫描使用 `mode="all"`（canary 事件的校准样本同样是有效证据）。
+详见 `docs/architecture/adaptive-router-canary.md`。
+
 ## Data flow
 
 ```text
