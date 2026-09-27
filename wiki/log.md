@@ -1174,3 +1174,24 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
   case3b 关闭 keeper 验证 fail-closed + 目录零新增，case3c 验证边车在场字节一致。
 - 证据：`tests/test_shadow_evaluation.py` 47 passed；全量 1799 passed + 44 subtests；
   通用教训归档 lessons §92。
+
+## [2026-09-27] feat | PR #103 Adaptive Router v2 Canary Mode（默认关闭）
+- 闭环最后一步：预测 → 少量真实执行 → Outcome → 重新评估 → #104 扩量人工决策。
+- 四保护：配置默认关闭（缺文件/非法 = 关闭，fail-closed 解析）；白名单 bucket
+  （recommended_agent × node × task_type，分流目标恒为池/健康/隔离过滤后的候选）；
+  `sha256("canary-v2|{run_id}|{task_id}")` mod 100 确定性分流（禁 Python hash，
+  身份缺一不分流，bucket 可覆盖 percentage）；任何异常 fail-open 回 Legacy 并留
+  `route_decision_error`(mode=canary)。
+- 准入复用 Shadow 权威判定：`model_data_status` + `evaluation_data_status` 双
+  sufficient（`shadow_rows._collect_rows_with_meta(mode="all")` + sufficiency 函数，
+  截断无法证明即拒绝）；bounded-scan 收敛为 mode 切片单实现（shadow/canary/all +
+  row_builder），canary_evaluation 为薄封装。
+- 事件契约：每路由恰一条 route_decision（canary 带 legacy_agent/diverted/
+  canary_gate，或 shadow）；Shadow 评估跳过 canary 事件并计数，保护"recommended
+  未执行"语义；`herdr-task canary-eval` 两臂（diverted vs 未分流）observed 对比，
+  只报事实不报 rollout 结论。
+- 验收：全量 1836 passed + 44 subtests（基线 1800+44，+36 零回归）；真实链路 7 步
+  PASS（分流→事件→reservation→Outcome→canary-eval 逐字节确定性→shadow 排除）；
+  S6 对抗自查修复 1 项（共享过滤器 --agent "" 行为漂移）；MERGE_READY。
+- 已知边界：评审独立性受限（同模型自查，子代理被宿主拒绝）；未在真实生产
+  workflow 触发（需授权，默认关闭）。

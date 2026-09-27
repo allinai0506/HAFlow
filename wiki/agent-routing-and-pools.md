@@ -171,3 +171,26 @@ Evidence:
 - `tests/test_execution_outcome.py`
 - `tests/test_adaptive_router.py`
 - `docs/architecture/adaptive-agent-router.md`
+
+---
+
+## 8. Canary 分流（Adaptive Router v2）
+
+`FACT`（PR #103）显式请求 / workflow 覆盖 / node fixed 之外，auto 选路分支可被
+Canary 门接管：仅当操作者启用配置（默认关闭，`~/.herdr-controller/route-canary.json`
+或 `HERDR_ROUTE_CANARY_CONFIG`）、推荐 bucket 在白名单、且该 bucket 的
+`model_data_status` 与 `evaluation_data_status` 双 `sufficient`（复用 Shadow
+Evaluation 权威判定，扫描有界）时，`sha256("canary-v2|{run_id}|{task_id}")`
+mod 100 < percentage 的身份改派推荐 Agent（目标恒为池/健康/隔离过滤后的候选
+成员，reservation 记最终值）。每次路由恰一条 `route_decision`（mode=canary 带
+`legacy_agent`/`diverted`/`canary_gate` 审计，或 mode=shadow）；Canary 路径任何
+异常 fail-open 回 Legacy 并留 `route_decision_error`。Shadow 评估跳过 canary
+事件；观测对比由只读 `herdr-task canary-eval` 两臂（diverted vs 未分流）完成，
+只报事实——扩量是 #104 的人工决策。
+
+Evidence:
+- `herdr/canary_router.py` / `herdr/canary_evaluation.py`
+- `herdr/shadow_rows.py#_collect_rows_with_meta`（mode 切片单实现）
+- `herdr/agent_router.py#choose_agent`
+- `tests/test_canary_router.py` / `tests/test_canary_evaluation.py`
+- `docs/architecture/adaptive-router-canary.md`
