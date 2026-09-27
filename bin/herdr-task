@@ -1511,6 +1511,222 @@ def cmd_canary_eval(args):
     print(canary_evaluation.render_canary_report(report))
 
 
+def _rollout_write_db_path():
+    """Resolve the writable state DB path (writes may init schema)."""
+    store = _get_store()
+    return getattr(store, "db_path", None)
+
+
+def _rollout_stage_label(value):
+    """Render a staged percentage; 0/off renders as ``off``."""
+    return "off" if not value else f"{value}%"
+
+
+def _rollout_bucket_args(args):
+    """Validate + normalize the shared bucket identity flags."""
+    from herdr import rollout_policy
+    agent = (getattr(args, "agent", None) or "").strip()
+    node = (getattr(args, "node", None) or "").strip()
+    task_type = getattr(args, "task_type", None)
+    if task_type is None:
+        task_type = ""
+    try:
+        bucket = rollout_policy.normalize_bucket(agent, node, task_type)
+    except ValueError as exc:
+        print(f"[ROLLOUT] {exc}", file=sys.stderr)
+        sys.exit(2)
+    return bucket
+
+
+def _rollout_change(args, new_percentage, reason, source, *, verb):
+    """Shared set/off write path: validate, write atomically, report."""
+    from herdr import rollout_policy
+    bucket = _rollout_bucket_args(args)
+    if not reason:
+        print(f"[ROLLOUT] --reason is required for {verb}", file=sys.stderr)
+        sys.exit(2)
+    try:
+        db_path = _rollout_write_db_path()
+        record = rollout_policy.set_stage(
+            db_path, agent=bucket["agent"], node=bucket["node"],
+            task_type=bucket["task_type"], new_percentage=new_percentage,
+            reason=reason, source=source)
+    except ValueError as exc:
+        # Invalid stage/transition or a concurrent-writer conflict: the
+        # bucket is unchanged and nothing was persisted.
+        print(f"[ROLLOUT] {exc}", file=sys.stderr)
+        sys.exit(2)
+    except Exception as exc:  # noqa: BLE001 -- CLI boundary
+        print(f"[ROLLOUT] failed: {type(exc).__name__}: {exc}",
+              file=sys.stderr)
+        sys.exit(1)
+    if getattr(args, "json", False):
+        print(json.dumps(record, ensure_ascii=False, indent=2,
+                         sort_keys=True))
+        return
+    key = (f"{bucket['agent']}/{bucket['node']}/"
+           f"{bucket['task_type'] or '(no type)'}")
+    if record.get("action") == "noop":
+        print(f"[ROLLOUT] {key} already at "
+              f"{_rollout_stage_label(record.get('new_percentage'))}; "
+              "no change")
+        return
+    print(f"[ROLLOUT] {key} "
+          f"{_rollout_stage_label(record.get('previous_percentage'))} -> "
+          f"{_rollout_stage_label(record.get('new_percentage'))} "
+          f"action={record.get('action')} audit_id={record.get('id')}")
+
+
+def cmd_rollout(args):
+    """Controlled Rollout operator entry (status/set/off/history/check-guard)."""
+    action = getattr(args, "rollout_command", None)
+    if action == "status":
+        _cmd_rollout_status(args)
+    elif action == "set":
+        _cmd_rollout_set(args)
+    elif action == "off":
+        _cmd_rollout_off(args)
+    elif action == "history":
+        _cmd_rollout_history(args)
+    elif action == "check-guard":
+        _cmd_rollout_check_guard(args)
+    else:
+        print("[ROLLOUT] unknown action; use status|set|off|history|check-guard",
+              file=sys.stderr)
+        sys.exit(2)
+
+
+def _cmd_rollout_status(args):
+    from herdr import rollout_policy, state_db
+    db_path = state_db.resolve_state_db_path()
+    if not db_path.is_file():
+        states = []
+    else:
+        try:
+            states = rollout_policy.list_states(db_path)
+        except Exception as exc:  # noqa: BLE001 -- read-only boundary
+            print(f"[ROLLOUT] failed: {type(exc).__name__}: {exc}",
+                  file=sys.stderr)
+            sys.exit(1)
+    killed = not rollout_policy.rollout_enabled()
+    if getattr(args, "json", False):
+        print(json.dumps({
+            "killed": killed,
+            "states": states,
+            "algorithm_version": rollout_policy.ALGORITHM_VERSION,
+        }, ensure_ascii=False, indent=2, sort_keys=True))
+        return
+    if killed:
+        print("rollout: KILLED (HERDR_ADAPTIVE_ROLLOUT_ENABLED=false) "
+              "-> all buckets Legacy")
+    if not states:
+        print("rollout: no staged buckets (all off)")
+        return
+    for row in states:
+        print(f"{row.get('agent')} / {row.get('node')} / "
+              f"{row.get('task_type') or '(no type)'} current: "
+              f"{_rollout_stage_label(row.get('percentage'))}")
+
+
+def _cmd_rollout_set(args):
+    from herdr import rollout_policy
+    raw_pct = getattr(args, "percentage", None)
+    if raw_pct is None:
+        print("[ROLLOUT] --percentage off/5/10/25/50 is required",
+              file=sys.stderr)
+        sys.exit(2)
+    try:
+        pct = rollout_policy.normalize_percentage(raw_pct)
+    except ValueError as exc:
+        print(f"[ROLLOUT] {exc}", file=sys.stderr)
+        sys.exit(2)
+    _rollout_change(
+        args, pct,
+        (getattr(args, "reason", None) or "").strip(),
+        (getattr(args, "source", None) or "cli").strip(),
+        verb="every rollout change")
+
+
+def _cmd_rollout_off(args):
+    _rollout_change(
+        args, 0,
+        (getattr(args, "reason", None) or "").strip(),
+        (getattr(args, "source", None) or "cli").strip(),
+        verb="rollback")
+
+
+def _cmd_rollout_history(args):
+    from herdr import rollout_policy, state_db
+    try:
+        limit = int(getattr(args, "limit", None) or 100)
+    except (TypeError, ValueError):
+        print("[ROLLOUT] --limit must be an int", file=sys.stderr)
+        sys.exit(2)
+    if limit <= 0:
+        print("[ROLLOUT] --limit must be a positive int", file=sys.stderr)
+        sys.exit(2)
+    db_path = state_db.resolve_state_db_path()
+    if not db_path.is_file():
+        rows = []
+    else:
+        try:
+            rows = rollout_policy.get_history(
+                db_path, agent=getattr(args, "agent", None),
+                node=getattr(args, "node", None),
+                task_type=getattr(args, "task_type", None), limit=limit)
+        except Exception as exc:  # noqa: BLE001 -- read-only boundary
+            print(f"[ROLLOUT] failed: {type(exc).__name__}: {exc}",
+                  file=sys.stderr)
+            sys.exit(1)
+    if getattr(args, "json", False):
+        print(json.dumps(rows, ensure_ascii=False, indent=2,
+                         sort_keys=True))
+        return
+    if not rows:
+        print("rollout: no audit events")
+        return
+    for row in rows:
+        print(f"#{row.get('id')} {row.get('recommended_agent')}/"
+              f"{row.get('node')}/{row.get('task_type') or '(no type)'} "
+              f"{_rollout_stage_label(row.get('previous_percentage'))} -> "
+              f"{_rollout_stage_label(row.get('new_percentage'))} "
+              f"{row.get('action')} "
+              f"by {row.get('source')} reason={row.get('reason')}")
+
+
+def _cmd_rollout_check_guard(args):
+    from herdr import rollout_policy, state_db
+    bucket = _rollout_bucket_args(args)
+    auto = bool(getattr(args, "auto_rollback", False))
+    reason = (getattr(args, "reason", None) or "safety guard triggered").strip()
+    source = (getattr(args, "source", None) or "guard").strip()
+    # Read-only evaluation must not create or migrate the database, so
+    # it resolves the path purely; only --auto-rollback opens it.
+    db_path = state_db.resolve_state_db_path() if not auto \
+        else _rollout_write_db_path()
+    try:
+        if auto:
+            result = rollout_policy.maybe_auto_rollback(
+                db_path, agent=bucket["agent"], node=bucket["node"],
+                task_type=bucket["task_type"], reason=reason, source=source)
+        else:
+            verdict = rollout_policy.evaluate_guard(
+                db_path, agent=bucket["agent"], node=bucket["node"],
+                task_type=bucket["task_type"])
+            result = {"action": "triggered" if verdict.get("triggered")
+                      else "none", **verdict}
+    except Exception as exc:  # noqa: BLE001 -- CLI boundary
+        print(f"[ROLLOUT] failed: {type(exc).__name__}: {exc}",
+              file=sys.stderr)
+        sys.exit(1)
+    if getattr(args, "json", False):
+        print(json.dumps(result, ensure_ascii=False, indent=2,
+                         sort_keys=True))
+        return
+    print(f"[ROLLOUT] guard action={result.get('action')} "
+          f"reason={result.get('reason')}")
+
+
 def cmd_metrics(args):
     """Read-only, run-scoped Harness Metrics summary."""
     from herdr.metrics import get_run_metrics
@@ -6373,6 +6589,50 @@ def main():
     )
     canary_eval_cmd.add_argument("--json", action="store_true")
 
+    rollout_cmd = sub.add_parser(
+        "rollout",
+        help="Adaptive Router Controlled Rollout（人工扩量/回退/审计）",
+    )
+    rollout_sub = rollout_cmd.add_subparsers(dest="rollout_command")
+
+    rollout_status = rollout_sub.add_parser("status", help="查看所有 bucket 当前阶段")
+    rollout_status.add_argument("--json", action="store_true")
+
+    rollout_set = rollout_sub.add_parser("set", help="人工推进一个 stage（相邻）")
+    rollout_set.add_argument("--agent", required=True)
+    rollout_set.add_argument("--node", required=True)
+    rollout_set.add_argument("--task-type", default="")
+    rollout_set.add_argument("--percentage", required=True,
+                             help="off/5/10/25/50")
+    rollout_set.add_argument("--reason", required=True)
+    rollout_set.add_argument("--source", default="cli")
+    rollout_set.add_argument("--json", action="store_true")
+
+    rollout_off = rollout_sub.add_parser("off", help="紧急回退到 off")
+    rollout_off.add_argument("--agent", required=True)
+    rollout_off.add_argument("--node", required=True)
+    rollout_off.add_argument("--task-type", default="")
+    rollout_off.add_argument("--reason", required=True)
+    rollout_off.add_argument("--source", default="cli")
+    rollout_off.add_argument("--json", action="store_true")
+
+    rollout_hist = rollout_sub.add_parser("history", help="审计历史（只读）")
+    rollout_hist.add_argument("--agent", default=None)
+    rollout_hist.add_argument("--node", default=None)
+    rollout_hist.add_argument("--task-type", default=None)
+    rollout_hist.add_argument("--limit", default="100")
+    rollout_hist.add_argument("--json", action="store_true")
+
+    rollout_guard = rollout_sub.add_parser(
+        "check-guard", help="Safety Guard 只读评估/自动回退")
+    rollout_guard.add_argument("--agent", required=True)
+    rollout_guard.add_argument("--node", required=True)
+    rollout_guard.add_argument("--task-type", default="")
+    rollout_guard.add_argument("--auto-rollback", action="store_true")
+    rollout_guard.add_argument("--reason", default="safety guard triggered")
+    rollout_guard.add_argument("--source", default="guard")
+    rollout_guard.add_argument("--json", action="store_true")
+
     args = parser.parse_args()
 
     if args.command == "add":
@@ -6705,6 +6965,9 @@ def main():
 
     elif args.command == "canary-eval":
         cmd_canary_eval(args)
+
+    elif args.command == "rollout":
+        cmd_rollout(args)
 
 
 if __name__ == "__main__":

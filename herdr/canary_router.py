@@ -361,15 +361,54 @@ def plan_canary(
     if not _admission_sufficient(admission):
         return None
     hash_bucket = canary_hash_bucket(task_id, run_id)
-    effective_percentage = (
+    config_percentage = (
         bucket.percentage if bucket.percentage is not None
         else config.percentage
     )
-    hash_divert = hash_bucket is not None and hash_bucket < effective_percentage
+    # Controlled Rollout (#104): the staged percentage overrides the
+    # static canary config. Resolution order inside rollout_policy:
+    # kill switch (0) -> staged row -> config fallback -> 0. Absent
+    # rows preserve #103 behavior; any rollout read error resolves to
+    # 0 (never expands). This lookup is read-only: promotion and
+    # persisted rollback happen only through explicit CLI/guard writes.
+    try:
+        try:
+            from . import rollout_policy as _rollout
+        except ImportError:  # pragma: no cover - script fallback
+            from herdr import rollout_policy as _rollout  # type: ignore
+        effective_percentage = _rollout.effective_percentage(
+            db_path, agent=recommended, node=node_name,
+            task_type=normalized_type, config_fallback=config_percentage)
+        percentage_source = "rollout"
+        guard_forced = False
+        if effective_percentage > 0:
+            # Only diversion candidates pay for the guard, and only
+            # when the operator opted into the hot guard: off buckets
+            # already stay Legacy and the guard reads a bounded scan.
+            try:
+                guard_forced = bool(_rollout.should_force_legacy(
+                    db_path, agent=recommended, node=node_name,
+                    task_type=normalized_type))
+            except Exception:
+                guard_forced = False
+    except Exception:
+        # Rollout control failure must never make routing more
+        # aggressive: fall back to "no staged expansion" (0) rather
+        # than re-deriving the pre-rollout config percentage.
+        effective_percentage = 0
+        percentage_source = "rollout_unavailable"
+        guard_forced = False
+    hash_divert = (
+        hash_bucket is not None and hash_bucket < effective_percentage
+        and not guard_forced
+    )
     gate = {
         "bucket_key": f"{recommended}/{node_name}/{normalized_type}",
         "hash_bucket": hash_bucket,
         "effective_percentage": effective_percentage,
+        "config_percentage": config_percentage,
+        "percentage_source": percentage_source,
+        "guard_forced_legacy": guard_forced,
         "hash_divert": hash_divert,
         "truncated": bool(admission.get("truncated")),
         "admission": {

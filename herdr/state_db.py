@@ -253,6 +253,51 @@ def _ensure_working_context_source_clock_schema(conn: sqlite3.Connection) -> Non
             )
 
 
+def _ensure_rollout_schema(conn: sqlite3.Connection) -> None:
+    """Create Controlled Rollout tables (idempotent, no migration).
+
+    Current State + Immutable Audit Events: ``rollout_state`` holds one
+    row per bucket (the present percentage); ``rollout_audit`` appends
+    exactly one row per state change and is never updated or deleted.
+    Called from ``_ensure_schema`` for fresh DBs and directly by the
+    rollout helpers so pre-existing DBs gain the tables lazily.
+    """
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS rollout_state (
+            bucket_key TEXT PRIMARY KEY,
+            agent TEXT NOT NULL,
+            node TEXT NOT NULL,
+            task_type TEXT NOT NULL DEFAULT '',
+            percentage INTEGER NOT NULL DEFAULT 0,
+            updated_at REAL NOT NULL,
+            updated_by TEXT NOT NULL DEFAULT '',
+            reason TEXT NOT NULL DEFAULT ''
+        );
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS rollout_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            bucket_key TEXT NOT NULL,
+            agent TEXT NOT NULL,
+            node TEXT NOT NULL,
+            task_type TEXT NOT NULL DEFAULT '',
+            previous_percentage INTEGER NOT NULL,
+            new_percentage INTEGER NOT NULL,
+            action TEXT NOT NULL,
+            reason TEXT NOT NULL DEFAULT '',
+            source TEXT NOT NULL DEFAULT '',
+            algorithm_version TEXT NOT NULL DEFAULT '',
+            created_at REAL NOT NULL
+        );
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_rollout_audit_bucket "
+        "ON rollout_audit(bucket_key, id DESC);")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_rollout_audit_created "
+        "ON rollout_audit(created_at DESC, id DESC);")
+
+
 def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
     """Execute table and index creation DDL once per database path."""
     if path_key in _INITIALIZED_DBS:
@@ -840,6 +885,7 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_replay_specs_source ON replay_specs(source_run_id);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_replay_specs_replay ON replay_specs(replay_run_id);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_replay_specs_workflow ON replay_specs(workflow_id);")
+    _ensure_rollout_schema(conn)
 
     # One-time atomic bootstrap migration if initializing a DB where legacy JSON exists and not yet completed
     cur = conn.execute("SELECT value FROM schema_meta WHERE key = 'v1_migration_done';")
@@ -3457,6 +3503,226 @@ def get_execution_outcome(
             (str(task_id), str(run_id)),
         ).fetchone()
         return _decode_outcome_row(row) if row is not None else None
+    finally:
+        conn.close()
+
+
+def rollout_bucket_key(agent: str, node: str, task_type: str) -> str:
+    """Canonical bucket identity: recommended_agent/node/task_type."""
+    return f"{agent}/{node}/{task_type or ''}"
+
+
+def get_rollout_stage(
+    agent: str,
+    node: str,
+    task_type: str,
+    db_path: Optional[Path] = None,
+) -> int:
+    """Read the current staged percentage for one bucket (0 when absent)."""
+    conn = get_db_connection(db_path)
+    try:
+        _ensure_rollout_schema(conn)
+        key = rollout_bucket_key(agent, node, task_type or "")
+        row = conn.execute(
+            "SELECT percentage FROM rollout_state WHERE bucket_key = ?",
+            (key,),
+        ).fetchone()
+        return int(row["percentage"]) if row is not None else 0
+    finally:
+        conn.close()
+
+
+def list_rollout_states(
+    db_path: Optional[Path] = None,
+) -> List[Dict[str, Any]]:
+    """List every bucket with an explicit staged row (absent means off)."""
+    conn = get_db_connection(db_path)
+    try:
+        _ensure_rollout_schema(conn)
+        rows = conn.execute(
+            "SELECT bucket_key, agent, node, task_type, percentage, "
+            "updated_at, updated_by, reason FROM rollout_state "
+            "ORDER BY agent, node, task_type",
+        ).fetchall()
+        return [
+            {
+                "bucket_key": row["bucket_key"],
+                "agent": row["agent"],
+                "node": row["node"],
+                "task_type": row["task_type"] or "",
+                "percentage": int(row["percentage"]),
+                "updated_at": float(row["updated_at"]),
+                "updated_by": row["updated_by"] or "",
+                "reason": row["reason"] or "",
+            }
+            for row in rows
+        ]
+    finally:
+        conn.close()
+
+
+def list_rollout_audit(
+    agent: Optional[str] = None,
+    node: Optional[str] = None,
+    task_type: Optional[str] = None,
+    limit: Optional[int] = None,
+    db_path: Optional[Path] = None,
+) -> List[Dict[str, Any]]:
+    """Newest-first immutable rollout history, optionally one bucket."""
+    conn = get_db_connection(db_path)
+    try:
+        _ensure_rollout_schema(conn)
+        query = (
+            "SELECT id, bucket_key, agent, node, task_type, "
+            "previous_percentage, new_percentage, action, reason, source, "
+            "algorithm_version, created_at FROM rollout_audit WHERE 1=1"
+        )
+        params: List[Any] = []
+        if agent is not None:
+            query += " AND agent = ?"
+            params.append(str(agent))
+        if node is not None:
+            query += " AND node = ?"
+            params.append(str(node))
+        if task_type is not None:
+            query += " AND task_type = ?"
+            params.append(str(task_type))
+        query += " ORDER BY id DESC"
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(int(limit))
+        return [
+            {
+                "id": int(row["id"]),
+                "bucket_key": row["bucket_key"],
+                "recommended_agent": row["agent"],
+                "agent": row["agent"],
+                "node": row["node"],
+                "task_type": row["task_type"] or "",
+                "previous_percentage": int(row["previous_percentage"]),
+                "new_percentage": int(row["new_percentage"]),
+                "action": row["action"],
+                "reason": row["reason"] or "",
+                "source": row["source"] or "",
+                "algorithm_version": row["algorithm_version"] or "",
+                "created_at": float(row["created_at"]),
+            }
+            for row in conn.execute(query, tuple(params)).fetchall()
+        ]
+    finally:
+        conn.close()
+
+
+def rollout_stage_known(
+    agent: str,
+    node: str,
+    task_type: str,
+    db_path: Optional[Path] = None,
+) -> bool:
+    """True when the bucket has an explicit staged row (off counts)."""
+    conn = get_db_connection(db_path)
+    try:
+        _ensure_rollout_schema(conn)
+        row = conn.execute(
+            "SELECT 1 FROM rollout_state WHERE bucket_key = ?",
+            (rollout_bucket_key(agent, node, task_type or ""),),
+        ).fetchone()
+        return row is not None
+    finally:
+        conn.close()
+
+
+def apply_rollout_stage_atomic(
+    *,
+    agent: str,
+    node: str,
+    task_type: str,
+    previous_percentage: int,
+    new_percentage: int,
+    action: str,
+    reason: str,
+    source: str,
+    algorithm_version: str,
+    created_at: float,
+    db_path: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Atomically upsert current state and append exactly one audit row.
+
+    One ``BEGIN IMMEDIATE`` transaction covers the expected-previous
+    check plus both writes: a crash can never leave a staged value
+    without its audit fact, and a concurrent operator can never have
+    an old state silently overwrite a new one (stale writers get a
+    ValueError conflict instead of a lost update, so the CLI exits
+    nonzero and no partial change is visible).
+    """
+    conn = get_db_connection(db_path)
+    try:
+        _ensure_rollout_schema(conn)
+        key = rollout_bucket_key(agent, node, task_type or "")
+        conn.execute("BEGIN IMMEDIATE;")
+        try:
+            current = conn.execute(
+                "SELECT percentage FROM rollout_state WHERE bucket_key = ?",
+                (key,),
+            ).fetchone()
+            disk_previous = int(current["percentage"]) if current else 0
+            if disk_previous != int(previous_percentage):
+                raise ValueError(
+                    f"rollout conflict: bucket {key} is now "
+                    f"{disk_previous}, expected {previous_percentage}; "
+                    "reload state and retry")
+            conn.execute(
+                "INSERT INTO rollout_state "
+                "(bucket_key, agent, node, task_type, percentage, "
+                "updated_at, updated_by, reason) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(bucket_key) DO UPDATE SET "
+                "percentage = excluded.percentage, "
+                "updated_at = excluded.updated_at, "
+                "updated_by = excluded.updated_by, "
+                "reason = excluded.reason",
+                (key, agent, node, task_type or "", int(new_percentage),
+                 float(created_at), str(source), str(reason)),
+            )
+            cur = conn.execute(
+                "INSERT INTO rollout_audit "
+                "(bucket_key, agent, node, task_type, previous_percentage, "
+                "new_percentage, action, reason, source, algorithm_version, "
+                "created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (key, agent, node, task_type or "",
+                 int(previous_percentage), int(new_percentage), str(action),
+                 str(reason), str(source), str(algorithm_version),
+                 float(created_at)),
+            )
+            audit_id = int(cur.lastrowid)
+            conn.execute("COMMIT;")
+        except Exception:
+            try:
+                conn.execute("ROLLBACK;")
+            except Exception:
+                pass
+            raise
+        row = conn.execute(
+            "SELECT id, bucket_key, agent, node, task_type, "
+            "previous_percentage, new_percentage, action, reason, source, "
+            "algorithm_version, created_at FROM rollout_audit WHERE id = ?",
+            (audit_id,),
+        ).fetchone()
+        return {
+            "id": int(row["id"]),
+            "bucket_key": row["bucket_key"],
+            "recommended_agent": row["agent"],
+            "agent": row["agent"],
+            "node": row["node"],
+            "task_type": row["task_type"] or "",
+            "previous_percentage": int(row["previous_percentage"]),
+            "new_percentage": int(row["new_percentage"]),
+            "action": row["action"],
+            "reason": row["reason"] or "",
+            "source": row["source"] or "",
+            "algorithm_version": row["algorithm_version"] or "",
+            "created_at": float(row["created_at"]),
+        }
     finally:
         conn.close()
 

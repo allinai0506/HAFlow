@@ -268,3 +268,34 @@ Canary 运行时配置（默认关闭，无配置文件即关闭）：
 - 分流：`sha256("canary-v2|{run_id}|{task_id}")` mod 100 < percentage，跨进程可复现；
 - 回退：Canary 路径任何异常 fail-open 到 Legacy Router 并留下 `route_decision_error`
   （mode=canary）审计事件。
+
+## 7. `herdr-task rollout` 命令
+
+Adaptive Router Controlled Rollout（详见
+`docs/architecture/adaptive-router-rollout.md`）：per-bucket
+`recommended_agent × node × task_type` 独立阶段 `off/5/10/25/50`，人工推进、
+可审计、可回退；系统不自动扩量，只可自动止损。
+
+```bash
+herdr-task rollout status [--json]
+herdr-task rollout set --agent codex --node implementation --task-type fix \
+  --percentage 10 --reason "reviewed canary results"
+herdr-task rollout off --agent codex --node implementation --task-type fix \
+  --reason "manual rollback"
+herdr-task rollout history [--agent codex] [--node implementation] \
+  [--task-type fix] [--limit 100] [--json]
+herdr-task rollout check-guard --agent codex --node implementation \
+  --task-type fix [--auto-rollback]
+```
+
+- `status`（只读）：列出有 staged 行的 bucket 与当前阶段；kill 时标注 KILLED；
+- `set`：相邻推进（`off→5→10→25→50`），跨级拒绝（exit 2），`--reason` 必填；
+- `off`：从任意阶段直接回 `off`，`--reason` 必填；
+- `history`（只读）：`rollout_audit` newest-first，每次变化恰好一条；
+- `check-guard`：只读评估 Safety Guard（复用 canary-eval 两臂 facts），
+  `--auto-rollback` 触发时持久化 `→off`（`action=auto_rollback`）；
+- `set` / `off`：非法阶段或开放百分比、跨级推进、缺 `--reason`、并发冲突
+  一律 exit 2（状态未变）；存储失败 exit 1（无部分生效）；
+- Kill：`HERDR_ADAPTIVE_ROLLOUT_ENABLED=false` 立即全 bucket Legacy，历史保留；
+- 热路径 guard 默认关闭，需要时用 `HERDR_ROLLOUT_HOT_GUARD=1` 开启；
+  自动止损默认由 `rollout check-guard --auto-rollback` 显式执行。

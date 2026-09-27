@@ -197,3 +197,34 @@ Evidence:
 - `herdr/agent_router.py#choose_agent`
 - `tests/test_canary_router.py` / `tests/test_canary_evaluation.py`
 - `docs/architecture/adaptive-router-canary.md`
+
+---
+
+## 9. 受控扩量（Adaptive Router Controlled Rollout, v1）
+
+`FACT` Canary 分流比例从哪来：`herdr/rollout_policy.py` 是唯一的 rollout 状态
+管理者，按 `recommended_agent × node × task_type` 维护闭枚举阶段
+`off/5/10/25/50`（无 75/100、无任意整数）。Router 只消费它给出的
+`effective_percentage`；#103 的 `sha256("canary-v2|run|task") mod 100` 身份、
+白名单、准入、持久化门全部不动，因此 `5% ⊂ 10% ⊂ 25% ⊂ 50%` 单调包含、升级不
+洗牌。
+
+扩量是人工动作：只能经 `herdr-task rollout set` 相邻推进（`off→5→10→25→50`，
+`--reason` 必填，跨级拒绝）；回退可从任意阶段直达 `off`。没有任何自动扩量代码
+路径 —— Safety Guard 只写“下”，不写“上”。当前状态与历史事实分离：
+`state_db.rollout_state`（当前值）与 `rollout_audit`（不可变，每次变化恰好一条）
+在同一个 `BEGIN IMMEDIATE` 事务内写入，败者拿到冲突错误，不存在无审计的变化或
+旧状态覆盖新状态。`rollout_enabled` 未设置即生效，因此“空 rollout + 无 canary
+配置”仍是 0（默认关闭）；`HERDR_ADAPTIVE_ROLLOUT_ENABLED=false` 立即全 bucket
+Legacy 且保留全部历史。解析失败/损坏/非法阶段/DB 异常一律 0 —— rollout 控制失败
+永远不能让生产路由更激进。Safety Guard 只读消费 `canary_evaluation` 两臂 facts，
+阈值集中可调、样本不足安静、可关闭；自动止损默认由
+`herdr-task rollout check-guard --auto-rollback` 执行，每次派发的热路径 guard
+需显式 `HERDR_ROLLOUT_HOT_GUARD=1` 开启（用延迟换即时止损）。
+
+Evidence:
+- `herdr/rollout_policy.py`
+- `herdr/state_db.py#apply_rollout_stage_atomic` / `#_ensure_rollout_schema`
+- `herdr/canary_router.py#plan_canary`（只消费 `effective_percentage`）
+- `tests/test_rollout_policy.py`
+- `docs/architecture/adaptive-router-rollout.md`

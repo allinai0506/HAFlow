@@ -115,6 +115,11 @@ canary）、`"all"`（全部，Canary 准入证据）。
 - delta = adaptive − legacy，只报事实；样本小，不声称显著性；
   **是否扩大流量是 #104（Controlled Rollout），始终是人工决策**。
 
+> #104 已落地：`effective_percentage` 的来源已从本模块的静态配置切到
+> `herdr/rollout_policy.py` 的 per-bucket 阶段（无 staged 行时仍回落到本模块配置，
+> 即与本模块行为一致）。分流身份、白名单、准入与持久化门未变。
+> 见 `docs/architecture/adaptive-router-rollout.md`。
+
 ## 7. 运维
 
 - 配置：`~/.herdr-controller/route-canary.json`（或 `HERDR_ROUTE_CANARY_CONFIG`），

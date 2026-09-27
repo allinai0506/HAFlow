@@ -1234,3 +1234,12 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
   「进入该工作流」跳工厂页管理；`?view=dashboard&workflow_id=` 深链与视图持久化。
 - 数据：标题复用 `_with_subject`；未知工作流返回空分段不抛错；选择器 50 个最近优先。
 - 证据：全量 1855 passed + 44 subtests；scoped API 与首页 smoke 通过。
+
+## [2026-09-27] feat | Adaptive Router Controlled Rollout（feat/adaptive-router-rollout-v1）
+- 目标：#99~#103 闭环后，只解决“已进入 Canary 的 bucket 如何安全、可审计、可回退地扩量”。评分、分流、Outcome、评估指标全部复用，不新增第二套事实源。
+- 状态模型：`herdr/rollout_policy.py` 独立模块管理 per-bucket `recommended_agent × node × task_type` 的闭枚举阶段 `off/5/10/25/50`；`state_db.rollout_state`（当前值）+ `rollout_audit`（不可变历史）同事务 `BEGIN IMMEDIATE` 写入，每次变化恰好一条审计（`previous/new_percentage`、`action=promote|rollback|auto_rollback`、`reason`、`source`、`algorithm_version`）。
+- 不变量：扩量只走相邻人工 `set`（`--reason` 必填，跨级拒绝）；回退任意阶段可直达 `off`；`HERDR_ADAPTIVE_ROLLOUT_ENABLED=false` 立即全 bucket Legacy 且保留历史；#103 `sha256(canary-v2|run|task) mod 100` 身份与 `No persisted canary decision, no canary execution` 门完全不动，只替换 `effective_percentage` 的来源（5%⊂10%⊂25%⊂50% 单调包含，不洗牌）。
+- Safety Guard：只读消费 `canary_evaluation` 两臂 facts，阈值集中可调（min_settled=20 / min_arm=8 / success_drop=0.20 / blocked=0.30 / human=0.30），样本不足安静，可关闭；触发只写“下”，不写“上”。
+- 评审闭环：S6 发现 3 个 blocking（热路径 guard 默认开启、解析失败回退旧配置导致扩量、并发写覆盖）与 6 个非阻塞问题，全部修复并补回归测试；热路径 guard 改为 `HERDR_ROLLOUT_HOT_GUARD=1` opt-in。
+- 证据：rollout 专项 45 passed；全量 1900 passed + 44 subtests；真实 CLI `rollout status/set/off/history/check-guard` 逐条 smoke 通过。
+- 文档：`docs/architecture/adaptive-router-rollout.md`（新增）+ `docs/references/cli-reference.md` 第 7 节。
