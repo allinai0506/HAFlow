@@ -1234,3 +1234,106 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
   「进入该工作流」跳工厂页管理；`?view=dashboard&workflow_id=` 深链与视图持久化。
 - 数据：标题复用 `_with_subject`；未知工作流返回空分段不抛错；选择器 50 个最近优先。
 - 证据：全量 1855 passed + 44 subtests；scoped API 与首页 smoke 通过。
+
+## [2026-09-27] feat | Adaptive Router Controlled Rollout（feat/adaptive-router-rollout-v1）
+- 目标：#99~#103 闭环后，只解决“已进入 Canary 的 bucket 如何安全、可审计、可回退地扩量”。评分、分流、Outcome、评估指标全部复用，不新增第二套事实源。
+- 状态模型：`herdr/rollout_policy.py` 独立模块管理 per-bucket `recommended_agent × node × task_type` 的闭枚举阶段 `off/5/10/25/50`；`state_db.rollout_state`（当前值）+ `rollout_audit`（不可变历史）同事务 `BEGIN IMMEDIATE` 写入，每次变化恰好一条审计（`previous/new_percentage`、`action=promote|rollback|auto_rollback`、`reason`、`source`、`algorithm_version`）。
+- 不变量：扩量只走相邻人工 `set`（`--reason` 必填，跨级拒绝）；回退任意阶段可直达 `off`；`HERDR_ADAPTIVE_ROLLOUT_ENABLED=false` 立即全 bucket Legacy 且保留历史；#103 `sha256(canary-v2|run|task) mod 100` 身份与 `No persisted canary decision, no canary execution` 门完全不动，只替换 `effective_percentage` 的来源（5%⊂10%⊂25%⊂50% 单调包含，不洗牌）。
+- Safety Guard：只读消费 `canary_evaluation` 两臂 facts，阈值集中可调（min_settled=20 / min_arm=8 / success_drop=0.20 / blocked=0.30 / human=0.30），样本不足安静，可关闭；触发只写“下”，不写“上”。
+- 评审闭环：S6 发现 3 个 blocking（热路径 guard 默认开启、解析失败回退旧配置导致扩量、并发写覆盖）与 6 个非阻塞问题，全部修复并补回归测试；热路径 guard 改为 `HERDR_ROLLOUT_HOT_GUARD=1` opt-in。
+- 证据：rollout 专项 45 passed；全量 1900 passed + 44 subtests；真实 CLI `rollout status/set/off/history/check-guard` 逐条 smoke 通过。
+- 文档：`docs/architecture/adaptive-router-rollout.md`（新增）+ `docs/references/cli-reference.md` 第 7 节。
+
+## [2026-09-27] fix | PR #106 评审修复：absent≠off、guard 评不了即 Legacy、只读不造状态
+- 评审结论：PR #106 主体设计认可，但 2 个 P1 + 2 个 P2 会破坏 “Safety always wins”，不予合并。
+- P1（配置态 bucket 的 off 是假成功）：无 staged row 的 bucket 仍按 canary 配置分流，
+  旧实现把 `off` 判成 no-op 且不写行 → CLI 报“已关闭”而 50% Adaptive 仍在跑；
+  Safety Guard 的 `already off` 同样中招。修复：absent ≠ explicit off，`rollout off`
+  必须写显式 0 行；无行且无 canary 流量时才真 no-op。`apply_rollout_stage_atomic` 拆出
+  `expected_staged_percentage`（并发校验）与 `previous_percentage`（审计记录真实分流比例）。
+- P1（hot guard 评不了反而放行）：`evaluate_guard` 出错时返回 triggered=false，
+  `should_force_legacy` 据此继续 Adaptive —— 与自身契约相反。修复：新增 `status`
+  维度（triggered/within_tolerance/insufficient_samples/unavailable/disabled），
+  `unavailable`（评不了）在热路径一律走 Legacy；样本不足仍放行（那是判断不是异常）。
+- P2（status/history 并不只读）：读路径曾走 `get_db_connection` + `_ensure_rollout_schema`，
+  会建表/迁移，违反 #102「观察状态不得制造状态」。修复：读路径改走
+  `get_readonly_db_connection`（mode=ro + query_only），pre-rollout 库读作空历史，
+  缺表抛 `ReadonlySchemaError` 而不是隐式建表。
+- P2（读取失败被伪装成全部 off）：`list_states` 吞异常返回 `[]` → CLI 显示
+  “all off”。修复：异常上抛，CLI 边界 exit 1 并报 `unavailable`。
+- 新增 `canary_router.config_percentage_for()` 供 CLI 提供真实 fallback（None=无流量）。
+- 证据：rollout 专项 56 passed（新增 absent≠off / guard outage / 只读不建表 /
+  读失败非零退出 等回归）；全量 1911 passed + 44 subtests。
+
+## [2026-09-27] fix | PR #106 评审修复二：审计 action 必须与真实流量一致
+- 评审结论：上轮 2 P1 + 2 P2 已全部修好；仅剩 1 个 P2 审计语义问题，修完可合并。
+- 根因：`action = _action_for(staged, nxt)` 用 staged 值判定，而审计写的是
+  `effective_prev`。首次接管旧 canary 配置时 staged=0、effective_prev=50，
+  于是产出自相矛盾的不可变事实 `50 → 5 action=promote`（config=100 时更明显）。
+- 修复：过渡合法性仍按 staged 阶梯校验（首次接管仍从 stage 5 起步），
+  但 `action` 改按真实有效比例 `effective_prev` 判定。现语义：
+  `0→5 promote`、`5→10 promote`、`50→5 rollback`、`100→5 rollback`、
+  `50→0 rollback`、`auto→0 auto_rollback`。`_action_for` docstring 明确要求
+  入参必须是“当时真正在分流的比例”，防止再次从 staged 推导。
+- 顺带：`apply_rollout_stage_atomic` 补 `Path` 归一（此前传 str 会
+  AttributeError，CLI 传的是 Path 故生产未暴露）。
+- 证据：新增 `test_migration_from_full_config_is_a_rollback`（100→5）与
+  `test_audit_action_matches_traffic_direction`（6 个 subtest 表驱动，并断言
+  “action=promote ⟺ 记录的方向确实是增加”这一不变量）；真实 CLI 复现
+  `50% -> 5% action=rollback`、`100% -> 5% action=rollback`，经典阶梯仍全为 promote。
+  rollout 专项 58 passed + 6 subtests；全量 1913 passed + 50 subtests。
+
+## [2026-09-27] fix | PR #106 评审修复三：快照即身份、guard 精确 bucket、单一 DB 解析器
+- 评审结论：上轮 audit action 已修好；本轮 4 P1 + 1 P2，其中 3 个 P1 直接威胁
+  “Safety always wins”。
+- P1（紧急 off 被 stale promotion 覆盖）：CAS 只比 `percentage`，分不清
+  `absent` 与「显式 0 行」——而前者仍按 canary 配置分流。读到 absent 的 promotion
+  会在事务里看到 percentage 仍为 0，判定无冲突，直接覆盖刚写入的紧急回退。
+  修复：引入 `RolloutSnapshot(exists, percentage)`，**存在性进入 CAS 身份**。
+- P1（no-op rollback 在事务外直接返回）：`get_rollout_stage()` 与
+  `rollout_stage_known()` 两次独立读取后判 no-op 并直接返回，并发 promotion 之后
+  仍会报告 “already off”。修复：读-判-写收敛进 `state_db.transact_rollout_stage`
+  一个 `BEGIN IMMEDIATE`（读快照 → 校验 == 决策依据的快照 → upsert + audit → COMMIT）；
+  `write=None` 的 no-op 同样校验。判定下沉为纯函数
+  `rollout_policy.decide_rollout_change(snapshot, ...)`，state_db 不含业务判断。
+- P1（guard 被兄弟 bucket 饿死）：`_bucket_report` 只按 node/task_type 过滤，
+  200 条决策预算会被同一 node/task_type 下更活跃的兄弟 recommendation 吃光，
+  目标 bucket 读成「无样本」→ guard 安静 → 明显恶化却继续放行。修复：给
+  canary collection 增加专用 `recommended_agent` 精确过滤（`agent` 语义太宽，
+  同时匹配 actual/recommended/legacy），且**在 limit 之前生效**。
+  回归测试已验证：撤掉修复即复现「目标 bucket 读成 None」。
+- P1（读写两套 DB resolver）：`set/off` 经 `_get_store()`，`status/history` 经
+  `state_db.resolve_state_db_path()`，非默认布局（WORKFLOW_FILE / CHECKPOINTS_DIR）
+  下可能 set 写库 A、status 读库 B。修复：统一为 `_rollout_db_path()`
+  = `resolve_state_db_path()`，写路径不再二次猜测。回归测试已验证：恢复旧行为
+  即复现 split-brain。
+- P2（check-guard unavailable 仍退出 0）：监控系统会把「无法判定」读成「检查通过」。
+  修复：`status=unavailable` → stderr + exit 1（JSON 走 stderr）；样本不足
+  （`insufficient_samples`）仍是正常判断，退出 0。
+- 证据：rollout 专项 66 passed + 6 subtests（新增快照 CAS/no-op CAS/单次快照读/
+  guard 饿死/split-brain/check-guard 退出码等回归）；全量 1921 passed + 50 subtests。
+
+## [2026-09-27] fix | PR #106 评审修复四：source 级过滤、腐坏 stage 可回退、bucket 键无歧义
+- 评审结论：上轮 5 项已修好；本轮 1 P1 + 2 P2。唯一 P1 直接影响止损有效性。
+- P1（guard 的 scan_cap 仍被无关决策吃光）：`recommended_agent` 只在 Python 层过滤，
+  而 `scanned += len(fresh)` 统计的是**每页返回的原始行数**、且在过滤之前，
+  因此 400 条更晚的其他 bucket / shadow 决策仍会耗尽 `scan_cap=400`，目标 bucket
+  根本看不到 → guard 安静 → 目标 bucket 明显恶化却继续放行。
+  修复：新增 `state_db.ExactDecisionBucket`，把 mode + recommended_agent + node +
+  task_type 作为 **SQL WHERE 谓词**下推到 `query_route_decisions`，预算只被可能命中的
+  行消耗。下推按 `recommended_agent` opt-in：shadow 评估依赖 Python 侧 mode 过滤来
+  统计 `skipped_canary_events`，从不传该参数，计数语义逐字不变（新增回归锁定）。
+- P2（腐坏 stage 无法 emergency off）：`decide_rollout_change` 遇到闭枚举外的 stage
+  时把快照改写成 `absent/0`，导致 CAS 必然冲突于磁盘上真实的腐坏行，运维被困死路。
+  修复：CAS 始终使用**原始**快照；腐坏时 `off` 会真正写入以修复（而不是 no-op），
+  腐坏期间任何其他 stage 一律拒绝。写这个测试时还纠正了 no-op 判定：它必须比较
+  **目标值**而非有效比例，且排除腐坏情形，否则首次接管的无行 promote 会被误判 no-op。
+- P2（bucket_key `/` 分隔符碰撞）：`("a/b","c","d")` 与 `("a","b/c","d")` 都得到
+  `a/b/c/d`，两个不同 bucket 可能读写同一行。修复：`rollout_state` 改用**列级复合主键**
+  `(agent, node, task_type)`；展示/审计用的 `rollout_bucket_key` 改用 JSON 数组编码；
+  早期按 bucket_key 主键建的表由 `_migrate_rollout_state_key` 按真实列原地迁移。
+- 验证：三项修复均已确认「撤掉即失败」（分别复现 scan 预算被吃光、CAS 冲突、
+  key 碰撞）。rollout 专项 72 passed + 6 subtests；全量 1927 passed + 50 subtests
+  （注：一次全量运行中 `test_trajectory_observer` 的 done-gateway 用例偶发失败，
+  属该用例自带后台调度 + `drain(timeout=10)` 的既有 timing flake，单独与重跑均通过，
+  与本 PR 无关）。

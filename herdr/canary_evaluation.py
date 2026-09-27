@@ -55,6 +55,12 @@ class CanaryEvaluationFilters:
     node: Optional[str] = None
     task_type: Optional[str] = None
     agent: Optional[str] = None
+    #: Exact bucket filter on the recommended agent only. Unlike
+    #: ``agent`` (which also matches actual/legacy agent) this isolates
+    #: one ``recommended_agent x node x task_type`` bucket, so the
+    #: matched-row budget is spent on that bucket and a busier sibling
+    #: cannot starve it. Used by the Controlled Rollout safety guard.
+    recommended_agent: Optional[str] = None
     since: Optional[float] = None
     before: Optional[float] = None
     limit: Optional[int] = None
@@ -114,6 +120,7 @@ def collect_canary_rows(
     node: Optional[str] = None,
     task_type: Optional[str] = None,
     agent: Optional[str] = None,
+    recommended_agent: Optional[str] = None,
     since: Optional[float] = None,
     before: Optional[float] = None,
     limit: Optional[int] = None,
@@ -126,13 +133,15 @@ def collect_canary_rows(
     ``shadow_rows``): stops at matched ``limit`` or the scanned
     ``scan_cap`` (or when the stream is exhausted), and reports which
     bound stopped it. Non-canary events consume scan budget and are
-    counted in the meta.
+    counted in the meta. ``recommended_agent`` narrows to one exact
+    bucket before the matched-row budget is applied.
     """
     return _collect_rows_with_meta(
         db_path,
         node=node,
         task_type=task_type,
         agent=agent,
+        recommended_agent=recommended_agent,
         since=since,
         before=before,
         limit=limit,
@@ -286,6 +295,7 @@ def run_canary_evaluation(
         node=active.node,
         task_type=active.task_type,
         agent=active.agent,
+        recommended_agent=active.recommended_agent,
         since=active.since,
         before=active.before,
         limit=active.limit,

@@ -197,3 +197,58 @@ Evidence:
 - `herdr/agent_router.py#choose_agent`
 - `tests/test_canary_router.py` / `tests/test_canary_evaluation.py`
 - `docs/architecture/adaptive-router-canary.md`
+
+---
+
+## 9. 受控扩量（Adaptive Router Controlled Rollout, v1）
+
+`FACT` Canary 分流比例从哪来：`herdr/rollout_policy.py` 是唯一的 rollout 状态
+管理者，按 `recommended_agent × node × task_type` 维护闭枚举阶段
+`off/5/10/25/50`（无 75/100、无任意整数）。Router 只消费它给出的
+`effective_percentage`；#103 的 `sha256("canary-v2|run|task") mod 100` 身份、
+白名单、准入、持久化门全部不动，因此 `5% ⊂ 10% ⊂ 25% ⊂ 50%` 单调包含、升级不
+洗牌。
+
+扩量是人工动作：只能经 `herdr-task rollout set` 相邻推进（`off→5→10→25→50`，
+`--reason` 必填，跨级拒绝）；回退可从任意阶段直达 `off`。没有任何自动扩量代码
+路径 —— Safety Guard 只写“下”，不写“上”。**absent ≠ explicit off**：没有 staged
+行的 bucket 仍按 canary 配置分流，所以 `rollout off` 会写入显式 `0` 行压制
+fallback（否则 CLI 会报告“已关闭”而流量照旧）。bucket 身份是**列级复合主键**
+`(agent, node, task_type)`，不用 `/` 拼接字符串 —— `("a/b","c","d")` 与
+`("a","b/c","d")` 会撞成同一个 key，展示用的 `rollout_bucket_key` 因此改用 JSON
+数组编码。当前状态与历史事实分离：
+`state_db.rollout_state`（当前值）与 `rollout_audit`（不可变，每次变化恰好一条）
+在同一个 `BEGIN IMMEDIATE` 事务内写入。并发身份是**快照** `RolloutSnapshot(exists,
+percentage)`：`exists` 是身份的一部分，因为 absent 与显式 off 是两个世界（前者
+仍按配置分流）。CAS 比对存在性 + 百分比，紧急回退不会被读到过期的 promotion 覆盖；
+no-op 也走同一事务校验，不会从过期读报告 “already off”。stage 落在闭枚举之外
+（腐坏）时只允许回 `off`，且 `off` 会真正写入以修复腐坏行，CAS 用原始磁盘快照。
+事务里只做快照校验与写入，
+判定是纯函数 `rollout_policy.decide_rollout_change(snapshot, ...)`。审计的
+`previous_percentage` 记录当时真正在分流的比例，`action` 亦按真实流量方向判定
+（`promote` ⟺ new > previous），所以首次接管旧配置的 `50 → 5` 记 `rollback`；
+过渡合法性仍按 staged 阶梯校验。
+`rollout_enabled` 未设置即生效，因此“空 rollout + 无 canary 配置”仍是 0
+（默认关闭）；`HERDR_ADAPTIVE_ROLLOUT_ENABLED=false` 立即全 bucket Legacy 且保留
+全部历史。解析失败/损坏/非法阶段/DB 异常一律 0 —— rollout 控制失败永远不能让
+生产路由更激进。Safety Guard 只读消费 `canary_evaluation` 两臂 facts，阈值集中
+可调、样本不足安静、可关闭；判定用 `status` 区分“评过了”与“评不了”，热路径
+guard 开启后**评不了（DB 不可用/schema 错误）一律走 Legacy**。guard 读取把整段
+bucket 范围（mode + recommended_agent + node + task_type）**下推到 SQL**
+（`state_db.ExactDecisionBucket`）：扫描预算 `scanned` 统计的是每页返回的原始
+行数，只在 Python 侧过滤保护不了 `scan_cap`，无关 bucket 与 shadow 决策会吃光它，
+把目标 bucket 读成“无样本”而漏掉止损。该下推按 `recommended_agent` opt-in，
+shadow 评估需要靠 Python 侧 mode 过滤统计 `skipped_canary_events`，因此不受影响。自动止损默认由 `herdr-task rollout check-guard --auto-rollback` 执行，
+每次派发的热路径 guard 需显式 `HERDR_ROLLOUT_HOT_GUARD=1` 开启（用延迟换即时止损）。
+`check-guard` 在 unavailable 时退出 1（监控不能把“无法判定”读成“检查通过”）。
+`status` / `history` 走 #102 只读连接（不建表不迁移），读取失败报 `unavailable`
+而不是伪装成“全部 off”；rollout 读写共用唯一 DB 解析器
+（`state_db.resolve_state_db_path()`），杜绝 set 写一个库、status 读另一个库。
+
+Evidence:
+- `herdr/rollout_policy.py`
+- `herdr/state_db.py#transact_rollout_stage` / `#read_rollout_snapshot` / `#ExactDecisionBucket` / `#_ensure_rollout_schema`
+- `herdr/rollout_policy.py#decide_rollout_change`（纯判定）
+- `herdr/canary_router.py#plan_canary`（只消费 `effective_percentage`）
+- `tests/test_rollout_policy.py`
+- `docs/architecture/adaptive-router-rollout.md`

@@ -203,6 +203,33 @@ def read_canary_config(
     )
 
 
+def config_percentage_for(agent: Any, node: Any, task_type: Any) -> Optional[int]:
+    """Static canary config percentage for one bucket, or None if not enabled.
+
+    Read-only accessor for the Controlled Rollout operator surface: it
+    answers "what would this bucket run at before it has a staged row?".
+    ``None`` means no canary config is active for the bucket — either
+    the config is missing/disabled/malformed, or the bucket is not
+    whitelisted (and therefore never diverted at all). Callers must not
+    read ``None`` as 0: the distinction decides whether an explicit
+    rollout row is needed to suppress traffic.
+    """
+    config, _errors = read_canary_config()
+    if config is None:
+        return None
+    agent_name = str(agent or "").strip()
+    node_name = str(node or "").strip()
+    if not agent_name or not node_name:
+        return None
+    bucket = _match_bucket(
+        config, agent_name, node_name, normalize_task_type(task_type))
+    if bucket is None:
+        return None
+    if bucket.percentage is not None:
+        return int(bucket.percentage)
+    return int(config.percentage)
+
+
 def canary_hash_bucket(task_id: Any, run_id: Any) -> Optional[int]:
     """Deterministic 0..99 split bucket for one execution identity.
 
@@ -361,15 +388,54 @@ def plan_canary(
     if not _admission_sufficient(admission):
         return None
     hash_bucket = canary_hash_bucket(task_id, run_id)
-    effective_percentage = (
+    config_percentage = (
         bucket.percentage if bucket.percentage is not None
         else config.percentage
     )
-    hash_divert = hash_bucket is not None and hash_bucket < effective_percentage
+    # Controlled Rollout (#104): the staged percentage overrides the
+    # static canary config. Resolution order inside rollout_policy:
+    # kill switch (0) -> staged row -> config fallback -> 0. Absent
+    # rows preserve #103 behavior; any rollout read error resolves to
+    # 0 (never expands). This lookup is read-only: promotion and
+    # persisted rollback happen only through explicit CLI/guard writes.
+    try:
+        try:
+            from . import rollout_policy as _rollout
+        except ImportError:  # pragma: no cover - script fallback
+            from herdr import rollout_policy as _rollout  # type: ignore
+        effective_percentage = _rollout.effective_percentage(
+            db_path, agent=recommended, node=node_name,
+            task_type=normalized_type, config_fallback=config_percentage)
+        percentage_source = "rollout"
+        guard_forced = False
+        if effective_percentage > 0:
+            # Only diversion candidates pay for the guard, and only
+            # when the operator opted into the hot guard: off buckets
+            # already stay Legacy and the guard reads a bounded scan.
+            try:
+                guard_forced = bool(_rollout.should_force_legacy(
+                    db_path, agent=recommended, node=node_name,
+                    task_type=normalized_type))
+            except Exception:
+                guard_forced = False
+    except Exception:
+        # Rollout control failure must never make routing more
+        # aggressive: fall back to "no staged expansion" (0) rather
+        # than re-deriving the pre-rollout config percentage.
+        effective_percentage = 0
+        percentage_source = "rollout_unavailable"
+        guard_forced = False
+    hash_divert = (
+        hash_bucket is not None and hash_bucket < effective_percentage
+        and not guard_forced
+    )
     gate = {
         "bucket_key": f"{recommended}/{node_name}/{normalized_type}",
         "hash_bucket": hash_bucket,
         "effective_percentage": effective_percentage,
+        "config_percentage": config_percentage,
+        "percentage_source": percentage_source,
+        "guard_forced_legacy": guard_forced,
         "hash_divert": hash_divert,
         "truncated": bool(admission.get("truncated")),
         "admission": {
@@ -401,6 +467,7 @@ __all__ = [
     "DEFAULT_ADMISSION_SCAN_CAP",
     "canary_hash_bucket",
     "config_path",
+    "config_percentage_for",
     "plan_canary",
     "read_canary_config",
 ]
