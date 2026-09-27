@@ -85,6 +85,8 @@ def build_dashboard(
     stalls: Optional[Dict[str, Mapping[str, Any]]] = None,
     anomalies: Optional[List[Mapping[str, Any]]] = None,
     runtimes: Optional[Dict[str, Mapping[str, Any]]] = None,
+    scope: Optional[str] = None,
+    workflows: Optional[List[Mapping[str, Any]]] = None,
     now: Optional[float] = None,
     limits: Optional[Dict[str, int]] = None,
 ) -> Dict[str, Any]:
@@ -210,6 +212,8 @@ def build_dashboard(
     return {
         "generated_at": now_f,
         "generated_at_text": format_clock(now_f),
+        "scope": scope or "all",
+        "workflows": [dict(w) for w in (workflows or [])],
         "tasks": task_items,
         "attention": attention,
         "deliveries": delivery_items,

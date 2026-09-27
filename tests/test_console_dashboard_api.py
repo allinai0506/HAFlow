@@ -107,6 +107,46 @@ def test_dashboard_two_column_layout_attention_first():
     assert rail < att, "attention must live in the rail"
 
 
+def test_dashboard_data_filters_by_workflow(monkeypatch):
+    tasks = [
+        {"task_id": "t-a", "workflow_id": "wf-1", "node": "implementation",
+         "stage": "implementation", "agent": "codex", "status": "working",
+         "goal": "a", "created_at": 1700000000,
+         "updated_at": 1700003000, "last_activity_at": 1700003000},
+        {"task_id": "t-b", "workflow_id": "wf-2", "node": "review",
+         "stage": "review", "agent": "codex", "status": "blocked",
+         "stage_verdict": "blocked", "stage_verdict_note": "拍板",
+         "goal": "b", "created_at": 1700000000,
+         "updated_at": 1700003100, "last_activity_at": 1700003100},
+    ]
+    wfmap = {"wf-1": {"workflow_id": "wf-1", "title": "w1"},
+             "wf-2": {"workflow_id": "wf-2", "title": "w2"}}
+    monkeypatch.setattr(c, "tasks", lambda: [dict(t) for t in tasks])
+    monkeypatch.setattr(c, "workflows", lambda: dict(wfmap))
+    with patch.object(c.herdr_workflow_docs, "load_notes", return_value=[]):
+        payload = c.dashboard_data(workflow_id="wf-1")
+    assert payload["scope"] == "wf-1"
+    assert {t["task_id"] for t in payload["tasks"]} == {"t-a"}
+    assert all(a["workflow_id"] == "wf-1" for a in payload["attention"])
+    titles = {w["workflow_id"]: w["title"] for w in payload["workflows"]}
+    assert titles == {"wf-1": "w1", "wf-2": "w2"}
+
+
+def test_dashboard_data_unknown_workflow_fail_soft(dash_env):
+    with patch.object(c.herdr_workflow_docs, "load_notes", return_value=[]):
+        payload = c.dashboard_data(workflow_id="wf-nope")
+    assert payload["scope"] == "wf-nope"
+    assert payload["tasks"] == []
+    assert payload["attention"] == []
+
+
+def test_dashboard_workflow_selector_tokens():
+    src = (ROOT / "console" / "herdr_factory_console.py").read_text(encoding="utf-8")
+    for token in ("dashWfSel", "dashSelectWorkflow", "dashOpenWorkflow",
+                  "进入该工作流", "dashWorkflowId", "workflow_id="):
+        assert token in src, f"missing workflow filter token: {token}"
+
+
 def test_dashboard_double_click_entry():
     cmd = ROOT / "console" / "HerdrDashboard.command"
     assert cmd.exists()

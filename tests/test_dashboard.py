@@ -138,3 +138,19 @@ def test_dashboard_carries_pane_runtime_and_executable_action():
     assert a["endpoint"] == "/api/controller/execute-action"
     assert a["payload"]["task_id"] == "x"
     assert a["node"] == "implementation"
+
+
+def test_dashboard_scope_and_workflows_passthrough():
+    now = 1700003600.0
+    tasks = [_task("t-1", "working", updated=1700003000)]
+    payload = d.build_dashboard(
+        tasks, blockers=[], actions_by_task={}, deliveries=[],
+        stalls={}, anomalies=[], now=now, scope="wf-1",
+        workflows=[{"workflow_id": "wf-1", "title": "w1",
+                    "active": 1, "attention": 0}],
+    )
+    assert payload["scope"] == "wf-1"
+    assert payload["workflows"][0]["title"] == "w1"
+    payload2 = d.build_dashboard(tasks, now=now)
+    assert payload2["scope"] == "all"
+    assert payload2["workflows"] == []
