@@ -1210,3 +1210,12 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
   task_type，与准入单位一致；渲染同步。
 - 验收：全量 1841 passed + 44 subtests（+5 修复测试）；真实链路 9 步 PASS
   （新增：损坏配置 fail-open、持久化失败 → Legacy + Legacy reservation）。
+
+## [2026-09-27] merge | PR #103 已合并（Adaptive Router v2 Canary 收口完成）
+- merge `e80a480`：main 现含 Canary 分流（四保护：默认关闭/白名单 bucket/sha256
+  确定性分流/fail-open）、持久化门（No persisted canary decision, no canary
+  execution）、`herdr-task canary-eval` 两臂只读评估（execution 去重 +
+  recommended_agent × node × task_type bucket）。
+- 评审闭环：外部评审 3 P1 + 1 P2 全部修复（`8d099a1`）；评审通过后合并。
+- 合并后 main 验证：全量 1841 passed + 44 subtests。
+- 下一步：#104 Controlled Rollout（per-bucket percentage 旋钮已在 canary 配置预留）。
