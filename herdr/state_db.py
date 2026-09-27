@@ -3512,16 +3512,53 @@ def rollout_bucket_key(agent: str, node: str, task_type: str) -> str:
     return f"{agent}/{node}/{task_type or ''}"
 
 
+def _rollout_tables_present(conn: sqlite3.Connection) -> bool:
+    """True when this database already carries the rollout tables."""
+    names = {
+        str(row[0])
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).fetchall()
+    }
+    return "rollout_state" in names and "rollout_audit" in names
+
+
+def _rollout_read_connection(
+    db_path: Optional[Path],
+    readonly: bool,
+) -> sqlite3.Connection:
+    """Open a connection for rollout reads.
+
+    ``readonly=True`` follows the #102 diagnostic contract: the database
+    must already exist (``mode=ro`` + ``query_only``), and no schema is
+    created, migrated or repaired. Observing state must not manufacture
+    state, so a pre-rollout database simply has no rollout tables and
+    reads as "no staged bucket" — never as a side effect of looking.
+    """
+    if not readonly:
+        conn = get_db_connection(Path(db_path) if db_path else None)
+        _ensure_rollout_schema(conn)
+        return conn
+    conn = get_readonly_db_connection(db_path)
+    if not _rollout_tables_present(conn):
+        conn.close()
+        raise ReadonlySchemaError(
+            "not compatible with rollout state: rollout tables absent "
+            "(read-only path never creates them)")
+    return conn
+
+
 def get_rollout_stage(
     agent: str,
     node: str,
     task_type: str,
     db_path: Optional[Path] = None,
+    *,
+    readonly: bool = False,
 ) -> int:
     """Read the current staged percentage for one bucket (0 when absent)."""
-    conn = get_db_connection(db_path)
+    conn = _rollout_read_connection(db_path, readonly)
     try:
-        _ensure_rollout_schema(conn)
         key = rollout_bucket_key(agent, node, task_type or "")
         row = conn.execute(
             "SELECT percentage FROM rollout_state WHERE bucket_key = ?",
@@ -3534,11 +3571,12 @@ def get_rollout_stage(
 
 def list_rollout_states(
     db_path: Optional[Path] = None,
+    *,
+    readonly: bool = False,
 ) -> List[Dict[str, Any]]:
     """List every bucket with an explicit staged row (absent means off)."""
-    conn = get_db_connection(db_path)
+    conn = _rollout_read_connection(db_path, readonly)
     try:
-        _ensure_rollout_schema(conn)
         rows = conn.execute(
             "SELECT bucket_key, agent, node, task_type, percentage, "
             "updated_at, updated_by, reason FROM rollout_state "
@@ -3567,11 +3605,12 @@ def list_rollout_audit(
     task_type: Optional[str] = None,
     limit: Optional[int] = None,
     db_path: Optional[Path] = None,
+    *,
+    readonly: bool = False,
 ) -> List[Dict[str, Any]]:
     """Newest-first immutable rollout history, optionally one bucket."""
-    conn = get_db_connection(db_path)
+    conn = _rollout_read_connection(db_path, readonly)
     try:
-        _ensure_rollout_schema(conn)
         query = (
             "SELECT id, bucket_key, agent, node, task_type, "
             "previous_percentage, new_percentage, action, reason, source, "
@@ -3618,11 +3657,12 @@ def rollout_stage_known(
     node: str,
     task_type: str,
     db_path: Optional[Path] = None,
+    *,
+    readonly: bool = False,
 ) -> bool:
     """True when the bucket has an explicit staged row (off counts)."""
-    conn = get_db_connection(db_path)
+    conn = _rollout_read_connection(db_path, readonly)
     try:
-        _ensure_rollout_schema(conn)
         row = conn.execute(
             "SELECT 1 FROM rollout_state WHERE bucket_key = ?",
             (rollout_bucket_key(agent, node, task_type or ""),),
@@ -3637,6 +3677,7 @@ def apply_rollout_stage_atomic(
     agent: str,
     node: str,
     task_type: str,
+    expected_staged_percentage: int,
     previous_percentage: int,
     new_percentage: int,
     action: str,
@@ -3654,6 +3695,15 @@ def apply_rollout_stage_atomic(
     an old state silently overwrite a new one (stale writers get a
     ValueError conflict instead of a lost update, so the CLI exits
     nonzero and no partial change is visible).
+
+    Two previous values, deliberately:
+    - ``expected_staged_percentage`` is the staged row this call is
+      replacing and is what the concurrency check compares against;
+    - ``previous_percentage`` is the percentage that was actually
+      being diverted (it differs only when a bucket is migrated from
+      the canary config fallback for the first time) and is what the
+      audit fact records, so an auditor can reconstruct the traffic
+      change rather than only the stage change.
     """
     conn = get_db_connection(db_path)
     try:
@@ -3666,11 +3716,11 @@ def apply_rollout_stage_atomic(
                 (key,),
             ).fetchone()
             disk_previous = int(current["percentage"]) if current else 0
-            if disk_previous != int(previous_percentage):
+            if disk_previous != int(expected_staged_percentage):
                 raise ValueError(
                     f"rollout conflict: bucket {key} is now "
-                    f"{disk_previous}, expected {previous_percentage}; "
-                    "reload state and retry")
+                    f"{disk_previous}, expected {expected_staged_percentage}"
+                    "; reload state and retry")
             conn.execute(
                 "INSERT INTO rollout_state "
                 "(bucket_key, agent, node, task_type, percentage, "

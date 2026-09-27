@@ -1243,3 +1243,24 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - 评审闭环：S6 发现 3 个 blocking（热路径 guard 默认开启、解析失败回退旧配置导致扩量、并发写覆盖）与 6 个非阻塞问题，全部修复并补回归测试；热路径 guard 改为 `HERDR_ROLLOUT_HOT_GUARD=1` opt-in。
 - 证据：rollout 专项 45 passed；全量 1900 passed + 44 subtests；真实 CLI `rollout status/set/off/history/check-guard` 逐条 smoke 通过。
 - 文档：`docs/architecture/adaptive-router-rollout.md`（新增）+ `docs/references/cli-reference.md` 第 7 节。
+
+## [2026-09-27] fix | PR #106 评审修复：absent≠off、guard 评不了即 Legacy、只读不造状态
+- 评审结论：PR #106 主体设计认可，但 2 个 P1 + 2 个 P2 会破坏 “Safety always wins”，不予合并。
+- P1（配置态 bucket 的 off 是假成功）：无 staged row 的 bucket 仍按 canary 配置分流，
+  旧实现把 `off` 判成 no-op 且不写行 → CLI 报“已关闭”而 50% Adaptive 仍在跑；
+  Safety Guard 的 `already off` 同样中招。修复：absent ≠ explicit off，`rollout off`
+  必须写显式 0 行；无行且无 canary 流量时才真 no-op。`apply_rollout_stage_atomic` 拆出
+  `expected_staged_percentage`（并发校验）与 `previous_percentage`（审计记录真实分流比例）。
+- P1（hot guard 评不了反而放行）：`evaluate_guard` 出错时返回 triggered=false，
+  `should_force_legacy` 据此继续 Adaptive —— 与自身契约相反。修复：新增 `status`
+  维度（triggered/within_tolerance/insufficient_samples/unavailable/disabled），
+  `unavailable`（评不了）在热路径一律走 Legacy；样本不足仍放行（那是判断不是异常）。
+- P2（status/history 并不只读）：读路径曾走 `get_db_connection` + `_ensure_rollout_schema`，
+  会建表/迁移，违反 #102「观察状态不得制造状态」。修复：读路径改走
+  `get_readonly_db_connection`（mode=ro + query_only），pre-rollout 库读作空历史，
+  缺表抛 `ReadonlySchemaError` 而不是隐式建表。
+- P2（读取失败被伪装成全部 off）：`list_states` 吞异常返回 `[]` → CLI 显示
+  “all off”。修复：异常上抛，CLI 边界 exit 1 并报 `unavailable`。
+- 新增 `canary_router.config_percentage_for()` 供 CLI 提供真实 fallback（None=无流量）。
+- 证据：rollout 专项 56 passed（新增 absent≠off / guard outage / 只读不建表 /
+  读失败非零退出 等回归）；全量 1911 passed + 44 subtests。

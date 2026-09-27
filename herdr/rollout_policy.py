@@ -174,6 +174,23 @@ def is_valid_transition(previous: int, new: int) -> bool:
     return nxt in _ALLOWED_NEXT.get(prev, ())
 
 
+def _safe_fallback(value: Any) -> int:
+    """Normalize a canary config percentage to a servable int (0 if unusable).
+
+    The canary config accepts any 1..100 integer, so this deliberately
+    does not use ``normalize_percentage`` (that is the closed rollout
+    enum). An unusable or out-of-range value serves 0: never guess a
+    traffic number.
+    """
+    if value is None or isinstance(value, bool):
+        return 0
+    try:
+        number = int(str(value).strip() if isinstance(value, str) else value)
+    except (TypeError, ValueError):
+        return 0
+    return number if 0 <= number <= 100 else 0
+
+
 def _action_for(previous: int, new: int, *, automatic: bool) -> str:
     if automatic:
         return "auto_rollback"
@@ -267,16 +284,27 @@ def set_stage(
     reason: str,
     source: str = "cli",
     automatic: bool = False,
+    config_fallback: Optional[int] = None,
     created_at: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Manually promote or roll back one bucket (atomic + audited).
+
+    ``config_fallback`` is the percentage the canary config would serve
+    for this bucket while it has no staged row. It is only used to make
+    the audit fact and the no-op decision truthful — the transition
+    ladder is always evaluated against the staged value.
+
+    **Absent is not explicit off.** A bucket with no staged row still
+    runs at the canary config percentage, so ``rollout off`` on such a
+    bucket must write an explicit ``percentage=0`` row to suppress that
+    fallback; treating it as a no-op would report success while Adaptive
+    traffic kept flowing.
 
     Raises ValueError on invalid bucket/stage/transition/empty reason,
     and on a concurrent-writer conflict (someone else already moved the
     bucket past the expected previous stage). Storage errors propagate
     so the CLI can report failure; the atomic helper guarantees no
-    partial state without its audit row. A repeat of the current stage
-    is a no-op with ``action="noop"`` and no audit row.
+    partial state without its audit row.
     """
     bucket = normalize_bucket(agent, node, task_type)
     nxt = normalize_percentage(new_percentage)
@@ -285,29 +313,34 @@ def set_stage(
     if not str(source or "").strip():
         raise ValueError("source is required for every rollout change")
     try:
-        previous = int(state_db.get_rollout_stage(
+        staged = normalize_percentage(state_db.get_rollout_stage(
             bucket["agent"], bucket["node"], bucket["task_type"],
             db_path=db_path))
-        previous = normalize_percentage(previous)
+        row_exists = state_db.rollout_stage_known(
+            bucket["agent"], bucket["node"], bucket["task_type"],
+            db_path=db_path)
     except ValueError as exc:
         # Corrupt staged value: only a rollback to off may proceed.
         if nxt != 0:
             raise ValueError(
                 "corrupt rollout state; only rollback to off is allowed"
             ) from exc
-        previous = 0
-    if nxt == previous:
-        # Idempotent repeat: no state change means no audit fact. The
-        # explicit "noop" action keeps the caller from mistaking this
-        # for a recorded transition.
+        staged, row_exists = 0, False
+    # What is actually being diverted right now: the staged row when one
+    # exists (explicit off included), otherwise the canary config.
+    effective_prev = staged if row_exists else _safe_fallback(
+        config_fallback)
+    if nxt == effective_prev:
+        # Idempotent repeat: nothing is diverted differently, so there is
+        # no state change and no audit fact.
         return {
             "bucket_key": state_db.rollout_bucket_key(
                 bucket["agent"], bucket["node"], bucket["task_type"]),
             "recommended_agent": bucket["agent"],
             "node": bucket["node"],
             "task_type": bucket["task_type"],
-            "previous_percentage": previous,
-            "new_percentage": previous,
+            "previous_percentage": effective_prev,
+            "new_percentage": nxt,
             "action": "noop",
             "changed": False,
             "reason": str(reason).strip(),
@@ -316,20 +349,24 @@ def set_stage(
             "created_at": (
                 float(created_at) if created_at is not None else time.time()),
         }
-    if not is_valid_transition(previous, nxt):
+    if not is_valid_transition(staged, nxt):
         raise ValueError(
-            f"rollout transition {previous} -> {nxt} is not allowed: "
+            f"rollout transition {staged} -> {nxt} is not allowed: "
             "promote one stage at a time (off->5->10->25->50); "
             "rollback may go directly to off")
-    action = _action_for(previous, nxt, automatic=automatic)
-    return state_db.apply_rollout_stage_atomic(
+    action = _action_for(staged, nxt, automatic=automatic)
+    record = state_db.apply_rollout_stage_atomic(
         agent=bucket["agent"], node=bucket["node"],
-        task_type=bucket["task_type"], previous_percentage=previous,
+        task_type=bucket["task_type"],
+        expected_staged_percentage=staged,
+        previous_percentage=effective_prev,
         new_percentage=nxt, action=action, reason=str(reason).strip(),
         source=str(source).strip(), algorithm_version=ALGORITHM_VERSION,
         created_at=float(created_at) if created_at is not None else time.time(),
         db_path=db_path,
     )
+    record["changed"] = True
+    return record
 
 
 def get_history(
@@ -340,17 +377,31 @@ def get_history(
     task_type: Optional[str] = None,
     limit: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
-    """Immutable audit history, newest-first (read-only)."""
-    return state_db.list_rollout_audit(
-        agent=agent, node=node, task_type=task_type, limit=limit,
-        db_path=db_path)
+    """Immutable audit history, newest-first (strictly read-only).
+
+    A database without the rollout tables reads as an empty history; any
+    other failure (locked, corrupt, unreadable) propagates so the caller
+    reports "unavailable" instead of "no audit events".
+    """
+    try:
+        return state_db.list_rollout_audit(
+            agent=agent, node=node, task_type=task_type, limit=limit,
+            db_path=db_path, readonly=True)
+    except state_db.ReadonlySchemaError:
+        return []
 
 
 def list_states(db_path: Optional[Path] = None) -> List[Dict[str, Any]]:
-    """Current staged percentages for buckets with explicit rows."""
+    """Current staged percentages for buckets with explicit rows.
+
+    Strictly read-only and honest: a pre-rollout database reports no
+    staged bucket, but a failure to read is raised rather than
+    flattened into an empty list — reporting "all off" when the truth
+    is "unknown" is a false safety signal.
+    """
     try:
-        return state_db.list_rollout_states(db_path=db_path)
-    except Exception:
+        return state_db.list_rollout_states(db_path=db_path, readonly=True)
+    except state_db.ReadonlySchemaError:
         return []
 
 
@@ -396,14 +447,31 @@ def evaluate_guard(
 
     Consumes only ``canary_evaluation`` arm metrics: qualified success,
     wall-time-adjacent rework/blocked/human means, and sample counts.
-    Never promotes; returns ``triggered`` plus a human-readable reason.
-    Disabled guard, insufficient samples, evaluation outage, or any
-    internal error all yield ``triggered=False`` except that hot-path
-    callers should separately fail safe to Legacy on error.
+    Never promotes.
+
+    ``status`` distinguishes "evaluated and decided" from "could not
+    evaluate", because the two demand opposite routing behavior:
+
+    ==========================  =========  ===============================
+    status                      triggered   hot path routes
+    ==========================  =========  ===============================
+    ``triggered``               True        Legacy
+    ``within_tolerance``        False       Adaptive
+    ``insufficient_samples``    False       Adaptive (not enough data)
+    ``unavailable``             False       **Legacy** (cannot judge)
+    ``disabled``                False       Adaptive (operator opted out)
+    ==========================  =========  ===============================
+
+    Sample starvation is a decision, an outage is not: ``unavailable``
+    must never read as "no problem".
     """
     cfg = config or GuardConfig()
     base: Dict[str, Any] = {
-        "triggered": False, "reason": "", "bucket": None, "config": {
+        "triggered": False,
+        "status": "unavailable",
+        "reason": "",
+        "bucket": None,
+        "config": {
             "enabled": cfg.enabled,
             "min_settled_samples": cfg.min_settled_samples,
             "min_arm_samples": cfg.min_arm_samples,
@@ -413,6 +481,7 @@ def evaluate_guard(
         },
     }
     if not cfg.enabled or not guard_enabled():
+        base["status"] = "disabled"
         base["reason"] = "guard disabled"
         return base
     try:
@@ -426,9 +495,10 @@ def evaluate_guard(
             task_type=bucket["task_type"])
     except Exception as exc:
         base["reason"] = (
-            f"canary evaluation unavailable: {type(exc).__name__}")
+            f"canary evaluation unavailable: {type(exc).__name__}: {exc}")
         return base
     if report is None:
+        base["status"] = "insufficient_samples"
         base["reason"] = "insufficient samples: no settled bucket yet"
         return base
     base["bucket"] = report
@@ -438,11 +508,13 @@ def evaluate_guard(
     legacy_n = int(legacy.get("sample_count") or 0)
     total = adaptive_n + legacy_n
     if total < cfg.min_settled_samples:
+        base["status"] = "insufficient_samples"
         base["reason"] = (
             f"insufficient samples: settled={total} "
             f"< min={cfg.min_settled_samples}")
         return base
     if adaptive_n < cfg.min_arm_samples or legacy_n < cfg.min_arm_samples:
+        base["status"] = "insufficient_samples"
         base["reason"] = (
             f"insufficient arm samples: adaptive={adaptive_n} "
             f"legacy={legacy_n} < min_arm={cfg.min_arm_samples}")
@@ -469,9 +541,11 @@ def evaluate_guard(
                 f"human_intervention elevated: adaptive={a_human} "
                 f"legacy={l_human}")
     if triggers:
+        base["status"] = "triggered"
         base["triggered"] = True
         base["reason"] = "; ".join(triggers)
     else:
+        base["status"] = "within_tolerance"
         base["reason"] = "within tolerance"
     return base
 
@@ -488,9 +562,12 @@ def should_force_legacy(
 
     Gated by ``HERDR_ROLLOUT_HOT_GUARD`` (default off) because the guard
     reads the #103 canary evaluation and must not add an unbounded scan
-    to every dispatch inside the router critical section. Once opted
-    in it is read-only and conservative: any evaluation error forces
-    Legacy (safety wins over availability of Adaptive traffic).
+    to every dispatch inside the router critical section.
+
+    Once opted in, it is read-only and conservative in both directions:
+    a triggered regression **and** an evaluation that could not run
+    (DB unavailable, schema error, unexpected error) both force Legacy.
+    "Cannot judge" is never treated as "no problem".
     """
     if not hot_guard_enabled():
         return False
@@ -500,7 +577,9 @@ def should_force_legacy(
             config=config)
     except Exception:
         return True
-    return bool(verdict.get("triggered"))
+    if verdict.get("triggered"):
+        return True
+    return verdict.get("status") == "unavailable"
 
 
 def maybe_auto_rollback(
@@ -512,27 +591,29 @@ def maybe_auto_rollback(
     reason: str,
     source: str = "guard",
     config: Optional[GuardConfig] = None,
+    config_fallback: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Persist an automatic rollback to off when the guard triggers.
 
-    Returns the audit record on rollback, or ``{"action": "none"}``
-    when the guard is quiet. Never promotes. Raises ValueError when
-    the bucket is already off (nothing to roll back).
+    Returns the audit record on rollback, or ``{"action": "none"}`` when
+    the guard is quiet or the bucket is already serving 0. Never
+    promotes. Like the manual path, a bucket with no staged row is still
+    running at the canary config percentage, so the rollback writes an
+    explicit off row instead of reporting "already off".
     """
     verdict = evaluate_guard(
         db_path, agent=agent, node=node, task_type=task_type, config=config)
     if not verdict.get("triggered"):
-        return {"action": "none", "reason": verdict.get("reason", "")}
-    bucket = normalize_bucket(agent, node, task_type)
-    current = get_stage(
-        db_path, bucket["agent"], bucket["node"], bucket["task_type"])
-    if current == 0:
-        return {"action": "none", "reason": "already off"}
+        return {
+            "action": "none",
+            "status": verdict.get("status", "unavailable"),
+            "reason": verdict.get("reason", ""),
+        }
     return set_stage(
-        db_path, agent=bucket["agent"], node=bucket["node"],
-        task_type=bucket["task_type"], new_percentage=0,
+        db_path, agent=agent, node=node, task_type=task_type,
+        new_percentage=0,
         reason=reason or verdict.get("reason", "safety guard triggered"),
-        source=source, automatic=True)
+        source=source, automatic=True, config_fallback=config_fallback)
 
 
 __all__ = [

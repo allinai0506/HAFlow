@@ -35,6 +35,7 @@ from unittest.mock import patch
 
 from herdr import canary_router
 from herdr import rollout_policy
+from herdr import state_db
 from herdr.state_store import get_state_store
 
 
@@ -272,6 +273,123 @@ class TestFailSafe(unittest.TestCase):
         with self.assertRaises(ValueError):
             rollout_policy.normalize_percentage(100)
 
+    def test_explicit_off_overrides_config_fallback(self):
+        # Reviewer P1: absent is NOT explicit off. A config-only bucket
+        # running at 50% must not report "off" as a no-op.
+        record = rollout_policy.set_stage(
+            self.db_path, agent="codex", node="implementation",
+            task_type="fix", new_percentage=0, reason="kill it",
+            source="cli", config_fallback=50)
+        self.assertEqual(record["action"], "rollback")
+        self.assertEqual(record["changed"], True)
+        # Explicit state exists and wins over the config fallback forever.
+        self.assertTrue(state_db.rollout_stage_known(
+            "codex", "implementation", "fix", self.db_path))
+        self.assertEqual(
+            rollout_policy.get_stage(
+                self.db_path, "codex", "implementation", "fix"), 0)
+        self.assertEqual(rollout_policy.effective_percentage(
+            self.db_path, agent="codex", node="implementation",
+            task_type="fix", config_fallback=50), 0)
+        history = rollout_policy.get_history(
+            self.db_path, agent="codex", node="implementation",
+            task_type="fix")
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0]["previous_percentage"], 50)
+        self.assertEqual(history[0]["new_percentage"], 0)
+        self.assertEqual(history[0]["action"], "rollback")
+
+    def test_explicit_off_on_non_serving_bucket_is_noop(self):
+        # No staged row AND no canary config traffic: nothing is being
+        # diverted, so there is genuinely nothing to change.
+        record = rollout_policy.set_stage(
+            self.db_path, agent="codex", node="implementation",
+            task_type="fix", new_percentage=0, reason="already off",
+            source="cli", config_fallback=None)
+        self.assertEqual(record["action"], "noop")
+        self.assertFalse(record["changed"])
+        self.assertFalse(state_db.rollout_stage_known(
+            "codex", "implementation", "fix", self.db_path))
+
+    def test_repeat_off_after_explicit_off_is_noop(self):
+        rollout_policy.set_stage(
+            self.db_path, agent="codex", node="implementation",
+            task_type="fix", new_percentage=0, reason="kill it",
+            source="cli", config_fallback=50)
+        record = rollout_policy.set_stage(
+            self.db_path, agent="codex", node="implementation",
+            task_type="fix", new_percentage=0, reason="again",
+            source="cli", config_fallback=50)
+        self.assertEqual(record["action"], "noop")
+        self.assertEqual(len(rollout_policy.get_history(
+            self.db_path, agent="codex", node="implementation",
+            task_type="fix")), 1)
+
+    def test_first_migration_audit_records_real_traffic(self):
+        # A config-only bucket at 50% migrated to stage 5: the audit must
+        # record the traffic that was actually being diverted.
+        rollout_policy.set_stage(
+            self.db_path, agent="codex", node="implementation",
+            task_type="fix", new_percentage=5, reason="take over",
+            source="cli", config_fallback=50)
+        history = rollout_policy.get_history(
+            self.db_path, agent="codex", node="implementation",
+            task_type="fix")
+        self.assertEqual(history[0]["previous_percentage"], 50)
+        self.assertEqual(history[0]["new_percentage"], 5)
+        self.assertEqual(history[0]["action"], "promote")
+        self.assertEqual(rollout_policy.effective_percentage(
+            self.db_path, agent="codex", node="implementation",
+            task_type="fix", config_fallback=50), 5)
+
+    def test_guard_outage_forces_legacy_on_hot_path(self):
+        # Reviewer P1: an evaluation that cannot run must never read as
+        # "no problem" once the hot guard is explicitly enabled.
+        with (patch.dict("os.environ", {"HERDR_ROLLOUT_HOT_GUARD": "1"}),
+                patch.object(
+                    rollout_policy, "_bucket_report",
+                    side_effect=RuntimeError("evaluation db down"))):
+            verdict = rollout_policy.evaluate_guard(
+                self.db_path, agent="codex", node="implementation",
+                task_type="fix")
+            self.assertFalse(verdict["triggered"])
+            self.assertEqual(verdict["status"], "unavailable")
+            self.assertTrue(rollout_policy.should_force_legacy(
+                self.db_path, agent="codex", node="implementation",
+                task_type="fix"))
+
+    def test_guard_insufficient_samples_still_allows_adaptive(self):
+        # Sample starvation is a decision, not an outage.
+        rollout_policy.set_stage(
+            self.db_path, agent="codex", node="implementation",
+            task_type="fix", new_percentage=5, reason="r", source="cli")
+        with patch.dict("os.environ", {"HERDR_ROLLOUT_HOT_GUARD": "1"}):
+            self.assertFalse(rollout_policy.should_force_legacy(
+                self.db_path, agent="codex", node="implementation",
+                task_type="fix"))
+
+    def test_guard_disabled_keeps_adaptive_traffic(self):
+        # Operator opting out of the guard is authoritative.
+        with patch.dict("os.environ", {"HERDR_ROLLOUT_HOT_GUARD": "1",
+                                      "HERDR_ROLLOUT_GUARD_ENABLED": "0"}):
+            self.assertFalse(rollout_policy.should_force_legacy(
+                self.db_path, agent="codex", node="implementation",
+                task_type="fix"))
+
+    def test_auto_rollback_suppresses_config_only_traffic(self):
+        # Reviewer P1: the guard must not report "already off" for a
+        # config-only bucket that is still diverting.
+        self._seed_collapsed_bucket_for_auto_rollback()
+        result = rollout_policy.maybe_auto_rollback(
+            self.db_path, agent="codex", node="implementation",
+            task_type="fix", reason="guard", config_fallback=50)
+        self.assertEqual(result["action"], "auto_rollback")
+        self.assertTrue(state_db.rollout_stage_known(
+            "codex", "implementation", "fix", self.db_path))
+        self.assertEqual(rollout_policy.effective_percentage(
+            self.db_path, agent="codex", node="implementation",
+            task_type="fix", config_fallback=50), 0)
+
     def test_default_is_closed(self):
         # No env, no staged row, no canary config: rollout resolves to 0,
         # so a fresh install expands no Adaptive traffic.
@@ -285,6 +403,51 @@ class TestFailSafe(unittest.TestCase):
         with patch.dict("os.environ",
                         {"HERDR_ADAPTIVE_ROLLOUT_ENABLED": "false"}):
             self.assertFalse(rollout_policy.rollout_enabled())
+
+    def _seed_collapsed_bucket_for_auto_rollback(self):
+        """A canary bucket whose adaptive arm collapsed (guard triggers)."""
+        from herdr import adaptive_router, eval_store, execution_outcome
+        base = 1_700_000_000.0
+        for index in range(12):
+            for agent, diverted, success in (
+                ("codex", True, index >= 12),     # adaptive: all failures
+                ("opencode", False, True),        # legacy: all successes
+            ):
+                run_id = f"run-coll-{agent}-{index}"
+                task_id = f"task-coll-{agent}-{index}"
+                ts = base + index
+                status = "completed" if success else "failed"
+                self.store.save_task({
+                    "task_id": task_id, "workflow_id": "wf-coll",
+                    "run_id": run_id, "node": "implementation",
+                    "stage": "implementation", "task_type": "fix",
+                    "agent": agent, "status": status,
+                    "status_history": [{"to": s} for s in (
+                        "pending", "dispatched", "working", "agent_done",
+                        status)],
+                    "started_at": ts, "finished_at": ts + 100.0,
+                    "created_at": ts,
+                })
+                eval_store.record_eval_result(
+                    run_id, requirements_satisfied=bool(success),
+                    verification_passed=True, human_intervention_count=0,
+                    final_status=status, task_id=task_id,
+                    workflow_id="wf-coll", created_at=ts + 101.0,
+                    db_path=self.db_path)
+                settled = execution_outcome.finalize_execution_outcome(
+                    task_id, db_path=self.db_path, finalized_at=ts + 105.0)
+                self.assertEqual(settled["status"], "created")
+                payload = adaptive_router.build_canary_decision(
+                    workflow_id="wf-coll", run_id=run_id, task_id=task_id,
+                    node="implementation", task_type="fix",
+                    actual_agent=agent, recommended_agent="codex",
+                    legacy_agent="opencode", diverted=diverted, rankings=[],
+                    gate={}, created_at=ts + 200.0)
+                self.store.record_event(
+                    "route_decision", payload, workflow_id="wf-coll",
+                    node_id="implementation", task_id=task_id,
+                    agent_id=agent, source="adaptive-router-canary",
+                    timestamp=ts + 200.0, run_id=run_id)
 
 
 class TestNoAutoPromotion(unittest.TestCase):
@@ -717,6 +880,64 @@ class TestRolloutCLI(unittest.TestCase):
         self.assertTrue(payload["killed"])
         self.assertEqual(payload["states"][0]["percentage"], 5)
 
+    def test_status_does_not_manufacture_schema(self):
+        # Reviewer P2: a read must not create tables or migrate. #102
+        # contract: observing state never manufactures state.
+        import sqlite3
+        with tempfile.TemporaryDirectory(prefix="herdr-rollout-ro-") as tmp:
+            db_path = Path(tmp) / "state.db"
+            # A pre-rollout database: valid, existing, no rollout tables.
+            sqlite3.connect(str(db_path)).close()
+            self.assertFalse(_has_rollout_tables(db_path))
+            with patch.dict("os.environ", {"HERDR_STATE_DB": str(db_path)}):
+                code, out, _ = self._run(["status"])
+                self.assertEqual(code, 0)
+                self.assertIn("no staged buckets", out)
+                code, out, _ = self._run(["history"])
+                self.assertEqual(code, 0)
+                self.assertIn("no audit events", out)
+            self.assertFalse(
+                _has_rollout_tables(db_path),
+                "read-only rollout commands must not create schema")
+
+    def test_status_never_prints_all_off_on_read_failure(self):
+        # Reviewer P2: an unreadable state is "unknown", not "all off".
+        self._run(["set", "--agent", "codex", "--node", "implementation",
+                   "--task-type", "fix", "--percentage", "5",
+                   "--reason", "init"])
+        with patch("herdr.state_db.list_rollout_states",
+                   side_effect=sqlite3_operational_error()):
+            code, out, err = self._run(["status"])
+        self.assertEqual(code, 1)
+        self.assertIn("unavailable", err.lower())
+        self.assertNotIn("all off", out + err)
+
+    def test_history_never_prints_empty_on_read_failure(self):
+        with patch("herdr.state_db.list_rollout_audit",
+                   side_effect=sqlite3_operational_error()):
+            code, out, err = self._run(["history"])
+        self.assertEqual(code, 1)
+        self.assertIn("unavailable", err.lower())
+        self.assertNotIn("no audit events", out)
+
+
+def _has_rollout_tables(db_path):
+    import sqlite3
+    conn = sqlite3.connect(str(db_path))
+    try:
+        names = {
+            row[0] for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+    finally:
+        conn.close()
+    return "rollout_state" in names and "rollout_audit" in names
+
+
+def sqlite3_operational_error():
+    import sqlite3
+    return sqlite3.OperationalError("database is locked")
+
 
 class TestRolloutRouterIntegration(unittest.TestCase):
     """Rollout overrides canary config percentage without touching hash."""
@@ -926,8 +1147,9 @@ class TestRolloutRouterIntegration(unittest.TestCase):
         with self.assertRaises(ValueError):
             _sdb.apply_rollout_stage_atomic(
                 agent="codex", node="implementation", task_type="fix",
-                previous_percentage=5, new_percentage=25,
-                action="promote", reason="stale", source="cli:stale",
+                expected_staged_percentage=5, previous_percentage=5,
+                new_percentage=25, action="promote", reason="stale",
+                source="cli:stale",
                 algorithm_version=rollout_policy.ALGORITHM_VERSION,
                 created_at=1_700_000_000.0, db_path=self.db_path)
         self.assertEqual(

@@ -1538,6 +1538,19 @@ def _rollout_bucket_args(args):
     return bucket
 
 
+def _rollout_config_fallback(bucket):
+    """Canary config percentage this bucket runs at with no staged row.
+
+    ``None`` means the bucket has no canary traffic to suppress (config
+    disabled, or bucket not whitelisted). The policy layer needs the
+    real number so ``rollout off`` writes an explicit off row instead of
+    reporting a no-op while the config keeps diverting.
+    """
+    from herdr import canary_router
+    return canary_router.config_percentage_for(
+        bucket["agent"], bucket["node"], bucket["task_type"])
+
+
 def _rollout_change(args, new_percentage, reason, source, *, verb):
     """Shared set/off write path: validate, write atomically, report."""
     from herdr import rollout_policy
@@ -1550,7 +1563,8 @@ def _rollout_change(args, new_percentage, reason, source, *, verb):
         record = rollout_policy.set_stage(
             db_path, agent=bucket["agent"], node=bucket["node"],
             task_type=bucket["task_type"], new_percentage=new_percentage,
-            reason=reason, source=source)
+            reason=reason, source=source,
+            config_fallback=_rollout_config_fallback(bucket))
     except ValueError as exc:
         # Invalid stage/transition or a concurrent-writer conflict: the
         # bucket is unchanged and nothing was persisted.
@@ -1602,11 +1616,13 @@ def _cmd_rollout_status(args):
     if not db_path.is_file():
         states = []
     else:
+        # Read failures must not be flattened into "all off": an unknown
+        # rollout state is not a safe-looking empty list.
         try:
             states = rollout_policy.list_states(db_path)
         except Exception as exc:  # noqa: BLE001 -- read-only boundary
-            print(f"[ROLLOUT] failed: {type(exc).__name__}: {exc}",
-                  file=sys.stderr)
+            print(f"[ROLLOUT] rollout state unavailable: "
+                  f"{type(exc).__name__}: {exc}", file=sys.stderr)
             sys.exit(1)
     killed = not rollout_policy.rollout_enabled()
     if getattr(args, "json", False):
@@ -1620,7 +1636,8 @@ def _cmd_rollout_status(args):
         print("rollout: KILLED (HERDR_ADAPTIVE_ROLLOUT_ENABLED=false) "
               "-> all buckets Legacy")
     if not states:
-        print("rollout: no staged buckets (all off)")
+        print("rollout: no staged buckets "
+              "(no rollout rows; buckets with none follow the canary config)")
         return
     for row in states:
         print(f"{row.get('agent')} / {row.get('node')} / "
@@ -1675,8 +1692,8 @@ def _cmd_rollout_history(args):
                 node=getattr(args, "node", None),
                 task_type=getattr(args, "task_type", None), limit=limit)
         except Exception as exc:  # noqa: BLE001 -- read-only boundary
-            print(f"[ROLLOUT] failed: {type(exc).__name__}: {exc}",
-                  file=sys.stderr)
+            print(f"[ROLLOUT] rollout history unavailable: "
+                  f"{type(exc).__name__}: {exc}", file=sys.stderr)
             sys.exit(1)
     if getattr(args, "json", False):
         print(json.dumps(rows, ensure_ascii=False, indent=2,
@@ -1708,13 +1725,17 @@ def _cmd_rollout_check_guard(args):
         if auto:
             result = rollout_policy.maybe_auto_rollback(
                 db_path, agent=bucket["agent"], node=bucket["node"],
-                task_type=bucket["task_type"], reason=reason, source=source)
+                task_type=bucket["task_type"], reason=reason, source=source,
+                config_fallback=_rollout_config_fallback(bucket))
         else:
             verdict = rollout_policy.evaluate_guard(
                 db_path, agent=bucket["agent"], node=bucket["node"],
                 task_type=bucket["task_type"])
             result = {"action": "triggered" if verdict.get("triggered")
                       else "none", **verdict}
+    except ValueError as exc:
+        print(f"[ROLLOUT] {exc}", file=sys.stderr)
+        sys.exit(2)
     except Exception as exc:  # noqa: BLE001 -- CLI boundary
         print(f"[ROLLOUT] failed: {type(exc).__name__}: {exc}",
               file=sys.stderr)

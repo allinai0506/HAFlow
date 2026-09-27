@@ -211,16 +211,22 @@ Evidence:
 
 扩量是人工动作：只能经 `herdr-task rollout set` 相邻推进（`off→5→10→25→50`，
 `--reason` 必填，跨级拒绝）；回退可从任意阶段直达 `off`。没有任何自动扩量代码
-路径 —— Safety Guard 只写“下”，不写“上”。当前状态与历史事实分离：
-`state_db.rollout_state`（当前值）与 `rollout_audit`（不可变，每次变化恰好一条）
-在同一个 `BEGIN IMMEDIATE` 事务内写入，败者拿到冲突错误，不存在无审计的变化或
-旧状态覆盖新状态。`rollout_enabled` 未设置即生效，因此“空 rollout + 无 canary
-配置”仍是 0（默认关闭）；`HERDR_ADAPTIVE_ROLLOUT_ENABLED=false` 立即全 bucket
-Legacy 且保留全部历史。解析失败/损坏/非法阶段/DB 异常一律 0 —— rollout 控制失败
-永远不能让生产路由更激进。Safety Guard 只读消费 `canary_evaluation` 两臂 facts，
-阈值集中可调、样本不足安静、可关闭；自动止损默认由
-`herdr-task rollout check-guard --auto-rollback` 执行，每次派发的热路径 guard
-需显式 `HERDR_ROLLOUT_HOT_GUARD=1` 开启（用延迟换即时止损）。
+路径 —— Safety Guard 只写“下”，不写“上”。**absent ≠ explicit off**：没有 staged
+行的 bucket 仍按 canary 配置分流，所以 `rollout off` 会写入显式 `0` 行压制
+fallback（否则 CLI 会报告“已关闭”而流量照旧）。当前状态与历史事实分离：
+`state_db.rollout_state`（当前值）与 `rollout_audit`（不可变，每次变化恰好一条，
+`previous_percentage` 记录当时真正在分流的比例）在同一个 `BEGIN IMMEDIATE`
+事务内写入，败者拿到冲突错误，不存在无审计的变化或旧状态覆盖新状态。
+`rollout_enabled` 未设置即生效，因此“空 rollout + 无 canary 配置”仍是 0
+（默认关闭）；`HERDR_ADAPTIVE_ROLLOUT_ENABLED=false` 立即全 bucket Legacy 且保留
+全部历史。解析失败/损坏/非法阶段/DB 异常一律 0 —— rollout 控制失败永远不能让
+生产路由更激进。Safety Guard 只读消费 `canary_evaluation` 两臂 facts，阈值集中
+可调、样本不足安静、可关闭；判定用 `status` 区分“评过了”与“评不了”，热路径
+guard 开启后**评不了（DB 不可用/schema 错误）一律走 Legacy**。自动止损默认由
+`herdr-task rollout check-guard --auto-rollback` 执行，每次派发的热路径 guard 需
+显式 `HERDR_ROLLOUT_HOT_GUARD=1` 开启（用延迟换即时止损）。`status` / `history`
+/ `check-guard` 走 #102 只读连接（不建表不迁移），读取失败报 `unavailable`
+而不是伪装成“全部 off”。
 
 Evidence:
 - `herdr/rollout_policy.py`

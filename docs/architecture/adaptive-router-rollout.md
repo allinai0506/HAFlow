@@ -53,6 +53,27 @@ kill switch false → 0
 rollout 模块本身不可用 → 0（percentage_source=rollout_unavailable）
 ```
 
+> ### Absent ≠ explicit off
+>
+> 没有 staged row 的 bucket 仍在按 canary 配置分流。因此 `rollout off` 对这类
+> bucket **必须写入 `percentage=0` 的显式行**来压制 fallback；把它当成 no-op 会
+> 让 CLI 报告“已关闭”，而生产仍在跑 Adaptive 流量。同理，Safety Guard 触发时
+> 不能因为“staged 读到 0”就报告 already off。
+>
+> `set_stage(..., config_fallback=N)` 用 canary 配置的真实百分比（由
+> `canary_router.config_percentage_for` 提供，`None` = 该 bucket 无 canary 流量）
+> 判断 no-op 与审计事实：
+>
+> | 场景 | 结果 |
+> | --- | --- |
+> | 无行 + config 50 + `off` | 写显式 0 行，审计 `50 → 0` |
+> | 无行 + 无 config 流量 + `off` | 真 no-op，不写行 |
+> | 有行 0 + `off` | 真 no-op |
+> | 无行 + config 50 + `set 5` | 写 5，审计 `50 → 5`（记录真实分流变化） |
+
+> 审计里的 `previous_percentage` 是**当时真正在分流的比例**（仅首次迁移时与
+> staged 值不同），`expected_staged_percentage` 才是并发校验用的 staged 值。
+
 `herdr/canary_router.py` 只消费该值（`gate.effective_percentage`，附带
 `config_percentage` / `percentage_source` / `guard_forced_legacy` 供审计），
 评分公式、准入、池/健康/隔离过滤、显式指定 bypass 均不动。
@@ -77,6 +98,16 @@ rollout 模块本身不可用 → 0（percentage_source=rollout_unavailable）
 - 读预算有界：`GUARD_DECISION_LIMIT=200` 匹配决策、`GUARD_SCAN_CAP=400` 扫描预算；
 - 触发判定只覆盖本 bucket（node/task_type 过滤后按精确身份选桶，不跨 bucket 牵连）。
 
+判定结果用 `status` 区分「评过了」与「评不了」，因为两者要求的路由方向相反：
+
+| status | triggered | 热路径路由 |
+| --- | --- | --- |
+| `triggered` | True | Legacy |
+| `within_tolerance` | False | Adaptive |
+| `insufficient_samples` | False | Adaptive（样本不足不是异常） |
+| `unavailable` | False | **Legacy**（评不了 ≠ 没问题） |
+| `disabled` | False | Adaptive（运维显式关闭） |
+
 自动止损的两种运行方式：
 
 | 方式 | 触发者 | 语义 |
@@ -85,8 +116,9 @@ rollout 模块本身不可用 → 0（percentage_source=rollout_unavailable）
 | `HERDR_ROLLOUT_HOT_GUARD=1`（opt-in） | 每次 dispatch | 只读，触发（或评估异常）时本次路由走 Legacy，不写库 |
 
 热路径 guard 默认关闭：它要在 router 临界区内做一次有界决策扫描，默认开启会给
-每次派发增加开销；开启即接受“用派发延迟换立即止损”。无论哪种方式，Guard 异常、
-评估不可用、DB 不可用一律更保守（本次 Legacy / 不扩大）。
+每次派发增加开销；开启即接受“用派发延迟换立即止损”。开启后，**评估不可用
+（DB 不可用、schema 错误、未知异常）一律走 Legacy**，绝不把“评不了”当作
+“没问题”；关闭 guard（`HERDR_ROLLOUT_GUARD_ENABLED=0`）则由运维显式接管。
 
 ## 5. Kill Switch
 
@@ -110,7 +142,10 @@ herdr-task rollout check-guard --agent codex --node implementation \
 
 `set/off` 要求非空 `--reason`；非法过渡/开放百分比 exit 2；并发冲突 exit 2
 （状态未变）；存储失败 exit 1 且无部分生效。`status` / `history` /
-`check-guard`（无 `--auto-rollback`）只读，纯路径解析，不创建/迁移数据库。
+`check-guard`（无 `--auto-rollback`）走 #102 的只读连接（`mode=ro` +
+`query_only`）：不建库、不建表、不迁移；pre-rollout 库读作“无 staged bucket”，
+而读取失败（locked/corrupt/无权限）**不会**被压成“全部 off”，而是 exit 1 并
+明确报 “unavailable”。
 
 ## 7. 文件边界
 
