@@ -1264,3 +1264,21 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - 新增 `canary_router.config_percentage_for()` 供 CLI 提供真实 fallback（None=无流量）。
 - 证据：rollout 专项 56 passed（新增 absent≠off / guard outage / 只读不建表 /
   读失败非零退出 等回归）；全量 1911 passed + 44 subtests。
+
+## [2026-09-27] fix | PR #106 评审修复二：审计 action 必须与真实流量一致
+- 评审结论：上轮 2 P1 + 2 P2 已全部修好；仅剩 1 个 P2 审计语义问题，修完可合并。
+- 根因：`action = _action_for(staged, nxt)` 用 staged 值判定，而审计写的是
+  `effective_prev`。首次接管旧 canary 配置时 staged=0、effective_prev=50，
+  于是产出自相矛盾的不可变事实 `50 → 5 action=promote`（config=100 时更明显）。
+- 修复：过渡合法性仍按 staged 阶梯校验（首次接管仍从 stage 5 起步），
+  但 `action` 改按真实有效比例 `effective_prev` 判定。现语义：
+  `0→5 promote`、`5→10 promote`、`50→5 rollback`、`100→5 rollback`、
+  `50→0 rollback`、`auto→0 auto_rollback`。`_action_for` docstring 明确要求
+  入参必须是“当时真正在分流的比例”，防止再次从 staged 推导。
+- 顺带：`apply_rollout_stage_atomic` 补 `Path` 归一（此前传 str 会
+  AttributeError，CLI 传的是 Path 故生产未暴露）。
+- 证据：新增 `test_migration_from_full_config_is_a_rollback`（100→5）与
+  `test_audit_action_matches_traffic_direction`（6 个 subtest 表驱动，并断言
+  “action=promote ⟺ 记录的方向确实是增加”这一不变量）；真实 CLI 复现
+  `50% -> 5% action=rollback`、`100% -> 5% action=rollback`，经典阶梯仍全为 promote。
+  rollout 专项 58 passed + 6 subtests；全量 1913 passed + 50 subtests。

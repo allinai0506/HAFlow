@@ -327,7 +327,8 @@ class TestFailSafe(unittest.TestCase):
 
     def test_first_migration_audit_records_real_traffic(self):
         # A config-only bucket at 50% migrated to stage 5: the audit must
-        # record the traffic that was actually being diverted.
+        # record the traffic that was actually being diverted, and the
+        # action must agree with it. 50% -> 5% is a reduction.
         rollout_policy.set_stage(
             self.db_path, agent="codex", node="implementation",
             task_type="fix", new_percentage=5, reason="take over",
@@ -337,10 +338,68 @@ class TestFailSafe(unittest.TestCase):
             task_type="fix")
         self.assertEqual(history[0]["previous_percentage"], 50)
         self.assertEqual(history[0]["new_percentage"], 5)
-        self.assertEqual(history[0]["action"], "promote")
+        self.assertEqual(history[0]["action"], "rollback")
         self.assertEqual(rollout_policy.effective_percentage(
             self.db_path, agent="codex", node="implementation",
             task_type="fix", config_fallback=50), 5)
+
+    def test_migration_from_full_config_is_a_rollback(self):
+        # 100% -> 5%: promoting would be an outright lie in the audit.
+        rollout_policy.set_stage(
+            self.db_path, agent="claude", node="test", task_type="docs",
+            new_percentage=5, reason="take over from full canary",
+            source="cli", config_fallback=100)
+        history = rollout_policy.get_history(
+            self.db_path, agent="claude", node="test", task_type="docs")
+        self.assertEqual(history[0]["previous_percentage"], 100)
+        self.assertEqual(history[0]["new_percentage"], 5)
+        self.assertEqual(history[0]["action"], "rollback")
+
+    def test_audit_action_matches_traffic_direction(self):
+        # The action contract as an explicit table. An audit row must
+        # never say "promote" while recording a smaller number.
+        # (config fallback, walk ladder to, target, expected previous,
+        #  expected action)
+        #
+        # Note the classic 5 -> 10 case needs no config fallback: with
+        # fallback=5 the walk to stage 5 is correctly a no-op (traffic is
+        # already 5%), so no row exists and jumping to 10 is a genuine
+        # cross-stage rejection. The ladder is validated against the
+        # staged value, which is 0 until a row is written.
+        cases = [
+            (None, 0, 5, 0, "promote"),     # 0 -> 5
+            (None, 5, 10, 5, "promote"),    # 5 -> 10
+            (50, 0, 5, 50, "rollback"),      # 50 -> 5
+            (100, 0, 5, 100, "rollback"),   # 100 -> 5
+            (50, 0, 0, 50, "rollback"),      # 50 -> 0
+            (10, 10, 0, 10, "rollback"),     # 10 -> 0
+        ]
+        ladder = [5, 10, 25, 50]
+        for index, case in enumerate(cases):
+            fallback, staged, target, expected_prev, expected = case
+            with self.subTest(fallback=fallback, staged=staged,
+                              target=target):
+                agent = f"agent-{index}"
+                db = self.db_path.parent / f"action-{index}.db"
+                for step in [s for s in ladder if s <= staged]:
+                    rollout_policy.set_stage(
+                        db, agent=agent, node="n", task_type="t",
+                        new_percentage=step, reason="ladder", source="cli",
+                        config_fallback=fallback)
+                rollout_policy.set_stage(
+                    db, agent=agent, node="n", task_type="t",
+                    new_percentage=target, reason="step", source="cli",
+                    config_fallback=fallback)
+                record = rollout_policy.get_history(
+                    db, agent=agent, node="n", task_type="t")[0]
+                self.assertEqual(record["previous_percentage"],
+                                 expected_prev)
+                self.assertEqual(record["new_percentage"], target)
+                self.assertEqual(record["action"], expected)
+                # The invariant the reviewer pointed at: the label and
+                # the recorded direction can never disagree.
+                grew = target > expected_prev
+                self.assertEqual(record["action"] == "promote", grew)
 
     def test_guard_outage_forces_legacy_on_hot_path(self):
         # Reviewer P1: an evaluation that cannot run must never read as

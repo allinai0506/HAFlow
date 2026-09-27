@@ -29,6 +29,11 @@ Bucket = `recommended_agent × node × task_type`，独立维护状态。
 
 Audit 契约字段：`recommended_agent/node/task_type/previous_percentage/new_percentage/action(promote|rollback|auto_rollback)/reason/source/created_at/algorithm_version=adaptive-router-rollout-v1`。
 
+`action` 描述**真实流量方向**：`promote` ⟺ `new_percentage > previous_percentage`。
+两者只在首次接管旧 canary 配置时才可能“看着矛盾”，而那正是必须说真话的场景 ——
+`50 → 5` 记 `rollback`（不是 `promote`）。过渡合法性仍按 staged 阶梯校验
+（首次接管只能从 stage 5 起步），只有 action 的判定基准是有效比例。
+
 ## 3. 与 Canary 的集成
 
 复用 `#103` 确定性分流，不重设 hash：
@@ -69,10 +74,11 @@ rollout 模块本身不可用 → 0（percentage_source=rollout_unavailable）
 > | 无行 + config 50 + `off` | 写显式 0 行，审计 `50 → 0` |
 > | 无行 + 无 config 流量 + `off` | 真 no-op，不写行 |
 > | 有行 0 + `off` | 真 no-op |
-> | 无行 + config 50 + `set 5` | 写 5，审计 `50 → 5`（记录真实分流变化） |
+> | 无行 + config 50 + `set 5` | 写 5，审计 `50 → 5` action=rollback（记录真实分流变化） |
 
 > 审计里的 `previous_percentage` 是**当时真正在分流的比例**（仅首次迁移时与
-> staged 值不同），`expected_staged_percentage` 才是并发校验用的 staged 值。
+> staged 值不同），`expected_staged_percentage` 才是并发校验用的 staged 值，
+> `action` 也按前者（真实分流比例）判定。
 
 `herdr/canary_router.py` 只消费该值（`gate.effective_percentage`，附带
 `config_percentage` / `percentage_source` / `guard_forced_legacy` 供审计），

@@ -214,9 +214,11 @@ Evidence:
 路径 —— Safety Guard 只写“下”，不写“上”。**absent ≠ explicit off**：没有 staged
 行的 bucket 仍按 canary 配置分流，所以 `rollout off` 会写入显式 `0` 行压制
 fallback（否则 CLI 会报告“已关闭”而流量照旧）。当前状态与历史事实分离：
-`state_db.rollout_state`（当前值）与 `rollout_audit`（不可变，每次变化恰好一条，
-`previous_percentage` 记录当时真正在分流的比例）在同一个 `BEGIN IMMEDIATE`
-事务内写入，败者拿到冲突错误，不存在无审计的变化或旧状态覆盖新状态。
+`state_db.rollout_state`（当前值）与 `rollout_audit`（不可变，每次变化恰好一条）
+在同一个 `BEGIN IMMEDIATE` 事务内写入，败者拿到冲突错误，不存在无审计的变化或
+旧状态覆盖新状态。审计的 `previous_percentage` 记录当时真正在分流的比例，
+`action` 亦按真实流量方向判定（`promote` ⟺ new > previous），所以首次接管旧配置的
+`50 → 5` 记 `rollback` 而非自相矛盾的 `promote`；过渡合法性仍按 staged 阶梯校验。
 `rollout_enabled` 未设置即生效，因此“空 rollout + 无 canary 配置”仍是 0
 （默认关闭）；`HERDR_ADAPTIVE_ROLLOUT_ENABLED=false` 立即全 bucket Legacy 且保留
 全部历史。解析失败/损坏/非法阶段/DB 异常一律 0 —— rollout 控制失败永远不能让

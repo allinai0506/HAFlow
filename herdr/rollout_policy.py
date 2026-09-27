@@ -192,6 +192,15 @@ def _safe_fallback(value: Any) -> int:
 
 
 def _action_for(previous: int, new: int, *, automatic: bool) -> str:
+    """Label a transition by the direction of the *traffic* change.
+
+    ``previous`` MUST be the percentage that was actually being
+    diverted, not the staged value. The two differ when a bucket is
+    migrated off the canary config fallback for the first time, and
+    labeling that by the staged value would write a self-contradictory
+    immutable fact (``previous_percentage=50, new_percentage=5,
+    action="promote"``).
+    """
     if automatic:
         return "auto_rollback"
     return "promote" if new > previous else "rollback"
@@ -354,7 +363,11 @@ def set_stage(
             f"rollout transition {staged} -> {nxt} is not allowed: "
             "promote one stage at a time (off->5->10->25->50); "
             "rollback may go directly to off")
-    action = _action_for(staged, nxt, automatic=automatic)
+    # The ladder is validated against the staged value (a first
+    # migration still starts at stage 5), but the audit action must
+    # describe the real traffic direction: taking a 50% config bucket
+    # down to stage 5 is a rollback, not a promotion.
+    action = _action_for(effective_prev, nxt, automatic=automatic)
     record = state_db.apply_rollout_stage_atomic(
         agent=bucket["agent"], node=bucket["node"],
         task_type=bucket["task_type"],

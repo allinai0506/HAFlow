@@ -3705,7 +3705,7 @@ def apply_rollout_stage_atomic(
       audit fact records, so an auditor can reconstruct the traffic
       change rather than only the stage change.
     """
-    conn = get_db_connection(db_path)
+    conn = get_db_connection(Path(db_path) if db_path else None)
     try:
         _ensure_rollout_schema(conn)
         key = rollout_bucket_key(agent, node, task_type or "")
