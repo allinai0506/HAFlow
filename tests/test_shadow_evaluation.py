@@ -989,6 +989,24 @@ class ShadowEvalCliTest(unittest.TestCase):
         self.assertEqual(
             report["coverage"]["route_decisions_with_outcome"], 1)
 
+    def test_production_default_path_prefers_checkpoints_over_tasks(self):
+        """Lock production precedence: CHECKPOINTS_DIR wins over TASKS_FILE.
+
+        ``get_default_db_path`` order is frozen (HERDR_STATE_DB >
+        CHECKPOINTS_DIR > WORKFLOWS_FILE > TASKS_FILE > default) because
+        ``get_state_store`` and every production caller depend on it.
+        The singular-WORKFLOW_FILE compat lives only in the shadow
+        resolver and must never reorder this function.
+        """
+        with patch.dict(_os.environ, {}, clear=False):
+            for var in ("HERDR_STATE_DB", "TASKS_FILE", "WORKFLOW_FILE",
+                        "WORKFLOWS_FILE", "CHECKPOINTS_DIR"):
+                _os.environ.pop(var, None)
+            _os.environ["CHECKPOINTS_DIR"] = "/data/a/checkpoints"
+            _os.environ["TASKS_FILE"] = "/data/b/tasks.json"
+            self.assertEqual(
+                state_db.get_default_db_path(), Path("/data/a/state.db"))
+
 
 def _db_sidecars(db_path):
     """Sidecar files a read-only run must never leave behind.

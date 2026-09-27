@@ -59,22 +59,22 @@ def _db_path_for_workflow_file(value: str) -> Path:
 def get_default_db_path() -> Path:
     """Resolve active SQLite DB path from environment or default location.
 
-    Priority mirrors ``bin/herdr-task._get_store`` (minus its
-    parent-exists gating, which pure path resolution cannot do):
-    HERDR_STATE_DB > TASKS_FILE > WORKFLOW_FILE > WORKFLOWS_FILE >
-    CHECKPOINTS_DIR > default.
+    Production global: order is frozen (HERDR_STATE_DB >
+    CHECKPOINTS_DIR > WORKFLOWS_FILE > TASKS_FILE > default). Shadow
+    Evaluation compatibility (singular ``WORKFLOW_FILE``) lives only in
+    ``resolve_state_db_path`` and must never reorder this function:
+    ``get_state_store`` and every other production caller depend on it.
     """
     env_path = os.environ.get("HERDR_STATE_DB")
     if env_path:
         return Path(env_path)
-    tasks_file = os.environ.get("TASKS_FILE")
-    if tasks_file:
-        return _db_path_for_tasks_file(tasks_file)
-    workflow_file = os.environ.get("WORKFLOW_FILE") or os.environ.get("WORKFLOWS_FILE")
-    if workflow_file:
-        return _db_path_for_workflow_file(workflow_file)
     if os.environ.get("CHECKPOINTS_DIR"):
         return Path(os.environ["CHECKPOINTS_DIR"]).parent / "state.db"
+    if os.environ.get("WORKFLOWS_FILE"):
+        return Path(os.environ["WORKFLOWS_FILE"]).parent / "state.db"
+    if os.environ.get("TASKS_FILE"):
+        p = Path(os.environ["TASKS_FILE"])
+        return p.parent / "state.db" if p.name == "tasks.json" else p.with_suffix(".db")
     return CONTROLLER_DIR / "state.db"
 
 
@@ -1167,13 +1167,29 @@ class ReadonlySchemaError(RuntimeError):
 
 
 def resolve_state_db_path(db_path: Optional[Path] = None) -> Path:
-    """Resolve the active state DB file path without touching the disk.
+    """Resolve the state DB path for Shadow Evaluation (read-only).
 
-    Pure path arithmetic: never mkdirs, creates, opens or initializes
-    anything. Diagnostics use this; only the production runtime goes
-    through ``get_state_store`` / ``get_db_connection``.
+    Shadow-only resolver: location semantics replicate
+    ``bin/herdr-task._get_store`` (HERDR_STATE_DB > TASKS_FILE >
+    WORKFLOW_FILE/WORKFLOWS_FILE > CHECKPOINTS_DIR > default) as pure
+    path arithmetic -- no ``get_state_store()``, no ``init_db``, no
+    mkdir, no file creation. Production callers keep using
+    ``get_default_db_path`` with its frozen order.
     """
-    return Path(db_path) if db_path is not None else get_default_db_path()
+    if db_path is not None:
+        return Path(db_path)
+    env_path = os.environ.get("HERDR_STATE_DB")
+    if env_path:
+        return Path(env_path)
+    tasks_file = os.environ.get("TASKS_FILE")
+    if tasks_file:
+        return _db_path_for_tasks_file(tasks_file)
+    workflow_file = os.environ.get("WORKFLOW_FILE") or os.environ.get("WORKFLOWS_FILE")
+    if workflow_file:
+        return _db_path_for_workflow_file(workflow_file)
+    if os.environ.get("CHECKPOINTS_DIR"):
+        return Path(os.environ["CHECKPOINTS_DIR"]).parent / "state.db"
+    return CONTROLLER_DIR / "state.db"
 
 
 def get_readonly_db_connection(
