@@ -326,6 +326,7 @@ def _choose_agent_impl(
     requested="auto",
     reservation_key=None,
     run_id=None,
+    decided_at=None,
 ):
     if workflow_id:
         record = workflow_record(workflow_id)
@@ -453,6 +454,14 @@ def _choose_agent_impl(
             "task_id": reservation_key or "",
         }
 
+    # Canary config probe (one small file read; missing/invalid means
+    # disabled). Read outside the lock; only an enabled config makes the
+    # locked section do any canary work.
+    _canary = _load_canary_module()
+    canary_cfg = None
+    if _canary is not None:
+        canary_cfg, _ = _canary.read_canary_config()
+
     ROUTER_LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
 
     with open(ROUTER_LOCK_FILE, "a+", encoding="utf-8") as lock:
@@ -525,6 +534,34 @@ def _choose_agent_impl(
                 f"No enabled Agent available for project {project_id}"
             )
 
+        # Canary gate (Adaptive Router v2): planning happens inside the
+        # lock because the diversion target must come from this exact
+        # validated candidate list and the reservation must record the
+        # final agent in the same critical section. Reads are bounded;
+        # the gate is closed entirely unless the operator enabled it.
+        canary_plan = None
+        canary_error = None
+        if canary_cfg is not None:
+            try:
+                canary_plan = _canary.plan_canary(
+                    config=canary_cfg,
+                    candidates=candidates,
+                    node=stage,
+                    task_type=task_type,
+                    task_id=reservation_key or "",
+                    run_id=run_id or "",
+                    db_path=getattr(_get_store(), "db_path", None),
+                    decided_at=(
+                        float(decided_at)
+                        if decided_at is not None else time.time()
+                    ),
+                    active_loads=active_loads,
+                    reserved_loads=reserved_loads,
+                    exclude_run_id=run_id or None,
+                )
+            except Exception as exc:  # noqa: BLE001 -- canary fails open
+                canary_error = f"{type(exc).__name__}: {exc}"
+
         ranked = sorted(
             enumerate(candidates),
             key=lambda item: (
@@ -534,7 +571,10 @@ def _choose_agent_impl(
             ),
         )
 
-        selected = ranked[0][1]
+        legacy_pick = ranked[0][1]
+        selected = legacy_pick
+        if canary_plan is not None and canary_plan.hash_divert:
+            selected = canary_plan.recommended
 
         if selected in stage_used_agents:
             _opt_out, _opt_reason = _isolation_opt_out(node_policy)
@@ -562,7 +602,7 @@ def _choose_agent_impl(
 
         fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
-    return selected, {
+    result_ctx = {
         "workflow_id": workflow_id or "",
         "stage": stage,
         "task_type": task_type,
@@ -572,6 +612,16 @@ def _choose_agent_impl(
         "run_id": run_id or "",
         "task_id": reservation_key or "",
     }
+    if canary_plan is not None:
+        result_ctx["canary_plan"] = {
+            "recommended": canary_plan.recommended,
+            "rankings": [dict(row) for row in canary_plan.rankings],
+            "gate": dict(canary_plan.gate),
+        }
+        result_ctx["canary_legacy_pick"] = legacy_pick
+    if canary_error:
+        result_ctx["canary_error"] = canary_error
+    return selected, result_ctx
 
 
 def _record_shadow_best_effort(selected, shadow_ctx, decided_at):
@@ -631,6 +681,95 @@ def _record_shadow_best_effort(selected, shadow_ctx, decided_at):
             pass
 
 
+def _load_canary_module():
+    """Import the canary gate module (standalone-import safe) or None."""
+    try:
+        from . import canary_router
+    except ImportError:
+        try:
+            from herdr import canary_router
+        except ImportError:
+            return None
+    return canary_router
+
+
+def _record_canary_best_effort(selected, shadow_ctx, decided_at, canary):
+    """Persist the canary route_decision (fail-open, one per routing).
+
+    A canary-gated routing records ONLY the mode="canary" event: one
+    decision, one event. The payload's ``actual_agent`` is the agent
+    that will really execute, so the outcome join contract holds for
+    diverted and non-diverted executions alike.
+    """
+    ctx = shadow_ctx or {}
+    legacy_pick = str(ctx.get("canary_legacy_pick") or "")
+    try:
+        try:
+            from . import adaptive_router as _adaptive
+        except ImportError:  # pragma: no cover - script-style import fallback
+            from herdr import adaptive_router as _adaptive
+        gate = dict(canary.get("gate") or {})
+        gate["would_divert"] = bool(canary.get("recommended") != legacy_pick)
+        payload = _adaptive.build_canary_decision(
+            workflow_id=ctx.get("workflow_id", ""),
+            run_id=ctx.get("run_id", ""),
+            task_id=ctx.get("task_id", ""),
+            node=ctx.get("stage", ""),
+            task_type=ctx.get("task_type", ""),
+            actual_agent=selected,
+            recommended_agent=str(canary.get("recommended") or ""),
+            legacy_agent=legacy_pick,
+            diverted=bool(selected != legacy_pick),
+            rankings=list(canary.get("rankings") or []),
+            gate=gate,
+            created_at=decided_at,
+        )
+        store = _get_store()
+        store.record_event(
+            "route_decision",
+            payload,
+            workflow_id=ctx.get("workflow_id") or None,
+            node_id=ctx.get("stage") or None,
+            task_id=ctx.get("task_id") or None,
+            agent_id=selected or None,
+            source="adaptive-router-canary",
+            timestamp=float(decided_at),
+            run_id=ctx.get("run_id") or None,
+        )
+    except Exception as exc:
+        _record_canary_error_best_effort(
+            ctx, decided_at, f"{type(exc).__name__}: {exc}", selected)
+
+
+def _record_canary_error_best_effort(shadow_ctx, decided_at, error, selected):
+    """Best-effort fail-open audit for the canary gate (never raises)."""
+    ctx = shadow_ctx or {}
+    try:
+        store = _get_store()
+        store.record_event(
+            "route_decision_error",
+            {
+                "mode": "canary",
+                "workflow_id": ctx.get("workflow_id", ""),
+                "run_id": ctx.get("run_id", ""),
+                "task_id": ctx.get("task_id", ""),
+                "actual_agent": selected,
+                "algorithm_version": "adaptive-router-v2-canary",
+                "error": error,
+                "created_at": decided_at,
+            },
+            workflow_id=ctx.get("workflow_id") or None,
+            node_id=ctx.get("stage") or None,
+            task_id=ctx.get("task_id") or None,
+            agent_id=selected or None,
+            source="adaptive-router-canary",
+            timestamp=decided_at,
+            run_id=ctx.get("run_id") or None,
+        )
+    except Exception:
+        pass
+
+
 def choose_agent(
     workflow_id,
     stage,
@@ -639,10 +778,13 @@ def choose_agent(
     reservation_key=None,
     run_id=None,
 ):
-    """Select the production agent (legacy semantics, unchanged).
+    """Select the production agent.
 
-    The Adaptive Router v1 shadow runs after the decision, persists a
-    ``route_decision`` event, and can never alter the returned agent.
+    Legacy semantics are unchanged. The Adaptive Router v2 canary may
+    divert the auto-selection to the recommendation when the operator
+    enabled it, the bucket is whitelisted and sufficient, and the
+    deterministic hash puts this identity in the canary slice; any
+    canary failure fails open to the legacy pick.
     """
     decided_at = time.time()
     selected, shadow_ctx = _choose_agent_impl(
@@ -652,8 +794,17 @@ def choose_agent(
         requested=requested,
         reservation_key=reservation_key,
         run_id=run_id,
+        decided_at=decided_at,
     )
-    _record_shadow_best_effort(selected, shadow_ctx, decided_at)
+    canary = shadow_ctx.get("canary_plan")
+    if canary is not None:
+        _record_canary_best_effort(selected, shadow_ctx, decided_at, canary)
+    else:
+        canary_error = shadow_ctx.get("canary_error")
+        if canary_error:
+            _record_canary_error_best_effort(
+                shadow_ctx, decided_at, canary_error, selected)
+        _record_shadow_best_effort(selected, shadow_ctx, decided_at)
     return selected
 
 
