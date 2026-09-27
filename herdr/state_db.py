@@ -40,18 +40,41 @@ HOME = Path.home()
 CONTROLLER_DIR = HOME / ".herdr-controller"
 
 
+def _db_path_for_tasks_file(value: str) -> Path:
+    """Derive DB path from a TASKS_FILE value (mirrors ``bin/herdr-task``)."""
+    p = Path(value)
+    return p.parent / "state.db" if p.name == "tasks.json" else p.with_suffix(".db")
+
+
+def _db_path_for_workflow_file(value: str) -> Path:
+    """Derive DB path from a WORKFLOW(S)_FILE value (mirrors ``bin/herdr-task``)."""
+    p = Path(value)
+    return (
+        p.parent / "state.db"
+        if p.name in ("workflows.json", "workflow.json")
+        else p.with_suffix(".db")
+    )
+
+
 def get_default_db_path() -> Path:
-    """Resolve active SQLite DB path from environment or default location."""
+    """Resolve active SQLite DB path from environment or default location.
+
+    Priority mirrors ``bin/herdr-task._get_store`` (minus its
+    parent-exists gating, which pure path resolution cannot do):
+    HERDR_STATE_DB > TASKS_FILE > WORKFLOW_FILE > WORKFLOWS_FILE >
+    CHECKPOINTS_DIR > default.
+    """
     env_path = os.environ.get("HERDR_STATE_DB")
     if env_path:
         return Path(env_path)
+    tasks_file = os.environ.get("TASKS_FILE")
+    if tasks_file:
+        return _db_path_for_tasks_file(tasks_file)
+    workflow_file = os.environ.get("WORKFLOW_FILE") or os.environ.get("WORKFLOWS_FILE")
+    if workflow_file:
+        return _db_path_for_workflow_file(workflow_file)
     if os.environ.get("CHECKPOINTS_DIR"):
         return Path(os.environ["CHECKPOINTS_DIR"]).parent / "state.db"
-    if os.environ.get("WORKFLOWS_FILE"):
-        return Path(os.environ["WORKFLOWS_FILE"]).parent / "state.db"
-    if os.environ.get("TASKS_FILE"):
-        p = Path(os.environ["TASKS_FILE"])
-        return p.parent / "state.db" if p.name == "tasks.json" else p.with_suffix(".db")
     return CONTROLLER_DIR / "state.db"
 
 

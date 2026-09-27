@@ -938,6 +938,57 @@ class ShadowEvalCliTest(unittest.TestCase):
                 agents=None, node=NODE, task_type=TASK_TYPE,
                 before=BASE_TS + 1_000_000.0, db_path=self.db_path)), 1)
 
+    def test_cli_resolves_singular_workflow_file(self):
+        """Regression: shadow-eval must honor singular WORKFLOW_FILE.
+
+        Only WORKFLOW_FILE=/tmp/isolated/workflow.json is set (no
+        HERDR_STATE_DB); the real DB lives at /tmp/isolated/state.db.
+        The CLI must read it instead of falling back to the default
+        ~/.herdr-controller/state.db.
+        """
+        import subprocess as _subprocess
+        import sys as _sys
+
+        workdir = Path(tempfile.mkdtemp(prefix="herdr-shadow-wf-singular-"))
+        self.addCleanup(
+            lambda: __import__("shutil").rmtree(workdir, ignore_errors=True))
+        isolated_db = workdir / "state.db"
+        workflow_file = workdir / "workflow.json"
+        workflow_file.write_text('{"workflows": {}}', encoding="utf-8")
+        store = get_state_store(isolated_db)
+        _record_decision(store, task_id="t-wf-singular",
+                         run_id="run-wf-singular",
+                         actual="opencode", recommended="codex")
+        _settle_outcome(store, isolated_db, "t-wf-singular",
+                        "run-wf-singular", "opencode", success=True)
+
+        # Pure resolution honors the singular variable with _get_store
+        # priority (HERDR_STATE_DB > TASKS_FILE > WORKFLOW_FILE).
+        with patch.dict(_os.environ, {}, clear=False):
+            for var in ("HERDR_STATE_DB", "TASKS_FILE", "WORKFLOWS_FILE",
+                        "CHECKPOINTS_DIR"):
+                _os.environ.pop(var, None)
+            _os.environ["WORKFLOW_FILE"] = str(workflow_file)
+            self.assertEqual(
+                state_db.resolve_state_db_path(), isolated_db)
+
+        root = Path(__file__).resolve().parent.parent
+        env = dict(_os.environ)
+        for var in ("HERDR_STATE_DB", "TASKS_FILE", "WORKFLOWS_FILE",
+                    "CHECKPOINTS_DIR"):
+            env.pop(var, None)
+        env["WORKFLOW_FILE"] = str(workflow_file)
+        proc = _subprocess.run(
+            [_sys.executable, str(root / "bin" / "herdr-task"),
+             "shadow-eval", "--json"],
+            capture_output=True, text=True, env=env, timeout=120,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        report = _json.loads(proc.stdout)
+        self.assertEqual(report["coverage"]["total_route_decisions"], 1)
+        self.assertEqual(
+            report["coverage"]["route_decisions_with_outcome"], 1)
+
 
 def _db_sidecars(db_path):
     """Sidecar files a read-only run must never leave behind.
