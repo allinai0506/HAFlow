@@ -203,6 +203,16 @@ class TestCanaryConfig(unittest.TestCase):
         self.assertIsNone(config)
         self.assertTrue(errors)
 
+    def test_invalid_utf8_config_is_disabled_with_errors(self):
+        # UnicodeDecodeError is a ValueError, not an OSError: a corrupted
+        # config file must still mean "disabled", never a routing crash.
+        path = self.tmp_path / "route-canary.json"
+        path.write_bytes(b'{"enabled": true, \xff\xfe}')
+        with _config_env(path):
+            config, errors = canary_router.read_canary_config()
+        self.assertIsNone(config)
+        self.assertTrue(errors)
+
     def test_invalid_percentage_rejected(self):
         for bad in (0, 101, "ten", None):
             path = _write_config(self.tmp_path, {
@@ -546,6 +556,55 @@ class TestCanaryRouting(CanaryRoutingTestBase):
         canary = [e for e in self._decisions()
                   if e["payload"].get("mode") == "canary"]
         self.assertEqual(canary, [])
+
+    def test_diversion_requires_persisted_decision(self):
+        # No persisted canary decision, no canary execution: if the
+        # diverted decision cannot be durably recorded, the routing
+        # must fall back to the legacy pick, and the reservation must
+        # record the legacy agent.
+        _seed_decision_history(self.store, self.db_path, 30, "codex")
+        self._enable_canary(percentage=100)
+
+        import sqlite3 as _sqlite3
+
+        real_record = self.store.record_event
+
+        def failing_record(event_type, payload, **kwargs):
+            if event_type == "route_decision" \
+                    and isinstance(payload, dict) \
+                    and payload.get("mode") == "canary":
+                raise _sqlite3.OperationalError("database is locked")
+            return real_record(event_type, payload, **kwargs)
+
+        with patch.object(self.store, "record_event",
+                          side_effect=failing_record):
+            selected = self._route("task-pf", "run-pf")
+        self.assertEqual(selected, "opencode")
+        canary = [e for e in self._decisions()
+                  if e["payload"].get("mode") == "canary"]
+        self.assertEqual(canary, [], "diverted execution without a "
+                         "persisted decision must never happen")
+        errors = self.store.list_events(event_type="route_decision_error")
+        canary_errors = [e for e in errors
+                         if e["payload"].get("mode") == "canary"]
+        self.assertTrue(canary_errors)
+        reservation = self._reservation("task-pf")
+        self.assertIsNotNone(reservation)
+        self.assertEqual(reservation["agent"], "opencode")
+
+    def test_diversion_persists_decision_before_returning(self):
+        # The diverted decision event must exist in the store by the
+        # time choose_agent returns (recorded inside the routing
+        # critical section, not after).
+        _seed_decision_history(self.store, self.db_path, 30, "codex")
+        self._enable_canary(percentage=100)
+        selected = self._route("task-pp", "run-pp")
+        self.assertEqual(selected, "codex")
+        canary = [e for e in self._decisions()
+                  if e["payload"].get("mode") == "canary"]
+        self.assertEqual(len(canary), 1)
+        self.assertEqual(canary[0]["payload"]["actual_agent"], "codex")
+        self.assertTrue(canary[0]["payload"]["diverted"])
 
 
 class TestCanaryDecisionPayload(unittest.TestCase):

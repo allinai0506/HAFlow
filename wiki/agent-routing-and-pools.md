@@ -178,15 +178,18 @@ Evidence:
 
 `FACT`（PR #103）显式请求 / workflow 覆盖 / node fixed 之外，auto 选路分支可被
 Canary 门接管：仅当操作者启用配置（默认关闭，`~/.herdr-controller/route-canary.json`
-或 `HERDR_ROUTE_CANARY_CONFIG`）、推荐 bucket 在白名单、且该 bucket 的
-`model_data_status` 与 `evaluation_data_status` 双 `sufficient`（复用 Shadow
-Evaluation 权威判定，扫描有界）时，`sha256("canary-v2|{run_id}|{task_id}")`
+或 `HERDR_ROUTE_CANARY_CONFIG`，损坏/非法 = 关闭）、推荐 bucket 在白名单、且该
+bucket 的 `model_data_status` 与 `evaluation_data_status` 双 `sufficient`（复用
+Shadow Evaluation 权威判定，扫描有界）时，`sha256("canary-v2|{run_id}|{task_id}")`
 mod 100 < percentage 的身份改派推荐 Agent（目标恒为池/健康/隔离过滤后的候选
-成员，reservation 记最终值）。每次路由恰一条 `route_decision`（mode=canary 带
-`legacy_agent`/`diverted`/`canary_gate` 审计，或 mode=shadow）；Canary 路径任何
-异常 fail-open 回 Legacy 并留 `route_decision_error`。Shadow 评估跳过 canary
-事件；观测对比由只读 `herdr-task canary-eval` 两臂（diverted vs 未分流）完成，
-只报事实——扩量是 #104 的人工决策。
+成员）。持久化门：真分流的 `route_decision`(mode=canary, diverted) 必须在路由
+临界区内、写 reservation 之前落盘成功（No persisted canary decision, no canary
+execution），失败即回 Legacy 并把 reservation 记为 Legacy；非分流决策锁外
+best-effort 记录。每次路由恰一条 `route_decision`；Canary 路径任何异常 fail-open
+回 Legacy 并留 `route_decision_error`。Shadow 评估跳过 canary 事件；观测对比由
+只读 `herdr-task canary-eval` 两臂（diverted vs 未分流）完成，臂样本经 #101 的
+execution 去重、bucket 按 recommended_agent × node × task_type 划分，只报事实
+——扩量是 #104 的人工决策。
 
 Evidence:
 - `herdr/canary_router.py` / `herdr/canary_evaluation.py`

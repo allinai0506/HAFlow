@@ -168,6 +168,9 @@ class TestCanaryArms(CanaryEvaluationTestBase):
         self.assertEqual(report["coverage"]["diverted_decisions"], 3)
         self.assertEqual(len(report["buckets"]), 1)
         bucket = report["buckets"][0]
+        # The admission unit is recommended_agent x node x task_type:
+        # the report must key buckets on the same identity.
+        self.assertEqual(bucket["recommended_agent"], "codex")
         self.assertEqual(bucket["node"], NODE)
         self.assertEqual(bucket["task_type"], TASK_TYPE)
         adaptive = bucket["adaptive_arm"]
@@ -195,6 +198,53 @@ class TestCanaryArms(CanaryEvaluationTestBase):
 
 
 class TestCanaryCoverage(CanaryEvaluationTestBase):
+    def test_duplicate_decisions_counted_once_per_execution(self):
+        # One (task_id, run_id) with a retry that produced two canary
+        # decisions must contribute exactly ONE arm sample: the same
+        # immutable Outcome must never be counted twice.
+        run_id, task_id = _settle_execution(
+            self.store, self.db_path, 0, "codex", wall=100.0)
+        _record_canary_decision(
+            self.store, run_id, task_id, actual_agent="codex",
+            recommended_agent="codex", legacy_agent="opencode",
+            diverted=True, ts=BASE_TS + 50_001.0)
+        _record_canary_decision(
+            self.store, run_id, task_id, actual_agent="codex",
+            recommended_agent="codex", legacy_agent="opencode",
+            diverted=True, ts=BASE_TS + 50_002.0)
+        report = canary_evaluation.build_canary_evaluation_report(
+            canary_evaluation.collect_canary_rows(self.db_path)[0])
+        self.assertEqual(report["coverage"]["canary_decisions"], 2)
+        self.assertEqual(report["coverage"]["settled_canary_executions"], 1)
+        self.assertEqual(len(report["buckets"]), 1)
+        self.assertEqual(
+            report["buckets"][0]["adaptive_arm"]["sample_count"], 1)
+        self.assertEqual(
+            report["buckets"][0]["adaptive_arm"]["median_wall_time_seconds"],
+            100.0)
+
+    def test_buckets_keyed_by_recommended_agent(self):
+        # Two whitelisted recommendations sharing node/task_type are two
+        # experiments; merging them would produce a delta representing
+        # neither. codex and claude stay separate buckets.
+        for idx, agent in ((0, "codex"), (1, "claude")):
+            run_id, task_id = _settle_execution(
+                self.store, self.db_path, idx, agent, wall=100.0)
+            _record_canary_decision(
+                self.store, run_id, task_id, actual_agent=agent,
+                recommended_agent=agent, legacy_agent="opencode",
+                diverted=True)
+        report = canary_evaluation.build_canary_evaluation_report(
+            canary_evaluation.collect_canary_rows(self.db_path)[0])
+        self.assertEqual(len(report["buckets"]), 2)
+        self.assertEqual(
+            [b["recommended_agent"] for b in report["buckets"]],
+            ["claude", "codex"],  # sorted by (agent, node, task_type)
+        )
+        for bucket in report["buckets"]:
+            self.assertEqual(bucket["adaptive_arm"]["sample_count"], 1)
+            self.assertEqual(bucket["legacy_arm"]["sample_count"], 0)
+
     def test_decision_without_outcome_is_coverage_only(self):
         run_id, task_id = _record_canary_decision(
             self.store, "run-open-1", "task-open-1", actual_agent="codex",

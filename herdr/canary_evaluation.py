@@ -36,6 +36,7 @@ from .shadow_rows import (
     _decision_identity,
     _outcome_matches,
     extract_prediction,
+    select_authoritative_execution_rows,
 )
 
 #: Facts-only note carried by every report and rendering.
@@ -227,22 +228,35 @@ def _delta(adaptive: Dict[str, Any], legacy: Dict[str, Any]) -> Dict[str, Any]:
 def build_canary_evaluation_report(
     rows: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
-    """Compose the deterministic machine-readable canary report."""
-    settled_rows = [row for row in rows if row.get("actual_outcome")]
+    """Compose the deterministic machine-readable canary report.
+
+    Two explicit sample units: ``coverage`` reads decision-level rows;
+    arm metrics read authoritative execution rows — the shadow dedup
+    (one (task_id, run_id) keeps at most one settled sample, latest
+    decision first) so a retried execution's immutable Outcome is
+    never counted twice. Buckets are keyed on the same identity the
+    gate admits: recommended_agent x node x task_type.
+    """
+    settled_rows = select_authoritative_execution_rows(rows)
     diverted = [row for row in rows if row["diverted"]]
     legacy = [row for row in rows if not row["diverted"]]
-    buckets: Dict[Tuple[str, str], Dict[str, List[Dict[str, Any]]]] = {}
+    buckets: Dict[Tuple[str, str, str], Dict[str, List[Dict[str, Any]]]] = {}
     for row in settled_rows:
-        key = (str(row["node"]), str(row["task_type"]))
+        key = (
+            str(row["recommended_agent"]),
+            str(row["node"]),
+            str(row["task_type"]),
+        )
         buckets.setdefault(
             key, {"adaptive": [], "legacy": []})["adaptive" if row["diverted"]
                                                  else "legacy"].append(row)
     bucket_reports = []
-    for (node, task_type) in sorted(buckets):
-        arms = buckets[(node, task_type)]
+    for (agent, node, task_type) in sorted(buckets):
+        arms = buckets[(agent, node, task_type)]
         adaptive_metrics = _arm_metrics(arms["adaptive"])
         legacy_metrics = _arm_metrics(arms["legacy"])
         bucket_reports.append({
+            "recommended_agent": agent,
             "node": node,
             "task_type": task_type,
             "adaptive_arm": adaptive_metrics,
@@ -300,7 +314,9 @@ def render_canary_report(report: Dict[str, Any]) -> str:
         lines.append("no settled canary executions in the scanned window")
     for bucket in buckets:
         lines.append(
-            f"bucket {bucket['node']} / {bucket['task_type'] or '(no type)'}")
+            f"bucket {bucket['recommended_agent']}"
+            f" / {bucket['node']}"
+            f" / {bucket['task_type'] or '(no type)'}")
         for arm_name in ("adaptive_arm", "legacy_arm"):
             arm = bucket[arm_name]
             label = "adaptive" if arm_name == "adaptive_arm" else "legacy"

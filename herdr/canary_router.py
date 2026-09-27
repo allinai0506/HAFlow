@@ -157,6 +157,10 @@ def read_canary_config(
         raw_text = cfg_path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return None, errors
+    except UnicodeError as exc:
+        # UnicodeDecodeError is a ValueError, not an OSError: a corrupted
+        # file must mean "disabled", never a routing crash.
+        return _invalid(errors, f"canary config is not valid UTF-8: {exc}")
     except OSError as exc:
         return _invalid(errors, f"canary config unreadable: {exc}")
     try:

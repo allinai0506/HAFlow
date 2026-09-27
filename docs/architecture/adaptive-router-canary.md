@@ -43,8 +43,19 @@ Legacy Router (_choose_agent_impl)
    重排身份归属 —— salt 是持久化契约的一部分。
 4. **一键回退 / fail-open**。Canary 规划任何异常（含 DB 读失败）→ 记
    `route_decision_error`（mode=canary，best-effort）→ 返回 Legacy Agent。
+   配置损坏（含非法 UTF-8）或配置加载的任何意外失败 → 一律视为关闭。
    运维回退 = 把 `enabled` 改为 false 或删除配置文件，立即生效（每次路由
    重新读配置，无缓存）。
+
+## 2a. 持久化门（No persisted canary decision, no canary execution）
+
+真正的分流（hash 命中且推荐 != Legacy 选择）必须先落盘再提交：`route_decision`
+(mode=canary, diverted=true) 在路由临界区**内部**、写 reservation **之前**
+持久化（`record_event` 抛异常或返回 False receipt 即视为失败）。持久化失败 →
+明确回到 Legacy 选择，reservation 记 Legacy Agent —— 永远不会出现"Adaptive
+Agent 真实执行但没有 canary 决策事实"的孤儿分流。非分流决策（hash 未命中 /
+两路由器同判 / 分流被回退）在锁外 best-effort 记录：执行本身走 Legacy 路径，
+事件丢失只会让评估的 legacy 臂少一个样本，不会产生无法归属的执行。
 
 ## 3. 准入（sufficient-only）
 
@@ -70,6 +81,7 @@ Legacy Router (_choose_agent_impl)
   `legacy_agent`（Legacy 会选谁）、`diverted`（最终执行者是否偏离 Legacy）、
   `canary_gate`（bucket_key / hash_bucket / effective_percentage /
   hash_divert / would_divert / admission 状态与样本数 / truncated）。
+  真分流（diverted=true）的决策在路由临界区内先持久化（见 §2a）。
 - 未过门 → `mode: "shadow"`（与 v1 相同）。
 - `actual_agent` 恒等于真正执行的 Agent：Outcome 归属契约
   （`decision.actual_agent == outcome.agent`）对分流与非分流执行同等成立。
@@ -80,6 +92,11 @@ Shadow 的语义是"recommended 从未执行，uplift 只是反事实预测"。C
 执行破坏了这个前提（recommended 真的跑了），若混入会把 agreement 虚高。
 因此 shadow 集合跳过 `mode="canary"` 事件并在 collection meta 计数
 （`skipped_canary_events`）；canary 事件由 Canary Evaluation 独占。
+
+Canary Evaluation 的臂样本同样遵循 #101 的 execution 去重
+（`select_authoritative_execution_rows`）：一个 `(task_id, run_id)` 无论
+产生多少次决策，至多贡献一个臂样本；bucket 按 `recommended_agent × node ×
+task_type` 划分，与准入单位一致。
 
 共享的 bounded-scan 实现在 `shadow_rows._collect_rows_with_meta`，以
 `mode` 参数选择切片：`"shadow"`（默认，排除 canary）、`"canary"`（仅

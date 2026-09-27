@@ -1195,3 +1195,18 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
   S6 对抗自查修复 1 项（共享过滤器 --agent "" 行为漂移）；MERGE_READY。
 - 已知边界：评审独立性受限（同模型自查，子代理被宿主拒绝）；未在真实生产
   workflow 触发（需授权，默认关闭）。
+
+## [2026-09-27] fix | PR #103 评审修复：3 P1 + 1 P2（实验真实性）
+- P1 配置读取：非法 UTF-8（UnicodeDecodeError 非 OSError）会逃逸并打断路由；
+  修复为捕获 UnicodeError + agent_router 调用点兜底，任何配置失败 = 关闭。
+- P1 持久化门：diversion 原为锁外 best-effort 记录，决策落盘失败仍真执行 →
+  评估永远无法归属。改为锁内、写 reservation 之前先持久化
+  route_decision(canary, diverted)（record_event 异常或 False receipt = 失败），
+  失败明确回 Legacy 并把 reservation 记为 Legacy。
+  原则：No persisted canary decision, no canary execution。
+- P1 evaluation dedup：同一 (task_id, run_id) 的 retry 多决策会把 immutable
+  Outcome 重复计入两臂；复用 #101 的 select_authoritative_execution_rows。
+- P2 bucket 身份：报告 key 从 node × task_type 改为 recommended_agent × node ×
+  task_type，与准入单位一致；渲染同步。
+- 验收：全量 1841 passed + 44 subtests（+5 修复测试）；真实链路 9 步 PASS
+  （新增：损坏配置 fail-open、持久化失败 → Legacy + Legacy reservation）。
