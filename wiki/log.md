@@ -1337,3 +1337,24 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
   （注：一次全量运行中 `test_trajectory_observer` 的 done-gateway 用例偶发失败，
   属该用例自带后台调度 + `drain(timeout=10)` 的既有 timing flake，单独与重跑均通过，
   与本 PR 无关）。
+
+## [2026-09-27] merge | PR #106 已合并（Adaptive Router Controlled Rollout 收口）
+- merge `0d862cc`：main 现含 per-bucket 受控扩量 —— 闭枚举阶段 off/5/10/25/50、
+  人工相邻推进（`--reason` 必填、跨级拒绝）、任意阶段可直达 `off`、
+  `HERDR_ADAPTIVE_ROLLOUT_ENABLED=false` 一键停全部扩量且保留历史。
+- 状态模型：`rollout_state`（复合主键 agent×node×task_type）+ `rollout_audit`
+  （不可变、每次变化恰好一条），读-判-写收敛进单个 `BEGIN IMMEDIATE`，CAS 身份含
+  “是否存在”+百分比，no-op 同样在事务内校验。
+- 复用 #103：`sha256("canary-v2|run|task") mod 100` 分流身份、白名单、准入、
+  持久化门（No persisted canary decision, no canary execution）全部未动，
+  只替换 `effective_percentage` 来源，故 5%⊂10%⊂25%⊂50% 单调包含、不洗牌。
+- Safety Guard 只读消费 canary-eval 两臂 facts，阈值集中可调、样本不足安静、
+  可关闭，只写“下”；guard 读取把 bucket 范围下推到 SQL，scan_cap 只被可能命中的
+  行消耗；评不了（DB/schema 故障）一律走 Legacy。
+- 评审闭环：5 轮外部评审共 13 项（2+2+1+5+3）全部修复并补回归测试，多项已验证
+  「撤掉修复即失败」；S6 工件 round 6 MERGE_READY。
+- 合并后 main 验证：全量 1927 passed + 50 subtests。
+- 遗留边界（有意不在本 PR）：热路径 guard 需 `HERDR_ROLLOUT_HOT_GUARD=1` opt-in；
+  未 staged 的 bucket 仍以 canary 配置为准；CAS 无 `revision` 计数器（当前单行模型
+  足够）；75/100 与 Adaptive 默认接管另行讨论；仓库尚无 GitHub Actions，
+  测试结论均来自本地实跑。
