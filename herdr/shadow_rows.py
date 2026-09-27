@@ -291,11 +291,29 @@ def _collect_rows_with_meta(
     filter is applied before the matched-row budget, so a per-bucket
     read spends its whole budget on that bucket instead of letting a
     busier sibling consume it.
+
+    Supplying ``recommended_agent`` additionally pushes the whole bucket
+    scope (mode + agent + node + task_type) into SQL via ``exact_bucket``,
+    because ``scanned`` counts every row a page returns: filtering in
+    Python alone protects the matched-row budget but not the scan cap,
+    which unrelated buckets and shadow decisions would still eat. The
+    pushdown is keyed on ``recommended_agent`` so it stays opt-in; a
+    caller that reports the rows its filter removed (shadow evaluation's
+    ``skipped_canary_events``) never supplies it and keeps its counters
+    exact.
     """
     if mode not in ("shadow", "canary", "all"):
         raise ValueError(f"unknown collection mode: {mode!r}")
     if row_builder is None:
         row_builder = build_evaluation_row
+    exact_bucket = None
+    if recommended_agent is not None:
+        exact_bucket = state_db.ExactDecisionBucket(
+            mode=mode if mode != "all" else "canary",
+            recommended_agent=recommended_agent,
+            node=node,
+            task_type=task_type,
+        )
     effective_limit = (
         state_db.ROUTE_DECISION_DEFAULT_LIMIT if limit is None else int(limit)
     )
@@ -330,6 +348,7 @@ def _collect_rows_with_meta(
         chunk = state_db.query_route_decisions(
             limit=query_limit, since=since, before=query_before,
             before_id=query_before_id, db_path=db_path,
+            exact_bucket=exact_bucket,
         )
         if not chunk:
             stop_reason = "exhausted"

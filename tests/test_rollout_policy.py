@@ -714,6 +714,86 @@ class TestGuard(unittest.TestCase):
         self.assertTrue(verdict["triggered"],
                         "a starved read would wrongly report quiet")
 
+    def _record_noise_decision(self, index, *, recommended, node, task_type,
+                               mode):
+        """One canary/shadow route_decision with no settled outcome.
+
+        Only the decision stream matters here: the point is how many
+        unrelated rows sit between the scan start and the target bucket.
+        """
+        from herdr import adaptive_router
+        ts = 1_700_500_000.0 + index
+        run_id, task_id = f"noise-run-{index}", f"noise-task-{index}"
+        if mode == "canary":
+            payload = adaptive_router.build_canary_decision(
+                workflow_id="wf-noise", run_id=run_id, task_id=task_id,
+                node=node, task_type=task_type, actual_agent=recommended,
+                recommended_agent=recommended, legacy_agent="opencode",
+                diverted=False, rankings=[], gate={}, created_at=ts)
+        else:
+            payload = adaptive_router.build_shadow_decision(
+                workflow_id="wf-noise", run_id=run_id, task_id=task_id,
+                node=node, task_type=task_type, actual_agent=recommended,
+                rankings=[], created_at=ts)
+        self.store.record_event(
+            "route_decision", payload, workflow_id="wf-noise", node_id=node,
+            task_id=task_id, agent_id=recommended,
+            source=f"adaptive-router-{mode}", timestamp=ts, run_id=run_id)
+
+    def test_guard_scan_budget_is_not_consumed_by_other_buckets(self):
+        # Reviewer P1: the guard's read must scope in SQL, not in Python.
+        # `scanned` counts every row a page returns, so filtering after
+        # the read still lets unrelated decisions eat scan_cap and the
+        # target bucket is never seen -> guard silent on a failing bucket.
+        _seed_collapsed_bucket(self.store, self.db_path, test=self)  # codex
+        # 200+ decisions of unrelated kinds, all NEWER than the target's.
+        # scan_cap is 400, so 400 raw rows would exhaust it before the
+        # target is reached if scoping happened after the read.
+        for index in range(300):
+            self._record_noise_decision(
+                index, recommended="claude" if index % 2 else "opencode",
+                node="implementation", task_type="fix", mode="canary")
+        for index in range(100):
+            self._record_noise_decision(
+                1000 + index, recommended="codex", node="implementation",
+                task_type="fix", mode="shadow")
+        verdict = rollout_policy.evaluate_guard(
+            self.db_path, agent="codex", node="implementation",
+            task_type="fix")
+        self.assertIsNotNone(verdict["bucket"],
+                             "scan budget was consumed by unrelated rows")
+        self.assertEqual(verdict["bucket"]["recommended_agent"], "codex")
+        self.assertTrue(verdict["triggered"])
+
+    def test_exact_bucket_read_is_scoped_in_sql(self):
+        # The pushdown must be a source-level predicate, not a Python
+        # post-filter: a stricter guard budget would then be enough.
+        from herdr import canary_evaluation
+        for index in range(40):
+            self._record_noise_decision(
+                index, recommended="codex", node="implementation",
+                task_type="fix", mode="canary")
+        rows, meta = canary_evaluation.collect_canary_rows(
+            self.db_path, node="implementation", task_type="fix",
+            recommended_agent="codex", limit=5, scan_cap=5)
+        self.assertEqual(len(rows), 5)
+        for row in rows:
+            self.assertEqual(row["recommended_agent"], "codex")
+            self.assertEqual(row["node"], "implementation")
+        # The budget is spent only on rows that can match.
+        self.assertLessEqual(meta["source_window_size"], 5)
+
+    def test_shadow_evaluation_meta_counters_are_unaffected(self):
+        # The pushdown is opt-in via recommended_agent precisely so the
+        # shadow collection can still count what its filter removed.
+        from herdr import shadow_evaluation
+        self._record_noise_decision(
+            1, recommended="codex", node="n", task_type="t", mode="canary")
+        self._record_noise_decision(
+            2, recommended="claude", node="n", task_type="t", mode="shadow")
+        report = shadow_evaluation.run_shadow_evaluation(self.db_path)["report"]
+        self.assertEqual(report["collection"]["skipped_canary_events"], 1)
+
     def test_guard_is_scoped_to_its_own_bucket(self):
         # A collapsed codex/implementation/fix bucket must not condemn a
         # different node, task_type, or recommended agent.
@@ -1386,6 +1466,96 @@ class TestRolloutRouterIntegration(unittest.TestCase):
         self.assertEqual(len(rollout_policy.get_history(
             self.db_path, agent="codex", node="implementation",
             task_type="fix")), 1)
+
+    def test_corrupt_stage_can_still_be_rolled_back_to_off(self):
+        # Reviewer P2: a stage outside the closed enum must not strand
+        # the operator. Rewriting the snapshot for the CAS would make
+        # every attempt conflict against the corrupt row on disk.
+        from herdr import state_db as _sdb
+        corrupt = _sdb.RolloutSnapshot(exists=True, percentage=75)
+        _sdb.transact_rollout_stage(
+            agent="codex", node="implementation", task_type="fix",
+            expected=_sdb.RolloutSnapshot(exists=False, percentage=0),
+            write=_sdb.RolloutWrite(
+                new_percentage=75, previous_percentage=0, action="rollback",
+                reason="simulated corruption", source="test",
+                algorithm_version=rollout_policy.ALGORITHM_VERSION,
+                created_at=1_700_000_000.0),
+            db_path=self.db_path)
+        live = _sdb.read_rollout_snapshot(
+            "codex", "implementation", "fix", self.db_path)
+        self.assertEqual(live, corrupt)
+        # Routing already treats a corrupt stage as serving nothing.
+        self.assertEqual(rollout_policy.effective_percentage(
+            self.db_path, agent="codex", node="implementation",
+            task_type="fix", config_fallback=50), 0)
+        # While corrupt, only off is allowed: corruption is not a licence
+        # to promote to an arbitrary stage.
+        with self.assertRaises(ValueError):
+            rollout_policy.set_stage(
+                self.db_path, agent="codex", node="implementation",
+                task_type="fix", new_percentage=5, reason="promote",
+                source="cli", config_fallback=50)
+        # "off" must repair it, not conflict, and not report a no-op.
+        record = rollout_policy.set_stage(
+            self.db_path, agent="codex", node="implementation",
+            task_type="fix", new_percentage=0, reason="repair",
+            source="cli", config_fallback=50)
+        self.assertEqual(record["action"], "rollback")
+        self.assertTrue(record["changed"])
+        self.assertEqual(_sdb.read_rollout_snapshot(
+            "codex", "implementation", "fix", self.db_path),
+            _sdb.RolloutSnapshot(exists=True, percentage=0))
+        # Repaired, the bucket is an ordinary off row again.
+        self.assertEqual(rollout_policy.set_stage(
+            self.db_path, agent="codex", node="implementation",
+            task_type="fix", new_percentage=5, reason="promote now",
+            source="cli", config_fallback=50)["action"], "promote")
+
+    def test_corrupt_stage_never_promotes_automatically(self):
+        from herdr import state_db as _sdb
+        _sdb.transact_rollout_stage(
+            agent="codex", node="implementation", task_type="fix",
+            expected=_sdb.RolloutSnapshot(exists=False, percentage=0),
+            write=_sdb.RolloutWrite(
+                new_percentage=75, previous_percentage=0, action="rollback",
+                reason="simulated corruption", source="test",
+                algorithm_version=rollout_policy.ALGORITHM_VERSION,
+                created_at=1_700_000_000.0),
+            db_path=self.db_path)
+        # The guard may only ever write off.
+        with self.assertRaises(ValueError):
+            rollout_policy.decide_rollout_change(
+                _sdb.RolloutSnapshot(exists=True, percentage=75),
+                new_percentage=5)
+
+    def test_bucket_key_is_unambiguous(self):
+        # Reviewer P2: a "/"-joined key cannot tell ("a/b","c","d") from
+        # ("a","b/c","d"), so two buckets could share one row.
+        from herdr import state_db as _sdb
+        first = _sdb.rollout_bucket_key("a/b", "c", "d")
+        second = _sdb.rollout_bucket_key("a", "b/c", "d")
+        self.assertNotEqual(first, second)
+        # And storage is keyed by the real columns, not by that string.
+        rollout_policy.set_stage(
+            self.db_path, agent="a/b", node="c", task_type="d",
+            new_percentage=5, reason="r", source="cli")
+        rollout_policy.set_stage(
+            self.db_path, agent="a", node="b/c", task_type="d",
+            new_percentage=5, reason="r", source="cli")
+        # Two rows, two keys: a shared string key would have merged them.
+        states = {s["bucket_key"] for s in rollout_policy.list_states(
+            self.db_path)}
+        self.assertEqual(len(states), 2)
+        # Moving one leaves the other alone.
+        rollout_policy.set_stage(
+            self.db_path, agent="a/b", node="c", task_type="d",
+            new_percentage=0, reason="rollback", source="cli")
+        self.assertEqual(rollout_policy.get_stage(
+            self.db_path, "a/b", "c", "d"), 0)
+        states = {s["bucket_key"] for s in rollout_policy.list_states(
+            self.db_path)}
+        self.assertEqual(len(states), 2)
 
     def test_single_snapshot_read_covers_both_fields(self):
         # One query, one point in time: the caller can never stitch

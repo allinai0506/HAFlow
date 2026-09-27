@@ -21,8 +21,16 @@ Bucket = `recommended_agent × node × task_type`，独立维护状态。
 
 `Current State + Immutable Audit Events`，SQLite 同库两表：
 
-- `rollout_state(bucket_key PK, agent, node, task_type, percentage, updated_at, updated_by, reason)` —— 当前值；
+- `rollout_state(agent, node, task_type, percentage, updated_at, updated_by, reason)` —— 当前值，**复合主键 `(agent, node, task_type)`**；
 - `rollout_audit(id PK, bucket_key, agent, node, task_type, previous_percentage, new_percentage, action, reason, source, algorithm_version, created_at)` —— 每次变化恰好一条，只增不改。
+
+> ### 为什么不用分隔字符串做主键
+>
+> `"/"` 拼接的 key 无法区分 `("a/b","c","d")` 与 `("a","b/c","d")` —— 两者都得到
+> `a/b/c/d`，于是两个不同 bucket 可能读写同一行状态。存储因此直接用**列级复合主键**。
+> `rollout_bucket_key()` 只用于审计与 CLI 展示，改用 JSON 数组编码
+> （`["a/b","c","d"]`），保证展示同样无歧义。早期按 `bucket_key` 主键建的表会被
+> `_migrate_rollout_state_key` 按真实列原地迁移。
 
 `state_db.transact_rollout_stage` 把**读-判-写**收敛进一个事务：
 
@@ -64,6 +72,13 @@ Audit 契约字段：`recommended_agent/node/task_type/previous_percentage/new_p
 
 未来若要更强的并发控制，可在 `rollout_state` 增加 `revision` 列并纳入 CAS 身份
 （当前 `BEGIN IMMEDIATE` + 全量快照比对已足够）。
+
+**腐坏 stage 只能回到 off**：若磁盘上的 stage 落在闭枚举之外（例如 75），
+`effective_percentage` 已按 fail-safe 解析为 0（不分流）。此时 `rollout off`
+会**写入**显式 0 行来修复，而不是报 no-op、也不是因改写快照而必然 CAS 冲突 ——
+否则运维会被困在无法回到已知状态的死路。腐坏期间任何其他 stage 一律拒绝
+（`corrupt rollout state; only rollback to off is allowed`），腐坏不构成自动
+扩量的许可。CAS 始终使用**原始**磁盘快照。
 
 ## 3. 与 Canary 的集成
 
@@ -132,12 +147,19 @@ rollout 模块本身不可用 → 0（percentage_source=rollout_unavailable）
 - 样本不足 → 安静（不定罪），可关闭（`HERDR_ROLLOUT_GUARD_ENABLED=0`）；
 - 触发 → `maybe_auto_rollback` 持久化 `→off`（`action=auto_rollback`）；
 - 读预算有界：`GUARD_DECISION_LIMIT=200` 匹配决策、`GUARD_SCAN_CAP=400` 扫描预算；
-- 触发判定只覆盖本 bucket，且用 `recommended_agent` 精确过滤（**在 limit 之前生效**）。
+- 触发判定只覆盖本 bucket，并把整段 bucket 范围**下推到 SQL**
+（`state_db.ExactDecisionBucket`：mode + recommended_agent + node + task_type）。
 只按 node/task_type 过滤是不够的：同一 `implementation/fix` 下可能有 codex/claude/
 opencode 多个 bucket，若更活跃的兄弟 bucket 吃掉全部 200 条决策预算，目标 bucket
 就会读成「无样本」→ guard 安静 → 目标 bucket 明明在恶化却继续放行 Adaptive。
 `agent` 过滤器语义太宽（同时匹配 actual/recommended/legacy），因此单独提供
 `recommended_agent`。
+
+下推到 SQL 是必需的，因为扫描预算 `scanned` 统计的是**每页返回的原始行数**：
+只在 Python 侧过滤能保护 matched 预算，却保护不了 `scan_cap` —— 无关 bucket 与
+shadow 决策照样会吃光它。该下推是**按 `recommended_agent` opt-in** 的：shadow 评估
+需要靠 Python 侧 mode 过滤来统计 `skipped_canary_events`，因此从不传
+`recommended_agent`，计数语义保持不变。
 
 判定结果用 `status` 区分「评过了」与「评不了」，因为两者要求的路由方向相反：
 

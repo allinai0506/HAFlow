@@ -1312,3 +1312,28 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
   （`insufficient_samples`）仍是正常判断，退出 0。
 - 证据：rollout 专项 66 passed + 6 subtests（新增快照 CAS/no-op CAS/单次快照读/
   guard 饿死/split-brain/check-guard 退出码等回归）；全量 1921 passed + 50 subtests。
+
+## [2026-09-27] fix | PR #106 评审修复四：source 级过滤、腐坏 stage 可回退、bucket 键无歧义
+- 评审结论：上轮 5 项已修好；本轮 1 P1 + 2 P2。唯一 P1 直接影响止损有效性。
+- P1（guard 的 scan_cap 仍被无关决策吃光）：`recommended_agent` 只在 Python 层过滤，
+  而 `scanned += len(fresh)` 统计的是**每页返回的原始行数**、且在过滤之前，
+  因此 400 条更晚的其他 bucket / shadow 决策仍会耗尽 `scan_cap=400`，目标 bucket
+  根本看不到 → guard 安静 → 目标 bucket 明显恶化却继续放行。
+  修复：新增 `state_db.ExactDecisionBucket`，把 mode + recommended_agent + node +
+  task_type 作为 **SQL WHERE 谓词**下推到 `query_route_decisions`，预算只被可能命中的
+  行消耗。下推按 `recommended_agent` opt-in：shadow 评估依赖 Python 侧 mode 过滤来
+  统计 `skipped_canary_events`，从不传该参数，计数语义逐字不变（新增回归锁定）。
+- P2（腐坏 stage 无法 emergency off）：`decide_rollout_change` 遇到闭枚举外的 stage
+  时把快照改写成 `absent/0`，导致 CAS 必然冲突于磁盘上真实的腐坏行，运维被困死路。
+  修复：CAS 始终使用**原始**快照；腐坏时 `off` 会真正写入以修复（而不是 no-op），
+  腐坏期间任何其他 stage 一律拒绝。写这个测试时还纠正了 no-op 判定：它必须比较
+  **目标值**而非有效比例，且排除腐坏情形，否则首次接管的无行 promote 会被误判 no-op。
+- P2（bucket_key `/` 分隔符碰撞）：`("a/b","c","d")` 与 `("a","b/c","d")` 都得到
+  `a/b/c/d`，两个不同 bucket 可能读写同一行。修复：`rollout_state` 改用**列级复合主键**
+  `(agent, node, task_type)`；展示/审计用的 `rollout_bucket_key` 改用 JSON 数组编码；
+  早期按 bucket_key 主键建的表由 `_migrate_rollout_state_key` 按真实列原地迁移。
+- 验证：三项修复均已确认「撤掉即失败」（分别复现 scan 预算被吃光、CAS 冲突、
+  key 碰撞）。rollout 专项 72 passed + 6 subtests；全量 1927 passed + 50 subtests
+  （注：一次全量运行中 `test_trajectory_observer` 的 done-gateway 用例偶发失败，
+  属该用例自带后台调度 + `drain(timeout=10)` 的既有 timing flake，单独与重跑均通过，
+  与本 PR 无关）。

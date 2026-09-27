@@ -316,21 +316,33 @@ def decide_rollout_change(
     state it was not made against.
     """
     nxt = normalize_percentage(new_percentage)
+    corrupt = False
     try:
         staged = normalize_percentage(snapshot.percentage)
     except ValueError as exc:
-        # Corrupt staged value: only a rollback to off may proceed.
+        # A corrupt staged value can only be repaired by going to off.
+        # The snapshot is deliberately left untouched: it is the CAS
+        # identity, and rewriting it here would guarantee a conflict
+        # against the corrupt row that actually exists on disk, leaving
+        # the operator with no way back to a known state.
         if nxt != 0:
             raise ValueError(
                 "corrupt rollout state; only rollback to off is allowed"
             ) from exc
-        staged = 0
-        snapshot = state_db.RolloutSnapshot(exists=False, percentage=0)
-    # What is actually being diverted right now: the staged row when one
-    # exists (explicit off included), otherwise the canary config.
-    effective_prev = (
-        staged if snapshot.exists else _safe_fallback(config_fallback))
-    if nxt == effective_prev:
+        staged, corrupt = 0, True
+    if corrupt:
+        # A value outside the closed stage enum serves nothing:
+        # effective_percentage already resolves it to 0.
+        effective_prev = 0
+    elif snapshot.exists:
+        effective_prev = staged
+    else:
+        effective_prev = _safe_fallback(config_fallback)
+    # A no-op means the target percentage is already what is being
+    # diverted: the row holds it, or there is no row and nothing is
+    # served. A corrupt row is the exception that must still write, or
+    # the operator could never repair it back to a known state.
+    if nxt == effective_prev and not corrupt:
         return RolloutDecision(
             snapshot=snapshot, staged=staged, effective_prev=effective_prev,
             new_percentage=nxt, is_noop=True, action="noop")

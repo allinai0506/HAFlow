@@ -296,6 +296,8 @@ herdr-task rollout check-guard --agent codex --node implementation \
   `--auto-rollback` 触发时持久化 `→off`（`action=auto_rollback`）；
 - `set` / `off`：非法阶段或开放百分比、跨级推进、缺 `--reason`、并发冲突
   一律 exit 2（状态未变）；存储失败 exit 1（无部分生效）；
+- bucket 身份是复合主键 `(agent, node, task_type)`，两个不同 bucket 不会共享一行；
+- stage 落在 off/5/10/25/50 之外时只有 `off` 可用，且 `off` 会写入修复腐坏行；
 - 并发保护：CAS 覆盖「行是否存在 + 百分比」，紧急回退不会被读到过期的 promotion
   覆盖，no-op 同样校验（不会从过期读报告 “already off”）；
 - 读写共用同一个 DB 解析器，不会出现 set 写一个库、status 读另一个库；
