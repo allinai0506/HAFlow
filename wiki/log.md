@@ -1228,3 +1228,9 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - 不变量：只读旁路（写操作复用既有 signoff/execute-action 接口）；工位探针 ≤20、3s 超时、8 并发、失败隔离；
   交付为空是真话（生产尚无 delivery 记录，FR-4 未落地）。
 - 证据：全量 1810 passed + 44 subtests；`/api/dashboard` 0.09s；首页 200 + 302 smoke。
+
+## [2026-09-27] feat | 仪表板工作流筛选（feat/dashboard-filter）
+- 补齐：仪表板下拉框按工作流筛选（默认全部），筛选后四段/KPI 均按该工作流；
+  「进入该工作流」跳工厂页管理；`?view=dashboard&workflow_id=` 深链与视图持久化。
+- 数据：标题复用 `_with_subject`；未知工作流返回空分段不抛错；选择器 50 个最近优先。
+- 证据：全量 1855 passed + 44 subtests；scoped API 与首页 smoke 通过。

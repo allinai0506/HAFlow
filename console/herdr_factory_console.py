@@ -741,20 +741,24 @@ def _dashboard_pane_runtime(pane_id):
     except Exception:
         return None
 
-def dashboard_data(limit_tasks=50, limit_workflows=50):
+def dashboard_data(limit_tasks=50, limit_workflows=50, workflow_id=None):
     """人类仪表板聚合(只读旁路):任务+工位实时/等你决策/最新交付/卡住。
 
     数据权威: tasks→StateStore经kernel; 工位实时→herdr agent get(只读探针);
-    阻断→controller_actions; 交付→workflow_docs+delivery_record; 停滞→projection。
+    阻断→controller_actions; 交付→workflow_docs+delivery_record; 停滞→projection;
+    工作流标题→workflows()+_with_subject。
     任一来源失败只隔离该工作流/工位,不拖垮整页;工位探针有界(≤20)+3s 超时+并发上限 8。
+    workflow_id 未知时返回空分段(fail-soft),不抛错。
     """
     now=time.time()
     try:
-        all_tasks=tasks()
+        _all=tasks()
     except Exception:
-        all_tasks=[]
-    if not isinstance(all_tasks,list):
-        all_tasks=[]
+        _all=[]
+    if not isinstance(_all,list):
+        _all=[]
+    scope=(workflow_id or '').strip() or None
+    all_tasks=[t for t in _all if (t.get('workflow_id') or 'unknown')==scope] if scope else _all
     try:
         wf_map=workflows()
     except Exception:
@@ -839,7 +843,19 @@ def dashboard_data(limit_tasks=50, limit_workflows=50):
             deliveries.append({'workflow_id':wid,'title':str(eff.get('title') or ''),'delivery_branch':str(eff.get('delivery_branch') or eff.get('body') or ''),'candidate_sha':str(eff.get('candidate_sha') or ''),'review_task':str(eff.get('review_task') or eff.get('task_id') or ''),'test_gate':str(eff.get('test_gate') or ''),'ts':ts})
         except Exception:
             continue
-    return herdr_dashboard.build_dashboard(all_tasks,blockers=blockers,actions_by_task=actions_by_task,deliveries=deliveries,stalls=stalls,anomalies=anomalies,runtimes=runtimes,now=now,limits={'tasks':limit_tasks,'deliveries':10,'attention':30,'stuck':30})
+    # 选择器选项:全部工作流(最近优先,≤50),标题复用 _with_subject
+    _by_wf_all={}
+    for t in _all:
+        _by_wf_all.setdefault(t.get('workflow_id') or 'unknown',[]).append(t)
+    wf_options=[]
+    for wid in sorted(_by_wf_all, key=lambda w:max([_upd(t) for t in _by_wf_all[w]] or [0.0]), reverse=True)[:50]:
+        wts=_by_wf_all[wid]
+        subj=_with_subject(dict(wf_map.get(wid) or {}, workflow_id=wid))
+        wf_options.append({'workflow_id':wid,
+                           'title':subj.get('title') or subj.get('requirement_subject') or wid,
+                           'active':sum(1 for t in wts if t.get('status') not in {'superseded','cleaned'} and not t.get('superseded_by')),
+                           'attention':sum(1 for t in wts if not t.get('superseded_by') and (t.get('finalize_escalated') or t.get('stage_verdict')=='blocked' or t.get('status') in {'blocked','failed'}))})
+    return herdr_dashboard.build_dashboard(all_tasks,blockers=blockers,actions_by_task=actions_by_task,deliveries=deliveries,stalls=stalls,anomalies=anomalies,runtimes=runtimes,scope=scope,workflows=wf_options,now=now,limits={'tasks':limit_tasks,'deliveries':10,'attention':30,'stuck':30})
 
 def api_task_signoff(b):
     tid=str(b.get('task_id') or '').strip()
@@ -2565,7 +2581,7 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 1
   </div>
 </div>
 <script>
-let state={overview:null,project:null,workflow:null,ops:null,dash:null,projectId:null,workflowId:null,spaceId:null,space:null,opsMode:false,dashMode:false,taskFilter:'all',drawerTab:'tty',selectedTaskId:null,taskDrawerTab:'overview',selectedTaskDetail:null};
+let state={overview:null,project:null,workflow:null,ops:null,dash:null,projectId:null,workflowId:null,spaceId:null,space:null,opsMode:false,dashMode:false,dashWorkflowId:null,taskFilter:'all',drawerTab:'tty',selectedTaskId:null,taskDrawerTab:'overview',selectedTaskDetail:null};
 const VIEW_KEY='herdrConsoleView';
 function closeMoreMenu(){const dd=document.getElementById('moreDropdown');if(dd)dd.classList.remove('open')}
 function toggleMoreMenu(e){e.stopPropagation();const dd=document.getElementById('moreDropdown');if(dd)dd.classList.toggle('open')}
@@ -2608,7 +2624,7 @@ function showPromptModal({title,label,defaultValue='',confirmText='确定',onCon
   const btn=document.getElementById('modalPromptBtn');
   if(btn)btn.onclick=async()=>{const val=input?input.value.trim():'';closeModal();if(onConfirm)await onConfirm(val)}
 }
-function saveViewState(){try{localStorage.setItem(VIEW_KEY,JSON.stringify({opsMode:state.opsMode,dashMode:state.dashMode,spaceId:state.spaceId,workflowId:state.workflowId}))}catch(e){}}
+function saveViewState(){try{localStorage.setItem(VIEW_KEY,JSON.stringify({opsMode:state.opsMode,dashMode:state.dashMode,dashWorkflowId:state.dashWorkflowId||null,spaceId:state.spaceId,workflowId:state.workflowId}))}catch(e){}}
 function loadViewState(){try{return JSON.parse(localStorage.getItem(VIEW_KEY)||'null')}catch(e){return null}}
 async function waitForWorkflowJob(jobId){
   try{
@@ -2909,7 +2925,7 @@ function showDashboard(){
   document.getElementById('projectTitle').textContent='我的仪表板';
   document.getElementById('workflowSubject').textContent='任务 · 工位实时 · 等你决策 · 每 10 秒自动刷新';
   document.getElementById('workflowSub').textContent='';
-  document.getElementById('workflowSwitcher').style.display='none';
+  const sw=document.getElementById('workflowSwitcher');sw.style.display='flex';sw.innerHTML='<label>工作流</label><select id="dashWfSel" onchange="dashSelectWorkflow(this.value)"><option value="">全部工作流</option></select><button class="btn" onclick="dashOpenWorkflow()">进入该工作流</button>';
   document.getElementById('stages').innerHTML='';
   document.getElementById('attentionBanner').style.display='none';
   document.getElementById('tasks').innerHTML='<div class="empty">正在加载仪表板…</div>';
@@ -2921,7 +2937,8 @@ async function exitDashboard(){
 }
 async function loadDashboard(){
   try{
-    const d=await api('/api/dashboard');
+    const qs=state.dashWorkflowId?('?workflow_id='+encodeURIComponent(state.dashWorkflowId)):'';
+    const d=await api('/api/dashboard'+qs);
     if(!state.dashMode)return;
     state.dash=d;renderDashboard();
   }catch(e){
@@ -2932,6 +2949,14 @@ async function loadDashboard(){
     }
   }
 }
+function dashSelectWorkflow(v){state.dashWorkflowId=v||null;saveViewState();loadDashboard()}
+async function dashOpenWorkflow(){
+  const wid=state.dashWorkflowId;
+  if(!wid)return toast('请先在下拉框选择一个工作流',true);
+  state.workflowId=wid;state.dashMode=false;state.dashWorkflowId=null;stopDashTimer();saveViewState();syncOpsUi();
+  try{await loadWorkflow(wid)}catch(e){toast(e.message,true)}
+  await refreshAll();
+}
 function dashPillFor(t){
   const s=t.status||'';
   if(s==='cleaned'||s==='completed'||s==='committed'||s==='integrated')return '<span class="badge cleaned">已完成</span>';
@@ -2940,7 +2965,7 @@ function dashPillFor(t){
   return '<span class="badge waiting">'+esc(t.status_text)+'</span>';
 }
 function renderDashboard(){
-  const d=state.dash||{tasks:[],attention:[],deliveries:[],stuck:[],counts:{tasks:0,attention:0,deliveries:0,stuck:0},generated_at_text:'—'};
+  const d=state.dash||{tasks:[],attention:[],deliveries:[],stuck:[],counts:{tasks:0,attention:0,deliveries:0,stuck:0},generated_at_text:'—',scope:'all',workflows:[]};
   const doneCount=d.tasks.filter(t=>['cleaned','completed','committed','integrated'].indexOf(t.status)>=0).length;
   const workT=d.tasks.filter(t=>['working','dispatched','agent_done','rework'].indexOf(t.status)>=0)[0];
   const bad=d.attention.length+d.stuck.length;
@@ -2950,6 +2975,8 @@ function renderDashboard(){
   document.getElementById('mAlerts').textContent=d.stuck.length;
   const mSpans=document.querySelectorAll('.metrics .metric span');
   if(mSpans[0])mSpans[0].textContent='任务总数';if(mSpans[1])mSpans[1].textContent='活跃任务';if(mSpans[2])mSpans[2].textContent='等你决策';if(mSpans[3])mSpans[3].textContent='卡住';
+  const sel=document.getElementById('dashWfSel');
+  if(sel){const cur=state.dashWorkflowId||'';sel.innerHTML='<option value="">全部工作流</option>'+(d.workflows||[]).map(w=>'<option value="'+esc(w.workflow_id)+'"'+(w.workflow_id===cur?' selected':'')+'>'+esc(w.title||w.workflow_id)+'（活 '+w.active+' / 等 '+w.attention+'）</option>').join('');if(cur&&!(d.workflows||[]).some(w=>w.workflow_id===cur)){const o=document.createElement('option');o.value=cur;o.textContent=cur+'（已归档或未知）';o.selected=true;sel.appendChild(o)}}
   document.getElementById('projects').innerHTML='<button class="project active" onclick="showDashboard()"><strong>我的仪表板</strong><small>任务 · 工位实时 · 等你决策 · '+esc(d.generated_at_text)+'</small></button>';
   const kpis='<div class="dash-kpis">'
     +'<div class="dash-kpi"><div class="k">任务完成</div><div class="v">'+doneCount+' <small>/ '+d.counts.tasks+'</small></div></div>'
@@ -4153,7 +4180,7 @@ async function bindSlotPrompt(p){
     }
   });
 }
-setInterval(()=>{if(!document.hidden)refreshAll()},600000);document.addEventListener('visibilitychange',()=>{if(!document.hidden)refreshAll()});(function(){const v=loadViewState();if(!v)return;state.opsMode=!!v.opsMode;state.dashMode=!!v.dashMode;state.spaceId=v.spaceId||null;state.workflowId=v.workflowId||null})();async function initFromUrlOrState(){const p=new URLSearchParams(window.location.search);let qWf=p.get('workflow_id');const qTask=p.get('task_id'),qPane=p.get('pane_id'),qOps=p.get('ops'),qView=p.get('view');if(!qWf&&qTask){try{const td=await api('/api/task?id='+encodeURIComponent(qTask));if(td&&td.task&&td.task.workflow_id)qWf=td.task.workflow_id}catch(e){}}if(!qWf&&!qTask&&!qPane&&!qOps&&!qView){state.opsMode?showOpsCenter():refreshAll();return}if(qOps==='1'||qOps==='true')state.opsMode=true;if(qView==='dashboard'){state.dashMode=true;state.opsMode=false}if(qWf){state.opsMode=false;state.dashMode=false;state.workflowId=qWf;try{const d=await api('/api/workflow?id='+encodeURIComponent(qWf));if(d&&d.project){if(d.project.project_id)state.projectId=d.project.project_id;if(d.project.workspace_id)state.spaceId=d.project.workspace_id}}catch(e){}}if(state.dashMode){await showDashboard()}else if(state.opsMode){await showOpsCenter()}else{await refreshAll();if(qWf&&state.workflowId!==qWf){try{await loadWorkflow(qWf)}catch(e){}}if(qTask){const el=document.querySelector(`[data-task-id="${CSS.escape?CSS.escape(qTask):qTask}"]`);if(el){el.scrollIntoView({behavior:'smooth',block:'center'});el.classList.add('task-highlight')}await openTaskDrawer(qTask)}else if(qPane){await showPane(qPane)}}}initFromUrlOrState();
+setInterval(()=>{if(!document.hidden)refreshAll()},600000);document.addEventListener('visibilitychange',()=>{if(!document.hidden)refreshAll()});(function(){const v=loadViewState();if(!v)return;state.opsMode=!!v.opsMode;state.dashMode=!!v.dashMode;state.dashWorkflowId=v.dashWorkflowId||null;state.spaceId=v.spaceId||null;state.workflowId=v.workflowId||null})();async function initFromUrlOrState(){const p=new URLSearchParams(window.location.search);let qWf=p.get('workflow_id');const qTask=p.get('task_id'),qPane=p.get('pane_id'),qOps=p.get('ops'),qView=p.get('view');if(!qWf&&qTask){try{const td=await api('/api/task?id='+encodeURIComponent(qTask));if(td&&td.task&&td.task.workflow_id)qWf=td.task.workflow_id}catch(e){}}if(!qWf&&!qTask&&!qPane&&!qOps&&!qView){state.opsMode?showOpsCenter():refreshAll();return}if(qOps==='1'||qOps==='true')state.opsMode=true;if(qView==='dashboard'){state.dashMode=true;state.opsMode=false;if(qWf)state.dashWorkflowId=qWf}if(qWf&&!state.dashMode){state.opsMode=false;state.dashWorkflowId=null;state.workflowId=qWf;try{const d=await api('/api/workflow?id='+encodeURIComponent(qWf));if(d&&d.project){if(d.project.project_id)state.projectId=d.project.project_id;if(d.project.workspace_id)state.spaceId=d.project.workspace_id}}catch(e){}}if(state.dashMode){await showDashboard()}else if(state.opsMode){await showOpsCenter()}else{await refreshAll();if(qWf&&state.workflowId!==qWf){try{await loadWorkflow(qWf)}catch(e){}}if(qTask){const el=document.querySelector(`[data-task-id="${CSS.escape?CSS.escape(qTask):qTask}"]`);if(el){el.scrollIntoView({behavior:'smooth',block:'center'});el.classList.add('task-highlight')}await openTaskDrawer(qTask)}else if(qPane){await showPane(qPane)}}}initFromUrlOrState();
 </script></body></html>'''
 HTML=HTML_TEMPLATE.replace('__PRODUCT_NAME__',PRODUCT_NAME).replace('__PRODUCT_TAGLINE__',PRODUCT_TAGLINE)
 
@@ -4176,7 +4203,7 @@ class Handler(BaseHTTPRequestHandler):
             if p=='/':return self.send_html(HTML)
             if p=='/dashboard':
                 self.send_response(302);self.send_header('Location','/?view=dashboard');self.end_headers();return
-            if p=='/api/dashboard':return self.send_json(200,dashboard_data())
+            if p=='/api/dashboard':return self.send_json(200,dashboard_data(workflow_id=self.query().get('workflow_id',[''])[0] or None))
             if p=='/api/overview':return self.send_json(200,overview())
             if p=='/api/ops-center':return self.send_json(200,ops_center(self.query().get('workflow_id',[''])[0] or None,self.query().get('include_tasks',[''])[0]=='1'))
             if p=='/api/templates':return self.send_json(200,templates_summary())
