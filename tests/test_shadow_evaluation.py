@@ -1307,5 +1307,64 @@ class ShadowEvalTrueReadOnlyTest(unittest.TestCase):
         self.assertTrue(db_path.exists())
 
 
+class CanaryModeExclusionTest(unittest.TestCase):
+    """Canary decisions belong to canary evaluation, never to shadow.
+
+    For canary-diverted executions the recommendation DID run, so
+    counting them as shadow "agreement" would inflate the rate. The
+    shadow scan skips mode="canary" events and reports how many it
+    skipped in the collection meta.
+    """
+
+    def setUp(self):
+        self.store, self.db_path = _make_env(self)
+
+    def _record_canary_decision(self, *, task_id, run_id, actual="codex",
+                                recommended="codex"):
+        decision = adaptive_router.build_canary_decision(
+            workflow_id="wf-shadow", run_id=run_id, task_id=task_id,
+            node=NODE, task_type=TASK_TYPE, actual_agent=actual,
+            recommended_agent=recommended, legacy_agent="opencode",
+            diverted=bool(actual != "opencode"),
+            rankings=[_ranking_entry(recommended, samples=30)],
+            gate={"bucket_key": f"{recommended}/{NODE}/{TASK_TYPE}"},
+            created_at=BASE_TS + 60.0,
+        )
+        self.store.record_event(
+            "route_decision", decision,
+            workflow_id="wf-shadow", node_id=NODE, task_id=task_id,
+            agent_id=actual, source="adaptive-router-canary",
+            timestamp=BASE_TS + 60.0, run_id=run_id,
+        )
+
+    def test_shadow_evaluation_skips_canary_events(self):
+        _settle_outcome(self.store, self.db_path, "task-sh-1", "run-sh-1",
+                        "opencode")
+        _record_decision(
+            self.store, task_id="task-sh-1", run_id="run-sh-1",
+            actual="opencode", recommended="codex")
+        _settle_outcome(self.store, self.db_path, "task-ca-1", "run-ca-1",
+                        "codex")
+        self._record_canary_decision(
+            task_id="task-ca-1", run_id="run-ca-1", actual="codex",
+            recommended="codex")
+        _settle_outcome(self.store, self.db_path, "task-ca-2", "run-ca-2",
+                        "codex")
+        self._record_canary_decision(
+            task_id="task-ca-2", run_id="run-ca-2", actual="codex",
+            recommended="codex")
+
+        bundle = shadow_evaluation.run_shadow_evaluation(self.db_path)
+        rows = bundle["rows"]
+        # Only the shadow decision survives; both canary events skipped.
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["task_id"], "task-sh-1")
+        report = bundle["report"]
+        self.assertEqual(
+            report["coverage"]["total_route_decisions"], 1)
+        self.assertEqual(
+            report["collection"]["skipped_canary_events"], 2)
+
+
 if __name__ == "__main__":
     unittest.main()

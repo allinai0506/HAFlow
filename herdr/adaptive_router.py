@@ -389,8 +389,53 @@ def record_shadow_decision(
     return decision
 
 
+CANARY_ALGORITHM_VERSION = "adaptive-router-v2-canary"
+
+
+def build_canary_decision(
+    *,
+    workflow_id: str,
+    run_id: str,
+    task_id: str,
+    node: str,
+    task_type: str,
+    actual_agent: str,
+    recommended_agent: str,
+    legacy_agent: str,
+    diverted: bool,
+    rankings: List[Dict[str, Any]],
+    gate: Dict[str, Any],
+    created_at: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Build the persisted canary payload (pure function, JSON-ready).
+
+    ``actual_agent`` MUST be the agent that will really execute: the
+    outcome join contract (decision.actual_agent == outcome.agent)
+    depends on it. ``legacy_agent`` keeps what the legacy router would
+    have picked so the evaluation can split observed arms.
+    """
+    return {
+        "mode": "canary",
+        "workflow_id": workflow_id or "",
+        "run_id": run_id or "",
+        "task_id": task_id or "",
+        "node": str(node or ""),
+        "task_type": normalize_task_type(task_type),
+        "actual_agent": actual_agent,
+        "recommended_agent": recommended_agent,
+        "legacy_agent": legacy_agent,
+        "diverted": bool(diverted),
+        "same_decision": bool(recommended_agent == actual_agent),
+        "candidate_rankings": [dict(row) for row in rankings],
+        "canary_gate": dict(gate or {}),
+        "algorithm_version": CANARY_ALGORITHM_VERSION,
+        "created_at": float(created_at) if created_at is not None else time.time(),
+    }
+
+
 __all__ = [
     "ALGORITHM_VERSION",
+    "CANARY_ALGORITHM_VERSION",
     "DEFAULT_HISTORY_LIMIT",
     "DEFAULT_LOOKBACK_DAYS",
     "FALLBACK_EXECUTION_SECONDS",
@@ -400,6 +445,7 @@ __all__ = [
     "RECOVERY_PENALTY_SECONDS",
     "REWORK_PENALTY_SECONDS",
     "ShadowContext",
+    "build_canary_decision",
     "build_shadow_decision",
     "collect_samples",
     "explain_ranking",

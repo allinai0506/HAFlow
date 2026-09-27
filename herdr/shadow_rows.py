@@ -201,12 +201,17 @@ def _matches_filters(
         return False
     if task_type is not None and row["task_type"] != str(task_type):
         return False
-    if (
-        agent is not None
-        and row["actual_agent"] != str(agent)
-        and row["recommended_agent"] != str(agent)
-    ):
-        return False
+    if agent is not None:
+        wanted = str(agent)
+        # Canary rows may also carry legacy_agent; shadow rows never do,
+        # and an empty legacy field must never widen shadow matching.
+        legacy = str(row.get("legacy_agent") or "")
+        if (
+            row["actual_agent"] != wanted
+            and row["recommended_agent"] != wanted
+            and (not legacy or legacy != wanted)
+        ):
+            return False
     return True
 
 
@@ -223,29 +228,12 @@ def _page_pairs(page: List[Dict[str, Any]]) -> List[Any]:
     return pairs
 
 
-def _build_page_rows(
-    page: List[Dict[str, Any]],
-    outcomes: Dict[Any, Dict[str, Any]],
-) -> List[Dict[str, Any]]:
-    rows: List[Dict[str, Any]] = []
-    for event in page:
-        payload = event.get("payload") or {}
-        if not isinstance(payload, dict):
-            payload = {}
-        identity = _decision_identity(payload, event)
-        outcome: Optional[Dict[str, Any]] = None
-        if identity["task_id"] and identity["run_id"]:
-            candidate = outcomes.get(
-                (identity["task_id"], identity["run_id"])
-            )
-            if candidate is not None and _outcome_matches(
-                identity,
-                str((payload.get("actual_agent")) or ""),
-                candidate,
-            ):
-                outcome = candidate
-        rows.append(build_evaluation_row(event, outcome))
-    return rows
+def _mode_matches(mode: str, event: Dict[str, Any]) -> bool:
+    """One decision-slice predicate for the shared bounded scan."""
+    if mode == "all":
+        return True
+    is_canary = str((event.get("payload") or {}).get("mode") or "") == "canary"
+    return is_canary if mode == "canary" else not is_canary
 
 
 def _collect_rows_with_meta(
@@ -259,6 +247,8 @@ def _collect_rows_with_meta(
     limit: Optional[int] = None,
     page_size: int = SCAN_PAGE_SIZE,
     scan_cap: Optional[int] = None,
+    mode: str = "shadow",
+    row_builder: Optional[Any] = None,
 ) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """Scan pages newest-first; join, filter and stop per page.
 
@@ -272,7 +262,25 @@ def _collect_rows_with_meta(
     - ``scan_cap``: hard scan budget hit first (truncated);
     - ``exhausted``: event stream ended (not truncated);
     - ``cursor_stalled``: cursor made no progress (truncated).
+
+    ``mode`` selects the decision slice from the shared scan:
+
+    - ``"shadow"`` (default): skip ``mode="canary"`` events — for them
+      the recommendation actually executed, which would inflate shadow
+      agreement; skipped events are counted in
+      ``skipped_canary_events``.
+    - ``"canary"``: keep only ``mode="canary"`` events (skipped others
+      counted in ``skipped_non_canary_events``).
+    - ``"all"``: keep everything (canary admission evidence).
+
+    ``row_builder(event, outcome) -> row | None`` builds one row from
+    one event; rows may be dropped by returning None. It defaults to
+    the shadow row builder; canary callers inject their own.
     """
+    if mode not in ("shadow", "canary", "all"):
+        raise ValueError(f"unknown collection mode: {mode!r}")
+    if row_builder is None:
+        row_builder = build_evaluation_row
     effective_limit = (
         state_db.ROUTE_DECISION_DEFAULT_LIMIT if limit is None else int(limit)
     )
@@ -285,6 +293,7 @@ def _collect_rows_with_meta(
     matched: List[Dict[str, Any]] = []
     seen_ids = set()
     scanned = 0
+    skipped_filtered = 0
     stop_reason = "exhausted"
     cursor_ts: Optional[float] = None
     cursor_id: Optional[int] = None
@@ -317,10 +326,28 @@ def _collect_rows_with_meta(
             break
         for event in fresh:
             seen_ids.add(event.get("decision_event_id"))
+        selected_events = [
+            event for event in fresh
+            if _mode_matches(mode, event)
+        ]
+        skipped_filtered += len(fresh) - len(selected_events)
         outcomes = state_db.batch_get_execution_outcomes(
-            _page_pairs(fresh), db_path=db_path)
-        for row in _build_page_rows(fresh, outcomes):
-            if _matches_filters(
+            _page_pairs(selected_events), db_path=db_path)
+        for event in selected_events:
+            identity = _decision_identity(event.get("payload") or {}, event)
+            outcome: Optional[Dict[str, Any]] = None
+            if identity["task_id"] and identity["run_id"]:
+                candidate = outcomes.get(
+                    (identity["task_id"], identity["run_id"]))
+                if candidate is not None and _outcome_matches(
+                    identity,
+                    str((event.get("payload") or {}).get("actual_agent")
+                        or ""),
+                    candidate,
+                ):
+                    outcome = candidate
+            row = row_builder(event, outcome)
+            if row is not None and _matches_filters(
                 row, node=node, task_type=task_type, agent=agent
             ):
                 matched.append(row)
@@ -349,7 +376,12 @@ def _collect_rows_with_meta(
         "truncated": stop_reason in ("scan_cap", "cursor_stalled"),
         "exhausted": stop_reason == "exhausted",
         "filter_mode": "filter-then-limit",
+        "mode": mode,
     }
+    if mode == "shadow":
+        meta["skipped_canary_events"] = skipped_filtered
+    elif mode == "canary":
+        meta["skipped_non_canary_events"] = skipped_filtered
     return matched, meta
 
 

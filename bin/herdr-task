@@ -1448,6 +1448,69 @@ def cmd_shadow_eval(args):
     print(shadow_evaluation.render_shadow_report(report))
 
 
+def cmd_canary_eval(args):
+    """Read-only Adaptive Router canary evaluation (never mutates).
+
+    Compares observed outcomes of canary-diverted (adaptive arm) vs
+    non-diverted (legacy arm) executions per bucket. Same validation
+    discipline as shadow-eval: every CLI input is checked BEFORE any
+    database touch, and the database is only ever opened read-only.
+    """
+    from herdr import canary_evaluation, state_db
+
+    try:
+        since = _parse_shadow_since(getattr(args, "since", None))
+    except ValueError as exc:
+        print(f"[CANARY-EVAL] {exc}", file=sys.stderr)
+        sys.exit(2)
+    try:
+        limit = int(getattr(args, "limit", None) or 1000)
+    except (TypeError, ValueError):
+        print("[CANARY-EVAL] --limit must be an int",
+              file=sys.stderr)
+        sys.exit(2)
+    if limit <= 0:
+        print("[CANARY-EVAL] --limit must be a positive int",
+              file=sys.stderr)
+        sys.exit(2)
+
+    # Pure path resolution: no StateStore, no init_db, no migration.
+    db_path = state_db.resolve_state_db_path()
+    if not db_path.is_file():
+        print(f"[CANARY-EVAL] state database not found: {db_path}",
+              file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        bundle = canary_evaluation.run_canary_evaluation(
+            db_path,
+            filters=canary_evaluation.CanaryEvaluationFilters(
+                node=getattr(args, "node", None),
+                task_type=getattr(args, "task_type", None),
+                agent=getattr(args, "agent", None),
+                since=since,
+                limit=limit,
+            ),
+        )
+    except state_db.ReadonlySchemaError as exc:
+        print(f"[CANARY-EVAL] {exc}", file=sys.stderr)
+        sys.exit(1)
+    except ValueError as exc:
+        print(f"[CANARY-EVAL] {exc}", file=sys.stderr)
+        sys.exit(2)
+    except Exception as exc:  # noqa: BLE001 -- CLI boundary reports and exits nonzero
+        print(f"[CANARY-EVAL] failed: {type(exc).__name__}: {exc}",
+              file=sys.stderr)
+        sys.exit(1)
+
+    report = bundle["report"]
+    if getattr(args, "json", False):
+        print(json.dumps(report, ensure_ascii=False, indent=2,
+                         sort_keys=True))
+        return
+    print(canary_evaluation.render_canary_report(report))
+
+
 def cmd_metrics(args):
     """Read-only, run-scoped Harness Metrics summary."""
     from herdr.metrics import get_run_metrics
@@ -6290,6 +6353,26 @@ def main():
     )
     shadow_eval_cmd.add_argument("--json", action="store_true")
 
+    canary_eval_cmd = sub.add_parser(
+        "canary-eval",
+        help="Adaptive Router Canary 评估（只读：diverted vs legacy 两臂 observed 对比）",
+    )
+    canary_eval_cmd.add_argument("--node", default=None)
+    canary_eval_cmd.add_argument("--task-type", default=None)
+    canary_eval_cmd.add_argument(
+        "--agent", default=None,
+        help="仅保留 actual / recommended / legacy 为该 Agent 的决策",
+    )
+    canary_eval_cmd.add_argument(
+        "--since", default=None,
+        help="仅评估该时间之后的决策：7d / 24h 或 epoch 秒",
+    )
+    canary_eval_cmd.add_argument(
+        "--limit", default="1000",
+        help="返回最多 N 条匹配决策；为寻找匹配项可能扫描更多历史记录",
+    )
+    canary_eval_cmd.add_argument("--json", action="store_true")
+
     args = parser.parse_args()
 
     if args.command == "add":
@@ -6619,6 +6702,9 @@ def main():
 
     elif args.command == "shadow-eval":
         cmd_shadow_eval(args)
+
+    elif args.command == "canary-eval":
+        cmd_canary_eval(args)
 
 
 if __name__ == "__main__":

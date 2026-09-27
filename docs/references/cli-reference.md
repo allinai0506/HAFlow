@@ -227,3 +227,44 @@ herdr-task compact --run-id <run_id> --task-id <task_id> --json --no-model
 - `--json`：stdout 只输出 ContextPack JSON，诊断写 stderr；
 - `--no-model`：不调用 Provider，仍生成程序验证的 facts 和证据引用；
 - 相同 `source_event_sequence` 重复调用返回已有 latest ContextPack，不删除历史快照。
+
+## 6. `herdr-task canary-eval` 命令
+
+Adaptive Router v2 Canary 只读评估（`shadow-eval` / `route-shadow` 为同类只读路由命令，
+详见 `docs/architecture/adaptive-router-canary.md`）。对比同一白名单 bucket 内
+diverted（Adaptive arm）与 non-diverted（Legacy arm）两组真实执行的 settled Outcome：
+qualified success / wall time / rework / blocked / human intervention / ETQS 近似。
+只报 observed 事实，不输出是否扩大流量的结论（#104 为人工决策）。
+
+```bash
+herdr-task canary-eval [--node <node>] [--task-type <type>] [--agent <agent>] \
+  [--since 7d] [--limit 1000] [--json]
+```
+
+- `--node` / `--task-type` / `--agent`：按 bucket 维度过滤决策行；
+- `--since`：仅评估该时间之后的决策，`Nd` / `Nh` 后缀或 epoch 秒；
+- `--limit`：最多返回 N 条匹配决策（寻找匹配可能扫描更多历史，有 scan_cap 上限）；
+- `--json`：输出机器可读报告（coverage / buckets / delta / collection meta）。
+
+Canary 运行时配置（默认关闭，无配置文件即关闭）：
+
+```json
+{
+  "enabled": true,
+  "percentage": 5,
+  "buckets": [
+    {"agent": "codex", "node": "implementation", "task_type": "fix",
+     "percentage": 50}
+  ],
+  "admission_scan_cap": 500
+}
+```
+
+- 配置路径：`~/.herdr-controller/route-canary.json`，可用环境变量
+  `HERDR_ROUTE_CANARY_CONFIG` 覆盖（测试/隔离环境）；
+- `percentage`：全局确定性分流比例（1-100），bucket 内 `percentage` 可覆盖（#104 扩量旋钮）；
+- 准入：bucket 的 `model_data_status` 与 `evaluation_data_status` 必须同时
+  `sufficient`（复用 Shadow Evaluation 权威判定），否则该 bucket 不分流；
+- 分流：`sha256("canary-v2|{run_id}|{task_id}")` mod 100 < percentage，跨进程可复现；
+- 回退：Canary 路径任何异常 fail-open 到 Legacy Router 并留下 `route_decision_error`
+  （mode=canary）审计事件。
