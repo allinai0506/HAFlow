@@ -9,6 +9,7 @@ target_dir="${HOME}/.herdr-console"
 mkdir -p "${target_dir}"
 install -m 755 "${source_dir}/herdr_factory_console.py" "${target_dir}/herdr_factory_console.py"
 install -m 755 "${source_dir}/launcher.applescript" "${target_dir}/launcher.applescript"
+install -m 755 "${source_dir}/HerdrDashboard.command" "${target_dir}/HerdrDashboard.command"
 
 if [[ "${1:-}" != "--no-restart" ]]; then
   launchctl kickstart -k "gui/$(id -u)/com.user.herdr-factory-console"

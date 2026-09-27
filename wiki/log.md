@@ -1219,3 +1219,12 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - 评审闭环：外部评审 3 P1 + 1 P2 全部修复（`8d099a1`）；评审通过后合并。
 - 合并后 main 验证：全量 1841 passed + 44 subtests。
 - 下一步：#104 Controlled Rollout（per-bucket percentage 旋钮已在 canary 配置预留）。
+
+## [2026-09-27] feat | 我的仪表板进首页（feat/dashboard）
+- 需求：任务状态、等你决策（含默认动作）、最新交付、卡住四段，一屏可读；真实钟；10s 刷新；双击打开。
+- 实现：`herdr/dashboard.py` 纯聚合（任务/阻断/交付/停滞/异常+工位实时，有界限量）；
+  首页新增 `dashMode` 第三视图（与运维驾驶舱同模式：header 入口、视图持久化、`?view=dashboard` 深链）；
+  `/dashboard` 302 到首页视图；`console/HerdrDashboard.command` 双击入口；安装脚本同步。
+- 不变量：只读旁路（写操作复用既有 signoff/execute-action 接口）；工位探针 ≤20、3s 超时、8 并发、失败隔离；
+  交付为空是真话（生产尚无 delivery 记录，FR-4 未落地）。
+- 证据：全量 1810 passed + 44 subtests；`/api/dashboard` 0.09s；首页 200 + 302 smoke。
