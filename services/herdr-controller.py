@@ -2309,13 +2309,30 @@ def _scheduler_join_gate_allows(workflow_id, node, tasks):
     # Workflows the scheduler never engaged keep legacy passthrough.
     is_join_shape = (node_type == "gate" and len(deps) >= 2)
     engaged = False
-    if not is_join_shape and len(deps) >= 2 and scheduler_facts_store is not None:
+    if not is_join_shape and len(deps) >= 2:
+        if scheduler_facts_store is None:
+            # Scheduler unavailable, so no candidate identity can be enforced
+            # on a fan-in node. Refuse rather than wave the node through.
+            print(
+                f"[JOIN GATE REFUSED] workflow={workflow_id} "
+                f"gate={node.get('id')} reason=scheduler_unavailable"
+            )
+            return False
         try:
             engaged = bool(
                 scheduler_facts_store.latest_frozen_candidate_sha(workflow_id)
             )
-        except Exception:
-            engaged = False
+        except Exception as exc:
+            # "lookup failed" is not "never frozen". Treating the error as
+            # un-engaged would classify a scheduler-managed workflow as legacy
+            # and let a fan-in node (e.g. wrapup on [test, review]) bypass the
+            # gate exactly when the identity of the candidate is unknown.
+            # Fail closed (AGENTS.md §4.4); the next sweep retries.
+            print(
+                f"[JOIN GATE REFUSED] workflow={workflow_id} "
+                f"gate={node.get('id')} reason=frozen_lookup_failed: {exc}"
+            )
+            return False
     if not (is_join_shape or engaged):
         return True
     if scheduler_core is None:
@@ -2324,8 +2341,14 @@ def _scheduler_join_gate_allows(workflow_id, node, tasks):
     if scheduler_facts_store is not None:
         try:
             expected = scheduler_facts_store.latest_frozen_candidate_sha(workflow_id)
-        except Exception:
-            expected = ""
+        except Exception as exc:
+            # Cannot know which candidate must be matched: refuse. Returning a
+            # blank expectation would let the gate compare against nothing.
+            print(
+                f"[JOIN GATE REFUSED] workflow={workflow_id} "
+                f"gate={node.get('id')} reason=frozen_lookup_failed: {exc}"
+            )
+            return False
     try:
         passed, reason, details = scheduler_core.evaluate_join_gate(
             node, tasks, workflow_id, expected
@@ -2780,12 +2803,32 @@ def check_workflow_stage_advance(workflow_id):
                 }
                 if "implementation" in completed_now:
                     project_ctx = project_for_workflow(workflow_id) or {}
-                    _scheduler_freeze_candidate(
+                    frozen_sha = _scheduler_freeze_candidate(
                         workflow_id,
                         project_ctx.get("project_root") or "",
                         "implementation",
                         list(deps),
                     )
+                    if not frozen_sha and project_ctx.get("project_root"):
+                        # No candidate identity on a workflow that has a real
+                        # project -> do not latch and do not dispatch.
+                        # Verifiers would either be refused at preflight (no
+                        # identity to prove) or run against whatever revision
+                        # happens to be checked out, and the stage latch would
+                        # suppress the natural retry once the branch/SHA
+                        # becomes resolvable. Skipping the latch keeps the node
+                        # re-evaluated on the next sweep.
+                        #
+                        # A workflow with no project_root has no repository to
+                        # resolve a candidate from at all; that is not a
+                        # transient identity gap, so it keeps legacy behaviour
+                        # rather than deadlocking forever.
+                        print(
+                            f"[SCHEDULER FREEZE DEFERRED] workflow={workflow_id} "
+                            f"node={ready_id} no candidate identity resolvable; "
+                            "stage not latched, dispatch deferred to next sweep"
+                        )
+                        continue
             except Exception as exc:
                 print(
                     f"[SCHEDULER SWEEP WARN] workflow={workflow_id} "

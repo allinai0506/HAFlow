@@ -16,6 +16,7 @@ import importlib.machinery
 import json
 import importlib.util
 import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -459,6 +460,112 @@ class P1LatchRecoveryTest(unittest.TestCase):
         queued.assert_not_called()
         put.assert_not_called()
 
+    def _sweep_patches(self, **overrides):
+        """Common sweep mocks; overrides win over the defaults."""
+        wf_id = "wf-sweep-2"
+        cfg = {
+            "nodes": [
+                {"id": "implementation", "depends_on": []},
+                {"id": "test", "depends_on": ["implementation"]},
+                {"id": "review", "depends_on": ["implementation"]},
+            ]
+        }
+        patches = {
+            "workflow_closed": False,
+            "coordinator_pane_for_workflow": "wA:p1",
+            "workflow_config_for": cfg,
+            "project_for_workflow": {
+                "startup_ready": True, "project_root": "/repo"},
+            "_workflow_entry": {},
+            "reconcile_stage_advance_states": None,
+            "is_node_complete": lambda _w, n: n == "implementation",
+            "is_workflow_completed": False,
+            "load_tasks": [],
+            "resolve_gate_config": None,
+            "_fix_loop_latch_blocks": False,
+            "blocked_gate_dependency": None,
+            "blocked_verdict_dep": None,
+            "attention_blocks_retry": False,
+        }
+        patches.update(overrides)
+        ctx = []
+        for name, value in patches.items():
+            if value is None and name == "reconcile_stage_advance_states":
+                ctx.append(patch.object(_ctl, name))
+            elif callable(value):
+                ctx.append(patch.object(_ctl, name, side_effect=value)
+                           if not isinstance(value, (bool, type(None)))
+                           else patch.object(_ctl, name, return_value=value))
+            else:
+                ctx.append(patch.object(_ctl, name, return_value=value))
+        return wf_id, ctx
+
+    def test_unresolvable_candidate_does_not_latch_or_dispatch(self):
+        """P1 回归:冻结不出候选身份时,不得占闩、不得派发。
+
+        否则 test/review 会在没有身份的情况下启动(被 preflight 拒绝),
+        而 stage 已标 queued/notified;等分支修好、SHA 可解析时,这一轮
+        不会再自然重试。
+        """
+        wf_id, ctx = self._sweep_patches(
+            _scheduler_join_gate_allows=True,
+            _scheduler_freeze_candidate="",
+        )
+        with patch.object(_ctl, "mark_stage_advance_queued") as queued, \
+            patch.object(_ctl.coordinator_queue, "put") as put:
+            for c in ctx:
+                c.start()
+            try:
+                _ctl.check_workflow_stage_advance(wf_id)
+            finally:
+                for c in reversed(ctx):
+                    c.stop()
+            queued.assert_not_called()
+            put.assert_not_called()
+
+    def test_workflow_without_project_root_keeps_legacy_advance(self):
+        """对照:没有 project_root 的 workflow 不属于候选身份语义。
+
+        它没有仓库可供解析候选,这不是暂时性缺口;若一并拦下,该
+        workflow 将永远无法推进。
+        """
+        wf_id, ctx = self._sweep_patches(
+            _scheduler_join_gate_allows=True,
+            _scheduler_freeze_candidate="",
+            project_for_workflow={"startup_ready": True},
+        )
+        with patch.object(
+            _ctl, "mark_stage_advance_queued", return_value=True
+        ) as queued, patch.object(_ctl.coordinator_queue, "put") as put:
+            for c in ctx:
+                c.start()
+            try:
+                _ctl.check_workflow_stage_advance(wf_id)
+            finally:
+                for c in reversed(ctx):
+                    c.stop()
+            self.assertTrue(queued.called, "legacy workflow must still advance")
+            self.assertTrue(put.called)
+
+    def test_resolved_candidate_latches_and_dispatches(self):
+        """对照:候选身份可解析时,闩与派发照常发生。"""
+        wf_id, ctx = self._sweep_patches(
+            _scheduler_join_gate_allows=True,
+            _scheduler_freeze_candidate="b" * 40,
+        )
+        with patch.object(
+            _ctl, "mark_stage_advance_queued", return_value=True
+        ) as queued, patch.object(_ctl.coordinator_queue, "put") as put:
+            for c in ctx:
+                c.start()
+            try:
+                _ctl.check_workflow_stage_advance(wf_id)
+            finally:
+                for c in reversed(ctx):
+                    c.stop()
+            queued.assert_called()
+            put.assert_called()
+
 
 class FrozenCandidateFactTest(unittest.TestCase):
     """P1(第 3 轮)回归:冻结 Candidate 与 Final Delivery Record 是两种事实。
@@ -618,6 +725,53 @@ class FrozenIdentityFallbackWiringTest(unittest.TestCase):
             "wf-fb-1", {}, [])
         self.assertEqual(sha, sha_a)
         self.assertEqual(branch, "agent/x/feat-a")
+
+    def test_frozen_lookup_error_fails_closed(self):
+        """P1 回归:查询 frozen 失败 != 从未冻结,必须 fail-closed。
+
+        默认 wrapup 是 agent 节点 + 两个依赖,不显式属于 join 形状,
+        靠「是否冻结过」决定是否走门禁。若把查询异常当成未冻结,
+        scheduler 管理的 workflow 会被误判为 legacy 而绕过门禁。
+        """
+        node = {"id": "wrapup", "node_type": "agent",
+                "depends_on": ["test", "review"]}
+        boom = sqlite3.OperationalError("database is locked")
+        with patch.object(
+            _ctl.scheduler_facts_store, "latest_frozen_candidate_sha",
+            side_effect=boom,
+        ):
+            self.assertFalse(
+                _ctl._scheduler_join_gate_allows("wf-err", node, []))
+
+    def test_successful_empty_lookup_still_passes_through(self):
+        """对照:查询成功且确实没冻结过 -> legacy passthrough 保持不变。"""
+        node = {"id": "wrapup", "node_type": "agent",
+                "depends_on": ["test", "review"]}
+        with patch.object(
+            _ctl.scheduler_facts_store, "latest_frozen_candidate_sha",
+            return_value="",
+        ):
+            self.assertTrue(
+                _ctl._scheduler_join_gate_allows("wf-legacy", node, []))
+
+    def test_engaged_workflow_with_lookup_error_still_refuses(self):
+        """已冻结的 workflow:读取 expected 失败同样不得放行。"""
+        node = {"id": "wrapup", "node_type": "agent",
+                "depends_on": ["test", "review"]}
+        with patch.object(
+            _ctl.scheduler_facts_store, "latest_frozen_candidate_sha",
+            side_effect=[ "a" * 40, sqlite3.OperationalError("locked") ],
+        ):
+            self.assertFalse(
+                _ctl._scheduler_join_gate_allows("wf-engaged", node, []))
+
+    def test_missing_scheduler_store_refuses_fanin_node(self):
+        """调度器不可用时,多依赖节点不得无条件放行。"""
+        node = {"id": "wrapup", "node_type": "agent",
+                "depends_on": ["test", "review"]}
+        with patch.object(_ctl, "scheduler_facts_store", None):
+            self.assertFalse(
+                _ctl._scheduler_join_gate_allows("wf-none", node, []))
 
     def test_no_freeze_yields_empty_legacy_prompt_unchanged(self):
         sha, branch = _ctl._scheduler_frozen_candidate_identity(
@@ -1348,42 +1502,99 @@ class LaunchReclaimTest(unittest.TestCase):
         a.node = "test"
         return a
 
-    def test_reclaim_kills_pane_removes_clone_and_reservation(self):
+    def test_reclaim_closes_dynamic_pane_via_herdr_backend(self):
+        """P2 回归:自建 dynamic Pane 用 herdr 后端关闭,不用裸 tmux。"""
         clone = self.root / "clone-1"
         clone.mkdir()
-        calls = {"tmux": 0, "reservation": 0}
+        calls = {"herdr": 0, "tmux": 0, "reservation": 0}
 
         def fake_run(cmd, **kwargs):
             if cmd and cmd[0] == "tmux":
                 calls["tmux"] += 1
+            if cmd and "pane" in cmd and "close" in cmd:
+                calls["herdr"] += 1
             return subprocess.CompletedProcess(cmd, 0, "", "")
 
         with patch.object(self._ht.subprocess, "run", side_effect=fake_run), \
+            patch.object(self._ht, "resolve_binary",
+                         return_value="/usr/local/bin/herdr"), \
             patch.object(self._ht, "release_agent_reservation",
                          side_effect=lambda tid: calls.__setitem__(
                              "reservation", calls["reservation"] + 1)), \
             patch.object(self._ht, "delete_clone_safely", return_value=True):
             self._ht._reclaim_unregistered_launch_resources(
-                self._args(), clone_path=str(clone), pane_id="%7:p1")
+                self._args(), clone_path=str(clone), pane_id="%7:p1",
+                pane_source="dynamic")
 
-        self.assertEqual(calls["tmux"], 1)
+        self.assertEqual(calls["herdr"], 1)
+        self.assertEqual(calls["tmux"], 0, "must not use raw tmux kill-pane")
         self.assertEqual(calls["reservation"], 1)
 
-    def test_reclaim_continues_when_pane_kill_fails(self):
+    def test_reclaim_does_not_close_prebuilt_pane(self):
+        """P2 回归:借用的 prebuilt Pane 属共享池,不得物理关闭。"""
+        clone = self.root / "clone-prebuilt"
+        clone.mkdir()
+        calls = {"pane_close": 0, "tmux": 0, "reservation": 0}
+
+        def fake_run(cmd, **kwargs):
+            if cmd and cmd[0] == "tmux":
+                calls["tmux"] += 1
+            if cmd and "pane" in cmd and "close" in cmd:
+                calls["pane_close"] += 1
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        with patch.object(self._ht.subprocess, "run", side_effect=fake_run), \
+            patch.object(self._ht, "resolve_binary",
+                         return_value="/usr/local/bin/herdr"), \
+            patch.object(self._ht, "release_agent_reservation",
+                         side_effect=lambda tid: calls.__setitem__(
+                             "reservation", calls["reservation"] + 1)), \
+            patch.object(self._ht, "delete_clone_safely", return_value=True):
+            self._ht._reclaim_unregistered_launch_resources(
+                self._args(), clone_path=str(clone), pane_id="%3:p9",
+                pane_source="prebuilt")
+
+        self.assertEqual(calls["pane_close"], 0, "borrowed pane must survive")
+        self.assertEqual(calls["tmux"], 0)
+        # The task's own occupancy is still released.
+        self.assertEqual(calls["reservation"], 1)
+
+    def test_reclaim_does_not_claim_pane_closed_on_failure(self):
+        """close 失败时不得打印成功。"""
+        clone = self.root / "clone-fail"
+        clone.mkdir()
+
+        def failing(cmd, **kwargs):
+            return subprocess.CompletedProcess(cmd, 1, "", "pane busy")
+
+        with patch.object(self._ht.subprocess, "run", side_effect=failing), \
+            patch.object(self._ht, "resolve_binary",
+                         return_value="/usr/local/bin/herdr"), \
+            patch.object(self._ht, "release_agent_reservation",
+                         return_value=None), \
+            patch.object(self._ht, "delete_clone_safely", return_value=True):
+            self._ht._reclaim_unregistered_launch_resources(
+                self._args(), clone_path=str(clone), pane_id="%5:p2",
+                pane_source="dynamic")
+
+    def test_reclaim_continues_when_pane_close_raises(self):
         """资源回收必须逐项尽力,前一步失败不能阻断后续释放。"""
         clone = self.root / "clone-2"
         clone.mkdir()
         released = {"n": 0}
 
         def fake_run(cmd, **kwargs):
-            raise OSError("tmux unavailable")
+            raise OSError("herdr unavailable")
 
         with patch.object(self._ht.subprocess, "run", side_effect=fake_run), \
+            patch.object(self._ht, "resolve_binary",
+                         return_value="/usr/local/bin/herdr"), \
             patch.object(self._ht, "release_agent_reservation",
                          side_effect=lambda tid: released.__setitem__(
                              "n", released["n"] + 1)), \
             patch.object(self._ht, "delete_clone_safely", return_value=True):
             self._ht._reclaim_unregistered_launch_resources(
-                self._args(), clone_path=str(clone), pane_id="%9:p1")
+                self._args(), clone_path=str(clone), pane_id="%9:p1",
+                pane_source="dynamic")
 
         self.assertEqual(released["n"], 1)

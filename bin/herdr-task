@@ -2363,7 +2363,9 @@ def _preflight_delivery_identity(workflow_id, node_id, task_id, claim=""):
     return effective
 
 
-def _reclaim_unregistered_launch_resources(args, clone_path="", pane_id=""):
+def _reclaim_unregistered_launch_resources(
+    args, clone_path="", pane_id="", pane_source="",
+):
     """Release pane/clone/reservation when a launch is refused pre-registration.
 
     The baseline check runs after the worker created a clone and a Pane but
@@ -2372,18 +2374,41 @@ def _reclaim_unregistered_launch_resources(args, clone_path="", pane_id=""):
     leaves an orphan clone, an orphan Pane, and a held agent reservation, and
     every retry accumulates another set (AGENTS.md §4.6 idempotency/recovery).
 
+    Pane ownership matters. A "dynamic" pane was created for this task, so this
+    process owns it and closing it is correct. A "prebuilt"/persistent pane is
+    borrowed shared infrastructure that outlives any one task; killing it would
+    destroy the pool, so only the task's occupancy is released. Herdr Panes are
+    managed through the ``herdr`` CLI rather than raw tmux, so teardown goes
+    through the same backend the rest of the repo uses.
+
     Best-effort and ordered so a failure at one step still attempts the rest.
     """
     task_id = getattr(args, "task_id", "")
     if pane_id:
-        try:
-            subprocess.run(
-                ["tmux", "kill-pane", "-t", str(pane_id)],
-                text=True, capture_output=True, check=False, timeout=15,
+        owned = str(pane_source or "dynamic").strip().lower() != "prebuilt"
+        if owned:
+            try:
+                # Reuse the repo's own pane teardown, which checks the
+                # return code; never report success unconditionally.
+                if close_pane(pane_id):
+                    print(f"[LAUNCH RECLAIM] pane closed pane={pane_id}")
+                else:
+                    print(
+                        f"[LAUNCH RECLAIM] pane close failed pane={pane_id}",
+                        file=sys.stderr,
+                    )
+            except (OSError, ValueError, RuntimeError,
+                    subprocess.SubprocessError) as exc:
+                print(
+                    f"[LAUNCH RECLAIM WARN] pane={pane_id}: {exc}", file=sys.stderr
+                )
+        else:
+            # Borrowed pane: leave it alive and reusable. Report it so an
+            # operator can see the reservation was released but the pane kept.
+            print(
+                f"[LAUNCH RECLAIM] prebuilt pane retained pane={pane_id} "
+                "(borrowed pool; ownership not taken)"
             )
-            print(f"[LAUNCH RECLAIM] pane killed pane={pane_id}")
-        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
-            print(f"[LAUNCH RECLAIM WARN] pane={pane_id}: {exc}", file=sys.stderr)
     if clone_path:
         try:
             if delete_clone_safely(clone_path):
@@ -2903,6 +2928,7 @@ def _launch_task(args):
     baseline_commit = worker_result.get("baseline_commit")
     recorded_onto = worker_result.get("onto_branch", onto_branch)
     pane_id = worker_result["pane_id"]
+    pane_source = worker_result.get("pane_source", "dynamic")
     # FR-6.2: test/review must be based on a recorded candidate when a
     # delivery identity exists. Fail-closed: mismatch or unprovable
     # baseline rejects the launch (exit 2, actionable). No delivery yet
@@ -2917,12 +2943,14 @@ def _launch_task(args):
             # task record to account for them (AGENTS.md §4.6/§4.11).
             _reclaim_unregistered_launch_resources(
                 args, clone_path=clone_path, pane_id=pane_id,
+                pane_source=pane_source,
             )
             raise
         except (ImportError, AttributeError, OSError, ValueError, RuntimeError,
                 sqlite3.Error, subprocess.SubprocessError) as exc:
             _reclaim_unregistered_launch_resources(
                 args, clone_path=clone_path, pane_id=pane_id,
+                pane_source=pane_source,
             )
             try:
                 _get_store().record_event(
@@ -2944,10 +2972,6 @@ def _launch_task(args):
                 "launch refused (FR-6.2 fail-closed)."
             )
             sys.exit(2)
-    pane_source = worker_result.get(
-        "pane_source",
-        "dynamic"
-    )
 
     print(f"[WORKER] clone={clone_path}")
     print(f"[WORKER] pane={pane_id}")
