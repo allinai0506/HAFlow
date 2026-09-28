@@ -267,6 +267,75 @@ class TestCandidateBinding:
         assert not sched.candidate_revision_matches(
             {"candidate_sha": "sha-A", "baseline_commit": "sha-B"}, "sha-A")
 
+    def test_completion_evidence_wins_over_launch_baseline(self):
+        """P1 回归:launch 时 HEAD=A,验收完成时 HEAD=B -> 以 B 为准。
+
+        baseline_commit 是启动证据,不是完成证据。Agent 执行期间
+        git pull/checkout 后,只有 verified_candidate_sha 能证明
+        「完成验证时到底验证了谁」。
+        """
+        task = {
+            "candidate_sha": "sha-A",
+            "baseline_commit": "sha-A",
+            "verified_candidate_sha": "sha-B",
+        }
+        assert sched.extract_task_verified_sha(task) == "sha-B"
+        assert sched.extract_task_candidate_sha(task) == "sha-B"
+        ok, claim, evidence = sched.task_claim_evidence_consistent(task)
+        assert ok is False
+        assert (claim, evidence) == ("sha-A", "sha-B")
+
+    def test_join_gate_refuses_launch_only_evidence(self):
+        """A claim + A launch baseline 但完成时 HEAD=B:门禁必须拒绝。"""
+        tasks = [
+            _task("t-test", WF, "test", sha="sha-A"),
+            _task("t-review", WF, "review", sha="sha-A"),
+        ]
+        for t in tasks:
+            t["baseline_commit"] = "sha-A"
+        tasks[0]["verified_candidate_sha"] = "sha-B"
+
+        passed, reason, details = sched.evaluate_join_gate(
+            _node("wrapup", ["test", "review"]), tasks, WF, "sha-A"
+        )
+        assert passed is False
+        assert reason in (
+            sched.JOIN_EVIDENCE_MISMATCH, sched.JOIN_CANDIDATE_MISMATCH,
+        )
+        assert details["branches"]["test"]["claim_evidence_mismatch"]
+
+    def test_completion_evidence_matching_passes(self):
+        tasks = [
+            _task("t-test", WF, "test", sha="sha-A"),
+            _task("t-review", WF, "review", sha="sha-A"),
+        ]
+        for t in tasks:
+            t["baseline_commit"] = "sha-A"
+            t["verified_candidate_sha"] = "sha-A"
+
+        passed, reason, _ = sched.evaluate_join_gate(
+            _node("wrapup", ["test", "review"]), tasks, WF, "sha-A"
+        )
+        assert passed is True and reason == sched.JOIN_SATISFIED
+
+    def test_abbreviated_sha_is_not_a_mismatch(self):
+        """P2 回归:delivery 记 abc1234,clone 记完整 SHA,同一 commit 不算冲突。"""
+        full = "abc1234f9287a1b2c3d4e5f60718293a4b5c6d7e"
+        task = {
+            "candidate_sha": "abc1234",
+            "baseline_commit": full,
+            "verified_candidate_sha": full,
+        }
+        ok, claim, evidence = sched.task_claim_evidence_consistent(task)
+        assert ok is True
+        assert claim != evidence  # 字符串不同,但规范化后是同一 commit
+
+    def test_revision_matches_accepts_abbreviated(self):
+        full = "abc1234f9287a1b2c3d4e5f60718293a4b5c6d7e"
+        task = {"candidate_sha": "abc1234", "verified_candidate_sha": full}
+        assert sched.candidate_revision_matches(task, "abc1234")
+        assert not sched.candidate_revision_matches(task, "def5678")
+
     def test_frozen_for_nodes_requires_all_bound(self):
         tasks = [
             _task("t-test", WF, "test", sha="sha-A"),

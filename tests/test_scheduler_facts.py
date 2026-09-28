@@ -42,6 +42,52 @@ class TestCandidateFrozen:
             facts.record_candidate_frozen("wf-facts-01", "", db_path=db)
 
 
+class TestCandidateRotationABA:
+    """A -> B -> A must re-freeze A (episode identity, not set membership).
+
+    Comparing against the whole history makes the third freeze a no-op, so
+    latest_frozen_candidate_sha keeps reporting B while the real candidate is
+    A again. Every later verifier then targets a stale expected SHA and the
+    workflow deadlocks. Idempotency is only correct against the *latest* freeze.
+    """
+
+    def test_refreeze_returns_to_previous_sha(self, db):
+        facts.record_candidate_frozen("wf-facts-01", "sha-A", db_path=db)
+        facts.record_candidate_frozen("wf-facts-01", "sha-B", db_path=db)
+        third = facts.record_candidate_frozen("wf-facts-01", "sha-A", db_path=db)
+
+        assert third["status"] == "created"
+        assert third["event"]["payload"]["candidate_sha"] == "sha-A"
+        assert third["event"]["payload"]["rotated_from"] == "sha-B"
+        assert facts.latest_frozen_candidate_sha("wf-facts-01", db_path=db) == "sha-A"
+
+    def test_refreeze_appends_third_event(self, db):
+        facts.record_candidate_frozen("wf-facts-01", "sha-A", db_path=db)
+        facts.record_candidate_frozen("wf-facts-01", "sha-B", db_path=db)
+        facts.record_candidate_frozen("wf-facts-01", "sha-A", db_path=db)
+
+        events = facts.list_candidate_frozen_events("wf-facts-01", db_path=db)
+        assert [e["payload"]["candidate_sha"] for e in events] == [
+            "sha-A", "sha-B", "sha-A",
+        ]
+
+    def test_same_sha_as_latest_is_still_noop(self, db):
+        facts.record_candidate_frozen("wf-facts-01", "sha-A", db_path=db)
+        facts.record_candidate_frozen("wf-facts-01", "sha-B", db_path=db)
+        repeat = facts.record_candidate_frozen("wf-facts-01", "sha-B", db_path=db)
+
+        assert repeat["status"] == "exists"
+        assert len(facts.list_candidate_frozen_events("wf-facts-01", db_path=db)) == 2
+
+    def test_aba_freeze_repairs_join_gate_expectation(self, db):
+        """The live candidate is A again, so the gate must expect A."""
+        facts.record_candidate_frozen("wf-facts-01", "sha-A", db_path=db)
+        facts.record_candidate_frozen("wf-facts-01", "sha-B", db_path=db)
+        facts.record_candidate_frozen("wf-facts-01", "sha-A", db_path=db)
+
+        assert facts.latest_frozen_candidate_sha("wf-facts-01", db_path=db) == "sha-A"
+
+
 class TestDecisionAudit:
     def test_scheduler_decision_roundtrip(self, db):
         facts.record_scheduler_decision(

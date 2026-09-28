@@ -3,6 +3,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -1980,6 +1981,17 @@ def set_status(task_id, new_status, verdict=None, note=None):
         print(f"Task not found: {task_id}")
         sys.exit(1)
 
+    # Completion evidence, before any verdict is accepted.
+    #
+    # baseline_commit is *launch* evidence: the clone HEAD when the worker
+    # started. An agent may pull, check out, or rebase mid-task, so it cannot
+    # prove which revision was verified once the verdict is submitted. Re-read
+    # the live clone now and store that as verified_candidate_sha, which is
+    # what the join gate must trust (AGENTS.md §4.4: program-produced, never
+    # model-reported).
+    if verdict in ("pass", "blocked"):
+        _capture_verified_candidate(task)
+
     if new_status not in TRANSITIONS:
         print(f"Invalid status: {new_status}")
         sys.exit(1)
@@ -2328,6 +2340,158 @@ def _preflight_delivery_identity(workflow_id, node_id, task_id, claim=""):
     return effective
 
 
+def _reclaim_unregistered_launch_resources(args, clone_path="", pane_id=""):
+    """Release pane/clone/reservation when a launch is refused pre-registration.
+
+    The baseline check runs after the worker created a clone and a Pane but
+    before the Task is registered, so the normal release path (which runs after
+    registration) never fires. Without this, a rejected test/review launch
+    leaves an orphan clone, an orphan Pane, and a held agent reservation, and
+    every retry accumulates another set (AGENTS.md §4.6 idempotency/recovery).
+
+    Best-effort and ordered so a failure at one step still attempts the rest.
+    """
+    task_id = getattr(args, "task_id", "")
+    if pane_id:
+        try:
+            subprocess.run(
+                ["tmux", "kill-pane", "-t", str(pane_id)],
+                text=True, capture_output=True, check=False, timeout=15,
+            )
+            print(f"[LAUNCH RECLAIM] pane killed pane={pane_id}")
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+            print(f"[LAUNCH RECLAIM WARN] pane={pane_id}: {exc}", file=sys.stderr)
+    if clone_path:
+        try:
+            if delete_clone_safely(clone_path):
+                print(f"[LAUNCH RECLAIM] clone removed {clone_path}")
+            else:
+                print(
+                    f"[LAUNCH RECLAIM] clone retained {clone_path}",
+                    file=sys.stderr,
+                )
+        except (OSError, ValueError, RuntimeError) as exc:
+            print(
+                f"[LAUNCH RECLAIM WARN] clone={clone_path}: {exc}", file=sys.stderr
+            )
+    if task_id:
+        try:
+            release_agent_reservation(task_id)
+            print(f"[LAUNCH RECLAIM] reservation released task={task_id}")
+        except (ImportError, AttributeError, OSError, ValueError,
+                RuntimeError) as exc:
+            print(
+                f"[LAUNCH RECLAIM WARN] reservation task={task_id}: {exc}",
+                file=sys.stderr,
+            )
+
+
+def _validate_test_review_baseline(args, baseline_commit, source_repo):
+    """Fail-closed baseline proof for a test/review launch.
+
+    Refuses the launch (SystemExit) unless the clone the worker just checked
+    out provably sits on the exact candidate revision this dispatch must
+    verify. Extracted from the launch path so the refusal has one owner and the
+    caller's resource-reclaim logic stays readable.
+    """
+    from herdr import delivery_record as _dr2
+    from herdr import workflow_docs as _wd2
+
+    node_id = getattr(args, "node", "") or getattr(args, "stage", "")
+    _notes = _wd2.load_notes(args.workflow_id)
+    try:
+        _effective = _dr2.select_effective_delivery(_notes)
+    except _dr2.DeliveryAmbiguityError as exc:
+        print(f"[DELIVERY AMBIGUOUS] {exc}; launch refused")
+        sys.exit(2)
+    if _effective is not None:
+        _base = str(
+            _effective.get("base")
+            or _dr2._body_value(_effective, "base")
+            or _effective.get("base_sha")
+            or ""
+        )
+        _effective = _dr2.select_effective_delivery(
+            _wd2.annotate_notes(_notes, current_base_sha=_base or None)
+        )
+    _claim = str(getattr(args, "candidate_sha", None) or "").strip()
+    if _effective is not None:
+        _cand = str(_effective.get("candidate_sha") or "")
+        if not _cand:
+            _body = _effective.get("body") or ""
+            for _line in _body.splitlines():
+                if _line.startswith("candidate_sha:"):
+                    _cand = _line.split(":", 1)[1].strip()
+                    break
+        if not _cand:
+            _cand = str(_effective.get("base_sha") or "")
+        # Scheduler v1: the dispatch claim must name the same revision as the
+        # delivery identity, otherwise the join gate could certify a revision
+        # no delivery record ever named.
+        if _claim and not _same_commit(_claim, _cand, source_repo):
+            _validate_test_delivery_baseline(
+                args, _cand, "claim_mismatch:" + _claim, source_repo,
+            )
+    else:
+        # No eligible delivery record (none at all, or all invalidated): the
+        # frozen candidate is the identity, and the dispatch claim must prove
+        # it. Never falls back to a bare branch HEAD.
+        _frozen, _source = _resolve_expected_candidate(args.workflow_id, _claim)
+        if _source != "frozen":
+            _validate_test_delivery_baseline(
+                args, "", baseline_commit, source_repo,
+            )
+        _cand = _frozen
+    _validate_test_delivery_baseline(args, _cand, baseline_commit, source_repo)
+
+
+def _canonical_commit(sha, source_repo):
+    """Resolve a revision to its full object ID, or "" when unresolvable.
+
+    Git accepts abbreviated object IDs, so a delivery record holding "abc1234"
+    and a clone reporting the full hash name the same commit. Canonicalising
+    first keeps the comparison strict without falsely rejecting a match.
+    """
+    sha = str(sha or "").strip()
+    if not sha:
+        return ""
+    try:
+        probe = subprocess.run(
+            ["git", "-C", str(source_repo), "rev-parse", "--verify", "--quiet",
+             f"{sha}^{{commit}}"],
+            text=True, capture_output=True, check=False, timeout=30,
+        )
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+        return ""
+    if probe.returncode != 0:
+        return ""
+    return (probe.stdout or "").strip().lower()
+
+
+def _same_commit(left, right, source_repo):
+    """Strict same-commit equality; never ancestor containment."""
+    left = str(left or "").strip().lower()
+    right = str(right or "").strip().lower()
+    if not left or not right:
+        return False
+    if left == right:
+        return True
+    # Canonicalise both sides against the real repository when reachable, so
+    # abbreviations compare equal without weakening the equality requirement.
+    full_left = _canonical_commit(left, source_repo)
+    full_right = _canonical_commit(right, source_repo)
+    if full_left and full_right:
+        return full_left == full_right
+    # No repository available: fall back to conservative prefix matching so a
+    # short SHA is not misreported as a mismatch, and nothing else matches.
+    short, full = (left, right) if len(left) <= len(right) else (right, left)
+    if len(short) < 7 or not re.fullmatch(r"[0-9a-f]{4,40}", short):
+        return False
+    if not re.fullmatch(r"[0-9a-f]{4,40}", full):
+        return False
+    return full.startswith(short)
+
+
 def _validate_test_delivery_baseline(args, candidate_sha, baseline_commit, source_repo):
     """Require test/review to verify exactly the frozen candidate revision.
 
@@ -2339,7 +2503,9 @@ def _validate_test_delivery_baseline(args, candidate_sha, baseline_commit, sourc
     """
     candidate_sha = str(candidate_sha or "").strip()
     baseline_commit = str(baseline_commit or "").strip()
-    if candidate_sha and baseline_commit and candidate_sha == baseline_commit:
+    if candidate_sha and baseline_commit and _same_commit(
+        candidate_sha, baseline_commit, source_repo
+    ):
         return
     try:
         _get_store().record_event(
@@ -2717,64 +2883,21 @@ def _launch_task(args):
     # -> router isolation (FR-6.1) is the guard; no silent pass is claimed.
     if node_id in ("test", "review"):
         try:
-            from herdr import delivery_record as _dr2
-            from herdr import workflow_docs as _wd2
-
-            _notes = _wd2.load_notes(args.workflow_id)
-            try:
-                _effective = _dr2.select_effective_delivery(_notes)
-            except _dr2.DeliveryAmbiguityError as exc:
-                print(f"[DELIVERY AMBIGUOUS] {exc}; launch refused")
-                sys.exit(2)
-            if _effective is not None:
-                _base = str(
-                    _effective.get("base")
-                    or _dr2._body_value(_effective, "base")
-                    or _effective.get("base_sha")
-                    or ""
-                )
-                _effective = _dr2.select_effective_delivery(
-                    _wd2.annotate_notes(_notes, current_base_sha=_base or None)
-                )
-            _claim = str(getattr(args, "candidate_sha", None) or "").strip()
-            if _effective is not None:
-                _cand = str(_effective.get("candidate_sha") or "")
-                if not _cand:
-                    _body = _effective.get("body") or ""
-                    for _line in _body.splitlines():
-                        if _line.startswith("candidate_sha:"):
-                            _cand = _line.split(":", 1)[1].strip()
-                            break
-                if not _cand:
-                    _cand = str(_effective.get("base_sha") or "")
-                # Scheduler v1: the dispatch claim must name the same revision
-                # as the delivery identity, otherwise the join gate could
-                # certify a revision no delivery record ever named.
-                if _claim and _claim != _cand:
-                    _validate_test_delivery_baseline(
-                        args, _cand,
-                        "claim_mismatch:" + _claim,
-                        source_repo,
-                    )
-            else:
-                # No eligible delivery record (none at all, or all invalidated):
-                # the frozen candidate is the identity, and the dispatch claim
-                # must prove it. Never falls back to a bare branch HEAD.
-                _frozen, _source = _resolve_expected_candidate(
-                    args.workflow_id, _claim
-                )
-                if _source != "frozen":
-                    _validate_test_delivery_baseline(
-                        args, "", baseline_commit, source_repo
-                    )
-                _cand = _frozen
-            _validate_test_delivery_baseline(
-                args, _cand, baseline_commit, source_repo
-            )
+            _validate_test_review_baseline(args, baseline_commit, source_repo)
         except SystemExit:
+            # Fail-closed refusal happens AFTER the pane and clone exist but
+            # BEFORE the task is registered, so a retry would otherwise
+            # accumulate orphan clones, panes, and agent reservations with no
+            # task record to account for them (AGENTS.md §4.6/§4.11).
+            _reclaim_unregistered_launch_resources(
+                args, clone_path=clone_path, pane_id=pane_id,
+            )
             raise
         except (ImportError, AttributeError, OSError, ValueError, RuntimeError,
                 sqlite3.Error, subprocess.SubprocessError) as exc:
+            _reclaim_unregistered_launch_resources(
+                args, clone_path=clone_path, pane_id=pane_id,
+            )
             try:
                 _get_store().record_event(
                     "test_baseline_rejected",
@@ -5896,6 +6019,51 @@ def note_list(args):
             f"{stale}[{note.get('kind')}][{note.get('node') or '-'}] "
             f"{note.get('title')} ({note.get('note_id')})"
         )
+
+
+def _capture_verified_candidate(task):
+    """Persist the clone revision that was live at verdict-write time.
+
+    This is completion evidence, distinct from ``baseline_commit`` (launch
+    evidence). Reading HEAD here catches an agent that pulled, checked out, or
+    rebased while running: the recorded value then names what the verifier
+    actually saw, and the join gate can refuse a verdict that never proved the
+    frozen candidate.
+
+    Best-effort by design: a missing or unreadable clone must not block
+    recording a verdict, so this never raises and never changes the exit path.
+    The join gate fails closed on its own when no evidence is present.
+    """
+    clone = str((task or {}).get("clone_path") or "").strip()
+    if not clone or not os.path.isdir(clone):
+        return ""
+    try:
+        probe = subprocess.run(
+            ["git", "-C", clone, "rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
+            text=True, capture_output=True, check=False, timeout=30,
+        )
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+        return ""
+    head = (probe.stdout or "").strip()
+    if probe.returncode != 0 or not head:
+        return ""
+
+    task_id = str((task or {}).get("task_id") or "")
+    if not task_id:
+        return head
+    try:
+        store = _get_store()
+        from herdr import kernel
+        kernel.update_task_metadata(
+            task_id=task_id,
+            updates={"verified_candidate_sha": head},
+            store=store,
+        )
+        task["verified_candidate_sha"] = head
+        print(f"[VERIFIED CANDIDATE] {task_id} head={head}")
+    except Exception as exc:
+        print(f"[VERIFIED CANDIDATE WARN] {task_id}: {exc}", file=sys.stderr)
+    return head
 
 
 def _record_gate_note(task, verdict, note):

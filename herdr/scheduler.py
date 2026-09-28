@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 try:
@@ -162,16 +163,70 @@ def extract_task_candidate_claim(task):
     return str(value).strip() if value not in (None, "") else ""
 
 
-def extract_task_verified_sha(task):
-    """The revision the clone was ACTUALLY based on (objective evidence).
+#: Shortest abbreviation this module treats as a trustworthy prefix of a full
+#: object ID. Git's own default abbreviation is 7, and ``core.abbrev`` never
+#: drops below 4; 7 keeps the pure-core comparison conservative. The
+#: authoritative canonicalisation (``rev-parse <sha>^{commit}``) happens at the
+#: boundary in bin/herdr-task, where the repository is reachable.
+MIN_ABBREVIATED_SHA_LEN = 7
 
-    ``baseline_commit`` is produced by the worker from the real clone HEAD;
-    it cannot be forged by a prompt injection or a stale dispatch argument.
-    This is the value a join gate must compare.
+# A git object ID (or an abbreviation of one). Values outside this shape are
+# still compared verbatim, so synthetic identifiers used by callers and tests
+# keep working; they simply never gain prefix semantics.
+_HEX_SHA_RE = re.compile(r"[0-9a-f]{4,40}\Z")
+
+
+def normalize_sha(sha):
+    """Lower-case and trim a revision string for comparison.
+
+    This normalises *form* only. It deliberately does not expand an
+    abbreviation: that needs a repository, and this module is pure.
+    """
+    return str(sha or "").strip().lower()
+
+
+def _is_hex_object_id(sha):
+    return bool(_HEX_SHA_RE.match(sha))
+
+
+def shas_identical(left, right):
+    """Whether two revision strings name the same commit (no ancestor semantics).
+
+    Equality is strict. Abbreviation is tolerated only in the one direction git
+    actually allows: a full object ID and an abbreviation that prefixes it, and
+    only when both sides look like object IDs. A shortened value never matches a
+    full value it is not a prefix of, and no ancestor/descendant relation is ever
+    accepted.
+    """
+    a = normalize_sha(left)
+    b = normalize_sha(right)
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    if not (_is_hex_object_id(a) and _is_hex_object_id(b)):
+        return False
+    short, full = (a, b) if len(a) <= len(b) else (b, a)
+    if len(short) < MIN_ABBREVIATED_SHA_LEN:
+        return False
+    return full.startswith(short)
+
+
+def extract_task_verified_sha(task):
+    """The revision the clone was ACTUALLY on when verification completed.
+
+    ``verified_candidate_sha`` is re-read from the live clone at verdict-write
+    time, so it is completion evidence: it survives an agent that pulls,
+    checks out, or rebases mid-task.
+
+    ``baseline_commit`` is only *launch* evidence - the clone HEAD recorded
+    when the worker started. It is used as a fallback so tasks that predate the
+    completion field keep their previous meaning, but it must never be
+    described as a verified revision.
     """
     if not isinstance(task, dict):
         return ""
-    for key in ("baseline_commit", "baseline_sha"):
+    for key in ("verified_candidate_sha", "baseline_commit", "baseline_sha"):
         value = task.get(key)
         if value not in (None, ""):
             text = str(value).strip()
@@ -195,7 +250,7 @@ def candidate_revision_matches(task, expected_sha):
     expected = str(expected_sha or "").strip()
     if not expected:
         return False
-    return extract_task_verified_sha(task) == expected
+    return shas_identical(extract_task_verified_sha(task), expected)
 
 
 def task_claim_evidence_consistent(task):
@@ -209,7 +264,7 @@ def task_claim_evidence_consistent(task):
     evidence = extract_task_verified_sha(task)
     if not evidence:
         return True, claim, evidence
-    return claim == evidence, claim, evidence
+    return shas_identical(claim, evidence), claim, evidence
 
 
 def evaluate_join_gate(gate_node, tasks, workflow_id, expected_candidate_sha=""):
@@ -278,18 +333,24 @@ def evaluate_join_gate(gate_node, tasks, workflow_id, expected_candidate_sha="")
         details["missing_candidate_sha"] = missing
         return False, JOIN_MISSING_CANDIDATE, details
 
-    observed = set()
+    # Group by normalised form so one branch recording an abbreviated SHA and
+    # another recording the full object ID still count as the same revision.
+    # Reported values keep their original spelling: the audit trail must show
+    # what was actually recorded, not the comparison key.
+    observed = {}
     for st in branch_states.values():
-        observed.update(st["candidate_shas"])
-    details["observed_candidate_shas"] = sorted(observed)
+        for raw in st["candidate_shas"]:
+            observed.setdefault(normalize_sha(raw) or raw, raw)
+    details["observed_candidate_shas"] = sorted(observed.values())
     if len(observed) != 1:
         return False, JOIN_CANDIDATE_MISMATCH, details
 
     observed_sha = sorted(observed)[0]
-    details["candidate_sha"] = observed_sha
-    if expected and observed_sha != expected:
+    reported_sha = observed[observed_sha]
+    details["candidate_sha"] = reported_sha
+    if expected and not shas_identical(observed_sha, expected):
         details["stale_reason"] = (
-            "verified %s but current candidate is %s" % (observed_sha, expected)
+            "verified %s but current candidate is %s" % (reported_sha, expected)
         )
         return False, JOIN_STALE, details
 

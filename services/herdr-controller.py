@@ -2262,6 +2262,35 @@ def _scheduler_freeze_candidate(workflow_id, project_root, source_node, dep_ids=
     return sha
 
 
+def _scheduler_frozen_candidate_identity(workflow_id, project_ctx, dep_ids=None):
+    """The frozen candidate identity a fallback dispatch must carry verbatim.
+
+    Direct dispatch binds the candidate through ``--candidate-sha`` and
+    ``--onto``. When it falls back to the coordinator, that binding would
+    otherwise be lost and the coordinator would re-derive a revision on its
+    own, giving one scheduler decision two execution semantics.
+
+    This returns the frozen fact only — never a freshly resolved SHA — so the
+    fallback path cannot silently substitute a different candidate. Returns
+    ("", "") when the scheduler never froze one (legacy workflows, and any
+    resolution error), which leaves the legacy coordinator prompt unchanged.
+    """
+    if scheduler_facts_store is None:
+        return "", ""
+    try:
+        events = scheduler_facts_store.list_candidate_frozen_events(workflow_id)
+    except Exception as exc:
+        print(f"[SCHEDULER FROZEN IDENTITY WARN] workflow={workflow_id}: {exc}")
+        return "", ""
+    if not events:
+        return "", ""
+    payload = (events[-1].get("payload") or {})
+    return (
+        str(payload.get("candidate_sha") or "").strip(),
+        str(payload.get("delivery_branch") or "").strip(),
+    )
+
+
 def _scheduler_join_gate_allows(workflow_id, node, tasks):
     """汇聚门禁放行判定:非 join 节点一律放行(保持原语义)。
 
@@ -4525,6 +4554,35 @@ Node Agent 策略
                 + "\n只需补派缺失/被作废的 Task。\n"
             )
 
+        # Candidate identity for the coordinator path. Direct dispatch binds
+        # the frozen candidate through --candidate-sha/--onto; when it falls
+        # back here that binding must be passed through verbatim, otherwise
+        # the coordinator re-derives a revision and the same scheduler
+        # decision gets two execution semantics.
+        frozen_sha, frozen_branch = _scheduler_frozen_candidate_identity(
+            workflow_id, project_ctx, (node or {}).get("depends_on") or [],
+        )
+        candidate_flags = ""
+        candidate_block = ""
+        if frozen_sha:
+            onto_line = f"   --onto {frozen_branch}\n" if frozen_branch else ""
+            candidate_flags = (
+                f"{onto_line}   --candidate-sha {frozen_sha}"
+            )
+            candidate_block = f"""
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+候选身份（调度器已冻结，必须原样透传）
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+candidate_sha: {frozen_sha}
+candidate_branch: {frozen_branch or '（未记录）'}
+
+创建 Task 时必须原样携带以上候选身份，
+不得重新推断当前分支或版本。
+验收节点（test/review）必须验证该冻结版本；
+版本不符时门禁 fail-closed 拒绝合并。
+""".strip()
+
         try:
             while True:
                 # Re-validate on every wait iteration: the workflow may be
@@ -4651,6 +4709,7 @@ task_type:
    --workflow-id {workflow_id}
    --node {next_stage}
    --source {project_root}
+{candidate_flags}
 
 6. 默认使用本节点 policy：
 
@@ -4671,6 +4730,8 @@ task_type:
    也可以创建多个并行 Task。
 
    数量由实际工作决定。
+
+{candidate_block}
 
 9. 当前节点所有必要 Task 派发完成后，
    结束当前回合。

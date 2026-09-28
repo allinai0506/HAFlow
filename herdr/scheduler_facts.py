@@ -63,18 +63,25 @@ def record_candidate_frozen(
 ):
     """Freeze a candidate SHA as the expected revision (idempotent).
 
-    Same-SHA refreeze is a no-op returning the first record ("exists");
-    a different SHA freezes anew and marks the rotation ("created").
+    Idempotency is defined against the *latest* freeze only, never against the
+    whole history. Candidate identity is an episode, not a set: freezing
+    A -> B -> A is a real rotation back to A, and the newest freeze must win.
+    Comparing against all prior events would make that third freeze a no-op and
+    leave latest_frozen_candidate_sha() reporting B while the live candidate is
+    A again — every later verifier would then target a stale expected SHA and
+    the workflow would deadlock.
     """
     sha = str(candidate_sha or "").strip()
     if not sha:
         raise ValueError("candidate_sha is required")
     store = _store(db_path)
     prior = list_candidate_frozen_events(workflow_id, db_path=db_path)
-    for event in prior:
-        payload = event.get("payload") or {}
-        if str(payload.get("candidate_sha") or "") == sha:
-            return {"status": "exists", "event": event}
+    if prior:
+        latest = str(
+            (prior[-1].get("payload") or {}).get("candidate_sha") or ""
+        )
+        if latest == sha:
+            return {"status": "exists", "event": prior[-1]}
     rotated_from = ""
     if prior:
         rotated_from = str(

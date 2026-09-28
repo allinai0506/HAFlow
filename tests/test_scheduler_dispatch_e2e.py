@@ -547,6 +547,154 @@ class FrozenCandidateFactTest(unittest.TestCase):
             self.assertEqual(_ctl._scheduler_freeze_candidate(
                 "wf-frozen-1", str(self.root), "implementation", []), "")
 
+    def test_aba_rotation_records_third_freeze(self):
+        """P1 回归:A → B → A 必须重新冻结,否则 latest 停在 B 而实际候选是 A。"""
+        from herdr import scheduler_facts as sf
+
+        sha_a, sha_b = "a" * 40, "b" * 40
+        self.assertEqual(self._freeze(sha_a), sha_a)
+        self.assertEqual(self._freeze(sha_b), sha_b)
+        self.assertEqual(self._freeze(sha_a), sha_a)
+
+        facts = sf.list_candidate_frozen_events("wf-frozen-1", db_path=self.db)
+        self.assertEqual(
+            [f["payload"]["candidate_sha"] for f in facts],
+            [sha_a, sha_b, sha_a],
+        )
+        self.assertEqual(facts[2]["payload"]["rotated_from"], sha_b)
+        self.assertEqual(
+            sf.latest_frozen_candidate_sha("wf-frozen-1", db_path=self.db), sha_a)
+
+
+class FrozenIdentityFallbackWiringTest(unittest.TestCase):
+    """P1 回归:总指挥回落必须原样透传冻结候选身份,不得自行推断。
+
+    同一个 Scheduler decision 只能有一套执行语义:Direct Dispatch 通过
+    --candidate-sha / --onto 绑定冻结候选;回退总指挥时也必须携带同一身份,
+    否则两条路径验证的可能不是同一个 revision。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="herdr-fallback-id-")
+        self.root = Path(self.tmp.name)
+        self.db = self.root / "state.db"
+        env = patch.dict(os.environ, {"HERDR_STATE_DB": str(self.db)})
+        env.start()
+        self.addCleanup(env.stop)
+        from herdr.state_store import get_state_store
+
+        get_state_store(self.db).save_workflow(
+            {"workflow_id": "wf-fb-1", "status": "running"})
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _freeze(self, sha, branch=""):
+        from herdr import scheduler_facts as sf
+
+        sf.record_candidate_frozen(
+            "wf-fb-1", sha, source_node="implementation",
+            delivery_branch=branch, db_path=self.db)
+
+    def test_identity_returns_latest_frozen_candidate(self):
+        self._freeze("a" * 40, branch="agent/x/feat-a")
+        sha, branch = _ctl._scheduler_frozen_candidate_identity(
+            "wf-fb-1", {}, [])
+        self.assertEqual(sha, "a" * 40)
+        self.assertEqual(branch, "agent/x/feat-a")
+
+    def test_identity_follows_aba_rotation(self):
+        sha_a, sha_b = "a" * 40, "b" * 40
+        self._freeze(sha_a, branch="agent/x/feat-a")
+        self._freeze(sha_b, branch="agent/x/feat-b")
+        self._freeze(sha_a, branch="agent/x/feat-a")
+        sha, branch = _ctl._scheduler_frozen_candidate_identity(
+            "wf-fb-1", {}, [])
+        self.assertEqual(sha, sha_a)
+        self.assertEqual(branch, "agent/x/feat-a")
+
+    def test_no_freeze_yields_empty_legacy_prompt_unchanged(self):
+        sha, branch = _ctl._scheduler_frozen_candidate_identity(
+            "wf-fb-1", {}, [])
+        self.assertEqual(sha, "")
+        self.assertEqual(branch, "")
+
+    def test_fallback_prompt_carries_frozen_candidate(self):
+        """回落提示词必须含 --candidate-sha 与 --onto,不允许总指挥重猜。
+
+        走真实调用链 _handle_coordinator_item(stage_advance),让
+        try_direct_stage_advance 真实返回 False(规则化直派不可用),
+        从而覆盖真正的回落分支。
+        """
+        sha = "c" * 40
+        sent = self._run_real_fallback(sha)
+        self.assertTrue(sent, "coordinator prompt must be sent")
+        message = sent[0]
+        self.assertIn(f"--candidate-sha {sha}", message)
+        self.assertIn("--onto agent/x/feat-c", message)
+        # 身份必须整块出现在 launch 指令里,而不是只有一句说明。
+        self.assertIn("--workflow-id wf-fb-1", message)
+        self.assertIn("--node test", message)
+
+    def _run_real_fallback(self, sha):
+        """Let direct dispatch really fall back, then capture the prompt."""
+        if sha:
+            self._freeze(sha, branch="agent/x/feat-c")
+        project_ctx = {
+            "startup_ready": True, "project_root": str(self.root),
+            "base_branch": "main", "coordinator_pane_id": "wA:p1",
+            "requirement": "req text here",
+        }
+        item = {
+            "kind": "stage_advance", "workflow_id": "wf-fb-1",
+            "stage": "implementation", "node_id": "test", "next_stage": "test",
+            "node": _node("test"),
+        }
+        sent = []
+        real_run = subprocess.run
+
+        def fake_run(cmd, **kwargs):
+            if cmd and cmd[0] == "git":
+                return real_run(cmd, **kwargs)
+            if cmd and len(cmd) > 3 and cmd[1:3] == ["agent", "prompt"]:
+                for arg in cmd[4:]:
+                    if not arg.startswith("--"):
+                        sent.append(arg)
+                        break
+            return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+        # direct_dispatch_planner=None makes try_direct_stage_advance return
+        # False at its first guard — the genuine fallback path.
+        with patch.object(_ctl, "project_for_workflow", return_value=project_ctx), \
+            patch.object(_ctl, "workflow_config_for", return_value={
+                "nodes": [_node("test")]}), \
+            patch.object(_ctl, "workflow_closed", return_value=False), \
+            patch.object(_ctl, "coordinator_status", return_value="idle"), \
+            patch.object(_ctl, "coordinator_pane_for_workflow",
+                         return_value="wA:p1"), \
+            patch.object(_ctl, "find_node", return_value=_node("test")), \
+            patch.object(_ctl, "get_stage_policy", return_value={}), \
+            patch.object(_ctl, "load_tasks", return_value=[]), \
+            patch.object(_ctl, "shared_docs_block", return_value=""), \
+            patch.object(_ctl, "direct_dispatch_planner", None), \
+            patch.object(
+                _ctl, "mark_stage_advance_notified", return_value=True), \
+            patch.object(
+                _ctl, "maybe_compact_coordinator", return_value=False), \
+            patch("subprocess.run", side_effect=fake_run):
+            _ctl._handle_coordinator_item(item)
+        return sent
+
+    def test_fallback_prompt_omits_candidate_when_never_frozen(self):
+        """未冻结候选的 legacy workflow:提示词不得凭空出现候选身份。"""
+        sent = self._run_real_fallback("")
+        self.assertTrue(sent, "coordinator prompt must be sent")
+        message = sent[0]
+        self.assertNotIn("--candidate-sha", message)
+        self.assertNotIn("候选身份", message)
+        # legacy 提示词必须仍然完整可读。
+        self.assertIn("--workflow-id wf-fb-1", message)
+
 
 class FrozenCandidateLaunchIdentityTest(unittest.TestCase):
     """冻结候选作为可验证身份:严格绑定 dispatch claim,缺则 fail-closed。"""
@@ -749,7 +897,11 @@ class P1StrictCandidateEqualityTest(unittest.TestCase):
 
         def fake_run(cmd, **kwargs):
             # 旧实现依赖 merge-base --is-ancestor;现在必须不再被调用。
-            raise AssertionError(f"ancestor probe must not decide: {cmd}")
+            if any("is-ancestor" in str(a) for a in cmd):
+                raise AssertionError(f"ancestor probe must not decide: {cmd}")
+            # Canonicalisation uses rev-parse; neither SHA exists in this
+            # empty repo, so both fail to resolve and the comparison fails.
+            return subprocess.CompletedProcess(cmd, 1, "", "")
 
         with patch.object(self._ht.subprocess, "run", side_effect=fake_run), \
             pytest.raises(SystemExit) as exc:
@@ -773,3 +925,252 @@ class P1StrictCandidateEqualityTest(unittest.TestCase):
             self._ht._validate_test_delivery_baseline(
                 self._args(), "", "5" * 40, str(self.root))
         self.assertEqual(exc.value.code, 2)
+
+    def test_abbreviated_candidate_matches_full_baseline(self):
+        """P2 回归:delivery 记短 SHA,clone 记全 SHA,同一 commit 必须放行。"""
+        full = "a" * 40
+        short = full[:12]
+
+        def fake_run(cmd, **kwargs):
+            # Only this full SHA resolves in the repo.
+            if any(full in str(a) for a in cmd):
+                return subprocess.CompletedProcess(cmd, 0, full + "\n", "")
+            return subprocess.CompletedProcess(cmd, 1, "", "")
+
+        with patch.object(self._ht.subprocess, "run", side_effect=fake_run):
+            self._ht._validate_test_delivery_baseline(
+                self._args(), short, full, str(self.root))
+
+    def test_unrelated_short_sha_still_refused(self):
+        """短 SHA 规范化不得放宽成「不同 commit 也放行」。"""
+        def fake_run(cmd, **kwargs):
+            return subprocess.CompletedProcess(cmd, 1, "", "")
+
+        with patch.object(self._ht.subprocess, "run", side_effect=fake_run), \
+            pytest.raises(SystemExit) as exc:
+            self._ht._validate_test_delivery_baseline(
+                self._args(), "abcdef1234", "1234567890", str(self.root))
+        self.assertEqual(exc.value.code, 2)
+
+
+class VerifiedCandidateAtVerdictTest(unittest.TestCase):
+    """P1 回归:完成验证时的 clone HEAD,而不是启动时的 baseline。
+
+    baseline_commit 是启动证据:Agent 执行期间 git pull / checkout / rebase
+    之后,只有重新读取 clone HEAD 才能证明「完成验证时验证了谁」。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="herdr-verified-")
+        self.root = Path(self.tmp.name)
+        self.db = self.root / "state.db"
+        env = patch.dict(os.environ, {
+            "HERDR_STATE_DB": str(self.db),
+            "TASKS_FILE": str(self.root / "tasks.json"),
+        })
+        env.start()
+        self.addCleanup(env.stop)
+        from herdr.state_store import get_state_store
+
+        get_state_store(self.db).save_workflow(
+            {"workflow_id": "wf-verified", "status": "running"})
+        self.store = get_state_store(self.db)
+        self._ht = _load_module(
+            "herdr_task_verified_test", HERDR_ROOT / "bin" / "herdr-task",
+        )
+        # Real git repo standing in for the task clone.
+        self.clone = self.root / "clone"
+        self.clone.mkdir()
+        subprocess.run(["git", "init", "-q", str(self.clone)], check=True)
+        for key, val in (("user.email", "t@t"), ("user.name", "t")):
+            subprocess.run(
+                ["git", "-C", str(self.clone), "config", key, val], check=True)
+        (self.clone / "a.txt").write_text("a")
+        subprocess.run(["git", "-C", str(self.clone), "add", "."], check=True)
+        subprocess.run(
+            ["git", "-C", str(self.clone), "commit", "-qm", "one",
+             "--no-gpg-sign"], check=True)
+        self.sha_a = self._head()
+        # The agent moves the clone while it works.
+        (self.clone / "b.txt").write_text("b")
+        subprocess.run(["git", "-C", str(self.clone), "add", "."], check=True)
+        subprocess.run(
+            ["git", "-C", str(self.clone), "commit", "-qm", "two",
+             "--no-gpg-sign"], check=True)
+        self.sha_b = self._head()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _head(self):
+        return subprocess.run(
+            ["git", "-C", str(self.clone), "rev-parse", "HEAD"],
+            check=True, text=True, capture_output=True).stdout.strip()
+
+    def _register(self, task_id="wf-verified-test-auto", baseline="", claim=""):
+        self.store.save_task({
+            "task_id": task_id, "workflow_id": "wf-verified", "node": "test",
+            "stage": "test", "status": "working", "clone_path": str(self.clone),
+            "candidate_sha": claim, "baseline_commit": baseline,
+        })
+        return self.store.get_task(task_id)
+
+    def test_captures_live_head_not_launch_baseline(self):
+        task = self._register(baseline=self.sha_a, claim=self.sha_a)
+        # Clone has since moved to sha_b, exactly the P1 failure mode.
+        self.assertNotEqual(self.sha_a, self.sha_b)
+
+        self._ht._capture_verified_candidate(task)
+
+        stored = self.store.get_task("wf-verified-test-auto")
+        self.assertEqual(stored["verified_candidate_sha"], self.sha_b)
+
+    def test_captured_value_drives_join_gate_verdict(self):
+        """The captured evidence is what the pure gate must read."""
+        from herdr import scheduler as sched
+
+        task = self._register(baseline=self.sha_a, claim=self.sha_a)
+        self._ht._capture_verified_candidate(task)
+        stored = self.store.get_task("wf-verified-test-auto")
+
+        # Launch-time fields still say A; completion evidence says B.
+        self.assertEqual(stored["baseline_commit"], self.sha_a)
+        self.assertEqual(sched.extract_task_verified_sha(stored), self.sha_b)
+        ok, _claim, evidence = sched.task_claim_evidence_consistent(stored)
+        self.assertFalse(ok)
+        self.assertEqual(evidence, self.sha_b)
+
+    def test_matching_head_records_same_revision(self):
+        from herdr import scheduler as sched
+
+        task = self._register(baseline=self.sha_b, claim=self.sha_b)
+        self._ht._capture_verified_candidate(task)
+        stored = self.store.get_task("wf-verified-test-auto")
+        ok, _claim, evidence = sched.task_claim_evidence_consistent(stored)
+        self.assertTrue(ok)
+        self.assertEqual(evidence, self.sha_b)
+
+    def test_missing_clone_is_best_effort_no_raise(self):
+        task = self._register()
+        task["clone_path"] = str(self.root / "does-not-exist")
+        self.assertEqual(self._ht._capture_verified_candidate(task), "")
+
+    def test_set_status_captures_before_accepting_verdict(self):
+        """The verdict path must not skip completion evidence."""
+        seen = {}
+
+        def fake_capture(task):
+            seen["called"] = True
+            return self.sha_b
+
+        self._register(baseline=self.sha_a, claim=self.sha_a)
+        with patch.object(self._ht, "_capture_verified_candidate",
+                          side_effect=fake_capture), \
+            patch.object(self._ht, "load_tasks", return_value={
+                "tasks": [{
+                    "task_id": "wf-verified-test-auto",
+                    "workflow_id": "wf-verified", "node": "test",
+                    "status": "agent_done", "clone_path": str(self.clone),
+                }]}), \
+            patch.object(self._ht, "sync_tasks_projection", return_value=None), \
+            patch.object(self._ht, "_clear_suppress_auto_close",
+                         return_value=None), \
+            patch.object(self._ht, "_record_gate_note", return_value=None), \
+            patch("herdr.kernel.update_task_metadata", return_value={}), \
+            patch("herdr.kernel.transition_task", return_value={
+                "workflow_id": "wf-verified"}):
+            self._ht.set_status(
+                "wf-verified-test-auto", "completed", verdict="pass",
+                note="looks good")
+
+        self.assertTrue(seen.get("called"))
+
+    def test_set_status_skips_capture_without_verdict(self):
+        seen = {"called": False}
+        self._register(baseline=self.sha_a, claim=self.sha_a)
+        with patch.object(
+            self._ht, "_capture_verified_candidate",
+            side_effect=lambda t: seen.__setitem__("called", True)), \
+            patch.object(self._ht, "load_tasks", return_value={
+                "tasks": [{
+                    "task_id": "wf-verified-test-auto",
+                    "workflow_id": "wf-verified", "node": "test",
+                    "status": "agent_done", "clone_path": str(self.clone),
+                }]}), \
+            patch.object(self._ht, "sync_tasks_projection", return_value=None), \
+            patch.object(self._ht, "_clear_suppress_auto_close",
+                         return_value=None), \
+            patch("herdr.kernel.transition_task", return_value={
+                "workflow_id": "wf-verified"}):
+            self._ht.set_status("wf-verified-test-auto", "completed")
+
+        self.assertFalse(seen["called"])
+
+
+class LaunchReclaimTest(unittest.TestCase):
+    """P2 回归:baseline 拒绝发生在注册之前,必须回收运行资源。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="herdr-reclaim-")
+        self.root = Path(self.tmp.name)
+        env = patch.dict(os.environ, {
+            "HERDR_STATE_DB": str(self.root / "state.db"),
+        })
+        env.start()
+        self.addCleanup(env.stop)
+        self._ht = _load_module(
+            "herdr_task_reclaim_test", HERDR_ROOT / "bin" / "herdr-task",
+        )
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _args(self):
+        class _A:
+            pass
+
+        a = _A()
+        a.task_id = "wf-reclaim-test-auto"
+        a.workflow_id = "wf-reclaim"
+        a.node = "test"
+        return a
+
+    def test_reclaim_kills_pane_removes_clone_and_reservation(self):
+        clone = self.root / "clone-1"
+        clone.mkdir()
+        calls = {"tmux": 0, "reservation": 0}
+
+        def fake_run(cmd, **kwargs):
+            if cmd and cmd[0] == "tmux":
+                calls["tmux"] += 1
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        with patch.object(self._ht.subprocess, "run", side_effect=fake_run), \
+            patch.object(self._ht, "release_agent_reservation",
+                         side_effect=lambda tid: calls.__setitem__(
+                             "reservation", calls["reservation"] + 1)), \
+            patch.object(self._ht, "delete_clone_safely", return_value=True):
+            self._ht._reclaim_unregistered_launch_resources(
+                self._args(), clone_path=str(clone), pane_id="%7:p1")
+
+        self.assertEqual(calls["tmux"], 1)
+        self.assertEqual(calls["reservation"], 1)
+
+    def test_reclaim_continues_when_pane_kill_fails(self):
+        """资源回收必须逐项尽力,前一步失败不能阻断后续释放。"""
+        clone = self.root / "clone-2"
+        clone.mkdir()
+        released = {"n": 0}
+
+        def fake_run(cmd, **kwargs):
+            raise OSError("tmux unavailable")
+
+        with patch.object(self._ht.subprocess, "run", side_effect=fake_run), \
+            patch.object(self._ht, "release_agent_reservation",
+                         side_effect=lambda tid: released.__setitem__(
+                             "n", released["n"] + 1)), \
+            patch.object(self._ht, "delete_clone_safely", return_value=True):
+            self._ht._reclaim_unregistered_launch_resources(
+                self._args(), clone_path=str(clone), pane_id="%9:p1")
+
+        self.assertEqual(released["n"], 1)
