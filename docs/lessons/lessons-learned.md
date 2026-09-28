@@ -4179,3 +4179,65 @@ run 前用 `mode=ro` 连接做快照，快照自己先把边车建了出来，�
 
 核心结论仍然成立且不受本修正影响：`get_db_connection` 有建库/迁移副作用，只读入口必须
 独立于它；fixture 快照自开 SQLite 连接会污染被测现场、制造假阳性。
+
+---
+
+## 93. 身份必须作为不可变执行身份贯穿全链：claim / launch / completion 三者不可互相顶替
+
+### 问题背景
+
+PR #107（Critical-Path Scheduler v1）在五轮评审中反复暴露同一类缺陷：调度器决定
+了「要验证哪个候选」，但这个身份只在**派发那一刻**被绑定，后续任何一环丢失或降级
+都会让门禁「证明了一件没有证明的事」。五轮共 11 项，全部是身份链断裂，没有一项
+是功能缺失：
+
+| 轮次 | 缺陷 | 后果 |
+|---|---|---|
+| 3 | Coordinator 回落丢 frozen SHA/branch | 同一 Scheduler decision 出现两套执行语义：直派验证 A，回落让总指挥自己重猜 |
+| 3 | 证据只有启动时的 `baseline_commit` | Agent 执行期间 `git pull` 后，任务仍声称验证 A，实际验证的是 B |
+| 3 | A→B→A 冻结与全历史比对 | 回到 A 时被当成 noop，`latest` 停在 B，之后 Test/Review 全部卡死 |
+| 4 | 取证 best-effort + 取证失败仍接受 pass | completion evidence 缺失时 fallback 回 launch evidence，等于撤销第 3 轮的修复 |
+| 4 | `rev-parse` 失败后退回前缀匹配 | Git 明确说「无法唯一解析」的场景被当作同一个 commit 放行 |
+| 5 | frozen lookup 异常 → `engaged=False` | 一次 SQLite 错误把 scheduler 管理的 workflow 重分类为 legacy，wrapup 绕过门禁 |
+| 5 | freeze 返回空仍占 stage latch | 无身份派发被 preflight 拒绝，而 stage 已锁，天然重试被抑制 |
+| 5 | 回收用裸 `tmux kill-pane` | 不检查 return code 就打印成功；且销毁借用的 prebuilt Pane |
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|---|---|---|
+| 身份只在 dispatch 绑定 | 同一个决策只能有一套执行语义，回落路径必须**原样透传**，不得重新推断 | 回落读 `candidate_frozen` 事实本身（不是重新 resolve），透传 `--candidate-sha` / `--onto` |
+| 用启动快照当完成证据 | `baseline_commit` 是 launch 证据，`verified_candidate_sha` 才是 completion 证据 | 提交 `pass/blocked` 时重新读 clone HEAD；`baseline_commit` 不得被称作 verified SHA |
+| 证据获取 best-effort 后还能降级 | 强证据一旦缺失就退到弱证据，等于没有强证据 | 取证失败即 fail-closed：无 `verified_candidate_sha` 的 scheduler-managed 任务拒绝 verdict |
+| 幂等按全集比对 | 候选身份是 **episode** 不是集合，回到历史值是真实轮换 | 冻结幂等只与 **latest** 比对，`A→B→A` 必须写第三条 |
+| 异常被当成「不存在」 | 「查询失败」与「查询成功但为空」必须三态区分 | lookup 异常 / store 缺失一律 fail-closed；仅「成功且为空」才 legacy passthrough |
+| 门禁前置失败仍推进阶段 | 门禁在 latch 之前判定，失败就不得占闩 | 无 frozen candidate → 不 latch、不派发，下轮 sweep 重估 |
+| 回收绕过自己的后端 | Herdr Pane 不等于裸 tmux pane；且共享资源有归属 | 只关闭本进程自建的 dynamic Pane（走 `close_pane`）；prebuilt Pane 只释放占用 |
+
+### 操作规范
+
+- **身份三字段不可互相顶替**：`candidate_sha`（要求验证谁）/ `baseline_commit`（启动时
+  clone 在谁）/ `verified_candidate_sha`（完成验证时实际验证了谁）。门禁只认第三个。
+- **fail-closed 必须区分「不知道」和「没有」**：任何把异常折叠成空值的 `except` 都要复查，
+  那是把 fail-closed 变回 fail-open 的最短路径。
+- **强证据的 fallback 链要逐环审计**：新增 fallback 前先问「上一环缺失时，我是不是在
+  用更弱的证据冒充同一件事」。
+- **fail-closed 需要作用域**：无候选声明的任务不构成任何身份断言，一律拒绝会打断无关
+  workflow；无 `project_root` 的 workflow 永久解析不出候选，拦下即死锁。
+
+### 验证命令 / 关联证据
+
+- 修复后全量：`python3.13 -m pytest -q` → 2033 passed + 50 subtests。
+- 专项回归：`tests/test_scheduler_v1.py`、`tests/test_scheduler_facts.py`、
+  `tests/test_scheduler_dispatch_e2e.py`（含 claim-only 放行、ABA 轮换、回落透传、
+  ambiguous SHA、reclaim 归属、latch 顺序）。
+- **变异验证**：逐项回退 11 处修复中每一处，均命中对应回归测试（单轮回退分别产生
+  1/4/6/11 个失败），证明测试真的在守门而非恒真。
+- 合并：`1ce6bdf`（PR #107，head `3ef0304`）。
+- 关联实现：`herdr/scheduler.py`、`herdr/scheduler_facts.py`、
+  `services/herdr-controller.py`、`bin/herdr-task`。
+
+### 相关文档 / 关联证据
+
+- 走查：`docs/walkthroughs/PR-107-critical-path-scheduler-v1.md`
+- 既有同族教训：§90（fix-loop 证据门禁与候选身份）、§88（隔离域不能用自身执行身份）。
