@@ -1381,6 +1381,14 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
   陈述**（计数、不可复现日志、错误因果），已按实跑重写。
 - 全量 2196 passed + 50 subtests；`compileall`、`git diff --check` 通过；
   `evaluate_join_gate(reuse_facts=None)` 与 3a84659 差分 20 万组零不一致。
+- 外部评审第 4 轮查出 2 个 P1 + 1 个 P2，均已修复并做变异验证：
+  (1) reuse 事实原先只绑 `to_candidate_sha`，**回滚会重新冻结一个曾冻结过的 SHA**，
+  旧轮次的 reuse 因此复活，把从未验证的候选判为已覆盖 → 改为绑定 `candidate_frozen`
+  事件 id（episode）；(2) 复用来源只校验了 evidence 没校验 claim，claim/evidence
+  不一致的任务被提拔成了下一轮的证据 → 两者必须同时绑定 from 候选；
+  (3) `record_reverification_decision` 的 read-then-compare 在并发下产生 8 行重复
+  → 改用仓库既有的 `BEGIN IMMEDIATE` 写锁做原子 check+insert。
+  变异验证：逐项回退后对应测试分别变红（回退原子性 → 8 条重复行）。
 - 遗留边界：绝对 sweep 开销未由本方实测（第三方量测 6 节点 2.03×，8/12 节点更快）；
   `record_reverification_decision` 仍是 read-then-compare，并发下可产生内容相同的
   重复行（不影响判定）；复用单跳，不递归。

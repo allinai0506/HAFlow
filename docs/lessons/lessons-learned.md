@@ -4275,6 +4275,9 @@ PR #108（Selective Reverification v1）让候选轮换时可以跳过重复验�
 | 同一不变量两份实现 | 账本说「满足」而门禁说「不满足」，workflow 永久等待 | 台账与门禁共用同一个纯函数 `resolve_effective_verification`；死掉的第三份实现删掉 |
 | 缺字段默认「好」 | `source.get("source") or "fresh"` 是 fail-*open* 默认值 | 缺 provenance 视为 unknown → RERUN |
 | 验证工件自己造假 | 计数、不可复现的日志、错误的因果说明 | 数字用 `pytest --collect-only` 核对；日志逐行实跑复制；无法自行复现的指标必须署名归属 |
+| 外部评审：reuse 事实只绑 SHA（第 4 轮才发现） | **回滚会重新冻结一个曾经冻结过的 SHA**；只认 SHA 时旧轮次的 reuse 复活，一个从未验证过的候选被判为已覆盖 | 事实绑定**冻结事件 id（episode）**而非候选 SHA；`A→B` 与后续轮次的 `A→B` 是两条 episode。测试必须覆盖「回到完全相同的 SHA」 |
+| 外部评审：复用来源只查 evidence（第 4 轮才发现） | claim/evidence 不一致的 Task 连自己那一轮的门禁都过不了，凭什么替下一轮作证 | `source.candidate_sha` 与 `source.verified_candidate_sha` **必须同时**绑定 from 候选；新增 `source_candidate_claim_mismatch` |
+| 并发写事实靠 read-then-compare | 8 个并发写者产生 8 行重复，append-only 审计账本出现重复事实 | 复用**已有的** `BEGIN IMMEDIATE` 写锁做 check+insert 原子化（与 interventions / collaboration_events 同一手法），不新建表、不新建锁系统 |
 
 ### 操作规范
 

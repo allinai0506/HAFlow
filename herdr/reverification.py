@@ -62,6 +62,7 @@ REASON_RERUN_SOURCE_ABSENT = "source_verification_absent"
 REASON_RERUN_SOURCE_NOT_PASS = "source_verdict_not_pass"
 REASON_RERUN_SOURCE_UNBOUND = "source_verification_missing_verified_candidate_sha"
 REASON_RERUN_SOURCE_FOREIGN = "source_verification_bound_to_other_candidate"
+REASON_RERUN_SOURCE_CLAIM_MISMATCH = "source_candidate_claim_mismatch"
 REASON_RERUN_SOURCE_NOT_FRESH = "source_verification_is_not_fresh"
 
 # 键名沿用 #107 已有契约,不另造命名空间。
@@ -520,6 +521,7 @@ def _rerun(base: Dict[str, Any], reason: str,
         "reason": reason,
         "source_task_id": str((source or {}).get("task_id") or ""),
         "source_verdict": str((source or {}).get("verdict") or ""),
+        "source_candidate_sha": str((source or {}).get("candidate_sha") or ""),
         "source_verified_candidate_sha": str(
             (source or {}).get("verified_candidate_sha") or ""),
         "source_freshness": str((source or {}).get("source") or ""),
@@ -531,7 +533,8 @@ def build_reverification_plan(workflow_id: str, from_sha: str, to_sha: str,
                               sources: Optional[Sequence[Dict[str, Any]]],
                               policy: Optional[Dict[str, Any]],
                               *, diff_reason: str = "",
-                              verifiers: Optional[Sequence[str]] = None
+                              verifiers: Optional[Sequence[str]] = None,
+                              episode_id: Any = ""
                               ) -> Dict[str, Any]:
     """构建一次可持久化、可重放、可解释的重新验证计划。
 
@@ -548,6 +551,10 @@ def build_reverification_plan(workflow_id: str, from_sha: str, to_sha: str,
     policy = policy if isinstance(policy, dict) else default_policy()
     version = str(policy.get("version") or POLICY_VERSION)
     fingerprint = policy_identity(policy)
+    # Carried on every fact so a reader can tell *which freeze* authorised it.
+    # An empty episode means "the caller could not name one", which is
+    # unprovable provenance and therefore refuses reuse downstream.
+    episode = "" if episode_id in (None, "") else str(episode_id)
     verifiers_cfg = policy.get("verifiers")
     verifiers_cfg = verifiers_cfg if isinstance(verifiers_cfg, dict) else {}
     if verifiers is None:
@@ -559,7 +566,8 @@ def build_reverification_plan(workflow_id: str, from_sha: str, to_sha: str,
     plan: Dict[str, Any] = {
         "workflow_id": str(workflow_id or ""),
         "plan_id": plan_identity(workflow_id, from_sha, to_sha, version,
-                                 fingerprint),
+                                 fingerprint, episode),
+        "candidate_frozen_event_id": episode,
         "from_candidate_sha": from_sha,
         "to_candidate_sha": to_sha,
         "changed_paths": paths,
@@ -583,9 +591,11 @@ def build_reverification_plan(workflow_id: str, from_sha: str, to_sha: str,
         base = {
             "verifier": name,
             "decision_identity": decision_identity(
-                workflow_id, from_sha, to_sha, name, version, fingerprint),
+                workflow_id, from_sha, to_sha, name, version, fingerprint,
+                episode),
             "policy_version": version,
             "policy_identity": fingerprint,
+            "candidate_frozen_event_id": episode,
             "from_candidate_sha": from_sha,
             "to_candidate_sha": to_sha,
             "changed_paths": paths,
@@ -619,6 +629,17 @@ def build_reverification_plan(workflow_id: str, from_sha: str, to_sha: str,
             plan["verifiers"][name] = _rerun(
                 base, REASON_RERUN_SOURCE_FOREIGN, source)
             continue
+        # The claim must bind to the same candidate as the evidence. A task that
+        # was told to verify B but whose verdict-time read says A is a
+        # claim/evidence mismatch: PR #107's join gate refuses such a task as
+        # proof of *either* revision, so it cannot be promoted into proof of A
+        # here either. Reuse must never rest on a verification that failed the
+        # gate of its own round.
+        claimed = str(source.get("candidate_sha") or "").strip()
+        if not claimed or not _same_revision(claimed, from_sha):
+            plan["verifiers"][name] = _rerun(
+                base, REASON_RERUN_SOURCE_CLAIM_MISMATCH, source)
+            continue
         if str(source.get("source") or "") != SOURCE_FRESH:
             # Missing freshness is *not* assumed fresh. A source that does not
             # say how it was obtained is an unknown-provenance record, and in a
@@ -633,6 +654,7 @@ def build_reverification_plan(workflow_id: str, from_sha: str, to_sha: str,
             "reason": REASON_REUSE_NON_IMPACT,
             "source_task_id": str(source.get("task_id") or ""),
             "source_verdict": "pass",
+            "source_candidate_sha": str(source.get("candidate_sha") or ""),
             "source_verified_candidate_sha": verified,
             "source_freshness": "fresh",
         }
@@ -656,25 +678,32 @@ def _identity(prefix: str, *parts: Any) -> str:
 
 def decision_identity(workflow_id: str, from_sha: str, to_sha: str,
                       verifier: str, policy_version: str,
-                      policy_fingerprint: str = "") -> str:
+                      policy_fingerprint: str = "",
+                      episode_id: Any = "") -> str:
     """一条 reuse/rerun 决策事实的身份。
 
-    身份是**episode** 而不是集合:``A → B`` 与 ``B → A`` 必然不同
-    (``from``/``to`` 按位参与编码),因此 A→B→A 不会让第一次的事实被误认成
-    第二次的(#107 在候选身份上踩过的同一个坑)。
+    身份是**episode** 而不是集合:
 
-    策略以**解析后的指纹**参与身份,而不只是声明的版本号:版本号是个人类标签,
-    收窄范围不会改变它。以指纹为准,收窄策略才能真正撤销既有复用。
+    - ``from`` / ``to`` 按位参与编码,所以 ``A → B`` 与 ``B → A`` 必然不同
+      (#107 在候选身份上踩过的同一个坑);
+    - ``episode_id`` 进一步绑定到**这一次候选冻结**,所以同一对
+      (from, to) 在不同轮次出现时也彼此独立;
+    - 策略以**解析后的指纹**参与身份,而不只是声明的版本号——版本号是个人类
+      标签,收窄范围不会改变它。
+
+    ``episode_id`` 是候选冻结事件的唯一 id,而不是候选 SHA:回滚到曾经冻结过的
+    SHA 时,新的冻结是**新的一轮**,旧轮次的 reuse 事实不得复活。
     """
     return _identity(_IDENTITY_PREFIX_DECISION, workflow_id, from_sha, to_sha,
-                     verifier, policy_fingerprint or policy_version)
+                     verifier, policy_fingerprint or policy_version, episode_id)
 
 
 def plan_identity(workflow_id: str, from_sha: str, to_sha: str,
-                  policy_version: str, policy_fingerprint: str = "") -> str:
+                  policy_version: str, policy_fingerprint: str = "",
+                  episode_id: Any = "") -> str:
     """一次重新验证 episode 的身份(覆盖该 episode 内的全部 verifier)。"""
     return _identity(_IDENTITY_PREFIX_PLAN, workflow_id, from_sha, to_sha,
-                     policy_fingerprint or policy_version)
+                     policy_fingerprint or policy_version, episode_id)
 
 
 # ============================================================

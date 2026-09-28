@@ -2919,6 +2919,87 @@ def record_event(
             conn.close()
 
 
+def record_event_if_absent(
+    event: Dict[str, Any],
+    *,
+    identity_field: str,
+    identity_value: str,
+    compare_fields: Optional[Tuple[str, ...]] = None,
+    scan_limit: int = 200,
+    db_path: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Append a WorkflowEvent only if its payload identity is not already stored.
+
+    Exactly-once for a fact whose identity lives *inside* ``payload_json``.
+    The identity cannot be a UNIQUE column there, so the check and the insert
+    share one SQLite write transaction instead: ``BEGIN IMMEDIATE`` takes the
+    write lock before the pre-read, so a second writer cannot observe "absent"
+    and insert a duplicate. This is the same write lock the repository already
+    uses for ``interventions``, ``collaboration_events`` and
+    ``observation_receipts`` — no new table, no new lock system.
+
+    ``compare_fields`` guards the case where the same identity arrives with
+    different content: that is a caller error, not a replay, and it is rejected
+    rather than silently absorbed (which would file one decision under another
+    decision's identity and hide the change from the audit trail).
+
+    Returns {"status": "created" | "exists" | "rejected", "event": ...}.
+    """
+    payload = event.get("payload") or {}
+    if not isinstance(payload, dict):
+        raise ValueError("payload must be a dict")
+    if not identity_value:
+        return {"status": "rejected", "reason": "missing_identity"}
+
+    conn = get_db_connection(db_path)
+    try:
+        conn.execute("BEGIN IMMEDIATE;")
+        try:
+            rows = conn.execute(
+                "SELECT id, timestamp, payload_json FROM events "
+                "WHERE workflow_id IS ? AND event_type = ? "
+                "ORDER BY id DESC LIMIT ?",
+                (event.get("workflow_id"), event.get("event_type"),
+                 int(scan_limit)),
+            ).fetchall()
+            for row in rows:
+                stored = json.loads(row["payload_json"] or "{}")
+                if str(stored.get(identity_field) or "") != str(identity_value):
+                    continue
+                if compare_fields and any(
+                        stored.get(k) != payload.get(k) for k in compare_fields):
+                    conn.execute("COMMIT;")
+                    return {
+                        "status": "rejected",
+                        "reason": "identity_content_mismatch",
+                        "event_id": row["id"],
+                    }
+                conn.execute("COMMIT;")
+                return {
+                    "status": "exists",
+                    "event": {
+                        "id": row["id"],
+                        "workflow_id": event.get("workflow_id"),
+                        "node_id": event.get("node_id"),
+                        "event_type": event.get("event_type"),
+                        "timestamp": row["timestamp"],
+                        "payload": stored,
+                        "source": event.get("source") or "system",
+                    },
+                }
+            recorded = record_event(event, conn=conn)
+            conn.execute("COMMIT;")
+            return {"status": "created", "event": recorded}
+        except Exception:
+            try:
+                conn.execute("ROLLBACK;")
+            except Exception:
+                pass
+            raise
+    finally:
+        conn.close()
+
+
 def list_events(
     workflow_id: Optional[str] = None,
     node_id: Optional[str] = None,

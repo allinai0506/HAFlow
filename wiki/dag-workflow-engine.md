@@ -173,8 +173,18 @@ Evidence:
 - **非线性候选一律 RERUN**：`A` 不是 `B` 的祖先（force push、切分支、回滚到分叉历史）
   时不做任何推断。
 - **rename/copy 两侧都判**：`R herdr/a.py docs/a.md` 不得因为目标落在 `docs/` 就放行。
-- **只认当前候选 + 当前策略**：复用事实按 `(verifier, to_candidate_sha, 策略指纹)`
-  精确绑定。候选再次变化、或策略被收窄 / 删除，旧复用自动失效。
+- **只认当前候选 + 当前策略 + 当前轮次**：复用事实按 `(verifier, to_candidate_sha,
+  policy_identity, candidate_frozen_event_id)` 精确绑定。其中 **episode 用冻结事件 id
+  而不是候选 SHA**——回滚会重新冻结一个曾经冻结过的 SHA，只认 SHA 会让旧轮次的 reuse
+  复活，把从未验证的候选判为已覆盖。候选再次轮换、回到完全相同的 SHA、或策略被收窄 /
+  删除，旧复用都自动失效；后续轮次重复出现的同一 `(from, to)` 是独立 episode。
+- **来源必须双重绑定**：`source.candidate_sha`（派发时被告知验证谁）与
+  `source.verified_candidate_sha`（写 verdict 时实际验证了谁）**都**必须等于 from
+  候选。两者不一致的任务连它自己那一轮的门禁都过不了（claim/evidence mismatch），
+  不得被提拔成下一轮的复用证据。
+- **事实写入是原子的**：check + insert 在同一个 `BEGIN IMMEDIATE` 写锁内完成
+  （复用仓库既有的 SQLite 写锁，不新建表或锁系统），两个并发 sweep 不会写出两条
+  相同事实。
 - **策略身份是指纹不是版本号**：`version` 是人类标签，收窄范围不会改变它；以指纹为准，
   「收窄策略」才会真正撤销既有复用。
 - **复用是调度决策**：复用节点**不创建 Task**。因为它没有任务，「节点完成」与 Join Gate
@@ -190,6 +200,7 @@ Evidence:
 - `herdr/scheduler.py#resolve_effective_verification`
 - `herdr/scheduler_facts.py#record_reverification_decision`
 - `herdr/scheduler_facts.py#find_reuse_fact`
+- `herdr/state_db.py#record_event_if_absent`
 - `services/herdr-controller.py#_reverification_plan_for_rotation`
 - `services/herdr-controller.py#_scheduler_resolve_candidate_and_plan`
 - `workflow_templates/software-development-v1.yaml`（`reverification:` 块）

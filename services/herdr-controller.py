@@ -2382,46 +2382,57 @@ def _reverification_context_and_facts(workflow_id):
         return memo
     try:
         cfg = workflow_config_for(workflow_id) or {}
-        expected = scheduler_facts_store.latest_frozen_candidate_sha(workflow_id)
+        freezes = scheduler_facts_store.list_candidate_frozen_events(workflow_id)
+        expected = str(
+            (freezes[-1].get("payload") or {}).get("candidate_sha") or ""
+        ) if freezes else ""
+        # The episode is the freeze event, not the SHA. A rollback re-freezes a
+        # SHA that was already frozen; keying reuse on the SHA would let the
+        # earlier round's fact resurrect and mark a candidate covered that was
+        # never verified.
+        episode = str(freezes[-1].get("id") or "") if freezes else ""
         policy_fp = str(reverification_mod.policy_identity(
             reverification_mod.policy_from_workflow(cfg)) or "")
     except Exception as exc:
         print(f"[REVERIFICATION POLICY WARN] workflow={workflow_id}: {exc}")
-        return "", "", [], []
-    if not expected or not policy_fp:
-        _REVERIFICATION_MEMO[workflow_id] = ("", "", [], [])
+        return "", "", "", [], []
+    if not expected or not policy_fp or not episode:
+        _REVERIFICATION_MEMO[workflow_id] = ("", "", "", [], [])
         return _REVERIFICATION_MEMO[workflow_id]
     try:
         node_ids = scheduler_core.verifier_branch_node_ids(cfg)
     except Exception as exc:
         print(f"[REVERIFICATION BRANCHES WARN] workflow={workflow_id}: {exc}")
-        return "", "", [], []
+        return "", "", "", [], []
     found = []
     for node_id in node_ids:
         try:
             fact = scheduler_facts_store.find_reuse_fact(
-                workflow_id, node_id, expected, policy_identity=policy_fp)
+                workflow_id, node_id, expected, policy_identity=policy_fp,
+                episode_id=episode)
         except Exception as exc:
             print(f"[REVERIFICATION FACT WARN] workflow={workflow_id} "
                   f"node={node_id}: {exc}")
-            return "", "", [], []
+            return "", "", "", [], []
         if fact:
             found.append(fact)
     if len(_REVERIFICATION_MEMO) >= _REVERIFICATION_MEMO_LIMIT:
         _REVERIFICATION_MEMO.clear()
-    _REVERIFICATION_MEMO[workflow_id] = (expected, policy_fp, node_ids, found)
+    _REVERIFICATION_MEMO[workflow_id] = (
+        expected, policy_fp, episode, node_ids, found)
     return _REVERIFICATION_MEMO[workflow_id]
 
 
 def _reverification_gate_facts(workflow_id):
-    """当前冻结候选 + 当前策略下的 reuse 事实(只读)。
+    """当前候选冻结 + 当前策略下的 reuse 事实(只读)。
 
-    事实按 (verifier, to_candidate_sha, policy_identity) 精确绑定,所以这里
-    读到的每一条都只对当前候选、当前**已解析**策略有效:收窄范围或删掉配置
-    都会让旧事实失效。读取失败一律返回空列表——门禁侧 fail-closed,绝不会
-    因为「查不到」而把复用当成通过。
+    事实按 (verifier, to_candidate_sha, policy_identity, 候选冻结 episode)
+    精确绑定,所以这里读到的每一条都只对**当前这一轮**候选有效:候选再次
+    轮换、回滚到曾冻结过的 SHA、或策略被收窄/删除,旧事实都失效。
+    读取失败一律返回空列表——门禁侧 fail-closed,绝不会因为「查不到」而把
+    复用当成通过。
     """
-    return _reverification_context_and_facts(workflow_id)[3]
+    return _reverification_context_and_facts(workflow_id)[4]
 
 
 def _reverification_effective(workflow_id, node_id):
@@ -2437,10 +2448,10 @@ def _reverification_effective(workflow_id, node_id):
     if scheduler_core is None or reverification_mod is None:
         return {"status": "none", "source": "none"}
     try:
-        expected = _reverification_context_and_facts(workflow_id)[0]
+        context = _reverification_context_and_facts(workflow_id)
         return scheduler_core.resolve_effective_verification(
-            load_tasks(), workflow_id, node_id, expected,
-            _reverification_gate_facts(workflow_id))
+            load_tasks(), workflow_id, node_id, context[0],
+            context[4])
     except Exception as exc:
         print(f"[REVERIFICATION EFFECTIVE WARN] workflow={workflow_id} "
               f"node={node_id}: {exc}")
@@ -2464,7 +2475,7 @@ def _reverification_satisfies_node(workflow_id, node_id):
         scheduler_core.EFFECTIVE_REUSE
 
 
-def _reverification_episode_settled(workflow_id, from_sha, to_sha):
+def _reverification_episode_settled(workflow_id, from_sha, to_sha, episode_id):
     """Whether every verifier of this episode already has a recorded decision.
 
     A rotation stays "the current rotation" until a *third* candidate is frozen,
@@ -2472,11 +2483,14 @@ def _reverification_episode_settled(workflow_id, from_sha, to_sha):
     and a full task scan — would be recomputed on every 2-second sweep, forever,
     for a decision that is already immutable on disk. The facts are the record;
     re-deriving them cannot change the answer, it can only cost subprocesses.
+
+    Scoped by the freeze episode as well as the SHA pair, so a repeated
+    (from, to) in a later round is treated as a fresh episode and re-planned.
     """
     if scheduler_facts_store is None or scheduler_core is None:
         return False
     try:
-        expected = _reverification_context_and_facts(workflow_id)[2]
+        expected = _reverification_context_and_facts(workflow_id)[3]
     except Exception:
         return False
     if not expected:
@@ -2493,6 +2507,9 @@ def _reverification_episode_settled(workflow_id, from_sha, to_sha):
                 != str(from_sha or "")):
             continue
         if str(payload.get("to_candidate_sha") or "") != str(to_sha or ""):
+            continue
+        if str(payload.get("candidate_frozen_event_id") or "") != str(
+                episode_id or ""):
             continue
         verifier = str(payload.get("verifier") or "")
         if verifier:
@@ -2540,11 +2557,22 @@ def _scheduler_resolve_candidate_and_plan(workflow_id, workflow_cfg):
     if not frozen_sha:
         return "", True
     rotated_from = _scheduler_previous_candidate_sha(workflow_id)
-    if rotated_from and rotated_from != frozen_sha and not (
-            _reverification_episode_settled(
-                workflow_id, rotated_from, frozen_sha)):
-        _reverification_plan_for_rotation(
-            workflow_id, workflow_cfg, project_root, rotated_from, frozen_sha)
+    if rotated_from and rotated_from != frozen_sha:
+        # The episode is the freeze event just recorded (or reused, when the
+        # SHA did not change). Facts are bound to it, not to the SHA, so a
+        # rollback onto an already-frozen SHA starts a new episode and cannot
+        # inherit the previous round's reuse.
+        try:
+            freezes = scheduler_facts_store.list_candidate_frozen_events(
+                workflow_id)
+            episode_id = str(freezes[-1].get("id") or "") if freezes else ""
+        except Exception:
+            episode_id = ""
+        if episode_id and not _reverification_episode_settled(
+                workflow_id, rotated_from, frozen_sha, episode_id):
+            _reverification_plan_for_rotation(
+                workflow_id, workflow_cfg, project_root, rotated_from,
+                frozen_sha, episode_id)
     return frozen_sha, False
 
 
@@ -2612,7 +2640,7 @@ def _reverification_source_verifications(workflow_id, from_sha):
 
 
 def _reverification_plan_for_rotation(workflow_id, workflow_cfg, project_root,
-                                      from_sha, to_sha):
+                                      from_sha, to_sha, episode_id):
     """候选轮换时构建并落盘一次重新验证计划(best-effort,失败即全部 RERUN)。
 
     返回 ``(plan, reused_node_ids)``。任何异常都退化为「没有复用」,即所有
@@ -2627,6 +2655,12 @@ def _reverification_plan_for_rotation(workflow_id, workflow_cfg, project_root,
         return empty
     if not project_root or not from_sha or not to_sha or from_sha == to_sha:
         return empty
+    if not episode_id:
+        # Without the freeze that authorises it, a decision could not be bound to
+        # a round, so nothing may be recorded as covered.
+        print(f"[REVERIFICATION PLAN SKIPPED] workflow={workflow_id} "
+              "no candidate freeze episode; treating as full re-verification")
+        return empty
     try:
         policy = reverification_mod.policy_from_workflow(workflow_cfg)
         entries, diff_reason = reverification_mod.collect_candidate_changes(
@@ -2636,6 +2670,7 @@ def _reverification_plan_for_rotation(workflow_id, workflow_cfg, project_root,
             workflow_id, from_sha, to_sha, entries, sources,
             policy, diff_reason=diff_reason,
             verifiers=scheduler_core.verifier_branch_node_ids(workflow_cfg),
+            episode_id=episode_id,
         )
     except Exception as exc:
         print(f"[REVERIFICATION PLAN WARN] workflow={workflow_id}: {exc}")

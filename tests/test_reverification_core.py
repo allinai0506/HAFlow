@@ -42,16 +42,19 @@ _ctl = _load_module(
 WF = "wf-rever-e2e"
 
 
-def _reuse_fact(workflow_id, verifier, candidate_sha, db_path):
-    """Look up a reuse fact under the policy that authorised it.
+def _reuse_fact(workflow_id, verifier, candidate_sha, db_path, episode_id=None):
+    """Look up a reuse fact under the policy AND freeze episode that made it.
 
-    ``find_reuse_fact`` is fail-closed on the policy identity, so a call that
-    omits it asks "is there a fact under *no* policy?", which is correctly
-    None. Tests that want the real answer pass the resolved policy.
+    ``find_reuse_fact`` is fail-closed on both, so a call that omits one asks
+    "is there a fact under *no* policy / *no* episode?", which is correctly
+    None. Tests asking "is the current episode covered?" pass both.
     """
+    if episode_id is None:
+        freezes = facts.list_candidate_frozen_events(workflow_id, db_path=db_path)
+        episode_id = freezes[-1].get("id") if freezes else None
     return facts.find_reuse_fact(
         workflow_id, verifier, candidate_sha,
-        policy_identity=rv.policy_identity(POLICY),
+        policy_identity=rv.policy_identity(POLICY), episode_id=episode_id,
         db_path=db_path)
 POLICY = {
     "version": rv.POLICY_VERSION,
@@ -139,7 +142,16 @@ class ReverificationE2EBase(unittest.TestCase):
             self.repo, from_sha, to_sha)
         return rv.build_reverification_plan(
             WF, from_sha, to_sha, entries, sources, POLICY,
-            diff_reason=reason)
+            diff_reason=reason, episode_id=self._episode_for(to_sha))
+
+    def _episode_for(self, candidate_sha):
+        """The freeze that authorises decisions about ``candidate_sha``."""
+        facts.record_candidate_frozen(WF, candidate_sha, db_path=self.db)
+        freezes = facts.list_candidate_frozen_events(WF, db_path=self.db)
+        for event in freezes:
+            if (event.get("payload") or {}).get("candidate_sha") == candidate_sha:
+                return event.get("id")
+        return ""
 
     def record_plan(self, plan):
         """Persist every decision in a plan; return [(verifier, status), ...]."""
@@ -189,9 +201,9 @@ class SchedulerIntegrationTest(ReverificationE2EBase):
         self.record_plan(plan)
 
         facts.record_candidate_frozen(WF, a, db_path=self.db)
-        facts.record_candidate_frozen(WF, b, db_path=self.db)
+        episode_b = self._episode_for(b)
 
-        reuse = _reuse_fact(WF, "test", b, self.db)
+        reuse = _reuse_fact(WF, "test", b, self.db, episode_id=episode_b)
         self.assertIsNotNone(reuse)
         self.assertEqual(reuse["source_task_id"], f"{WF}-test-auto")
         self.assertEqual(reuse["to_candidate_sha"], b)

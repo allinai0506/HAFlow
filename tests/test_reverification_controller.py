@@ -41,20 +41,24 @@ _ctl = _load_module(
 WF = "wf-rever-ctl"
 
 
-def _reuse_fact(workflow_id, verifier, candidate_sha, db_path):
-    """Look up a reuse fact under the policy that authorised it.
+def _reuse_fact(workflow_id, verifier, candidate_sha, db_path, episode_id=None):
+    """Look up a reuse fact under the policy AND freeze episode that made it.
 
-    ``find_reuse_fact`` is fail-closed on the policy identity, so a call that
-    omits it asks "is there a fact under *no* policy?", which is correctly
-    None. Tests that want the real answer pass the resolved policy.
+    ``find_reuse_fact`` is fail-closed on both, so a call that omits one asks
+    "is there a fact under *no* policy / *no* episode?", which is correctly
+    None. Tests asking "is the current episode covered?" pass both.
     """
     from herdr.workflow import load_template
+    if episode_id is None:
+        freezes = facts.list_candidate_frozen_events(workflow_id, db_path=db_path)
+        episode_id = freezes[-1].get("id") if freezes else None
     return facts.find_reuse_fact(
         workflow_id, verifier, candidate_sha,
         policy_identity=reverification_mod.policy_identity(
             reverification_mod.policy_from_workflow(load_template(
                 str(REPO_ROOT / "workflow_templates"
                     / "software-development-v1.yaml")))),
+        episode_id=episode_id,
         db_path=db_path)
 
 
@@ -260,7 +264,13 @@ class ControllerReverificationTest(unittest.TestCase):
         """
         if rel:
             self.write(rel, text)
-        new = self.commit(f"change:{rel}")
+            new = self.commit(f"change:{rel}")
+        else:
+            new = self.head
+        self._begin_rework()
+        return new
+
+    def _begin_rework(self):
         impl_id = f"{WF}-impl-{_bump()}"
         for task in self.store.list_tasks(workflow_id=WF):
             node = str(task.get("node") or task.get("stage") or "")
@@ -280,7 +290,17 @@ class ControllerReverificationTest(unittest.TestCase):
         # stage latch. Skipping it here would model a rework that never took
         # effect, because the latch would still be set when the rework finished.
         self._sweep()
-        return new
+
+    def rollback_to(self, sha):
+        """Reset the delivery branch to an earlier commit and rework from there.
+
+        Models the rollback the spec names explicitly: the branch is moved back
+        so the frozen candidate becomes a SHA that was already frozen in an
+        earlier episode. No new commit is made — the point is that the candidate
+        is byte-identical to one already in the ledger.
+        """
+        _git(self.repo, "reset", "-q", "--hard", sha)
+        self._begin_rework()
 
     def finish_rework(self):
         """The rework agent finishes: implementation is complete again.
@@ -692,6 +712,81 @@ class ControllerReverificationTest(unittest.TestCase):
             len(events),
             "every episode must have its own decision identity",
         )
+
+    def test_rollback_to_a_previous_candidate_cannot_resurrect_old_reuse(self):
+        """P1: a reuse fact must not survive into a different candidate episode.
+
+        A -> B reuses test. B -> C re-runs it. Then the implementation branch
+        is reset so the candidate is B *again* — the rollback case the spec
+        names explicitly. The C -> B episode is non-linear, so every verifier
+        must re-run. But the ledger still holds the first A -> B fact, and a
+        lookup keyed only on (verifier, to_candidate_sha) would find it: B is
+        B, so the stale fact would resurrect, mark test complete, and B would
+        never actually be tested.
+
+        Binding the fact to the candidate-freeze episode — not to the SHA — is
+        what makes "facts do not cross episodes" true.
+        """
+        # Round 1: A -> B, docs only, test reuses.
+        a = self._bootstrap_passed_candidate()
+        b = self.rotate("docs/a.md", "1")
+        self.finish_rework()
+        self._sweep()
+        self.assertIsNotNone(_reuse_fact(WF, "test", b, self.db))
+        self.assertTrue(_ctl.is_node_complete(WF, "test"))
+        first_episode = self._current_episode_id()
+
+        # Round 2: B -> C, code change, so test must re-run.
+        self.save_task(task_id=f"{WF}-test-c", node="test", stage="test",
+                       candidate_sha=b, verified_candidate_sha=b,
+                       status="completed", stage_verdict="pass",
+                       updated_at=_bump())
+        c = self.rotate("herdr/scheduler.py", "code")
+        self.finish_rework()
+        self._sweep()
+        self.assertIsNone(_reuse_fact(WF, "test", c, self.db),
+                          "precondition: C decided RERUN, so no reuse fact")
+        second_episode = self._current_episode_id()
+        self.assertNotEqual(first_episode, second_episode)
+        self.assertFalse(_ctl.is_node_complete(WF, "test"))
+
+        # Round 3: the implementation branch is reset to B, so the candidate is
+        # B again. C is not an ancestor of B, so this rotation is non-linear
+        # and every verifier must re-run — including test.
+        self.rollback_to(b)
+        self.finish_rework()
+        self._sweep()
+        self.assertEqual(
+            self._current_candidate(), b,
+            "precondition: the candidate really is B again")
+        # The A -> B fact is still in the ledger — it was correctly *ignored*,
+        # not deleted. A test that passed because the fact had vanished would not
+        # be testing episode binding at all.
+        stale = [e["payload"] for e in
+                 facts.list_reverification_decisions(WF, db_path=self.db)
+                 if e["payload"]["decision"] == "reuse"
+                 and e["payload"]["from_candidate_sha"] == a
+                 and e["payload"]["to_candidate_sha"] == b]
+        self.assertEqual(len(stale), 1,
+                         "precondition: the A -> B reuse fact still exists")
+        self.assertNotEqual(
+            stale[0]["candidate_frozen_event_id"],
+            self._current_episode_id(),
+            "the fact must belong to the earlier freeze")
+        self.assertNotEqual(self._current_episode_id(), first_episode)
+        self.assertIn(
+            "test", self.launched_nodes(),
+            "test(B) must be re-dispatched: the A->B fact belongs to a "
+            "different candidate episode and must not resurrect",
+        )
+
+    def _current_candidate(self):
+        return facts.latest_frozen_candidate_sha(WF, db_path=self.db)
+
+    def _current_episode_id(self):
+        events = facts.list_candidate_frozen_events(WF, db_path=self.db)
+        self.assertTrue(events, "precondition: a candidate has been frozen")
+        return events[-1].get("id")
 
     def test_case9_blocked_previous_verdict_cannot_be_reused(self):
         """§31 Case 9: test(A) BLOCKED 时 docs-only 也不得复用。"""

@@ -41,6 +41,27 @@ def _policy_identity(policy=None):
     return rv.policy_identity(rv.policy_from_workflow(policy or _SHIPPED_POLICY))
 
 
+#: A freeze episode id. Facts are bound to the *freeze*, not the SHA, so a
+#: rollback onto an already-frozen SHA starts a new episode.
+EPISODE = "101"
+
+
+def _reuse_payload(**overrides):
+    """A reuse decision that satisfies every admissibility check."""
+    payload = {
+        "decision": rv.DECISION_REUSE, "verifier": "test",
+        "from_candidate_sha": "A", "to_candidate_sha": "B",
+        "candidate_frozen_event_id": EPISODE,
+        "source_task_id": "t-A", "source_verdict": "pass",
+        "source_candidate_sha": "A", "source_verified_candidate_sha": "A",
+        "changed_paths": ["docs/a.md"],
+        "policy_version": rv.POLICY_VERSION,
+        "policy_identity": _policy_identity(),
+    }
+    payload.update(overrides)
+    return payload
+
+
 # ---------------------------------------------------------------- policy ---
 
 class TestPolicy:
@@ -338,6 +359,48 @@ class TestBuildReverificationPlan:
             [_source(verified="Z")], _policy())
         assert plan["verifiers"]["test"]["reason"] == rv.REASON_RERUN_SOURCE_FOREIGN
 
+    def test_source_claim_must_bind_to_the_same_candidate(self):
+        """A claim/evidence mismatch is not a proof of either revision.
+
+        PR #107's join gate refuses a task told to verify B whose verdict-time
+        read says A: it cannot serve as evidence for B *or* for A. Promoting it
+        into proof of A here would let a verification that failed its own round's
+        gate carry a later reuse.
+        """
+        plan = rv.build_reverification_plan(
+            "wf-1", "A", "C", _entries(("M", "", "docs/a.md")), [{
+                "verifier": "test", "task_id": "mismatch", "verdict": "pass",
+                "candidate_sha": "B",           # told to verify B
+                "verified_candidate_sha": "A",  # actually proved A
+                "source": "fresh",
+            }], _policy())
+        decision = plan["verifiers"]["test"]
+        assert decision["decision"] == rv.DECISION_RERUN
+        assert decision["reason"] == rv.REASON_RERUN_SOURCE_CLAIM_MISMATCH
+
+    def test_source_without_a_claim_is_not_a_proof(self):
+        """A legacy task with completion evidence but no dispatch claim."""
+        plan = rv.build_reverification_plan(
+            "wf-1", "A", "C", _entries(("M", "", "docs/a.md")), [{
+                "verifier": "test", "task_id": "legacy", "verdict": "pass",
+                "candidate_sha": "",
+                "verified_candidate_sha": "A",
+                "source": "fresh",
+            }], _policy())
+        assert plan["verifiers"]["test"]["reason"] == \
+            rv.REASON_RERUN_SOURCE_CLAIM_MISMATCH
+
+    def test_matching_claim_and_evidence_still_reuses(self):
+        """The new check must not over-reject the normal case."""
+        plan = rv.build_reverification_plan(
+            "wf-1", "A", "C", _entries(("M", "", "docs/a.md")), [{
+                "verifier": "test", "task_id": "ok", "verdict": "pass",
+                "candidate_sha": "A", "verified_candidate_sha": "A",
+                "source": "fresh",
+            }], _policy())
+        assert plan["verifiers"]["test"]["decision"] == rv.DECISION_REUSE
+        assert plan["verifiers"]["test"]["source_candidate_sha"] == "A"
+
     def test_absent_source_reruns(self):
         plan = rv.build_reverification_plan(
             "wf-1", "A", "B", _entries(("M", "", "docs/a.md")), [], _policy())
@@ -401,33 +464,27 @@ class TestDecisionIdentity:
         same-SHA case, which must be rejected at the fact boundary: recording it
         would let a "reuse" claim exist with no candidate change behind it.
         """
-        result = facts.record_reverification_decision("wf-facts-rev", {
-            "decision": rv.DECISION_REUSE, "verifier": "test",
-            "from_candidate_sha": "A", "to_candidate_sha": "A",
-            "source_task_id": "t-A", "source_verdict": "pass",
-            "source_verified_candidate_sha": "A",
-        }, db_path=db)
+        result = facts.record_reverification_decision(
+            "wf-facts-rev", _reuse_payload(to_candidate_sha="A"), db_path=db)
         assert result["status"] == "rejected"
         assert result["reason"] == "same_candidate"
 
     def test_aba_rotation_uses_distinct_episodes(self, db):
         """A -> B and B -> A are separate facts, each resolving to its own target."""
         for src, dst in (("A", "B"), ("B", "A")):
-            facts.record_reverification_decision("wf-facts-rev", {
-                "decision": rv.DECISION_REUSE, "verifier": "test",
-                "from_candidate_sha": src, "to_candidate_sha": dst,
-                "source_task_id": f"t-{src}", "source_verdict": "pass",
-                "source_verified_candidate_sha": src,
-                "policy_identity": _policy_identity(),
-            }, db_path=db)
+            facts.record_reverification_decision("wf-facts-rev", _reuse_payload(
+                from_candidate_sha=src, to_candidate_sha=dst,
+                source_task_id=f"t-{src}",
+                source_candidate_sha=src,
+                source_verified_candidate_sha=src), db_path=db)
         assert len(facts.list_reverification_decisions(
             "wf-facts-rev", db_path=db)) == 2
         policy = _policy_identity()
         assert facts.find_reuse_fact("wf-facts-rev", "test", "B",
-                                     policy_identity=policy,
+                                     policy_identity=policy, episode_id=EPISODE,
                                      db_path=db)["from_candidate_sha"] == "A"
         assert facts.find_reuse_fact("wf-facts-rev", "test", "A",
-                                     policy_identity=policy,
+                                     policy_identity=policy, episode_id=EPISODE,
                                      db_path=db)["from_candidate_sha"] == "B"
 
     def test_policy_identity_scopes_the_lookup(self, db):
@@ -445,22 +502,23 @@ class TestDecisionIdentity:
                                        ["docs/adr/**"]}}})
         assert rv.policy_identity(wide) != rv.policy_identity(narrow)
 
-        facts.record_reverification_decision("wf-facts-rev", {
-            "decision": rv.DECISION_REUSE, "verifier": "test",
-            "from_candidate_sha": "A", "to_candidate_sha": "B",
-            "source_task_id": "t-A", "source_verdict": "pass",
-            "source_verified_candidate_sha": "A",
-            "policy_version": wide["version"],
-            "policy_identity": rv.policy_identity(wide),
-        }, db_path=db)
+        facts.record_reverification_decision("wf-facts-rev", _reuse_payload(
+            policy_version=wide["version"],
+            policy_identity=rv.policy_identity(wide)), db_path=db)
         assert facts.find_reuse_fact(
             "wf-facts-rev", "test", "B",
-            policy_identity=rv.policy_identity(wide), db_path=db)
+            policy_identity=rv.policy_identity(wide), episode_id=EPISODE,
+            db_path=db)
         assert facts.find_reuse_fact(
             "wf-facts-rev", "test", "B",
-            policy_identity=rv.policy_identity(narrow), db_path=db) is None
+            policy_identity=rv.policy_identity(narrow), episode_id=EPISODE,
+            db_path=db) is None
         assert facts.find_reuse_fact(
             "wf-facts-rev", "test", "B", policy_identity="", db_path=db) is None
+        assert facts.find_reuse_fact(
+            "wf-facts-rev", "test", "B",
+            policy_identity=rv.policy_identity(wide), episode_id="",
+            db_path=db) is None
 
     def test_removing_the_block_changes_the_policy_identity(self, db):
         """Deleting the config must revoke reuse, not be a no-op."""
@@ -472,15 +530,9 @@ class TestDecisionIdentity:
 
     def test_fact_carries_the_scope_that_authorised_it(self, db):
         """§32: the fact must explain itself without its parent plan."""
-        facts.record_reverification_decision("wf-facts-rev", {
-            "decision": rv.DECISION_REUSE, "verifier": "test",
-            "from_candidate_sha": "A", "to_candidate_sha": "B",
-            "source_task_id": "t-A", "source_verdict": "pass",
-            "source_verified_candidate_sha": "A",
-            "changed_paths": ["docs/a.md"],
-            "reusable_scope": ["docs/**/*.md"],
-            "out_of_scope_paths": [],
-        }, db_path=db)
+        facts.record_reverification_decision("wf-facts-rev", _reuse_payload(
+            reusable_scope=["docs/**/*.md"], out_of_scope_paths=[]),
+            db_path=db)
         payload = facts.list_reverification_decisions(
             "wf-facts-rev", db_path=db)[0]["payload"]
         assert payload["reusable_scope"] == ["docs/**/*.md"]
@@ -488,13 +540,7 @@ class TestDecisionIdentity:
 
     def test_caller_supplied_identity_must_match_the_fact(self, db):
         """The identity is recomputed, never taken on trust from the payload."""
-        payload = {
-            "decision": rv.DECISION_REUSE, "verifier": "test",
-            "from_candidate_sha": "A", "to_candidate_sha": "B",
-            "source_task_id": "t-A", "source_verdict": "pass",
-            "source_verified_candidate_sha": "A",
-            "policy_version": "selective-reverification-v1",
-        }
+        payload = _reuse_payload()
         forged = dict(payload, decision_identity="rever_deadbeef")
         result = facts.record_reverification_decision(
             "wf-facts-rev", forged, db_path=db)
@@ -509,17 +555,15 @@ class TestDecisionIdentity:
         assert ok["status"] == "created"
 
     def test_changed_policy_version_is_a_distinct_fact(self, db):
-        """A different policy version is a different decision, not a replay."""
-        base = {
-            "decision": rv.DECISION_REUSE, "verifier": "test",
-            "from_candidate_sha": "A", "to_candidate_sha": "B",
-            "source_task_id": "t-A", "source_verdict": "pass",
-            "source_verified_candidate_sha": "A",
-            "policy_version": "selective-reverification-v1",
-        }
+        """A different policy is a different decision, not a replay."""
+        base = _reuse_payload()
         facts.record_reverification_decision("wf-facts-rev", base, db_path=db)
         result = facts.record_reverification_decision("wf-facts-rev", dict(
-            base, policy_version="selective-reverification-v1-strict"),
+            base, policy_version="selective-reverification-v1-strict",
+            policy_identity=_policy_identity({
+                "reverification": {"version": "selective-reverification-v1-strict",
+                                   "test": {"reusable_only_if_changes_within":
+                                            ["docs/**/*.md"]}}})),
             db_path=db)
         assert result["status"] == "created"
         assert len(facts.list_reverification_decisions(
@@ -752,12 +796,9 @@ class TestReverificationFactStore:
             "node": "test", "status": "completed", "stage_verdict": "pass",
             "candidate_sha": "A", "verified_candidate_sha": "A",
         })
-        facts.record_reverification_decision("wf-facts-rev", {
-            "decision": rv.DECISION_REUSE, "verifier": "test",
-            "from_candidate_sha": "A", "to_candidate_sha": "B",
-            "source_task_id": "wf-test-auto", "source_verdict": "pass",
-            "source_verified_candidate_sha": "A",
-        }, db_path=db)
+        facts.record_reverification_decision(
+            "wf-facts-rev", _reuse_payload(source_task_id="wf-test-auto"),
+            db_path=db)
 
         task = get_state_store(db).get_task("wf-test-auto")
         assert task["candidate_sha"] == "A"
@@ -765,14 +806,9 @@ class TestReverificationFactStore:
         assert task["stage_verdict"] == "pass"
 
     def test_fact_records_the_proof_it_relies_on(self, db):
-        facts.record_reverification_decision("wf-facts-rev", {
-            "decision": rv.DECISION_REUSE, "verifier": "test",
-            "from_candidate_sha": "A", "to_candidate_sha": "B",
-            "source_task_id": "wf-test-auto", "source_verdict": "pass",
-            "source_verified_candidate_sha": "A",
-            "changed_paths": ["docs/a.md"],
-            "policy_version": rv.POLICY_VERSION,
-        }, db_path=db)
+        facts.record_reverification_decision(
+            "wf-facts-rev", _reuse_payload(source_task_id="wf-test-auto"),
+            db_path=db)
         payload = facts.list_reverification_decisions("wf-facts-rev", db_path=db)[0]["payload"]
         assert payload["source_verdict"] == "pass"
         assert payload["source_verified_candidate_sha"] == "A"
@@ -782,12 +818,7 @@ class TestReverificationFactStore:
 
     def test_same_episode_is_idempotent(self, db):
         """§25: 同一事实重复执行必须幂等。"""
-        payload = {
-            "decision": rv.DECISION_REUSE, "verifier": "test",
-            "from_candidate_sha": "A", "to_candidate_sha": "B",
-            "source_task_id": "wf-test-auto", "source_verdict": "pass",
-            "source_verified_candidate_sha": "A",
-        }
+        payload = _reuse_payload(source_task_id="wf-test-auto")
         first = facts.record_reverification_decision(
             "wf-facts-rev", payload, db_path=db)
         second = facts.record_reverification_decision(
@@ -800,32 +831,118 @@ class TestReverificationFactStore:
     def test_case14_aba_produces_two_distinct_facts(self, db):
         """§26/§31 Case 14: A→B 与 B→A 是不同 episode。"""
         for src, dst in (("A", "B"), ("B", "A")):
-            facts.record_reverification_decision("wf-facts-rev", {
-                "decision": rv.DECISION_REUSE, "verifier": "test",
-                "from_candidate_sha": src, "to_candidate_sha": dst,
-                "source_task_id": f"t-{src}", "source_verdict": "pass",
-                "source_verified_candidate_sha": src,
-                "policy_identity": _policy_identity(),
-            }, db_path=db)
+            facts.record_reverification_decision("wf-facts-rev", _reuse_payload(
+                from_candidate_sha=src, to_candidate_sha=dst,
+                source_task_id=f"t-{src}",
+                source_candidate_sha=src,
+                source_verified_candidate_sha=src), db_path=db)
         recorded = facts.list_reverification_decisions("wf-facts-rev", db_path=db)
         assert len(recorded) == 2
         assert {e["payload"]["from_candidate_sha"] for e in recorded} == {"A", "B"}
 
     def test_lookup_is_bound_to_the_exact_to_candidate(self, db):
         """§23: 复用事实只能满足它自己记录的 to_candidate。"""
-        facts.record_reverification_decision("wf-facts-rev", {
-            "decision": rv.DECISION_REUSE, "verifier": "test",
-            "from_candidate_sha": "A", "to_candidate_sha": "B",
-            "source_task_id": "t-A", "source_verdict": "pass",
-            "source_verified_candidate_sha": "A",
-            "policy_identity": _policy_identity(),
-        }, db_path=db)
+        facts.record_reverification_decision(
+            "wf-facts-rev", _reuse_payload(), db_path=db)
         assert facts.find_reuse_fact("wf-facts-rev", "test", "B",
-                                     policy_identity=_policy_identity(), db_path=db)
+                                     policy_identity=_policy_identity(),
+                                     episode_id=EPISODE, db_path=db)
         assert facts.find_reuse_fact("wf-facts-rev", "test", "C",
-                                     policy_identity=_policy_identity(), db_path=db) is None
+                                     policy_identity=_policy_identity(),
+                                     episode_id=EPISODE, db_path=db) is None
         assert facts.find_reuse_fact("wf-facts-rev", "review", "B",
-                                     policy_identity=_policy_identity(), db_path=db) is None
+                                     policy_identity=_policy_identity(),
+                                     episode_id=EPISODE, db_path=db) is None
+
+    def test_concurrent_writers_produce_exactly_one_fact(self, db):
+        """§25: two sweeps must not both insert the same decision.
+
+        Threads, not sequential repeats: sequential idempotency is already proven
+        above, and AGENTS.md §6 requires independent connections with real
+        interleaving. ``get_db_connection`` opens a connection per call, so each
+        thread genuinely contends for the SQLite write lock.
+        """
+        import threading
+
+        payload = _reuse_payload()
+        barrier = threading.Barrier(8)
+        results = []
+        lock = threading.Lock()
+
+        def writer():
+            barrier.wait()
+            outcome = facts.record_reverification_decision(
+                "wf-facts-rev", dict(payload), db_path=db)
+            with lock:
+                results.append(outcome["status"])
+
+        threads = [threading.Thread(target=writer) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        recorded = facts.list_reverification_decisions("wf-facts-rev", db_path=db)
+        assert len(recorded) == 1, f"expected one fact, got {len(recorded)}"
+        assert results.count("created") == 1, results
+        assert set(results) <= {"created", "exists"}
+
+    def test_reuse_is_bound_to_the_candidate_freeze_episode(self, db):
+        """§26: a fact must not cross candidate episodes.
+
+        A rollback re-freezes a SHA that was already frozen. Keyed on the SHA
+        alone, the earlier round's reuse would resurrect and mark the candidate
+        covered that was never verified — the candidate would silently skip a
+        verifier. The freeze event is what distinguishes the rounds.
+        """
+        facts.record_reverification_decision(
+            "wf-facts-rev", _reuse_payload(), db_path=db)
+        assert facts.find_reuse_fact(
+            "wf-facts-rev", "test", "B", policy_identity=_policy_identity(),
+            episode_id=EPISODE, db_path=db)
+        assert facts.find_reuse_fact(
+            "wf-facts-rev", "test", "B", policy_identity=_policy_identity(),
+            episode_id="202", db_path=db) is None, \
+            "a different freeze episode must not be covered by this fact"
+        assert facts.find_reuse_fact(
+            "wf-facts-rev", "test", "B", policy_identity=_policy_identity(),
+            db_path=db) is None, \
+            "an unnamed episode must not be covered by this fact"
+
+    def test_same_sha_pair_in_a_later_episode_is_a_separate_decision(self, db):
+        """A -> B twice is two episodes, not one replay."""
+        facts.record_reverification_decision(
+            "wf-facts-rev", _reuse_payload(), db_path=db)
+        second = facts.record_reverification_decision(
+            "wf-facts-rev",
+            _reuse_payload(candidate_frozen_event_id="202"), db_path=db)
+        assert second["status"] == "created"
+        assert len(facts.list_reverification_decisions(
+            "wf-facts-rev", db_path=db)) == 2
+
+    def test_a_fact_without_a_freeze_episode_is_refused(self, db):
+        """An unattributable decision can never satisfy a lookup."""
+        payload = _reuse_payload()
+        payload.pop("candidate_frozen_event_id")
+        result = facts.record_reverification_decision(
+            "wf-facts-rev", payload, db_path=db)
+        assert result["status"] == "rejected"
+        assert result["reason"] == "missing_candidate_episode"
+        assert facts.list_reverification_decisions("wf-facts-rev", db_path=db) == []
+
+    def test_reuse_requires_a_matching_source_claim(self, db):
+        """§14: claim and completion evidence must agree on the candidate."""
+        mismatch = facts.record_reverification_decision(
+            "wf-facts-rev",
+            _reuse_payload(source_candidate_sha="C"), db_path=db)
+        assert mismatch["status"] == "rejected"
+        assert mismatch["reason"] == "source_claim_mismatch"
+
+        claimless = facts.record_reverification_decision(
+            "wf-facts-rev", _reuse_payload(source_candidate_sha=""), db_path=db)
+        assert claimless["status"] == "rejected"
+        assert claimless["reason"] == "source_claim_mismatch"
+        assert facts.list_reverification_decisions("wf-facts-rev", db_path=db) == []
 
     def test_facts_are_scoped_per_workflow(self, db):
         facts.record_reverification_decision("wf-facts-rev", {
@@ -835,7 +952,8 @@ class TestReverificationFactStore:
             "source_verified_candidate_sha": "A",
         }, db_path=db)
         assert facts.find_reuse_fact("other-wf", "test", "B",
-                                     policy_identity=_policy_identity(), db_path=db) is None
+                                     policy_identity=_policy_identity(),
+                                     episode_id=EPISODE, db_path=db) is None
 
     def test_reuse_requires_a_passed_source(self, db):
         """§13: 只有 PASS 可以成为 reuse source。"""
@@ -869,28 +987,27 @@ class TestReverificationFactStore:
 
     def test_reuse_requires_a_distinct_target_candidate(self, db):
         """§17: A → A 不是一次重新验证。"""
-        result = facts.record_reverification_decision("wf-facts-rev", {
-            "decision": rv.DECISION_REUSE, "verifier": "test",
-            "from_candidate_sha": "A", "to_candidate_sha": "A",
-            "source_task_id": "t-A", "source_verdict": "pass",
-            "source_verified_candidate_sha": "A",
-        }, db_path=db)
+        result = facts.record_reverification_decision(
+            "wf-facts-rev", _reuse_payload(to_candidate_sha="A"), db_path=db)
         assert result["status"] == "rejected"
 
     def test_rerun_decisions_are_recordable(self, db):
         result = facts.record_reverification_decision("wf-facts-rev", {
             "decision": rv.DECISION_RERUN, "verifier": "review",
             "from_candidate_sha": "A", "to_candidate_sha": "B",
+            "candidate_frozen_event_id": EPISODE,
             "reason": rv.REASON_RERUN_NO_SCOPE,
         }, db_path=db)
         assert result["status"] == "created"
         assert facts.find_reuse_fact("wf-facts-rev", "review", "B",
-                                     policy_identity=_policy_identity(), db_path=db) is None
+                                     policy_identity=_policy_identity(),
+                                     episode_id=EPISODE, db_path=db) is None
 
     def test_missing_identity_fields_are_rejected(self, db):
         result = facts.record_reverification_decision("wf-facts-rev", {
             "decision": rv.DECISION_RERUN, "verifier": "test",
             "from_candidate_sha": "", "to_candidate_sha": "B",
+            "candidate_frozen_event_id": EPISODE,
         }, db_path=db)
         assert result["status"] == "rejected"
 

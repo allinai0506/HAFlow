@@ -19,8 +19,11 @@ from pathlib import Path
 HERDR_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(HERDR_ROOT))
 
+from herdr import reverification as reverification_mod  # noqa: E402
 from herdr import reverification as rv  # noqa: E402
 from herdr import scheduler_facts as facts  # noqa: E402
+from herdr.state_store import get_state_store  # noqa: E402
+from herdr.workflow import load_template  # noqa: E402
 
 
 def _load_module(name, path):
@@ -103,29 +106,45 @@ class ReverificationCliTest(unittest.TestCase):
 
         store = state_store.get_state_store(self.db)
         store.save_workflow({"workflow_id": WF, "status": "running"})
+        # Facts are bound to the freeze that authorised them, so the candidate
+        # has to be frozen before the A -> B decisions are recorded.
+        facts.record_candidate_frozen(WF, "a" * 40, db_path=self.db)
+        facts.record_candidate_frozen(WF, "b" * 40, db_path=self.db)
         self.record("test", "reuse", "a" * 40, "b" * 40,
                     source_task_id=f"{WF}-test-auto",
                     reusable_scope=["docs/**/*.md"])
         self.record("review", "rerun", "a" * 40, "b" * 40,
                     reason=rv.REASON_RERUN_NO_SCOPE)
-        # `status` is scoped to the frozen candidate, so the candidate has to be
-        # frozen for the A -> B decisions to be the current ones.
-        facts.record_candidate_frozen(WF, "a" * 40, db_path=self.db)
-        facts.record_candidate_frozen(WF, "b" * 40, db_path=self.db)
 
     def record(self, verifier, decision, from_sha, to_sha, **extra):
         payload = {
             "decision": decision, "verifier": verifier,
             "from_candidate_sha": from_sha, "to_candidate_sha": to_sha,
+            "candidate_frozen_event_id": self._episode_id(to_sha),
             "changed_paths": ["docs/user-guide.md"],
             "reason": rv.REASON_REUSE_NON_IMPACT,
             "source_task_id": f"{WF}-{verifier}-auto",
             "source_verdict": "pass",
+            "source_candidate_sha": from_sha,
             "source_verified_candidate_sha": from_sha,
             "policy_version": rv.POLICY_VERSION,
+            "policy_identity": reverification_mod.policy_identity(
+                reverification_mod.policy_from_workflow(load_template(
+                    str(HERDR_ROOT / "workflow_templates"
+                        / "software-development-v1.yaml")))),
         }
         payload.update(extra)
         facts.record_reverification_decision(WF, payload, db_path=self.db)
+
+    @staticmethod
+    def _episode_id(candidate_sha):
+        """The freeze event that authorised a decision about ``candidate_sha``."""
+        freezes = facts.list_candidate_frozen_events(
+            WF, db_path=get_state_store().db_path)
+        for event in freezes:
+            if (event.get("payload") or {}).get("candidate_sha") == candidate_sha:
+                return event.get("id")
+        return ""
 
     def run_cli(self, *argv):
         # `main()` owns the only parser in this script, so the test builds the
@@ -180,6 +199,7 @@ class ReverificationCliTest(unittest.TestCase):
         self.assertIn("scope: docs/**/*.md", out)
 
     def test_history_json_lists_every_episode(self):
+        facts.record_candidate_frozen(WF, "c" * 40, db_path=self.db)
         self.record("test", "rerun", "b" * 40, "c" * 40,
                     reason=rv.REASON_RERUN_OUTSIDE_SCOPE)
         out = self.run_cli("reverification", "history",
@@ -192,7 +212,9 @@ class ReverificationCliTest(unittest.TestCase):
 
     def test_history_is_bounded_by_limit(self):
         for i in range(5):
-            self.record("test", "rerun", f"{i}" * 40, f"{i + 1}" * 40)
+            target = f"{i + 1}" * 40
+            facts.record_candidate_frozen(WF, target, db_path=self.db)
+            self.record("test", "rerun", f"{i}" * 40, target)
         out = self.run_cli("reverification", "history",
                            "--workflow-id", WF, "--limit", "2", "--json")
         rows = json.loads(out)
