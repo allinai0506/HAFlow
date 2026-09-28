@@ -58,6 +58,18 @@ except Exception:
     direct_dispatch_planner = None
 
 try:
+    from herdr import scheduler as scheduler_core
+    from herdr import scheduler_facts as scheduler_facts_store
+    from herdr import delivery_record as delivery_record_mod
+    from herdr import workflow_docs as workflow_docs_mod
+except Exception:
+    # Scheduler v1 可选:缺失时退回原推进语义,绝不阻塞控制面。
+    scheduler_core = None
+    scheduler_facts_store = None
+    delivery_record_mod = None
+    workflow_docs_mod = None
+
+try:
     from herdr.git_coordination import ensure_no_git_processes
 except Exception:
     ensure_no_git_processes = None
@@ -2167,6 +2179,118 @@ def _dispatch_candidate_ready(project_root, base_branch, specs):
     return True
 
 
+# ============================================================
+# Critical-Path Scheduler v1:候选冻结 + 汇聚门禁 (HAFlow PR #107)
+#
+# - _scheduler_expected_candidate_sha:delivery note 优先,分支 HEAD 兜底;
+#   失败一律返回 ""(fail-open 原语义,门禁侧 fail-closed)。
+# - _scheduler_freeze_candidate:implementation 完成后冻结候选(幂等)。
+# - _scheduler_join_gate_allows:join 语义节点的确定性放行判定。
+# ============================================================
+
+def _scheduler_expected_candidate_sha(workflow_id, project_root, dep_ids, candidate_branch):
+    """解析期望候选 SHA:delivery note 优先,分支 HEAD 兜底。"""
+    if (
+        scheduler_core is None
+        or delivery_record_mod is None
+        or workflow_docs_mod is None
+    ):
+        return ""
+    try:
+        notes = workflow_docs_mod.load_notes(workflow_id)
+        effective = delivery_record_mod.select_effective_delivery(
+            notes, workflow_id=workflow_id
+        )
+    except Exception:
+        effective = None
+    if effective is not None:
+        try:
+            sha = delivery_record_mod._body_value(effective, "candidate_sha")
+        except Exception:
+            sha = ""
+        sha = str(sha or effective.get("candidate_sha") or "").strip()
+        if sha:
+            return sha
+    try:
+        return scheduler_core.resolve_candidate_sha_for_branch(
+            project_root, candidate_branch
+        )
+    except Exception:
+        return ""
+
+
+def _scheduler_freeze_candidate(workflow_id, project_root, source_node, dep_ids=None):
+    """冻结候选 SHA(幂等):delivery note 优先,分支 HEAD 兜底。"""
+    if scheduler_core is None or scheduler_facts_store is None:
+        return ""
+    candidate_branch = None
+    try:
+        if direct_dispatch_planner is not None:
+            candidate_branch = direct_dispatch_planner.candidate_branch_for_node(
+                load_tasks(), workflow_id, source_node, dep_ids or []
+            )
+    except Exception:
+        candidate_branch = None
+    sha = _scheduler_expected_candidate_sha(
+        workflow_id, project_root, dep_ids or [], candidate_branch
+    )
+    if not sha:
+        return ""
+    try:
+        scheduler_facts_store.record_candidate_frozen(
+            workflow_id, sha,
+            source_node=source_node,
+            delivery_branch=candidate_branch or "",
+        )
+    except Exception as exc:
+        print(f"[SCHEDULER FREEZE WARN] workflow={workflow_id}: {exc}")
+    return sha
+
+
+def _scheduler_join_gate_allows(workflow_id, node, tasks):
+    """汇聚门禁放行判定:非 join 节点一律放行(保持原语义)。
+
+    join 节点 = node_type 为 gate 且 depends_on >= 2 的节点。
+    判定失败/异常一律拒绝(Fail-Closed)。
+    """
+    node = node or {}
+    is_gate = str(node.get("node_type") or "") == "gate"
+    deps = list(node.get("depends_on") or [])
+    if not (is_gate and len(deps) >= 2):
+        return True
+    if scheduler_core is None:
+        return False
+    expected = ""
+    if scheduler_facts_store is not None:
+        try:
+            expected = scheduler_facts_store.latest_frozen_candidate_sha(workflow_id)
+        except Exception:
+            expected = ""
+    try:
+        passed, reason, details = scheduler_core.evaluate_join_gate(
+            node, tasks, workflow_id, expected
+        )
+    except Exception as exc:
+        print(
+            f"[JOIN GATE ERROR] workflow={workflow_id} "
+            f"gate={node.get('id')}: {exc}"
+        )
+        return False
+    if scheduler_facts_store is not None:
+        try:
+            scheduler_facts_store.record_join_gate_verdict(
+                workflow_id, str(node.get("id") or ""), passed, reason, details
+            )
+        except Exception as exc:
+            print(f"[JOIN GATE AUDIT WARN] workflow={workflow_id}: {exc}")
+    if not passed:
+        print(
+            f"[JOIN GATE REFUSED] workflow={workflow_id} "
+            f"gate={node.get('id')} reason={reason}"
+        )
+    return passed
+
+
 def try_direct_stage_advance(item):
     """常规推进会:按节点模板规则化直接派发,失败回落总指挥。
 
@@ -2222,6 +2346,20 @@ def try_direct_stage_advance(item):
         )
         return False
 
+    # Scheduler v1 汇聚门禁:join 节点未满足确定性条件时拒绝派发。
+    # 普通节点与异常一律走原语义/拒绝,绝不静默放行。
+    try:
+        join_node = node if isinstance(node, dict) else {"id": ready_id}
+        if not _scheduler_join_gate_allows(workflow_id, join_node, load_tasks()):
+            mark_stage_advance_notified(workflow_id, ready_id)
+            return True
+    except Exception as exc:
+        print(
+            f"[JOIN GATE ERROR] workflow={workflow_id} "
+            f"node={ready_id}: {exc}"
+        )
+        return False
+
     gate_task = node_is_gate(workflow_id, ready_id)
 
     docs_block = shared_docs_block(
@@ -2236,6 +2374,9 @@ def try_direct_stage_advance(item):
     candidate_branch = direct_dispatch_planner.candidate_branch_for_node(
         load_tasks(), workflow_id, ready_id, dep_ids
     )
+    candidate_sha = _scheduler_expected_candidate_sha(
+        workflow_id, project_root, dep_ids, candidate_branch
+    )
     plan = direct_dispatch_planner.plan_stage_dispatch(
         workflow_id,
         node,
@@ -2244,6 +2385,7 @@ def try_direct_stage_advance(item):
         context_branch=candidate_branch,
         gate_contract=gate_task,
         docs_block=docs_block,
+        candidate_sha=candidate_sha,
     )
 
     if gate_task and plan.get("mode") == "dispatch":
@@ -2308,6 +2450,9 @@ def try_direct_stage_advance(item):
 
         if spec.get("onto_branch"):
             cmd += ["--onto", spec["onto_branch"]]
+
+        if spec.get("candidate_sha"):
+            cmd += ["--candidate-sha", spec["candidate_sha"]]
 
         for line in spec["acceptance"]:
             cmd += ["--acceptance", line]
@@ -2561,6 +2706,33 @@ def check_workflow_stage_advance(workflow_id):
 
             deps = ready_node.get("depends_on", [])
             source_stage = deps[-1] if deps else "start"
+
+            # Scheduler v1:ready 节点的 join 门禁 + 候选冻结。
+            # join 未满足 -> 跳过本次派发(保持 queued 闩,下轮 sweep 重试)。
+            # implementation 完成 -> 冻结候选 SHA 供下游 test/review 绑定。
+            try:
+                if not _scheduler_join_gate_allows(
+                    workflow_id, ready_node, load_tasks()
+                ):
+                    continue
+                completed_now = {
+                    n["id"]
+                    for n in workflow_cfg.get("nodes", [])
+                    if is_node_complete(workflow_id, n["id"])
+                }
+                if "implementation" in completed_now:
+                    project_ctx = project_for_workflow(workflow_id) or {}
+                    _scheduler_freeze_candidate(
+                        workflow_id,
+                        project_ctx.get("project_root") or "",
+                        "implementation",
+                        list(deps),
+                    )
+            except Exception as exc:
+                print(
+                    f"[SCHEDULER SWEEP WARN] workflow={workflow_id} "
+                    f"node={ready_id}: {exc}"
+                )
 
             coordinator_queue.put(
                 {

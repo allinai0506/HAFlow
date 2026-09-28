@@ -2803,6 +2803,10 @@ def _launch_task(args):
     replay_of = getattr(args, "replay_of", None)
     if replay_of:
         task["replay_of"] = replay_of
+    # Scheduler v1:冻结候选版本绑定(只做持久化,不改变任何派发语义)。
+    bound_sha = str(getattr(args, "candidate_sha", None) or "").strip()
+    if bound_sha:
+        task["candidate_sha"] = bound_sha
     _apply_execution_identity(task, args)
     if raw_policy:
         task["agent_policy"] = agent_policy
@@ -6167,6 +6171,12 @@ def main():
         help="Checkout this existing branch instead of creating a task branch "
              "(commits land on it, e.g. to continue an open PR). "
              "Fetched from origin; fails fast if missing."
+    )
+    launch.add_argument(
+        "--candidate-sha",
+        default=None,
+        help="Scheduler v1: immutable candidate revision this task must "
+             "verify (persisted on the task record for join-gate checks)."
     )
     launch.add_argument(
         "--test-cmd",

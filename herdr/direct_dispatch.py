@@ -299,6 +299,7 @@ def _prompt(
     redispatch_of=None,
     last_failure_note=None,
     context_branch=None,
+    candidate_sha=None,
     role_outputs=None,
     gate_contract=False,
     docs_block=None,
@@ -318,6 +319,12 @@ def _prompt(
         redispatch_note += f"\n上次门禁失败原因：\n{last_failure_note}\n"
     if context_branch:
         redispatch_note += f"\n相关既有分支（如需核对）：{context_branch}\n"
+    frozen_sha = str(candidate_sha or "").strip()
+    if frozen_sha:
+        redispatch_note += (
+            "\n冻结候选版本（必须验证此版本，禁止切换分支或验证其他提交）："
+            f"{frozen_sha}\n"
+        )
 
     gate_note = (
         "\n\n" + gate_verdict_contract(task_id) if gate_contract and task_id else ""
@@ -375,6 +382,7 @@ def _dispatch_spec(
     gate_contract=False,
     docs_block=None,
     onto_branch=None,
+    candidate_sha=None,
 ):
     if onto_branch is None:
         onto_branch = sanitize_branch_name(context_branch)
@@ -391,6 +399,7 @@ def _dispatch_spec(
             redispatch_of=redispatch_of,
             last_failure_note=last_failure_note,
             context_branch=context_branch,
+            candidate_sha=candidate_sha,
             role_outputs=role_outputs,
             gate_contract=gate_contract,
             docs_block=docs_block,
@@ -400,6 +409,9 @@ def _dispatch_spec(
     }
     if onto_branch:
         spec["onto_branch"] = onto_branch
+    frozen_sha = str(candidate_sha or "").strip()
+    if frozen_sha:
+        spec["candidate_sha"] = frozen_sha
     return spec
 
 
@@ -412,6 +424,7 @@ def plan_stage_dispatch(
     context_branch=None,
     gate_contract=False,
     docs_block=None,
+    candidate_sha=None,
 ):
     """决定 ready 节点该派发什么。
 
@@ -482,6 +495,7 @@ def plan_stage_dispatch(
                     integration_mode=task.get("integration_mode"),
                     gate_contract=gate_contract,
                     docs_block=docs_block,
+                    candidate_sha=candidate_sha,
                 )
             )
         return {"mode": "dispatch", "reason": "redispatch superseded subset", "specs": specs}
@@ -538,6 +552,7 @@ def plan_stage_dispatch(
                     context_branch=context_branch,
                     gate_contract=gate_contract,
                     docs_block=docs_block,
+                    candidate_sha=candidate_sha,
                 )
             )
         return {"mode": "dispatch", "reason": "initial node dispatch with roles", "specs": specs}
@@ -553,5 +568,6 @@ def plan_stage_dispatch(
         context_branch=context_branch,
         gate_contract=gate_contract,
         docs_block=docs_block,
+        candidate_sha=candidate_sha,
     )
     return {"mode": "dispatch", "reason": "initial node dispatch", "specs": [spec]}
