@@ -212,27 +212,53 @@ def shas_identical(left, right):
     return full.startswith(short)
 
 
+def _text(task, key):
+    value = task.get(key)
+    if value in (None, ""):
+        return ""
+    return str(value).strip()
+
+
+def is_scheduler_managed_task(task):
+    """Whether this task must prove completion evidence (PR #107 semantics).
+
+    A task counts as scheduler-managed when the scheduler recorded a candidate
+    claim for it, or it sits on a verifier node in a scheduler-engaged
+    workflow. Those are exactly the tasks whose verdict decides whether a
+    frozen candidate may pass the join gate, so for them "which revision was
+    actually verified" is a load-bearing question rather than a nicety.
+
+    A task with no claim at all is not scheduler-managed: nothing downstream
+    treats it as evidence about a candidate, so refusing its verdict would
+    break unrelated legacy work without closing any real hole.
+    """
+    if not isinstance(task, dict):
+        return False
+    return bool(_text(task, "candidate_sha"))
+
+
 def extract_task_verified_sha(task):
-    """The revision the clone was ACTUALLY on when verification completed.
+    """Completion evidence: the revision verified when the verdict was written.
 
     ``verified_candidate_sha`` is re-read from the live clone at verdict-write
-    time, so it is completion evidence: it survives an agent that pulls,
-    checks out, or rebases mid-task.
+    time, so it is the only value that survives an agent that pulls, checks
+    out, or rebases mid-task.
 
-    ``baseline_commit`` is only *launch* evidence - the clone HEAD recorded
-    when the worker started. It is used as a fallback so tasks that predate the
-    completion field keep their previous meaning, but it must never be
-    described as a verified revision.
+    ``baseline_commit`` / ``baseline_sha`` are *launch* evidence. For a
+    scheduler-managed task they are deliberately NOT a fallback: silently
+    degrading to them would reinstate precisely the "they happened to start
+    from the same candidate" claim that completion evidence exists to
+    eliminate. Legacy tasks keep the fallback so pre-Scheduler workflows
+    retain their previous meaning.
     """
     if not isinstance(task, dict):
         return ""
-    for key in ("verified_candidate_sha", "baseline_commit", "baseline_sha"):
-        value = task.get(key)
-        if value not in (None, ""):
-            text = str(value).strip()
-            if text:
-                return text
-    return ""
+    completion = _text(task, "verified_candidate_sha")
+    if completion:
+        return completion
+    if is_scheduler_managed_task(task):
+        return ""
+    return _text(task, "baseline_commit") or _text(task, "baseline_sha")
 
 
 def extract_task_candidate_sha(task):
@@ -256,13 +282,19 @@ def candidate_revision_matches(task, expected_sha):
 def task_claim_evidence_consistent(task):
     """Whether a task's dispatch claim matches its verification evidence.
 
-    Returns (ok, claim, evidence). Absent evidence is not a mismatch here:
-    legacy tasks predate the field and are handled by the caller via
-    expect_evidence=False.
+    Returns (ok, claim, evidence). A scheduler-managed task that carries a
+    candidate claim but no completion evidence is NOT consistent: it asserts a
+    revision it never proved. Reporting that as consistent is what allowed
+    launch evidence to stand in for completion evidence.
+
+    A task with no claim at all is unaffected; it is not scheduler-managed and
+    has no candidate assertion to support.
     """
     claim = extract_task_candidate_claim(task)
     evidence = extract_task_verified_sha(task)
     if not evidence:
+        if claim:
+            return False, claim, evidence
         return True, claim, evidence
     return shas_identical(claim, evidence), claim, evidence
 
@@ -290,15 +322,30 @@ def evaluate_join_gate(gate_node, tasks, workflow_id, expected_candidate_sha="")
             {extract_task_candidate_sha(t) for t in dep_tasks
              if extract_task_candidate_sha(t)}
         )
-        # Claim/evidence split: the dispatch claim must match the clone
-        # baseline the worker actually recorded, otherwise the task proves
-        # nothing about the claimed revision.
+        # Claim/evidence split: the dispatch claim must match the revision the
+        # verifier actually proved, otherwise the task proves nothing about the
+        # claimed revision. A scheduler-managed task with no completion
+        # evidence at all is reported separately: it is a missing proof, not a
+        # contradiction, and it must not be satisfied by launch evidence.
         inconsistent = []
+        missing_evidence = []
         for task in dep_tasks:
-            ok, claim, evidence = task_claim_evidence_consistent(task)
-            if not ok:
+            claim = extract_task_candidate_claim(task)
+            evidence = extract_task_verified_sha(task)
+            task_id = str(task.get("task_id") or "")
+            if not claim:
+                # No candidate assertion to support or contradict: a legacy
+                # task outside scheduler semantics. Left untouched so
+                # pre-Scheduler workflows keep their previous meaning.
+                continue
+            if not evidence:
+                # A claim with nothing behind it: a missing proof, not a
+                # contradiction. Checked before the mismatch report so it is
+                # never described as a mere disagreement.
+                missing_evidence.append({"task_id": task_id, "claim": claim})
+            elif not shas_identical(claim, evidence):
                 inconsistent.append({
-                    "task_id": str(task.get("task_id") or ""),
+                    "task_id": task_id,
                     "claim": claim,
                     "evidence": evidence,
                 })
@@ -307,6 +354,7 @@ def evaluate_join_gate(gate_node, tasks, workflow_id, expected_candidate_sha="")
             "verdict": verdict,
             "candidate_shas": shas,
             "claim_evidence_mismatch": inconsistent,
+            "missing_completion_evidence": missing_evidence,
         }
     details["branches"] = branch_states
 
@@ -314,6 +362,22 @@ def evaluate_join_gate(gate_node, tasks, workflow_id, expected_candidate_sha="")
     if incomplete:
         details["incomplete"] = incomplete
         return False, JOIN_WAITING, details
+
+    # Missing completion evidence is checked before the mismatch report: a
+    # verifier that proved nothing must never be reported as merely
+    # contradicting its claim, because that reading implies evidence exists.
+    unproven = {
+        d: st["missing_completion_evidence"]
+        for d, st in branch_states.items() if st["missing_completion_evidence"]
+    }
+    if unproven:
+        details["missing_completion_evidence"] = unproven
+        details["reason_detail"] = (
+            "a scheduler-managed verifier carries a candidate claim but no "
+            "verified_candidate_sha, so the revision it actually verified is "
+            "unproven (launch baseline is not completion evidence)"
+        )
+        return False, JOIN_MISSING_CANDIDATE, details
 
     mismatched = {
         d: st["claim_evidence_mismatch"]

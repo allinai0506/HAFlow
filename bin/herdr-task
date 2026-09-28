@@ -1991,6 +1991,29 @@ def set_status(task_id, new_status, verdict=None, note=None):
     # model-reported).
     if verdict in ("pass", "blocked"):
         _capture_verified_candidate(task)
+        # Fail closed at the verdict boundary, for scheduler-managed tasks
+        # only. A task that carries a candidate claim is asserting "I verified
+        # revision X"; if the clone HEAD could not be read at verdict time,
+        # that assertion is unproven, and letting it through would let launch
+        # evidence quietly reinstate the "they happened to start from the same
+        # candidate" claim this whole mechanism exists to eliminate.
+        #
+        # A task with no candidate claim makes no such assertion: it is outside
+        # scheduler identity semantics, so refusing its verdict would break
+        # unrelated work without closing any real hole.
+        if (
+            str(task.get("candidate_sha") or "").strip()
+            and not str(task.get("verified_candidate_sha") or "").strip()
+        ):
+            print(
+                f"[VERDICT REFUSED] {task_id}: refusing verdict "
+                f"'{verdict}' without completion evidence. The clone HEAD "
+                "could not be read at verdict time, so the revision actually "
+                "verified is unproven. Re-run the verification and submit the "
+                "verdict again (AGENTS.md §4.4: fail closed, no silent pass).",
+                file=sys.stderr,
+            )
+            sys.exit(2)
 
     if new_status not in TRANSITIONS:
         print(f"Invalid status: {new_status}")
@@ -2469,27 +2492,30 @@ def _canonical_commit(sha, source_repo):
 
 
 def _same_commit(left, right, source_repo):
-    """Strict same-commit equality; never ancestor containment."""
+    """Strict same-commit equality; never ancestor containment.
+
+    At this boundary a real repository is reachable, so Git is the only
+    authority. Both sides are canonicalised with ``rev-parse <sha>^{commit}``
+    and compared as full object IDs. If either side fails to resolve, Git has
+    said the revision cannot be uniquely identified (an ambiguous abbreviation,
+    or a repository that is absent/unreadable) — that is a proof failure, so
+    the answer is False.
+
+    Falling back to string-prefix matching here would accept exactly the case
+    Git refused to prove, re-opening a false "same commit" verdict on the
+    launch gate.
+    """
     left = str(left or "").strip().lower()
     right = str(right or "").strip().lower()
     if not left or not right:
         return False
     if left == right:
         return True
-    # Canonicalise both sides against the real repository when reachable, so
-    # abbreviations compare equal without weakening the equality requirement.
     full_left = _canonical_commit(left, source_repo)
     full_right = _canonical_commit(right, source_repo)
-    if full_left and full_right:
-        return full_left == full_right
-    # No repository available: fall back to conservative prefix matching so a
-    # short SHA is not misreported as a mismatch, and nothing else matches.
-    short, full = (left, right) if len(left) <= len(right) else (right, left)
-    if len(short) < 7 or not re.fullmatch(r"[0-9a-f]{4,40}", short):
+    if not full_left or not full_right:
         return False
-    if not re.fullmatch(r"[0-9a-f]{4,40}", full):
-        return False
-    return full.startswith(short)
+    return full_left == full_right
 
 
 def _validate_test_delivery_baseline(args, candidate_sha, baseline_commit, source_repo):
@@ -6030,9 +6056,9 @@ def _capture_verified_candidate(task):
     actually saw, and the join gate can refuse a verdict that never proved the
     frozen candidate.
 
-    Best-effort by design: a missing or unreadable clone must not block
-    recording a verdict, so this never raises and never changes the exit path.
-    The join gate fails closed on its own when no evidence is present.
+    Never raises: the caller (set_status) inspects the returned value and
+    refuses the verdict, so an unreadable clone fails closed at the decision
+    boundary rather than being swallowed here.
     """
     clone = str((task or {}).get("clone_path") or "").strip()
     if not clone or not os.path.isdir(clone):

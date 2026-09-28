@@ -73,6 +73,12 @@ def _task(task_id, status, node, **extra):
         "updated_at": 100.0,
     }
     task.update(extra)
+    # A completed scheduler-managed task that verified its claim carries
+    # completion evidence. Model it by default so controller-wiring tests
+    # exercise the normal path; pass verified_candidate_sha="" explicitly to
+    # exercise the fail-closed path.
+    if task.get("candidate_sha") and "verified_candidate_sha" not in extra:
+        task["verified_candidate_sha"] = task["candidate_sha"]
     return task
 
 
@@ -927,13 +933,18 @@ class P1StrictCandidateEqualityTest(unittest.TestCase):
         self.assertEqual(exc.value.code, 2)
 
     def test_abbreviated_candidate_matches_full_baseline(self):
-        """P2 回归:delivery 记短 SHA,clone 记全 SHA,同一 commit 必须放行。"""
+        """P2 回归:git 能唯一解析的短 SHA 与全 SHA 视为同一 commit。
+
+        只在 rev-parse 两侧都成功时成立;解析失败必须 fail-closed
+        (见 test_ambiguous_short_sha_is_refused)。
+        """
         full = "a" * 40
         short = full[:12]
 
         def fake_run(cmd, **kwargs):
-            # Only this full SHA resolves in the repo.
-            if any(full in str(a) for a in cmd):
+            # Git resolves both the abbreviation and the full SHA to the same
+            # object ID.
+            if any(short in str(a) for a in cmd):
                 return subprocess.CompletedProcess(cmd, 0, full + "\n", "")
             return subprocess.CompletedProcess(cmd, 1, "", "")
 
@@ -951,6 +962,62 @@ class P1StrictCandidateEqualityTest(unittest.TestCase):
             self._ht._validate_test_delivery_baseline(
                 self._args(), "abcdef1234", "1234567890", str(self.root))
         self.assertEqual(exc.value.code, 2)
+
+    def test_ambiguous_short_sha_is_refused(self):
+        """P2 回归:rev-parse 无法唯一解析的短 SHA 必须 fail-closed。
+
+        git 明确告知「不能唯一证明是哪个 commit」,此时若再退回 prefix
+        匹配,等于用无法证明的相等放行 launch gate。
+        """
+        full = "abc1234f9287a1b2c3d4e5f60718293a4b5c6d7e"
+
+        def ambiguous(cmd, **kwargs):
+            return subprocess.CompletedProcess(
+                cmd, 1, "", "error: short SHA1 abc1234 is ambiguous")
+
+        with patch.object(self._ht.subprocess, "run", side_effect=ambiguous):
+            self.assertFalse(self._ht._same_commit("abc1234", full, str(self.root)))
+        with patch.object(self._ht.subprocess, "run", side_effect=ambiguous), \
+            pytest.raises(SystemExit) as exc:
+            self._ht._validate_test_delivery_baseline(
+                self._args(), "abc1234", full, str(self.root))
+        self.assertEqual(exc.value.code, 2)
+
+    def test_unresolvable_repo_never_falls_back_to_prefix(self):
+        """仓库不可查时不得凭字符串前缀放行。"""
+        full = "abc1234f9287a1b2c3d4e5f60718293a4b5c6d7e"
+
+        def fake_run(cmd, **kwargs):
+            return subprocess.CompletedProcess(cmd, 128, "", "not a git repository")
+
+        with patch.object(self._ht.subprocess, "run", side_effect=fake_run):
+            self.assertFalse(
+                self._ht._same_commit("abc1234", full, "/nonexistent-repo"))
+            self.assertFalse(
+                self._ht._same_commit("abc1234", full, str(self.root)))
+
+    def test_real_repo_short_sha_resolves_and_passes(self):
+        """对照:真实仓库中可唯一解析的短 SHA 仍然放行。"""
+        sha = "9" * 40
+        repo = self.root / "abbrev-repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        for key, val in (("user.email", "t@t"), ("user.name", "t")):
+            subprocess.run(
+                ["git", "-C", str(repo), "config", key, val], check=True)
+        (repo / "z.txt").write_text("z")
+        subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "commit", "-qm", "z", "--no-gpg-sign"],
+            check=True)
+        head = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"],
+            check=True, text=True, capture_output=True).stdout.strip()
+        self.assertTrue(head)
+        short = head[:12]
+        self.assertTrue(self._ht._same_commit(short, head, str(repo)))
+        self._ht._validate_test_delivery_baseline(
+            self._args(), short, head, str(repo))
 
 
 class VerifiedCandidateAtVerdictTest(unittest.TestCase):
@@ -1040,6 +1107,57 @@ class VerifiedCandidateAtVerdictTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(evidence, self.sha_b)
 
+    def test_join_gate_must_not_pass_without_completion_evidence(self):
+        """P1 回归:candidate=A + baseline=A 但完成证据缺失,门禁必须拒绝。
+
+        fallback 到 baseline_commit(启动证据)会让「完成时验证了谁」重新
+        退化成「启动时碰巧在谁」,等于撤销上一轮的修复。
+        """
+        from herdr import scheduler as sched
+
+        tasks = [
+            _task("t-test", "cleaned", "test",
+                  candidate_sha=self.sha_a, verified_candidate_sha=""),
+            _task("t-review", "cleaned", "review",
+                  candidate_sha=self.sha_a, verified_candidate_sha=""),
+        ]
+        for t in tasks:
+            t["baseline_commit"] = self.sha_a
+
+        passed, reason, details = sched.evaluate_join_gate(
+            {"id": "wrapup", "depends_on": ["test", "review"]},
+            tasks, "wf-1", self.sha_a,
+        )
+        self.assertFalse(passed, "join gate must not pass on launch evidence alone")
+        self.assertEqual(reason, sched.JOIN_MISSING_CANDIDATE)
+        self.assertIn("missing_completion_evidence", details)
+
+    def test_legacy_task_without_candidate_claim_is_untouched(self):
+        """真正的历史任务(无候选声明)保持旧语义,门禁不因此全量拒绝。"""
+        from herdr import scheduler as sched
+
+        tasks = [
+            _task("t-test", "cleaned", "test", stage_verdict="pass",
+                  baseline_commit=self.sha_a),
+            _task("t-review", "cleaned", "review", stage_verdict="pass",
+                  baseline_commit=self.sha_a),
+        ]
+        passed, reason, _ = sched.evaluate_join_gate(
+            {"id": "wrapup", "depends_on": ["test", "review"]},
+            tasks, "wf-1", self.sha_a,
+        )
+        self.assertTrue(passed, reason)
+        self.assertEqual(reason, sched.JOIN_SATISFIED)
+
+    def test_claim_evidence_consistent_rejects_launch_only_evidence(self):
+        """Scheduler 管理的任务:claim 匹配 baseline 但无完成证据 -> 不一致。"""
+        from herdr import scheduler as sched
+
+        task = {"candidate_sha": self.sha_a, "baseline_commit": self.sha_a}
+        ok, _claim, evidence = sched.task_claim_evidence_consistent(task)
+        self.assertFalse(ok)
+        self.assertEqual(evidence, "")
+
     def test_matching_head_records_same_revision(self):
         from herdr import scheduler as sched
 
@@ -1055,35 +1173,130 @@ class VerifiedCandidateAtVerdictTest(unittest.TestCase):
         task["clone_path"] = str(self.root / "does-not-exist")
         self.assertEqual(self._ht._capture_verified_candidate(task), "")
 
+    def _set_status(self, task_kwargs, verdict, note=None, capture=None):
+        task = {
+            "task_id": "wf-verified-test-auto", "workflow_id": "wf-verified",
+            "node": "test", "status": "agent_done",
+            "clone_path": str(self.clone),
+        }
+        task.update(task_kwargs)
+        ctx = [
+            patch.object(self._ht, "load_tasks", return_value={"tasks": [task]}),
+            patch.object(self._ht, "sync_tasks_projection", return_value=None),
+            patch.object(self._ht, "_clear_suppress_auto_close",
+                         return_value=None),
+            patch.object(self._ht, "_record_gate_note", return_value=None),
+            patch("herdr.kernel.update_task_metadata", return_value={}),
+            patch("herdr.kernel.transition_task", return_value={
+                "workflow_id": "wf-verified"}),
+        ]
+        if capture is not None:
+            ctx.insert(0, patch.object(
+                self._ht, "_capture_verified_candidate", side_effect=capture))
+        return ctx
+
     def test_set_status_captures_before_accepting_verdict(self):
         """The verdict path must not skip completion evidence."""
         seen = {}
 
         def fake_capture(task):
             seen["called"] = True
+            task["verified_candidate_sha"] = self.sha_b
             return self.sha_b
 
         self._register(baseline=self.sha_a, claim=self.sha_a)
-        with patch.object(self._ht, "_capture_verified_candidate",
-                          side_effect=fake_capture), \
-            patch.object(self._ht, "load_tasks", return_value={
-                "tasks": [{
-                    "task_id": "wf-verified-test-auto",
-                    "workflow_id": "wf-verified", "node": "test",
-                    "status": "agent_done", "clone_path": str(self.clone),
-                }]}), \
-            patch.object(self._ht, "sync_tasks_projection", return_value=None), \
-            patch.object(self._ht, "_clear_suppress_auto_close",
-                         return_value=None), \
-            patch.object(self._ht, "_record_gate_note", return_value=None), \
-            patch("herdr.kernel.update_task_metadata", return_value={}), \
-            patch("herdr.kernel.transition_task", return_value={
-                "workflow_id": "wf-verified"}):
+        patchers = self._set_status(
+            {"candidate_sha": self.sha_a, "baseline_commit": self.sha_a},
+            "pass", note="looks good", capture=fake_capture,
+        )
+        for p in patchers:
+            p.start()
+        try:
             self._ht.set_status(
                 "wf-verified-test-auto", "completed", verdict="pass",
                 note="looks good")
-
+        finally:
+            for p in patchers:
+                p.stop()
         self.assertTrue(seen.get("called"))
+
+    def test_set_status_refuses_verdict_without_completion_evidence(self):
+        """P1 回归:读不到完成证据时必须拒绝 verdict,而不是照常 pass。"""
+        self._register(baseline=self.sha_a, claim=self.sha_a)
+        patchers = self._set_status(
+            {"candidate_sha": self.sha_a, "baseline_commit": self.sha_a},
+            "pass", note="looks good",
+            # Capture runs but cannot resolve a HEAD: no evidence recorded.
+            capture=lambda task: "",
+        )
+        for p in patchers:
+            p.start()
+        try:
+            with pytest.raises(SystemExit) as exc:
+                self._ht.set_status(
+                    "wf-verified-test-auto", "completed", verdict="pass",
+                    note="looks good")
+        finally:
+            for p in patchers:
+                p.stop()
+        self.assertEqual(exc.value.code, 2)
+
+    def test_set_status_refuses_blocked_verdict_without_evidence(self):
+        """blocked 同样需要完成证据:否则「卡住」的原因也无从复核。"""
+        self._register(baseline=self.sha_a, claim=self.sha_a)
+        patchers = self._set_status(
+            {"candidate_sha": self.sha_a, "baseline_commit": self.sha_a},
+            "blocked", note="cannot reproduce", capture=lambda task: "",
+        )
+        for p in patchers:
+            p.start()
+        try:
+            with pytest.raises(SystemExit) as exc:
+                self._ht.set_status(
+                    "wf-verified-test-auto", "completed", verdict="blocked",
+                    note="cannot reproduce")
+        finally:
+            for p in patchers:
+                p.stop()
+        self.assertEqual(exc.value.code, 2)
+
+    def test_set_status_allows_legacy_task_without_candidate_claim(self):
+        """无候选声明的历史任务:不因缺少完成证据被误拒。"""
+        self._register(baseline=self.sha_a)
+        patchers = self._set_status(
+            {"baseline_commit": self.sha_a}, "pass", note="legacy ok",
+            capture=lambda task: "",
+        )
+        for p in patchers:
+            p.start()
+        try:
+            self._ht.set_status(
+                "wf-verified-test-auto", "completed", verdict="pass",
+                note="legacy ok")
+        finally:
+            for p in patchers:
+                p.stop()
+
+    def test_set_status_allows_verdict_when_evidence_present(self):
+        """有完成证据时 verdict 正常受理(不引入误拒)。"""
+        def capture(task):
+            task["verified_candidate_sha"] = self.sha_b
+            return self.sha_b
+
+        self._register(baseline=self.sha_b, claim=self.sha_b)
+        patchers = self._set_status(
+            {"candidate_sha": self.sha_b, "baseline_commit": self.sha_b},
+            "pass", note="ok", capture=capture,
+        )
+        for p in patchers:
+            p.start()
+        try:
+            self._ht.set_status(
+                "wf-verified-test-auto", "completed", verdict="pass",
+                note="ok")
+        finally:
+            for p in patchers:
+                p.stop()
 
     def test_set_status_skips_capture_without_verdict(self):
         seen = {"called": False}

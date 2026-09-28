@@ -20,7 +20,16 @@ def _node(node_id, deps=()):
     return {"id": node_id, "depends_on": list(deps)}
 
 
-def _task(task_id, workflow_id, node, status="completed", verdict="pass", sha=""):
+def _task(task_id, workflow_id, node, status="completed", verdict="pass", sha="",
+          verified=None):
+    """Build a task record.
+
+    ``sha`` is the dispatch claim. ``verified`` is completion evidence; by
+    default it mirrors the claim, modelling a verifier that completed and
+    actually proved that revision. Pass ``verified=""`` to model a
+    scheduler-managed task whose completion evidence is missing, which the
+    join gate must refuse.
+    """
     task = {
         "task_id": task_id,
         "workflow_id": workflow_id,
@@ -31,6 +40,7 @@ def _task(task_id, workflow_id, node, status="completed", verdict="pass", sha=""
     }
     if sha:
         task["candidate_sha"] = sha
+        task["verified_candidate_sha"] = sha if verified is None else verified
     return task
 
 
@@ -190,18 +200,50 @@ class TestJoinGate:
         assert reason == sched.JOIN_MISSING_CANDIDATE
 
     def test_join_gate_refuses_claim_evidence_mismatch(self):
-        """P1 回归:派发声明 A 但 clone 基线 B -> 拒绝汇聚(证据优先)。"""
+        """P1 回归:派发声明 A 但完成时验证了 B -> 拒绝汇聚(证据优先)。"""
         tasks = [
             _task("t-test", WF, "test", sha="sha-A"),
-            _task("t-review", WF, "review", sha="sha-A"),
+            _task("t-review", WF, "review", sha="sha-A", verified="sha-B"),
         ]
-        tasks[1]["baseline_commit"] = "sha-B"
         passed, reason, details = sched.evaluate_join_gate(
             self.GATE, tasks, WF, expected_candidate_sha="sha-A"
         )
         assert passed is False
         assert reason == sched.JOIN_EVIDENCE_MISMATCH
-        assert details["evidence_mismatch"]["review"][0]["evidence"] == "sha-B"
+
+    def test_join_gate_refuses_missing_completion_evidence(self):
+        """P1 回归:有候选声明但无完成证据 -> 不得用启动证据放行。"""
+        tasks = [
+            _task("t-test", WF, "test", sha="sha-A", verified=""),
+            _task("t-review", WF, "review", sha="sha-A", verified=""),
+        ]
+        for t in tasks:
+            t["baseline_commit"] = "sha-A"
+        passed, reason, details = sched.evaluate_join_gate(
+            self.GATE, tasks, WF, expected_candidate_sha="sha-A"
+        )
+        assert passed is False
+        assert reason == sched.JOIN_MISSING_CANDIDATE
+        assert "missing_completion_evidence" in details
+        # 缺证据必须报告为「未证明」,不得混同为「证据矛盾」
+        missing = details["missing_completion_evidence"]
+        assert sorted(missing) == ["review", "test"]
+        assert "evidence_mismatch" not in details
+        assert missing["test"][0]["claim"] == "sha-A"
+
+    def test_join_gate_reports_mismatch_and_missing_evidence_separately(self):
+        """同时存在「缺证据」与「证据矛盾」时,优先报缺证据。"""
+        tasks = [
+            _task("t-test", WF, "test", sha="sha-A", verified=""),
+            _task("t-review", WF, "review", sha="sha-A", verified="sha-B"),
+        ]
+        tasks[0]["baseline_commit"] = "sha-A"
+        passed, reason, details = sched.evaluate_join_gate(
+            self.GATE, tasks, WF, expected_candidate_sha="sha-A"
+        )
+        assert passed is False
+        assert reason == sched.JOIN_MISSING_CANDIDATE
+        assert list(details["missing_completion_evidence"]) == ["test"]
 
     def test_join_gate_accepts_matching_claim_and_evidence(self):
         tasks = [
@@ -235,37 +277,63 @@ class TestJoinGate:
 
 class TestCandidateBinding:
     def test_evidence_wins_over_claim(self):
-        """P1 回归:claim=A 但 clone 基线 B 时,证据(B)必须胜出。"""
-        task = {"candidate_sha": "sha-A", "baseline_commit": "sha-B"}
+        """P1 回归:claim=A 但完成时验证的是 B,证据(B)必须胜出。"""
+        task = {
+            "candidate_sha": "sha-A",
+            "baseline_commit": "sha-A",
+            "verified_candidate_sha": "sha-B",
+        }
         assert sched.extract_task_candidate_claim(task) == "sha-A"
         assert sched.extract_task_verified_sha(task) == "sha-B"
         assert sched.extract_task_candidate_sha(task) == "sha-B"
 
     def test_claim_evidence_consistency(self):
         ok, claim, evidence = sched.task_claim_evidence_consistent(
-            {"candidate_sha": "sha-A", "baseline_commit": "sha-A"})
+            {"candidate_sha": "sha-A", "verified_candidate_sha": "sha-A"})
         assert (ok, claim, evidence) == (True, "sha-A", "sha-A")
         ok, claim, evidence = sched.task_claim_evidence_consistent(
-            {"candidate_sha": "sha-A", "baseline_commit": "sha-B"})
+            {"candidate_sha": "sha-A", "verified_candidate_sha": "sha-B"})
         assert (ok, claim, evidence) == (False, "sha-A", "sha-B")
-        # 缺证据(旧任务)不算冲突,由调用方按 legacy 语义处理
+        # 声明了候选却没有任何完成证据:这是未证明,不是一致
         ok, _claim, evidence = sched.task_claim_evidence_consistent(
             {"candidate_sha": "sha-A"})
-        assert ok is True and evidence == ""
+        assert ok is False and evidence == ""
+        # 完全没有候选声明的旧任务:evidence 仍可读出,但不存在需要支撑的声明,
+        # 由调用方按 legacy 语义跳过,不是矛盾。
+        legacy = {"baseline_commit": "sha-A"}
+        assert not sched.is_scheduler_managed_task(legacy)
+        assert sched.extract_task_verified_sha(legacy) == "sha-A"
 
     def test_legacy_task_falls_back_to_claim(self):
         assert sched.extract_task_candidate_sha({"candidate_sha": "sha-X"}) == "sha-X"
         assert sched.extract_task_candidate_sha({"baseline_commit": "sha-Y"}) == "sha-Y"
 
+    def test_launch_baseline_is_not_completion_evidence(self):
+        """P1 回归:scheduler 管理的任务不得用 baseline 冒充完成证据。"""
+        task = {"candidate_sha": "sha-A", "baseline_commit": "sha-A"}
+        assert sched.is_scheduler_managed_task(task) is True
+        assert sched.extract_task_verified_sha(task) == ""
+        ok, _claim, evidence = sched.task_claim_evidence_consistent(task)
+        assert ok is False
+        assert evidence == ""
+
+    def test_legacy_task_without_claim_keeps_baseline_fallback(self):
+        task = {"baseline_commit": "sha-Y"}
+        assert sched.is_scheduler_managed_task(task) is False
+        assert sched.extract_task_verified_sha(task) == "sha-Y"
+
     def test_revision_matches_uses_evidence(self):
-        same = {"candidate_sha": "sha-A", "baseline_commit": "sha-A"}
+        same = {"candidate_sha": "sha-A", "verified_candidate_sha": "sha-A"}
         assert sched.candidate_revision_matches(same, "sha-A")
         assert not sched.candidate_revision_matches(same, "sha-B")
         assert not sched.candidate_revision_matches(same, "")
         assert not sched.candidate_revision_matches({}, "sha-A")
-        # 声明 A 但实际基线 B:不得算作验证了 A
+        # 声明 A 但完成时验证 B:不得算作验证了 A
         assert not sched.candidate_revision_matches(
-            {"candidate_sha": "sha-A", "baseline_commit": "sha-B"}, "sha-A")
+            {"candidate_sha": "sha-A", "verified_candidate_sha": "sha-B"}, "sha-A")
+        # 声明 A 但无完成证据:同样不得算作验证了 A
+        assert not sched.candidate_revision_matches(
+            {"candidate_sha": "sha-A", "baseline_commit": "sha-A"}, "sha-A")
 
     def test_completion_evidence_wins_over_launch_baseline(self):
         """P1 回归:launch 时 HEAD=A,验收完成时 HEAD=B -> 以 B 为准。
