@@ -57,6 +57,8 @@ except Exception:
     # 纯函数决策模块缺失时退回总指挥路径,绝不阻塞控制面。
     direct_dispatch_planner = None
 
+reverification_mod = None
+
 try:
     from herdr import scheduler as scheduler_core
     from herdr import scheduler_facts as scheduler_facts_store
@@ -68,6 +70,15 @@ except Exception:
     scheduler_facts_store = None
     delivery_record_mod = None
     workflow_docs_mod = None
+
+try:
+    from herdr import reverification as reverification_mod
+except Exception:
+    # Selective Reverification (PR #108) is optional on top of the scheduler:
+    # without it every verifier re-runs, which is exactly the pre-#108
+    # behaviour. A separate import block so a missing planner cannot also
+    # disable the #107 candidate / join-gate machinery.
+    reverification_mod = None
 
 try:
     from herdr.git_coordination import ensure_no_git_processes
@@ -2037,9 +2048,6 @@ def is_node_complete(workflow_id, node_id):
         if t.get("workflow_id") == workflow_id
         and (t.get("node") == node_id or t.get("stage") == node_id)
     ]
-    if not tasks:
-        return False
-
     # Superseded tasks are excluded from completion calculation — they were
     # replaced by another task whose outcome is the authoritative result.
     active = [
@@ -2047,9 +2055,18 @@ def is_node_complete(workflow_id, node_id):
         if t.get("status") != "superseded" and not t.get("superseded_by")
     ]
 
-    # A node with only superseded tasks and no replacements is incomplete.
+    # No task, or only superseded ones: a reused verifier looks exactly like
+    # this, because reuse never creates a Task (PR #108). Its verification is
+    # satisfied by an immutable reuse fact bound to the current candidate, so
+    # it is complete *for that candidate* — without this the workflow would
+    # wait forever on a verifier that is not going to run again, and the join
+    # gate would never see a satisfied branch.
+    #
+    # The binding is re-resolved against the latest frozen candidate on every
+    # call, so a later rotation (A -> B -> C) drops the A -> B fact
+    # automatically and the node stops counting as complete.
     if not active:
-        return False
+        return _reverification_satisfies_node(workflow_id, node_id)
 
     return all(
         t.get("status") in (
@@ -2262,6 +2279,25 @@ def _scheduler_freeze_candidate(workflow_id, project_root, source_node, dep_ids=
     return sha
 
 
+def _scheduler_previous_candidate_sha(workflow_id):
+    """The candidate frozen immediately before the newest one ("" when none).
+
+    Read from the freeze ledger rather than recomputed: the ledger is the
+    authoritative record of which revisions were verified in which order, so it
+    is what makes A -> B -> A three distinct episodes instead of two.
+    """
+    if scheduler_facts_store is None:
+        return ""
+    try:
+        events = scheduler_facts_store.list_candidate_frozen_events(workflow_id)
+    except Exception as exc:
+        print(f"[SCHEDULER FROZEN HISTORY WARN] workflow={workflow_id}: {exc}")
+        return ""
+    if len(events) < 2:
+        return ""
+    return str((events[-2].get("payload") or {}).get("candidate_sha") or "")
+
+
 def _scheduler_frozen_candidate_identity(workflow_id, project_ctx, dep_ids=None):
     """The frozen candidate identity a fallback dispatch must carry verbatim.
 
@@ -2289,6 +2325,360 @@ def _scheduler_frozen_candidate_identity(workflow_id, project_ctx, dep_ids=None)
         str(payload.get("candidate_sha") or "").strip(),
         str(payload.get("delivery_branch") or "").strip(),
     )
+
+
+# ============================================================
+# Selective Reverification v1:选择性重新验证 (HAFlow PR #108)
+#
+# Task states from which a recorded verdict is a settled result. ``superseded``
+# belongs here too: superseding is a status change, not a rewrite — it means
+# "no longer the current conclusion", and the record of what the task verified
+# has to survive for the reuse evidence to be reachable at all. A task that
+# never reached one of these states also has no verdict, so it is refused
+# twice over (by this filter and by the verdict check).
+_SETTLED_VERIFICATION_STATUSES = frozenset((
+    "completed", "committed", "integrated", "cleanup_ready", "cleaned",
+    "superseded",
+))
+#
+#
+# - _reverification_gate_facts:读当前候选上的 reuse 事实(只读,失败即空)。
+# - _reverification_satisfies_node:该 verifier 是否已被复用事实满足。
+# - _reverification_plan_for_rotation:候选轮换时构建并落盘重新验证计划。
+# - _reverification_reused_node:该节点本次不派发(复用是调度决策,不是 Agent 决策)。
+# ============================================================
+
+#: Per-sweep memo, keyed by workflow: the resolved policy context *and* the
+#: reuse facts derived from it, resolved together.
+#:
+#: Memoised because ``workflow_config_for`` re-reads and re-parses the workflow
+#: YAML from disk on every call, and this path runs once per node per 2-second
+#: sweep — without the memo, readiness paid for a full YAML parse per node.
+#: Cleared at the top of every sweep, so a fact written by this sweep (the plan)
+#: is picked up by the readiness computation in the same pass and a later sweep
+#: never trusts a previous pass's snapshot.
+_REVERIFICATION_MEMO = {}
+
+#: Bound on memoised workflows, so a long-lived controller that keeps sweeping
+#: many workflows does not accumulate an entry for each forever.
+_REVERIFICATION_MEMO_LIMIT = 256
+
+
+def _reset_reverification_memo(workflow_id):
+    _REVERIFICATION_MEMO.pop(workflow_id, None)
+
+
+def _reverification_context_and_facts(workflow_id):
+    """Resolve (expected_sha, policy_identity, branch_node_ids, reuse_facts) once.
+
+    Returned as a single memoised tuple because they all come from the same two
+    reads, and because the join gate and the readiness computation must agree on
+    them exactly.
+    """
+    if scheduler_facts_store is None or reverification_mod is None:
+        return "", "", [], []
+    memo = _REVERIFICATION_MEMO.get(workflow_id)
+    if memo is not None:
+        return memo
+    try:
+        cfg = workflow_config_for(workflow_id) or {}
+        expected = scheduler_facts_store.latest_frozen_candidate_sha(workflow_id)
+        policy_fp = str(reverification_mod.policy_identity(
+            reverification_mod.policy_from_workflow(cfg)) or "")
+    except Exception as exc:
+        print(f"[REVERIFICATION POLICY WARN] workflow={workflow_id}: {exc}")
+        return "", "", [], []
+    if not expected or not policy_fp:
+        _REVERIFICATION_MEMO[workflow_id] = ("", "", [], [])
+        return _REVERIFICATION_MEMO[workflow_id]
+    try:
+        node_ids = scheduler_core.verifier_branch_node_ids(cfg)
+    except Exception as exc:
+        print(f"[REVERIFICATION BRANCHES WARN] workflow={workflow_id}: {exc}")
+        return "", "", [], []
+    found = []
+    for node_id in node_ids:
+        try:
+            fact = scheduler_facts_store.find_reuse_fact(
+                workflow_id, node_id, expected, policy_identity=policy_fp)
+        except Exception as exc:
+            print(f"[REVERIFICATION FACT WARN] workflow={workflow_id} "
+                  f"node={node_id}: {exc}")
+            return "", "", [], []
+        if fact:
+            found.append(fact)
+    if len(_REVERIFICATION_MEMO) >= _REVERIFICATION_MEMO_LIMIT:
+        _REVERIFICATION_MEMO.clear()
+    _REVERIFICATION_MEMO[workflow_id] = (expected, policy_fp, node_ids, found)
+    return _REVERIFICATION_MEMO[workflow_id]
+
+
+def _reverification_gate_facts(workflow_id):
+    """当前冻结候选 + 当前策略下的 reuse 事实(只读)。
+
+    事实按 (verifier, to_candidate_sha, policy_identity) 精确绑定,所以这里
+    读到的每一条都只对当前候选、当前**已解析**策略有效:收窄范围或删掉配置
+    都会让旧事实失效。读取失败一律返回空列表——门禁侧 fail-closed,绝不会
+    因为「查不到」而把复用当成通过。
+    """
+    return _reverification_context_and_facts(workflow_id)[3]
+
+
+def _reverification_effective(workflow_id, node_id):
+    """The verification that currently counts for one node.
+
+    Delegates to the scheduler core rather than re-deriving it here. The core
+    owns the precedence rule (fresh evidence outranks a reuse fact, and a reuse
+    fact only applies when the branch has no live task), and the join gate
+    applies exactly the same rule. Two implementations of one load-bearing
+    predicate is how the ledger ends up claiming a verification the gate
+    refuses, so there is deliberately only one.
+    """
+    if scheduler_core is None or reverification_mod is None:
+        return {"status": "none", "source": "none"}
+    try:
+        expected = _reverification_context_and_facts(workflow_id)[0]
+        return scheduler_core.resolve_effective_verification(
+            load_tasks(), workflow_id, node_id, expected,
+            _reverification_gate_facts(workflow_id))
+    except Exception as exc:
+        print(f"[REVERIFICATION EFFECTIVE WARN] workflow={workflow_id} "
+              f"node={node_id}: {exc}")
+        return {"status": "none", "source": "none"}
+
+
+def _reverification_satisfies_node(workflow_id, node_id):
+    """该 verifier 节点是否已由 reuse 事实满足(仅对当前候选与当前策略)。
+
+    复用事实只对汇聚门禁真正会追问的分支有意义,而 ``_reverification_gate_facts``
+    本身就只按分支节点取事实,因此这里不需要再单独做一次 DAG 查询。
+
+    ``scheduler_core`` 的存在检查不能省:本函数在 ``is_node_complete`` 的热
+    路径上,而那个函数在 #107 里只依赖任务状态、在 scheduler 缺失时不会崩。
+    直接访问 ``scheduler_core.EFFECTIVE_REUSE`` 会在 scheduler 导入失败时抛
+    AttributeError,把一个可选组件的缺失升级成控制面崩溃。
+    """
+    if not node_id or scheduler_core is None:
+        return False
+    return _reverification_effective(workflow_id, node_id).get("source") == \
+        scheduler_core.EFFECTIVE_REUSE
+
+
+def _reverification_episode_settled(workflow_id, from_sha, to_sha):
+    """Whether every verifier of this episode already has a recorded decision.
+
+    A rotation stays "the current rotation" until a *third* candidate is frozen,
+    so without this check the whole plan — canonicalise, ancestor check, diff,
+    and a full task scan — would be recomputed on every 2-second sweep, forever,
+    for a decision that is already immutable on disk. The facts are the record;
+    re-deriving them cannot change the answer, it can only cost subprocesses.
+    """
+    if scheduler_facts_store is None or scheduler_core is None:
+        return False
+    try:
+        expected = _reverification_context_and_facts(workflow_id)[2]
+    except Exception:
+        return False
+    if not expected:
+        return False
+    try:
+        recorded = scheduler_facts_store.list_reverification_decisions(
+            workflow_id, limit=scheduler_facts_store.REUSE_LOOKUP_SCAN_LIMIT)
+    except Exception:
+        return False
+    seen = set()
+    for event in recorded:
+        payload = event.get("payload") or {}
+        if (str(payload.get("from_candidate_sha") or "")
+                != str(from_sha or "")):
+            continue
+        if str(payload.get("to_candidate_sha") or "") != str(to_sha or ""):
+            continue
+        verifier = str(payload.get("verifier") or "")
+        if verifier:
+            seen.add(verifier)
+    return set(expected).issubset(seen)
+
+
+def _scheduler_resolve_candidate_and_plan(workflow_id, workflow_cfg):
+    """Freeze the current candidate and, on a real rotation, plan re-verification.
+
+    Returns ``(frozen_sha, deferred)``. ``deferred`` is True only when a freeze
+    was actually attempted and failed to produce an identity, which is the one
+    case the caller must not latch on. Returns the frozen SHA, or "" when
+    unprovable. Runs once per sweep, before readiness is computed, so that a
+    rotation and the decision it implies are both visible to the same pass.
+
+    The freeze is idempotent against the newest freeze (PR #107), so calling it
+    on every sweep costs one ledger read when nothing changed. When the newest
+    freeze differs from the one before it, that is a genuine A -> B rotation and
+    the only place a reverification episode may begin. The plan is written
+    before anything is latched or dispatched, so a crash replays from the facts
+    instead of re-deriving a different decision.
+
+    A workflow with a real project but no resolvable identity returns "" so the
+    caller can defer rather than latch: verifiers would otherwise be refused at
+    preflight or run against whatever happens to be checked out. A workflow with
+    no project_root has no repository to resolve a candidate from at all, which
+    is not a transient gap, so it keeps the legacy behaviour.
+    """
+    if scheduler_core is None or scheduler_facts_store is None:
+        return "", False
+    if not is_node_complete(workflow_id, "implementation"):
+        # Not our business yet: the candidate is frozen when implementation
+        # completes, not before. Reporting a deferral here would stall a
+        # workflow that has not reached the point where a candidate exists.
+        return "", False
+    project_ctx = project_for_workflow(workflow_id) or {}
+    project_root = project_ctx.get("project_root") or ""
+    if not project_root:
+        # No repository to resolve a candidate from at all: not a transient
+        # identity gap, so keep the legacy behaviour rather than deadlocking.
+        return "", False
+    frozen_sha = _scheduler_freeze_candidate(
+        workflow_id, project_root, "implementation", ["implementation"])
+    if not frozen_sha:
+        return "", True
+    rotated_from = _scheduler_previous_candidate_sha(workflow_id)
+    if rotated_from and rotated_from != frozen_sha and not (
+            _reverification_episode_settled(
+                workflow_id, rotated_from, frozen_sha)):
+        _reverification_plan_for_rotation(
+            workflow_id, workflow_cfg, project_root, rotated_from, frozen_sha)
+    return frozen_sha, False
+
+
+def _reverification_source_verifications(workflow_id, from_sha):
+    """Candidate ``from_sha`` 上可作为复用来源的既有验证(供举证)。
+
+    三条硬性过滤,任一不满足即不作为来源:
+
+    1. 必须带 ``verified_candidate_sha``(claim / baseline 都不是完成证据,§14);
+    2. 必须**精确绑定** ``from_sha``——不是「在附近某个版本跑过」;
+    3. 必须是真实跑出来的任务(reuse 不创建 Task,因此任何 Task 都是 fresh)。
+
+    第 1 条刻意**不**走 ``scheduler.extract_task_verified_sha``:该函数为兼容
+    pre-Scheduler workflow,会对没有 candidate claim 的任务回退到
+    ``baseline_commit``。复用来源的要求比那个回退严格得多——它断言的是
+    「这个 verifier 真的验证了 A」,而 launch baseline 只能说明「它从 A 出发」,
+    正是 #107 引入完成证据要消灭的那个说法(中途 pull/rebase 的 Agent 仍会
+    报告 baseline=A,却验证了别的树)。所以这里读字面字段。
+
+    刻意**不**排除 superseded 任务:fix-loop 返工时会把上一轮的 test 任务
+    作废,但「作废」只表示它不再是当前结论,不表示抹掉它验证过 A 这一事实。
+    排除掉它们会让所有真实返工都无法复用,等于功能永远不生效。
+    """
+    if scheduler_core is None:
+        return []
+    wanted = str(from_sha or "").strip()
+    if not wanted:
+        return []
+    sources = []
+    for task in load_tasks():
+        if not isinstance(task, dict):
+            continue
+        if task.get("workflow_id") != workflow_id:
+            continue
+        # A verdict is only meaningful on a task that actually reached one. A
+        # task still running cannot have proved anything, and a stale
+        # stage_verdict left on a non-terminal record must not be read as a
+        # PASS. Superseded counts: fix-loop supersedes the previous round's
+        # verifier, and excluding those would make reuse unreachable on every
+        # real rework.
+        if str(task.get("status") or "") not in _SETTLED_VERIFICATION_STATUSES:
+            continue
+        node_id = str(task.get("node") or task.get("stage") or "")
+        if not node_id:
+            continue
+        verified = str(task.get("verified_candidate_sha") or "").strip()
+        if not verified:
+            continue
+        if not scheduler_core.shas_identical(verified, wanted):
+            continue
+        try:
+            updated = float(task.get("updated_at") or 0)
+        except (TypeError, ValueError):
+            updated = 0.0
+        sources.append({
+            "verifier": node_id,
+            "task_id": str(task.get("task_id") or ""),
+            "verdict": str(task.get("stage_verdict") or "").strip().lower(),
+            "candidate_sha": scheduler_core.extract_task_candidate_claim(task),
+            "verified_candidate_sha": verified,
+            "source": reverification_mod.SOURCE_FRESH,
+            "updated_at": updated,
+        })
+    return sources
+
+
+def _reverification_plan_for_rotation(workflow_id, workflow_cfg, project_root,
+                                      from_sha, to_sha):
+    """候选轮换时构建并落盘一次重新验证计划(best-effort,失败即全部 RERUN)。
+
+    返回 ``(plan, reused_node_ids)``。任何异常都退化为「没有复用」,即所有
+    verifier 照常重跑:漏跑一个 verifier 远好过跳过一个本该跑的 verifier。
+    """
+    empty = ({}, set())
+    if (
+        reverification_mod is None
+        or scheduler_facts_store is None
+        or scheduler_core is None
+    ):
+        return empty
+    if not project_root or not from_sha or not to_sha or from_sha == to_sha:
+        return empty
+    try:
+        policy = reverification_mod.policy_from_workflow(workflow_cfg)
+        entries, diff_reason = reverification_mod.collect_candidate_changes(
+            project_root, from_sha, to_sha)
+        sources = _reverification_source_verifications(workflow_id, from_sha)
+        plan = reverification_mod.build_reverification_plan(
+            workflow_id, from_sha, to_sha, entries, sources,
+            policy, diff_reason=diff_reason,
+            verifiers=scheduler_core.verifier_branch_node_ids(workflow_cfg),
+        )
+    except Exception as exc:
+        print(f"[REVERIFICATION PLAN WARN] workflow={workflow_id}: {exc}")
+        return empty
+
+    reused = set()
+    for decision in plan["verifiers"].values():
+        node_id = str(decision.get("verifier") or "")
+        try:
+            recorded = scheduler_facts_store.record_reverification_decision(
+                workflow_id, decision)
+        except Exception as exc:
+            print(f"[REVERIFICATION WRITE WARN] workflow={workflow_id} "
+                  f"node={node_id}: {exc}")
+            continue
+        if decision.get("decision") == reverification_mod.DECISION_REUSE:
+            if recorded.get("status") == "rejected":
+                print(
+                    f"[REVERIFICATION REJECTED] workflow={workflow_id} "
+                    f"node={node_id} reason="
+                    f"{recorded.get('reason')}"
+                )
+                continue
+            reused.add(node_id)
+        print(
+            f"[REVERIFICATION {str(decision.get('decision') or '').upper()}] "
+            f"workflow={workflow_id} node={node_id} "
+            f"{from_sha[:8]} -> {to_sha[:8]} "
+            f"reason={decision.get('reason')} "
+            f"changed={','.join(decision.get('changed_paths') or []) or '-'}"
+        )
+    return plan, reused
+
+
+def _reverification_reused_node(workflow_id, node_id):
+    """该节点本次是否应由 reuse 事实满足、从而**不创建 Task**。
+
+    复用是调度决策,不是 Agent 决策(§19):控制器不会先创建 test(B) Task
+    再让 Agent 自己决定不跑。
+    """
+    if not node_id:
+        return False
+    return _reverification_satisfies_node(workflow_id, node_id)
 
 
 def _scheduler_join_gate_allows(workflow_id, node, tasks):
@@ -2351,7 +2741,8 @@ def _scheduler_join_gate_allows(workflow_id, node, tasks):
             return False
     try:
         passed, reason, details = scheduler_core.evaluate_join_gate(
-            node, tasks, workflow_id, expected
+            node, tasks, workflow_id, expected,
+            reuse_facts=_reverification_gate_facts(workflow_id),
         )
     except Exception as exc:
         print(
@@ -2482,6 +2873,25 @@ def try_direct_stage_advance(item):
             print(f"[GATE VERDICT DIR WARN] {exc}")
 
     mode = plan.get("mode")
+
+    # PR #108: a reused verifier must not be dispatched at all.
+    #
+    # This is defence in depth, not the primary mechanism. In the normal path
+    # the reuse fact already makes the node complete, so readiness filtering
+    # means a reused node never reaches here and the ledger and the scheduler
+    # cannot disagree. It stays because the two are computed from different
+    # reads at different times, and if they ever did disagree the safe
+    # direction is unambiguous: re-running a verifier wastes work, while
+    # dispatching a verifier that an immutable fact already covers is the
+    # dangerous one.
+    if _reverification_reused_node(workflow_id, ready_id):
+        mark_stage_advance_notified(workflow_id, ready_id)
+        print(
+            f"[REVERIFICATION REUSE] workflow={workflow_id} "
+            f"node={ready_id} no task created; "
+            f"verification carried by a reuse fact bound to the current candidate"
+        )
+        return True
 
     if mode == "fallback":
         print(
@@ -2667,6 +3077,30 @@ def check_workflow_stage_advance(workflow_id):
         # so that regressed stages can be re-triggered.
         reconcile_stage_advance_states(workflow_id, workflow_cfg)
 
+        # PR #108: resolve the candidate and its reverification plan BEFORE
+        # completed_nodes is computed.
+        #
+        # Order is load-bearing. A reused verifier counts as complete only for
+        # the candidate its fact is bound to, so a candidate rotation has to
+        # happen first — otherwise a node satisfied by a now-stale A -> B fact
+        # still looks complete in this sweep, no Task is created for C, and the
+        # verifier would be skipped for C without ever having run. Running the
+        # freeze first makes the rotation visible to the same sweep that acts
+        # on it.
+        deferred = False
+        try:
+            _frozen_sha, deferred = _scheduler_resolve_candidate_and_plan(
+                workflow_id, workflow_cfg)
+        except Exception as exc:
+            print(f"[SCHEDULER SWEEP WARN] workflow={workflow_id}: {exc}")
+            deferred = True
+        # Reset AFTER the plan, not before: the plan writes the reuse facts, and
+        # the episode check above reads the ledger first. Clearing afterwards
+        # guarantees the memo is built from a ledger that already contains this
+        # sweep's writes, so a fact recorded a moment ago is visible to the
+        # readiness computation in the same pass.
+        _reset_reverification_memo(workflow_id)
+
         completed_nodes = {
             n["id"]
             for n in workflow_cfg.get("nodes", [])
@@ -2796,43 +3230,32 @@ def check_workflow_stage_advance(workflow_id):
                     workflow_id, ready_node, load_tasks()
                 ):
                     continue
-                completed_now = {
-                    n["id"]
-                    for n in workflow_cfg.get("nodes", [])
-                    if is_node_complete(workflow_id, n["id"])
-                }
-                if "implementation" in completed_now:
-                    project_ctx = project_for_workflow(workflow_id) or {}
-                    frozen_sha = _scheduler_freeze_candidate(
-                        workflow_id,
-                        project_ctx.get("project_root") or "",
-                        "implementation",
-                        list(deps),
-                    )
-                    if not frozen_sha and project_ctx.get("project_root"):
-                        # No candidate identity on a workflow that has a real
-                        # project -> do not latch and do not dispatch.
-                        # Verifiers would either be refused at preflight (no
-                        # identity to prove) or run against whatever revision
-                        # happens to be checked out, and the stage latch would
-                        # suppress the natural retry once the branch/SHA
-                        # becomes resolvable. Skipping the latch keeps the node
-                        # re-evaluated on the next sweep.
-                        #
-                        # A workflow with no project_root has no repository to
-                        # resolve a candidate from at all; that is not a
-                        # transient identity gap, so it keeps legacy behaviour
-                        # rather than deadlocking forever.
-                        print(
-                            f"[SCHEDULER FREEZE DEFERRED] workflow={workflow_id} "
-                            f"node={ready_id} no candidate identity resolvable; "
-                            "stage not latched, dispatch deferred to next sweep"
-                        )
-                        continue
             except Exception as exc:
                 print(
                     f"[SCHEDULER SWEEP WARN] workflow={workflow_id} "
                     f"node={ready_id}: {exc}"
+                )
+                continue
+
+            # No candidate identity on a workflow that has a real project and a
+            # completed implementation -> do not latch and do not dispatch this
+            # node. Verifiers would either be refused at preflight (no identity
+            # to prove) or run against whatever revision happens to be checked
+            # out, and the stage latch would suppress the natural retry once the
+            # branch/SHA becomes resolvable. Skipping the latch keeps the node
+            # re-evaluated on the next sweep.
+            #
+            # Scoped to the ready-node loop. Verified against `3a84659`: the
+            # freeze failure there also skipped every ready node in that pass,
+            # so this is behaviour-preserving rather than an improvement — the
+            # point of the change is only that it must not run *before*
+            # `is_workflow_completed`, where it would stop a finished workflow
+            # from ever closing.
+            if deferred:
+                print(
+                    f"[SCHEDULER FREEZE DEFERRED] workflow={workflow_id} "
+                    f"node={ready_id} no candidate identity resolvable; "
+                    "stage not latched, dispatch deferred to next sweep"
                 )
                 continue
 

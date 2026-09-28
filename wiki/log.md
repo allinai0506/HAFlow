@@ -1358,3 +1358,32 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
   未 staged 的 bucket 仍以 canary 配置为准；CAS 无 `revision` 计数器（当前单行模型
   足够）；75/100 与 Adaptive 默认接管另行讨论；仓库尚无 GitHub Actions，
   测试结论均来自本地实跑。
+
+## 2026-09-28 · Selective Reverification v1（PR #108，未推送）
+
+- 候选轮换 A→B 后，`test` / `review` 不再一律重跑。复用只在四者同时成立时允许：
+  真实 `git diff --name-status A B` + 显式非影响范围 + 带 `verified_candidate_sha`
+  的来源 PASS + 不可变派生事实；任一不能证明即 RERUN。全程无 LLM 参与影响判定。
+- 范围按「显式声明不会影响的路径」建模，不是「哪些文件要重测」：未声明的路径、
+  未声明的 verifier 一律 RERUN。v1 只给 `test` 开 `docs/**/*.md`；`review` 的 `[]`
+  表示不存在安全复用范围，即永远 RERUN。根级 `AGENTS.md` / `CLAUDE.md` / `RULES.md`
+  是运行时行为契约，`.herdr-loop/*.md` 被评估器/投影读取，均刻意排除在外。
+- 历史事实不可变：`test(A) PASS` 仍然是「test 验证了 A」。复用产生新事实
+  `reverification_decision`，按 (workflow, from, to, verifier, 策略指纹) 幂等，
+  A→B 与 B→A 必然是两条 episode。
+- 策略身份取**已解析策略的指纹**而非版本号：收窄范围或删掉配置会真正撤销既有复用；
+  只看版本号会让收窄变成装饰。事实按 (verifier, to_candidate_sha, 策略指纹) 精确
+  绑定，因此候选再次变化、策略收窄，旧复用都自动失效。
+- 复用节点**不创建 Task**，是调度决策而非 Agent 决策；它没有任务，所以「节点完成」
+  与 Join Gate 都改读同一个纯函数 `resolve_effective_verification`，台账与门禁不可能
+  对同一个分支给出相反答案。
+- 三轮独立对抗评审共 17 项，全部修复并补回归测试；其中 3 项是**验证工件自身的错误
+  陈述**（计数、不可复现日志、错误因果），已按实跑重写。
+- 全量 2196 passed + 50 subtests；`compileall`、`git diff --check` 通过；
+  `evaluate_join_gate(reuse_facts=None)` 与 3a84659 差分 20 万组零不一致。
+- 遗留边界：绝对 sweep 开销未由本方实测（第三方量测 6 节点 2.03×，8/12 节点更快）；
+  `record_reverification_decision` 仍是 read-then-compare，并发下可产生内容相同的
+  重复行（不影响判定）；复用单跳，不递归。
+- 关联实现：`herdr/reverification.py`、`herdr/scheduler.py`、
+  `herdr/scheduler_facts.py`、`services/herdr-controller.py`、`bin/herdr-task`。
+- 教训：§94。

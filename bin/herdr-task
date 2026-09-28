@@ -1600,6 +1600,140 @@ def _rollout_change(args, new_percentage, reason, source, *, verb):
           f"action={record.get('action')} audit_id={record.get('id')}")
 
 
+def cmd_reverification(args):
+    """Selective Reverification audit entry (status/history) — read-only.
+
+    Read-only by construction: it only ever reads recorded decision facts. It
+    answers "why did this verifier not re-run?", which cannot be answered from
+    tasks alone because a reuse leaves no task behind.
+    """
+    action = getattr(args, "reverification_command", None)
+    if action == "status":
+        _cmd_reverification_status(args)
+    elif action == "history":
+        _cmd_reverification_history(args)
+    else:
+        print("[REVERIFICATION] unknown action; use status|history",
+              file=sys.stderr)
+        sys.exit(2)
+
+
+def _reverification_rows(workflow_id, limit=None):
+    """Reverification decision facts for one workflow (read-only, bounded)."""
+    from herdr import scheduler_facts, state_db
+    db_path = state_db.resolve_state_db_path()
+    if not db_path.is_file():
+        return []
+    try:
+        return scheduler_facts.list_reverification_decisions(
+            workflow_id, db_path=db_path, limit=limit)
+    except Exception as exc:  # noqa: BLE001 -- read-only boundary
+        print(f"[REVERIFICATION] decisions unavailable: "
+              f"{type(exc).__name__}: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+
+def _reverification_current_decisions(workflow_id):
+    """Newest decision per verifier, restricted to the current candidate.
+
+    Scoped to the frozen candidate because that is the question `status` claims
+    to answer: a decision about an older candidate is history, and `history` is
+    the command for that. Reporting the newest decision overall would silently
+    answer a different question.
+
+    Guarded on the DB existing before touching the state store. ``get_state_store``
+    runs ``init_db`` — full DDL plus migration — so a read-only command that
+    called it unconditionally would create a half-megabyte database on a host
+    that has none.
+    """
+    from herdr import scheduler_facts, state_db
+    db_path = state_db.resolve_state_db_path()
+    if not db_path.is_file():
+        return {}, ""
+    events = _reverification_rows(workflow_id)
+    try:
+        expected = scheduler_facts.latest_frozen_candidate_sha(
+            workflow_id, db_path=db_path)
+    except Exception as exc:  # noqa: BLE001 -- read-only boundary
+        print(f"[REVERIFICATION] candidate unavailable: "
+              f"{type(exc).__name__}: {exc}", file=sys.stderr)
+        sys.exit(1)
+    if not expected:
+        return {}, ""
+    latest = {}
+    for event in events:
+        payload = event.get("payload") or {}
+        if str(payload.get("to_candidate_sha") or "") != expected:
+            continue
+        latest[str(payload.get("verifier") or "")] = payload
+    return latest, expected
+
+
+def _cmd_reverification_status(args):
+    """Why the current candidate did or did not re-run each verifier."""
+    from herdr import reverification
+    workflow_id = args.workflow_id
+    latest, expected = _reverification_current_decisions(workflow_id)
+    decisions = [d for _n, d in latest.items()]
+    payload = {
+        "workflow_id": workflow_id,
+        "candidate_sha": expected,
+        "metrics": reverification.reverification_metrics(decisions),
+        "decisions": sorted(decisions, key=lambda p: p.get("verifier", "")),
+    }
+    if getattr(args, "json", False):
+        print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+        return
+    metrics = payload["metrics"]
+    print(f"workflow={workflow_id} candidate={expected[:8] or '(none)'} "
+          f"verifiers={metrics['total_verifiers']} "
+          f"reuse={metrics['reuse_count']} rerun={metrics['rerun_count']} "
+          f"reuse_rate={metrics['reuse_rate']:.2f}")
+    for decision in payload["decisions"]:
+        print(f"- {decision.get('verifier')}: "
+              f"{decision.get('decision')} "
+              f"({decision.get('from_candidate_sha', '')[:8]} -> "
+              f"{decision.get('to_candidate_sha', '')[:8]})")
+        print(f"    reason: {decision.get('reason')}")
+        print(f"    changed: "
+              f"{','.join(decision.get('changed_paths') or []) or '-'}")
+        if decision.get("decision") == "reuse":
+            print(f"    scope: "
+                  f"{','.join(decision.get('reusable_scope') or []) or '-'}")
+            print(f"    source: {decision.get('source_task_id')} "
+                  f"verdict={decision.get('source_verdict')} "
+                  f"verified_candidate_sha="
+                  f"{(decision.get('source_verified_candidate_sha') or '')[:8]}")
+        print(f"    policy: {decision.get('policy_version')}")
+
+
+def _cmd_reverification_history(args):
+    try:
+        limit = int(getattr(args, "limit", None) or 100)
+    except (TypeError, ValueError):
+        print("[REVERIFICATION] --limit must be an int", file=sys.stderr)
+        sys.exit(2)
+    if limit <= 0:
+        print("[REVERIFICATION] --limit must be a positive int", file=sys.stderr)
+        sys.exit(2)
+    rows = _reverification_rows(args.workflow_id, limit=limit)
+    if getattr(args, "json", False):
+        print(json.dumps([e.get("payload") or {} for e in rows],
+                         ensure_ascii=False, indent=2, sort_keys=True))
+        return
+    if not rows:
+        print(f"reverification: no decision facts for {args.workflow_id}")
+        return
+    for event in rows:
+        payload = event.get("payload") or {}
+        print(f"#{event.get('id')} {payload.get('verifier')} "
+              f"{payload.get('decision')} "
+              f"{str(payload.get('from_candidate_sha') or '')[:8]} -> "
+              f"{str(payload.get('to_candidate_sha') or '')[:8]} "
+              f"reason={payload.get('reason')} "
+              f"policy={payload.get('policy_version')}")
+
+
 def cmd_rollout(args):
     """Controlled Rollout operator entry (status/set/off/history/check-guard)."""
     action = getattr(args, "rollout_command", None)
@@ -6931,6 +7065,24 @@ def main():
     )
     canary_eval_cmd.add_argument("--json", action="store_true")
 
+    reverification_cmd = sub.add_parser(
+        "reverification",
+        help="Selective Reverification v1 审计（只读：status/history）",
+    )
+    reverification_sub = reverification_cmd.add_subparsers(
+        dest="reverification_command")
+
+    reverification_status = reverification_sub.add_parser(
+        "status", help="查看当前候选上各 verifier 的 reuse/rerun 判定与原因")
+    reverification_status.add_argument("--workflow-id", required=True)
+    reverification_status.add_argument("--json", action="store_true")
+
+    reverification_history = reverification_sub.add_parser(
+        "history", help="审计历史判定（只读）")
+    reverification_history.add_argument("--workflow-id", required=True)
+    reverification_history.add_argument("--limit", default="100")
+    reverification_history.add_argument("--json", action="store_true")
+
     rollout_cmd = sub.add_parser(
         "rollout",
         help="Adaptive Router Controlled Rollout（人工扩量/回退/审计）",
@@ -7310,6 +7462,9 @@ def main():
 
     elif args.command == "rollout":
         cmd_rollout(args)
+
+    elif args.command == "reverification":
+        cmd_reverification(args)
 
 
 if __name__ == "__main__":

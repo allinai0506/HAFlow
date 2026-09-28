@@ -299,10 +299,134 @@ def task_claim_evidence_consistent(task):
     return shas_identical(claim, evidence), claim, evidence
 
 
-def evaluate_join_gate(gate_node, tasks, workflow_id, expected_candidate_sha=""):
+#: Effective verification sources (§21). ``fresh`` outranks ``reuse``; a
+#: verifier with neither is ``none`` and never counts as a pass.
+EFFECTIVE_FRESH = "fresh"
+EFFECTIVE_REUSE = "reuse"
+EFFECTIVE_NONE = "none"
+
+
+def resolve_effective_verification(
+    tasks,
+    workflow_id,
+    verifier,
+    candidate_sha,
+    reuse_facts=None,
+):
+    """Resolve the verification that currently counts for one verifier.
+
+    Returns a dict with ``status`` and ``source`` (§21):
+
+    - ``fresh``  — a real task proved exactly ``candidate_sha``;
+    - ``reuse``  — no fresh evidence exists and a reuse fact binds this
+      verifier to exactly ``candidate_sha``;
+    - ``none``   — no admissible evidence; the branch is unsatisfied.
+
+    Precedence is the whole point of this function. A fresh verdict is
+    authoritative even when it is BLOCKED: an old reuse fact must never
+    resurrect a candidate the verifier actually rejected (§22, Case 12). A
+    reuse fact therefore only applies where fresh evidence is *absent* — a
+    running, incomplete, or unproven task is a live claim on the candidate, and
+    silently substituting a reuse fact for it would let the gate pass on a
+    verification that is still running.
+    """
+    expected = str(candidate_sha or "").strip()
+    dep_tasks = node_tasks(tasks, workflow_id, verifier)
+    reuse = _select_reuse_fact(reuse_facts, verifier, expected)
+
+    if dep_tasks:
+        complete = node_is_complete(dep_tasks)
+        if not complete:
+            return {"verifier": verifier, "candidate_sha": expected,
+                    "status": "pending", "source": EFFECTIVE_NONE,
+                    "tasks": [str(t.get("task_id") or "") for t in dep_tasks],
+                    "reuse_ignored": bool(reuse)}
+        unproven = [
+            str(t.get("task_id") or "") for t in dep_tasks
+            if extract_task_candidate_claim(t)
+            and not extract_task_verified_sha(t)
+        ]
+        if unproven:
+            return {"verifier": verifier, "candidate_sha": expected,
+                    "status": "unproven", "source": EFFECTIVE_NONE,
+                    "unproven_tasks": sorted(unproven),
+                    "reuse_ignored": bool(reuse)}
+        if not expected:
+            return {"verifier": verifier, "candidate_sha": "",
+                    "status": "unproven", "source": EFFECTIVE_NONE,
+                    "reason": "no expected candidate to bind to"}
+        matched = [t for t in dep_tasks if candidate_revision_matches(t, expected)]
+        if not matched:
+            return {"verifier": verifier, "candidate_sha": expected,
+                    "status": "stale", "source": EFFECTIVE_NONE,
+                    "verified": sorted({
+                        extract_task_candidate_sha(t) for t in dep_tasks
+                        if extract_task_candidate_sha(t)}),
+                    "reuse_ignored": bool(reuse)}
+        return {
+            "verifier": verifier,
+            "candidate_sha": expected,
+            "status": node_verdict(matched) or "unproven",
+            "source": EFFECTIVE_FRESH,
+            "tasks": sorted(str(t.get("task_id") or "") for t in matched),
+        }
+
+    if reuse:
+        return {
+            "verifier": verifier,
+            "candidate_sha": expected,
+            "status": "pass",
+            "source": EFFECTIVE_REUSE,
+            "source_candidate_sha": str(reuse.get("from_candidate_sha") or ""),
+            "source_task_id": str(reuse.get("source_task_id") or ""),
+            "decision_event_id": reuse.get("event_id"),
+            "policy_version": str(reuse.get("policy_version") or ""),
+            "changed_paths": list(reuse.get("changed_paths") or []),
+        }
+    return {"verifier": verifier, "candidate_sha": expected,
+            "status": "none", "source": EFFECTIVE_NONE}
+
+
+def _select_reuse_fact(reuse_facts, verifier, candidate_sha):
+    """The last reuse fact in ``reuse_facts`` bound to (verifier, candidate_sha).
+
+    Selection is by position, not by recency: the caller supplies the facts in
+    ledger order (oldest first), so the last match is the newest. Making that
+    dependence explicit matters because ``evaluate_join_gate`` is a public
+    pure function — a caller that passes an unordered list gets an
+    order-dependent answer, and a fact with a ``timestamp`` would look like the
+    tie-breaker it is not.
+    """
+    name = normalize_node_id(verifier)
+    expected = str(candidate_sha or "").strip()
+    if not name or not expected:
+        return None
+    found = None
+    for fact in reuse_facts or []:
+        if not isinstance(fact, dict):
+            continue
+        if normalize_node_id(fact.get("verifier")) != name:
+            continue
+        if not shas_identical(fact.get("to_candidate_sha"), expected):
+            continue
+        if str(fact.get("source_verdict") or "") != "pass":
+            continue
+        if not str(fact.get("source_verified_candidate_sha") or "").strip():
+            continue
+        found = fact
+    return found
+
+
+def evaluate_join_gate(gate_node, tasks, workflow_id, expected_candidate_sha="",
+                       reuse_facts=None):
     """Deterministic join-gate verdict (pure, no LLM).
 
     Returns (passed, reason, details).
+
+    ``reuse_facts`` carries the PR #108 reuse facts for this workflow. A branch
+    with no task may be satisfied by a reuse fact bound to exactly the expected
+    candidate; every other branch still needs its own fresh proof. Passing
+    ``reuse_facts=None`` (the default) reproduces the PR #107 verdict exactly.
     """
     gate_node = gate_node or {}
     gate_id = normalize_node_id(gate_node.get("id"))
@@ -316,6 +440,32 @@ def evaluate_join_gate(gate_node, tasks, workflow_id, expected_candidate_sha="")
 
     for dep in deps:
         dep_tasks = node_tasks(tasks, workflow_id, dep)
+        # A reuse fact (PR #108) may only stand in for a branch that has NO
+        # task at all. Any existing task — complete or not, passed or blocked —
+        # is fresh evidence and keeps its own meaning: a verifier that actually
+        # ran against the candidate must never have its verdict replaced by a
+        # fact about an earlier candidate (§22, Case 12).
+        #
+        # The "no task" requirement is also what keeps the ledger and this gate
+        # from disagreeing. The controller treats a reuse fact as satisfying
+        # the node, so no new task is created for it; if the fact could also
+        # satisfy a branch that still holds a task, the ledger would claim a
+        # verification this gate refuses, and the workflow would stall on a
+        # branch that is never going to re-run.
+        reuse = None
+        if not dep_tasks:
+            reuse = _select_reuse_fact(reuse_facts, dep, expected)
+        if reuse:
+            branch_states[dep] = {
+                "complete": True,
+                "verdict": "pass",
+                "candidate_shas": [expected],
+                "claim_evidence_mismatch": [],
+                "missing_completion_evidence": [],
+                "evidence_source": EFFECTIVE_REUSE,
+                "reuse": reuse,
+            }
+            continue
         complete = node_is_complete(dep_tasks)
         verdict = node_verdict(dep_tasks) if complete else None
         shas = sorted(
@@ -355,6 +505,7 @@ def evaluate_join_gate(gate_node, tasks, workflow_id, expected_candidate_sha="")
             "candidate_shas": shas,
             "claim_evidence_mismatch": inconsistent,
             "missing_completion_evidence": missing_evidence,
+            "evidence_source": EFFECTIVE_FRESH if complete else EFFECTIVE_NONE,
         }
     details["branches"] = branch_states
 
@@ -426,10 +577,33 @@ def evaluate_join_gate(gate_node, tasks, workflow_id, expected_candidate_sha="")
     return True, JOIN_SATISFIED, details
 
 
-def join_ready(gate_node, tasks, workflow_id, expected_candidate_sha=""):
+def verifier_branch_node_ids(workflow_cfg):
+    """Node ids a reuse fact may satisfy: the join gate's branch nodes.
+
+    Derived from the same DAG the gate reads, so a verifier is admissible
+    exactly when the gate will ask it for proof. A gate node itself is never a
+    branch, and a node nobody gates on is not a verifier — permitting reuse for
+    either would let a fact satisfy a node no gate consults.
+
+    Pure: the caller supplies the workflow config. Failure to read a config
+    yields an empty set, which means no verifier can be reused (fail-closed).
+    """
+    found = set()
+    for node in (workflow_cfg or {}).get("nodes") or []:
+        if not isinstance(node, dict):
+            continue
+        deps = node_dependencies(node)
+        is_gate = str(node.get("node_type") or "") == "gate" and len(deps) >= 2
+        if is_gate or len(deps) >= 2:
+            found.update(deps)
+    return sorted(n for n in found if n)
+
+
+def join_ready(gate_node, tasks, workflow_id, expected_candidate_sha="",
+               reuse_facts=None):
     """Boolean shortcut for evaluate_join_gate."""
     passed, _reason, _details = evaluate_join_gate(
-        gate_node, tasks, workflow_id, expected_candidate_sha
+        gate_node, tasks, workflow_id, expected_candidate_sha, reuse_facts
     )
     return passed
 

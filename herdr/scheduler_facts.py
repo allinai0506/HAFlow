@@ -8,6 +8,8 @@ WorkflowEvent 形式落盘,回答"这次 test/review 到底验证了哪个版本
 - scheduler_decision:ready 计算 + 派发明细(每次 check_advance 落一条)。
 - candidate_frozen:某候选 SHA 被冻结为期望版本(幂等,同 SHA 只记首条)。
 - join_gate_verdict:汇聚门禁每次判定结果(pass/wait/block/stale/mismatch)。
+- reverification_decision:候选变化后每个 verifier 的 reuse/rerun 判定
+  (PR #108;幂等键是 episode 级 decision_identity,不是候选集合成员)。
 """
 
 from __future__ import annotations
@@ -19,14 +21,48 @@ from typing import Any, Dict, List, Optional
 EVENT_SCHEDULER_DECISION = "scheduler_decision"
 EVENT_CANDIDATE_FROZEN = "candidate_frozen"
 EVENT_JOIN_GATE_VERDICT = "join_gate_verdict"
+EVENT_REVERIFICATION_DECISION = "reverification_decision"
 
 SCHEDULER_EVENT_SOURCE = "critical-path-scheduler"
+
+#: 只有 ``pass`` 结论可以成为 reuse 来源(PR #108 §13:只有 PASS 可以复用)。
+REUSE_SOURCE_VERDICT = "pass"
+
+#: How far back a reuse lookup scans. A workflow accumulates one fact pair per
+#: candidate rotation, so a few hundred entries covers any realistic history;
+#: the cap exists to bound a hot-path read, not to truncate real evidence.
+REUSE_LOOKUP_SCAN_LIMIT = 200
+
+#: Payload fields that must match for two facts to count as the same fact.
+#: ``created_at`` is excluded on purpose: it is stamped per write, so two
+#: writers of an otherwise identical decision must still be recognised as
+#: replays of each other.
+_COMPARED_FIELDS = (
+    "verifier", "decision", "from_candidate_sha", "to_candidate_sha",
+    "source_verdict", "source_verified_candidate_sha", "policy_version",
+    "policy_identity", "reason", "changed_paths", "reusable_scope",
+)
 
 
 def _store(db_path: Optional[Path] = None):
     from .state_store import get_state_store
 
     return get_state_store(db_path) if db_path is not None else get_state_store()
+
+
+def shas_identical(left, right):
+    """Strict revision equality (no ancestor semantics)."""
+    from .scheduler import shas_identical as _impl
+
+    return _impl(left, right)
+
+
+def decision_identity(workflow_id, from_candidate_sha, to_candidate_sha,
+                      verifier, policy_version, policy_identity=""):
+    from .reverification import decision_identity as _impl
+
+    return _impl(workflow_id, from_candidate_sha, to_candidate_sha,
+                 verifier, policy_version, policy_identity)
 
 
 def record_scheduler_decision(
@@ -116,6 +152,199 @@ def latest_frozen_candidate_sha(workflow_id, db_path=None):
     if not events:
         return ""
     return str((events[-1].get("payload") or {}).get("candidate_sha") or "")
+
+
+def list_reverification_decisions(workflow_id, db_path=None, limit=None):
+    """List reverification decision events in chronological order.
+
+    Bounded by ``limit`` (newest N) so a reader on the hot sweep path cannot
+    scan an unbounded event history. Omitted, the read is unbounded — use it
+    only where the whole episode history is genuinely the input.
+    """
+    kwargs = {}
+    if limit is not None:
+        # list_events applies LIMIT after ordering, so the newest N requires the
+        # descending direction to be requested explicitly.
+        kwargs = {"desc": True, "limit": int(limit)}
+        events = _store(db_path).list_events(
+            workflow_id=workflow_id,
+            event_type=EVENT_REVERIFICATION_DECISION,
+            **kwargs)
+        return list(reversed(events))
+    return _store(db_path).list_events(
+        workflow_id=workflow_id,
+        event_type=EVENT_REVERIFICATION_DECISION,
+    )
+
+
+def find_reuse_fact(workflow_id, verifier, candidate_sha, policy_identity=None,
+                    db_path=None):
+    """Return the newest reuse fact bound to exactly (verifier, candidate_sha).
+
+    ``None`` when there is none. The binding is exact on purpose: an A -> B
+    fact cannot satisfy candidate C (§23), and a fact for the `test` verifier
+    cannot satisfy `review`. Returning a fact for a different candidate is the
+    failure mode this whole module exists to prevent, so an unbound lookup
+    resolves to "no evidence" rather than to a near match.
+
+    ``policy_identity`` scopes the lookup to the *resolved* policy that
+    authorised the reuse, not to a version label. A version string does not
+    change when the policy does, so a version-keyed filter would keep honouring
+    reuse after the operator narrowed the scope or removed the block — making
+    narrowing cosmetic. With an empty expectation the lookup returns no fact:
+    "I do not know which policy applies" is not a reason to honour anything.
+    """
+    wanted_verifier = str(verifier or "").strip()
+    wanted_sha = str(candidate_sha or "").strip()
+    wanted_policy = str(policy_identity or "").strip()
+    if not wanted_verifier or not wanted_sha or not wanted_policy:
+        return None
+    # One workflow's verification rounds are few, but the read is on the sweep
+    # path and runs once per branch per sweep, so it is bounded anyway.
+    for event in reversed(list_reverification_decisions(
+            workflow_id, db_path=db_path, limit=REUSE_LOOKUP_SCAN_LIMIT)):
+        payload = event.get("payload") or {}
+        if str(payload.get("decision") or "") != "reuse":
+            continue
+        if str(payload.get("verifier") or "").strip() != wanted_verifier:
+            continue
+        if str(payload.get("to_candidate_sha") or "").strip() != wanted_sha:
+            continue
+        if str(payload.get("source_verdict") or "") != REUSE_SOURCE_VERDICT:
+            continue
+        if not str(payload.get("source_verified_candidate_sha") or "").strip():
+            continue
+        if str(payload.get("policy_identity") or "") != wanted_policy:
+            # The policy that authorised this reuse is no longer the declared
+            # one, so the fact is stale evidence rather than current evidence.
+            continue
+        return {"event_id": event.get("id"), "timestamp": event.get("timestamp"),
+                **payload}
+    return None
+
+
+def record_reverification_decision(workflow_id, decision, db_path=None):
+    """Record one reverification decision (immutable, idempotent per episode).
+
+    A reuse decision is a *derived* fact, never an edit of the source task
+    (§5): `test(A) PASS` keeps meaning "test verified A" forever. Reuse is
+    proven by what this fact carries — the source task id, the source verdict,
+    the SHA that source was actually bound to, the changed paths, and the
+    policy version that allowed the reuse.
+
+    Idempotency is keyed on `decision_identity`, which mixes workflow,
+    from/to candidate, verifier and policy version. A -> B and B -> A are
+    therefore different episodes, so a rotation back to an earlier candidate
+    re-evaluates instead of silently inheriting the first round's fact (§26).
+
+    The read-then-compare is not transactional, so two concurrent writers can
+    both insert. That is a real (inherited) limitation, and it is *not* made
+    harmless by the facts being identical: ``created_at`` is stamped per write,
+    so the rows differ. What keeps it safe is that a duplicate carries the same
+    decision identity and the same decision content, and every reader takes the
+    newest match — so a duplicate changes nothing except the row count.
+    Double *dispatch*, which would be the expensive failure, is blocked
+    separately by the stage latch and by ``plan_stage_dispatch`` lineage dedup.
+
+    Returns {"status": "created" | "exists" | "rejected", ...}. Rejection is
+    fail-closed: a reuse claim that does not carry a passed, candidate-bound
+    source is never persisted at all.
+    """
+    payload = dict(decision or {})
+    verdict = str(payload.get("decision") or "").strip()
+    verifier = str(payload.get("verifier") or "").strip()
+    from_sha = str(payload.get("from_candidate_sha") or "").strip()
+    to_sha = str(payload.get("to_candidate_sha") or "").strip()
+
+    if not verdict or not verifier or not to_sha or not from_sha:
+        # `from_candidate_sha` is required for BOTH decisions: a decision that
+        # does not name the candidate it replaces is not a reverification
+        # decision at all, and admitting it would let a "reuse" claim appear
+        # without a provable A -> B episode behind it.
+        return {"status": "rejected", "reason": "missing_identity_fields"}
+    if verdict == "reuse":
+        if from_sha == to_sha:
+            # A -> A is the same candidate, not a reverification episode (§17).
+            return {"status": "rejected", "reason": "same_candidate"}
+        if str(payload.get("source_verdict") or "") != REUSE_SOURCE_VERDICT:
+            return {"status": "rejected", "reason": "source_verdict_not_pass"}
+        bound = str(payload.get("source_verified_candidate_sha") or "").strip()
+        if not bound:
+            return {"status": "rejected", "reason": "source_not_bound"}
+        if not shas_identical(bound, from_sha):
+            return {"status": "rejected", "reason": "source_bound_to_other_candidate"}
+
+    policy_version = str(payload.get("policy_version") or "").strip()
+    policy_fp = str(payload.get("policy_identity") or "").strip()
+    # The identity is always recomputed from the fact's own fields, never taken
+    # from the payload. A caller-supplied identity that disagrees with the
+    # fields would file a decision under a key that does not describe it, and
+    # the dedup lookup would then treat two different decisions as one.
+    identity = decision_identity(
+        workflow_id, from_sha, to_sha, verifier, policy_version, policy_fp)
+    claimed = str(payload.get("decision_identity") or "").strip()
+    if claimed and claimed != identity:
+        return {
+            "status": "rejected",
+            "reason": "decision_identity_mismatch",
+            "expected": identity,
+        }
+    created_at = float(payload.get("created_at") or 0) or time.time()
+
+    body = {
+        "decision_identity": identity,
+        "verifier": verifier,
+        "decision": verdict,
+        "from_candidate_sha": from_sha,
+        "to_candidate_sha": to_sha,
+        "source_task_id": str(payload.get("source_task_id") or ""),
+        "source_verdict": str(payload.get("source_verdict") or ""),
+        "source_verified_candidate_sha": str(
+            payload.get("source_verified_candidate_sha") or ""),
+        "changed_paths": [str(p) for p in (payload.get("changed_paths") or [])],
+        "changed_entries": [dict(e) for e in (payload.get("changed_entries") or [])
+                            if isinstance(e, dict)],
+        # The authorising scope travels with the fact. Without it the ledger
+        # records *that* a reuse happened and *which* files changed, but not
+        # *which* declared scope permitted it — so the decision could not be
+        # explained from the fact alone, which is the whole point of persisting
+        # it as an immutable, self-describing record.
+        "reusable_scope": [str(p) for p in
+                           (payload.get("reusable_scope") or [])],
+        "out_of_scope_paths": [str(p) for p in
+                               (payload.get("out_of_scope_paths") or [])],
+        "policy": payload.get("policy") or {},
+        "policy_version": policy_version,
+        "policy_identity": policy_fp,
+        "reason": str(payload.get("reason") or ""),
+        "created_at": created_at,
+    }
+
+    store = _store(db_path)
+    for event in list_reverification_decisions(
+            workflow_id, db_path=db_path, limit=REUSE_LOOKUP_SCAN_LIMIT):
+        stored = event.get("payload") or {}
+        if str(stored.get("decision_identity") or "") == identity:
+            # Same identity but different content means the caller handed us a
+            # decision that does not match the identity it claims. Silently
+            # treating it as a replay would file a v2-strict decision under a
+            # v1 identity, hiding the policy change from the audit trail.
+            if any(stored.get(k) != body[k] for k in _COMPARED_FIELDS):
+                return {
+                    "status": "rejected",
+                    "reason": "identity_content_mismatch",
+                    "event": event,
+                }
+            return {"status": "exists", "event": event}
+    event = store.record_event(
+        EVENT_REVERIFICATION_DECISION,
+        body,
+        workflow_id=workflow_id,
+        node_id=verifier,
+        source=SCHEDULER_EVENT_SOURCE,
+        timestamp=created_at,
+    )
+    return {"status": "created", "event": event}
 
 
 def record_join_gate_verdict(
