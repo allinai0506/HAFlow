@@ -1394,4 +1394,6 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
   重复行（不影响判定）；复用单跳，不递归。
 - 关联实现：`herdr/reverification.py`、`herdr/scheduler.py`、
   `herdr/scheduler_facts.py`、`services/herdr-controller.py`、`bin/herdr-task`。
-- 教训：§94。
+- 教训：§94。归档走查：`docs/walkthroughs/20260928-pr108-selective-reverification.md`
+  （含 entry-gate / S5 验证 / S6 评审三份门禁工件的长期副本，原件在 `.omc/` 且被
+  gitignore，不随仓库留存）。

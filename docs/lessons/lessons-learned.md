@@ -4239,7 +4239,7 @@ PR #107（Critical-Path Scheduler v1）在五轮评审中反复暴露同一类�
 
 ### 相关文档 / 关联证据
 
-- 走查：`docs/walkthroughs/PR-107-critical-path-scheduler-v1.md`
+- 走查：`docs/walkthroughs/20260928-pr108-selective-reverification.md`
 - 既有同族教训：§90（fix-loop 证据门禁与候选身份）、§88（隔离域不能用自身执行身份）。
 
 ## 94. 复用是最弱的一环：能被证明的只有「已声明」，策略身份必须是指纹不是版本号
@@ -4306,8 +4306,8 @@ PR #108（Selective Reverification v1）让候选轮换时可以跳过重复验�
 
 ### 相关文档 / 关联证据
 
-- S5 证据：`.omc/verify-ses_f1955d584ffebwerHsuyyt1HeZ.md`（含两处被评审推翻后重写的
-  错误陈述，是「工件也会造假」的实例）
-- S6 评审：`.omc/review-ses_f1955d584ffebwerHsuyyt1HeZ.md`（三轮独立对抗评审）
+- S5 证据与 S6 评审：已归档至
+  `docs/walkthroughs/20260928-pr108-selective-reverification.md`
+  （含两处被评审推翻后重写的错误陈述，是「工件也会造假」的实例）
 - 既有同族教训：§93（身份三字段不可顶替）、§91（测试会写穿实盘注册表）、
   §92（只读不等于无副作用）。

@@ -26,3 +26,4 @@
    - [`20260913-phase5-universal-studio-ui.md`](file:///Users/user/HAFlow/docs/walkthroughs/20260913-phase5-universal-studio-ui.md)：通用底座阶段五：通用人机对等协同工作舱 (Universal Studio UI)。
    - [`20260913-universal-runtime-e2e-dogfooding.md`](file:///Users/user/HAFlow/docs/walkthroughs/20260913-universal-runtime-e2e-dogfooding.md)：通用底座全链路端到端集成实操与自动化演练报告。
    - [`20260913-checkpoint-store-v2-sqlite.md`](file:///Users/user/HAFlow/docs/walkthroughs/20260913-checkpoint-store-v2-sqlite.md)：Checkpoint Store V2：嵌入式 SQLite 状态引擎、单事务原子快照、图谱谱系追踪与时间旅行分叉。
+   - [`20260928-pr108-selective-reverification.md`](file:///Users/user/HAFlow/docs/walkthroughs/20260928-pr108-selective-reverification.md)：Selective Reverification v1 —— 候选轮换后按可证明证据选择性跳过重复验证；含四轮评审闭环与变异验证记录。
