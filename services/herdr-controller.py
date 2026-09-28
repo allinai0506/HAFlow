@@ -58,6 +58,18 @@ except Exception:
     direct_dispatch_planner = None
 
 try:
+    from herdr import scheduler as scheduler_core
+    from herdr import scheduler_facts as scheduler_facts_store
+    from herdr import delivery_record as delivery_record_mod
+    from herdr import workflow_docs as workflow_docs_mod
+except Exception:
+    # Scheduler v1 可选:缺失时退回原推进语义,绝不阻塞控制面。
+    scheduler_core = None
+    scheduler_facts_store = None
+    delivery_record_mod = None
+    workflow_docs_mod = None
+
+try:
     from herdr.git_coordination import ensure_no_git_processes
 except Exception:
     ensure_no_git_processes = None
@@ -2167,6 +2179,201 @@ def _dispatch_candidate_ready(project_root, base_branch, specs):
     return True
 
 
+# ============================================================
+# Critical-Path Scheduler v1:候选冻结 + 汇聚门禁 (HAFlow PR #107)
+#
+# - _scheduler_expected_candidate_sha:delivery note 优先,分支 HEAD 兜底;
+#   失败一律返回 ""(fail-open 原语义,门禁侧 fail-closed)。
+# - _scheduler_freeze_candidate:implementation 完成后冻结候选(幂等)。
+# - _scheduler_join_gate_allows:join 语义节点的确定性放行判定。
+# ============================================================
+
+def _scheduler_expected_candidate_sha(workflow_id, project_root, dep_ids, candidate_branch):
+    """解析期望候选 SHA:delivery note 优先,分支 HEAD 兜底。"""
+    if (
+        scheduler_core is None
+        or delivery_record_mod is None
+        or workflow_docs_mod is None
+    ):
+        return ""
+    try:
+        notes = workflow_docs_mod.load_notes(workflow_id)
+        effective = delivery_record_mod.select_effective_delivery(
+            notes, workflow_id=workflow_id
+        )
+    except Exception:
+        effective = None
+    if effective is not None:
+        try:
+            sha = delivery_record_mod._body_value(effective, "candidate_sha")
+        except Exception:
+            sha = ""
+        sha = str(sha or effective.get("candidate_sha") or "").strip()
+        if sha:
+            return sha
+    try:
+        return scheduler_core.resolve_candidate_sha_for_branch(
+            project_root, candidate_branch
+        )
+    except Exception:
+        return ""
+
+
+def _scheduler_freeze_candidate(workflow_id, project_root, source_node, dep_ids=None):
+    """Freeze the candidate SHA and ensure a delivery record exists (Plan A).
+
+    Two distinct facts, two distinct lifecycles (do not merge them):
+    - candidate_frozen (this function): "which revision this verification
+      round targets". Owned by the scheduler; carries no verifier identity.
+    - delivery record (written later, by review-pass/wrapup with the REAL
+      verifier task ids): "which real tasks verified and formed the".
+
+    Freezing therefore records only the frozen-candidate fact. It never
+    invents review_task/test_gate ids: delivery_record treats those as part
+    of an immutable fingerprint, so a placeholder would both conflict with
+    the real ids later and misrepresent delivery auditability.
+
+    Returns the frozen SHA, or "" when unprovable (join side fail-closed).
+    """
+    if scheduler_core is None or scheduler_facts_store is None:
+        return ""
+    candidate_branch = None
+    try:
+        if direct_dispatch_planner is not None:
+            candidate_branch = direct_dispatch_planner.candidate_branch_for_node(
+                load_tasks(), workflow_id, source_node, dep_ids or []
+            )
+    except Exception:
+        candidate_branch = None
+    sha = _scheduler_expected_candidate_sha(
+        workflow_id, project_root, dep_ids or [], candidate_branch
+    )
+    if not sha:
+        return ""
+    try:
+        scheduler_facts_store.record_candidate_frozen(
+            workflow_id, sha,
+            source_node=source_node,
+            delivery_branch=candidate_branch or "",
+        )
+    except Exception as exc:
+        print(f"[SCHEDULER FREEZE WARN] workflow={workflow_id}: {exc}")
+        return ""
+    return sha
+
+
+def _scheduler_frozen_candidate_identity(workflow_id, project_ctx, dep_ids=None):
+    """The frozen candidate identity a fallback dispatch must carry verbatim.
+
+    Direct dispatch binds the candidate through ``--candidate-sha`` and
+    ``--onto``. When it falls back to the coordinator, that binding would
+    otherwise be lost and the coordinator would re-derive a revision on its
+    own, giving one scheduler decision two execution semantics.
+
+    This returns the frozen fact only — never a freshly resolved SHA — so the
+    fallback path cannot silently substitute a different candidate. Returns
+    ("", "") when the scheduler never froze one (legacy workflows, and any
+    resolution error), which leaves the legacy coordinator prompt unchanged.
+    """
+    if scheduler_facts_store is None:
+        return "", ""
+    try:
+        events = scheduler_facts_store.list_candidate_frozen_events(workflow_id)
+    except Exception as exc:
+        print(f"[SCHEDULER FROZEN IDENTITY WARN] workflow={workflow_id}: {exc}")
+        return "", ""
+    if not events:
+        return "", ""
+    payload = (events[-1].get("payload") or {})
+    return (
+        str(payload.get("candidate_sha") or "").strip(),
+        str(payload.get("delivery_branch") or "").strip(),
+    )
+
+
+def _scheduler_join_gate_allows(workflow_id, node, tasks):
+    """汇聚门禁放行判定:非 join 节点一律放行(保持原语义)。
+
+    join 节点 = node_type 为 gate 且 depends_on >= 2 的节点。
+    判定失败/异常一律拒绝(Fail-Closed)。
+    """
+    node = node or {}
+    deps = list(node.get("depends_on") or [])
+    node_type = str(node.get("node_type") or "")
+    # Join-before-dispatch applies to two shapes:
+    # 1. explicit join nodes (node_type=gate with >=2 dependencies);
+    # 2. scheduler-engaged fan-in agent nodes with >=2 dependencies
+    #    (e.g. wrapup on [test, review]): once the scheduler froze a
+    #    candidate for a workflow, every multi-dependency dispatch in that
+    #    workflow must prove same-revision verification first.
+    # Workflows the scheduler never engaged keep legacy passthrough.
+    is_join_shape = (node_type == "gate" and len(deps) >= 2)
+    engaged = False
+    if not is_join_shape and len(deps) >= 2:
+        if scheduler_facts_store is None:
+            # Scheduler unavailable, so no candidate identity can be enforced
+            # on a fan-in node. Refuse rather than wave the node through.
+            print(
+                f"[JOIN GATE REFUSED] workflow={workflow_id} "
+                f"gate={node.get('id')} reason=scheduler_unavailable"
+            )
+            return False
+        try:
+            engaged = bool(
+                scheduler_facts_store.latest_frozen_candidate_sha(workflow_id)
+            )
+        except Exception as exc:
+            # "lookup failed" is not "never frozen". Treating the error as
+            # un-engaged would classify a scheduler-managed workflow as legacy
+            # and let a fan-in node (e.g. wrapup on [test, review]) bypass the
+            # gate exactly when the identity of the candidate is unknown.
+            # Fail closed (AGENTS.md §4.4); the next sweep retries.
+            print(
+                f"[JOIN GATE REFUSED] workflow={workflow_id} "
+                f"gate={node.get('id')} reason=frozen_lookup_failed: {exc}"
+            )
+            return False
+    if not (is_join_shape or engaged):
+        return True
+    if scheduler_core is None:
+        return False
+    expected = ""
+    if scheduler_facts_store is not None:
+        try:
+            expected = scheduler_facts_store.latest_frozen_candidate_sha(workflow_id)
+        except Exception as exc:
+            # Cannot know which candidate must be matched: refuse. Returning a
+            # blank expectation would let the gate compare against nothing.
+            print(
+                f"[JOIN GATE REFUSED] workflow={workflow_id} "
+                f"gate={node.get('id')} reason=frozen_lookup_failed: {exc}"
+            )
+            return False
+    try:
+        passed, reason, details = scheduler_core.evaluate_join_gate(
+            node, tasks, workflow_id, expected
+        )
+    except Exception as exc:
+        print(
+            f"[JOIN GATE ERROR] workflow={workflow_id} "
+            f"gate={node.get('id')}: {exc}"
+        )
+        return False
+    if scheduler_facts_store is not None:
+        try:
+            scheduler_facts_store.record_join_gate_verdict(
+                workflow_id, str(node.get("id") or ""), passed, reason, details
+            )
+        except Exception as exc:
+            print(f"[JOIN GATE AUDIT WARN] workflow={workflow_id}: {exc}")
+    if not passed:
+        print(
+            f"[JOIN GATE REFUSED] workflow={workflow_id} "
+            f"gate={node.get('id')} reason={reason}"
+        )
+    return passed
+
+
 def try_direct_stage_advance(item):
     """常规推进会:按节点模板规则化直接派发,失败回落总指挥。
 
@@ -2222,6 +2429,21 @@ def try_direct_stage_advance(item):
         )
         return False
 
+    # Scheduler v1 汇聚门禁:join 判定先于一切闩与派发。
+    # - 非 join 形状:直接放行,走原语义(零行为变化);
+    # - join 未满足:返回 True(事件已处理)但不写任何闩,下轮 sweep 重估;
+    # - 判定异常:Fail-Closed,回落总指挥(原 fallback 语义)。
+    try:
+        join_node = node if isinstance(node, dict) else {"id": ready_id}
+        if not _scheduler_join_gate_allows(workflow_id, join_node, load_tasks()):
+            return True
+    except Exception as exc:
+        print(
+            f"[JOIN GATE ERROR] workflow={workflow_id} "
+            f"node={ready_id}: {exc}"
+        )
+        return False
+
     gate_task = node_is_gate(workflow_id, ready_id)
 
     docs_block = shared_docs_block(
@@ -2236,6 +2458,9 @@ def try_direct_stage_advance(item):
     candidate_branch = direct_dispatch_planner.candidate_branch_for_node(
         load_tasks(), workflow_id, ready_id, dep_ids
     )
+    candidate_sha = _scheduler_expected_candidate_sha(
+        workflow_id, project_root, dep_ids, candidate_branch
+    )
     plan = direct_dispatch_planner.plan_stage_dispatch(
         workflow_id,
         node,
@@ -2244,6 +2469,7 @@ def try_direct_stage_advance(item):
         context_branch=candidate_branch,
         gate_contract=gate_task,
         docs_block=docs_block,
+        candidate_sha=candidate_sha,
     )
 
     if gate_task and plan.get("mode") == "dispatch":
@@ -2308,6 +2534,9 @@ def try_direct_stage_advance(item):
 
         if spec.get("onto_branch"):
             cmd += ["--onto", spec["onto_branch"]]
+
+        if spec.get("candidate_sha"):
+            cmd += ["--candidate-sha", spec["candidate_sha"]]
 
         for line in spec["acceptance"]:
             cmd += ["--acceptance", line]
@@ -2556,11 +2785,59 @@ def check_workflow_stage_advance(workflow_id):
             if attention_blocks_retry(f"{workflow_id}:stage_advance:{ready_id}"):
                 continue
 
-            if not mark_stage_advance_queued(workflow_id, ready_id):
-                continue
-
             deps = ready_node.get("depends_on", [])
             source_stage = deps[-1] if deps else "start"
+
+            # Scheduler v1:join 判定先于 queued 闩。
+            # join 未满足 -> continue(无闩),下轮 sweep 重估,修正证据后自动恢复。
+            # implementation 完成 -> 冻结候选 SHA(+补 delivery note)供下游绑定。
+            try:
+                if not _scheduler_join_gate_allows(
+                    workflow_id, ready_node, load_tasks()
+                ):
+                    continue
+                completed_now = {
+                    n["id"]
+                    for n in workflow_cfg.get("nodes", [])
+                    if is_node_complete(workflow_id, n["id"])
+                }
+                if "implementation" in completed_now:
+                    project_ctx = project_for_workflow(workflow_id) or {}
+                    frozen_sha = _scheduler_freeze_candidate(
+                        workflow_id,
+                        project_ctx.get("project_root") or "",
+                        "implementation",
+                        list(deps),
+                    )
+                    if not frozen_sha and project_ctx.get("project_root"):
+                        # No candidate identity on a workflow that has a real
+                        # project -> do not latch and do not dispatch.
+                        # Verifiers would either be refused at preflight (no
+                        # identity to prove) or run against whatever revision
+                        # happens to be checked out, and the stage latch would
+                        # suppress the natural retry once the branch/SHA
+                        # becomes resolvable. Skipping the latch keeps the node
+                        # re-evaluated on the next sweep.
+                        #
+                        # A workflow with no project_root has no repository to
+                        # resolve a candidate from at all; that is not a
+                        # transient identity gap, so it keeps legacy behaviour
+                        # rather than deadlocking forever.
+                        print(
+                            f"[SCHEDULER FREEZE DEFERRED] workflow={workflow_id} "
+                            f"node={ready_id} no candidate identity resolvable; "
+                            "stage not latched, dispatch deferred to next sweep"
+                        )
+                        continue
+            except Exception as exc:
+                print(
+                    f"[SCHEDULER SWEEP WARN] workflow={workflow_id} "
+                    f"node={ready_id}: {exc}"
+                )
+                continue
+
+            if not mark_stage_advance_queued(workflow_id, ready_id):
+                continue
 
             coordinator_queue.put(
                 {
@@ -4320,6 +4597,35 @@ Node Agent 策略
                 + "\n只需补派缺失/被作废的 Task。\n"
             )
 
+        # Candidate identity for the coordinator path. Direct dispatch binds
+        # the frozen candidate through --candidate-sha/--onto; when it falls
+        # back here that binding must be passed through verbatim, otherwise
+        # the coordinator re-derives a revision and the same scheduler
+        # decision gets two execution semantics.
+        frozen_sha, frozen_branch = _scheduler_frozen_candidate_identity(
+            workflow_id, project_ctx, (node or {}).get("depends_on") or [],
+        )
+        candidate_flags = ""
+        candidate_block = ""
+        if frozen_sha:
+            onto_line = f"   --onto {frozen_branch}\n" if frozen_branch else ""
+            candidate_flags = (
+                f"{onto_line}   --candidate-sha {frozen_sha}"
+            )
+            candidate_block = f"""
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+候选身份（调度器已冻结，必须原样透传）
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+candidate_sha: {frozen_sha}
+candidate_branch: {frozen_branch or '（未记录）'}
+
+创建 Task 时必须原样携带以上候选身份，
+不得重新推断当前分支或版本。
+验收节点（test/review）必须验证该冻结版本；
+版本不符时门禁 fail-closed 拒绝合并。
+""".strip()
+
         try:
             while True:
                 # Re-validate on every wait iteration: the workflow may be
@@ -4446,6 +4752,7 @@ task_type:
    --workflow-id {workflow_id}
    --node {next_stage}
    --source {project_root}
+{candidate_flags}
 
 6. 默认使用本节点 policy：
 
@@ -4466,6 +4773,8 @@ task_type:
    也可以创建多个并行 Task。
 
    数量由实际工作决定。
+
+{candidate_block}
 
 9. 当前节点所有必要 Task 派发完成后，
    结束当前回合。
