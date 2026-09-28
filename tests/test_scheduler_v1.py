@@ -189,6 +189,33 @@ class TestJoinGate:
         assert passed is False
         assert reason == sched.JOIN_MISSING_CANDIDATE
 
+    def test_join_gate_refuses_claim_evidence_mismatch(self):
+        """P1 回归:派发声明 A 但 clone 基线 B -> 拒绝汇聚(证据优先)。"""
+        tasks = [
+            _task("t-test", WF, "test", sha="sha-A"),
+            _task("t-review", WF, "review", sha="sha-A"),
+        ]
+        tasks[1]["baseline_commit"] = "sha-B"
+        passed, reason, details = sched.evaluate_join_gate(
+            self.GATE, tasks, WF, expected_candidate_sha="sha-A"
+        )
+        assert passed is False
+        assert reason == sched.JOIN_EVIDENCE_MISMATCH
+        assert details["evidence_mismatch"]["review"][0]["evidence"] == "sha-B"
+
+    def test_join_gate_accepts_matching_claim_and_evidence(self):
+        tasks = [
+            _task("t-test", WF, "test", sha="sha-A"),
+            _task("t-review", WF, "review", sha="sha-A"),
+        ]
+        for task in tasks:
+            task["baseline_commit"] = "sha-A"
+        passed, reason, _details = sched.evaluate_join_gate(
+            self.GATE, tasks, WF, expected_candidate_sha="sha-A"
+        )
+        assert passed is True
+        assert reason == sched.JOIN_SATISFIED
+
     def test_superseded_tasks_ignored(self):
         """被作废任务不污染汇聚判定。"""
         stale = _task("t-test-old", WF, "test", status="superseded",
@@ -207,18 +234,38 @@ class TestJoinGate:
 
 
 class TestCandidateBinding:
-    def test_extract_prefers_candidate_sha(self):
-        task = {"candidate_sha": "sha-X", "baseline_commit": "sha-Y"}
-        assert sched.extract_task_candidate_sha(task) == "sha-X"
+    def test_evidence_wins_over_claim(self):
+        """P1 回归:claim=A 但 clone 基线 B 时,证据(B)必须胜出。"""
+        task = {"candidate_sha": "sha-A", "baseline_commit": "sha-B"}
+        assert sched.extract_task_candidate_claim(task) == "sha-A"
+        assert sched.extract_task_verified_sha(task) == "sha-B"
+        assert sched.extract_task_candidate_sha(task) == "sha-B"
 
-    def test_extract_falls_back_to_baseline_commit(self):
+    def test_claim_evidence_consistency(self):
+        ok, claim, evidence = sched.task_claim_evidence_consistent(
+            {"candidate_sha": "sha-A", "baseline_commit": "sha-A"})
+        assert (ok, claim, evidence) == (True, "sha-A", "sha-A")
+        ok, claim, evidence = sched.task_claim_evidence_consistent(
+            {"candidate_sha": "sha-A", "baseline_commit": "sha-B"})
+        assert (ok, claim, evidence) == (False, "sha-A", "sha-B")
+        # 缺证据(旧任务)不算冲突,由调用方按 legacy 语义处理
+        ok, _claim, evidence = sched.task_claim_evidence_consistent(
+            {"candidate_sha": "sha-A"})
+        assert ok is True and evidence == ""
+
+    def test_legacy_task_falls_back_to_claim(self):
+        assert sched.extract_task_candidate_sha({"candidate_sha": "sha-X"}) == "sha-X"
         assert sched.extract_task_candidate_sha({"baseline_commit": "sha-Y"}) == "sha-Y"
 
-    def test_revision_matches(self):
-        assert sched.candidate_revision_matches({"candidate_sha": "sha-A"}, "sha-A")
-        assert not sched.candidate_revision_matches({"candidate_sha": "sha-A"}, "sha-B")
-        assert not sched.candidate_revision_matches({"candidate_sha": "sha-A"}, "")
+    def test_revision_matches_uses_evidence(self):
+        same = {"candidate_sha": "sha-A", "baseline_commit": "sha-A"}
+        assert sched.candidate_revision_matches(same, "sha-A")
+        assert not sched.candidate_revision_matches(same, "sha-B")
+        assert not sched.candidate_revision_matches(same, "")
         assert not sched.candidate_revision_matches({}, "sha-A")
+        # 声明 A 但实际基线 B:不得算作验证了 A
+        assert not sched.candidate_revision_matches(
+            {"candidate_sha": "sha-A", "baseline_commit": "sha-B"}, "sha-A")
 
     def test_frozen_for_nodes_requires_all_bound(self):
         tasks = [

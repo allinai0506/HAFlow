@@ -32,6 +32,7 @@ JOIN_BLOCKED = "join_blocked"
 JOIN_STALE = "join_stale"
 JOIN_CANDIDATE_MISMATCH = "join_candidate_mismatch"
 JOIN_MISSING_CANDIDATE = "join_missing_candidate"
+JOIN_EVIDENCE_MISMATCH = "join_evidence_mismatch"
 
 
 def normalize_node_id(value: Any) -> str:
@@ -149,11 +150,28 @@ def node_verdict(tasks_for_node):
     return verdict
 
 
-def extract_task_candidate_sha(task):
-    """Extract the candidate_sha bound to a task record."""
+def extract_task_candidate_claim(task):
+    """The candidate revision the scheduler TOLD this task to verify (claim).
+
+    A claim alone proves nothing: it is what dispatch injected, not what the
+    agent actually verified. Gate decisions must read evidence instead.
+    """
     if not isinstance(task, dict):
         return ""
-    for key in ("candidate_sha", "baseline_commit", "baseline_sha"):
+    value = task.get("candidate_sha")
+    return str(value).strip() if value not in (None, "") else ""
+
+
+def extract_task_verified_sha(task):
+    """The revision the clone was ACTUALLY based on (objective evidence).
+
+    ``baseline_commit`` is produced by the worker from the real clone HEAD;
+    it cannot be forged by a prompt injection or a stale dispatch argument.
+    This is the value a join gate must compare.
+    """
+    if not isinstance(task, dict):
+        return ""
+    for key in ("baseline_commit", "baseline_sha"):
         value = task.get(key)
         if value not in (None, ""):
             text = str(value).strip()
@@ -162,12 +180,36 @@ def extract_task_candidate_sha(task):
     return ""
 
 
+def extract_task_candidate_sha(task):
+    """Verified revision, falling back to the claim when evidence is absent.
+
+    Evidence first: a task whose clone baseline is known reports what the
+    agent truly verified. Legacy tasks without baseline_commit fall back to
+    the dispatch claim so pre-Scheduler workflows keep their old meaning.
+    """
+    return extract_task_verified_sha(task) or extract_task_candidate_claim(task)
+
+
 def candidate_revision_matches(task, expected_sha):
-    """Whether the task is bound to the expected candidate (empty never matches)."""
+    """Whether the task VERIFIED the expected candidate (empty never matches)."""
     expected = str(expected_sha or "").strip()
     if not expected:
         return False
-    return extract_task_candidate_sha(task) == expected
+    return extract_task_verified_sha(task) == expected
+
+
+def task_claim_evidence_consistent(task):
+    """Whether a task's dispatch claim matches its verification evidence.
+
+    Returns (ok, claim, evidence). Absent evidence is not a mismatch here:
+    legacy tasks predate the field and are handled by the caller via
+    expect_evidence=False.
+    """
+    claim = extract_task_candidate_claim(task)
+    evidence = extract_task_verified_sha(task)
+    if not evidence:
+        return True, claim, evidence
+    return claim == evidence, claim, evidence
 
 
 def evaluate_join_gate(gate_node, tasks, workflow_id, expected_candidate_sha=""):
@@ -193,10 +235,23 @@ def evaluate_join_gate(gate_node, tasks, workflow_id, expected_candidate_sha="")
             {extract_task_candidate_sha(t) for t in dep_tasks
              if extract_task_candidate_sha(t)}
         )
+        # Claim/evidence split: the dispatch claim must match the clone
+        # baseline the worker actually recorded, otherwise the task proves
+        # nothing about the claimed revision.
+        inconsistent = []
+        for task in dep_tasks:
+            ok, claim, evidence = task_claim_evidence_consistent(task)
+            if not ok:
+                inconsistent.append({
+                    "task_id": str(task.get("task_id") or ""),
+                    "claim": claim,
+                    "evidence": evidence,
+                })
         branch_states[dep] = {
             "complete": complete,
             "verdict": verdict,
             "candidate_shas": shas,
+            "claim_evidence_mismatch": inconsistent,
         }
     details["branches"] = branch_states
 
@@ -204,6 +259,14 @@ def evaluate_join_gate(gate_node, tasks, workflow_id, expected_candidate_sha="")
     if incomplete:
         details["incomplete"] = incomplete
         return False, JOIN_WAITING, details
+
+    mismatched = {
+        d: st["claim_evidence_mismatch"]
+        for d, st in branch_states.items() if st["claim_evidence_mismatch"]
+    }
+    if mismatched:
+        details["evidence_mismatch"] = mismatched
+        return False, JOIN_EVIDENCE_MISMATCH, details
 
     blocked = sorted(d for d, st in branch_states.items() if st["verdict"] == "blocked")
     if blocked:
@@ -268,10 +331,16 @@ def candidate_frozen_for_nodes(tasks, workflow_id, node_ids, expected_candidate_
             if extract_task_candidate_sha(t)
             and not candidate_revision_matches(t, expected)
         })
-        node_ok = bool(bound) and not foreign
+        inconsistent = [
+            str(t.get("task_id") or "")
+            for t in dep_tasks
+            if not task_claim_evidence_consistent(t)[0]
+        ]
+        node_ok = bool(bound) and not foreign and not inconsistent
         details["nodes"][nid] = {
             "bound_tasks": [str(t.get("task_id") or "") for t in bound],
             "foreign_candidate_shas": foreign,
+            "claim_evidence_mismatch": sorted(inconsistent),
             "ok": node_ok,
         }
         if not node_ok:

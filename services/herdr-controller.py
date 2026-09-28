@@ -2220,7 +2220,18 @@ def _scheduler_expected_candidate_sha(workflow_id, project_root, dep_ids, candid
 
 
 def _scheduler_freeze_candidate(workflow_id, project_root, source_node, dep_ids=None):
-    """冻结候选 SHA(幂等):delivery note 优先,分支 HEAD 兜底。"""
+    """Freeze the candidate SHA and ensure a delivery record exists (Plan A).
+
+    Scheduler v1 contract: test/review launch requires a delivery note
+    (FR-6.2 fail-closed). The freeze therefore does two things atomically
+    in intent:
+    1. resolve the expected SHA (delivery note first, branch HEAD fallback);
+    2. when no delivery note exists yet, record a provisional delivery
+       note naming this frozen SHA, so dispatch and launch share ONE rule.
+    Provisional notes use deterministic placeholder review/test task ids
+    that the wrapup delivery finalizes; idempotent via record_delivery_note.
+    Returns the frozen SHA, or "" when unprovable (join side fail-closed).
+    """
     if scheduler_core is None or scheduler_facts_store is None:
         return ""
     candidate_branch = None
@@ -2244,8 +2255,77 @@ def _scheduler_freeze_candidate(workflow_id, project_root, source_node, dep_ids=
         )
     except Exception as exc:
         print(f"[SCHEDULER FREEZE WARN] workflow={workflow_id}: {exc}")
+    try:
+        _scheduler_ensure_delivery_note(
+            workflow_id, candidate_branch or "", sha, source_node
+        )
+    except Exception as exc:
+        print(f"[SCHEDULER DELIVERY WARN] workflow={workflow_id}: {exc}")
+        return ""
     return sha
 
+
+def _scheduler_ensure_delivery_note(workflow_id, delivery_branch, sha, source_node):
+    """Ensure a delivery note names the frozen SHA (idempotent).
+
+    Reuses bin/herdr-task record_delivery_note so the scheduler never owns
+    a second delivery-truth. Raises on failure: without a note, test/review
+    launch would be refused by FR-6.2, so freeze must report unprovable.
+    """
+    from herdr import delivery_record as _dr
+    from herdr import workflow_docs as _wd
+    try:
+        notes = _wd.load_notes(workflow_id)
+    except Exception as exc:
+        raise RuntimeError(f"delivery notes unreadable: {exc}")
+    try:
+        effective = _dr.select_effective_delivery(notes, workflow_id=workflow_id)
+    except Exception:
+        effective = None
+    supersedes = ""
+    if effective is not None:
+        try:
+            current = _dr._body_value(effective, "candidate_sha")
+        except Exception:
+            current = ""
+        current = str(current or effective.get("candidate_sha") or "").strip()
+        if current == sha:
+            return {"status": "exists"}
+        # Candidate rotated (e.g. fix-loop rework): replace the prior
+        # delivery identity explicitly instead of stalling. record_delivery_note
+        # validates the replacement edge and rejects unknown targets.
+        try:
+            supersedes = _dr.candidate_identity(effective)
+        except Exception:
+            supersedes = ""
+        if not supersedes:
+            raise RuntimeError(
+                f"delivery note names {current or '<empty>'} but freeze "
+                f"resolved {sha}; no explicit supersede identity available"
+            )
+    # bin/herdr-task 无 .py 扩展名,必须显式给 SourceFileLoader,
+    # 否则 spec_from_file_location 拿不到 loader。
+    import importlib.machinery as _ilm
+    import importlib.util as _ilu
+    import pathlib as _pl
+    task_bin = _pl.Path(TASK_MANAGER)
+    if not task_bin.exists():
+        task_bin = _pl.Path(__file__).resolve().parent.parent / "bin" / "herdr-task"
+    loader = _ilm.SourceFileLoader("herdr_task_delivery", str(task_bin))
+    spec = _ilu.spec_from_loader("herdr_task_delivery", loader)
+    module = _ilu.module_from_spec(spec)
+    loader.exec_module(module)
+    # Provisional verifier task ids MUST be unique per candidate: they become
+    # delivery aliases, and two candidates sharing an alias makes delivery
+    # selection ambiguous (fail-closed). Suffix the short SHA.
+    short = sha[:12]
+    provisional = f"{workflow_id}-{source_node or 'implementation'}-{short}"
+    return module.record_delivery_note(
+        workflow_id, delivery_branch or source_node, sha,
+        f"{provisional}-review", f"{provisional}-test",
+        base="", node=source_node or "implementation", agent="scheduler-v1",
+        supersedes=supersedes or None,
+    )
 
 def _scheduler_join_gate_allows(workflow_id, node, tasks):
     """汇聚门禁放行判定:非 join 节点一律放行(保持原语义)。
@@ -2254,9 +2334,25 @@ def _scheduler_join_gate_allows(workflow_id, node, tasks):
     判定失败/异常一律拒绝(Fail-Closed)。
     """
     node = node or {}
-    is_gate = str(node.get("node_type") or "") == "gate"
     deps = list(node.get("depends_on") or [])
-    if not (is_gate and len(deps) >= 2):
+    node_type = str(node.get("node_type") or "")
+    # Join-before-dispatch applies to two shapes:
+    # 1. explicit join nodes (node_type=gate with >=2 dependencies);
+    # 2. scheduler-engaged fan-in agent nodes with >=2 dependencies
+    #    (e.g. wrapup on [test, review]): once the scheduler froze a
+    #    candidate for a workflow, every multi-dependency dispatch in that
+    #    workflow must prove same-revision verification first.
+    # Workflows the scheduler never engaged keep legacy passthrough.
+    is_join_shape = (node_type == "gate" and len(deps) >= 2)
+    engaged = False
+    if not is_join_shape and len(deps) >= 2 and scheduler_facts_store is not None:
+        try:
+            engaged = bool(
+                scheduler_facts_store.latest_frozen_candidate_sha(workflow_id)
+            )
+        except Exception:
+            engaged = False
+    if not (is_join_shape or engaged):
         return True
     if scheduler_core is None:
         return False
@@ -2346,12 +2442,13 @@ def try_direct_stage_advance(item):
         )
         return False
 
-    # Scheduler v1 汇聚门禁:join 节点未满足确定性条件时拒绝派发。
-    # 普通节点与异常一律走原语义/拒绝,绝不静默放行。
+    # Scheduler v1 汇聚门禁:join 判定先于一切闩与派发。
+    # - 非 join 形状:直接放行,走原语义(零行为变化);
+    # - join 未满足:返回 True(事件已处理)但不写任何闩,下轮 sweep 重估;
+    # - 判定异常:Fail-Closed,回落总指挥(原 fallback 语义)。
     try:
         join_node = node if isinstance(node, dict) else {"id": ready_id}
         if not _scheduler_join_gate_allows(workflow_id, join_node, load_tasks()):
-            mark_stage_advance_notified(workflow_id, ready_id)
             return True
     except Exception as exc:
         print(
@@ -2701,15 +2798,12 @@ def check_workflow_stage_advance(workflow_id):
             if attention_blocks_retry(f"{workflow_id}:stage_advance:{ready_id}"):
                 continue
 
-            if not mark_stage_advance_queued(workflow_id, ready_id):
-                continue
-
             deps = ready_node.get("depends_on", [])
             source_stage = deps[-1] if deps else "start"
 
-            # Scheduler v1:ready 节点的 join 门禁 + 候选冻结。
-            # join 未满足 -> 跳过本次派发(保持 queued 闩,下轮 sweep 重试)。
-            # implementation 完成 -> 冻结候选 SHA 供下游 test/review 绑定。
+            # Scheduler v1:join 判定先于 queued 闩。
+            # join 未满足 -> continue(无闩),下轮 sweep 重估,修正证据后自动恢复。
+            # implementation 完成 -> 冻结候选 SHA(+补 delivery note)供下游绑定。
             try:
                 if not _scheduler_join_gate_allows(
                     workflow_id, ready_node, load_tasks()
@@ -2733,6 +2827,10 @@ def check_workflow_stage_advance(workflow_id):
                     f"[SCHEDULER SWEEP WARN] workflow={workflow_id} "
                     f"node={ready_id}: {exc}"
                 )
+                continue
+
+            if not mark_stage_advance_queued(workflow_id, ready_id):
+                continue
 
             coordinator_queue.put(
                 {

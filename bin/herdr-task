@@ -2275,21 +2275,17 @@ def _preflight_delivery_identity(workflow_id, node_id, task_id):
 
 
 def _validate_test_delivery_baseline(args, candidate_sha, baseline_commit, source_repo):
-    """Require an independently provable delivery ancestor for test/review."""
+    """Require test/review to verify exactly the frozen candidate revision.
+
+    Scheduler v1 invariant: every verifier must verify the SAME immutable
+    candidate revision. Ancestor containment (candidate is an ancestor of
+    the clone baseline) is NOT sufficient: the agent would actually verify
+    baseline_commit, while the join gate would claim candidate_sha. Only
+    strict equality proves the claim. Empty values fail closed.
+    """
     candidate_sha = str(candidate_sha or "").strip()
     baseline_commit = str(baseline_commit or "").strip()
-    matches = bool(candidate_sha and baseline_commit and candidate_sha == baseline_commit)
-    if not matches and candidate_sha and baseline_commit:
-        try:
-            probe = subprocess.run(
-                ["git", "-C", source_repo, "merge-base", "--is-ancestor",
-                 candidate_sha, baseline_commit],
-                text=True, capture_output=True, check=False,
-            )
-            matches = probe.returncode == 0
-        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
-            matches = False
-    if matches:
+    if candidate_sha and baseline_commit and candidate_sha == baseline_commit:
         return
     try:
         _get_store().record_event(
@@ -2693,6 +2689,17 @@ def _launch_task(args):
                             break
                 if not _cand:
                     _cand = str(_effective.get("base_sha") or "")
+                # Scheduler v1: controller binds --candidate-sha at dispatch;
+                # the frozen claim must equal the delivery identity, otherwise
+                # launch is refused (claim/identity split would let the join
+                # gate certify a revision the delivery record never named).
+                _claim = str(getattr(args, "candidate_sha", None) or "").strip()
+                if _claim and _claim != _cand:
+                    _validate_test_delivery_baseline(
+                        args, _cand,
+                        "claim_mismatch:" + _claim,
+                        source_repo,
+                    )
                 _validate_test_delivery_baseline(
                     args, _cand, baseline_commit, source_repo
                 )

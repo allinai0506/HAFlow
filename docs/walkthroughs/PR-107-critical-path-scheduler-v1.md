@@ -89,3 +89,82 @@
   显式 `node_type: gate` 的 join 节点，接线已预留（`_scheduler_join_gate_allows`
   按 `node_type==gate && len(deps)>=2` 识别）。
 - 并行窗口度量依赖任务时间戳字段；历史任务缺字段时标记 `unknown`。
+
+## 6. 复审 P1 修复(第 2 轮)
+
+四个 P1 全部命中"调度语义 vs 真实调用链"的裂缝,逐一修复并补回归:
+
+### P1-1 默认 wrapup 绕过 Join Gate —— 已修
+
+旧实现只认 `node_type == gate && deps >= 2`,而真实模板 `wrapup` 是 agent 节点,
+于是 `test(A) pass + review(B) pass` 后 wrapup 照样 Ready。测试当时手工构造了
+`node_type: gate`,掩盖了真实形态。
+
+修复(`_scheduler_join_gate_allows`):两类形状都受门禁约束——
+1. 显式 join 节点:`node_type == gate` 且依赖 >= 2;
+2. **已被 Scheduler 接管**的 workflow(`latest_frozen_candidate_sha` 非空)中的
+   任何多依赖节点(`wrapup` 即属此类)。
+未接管的 workflow 保持 legacy passthrough —— 零行为变化。
+选择"让多依赖 wrapup 拥有 join-before-dispatch 语义"而非把 wrapup 降级为纯 gate,
+因为 wrapup 仍需 Agent 执行六步收尾。
+
+回归:测试改为加载**真实模板**节点(`herdr.workflow.load_template`),断言
+真实 wrapup 双分支异版本被拒、同版本放行,且未接管 workflow 仍 passthrough。
+
+### P1-2 candidate_sha 不能证明验证版本 —— 已修(证据优先 + 严格相等)
+
+两处修正:
+
+1. **判据改为证据优先**(`herdr/scheduler.py`):拆分
+   `extract_task_candidate_claim`(`candidate_sha`,调度器声明的意图)与
+   `extract_task_verified_sha`(`baseline_commit`,worker 从真实 clone HEAD 记录的
+   客观证据)。Join Gate 以**证据**为准,并新增 `join_evidence_mismatch`:
+   声明与证据不一致一律拒绝汇聚。
+2. **launch 侧严格相等**(`bin/herdr-task#_validate_test_delivery_baseline`):
+   取消 `merge-base --is-ancestor` 放宽,只接受 `candidate_sha == baseline_commit`。
+   同时校验 `--candidate-sha` 声明必须等于 delivery note 的 `candidate_sha`。
+   空值一律 fail-closed(exit 2 + `test_baseline_rejected` 事件)。
+
+回归:claim=A/evidence=B 的 join 拒绝;ancestor-only 基线被拒绝
+(并断言不再依赖 ancestor 探测);空值 fail-closed。
+
+### P1-3 branch fallback 与 launch preflight 打架 —— 已修(方案 A)
+
+采用方案 A:`_scheduler_freeze_candidate` 冻结 SHA 后**同时保证 delivery note 存在**
+(`_scheduler_ensure_delivery_note`,复用 `bin/herdr-task record_delivery_note`,
+不建第二套交付真相):
+
+- 无 delivery note → 记录provisional note(`{wf}-{node}-{sha[:12]}-review/test`),
+  使 launch 的 FR-6.2 preflight 通过;
+- 已有同 SHA note → 幂等返回 `exists`;
+- 已有**不同** SHA note(候选轮换 / fix-loop 返工)→ 显式 `supersedes` 替换,
+  沿用既有 replacement edge 校验;
+- 补记失败 → freeze 返回 ""(上报 unprovable),join 侧 fail-closed。
+
+provisional verifier 任务 id 带 short SHA 后缀:它们会成为 delivery alias,
+两个候选共用 alias 会让 delivery 选择歧义(fail-closed),实测已踩到。
+
+回归:真实执行 record-delivery 链路,断言 note 存在、幂等、轮换后
+`select_effective_delivery` 唯一 tip,以及 SHA 不可证时返回空。
+
+### P1-4 首次拒绝后闩被吞导致永久卡死 —— 已修(判定先于闩)
+
+两条推进路径都改为 **join 判定先于一切闩**:
+
+- sweep(`check_workflow_stage_advance`):join 拒绝 → `continue`,**不写** `queued`;
+  冻结异常也不再落闩;
+- direct(`try_direct_stage_advance`):join 拒绝 → 直接返回,不再调用
+  `mark_stage_advance_notified`。
+
+因此修正证据后下一轮 sweep 自动重估并恢复,不再需要 Controller 重启。
+
+回归:sweep 路径断言 join 拒绝时 `mark_stage_advance_queued` 与 `coordinator_queue.put`
+均未被调用;direct 路径断言 `mark_stage_advance_notified` 未调用、无 launch,
+第二次(证据修好)正常派发。
+
+### 未处理项(明确不在 #107 范围)
+
+- **GitHub CI 证据缺口**:仓库当前无 `.github/workflows/`,PR 描述中的通过数是
+  分支本地结果。建议单独小 PR 引入 CI(需先验证全量套件在 CI runner 上可移植),
+  不塞进本 PR。
+- **#106 post-merge Rollout 问题**:按指示单独 hotfix PR,不在 #107 内混合。
