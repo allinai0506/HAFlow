@@ -14,10 +14,24 @@ Safety contract (Promotion is manual. Rollback can be automatic. Safety
 always wins.):
 
 - Stages are a closed enum: off(0)/5/10/25/50. No 75/100, no open ints.
+  Percentage parsing is lossless: fractional numbers, NaN, infinities
+  and bools are rejected, never truncated into a valid stage.
 - Promotion is adjacent-only and manual: off->5->10->25->50, each with
   an explicit non-empty reason. 5->50 is refused.
 - Emergency rollback to off is allowed from any stage.
 - No auto-promotion path exists in this module.
+- A config-fallback bucket set to the same percentage it already serves
+  is a *takeover*, not a no-op: traffic is unchanged, but ownership
+  moves to an explicit staged row, so the next promotion validates
+  against the real ladder position.
+- Routing decisions come from exactly one snapshot:
+  ``effective_percentage`` reads ``state_db.read_rollout_snapshot``
+  once, so an emergency rollback can never be followed by a stale
+  percentage stitched together from two separate reads.
+- Guard evidence is scoped to the current rollout episode: the newest
+  ``rollout_audit`` row for a bucket opens a fresh evidence window, so
+  samples from a previous activation (or a previous stage) can never
+  condemn or clear the current one.
 - Fail-safe: kill switch, invalid bucket, corrupt state, guard error,
   evaluation/DB outage all resolve to "do not expand" (effective 0 or
   the conservative fallback), never to more Adaptive traffic.
@@ -138,8 +152,35 @@ def normalize_bucket(agent: Any, node: Any, task_type: Any) -> Dict[str, str]:
     return {"agent": clean_agent, "node": clean_node, "task_type": clean_type}
 
 
+def _strict_integral(value: Any) -> int:
+    """Lossless int conversion; raise ValueError on anything fractional.
+
+    ``int()`` truncates (``int(5.9) == 5``), which would silently accept
+    a fractional percentage as a valid stage. Validate before convert:
+    the value must already BE an integer — integral floats (``5.0``)
+    and integral Decimals (``Decimal("5.0")``) included; bools, NaN,
+    infinities and every fractional value are rejected.
+    """
+    if isinstance(value, bool):
+        raise ValueError(f"not an exact integer: {value!r}")
+    if isinstance(value, int):
+        return value
+    try:
+        number = int(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"not an exact integer: {value!r}") from exc
+    if value != number:  # 5.9 != 5; integral float/Decimal compare equal
+        raise ValueError(f"not an exact integer: {value!r}")
+    return number
+
+
 def normalize_percentage(value: Any) -> int:
-    """Map off/0/5/10/25/50 to int; reject every open percentage."""
+    """Map off/0/5/10/25/50 to int; reject every open percentage.
+
+    Conversion is lossless: ``5.9`` is rejected, never truncated to the
+    valid stage ``5``. Integral floats like ``5.0`` are accepted; NaN,
+    infinities and bools are not percentages.
+    """
     if value is None:
         return 0
     if isinstance(value, str):
@@ -152,14 +193,12 @@ def normalize_percentage(value: Any) -> int:
             raise ValueError(
                 f"percentage must be one of off/5/10/25/50, "
                 f"got {value!r}") from exc
-    if isinstance(value, bool):
-        raise ValueError(
-            f"percentage must be one of off/5/10/25/50, got {value!r}")
     try:
-        number = int(value)
-    except (TypeError, ValueError) as exc:
+        number = _strict_integral(value)
+    except ValueError as exc:
         raise ValueError(
-            f"percentage must be one of off/5/10/25/50, got {value!r}") from exc
+            f"percentage must be one of off/5/10/25/50, got {value!r}"
+        ) from exc
     if number not in ALLOWED_PERCENTAGES:
         raise ValueError(
             f"percentage must be one of off/5/10/25/50, got {value!r}")
@@ -180,13 +219,16 @@ def _safe_fallback(value: Any) -> int:
 
     The canary config accepts any 1..100 integer, so this deliberately
     does not use ``normalize_percentage`` (that is the closed rollout
-    enum). An unusable or out-of-range value serves 0: never guess a
-    traffic number.
+    enum). An unusable, fractional or out-of-range value serves 0:
+    never guess a traffic number, and never truncate one into existence
+    (``5.9`` is not ``5``).
     """
     if value is None or isinstance(value, bool):
         return 0
     try:
-        number = int(str(value).strip() if isinstance(value, str) else value)
+        if isinstance(value, str):
+            value = int(value.strip())
+        number = _strict_integral(value)
     except (TypeError, ValueError):
         return 0
     return number if 0 <= number <= 100 else 0
@@ -243,6 +285,13 @@ def effective_percentage(
     0. Invalid identity, storage errors, and unknown stages all yield
     0. This function never raises for routing inputs: rollout control
     failure must never make production routing more aggressive.
+
+    One decision comes from one snapshot: ``exists`` and ``percentage``
+    are read by a single ``read_rollout_snapshot`` query. Reading them
+    in two queries could stitch together two different points in time —
+    a stage read *before* an emergency rollback combined with a presence
+    read *after* it would resurrect the rolled-back percentage for one
+    more request, which is exactly the expansion safety forbids.
     """
     try:
         if not rollout_enabled():
@@ -251,39 +300,19 @@ def effective_percentage(
     except ValueError:
         return 0
     try:
-        staged = state_db.get_rollout_stage(
+        snapshot = state_db.read_rollout_snapshot(
             bucket["agent"], bucket["node"], bucket["task_type"],
             db_path=db_path)
     except Exception:
-        return 0
-    try:
-        staged_int = normalize_percentage(staged)
-    except ValueError:
         return 0
     # A staged row (including explicit off) is authoritative once the
     # operator migrated the bucket; absent rows preserve #103 behavior.
-    try:
-        known = state_db.rollout_stage_known(
-            bucket["agent"], bucket["node"], bucket["task_type"],
-            db_path=db_path)
-    except Exception:
-        return 0
-    if known:
-        return staged_int
-    if config_fallback is None:
-        return 0
-    try:
-        fallback = config_fallback
-        if isinstance(fallback, bool):
-            raise ValueError("invalid fallback")
-        # Canary config percentages are 1..100 (plus 0/off for rollout);
-        # any out-of-range fallback fails safe to 0, never expands.
-        number = int(str(fallback).strip() if isinstance(fallback, str) else fallback)
-        if not 0 <= number <= 100:
+    if snapshot.exists:
+        try:
+            return normalize_percentage(snapshot.percentage)
+        except ValueError:
             return 0
-        return number
-    except (TypeError, ValueError):
-        return 0
+    return _safe_fallback(config_fallback)
 
 
 @dataclass(frozen=True)
@@ -339,10 +368,25 @@ def decide_rollout_change(
     else:
         effective_prev = _safe_fallback(config_fallback)
     # A no-op means the target percentage is already what is being
-    # diverted: the row holds it, or there is no row and nothing is
-    # served. A corrupt row is the exception that must still write, or
-    # the operator could never repair it back to a known state.
+    # diverted AND the staged row already owns it. Two exceptions must
+    # still write: a corrupt row (or the operator could never repair it
+    # back to a known state), and an absent row whose config fallback
+    # already serves the target — a *takeover*. Traffic equality is not
+    # state-ownership equality: without the write the bucket stays
+    # staged=absent (ladder position 0), so the legitimate next step
+    # 5 -> 10 would keep being rejected as the cross-stage jump 0 -> 10.
     if nxt == effective_prev and not corrupt:
+        if not snapshot.exists and effective_prev > 0:
+            # Takeover: traffic is unchanged (the config fallback already
+            # serves exactly this), but ownership moves to an explicit
+            # staged row. The ladder governs traffic *changes* and is
+            # not re-checked here precisely because nothing about
+            # traffic changes. Reserved for this one case; never used
+            # for an actual stage transition.
+            return RolloutDecision(
+                snapshot=snapshot, staged=staged,
+                effective_prev=effective_prev, new_percentage=nxt,
+                is_noop=False, action="takeover")
         return RolloutDecision(
             snapshot=snapshot, staged=staged, effective_prev=effective_prev,
             new_percentage=nxt, is_noop=True, action="noop")
@@ -386,6 +430,12 @@ def set_stage(
     bucket must write an explicit ``percentage=0`` row to suppress that
     fallback; treating it as a no-op would report success while Adaptive
     traffic kept flowing.
+
+    **Same traffic is not always a no-op.** An absent bucket whose
+    config fallback already serves the requested percentage performs a
+    *takeover* (``action="takeover"``): the explicit staged row is
+    persisted so ownership — and the ladder position the next promotion
+    validates against — moves from the config to Controlled Rollout.
 
     Read, decide, and write are one verified cycle: the snapshot this
     decision was made against is re-checked inside the write
@@ -478,12 +528,47 @@ def list_states(db_path: Optional[Path] = None) -> List[Dict[str, Any]]:
         return []
 
 
+def current_rollout_episode_start(
+    db_path: Optional[Path],
+    *,
+    agent: str,
+    node: str,
+    task_type: str,
+) -> Optional[float]:
+    """Start of the bucket's current guard-evidence episode, or None.
+
+    Every successful staged-row change — activation, promotion,
+    takeover, manual or automatic rollback — appends exactly one
+    immutable ``rollout_audit`` row, and each such change opens a fresh
+    guard-evidence episode: samples produced under a previous stage, or
+    under a previous activation that has since been rolled back, must
+    never clear (or condemn) the current one. The boundary is the
+    newest audit row's ``created_at``; the guard consumes only canary
+    decisions at or after it.
+
+    A bucket with no audit history returns ``None``: it has no rollout
+    episode yet, so pre-rollout (#103) guard reads stay unscoped. A
+    pre-rollout database (no rollout tables at all) also reads as "no
+    episode" — observing evidence never creates schema.
+    """
+    try:
+        rows = state_db.list_rollout_audit(
+            agent=agent, node=node, task_type=task_type, limit=1,
+            db_path=db_path, readonly=True)
+    except state_db.ReadonlySchemaError:
+        return None
+    if not rows:
+        return None
+    return float(rows[0]["created_at"])
+
+
 def _bucket_report(
     db_path: Optional[Path],
     *,
     agent: str,
     node: str,
     task_type: str,
+    since: Optional[float] = None,
 ) -> Optional[Dict[str, Any]]:
     """Fetch this bucket's canary evaluation report (read-only reuse).
 
@@ -495,13 +580,18 @@ def _bucket_report(
     recommendation consume the whole budget, so this bucket would read
     as "no samples" and the guard would stay quiet while the bucket was
     actually failing.
+
+    ``since`` is the current rollout episode boundary
+    (``current_rollout_episode_start``): decisions older than it belong
+    to a previous activation or stage and are not evidence about the
+    traffic being served right now.
     """
     from . import canary_evaluation
     bundle = canary_evaluation.run_canary_evaluation(
         db_path,
         filters=canary_evaluation.CanaryEvaluationFilters(
             node=node, task_type=task_type, agent=None,
-            recommended_agent=agent,
+            recommended_agent=agent, since=since,
             limit=GUARD_DECISION_LIMIT, scan_cap=GUARD_SCAN_CAP),
     )
     for bucket in bundle["report"].get("buckets") or []:
@@ -526,6 +616,13 @@ def evaluate_guard(
     wall-time-adjacent rework/blocked/human means, and sample counts.
     Never promotes.
 
+    Evidence is scoped to the current rollout episode
+    (``current_rollout_episode_start``): only canary decisions recorded
+    at or after the bucket's newest staged-row change count. A bucket
+    that rolled back and was re-activated re-accumulates evidence from
+    zero instead of inheriting the samples that condemned the previous
+    activation; historical rows stay on disk untouched.
+
     ``status`` distinguishes "evaluated and decided" from "could not
     evaluate", because the two demand opposite routing behavior:
 
@@ -548,6 +645,9 @@ def evaluate_guard(
         "status": "unavailable",
         "reason": "",
         "bucket": None,
+        #: Episode boundary the evidence window starts at (None = no
+        #: rollout episode yet, the read is unscoped).
+        "evidence_since": None,
         "config": {
             "enabled": cfg.enabled,
             "min_settled_samples": cfg.min_settled_samples,
@@ -567,13 +667,17 @@ def evaluate_guard(
         base["reason"] = f"invalid bucket: {exc}"
         return base
     try:
-        report = _bucket_report(
+        episode_start = current_rollout_episode_start(
             db_path, agent=bucket["agent"], node=bucket["node"],
             task_type=bucket["task_type"])
+        report = _bucket_report(
+            db_path, agent=bucket["agent"], node=bucket["node"],
+            task_type=bucket["task_type"], since=episode_start)
     except Exception as exc:
         base["reason"] = (
             f"canary evaluation unavailable: {type(exc).__name__}: {exc}")
         return base
+    base["evidence_since"] = episode_start
     if report is None:
         base["status"] = "insufficient_samples"
         base["reason"] = "insufficient samples: no settled bucket yet"
@@ -700,6 +804,7 @@ __all__ = [
     "ROLLOUT_ENABLED_ENV_VAR",
     "GuardConfig",
     "RolloutDecision",
+    "current_rollout_episode_start",
     "decide_rollout_change",
     "effective_percentage",
     "evaluate_guard",

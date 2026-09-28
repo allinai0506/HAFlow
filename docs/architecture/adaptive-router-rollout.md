@@ -42,12 +42,16 @@ BEGIN IMMEDIATE
 COMMIT
 ```
 
-Audit 契约字段：`recommended_agent/node/task_type/previous_percentage/new_percentage/action(promote|rollback|auto_rollback)/reason/source/created_at/algorithm_version=adaptive-router-rollout-v1`。
+Audit 契约字段：`recommended_agent/node/task_type/previous_percentage/new_percentage/action(promote|rollback|auto_rollback|takeover)/reason/source/created_at/algorithm_version=adaptive-router-rollout-v1`。
 
 `action` 描述**真实流量方向**：`promote` ⟺ `new_percentage > previous_percentage`。
-两者只在首次接管旧 canary 配置时才可能“看着矛盾”，而那正是必须说真话的场景 ——
-`50 → 5` 记 `rollback`（不是 `promote`）。过渡合法性仍按 staged 阶梯校验
-（首次接管只能从 stage 5 起步），只有 action 的判定基准是有效比例。
+唯一例外是 `takeover`：**流量不变、所有权迁移** —— 无 staged 行、canary 配置正在
+服务 N%、`set N` 时，写入显式 N 行并审计 `N → N`。这不是 no-op：no-op 什么都不
+改变，takeover 把 bucket 从「配置兜底」迁移到「staged 行持有」，此后阶梯校验才有
+真实的 staged 基准（`5→10` 才可能；否则系统只会看到 `0→10` 而拒绝）。
+`50 → 5` 仍记 `rollback`（不是 `promote`）—— 首次接管**旧流量比例更高**时流量
+真实下降。过渡合法性仍按 staged 阶梯校验，只有 action 的判定基准是有效比例；
+takeover 绕过阶梯是因为流量没有变化，阶梯管的是流量变化。
 
 ## 2a. 并发：快照即身份
 
@@ -104,6 +108,15 @@ kill switch false → 0
 rollout 模块本身不可用 → 0（percentage_source=rollout_unavailable）
 ```
 
+**一次决策来自一次快照**：`exists + percentage` 由 `state_db.read_rollout_snapshot`
+在**一条查询**里读出。拆成两次读（先读值、再读存在性）会让「已 COMMIT 的紧急回退」
+与「回退前的旧值」被拼成一次决策 —— 状态、证据、流量必须描述同一时刻。
+
+**先校验、后转换**：`normalize_percentage` 与 config fallback 解析对任何非精确整数
+输入（`5.9`、`NaN`、`inf`、`True`、`Decimal("5.9")`）一律拒绝/归零，绝不用
+`int()` 截断 —— `int(5.9)` 曾经静默变成合法 stage 5。合法输入：闭枚举整数、
+其字符串、`"off"`、整数值浮点/Decimal（`5.0`）。
+
 > ### Absent ≠ explicit off
 >
 > 没有 staged row 的 bucket 仍在按 canary 配置分流。因此 `rollout off` 对这类
@@ -120,6 +133,7 @@ rollout 模块本身不可用 → 0（percentage_source=rollout_unavailable）
 > | 无行 + config 50 + `off` | 写显式 0 行，审计 `50 → 0` |
 > | 无行 + 无 config 流量 + `off` | 真 no-op，不写行 |
 > | 有行 0 + `off` | 真 no-op |
+> | 无行 + config 5 + `set 5` | 写 5，审计 `5 → 5` action=takeover（流量不变，所有权迁移） |
 > | 无行 + config 50 + `set 5` | 写 5，审计 `50 → 5` action=rollback（记录真实分流变化） |
 
 > 审计里的 `previous_percentage` 是**当时真正在分流的比例**（仅首次迁移时与
@@ -133,6 +147,9 @@ rollout 模块本身不可用 → 0（percentage_source=rollout_unavailable）
 ## 3a. 幂等
 
 - 重复设置当前阶段是 `action="noop"`：不是状态变化，不写审计；
+- **同流量不总是 no-op**：无 staged 行 + config fallback N + `set N` 是
+  `action="takeover"`（写行、写审计，所有权迁移）；只有 `exists=True` 且值相同
+  （或无行、无流量、`set 0`）才是真 no-op；
 - no-op 仍经过 §2a 的快照校验，不会从过期读取得出「已经 off」；
 - Router 只读 staged 值，SQLite 单条读要么看到旧值要么看到新值，不存在中间态。
 
@@ -146,6 +163,13 @@ rollout 模块本身不可用 → 0（percentage_source=rollout_unavailable）
   `SUCCESS_DROP_TOLERANCE=0.20`、`BLOCKED_TOLERANCE=0.30`、`HUMAN_TOLERANCE=0.30`；
 - 样本不足 → 安静（不定罪），可关闭（`HERDR_ROLLOUT_GUARD_ENABLED=0`）；
 - 触发 → `maybe_auto_rollback` 持久化 `→off`（`action=auto_rollback`）；
+- **证据只取当前 episode**：每次成功的显式阶段变更（promote/rollback/
+  auto_rollback/takeover）开启新证据窗口，窗口起点 = 本 bucket 最新一条
+  `rollout_audit.created_at`（`current_rollout_episode_start`，作为 `since`
+  传给 canary_evaluation，判定结果经 `evidence_since` 暴露）。回退后重试 5%
+  不会被上一轮坏样本立即再次定罪；5% 的好证据也不会证明 10% 安全 —— 每次
+  变更后重新累积。无审计历史的 bucket（纯 config 兜底）保持 #103 的不加窗
+  读取；历史数据永不删除，CLI history 仍展示全部；
 - 读预算有界：`GUARD_DECISION_LIMIT=200` 匹配决策、`GUARD_SCAN_CAP=400` 扫描预算；
 - 触发判定只覆盖本 bucket，并把整段 bucket 范围**下推到 SQL**
 （`state_db.ExactDecisionBucket`：mode + recommended_agent + node + task_type）。
@@ -160,6 +184,16 @@ opencode 多个 bucket，若更活跃的兄弟 bucket 吃掉全部 200 条决策
 shadow 决策照样会吃光它。该下推是**按 `recommended_agent` opt-in** 的：shadow 评估
 需要靠 Python 侧 mode 过滤来统计 `skipped_canary_events`，因此从不传
 `recommended_agent`，计数语义保持不变。
+
+精确 bucket 读取由部分表达式索引 `idx_events_route_decision_bucket` 服务：
+四个 bucket 表达式（各自包在 `CASE WHEN json_valid(payload_json) THEN … END`
+里）+ `timestamp` + `id`，`WHERE event_type='route_decision'`。稀疏 bucket 不再
+全扫 route_decision 历史；非法 payload 在索引中落为 NULL，INSERT 时的索引维护
+永不失败（与 working-context 触发器同款 json_valid 防护）。索引只在可写 schema
+初始化（`_ensure_schema`）中创建，只读守卫查询绝不建表建索引（#102 契约）。
+查询的 WHERE 子句与索引定义共用同一表达式生成器
+（`_route_decision_bucket_exprs`），保证 SQLite 稳定命中索引 —— 由
+EXPLAIN QUERY PLAN 回归测试锁定（多兄弟行 + 少目标行，断言 SEARCH 而非 SCAN）。
 
 判定结果用 `status` 区分「评过了」与「评不了」，因为两者要求的路由方向相反：
 
@@ -209,6 +243,12 @@ herdr-task rollout check-guard --agent codex --node implementation \
 `query_only`）：不建库、不建表、不迁移；pre-rollout 库读作“无 staged bucket”，
 而读取失败（locked/corrupt/无权限）**不会**被压成“全部 off”，而是 exit 1 并
 明确报 “unavailable”。
+
+`set` 输出的 `action` ∈ `promote/rollback/auto_rollback/takeover/noop`。
+`5% -> 5% action=takeover` 表示流量未变、所有权从 canary 配置迁移到 staged 行 ——
+这是「config 兜底服务中」的 bucket 进入阶梯的入口动作；takeover 之后
+`set 10` 才是合法的 `5 -> 10` promote。百分比参数在域边界先校验后转换：
+`--percentage 5.9` 之类非精确整数输入直接 exit 2，绝不截断。
 
 **唯一 DB 解析器**：读写共用 `state_db.resolve_state_db_path()`，写路径不再经
 `_get_store()` 二次猜测 —— 否则在 `WORKFLOW_FILE` / `CHECKPOINTS_DIR` 等非默认

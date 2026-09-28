@@ -678,6 +678,20 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type, timestamp);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_source ON events(source, timestamp);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_run_sequence ON events(run_id, sequence, id);")
+    # Exact canary-bucket reads (the Controlled Rollout guard) must be
+    # served by an index, not by scanning route_decision history while
+    # evaluating JSON per row. The WHERE fragments built by
+    # ``_exact_bucket_sql`` reuse ``_route_decision_bucket_exprs``
+    # verbatim so SQLite resolves them against this partial expression
+    # index. The CASE/json_valid wrapper keeps malformed payloads from
+    # ever failing index maintenance on INSERT: they index as NULL and
+    # simply never match an exact-bucket read.
+    _bucket_exprs = _route_decision_bucket_exprs()
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_events_route_decision_bucket "
+        f"ON events({_bucket_exprs[0]}, {_bucket_exprs[1]}, "
+        f"{_bucket_exprs[2]}, {_bucket_exprs[3]}, timestamp, id) "
+        "WHERE event_type = 'route_decision';")
     for row in conn.execute(
         "SELECT run_id, task_id, workflow_id, timestamp, payload_json "
         "FROM events WHERE source = 'trajectory' AND event_type = 'observation_created'"
@@ -4082,74 +4096,77 @@ class ExactDecisionBucket:
     task_type: Optional[str] = None
 
 
+def _route_decision_bucket_exprs() -> Tuple[str, str, str, str]:
+    """Canonical SQL expressions for the exact decision-bucket columns.
+
+    Both the ``idx_events_route_decision_bucket`` expression index and
+    the WHERE fragments from :func:`_exact_bucket_sql` are built from
+    these exact strings: SQLite only serves a query from an expression
+    index when the query expression is structurally identical to the
+    indexed one, so the two must never be allowed to drift.
+
+    Every extraction is wrapped in ``CASE WHEN json_valid(payload_json)``
+    because index expressions are evaluated on INSERT: a malformed
+    historical payload must index as NULL (and simply never match an
+    exact-bucket read), never fail the write.
+    """
+    def _scoped(core: str) -> str:
+        return f"(CASE WHEN json_valid(payload_json) THEN {core} END)"
+
+    mode = _scoped("COALESCE(json_extract(payload_json, '$.mode'), '')")
+    recommended = _scoped(
+        "COALESCE(json_extract(payload_json, '$.recommended_agent'), '')")
+    node = _scoped(
+        "COALESCE(NULLIF(json_extract(payload_json, '$.node'), ''), "
+        "node_id, '')")
+    task_type = _scoped(
+        "COALESCE(json_extract(payload_json, '$.task_type'), '')")
+    return mode, recommended, node, task_type
+
+
 def _exact_bucket_sql(bucket: ExactDecisionBucket) -> Tuple[str, List[Any]]:
     """Build the WHERE fragment that scopes a read to one exact bucket.
 
-    ``json_valid`` guards the extraction exactly as the working-context
-    triggers do: a malformed historical payload must never make the
-    query fail. A row whose payload is unreadable simply does not match
-    an exact-bucket read.
+    The fragments reuse :func:`_route_decision_bucket_exprs` verbatim so
+    the read is served by ``idx_events_route_decision_bucket`` instead
+    of scanning route_decision history: a sparse bucket must cost its
+    own rows, not its siblings'. Malformed payloads evaluate to NULL
+    through the CASE wrapper and never match, exactly as the pre-index
+    standalone ``json_valid`` clause behaved.
     """
-    clauses = ["json_valid(payload_json)"]
+    mode_expr, agent_expr, node_expr, task_type_expr = (
+        _route_decision_bucket_exprs())
+    clauses: List[str] = []
     params: List[Any] = []
     if bucket.mode == "canary":
-        clauses.append(
-            "COALESCE(json_extract(payload_json, '$.mode'), '') = 'canary'")
+        clauses.append(f"{mode_expr} = 'canary'")
     else:
-        clauses.append(
-            "COALESCE(json_extract(payload_json, '$.mode'), '') != 'canary'")
-    clauses.append(
-        "COALESCE(json_extract(payload_json, '$.recommended_agent'), '') = ?")
+        clauses.append(f"{mode_expr} != 'canary'")
+    clauses.append(f"{agent_expr} = ?")
     params.append(str(bucket.recommended_agent))
     if bucket.node is not None:
-        clauses.append(
-            "COALESCE(NULLIF(json_extract(payload_json, '$.node'), ''), "
-            "node_id, '') = ?")
+        clauses.append(f"{node_expr} = ?")
         params.append(str(bucket.node))
     if bucket.task_type is not None:
-        clauses.append(
-            "COALESCE(json_extract(payload_json, '$.task_type'), '') = ?")
+        clauses.append(f"{task_type_expr} = ?")
         params.append(str(bucket.task_type))
     return " AND ".join(clauses), params
 
 
-def query_route_decisions(
+def _route_decisions_sql(
     *,
-    limit: Optional[int] = None,
+    limit: int,
     since: Optional[float] = None,
     before: Optional[float] = None,
     before_id: Optional[int] = None,
-    db_path: Optional[Path] = None,
     exact_bucket: Optional[ExactDecisionBucket] = None,
-) -> List[Dict[str, Any]]:
-    """Read frozen route_decision events, newest-first, bounded.
+) -> Tuple[str, List[Any]]:
+    """The exact statement ``query_route_decisions`` executes.
 
-    Shadow Evaluation's bounded read path: always observe-only. The
-    connection comes from ``_open_shadow_read_connection`` (``mode=ro`` +
-    ``query_only`` + capability check), so this query never creates,
-    initializes or migrates the database it reads.
-
-    Only the ``route_decision`` event type, served by
-    ``idx_events_type(event_type, timestamp)``. Payloads are decoded in
-    Python (no SQL JSON extraction). Callers must pass an explicit
-    ``limit`` for large histories; the hard cap keeps evaluation off
-    the dispatch hot path and far from unbounded loads.
-
-    ``before_id`` pairs with ``before`` as an exact keyset cursor
-    ((timestamp, id) paging): ``timestamp < before OR (timestamp =
-    before AND id < before_id)``. Without it, ``before`` stays a plain
-    timestamp floor for backward compatibility.
-
-    ``exact_bucket`` narrows the scan to one decision bucket in SQL, so
-    a caller's row budget is spent only on rows that can match instead of
-    being consumed by unrelated buckets. It is opt-in: callers that rely
-    on counting the rows the filter removed (the shadow collection's
-    ``skipped_canary_events``) must leave it unset.
+    Separate from execution so a test can ``EXPLAIN QUERY PLAN`` the
+    byte-identical SQL the read path issues — asserting against a
+    paraphrased query would prove nothing about the production plan.
     """
-    capped = ROUTE_DECISION_DEFAULT_LIMIT if limit is None else int(limit)
-    if capped < 1:
-        raise ValueError("limit must be a positive int")
-    capped = min(capped, ROUTE_DECISION_MAX_LIMIT)
     query = (
         "SELECT id, workflow_id, node_id, task_id, agent_id, timestamp, "
         "source, run_id, payload_json FROM events "
@@ -4171,7 +4188,54 @@ def query_route_decisions(
         query += f" AND {scope_sql}"
         params.extend(scope_params)
     query += " ORDER BY timestamp DESC, id DESC LIMIT ?"
-    params.append(capped)
+    params.append(int(limit))
+    return query, params
+
+
+def query_route_decisions(
+    *,
+    limit: Optional[int] = None,
+    since: Optional[float] = None,
+    before: Optional[float] = None,
+    before_id: Optional[int] = None,
+    db_path: Optional[Path] = None,
+    exact_bucket: Optional[ExactDecisionBucket] = None,
+) -> List[Dict[str, Any]]:
+    """Read frozen route_decision events, newest-first, bounded.
+
+    Shadow Evaluation's bounded read path: always observe-only. The
+    connection comes from ``_open_shadow_read_connection`` (``mode=ro`` +
+    ``query_only`` + capability check), so this query never creates,
+    initializes or migrates the database it reads.
+
+    Only the ``route_decision`` event type. A plain scan is served by
+    ``idx_events_type(event_type, timestamp)``; an ``exact_bucket`` read
+    is served by ``idx_events_route_decision_bucket``, the partial
+    expression index built from the same CASE-wrapped extraction
+    expressions the WHERE clause uses, so a sparse bucket costs its own
+    rows instead of a JSON-evaluating scan over all of history.
+    Payloads are decoded in Python. Callers must pass an explicit
+    ``limit`` for large histories; the hard cap keeps evaluation off
+    the dispatch hot path and far from unbounded loads.
+
+    ``before_id`` pairs with ``before`` as an exact keyset cursor
+    ((timestamp, id) paging): ``timestamp < before OR (timestamp =
+    before AND id < before_id)``. Without it, ``before`` stays a plain
+    timestamp floor for backward compatibility.
+
+    ``exact_bucket`` narrows the scan to one decision bucket in SQL, so
+    a caller's row budget is spent only on rows that can match instead of
+    being consumed by unrelated buckets. It is opt-in: callers that rely
+    on counting the rows the filter removed (the shadow collection's
+    ``skipped_canary_events``) must leave it unset.
+    """
+    capped = ROUTE_DECISION_DEFAULT_LIMIT if limit is None else int(limit)
+    if capped < 1:
+        raise ValueError("limit must be a positive int")
+    capped = min(capped, ROUTE_DECISION_MAX_LIMIT)
+    query, params = _route_decisions_sql(
+        limit=capped, since=since, before=before, before_id=before_id,
+        exact_bucket=exact_bucket)
     conn = _open_shadow_read_connection(db_path)
     try:
         decisions: List[Dict[str, Any]] = []

@@ -103,6 +103,67 @@ def _seed_collapsed_bucket(store, db_path, *, test):
                 timestamp=ts + 200.0, run_id=run_id)
 
 
+def _seed_episode_samples(test, store, db_path, *, start_ts, tag,
+                          adaptive_successes, adaptive_failures,
+                          legacy_successes, legacy_failures):
+    """Seed settled canary decisions for codex/implementation/fix.
+
+    Same shape as ``TestGuard._seed_canary_bucket`` but with explicit
+    timestamps: the caller controls which rollout episode the samples
+    belong to. Adaptive arm = diverted codex executions; legacy arm =
+    undiverted opencode. Decision events land at ``start_ts + i +
+    200``; outcomes at ``start_ts + i + 105``.
+    """
+    from herdr import adaptive_router, eval_store, execution_outcome
+    index = 0
+
+    def settle(agent, success, run_id, task_id, ts):
+        store.save_task({
+            "task_id": task_id, "workflow_id": "wf-ep",
+            "run_id": run_id, "node": "implementation",
+            "stage": "implementation", "task_type": "fix",
+            "agent": agent, "status": "completed" if success else "failed",
+            "status_history": [{"to": s} for s in (
+                "pending", "dispatched", "working", "agent_done",
+                "completed" if success else "failed")],
+            "started_at": ts, "finished_at": ts + 100.0,
+            "created_at": ts,
+        })
+        eval_store.record_eval_result(
+            run_id, requirements_satisfied=bool(success),
+            verification_passed=True, human_intervention_count=0,
+            final_status="completed" if success else "failed",
+            task_id=task_id, workflow_id="wf-ep",
+            created_at=ts + 101.0, db_path=db_path)
+        out = execution_outcome.finalize_execution_outcome(
+            task_id, db_path=db_path, finalized_at=ts + 105.0)
+        test.assertEqual(out["status"], "created")
+
+    def decide(run_id, task_id, actual, diverted, ts):
+        payload = adaptive_router.build_canary_decision(
+            workflow_id="wf-ep", run_id=run_id, task_id=task_id,
+            node="implementation", task_type="fix", actual_agent=actual,
+            recommended_agent="codex", legacy_agent="opencode",
+            diverted=diverted, rankings=[], gate={}, created_at=ts)
+        store.record_event(
+            "route_decision", payload, workflow_id="wf-ep",
+            node_id="implementation", task_id=task_id, agent_id=actual,
+            source="adaptive-router-canary", timestamp=ts, run_id=run_id)
+
+    for i in range(adaptive_successes + adaptive_failures):
+        ts = start_ts + index
+        run_id, task_id = f"run-{tag}-a{index}", f"task-{tag}-a{index}"
+        settle("codex", i < adaptive_successes, run_id, task_id, ts)
+        decide(run_id, task_id, "codex", True, ts + 200.0)
+        index += 1
+    for i in range(legacy_successes + legacy_failures):
+        ts = start_ts + index
+        run_id, task_id = f"run-{tag}-l{index}", f"task-{tag}-l{index}"
+        settle("opencode", i < legacy_successes, run_id, task_id, ts)
+        decide(run_id, task_id, "opencode", False, ts + 200.0)
+        index += 1
+
+
 class TestStages(unittest.TestCase):
     def test_allowed_stages_exact(self):
         self.assertEqual(
@@ -408,10 +469,11 @@ class TestFailSafe(unittest.TestCase):
         #  expected action)
         #
         # Note the classic 5 -> 10 case needs no config fallback: with
-        # fallback=5 the walk to stage 5 is correctly a no-op (traffic is
-        # already 5%), so no row exists and jumping to 10 is a genuine
-        # cross-stage rejection. The ladder is validated against the
-        # staged value, which is 0 until a row is written.
+        # fallback=5 the walk to stage 5 is a *takeover* (traffic is
+        # already 5%, but ownership moves to an explicit staged row), so
+        # jumping to 10 without it stays a genuine cross-stage rejection.
+        # The ladder is validated against the staged value, which is 0
+        # until a row is written.
         cases = [
             (None, 0, 5, 0, "promote"),     # 0 -> 5
             (None, 5, 10, 5, "promote"),    # 5 -> 10
@@ -562,9 +624,13 @@ class TestNoAutoPromotion(unittest.TestCase):
             canary_evaluation.build_canary_evaluation_report([])["buckets"],
             [])
 
+        # Pin the activation before the seeded samples (base
+        # 1_700_000_000): evidence is episode-scoped, and this test's
+        # point is that even perfect *visible* data never promotes.
         rollout_policy.set_stage(
             self.db_path, agent="codex", node="implementation",
-            task_type="fix", new_percentage=5, reason="manual", source="cli")
+            task_type="fix", new_percentage=5, reason="manual",
+            source="cli", created_at=1_699_999_900.0)
         before = rollout_policy.get_stage(
             self.db_path, "codex", "implementation", "fix")
         history_before = len(rollout_policy.get_history(self.db_path))
@@ -648,12 +714,18 @@ class TestGuard(unittest.TestCase):
             idx += 1
 
     def test_guard_triggers_on_collapsed_adaptive(self):
+        # Guard evidence is episode-scoped: only decisions at or after
+        # the bucket's newest staged-row change count. Pin the stage
+        # changes just before the seeded samples (base 1_700_000_000)
+        # so they belong to the current episode.
         rollout_policy.set_stage(
             self.db_path, agent="codex", node="implementation",
-            task_type="fix", new_percentage=5, reason="r", source="cli")
+            task_type="fix", new_percentage=5, reason="r", source="cli",
+            created_at=1_699_999_900.0)
         rollout_policy.set_stage(
             self.db_path, agent="codex", node="implementation",
-            task_type="fix", new_percentage=10, reason="r", source="cli")
+            task_type="fix", new_percentage=10, reason="r", source="cli",
+            created_at=1_699_999_950.0)
         # Adaptive 0% vs legacy 100%: clear, explainable collapse.
         self._seed_canary_bucket(adaptive_success=0.0, legacy_success=1.0)
         verdict = rollout_policy.evaluate_guard(
@@ -988,6 +1060,44 @@ class TestRolloutCLI(unittest.TestCase):
         self.assertIn("emergency", out)
         # Full ladder plus the emergency rollback, one row each.
         self.assertEqual(len(rollout_policy.get_history(self.db_path)), 5)
+
+    def test_set_adopts_config_fallback_then_promotes(self):
+        # Live CLI path: the canary config serves 5% for the bucket, so
+        # `rollout set 5` must take ownership (action=takeover, not a
+        # no-op), after which `set 10` promotes 5 -> 10 instead of being
+        # rejected as 0 -> 10.
+        cfg = self.db_path.parent / "route-canary.json"
+        cfg.write_text(json.dumps({
+            "enabled": True, "percentage": 5,
+            "buckets": [{"agent": "codex", "node": "implementation",
+                         "task_type": "fix"}],
+        }), encoding="utf-8")
+        with patch.dict("os.environ",
+                        {"HERDR_ROUTE_CANARY_CONFIG": str(cfg)}):
+            code, out, _ = self._run([
+                "set", "--agent", "codex", "--node", "implementation",
+                "--task-type", "fix", "--percentage", "5",
+                "--reason", "adopt the config slice"])
+            self.assertEqual(code, 0, out)
+            self.assertIn("5% -> 5%", out)
+            self.assertIn("action=takeover", out)
+
+            code, out, _ = self._run(["status"])
+            self.assertEqual(code, 0, out)
+            self.assertIn("current: 5%", out)
+
+            code, out, _ = self._run([
+                "set", "--agent", "codex", "--node", "implementation",
+                "--task-type", "fix", "--percentage", "10",
+                "--reason", "grow after review"])
+            self.assertEqual(code, 0, out)
+            self.assertIn("5% -> 10%", out)
+            self.assertIn("action=promote", out)
+
+            code, out, _ = self._run(["history"])
+            self.assertEqual(code, 0, out)
+            self.assertIn("takeover", out)
+            self.assertIn("adopt the config slice", out)
 
     def test_skip_stage_exits_two_and_keeps_state(self):
         self._run(["set", "--agent", "codex", "--node", "implementation",
@@ -1572,6 +1682,537 @@ class TestRolloutRouterIntegration(unittest.TestCase):
             _sdb.read_rollout_snapshot(
                 "codex", "implementation", "fix", self.db_path),
             _sdb.RolloutSnapshot(exists=True, percentage=5))
+
+
+class TestFallbackTakeover(unittest.TestCase):
+    """absent row + config fallback N + set N is a takeover, not a no-op.
+
+    A takeover moves bucket ownership from the canary config to an
+    explicit staged row without moving traffic. It is a real state
+    mutation with its own audit action, and it is the only reason the
+    promotion ladder at fallback-served buckets is reachable at all.
+    """
+
+    def setUp(self):
+        self.store, self.db_path = _make_store(self)
+
+    def test_takeover_persists_row_and_unblocks_ladder(self):
+        # Config owns 5% for the bucket; no staged row exists yet.
+        self.assertFalse(state_db.rollout_stage_known(
+            "codex", "implementation", "fix", self.db_path))
+        record = rollout_policy.set_stage(
+            self.db_path, agent="codex", node="implementation",
+            task_type="fix", new_percentage=5, reason="adopt config 5%",
+            source="cli", config_fallback=5)
+        self.assertTrue(record["changed"])
+        self.assertEqual(record["action"], "takeover")
+        # Traffic did not move; ownership did.
+        self.assertEqual(record["previous_percentage"], 5)
+        self.assertEqual(record["new_percentage"], 5)
+        self.assertEqual(
+            state_db.read_rollout_snapshot(
+                "codex", "implementation", "fix", self.db_path),
+            state_db.RolloutSnapshot(exists=True, percentage=5))
+        self.assertEqual(rollout_policy.effective_percentage(
+            self.db_path, agent="codex", node="implementation",
+            task_type="fix", config_fallback=5), 5)
+
+        # The ladder now validates against the real staged position:
+        # 5 -> 10 is legal, where before the takeover it read 0 -> 10.
+        record = rollout_policy.set_stage(
+            self.db_path, agent="codex", node="implementation",
+            task_type="fix", new_percentage=10, reason="grow",
+            source="cli", config_fallback=5)
+        self.assertEqual(record["action"], "promote")
+        self.assertEqual(record["previous_percentage"], 5)
+        self.assertEqual(record["new_percentage"], 10)
+        history = rollout_policy.get_history(
+            self.db_path, agent="codex", node="implementation",
+            task_type="fix")
+        self.assertEqual([row["action"] for row in history],
+                         ["promote", "takeover"])
+        self.assertEqual(history[1]["previous_percentage"], 5)
+        self.assertEqual(history[1]["new_percentage"], 5)
+
+    def test_explicit_stage_at_same_value_is_a_true_noop(self):
+        # exists=5 + set 5: ownership already moved, nothing to do.
+        rollout_policy.set_stage(
+            self.db_path, agent="codex", node="implementation",
+            task_type="fix", new_percentage=5, reason="take over",
+            source="cli", config_fallback=5)
+        record = rollout_policy.set_stage(
+            self.db_path, agent="codex", node="implementation",
+            task_type="fix", new_percentage=5, reason="again",
+            source="cli", config_fallback=5)
+        self.assertEqual(record["action"], "noop")
+        self.assertFalse(record["changed"])
+        self.assertEqual(
+            len(rollout_policy.get_history(
+                self.db_path, agent="codex", node="implementation",
+                task_type="fix")), 1)
+
+    def test_promotion_without_takeover_still_rejected(self):
+        # 0 -> 10 stays invalid while the bucket row is absent: the
+        # takeover at the served percentage is the explicit entry step.
+        with self.assertRaises(ValueError):
+            rollout_policy.set_stage(
+                self.db_path, agent="codex", node="implementation",
+                task_type="fix", new_percentage=10, reason="skip",
+                source="cli", config_fallback=5)
+        self.assertFalse(state_db.rollout_stage_known(
+            "codex", "implementation", "fix", self.db_path))
+
+    def test_takeover_at_higher_config_level_changes_ownership_only(self):
+        decision = rollout_policy.decide_rollout_change(
+            state_db.RolloutSnapshot(exists=False, percentage=0),
+            new_percentage=25, config_fallback=25)
+        self.assertFalse(decision.is_noop)
+        self.assertEqual(decision.action, "takeover")
+        self.assertEqual(decision.effective_prev, 25)
+        self.assertEqual(decision.new_percentage, 25)
+
+    def test_zero_fallback_zero_target_stays_noop(self):
+        # Nothing serving + nothing requested: no ownership to adopt.
+        for fallback in (None, 0):
+            decision = rollout_policy.decide_rollout_change(
+                state_db.RolloutSnapshot(exists=False, percentage=0),
+                new_percentage=0, config_fallback=fallback)
+            self.assertTrue(decision.is_noop)
+            self.assertEqual(decision.action, "noop")
+
+
+class TestSingleSnapshotEffectiveRead(unittest.TestCase):
+    """effective_percentage decides from one atomic snapshot read.
+
+    The pre-hotfix code stitched get_rollout_stage() and
+    rollout_stage_known() — two queries a committed emergency rollback
+    could interleave with. The decision must come from one snapshot.
+    """
+
+    def setUp(self):
+        self.store, self.db_path = _make_store(self)
+
+    def _forbid_two_phase_reads(self):
+        def fail(name):
+            def _raise(*_a, **_k):
+                raise AssertionError(
+                    f"two-phase read: state_db.{name} must not be called")
+            return _raise
+        return (
+            patch.object(state_db, "get_rollout_stage",
+                         side_effect=fail("get_rollout_stage")),
+            patch.object(state_db, "rollout_stage_known",
+                         side_effect=fail("rollout_stage_known")),
+            patch.object(state_db, "read_rollout_snapshot",
+                         wraps=state_db.read_rollout_snapshot),
+        )
+
+    def test_staged_row_resolved_from_exactly_one_snapshot(self):
+        rollout_policy.set_stage(
+            self.db_path, agent="codex", node="implementation",
+            task_type="fix", new_percentage=5, reason="r", source="cli")
+        p_stage, p_known, p_snap = self._forbid_two_phase_reads()
+        with p_stage, p_known, p_snap as spy:
+            self.assertEqual(rollout_policy.effective_percentage(
+                self.db_path, agent="codex", node="implementation",
+                task_type="fix", config_fallback=50), 5)
+        self.assertEqual(spy.call_count, 1)
+
+    def test_absent_row_resolved_from_exactly_one_snapshot(self):
+        p_stage, p_known, p_snap = self._forbid_two_phase_reads()
+        with p_stage, p_known, p_snap as spy:
+            self.assertEqual(rollout_policy.effective_percentage(
+                self.db_path, agent="codex", node="implementation",
+                task_type="fix", config_fallback=5), 5)
+            self.assertEqual(rollout_policy.effective_percentage(
+                self.db_path, agent="codex", node="implementation",
+                task_type="fix", config_fallback=None), 0)
+        self.assertEqual(spy.call_count, 2)  # one read per decision
+
+    def test_committed_rollback_is_immediately_visible(self):
+        rollout_policy.set_stage(
+            self.db_path, agent="codex", node="implementation",
+            task_type="fix", new_percentage=5, reason="r", source="cli")
+        self.assertEqual(rollout_policy.effective_percentage(
+            self.db_path, agent="codex", node="implementation",
+            task_type="fix", config_fallback=None), 5)
+        rollout_policy.set_stage(
+            self.db_path, agent="codex", node="implementation",
+            task_type="fix", new_percentage=0, reason="emergency",
+            source="guard", automatic=True)
+        # The next read after the rollback COMMITs returns 0 — and with
+        # a single atomic read it structurally cannot return a stale 5.
+        p_stage, p_known, p_snap = self._forbid_two_phase_reads()
+        with p_stage, p_known, p_snap as spy:
+            self.assertEqual(rollout_policy.effective_percentage(
+                self.db_path, agent="codex", node="implementation",
+                task_type="fix", config_fallback=50), 0)
+        self.assertEqual(spy.call_count, 1)
+
+
+class TestGuardEpisodeIsolation(unittest.TestCase):
+    """Guard evidence belongs to the current rollout episode only.
+
+    Every successful explicit stage change opens a new evidence episode:
+    the newest rollout_audit row's created_at is the guard's `since`
+    boundary. A rollback + retry re-accumulates evidence instead of
+    re-condemning the retry with the previous episode's bad samples.
+    Historical rows are never deleted; they just stop being evidence.
+    """
+
+    T_ACTIVATE = 1_700_000_000.0
+    T_EP1_SAMPLES = 1_700_001_000.0
+    T_ROLLBACK = 1_700_002_000.0
+    T_RETRY = 1_700_003_000.0
+    T_EP2_GOOD = 1_700_004_000.0
+    T_EP2_BAD = 1_700_005_000.0
+
+    def setUp(self):
+        self.store, self.db_path = _make_store(self)
+
+    def _guard(self):
+        return rollout_policy.evaluate_guard(
+            self.db_path, agent="codex", node="implementation",
+            task_type="fix")
+
+    def test_retry_after_rollback_reaccumulates_evidence(self):
+        # Episode 1: activate 5%, then the adaptive arm collapses.
+        rollout_policy.set_stage(
+            self.db_path, agent="codex", node="implementation",
+            task_type="fix", new_percentage=5, reason="activate ep1",
+            source="cli", created_at=self.T_ACTIVATE)
+        _seed_episode_samples(
+            self, self.store, self.db_path, start_ts=self.T_EP1_SAMPLES,
+            tag="ep1", adaptive_successes=0, adaptive_failures=12,
+            legacy_successes=12, legacy_failures=0)
+        verdict = self._guard()
+        self.assertTrue(verdict["triggered"])
+
+        # The guard's own write path ends episode 1.
+        with patch.object(rollout_policy.time, "time",
+                          return_value=self.T_ROLLBACK):
+            result = rollout_policy.maybe_auto_rollback(
+                self.db_path, agent="codex", node="implementation",
+                task_type="fix", reason="ep1 regression")
+        self.assertEqual(result["action"], "auto_rollback")
+
+        # Episode 2: the human re-activates 5% after fixing the issue.
+        rollout_policy.set_stage(
+            self.db_path, agent="codex", node="implementation",
+            task_type="fix", new_percentage=5, reason="retry after fix",
+            source="cli", created_at=self.T_RETRY)
+        self.assertEqual(rollout_policy.current_rollout_episode_start(
+            self.db_path, agent="codex", node="implementation",
+            task_type="fix"), self.T_RETRY)
+
+        # No new samples yet: the old episode's collapse must NOT
+        # re-condemn the retry. Starvation is a decision, not a verdict.
+        verdict = self._guard()
+        self.assertEqual(verdict["status"], "insufficient_samples")
+        self.assertFalse(verdict["triggered"])
+        self.assertEqual(verdict["evidence_since"], self.T_RETRY)
+
+        # Episode-2 good evidence: tolerated.
+        _seed_episode_samples(
+            self, self.store, self.db_path, start_ts=self.T_EP2_GOOD,
+            tag="ep2good", adaptive_successes=12, adaptive_failures=0,
+            legacy_successes=12, legacy_failures=0)
+        verdict = self._guard()
+        self.assertEqual(verdict["status"], "within_tolerance")
+        self.assertFalse(verdict["triggered"])
+
+        # Episode-2's own regression: still caught.
+        _seed_episode_samples(
+            self, self.store, self.db_path, start_ts=self.T_EP2_BAD,
+            tag="ep2bad", adaptive_successes=0, adaptive_failures=12,
+            legacy_successes=0, legacy_failures=0)
+        verdict = self._guard()
+        self.assertTrue(verdict["triggered"])
+
+    def test_stage_change_opens_a_fresh_evidence_window(self):
+        # 5% evidence must not prove 10% safe: the promotion itself
+        # opens a new episode and the evidence window restarts.
+        rollout_policy.set_stage(
+            self.db_path, agent="codex", node="implementation",
+            task_type="fix", new_percentage=5, reason="activate",
+            source="cli", created_at=self.T_ACTIVATE)
+        _seed_episode_samples(
+            self, self.store, self.db_path, start_ts=self.T_EP1_SAMPLES,
+            tag="at5", adaptive_successes=12, adaptive_failures=0,
+            legacy_successes=12, legacy_failures=0)
+        self.assertEqual(self._guard()["status"], "within_tolerance")
+
+        rollout_policy.set_stage(
+            self.db_path, agent="codex", node="implementation",
+            task_type="fix", new_percentage=10, reason="grow",
+            source="cli", created_at=self.T_RETRY)
+        verdict = self._guard()
+        self.assertEqual(verdict["status"], "insufficient_samples")
+        self.assertFalse(verdict["triggered"])
+        self.assertEqual(verdict["evidence_since"], self.T_RETRY)
+
+        _seed_episode_samples(
+            self, self.store, self.db_path, start_ts=self.T_EP2_GOOD,
+            tag="at10", adaptive_successes=12, adaptive_failures=0,
+            legacy_successes=12, legacy_failures=0)
+        self.assertEqual(self._guard()["status"], "within_tolerance")
+
+    def test_bucket_without_rollout_history_reads_unscoped(self):
+        # #103 behavior is preserved for config-only buckets: no rollout
+        # episode exists, so the guard read stays unscoped and the old
+        # samples still count.
+        _seed_episode_samples(
+            self, self.store, self.db_path, start_ts=self.T_EP1_SAMPLES,
+            tag="plain", adaptive_successes=0, adaptive_failures=12,
+            legacy_successes=12, legacy_failures=0)
+        verdict = self._guard()
+        self.assertTrue(verdict["triggered"])
+        self.assertIsNone(verdict["evidence_since"])
+
+    def test_episode_start_tracks_newest_change_including_rollback(self):
+        self.assertIsNone(rollout_policy.current_rollout_episode_start(
+            self.db_path, agent="codex", node="implementation",
+            task_type="fix"))
+        rollout_policy.set_stage(
+            self.db_path, agent="codex", node="implementation",
+            task_type="fix", new_percentage=5, reason="a", source="cli",
+            created_at=1_000.0)
+        rollout_policy.set_stage(
+            self.db_path, agent="codex", node="implementation",
+            task_type="fix", new_percentage=10, reason="b", source="cli",
+            created_at=2_000.0)
+        self.assertEqual(rollout_policy.current_rollout_episode_start(
+            self.db_path, agent="codex", node="implementation",
+            task_type="fix"), 2_000.0)
+        # A rollback is a stage change too: it opens a new boundary.
+        rollout_policy.set_stage(
+            self.db_path, agent="codex", node="implementation",
+            task_type="fix", new_percentage=0, reason="off", source="cli",
+            created_at=3_000.0)
+        self.assertEqual(rollout_policy.current_rollout_episode_start(
+            self.db_path, agent="codex", node="implementation",
+            task_type="fix"), 3_000.0)
+
+    def test_episode_start_on_pre_rollout_db_is_none(self):
+        import sqlite3
+        tmp = tempfile.TemporaryDirectory(prefix="herdr-rollout-bare-")
+        self.addCleanup(tmp.cleanup)
+        bare = Path(tmp.name) / "state.db"
+        sqlite3.connect(str(bare)).close()
+        self.assertIsNone(rollout_policy.current_rollout_episode_start(
+            bare, agent="codex", node="implementation", task_type="fix"))
+
+
+class TestExactBucketIndex(unittest.TestCase):
+    """The exact-bucket guard read must be genuinely index-served.
+
+    Sparse buckets must not scan route_decision history: the partial
+    expression index is asserted through EXPLAIN QUERY PLAN, and its
+    CASE/json_valid wrapper keeps malformed payloads from ever breaking
+    INSERT-time index maintenance.
+    """
+
+    def setUp(self):
+        self.store, self.db_path = _make_store(self)
+
+    def _decision(self, index, *, recommended, tag, ts):
+        from herdr import adaptive_router
+        payload = adaptive_router.build_canary_decision(
+            workflow_id="wf-idx", run_id=f"{tag}-run-{index}",
+            task_id=f"{tag}-task-{index}", node="implementation",
+            task_type="fix", actual_agent=recommended,
+            recommended_agent=recommended, legacy_agent="opencode",
+            diverted=False, rankings=[], gate={}, created_at=ts)
+        self.store.record_event(
+            "route_decision", payload, workflow_id="wf-idx",
+            node_id="implementation", task_id=f"{tag}-task-{index}",
+            agent_id=recommended, source="adaptive-router-canary",
+            timestamp=ts, run_id=f"{tag}-run-{index}")
+
+    @staticmethod
+    def _bucket(agent="codex"):
+        return state_db.ExactDecisionBucket(
+            mode="canary", recommended_agent=agent,
+            node="implementation", task_type="fix")
+
+    def test_exact_bucket_query_plan_uses_the_expression_index(self):
+        import sqlite3
+        base = 1_700_000_000.0
+        # Many sibling rows, few target rows: the sparse-bucket case.
+        for index in range(300):
+            self._decision(index, recommended="claude", tag="sib",
+                           ts=base + index)
+        for index in range(5):
+            self._decision(index, recommended="codex", tag="tgt",
+                           ts=base + 1_000 + index)
+
+        sql, params = state_db._route_decisions_sql(
+            limit=200, since=base, exact_bucket=self._bucket())
+        conn = sqlite3.connect(str(self.db_path))
+        try:
+            plan = conn.execute("EXPLAIN QUERY PLAN " + sql,
+                                params).fetchall()
+        finally:
+            conn.close()
+        detail = " | ".join(str(row[-1]) for row in plan)
+        self.assertIn("idx_events_route_decision_bucket", detail)
+        self.assertIn("SEARCH events", detail)
+        self.assertNotIn("SCAN events", detail)
+
+        # The indexed read returns exactly the sparse target, newest
+        # first, with no sibling leakage.
+        rows = state_db.query_route_decisions(
+            limit=200, since=base, db_path=self.db_path,
+            exact_bucket=self._bucket())
+        self.assertEqual(len(rows), 5)
+        self.assertEqual(rows[0]["run_id"], "tgt-run-4")
+        for row in rows:
+            self.assertEqual(row["payload"]["recommended_agent"], "codex")
+
+    def test_shadow_bucket_shares_the_index_without_semantic_change(self):
+        from herdr import adaptive_router
+        base = 1_700_000_000.0
+        # Canary and shadow rows interleaved in the same event stream:
+        # each exact bucket must still see only its own mode.
+        for index in range(10):
+            self._decision(index, recommended="codex", tag="mix",
+                           ts=base + index)
+        for index in range(20):
+            payload = adaptive_router.build_shadow_decision(
+                workflow_id="wf-idx", run_id=f"sh-run-{index}",
+                task_id=f"sh-task-{index}", node="implementation",
+                task_type="fix", actual_agent="codex",
+                rankings=[{"agent": "codex"}], created_at=base + 100 + index)
+            self.store.record_event(
+                "route_decision", payload, workflow_id="wf-idx",
+                node_id="implementation", task_id=f"sh-task-{index}",
+                agent_id="codex", source="adaptive-router-shadow",
+                timestamp=base + 100 + index, run_id=f"sh-run-{index}")
+
+        shadow_rows = state_db.query_route_decisions(
+            limit=50, db_path=self.db_path,
+            exact_bucket=state_db.ExactDecisionBucket(
+                mode="shadow", recommended_agent="codex",
+                node="implementation", task_type="fix"))
+        self.assertEqual(len(shadow_rows), 20)
+        for row in shadow_rows:
+            self.assertEqual(row["payload"]["mode"], "shadow")
+
+        canary_rows = state_db.query_route_decisions(
+            limit=50, db_path=self.db_path, exact_bucket=self._bucket())
+        self.assertEqual(len(canary_rows), 10)
+        for row in canary_rows:
+            self.assertEqual(row["payload"]["mode"], "canary")
+
+    def test_malformed_payloads_never_match_and_never_break_writes(self):
+        # A malformed payload indexes as NULL: the INSERT succeeds, the
+        # exact bucket never matches it, and the general scan still
+        # tolerates it (decoded to {}).
+        conn = state_db.get_db_connection(self.db_path)
+        try:
+            conn.execute(
+                "INSERT INTO events(node_id, event_type, payload_json, "
+                "timestamp) VALUES ('implementation', 'route_decision', "
+                "'{not valid json', 1_700_000_000.0)")
+        finally:
+            conn.close()
+        rows = state_db.query_route_decisions(
+            limit=10, db_path=self.db_path, exact_bucket=self._bucket())
+        self.assertEqual(rows, [])
+        rows = state_db.query_route_decisions(
+            limit=10, db_path=self.db_path)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["payload"], {})
+
+
+class TestStrictPercentageParsing(unittest.TestCase):
+    """Validate before convert: no lossy int() on the rollout boundary.
+
+    int(5.9) used to silently truncate to the valid stage 5. Legal
+    inputs are exact: 0/5/10/25/50, their strings, "off", integral
+    floats and Decimals. Fractional, non-finite and bool inputs raise
+    ValueError at normalize_percentage and decay to 0 in _safe_fallback.
+    """
+
+    def setUp(self):
+        self.store, self.db_path = _make_store(self)
+
+    def test_integral_floats_and_decimals_accepted(self):
+        from decimal import Decimal
+        self.assertEqual(rollout_policy.normalize_percentage(0.0), 0)
+        self.assertEqual(rollout_policy.normalize_percentage(5.0), 5)
+        self.assertEqual(rollout_policy.normalize_percentage(50.0), 50)
+        self.assertEqual(
+            rollout_policy.normalize_percentage(Decimal("5.0")), 5)
+        self.assertEqual(
+            rollout_policy.normalize_percentage(Decimal("10")), 10)
+
+    def test_fractional_rejected_never_truncated(self):
+        for bad in (5.9, 5.1, 4.9999, 10.5, 25.0001, -0.5):
+            with self.assertRaises(ValueError, msg=f"{bad!r}"):
+                rollout_policy.normalize_percentage(bad)
+
+    def test_non_finite_and_bool_rejected(self):
+        for bad in (float("nan"), float("inf"), float("-inf"),
+                    True, False):
+            with self.assertRaises(ValueError, msg=f"{bad!r}"):
+                rollout_policy.normalize_percentage(bad)
+
+    def test_fractional_decimal_and_nan_decimal_rejected(self):
+        from decimal import Decimal
+        for bad in (Decimal("5.9"), Decimal("10.5"), Decimal("NaN"),
+                    Decimal("Infinity")):
+            with self.assertRaises(ValueError, msg=f"{bad!r}"):
+                rollout_policy.normalize_percentage(bad)
+
+    def test_set_stage_rejects_fractional_via_python_api(self):
+        # The domain boundary rejects before any state is written.
+        with self.assertRaises(ValueError):
+            rollout_policy.set_stage(
+                self.db_path, agent="codex", node="implementation",
+                task_type="fix", new_percentage=5.9, reason="r",
+                source="api")
+        self.assertFalse(state_db.rollout_stage_known(
+            "codex", "implementation", "fix", self.db_path))
+
+    def test_fractional_fallback_serves_zero_never_truncates(self):
+        # 5.9 as a config fallback is unusable: it resolves to 0, never
+        # to a serving 5.
+        self.assertEqual(rollout_policy.effective_percentage(
+            self.db_path, agent="codex", node="implementation",
+            task_type="fix", config_fallback=5.9), 0)
+        self.assertEqual(rollout_policy.effective_percentage(
+            self.db_path, agent="codex", node="implementation",
+            task_type="fix", config_fallback=5.0), 5)
+        self.assertEqual(rollout_policy.effective_percentage(
+            self.db_path, agent="codex", node="implementation",
+            task_type="fix", config_fallback=float("nan")), 0)
+        self.assertEqual(rollout_policy.effective_percentage(
+            self.db_path, agent="codex", node="implementation",
+            task_type="fix", config_fallback=True), 0)
+
+    def test_fractional_fallback_is_not_a_takeover(self):
+        # An unusable fallback reads as 0 traffic: set 5 on it is a
+        # normal 0 -> 5 promotion, never a takeover at "5".
+        decision = rollout_policy.decide_rollout_change(
+            state_db.RolloutSnapshot(exists=False, percentage=0),
+            new_percentage=5, config_fallback=5.9)
+        self.assertEqual(decision.action, "promote")
+        self.assertEqual(decision.effective_prev, 0)
+
+    def test_safe_fallback_lossless(self):
+        self.assertEqual(rollout_policy._safe_fallback(None), 0)
+        self.assertEqual(rollout_policy._safe_fallback(0), 0)
+        self.assertEqual(rollout_policy._safe_fallback(5), 5)
+        self.assertEqual(rollout_policy._safe_fallback(5.0), 5)
+        self.assertEqual(rollout_policy._safe_fallback("5"), 5)
+        self.assertEqual(rollout_policy._safe_fallback(5.9), 0)
+        self.assertEqual(rollout_policy._safe_fallback("5.9"), 0)
+        self.assertEqual(rollout_policy._safe_fallback(True), 0)
+        self.assertEqual(rollout_policy._safe_fallback(float("inf")), 0)
+        self.assertEqual(rollout_policy._safe_fallback(float("nan")), 0)
+        self.assertEqual(rollout_policy._safe_fallback(101), 0)
+        self.assertEqual(rollout_policy._safe_fallback(-1), 0)
 
 
 if __name__ == "__main__":
