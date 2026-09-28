@@ -290,9 +290,14 @@ herdr-task rollout check-guard --agent codex --node implementation \
 
 - `status`（只读）：列出有 staged 行的 bucket 与当前阶段；kill 时标注 KILLED；
 - `set`：相邻推进（`off→5→10→25→50`），跨级拒绝（exit 2），`--reason` 必填；
+  百分比先校验后转换，`5.9`/`NaN` 等非精确整数输入直接 exit 2，绝不截断；
+- `set` 对**没有 staged 行**、正由 canary 配置服务 N% 的 bucket 执行 `set N` 时
+  记 `action=takeover`（输出 `5% -> 5% action=takeover`）：流量不变、所有权
+  迁移到 staged 行，此后才能继续 `set 10`；只有「行已存在且值相同」才是真 no-op；
 - `off`：从任意阶段直接回 `off`，`--reason` 必填；
 - `history`（只读）：`rollout_audit` newest-first，每次变化恰好一条；
-- `check-guard`：只读评估 Safety Guard（复用 canary-eval 两臂 facts），
+- `check-guard`：只读评估 Safety Guard（复用 canary-eval 两臂 facts，证据窗口
+  从本 bucket 最近一次阶段变更起算 —— 回退后重试会重新累积证据），
   `--auto-rollback` 触发时持久化 `→off`（`action=auto_rollback`）；
 - `set` / `off`：非法阶段或开放百分比、跨级推进、缺 `--reason`、并发冲突
   一律 exit 2（状态未变）；存储失败 exit 1（无部分生效）；

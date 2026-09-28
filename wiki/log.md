@@ -1397,3 +1397,35 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - 教训：§94。归档走查：`docs/walkthroughs/20260928-pr108-selective-reverification.md`
   （含 entry-gate / S5 验证 / S6 评审三份门禁工件的长期副本，原件在 `.omc/` 且被
   gitignore，不随仓库留存）。
+
+## 2026-09-28 · Controlled Rollout 合并后安全收口（#106 后续 hotfix）
+
+- 只修五个已确认的漏洞，不新增 rollout 特性（无 75/100、无自动扩量、无新指标）：
+  takeover、单快照读取、episode 证据窗口、精确 bucket 索引、百分比无损解析。
+- **fallback 接管误判**：无 staged 行 + config fallback 5 + `set 5` 原被判 no-op，
+  所有权永不迁移，`5→10` 永远被读成 `0→10` 拒绝。新增第 4 个审计 action
+  `takeover`（`5% → 5%`）：流量不变、所有权迁移到 staged 行；绕过阶梯是因为
+  阶梯管的是流量变化。有行同值仍是真 no-op，不新增审计行。
+- **一次决策一次快照**：`effective_percentage` 原来分两次读（值 + 存在性），
+  已 COMMIT 的紧急回退可能与旧值拼成一次决策。改为单次
+  `read_rollout_snapshot`；回归测试把旧两读 helper patch 成抛错并断言快照
+  恰好被调一次。
+- **Guard 证据 episode 化**：每次成功的显式阶段变更（含 rollback/takeover）
+  以最新 `rollout_audit.created_at` 为证据窗口起点。回退后重试 5% 不再被上一轮
+  坏样本立即定罪，5% 好证据也不再证明 10% 安全；无审计历史 bucket 保持 #103
+  不加窗读取，历史永不删除。判定结果新增 `evidence_since` 事实字段。
+- **精确 bucket 真索引**：`idx_events_route_decision_bucket` 部分表达式索引
+  （`CASE WHEN json_valid` 包裹四表达式 + timestamp + id），非法 payload 索引为
+  NULL、INSERT 永不失败；只在 `_ensure_schema` 可写路径创建（#102 只读契约不破）。
+  查询与索引共用 `_route_decision_bucket_exprs`，EXPLAIN QUERY PLAN 断言
+  `SEARCH events USING INDEX …`，稀疏 bucket（5/305 行）不再扫历史。
+- **先校验后转换**：`int(5.9)` 曾静默变合法 stage 5。`normalize_percentage` 与
+  `_safe_fallback` 共用 `_strict_integral`：`5.9/NaN/inf/True/Decimal("5.9")`
+  拒绝（域边界 ValueError / fallback 归零），`5.0/Decimal("5.0")` 合法。
+- 未改：canary-v2 hash、bucket 定义、Router 评分、canary 准入与指标、#107
+  Scheduler、#108 Reverification、Shadow 全量扫描与 `skipped_canary_events`
+  口径、#102 只读契约。不变量复验：`No persisted canary decision → no canary
+  execution`、`hash_bucket < percentage`、`5⊂10⊂25⊂50` 单调包含全部保持。
+- 全量 2230 passed + 50 subtests；compileall / CLI 语法 / `git diff --check` 通过。
+- 教训：「同流量」不等于「无操作」——所有权也是状态；「评不了」与「没问题」
+  必须走相反的路由方向；任何跨两次读的决策都是并发窗口。
