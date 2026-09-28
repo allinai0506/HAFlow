@@ -13,6 +13,7 @@ controller 模块按源码加载,subprocess 伪造,git 用真实临时仓库。
 """
 
 import importlib.machinery
+import json
 import importlib.util
 import os
 import subprocess
@@ -453,17 +454,17 @@ class P1LatchRecoveryTest(unittest.TestCase):
         put.assert_not_called()
 
 
-class P1DeliveryNoteFreezeTest(unittest.TestCase):
-    """P1-3 回归:freeze 必须真能打通 launch 的 delivery preflight。
+class FrozenCandidateFactTest(unittest.TestCase):
+    """P1(第 3 轮)回归:冻结 Candidate 与 Final Delivery Record 是两种事实。
 
-    背景:Controller 曾用"分支 HEAD 兜底"算出 candidate_sha,而
-    herdr-task launch 的 _preflight_delivery_identity 在缺 delivery note 时
-    直接 exit 2 —— 两层契约互相打架。本测试真实执行 record-delivery 路径,
-    证明冻结后 delivery note 存在且 SHA 一致。
+    背景:上一版在冻结时伪造 review_task/test_gate 占位 id 写入 delivery
+    record。delivery_record 把这些字段纳入不可变 fingerprint,于是真实任务
+    创建后写入真 id 会 [DELIVERY CONFLICT];check-delivery 看到的 verifier
+    身份也是假的。冻结只允许写 candidate_frozen 事实。
     """
 
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(prefix="herdr-p13-")
+        self.tmp = tempfile.TemporaryDirectory(prefix="herdr-frozen-")
         self.root = Path(self.tmp.name)
         self.docs = self.root / "docs"
         self.docs.mkdir(parents=True, exist_ok=True)
@@ -477,70 +478,233 @@ class P1DeliveryNoteFreezeTest(unittest.TestCase):
         from herdr.state_store import get_state_store
 
         get_state_store(self.db).save_workflow(
-            {"workflow_id": "wf-freeze-1", "status": "running"})
+            {"workflow_id": "wf-frozen-1", "status": "running"})
 
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_freeze_creates_delivery_note_usable_by_launch(self):
-        from herdr import delivery_record as dr
+    def _freeze(self, sha):
+        with patch.object(_ctl, "_scheduler_expected_candidate_sha",
+                          return_value=sha),             patch.object(_ctl, "load_tasks", return_value=[]):
+            return _ctl._scheduler_freeze_candidate(
+                "wf-frozen-1", str(self.root), "implementation", [])
+
+    def test_freeze_records_fact_and_no_delivery_note(self):
+        from herdr import scheduler_facts as sf
         from herdr import workflow_docs as wd
 
         sha = "a" * 40
-        with patch.object(_ctl, "_scheduler_expected_candidate_sha",
-                          return_value=sha), \
-            patch.object(_ctl, "load_tasks", return_value=[]):
-            frozen = _ctl._scheduler_freeze_candidate(
-                "wf-freeze-1", str(self.root), "implementation", [])
-        self.assertEqual(frozen, sha)
-        notes = wd.load_notes("wf-freeze-1")
-        self.assertTrue(
-            [n for n in notes if n.get("kind") == "delivery"],
-            "freeze must create a delivery note so FR-6.2 preflight passes",
+        self.assertEqual(self._freeze(sha), sha)
+        facts = sf.list_candidate_frozen_events("wf-frozen-1", db_path=self.db)
+        self.assertEqual(len(facts), 1)
+        self.assertEqual(facts[0]["payload"]["candidate_sha"], sha)
+        # 冻结阶段绝不能产生 delivery record:真实 verifier task 还不存在
+        self.assertEqual(
+            [n for n in wd.load_notes("wf-frozen-1") if n.get("kind") == "delivery"],
+            [],
+            "freeze must not fabricate a delivery identity",
         )
-        effective = dr.select_effective_delivery(notes, workflow_id="wf-freeze-1")
-        self.assertIsNotNone(effective)
-        self.assertEqual(dr._body_value(effective, "candidate_sha"), sha)
+        # 也不得出现任何伪造的 verifier task id
+        raw = json.dumps(wd.load_notes("wf-frozen-1"), ensure_ascii=False)
+        self.assertNotIn("provisional", raw)
 
     def test_freeze_is_idempotent_on_same_sha(self):
-        from herdr import workflow_docs as wd
+        from herdr import scheduler_facts as sf
 
         sha = "b" * 40
-        with patch.object(_ctl, "_scheduler_expected_candidate_sha",
-                          return_value=sha), \
-            patch.object(_ctl, "load_tasks", return_value=[]):
-            self.assertEqual(_ctl._scheduler_freeze_candidate(
-                "wf-freeze-1", str(self.root), "implementation", []), sha)
-            self.assertEqual(_ctl._scheduler_freeze_candidate(
-                "wf-freeze-1", str(self.root), "implementation", []), sha)
-        notes = [n for n in wd.load_notes("wf-freeze-1")
-                 if n.get("kind") == "delivery"]
-        self.assertEqual(len(notes), 1)
+        self.assertEqual(self._freeze(sha), sha)
+        self.assertEqual(self._freeze(sha), sha)
+        facts = sf.list_candidate_frozen_events("wf-frozen-1", db_path=self.db)
+        self.assertEqual(len(facts), 1)
 
-    def test_candidate_rotation_supersedes_previous_note(self):
-        from herdr import delivery_record as dr
+    def test_fix_loop_recandidate_frees_without_delivery_conflict(self):
+        """P1 回归:review blocked → A 失效 → 返工 → B 冻结必须畅通。
+
+        旧实现在这种情况下 supersedes 为空,record_delivery_note 直接
+        [DELIVERY REPLACEMENT REQUIRED] + SystemExit(2),第二轮 test/review
+        无法启动。现在冻结不再触碰 delivery,链路自然贯通。
+        """
+        from herdr import scheduler_facts as sf
         from herdr import workflow_docs as wd
 
-        first, second = "c" * 40, "d" * 40
-        with patch.object(_ctl, "load_tasks", return_value=[]):
-            with patch.object(_ctl, "_scheduler_expected_candidate_sha",
-                              return_value=first):
-                self.assertEqual(_ctl._scheduler_freeze_candidate(
-                    "wf-freeze-1", str(self.root), "implementation", []), first)
-            with patch.object(_ctl, "_scheduler_expected_candidate_sha",
-                              return_value=second):
-                self.assertEqual(_ctl._scheduler_freeze_candidate(
-                    "wf-freeze-1", str(self.root), "implementation", []), second)
-        notes = wd.load_notes("wf-freeze-1")
-        effective = dr.select_effective_delivery(notes, workflow_id="wf-freeze-1")
-        self.assertIsNotNone(effective, "rotation must leave exactly one eligible tip")
-        self.assertEqual(dr._body_value(effective, "candidate_sha"), second)
+        sha_a, sha_b = "c" * 40, "d" * 40
+        self.assertEqual(self._freeze(sha_a), sha_a)
+        self.assertEqual(self._freeze(sha_b), sha_b)
+        facts = sf.list_candidate_frozen_events("wf-frozen-1", db_path=self.db)
+        self.assertEqual(
+            [f["payload"]["candidate_sha"] for f in facts], [sha_a, sha_b])
+        self.assertEqual(facts[1]["payload"]["rotated_from"], sha_a)
+        self.assertEqual(
+            sf.latest_frozen_candidate_sha("wf-frozen-1", db_path=self.db), sha_b)
+        self.assertEqual(
+            [n for n in wd.load_notes("wf-frozen-1") if n.get("kind") == "delivery"],
+            [],
+        )
 
     def test_unprovable_sha_returns_empty(self):
         with patch.object(_ctl, "_scheduler_expected_candidate_sha",
                           return_value=""):
             self.assertEqual(_ctl._scheduler_freeze_candidate(
-                "wf-freeze-1", str(self.root), "implementation", []), "")
+                "wf-frozen-1", str(self.root), "implementation", []), "")
+
+
+class FrozenCandidateLaunchIdentityTest(unittest.TestCase):
+    """冻结候选作为可验证身份:严格绑定 dispatch claim,缺则 fail-closed。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="herdr-frozenlaunch-")
+        self.root = Path(self.tmp.name)
+        self.docs = self.root / "docs"
+        self.docs.mkdir(parents=True, exist_ok=True)
+        self.db = self.root / "state.db"
+        env = patch.dict(os.environ, {
+            "HERDR_WORKFLOW_DOCS_DIR": str(self.docs),
+            "HERDR_STATE_DB": str(self.db),
+        })
+        env.start()
+        self.addCleanup(env.stop)
+        from herdr.state_store import get_state_store
+
+        get_state_store(self.db).save_workflow(
+            {"workflow_id": "wf-frozen-2", "status": "running"})
+        self._ht = _load_module(
+            "herdr_task_frozen_launch_test",
+            HERDR_ROOT / "bin" / "herdr-task",
+        )
+        self.sha = "e" * 40
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _freeze(self):
+        from herdr import scheduler_facts as sf
+
+        sf.record_candidate_frozen(
+            "wf-frozen-2", self.sha, source_node="implementation",
+            db_path=self.db)
+
+    def test_preflight_accepts_matching_frozen_claim(self):
+        self._freeze()
+        result = self._ht._preflight_delivery_identity(
+            "wf-frozen-2", "test", "wf-frozen-2-test-auto", claim=self.sha)
+        self.assertEqual(result["identity_source"], "frozen")
+        self.assertEqual(result["candidate_sha"], self.sha)
+
+    def test_preflight_rejects_missing_claim(self):
+        self._freeze()
+        with pytest.raises(SystemExit) as exc:
+            self._ht._preflight_delivery_identity(
+                "wf-frozen-2", "test", "wf-frozen-2-test-auto", claim=None)
+        self.assertEqual(exc.value.code, 2)
+
+    def test_preflight_rejects_mismatched_claim(self):
+        self._freeze()
+        with pytest.raises(SystemExit) as exc:
+            self._ht._preflight_delivery_identity(
+                "wf-frozen-2", "review", "wf-frozen-2-review-auto",
+                claim="f" * 40)
+        self.assertEqual(exc.value.code, 2)
+
+    def test_preflight_rejects_when_nothing_frozen(self):
+        with pytest.raises(SystemExit) as exc:
+            self._ht._preflight_delivery_identity(
+                "wf-frozen-2", "test", "wf-frozen-2-test-auto", claim=self.sha)
+        self.assertEqual(exc.value.code, 2)
+
+    def test_preflight_ignores_non_verifier_nodes(self):
+        self.assertIsNone(self._ht._preflight_delivery_identity(
+            "wf-frozen-2", "implementation", "wf-frozen-2-impl", claim=None))
+
+    def test_invalidated_prior_candidate_does_not_block_new_frozen(self):
+        """P1 回归:上一轮 candidate 已失效时,新一轮 frozen candidate 仍可验证。
+
+        旧行为:prior candidate 存在但不可用 -> delivery_invalidated -> exit 2,
+        于是 fix-loop 后 Test(B)/Review(B) 永远起不来。
+        """
+        from herdr import delivery_record as dr
+        from herdr import workflow_docs as wd
+
+        stale_sha = "1" * 40
+        wd.append_note(
+            "wf-frozen-2", kind="delivery",
+            title=dr.delivery_note_title("agent/x/feat", stale_sha),
+            body=dr.delivery_note_body({
+                "delivery_id": f"candidate-{stale_sha}",
+                "delivery_branch": "agent/x/feat", "candidate_sha": stale_sha,
+                "review_task": "old-review", "test_gate": "old-test"}),
+            node="wrapup", task_id="old-review", source=wd.SOURCE_CONTROLLER,
+            fields={"delivery_id": f"candidate-{stale_sha}",
+                    "delivery_branch": "agent/x/feat",
+                    "candidate_sha": stale_sha,
+                    "review_task": "old-review", "test_gate": "old-test"})
+        # 失效候选(等价于 fix-loop 作废后的 invalidation 备注)
+        wd.append_note(
+            "wf-frozen-2", kind="invalidation",
+            title="fix-loop 作废", body="candidate invalidated",
+            node="review", source=wd.SOURCE_CONTROLLER,
+            invalidates=["wrapup"],
+            fields={"invalidated_candidates": [f"candidate-{stale_sha}"]})
+
+        # 新一轮:B 被冻结,claim=B -> 允许(不得复活 A)
+        self._freeze()
+        result = self._ht._preflight_delivery_identity(
+            "wf-frozen-2", "test", "wf-frozen-2-test-auto", claim=self.sha)
+        self.assertEqual(result["identity_source"], "frozen")
+        self.assertEqual(result["candidate_sha"], self.sha)
+
+    def test_invalidated_prior_candidate_cannot_be_resurrected(self):
+        """失效候选不得借 frozen 通道复活:claim 指向旧 SHA 仍必须拒绝。"""
+        from herdr import delivery_record as dr
+        from herdr import workflow_docs as wd
+
+        stale_sha = "2" * 40
+        wd.append_note(
+            "wf-frozen-2", kind="delivery",
+            title=dr.delivery_note_title("agent/x/feat", stale_sha),
+            body=dr.delivery_note_body({
+                "delivery_id": f"candidate-{stale_sha}",
+                "delivery_branch": "agent/x/feat", "candidate_sha": stale_sha,
+                "review_task": "old-review", "test_gate": "old-test"}),
+            node="wrapup", task_id="old-review", source=wd.SOURCE_CONTROLLER,
+            fields={"delivery_id": f"candidate-{stale_sha}",
+                    "delivery_branch": "agent/x/feat",
+                    "candidate_sha": stale_sha,
+                    "review_task": "old-review", "test_gate": "old-test"})
+        wd.append_note(
+            "wf-frozen-2", kind="invalidation",
+            title="fix-loop 作废", body="candidate invalidated",
+            node="review", source=wd.SOURCE_CONTROLLER,
+            invalidates=["wrapup"],
+            fields={"invalidated_candidates": [f"candidate-{stale_sha}"]})
+        self._freeze()  # frozen = self.sha
+        with pytest.raises(SystemExit) as exc:
+            self._ht._preflight_delivery_identity(
+                "wf-frozen-2", "review", "wf-frozen-2-review-auto",
+                claim=stale_sha)
+        self.assertEqual(exc.value.code, 2)
+
+    def test_delivery_record_still_authoritative_when_present(self):
+        from herdr import delivery_record as dr
+        from herdr import workflow_docs as wd
+
+        note_sha = "9" * 40
+        wd.append_note(
+            "wf-frozen-2", kind="delivery",
+            title=dr.delivery_note_title("agent/x/feat", note_sha),
+            body=dr.delivery_note_body({
+                "delivery_id": f"candidate-{note_sha}",
+                "delivery_branch": "agent/x/feat", "candidate_sha": note_sha,
+                "review_task": "real-review", "test_gate": "real-test"}),
+            node="wrapup", task_id="real-review", source=wd.SOURCE_CONTROLLER,
+            fields={"delivery_id": f"candidate-{note_sha}",
+                    "delivery_branch": "agent/x/feat",
+                    "candidate_sha": note_sha,
+                    "review_task": "real-review", "test_gate": "real-test"})
+        result = self._ht._preflight_delivery_identity(
+            "wf-frozen-2", "test", "wf-frozen-2-test-auto", claim=self.sha)
+        # delivery record 优先:返回的是 record 而不是 frozen claim
+        self.assertIsNone(result.get("identity_source"))
+        self.assertEqual(dr._body_value(result, "candidate_sha"), note_sha)
 
 
 class P1StrictCandidateEqualityTest(unittest.TestCase):

@@ -2227,8 +2227,42 @@ def _record_router_failure_task(args, node_id, error):
     return task
 
 
-def _preflight_delivery_identity(workflow_id, node_id, task_id):
-    """Reject ambiguous/invalidated delivery before creating runtime resources."""
+def _frozen_candidate_sha(workflow_id):
+    """Latest scheduler-frozen candidate revision, or "" when none/failed.
+
+    A frozen candidate is a first-class identity claim produced by the
+    Critical-Path Scheduler when implementation completes. It carries no
+    verifier ids: the delivery record is written later, with real ones.
+    """
+    try:
+        from herdr import scheduler_facts as _sf
+    except ImportError:
+        return ""
+    try:
+        return str(_sf.latest_frozen_candidate_sha(workflow_id) or "").strip()
+    except (OSError, ValueError, RuntimeError, AttributeError, sqlite3.Error):
+        return ""
+
+
+def _resolve_expected_candidate(workflow_id, claim):
+    """Resolve the candidate revision test/review must verify.
+
+    Returns (candidate_sha, source) with source in {"delivery", "frozen"}.
+    - "delivery": an explicit delivery record exists (authoritative; the
+      caller must still run select_effective_delivery for ambiguity).
+    - "frozen": no delivery record yet; the scheduler-frozen candidate is
+      accepted ONLY when the dispatch claim names exactly that revision.
+    Returns ("", "") when nothing provable exists (fail-closed).
+    """
+    claim = str(claim or "").strip()
+    frozen = _frozen_candidate_sha(workflow_id)
+    if frozen and claim and claim == frozen:
+        return frozen, "frozen"
+    return "", ""
+
+
+def _preflight_delivery_identity(workflow_id, node_id, task_id, claim=""):
+    """Reject ambiguous/invalidated/unprovable delivery before creating resources."""
     if node_id not in {"test", "review"}:
         return None
     from herdr import delivery_record as _dr
@@ -2264,13 +2298,33 @@ def _preflight_delivery_identity(workflow_id, node_id, task_id):
         raise SystemExit(2)
 
     if not delivery_notes:
-        reject("delivery_missing", "no valid delivery baseline exists")
+        # No delivery record yet: the scheduler-frozen candidate is the only
+        # acceptable identity, and only when the dispatch claim proves it.
+        candidate, source = _resolve_expected_candidate(workflow_id, claim)
+        if source == "frozen":
+            return {"candidate_sha": candidate, "identity_source": "frozen"}
+        reject(
+            "delivery_missing",
+            "no valid delivery baseline exists and no matching frozen "
+            "candidate is recorded for this dispatch claim",
+        )
     try:
         effective = _dr.select_effective_delivery(notes)
     except _dr.DeliveryAmbiguityError as exc:
         reject("delivery_ambiguous", exc)
     if effective is None:
-        reject("delivery_invalidated", "delivery candidate was invalidated")
+        # A prior candidate exists but none is eligible (invalidated by a
+        # fix-loop rework). The frozen candidate for the CURRENT revision is
+        # the legitimate identity: it never resurrects the invalidated one,
+        # and the join gate still requires every verifier on that revision.
+        candidate, source = _resolve_expected_candidate(workflow_id, claim)
+        if source == "frozen":
+            return {"candidate_sha": candidate, "identity_source": "frozen"}
+        reject(
+            "delivery_invalidated",
+            "delivery candidate was invalidated and no matching frozen "
+            "candidate exists for this dispatch claim",
+        )
     return effective
 
 
@@ -2508,7 +2562,10 @@ def _launch_task(args):
 
     # Only after routing and delivery identity checks succeed do we create
     # runtime resources.  Both gates are deliberately before topology/Panes.
-    _preflight_delivery_identity(args.workflow_id, node_id, args.task_id)
+    _preflight_delivery_identity(
+        args.workflow_id, node_id, args.task_id,
+        claim=getattr(args, "candidate_sha", None),
+    )
     stage_config = ensure_stage_topology(
         args.workflow_id,
         node_id,
@@ -2679,6 +2736,7 @@ def _launch_task(args):
                 _effective = _dr2.select_effective_delivery(
                     _wd2.annotate_notes(_notes, current_base_sha=_base or None)
                 )
+            _claim = str(getattr(args, "candidate_sha", None) or "").strip()
             if _effective is not None:
                 _cand = str(_effective.get("candidate_sha") or "")
                 if not _cand:
@@ -2689,20 +2747,30 @@ def _launch_task(args):
                             break
                 if not _cand:
                     _cand = str(_effective.get("base_sha") or "")
-                # Scheduler v1: controller binds --candidate-sha at dispatch;
-                # the frozen claim must equal the delivery identity, otherwise
-                # launch is refused (claim/identity split would let the join
-                # gate certify a revision the delivery record never named).
-                _claim = str(getattr(args, "candidate_sha", None) or "").strip()
+                # Scheduler v1: the dispatch claim must name the same revision
+                # as the delivery identity, otherwise the join gate could
+                # certify a revision no delivery record ever named.
                 if _claim and _claim != _cand:
                     _validate_test_delivery_baseline(
                         args, _cand,
                         "claim_mismatch:" + _claim,
                         source_repo,
                     )
-                _validate_test_delivery_baseline(
-                    args, _cand, baseline_commit, source_repo
+            else:
+                # No eligible delivery record (none at all, or all invalidated):
+                # the frozen candidate is the identity, and the dispatch claim
+                # must prove it. Never falls back to a bare branch HEAD.
+                _frozen, _source = _resolve_expected_candidate(
+                    args.workflow_id, _claim
                 )
+                if _source != "frozen":
+                    _validate_test_delivery_baseline(
+                        args, "", baseline_commit, source_repo
+                    )
+                _cand = _frozen
+            _validate_test_delivery_baseline(
+                args, _cand, baseline_commit, source_repo
+            )
         except SystemExit:
             raise
         except (ImportError, AttributeError, OSError, ValueError, RuntimeError,

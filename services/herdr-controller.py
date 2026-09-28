@@ -2222,14 +2222,17 @@ def _scheduler_expected_candidate_sha(workflow_id, project_root, dep_ids, candid
 def _scheduler_freeze_candidate(workflow_id, project_root, source_node, dep_ids=None):
     """Freeze the candidate SHA and ensure a delivery record exists (Plan A).
 
-    Scheduler v1 contract: test/review launch requires a delivery note
-    (FR-6.2 fail-closed). The freeze therefore does two things atomically
-    in intent:
-    1. resolve the expected SHA (delivery note first, branch HEAD fallback);
-    2. when no delivery note exists yet, record a provisional delivery
-       note naming this frozen SHA, so dispatch and launch share ONE rule.
-    Provisional notes use deterministic placeholder review/test task ids
-    that the wrapup delivery finalizes; idempotent via record_delivery_note.
+    Two distinct facts, two distinct lifecycles (do not merge them):
+    - candidate_frozen (this function): "which revision this verification
+      round targets". Owned by the scheduler; carries no verifier identity.
+    - delivery record (written later, by review-pass/wrapup with the REAL
+      verifier task ids): "which real tasks verified and formed the".
+
+    Freezing therefore records only the frozen-candidate fact. It never
+    invents review_task/test_gate ids: delivery_record treats those as part
+    of an immutable fingerprint, so a placeholder would both conflict with
+    the real ids later and misrepresent delivery auditability.
+
     Returns the frozen SHA, or "" when unprovable (join side fail-closed).
     """
     if scheduler_core is None or scheduler_facts_store is None:
@@ -2255,77 +2258,9 @@ def _scheduler_freeze_candidate(workflow_id, project_root, source_node, dep_ids=
         )
     except Exception as exc:
         print(f"[SCHEDULER FREEZE WARN] workflow={workflow_id}: {exc}")
-    try:
-        _scheduler_ensure_delivery_note(
-            workflow_id, candidate_branch or "", sha, source_node
-        )
-    except Exception as exc:
-        print(f"[SCHEDULER DELIVERY WARN] workflow={workflow_id}: {exc}")
         return ""
     return sha
 
-
-def _scheduler_ensure_delivery_note(workflow_id, delivery_branch, sha, source_node):
-    """Ensure a delivery note names the frozen SHA (idempotent).
-
-    Reuses bin/herdr-task record_delivery_note so the scheduler never owns
-    a second delivery-truth. Raises on failure: without a note, test/review
-    launch would be refused by FR-6.2, so freeze must report unprovable.
-    """
-    from herdr import delivery_record as _dr
-    from herdr import workflow_docs as _wd
-    try:
-        notes = _wd.load_notes(workflow_id)
-    except Exception as exc:
-        raise RuntimeError(f"delivery notes unreadable: {exc}")
-    try:
-        effective = _dr.select_effective_delivery(notes, workflow_id=workflow_id)
-    except Exception:
-        effective = None
-    supersedes = ""
-    if effective is not None:
-        try:
-            current = _dr._body_value(effective, "candidate_sha")
-        except Exception:
-            current = ""
-        current = str(current or effective.get("candidate_sha") or "").strip()
-        if current == sha:
-            return {"status": "exists"}
-        # Candidate rotated (e.g. fix-loop rework): replace the prior
-        # delivery identity explicitly instead of stalling. record_delivery_note
-        # validates the replacement edge and rejects unknown targets.
-        try:
-            supersedes = _dr.candidate_identity(effective)
-        except Exception:
-            supersedes = ""
-        if not supersedes:
-            raise RuntimeError(
-                f"delivery note names {current or '<empty>'} but freeze "
-                f"resolved {sha}; no explicit supersede identity available"
-            )
-    # bin/herdr-task 无 .py 扩展名,必须显式给 SourceFileLoader,
-    # 否则 spec_from_file_location 拿不到 loader。
-    import importlib.machinery as _ilm
-    import importlib.util as _ilu
-    import pathlib as _pl
-    task_bin = _pl.Path(TASK_MANAGER)
-    if not task_bin.exists():
-        task_bin = _pl.Path(__file__).resolve().parent.parent / "bin" / "herdr-task"
-    loader = _ilm.SourceFileLoader("herdr_task_delivery", str(task_bin))
-    spec = _ilu.spec_from_loader("herdr_task_delivery", loader)
-    module = _ilu.module_from_spec(spec)
-    loader.exec_module(module)
-    # Provisional verifier task ids MUST be unique per candidate: they become
-    # delivery aliases, and two candidates sharing an alias makes delivery
-    # selection ambiguous (fail-closed). Suffix the short SHA.
-    short = sha[:12]
-    provisional = f"{workflow_id}-{source_node or 'implementation'}-{short}"
-    return module.record_delivery_note(
-        workflow_id, delivery_branch or source_node, sha,
-        f"{provisional}-review", f"{provisional}-test",
-        base="", node=source_node or "implementation", agent="scheduler-v1",
-        supersedes=supersedes or None,
-    )
 
 def _scheduler_join_gate_allows(workflow_id, node, tasks):
     """汇聚门禁放行判定:非 join 节点一律放行(保持原语义)。

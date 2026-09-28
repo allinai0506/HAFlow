@@ -168,3 +168,74 @@ provisional verifier 任务 id 带 short SHA 后缀:它们会成为 delivery ali
   分支本地结果。建议单独小 PR 引入 CI(需先验证全量套件在 CI runner 上可移植),
   不塞进本 PR。
 - **#106 post-merge Rollout 问题**:按指示单独 hotfix PR,不在 #107 内混合。
+
+## 7. 复审 P1 修复(第 3 轮):两种事实生命周期分离
+
+上一轮的 4 个 P1 已闭合。本轮两个新 P1 根因相同:
+
+> **Candidate Frozen Fact 与 Final Delivery Record 是两种不同生命周期的事实。**
+>
+> - `candidate_frozen`(scheduler_facts)回答"这轮验证针对哪个 SHA";
+> - `delivery record` 回答"最终由哪些**真实** Task 验证并形成交付"。
+
+上一版在冻结时用占位 id 伪造了 delivery,把两者混成一条事实。已彻底移除。
+
+### P1-A 冻结时写入假 verifier task id —— 已修(移除伪造)
+
+旧实现生成 `<wf>-implementation-<sha>-review|test` 写进 delivery 的
+`review_task`/`test_gate`。但 `delivery_record` 把这两个字段纳入**不可变
+fingerprint**,于是真实任务创建后写回真 id 会命中 `[DELIVERY CONFLICT]`;
+`check-delivery` 看到的 verifier 身份也是假的。
+
+修复:`_scheduler_ensure_delivery_note` **整体删除**。`_scheduler_freeze_candidate`
+现在只写 `candidate_frozen` 事实(携带 `source_node`/`delivery_branch`/
+`rotated_from`),不产生任何 delivery note、不发明任何 verifier id。
+
+回归:断言冻结后 `candidate_frozen` 存在、delivery note 数量为 0、
+备注原文里不出现任何 `provisional` 字样。
+
+### P1-B Fix-loop 新候选无法取代失效候选 —— 已修(冻结轨道独立)
+
+旧的失败链:Candidate A → review blocked → A 失效 → 返工 → Candidate B →
+冻结 B → 找不到 effective A → `supersedes` 为空 → `record_delivery_note` 抛
+`[DELIVERY REPLACEMENT REQUIRED]` 并 `SystemExit(2)`(而 `except Exception`
+抓不到 `SystemExit`)→ **第二轮 Test/Review 起不来**,直接打掉 #107 的核心场景。
+
+修复分两层:
+
+1. **冻结不再触碰 delivery**:候选轮换只体现为第二条 `candidate_frozen`
+   事实(带 `rotated_from`),不再有 prior candidate 需要 supersede,
+   因此不再触发 `SystemExit` 路径。
+2. **launch 侧接受冻结候选作为可验证身份**(`bin/herdr-task`):
+   - 无 delivery note → 仅当 `--candidate-sha` 与当前冻结 SHA **严格相等**才放行
+     (`identity_source=frozen`),否则 `delivery_missing` fail-closed;
+   - 有 delivery note 但**全部失效** → 同上按冻结候选放行,但**绝不复活**失效候选;
+   - 有有效 delivery note → 仍以 record 为权威,claim 与 record 不一致即拒绝;
+   - 最终仍由 `_validate_test_delivery_baseline` 强制
+     `candidate_sha == baseline_commit`(严格相等,无 ancestor 放宽)。
+
+回归(真实 `_preflight_delivery_identity` 调用链,隔离 docs/state):
+匹配 claim 放行;缺 claim / claim 不匹配 / 无冻结事实 → exit 2;
+失效候选 + 新冻结 B → 放行;失效候选 + claim 指向旧 A → 拒绝(不可复活);
+存在有效 delivery record 时仍以 record 为权威;非 verifier 节点不受影响。
+
+### 本轮结果
+
+```
+candidate_frozen 事实            ✅(不含 verifier 身份)
+冻结阶段零 delivery note        ✅
+provisional / 假 task id        ✅ 已彻底移除
+fix-loop 候选轮换                ✅(A blocked → B 冻结 → Test(B)/Review(B) 可启动)
+失效候选不可复活               ✅
+严格 candidate_sha == baseline  ✅
+```
+
+证据:全量 `pytest -q` → **1985 passed, 50 subtests, 0 failed**;
+`compileall` 与 `git diff --check` 干净。
+
+### 仍未处理(不在 #107 范围)
+
+- GitHub CI:仓库仍无 `.github/workflows/`,以上为分支本地证据,无 CI 独立确认。
+- #106 post-merge Rollout 问题:单独 hotfix PR。
+- 正式 delivery record 的写入仍由 review-pass/wrapup 依 FR-4.1 用真实 task id 完成
+  (既有链路,本 PR 未改其语义)。
