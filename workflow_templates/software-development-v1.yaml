@@ -3,6 +3,26 @@ label: 软件开发标准流程
 version: "1.0"
 description: 标准的 6 阶段软件开发与评审流程 (需求分析 -> 计划 -> 实现 -> 测试 -> 评审 -> 收尾)
 
+# 选择性重新验证策略 (Scheduler v1 / PR #108)
+#
+# 语义是「显式声明明确不会影响的路径」,不是「声明哪些文件要重测」。
+# 未在此声明的路径一律视为可能影响 verifier;未声明的 verifier 一律重跑。
+# 因此新增目录(如 engine-v2/**)不会因为「没配置」而被误判为安全。
+#
+# 范围刻意收窄到 docs/**/*.md:仓库根的 AGENTS.md / CLAUDE.md / README.md /
+# RULES.md 是运行时读取的 Agent 行为契约,不是纯文档,故不在范围内。
+# .herdr-loop/*.md(评估器/投影/监督读取)同样不在范围内。
+# docs/context/*.txt 亦不在范围内(后缀非 .md)。
+reverification:
+  version: selective-reverification-v1
+  test:
+    reusable_only_if_changes_within:
+      - "docs/**/*.md"
+  # v1 永远重跑评审:评审的价值正在于看到新代码。
+  # 空列表表示「不存在安全复用范围」,不是「任何改动都可复用」。
+  review:
+    reusable_only_if_changes_within: []
+
 nodes:
   - id: requirements
     label: 2需求分析

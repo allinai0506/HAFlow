@@ -4241,3 +4241,73 @@ PR #107（Critical-Path Scheduler v1）在五轮评审中反复暴露同一类�
 
 - 走查：`docs/walkthroughs/PR-107-critical-path-scheduler-v1.md`
 - 既有同族教训：§90（fix-loop 证据门禁与候选身份）、§88（隔离域不能用自身执行身份）。
+
+## 94. 复用是最弱的一环：能被证明的只有「已声明」，策略身份必须是指纹不是版本号
+
+### 问题背景
+
+PR #108（Selective Reverification v1）让候选轮换时可以跳过重复验证。它引入了本仓库
+第一条**主动放弃验证**的路径，因此每一处 fail-open 都比以往代价更高。三轮独立对抗
+评审共 17 项，其中最要命的一项不是「新代码写错了」，而是**修复方式本身换了一个问题
+而不是解决原问题**：
+
+| 轮次 | 缺陷 | 后果 |
+|---|---|---|
+| 1 | 复用来源走 `extract_task_verified_sha` | 该函数为兼容 pre-Scheduler 会回退 `baseline_commit`，于是「启动快照」被当成「验证过 A」；#107 专门消灭的说法在这里复活 |
+| 1 | 排除 superseded 来源 | fix-loop 返工必然作废上一轮 test 任务，于是复用来源永远不存在，功能在真实返工下永不生效 |
+| 1 | 冻结在 ready 循环内 | 轮换对本轮 sweep 不可见，被旧事实满足的节点本轮仍算完成 → C 候选的 verifier 从未运行就被跳过 |
+| 1 | 冻结上提后 `if deferred: return` | 该 return 早于 `is_workflow_completed` → 全部完成的 workflow 永远关不掉，每 2s 刷一次日志 |
+| 2 | 用 `policy_version` 撤销复用 | 版本号是标签，收窄范围不改它 → 收窄策略纯属装饰；**而代码注释恰好宣称自己防住了这件事** |
+| 2 | `is_node_complete` 读 `scheduler_core.EFFECTIVE_REUSE` | 可选组件缺失从「退回原语义」升级成热路径 AttributeError |
+| 2 | 「重复事实 byte-identical 所以无害」 | `created_at` 逐次写不同，理由是假的；S5 工件照抄了这个说法 |
+| 3 | 记忆化后又引入「先读后写」 | episode 检查先建 memo，plan 后写事实 → 同轮 readiness 读不到刚写的复用，静默重跑 |
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|---|---|---|
+| 复用会跳过验证 | 复用路径上**任何**宽松都是安全漏洞，不是效率问题 | 判据写成机器事实：git diff + 显式非影响范围 + 带 `verified_candidate_sha` 的 PASS + 不可变派生事实，四者缺一即 RERUN |
+| 复用来源用 launch 证据 | §93 的「三字段不可顶替」对**新**代码同样生效，调用方选了宽 fallback 不代表要求变了 | 复用来源读字面字段，不复用为兼容旧流程设计的 fallback |
+| 作废 ≠ 抹除 | superseded 只表示「不再是当前结论」，记录「验证过什么」必须留存 | 复用来源保留 superseded 记录，靠 `verified_candidate_sha == from_sha` 精确绑定取用 |
+| 版本号当策略身份 | 人写的标签不会随配置变 | 策略身份 = **已解析策略的指纹**（版本 + 每个 verifier 的范围）；收窄范围和删配置都必须真正撤销既有复用 |
+| 上提顺序改变可观测性 | 动作必须早于它要影响的计算 | 候选冻结上提到 readiness 之前；但「无候选」只能跳过待派发节点，**不得**早于 `is_workflow_completed` |
+| 记忆化改变读写顺序 | memo 一旦先于写入建立，本轮就读不到刚写的事实 | 复位点放在写入**之后**；memo 覆盖策略上下文与事实，避免每节点重解析 YAML |
+| 同一不变量两份实现 | 账本说「满足」而门禁说「不满足」，workflow 永久等待 | 台账与门禁共用同一个纯函数 `resolve_effective_verification`；死掉的第三份实现删掉 |
+| 缺字段默认「好」 | `source.get("source") or "fresh"` 是 fail-*open* 默认值 | 缺 provenance 视为 unknown → RERUN |
+| 验证工件自己造假 | 计数、不可复现的日志、错误的因果说明 | 数字用 `pytest --collect-only` 核对；日志逐行实跑复制；无法自行复现的指标必须署名归属 |
+| 外部评审：reuse 事实只绑 SHA（第 4 轮才发现） | **回滚会重新冻结一个曾经冻结过的 SHA**；只认 SHA 时旧轮次的 reuse 复活，一个从未验证过的候选被判为已覆盖 | 事实绑定**冻结事件 id（episode）**而非候选 SHA；`A→B` 与后续轮次的 `A→B` 是两条 episode。测试必须覆盖「回到完全相同的 SHA」 |
+| 外部评审：复用来源只查 evidence（第 4 轮才发现） | claim/evidence 不一致的 Task 连自己那一轮的门禁都过不了，凭什么替下一轮作证 | `source.candidate_sha` 与 `source.verified_candidate_sha` **必须同时**绑定 from 候选；新增 `source_candidate_claim_mismatch` |
+| 并发写事实靠 read-then-compare | 8 个并发写者产生 8 行重复，append-only 审计账本出现重复事实 | 复用**已有的** `BEGIN IMMEDIATE` 写锁做 check+insert 原子化（与 interventions / collaboration_events 同一手法），不新建表、不新建锁系统 |
+
+### 操作规范
+
+- **复用的事实必须自解释**：`reusable_scope` / `out_of_scope_paths` / `policy_identity`
+  与决策同批落盘，否则事后无法回答「凭什么判它安全」。
+- **read-only 命令的守卫要打在 store 之前**：`get_state_store` 会跑 `init_db`（DDL +
+  迁移），一个「只读」命令在空环境上就能造出 500KB 数据库。
+- **测试隔离要改模块常量，不是环境变量**：`STAGE_STATE_FILE` 在 import 期被读成模块常量，
+  `monkeypatch.setenv` 完全无效——实测曾把测试 workflow 写进用户真实
+  `~/.herdr-controller/stage-state.json`。
+- **不设基线的健康检查要显式豁免**，别伪装成跑过。
+
+### 验证命令 / 关联证据
+
+- 修复后全量：`pytest -q` → **2196 passed + 50 subtests**。
+- 专项：`tests/test_reverification_v1.py`（118）、`test_reverification_core.py`（19）、
+  `test_reverification_controller.py`（16）、`test_reverification_cli.py`（10）。
+- 真实链路：临时 git 仓库 + 真实 `check_workflow_stage_advance` sweep，docs-only 轮换下
+  **不产生 test launch**、只派 review，Join Gate 以 reuse 事实放行。
+- **#107 兼容性是实测的**：`evaluate_join_gate(reuse_facts=None)` 与 `3a84659` 实现做了
+  20 万组随机差分，0 处判决不一致。
+- 隔离校验：`~/.herdr-controller/stage-state.json` 全量测试前后 sha1 一致
+  （`b1f02b4f063d1c34`），无 `wf-rever*` 残留键。
+- 关联实现：`herdr/reverification.py`、`herdr/scheduler.py`、
+  `herdr/scheduler_facts.py`、`services/herdr-controller.py`、`bin/herdr-task`。
+
+### 相关文档 / 关联证据
+
+- S5 证据：`.omc/verify-ses_f1955d584ffebwerHsuyyt1HeZ.md`（含两处被评审推翻后重写的
+  错误陈述，是「工件也会造假」的实例）
+- S6 评审：`.omc/review-ses_f1955d584ffebwerHsuyyt1HeZ.md`（三轮独立对抗评审）
+- 既有同族教训：§93（身份三字段不可顶替）、§91（测试会写穿实盘注册表）、
+  §92（只读不等于无副作用）。

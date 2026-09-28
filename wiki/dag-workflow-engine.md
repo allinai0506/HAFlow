@@ -158,6 +158,56 @@ Evidence:
 - `services/herdr-controller.py#try_direct_stage_advance`
 - `tests/test_gate_verdict_symmetry.py`
 
+## 5. 选择性重新验证：候选轮换后哪些 verifier 必须重跑
+
+`FACT` 候选从 A 轮换到 B 时，`test` / `review` 不再一律重跑。复用（reuse）只在
+下列四者**同时**成立时允许，任一无法证明即 `RERUN`：
+
+1. **真实 git diff** —— `git diff --name-status -z A B`，不是 Agent 自述；
+2. **显式非影响范围** —— 只声明「明确不会影响」的路径；未声明的路径按可能影响处理；
+3. **带 `verified_candidate_sha == A` 的来源 PASS** —— launch 证据不算；
+4. **不可变派生事实** —— `reverification_decision` 事件，绝不改写历史 Task。
+
+影响判定不使用 LLM，不做 import / AST / CodeGraph 依赖推理，也不做测试用例选择。
+
+- **非线性候选一律 RERUN**：`A` 不是 `B` 的祖先（force push、切分支、回滚到分叉历史）
+  时不做任何推断。
+- **rename/copy 两侧都判**：`R herdr/a.py docs/a.md` 不得因为目标落在 `docs/` 就放行。
+- **只认当前候选 + 当前策略 + 当前轮次**：复用事实按 `(verifier, to_candidate_sha,
+  policy_identity, candidate_frozen_event_id)` 精确绑定。其中 **episode 用冻结事件 id
+  而不是候选 SHA**——回滚会重新冻结一个曾经冻结过的 SHA，只认 SHA 会让旧轮次的 reuse
+  复活，把从未验证的候选判为已覆盖。候选再次轮换、回到完全相同的 SHA、或策略被收窄 /
+  删除，旧复用都自动失效；后续轮次重复出现的同一 `(from, to)` 是独立 episode。
+- **来源必须双重绑定**：`source.candidate_sha`（派发时被告知验证谁）与
+  `source.verified_candidate_sha`（写 verdict 时实际验证了谁）**都**必须等于 from
+  候选。两者不一致的任务连它自己那一轮的门禁都过不了（claim/evidence mismatch），
+  不得被提拔成下一轮的复用证据。
+- **事实写入是原子的**：check + insert 在同一个 `BEGIN IMMEDIATE` 写锁内完成
+  （复用仓库既有的 SQLite 写锁，不新建表或锁系统），两个并发 sweep 不会写出两条
+  相同事实。
+- **策略身份是指纹不是版本号**：`version` 是人类标签，收窄范围不会改变它；以指纹为准，
+  「收窄策略」才会真正撤销既有复用。
+- **复用是调度决策**：复用节点**不创建 Task**。因为它没有任务，「节点完成」与 Join Gate
+  都改读同一个纯函数 `herdr/scheduler.py#resolve_effective_verification`，台账与门禁
+  不可能对同一分支给出相反答案。
+- **优先级**：`fresh B verification > reuse→B fact > nothing`。分支上存在任何活跃任务时，
+  复用事实完全不参与判定。
+- **单跳**：复用得来的派生事实不得再次作为复用来源。
+
+Evidence:
+- `herdr/reverification.py#build_reverification_plan`
+- `herdr/reverification.py#policy_identity`
+- `herdr/scheduler.py#resolve_effective_verification`
+- `herdr/scheduler_facts.py#record_reverification_decision`
+- `herdr/scheduler_facts.py#find_reuse_fact`
+- `herdr/state_db.py#record_event_if_absent`
+- `services/herdr-controller.py#_reverification_plan_for_rotation`
+- `services/herdr-controller.py#_scheduler_resolve_candidate_and_plan`
+- `workflow_templates/software-development-v1.yaml`（`reverification:` 块）
+- `tests/test_reverification_v1.py`、`tests/test_reverification_core.py`、
+  `tests/test_reverification_controller.py`、`tests/test_reverification_cli.py`
+- 审计入口（只读）：`bin/herdr-task reverification status|history`
+
 ## 10. 门禁 verdict 与 fix-loop 回路
 
 `FACT` 阶段结论（pass/blocked）是 DAG 推进的一等输入，与任务完成态正交：

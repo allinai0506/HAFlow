@@ -67,7 +67,7 @@
 
 ### 3.2 流程推进与运行时层
 - **[[task-lifecycle]]**: 任务 11 状态机、CoW 克隆隔离沙盒、Git 分支规则与基线指纹比对
-- **[[dag-workflow-engine]]**: 模板语法、Kahn 拓扑环路检测、Stage/Node 双向归一化与就绪推进
+- **[[dag-workflow-engine]]**: 模板语法、Kahn 拓扑环路检测、Stage/Node 双向归一化与就绪推进、候选轮换后的选择性重新验证（reuse 只在 diff + 显式非影响范围 + 带 verified SHA 的 PASS + 不可变事实四者齐备时成立）
 - **[[agent-routing-and-pools]]**: 候选人评分排序、Node Policy 覆盖、健康准入门禁与并发锁
 - **[[preflight-and-health]]**: 静默版本检查、无副作用 Token/Auth 沙盒深探机制
 
