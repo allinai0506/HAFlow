@@ -1398,7 +1398,7 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
   （含 entry-gate / S5 验证 / S6 评审三份门禁工件的长期副本，原件在 `.omc/` 且被
   gitignore，不随仓库留存）。
 
-## 2026-09-28 · Controlled Rollout 合并后安全收口（#106 后续 hotfix）
+## 2026-09-28 · Controlled Rollout 合并后安全收口（PR #109，已合并）
 
 - 只修五个已确认的漏洞，不新增 rollout 特性（无 75/100、无自动扩量、无新指标）：
   takeover、单快照读取、episode 证据窗口、精确 bucket 索引、百分比无损解析。
