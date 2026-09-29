@@ -14,6 +14,7 @@ import os
 import subprocess
 import sys
 import unittest
+import unittest.mock
 from pathlib import Path
 
 HERDR_ROOT = Path(__file__).resolve().parent.parent
@@ -862,6 +863,101 @@ class ReplacementBaselineTest(unittest.TestCase):
     def test_legacy_fact_refused(self):
         self.assertIsNone(srp.selective_replacement_baseline(
             self._fact(mode=srp.MODE_LEGACY_FALLBACK), SHA_A, "candidate-x"))
+
+
+class SelectiveReplacementLaunchBaselineTest(unittest.TestCase):
+    """P1-3 round-2: launch 前证明 branch HEAD == frozen SHA(真实 git)。
+
+    freeze 时 candidate→AAA,之后 branch 被推到 BBB;带着
+    --onto candidate --candidate-sha AAA 的 replacement 必须被拒绝,
+    而不是以 baseline=BBB 注册一个自称 AAA 的任务。
+    """
+
+    def setUp(self):
+        import tempfile
+        from types import SimpleNamespace
+        self.tmp = tempfile.TemporaryDirectory(prefix="herdr-srp-baseline-")
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.repo = self.root / "repo"
+        self.repo.mkdir()
+        self._git("init", "-q", ".")
+        self._git("config", "user.email", "t@t")
+        self._git("config", "user.name", "t")
+        (self.repo / "seed.txt").write_text("seed", encoding="utf-8")
+        self._git("add", "-A")
+        self._git("commit", "-q", "-m", "seed", "--no-gpg-sign")
+        self._task_mod = self._load_task_mod()
+        self._ns = SimpleNamespace
+        env = os.environ.copy()
+        env["HERDR_STATE_DB"] = str(self.root / "state.db")
+        self._env_patch = unittest.mock.patch.dict(os.environ, env)
+        self._env_patch.start()
+        self.addCleanup(self._env_patch.stop)
+
+    def _git(self, *args):
+        return subprocess.run(
+            ["git", "-C", str(self.repo)] + list(args),
+            text=True, capture_output=True, check=True)
+
+    def _load_task_mod(self):
+        import importlib.machinery
+        import importlib.util
+        name = "herdr_task_selective_baseline_test"
+        spec = importlib.util.spec_from_loader(
+            name, importlib.machinery.SourceFileLoader(
+                name, str(HERDR_ROOT / "bin" / "herdr-task")))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def _args(self, **over):
+        base = {
+            "task_id": "wf-srp-impl-B-r2", "workflow_id": WF,
+            "node": "implementation", "stage": "implementation",
+            "onto": "candidate",
+        }
+        base.update(over)
+        return self._ns(**base)
+
+    def test_advanced_branch_is_refused(self):
+        self._git("checkout", "-q", "-b", "candidate")
+        (self.repo / "a.txt").write_text("A", encoding="utf-8")
+        self._git("add", "-A")
+        self._git("commit", "-q", "-m", "AAA", "--no-gpg-sign")
+        aaa = self._git("rev-parse", "HEAD").stdout.strip()
+        (self.repo / "b.txt").write_text("B", encoding="utf-8")
+        self._git("add", "-A")
+        self._git("commit", "-q", "-m", "BBB", "--no-gpg-sign")
+        bbb = self._git("rev-parse", "HEAD").stdout.strip()
+        self.assertNotEqual(aaa, bbb)
+        with self.assertRaises(SystemExit) as ctx:
+            self._task_mod._validate_selective_replacement_baseline(
+                self._args(), aaa, bbb, str(self.repo))
+        self.assertEqual(ctx.exception.code, 2)
+
+    def test_matching_head_is_accepted(self):
+        self._git("checkout", "-q", "-b", "candidate")
+        (self.repo / "a.txt").write_text("A", encoding="utf-8")
+        self._git("add", "-A")
+        self._git("commit", "-q", "-m", "AAA", "--no-gpg-sign")
+        aaa = self._git("rev-parse", "HEAD").stdout.strip()
+        # 相等不断言返回值(返回 None 即通过),只断言不抛。
+        self._task_mod._validate_selective_replacement_baseline(
+            self._args(), aaa, aaa, str(self.repo))
+
+    def test_empty_values_fail_closed(self):
+        self._git("checkout", "-q", "-b", "candidate")
+        (self.repo / "a.txt").write_text("A", encoding="utf-8")
+        self._git("add", "-A")
+        self._git("commit", "-q", "-m", "AAA", "--no-gpg-sign")
+        aaa = self._git("rev-parse", "HEAD").stdout.strip()
+        with self.assertRaises(SystemExit):
+            self._task_mod._validate_selective_replacement_baseline(
+                self._args(), "", aaa, str(self.repo))
+        with self.assertRaises(SystemExit):
+            self._task_mod._validate_selective_replacement_baseline(
+                self._args(), aaa, "", str(self.repo))
 
 
 if __name__ == "__main__":

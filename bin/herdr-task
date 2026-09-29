@@ -2741,6 +2741,51 @@ def _validate_test_delivery_baseline(args, candidate_sha, baseline_commit, sourc
     raise SystemExit(2)
 
 
+def _validate_selective_replacement_baseline(args, candidate_sha, baseline_commit, source_repo):
+    """Require a replacement checkout to sit exactly on its claimed candidate.
+
+    P1-3 (PR #110 round-2): the controller binds a selective replacement to
+    `--onto <frozen_branch>` + `--candidate-sha <frozen_sha>`, but nothing
+    proves the branch HEAD still equals the frozen SHA at checkout time —
+    the branch may have advanced after the freeze. The worker reports the
+    actual checkout HEAD as baseline_commit; claim and checkout must be
+    strictly identical, otherwise task metadata (candidate_sha=AAA) diverges
+    from the real baseline (BBB) — the claim/execution split #107 exists to
+    prevent. Empty values fail closed. Refusal is SystemExit(2), mirroring
+    the test/review gate above.
+    """
+    candidate_sha = str(candidate_sha or "").strip()
+    baseline_commit = str(baseline_commit or "").strip()
+    if candidate_sha and baseline_commit and _same_commit(
+        candidate_sha, baseline_commit, source_repo
+    ):
+        return
+    try:
+        _get_store().record_event(
+            "selective_baseline_rejected",
+            {"candidate_sha": candidate_sha, "baseline_commit": baseline_commit,
+             "stage": getattr(args, "node", "") or getattr(args, "stage", ""),
+             "onto_branch": str(getattr(args, "onto", None) or ""),
+             "failure_code": "replacement_baseline_mismatch", "actionable": True,
+             "remediation": "re-freeze the candidate and relaunch the replacement onto the frozen branch"},
+            workflow_id=args.workflow_id,
+            node_id=getattr(args, "node", "") or getattr(args, "stage", ""),
+            task_id=args.task_id,
+            source="herdr-task",
+        )
+    except (OSError, ValueError, RuntimeError, AttributeError, sqlite3.Error) as event_exc:
+        print(
+            f"[BASELINE EVENT WARN] could not persist rejection: {event_exc}",
+            file=sys.stderr,
+        )
+    print(
+        f"[BASELINE REJECTED] replacement task {args.task_id} baseline "
+        f"{baseline_commit} != claimed candidate {candidate_sha}; "
+        "launch refused (selective-replan fail-closed)."
+    )
+    raise SystemExit(2)
+
+
 def _launch_task(args):
     agent_policy = None
     raw_policy = getattr(args, "agent_policy", None)
@@ -3128,6 +3173,49 @@ def _launch_task(args):
             print(
                 f"[BASELINE REJECTED] could not prove test/review baseline: {exc}; "
                 "launch refused (FR-6.2 fail-closed)."
+            )
+            sys.exit(2)
+
+    # P1-3 (PR #110 round-2): selective replacement binds `--onto` +
+    # `--candidate-sha` to a frozen baseline; the branch may have advanced
+    # after the freeze, so the actual checkout HEAD (baseline_commit) must
+    # still equal the claim. Fresh-branch launches (no --onto) create new
+    # work and skip. test/review keep their own gate above.
+    _selective_claim = str(getattr(args, "candidate_sha", None) or "").strip()
+    if node_id not in ("test", "review") and _selective_claim and onto_branch and baseline_commit:
+        try:
+            _validate_selective_replacement_baseline(
+                args, _selective_claim, baseline_commit, source_repo)
+        except SystemExit:
+            _reclaim_unregistered_launch_resources(
+                args, clone_path=clone_path, pane_id=pane_id,
+                pane_source=pane_source,
+            )
+            raise
+        except (ImportError, AttributeError, OSError, ValueError, RuntimeError,
+                sqlite3.Error, subprocess.SubprocessError) as exc:
+            _reclaim_unregistered_launch_resources(
+                args, clone_path=clone_path, pane_id=pane_id,
+                pane_source=pane_source,
+            )
+            try:
+                _get_store().record_event(
+                    "selective_baseline_rejected",
+                    {"stage": node_id, "failure_code": "baseline_check_unavailable",
+                     "detail": str(exc)[:300], "actionable": True,
+                     "remediation": "repair workflow delivery metadata and relaunch"},
+                    workflow_id=args.workflow_id, node_id=node_id,
+                    task_id=args.task_id, source="herdr-task",
+                )
+            except (OSError, ValueError, RuntimeError, AttributeError,
+                    sqlite3.Error) as event_exc:
+                print(
+                    f"[BASELINE EVENT WARN] could not persist rejection: {event_exc}",
+                    file=sys.stderr,
+                )
+            print(
+                f"[BASELINE REJECTED] could not prove replacement baseline: {exc}; "
+                "launch refused (selective-replan fail-closed)."
             )
             sys.exit(2)
 

@@ -2388,12 +2388,14 @@ def handle_fix_loop(workflow_id, gate_node_id, gate_cfg, workflow_cfg):
                 _sibling_gates.setdefault(_node, _gcfg)
             if len(_sibling_gates) > 1 and str(gate_node_id) in _sibling_gates:
                 _ordered = sorted(_sibling_gates)
-                # 仅首个(确定性排序首位)执行合并,其余直接返回以避免重复。
-                # 调用方 sweep 按序循环,首个合并已覆盖全组,后续调用因门禁
-                # 已 superseded 而自然空转;直接调用 handle 时同样收敛。
-                if str(gate_node_id) == _ordered[0]:
-                    _merged = [(gid, _sibling_gates[gid]) for gid in _ordered]
-                    _handle_merged_fix_loops(workflow_id, retry_node, _merged, workflow_cfg)
+                # P1-2 round-2:组内任一门禁触发都必须进入合并处理,不得再要求
+                # 调用方恰好是字典序首位。真实 sweep 经 blocked_gate_dependency
+                # 按 depends_on 顺序永远先返回 test,而 sorted 首位是 review,
+                # 旧限制会让合并入口永久不可达。_handle_merged_fix_loops 对
+                # 已处理过的组自然空转(快照无存活 blocked 即返回),故任意入口
+                # 触发都是幂等的。
+                _merged = [(gid, _sibling_gates[gid]) for gid in _ordered]
+                _handle_merged_fix_loops(workflow_id, retry_node, _merged, workflow_cfg)
                 return
         except Exception as exc:
             print(

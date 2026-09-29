@@ -1028,6 +1028,63 @@ class ControllerSelectiveReplanTest(unittest.TestCase):
         self.run_fix_loop(gate_node="test")
         self._assert_dual_gate_merged()
 
+    def test_p1_dual_gate_real_sweep_single_pass(self):
+        """P1-2 round-2:真实 sweep 只调 check_workflow_stage_advance() 一次。
+
+        wrapup.depends_on=[test,review] 时 blocked_gate_dependency 按
+        depends_on 顺序永远先返回 test;若合并入口仍要求调用方恰好是
+        sorted 首位(review),合并将永久不可达。本用例禁止手工逐个调
+        handle_fix_loop,只走一次真实 sweep,断言双 gate 一次合并。
+        """
+        # 真实 sweep 会先重算并冻结候选:用仓库真实 HEAD 作为冻结与门禁
+        # 验证 SHA,否则 sweep 首轮即发生候选轮换,门禁身份链必然断裂。
+        real_sha = _git(self.repo, "rev-parse", "HEAD").stdout.strip()
+        self.freeze(real_sha)
+        self._seed_completed_upstream()
+        self.seed_three_impl()
+        self.seed_gate(
+            affected=["wf-srp-ctl-impl-B"], sha=real_sha, version=7,
+            task_id="wf-srp-ctl-test-1", node="test")
+        self.seed_gate(
+            affected=["wf-srp-ctl-impl-C"], sha=real_sha, version=7,
+            task_id="wf-srp-ctl-review-1", node="review")
+        before_a = self.snapshot("wf-srp-ctl-impl-A")
+        self.queue.clear()
+
+        _ctl.check_workflow_stage_advance(WF)
+
+        # 一次 sweep 后双目标均已作废,A 零写入,双事实并存。
+        self.assertEqual(
+            self.store.get_task("wf-srp-ctl-impl-B")["status"], "superseded")
+        self.assertEqual(
+            self.store.get_task("wf-srp-ctl-impl-C")["status"], "superseded")
+        self.assertEqual(self.snapshot("wf-srp-ctl-impl-A"), before_a)
+        by_gate = {
+            (e["payload"].get("gate_task_id")): e["payload"]
+            for e in self.selective_facts()
+            if e["payload"].get("mode") == "selective"
+        }
+        self.assertEqual(
+            by_gate["wf-srp-ctl-test-1"]["target_task_ids"],
+            ["wf-srp-ctl-impl-B"])
+        self.assertEqual(
+            by_gate["wf-srp-ctl-review-1"]["target_task_ids"],
+            ["wf-srp-ctl-impl-C"])
+        latch = self.latch_state()
+        self.assertEqual(latch["mode"], "selective")
+        self.assertEqual(
+            sorted(latch["target_lineage_roots"]),
+            ["wf-srp-ctl-impl-B", "wf-srp-ctl-impl-C"])
+        self.assertTrue(
+            _ctl._selective_replan_awaiting_redispatch(WF, "implementation"))
+        notes = _ctl._selective_redispatch_blocker_notes(WF, "implementation")
+        plan = direct_dispatch_planner.plan_stage_dispatch(
+            WF, self._impl_node(), self.store.list_tasks(), "selective replan",
+            redispatch_blocker_notes=notes)
+        self.assertEqual(
+            sorted(s["task_id"] for s in plan["specs"]),
+            ["wf-srp-ctl-impl-B-r2", "wf-srp-ctl-impl-C-r2"])
+
     def test_p1_replacement_baseline_is_frozen_candidate(self):
         """P1-3: B-r2 基线必须是当前冻结 Candidate,而非 B 旧分支/plan 分支。
 
