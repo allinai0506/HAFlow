@@ -98,10 +98,15 @@ def gate_verdict_path(task_id) -> str:
     return str(gate_verdict_dir() / f"{task_id}.json")
 
 
-def gate_verdict_contract(task_id) -> str:
-    """门禁结论契约文本(含本任务的结论文件绝对路径)。"""
+def gate_verdict_contract(task_id, inventory_block=None) -> str:
+    """门禁结论契约文本(含本任务的结论文件绝对路径)。
+
+    ``inventory_block``(PR #110,可选):workflow 显式开启 selective_replan
+    时由控制面注入的可归因实现 Task 清单;提供后契约追加结构化
+    ``affected_task_ids`` 条款。未提供时契约文本与历史逐字节一致。
+    """
     path = gate_verdict_path(task_id)
-    return f"""\
+    base = f"""\
 【门禁结论契约（必须遵守，结论将被机器直接采纳）】
 1. 验证完成后，写入门禁结论文件：{path}
    内容二选一：
@@ -112,6 +117,14 @@ def gate_verdict_contract(task_id) -> str:
    HERDR_GATE_VERDICT: <pass|blocked>
 3. verdict 只能二选一：pass = 未发现必须返工的阻塞缺陷；blocked = 存在必须返工的阻塞缺陷，且必须在 note 中列出。
 4. 结论一经写入即作为门禁裁决生效：pass 自动推进下一节点；blocked 自动触发回流返工。"""
+    if not inventory_block:
+        return base
+    return base + f"""
+5. 本工作流已启用选择性返工(Selective Replan):blocked 时如能明确归因,
+   请在结论 JSON 中追加结构化字段 affected_task_ids(见下方清单),
+   系统将只返工被点名的实现任务;归因不明时保持缺省即整体返工。
+
+{inventory_block}"""
 
 
 def _as_list(value):
@@ -303,6 +316,8 @@ def _prompt(
     role_outputs=None,
     gate_contract=False,
     docs_block=None,
+    gate_inventory_block=None,
+    redispatch_blocker_note=None,
 ):
     target_outputs = role_outputs if role_outputs is not None else node["required_outputs"]
     outputs = "\n".join(f"- {line}" for line in target_outputs) or "- 未定义"
@@ -315,6 +330,8 @@ def _prompt(
             f"\n本任务是对 {redispatch_of} 的作废补派："
             "只重跑受影响子集，请聚焦失败项，不要扩大改动范围。\n"
         )
+    if redispatch_blocker_note:
+        redispatch_note += f"\n{str(redispatch_blocker_note).strip()}\n"
     if last_failure_note:
         redispatch_note += f"\n上次门禁失败原因：\n{last_failure_note}\n"
     if context_branch:
@@ -327,7 +344,8 @@ def _prompt(
         )
 
     gate_note = (
-        "\n\n" + gate_verdict_contract(task_id) if gate_contract and task_id else ""
+        "\n\n" + gate_verdict_contract(task_id, gate_inventory_block)
+        if gate_contract and task_id else ""
     )
 
     docs_section = f"\n{docs_block}\n" if docs_block else ""
@@ -383,6 +401,8 @@ def _dispatch_spec(
     docs_block=None,
     onto_branch=None,
     candidate_sha=None,
+    gate_inventory_block=None,
+    redispatch_blocker_note=None,
 ):
     if onto_branch is None:
         onto_branch = sanitize_branch_name(context_branch)
@@ -403,6 +423,8 @@ def _dispatch_spec(
             role_outputs=role_outputs,
             gate_contract=gate_contract,
             docs_block=docs_block,
+            gate_inventory_block=gate_inventory_block,
+            redispatch_blocker_note=redispatch_blocker_note,
         ),
         "task_type": node["task_type"],
         "integration_mode": integration_mode or node["integration_mode"],
@@ -425,10 +447,17 @@ def plan_stage_dispatch(
     gate_contract=False,
     docs_block=None,
     candidate_sha=None,
+    gate_inventory_block=None,
+    redispatch_blocker_notes=None,
 ):
     """决定 ready 节点该派发什么。
 
     返回 {"mode": "dispatch"|"wait"|"fallback", "reason": str, "specs": [...]}。
+
+    ``gate_inventory_block``(PR #110,可选):selective_replan 开启时由控制面
+    注入的可归因 Task 清单文本,追加到门禁契约。
+    ``redispatch_blocker_notes``(PR #110,可选):{被作废 task_id: blocker 上下文},
+    补派该谱系时注入 prompt;旧 Task 本身不被改写。
     """
     normalized = normalize_node(node)
     if not normalized:
@@ -496,6 +525,10 @@ def plan_stage_dispatch(
                     gate_contract=gate_contract,
                     docs_block=docs_block,
                     candidate_sha=candidate_sha,
+                    gate_inventory_block=gate_inventory_block,
+                    redispatch_blocker_note=(
+                        redispatch_blocker_notes or {}
+                    ).get(old_id),
                 )
             )
         return {"mode": "dispatch", "reason": "redispatch superseded subset", "specs": specs}
@@ -553,6 +586,7 @@ def plan_stage_dispatch(
                     gate_contract=gate_contract,
                     docs_block=docs_block,
                     candidate_sha=candidate_sha,
+                    gate_inventory_block=gate_inventory_block,
                 )
             )
         return {"mode": "dispatch", "reason": "initial node dispatch with roles", "specs": specs}
@@ -569,5 +603,6 @@ def plan_stage_dispatch(
         gate_contract=gate_contract,
         docs_block=docs_block,
         candidate_sha=candidate_sha,
+        gate_inventory_block=gate_inventory_block,
     )
     return {"mode": "dispatch", "reason": "initial node dispatch", "specs": [spec]}

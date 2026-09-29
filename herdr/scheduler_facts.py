@@ -22,8 +22,10 @@ EVENT_SCHEDULER_DECISION = "scheduler_decision"
 EVENT_CANDIDATE_FROZEN = "candidate_frozen"
 EVENT_JOIN_GATE_VERDICT = "join_gate_verdict"
 EVENT_REVERIFICATION_DECISION = "reverification_decision"
+EVENT_SELECTIVE_REPLAN_DECISION = "selective_replan_decision"
 
 SCHEDULER_EVENT_SOURCE = "critical-path-scheduler"
+SELECTIVE_REPLAN_EVENT_SOURCE = "selective-replan"
 
 #: 只有 ``pass`` 结论可以成为 reuse 来源(PR #108 §13:只有 PASS 可以复用)。
 REUSE_SOURCE_VERDICT = "pass"
@@ -375,6 +377,216 @@ def record_reverification_decision(workflow_id, decision, db_path=None):
         # would file it under the wrong identity and hide the change.
         return outcome
     return outcome
+
+
+# ============================================================
+# Selective Replan v1 facts (PR #110)
+# ============================================================
+
+#: Payload fields that must match for two replan facts to count as the same
+#: episode's decision. ``replan_id`` deliberately excludes the target lists,
+#: so a same-episode target change lands on the same identity and is caught
+#: here as identity_content_mismatch instead of filing a contradictory fact.
+_REPLAN_COMPARED_FIELDS = (
+    "gate_node", "gate_task_id", "gate_task_version", "gate_candidate_sha",
+    "retry_node", "mode", "requested_task_ids", "target_task_ids",
+    "target_lineage_roots", "preserved_task_ids", "policy_version",
+    "policy_identity", "reason",
+)
+
+REPLAN_LOOKUP_SCAN_LIMIT = 200
+
+
+def _replan_identity_for(workflow_id, payload):
+    from .selective_replan import replan_identity
+
+    return replan_identity(
+        workflow_id,
+        payload.get("gate_task_id"),
+        payload.get("gate_task_version"),
+        payload.get("gate_candidate_sha"),
+        payload.get("retry_node"),
+        payload.get("policy_identity"),
+    )
+
+
+def record_selective_replan_decision(workflow_id, decision, db_path=None):
+    """Record one selective-replan decision (immutable, idempotent per episode).
+
+    Exactly-once semantics come from ``state_db.record_event_if_absent`` —
+    the same SQLite ``BEGIN IMMEDIATE`` write lock every other fact in this
+    repository uses; no new table, no new lock system.
+
+    Fail-closed validation:
+    - identity is always recomputed from the fact's own fields; a caller
+      claiming a different ``replan_id`` is rejected;
+    - a decision that cannot name its gate episode (task id, task version,
+      verified candidate sha) is rejected rather than persisted;
+    - same identity with different content (e.g. targets edited after the
+      fact) is rejected as ``identity_content_mismatch`` by the shared
+      primitive.
+
+    Returns {"status": "created" | "exists" | "rejected", ...}.
+    """
+    payload = dict(decision or {})
+    workflow_id = str(workflow_id or "").strip()
+    gate_task_id = str(payload.get("gate_task_id") or "").strip()
+    retry_node = str(payload.get("retry_node") or "").strip()
+    mode = str(payload.get("mode") or "").strip()
+    if not workflow_id or not gate_task_id or not retry_node:
+        return {"status": "rejected", "reason": "missing_identity_fields"}
+    if mode not in ("selective", "legacy_fallback"):
+        return {"status": "rejected", "reason": "unknown_mode"}
+    try:
+        version = int(payload.get("gate_task_version"))
+    except (TypeError, ValueError):
+        return {"status": "rejected", "reason": "gate_task_version_unproven"}
+    gate_candidate_sha = str(payload.get("gate_candidate_sha") or "").strip()
+    if not gate_candidate_sha:
+        return {"status": "rejected", "reason": "gate_candidate_unproven"}
+
+    body = {
+        "replan_id": "",
+        "workflow_id": workflow_id,
+        "gate_node": str(payload.get("gate_node") or ""),
+        "gate_task_id": gate_task_id,
+        "gate_task_version": version,
+        "gate_candidate_sha": gate_candidate_sha,
+        # P1-3: replacement 基线审计字段。决策时刻冻结候选的可证明分支,
+        #  informational(不进 _REPLAN_COMPARED_FIELDS):老事实无此键时
+        #  仍按原 compare 判定 exists/mismatch,不因升级产生误拒。
+        "source_candidate_branch": str(
+            payload.get("source_candidate_branch") or ""
+        ).strip(),
+        "gate_note": str(payload.get("gate_note") or ""),
+        "retry_node": retry_node,
+        "mode": mode,
+        "requested_task_ids": [
+            str(t) for t in (payload.get("requested_task_ids") or [])
+        ],
+        "target_task_ids": [
+            str(t) for t in (payload.get("target_task_ids") or [])
+        ],
+        "target_lineage_roots": [
+            str(r) for r in (payload.get("target_lineage_roots") or [])
+        ],
+        "preserved_task_ids": [
+            str(t) for t in (payload.get("preserved_task_ids") or [])
+        ],
+        "policy_version": str(payload.get("policy_version") or ""),
+        "policy_identity": str(payload.get("policy_identity") or ""),
+        "reason": str(payload.get("reason") or ""),
+        "created_at": float(payload.get("created_at") or 0) or time.time(),
+    }
+    identity = _replan_identity_for(workflow_id, body)
+    claimed = str(payload.get("replan_id") or "").strip()
+    if claimed and claimed != identity:
+        return {
+            "status": "rejected",
+            "reason": "replan_identity_mismatch",
+            "expected": identity,
+        }
+    body["replan_id"] = identity
+
+    from . import state_db
+
+    return state_db.record_event_if_absent(
+        {
+            "workflow_id": workflow_id,
+            "node_id": str(payload.get("gate_node") or ""),
+            "task_id": gate_task_id,
+            "event_type": EVENT_SELECTIVE_REPLAN_DECISION,
+            "timestamp": body["created_at"],
+            "payload": body,
+            "source": SELECTIVE_REPLAN_EVENT_SOURCE,
+        },
+        identity_field="replan_id",
+        identity_value=identity,
+        compare_fields=_REPLAN_COMPARED_FIELDS,
+        scan_limit=REPLAN_LOOKUP_SCAN_LIMIT,
+        db_path=db_path,
+    )
+
+
+def list_selective_replan_decisions(workflow_id, db_path=None, limit=None):
+    """List selective-replan decision events in chronological order."""
+    kwargs = {}
+    if limit is not None:
+        kwargs = {"desc": True, "limit": int(limit)}
+        events = _store(db_path).list_events(
+            workflow_id=workflow_id,
+            event_type=EVENT_SELECTIVE_REPLAN_DECISION,
+            **kwargs)
+        return list(reversed(events))
+    return _store(db_path).list_events(
+        workflow_id=workflow_id,
+        event_type=EVENT_SELECTIVE_REPLAN_DECISION,
+    )
+
+
+def find_selective_replan_decision(workflow_id, replan_id, db_path=None):
+    """Return the newest fact payload with this exact replan identity, or None.
+
+    An empty identity returns no fact: "I do not know which episode applies"
+    is not a reason to honour anything (same fail-closed rule as the #108
+    reuse lookup).
+    """
+    wanted = str(replan_id or "").strip()
+    if not wanted:
+        return None
+    for event in reversed(list_selective_replan_decisions(
+            workflow_id, db_path=db_path, limit=REPLAN_LOOKUP_SCAN_LIMIT)):
+        payload = event.get("payload") or {}
+        if str(payload.get("replan_id") or "") != wanted:
+            continue
+        return {"event_id": event.get("id"),
+                "timestamp": event.get("timestamp"), **payload}
+    return None
+
+
+def latest_selective_replan_for_node(workflow_id, retry_node, db_path=None):
+    """Newest *selective* fact whose retry_node matches, or None.
+
+    Legacy-fallback facts carry no targets and therefore never imply pending
+    redispatch; they are skipped here on purpose.
+    """
+    node = str(retry_node or "").strip()
+    if not node:
+        return None
+    for event in reversed(list_selective_replan_decisions(
+            workflow_id, db_path=db_path, limit=REPLAN_LOOKUP_SCAN_LIMIT)):
+        payload = event.get("payload") or {}
+        if str(payload.get("mode") or "") != "selective":
+            continue
+        if str(payload.get("retry_node") or "") != node:
+            continue
+        return {"event_id": event.get("id"),
+                "timestamp": event.get("timestamp"), **payload}
+    return None
+
+
+def list_selective_replan_for_node(workflow_id, retry_node, db_path=None):
+    """All *selective* facts for one retry_node, chronological.
+
+    P1-2: test ∥ review 并行 blocked 会在同一轮留下两条单门禁事实
+    (test→[B], review→[C])。只读最新一条会丢掉另一条的目标;
+    awaiting/notes 必须对该节点全部 selective 事实取并集,
+    已落定谱系(无补派候选)自然不再触发,故历史事实滞留无害。
+    """
+    node = str(retry_node or "").strip()
+    if not node:
+        return []
+    matched = []
+    for event in list_selective_replan_decisions(
+            workflow_id, db_path=db_path, limit=REPLAN_LOOKUP_SCAN_LIMIT):
+        payload = event.get("payload") or {}
+        if str(payload.get("mode") or "") != "selective":
+            continue
+        if str(payload.get("retry_node") or "") != node:
+            continue
+        matched.append({"event_id": event.get("id"),
+                        "timestamp": event.get("timestamp"), **payload})
+    return matched
 
 
 def record_join_gate_verdict(

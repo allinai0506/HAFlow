@@ -4311,3 +4311,81 @@ PR #108（Selective Reverification v1）让候选轮换时可以跳过重复验�
   （含两处被评审推翻后重写的错误陈述，是「工件也会造假」的实例）
 - 既有同族教训：§93（身份三字段不可顶替）、§91（测试会写穿实盘注册表）、
   §92（只读不等于无副作用）。
+
+---
+
+## 95. 选择性返工：归因是**结论**不是**身份**，而「无法归因」必须能被显式写下
+
+### 问题背景
+
+PR #110（Selective Replan v1）让门禁 blocked 后的返工可以从「整个 implementation 阶段
+重来」收窄到「只重做被 Verifier 点名的 Task 谱系」。它引入本仓库第一条**按结构化归因
+改写工作流范围**的路径：系统第一次依据 Verifier 写下的一句话，决定哪些已完成的工作
+要作废。因此 fail-open 的代价不再是「多跑一次验证」，而是**悄悄作废未被点名的工作**。
+
+一轮独立对抗评审（Opus 5，read-only）给出 `NEEDS_FIXES`，9 项缺陷中 3 项 blocking。
+把它们的成因剥掉表象后只剩两条：**同一件事有两个名字 / 同一不变量有两份实现**。
+
+| 编号 | 缺陷 | 后果 |
+|---|---|---|
+| F1 | 目标按**策略声明的** `retry_node` 校验，作废却按**门禁解析出的** `retry_node` 执行 | 两者不一致时「保留」过滤器永不命中：未被点名的 Task 被一并作废，同时留下一条自称 selective 的事实 |
+| F2 | 「等待补派」另写了一套 `superseded_by` 规则，与补派管线 `lineage_redispatch_candidates` 分歧 | 分歧状态是一个**没有出口的终态**：节点永久钉在未完成，工作流带着作废谱系收口 |
+| F4 | 机制修好了，**通知没修**：selective 下总指挥仍收到全量返工的 `herdr-task launch` 骨架 | Controller 刚起 B-r2，总指挥又按同一份通知全量重做实现——本 PR 要消灭的失败模式换了一条通道回来 |
+| F5 | `record_event_if_absent` 返回 `exists` 但 payload 读不回时，`isinstance(stored, dict)` 无 `else` | 静默把**本次重算**的 plan 提升为权威，等于用未经持久化确认的结论改写事实 |
+| F6 | 拒绝分支打印的是**计划自身**的 reason | `identity_content_mismatch`（同 episode 换 targets）这类真正原因被掩盖 |
+| F7 | `stage_verdict_affected_task_ids` 只在非空时写入，永不被清除 | 上一轮点名 B，本轮 Verifier 明确「无法归因」，B 仍被继续作废——幽灵归因 |
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|---|---|---|
+| 归因来源可以推断 | 「猜」与「证」在持久化事实里长得一样，事后无法区分 | 唯一来源是结构化字段；缺字段/空列表/ID 不存在/跨 workflow/跨节点/非当前谱系头/已 superseded/候选身份或版本不可证/结论读不出/事实写不进 —— 十种情况**全部**回退 legacy |
+| fail-closed 写成「过滤掉非法项」 | 「三个 ID 里两个合法就只用那两个」= 用一条**自己都无法解释其完整性**的结论改写工作流 | Fail-Closed 的强形式是**全有或全无**：一个非法 → 整个 selective 决策拒绝 |
+| 同一件事两个名字（F1） | `policy.retry_node` 与 `gate_cfg.retry_node` 是两个独立结论，一致是巧合 | 不一致即证明不了「校验节点 = 作废节点」→ 整体回退；不做「以谁为准」的猜测 |
+| 同一不变量两份实现（F2） | 与 §94 同一条失效模式，换个位置复发：账本/门禁/管线三个说法里只要有一个不同，就有一个状态无人负责 | 等待谓词**复用补派管线同一个函数**；判据同源 ⇒ 窗口必然闭合 |
+| 「机制修好」当成交付完成（F4） | 消息是**真实的重新进入通道**，不是描述 | 修机制必须同时修它的每一条通知；补投（`redeliver_pending_fix_loop`）也要保留同一上下文，不给病理留第二通道 |
+| 「显式无法归因」没有表示法（F7） | 缺失字段与显式空列表语义不同（前者=旧数据/未写，后者=本轮主动放弃归因）；只在非空时写入等于**取消了后者的表达能力** | 每次写 verdict 一律**覆写**该字段（含显式 `[]`）；`pass` 结论同样清除——结论换了，归因不能活过它 |
+| `exists` 当作「可用」（F5） | 持久化成功 ≠ 读得回来；`isinstance` 少了 `else` 就是一条静默的 fail-open | 读不回即回退 legacy，**绝不**用本次重算结果顶替权威 |
+| 身份里塞结论 | 同 episode 换 targets 会撞 id | 身份刻意**不含** targets（`replan_id = SHA256(workflow, gate_task, gate_version, gate_candidate_sha, retry_node, policy_identity)`）→ 代价是撞 id，因此撞 id **必须拒绝**（`identity_content_mismatch`）而不是覆盖；重放同内容返回 `exists`，崩溃恢复天然幂等 |
+| 「重开节点」被当成「全量重派」 | 每轮 sweep 清 stage-advance 会绕开 `notified` 闩 | 安全边界不在闩上而在**判据同源**：只要 AWAIT 为真，补派管线就只产出被点名谱系的 `-rN`；窗口一关直派转 `wait`（不唤醒总指挥） |
+| 保留任务被「顺手」写一下 | 「保留」若允许更新 `updated_at`/`version`，latch 就会被保留任务的落定解除 | 保留 = **零写入**（断言级证明：比对 status/version/branch/metadata/updated_at 完整快照）；latch 要求**每个** target root 在 `latch_ts` 之后都有替代成员（AND 不是 ANY） |
+| 修复轮声称修好 | 写了用例 ≠ 用例能红 | 6 个守卫型修复逐条**反向改写**跑守卫用例，6/6 变红；跑完 `diff` 确认工作区与变异前逐字节一致 |
+
+### 操作规范
+
+- **绝不部分接受**：`affected_task_ids` 的校验是全有或全无的函数，
+  不要在任何调用点做「过滤出合法的那些」。
+- **顺序是硬约束**：构建 plan → 持久化不可变事实 → 才允许作废。
+  **没有持久化成功的 selective 事实，就没有 selective 作废**（不存在「先作废、后补事实」的窗口）。
+- **「无法归因」要写得出来**：字段缺失与显式 `[]` 必须都能表达，且写 verdict 一律覆写。
+- **legacy 等价要可断言，不要靠读代码**：`selective_target_task_ids=None`、
+  无 `inventory_block`、targets 为空 三条边界各有一个「逐字节等价」用例。
+- **通知是通道**：改动任何自动回流机制时，检查它是否还有别的方式通知人或总指挥。
+- **评审工件必须署名来源**：本轮 Round 2 的独立复审因环境故障（子代理创建全线
+  `400 Model is unavailable`）不可得，工件里如实标为 `claude (self, round-2 delta)`，
+  并写明 Round 1 的独立性成立、Round 2 不算独立通过——**不可得的证据不得被写成已通过**。
+
+### 验证命令 / 关联证据
+
+- 修复后全量：`pytest -q` → **2320 passed + 50 subtests**（EXIT=0，457.05s）；
+  改动前基线 2230 → 零回归。
+- 专项：`tests/test_selective_replan_core.py`（65）、
+  `tests/test_selective_replan_controller.py`（26）。
+- 真实链路：`test_real_git_replacement_builds_on_preserved_work` 在临时 git 仓库里让
+  A/C 落盘真实文件、B 被 supersede，再断言 replacement 的 `context_branch`
+  **仍含 A/C 产出**；两个用例驱动**真实** `check_workflow_stage_advance` 覆盖 sweep 正反两向。
+- 隔离校验：`~/.herdr-controller/stage-state.json` sha1 全量前后一致
+  （`b1f02b4f063d1c34`）；实盘 `state.db` 扫 `wf-srp%` 命中 0 行。
+- 变异验证：6/6 守卫用例在反向改写后变红。
+- 关联实现：`herdr/selective_replan.py`、`herdr/fix_loop.py`、
+  `herdr/direct_dispatch.py`、`herdr/scheduler_facts.py`、
+  `services/herdr-controller.py`、`bin/herdr-task`、
+  `workflow_templates/software-development-v1.yaml`。
+
+### 相关文档 / 关联证据
+
+- S5 证据与 S6 评审：`.omc/verify-<session>.md` / `.omc/review-<session>.md`；
+  长期副本 `docs/walkthroughs/20260929-pr110-selective-replan.md`
+- Wiki：`wiki/dag-workflow-engine.md` §6
+- 既有同族教训：§94（同一不变量两份实现 / 复用必须被证明）、
+  §61（补派按谱系去重）、§91（测试会写穿实盘注册表）、§93（身份三字段不可顶替）

@@ -208,6 +208,82 @@ Evidence:
   `tests/test_reverification_controller.py`、`tests/test_reverification_cli.py`
 - 审计入口（只读）：`bin/herdr-task reverification status|history`
 
+## 6. 选择性返工：门禁 blocked 后哪些实现 Task 必须重做
+
+`FACT` 门禁 blocked 触发的 fix-loop 回流原本只有一个粒度：作废 gate + 下游全部任务，
+再让 implementation 整体重来。`implementation` 里有多个互不相干的 Task 时，这是
+纯浪费。**选择性返工（Selective Replan v1）** 把「这次 blocker 到底怪谁」变成一条
+可持久化、可重放、可审计的事实，然后只 supersede 被点名的谱系。
+
+`FACT` **唯一归因来源是 Verifier 的结构化结论**。V1 不接受任何推断：
+
+- 只认 Gate Verdict JSON 的 `affected_task_ids` 字段（`bin/herdr-task set --verdict
+  blocked --affected-task-id <id>` 写入 `stage_verdict_affected_task_ids`）；
+- 不从 `note` / 终端输出 / `BLOCKER.md` / 文件名 / 模块名 / embedding / CodeGraph /
+  AST / import graph 反推，不做任务依赖传播，不自动拆任务，不改验收标准；
+- 缺失或 `[]` 都等于「无法归因」→ 整体回退 legacy fix-loop。
+  **Explicit attribution first. Unknown means legacy fallback.**
+
+`FACT` **Fail-Closed 是全有或全无**：`affected_task_ids` 里只要有**一个** ID 不合法
+（不存在 / 属别的 workflow / 不在 `retry_node` / 已不是当前 lineage head / 已
+superseded / 状态不可替换），整个 selective 决策作废、按 legacy 处理；**严禁**
+「三个 ID 里两个合法就只用那两个」。门禁候选身份（`candidate_sha` ==
+`verified_candidate_sha` == 当前冻结候选）或 gate task `version` 无法证明时同样 fallback。
+加一条：**没有持久化成功的 selective 事实，就没有 selective 作废**——事实写入先于
+invalidation，写失败/内容冲突即退回 legacy。
+
+`FACT` **episode 身份刻意不含 targets**：`replan_id = SHA256(workflow_id, gate_task_id,
+gate_task_version, gate_verified_candidate_sha, retry_node, policy_identity)`。同一个
+blocked episode 两次给出不同 targets 必须命中同一 identity 并被
+`state_db.record_event_if_absent` 的 `compare_fields` 判为
+`identity_content_mismatch`（整体拒绝），而不是留下两条互相矛盾的事实。重放同内容
+则返回 `exists`，以库中事实为准 —— 崩溃恢复天然幂等。
+
+`FACT` **保留的 Task 零写入**：`invalidate_for_fix_loop(..., selective_target_task_ids=...)`
+只处理被点名谱系的 `-rN` 递增（`B → B-r2`），未被点名的任务连 status 都不碰；
+replacement 继承原 Task 的 goal/acceptance/integration_mode/task_type，blocker 上下文
+通过**派发 Prompt** 注入（`render_replacement_blocker_note`），绝不回写旧 Task。
+`selective_target_task_ids=None` 时函数行为与改造前逐字节一致。
+
+`FACT` **必须让节点重新「未完成」**：只 supersede B 而 A/C 仍 `completed` 时
+`is_node_complete("implementation")` 为真，B-r2 永远不会被派发。两处配套：selective
+作废时 `clear_stage_advance(workflow_id, retry_node)`；同时
+`check_workflow_stage_advance` 每轮 sweep 用 `_selective_replan_awaiting_redispatch`
+读事实判定「目标谱系尚无活跃成员」，命中即把该节点**移出 completed 集合并清掉
+stage-advance**（`[SELECTIVE REPLAN AWAIT]`），使节点重新进入就绪节点流程。
+「重开」不等于「全量重派」：随后的 direct dispatch 走
+`lineage_redispatch_candidates`，只会把被作废的谱系补派为 `-rN`。该判定同时
+自愈「作废完成、清状态前崩溃」的窗口。「等待」谓词与补派管线**同源**，
+因此「补派管线给不出候选」的谱系不会被误判为等待（否则节点会永久钉在未完成）。
+
+`FACT` **latch 与重投都是 target-aware 的**：`pending_redo` 与
+`fix_loop_item` 新增 `mode` / `target_lineage_roots`；`latch_blocks_advance` 要求
+**每个** target root 在 `latch_ts` 之后都有非 superseded 的 COMPLETED_LIKE 成员，
+`redelivery_handled` 要求每个 root 都有 `latch_ts` 之后新建的 `-rN`。**保留的 Task
+永远不能清 latch**（否则会提前放行）。判据不含 targets 的历史事实
+（`mode=legacy_fallback`）不影响任何 latch。
+
+`FACT` **Verifier 只能看见当前权威 Task**：门禁 Prompt 注入的 Task Inventory 由
+`build_task_inventory` 生成，逐谱系取 `current_lineage_head`（序号最大的存活成员），
+历史 `-rN` 旧版本绝不入清单——否则 Verifier 会把 blocker 绑到已作废的任务上。
+`verdict_fingerprint` 追加 `sorted(affected_task_ids)`，同一 blocked episode 换 targets
+不会被误判为「同一结论」。
+
+Evidence:
+- `herdr/selective_replan.py#build_selective_replan_plan` / `#validate_replan_targets` /
+  `#replan_identity` / `#build_task_inventory` / `#policy_from_workflow`
+- `herdr/scheduler_facts.py#record_selective_replan_decision` /
+  `#latest_selective_replan_for_node` / `#find_selective_replan_decision`
+- `herdr/fix_loop.py#latch_blocks_advance` / `#redelivery_handled` / `#summarize_fix_loop_item`
+- `herdr/direct_dispatch.py#gate_verdict_contract`（`inventory_block` 注入）
+- `services/herdr-controller.py#_resolve_selective_replan` /
+  `#invalidate_for_fix_loop` / `#_selective_replan_awaiting_redispatch` /
+  `#_selective_gate_inventory_block` / `#_selective_redispatch_blocker_notes`
+- `bin/herdr-task set ... --affected-task-id`
+- `workflow_templates/software-development-v1.yaml`（`selective_replan:` 块，显式 opt-in）
+- `tests/test_selective_replan_core.py`、`tests/test_selective_replan_controller.py`
+- 走查：`docs/walkthroughs/20260929-pr110-selective-replan.md`
+
 ## 10. 门禁 verdict 与 fix-loop 回路
 
 `FACT` 阶段结论（pass/blocked）是 DAG 推进的一等输入，与任务完成态正交：

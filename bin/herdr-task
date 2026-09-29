@@ -2107,13 +2107,27 @@ def cmd_eval_compare(args):
         print(f"{field}: {diff['before'][field]} -> {diff['after'][field]}")
 
 
-def set_status(task_id, new_status, verdict=None, note=None):
+def set_status(task_id, new_status, verdict=None, note=None, affected_task_ids=None):
     data = load_tasks()
     task = find_task(data, task_id)
 
     if not task:
         print(f"Task not found: {task_id}")
         sys.exit(1)
+
+    # PR #110: 结构化归因目标仅允许随 blocked 结论持久化;pass 或未给
+    # verdict 时携带 affected-task-id 直接拒绝(不静默忽略)。
+    affected_ids = []
+    for raw in affected_task_ids or []:
+        text = str(raw or "").strip()
+        if text and text not in affected_ids:
+            affected_ids.append(text)
+    if affected_ids and verdict != "blocked":
+        print(
+            "--affected-task-id is only valid with '--verdict blocked'",
+            file=sys.stderr,
+        )
+        sys.exit(2)
 
     # Completion evidence, before any verdict is accepted.
     #
@@ -2153,7 +2167,7 @@ def set_status(task_id, new_status, verdict=None, note=None):
         print(f"Invalid status: {new_status}")
         sys.exit(1)
 
-    if (verdict or note) and new_status != "completed":
+    if (verdict or note or affected_ids) and new_status != "completed":
         print("verdict/note only apply to 'set <task> completed'")
         sys.exit(2)
 
@@ -2168,15 +2182,23 @@ def set_status(task_id, new_status, verdict=None, note=None):
     if note:
         task["stage_verdict_note"] = note
 
+    # PR #110:归因字段随结论一起覆盖写。只在非空时写会让上一次的
+    # affected_task_ids 存活过新一轮结论——本轮 Verifier 明确「无法归因」
+    # (不写该字段)时,系统会拿着上一轮的旧归因去做选择性返工。
+    if verdict:
+        task["stage_verdict_affected_task_ids"] = list(affected_ids)
+
     old_status = task["status"]
 
     if old_status == new_status:
-        if verdict or note:
+        if verdict or note or affected_ids:
             updates = {}
             if verdict:
                 updates["stage_verdict"] = verdict
             if note:
                 updates["stage_verdict_note"] = note
+            if verdict:
+                updates["stage_verdict_affected_task_ids"] = list(affected_ids)
             store = _get_store()
             try:
                 from herdr import kernel
@@ -2210,6 +2232,8 @@ def set_status(task_id, new_status, verdict=None, note=None):
         metadata["stage_verdict"] = verdict
     if note:
         metadata["stage_verdict_note"] = note
+    if verdict:
+        metadata["stage_verdict_affected_task_ids"] = list(affected_ids)
 
     store = _get_store()
     try:
@@ -2717,6 +2741,51 @@ def _validate_test_delivery_baseline(args, candidate_sha, baseline_commit, sourc
     raise SystemExit(2)
 
 
+def _validate_selective_replacement_baseline(args, candidate_sha, baseline_commit, source_repo):
+    """Require a replacement checkout to sit exactly on its claimed candidate.
+
+    P1-3 (PR #110 round-2): the controller binds a selective replacement to
+    `--onto <frozen_branch>` + `--candidate-sha <frozen_sha>`, but nothing
+    proves the branch HEAD still equals the frozen SHA at checkout time —
+    the branch may have advanced after the freeze. The worker reports the
+    actual checkout HEAD as baseline_commit; claim and checkout must be
+    strictly identical, otherwise task metadata (candidate_sha=AAA) diverges
+    from the real baseline (BBB) — the claim/execution split #107 exists to
+    prevent. Empty values fail closed. Refusal is SystemExit(2), mirroring
+    the test/review gate above.
+    """
+    candidate_sha = str(candidate_sha or "").strip()
+    baseline_commit = str(baseline_commit or "").strip()
+    if candidate_sha and baseline_commit and _same_commit(
+        candidate_sha, baseline_commit, source_repo
+    ):
+        return
+    try:
+        _get_store().record_event(
+            "selective_baseline_rejected",
+            {"candidate_sha": candidate_sha, "baseline_commit": baseline_commit,
+             "stage": getattr(args, "node", "") or getattr(args, "stage", ""),
+             "onto_branch": str(getattr(args, "onto", None) or ""),
+             "failure_code": "replacement_baseline_mismatch", "actionable": True,
+             "remediation": "re-freeze the candidate and relaunch the replacement onto the frozen branch"},
+            workflow_id=args.workflow_id,
+            node_id=getattr(args, "node", "") or getattr(args, "stage", ""),
+            task_id=args.task_id,
+            source="herdr-task",
+        )
+    except (OSError, ValueError, RuntimeError, AttributeError, sqlite3.Error) as event_exc:
+        print(
+            f"[BASELINE EVENT WARN] could not persist rejection: {event_exc}",
+            file=sys.stderr,
+        )
+    print(
+        f"[BASELINE REJECTED] replacement task {args.task_id} baseline "
+        f"{baseline_commit} != claimed candidate {candidate_sha}; "
+        "launch refused (selective-replan fail-closed)."
+    )
+    raise SystemExit(2)
+
+
 def _launch_task(args):
     agent_policy = None
     raw_policy = getattr(args, "agent_policy", None)
@@ -3104,6 +3173,53 @@ def _launch_task(args):
             print(
                 f"[BASELINE REJECTED] could not prove test/review baseline: {exc}; "
                 "launch refused (FR-6.2 fail-closed)."
+            )
+            sys.exit(2)
+
+    # P1-3 (PR #110 round-2): selective replacement binds `--onto` +
+    # `--candidate-sha` to a frozen baseline; the branch may have advanced
+    # after the freeze, so the actual checkout HEAD (baseline_commit) must
+    # still equal the claim. Fresh-branch launches (no --onto) create new
+    # work and skip. test/review keep their own gate above.
+    # NOTE: baseline_commit is deliberately NOT part of the gate condition:
+    # a missing baseline must enter the validator (fail-closed) instead of
+    # silently skipping it — otherwise the task would be registered with
+    # candidate_sha=AAA and no proof it ever started from AAA.
+    _selective_claim = str(getattr(args, "candidate_sha", None) or "").strip()
+    if node_id not in ("test", "review") and _selective_claim and onto_branch:
+        try:
+            _validate_selective_replacement_baseline(
+                args, _selective_claim, baseline_commit, source_repo)
+        except SystemExit:
+            _reclaim_unregistered_launch_resources(
+                args, clone_path=clone_path, pane_id=pane_id,
+                pane_source=pane_source,
+            )
+            raise
+        except (ImportError, AttributeError, OSError, ValueError, RuntimeError,
+                sqlite3.Error, subprocess.SubprocessError) as exc:
+            _reclaim_unregistered_launch_resources(
+                args, clone_path=clone_path, pane_id=pane_id,
+                pane_source=pane_source,
+            )
+            try:
+                _get_store().record_event(
+                    "selective_baseline_rejected",
+                    {"stage": node_id, "failure_code": "baseline_check_unavailable",
+                     "detail": str(exc)[:300], "actionable": True,
+                     "remediation": "repair workflow delivery metadata and relaunch"},
+                    workflow_id=args.workflow_id, node_id=node_id,
+                    task_id=args.task_id, source="herdr-task",
+                )
+            except (OSError, ValueError, RuntimeError, AttributeError,
+                    sqlite3.Error) as event_exc:
+                print(
+                    f"[BASELINE EVENT WARN] could not persist rejection: {event_exc}",
+                    file=sys.stderr,
+                )
+            print(
+                f"[BASELINE REJECTED] could not prove replacement baseline: {exc}; "
+                "launch refused (selective-replan fail-closed)."
             )
             sys.exit(2)
 
@@ -6752,6 +6868,16 @@ def main():
         default=None,
         help="Blocker list / verdict detail, stored as stage_verdict_note",
     )
+    set_cmd.add_argument(
+        "--affected-task-id",
+        dest="affected_task_ids",
+        action="append",
+        default=None,
+        help="Implementation task ID explicitly blamed by a blocked gate "
+             "verdict (repeatable; only valid with --verdict blocked; "
+             "stored as stage_verdict_affected_task_ids for PR #110 "
+             "selective replan)",
+    )
 
     stage_cmd = sub.add_parser("stage-status")
     stage_cmd.add_argument("workflow_id")
@@ -7205,7 +7331,8 @@ def main():
         get_task(args.task_id)
 
     elif args.command == "set":
-        set_status(args.task_id, args.status, args.verdict, args.note)
+        set_status(args.task_id, args.status, args.verdict, args.note,
+                   affected_task_ids=args.affected_task_ids)
 
     elif args.command == "stage-status":
         stage_status(
