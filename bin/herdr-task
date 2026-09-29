@@ -3288,6 +3288,8 @@ def _launch_task(args):
         "requested_agent": requested_agent,
         "clone_path": clone_path,
         "branch": branch,
+        "baseline_commit": baseline_commit,
+        "onto_branch": onto_branch,
         "baseline_untracked": baseline_untracked,
         "baseline_fingerprint": baseline_fingerprint,
         "baseline_commit": baseline_commit,

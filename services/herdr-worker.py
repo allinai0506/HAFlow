@@ -402,6 +402,45 @@ def list_dirty_tracked(repo):
     ]
 
 
+# 不可变锚点契约:必须是 full 40-hex,禁用 `--short`(短 sha 无法与提交对象一一对应)。
+FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+
+
+def capture_head_sha(clone):
+    """采集基线锚点:分支检出完成那一刻的 HEAD sha。
+
+    与 build_baseline_fingerprint 并列而不合并 —— 工作区指纹与 commit sha
+    是两种证据,前者回答"改了什么",后者回答"从哪个提交起算"。
+    调用方必须保证本函数执行于分支检出之后、`.agent-task-context` 落盘之前,
+    否则 `--onto` 分支的既有提交会被误算进本任务区间。
+    """
+    result = subprocess.run(
+        [
+            "git", "-C", str(clone),
+            "rev-parse", "HEAD"
+        ],
+        text=True,
+        capture_output=True,
+        check=False
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            result.stderr.strip()
+            or result.stdout.strip()
+            or f"Failed to resolve HEAD for clone: {clone}"
+        )
+
+    sha = result.stdout.strip()
+
+    if not FULL_SHA_RE.match(sha):
+        raise RuntimeError(
+            f"HEAD sha is not a full 40-hex object id: {sha!r} (clone={clone})"
+        )
+
+    return sha
+
+
 def build_baseline_fingerprint(repo):
     tracked = {}
 
@@ -770,6 +809,8 @@ def main():
             )
             print(f"[WORKSPACE] {clone}")
             branch = None
+            # 无 Git 语义 ⇒ 无锚点;onto_branch 在 context 模式已被前置拒绝。
+            baseline_commit = None
             baseline_fingerprint = {
                 "tracked": {},
                 "untracked": {}
@@ -798,6 +839,14 @@ def main():
                 )
 
             print(f"[BRANCH] {branch}")
+
+            # 不可变锚点:分支检出(新建或 --onto)完成后的 HEAD。
+            # 顺序铁律:必须在 sanitize/切换之后,否则会把 --onto 的既有提交
+            # 算进本任务区间;必须在 write_task_context 之前,否则
+            # .agent-task-context 会被记入锚点区间。
+            baseline_commit = capture_head_sha(clone)
+
+            print(f"[BASELINE COMMIT] {baseline_commit}")
 
             # 在写入 .agent-task-context 之前记录完整工作区基线。
             # 包括：
@@ -878,6 +927,8 @@ def main():
             "task_id": args.task_id,
             "clone": str(clone),
             "branch": branch,
+            "baseline_commit": baseline_commit,
+            "onto_branch": getattr(args, "onto", None),
             "baseline_untracked": baseline_untracked,
             "baseline_fingerprint": baseline_fingerprint,
             "baseline_commit": baseline_commit if args.execution_mode != "context" else None,
