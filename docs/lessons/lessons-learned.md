@@ -4611,3 +4611,69 @@ ruff check bin/herdr-task herdr/eval_engine.py herdr/eval_store.py herdr/replay_
 - `herdr/eval_engine.py`、`herdr/replay_engine.py`、`herdr/eval_store.py`
 - `wiki/log.md`（fix6 轮收尾条目与二次收尾关系）
 - PR: https://github.com/allinai0506/HAFlow/pull/86
+
+## 99. 单页应用的共享渲染容器必须有单一所有权者；部署资产必须与运行副本同源
+
+### 问题背景
+
+PR #114（Flow Workbench v1，`c2faa61`）把 Console 的 Workflow 主区从 Stage Stepper 升级为 DAG 画布，默认视图改为 Flow，其中把共享的 `#tasks` 容器置为 `display:none`。但 `#tasks` 并非 Task List 独占——运维驾驶舱、我的仪表板、历史/未注册空间面板三处既有代码都把自己的内容写进同一个容器。
+
+用户实测反馈：「我的仪表板为什么打开也是这个页面」。内容确实渲染了，但被 Flow 默认视图的 `display:none` 隐藏，屏幕上只剩画布。独立审查进一步查出同源的两个既存缺陷：`showOpsCenter` 未清 `dashMode` 也未停 10s 定时器，导致仪表板定时器周期性覆盖运维驾驶舱内容、且「← 返回工厂」退不出来；aux 模式下 `.task-filters` 仍可点击，`renderTasks` 覆写掉运维/仪表板内容。
+
+同一 PR 还暴露一个部署缺陷：`scripts/install-herdr-console.sh` 只 `install` 三个文件，不复制 `console/static/`，导致新引入的离线依赖在部署环境必然丢失，Flow Canvas 会稳定报「本地 X6 资源缺失」。开发态（直接在仓库跑）完全正常，只有走 LaunchAgent 部署才暴露。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 新视图把共享容器 `display:none`，其他既有视图写进同一容器 | 共享渲染容器有多个写入方时，**显示归属必须由单一入口裁决**，不能让每个视图各自决定 visibility | 抽出唯一裁决函数（如 `setWorkspaceMode(flow/list/aux)`），成为该容器及其兄弟节点 display 的**唯一**写入者；新增/修改任何写该容器的路径必须显式 claim |
+| 症状是「页面没切换」，不是报错 | 静默的可见性缺陷比崩溃更危险：没有异常、没有日志，只有用户肉眼发现 | 契约测试必须断言「每个写共享容器的函数都调用了 claim」，而非只断言某一个函数正确；正向测试通过不代表其他写入方也被覆盖 |
+| 模式互斥标志不对称（`showDashboard` 清 `opsMode`，`showOpsCenter` 不清 `dashMode`） | 多个布尔模式标志并存的 UI 天然会漂移；定时器与标志不同步 = 周期性互相覆盖 | 模式切换必须成对清标志 + 停定时器，并在切换函数里集中声明；测试断言切换函数体内的对称赋值 |
+| aux 模式仍可点击属于其他模式的控件 | 控件可见性必须跟随容器模式 | 模式辅助函数统一处理所有模式相关控件（切换条、筛选器、摘要）的显隐，不留可点的旁路 |
+| 部署脚本逐个 `install` 文件，新增目录型资产未被复制 | 部署资产清单与运行副本的同源性必须在脚本里显式维护 | 目录型资产（`static/` 等）用 `rsync -a --delete` 同步；新增运行时资源目录时必须同步更新部署脚本，并加「部署后资源可达」检查 |
+| 开发态通过 ≠ 部署态通过 | 验证环境必须与真实运行入口一致 | Console 类改动必须在 LaunchAgent 部署形态下验证资源可达（HTTP 状态码），不只在仓库内跑 |
+
+### 操作规范（已固化到 `wiki/flow-workbench.md` §6、`tests/test_console_flow_workbench.py`）
+
+1. **容器归属单一入口**：新增或修改任何写共享渲染容器的代码路径，必须显式调用 `setWorkspaceMode(...)`；禁止在其他位置直接写该容器的 `style.display`。
+2. **模式切换成对清理**：`showOpsCenter` / `showDashboard` 互斥进入时，必须同时清对方标志并停对方定时器。
+3. **容器归属契约测试**：为「写共享容器的函数集合」逐个断言 claim 调用（`test_every_aux_container_writer_claims_the_workspace`），新增写入方时测试必须同步更新，否则会被门禁拦下。
+4. **部署资产同源**：新增运行时资源目录时，同步更新 `scripts/install-herdr-console.sh` 的 `rsync` 规则，并验证部署后 `curl` 资源返回 200。
+5. **空 catch 不得掩盖死代码**：若某个调用被 `try/catch` 吞掉，必须确认该 API 在 vendored 依赖里真实存在（X6 3.x 无 `cleanSelection`，selection 是插件）。用 `grep` 在 vendor bundle 里核对 API 存在性，而不是假设。
+
+### 验证命令 / 守护测试
+
+```bash
+# 1) 容器归属 + 画布生命周期 + 依赖缺失 fail-soft + 无 CDN
+pytest -q tests/test_console_flow_workbench.py
+# 期望：15 passed
+
+# 2) 反向验证（把 D1/D2/D3 三处修复回退，契约测试必须失败）
+pytest -q tests/test_console_flow_workbench.py
+# 期望：4 failed（test_every_aux_container_writer_claims_the_workspace /
+#        test_select_space_drops_stale_flow_graph /
+#        test_ops_center_clears_dashboard_mode_and_timer /
+#        test_aux_mode_hides_task_filters）
+
+# 3) 部署态资源可达（真实 LaunchAgent 形态）
+./scripts/install-herdr-console.sh
+curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8765/static/vendor/x6-3.1.8.min.js
+curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8765/static/vendor/dagre-3.1.1.min.js
+# 期望：200 / 200
+
+# 4) 禁止第三方运行时 CDN
+grep -riE "unpkg|jsdelivr|cdnjs" console/ herdr/ || echo "no CDN"
+# 期望：no CDN
+```
+
+### 相关文档 / 关联证据
+
+- `wiki/flow-workbench.md` — Flow Workbench 分层职责、真值来源表、状态聚合优先级、容器归属契约（§6）
+- `herdr/workflow_graph.py` — `workflow_graph_projection` / `aggregate_node_status` / `pick_default_node`
+- `console/herdr_factory_console.py` — `setWorkspaceMode` / `selectSpace` / `showOpsCenter` / `send_static`
+- `scripts/install-herdr-console.sh` — `static/` 的 `rsync -a --delete` 同步
+- `tests/test_console_flow_workbench.py` — 容器归属契约与反向验证测试
+- Git Commit `c2faa61` / Merge Commit `c9bb16e`
+- PR: https://github.com/allinai0506/HAFlow/pull/114
+
+---

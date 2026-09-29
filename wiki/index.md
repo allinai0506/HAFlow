@@ -25,6 +25,7 @@
 8. **[[preflight-and-health]] (体检与沙盒深层探针)**: 掌握轻量与深度沙盒探针如何保证无副作用检测 Agent 额度与凭证。
 9. **[[common-change-paths]] (高频开发与代码修改指南)**: 针对常见业务与工程需求（如添加新 Agent、修改状态机、重载服务），指导您需要同时关注哪些文件与测试。
 10. **[[ops-center]] (Agent 运维驾驶舱)**: 了解 Dashboard V2 的老板视角、Workflow 卡片、Agent Fleet、异常中心与下钻数据契约。
+11. **[[flow-workbench]] (Flow Workbench 运行态 DAG 工作台)**: 掌握 Console 如何用 Graph Projection + Dagre + AntV X6 准确表达 Workflow 的并行与汇聚，以及离线依赖与容器归属约束。
 
 ---
 
@@ -48,6 +49,7 @@
 | **排查后台服务不推进、状态不同步** | [[architecture]] | `services/herdr-controller.py` |
 | **编写或修改自动化测试** | [[dag-workflow-engine]] | `tests/test_workflow_engine.py` |
 | **工作流外部受控元语与快照回溯** | [[dag-workflow-engine]], [[task-lifecycle]] | `herdr/kernel.py`, `console/herdr_factory_console.py` |
+| **修改 Workflow 主区画布 / Inspector / 视图切换** | [[flow-workbench]] | `herdr/workflow_graph.py`, `console/herdr_factory_console.py`, `console/static/vendor/` |
 | **工位实时打断与插话纠偏 (Steering Mesh & AgentAdapter)** | [[task-lifecycle]] | `herdr/steering.py`, `herdr/agent_adapter.py`, `bin/herdr-task:steer/adapters` |
 | **白盒遥测、语义提炼与产物投影 (Projection Engine)** | [[task-lifecycle]] | `herdr/projection.py`, `console/herdr_factory_console.py` |
 | **通用配置驱动与受控 MCP 生态容器 (Dynamic Config & MCP Mesh)** | [[dag-workflow-engine]] | `herdr/mcp.py`, `herdr/workflow.py` |

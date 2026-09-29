@@ -1510,3 +1510,16 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - 六步状态：步骤 1-2 已完成（本节 + `docs/lessons/lessons-learned.md` §88）；步骤 0 交付 PR 已存在且为 draft（PR86 head `cc5e9a0` base `main`，未合并、未改写历史）；步骤 3 合并确认只读 `--dry-run` → ⛔ 未合入；步骤 4-6 DEFERRED（破坏性步骤须待 base 合入后执行，不得删除 clone/pane/tab）。
 - 合并指引与分叉研判：PR86 → base `main`，`git merge-tree --write-tree origin/main cc5e9a0` 退出码 0（树哈希 `a264b0ece8cc117db2cc5c981f0691186f408cbb`，**零冲突，可直接合入**）。本地同名分支 `3de67c8` 与远端 `cc5e9a0` 分叉（merge-base `3be4362`），本地分支为历史 fix5 节点残留，其工作树内容已完全被 `origin/main`（含 PR87）与 PR86（`cc5e9a0`）覆盖，本地无独有未提交工作；按硬约束未做任何 reset/delete/pull，建议待 PR86 合入 main 后由 Controller 统一清理本地分支。
 - 证据：PR86（`gh pr view 86` state: OPEN, isDraft: true, headRefOid: `cc5e9a0`）；`shared/notes.jsonl`（`impl-fix6` pass `n-1790163114271-36f8`、`test-auto-r8` pass `n-1790163892258-aee0`、`review-auto-r3` pass `n-1790165060831-9aed`）；全量测试 1191/1191；`git merge-tree --write-tree origin/main cc5e9a0` exit 0。
+
+## [2026-09-29] merge | PR #114 已合并：Flow Workbench v1 用真实 DAG 表达 Workflow 运行工作台
+
+- 交付物身份：PR https://github.com/allinai0506/HAFlow/pull/114 （base `main`），head 提交 `c2faa61`，merge commit `c9bb16e`，合并时间 2026-09-29T13:26:12Z，11 files / +824 -11。
+- 解决的问题：Console 用 Stage Stepper + Task List 表达真实 DAG，把 `software-development-v1` 的 test/review 并行分支画成串行链，产品能力与用户看到的模型不一致。本次以只读投影方式让 DAG 拓扑首次在 UI 中被准确表达。
+- 架构：`Workflow Definition → herdr/workflow_graph.py::workflow_graph_projection()（纯函数）→ Dagre(TB) 计算坐标 → AntV X6 渲染 → Flow Canvas → Node Inspector`。X6 只负责画布与交互，Dagre 只负责布局，业务真相全部留在投影层。
+- 依赖与离线：`@antv/x6@3.1.8` + `@dagrejs/dagre@3.1.1` 固定版本 vendored 到 `console/static/vendor/`（保留双 LICENSE），经本地 `/static/` 路由加载，运行时零 CDN、断网可用；npm 仅作开发期获取手段，Console 启动方式不变。`scripts/install-herdr-console.sh` 补 `rsync console/static/`。
+- 真值纪律：nodes/edges 仅来自真实 Workflow Definition 与 `depends_on`；状态聚合 `blocked > failed > rework > working > completed > waiting` 确定性且与既有 `stage_summary` 同源；context 无 contract 则返回空，不伪造「已加载」；legacy/空定义 fail-soft 返回有限 nodes + `edges: []`。
+- 未改动：Scheduler / Router / Agent Router / Canary / Rollout / Reverification / Execution Outcome / Candidate Freeze / Join Gate / Workflow 执行语义 / Task lifecycle / Controller 语义。无副作用、无持久化写入。
+- 评审闭环：S6 三轮独立审查。Round1 NEEDS_FIXES（dead X6 Selection API）→ 选中态改走 `cell.attr('body/stroke-width')`；Round2 MERGE_READY；用户实测报 F1（我的仪表板显示为同一页面）后 Round3 NEEDS_FIXES 给出 3 项容器归属缺陷（D1 selectSpace 陈旧图 / D2 showOpsCenter 未清 dashMode 致 10s 定时器互相覆盖 / D3 aux 模式任务筛选误覆写）→ 抽出 `setWorkspaceMode(flow|list|aux)` 单一入口修复。最终 MERGE_READY，无未解决正确性/安全性缺陷。
+- 验证：`pytest -q tests/test_console* tests/test_workflow*` 253 passed / 3 subtests；compileall 与 `git diff --check` exit 0；Console 实启 `/`、x6、dagre 全 200；HTML 静态校验 7/7。**未验证项**：`pytest -q` 全量套件 120s 超时未跑完（专项套件全绿，已在 PR 描述中如实标注）。
+- 知识沉淀：新增 `wiki/flow-workbench.md`（分层职责、真值来源表、状态聚合优先级、离线依赖、read-mostly 契约、容器归属）；`docs/lessons/lessons-learned.md` §99（共享渲染容器的单一所有权 + 部署资产与运行副本的同源要求）。
+- 遗留边界（已交付但需知悉）：节点标签使用 X6 `rect` + 文本而非 `shape: 'html'` 自定义卡片，样式控制较简；Flow 图随 `loadWorkflow` 重绘，与 Task List 同节奏，未做独立图轮询。
