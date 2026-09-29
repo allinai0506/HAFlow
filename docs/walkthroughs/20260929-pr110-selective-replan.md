@@ -243,14 +243,69 @@ git diff --check EXIT=0
 
 ## 5. 评审闭环：一轮独立评审，9 项缺陷
 
-评审者：独立对抗性子代理（Opus 5，read-only，与实现者上下文分离），
-verdict **NEEDS_FIXES**，blocking = F1 / F2 / F4（F3 同轮处置）。
+### 5.1 评审来源披露
+
+本轮原本派出三个独立评审者。实际结果：
+
+- `rev-c-opus`（Opus 5，read-only，与实现者上下文分离）**送达**——
+  按「把报告写进文件」的方式（`/tmp/srp-review-c-opus.md`），
+  结论 `NEEDS_FIXES`、9 项发现、并附 10 条不变量逐条核验表。
+  下文 §5.3 的 F1–F9 即其 findings 1–9 的逐条处置（编号一一对应）。
+- 另外两路（`rev-a-fable` / `rev-b-sonnet`）以及后续派出的
+  `rev-ping`、`rev-r2-sonnet`、`rev-r2-opus`、`rev-r2b-a` 全部以
+  `API Error: 400 Upstream request failed: Model is unavailable.` 失败，
+  **零工具调用**。
+
+未送达的两路**不是通过**：它们的结论在本 PR 中不可用，不得被当作已完成的评审。
+Round 2 的修复增量复审同样因此不可得，改由实现者以 `google-code-review` 自审，
+**已如实标为同模型自审**（见 S6 工件 §0），未冒充独立通过。
+
+### 5.2 评审者的原始 blocking 清单（逐字）
+
+Round 1 报告原文（长期副本
+`.omc/review-e0030041-737c-43ec-b042-4187ba05b487-round1-opus5.md`，
+原件 `/tmp/srp-review-c-opus.md`）收尾写道：
+
+```text
+VERDICT: NEEDS_FIXES
+
+Minimal blocking list:
+1. Finding 1 — reconcile the validated `retry_node` (policy) with the applied
+   `retry_node` (gate config): reject the plan when they differ, or apply the
+   invalidation against the policy's node. Today a config drift destroys the
+   tasks the PR promises to preserve while filing a fact that says it didn't.
+2. Finding 2 — align `superseded_by` semantics between
+   `_selective_replan_awaiting_redispatch` (`current_lineage_head is None`) and
+   `lineage_redispatch_candidates` (max member has `superseded_by` ⇒ skipped),
+   and add an escape hatch (escalate / stop re-discarding) when no candidate
+   can ever be produced. Today this state is permanent and silent.
+
+Fix finding 4 in the same pass: the coordinator must not be told to redo the
+full `implementation` stage while the controller is running the selective
+replacement.
+```
+
+三点值得单独指出：
+
+1. **修复采用的就是评审者给的第一方案**：F1 按「两者不一致即拒绝整个 plan」落地
+   （不是「改用策略节点作废」）；F2 按「对齐 `superseded_by` 语义」落地为
+   **共用一个函数**，因此不需要额外的「escape hatch」——谓词同源后，
+   「补派管线给不出候选」的谱系直接不再被判为等待，节点走正常完成路径。
+2. 评审者的不变量表把不变量 4 标为 **VIOLATED under finding 1**、
+   不变量 8 标为 **NOT GUARANTEED for re-close**。两者现在都由上述修复关闭，
+   并各有一个变红过的守卫用例（M1 / M2）。
+3. 评审者自己声明的「无法验证项」也一并保留，不因结论被修好就抹去：
+   收到 mode-blind 通知后总指挥的**实际**行为（只追踪了消息构造，未做真实派发）、
+   任何需要真实 `~/.herdr-controller` 状态目录的行为、以及 finding 9 的运行时开销
+   （读代码得出，未实测）。本 PR 的 §6「已知边界」与此一致。
+
+### 5.3 九项发现的逐条处置
 
 | 编号 | 级别 | 缺陷 | 处置 |
 |---|---|---|---|
 | F1 | MAJOR | 计划按策略声明的 `retry_node` 校验目标，作废却按门禁解析出的 `retry_node` 执行。两者不一致时「保留」过滤器永不命中，会把**未被点名**的任务一并作废，同时留下一条自称 selective 的事实 | 已修：`_resolve_selective_replan` 早期守卫，不一致即整体回退 legacy |
 | F2 | MAJOR | `_selective_replan_awaiting_redispatch` 与 `lineage_redispatch_candidates` 对 `superseded_by` 的判断不一致；分歧状态是一个**没有出口的终态** | 已修：awaiting 判定改为复用补派管线同一谓词 |
-| F3 | MINOR | sweep 每轮无条件 `clear_stage_advance` 绕开 `notified` 闩，可能退化为每 2s 重复派发 / 重复提示 | 不修，**已验证为良性**（见 §5.1），并新增不变量用例锁死 |
+| F3 | MINOR | sweep 每轮无条件 `clear_stage_advance` 绕开 `notified` 闩，可能退化为每 2s 重复派发 / 重复提示 | 不修，**已验证为良性**（见 §5.4），并新增不变量用例锁死 |
 | F4 | MAJOR | `build_fix_loop_message` 对 `mode` 无感知：selective 下总指挥仍被告知全量重做 implementation，与 Controller 刚起的 B-r2 撞在同一条分支上 | 已修：新增 `_build_selective_replan_message`；补投路径同步保留 selective 上下文 |
 | F5 | MINOR | `exists` 但 stored payload 读不回时，`isinstance(stored, dict)` 无 `else`，静默把本次重算的 plan 提升为权威 | 已修：回退并打印 `stored_fact_unreadable` |
 | F6 | MINOR | 拒绝分支日志打印计划自身 reason，掩盖真正的拒绝原因 `identity_content_mismatch` | 已修：优先 `error` / `reason` |
@@ -258,12 +313,9 @@ verdict **NEEDS_FIXES**，blocking = F1 / F2 / F4（F3 同轮处置）。
 | F8 | NIT | wiki §6 把该覆盖描述为「清 stage-advance 并跳过」，代码实际是重新入队 | 已修：措辞纠正为「移出 completed 并重新进入就绪流程」，并写明「重开 ≠ 全量重派」 |
 | F9 | NIT | AWAIT 循环内逐节点 `load_tasks()`；sweep 路径完全无测试 | 已修：每轮惰性缓存一次；新增两个真实 sweep 用例（正反两向） |
 
-评审来源披露：本轮原本派出三个独立评审者，但本环境的子代理→主会话消息通道失效
-（已用一个对照子代理确认 `SendMessage` 无法送达主会话），只有 Opus 5 一路按
-「把报告写进文件」的方式送达。其余两路未送达**不是通过**，此处如实披露：
-它们的结论在本 PR 中不可用，不得被当作已完成的评审。
+F1 / F2 / F4 是评审者的 blocking 三项，均已修；F3 同轮处置（不修 + 不变量用例）。
 
-### 5.1 F3：不修的理由（用不变量锁死，而非仅靠论证）
+### 5.4 F3：不修的理由（用不变量锁死，而非仅靠论证）
 
 评审提出的病理是「每 2s 一次派发尝试 / 每 2s 一次总指挥提示」。实测不成立，
 原因可被点名：
@@ -281,11 +333,11 @@ verdict **NEEDS_FIXES**，blocking = F1 / F2 / F4（F3 同轮处置）。
 
 该不变量由 `test_awaiting_window_only_redispatches_targeted_lineage` 正反两向锁死。
 
-### 5.2 变异验证：每个修复必须被一个真会变红的用例守住
+### 5.5 变异验证：每个修复必须被一个真会变红的用例守住
 
 方法：把修复点逐条**反向改写**（不是删掉，而是改回评审指出的那个错误行为），
 只跑声称守住它的那条用例；预期**变红**。跑完用 `shutil.copyfile` 从
-`/tmp/srp-mut/*.orig` 还原，并 `diff` 确认与变异前逐字节一致（见 §5.3）。
+`/tmp/srp-mut/*.orig` 还原，并 `diff` 确认与变异前逐字节一致（见 §5.6）。
 
 | # | 目标修复 | 变异方式（把修复改回缺陷行为） | 守卫用例 | 结果 |
 |---|---|---|---|---|
@@ -300,7 +352,7 @@ verdict **NEEDS_FIXES**，blocking = F1 / F2 / F4（F3 同轮处置）。
 F3 / F8 / F9 不是守卫型修复（分别为「不修 + 不变量用例」「措辞」「性能 + 覆盖」），
 不在变异表内。
 
-### 5.3 变异后的工作区完整性
+### 5.6 变异后的工作区完整性
 
 `/tmp/srp-mut/` 只备份了被变异的两个文件（`services/herdr-controller.py`、
 `bin/herdr-task`）。还原后：
