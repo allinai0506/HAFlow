@@ -452,6 +452,12 @@ def record_selective_replan_decision(workflow_id, decision, db_path=None):
         "gate_task_id": gate_task_id,
         "gate_task_version": version,
         "gate_candidate_sha": gate_candidate_sha,
+        # P1-3: replacement 基线审计字段。决策时刻冻结候选的可证明分支,
+        #  informational(不进 _REPLAN_COMPARED_FIELDS):老事实无此键时
+        #  仍按原 compare 判定 exists/mismatch,不因升级产生误拒。
+        "source_candidate_branch": str(
+            payload.get("source_candidate_branch") or ""
+        ).strip(),
         "gate_note": str(payload.get("gate_note") or ""),
         "retry_node": retry_node,
         "mode": mode,
@@ -557,6 +563,30 @@ def latest_selective_replan_for_node(workflow_id, retry_node, db_path=None):
         return {"event_id": event.get("id"),
                 "timestamp": event.get("timestamp"), **payload}
     return None
+
+
+def list_selective_replan_for_node(workflow_id, retry_node, db_path=None):
+    """All *selective* facts for one retry_node, chronological.
+
+    P1-2: test ∥ review 并行 blocked 会在同一轮留下两条单门禁事实
+    (test→[B], review→[C])。只读最新一条会丢掉另一条的目标;
+    awaiting/notes 必须对该节点全部 selective 事实取并集,
+    已落定谱系(无补派候选)自然不再触发,故历史事实滞留无害。
+    """
+    node = str(retry_node or "").strip()
+    if not node:
+        return []
+    matched = []
+    for event in list_selective_replan_decisions(
+            workflow_id, db_path=db_path, limit=REPLAN_LOOKUP_SCAN_LIMIT):
+        payload = event.get("payload") or {}
+        if str(payload.get("mode") or "") != "selective":
+            continue
+        if str(payload.get("retry_node") or "") != node:
+            continue
+        matched.append({"event_id": event.get("id"),
+                        "timestamp": event.get("timestamp"), **payload})
+    return matched
 
 
 def record_join_gate_verdict(

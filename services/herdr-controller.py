@@ -1043,6 +1043,60 @@ def _fix_loop_keepable(task):
     return False
 
 
+class SelectiveInvalidationResult(list):
+    """选择性作废的结构化返回(仍是 list,兼容 legacy 调用方)。
+
+    P1-1: selective 作废不能只返回 invalidated=[...]。部分失败时
+    调用方必须能判断 all_targets_applied / pending / failed,
+    否则会带着 [B,C] 的 latch 去等一个永远不会产生的 C-r2。
+    legacy 路径( selective_target_task_ids is None )仍返回普通 list。
+    """
+
+    def __new__(cls, invalidated=None, *, applied=None, pending=None,
+                failed=None):
+        obj = super().__new__(cls, list(invalidated or []))
+        obj.applied = list(applied or [])
+        obj.pending = list(pending or [])
+        obj.failed = dict(failed or {})
+        obj.all_targets_applied = not obj.pending
+        return obj
+
+
+def _invalidate_single_task(task_id, gate_node_id):
+    """finalize(如需)+supersede 单个任务,返回 (ok, error)。"""
+    status = (get_task(task_id) or {}).get("status")
+    if status in ("completed", "cleanup_ready"):
+        result = subprocess.run(
+            [TASK_MANAGER, "finalize", task_id],
+            text=True,
+            capture_output=True,
+        )
+        if result.returncode != 0:
+            err = result.stderr.strip() or result.stdout.strip()
+            print(f"[FIX LOOP INVALIDATE ERROR] finalize {task_id}: {err}")
+            return False, f"finalize:{err}"
+        status = (get_task(task_id) or {}).get("status")
+    if status not in FIX_LOOP_SUPERSEDEABLE:
+        print(
+            f"[FIX LOOP INVALIDATE SKIP] task={task_id} "
+            f"status={status} cannot be superseded"
+        )
+        return False, f"status_not_supersedeable:{status}"
+    result = subprocess.run(
+        [
+            TASK_MANAGER, "supersede", task_id,
+            "--reason", f"fix-loop: gate {gate_node_id} blocked",
+        ],
+        text=True,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        err = result.stderr.strip() or result.stdout.strip()
+        print(f"[FIX LOOP INVALIDATE ERROR] supersede {task_id}: {err}")
+        return False, f"supersede:{err}"
+    return True, ""
+
+
 def invalidate_for_fix_loop(workflow_id, gate_node_id, workflow_cfg, retry_node=None, selective_target_task_ids=None):
     """作废 gate 节点及其全部下游、以及 retry_node 到 gate 间全部中间节点的非 superseded 任务(fix-loop 回流前提)。
 
@@ -1054,6 +1108,12 @@ def invalidate_for_fix_loop(workflow_id, gate_node_id, workflow_cfg, retry_node=
     其余实现任务零写入(状态/版本/分支/元数据全部不动);
     retry_node 之外的节点行为与 legacy 完全一致。
     None = legacy 精确原行为(retry_node 自身不进扫描范围)。
+
+    P1-1 两阶段提交: selective 模式先作废全部目标谱系,任一目标
+    未落定即整体返回(门禁/下游一律不动,无 latch、无通知),
+    下轮 sweep 基于已持久化 Fact 重试剩余目标。返回
+    SelectiveInvalidationResult(仍是 list),携带
+    applied/pending/failed/all_targets_applied。
     """
     nodes_by_id = {
         n["id"]: n for n in workflow_cfg.get("nodes", [])
@@ -1084,6 +1144,62 @@ def invalidate_for_fix_loop(workflow_id, gate_node_id, workflow_cfg, retry_node=
         selective_targets = {
             str(t).strip() for t in selective_target_task_ids if str(t).strip()
         }
+
+    # P1-1: selective 目标两阶段提交。阶段一先处理 retry_node 点名目标;
+    # 任一目标 pending 即返回,不碰门禁/下游(门禁仍 blocked,下轮可重试)。
+    if selective_targets is not None and retry_node:
+        ordered_targets = sorted(selective_targets)
+        applied: list = []
+        failed: dict = {}
+        snapshot = {
+            str(t.get("task_id") or ""): t
+            for t in load_tasks()
+            if isinstance(t, dict)
+            and t.get("workflow_id") == workflow_id
+        }
+        for target_id in ordered_targets:
+            record = snapshot.get(target_id)
+            if record is None:
+                failed[target_id] = "target_task_unknown"
+                continue
+            status = record.get("status")
+            if status == "superseded" or record.get("superseded_by"):
+                # 崩溃前已作废:视为已落定,不重复 supersede。
+                applied.append(target_id)
+                continue
+            ok, err = _invalidate_single_task(target_id, gate_node_id)
+            if ok:
+                applied.append(target_id)
+            else:
+                failed[target_id] = err
+        if selective_replan_core is not None:
+            outcome = selective_replan_core.selective_invalidation_outcome(
+                ordered_targets, applied, failed
+            )
+        else:
+            outcome = {
+                "applied": applied,
+                "pending": [t for t in ordered_targets if t not in applied],
+                "failed": failed,
+                "all_targets_applied": len(failed) == 0
+                and len(applied) == len(ordered_targets),
+            }
+        if not outcome["all_targets_applied"]:
+            print(
+                f"[SELECTIVE REPLAN PARTIAL] workflow={workflow_id} "
+                f"gate={gate_node_id} retry={retry_node} "
+                f"applied={','.join(outcome['applied'])} "
+                f"pending={','.join(outcome['pending'])} "
+                f"failed={','.join(sorted(outcome['failed']))}"
+            )
+            return SelectiveInvalidationResult(
+                list(outcome["applied"]),
+                applied=list(outcome["applied"]),
+                pending=list(outcome["pending"]),
+                failed=dict(outcome["failed"]),
+            )
+        # 阶段一全落定,进入阶段二:门禁/下游/中间节点(仍跳过 preserved)。
+        # 目标已全部 superseded,下方扫描会自然跳过它们(状态已变)。
 
     supersedeable = FIX_LOOP_SUPERSEDEABLE
     invalidated = []
@@ -1178,6 +1294,24 @@ def invalidate_for_fix_loop(workflow_id, gate_node_id, workflow_cfg, retry_node=
             void_nodes.add(retry_node)
         _record_invalidation_note(
             workflow_id, gate_node_id, retry_node, void_nodes, invalidated
+        )
+
+    if selective_targets is not None:
+        # P1-1:阶段一目标已全落定,最终返回需包含目标+门禁/下游。
+        # 阶段二扫描跳过已 superseded 的目标,故在此补回。
+        phase1_applied = []
+        try:
+            phase1_applied = list(ordered_targets)
+        except NameError:
+            phase1_applied = sorted(selective_targets)
+        combined = list(phase1_applied) + [
+            tid for tid in invalidated if tid not in phase1_applied
+        ]
+        return SelectiveInvalidationResult(
+            combined,
+            applied=list(phase1_applied),
+            pending=[],
+            failed={},
         )
 
     return invalidated
@@ -1470,6 +1604,19 @@ def _scheduler_current_frozen_candidate_sha(workflow_id):
     return str((events[-1].get("payload") or {}).get("candidate_sha") or "")
 
 
+def _scheduler_current_frozen_branch(workflow_id):
+    """最新一次冻结候选的可证明分支(从 freeze 台账读);无 → ""。"""
+    if scheduler_facts_store is None:
+        return ""
+    try:
+        events = scheduler_facts_store.list_candidate_frozen_events(workflow_id)
+    except Exception:
+        return ""
+    if not events:
+        return ""
+    return str((events[-1].get("payload") or {}).get("delivery_branch") or "")
+
+
 def _resolve_selective_replan(workflow_id, gate_node_id, retry_node,
                               workflow_cfg, blocked_gate_tasks, tasks):
     """PR #110:把 blocked 门禁的显式 affected_task_ids 解析为选择性返工目标。
@@ -1500,6 +1647,65 @@ def _resolve_selective_replan(workflow_id, gate_node_id, retry_node,
         )
         return None, None
 
+    # P1-1 Resolve-once-persist-once-read-many:已有当前 gate episode 的
+    # Fact 时直接作为 authority 逐个 reconcile,不再根据已变化的 Task
+    # 状态重新决定 targets(否则 B 已 supersede 会导致整体 fallback,
+    # C 永远得不到 supersede)。
+    if len(blocked_gate_tasks) == 1 and isinstance(
+        blocked_gate_tasks[0], dict
+    ):
+        try:
+            _gate_task = blocked_gate_tasks[0]
+            _frozen_sha = _scheduler_current_frozen_candidate_sha(workflow_id)
+            _policy_fp = selective_replan_core.policy_identity(policy)
+            try:
+                _gate_version = int(_gate_task.get("version"))
+            except (TypeError, ValueError):
+                _gate_version = None
+            if _gate_version is not None and _frozen_sha and _policy_fp:
+                try:
+                    if hasattr(
+                        scheduler_facts_store,
+                        "list_selective_replan_for_node",
+                    ):
+                        _prior_facts = (
+                            scheduler_facts_store.list_selective_replan_for_node(
+                                workflow_id, retry_node
+                            )
+                        )
+                    else:
+                        _prior_facts = (
+                            scheduler_facts_store.list_selective_replan_decisions(
+                                workflow_id,
+                                limit=scheduler_facts_store.REPLAN_LOOKUP_SCAN_LIMIT,
+                            )
+                        )
+                except Exception:
+                    _prior_facts = []
+                _reused = selective_replan_core.find_reusable_selective_fact(
+                    _prior_facts,
+                    retry_node=str(retry_node or ""),
+                    gate_task_id=str(_gate_task.get("task_id") or ""),
+                    gate_task_version=_gate_version,
+                    frozen_candidate_sha=_frozen_sha,
+                    policy_identity=_policy_fp,
+                )
+                if isinstance(_reused, dict) and _reused.get("mode") == (
+                    selective_replan_core.MODE_SELECTIVE
+                ):
+                    print(
+                        f"[SELECTIVE REPLAN REUSE] workflow={workflow_id} "
+                        f"gate={gate_node_id} retry={retry_node} "
+                        f"targets={','.join(_reused.get('target_task_ids') or [])} "
+                        f"replan_id={_reused.get('replan_id')}"
+                    )
+                    return list(_reused.get("target_task_ids") or []), _reused
+        except Exception as exc:
+            print(
+                f"[SELECTIVE REPLAN WARN] workflow={workflow_id} "
+                f"gate={gate_node_id} reuse lookup skipped: {exc}"
+            )
+
     requested_raw = None
     if len(blocked_gate_tasks) == 1:
         requested_raw = blocked_gate_tasks[0].get(
@@ -1517,6 +1723,14 @@ def _resolve_selective_replan(workflow_id, gate_node_id, retry_node,
         ),
         supersedeable_statuses=FIX_LOOP_SUPERSEDEABLE,
     )
+    # P1-3:把决策时刻冻结候选的可证明分支绑进事实,供 replacement
+    # 派发时 fail-closed 校验基线(不进 identity,不影响 exists/mismatch)。
+    try:
+        plan["source_candidate_branch"] = _scheduler_current_frozen_branch(
+            workflow_id
+        )
+    except Exception:
+        pass
 
     authority = plan
     if plan.get("replan_id"):
@@ -1601,21 +1815,62 @@ def _latest_selective_fact(workflow_id, node_id):
     return fact if isinstance(fact, dict) else None
 
 
+def _all_selective_facts(workflow_id, node_id):
+    """该 retry_node 全部 selective 事实(chronological);异常 → []。
+
+    P1-2: test ∥ review 同轮 blocked 会留下两条单门禁事实。
+    只读最新一条会丢目标,必须取并集。
+    """
+    if selective_replan_core is None or scheduler_facts_store is None:
+        return []
+    try:
+        if hasattr(scheduler_facts_store, "list_selective_replan_for_node"):
+            facts = scheduler_facts_store.list_selective_replan_for_node(
+                workflow_id, node_id
+            )
+        else:
+            facts = []
+            for event in scheduler_facts_store.list_selective_replan_decisions(
+                workflow_id,
+                limit=scheduler_facts_store.REPLAN_LOOKUP_SCAN_LIMIT,
+            ):
+                payload = event.get("payload") or {}
+                if str(payload.get("mode") or "") != "selective":
+                    continue
+                if str(payload.get("retry_node") or "") != str(node_id or ""):
+                    continue
+                facts.append({
+                    "event_id": event.get("id"),
+                    "timestamp": event.get("timestamp"),
+                    **payload,
+                })
+    except Exception as exc:
+        print(
+            f"[SELECTIVE REPLAN WARN] workflow={workflow_id} "
+            f"node={node_id}: {exc}"
+        )
+        return []
+    return [f for f in (facts or []) if isinstance(f, dict)]
+
+
 def _selective_replan_awaiting_redispatch(workflow_id, node_id, tasks=None):
     """PR #110:该节点是否存在「已作废、待补派」的 selective 目标谱系。
 
     以持久化 selective_replan_decision 事实为唯一依据(无事实 → False)。
+    P1-2:同一节点多条 selective 事实取目标并集( test→[B] + review→[C]
+    = [B,C] );已落定谱系无补派候选,自然不再触发,历史滞留无害。
     判定刻意复用补派管线自己的谓词 `lineage_redispatch_candidates`:
     「该谱系当前有补派候选」≡「它能被补派」。两处若各写一套定义,一旦
     分歧(典型:任务被标 superseded_by 指向一个从未创建的替代者),
     这里会永远判 True、节点永远不完成,而补派管线永远给不出候选——
     工作流永久卡死。用同一个谓词,这种状态自动被视为「无事可等」。
     """
-    fact = _latest_selective_fact(workflow_id, node_id)
-    if not fact:
+    facts = _all_selective_facts(workflow_id, node_id)
+    if not facts:
         return False
     roots = {
         str(r).strip()
+        for fact in facts
         for r in (fact.get("target_lineage_roots") or [])
         if str(r).strip()
     }
@@ -1668,18 +1923,406 @@ def _selective_redispatch_blocker_notes(workflow_id, node_id):
 
     返回 {被作废 task_id: 上下文文本};上下文只进 dispatch prompt,
     旧 Task 本身(状态/元数据)不被改写。
+    P1-2:多条 selective 事实按目标取并集,每条目标沿用其所属事实的
+    gate note( test→B 用 test 的 blocker, review→C 用 review 的)。
     """
-    fact = _latest_selective_fact(workflow_id, node_id)
-    if not fact:
+    facts = _all_selective_facts(workflow_id, node_id)
+    if not facts:
         return None
     notes = {}
-    for raw_id in fact.get("target_task_ids") or []:
-        task_id = str(raw_id).strip()
-        if task_id:
-            notes[task_id] = selective_replan_core.render_replacement_blocker_note(
-                fact, task_id
-            )
+    for fact in facts:
+        try:
+            render = selective_replan_core.render_replacement_blocker_note
+        except Exception:
+            continue
+        for raw_id in fact.get("target_task_ids") or []:
+            task_id = str(raw_id).strip()
+            if task_id and task_id not in notes:
+                notes[task_id] = render(fact, task_id)
     return notes or None
+
+
+def _blocked_gate_tasks_for(workflow_id, gate_node_id):
+    """该门禁节点当前存活的 blocked 结论任务(快照用,不含 superseded)。"""
+    matched = []
+    for task in load_tasks():
+        if task.get("workflow_id") != workflow_id:
+            continue
+        if gate_node_id not in (task.get("node"), task.get("stage")):
+            continue
+        if task.get("status") == "superseded":
+            continue
+        if task.get("stage_verdict") == "blocked":
+            matched.append(task)
+    return matched
+
+
+def _retry_node_for_gate(workflow_cfg, gate_cfg, gate_node_id):
+    """解析 fix-loop 的 retry_node(含历史 fallback,与 handle 一致)。"""
+    retry_node = (gate_cfg or {}).get("retry_node", "implementation")
+    nodes_by_id = {n["id"]: n for n in (workflow_cfg or {}).get("nodes", [])}
+    if nodes_by_id and retry_node not in nodes_by_id:
+        gate_deps = nodes_by_id.get(gate_node_id, {}).get("depends_on", [])
+        fallback = next(
+            (dep for dep in gate_deps if dep in nodes_by_id),
+            None,
+        ) or next(iter(nodes_by_id))
+        retry_node = fallback
+    return retry_node
+
+
+def invalidate_for_merged_fix_loop(
+    workflow_id, gate_node_ids, workflow_cfg, retry_node=None,
+    selective_target_task_ids=None,
+):
+    """多门禁共享 retry_node 时的单次原子作废(P1-2)。
+
+    node 闭包取各门禁下游的并集 + retry 下游 + retry 自身(selective);
+    目标两阶段提交与单门禁完全一致(任一目标 pending 即返回,
+    各门禁/下游一律不动)。返回 SelectiveInvalidationResult 或普通 list。
+    """
+    gate_ids = sorted({str(g).strip() for g in (gate_node_ids or []) if str(g).strip()})
+    if not gate_ids:
+        return []
+    primary = gate_ids[0]
+    nodes_by_id = {n["id"]: n for n in (workflow_cfg or {}).get("nodes", [])}
+    if not nodes_by_id and (workflow_cfg or {}).get("stages"):
+        prev = None
+        for stage in (workflow_cfg or {}).get("stages", []):
+            stage_id = stage.get("key") or stage.get("id")
+            nodes_by_id[stage_id] = {
+                "id": stage_id,
+                "depends_on": [prev] if prev else [],
+            }
+            prev = stage_id
+    node_ids: set = set()
+    for gid in gate_ids:
+        node_ids |= set(_collect_downstream_nodes(nodes_by_id, gid))
+    if retry_node and retry_node in nodes_by_id:
+        node_ids |= _collect_downstream_nodes(nodes_by_id, retry_node) - {retry_node}
+        if selective_target_task_ids is not None:
+            node_ids.add(retry_node)
+
+    selective_targets = None
+    if selective_target_task_ids is not None:
+        selective_targets = {
+            str(t).strip() for t in selective_target_task_ids if str(t).strip()
+        }
+
+    if selective_targets is not None and retry_node:
+        ordered_targets = sorted(selective_targets)
+        applied: list = []
+        failed: dict = {}
+        snapshot = {
+            str(t.get("task_id") or ""): t
+            for t in load_tasks()
+            if isinstance(t, dict) and t.get("workflow_id") == workflow_id
+        }
+        for target_id in ordered_targets:
+            record = snapshot.get(target_id)
+            if record is None:
+                failed[target_id] = "target_task_unknown"
+                continue
+            if record.get("status") == "superseded" or record.get("superseded_by"):
+                applied.append(target_id)
+                continue
+            ok, err = _invalidate_single_task(target_id, "+".join(gate_ids))
+            if ok:
+                applied.append(target_id)
+            else:
+                failed[target_id] = err
+        if selective_replan_core is not None:
+            outcome = selective_replan_core.selective_invalidation_outcome(
+                ordered_targets, applied, failed
+            )
+        else:
+            outcome = {
+                "applied": applied,
+                "pending": [t for t in ordered_targets if t not in applied],
+                "failed": failed,
+                "all_targets_applied": not failed and len(applied) == len(ordered_targets),
+            }
+        if not outcome["all_targets_applied"]:
+            print(
+                f"[SELECTIVE REPLAN PARTIAL] workflow={workflow_id} "
+                f"gates={'+'.join(gate_ids)} retry={retry_node} "
+                f"applied={','.join(outcome['applied'])} "
+                f"pending={','.join(outcome['pending'])}"
+            )
+            return SelectiveInvalidationResult(
+                list(outcome["applied"]),
+                applied=list(outcome["applied"]),
+                pending=list(outcome["pending"]),
+                failed=dict(outcome["failed"]),
+            )
+
+    invalidated = []
+    invalidated_nodes = set()
+    gate_id_set = set(gate_ids)
+    for task in load_tasks():
+        if task.get("workflow_id") != workflow_id:
+            continue
+        if task.get("node") not in node_ids and task.get("stage") not in node_ids:
+            continue
+        status = task.get("status")
+        task_id = task["task_id"]
+        task_node = task.get("node") or task.get("stage")
+        if status == "superseded":
+            continue
+        if (
+            selective_targets is not None
+            and task_node == retry_node
+            and task_id not in selective_targets
+        ):
+            continue
+        if (
+            task_node in gate_id_set
+            and (not retry_node or retry_node not in gate_id_set)
+            and task.get("stage_verdict") == "pass"
+            and _fix_loop_keepable(task)
+        ):
+            continue
+        if status in ("completed", "cleanup_ready"):
+            result = subprocess.run(
+                [TASK_MANAGER, "finalize", task_id],
+                text=True, capture_output=True,
+            )
+            if result.returncode != 0:
+                continue
+            status = (get_task(task_id) or {}).get("status")
+        if status not in FIX_LOOP_SUPERSEDEABLE:
+            continue
+        result = subprocess.run(
+            [TASK_MANAGER, "supersede", task_id,
+             "--reason", f"fix-loop: gates {'+'.join(gate_ids)} blocked"],
+            text=True, capture_output=True,
+        )
+        if result.returncode == 0:
+            invalidated.append(task_id)
+            if task_node:
+                invalidated_nodes.add(task_node)
+    if invalidated:
+        void_nodes = set(invalidated_nodes) | gate_id_set
+        if retry_node:
+            void_nodes.add(retry_node)
+        _record_invalidation_note(
+            workflow_id, "+".join(gate_ids), retry_node, void_nodes, invalidated
+        )
+    if selective_targets is not None:
+        try:
+            phase1 = list(ordered_targets)
+        except NameError:
+            phase1 = sorted(selective_targets)
+        combined = list(phase1) + [t for t in invalidated if t not in phase1]
+        return SelectiveInvalidationResult(
+            combined, applied=list(phase1), pending=[], failed={})
+    void_primary = sorted(invalidated_nodes | {primary})
+    if retry_node:
+        void_primary.append(retry_node)
+    return invalidated
+
+
+def _handle_merged_fix_loops(workflow_id, retry_node, gates, workflow_cfg):
+    """同一 retry_node 多门禁 blocked 的单次合并处理(P1-2)。
+
+    gates: [(gate_node_id, gate_cfg)] 已按 gate id 排序,确定性。
+    流程:快照全部 blocked 任务 → 逐门禁 resolve(各 persist 其事实)
+    → 任一 fallback 即整组回退 legacy 逐个处理 → 全 selective 则
+    union targets 单次原子作废 + 单次 latch/通知。
+    """
+    from herdr import fix_loop as fix_loop_core
+
+    gate_ids = [str(gid) for gid, _ in gates]
+    # 快照:各门禁存活 blocked 任务(后续作废不得影响快照)。
+    snapshots: dict = {}
+    for gid, _gcfg in gates:
+        snapshots[gid] = _blocked_gate_tasks_for(workflow_id, gid)
+    # 任一门禁无存活 blocked 任务 → 整组无事可做(幂等空转)。
+    if not any(snapshots.values()):
+        return
+    blockers = []
+    for gid in sorted(snapshots):
+        for task in sorted(snapshots[gid], key=lambda t: str(t.get("task_id") or "")):
+            blockers.append({
+                "task_id": task.get("task_id"),
+                "note": task.get("stage_verdict_note", ""),
+            })
+    suggested_branch = latest_branch_for_node(workflow_id, retry_node)
+    if selective_replan_core is not None:
+        affected_union = selective_replan_core.merge_affected_task_ids([
+            task.get("stage_verdict_affected_task_ids")
+            for tasks in snapshots.values() for task in tasks
+        ])
+    else:
+        affected_union = []
+    fingerprint = fix_loop_core.verdict_fingerprint(
+        suggested_branch, blockers, affected_task_ids=affected_union
+    )
+    try:
+        max_loops = min(int((gcfg or {}).get("max_loops", FIX_LOOP_MAX)) for _, gcfg in gates)
+    except (TypeError, ValueError):
+        max_loops = FIX_LOOP_MAX
+    with lock:
+        _state = load_stage_state()
+        try:
+            prior_count = int(_state.get(f"{workflow_id}|fixloop|{retry_node}", 0))
+        except (TypeError, ValueError):
+            prior_count = 0
+        stored_fp = _state.get(f"{workflow_id}|fixloop|{retry_node}|fp")
+    # 任一门禁已有 exhaustion 记录即整组升级( fail-closed,不重试已升级门禁)。
+    for gid in gate_ids:
+        if _fix_loop_exhaustion_episode(workflow_id, gid):
+            reason = "max_loops_exhausted"
+            summary = fix_loop_core.summarize_fix_loop_item({
+                "workflow_id": workflow_id, "gate_stage": "+".join(sorted(gate_ids)),
+                "retry_node": retry_node, "loop_count": prior_count,
+                "max_loops": max_loops, "suggested_branch": suggested_branch,
+                "blockers": blockers, "exhausted": True,
+            })
+            _record_fix_loop_exhaustion(
+                workflow_id, gid, retry_node, reason, summary, fingerprint)
+            with lock:
+                _state = load_stage_state()
+                _state[f"{workflow_id}|fixloop|{retry_node}|pending_redo"] = {
+                    "ts": time.time(), "gate": "+".join(sorted(gate_ids)),
+                    "gates": sorted(gate_ids),
+                }
+                save_stage_state(_state)
+            coordinator_queue.put({
+                "kind": "fix_loop", "workflow_id": workflow_id,
+                "gate_stage": "+".join(sorted(gate_ids)), "retry_node": retry_node,
+                "blockers": blockers, "invalidated": [], "loop_count": prior_count,
+                "max_loops": max_loops, "suggested_branch": suggested_branch,
+                "exhausted": True, "escalation_reason": reason,
+            })
+            return
+    if fix_loop_core.fix_loop_exhausted(prior_count, max_loops) or \
+            fix_loop_core.is_repeat_verdict(fingerprint, stored_fp):
+        reason = ("max_loops_exhausted" if fix_loop_core.fix_loop_exhausted(
+            prior_count, max_loops) else "repeat_verdict")
+        summary = fix_loop_core.summarize_fix_loop_item({
+            "workflow_id": workflow_id, "gate_stage": "+".join(sorted(gate_ids)),
+            "retry_node": retry_node, "loop_count": prior_count,
+            "max_loops": max_loops, "suggested_branch": suggested_branch,
+            "blockers": blockers, "exhausted": True,
+        })
+        for gid in gate_ids:
+            _record_fix_loop_exhaustion(
+                workflow_id, gid, retry_node, reason, summary, fingerprint)
+        with lock:
+            _state = load_stage_state()
+            _state[f"{workflow_id}|fixloop|{retry_node}|pending_redo"] = {
+                "ts": time.time(), "gate": "+".join(sorted(gate_ids)),
+                "gates": sorted(gate_ids),
+            }
+            save_stage_state(_state)
+        coordinator_queue.put({
+            "kind": "fix_loop", "workflow_id": workflow_id,
+            "gate_stage": "+".join(sorted(gate_ids)), "retry_node": retry_node,
+            "blockers": blockers, "invalidated": [], "loop_count": prior_count,
+            "max_loops": max_loops, "suggested_branch": suggested_branch,
+            "exhausted": True, "escalation_reason": reason,
+        })
+        print(f"[FIX LOOP EXHAUSTED] workflow={workflow_id} gates={'+'.join(sorted(gate_ids))} reason={reason}")
+        return
+
+    # 逐门禁 resolve(各 persist 其事实)。任一非 selective 即整组回退 legacy。
+    per_gate_targets: dict = {}
+    per_gate_plans: dict = {}
+    all_selective = True
+    for gid, gcfg in gates:
+        _rn = _retry_node_for_gate(workflow_cfg, gcfg, gid)
+        tids, plan = _resolve_selective_replan(
+            workflow_id, gid, _rn, workflow_cfg, snapshots[gid], load_tasks())
+        if tids is None:
+            all_selective = False
+            break
+        per_gate_targets[gid] = list(tids)
+        per_gate_plans[gid] = plan
+    if not all_selective:
+        # 整组回退 legacy:逐门禁按原单门禁路径处理(legacy  sequential 安全,
+        # 无 targets 可丢;首个作废后其余自然空转)。
+        for gid, gcfg in gates:
+            # 避免递归进合并:直接走单门禁 legacy?调用 handle 会再次检测
+            # sibling 并合并 → 无限递归。改为临时只处理单门禁 legacy:
+            # 此时 selective 已整体放弃,按 legacy invalidate 单门禁。
+            _legacy_blocked = _blocked_gate_tasks_for(workflow_id, gid)
+            if not _legacy_blocked:
+                continue
+            _inv = invalidate_for_fix_loop(
+                workflow_id, gid, workflow_cfg,
+                retry_node=_retry_node_for_gate(workflow_cfg, gcfg, gid),
+                selective_target_task_ids=None,
+            )
+            if _inv:
+                _lc = _bump_fix_loop_count(
+                    workflow_id, _retry_node_for_gate(workflow_cfg, gcfg, gid))
+                with lock:
+                    _st = load_stage_state()
+                    _st[f"{workflow_id}|fixloop|{_retry_node_for_gate(workflow_cfg, gcfg, gid)}|pending_redo"] = {
+                        "ts": time.time(), "gate": gid}
+                    save_stage_state(_st)
+                coordinator_queue.put({
+                    "kind": "fix_loop", "workflow_id": workflow_id,
+                    "gate_stage": gid,
+                    "retry_node": _retry_node_for_gate(workflow_cfg, gcfg, gid),
+                    "blockers": [{"task_id": t.get("task_id"),
+                                  "note": t.get("stage_verdict_note", "")}
+                                 for t in _legacy_blocked],
+                    "invalidated": list(_inv), "loop_count": _lc,
+                    "max_loops": (gcfg or {}).get("max_loops", FIX_LOOP_MAX),
+                    "suggested_branch": latest_branch_for_node(
+                        workflow_id, _retry_node_for_gate(workflow_cfg, gcfg, gid)),
+                })
+        return
+
+    union_targets = selective_replan_core.merge_affected_task_ids(
+        list(per_gate_targets.values())) if selective_replan_core else sorted(
+        {t for v in per_gate_targets.values() for t in v})
+    union_roots = sorted({
+        str(r).strip()
+        for plan in per_gate_plans.values()
+        for r in ((plan or {}).get("target_lineage_roots") or [])
+        if str(r).strip()})
+    # 单次原子作废(目标两阶段,门禁取并集)。
+    invalidated = invalidate_for_merged_fix_loop(
+        workflow_id, gate_ids, workflow_cfg, retry_node=retry_node,
+        selective_target_task_ids=union_targets)
+    if isinstance(invalidated, SelectiveInvalidationResult) and not invalidated.all_targets_applied:
+        print(f"[SELECTIVE REPLAN DEFERRED] workflow={workflow_id} gates={'+'.join(sorted(gate_ids))} pending={','.join(invalidated.pending)} awaiting retry")
+        return
+    if not invalidated:
+        return
+    clear_stage_advance(workflow_id, retry_node)
+    loop_count = _bump_fix_loop_count(workflow_id, retry_node)
+    # latch 取各事实最早创建时间(恒早于一切 replacement,避免重试 race)。
+    fact_ts = 0.0
+    for plan in per_gate_plans.values():
+        try:
+            cand = float((plan or {}).get("created_at") or 0)
+        except (TypeError, ValueError):
+            cand = 0
+        if cand and (not fact_ts or cand < fact_ts):
+            fact_ts = cand
+    with lock:
+        _state = load_stage_state()
+        _pending = {"ts": fact_ts or time.time(),
+                    "gate": "+".join(sorted(gate_ids)),
+                    "gates": sorted(gate_ids),
+                    "mode": "selective",
+                    "target_lineage_roots": union_roots}
+        _state[f"{workflow_id}|fixloop|{retry_node}|pending_redo"] = _pending
+        _state[f"{workflow_id}|fixloop|{retry_node}|fp"] = fingerprint
+        save_stage_state(_state)
+    coordinator_queue.put({
+        "kind": "fix_loop", "workflow_id": workflow_id,
+        "gate_stage": "+".join(sorted(gate_ids)), "retry_node": retry_node,
+        "blockers": blockers, "invalidated": list(invalidated),
+        "loop_count": loop_count,
+        "max_loops": max_loops, "suggested_branch": suggested_branch,
+        "mode": "selective", "target_lineage_roots": union_roots,
+    })
+    print(f"[FIX LOOP QUEUED] workflow={workflow_id} gates={'+'.join(sorted(gate_ids))} retry={retry_node} loop={loop_count} invalidated={len(invalidated)}")
 
 
 def handle_fix_loop(workflow_id, gate_node_id, gate_cfg, workflow_cfg):
@@ -1700,6 +2343,63 @@ def handle_fix_loop(workflow_id, gate_node_id, gate_cfg, workflow_cfg):
             f"{retry_node} not in workflow nodes, using {fallback}"
         )
         retry_node = fallback
+
+    # P1-2:同一 retry_node 的多门禁并行 blocked 时,先冻结本轮全部
+    # blocked gate facts,再进入 invalidation。否则先处理的 gate 会把
+    # 另一个 blocked gate Task 一并作废,后者的 affected_task_ids 丢失。
+    # 仅 selective 策略开启时合并;legacy 工作流保持逐门禁原行为。
+    try:
+        _merge_enabled = (
+            selective_replan_core is not None
+            and selective_replan_core.policy_from_workflow(workflow_cfg) is not None
+            and selective_replan_core.policy_from_workflow(
+                workflow_cfg)["retry_node"] == str(retry_node or "")
+        )
+    except Exception:
+        _merge_enabled = False
+    if _merge_enabled:
+        try:
+            _sibling_gates: dict = {}
+            for _task in load_tasks():
+                if not isinstance(_task, dict):
+                    continue
+                if _task.get("workflow_id") != workflow_id:
+                    continue
+                if _task.get("status") == "superseded":
+                    continue
+                if _task.get("stage_verdict") != "blocked":
+                    continue
+                _node = str(_task.get("node") or _task.get("stage") or "")
+                if not _node:
+                    continue
+                try:
+                    _gcfg = resolve_gate_config(
+                        (workflow_cfg.get("nodes") and
+                         {n["id"]: n for n in workflow_cfg.get("nodes", [])}.get(_node)),
+                        _node,
+                    )
+                except Exception:
+                    _gcfg = None
+                if not _gcfg:
+                    continue
+                _rn = _retry_node_for_gate(workflow_cfg, _gcfg, _node)
+                if _rn != retry_node:
+                    continue
+                _sibling_gates.setdefault(_node, _gcfg)
+            if len(_sibling_gates) > 1 and str(gate_node_id) in _sibling_gates:
+                _ordered = sorted(_sibling_gates)
+                # 仅首个(确定性排序首位)执行合并,其余直接返回以避免重复。
+                # 调用方 sweep 按序循环,首个合并已覆盖全组,后续调用因门禁
+                # 已 superseded 而自然空转;直接调用 handle 时同样收敛。
+                if str(gate_node_id) == _ordered[0]:
+                    _merged = [(gid, _sibling_gates[gid]) for gid in _ordered]
+                    _handle_merged_fix_loops(workflow_id, retry_node, _merged, workflow_cfg)
+                return
+        except Exception as exc:
+            print(
+                f"[SELECTIVE REPLAN WARN] workflow={workflow_id} "
+                f"sibling gate scan skipped: {exc}"
+            )
 
     blockers = []
     blocked_gate_tasks = []
@@ -1821,6 +2521,20 @@ def handle_fix_loop(workflow_id, gate_node_id, gate_cfg, workflow_cfg):
         selective_target_task_ids=selective_ids,
     )
 
+    if selective_ids is not None and isinstance(
+        invalidated, SelectiveInvalidationResult
+    ) and not invalidated.all_targets_applied:
+        # P1-1:部分作废 fail-closed。门禁/下游一律未动(两阶段提交),
+        # 无 latch、无计数、无通知;门禁仍 blocked,下轮 sweep 基于
+        # 已持久化 Fact 重试剩余目标,绝不带着全量 roots 去等 C-r2。
+        print(
+            f"[SELECTIVE REPLAN DEFERRED] workflow={workflow_id} "
+            f"gate={gate_node_id} retry={retry_node} "
+            f"pending={','.join(invalidated.pending)} "
+            "awaiting retry"
+        )
+        return
+
     if not invalidated:
         return
 
@@ -1842,6 +2556,17 @@ def handle_fix_loop(workflow_id, gate_node_id, gate_cfg, workflow_cfg):
             pending_redo["target_lineage_roots"] = list(
                 (replan_plan or {}).get("target_lineage_roots") or []
             )
+            # P1-1: latch 边界取 Fact 创建时间(首轮持久化时刻),
+            # 而非本轮作废完成时刻。部分重试场景下 B-r2 可能在首轮
+            # 部分作废后提前派发;若 latch 取第二轮时间,会把已完成
+            # 的 B-r2 判为 stale 而永久等待。Fact 时间恒早于一切
+            # replacement,旧完成( gated 前)又恒早于 Fact,故安全。
+            try:
+                _fact_ts = float((replan_plan or {}).get("created_at") or 0)
+            except (TypeError, ValueError):
+                _fact_ts = 0
+            if _fact_ts > 0:
+                pending_redo["ts"] = _fact_ts
         _state[f"{workflow_id}|fixloop|{retry_node}|pending_redo"] = pending_redo
         _state[f"{workflow_id}|fixloop|{retry_node}|fp"] = fingerprint
         save_stage_state(_state)
@@ -1852,7 +2577,7 @@ def handle_fix_loop(workflow_id, gate_node_id, gate_cfg, workflow_cfg):
         "gate_stage": gate_node_id,
         "retry_node": retry_node,
         "blockers": blockers,
-        "invalidated": invalidated,
+        "invalidated": list(invalidated),
         "loop_count": loop_count,
         "max_loops": gate_cfg.get("max_loops", FIX_LOOP_MAX),
         "suggested_branch": suggested_branch,
@@ -3182,6 +3907,60 @@ def try_direct_stage_advance(item):
     candidate_sha = _scheduler_expected_candidate_sha(
         workflow_id, project_root, dep_ids, candidate_branch
     )
+    # P1-3: selective replacement 基线必须来自当前冻结 Candidate,
+    # 禁止从普通 Task branch 猜。存在 selective 事实时 fail-closed:
+    # 冻结 sha/branch 不可证明,或任一待补派谱系所属事实与当前冻结
+    # 不 identical(轮换后旧事实),一律回落总指挥,不派发。
+    try:
+        _sel_facts = _all_selective_facts(workflow_id, ready_id)
+    except Exception:
+        _sel_facts = []
+    if _sel_facts and selective_replan_core is not None:
+        _frozen_sha = _scheduler_current_frozen_candidate_sha(workflow_id)
+        _frozen_branch = _scheduler_current_frozen_branch(workflow_id)
+        if not _frozen_sha or not _frozen_branch:
+            print(
+                f"[SELECTIVE REPLAN BASELINE REFUSED] workflow={workflow_id} "
+                f"node={ready_id} reason=frozen_unproven -> fallback to coordinator"
+            )
+            return False
+        try:
+            from herdr import direct_dispatch as _dd
+            _node_tasks = [
+                t for t in (load_tasks() or [])
+                if isinstance(t, dict)
+                and str(t.get("workflow_id") or "") == workflow_id
+                and str(t.get("node") or t.get("stage") or "") == ready_id
+            ]
+            _pending_roots = {
+                _dd.lineage_key(t.get("task_id"))[0]
+                for t in _dd.lineage_redispatch_candidates(_node_tasks)
+            }
+        except Exception:
+            _pending_roots = set()
+        _need_baseline = False
+        for _fact in _sel_facts:
+            _roots = {str(r).strip() for r in (_fact.get("target_lineage_roots") or []) if str(r).strip()}
+            if _pending_roots and not (_roots & _pending_roots):
+                continue
+            _need_baseline = True
+            _base = selective_replan_core.selective_replacement_baseline(
+                _fact, _frozen_sha, _frozen_branch)
+            if _base is None:
+                print(
+                    f"[SELECTIVE REPLAN BASELINE REFUSED] workflow={workflow_id} "
+                    f"node={ready_id} reason=baseline_unproven "
+                    f"fact={str(_fact.get('replan_id') or '')[:16]} -> fallback to coordinator"
+                )
+                return False
+        if _need_baseline:
+            candidate_branch = _frozen_branch
+            candidate_sha = _frozen_sha
+            print(
+                f"[SELECTIVE REPLAN BASELINE] workflow={workflow_id} "
+                f"node={ready_id} onto={_frozen_branch} "
+                f"candidate={str(_frozen_sha)[:12]}"
+            )
     # PR #110:门禁派发携带可归因 Task 清单;retry_node 补派携带
     # blocker 上下文。两者均只在策略显式开启时非 None。
     gate_inventory_block = None
@@ -3754,6 +4533,23 @@ def _fix_loop_latch_info(workflow_id, node_id):
     return ts, gate
 
 
+def _fix_loop_latch_gates(workflow_id, node_id):
+    """闩关联的全部 gate id(P1-2 合并闩存 gates 列表,单门禁回退 gate)。"""
+    with lock:
+        state = load_stage_state()
+        raw = state.get(f"{workflow_id}|fixloop|{node_id}|pending_redo")
+    if not isinstance(raw, dict):
+        return []
+    gates = [str(g).strip() for g in (raw.get("gates") or []) if str(g).strip()]
+    if gates:
+        return gates
+    gate = str(raw.get("gate") or "").strip()
+    # 合并闩的 gate 形如 "test+review",拆回单门禁以便逐个清除升级记录。
+    if "+" in gate:
+        return [g.strip() for g in gate.split("+") if g.strip()]
+    return [gate] if gate else []
+
+
 def _fix_loop_latch_targets(workflow_id, node_id):
     """Selective replan (PR #110) 的目标谱系根;legacy 闩返回 []。"""
     with lock:
@@ -3786,6 +4582,8 @@ def _fix_loop_latch_blocks(workflow_id, node_id, tasks=None):
         tasks, node_id, latch_ts,
         target_lineage_roots=_fix_loop_latch_targets(workflow_id, node_id),
     ):
+        _gates_to_clear = _fix_loop_latch_gates(workflow_id, node_id) or (
+            [latch_gate] if latch_gate else [])
         with lock:
             state = load_stage_state()
             state.pop(
@@ -3794,10 +4592,9 @@ def _fix_loop_latch_blocks(workflow_id, node_id, tasks=None):
             state.pop(f"{workflow_id}|fixloop|{node_id}|fp", None)
             state.pop(f"{workflow_id}|fixloop|{node_id}", None)
             save_stage_state(state)
-        if latch_gate:
-            attention_clear(
-                f"{workflow_id}:fix_loop_exhausted:{latch_gate}"
-            )
+        for _gate in _gates_to_clear:
+            if _gate:
+                attention_clear(f"{workflow_id}:fix_loop_exhausted:{_gate}")
         _fix_latch_logged.discard(f"{workflow_id}:{node_id}")
         return False
     return True

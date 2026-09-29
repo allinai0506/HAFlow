@@ -246,10 +246,10 @@ class ControllerSelectiveReplanTest(unittest.TestCase):
         return self.save_task(task_id=task_id, status=status, **overrides)
 
     def seed_gate(self, affected=None, sha=SHA_A, version=7,
-                  task_id="wf-srp-ctl-review-1", **extra):
+                  task_id="wf-srp-ctl-review-1", node="review", **extra):
         overrides = {
-            "node": "review",
-            "stage": "review",
+            "node": node,
+            "stage": node,
             "status": "completed",
             "stage_verdict": "blocked",
             "stage_verdict_note": "前端错误提示缺失",
@@ -263,9 +263,10 @@ class ControllerSelectiveReplanTest(unittest.TestCase):
         overrides.update(extra)
         return self.save_task(task_id=task_id, **overrides)
 
-    def freeze(self, sha=SHA_A):
+    def freeze(self, sha=SHA_A, branch=""):
         facts.record_candidate_frozen(
-            WF, sha, source_node="implementation", db_path=self.db)
+            WF, sha, source_node="implementation",
+            delivery_branch=branch, db_path=self.db)
 
     def impl_tasks(self):
         return ["wf-srp-ctl-impl-A", "wf-srp-ctl-impl-B", "wf-srp-ctl-impl-C"]
@@ -879,6 +880,223 @@ class ControllerSelectiveReplanTest(unittest.TestCase):
             "default_task_type": "feat",
             "default_integration_mode": "git",
         }
+
+    # -- P1 regressions (PR #110 review round-2) --------------------------
+
+    def test_p1_partial_invalidation_defers_then_restart_recovers(self):
+        """P1-1: targets=[B,C], B ok + C fail → 无 latch/通知,重启后复用 Fact 续作 C。
+
+        Fact 先持久化 [B,C];首轮 C supersede 失败时门禁/下游一律不动,
+        不写全量 latch;第二轮基于已落盘 Fact(不重新决定 targets)续作 C,
+        最终 B-r2/C-r2 各一个,A 保留,latch 可解除。
+        """
+        self.freeze()
+        self.seed_three_impl()
+        before_a = self.snapshot("wf-srp-ctl-impl-A")
+        self.seed_gate(affected=["wf-srp-ctl-impl-B", "wf-srp-ctl-impl-C"])
+
+        orig_supersede = self._apply_supersede
+
+        def _fail_c(task_id):
+            if task_id == "wf-srp-ctl-impl-C":
+                return subprocess.CompletedProcess([], 1, "", "boom")
+            return orig_supersede(task_id)
+
+        self._apply_supersede = _fail_c
+        try:
+            self.run_fix_loop()
+        finally:
+            self._apply_supersede = orig_supersede
+
+        # 首轮部分失败:Fact 已落盘, B 已作废, C 未动,门禁仍存活,无 latch/通知。
+        stored = facts.latest_selective_replan_for_node(
+            WF, "implementation", db_path=self.db)
+        self.assertIsNotNone(stored)
+        self.assertEqual(
+            stored["target_task_ids"],
+            ["wf-srp-ctl-impl-B", "wf-srp-ctl-impl-C"])
+        self.assertEqual(
+            self.store.get_task("wf-srp-ctl-impl-B")["status"], "superseded")
+        # C 的 supersede 失败,但其 finalize 已将其规范化为 cleaned(仍存活,
+        # 非 superseded);第二轮重试时直接 supersede 即可,无需再次 finalize。
+        self.assertIn(
+            self.store.get_task("wf-srp-ctl-impl-C")["status"],
+            ("completed", "cleaned"))
+        self.assertEqual(
+            self.store.get_task("wf-srp-ctl-review-1")["status"], "completed")
+        latch = self.latch_state()
+        self.assertTrue(latch is None or "mode" not in (latch or {}))
+        self.assertEqual(
+            [i for i in self.queue if i.get("kind") == "fix_loop"], [])
+
+        # 重启后重算必须复用已落盘 Fact,而非因 B 已非谱系头整体 fallback。
+        reused_targets, reused_plan = _ctl._resolve_selective_replan(
+            WF, "review", "implementation", self._wf_cfg(),
+            [self.store.get_task("wf-srp-ctl-review-1")],
+            self.store.list_tasks())
+        self.assertEqual(
+            reused_targets,
+            ["wf-srp-ctl-impl-B", "wf-srp-ctl-impl-C"])
+        self.assertEqual(reused_plan["replan_id"], stored["replan_id"])
+
+        # 第二轮(故障已除):C 续作,门禁作废,latch 全量,补派 B-r2/C-r2。
+        self.run_fix_loop()
+        self.assertEqual(
+            self.store.get_task("wf-srp-ctl-impl-C")["status"], "superseded")
+        self.assertEqual(
+            self.store.get_task("wf-srp-ctl-review-1")["status"], "superseded")
+        self.assertEqual(self.snapshot("wf-srp-ctl-impl-A"), before_a)
+        latch = self.latch_state()
+        self.assertEqual(latch["mode"], "selective")
+        self.assertEqual(
+            sorted(latch["target_lineage_roots"]),
+            ["wf-srp-ctl-impl-B", "wf-srp-ctl-impl-C"])
+        self.assertEqual(len(self.selective_facts()), 1)
+
+        notes = _ctl._selective_redispatch_blocker_notes(WF, "implementation")
+        plan = direct_dispatch_planner.plan_stage_dispatch(
+            WF, self._impl_node(), self.store.list_tasks(), "selective replan",
+            redispatch_blocker_notes=notes)
+        self.assertEqual(
+            sorted(s["task_id"] for s in plan["specs"]),
+            ["wf-srp-ctl-impl-B-r2", "wf-srp-ctl-impl-C-r2"])
+
+        # 目标谱系真正完成 → latch 解除;保留任务更新永不放行(见 Case 11)。
+        self.assertTrue(_ctl._fix_loop_latch_blocks(WF, "implementation"))
+        self.seed_impl("wf-srp-ctl-impl-B-r2", status="completed")
+        self.assertTrue(_ctl._fix_loop_latch_blocks(WF, "implementation"))
+        self.seed_impl("wf-srp-ctl-impl-C-r2", status="completed")
+        self.assertFalse(_ctl._fix_loop_latch_blocks(WF, "implementation"))
+
+    def _seed_dual_blocked_gates(self):
+        self.freeze()
+        self.seed_three_impl()
+        self.seed_gate(
+            affected=["wf-srp-ctl-impl-B"], sha=SHA_A, version=7,
+            task_id="wf-srp-ctl-test-1", node="test")
+        self.seed_gate(
+            affected=["wf-srp-ctl-impl-C"], sha=SHA_A, version=7,
+            task_id="wf-srp-ctl-review-1", node="review")
+
+    def _assert_dual_gate_merged(self):
+        before_a = self.snapshot("wf-srp-ctl-impl-A")
+        self.assertEqual(
+            self.store.get_task("wf-srp-ctl-impl-B")["status"], "superseded")
+        self.assertEqual(
+            self.store.get_task("wf-srp-ctl-impl-C")["status"], "superseded")
+        self.assertEqual(self.snapshot("wf-srp-ctl-impl-A"), before_a)
+        # 两条单门禁事实各 persist 其归因,awaiting/notes 取并集。
+        by_gate = {
+            (e["payload"].get("gate_task_id")): e["payload"]
+            for e in self.selective_facts()
+            if e["payload"].get("mode") == "selective"
+        }
+        self.assertEqual(
+            by_gate["wf-srp-ctl-test-1"]["target_task_ids"],
+            ["wf-srp-ctl-impl-B"])
+        self.assertEqual(
+            by_gate["wf-srp-ctl-review-1"]["target_task_ids"],
+            ["wf-srp-ctl-impl-C"])
+        self.assertTrue(
+            _ctl._selective_replan_awaiting_redispatch(WF, "implementation"))
+        notes = _ctl._selective_redispatch_blocker_notes(WF, "implementation")
+        self.assertIn("wf-srp-ctl-impl-B", notes)
+        self.assertIn("wf-srp-ctl-impl-C", notes)
+        plan = direct_dispatch_planner.plan_stage_dispatch(
+            WF, self._impl_node(), self.store.list_tasks(), "selective replan",
+            redispatch_blocker_notes=notes)
+        self.assertEqual(
+            sorted(s["task_id"] for s in plan["specs"]),
+            ["wf-srp-ctl-impl-B-r2", "wf-srp-ctl-impl-C-r2"])
+        latch = self.latch_state()
+        self.assertEqual(latch["mode"], "selective")
+        self.assertEqual(
+            sorted(latch["target_lineage_roots"]),
+            ["wf-srp-ctl-impl-B", "wf-srp-ctl-impl-C"])
+
+    def test_p1_dual_gate_merge_test_then_review(self):
+        """P1-2: test→[B] + review→[C] 同轮 blocked,先处理 test 再 review。"""
+        self._seed_dual_blocked_gates()
+        self.run_fix_loop(gate_node="test")
+        self.run_fix_loop(gate_node="review")
+        self._assert_dual_gate_merged()
+
+    def test_p1_dual_gate_merge_review_then_test(self):
+        """P1-2:顺序无关,先 review 再 test 结果一致。"""
+        self._seed_dual_blocked_gates()
+        self.run_fix_loop(gate_node="review")
+        self.run_fix_loop(gate_node="test")
+        self._assert_dual_gate_merged()
+
+    def test_p1_replacement_baseline_is_frozen_candidate(self):
+        """P1-3: B-r2 基线必须是当前冻结 Candidate,而非 B 旧分支/plan 分支。
+
+        A/B/C 各自独立分支, Candidate 为集成后的 A+B+C。
+        断言 dispatch 的 --onto 即 Candidate 分支,且 Candidate 树中
+        A/C 文件俱在、HEAD 即冻结 SHA。
+        """
+        base = _git(self.repo, "rev-parse", "HEAD").stdout.strip()
+        for branch, rel, text in (
+            ("branch-A", "a.txt", "A work"),
+            ("branch-B", "b.txt", "B work"),
+            ("branch-C", "c.txt", "C work"),
+        ):
+            _git(self.repo, "checkout", "-q", "-b", branch, base)
+            self.write_repo(rel, text)
+            self.commit_repo(f"{branch} work")
+        _git(self.repo, "checkout", "-q", "-b", "candidate", base)
+        for rel, text in (("a.txt", "A work"), ("b.txt", "B work"), ("c.txt", "C work")):
+            self.write_repo(rel, text)
+        candidate_sha = self.commit_repo("candidate A+B+C")
+
+        self.freeze(candidate_sha, branch="candidate")
+        self.seed_impl("wf-srp-ctl-impl-A", branch="branch-A")
+        self.seed_impl("wf-srp-ctl-impl-B", branch="branch-B")
+        self.seed_impl("wf-srp-ctl-impl-C", branch="branch-C")
+        self.seed_gate(affected=["wf-srp-ctl-impl-B"], sha=candidate_sha)
+        self.run_fix_loop()
+
+        fact = facts.latest_selective_replan_for_node(
+            WF, "implementation", db_path=self.db)
+        self.assertIsNotNone(fact)
+        baseline = srp.selective_replacement_baseline(
+            fact, candidate_sha, "candidate")
+        self.assertEqual(
+            baseline, {"onto_branch": "candidate", "candidate_sha": candidate_sha})
+        # 轮换/缺分支一律 fail-closed,不猜。
+        self.assertIsNone(
+            srp.selective_replacement_baseline(fact, SHA_A, "candidate"))
+        self.assertIsNone(
+            srp.selective_replacement_baseline(fact, candidate_sha, ""))
+
+        item = {
+            "kind": "stage_advance", "workflow_id": WF,
+            "stage": "plan", "node_id": "implementation",
+            "next_stage": "implementation",
+            "node": dict(self._impl_node(), depends_on=["plan"]),
+        }
+        self.assertTrue(_ctl.try_direct_stage_advance(item))
+        onto_flags = [
+            argv[i + 1]
+            for argv in self.launches
+            for i, token in enumerate(argv[:-1])
+            if token == "--onto"
+        ]
+        self.assertTrue(onto_flags, "replacement must carry --onto")
+        self.assertTrue(all(o == "candidate" for o in onto_flags))
+        self.assertNotIn("branch-B", onto_flags)
+        sha_flags = [
+            argv[i + 1]
+            for argv in self.launches
+            for i, token in enumerate(argv[:-1])
+            if token == "--candidate-sha"
+        ]
+        self.assertTrue(all(s == candidate_sha for s in sha_flags))
+        for rel, expected in (("a.txt", "A work"), ("c.txt", "C work")):
+            shown = _git(self.repo, "show", f"candidate:{rel}").stdout.strip()
+            self.assertEqual(shown, expected)
+        head = _git(self.repo, "rev-parse", "candidate").stdout.strip()
+        self.assertEqual(head, candidate_sha)
 
 
 if __name__ == "__main__":

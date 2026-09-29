@@ -767,5 +767,102 @@ class CliAffectedTaskIdTest(unittest.TestCase):
         self.assertEqual(self._task()["stage_verdict_affected_task_ids"], [])
 
 
+class MergeAffectedIdsTest(unittest.TestCase):
+    def test_sorted_deterministic_union(self):
+        self.assertEqual(
+            srp.merge_affected_task_ids([["B", "A"], ["C", "B", " "]]),
+            ["A", "B", "C"])
+        self.assertEqual(srp.merge_affected_task_ids([]), [])
+        self.assertEqual(srp.merge_affected_task_ids([None, ["B"]]), ["B"])
+
+
+class InvalidationOutcomeTest(unittest.TestCase):
+    def test_all_applied(self):
+        out = srp.selective_invalidation_outcome(["B", "C"], ["B", "C"], {})
+        self.assertTrue(out["all_targets_applied"])
+        self.assertEqual(out["pending"], [])
+
+    def test_partial_reports_pending_and_failed(self):
+        out = srp.selective_invalidation_outcome(
+            ["B", "C"], ["B"], {"C": "supersede:boom"})
+        self.assertFalse(out["all_targets_applied"])
+        self.assertEqual(out["pending"], ["C"])
+        self.assertIn("C", out["failed"])
+
+    def test_already_superseded_counts_as_applied(self):
+        # 调用方把崩溃前已 superseded 的目标计入 applied。
+        out = srp.selective_invalidation_outcome(["B", "C"], ["B"], {})
+        self.assertEqual(out["pending"], ["C"])
+
+
+class ReusableFactTest(unittest.TestCase):
+    def _fact(self, **over):
+        base = {
+            "mode": srp.MODE_SELECTIVE, "retry_node": "implementation",
+            "gate_task_id": "g1", "gate_task_version": 7,
+            "gate_candidate_sha": SHA_A,
+            "policy_identity": "srp-x",
+            "target_task_ids": ["B"],
+        }
+        base.update(over)
+        return base
+
+    def test_happy_path_reuse(self):
+        fact = self._fact()
+        found = srp.find_reusable_selective_fact(
+            [fact], retry_node="implementation", gate_task_id="g1",
+            gate_task_version=7, frozen_candidate_sha=SHA_A,
+            policy_identity="srp-x")
+        self.assertEqual(found, fact)
+
+    def test_version_mismatch_no_reuse(self):
+        self.assertIsNone(srp.find_reusable_selective_fact(
+            [self._fact()], retry_node="implementation", gate_task_id="g1",
+            gate_task_version=8, frozen_candidate_sha=SHA_A,
+            policy_identity="srp-x"))
+
+    def test_candidate_rotation_no_reuse(self):
+        self.assertIsNone(srp.find_reusable_selective_fact(
+            [self._fact()], retry_node="implementation", gate_task_id="g1",
+            gate_task_version=7, frozen_candidate_sha=SHA_B,
+            policy_identity="srp-x"))
+
+    def test_fallback_mode_never_reused(self):
+        self.assertIsNone(srp.find_reusable_selective_fact(
+            [self._fact(mode=srp.MODE_LEGACY_FALLBACK)],
+            retry_node="implementation", gate_task_id="g1",
+            gate_task_version=7, frozen_candidate_sha=SHA_A,
+            policy_identity="srp-x"))
+
+
+class ReplacementBaselineTest(unittest.TestCase):
+    def _fact(self, **over):
+        base = {
+            "mode": srp.MODE_SELECTIVE,
+            "target_task_ids": ["B"],
+            "gate_candidate_sha": SHA_A,
+        }
+        base.update(over)
+        return base
+
+    def test_happy_path(self):
+        base = srp.selective_replacement_baseline(
+            self._fact(), SHA_A, "candidate-x")
+        self.assertEqual(
+            base, {"onto_branch": "candidate-x", "candidate_sha": SHA_A})
+
+    def test_rotation_refused(self):
+        self.assertIsNone(srp.selective_replacement_baseline(
+            self._fact(), SHA_B, "candidate-x"))
+
+    def test_missing_branch_refused(self):
+        self.assertIsNone(srp.selective_replacement_baseline(
+            self._fact(), SHA_A, ""))
+
+    def test_legacy_fact_refused(self):
+        self.assertIsNone(srp.selective_replacement_baseline(
+            self._fact(mode=srp.MODE_LEGACY_FALLBACK), SHA_A, "candidate-x"))
+
+
 if __name__ == "__main__":
     unittest.main()

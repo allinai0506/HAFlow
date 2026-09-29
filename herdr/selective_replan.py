@@ -526,3 +526,149 @@ def replan_metrics(plan: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         "mode": str(plan.get("mode") or ""),
         "reason": str(plan.get("reason") or ""),
     }
+
+
+# ============================================================
+# P1-1/P1-2/P1-3 纯决策 helpers(PR #110 review round-2)
+# ============================================================
+
+def merge_affected_task_ids(
+    lists: Optional[Sequence[Any]],
+) -> List[str]:
+    """多门禁 affected_task_ids 的确定性合并(排序去重,忽略空白)。
+
+    P1-2: test ∥ review 并行 blocked 时,同一 retry_node 的多个门禁
+    必须先冻结为一个确定的当前轮处理集合,再进入 invalidation;
+    否则先处理的 gate 会把另一个 blocked gate Task 一并作废,
+    后者的结构化 blocker 事实永远丢失。
+    """
+    merged: List[str] = []
+    for raw_list in lists or []:
+        for raw in raw_list or []:
+            text = str(raw or "").strip()
+            if text and text not in merged:
+                merged.append(text)
+    return sorted(merged)
+
+
+def selective_invalidation_outcome(
+    target_task_ids: Optional[Sequence[Any]],
+    applied_task_ids: Optional[Sequence[Any]],
+    failed_task_ids: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """选择性作废结果分类(纯函数)。
+
+    - applied: 本轮已确认作废(含崩溃前已 superseded 的目标);
+    - pending: 目标中尚未作废的(需重试,不得写 latch/通知);
+    - failed: pending 中明确报错的子集(诊断用);
+    - all_targets_applied: 是否全部落定,调用方 fail-closed 依据。
+    """
+    targets = [str(t).strip() for t in (target_task_ids or []) if str(t).strip()]
+    applied_set = {str(t).strip() for t in (applied_task_ids or []) if str(t).strip()}
+    if isinstance(failed_task_ids, dict):
+        failed = {str(k).strip(): v for k, v in failed_task_ids.items() if str(k).strip()}
+    else:
+        failed = {str(t).strip(): "" for t in (failed_task_ids or []) if str(t).strip()}
+    applied = [t for t in targets if t in applied_set]
+    pending = [t for t in targets if t not in applied_set]
+    return {
+        "targets": list(targets),
+        "applied": applied,
+        "pending": pending,
+        "failed": {k: v for k, v in failed.items() if k in pending},
+        "all_targets_applied": not pending,
+    }
+
+
+def find_reusable_selective_fact(
+    facts: Optional[Sequence[Dict[str, Any]]],
+    *,
+    retry_node: str,
+    gate_task_id: str,
+    gate_task_version: Any,
+    frozen_candidate_sha: str,
+    policy_identity: str,
+) -> Optional[Dict[str, Any]]:
+    """在已持久化 selective 事实中找当前 gate episode 可复用的权威。
+
+    P1-1 Resolve-once-persist-once-read-many:崩溃重启后 Task 状态已变
+    (B 已 supersede),绝不能基于当前 Task 状态重新决定 targets;
+    已有当前 gate episode 的 Fact 时直接作为 authority 逐个 reconcile。
+
+    匹配条件(全部满足,任一不满足即不是同一 episode):
+    - mode == selective;
+    - retry_node 相同;
+    - gate_task_id 相同;
+    - gate_task_version 相同(int 比较);
+    - gate_candidate_sha 与当前冻结候选 identical(缩写/大小写由调度器判定);
+    - policy_identity 相同。
+    返回最新的匹配事实,无匹配 → None。
+    """
+    node = str(retry_node or "").strip()
+    gid = str(gate_task_id or "").strip()
+    try:
+        want_version = int(gate_task_version)
+    except (TypeError, ValueError):
+        return None
+    frozen = str(frozen_candidate_sha or "").strip()
+    policy_fp = str(policy_identity or "").strip()
+    if not node or not gid or not frozen or not policy_fp:
+        return None
+    matched: Optional[Dict[str, Any]] = None
+    for fact in facts or []:
+        if not isinstance(fact, dict):
+            continue
+        payload = fact.get("payload") if isinstance(fact.get("payload"), dict) else fact
+        if str(payload.get("mode") or "") != MODE_SELECTIVE:
+            continue
+        if str(payload.get("retry_node") or "").strip() != node:
+            continue
+        if str(payload.get("gate_task_id") or "").strip() != gid:
+            continue
+        try:
+            fact_version = int(payload.get("gate_task_version"))
+        except (TypeError, ValueError):
+            continue
+        if fact_version != want_version:
+            continue
+        if not _shas_identical(
+            str(payload.get("gate_candidate_sha") or ""), frozen
+        ):
+            continue
+        if str(payload.get("policy_identity") or "").strip() != policy_fp:
+            continue
+        matched = fact if isinstance(fact.get("payload"), dict) else dict(fact)
+        if isinstance(fact.get("payload"), dict):
+            matched = {"event_id": fact.get("id"), **payload}
+    return matched
+
+
+def selective_replacement_baseline(
+    fact: Optional[Dict[str, Any]],
+    frozen_candidate_sha: Any,
+    frozen_branch: Any,
+) -> Optional[Dict[str, str]]:
+    """Selective replacement 的 fail-closed 基线(纯函数)。
+
+    P1-3: replacement 必须建立在当前冻结 Candidate 之上,
+    不能从普通 Task branch 猜。基线可证明当且仅当:
+    - fact 为 selective 且带非空 targets;
+    - 当前冻结 sha 非空且与 fact 的 gate_candidate_sha identical
+      (轮换后旧 fact 不得继续派发,避免在过期树上重做);
+    - 当前冻结 branch 非空(可证明的 delivery/candidate branch)。
+    任一不满足 → None(调用方回落总指挥,绝不猜 branch)。
+    """
+    fact = fact if isinstance(fact, dict) else {}
+    payload = fact.get("payload") if isinstance(fact.get("payload"), dict) else fact
+    if str(payload.get("mode") or "") != MODE_SELECTIVE:
+        return None
+    targets = [str(t).strip() for t in (payload.get("target_task_ids") or []) if str(t).strip()]
+    if not targets:
+        return None
+    frozen_sha = str(frozen_candidate_sha or "").strip()
+    branch = str(frozen_branch or "").strip()
+    if not frozen_sha or not branch:
+        return None
+    if not _shas_identical(str(payload.get("gate_candidate_sha") or ""), frozen_sha):
+        return None
+    return {"onto_branch": branch, "candidate_sha": frozen_sha}
