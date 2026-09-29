@@ -1523,3 +1523,12 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - 验证：`pytest -q tests/test_console* tests/test_workflow*` 253 passed / 3 subtests；compileall 与 `git diff --check` exit 0；Console 实启 `/`、x6、dagre 全 200；HTML 静态校验 7/7。**未验证项**：`pytest -q` 全量套件 120s 超时未跑完（专项套件全绿，已在 PR 描述中如实标注）。
 - 知识沉淀：新增 `wiki/flow-workbench.md`（分层职责、真值来源表、状态聚合优先级、离线依赖、read-mostly 契约、容器归属）；`docs/lessons/lessons-learned.md` §99（共享渲染容器的单一所有权 + 部署资产与运行副本的同源要求）。
 - 遗留边界（已交付但需知悉）：节点标签使用 X6 `rect` + 文本而非 `shape: 'html'` 自定义卡片，样式控制较简；Flow 图随 `loadWorkflow` 重绘，与 Task List 同节奏，未做独立图轮询。
+
+## [2026-09-30] wrapup | Flow Workbench v1 全链路收口（PR #114 + #115 均已合入 main）
+
+- 合并确认：PR #114（功能，head `c2faa61`）于 2026-09-29T13:26:12Z 合入，merge commit `c9bb16e`；PR #115（知识沉淀，head `8539e39`）于 2026-09-29T22:54:33Z 合入，merge commit `1b95532`。本地 `main` 已 ff 至 `1b95532`，工作区干净。
+- 本次交付最终形态：`herdr/workflow_graph.py` 纯投影层（`workflow_graph_projection` / `aggregate_node_status` / `pick_default_node`）+ Console Flow Canvas（Dagre 坐标 + X6 渲染 + Inspector 四页签 + Flow/List 视图切换）+ `console/static/vendor/` 离线依赖（X6 3.1.8 / Dagre 3.1.1，双 LICENSE）+ 5 条新契约测试。
+- 知识沉淀：新增 [[flow-workbench]] 知识页并登记双向链接；`docs/lessons/lessons-learned.md` §99「共享渲染容器的单一所有权 + 部署资产与运行副本同源」，含反向验证命令。
+- 收尾验证（绑定 `1b95532`）：`pytest -q tests/test_console* tests/test_workflow*` → 253 passed / 3 subtests；`compileall herdr services bin tests console` exit 0；`git diff --check` exit 0；部署形态 `~/.herdr-console` 与仓库 console/x6 资源 IN-SYNC，LaunchAgent `com.user.herdr-factory-console` running（pid 58641），`/` 与两个 vendor 资源均 200。
+- 六步状态：步骤 1 知识沉淀 ✅、步骤 2 wiki checkpoint ✅（无 `.wiki/WIKI.md`，按 AGENTS.md 治理回填 `wiki/`）、步骤 3 合并确认 ✅（两个 PR 均 MERGED，只读核对未做任何强制推送或历史改写）、步骤 4 anchor sync ✅（main ff 至 `1b95532`）、步骤 5 分支校验 ✅、步骤 6 卫生检查 ✅（无残留临时文件；`__pycache__`/`.DS_Store` 已被 `.gitignore` 覆盖）。
+- 未执行 / 需知悉（均非本轮可越权处理）：`pytest -q` 全量套件 120s 超时未跑完（专项套件全绿，已在 PR 描述与 §99 中标注）；本地 `feat/flow-workbench-v1` / `docs/flow-workbench-wrapup` 两个已合入分支未删除（分支/clone/pane 清理属 `close-workflow` 职责）；节点标签为 X6 `rect` + 文本而非 `shape: 'html'` 自定义卡片；Flow 图随 `loadWorkflow` 重绘，未做独立图轮询。
