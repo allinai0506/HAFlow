@@ -23,6 +23,19 @@ reverification:
   review:
     reusable_only_if_changes_within: []
 
+# 选择性返工策略 (Selective Replan v1 / PR #110)
+#
+# 语义是「Verifier 在结构化门禁结论中显式点名受影响的实现 Task」,
+# 不是「系统根据 blocker 文本/文件名/依赖图推测影响面」。
+# 唯一允许的依据是 Gate Verdict JSON 的 affected_task_ids 字段;
+# 缺失、为空、任一 ID 无法机器校验(不存在/跨 workflow/不在 retry_node/
+# 非当前谱系头/状态不可替换)或门禁身份链无法证明时,整个 selective
+# 决策被拒绝并回退 legacy fix-loop(Fail-Closed,绝不部分接受)。
+selective_replan:
+  version: selective-replan-v1
+  mode: explicit_task_targets
+  retry_node: implementation
+
 nodes:
   - id: requirements
     label: 2需求分析

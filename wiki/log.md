@@ -1429,3 +1429,56 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - 全量 2230 passed + 50 subtests；compileall / CLI 语法 / `git diff --check` 通过。
 - 教训：「同流量」不等于「无操作」——所有权也是状态；「评不了」与「没问题」
   必须走相反的路由方向；任何跨两次读的决策都是并发窗口。
+
+## 2026-09-29 · 选择性返工：门禁 blocked 后只重做被点名的实现 Task（PR #110）
+
+- 解决的问题：fix-loop 回流到 implementation 的粒度一直是**整个阶段**。
+  一次「前端少了一句错误提示」的评审会让后端 API 与数据库脚本一起重写。
+  根因不是没人想省，而是系统里不存在 `Blocker → Affected Implementation Task`
+  这条事实。V1 把它变成一条可持久化、可重放、可审计的事实。
+- **唯一归因来源**：Verifier 的结构化 Gate Verdict 字段 `affected_task_ids`
+  （`herdr-task set <gate> --verdict blocked --affected-task-id <id>`，追加式、
+  仅 blocked 合法）。不从 `note` / 屏幕输出 / 文件名 / 模块名 / embedding /
+  CodeGraph / AST / import graph 反推。**Explicit attribution first.
+  Unknown means legacy fallback.**
+- **Fail-Closed 是全有或全无**：缺失 / `[]` / ID 不存在 / 跨 workflow / 非
+  `retry_node` / 已非当前谱系头 / 已 superseded / 门禁候选身份或版本不可证 /
+  结论读不出 / 事实无法持久化 —— 任一命中即整个 selective 决策拒绝，
+  **严禁**「三个 ID 里两个合法就只用那两个」。
+- **无持久化事实，就没有选择性作废**：顺序硬编码为「构建 plan → 持久化不可变
+  事实 → 才允许作废」，不存在先作废后补事实的窗口。
+- **episode 身份刻意不含 targets**：`replan_id = SHA256(workflow_id, gate_task_id,
+  gate_task_version, gate_verified_candidate_sha, retry_node, policy_identity)`。
+  目标是结论不是身份；同 episode 换 targets 撞 id 时**必须拒绝**
+  （`identity_content_mismatch`）而非覆盖；重放同内容返回 `exists`，崩溃恢复幂等。
+- **保留 = 零写入**：`invalidate_for_fix_loop(..., selective_target_task_ids=...)`
+  只递增被点名谱系（`B → B-r2`），未点名任务连 status 都不碰（实测输出
+  `[SELECTIVE REPLAN PRESERVE]`）；replacement 继承原 goal/acceptance/
+  integration_mode/task_type，blocker 上下文只进派发 prompt，绝不回写旧 Task。
+  `selective_target_task_ids=None` 时逐字节等价 legacy。
+- **「重开」不等于「全量重派」**：只 supersede B 而 A/C 仍 completed 时
+  `is_node_complete` 会把节点误判为完成，故 selective 作废时
+  `clear_stage_advance`，且每轮 sweep 用 `_selective_replan_awaiting_redispatch`
+  把节点移出 completed（`[SELECTIVE REPLAN AWAIT]`）。该等待谓词与补派管线
+  `lineage_redispatch_candidates` **是同一个函数**：同真同假 ⇒ 既不会全量重派，
+  也不会把节点永久钉住。
+- **latch 与重投都是 target-aware**：`pending_redo`/`fix_loop_item` 新增
+  `mode`/`target_lineage_roots`；每个 target root 在 `latch_ts` 之后都要有非
+  superseded 的 completed-like 成员（AND）。**保留任务的落定永不能解除 latch**；
+  补投路径同步保留同一上下文，不给病理留第二通道。
+- **通知是通道**：selective 下 `build_fix_loop_message` 改走
+  `_build_selective_replan_message`——列出被点名谱系、明确
+  「⛔ 禁止：对 `--stage implementation` 派发全量 fix task」、
+  **不携带可照抄的 launch 骨架**。否则机制修好了、总指挥仍按旧通知全量重做。
+- 未改：#107 候选冻结 / Join Gate、#108 reverification、Adaptive Router、
+  Canary/Rollout 语义、`herdr/scheduler.py`、stage latch legacy 语义。
+  未做（禁止项）：requirements/plan 级 replan、DAG 重写、AST/CodeGraph/LLM 影响分析、
+  自动拆 Task、自动改验收标准。
+- 评审：一轮独立评审（Opus 5，read-only，NEEDS_FIXES，9 项）全部处置；
+  Round 2 增量复审因本环境子代理创建全线故障（`400 Model is unavailable`）
+  不可得，已如实标为 `claude (self, round-2 delta)`，未冒充独立通过。
+  6/6 守卫型修复经**变异验证**（反向改写 → 用例变红）。
+- 验证：专项 91 passed；全量 **2320 passed + 50 subtests**（EXIT=0）；
+  基线 2230 → 零回归；`compileall` / `git diff --check` EXIT=0；
+  `stage-state.json` sha1 前后一致、实盘 `state.db` 扫 `wf-srp%` 命中 0 行。
+- 教训：§95。归档走查：`docs/walkthroughs/20260929-pr110-selective-replan.md`
