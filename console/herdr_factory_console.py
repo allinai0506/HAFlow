@@ -18,6 +18,7 @@ def _resolve_herdr_root():
 HERDR_ROOT=_resolve_herdr_root(); ROOT=HOME/'.herdr-controller'
 sys.path.insert(0, str(HERDR_ROOT))
 from herdr import workflow as herdr_workflow
+from herdr import workflow_graph as herdr_workflow_graph
 from herdr import projects as herdr_projects
 from herdr import kernel as herdr_kernel
 from herdr import steering as herdr_steering
@@ -29,6 +30,7 @@ from herdr import workflow_docs as herdr_workflow_docs
 from herdr import delivery_record as herdr_delivery_record
 from herdr.agent_binary import resolve_agent_binary
 PROJECTS_FILE=ROOT/'projects.json'; WORKFLOWS_FILE=ROOT/'workflows.json'; TASKS_FILE=ROOT/'tasks.json'; POOLS_FILE=ROOT/'agent-pools.json'; SLOTS_FILE=ROOT/'pane-slots.json'; LOG_DIR=ROOT/'logs'
+CONSOLE_STATIC_DIR=Path(__file__).resolve().parent/'static'
 HOST='127.0.0.1'; PORT=int(os.environ.get('HERDR_CONSOLE_PORT','8765'))
 PRODUCT_NAME='HAFlow'; PRODUCT_TAGLINE='让人和多个 AI Agent 一起把事情做完'
 HERDR_TASK=HERDR_ROOT/'bin'/'herdr-task'
@@ -97,6 +99,49 @@ def tasks_for_workflow(wid):return [t for t in tasks() if t.get('workflow_id')==
 def workflow_node_types(wid,p):
     cfg=load_json(Path(p.get('workflow_file')),{}) if p and p.get('workflow_file') else {}
     return {n.get('id') or n.get('key'):n.get('node_type','agent') for n in cfg.get('nodes') or [] if n.get('id') or n.get('key')}
+
+def workflow_definition_for(wid,p,w):
+    """Resolve the real workflow definition for a running workflow (fail-soft).
+
+    Priority: workflow_file snapshot via projects.workflow_config_for ->
+    raw workflow_file JSON -> template name guess -> None (projection fail-soft).
+    Never invents nodes/edges; returns None when nothing reliable exists.
+    """
+    try:
+        cfg=herdr_projects.workflow_config_for(wid)
+        if cfg and cfg.get('nodes'):
+            return cfg
+    except Exception:
+        pass
+    try:
+        if p and p.get('workflow_file'):
+            raw=load_json(Path(p.get('workflow_file')),{})
+            if raw and (raw.get('nodes') or raw.get('stages')):
+                return herdr_workflow.normalize_workflow(raw)
+    except Exception:
+        pass
+    try:
+        tmpl=(w.get('template') or w.get('template_id') or w.get('workflow_template') or '').strip() if w else ''
+        if tmpl:
+            return herdr_workflow.load_template(tmpl)
+    except Exception:
+        pass
+    return None
+
+def workflow_graph_for(wid,p,w,ts):
+    """Pure projection wiring: definition + tasks + blockers -> graph. Never raises."""
+    try:
+        definition=workflow_definition_for(wid,p,w)
+    except Exception:
+        definition=None
+    try:
+        blockers=herdr_controller_actions.resolve_workflow_blockers(ts or [],w or {})
+    except Exception:
+        blockers=[]
+    try:
+        return herdr_workflow_graph.workflow_graph_projection(definition or {},ts or [],blockers)
+    except Exception:
+        return {'nodes':[],'edges':[],'context':{'required':[],'optional':[]}}
 
 def enrich_workflow_tasks(wid,p,ts):
     node_types=workflow_node_types(wid,p)
@@ -367,7 +412,8 @@ def workflow_detail(wid):
     for k,l in workflow_stages(wid,p):
         x=stage_summary(ts,k); x['label']=l; ss.append(x)
     stall_info=herdr_projection.detect_workflow_stalls(wid,ts,workflow=w)
-    return {'workflow':{'workflow_id':wid,**_with_subject(w)},'project':p,'stages':ss,'tasks':ts,'coordinator':agent_runtime(w.get('coordinator_pane_id')),'candidate_branch':w.get('candidate_branch'),'agent_override':w.get('agent_override','auto'),'stall':stall_info}
+    graph=workflow_graph_for(wid,p,w,ts)
+    return {'workflow':{'workflow_id':wid,**_with_subject(w)},'project':p,'stages':ss,'tasks':ts,'graph':graph,'context':graph.get('context',{'required':[],'optional':[]}),'coordinator':agent_runtime(w.get('coordinator_pane_id')),'candidate_branch':w.get('candidate_branch'),'agent_override':w.get('agent_override','auto'),'stall':stall_info}
 
 
 def task_detail(tid):
@@ -2451,7 +2497,38 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 1
   .ctl-status-grid { grid-template-columns: 1fr; }
   .ctl-card-foot { justify-content: stretch; }
   .ctl-card-foot .btn { flex: 1; justify-content: center; }
-}</style></head><body>
+}
+/* Flow Workbench v1: read-mostly runtime canvas + inspector */
+.flow-view-toggle { display: inline-flex; background: var(--bg-subtle); border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); padding: 2px; gap: 2px; }
+.flow-view-toggle .filter-btn.active { background: var(--bg-surface); }
+#flowSummary { font-size: 12px; color: var(--text-secondary); padding: 8px 16px; border-bottom: 1px solid var(--border-subtle); display: none; }
+#flowWrap { display: flex; gap: 0; min-height: 420px; background: var(--bg-surface); }
+#flowCanvasWrap { position: relative; flex: 1; min-width: 0; min-height: 420px; background: var(--bg-surface); }
+#flowCanvas { width: 100%; height: 480px; background: var(--bg-surface); }
+#flowCanvas .x6-graph-svg { background: var(--bg-surface); }
+.flow-controls { position: absolute; top: 10px; right: 10px; display: flex; gap: 6px; z-index: 5; }
+.flow-controls .btn { padding: 4px 10px; font-size: 12px; }
+#flowError { display: none; margin: 12px 16px; padding: 10px 12px; background: var(--warning-bg); border: 1px solid rgba(217,119,6,.3); border-radius: var(--radius-sm); font-size: 12px; color: var(--text-primary); }
+#flowInspector { width: 340px; flex-shrink: 0; border-left: 1px solid var(--border-default); background: var(--bg-surface); display: flex; flex-direction: column; min-height: 420px; max-height: 640px; }
+.flow-insp-head { padding: 12px 14px 8px; border-bottom: 1px solid var(--border-subtle); }
+.flow-insp-title { font-size: 14px; font-weight: 600; color: var(--text-primary); }
+.flow-insp-meta { font-size: 11.5px; color: var(--text-secondary); margin-top: 2px; }
+.flow-insp-tabs { display: flex; gap: 2px; padding: 8px 10px 0; border-bottom: 1px solid var(--border-subtle); }
+.flow-insp-tab { background: transparent; border: none; border-bottom: 2px solid transparent; padding: 6px 10px; font-size: 12px; color: var(--text-secondary); cursor: pointer; }
+.flow-insp-tab.active { color: var(--text-primary); font-weight: 600; border-bottom-color: var(--primary); }
+#flowInspectorBody { padding: 12px 14px; overflow-y: auto; font-size: 12.5px; line-height: 1.6; }
+.flow-kv { display: grid; grid-template-columns: 72px 1fr; gap: 4px 8px; margin-bottom: 8px; }
+.flow-kv dt { color: var(--text-tertiary); font-size: 11.5px; }
+.flow-kv dd { margin: 0; color: var(--text-primary); word-break: break-word; }
+.flow-node-card { border: 1px solid var(--border-default); border-radius: 8px; background: #fff; padding: 8px 10px; }
+.flow-node-card.is-working { border-color: var(--primary); }
+.flow-node-card.is-blocked, .flow-node-card.is-failed { border-color: var(--danger); }
+.flow-node-card.is-rework { border-color: var(--warning); }
+.flow-node-card.is-completed { border-color: rgba(22,163,74,.4); }
+.flow-task-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--border-subtle); cursor: pointer; }
+.flow-task-row:hover { background: var(--bg-hover); }
+@media (max-width: 1280px) { #flowInspector { width: 300px; } }
+@media (max-width: 1000px) { #flowWrap { flex-direction: column; } #flowInspector { width: 100%; border-left: none; border-top: 1px solid var(--border-default); max-height: none; } }</style></head><body>
 <div class="shell">
   <aside class="sidebar">
     <div class="brand">__PRODUCT_NAME__</div>
@@ -2509,15 +2586,46 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 1
         <div class="panel-header">
           <div class="panel-title-area">
             <h3 class="panel-title">执行者与任务实时看板</h3>
-            <div class="task-filters">
-              <button class="filter-btn active" id="fAll" onclick="setTaskFilter('all')">全部任务 <span class="filter-cnt" id="cntAll">0</span></button>
-              <button class="filter-btn" id="fDecision" onclick="setTaskFilter('decision')">待我拍板 <span class="filter-cnt" id="cntDecision">0</span></button>
-              <button class="filter-btn" id="fAttention" onclick="setTaskFilter('attention')">需关注 <span class="filter-cnt" id="cntAttention">0</span></button>
-              <button class="filter-btn" id="fActive" onclick="setTaskFilter('active')">进行中 <span class="filter-cnt" id="cntActive">0</span></button>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <div class="flow-view-toggle" role="tablist" aria-label="工作流视图切换">
+                <button class="filter-btn active" id="viewFlowBtn" onclick="switchWorkflowView('flow')">流程图</button>
+                <button class="filter-btn" id="viewListBtn" onclick="switchWorkflowView('list')">任务列表</button>
+              </div>
+              <div class="task-filters">
+                <button class="filter-btn active" id="fAll" onclick="setTaskFilter('all')">全部任务 <span class="filter-cnt" id="cntAll">0</span></button>
+                <button class="filter-btn" id="fDecision" onclick="setTaskFilter('decision')">待我拍板 <span class="filter-cnt" id="cntDecision">0</span></button>
+                <button class="filter-btn" id="fAttention" onclick="setTaskFilter('attention')">需关注 <span class="filter-cnt" id="cntAttention">0</span></button>
+                <button class="filter-btn" id="fActive" onclick="setTaskFilter('active')">进行中 <span class="filter-cnt" id="cntActive">0</span></button>
+              </div>
             </div>
           </div>
         </div>
-        <div id="tasks" class="task-list"></div>
+        <div id="flowSummary"></div>
+        <div id="flowWrap">
+          <div id="flowCanvasWrap">
+            <div id="flowCanvas" role="application" aria-label="工作流 DAG 画布"></div>
+            <div class="flow-controls">
+              <button class="btn" onclick="flowZoomIn()" title="放大">+</button>
+              <button class="btn" onclick="flowZoomOut()" title="缩小">−</button>
+              <button class="btn" onclick="fitFlowGraph()" title="自适应">Fit</button>
+            </div>
+            <div id="flowError" role="alert"></div>
+          </div>
+          <aside id="flowInspector" aria-label="节点 Inspector">
+            <div class="flow-insp-head">
+              <div class="flow-insp-title" id="flowInspTitle">节点详情</div>
+              <div class="flow-insp-meta" id="flowInspMeta">—</div>
+            </div>
+            <div class="flow-insp-tabs" role="tablist" aria-label="Inspector 页签">
+              <button class="flow-insp-tab active" id="flowTabSummary" onclick="switchFlowInspectorTab('summary')">概览</button>
+              <button class="flow-insp-tab" id="flowTabTasks" onclick="switchFlowInspectorTab('tasks')">任务</button>
+              <button class="flow-insp-tab" id="flowTabContext" onclick="switchFlowInspectorTab('context')">上下文</button>
+              <button class="flow-insp-tab" id="flowTabRuntime" onclick="switchFlowInspectorTab('runtime')">运行</button>
+            </div>
+            <div id="flowInspectorBody"></div>
+          </aside>
+        </div>
+        <div id="tasks" class="task-list" style="display:none"></div>
       </section>
       <details class="resources-details" id="resourcesDetails">
         <summary class="resources-summary"><span>执行者阵容与常驻工位</span><span class="summary-caret">▾</span></summary>
@@ -2580,8 +2688,10 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 1
     <div class="drawer-view"><pre id="drawerPre">请选择活动工位或点击展开查看底层物理输出…</pre></div>
   </div>
 </div>
+<script src="/static/vendor/dagre-3.1.1.min.js"></script>
+<script src="/static/vendor/x6-3.1.8.min.js"></script>
 <script>
-let state={overview:null,project:null,workflow:null,ops:null,dash:null,projectId:null,workflowId:null,spaceId:null,space:null,opsMode:false,dashMode:false,dashWorkflowId:null,taskFilter:'all',drawerTab:'tty',selectedTaskId:null,taskDrawerTab:'overview',selectedTaskDetail:null};
+let state={overview:null,project:null,workflow:null,ops:null,dash:null,projectId:null,workflowId:null,spaceId:null,space:null,opsMode:false,dashMode:false,dashWorkflowId:null,taskFilter:'all',drawerTab:'tty',selectedTaskId:null,taskDrawerTab:'overview',selectedTaskDetail:null,workflowView:'flow',flowSelectedNodeId:null,flowInspectorTab:'summary',flowGraph:null,flowGraphWfId:null};
 const VIEW_KEY='herdrConsoleView';
 function closeMoreMenu(){const dd=document.getElementById('moreDropdown');if(dd)dd.classList.remove('open')}
 function toggleMoreMenu(e){e.stopPropagation();const dd=document.getElementById('moreDropdown');if(dd)dd.classList.toggle('open')}
@@ -2869,7 +2979,7 @@ async function populateTemplateSelect(selId='newTemplate'){
   }catch(e){}
 }
 function showOpsCenter(){
-  state.opsMode=true;
+  state.opsMode=true;state.dashMode=false;stopDashTimer();
   saveViewState();
   syncOpsUi();
   document.getElementById('projectTitle').textContent='运维驾驶舱';
@@ -2877,6 +2987,7 @@ function showOpsCenter(){
   document.getElementById('workflowSub').textContent='';
   document.getElementById('workflowSwitcher').style.display='none';
   document.getElementById('stages').innerHTML='';
+  setWorkspaceMode('aux');
   document.getElementById('tasks').innerHTML='<div class="empty">正在加载运维数据…</div>';
   loadOpsCenter()
 }
@@ -2928,6 +3039,7 @@ function showDashboard(){
   const sw=document.getElementById('workflowSwitcher');sw.style.display='flex';sw.innerHTML='<label>工作流</label><select id="dashWfSel" onchange="dashSelectWorkflow(this.value)"><option value="">全部工作流</option></select><button class="btn" onclick="dashOpenWorkflow()">进入该工作流</button>';
   document.getElementById('stages').innerHTML='';
   document.getElementById('attentionBanner').style.display='none';
+  setWorkspaceMode('aux');
   document.getElementById('tasks').innerHTML='<div class="empty">正在加载仪表板…</div>';
   loadDashboard();
   dashTimer=setInterval(()=>{if(state.dashMode&&!document.hidden)loadDashboard()},10000);
@@ -3086,10 +3198,13 @@ async function selectSpace(workspaceId,rer=true){
     await loadProject(s.project_id,false);
     document.getElementById('projectTitle').textContent=s.label||s.project_name||s.workspace_id;
   }else{
+    destroyFlowGraph();
     state.project=null;
     state.projectId=s.project_id||null;
     state.workflow=null;
     state.workflowId=null;
+    state.flowSelectedNodeId=null;
+    setWorkspaceMode('aux');
 
     document.getElementById('projectTitle').textContent=s.label||s.workspace_id;
     document.getElementById('workflowSubject').textContent=relationText(s);
@@ -3166,7 +3281,9 @@ function renderWorkflowSwitcher(){
   box.innerHTML='<label>工作流</label><select id="wfSelect" onchange="state.workflowId=this.value;loadWorkflow(this.value)">'+ws.map(x=>`<option value="${esc(x.workflow_id)}"${x.workflow_id===state.workflowId?' selected':''}>${esc(workflowDisplayName(x))}</option>`).join('')+'</select>'
 }
 async function loadWorkflow(id){
+  destroyFlowGraph();
   state.workflowId=id;
+  state.flowSelectedNodeId=null;
   state.workflow=await api('/api/workflow?id='+encodeURIComponent(id));
   try{state.controllerActionsData=await api('/api/workflow/controller-actions?workflow_id='+encodeURIComponent(id))}catch(e){state.controllerActionsData=null}
   const w=state.workflow.workflow;
@@ -3174,8 +3291,9 @@ async function loadWorkflow(id){
   renderWorkflowHead(w);
   renderStages();
   renderTasks();
+  renderFlowWorkbench();
 }
-function clearWorkflow(){state.workflow=null;state.workflowId=null;saveViewState();document.getElementById('workflowSubject').textContent='暂无工作流';document.getElementById('workflowSub').textContent='';document.getElementById('stages').innerHTML='';const ab=document.getElementById('attentionBanner');if(ab)ab.style.display='none';document.getElementById('tasks').innerHTML='<div class="empty">暂无任务</div>'}
+function clearWorkflow(){destroyFlowGraph();state.workflow=null;state.workflowId=null;state.flowSelectedNodeId=null;saveViewState();document.getElementById('workflowSubject').textContent='暂无工作流';document.getElementById('workflowSub').textContent='';document.getElementById('stages').innerHTML='';const ab=document.getElementById('attentionBanner');if(ab)ab.style.display='none';setWorkspaceMode('aux');document.getElementById('tasks').innerHTML='<div class="empty">暂无任务</div>'}
 function setTaskFilter(f){state.taskFilter=f;['All','Decision','Attention','Active'].forEach(k=>{const el=document.getElementById('f'+k);if(el)el.classList.toggle('active',f.toLowerCase()===k.toLowerCase())});renderTasks()}
 function isDecisionTask(t){
   if(t.status==='superseded'||t.status==='cleaned')return false;
@@ -3400,6 +3518,27 @@ function renderTasks(){
     </div>`;
   }).join('')
 }
+function flowGraphData(){return (state.workflow&&state.workflow.graph)||{nodes:[],edges:[]};}
+function initFlowGraph(){renderFlowGraph();}
+function pickDefaultFlowNodeId(nodes){if(!nodes||!nodes.length)return null;const order=['blocked','failed','working','rework'];for(const st of order){const hit=nodes.find(n=>n.status===st);if(hit)return hit.id;}const completed=new Set(nodes.filter(n=>n.status==='completed').map(n=>n.id));const waitingNext=nodes.find(n=>n.status==='waiting'&&(n.depends_on||[]).every(d=>completed.has(d)));if(waitingNext)return waitingNext.id;const waiting=nodes.find(n=>n.status==='waiting');if(waiting)return waiting.id;return nodes[0].id;}
+function setWorkspaceMode(mode){const fw=document.getElementById('flowWrap');const tl=document.getElementById('tasks');const st=document.getElementById('stages');const fs=document.getElementById('flowSummary');const tg=document.querySelector('.flow-view-toggle');if(tg)tg.style.display=mode==='aux'?'none':'inline-flex';const tf=document.querySelector('.task-filters');if(tf)tf.style.display=mode==='aux'?'none':'flex';if(fw)fw.style.display=mode==='flow'?'flex':'none';if(fs)fs.style.display=mode==='flow'?'block':'none';if(st)st.style.display=mode==='list'?'flex':'none';if(tl)tl.style.display=mode==='flow'?'none':'block';}
+function switchWorkflowView(v){state.workflowView=(v==='list'?'list':'flow');const bf=document.getElementById('viewFlowBtn');if(bf)bf.classList.toggle('active',state.workflowView==='flow');const bl=document.getElementById('viewListBtn');if(bl)bl.classList.toggle('active',state.workflowView==='list');setWorkspaceMode(state.workflowView);if(state.workflowView==='flow')requestAnimationFrame(()=>{resizeFlowGraph();fitFlowGraph();});else renderTasks();}
+function switchFlowInspectorTab(t){state.flowInspectorTab=t;['Summary','Tasks','Context','Runtime'].forEach(k=>{const el=document.getElementById('flowTab'+k);if(el)el.classList.toggle('active',k.toLowerCase()===t);});renderNodeInspector();}
+function selectFlowNode(id){state.flowSelectedNodeId=id;updateFlowSelection();renderNodeInspector();}
+function updateFlowSelection(){try{if(!state.flowGraph||!state.flowGraph.getCellById)return;const g=flowGraphData();(g.nodes||[]).forEach(n=>{try{const cell=state.flowGraph.getCellById(n.id);if(!cell||!cell.attr)return;const sel=String(state.flowSelectedNodeId||'')===String(n.id);cell.attr('body/stroke-width',sel?3:((n.status==='working'||n.status==='blocked'||n.status==='failed')?2:1));}catch(err){}});}catch(e){}}
+function destroyFlowGraph(){try{if(state.flowGraph&&state.flowGraph.dispose)state.flowGraph.dispose();}catch(e){}state.flowGraph=null;state.flowGraphWfId=null;const c=document.getElementById('flowCanvas');if(c)c.innerHTML='';}
+function resizeFlowGraph(){try{const wrap=document.getElementById('flowCanvasWrap');const cv=document.getElementById('flowCanvas');if(!wrap||!cv||!state.flowGraph)return;const w=wrap.clientWidth||800;const h=Math.max(420,cv.clientHeight||480);if(state.flowGraph.resize)state.flowGraph.resize(w,h);}catch(e){}}
+function fitFlowGraph(){try{if(!state.flowGraph)return;if(state.flowGraph.zoomToFit)state.flowGraph.zoomToFit({padding:24,maxScale:1});else if(state.flowGraph.centerContent)state.flowGraph.centerContent();}catch(e){}}
+function flowZoomIn(){try{if(state.flowGraph&&state.flowGraph.zoom)state.flowGraph.zoom(0.15);}catch(e){}}
+function flowZoomOut(){try{if(state.flowGraph&&state.flowGraph.zoom)state.flowGraph.zoom(-0.15);}catch(e){}}
+function renderFlowWorkbench(){const g=flowGraphData();const nodes=g.nodes||[];setWorkspaceMode(state.workflowView);const fs=document.getElementById('flowSummary');if(fs){if(state.workflowView==='flow'&&nodes.length){const c={blocked:0,failed:0,working:0};nodes.forEach(n=>{if(n.status==='blocked'||n.status==='failed')c.blocked++;else if(n.status==='working')c.working++;});fs.style.display='block';fs.textContent=nodes.length+' 个节点 · '+c.working+' 个运行中 · '+c.blocked+' 个需关注';}else fs.style.display='none';}const bf=document.getElementById('viewFlowBtn');if(bf)bf.classList.toggle('active',state.workflowView!=='list');const bl=document.getElementById('viewListBtn');if(bl)bl.classList.toggle('active',state.workflowView==='list');if(!state.flowSelectedNodeId||!nodes.some(n=>n.id===state.flowSelectedNodeId)){state.flowSelectedNodeId=pickDefaultFlowNodeId(nodes);}renderNodeInspector();renderFlowGraph();}
+function dagreLayoutPositions(nodes,edges){const g=new window.dagre.graphlib.Graph();g.setGraph({rankdir:'TB',ranksep:56,nodesep:28,marginx:24,marginy:24});g.setDefaultEdgeLabel(()=>({}));const W=208,H=92;nodes.forEach(n=>g.setNode(n.id,{width:W,height:H}));edges.forEach(e=>{try{g.setEdge(e.from,e.to);}catch(err){}});window.dagre.layout(g);const pos={};nodes.forEach(n=>{const p=g.node(n.id);if(p)pos[n.id]={x:p.x-W/2,y:p.y-H/2};});return pos;}
+function renderFlowGraph(){const wrap=document.getElementById('flowCanvas');const errBox=document.getElementById('flowError');if(errBox){errBox.style.display='none';errBox.textContent='';}if(!wrap)return;const g=flowGraphData();const nodes=g.nodes||[];const edges=g.edges||[];if(state.flowGraphWfId&&state.flowGraphWfId!==state.workflowId)destroyFlowGraph();if(!nodes.length){destroyFlowGraph();if(errBox){errBox.style.display='block';errBox.textContent='当前工作流暂无可用节点定义（legacy 或空定义，已 fail-soft，不伪造连线）。';}return;}if(typeof window.dagre==='undefined'||!window.dagre.graphlib||!window.dagre.layout){destroyFlowGraph();if(errBox){errBox.style.display='block';errBox.textContent='本地 Dagre 资源缺失（/static/vendor/dagre-3.1.1.min.js），请检查 Console 静态资源。页面其他功能不受影响。';}return;}if(typeof window.X6==='undefined'||!window.X6.Graph){destroyFlowGraph();if(errBox){errBox.style.display='block';errBox.textContent='本地 X6 资源缺失（/static/vendor/x6-3.1.8.min.js），请检查 Console 静态资源。页面其他功能不受影响。';}return;}let pos={};try{pos=dagreLayoutPositions(nodes,edges);}catch(e){destroyFlowGraph();if(errBox){errBox.style.display='block';errBox.textContent='Dagre 布局失败：'+e.message;}return;}try{destroyFlowGraph();const W=wrap.clientWidth||800;const H=480;const graph=new window.X6.Graph({container:wrap,width:W,height:H,background:{color:'#ffffff'},panning:{enabled:true},mousewheel:{enabled:true,modifiers:[]},interacting:{nodeMovable:false,edgeMovable:false,edgeLabelMovable:false,arrowheadMovable:false,vertexMovable:false,vertexAddable:false,vertexDeletable:false,edgeAddable:false},connecting:{allowBlank:false,allowLoop:false,allowNode:false,allowEdge:false,snap:true},highlighting:{magnetAdsorbed:{name:'stroke',args:{padding:4,attrs:{stroke:'#5e6ad2','stroke-width':2}}}}});state.flowGraph=graph;state.flowGraphWfId=state.workflowId;const statusStroke={completed:'rgba(22,163,74,.55)',working:'#5e6ad2',blocked:'#dc2626',failed:'#dc2626',rework:'#d97706',waiting:'#e5e7eb'};nodes.forEach(n=>{const p=pos[n.id]||{x:20,y:20};const icon=n.status==='completed'?'✓':n.status==='working'?'●':(n.status==='blocked'||n.status==='failed')?'!':n.status==='rework'?'●':'○';const agents=(n.agents||[]).slice(0,2).join(' · ');const counts=(n.active_task_count||0)+' 运行 · ✓'+(n.completed_task_count||0)+' · !'+((n.failed_task_count||0)+(n.blocked_task_count||0));const label=(n.label||n.id)+'\n'+icon+' '+n.status+' · '+(n.node_type||'agent').toUpperCase()+'\n'+counts+(agents?'\n'+agents:'');graph.addNode({id:n.id,shape:'rect',x:p.x,y:p.y,width:208,height:92,label:label,attrs:{body:{fill:'#ffffff',stroke:statusStroke[n.status]||'#e5e7eb','stroke-width':(n.status==='working'||n.status==='blocked'||n.status==='failed')?2:1,rx:8,ry:8},label:{fill:'#121316','font-size':12,'text-anchor':'middle','vertical-anchor':'middle','white-space':'pre-line'}}});});edges.forEach(e=>{try{graph.addEdge({source:e.from,target:e.to,router:{name:'orth'},connector:{name:'rounded'},attrs:{line:{stroke:'#d1d5db','stroke-width':1,targetMarker:{name:'block',size:7}}}});}catch(err){}});graph.on('node:click',({node})=>{try{selectFlowNode(node.id);}catch(err){}});updateFlowSelection();fitFlowGraph();}catch(e){destroyFlowGraph();if(errBox){errBox.style.display='block';errBox.textContent='Flow Canvas 初始化失败：'+e.message;}}}
+function flowNodeById(id){const g=flowGraphData();return (g.nodes||[]).find(n=>n.id===id)||null;}
+function flowTasksForNode(nodeId){const ts=(state.workflow&&state.workflow.tasks)||[];return ts.filter(t=>String(t.node||t.stage||'')===String(nodeId)&&t.status!=='superseded'&&!t.superseded_by);}
+function renderNodeInspector(){const body=document.getElementById('flowInspectorBody');const title=document.getElementById('flowInspTitle');const meta=document.getElementById('flowInspMeta');if(!body)return;const node=flowNodeById(state.flowSelectedNodeId);if(!node){if(title)title.textContent='节点详情';if(meta)meta.textContent='—';body.innerHTML='<div class="empty">暂无节点</div>';return;}if(title)title.textContent=(node.label||node.id)+' · '+(node.id||'');if(meta)meta.textContent=(node.node_type||'agent').toUpperCase()+' · '+node.status;const tab=state.flowInspectorTab||'summary';if(tab==='tasks'){const nts=flowTasksForNode(node.id);body.innerHTML=nts.length?nts.map(t=>`<div class="flow-task-row" onclick="openTaskDrawer('${esc(t.task_id)}')"><span><strong>${esc(t.task_id)}</strong><span class="muted"> · ${esc(t.agent||'未分配')}</span></span><span>${badge(t.status)}</span></div>`).join(''):'<div class="empty">该节点暂无任务</div>';return;}if(tab==='context'){const ctx=(state.workflow&&state.workflow.context)||{required:[],optional:[]};const req=ctx.required||[];const opt=ctx.optional||[];body.innerHTML=`<div class="proj-sec"><div class="proj-lbl">必需上下文</div>${req.length?req.map(c=>`<div>· ${esc(typeof c==='string'?c:(c.id||c))}</div>`).join(''):'<div class="muted">—</div>'}</div><div class="proj-sec"><div class="proj-lbl">可选上下文</div>${opt.length?opt.map(c=>`<div>· ${esc(typeof c==='string'?c:(c.id||c))}</div>`).join(''):'<div class="muted">—</div>'}</div><div class="muted" style="margin-top:8px">仅显示真实 Context Contract；无绑定信息时不伪造已加载。</div>`;return;}if(tab==='runtime'){const nts=flowTasksForNode(node.id);body.innerHTML=nts.length?nts.map(t=>`<div class="flow-node-card" style="margin-bottom:8px"><div><strong>${esc(t.task_id)}</strong> ${badge(t.status)}</div><dl class="flow-kv" style="margin-top:6px"><dt>执行者</dt><dd>${esc(t.agent||'—')}</dd><dt>工位</dt><dd>${esc(t.pane_id||'—')}</dd><dt>更新</dt><dd>${esc(t.updated_at||t.last_activity_at||'—')}</dd><dt>分支</dt><dd>${esc(t.candidate_sha||t.integration_branch||'—')}</dd><dt>结论</dt><dd>${esc(t.stage_verdict||'—')}</dd></dl></div>`).join(''):'<div class="empty">暂无运行时信息</div>';return;}const downstream=node.downstream||[];const nts=flowTasksForNode(node.id);const acts=(state.controllerActionsData&&state.controllerActionsData.actions)||[];const mine=acts.filter(a=>((a.blocker_task_id||a.old_task_id||String(a.action_id||'').split(':')[0])===node.id)||(node.task_ids||[]).includes(a.blocker_task_id||a.old_task_id));const shown=mine.slice(0,2);const actHtml=shown.length?`<div class="proj-sec"><div class="proj-lbl">需要处理</div>${shown.map(a=>`<div class="flow-node-card" style="margin-bottom:8px"><div><strong>${esc(a.title||a.action_id)}</strong></div><div class="muted" style="margin:4px 0">${esc(a.effect||a.description||'')}</div><div style="display:flex;gap:6px;justify-content:flex-end"><button class="mini" onclick="locateControllerTask('${esc(a.blocker_task_id||a.old_task_id||'')}')">查看任务</button><button class="btn primary" style="padding:3px 10px;font-size:11.5px" onclick="executeControllerAction('${esc(a.action_id)}','${esc(state.workflowId)}')">一键执行</button></div></div>`).join('')}</div>`:(node.has_attention?'<div class="muted">该节点需关注，暂无可用一键解卡建议，请查看任务详情。</div>':'');body.innerHTML=`<dl class="flow-kv"><dt>节点</dt><dd>${esc(node.id)}</dd><dt>状态</dt><dd>${esc(node.status)}</dd><dt>类型</dt><dd>${esc(node.node_type||'agent')}</dd><dt>目的</dt><dd>${esc(node.purpose||'—')}</dd><dt>依赖</dt><dd>${esc((node.depends_on||[]).join(', ')||'—')}</dd><dt>下游</dt><dd>${esc(downstream.join(', ')||'—')}</dd><dt>任务</dt><dd>${node.task_count||0}</dd><dt>运行中</dt><dd>${node.active_task_count||0}</dd><dt>执行者</dt><dd>${esc((node.agents||[]).join(', ')||'—')}</dd></dl>${actHtml}`;}
+window.addEventListener('resize',()=>{try{if(state.workflowView!=='list')resizeFlowGraph();}catch(e){}});
+
 function renderAgents(){const rs=state.project.agents||[];document.getElementById('agents').innerHTML=rs.length?rs.map(a=>`<div class="agent-row"><span><i class="dot ${esc(a.status)}"></i>${esc(a.agent)}</span><span class="muted">${esc(agentStatusLabel(a.status))} · 负载 ${a.load} · 认证 ${esc(authHintLabel(a.auth_hint))}</span></div>`).join(''):'<div class="empty">暂无执行者信息</div>'}function renderSlots(){const rs=state.project.slots||[];document.getElementById('slots').innerHTML=rs.length?rs.map(s=>`<div class="slot-row"><div><div>${esc(s.pane_id)} · ${esc(cleanStageLabel(s.stage_label))}</div><div class="task-meta">绑定 ${esc(s.bound_agent)} · 运行时 ${esc(s.live_agent||'空闲')} · ${esc(s.claimed_by?'被任务占用':'未占用')}</div></div><button class="mini" onclick="bindSlotPrompt('${esc(s.pane_id)}')">绑定</button></div>`).join(''):'<div class="empty">暂无用户预建智能体工位</div>'}
 function openModal(t,h){document.getElementById('modalTitle').textContent=t;document.getElementById('modalBody').innerHTML=h;document.getElementById('modal').classList.add('open')}function closeModal(){document.getElementById('modal').classList.remove('open')}
 function autoFillWorkflowTitle(){
@@ -4194,6 +4333,16 @@ class Handler(BaseHTTPRequestHandler):
         raw=json.dumps(p,ensure_ascii=False).encode(); self.send_response(status); self.send_header('Content-Type','application/json; charset=utf-8'); self.send_header('Content-Length',str(len(raw))); self.send_header('Cache-Control','no-store'); self.end_headers(); self.wfile.write(raw)
     def send_html(self,text):
         raw=text.encode(); self.send_response(200); self.send_header('Content-Type','text/html; charset=utf-8'); self.send_header('Content-Length',str(len(raw))); self.send_header('Cache-Control','no-store'); self.end_headers(); self.wfile.write(raw)
+    def send_static(self,rel):
+        base=CONSOLE_STATIC_DIR.resolve()
+        target=(base/rel).resolve()
+        if base not in target.parents and target!=base:
+            return self.send_json(403,error='Forbidden')
+        if not target.is_file():
+            return self.send_json(404,error='Not Found')
+        suffix=target.suffix.lower()
+        ctype='application/javascript; charset=utf-8' if suffix=='.js' else 'text/css; charset=utf-8' if suffix=='.css' else 'application/octet-stream'
+        raw=target.read_bytes(); self.send_response(200); self.send_header('Content-Type',ctype); self.send_header('Content-Length',str(len(raw))); self.send_header('Cache-Control','public, max-age=3600'); self.end_headers(); self.wfile.write(raw)
     def query(self):return urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
     def body(self):
         n=int(self.headers.get('Content-Length','0') or 0); raw=self.rfile.read(n) if n else b'{}'; return json.loads(raw.decode() or '{}')
@@ -4201,6 +4350,7 @@ class Handler(BaseHTTPRequestHandler):
         p=urllib.parse.urlparse(self.path).path
         try:
             if p=='/':return self.send_html(HTML)
+            if p.startswith('/static/'):return self.send_static(p[len('/static/'):])
             if p=='/dashboard':
                 self.send_response(302);self.send_header('Location','/?view=dashboard');self.end_headers();return
             if p=='/api/dashboard':return self.send_json(200,dashboard_data(workflow_id=self.query().get('workflow_id',[''])[0] or None))
