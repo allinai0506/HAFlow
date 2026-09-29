@@ -891,6 +891,7 @@ class SelectiveReplacementLaunchBaselineTest(unittest.TestCase):
         self._ns = SimpleNamespace
         env = os.environ.copy()
         env["HERDR_STATE_DB"] = str(self.root / "state.db")
+        env["HERDR_WORKFLOW_DOCS_DIR"] = str(self.root / "wdocs")
         self._env_patch = unittest.mock.patch.dict(os.environ, env)
         self._env_patch.start()
         self.addCleanup(self._env_patch.stop)
@@ -958,6 +959,97 @@ class SelectiveReplacementLaunchBaselineTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             self._task_mod._validate_selective_replacement_baseline(
                 self._args(), aaa, "", str(self.repo))
+
+    def test_missing_worker_baseline_refuses_launch_and_reclaims(self):
+        """调用层回归:worker baseline 缺失必须进入 validator,而非跳过。
+
+        candidate_sha=AAA + onto=candidate,但 worker 上报
+        baseline_commit=""。旧调用条件(`and baseline_commit`)会静默跳过
+        校验并注册一个自称 AAA、毫无启动证据的假任务。本用例走真实
+        _launch_task,断言:launch 被拒绝、Task 不注册、clone/pane 透传
+        回收、审计事件落盘。
+        """
+        from herdr.state_store import get_state_store, reset_state_store
+        aaa = "a" * 40
+        store = get_state_store(Path(os.environ["HERDR_STATE_DB"]))
+        store.save_workflow({"workflow_id": WF, "status": "running"})
+        task_bin = self._task_mod
+        worker_payload = {
+            "clone": str(self.root / "clone-x"),
+            "branch": "candidate",
+            "baseline_commit": "",
+            "baseline_untracked": [],
+            "baseline_fingerprint": {"tracked": {}, "untracked": {}},
+            "onto_branch": "candidate",
+            "pane_id": "pane-1",
+            "pane_source": "dynamic",
+            "agent": "opencode",
+            "agent_name": "x",
+            "agent_session_id": "s",
+        }
+        real_run = subprocess.run
+
+        def fake_run(cmd, **kwargs):
+            argv = [str(c) for c in (cmd or [])]
+            if argv and argv[0] == "git":
+                # onto 预检的 fetch / remote_ref:一律成功。
+                return subprocess.CompletedProcess(cmd, 0, "ok", "")
+            if argv and str(argv[0]).endswith("herdr-worker.py"):
+                return subprocess.CompletedProcess(
+                    cmd, 0,
+                    "ok\nHERDR_WORKER_RESULT=" + json.dumps(worker_payload), "")
+            return real_run(cmd, **kwargs)
+
+        args = self._ns(
+            task_id="wf-srp-impl-B-r2", workflow_id=WF, run_id="run-1",
+            node="implementation", stage="implementation",
+            workspace=None, pane=None, agent="auto", clone=None,
+            integration_mode="git", source=str(self.repo),
+            goal="fix B", acceptance=["AC"], onto="candidate",
+            candidate_sha=aaa, task_type="feat",
+        )
+        project = {
+            "project_id": "p1", "project_name": "t",
+            "project_root": str(self.repo), "base_branch": "main",
+            "coordinator_pane_id": "1:1", "workflow_file": "wf.yaml",
+        }
+        with unittest.mock.patch.object(
+                task_bin, "project_for_workflow", return_value=project), \
+            unittest.mock.patch.object(
+                task_bin, "choose_agent", return_value="opencode"), \
+            unittest.mock.patch.object(
+                task_bin, "ensure_stage_topology", return_value={
+                    "workspace_id": "ws", "anchor_pane_id": "anchor",
+                    "tab_id": "tab", "node_label": "impl",
+                    "stage_label": "impl"}), \
+            unittest.mock.patch.object(
+                task_bin, "acquire_pane_for_task", return_value=None), \
+            unittest.mock.patch.object(
+                task_bin.subprocess, "run", side_effect=fake_run), \
+            unittest.mock.patch.object(
+                task_bin, "_reclaim_unregistered_launch_resources") as reclaim, \
+            unittest.mock.patch.object(
+                task_bin, "auto_init_task_loop",
+                side_effect=AssertionError("must not init on refusal")):
+            with self.assertRaises(SystemExit) as ctx:
+                task_bin._launch_task(args)
+        self.assertEqual(ctx.exception.code, 2)
+        # Task 未注册:不存在自称 AAA 的假任务。
+        self.assertIsNone(store.get_task("wf-srp-impl-B-r2"))
+        # 资源已回收:clone + pane 原样透传。
+        reclaim.assert_called_once()
+        _, kwargs = reclaim.call_args
+        self.assertEqual(kwargs.get("clone_path"), str(self.root / "clone-x"))
+        self.assertEqual(kwargs.get("pane_id"), "pane-1")
+        # 审计事件落盘且可执行。
+        events = store.list_events(
+            task_id="wf-srp-impl-B-r2",
+            event_type="selective_baseline_rejected")
+        self.assertEqual(len(events), 1)
+        self.assertEqual(
+            events[0]["payload"]["failure_code"],
+            "replacement_baseline_mismatch")
+        reset_state_store()
 
 
 if __name__ == "__main__":

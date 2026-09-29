@@ -3181,8 +3181,12 @@ def _launch_task(args):
     # after the freeze, so the actual checkout HEAD (baseline_commit) must
     # still equal the claim. Fresh-branch launches (no --onto) create new
     # work and skip. test/review keep their own gate above.
+    # NOTE: baseline_commit is deliberately NOT part of the gate condition:
+    # a missing baseline must enter the validator (fail-closed) instead of
+    # silently skipping it — otherwise the task would be registered with
+    # candidate_sha=AAA and no proof it ever started from AAA.
     _selective_claim = str(getattr(args, "candidate_sha", None) or "").strip()
-    if node_id not in ("test", "review") and _selective_claim and onto_branch and baseline_commit:
+    if node_id not in ("test", "review") and _selective_claim and onto_branch:
         try:
             _validate_selective_replacement_baseline(
                 args, _selective_claim, baseline_commit, source_repo)
