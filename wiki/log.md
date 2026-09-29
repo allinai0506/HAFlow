@@ -1482,3 +1482,21 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
   基线 2230 → 零回归；`compileall` / `git diff --check` EXIT=0；
   `stage-state.json` sha1 前后一致、实盘 `state.db` 扫 `wf-srp%` 命中 0 行。
 - 教训：§95。归档走查：`docs/walkthroughs/20260929-pr110-selective-replan.md`
+## [2026-09-23] wrapup | wf-haflow-0923-01 Eval+Replay V1 二次收尾：abandon 后已收敛，交付落 PR86（未合入）
+- 交付物身份（本条取代上一条的终态结论）：PR https://github.com/allinai0506/HAFlow/pull/86 （draft，base `main`），head `agent/opencode/feat-wf-haflow-0923-01-impl-t1`@`7a6f2ae`，相对 `origin/main` 6 个提交。
+- 收敛经过：stranded 工作恢复为 `eaf2afe`（impl-fix1 遗产）、`f847886`（impl-fix4 遗产）→ 两次合入 `origin/main`（`db2b213`、`f4e8f90`）→ `impl-fix5` 收敛为 `7a6f2ae`（真 preflight+launch、默认 frozen 拒绝、Eval 四事实字段、Compare 仅 before/after）。`test-auto-r7` 全量 1183/1183 pass；`review-auto-r2` 独立评审 MERGE_READY（阻断缺陷 0）。上一条 ABANDONED 结论描述的是**首次收尾时点**的事实，不是最终交付物状态。
+- 六步状态：步骤 1-2 已完成（本节 + `docs/lessons/lessons-learned.md` §87）；步骤 0 交付 PR 已存在（记录 URL/base，未合并、未改写分支历史）；步骤 3 合并确认只读 `--dry-run` → ⛔ 未合入；步骤 4-6 DEFERRED（破坏性步骤须待 base 合入后执行）。
+- 新增教训 `docs/lessons/lessons-learned.md` §87：收尾条目必须固定交付物身份（PR URL + head SHA + base）；stranded 恢复以 clone 为源、单独提交写 provenance；同名分支本地/远端分叉只读研判，禁止 reset/pull/delete；分叉不等于工作丢失，用内容等价性（`merge-tree` 结果树比对）判定而非数 commit。
+- 合并指引：PR86 → base `main`，`git merge-tree --write-tree origin/main 7a6f2ae` 退出码 0（**无冲突，可直接合入**）。同 clone 残留的本地同名分支 `3de67c8` 经内容比对与「`origin/main` ⊕ `7a6f2ae`」结果树**逐字节相同**（`722c95e1`），即**无独有工作**；本次未 reset/delete，清理决策交 Controller。
+- 证据：PR86；`shared/notes.jsonl`（test r7 / review r2 门禁）；`git rev-list --count origin/main..7a6f2ae` = 6；`git merge-base`（本地 `3de67c8` vs 远端 `7a6f2ae`）= `3be4362`；`git rev-parse 3de67c8^{tree}` = `git merge-tree --write-tree origin/main 7a6f2ae | head -1` = `722c95e1`。
+
+## [2026-09-23] wrapup | wf-haflow-0923-01 Eval+Replay V1 fix6轮收尾：三项 Correctness 缺陷修复与门禁收敛，交付落 PR86（head 快进至 cc5e9a0）
+- 交付物身份与条目关系（本条推进/继承上一条二次收尾条目）：PR https://github.com/allinai0506/HAFlow/pull/86 （draft，base `main`），head 分支 `agent/opencode/feat-wf-haflow-0923-01-impl-t1` 快进推进至 `cc5e9a0`（相对 `origin/main` 7 个提交，包含 fix6 7 文件 +348 -53 纯修正）。本条记录的是 fix6 轮在二次收尾 `7a6f2ae` 基础上的门禁收敛与最终候选状态。
+- fix6 核心修复（三项 correctness）：
+  1. P1-1（解耦）：`herdr/eval_engine.py` 解耦 requirements_satisfied 与 verification_passed，仅从 `acceptance_verdict` 或 `stage_verdict`（pass/blocked）读取，双向独立，无 LLM judge 与 score；
+  2. P1-2（隔离）：`herdr/replay_engine.py` 建立 5 级策略来源继承链（ReplaySpec → 源快照 → Task 冻结 → Workflow 冻结 → 私有 definition），无来源时 policy 显式为 null（`policy_source: unavailable`），杜绝全局策略泄漏；
+  3. P2-1（物化时机）：`herdr/replay_engine.py` 将 `record_replay_spec` 移至 launch 成功且身份核验（`run_id == replay_run_id` 且 `replay_of == source_run_id`）之后，失败时执行包含 Task/Workflow/事件/快照文件的完整级联原子补偿。
+- 门禁证据：`impl-fix6` completed/pass（`cc5e9a0`）；`test-auto-r8` 独立测试全量 1191/1191 pass，触改 3 文件 ruff 62==62 零新增 lint；`review-auto-r3` 独立评审 MERGE_READY（阻断缺陷 0，7 项非阻塞建议汇总为后续工作项，不影响本轮交付）。
+- 六步状态：步骤 1-2 已完成（本节 + `docs/lessons/lessons-learned.md` §88）；步骤 0 交付 PR 已存在且为 draft（PR86 head `cc5e9a0` base `main`，未合并、未改写历史）；步骤 3 合并确认只读 `--dry-run` → ⛔ 未合入；步骤 4-6 DEFERRED（破坏性步骤须待 base 合入后执行，不得删除 clone/pane/tab）。
+- 合并指引与分叉研判：PR86 → base `main`，`git merge-tree --write-tree origin/main cc5e9a0` 退出码 0（树哈希 `a264b0ece8cc117db2cc5c981f0691186f408cbb`，**零冲突，可直接合入**）。本地同名分支 `3de67c8` 与远端 `cc5e9a0` 分叉（merge-base `3be4362`），本地分支为历史 fix5 节点残留，其工作树内容已完全被 `origin/main`（含 PR87）与 PR86（`cc5e9a0`）覆盖，本地无独有未提交工作；按硬约束未做任何 reset/delete/pull，建议待 PR86 合入 main 后由 Controller 统一清理本地分支。
+- 证据：PR86（`gh pr view 86` state: OPEN, isDraft: true, headRefOid: `cc5e9a0`）；`shared/notes.jsonl`（`impl-fix6` pass `n-1790163114271-36f8`、`test-auto-r8` pass `n-1790163892258-aee0`、`review-auto-r3` pass `n-1790165060831-9aed`）；全量测试 1191/1191；`git merge-tree --write-tree origin/main cc5e9a0` exit 0。
