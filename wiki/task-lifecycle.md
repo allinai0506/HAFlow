@@ -228,6 +228,8 @@ Evidence:
 
 `FACT` eval/init/基线写入在工位评估命名空间复用既有内核文件锁，竞争者busy退出75，不改持有者产物；持有者异常或进程退出后锁释放。日志新鲜性检查在所有权内执行。评分仍不是业务验收报告；runner在新session启动，超时/中断/异常/正常返回清理本次进程组后释放锁；TERM有限等待，必要时KILL。不可捕获SIGKILL及主动脱离session的子进程不在本地保证内。
 
+`FACT` 自动npm默认测试命令为`CI=1 npm test`，避免继承Agent TTY时进入Vitest watch；显式任务命令完整保留。Java子任务测试范围仍须明确契约，不能从根package.json推断。
+
 Evidence:
 - `herdr/evaluator.py:init_loop`
 - `tests/test_evaluator_step_isolation.py`
@@ -237,6 +239,7 @@ Evidence:
 - `tests/test_evaluator_runner_contract.py`
 - `tests/test_evaluator_process_isolation.py`
 - `tests/test_evaluator_process_cleanup.py`
+- `tests/test_task_loop_noninteractive.py`
 
 
 ## 2. CoW (Copy-on-Write) 沙盒隔离机制

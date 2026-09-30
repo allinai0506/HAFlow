@@ -50,6 +50,8 @@
 | C27 | 评估超时只终止直接shell，后代进程可继续运行 | bin/herdr-loop subprocess.run；隔离就绪子进程探针 | 隔离实验确认；处理本次创建的进程组，验证超时/中断和正常返回 |
 | C28 | 外层脚本exit17/缺lint回执，仍100分converged | 隔离真实run_evaluation写EVAL_DONE=true | 已复现；完整检查runner退出、步骤回执和新鲜日志，防缺失默认成功 |
 | C29 | 同工位并发eval共享日志，读到另一个进程结果并假绿 | 独立进程/受控交错探针，2 lint errors被覆盖为1 | 已复现；跨进程锁覆盖eval/init/基线写入，busy不改他人快照；专门验证中断恢复 |
+| C05b | 多栈仓库根package.json优先，Java子任务误跑前端 | auto_init_task_loop；T2/T4b/T7及test-r4 GOAL命令 | 已证实命令误选；显式--test-cmd现有契约优先，缺契约必须有可恢复拒绝，不能猜Java默认 |
+| C27b | auto-init的lint基线采集仍只超时直接shell | issue27b-descendant-probe.json，就绪后超时仍late-write | 已复现；单命令exec正常对照无残留；复用C27生命周期覆盖真实基线入口，独立提交 |
 
 ## 执行计划与检查点
 1. 固定日志快照、归属与覆盖账本；逐卡补触发、因果、正常对照、代码边界及验证。
@@ -79,3 +81,5 @@ C28本地验证：完整单次执行契约校验runner退出、唯一有效步�
 C29本地验证：复用既有内核文件锁，在工位评估命名空间覆盖eval/init/基线写入；竞争者明确busy退出75，不改持有者日志、配置或快照。独立进程受控交错撤销修复3 failed/2正常对照passed，修后5靶向通过；专项43 passed；全量2643 passed/145 subtests passed、0 failed/0 skipped（336.77s）。异常及持有者进程退出后可以重新获取锁。compileall、CLI AST/diff-check通过。仅自审、未部署；锁不清理后代进程，C27仍独立待修。
 
 C27本地验证：只回收本次新session进程组，在锁释放前覆盖超时/中断/异常/正常返回，TERM有限等待、残留KILL；保留124及真实回执。核心反证5 failed/1 passed，修后7靶向passed；专项45 passed；全量2650 passed/145 subtests、0 failed/0 skipped（390.39s）。两次专项试验分别发现就绪前超时夹具问题及宿主空组EPERM差异，均保留失败日志并用就绪屏障/原生组列表修正；不放宽清理断言，新增活组EPERM失败防护。compileall/CLI AST/diff-check通过；仅自审、未部署，没有杀生产进程。不可捕获SIGKILL及主动脱离session的后代未覆盖，不能宣称无限进程树保证。
+
+C05a本地验证：默认npm命令CI=1，保留显式任务命令。旧1 failed/1正常对照passed，修后2靶向passed；专项18 passed，全量2652 passed/145 subtests、0 failed/0 skipped（381.91s）。实际安装Vitest 3.2.6真实PTY旧命令测试通过后watch、exit124，修后exit0收敛；无TTY旧命令正常退出，保留负触发对照。compileall/CLI AST/diff-check通过；仅自审、未部署；Java任务误选根前端测试独立列C05b，基线后代残留列C27b，不冒充全部关闭。

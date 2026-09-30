@@ -2301,7 +2301,7 @@ def auto_init_task_loop(clone_path, goal, acceptance_list, test_cmd=None, lint_c
     # Detect test command if not provided
     if not test_cmd:
         if (clone / "package.json").exists():
-            test_cmd = "npm test"
+            test_cmd = "CI=1 npm test"
         elif (clone / "pytest.ini").exists() or (clone / "tests").is_dir():
             test_cmd = "pytest"
         elif (clone / "Cargo.toml").exists():

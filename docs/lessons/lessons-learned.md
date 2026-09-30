@@ -5300,3 +5300,17 @@ C29追加验证：`tests/test_evaluator_process_isolation.py`使用独立进程�
 
 ### 验证与关联证据
 `tests/test_evaluator_process_cleanup.py`用真实独立CLI、shell、Python子进程和就绪屏障验证超时、拒绝TERM、SIGINT/SIGTERM、后台残留及无关进程存活；正常前台执行保留通过。旧实现核心矩阵5 failed/1 passed，修后7 passed（含活进程拒绝不能忽略的专项）。相邻45 passed，全量2650 passed/145 subtests（390.39s）。仅本地验证、未部署；详见执行计划C27。
+
+## 113. 自动测试命令必须声明非交互环境（2026-09-30）
+
+### 问题背景
+`test-r4`的4015条绿色摘要后出现`PASS Waiting for file changes`并exit124。`auto_init_task_loop`仅据package.json生成`npm test`，继承Agent的TTY输入，Vitest默认进入watch，导致任务反复耗尽。
+
+### 经验教训
+绿色摘要不证明命令已结束。普通管道能退出也不能排除TTY下的挂起：当前Vitest默认watch取决于非CI与stdin.isTTY，验证必须保留真实触发条件，不能只做无TTY对照。
+
+### 操作规范与防护
+自动npm默认命令改为`CI=1 npm test`，GOAL和脚本保持同一配置；显式`--test-cmd`完整保留，不擅自改变任务范围。此修复仅覆盖支持CI语义的默认npm命令；多栈仓库Java任务误选根前端测试仍属C05b，不能以非交互退出代替正确测试契约。
+
+### 验证与关联证据
+真实Task自动初始化→npm→Python测试脚本→eval→持久快照，同断言旧1 failed/1正常对照passed，修后2 passed；相邻18 passed，全量2652 passed/145 subtests（381.91s）。另用已安装Vitest 3.2.6和真实PTY输入验证旧命令1 passed后exit124、不收敛，修后1 passed且exit0收敛；无TTY旧命令正常退出，保留为触发条件对照。仅本地验证、未部署。源码`bin/herdr-task:auto_init_task_loop`，回归`tests/test_task_loop_noninteractive.py`。
