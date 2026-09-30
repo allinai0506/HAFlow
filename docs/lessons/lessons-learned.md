@@ -4879,3 +4879,83 @@ pytest -q
 - 现场：events 表 `impl-t6-mock-retire` 238 条 `blocked_observation_cas_rejected`
 
 ---
+
+
+## 102. Worktree 的 .git 指针不具备 CoW 隔离（2026-09-30）
+
+### 问题背景
+`wf-project-0929-01` 三个任务复制 Gemini Worktree 后共享 `.git/worktrees/gemini`，T6 切分支改变了 T1 与 Barrier-0 的 HEAD，导致提交触发 Agent/branch mismatch，方案未进入源仓库。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| `create_clone` 仅检查 `.git` 存在，误把复制工作文件视为 Git 身份隔离；复制 `.git` 文件不会复制其目标 HEAD/index。 | 工作文件复制不等于 Git 身份隔离 | 修改 HEAD/index 前验证独立元数据 |
+
+### 操作规范（已固化到源码与回归测试）
+在后续 Git 副作用前，将 Worktree 指针替换为独立 clone 元数据。现场恢复必须保留工作文件、备份指针/index/HEAD，分别恢复任务分支；源暂存区污染单独核对，不以改 Agent 名称绕过门禁。
+
+### 验证命令 / 守护测试
+`TestCleanSandbox.test_worktree_source_clones_have_independent_git_state` 使用真实 Git Worktree、两个 Clone 和 staged WIP；断言源 HEAD/index/工作文件未变、两个 Clone 分支/index 不相互污染。修复前断言 `.git.is_dir()` 失败，修复后专项 22 passed。
+
+
+## 103. runtime done 必须贯穿完成判定与持久化（2026-09-30）
+
+### 问题背景
+T1 已完成且全量评估 3961/3961，Herdr 返回 `done`，Sentinel 却持续记录 `EARLY marker present while busy`。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| Herdr 的 done 表示已完成但尚未被查看，HAFlow 纯完成策略与 SQLite observation/CAS 仍只接受 idle，运行时与持久化的语义不一致。 | 完成态语义必须贯穿策略与持久化 | done 仍须通过标记、稳定性与 CAS 门禁 |
+
+### 操作规范（已固化到源码与回归测试）
+在完成策略、observation ready、completion CAS 三处一致接受 idle/done。done 不能单独完成任务，仍要求新标记、稳定双采样、最短耗时、当前身份与版本。
+
+### 验证命令 / 守护测试
+`test_done_runtime_completion_persists_with_existing_gates` 修复前因 done 被分类 early 失败；修复后经真实 SQLite observation 与 CAS 到 agent_done，同时拒绝无标记、短耗时、过期 epoch。
+
+
+## 104. 本地 Agent 锚点不是远端分支（2026-09-30）
+
+### 问题背景
+T1/T6 完成后已 committed，integrate 对 `origin/agent/gemini-init` 的 fetch 报找不到远端 ref，反复终化无法收敛。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| `base_branch` 可来自本地 Worktree 锚点，integrate 却统一按 origin 分支解析，忽略源现场本身是可用基线。 | 本地锚点不能假定存在于远端 | 按基线归属选择获取路径并沿用既有锁 |
+
+### 操作规范（已固化到源码与回归测试）
+仅对 `agent/*-init` 在既有 source/Clone 锁内读取源本地分支到 Clone 的 task-scoped base ref，rebase/关系验证统一使用该 ref；普通分支保持远端路径。
+
+### 验证命令 / 守护测试
+真实 Git+SQLite `test_local_agent_anchor_integrates_without_remote_anchor` 修复前重现 remote ref 缺失；修复后 source HEAD/anchor 不变，集成 ref 同时包含基线推进和任务成果。集成专项 51 passed，实际 T1/T6 从 committed 到 integrated。
+
+
+## 105. 绿色测试名含 FAIL 不等于失败（2026-09-30）
+
+### 问题背景
+Vitest 输出绿色 `✓ ...展示 FAIL 状态...`，3961 个测试已通过，评估器仍把该行加入 failing_tests，得分被压到95，内循环耗尽。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| Vitest/Jest 失败提取仅匹配行内 FAIL/✕ 子串，没有先识别行首通过标记，测试名称被误当状态。 | 测试名称不能充当执行状态 | 先识别通过标记再提取真实失败 |
+
+### 操作规范（已固化到源码与回归测试）
+复用 `_is_failing_test_line`，先排除以✓/√开头的通过行，再保留原真实失败识别；不改业务测试名称或降低评分门槛。
+
+### 验证命令 / 守护测试
+`test_loop_evaluator.py` 新回归覆盖Vitest/Jest、两种通过标记、FAIL/✕标题、混合真失败和Jest失败suite。修复前10个subtests失败；修复后绿标题仍100分/converged，真实失败仍留在failing_tests。
+
+```bash
+python3.13 -m pytest -q tests/test_herdr_worker.py tests/test_impl_fix1_regression.py tests/test_legacy_adopt_converge.py tests/test_loop_evaluator.py
+```
+
+关联证据：[工作流恢复记录](../walkthroughs/20260930-wf-project-0929-recovery.md)、`wiki/task-lifecycle.md`。
+
+---

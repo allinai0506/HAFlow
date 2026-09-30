@@ -351,3 +351,33 @@ Evidence:
   给 CLI 的 agent 相同；审计失败仍 fail-closed。
 - Sentinel SQLite 观察失败按旁路故障记录并继续下一轮；记录本身也失败时只写 stderr，不能让
   单次 SQLite 异常退出哨兵主循环。
+
+
+### CoW Clone 来源为 Git Worktree
+
+FACT: Worktree 根的 `.git` 是指向源仓库的文件，直接 CoW 复制会共享 HEAD 与 index。`create_clone` 在任何 reset、clean、branch 切换前，用 `git clone --no-hardlinks --no-checkout` 创建独立元数据并替换 Clone 中的指针；保留源 origin URL。普通 `.git` 目录仍使用 CoW 复制。
+
+Evidence:
+- `services/herdr-worker.py#create_clone`
+- `tests/test_herdr_worker.py#TestCleanSandbox.test_worktree_source_clones_have_independent_git_state`
+
+FACT: Herdr runtime `done` 与 `idle` 均表示可接收输入；完成策略接受两者，但仍要求新完成标记、两轮间隔采样、至少 60 秒、当前任务版本与 CAS。`done` 不是独立完成证据。
+
+Evidence:
+- `herdr/completion.py#should_accept`
+- `herdr/state_db.py#observe_completion`
+- `herdr/state_db.py#compare_and_set_completion_transition`
+- `tests/test_impl_fix1_regression.py#test_done_runtime_completion_persists_with_existing_gates`
+
+FACT: `agent/*-init` 是本地 Worktree 锚点，integrate 在现有 source/Clone 锁内 fetch source 的 `refs/heads/<base>` 到 Clone 的 `refs/herdr/bases/<task>`，再 rebase 和校验。普通分支仍 fetch origin。此操作不会把 anchor 推到远端，也不会改 source 的 HEAD/index；集成仍只导入 task/integration refs，后续候选合流另行处理。
+
+Evidence:
+- `bin/herdr-task#integrate_task`
+- `tests/test_legacy_adopt_converge.py#IntegrateOutcomeTest.test_local_agent_anchor_integrates_without_remote_anchor`
+
+FACT: 内循环评估的 Vitest/Jest 失败提取先识别行首✓/√通过标记，避免将用例名称中的FAIL/✕解释为失败；真失败与非零退出的评分门禁保留。
+
+Evidence:
+- `herdr/evaluator.py#_is_failing_test_line`
+- `tests/test_loop_evaluator.py#EvaluatorTest.test_green_titles_with_failure_words_still_converge`
+- `tests/test_loop_evaluator.py#EvaluatorTest.test_true_failure_is_retained_beside_green_failure_title`

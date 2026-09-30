@@ -447,3 +447,22 @@ def test_router_failure_does_not_acquire_a_pane(tmp_path, monkeypatch):
     assert events and events[-1]["payload"]["pane_dispatched"] is False
     from herdr.state_store import reset_state_store
     reset_state_store()
+
+
+def test_done_runtime_completion_persists_with_existing_gates(tmp_path):
+    from herdr import completion
+    store = SQLiteStateStore(tmp_path / "state.db")
+    task = seed_task(store, "task-runtime-done")
+    assert completion.classify_signal(True, "done") == "none"
+    assert not completion.should_accept(marker_present=True, agent_status="done", elapsed_seconds=59)
+    assert not completion.should_accept(marker_present=False, agent_status="done", elapsed_seconds=100)
+    assert not completion.should_accept(marker_present=True, agent_status="done", elapsed_seconds=100, stale_epoch=True)
+    store.observe_completion(task_id=task["task_id"], marker_present=False, agent_status="working", observed_at=100)
+    first = store.observe_completion(task_id=task["task_id"], marker_present=True, agent_status="done", observed_at=103)
+    assert not first["ready"]
+    second = store.observe_completion(task_id=task["task_id"], marker_present=True, agent_status="done", observed_at=106)
+    assert second["ready"]
+    result = store.compare_and_set_completion_transition(task_id=task["task_id"], expected_status="working",
+        expected_version=task["version"], reason="completion_test", source="test", now=106)
+    assert result["accepted"]
+    assert store.get_task(task["task_id"])["status"] == "agent_done"

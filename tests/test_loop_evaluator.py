@@ -72,6 +72,33 @@ FAILED test_sample.py::test_addition - assert 2 == 3
         self.assertEqual(total, 12)
         self.assertTrue(any("should handle multi-role" in f for f in failing))
 
+    def test_green_titles_with_failure_words_still_converge(self):
+        for summary in ("Tests  1 passed (1)", "Tests: 1 passed, 1 total"):
+            for marker in ("✓", "√"):
+                for title in ("展示 FAIL 状态与缺失场景列表", "literal ✕ icon"):
+                    with self.subTest(summary=summary, marker=marker, title=title):
+                        metrics = calculate_metrics(
+                            test_output=f"  {marker} {title} 455ms\n{summary}",
+                            test_exit_code=0, lint_output="", lint_exit_code=0,
+                        )
+                        self.assertEqual(metrics.failing_tests, [])
+                        self.assertEqual(metrics.passed_tests, 1)
+                        self.assertEqual(metrics.total_tests, 1)
+                        self.assertEqual(metrics.composite_score, 100.0)
+                        self.assertTrue(is_converged(metrics))
+
+    def test_true_failure_is_retained_beside_green_failure_title(self):
+        for summary in ("Tests  1 failed | 1 passed (2)", "Tests: 1 failed, 1 passed, 2 total"):
+            with self.subTest(summary=summary):
+                output = f" ✓ displays FAIL status\n ✕ actual broken assertion\n{summary}"
+                passed, total, failing = parse_test_output(output, 1)
+                self.assertEqual((passed, total), (1, 2))
+                self.assertEqual(failing, ["actual broken assertion"])
+
+    def test_jest_fail_suite_is_retained(self):
+        output = "FAIL src/real-failure.test.ts\nTests: 1 failed, 0 passed, 1 total"
+        self.assertEqual(parse_test_output(output, 1), (0, 1, ["src/real-failure.test.ts"]))
+
     def test_parse_lint_output(self):
         eslint_out = "12 problems (2 errors, 10 warnings)"
         self.assertEqual(parse_lint_output(eslint_out, 1), 2)

@@ -158,6 +158,33 @@ class TestCleanSandbox(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
+    def test_worktree_source_clones_have_independent_git_state(self):
+        worker = load_worker()
+        worktree = Path(self.temp_dir) / "worktree"
+        subprocess.run(["git", "worktree", "add", "-b", "worktree-base", str(worktree), "main"],
+                       cwd=self.source_repo, check=True, capture_output=True)
+        (worktree / "foo.txt").write_text("source WIP\n")
+        subprocess.run(["git", "add", "foo.txt"], cwd=worktree, check=True)
+        source_index = subprocess.check_output(["git", "diff", "--cached"], cwd=worktree)
+        subprocess.run(["git", "config", "core.hooksPath", ".task-hooks"], cwd=worktree, check=True)
+        with patch.object(worker, "CLONE_ROOT", Path(self.temp_dir) / "clones"):
+            first = worker.create_clone(worktree, "first")
+            second = worker.create_clone(worktree, "second")
+            self.assertTrue((first / ".git").is_dir())
+            self.assertTrue((second / ".git").is_dir())
+            self.assertEqual(subprocess.check_output(["git", "config", "--get", "core.hooksPath"], cwd=first).strip(), b".task-hooks")
+            worker.create_task_branch(first, "first", "codex", "feat", "main")
+            worker.create_task_branch(second, "second", "opencode", "feat", "main")
+            self.assertEqual(subprocess.check_output(["git", "branch", "--show-current"], cwd=worktree).strip(),
+                             b"worktree-base")
+            self.assertEqual(subprocess.check_output(["git", "diff", "--cached"], cwd=worktree), source_index)
+            self.assertEqual((worktree / "foo.txt").read_text(), "source WIP\n")
+            self.assertEqual(subprocess.check_output(["git", "branch", "--show-current"], cwd=first).strip(),
+                             b"agent/codex/feat-first")
+            (first / "foo.txt").write_text("first-only change\n")
+            subprocess.run(["git", "add", "foo.txt"], cwd=first, check=True)
+            self.assertEqual(subprocess.check_output(["git", "diff", "--cached"], cwd=second), b"")
+
     def test_create_task_branch_with_dirty_source(self):
         worker = load_worker()
         clone_root = Path(self.temp_dir) / "clones"
