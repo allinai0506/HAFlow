@@ -343,6 +343,8 @@ def _normalize_workflow_body(workflow: Dict[str, Any]) -> Dict[str, Any]:
                 "rules": list(node.get("rules") or []),
                 "gate": dict(node.get("gate") or {}),
             }
+            if "required_task_ids" in node:
+                norm_node["required_task_ids"] = node["required_task_ids"]
             if "tab_id" in node:
                 norm_node["tab_id"] = node["tab_id"]
             if "anchor_pane_id" in node:

@@ -1643,3 +1643,27 @@ class PlannedImplementationCoverageTest(unittest.TestCase):
             cfg = {"nodes": [{"id": "implementation", "required_task_ids": invalid}]}
             with self.subTest(config=invalid), patch.object(_ctl, "load_tasks", return_value=[task]), patch.object(_ctl, "workflow_config_for", return_value=cfg), patch.object(_ctl, "scheduler_core", None):
                 self.assertFalse(_ctl.is_node_complete("wf-1", "implementation"))
+
+
+class PersistedPlannedCoverageTest(unittest.TestCase):
+    def test_real_config_loader_does_not_drop_manifest_after_task_fuse(self):
+        from herdr import projects
+        from herdr.state_store import SQLiteStateStore
+        with tempfile.TemporaryDirectory() as td:
+            cfg = Path(td) / "workflow.json"
+            cfg.write_text(json.dumps({"nodes": [{"id": "implementation", "required_task_ids": ["t1", "t3"]}]}))
+            store = SQLiteStateStore(Path(td) / "state.db")
+            store.save_workflow({"workflow_id": "wf-1", "status": "running", "workflow_file": str(cfg)})
+            store.save_task(_task("t1", "integrated", "implementation", integration_mode="git"))
+            store.save_task(_task("t3", "superseded", "implementation", integration_mode="git"))
+            with patch.object(projects, "_get_store", return_value=store), patch.object(_ctl, "load_tasks", side_effect=store.list_tasks):
+                self.assertFalse(_ctl.is_node_complete("wf-1", "implementation"))
+
+    def test_normalization_preserves_manifest_and_invalid_values(self):
+        from herdr.workflow import normalize_workflow
+        for manifest in (["t1", "t3"], [], "", 0, {}):
+            with self.subTest(manifest=manifest):
+                normalized = normalize_workflow({"nodes": [{"id": "implementation", "required_task_ids": manifest}]})
+                self.assertEqual(normalized["nodes"][0]["required_task_ids"], manifest)
+                self.assertEqual(normalize_workflow(normalized)["nodes"][0]["required_task_ids"], manifest)
+        self.assertNotIn("required_task_ids", normalize_workflow({"nodes": [{"id": "implementation"}]})["nodes"][0])

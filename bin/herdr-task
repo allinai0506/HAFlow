@@ -210,6 +210,13 @@ def load_workflow(workflow_id=None):
             store = get_state_store()
             wf = store.get_workflow(workflow_id)
             if wf:
+                if wf.get("workflow_file"):
+                    try:
+                        config = json.loads(Path(wf["workflow_file"]).expanduser().read_text())
+                        if isinstance(config, dict) and config:
+                            return normalize_workflow(config)
+                    except (OSError, ValueError, TypeError):
+                        pass
                 return normalize_workflow(wf)
         except Exception:
             pass

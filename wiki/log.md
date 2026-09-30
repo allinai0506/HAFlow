@@ -1563,3 +1563,5 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - 2026-09-30：内循环评估保留绿色标题中的FAIL/✕语义，避免幽灵失败；Vitest/Jest回归覆盖真失败保留。
 
 - 2026-09-30：wf-project-0929-01 Candidate 根因恢复：Git 节点等集成、显式 planned Task 清单、CLI/ops读取口径同步、Worktree本地refs保留与作废候选排除；详见 task-lifecycle 和恢复记录。
+
+- 2026-09-30 Candidate 恢复追加：真实配置加载保留 planned Task 身份，CLI 仅加载记录明确路径，缺失文件不借用 foreign legacy；恢复任务绑定 Java 验收入口。

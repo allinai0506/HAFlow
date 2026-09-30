@@ -4989,3 +4989,5 @@ python3.13 -m pytest -q tests/test_scheduler_dispatch_e2e.py tests/test_herdr_ta
 修前复现本地分支丢失、未集成提前完成、清单缺项、CLI投影丢字段；Controller→真实临时 Git→SQLite 冻结链证明缺计划项时不写 candidate_frozen，交付齐全后才写一条事实。详见 [恢复记录](../walkthroughs/20260930-candidate-recovery.md)。
 
 ---
+
+候选恢复追加验证：完成判据必须通过真实 SQLite Workflow 记录→明确配置文件→normalize→Controller/CLI 验证，直接 mock workflow_config_for 会掩盖字段丢失。明确记录文件缺失时不得借用全局 legacy 的其他工作流配置。窄 Pane 造成 TUI idle 默认推断时须验证实际尺寸与身份；任务评估命令须对齐代码语言，不能用前端测试替代 Java Provider 验收。

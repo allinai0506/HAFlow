@@ -24,4 +24,8 @@ RED已证明source local branch不存在、completed/committed的Git任务过早
 
 最新全量：2440 passed、67 subtests passed、零失败零跳过（424.68秒）。相邻专项165 passed、16 subtests passed。隔离副本撤掉关键修复后6 failed、4 passed，证明回归会阻断该退化。独立评审覆盖最新完整调用链，无阻塞项；评审者未独立重跑全量。
 
-运行代码以补丁加载到保留其他修改的HAFlow目录，并用launchctl热重启Controller。配置已保存9项required_task_ids，T3真实ID为impl-t3-abnormal-voucher-provider，基线d78809a32。恢复派发与协调器竞态产生的impl-t3-abnormal-provider已halt并supersede，未集成，保留现场（autosave报告git add失败，不宣称保存了其WIP）。当前实现节点in_progress、complete=false，原T3 runtime running；test/review尚未派发符合未完整交付的边界。配置与5个运行文件均有recovery目录回滚备份。当前不宣称产品工作流已完成；G1c/MATCH的DB证据与后续T4/T7仍属真实依赖，禁止补造验收结论。
+运行代码以补丁加载到保留其他修改的HAFlow目录，并用launchctl热重启Controller。配置已保存9项required_task_ids，T3真实ID为impl-t3-abnormal-voucher-provider，基线d78809a32。恢复派发与协调器竞态产生的impl-t3-abnormal-provider已halt并supersede，未集成，保留现场（autosave报告git add失败，不宣称保存了其WIP）。随后持续监控暴露配置加载链遗漏：projects.workflow_config_for经normalize丢失清单，CLI优先读取空SQLite config也未访问明确记录文件。已补实际临时SQLite→文件→normalize→Controller/CLI的RED/GREEN回归，并禁止缺失配置借用foreign legacy。独立复审确认该边界无阻塞。
+
+原T3又被dispatch_delivery_fuse自动作废，协调器已派发唯一恢复任务impl-t3-recover-abnormal（run_5223247453e44751a6af8d95cb300102），计划清单已替换其真实ID。短暂pause并撤回test/review阶段闩后已resume。提前a4a9909bee候选不代表完整实现，已追加invalidation说明；历史事实不删除。该恢复Pane实际宽度1列导致idle误判，zoom后真实working可读；只在该clone修正Java任务错误默认npm评估入口，旧配置/结果备份，不修改断言。
+
+最终真实读取应为实现in_progress、complete=false；test/review未派发符合未完整交付的边界。最终最新源码全量2444 passed、72 subtests passed、零失败零跳过（379.03秒）；配置加载专项107 passed、12 subtests passed。独立复审无阻塞。现场T3恢复Task为working，其clone已有f1bac40d3真实4文件提交并运行Java验证（尚不宣称集成）；T4a impl-t4a-aggregate-service为working，计划身份已同步。T4b/T7仍待后续真实交付。配置与5个运行文件均有recovery目录回滚备份。当前不宣称产品工作流已完成；G1c/MATCH的DB证据与后续T4/T7仍属真实依赖，禁止补造验收结论。
