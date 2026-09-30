@@ -46,18 +46,23 @@ launchctl list | grep herdr
 >
 > - 改了 **sentinel / notifier**（`~/HAFlow/services/`）→ `kickstart` 即生效；
 > - 改了 **console / controller** 或 `herdr/` 包 → **工作区改动不会生效**，
->   必须走 §2.2.1 的完整流程。
-> - `./scripts/install-herdr-console.sh` 只把 console 脚本复制到 `~/.herdr-console/`，
->   **不改 plist**，在当前拓扑下那份副本不会被执行。
+>   必须先提交，再重建快照并让服务重载。
+
+#### 2.2.1 推荐：一条命令部署（console + controller + sentinel + notifier）
+
+`./scripts/install-herdr-console.sh` 会：提交后按 `HEAD` 重建 release 快照 →
+改 plist（console 还改 `HERDR_ROOT`）→ `bootout` + `bootstrap` 重载 → 自检
+运行中进程是否真的加载了新 commit。改完直接跑它即可。
 
 ```bash
-# 仅适用于 sentinel / notifier，或"配置未变"的纯进程重启
-launchctl kickstart -k gui/$(id -u)/com.user.herdr-controller
-launchctl kickstart -k gui/$(id -u)/com.user.herdr-factory-console
-launchctl kickstart -k gui/$(id -u)/com.user.herdr-notifier
+./scripts/install-herdr-console.sh              # 部署当前 HEAD
+./scripts/install-herdr-console.sh --sha <commit>  # 部署指定 commit
+./scripts/install-herdr-console.sh --no-restart   # 只同步资源，不重载
 ```
 
-#### 2.2.1 让 console / controller 真正加载新代码
+**改 console / controller 前必须先提交**，否则快照还是旧 commit。
+
+#### 2.2.2 手动流程（脚本不可用时；或你要看每一步细节）
 
 `launchctl kickstart` **只重启进程，不重读 plist**（launchd 用已加载的 job 配置快照）。
 改了 plist 后必须 `bootout` + `bootstrap`。
@@ -74,10 +79,11 @@ git archive --format=tar $SHA | tar -x -C ~/.herdr-controller/releases/$SHA
 # 3. 改 plist 指向新快照（console 要改两处：HERDR_ROOT + ProgramArguments）
 R=/Users/user/.herdr-controller/releases/$SHA
 P=~/Library/LaunchAgents/com.user.herdr-factory-console.plist
-PlistBuddy -c "Set :EnvironmentVariables:HERDR_ROOT $R" $P
-PlistBuddy -c "Set :ProgramArguments:1 $R/console/herdr_factory_console.py" $P
-PlistBuddy -c "Set :ProgramArguments:1 $R/services/herdr-controller.py" \
+plutil -replace EnvironmentVariables.HERDR_ROOT -string "$R" "$P"
+plutil -replace ProgramArguments.1 -string "$R/console/herdr_factory_console.py" "$P"
+plutil -replace ProgramArguments.1 -string "$R/services/herdr-controller.py" \
   ~/Library/LaunchAgents/com.user.herdr-controller.plist
+plutil -lint "$P"
 
 # 4. 重载 job（顺序：先改 plist，再 bootout，最后 bootstrap）
 for j in com.user.herdr-factory-console com.user.herdr-controller; do
