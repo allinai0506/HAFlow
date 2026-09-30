@@ -16,7 +16,24 @@ HERDR_MIN_COMPLETION_SECONDS may raise it, never lower it, so the
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Sequence
+
+DONE_MARKER_PREFIX = "HERDR_TASK_DONE:"
+BLOCKER_MARKER_PREFIX = "HERDR_TASK_BLOCKER:"
+ORCH_MARKER_PREFIX = "HERDR_ORCH_TASK:"
+
+# A pane is a hard-wrapped terminal screen, not a logical document.  A TUI
+# message body keeps a left margin, so every soft-wrapped continuation line
+# starts with horizontal whitespace.  Only those joins are undone; hard breaks
+# (blank/whitespace-only lines, unindented lines) keep their newline so
+# unrelated text can never be spliced into a marker.
+_SOFT_WRAP_RE = re.compile(r"\r?\n[ \t]+(?=\S)")
+# Task ids are slug-shaped.  A literal followed by more of these characters is
+# a longer, different marker and must never satisfy a shorter task id.
+_IDENT_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_."
+)
 
 MIN_COMPLETION_SECONDS = 60.0
 # Sentinel polls once every three seconds.  A second marker sighting is only
@@ -83,6 +100,52 @@ def sample_interval_satisfied(
         return float(last_sample_at) - float(first_seen_at) >= min_sample_interval_seconds()
     except (TypeError, ValueError):
         return False
+
+
+def marker_literal(task_id: str, prefix: str = DONE_MARKER_PREFIX) -> str:
+    """Compose the exact marker string a pane has to display."""
+    if not task_id:
+        return ""
+    return f"{prefix}{task_id}"
+
+
+def _contains_marker_token(text: str, literal: str) -> bool:
+    """Substring search that refuses to stop inside a longer identifier."""
+    start = 0
+    while True:
+        idx = text.find(literal, start)
+        if idx == -1:
+            return False
+        end = idx + len(literal)
+        if text[end:end + 1] not in _IDENT_CHARS:
+            return True
+        start = idx + 1
+
+
+def marker_present(
+    screen: str,
+    task_id: str,
+    prefix: str = DONE_MARKER_PREFIX,
+) -> bool:
+    """Return whether a pane already displays ``prefix + task_id``.
+
+    The single marker-detection choke point for both daemons.  A naive
+    ``literal in screen`` read is not enough: terminal and TUI rendering hard
+    wraps long tokens, so a 60-character marker no longer appears as one
+    contiguous substring and the task can never leave ``working`` even though
+    every deliverable is on disk.  Soft wraps are therefore undone before the
+    search, while hard breaks and the identifier boundary keep the match
+    fail-closed.
+    """
+    if not screen or not task_id:
+        return False
+    literal = marker_literal(task_id, prefix)
+    if _contains_marker_token(screen, literal):
+        return True
+    unwrapped = _SOFT_WRAP_RE.sub("", screen)
+    if unwrapped == screen:
+        return False
+    return _contains_marker_token(unwrapped, literal)
 
 
 def sanitize_completion_marker(text: str, task_id: str) -> tuple[str, int]:

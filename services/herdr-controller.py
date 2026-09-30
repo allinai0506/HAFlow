@@ -8668,7 +8668,9 @@ def _completion_marker_snapshot(task):
     except (OSError, subprocess.SubprocessError):
         return False, ""
     screen = (result.stdout or "") + (result.stderr or "")
-    return f"HERDR_TASK_DONE:{task_id}" in screen, screen
+    from herdr.completion import marker_present as _marker_present
+
+    return _marker_present(screen, task_id), screen
 
 
 def _record_completion_sample(

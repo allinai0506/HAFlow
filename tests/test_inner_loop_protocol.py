@@ -7,6 +7,7 @@ Covers:
 4. herdr-task: prompt iron-rule prohibitions source-level verification
 """
 
+import re
 import sys
 import tempfile
 import unittest
@@ -127,23 +128,38 @@ class BlockerReportGenerationTest(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class SentinelBlockerDetectionTest(unittest.TestCase):
-    """Sentinel source must contain BLOCKER marker detection with correct status."""
+    """Sentinel source must detect the BLOCKER marker and route to blocked.
+
+    The detection has to go through the shared wrap-tolerant marker contract:
+    a raw ``blocker_marker in screen`` check cannot see a marker the terminal
+    hard-wrapped, and a stranded ``working`` task never reaches the controller.
+    """
 
     def _sentinel_source(self):
         return (HERDR_ROOT / "services" / "herdr-sentinel.py").read_text(encoding="utf-8")
 
+    def _blocker_check(self, src):
+        return re.search(
+            r'status in \{"dispatched", "working"\} and _comp\.marker_present\(\s*'
+            r"screen,\s*task_id,\s*_comp\.BLOCKER_MARKER_PREFIX",
+            src,
+        )
+
     def test_blocker_marker_defined_in_sentinel(self):
         src = self._sentinel_source()
-        self.assertIn("HERDR_TASK_BLOCKER:{task_id}", src,
-                      "Sentinel must define blocker_marker variable")
+        self.assertIn("marker_literal(task_id", src,
+                      "Sentinel must compose task-owned markers centrally")
+        self.assertIn("BLOCKER_MARKER_PREFIX", src,
+                      "Sentinel must resolve the blocker marker via the shared contract")
 
     def test_blocker_transitions_to_blocked_not_agent_done(self):
         src = self._sentinel_source()
-        idx = src.find("blocker_marker in screen")
-        self.assertGreater(idx, 0, "Sentinel must check blocker_marker in screen")
-        section = src[idx:idx + 300]
-        self.assertIn('"blocked"', section, "Blocker must set status to 'blocked'")
-        self.assertNotIn('"agent_done"', section, "Blocker must NOT set 'agent_done'")
+        match = self._blocker_check(src)
+        self.assertIsNotNone(match,
+                             "Sentinel must check the wrap-tolerant blocker marker")
+        window = src[match.start():match.start() + 900]
+        self.assertIn('"blocked"', window, "Blocker must set status to 'blocked'")
+        self.assertNotIn('"agent_done"', window, "Blocker must NOT set 'agent_done'")
 
     def test_blocker_reason_is_inner_loop_exhausted(self):
         src = self._sentinel_source()

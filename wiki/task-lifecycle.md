@@ -137,6 +137,43 @@ Evidence:
 - `tests/test_trajectory.py`
 - `tests/test_supervisor_tests_completed.py`
 
+### 1.3 完成标记的折行容错契约 (Wrap-Tolerant Marker Detection)
+
+`FACT` `working → agent_done` 的唯一常驻通路是「Pane 可见屏幕上出现
+`HERDR_TASK_DONE:<task_id>` + `agent_status == idle` + elapsed ≥ 60s + 两次
+间隔确认」。Sentinel 只写 `completion_observations` 样本，Controller 独占
+`compare_and_set_completion_transition` 的 CAS 落盘（见 §1.2 的 FR-1 分层）。
+
+`DECISION` **Pane 是被硬折行的终端屏幕，不是逻辑文档。** TUI 消息体自带左边距，
+折行的续行必然以水平缩进开头。因此：
+
+- 标记探测的唯一接缝是纯函数 `herdr.completion.marker_present()`；
+- 探测前只消解**缩进续行**（`\r?\n[ \t]+(?=\S)`），硬换行（空行、纯空白行、
+  无缩进行）**保留换行符**，因此无关文本永远无法被拼成假标记；
+- 命中后必须做**标识符边界校验**：`...-v1` 不得满足 `...-v1b`，跨 Task 证据
+  不得完成别人的 Task；
+- 三个前缀共用同一接缝：`HERDR_TASK_DONE:` / `HERDR_TASK_BLOCKER:` /
+  `HERDR_ORCH_TASK:`。
+
+`WHY` 历史上两个守护进程各自用 `literal in screen` 裸子串匹配。标记长度
+= 16 + `len(task_id)`，`plan-arch-*`（51 字符）单行放下所以正常，
+`plan-adversarial-*`（58 字符）超宽被折成两行 → `marker_present` 恒为 False →
+`consecutive_samples` 恒为 0 → CAS 永远以 `completion_marker_absent` 拒绝 →
+**产物与台账全部落盘、Agent 已 idle 的任务仍永久卡在 `working`，节点永不推进**。
+该缺陷与产物质量无关，只取决于 `task_id` 长度与 Pane 宽度之差，属可复现的活性空洞。
+
+`GUARD` 纯层测试（`tests/test_completion_marker_wrapping.py`）只覆盖函数行为；
+防复发的真正门禁是**源码级契约**：任一守护进程重新内联 `f"HERDR_TASK_DONE:{task_id}"`
+即测试失败（`test_daemon_has_no_raw_marker_substring_check`）。
+
+Evidence:
+- `herdr/completion.py:marker_present, marker_literal, _SOFT_WRAP_RE`
+- `services/herdr-sentinel.py:main` (done / blocker / orch 三处探测)
+- `services/herdr-controller.py:_completion_marker_snapshot`
+- `herdr/state_db.py:compare_and_set_completion_transition`（`completion_marker_absent` 拒绝分支）
+- `tests/test_completion_marker_wrapping.py`
+- `docs/lessons/lessons-learned.md` §100
+
 ---
 
 ## 2. CoW (Copy-on-Write) 沙盒隔离机制
