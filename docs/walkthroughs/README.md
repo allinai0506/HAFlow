@@ -28,3 +28,4 @@
    - [`20260913-checkpoint-store-v2-sqlite.md`](file:///Users/user/HAFlow/docs/walkthroughs/20260913-checkpoint-store-v2-sqlite.md)：Checkpoint Store V2：嵌入式 SQLite 状态引擎、单事务原子快照、图谱谱系追踪与时间旅行分叉。
    - [`20260928-pr108-selective-reverification.md`](file:///Users/user/HAFlow/docs/walkthroughs/20260928-pr108-selective-reverification.md)：Selective Reverification v1 —— 候选轮换后按可证明证据选择性跳过重复验证；含四轮评审闭环与变异验证记录。
    - [`20260929-pr110-selective-replan.md`](file:///Users/user/HAFlow/docs/walkthroughs/20260929-pr110-selective-replan.md)：Selective Replan v1 —— 门禁 blocked 后只重做被 Verifier 显式点名的实现 Task 谱系（A 保留 / B → B-r2 / C 保留）；含 Fail-Closed 全有或全无校验、episode 身份、6/6 变异验证与评审来源披露。
+   - [`20260930-console-controller-decision-buttons.md`](file:///Users/user/HAFlow/docs/walkthroughs/20260930-console-controller-decision-buttons.md)：PR #120 —— 控制台 Controller 动作全按钮化（交付链路逐步骤门控 + 真实 re-drive）与"待你裁决"显式提醒；含两类"测试全绿但功能死掉"缺陷的运行时门禁复盘。
