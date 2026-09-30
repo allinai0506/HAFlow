@@ -1532,3 +1532,15 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - 收尾验证（绑定 `1b95532`）：`pytest -q tests/test_console* tests/test_workflow*` → 253 passed / 3 subtests；`compileall herdr services bin tests console` exit 0；`git diff --check` exit 0；部署形态 `~/.herdr-console` 与仓库 console/x6 资源 IN-SYNC，LaunchAgent `com.user.herdr-factory-console` running（pid 58641），`/` 与两个 vendor 资源均 200。
 - 六步状态：步骤 1 知识沉淀 ✅、步骤 2 wiki checkpoint ✅（无 `.wiki/WIKI.md`，按 AGENTS.md 治理回填 `wiki/`）、步骤 3 合并确认 ✅（两个 PR 均 MERGED，只读核对未做任何强制推送或历史改写）、步骤 4 anchor sync ✅（main ff 至 `1b95532`）、步骤 5 分支校验 ✅、步骤 6 卫生检查 ✅（无残留临时文件；`__pycache__`/`.DS_Store` 已被 `.gitignore` 覆盖）。
 - 未执行 / 需知悉（均非本轮可越权处理）：`pytest -q` 全量套件 120s 超时未跑完（专项套件全绿，已在 PR 描述与 §99 中标注）；本地 `feat/flow-workbench-v1` / `docs/flow-workbench-wrapup` 两个已合入分支未删除（分支/clone/pane 清理属 `close-workflow` 职责）；节点标签为 X6 `rect` + 文本而非 `shape: 'html'` 自定义卡片；Flow 图随 `loadWorkflow` 重绘，未做独立图轮询。
+
+## [2026-09-30] root-cause | wf-project-0929-01 plan 节点永久卡死：完成标记被终端硬折行，裸子串匹配恒为假
+
+- 现场：`plan-arch` = `cleaned`，`plan-adversarial` 卡 `working` 9.5h。产物与台账全齐（技术方案 64KB、对抗审查 158KB、`kind=gate` 台账在 `notes.jsonl`），`agent get w13:pB` = `idle`，`observed_version == tasks.version == 3`（CAS 无版本漂移），仅 `marker_present=0` / `consecutive_samples=0`。
+- 根因（实测）：`herdr pane read w13:pB --source visible` 显示标记被折成两行 `HERDR_TASK_DONE:plan-adversarial-unified-task-` + `workbench-v1`。`services/herdr-sentinel.py` 与 `services/herdr-controller.py` 各用 `f"HERDR_TASK_DONE:{task_id}" in screen` 读**已折行的终端屏幕**，标记不再是连续子串 → `marker_present` 恒 False → CAS 恒以 `completion_marker_absent` 拒绝 → 节点永不推进。
+- 宽度判据：标记长 = 16 + `len(task_id)`。`plan-arch` = 51 字符单行放下（正常推进），`plan-adversarial` = 58 字符超宽折断（永久卡死）。缺陷与产物质量无关，只取决于 task_id 长度与 Pane 宽度之差。
+- 修复：探测逻辑下沉为纯函数 `herdr/completion.py:marker_present / marker_literal`；只消解缩进续行 `\r?\n[ \t]+(?=\S)`（空行/纯空白行/无缩进行保留换行，fail-closed），命中后做标识符边界校验（`...-v1` 不满足 `...-v1b`，跨 Task 证据不通用）；`HERDR_TASK_DONE` / `HERDR_TASK_BLOCKER` / `HERDR_ORCH_TASK` 三前缀共用同一接缝，4 处调用点全部改造。
+- 防复发：`tests/test_completion_marker_wrapping.py`（27 passed）= 纯层行为 + **源码级契约**（任一守护进程重新内联 `f"HERDR_TASK_DONE:{task_id}"` 即失败，2 daemon × 3 prefix = 6 条）。`tests/test_inner_loop_protocol.py` 两条断言源码文本的契约测试**重定向到新接缝并加强**（未删除、未放宽）。
+- 流程解锁（真实链路，非手工改状态）：`launchctl kickstart -k` 重载 sentinel + controller 后 → `working → agent_done → completed → cleanup_ready → cleaned`（version 3→8）→ `AUTO ACCEPT baseline=TASK_CHANGED` → `[STAGE ADVANCE QUEUED] plan -> implementation` → 已真实派发 `impl-barrier0-plan-rectify`(opencode, working) 与 `impl-t6-mock-retire`(qodercli, blocked)。
+- 收尾验证（绑定当前源码）：`pytest -q` → **2406 passed, 50 subtests passed**（318s）；`compileall herdr services bin tests` exit 0；`git diff --check` exit 0。
+- 知识沉淀：`wiki/task-lifecycle.md` §1.3「完成标记的折行容错契约」新增知识页小节；`docs/lessons/lessons-learned.md` §100「活性判据的输入必须匹配它的物理载体」。
+- 未验证 / 需知悉：修复前全量为 2396 passed / 2 failed（两条源码文本契约测试），修复后 2406 全绿；`impl-t6-mock-retire` 当前为 `blocked`，属该 Task 自身的内环仲裁面，与本缺陷无关，Controller 已按既有 `blocked_marker_observed` 通路接管。

@@ -357,10 +357,11 @@ def _pane_delivery_evidence(pane_id, task_id):
     if not pane_id:
         return {"has_marker": False, "agent_status": None}
 
+    from herdr.completion import ORCH_MARKER_PREFIX, marker_present
+
     screen = pane_visible(pane_id)
-    orchestration_marker = f"HERDR_ORCH_TASK:{task_id}"
     return {
-        "has_marker": orchestration_marker in screen,
+        "has_marker": marker_present(screen, task_id, ORCH_MARKER_PREFIX),
         "agent_status": agent_status(pane_id),
     }
 
@@ -469,9 +470,16 @@ def main():
             state["seen"].setdefault(task_id, now)
 
             screen = pane_visible(pane_id)
-            done_marker = f"HERDR_TASK_DONE:{task_id}"
-            blocker_marker = f"HERDR_TASK_BLOCKER:{task_id}"
-            orchestration_marker = f"HERDR_ORCH_TASK:{task_id}"
+            from herdr import completion as _comp
+
+            done_marker = _comp.marker_literal(task_id)
+            blocker_marker = _comp.marker_literal(
+                task_id, _comp.BLOCKER_MARKER_PREFIX
+            )
+            orchestration_marker = _comp.marker_literal(
+                task_id, _comp.ORCH_MARKER_PREFIX
+            )
+            done_marker_present = _comp.marker_present(screen, task_id)
 
             # FR-1: Sentinel is an observer.  It records a durable sample and
             # never promotes a task; Controller consumes the sample and owns
@@ -479,7 +487,7 @@ def main():
             if status in {"dispatched", "working"}:
                 from herdr import completion as _comp
 
-                marker_present = done_marker in screen
+                marker_present = done_marker_present
                 agent_state = agent_status(pane_id)
                 try:
                     observation = store.observe_completion(
@@ -544,7 +552,9 @@ def main():
 
             # Inner loop exhausted: record the observation only.  The
             # Controller transitions the task to blocked and owns arbitration.
-            if status in {"dispatched", "working"} and blocker_marker in screen:
+            if status in {"dispatched", "working"} and _comp.marker_present(
+                screen, task_id, _comp.BLOCKER_MARKER_PREFIX
+            ):
                 _record_sentinel_event(
                     store,
                     task,
@@ -577,7 +587,9 @@ def main():
                 status == "dispatched"
                 and age >= NUDGE_AFTER_SECONDS
                 and task_id not in state["nudged"]
-                and orchestration_marker in screen
+                and _comp.marker_present(
+                    screen, task_id, _comp.ORCH_MARKER_PREFIX
+                )
                 and agent_status(pane_id) in {"idle", "unknown", None}
             ):
                 if nudge_enter(pane_id):
@@ -590,7 +602,7 @@ def main():
             # Check for in-flight pending steering instructions to inject on idle
             try:
                 import herdr.steering as herdr_steering
-                if agent_status(pane_id) in {"idle", "unknown", None} and done_marker not in screen:
+                if agent_status(pane_id) in {"idle", "unknown", None} and not done_marker_present:
                     dispatched_steer = herdr_steering.dispatch_pending_steer(task_id)
                     if dispatched_steer:
                         print(

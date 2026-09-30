@@ -4677,3 +4677,105 @@ grep -riE "unpkg|jsdelivr|cdnjs" console/ herdr/ || echo "no CDN"
 - PR: https://github.com/allinai0506/HAFlow/pull/114
 
 ---
+
+## 100. 活性判据的输入必须匹配它的物理载体：折行的终端屏幕不是逻辑文档
+
+### 现象
+
+Workflow `wf-project-0929-01` 的 `plan` 节点卡在非终态 9.5 小时。现场证据齐备：
+
+- `plan-arch` = `cleaned`（同一节点、同一批次）；
+- `plan-adversarial` 两份核心产出全部落盘 —— 技术方案与任务拆分（64KB）、
+  方案对抗审查与可行性风险评估（158KB），`notes.jsonl` 也有对应 `kind=gate` 台账；
+- `herdr agent get w13:pB` = `idle`；
+- `completion_observations` 里 `observed_version=3` 与 `tasks.version=3` 一致，
+  `agent_status=idle`、`epoch_changed=0`、`vanished=0`。
+
+唯独 `marker_present=0`、`consecutive_samples=0`，即
+`compare_and_set_completion_transition` 永远以 `completion_marker_absent`
+拒绝，`working → agent_done` 永不发生，节点永不推进。
+
+### 根因（实测，非推断）
+
+`herdr pane read w13:pB --source visible` 原文：
+
+```
+     HERDR_TASK_DONE:plan-adversarial-unified-task-
+     workbench-v1
+```
+
+标记**确实在屏幕上**，但被终端硬折成两行。而 Sentinel 与 Controller 各自用裸子串
+匹配（`services/herdr-sentinel.py` 与 `services/herdr-controller.py` 的
+`f"HERDR_TASK_DONE:{task_id}" in screen`）去读**已折行的屏幕**——标记不再是一段
+连续子串，于是永远匹配不到。
+
+标记长度 = `len("HERDR_TASK_DONE:") + len(task_id)` = 16 + 42 = **58**；
+同节点兄弟 `plan-arch-*` = 16 + 35 = **51**。opencode TUI 消息列宽度落在
+51 与 58 之间：`plan-arch` 单行放下所以顺利推进，`plan-adversarial` 超宽被折
+所以永久卡死。**该缺陷与产物质量无关，只取决于 task_id 长度与 Pane 宽度之差**，
+换个更长的 task_id 就会在任意 workflow 上复现。
+
+`herdr/completion.py` 是 FR-1 的纯决策层，承载了 elapsed / 采样间隔 / epoch
+等全部时间与轮次判据，唯独**标记探测**这一环漏在 I/O 层用裸字符串实现，
+纯层与装配层之间没有共同契约。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 对折行的终端屏幕做连续子串匹配 | 活性判据的输入载体与判据的假设不匹配时，判据恒为假，且**无异常、无日志、无告警** | 标记探测下沉为纯函数 `herdr.completion.marker_present()`；只消解**缩进续行**（TUI 折行必带左边距），硬换行保留换行符 |
+| 只有裸子串匹配能匹配到「别的 task 的标记」 | 证据必须与主体绑定，否则跨 Task 误完成 | 命中后做**标识符边界校验**：`...-v1` 不得满足 `...-v1b` |
+| 「空白行」与「缩进续行」都被当成可拼接换行 | 拼接规则太宽会把两个独立块拼成假标记 | 软折行正则收紧为 `\r?\n[ \t]+(?=\S)`：纯空白行仍视为硬块边界 |
+| 纯层测试全绿仍可能被绕过（有人把判断重新内联回 I/O 层） | 函数测试不覆盖「调用点有没有用它」 | 加**源码级契约测试**：`f"HERDR_TASK_DONE:{{task_id}}"` 出现在任一守护进程即失败 |
+| 契约测试断言源码文本时，可能把缺陷实现本身写成契约 | 断言会随重构失效，甚至反向锁死错误实现 | 重定向到新接缝并**加强**（从「存在裸子串」升级为「必须走共享接缝 + 状态语义不变」），不删测试 |
+| 三个标记前缀（done / blocker / orch）各自实现 | 同一屏幕、同一折行问题，同类缺陷三份 | 三个前缀共用同一接缝，仅参数化 prefix |
+
+### 操作规范（已固化到 `wiki/task-lifecycle.md` §1.3）
+
+1. **单一接缝**：任何 Pane 标记探测必须调用 `herdr.completion.marker_present()`，
+   禁止在 `services/` 内联 `f"{PREFIX}:{task_id}" in screen`。
+2. **保守消解**：只消解缩进续行；空行、纯空白行、无缩进行一律保留换行。
+3. **主体绑定**：命中后必须过标识符边界校验，跨 Task 证据不得通用。
+4. **源码级门禁**：`test_daemon_has_no_raw_marker_substring_check` 覆盖两个守护进程
+   × 三个前缀，共 6 条；回归必须失败才算守住了。
+5. **验收不接受「产物已落盘」代替生命周期信号**：本例产物与台账全齐仍卡死，
+   说明产物齐备度不能替代 `working → agent_done` 的因果链验证。
+
+### 验证命令 / 守护测试
+
+```bash
+# 1) 纯层行为 + 源码级契约
+pytest -q tests/test_completion_marker_wrapping.py
+# 期望：27 passed
+
+# 2) 反向验证（把匹配退回裸子串，契约必须失败）
+#    在 services/herdr-controller.py 临时插入：
+#      return f"HERDR_TASK_DONE:{task_id}" in screen, screen
+pytest -q tests/test_completion_marker_wrapping.py
+# 期望：test_daemon_has_no_raw_marker_substring_check 失败
+
+# 3) 真实活 Pane 判定（不是夹具）
+python3 -c "
+import subprocess,sys; sys.path.insert(0,'.')
+from herdr.completion import marker_present
+tid='plan-adversarial-unified-task-workbench-v1'
+r=subprocess.run(['herdr','pane','read','w13:pB','--source','visible'],text=True,capture_output=True)
+s=r.stdout+r.stderr
+print('legacy:', f'HERDR_TASK_DONE:{tid}' in s, '| fixed:', marker_present(s,tid))"
+# 期望：legacy: False | fixed: True
+
+# 4) 全量回归
+pytest -q
+# 期望：2406 passed, 50 subtests passed
+```
+
+### 相关文档 / 关联证据
+
+- `wiki/task-lifecycle.md` §1.3 — 完成标记折行容错契约
+- `herdr/completion.py:marker_present, marker_literal` — 纯探测接缝
+- `services/herdr-sentinel.py` / `services/herdr-controller.py` — 4 处调用点
+- `herdr/state_db.py:compare_and_set_completion_transition` — `completion_marker_absent` 拒绝分支
+- `tests/test_completion_marker_wrapping.py` — 行为 + 源码级契约
+- `tests/test_inner_loop_protocol.py` — 契约断言重定向到新接缝
+
+---
