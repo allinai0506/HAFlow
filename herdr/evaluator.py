@@ -11,6 +11,9 @@ Implements the 5-element paradigm (Goal, Metrics, Data, Markdown files, Cron):
 import json
 import os
 import re
+import signal
+import subprocess
+import threading
 import time
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
@@ -41,6 +44,85 @@ def evaluation_lock(loop_dir: Path):
         operation.release()
 
 
+@contextmanager
+def _owned_evaluation_signals():
+    # Baseline capture runs in herdr-task as well as herdr-loop; scope the
+    # catchable termination handler to this owned command, not the whole CLI.
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    previous = signal.getsignal(signal.SIGTERM)
+
+    def terminate(signum, _frame):
+        raise SystemExit(128 + signum)
+
+    signal.signal(signal.SIGTERM, terminate)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
+def _signal_owned_group(process, signum):
+    # start_new_session below makes this PID the owned process-group identity.
+    # Never signal the caller's group or discover unrelated processes by name.
+    try:
+        os.killpg(process.pid, signum)
+    except ProcessLookupError:
+        pass
+    except PermissionError:
+        # Some hosts report EPERM for a group that has just disappeared.
+        # Ignore only a verified empty/zombie-only group, never live denial.
+        listing = subprocess.run(
+            ["ps", "-axo", "pgid=,stat="], capture_output=True, text=True,
+            timeout=1, check=True,
+        )
+        members = [row.split()[1] for row in listing.stdout.splitlines()
+                   if len(row.split()) == 2 and row.split()[0] == str(process.pid)]
+        if any(not state.startswith("Z") for state in members):
+            raise
+
+
+def _stop_owned_runner(process):
+    _signal_owned_group(process, signal.SIGTERM)
+    try:
+        return process.communicate(timeout=1)
+    except subprocess.TimeoutExpired:
+        _signal_owned_group(process, signal.SIGKILL)
+        return process.communicate(timeout=1)
+    finally:
+        # Children may redirect their pipes and survive their already-reaped
+        # parent. Terminate any remaining members before releasing ownership.
+        _signal_owned_group(process, signal.SIGKILL)
+
+
+def run_evaluation_command(command: List[str], cwd: Path, timeout: float) -> Tuple[int, str, str]:
+    """Run one owned command; return exit/stdout/stderr after group cleanup.
+
+    Timeout returns 124 and observed output. Catchable termination unwinds.
+    The caller owns the artifact lock; this helper does not publish artifacts.
+    """
+    with _owned_evaluation_signals():
+        process = subprocess.Popen(
+            command, cwd=str(cwd), text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
+        )
+        cleaned = False
+        try:
+            try:
+                stdout, stderr = process.communicate(timeout=timeout)
+                return process.returncode, stdout, stderr
+            except subprocess.TimeoutExpired:
+                stdout, stderr = _stop_owned_runner(process)
+                cleaned = True
+                return 124, stdout, stderr
+        finally:
+            # Also covers normal shell return with background children and Python
+            # exceptions/interrupts. Cleanup stays inside the evaluation lock.
+            if not cleaned:
+                _stop_owned_runner(process)
+
+
 def effective_defects(current: int, baseline: int) -> int:
     """New defects introduced in this loop (never negative).
 
@@ -60,6 +142,18 @@ def effective_defects(current: int, baseline: int) -> int:
 def write_baseline_lint(loop_dir: Path, lint_errors: int, type_errors: int = 0) -> Path:
     with evaluation_lock(loop_dir):
         return _write_baseline_lint_unlocked(loop_dir, lint_errors, type_errors)
+
+
+def capture_lint_baseline(loop_dir: Path, command: str, cwd: Path) -> Path:
+    """Own pre-edit lint execution and baseline publication as one lifecycle."""
+    with evaluation_lock(loop_dir):
+        exit_code, stdout, stderr = run_evaluation_command(
+            ["/bin/sh", "-c", command], cwd, timeout=120,
+        )
+        if exit_code == 124:
+            raise TimeoutError("Lint baseline capture timed out after 120 seconds")
+        lint_errors = parse_lint_output(stdout + stderr, exit_code)
+        return _write_baseline_lint_unlocked(loop_dir, lint_errors, 0)
 
 
 def _write_baseline_lint_unlocked(loop_dir: Path, lint_errors: int, type_errors: int = 0) -> Path:

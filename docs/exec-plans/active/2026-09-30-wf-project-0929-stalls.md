@@ -83,3 +83,5 @@ C29本地验证：复用既有内核文件锁，在工位评估命名空间覆�
 C27本地验证：只回收本次新session进程组，在锁释放前覆盖超时/中断/异常/正常返回，TERM有限等待、残留KILL；保留124及真实回执。核心反证5 failed/1 passed，修后7靶向passed；专项45 passed；全量2650 passed/145 subtests、0 failed/0 skipped（390.39s）。两次专项试验分别发现就绪前超时夹具问题及宿主空组EPERM差异，均保留失败日志并用就绪屏障/原生组列表修正；不放宽清理断言，新增活组EPERM失败防护。compileall/CLI AST/diff-check通过；仅自审、未部署，没有杀生产进程。不可捕获SIGKILL及主动脱离session的后代未覆盖，不能宣称无限进程树保证。
 
 C05a本地验证：默认npm命令CI=1，保留显式任务命令。旧1 failed/1正常对照passed，修后2靶向passed；专项18 passed，全量2652 passed/145 subtests、0 failed/0 skipped（381.91s）。实际安装Vitest 3.2.6真实PTY旧命令测试通过后watch、exit124，修后exit0收敛；无TTY旧命令正常退出，保留负触发对照。compileall/CLI AST/diff-check通过；仅自审、未部署；Java任务误选根前端测试独立列C05b，基线后代残留列C27b，不冒充全部关闭。
+
+C27b本地验证：基线采集复用受管进程组执行，覆盖命令→输出→基线写入锁边界；保留/bin/sh -c与正常已有债务，超时不制造基线；SIGTERM处理限主线程命令作用域并恢复handler。关键Task调用撤销反证4 failed/1正常对照passed，修后5靶向；专项39 passed，全量2657 passed/145 subtests、0 failed/0 skipped（360.47s）。原C27测试保留，仅将权限拒绝helper定位到其新源码位置，不改断言。初次测试导入失败、宽限期内完成观察均保留；用超过宽限期的子进程覆盖强制回收。compileall/两CLI AST/diff-check通过；仅自审、未部署，非主线程收到进程SIGTERM及不可捕获终止/脱离session仍不在保证内。

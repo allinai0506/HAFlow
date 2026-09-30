@@ -113,7 +113,7 @@ def test_completed_foreground_work_remains_valid(tmp_path):
 
 
 def test_live_group_permission_denial_is_not_ignored(monkeypatch):
-    loop = load_loop()
+    from herdr import evaluator as loop
     process = type('Owned', (), {'pid': 12345})()
     def denied(*args):
         raise PermissionError('controlled live denial')

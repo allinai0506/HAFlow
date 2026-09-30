@@ -5296,10 +5296,12 @@ C29追加验证：`tests/test_evaluator_process_isolation.py`使用独立进程�
 进程退出和工作结束不是同一事实。共享产物所有权只能在本次执行的后代停止后释放；不得按进程名称寻找或清理无关工作。宿主对已消失的进程组可能返回EPERM，必须核对实际存活成员，不能吞掉活进程的权限拒绝。
 
 ### 操作规范与防护
-`bin/herdr-loop`在新session启动本次runner，超时、中断、异常和正常返回都清理其进程组；TERM后有限等待，残留成员用KILL，保留原生超时124和已观察回执。CLI把SIGTERM转为栈退出，清理在评估锁内完成。只忽略经ps成功核实为空/僵尸的EPERM；活进程拒绝仍为失败。不可捕获的SIGKILL以及主动脱离session的子进程不在此保证内，需Supervisor现场处理；本项没有清理生产进程。
+`herdr/evaluator.py:run_evaluation_command`在新session启动本次命令，供`bin/herdr-loop`与Task的lint基线采集复用；超时、中断、异常和正常返回都清理其进程组，TERM后有限等待，残留成员用KILL，保留原生超时124和已观察回执。主线程的SIGTERM处理仅在受管命令作用域内转为栈退出并恢复原handler。`capture_lint_baseline`持锁覆盖命令和基线写入，超时不写伪造基线；已有债务解析不变。只忽略经ps成功核实为空/僵尸的EPERM；活进程拒绝仍为失败。不可捕获的SIGKILL以及主动脱离session的子进程不在此保证内，需Supervisor现场处理；本项没有清理生产进程。
 
 ### 验证与关联证据
 `tests/test_evaluator_process_cleanup.py`用真实独立CLI、shell、Python子进程和就绪屏障验证超时、拒绝TERM、SIGINT/SIGTERM、后台残留及无关进程存活；正常前台执行保留通过。旧实现核心矩阵5 failed/1 passed，修后7 passed（含活进程拒绝不能忽略的专项）。相邻45 passed，全量2650 passed/145 subtests（390.39s）。仅本地验证、未部署；详见执行计划C27。
+
+C27b追加验证：实际auto-init基线入口旧4 failed/1正常对照passed，修后5 passed；相邻39 passed，全量2657 passed/145 subtests（360.47s）。覆盖超时（含宽限期后强制回收）、SIGTERM中断、并发初始化拒绝、基线债务保留和锁恢复。采集脚本保持原`/bin/sh -c`语义。初次夹具导入失败与宽限期内已完成子进程的观察保留，随后用超过宽限期的受控子进程验证强制回收；不放宽存活/产物断言。原C27记录对应ec334bb，公共执行入口在C27b归入evaluator。仅本地验证，未部署。
 
 ## 113. 自动测试命令必须声明非交互环境（2026-09-30）
 

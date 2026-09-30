@@ -1591,3 +1591,5 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - 2026-09-30 — C27本次runner进程组回收：超时/中断/异常/正常返回均在评估锁内回收；原生124保留，无关进程不受影响。详见 [[task-lifecycle]] §1.6与教训§112；不可捕获终止与主动脱离session仍属外部恢复边界，未部署。
 
 - 2026-09-30 — C05a默认npm非交互：CI=1避免继承TTY后watch挂起；真实Vitest PTY旧exit124/新exit0，显式命令保留。详见 [[task-lifecycle]] §1.6与教训§113；C05b测试范围契约未关闭，未部署。
+
+- 2026-09-30 — C27b基线入口闭环：复用evaluator受管命令生命周期，基线采集到写入持锁、超时不造基线、SIGTERM作用域内清理并恢复handler；真实进程与并发初始化回归。详见 [[task-lifecycle]] §1.6与教训§112，未部署。
