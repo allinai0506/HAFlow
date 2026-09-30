@@ -29,3 +29,5 @@ RED已证明source local branch不存在、completed/committed的Git任务过早
 原T3又被dispatch_delivery_fuse自动作废，协调器已派发唯一恢复任务impl-t3-recover-abnormal（run_5223247453e44751a6af8d95cb300102），计划清单已替换其真实ID。短暂pause并撤回test/review阶段闩后已resume。提前a4a9909bee候选不代表完整实现，已追加invalidation说明；历史事实不删除。该恢复Pane实际宽度1列导致idle误判，zoom后真实working可读；只在该clone修正Java任务错误默认npm评估入口，旧配置/结果备份，不修改断言。
 
 最终真实读取应为实现in_progress、complete=false；test/review未派发符合未完整交付的边界。最终最新源码全量2444 passed、72 subtests passed、零失败零跳过（379.03秒）；配置加载专项107 passed、12 subtests passed。独立复审无阻塞。现场T3恢复Task为working，其clone已有f1bac40d3真实4文件提交并运行Java验证（尚不宣称集成）；T4a impl-t4a-aggregate-service为working，计划身份已同步。T4b/T7仍待后续真实交付。配置与5个运行文件均有recovery目录回滚备份。当前不宣称产品工作流已完成；G1c/MATCH的DB证据与后续T4/T7仍属真实依赖，禁止补造验收结论。
+
+最后运行刷新：T3恢复任务已自动集成并到cleaned，source仓库refs/herdr/tasks/impl-t3-recover-abnormal解析到f1bac40d31a0e5b8b53efa56d82ad18ee2c2ac5a；Java评估日志BUILD SUCCESS，Agent交付称13项Provider用例、含架构门禁41项通过（须以真实日志/报告为准）。source主锚仍需协调器合流，不能混淆ref已集成与当前HEAD。T4a为working，亦发现默认npm评估入口，已仅在其clone改为UnifiedTaskServiceImplTest及架构测试，备份原配置；Pane已zoom显示实际Generating/后端验证。未完成T4b/T7仍阻断test/review。
