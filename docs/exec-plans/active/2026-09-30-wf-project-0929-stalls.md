@@ -70,3 +70,5 @@ C03本地验证：派发内循环协议输入含自身BLOCKER字面量，DONE-on
 C04本地验证：旧实现50轮询输出25条，回归1 failed/15 passed；修后专项43 passed/9 subtests passed。基于cff721b采用他人谱系修复并重放本轮独立提交后，全量2606 passed/145 subtests passed、0 failed/0 skipped（366.29s）。同一样本仅一日志，样本版本变更再次记录；相邻真实SQLite仲裁链与supersede链专项通过。compileall/diff-check通过；无运行现场变更。重放后本轮前三提交为8708460(C01)、ac4a1ee(C21)、e2281a0(C03)，旧证据仍对应原验证基线。
 
 C26本地验证：隐式投影/opt-in迁移统一跟随所选SQLite父目录，保留显式环境、模块、调用参数路径；默认workflow.json仍供配置读取，不冒充显式选库。修前及撤销三处关键修复均5 failed/2 passed；修后专项59 passed，最终靶向7 passed；隔离全量2613 passed/145 subtests passed、0 failed/0 skipped（355.47s）。真实临时宿主文件未被写穿；compileall、bin/herdr-task AST与diff-check通过。仅自审、未部署，损坏的生产历史JSON投影尚未重建。
+
+C06本地验证：三步复合命令完整重定向、独立cwd、exit不跳过后续步骤且记录真实退出码。修前及撤销关键修复均5 failed；修后专项53 passed/10 subtests passed，最终靶向5 passed；全量2618 passed/145 subtests passed、0 failed/0 skipped（372.30s）。真实Bash执行边界，无外部依赖替身；compileall/diff-check通过。仅自审，未部署；外层失败/缺失回执/日志新鲜性由C28独立处理。

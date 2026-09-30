@@ -5256,3 +5256,17 @@ print(node_is_complete(allt, req))   # 期望 True
 - `herdr/scheduler.py::node_is_complete` — 链式解析（未改动，问题在数据）
 - `herdr/direct_dispatch.py::lineage_redispatch_candidates` — 谱系补派去重
 - `tests/test_stage_advance_and_supersede.py` — 7 条新回归
+
+## 110. 评估命令的重定向和目录隔离必须覆盖整个步骤（2026-09-30）
+
+### 问题背景
+`wf-project-0929-01` 的评估入口允许 `cd ... && ...` 等复合命令。模板直接拼接 `> log 2>&1`，只重定向最后一条简单命令；前半段输出丢在runner stdout，cd影响lint，exit可跳过后续检查。
+
+### 经验教训
+命令字符串不是单条可执行文件。步骤边界应包围整个脚本片段，捕获完整输出和真实退出码，并隔离该步骤的shell状态；不能靠解析最后一段日志弥补执行边界缺失。
+
+### 操作规范与防护
+`herdr/evaluator.py:init_loop` 为test/lint/repro分别生成子shell，再从外层记录退出码。命令内容不改写；失败步骤不会隐藏后续检查。`tests/test_evaluator_step_isolation.py`以真实Bash验证三步复合命令日志、cwd和exit边界。外层runner失败和缺回执另属C28，本项不声明解决。
+
+### 验证与关联证据
+`python3.13 -m pytest -q tests/test_evaluator_step_isolation.py`：同一断言修前及撤销修复均5 failed，修后5 passed。相邻专项53 passed/10 subtests，全量2618 passed/145 subtests（372.30s）。仅本地验证，未部署；详见本轮执行计划C06。

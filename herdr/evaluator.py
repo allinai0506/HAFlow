@@ -114,7 +114,9 @@ def init_loop(
     if repro_cmd:
         repro_block = f"""
 echo "=== [3/3] RUNNING REPRO CASE ==="
-{repro_cmd} > "$LOG_DIR/repro.log" 2>&1
+(
+{repro_cmd}
+) > "$LOG_DIR/repro.log" 2>&1
 REPRO_EXIT=$?
 echo "REPRO_EXIT=$REPRO_EXIT"
 """
@@ -133,12 +135,16 @@ LOG_DIR="$ROOT_DIR/{LOOP_DIR_NAME}/logs"
 mkdir -p "$LOG_DIR"
 
 echo "=== [1/3] RUNNING TESTS ==="
-{test_cmd or 'pytest'} > "$LOG_DIR/test.log" 2>&1
+(
+{test_cmd or 'pytest'}
+) > "$LOG_DIR/test.log" 2>&1
 TEST_EXIT=$?
 echo "TEST_EXIT=$TEST_EXIT"
 
 echo "=== [2/3] RUNNING LINT / QUALITY ==="
-{lint_cmd or 'true'} > "$LOG_DIR/lint.log" 2>&1
+(
+{lint_cmd or 'true'}
+) > "$LOG_DIR/lint.log" 2>&1
 LINT_EXIT=$?
 echo "LINT_EXIT=$LINT_EXIT"
 {repro_block}

@@ -1581,3 +1581,5 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - 最终评审补充：最后一个 Task superseded 后替代项缺失仍保留交接义务；3 条先红后绿回归覆盖崩溃窗口和已 notified latch。
 
 - 2026-09-30 — C26投影命名空间：默认CLI/steering导出及opt-in迁移跟随所选SQLite，显式覆盖保留；临时宿主与隔离库真实回归防写穿。详见 [[task-lifecycle]] §1.5与工程教训§91；仅本地验证，未部署。
+
+- 2026-09-30 — C06评估步骤隔离：test/lint/repro整段命令子shell、完整日志、独立cwd与真实退出码。详见 [[task-lifecycle]] §1.6；外层执行完整性C28未关闭，未部署。

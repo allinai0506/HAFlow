@@ -220,6 +220,18 @@ Evidence:
 - `docs/lessons/lessons-learned.md` §91复发补证
 
 
+### 1.6 评估脚本步骤隔离
+
+`FACT` `init_loop`生成的test/lint/repro命令分别在子shell执行，完整stdout/stderr重定向到对应日志。cd/export/exit仅影响该步骤，外层读取真实退出码后继续其它检查。步骤命令内容保留。
+
+`UNKNOWN` 这项隔离本身不证明外层runner完整执行；外层退出、回执和日志新鲜性见执行计划C28，尚未关闭。
+
+Evidence:
+- `herdr/evaluator.py:init_loop`
+- `tests/test_evaluator_step_isolation.py`
+- `docs/lessons/lessons-learned.md` §110
+
+
 ## 2. CoW (Copy-on-Write) 沙盒隔离机制
 
 `FACT` 任何研发修改类任务绝不在项目主干目录执行，而必须在独立克隆中运行：
