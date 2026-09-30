@@ -136,6 +136,19 @@ class TestConsoleCopyIsPlainChinese(unittest.TestCase):
         self.assertIn("紧急叫停", CONSOLE_SRC)
         self.assertNotIn("推进交付链路", CONSOLE_SRC)
 
+    def test_no_legacy_halt_wording_survives(self):
+        """「紧急制动」曾以 halt reason 的形式留在源码里。
+
+        它不渲染到页面（status_history 只显示 from → to），但会写进 halt
+        事件的持久化记录 —— 属于用户可见文案体系的漏网之鱼，必须一起清掉。
+        """
+        for token in ("紧急制动", "实时插话", "真实重驱", "重驱工位"):
+            with self.subTest(token=token):
+                self.assertNotIn(
+                    token, CONSOLE_SRC,
+                    f"console 源码仍含旧术语: {token}",
+                )
+
 
 if __name__ == "__main__":
     unittest.main()
