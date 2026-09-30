@@ -63,3 +63,5 @@ C01本地验证：旧实现同一断言10 failed，修后专项48 passed、10 su
 C21本地验证：真实临时SQLite blocked observation→CAS→Controller queue→通知出口；反证恢复旧Controller为1 failed/1 passed，修后两场景通过。专项109 passed、9 subtests passed；最终隔离全量2594 passed、145 subtests passed、0 failed/0 skipped（330.41s）。两个隔离方案试运行中止，第三次发现原有测试夹具漏绑定Controller TASKS_FILE（1 failed），修正夹具并恢复变量后全量通过；没有放宽断言。Path.home与默认Controller expanduser仅在测试进程重定向至临时目录。compileall、diff-check通过；仅自审，尚未部署，历史队列事件未修复。
 
 C03本地验证：派发内循环协议输入含自身BLOCKER字面量，DONE-only清洗未覆盖，导致提示词回显可被Sentinel误读。共享清洗扩展DONE/BLOCKER，覆盖真实dispatch→临时SQLite及steering→临时SQLite出口，保留ORCH身份与真实Agent标记检测。修前及撤销关键修复反证均3 failed/1 passed；修后专项62 passed，全量2598 passed/145 subtests passed、0 failed/0 skipped（335.82s）；compileall/diff-check通过。仅关闭输入回显路径，历史合法blocker跨恢复epoch的重复读取仍需独立处理（C03b），没有修生产历史状态。
+
+C04本地验证：旧实现50轮询输出25条，回归1 failed/15 passed；修后专项43 passed/9 subtests passed。基于cff721b采用他人谱系修复并重放本轮独立提交后，全量2606 passed/145 subtests passed、0 failed/0 skipped（366.29s）。同一样本仅一日志，样本版本变更再次记录；相邻真实SQLite仲裁链与supersede链专项通过。compileall/diff-check通过；无运行现场变更。重放后本轮前三提交为8708460(C01)、ac4a1ee(C21)、e2281a0(C03)，旧证据仍对应原验证基线。

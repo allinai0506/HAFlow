@@ -2887,7 +2887,7 @@ def process_blocked_observations():
             authoritative_version=_task_version(task),
         ):
             task_id = task["task_id"]
-            if _blocked_observation_stale.pop(task_id, None) != expected_version:
+            if _blocked_observation_stale.get(task_id) != expected_version:
                 _blocked_observation_stale[task_id] = expected_version
                 print(
                     f"[BLOCKED OBSERVATION STALE] "
