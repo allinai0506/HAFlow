@@ -5280,7 +5280,9 @@ print(node_is_complete(allt, req))   # 期望 True
 实际测试计数、步骤执行结果、整体评估完成是不同事实。外层退出码被忽略，缺失质量/复现回执默认0，日志文件存在不证明属于本轮，这些机制共同允许不完整执行冒充成功。失败也必须进入求助单，否则拒绝收敛后仍无法自主仲裁。
 
 ### 操作规范与防护
-`bin/herdr-loop`校验原生runner退出、每个所需步骤唯一且有效的退出回执、可读的新写日志；复现配置复用程序生成GOAL。`calculate_metrics/is_converged`同时拒绝完整性失败，保留实际已观察测试数与历史lint基线语义。程序生成错误标签进入原子EVAL_DONE和BLOCKER，错误原值不落盘；旧日志保留但不复用。仅证明单次执行必要条件，C29已复现跨进程日志串读，另行修复。
+`bin/herdr-loop`校验原生runner退出、每个所需步骤唯一且有效的退出回执、可读的新写日志；复现配置复用程序生成GOAL。`calculate_metrics/is_converged`同时拒绝完整性失败，保留实际已观察测试数与历史lint基线语义。程序生成错误标签进入原子EVAL_DONE和BLOCKER，错误原值不落盘；旧日志保留但不复用。单次执行完整性还需要生产者所有权：eval/init/基线写入复用既有内核文件锁，持锁覆盖读、执行和快照写入；竞争者busy退出75，不修改共享产物。异常或持有者进程退出释放锁，正常对照可再次评估。锁不等于后代进程清理，C27仍独立处理。
 
 ### 验证与关联证据
 `python3.13 -m pytest -q tests/test_evaluator_runner_contract.py`：恢复旧runner及指标实现18 failed/2正常对照passed，修后20 passed；真实shell及持久快照、耗尽求助单与缓存满分否决覆盖。相邻76 passed/10 subtests；全量2638 passed/145 subtests（366.56s）。仅本地验证，未部署，历史错误成功记录未重写。相关源码`bin/herdr-loop:run_evaluation`、`herdr/evaluator.py:calculate_metrics,is_converged,generate_blocker_report`。
+
+C29追加验证：`tests/test_evaluator_process_isolation.py`使用独立进程与就绪屏障；撤销锁后3 failed/2 passed，修后5 passed，专项43 passed，全量2643 passed/145 subtests（336.77s）。真实CLI→执行→日志/基线→持久快照，竞争eval/init/baseline均不改持有者产物；异常与进程退出后的恢复通过。仅本地验证，未部署。

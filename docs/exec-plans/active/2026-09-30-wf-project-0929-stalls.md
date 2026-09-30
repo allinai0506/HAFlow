@@ -75,3 +75,5 @@ C26本地验证：隐式投影/opt-in迁移统一跟随所选SQLite父目录，�
 C06本地验证：三步复合命令完整重定向、独立cwd、exit不跳过后续步骤且记录真实退出码。修前及撤销关键修复均5 failed；修后专项53 passed/10 subtests passed，最终靶向5 passed；全量2618 passed/145 subtests passed、0 failed/0 skipped（372.30s）。真实Bash执行边界，无外部依赖替身；compileall/diff-check通过。仅自审，未部署；外层失败/缺失回执/日志新鲜性由C28独立处理。
 
 C28本地验证：完整单次执行契约校验runner退出、唯一有效步骤回执、所需日志新鲜性；复用程序生成GOAL的repro配置，不用缺失默认成功。失败字段程序生成并进入METRICS/EVAL_DONE/EVALUATION及耗尽BLOCKER，保留实际绿色测试数、有效历史lint基线和旧日志原件；弃用已移除契约的旧repro日志。关键修复撤销反证18 failed/2 passed，修后20靶向通过；专项76 passed/10 subtests passed；全量2638 passed/145 subtests passed、0 failed/0 skipped（366.56s）。旧outer-loop成功夹具补本轮lint/repro日志，不改断言。compileall、CLI AST/diff-check通过。仅自审，未部署；C27进程残留、C29并发生产者身份、C07单位测试数和C08业务交付门禁仍未关闭。
+
+C29本地验证：复用既有内核文件锁，在工位评估命名空间覆盖eval/init/基线写入；竞争者明确busy退出75，不改持有者日志、配置或快照。独立进程受控交错撤销修复3 failed/2正常对照passed，修后5靶向通过；专项43 passed；全量2643 passed/145 subtests passed、0 failed/0 skipped（336.77s）。异常及持有者进程退出后可以重新获取锁。compileall、CLI AST/diff-check通过。仅自审、未部署；锁不清理后代进程，C27仍独立待修。

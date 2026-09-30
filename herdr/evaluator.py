@@ -12,12 +12,33 @@ import json
 import os
 import re
 import time
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from herdr.git_coordination import GitOperationLock
+
 LOOP_DIR_NAME = ".herdr-loop"
 BASELINE_LINT_FILENAME = "BASELINE_LINT.json"
+
+
+class EvaluationBusyError(RuntimeError):
+    """Another process owns this loop's mutable evaluation artifacts."""
+
+
+@contextmanager
+def evaluation_lock(loop_dir: Path):
+    # Reuse the existing kernel file-lock implementation, in a loop-local
+    # namespace independent of repository Git operations and production state.
+    loop_dir = Path(loop_dir)
+    operation = GitOperationLock(loop_dir, lock_root=loop_dir / ".locks")
+    if not operation.try_acquire():
+        raise EvaluationBusyError(f"Evaluation namespace already active: {loop_dir}")
+    try:
+        yield
+    finally:
+        operation.release()
 
 
 def effective_defects(current: int, baseline: int) -> int:
@@ -37,6 +58,11 @@ def effective_defects(current: int, baseline: int) -> int:
 
 
 def write_baseline_lint(loop_dir: Path, lint_errors: int, type_errors: int = 0) -> Path:
+    with evaluation_lock(loop_dir):
+        return _write_baseline_lint_unlocked(loop_dir, lint_errors, type_errors)
+
+
+def _write_baseline_lint_unlocked(loop_dir: Path, lint_errors: int, type_errors: int = 0) -> Path:
     """Persist pre-edit lint baseline once at loop init (best-effort)."""
     loop_dir = Path(loop_dir)
     loop_dir.mkdir(parents=True, exist_ok=True)
@@ -76,6 +102,24 @@ def get_loop_dir(base_dir: Path) -> Path:
 
 
 def init_loop(
+    target_dir: Path,
+    goal: str,
+    acceptance: str = "",
+    test_cmd: str = "",
+    lint_cmd: str = "",
+    max_iterations: int = 5,
+    repro_cmd: str = "",
+) -> Path:
+    """Initialize contracts while owning the evaluation namespace."""
+    with evaluation_lock(get_loop_dir(target_dir)):
+        return _init_loop_unlocked(
+            target_dir=target_dir, goal=goal, acceptance=acceptance,
+            test_cmd=test_cmd, lint_cmd=lint_cmd, max_iterations=max_iterations,
+            repro_cmd=repro_cmd,
+        )
+
+
+def _init_loop_unlocked(
     target_dir: Path,
     goal: str,
     acceptance: str = "",

@@ -20,7 +20,9 @@ if str(HERDR_ROOT) not in sys.path:
 
 from herdr.evaluator import (
     LOOP_DIR_NAME,
+    EvaluationBusyError,
     MetricVector,
+    evaluation_lock,
     calculate_metrics,
     generate_blocker_report,
     get_loop_dir,
@@ -83,6 +85,14 @@ def _fresh_step_log(path: Path, before, errors: list[str], step: str) -> str:
 
 
 def run_evaluation(target_dir: Path) -> tuple[MetricVector, bool, str]:
+    loop_dir = get_loop_dir(target_dir)
+    if not (loop_dir / "EVALUATOR.sh").exists():
+        raise FileNotFoundError(f"Evaluator script not found at {loop_dir / 'EVALUATOR.sh'}")
+    with evaluation_lock(loop_dir):
+        return _run_evaluation_locked(target_dir)
+
+
+def _run_evaluation_locked(target_dir: Path) -> tuple[MetricVector, bool, str]:
     """Run EVALUATOR.sh, compute metrics, update all markdown & json files."""
     loop_dir = get_loop_dir(target_dir)
     evaluator_sh = loop_dir / "EVALUATOR.sh"
@@ -317,4 +327,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except EvaluationBusyError as exc:
+        print(f"[HERDR_LOOP_BUSY] {exc}")
+        sys.exit(75)
