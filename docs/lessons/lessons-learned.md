@@ -5286,3 +5286,17 @@ print(node_is_complete(allt, req))   # 期望 True
 `python3.13 -m pytest -q tests/test_evaluator_runner_contract.py`：恢复旧runner及指标实现18 failed/2正常对照passed，修后20 passed；真实shell及持久快照、耗尽求助单与缓存满分否决覆盖。相邻76 passed/10 subtests；全量2638 passed/145 subtests（366.56s）。仅本地验证，未部署，历史错误成功记录未重写。相关源码`bin/herdr-loop:run_evaluation`、`herdr/evaluator.py:calculate_metrics,is_converged,generate_blocker_report`。
 
 C29追加验证：`tests/test_evaluator_process_isolation.py`使用独立进程与就绪屏障；撤销锁后3 failed/2 passed，修后5 passed，专项43 passed，全量2643 passed/145 subtests（336.77s）。真实CLI→执行→日志/基线→持久快照，竞争eval/init/baseline均不改持有者产物；异常与进程退出后的恢复通过。仅本地验证，未部署。
+
+## 112. 评估超时必须回收本次创建的进程组（2026-09-30）
+
+### 问题背景
+`wf-project-0929-01` 的评估出现exit124。只超时终止直接shell不能终止npm/node等后代；隔离就绪屏障确认超时后子进程仍会继续写文件，正常shell返回也可能留下后台进程。
+
+### 经验教训
+进程退出和工作结束不是同一事实。共享产物所有权只能在本次执行的后代停止后释放；不得按进程名称寻找或清理无关工作。宿主对已消失的进程组可能返回EPERM，必须核对实际存活成员，不能吞掉活进程的权限拒绝。
+
+### 操作规范与防护
+`bin/herdr-loop`在新session启动本次runner，超时、中断、异常和正常返回都清理其进程组；TERM后有限等待，残留成员用KILL，保留原生超时124和已观察回执。CLI把SIGTERM转为栈退出，清理在评估锁内完成。只忽略经ps成功核实为空/僵尸的EPERM；活进程拒绝仍为失败。不可捕获的SIGKILL以及主动脱离session的子进程不在此保证内，需Supervisor现场处理；本项没有清理生产进程。
+
+### 验证与关联证据
+`tests/test_evaluator_process_cleanup.py`用真实独立CLI、shell、Python子进程和就绪屏障验证超时、拒绝TERM、SIGINT/SIGTERM、后台残留及无关进程存活；正常前台执行保留通过。旧实现核心矩阵5 failed/1 passed，修后7 passed（含活进程拒绝不能忽略的专项）。相邻45 passed，全量2650 passed/145 subtests（390.39s）。仅本地验证、未部署；详见执行计划C27。

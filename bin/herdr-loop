@@ -8,6 +8,7 @@ under the 5-element paradigm (Goal, Metrics, Data, Markdown, Cron).
 import argparse
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -92,6 +93,60 @@ def run_evaluation(target_dir: Path) -> tuple[MetricVector, bool, str]:
         return _run_evaluation_locked(target_dir)
 
 
+def _signal_owned_group(process, signum):
+    # start_new_session below makes this PID the owned process-group identity.
+    # Never signal the caller's group or discover unrelated processes by name.
+    try:
+        os.killpg(process.pid, signum)
+    except ProcessLookupError:
+        pass
+    except PermissionError:
+        # Some hosts report EPERM for a group that has just disappeared.
+        # Ignore only a verified empty/zombie-only group, never live denial.
+        listing = subprocess.run(
+            ["ps", "-axo", "pgid=,stat="], capture_output=True, text=True,
+            timeout=1, check=True,
+        )
+        members = [row.split()[1] for row in listing.stdout.splitlines()
+                   if len(row.split()) == 2 and row.split()[0] == str(process.pid)]
+        if any(not state.startswith("Z") for state in members):
+            raise
+
+
+def _stop_owned_runner(process):
+    _signal_owned_group(process, signal.SIGTERM)
+    try:
+        return process.communicate(timeout=1)
+    except subprocess.TimeoutExpired:
+        _signal_owned_group(process, signal.SIGKILL)
+        return process.communicate(timeout=1)
+    finally:
+        # Children may redirect their pipes and survive their already-reaped
+        # parent. Terminate any remaining members before releasing ownership.
+        _signal_owned_group(process, signal.SIGKILL)
+
+
+def _execute_evaluator(evaluator_sh, target_dir):
+    process = subprocess.Popen(
+        [str(evaluator_sh)], cwd=str(target_dir), text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
+    )
+    cleaned = False
+    try:
+        try:
+            stdout, _ = process.communicate(timeout=300)
+            return process.returncode, stdout
+        except subprocess.TimeoutExpired:
+            stdout, _ = _stop_owned_runner(process)
+            cleaned = True
+            return 124, stdout
+    finally:
+        # Also covers normal shell return with background children and Python
+        # exceptions/interrupts. Cleanup stays inside the evaluation lock.
+        if not cleaned:
+            _stop_owned_runner(process)
+
+
 def _run_evaluation_locked(target_dir: Path) -> tuple[MetricVector, bool, str]:
     """Run EVALUATOR.sh, compute metrics, update all markdown & json files."""
     loop_dir = get_loop_dir(target_dir)
@@ -117,19 +172,7 @@ def _run_evaluation_locked(target_dir: Path) -> tuple[MetricVector, bool, str]:
     evaluation_exit = 127
     receipt_output = ""
     try:
-        runner = subprocess.run(
-            [str(evaluator_sh)],
-            cwd=str(target_dir),
-            text=True,
-            capture_output=True,
-            timeout=300,
-        )
-        evaluation_exit = runner.returncode
-        receipt_output = runner.stdout
-    except subprocess.TimeoutExpired as exc:
-        evaluation_exit = 124
-        partial = exc.stdout or ""
-        receipt_output = partial.decode("utf-8", "replace") if isinstance(partial, bytes) else partial
+        evaluation_exit, receipt_output = _execute_evaluator(evaluator_sh, target_dir)
     except OSError:
         evaluation_errors.append("evaluator_start_failed")
     if evaluation_exit != 0:
@@ -327,6 +370,12 @@ def main():
 
 
 if __name__ == "__main__":
+    def _terminate_owned_evaluation(signum, _frame):
+        # Turn catchable termination into stack unwinding so owned descendants
+        # are stopped before the kernel artifact lock is released.
+        raise SystemExit(128 + signum)
+
+    signal.signal(signal.SIGTERM, _terminate_owned_evaluation)
     try:
         main()
     except EvaluationBusyError as exc:

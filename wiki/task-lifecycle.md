@@ -226,7 +226,7 @@ Evidence:
 
 `FACT` 单次执行还要求外层runner成功、每个所需步骤唯一且有效的回执及本轮可读日志。程序生成的GOAL复现配置决定必需步骤；旧repro契约已移除时不复用旧日志。整体执行失败否决收敛并写原子EVAL_DONE与求助单；绿色测试数和有效lint基线语义保留。
 
-`FACT` eval/init/基线写入在工位评估命名空间复用既有内核文件锁，竞争者busy退出75，不改持有者产物；持有者异常或进程退出后锁释放。日志新鲜性检查在所有权内执行。评分仍不是业务验收报告；后代进程清理由C27独立处理。
+`FACT` eval/init/基线写入在工位评估命名空间复用既有内核文件锁，竞争者busy退出75，不改持有者产物；持有者异常或进程退出后锁释放。日志新鲜性检查在所有权内执行。评分仍不是业务验收报告；runner在新session启动，超时/中断/异常/正常返回清理本次进程组后释放锁；TERM有限等待，必要时KILL。不可捕获SIGKILL及主动脱离session的子进程不在本地保证内。
 
 Evidence:
 - `herdr/evaluator.py:init_loop`
@@ -236,6 +236,7 @@ Evidence:
 - `herdr/evaluator.py:calculate_metrics, is_converged, generate_blocker_report`
 - `tests/test_evaluator_runner_contract.py`
 - `tests/test_evaluator_process_isolation.py`
+- `tests/test_evaluator_process_cleanup.py`
 
 
 ## 2. CoW (Copy-on-Write) 沙盒隔离机制

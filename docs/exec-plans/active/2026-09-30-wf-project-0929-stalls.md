@@ -77,3 +77,5 @@ C06本地验证：三步复合命令完整重定向、独立cwd、exit不跳过�
 C28本地验证：完整单次执行契约校验runner退出、唯一有效步骤回执、所需日志新鲜性；复用程序生成GOAL的repro配置，不用缺失默认成功。失败字段程序生成并进入METRICS/EVAL_DONE/EVALUATION及耗尽BLOCKER，保留实际绿色测试数、有效历史lint基线和旧日志原件；弃用已移除契约的旧repro日志。关键修复撤销反证18 failed/2 passed，修后20靶向通过；专项76 passed/10 subtests passed；全量2638 passed/145 subtests passed、0 failed/0 skipped（366.56s）。旧outer-loop成功夹具补本轮lint/repro日志，不改断言。compileall、CLI AST/diff-check通过。仅自审，未部署；C27进程残留、C29并发生产者身份、C07单位测试数和C08业务交付门禁仍未关闭。
 
 C29本地验证：复用既有内核文件锁，在工位评估命名空间覆盖eval/init/基线写入；竞争者明确busy退出75，不改持有者日志、配置或快照。独立进程受控交错撤销修复3 failed/2正常对照passed，修后5靶向通过；专项43 passed；全量2643 passed/145 subtests passed、0 failed/0 skipped（336.77s）。异常及持有者进程退出后可以重新获取锁。compileall、CLI AST/diff-check通过。仅自审、未部署；锁不清理后代进程，C27仍独立待修。
+
+C27本地验证：只回收本次新session进程组，在锁释放前覆盖超时/中断/异常/正常返回，TERM有限等待、残留KILL；保留124及真实回执。核心反证5 failed/1 passed，修后7靶向passed；专项45 passed；全量2650 passed/145 subtests、0 failed/0 skipped（390.39s）。两次专项试验分别发现就绪前超时夹具问题及宿主空组EPERM差异，均保留失败日志并用就绪屏障/原生组列表修正；不放宽清理断言，新增活组EPERM失败防护。compileall/CLI AST/diff-check通过；仅自审、未部署，没有杀生产进程。不可捕获SIGKILL及主动脱离session的后代未覆盖，不能宣称无限进程树保证。
