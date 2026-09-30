@@ -323,17 +323,17 @@ def generate_controller_actions(
 #: leave the majority non-git task class with no button at all.
 GIT_PIPELINE_FORWARD = (
     ("agent_done", "accept_and_commit", (("set", "completed"), ("commit",)),
-     "验收通过并提交交付", True),
+     "确认达标并保存版本", True),
     ("completed", "commit", (("commit",),),
-     "提交交付产物", True),
+     "保存交付版本", True),
     ("committed", "integrate", (("integrate",),),
-     "集成到基线分支", True),
+     "并入目标分支", True),
     ("integrated", "finalize", (("finalize",),),
-     "收尾并清理现场", False),
+     "收尾归档", False),
     ("cleanup_ready", "finalize", (("finalize",),),
-     "收尾并清理现场", False),
+     "收尾归档", False),
     ("cleanup_ready", "cleanup", (("cleanup",),),
-     "标记归档完成", False),
+     "标记为已归档", False),
 )
 
 #: Statuses where a live pane can still be re-driven with a real prompt.
@@ -355,16 +355,16 @@ STEER_DEFAULT = "请继续推进当前任务并在完成后输出 HERDR_TASK_DON
 def _pipeline_effect(status, task_id):
     return {
         "accept_and_commit": (
-            f"把 {task_id} 标记为验收通过并立即提交交付 commit，"
-            f"让 Controller 继续走集成链路。"
+            f"确认 {task_id} 的产物达标，把它存成一个版本，"
+            f"系统随后自动把它并进目标分支。"
         ),
-        "commit": f"为 {task_id} 生成并登记交付 commit，进入待集成状态。",
+        "commit": f"把 {task_id} 的改动存成一个版本，等着并进目标分支。",
         "integrate": (
-            f"把 {task_id} 的交付分支 rebase 到基线并合并，"
-            f"使其真正进入目标分支（幂等，已集成则返回 already_integrated）。"
+            f"把 {task_id} 的改动并进目标分支。会先对齐目标分支的最新代码，"
+            f"已经并过则原样跳过，不重复操作。"
         ),
-        "finalize": f"对 {task_id} 执行收尾：留证据、关工位、推进到已归档。",
-        "cleanup": f"把 {task_id} 从待归档标记为已归档（逻辑清理，保留工位与代码目录）。",
+        "finalize": f"给 {task_id} 收尾：留证据、关掉工位、归档。",
+        "cleanup": f"把 {task_id} 标记为已归档（代码和工位都保留）。",
     }[status]
 
 
@@ -396,8 +396,8 @@ def _git_pipeline_actions(task, wid):
             action_id=f"{tid}:{name}",
             title=label,
             description=(
-                f"{tid} 当前处于 {status}，这是它在交付链路里的下一步；"
-                f"点击后由 Controller 直接执行对应命令。"
+                f"{tid} 还没走完交付流程，这一步是它接下来该做的。"
+                f"点按钮即可，不用敲命令。"
             ),
             category="pipeline",
             command_line=" && ".join(
@@ -430,10 +430,10 @@ def _escalation_actions(task, wid):
     return [
         ControllerAction(
             action_id=f"{tid}:clear_escalation",
-            title="解除升级锁并重新收尾",
+            title="解锁并重新并入目标分支",
             description=(
-                f"撤销机器设置的 finalize_escalated 锁并重新驱动 integrate"
-                f"（{reason}）。保留交付物；可能再次冲突并再次升级。"
+                f"上一次并入时出了冲突（{reason}）。"
+                f"解锁后重新试一次，产物保留；如果又冲突还会再提示。"
             ),
             category="recovery",
             command_line=build_cli_command("clear-escalation", positionals=[tid]),
@@ -441,17 +441,17 @@ def _escalation_actions(task, wid):
             api_payload={"type": "clear_escalation", "task_id": tid, "workflow_id": wid},
             recommended=True,
             blocker_task_id=tid,
-            effect=f"清除 {tid} 的终化升级锁与对应告警，重新驱动集成；交付物不丢。",
+            effect=f"解除 {tid} 的冲突锁定并重新并入目标分支；已做的改动不丢。",
             stage=task.get("stage") or task.get("node") or "",
             group="pipeline",
             commands=[["clear-escalation", tid]],
         ),
         ControllerAction(
             action_id=f"{tid}:close_workflow_accept_escalated",
-            title="确认无误，保留交付并关闭工作流",
+            title="确认没问题，保留成果并结束工作流",
             description=(
-                f"人工确认 {reason} 不影响交付，仅对机器升级标记放行，"
-                f"保留交付物关闭本工作流。"
+                f"你确认 {reason} 不影响成果。保留已交付的内容，"
+                f"直接结束这条工作流。"
             ),
             category="bypass",
             command_line=build_cli_command(
@@ -466,15 +466,15 @@ def _escalation_actions(task, wid):
             },
             is_destructive=True,
             blocker_task_id=tid,
-            effect=f"带 --accept-escalated 关闭 {wid}；保留 {tid} 交付物，仅放行机器升级标记。",
+            effect=f"保留已交付内容并结束 {wid}；只对机器标记的冲突放行，不丢成果。",
             stage=task.get("stage") or task.get("node") or "",
             group="pipeline",
             commands=[["close-workflow", wid, "--accept-escalated"]],
         ),
         ControllerAction(
             action_id=f"{tid}:supersede",
-            title="丢弃该任务分支并作废",
-            description="永久丢弃该任务的分支提交并作废任务（不可回溯）。",
+            title="丢弃这个任务的成果",
+            description="永久丢弃该任务的改动并作废任务，无法恢复。",
             category="bypass",
             command_line=build_cli_command(
                 "supersede", positionals=[tid],
@@ -489,7 +489,7 @@ def _escalation_actions(task, wid):
             },
             is_destructive=True,
             blocker_task_id=tid,
-            effect=f"作废 {tid} 并丢弃其分支提交；该任务的产物不会进入基线。",
+            effect=f"丢弃 {tid} 的全部改动；这个任务的成果不会进入目标分支。",
             old_task_id=tid,
             stage=task.get("stage") or task.get("node") or "",
             group="pipeline",
@@ -511,10 +511,10 @@ def _live_pane_actions(task, wid):
         message = REDRIVE_DEFAULT.replace("<task_id>", tid)
         actions.append(ControllerAction(
             action_id=f"{tid}:redrive",
-            title="真实 re-drive：直接向工位重推提示",
+            title="立刻推它一把（马上送到工位）",
             description=(
-                f"向工位 {pane_id} 直接重发一条提示（herdr agent prompt），"
-                f"让执行者自己收敛到完成态。这是真实重驱，不是 steer 插话队列。"
+                f"马上给工位 {pane_id} 发一条「继续做完并交结果」的指令，"
+                f"并等它回应。适合任务卡住、工位闲着不动的情况。"
             ),
             category="recovery",
             command_line=" ".join(
@@ -532,8 +532,8 @@ def _live_pane_actions(task, wid):
             },
             blocker_task_id=tid,
             effect=(
-                f"向工位 {pane_id} 重推一条真实提示并等待回执；"
-                f"不改任务状态，状态由 Controller 与工位完成标记自然收敛。"
+                f"立刻把指令送到工位 {pane_id} 并等回执。"
+                f"任务状态不变，是否完成由工位自己交结果决定。"
             ),
             stage=task.get("stage") or task.get("node") or "",
             group="pipeline",
@@ -543,10 +543,10 @@ def _live_pane_actions(task, wid):
         ))
         actions.append(ControllerAction(
             action_id=f"{tid}:steer",
-            title="插话指导（进入 steer 队列）",
+            title="留一句话指导（排队，下一轮才生效）",
             description=(
-                "把一条指导写入 steer 队列，由 Worker 在下一个轮询点读取；"
-                "不会立刻打断当前执行。"
+                "写一条指导放进队列，等执行者下一次休息时读到。"
+                "不会打断它现在正在做的事。"
             ),
             category="fix",
             command_line=build_cli_command("steer", positionals=[tid, STEER_DEFAULT]),
@@ -558,7 +558,10 @@ def _live_pane_actions(task, wid):
                 "instruction": STEER_DEFAULT,
             },
             blocker_task_id=tid,
-            effect=f"向 {tid} 的 steer 队列写入一条指导；下一个轮询点生效，不改状态。",
+            effect=(
+                f"把指导放进 {tid} 的留言队列，下一轮才生效；"
+                f"不会打断当前执行，任务状态不变。"
+            ),
             stage=task.get("stage") or task.get("node") or "",
             group="pipeline",
             commands=[["steer", tid, STEER_DEFAULT]],
@@ -566,15 +569,18 @@ def _live_pane_actions(task, wid):
 
     actions.append(ControllerAction(
         action_id=f"{tid}:halt",
-        title="紧急制动该任务",
-        description="中断该工位并把任务置为需人工处置的终态。",
+        title="紧急叫停（中断执行）",
+        description="立刻中断工位正在做的事，任务转为需要你处理。",
         category="recovery",
         command_line=build_cli_command("halt", positionals=[tid]),
         api_endpoint="/api/controller/execute-action",
         api_payload={"type": "halt", "task_id": tid, "workflow_id": wid},
         is_destructive=True,
         blocker_task_id=tid,
-        effect=f"中断 {tid} 的执行；现场保留，需要你随后决定重派或作废。",
+        effect=(
+            f"中断 {tid} 现在的执行。现场和代码都保留，"
+            f"之后由你决定重新派人还是作废。"
+        ),
         stage=task.get("stage") or task.get("node") or "",
         group="pipeline",
         commands=[["halt", tid]],
@@ -643,10 +649,10 @@ def collect_workflow_actions(tasks, workflow, project_root="", workflow_paused=F
     if workflow_paused and wid:
         _add(ControllerAction(
             action_id=f"{wid}:resume_workflow",
-            title="恢复工作流调度",
+            title="恢复工作流（继续往下推进）",
             description=(
-                "该工作流当前处于 paused：Controller 不会派发新任务、"
-                "也不会推进门禁。恢复后按原 DAG 继续。"
+                "这条工作流现在处于暂停：不会派发新任务，也不会往下推进。"
+                "恢复后按原计划继续。"
             ),
             category="recovery",
             command_line="",
@@ -654,7 +660,7 @@ def collect_workflow_actions(tasks, workflow, project_root="", workflow_paused=F
             api_payload={"workflow_id": wid, "node_id": None},
             recommended=True,
             blocker_task_id="",
-            effect=f"把 {wid} 从 paused 恢复为可调度；不会重跑已完成任务。",
+            effect=f"解除 {wid} 的暂停，恢复后按原计划继续；已完成的任务不会重跑。",
             stage="",
             group="pipeline",
             commands=[],

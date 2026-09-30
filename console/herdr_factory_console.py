@@ -4123,7 +4123,7 @@ function renderTasks(){
           ${['working','dispatched','rework','blocked','paused'].includes(t.status)?`
             <div class="task-dropdown-divider"></div>
             <button class="task-dropdown-item" style="color:var(--primary)" onclick="closeAllTaskMenus();showSteerModal('${esc(t.task_id)}')">实时插话</button>
-            <button class="task-dropdown-item danger" onclick="closeAllTaskMenus();haltTaskPrompt('${esc(t.task_id)}')">紧急制动</button>
+            <button class="task-dropdown-item danger" onclick="closeAllTaskMenus();haltTaskPrompt('${esc(t.task_id)}')">紧急叫停</button>
           `:''}
           ${t.status==='rework'?`
             <div class="task-dropdown-divider"></div>
@@ -4741,7 +4741,7 @@ function taskDrawerMenuHtml(t){
   let h='';
   if(paneId)h+=`<button class="task-dropdown-item" onclick="closeTaskDrawerMenu();showPane('${paneId}')">查看工位</button>`;
   h+=`<button class="task-dropdown-item" onclick="closeTaskDrawerMenu();askCoordinator('${id}')">让总指挥处理</button>`;
-  if(canSteerTask(t)){h+=`<div class="task-dropdown-divider"></div><button class="task-dropdown-item" style="color:var(--primary)" onclick="closeTaskDrawerMenu();showSteerModal('${id}')">实时插话</button><button class="task-dropdown-item danger" onclick="closeTaskDrawerMenu();haltTaskPrompt('${id}')">紧急制动</button>`}
+  if(canSteerTask(t)){h+=`<div class="task-dropdown-divider"></div><button class="task-dropdown-item" style="color:var(--primary)" onclick="closeTaskDrawerMenu();showSteerModal('${id}')">留话指导</button><button class="task-dropdown-item danger" onclick="closeTaskDrawerMenu();haltTaskPrompt('${id}')">紧急叫停</button>`}
   if(canForceReviewTask(t)){h+=`<div class="task-dropdown-divider"></div><button class="task-dropdown-item" style="color:var(--warning);font-weight:600" onclick="closeTaskDrawerMenu();forceReviewTask('${id}')">唤醒评审</button>`}
   if(canForcePassTask(t)){h+=`<div class="task-dropdown-divider"></div><button class="task-dropdown-item primary" onclick="closeTaskDrawerMenu();forcePassTask('${esc(t.workflow_id||state.workflowId||'')}','${esc(t.node||t.stage||'')}')">强制放行</button>`}
   return h;
@@ -4870,7 +4870,7 @@ function switchDrawerTab(tab){state.drawerTab=tab;['tty','logs','raw'].forEach(t
 async function refreshDeepDrawer(){const pre=document.getElementById('drawerPre');if(!pre)return;pre.textContent='正在拉取底层现场数据…';try{if(state.drawerTab==='tty'){const ts=(state.workflow&&state.workflow.tasks)||[];const activeTask=ts.find(t=>['working','dispatched','rework','paused'].includes(t.status))||ts[0];const paneId=activeTask?activeTask.pane_id:(state.project&&state.project.slots&&state.project.slots[0]&&state.project.slots[0].pane_id);if(!paneId){pre.textContent='当前暂无活动工位 TTY';return}const d=await api('/api/pane/read?id='+encodeURIComponent(paneId));pre.textContent=`[工位 ${paneId} 实时终端现场]\n`+(d.output||'（工位暂无输出）')}else if(state.drawerTab==='logs'){const d=await api('/api/logs?kind=controller');pre.textContent='[调度器内核日志 Controller Log]\n'+(d.output||'（暂无日志）')}else if(state.drawerTab==='raw'){if(!state.workflowId){pre.textContent='请先选择一个工作流';return}const d=await api('/api/workflow/projection?id='+encodeURIComponent(state.workflowId));pre.textContent=JSON.stringify(d,null,2)}}catch(e){pre.textContent='拉取失败: '+e.message}}
 function showSteerModal(tid){openModal('总指挥实时插话纠偏',`<div class="form"><div class="muted" style="margin-bottom:8px">任务 ID：${esc(tid)}</div><label for="steerInput">纠偏或引导指令（将直接注入工位执行者）</label><textarea id="steerInput" rows="3" placeholder="例如：优先使用标准库，不要引入外部第三方包" style="width:100%;box-sizing:border-box;margin-bottom:10px"></textarea><div style="display:flex;align-items:center;gap:8px;margin-bottom:12px"><input type="checkbox" id="steerUrgent" style="width:auto"><label for="steerUrgent" style="margin:0;cursor:pointer"><strong>紧急插话 (立即软打断工位执行者并注入指令)</strong></label></div><button class="btn primary" onclick="submitSteer('${esc(tid)}')">发送指令</button></div>`)}
 async function submitSteer(tid){const inst=(document.getElementById('steerInput')?.value||'').trim();const urgent=!!document.getElementById('steerUrgent')?.checked;if(!inst)return toast('请输入指令内容',true);closeModal();try{toast('正在发送干预指令…');const res=await api('/api/task/steer',{method:'POST',body:JSON.stringify({task_id:tid,instruction:inst,urgent:urgent})});toast(res.status==='dispatched'?'指令已立即注入工位！':'指令已排入工位队列，将在间歇注入');await loadWorkflow(state.workflowId)}catch(e){toast(e.message,true)}}
-function haltTaskPrompt(tid){showConfirmModal({title:'工位紧急制动 (Halt)',message:'确定要立即打断任务 '+tid+' 的执行吗？系统将向工位发送软中断 (SIGINT)，保留现场并转为受控待命状态。',confirmText:'紧急制动',danger:true,onConfirm:async()=>{try{toast('正在执行紧急制动…');await api('/api/task/halt',{method:'POST',body:JSON.stringify({task_id:tid,reason:'人工在控制台紧急制动'})});toast('工位已安全打断');await loadWorkflow(state.workflowId)}catch(e){toast(e.message,true)}}})}
+function haltTaskPrompt(tid){showConfirmModal({title:'紧急叫停这个任务',message:'确定要立刻中断任务 '+tid+' 吗？正在做的事会停下，但代码和现场都会保留，之后你可以决定重新派人还是作废。',confirmText:'确认叫停',danger:true,onConfirm:async()=>{try{toast('正在叫停…');await api('/api/task/halt',{method:'POST',body:JSON.stringify({task_id:tid,reason:'人工在控制台紧急制动'})});toast('工位已安全打断');await loadWorkflow(state.workflowId)}catch(e){toast(e.message,true)}}})}
 async function toggleWorkflowPause(){if(!state.workflowId)return toast('当前没有工作流',true);const curSt=state.workflow&&state.workflow.workflow&&state.workflow.workflow.status;const isPaused=curSt==='paused';const act=isPaused?'resume':'pause';const label=isPaused?'恢复自动调度':'暂停自动调度';showConfirmModal({title:label,message:isPaused?'确认恢复该工作流的自动调度推进？':'确认暂停该工作流的自动推进？当前运行中的工位不会被强制终止。',confirmText:label,onConfirm:async()=>{try{await api('/api/kernel/'+act,{method:'POST',body:JSON.stringify({workflow_id:state.workflowId})});await loadWorkflow(state.workflowId);toast('工作流已'+(isPaused?'恢复':'暂停'))}catch(e){toast(e.message,true)}}})}
 async function stepWorkflow(){if(!state.workflowId)return toast('当前没有工作流',true);try{toast('正在单步推进…');const res=await api('/api/kernel/step',{method:'POST',body:JSON.stringify({workflow_id:state.workflowId})});if(res.ok){await loadWorkflow(state.workflowId);toast('单步已推进: '+res.stepped_label+' ('+res.stepped_node+')')}else{toast('无法单步推进: '+(res.reason==='no_ready_nodes'?'当前无就绪节点':res.reason),true)}}catch(e){toast(e.message,true)}}
 function showRollbackModal(){if(!state.workflowId)return toast('当前没有工作流',true);const stages=(state.workflow&&state.workflow.stages)||[];if(!stages.length)return toast('工作流暂无节点',true);const options=stages.map(s=>`<option value="${esc(s.key)}">${esc(cleanStageLabel(s.label))} (${esc(s.key)})</option>`).join('');openModal('节点回溯 (Rollback)',`<div class="form"><label for="rbTarget">回溯目标节点（该节点及所有下游任务将被重置作废）</label><select id="rbTarget">${options}</select><label for="rbReason">回溯原因</label><input id="rbReason" type="text" value="人工核验需求变更或发现重大缺陷"><button class="btn primary" style="background:#dc2626;border-color:#ef4444" onclick="executeRollback()">确认回溯</button><div class="muted">警告：此操作不可撤销，下游所有产物与任务将被标记为作废。</div></div>`)}
@@ -4918,7 +4918,7 @@ function renderPipelineActions(acts){
     return `<div class="ctl-blocker" style="margin-bottom:10px"><div class="ctl-blocker-head"><div style="min-width:0"><div class="ctl-blocker-title">${esc(taskDisplayName({task_id:k})||k)}</div><div class="ctl-blocker-id">${esc(k)}</div></div><div style="display:flex;gap:6px;flex-shrink:0"><button class="mini" onclick="locateControllerTask('${esc(k)}')">查看任务详情</button></div></div></div><div class="ctl-actions">${items.map((a,i)=>controllerActionCard(a,k,i+1)).join('')}</div>`;
   }).join('');
   const resumeHtml=resumeAct?`<div class="ctl-actions" style="margin-bottom:12px">${controllerActionCard(resumeAct,'',1)}</div>`:'';
-  return `<section><div class="ctl-section-title">推进交付链路 <span class="ctl-count">${pipelineActs.length}</span></div><div class="ctl-sub">这些任务本身没有报错，只是还差交付链路的一步（提交 / 集成 / 收尾），或工位需要一次真实重驱。点按钮即可推进。</div>${resumeHtml}${groups}</section>`;
+  return `<section><div class="ctl-section-title">继续推进 <span class="ctl-count">${pipelineActs.length}</span></div><div class="ctl-sub">这些任务本身没有报错，只是还差一步就能收尾（保存版本 / 并入目标分支 / 归档），或者工位需要人推一把。点按钮即可。</div>${resumeHtml}${groups}</section>`;
 }
 // Open decision asks must be impossible to miss: they block whole waves and
 // previously only existed as free text inside the coordinator's terminal.
@@ -4928,17 +4928,17 @@ function renderDecisionPanel(){
   const advice=data.advice||[];
   let html='';
   if(decisions.length){
-    html+=`<div class="ctl-section-title">待你裁决 <span class="ctl-count">${decisions.length}</span></div><div class="ctl-sub">总指挥把这些问题上抛给你了。在你拍板前，相关阶段不会开工。点选项即落库，总指挥下一轮就能读到你的结论。</div>`;
+    html+=`<div class="ctl-section-title">待你裁决 <span class="ctl-count">${decisions.length}</span></div><div class="ctl-sub">总指挥把这些问题交给你决定了。在你拍板前，相关阶段不会开工。点选项即记录，总指挥下一轮就能读到你的结论。</div>`;
     html+=decisions.map(d=>{
       const opts=(d.options||[]).map(o=>`<span class="ctl-dec-opt${o===d.recommended?' is-rec':''}">${esc(o)}${o===d.recommended?' · 建议':''}</span>`).join('');
       return `<div class="ctl-decision"><div class="ctl-dec-head"><span class="ctl-dec-id">${esc(d.decision_id)}</span><span class="ctl-chip">${esc(d.node||'—')}</span><span class="ctl-chip">${esc(d.raised_at_text||'')}</span></div><div class="ctl-dec-q">${esc(d.question||d.title||d.decision_id)}</div>${opts?`<div class="ctl-dec-opts">${opts}</div>`:''}<div class="ctl-card-foot"><button class="btn primary" onclick="openDecisionPanel('${esc(d.decision_id)}')">已拍板，记录结论</button></div></div>`;
     }).join('');
   }
   if(advice.length){
-    html+=`<div class="ctl-section-title" style="margin-top:16px">总指挥最新建议 <span class="ctl-count">${advice.length}</span></div><div class="ctl-sub">来自工作流共享文档区（append-only 账本），非模型口头结论。</div>`;
+    html+=`<div class="ctl-section-title" style="margin-top:16px">总指挥最新建议 <span class="ctl-count">${advice.length}</span></div><div class="ctl-sub">来自工作流的共享记录（只追加，不会被改写），不是模型口头说的话。</div>`;
     html+=advice.map(a=>`<div class="ctl-dec-advice${a.stale?' is-stale':''}"><div class="ctl-dec-advice-h"><span class="ctl-dec-advice-kind">${esc(a.kind)}</span><span class="ctl-dec-advice-t">${esc(a.title||'—')}</span>${a.stale?'<span class="ctl-chip">已作废</span>':''}</div>${a.summary?`<div class="ctl-dec-advice-s">${esc(a.summary)}</div>`:''}</div>`).join('');
   }
-  if(!html)return `<div class="ctl-empty">✓ 当前没有待你裁决的问题。<div class="muted">总指挥上抛的裁决项会出现在这里；已裁决的会自动消失。</div></div>`;
+  if(!html)return `<div class="ctl-empty">✓ 当前没有待你裁决的问题。<div class="muted">总指挥交给你的问题会出现在这里；定了之后会自动消失。</div></div>`;
   return `<section>${html}</section>`;
 }
 function openDecisionPanel(decisionId){
@@ -4996,7 +4996,7 @@ function openControllerCockpitModal(){
     }).join('');
     unblockSection=`<section><div class="ctl-section-title">按卡点任务一键解卡 <span class="ctl-count">${blockers.length||acts.length}</span></div><div class="ctl-sub">每个卡点任务独立分组：先看“卡点原因”，再点对应按钮即可执行，无需手动敲命令。</div>${sections}</section>`;
   } else {
-    unblockSection=`<div class="ctl-empty">✓ 当前没有报错卡点。<div class="muted">若交付链路仍在等待（提交 / 集成 / 收尾），见下方“推进交付链路”一节。</div></div>`;
+    unblockSection=`<div class="ctl-empty">✓ 当前没有报错卡点。<div class="muted">若只是还没收尾（保存版本 / 并入目标分支 / 归档），见下方“继续推进”一节。</div></div>`;
   }
   const pipelineSection=renderPipelineActions(allActs);
   const decisionSection=renderDecisionPanel();
@@ -5005,8 +5005,8 @@ function openControllerCockpitModal(){
     {name:'换执行者重派',cmd:`bin/herdr-task launch --task-id <new-task-id> --workflow-id ${wid} --stage <stage> --source . --agent <agent> --goal <goal> --prompt <prompt> --supersedes <old-task-id>`,desc:'作废指定卡点旧任务，换执行者重派新任务'},
     {name:'强制推进阶段',cmd:`bin/herdr-task advance ${wid}`,desc:'检查并强制推进工作流至下一阶段'},
     {name:'解除升级锁定',cmd:'bin/herdr-task clear-escalation <task-id>',desc:'撤销机器终化升级锁，解除阻断重新流转'},
-    {name:'真实重驱工位',cmd:`herdr agent prompt <pane-id> "提示内容" --wait --timeout 180000`,desc:'直接向工位重推提示并等待回执（区别于 steer 插话队列）'},
-    {name:'实时插话指导',cmd:'bin/herdr-task steer <task-id> "提示内容"',desc:'向正在执行的智能体工位注入实时插话指导'},
+    {name:'立刻推工位一把',cmd:`herdr agent prompt <pane-id> "提示内容" --wait --timeout 180000`,desc:'马上把指令送到工位并等回执（立即生效）'},
+    {name:'留话指导',cmd:'bin/herdr-task steer <task-id> "提示内容"',desc:'把指导放进留言队列，下一轮才生效（不打断当前执行）'},
   ];
   let cheatSheet=`<details class="ctl-tech"><summary>工程师命令参考（可选展开，终端用户无需使用）</summary><div class="ctl-tech-body"><section class="ctl-cheatsheet" style="box-shadow:none"><div class="ctl-sub">以下命令仅供审计与排查；日常使用请点上面的“一键执行”按钮。</div><div class="ctl-cheat-list">${cheatRows.map((r,i)=>`<div class="ctl-cheat-row"><span class="ctl-cheat-num">${i+1}</span><div><div class="ctl-cheat-name"><span>${esc(r.name)}</span><button class="mini" onclick="copyCliCommand(document.getElementById('ctlCheat${i}').textContent)">复制</button></div><div class="ctl-cheat-cmd"><code id="ctlCheat${i}">${esc(r.cmd)}</code></div><div class="ctl-cheat-desc">${esc(r.desc)}</div></div></div>`).join('')}</div></section></div></details>`;
 

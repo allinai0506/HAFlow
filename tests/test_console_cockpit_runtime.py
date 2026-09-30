@@ -159,7 +159,7 @@ class TestControllerCockpitRuntime(unittest.TestCase):
             try {{
               openControllerCockpitModal();
               console.log('OPEN_OK');
-              console.log('HAS_PIPELINE=' + (String(__probe.modal||'').indexOf('推进交付链路') >= 0));
+              console.log('HAS_PIPELINE=' + (String(__probe.modal||'').indexOf('继续推进') >= 0));
             }} catch (e) {{
               console.log('THREW ' + e.constructor.name + ': ' + e.message);
             }}

@@ -11,6 +11,8 @@ executor must prefix (``herdr-task`` for the CLI, ``herdr`` for the pane
 transport).  Keeping the binary out of the pure core avoids path I/O here.
 """
 
+import re
+
 import pytest
 
 from herdr.controller_actions import (
@@ -73,7 +75,7 @@ def test_committed_offers_integrate():
     )
     assert act.commands == [["integrate", "impl-x"]]
     assert act.recommended is True
-    assert "集成" in act.title
+    assert "并入" in act.title
     assert act.effect, "every button must state its plain-language effect"
 
 
@@ -120,6 +122,57 @@ def test_in_flight_offers_redrive_steer_and_halt():
     halt = _by_id(actions, ":halt")
     assert halt.is_destructive is True
     assert halt.commands == [["halt", "impl-x"]]
+
+
+# 用户看不懂 re-drive / steer / halt 这套术语：按钮标题与说明必须是
+# 中文人话，且三者的区别要能从文案本身读出来（立即生效 / 排队生效 / 中断）。
+JARGON = re.compile(
+    r"re-?drive|steer|halt|prompt|agent|queue|timeout|pane|"
+    r"herdr|controller|cli|subcommand|argv",
+    re.IGNORECASE,
+)
+
+
+@pytest.mark.parametrize("suffix", [":redrive", ":steer", ":halt"])
+def test_live_pane_buttons_are_plain_chinese(suffix):
+    action = _by_id(
+        generate_progress_actions(_task(status="working"), {"workflow_id": "wf-001"}),
+        suffix,
+    )
+    for field in (action.title, action.description, action.effect):
+        assert not JARGON.search(field), f"{suffix}.{field}"
+    # 任务 ID / 工位号是定位信息，允许出现在正文里，但标题不该被 ID 淹没。
+    assert not action.title.strip().startswith(action.blocker_task_id)
+
+
+def test_redrive_steer_halt_titles_distinguish_their_timing():
+    """三个按钮最容易混淆的地方就是「什么时候生效」。"""
+    actions = {
+        a.action_id.rsplit(":", 1)[1]: a
+        for a in generate_progress_actions(
+            _task(status="working"), {"workflow_id": "wf-001"},
+        )
+    }
+    redrive, steer, halt = actions["redrive"], actions["steer"], actions["halt"]
+
+    # 重推 = 立刻送达工位；插话 = 排队，下一轮才读到；叫停 = 中断。
+    assert "立刻" in redrive.effect or "立即" in redrive.effect
+    assert "下一" in steer.effect or "排队" in steer.effect
+    assert "中断" in halt.effect or "停止" in halt.effect
+
+    # 三者标题互不相同，避免出现两个都叫「插话」的按钮。
+    titles = {a.title for a in (redrive, steer, halt)}
+    assert len(titles) == 3
+
+
+def test_pipeline_button_titles_are_chinese_too():
+    for status in ("agent_done", "completed", "committed",
+                   "integrated", "cleanup_ready"):
+        for action in generate_progress_actions(
+            _task(status=status), {"workflow_id": "wf-001"},
+        ):
+            assert not JARGON.search(action.title), action.title
+            assert not JARGON.search(action.effect), action.effect
 
 
 def test_no_pane_means_no_redrive():

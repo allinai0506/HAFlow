@@ -26,7 +26,7 @@ class TestConsoleDecisionAndPipelineUI(unittest.TestCase):
     def test_controller_cockpit_has_a_pipeline_section(self):
         js = _js()
         self.assertIn("renderPipelineActions", js)
-        self.assertIn("推进交付链路", js)
+        self.assertIn("继续推进", js)
         self.assertIn("a.group==='pipeline'", js)
 
     def test_pipeline_actions_are_not_hidden_when_there_are_no_blockers(self):
@@ -43,7 +43,7 @@ class TestConsoleDecisionAndPipelineUI(unittest.TestCase):
         self.assertIn("${decisionSection}${unblockSection}${pipelineSection}", js)
         # The empty-blocker message must point at the pipeline section instead
         # of claiming there is nothing to do.
-        self.assertIn("推进交付链路”一节", js)
+        self.assertIn("继续推进”一节", js)
 
     def test_cockpit_renders_decision_cards_with_resolve_buttons(self):
         js = _js()
