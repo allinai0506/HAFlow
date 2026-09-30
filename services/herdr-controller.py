@@ -6793,7 +6793,7 @@ task_type:
         # attention 事件针对 interrupted/paused 等需要裁决的中间态,
         # 只要任务仍停留在待裁决状态就有效。
         expected_status = None
-    elif event_type == "blocked":
+    elif event_type in {"blocked", "inner_loop_exhausted"}:
         expected_status = "blocked"
     else:
         expected_status = "agent_done"
