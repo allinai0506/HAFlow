@@ -1561,3 +1561,5 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - 2026-09-30：完成判定接纳 Herdr runtime `done`，保持新标记、双采样间隔、60 秒与 CAS；新增真实 SQLite 落库回归。
 - 2026-09-30：本地 agent init anchor 集成使用源仓库基线与 task-scoped ref；保留普通远端集成和 source Git 锁。
 - 2026-09-30：内循环评估保留绿色标题中的FAIL/✕语义，避免幽灵失败；Vitest/Jest回归覆盖真失败保留。
+
+- 2026-09-30：wf-project-0929-01 Candidate 根因恢复：Git 节点等集成、显式 planned Task 清单、CLI/ops读取口径同步、Worktree本地refs保留与作废候选排除；详见 task-lifecycle 和恢复记录。

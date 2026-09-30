@@ -333,3 +333,18 @@ class TestSupersededStats(unittest.TestCase):
              "created_at": 50, "updated_at": 60},
         ])
         self.assertEqual(self._card()["nodes"][0]["drilldown_task"], "t3")
+
+
+class PlannedNodeStatusTest(unittest.TestCase):
+    def test_cli_and_card_do_not_complete_missing_planned_tasks(self):
+        tasks = [{"task_id": "t1", "workflow_id": "wf-plan", "node": "implementation", "status": "integrated", "integration_mode": "git"}]
+        cfg = {"nodes": [{"id": "implementation", "required_task_ids": ["t1", "t3"]}]}
+        import io
+        from contextlib import redirect_stdout
+        with patch.object(_ht, "_safe_workflow", return_value=(cfg, "wf-plan")), patch.object(_ht, "resolve_node", return_value={"node_label": "implementation", "stage_label": "implementation"}), patch.object(_ht, "load_tasks", return_value={"tasks": tasks}):
+            cards = _ht._build_workflow_cards({"wf-plan": tasks}, 1)
+            self.assertNotEqual(cards[0]["nodes"][0]["status"], "completed")
+            output = io.StringIO()
+            with redirect_stdout(output):
+                _ht.node_status("wf-plan", "implementation")
+            self.assertFalse(json.loads(output.getvalue())["complete"])

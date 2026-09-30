@@ -411,6 +411,7 @@ def _normalize_workflow_nodes(workflow):
             "id": item.get("id") or item.get("key"),
             "label": item.get("label") or item.get("name") or item.get("id") or item.get("key"),
             "next": item.get("next"),
+            "required_task_ids": item.get("required_task_ids"),
         }
         for item in nodes
         if (item.get("id") or item.get("key"))
@@ -540,6 +541,7 @@ def _collect_workflow_node_metadata(workflow):
             node_meta[node_id] = {
                 "label": node.get("label", node_id),
                 "next": node.get("next"),
+                "required_task_ids": node.get("required_task_ids"),
             }
     return node_meta
 
@@ -743,6 +745,11 @@ def _select_drilldown_task(tasks_for_node):
     return candidates[0]
 
 
+def _node_delivery_complete(tasks, required_task_ids=None):
+    from herdr.scheduler import node_is_complete
+    return node_is_complete(tasks, required_task_ids)
+
+
 def _build_workflow_cards(workflows_tasks, now):
     cards = []
     for workflow_id in sorted(workflows_tasks):
@@ -782,7 +789,7 @@ def _build_workflow_cards(workflows_tasks, now):
                 status = "failed"
             elif counts["blocked"] > 0:
                 status = "blocked"
-            elif counts["completed"] == counts["total"] and counts["total"] > 0:
+            elif _node_delivery_complete(node_tasks, (node_meta.get(node_id) or {}).get("required_task_ids")):
                 status = "completed"
             elif counts["active"] > 0:
                 status = "in_progress"
@@ -5775,20 +5782,9 @@ def node_status(workflow_id, node_key):
         if task.get("status") != "superseded" and not task.get("superseded_by")
     ]
 
-    if not active_tasks:
-        # All tasks were superseded with no replacement — treat as incomplete.
-        complete = False
-    else:
-        complete = all(
-            task.get("status") in (
-                "completed",
-                "committed",
-                "integrated",
-                "cleanup_ready",
-                "cleaned"
-            )
-            for task in active_tasks
-        )
+    workflow, _ = _safe_workflow(workflow_id)
+    cfg_node = next((n for n in _normalize_workflow_nodes(workflow or {}) if n.get("id") == node_key), {})
+    complete = _node_delivery_complete(tasks, cfg_node.get("required_task_ids"))
 
     result = {
         "workflow_id": workflow_id,

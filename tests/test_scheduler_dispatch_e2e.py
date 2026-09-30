@@ -1598,3 +1598,48 @@ class LaunchReclaimTest(unittest.TestCase):
                 pane_source="dynamic")
 
         self.assertEqual(released["n"], 1)
+
+
+class GitImplementationDeliveryTest(unittest.TestCase):
+    def test_git_completion_waits_for_integration_both_readers(self):
+        for status in ("completed", "committed", "integrated", "cleaned"):
+            task = _task("impl", status, "implementation", integration_mode="git")
+            expected = status in ("integrated", "cleaned")
+            with self.subTest(status=status), patch.object(_ctl, "load_tasks", return_value=[task]):
+                self.assertEqual(scheduler_core.node_is_complete([task]), expected)
+                self.assertEqual(_ctl.is_node_complete("wf-1", "implementation"), expected)
+
+    def test_non_git_completion_keeps_legacy_semantics(self):
+        task = _task("docs", "completed", "implementation", integration_mode="none")
+        with patch.object(_ctl, "load_tasks", return_value=[task]):
+            self.assertTrue(scheduler_core.node_is_complete([task]))
+            self.assertTrue(_ctl.is_node_complete("wf-1", "implementation"))
+
+
+class PlannedImplementationCoverageTest(unittest.TestCase):
+    def test_unlaunched_planned_task_prevents_completion(self):
+        tasks = [_task("t1", "integrated", "implementation", integration_mode="git")]
+        cfg = {"nodes": [{"id": "implementation", "required_task_ids": ["t1", "t3"]}]}
+        with patch.object(_ctl, "load_tasks", return_value=tasks), patch.object(_ctl, "workflow_config_for", return_value=cfg):
+            self.assertFalse(_ctl.is_node_complete("wf-1", "implementation"))
+
+    def test_superseded_requirement_uses_only_explicit_replacement(self):
+        tasks = [_task("t1", "superseded", "implementation", superseded_by="t1-r2"),
+                 _task("t1-r2", "integrated", "implementation", integration_mode="git")]
+        cfg = {"nodes": [{"id": "implementation", "required_task_ids": ["t1"]}]}
+        with patch.object(_ctl, "load_tasks", return_value=tasks), patch.object(_ctl, "workflow_config_for", return_value=cfg):
+            self.assertTrue(_ctl.is_node_complete("wf-1", "implementation"))
+            tasks[0]["superseded_by"] = "missing"
+            self.assertFalse(_ctl.is_node_complete("wf-1", "implementation"))
+
+    def test_required_manifest_cannot_be_bypassed_by_empty_reuse(self):
+        cfg = {"nodes": [{"id": "implementation", "required_task_ids": ["missing"]}]}
+        with patch.object(_ctl, "load_tasks", return_value=[]), patch.object(_ctl, "workflow_config_for", return_value=cfg), patch.object(_ctl, "_reverification_satisfies_node", return_value=True):
+            self.assertFalse(_ctl.is_node_complete("wf-1", "implementation"))
+
+    def test_invalid_falsey_manifest_fails_closed_without_scheduler(self):
+        task = _task("t1", "completed", "implementation")
+        for invalid in ("", 0, {}):
+            cfg = {"nodes": [{"id": "implementation", "required_task_ids": invalid}]}
+            with self.subTest(config=invalid), patch.object(_ctl, "load_tasks", return_value=[task]), patch.object(_ctl, "workflow_config_for", return_value=cfg), patch.object(_ctl, "scheduler_core", None):
+                self.assertFalse(_ctl.is_node_complete("wf-1", "implementation"))

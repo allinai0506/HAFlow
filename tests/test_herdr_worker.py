@@ -171,6 +171,8 @@ class TestCleanSandbox(unittest.TestCase):
             first = worker.create_clone(worktree, "first")
             second = worker.create_clone(worktree, "second")
             self.assertTrue((first / ".git").is_dir())
+            self.assertEqual(subprocess.check_output(["git", "rev-parse", "refs/heads/feat/wip"], cwd=first),
+                             subprocess.check_output(["git", "rev-parse", "refs/heads/feat/wip"], cwd=worktree))
             self.assertTrue((second / ".git").is_dir())
             self.assertEqual(subprocess.check_output(["git", "config", "--get", "core.hooksPath"], cwd=first).strip(), b".task-hooks")
             worker.create_task_branch(first, "first", "codex", "feat", "main")
