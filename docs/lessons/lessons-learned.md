@@ -4991,3 +4991,62 @@ python3.13 -m pytest -q tests/test_scheduler_dispatch_e2e.py tests/test_herdr_ta
 ---
 
 候选恢复追加验证：完成判据必须通过真实 SQLite Workflow 记录→明确配置文件→normalize→Controller/CLI 验证，直接 mock workflow_config_for 会掩盖字段丢失。明确记录文件缺失时不得借用全局 legacy 的其他工作流配置。窄 Pane 造成 TUI idle 默认推断时须验证实际尺寸与身份；任务评估命令须对齐代码语言，不能用前端测试替代 Java Provider 验收。
+
+## 107. 语法检查通过 ≠ 功能可用：控制台"全绿但按钮打不开"
+
+### 问题背景
+PR #120（`feat/console-controller-decision-buttons`）为控制台补齐 Controller 动作按钮与
+"待你裁决"提醒。首轮实现把动作卡渲染器从 `openControllerCockpitModal()` 的内联模板
+提升为模块级函数 `controllerActionCard()`，却漏掉它仍引用外层函数的 `const catMeta`。
+浏览器打开 Controller 弹窗即抛 `ReferenceError: catMeta is not defined`——整个交付面
+（状态卡 / 卡点按钮 / 交付链路 / 裁决面板）一个都渲染不出来，功能与改动前无异。
+同轮第二处同类死链：`openDecisionPanel()` 用 `JSON.stringify` 生成选项芯片的内联
+`onclick`，双引号落在双引号 HTML 属性里被解析器截断，点击后是 `SyntaxError`。
+
+**两个缺陷都是在全量测试 2494 项全绿的情况下进入工作树的。** 根因是既有前端测试的
+验证方式只能证明"脚本可解析"，证明不了"脚本能跑"。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| `node --check` 只做语法分析 | 能发现 `SyntaxError`，**发现不了 `ReferenceError`**——作用域是运行期解析的，静态检查无从判断自由变量是否在可见作用域内 | 任何"内联逻辑提取为模块级函数"的改动必须补运行时执行测试，不能只靠 `node --check` |
+| 测试断言退化为 `assertIn(字面量, 源码)` | 字符串 grep 与功能可用性无因果关系；缺陷 B1 的 9 条此类断言照样全绿 | 前端契约测试禁止只做字面量 grep，必须真正**调用**被测函数并断言其输出 |
+| `JSON.stringify` 产出双引号 | 内联 `onclick="..."` 处于双引号属性内，双引号会在第一个 `"` 处截断属性，JS 侧得到残缺语句 | 生成内联事件处理器的值必须用单引号 JS 字面量，并对 `'`、`\`、`"`、`&`、换行做转义；封装统一 `jsArg()` |
+| 提取函数时遗漏闭包依赖 | 内联模板的 `const` 提升到模块级函数后即失去作用域，是重构高频静默破坏点 | 提取后立即搜依赖符号，确认每处都在新作用域内可见 |
+| 组件为空时整体消失 | 旧代码用 `if (blockers.length \|\| acts.length)` 包裹整个卡片渲染区，"无报错卡点但仍待交付链路"时整个区域不渲染 | 不同语义的动作（解卡 vs 推进链路）必须**独立**判定渲染条件，不共用一个布尔门 |
+
+### 操作规范（已固化到源码与回归）
+1. **运行时渲染测试为前端第一道门禁**：真实抽取控制台 `<script>`，在 Node + DOM stub
+   下**实际调用** `openControllerCockpitModal()` / `renderDashboard()` /
+   `openDecisionPanel()`，断言渲染产物含预期区块。这道门能同时抓住作用域错误与
+   渲染条件错误；
+2. **内联处理器逐条编译**：把渲染结果中所有 `onclick="..."` 提取出来逐条喂给
+   `node --check`，杜绝属性截断类死链；
+3. **引号转义走统一入口**：内联事件的值一律经 `jsArg()` 生成，模板内禁止裸用
+   `JSON.stringify`；`jsArg()` 正确性由"HTML 属性解析 → JS 求值"往返测试守护；
+4. **语义分区渲染条件相互独立**：交付链路 / 卡点解卡 / 待裁决三节各自判定，任一为空
+   不得导致其余消失。
+
+### 验证命令 / 关联证据
+
+```bash
+# 运行时渲染门禁：真实执行控制台 JS，捕获 ReferenceError / 属性截断
+python3.13 -m pytest -q tests/test_console_cockpit_runtime.py
+# 期望：8 passed
+
+# 语法层门禁（保留，但明确它只覆盖可解析性）
+python3.13 -m pytest -q tests/test_console_frontend_syntax.py
+```
+
+**反向验证**：删除模块级 `catMeta` 定义后，
+`test_cockpit_opens_and_renders_pipeline_section_without_blockers` 实际捕获到
+`THREW ReferenceError: catMeta is not defined`——证明该测试能红，不是恒真断言。
+篡改 `GIT_PIPELINE_FORWARD` 的 `committed` 行后 3 条测试失败。
+
+### 相关文档 / 关联证据
+- PR #120 — 核心改动（`herdr/controller_actions.py`、`herdr/human_decisions.py`、
+  `console/herdr_factory_console.py`、`bin/herdr-task note-add --field`）
+- `tests/test_console_cockpit_runtime.py` — 本次新增的运行时门禁
+- `tests/test_console_decision_ui.py` — 源码级契约断言（仅作补充，不作唯一依据）
+- `docs/walkthroughs/20260930-console-controller-decision-buttons.md` — 交付记录
