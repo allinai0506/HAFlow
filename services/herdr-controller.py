@@ -8803,9 +8803,8 @@ def handle_event(task_id, agent_status):
                     if _set_observed_status(task, "agent_done", "rework_recovery"):
                         emit_done_if_allowed(get_task(task_id), report_text=screen)
                     return
-            # ``done`` is not an idle confirmation.  It may record a sample
-            # for observability, but only the durable idle+marker path can
-            # transition the task.
+            # Both idle and done are settled runtime states; the durable
+            # marker, sampling, elapsed-time and CAS gates still arbitrate.
             _record_completion_sample(
                 task,
                 has_done_marker,

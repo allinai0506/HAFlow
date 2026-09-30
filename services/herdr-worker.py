@@ -10,6 +10,7 @@ import subprocess
 import shlex
 import sys
 import time
+import tempfile
 from pathlib import Path
 
 HERDR_ROOT = Path(__file__).resolve().parent.parent
@@ -151,6 +152,36 @@ def create_clone(source, task_id):
             result.stderr.strip()
             or "Clone failed"
         )
+
+    # A linked worktree's .git file points back to the source HEAD/index.
+    # Materialize independent metadata before any reset or branch operation.
+    if (clone / ".git").is_file():
+        with tempfile.TemporaryDirectory(prefix="herdr-git-") as temporary:
+            independent = Path(temporary) / "repo"
+            subprocess.run(
+                ["git", "clone", "--no-hardlinks", "--no-checkout", str(source), str(independent)],
+                check=True, capture_output=True, text=True,
+            )
+            origin = subprocess.run(
+                ["git", "-C", str(source), "remote", "get-url", "origin"],
+                capture_output=True, text=True,
+            )
+            if origin.returncode == 0:
+                subprocess.run(
+                    ["git", "-C", str(independent), "remote", "set-url", "origin", origin.stdout.strip()],
+                    check=True, capture_output=True, text=True,
+                )
+            hooks = subprocess.run(
+                ["git", "-C", str(source), "config", "--get", "core.hooksPath"],
+                capture_output=True, text=True,
+            )
+            if hooks.returncode == 0:
+                subprocess.run(
+                    ["git", "-C", str(independent), "config", "core.hooksPath", hooks.stdout.strip()],
+                    check=True, capture_output=True, text=True,
+                )
+            (clone / ".git").unlink()
+            shutil.move(str(independent / ".git"), str(clone / ".git"))
 
     if result.stderr.strip():
         print(

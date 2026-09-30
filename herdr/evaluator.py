@@ -233,6 +233,22 @@ class MetricVector:
         return asdict(self)
 
 
+# vitest/Jest 用行首标记区分通过与失败（✓/√ 通过，✕ 失败）。
+# 子串匹配会误判：用例名本身可能直写 "FAIL "/"✕"（例如中文用例名里
+# 写 "...展示 FAIL 状态..."），此时一条绿色用例会被当成失败项，使
+# failing_tests 非空、内循环永不收敛，把满分 100 的绿色套件压到 95 分
+# 并最终误报 inner_loop_exhausted。故必须先排除带通过标记的行。
+_PASS_MARKERS = ("✓", "√")
+
+
+def _is_failing_test_line(line: str) -> bool:
+    """True only for test lines that actually denote a failure."""
+    stripped = line.strip()
+    if not stripped or stripped.startswith(_PASS_MARKERS):
+        return False
+    return "✕" in line or "FAIL " in line
+
+
 def parse_test_output(output: str, exit_code: int) -> Tuple[int, int, List[str]]:
     """Extract passed, total, and failing test names from test output.
     
@@ -275,7 +291,7 @@ def parse_test_output(output: str, exit_code: int) -> Tuple[int, int, List[str]]
         total = int(total_str) if total_str else (passed + failed)
         
         for line in output.splitlines():
-            if "✕" in line or "FAIL " in line:
+            if _is_failing_test_line(line):
                 cleaned = line.replace("FAIL", "").replace("✕", "").strip()
                 if cleaned and cleaned not in failing:
                     failing.append(cleaned)
@@ -290,7 +306,7 @@ def parse_test_output(output: str, exit_code: int) -> Tuple[int, int, List[str]]
         total = int(total_str) if total_str else (passed + failed)
         
         for line in output.splitlines():
-            if "FAIL " in line or "✕" in line:
+            if _is_failing_test_line(line):
                 cleaned = line.replace("FAIL", "").replace("✕", "").strip()
                 if cleaned and cleaned not in failing:
                     failing.append(cleaned)

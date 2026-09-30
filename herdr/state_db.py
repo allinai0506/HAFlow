@@ -1912,7 +1912,7 @@ def observe_completion(
             and consecutive >= 2
             and completion_policy.sample_interval_satisfied(first_seen, last_sample)
             and not vanished
-            and agent_status == "idle"
+            and agent_status in {"idle", "done"}
             and elapsed >= completion_policy.min_completion_seconds()
         )
         values = (
@@ -6649,7 +6649,7 @@ def compare_and_set_completion_transition(
             observation.get("last_observed_at"), effective_now
         ):
             rejection = "completion_observation_stale"
-        elif observation.get("agent_status") != "idle":
+        elif observation.get("agent_status") not in {"idle", "done"}:
             rejection = "agent_not_idle"
         else:
             started = current.get("started_at") or current.get("created_at") or effective_now

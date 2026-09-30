@@ -4797,17 +4797,17 @@ def integrate_task(task_id):
         print(f"[BRANCH OWNERSHIP ERROR] {exc}")
         sys.exit(5)
 
-    subprocess.run(
-        [
-            "git",
-            "-C",
-            clone,
-            "fetch",
-            "origin",
-            base_branch
-        ],
-        check=True
-    )
+    # Agent init anchors are local worktree baselines, not remote branches.
+    # Fetch a task-scoped ref while holding the existing source Git lock.
+    if base_branch.startswith("agent/") and base_branch.endswith("-init"):
+        base_ref = f"refs/herdr/bases/{task_id}"
+        subprocess.run(
+            ["git", "-C", clone, "fetch", main_repo, f"refs/heads/{base_branch}:{base_ref}"],
+            check=True,
+        )
+    else:
+        base_ref = f"origin/{base_branch}"
+        subprocess.run(["git", "-C", clone, "fetch", "origin", base_branch], check=True)
 
     # FR-8 pre-check: remote task branch equivalence (L-4). Best-effort fetch
     # of the同名远端分支; if it already contains HEAD, the deliverable is
@@ -4869,7 +4869,7 @@ def integrate_task(task_id):
             "-C",
             clone,
             "rebase",
-            f"origin/{base_branch}"
+            base_ref
         ],
         text=True,
         capture_output=True,
@@ -4885,7 +4885,7 @@ def integrate_task(task_id):
         )
         print(
             f"[INTEGRATE REBASE CONFLICT] task={task_id} "
-            f"branch={branch} base=origin/{base_branch}: "
+            f"branch={branch} base={base_ref}: "
             f"{(rebase.stderr.strip() or rebase.stdout.strip())[:500]}"
         )
         print(
@@ -4910,7 +4910,7 @@ def integrate_task(task_id):
             "rev-list",
             "--left-right",
             "--count",
-            f"origin/{base_branch}...HEAD"
+            f"{base_ref}...HEAD"
         ],
         text=True
     ).strip().split()
@@ -4918,7 +4918,7 @@ def integrate_task(task_id):
     if len(relation) != 2 or relation[0] != "0":
         print(
             "Task branch is not based cleanly "
-            f"on latest origin/{base_branch}"
+            f"on latest {base_ref}"
         )
         print(
             "HERDR_INTEGRATE_RESULT="

@@ -1556,3 +1556,8 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - 收尾验证（绑定当前源码）：`pytest -q` → **2426 passed, 50 subtests passed**（382s）；`compileall herdr services bin tests` exit 0；`git diff --check` exit 0。
 - 知识沉淀：`wiki/task-lifecycle.md` §1.4「陈旧观测的 CAS 前置跳过」；`docs/lessons/lessons-learned.md` §101。
 - 未验证 / 需知悉：本 PR 只改判据与重试策略，**未在生产守护进程热重载验证**（需 `launchctl kickstart` 属运维授权，未执行）；`impl-t6-mock-retire-r2` 的 `codex TOKEN_EXHAUSTED` 属 Agent 供给问题，与本缺陷无关，`r3` 已在飞。
+
+- 2026-09-30：补充 Worktree 来源的 CoW Clone Git 隔离契约；回归覆盖两个 Clone 分支/index 相互隔离及源 staged WIP 保留。
+- 2026-09-30：完成判定接纳 Herdr runtime `done`，保持新标记、双采样间隔、60 秒与 CAS；新增真实 SQLite 落库回归。
+- 2026-09-30：本地 agent init anchor 集成使用源仓库基线与 task-scoped ref；保留普通远端集成和 source Git 锁。
+- 2026-09-30：内循环评估保留绿色标题中的FAIL/✕语义，避免幽灵失败；Vitest/Jest回归覆盖真失败保留。

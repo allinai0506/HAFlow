@@ -297,6 +297,21 @@ class IntegrateOutcomeTest(IntegrateOutcomeBase):
         stored = _ht._get_store().get_task("t-int")
         self.assertEqual(stored["status"], "committed")
 
+    def test_local_agent_anchor_integrates_without_remote_anchor(self):
+        main_repo = self._build_origin_fixture(conflict=False)
+        self._git("switch", "-c", "agent/gemini-init", cwd=main_repo)
+        source_head = self._git("rev-parse", "HEAD", cwd=main_repo).stdout.strip()
+        self._save_integrate_task(main_repo)
+        _ht._get_store().update_task_metadata("t-int", {"base_branch": "agent/gemini-init"})
+        with patch.object(_ht, "project_for_workflow", return_value={"project_root": str(main_repo)}):
+            _ht.integrate_task("t-int")
+        stored = _ht._get_store().get_task("t-int")
+        self.assertEqual(stored["status"], "integrated")
+        self.assertEqual(self._git("rev-parse", "HEAD", cwd=main_repo).stdout.strip(), source_head)
+        self.assertEqual(self._git("symbolic-ref", "--short", "HEAD", cwd=main_repo).stdout.strip(), "agent/gemini-init")
+        self.assertEqual(self._git("show", stored["integration_ref"] + ":file.txt", cwd=main_repo).stdout, "task\n")
+        self.assertEqual(self._git("show", stored["integration_ref"] + ":other.txt", cwd=main_repo).stdout, "origin\n")
+
     def test_clean_rebase_integrates_idempotently(self):
         main_repo = self._build_origin_fixture(conflict=False)
         self._save_integrate_task(main_repo)

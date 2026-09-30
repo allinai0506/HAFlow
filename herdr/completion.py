@@ -6,7 +6,7 @@ both daemons share one policy without duplicating mutable state.
 
 Triple condition (plan-arch T3, A-1裁定):
   accept iff marker newly appeared (absent -> present) AND
-  agent_status == "idle" AND elapsed(started_at) >= MIN_COMPLETION_SECONDS.
+  agent_status in {"idle", "done"} AND elapsed(started_at) >= MIN_COMPLETION_SECONDS.
 
 MIN_COMPLETION_SECONDS is fixed at 60s (floor). Env override
 HERDR_MIN_COMPLETION_SECONDS may raise it, never lower it, so the
@@ -244,7 +244,7 @@ def should_accept(
         # Marker was already on screen at dispatch/first sight:
         # pane-reuse residue, never a fresh completion signal.
         return False
-    if agent_status != "idle":
+    if agent_status not in {"idle", "done"}:
         return False
     try:
         elapsed = float(elapsed_seconds)
@@ -258,7 +258,7 @@ def classify_signal(marker_present: bool, agent_status: str | None) -> str:
 
     Returns ``early`` (marker present, agent provably busy),
     ``unknown`` (marker present but agent state unreadable),
-    or ``none`` (no marker or agent idle).
+    or ``none`` (no marker or agent idle/done).
     Only ``early`` may increment early_done_signal; ``unknown`` must be
     recorded separately and never counted (A-3).
     """
@@ -266,7 +266,7 @@ def classify_signal(marker_present: bool, agent_status: str | None) -> str:
         return "none"
     if agent_status is None:
         return "unknown"
-    if agent_status == "idle":
+    if agent_status in {"idle", "done"}:
         return "none"
     return "early"
 
@@ -349,7 +349,7 @@ def stable_confirmation(
     the decision closed.  The function deliberately does not inspect task
     identity; callers bind samples to one task/version epoch before invoking it.
     """
-    if agent_status != "idle":
+    if agent_status not in {"idle", "done"}:
         return False
     try:
         if float(elapsed_seconds) < min_completion_seconds():
