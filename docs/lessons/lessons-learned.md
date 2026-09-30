@@ -4779,3 +4779,103 @@ pytest -q
 - `tests/test_inner_loop_protocol.py` — 契约断言重定向到新接缝
 
 ---
+
+## 101. 已知不可能赢的 CAS 必须前置跳过，而不是每轮 sweep 重试到偶然对上
+
+### 现象
+
+`wf-project-0929-01` / `impl-t6-mock-retire`（qodercli）在 08:29:14 启动，4 秒后
+Sentinel 上报 `blocked_marker_observed`（`observed_version=3`）。08:29:46 有一次
+`herdr-task set-status`，任务版本被抬到 5。此后到 08:54:04 落 `blocked` 为止，
+Controller 每轮 sweep 都用**同一份 `observed_version=3` 的旧样本**去 CAS：
+
+```
+select count(*) from events
+ where task_id='impl-t6-mock-retire'
+   and event_type='blocked_observation_cas_rejected';
+-- 238
+```
+
+**238 条完全相同的拒绝事件，跨 25 分钟，任务零进展。** 直到 08:53:58 Sentinel 碰巧
+再次看见标记、写入 `observed_version=5` 的新样本，CAS 才在 08:54:04 成功。也就是说
+这次成功**纯属侥幸** —— 靠 Sentinel 何时重新看见屏幕上的标记。
+
+### 根因
+
+`process_blocked_observations` 读 `blocked_marker_observed` 事件列表（limit=1 desc），
+把事件里的 `observed_version` 交给 `kernel.transition_task`，被拒就记一条事件，然后
+`continue` —— 下一轮 sweep 原样重来。代码注释甚至已经写明
+"An old event can never win after a human reopen or another Controller update"，
+**但注释描述的是事实，代码却仍在尝试**。
+
+两条独立缺陷：
+
+1. **无前置检查**：明知样本已陈旧（version 对不上）仍发起 CAS。
+2. **拒绝事件无去重**：每轮 sweep 往 events ledger 追加一行同样的事实。
+
+对比：完成观测通路（`compare_and_set_completion_transition`）是**单事务内**校验 +
+CAS + 消费观测，天然不会重试同一份样本，全库拒绝计数个位数。**只有 blocked 通路
+把观测读在事务外**，才暴露出这个活性空洞。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 注释说"旧事件不可能赢"，代码却照发不误 | 注释不是护栏；**不可能赢的重试必须是结构上不发生** | 陈旧样本在发起 CAS **之前**用纯判据跳过，静默等 Sentinel 补新样本 |
+| 观测读在事务外 + 每轮 sweep 重试 | 事务外读到的观测会随权威行漂移，重试只会放大漂移 | 事务外读观测的通路必须做 version/status 前置绑定；能进事务的（完成观测）就进事务 |
+| 每轮 sweep 追加一条相同拒绝 | 事件 ledger 是事实流，不是重试日志 | 非预期拒绝按 `(task_id, observed_version)` 去重，一个样本一条事实 |
+| 去重状态无生命周期 | 进程内 map 会随任务数无界增长 | 任务离开 active 集合时同步清键 |
+| 陈旧只提示一次 | 同一事实每 2s 刷屏会淹掉真信号 | 陈旧闩也去重：只在"首次陈旧"和"版本变化"时打一行 |
+
+### 操作规范（已固化到 `wiki/task-lifecycle.md` §1.4）
+
+1. **前置判据纯函数化**：能否发起 CAS 由 `herdr.completion.observation_is_current()`
+   判定，Controller 与 Sentinel 不得各写一份。
+2. **fail-closed 不变**：判据只减少"明知会拒的尝试"，不放宽任何已有拒绝。
+3. **不绑定即放行**：样本或权威行缺 version 时返回 True，交由权威 CAS 裁决 ——
+   避免用缺字段误杀新鲜样本。
+4. **非法 version fail-closed**：`"v5"` / `""` / 非数字一律判为陈旧。
+5. **去重键含样本身份**：`(task_id, observed_version)`；新样本必须能再次触发记录。
+
+### 验证命令 / 守护测试
+
+```bash
+# 1) 纯判据 + Controller 接线
+pytest -q tests/test_blocked_observation_cas_storm.py
+# 期望：15 passed
+
+# 2) 反向验证（回退前置检查与去重，契约必须失败）
+#    services/herdr-controller.py 内把
+#      if not observation_is_current(...):
+#    改为
+#      if False and not observation_is_current(...):
+#    并把
+#      if _blocked_observation_rejected.get(task_id) != expected_version:
+#    改为
+#      if True:
+pytest -q tests/test_blocked_observation_cas_storm.py
+# 期望：3 failed（test_stale_sample_is_never_attempted /
+#        test_unexpected_rejection_is_recorded_once_per_sample /
+#        test_a_new_sample_retries_and_is_recorded_again）
+
+# 3) 现场数据回放（真实 events，不造夹具）
+sqlite3 ~/.herdr-controller/state.db "
+  select count(*) from events
+   where task_id='impl-t6-mock-retire'
+     and event_type='blocked_observation_cas_rejected';"
+# 修复前：238
+
+# 4) 全量回归
+pytest -q
+# 期望：2426 passed, 50 subtests passed
+```
+
+### 相关文档 / 关联证据
+
+- `wiki/task-lifecycle.md` §1.4 陈旧观测的 CAS 前置跳过
+- `herdr/completion.py:observation_is_current` — 纯前置判据
+- `services/herdr-controller.py:process_blocked_observations` — 跳过 + 去重
+- `tests/test_blocked_observation_cas_storm.py` — 判据 + 接线 + 反向验证
+- 现场：events 表 `impl-t6-mock-retire` 238 条 `blocked_observation_cas_rejected`
+
+---

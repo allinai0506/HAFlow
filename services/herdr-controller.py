@@ -139,6 +139,11 @@ _listener_giveup_logged = set()
 # 终化重试耗尽的任务:只告警一次,避免每轮 sweep 刷屏。
 _finalize_retry_exhausted_logged = set()
 
+# Blocked 观测的 CAS 风暴护栏：task_id -> 该样本的 observed_version。
+# stale 只提示一次(等 Sentinel 补新样本)，非 stale 拒绝每样本只记一条事件。
+_blocked_observation_stale = {}
+_blocked_observation_rejected = {}
+
 # git 终化未收敛而推迟 close 的 workflow:只提示一次,避免每 sweep 刷屏。
 _close_deferred_logged = set()
 
@@ -2839,13 +2844,26 @@ def process_all_completion_observations(now=None):
 
 
 def process_blocked_observations():
-    """Apply one Controller-owned CAS for each fresh Sentinel blocker sample."""
+    """Apply one Controller-owned CAS for each fresh Sentinel blocker sample.
+
+    A sample recorded before a ``set-status`` / human reopen / other Controller
+    write is stale by construction: its ``observed_version`` can never match
+    again.  Re-attempting that CAS on every sweep burns the transition budget
+    and grows the events ledger without bound (observed: 238 identical
+    rejections over 25 minutes on one task) while the task makes no progress.
+    A stale sample is therefore skipped silently until Sentinel records a
+    fresh one; rejections that are *not* explained by staleness are still
+    recorded, but deduplicated per (task, expected_version).
+    """
     from herdr import kernel
+    from herdr.completion import observation_is_current
 
     store = _get_store()
     processed = 0
     for task in load_tasks():
         if task.get("status") not in {"dispatched", "working", "rework"}:
+            _blocked_observation_stale.pop(task.get("task_id"), None)
+            _blocked_observation_rejected.pop(task.get("task_id"), None)
             continue
         try:
             events = store.list_events(
@@ -2861,8 +2879,25 @@ def process_blocked_observations():
         payload = events[0].get("payload") or {}
         expected_version = payload.get("observed_version")
         expected_status = payload.get("observed_status") or task.get("status")
-        # An old event can never win after a human reopen or another Controller
-        # update: the version is part of the same transaction as the write.
+
+        if not observation_is_current(
+            payload,
+            authoritative_status=task.get("status"),
+            authoritative_version=_task_version(task),
+        ):
+            task_id = task["task_id"]
+            if _blocked_observation_stale.pop(task_id, None) != expected_version:
+                _blocked_observation_stale[task_id] = expected_version
+                print(
+                    f"[BLOCKED OBSERVATION STALE] "
+                    f"task={task_id} "
+                    f"observed_version={expected_version} "
+                    f"authoritative_version={_task_version(task)} -> "
+                    f"awaiting fresh Sentinel sample"
+                )
+            continue
+        _blocked_observation_stale.pop(task.get("task_id"), None)
+
         result = kernel.transition_task(
             task_id=task["task_id"],
             to_status="blocked",
@@ -2874,18 +2909,31 @@ def process_blocked_observations():
             store=store,
         )
         if not result.get("accepted", True):
-            try:
-                store.record_event(
-                    "blocked_observation_cas_rejected",
-                    {"task_id": task["task_id"], "expected_version": expected_version},
-                    workflow_id=task.get("workflow_id"),
-                    node_id=task.get("node") or task.get("stage"),
-                    task_id=task["task_id"],
-                    source="herdr-controller",
-                )
-            except (OSError, RuntimeError, ValueError, AttributeError):
-                pass
+            # An unexpected rejection still matters, but one fact recorded once
+            # per sample beats re-asserting it on every sweep.
+            task_id = task["task_id"]
+            if _blocked_observation_rejected.get(task_id) != expected_version:
+                _blocked_observation_rejected[task_id] = expected_version
+                try:
+                    store.record_event(
+                        "blocked_observation_cas_rejected",
+                        {
+                            "task_id": task_id,
+                            "expected_version": expected_version,
+                            "expected_status": expected_status,
+                            "authoritative_status": task.get("status"),
+                            "authoritative_version": _task_version(task),
+                            "reason": result.get("reason"),
+                        },
+                        workflow_id=task.get("workflow_id"),
+                        node_id=task.get("node") or task.get("stage"),
+                        task_id=task_id,
+                        source="herdr-controller",
+                    )
+                except (OSError, RuntimeError, ValueError, AttributeError):
+                    pass
             continue
+        _blocked_observation_rejected.pop(task["task_id"], None)
         processed += 1
         fresh = result.get("task") or task
         enqueue_coordinator_event(fresh, "inner_loop_exhausted")
