@@ -20,6 +20,7 @@ if str(HERDR_ROOT) not in sys.path:
 
 from herdr.evaluator import (
     LOOP_DIR_NAME,
+    MetricVector,
     calculate_metrics,
     generate_blocker_report,
     get_loop_dir,
@@ -33,7 +34,7 @@ from herdr.evaluator import (
 )
 
 
-def run_evaluation(target_dir: Path) -> tuple[MetricVector, bool]:
+def run_evaluation(target_dir: Path) -> tuple[MetricVector, bool, str]:
     """Run EVALUATOR.sh, compute metrics, update all markdown & json files."""
     loop_dir = get_loop_dir(target_dir)
     evaluator_sh = loop_dir / "EVALUATOR.sh"

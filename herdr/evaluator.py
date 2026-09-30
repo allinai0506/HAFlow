@@ -450,7 +450,7 @@ def calculate_metrics(
     # Absolute zero-defect rule: cannot score 100.0 if any NEW failures exist.
     # Pre-existing baseline debt is transparent in lint_errors/type_errors
     # but does not cap the score; only the delta gates.
-    if (failing or new_lint > 0 or new_type > 0 or (has_repro and repro_val < 100.0) or out_of_bounds) and composite >= 100.0:
+    if (test_exit_code != 0 or failing or new_lint > 0 or new_type > 0 or (has_repro and repro_val < 100.0) or out_of_bounds) and composite >= 100.0:
         composite = 95.0
 
     return MetricVector(
@@ -485,6 +485,8 @@ def calculate_metrics(
 
 def is_converged(metrics: MetricVector) -> bool:
     """True if metrics satisfy complete convergence (DoD fulfilled, 0 NEW defects)."""
+    if metrics.details.get("test_exit_code", 0) != 0:
+        return False
     if metrics.composite_score < 99.9:
         return False
     if metrics.failing_tests:
