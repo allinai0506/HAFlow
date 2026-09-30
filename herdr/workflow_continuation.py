@@ -13,7 +13,7 @@ def pending_continuations(workflow, config, tasks):
     wid = workflow.get('workflow_id')
     owned = [t for t in tasks if t.get('workflow_id') == wid]
     active = [t for t in owned if t.get('status') != 'superseded' and not t.get('superseded_by')]
-    if not active or any(t.get('status') not in DELIVERED or
+    if not owned or any(t.get('status') not in DELIVERED or
                          t.get('stage_verdict') == 'blocked' or t.get('finalize_escalated') or
                          (t.get('integration_mode') == 'git' and t.get('status') in {'completed', 'committed'})
                          for t in active):
@@ -27,7 +27,8 @@ def pending_continuations(workflow, config, tasks):
             continue
         node_id = node.get('id')
         node_tasks = [t for t in active if (t.get('node') or t.get('stage')) == node_id]
-        if not node_tasks:
+        node_history = [t for t in owned if (t.get('node') or t.get('stage')) == node_id]
+        if not node_history:
             continue
         # A successor already ran: adoption into the original base need not be
         # meaningful (e.g. candidate branches). Its own gates own that result.
@@ -55,7 +56,7 @@ def pending_continuations(workflow, config, tasks):
                        'adoption': 'unknown'} for t in node_tasks if t.get('integration_mode') == 'git']
         pending.append({'workflow_id': wid, 'node_id': node_id, 'missing_task_ids': missing,
                 'deliveries': deliveries, 'target_branch': workflow.get('candidate_branch') or workflow.get('base_branch'),
-                'target_sha': None, 'last_progress_at': max(float(t.get('updated_at') or 0) for t in active)})
+                'target_sha': None, 'last_progress_at': max(float(t.get('updated_at') or 0) for t in owned)})
     return pending
 
 

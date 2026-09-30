@@ -1578,3 +1578,4 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - 区分集成引用接收与指定目标 SHA 的采用证据，显式计划缺项不因 Task cleaned 消失。
 - Controller 复用 attention 事务保存有界协调恢复义务；暂停/阻塞不催办、重启复核、旧队列重新核验、独立进程去重。
 - Console stall 复用同一判定显示未派发和未采用成果。Evidence: `tests/test_workflow_continuation.py`；详见 [[task-lifecycle]]。
+- 最终评审补充：最后一个 Task superseded 后替代项缺失仍保留交接义务；3 条先红后绿回归覆盖崩溃窗口和已 notified latch。

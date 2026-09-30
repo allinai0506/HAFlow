@@ -338,3 +338,29 @@ def test_required_id_on_other_node_does_not_satisfy_plan(scene):
                      'status': 'cleaned', 'integration_mode': 'none', 'updated_at': 100}
                     for tid in ['t4b', 't7'])
     assert inspect(scene)['missing_task_ids'] == ['t4b', 't7']
+
+
+@pytest.mark.parametrize('replacement', ['t3-r2', None])
+def test_only_superseded_task_leaves_required_obligation(scene, replacement):
+    scene[1]['nodes'][0]['required_task_ids'] = ['t3']
+    scene[2][0].update(status='superseded', superseded_by=replacement)
+    result = inspect(scene)
+    assert result['missing_task_ids'] == ['t3']
+    assert result['deliveries'] == []  # Never adopt the discarded task's code.
+
+
+def test_supersede_crash_with_notified_latch_is_durably_recovered(scene, tmp_path):
+    from herdr.scheduler import node_is_complete
+    controller = importlib.import_module('services.herdr-controller')
+    scene[1]['nodes'][0]['required_task_ids'] = ['t3']
+    scene[2][0].update(status='superseded', superseded_by='t3-r2')
+    assert not node_is_complete(scene[2], ['t3'])
+    stage_state = tmp_path / 'stage-state.json'
+    stage_state.write_text(json.dumps({'wf:implementation': 'notified'}))
+    queued = []
+    with wiring(controller, scene, tmp_path / 'attention.json', queued), \
+         patch.object(controller, 'STAGE_STATE_FILE', str(stage_state)):
+        controller.check_workflow_continuation('wf', now=1000)
+        assert len(queued) == 1
+        assert controller.attention_get('wf:continuation')['missing_task_ids'] == ['t3']
+        assert controller.load_stage_state()['wf:implementation'] == 'notified'

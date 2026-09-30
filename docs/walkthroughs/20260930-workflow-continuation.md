@@ -16,11 +16,11 @@ The original ui-upgrade work area was not edited. This is an independently creat
 ## Verification
 
 - Initial regression: 17 failures, including the missing capability and the superseded-history projection blind spot; subsequently fixed with real temporary Git.
-- Final affected matrix: `python3.13 -m pytest -q tests/test_workflow_continuation.py tests/test_liveness_guard.py tests/test_projection_engine.py tests/test_scheduler_dispatch_e2e.py tests/test_direct_stage_dispatch.py tests/test_console_projection_api.py` — 200 passed, 35 subtests passed; zero failed/skipped.
-- Final full suite: `python3.13 -m pytest -q` — 2566 passed, 72 subtests passed, zero failed/skipped, 305.99 seconds.
+- Final affected matrix: `python3.13 -m pytest -q tests/test_workflow_continuation.py tests/test_liveness_guard.py tests/test_projection_engine.py tests/test_scheduler_dispatch_e2e.py tests/test_direct_stage_dispatch.py tests/test_console_projection_api.py` — 203 passed, 35 subtests passed; zero failed/skipped.
+- Final full suite: `python3.13 -m pytest -q` — 2569 passed, 72 subtests passed, zero failed/skipped, 316.54 seconds.
 - `python3 -m compileall -q herdr services bin tests` — exit 0.
 - `git diff --check` — exit 0.
-- Independent Standards and Spec reviews: original findings fixed and rechecked; no remaining confirmed blockers. Spec reviewer independently ran the 31-test subset before the final node-identity regression. The final 32 continuation tests are included in the affected/full counts above.
+- Independent Standards and Spec reviews: original findings fixed and rechecked; no remaining confirmed blockers. Spec reviewer independently ran the 31-test subset before the final node-identity regression. The final 35 continuation tests are included in the affected/full counts above.
 
 The persistence/read chain uses real temporary SQLite, frozen workflow JSON, config normalization, Controller reconciliation, EpisodeStore transactions and Projection. Two independent processes compete for one recovery claim. Regression coverage includes cross-workflow and cross-node IDs, replacement chains, satisfied parallel predecessors, paused/blocked/active states, in-flight Git finalization, adoption before/after actual branch movement, timeout/unknown evidence, restart, stale/duplicate queue rejection, busy budget, native notifier False receipts, notification retries, and nonblocking background scans.
 
@@ -30,4 +30,8 @@ Agent prompt and native notification transports are controlled substitutes. No l
 
 ## Upstream documentation reconciliation
 
-PR creation found a concurrent documentation-only main update (`2f5e4e3`). The branch merges that update, retaining both §106 continuation lessons and upstream §107 console lessons. `git diff 8cef006 -- herdr services bin tests console` is empty: the final tested executable/test tree is unchanged. No force push or main-branch edit was used.
+PR creation found a concurrent documentation-only main update (`2f5e4e3`). The branch merges that update, retaining both §106 continuation lessons and upstream §107 console lessons. Before the final review correction, `git diff 8cef006 -- herdr services bin tests console` was empty. The final review correction below changes only continuation policy and its regressions. No force push or main-branch edit was used.
+
+## Final review correction
+
+A crash after superseding the last Task, before creating its replacement or clearing the stage latch, left no active tasks and skipped continuation inspection. Inspection now uses owned node history to retain the required-task obligation while excluding superseded deliveries. Three regression cases cover a missing replacement, an absent replacement link, and the Controller → durable attention path with the notified stage latch preserved. All three failed before the change and passed afterward. Independent Spec review rechecked this boundary (5 passed, 30 deselected) with no new blockers.
