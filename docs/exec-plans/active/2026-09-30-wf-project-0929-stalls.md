@@ -28,7 +28,7 @@
 | C06 | test命令cd Java后lint在Java目录执行；命令串未完整重定向 | review-r2 EVALUATOR.sh/test.log/lint.log | 待边界实验；每一步独立cwd、完整日志、真实exit |
 | C07 | Maven -q无摘要，被泛化为1/1，不能证明实际覆盖 | review-r2 EVAL_DONE=1/1，Surefire报告 | 已证实计数不足；使用真实测试报告/可信摘要，不能把命令成功当1个测试 |
 | C08 | Agent自报done但无指定交付报告、0改动 | test-r4/review-r1；human steering历史 | 已证实；产物契约在完成边界验证，评分不能代替交付 |
-| C09 | 补派未串接旧Task，failed/blocked占位和required清单永久阻断 | main未提交 --supersedes 修复；24Task状态 | 他人现有修复，保留并审查；不重复实现，核对配置/替代链 |
+| C09 | 补派未串接旧Task，failed/blocked占位和required清单永久阻断 | 他人提交 cff721b --supersedes 修复；24Task状态 | 现场运行release已含cff721b；保留并审查，不重复实现，核对组合回归/替代链 |
 | C10 | 显式codex/claude派发被健康/隔离门禁拒绝 | events6250/8127/8155，TOKEN_EXHAUSTED/ERROR | 保护正确；错误码empty_review_pool对实现也使用需修；恢复路由选实际合格Agent，不擅自绕隔离 |
 | C11 | delivery note多条候选，test-r2/r3启动被拒 | test_baseline_rejected8129/8131 | 门禁正确；唯一交付登记需由主控自动收敛，旧历史不能删除来凑pass |
 | C12 | 本地Task分支不存在origin，--onto派发失败 | controller.out643878/643921 | 已证实；核对launch和candidate快照边界，临时Git无网络回归 |
@@ -41,8 +41,8 @@
 | C19 | hook拒绝wrong Agent/local dev/origin dev/复杂度/Node版本 | COMMIT ERROR10次、FINALIZE耗尽2次 | 历史已恢复；未跳过hook，检查当前成果refs与source祖先；运行环境应匹配.nvmrc |
 | C20 | 集成ref存在而source HEAD未合流，主控停止推进 | continuation PR124、stage wait1720 | 历史能力已合入；需现场核对是否运行最新版及obligation是否生效 |
 | C21 | Queue判inner_loop_exhausted也要求agent_done，旧事件被丢弃 | QUEUE STALE12次，review-r2耗尽事件 | 已证实症状；检查event expected_status契约，防仲裁通知永久丢失 |
-| C22 | 评审声明pass同时承认P1权限缺陷 | review-r2报告§1与P1说明 | 待独立源码核验；不能按文字pass越过权限DoD，有效缺陷必须返工 |
-| C23 | 真实DB门禁/MATCH语义未完成，cannot claim full green | T7 note、RealDbGatesIT与test/review任务 | 产品验收依赖；不能由编排修复替代，需要固定Candidate实际测试与需求对齐 |
+| C22 | 评审声明pass同时承认P1权限缺陷 | review-r2报告§1与P1说明 | 源码确认：无type跳过权限，聚合所有Provider，审批Provider仅fonds过滤；违反本轮权限DoD，必须返工 |
+| C23 | 真实DB门禁/MATCH语义未完成，cannot claim full green | T7 note、RealDbGatesIT与test/review任务 | DU-10人类已裁决三Provider/MATCH后续增量；只验登记与降级，不将MATCH缺口作为阻断；真实DB仍须按本轮判据验证 |
 | C24 | Provider jev422 / context reducer失败、stderr缺运行归属 | controller.err尾部、observer/context记录 | 待归属；旁路失败不得阻断主状态，不宣称属于本Workflow |
 | C25 | console BrokenPipe/转义警告、STARTUP WAIT、Git busy | console.err、startup8次、GIT BUSY75后成功 | 分类核对；网络断开/正常等待不冒充bug，确认重试有界和成功后解除 |
 | C26 | 全局JSON投影滞后，UI/诊断可能读到不同状态 | SQLite latest_dispatch != workflows.json；tasks projection缺Task | 已证实投影差异；检查权威读取/导出刷新，不另建事实源 |
@@ -61,3 +61,5 @@
 C01本地验证：旧实现同一断言10 failed，修后专项48 passed、10 subtests passed；全量2592 passed、145 subtests passed，0 failed/0 skipped（378.38s）。CLI --help/AST、compileall、diff-check通过。机械证据记录 issue01-evidence.json 在本机证据目录；自审完成，无独立评审，不标MERGE_READY。剩余卡片尚未关闭。没有生产部署/重启/运行数据改写，没有工作流完成声明。
 
 C21本地验证：真实临时SQLite blocked observation→CAS→Controller queue→通知出口；反证恢复旧Controller为1 failed/1 passed，修后两场景通过。专项109 passed、9 subtests passed；最终隔离全量2594 passed、145 subtests passed、0 failed/0 skipped（330.41s）。两个隔离方案试运行中止，第三次发现原有测试夹具漏绑定Controller TASKS_FILE（1 failed），修正夹具并恢复变量后全量通过；没有放宽断言。Path.home与默认Controller expanduser仅在测试进程重定向至临时目录。compileall、diff-check通过；仅自审，尚未部署，历史队列事件未修复。
+
+C03本地验证：派发内循环协议输入含自身BLOCKER字面量，DONE-only清洗未覆盖，导致提示词回显可被Sentinel误读。共享清洗扩展DONE/BLOCKER，覆盖真实dispatch→临时SQLite及steering→临时SQLite出口，保留ORCH身份与真实Agent标记检测。修前及撤销关键修复反证均3 failed/1 passed；修后专项62 passed，全量2598 passed/145 subtests passed、0 failed/0 skipped（335.82s）；compileall/diff-check通过。仅关闭输入回显路径，历史合法blocker跨恢复epoch的重复读取仍需独立处理（C03b），没有修生产历史状态。
