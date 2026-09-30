@@ -277,7 +277,7 @@ class BlockerArbitrationEventTest(unittest.TestCase):
         self.assertIn("HERDR_CONTROLLER_BLOCKER_EVENT", message)
         self.assertIn("inner_loop_exhausted", message)
         self.assertIn("评分停滞在 0.4", message)
-        self.assertIn("rework", message)
+        self.assertIn("set wf-1-impl-x working", message)
         self.assertIn("failed", message)
         self.assertIn("仲裁前不得把 Task 置为 completed", message)
         self.assertIn("效率纪律", message)

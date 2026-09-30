@@ -91,3 +91,5 @@ C05a本地验证：默认npm命令CI=1，保留显式任务命令。旧1 failed/
 C27b本地验证：基线采集复用受管进程组执行，覆盖命令→输出→基线写入锁边界；保留/bin/sh -c与正常已有债务，超时不制造基线；SIGTERM处理限主线程命令作用域并恢复handler。关键Task调用撤销反证4 failed/1正常对照passed，修后5靶向；专项39 passed，全量2657 passed/145 subtests、0 failed/0 skipped（360.47s）。原C27测试保留，仅将权限拒绝helper定位到其新源码位置，不改断言。初次测试导入失败、宽限期内完成观察均保留；用超过宽限期的子进程覆盖强制回收。compileall/两CLI AST/diff-check通过；仅自审、未部署，非主线程收到进程SIGTERM及不可捕获终止/脱离session仍不在保证内。
 
 C03b本地验证：实时working及重启working/done保留内循环blocked/版本，重启恢复队列；最新blocked转换reason优先于遗留sentinel_reason，合法显式返工及普通blocked保持恢复。撤销关键Controller实现6 failed/2正常对照passed，修后8靶向；专项60 passed，全量2665 passed/145 subtests、0 failed/0 skipped（352.76s）。真实临时SQLite观察/CAS/读取/仲裁队列链，只替换外部传输；HERDR_CONTROLLER_TEST在事件路径取消，防CLI返回值冒充持久化。初版对照发现非法blocked→rework，保留为C30并改为合法恢复后返工；没有force放行。compileall/diff-check通过，仅自审、未部署。C03c显式恢复后旧屏幕标记、C30命令矛盾仍未关闭。
+
+C30本地验证：仲裁卡及人工升级提示采用现有合法blocked→working恢复；保留failed换策略，不扩展状态机、不force。真实提示参数→本Candidate CLI→临时SQLite→读取状态及来源历史，旧及撤销2 failed/1正常对照passed，修后3靶向；专项47 passed，全量2668 passed/145 subtests、0 failed/0 skipped（358.35s）。旧文本测试明确断言实际合法命令，不放宽新执行断言。通知出口替换，未实际发升级通知；compileall/diff-check通过，仅自审、未部署。命令中的运行版本路径C20、重新初始化证据C31仍待独立修复。

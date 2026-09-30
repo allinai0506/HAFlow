@@ -1595,3 +1595,5 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - 2026-09-30 — C27b基线入口闭环：复用evaluator受管命令生命周期，基线采集到写入持锁、超时不造基线、SIGTERM作用域内清理并恢复handler；真实进程与并发初始化回归。详见 [[task-lifecycle]] §1.6与教训§112，未部署。
 
 - 2026-09-30 — C03b仲裁事实保护：实时/重启运行信号不能抹掉内循环blocked；重启恢复队列，最新转换历史区分普通blocked与遗留metadata。详见 [[task-lifecycle]] §1与教训§114；C03c旧标记、C30非法恢复命令未关闭，未部署。
+
+- 2026-09-30 — C30恢复命令契约：仲裁卡/人工升级提示blocked→working，复用现有合法状态边；真实CLI→临时SQLite状态/历史验证，不force放行。详见 [[task-lifecycle]] §1与教训§114，未部署。

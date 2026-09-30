@@ -5326,7 +5326,9 @@ C27b追加验证：实际auto-init基线入口旧4 failed/1正常对照passed，
 活性与业务决策是不同事实。等待仲裁不等于Agent进程停止；普通运行信号不能解除待决阻塞。旧`sentinel_reason`又可能在后续普通阻塞中保留，直接按该字段保护所有blocked会制造另一个无法恢复的卡点，必须以本次状态转换历史为准。
 
 ### 操作规范与防护
-`blocked_event_type`优先读取最新blocked转换的明确reason，缺历史时保留既有legacy fallback。当前内循环blocked拒绝普通working/idle/done解除；重启遇到已知运行信号则恢复仲裁队列，不改变状态。显式合法恢复/返工以及新的普通blocked保持原行为。旧屏幕标记在显式恢复后的重复采样仍为C03c；提示中的非法blocked→rework命令仍为C30，未混入本次修复。
+`blocked_event_type`优先读取最新blocked转换的明确reason，缺历史时保留既有legacy fallback。当前内循环blocked拒绝普通working/idle/done解除；重启遇到已知运行信号则恢复仲裁队列，不改变状态。显式合法恢复/返工以及新的普通blocked保持原行为。旧屏幕标记在显式恢复后的重复采样仍为C03c；仲裁卡和人工升级提示必须使用现有合法blocked→working恢复命令；没有扩展状态机，没有force放行。命令验证独立于运行信号保护（C30）。
 
 ### 验证与关联证据
 `tests/test_inner_loop_arbitration_recovery.py`用真实临时SQLite观察→CAS→运行事件/重启→队列→通知出口验证，外部输送替换但持久转换不替换。撤销实现6 failed/2正常对照passed；修后8 passed，相邻60 passed，全量2665 passed/145 subtests（352.76s）。初版对照采用了仲裁卡上的非法直接rework，4项报InvalidTransitionError；修正对照为合法显式恢复后再返工，并保留该协议缺陷为C30。仅本地验证、未部署，无独立评审。
+
+C30追加验证：`tests/test_blocked_recovery_command_contract.py`提取真实提示的CLI参数，只将程序路径重定向到隔离Candidate，在临时SQLite实际执行set并读取状态/历史；恢复命令旧2 failed/1失败策略对照passed，修后3 passed。相邻47 passed，全量2668 passed/145 subtests（358.35s）。原提示文本测试改为断言确切`set wf-1-impl-x working`，新真实执行断言未放宽。只替换通知出口，未向任何人实际发送升级消息；路径版本固定仍属C20，未部署。

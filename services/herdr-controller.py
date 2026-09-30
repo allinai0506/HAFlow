@@ -267,7 +267,7 @@ def _notify_blocked_human_upgrade(task, episode_id, active_seconds):
             f"(episode {episode_id}); the one automatic re-push budget is "
             "exhausted.\n"
             "Human confirmation required; no destructive command was run.\n"
-            f"  herdr-task set {task_id} rework  # after human guidance\n"
+            f"  herdr-task set {task_id} working  # after human guidance\n"
             f"  herdr-task supersede {task_id} --reason ...  # discard branch commits\n"
             f"  herdr-task close-workflow {workflow_id} --force  # direct force close"
         )
@@ -5100,7 +5100,7 @@ agent_status: blocked (inner_loop_exhausted)
 ━━━━━━━━━━━━━━━━━━━━━
 
 A. 问题可解决(提供具体指导后让工位继续)：
-   ~/HAFlow/bin/herdr-task set {task_id} rework
+   ~/HAFlow/bin/herdr-task set {task_id} working
    然后用 herdr agent prompt 向工位下达具体修复指令。
 
 B. 需要换策略(放弃本轮，换 Agent 或调整范围)：
