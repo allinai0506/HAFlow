@@ -238,9 +238,10 @@ def notify_attention(title, task, message, reason):
         url = notifier.build_console_url(
             workflow_id=task.get("workflow_id"), task_id=task.get("task_id")
         )
-        notifier.notify(title, f"{task.get('workflow_id', 'unknown')} · {reason}", message, url=url)
+        return bool(notifier.notify(title, f"{task.get('workflow_id', 'unknown')} · {reason}", message, url=url))
     except Exception as exc:
         print(f"[ATTENTION NOTIFY ERROR] {exc}")
+        return False
 
 
 def _blocked_sla_key(task_id):
@@ -4743,8 +4744,136 @@ def redeliver_pending_fix_loop(workflow_id):
     return redelivered
 
 
+def check_workflow_continuation(workflow_id, now=None):
+    """Persist unresolved obligations; notification delivery never resolves them."""
+    from herdr.projects import inspect_continuation
+    now = time.time() if now is None else now
+    key = f"{workflow_id}:continuation"
+    record = project_for_workflow(workflow_id) or {}
+    pending = inspect_continuation(record, workflow_config_for(workflow_id) or {}, load_tasks())
+    if pending is None and not attention_get(key):
+        return
+    queued = None
+    notify = False
+    interval = liveness.attention_retry_interval()
+    with _attention_store.transaction() as episodes:
+        if pending is None:
+            episodes.pop(key, None)
+            return
+        episode = episodes.get(key) or {}
+        if episode.get("fingerprint") != pending["fingerprint"]:
+            episode = dict(pending, first_seen_at=now, attempts=0, claims=0,
+                           next_retry_at=max(now, pending["last_progress_at"] + liveness.stage_advance_sla()))
+        if now >= episode["next_retry_at"] and not episode.get("escalated"):
+            if episode["attempts"] >= 2 or now - episode["first_seen_at"] >= 2 * interval:
+                episode.update(escalated=True, notification_pending=True, notify_after=now)
+            else:
+                episode["claims"] += 1
+                episode["next_retry_at"] = now + interval
+                queued = {"kind": "workflow_continuation", "workflow_id": workflow_id,
+                          "key": key, "fingerprint": pending["fingerprint"],
+                          "claim": episode["claims"]}
+        if episode.get("notification_pending") and now >= episode.get("notify_after", 0):
+            episode["notify_after"] = now + interval
+            notify = True
+        episode.update(reason="workflow_continuation", event_type="workflow_continuation")
+        episodes[key] = episode
+    if queued:
+        coordinator_queue.put(queued)
+    if notify:
+        delivered = notify_attention("Herdr Factory · 工作流等待人工推进", record,
+                                     pending["message"], "workflow_continuation")
+        with _attention_store.transaction() as episodes:
+            current = episodes.get(key)
+            if current and current.get("fingerprint") == pending["fingerprint"]:
+                current["notification_pending"] = not delivered
+
+
+def continuation_coordinator(record):
+    """Resolve the canonical named coordinator; a cached Pane ID is not ownership."""
+    from herdr.projects import coordinator_agent_name
+    if not record.get("project_id"):
+        return None
+    name = coordinator_agent_name(record["project_id"])
+    try:
+        result = subprocess.run(["herdr", "agent", "get", name], text=True,
+                                capture_output=True, timeout=5)
+        if result.returncode != 0:
+            return None
+        agent = json.loads(result.stdout).get("result", {}).get("agent", {})
+        if agent.get("name") == name and agent.get("agent_status") in ("idle", "done"):
+            return name
+    except (OSError, subprocess.TimeoutExpired, ValueError, AttributeError):
+        pass
+    return None
+
+
+def handle_workflow_continuation(item):
+    """Revalidate under the existing per-workflow executor before any prompt."""
+    from herdr.projects import inspect_continuation
+    wid = item["workflow_id"]
+    record = project_for_workflow(wid) or {}
+    pending = inspect_continuation(record, workflow_config_for(wid) or {}, load_tasks())
+    if pending is None or pending["fingerprint"] != item["fingerprint"]:
+        return
+    coordinator = continuation_coordinator(record)
+    if coordinator is None:
+        return
+    # Claim a send only after a live, owned coordinator is ready. A duplicate
+    # queue item or a lost process cannot send the same claim twice.
+    with _attention_store.transaction() as episodes:
+        episode = episodes.get(item["key"]) or {}
+        if (episode.get("fingerprint") != item["fingerprint"] or episode.get("escalated")
+                or episode.get("claims") != item["claim"]
+                or episode.get("last_sent_claim", 0) >= item["claim"] or episode.get("attempts", 0) >= 2):
+            return
+        episode["last_sent_claim"] = item["claim"]
+        episode["attempts"] += 1
+    message = ("HERDR_WORKFLOW_CONTINUATION_EVENT\n" +
+               json.dumps(pending, ensure_ascii=False) +
+               "\n请核对计划和持久集成引用，完成授权范围内的合流与缺失 Task 续派。"
+               "先检查是否已有同 ID 或替代 Task，遵守串行屏障和候选版本门禁。"
+               "不得 force-pass、删除计划义务、扩大范围或重复创建任务。"
+               "若需人工裁决请落盘明确阻塞；通知收到不代表义务完成。\n" + COORDINATOR_DISCIPLINE)
+    try:
+        subprocess.run(["herdr", "agent", "prompt", coordinator, message, "--wait", "--timeout", "30000"],
+                       text=True, capture_output=True, timeout=35)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"[CONTINUATION DELIVERY ERROR] workflow={wid}: {type(exc).__name__}")
+
+
+_CONTINUATION_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="continuation")
+_continuation_scan_lock = threading.Lock()
+_continuation_scan_at = 0.0
+
+
+def schedule_workflow_continuations(workflow_ids, now):
+    """One bounded background scan, without blocking the fast stage sweep."""
+    if not _continuation_scan_lock.acquire(blocking=False):
+        return
+    def scan():
+        try:
+            for wid in workflow_ids:
+                try:
+                    check_workflow_continuation(wid, now=now)
+                except Exception as exc:
+                    print(f"[CONTINUATION CHECK ERROR] workflow={wid}: {type(exc).__name__}")
+        finally:
+            _continuation_scan_lock.release()
+    try:
+        _CONTINUATION_EXECUTOR.submit(scan)
+    except RuntimeError:
+        _continuation_scan_lock.release()
+
+
 def check_all_workflows_stage_advance():
-    for wf in active_registered_workflows():
+    global _continuation_scan_at
+    now = time.time()
+    workflow_ids = active_registered_workflows()
+    if now - _continuation_scan_at >= 30:
+        _continuation_scan_at = now
+        schedule_workflow_continuations(workflow_ids, now)
+    for wf in workflow_ids:
         try:
             redeliver_pending_fix_loop(wf)
         except Exception as e:
@@ -6214,6 +6343,10 @@ def _handle_coordinator_item(item):
     # ==============================================
     # Fix Loop (gate verdict blocked)
     # ==============================================
+    if item.get("kind") == "workflow_continuation":
+        handle_workflow_continuation(item)
+        return
+
     if item.get("kind") == "fix_loop":
         _handle_fix_loop_item(item)
         return

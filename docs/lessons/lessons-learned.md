@@ -4992,6 +4992,22 @@ python3.13 -m pytest -q tests/test_scheduler_dispatch_e2e.py tests/test_herdr_ta
 
 候选恢复追加验证：完成判据必须通过真实 SQLite Workflow 记录→明确配置文件→normalize→Controller/CLI 验证，直接 mock workflow_config_for 会掩盖字段丢失。明确记录文件缺失时不得借用全局 legacy 的其他工作流配置。窄 Pane 造成 TUI idle 默认推断时须验证实际尺寸与身份；任务评估命令须对齐代码语言，不能用前端测试替代 Java Provider 验收。
 
+### 第 106 节补充：门禁挡住提前完成之后，还需要阶段内部的交接恢复
+
+#### 问题背景
+`wf-project-0929-01` 的 T4a 于 2026-09-30 13:22:36 到达 cleaned，T3/T4a 的成果存在集成引用，但基线仍是 `d78809a32`，T4b/T7 未派发。阶段清单门禁能拒绝冻结候选，却不能替协调者继续同一节点内的计划。
+
+#### 经验教训
+发送阶段通知不是执行回执；任务结束不是指定版本采用成果。仅监控活跃 Task，会遗漏“工作流 running、零活跃 Task、计划缺项”的空档。将未完成义务绑定事实指纹，不能以消息发送成功清除。
+
+#### 操作规范
+复用 StateStore/显式任务清单/Git 证据，Controller 持久化有界恢复 episode；队列发送前重读事实，不直接合流或绕过候选与串行门禁。跨进程领取须在文件锁事务内完成。首次账本不存在应初始化空 episodes，损坏账本仍拒绝事务。
+
+#### 验证命令与证据
+`python3.13 -m pytest -q tests/test_workflow_continuation.py`：真实临时 Git 合流前后采用证据、临时 SQLite→配置→Controller→账本→Projection、两个独立进程竞争、重启读取、暂停/阻塞、旧队列和两次预算升级。外部 Herdr prompt 用受控传输替代，未启动真实 Agent 或改生产工作流。
+
+---
+
 ## 107. 语法检查通过 ≠ 功能可用：控制台"全绿但按钮打不开"
 
 ### 问题背景

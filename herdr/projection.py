@@ -337,6 +337,19 @@ def detect_workflow_stalls(
                 "target_task_id": None,
             }
 
+    # Planned obligations survive Task cleanup and superseded historical rows.
+    if wf_entry:
+        from herdr.projects import workflow_config_for, inspect_continuation
+        try:
+            pending = inspect_continuation(wf_entry, workflow_config_for(workflow_id) or {}, tasks)
+        except (OSError, RuntimeError, ValueError):
+            pending = None
+        from herdr.liveness import stage_advance_sla
+        if pending and now - pending["last_progress_at"] >= stage_advance_sla():
+            return {"is_stalled": True, "stall_type": "workflow_continuation",
+                    "message": pending["message"], "suggested_action": None,
+                    "target_task_id": None, "continuation": pending}
+
     # 1. Detect rework orphan: task staying in 'rework' for > 45 seconds
     for t in tasks:
         if t.get("status") == "rework":
