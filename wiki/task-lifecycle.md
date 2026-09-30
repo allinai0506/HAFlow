@@ -450,3 +450,5 @@ Evidence:
 - `services/herdr-controller.py#handle_workflow_continuation`
 - `herdr/projection.py#detect_workflow_stalls`
 - `tests/test_workflow_continuation.py`
+
+`FACT` 重新init在替换输入前原子失效当前EVAL_DONE，旧快照内容寻址归档history，仅本轮完成快照可被读为评估证据。证据ID含快照SHA，相同字节重启稳定；重置后的同计数不混用旧身份。升级可能重新观察一次旧快照，SHA不替代Task/run归属。证据：`tests/test_loop_reset_evidence_identity.py`（C31，本地验证，未部署）。

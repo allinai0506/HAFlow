@@ -5287,6 +5287,8 @@ print(node_is_complete(allt, req))   # 期望 True
 
 C29追加验证：`tests/test_evaluator_process_isolation.py`使用独立进程与就绪屏障；撤销锁后3 failed/2 passed，修后5 passed，专项43 passed，全量2643 passed/145 subtests（336.77s）。真实CLI→执行→日志/基线→持久快照，竞争eval/init/baseline均不改持有者产物；异常与进程退出后的恢复通过。仅本地验证，未部署。
 
+C31追加验证：初始化在替换输入前原子失效当前EVAL_DONE；旧原始快照以SHA256归档至history/EVAL_DONE-<sha>.json，历史日志与BLOCKER保留但不作为本轮事实。证据ID绑定读取的单份快照SHA，避免重置后相同计数/iteration复用旧身份；同字节跨进程重启仍去重，未传SHA的旧API保持兼容。升级前后同一旧快照可能被重新观察一次，部署需核对既有ledger；不宣称此SHA证明Task/run归属。撤销关键实现4 failed/1正常对照passed，修后5靶向passed；专项80 passed/10 subtests，全量2673 passed/145 subtests、0 failed/0 skipped（385.00s）。失败初始化也不能留下旧绿证据。仅自审、未部署，C03c恢复epoch和C08业务交付仍未关闭。
+
 ## 112. 评估超时必须回收本次创建的进程组（2026-09-30）
 
 ### 问题背景

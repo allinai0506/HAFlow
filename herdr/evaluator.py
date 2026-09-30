@@ -8,6 +8,7 @@ Implements the 5-element paradigm (Goal, Metrics, Data, Markdown files, Cron):
 - Generates structured Markdown reports (METRICS.md, EVALUATION.md, STATE.md)
 """
 
+import hashlib
 import json
 import os
 import re
@@ -225,6 +226,32 @@ def _init_loop_unlocked(
     """Initialize .herdr-loop directory structure and contracts."""
     loop_dir = get_loop_dir(target_dir)
     loop_dir.mkdir(parents=True, exist_ok=True)
+
+    # EVAL_DONE is the reader's single authoritative execution snapshot.
+    # Invalidate it before replacing inputs; a failed init cannot expose old
+    # success as evidence for the new contract. Historical logs stay intact.
+    snapshot_path = loop_dir / "EVAL_DONE.json"
+    previous_snapshot = snapshot_path.read_bytes() if snapshot_path.exists() else None
+    reset_path = snapshot_path.with_suffix(f".json.tmp.{os.getpid()}")
+    reset_path.write_text(json.dumps({
+        "iteration": 0, "completed_at": None, "status": "initialized",
+        "converged": False, "max_iterations": max_iterations,
+        "total_tests": 0, "passed_tests": 0, "failing_tests": [],
+        "composite_score": 0.0,
+    }), encoding="utf-8")
+    reset_path.replace(snapshot_path)
+    if previous_snapshot is not None:
+        # Historical receipt, never consulted as the current execution view.
+        history = loop_dir / "history"
+        history.mkdir(exist_ok=True)
+        receipt_sha = hashlib.sha256(previous_snapshot).hexdigest()
+        receipt = history / f"EVAL_DONE-{receipt_sha}.json"
+        if not receipt.exists():
+            receipt_tmp = receipt.with_suffix(f".json.tmp.{os.getpid()}")
+            receipt_tmp.write_bytes(previous_snapshot)
+            receipt_tmp.replace(receipt)
+        elif receipt.read_bytes() != previous_snapshot:
+            raise RuntimeError("Conflicting historical evaluation receipt")
 
     # 1. Write GOAL.md
     goal_md = loop_dir / "GOAL.md"

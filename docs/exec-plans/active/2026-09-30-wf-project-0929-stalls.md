@@ -93,3 +93,6 @@ C27b本地验证：基线采集复用受管进程组执行，覆盖命令→输�
 C03b本地验证：实时working及重启working/done保留内循环blocked/版本，重启恢复队列；最新blocked转换reason优先于遗留sentinel_reason，合法显式返工及普通blocked保持恢复。撤销关键Controller实现6 failed/2正常对照passed，修后8靶向；专项60 passed，全量2665 passed/145 subtests、0 failed/0 skipped（352.76s）。真实临时SQLite观察/CAS/读取/仲裁队列链，只替换外部传输；HERDR_CONTROLLER_TEST在事件路径取消，防CLI返回值冒充持久化。初版对照发现非法blocked→rework，保留为C30并改为合法恢复后返工；没有force放行。compileall/diff-check通过，仅自审、未部署。C03c显式恢复后旧屏幕标记、C30命令矛盾仍未关闭。
 
 C30本地验证：仲裁卡及人工升级提示采用现有合法blocked→working恢复；保留failed换策略，不扩展状态机、不force。真实提示参数→本Candidate CLI→临时SQLite→读取状态及来源历史，旧及撤销2 failed/1正常对照passed，修后3靶向；专项47 passed，全量2668 passed/145 subtests、0 failed/0 skipped（358.35s）。旧文本测试明确断言实际合法命令，不放宽新执行断言。通知出口替换，未实际发升级通知；compileall/diff-check通过，仅自审、未部署。命令中的运行版本路径C20、重新初始化证据C31仍待独立修复。
+
+
+C31追加验证：初始化在替换输入前原子失效当前EVAL_DONE；旧原始快照以SHA256归档至history/EVAL_DONE-<sha>.json，历史日志与BLOCKER保留但不作为本轮事实。证据ID绑定读取的单份快照SHA，避免重置后相同计数/iteration复用旧身份；同字节跨进程重启仍去重，未传SHA的旧API保持兼容。升级前后同一旧快照可能被重新观察一次，部署需核对既有ledger；不宣称此SHA证明Task/run归属。撤销关键实现4 failed/1正常对照passed，修后5靶向passed；专项80 passed/10 subtests，全量2673 passed/145 subtests、0 failed/0 skipped（385.00s）。失败初始化也不能留下旧绿证据。仅自审、未部署，C03c恢复epoch和C08业务交付仍未关闭。

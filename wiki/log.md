@@ -1597,3 +1597,5 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - 2026-09-30 — C03b仲裁事实保护：实时/重启运行信号不能抹掉内循环blocked；重启恢复队列，最新转换历史区分普通blocked与遗留metadata。详见 [[task-lifecycle]] §1与教训§114；C03c旧标记、C30非法恢复命令未关闭，未部署。
 
 - 2026-09-30 — C30恢复命令契约：仲裁卡/人工升级提示blocked→working，复用现有合法状态边；真实CLI→临时SQLite状态/历史验证，不force放行。详见 [[task-lifecycle]] §1与教训§114，未部署。
+
+- 2026-10-01 — C31初始化证据失效与历史保存：原子失效EVAL_DONE、SHA寻址历史回执、新评估身份避免ABA；同字节跨进程稳定。详见 [[task-lifecycle]] 与教训§111；2673 passed/145 subtests，仅本地验证，未部署。

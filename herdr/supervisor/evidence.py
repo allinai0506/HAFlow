@@ -142,6 +142,11 @@ def build_test_evidence_id(test_evidence: Dict[str, Any]) -> str:
         "total_tests": int(test_evidence.get("total_tests") or 0),
         "type_errors": int(test_evidence.get("type_errors") or 0),
     }
+    # Equal counts after a loop reset are a different execution. The reader
+    # already hashes the exact snapshot bytes; keep restart dedup for those
+    # same bytes, and preserve the legacy metric-only API when hash is absent.
+    if test_evidence.get("snapshot_sha256"):
+        canonical["snapshot_sha256"] = str(test_evidence["snapshot_sha256"])
     encoded = json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return f"tevd-{hashlib.sha256(encoded).hexdigest()[:16]}"
 
