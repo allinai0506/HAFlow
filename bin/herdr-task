@@ -5888,7 +5888,33 @@ def supersede_task(task_id, new_task_id=None, reason=None):
         sys.exit(1)
 
     old_status = task["status"]
-    if "superseded" not in TRANSITIONS.get(old_status, set()):
+
+    # 补挂：任务已经是 superseded（auto-recover 先作废、direct_dispatch 之后才
+    # 按谱系补派 -rN），此刻补上替代者指针。这不是状态转换 —— superseded 必须
+    # 保持终态 —— 所以只回填 superseded_by，不动 status、run 与首次作废原因。
+    #
+    # 不补的后果不是「少个字段」：required_task_ids 的链式解析
+    # （scheduler.node_is_complete）断在第一跳，实现节点永远判不出完成，
+    # Controller 只会刷 [STAGE ADVANCE WAIT] coordinator=working。
+    relinking = old_status == "superseded"
+    if relinking and not new_task_id:
+        print(
+            f"Illegal transition: "
+            f"{task_id}: {old_status} -> superseded"
+        )
+        sys.exit(2)
+    if relinking:
+        existing = str(task.get("superseded_by") or "").strip()
+        if existing:
+            if existing == new_task_id:
+                print(f"[SUPERSEDE NOOP] {task_id} already superseded by {existing}")
+                return
+            print(
+                f"[SUPERSEDE REJECTED] {task_id} already superseded by "
+                f"{existing}; refusing to repoint to {new_task_id}"
+            )
+            sys.exit(2)
+    elif "superseded" not in TRANSITIONS.get(old_status, set()):
         print(
             f"Illegal transition: "
             f"{task_id}: {old_status} -> superseded"
@@ -5906,22 +5932,34 @@ def supersede_task(task_id, new_task_id=None, reason=None):
                     "belongs to another workflow"
                 )
                 sys.exit(2)
-            if task.get("run_id") and replacement.get("run_id") != task.get("run_id"):
+            # 补派按设计就是新执行：controller 保留 --execution-id 并注明
+            # "sibling launches keep distinct run_ids"，所以补挂必须允许
+            # run 不同，否则存量断链永远补不上。首次作废仍要求同 run。
+            if (
+                not relinking
+                and task.get("run_id")
+                and replacement.get("run_id") != task.get("run_id")
+            ):
                 print(
                     f"[SUPERSEDE REJECTED] replacement {new_task_id} "
                     "belongs to another run"
                 )
                 sys.exit(2)
-    if reason:
+
+    if reason and not relinking:
         meta["supersede_reason"] = reason
 
     store = _get_store()
     try:
         from herdr import kernel
+        # 补挂是幂等自转移：核心状态机本就允许 old == new
+        # （herdr.transitions.validate_task_transition），因此这里只借道
+        # metadata 回填指针，status 保持终态不变。
         result = kernel.transition_task(
             task_id=task_id,
             to_status="superseded",
-            reason=reason or "superseded",
+            reason=(task.get("supersede_reason") or reason) if relinking
+            else (reason or "superseded"),
             source="herdr-task",
             metadata=meta,
             store=store,
@@ -5930,7 +5968,8 @@ def supersede_task(task_id, new_task_id=None, reason=None):
         )
         if not result.get("accepted", True):
             print(
-                f"[SUPERSEDE CAS REJECTED] {task_id} changed during supersede",
+                f"[SUPERSEDE CAS REJECTED] {task_id} changed during "
+                f"{'link' if relinking else 'supersede'}",
                 file=sys.stderr,
             )
             sys.exit(2)
@@ -5940,6 +5979,13 @@ def supersede_task(task_id, new_task_id=None, reason=None):
 
     t_file = globals().get("TASKS_FILE") or os.environ.get("TASKS_FILE")
     sync_tasks_projection(store=store, tasks_file=Path(t_file) if t_file else None)
+
+    if relinking:
+        print(
+            f"{task_id}: linked superseded_by={new_task_id} "
+            f"(status unchanged: {old_status})"
+        )
+        return
 
     try:
         _autosave_clone_wip(task)

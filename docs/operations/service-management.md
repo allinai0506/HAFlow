@@ -39,19 +39,71 @@ launchctl list | grep herdr
 ```
 
 ### 2.2 重启服务（热更新代码后生效）
+
+> ⚠️ **先看清部署拓扑。** Console 与 Controller 的 launchd 配置写死
+> `HERDR_ROOT=~/.herdr-controller/releases/<40位commit>`，跑的是**按 commit 冻结的
+> `git archive` 快照**；Sentinel 与 Notifier 则直跑工作区 `~/HAFlow/`。因此：
+>
+> - 改了 **sentinel / notifier**（`~/HAFlow/services/`）→ `kickstart` 即生效；
+> - 改了 **console / controller** 或 `herdr/` 包 → **工作区改动不会生效**，
+>   必须走 §2.2.1 的完整流程。
+> - `./scripts/install-herdr-console.sh` 只把 console 脚本复制到 `~/.herdr-console/`，
+>   **不改 plist**，在当前拓扑下那份副本不会被执行。
+
 ```bash
-# 从仓库同步并重启 Console（推荐）
-./scripts/install-herdr-console.sh
-
-# 重启 Controller 调度控制器
+# 仅适用于 sentinel / notifier，或"配置未变"的纯进程重启
 launchctl kickstart -k gui/$(id -u)/com.user.herdr-controller
-
-# 重启 Console 控制台
 launchctl kickstart -k gui/$(id -u)/com.user.herdr-factory-console
-
-# 重启 Notifier
 launchctl kickstart -k gui/$(id -u)/com.user.herdr-notifier
 ```
+
+#### 2.2.1 让 console / controller 真正加载新代码
+
+`launchctl kickstart` **只重启进程，不重读 plist**（launchd 用已加载的 job 配置快照）。
+改了 plist 后必须 `bootout` + `bootstrap`。
+
+```bash
+# 1. 提交改动，确保快照有对应 commit
+git rev-parse HEAD
+
+# 2. 按该 commit 重建 release 快照（保留旧快照作回滚）
+SHA=$(git rev-parse HEAD)
+mkdir -p ~/.herdr-controller/releases/$SHA
+git archive --format=tar $SHA | tar -x -C ~/.herdr-controller/releases/$SHA
+
+# 3. 改 plist 指向新快照（console 要改两处：HERDR_ROOT + ProgramArguments）
+R=/Users/user/.herdr-controller/releases/$SHA
+P=~/Library/LaunchAgents/com.user.herdr-factory-console.plist
+PlistBuddy -c "Set :EnvironmentVariables:HERDR_ROOT $R" $P
+PlistBuddy -c "Set :ProgramArguments:1 $R/console/herdr_factory_console.py" $P
+PlistBuddy -c "Set :ProgramArguments:1 $R/services/herdr-controller.py" \
+  ~/Library/LaunchAgents/com.user.herdr-controller.plist
+
+# 4. 重载 job（顺序：先改 plist，再 bootout，最后 bootstrap）
+for j in com.user.herdr-factory-console com.user.herdr-controller; do
+  launchctl bootout gui/$(id -u)/$j
+  launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/$j.plist
+done
+
+# 5. 部署后三查：PID -> 实际加载路径 -> 与 HEAD 比对
+ps -o command= -p "$(lsof -nP -iTCP:8765 -sTCP:LISTEN -t | head -1)" | grep -oE '[a-f0-9]{40}'
+git rev-parse HEAD    # 两者必须一致
+```
+
+<details>
+<summary>排查端口占用时的 lsof 陷阱</summary>
+
+`lsof -p PID -iTCP` 中 `-p` 与 `-i` 是 **OR** 关系，会把该进程所有 fd
+（含 dylib、`/dev/null`）**加上系统上全部网络连接**一并列出。必须用 `-a`：
+
+```bash
+lsof -a -nP -p <PID> -iTCP -sTCP:LISTEN   # 只看该进程的 LISTEN 端口
+```
+
+不加 `-a` 时，一个 console 进程曾被误报为"监听 98 个端口"（实含 3306/6379/3000
+等他人服务），真实 LISTEN 只有 1 个。
+
+</details>
 
 ### 2.3 停止与重新加载服务
 ```bash

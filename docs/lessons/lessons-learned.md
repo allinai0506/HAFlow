@@ -46,6 +46,7 @@
 | 修改源码后直接在终端重启进程 | LaunchAgent 与直接 python3 启动会发生 Socket / 状态文件冲突 | 必须用 `launchctl kickstart -k` 热重载，严禁裸启 |
 | 修改后未验证进程 PID 是否更新 | 代码更新成功不等于运行中进程已切换 | 热重载后必须用 `launchctl list | grep herdr` 确认 PID 变化 |
 | 日志仍是旧逻辑输出 | 日志时间戳是判定"进程是否已切换"的铁证 | 重载后检查 `~/Library/Logs/herdr/*.log` 中的启动时间戳 |
+| **PID 变了就认为新代码已加载** | PID 变化只证明进程重启。console/controller 的 plist 指向 `releases/<commit>` 冻结快照，且 `kickstart` **不重读 plist**——改完配置后 `kickstart` 起的仍是旧路径 | 部署后必须核对运行中进程的**实际加载路径**（`ps -o command= -p <pid>`）并与 `git rev-parse HEAD` 比对；改了 plist 一律 `bootout`+`bootstrap`。详见 **§108** |
 
 ### 操作规范（已固化到 `RULES.md §4 坑点1`、`CLAUDE.md`）
 
@@ -1669,7 +1670,7 @@ pytest -q
 |---|---|---|
 | **单层目录名判定导致根路径误判** | 仅按 `(candidate / "herdr").is_dir()` 检测极易被父目录下的同名包子目录或软链接欺骗 | 采用复合特征指纹校验：必须同时满足 `(candidate / "herdr" / "__init__.py").exists()` 且 `(candidate / "bin").is_dir()`，严格锁定源码根 |
 | **软链接制造虚假兼容性** | 临时软链接虽能解燃眉之急，但会导致配置与日志中陈旧路径持续蔓延与沉淀 | 重构/改名必须物理彻底断开旧路径，全盘清理（Grep-Purge）并移除所有软链接拐杖，迫使所有组件面向新标准路径或动态探针自愈 |
-| **多环境常驻进程分发落后** | 部署于用户主目录或系统级 LaunchAgents 的服务脱离 Git 工作区，直接改动仓库代码不会自动热加载 | 服务脚本修改后必须前置重新分发（如执行 `./scripts/install-herdr-console.sh` 并 `launchctl kickstart -k`），且需建立自检闭环 |
+| **多环境常驻进程分发落后** | 部署于用户主目录或系统级 LaunchAgents 的服务脱离 Git 工作区，直接改动仓库代码不会自动热加载 | 服务脚本修改后必须前置重新分发并让服务加载新代码。**当前拓扑已变**：console/controller 跑 `releases/<commit>` 冻结快照（`install-herdr-console.sh` 部署的副本不生效），sentinel/notifier 直跑工作区——改前先确认"该服务实际跑哪份代码"，流程见 **§108** |
 | **持久化状态路径漂移** | JSON 数据库与任务状态文件中固化了绝对路径，换目录后可能成为暗雷 | 运行时配置中的路径尽量采用相对项目根或动态通过项目名重新解析，防止母体移动后子工位引用悬空 |
 
 ### 操作规范
@@ -1728,7 +1729,7 @@ Web 控制台「执行者自检」（`herdr-deep-preflight --deep`）报告 `ope
 
 1. 在 `herdr/deep_preflight.py` 中维护 `SMOKE_TIMEOUTS`（当前仅 `claude: 90`）与 `DEFAULT_SMOKE_TIMEOUT = 40`；新增抖动大的执行者时优先加超时 + 重试，而非放宽全局阈值；
 2. 新增 `final_status` 枚举值时，必须同步三处：控制台 `statusLabel` + `hard` 集合、`print_table` 的 `bad` 集合、`main` 的 `auto_disable/hard` 集合；
-3. 涉及 `console/` 任何改动，必须执行 `./scripts/install-herdr-console.sh` 并 `launchctl kickstart -k` 热重载（见 §37.3），否则线上仍是旧逻辑；
+3. 涉及 `console/` 任何改动，必须重新分发并让服务真正加载新代码，否则线上仍是旧逻辑。**注意：部署方式已变更** —— `com.user.herdr-factory-console` 与 `com.user.herdr-controller` 的 plist 指向 `~/.herdr-controller/releases/<commit>` 冻结快照，`./scripts/install-herdr-console.sh` 部署到 `~/.herdr-console/` 的副本**不会被执行**。正确流程（提交 → 重建快照 → 改 plist → `bootout`+`bootstrap`）见 **§108**；改 plist 后仅 `kickstart` 无效；
 4. 探针口径变更必须同步 `docs/operations/deep-preflight-playbook.md` 超时表与 `wiki/preflight-and-health.md` §3.2，并在 `wiki/log.md` 追加演进记录。
 
 ### 验证命令 / 证据
@@ -5066,3 +5067,182 @@ python3.13 -m pytest -q tests/test_console_frontend_syntax.py
 - `tests/test_console_cockpit_runtime.py` — 本次新增的运行时门禁
 - `tests/test_console_decision_ui.py` — 源码级契约断言（仅作补充，不作唯一依据）
 - `docs/walkthroughs/20260930-console-controller-decision-buttons.md` — 交付记录
+
+## 108. `launchctl kickstart` 不重载 plist：改了配置等于没改（2026-09-30）
+
+### 问题背景
+
+给控制台按钮改中文文案（提交 `348f14c` / `4d8e177`）后，按 RULES 走
+`launchctl kickstart -k gui/$UID/com.user.herdr-factory-console` 热重载。命令成功、
+进程 PID 也换了，但 `curl http://127.0.0.1:8765/api/workflow/controller-actions`
+返回的按钮标题**一字未变**——"真实 re-drive""插话指导""紧急制动"全在。
+
+逐层排查后确认：console 与 controller 的 launchd 配置写死了
+`HERDR_ROOT=~/.herdr-controller/releases/<40位commit>`，那是一份 `git archive`
+快照，内容等于当时的 HEAD。工作区改动既不在 console 脚本里，也不在它
+`sys.path.insert` 后 import 的 `herdr/` 包里。四个服务实际加载的代码并不一致：
+
+| 服务 | ProgramArguments | 加载的代码 |
+|------|------------------|-----------|
+| factory-console | `releases/<sha>/console/herdr_factory_console.py` | 冻结快照 |
+| controller | `releases/<sha>/services/herdr-controller.py` | 冻结快照 |
+| sentinel | `~/HAFlow/services/herdr-sentinel.py` | 工作区 |
+| notifier | `~/HAFlow/services/herdr-notifier.py` | 工作区 |
+
+而 `launchctl kickstart -k` **只重启进程，不重新读取 plist**：launchd 用的是已加载的
+job 配置快照。实测把 plist 改成新快照路径后 `kickstart`，起来的进程仍执行旧路径
+（`release b33fe9f…`）；必须 `launchctl bootout` 后再 `launchctl bootstrap` 才会
+重新解析 plist。
+
+**这个坑在同一个 session 里踩了两次**——第一次没察觉，第二次改完 plist 又先
+`bootstrap` 才改 plist，等于没改。
+
+附带：`scripts/install-herdr-console.sh` 会把 console 脚本部署到
+`~/.herdr-console/`，但它**不改 plist**。plist 指向 release 之后，那份部署副本
+永远不会被执行，却仍然每次被 install 刷新——一个静默的误导源。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| `kickstart` 后 PID 变了就认为部署成功 | PID 变化只证明进程重启，不证明**配置或代码**是新的 | 部署后必须核对"运行中进程的实际命令行 / 加载路径"，不能只看 PID |
+| 改了 plist 但只用 `kickstart` | launchd 不重读已加载的 job 配置 | 改 plist 一律 `bootout` + `bootstrap`；`kickstart` 仅适用于**未改配置**时的纯重启 |
+| 提交到 main 就等于生效 | release 快照按 commit 冻结，工作区改动永远不进快照 | 改完代码必须核对"运行中服务加载的是哪份代码"，与 `git rev-parse HEAD` 对齐 |
+| 服务间部署语义不一致 | console/controller 走冻结快照、sentinel/notifier 直跑工作区 | 部署拓扑是**必须显式记录的事实**，不能靠推测；排查前先列"每个服务实际跑哪份代码" |
+| install 脚本与实际部署模型脱节 | `install-herdr-console.sh` 部署的文件与 plist 指向的路径不是同一处 | 部署脚本与 plist 指向必须同源，否则脚本是纯误导 |
+
+### 操作规范（已固化）
+
+1. **改 plist 后一律重启 job**：
+   ```bash
+   launchctl bootout gui/$(id -u)/<label>
+   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/<label>.plist
+   ```
+2. **部署后三查**：`lsof -nP -iTCP:<port> -sTCP:LISTEN -t` 拿 PID →
+   `ps -o command= -p <pid>` 看实际加载路径 → 与 `git rev-parse HEAD` 比对；
+3. **重建 release 快照**：`git archive --format=tar <sha> | tar -x -C ~/.herdr-controller/releases/<sha>`，
+   旧快照保留作回滚（本次保留 `b33fe9f`）；
+4. **`lsof -p PID -iTCP` 是 OR 不是 AND**：不加 `-a` 会把该进程所有 fd
+   （含 dylib、`/dev/null`）**加上**系统上所有网络连接一并列出。实测一个 console
+   进程因此被误报成"监听 98 个端口"（实含 3306/6379/3000 等他人服务），
+   真实 LISTEN 只有 1 个。正确写法 `lsof -a -p PID -iTCP -sTCP:LISTEN`。
+
+### 验证命令 / 关联证据
+
+```bash
+# 部署后核对：运行中进程加载的是哪个快照
+ps -o command= -p "$(lsof -nP -iTCP:8765 -sTCP:LISTEN -t | head -1)" | grep -oE '[a-f0-9]{40}'
+git rev-parse HEAD
+# 期望两者一致
+
+# 真实 HTTP 验收新文案已生效
+curl -s http://127.0.0.1:8765/ | grep -c "继续推进"          # > 0
+curl -s http://127.0.0.1:8765/ | grep -c "推进交付链路"       # 0
+```
+
+**本次实测**：console PID 69225 / controller PID 69230 均加载
+`4d8e1770ff5cbd7656209cb557e1ef5b847eb4ce`，与 `origin/main` 一致；页面新文案
+命中、`推进交付链路`/`真实重驱`/`实时插话`/`紧急制动` 全部 0 次。
+
+### 相关文档 / 关联证据
+- 提交 `348f14c`（中文按钮）、`4d8e177`（补齐漏网术语）
+- `tests/test_console_plain_chinese_ui.py` — 旧术语门禁
+- `console/HerdrDashboard.command` — 双击入口仍用 `kickstart`（配置未变时可继续使用）
+
+## 109. 补派换 ID 后 `superseded_by` 断链，工作流永久卡死（2026-09-30）
+
+### 问题背景
+
+`wf-project-0929-01` 的 implementation 节点卡在 `[STAGE ADVANCE WAIT]
+coordinator=working`。`required_task_ids` 9 项里，`impl-t7-integration-gates`
+处于 `superseded`（auto-recover 因 `dispatch_delivery_fuse` 作废），真正干完并
+`cleaned` 的是补派出来的 `impl-t7-integration-gates-r2`。
+
+`herdr/scheduler.py::node_is_complete` 本来就有 superseded 链式解析——顺着
+`superseded_by` 一直走到落地的替代者。但 T7 的 `superseded_by` 是 `None`，链断在
+第一跳，判定恒为 `False`。实测确认这就是唯一卡点：
+
+```
+现状（superseded_by 为空）:    node_is_complete = False
+模拟回填 superseded_by → r2:   node_is_complete = True
+```
+
+**根因是两段式流程中间没人连线**：
+
+1. `services/herdr-controller.py:1447` 的 auto-recover 调
+   `herdr-task supersede <id> --reason "auto-recover: infrastructure failure"`，
+   此刻**还不知道**将来替代者是谁，因此不传 `--by`；
+2. 之后 `direct_dispatch.plan_stage_dispatch` 按谱系
+   （`lineage_redispatch_candidates` + `next_replacement_id`）补派 `-r2`，
+   spec 里带了 `redispatch_of`，但 `services/herdr-controller.py:4113` 构造
+   launch argv 时**只把它拼进 prompt 文本，从未转成 `--supersedes`**。
+
+`bin/herdr-task launch --supersedes` 机制本来是完整的（会调
+`supersede_task(old, new_task_id=new)` 写 `superseded_by`），但补派路径没用它。
+
+补派之所以不传 `--supersedes`，是因为传了也跑不通：`TRANSITIONS["superseded"]`
+是空集（`superseded` 是终态），而旧任务**已经**是 `superseded`，`launch --supersedes`
+会因 `superseded → superseded` 非法而 `exit 2`。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 两段式流程（先作废、后补派）中间无连线 | 谱系信息在 `task_id` 后缀里（`-r2`），**没有**落到 `superseded_by` 字段上；两个真相源不一致 | 凡"作废 + 补派"成对出现，必须回填 `superseded_by`，且由**回归测试**钉住 |
+| 判据依赖可选字段 | `node_is_complete` 依赖 `superseded_by` 才能穿透 superseded，但该字段在补派路径下必然为空 | 判定所依赖的字段，其**每条写入路径**都必须被测试覆盖；新增写入路径时同步补测试 |
+| 跨 run 补派被误判为身份串号 | 补派按设计就是新执行：controller 保留 `--execution-id` 并注明 "sibling launches keep distinct run_ids"，新旧 `run_id` 天然不同 | run 相等性只适用于"同一执行的重新作废"；补挂链路必须允许跨 run，但仍要校验同 workflow |
+| 核心已支持幂等自转移，前置表不支持 | `herdr.transitions.validate_task_transition` 明确允许 `old == new`（注释：including idempotent self-transitions），但 `bin/herdr-task` 自己的 `TRANSITIONS` 表把它挡了 | 修状态相关缺陷前先读核心状态机，别在前置表上找唯一真相；两表语义差异本身是缺陷 |
+
+### 操作规范（已固化到源码与回归）
+
+1. **`supersede_task` 支持补挂**：旧任务已是 `superseded` 且 `superseded_by`
+   为空时，只回填指针，**不动** `status` / `run_id` / `supersede_reason`；
+   已有 `superseded_by` 时拒绝改指（防谱系被静默改写）；跨 workflow 一律拒绝；
+   补挂允许跨 `run_id`（补派即新执行），首次作废仍要求同 run；
+2. **补派链路传 `--supersedes`**：`services/herdr-controller.py` 构造 launch
+   argv 时消费 `spec["redispatch_of"]`；
+3. **不依赖自定义状态机参数**：补挂借道核心的幂等自转移能力，不新增
+   `allow_noop_status` 之类的旁路开关；
+4. **存量断链用同一命令修复**：`herdr-task supersede <old> --by <new>` 走的就是
+   补挂分支，修复与预防共用一条代码路径。
+
+### 验证命令 / 关联证据
+
+```bash
+# 7 条新回归：补挂写指针 / 保留终态与 run / 拒绝改指 / 拒绝跨 workflow /
+#             允许跨 run / 无替代者时仍拒绝 / required_task_ids 穿透
+python3.13 -m pytest -q tests/test_stage_advance_and_supersede.py
+# 期望：25 passed, 9 subtests passed
+
+# 真实状态机穿透验证
+python3.13 -c "
+import sys; sys.path.insert(0,'.')
+from herdr.state_store import get_state_store
+from herdr.scheduler import node_is_complete
+s = get_state_store()
+req = ['impl-barrier0-plan-rectify','impl-t1-contract-foundation',
+       'impl-t2-archive-ocr-provider','impl-t3-recover-abnormal',
+       'impl-t4a-aggregate-service','impl-t4b-task-http-contract',
+       'impl-t5-frontend-workbench','impl-t6-mock-retire-r3',
+       'impl-t7-integration-gates']
+# 必须传 node 的**全量**任务：链式解析要按 superseded_by 找到 -r2，
+# 只传 required_task_ids 清单会因找不到替代者而恒为 False
+allt = [t for t in s.list_tasks('wf-project-0929-01')
+        if (t.get('node') or t.get('stage')) == 'implementation']
+print(node_is_complete(allt, req))   # 期望 True
+"
+```
+
+**反向验证**：`TestNodeCompleteAfterRedispatchLink` 同时断言断链时为 `False`
+（fail-closed）与回填后为 `True`，避免测试退化为恒真断言。
+
+**本次实测**：补挂后 T7 保持 `status=superseded`、`run_id` 与
+`supersede_reason` 均未变，`superseded_by=impl-t7-integration-gates-r2`，
+`node_is_complete` 转为 `True`，controller 日志不再刷 `STAGE ADVANCE WAIT`。
+
+### 相关文档 / 关联证据
+- `bin/herdr-task::supersede_task` — 补挂分支
+- `services/herdr-controller.py` — launch argv 补 `--supersedes`
+- `herdr/scheduler.py::node_is_complete` — 链式解析（未改动，问题在数据）
+- `herdr/direct_dispatch.py::lineage_redispatch_candidates` — 谱系补派去重
+- `tests/test_stage_advance_and_supersede.py` — 7 条新回归

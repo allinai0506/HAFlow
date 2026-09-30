@@ -4131,6 +4131,15 @@ def try_direct_stage_advance(item):
         if spec.get("onto_branch"):
             cmd += ["--onto", spec["onto_branch"]]
 
+        # 补派必须把谱系前驱连起来：direct_dispatch 已经算出 redispatch_of，
+        # 但历史上 launch argv 没带 --supersedes，导致旧任务的 superseded_by
+        # 永远为空。required_task_ids 的链式解析（scheduler.node_is_complete）
+        # 因此断在第一跳，实现节点永远判不出完成，日志只剩
+        # [STAGE ADVANCE WAIT] coordinator=working。
+        _redispatch_of = str(spec.get("redispatch_of") or "").strip()
+        if _redispatch_of:
+            cmd += ["--supersedes", _redispatch_of]
+
         if spec.get("candidate_sha"):
             cmd += ["--candidate-sha", spec["candidate_sha"]]
 

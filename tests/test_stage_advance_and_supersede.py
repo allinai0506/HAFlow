@@ -253,6 +253,166 @@ class TestSupersedeTask(unittest.TestCase):
         finally:
             os.unlink(path)
 
+    # -- 补挂：auto-recover 两阶段留下的断链 ---------------------------------
+    #
+    # auto-recover (`services/herdr-controller.py`) 先把基础设施失败的任务
+    # 标成 superseded（此刻还不知道替代者是谁），direct_dispatch 之后才按谱系
+    # 补派 -rN。旧任务的 superseded_by 因此永远为空，而 required_task_ids 的
+    # 链式解析（scheduler.node_is_complete）断在第一跳 → 节点永久判不出完成。
+    #
+    # 修法不是放宽状态机（superseded 必须保持终态，见
+    # test_superseded_is_terminal），而是让 supersede 能在「已经是 superseded」
+    # 时幂等地补挂替代者：只写 superseded_by，不改 status。
+
+    def test_link_replacement_onto_already_superseded_task(self):
+        path = self._store([
+            {"task_id": "impl-t7", "status": "superseded",
+             "workflow_id": "wf-1", "supersede_reason": "auto-recover"},
+        ])
+        try:
+            _ht.TASKS_FILE = path
+            _ht.supersede_task("impl-t7", new_task_id="impl-t7-r2")
+            with open(path) as f:
+                data = json.load(f)
+            t = next(x for x in data["tasks"] if x["task_id"] == "impl-t7")
+            self.assertEqual(t["superseded_by"], "impl-t7-r2",
+                             "补派替代者后必须回填 superseded_by")
+            self.assertEqual(t["status"], "superseded",
+                             "补挂不得改动已达终态的 status")
+            self.assertEqual(t["supersede_reason"], "auto-recover",
+                             "补挂不得覆盖首次作废的原因")
+        finally:
+            os.unlink(path)
+
+    def test_link_replacement_does_not_overwrite_existing_pointer(self):
+        """已有替代者时必须拒绝，否则谱系会被静默改写。"""
+        path = self._store([
+            {"task_id": "impl-x", "status": "superseded",
+             "superseded_by": "impl-x-r2"},
+        ])
+        try:
+            _ht.TASKS_FILE = path
+            with self.assertRaises(SystemExit) as cm:
+                _ht.supersede_task("impl-x", new_task_id="impl-x-r9")
+            self.assertEqual(cm.exception.code, 2)
+            with open(path) as f:
+                data = json.load(f)
+            t = next(x for x in data["tasks"] if x["task_id"] == "impl-x")
+            self.assertEqual(t["superseded_by"], "impl-x-r2")
+        finally:
+            os.unlink(path)
+
+    def test_link_replacement_rejects_cross_workflow(self):
+        path = self._store([
+            {"task_id": "impl-y", "status": "superseded", "workflow_id": "wf-1"},
+            {"task_id": "impl-y-r2", "status": "pending", "workflow_id": "wf-2"},
+        ])
+        try:
+            _ht.TASKS_FILE = path
+            with self.assertRaises(SystemExit) as cm:
+                _ht.supersede_task("impl-y", new_task_id="impl-y-r2")
+            self.assertEqual(cm.exception.code, 2)
+        finally:
+            os.unlink(path)
+
+    def test_link_replacement_allows_distinct_run_id(self):
+        """补派按设计就是新执行：新旧 run_id 不同，不是身份串号。
+
+        controller 构造 launch argv 时明确保留
+        ``--execution-id <workflow_id>`` 并注明 "sibling launches keep
+        distinct run_ids but share one execution_id"。实测事故
+        (wf-project-0929-01)：impl-t7 run_955df1bd… 被补派成
+        impl-t7-r2 run_c5a26395…，run 天然不同 —— 若补挂沿用 run 相等
+        校验，存量断链将永远补不上。
+
+        跨 workflow 仍然必须拒绝（见上一个用例）：run 可不同，
+        归属的 workflow 不能不同。
+        """
+        path = self._store([
+            {"task_id": "impl-t7", "status": "superseded",
+             "workflow_id": "wf-1", "run_id": "run_aaa"},
+            {"task_id": "impl-t7-r2", "status": "cleaned",
+             "workflow_id": "wf-1", "run_id": "run_bbb"},
+        ])
+        try:
+            _ht.TASKS_FILE = path
+            _ht.supersede_task("impl-t7", new_task_id="impl-t7-r2")
+            with open(path) as f:
+                data = json.load(f)
+            t = next(x for x in data["tasks"] if x["task_id"] == "impl-t7")
+            self.assertEqual(t["superseded_by"], "impl-t7-r2")
+            self.assertEqual(t["run_id"], "run_aaa", "补挂不得改写旧任务 run 归属")
+        finally:
+            os.unlink(path)
+
+    def test_superseded_task_without_replacement_still_rejected(self):
+        """没有替代者时维持原语义：superseded 不能再「转」一次。"""
+        path = self._store([{"task_id": "impl-z", "status": "superseded"}])
+        try:
+            _ht.TASKS_FILE = path
+            with self.assertRaises(SystemExit) as cm:
+                _ht.supersede_task("impl-z")
+            self.assertEqual(cm.exception.code, 2)
+        finally:
+            os.unlink(path)
+
+
+# ---------------------------------------------------------------------------
+# 5. 补派链路：dispatch spec 的 redispatch_of 必须落到 --supersedes
+# ---------------------------------------------------------------------------
+
+class TestRedispatchLinksSupersedes(unittest.TestCase):
+    """direct_dispatch 已经算出 redispatch_of，controller 却没传给 launch。
+
+    实测事故（wf-project-0929-01）：impl-t7-integration-gates 被 auto-recover
+    作废后补派成 -r2，但 launch 命令缺 --supersedes，required_task_ids 判定
+    永久卡死，日志刷 [STAGE ADVANCE WAIT] coordinator=working。
+    """
+
+    def test_controller_passes_supersedes_for_redispatch_specs(self):
+        ctrl = _load_controller("herdr_controller_supersedes_probe")
+        src = HERDR_ROOT / "services" / "herdr-controller.py"
+        text = src.read_text(encoding="utf-8")
+        # launch argv 的构造块：redispatch_of 必须被翻译成 --supersedes
+        self.assertIn("spec.get(\"redispatch_of\")", text,
+                      "补派 spec 的 redispatch_of 未被消费")
+        self.assertIn('"--supersedes"', text,
+                      "direct dispatch 的 launch argv 缺 --supersedes")
+        self.assertTrue(hasattr(ctrl, "TASK_MANAGER"))
+
+
+class TestNodeCompleteAfterRedispatchLink(unittest.TestCase):
+    """端到端：补挂 superseded_by 后，required_task_ids 判定必须从卡死变通过。"""
+
+    def _task(self, tid, status, **kw):
+        t = {"task_id": tid, "status": status, "workflow_id": "wf-1",
+             "node": "implementation", "integration_mode": "git"}
+        t.update(kw)
+        return t
+
+    def test_required_task_ids_resolves_through_redispatch_lineage(self):
+        from herdr.scheduler import node_is_complete
+
+        required = ["impl-a", "impl-t7"]
+        broken = [
+            self._task("impl-a", "cleaned"),
+            self._task("impl-t7", "superseded", superseded_by=None),
+        ]
+        self.assertFalse(
+            node_is_complete(broken, required),
+            "断链时应当判未完成（fail-closed），这是当前的卡死态",
+        )
+
+        linked = [
+            self._task("impl-a", "cleaned"),
+            self._task("impl-t7", "superseded", superseded_by="impl-t7-r2"),
+            self._task("impl-t7-r2", "cleaned"),
+        ]
+        self.assertTrue(
+            node_is_complete(linked, required),
+            "回填 superseded_by 后应能沿谱系走到 -r2 并判完成",
+        )
+
 
 # ---------------------------------------------------------------------------
 # 5. stage_reset / force_advance
