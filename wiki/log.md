@@ -8,6 +8,13 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-09-30] feat | PR #120 控制台 Controller 动作全按钮化 + 待裁决项显式提醒
+- 背景：控制台只为 `blocked/failed/rework` 生成按钮，`bin/herdr-task` 的 `commit/integrate/cleanup/finalize/clear-escalation` 从无 `action_id`，于是"无报错但仍待集成"的任务在 UI 上等同于"没事可做"；Barrier-0 的 DU-10 等人工裁决只以自由文本存在于共享文档区与总指挥终端，`dashboard.attention` 完全不收决策类提醒。
+- 变更：`herdr/controller_actions.py` 新增交付链路逐步骤表（`needs_git` 逐步骤门控：commit/integrate 需 git clone，finalize/cleanup 只需已落定——整表门控会让占多数的非 git 任务仍无按钮）、终化升级三条处置、真实 re-drive（`herdr agent prompt --wait`，区别于 steer 插话队列）与 `collect_workflow_actions` 聚合；`generate_controller_actions` 收敛为仅经 `resolve_workflow_blockers` 调用，避免其破坏性 `force_pass_advance` 兜底落到 `cleaned/superseded` 历史任务上。
+- 提醒面：新增 `herdr/human_decisions.py`，从 append-only 账本折叠"待你裁决"（仅带 `decision_id` 的 decision 笔记算待办；最新一条赢；resolved 关闭；stale 不算）与建议时间线，`ADVICE_KINDS` 直接别名 `workflow_docs.NOTE_KINDS` 避免平行副本漂移；`bin/herdr-task note-add --field KEY=VALUE` 只解析透传，字段校验仍归核心，CLI 与 HTTP 因此可写同一种决策记录。
+- 教训（§107）：本 PR 自身带入两个"全量 2494 项全绿"的功能级缺陷——动作卡渲染器提升到模块作用域后仍引用外层 `catMeta`（`ReferenceError`，弹窗完全打不开）、`JSON.stringify` 双引号截断双引号 `onclick`（选项芯片死链）。根因是既有前端测试只有 `node --check`（仅证明可解析，发现不了运行期作用域错误）与字面量 grep。已新增 `tests/test_console_cockpit_runtime.py`：真实抽取 `<script>`、Node + DOM stub 实际调用渲染函数，并对每个 inline handler 逐条 `node --check`。
+- 证据：全量 2522 passed / 60 subtests；compileall 与 `git diff --check` exit 0；线上 `controller-actions` 返回 3 个 pipeline 按钮、`decisions` 返回 advice 12；反向验证（篡改核心表 / 注入缺失作用域）均如实变红。详见 `docs/walkthroughs/20260930-console-controller-decision-buttons.md`。
+
 ## [2026-09-27] fix | PR #102 只读边界重划：HAFlow 持久状态只读，容忍 SQLite WAL 协调文件
 - 评审结论：撤回当日早些引入的 `ReadonlyWalSidecarError` fail-closed preflight——「检查边车缺失再打开」是 TOCTOU 竞态，且 `-wal`/`-shm` 是 SQLite 自身连接协调文件，不应由应用层契约治理。
 - 变更：只读契约重划为「不改 HAFlow 持久数据与 schema」（不建库、无 DDL/migration、无业务写、不翻 journal_mode）；`mode=ro` + `query_only` 防写不变；删除 preflight、CLI catch、fixture WAL keeper 与 case3b/case3c，新增 case3 断言「边车被清空的 WAL 库读取成功、应用数据不变、SQLite 关闭后自清协调文件」。

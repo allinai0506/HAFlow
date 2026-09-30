@@ -27,3 +27,7 @@ The persistence/read chain uses real temporary SQLite, frozen workflow JSON, con
 ## Unverified environment boundaries
 
 Agent prompt and native notification transports are controlled substitutes. No live Agent turn, macOS notification delivery, controller deployment or production workflow recovery is asserted. Merge/deployment must be handled separately after PR review.
+
+## Upstream documentation reconciliation
+
+PR creation found a concurrent documentation-only main update (`2f5e4e3`). The branch merges that update, retaining both §106 continuation lessons and upstream §107 console lessons. `git diff 8cef006 -- herdr services bin tests console` is empty: the final tested executable/test tree is unchanged. No force push or main-branch edit was used.
