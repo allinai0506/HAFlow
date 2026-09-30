@@ -19,6 +19,7 @@ HERDR_ROOT=_resolve_herdr_root(); ROOT=HOME/'.herdr-controller'
 sys.path.insert(0, str(HERDR_ROOT))
 from herdr import workflow as herdr_workflow
 from herdr import workflow_graph as herdr_workflow_graph
+from herdr import human_decisions as herdr_human_decisions
 from herdr import projects as herdr_projects
 from herdr import kernel as herdr_kernel
 from herdr import steering as herdr_steering
@@ -659,26 +660,178 @@ def api_workflow_retry_advance(b):
     return manual_advance(wid)
 
 def api_workflow_controller_actions(wid):
+    """Blocker + pipeline actions for a workflow.
+
+    A healthy task that still owes the git delivery pipeline its next step
+    (commit / integrate / finalize) or a live pane a real re-drive is an
+    actionable item too — otherwise the console shows "no blockers" while
+    delivery is actually waiting on a human click.
+    """
     wid = str(wid or '').strip()
     if not wid: raise RuntimeError('workflow_id 不能为空')
     wf = workflows().get(wid) or {}
+    wf = {'workflow_id': wid, **wf}
     ts = tasks_for_workflow(wid)
     blockers = herdr_controller_actions.resolve_workflow_blockers(ts, wf)
     p = project_for_workflow(wid) or {}
     proj_root = p.get('project_root') or wf.get('project_root') or ''
-    actions_list = []
-    seen_action_ids = set()
-    for b in blockers:
-        acts = herdr_controller_actions.generate_controller_actions(b, wf, project_root=proj_root)
-        for act in acts:
-            if act.action_id not in seen_action_ids:
-                seen_action_ids.add(act.action_id)
-                actions_list.append(act.to_dict())
+    actions_list = [
+        act.to_dict()
+        for act in herdr_controller_actions.collect_workflow_actions(
+            ts, wf, project_root=proj_root,
+            workflow_paused=str(wf.get('status') or '') == 'paused',
+        )
+    ]
     return {
         'workflow_id': wid,
         'blockers': blockers,
         'actions': actions_list,
     }
+
+def pipeline_step_commands(step):
+    """Resolve a pipeline step to relative argv from the core's single table.
+
+    The console must not keep its own copy of the git delivery chain: a
+    second table would drift and could execute a transition the state machine
+    rejects.
+    """
+    for _status, name, steps, _label, _needs_git in herdr_controller_actions.GIT_PIPELINE_FORWARD:
+        if name == step:
+            return [[parts[0], None, *parts[1:]] for parts in steps]
+    raise RuntimeError(f'未知的交付链路步骤: {step}')
+
+ACTION_BINARIES = {
+    'herdr-task': lambda: str(HERDR_TASK),
+    'herdr': lambda: 'herdr',
+}
+
+def _find_action(payload, suffix):
+    """Re-derive the action a request refers to, so argv stays core-authored.
+
+    The request only names the task and the step; the executable argv always
+    comes back out of ``herdr.controller_actions``, never from the body.
+    """
+    task_id = str(payload.get('task_id') or '').strip()
+    wid = str(payload.get('workflow_id') or '').strip()
+    if not task_id or not wid:
+        raise RuntimeError('task_id 与 workflow_id 不能为空')
+    task = next(
+        (t for t in tasks_for_workflow(wid) if t.get('task_id') == task_id), None,
+    )
+    if task is None:
+        raise RuntimeError(f'未找到任务 {task_id}（工作流 {wid}）')
+    action = next(
+        (a for a in herdr_controller_actions.generate_progress_actions(task, {'workflow_id': wid})
+         if a.action_id.endswith(suffix)),
+        None,
+    )
+    if action is None or not action.commands:
+        raise RuntimeError(f'该任务当前没有可执行的 {suffix} 动作（状态已变化，请刷新）')
+    return action
+
+def _run_action_command(action, timeout=900):
+    """Run a core-authored action: ``command_base`` + its first argv command."""
+    if len(action.commands) != 1:
+        raise RuntimeError(f'动作 {action.action_id} 不是单条命令，请改用 task_git_step')
+    base = ACTION_BINARIES.get(action.command_base)
+    if base is None:
+        raise RuntimeError(f'未知的命令基座: {action.command_base}')
+    argv = [base(), *[str(p) for p in action.commands[0]]]
+    r = run(argv, timeout, check=True)
+    return {'ok': True, 'task_id': action.blocker_task_id,
+            'action_id': action.action_id, 'output': r.stdout.strip()[:2000]}
+
+def _run_task_commands(task_id, commands, timeout=900):
+    """Run relative argv in order against bin/herdr-task; stop at first failure.
+
+    ``None`` marks the task-id slot.  Only argv shapes this module produced are
+    accepted: every command is a subcommand, optionally followed by flags.
+    """
+    ran = []
+    for command in commands:
+        if not command or command[0] in ('herdr-task', 'bin/herdr-task'):
+            raise RuntimeError('交付链路命令必须使用相对子命令形式')
+        argv = [str(HERDR_TASK)]
+        for part in command:
+            if part is not None and str(part).startswith('-'):
+                if argv[-1] == str(HERDR_TASK) or argv[-1].startswith('-'):
+                    raise RuntimeError(f'交付链路命令缺少子命令参数: {command}')
+            argv.append(str(task_id) if part is None else str(part))
+        result = run(argv, timeout, check=True)
+        ran.append({'command': ' '.join(argv), 'stdout': result.stdout.strip()[:2000]})
+    return ran
+
+def api_workflow_decisions(wid):
+    """Open human decisions + the coordinator's latest advice for a workflow."""
+    wid = str(wid or '').strip()
+    if not wid: raise RuntimeError('workflow_id 不能为空')
+    try:
+        notes = herdr_workflow_docs.annotate_notes(
+            herdr_workflow_docs.load_notes(wid), current_base_sha=None,
+        )
+    except Exception as exc:
+        print(f"[DECISIONS WARN] {wid}: {exc}")
+        notes = []
+    return {
+        'workflow_id': wid,
+        'decisions': herdr_human_decisions.collect_open_decisions(notes, workflow_id=wid),
+        'advice': herdr_human_decisions.collect_advice(notes, workflow_id=wid),
+    }
+
+def _append_decision_note(wid, fields, title, body, node=None, task_id=None):
+    try:
+        return herdr_workflow_docs.append_note(
+            wid, kind='decision', title=title, body=body,
+            node=node, task_id=task_id, source=herdr_workflow_docs.SOURCE_HUMAN,
+            fields=fields,
+        )
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
+
+def api_workflow_decide_raise(b):
+    """Open a new decision ask so the human is reminded about it."""
+    wid=str(b.get('workflow_id') or '').strip()
+    if not wid:raise RuntimeError('workflow_id 不能为空')
+    did=str(b.get('decision_id') or '').strip()
+    if not did:raise RuntimeError('decision_id 不能为空')
+    question=str(b.get('question') or '').strip()
+    if not question:raise RuntimeError('question 不能为空')
+    options=b.get('options') or []
+    if not isinstance(options,(list,tuple)):raise RuntimeError('options 必须是列表')
+    try:
+        fields=herdr_human_decisions.build_decision_fields(
+            did, herdr_human_decisions.STATUS_OPEN, question=question,
+            options=options, recommended=str(b.get('recommended') or ''),
+        )
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
+    record=_append_decision_note(
+        wid, fields, did, question,
+        node=str(b.get('node') or '').strip() or None,
+        task_id=str(b.get('task_id') or '').strip() or None,
+    )
+    return {'ok':True,'note_id':record.get('note_id'),'decision_id':did}
+
+def api_workflow_decide_resolve(b):
+    """Record the human ruling; the ask leaves the pending list."""
+    wid=str(b.get('workflow_id') or '').strip()
+    if not wid:raise RuntimeError('workflow_id 不能为空')
+    did=str(b.get('decision_id') or '').strip()
+    if not did:raise RuntimeError('decision_id 不能为空')
+    decision=str(b.get('decision') or '').strip()
+    if not decision:raise RuntimeError('decision 不能为空')
+    open_asks={d['decision_id']:d for d in api_workflow_decisions(wid)['decisions']}
+    prior=open_asks.get(did) or {}
+    fields=herdr_human_decisions.build_decision_fields(
+        did, herdr_human_decisions.STATUS_RESOLVED,
+        question=prior.get('question') or did, decision=decision,
+    )
+    record=_append_decision_note(
+        wid, fields, f'{did} 裁决', decision,
+        node=prior.get('node') or None, task_id=prior.get('task_id') or None,
+    )
+    return {'ok':True,'note_id':record.get('note_id'),'decision_id':did,
+            'decision':decision}
 
 def api_controller_execute_action(payload):
     payload = payload or {}
@@ -728,6 +881,41 @@ def api_controller_execute_action(payload):
 
     elif act_type == 'advance':
         return manual_advance(wid)
+
+    elif act_type == 'task_git_step':
+        task_id = str(payload.get('task_id') or '').strip()
+        if not task_id:raise RuntimeError('task_id 不能为空')
+        step = str(payload.get('step') or '').strip()
+        ran = _run_task_commands(task_id, pipeline_step_commands(step), timeout=900)
+        return {'ok': True, 'task_id': task_id, 'step': step, 'ran': len(ran),
+                'output': ran}
+
+    elif act_type in ('redrive', 'clear_escalation', 'supersede', 'close_workflow'):
+        task_id = str(payload.get('task_id') or '').strip()
+        if act_type != 'close_workflow' and not task_id:
+            raise RuntimeError('task_id 不能为空')
+        if act_type == 'redrive':
+            # A real re-drive: a direct pane prompt with a bounded wait.
+            # Deliberately NOT the steering queue, which the worker only
+            # reads on its next poll.
+            return _run_action_command(_find_action(payload, 'redrive'), 200)
+        if act_type in ('clear_escalation', 'supersede'):
+            return _run_action_command(_find_action(payload, act_type), 900)
+        # close-workflow, scoped to the machine-set escalation only.  --force is
+        # deliberately unreachable: it bypasses the whole human-confirmation
+        # contract and no action ever declares it.
+        argv = [str(HERDR_TASK), 'close-workflow', wid]
+        if payload.get('accept_escalated'):
+            argv.append('--accept-escalated')
+        r = run(argv, 900, check=True)
+        return {'ok': True, 'task_id': task_id, 'workflow_id': wid,
+                'output': r.stdout.strip()[:2000]}
+
+    elif act_type == 'steer':
+        return api_task_steer(payload)
+
+    elif act_type == 'halt':
+        return api_task_halt(payload)
 
     raise RuntimeError(f'未知的控制器动作类型: {act_type}')
 
@@ -829,7 +1017,7 @@ def dashboard_data(limit_tasks=50, limit_workflows=50, workflow_id=None):
     # 最近活跃的工作流优先,保证有界
     wf_ids=sorted(by_wf, key=lambda w:max([_upd(t) for t in by_wf[w]] or [0.0]), reverse=True)[:max(1,limit_workflows)]
 
-    blockers=[]; actions_by_task={}; stalls={}; deliveries=[]; anomalies=[]
+    blockers=[]; actions_by_task={}; stalls={}; deliveries=[]; anomalies=[]; decisions=[]
     for wid in wf_ids:
         wts=by_wf.get(wid,[])
         wf=wf_map.get(wid) or {}
@@ -870,11 +1058,13 @@ def dashboard_data(limit_tasks=50, limit_workflows=50, workflow_id=None):
         runtimes={p:v for p,v in _res.items() if isinstance(v,dict)}
     # 最新交付:最近 20 个工作流各取有效交付(失败隔离)
     recent_wf=sorted({t.get('workflow_id') for t in all_tasks if t.get('workflow_id')}, key=lambda w:max([_upd(t) for t in all_tasks if t.get('workflow_id')==w] or [0.0]), reverse=True)[:20]
+    notes_by_wf={}
     for wid in recent_wf:
         try:
-            notes=herdr_workflow_docs.load_notes(wid)
+            notes_by_wf[wid]=herdr_workflow_docs.annotate_notes(herdr_workflow_docs.load_notes(wid),current_base_sha=None)
         except Exception:
             continue
+    for wid, notes in notes_by_wf.items():
         try:
             dl_notes=[n for n in notes if isinstance(n,dict) and n.get('kind')=='delivery']
             if not dl_notes:
@@ -901,7 +1091,14 @@ def dashboard_data(limit_tasks=50, limit_workflows=50, workflow_id=None):
                            'title':subj.get('title') or subj.get('requirement_subject') or wid,
                            'active':sum(1 for t in wts if t.get('status') not in {'superseded','cleaned'} and not t.get('superseded_by')),
                            'attention':sum(1 for t in wts if not t.get('superseded_by') and (t.get('finalize_escalated') or t.get('stage_verdict')=='blocked' or t.get('status') in {'blocked','failed'}))})
-    return herdr_dashboard.build_dashboard(all_tasks,blockers=blockers,actions_by_task=actions_by_task,deliveries=deliveries,stalls=stalls,anomalies=anomalies,runtimes=runtimes,scope=scope,workflows=wf_options,now=now,limits={'tasks':limit_tasks,'deliveries':10,'attention':30,'stuck':30})
+    # 需人裁决项:复用上面交付物扫描已读入的同一份账本,不再二次 load_notes
+    # (每工作流原本会被读+解析两次)。
+    for wid, notes in notes_by_wf.items():
+        try:
+            decisions.extend(herdr_human_decisions.collect_open_decisions(notes,workflow_id=wid,limit=20))
+        except Exception:
+            continue
+    return herdr_dashboard.build_dashboard(all_tasks,blockers=blockers,actions_by_task=actions_by_task,deliveries=deliveries,stalls=stalls,anomalies=anomalies,runtimes=runtimes,decisions=decisions,scope=scope,workflows=wf_options,now=now,limits={'tasks':limit_tasks,'deliveries':10,'attention':30,'stuck':30,'decisions':30})
 
 def api_task_signoff(b):
     tid=str(b.get('task_id') or '').strip()
@@ -2486,6 +2683,21 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 1
 .ctl-meta-chips { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
 .ctl-chip { font-size: 11px; color: var(--text-secondary); background: var(--bg-subtle); border: 1px solid var(--border-subtle); border-radius: 999px; padding: 1px 8px; }
 .ctl-chip strong { color: var(--text-primary); font-weight: 600; }
+/* Human decision asks: must read as "waiting on you", not as another log line */
+.ctl-decision { background: var(--warning-bg); border: 1px solid rgba(217,119,6,.3); border-left: 3px solid var(--warning); border-radius: var(--radius-md); padding: 12px 14px; margin-bottom: 10px; }
+.ctl-decision.is-resolved { background: var(--success-bg); border-color: rgba(22,163,74,.3); border-left-color: var(--success); }
+.ctl-dec-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
+.ctl-dec-id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; font-weight: 600; color: var(--warning); }
+.ctl-dec-q { font-size: 13px; color: var(--text-primary); line-height: 1.6; margin-bottom: 8px; }
+.ctl-dec-opts { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+.ctl-dec-opt { font-size: 11.5px; color: var(--text-secondary); background: var(--bg-surface); border: 1px solid var(--border-default); border-radius: var(--radius-sm); padding: 3px 9px; }
+.ctl-dec-opt.is-rec { color: var(--text-primary); border-color: rgba(217,119,6,.5); font-weight: 600; }
+.ctl-dec-advice { background: var(--bg-surface); border: 1px solid var(--border-default); border-radius: var(--radius-md); padding: 9px 12px; margin-bottom: 8px; }
+.ctl-dec-advice.is-stale { opacity: .6; }
+.ctl-dec-advice-h { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 4px; }
+.ctl-dec-advice-kind { font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .4px; color: var(--text-tertiary); border: 1px solid var(--border-subtle); border-radius: 999px; padding: 0 7px; }
+.ctl-dec-advice-t { font-size: 12.5px; font-weight: 600; color: var(--text-primary); }
+.ctl-dec-advice-s { font-size: 12px; color: var(--text-secondary); line-height: 1.6; }
 
 @media (max-width: 1000px) {
   .shell { grid-template-columns: 1fr; }
@@ -3192,6 +3404,13 @@ function toast(m,b=false){
 function esc(s){
   return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))
 }
+// Emit a value as a single-quoted JS literal for use inside a double-quoted
+// inline handler. JSON.stringify would emit double quotes and truncate the
+// attribute at the first one.
+function jsArg(v){
+  const s=String(v??'').replace(/[\r\n]/g,'');
+  return "'"+s.replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/&/g,'&amp;').replace(/"/g,'&quot;')+"'";
+}
 function humanStatus(s){
   return ({
     waiting:'等待',pending:'待派发',dispatched:'已派发',working:'运行中',
@@ -3447,6 +3666,12 @@ async function loadDashboard(){
   }
 }
 function dashSelectWorkflow(v){state.dashWorkflowId=v||null;saveViewState();loadDashboard()}
+async function dashOpenWorkflowOf(wid){
+  if(!wid)return dashOpenWorkflow();
+  state.dashWorkflowId=wid;
+  await dashOpenWorkflow();
+  openControllerCockpitModal();
+}
 async function dashOpenWorkflow(){
   const wid=state.dashWorkflowId;
   if(!wid)return toast('请先在下拉框选择一个工作流',true);
@@ -3481,7 +3706,11 @@ function renderDashboard(){
     +'<div class="dash-kpi"><div class="k">卡住</div><div class="v'+(d.stuck.length?' warn':'')+'">'+d.stuck.length+'</div><div class="s">'+(d.stuck.length?'需要处理':'Clear')+'</div></div>'
     +'<div class="dash-kpi"><div class="k">交付物</div><div class="v">'+d.deliveries.length+'</div><div class="s">最新有效交付</div></div></div>';
   const taskRows=d.tasks.length?d.tasks.map((t,i)=>'<div class="dash-task"><span class="n">'+(i+1)+'</span><div><div class="t">'+esc(t.task_id)+'</div><div class="d">'+esc(t.goal||t.node)+'</div><div class="m">工位 '+esc(t.pane_id||'—')+' · 执行者 '+esc(t.agent)+(t.runtime_status?(' · '+esc(t.runtime_status)):'')+' · 更新于 '+esc(t.updated_at_text)+'</div></div><div>'+dashPillFor(t)+'</div></div>').join(''):'<div class="empty">当前没有任务</div>';
-  const attRows=d.attention.length?d.attention.map(a=>'<div class="dash-q"><div class="qt"><span>'+esc(a.reason||a.task_id)+'</span><span class="dash-default">默认: '+esc(a.default_action)+'</span></div><div class="qd"><b>说明</b><span>'+esc(a.default_action_text)+'</span></div><div class="qm">'+esc(a.task_id)+' · 工位 '+esc(a.pane_id||'—')+' · '+esc(a.workflow_id)+' · '+esc(a.updated_at_text)+'</div><div class="dash-btns"><button class="btn primary" onclick="dashSignoff('+JSON.stringify(a.task_id)+','+JSON.stringify(a.workflow_id)+','+JSON.stringify(a.node||'')+',\'approve\')">放行</button><button class="btn danger-btn" onclick="dashSignoff('+JSON.stringify(a.task_id)+','+JSON.stringify(a.workflow_id)+','+JSON.stringify(a.node||'')+',\'reject\')">打回</button>'+(a.endpoint?'<button class="btn" onclick="dashExec('+JSON.stringify(a.endpoint)+','+JSON.stringify(a.payload||{}).replace(/</g,'\\u003c')+')">一键：'+esc(a.default_action)+'</button>':'')+'</div></div>').join(''):'<div class="dash-ok"><span class="dash-dot green"></span>没有等你的问题</div>';
+  const attRows=d.attention.length?d.attention.map(a=>{
+    if(a.decision_id)return '<div class="dash-q"><div class="qt"><span>待你裁决 · '+esc(a.decision_id)+'</span><span class="dash-default">'+esc(a.default_action)+'</span></div><div class="qd"><b>说明</b><span>'+esc(a.reason||a.default_action_text)+'</span></div><div class="qm">'+esc(a.workflow_id)+' · '+esc(a.node||'—')+' · '+esc(a.updated_at_text)+'</div><div class="dash-btns"><button class="btn primary" onclick="dashOpenWorkflowOf('+jsArg(a.workflow_id)+')">进入工作流裁决</button></div></div>';
+    return '<div class="dash-q"><div class="qt"><span>'+esc(a.reason||a.task_id)+'</span><span class="dash-default">默认: '+esc(a.default_action)+'</span></div><div class="qd"><b>说明</b><span>'+esc(a.default_action_text)+'</span></div><div class="qm">'+esc(a.task_id)+' · 工位 '+esc(a.pane_id||'—')+' · '+esc(a.workflow_id)+' · '+esc(a.updated_at_text)+'</div><div class="dash-btns"><button class="btn primary" onclick="dashSignoff('+JSON.stringify(a.task_id)+','+JSON.stringify(a.workflow_id)+','+JSON.stringify(a.node||'')+',\'approve\')">放行</button><button class="btn danger-btn" onclick="dashSignoff('+JSON.stringify(a.task_id)+','+JSON.stringify(a.workflow_id)+','+JSON.stringify(a.node||'')+',\'reject\')">打回</button>'+(a.endpoint?'<button class="btn" onclick="dashExec('+JSON.stringify(a.endpoint)+','+JSON.stringify(a.payload||{}).replace(/</g,'\\u003c')+')">一键：'+esc(a.default_action)+'</button>':'')+'</div></div>';
+  }).join(''):'<div class="dash-ok"><span class="dash-dot green"></span>没有等你的问题</div>';
+  const decRows=(d.decisions||[]).length?d.decisions.map(x=>'<div class="dash-q"><div class="qt"><span>'+esc(x.decision_id)+'</span><span class="dash-default">'+esc(x.node||'—')+'</span></div><div class="qd"><b>问题</b><span>'+esc(x.question||x.title)+'</span></div>'+((x.options||[]).length?'<div class="qm">可选：'+esc((x.options||[]).join(' / '))+(x.recommended?('（建议：'+esc(x.recommended)+'）'):'')+'</div>':'')+'<div class="qm">'+esc(x.workflow_id)+' · '+esc(x.raised_at_text)+'</div><div class="dash-btns"><button class="btn primary" onclick="dashOpenWorkflowOf('+jsArg(x.workflow_id)+')">去拍板</button></div></div>').join(''):'<div class="dash-ok"><span class="dash-dot green"></span>没有待裁决项</div>';
   const dlvRows=d.deliveries.length?d.deliveries.map(x=>'<div class="dash-task"><span class="n">✓</span><div><div class="t">'+esc(x.title||x.candidate_sha)+'</div><div class="m">'+esc(x.workflow_id)+' · '+esc(x.updated_at_text)+'</div></div><div><span class="badge cleaned">交付</span></div></div>').join(''):'<div class="empty">暂无交付物</div>';
   const stuckRows=d.stuck.length?d.stuck.map(s=>'<div class="dash-task"><span class="n">!</span><div><div class="t">'+esc(s.task_id||s.workflow_id)+'</div><div class="d">'+esc(s.reason)+'</div><div class="m">'+esc(s.workflow_id)+' · '+esc(s.last_event_text||'')+'</div></div><div><span class="badge blocked">卡住</span></div></div>').join(''):'<div class="dash-ok"><span class="dash-dot green"></span>一切正常，没有卡住</div>';
   document.getElementById('tasks').innerHTML=kpis
@@ -3489,6 +3718,7 @@ function renderDashboard(){
     +'<div class="dash-sec"><div class="dash-sec-h"><span>任务及其状态</span><span class="count">'+d.tasks.length+' / '+d.counts.tasks+'</span></div>'+taskRows+'</div>'
     +'<div class="dash-sec"><div class="dash-sec-h"><span>最新交付物</span><span class="count">'+d.deliveries.length+' 个</span></div>'+dlvRows+'</div>'
     +'</div><div class="dash-rail">'
+    +'<div class="dash-sec"><div class="dash-sec-h"><span>待你裁决</span><span class="count">'+(d.decisions||[]).length+' 个</span></div>'+decRows+'</div>'
     +'<div class="dash-sec"><div class="dash-sec-h"><span>等你的问题</span><span class="count">'+d.attention.length+' 个</span></div>'+attRows+'</div>'
     +'<div class="dash-sec"><div class="dash-sec-h"><span>卡住的东西</span><span class="count">'+d.stuck.length+' 项</span></div>'+stuckRows+'</div>'
     +'</div></div>';
@@ -3676,6 +3906,7 @@ async function loadWorkflow(id){
   state.flowSelectedNodeId=null;
   state.workflow=await api('/api/workflow?id='+encodeURIComponent(id));
   try{state.controllerActionsData=await api('/api/workflow/controller-actions?workflow_id='+encodeURIComponent(id))}catch(e){state.controllerActionsData=null}
+  try{state.decisionData=await api('/api/workflow/decisions?workflow_id='+encodeURIComponent(id))}catch(e){state.decisionData=null}
   const w=state.workflow.workflow;
   saveViewState();
   renderWorkflowHead(w);
@@ -3793,7 +4024,6 @@ function updateAttentionHub(){
       const d=decisionSummary(t);
       let actionsHtml='';
       if(acts.length){
-        const catMeta=c=>({fix:['修复','working'],rework:['换人重派','rework'],bypass:['豁免推进','cleaned'],recovery:['恢复','waiting']}[c]||[c,'waiting']);
         const mine=acts.filter(a=>((a.blocker_task_id||a.old_task_id||String(a.action_id||'').split(':')[0])===t.task_id));
         const shown=(mine.length?mine:acts).slice(0,2);
         const cardRows=shown.map(act=>`
@@ -4664,18 +4894,87 @@ async function createCandidate(){
     }
   });
 }
+function controllerActionCard(act,tid,index){
+  const m=catMeta(act.category);
+  const fx=act.effect||act.description||'';
+  const target=tid||act.blocker_task_id||act.old_task_id||'';
+  return `<article class="ctl-card${act.recommended?' is-recommended':''}${act.is_destructive?' is-destructive':''}"><div class="ctl-card-head"><span class="ctl-index">操作 ${index}</span><span class="ctl-card-title">${act.recommended?'⭐ ':''}${esc(act.title)}</span><span class="ctl-badges">${act.recommended?'<span class="ctl-rec">推荐</span>':''}<span class="badge ${m[1]}">${esc(m[0])}</span></span></div><p class="ctl-card-desc">${esc(act.description)}</p>${fx?`<div class="ctl-effect">点按钮后：${esc(fx)}</div>`:''}${act.new_task_id||act.new_agent?`<div class="ctl-meta-chips">${act.old_task_id?`<span class="ctl-chip">旧任务 <strong>${esc(act.old_task_id)}</strong></span>`:''}${act.new_task_id?`<span class="ctl-chip">新任务 <strong>${esc(act.new_task_id)}</strong></span>`:''}${act.new_agent?`<span class="ctl-chip">执行者 <strong>${esc(act.new_agent)}</strong></span>`:''}</div>`:''}<div class="ctl-card-foot">${target?`<button class="btn" onclick="locateControllerTask('${esc(target)}')">查看任务</button>`:''}<button class="btn primary" onclick="executeControllerAction('${esc(act.action_id)}','${esc(state.workflowId||'')}')">一键执行</button></div>${act.command_line?`<details class="ctl-tech"><summary>工程师技术详情（可选）</summary><div class="ctl-tech-body"><div class="ctl-cheat-cmd"><code>${esc(act.command_line)}</code></div><div style="display:flex;justify-content:flex-end;margin-top:6px"><button class="mini" onclick="copyCliCommandByActionId('${esc(act.action_id)}')">复制命令</button></div></div></details>`:''}</article>`;
+}
+// Category → [label, badge class].  Module scope: the action-card renderer is
+// shared by both the blocker and pipeline sections.
+const CTL_CAT_META={fix:['修复','working'],rework:['换人重派','rework'],bypass:['豁免推进','cleaned'],recovery:['恢复','waiting'],pipeline:['推进交付','working']};
+function catMeta(c){return CTL_CAT_META[c]||[c||'操作','waiting'];}
+// Pipeline actions must render even when there are zero blockers: a healthy task
+// that still owes `integrate` is exactly the case that used to render nothing.
+function renderPipelineActions(acts){
+  const pipelineActs=acts.filter(a=>a.group==='pipeline');
+  if(!pipelineActs.length)return '';
+  const resumeAct=pipelineActs.find(a=>a.action_id.endsWith(':resume_workflow'));
+  const taskActs=pipelineActs.filter(a=>a!==resumeAct);
+  const byTask={};
+  taskActs.forEach(a=>{const k=a.blocker_task_id||String(a.action_id).split(':')[0];(byTask[k]=byTask[k]||[]).push(a)});
+  const groups=Object.keys(byTask).map(k=>{
+    const items=byTask[k].slice().sort((a,b)=>(b.recommended?1:0)-(a.recommended?1:0));
+    return `<div class="ctl-blocker" style="margin-bottom:10px"><div class="ctl-blocker-head"><div style="min-width:0"><div class="ctl-blocker-title">${esc(taskDisplayName({task_id:k})||k)}</div><div class="ctl-blocker-id">${esc(k)}</div></div><div style="display:flex;gap:6px;flex-shrink:0"><button class="mini" onclick="locateControllerTask('${esc(k)}')">查看任务详情</button></div></div></div><div class="ctl-actions">${items.map((a,i)=>controllerActionCard(a,k,i+1)).join('')}</div>`;
+  }).join('');
+  const resumeHtml=resumeAct?`<div class="ctl-actions" style="margin-bottom:12px">${controllerActionCard(resumeAct,'',1)}</div>`:'';
+  return `<section><div class="ctl-section-title">推进交付链路 <span class="ctl-count">${pipelineActs.length}</span></div><div class="ctl-sub">这些任务本身没有报错，只是还差交付链路的一步（提交 / 集成 / 收尾），或工位需要一次真实重驱。点按钮即可推进。</div>${resumeHtml}${groups}</section>`;
+}
+// Open decision asks must be impossible to miss: they block whole waves and
+// previously only existed as free text inside the coordinator's terminal.
+function renderDecisionPanel(){
+  const data=state.decisionData||{};
+  const decisions=data.decisions||[];
+  const advice=data.advice||[];
+  let html='';
+  if(decisions.length){
+    html+=`<div class="ctl-section-title">待你裁决 <span class="ctl-count">${decisions.length}</span></div><div class="ctl-sub">总指挥把这些问题上抛给你了。在你拍板前，相关阶段不会开工。点选项即落库，总指挥下一轮就能读到你的结论。</div>`;
+    html+=decisions.map(d=>{
+      const opts=(d.options||[]).map(o=>`<span class="ctl-dec-opt${o===d.recommended?' is-rec':''}">${esc(o)}${o===d.recommended?' · 建议':''}</span>`).join('');
+      return `<div class="ctl-decision"><div class="ctl-dec-head"><span class="ctl-dec-id">${esc(d.decision_id)}</span><span class="ctl-chip">${esc(d.node||'—')}</span><span class="ctl-chip">${esc(d.raised_at_text||'')}</span></div><div class="ctl-dec-q">${esc(d.question||d.title||d.decision_id)}</div>${opts?`<div class="ctl-dec-opts">${opts}</div>`:''}<div class="ctl-card-foot"><button class="btn primary" onclick="openDecisionPanel('${esc(d.decision_id)}')">已拍板，记录结论</button></div></div>`;
+    }).join('');
+  }
+  if(advice.length){
+    html+=`<div class="ctl-section-title" style="margin-top:16px">总指挥最新建议 <span class="ctl-count">${advice.length}</span></div><div class="ctl-sub">来自工作流共享文档区（append-only 账本），非模型口头结论。</div>`;
+    html+=advice.map(a=>`<div class="ctl-dec-advice${a.stale?' is-stale':''}"><div class="ctl-dec-advice-h"><span class="ctl-dec-advice-kind">${esc(a.kind)}</span><span class="ctl-dec-advice-t">${esc(a.title||'—')}</span>${a.stale?'<span class="ctl-chip">已作废</span>':''}</div>${a.summary?`<div class="ctl-dec-advice-s">${esc(a.summary)}</div>`:''}</div>`).join('');
+  }
+  if(!html)return `<div class="ctl-empty">✓ 当前没有待你裁决的问题。<div class="muted">总指挥上抛的裁决项会出现在这里；已裁决的会自动消失。</div></div>`;
+  return `<section>${html}</section>`;
+}
+function openDecisionPanel(decisionId){
+  const decisions=((state.decisionData||{}).decisions)||[];
+  const d=decisions.find(x=>x.decision_id===decisionId);
+  if(!d)return toast('该裁决项已不在待办列表',true);
+  // Single quotes only: the handler lives inside a double-quoted HTML
+  // attribute, so JSON.stringify's double quotes would truncate it.
+  // esc() escapes ' as &#39;, so the browser decodes back to the raw value.
+  const opts=(d.options||[]).map(o=>`<div class="ctl-dec-opt${o===d.recommended?' is-rec':''}" style="cursor:pointer;padding:6px 12px" onclick="document.getElementById('decChosen').value=String.fromCharCode(${Array.from(o).map(ch=>ch.charCodeAt(0)).join(',')})">${esc(o)}${o===d.recommended?' · 建议':''}</div>`).join('');
+  openModal('记录裁决 · '+d.decision_id,`<div class="ctl-wrap"><div class="ctl-dec-q">${esc(d.question||d.title)}</div>${opts?`<div class="ctl-dec-opts" style="flex-direction:column;align-items:stretch">${opts}</div>`:''}<div class="form"><label for="decChosen">你的结论（可直接选上面的选项，也可自己写）</label><input id="decChosen" value="${esc(d.recommended||'')}" placeholder="例如：MATCH 入 V1，但 T3 段需先过 G1c 的 DB/EXPLAIN 门禁"><label for="decNote">补充说明（可选）</label><input id="decNote" placeholder="给总指挥的执行约束"></div><div style="display:flex;justify-content:flex-end;gap:10px;margin-top:12px"><button class="btn" onclick="closeModal()">取消</button><button class="btn primary" onclick="submitDecision('${esc(d.decision_id)}')">落库并通知总指挥</button></div></div>`);
+}
+async function submitDecision(decisionId){
+  const decision=(document.getElementById('decChosen')?.value||'').trim();
+  const note=(document.getElementById('decNote')?.value||'').trim();
+  if(!decision)return toast('请填写你的结论',true);
+  closeModal();
+  try{
+    toast('正在记录裁决…');
+    await api('/api/workflow/decision',{method:'POST',body:JSON.stringify({workflow_id:state.workflowId,decision_id:decisionId,decision:decision+(note?('（'+note+'）'):''),operator:'human_console'})});
+    toast('裁决已落库，总指挥下一轮即可读到');
+    await loadWorkflow(state.workflowId);
+  }catch(e){toast('记录失败: '+e.message,true)}
+}
 function openControllerCockpitModal(){
   const w=state.workflow&&state.workflow.workflow;
   const wid=state.workflowId||(w&&w.workflow_id)||'未选择工作流';
   const stall=state.workflow&&state.workflow.stall;
-  const acts=(state.controllerActionsData&&state.controllerActionsData.actions)||[];
+  const allActs=(state.controllerActionsData&&state.controllerActionsData.actions)||[];
   const blockers=(state.controllerActionsData&&state.controllerActionsData.blockers)||[];
+  const acts=allActs.filter(a=>a.group!=='pipeline');
   if(!state.controllerActionsMap)state.controllerActionsMap={};
-  acts.forEach(a=>{state.controllerActionsMap[a.action_id]=a;});
+  allActs.forEach(a=>{state.controllerActionsMap[a.action_id]=a;});
   const curStage=state.workflow&&state.workflow.stages?state.workflow.stages.find(s=>['working','failed','blocked'].includes(s.status)):null;
   const stageName=curStage?(curStage.label||curStage.key):'就绪/空闲';
   const isStalled=Boolean(stall&&stall.is_stalled);
-  const catMeta=c=>({fix:['修复','working'],rework:['换人重派','rework'],bypass:['豁免推进','cleaned'],recovery:['恢复','waiting']}[c]||[c||'操作','waiting']);
 
   let statusCard=`<section class="ctl-status${isStalled?' is-stalled':''}"><div class="ctl-status-head"><span class="ctl-status-title"><span class="ctl-dot"></span>调度状态与等待条件</span><span class="badge ${isStalled?'failed':'cleaned'}">${isStalled?'推进停滞':'调度运转中'}</span></div><div class="ctl-status-grid"><div class="ctl-status-item"><span class="ctl-k">当前关注阶段</span><strong>${esc(stageName)}</strong></div><div class="ctl-status-item"><span class="ctl-k">活跃卡点</span><strong>${blockers.length} 项</strong></div><div class="ctl-status-item is-full"><span class="ctl-k">${isStalled?'停滞原因':'轮询状态'}</span><span class="ctl-note">${isStalled?`⚠️ ${esc(stall.message)}`:'✓ Controller 后台轮询正常，正在监控 DAG 拓扑门禁'}</span></div></div></section>`;
 
@@ -4692,23 +4991,26 @@ function openControllerCockpitModal(){
       const ag=b.agent||'';
       const stageLabel=b.stage_label||b.stage||b.node||'';
       const head=tid?`<div class="ctl-blocker" style="margin-bottom:10px"><div class="ctl-blocker-head"><div style="min-width:0"><div class="ctl-blocker-title">卡点任务 ${gi+1} · ${esc(taskDisplayName(b)||stageLabel||'任务')}</div><div class="ctl-blocker-id">${esc(tid)}${ag?` · 执行者 ${esc(ag)}`:''}${st?` · ${esc(humanStatus(st))}`:''}${stageLabel?` · ${esc(stageLabel)}`:''}</div></div><div style="display:flex;gap:6px;flex-shrink:0"><button class="mini" onclick="locateControllerTask('${esc(tid)}')">查看任务详情</button></div></div>${reason?`<div class="ctl-blocker-reason">卡点原因：${esc(reason)}</div>`:''}</div>`:`<div class="ctl-sub">以下为当前可执行的一键解卡操作（已按推荐度排序）。</div>`;
-      const cards=(g.items.length?g.items:[]).map((act,i)=>{const m=catMeta(act.category);const fx=act.effect||act.description||'';return `<article class="ctl-card${act.recommended?' is-recommended':''}${act.is_destructive?' is-destructive':''}"><div class="ctl-card-head"><span class="ctl-index">操作 ${i+1}</span><span class="ctl-card-title">${act.recommended?'⭐ ':''}${esc(act.title)}</span><span class="ctl-badges">${act.recommended?'<span class="ctl-rec">推荐</span>':''}<span class="badge ${m[1]}">${esc(m[0])}</span></span></div><p class="ctl-card-desc">${esc(act.description)}</p>${fx?`<div class="ctl-effect">点按钮后：${esc(fx)}</div>`:''}${act.new_task_id||act.new_agent?`<div class="ctl-meta-chips">${act.old_task_id?`<span class="ctl-chip">旧任务 <strong>${esc(act.old_task_id)}</strong></span>`:''}${act.new_task_id?`<span class="ctl-chip">新任务 <strong>${esc(act.new_task_id)}</strong></span>`:''}${act.new_agent?`<span class="ctl-chip">执行者 <strong>${esc(act.new_agent)}</strong></span>`:''}</div>`:''}<div class="ctl-card-foot"><button class="btn" onclick="locateControllerTask('${esc(tid||actionKey(act))}')">查看任务</button><button class="btn primary" onclick="executeControllerAction('${esc(act.action_id)}','${esc(wid)}')">一键执行</button></div><details class="ctl-tech"><summary>工程师技术详情（可选）</summary><div class="ctl-tech-body"><div class="ctl-cheat-cmd"><code>${esc(act.command_line)}</code></div><div style="display:flex;justify-content:flex-end;margin-top:6px"><button class="mini" onclick="copyCliCommandByActionId('${esc(act.action_id)}')">复制命令</button></div></div></details></article>`}).join('')||'<div class="muted" style="font-size:12px">该卡点暂无自动解卡按钮，请查看任务详情人工处理。</div>';
+      const cards=(g.items.length?g.items:[]).map((act,i)=>controllerActionCard(act,tid,i+1)).join('')||'<div class="muted" style="font-size:12px">该卡点暂无自动解卡按钮，请查看任务详情人工处理。</div>';
       return `<section style="margin-bottom:16px">${head}<div class="ctl-actions">${cards}</div></section>`;
     }).join('');
     unblockSection=`<section><div class="ctl-section-title">按卡点任务一键解卡 <span class="ctl-count">${blockers.length||acts.length}</span></div><div class="ctl-sub">每个卡点任务独立分组：先看“卡点原因”，再点对应按钮即可执行，无需手动敲命令。</div>${sections}</section>`;
   } else {
-    unblockSection=`<div class="ctl-empty">✓ 当前暂无活跃卡点，无需解卡。<div class="muted">Controller 仍在后台监控 DAG 门禁；若出现停滞，这里会按任务分组给出可一键执行的按钮。</div></div>`;
+    unblockSection=`<div class="ctl-empty">✓ 当前没有报错卡点。<div class="muted">若交付链路仍在等待（提交 / 集成 / 收尾），见下方“推进交付链路”一节。</div></div>`;
   }
+  const pipelineSection=renderPipelineActions(allActs);
+  const decisionSection=renderDecisionPanel();
 
   const cheatRows=[
     {name:'换执行者重派',cmd:`bin/herdr-task launch --task-id <new-task-id> --workflow-id ${wid} --stage <stage> --source . --agent <agent> --goal <goal> --prompt <prompt> --supersedes <old-task-id>`,desc:'作废指定卡点旧任务，换执行者重派新任务'},
     {name:'强制推进阶段',cmd:`bin/herdr-task advance ${wid}`,desc:'检查并强制推进工作流至下一阶段'},
     {name:'解除升级锁定',cmd:'bin/herdr-task clear-escalation <task-id>',desc:'撤销机器终化升级锁，解除阻断重新流转'},
+    {name:'真实重驱工位',cmd:`herdr agent prompt <pane-id> "提示内容" --wait --timeout 180000`,desc:'直接向工位重推提示并等待回执（区别于 steer 插话队列）'},
     {name:'实时插话指导',cmd:'bin/herdr-task steer <task-id> "提示内容"',desc:'向正在执行的智能体工位注入实时插话指导'},
   ];
   let cheatSheet=`<details class="ctl-tech"><summary>工程师命令参考（可选展开，终端用户无需使用）</summary><div class="ctl-tech-body"><section class="ctl-cheatsheet" style="box-shadow:none"><div class="ctl-sub">以下命令仅供审计与排查；日常使用请点上面的“一键执行”按钮。</div><div class="ctl-cheat-list">${cheatRows.map((r,i)=>`<div class="ctl-cheat-row"><span class="ctl-cheat-num">${i+1}</span><div><div class="ctl-cheat-name"><span>${esc(r.name)}</span><button class="mini" onclick="copyCliCommand(document.getElementById('ctlCheat${i}').textContent)">复制</button></div><div class="ctl-cheat-cmd"><code id="ctlCheat${i}">${esc(r.cmd)}</code></div><div class="ctl-cheat-desc">${esc(r.desc)}</div></div></div>`).join('')}</div></section></div></details>`;
 
-  const html=`<div class="ctl-wrap">${statusCard}${unblockSection}${cheatSheet}</div>`;
+  const html=`<div class="ctl-wrap">${statusCard}${decisionSection}${unblockSection}${pipelineSection}${cheatSheet}</div>`;
   openModal(`Controller 调度与解卡控制台 · ${wid}`,html);
 }
 async function advanceStage(){
@@ -4979,6 +5281,9 @@ class Handler(BaseHTTPRequestHandler):
             if p=='/api/workflow/controller-actions':
                 wid=self.query().get('workflow_id',[''])[0] or self.query().get('id',[''])[0]
                 return self.send_json(200,api_workflow_controller_actions(wid))
+            if p=='/api/workflow/decisions':
+                wid=self.query().get('workflow_id',[''])[0] or self.query().get('id',[''])[0]
+                return self.send_json(200,api_workflow_decisions(wid))
             return self.send_json(404,error='Not Found')
         except Exception as e:
             self.log_message('GET %s failed: %s', self.path, e)
@@ -5025,6 +5330,8 @@ class Handler(BaseHTTPRequestHandler):
             if p=='/api/kernel/checkpoint':return self.send_json(200,api_kernel_checkpoint_create(b))
             if p=='/api/kernel/checkpoint/restore':return self.send_json(200,api_kernel_checkpoint_restore(b))
             if p=='/api/controller/execute-action':return self.send_json(200,api_controller_execute_action(b))
+            if p=='/api/workflow/decision/raise':return self.send_json(200,api_workflow_decide_raise(b))
+            if p=='/api/workflow/decision':return self.send_json(200,api_workflow_decide_resolve(b))
             return self.send_json(404,error='Not Found')
         except Exception as e:
             self.log_message('POST %s failed: %s', self.path, e)

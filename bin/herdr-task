@@ -6259,6 +6259,16 @@ def note_add(args):
     agent = args.agent or (task.get("agent") if task else None)
     base_sha = args.base_sha or _task_head_sha(task) or None
 
+    # --field KEY=VALUE 只做解析与透传；字段名/保留名/长度仍由
+    # append_note 的白名单统一裁决，CLI 不自建第二套校验。
+    extra_fields = {}
+    for raw in getattr(args, "field", None) or []:
+        key, sep, value = str(raw).partition("=")
+        if not sep or not key.strip():
+            print(f"Error: --field expects KEY=VALUE, got: {raw}")
+            sys.exit(2)
+        extra_fields[key.strip()] = value
+
     try:
         record = wd.append_note(
             args.workflow_id,
@@ -6272,6 +6282,7 @@ def note_add(args):
             base_sha=base_sha,
             round=args.round,
             invalidates=args.invalidates,
+            fields=extra_fields or None,
         )
     except ValueError as exc:
         print(f"Error: {exc}")
@@ -7022,6 +7033,18 @@ def main():
         action="append",
         default=None,
         help="仅 kind=invalidation：作废哪些节点的历史条目",
+    )
+    note_add_cmd.add_argument(
+        "--field",
+        action="append",
+        default=None,
+        metavar="KEY=VALUE",
+        help=(
+            "结构化字段（可重复），原样透传给 append_note(fields=...) 并由"
+            "其白名单校验。用于决策契约：--field decision_id=DU-10 "
+            "--field decision_status=open --field question='...' "
+            "--field options='[\"入\",\"不入\"]' --field recommended=入"
+        ),
     )
 
     note_list_cmd = sub.add_parser("note-list", help="查看 workflow 共享文档区条目")
