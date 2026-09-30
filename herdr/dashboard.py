@@ -85,6 +85,7 @@ def build_dashboard(
     stalls: Optional[Dict[str, Mapping[str, Any]]] = None,
     anomalies: Optional[List[Mapping[str, Any]]] = None,
     runtimes: Optional[Dict[str, Mapping[str, Any]]] = None,
+    decisions: Optional[List[Mapping[str, Any]]] = None,
     scope: Optional[str] = None,
     workflows: Optional[List[Mapping[str, Any]]] = None,
     now: Optional[float] = None,
@@ -93,7 +94,8 @@ def build_dashboard(
     import time as _time
 
     now_f = float(now) if now is not None else _time.time()
-    lim = {"tasks": 50, "attention": 30, "deliveries": 10, "stuck": 30}
+    lim = {"tasks": 50, "attention": 30, "deliveries": 10, "stuck": 30,
+           "decisions": 30}
     if limits:
         lim.update({k: int(v) for k, v in limits.items() if v is not None})
 
@@ -131,6 +133,39 @@ def build_dashboard(
             "updated_at_text": format_clock(upd),
         })
 
+    # --- decisions: open asks awaiting a human ruling ---
+    # An open decision is not a task, so it gets its own identity key and
+    # also joins `attention` (the console's single "等你的问题" surface).
+    decision_list: List[Dict[str, Any]] = []
+    for x in decisions or []:
+        if not isinstance(x, Mapping):
+            continue
+        did = str(x.get("decision_id") or "").strip()
+        if not did:
+            continue
+        raised = _epoch(x.get("raised_at"))
+        question = str(x.get("question") or x.get("title") or "").strip()
+        options = [str(o) for o in (x.get("options") or []) if str(o).strip()]
+        recommended = str(x.get("recommended") or "").strip()
+        decision_list.append({
+            "decision_id": did,
+            "workflow_id": x.get("workflow_id") or "unknown",
+            "node": x.get("node") or "—",
+            "title": str(x.get("title") or did)[:200],
+            "question": question[:300],
+            "options": options,
+            "recommended": recommended,
+            "reason": question[:300] or f"待你裁决：{did}",
+            "default_action": f"裁决 {did}",
+            "default_action_text": (
+                (question[:200] + "。") if question else ""
+            ) + "确认后点“已拍板”把你的结论落库，总指挥下一轮即可读到。",
+            "raised_at": raised,
+            "raised_at_text": format_clock(raised),
+        })
+    decision_list.sort(key=lambda x: -(x.get("raised_at") or 0.0))
+    decision_items = decision_list[: lim["decisions"]]
+
     # --- attention: union of explicit blockers + escalated + blocked/failed ---
     seen: Dict[str, Dict[str, Any]] = {}
     candidates: List[Mapping[str, Any]] = []
@@ -164,8 +199,28 @@ def build_dashboard(
             "updated_at": upd,
             "updated_at_text": format_clock(upd),
         }
-    attention = sorted(seen.values(),
-                       key=lambda a: -(a.get("updated_at") or 0.0))[: lim["attention"]]
+    # A decision has no one-click executor: the ruling text is the human's.
+    # Keyed by workflow too, so two workflows reusing an id both stay visible.
+    for dec in decision_items:
+        key = f"decision:{dec['workflow_id']}:{dec['decision_id']}"
+        seen.setdefault(key, {
+            "task_id": "",
+            "decision_id": dec["decision_id"],
+            "workflow_id": dec["workflow_id"],
+            "node": dec["node"],
+            "pane_id": "",
+            "reason": dec["reason"],
+            "default_action": dec["default_action"],
+            "default_action_text": dec["default_action_text"],
+            "command": "",
+            "options": dec["options"],
+            "recommended": dec["recommended"],
+            "updated_at": dec["raised_at"],
+            "updated_at_text": dec["raised_at_text"],
+        })
+    ordered_attention = sorted(seen.values(),
+                               key=lambda a: -(a.get("updated_at") or 0.0))
+    attention = ordered_attention[: lim["attention"]]
 
     # --- deliveries: newest first ---
     def _dl_ts(x: Mapping[str, Any]) -> float:
@@ -216,11 +271,15 @@ def build_dashboard(
         "workflows": [dict(w) for w in (workflows or [])],
         "tasks": task_items,
         "attention": attention,
+        "decisions": decision_items,
         "deliveries": delivery_items,
         "stuck": stuck,
         "counts": {
             "tasks": len(task_list),
-            "attention": len(seen),
+            # Count what is actually rendered, not the pre-slice total, so the
+            # KPI can never disagree with the list underneath it.
+            "attention": len(attention),
+            "decisions": len(decision_items),
             "deliveries": len(delivery_list),
             "stuck": len(stuck),
         },
