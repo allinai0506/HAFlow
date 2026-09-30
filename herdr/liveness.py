@@ -549,7 +549,7 @@ class EpisodeStore:
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
         except FileNotFoundError:
-            data = {}
+            data = {"episodes": {}}
         except (OSError, TypeError, ValueError) as exc:
             if strict:
                 raise RuntimeError("episode ledger could not be read") from exc

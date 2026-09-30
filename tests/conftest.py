@@ -21,3 +21,9 @@ os.environ.setdefault(
 # Hard override: a developer shell exporting HERDR_OBSERVER_ENABLED=1 must not
 # silently re-enable production writes from the suite.
 os.environ["HERDR_OBSERVER_ENABLED"] = "0"
+
+# Workflow continuation uses the shared attention ledger even after Tasks finish.
+# Background scans from tests must never write the host Controller ledger.
+os.environ["HERDR_ATTENTION_FILE"] = os.path.join(
+    tempfile.mkdtemp(prefix="herdr-test-attention-"), "attention.json"
+)

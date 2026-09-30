@@ -392,3 +392,21 @@ Git 模式任务的 Agent 完成、提交成功和集成成功是三种事实。
 Worktree Clone 转换须保留 source 本地 heads，而不是只把它们映射到 origin/*；`--update-head-ok` 仅在临时 no-checkout 独立元数据导入时使用，不作用于 source。源 dev/anchor 落后于远端时仍需正常同步并重跑验证；保留分支不能代替新基线验收。Candidate 选择排除 superseded/有 superseded_by 的旧任务。
 
 证据：`tests/test_scheduler_dispatch_e2e.py::PlannedImplementationCoverageTest`、`tests/test_herdr_task_ops_center.py::PlannedNodeStatusTest`、`tests/test_herdr_worker.py::TestCleanSandbox` 与 `docs/walkthroughs/20260930-candidate-recovery.md`。
+
+## 阶段内交接义务巡检
+
+FACT：`integrated` 是持久集成引用接收，不保证指定基线已采用成果。显式 `required_task_ids` 节点的所有现有任务结束后，Controller 每 30 秒检查缺失计划任务与 Git 成果采用状态；仅 `running` 且无活跃/阻塞任务时催办。Git 祖先核验绑定当次目标 SHA，总查询预算 3 秒，失败标记 `unknown`。
+
+FACT：未完成义务保存在既有 attention episode，默认结束后 600 秒催办，间隔复用 `HERDR_ATTENTION_RETRY_INTERVAL`，同一义务最多进行两次实际协调投递；协调者持续不可用或仍无结果时升级人工。忙碌不消耗实际发送次数，人工通知失败保留待投递状态并按间隔重试。账本事务使用跨进程文件锁；重启重新检查事实，通知收到不关闭义务。队列执行前再次校验指纹、工作流状态和计划。复用启动时的 canonical coordinator name，按名称探测与投递，拒绝错误身份；探测 5 秒、投递 35 秒上限。慢巡检在独立单线程后台池运行，同时最多一个 scan，不阻塞正常阶段推进。沿真实 `superseded_by` 查替代任务，不从自由文本推断新 ID。
+
+FACT：Console 的 stall 投影显示具体未派发任务与已接收但未确认采用的成果，返回 `continuation.deliveries[].adoption`（`adopted` / `not_adopted` / `unknown`）及 `target_sha`。巡检不直接合流、不启动 Task、不修改任务状态；协调者仍遵守原权限、串行屏障与候选门禁。
+
+边界：仅适用于有显式任务清单（单节点最多 64 项）且已有任务的节点；超出该预算仍由原调度门禁处理，不执行此恢复路径。已经有直接后继任务时交给后继验收，不以原基线未采用误报。未声明清单的动态计划维持既有行为。Git 祖先证据不把 squash/cherry-pick 内容相似当作采用证明。
+
+Evidence:
+- `herdr/workflow_continuation.py#pending_continuations`
+- `herdr/projects.py#inspect_continuation`
+- `services/herdr-controller.py#check_workflow_continuation`
+- `services/herdr-controller.py#handle_workflow_continuation`
+- `herdr/projection.py#detect_workflow_stalls`
+- `tests/test_workflow_continuation.py`

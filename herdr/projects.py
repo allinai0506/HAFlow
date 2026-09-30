@@ -519,7 +519,7 @@ def _coordinator_alive(pane_id):
     return result.returncode == 0
 
 
-def _start_coordinator(project_id, coordinator_pane_id):
+def coordinator_agent_name(project_id):
     # Herdr agent name must:
     # - start with lowercase letter
     # - contain only a-z, 0-9, - or _
@@ -533,7 +533,11 @@ def _start_coordinator(project_id, coordinator_pane_id):
     if not safe_id or not safe_id[0].isalpha():
         safe_id = "project-" + safe_id
 
-    agent_name = (safe_id + "-coordinator")[:32]
+    return (safe_id + "-coordinator")[:32]
+
+
+def _start_coordinator(project_id, coordinator_pane_id):
+    agent_name = coordinator_agent_name(project_id)
 
     return _run_json([
         "herdr",
@@ -1285,3 +1289,42 @@ def ensure_node_runtime(workflow_id_or_root, node_id):
         "required_outputs": node.get("required_outputs", []),
         "rules": node.get("rules", []),
     }
+
+
+def inspect_continuation(workflow_record, config, tasks):
+    """Bounded, read-only Git evidence for the pure continuation policy."""
+    from herdr.workflow_continuation import pending_continuations, finish_continuation
+    import time
+    candidates = pending_continuations(workflow_record, config, tasks)
+    if not candidates:
+        return None
+    root = workflow_record.get('project_root')
+    branch = candidates[0]['target_branch']
+    target_sha, adoption = None, {}
+    deadline = time.monotonic() + 3.0
+
+    def probe(*args):
+        budget = deadline - time.monotonic()
+        if not root or budget <= 0:
+            return None
+        try:
+            return subprocess.run(['git', '-C', root, *args], text=True,
+                                  capture_output=True, timeout=budget)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+
+    if branch:
+        resolved = probe('rev-parse', '--verify', '--end-of-options', f'{branch}^{{commit}}')
+        if resolved is not None and resolved.returncode == 0:
+            target_sha = resolved.stdout.strip()
+    for pending in candidates:
+        for delivery in pending['deliveries']:
+            sha = delivery['sha']
+            if target_sha and isinstance(sha, str) and re.fullmatch(r'[0-9a-f]{40}', sha):
+                result = probe('merge-base', '--is-ancestor', sha, target_sha)
+                if result is not None and result.returncode in (0, 1):
+                    adoption[delivery['task_id']] = 'adopted' if result.returncode == 0 else 'not_adopted'
+        unresolved = finish_continuation(pending, target_sha, adoption)
+        if unresolved:
+            return unresolved
+    return None

@@ -1565,3 +1565,9 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - 2026-09-30：wf-project-0929-01 Candidate 根因恢复：Git 节点等集成、显式 planned Task 清单、CLI/ops读取口径同步、Worktree本地refs保留与作废候选排除；详见 task-lifecycle 和恢复记录。
 
 - 2026-09-30 Candidate 恢复追加：真实配置加载保留 planned Task 身份，CLI 仅加载记录明确路径，缺失文件不借用 foreign legacy；恢复任务绑定 Java 验收入口。
+
+### 2026-09-30 — 阶段内部交接义务防静默停滞
+
+- 区分集成引用接收与指定目标 SHA 的采用证据，显式计划缺项不因 Task cleaned 消失。
+- Controller 复用 attention 事务保存有界协调恢复义务；暂停/阻塞不催办、重启复核、旧队列重新核验、独立进程去重。
+- Console stall 复用同一判定显示未派发和未采用成果。Evidence: `tests/test_workflow_continuation.py`；详见 [[task-lifecycle]]。
