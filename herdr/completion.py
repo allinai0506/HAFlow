@@ -194,6 +194,39 @@ def is_stale_epoch(epoch_updated_at: float | None, current_updated_at: float) ->
         return True
 
 
+def observation_is_current(
+    observation: dict | None,
+    *,
+    authoritative_status: str | None,
+    authoritative_version: int | None,
+) -> bool:
+    """Return whether a durable Sentinel sample can still win its CAS.
+
+    ``herdr-task set-status``, a human reopen, or another Controller write all
+    bump the task version.  A sample recorded before that write can never be
+    accepted again, so the owner must wait for a fresh sample instead of
+    retrying a compare-and-set that is unwinnable by construction.
+
+    This is a pre-check, not the authoritative gate: the atomic completion
+    path still validates inside its own transaction.  It exists for the paths
+    that read an observation outside a transaction and would otherwise
+    re-attempt a hopeless transition on every sweep.
+    """
+    if not isinstance(observation, dict):
+        return False
+    observed_status = observation.get("observed_status")
+    if observed_status is not None and observed_status != authoritative_status:
+        return False
+    observed_version = observation.get("observed_version")
+    if observed_version is None or authoritative_version is None:
+        # Nothing to bind the sample to; let the authoritative CAS decide.
+        return True
+    try:
+        return int(observed_version) == int(authoritative_version)
+    except (TypeError, ValueError):
+        return False
+
+
 def should_accept(
     *,
     marker_present: bool,

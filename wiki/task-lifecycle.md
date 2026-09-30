@@ -174,6 +174,36 @@ Evidence:
 - `tests/test_completion_marker_wrapping.py`
 - `docs/lessons/lessons-learned.md` §100
 
+### 1.4 陈旧观测的 CAS 前置跳过
+
+`FACT` §1.3 的完成观测走 `compare_and_set_completion_transition`，观测校验、CAS 与
+观测消费在**同一个 SQLite 写事务**内完成，因此不会重试同一份样本。
+
+`DECISION` **blocked 观测读在事务外**，必须自己承担漂移。`herdr-task set-status`、
+人工 reopen、其它 Controller 写入都会抬 `tasks.version`；此后那份
+`blocked_marker_observed` 样本的 `observed_version` 永远对不上。发起一次已知不可能
+赢的 CAS、再记一条拒绝事件，然后下一轮 sweep 原样重来 —— 实测
+`impl-t6-mock-retire` 刷出 **238 条完全相同的 `blocked_observation_cas_rejected`，
+跨 25 分钟零进展**，最终成功纯靠 Sentinel 碰巧再次看见标记。
+
+`RULE` 能否发起 CAS 由纯函数 `herdr.completion.observation_is_current()` 前置判定：
+
+- `observed_status` / `observed_version` 任一与权威行不符 → **静默跳过**，等 Sentinel
+  补新样本；不打事件、不占用转换预算；
+- 非预期拒绝（判据说该赢却没赢）仍记录，但按 `(task_id, observed_version)` **去重**，
+  一个样本一条事实；
+- 缺 version（样本侧或权威侧）→ 返回 True 交由权威 CAS 裁决，避免用缺字段误杀新鲜样本；
+- 非法 version（`"v5"` / `""` / 非数字）→ 判为陈旧，fail-closed。
+
+`GUARD` 判据是"只减少明知会拒的尝试"，**不放宽任何已有拒绝**。陈旧闩与去重表在任务
+离开 active 状态时清键，避免进程内 map 随任务数无界增长。
+
+Evidence:
+- `herdr/completion.py:observation_is_current`（纯判据，与 `cas_allows` 同居 FR-1 契约层）
+- `services/herdr-controller.py:process_blocked_observations`（前置跳过 + 去重 + 清键）
+- `tests/test_blocked_observation_cas_storm.py`（15 passed，含反向验证）
+- `docs/lessons/lessons-learned.md` §101
+
 ---
 
 ## 2. CoW (Copy-on-Write) 沙盒隔离机制

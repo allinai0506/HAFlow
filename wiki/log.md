@@ -1544,3 +1544,15 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - 收尾验证（绑定当前源码）：`pytest -q` → **2406 passed, 50 subtests passed**（318s）；`compileall herdr services bin tests` exit 0；`git diff --check` exit 0。
 - 知识沉淀：`wiki/task-lifecycle.md` §1.3「完成标记的折行容错契约」新增知识页小节；`docs/lessons/lessons-learned.md` §100「活性判据的输入必须匹配它的物理载体」。
 - 未验证 / 需知悉：修复前全量为 2396 passed / 2 failed（两条源码文本契约测试），修复后 2406 全绿；`impl-t6-mock-retire` 当前为 `blocked`，属该 Task 自身的内环仲裁面，与本缺陷无关，Controller 已按既有 `blocked_marker_observed` 通路接管。
+
+## [2026-09-30] root-cause | blocked 观测的 CAS 风暴：陈旧样本被每轮 sweep 重试 238 次
+
+- 现场：`wf-project-0929-01` / `impl-t6-mock-retire`（qodercli）08:29:14 启动，08:29:18 Sentinel 上报 `blocked_marker_observed`（`observed_version=3`）；08:29:46 一次 `herdr-task set-status` 把版本抬到 5；此后到 08:54:04 落 `blocked` 之间，Controller 每轮 sweep 用同一份旧样本发 CAS，`blocked_observation_cas_rejected` 累计 **238 条**（跨 25 分钟、任务零进展）。最终成功纯靠 08:53:58 Sentinel 碰巧再次看见标记、写入 `observed_version=5` 新样本。
+- 根因：`process_blocked_observations` 把观测读在**事务外**（`list_events` limit=1 desc），把事件里的 `observed_version` 直接交给 `kernel.transition_task`，被拒即记一条事件后 `continue`，下一轮原样重来。两条独立缺陷：① 无前置检查，代码注释已写明"An old event can never win"但仍照发；② 拒绝事件无去重，每轮 sweep 往 facts ledger 追加同一事实。
+- 对照：完成观测通路 `compare_and_set_completion_transition` 在**单事务内**完成校验+CAS+消费观测，天然不重试，全库拒绝计数个位数。缺陷只在事务外读观测的 blocked 通路暴露。
+- 修复：新增纯判据 `herdr/completion.py:observation_is_current()`，Controller 在发起 CAS **之前**判定 —— version/status 不符即静默跳过等 Sentinel 补新样本（不打事件、不占转换预算）；非预期拒绝按 `(task_id, observed_version)` 去重，一个样本一条事实；缺 version 时放行交权威 CAS 裁决；非法 version fail-closed；任务离开 active 时清键防止进程内 map 无界增长。fail-closed 语义不变，只减少明知会拒的尝试。
+- 防复发：`tests/test_blocked_observation_cas_storm.py`（15 passed）= 纯判据 9 条 + Controller 接线 6 条。**反向验证已执行**：回退前置检查（`if False and ...`）与去重（`if True:`）后 3 条精准失败（test_stale_sample_is_never_attempted / test_unexpected_rejection_is_recorded_once_per_sample / test_a_new_sample_retries_and_is_recorded_again），恢复后全绿。
+- 现场数据回放（真实 events，非夹具）：样本 `observed_version=3` 在权威 version=3 时判定"会尝试"，version=4/5 判定"跳过"；08:53:58 新样本 `observed_version=5` 判定"会尝试"，与 08:54:04 实际落 `blocked` 一致。
+- 收尾验证（绑定当前源码）：`pytest -q` → **2426 passed, 50 subtests passed**（382s）；`compileall herdr services bin tests` exit 0；`git diff --check` exit 0。
+- 知识沉淀：`wiki/task-lifecycle.md` §1.4「陈旧观测的 CAS 前置跳过」；`docs/lessons/lessons-learned.md` §101。
+- 未验证 / 需知悉：本 PR 只改判据与重试策略，**未在生产守护进程热重载验证**（需 `launchctl kickstart` 属运维授权，未执行）；`impl-t6-mock-retire-r2` 的 `codex TOKEN_EXHAUSTED` 属 Agent 供给问题，与本缺陷无关，`r3` 已在飞。
