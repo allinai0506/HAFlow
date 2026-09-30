@@ -3961,8 +3961,15 @@ def try_direct_stage_advance(item):
 
     # 门禁节点在派发时注入结论契约(状态目录 gate-verdicts/<task_id>.json +
     # 终端标记),由 try_auto_verdict 直接采纳,免除总指挥裁决回合。
+    #
+    # delivered_in_base=True:已 git 交付(已 integrate 进 base)的依赖,其交付物
+    # 已在 base 上,onto 不应再指向本地任务分支 —— `herdr-task launch` 要求
+    # `--onto` 存在于 refs/remotes/origin/,而任务分支通常从不推送。实测事故
+    # (wf-project-0929-01):test 节点反复 "Onto branch not found on origin:
+    # agent/opencode/feat-impl-t7-integration-gates-r2",任务在 pending 阶段
+    # 即被判 router_isolation_rejected,从未真正执行。详见 lessons §110。
     candidate_branch = direct_dispatch_planner.candidate_branch_for_node(
-        load_tasks(), workflow_id, ready_id, dep_ids
+        load_tasks(), workflow_id, ready_id, dep_ids, delivered_in_base=True
     )
     candidate_sha = _scheduler_expected_candidate_sha(
         workflow_id, project_root, dep_ids, candidate_branch

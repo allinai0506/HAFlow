@@ -39,11 +39,30 @@ def sanitize_branch_name(value):
     return text
 
 
-def candidate_branch_for_node(tasks, workflow_id, node_id, dep_ids):
+GIT_DELIVERED_STATUSES = frozenset(
+    {"integrated", "cleanup_ready", "cleaned"}
+)
+
+
+def candidate_branch_for_node(
+    tasks, workflow_id, node_id, dep_ids, delivered_in_base=False
+):
     """派发候选分支:依赖链最新分支优先,回退本节点自身。
 
     test 类节点必须测实现分支而非自己的旧任务分支；依赖无分支时
     返回 None（调用方保持原行为）。
+
+    ``delivered_in_base=True`` 表示调用方已确认"git 交付物已合入 base"
+    （即工作流的冻结候选就是 base 分支本身）。此时已交付（integrated /
+    cleanup_ready / cleaned）依赖的**任务分支**不再作为 onto：交付物早已
+    进入 base，而任务分支通常从未推送到 origin，而 `herdr-task launch` 要求
+    ``--onto`` 必须存在于 ``refs/remotes/origin/``。实测事故
+    (wf-project-0929-01)：test 节点反复 ``Onto branch not found on origin:
+    agent/opencode/feat-impl-t7-integration-gates-r2``，任务在 pending 阶段
+    即被判 router_isolation_rejected。返回 None 让任务落在 base（候选）上测。
+
+    未交付（仍在跑 / 尚未 integrate）的依赖仍取其任务分支 —— fix-loop 续接
+    依赖该行为。
     """
     best = None
     for task in tasks or []:
@@ -60,6 +79,11 @@ def candidate_branch_for_node(tasks, workflow_id, node_id, dep_ids):
             continue
         if task.get("status") == "superseded" or task.get("superseded_by"):
             continue
+        if delivered_in_base and task.get("integration_mode") == "git" \
+                and task.get("status") in GIT_DELIVERED_STATUSES:
+            # 交付物已在 base 上：onto 若指向本地任务分支，launch 会因
+            # origin 无该分支而拒绝派发。跳过，让候选回退到 base。
+            continue
         branch = sanitize_branch_name(task.get("branch"))
         if not branch:
             continue
@@ -71,8 +95,16 @@ def candidate_branch_for_node(tasks, workflow_id, node_id, dep_ids):
             best = (updated, branch)
     if best is not None:
         return best[1]
+    if delivered_in_base:
+        # 依赖已全部交付 → 候选就是 base 本身。**不要**回退到本节点分支：
+        # 本节点正在跑的任务分支（如 test 节点的 agent/pi/test-...-r6）同样
+        # 从未推送，launch 仍会以 Onto branch not found on origin 拒绝派发。
+        # 返回 None 让任务落在 source HEAD（即 base）上。
+        return None
     if dep_ids:
-        return candidate_branch_for_node(tasks, workflow_id, node_id, [])
+        return candidate_branch_for_node(
+            tasks, workflow_id, node_id, [], delivered_in_base=delivered_in_base
+        )
     return None
 
 DEFAULT_TASK_TYPE = "feat"

@@ -110,6 +110,11 @@ class PlannerOntoTest(unittest.TestCase):
             self.assertIsNone(plan["specs"][0].get("onto_branch"))
 
     def test_candidate_branch_prefers_dependencies(self):
+        """优先取依赖节点的分支，而非本节点自己的旧任务分支。
+
+        （此处 `delivered_in_base=False`：只验证"选哪条谱系"，
+        "已交付是否该跳过"由 DeliveredDependencyOntoTest 覆盖。）
+        """
         tasks = [
             _task("impl-1", "cleaned", "implementation",
                   branch="agent/opencode/feat-new", updated_at=200.0),
@@ -118,7 +123,8 @@ class PlannerOntoTest(unittest.TestCase):
         ]
         self.assertEqual(
             planner.candidate_branch_for_node(
-                tasks, "wf-1", "test", ["implementation"]
+                tasks, "wf-1", "test", ["implementation"],
+                delivered_in_base=False,
             ),
             "agent/opencode/feat-new",
         )
@@ -128,7 +134,7 @@ class PlannerOntoTest(unittest.TestCase):
             _task("impl", "integrated", "implementation", branch="agent/x/task", integration_ref="refs/herdr/tasks/impl", updated_at=200),
             _task("old", "superseded", "implementation", branch="agent/x/old", updated_at=300),
         ]
-        self.assertEqual(planner.candidate_branch_for_node(tasks, "wf-1", "test", ["implementation"]), "agent/x/task")
+        self.assertEqual(planner.candidate_branch_for_node(tasks, "wf-1", "test", ["implementation"], delivered_in_base=True), "agent/x/task")
 
     def test_candidate_branch_falls_back_to_own_node(self):
         tasks = [
@@ -139,6 +145,103 @@ class PlannerOntoTest(unittest.TestCase):
                 tasks, "wf-1", "test", ["implementation"]
             )
         )
+
+
+class DeliveredDependencyOntoTest(unittest.TestCase):
+    """交付物已合入 base 的依赖，**不能**再把任务分支当 onto。
+
+    实测事故（wf-project-0929-01）：test 节点反复
+    `[DIRECT DISPATCH ERROR] Onto branch not found on origin:
+    agent/opencode/feat-impl-t7-integration-gates-r2`，任务在 `pending` 阶段就被
+    判 `router_isolation_rejected`，从未真正执行（r1/r5 都是这样死的）。
+
+    两个事实叠加导致：
+      1. `herdr-task launch` 要求 `--onto` 分支存在于
+         `refs/remotes/origin/`（fix-loop 续接既有 PR 分支的约束）；
+      2. 该工作流的 9 个 `integration_mode=git` 任务**全部** `cleaned`
+         —— 交付物早已合入 base `agent/gemini-init`，而任务分支从未推送。
+
+    于是 onto 指向一个 origin 上不存在的本地分支，launch 必然 `exit 2`。
+    同一工作流里手工 `herdr-task launch`（不带 `--onto`）的
+    `test-...-r6` 成功落地，且 `baseline_commit=5d3d615e07ab` 正是合入 base
+    的交付点 —— 证明"落在 base 上测"才是正确形态。
+    """
+
+    def _impl(self, task_id, status, branch, **extra):
+        return _task(task_id, status, "implementation", branch=branch,
+                     integration_mode="git", **extra)
+
+    def test_all_dependencies_delivered_yields_no_onto(self):
+        tasks = [
+            self._impl("impl-a", "cleaned", "agent/opencode/feat-a", updated_at=300.0),
+            self._impl("impl-b", "integrated", "agent/opencode/feat-b", updated_at=200.0),
+        ]
+        self.assertIsNone(
+            planner.candidate_branch_for_node(
+                tasks, "wf-1", "test", ["implementation"], delivered_in_base=True
+            ),
+            "交付物已在 base 上时必须不设 onto，否则 launch 必然拒绝",
+        )
+
+    def test_undelivered_dependency_still_uses_task_branch(self):
+        """交付物尚未合入 base 时，任务分支仍是唯一载体（fix-loop 续接）。"""
+        tasks = [
+            self._impl("impl-done", "cleaned", "agent/opencode/feat-done", updated_at=200.0),
+            self._impl("impl-live", "working", "agent/opencode/feat-live", updated_at=300.0),
+        ]
+        self.assertEqual(
+            planner.candidate_branch_for_node(
+                tasks, "wf-1", "test", ["implementation"], delivered_in_base=True
+            ),
+            "agent/opencode/feat-live",
+        )
+
+    def test_does_not_fall_back_to_own_node_branch(self):
+        """依赖已交付时**不得**回退到本节点分支。
+
+        `candidate_branch_for_node` 在依赖无候选时会回退到本节点（为了"依赖无
+        分支时仍能派发"）。但在 delivered_in_base 模式下这个回退是错的：本节点
+        自己的任务分支（如 test 节点的 agent/pi/test-...-r6）同样从未推送，
+        launch 仍会 `Onto branch not found on origin` 拒绝派发。
+
+        实测：修复前 onto = agent/opencode/feat-impl-t7-integration-gates-r2，
+        只加"跳过已交付依赖"后变成 agent/pi/test-...-r6，两者都 exit 2。
+        正确答案是 None —— 任务落在 base（source HEAD）上测候选交付物。
+        """
+        tasks = [
+            self._impl("impl-a", "cleaned", "agent/opencode/feat-a", updated_at=200.0),
+            _task("t-r4", "rework", "test",
+                  branch="agent/agy/test-test-unified-task-workbench-v1-r4",
+                  updated_at=250.0),
+            _task("t-r6", "working", "test",
+                  branch="agent/pi/test-test-unified-task-workbench-v1-r6",
+                  updated_at=300.0),
+        ]
+        self.assertIsNone(
+            planner.candidate_branch_for_node(
+                tasks, "wf-1", "test", ["implementation"], delivered_in_base=True
+            ),
+            "依赖已交付时应回落到 base(None)，不是本节点任务分支",
+        )
+
+    def test_legacy_call_without_flag_keeps_old_behavior(self):
+        """未显式告知"交付已合入 base"时保持原行为，不静默改变既有调用方。"""
+        tasks = [self._impl("impl-a", "cleaned", "agent/opencode/feat-a", updated_at=200.0)]
+        self.assertEqual(
+            planner.candidate_branch_for_node(tasks, "wf-1", "test", ["implementation"]),
+            "agent/opencode/feat-a",
+        )
+
+    def test_delivered_filter_covers_every_git_delivered_status(self):
+        for status in ("integrated", "cleanup_ready", "cleaned"):
+            with self.subTest(status=status):
+                tasks = [self._impl("impl-a", status, "agent/opencode/feat-a", updated_at=200.0)]
+                self.assertIsNone(
+                    planner.candidate_branch_for_node(
+                        tasks, "wf-1", "test", ["implementation"], delivered_in_base=True
+                    ),
+                    f"{status} 属于已交付状态，应跳过任务分支",
+                )
 
 
 class ControllerOntoWiringTest(unittest.TestCase):
