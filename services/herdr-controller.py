@@ -5274,6 +5274,17 @@ def blocked_event_type(task):
     blocked 卡,工位自述的 BLOCKER.md 被丢弃——这是 Phase 0 设计的
     最后一跳(2026-09-13 设计,09-18 补齐)。
     """
+    # Transition history is the current decision; metadata can survive a
+    # later generic blocker. Retain the legacy fallback when no reason exists.
+    history = (task or {}).get("status_history") or []
+    latest = history[-1] if history and isinstance(history[-1], dict) else {}
+    if latest.get("to") == "blocked" and latest.get("reason"):
+        return (
+            "inner_loop_exhausted"
+            if latest.get("reason") == "inner_loop_exhausted"
+            or latest.get("sentinel_reason") == "inner_loop_exhausted"
+            else "blocked"
+        )
     if task and task.get("sentinel_reason") == "inner_loop_exhausted":
         return "inner_loop_exhausted"
     return "blocked"
@@ -8920,6 +8931,14 @@ def handle_event(task_id, agent_status):
     ):
         return
 
+    if (
+        current_status == "blocked"
+        and blocked_event_type(task) == "inner_loop_exhausted"
+        and agent_status in {"working", "idle", "done"}
+    ):
+        # Runtime liveness is not the coordinator's persisted decision.
+        return
+
     if agent_status == "working":
         if current_status in (
             "dispatched",
@@ -9056,6 +9075,15 @@ def reconcile_task_state(task_id):
         f"registry={current} "
         f"agent={runtime}"
     )
+
+    if (
+        current == "blocked"
+        and blocked_event_type(task) == "inner_loop_exhausted"
+        and runtime in {"working", "idle", "done"}
+    ):
+        # Recover the volatile arbitration queue, keeping the durable blocker.
+        enqueue_coordinator_event(task, "inner_loop_exhausted")
+        return
 
     # --------------------------------
     # Agent 当前正在运行

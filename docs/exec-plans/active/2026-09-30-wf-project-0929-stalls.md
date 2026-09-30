@@ -46,12 +46,16 @@
 | C24 | Provider jev422 / context reducer失败、stderr缺运行归属 | controller.err尾部、observer/context记录 | 待归属；旁路失败不得阻断主状态，不宣称属于本Workflow |
 | C25 | console BrokenPipe/转义警告、STARTUP WAIT、Git busy | console.err、startup8次、GIT BUSY75后成功 | 分类核对；网络断开/正常等待不冒充bug，确认重试有界和成功后解除 |
 | C26 | 全局JSON投影滞后，UI/诊断可能读到不同状态 | SQLite latest_dispatch != workflows.json；tasks projection缺Task | 已证实投影差异；检查权威读取/导出刷新，不另建事实源 |
-| C03b | 合法旧blocker在恢复后仍被读取，working事件可能抹掉仲裁状态 | blocked/working状态历史；handle_agent_event | 未关闭；需完整核对显式仲裁、采样epoch和内循环恢复链，不能只看busy就解除耗尽 |
+| C03b | 运行信号抹掉等待仲裁的blocked状态，重启也自动恢复working | status_history；handle_event/reconcile_task_state | 已复现；当前修复保留仲裁事实、恢复队列，强历史优先于遗留metadata，正常恢复作对照 |
+| C03c | 显式恢复后合法旧BLOCKER仍可被新采样再次消费 | Sentinel当前屏幕重复读取；process_blocked_observations | 未关闭；需核对恢复epoch及程序生成的本轮评估事实，不能把旧屏幕标记当新耗尽 |
 | C27 | 评估超时只终止直接shell，后代进程可继续运行 | bin/herdr-loop subprocess.run；隔离就绪子进程探针 | 隔离实验确认；处理本次创建的进程组，验证超时/中断和正常返回 |
 | C28 | 外层脚本exit17/缺lint回执，仍100分converged | 隔离真实run_evaluation写EVAL_DONE=true | 已复现；完整检查runner退出、步骤回执和新鲜日志，防缺失默认成功 |
 | C29 | 同工位并发eval共享日志，读到另一个进程结果并假绿 | 独立进程/受控交错探针，2 lint errors被覆盖为1 | 已复现；跨进程锁覆盖eval/init/基线写入，busy不改他人快照；专门验证中断恢复 |
 | C05b | 多栈仓库根package.json优先，Java子任务误跑前端 | auto_init_task_loop；T2/T4b/T7及test-r4 GOAL命令 | 已证实命令误选；显式--test-cmd现有契约优先，缺契约必须有可恢复拒绝，不能猜Java默认 |
 | C27b | auto-init的lint基线采集仍只超时直接shell | issue27b-descendant-probe.json，就绪后超时仍late-write | 已复现；单命令exec正常对照无残留；复用C27生命周期覆盖真实基线入口，独立提交 |
+
+| C30 | 仲裁卡/人工升级提示要求blocked→rework，状态机禁止 | build_coordinator_message；_notify_blocked_human_upgrade；临时SQLite非法转换 | 已证实协议矛盾；命令须复用现有合法恢复边，不扩展状态机或force放行 |
+| C31 | re-init新契约后EVAL_DONE旧绿快照仍被当本轮证据 | issue31-probe.json，初始化0但extract返回旧converged/evidence_id | 已复现；原子失效当前快照，保留历史事实；属C03c/C08恢复身份的必要依赖 |
 
 ## 执行计划与检查点
 1. 固定日志快照、归属与覆盖账本；逐卡补触发、因果、正常对照、代码边界及验证。
@@ -85,3 +89,5 @@ C27本地验证：只回收本次新session进程组，在锁释放前覆盖超�
 C05a本地验证：默认npm命令CI=1，保留显式任务命令。旧1 failed/1正常对照passed，修后2靶向passed；专项18 passed，全量2652 passed/145 subtests、0 failed/0 skipped（381.91s）。实际安装Vitest 3.2.6真实PTY旧命令测试通过后watch、exit124，修后exit0收敛；无TTY旧命令正常退出，保留负触发对照。compileall/CLI AST/diff-check通过；仅自审、未部署；Java任务误选根前端测试独立列C05b，基线后代残留列C27b，不冒充全部关闭。
 
 C27b本地验证：基线采集复用受管进程组执行，覆盖命令→输出→基线写入锁边界；保留/bin/sh -c与正常已有债务，超时不制造基线；SIGTERM处理限主线程命令作用域并恢复handler。关键Task调用撤销反证4 failed/1正常对照passed，修后5靶向；专项39 passed，全量2657 passed/145 subtests、0 failed/0 skipped（360.47s）。原C27测试保留，仅将权限拒绝helper定位到其新源码位置，不改断言。初次测试导入失败、宽限期内完成观察均保留；用超过宽限期的子进程覆盖强制回收。compileall/两CLI AST/diff-check通过；仅自审、未部署，非主线程收到进程SIGTERM及不可捕获终止/脱离session仍不在保证内。
+
+C03b本地验证：实时working及重启working/done保留内循环blocked/版本，重启恢复队列；最新blocked转换reason优先于遗留sentinel_reason，合法显式返工及普通blocked保持恢复。撤销关键Controller实现6 failed/2正常对照passed，修后8靶向；专项60 passed，全量2665 passed/145 subtests、0 failed/0 skipped（352.76s）。真实临时SQLite观察/CAS/读取/仲裁队列链，只替换外部传输；HERDR_CONTROLLER_TEST在事件路径取消，防CLI返回值冒充持久化。初版对照发现非法blocked→rework，保留为C30并改为合法恢复后返工；没有force放行。compileall/diff-check通过，仅自审、未部署。C03c显式恢复后旧屏幕标记、C30命令矛盾仍未关闭。

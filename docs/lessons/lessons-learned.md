@@ -5316,3 +5316,17 @@ C27b追加验证：实际auto-init基线入口旧4 failed/1正常对照passed，
 
 ### 验证与关联证据
 真实Task自动初始化→npm→Python测试脚本→eval→持久快照，同断言旧1 failed/1正常对照passed，修后2 passed；相邻18 passed，全量2652 passed/145 subtests（381.91s）。另用已安装Vitest 3.2.6和真实PTY输入验证旧命令1 passed后exit124、不收敛，修后1 passed且exit0收敛；无TTY旧命令正常退出，保留为触发条件对照。仅本地验证、未部署。源码`bin/herdr-task:auto_init_task_loop`，回归`tests/test_task_loop_noninteractive.py`。
+
+## 114. Agent 活性信号不能代替内循环仲裁决策（2026-09-30）
+
+### 问题背景
+`wf-project-0929-01`的blocked/working来回切换会让待投递仲裁事件变成stale。Controller实时`handle_event`与重启`reconcile_task_state`均只凭Agent working/done把blocked改回working，覆盖程序记录的耗尽事实。
+
+### 经验教训
+活性与业务决策是不同事实。等待仲裁不等于Agent进程停止；普通运行信号不能解除待决阻塞。旧`sentinel_reason`又可能在后续普通阻塞中保留，直接按该字段保护所有blocked会制造另一个无法恢复的卡点，必须以本次状态转换历史为准。
+
+### 操作规范与防护
+`blocked_event_type`优先读取最新blocked转换的明确reason，缺历史时保留既有legacy fallback。当前内循环blocked拒绝普通working/idle/done解除；重启遇到已知运行信号则恢复仲裁队列，不改变状态。显式合法恢复/返工以及新的普通blocked保持原行为。旧屏幕标记在显式恢复后的重复采样仍为C03c；提示中的非法blocked→rework命令仍为C30，未混入本次修复。
+
+### 验证与关联证据
+`tests/test_inner_loop_arbitration_recovery.py`用真实临时SQLite观察→CAS→运行事件/重启→队列→通知出口验证，外部输送替换但持久转换不替换。撤销实现6 failed/2正常对照passed；修后8 passed，相邻60 passed，全量2665 passed/145 subtests（352.76s）。初版对照采用了仲裁卡上的非法直接rework，4项报InvalidTransitionError；修正对照为合法显式恢复后再返工，并保留该协议缺陷为C30。仅本地验证、未部署，无独立评审。
