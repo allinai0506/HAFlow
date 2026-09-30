@@ -125,16 +125,40 @@ def node_tasks(
     return matched
 
 
-def node_is_complete(tasks_for_node: Sequence[Dict[str, Any]]) -> bool:
+def node_is_complete(tasks_for_node: Sequence[Dict[str, Any]], required_task_ids=None) -> bool:
     """节点完成判定(与控制器 is_node_complete 同口径的纯函数版本)。
 
     - 零任务 -> 未完成;
     - 任一活跃任务不在完成集合 -> 未完成。
     """
-    active = [t for t in (tasks_for_node or []) if isinstance(t, dict)]
+    tasks = [t for t in (tasks_for_node or []) if isinstance(t, dict)]
+    active = [t for t in tasks if t.get("status") != "superseded" and not t.get("superseded_by")]
     if not active:
         return False
-    return all(str(t.get("status") or "") in NODE_DONE_STATUSES for t in active)
+    if required_task_ids is not None:
+        if not isinstance(required_task_ids, list) or any(
+                not isinstance(tid, str) or not tid.strip() for tid in required_task_ids):
+            return False
+        by_id = {t.get("task_id"): t for t in tasks}
+        for required_id in required_task_ids:
+            seen = set()
+            current = required_id
+            while current not in seen:
+                seen.add(current)
+                task = by_id.get(current)
+                if task is None:
+                    return False
+                if task.get("status") != "superseded" and not task.get("superseded_by"):
+                    break
+                current = task.get("superseded_by")
+            else:
+                return False
+    return all(
+        str(t.get("status") or "") in NODE_DONE_STATUSES
+        and (t.get("integration_mode") != "git"
+             or t.get("status") in ("integrated", "cleanup_ready", "cleaned"))
+        for t in active
+    )
 
 
 def node_verdict(tasks_for_node):

@@ -1598,3 +1598,72 @@ class LaunchReclaimTest(unittest.TestCase):
                 pane_source="dynamic")
 
         self.assertEqual(released["n"], 1)
+
+
+class GitImplementationDeliveryTest(unittest.TestCase):
+    def test_git_completion_waits_for_integration_both_readers(self):
+        for status in ("completed", "committed", "integrated", "cleaned"):
+            task = _task("impl", status, "implementation", integration_mode="git")
+            expected = status in ("integrated", "cleaned")
+            with self.subTest(status=status), patch.object(_ctl, "load_tasks", return_value=[task]):
+                self.assertEqual(scheduler_core.node_is_complete([task]), expected)
+                self.assertEqual(_ctl.is_node_complete("wf-1", "implementation"), expected)
+
+    def test_non_git_completion_keeps_legacy_semantics(self):
+        task = _task("docs", "completed", "implementation", integration_mode="none")
+        with patch.object(_ctl, "load_tasks", return_value=[task]):
+            self.assertTrue(scheduler_core.node_is_complete([task]))
+            self.assertTrue(_ctl.is_node_complete("wf-1", "implementation"))
+
+
+class PlannedImplementationCoverageTest(unittest.TestCase):
+    def test_unlaunched_planned_task_prevents_completion(self):
+        tasks = [_task("t1", "integrated", "implementation", integration_mode="git")]
+        cfg = {"nodes": [{"id": "implementation", "required_task_ids": ["t1", "t3"]}]}
+        with patch.object(_ctl, "load_tasks", return_value=tasks), patch.object(_ctl, "workflow_config_for", return_value=cfg):
+            self.assertFalse(_ctl.is_node_complete("wf-1", "implementation"))
+
+    def test_superseded_requirement_uses_only_explicit_replacement(self):
+        tasks = [_task("t1", "superseded", "implementation", superseded_by="t1-r2"),
+                 _task("t1-r2", "integrated", "implementation", integration_mode="git")]
+        cfg = {"nodes": [{"id": "implementation", "required_task_ids": ["t1"]}]}
+        with patch.object(_ctl, "load_tasks", return_value=tasks), patch.object(_ctl, "workflow_config_for", return_value=cfg):
+            self.assertTrue(_ctl.is_node_complete("wf-1", "implementation"))
+            tasks[0]["superseded_by"] = "missing"
+            self.assertFalse(_ctl.is_node_complete("wf-1", "implementation"))
+
+    def test_required_manifest_cannot_be_bypassed_by_empty_reuse(self):
+        cfg = {"nodes": [{"id": "implementation", "required_task_ids": ["missing"]}]}
+        with patch.object(_ctl, "load_tasks", return_value=[]), patch.object(_ctl, "workflow_config_for", return_value=cfg), patch.object(_ctl, "_reverification_satisfies_node", return_value=True):
+            self.assertFalse(_ctl.is_node_complete("wf-1", "implementation"))
+
+    def test_invalid_falsey_manifest_fails_closed_without_scheduler(self):
+        task = _task("t1", "completed", "implementation")
+        for invalid in ("", 0, {}):
+            cfg = {"nodes": [{"id": "implementation", "required_task_ids": invalid}]}
+            with self.subTest(config=invalid), patch.object(_ctl, "load_tasks", return_value=[task]), patch.object(_ctl, "workflow_config_for", return_value=cfg), patch.object(_ctl, "scheduler_core", None):
+                self.assertFalse(_ctl.is_node_complete("wf-1", "implementation"))
+
+
+class PersistedPlannedCoverageTest(unittest.TestCase):
+    def test_real_config_loader_does_not_drop_manifest_after_task_fuse(self):
+        from herdr import projects
+        from herdr.state_store import SQLiteStateStore
+        with tempfile.TemporaryDirectory() as td:
+            cfg = Path(td) / "workflow.json"
+            cfg.write_text(json.dumps({"nodes": [{"id": "implementation", "required_task_ids": ["t1", "t3"]}]}))
+            store = SQLiteStateStore(Path(td) / "state.db")
+            store.save_workflow({"workflow_id": "wf-1", "status": "running", "workflow_file": str(cfg)})
+            store.save_task(_task("t1", "integrated", "implementation", integration_mode="git"))
+            store.save_task(_task("t3", "superseded", "implementation", integration_mode="git"))
+            with patch.object(projects, "_get_store", return_value=store), patch.object(_ctl, "load_tasks", side_effect=store.list_tasks):
+                self.assertFalse(_ctl.is_node_complete("wf-1", "implementation"))
+
+    def test_normalization_preserves_manifest_and_invalid_values(self):
+        from herdr.workflow import normalize_workflow
+        for manifest in (["t1", "t3"], [], "", 0, {}):
+            with self.subTest(manifest=manifest):
+                normalized = normalize_workflow({"nodes": [{"id": "implementation", "required_task_ids": manifest}]})
+                self.assertEqual(normalized["nodes"][0]["required_task_ids"], manifest)
+                self.assertEqual(normalize_workflow(normalized)["nodes"][0]["required_task_ids"], manifest)
+        self.assertNotIn("required_task_ids", normalize_workflow({"nodes": [{"id": "implementation"}]})["nodes"][0])

@@ -123,6 +123,13 @@ class PlannerOntoTest(unittest.TestCase):
             "agent/opencode/feat-new",
         )
 
+    def test_candidate_excludes_superseded_tasks(self):
+        tasks = [
+            _task("impl", "integrated", "implementation", branch="agent/x/task", integration_ref="refs/herdr/tasks/impl", updated_at=200),
+            _task("old", "superseded", "implementation", branch="agent/x/old", updated_at=300),
+        ]
+        self.assertEqual(planner.candidate_branch_for_node(tasks, "wf-1", "test", ["implementation"]), "agent/x/task")
+
     def test_candidate_branch_falls_back_to_own_node(self):
         tasks = [
             _task("impl-1", "cleaned", "implementation", updated_at=200.0),

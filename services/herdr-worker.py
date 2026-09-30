@@ -162,6 +162,13 @@ def create_clone(source, task_id):
                 ["git", "clone", "--no-hardlinks", "--no-checkout", str(source), str(independent)],
                 check=True, capture_output=True, text=True,
             )
+            # Keep source local branch identities (e.g. a pinned dev baseline).
+            # clone otherwise maps every non-current local branch to origin/*.
+            subprocess.run(
+                ["git", "-C", str(independent), "fetch", "--update-head-ok", "--no-tags", str(source),
+                 "refs/heads/*:refs/heads/*"],
+                check=True, capture_output=True, text=True,
+            )
             origin = subprocess.run(
                 ["git", "-C", str(source), "remote", "get-url", "origin"],
                 capture_output=True, text=True,

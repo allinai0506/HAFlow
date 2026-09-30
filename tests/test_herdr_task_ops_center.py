@@ -333,3 +333,49 @@ class TestSupersededStats(unittest.TestCase):
              "created_at": 50, "updated_at": 60},
         ])
         self.assertEqual(self._card()["nodes"][0]["drilldown_task"], "t3")
+
+
+class PlannedNodeStatusTest(unittest.TestCase):
+    def test_cli_and_card_do_not_complete_missing_planned_tasks(self):
+        tasks = [{"task_id": "t1", "workflow_id": "wf-plan", "node": "implementation", "status": "integrated", "integration_mode": "git"}]
+        cfg = {"nodes": [{"id": "implementation", "required_task_ids": ["t1", "t3"]}]}
+        import io
+        from contextlib import redirect_stdout
+        with patch.object(_ht, "_safe_workflow", return_value=(cfg, "wf-plan")), patch.object(_ht, "resolve_node", return_value={"node_label": "implementation", "stage_label": "implementation"}), patch.object(_ht, "load_tasks", return_value={"tasks": tasks}):
+            cards = _ht._build_workflow_cards({"wf-plan": tasks}, 1)
+            self.assertNotEqual(cards[0]["nodes"][0]["status"], "completed")
+            output = io.StringIO()
+            with redirect_stdout(output):
+                _ht.node_status("wf-plan", "implementation")
+            self.assertFalse(json.loads(output.getvalue())["complete"])
+
+
+class PersistedWorkflowConfigTest(unittest.TestCase):
+    def test_node_status_uses_recorded_config_file_with_real_store(self):
+        from herdr import projects
+        from herdr.state_store import SQLiteStateStore
+        import io
+        from contextlib import redirect_stdout
+        with tempfile.TemporaryDirectory() as td:
+            cfg = Path(td) / "workflow.json"
+            cfg.write_text(json.dumps({"nodes": [{"id": "implementation", "required_task_ids": ["t1", "t3"]}]}))
+            store = SQLiteStateStore(Path(td) / "state.db")
+            store.save_workflow({"workflow_id": "wf-plan", "status": "running", "workflow_file": str(cfg), "config": {}})
+            store.save_task({"task_id": "t1", "workflow_id": "wf-plan", "node": "implementation", "status": "integrated", "integration_mode": "git"})
+            with patch.object(_ht, "get_state_store", return_value=store), patch.object(projects, "_get_store", return_value=store), patch.object(_ht, "load_tasks", return_value={"tasks": store.list_tasks()}):
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    _ht.node_status("wf-plan", "implementation")
+                self.assertFalse(json.loads(output.getvalue())["complete"])
+
+
+    def test_missing_recorded_config_never_borrows_global_legacy(self):
+        from herdr import projects
+        from herdr.state_store import SQLiteStateStore
+        with tempfile.TemporaryDirectory() as td:
+            legacy = Path(td) / "legacy.json"
+            legacy.write_text(json.dumps({"nodes": [{"id": "foreign"}]}))
+            store = SQLiteStateStore(Path(td) / "state.db")
+            store.save_workflow({"workflow_id": "wf-plan", "status": "running", "workflow_file": str(Path(td) / "missing.json"), "nodes": [{"id": "implementation", "required_task_ids": ["t3"]}]})
+            with patch.object(_ht, "get_state_store", return_value=store), patch.object(projects, "_get_store", return_value=store), patch.object(projects, "LEGACY_WORKFLOW_FILE", legacy):
+                self.assertEqual(_ht.load_workflow("wf-plan")["nodes"][0]["id"], "implementation")

@@ -58,6 +58,8 @@ def candidate_branch_for_node(tasks, workflow_id, node_id, dep_ids):
             task.get("node"), task.get("stage")
         ):
             continue
+        if task.get("status") == "superseded" or task.get("superseded_by"):
+            continue
         branch = sanitize_branch_name(task.get("branch"))
         if not branch:
             continue

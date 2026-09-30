@@ -4959,3 +4959,35 @@ python3.13 -m pytest -q tests/test_herdr_worker.py tests/test_impl_fix1_regressi
 关联证据：[工作流恢复记录](../walkthroughs/20260930-wf-project-0929-recovery.md)、`wiki/task-lifecycle.md`。
 
 ---
+
+## 106. 已派发任务全部结束不代表实现计划全部交付
+
+### 问题背景
+`wf-project-0929-01` 在 T3/T4a/T4b/T7 尚未派发、T5 尚未提交时被判为 implementation 完成；test/review 持续 FREEZE DEFERRED。根因不是 verifier 少一个字段，而是交付上游未闭合。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| completed 被当作 Git 成果可用 | Agent 结束不等于持久化集成完成 | Git 节点等 integrated 后推进 |
+| 只统计已派发任务 | 零活跃任务不能证明整个计划完成 | 已批准计划以显式 required_task_ids 核对，缺项不冻结 |
+| UI 投影丢掉清单 | 写入约束须贯穿所有读取方 | Controller/node-status/ops 复用纯判据并保留配置字段 |
+| 独立 clone 丢 source local heads | Git 身份独立与分支身份保留须同时成立 | 本地 refs 导入只写临时独立 metadata，不修改 source |
+
+### 操作规范（已固化到源码与回归）
+1. 不补造 Candidate/verifier 身份，不用 force-pass 把未完成实现变成通过。
+2. Git 成果经正常 commit/integrate；源锚点仅在核对后推进，留恢复分支；基线变化后重跑测试。
+3. 必需任务只由明确计划登记，不从自由文本猜 ID。替代只沿真实 superseded_by；清单为空 Task 时不能被 reuse 绕过。
+4. 测试使用项目固定运行时。本次默认 Node 下 AbortSignal 类型不匹配，Node 22.16.0 全量通过，未削弱 SSO 断言。
+
+### 验证命令 / 关联证据
+
+```bash
+python3.13 -m pytest -q tests/test_scheduler_dispatch_e2e.py tests/test_herdr_task_ops_center.py tests/test_herdr_worker.py tests/test_dispatch_candidate.py tests/test_selective_replan_controller.py
+```
+
+修前复现本地分支丢失、未集成提前完成、清单缺项、CLI投影丢字段；Controller→真实临时 Git→SQLite 冻结链证明缺计划项时不写 candidate_frozen，交付齐全后才写一条事实。详见 [恢复记录](../walkthroughs/20260930-candidate-recovery.md)。
+
+---
+
+候选恢复追加验证：完成判据必须通过真实 SQLite Workflow 记录→明确配置文件→normalize→Controller/CLI 验证，直接 mock workflow_config_for 会掩盖字段丢失。明确记录文件缺失时不得借用全局 legacy 的其他工作流配置。窄 Pane 造成 TUI idle 默认推断时须验证实际尺寸与身份；任务评估命令须对齐代码语言，不能用前端测试替代 Java Provider 验收。

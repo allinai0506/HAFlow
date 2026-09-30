@@ -55,6 +55,7 @@
 | `worker_policy`| `WorkerPolicy` | 否 | 与 `agent_policy` 相同 | 执行者能力与沙盒权限约束配置（支持 `capabilities`, `permissions`）。 |
 | `inputs` | `List[Dict]` | 否 | `[]` | 显式声明的上游输入依赖引用（如 `{"ref": "context.user_goal"}` 或 `{"ref": "nodes.analysis.outputs"}`）。 |
 | `gate` | `GateSpec` | 否 | `{}` | 节点质量与合规门禁契约配置（支持自动规则、人工审批与打回重试目标）。 |
+| `required_task_ids` | `List[string]` | 否 | 未设置 | 节点必须交付的 Task ID 清单；未派发/未完成项阻止节点完成。替代项只沿已登记的 superseded_by 链解析，缺失或环拒绝完成。不设置时保持既有任务集合语义。 |
 | `required_outputs` | `List[string]`| 否 | `[]` | 该节点验收时必须存在的产出文件路径清单。 |
 | `rules` | `List[string]`| 否 | `[]` | 该节点执行过程必须强制遵循的业务/工程规则。 |
 

@@ -3135,13 +3135,22 @@ def is_node_complete(workflow_id, node_id):
     # The binding is re-resolved against the latest frozen candidate on every
     # call, so a later rotation (A -> B -> C) drops the A -> B fact
     # automatically and the node stops counting as complete.
-    if not active:
+    cfg = workflow_config_for(workflow_id) or {}
+    node = next((n for n in cfg.get("nodes", []) if n.get("id") == node_id), {})
+    required_ids = node.get("required_task_ids")
+    if not active and required_ids is None:
         return _reverification_satisfies_node(workflow_id, node_id)
 
+    if scheduler_core is not None:
+        return scheduler_core.node_is_complete(tasks, required_ids)
+    if required_ids is not None:
+        return False
     return all(
         t.get("status") in (
             "completed", "committed", "integrated", "cleanup_ready", "cleaned"
         )
+        and (t.get("integration_mode") != "git"
+             or t.get("status") in ("integrated", "cleanup_ready", "cleaned"))
         for t in active
     )
 
@@ -4295,8 +4304,6 @@ def check_workflow_stage_advance(workflow_id):
             _await_tasks = None
             for _n in workflow_cfg.get("nodes", []):
                 _nid = _n.get("id")
-                if _nid not in completed_nodes:
-                    continue
                 if _await_tasks is None:
                     _await_tasks = load_tasks()
                 if not _selective_replan_awaiting_redispatch(
