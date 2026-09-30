@@ -34,6 +34,54 @@ from herdr.evaluator import (
 )
 
 
+def _log_stamp(path: Path) -> tuple[int, int, int, int] | None:
+    try:
+        stat = path.stat()
+        return stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
+    except OSError:
+        return None
+
+
+def _exit_receipts(stdout: str) -> tuple[dict[str, int], list[str]]:
+    """Only one native shell exit receipt per step is valid evidence."""
+    receipts = {}
+    seen = set()
+    errors = set()
+    for line in stdout.splitlines():
+        name, separator, value = line.partition("=")
+        if not separator or name not in {"TEST_EXIT", "LINT_EXIT", "REPRO_EXIT"}:
+            continue
+        if name in seen:
+            errors.add(f"duplicate_exit_receipt:{name}")
+            continue
+        seen.add(name)
+        try:
+            code = int(value)
+        except ValueError:
+            errors.add(f"invalid_exit_receipt:{name}")
+            continue
+        if not 0 <= code <= 255:
+            errors.add(f"invalid_exit_receipt:{name}")
+            continue
+        receipts[name] = code
+    return receipts, sorted(errors)
+
+
+def _fresh_step_log(path: Path, before, errors: list[str], step: str) -> str:
+    stamp = _log_stamp(path)
+    if stamp is None:
+        errors.append(f"missing_step_log:{step}")
+        return ""
+    if stamp == before:
+        errors.append(f"stale_step_log:{step}")
+        return ""
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        errors.append(f"unreadable_step_log:{step}")
+        return ""
+
+
 def run_evaluation(target_dir: Path) -> tuple[MetricVector, bool, str]:
     """Run EVALUATOR.sh, compute metrics, update all markdown & json files."""
     loop_dir = get_loop_dir(target_dir)
@@ -44,10 +92,20 @@ def run_evaluation(target_dir: Path) -> tuple[MetricVector, bool, str]:
     log_dir = loop_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    # Run the evaluator script with timeout safety
-    test_exit = 1
-    lint_exit = 0
-    repro_exit = 0
+    paths = {step: log_dir / f"{step}.log" for step in ("test", "lint", "repro")}
+    before = {step: _log_stamp(path) for step, path in paths.items()}
+    evaluation_errors = []
+    # GOAL.md is the existing program-generated command contract, including
+    # the optional repro command. Keep existing task clones compatible.
+    try:
+        goal = (loop_dir / "GOAL.md").read_text(encoding="utf-8")
+        repro_required = any(line.startswith("- **靶向复现用例**:") for line in goal.splitlines())
+    except (OSError, UnicodeError):
+        evaluation_errors.append("goal_contract_unreadable")
+        repro_required = False
+
+    evaluation_exit = 127
+    receipt_output = ""
     try:
         runner = subprocess.run(
             [str(evaluator_sh)],
@@ -56,25 +114,35 @@ def run_evaluation(target_dir: Path) -> tuple[MetricVector, bool, str]:
             capture_output=True,
             timeout=300,
         )
-        for line in runner.stdout.splitlines():
-            if line.startswith("TEST_EXIT="):
-                test_exit = int(line.split("=")[1])
-            elif line.startswith("LINT_EXIT="):
-                lint_exit = int(line.split("=")[1])
-            elif line.startswith("REPRO_EXIT="):
-                repro_exit = int(line.split("=")[1])
-    except subprocess.TimeoutExpired:
-        test_exit = 124
-        timeout_msg = "\n[HERDR_TIMEOUT] Evaluation script timed out after 300 seconds."
-        test_file = log_dir / "test.log"
-        if test_file.exists():
-            test_file.write_text(test_file.read_text(encoding="utf-8") + timeout_msg, encoding="utf-8")
-        else:
-            test_file.write_text(timeout_msg.strip(), encoding="utf-8")
-
-    test_log = (log_dir / "test.log").read_text(encoding="utf-8") if (log_dir / "test.log").exists() else ""
-    lint_log = (log_dir / "lint.log").read_text(encoding="utf-8") if (log_dir / "lint.log").exists() else ""
-    repro_log = (log_dir / "repro.log").read_text(encoding="utf-8") if (log_dir / "repro.log").exists() else None
+        evaluation_exit = runner.returncode
+        receipt_output = runner.stdout
+    except subprocess.TimeoutExpired as exc:
+        evaluation_exit = 124
+        partial = exc.stdout or ""
+        receipt_output = partial.decode("utf-8", "replace") if isinstance(partial, bytes) else partial
+    except OSError:
+        evaluation_errors.append("evaluator_start_failed")
+    if evaluation_exit != 0:
+        evaluation_errors.append(f"evaluator_exit:{evaluation_exit}")
+    receipts, receipt_errors = _exit_receipts(receipt_output)
+    evaluation_errors.extend(receipt_errors)
+    repro_stamp = _log_stamp(paths["repro"])
+    repro_required = repro_required or "REPRO_EXIT" in receipts or (
+        repro_stamp is not None and repro_stamp != before["repro"]
+    )
+    required_steps = ["test", "lint"] + (["repro"] if repro_required else [])
+    logs = {}
+    for step in required_steps:
+        name = step.upper() + "_EXIT"
+        if name not in receipts:
+            evaluation_errors.append(f"missing_exit_receipt:{name}")
+        logs[step] = _fresh_step_log(paths[step], before[step], evaluation_errors, step)
+    test_exit = receipts.get("TEST_EXIT", 124 if evaluation_exit == 124 else 1)
+    lint_exit = receipts.get("LINT_EXIT", 1)
+    repro_exit = receipts.get("REPRO_EXIT", 1) if repro_required else 0
+    test_log = logs["test"]
+    lint_log = logs["lint"]
+    repro_log = logs.get("repro")
 
     # Baseline-aware gate: pre-existing debt recorded at init does not block.
     baseline_lint, baseline_type = read_baseline_lint(loop_dir)
@@ -89,6 +157,8 @@ def run_evaluation(target_dir: Path) -> tuple[MetricVector, bool, str]:
         repro_exit_code=repro_exit if repro_log is not None else None,
         baseline_lint_errors=baseline_lint,
         baseline_type_errors=baseline_type,
+        evaluation_exit_code=evaluation_exit,
+        evaluation_errors=evaluation_errors,
     )
 
     state = read_state(loop_dir)
@@ -158,6 +228,8 @@ def run_evaluation(target_dir: Path) -> tuple[MetricVector, bool, str]:
             "new_type_errors": metrics.new_type_errors,
             "composite_score": round(float(metrics.composite_score), 2),
             "has_repro_test": bool(metrics.has_repro_test),
+            "evaluation_exit_code": evaluation_exit,
+            "evaluation_errors": evaluation_errors,
         }, ensure_ascii=False),
     )
 

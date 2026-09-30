@@ -224,12 +224,17 @@ Evidence:
 
 `FACT` `init_loop`生成的test/lint/repro命令分别在子shell执行，完整stdout/stderr重定向到对应日志。cd/export/exit仅影响该步骤，外层读取真实退出码后继续其它检查。步骤命令内容保留。
 
-`UNKNOWN` 这项隔离本身不证明外层runner完整执行；外层退出、回执和日志新鲜性见执行计划C28，尚未关闭。
+`FACT` 单次执行还要求外层runner成功、每个所需步骤唯一且有效的回执及本轮可读日志。程序生成的GOAL复现配置决定必需步骤；旧repro契约已移除时不复用旧日志。整体执行失败否决收敛并写原子EVAL_DONE与求助单；绿色测试数和有效lint基线语义保留。
+
+`UNKNOWN` 日志新鲜性不等于生产者身份。C29独立进程实验确认同工位并发eval可串读，尚未关闭；评分也不是业务验收报告。
 
 Evidence:
 - `herdr/evaluator.py:init_loop`
 - `tests/test_evaluator_step_isolation.py`
-- `docs/lessons/lessons-learned.md` §110
+- `docs/lessons/lessons-learned.md` §110、§111
+- `bin/herdr-loop:run_evaluation, _exit_receipts, _fresh_step_log`
+- `herdr/evaluator.py:calculate_metrics, is_converged, generate_blocker_report`
+- `tests/test_evaluator_runner_contract.py`
 
 
 ## 2. CoW (Copy-on-Write) 沙盒隔离机制

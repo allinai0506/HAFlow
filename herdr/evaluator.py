@@ -396,6 +396,8 @@ def calculate_metrics(
     allowed_patterns: Optional[List[str]] = None,
     baseline_lint_errors: int = 0,
     baseline_type_errors: int = 0,
+    evaluation_exit_code: int = 0,
+    evaluation_errors: Optional[List[str]] = None,
 ) -> MetricVector:
     """Compute the 5-dimensional metric vector from execution outputs."""
     passed, total, failing = parse_test_output(test_output, test_exit_code)
@@ -456,7 +458,7 @@ def calculate_metrics(
     # Absolute zero-defect rule: cannot score 100.0 if any NEW failures exist.
     # Pre-existing baseline debt is transparent in lint_errors/type_errors
     # but does not cap the score; only the delta gates.
-    if (test_exit_code != 0 or failing or new_lint > 0 or new_type > 0 or (has_repro and repro_val < 100.0) or out_of_bounds) and composite >= 100.0:
+    if (evaluation_exit_code != 0 or evaluation_errors or test_exit_code != 0 or failing or new_lint > 0 or new_type > 0 or (has_repro and repro_val < 100.0) or out_of_bounds) and composite >= 100.0:
         composite = 95.0
 
     return MetricVector(
@@ -478,6 +480,8 @@ def calculate_metrics(
         details={
             "out_of_bounds_files": out_of_bounds,
             "test_exit_code": test_exit_code,
+            "evaluation_exit_code": evaluation_exit_code,
+            "evaluation_errors": list(evaluation_errors or []),
             "lint_exit_code": lint_exit_code,
             "type_exit_code": type_exit_code,
             "repro_exit_code": repro_exit_code,
@@ -491,6 +495,8 @@ def calculate_metrics(
 
 def is_converged(metrics: MetricVector) -> bool:
     """True if metrics satisfy complete convergence (DoD fulfilled, 0 NEW defects)."""
+    if metrics.details.get("evaluation_exit_code", 0) != 0 or metrics.details.get("evaluation_errors"):
+        return False
     if metrics.details.get("test_exit_code", 0) != 0:
         return False
     if metrics.composite_score < 99.9:
@@ -540,6 +546,17 @@ def render_metrics_markdown(metrics: MetricVector, iteration: int, max_iteration
 
 *更新时间: {time.strftime('%Y-%m-%d %H:%M:%S')}*
 """.strip()
+
+
+def _execution_failure_block(metrics: MetricVector) -> str:
+    errors = list(metrics.details.get("evaluation_errors") or [])
+    exit_code = metrics.details.get("evaluation_exit_code", 0)
+    exit_error = f"evaluator_exit:{exit_code}"
+    if exit_code != 0 and exit_error not in errors:
+        errors.append(exit_error)
+    if not errors:
+        return ""
+    return "\n### 评估执行证据未满足\n" + "\n".join(f"- `{error}`" for error in errors) + "\n"
 
 
 def render_evaluation_markdown(
@@ -595,7 +612,7 @@ def render_evaluation_markdown(
 > **剩余循环轮次**: {max_iterations - iteration}
 
 ## 待修复阻断项 (Blockers)
-
+{_execution_failure_block(metrics)}
 ### 1. 失败测试清单
 {failing_list}
 {repro_block}
@@ -648,7 +665,7 @@ def generate_blocker_report(loop_dir: Path, metrics: MetricVector, iteration: in
 > **综合得分**: `{metrics.composite_score} / 100.0`
 
 ## 当前阻断项
-
+{_execution_failure_block(metrics)}
 ### 失败测试
 {failing_list}
 
