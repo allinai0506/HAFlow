@@ -206,6 +206,20 @@ Evidence:
 
 ---
 
+### 1.5 StateStore 命名空间与 JSON 投影
+
+`FACT` CLI 的隐式 tasks/workflows 投影跟随选定 SQLite 实例父目录；只有显式环境、模块或函数参数路径覆盖此目标。默认 workflow.json 保留配置读取职责，不作为显式数据库选址覆盖。steering 的隐式 tasks/steering 投影、SQLite 默认全量导出和 opt-in JSON 迁移同样跟随实例父目录。
+
+`GUARD` 测试只设置临时 HERDR_STATE_DB 时不能读入或覆盖宿主默认JSON；显式目标路径仍按既有契约生效。本地修复不自动修复已经损坏的生产投影，也不改变SQLite权威来源。
+
+Evidence:
+- `bin/herdr-task:TASKS_FILE, WORKFLOWS_FILE, _get_store, save_tasks`
+- `herdr/steering.py:get_tasks_file, get_steering_file, save_steering_data`
+- `herdr/state_store.py:resolve_tasks_projection_file, _maybe_auto_migrate, export_all_json`
+- `tests/test_state_projection_namespace.py`
+- `docs/lessons/lessons-learned.md` §91复发补证
+
+
 ## 2. CoW (Copy-on-Write) 沙盒隔离机制
 
 `FACT` 任何研发修改类任务绝不在项目主干目录执行，而必须在独立克隆中运行：

@@ -46,6 +46,9 @@
 | C24 | Provider jev422 / context reducer失败、stderr缺运行归属 | controller.err尾部、observer/context记录 | 待归属；旁路失败不得阻断主状态，不宣称属于本Workflow |
 | C25 | console BrokenPipe/转义警告、STARTUP WAIT、Git busy | console.err、startup8次、GIT BUSY75后成功 | 分类核对；网络断开/正常等待不冒充bug，确认重试有界和成功后解除 |
 | C26 | 全局JSON投影滞后，UI/诊断可能读到不同状态 | SQLite latest_dispatch != workflows.json；tasks projection缺Task | 已证实投影差异；检查权威读取/导出刷新，不另建事实源 |
+| C03b | 合法旧blocker在恢复后仍被读取，working事件可能抹掉仲裁状态 | blocked/working状态历史；handle_agent_event | 未关闭；需完整核对显式仲裁、采样epoch和内循环恢复链，不能只看busy就解除耗尽 |
+| C27 | 评估超时只终止直接shell，后代进程可继续运行 | bin/herdr-loop subprocess.run；隔离就绪子进程探针 | 隔离实验确认；处理本次创建的进程组，验证超时/中断和正常返回 |
+| C28 | 外层脚本exit17/缺lint回执，仍100分converged | 隔离真实run_evaluation写EVAL_DONE=true | 已复现；完整检查runner退出、步骤回执和新鲜日志，防缺失默认成功 |
 
 ## 执行计划与检查点
 1. 固定日志快照、归属与覆盖账本；逐卡补触发、因果、正常对照、代码边界及验证。
@@ -65,3 +68,5 @@ C21本地验证：真实临时SQLite blocked observation→CAS→Controller queu
 C03本地验证：派发内循环协议输入含自身BLOCKER字面量，DONE-only清洗未覆盖，导致提示词回显可被Sentinel误读。共享清洗扩展DONE/BLOCKER，覆盖真实dispatch→临时SQLite及steering→临时SQLite出口，保留ORCH身份与真实Agent标记检测。修前及撤销关键修复反证均3 failed/1 passed；修后专项62 passed，全量2598 passed/145 subtests passed、0 failed/0 skipped（335.82s）；compileall/diff-check通过。仅关闭输入回显路径，历史合法blocker跨恢复epoch的重复读取仍需独立处理（C03b），没有修生产历史状态。
 
 C04本地验证：旧实现50轮询输出25条，回归1 failed/15 passed；修后专项43 passed/9 subtests passed。基于cff721b采用他人谱系修复并重放本轮独立提交后，全量2606 passed/145 subtests passed、0 failed/0 skipped（366.29s）。同一样本仅一日志，样本版本变更再次记录；相邻真实SQLite仲裁链与supersede链专项通过。compileall/diff-check通过；无运行现场变更。重放后本轮前三提交为8708460(C01)、ac4a1ee(C21)、e2281a0(C03)，旧证据仍对应原验证基线。
+
+C26本地验证：隐式投影/opt-in迁移统一跟随所选SQLite父目录，保留显式环境、模块、调用参数路径；默认workflow.json仍供配置读取，不冒充显式选库。修前及撤销三处关键修复均5 failed/2 passed；修后专项59 passed，最终靶向7 passed；隔离全量2613 passed/145 subtests passed、0 failed/0 skipped（355.47s）。真实临时宿主文件未被写穿；compileall、bin/herdr-task AST与diff-check通过。仅自审、未部署，损坏的生产历史JSON投影尚未重建。

@@ -99,8 +99,10 @@ except ImportError:
         ensure_no_git_processes,
     )
 
-TASKS_FILE = os.environ.get("TASKS_FILE") or os.path.expanduser("~/.herdr-controller/tasks.json")
-WORKFLOW_FILE = os.environ.get("WORKFLOW_FILE") or os.path.expanduser("~/.herdr-controller/workflow.json")
+# Only explicit projection overrides outrank the selected SQLite namespace.
+TASKS_FILE = os.environ.get("TASKS_FILE")
+_DEFAULT_WORKFLOW_FILE = os.path.expanduser("~/.herdr-controller/workflow.json")
+WORKFLOW_FILE = os.environ.get("WORKFLOW_FILE") or _DEFAULT_WORKFLOW_FILE
 # Same resolution as services/herdr-controller.py::ATTENTION_FILE, captured
 # at import like the controller captures it: the CLI and the controller run
 # in different processes but inherit the same environment, so both must
@@ -175,7 +177,7 @@ except ImportError:
     }
 
 CONTROLLER_ROOT = os.path.expanduser("~/.herdr-controller")
-WORKFLOWS_FILE = os.path.join(CONTROLLER_ROOT, "workflows.json")
+WORKFLOWS_FILE = os.environ.get("WORKFLOWS_FILE")
 STAGE_STATE_FILE = os.path.join(CONTROLLER_ROOT, "stage-state.json")
 CLONE_ROOT = os.path.realpath(os.path.join(CONTROLLER_ROOT, "clones"))
 EVIDENCE_ROOT = os.path.join(CONTROLLER_ROOT, "logs", "tasks")
@@ -1141,7 +1143,10 @@ def _get_store():
         db_path = p.parent / "state.db" if p.name == "tasks.json" else p.with_suffix(".db")
         if db_path.parent.exists():
             return get_state_store(db_path=db_path)
-    wf_file = globals().get("WORKFLOW_FILE") or globals().get("WORKFLOWS_FILE") or os.environ.get("WORKFLOW_FILE") or os.environ.get("WORKFLOWS_FILE")
+    legacy_wf_file = globals().get("WORKFLOW_FILE")
+    if legacy_wf_file == _DEFAULT_WORKFLOW_FILE and not os.environ.get("WORKFLOW_FILE"):
+        legacy_wf_file = None  # Default config path is not an explicit DB selector.
+    wf_file = legacy_wf_file or globals().get("WORKFLOWS_FILE") or os.environ.get("WORKFLOW_FILE") or os.environ.get("WORKFLOWS_FILE")
     if wf_file:
         p = Path(wf_file)
         db_path = p.parent / "state.db" if p.name in ("workflows.json", "workflow.json") else p.with_suffix(".db")

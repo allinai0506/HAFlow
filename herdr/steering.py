@@ -28,23 +28,20 @@ from .agent_adapter import (
     get_agent_adapter,
     list_agent_adapters,
 )
-from .state_store import get_state_store, StateStore, sync_tasks_projection
+from .state_store import get_state_store, StateStore, sync_tasks_projection, resolve_tasks_projection_file
 
 ACTIVE_STATUSES = {"dispatched", "working", "rework", "blocked", "paused", "interrupted"}
 
 
 def get_tasks_file() -> Path:
-    p = os.environ.get("TASKS_FILE")
-    if p:
-        return Path(p)
-    return Path.home() / ".herdr-controller" / "tasks.json"
+    return resolve_tasks_projection_file(store=get_state_store())
 
 
 def get_steering_file() -> Path:
     p = os.environ.get("STEERING_FILE")
     if p:
         return Path(p)
-    return Path.home() / ".herdr-controller" / "steering.json"
+    return get_state_store().db_path.parent / "steering.json"
 
 
 def _atomic_write_json(file_path: Path, data: Any) -> None:

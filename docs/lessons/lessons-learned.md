@@ -4124,6 +4124,16 @@ TASKS_FILE=/tmp/x/tasks.json WORKFLOWS_FILE=/tmp/x/workflows.json pytest -q "${T
   只覆盖 observer，覆盖不到本条的投影回落，且**不能**靠钉 `TASKS_FILE`/`WORKFLOWS_FILE` 补，见上节实测）、
   §89（收尾节点分支 ≠ 交付物分支：收尾侧必须对"看似无关"的实盘副作用保持警惕）
 
+### 2026-09-30 复发补证：调用者默认值越过所选数据库
+
+**问题背景**：`wf-project-0929-01` 排查再次发现实盘投影仅剩测试Task，SQLite业务行仍在。当前resolver已有`store.db_path.parent`回落，但CLI把默认宿主路径作为显式参数传入，绕过resolver；steering和默认全量导出也有同类宿主默认值。
+
+**经验教训**：修复回落层不等于调用链收口。默认配置路径不能冒充显式选库或显式投影覆盖；opt-in迁移的隐式输入也须属于所选库命名空间。真正显式指定的环境/模块/调用参数路径继续有效，不替用户改写。
+
+**操作规范与防护**：`bin/herdr-task`仅保留显式投影覆盖，默认`workflow.json`仍用于配置读取；steering复用StateStore投影解析，SQLite默认导出/迁移使用该实例父目录。`tests/test_state_projection_namespace.py`用两个临时命名空间检查宿主字节不变、隔离库真实写入/回读、显式覆盖有效，以及空库不导入宿主Task。不得仅在conftest全局钉一组env掩盖产品缺陷。
+
+**验证与证据**：同一回归修前及撤销关键修复均`5 failed,2 passed`，修后`7 passed`；相邻专项`59 passed`，隔离全量`2613 passed,145 subtests passed`（355.47s）。`python3.13 -m pytest -q tests/test_state_projection_namespace.py`安全使用临时路径；证据见本轮执行计划C26与该测试。仅本地验证，未重建实盘JSON、未部署；旧章节中的313条为历史快照，不能当作当前数量。
+
 ## 92. SQLite `mode=ro` 并非无副作用：WAL 缺边车时打开会实体化 `-wal`/`-shm`
 
 ### 问题背景

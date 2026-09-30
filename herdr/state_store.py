@@ -624,10 +624,10 @@ class SQLiteStateStore(StateStore):
             wfs = self.list_workflows()
             tasks = self.list_tasks()
             if not wfs and not tasks:
-                wf_path = Path(os.environ.get("WORKFLOWS_FILE") or (state_db.CONTROLLER_DIR / "workflows.json"))
-                tasks_path = Path(os.environ.get("TASKS_FILE") or (state_db.CONTROLLER_DIR / "tasks.json"))
-                st_path = Path(os.environ.get("STEERING_FILE") or (state_db.CONTROLLER_DIR / "steering.json"))
-                cp_path = Path(os.environ.get("CHECKPOINTS_DIR") or (state_db.CONTROLLER_DIR / "checkpoints"))
+                wf_path = Path(os.environ.get("WORKFLOWS_FILE") or (self.db_path.parent / "workflows.json"))
+                tasks_path = Path(os.environ.get("TASKS_FILE") or (self.db_path.parent / "tasks.json"))
+                st_path = Path(os.environ.get("STEERING_FILE") or (self.db_path.parent / "steering.json"))
+                cp_path = Path(os.environ.get("CHECKPOINTS_DIR") or (self.db_path.parent / "checkpoints"))
 
                 if wf_path.exists() or tasks_path.exists() or st_path.exists():
                     self.import_from_json(
@@ -1155,7 +1155,7 @@ class SQLiteStateStore(StateStore):
         return {"steering_queues": queues, "history": history}
 
     def export_all_json(self, target_dir: Optional[Path] = None) -> Dict[str, Any]:
-        out_dir = Path(target_dir) if target_dir else state_db.CONTROLLER_DIR
+        out_dir = Path(target_dir) if target_dir else self.db_path.parent
         out_dir.mkdir(parents=True, exist_ok=True)
 
         wf_path = out_dir / "workflows.json"
