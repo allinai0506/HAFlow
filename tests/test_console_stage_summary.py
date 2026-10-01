@@ -102,5 +102,42 @@ class TestStageSummarySuperseded(unittest.TestCase):
                 )
 
 
+    def test_completed_workflow_makes_stage_cleaned(self):
+        wf = {"status": "completed"}
+        tasks = [
+            {"task_id": "impl-1", "stage": "implementation", "status": "failed"},
+        ]
+        summary = self.module.stage_summary(tasks, "implementation", workflow=wf)
+        self.assertEqual(summary["status"], "cleaned")
+        summary_empty = self.module.stage_summary([], "wrapup", workflow=wf)
+        self.assertEqual(summary_empty["status"], "cleaned")
+
+    def test_gate_override_pass_makes_stage_cleaned(self):
+        wf = {"status": "running", "gate_overrides": {"test": {"verdict": "pass"}}}
+        tasks = [
+            {"task_id": "test-1", "stage": "test", "status": "failed"},
+        ]
+        summary = self.module.stage_summary(tasks, "test", workflow=wf)
+        self.assertEqual(summary["status"], "cleaned")
+
+    def test_retry_success_after_failure_stage_cleaned(self):
+        wf = {"status": "running"}
+        tasks = [
+            {"task_id": "t1", "stage": "implementation", "status": "failed", "created_at": 100},
+            {"task_id": "t2", "stage": "implementation", "status": "completed", "created_at": 200},
+        ]
+        summary = self.module.stage_summary(tasks, "implementation", workflow=wf)
+        self.assertEqual(summary["status"], "cleaned")
+
+    def test_failure_after_success_stage_failed(self):
+        wf = {"status": "running"}
+        tasks = [
+            {"task_id": "t1", "stage": "implementation", "status": "completed", "created_at": 100},
+            {"task_id": "t2", "stage": "implementation", "status": "failed", "created_at": 200},
+        ]
+        summary = self.module.stage_summary(tasks, "implementation", workflow=wf)
+        self.assertEqual(summary["status"], "failed")
+
+
 if __name__ == "__main__":
     unittest.main()

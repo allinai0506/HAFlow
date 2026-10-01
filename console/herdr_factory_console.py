@@ -140,7 +140,12 @@ def workflow_graph_for(wid,p,w,ts):
     except Exception:
         blockers=[]
     try:
-        return herdr_workflow_graph.workflow_graph_projection(definition or {},ts or [],blockers)
+        payload=dict(definition or {})
+        if isinstance(w,dict):
+            for k in ("status","gate_overrides","current_stage","workflow_id"):
+                if w.get(k) is not None:
+                    payload[k]=w[k]
+        return herdr_workflow_graph.workflow_graph_projection(payload,ts or [],blockers)
     except Exception:
         return {'nodes':[],'edges':[],'context':{'required':[],'optional':[]}}
 
@@ -148,18 +153,48 @@ def enrich_workflow_tasks(wid,p,ts):
     node_types=workflow_node_types(wid,p)
     return [{**t,'node_type':t.get('node_type') or node_types.get(t.get('node') or t.get('stage'))} for t in ts]
 
-def stage_summary(ts,key):
+def stage_summary(ts,key,workflow=None):
     xs=[t for t in ts if t.get('stage')==key]
-    if not xs:return {'key':key,'count':0,'status':'waiting','tasks':[]}
     live=[t for t in xs if t.get('status')!='superseded' and not t.get('superseded_by')]
+    wf_status=(workflow or {}).get('status') if isinstance(workflow,dict) else ''
+    is_wf_completed=wf_status in {'completed','cleaned','archived'}
+    gate_override=((workflow or {}).get('gate_overrides') or {}).get(key) or {}
+    gate_passed=gate_override.get('verdict')=='pass'
+
+    if not xs:
+        if is_wf_completed:
+            return {'key':key,'count':0,'status':'cleaned','tasks':[]}
+        return {'key':key,'count':0,'status':'waiting','tasks':[]}
     if not live: st='superseded'
+    elif is_wf_completed: st='cleaned'
+    elif gate_passed:
+        active=any(t.get('status') in {'working','dispatched','pending','rework','agent_done'} for t in live)
+        st='working' if active else 'cleaned'
     else:
         ss=[t.get('status','unknown') for t in live]
-        if any(s=='failed' for s in ss): st='failed'
-        elif any(s=='blocked' for s in ss): st='blocked'
+        verdicts=[str(t.get('stage_verdict') or '') for t in live]
+        if any(s=='blocked' and v!='pass' for s,v in zip(ss,verdicts)): st='blocked'
         elif any(s in {'working','dispatched','pending','rework','agent_done'} for s in ss): st='working'
-        elif all(s in {'completed','committed','integrated','cleanup_ready','cleaned'} for s in ss): st='cleaned'
-        else: st='mixed'
+        elif any(v=='pass' for v in verdicts) or all(s in {'completed','committed','integrated','cleanup_ready','cleaned'} for s in ss):
+            st='cleaned'
+        else:
+            def _k(t):
+                for k in ('created_at','updated_at','last_activity_at'):
+                    v=t.get(k)
+                    if isinstance(v,(int,float)): return float(v)
+                    if isinstance(v,str) and v.replace('.','',1).isdigit(): return float(v)
+                return 0.0
+            latest=sorted(live,key=_k)[-1]
+            latest_st=str(latest.get('status') or '')
+            latest_v=str(latest.get('stage_verdict') or '')
+            if latest_v=='pass' or latest_st in {'completed','committed','integrated','cleanup_ready','cleaned'}:
+                st='cleaned'
+            elif latest_st=='failed' or any(s=='failed' for s in ss):
+                st='failed'
+            elif any(s=='blocked' for s in ss):
+                st='blocked'
+            else:
+                st='mixed'
     return {'key':key,'count':len(live),'status':st,'tasks':xs}
 
 def panes(workspace):
@@ -411,7 +446,7 @@ def workflow_detail(wid):
     if not w:raise RuntimeError('工作流不存在')
     p=project_for_workflow(wid); ts=enrich_workflow_tasks(wid,p,tasks_for_workflow(wid)); ss=[]
     for k,l in workflow_stages(wid,p):
-        x=stage_summary(ts,k); x['label']=l; ss.append(x)
+        x=stage_summary(ts,k,workflow=w); x['label']=l; ss.append(x)
     stall_info=herdr_projection.detect_workflow_stalls(wid,ts,workflow=w)
     graph=workflow_graph_for(wid,p,w,ts)
     return {'workflow':{'workflow_id':wid,**_with_subject(w)},'project':p,'stages':ss,'tasks':ts,'graph':graph,'context':graph.get('context',{'required':[],'optional':[]}),'coordinator':agent_runtime(w.get('coordinator_pane_id')),'candidate_branch':w.get('candidate_branch'),'agent_override':w.get('agent_override','auto'),'stall':stall_info}
@@ -4253,7 +4288,7 @@ function flowIconSvg(id){
   return '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">'+p+'</svg>';
 }
 function flowCardFoot(n){
-  if(!n.task_count)return '尚未开始';
+  if(!n.task_count)return (n.status === 'completed' || n.status === 'cleaned') ? '已完成' : '尚未开始';
   const head=(Number(n.active_task_count)||0)+' 运行 · 完成 '+(Number(n.completed_task_count)||0);
   const agents=(n.agents||[]).filter(Boolean).slice(0,2);
   return agents.length?head+' · '+agents.join(' · '):head;
@@ -4307,10 +4342,16 @@ function flowChecklist(node){
     else items.push(['wait','等待上游 · '+waiting.map(labelOf).join('、')]);
   }
   const agents=(node.agents||[]).filter(Boolean);
-  if(!agents.length)items.push(['wait','尚未分配执行者']);
+  if(!agents.length){
+    if(node.status==='completed')items.push(['ok','阶段已收尾完成']);
+    else items.push(['wait','尚未分配执行者']);
+  }
   else items.push(['ok','执行者已分配 · '+agents.join('、')]);
   const failed=Number(node.failed_task_count||0), blocked=Number(node.blocked_task_count||0);
-  if(failed||blocked)items.push(['bad','失败 '+failed+' · 阻塞 '+blocked]);
+  if(failed||blocked){
+    if(node.status==='completed')items.push(['ok','历史失败/阻塞已处理放行（历史失败 '+failed+' · 阻塞 '+blocked+'）']);
+    else items.push(['bad','失败 '+failed+' · 阻塞 '+blocked]);
+  }
   else items.push(['ok','无失败、无阻塞']);
   const down=node.downstream||[];
   if(!down.length)items.push(['ok','终点节点']);
@@ -4975,8 +5016,9 @@ function openControllerCockpitModal(){
   const acts=allActs.filter(a=>a.group!=='pipeline');
   if(!state.controllerActionsMap)state.controllerActionsMap={};
   allActs.forEach(a=>{state.controllerActionsMap[a.action_id]=a;});
-  const curStage=state.workflow&&state.workflow.stages?state.workflow.stages.find(s=>['working','failed','blocked'].includes(s.status)):null;
-  const stageName=curStage?(curStage.label||curStage.key):'就绪/空闲';
+  const isWfDone=['completed','cleaned','archived'].includes(w&&w.status);
+  const curStage=isWfDone?null:(state.workflow&&state.workflow.stages?state.workflow.stages.find(s=>['working','failed','blocked'].includes(s.status)):null);
+  const stageName=isWfDone?'已全部完成':(curStage?(curStage.label||curStage.key):'就绪/空闲');
   const isStalled=Boolean(stall&&stall.is_stalled);
 
   let statusCard=`<section class="ctl-status${isStalled?' is-stalled':''}"><div class="ctl-status-head"><span class="ctl-status-title"><span class="ctl-dot"></span>调度状态与等待条件</span><span class="badge ${isStalled?'failed':'cleaned'}">${isStalled?'推进停滞':'调度运转中'}</span></div><div class="ctl-status-grid"><div class="ctl-status-item"><span class="ctl-k">当前关注阶段</span><strong>${esc(stageName)}</strong></div><div class="ctl-status-item"><span class="ctl-k">活跃卡点</span><strong>${blockers.length} 项</strong></div><div class="ctl-status-item is-full"><span class="ctl-k">${isStalled?'停滞原因':'轮询状态'}</span><span class="ctl-note">${isStalled?`⚠️ ${esc(stall.message)}`:'✓ Controller 后台轮询正常，正在监控 DAG 拓扑门禁'}</span></div></div></section>`;

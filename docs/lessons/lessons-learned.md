@@ -5598,3 +5598,44 @@ C30追加验证：`tests/test_blocked_recovery_command_contract.py`提取真实�
 
 
 C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后完整全量2871 passed、154 subtests passed、2 skipped（隔离HOME无LaunchAgent），0 failed，454.85s。两项本机只读plist检查另行2 passed（0.07s）。compileall、三入口CLI AST、diff-check通过；独立最终只读复审组合阻断闭合，未自行重跑全量。真实Agent/Worker启动、业务E2E及开放卡未因此验收。
+
+## 118. 已结束工作流在画布投影与阶段聚合中的终态穿透与门禁放行感知（2026-10-01）
+
+### 问题背景
+
+在 HAFlow Web 控制台查看已结束的工作流（如 `wf-project-0929-01`，其在数据库中已执行 `close-workflow` 标记为 `status: completed`，且 `gate_overrides` 中对实现和测试阶段均记录了 `verdict: pass` 的人工放行）：
+1. 界面画布（Canvas）上，「实现」仍显示红色「失败」，「测试」仍显示红色「已阻塞」，「收尾」仍显示灰色「等待」（底部文案「尚未开始」）；
+2. 调度驾驶舱「当前关注阶段」仍指向失败的「实现」阶段；
+3. 用户反馈：「有变化 但是不全对 这个工作流已经都结束了」。
+
+### 根因分析
+
+1. **图拓扑纯投影函数忽略工作流终态与门禁裁决**：
+   `herdr/workflow_graph.py:workflow_graph_projection` 仅接收规范化节点定义与任务列表，完全没有消费工作流主记录的 `status` 与 `gate_overrides`。即使工作流整体已关闭（`completed`），投影引擎仍然逐个节点按底层任务状态盲目聚合。
+2. **任务聚合状态存在单次失败永久污染缺陷**：
+   `aggregate_node_status` 原逻辑使用 `if any(s == 'failed'): return 'failed'`。在真实软件工程流水线中，节点经历重试、修复任务成功（或人工 force-pass 裁决）后，历史上被记录为 `failed` 的旧任务未被清除，导致即使最新任务成功或门禁放行，该阶段依然被永久定格为 `failed`。
+3. **控制台详情组装未向投影层透传运行时状态**：
+   `console/herdr_factory_console.py:workflow_graph_for` 仅传 `definition`，丢弃了 `workflow.status` 与 `gate_overrides`；同时 `stage_summary` 亦未感知工作流终态与放行裁决。
+4. **前端卡片底部文案缺少完成态分支**：
+   `flowCardFoot(n)` 在 `!n.task_count` 时无条件返回「尚未开始」，导致没有任务直接伴随工作流收尾关闭的「收尾」阶段在已完成时仍显示「尚未开始」。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 投影视图仅从叶子任务自底向上聚合，忽略顶层实体终态 | 整体生命周期终态（Workflow completed）高于局部历史重试状态；自底向上聚合容易被历史脏事实误导 | 当父容器进入终态（completed/cleaned/archived）时，所有子视图节点状态强制对齐终态，清零活跃与需关注标记 |
+| 阶段聚合以 `any(s == 'failed')` 判定失败 | 失败是单次尝试的过程事实，最新成功（或 gate pass）才是当前结论 | 聚合任务状态时，若无活跃运行中任务，应优先检查 gate_verdict pass 与按时序排序的最新任务完成态 |
+| 前端对空任务状态盲目假设「未开始」 | 空任务可能是尚未调度，也可能是随流程跳过或直接核准的终态 | 展示文案必须结合实体 `status` 综合判定，`n.status === 'completed'` 时必须显示「已完成」 |
+
+### 操作规范（已固化到源码与回归）
+
+1. **`herdr/workflow_graph.py`**：
+   - `workflow_graph_projection` 读取 `workflow.status` 与 `gate_overrides`。若工作流为 `completed/cleaned/archived`，节点状态一律置为 `completed`，`active_task_count = 0`，`has_attention = False`；若存在 `verdict: pass` 放行且无活跃任务，置为 `completed`。
+   - `aggregate_node_status` 在无活跃任务时按最新时序任务与 verdict pass 判定完成。
+2. **`console/herdr_factory_console.py`**：
+   - `workflow_graph_for` 合并透传 `status` 与 `gate_overrides`。
+   - `stage_summary` 接收 `workflow` 参数，对齐已完成与放行阶段判定。
+   - `flowCardFoot` 在 `status === 'completed'` 时显示「已完成」。
+3. **回归测试**：
+   - `tests/test_workflow_graph_projection.py::TestCompletedWorkflowAndGateOverrides`
+   - `tests/test_console_stage_summary.py::test_completed_workflow_makes_stage_cleaned`
