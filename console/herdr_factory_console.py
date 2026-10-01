@@ -1278,7 +1278,7 @@ button { cursor: pointer; }
 .sidebar {
   border-right: 1px solid var(--border-default);
   background: var(--bg-sidebar);
-  padding: 14px 10px;
+  padding: 16px 12px;
   position: sticky;
   top: 0;
   height: 100vh;
@@ -1291,23 +1291,23 @@ button { cursor: pointer; }
   font-weight: 600;
   letter-spacing: -0.2px;
   color: var(--text-primary);
-  padding: 0 6px;
+  padding: 0 8px;
 }
 .sub {
   color: var(--text-tertiary);
   font-size: 11px;
   margin: 2px 0 12px;
-  padding: 0 6px;
+  padding: 0 8px;
 }
 .sidebar-cta {
   width: 100%;
   margin-bottom: 12px;
   height: 32px;
-  padding: 0 10px;
+  padding: 0 12px;
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 6px;
+  gap: 8px;
   border: 1px solid var(--border-default);
   background: var(--bg-surface);
   color: var(--text-primary);
@@ -1327,7 +1327,7 @@ button { cursor: pointer; }
   color: var(--text-tertiary);
   text-transform: uppercase;
   letter-spacing: 0.5px;
-  padding: 8px 6px 4px;
+  padding: 8px 8px 4px;
 }
 .projects {
   display: flex;
@@ -1341,7 +1341,7 @@ button { cursor: pointer; }
   border: 1px solid transparent;
   color: var(--text-primary);
   border-radius: var(--radius-sm);
-  padding: 6px 8px;
+  padding: 8px;
   transition: all .12s ease;
 }
 .project:hover {
@@ -1372,10 +1372,10 @@ button { cursor: pointer; }
   width: 100%;
   margin-top: 8px;
   height: 30px;
-  padding: 0 10px;
+  padding: 0 12px;
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   border: 1px solid var(--border-subtle);
   background: var(--bg-surface);
   color: var(--text-secondary);
@@ -1428,6 +1428,9 @@ button { cursor: pointer; }
   align-items: center;
   flex-wrap: wrap;
 }
+.actions .btn.primary {
+  margin-left: auto;
+}
 
 /* Buttons (Linear Style) */
 .btn {
@@ -1435,10 +1438,10 @@ button { cursor: pointer; }
   background: var(--bg-surface);
   color: var(--text-primary);
   border-radius: var(--radius-sm);
-  padding: 6px 12px;
+  padding: 8px 12px;
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   font-size: 12.5px;
   font-weight: 500;
   transition: all .12s ease;
@@ -1477,7 +1480,7 @@ button { cursor: pointer; }
   cursor: wait;
 }
 .btn.icon-only {
-  padding: 6px 8px;
+  padding: 8px;
 }
 .btn-group {
   display: inline-flex;
@@ -1524,7 +1527,7 @@ button { cursor: pointer; }
   animation: popIn .1s ease-out;
 }
 .dropdown-item {
-  padding: 6px 10px;
+  padding: 8px 12px;
   font-size: 12.5px;
   color: var(--text-primary);
   border-radius: var(--radius-sm);
@@ -1559,15 +1562,15 @@ button { cursor: pointer; }
   display: flex;
   align-items: center;
   gap: 16px;
-  padding: 6px 0 12px;
-  margin-bottom: 14px;
+  padding: 8px 0 12px;
+  margin-bottom: 16px;
   border-bottom: 1px solid var(--border-subtle);
   flex-wrap: wrap;
 }
 .metric {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: 4px;
   background: transparent;
   border: none;
   padding: 0;
@@ -1578,7 +1581,7 @@ button { cursor: pointer; }
   font-size: 13px;
   font-weight: 600;
   color: var(--text-primary);
-  font-family: inherit;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-variant-numeric: tabular-nums;
 }
 .metric span {
@@ -1587,7 +1590,7 @@ button { cursor: pointer; }
 }
 .metric:not(:last-child)::after {
   content: '·';
-  margin-left: 10px;
+  margin-left: 8px;
   color: var(--border-default);
 }
 
@@ -1607,7 +1610,7 @@ button { cursor: pointer; }
 .stage-step {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   padding: 4px 8px;
   border-radius: var(--radius-sm);
   font-size: 12.5px;
@@ -1668,7 +1671,7 @@ button { cursor: pointer; }
 .stage-badge {
   font-size: 10.5px;
   font-weight: 600;
-  padding: 1px 6px;
+  padding: 1px 8px;
   border-radius: 999px;
   line-height: 1.3;
 }
@@ -1700,7 +1703,7 @@ button { cursor: pointer; }
   font-size: 11px;
   font-weight: 500;
   border-radius: 999px;
-  padding: 2px 7px;
+  padding: 2px 8px;
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -1766,7 +1769,7 @@ button { cursor: pointer; }
 }
 .decision-list {
   display: grid;
-  gap: 6px;
+  gap: 8px;
   margin-top: 8px;
 }
 .decision-list-label {
@@ -1778,9 +1781,9 @@ button { cursor: pointer; }
 .decision-item {
   display: grid;
   grid-template-columns: minmax(120px,.7fr) minmax(180px,1fr) minmax(180px,1.2fr);
-  gap: 10px;
+  gap: 8px;
   align-items: baseline;
-  padding: 6px 0;
+  padding: 8px 0;
   border-top: 1px solid var(--border-subtle);
   font-size: 12px;
 }
@@ -1796,7 +1799,7 @@ button { cursor: pointer; }
   font-size: 11.5px;
 }
 .dash-kpis{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));background:var(--bg-surface);border:1px solid var(--border-default);border-radius:var(--radius-md);margin-bottom:16px;overflow:hidden}
-.dash-kpi{padding:10px 14px;border-left:1px solid var(--border-subtle)}
+.dash-kpi{padding:12px 16px;border-left:1px solid var(--border-subtle)}
 .dash-kpi:first-child{border-left:0}
 .dash-kpi .k{font-size:11px;color:var(--text-secondary)}
 .dash-kpi .v{font-size:18px;font-weight:650;color:var(--text-primary);font-variant-numeric:tabular-nums}
@@ -1804,9 +1807,9 @@ button { cursor: pointer; }
 .dash-kpi .v.warn{color:var(--warning)}
 .dash-kpi .s{font-size:11px;color:var(--text-tertiary)}
 .dash-sec{background:var(--bg-surface);border:1px solid var(--border-default);border-radius:var(--radius-md);margin-bottom:16px;overflow:hidden}
-.dash-sec-h{display:flex;justify-content:space-between;align-items:center;padding:10px 16px;border-bottom:1px solid var(--border-default);font-size:13px;font-weight:650;color:var(--text-primary)}
+.dash-sec-h{display:flex;justify-content:space-between;align-items:center;padding:12px 16px;border-bottom:1px solid var(--border-default);font-size:13px;font-weight:650;color:var(--text-primary)}
 .dash-sec-h .count{font-size:11.5px;color:var(--text-tertiary);font-weight:500;font-variant-numeric:tabular-nums}
-.dash-task{display:grid;grid-template-columns:26px minmax(0,1fr) auto;gap:10px;align-items:start;padding:10px 16px;border-top:1px solid var(--border-subtle)}
+.dash-task{display:grid;grid-template-columns:26px minmax(0,1fr) auto;gap:8px;align-items:start;padding:12px 16px;border-top:1px solid var(--border-subtle)}
 .dash-task:first-of-type{border-top:0}
 .dash-task .n{color:var(--text-tertiary);font-size:12px;padding-top:2px;font-variant-numeric:tabular-nums}
 .dash-task .t{font-weight:600;font-size:13px;color:var(--text-primary);overflow-wrap:anywhere}
@@ -1814,12 +1817,12 @@ button { cursor: pointer; }
 .dash-task .m{color:var(--text-tertiary);font-size:11px;margin-top:2px}
 .dash-q{padding:12px 16px;border-top:1px solid var(--border-subtle)}
 .dash-q:first-of-type{border-top:0}
-.dash-q .qt{font-weight:600;font-size:13px;color:var(--text-primary);display:flex;justify-content:space-between;gap:10px;align-items:flex-start}
-.dash-default{font-size:11px;font-weight:600;color:var(--warning);background:var(--warning-bg);border-radius:999px;padding:2px 9px;white-space:nowrap}
-.dash-q .qd{display:grid;grid-template-columns:44px minmax(0,1fr);gap:8px;margin-top:6px;font-size:12px;color:var(--text-secondary)}
-.dash-q .qm{color:var(--text-tertiary);font-size:11px;margin-top:6px}
-.dash-btns{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
-.dash-ok{display:flex;gap:8px;align-items:center;padding:14px 16px;color:var(--text-secondary);font-size:13px}
+.dash-q .qt{font-weight:600;font-size:13px;color:var(--text-primary);display:flex;justify-content:space-between;gap:8px;align-items:flex-start}
+.dash-default{font-size:11px;font-weight:600;color:var(--warning);background:var(--warning-bg);border-radius:999px;padding:2px 8px;white-space:nowrap}
+.dash-q .qd{display:grid;grid-template-columns:44px minmax(0,1fr);gap:8px;margin-top:8px;font-size:12px;color:var(--text-secondary)}
+.dash-q .qm{color:var(--text-tertiary);font-size:11px;margin-top:8px}
+.dash-btns{display:flex;gap:8px;margin-top:8px;flex-wrap:wrap}
+.dash-ok{display:flex;gap:8px;align-items:center;padding:16px;color:var(--text-secondary);font-size:13px}
 .dash-layout{display:grid;grid-template-columns:minmax(0,1fr) 364px;gap:16px;align-items:start}
 .dash-rail{position:sticky;top:12px;display:flex;flex-direction:column;min-width:0}
 .dash-rail .dash-sec{border-top:2px solid var(--warning)}
@@ -1834,7 +1837,7 @@ button { cursor: pointer; }
 .wf-switcher {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   margin: 0 0 16px;
 }
 .wf-switcher label {
@@ -1847,7 +1850,7 @@ button { cursor: pointer; }
   color: var(--text-primary);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-sm);
-  padding: 6px 10px;
+  padding: 8px 12px;
   max-width: 520px;
 }
 
@@ -1860,7 +1863,7 @@ button { cursor: pointer; }
   align-items: center;
   gap: 8px;
   height: 32px;
-  padding: 0 10px 0 8px;
+  padding: 0 12px 0 8px;
   background: var(--bg-surface);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-sm);
@@ -1904,7 +1907,7 @@ button { cursor: pointer; }
   font-size: 11px;
   color: var(--text-tertiary);
   background: var(--bg-subtle);
-  padding: 1px 5px;
+  padding: 1px 4px;
   border-radius: 4px;
   border: 1px solid var(--border-subtle);
 }
@@ -1993,7 +1996,7 @@ button { cursor: pointer; }
   margin-bottom: 4px;
 }
 .popover-group-header {
-  padding: 6px 8px;
+  padding: 8px;
   font-size: 11px;
   font-weight: 600;
   color: var(--text-tertiary);
@@ -2012,7 +2015,7 @@ button { cursor: pointer; }
 .popover-group-title {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   text-transform: uppercase;
   letter-spacing: 0.3px;
 }
@@ -2097,7 +2100,7 @@ button { cursor: pointer; }
 .item-sub {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   font-size: 11px;
   color: var(--text-tertiary);
 }
@@ -2121,7 +2124,7 @@ button { cursor: pointer; }
 .badge-pill {
   font-size: 11px;
   height: 19px;
-  padding: 0 7px;
+  padding: 0 8px;
   border-radius: 999px;
   font-weight: 500;
   display: inline-flex;
@@ -2131,6 +2134,7 @@ button { cursor: pointer; }
   white-space: nowrap;
   flex-shrink: 0;
   box-sizing: border-box;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-variant-numeric: tabular-nums;
   border: 1px solid transparent;
 }
@@ -2208,7 +2212,7 @@ button { cursor: pointer; }
   border: none;
   color: var(--text-secondary);
   border-radius: var(--radius-sm);
-  padding: 4px 10px;
+  padding: 4px 12px;
   font-size: 12px;
   font-weight: 500;
   cursor: pointer;
@@ -2226,9 +2230,11 @@ button { cursor: pointer; }
 .filter-cnt {
   background: var(--bg-subtle);
   border-radius: 999px;
-  padding: 1px 6px;
+  padding: 1px 8px;
   margin-left: 4px;
   font-size: 11px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-variant-numeric: tabular-nums;
 }
 
 /* 任务列表 */
@@ -2237,7 +2243,7 @@ button { cursor: pointer; }
   overflow: visible;
 }
 .task {
-  padding: 6px 16px;
+  padding: 8px 16px;
   border-bottom: 1px solid var(--border-subtle);
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -2306,6 +2312,7 @@ button { cursor: pointer; }
   color: var(--text-tertiary);
   font-size: 11.5px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-variant-numeric: tabular-nums;
   flex-shrink: 0;
 }
 .task-agent {
@@ -2374,7 +2381,7 @@ button { cursor: pointer; }
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 10px;
+  padding: 8px 12px;
   border: none;
   background: transparent;
   color: var(--text-primary);
@@ -2410,7 +2417,7 @@ button { cursor: pointer; }
 }
 .task-actions {
   display: flex;
-  gap: 6px;
+  gap: 8px;
   flex-wrap: wrap;
   justify-content: flex-end;
 }
@@ -2451,7 +2458,7 @@ button { cursor: pointer; }
   overflow: hidden;
 }
 .resources-summary {
-  padding: 10px 16px;
+  padding: 12px 16px;
   font-size: 12.5px;
   font-weight: 600;
   color: var(--text-secondary);
@@ -2471,7 +2478,7 @@ button { cursor: pointer; }
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
   gap: 12px;
-  padding: 14px 16px;
+  padding: 16px;
   border-top: 1px solid var(--border-subtle);
 }
 .res-card {
@@ -2486,7 +2493,7 @@ button { cursor: pointer; }
   color: var(--text-secondary);
 }
 .agent-row, .slot-row, .alert-row {
-  padding: 6px 0;
+  padding: 8px 0;
   border-bottom: 1px solid var(--border-subtle);
   display: flex;
   justify-content: space-between;
@@ -2502,7 +2509,7 @@ button { cursor: pointer; }
   height: 7px;
   border-radius: 50%;
   display: inline-block;
-  margin-right: 6px;
+  margin-right: 8px;
   background: var(--text-tertiary);
 }
 .dot.ready { background: var(--success); }
@@ -2539,7 +2546,7 @@ button { cursor: pointer; }
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 14px 18px;
+  padding: 16px 18px;
   border-bottom: 1px solid var(--border-default);
   position: sticky;
   top: 0;
@@ -2573,7 +2580,7 @@ button { cursor: pointer; }
 }
 .form {
   display: grid;
-  gap: 10px;
+  gap: 8px;
 }
 .form label {
   font-size: 12px;
@@ -2586,7 +2593,7 @@ button { cursor: pointer; }
   color: var(--text-primary);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-sm);
-  padding: 8px 10px;
+  padding: 8px 12px;
   font-size: 13px;
   transition: border-color .15s;
 }
@@ -2633,7 +2640,7 @@ button { cursor: pointer; }
   color: var(--primary);
   font-size: 11px;
   font-weight: 600;
-  padding: 2px 7px;
+  padding: 2px 8px;
   border-radius: 4px;
 }
 .drawer-body {
@@ -2718,13 +2725,14 @@ button { cursor: pointer; }
   font-size: 11.5px;
   color: var(--text-tertiary);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-variant-numeric: tabular-nums;
   margin-top: 2px;
   word-break: break-all;
 }
 .task-drawer-meta {
   font-size: 12px;
   color: var(--text-secondary);
-  margin-top: 6px;
+  margin-top: 8px;
 }
 .task-drawer-actions {
   display: flex;
@@ -2759,7 +2767,7 @@ button { cursor: pointer; }
   border-bottom: 1px solid var(--border-default);
 }
 .td-tab {
-  padding: 10px 14px;
+  padding: 12px 16px;
   background: transparent;
   border: 0;
   border-bottom: 2px solid transparent;
@@ -2791,12 +2799,12 @@ button { cursor: pointer; }
 .td-attrs {
   display: grid;
   grid-template-columns: 88px 1fr;
-  gap: 6px 12px;
-  padding: 12px 14px;
+  gap: 8px 12px;
+  padding: 12px 16px;
   background: var(--bg-subtle);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
-  margin-bottom: 14px;
+  margin-bottom: 16px;
   font-size: 12.5px;
 }
 .td-attr-k {
@@ -2814,7 +2822,7 @@ button { cursor: pointer; }
   font-size: 12px;
   font-weight: 600;
   color: var(--text-secondary);
-  margin-bottom: 6px;
+  margin-bottom: 8px;
 }
 .td-txt {
   font-size: 13px;
@@ -2851,7 +2859,7 @@ button { cursor: pointer; }
   height: 9px;
   border-radius: 50%;
   background: var(--border-default);
-  margin-top: 5px;
+  margin-top: 4px;
   flex-shrink: 0;
 }
 .td-dot.done {
@@ -2873,7 +2881,7 @@ button { cursor: pointer; }
   background: var(--border-default);
 }
 .td-ev-body {
-  padding-bottom: 14px;
+  padding-bottom: 16px;
   min-width: 0;
 }
 .td-ev-title {
@@ -2891,7 +2899,7 @@ button { cursor: pointer; }
 .td-art {
   border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
-  padding: 10px 12px;
+  padding: 12px;
   margin-bottom: 8px;
   background: var(--bg-surface);
 }
@@ -2913,7 +2921,7 @@ button { cursor: pointer; }
   bottom: 24px;
   background: var(--bg-surface);
   border: 1px solid var(--border-default);
-  padding: 10px 16px;
+  padding: 12px 16px;
   border-radius: var(--radius-md);
   display: none;
   max-width: 420px;
@@ -2945,15 +2953,15 @@ pre { margin: 0; white-space: pre-wrap; word-break: break-word; font-family: ui-
 @keyframes spin { to { transform: rotate(360deg); } }
 
 /* Preflight, Signoff & Ops Center */
-.signoff-box { display: grid; gap: 14px; }
+.signoff-box { display: grid; gap: 16px; }
 .signoff-head { display: flex; justify-content: space-between; align-items: center; padding-bottom: 12px; border-bottom: 1px solid var(--border-default); }
-.signoff-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border-default); }
+.signoff-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border-default); }
 .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid rgba(0,0,0,0.15); border-radius: 50%; border-top-color: var(--primary); animation: spin .8s linear infinite; vertical-align: middle; }
 .preflight-box { display: grid; gap: 12px; }
-.preflight-head { background: var(--bg-subtle); border: 1px solid var(--border-default); border-radius: var(--radius-sm); padding: 12px 14px; }
+.preflight-head { background: var(--bg-subtle); border: 1px solid var(--border-default); border-radius: var(--radius-sm); padding: 12px 16px; }
 .preflight-prog { height: 4px; background: var(--border-default); border-radius: 2px; overflow: hidden; margin-top: 8px; }
 .preflight-prog-fill { height: 100%; width: 0%; background: var(--primary); transition: width .3s ease; }
-.preflight-row { background: var(--bg-surface); border: 1px solid var(--border-default); border-radius: var(--radius-sm); padding: 10px 12px; display: flex; justify-content: space-between; gap: 10px; align-items: flex-start; }
+.preflight-row { background: var(--bg-surface); border: 1px solid var(--border-default); border-radius: var(--radius-sm); padding: 12px; display: flex; justify-content: space-between; gap: 8px; align-items: flex-start; }
 .preflight-row.is-ready { border-color: rgba(22, 163, 74, 0.35); }
 .preflight-row.is-failed { border-color: rgba(220, 38, 38, 0.35); }
 .preflight-row.is-warn { border-color: rgba(217, 119, 6, 0.35); }
@@ -2963,88 +2971,88 @@ pre { margin: 0; white-space: pre-wrap; word-break: break-word; font-family: ui-
 .fleet-row:last-child { border-bottom: 0; }
 .fleet-row:hover { background: var(--bg-hover); }
 .ops-section { margin-bottom: 16px; }
-.ops-section h3 { font-size: 13px; font-weight: 600; margin: 0 0 10px; color: var(--text-primary); }
-.ops-card { background: var(--bg-surface); border: 1px solid var(--border-default); border-radius: var(--radius-sm); padding: 12px 14px; margin-bottom: 8px; transition: border-color .15s ease; }
+.ops-section h3 { font-size: 13px; font-weight: 600; margin: 0 0 8px; color: var(--text-primary); }
+.ops-card { background: var(--bg-surface); border: 1px solid var(--border-default); border-radius: var(--radius-sm); padding: 12px 16px; margin-bottom: 8px; transition: border-color .15s ease; }
 .ops-card:hover { border-color: var(--primary); }
 .ops-card-head { display: flex; justify-content: space-between; align-items: center; font-size: 13px; font-weight: 600; margin-bottom: 4px; }
-.ops-nodes { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.ops-nodes { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
 
 /* Controller cockpit — light high-contrast redesign (Linear clean) */
-code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; background: var(--bg-subtle); border: 1px solid var(--border-subtle); border-radius: 4px; padding: 1px 5px; color: var(--text-primary); }
-.ctl-wrap { display: grid; gap: 14px; line-height: 1.5; max-height: 75vh; overflow-y: auto; padding-right: 4px; }
-.ctl-status { background: var(--bg-surface); border: 1px solid var(--border-default); border-left: 3px solid var(--success); border-radius: var(--radius-md); padding: 12px 14px; box-shadow: var(--shadow-sm); }
+code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; background: var(--bg-subtle); border: 1px solid var(--border-subtle); border-radius: 4px; padding: 1px 4px; color: var(--text-primary); }
+.ctl-wrap { display: grid; gap: 16px; line-height: 1.5; max-height: 75vh; overflow-y: auto; padding-right: 4px; }
+.ctl-status { background: var(--bg-surface); border: 1px solid var(--border-default); border-left: 3px solid var(--success); border-radius: var(--radius-md); padding: 12px 16px; box-shadow: var(--shadow-sm); }
 .ctl-status.is-stalled { border-left-color: var(--warning); background: var(--warning-bg); }
-.ctl-status-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 10px; }
+.ctl-status-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 8px; }
 .ctl-status-title { font-weight: 600; font-size: 13px; color: var(--text-primary); display: inline-flex; align-items: center; gap: 8px; }
 .ctl-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--success); display: inline-block; flex-shrink: 0; }
 .ctl-status.is-stalled .ctl-dot { background: var(--warning); }
 .ctl-status-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 16px; }
-.ctl-status-item { background: var(--bg-subtle); border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); padding: 8px 10px; font-size: 12px; color: var(--text-secondary); }
+.ctl-status-item { background: var(--bg-subtle); border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); padding: 8px 12px; font-size: 12px; color: var(--text-secondary); }
 .ctl-status.is-stalled .ctl-status-item { background: rgba(255,255,255,.65); }
 .ctl-status-item.is-full { grid-column: 1 / -1; }
 .ctl-k { display: block; font-size: 11px; color: var(--text-tertiary); font-weight: 600; letter-spacing: .3px; margin-bottom: 2px; }
 .ctl-status-item strong { color: var(--text-primary); font-size: 12.5px; }
 .ctl-note { font-size: 12px; color: var(--text-secondary); line-height: 1.6; }
 .ctl-section-title { font-weight: 600; font-size: 13px; color: var(--text-primary); margin-bottom: 4px; display: flex; align-items: center; gap: 8px; }
-.ctl-count { font-size: 11px; color: var(--text-secondary); font-weight: 600; background: var(--bg-subtle); border: 1px solid var(--border-subtle); padding: 1px 7px; border-radius: 999px; }
-.ctl-sub { font-size: 12px; color: var(--text-secondary); margin-bottom: 10px; line-height: 1.5; }
-.ctl-actions { display: grid; gap: 10px; }
-.ctl-card { background: var(--bg-surface); border: 1px solid var(--border-default); border-radius: var(--radius-md); padding: 12px 14px; box-shadow: var(--shadow-sm); }
+.ctl-count { font-size: 11px; color: var(--text-secondary); font-weight: 600; background: var(--bg-subtle); border: 1px solid var(--border-subtle); padding: 1px 8px; border-radius: 999px; }
+.ctl-sub { font-size: 12px; color: var(--text-secondary); margin-bottom: 8px; line-height: 1.5; }
+.ctl-actions { display: grid; gap: 8px; }
+.ctl-card { background: var(--bg-surface); border: 1px solid var(--border-default); border-radius: var(--radius-md); padding: 12px 16px; box-shadow: var(--shadow-sm); }
 .ctl-card.is-recommended { border-color: rgba(94,106,210,.45); box-shadow: 0 0 0 1px rgba(94,106,210,.15), var(--shadow-sm); }
-.ctl-card-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; flex-wrap: wrap; }
-.ctl-index { font-size: 11px; font-weight: 700; color: var(--primary); background: var(--primary-subtle); border: 1px solid rgba(94,106,210,.25); border-radius: 6px; padding: 1px 7px; white-space: nowrap; }
+.ctl-card-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+.ctl-index { font-size: 11px; font-weight: 700; color: var(--primary); background: var(--primary-subtle); border: 1px solid rgba(94,106,210,.25); border-radius: 6px; padding: 1px 8px; white-space: nowrap; }
 .ctl-card-title { font-size: 13px; font-weight: 600; color: var(--text-primary); flex: 1; min-width: 140px; }
-.ctl-badges { display: inline-flex; gap: 6px; align-items: center; }
+.ctl-badges { display: inline-flex; gap: 8px; align-items: center; }
 .ctl-rec { font-size: 11px; font-weight: 700; color: #ffffff; background: var(--primary); border-radius: 999px; padding: 2px 8px; }
-.ctl-card-desc { font-size: 12px; color: var(--text-secondary); margin-bottom: 10px; line-height: 1.6; }
-.ctl-cmd { background: var(--bg-subtle); border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); padding: 8px 10px; margin-bottom: 10px; }
-.ctl-cmd-label { display: flex; justify-content: space-between; align-items: center; font-size: 11px; font-weight: 600; color: var(--text-tertiary); letter-spacing: .3px; margin-bottom: 6px; }
-.ctl-cmd code { display: block; background: #ffffff; border: 1px solid var(--border-default); border-radius: 6px; padding: 7px 9px; font-size: 11.5px; line-height: 1.6; color: var(--text-primary); white-space: pre-wrap; word-break: break-all; user-select: all; }
+.ctl-card-desc { font-size: 12px; color: var(--text-secondary); margin-bottom: 8px; line-height: 1.6; }
+.ctl-cmd { background: var(--bg-subtle); border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); padding: 8px 12px; margin-bottom: 8px; }
+.ctl-cmd-label { display: flex; justify-content: space-between; align-items: center; font-size: 11px; font-weight: 600; color: var(--text-tertiary); letter-spacing: .3px; margin-bottom: 8px; }
+.ctl-cmd code { display: block; background: #ffffff; border: 1px solid var(--border-default); border-radius: 6px; padding: 8px; font-size: 11.5px; line-height: 1.6; color: var(--text-primary); white-space: pre-wrap; word-break: break-all; user-select: all; }
 .ctl-card-foot { display: flex; justify-content: flex-end; gap: 8px; align-items: center; flex-wrap: wrap; }
-.ctl-empty { background: var(--success-bg); border: 1px solid rgba(22,163,74,.25); border-radius: var(--radius-md); padding: 12px 14px; font-size: 12.5px; color: var(--text-primary); line-height: 1.6; }
+.ctl-empty { background: var(--success-bg); border: 1px solid rgba(22,163,74,.25); border-radius: var(--radius-md); padding: 12px 16px; font-size: 12.5px; color: var(--text-primary); line-height: 1.6; }
 .ctl-empty .muted { margin-top: 4px; }
-.ctl-cheatsheet { background: var(--bg-surface); border: 1px solid var(--border-default); border-radius: var(--radius-md); padding: 12px 14px; box-shadow: var(--shadow-sm); }
+.ctl-cheatsheet { background: var(--bg-surface); border: 1px solid var(--border-default); border-radius: var(--radius-md); padding: 12px 16px; box-shadow: var(--shadow-sm); }
 .ctl-cheat-list { display: grid; }
-.ctl-cheat-row { display: grid; grid-template-columns: 24px minmax(0,1fr); gap: 10px; padding: 10px 0; border-top: 1px solid var(--border-subtle); }
-.ctl-cheat-row:first-of-type { border-top: 0; padding-top: 6px; }
+.ctl-cheat-row { display: grid; grid-template-columns: 24px minmax(0,1fr); gap: 8px; padding: 12px 0; border-top: 1px solid var(--border-subtle); }
+.ctl-cheat-row:first-of-type { border-top: 0; padding-top: 8px; }
 .ctl-cheat-num { width: 20px; height: 20px; border-radius: 6px; background: var(--bg-subtle); border: 1px solid var(--border-default); color: var(--text-secondary); font-size: 11px; font-weight: 700; display: inline-flex; align-items: center; justify-content: center; margin-top: 1px; }
-.ctl-cheat-name { font-size: 12.5px; font-weight: 600; color: var(--text-primary); display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 6px; }
-.ctl-cheat-cmd { background: var(--bg-subtle); border: 1px solid var(--border-subtle); border-radius: 6px; padding: 7px 9px; }
-.ctl-cheat-cmd code { display: block; background: #ffffff; border: 1px solid var(--border-default); border-radius: 6px; padding: 6px 8px; white-space: pre-wrap; word-break: break-all; line-height: 1.6; user-select: all; }
-.ctl-cheat-desc { font-size: 12px; color: var(--text-secondary); margin-top: 6px; line-height: 1.5; }
-.ctl-mini-card { margin-top: 6px; padding: 8px 10px; background: var(--bg-surface); border: 1px solid var(--border-default); border-radius: var(--radius-sm); }
+.ctl-cheat-name { font-size: 12.5px; font-weight: 600; color: var(--text-primary); display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 8px; }
+.ctl-cheat-cmd { background: var(--bg-subtle); border: 1px solid var(--border-subtle); border-radius: 6px; padding: 8px; }
+.ctl-cheat-cmd code { display: block; background: #ffffff; border: 1px solid var(--border-default); border-radius: 6px; padding: 8px; white-space: pre-wrap; word-break: break-all; line-height: 1.6; user-select: all; }
+.ctl-cheat-desc { font-size: 12px; color: var(--text-secondary); margin-top: 8px; line-height: 1.5; }
+.ctl-mini-card { margin-top: 8px; padding: 8px 12px; background: var(--bg-surface); border: 1px solid var(--border-default); border-radius: var(--radius-sm); }
 .ctl-mini-card.is-recommended { border-color: rgba(94,106,210,.4); }
-.ctl-mini-cmd { display: flex; align-items: flex-start; gap: 6px; background: var(--bg-subtle); padding: 6px 8px; border-radius: 6px; border: 1px solid var(--border-subtle); margin: 6px 0; }
-.ctl-mini-cmd code { flex: 1; background: #fff; border: 1px solid var(--border-default); border-radius: 4px; padding: 4px 6px; font-size: 11px; white-space: pre-wrap; word-break: break-all; line-height: 1.5; user-select: all; }
-.ctl-pre-light { white-space: pre-wrap; max-height: 160px; overflow: auto; background: var(--bg-subtle); color: var(--text-primary); padding: 8px 10px; border-radius: 8px; margin-top: 6px; border: 1px solid var(--border-subtle); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 1.5; }
+.ctl-mini-cmd { display: flex; align-items: flex-start; gap: 8px; background: var(--bg-subtle); padding: 8px; border-radius: 6px; border: 1px solid var(--border-subtle); margin: 8px 0; }
+.ctl-mini-cmd code { flex: 1; background: #fff; border: 1px solid var(--border-default); border-radius: 4px; padding: 4px 8px; font-size: 11px; white-space: pre-wrap; word-break: break-all; line-height: 1.5; user-select: all; }
+.ctl-pre-light { white-space: pre-wrap; max-height: 160px; overflow: auto; background: var(--bg-subtle); color: var(--text-primary); padding: 8px 12px; border-radius: 8px; margin-top: 8px; border: 1px solid var(--border-subtle); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 1.5; }
 /* Task-bound unblocking (end-user oriented, buttons first) */
-.ctl-blocker { background: var(--bg-surface); border: 1px solid var(--border-default); border-radius: var(--radius-md); padding: 12px 14px; box-shadow: var(--shadow-sm); }
-.ctl-blocker-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }
+.ctl-blocker { background: var(--bg-surface); border: 1px solid var(--border-default); border-radius: var(--radius-md); padding: 12px 16px; box-shadow: var(--shadow-sm); }
+.ctl-blocker-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
 .ctl-blocker-id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; color: var(--text-secondary); margin-top: 2px; word-break: break-all; }
 .ctl-blocker-title { font-size: 13px; font-weight: 600; color: var(--text-primary); }
-.ctl-blocker-reason { font-size: 12px; color: var(--text-secondary); background: var(--bg-subtle); border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); padding: 7px 9px; margin: 8px 0 10px; line-height: 1.6; }
-.ctl-effect { font-size: 12px; color: var(--text-primary); background: var(--primary-subtle); border: 1px solid rgba(94,106,210,.25); border-radius: var(--radius-sm); padding: 7px 9px; margin-bottom: 10px; line-height: 1.6; }
+.ctl-blocker-reason { font-size: 12px; color: var(--text-secondary); background: var(--bg-subtle); border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); padding: 8px; margin: 8px 0 8px; line-height: 1.6; }
+.ctl-effect { font-size: 12px; color: var(--text-primary); background: var(--primary-subtle); border: 1px solid rgba(94,106,210,.25); border-radius: var(--radius-sm); padding: 8px; margin-bottom: 8px; line-height: 1.6; }
 .ctl-card.is-destructive .ctl-effect { background: var(--danger-bg); border-color: rgba(220,38,38,.25); }
-.ctl-tech { margin-bottom: 10px; border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); background: var(--bg-surface); }
-.ctl-tech summary { cursor: pointer; font-size: 11.5px; color: var(--text-tertiary); padding: 6px 10px; user-select: none; }
+.ctl-tech { margin-bottom: 8px; border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); background: var(--bg-surface); }
+.ctl-tech summary { cursor: pointer; font-size: 11.5px; color: var(--text-tertiary); padding: 8px 12px; user-select: none; }
 .ctl-tech summary:hover { color: var(--text-secondary); }
-.ctl-tech-body { padding: 0 10px 10px; }
-.ctl-meta-chips { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+.ctl-tech-body { padding: 0 12px 12px; }
+.ctl-meta-chips { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
 .ctl-chip { font-size: 11px; color: var(--text-secondary); background: var(--bg-subtle); border: 1px solid var(--border-subtle); border-radius: 999px; padding: 1px 8px; }
 .ctl-chip strong { color: var(--text-primary); font-weight: 600; }
 /* Human decision asks: must read as "waiting on you", not as another log line */
-.ctl-decision { background: var(--warning-bg); border: 1px solid rgba(217,119,6,.3); border-left: 3px solid var(--warning); border-radius: var(--radius-md); padding: 12px 14px; margin-bottom: 10px; }
+.ctl-decision { background: var(--warning-bg); border: 1px solid rgba(217,119,6,.3); border-left: 3px solid var(--warning); border-radius: var(--radius-md); padding: 12px 16px; margin-bottom: 8px; }
 .ctl-decision.is-resolved { background: var(--success-bg); border-color: rgba(22,163,74,.3); border-left-color: var(--success); }
-.ctl-dec-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
+.ctl-dec-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
 .ctl-dec-id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; font-weight: 600; color: var(--warning); }
 .ctl-dec-q { font-size: 13px; color: var(--text-primary); line-height: 1.6; margin-bottom: 8px; }
-.ctl-dec-opts { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
-.ctl-dec-opt { font-size: 11.5px; color: var(--text-secondary); background: var(--bg-surface); border: 1px solid var(--border-default); border-radius: var(--radius-sm); padding: 3px 9px; }
+.ctl-dec-opts { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+.ctl-dec-opt { font-size: 11.5px; color: var(--text-secondary); background: var(--bg-surface); border: 1px solid var(--border-default); border-radius: var(--radius-sm); padding: 3px 8px; }
 .ctl-dec-opt.is-rec { color: var(--text-primary); border-color: rgba(217,119,6,.5); font-weight: 600; }
-.ctl-dec-advice { background: var(--bg-surface); border: 1px solid var(--border-default); border-radius: var(--radius-md); padding: 9px 12px; margin-bottom: 8px; }
+.ctl-dec-advice { background: var(--bg-surface); border: 1px solid var(--border-default); border-radius: var(--radius-md); padding: 8px 12px; margin-bottom: 8px; }
 .ctl-dec-advice.is-stale { opacity: .6; }
 .ctl-dec-advice-h { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 4px; }
-.ctl-dec-advice-kind { font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .4px; color: var(--text-tertiary); border: 1px solid var(--border-subtle); border-radius: 999px; padding: 0 7px; }
+.ctl-dec-advice-kind { font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .4px; color: var(--text-tertiary); border: 1px solid var(--border-subtle); border-radius: 999px; padding: 0 8px; }
 .ctl-dec-advice-t { font-size: 12.5px; font-weight: 600; color: var(--text-primary); }
 .ctl-dec-advice-s { font-size: 12px; color: var(--text-secondary); line-height: 1.6; }
 
@@ -3067,26 +3075,26 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 1
 #flowCanvasWrap { position: relative; flex: 1; min-width: 0; min-height: 420px; background: var(--bg-surface); }
 #flowCanvas { width: 100%; height: 480px; background: var(--bg-surface); }
 #flowCanvas .x6-graph-svg { background: var(--bg-surface); }
-.flow-controls { position: absolute; top: 10px; right: 10px; display: flex; gap: 6px; z-index: 5; }
-.flow-controls .btn { padding: 4px 10px; font-size: 12px; }
-#flowError { display: none; margin: 12px 16px; padding: 10px 12px; background: var(--warning-bg); border: 1px solid rgba(217,119,6,.3); border-radius: var(--radius-sm); font-size: 12px; color: var(--text-primary); }
+.flow-controls { position: absolute; top: 10px; right: 10px; display: flex; gap: 8px; z-index: 5; }
+.flow-controls .btn { padding: 4px 12px; font-size: 12px; }
+#flowError { display: none; margin: 12px 16px; padding: 12px; background: var(--warning-bg); border: 1px solid rgba(217,119,6,.3); border-radius: var(--radius-sm); font-size: 12px; color: var(--text-primary); }
 #flowInspector { width: 340px; flex-shrink: 0; border-left: 1px solid var(--border-default); background: var(--bg-surface); display: flex; flex-direction: column; min-height: 420px; max-height: 640px; }
-.flow-insp-head { padding: 12px 14px 8px; border-bottom: 1px solid var(--border-subtle); }
+.flow-insp-head { padding: 12px 16px 8px; border-bottom: 1px solid var(--border-subtle); }
 .flow-insp-title { font-size: 14px; font-weight: 600; color: var(--text-primary); }
 .flow-insp-meta { font-size: 11.5px; color: var(--text-secondary); margin-top: 2px; }
-.flow-insp-tabs { display: flex; gap: 2px; padding: 8px 10px 0; border-bottom: 1px solid var(--border-subtle); }
-.flow-insp-tab { background: transparent; border: none; border-bottom: 2px solid transparent; padding: 6px 10px; font-size: 12px; color: var(--text-secondary); cursor: pointer; }
+.flow-insp-tabs { display: flex; gap: 2px; padding: 8px 12px 0; border-bottom: 1px solid var(--border-subtle); }
+.flow-insp-tab { background: transparent; border: none; border-bottom: 2px solid transparent; padding: 8px 12px; font-size: 12px; color: var(--text-secondary); cursor: pointer; }
 .flow-insp-tab.active { color: var(--text-primary); font-weight: 600; border-bottom-color: var(--primary); }
-#flowInspectorBody { padding: 12px 14px; overflow-y: auto; font-size: 12.5px; line-height: 1.6; }
+#flowInspectorBody { padding: 12px 16px; overflow-y: auto; font-size: 12.5px; line-height: 1.6; }
 .flow-kv { display: grid; grid-template-columns: 72px 1fr; gap: 4px 8px; margin-bottom: 8px; }
 .flow-kv dt { color: var(--text-tertiary); font-size: 11.5px; }
 .flow-kv dd { margin: 0; color: var(--text-primary); word-break: break-word; }
-.flow-node-card { border: 1px solid var(--border-default); border-radius: 8px; background: #fff; padding: 8px 10px; }
+.flow-node-card { border: 1px solid var(--border-default); border-radius: 8px; background: #fff; padding: 8px 12px; }
 .flow-node-card.is-working { border-color: var(--primary); }
 .flow-node-card.is-blocked, .flow-node-card.is-failed { border-color: var(--danger); }
 .flow-node-card.is-rework { border-color: var(--warning); }
 .flow-node-card.is-completed { border-color: rgba(22,163,74,.4); }
-.flow-task-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--border-subtle); cursor: pointer; }
+.flow-task-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--border-subtle); cursor: pointer; }
 .flow-task-row:hover { background: var(--bg-hover); }
 @media (max-width: 1280px) { #flowInspector { width: 300px; } }
 @media (max-width: 1000px) { #flowWrap { flex-direction: column; } #flowInspector { width: 100%; border-left: none; border-top: 1px solid var(--border-default); max-height: none; } }
@@ -3113,13 +3121,13 @@ body {
   overflow: auto;
   background: #fafafa;
   border-right: 1px solid #e6e8ee;
-  padding: 14px 10px 12px;
+  padding: 16px 12px 12px;
 }
 .brand-row {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 2px 6px 12px;
+  padding: 2px 8px 12px;
 }
 .brand {
   display: block;
@@ -3138,13 +3146,13 @@ body {
   place-items: center;
   flex: none;
 }
-.switcher-wrap { position: relative; margin: 0 2px 14px; }
+.switcher-wrap { position: relative; margin: 0 2px 16px; }
 .switcher {
   width: 100%;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 7px 8px;
+  padding: 8px;
   background: #fff;
   border: 1px solid #e4e6ec;
   border-radius: 10px;
@@ -3178,7 +3186,7 @@ body {
   border: 1px solid #e4e6ec;
   border-radius: 12px;
   box-shadow: 0 12px 32px rgba(18,19,22,.12);
-  padding: 6px;
+  padding: 8px;
   max-height: 320px;
   overflow: auto;
 }
@@ -3199,7 +3207,7 @@ body {
 .nav-group { margin: 2px 0 12px; }
 .nav-group h4 {
   margin: 0;
-  padding: 4px 8px 6px;
+  padding: 4px 8px 8px;
   font-size: 11px;
   font-weight: 650;
   letter-spacing: .06em;
@@ -3210,7 +3218,7 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 8px;
+  padding: 8px;
   margin: 1px 0;
   border: 0;
   background: transparent;
@@ -3231,7 +3239,9 @@ body {
   color: #6d727c;
   background: #f0f1f4;
   border-radius: 999px;
-  padding: 1px 6px;
+  padding: 1px 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-variant-numeric: tabular-nums;
 }
 .nav-count[hidden] { display: none; }
 .nav-templates {
@@ -3241,7 +3251,7 @@ body {
   background-size: 15px 15px;
   padding-left: 31px;
 }
-.side-foot { margin-top: auto; padding: 10px 8px 2px; border-top: 1px solid #eee; }
+.side-foot { margin-top: auto; padding: 12px 8px 2px; border-top: 1px solid #eee; }
 .side-foot b { display: block; font-size: 12px; font-weight: 650; }
 .side-foot span { display: block; margin-top: 2px; font-size: 11px; color: #8b909a; line-height: 1.4; }
 .main {
@@ -3293,7 +3303,7 @@ body {
 }
 #canvasToolbar > * { pointer-events: auto; }
 .shell[data-workspace="flow"] #canvasToolbar {
-  position: absolute; top: 12px; left: 12px; right: 312px;
+  position: absolute; top: 12px; left: 16px; right: 316px;
 }
 .shell[data-workspace="list"] #canvasToolbar { position: relative; margin: 12px 16px 0; }
 .shell[data-workspace="aux"] #canvasToolbar { display: none !important; }
@@ -3306,23 +3316,28 @@ body {
   padding: 2px;
   box-shadow: 0 1px 2px rgba(18,19,22,.04);
 }
-.flow-view-toggle .filter-btn { padding: 4px 9px; border-radius: 6px; }
+.flow-view-toggle .filter-btn { padding: 4px 8px; border-radius: 6px; }
 .flow-view-toggle .filter-btn.active { background: #f6eee8; color: #16171b; font-weight: 650; box-shadow: none; }
 #flowSummary {
   border: 1px solid #e6e8ee;
   border-bottom: 1px solid #e6e8ee;
   border-radius: 999px;
   background: rgba(255,255,255,.94);
-  padding: 5px 10px;
+  padding: 4px 12px;
   font-size: 12px;
   color: #5e636e;
   white-space: nowrap;
 }
-#flowSummary b { color: #16171b; font-weight: 680; }
+#flowSummary b {
+  color: #16171b;
+  font-weight: 680;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+}
 .shell[data-workspace="list"] #flowSummary,
 .shell[data-workspace="list"] .flow-controls { display: none !important; }
 .flow-controls { position: static; gap: 0; background: #fff; border: 1px solid #e6e8ee; border-radius: 8px; overflow: hidden; }
-.flow-controls .btn { padding: 5px 9px; border: 0; border-radius: 0; border-left: 1px solid #e6e8ee; box-shadow: none; background: #fff; }
+.flow-controls .btn { padding: 4px 8px; border: 0; border-radius: 0; border-left: 1px solid #e6e8ee; box-shadow: none; background: #fff; }
 .flow-controls .btn:first-child { border-left: 0; }
 #flowWrap { flex: 1; min-height: 0; background: transparent; }
 #flowCanvasWrap {
@@ -3345,11 +3360,11 @@ body {
   border-left: 1px solid #e6e8ee;
   background: #fff;
 }
-.flow-insp-head { padding: 14px 14px 8px; border-bottom: 0; }
+.flow-insp-head { padding: 16px 16px 8px; border-bottom: 0; }
 .flow-insp-title { font-size: 15px; font-weight: 680; }
 .flow-insp-meta { font-size: 12px; color: #5e636e; margin-top: 3px; }
 .flow-insp-tabs { padding: 0 8px; gap: 2px; }
-.flow-insp-tab { padding: 8px 8px 7px; font-size: 12.5px; border-bottom: 0; }
+.flow-insp-tab { padding: 8px; font-size: 12.5px; border-bottom: 0; }
 .flow-insp-tab.active { color: #16171b; font-weight: 680; box-shadow: inset 0 -2px 0 #5e6ad2; }
 #flowInspectorBody { flex: 1; }
 #flowCanvas .flow-node-card {
@@ -3360,7 +3375,7 @@ body {
   background: #fff;
   border: 1px solid #e5e7ee;
   border-radius: 12px;
-  padding: 10px 12px 11px;
+  padding: 12px;
   box-shadow: 0 1px 2px rgba(18,19,22,.04), 0 8px 20px rgba(18,19,22,.05);
   cursor: pointer;
   overflow: hidden;
@@ -3385,17 +3400,17 @@ body {
 #flowCanvas .flow-node-card.is-rework .fn-pill { background: #fffbeb; color: #d97706; }
 #flowCanvas .flow-node-card.is-completed .fn-pill { background: #f0fdf4; color: #157a3a; }
 #flowCanvas .flow-node-card.is-selected { border-color: #5e6ad2; box-shadow: 0 0 0 3px rgba(94,106,210,.16), 0 10px 24px rgba(94,106,210,.12); }
-.fn-top { display: flex; align-items: center; gap: 6px; margin-bottom: 7px; }
+.fn-top { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
 .fn-ico { width: 20px; height: 20px; border-radius: 6px; background: #f3f4f6; color: #6d727c; display: grid; place-items: center; flex: none; }
 .fn-kind { font-size: 10px; letter-spacing: .07em; font-weight: 750; color: #8b909a; }
-.fn-pill { margin-left: auto; font-size: 11px; font-weight: 650; border-radius: 999px; padding: 2px 7px; background: #f3f4f6; color: #727782; white-space: nowrap; }
+.fn-pill { margin-left: auto; font-size: 11px; font-weight: 650; border-radius: 999px; padding: 2px 8px; background: #f3f4f6; color: #727782; white-space: nowrap; }
 .fn-title { font-size: 14px; font-weight: 680; letter-spacing: -.01em; color: #16171b; line-height: 1.3; }
 .fn-purpose { margin-top: 3px; font-size: 12px; color: #5e636e; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .fn-foot { margin-top: 8px; font-size: 11.5px; color: #8b909a; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.flow-reads { background: #f4f6fb; border: 1px solid #e4e8f4; border-radius: 10px; padding: 10px 12px; font-size: 12.5px; line-height: 1.55; color: #2c3142; }
+.flow-reads { background: #f4f6fb; border: 1px solid #e4e8f4; border-radius: 10px; padding: 12px; font-size: 12.5px; line-height: 1.55; color: #2c3142; }
 .flow-reads em { font-style: normal; display: block; margin-bottom: 4px; font-size: 11px; letter-spacing: .05em; font-weight: 700; color: #8b909a; }
-.flow-sec { margin: 14px 0 6px; font-size: 11px; letter-spacing: .05em; color: #8b909a; font-weight: 700; }
-.flow-check { display: flex; gap: 8px; padding: 6px 0; border-top: 1px solid #f3f4f6; font-size: 12.5px; }
+.flow-sec { margin: 16px 0 8px; font-size: 11px; letter-spacing: .05em; color: #8b909a; font-weight: 700; }
+.flow-check { display: flex; gap: 8px; padding: 8px 0; border-top: 1px solid #f3f4f6; font-size: 12.5px; }
 .flow-check:first-of-type { border-top: 0; }
 .flow-mark { width: 14px; flex: none; font-weight: 750; }
 .flow-mark.ok { color: #157a3a; }
@@ -3403,7 +3418,7 @@ body {
 .flow-mark.bad { color: #dc2626; }
 .flow-task-row b { display: block; font-size: 12px; font-weight: 650; max-width: 188px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .flow-task-row small { display: block; color: #8b909a; font-size: 11.5px; }
-.flow-attn { margin-top: 12px; background: #fffbeb; border: 1px solid rgba(217,119,6,.35); border-radius: 10px; padding: 10px 12px; }
+.flow-attn { margin-top: 12px; background: #fffbeb; border: 1px solid rgba(217,119,6,.35); border-radius: 10px; padding: 12px; }
 .shell-page { padding: 4px 4px 28px; }
 .shell-page h3 { margin: 8px 0 12px; font-size: 16px; font-weight: 680; }
 .shell-row {
@@ -3412,7 +3427,7 @@ body {
   flex-direction: column;
   align-items: flex-start;
   gap: 2px;
-  padding: 10px 12px;
+  padding: 12px;
   margin: 0 0 8px;
   border: 1px solid #e6e8ee;
   border-radius: 10px;
@@ -3432,11 +3447,12 @@ body {
   .deep-drawer { left: 0; right: 0; bottom: 0; border-radius: 0; }
   .deep-drawer.collapsed { clip-path: inset(0 0 calc(100% - 38px) 0); }
   .shell[data-workspace="flow"] #canvasToolbar {
-    right: 12px;
+    left: 16px;
+    right: 16px;
     flex-wrap: wrap;
-    row-gap: 6px;
+    row-gap: 8px;
     background: rgba(247,248,250,.94);
-    border-radius: 10px;
+    border-radius: 8px;
     padding: 4px;
   }
   #flowCanvasWrap { min-height: 420px; flex: none; padding-top: 96px; }
@@ -3497,7 +3513,6 @@ body {
       </div>
       <div class="actions">
         <button class="btn factory-action" onclick="advanceStage()" title="推进当前阶段">进入下一阶段</button>
-        <button class="btn primary factory-action" onclick="showNewWorkflow()"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg><span>新需求</span></button>
         <div class="dropdown factory-action" id="moreDropdown">
           <button class="btn icon-only" onclick="toggleMoreMenu(event)" aria-label="更多操作" title="更多操作">···</button>
           <div class="dropdown-menu">
@@ -3515,7 +3530,7 @@ body {
             <button class="dropdown-item danger-text" onclick="closeMoreMenu();showUnregisterProjectModal()">注销项目</button>
           </div>
         </div>
-
+        <button class="btn primary factory-action" onclick="showNewWorkflow()"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg><span>新需求</span></button>
       </div>
     </div>
     <div class="metrics" aria-hidden="true">
@@ -3598,11 +3613,11 @@ body {
         <div class="task-drawer-meta" id="taskDrawerMeta"></div>
       </div>
       <div class="task-drawer-actions">
-        <button class="btn primary" id="taskDrawerPrimary" style="padding:4px 10px;font-size:12px">成果会签</button>
         <div class="task-drawer-menu-wrap">
           <button class="btn icon-only" id="taskDrawerMore" aria-label="任务更多操作" title="更多操作" onclick="toggleTaskDrawerMenu(event)">···</button>
           <div class="task-drawer-menu" id="taskDrawerMenu" onclick="event.stopPropagation()"></div>
         </div>
+        <button class="btn primary" id="taskDrawerPrimary" style="padding:4px 12px;font-size:12px">成果会签</button>
         <button class="close" aria-label="关闭任务详情" onclick="closeTaskDrawer()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg></button>
       </div>
     </div>
@@ -3619,7 +3634,7 @@ body {
 <div id="deepDrawer" class="deep-drawer collapsed">
   <div class="drawer-head" onclick="toggleDeepDrawer()">
     <div style="display:flex;align-items:center;gap:8px"><span class="drawer-pill">底层物理现场</span><span class="muted" style="font-size:12px">原生终端 · 内核日志 · 白盒遥测</span></div>
-    <div style="display:flex;align-items:center;gap:10px"><button class="mini" onclick="event.stopPropagation();refreshDeepDrawer()">刷新</button><span id="drawerToggleText" style="font-size:12px;color:var(--accent);font-weight:600">▲ 展开抽屉</span></div>
+    <div style="display:flex;align-items:center;gap:8px"><button class="mini" onclick="event.stopPropagation();refreshDeepDrawer()">刷新</button><span id="drawerToggleText" style="font-size:12px;color:var(--accent);font-weight:600">▲ 展开抽屉</span></div>
   </div>
   <div class="drawer-body">
     <div class="drawer-tabs">
@@ -3669,12 +3684,12 @@ document.addEventListener('keydown',e=>{
   }
 });
 function showConfirmModal({title,message,confirmText='确认',danger=false,onConfirm}){
-  openModal(title,`<div style="line-height:1.6"><div style="font-size:14px;margin-bottom:18px;color:var(--text)">${esc(message)}</div><div style="display:flex;justify-content:flex-end;gap:10px"><button class="btn" onclick="closeModal()">取消</button><button id="modalConfirmBtn" class="btn ${danger?'danger-btn':'primary'}">${esc(confirmText)}</button></div></div>`);
+  openModal(title,`<div style="line-height:1.6"><div style="font-size:14px;margin-bottom:18px;color:var(--text)">${esc(message)}</div><div style="display:flex;justify-content:flex-end;gap:8px"><button class="btn" onclick="closeModal()">取消</button><button id="modalConfirmBtn" class="btn ${danger?'danger-btn':'primary'}">${esc(confirmText)}</button></div></div>`);
   const btn=document.getElementById('modalConfirmBtn');
   if(btn)btn.onclick=async()=>{closeModal();if(onConfirm)await onConfirm()}
 }
 function showPromptModal({title,label,defaultValue='',confirmText='确定',onConfirm}){
-  openModal(title,`<div class="form"><label for="promptInput">${esc(label)}</label><input id="promptInput" value="${esc(defaultValue)}" autofocus><div style="display:flex;justify-content:flex-end;gap:10px;margin-top:10px"><button class="btn" onclick="closeModal()">取消</button><button id="modalPromptBtn" class="btn primary">${esc(confirmText)}</button></div></div>`);
+  openModal(title,`<div class="form"><label for="promptInput">${esc(label)}</label><input id="promptInput" value="${esc(defaultValue)}" autofocus><div style="display:flex;justify-content:flex-end;gap:8px;margin-top:8px"><button class="btn" onclick="closeModal()">取消</button><button id="modalPromptBtn" class="btn primary">${esc(confirmText)}</button></div></div>`);
   const input=document.getElementById('promptInput');
   if(input){input.focus();input.select();input.addEventListener('keydown',e=>{if(e.key==='Enter')document.getElementById('modalPromptBtn')?.click()})};
   const btn=document.getElementById('modalPromptBtn');
@@ -4513,8 +4528,8 @@ async function executeControllerAction(actId,wid){
   const cmdLine=act.command_line||actId;
   const effect=act.effect||act.description||'';
   const targetTask=act.blocker_task_id||act.old_task_id||(act.api_payload&&act.api_payload.task_id)||'';
-  const summaryHtml=`<div style="line-height:1.6"><div style="font-size:13.5px;font-weight:600;margin-bottom:8px;color:var(--text-primary)">将执行：${esc(act.title||actId)}</div>${targetTask?`<div class="muted" style="font-size:12px;margin-bottom:6px">针对卡点任务：<code>${esc(targetTask)}</code></div>`:''}${effect?`<div class="ctl-effect" style="margin-bottom:8px">${esc(effect)}</div>`:''}${act.is_destructive?'<div style="font-size:12px;color:var(--danger);font-weight:600;margin-bottom:8px">高风险豁免操作，请确认已人工核查产物。</div>':''}<details class="ctl-tech"><summary>工程师技术详情（可选展开）</summary><div class="ctl-tech-body"><div class="muted" style="font-size:11.5px;margin-bottom:4px">对应底层命令（仅审计 standby，点按钮即可执行，无需手动敲）：</div><div class="ctl-cheat-cmd"><code>${esc(cmdLine)}</code></div><div style="display:flex;justify-content:flex-end;margin-top:6px"><button class="mini" onclick="copyCliCommandByActionId('${esc(act.action_id||actId)}')">复制命令</button></div></div></details></div>`;
-  openModal('执行 Controller 解卡操作',`${summaryHtml}<div style="display:flex;justify-content:flex-end;gap:10px;margin-top:14px"><button class="btn" onclick="closeModal()">取消</button><button id="ctlExecConfirmBtn" class="btn ${act.is_destructive?'danger-btn':'primary'}">立即执行</button></div>`);
+  const summaryHtml=`<div style="line-height:1.6"><div style="font-size:13.5px;font-weight:600;margin-bottom:8px;color:var(--text-primary)">将执行：${esc(act.title||actId)}</div>${targetTask?`<div class="muted" style="font-size:12px;margin-bottom:8px">针对卡点任务：<code>${esc(targetTask)}</code></div>`:''}${effect?`<div class="ctl-effect" style="margin-bottom:8px">${esc(effect)}</div>`:''}${act.is_destructive?'<div style="font-size:12px;color:var(--danger);font-weight:600;margin-bottom:8px">高风险豁免操作，请确认已人工核查产物。</div>':''}<details class="ctl-tech"><summary>工程师技术详情（可选展开）</summary><div class="ctl-tech-body"><div class="muted" style="font-size:11.5px;margin-bottom:4px">对应底层命令（仅审计 standby，点按钮即可执行，无需手动敲）：</div><div class="ctl-cheat-cmd"><code>${esc(cmdLine)}</code></div><div style="display:flex;justify-content:flex-end;margin-top:8px"><button class="mini" onclick="copyCliCommandByActionId('${esc(act.action_id||actId)}')">复制命令</button></div></div></details></div>`;
+  openModal('执行 Controller 解卡操作',`${summaryHtml}<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px"><button class="btn" onclick="closeModal()">取消</button><button id="ctlExecConfirmBtn" class="btn ${act.is_destructive?'danger-btn':'primary'}">立即执行</button></div>`);
   const confirmBtn=document.getElementById('ctlExecConfirmBtn');
   if(confirmBtn)confirmBtn.onclick=async()=>{
     closeModal();
@@ -4564,15 +4579,15 @@ function updateAttentionHub(){
     ab.style.borderColor='rgba(217,119,6,0.25)';
     let actBtn='';
     if(stall.suggested_action==='force_review'&&stall.target_task_id){
-      actBtn=`<button class="btn primary" style="background:#d97706;border-color:#b45309;padding:4px 10px;font-size:12px" onclick="forceReviewTask('${stall.target_task_id}')">🔔 立即唤醒评审</button>`;
+      actBtn=`<button class="btn primary" style="background:#d97706;border-color:#b45309;padding:4px 12px;font-size:12px" onclick="forceReviewTask('${stall.target_task_id}')">🔔 立即唤醒评审</button>`;
     }else if(stall.suggested_action==='retry_advance'){
-      actBtn=`<button class="btn primary" style="background:#2563eb;border-color:#1d4ed8;padding:4px 10px;font-size:12px" onclick="retryStageAdvance('${state.workflowId}')">⚡ 尝试推进阶段</button>`;
+      actBtn=`<button class="btn primary" style="background:#2563eb;border-color:#1d4ed8;padding:4px 12px;font-size:12px" onclick="retryStageAdvance('${state.workflowId}')">⚡ 尝试推进阶段</button>`;
     }
-    ab.innerHTML=`<div style="display:flex;align-items:center;gap:10px"><span class="att-badge" style="background:var(--warning);color:#fff">推进停滞告警</span><span class="att-text" style="color:var(--text-primary)">⚠️ ${esc(stall.message)}</span></div><div>${actBtn}</div>`;
+    ab.innerHTML=`<div style="display:flex;align-items:center;gap:8px"><span class="att-badge" style="background:var(--warning);color:#fff">推进停滞告警</span><span class="att-text" style="color:var(--text-primary)">⚠️ ${esc(stall.message)}</span></div><div>${actBtn}</div>`;
   }else if(w&&(w.status==='completed'||w.outcome==='delivered')){
     ab.style.background='var(--success-bg)';
     ab.style.borderColor='rgba(22,163,74,0.25)';
-    ab.innerHTML=`<div style="display:flex;align-items:center;gap:10px"><span class="att-badge" style="background:var(--success);color:#fff">已交付</span><span class="att-text" style="color:var(--text-primary);font-weight:500">🎉 工作流已顺利完成全流程闭环并交付归档</span></div><div></div>`;
+    ab.innerHTML=`<div style="display:flex;align-items:center;gap:8px"><span class="att-badge" style="background:var(--success);color:#fff">已交付</span><span class="att-text" style="color:var(--text-primary);font-weight:500">🎉 工作流已顺利完成全流程闭环并交付归档</span></div><div></div>`;
   }else{
     ab.style.background='var(--bg-surface)';
     ab.style.borderColor='var(--border-default)';
@@ -4593,11 +4608,11 @@ function updateAttentionHub(){
               <span class="ctl-badges"><span class="badge ${catMeta(act.category)[1]}" style="font-size:10px">${esc(catMeta(act.category)[0])}</span></span>
             </div>
             <div class="muted" style="margin-bottom:4px;font-size:11px;line-height:1.5">${esc(act.effect||act.description)}</div>
-            <div style="display:flex;justify-content:flex-end;gap:6px;align-items:center">
+            <div style="display:flex;justify-content:flex-end;gap:8px;align-items:center">
               <button class="mini" style="padding:2px 8px;font-size:10.5px;flex-shrink:0" onclick="locateControllerTask('${esc(t.task_id)}')">查看任务</button>
-              <button class="btn primary" style="padding:3px 10px;font-size:11.5px" onclick="executeControllerAction('${esc(act.action_id)}','${esc(state.workflowId)}')">一键执行</button>
+              <button class="btn primary" style="padding:3px 8px;font-size:11.5px" onclick="executeControllerAction('${esc(act.action_id)}','${esc(state.workflowId)}')">一键执行</button>
             </div>
-            <details class="ctl-tech" style="margin-top:6px"><summary>技术详情</summary><div class="ctl-tech-body"><div class="ctl-mini-cmd"><code>${esc(act.command_line)}</code><button class="mini" style="padding:2px 6px;font-size:10.5px;flex-shrink:0" onclick="copyCliCommandByActionId('${esc(act.action_id)}')">复制</button></div></div></details>
+            <details class="ctl-tech" style="margin-top:8px"><summary>技术详情</summary><div class="ctl-tech-body"><div class="ctl-mini-cmd"><code>${esc(act.command_line)}</code><button class="mini" style="padding:2px 8px;font-size:10.5px;flex-shrink:0" onclick="copyCliCommandByActionId('${esc(act.action_id)}')">复制</button></div></div></details>
           </div>
         `).join('');
         actionsHtml=`<div class="controller-actions-wrap" style="margin-top:4px">${cardRows}</div>`;
@@ -4606,7 +4621,7 @@ function updateAttentionHub(){
     }).join('');
     const more=decisionTasks.length>3?`<div class="decision-more">还有 ${decisionTasks.length-3} 项，请查看全部决策项。</div>`:'';
     const details=decisionTasks.length?`<div class="decision-list"><div class="decision-list-label">待决策事项</div>${detailRows}${more}</div>`:'';
-    ab.innerHTML=`<div style="min-width:0;flex:1"><div style="display:flex;align-items:center;gap:10px"><span class="att-badge">人机协同态势</span><span class="att-text">${activeTasks.length} 个执行者正在协同 · ${readyCnt} 个正常推进 · ${attentionTasks.length} 个需关注 · <strong style="color:${decisionTasks.length?'var(--accent)':'var(--text)'}">${decisionTasks.length} 个待你拍板</strong></span></div>${details}</div><div>${decisionTasks.length?`<button class="btn primary" style="padding:4px 10px;font-size:12px" onclick="setTaskFilter('decision')">查看决策项</button>`:''}</div>`;
+    ab.innerHTML=`<div style="min-width:0;flex:1"><div style="display:flex;align-items:center;gap:8px"><span class="att-badge">人机协同态势</span><span class="att-text">${activeTasks.length} 个执行者正在协同 · ${readyCnt} 个正常推进 · ${attentionTasks.length} 个需关注 · <strong style="color:${decisionTasks.length?'var(--accent)':'var(--text)'}">${decisionTasks.length} 个待你拍板</strong></span></div>${details}</div><div>${decisionTasks.length?`<button class="btn primary" style="padding:4px 12px;font-size:12px" onclick="setTaskFilter('decision')">查看决策项</button>`:''}</div>`;
   }
 }
 function renderStages(){
@@ -4909,7 +4924,7 @@ function dagreLayoutPositions(nodes,edges){const g=new window.dagre.graphlib.Gra
 function renderFlowGraph(){const wrap=document.getElementById('flowCanvas');const errBox=document.getElementById('flowError');if(errBox){errBox.style.display='none';errBox.textContent='';}if(!wrap)return;const g=flowGraphData();const nodes=g.nodes||[];const edges=g.edges||[];if(state.flowGraphWfId&&state.flowGraphWfId!==state.workflowId)destroyFlowGraph();if(!nodes.length){destroyFlowGraph();if(errBox){errBox.style.display='block';errBox.textContent='当前工作流暂无可用节点定义（legacy 或空定义，已 fail-soft，不伪造连线）。';}return;}if(typeof window.dagre==='undefined'||!window.dagre.graphlib||!window.dagre.layout){destroyFlowGraph();if(errBox){errBox.style.display='block';errBox.textContent='本地 Dagre 资源缺失（/static/vendor/dagre-3.1.1.min.js），请检查 Console 静态资源。页面其他功能不受影响。';}return;}if(typeof window.X6==='undefined'||!window.X6.Graph){destroyFlowGraph();if(errBox){errBox.style.display='block';errBox.textContent='本地 X6 资源缺失（/static/vendor/x6-3.1.8.min.js），请检查 Console 静态资源。页面其他功能不受影响。';}return;}if(!ensureFlowCardShape()){destroyFlowGraph();if(errBox){errBox.style.display='block';errBox.textContent='本地 X6 缺少 HTML 节点（Shape.HTML），无法绘制流程卡片。';}return;}let pos={};try{pos=dagreLayoutPositions(nodes,edges);}catch(e){destroyFlowGraph();if(errBox){errBox.style.display='block';errBox.textContent='Dagre 布局失败：'+e.message;}return;}try{destroyFlowGraph();const W=wrap.clientWidth||800;const H=480;const graph=new window.X6.Graph({container:wrap,width:W,height:H,background:{color:'transparent'},panning:{enabled:true},mousewheel:{enabled:true,modifiers:[]},interacting:{nodeMovable:false,edgeMovable:false,edgeLabelMovable:false,arrowheadMovable:false,vertexMovable:false,vertexAddable:false,vertexDeletable:false,edgeAddable:false},connecting:{allowBlank:false,allowLoop:false,allowNode:false,allowEdge:false,snap:true},highlighting:{magnetAdsorbed:{name:'stroke',args:{padding:4,attrs:{stroke:'#5e6ad2','stroke-width':2}}}}});state.flowGraph=graph;state.flowGraphWfId=state.workflowId;nodes.forEach(n=>{const p=pos[n.id]||{x:20,y:20};graph.addNode({id:n.id,shape:'flow-card',x:p.x,y:p.y,width:232,height:134,data:Object.assign({},n,{selected:String(state.flowSelectedNodeId||'')===String(n.id)})});});edges.forEach(e=>{try{graph.addEdge({source:{cell:e.from,anchor:{name:'bottom',args:{dy:-8}},connectionPoint:'anchor'},target:{cell:e.to,anchor:{name:'top',args:{dy:8}},connectionPoint:'anchor'},router:{name:'orth',args:{padding:2}},connector:{name:'rounded'},attrs:{line:{stroke:'#c5c9d3','stroke-width':1.6,targetMarker:{name:'block',size:6}}}});}catch(err){}});graph.on('node:click',({node})=>{try{selectFlowNode(node.id);}catch(err){}});updateFlowSelection();fitFlowGraph();requestAnimationFrame(()=>{resizeFlowGraph();fitFlowGraph();});}catch(e){destroyFlowGraph();if(errBox){errBox.style.display='block';errBox.textContent='Flow Canvas 初始化失败：'+e.message;}}}
 function flowNodeById(id){const g=flowGraphData();return (g.nodes||[]).find(n=>n.id===id)||null;}
 function flowTasksForNode(nodeId){const ts=(state.workflow&&state.workflow.tasks)||[];return ts.filter(t=>String(t.node||t.stage||'')===String(nodeId)&&t.status!=='superseded'&&!t.superseded_by);}
-function renderNodeInspector(){const body=document.getElementById('flowInspectorBody');const title=document.getElementById('flowInspTitle');const meta=document.getElementById('flowInspMeta');if(!body)return;const node=flowNodeById(state.flowSelectedNodeId);if(!node){if(title)title.textContent='节点详情';if(meta)meta.textContent='—';body.innerHTML='<div class="empty">暂无节点</div>';return;}if(title)title.textContent=cleanStageLabel(node.label||node.id);if(meta)meta.textContent=(node.node_type||'agent').toUpperCase()+' · '+humanNodeStatus(node.status);const tab=state.flowInspectorTab||'summary';if(tab==='tasks'){const nts=flowTasksForNode(node.id);body.innerHTML=nts.length?nts.map(t=>`<div class="flow-task-row" onclick="openTaskDrawer('${esc(t.task_id)}')"><span><strong>${esc(t.task_id)}</strong><span class="muted"> · ${esc(t.agent||'未分配')}</span></span><span>${badge(t.status)}</span></div>`).join(''):'<div class="empty">该节点暂无任务</div>';return;}if(tab==='context'){const ctx=(state.workflow&&state.workflow.context)||{required:[],optional:[]};const req=ctx.required||[];const opt=ctx.optional||[];body.innerHTML=`<div class="proj-sec"><div class="proj-lbl">必需上下文</div>${req.length?req.map(c=>`<div>· ${esc(typeof c==='string'?c:(c.id||c))}</div>`).join(''):'<div class="muted">—</div>'}</div><div class="proj-sec"><div class="proj-lbl">可选上下文</div>${opt.length?opt.map(c=>`<div>· ${esc(typeof c==='string'?c:(c.id||c))}</div>`).join(''):'<div class="muted">—</div>'}</div><div class="muted" style="margin-top:8px">仅显示真实 Context Contract；无绑定信息时不伪造已加载。</div>`;return;}if(tab==='runtime'){const nts=flowTasksForNode(node.id);body.innerHTML=nts.length?nts.map(t=>`<div class="flow-node-card" style="margin-bottom:8px"><div><strong>${esc(t.task_id)}</strong> ${badge(t.status)}</div><dl class="flow-kv" style="margin-top:6px"><dt>执行者</dt><dd>${esc(t.agent||'—')}</dd><dt>工位</dt><dd>${esc(t.pane_id||'—')}</dd><dt>更新</dt><dd>${esc(t.updated_at||t.last_activity_at||'—')}</dd><dt>分支</dt><dd>${esc(t.candidate_sha||t.integration_branch||'—')}</dd><dt>结论</dt><dd>${esc(t.stage_verdict||'—')}</dd></dl></div>`).join(''):'<div class="empty">暂无运行时信息</div>';return;}const nts=flowTasksForNode(node.id);const acts=(state.controllerActionsData&&state.controllerActionsData.actions)||[];const mine=acts.filter(a=>((a.blocker_task_id||a.old_task_id||String(a.action_id||'').split(':')[0])===node.id)||(node.task_ids||[]).includes(a.blocker_task_id||a.old_task_id));const shown=mine.slice(0,2);const actHtml=shown.length?`<div class="flow-attn"><div class="flow-sec">需要处理</div>${shown.map(a=>`<div class="flow-node-card" style="margin-bottom:8px"><div><strong>${esc(a.title||a.action_id)}</strong></div><div class="muted" style="margin:4px 0">${esc(a.effect||a.description||'')}</div><div style="display:flex;gap:6px;justify-content:flex-end"><button class="mini" onclick="locateControllerTask('${esc(a.blocker_task_id||a.old_task_id||'')}')">查看任务</button><button class="btn primary" style="padding:3px 10px;font-size:11.5px" onclick="executeControllerAction('${esc(a.action_id)}','${esc(state.workflowId)}')">一键执行</button></div></div>`).join('')}</div>`:(node.has_attention?'<div class="muted">该节点需关注，暂无可用一键解卡建议，请查看任务详情。</div>':'');body.innerHTML=flowOverviewHtml(node, nts)+actHtml;}
+function renderNodeInspector(){const body=document.getElementById('flowInspectorBody');const title=document.getElementById('flowInspTitle');const meta=document.getElementById('flowInspMeta');if(!body)return;const node=flowNodeById(state.flowSelectedNodeId);if(!node){if(title)title.textContent='节点详情';if(meta)meta.textContent='—';body.innerHTML='<div class="empty">暂无节点</div>';return;}if(title)title.textContent=cleanStageLabel(node.label||node.id);if(meta)meta.textContent=(node.node_type||'agent').toUpperCase()+' · '+humanNodeStatus(node.status);const tab=state.flowInspectorTab||'summary';if(tab==='tasks'){const nts=flowTasksForNode(node.id);body.innerHTML=nts.length?nts.map(t=>`<div class="flow-task-row" onclick="openTaskDrawer('${esc(t.task_id)}')"><span><strong>${esc(t.task_id)}</strong><span class="muted"> · ${esc(t.agent||'未分配')}</span></span><span>${badge(t.status)}</span></div>`).join(''):'<div class="empty">该节点暂无任务</div>';return;}if(tab==='context'){const ctx=(state.workflow&&state.workflow.context)||{required:[],optional:[]};const req=ctx.required||[];const opt=ctx.optional||[];body.innerHTML=`<div class="proj-sec"><div class="proj-lbl">必需上下文</div>${req.length?req.map(c=>`<div>· ${esc(typeof c==='string'?c:(c.id||c))}</div>`).join(''):'<div class="muted">—</div>'}</div><div class="proj-sec"><div class="proj-lbl">可选上下文</div>${opt.length?opt.map(c=>`<div>· ${esc(typeof c==='string'?c:(c.id||c))}</div>`).join(''):'<div class="muted">—</div>'}</div><div class="muted" style="margin-top:8px">仅显示真实 Context Contract；无绑定信息时不伪造已加载。</div>`;return;}if(tab==='runtime'){const nts=flowTasksForNode(node.id);body.innerHTML=nts.length?nts.map(t=>`<div class="flow-node-card" style="margin-bottom:8px"><div><strong>${esc(t.task_id)}</strong> ${badge(t.status)}</div><dl class="flow-kv" style="margin-top:8px"><dt>执行者</dt><dd>${esc(t.agent||'—')}</dd><dt>工位</dt><dd>${esc(t.pane_id||'—')}</dd><dt>更新</dt><dd>${esc(t.updated_at||t.last_activity_at||'—')}</dd><dt>分支</dt><dd>${esc(t.candidate_sha||t.integration_branch||'—')}</dd><dt>结论</dt><dd>${esc(t.stage_verdict||'—')}</dd></dl></div>`).join(''):'<div class="empty">暂无运行时信息</div>';return;}const nts=flowTasksForNode(node.id);const acts=(state.controllerActionsData&&state.controllerActionsData.actions)||[];const mine=acts.filter(a=>((a.blocker_task_id||a.old_task_id||String(a.action_id||'').split(':')[0])===node.id)||(node.task_ids||[]).includes(a.blocker_task_id||a.old_task_id));const shown=mine.slice(0,2);const actHtml=shown.length?`<div class="flow-attn"><div class="flow-sec">需要处理</div>${shown.map(a=>`<div class="flow-node-card" style="margin-bottom:8px"><div><strong>${esc(a.title||a.action_id)}</strong></div><div class="muted" style="margin:4px 0">${esc(a.effect||a.description||'')}</div><div style="display:flex;gap:8px;justify-content:flex-end"><button class="mini" onclick="locateControllerTask('${esc(a.blocker_task_id||a.old_task_id||'')}')">查看任务</button><button class="btn primary" style="padding:3px 8px;font-size:11.5px" onclick="executeControllerAction('${esc(a.action_id)}','${esc(state.workflowId)}')">一键执行</button></div></div>`).join('')}</div>`:(node.has_attention?'<div class="muted">该节点需关注，暂无可用一键解卡建议，请查看任务详情。</div>':'');body.innerHTML=flowOverviewHtml(node, nts)+actHtml;}
 window.addEventListener('resize',()=>{try{if(state.workflowView!=='list'){resizeFlowGraph();fitFlowGraph();}}catch(e){}});
 
 function renderAgents(){const rs=state.project.agents||[];document.getElementById('agents').innerHTML=rs.length?rs.map(a=>`<div class="agent-row"><span><i class="dot ${esc(a.status)}"></i>${esc(a.agent)}</span><span class="muted">${esc(agentStatusLabel(a.status))} · 负载 ${a.load} · 认证 ${esc(authHintLabel(a.auth_hint))}</span></div>`).join(''):'<div class="empty">暂无执行者信息</div>'}function renderSlots(){const rs=state.project.slots||[];document.getElementById('slots').innerHTML=rs.length?rs.map(s=>`<div class="slot-row"><div><div>${esc(s.pane_id)} · ${esc(cleanStageLabel(s.stage_label))}</div><div class="task-meta">绑定 ${esc(s.bound_agent)} · 运行时 ${esc(s.live_agent||'空闲')} · ${esc(s.claimed_by?'被任务占用':'未占用')}</div></div><button class="mini" onclick="bindSlotPrompt('${esc(s.pane_id)}')">绑定</button></div>`).join(''):'<div class="empty">暂无用户预建智能体工位</div>'}
@@ -4978,7 +4993,7 @@ async function submitAdoptSpace(wid){
 function showUnregisterProjectModal(){
   if(!state.project||!state.projectId)return toast('请先选择当前工厂项目',true);
   const p=state.project.project;
-  openModal('注销工厂项目',`<div style="line-height:1.6"><div style="font-size:15px;font-weight:650;margin-bottom:8px">确定要注销项目【${esc(p.project_name||p.project_id)}】吗？</div><div class="muted" style="font-size:13px;margin-bottom:14px">项目目录：<code>${esc(p.project_root)}</code><br>当前空间：<b>${esc(p.workspace_id||'')}</b></div><div style="background:var(--bg-subtle);border:1px solid var(--border-default);border-radius:10px;padding:12px;font-size:12px;margin-bottom:14px;color:var(--text-primary)"><div style="font-weight:600;margin-bottom:4px">注销影响说明：</div><div>1. <b>本地代码仓库绝对不碰</b>，保留所有代码与 Git 提交。</div><div>2. 工厂调度器将停止对该项目的自动任务派发与状态巡检。</div><div>3. 终端空间将从【当前工厂 <span class="dot ready" style="vertical-align:middle"></span>】退回为【独立终端 <span class="dot working" style="vertical-align:middle"></span>】。</div></div><label for="unregCloseSpace" style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;margin-bottom:16px"><input type="checkbox" id="unregCloseSpace"> 同时关闭终端工作区（仅关闭窗口标签页，不删除代码）</label><div style="display:flex;justify-content:flex-end;gap:8px"><button class="btn" onclick="closeModal()">取消</button><button class="btn danger-btn" onclick="submitUnregisterProject()">确认注销</button></div></div>`);
+  openModal('注销工厂项目',`<div style="line-height:1.6"><div style="font-size:15px;font-weight:650;margin-bottom:8px">确定要注销项目【${esc(p.project_name||p.project_id)}】吗？</div><div class="muted" style="font-size:13px;margin-bottom:16px">项目目录：<code>${esc(p.project_root)}</code><br>当前空间：<b>${esc(p.workspace_id||'')}</b></div><div style="background:var(--bg-subtle);border:1px solid var(--border-default);border-radius:10px;padding:12px;font-size:12px;margin-bottom:16px;color:var(--text-primary)"><div style="font-weight:600;margin-bottom:4px">注销影响说明：</div><div>1. <b>本地代码仓库绝对不碰</b>，保留所有代码与 Git 提交。</div><div>2. 工厂调度器将停止对该项目的自动任务派发与状态巡检。</div><div>3. 终端空间将从【当前工厂 <span class="dot ready" style="vertical-align:middle"></span>】退回为【独立终端 <span class="dot working" style="vertical-align:middle"></span>】。</div></div><label for="unregCloseSpace" style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;margin-bottom:16px"><input type="checkbox" id="unregCloseSpace"> 同时关闭终端工作区（仅关闭窗口标签页，不删除代码）</label><div style="display:flex;justify-content:flex-end;gap:8px"><button class="btn" onclick="closeModal()">取消</button><button class="btn danger-btn" onclick="submitUnregisterProject()">确认注销</button></div></div>`);
 }
 async function submitUnregisterProject(){
   if(!state.project||!state.projectId)return;
@@ -5037,7 +5052,7 @@ function buildPreflightRowHtml(a){
     +`<div class="task-meta" id="pf-note-${esc(agent)}" style="margin-top:4px">准备执行最小探针…</div>`
     +`<div id="pf-output-${esc(agent)}"></div>`
     +`</div>`
-    +`<div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;flex-shrink:0">`
+    +`<div style="display:flex;flex-direction:column;align-items:flex-end;gap:8px;flex-shrink:0">`
     +`<span class="task-meta" id="pf-auth-${esc(agent)}">${esc(auth)}</span>`
     +`<div id="pf-action-${esc(agent)}"></div>`
     +`</div>`
@@ -5177,7 +5192,7 @@ async function runPreflight(){
     +'<div class="preflight-prog">'
     +'<div id="preflightProgressBar" class="preflight-prog-fill" style="width:0%"></div>'
     +'</div>'
-    +'<div id="preflightStats" class="task-meta" style="margin-top:6px;display:flex;gap:12px;font-size:11.5px">'
+    +'<div id="preflightStats" class="task-meta" style="margin-top:8px;display:flex;gap:12px;font-size:11.5px">'
     +'<span id="preflightStatReady" class="good-text" style="display:none">0 就绪</span>'
     +'<span id="preflightStatWarn" class="warn-text" style="display:none">0 警告</span>'
     +'<span id="preflightStatError" class="danger-text" style="display:none">0 异常</span>'
@@ -5411,8 +5426,8 @@ function switchTaskDrawerTab(tab){
   const drawer=document.getElementById('taskDrawer');
   if(drawer&&drawer.hidden){drawer.hidden=false;drawer.classList.add('open')}
 }
-async function showTask(id){try{const [td,proj]=await Promise.all([api('/api/task?id='+encodeURIComponent(id)).catch(()=>null),api('/api/task/projection?id='+encodeURIComponent(id)).catch(()=>null)]);const d=proj||(td&&td.task)||{};const raw=td||proj||{};const st=d.status||(td&&td.task&&td.task.status)||'unknown';const intent=d.intent||(td&&td.task&&td.task.goal)||'无明确意图描述';const blockers=Array.isArray(d.blockers)?d.blockers:(d.blocker?[d.blocker]:[]);const ms=Array.isArray(d.milestones)?d.milestones:[];const arts=Array.isArray(d.artifacts)?d.artifacts:[];const acts=Array.isArray(d.recent_activity)?d.recent_activity:(typeof d.recent_activity==='string'&&d.recent_activity?d.recent_activity.split('\n'):[]);const blkHtml=blockers.length?`<div class="proj-blk"><strong>⚠️ 卡点告警:</strong><span>${esc(blockers.join('; '))}</span></div>`:'';const msHtml=ms.length?`<div class="proj-sec"><div class="proj-lbl">动态路标</div>${ms.map(m=>`<div class="proj-ms"><span class="proj-ms-dot ${m.status}">${m.status==='completed'?'✓':(m.status==='in_progress'?'›':'·')}</span><span style="${m.status==='completed'?'color:var(--text)':(m.status==='in_progress'?'color:var(--warn);font-weight:600':'color:var(--muted)')}">${esc(m.label)}</span></div>`).join('')}</div>`:'';const artHtml=arts.length?`<div class="proj-sec"><div class="proj-lbl">核心产物</div>${arts.map(a=>`<div class="proj-art"><div class="proj-art-hd"><span>${esc(a.name||a.kind)}</span><span class="badge ${a.passed?'cleaned':(a.kind==='evaluation'?'failed':'waiting')}">${esc(a.kind)}</span></div><div class="muted">${esc(a.summary||'')}</div></div>`).join('')}</div>`:'';const actHtml=acts.length?`<div class="proj-sec"><div class="proj-lbl">近期动态提炼</div><ul class="proj-acts">${acts.map(a=>`<li>${esc(a)}</li>`).join('')}</ul></div>`:'';const body=`<div class="proj-box"><div style="display:flex;justify-content:space-between;align-items:center;padding-bottom:8px;border-bottom:1px solid var(--line)"><div><span class="badge ${st}">${esc(st)}</span><span style="margin-left:8px;font-size:12px;color:var(--muted)">执行者: <strong>${esc(d.agent||'-')}</strong></span><span style="margin-left:8px;font-size:12px;color:var(--muted)">工位: <strong>${esc(d.node||'-')}</strong></span></div><button class="mini" onclick="const el=document.getElementById('taskRawPre');if(el)el.style.display=el.style.display==='none'?'block':'none'">原始数据</button></div>${blkHtml}<div class="proj-sec"><div class="proj-lbl">当前语义意图</div><div class="proj-txt">${esc(intent)}</div></div>${msHtml}${artHtml}${actHtml}<div id="taskRawPre" style="display:none;margin-top:10px"><div class="proj-lbl">原始调试数据</div><pre>${esc(JSON.stringify(raw,null,2))}</pre></div></div>`;openModal('任务白盒简报 · '+id,body)}catch(e){toast(e.message,true)}}async function showPane(id){if(!id)return toast('没有工位',true);try{const d=await api('/api/pane/read?id='+encodeURIComponent(id));openModal('工位 '+id,`<pre>${esc(d.output)}</pre>`)}catch(e){toast(e.message,true)}}async function askCoordinator(id){try{toast('正在通知总指挥…');await api('/api/task/coordinator',{method:'POST',body:JSON.stringify({task_id:id})});toast('总指挥已处理/接收')}catch(e){toast(e.message,true)}}
-async function openSignoffChamber(taskId){try{const [td,proj]=await Promise.all([api('/api/task?id='+encodeURIComponent(taskId)).catch(()=>null),api('/api/task/projection?id='+encodeURIComponent(taskId)).catch(()=>null)]);const d=proj||(td&&td.task)||{};const t=(td&&td.task)||{};const wid=t.workflow_id||state.workflowId;const node=t.node||t.stage||'';const arts=Array.isArray(d.artifacts)?d.artifacts:[];const isBlocked=t.stage_verdict==='blocked'||t.status==='blocked';let artCards='<div class="empty">暂无生成产物</div>';if(arts.length){artCards=arts.map(a=>`<div class="proj-sec" style="margin-bottom:8px"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px"><strong>${esc(a.name||a.kind)}</strong><span class="badge ${a.passed?'cleaned':(a.kind==='evaluation'?'failed':'waiting')}">${esc(a.kind)}</span></div><div class="task-meta" style="margin-bottom:6px">${esc(a.path||'')}</div><div class="proj-txt ctl-pre-light">${esc(a.content||a.summary||'（文件产物记录正常）')}</div></div>`).join('')}const html=`<div class="signoff-box"><div class="signoff-head"><div><div style="font-size:16px;font-weight:700">${esc(taskDisplayName(t))}</div><div class="task-meta">任务 ID: ${esc(taskId)} · 执行者: <b>${esc(t.agent||'-')}</b> · 节点: <b>${esc(node)}</b></div></div><div>${badge(t.status)}</div></div>${isBlocked?'<div class="proj-blk"><strong>⚠️ 门禁会签等待:</strong> 当前节点触发门禁阻断，需要人类总指挥核查产物并决策放行或打回。</div>':''}<div class="proj-sec"><div class="proj-lbl">核心交付物与成果列表</div>${artCards}</div><div class="form"><label for="signoffFeedback">审批意见 / 批注说明（可选）</label><input id="signoffFeedback" placeholder="例如：数据核准，批准通过；或：海外收入拆解不全，请补充"></div><div class="signoff-actions"><button class="btn" onclick="closeModal()">暂不处理</button><button class="btn danger-btn" onclick="submitSignoffDecision(\'${esc(taskId)}\',\'${esc(wid)}\',\'${esc(node)}\',\'reject\')">批注打回</button><button class="btn primary" onclick="submitSignoffDecision(\'${esc(taskId)}\',\'${esc(wid)}\',\'${esc(node)}\',\'approve\')">通过并放行</button></div></div>`;openModal('成果交付会签室 (Artifact Signoff Chamber)',html)}catch(e){toast(e.message,true)}}
+async function showTask(id){try{const [td,proj]=await Promise.all([api('/api/task?id='+encodeURIComponent(id)).catch(()=>null),api('/api/task/projection?id='+encodeURIComponent(id)).catch(()=>null)]);const d=proj||(td&&td.task)||{};const raw=td||proj||{};const st=d.status||(td&&td.task&&td.task.status)||'unknown';const intent=d.intent||(td&&td.task&&td.task.goal)||'无明确意图描述';const blockers=Array.isArray(d.blockers)?d.blockers:(d.blocker?[d.blocker]:[]);const ms=Array.isArray(d.milestones)?d.milestones:[];const arts=Array.isArray(d.artifacts)?d.artifacts:[];const acts=Array.isArray(d.recent_activity)?d.recent_activity:(typeof d.recent_activity==='string'&&d.recent_activity?d.recent_activity.split('\n'):[]);const blkHtml=blockers.length?`<div class="proj-blk"><strong>⚠️ 卡点告警:</strong><span>${esc(blockers.join('; '))}</span></div>`:'';const msHtml=ms.length?`<div class="proj-sec"><div class="proj-lbl">动态路标</div>${ms.map(m=>`<div class="proj-ms"><span class="proj-ms-dot ${m.status}">${m.status==='completed'?'✓':(m.status==='in_progress'?'›':'·')}</span><span style="${m.status==='completed'?'color:var(--text)':(m.status==='in_progress'?'color:var(--warn);font-weight:600':'color:var(--muted)')}">${esc(m.label)}</span></div>`).join('')}</div>`:'';const artHtml=arts.length?`<div class="proj-sec"><div class="proj-lbl">核心产物</div>${arts.map(a=>`<div class="proj-art"><div class="proj-art-hd"><span>${esc(a.name||a.kind)}</span><span class="badge ${a.passed?'cleaned':(a.kind==='evaluation'?'failed':'waiting')}">${esc(a.kind)}</span></div><div class="muted">${esc(a.summary||'')}</div></div>`).join('')}</div>`:'';const actHtml=acts.length?`<div class="proj-sec"><div class="proj-lbl">近期动态提炼</div><ul class="proj-acts">${acts.map(a=>`<li>${esc(a)}</li>`).join('')}</ul></div>`:'';const body=`<div class="proj-box"><div style="display:flex;justify-content:space-between;align-items:center;padding-bottom:8px;border-bottom:1px solid var(--line)"><div><span class="badge ${st}">${esc(st)}</span><span style="margin-left:8px;font-size:12px;color:var(--muted)">执行者: <strong>${esc(d.agent||'-')}</strong></span><span style="margin-left:8px;font-size:12px;color:var(--muted)">工位: <strong>${esc(d.node||'-')}</strong></span></div><button class="mini" onclick="const el=document.getElementById('taskRawPre');if(el)el.style.display=el.style.display==='none'?'block':'none'">原始数据</button></div>${blkHtml}<div class="proj-sec"><div class="proj-lbl">当前语义意图</div><div class="proj-txt">${esc(intent)}</div></div>${msHtml}${artHtml}${actHtml}<div id="taskRawPre" style="display:none;margin-top:8px"><div class="proj-lbl">原始调试数据</div><pre>${esc(JSON.stringify(raw,null,2))}</pre></div></div>`;openModal('任务白盒简报 · '+id,body)}catch(e){toast(e.message,true)}}async function showPane(id){if(!id)return toast('没有工位',true);try{const d=await api('/api/pane/read?id='+encodeURIComponent(id));openModal('工位 '+id,`<pre>${esc(d.output)}</pre>`)}catch(e){toast(e.message,true)}}async function askCoordinator(id){try{toast('正在通知总指挥…');await api('/api/task/coordinator',{method:'POST',body:JSON.stringify({task_id:id})});toast('总指挥已处理/接收')}catch(e){toast(e.message,true)}}
+async function openSignoffChamber(taskId){try{const [td,proj]=await Promise.all([api('/api/task?id='+encodeURIComponent(taskId)).catch(()=>null),api('/api/task/projection?id='+encodeURIComponent(taskId)).catch(()=>null)]);const d=proj||(td&&td.task)||{};const t=(td&&td.task)||{};const wid=t.workflow_id||state.workflowId;const node=t.node||t.stage||'';const arts=Array.isArray(d.artifacts)?d.artifacts:[];const isBlocked=t.stage_verdict==='blocked'||t.status==='blocked';let artCards='<div class="empty">暂无生成产物</div>';if(arts.length){artCards=arts.map(a=>`<div class="proj-sec" style="margin-bottom:8px"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px"><strong>${esc(a.name||a.kind)}</strong><span class="badge ${a.passed?'cleaned':(a.kind==='evaluation'?'failed':'waiting')}">${esc(a.kind)}</span></div><div class="task-meta" style="margin-bottom:8px">${esc(a.path||'')}</div><div class="proj-txt ctl-pre-light">${esc(a.content||a.summary||'（文件产物记录正常）')}</div></div>`).join('')}const html=`<div class="signoff-box"><div class="signoff-head"><div><div style="font-size:16px;font-weight:700">${esc(taskDisplayName(t))}</div><div class="task-meta">任务 ID: ${esc(taskId)} · 执行者: <b>${esc(t.agent||'-')}</b> · 节点: <b>${esc(node)}</b></div></div><div>${badge(t.status)}</div></div>${isBlocked?'<div class="proj-blk"><strong>⚠️ 门禁会签等待:</strong> 当前节点触发门禁阻断，需要人类总指挥核查产物并决策放行或打回。</div>':''}<div class="proj-sec"><div class="proj-lbl">核心交付物与成果列表</div>${artCards}</div><div class="form"><label for="signoffFeedback">审批意见 / 批注说明（可选）</label><input id="signoffFeedback" placeholder="例如：数据核准，批准通过；或：海外收入拆解不全，请补充"></div><div class="signoff-actions"><button class="btn" onclick="closeModal()">暂不处理</button><button class="btn danger-btn" onclick="submitSignoffDecision(\'${esc(taskId)}\',\'${esc(wid)}\',\'${esc(node)}\',\'reject\')">批注打回</button><button class="btn primary" onclick="submitSignoffDecision(\'${esc(taskId)}\',\'${esc(wid)}\',\'${esc(node)}\',\'approve\')">通过并放行</button></div></div>`;openModal('成果交付会签室 (Artifact Signoff Chamber)',html)}catch(e){toast(e.message,true)}}
 async function submitSignoffDecision(taskId,wid,node,act){const feedback=(document.getElementById('signoffFeedback')?.value||'').trim();closeModal();try{toast(act==='approve'?'正在通过并放行…':'正在批注打回…');const res=await api('/api/task/signoff',{method:'POST',body:JSON.stringify({task_id:taskId,workflow_id:wid,node:node,action:act,feedback:feedback,operator:'总指挥'})});if(res.ok){await loadWorkflow(wid);toast(act==='approve'?'已通过并放行门禁！':'已完成批注打回，已回退至上游重新推进')}else{toast('操作失败: '+(res.error||'未知错误'),true)}}catch(e){toast(e.message,true)}}
 async function forceReviewTask(tid){
   try{
@@ -5434,7 +5449,7 @@ function toggleDeepDrawer(){const d=document.getElementById('deepDrawer');if(!d)
 
 function switchDrawerTab(tab){state.drawerTab=tab;['tty','logs','raw'].forEach(t=>{const el=document.getElementById('dtab'+t.charAt(0).toUpperCase()+t.slice(1));if(el)el.classList.toggle('active',t===tab)});refreshDeepDrawer()}
 async function refreshDeepDrawer(){const pre=document.getElementById('drawerPre');if(!pre)return;pre.textContent='正在拉取底层现场数据…';try{if(state.drawerTab==='tty'){const ts=(state.workflow&&state.workflow.tasks)||[];const activeTask=ts.find(t=>['working','dispatched','rework','paused'].includes(t.status))||ts[0];const paneId=activeTask?activeTask.pane_id:(state.project&&state.project.slots&&state.project.slots[0]&&state.project.slots[0].pane_id);if(!paneId){pre.textContent='当前暂无活动工位 TTY';return}const d=await api('/api/pane/read?id='+encodeURIComponent(paneId));pre.textContent=`[工位 ${paneId} 实时终端现场]\n`+(d.output||'（工位暂无输出）')}else if(state.drawerTab==='logs'){const d=await api('/api/logs?kind=controller');pre.textContent='[调度器内核日志 Controller Log]\n'+(d.output||'（暂无日志）')}else if(state.drawerTab==='raw'){if(!state.workflowId){pre.textContent='请先选择一个工作流';return}const d=await api('/api/workflow/projection?id='+encodeURIComponent(state.workflowId));pre.textContent=JSON.stringify(d,null,2)}}catch(e){pre.textContent='拉取失败: '+e.message}}
-function showSteerModal(tid){openModal('留话指导',`<div class="form"><div class="muted" style="margin-bottom:8px">任务 ID：${esc(tid)}</div><label for="steerInput">想告诉它的话（排队等它空闲时读到，不打断当前执行）</label><textarea id="steerInput" rows="3" placeholder="例如：优先使用标准库，不要引入外部第三方包" style="width:100%;box-sizing:border-box;margin-bottom:10px"></textarea><div style="display:flex;align-items:center;gap:8px;margin-bottom:12px"><input type="checkbox" id="steerUrgent" style="width:auto"><label for="steerUrgent" style="margin:0;cursor:pointer"><strong>现在就打断它，马上送进去</strong></label></div><button class="btn primary" onclick="submitSteer('${esc(tid)}')">发送指令</button></div>`)}
+function showSteerModal(tid){openModal('留话指导',`<div class="form"><div class="muted" style="margin-bottom:8px">任务 ID：${esc(tid)}</div><label for="steerInput">想告诉它的话（排队等它空闲时读到，不打断当前执行）</label><textarea id="steerInput" rows="3" placeholder="例如：优先使用标准库，不要引入外部第三方包" style="width:100%;box-sizing:border-box;margin-bottom:8px"></textarea><div style="display:flex;align-items:center;gap:8px;margin-bottom:12px"><input type="checkbox" id="steerUrgent" style="width:auto"><label for="steerUrgent" style="margin:0;cursor:pointer"><strong>现在就打断它，马上送进去</strong></label></div><button class="btn primary" onclick="submitSteer('${esc(tid)}')">发送指令</button></div>`)}
 async function submitSteer(tid){const inst=(document.getElementById('steerInput')?.value||'').trim();const urgent=!!document.getElementById('steerUrgent')?.checked;if(!inst)return toast('请输入指令内容',true);closeModal();try{toast('正在留言…');const res=await api('/api/task/steer',{method:'POST',body:JSON.stringify({task_id:tid,instruction:inst,urgent:urgent})});if(res.ok===false){toast(res.reason==='soft_steer_not_supported'?'当前工位不支持不打断的留言，指令已保留；可选择立即打断发送。':res.reason==='unknown_agent_no_adapter_registered'?'当前工位没有可用的指令适配能力，指令已保留，请检查工位配置。':'指令未送达，请查看任务现场后重试。',true);await loadWorkflow(state.workflowId);return}toast(res.status==='dispatched'?'已经打断它并送到手上了':'已放进留言队列，它空闲时会读到');await loadWorkflow(state.workflowId)}catch(e){toast(e.message,true)}}
 function haltTaskPrompt(tid){showConfirmModal({title:'紧急叫停这个任务',message:'确定要立刻中断任务 '+tid+' 吗？正在做的事会停下，但代码和现场都会保留，之后你可以决定重新派人还是作废。',confirmText:'确认叫停',danger:true,onConfirm:async()=>{try{toast('正在叫停…');await api('/api/task/halt',{method:'POST',body:JSON.stringify({task_id:tid,reason:'人工在控制台紧急叫停'})});toast('工位已安全打断');await loadWorkflow(state.workflowId)}catch(e){toast(e.message,true)}}})}
 async function toggleWorkflowPause(){if(!state.workflowId)return toast('当前没有工作流',true);const curSt=state.workflow&&state.workflow.workflow&&state.workflow.workflow.status;const isPaused=curSt==='paused';const act=isPaused?'resume':'pause';const label=isPaused?'恢复自动调度':'暂停自动调度';showConfirmModal({title:label,message:isPaused?'确认恢复该工作流的自动调度推进？':'确认暂停该工作流的自动推进？当前运行中的工位不会被强制终止。',confirmText:label,onConfirm:async()=>{try{await api('/api/kernel/'+act,{method:'POST',body:JSON.stringify({workflow_id:state.workflowId})});await loadWorkflow(state.workflowId);toast('工作流已'+(isPaused?'恢复':'暂停'))}catch(e){toast(e.message,true)}}})}
@@ -5442,7 +5457,7 @@ async function stepWorkflow(){if(!state.workflowId)return toast('当前没有工
 function showRollbackModal(){if(!state.workflowId)return toast('当前没有工作流',true);const stages=(state.workflow&&state.workflow.stages)||[];if(!stages.length)return toast('工作流暂无节点',true);const options=stages.map(s=>`<option value="${esc(s.key)}">${esc(cleanStageLabel(s.label))} (${esc(s.key)})</option>`).join('');openModal('节点回溯 (Rollback)',`<div class="form"><label for="rbTarget">回溯目标节点（该节点及所有下游任务将被重置作废）</label><select id="rbTarget">${options}</select><label for="rbReason">回溯原因</label><input id="rbReason" type="text" value="人工核验需求变更或发现重大缺陷"><button class="btn primary" style="background:#dc2626;border-color:#ef4444" onclick="executeRollback()">确认回溯</button><div class="muted">警告：此操作不可撤销，下游所有产物与任务将被标记为作废。</div></div>`)}
 async function executeRollback(){const target=document.getElementById('rbTarget').value;const reason=document.getElementById('rbReason').value;closeModal();try{toast('正在执行回溯…');const res=await api('/api/kernel/rollback',{method:'POST',body:JSON.stringify({workflow_id:state.workflowId,target_node_id:target,reason:reason})});await loadWorkflow(state.workflowId);toast('已成功回溯至 '+target+'，作废 '+res.invalidated_tasks.length+' 个任务')}catch(e){toast(e.message,true)}}
 async function forcePassTask(wid,nodeId){showPromptModal({title:'人工强制放行门禁',label:'请输入强制放行的审计说明与依据：',defaultValue:'经人工核验，次要阻断项已评估无害，特批放行',onConfirm:async(note)=>{try{toast('正在强制放行…');await api('/api/kernel/force-pass',{method:'POST',body:JSON.stringify({workflow_id:wid,gate_node_id:nodeId,note:note})});await loadWorkflow(wid);toast('门禁已强制放行')}catch(e){toast(e.message,true)}}})}
-async function showCheckpointsModal(){if(!state.workflowId)return toast('当前没有工作流',true);try{const cps=await api('/api/kernel/checkpoints?workflow_id='+encodeURIComponent(state.workflowId));let listHtml='<div class="muted" style="margin-bottom:12px">暂无历史快照</div>';if(cps&&cps.length){listHtml=cps.map(c=>`<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--line)"><div><strong>${esc(c.tag||'无标签')}</strong><div class="task-meta">${esc(c.checkpoint_id)} · ${c.task_count} 任务 · ${new Date(c.created_at*1000).toLocaleString()}</div></div><button class="btn" style="padding:3px 8px;font-size:12px;color:var(--danger)" onclick="restoreWorkflowCheckpoint('${esc(c.checkpoint_id)}')">恢复此快照</button></div>`).join('')}openModal('工作流快照中心',`<div class="form"><div style="display:flex;gap:8px;margin-bottom:14px"><input id="cpTagInput" type="text" placeholder="快照标签（如：修改前基准）" style="flex:1"><button class="btn primary" onclick="createWorkflowCheckpoint()">创建快照</button></div><h4>历史快照</h4><div style="max-height:240px;overflow-y:auto">${listHtml}</div></div>`)}catch(e){toast(e.message,true)}}
+async function showCheckpointsModal(){if(!state.workflowId)return toast('当前没有工作流',true);try{const cps=await api('/api/kernel/checkpoints?workflow_id='+encodeURIComponent(state.workflowId));let listHtml='<div class="muted" style="margin-bottom:12px">暂无历史快照</div>';if(cps&&cps.length){listHtml=cps.map(c=>`<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--line)"><div><strong>${esc(c.tag||'无标签')}</strong><div class="task-meta">${esc(c.checkpoint_id)} · ${c.task_count} 任务 · ${new Date(c.created_at*1000).toLocaleString()}</div></div><button class="btn" style="padding:3px 8px;font-size:12px;color:var(--danger)" onclick="restoreWorkflowCheckpoint('${esc(c.checkpoint_id)}')">恢复此快照</button></div>`).join('')}openModal('工作流快照中心',`<div class="form"><div style="display:flex;gap:8px;margin-bottom:16px"><input id="cpTagInput" type="text" placeholder="快照标签（如：修改前基准）" style="flex:1"><button class="btn primary" onclick="createWorkflowCheckpoint()">创建快照</button></div><h4>历史快照</h4><div style="max-height:240px;overflow-y:auto">${listHtml}</div></div>`)}catch(e){toast(e.message,true)}}
 async function createWorkflowCheckpoint(){const tag=document.getElementById('cpTagInput')?.value||'';try{toast('正在保存快照…');await api('/api/kernel/checkpoint',{method:'POST',body:JSON.stringify({workflow_id:state.workflowId,tag:tag})});toast('快照已保存');showCheckpointsModal()}catch(e){toast(e.message,true)}}
 async function restoreWorkflowCheckpoint(cpid){showConfirmModal({title:'恢复工作流快照',message:'确定要将工作流恢复到快照 '+cpid+' 吗？当前未保存的节点状态将被覆盖。',confirmText:'确认恢复',danger:true,onConfirm:async()=>{try{toast('正在恢复快照…');await api('/api/kernel/checkpoint/restore',{method:'POST',body:JSON.stringify({workflow_id:state.workflowId,checkpoint_id:cpid})});closeModal();await loadWorkflow(state.workflowId);toast('已恢复至快照 '+cpid)}catch(e){toast(e.message,true)}}})}
 async function createCandidate(){
@@ -5464,7 +5479,7 @@ function controllerActionCard(act,tid,index){
   const m=catMeta(act.category);
   const fx=act.effect||act.description||'';
   const target=tid||act.blocker_task_id||act.old_task_id||'';
-  return `<article class="ctl-card${act.recommended?' is-recommended':''}${act.is_destructive?' is-destructive':''}"><div class="ctl-card-head"><span class="ctl-index">操作 ${index}</span><span class="ctl-card-title">${act.recommended?'⭐ ':''}${esc(act.title)}</span><span class="ctl-badges">${act.recommended?'<span class="ctl-rec">推荐</span>':''}<span class="badge ${m[1]}">${esc(m[0])}</span></span></div><p class="ctl-card-desc">${esc(act.description)}</p>${fx?`<div class="ctl-effect">点按钮后：${esc(fx)}</div>`:''}${act.new_task_id||act.new_agent?`<div class="ctl-meta-chips">${act.old_task_id?`<span class="ctl-chip">旧任务 <strong>${esc(act.old_task_id)}</strong></span>`:''}${act.new_task_id?`<span class="ctl-chip">新任务 <strong>${esc(act.new_task_id)}</strong></span>`:''}${act.new_agent?`<span class="ctl-chip">执行者 <strong>${esc(act.new_agent)}</strong></span>`:''}</div>`:''}<div class="ctl-card-foot">${target?`<button class="btn" onclick="locateControllerTask('${esc(target)}')">查看任务</button>`:''}<button class="btn primary" onclick="executeControllerAction('${esc(act.action_id)}','${esc(state.workflowId||'')}')">一键执行</button></div>${act.command_line?`<details class="ctl-tech"><summary>工程师技术详情（可选）</summary><div class="ctl-tech-body"><div class="ctl-cheat-cmd"><code>${esc(act.command_line)}</code></div><div style="display:flex;justify-content:flex-end;margin-top:6px"><button class="mini" onclick="copyCliCommandByActionId('${esc(act.action_id)}')">复制命令</button></div></div></details>`:''}</article>`;
+  return `<article class="ctl-card${act.recommended?' is-recommended':''}${act.is_destructive?' is-destructive':''}"><div class="ctl-card-head"><span class="ctl-index">操作 ${index}</span><span class="ctl-card-title">${act.recommended?'⭐ ':''}${esc(act.title)}</span><span class="ctl-badges">${act.recommended?'<span class="ctl-rec">推荐</span>':''}<span class="badge ${m[1]}">${esc(m[0])}</span></span></div><p class="ctl-card-desc">${esc(act.description)}</p>${fx?`<div class="ctl-effect">点按钮后：${esc(fx)}</div>`:''}${act.new_task_id||act.new_agent?`<div class="ctl-meta-chips">${act.old_task_id?`<span class="ctl-chip">旧任务 <strong>${esc(act.old_task_id)}</strong></span>`:''}${act.new_task_id?`<span class="ctl-chip">新任务 <strong>${esc(act.new_task_id)}</strong></span>`:''}${act.new_agent?`<span class="ctl-chip">执行者 <strong>${esc(act.new_agent)}</strong></span>`:''}</div>`:''}<div class="ctl-card-foot">${target?`<button class="btn" onclick="locateControllerTask('${esc(target)}')">查看任务</button>`:''}<button class="btn primary" onclick="executeControllerAction('${esc(act.action_id)}','${esc(state.workflowId||'')}')">一键执行</button></div>${act.command_line?`<details class="ctl-tech"><summary>工程师技术详情（可选）</summary><div class="ctl-tech-body"><div class="ctl-cheat-cmd"><code>${esc(act.command_line)}</code></div><div style="display:flex;justify-content:flex-end;margin-top:8px"><button class="mini" onclick="copyCliCommandByActionId('${esc(act.action_id)}')">复制命令</button></div></div></details>`:''}</article>`;
 }
 // Category → [label, badge class].  Module scope: the action-card renderer is
 // shared by both the blocker and pipeline sections.
@@ -5481,7 +5496,7 @@ function renderPipelineActions(acts){
   taskActs.forEach(a=>{const k=a.blocker_task_id||String(a.action_id).split(':')[0];(byTask[k]=byTask[k]||[]).push(a)});
   const groups=Object.keys(byTask).map(k=>{
     const items=byTask[k].slice().sort((a,b)=>(b.recommended?1:0)-(a.recommended?1:0));
-    return `<div class="ctl-blocker" style="margin-bottom:10px"><div class="ctl-blocker-head"><div style="min-width:0"><div class="ctl-blocker-title">${esc(taskDisplayName({task_id:k})||k)}</div><div class="ctl-blocker-id">${esc(k)}</div></div><div style="display:flex;gap:6px;flex-shrink:0"><button class="mini" onclick="locateControllerTask('${esc(k)}')">查看任务详情</button></div></div></div><div class="ctl-actions">${items.map((a,i)=>controllerActionCard(a,k,i+1)).join('')}</div>`;
+    return `<div class="ctl-blocker" style="margin-bottom:8px"><div class="ctl-blocker-head"><div style="min-width:0"><div class="ctl-blocker-title">${esc(taskDisplayName({task_id:k})||k)}</div><div class="ctl-blocker-id">${esc(k)}</div></div><div style="display:flex;gap:8px;flex-shrink:0"><button class="mini" onclick="locateControllerTask('${esc(k)}')">查看任务详情</button></div></div></div><div class="ctl-actions">${items.map((a,i)=>controllerActionCard(a,k,i+1)).join('')}</div>`;
   }).join('');
   const resumeHtml=resumeAct?`<div class="ctl-actions" style="margin-bottom:12px">${controllerActionCard(resumeAct,'',1)}</div>`:'';
   return `<section><div class="ctl-section-title">继续推进 <span class="ctl-count">${pipelineActs.length}</span></div><div class="ctl-sub">这些任务本身没有报错，只是还差一步就能收尾（保存版本 / 并入目标分支 / 归档），或者工位需要人推一把。点按钮即可。</div>${resumeHtml}${groups}</section>`;
@@ -5514,8 +5529,8 @@ function openDecisionPanel(decisionId){
   // Single quotes only: the handler lives inside a double-quoted HTML
   // attribute, so JSON.stringify's double quotes would truncate it.
   // esc() escapes ' as &#39;, so the browser decodes back to the raw value.
-  const opts=(d.options||[]).map(o=>`<div class="ctl-dec-opt${o===d.recommended?' is-rec':''}" style="cursor:pointer;padding:6px 12px" onclick="document.getElementById('decChosen').value=String.fromCharCode(${Array.from(o).map(ch=>ch.charCodeAt(0)).join(',')})">${esc(o)}${o===d.recommended?' · 建议':''}</div>`).join('');
-  openModal('记录裁决 · '+d.decision_id,`<div class="ctl-wrap"><div class="ctl-dec-q">${esc(d.question||d.title)}</div>${opts?`<div class="ctl-dec-opts" style="flex-direction:column;align-items:stretch">${opts}</div>`:''}<div class="form"><label for="decChosen">你的结论（可直接选上面的选项，也可自己写）</label><input id="decChosen" value="${esc(d.recommended||'')}" placeholder="例如：MATCH 入 V1，但 T3 段需先过 G1c 的 DB/EXPLAIN 门禁"><label for="decNote">补充说明（可选）</label><input id="decNote" placeholder="给总指挥的执行约束"></div><div style="display:flex;justify-content:flex-end;gap:10px;margin-top:12px"><button class="btn" onclick="closeModal()">取消</button><button class="btn primary" onclick="submitDecision('${esc(d.decision_id)}')">落库并通知总指挥</button></div></div>`);
+  const opts=(d.options||[]).map(o=>`<div class="ctl-dec-opt${o===d.recommended?' is-rec':''}" style="cursor:pointer;padding:8px 12px" onclick="document.getElementById('decChosen').value=String.fromCharCode(${Array.from(o).map(ch=>ch.charCodeAt(0)).join(',')})">${esc(o)}${o===d.recommended?' · 建议':''}</div>`).join('');
+  openModal('记录裁决 · '+d.decision_id,`<div class="ctl-wrap"><div class="ctl-dec-q">${esc(d.question||d.title)}</div>${opts?`<div class="ctl-dec-opts" style="flex-direction:column;align-items:stretch">${opts}</div>`:''}<div class="form"><label for="decChosen">你的结论（可直接选上面的选项，也可自己写）</label><input id="decChosen" value="${esc(d.recommended||'')}" placeholder="例如：MATCH 入 V1，但 T3 段需先过 G1c 的 DB/EXPLAIN 门禁"><label for="decNote">补充说明（可选）</label><input id="decNote" placeholder="给总指挥的执行约束"></div><div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px"><button class="btn" onclick="closeModal()">取消</button><button class="btn primary" onclick="submitDecision('${esc(d.decision_id)}')">落库并通知总指挥</button></div></div>`);
 }
 async function submitDecision(decisionId){
   const decision=(document.getElementById('decChosen')?.value||'').trim();
@@ -5557,7 +5572,7 @@ function openControllerCockpitModal(){
       const st=b.status||'';
       const ag=b.agent||'';
       const stageLabel=b.stage_label||b.stage||b.node||'';
-      const head=tid?`<div class="ctl-blocker" style="margin-bottom:10px"><div class="ctl-blocker-head"><div style="min-width:0"><div class="ctl-blocker-title">卡点任务 ${gi+1} · ${esc(taskDisplayName(b)||stageLabel||'任务')}</div><div class="ctl-blocker-id">${esc(tid)}${ag?` · 执行者 ${esc(ag)}`:''}${st?` · ${esc(humanStatus(st))}`:''}${stageLabel?` · ${esc(stageLabel)}`:''}</div></div><div style="display:flex;gap:6px;flex-shrink:0"><button class="mini" onclick="locateControllerTask('${esc(tid)}')">查看任务详情</button></div></div>${reason?`<div class="ctl-blocker-reason">卡点原因：${esc(reason)}</div>`:''}</div>`:`<div class="ctl-sub">以下为当前可执行的一键解卡操作（已按推荐度排序）。</div>`;
+      const head=tid?`<div class="ctl-blocker" style="margin-bottom:8px"><div class="ctl-blocker-head"><div style="min-width:0"><div class="ctl-blocker-title">卡点任务 ${gi+1} · ${esc(taskDisplayName(b)||stageLabel||'任务')}</div><div class="ctl-blocker-id">${esc(tid)}${ag?` · 执行者 ${esc(ag)}`:''}${st?` · ${esc(humanStatus(st))}`:''}${stageLabel?` · ${esc(stageLabel)}`:''}</div></div><div style="display:flex;gap:8px;flex-shrink:0"><button class="mini" onclick="locateControllerTask('${esc(tid)}')">查看任务详情</button></div></div>${reason?`<div class="ctl-blocker-reason">卡点原因：${esc(reason)}</div>`:''}</div>`:`<div class="ctl-sub">以下为当前可执行的一键解卡操作（已按推荐度排序）。</div>`;
       const cards=(g.items.length?g.items:[]).map((act,i)=>controllerActionCard(act,tid,i+1)).join('')||'<div class="muted" style="font-size:12px">该卡点暂无自动解卡按钮，请查看任务详情人工处理。</div>';
       return `<section style="margin-bottom:16px">${head}<div class="ctl-actions">${cards}</div></section>`;
     }).join('');
@@ -5621,13 +5636,13 @@ function archiveFiltersHtml(){
   }else if(archiveQuery.workflow_id){
     wfOptions+=`<option value="${esc(archiveQuery.workflow_id)}" selected>${esc(archiveQuery.workflow_id)}</option>`;
   }
-  return `<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin-bottom:10px">`
+  return `<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin-bottom:8px">`
     +`<select id="arcProject" onchange="onArchiveProjectChange()"><option value="">全部项目</option>${ps.map(p=>`<option value="${esc(p.project_id)}"${archiveQuery.project_id===p.project_id?' selected':''}>${esc(p.project_name||p.project_id)}</option>`).join('')}</select>`
     +`<select id="arcWorkflow" onchange="onArchiveWorkflowChange()">${wfOptions}</select>`
     +`<select id="arcAgent" onchange="applyArchiveFilters()"><option value="">全部执行者</option>${['opencode','codex','claude','qodercli','agy','pi','grok','kimi'].map(a=>`<option${archiveQuery.agent===a?' selected':''}>${esc(a)}</option>`).join('')}</select>`
     +`<select id="arcStatus" onchange="applyArchiveFilters()">${ARCHIVE_STATUS_CHOICES.map(c=>`<option value="${c[0]}"${archiveQuery.status===c[0]?' selected':''}>${c[1]}</option>`).join('')}</select>`
     +`<input id="arcQ" placeholder="关键词：任务/目标/节点" value="${esc(archiveQuery.q)}" onkeydown="if(event.key==='Enter')applyArchiveFilters()">`
-    +`</div><div style="display:flex;justify-content:flex-end;gap:8px;margin-bottom:10px"><button class="btn primary" onclick="applyArchiveFilters()">查询</button></div><div id="archiveList"><div class="empty">正在加载…</div></div>`;
+    +`</div><div style="display:flex;justify-content:flex-end;gap:8px;margin-bottom:8px"><button class="btn primary" onclick="applyArchiveFilters()">查询</button></div><div id="archiveList"><div class="empty">正在加载…</div></div>`;
 }
 function archiveRowsHtml(d){
   const items=d.items||[];
@@ -5645,7 +5660,7 @@ function archiveRowsHtml(d){
       +`<div class="task-meta">更新于 ${esc(when)} · 历时 ${esc(formatElapsed(t.duration_seconds))}</div></div>`
       +`<div class="task-actions"><button class="mini" onclick="openTaskDrawer('${esc(t.task_id)}')">详情</button></div></div>`;
   }).join('');
-  return rows+`<div class="task-meta" style="padding:10px 16px;display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap"><span>共 ${d.total} 条 · 第 ${page}/${pages} 页</span><span><button class="mini" onclick="archivePage(-1)"${page<=1?' style="opacity:.45;pointer-events:none"':''}>上一页</button> <button class="mini" onclick="archivePage(1)"${page>=pages?' style="opacity:.45;pointer-events:none"':''}>下一页</button></span></div>`;
+  return rows+`<div class="task-meta" style="padding:12px 16px;display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap"><span>共 ${d.total} 条 · 第 ${page}/${pages} 页</span><span><button class="mini" onclick="archivePage(-1)"${page<=1?' style="opacity:.45;pointer-events:none"':''}>上一页</button> <button class="mini" onclick="archivePage(1)"${page>=pages?' style="opacity:.45;pointer-events:none"':''}>下一页</button></span></div>`;
 }
 async function populateArchiveWorkflowSelect(projectId,selectedWorkflowId){
   const sel=document.getElementById('arcWorkflow');
