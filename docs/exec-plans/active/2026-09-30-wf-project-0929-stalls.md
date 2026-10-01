@@ -62,7 +62,7 @@
 
 | C26b | 缺失迁移配套路径被变成None，回退宿主输入 | A独立复现；主控四类TEMP迁移/文件读取，issue26b-red.log | 本地验证：保留已解析路径；旧及反证4 failed/8 passed；12靶向/64相邻/2687全量+145子测试绿；独立复审无此项阻断，未部署 |
 | C27c | 原生CLI init基线仍在锁外且未受管；Task初始化/采集也分离 | A/B/C/D各自原生并发探针；A/D另有SIGTERM晚写 | 本地验证：整个reset→采集→发布同一锁；旧baseline失效；9靶向/86相邻+10子测试/2696全量+145子测试，独立复审无此项阻断；未部署 |
-| C31b | current回执替换早于history发布，失败重试永久丢原字节 | A中断/C目录故障；主控故障及正常对照 | 已确认；先保存可恢复历史，再失效当前，最后换输入，独立提交 |
+| C31b | current回执替换早于history发布，失败重试永久丢原字节 | A中断/C目录故障；主控故障及正常对照 | 专项已验证：先归档后失效current再替换输入；故障/中断保持旧契约与原回执；12靶向/91专项+10子测试，11失败/1正常反证；全量2730 passed/145子测试，0失败/0跳过，360.26s；未部署 |
 | C21b | 旧耗尽队列跨显式恢复、普通阻塞episode误投 | A/D真实TEMP SQLite queue出口 | 已确认；检查authoritative cause与episode，不能仅status==blocked；独立提交 |
 | C28b | 自由GOAL/DoD文本伪装repro配置，绿色评估被误阻塞 | B/C独立复现；主控quoted/正常对照 | 已确认；配置读取与自由文本隔离，老合约兼容需明确；独立提交 |
 | C28c | linter未启动exit127被抵扣为历史债务并假绿 | B原生missing_linter脚本和原子回执，主控重执行一致 | 专项已验证：reserved执行失败独立veto且拒绝采集假债务；旧污染基线不能假绿；89专项/10子测试通过，19失败/3正常对照反证；全量2718 passed/145子测试，0失败/0跳过，387.92s；仅本地提交，未部署 |
@@ -128,3 +128,7 @@ T8现场只读复核：SQLite仍working/version3，但核对native instance name
 C28c验收中：原始20用例18 failed/2合法exit1/2对照；扩展至22用例后恢复核心实现19 failed/3对照。最终专项89 passed/10 subtests（27.82s）。初次相邻运行与反证阶段时间交叠，不作为最终证据；反证恢复精准源字节后重跑专项，最终全量期间冻结生产源码。独立只读复审无本卡新增阻断。保留Task best-effort警告，CLI采集执行失败返回非零，旧污染baseline仍独立否决。
 
 C28c最终：全量2718 passed/145 subtests passed，0 failed/0 skipped（387.92s），exit0；compileall、两CLI AST、diff-check通过。生产源码全量期间冻结；本卡不部署、不修实盘历史数据，其余卡继续逐项。
+
+C31b验收中：实际旧成功/耗尽回执×history mkdir/write/replace/SystemExit故障；native CLI history被文件阻挡和重试；同hash冲突及已存在相同回执。旧11 failed/1正常，修后12 passed（6.80s），撤销核心11 failed/1正常（13.47s）；恢复精准字节后91专项/10子测试（35.20s）。独立评审遇反证暂时撤销时明确停止当前候选结论，恢复后重新只读核对，无本卡新增阻断；不将历史BLOCKER过滤C31c混入本卡。全量运行，源码冻结。
+
+C31b最终：源码冻结全量2730 passed/145 subtests passed，0 failed/0 skipped（360.26s），exit0；compileall、两CLI AST、diff-check通过。仅本地提交，不部署、不改live状态；下一项C31c。

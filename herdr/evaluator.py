@@ -239,18 +239,12 @@ def _init_loop_unlocked(
     loop_dir.mkdir(parents=True, exist_ok=True)
 
     # EVAL_DONE is the reader's single authoritative execution snapshot.
-    # Invalidate it before replacing inputs; a failed init cannot expose old
-    # success as evidence for the new contract. Historical logs stay intact.
+    # Archive the old receipt before invalidating it. If publication fails,
+    # the unchanged old contract keeps its recoverable current receipt. Once
+    # archived, invalidate before replacing inputs so failed new initialization
+    # cannot expose old success as evidence for the new contract.
     snapshot_path = loop_dir / "EVAL_DONE.json"
     previous_snapshot = snapshot_path.read_bytes() if snapshot_path.exists() else None
-    reset_path = snapshot_path.with_suffix(f".json.tmp.{os.getpid()}")
-    reset_path.write_text(json.dumps({
-        "iteration": 0, "completed_at": None, "status": "initialized",
-        "converged": False, "max_iterations": max_iterations,
-        "total_tests": 0, "passed_tests": 0, "failing_tests": [],
-        "composite_score": 0.0,
-    }), encoding="utf-8")
-    reset_path.replace(snapshot_path)
     if previous_snapshot is not None:
         # Historical receipt, never consulted as the current execution view.
         history = loop_dir / "history"
@@ -263,6 +257,15 @@ def _init_loop_unlocked(
             receipt_tmp.replace(receipt)
         elif receipt.read_bytes() != previous_snapshot:
             raise RuntimeError("Conflicting historical evaluation receipt")
+
+    reset_path = snapshot_path.with_suffix(f".json.tmp.{os.getpid()}")
+    reset_path.write_text(json.dumps({
+        "iteration": 0, "completed_at": None, "status": "initialized",
+        "converged": False, "max_iterations": max_iterations,
+        "total_tests": 0, "passed_tests": 0, "failing_tests": [],
+        "composite_score": 0.0,
+    }), encoding="utf-8")
+    reset_path.replace(snapshot_path)
 
     # Debt belongs to the previous contract until a new capture succeeds.
     # An absent baseline has the existing conservative zero-debt semantics.
