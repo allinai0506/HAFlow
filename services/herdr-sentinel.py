@@ -604,7 +604,7 @@ def main():
                 import herdr.steering as herdr_steering
                 if agent_status(pane_id) in {"idle", "unknown", None} and not done_marker_present:
                     dispatched_steer = herdr_steering.dispatch_pending_steer(task_id)
-                    if dispatched_steer:
+                    if dispatched_steer and dispatched_steer.get("ok"):
                         print(
                             f"[SENTINEL STEER] Injected pending steer {dispatched_steer['steer_id']} for task={task_id} pane={pane_id}",
                             flush=True,

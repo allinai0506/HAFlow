@@ -7477,8 +7477,11 @@ def main():
                 operator=args.operator,
                 urgent=args.urgent,
             )
-            mode = "IMMEDIATE" if args.urgent else "QUEUED"
+            mode = ("IMMEDIATE" if args.urgent else "QUEUED") if res.get("ok") else "FAILED"
             print(f"[STEER_{mode}] {res['steer_id']} for {res['task_id']}")
+            if not res.get("ok"):
+                print(f"Steering not delivered: {res.get('reason') or 'delivery_failed'}")
+                sys.exit(1)
         except Exception as e:
             print(f"Error steering task: {e}")
             sys.exit(1)

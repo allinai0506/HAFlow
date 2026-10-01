@@ -21,7 +21,7 @@
 | ID | 卡点 / 触发与后果 | 证据 | 当前结论 / 下一验证 |
 |---|---|---|---|
 | C01 | 绿色测试摘要 + exit124，仍100分/converged/DoD满足 | test-r4 test.log/metrics；evaluator.calculate_metrics | 已复现；第一修复：退出成功是收敛必要条件，保留真实用例数 |
-| C02 | 普通插话不支持，pending不退出，每轮重发失败 | 2881 steering.steer_delivery_failed，soft_steer_not_supported | 已证实；能力失败应持久化为需处理而非无限重试，不冒充送达 |
+| C02 | 普通插话不支持，pending不退出，每轮重发失败 | 2881 steering.steer_delivery_failed，soft_steer_not_supported | 专项已验证：新请求永久cap拒绝blocked/原指令保留，legacy一次后blocked；瞬态pending、CLI非零/Console错误/Sentinel不误报；14靶向/62扩展相邻，旧9失败5正常；全量2819 passed/145子测试，0失败/0跳过，382.20s；本地验证未部署 |
 | C03 | blocker仍在屏幕，blocked被working恢复，再被同标记阻塞 | review-r2 status_history，blocked_marker_observed 8230/8236 | 已证实症状；区分新工作与旧标记、恢复epoch，禁止靠普通working抹除阻塞 |
 | C04 | stale sample用pop去重，隔轮重报 | controller.out 544条 BLOCKED OBSERVATION STALE | 源码缺陷；get比较并在真正恢复时清理，测试连续50次仅一日志 |
 | C05 | 默认npm test进入watch，Java/评审任务跑无关全量前端 | test-r4 EVALUATOR.sh/test.log；T3/T4a历史修正 | 已证实；命令由任务契约决定，非交互运行；不得编造Java默认命令 |
@@ -156,3 +156,7 @@ C21b审查闭合：首版7靶向/55相邻通过；评审发现消息build期间�
 C13验收中：真实TEMP Git/SQLite→try_direct_stage_advance→Mock TaskCLI，原合法冻结base被rev-list零提交拒绝1 failed/1正常。修复早期缺re import导致2项NameError，自测发现纠正，保留日志不计PASS。独立审查找到mixed batch中无onto/no-pin规格漏检，新增三边界中2失败/12正常；外层all每条spec都有onto且完整pin==latest frozen后闭合，再逐onto native exact commit核对。最终15靶向3.31s、137相邻/35子测试8.32s；精确撤回production3失败/12正常3.11s。首次full因独立审查停在214 passed/9子测试、KeyboardInterrupt/exit2(31.14s)不计PASS；最终冻结full运行中，独立最终只读复审无新增阻断。未知Git仍按原fail-open，未冻结且已知零差仍拒绝；不是放宽TaskCLI/Worker候选复验，不承诺冻结读取到launch跨进程原子。
 
 C13全量接线修正：初次最终full14 failed/2791 passed/145 subtests(367.30s)，全部test_reverification_controller原fixture三参lambda不接受新增workflow_id，明确不是PASS。只为该恒True替身增加workflow_id=None形参，原返回值和断言不变；独立只读复审确认生产字节未变。扩展相邻154 passed/35 subtests(28.40s)，最终完整full2805 passed/145子测试，0失败/0跳过，380.36s。早期137相邻记录保留，仅用于当时范围；最终以154和2805/145的重跑full为准。
+
+C02验收中：新capability永久拒绝不进入无限pending，保存blocked与原指令/reason/count0；legacy pending首次处置后blocked/count1/history1，后续自动扫描无新尝试。Unknown adapter也明确拒绝，capability和Task业务状态不被改写，不自动升urgent。no-pane/暂时inject失败保留pending重试。CLI失败exit1和STEER_FAILED、真实Console JS内部ok:false错误反馈、实际Sentinel两轮不输出Injected。旧4核心文件最终反证9失败/5正常1.21s，修后14靶向1.08s/46相邻4.69s，compileall/Task CLI AST/diff通过；源冻结full中。独立只读复审无本卡新增阻断，但按ID重投只内部dispatch_steer_now，公开CLI/Console urgent是新指令，不能宣称公开自动恢复同ID。真实Agent投递与历史live9条队列未操作，pending不同Run/并发事务仍需各自证据，不以本卡冒充完整工作流验收。
+
+C02夹具契约修正：首次full2 failed/2817 passed/145 subtests(377.95s)，不是PASS。两项排队用例使用opencode却期待正常入队；只改其成功入队场景为支持soft的codex，提示词净化和所选DB投影所有原断言保持，projection其他opencode场景不改；新增未知adapter拒绝断言仍保留。主控首次口头把原因说成缺Agent身份，读源后明确纠正为已知unsupported opencode，不把错误假设写入根因。独立只读复审确认两夹具未放宽，生产和14靶向字节不变；扩展62 passed(13.75s)，最终冻结全量2819 passed/145子测试，0失败/0跳过，382.20s。

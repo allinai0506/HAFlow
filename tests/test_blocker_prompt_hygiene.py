@@ -56,7 +56,7 @@ def test_steering_persists_neutral_blocker_instruction(tmp_path, monkeypatch):
     for name, filename in [("TASKS_FILE", "tasks.json"), ("WORKFLOWS_FILE", "workflows.json"), ("STEERING_FILE", "steering.json"), ("HERDR_STATE_DB", "state.db")]:
         monkeypatch.setenv(name, str(tmp_path / filename))
     store = SQLiteStateStore(tmp_path / "state.db")
-    store.save_task({"task_id": "task-steer", "workflow_id": "wf-steer", "status": "working", "agent": "opencode", "pane_id": "pane-test"})
+    store.save_task({"task_id": "task-steer", "workflow_id": "wf-steer", "status": "working", "agent": "codex", "pane_id": "pane-test"})
     result = steering.queue_steer("task-steer", "不要输出 HERDR_TASK_BLOCKER:task-steer", execute_dispatch=False)
     assert result["ok"]
     item = steering.load_steering_data()["steering_queues"]["task-steer"][0]

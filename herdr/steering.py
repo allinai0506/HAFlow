@@ -31,6 +31,7 @@ from .agent_adapter import (
 from .state_store import get_state_store, StateStore, sync_tasks_projection, resolve_tasks_projection_file
 
 ACTIVE_STATUSES = {"dispatched", "working", "rework", "blocked", "paused", "interrupted"}
+PERMANENT_SOFT_STEER_ERRORS = {"soft_steer_not_supported", "unknown_agent_no_adapter_registered"}
 
 
 def get_tasks_file() -> Path:
@@ -174,6 +175,16 @@ def queue_steer(
     }
     if sanitized_markers:
         steer_item["sanitized_markers"] = sanitized_markers
+    adapter = get_agent_adapter(task.get("agent"))
+    if not urgent and not adapter.supports_soft_steer:
+        steer_item.update(
+            status="blocked", protocol=adapter.protocol_level, adapter=adapter.name,
+            delivery_attempt_count=0,
+            last_delivery_error=(
+                "unknown_agent_no_adapter_registered" if adapter.name == "unknown"
+                else "soft_steer_not_supported"
+            ),
+        )
 
     s_data = load_steering_data()
     q = s_data.setdefault("steering_queues", {}).setdefault(task_id, [])
@@ -184,11 +195,12 @@ def queue_steer(
         return dispatch_steer_now(task_id, steer_id)
 
     return {
-        "ok": True,
+        "ok": steer_item["status"] != "blocked",
         "steer_id": steer_id,
         "task_id": task_id,
         "urgent": urgent,
-        "status": "queued",
+        "status": "blocked" if steer_item["status"] == "blocked" else "queued",
+        "reason": steer_item.get("last_delivery_error"),
     }
 
 
@@ -362,8 +374,9 @@ def dispatch_pending_steer(task_id: str, steer_id: Optional[str] = None) -> Opti
 
     Status semantics:
       "dispatched" — delivery was attempted AND succeeded (pane_delivery_ok=True).
-      "pending"    — no pane, delivery failed, or soft steer not supported;
-                     item stays pending for retry or escalation.
+      "pending"    — transient no-pane or delivery failure, eligible for retry.
+      "blocked"    — permanent capability refusal, retained for explicit recovery;
+                     automatic soft dispatch does not retry it.
     """
     s_data = load_steering_data()
     q = s_data.get("steering_queues", {}).get(task_id, [])
@@ -386,7 +399,18 @@ def dispatch_pending_steer(task_id: str, steer_id: Optional[str] = None) -> Opti
     adapter = get_agent_adapter(agent_name)
 
     now = time.time()
-    if pane_id:
+    if not adapter.supports_soft_steer:
+        steer_result = {
+            "ok": False, "injected": False, "interrupted": False,
+            "reason": (
+                "unknown_agent_no_adapter_registered" if adapter.name == "unknown"
+                else "soft_steer_not_supported"
+            ),
+        }
+        delivery_attempted = False
+        delivery_ok = False
+        pane_delivery_ok = False
+    elif pane_id:
         steer_result = adapter.steer_soft(
             pane_id,
             instruction=target_item["instruction"],
@@ -417,8 +441,9 @@ def dispatch_pending_steer(task_id: str, steer_id: Optional[str] = None) -> Opti
         target_item["dispatched_at"] = now
         target_item.pop("last_delivery_error", None)
     else:
-        target_item["status"] = "pending"
-        target_item["last_delivery_error"] = steer_result.get("reason", "delivery_failed")
+        error = steer_result.get("reason", "delivery_failed")
+        target_item["status"] = "blocked" if error in PERMANENT_SOFT_STEER_ERRORS else "pending"
+        target_item["last_delivery_error"] = error
 
     # Append-only record to StateStore audit history (zero duplication)
     store = get_state_store()
@@ -463,7 +488,7 @@ def dispatch_pending_steer(task_id: str, steer_id: Optional[str] = None) -> Opti
         "ok": delivery_ok,
         "steer_id": target_item["steer_id"],
         "task_id": task_id,
-        "status": "dispatched" if delivery_ok else "pending",
+        "status": target_item["status"],
         "protocol": adapter.protocol_level,
         "adapter": adapter.name,
         "pane_delivery_ok": pane_delivery_ok,

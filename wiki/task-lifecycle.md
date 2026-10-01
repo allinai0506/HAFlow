@@ -475,3 +475,5 @@ Evidence:
 `FACT` blocked/inner_loop_exhausted队列逐轮验证workflow/run及status_history转换episode、当前cause；恢复再阻塞不得消费旧事件，同episode metadata更新不失效，旧queue清理不得解除新episode去重。legacy无history保守版本绑定；本地C21b，未部署。
 
 `FACT` Controller零差预检允许最新冻结full SHA与全批spec pin/onto、native onto commit完全一致的候选；无冻、缩写、旧pin、混批缺onto身份仍拒绝。差异计数不替代候选身份；未知Git保留既有策略，TaskCLI/Worker复验保持，C13本地未部署。
+
+`FACT` 永久soft能力拒绝是steer队列blocked，不是Task业务blocked；原文与last_delivery_error保留，自动soft扫描跳过，暂时no-pane/inject失败仍pending。CLI/Console/Sentinel明确反馈失败。内部按ID显式urgent与公开新urgent不是同一入口，未验证真实投递；C02本地未部署。

@@ -59,12 +59,13 @@ def test_steering_queue_uses_selected_db_projection(namespaces):
     host_projection = host / "steering.json"
     host_projection.write_text('{"host":"must remain"}')
     store = SQLiteStateStore(selected / "state.db")
-    store.save_task(task())
+    supported_task = dict(task(), agent="codex")
+    store.save_task(supported_task)
     assert steering.queue_steer("selected-task", "继续验收", execute_dispatch=False)["ok"]
     assert host_projection.read_text() == '{"host":"must remain"}'
     data = json.loads((selected / "steering.json").read_text())
     assert len(data["steering_queues"]["selected-task"]) == 1
-    steering.save_tasks_data({"tasks": [task()]})
+    steering.save_tasks_data({"tasks": [supported_task]})
     assert (selected / "tasks.json").exists()
     assert not (host / "tasks.json").exists()
 

@@ -5438,3 +5438,13 @@ C30追加验证：`tests/test_blocked_recovery_command_contract.py`提取真实�
 **修复与预防**：仅在已有零差判断时复用最新冻结台账，要求严格完整40位SHA、每条spec有onto且pin完全一致，再逐onto native commit与frozen匹配。初版遗漏无onto同批spec，独立评审证明会启动无pin Task，回归后收紧all；不改非空与未知Git既有策略，不删除空分支保护。
 
 **验证与关联证据**：tests/test_frozen_base_candidate_dispatch.py 15项，通过真实冻结轮换/跨workflow隔离/短pin/旧spec/onto不匹配/混批缺身份/双onto正例，154扩展相邻和35子测试通过，全量见C13计划；旧fixture接线14项TypeError单行兼容修正，未放宽断言。仅本地未部署，TaskCLI/Worker现有复验仍需执行；冻结读取与外部launch非原子，不用本卡冒充所有并发原子保证。
+
+## 115. 永久能力拒绝必须退出重试，非空失败对象不是送达
+
+**现象与影响**：soft_steer_not_supported曾写2881次失败，每轮保留pending继续尝试；Sentinel判断非空返回对象而打印Injected，CLI与Console反馈也把失败混成成功队列。
+
+**根因与证据**：声明能力不支持属于永久失败，不会因等待idle恢复。dispatch_pending_steer却用同一pending表示暂时无pane、暂时送达失败、永久能力拒绝；上游用对象truthiness代替ok。真实TEMP SQLite、Native CLI、Sentinel两轮与Node执行实际submitSteer中，撤回4核心实现9失败/5正常。
+
+**修复与预防**：新请求先检查既有能力，不支持保存blocked与原文/原因/count0；legacy pending首次拒绝后blocked并保留唯一失败history，后续soft扫描不再选择。暂时失败继续pending。CLI失败非零、Console明确失败、Sentinel仅ok才记录Injected；不修改Agent能力、不将软指令自动升级打断。
+
+**验证与关联证据**：tests/test_steering_permanent_failure.py 14项通过，62扩展相邻通过，全量见C02计划；已有unsupported测试更新为更强立即拒绝/保留原文/0TTY断言。内部同ID显式urgent恢复只有受控Mock外部边界证据；公开CLI/Console急送创建新指令，不能宣称原ID公开自动恢复。没有真实Agent调用，没有处理live历史队列，暂时失败与跨Run语义各自保留边界。
