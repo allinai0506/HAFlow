@@ -5639,3 +5639,46 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 3. **回归测试**：
    - `tests/test_workflow_graph_projection.py::TestCompletedWorkflowAndGateOverrides`
    - `tests/test_console_stage_summary.py::test_completed_workflow_makes_stage_cleaned`
+
+## 119. 全局通用 CSS 类名碰撞与组件状态徽标隔离防护（2026-10-01）
+
+### 铁证与现象
+
+在实现控制台 Linear 风格下拉框标准组件时，用户截屏反馈徽标异常：
+1. 徽标胶囊被压扁为 7px × 7px 的椭圆细环；
+2. 胶囊文字（`3 活`、`4 等`）被挤出胶囊外，并发生单字纵向竖排折行；
+3. 用户反馈：「后面的数字暂时太丑了 优化一下」。
+
+### 根因分析
+
+1. **全局泛化类名冲突（Global CSS Selector Collision）**：
+   在控制台单文件体系（`console/herdr_factory_console.py:2479`）中，历史定义了用于表格与弹窗状态指示器的全局样式：
+   `.dot { width: 7px; height: 7px; border-radius: 50%; }`。
+   下拉框徽标使用了复合类名 `<span class="badge-pill active dot">`，命中了该全局规则，导致原本应为自适应宽度的胶囊被强制锁定为 7px 宽 × 7px 高。
+2. **文字防折行与紧凑度缺失**：
+   未设置 `white-space: nowrap` 与 `flex-shrink: 0`，导致外溢文本在父级 flex 排版下逐字折行。
+3. **文案规范随意**：
+   使用了「3 活」「4 等」这类口语化缩写，与控制台「活跃」「等你的问题」专业语义脱节。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 泛化类名冲突（`.dot`）压扁组件 | 在原生 CSS/无构建单文件项目中，禁止使用通用短单词作为修饰类（modifier） | 使用伪元素 `.badge-pill::before` 绘制点状指示器，不得给宿主增加全局命名冲突类名 |
+| 数字与状态文案竖排折行 | 指标与数字胶囊在任何缩放与弹性布局下绝对不可单字折行 | 胶囊必须显式指定 `white-space: nowrap; flex-shrink: 0; font-variant-numeric: tabular-nums` |
+| 口语化简写损害工业级品质 | 随意缩略（如「活」「等」）让界面显得廉价、含义模糊 | 统一为标准业务语义（`• X 活跃`、`• Y 需决策`、`已完成`、`聚合`） |
+
+### 操作规范（已固化到源码与回归）
+
+1. **`console/herdr_factory_console.py` & `console/static/prototype_workflow_dropdown.html`**：
+   - 彻底清除 `.badge-pill.dot`，采用 `.badge-pill::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }` 绘制点状指示器；
+   - 聚合等无点徽标使用 `.badge-pill.nodot::before { display: none; }`；
+   - 添加 `height: 19px; padding: 0 7px; white-space: nowrap; flex-shrink: 0; font-variant-numeric: tabular-nums;`；
+   - 标题容器与徽标容器补充 `flex: 1; min-width: 0` 与 `white-space: nowrap; flex-shrink: 0`；
+   - 文案规范统一为 `${w.active} 活跃` 与 `${w.attention} 需决策`。
+2. **自动化门禁测试**：
+   - 在 `tests/test_console_linear_dropdown.py` 中固化 `test_badge_pills_styling_and_labels`：
+     - `self.assertNotIn(".badge-pill.dot", self.source)`
+     - `self.assertIn("tabular-nums", self.source)`
+     - `self.assertIn("活跃</span>", self.source)`
+     - `self.assertIn("需决策</span>", self.source)`

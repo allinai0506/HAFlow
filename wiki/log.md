@@ -8,6 +8,26 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-10-01] feat | 控制台 Linear 风格标准工作流选择器与状态胶囊设计系统规范
+- 背景：
+  1. 工作流 ID 遮蔽：原先前端使用 `w.title || w.workflow_id`，导致定义了 title 的工作流（如 `wf-project-0929-01` 对应 `Task：统一待办工作台 V1`）ID 被彻底遮蔽，用户误以为刚执行的工作流未出现在下拉框。
+  2. 原生 Select 体验落后：原先使用系统原生 `<select>`，不符合 2026 年现代产品体验规范。
+  3. Badge 胶囊类名冲突：初期尝试使用 `.badge-pill.dot` 时与控制台全局 `.dot { width: 7px; height: 7px; border-radius: 50%; }` 发生命名冲突，导致胶囊宽度高度被压扁为 7px 细环且文字被挤出竖排折行。
+- 变更：
+  1. 在 `console/herdr_factory_console.py` 实现全套 Linear 风格 Combobox 标准组件（`.linear-select`, `.linear-trigger`, `.linear-popover`），包含即时搜索过滤、快捷键（`/` 与 `Esc`）、全键盘上下键导航与回车选中、点击外部自动关闭。
+  2. 方案 B 状态分组与折叠：按「进行中 / 需决策」与「已完成 / 闲置」分组，支持点击分组标题折叠/展开（`togglePopoverGroup`）。
+  3. 双行信息架构：首行标题 + 次行等宽 ID（`item-id`），确保工作流 ID 随时清晰可见。
+  4. 胶囊样式隔离（消除 `.dot` 冲突）：移除全局 `.dot` 引用，使用 `.badge-pill::before` 绘制 5px 原点指示器，设置 `height: 19px; white-space: nowrap; font-variant-numeric: tabular-nums`，文案规范统一为 `• X 活跃`、`• Y 需决策`、`已完成` 与 `聚合`。
+  5. 兼容性保护：保留隐藏的 `<select id="dashWfSel">`，保障既有自动化测试与外部控制台 API 契约不变。
+  6. 同步更新 `console/static/prototype_workflow_dropdown.html` 原型。
+- 证据：
+  - 新增专项测试 `tests/test_console_linear_dropdown.py`（7 项测试全绿）；
+  - 控制台全量测试集 `pytest tests/test_console_*.py`（212 passed）；
+  - 全仓测试 `pytest -q`（2891 passed, 157 subtests passed）；
+  - `python3 -m compileall`、`git diff --check`、`entry-gate-check.py` 校验全绿；
+  - 生产发布快照 `182db0722ee6` 已通过 `./scripts/install-herdr-console.sh` 部署并热重启服务；
+  - `ego-browser` 截图验证无文字折行、胶囊原点与数字对齐完美。
+
 ## [2026-10-01] fix | 控制台已结束工作流与门禁放行状态投影对齐
 - 背景：控制台画布卡片和详情阶段聚合仅基于任务状态盲目聚合（`any(s == 'failed')`），忽略了工作流已完成终态（`workflow.status in {'completed', 'cleaned', 'archived'}`）以及人工门禁放行裁决（`gate_overrides[node].verdict == 'pass'`），导致已闭环工作流历史上的重试失败仍将「实现」标为红色失败、「测试」标为已阻塞、「收尾」因无任务标为灰色尚未开始。
 - 修复：
