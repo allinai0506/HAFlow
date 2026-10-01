@@ -56,6 +56,8 @@ Evidence:
 - `herdr/state_db.py:transition_task, transition_workflow`
 - `bin/herdr-task:set_status, supersede_task`
 
+`FACT` 当前内循环耗尽的blocked是等待仲裁的持久事实，Agent working/idle/done不能代替明确恢复决策。实时事件保留该状态；重启在已知运行信号下恢复仲裁队列。最新blocked转换reason优先于可遗留的sentinel_reason；历史缺失时保留legacy行为。证据：`tests/test_inner_loop_arbitration_recovery.py`。旧屏幕跨恢复epoch（C03c）仍单独待修。仲裁卡及人工升级提示使用现有合法blocked→working命令，不增状态边或force；真实CLI参数执行回归见`tests/test_blocked_recovery_command_contract.py`（C30）。
+
 ### 1.1 门禁结论 (Gate Verdict) 与 fix-loop
 
 `FACT` 门禁阶段（test/review/wrapup，`GATE_DEFAULTS`；节点/全局 stage-policy
@@ -205,6 +207,61 @@ Evidence:
 - `docs/lessons/lessons-learned.md` §101
 
 ---
+
+### 1.5 StateStore 命名空间与 JSON 投影
+
+`FACT` CLI 的隐式 tasks/workflows 投影跟随选定 SQLite 实例父目录；只有显式环境、模块或函数参数路径覆盖此目标。默认 workflow.json 保留配置读取职责，不作为显式数据库选址覆盖。steering 的隐式 tasks/steering 投影、SQLite 默认全量导出和 opt-in JSON 迁移同样跟随实例父目录。
+
+`FACT` opt-in迁移对缺失配套文件仍传所选路径；不得将缺失转换成None，否则底层迁移将其解释为宿主默认输入。存在性由迁移reader判断；显式源路径仍有效。
+
+`GUARD` 测试只设置临时 HERDR_STATE_DB 时不能读入或覆盖宿主默认JSON；显式目标路径仍按既有契约生效。本地修复不自动修复已经损坏的生产投影，也不改变SQLite权威来源。
+
+Evidence:
+- `bin/herdr-task:TASKS_FILE, WORKFLOWS_FILE, _get_store, save_tasks`
+- `herdr/steering.py:get_tasks_file, get_steering_file, save_steering_data`
+- `herdr/state_store.py:resolve_tasks_projection_file, _maybe_auto_migrate, export_all_json`
+- `tests/test_state_projection_namespace.py`
+- `docs/lessons/lessons-learned.md` §91复发补证
+
+
+### 1.6 评估脚本步骤隔离
+
+`FACT` `init_loop`生成的test/lint/repro命令分别在子shell执行，完整stdout/stderr重定向到对应日志。cd/export/exit仅影响该步骤，外层读取真实退出码后继续其它检查。步骤命令内容保留。
+
+`FACT` 单次执行还要求外层runner成功、每个所需步骤唯一且有效的回执及本轮可读日志。程序生成的GOAL复现配置决定必需步骤；旧repro契约已移除时不复用旧日志。整体执行失败否决收敛并写原子EVAL_DONE与求助单；绿色测试数和有效lint基线语义保留。
+
+`FACT` eval/init/基线写入在工位评估命名空间复用既有内核文件锁，竞争者busy退出75，不改持有者产物；持有者异常或进程退出后锁释放。日志新鲜性检查在所有权内执行。评分仍不是业务验收报告；runner与lint基线采集复用`run_evaluation_command`，在新session启动，超时/中断/异常/正常返回清理本次进程组后释放锁；TERM有限等待，必要时KILL。基线采集持锁覆盖命令和写入，超时不写基线，作用域内主线程SIGTERM可清理并恢复原handler。不可捕获SIGKILL及主动脱离session的子进程不在本地保证内。
+
+`FACT` 原生CLI与Task自动初始化启用init_loop(capture_baseline=True)，同一锁覆盖初始化、旧baseline失效、受管采集和发布。默认standalone init不执行命令，仍清除旧契约债务；缺基线保守按0。CLI超时失败，Task继续保留既有best-effort告警/启动契约。missing-linter、历史receipt故障顺序与自由文本配置另卡，不以这一修复声明已全部关闭。
+
+`FACT` 初始化先发布旧回执history并校验同hash内容，再失效current，最后换输入；history故障/中断保留旧契约及current，重试不丢原始字节。当前重置失败/新GOAL失败不允许旧成功被解释为新契约证据；相关测试`tests/test_loop_history_publication.py`。
+
+`FACT` Supervisor的现代工位摘要状态/count统一来自单份EVAL_DONE，遗留BLOCKER仅当前exhausted时可报告存在；坏/薄/不可读receipt unknown不回退显示文件，只有absent receipt保留legacy兼容（非跨文件原子性）。共享reader服务extract和summary，各一次原子读取。验证`tests/test_loop_current_summary.py`。
+
+`FACT` 测试隔离默认禁Observer模型，单例不继承host Jev凭据；假key cleanup必须精确restore absence/value，确定性gateway明示零transport。本机provider失败测试明确opt-in，生产配置不变。入口`tests/test_model_test_environment_isolation.py`。
+
+`FACT` 测试日志进入parser前复用终端ANSI清洗，仅内存解析视图规范化，磁盘日志原字节保留；绿色标记的FAIL/✕名称不等于失败，真实失败/非零exit门禁不变。验证`tests/test_evaluator_ansi_test_output.py`。
+
+`FACT` repro requirement来自GOAL末尾program typed标记，不扫描自由goal/DoD/command literal；旧格式仅唯一完整单行配置兼容，歧义goal_configuration_invalid需re-init。真实repro receipt/fresh log仍独立要求完整性。入口`tests/test_goal_repro_configuration.py`。
+
+`FACT` 静态检查reserved退出124/126/127、负值及128以上不能被baseline抵扣，采集拒绝发布，评分与收敛独立否决旧污染baseline；工具实际exit1/2的历史欠账差值契约保留。验证入口`tests/test_lint_execution_failure_gate.py`。
+
+`FACT` 自动npm默认测试命令为`CI=1 npm test`，避免继承Agent TTY时进入Vitest watch；显式任务命令完整保留。Java子任务测试范围仍须明确契约，不能从根package.json推断。
+
+Evidence:
+- `herdr/evaluator.py:init_loop`
+- `tests/test_evaluator_step_isolation.py`
+- `docs/lessons/lessons-learned.md` §110、§111
+- `bin/herdr-loop:run_evaluation, _exit_receipts, _fresh_step_log`
+- `herdr/evaluator.py:calculate_metrics, is_converged, generate_blocker_report`
+- `tests/test_evaluator_runner_contract.py`
+- `tests/test_evaluator_process_isolation.py`
+- `tests/test_evaluator_process_cleanup.py`
+- `tests/test_task_loop_noninteractive.py`
+- `herdr/evaluator.py:run_evaluation_command, capture_lint_baseline`
+- `tests/test_task_baseline_process_cleanup.py`
+- `tests/test_loop_init_baseline_atomicity.py`
+
 
 ## 2. CoW (Copy-on-Write) 沙盒隔离机制
 
@@ -410,3 +467,24 @@ Evidence:
 - `services/herdr-controller.py#handle_workflow_continuation`
 - `herdr/projection.py#detect_workflow_stalls`
 - `tests/test_workflow_continuation.py`
+
+`FACT` 重新init在替换输入前原子失效当前EVAL_DONE，旧快照内容寻址归档history，仅本轮完成快照可被读为评估证据。证据ID含快照SHA，相同字节重启稳定；重置后的同计数不混用旧身份。升级可能重新观察一次旧快照，SHA不替代Task/run归属。证据：`tests/test_loop_reset_evidence_identity.py`（C31，本地验证，未部署）。
+
+`FACT` 显式完整candidate SHA匹配本地--onto分支时，launch可接受未发布候选，并将同pin传给Worker；Worker在独立Clone检出前后重新核对。无pin续接仍要求origin，符号/缩写pin与移动分支拒绝，所有权/后续交付门禁保留。证据：`tests/test_pinned_local_onto.py`（C12，最终2682 passed/145 subtests，本地验证，未部署）。
+
+`FACT` blocked/inner_loop_exhausted队列逐轮验证workflow/run及status_history转换episode、当前cause；恢复再阻塞不得消费旧事件，同episode metadata更新不失效，旧queue清理不得解除新episode去重。legacy无history保守版本绑定；本地C21b，未部署。
+
+`FACT` Controller零差预检允许最新冻结full SHA与全批spec pin/onto、native onto commit完全一致的候选；无冻、缩写、旧pin、混批缺onto身份仍拒绝。差异计数不替代候选身份；未知Git保留既有策略，TaskCLI/Worker复验保持，C13本地未部署。
+
+`FACT` 永久soft能力拒绝是steer队列blocked，不是Task业务blocked；原文与last_delivery_error保留，自动soft扫描跳过，暂时no-pane/inject失败仍pending。CLI/Console/Sentinel明确反馈失败。内部按ID显式urgent与公开新urgent不是同一入口，未验证真实投递；C02本地未部署。
+
+
+### 2026-10-01：原生 index 锁等待（C35a，本地未部署）
+
+Task commit对actual native index路径的稳定外来锁冲突给HERDR_COMMIT_RESULT wait/git_index_lock及75；所有index写入均核对命令前后身份，hook/filter stderr不等于锁证明。Controller只同Task专属标记写60秒等待，不增普通失败预算；typed owner基于Run和持久状态转换，metadata不另起失败周期。EpisodeStore文件锁CAS保留并发新记录；未知/门禁与legacy升级不自动解除。未操作真实T8锁、没有真实集成，不能据此标工作流完成。
+
+
+C13b：已交付依赖省略任务分支onto时，test/review仍须带有可证明的候选pin。在delivery尚未产生时，只有当前workflow最新冻结SHA与source HEAD严格相同可传该pin；仍由TaskCLI和Worker复验，不把冻结当成业务delivery。
+
+
+C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后完整全量2871 passed、154 subtests passed、2 skipped（隔离HOME无LaunchAgent），0 failed，454.85s。两项本机只读plist检查另行2 passed（0.07s）。compileall、三入口CLI AST、diff-check通过；独立最终只读复审组合阻断闭合，未自行重跑全量。真实Agent/Worker启动、业务E2E及开放卡未因此验收。

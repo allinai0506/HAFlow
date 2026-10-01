@@ -8,16 +8,121 @@ Implements the 5-element paradigm (Goal, Metrics, Data, Markdown files, Cron):
 - Generates structured Markdown reports (METRICS.md, EVALUATION.md, STATE.md)
 """
 
+import hashlib
 import json
 import os
 import re
+import signal
+import subprocess
+import threading
 import time
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from herdr.git_coordination import GitOperationLock
+from herdr.projection import strip_ansi_codes
+
 LOOP_DIR_NAME = ".herdr-loop"
 BASELINE_LINT_FILENAME = "BASELINE_LINT.json"
+
+
+class EvaluationBusyError(RuntimeError):
+    """Another process owns this loop's mutable evaluation artifacts."""
+
+
+@contextmanager
+def evaluation_lock(loop_dir: Path):
+    # Reuse the existing kernel file-lock implementation, in a loop-local
+    # namespace independent of repository Git operations and production state.
+    loop_dir = Path(loop_dir)
+    operation = GitOperationLock(loop_dir, lock_root=loop_dir / ".locks")
+    if not operation.try_acquire():
+        raise EvaluationBusyError(f"Evaluation namespace already active: {loop_dir}")
+    try:
+        yield
+    finally:
+        operation.release()
+
+
+@contextmanager
+def _owned_evaluation_signals():
+    # Baseline capture runs in herdr-task as well as herdr-loop; scope the
+    # catchable termination handler to this owned command, not the whole CLI.
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    previous = signal.getsignal(signal.SIGTERM)
+
+    def terminate(signum, _frame):
+        raise SystemExit(128 + signum)
+
+    signal.signal(signal.SIGTERM, terminate)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
+def _signal_owned_group(process, signum):
+    # start_new_session below makes this PID the owned process-group identity.
+    # Never signal the caller's group or discover unrelated processes by name.
+    try:
+        os.killpg(process.pid, signum)
+    except ProcessLookupError:
+        pass
+    except PermissionError:
+        # Some hosts report EPERM for a group that has just disappeared.
+        # Ignore only a verified empty/zombie-only group, never live denial.
+        listing = subprocess.run(
+            ["ps", "-axo", "pgid=,stat="], capture_output=True, text=True,
+            timeout=1, check=True,
+        )
+        members = [row.split()[1] for row in listing.stdout.splitlines()
+                   if len(row.split()) == 2 and row.split()[0] == str(process.pid)]
+        if any(not state.startswith("Z") for state in members):
+            raise
+
+
+def _stop_owned_runner(process):
+    _signal_owned_group(process, signal.SIGTERM)
+    try:
+        return process.communicate(timeout=1)
+    except subprocess.TimeoutExpired:
+        _signal_owned_group(process, signal.SIGKILL)
+        return process.communicate(timeout=1)
+    finally:
+        # Children may redirect their pipes and survive their already-reaped
+        # parent. Terminate any remaining members before releasing ownership.
+        _signal_owned_group(process, signal.SIGKILL)
+
+
+def run_evaluation_command(command: List[str], cwd: Path, timeout: float) -> Tuple[int, str, str]:
+    """Run one owned command; return exit/stdout/stderr after group cleanup.
+
+    Timeout returns 124 and observed output. Catchable termination unwinds.
+    The caller owns the artifact lock; this helper does not publish artifacts.
+    """
+    with _owned_evaluation_signals():
+        process = subprocess.Popen(
+            command, cwd=str(cwd), text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
+        )
+        cleaned = False
+        try:
+            try:
+                stdout, stderr = process.communicate(timeout=timeout)
+                return process.returncode, stdout, stderr
+            except subprocess.TimeoutExpired:
+                stdout, stderr = _stop_owned_runner(process)
+                cleaned = True
+                return 124, stdout, stderr
+        finally:
+            # Also covers normal shell return with background children and Python
+            # exceptions/interrupts. Cleanup stays inside the evaluation lock.
+            if not cleaned:
+                _stop_owned_runner(process)
 
 
 def effective_defects(current: int, baseline: int) -> int:
@@ -37,6 +142,29 @@ def effective_defects(current: int, baseline: int) -> int:
 
 
 def write_baseline_lint(loop_dir: Path, lint_errors: int, type_errors: int = 0) -> Path:
+    with evaluation_lock(loop_dir):
+        return _write_baseline_lint_unlocked(loop_dir, lint_errors, type_errors)
+
+
+def capture_lint_baseline(loop_dir: Path, command: str, cwd: Path) -> Path:
+    """Own pre-edit lint execution and baseline publication as one lifecycle."""
+    with evaluation_lock(loop_dir):
+        return _capture_lint_baseline_unlocked(loop_dir, command, cwd)
+
+
+def _capture_lint_baseline_unlocked(loop_dir: Path, command: str, cwd: Path) -> Path:
+    exit_code, stdout, stderr = run_evaluation_command(
+        ["/bin/sh", "-c", command], cwd, timeout=120,
+    )
+    if exit_code == 124:
+        raise TimeoutError("Lint baseline capture timed out after 120 seconds")
+    if static_check_execution_failed(exit_code):
+        raise RuntimeError(f"Lint baseline command failed to execute: exit {exit_code}")
+    lint_errors = parse_lint_output(stdout + stderr, exit_code)
+    return _write_baseline_lint_unlocked(loop_dir, lint_errors, 0)
+
+
+def _write_baseline_lint_unlocked(loop_dir: Path, lint_errors: int, type_errors: int = 0) -> Path:
     """Persist pre-edit lint baseline once at loop init (best-effort)."""
     loop_dir = Path(loop_dir)
     loop_dir.mkdir(parents=True, exist_ok=True)
@@ -75,7 +203,63 @@ def get_loop_dir(base_dir: Path) -> Path:
     return Path(base_dir) / LOOP_DIR_NAME
 
 
+def read_repro_requirement(goal_contract: str) -> bool:
+    """Read typed producer metadata, or an unambiguous legacy config section.
+
+    Free goal/acceptance text is never configuration. New producer metadata
+    is appended last, after every raw command literal, so body examples cannot
+    override it. Ambiguous old multiline display contracts require re-init.
+    """
+    prefix = "<!-- HERDR_REPRO_REQUIRED: "
+    lines = goal_contract.rstrip().splitlines()
+    last = lines[-1] if lines else ""
+    if last.startswith(prefix):
+        if last == prefix + "true -->":
+            return True
+        if last == prefix + "false -->":
+            return False
+        raise ValueError("Invalid typed repro requirement")
+    sections = goal_contract.split("\n## 评估指令配置\n")
+    if len(sections) != 2:
+        raise ValueError("Missing or ambiguous legacy configuration section")
+    configuration = sections[1]
+    fields = {}
+    for line in configuration.splitlines():
+        if not line.strip():
+            continue
+        match = re.fullmatch(r"- \*\*(测试命令|代码质量|靶向复现用例)\*\*: `(.*)`", line)
+        if match is None or match.group(1) in fields:
+            raise ValueError("Ambiguous legacy configuration section")
+        fields[match.group(1)] = match.group(2)
+    if not {"测试命令", "代码质量"}.issubset(fields):
+        raise ValueError("Incomplete legacy configuration section")
+    return "靶向复现用例" in fields
+
+
 def init_loop(
+    target_dir: Path,
+    goal: str,
+    acceptance: str = "",
+    test_cmd: str = "",
+    lint_cmd: str = "",
+    max_iterations: int = 5,
+    repro_cmd: str = "",
+    capture_baseline: bool = False,
+) -> Path:
+    """Own contract replacement and optional baseline capture as one lifecycle."""
+    with evaluation_lock(get_loop_dir(target_dir)):
+        loop_dir = _init_loop_unlocked(
+            target_dir=target_dir, goal=goal, acceptance=acceptance,
+            test_cmd=test_cmd, lint_cmd=lint_cmd, max_iterations=max_iterations,
+            repro_cmd=repro_cmd,
+        )
+        command = (lint_cmd or "").strip()
+        if capture_baseline and command and command != "true":
+            _capture_lint_baseline_unlocked(loop_dir, command, Path(target_dir))
+        return loop_dir
+
+
+def _init_loop_unlocked(
     target_dir: Path,
     goal: str,
     acceptance: str = "",
@@ -87,6 +271,39 @@ def init_loop(
     """Initialize .herdr-loop directory structure and contracts."""
     loop_dir = get_loop_dir(target_dir)
     loop_dir.mkdir(parents=True, exist_ok=True)
+
+    # EVAL_DONE is the reader's single authoritative execution snapshot.
+    # Archive the old receipt before invalidating it. If publication fails,
+    # the unchanged old contract keeps its recoverable current receipt. Once
+    # archived, invalidate before replacing inputs so failed new initialization
+    # cannot expose old success as evidence for the new contract.
+    snapshot_path = loop_dir / "EVAL_DONE.json"
+    previous_snapshot = snapshot_path.read_bytes() if snapshot_path.exists() else None
+    if previous_snapshot is not None:
+        # Historical receipt, never consulted as the current execution view.
+        history = loop_dir / "history"
+        history.mkdir(exist_ok=True)
+        receipt_sha = hashlib.sha256(previous_snapshot).hexdigest()
+        receipt = history / f"EVAL_DONE-{receipt_sha}.json"
+        if not receipt.exists():
+            receipt_tmp = receipt.with_suffix(f".json.tmp.{os.getpid()}")
+            receipt_tmp.write_bytes(previous_snapshot)
+            receipt_tmp.replace(receipt)
+        elif receipt.read_bytes() != previous_snapshot:
+            raise RuntimeError("Conflicting historical evaluation receipt")
+
+    reset_path = snapshot_path.with_suffix(f".json.tmp.{os.getpid()}")
+    reset_path.write_text(json.dumps({
+        "iteration": 0, "completed_at": None, "status": "initialized",
+        "converged": False, "max_iterations": max_iterations,
+        "total_tests": 0, "passed_tests": 0, "failing_tests": [],
+        "composite_score": 0.0,
+    }), encoding="utf-8")
+    reset_path.replace(snapshot_path)
+
+    # Debt belongs to the previous contract until a new capture succeeds.
+    # An absent baseline has the existing conservative zero-debt semantics.
+    (loop_dir / BASELINE_LINT_FILENAME).unlink(missing_ok=True)
 
     # 1. Write GOAL.md
     goal_md = loop_dir / "GOAL.md"
@@ -107,6 +324,7 @@ def init_loop(
 """
     if repro_cmd:
         goal_content += f"- **靶向复现用例**: `{repro_cmd}`\n"
+    goal_content += f"<!-- HERDR_REPRO_REQUIRED: {str(bool(repro_cmd)).lower()} -->\n"
     goal_md.write_text(goal_content, encoding="utf-8")
 
     # 2. Write EVALUATOR.sh
@@ -114,7 +332,9 @@ def init_loop(
     if repro_cmd:
         repro_block = f"""
 echo "=== [3/3] RUNNING REPRO CASE ==="
-{repro_cmd} > "$LOG_DIR/repro.log" 2>&1
+(
+{repro_cmd}
+) > "$LOG_DIR/repro.log" 2>&1
 REPRO_EXIT=$?
 echo "REPRO_EXIT=$REPRO_EXIT"
 """
@@ -133,12 +353,16 @@ LOG_DIR="$ROOT_DIR/{LOOP_DIR_NAME}/logs"
 mkdir -p "$LOG_DIR"
 
 echo "=== [1/3] RUNNING TESTS ==="
-{test_cmd or 'pytest'} > "$LOG_DIR/test.log" 2>&1
+(
+{test_cmd or 'pytest'}
+) > "$LOG_DIR/test.log" 2>&1
 TEST_EXIT=$?
 echo "TEST_EXIT=$TEST_EXIT"
 
 echo "=== [2/3] RUNNING LINT / QUALITY ==="
-{lint_cmd or 'true'} > "$LOG_DIR/lint.log" 2>&1
+(
+{lint_cmd or 'true'}
+) > "$LOG_DIR/lint.log" 2>&1
 LINT_EXIT=$?
 echo "LINT_EXIT=$LINT_EXIT"
 {repro_block}
@@ -255,6 +479,8 @@ def parse_test_output(output: str, exit_code: int) -> Tuple[int, int, List[str]]
     Supports pytest, vitest, jest, and generic test runners.
     Returns: (passed_count, total_count, failing_tests_list)
     """
+    # Normalize only the parser view; the runner keeps original log bytes.
+    output = strip_ansi_codes(output)
     failing: List[str] = []
     
     # 1. Check Pytest format: "1 failed, 4 passed in 0.15s" (with or without =)
@@ -351,6 +577,16 @@ def parse_test_output(output: str, exit_code: int) -> Tuple[int, int, List[str]]
         return 0, 1, [err_msg]
 
 
+def static_check_execution_failed(exit_code: int) -> bool:
+    """Reserved timeout/shell/signal exits are not static-analysis debt.
+
+    Ordinary tool defect exits (including TypeScript's 2) retain the existing
+    baseline contract. The shell reserves 126/127 for execution failures and
+    reports signal termination as 128+signal; the owned runner uses 124 timeout.
+    """
+    return exit_code < 0 or exit_code in (124, 126, 127) or exit_code >= 128
+
+
 def parse_lint_output(output: str, exit_code: int) -> int:
     """Parse linter / typecheck error count from output."""
     if exit_code == 0:
@@ -390,6 +626,8 @@ def calculate_metrics(
     allowed_patterns: Optional[List[str]] = None,
     baseline_lint_errors: int = 0,
     baseline_type_errors: int = 0,
+    evaluation_exit_code: int = 0,
+    evaluation_errors: Optional[List[str]] = None,
 ) -> MetricVector:
     """Compute the 5-dimensional metric vector from execution outputs."""
     passed, total, failing = parse_test_output(test_output, test_exit_code)
@@ -447,10 +685,13 @@ def calculate_metrics(
         weights["repro"] * repro_val
     )
     
+    static_execution_failed = (static_check_execution_failed(lint_exit_code) or
+                               static_check_execution_failed(type_exit_code))
+
     # Absolute zero-defect rule: cannot score 100.0 if any NEW failures exist.
     # Pre-existing baseline debt is transparent in lint_errors/type_errors
     # but does not cap the score; only the delta gates.
-    if (failing or new_lint > 0 or new_type > 0 or (has_repro and repro_val < 100.0) or out_of_bounds) and composite >= 100.0:
+    if (static_execution_failed or evaluation_exit_code != 0 or evaluation_errors or test_exit_code != 0 or failing or new_lint > 0 or new_type > 0 or (has_repro and repro_val < 100.0) or out_of_bounds) and composite >= 100.0:
         composite = 95.0
 
     return MetricVector(
@@ -472,6 +713,8 @@ def calculate_metrics(
         details={
             "out_of_bounds_files": out_of_bounds,
             "test_exit_code": test_exit_code,
+            "evaluation_exit_code": evaluation_exit_code,
+            "evaluation_errors": list(evaluation_errors or []),
             "lint_exit_code": lint_exit_code,
             "type_exit_code": type_exit_code,
             "repro_exit_code": repro_exit_code,
@@ -485,6 +728,13 @@ def calculate_metrics(
 
 def is_converged(metrics: MetricVector) -> bool:
     """True if metrics satisfy complete convergence (DoD fulfilled, 0 NEW defects)."""
+    if metrics.details.get("evaluation_exit_code", 0) != 0 or metrics.details.get("evaluation_errors"):
+        return False
+    if any(static_check_execution_failed(metrics.details.get(key, 0))
+           for key in ("lint_exit_code", "type_exit_code")):
+        return False
+    if metrics.details.get("test_exit_code", 0) != 0:
+        return False
     if metrics.composite_score < 99.9:
         return False
     if metrics.failing_tests:
@@ -532,6 +782,17 @@ def render_metrics_markdown(metrics: MetricVector, iteration: int, max_iteration
 
 *更新时间: {time.strftime('%Y-%m-%d %H:%M:%S')}*
 """.strip()
+
+
+def _execution_failure_block(metrics: MetricVector) -> str:
+    errors = list(metrics.details.get("evaluation_errors") or [])
+    exit_code = metrics.details.get("evaluation_exit_code", 0)
+    exit_error = f"evaluator_exit:{exit_code}"
+    if exit_code != 0 and exit_error not in errors:
+        errors.append(exit_error)
+    if not errors:
+        return ""
+    return "\n### 评估执行证据未满足\n" + "\n".join(f"- `{error}`" for error in errors) + "\n"
 
 
 def render_evaluation_markdown(
@@ -587,7 +848,7 @@ def render_evaluation_markdown(
 > **剩余循环轮次**: {max_iterations - iteration}
 
 ## 待修复阻断项 (Blockers)
-
+{_execution_failure_block(metrics)}
 ### 1. 失败测试清单
 {failing_list}
 {repro_block}
@@ -640,7 +901,7 @@ def generate_blocker_report(loop_dir: Path, metrics: MetricVector, iteration: in
 > **综合得分**: `{metrics.composite_score} / 100.0`
 
 ## 当前阻断项
-
+{_execution_failure_block(metrics)}
 ### 失败测试
 {failing_list}
 

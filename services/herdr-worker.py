@@ -18,9 +18,9 @@ if str(HERDR_ROOT) not in sys.path:
     sys.path.insert(0, str(HERDR_ROOT))
 
 try:
-    from herdr.git_coordination import ensure_branch_available
+    from herdr.git_coordination import ensure_branch_available, pinned_local_onto_matches
 except ImportError:
-    from herdr_git_coordination import ensure_branch_available
+    from herdr_git_coordination import ensure_branch_available, pinned_local_onto_matches
 
 
 CLONE_ROOT = Path(
@@ -259,13 +259,26 @@ def create_task_branch(clone, task_id, agent, task_type, base_branch):
     return branch
 
 
-def checkout_onto_branch(clone, onto_branch):
+def checkout_onto_branch(clone, onto_branch, *, candidate_sha=None):
     """检出既有分支(fix-loop 续接:commit 直落开放中的 PR 分支)。
 
-    基线指纹在调用方紧随其后执行,因此本函数必须完成 origin 同步,
-    保证 PR 分支的既有提交不属于本任务基线。
+    基线指纹在调用方紧随其后执行。普通续接完成 origin 同步；显式完整
+    candidate SHA 则核对独立本地分支，保证既有提交不属于本任务变更。
     """
     ensure_branch_available(onto_branch, _registered_tasks())
+
+    if pinned_local_onto_matches(clone, onto_branch, candidate_sha):
+        sanitize_clone_sandbox(clone)
+        result = subprocess.run(
+            ["git", "-C", str(clone), "switch", onto_branch],
+            text=True, capture_output=True,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip() or result.stdout.strip())
+        # Recheck after checkout; never advertise a moved branch as pinned.
+        if not pinned_local_onto_matches(clone, onto_branch, candidate_sha):
+            raise RuntimeError("Local candidate branch disappeared during checkout")
+        return onto_branch
 
     fetch = subprocess.run(
         [
@@ -826,6 +839,9 @@ def main():
         help="Checkout this existing branch instead of creating a task branch."
     )
 
+    parser.add_argument("--candidate-sha", default=None,
+                        help="Exact candidate pin for an unpublished local --onto branch.")
+
     args = parser.parse_args()
 
     context_bindings = {}
@@ -866,7 +882,7 @@ def main():
             if args.onto:
                 # 必须先于 build_baseline_fingerprint:
                 # PR 分支的既有提交不能被记入本任务的基线变更。
-                branch = checkout_onto_branch(clone, args.onto)
+                branch = checkout_onto_branch(clone, args.onto, candidate_sha=args.candidate_sha)
             else:
                 branch = create_task_branch(
                     clone,

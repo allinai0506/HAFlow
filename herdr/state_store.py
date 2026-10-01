@@ -624,17 +624,19 @@ class SQLiteStateStore(StateStore):
             wfs = self.list_workflows()
             tasks = self.list_tasks()
             if not wfs and not tasks:
-                wf_path = Path(os.environ.get("WORKFLOWS_FILE") or (state_db.CONTROLLER_DIR / "workflows.json"))
-                tasks_path = Path(os.environ.get("TASKS_FILE") or (state_db.CONTROLLER_DIR / "tasks.json"))
-                st_path = Path(os.environ.get("STEERING_FILE") or (state_db.CONTROLLER_DIR / "steering.json"))
-                cp_path = Path(os.environ.get("CHECKPOINTS_DIR") or (state_db.CONTROLLER_DIR / "checkpoints"))
+                wf_path = Path(os.environ.get("WORKFLOWS_FILE") or (self.db_path.parent / "workflows.json"))
+                tasks_path = Path(os.environ.get("TASKS_FILE") or (self.db_path.parent / "tasks.json"))
+                st_path = Path(os.environ.get("STEERING_FILE") or (self.db_path.parent / "steering.json"))
+                cp_path = Path(os.environ.get("CHECKPOINTS_DIR") or (self.db_path.parent / "checkpoints"))
 
                 if wf_path.exists() or tasks_path.exists() or st_path.exists():
+                    # A missing selected file is still a selected input.
+                    # None would ask the migration reader for host defaults.
                     self.import_from_json(
-                        workflows_file=wf_path if wf_path.exists() else None,
-                        tasks_file=tasks_path if tasks_path.exists() else None,
-                        steering_file=st_path if st_path.exists() else None,
-                        checkpoints_dir=cp_path if cp_path.exists() else None,
+                        workflows_file=wf_path,
+                        tasks_file=tasks_path,
+                        steering_file=st_path,
+                        checkpoints_dir=cp_path,
                     )
         except Exception:
             pass
@@ -1155,7 +1157,7 @@ class SQLiteStateStore(StateStore):
         return {"steering_queues": queues, "history": history}
 
     def export_all_json(self, target_dir: Optional[Path] = None) -> Dict[str, Any]:
-        out_dir = Path(target_dir) if target_dir else state_db.CONTROLLER_DIR
+        out_dir = Path(target_dir) if target_dir else self.db_path.parent
         out_dir.mkdir(parents=True, exist_ok=True)
 
         wf_path = out_dir / "workflows.json"

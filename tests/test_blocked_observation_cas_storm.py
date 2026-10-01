@@ -195,6 +195,21 @@ class ControllerBlockedObservationTests(unittest.TestCase):
             enqueue.assert_not_called()
         self.assertEqual(store.recorded, [], "a stale sample must not touch the ledger")
 
+    def test_same_stale_sample_logs_once_until_sample_changes(self):
+        task = self._task(version=5)
+        store = _FakeStore({"impl-t6-mock-retire": {
+            "observed_version": 3, "observed_status": "working",
+        }})
+        with patch("builtins.print") as output:
+            for _ in range(50):
+                self._sweep(task, store, {"accepted": False})
+            self.assertEqual(output.call_count, 1)
+            store.samples[task["task_id"]]["observed_version"] = 4
+            for _ in range(50):
+                self._sweep(task, store, {"accepted": False})
+            self.assertEqual(output.call_count, 2)
+        self.assertEqual(store.recorded, [])
+
     def test_fresh_sample_transitions_to_blocked(self):
         task = self._task(version=5)
         store = _FakeStore({"impl-t6-mock-retire": {

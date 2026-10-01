@@ -2358,6 +2358,7 @@ class TestJsonStdoutPurity:
             "HERDR_OBSERVER_ENABLED": "1",
             "HERDR_OBSERVER_LIVE_PROBE": "0",
             "HERDR_OBSERVER_PROVIDER": "jev",
+            "HERDR_OBSERVER_JEV_ENABLED": "1",  # explicit controlled loopback failure
             "HERDR_OBSERVER_JEV_BASE_URL": "http://127.0.0.1:1",
             "HERDR_OBSERVER_JEV_TIMEOUT": "1",
             "JEV_API_KEY": "sk-fake-test-key",
@@ -2739,6 +2740,14 @@ class TestDoneGatewayTerminalCheckpoint:
         monkeypatch.setenv("HERDR_OBSERVER_ENABLED", "1")
         monkeypatch.setenv("HERDR_OBSERVER_LIVE_PROBE", "0")
         monkeypatch.setenv("HERDR_OBSERVER_CONFIG", str(tmp_path / "absent.json"))
+        # This verifies deterministic observation, never a real model transport.
+        monkeypatch.setenv("HERDR_OBSERVER_JEV_ENABLED", "0")
+        from herdr.decision.providers import jev
+        transport_calls = []
+        def forbidden_transport(*args, **kwargs):
+            transport_calls.append(True)
+            raise AssertionError("deterministic gateway test attempted model transport")
+        monkeypatch.setattr(jev, "_http_post_json", forbidden_transport)
         observer_harness_module.reset_process_state()
         try:
             store = SQLiteStateStore(tmp_path / "state.db")
@@ -2762,6 +2771,7 @@ class TestDoneGatewayTerminalCheckpoint:
 
             assert controller.emit_done_if_allowed(task) is True
             observer_harness_module._default_scheduler().drain(timeout=10)
+            assert transport_calls == [], "deterministic gateway must never invoke model transport"
 
             rows = list_trajectory_findings("run-gateway", db_path=store.db_path)
             assert [row["finding_type"] for row in rows] == ["verification_failure"]

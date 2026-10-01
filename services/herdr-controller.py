@@ -2,6 +2,7 @@
 
 import json
 import hashlib
+import re
 import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -267,7 +268,7 @@ def _notify_blocked_human_upgrade(task, episode_id, active_seconds):
             f"(episode {episode_id}); the one automatic re-push budget is "
             "exhausted.\n"
             "Human confirmation required; no destructive command was run.\n"
-            f"  herdr-task set {task_id} rework  # after human guidance\n"
+            f"  herdr-task set {task_id} working  # after human guidance\n"
             f"  herdr-task supersede {task_id} --reason ...  # discard branch commits\n"
             f"  herdr-task close-workflow {workflow_id} --force  # direct force close"
         )
@@ -2887,7 +2888,7 @@ def process_blocked_observations():
             authoritative_version=_task_version(task),
         ):
             task_id = task["task_id"]
-            if _blocked_observation_stale.pop(task_id, None) != expected_version:
+            if _blocked_observation_stale.get(task_id) != expected_version:
                 _blocked_observation_stale[task_id] = expected_version
                 print(
                     f"[BLOCKED OBSERVATION STALE] "
@@ -3232,10 +3233,11 @@ DIRECT_DISPATCH_LAUNCH_TIMEOUT = 300
 SUPERVISOR_VERIFY_DISPATCH_TIMEOUT = 120
 
 
-def _dispatch_candidate_ready(project_root, base_branch, specs):
+def _dispatch_candidate_ready(project_root, base_branch, specs, workflow_id=None):
     """候选非空预检:onto 分支相对基线无提交时拒绝派发(转总指挥)。
 
-    r6 曾直派测试 main 空候选并恒 blocked，白烧内环。未知情况
+    r6 曾直派测试 main 空候选并恒 blocked，白烧内环。已冻结完整SHA
+    同时匹配spec pin与实际onto时，等于基线不代表空候选。未知情况
     （缺 refs、git 失败）一律 fail-open 照常派发。
     """
     ontos = sorted(
@@ -3267,6 +3269,28 @@ def _dispatch_candidate_ready(project_root, base_branch, specs):
         if is_empty:
             empty += 1
     if checked and empty == checked:
+        frozen = _scheduler_current_frozen_candidate_sha(workflow_id) if workflow_id else ""
+        if re.fullmatch(r"[0-9a-f]{40}", frozen) and all(
+            spec.get("onto_branch") and spec.get("candidate_sha") == frozen
+            for spec in specs
+        ):
+            proven = True
+            for onto in ontos:
+                try:
+                    resolved = subprocess.run(
+                        ["git", "-C", project_root, "rev-parse", "--verify",
+                         f"{onto}^{{commit}}"],
+                        text=True, capture_output=True, timeout=10,
+                    )
+                except Exception:
+                    return True  # Preserve the existing unknown-Git policy.
+                if resolved.returncode != 0:
+                    return True
+                if resolved.stdout.strip() != frozen:
+                    proven = False
+                    break
+            if proven:
+                return True
         print(
             f"[DIRECT DISPATCH CANDIDATE EMPTY] "
             f"onto={','.join(ontos)} has no commits beyond {base} "
@@ -3308,6 +3332,16 @@ def _scheduler_expected_candidate_sha(workflow_id, project_root, dep_ids, candid
         sha = str(sha or effective.get("candidate_sha") or "").strip()
         if sha:
             return sha
+    if candidate_branch is None:
+        # Delivered dependencies no longer carry an unpublished task branch.
+        # Keep the existing frozen identity only when source HEAD proves the
+        # exact same revision; CLI/Worker still enforce the resulting pin.
+        frozen = _scheduler_current_frozen_candidate_sha(workflow_id)
+        if re.fullmatch(r"[0-9a-f]{40}", frozen):
+            head = scheduler_core.resolve_candidate_sha_for_branch(project_root, "HEAD")
+            if head == frozen:
+                return frozen
+        return ""
     try:
         return scheduler_core.resolve_candidate_sha_for_branch(
             project_root, candidate_branch
@@ -4111,7 +4145,7 @@ def try_direct_stage_advance(item):
         return False
 
     if not _dispatch_candidate_ready(
-        project_root, project_ctx.get("base_branch"), specs
+        project_root, project_ctx.get("base_branch"), specs, workflow_id=workflow_id
     ):
         return False
 
@@ -5107,7 +5141,7 @@ agent_status: blocked (inner_loop_exhausted)
 ━━━━━━━━━━━━━━━━━━━━━
 
 A. 问题可解决(提供具体指导后让工位继续)：
-   ~/HAFlow/bin/herdr-task set {task_id} rework
+   ~/HAFlow/bin/herdr-task set {task_id} working
    然后用 herdr agent prompt 向工位下达具体修复指令。
 
 B. 需要换策略(放弃本轮，换 Agent 或调整范围)：
@@ -5281,28 +5315,63 @@ def blocked_event_type(task):
     blocked 卡,工位自述的 BLOCKER.md 被丢弃——这是 Phase 0 设计的
     最后一跳(2026-09-13 设计,09-18 补齐)。
     """
+    # Transition history is the current decision; metadata can survive a
+    # later generic blocker. Retain the legacy fallback when no reason exists.
+    history = (task or {}).get("status_history") or []
+    latest = history[-1] if history and isinstance(history[-1], dict) else {}
+    if latest.get("to") == "blocked" and latest.get("reason"):
+        return (
+            "inner_loop_exhausted"
+            if latest.get("reason") == "inner_loop_exhausted"
+            or latest.get("sentinel_reason") == "inner_loop_exhausted"
+            else "blocked"
+        )
     if task and task.get("sentinel_reason") == "inner_loop_exhausted":
         return "inner_loop_exhausted"
     return "blocked"
 
 
+def blocker_queue_episode(task):
+    """Identity of the persisted blocker; metadata saves are not transitions."""
+    history = task.get("status_history") or []
+    latest = history[-1] if history and isinstance(history[-1], dict) else None
+    identity = {
+        "workflow_id": task.get("workflow_id"),
+        "run_id": task.get("run_id"),
+        "history_length": len(history),
+        "transition": latest,
+    }
+    if latest is None:
+        # Legacy rows have no transition identity. Never infer continuity
+        # across a changed persisted version.
+        identity["legacy_version"] = task.get("version")
+    return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+
+
 def enqueue_coordinator_event(task, event_type):
     key = f"{task['task_id']}:{event_type}"
+    episode = (
+        blocker_queue_episode(task)
+        if event_type in {"blocked", "inner_loop_exhausted"} else None
+    )
+    queue_key = f"{key}:{episode}" if episode is not None else key
 
     with lock:
-        if key in queued_events:
+        if queue_key in queued_events:
             print(
                 f"[QUEUE DUPLICATE SKIPPED] {key}"
             )
             return
 
-        queued_events.add(key)
+        queued_events.add(queue_key)
 
     coordinator_queue.put(
         {
             "task_id": task["task_id"],
             "event_type": event_type,
-            "key": key
+            "key": key,
+            "queue_key": queue_key,
+            "blocker_episode": episode,
         }
     )
 
@@ -5660,6 +5729,17 @@ def _check_finalize_retry(task, status, now):
         _finalize_retry_exhausted_logged.discard(task_id)
         return False
     key = f"{task_id}:finalize"
+    owner_episode = blocker_queue_episode(task)
+    def expire_owned_wait(current):
+        detail = current.get("detail") or {}
+        if (current.get("reason") == "git_index_lock"
+                and isinstance(detail, dict) and detail.get("owner_episode")
+                and detail["owner_episode"] != owner_episode):
+            return {"__replace__": {}}
+        return None
+    # Only newly typed waits have a trustworthy owner. Never reset generic
+    # failures or legacy escalations; metadata-only saves retain history ID.
+    _attention_store.mutate(key, expire_owned_wait)
     # P1 recovery coherence: `herdr-task clear-escalation` (or any external
     # recovery) removes the shared attention episode from another process.
     # The in-memory exhausted latch must follow the episode: otherwise a
@@ -5693,6 +5773,7 @@ def _check_finalize_retry(task, status, now):
         return True
     if not retry:
         return False
+    wait_episode_before = attention_get(key) or {}
     try:
         outcome = finalize_completed_task(task_id)
     except (OSError, RuntimeError, ValueError, KeyError,
@@ -5706,6 +5787,32 @@ def _check_finalize_retry(task, status, now):
         _escalate_finalize(get_task(task_id) or task,
                            "finalize_subprocess_error",
                            {"error": f"{type(exc).__name__}: {exc}"[:500]})
+        return True
+    if (isinstance(outcome, dict) and outcome.get("kind") == "wait"
+            and outcome.get("reason") == "git_index_lock"
+            and outcome.get("budgeted") is False):
+        fresh = get_task(task_id)
+        if (fresh and fresh.get("status") == status
+                and fresh.get("run_id") == task.get("run_id")
+                and fresh.get("version") == task.get("version")):
+            def persist_wait(current):
+                # Cross-process CAS under the existing EpisodeStore lock:
+                # do not overwrite an episode another driver changed while
+                # the CLI or the authoritative task read was in flight.
+                if current != wait_episode_before:
+                    return None
+                episode = dict(current or {})
+                episode.update(task_id=task_id, workflow_id=fresh.get("workflow_id"),
+                               event_type="finalize", reason="git_index_lock",
+                               attempts=int(episode.get("attempts") or 0),
+                               last_attempt_at=time.time(), next_retry_at=now + 60,
+                               detail={"run_id": fresh.get("run_id"), "version": fresh.get("version"),
+                                       "owner_episode": owner_episode})
+                episode.setdefault("first_seen_at", time.time())
+                return episode
+            _attention_store.mutate(key, persist_wait)
+        # A late result must not clear or overwrite another run/transition's
+        # shared-key episode. Leave its current owner to drive recovery.
         return True
     retryable = True
     if isinstance(outcome, dict) and "retryable" in outcome:
@@ -5867,6 +5974,11 @@ def finalize_completed_task(task_id):
                     f"task={task_id} "
                     f"reason=git_busy retry later"
                 )
+                if (commit_payload.get("task_id") == task_id
+                        and commit_payload.get("result") == "wait"
+                        and commit_payload.get("reason") == "git_index_lock"):
+                    return {"retryable": True, "kind": "wait", "rc": 75,
+                            "reason": "git_index_lock", "budgeted": False}
                 return {"retryable": True, "kind": "wait", "rc": 75}
             elif result.returncode != 0:
                 print(
@@ -6800,7 +6912,7 @@ task_type:
         # attention 事件针对 interrupted/paused 等需要裁决的中间态,
         # 只要任务仍停留在待裁决状态就有效。
         expected_status = None
-    elif event_type == "blocked":
+    elif event_type in {"blocked", "inner_loop_exhausted"}:
         expected_status = "blocked"
     else:
         expected_status = "agent_done"
@@ -6852,6 +6964,17 @@ task_type:
                 )
                 break
 
+            if event_type in {"blocked", "inner_loop_exhausted"} and (
+                item.get("blocker_episode") != blocker_queue_episode(task)
+                or blocked_event_type(task) != event_type
+            ):
+                print(f"[QUEUE STALE] task={task_id} blocker episode changed")
+                # Legacy metadata updates cannot prove episode continuity.
+                # Drop old authority, but retain reachability of the current
+                # persisted blocker through the same episode-aware queue.
+                enqueue_coordinator_event(task, blocked_event_type(task))
+                break
+
             status = coordinator_status(task.get("workflow_id"))
 
             if status in ("idle", "done"):
@@ -6865,6 +6988,18 @@ task_type:
                     f"task={task_id} "
                     f"event={event_type}"
                 )
+
+                if event_type in {"blocked", "inner_loop_exhausted"}:
+                    current = get_task(task_id)
+                    if (
+                        not current or current.get("status") != "blocked"
+                        or item.get("blocker_episode") != blocker_queue_episode(current)
+                        or blocked_event_type(current) != event_type
+                    ):
+                        print(f"[QUEUE STALE] task={task_id} changed before prompt")
+                        if current and current.get("status") == "blocked":
+                            enqueue_coordinator_event(current, blocked_event_type(current))
+                        break
 
                 result = subprocess.run(
                     [
@@ -6975,7 +7110,7 @@ task_type:
 
     finally:
         with lock:
-            queued_events.discard(key)
+            queued_events.discard(item.get("queue_key", key))
 
 
 # ============================================================
@@ -8927,6 +9062,14 @@ def handle_event(task_id, agent_status):
     ):
         return
 
+    if (
+        current_status == "blocked"
+        and blocked_event_type(task) == "inner_loop_exhausted"
+        and agent_status in {"working", "idle", "done"}
+    ):
+        # Runtime liveness is not the coordinator's persisted decision.
+        return
+
     if agent_status == "working":
         if current_status in (
             "dispatched",
@@ -9063,6 +9206,15 @@ def reconcile_task_state(task_id):
         f"registry={current} "
         f"agent={runtime}"
     )
+
+    if (
+        current == "blocked"
+        and blocked_event_type(task) == "inner_loop_exhausted"
+        and runtime in {"working", "idle", "done"}
+    ):
+        # Recover the volatile arbitration queue, keeping the durable blocker.
+        enqueue_coordinator_event(task, "inner_loop_exhausted")
+        return
 
     # --------------------------------
     # Agent 当前正在运行

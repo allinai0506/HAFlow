@@ -4124,6 +4124,26 @@ TASKS_FILE=/tmp/x/tasks.json WORKFLOWS_FILE=/tmp/x/workflows.json pytest -q "${T
   只覆盖 observer，覆盖不到本条的投影回落，且**不能**靠钉 `TASKS_FILE`/`WORKFLOWS_FILE` 补，见上节实测）、
   §89（收尾节点分支 ≠ 交付物分支：收尾侧必须对"看似无关"的实盘副作用保持警惕）
 
+### 2026-09-30 复发补证：调用者默认值越过所选数据库
+
+**问题背景**：`wf-project-0929-01` 排查再次发现实盘投影仅剩测试Task，SQLite业务行仍在。当前resolver已有`store.db_path.parent`回落，但CLI把默认宿主路径作为显式参数传入，绕过resolver；steering和默认全量导出也有同类宿主默认值。
+
+**经验教训**：修复回落层不等于调用链收口。默认配置路径不能冒充显式选库或显式投影覆盖；opt-in迁移的隐式输入也须属于所选库命名空间。真正显式指定的环境/模块/调用参数路径继续有效，不替用户改写。
+
+**操作规范与防护**：`bin/herdr-task`仅保留显式投影覆盖，默认`workflow.json`仍用于配置读取；steering复用StateStore投影解析，SQLite默认导出/迁移使用该实例父目录。`tests/test_state_projection_namespace.py`用两个临时命名空间检查宿主字节不变、隔离库真实写入/回读、显式覆盖有效，以及空库不导入宿主Task。不得仅在conftest全局钉一组env掩盖产品缺陷。
+
+**验证与证据**：同一回归修前及撤销关键修复均`5 failed,2 passed`，修后`7 passed`；相邻专项`59 passed`，隔离全量`2613 passed,145 subtests passed`（355.47s）。`python3.13 -m pytest -q tests/test_state_projection_namespace.py`安全使用临时路径；证据见本轮执行计划C26与该测试。仅本地验证，未重建实盘JSON、未部署；旧章节中的313条为历史快照，不能当作当前数量。
+
+### 2026-10-01 复核补证：缺失文件不是未选择路径
+
+**问题背景**：C26复核用空selected/workflows.json触发迁移，selected缺tasks.json时，调用者传None；底层迁移回退host/tasks.json，将宿主Task导入隔离SQLite。workflows/steering同因；缺checkpoint还会读取宿主文件，即使外键拒绝落库也已越过读取边界。
+
+**经验教训**：路径解析与文件存在性属于不同决策。不存在的已选路径不能被转换成“使用默认值”；只测全套文件都存在或全部都不存在会漏掉配套输入部分缺失。
+
+**操作规范与防护**：SQLiteStateStore传递全部已解析companion路径，迁移reader自行跳过缺失文件；保留明确指定外部源的契约。TEMP四类分别检查宿主未读取、字节不变、隔离库不含宿主对象；显式迁移作正常对照。
+
+**验证与证据**：修前及撤销实现均4 failed/8 passed，修后12靶向与64相邻通过；全量2687 passed/145 subtests passed（378.99s），独立复审无此项阻断。未部署、未修实盘历史投影。证据为执行计划C26b与test_state_projection_namespace.py。
+
 ## 92. SQLite `mode=ro` 并非无副作用：WAL 缺边车时打开会实体化 `-wal`/`-shm`
 
 ### 问题背景
@@ -4936,6 +4956,10 @@ T1/T6 完成后已 committed，integrate 对 `origin/agent/gemini-init` 的 fetc
 真实 Git+SQLite `test_local_agent_anchor_integrates_without_remote_anchor` 修复前重现 remote ref 缺失；修复后 source HEAD/anchor 不变，集成 ref 同时包含基线推进和任务成果。集成专项 51 passed，实际 T1/T6 从 committed 到 integrated。
 
 
+### 第104节补充：冻结候选的本地续接必须显式绑定完整SHA（C12）
+本地冻结分支未发布到origin时，launch和Worker的--onto原先统一要求远端，候选存在仍被拒绝。新增路径仅允许显式完整候选SHA与本地ref的原生commit ID逐字一致；源预检在运行资源创建前，Worker在独立Clone检出前后重新核对。无pin仍保留远端路径，移动分支/缩写/符号revision拒绝，活跃分支所有权不绕过。真实Worker CoW回归保留源WIP并只清理隔离Clone；不push、不启动真实Agent，后续门禁不放宽。
+专项最终46 passed，撤销关键实现7 failed/2正常对照passed，恢复9靶向passed；初次fixture的clone origin误指向源而非源的远端，已用真实Worker create_clone替代并保留旧日志。首次自审发现符号revision可被解析成当前SHA，3项失败测试锁定该路径，随后改为完整原生ID比较。最终专项127 passed；全量2682 passed/145 subtests、0 failed/0 skipped（420.72s）。中间全量1 failed/2681 passed：原selective-replan夹具给所有Git返回ok，身份校验在预检拒绝，未进入其原目标Worker缺基线回收。改为真实临时Git候选与本地bare origin，保留全部拒绝/回收/不登记/审计断言；失败日志保留。此前2679通过记录不替代最终源码验收。仅自审、未部署，无真实Agent/model调用。
+
 ## 105. 绿色测试名含 FAIL 不等于失败（2026-09-30）
 
 ### 问题背景
@@ -5371,3 +5395,206 @@ for n in ('test', 'review'):
 3. **回归测试**：
    - `tests/test_workflow_graph_projection.py::test_failed_task_is_not_counted_as_active`
    - `tests/test_console_flow_workbench.py::test_node_status_human_label_completed`
+
+## 110A. 评估命令的重定向和目录隔离必须覆盖整个步骤（2026-09-30）
+
+### 问题背景
+`wf-project-0929-01` 的评估入口允许 `cd ... && ...` 等复合命令。模板直接拼接 `> log 2>&1`，只重定向最后一条简单命令；前半段输出丢在runner stdout，cd影响lint，exit可跳过后续检查。
+
+### 经验教训
+命令字符串不是单条可执行文件。步骤边界应包围整个脚本片段，捕获完整输出和真实退出码，并隔离该步骤的shell状态；不能靠解析最后一段日志弥补执行边界缺失。
+
+### 操作规范与防护
+`herdr/evaluator.py:init_loop` 为test/lint/repro分别生成子shell，再从外层记录退出码。命令内容不改写；失败步骤不会隐藏后续检查。`tests/test_evaluator_step_isolation.py`以真实Bash验证三步复合命令日志、cwd和exit边界。外层runner失败和缺回执另属C28，本项不声明解决。
+
+### 验证与关联证据
+`python3.13 -m pytest -q tests/test_evaluator_step_isolation.py`：同一断言修前及撤销修复均5 failed，修后5 passed。相邻专项53 passed/10 subtests，全量2618 passed/145 subtests（372.30s）。仅本地验证，未部署；详见本轮执行计划C06。
+
+## 111. 评估执行完整性不能由绿色测试摘要替代（2026-09-30）
+
+### 问题背景
+`wf-project-0929-01` 的exit124/绿色4015摘要先由C01修复；继续追踪完整runner→回执→日志→metrics→EVAL_DONE链，隔离矩阵又发现外层exit17、缺lint/repro、重复回执、旧日志仍可100分收敛，无效回执则抛异常。不能继续只补得分分支。
+
+### 经验教训
+实际测试计数、步骤执行结果、整体评估完成是不同事实。外层退出码被忽略，缺失质量/复现回执默认0，日志文件存在不证明属于本轮，这些机制共同允许不完整执行冒充成功。失败也必须进入求助单，否则拒绝收敛后仍无法自主仲裁。
+
+### 操作规范与防护
+`bin/herdr-loop`校验原生runner退出、每个所需步骤唯一且有效的退出回执、可读的新写日志；复现配置复用程序生成GOAL。`calculate_metrics/is_converged`同时拒绝完整性失败，保留实际已观察测试数与历史lint基线语义。程序生成错误标签进入原子EVAL_DONE和BLOCKER，错误原值不落盘；旧日志保留但不复用。单次执行完整性还需要生产者所有权：eval/init/基线写入复用既有内核文件锁，持锁覆盖读、执行和快照写入；竞争者busy退出75，不修改共享产物。异常或持有者进程退出释放锁，正常对照可再次评估。锁不等于后代进程清理，C27仍独立处理。
+
+### 验证与关联证据
+`python3.13 -m pytest -q tests/test_evaluator_runner_contract.py`：恢复旧runner及指标实现18 failed/2正常对照passed，修后20 passed；真实shell及持久快照、耗尽求助单与缓存满分否决覆盖。相邻76 passed/10 subtests；全量2638 passed/145 subtests（366.56s）。仅本地验证，未部署，历史错误成功记录未重写。相关源码`bin/herdr-loop:run_evaluation`、`herdr/evaluator.py:calculate_metrics,is_converged,generate_blocker_report`。
+
+C29追加验证：`tests/test_evaluator_process_isolation.py`使用独立进程与就绪屏障；撤销锁后3 failed/2 passed，修后5 passed，专项43 passed，全量2643 passed/145 subtests（336.77s）。真实CLI→执行→日志/基线→持久快照，竞争eval/init/baseline均不改持有者产物；异常与进程退出后的恢复通过。仅本地验证，未部署。
+
+C31追加验证：初始化在替换输入前原子失效当前EVAL_DONE；旧原始快照以SHA256归档至history/EVAL_DONE-<sha>.json，历史日志与BLOCKER保留但不作为本轮事实。证据ID绑定读取的单份快照SHA，避免重置后相同计数/iteration复用旧身份；同字节跨进程重启仍去重，未传SHA的旧API保持兼容。升级前后同一旧快照可能被重新观察一次，部署需核对既有ledger；不宣称此SHA证明Task/run归属。撤销关键实现4 failed/1正常对照passed，修后5靶向passed；专项80 passed/10 subtests，全量2673 passed/145 subtests、0 failed/0 skipped（385.00s）。失败初始化也不能留下旧绿证据。仅自审、未部署，C03c恢复epoch和C08业务交付仍未关闭。
+
+C28c补充（2026-10-01）：
+
+**问题背景**：缺linter返回127，fallback解析为1错误并写baseline；以后仍127时差值0，原子回执converged=true。执行失败被误当成历史诊断欠账。
+
+**经验教训**：baseline只能抵扣实际静态诊断；工具无法执行、超时和信号终止不能成为可抵扣债务。仅拒绝新baseline不足，旧版本已污染的baseline也必须在metrics与收敛边界独立否决。
+
+**操作规范与防护**：共享reserved退出分类124/126/127、负值与128以上；capture拒绝发布假债务，评分与is_converged独立veto。实际exit1及TypeScript exit2仍保留既有差值门禁，不把所有非零当新缺陷。Task既有best-effort告警保留，无live数据修复。
+
+**验证与关联证据**：`tests/test_lint_execution_failure_gate.py`包含lint/type失败矩阵、原生CLI缺工具/不可执行、Task告警、旧污染baseline实际持久回执、正常exit1/2。扩展旧实现19 failed/3正常对照；最终89专项/10子测试通过；全量2718 passed/145子测试，0失败/0跳过（387.92s）；仅本地验证未部署，提交结果见本轮计划C28c。任意工具自定义低位配置退出码仍需其具体契约，不用本卡宣称所有配置失败均分类。
+
+C31b补充（2026-10-01）：
+
+**问题背景**：current评估回执先替换，再mkdir/write/replace历史；任一故障后重试只能看到reset字节，原始receipt永久丢失。
+
+**经验教训**：失效旧事实前必须先建立可恢复历史；归档失败时仍未发布新契约，保留旧契约对应的current是合法旧事实，不能先把证据抹掉。
+
+**操作规范与防护**：同一内核锁内先内容寻址归档并校验已有内容，再原子reset current，最后发布新输入。历史冲突立即拒绝且current不动，重复同内容幂等。保持初始化失败不把旧绿证据用于新输入的原有门禁。不宣称文件replace提供掉电持久性。
+
+**验证与关联证据**：`tests/test_loop_history_publication.py`含实际成功/耗尽回执、mkdir/write/replace/SystemExit、native CLI文件系统障碍与重试、同SHA冲突/正常复用。旧及撤销11 failed/1正常，修后12 passed；91相邻/10子测试通过；全量2730 passed/145子测试，0失败/0跳过（360.26s）；详见计划C31b。仅local未部署，C31c历史BLOCKER过滤独立待修。
+
+C31c补充（2026-10-01）：
+
+**问题背景**：extract读取原子EVAL_DONE，但collect_execution_evidence→summarize_loop仍从STATE/METRICS和BLOCKER存在性拼装事实；重置后遗留BLOCKER、显示文件写入故障或更新交错可把旧事实送入监督器。
+
+**经验教训**：旁路摘要也必须遵守相同权威来源；不能只修主读取器或只隐藏BLOCKER标记。程序读取的一份原子receipt定义当前状态/计数，历史文件存在不等于当前阻塞。
+
+**操作规范与防护**：共享best-effort单次原子reader；modern摘要仅同份receipt，current exhausted才报告BLOCKER存在。坏/薄/过深/不可读receipt返回unknown，不回退旧显示。仅absent receipt保留legacy读取契约，明确不保证legacy跨文件原子性。保留历史BLOCKER及显示文件，不声明SHA证明run归属。
+
+**验证与关联证据**：`tests/test_loop_current_summary.py`12例：真实eval/reset/collector、中途METRICS写失败、单次read后replace交错、legacy及异常解析。旧最终10 failed/2正常，106相邻通过；全量2742 passed/145子测试，0失败/0跳过（370.78s），详见计划C31c。首次2项测试对init行为假设错误已纠正，日志保留，不当产品失败证据。
+
+C34补充（2026-10-01）：
+
+**问题背景**：全量中确定性Observer gateway测试drain10秒后finding为空，但之后数据库出现finding。前序unittest设置假key，cleanup只恢复原有变量，未删除本来absent的新key，默认启用Jev使确定性测试走外部模型路径。
+
+**经验教训**：凭据生命周期必须精确恢复absence和值；启用旁路诊断不意味着测试应启用模型。单独通过不能证明全量隔离；必须保留失败与迟到持久化证据，不延长timeout遮盖错误依赖。
+
+**操作规范与防护**：修正原helper cleanup，suite每例移除继承Jev凭据并默认禁用Observer模型；确定性gateway明确provider disabled和禁止transport。真实provider错误测试明确opt-in受控loopback，原断言不放宽。生产模块无改动。
+
+**验证与关联证据**：`tests/test_model_test_environment_isolation.py`执行真实unittest.run cleanup absent/present及实际gateway零transport；旧/反证2 failed/1正常，higher judge_many与inner transport各自计数避免spy覆盖/吞异常盲点；最终字节移除禁用保护1 failed/2正常，恢复3 passed；模型/Observer119及扩大155专项通过；全量2745 passed/145子测试，0失败/0跳过（405.16s），详见计划C34。此前外部请求是否发生未直接证明，只证明默认模型路径和key泄漏，不冒称无出站；受控复现无实际请求。C15b代码独立暂存另验。
+
+C15b补充（2026-10-01）：
+
+**问题背景**：ANSI颜色前缀位于绿色✓/√之前，startswith漏识别通过标记；用例名含FAIL/✕被误列失败，绿色套件降到95而不收敛。
+
+**经验教训**：终端装饰不是测试语义，解析边界须复用已有清洗后判定，不改评分掩盖，也不补无限颜色marker。
+
+**操作规范与防护**：test parser复用projection.strip_ansi_codes，仅规范化内存视图；原始日志、真实exit和实际失败门禁不变。C34测试隔离修复单独提交后重新验收，不把旧失败全量称通过。
+
+**验证与关联证据**：`tests/test_evaluator_ansi_test_output.py`13例含Vitest/Jest、✓/√、FAIL/✕名、真失败、非零exit、明文对照与实际runner原字节/回执。新基线13pass，撤销11 failed/2正常；全量2758 passed/145子测试，0失败/0跳过（385.08s），详见计划C15b，未部署。
+
+C28b补充（2026-10-01）：
+
+**问题背景**：reader扫描整个GOAL是否出现repro字段，自由目标/验收示例误阻塞绿色评估；最初修复只取最后配置区块，又被合法多行repro字面量中的完整伪区块骗成false。
+
+**经验教训**：自由文本不能充当可执行配置；没有结构化边界的旧Markdown无法可靠消歧，不能为了兼容猜最后一块，更不能把不确定性变成成功。
+
+**操作规范与防护**：现有GOAL末尾附program生成typed requirement，来自真实repro_cmd，置于全部原始字段之后，不新建平行事实文件。新reader标记优先；legacy仅唯一完整单行配置，其余unknown/error需重新初始化。实际命令执行和fresh receipt/log完整性门禁保留。
+
+**验证与关联证据**：`tests/test_goal_repro_configuration.py`22例含自由字段/typed伪标记、多行命令、legacy兼容/歧义、原生CLI roundtrip、真实repro漏runner和合法Bash literal正向/反向。中间legacy漏洞完整回归1失败；最终22pass/核心撤销19fail3正常；89专项/10子测试通过，全量见计划C28b，未部署。
+
+## 112. 评估超时必须回收本次创建的进程组（2026-09-30）
+
+### 问题背景
+`wf-project-0929-01` 的评估出现exit124。只超时终止直接shell不能终止npm/node等后代；隔离就绪屏障确认超时后子进程仍会继续写文件，正常shell返回也可能留下后台进程。
+
+### 经验教训
+进程退出和工作结束不是同一事实。共享产物所有权只能在本次执行的后代停止后释放；不得按进程名称寻找或清理无关工作。宿主对已消失的进程组可能返回EPERM，必须核对实际存活成员，不能吞掉活进程的权限拒绝。
+
+### 操作规范与防护
+`herdr/evaluator.py:run_evaluation_command`在新session启动本次命令，供`bin/herdr-loop`与Task的lint基线采集复用；超时、中断、异常和正常返回都清理其进程组，TERM后有限等待，残留成员用KILL，保留原生超时124和已观察回执。主线程的SIGTERM处理仅在受管命令作用域内转为栈退出并恢复原handler。`capture_lint_baseline`持锁覆盖命令和基线写入，超时不写伪造基线；已有债务解析不变。只忽略经ps成功核实为空/僵尸的EPERM；活进程拒绝仍为失败。不可捕获的SIGKILL以及主动脱离session的子进程不在此保证内，需Supervisor现场处理；本项没有清理生产进程。
+
+### 验证与关联证据
+`tests/test_evaluator_process_cleanup.py`用真实独立CLI、shell、Python子进程和就绪屏障验证超时、拒绝TERM、SIGINT/SIGTERM、后台残留及无关进程存活；正常前台执行保留通过。旧实现核心矩阵5 failed/1 passed，修后7 passed（含活进程拒绝不能忽略的专项）。相邻45 passed，全量2650 passed/145 subtests（390.39s）。仅本地验证、未部署；详见执行计划C27。
+
+C27b追加验证：实际auto-init基线入口旧4 failed/1正常对照passed，修后5 passed；相邻39 passed，全量2657 passed/145 subtests（360.47s）。覆盖超时（含宽限期后强制回收）、SIGTERM中断、并发初始化拒绝、基线债务保留和锁恢复。采集脚本保持原`/bin/sh -c`语义。初次夹具导入失败与宽限期内已完成子进程的观察保留，随后用超过宽限期的受控子进程验证强制回收；不放宽存活/产物断言。原C27记录对应ec334bb，公共执行入口在C27b归入evaluator。仅本地验证，未部署。
+
+### 2026-10-01 复核补证：公开初始化入口必须持锁到基线发布
+
+**问题背景**：独立审查发现原生CLI在init_loop释放锁后仍使用旧subprocess.run采集基线，竞争init可改契约，旧采集随后覆盖新baseline；竞争eval甚至可使用上一契约的债务假绿。SIGTERM只结束CLI，后代晚写仍可发生。Task两段各自持锁也留下初始化/采集间隙。
+
+**经验教训**：单个helper持锁和整个操作持有所有权不同。基线属于本次契约，重新init必须先让旧债务不可用，命令及发布结束后才允许下一生产者。
+
+**操作规范与防护**：init_loop的显式capture_baseline在同一次内核锁内覆盖初始化、旧基线失效、共享受管命令、发布；Task和原生CLI均启用。内部unlocked capture避免再次加锁，standalone capture继续自行持锁。超时不保留旧baseline；CLI失败不返回成功，Task保留既有告警/启动行为。合法exit1已有债务仍可采集；missing-linter退出语义由C28c单独处理。
+
+**验证与证据**：原生进程竞争init/eval、SIGTERM含忽略TERM后代、真实CLI受控超时、Task首锁释放状态、旧债务失效与正常债务对照；撤销三producer/core文件8 failed/1正常对照，修后9靶向、86相邻/10子测试、全量2696 passed/145 subtests（384.91s）。两CLI AST/compileall/help/diff-check通过，独立复审无此项阻断，未部署。证据为执行计划C27c与test_loop_init_baseline_atomicity.py；SIGKILL/主动脱离session仍非保证范围。
+
+## 113. 自动测试命令必须声明非交互环境（2026-09-30）
+
+### 问题背景
+`test-r4`的4015条绿色摘要后出现`PASS Waiting for file changes`并exit124。`auto_init_task_loop`仅据package.json生成`npm test`，继承Agent的TTY输入，Vitest默认进入watch，导致任务反复耗尽。
+
+### 经验教训
+绿色摘要不证明命令已结束。普通管道能退出也不能排除TTY下的挂起：当前Vitest默认watch取决于非CI与stdin.isTTY，验证必须保留真实触发条件，不能只做无TTY对照。
+
+### 操作规范与防护
+自动npm默认命令改为`CI=1 npm test`，GOAL和脚本保持同一配置；显式`--test-cmd`完整保留，不擅自改变任务范围。此修复仅覆盖支持CI语义的默认npm命令；多栈仓库Java任务误选根前端测试仍属C05b，不能以非交互退出代替正确测试契约。
+
+### 验证与关联证据
+真实Task自动初始化→npm→Python测试脚本→eval→持久快照，同断言旧1 failed/1正常对照passed，修后2 passed；相邻18 passed，全量2652 passed/145 subtests（381.91s）。另用已安装Vitest 3.2.6和真实PTY输入验证旧命令1 passed后exit124、不收敛，修后1 passed且exit0收敛；无TTY旧命令正常退出，保留为触发条件对照。仅本地验证、未部署。源码`bin/herdr-task:auto_init_task_loop`，回归`tests/test_task_loop_noninteractive.py`。
+
+## 114. Agent 活性信号不能代替内循环仲裁决策（2026-09-30）
+
+### 问题背景
+`wf-project-0929-01`的blocked/working来回切换会让待投递仲裁事件变成stale。Controller实时`handle_event`与重启`reconcile_task_state`均只凭Agent working/done把blocked改回working，覆盖程序记录的耗尽事实。
+
+### 经验教训
+活性与业务决策是不同事实。等待仲裁不等于Agent进程停止；普通运行信号不能解除待决阻塞。旧`sentinel_reason`又可能在后续普通阻塞中保留，直接按该字段保护所有blocked会制造另一个无法恢复的卡点，必须以本次状态转换历史为准。
+
+### 操作规范与防护
+`blocked_event_type`优先读取最新blocked转换的明确reason，缺历史时保留既有legacy fallback。当前内循环blocked拒绝普通working/idle/done解除；重启遇到已知运行信号则恢复仲裁队列，不改变状态。显式合法恢复/返工以及新的普通blocked保持原行为。旧屏幕标记在显式恢复后的重复采样仍为C03c；仲裁卡和人工升级提示必须使用现有合法blocked→working恢复命令；没有扩展状态机，没有force放行。命令验证独立于运行信号保护（C30）。
+
+### 验证与关联证据
+`tests/test_inner_loop_arbitration_recovery.py`用真实临时SQLite观察→CAS→运行事件/重启→队列→通知出口验证，外部输送替换但持久转换不替换。撤销实现6 failed/2正常对照passed；修后8 passed，相邻60 passed，全量2665 passed/145 subtests（352.76s）。初版对照采用了仲裁卡上的非法直接rework，4项报InvalidTransitionError；修正对照为合法显式恢复后再返工，并保留该协议缺陷为C30。仅本地验证、未部署，无独立评审。
+
+C30追加验证：`tests/test_blocked_recovery_command_contract.py`提取真实提示的CLI参数，只将程序路径重定向到隔离Candidate，在临时SQLite实际执行set并读取状态/历史；恢复命令旧2 failed/1失败策略对照passed，修后3 passed。相邻47 passed，全量2668 passed/145 subtests（358.35s）。原提示文本测试改为断言确切`set wf-1-impl-x working`，新真实执行断言未放宽。只替换通知出口，未向任何人实际发送升级消息；路径版本固定仍属C20，未部署。
+
+## 113. 阻塞队列必须属于一次转换，状态名不代表同一事件
+
+**现象与影响**：耗尽事件排队等待期间，显式恢复后再次阻塞，旧事件仍因当前status=blocked被投递。相同event_type去重还会抑制新阻塞，旧消费finally可能清掉新事件所有权。
+
+**根因与证据**：enqueue只带task/event，消费仅检查状态名。真实TEMP SQLite恢复→再次阻塞、不同Run、同timestamp及busy等待交错中，旧实现最终9失败/1正常对照。普通metadata save会增加版本，单纯版本相等又会误丢同一次阻塞。
+
+**修复与预防**：复用持久workflow/run/status_history长度与最新转换生成episode；无history旧行保守绑定版本。blocked类队列携带并逐轮核对episode和当前cause，去重queue_key独立带episode；attention沿用原key，不改变既有重试存储。旧消费只释放自己queue_key。构造消息后、发送前再读核对；未知legacy版本变更丢旧权威时，安全补排当前持久blocked，不能因保守判未知造成永久漏仲裁。
+
+**验证与关联证据**：tests/test_blocker_queue_episode.py 10项全部通过，最终反证9失败/1正常；相邻结果见计划；全量见计划C21b。仅本地代码，未部署。外部prompt与数据库转换不属于同一事务，不能声称此修复消除最后一次读到发送之间所有并发窗口；历史事实仍需保留，未知legacy不能凭状态名推断连续性。
+
+## 114. 候选身份不能用相对基线新增提交数替代
+
+**现象与影响**：已冻结候选恰好在base或已被合流时，rev-list base..onto为零，Controller反复拒绝后续测试/评审派发；既有日志出现10次候选空差提示。
+
+**根因与证据**：差异数只说明分支关系，不说明该提交是否为已确认待验证候选。真实TEMP Git和SQLite冻结事实经实际Controller入口到Mock TaskCLI，原版最终3失败/12正常对照；正常冻结base、latest轮换回同SHA和双onto合法批次均被拒。
+
+**修复与预防**：仅在已有零差判断时复用最新冻结台账，要求严格完整40位SHA、每条spec有onto且pin完全一致，再逐onto native commit与frozen匹配。初版遗漏无onto同批spec，独立评审证明会启动无pin Task，回归后收紧all；不改非空与未知Git既有策略，不删除空分支保护。
+
+**验证与关联证据**：tests/test_frozen_base_candidate_dispatch.py 15项，通过真实冻结轮换/跨workflow隔离/短pin/旧spec/onto不匹配/混批缺身份/双onto正例，154扩展相邻和35子测试通过，全量见C13计划；旧fixture接线14项TypeError单行兼容修正，未放宽断言。仅本地未部署，TaskCLI/Worker现有复验仍需执行；冻结读取与外部launch非原子，不用本卡冒充所有并发原子保证。
+
+## 115. 永久能力拒绝必须退出重试，非空失败对象不是送达
+
+**现象与影响**：soft_steer_not_supported曾写2881次失败，每轮保留pending继续尝试；Sentinel判断非空返回对象而打印Injected，CLI与Console反馈也把失败混成成功队列。
+
+**根因与证据**：声明能力不支持属于永久失败，不会因等待idle恢复。dispatch_pending_steer却用同一pending表示暂时无pane、暂时送达失败、永久能力拒绝；上游用对象truthiness代替ok。真实TEMP SQLite、Native CLI、Sentinel两轮与Node执行实际submitSteer中，撤回4核心实现9失败/5正常。
+
+**修复与预防**：新请求先检查既有能力，不支持保存blocked与原文/原因/count0；legacy pending首次拒绝后blocked并保留唯一失败history，后续soft扫描不再选择。暂时失败继续pending。CLI失败非零、Console明确失败、Sentinel仅ok才记录Injected；不修改Agent能力、不将软指令自动升级打断。
+
+**验证与关联证据**：tests/test_steering_permanent_failure.py 14项通过，62扩展相邻通过，全量见C02计划；已有unsupported测试更新为更强立即拒绝/保留原文/0TTY断言。内部同ID显式urgent恢复只有受控Mock外部边界证据；公开CLI/Console急送创建新指令，不能宣称原ID公开自动恢复。没有真实Agent调用，没有处理live历史队列，暂时失败与跨Run语义各自保留边界。
+
+
+## 116. Git 锁等待不等于失败预算，错误文本不证明锁身份
+
+**现象与影响**：已完成T8因index.lock存在连续提交失败，普通finalize预算耗尽后持久升级，即使外部锁后来消失也不再自动推进。
+
+**根因与证据**：native add的锁冲突未分类，CalledProcessError作为通用提交错误；重试驱动不区分等待和质量失败。临时原生普通/linked Git、真实CLI/SQLite与Controller复现；同时独立审查证明hook和clean filter可输出精确fatal文本而没有实际外来锁，不能仅凭stderr免预算。
+
+**修复与预防**：仅命令前后稳定实际native index锁身份+精确原生错误给结构wait/rc75。专属wait不增加普通错误次数，持久60秒退避；以Run/持久转换episode识别当前完成周期，既有EpisodeStore文件锁CAS保护等待写入和旧owner失效，metadata保存不抹错误预算。不删除/移动锁，不自动翻案legacy通用升级。
+
+**验证与关联证据**：tests/test_finalize_git_index_wait.py 25项；真实受控TEMP锁超过5轮不耗预算、锁/HEAD/index/tracked/untracked保留，夹具释放锁后实际Controller在due前不动、due后通过真实CLI将原Task提交；integration用受控busy替身，非真实集成验收。包含独立进程attention竞争、两个stderr伪装、GIT_INDEX_FILE、历史新owner与metadata对照。最终Controller反证10失败15正常；相邻/full见C35a计划。实盘锁创建者未知，当前升级仍需单独安全恢复；两个持久存储和外部Git没有共同事务，不承诺最后读后所有竞态已消除。
+
+
+## 117. 省略已交付任务分支不能省略验收候选身份
+
+**现象与影响**：已冻结、实现已交付而delivery note尚未形成的正常窗口，test/review省略onto后也丢失候选SHA，CLI以delivery_missing拒绝，自动验收不能推进。
+
+**根因与证据**：main125正确省略未推送任务分支，但候选resolver把branch缺失当作pin缺失；旧C13 fixture模拟了带pin计划。恢复真实selector/planner后实际CLI preflight两项失败，六项正常对照保留。
+
+**修复与预防**：只在无effective delivery、candidate_branch=None、当前workflow最新严格40位冻结SHA与native source HEAD exact相同才保留pin。冻结身份与业务delivery是不同事实；不恢复onto、不放宽TaskCLI/Worker复验。
+
+**验证与关联证据**：tests/test_delivered_base_frozen_pin.py八例，撤销2失败6正常，40相邻及3子测试通过；全量结果见C13b计划。实际CLI身份方法被执行，完整Worker后段仍由既有baseline回归验证；无真实Agent/模型调用，未伪造delivery。
+
+
+C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后完整全量2871 passed、154 subtests passed、2 skipped（隔离HOME无LaunchAgent），0 failed，454.85s。两项本机只读plist检查另行2 passed（0.07s）。compileall、三入口CLI AST、diff-check通过；独立最终只读复审组合阻断闭合，未自行重跑全量。真实Agent/Worker启动、业务E2E及开放卡未因此验收。

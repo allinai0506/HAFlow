@@ -209,9 +209,13 @@ class SuppressAutoCloseLatchTest(unittest.TestCase):
         root = Path(self.tmp.name)
         self.workflows_file = root / "workflows.json"
         self.tasks_file = root / "tasks.json"
-        _ht.WORKFLOWS_FILE = str(self.workflows_file)
-        _ht.TASKS_FILE = str(self.tasks_file)
-        _ctl.WORKFLOWS_FILE = str(self.workflows_file)
+        self.addCleanup(self.tmp.cleanup)
+        for module in (_ht, _ctl):
+            for name, value in (("TASKS_FILE", self.tasks_file),
+                                ("WORKFLOWS_FILE", self.workflows_file)):
+                binding = patch.object(module, name, str(value))
+                binding.start()
+                self.addCleanup(binding.stop)
         _ctl._workflow_close_inflight.clear()
 
     def _write(self, tasks, workflows):
