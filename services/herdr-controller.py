@@ -5290,23 +5290,47 @@ def blocked_event_type(task):
     return "blocked"
 
 
+def blocker_queue_episode(task):
+    """Identity of the persisted blocker; metadata saves are not transitions."""
+    history = task.get("status_history") or []
+    latest = history[-1] if history and isinstance(history[-1], dict) else None
+    identity = {
+        "workflow_id": task.get("workflow_id"),
+        "run_id": task.get("run_id"),
+        "history_length": len(history),
+        "transition": latest,
+    }
+    if latest is None:
+        # Legacy rows have no transition identity. Never infer continuity
+        # across a changed persisted version.
+        identity["legacy_version"] = task.get("version")
+    return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+
+
 def enqueue_coordinator_event(task, event_type):
     key = f"{task['task_id']}:{event_type}"
+    episode = (
+        blocker_queue_episode(task)
+        if event_type in {"blocked", "inner_loop_exhausted"} else None
+    )
+    queue_key = f"{key}:{episode}" if episode is not None else key
 
     with lock:
-        if key in queued_events:
+        if queue_key in queued_events:
             print(
                 f"[QUEUE DUPLICATE SKIPPED] {key}"
             )
             return
 
-        queued_events.add(key)
+        queued_events.add(queue_key)
 
     coordinator_queue.put(
         {
             "task_id": task["task_id"],
             "event_type": event_type,
-            "key": key
+            "key": key,
+            "queue_key": queue_key,
+            "blocker_episode": episode,
         }
     )
 
@@ -6856,6 +6880,17 @@ task_type:
                 )
                 break
 
+            if event_type in {"blocked", "inner_loop_exhausted"} and (
+                item.get("blocker_episode") != blocker_queue_episode(task)
+                or blocked_event_type(task) != event_type
+            ):
+                print(f"[QUEUE STALE] task={task_id} blocker episode changed")
+                # Legacy metadata updates cannot prove episode continuity.
+                # Drop old authority, but retain reachability of the current
+                # persisted blocker through the same episode-aware queue.
+                enqueue_coordinator_event(task, blocked_event_type(task))
+                break
+
             status = coordinator_status(task.get("workflow_id"))
 
             if status in ("idle", "done"):
@@ -6869,6 +6904,18 @@ task_type:
                     f"task={task_id} "
                     f"event={event_type}"
                 )
+
+                if event_type in {"blocked", "inner_loop_exhausted"}:
+                    current = get_task(task_id)
+                    if (
+                        not current or current.get("status") != "blocked"
+                        or item.get("blocker_episode") != blocker_queue_episode(current)
+                        or blocked_event_type(current) != event_type
+                    ):
+                        print(f"[QUEUE STALE] task={task_id} changed before prompt")
+                        if current and current.get("status") == "blocked":
+                            enqueue_coordinator_event(current, blocked_event_type(current))
+                        break
 
                 result = subprocess.run(
                     [
@@ -6979,7 +7026,7 @@ task_type:
 
     finally:
         with lock:
-            queued_events.discard(key)
+            queued_events.discard(item.get("queue_key", key))
 
 
 # ============================================================

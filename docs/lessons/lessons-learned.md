@@ -5418,3 +5418,13 @@ C27b追加验证：实际auto-init基线入口旧4 failed/1正常对照passed，
 `tests/test_inner_loop_arbitration_recovery.py`用真实临时SQLite观察→CAS→运行事件/重启→队列→通知出口验证，外部输送替换但持久转换不替换。撤销实现6 failed/2正常对照passed；修后8 passed，相邻60 passed，全量2665 passed/145 subtests（352.76s）。初版对照采用了仲裁卡上的非法直接rework，4项报InvalidTransitionError；修正对照为合法显式恢复后再返工，并保留该协议缺陷为C30。仅本地验证、未部署，无独立评审。
 
 C30追加验证：`tests/test_blocked_recovery_command_contract.py`提取真实提示的CLI参数，只将程序路径重定向到隔离Candidate，在临时SQLite实际执行set并读取状态/历史；恢复命令旧2 failed/1失败策略对照passed，修后3 passed。相邻47 passed，全量2668 passed/145 subtests（358.35s）。原提示文本测试改为断言确切`set wf-1-impl-x working`，新真实执行断言未放宽。只替换通知出口，未向任何人实际发送升级消息；路径版本固定仍属C20，未部署。
+
+## 113. 阻塞队列必须属于一次转换，状态名不代表同一事件
+
+**现象与影响**：耗尽事件排队等待期间，显式恢复后再次阻塞，旧事件仍因当前status=blocked被投递。相同event_type去重还会抑制新阻塞，旧消费finally可能清掉新事件所有权。
+
+**根因与证据**：enqueue只带task/event，消费仅检查状态名。真实TEMP SQLite恢复→再次阻塞、不同Run、同timestamp及busy等待交错中，旧实现最终9失败/1正常对照。普通metadata save会增加版本，单纯版本相等又会误丢同一次阻塞。
+
+**修复与预防**：复用持久workflow/run/status_history长度与最新转换生成episode；无history旧行保守绑定版本。blocked类队列携带并逐轮核对episode和当前cause，去重queue_key独立带episode；attention沿用原key，不改变既有重试存储。旧消费只释放自己queue_key。构造消息后、发送前再读核对；未知legacy版本变更丢旧权威时，安全补排当前持久blocked，不能因保守判未知造成永久漏仲裁。
+
+**验证与关联证据**：tests/test_blocker_queue_episode.py 10项全部通过，最终反证9失败/1正常；相邻结果见计划；全量见计划C21b。仅本地代码，未部署。外部prompt与数据库转换不属于同一事务，不能声称此修复消除最后一次读到发送之间所有并发窗口；历史事实仍需保留，未知legacy不能凭状态名推断连续性。

@@ -1623,3 +1623,5 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - C15b新基线最终：13靶向/98专项+10子测试/2758全量+145子测试通过，0失败0跳过385.08s；仅parser ANSI规范化本地提交，原日志保留。C34独立提交，旧失败全量未改写。
 
 - 2026-10-01 C28b专项：GOAL自由文本不当配置，program末尾typed requirement、唯一unambiguous legacy兼容；复审中legacy假绿已完整回归闭合。22靶向/89专项+10子测试通过，旧19失败3正常反证；冻结源全量2780 passed/145子测试，0失败/0跳过，415.65s；未部署。
+
+- 2026-10-01 C21b专项：blocked队列绑定持久转换episode，独立queue去重key保留attention原key；9失败1正常反证、10靶向通过，全量2790 passed/145子测试，0失败/0跳过，392.05s；未部署。
