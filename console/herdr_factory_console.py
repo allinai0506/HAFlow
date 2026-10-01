@@ -2084,12 +2084,15 @@ button { cursor: pointer; }
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  flex: 1;
+  min-width: 0;
 }
 .item-badges {
   display: flex;
   align-items: center;
   gap: 4px;
   flex-shrink: 0;
+  white-space: nowrap;
 }
 .item-sub {
   display: flex;
@@ -2117,30 +2120,48 @@ button { cursor: pointer; }
 }
 .badge-pill {
   font-size: 11px;
-  padding: 1px 6px;
+  height: 19px;
+  padding: 0 7px;
   border-radius: 999px;
   font-weight: 500;
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  line-height: 1.3;
+  gap: 4.5px;
+  line-height: 1;
+  white-space: nowrap;
+  flex-shrink: 0;
+  box-sizing: border-box;
+  font-variant-numeric: tabular-nums;
+  border: 1px solid transparent;
 }
-.badge-pill.active {
-  background: #ecfdf5;
-  color: #047857;
-  border: 1px solid #a7f3d0;
-}
-.badge-pill.attention {
-  background: #fffbeb;
-  color: #b45309;
-  border: 1px solid #fde68a;
-}
-.badge-pill.dot::before {
+.badge-pill::before {
   content: "";
   width: 5px;
   height: 5px;
   border-radius: 50%;
   background: currentColor;
+  flex-shrink: 0;
+}
+.badge-pill.nodot::before {
+  display: none;
+}
+.badge-pill.active {
+  background: #ecfdf5;
+  color: #047857;
+  border-color: #a7f3d0;
+}
+.badge-pill.attention {
+  background: #fffbeb;
+  color: #b45309;
+  border-color: #fde68a;
+}
+.badge-pill.completed {
+  background: var(--bg-subtle);
+  color: var(--text-tertiary);
+  border-color: var(--border-subtle);
+}
+.badge-pill.completed::before {
+  background: #9ca3af;
 }
 
 /* 任务看板 */
@@ -4059,7 +4080,7 @@ function renderLinearPopoverList(){
       <div class="item-main">
         <div class="item-header">
           <span class="item-title">全部工作流</span>
-          <span class="item-badges"><span class="badge-pill" style="background:var(--bg-subtle);color:var(--text-secondary)">聚合</span></span>
+          <span class="item-badges"><span class="badge-pill nodot" style="background:var(--bg-subtle);color:var(--text-secondary)">聚合</span></span>
         </div>
         <div class="item-sub">查看所有活跃工作流的聚合看板</div>
       </div>
@@ -4088,9 +4109,9 @@ function renderLinearPopoverList(){
       const isSel = (w.workflow_id === cur);
       const title = w.title || w.workflow_id;
       let pills = '';
-      if(w.active > 0) pills += `<span class="badge-pill active dot">${w.active} 活</span>`;
-      if(w.attention > 0) pills += `<span class="badge-pill attention dot">${w.attention} 等</span>`;
-      if(!pills) pills = `<span class="badge-pill" style="background:var(--bg-subtle);color:var(--text-tertiary)">完成</span>`;
+      if(w.active > 0) pills += `<span class="badge-pill active">${w.active} 活跃</span>`;
+      if(w.attention > 0) pills += `<span class="badge-pill attention">${w.attention} 需决策</span>`;
+      if(!pills) pills = `<span class="badge-pill completed">已完成</span>`;
 
       function hl(txt){
         if(!kw || !txt) return esc(txt);
@@ -4137,8 +4158,8 @@ function updateLinearWorkflowTrigger(workflows, curWid){
   }
   const title = cw.title || cw.workflow_id;
   let pills = '';
-  if(cw.active > 0) pills += `<span class="badge-pill active dot">${cw.active} 活</span>`;
-  if(cw.attention > 0) pills += `<span class="badge-pill attention dot">${cw.attention} 等</span>`;
+  if(cw.active > 0) pills += `<span class="badge-pill active">${cw.active} 活跃</span>`;
+  if(cw.attention > 0) pills += `<span class="badge-pill attention">${cw.attention} 需决策</span>`;
 
   contentEl.innerHTML = `<span class="trigger-title">${esc(title)}</span>`
     + `<span class="trigger-mono">${esc(cw.workflow_id)}</span>`

@@ -72,6 +72,14 @@ class TestConsoleLinearDropdown(unittest.TestCase):
         self.assertIn("!e.target.closest('.linear-select'))closeLinearSelectMenu()", self.source)
         self.assertIn("closeLinearSelectMenu();", self.source)
 
+    def test_badge_pills_styling_and_labels(self):
+        """Guard that badge pills avoid global .dot collision and use polished labels."""
+        self.assertNotIn(".badge-pill.dot", self.source)
+        self.assertIn("tabular-nums", self.source)
+        self.assertIn("活跃</span>", self.source)
+        self.assertIn("需决策</span>", self.source)
+        self.assertIn("已完成</span>", self.source)
+
 
 if __name__ == "__main__":
     unittest.main()
