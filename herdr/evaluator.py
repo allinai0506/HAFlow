@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from herdr.git_coordination import GitOperationLock
+from herdr.projection import strip_ansi_codes
 
 LOOP_DIR_NAME = ".herdr-loop"
 BASELINE_LINT_FILENAME = "BASELINE_LINT.json"
@@ -444,6 +445,8 @@ def parse_test_output(output: str, exit_code: int) -> Tuple[int, int, List[str]]
     Supports pytest, vitest, jest, and generic test runners.
     Returns: (passed_count, total_count, failing_tests_list)
     """
+    # Normalize only the parser view; the runner keeps original log bytes.
+    output = strip_ansi_codes(output)
     failing: List[str] = []
     
     # 1. Check Pytest format: "1 failed, 4 passed in 0.15s" (with or without =)

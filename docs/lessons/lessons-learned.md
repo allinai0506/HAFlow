@@ -5343,6 +5343,16 @@ C34补充（2026-10-01）：
 
 **验证与关联证据**：`tests/test_model_test_environment_isolation.py`执行真实unittest.run cleanup absent/present及实际gateway零transport；旧/反证2 failed/1正常，higher judge_many与inner transport各自计数避免spy覆盖/吞异常盲点；最终字节移除禁用保护1 failed/2正常，恢复3 passed；模型/Observer119及扩大155专项通过；全量2745 passed/145子测试，0失败/0跳过（405.16s），详见计划C34。此前外部请求是否发生未直接证明，只证明默认模型路径和key泄漏，不冒称无出站；受控复现无实际请求。C15b代码独立暂存另验。
 
+C15b补充（2026-10-01）：
+
+**问题背景**：ANSI颜色前缀位于绿色✓/√之前，startswith漏识别通过标记；用例名含FAIL/✕被误列失败，绿色套件降到95而不收敛。
+
+**经验教训**：终端装饰不是测试语义，解析边界须复用已有清洗后判定，不改评分掩盖，也不补无限颜色marker。
+
+**操作规范与防护**：test parser复用projection.strip_ansi_codes，仅规范化内存视图；原始日志、真实exit和实际失败门禁不变。C34测试隔离修复单独提交后重新验收，不把旧失败全量称通过。
+
+**验证与关联证据**：`tests/test_evaluator_ansi_test_output.py`13例含Vitest/Jest、✓/√、FAIL/✕名、真失败、非零exit、明文对照与实际runner原字节/回执。新基线13pass，撤销11 failed/2正常；全量2758 passed/145子测试，0失败/0跳过（385.08s），详见计划C15b，未部署。
+
 ## 112. 评估超时必须回收本次创建的进程组（2026-09-30）
 
 ### 问题背景

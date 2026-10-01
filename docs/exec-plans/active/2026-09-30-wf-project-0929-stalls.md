@@ -67,7 +67,7 @@
 | C28b | 自由GOAL/DoD文本伪装repro配置，绿色评估被误阻塞 | B/C独立复现；主控quoted/正常对照 | 已确认；配置读取与自由文本隔离，老合约兼容需明确；独立提交 |
 | C28c | linter未启动exit127被抵扣为历史债务并假绿 | B原生missing_linter脚本和原子回执，主控重执行一致 | 专项已验证：reserved执行失败独立veto且拒绝采集假债务；旧污染基线不能假绿；89专项/10子测试通过，19失败/3正常对照反证；全量2718 passed/145子测试，0失败/0跳过，387.92s；仅本地提交，未部署 |
 | C31c | reset后Supervisor仍把历史BLOCKER作为当前tests evidence | B临时reset→summary→collect，主控重执行一致 | 专项已验证：modern摘要单份EVAL_DONE状态/计数；仅当前耗尽BLOCKER；invalid未知不fallback，absent legacy兼容；106专项通过/反证10失败2正常；全量2742 passed/145子测试，0失败/0跳过370.78s；未部署 |
-| C15b | ANSI前缀让绿色FAIL标题被识别成失败 | B解析探针、主控1/1却score95复验 | 已确认；C15原历史修复的边界仍不完整，不混同C04日志去重；独立提交 |
+| C15b | ANSI前缀让绿色FAIL标题被识别成失败 | B解析探针、主控1/1却score95复验 | C34独立提交后精准恢复：仅test parser复用ANSI清洗，原始日志保留；新基线13定向pass/反证11失败2正常；98专项/10子测试及2758全量/145子测试通过，0失败/0跳过385.08s；旧失败全量不算PASS |
 | C34 | 测试假Jev key泄漏使确定性Observer误走模型，finding迟到全量失败 | C15b首轮full1失败/2754通过；tmp DB随后已有finding；受控key/transport2失败1正常 | 独立测试隔离修复中：准确restore key、每例移除继承凭据、默认Observer模型关闭、gateway明确零transport；155扩大专项/3定向通过；全量2745 passed/145子测试，0失败/0跳过405.16s；C15b完整暂存不混改 |
 
 ## 执行计划与检查点
@@ -144,3 +144,7 @@ C34诊断：C15b首轮full1 failed/2754 passed/145子测试（332.58s）；单�
 C34最终专项：独立评审发现outer transport spy被inner覆盖且异常被吞的盲点；修为higher judge_many spy及inner transport各自可观测计数。旧最终2 failed/1正常（0.50s）；最终字节移除gateway禁用保护1 failed/2正常（0.47s），恢复3 passed（0.40s）；119专项（14.17s）及155扩大专项（13.70s）passed。首个C34 full为修复测试盲点主动中断：514 passed/85子测试/KeyboardInterrupt72.45s，不算通过。恢复源码后重新final full冻结运行；无生产源码修改，C15b外部完整暂存。
 
 C34最终：全量2745 passed/145 subtests passed，0 failed/0 skipped（405.16s），exit0；compileall/diff-check通过；独立最终只读复审无新增阻断，未自行重跑。无生产源码修改，仅本地提交。C15b恢复后重新验证，旧失败及中断记录不当通过。迟到finding仅独立审查只读报告，原临时库已被pytest retention移除，主控无法再次读取，不伪造root查询。
+
+C15b恢复验收：C34已单独commit16699f8，全量2745/145子测试通过。仅恢复herdr/evaluator.py3行patch及13用例，与原外部字节一致，不覆盖C34记录。新基线target13 passed（0.73s），撤销当前HEAD核心11 failed/2正常（0.48s），恢复fixed后冻结neighbors/full。此前1失败full由C34测试key泄漏及默认model路径独立处理，旧失败/中断永不冒充通过。
+
+C15b最终新基线验收：13靶向passed（0.73s），撤销11 failed/2正常（0.48s），98相邻passed/10子测试（20.48s）；全量2758 passed/145 subtests passed，0 failed/0 skipped（385.08s），exit0。compileall/diff-check通过，独立只读核对恢复patch/test字节与C34护栏无变动。仅local提交，未部署；原失败/中断记录保留，C34已另提交。
