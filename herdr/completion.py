@@ -149,17 +149,19 @@ def marker_present(
 
 
 def sanitize_completion_marker(text: str, task_id: str) -> tuple[str, int]:
-    """Replace literal HERDR_TASK_DONE:<task_id> with the neutral token.
+    """Neutralize this task's DONE and BLOCKER literals in Agent input.
 
+    Input echo must not impersonate a terminal signal emitted by the Agent.
     Returns (cleaned_text, replacement_count). Empty task_id is a no-op.
     """
     if not text or not task_id:
         return text, 0
-    literal = f"HERDR_TASK_DONE:{task_id}"
-    count = text.count(literal)
-    if count == 0:
-        return text, 0
-    return text.replace(literal, NEUTRAL_TOKEN), count
+    count = 0
+    for prefix in (DONE_MARKER_PREFIX, BLOCKER_MARKER_PREFIX):
+        literal = marker_literal(task_id, prefix)
+        count += text.count(literal)
+        text = text.replace(literal, f"{prefix}<TASK_ID>")
+    return text, count
 
 
 def sanitize_prompt(prompt: str, task_id: str) -> tuple[str, int]:

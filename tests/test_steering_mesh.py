@@ -381,7 +381,7 @@ def test_halt_task_interrupt_failure_preserves_task_status(steering_env):
 
 
 def test_dispatch_pending_steer_opencode_soft_steer_refused(steering_env):
-    """OpenCode does not support soft steer; dispatch_pending_steer must refuse and stay pending."""
+    """OpenCode does not support soft steer; new non-urgent queue must preserve a permanent refusal without retry."""
     task_id = "task-opencode-01"
     from herdr.state_store import get_state_store
     t_data = json.loads(steering_env["tasks_file"].read_text(encoding="utf-8"))
@@ -408,18 +408,18 @@ def test_dispatch_pending_steer_opencode_soft_steer_refused(steering_env):
         res_drain = steering.dispatch_pending_steer(task_id)
 
     # Must refuse
-    assert res_drain is not None
-    assert res_drain["ok"] is False
-    assert res_drain["status"] == "pending"
-    assert res_drain["reason"] == "soft_steer_not_supported"
+    assert res_q["ok"] is False
+    assert res_q["status"] == "blocked"
+    assert res_q["reason"] == "soft_steer_not_supported"
+    assert res_drain is None
 
     # ZERO subprocess calls: no TTY injection!
     assert mock_run.call_count == 0
 
-    # Item remains pending in queue
+    # Original instruction remains visible in blocked queue
     s_data = steering.load_steering_data()
     q = s_data["steering_queues"][task_id]
-    assert q[0]["status"] == "pending"
+    assert q[0]["status"] == "blocked"
     assert q[0]["last_delivery_error"] == "soft_steer_not_supported"
 
 

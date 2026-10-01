@@ -169,7 +169,7 @@ class ControllerReverificationTest(unittest.TestCase):
         self._patch("_ctl.is_workflow_completed", lambda cfg, done: False)
         self._patch("_ctl.maybe_close_completed_workflow", lambda wf: None)
         self._patch("_ctl._dispatch_candidate_ready",
-                    lambda root, base, specs: True)
+                    lambda root, base, specs, workflow_id=None: True)
         self._patch("_ctl._fix_loop_latch_blocks", lambda *a: False)
         self._patch("_ctl.blocked_gate_dependency", lambda *a: None)
         self._patch("_ctl.blocked_verdict_dep", lambda *a: None)

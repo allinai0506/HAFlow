@@ -87,6 +87,7 @@ try:
         GitOperationLock,
         GitProcessActiveError,
         ensure_branch_available,
+        pinned_local_onto_matches,
         ensure_no_git_processes,
     )
 except ImportError:
@@ -96,11 +97,14 @@ except ImportError:
         GitOperationLock,
         GitProcessActiveError,
         ensure_branch_available,
+        pinned_local_onto_matches,
         ensure_no_git_processes,
     )
 
-TASKS_FILE = os.environ.get("TASKS_FILE") or os.path.expanduser("~/.herdr-controller/tasks.json")
-WORKFLOW_FILE = os.environ.get("WORKFLOW_FILE") or os.path.expanduser("~/.herdr-controller/workflow.json")
+# Only explicit projection overrides outrank the selected SQLite namespace.
+TASKS_FILE = os.environ.get("TASKS_FILE")
+_DEFAULT_WORKFLOW_FILE = os.path.expanduser("~/.herdr-controller/workflow.json")
+WORKFLOW_FILE = os.environ.get("WORKFLOW_FILE") or _DEFAULT_WORKFLOW_FILE
 # Same resolution as services/herdr-controller.py::ATTENTION_FILE, captured
 # at import like the controller captures it: the CLI and the controller run
 # in different processes but inherit the same environment, so both must
@@ -175,7 +179,7 @@ except ImportError:
     }
 
 CONTROLLER_ROOT = os.path.expanduser("~/.herdr-controller")
-WORKFLOWS_FILE = os.path.join(CONTROLLER_ROOT, "workflows.json")
+WORKFLOWS_FILE = os.environ.get("WORKFLOWS_FILE")
 STAGE_STATE_FILE = os.path.join(CONTROLLER_ROOT, "stage-state.json")
 CLONE_ROOT = os.path.realpath(os.path.join(CONTROLLER_ROOT, "clones"))
 EVIDENCE_ROOT = os.path.join(CONTROLLER_ROOT, "logs", "tasks")
@@ -1141,7 +1145,10 @@ def _get_store():
         db_path = p.parent / "state.db" if p.name == "tasks.json" else p.with_suffix(".db")
         if db_path.parent.exists():
             return get_state_store(db_path=db_path)
-    wf_file = globals().get("WORKFLOW_FILE") or globals().get("WORKFLOWS_FILE") or os.environ.get("WORKFLOW_FILE") or os.environ.get("WORKFLOWS_FILE")
+    legacy_wf_file = globals().get("WORKFLOW_FILE")
+    if legacy_wf_file == _DEFAULT_WORKFLOW_FILE and not os.environ.get("WORKFLOW_FILE"):
+        legacy_wf_file = None  # Default config path is not an explicit DB selector.
+    wf_file = legacy_wf_file or globals().get("WORKFLOWS_FILE") or os.environ.get("WORKFLOW_FILE") or os.environ.get("WORKFLOWS_FILE")
     if wf_file:
         p = Path(wf_file)
         db_path = p.parent / "state.db" if p.name in ("workflows.json", "workflow.json") else p.with_suffix(".db")
@@ -2296,7 +2303,7 @@ def auto_init_task_loop(clone_path, goal, acceptance_list, test_cmd=None, lint_c
     # Detect test command if not provided
     if not test_cmd:
         if (clone / "package.json").exists():
-            test_cmd = "npm test"
+            test_cmd = "CI=1 npm test"
         elif (clone / "pytest.ini").exists() or (clone / "tests").is_dir():
             test_cmd = "pytest"
         elif (clone / "Cargo.toml").exists():
@@ -2322,31 +2329,14 @@ def auto_init_task_loop(clone_path, goal, acceptance_list, test_cmd=None, lint_c
             test_cmd=test_cmd or "pytest",
             lint_cmd=lint_cmd or "true",
             repro_cmd=repro_cmd or "",
+            capture_baseline=True,
         )
+    except TimeoutError as e:
+        print(f"[HERDR_LOOP_WARN] Failed to snapshot lint baseline: {e}")
+        return
     except Exception as e:
         print(f"[HERDR_LOOP_WARN] Failed to auto-init loop: {e}")
         return
-
-    # Baseline-aware gate: snapshot pre-edit lint debt once at init.
-    # Eval then gates only on NEW defects (current - baseline).
-    # Best-effort: never fail task launch when snapshot is unavailable.
-    try:
-        from herdr.evaluator import parse_lint_output, write_baseline_lint
-        snapshot_cmd = (lint_cmd or "true").strip() or "true"
-        if snapshot_cmd != "true":
-            proc = subprocess.run(
-                snapshot_cmd,
-                cwd=str(clone),
-                text=True,
-                capture_output=True,
-                timeout=120,
-                shell=True,
-            )
-            snapshot_output = (proc.stdout or "") + (proc.stderr or "")
-            baseline_lint = parse_lint_output(snapshot_output, proc.returncode)
-            write_baseline_lint(clone / ".herdr-loop", baseline_lint, 0)
-    except Exception as e:
-        print(f"[HERDR_LOOP_WARN] Failed to snapshot lint baseline: {e}")
 
 
 def _record_router_failure_task(args, node_id, error):
@@ -2873,31 +2863,39 @@ def _launch_task(args):
             print(f"[BRANCH OWNERSHIP ERROR] {exc}")
             sys.exit(2)
 
-        # Fix-loop 续接:任务必须落在既有分支(如开放中的 PR 分支)上。
-        fetch = subprocess.run(
-            [
-                "git", "-C", source_repo,
-                "fetch", "origin", onto_branch,
-            ],
-            text=True,
-            capture_output=True,
-        )
-        remote_ref = subprocess.run(
-            [
-                "git", "-C", source_repo,
-                "rev-parse", "--verify", "--quiet",
-                f"refs/remotes/origin/{onto_branch}",
-            ],
-            text=True,
-            capture_output=True,
-        )
-
-        if fetch.returncode != 0 or remote_ref.returncode != 0:
-            print(
-                f"Onto branch not found on origin: {onto_branch}\n"
-                f"{(fetch.stderr.strip() or fetch.stdout.strip())}"
+        try:
+            pinned_local = pinned_local_onto_matches(
+                source_repo, onto_branch, getattr(args, "candidate_sha", None),
             )
+        except RuntimeError as exc:
+            print(str(exc))
             sys.exit(2)
+        if not pinned_local:
+            # Fix-loop 续接:任务必须落在既有分支(如开放中的 PR 分支)上。
+            fetch = subprocess.run(
+                [
+                    "git", "-C", source_repo,
+                    "fetch", "origin", onto_branch,
+                ],
+                text=True,
+                capture_output=True,
+            )
+            remote_ref = subprocess.run(
+                [
+                    "git", "-C", source_repo,
+                    "rev-parse", "--verify", "--quiet",
+                    f"refs/remotes/origin/{onto_branch}",
+                ],
+                text=True,
+                capture_output=True,
+            )
+
+            if fetch.returncode != 0 or remote_ref.returncode != 0:
+                print(
+                    f"Onto branch not found on origin: {onto_branch}\n"
+                    f"{(fetch.stderr.strip() or fetch.stdout.strip())}"
+                )
+                sys.exit(2)
 
     requested_agent = args.agent if args.agent else "auto"
 
@@ -3086,6 +3084,8 @@ def _launch_task(args):
 
     if onto_branch:
         worker_cmd += ["--onto", onto_branch]
+        if getattr(args, "candidate_sha", None):
+            worker_cmd += ["--candidate-sha", args.candidate_sha]
 
     if prebuilt_pane:
         worker_cmd += ["--pane-id", prebuilt_pane]
@@ -4055,6 +4055,46 @@ def launch_task(args):
         sys.exit(75)
 
 
+def _run_commit_index_command(task_id, clone, command):
+    """Report native index contention without claiming or removing the lock."""
+    def native_lock():
+        resolved = subprocess.run(
+            ["git", "-C", clone, "rev-parse", "--path-format=absolute", "--git-path", "index"],
+            text=True, capture_output=True, check=False,
+        )
+        return Path(resolved.stdout.strip() + ".lock") if resolved.returncode == 0 and resolved.stdout.strip() else None
+
+    def identity(path):
+        try:
+            stat = path.stat()
+            return (stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_size)
+        except (OSError, AttributeError):
+            return None
+
+    # Both add (clean filters) and commit (hooks) include external stderr.
+    # Text alone is not a native lock receipt. Require the same lock before
+    # and after the command; disappeared/replaced locks retain error budget.
+    before_path = native_lock()
+    before_identity = identity(before_path) if before_path else None
+    result = subprocess.run(command, text=True, capture_output=True, check=False)
+    if result.stdout:
+        print(result.stdout, end="")
+    if result.stderr:
+        print(result.stderr, end="", file=sys.stderr)
+    if result.returncode:
+        lock_path = native_lock()
+        expected = f"fatal: Unable to create '{lock_path}': File exists."
+        verified = (before_identity is not None
+                    and lock_path == before_path
+                    and identity(lock_path) == before_identity)
+        if lock_path is not None and verified and expected in result.stderr.splitlines():
+            print("HERDR_COMMIT_RESULT=" + json.dumps({
+                "task_id": task_id, "result": "wait", "reason": "git_index_lock",
+            }))
+            sys.exit(75)
+    return result
+
+
 @_with_git_operation_lock()
 def commit_task(task_id, message=None):
     data = load_tasks()
@@ -4151,29 +4191,16 @@ def commit_task(task_id, message=None):
 
     # tracked 文件在 Task 创建前要求 clean，
     # 因此当前 tracked 修改全部属于该 Task。
-    subprocess.run(
-        [
-            "git",
-            "-C",
-            clone,
-            "add",
-            "-u"
-        ],
-        check=True
-    )
+    staged_update = _run_commit_index_command(task_id, clone, ["git", "-C", clone, "add", "-u"])
+    if staged_update.returncode:
+        raise subprocess.CalledProcessError(staged_update.returncode, staged_update.args,
+                                            staged_update.stdout, staged_update.stderr)
 
     if task_untracked:
-        subprocess.run(
-            [
-                "git",
-                "-C",
-                clone,
-                "add",
-                "--",
-                *task_untracked
-            ],
-            check=True
-        )
+        staged_new = _run_commit_index_command(task_id, clone, ["git", "-C", clone, "add", "--", *task_untracked])
+        if staged_new.returncode:
+            raise subprocess.CalledProcessError(staged_new.returncode, staged_new.args,
+                                                staged_new.stdout, staged_new.stderr)
 
     # 必须确实存在 staged changes
     staged = subprocess.run(
@@ -4197,18 +4224,7 @@ def commit_task(task_id, message=None):
     if message is None:
         message = f"task: {task_id}"
 
-    result = subprocess.run(
-        [
-            "git",
-            "-C",
-            clone,
-            "commit",
-            "-m",
-            message
-        ],
-        text=True,
-        check=False
-    )
+    result = _run_commit_index_command(task_id, clone, ["git", "-C", clone, "commit", "-m", message])
 
     if result.returncode != 0:
         print(
@@ -7477,8 +7493,11 @@ def main():
                 operator=args.operator,
                 urgent=args.urgent,
             )
-            mode = "IMMEDIATE" if args.urgent else "QUEUED"
+            mode = ("IMMEDIATE" if args.urgent else "QUEUED") if res.get("ok") else "FAILED"
             print(f"[STEER_{mode}] {res['steer_id']} for {res['task_id']}")
+            if not res.get("ok"):
+                print(f"Steering not delivered: {res.get('reason') or 'delivery_failed'}")
+                sys.exit(1)
         except Exception as e:
             print(f"Error steering task: {e}")
             sys.exit(1)

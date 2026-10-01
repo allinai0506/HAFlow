@@ -4,8 +4,8 @@
 Functional Core: turns HAFlow's real execution artifacts into bounded,
 redacted facts for ``SupervisorState``. Reuses the canonical producers:
 
-- HERDR loop report -> ``<clone>/.herdr-loop/`` (STATE.md via
-  ``evaluator.read_state``, METRICS.json test/lint/score counts);
+- HERDR loop report -> ``<clone>/.herdr-loop/EVAL_DONE.json`` atomic
+  state/count snapshot; absent-snapshot legacy reports retain display compatibility;
 - git workspace -> ``git status`` / ``git diff --stat`` bounded summary;
 - Agent done report -> task verdict/blocker/status_history plus a bounded
   tail of the report text the orchestrator supplies (pane tail / transcript).
@@ -75,6 +75,19 @@ def _run_git(clone_path: str, args: List[str]) -> Optional[str]:
     return result.stdout or ""
 
 
+def _read_loop_snapshot(loop_dir: Path) -> Optional[tuple[Dict[str, Any], bytes]]:
+    """Parse one exact atomic receipt; invalid/thin snapshots are unknown."""
+    try:
+        raw = (loop_dir / "EVAL_DONE.json").read_bytes()
+        snapshot = json.loads(raw.decode("utf-8"))
+    except Exception:
+        # Evidence collection is best-effort, including parser depth failures.
+        return None
+    if not isinstance(snapshot, dict) or "total_tests" not in snapshot:
+        return None
+    return snapshot, raw
+
+
 def summarize_loop(clone_path: Optional[str]) -> Optional[Dict[str, Any]]:
     """HERDR loop report + test result counts, bounded to a small dict."""
     if not clone_path:
@@ -84,10 +97,25 @@ def summarize_loop(clone_path: Optional[str]) -> Optional[Dict[str, Any]]:
         return None
 
     facts: Dict[str, Any] = {}
-    try:
-        state = read_state(loop_dir)
-    except Exception:
-        state = {}
+    snapshot_path = loop_dir / "EVAL_DONE.json"
+    if snapshot_path.exists():
+        parsed = _read_loop_snapshot(loop_dir)
+        if parsed is None:
+            return None
+        snapshot, _raw = parsed
+        state = snapshot
+        metrics = snapshot
+    else:
+        # Compatibility for pre-snapshot reports only. A present but invalid
+        # receipt must never fall back to potentially stale display artifacts.
+        try:
+            state = read_state(loop_dir)
+        except Exception:
+            state = {}
+        try:
+            metrics = json.loads((loop_dir / "METRICS.json").read_text(encoding="utf-8"))
+        except Exception:
+            metrics = None
     if isinstance(state, dict):
         if state.get("status") not in (None, "unknown"):
             facts["loop_status"] = _clean(state.get("status"), 40)
@@ -99,13 +127,9 @@ def summarize_loop(clone_path: Optional[str]) -> Optional[Dict[str, Any]]:
             facts["max_iterations"] = max_iterations
         if state.get("converged") is not None:
             facts["converged"] = bool(state.get("converged"))
-    if (loop_dir / "BLOCKER.md").exists():
+    if facts.get("loop_status") == "exhausted" and (loop_dir / "BLOCKER.md").exists():
         facts["blocker_report"] = True
 
-    try:
-        metrics = json.loads((loop_dir / "METRICS.json").read_text(encoding="utf-8"))
-    except Exception:
-        metrics = None
     if isinstance(metrics, dict):
         for key in ("total_tests", "passed_tests", "lint_errors", "type_errors",
                     "composite_score"):
@@ -142,6 +166,11 @@ def build_test_evidence_id(test_evidence: Dict[str, Any]) -> str:
         "total_tests": int(test_evidence.get("total_tests") or 0),
         "type_errors": int(test_evidence.get("type_errors") or 0),
     }
+    # Equal counts after a loop reset are a different execution. The reader
+    # already hashes the exact snapshot bytes; keep restart dedup for those
+    # same bytes, and preserve the legacy metric-only API when hash is absent.
+    if test_evidence.get("snapshot_sha256"):
+        canonical["snapshot_sha256"] = str(test_evidence["snapshot_sha256"])
     encoded = json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return f"tevd-{hashlib.sha256(encoded).hexdigest()[:16]}"
 
@@ -169,23 +198,13 @@ def extract_test_evidence(clone_path: Optional[str]) -> Optional[Dict[str, Any]]
     if not loop_dir.is_dir():
         return None
 
-    # Single-file atomic read — no cross-file consistency checks needed.
+    # Both evidence entry points consume one exact receipt. Do not re-read
+    # mutable display artifacts or the snapshot after this point.
     snap_path = loop_dir / "EVAL_DONE.json"
-    try:
-        # Parse the exact bytes that produced the evidence. Callers must not
-        # re-read EVAL_DONE.json for freshness after this point: the loop can
-        # atomically replace it between reads.
-        raw_snapshot = snap_path.read_bytes()
-        snap = json.loads(raw_snapshot.decode("utf-8"))
-    except Exception:
+    parsed = _read_loop_snapshot(loop_dir)
+    if parsed is None:
         return None
-    if not isinstance(snap, dict):
-        return None
-
-    # Require at least the iteration and total_tests fields from a full snapshot
-    # (old thin sentinels that only had {"iteration", "ts"} will miss these).
-    if "total_tests" not in snap:
-        return None
+    snap, raw_snapshot = parsed
 
     iteration = _int_or_none(snap.get("iteration")) or 0
     total_tests = _int_or_none(snap.get("total_tests")) or 0

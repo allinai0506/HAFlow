@@ -1586,3 +1586,62 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - Controller 复用 attention 事务保存有界协调恢复义务；暂停/阻塞不催办、重启复核、旧队列重新核验、独立进程去重。
 - Console stall 复用同一判定显示未派发和未采用成果。Evidence: `tests/test_workflow_continuation.py`；详见 [[task-lifecycle]]。
 - 最终评审补充：最后一个 Task superseded 后替代项缺失仍保留交接义务；3 条先红后绿回归覆盖崩溃窗口和已 notified latch。
+
+- 2026-09-30 — C26投影命名空间：默认CLI/steering导出及opt-in迁移跟随所选SQLite，显式覆盖保留；临时宿主与隔离库真实回归防写穿。详见 [[task-lifecycle]] §1.5与工程教训§91；仅本地验证，未部署。
+
+- 2026-09-30 — C06评估步骤隔离：test/lint/repro整段命令子shell、完整日志、独立cwd与真实退出码。详见 [[task-lifecycle]] §1.6；外层执行完整性C28未关闭，未部署。
+
+- 2026-09-30 — C28单次评估完整性：runner退出、唯一有效回执、新鲜日志、缓存满分否决及耗尽求助证据。详见 [[task-lifecycle]] §1.6与教训§111；C29并发串读未关闭，未部署。
+
+- 2026-09-30 — C29评估跨进程所有权：eval/init/baseline共用内核文件锁；竞争者退出75且不改产物，异常/进程退出可恢复。详见 [[task-lifecycle]] §1.6与教训§111；C27后代进程清理未关闭，未部署。
+
+- 2026-09-30 — C27本次runner进程组回收：超时/中断/异常/正常返回均在评估锁内回收；原生124保留，无关进程不受影响。详见 [[task-lifecycle]] §1.6与教训§112；不可捕获终止与主动脱离session仍属外部恢复边界，未部署。
+
+- 2026-09-30 — C05a默认npm非交互：CI=1避免继承TTY后watch挂起；真实Vitest PTY旧exit124/新exit0，显式命令保留。详见 [[task-lifecycle]] §1.6与教训§113；C05b测试范围契约未关闭，未部署。
+
+- 2026-09-30 — C27b基线入口闭环：复用evaluator受管命令生命周期，基线采集到写入持锁、超时不造基线、SIGTERM作用域内清理并恢复handler；真实进程与并发初始化回归。详见 [[task-lifecycle]] §1.6与教训§112，未部署。
+
+- 2026-09-30 — C03b仲裁事实保护：实时/重启运行信号不能抹掉内循环blocked；重启恢复队列，最新转换历史区分普通blocked与遗留metadata。详见 [[task-lifecycle]] §1与教训§114；C03c旧标记、C30非法恢复命令未关闭，未部署。
+
+- 2026-09-30 — C30恢复命令契约：仲裁卡/人工升级提示blocked→working，复用现有合法状态边；真实CLI→临时SQLite状态/历史验证，不force放行。详见 [[task-lifecycle]] §1与教训§114，未部署。
+
+- 2026-10-01 — C31初始化证据失效与历史保存：原子失效EVAL_DONE、SHA寻址历史回执、新评估身份避免ABA；同字节跨进程稳定。详见 [[task-lifecycle]] 与教训§111；2673 passed/145 subtests，仅本地验证，未部署。
+
+- 2026-10-01 — C12本地候选续接：显式完整SHA源/Clone双核对，普通未指定pin续接仍走origin；真CoW保留源WIP。127专项、2682全量/145子测试；中间旧夹具ok伪SHA失败保留并替换为原生Git，不改断言。详见 [[task-lifecycle]] 与教训§104；未部署。
+
+- 2026-10-01 — C26b复核补缺失配套输入：保留所选path，不传None回宿主；四类TEMP读/SQLite回归，显式源正常对照。12靶向/64相邻/2687全量+145子测试，378.99s；独立复审无此项阻断，未部署。详见 [[task-lifecycle]] 与教训§91。
+
+- 2026-10-01 — C27c公开初始化基线所有权收口：CLI/Task统一单锁init→采集→发布，旧债务失效，SIGTERM/超时清理；9靶向/86相邻+10子测试/2696全量+145子测试（384.91s），独立复审无此项阻断。详见 [[task-lifecycle]] 与教训§112补证；未部署。
+
+- 2026-10-01 C28c专项：执行失败不能抵扣为lint历史债务；capture拒绝、metrics与convergence独立veto覆盖旧污染baseline；合法exit1/2对照保留。89专项/10子测试通过，19失败/3对照反证，独立只读复审无新增阻断；全量2718 passed/145子测试，0失败/0跳过，387.92s；未部署。
+
+- 2026-10-01 C31b专项：归档旧回执先于current reset；故障/中断不丢字节，重试同hash幂等；12靶向、91专项/10子测试通过，撤销11 failed/1正常，独立只读复审无新增阻断。全量2730 passed/145子测试，0失败/0跳过（360.26s），未部署；历史BLOCKER过滤另卡。
+
+- 2026-10-01 C31c专项：Supervisor摘要统一现代原子快照，禁止遗留BLOCKER/陈旧显示成为当前事实；legacy absent兼容，invalid未知。106专项通过，旧10失败/2正常反证；源码冻结全量2742 passed/145子测试，0失败/0跳过（370.78s），未部署。
+
+- 2026-10-01 C34专项：修复fake key跨测试泄漏，确定性Observer不隐式模型调用；119专项通过，2失败1正常反证。C15b完整暂存，先独立测试隔离卡验收；未部署，full运行中。
+
+- C34复审后补证：修正spy覆盖/异常吞噬盲点，最终字节移除禁用1失败2正常、恢复3通过；155扩大专项通过。旧中断全量不计通过，final full冻结运行中。
+
+- C34最终：3靶向/155扩大专项、2745全量/145子测试通过，0失败0跳过405.16s；仅测试隔离本地提交，生产源码不变。下一项恢复C15b独立验收。
+
+- 2026-10-01 C15b恢复：C34单独提交后恢复ANSI parser修复，新基线13靶向通过/11失败2正常反证，原始日志字节保留；邻接/full重新运行，旧失败/中断不算通过，未部署。
+
+- C15b新基线最终：13靶向/98专项+10子测试/2758全量+145子测试通过，0失败0跳过385.08s；仅parser ANSI规范化本地提交，原日志保留。C34独立提交，旧失败全量未改写。
+
+- 2026-10-01 C28b专项：GOAL自由文本不当配置，program末尾typed requirement、唯一unambiguous legacy兼容；复审中legacy假绿已完整回归闭合。22靶向/89专项+10子测试通过，旧19失败3正常反证；冻结源全量2780 passed/145子测试，0失败/0跳过，415.65s；未部署。
+
+- 2026-10-01 C21b专项：blocked队列绑定持久转换episode，独立queue去重key保留attention原key；9失败1正常反证、10靶向通过，全量2790 passed/145子测试，0失败/0跳过，392.05s；未部署。
+
+- 2026-10-01 C13专项：冻结身份与base相同不代表无候选；零差例外必须全批spec完整身份+最新freeze+native onto exact。独立审查mixed无onto漏洞闭合，15靶向/154扩展相邻+35子测试、3失败12正常反证；最终全量2805 passed/145子测试，0失败/0跳过，380.36s；未部署。
+
+- 2026-10-01 C02专项：cap永久拒绝保存blocked并退出soft重试，原文/reason保留；暂时失败pending；CLI失败非零、Console错误、Sentinel只ok报Injected。14靶向/62扩展相邻，撤回9失败5正常，独立只读复审无新增阻断；全量2819 passed/145子测试，0失败/0跳过，382.20s；本地验证未部署。公开urgent新指令与内部同ID恢复区分，未进行真实投递。
+
+- 2026-10-01 C35a：native index锁严格身份分类、Controller专属等待预算/60秒退避、历史owner与跨进程attention CAS；25靶向及10失败15正常反证，最终相邻/full进行中。T8锁及WIP原样保留，C35b现场恢复未完成；未部署。
+
+C35a最终本地验收：25靶向通过9.20s，最终同25只撤销Controller10失败15正常6.66s；恢复冻结后67相邻通过14.52s；全量2844 passed/145 subtests passed，0失败0跳过391.46s。CLI AST、compileall、diff-check通过；独立最终只读复审无本卡新增阻断，未自行重跑suite。前轮相邻交叠和中间3失败19正常（CAS空None与{}实现错误）日志保留，不作为最终通过。所有写index命令均前后稳定实际锁身份，跨进程wait写入CAS；新owner失效只针对明确typed wait，metadata-only变更保留已有预算。仅本地代码验收，未部署；T8当前锁/legacy升级未修复，C35b仍开放。
+
+- 2026-10-01 C13b：PR127组合审查发现main125省略onto时丢pin，已用最新freeze/native HEAD等值闭合；8靶向、2失败6正常反证、40专项3子测试，独立复审通过，全量进行中。旧中止full日志保留，不能当PASS。
+
+
+C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后完整全量2871 passed、154 subtests passed、2 skipped（隔离HOME无LaunchAgent），0 failed，454.85s。两项本机只读plist检查另行2 passed（0.07s）。compileall、三入口CLI AST、diff-check通过；独立最终只读复审组合阻断闭合，未自行重跑全量。真实Agent/Worker启动、业务E2E及开放卡未因此验收。

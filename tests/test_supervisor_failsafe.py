@@ -38,7 +38,13 @@ def _clean_jev_env(test):
     saved = {}
     for key in ("JEV_API_KEY", "TYPESAFE_API_KEY"):
         saved[key] = os.environ.pop(key, None)
-    test.addCleanup(lambda: [os.environ.update({k: v}) for k, v in saved.items() if v is not None])
+    def restore():
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+    test.addCleanup(restore)
 
 
 class NoApiKeyTests(unittest.TestCase):

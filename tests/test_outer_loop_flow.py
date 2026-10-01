@@ -107,6 +107,9 @@ class OuterLoopMetricsTest(unittest.TestCase):
         evaluator_sh.write_text("""#!/bin/bash
 mkdir -p .herdr-loop/logs
 echo "1 passed in 0.01s" > .herdr-loop/logs/test.log
+# The successful replacement must provide this evaluation's quality/repro logs.
+: > .herdr-loop/logs/lint.log
+echo "1 passed in 0.01s" > .herdr-loop/logs/repro.log
 echo "TEST_EXIT=0"
 echo "LINT_EXIT=0"
 echo "REPRO_EXIT=0"
