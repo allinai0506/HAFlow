@@ -1609,3 +1609,5 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - 2026-10-01 C28c专项：执行失败不能抵扣为lint历史债务；capture拒绝、metrics与convergence独立veto覆盖旧污染baseline；合法exit1/2对照保留。89专项/10子测试通过，19失败/3对照反证，独立只读复审无新增阻断；全量2718 passed/145子测试，0失败/0跳过，387.92s；未部署。
 
 - 2026-10-01 C31b专项：归档旧回执先于current reset；故障/中断不丢字节，重试同hash幂等；12靶向、91专项/10子测试通过，撤销11 failed/1正常，独立只读复审无新增阻断。全量2730 passed/145子测试，0失败/0跳过（360.26s），未部署；历史BLOCKER过滤另卡。
+
+- 2026-10-01 C31c专项：Supervisor摘要统一现代原子快照，禁止遗留BLOCKER/陈旧显示成为当前事实；legacy absent兼容，invalid未知。106专项通过，旧10失败/2正常反证；源码冻结全量2742 passed/145子测试，0失败/0跳过（370.78s），未部署。

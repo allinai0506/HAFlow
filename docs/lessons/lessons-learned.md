@@ -5323,6 +5323,16 @@ C31b补充（2026-10-01）：
 
 **验证与关联证据**：`tests/test_loop_history_publication.py`含实际成功/耗尽回执、mkdir/write/replace/SystemExit、native CLI文件系统障碍与重试、同SHA冲突/正常复用。旧及撤销11 failed/1正常，修后12 passed；91相邻/10子测试通过；全量2730 passed/145子测试，0失败/0跳过（360.26s）；详见计划C31b。仅local未部署，C31c历史BLOCKER过滤独立待修。
 
+C31c补充（2026-10-01）：
+
+**问题背景**：extract读取原子EVAL_DONE，但collect_execution_evidence→summarize_loop仍从STATE/METRICS和BLOCKER存在性拼装事实；重置后遗留BLOCKER、显示文件写入故障或更新交错可把旧事实送入监督器。
+
+**经验教训**：旁路摘要也必须遵守相同权威来源；不能只修主读取器或只隐藏BLOCKER标记。程序读取的一份原子receipt定义当前状态/计数，历史文件存在不等于当前阻塞。
+
+**操作规范与防护**：共享best-effort单次原子reader；modern摘要仅同份receipt，current exhausted才报告BLOCKER存在。坏/薄/过深/不可读receipt返回unknown，不回退旧显示。仅absent receipt保留legacy读取契约，明确不保证legacy跨文件原子性。保留历史BLOCKER及显示文件，不声明SHA证明run归属。
+
+**验证与关联证据**：`tests/test_loop_current_summary.py`12例：真实eval/reset/collector、中途METRICS写失败、单次read后replace交错、legacy及异常解析。旧最终10 failed/2正常，106相邻通过；全量2742 passed/145子测试，0失败/0跳过（370.78s），详见计划C31c。首次2项测试对init行为假设错误已纠正，日志保留，不当产品失败证据。
+
 ## 112. 评估超时必须回收本次创建的进程组（2026-09-30）
 
 ### 问题背景

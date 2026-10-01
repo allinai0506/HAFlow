@@ -66,7 +66,7 @@
 | C21b | 旧耗尽队列跨显式恢复、普通阻塞episode误投 | A/D真实TEMP SQLite queue出口 | 已确认；检查authoritative cause与episode，不能仅status==blocked；独立提交 |
 | C28b | 自由GOAL/DoD文本伪装repro配置，绿色评估被误阻塞 | B/C独立复现；主控quoted/正常对照 | 已确认；配置读取与自由文本隔离，老合约兼容需明确；独立提交 |
 | C28c | linter未启动exit127被抵扣为历史债务并假绿 | B原生missing_linter脚本和原子回执，主控重执行一致 | 专项已验证：reserved执行失败独立veto且拒绝采集假债务；旧污染基线不能假绿；89专项/10子测试通过，19失败/3正常对照反证；全量2718 passed/145子测试，0失败/0跳过，387.92s；仅本地提交，未部署 |
-| C31c | reset后Supervisor仍把历史BLOCKER作为当前tests evidence | B临时reset→summary→collect，主控重执行一致 | 已确认；历史保留不等同当前引用，需当前状态与身份绑定；不声称已导致生产模型决策 |
+| C31c | reset后Supervisor仍把历史BLOCKER作为当前tests evidence | B临时reset→summary→collect，主控重执行一致 | 专项已验证：modern摘要单份EVAL_DONE状态/计数；仅当前耗尽BLOCKER；invalid未知不fallback，absent legacy兼容；106专项通过/反证10失败2正常；全量2742 passed/145子测试，0失败/0跳过370.78s；未部署 |
 | C15b | ANSI前缀让绿色FAIL标题被识别成失败 | B解析探针、主控1/1却score95复验 | 已确认；C15原历史修复的边界仍不完整，不混同C04日志去重；独立提交 |
 
 ## 执行计划与检查点
@@ -132,3 +132,7 @@ C28c最终：全量2718 passed/145 subtests passed，0 failed/0 skipped（387.92
 C31b验收中：实际旧成功/耗尽回执×history mkdir/write/replace/SystemExit故障；native CLI history被文件阻挡和重试；同hash冲突及已存在相同回执。旧11 failed/1正常，修后12 passed（6.80s），撤销核心11 failed/1正常（13.47s）；恢复精准字节后91专项/10子测试（35.20s）。独立评审遇反证暂时撤销时明确停止当前候选结论，恢复后重新只读核对，无本卡新增阻断；不将历史BLOCKER过滤C31c混入本卡。全量运行，源码冻结。
 
 C31b最终：源码冻结全量2730 passed/145 subtests passed，0 failed/0 skipped（360.26s），exit0；compileall、两CLI AST、diff-check通过。仅本地提交，不部署、不改live状态；下一项C31c。
+
+C31c验收中：先真实eval/reset发现历史BLOCKER误报；首次测试误以为init保留METRICS，2项自测假设错误已纠正并保留旧日志，不计产品根因。实际METRICS写入失败会留下旧显示状态/计数；另有current单次read后replace可控交错。modern摘要与extract复用原子reader，坏/薄/深层/不可读快照unknown不回退，只有absent快照legacy保留兼容；BLOCKER只在当前exhausted报告存在。原版最终12用例10 failed/2正常（6.22s），相邻106 passed（18.67s）；源恢复冻结，靶向及全量进行中。
+
+C31c最终：恢复精准源码后22定向passed（6.38s），106相邻passed（18.67s）；全量2742 passed/145 subtests passed，0 failed/0 skipped（370.78s），exit0；compileall/diff-check通过。独立最终只读复审无本卡新增阻断，未自行重跑；仅local提交，未部署。
