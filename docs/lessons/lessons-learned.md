@@ -5271,7 +5271,99 @@ print(node_is_complete(allt, req))   # 期望 True
 - `herdr/direct_dispatch.py::lineage_redispatch_candidates` — 谱系补派去重
 - `tests/test_stage_advance_and_supersede.py` — 7 条新回归
 
-## 110. 评估命令的重定向和目录隔离必须覆盖整个步骤（2026-09-30）
+## 110. `--onto` 指向未推送的任务分支，test/review 派发必然失败（2026-09-30）
+
+### 问题背景
+
+§109 修好补派断链后，`wf-project-0929-01` 推进到 test/review，却立刻出现另一层卡点。
+controller 日志反复刷：
+
+```
+[DIRECT DISPATCH ERROR] task=wf-project-0929-01-test-auto: Onto branch not found on origin: agent/opencode/feat-impl-t7-integration-gates-r2
+```
+
+`test-...` 与 `test-...-r5` 两条任务在 `pending` 阶段就带
+`failure_reason=router_isolation_rejected` 死掉，从未真正执行。
+
+### 根因：`--onto` 承载了两个语义，只有一种被校验
+
+1. **语义 A（fix-loop 续接）**：`bin/herdr-task:2877-2900` 要求 `--onto` 必须存在于
+   `refs/remotes/origin/`，注释写明"任务必须落在既有分支（如开放中的 PR 分支）上"。
+2. **语义 B（测候选交付物）**：`herdr/direct_dispatch.py::candidate_branch_for_node`
+   取依赖节点里 `updated_at` 最新的**任务分支**作为 onto。
+
+controller 一律走语义 B，却撞上语义 A 的校验。而该工作流的 9 个
+`integration_mode=git` 任务**全部已 `cleaned`** —— 交付物早已合入 base
+`agent/gemini-init`（HEAD = `5d3d615e0`），**而任务分支从未推送到 origin**
+（连 base 都没有）。于是 onto 指向一个 origin 上不存在的本地分支，
+launch 必然 `exit 2`。
+
+反证很直接：同一工作流里手工 `herdr-task launch`（不带 `--onto`）的
+`test-...-r6` 成功落地，且 `base_branch=agent/gemini-init`、
+`baseline_commit=5d3d615e07ab` 正是合入 base 的交付点 —— 证明"落在 base 上测"
+才是正确形态。
+
+另注：日志里的 `router_isolation_rejected` 与本条**无关**，那是真实的 router 失败
+（`test-...` 是 agent 复用策略拒绝，`r5` 是 `claude` deep preflight 失败），
+由 `bin/herdr-task::_record_router_failure_task` 在 `choose_agent` 抛错时写入。
+排查时必须看 `failure_detail` 而非 `failure_reason` 标签。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 一个参数承载两种语义 | `--onto` 同时用于"续接外部 PR 分支"和"测本地候选交付物"，但只用一种校验 | 同一参数承载多语义时，校验必须覆盖全部语义；否则要么加参数区分，要么按语义分流 |
+| 交付物已合入 base，却仍让 test 指向任务分支 | 任务分支是**过程产物**，base 才是**交付目标**；已 integrate 的任务，其 onto 不应是它的过程分支 | 候选分支计算必须区分"交付未完成"与"交付已完成"：前者用任务分支（fix-loop 需续接），后者用 base |
+| 回退到本节点分支引入新错误 | 只加"跳过已交付依赖"后，onto 变成 `agent/pi/test-...-r6`（本节点正在跑的任务分支），同样未被推送、同样失败 | 修一半比不修更危险：回退路径必须一并纳入语义判断，并留测试覆盖 |
+| 测试用假分支名导致假通过 | 夹具里写 `agent/pi/test-test-...-r6`（含 `...`）被 `sanitize_branch_name` 静默过滤，断言"返回 None"假通过 | 夹具必须用**真实形态**的标识；断言前先验证夹具数据真的能通过被测路径的前置过滤 |
+
+### 操作规范（已固化到源码与回归）
+
+1. **`candidate_branch_for_node` 新增 `delivered_in_base` 语义**：
+   - `True` 且依赖为 `integration_mode=git` 且状态 ∈ {integrated, cleanup_ready, cleaned}
+     → 跳过该任务分支（交付物已在 base）；
+   - 依赖全部交付时**不**回退到本节点分支，返回 `None` 让任务落在 base；
+   - 未交付依赖（working / blocked / failed 等）仍取其任务分支 —— fix-loop 依赖此行为；
+   - 未传该参数时**保持原行为**，不静默改变既有调用方。
+2. **controller 传 `delivered_in_base=True`**（`services/herdr-controller.py`），
+   因为它算的是"要测的候选交付物"，前提就是交付已进入 base。
+3. **判失败原因看 `failure_detail`**：`failure_reason` 是粗粒度标签，
+   `router_isolation_rejected` 这类标签可能出现在与 router 无关的路径上。
+
+### 验证命令 / 关联证据
+
+```bash
+# 5 条新回归：全交付→None / 未交付→仍用任务分支 / 不回退本节点 /
+#             legacy 调用不变 / 覆盖三种 git 交付状态
+python3.13 -m pytest -q tests/test_dispatch_candidate.py
+# 期望：17 passed, 3 subtests passed
+
+# 真实数据复算候选分支
+python3.13 -c "
+import sys; sys.path.insert(0,'.')
+from herdr.state_store import get_state_store
+from herdr import direct_dispatch as dd
+s = get_state_store(); tasks = s.list_tasks('wf-project-0929-01')
+for n in ('test', 'review'):
+    print(n, dd.candidate_branch_for_node(tasks, 'wf-project-0929-01', n,
+                                          ['implementation'], delivered_in_base=True))
+"
+# 修复前：agent/opencode/feat-impl-t7-integration-gates-r2  (origin 无 → exit 2)
+# 修复后：None  (落在 base agent/gemini-init @ 5d3d615e0)
+```
+
+**反向验证**：`test_does_not_fall_back_to_own_node_branch` 使用真实形态分支名
+（`agent/pi/test-test-unified-task-workbench-v1-r6`）才使该断言真正有效 ——
+首版夹具用含 `...` 的假名被 `sanitize_branch_name` 过滤，测试假通过，
+被真实数据复算（仍返回 r6 分支）当场暴露。
+
+### 相关文档 / 关联证据
+- `herdr/direct_dispatch.py::candidate_branch_for_node` — 新增 `delivered_in_base`
+- `services/herdr-controller.py` — 传 `delivered_in_base=True`
+- `bin/herdr-task:2877-2900` — onto 的 origin 校验（fix-loop 语义，未改）
+- `tests/test_dispatch_candidate.py` — 5 条新回归 + 1 条修正为真实形态的夹具
+
+## 110A. 评估命令的重定向和目录隔离必须覆盖整个步骤（2026-09-30）
 
 ### 问题背景
 `wf-project-0929-01` 的评估入口允许 `cd ... && ...` 等复合命令。模板直接拼接 `> log 2>&1`，只重定向最后一条简单命令；前半段输出丢在runner stdout，cd影响lint，exit可跳过后续检查。
