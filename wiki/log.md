@@ -1629,3 +1629,7 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - 2026-10-01 C13专项：冻结身份与base相同不代表无候选；零差例外必须全批spec完整身份+最新freeze+native onto exact。独立审查mixed无onto漏洞闭合，15靶向/154扩展相邻+35子测试、3失败12正常反证；最终全量2805 passed/145子测试，0失败/0跳过，380.36s；未部署。
 
 - 2026-10-01 C02专项：cap永久拒绝保存blocked并退出soft重试，原文/reason保留；暂时失败pending；CLI失败非零、Console错误、Sentinel只ok报Injected。14靶向/62扩展相邻，撤回9失败5正常，独立只读复审无新增阻断；全量2819 passed/145子测试，0失败/0跳过，382.20s；本地验证未部署。公开urgent新指令与内部同ID恢复区分，未进行真实投递。
+
+- 2026-10-01 C35a：native index锁严格身份分类、Controller专属等待预算/60秒退避、历史owner与跨进程attention CAS；25靶向及10失败15正常反证，最终相邻/full进行中。T8锁及WIP原样保留，C35b现场恢复未完成；未部署。
+
+C35a最终本地验收：25靶向通过9.20s，最终同25只撤销Controller10失败15正常6.66s；恢复冻结后67相邻通过14.52s；全量2844 passed/145 subtests passed，0失败0跳过391.46s。CLI AST、compileall、diff-check通过；独立最终只读复审无本卡新增阻断，未自行重跑suite。前轮相邻交叠和中间3失败19正常（CAS空None与{}实现错误）日志保留，不作为最终通过。所有写index命令均前后稳定实际锁身份，跨进程wait写入CAS；新owner失效只针对明确typed wait，metadata-only变更保留已有预算。仅本地代码验收，未部署；T8当前锁/legacy升级未修复，C35b仍开放。

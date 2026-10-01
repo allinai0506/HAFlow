@@ -4055,6 +4055,46 @@ def launch_task(args):
         sys.exit(75)
 
 
+def _run_commit_index_command(task_id, clone, command):
+    """Report native index contention without claiming or removing the lock."""
+    def native_lock():
+        resolved = subprocess.run(
+            ["git", "-C", clone, "rev-parse", "--path-format=absolute", "--git-path", "index"],
+            text=True, capture_output=True, check=False,
+        )
+        return Path(resolved.stdout.strip() + ".lock") if resolved.returncode == 0 and resolved.stdout.strip() else None
+
+    def identity(path):
+        try:
+            stat = path.stat()
+            return (stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_size)
+        except (OSError, AttributeError):
+            return None
+
+    # Both add (clean filters) and commit (hooks) include external stderr.
+    # Text alone is not a native lock receipt. Require the same lock before
+    # and after the command; disappeared/replaced locks retain error budget.
+    before_path = native_lock()
+    before_identity = identity(before_path) if before_path else None
+    result = subprocess.run(command, text=True, capture_output=True, check=False)
+    if result.stdout:
+        print(result.stdout, end="")
+    if result.stderr:
+        print(result.stderr, end="", file=sys.stderr)
+    if result.returncode:
+        lock_path = native_lock()
+        expected = f"fatal: Unable to create '{lock_path}': File exists."
+        verified = (before_identity is not None
+                    and lock_path == before_path
+                    and identity(lock_path) == before_identity)
+        if lock_path is not None and verified and expected in result.stderr.splitlines():
+            print("HERDR_COMMIT_RESULT=" + json.dumps({
+                "task_id": task_id, "result": "wait", "reason": "git_index_lock",
+            }))
+            sys.exit(75)
+    return result
+
+
 @_with_git_operation_lock()
 def commit_task(task_id, message=None):
     data = load_tasks()
@@ -4151,29 +4191,16 @@ def commit_task(task_id, message=None):
 
     # tracked 文件在 Task 创建前要求 clean，
     # 因此当前 tracked 修改全部属于该 Task。
-    subprocess.run(
-        [
-            "git",
-            "-C",
-            clone,
-            "add",
-            "-u"
-        ],
-        check=True
-    )
+    staged_update = _run_commit_index_command(task_id, clone, ["git", "-C", clone, "add", "-u"])
+    if staged_update.returncode:
+        raise subprocess.CalledProcessError(staged_update.returncode, staged_update.args,
+                                            staged_update.stdout, staged_update.stderr)
 
     if task_untracked:
-        subprocess.run(
-            [
-                "git",
-                "-C",
-                clone,
-                "add",
-                "--",
-                *task_untracked
-            ],
-            check=True
-        )
+        staged_new = _run_commit_index_command(task_id, clone, ["git", "-C", clone, "add", "--", *task_untracked])
+        if staged_new.returncode:
+            raise subprocess.CalledProcessError(staged_new.returncode, staged_new.args,
+                                                staged_new.stdout, staged_new.stderr)
 
     # 必须确实存在 staged changes
     staged = subprocess.run(
@@ -4197,18 +4224,7 @@ def commit_task(task_id, message=None):
     if message is None:
         message = f"task: {task_id}"
 
-    result = subprocess.run(
-        [
-            "git",
-            "-C",
-            clone,
-            "commit",
-            "-m",
-            message
-        ],
-        text=True,
-        check=False
-    )
+    result = _run_commit_index_command(task_id, clone, ["git", "-C", clone, "commit", "-m", message])
 
     if result.returncode != 0:
         print(

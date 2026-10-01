@@ -5448,3 +5448,14 @@ C30追加验证：`tests/test_blocked_recovery_command_contract.py`提取真实�
 **修复与预防**：新请求先检查既有能力，不支持保存blocked与原文/原因/count0；legacy pending首次拒绝后blocked并保留唯一失败history，后续soft扫描不再选择。暂时失败继续pending。CLI失败非零、Console明确失败、Sentinel仅ok才记录Injected；不修改Agent能力、不将软指令自动升级打断。
 
 **验证与关联证据**：tests/test_steering_permanent_failure.py 14项通过，62扩展相邻通过，全量见C02计划；已有unsupported测试更新为更强立即拒绝/保留原文/0TTY断言。内部同ID显式urgent恢复只有受控Mock外部边界证据；公开CLI/Console急送创建新指令，不能宣称原ID公开自动恢复。没有真实Agent调用，没有处理live历史队列，暂时失败与跨Run语义各自保留边界。
+
+
+## 116. Git 锁等待不等于失败预算，错误文本不证明锁身份
+
+**现象与影响**：已完成T8因index.lock存在连续提交失败，普通finalize预算耗尽后持久升级，即使外部锁后来消失也不再自动推进。
+
+**根因与证据**：native add的锁冲突未分类，CalledProcessError作为通用提交错误；重试驱动不区分等待和质量失败。临时原生普通/linked Git、真实CLI/SQLite与Controller复现；同时独立审查证明hook和clean filter可输出精确fatal文本而没有实际外来锁，不能仅凭stderr免预算。
+
+**修复与预防**：仅命令前后稳定实际native index锁身份+精确原生错误给结构wait/rc75。专属wait不增加普通错误次数，持久60秒退避；以Run/持久转换episode识别当前完成周期，既有EpisodeStore文件锁CAS保护等待写入和旧owner失效，metadata保存不抹错误预算。不删除/移动锁，不自动翻案legacy通用升级。
+
+**验证与关联证据**：tests/test_finalize_git_index_wait.py 25项；真实受控TEMP锁超过5轮不耗预算、锁/HEAD/index/tracked/untracked保留，夹具释放锁后实际Controller在due前不动、due后通过真实CLI将原Task提交；integration用受控busy替身，非真实集成验收。包含独立进程attention竞争、两个stderr伪装、GIT_INDEX_FILE、历史新owner与metadata对照。最终Controller反证10失败15正常；相邻/full见C35a计划。实盘锁创建者未知，当前升级仍需单独安全恢复；两个持久存储和外部Git没有共同事务，不承诺最后读后所有竞态已消除。

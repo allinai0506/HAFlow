@@ -160,3 +160,10 @@ C13全量接线修正：初次最终full14 failed/2791 passed/145 subtests(367.3
 C02验收中：新capability永久拒绝不进入无限pending，保存blocked与原指令/reason/count0；legacy pending首次处置后blocked/count1/history1，后续自动扫描无新尝试。Unknown adapter也明确拒绝，capability和Task业务状态不被改写，不自动升urgent。no-pane/暂时inject失败保留pending重试。CLI失败exit1和STEER_FAILED、真实Console JS内部ok:false错误反馈、实际Sentinel两轮不输出Injected。旧4核心文件最终反证9失败/5正常1.21s，修后14靶向1.08s/46相邻4.69s，compileall/Task CLI AST/diff通过；源冻结full中。独立只读复审无本卡新增阻断，但按ID重投只内部dispatch_steer_now，公开CLI/Console urgent是新指令，不能宣称公开自动恢复同ID。真实Agent投递与历史live9条队列未操作，pending不同Run/并发事务仍需各自证据，不以本卡冒充完整工作流验收。
 
 C02夹具契约修正：首次full2 failed/2817 passed/145 subtests(377.95s)，不是PASS。两项排队用例使用opencode却期待正常入队；只改其成功入队场景为支持soft的codex，提示词净化和所选DB投影所有原断言保持，projection其他opencode场景不改；新增未知adapter拒绝断言仍保留。主控首次口头把原因说成缺Agent身份，读源后明确纠正为已知unsupported opencode，不把错误假设写入根因。独立只读复审确认两夹具未放宽，生产和14靶向字节不变；扩展62 passed(13.75s)，最终冻结全量2819 passed/145子测试，0失败/0跳过，382.20s。
+
+
+C35拆分：增量8文件逐行索引14774行（14116与workflow/task关联，非均有Run戳），累计覆盖887980行，245归一化family逐项归卡。T8 canonical completed仍未commit；6次native add-u因index.lock已存在失败，后retry_exhausted停止推进。clone独立Git元数据早于锁约22分钟，排除复制锁；锁创建者unknown，agy只读句柄不是写入所有权证据。当前锁/WIP原样保留，不解除legacy升级。C36只有一次空动作被拒日志，请求归属不足，仍待证，不擅自标缺陷。
+
+C35a本地修复：Task CLI仅在native实际index.lock路径、命令前后稳定dev/inode/mtime/size、精确File exists时给同Task结构wait/rc75；add clean filter与commit hook的混合stderr不能单凭文本免预算。Git自身解析index并追加.lock，支持linked及GIT_INDEX_FILE。Controller只专属同task marker免普通失败预算，60秒退避；等待持久绑定历史转换episode，metadata-only版本变更不重置旧失败，新Run/新完成周期不继承typed旧等待；EpisodeStore跨进程CAS避免晚写覆盖新记录。通用busy/错误/门禁、legacy未知升级保留原策略。25靶向通过9.20s；最终撤回Controller10失败/15正常6.66s。前轮相邻与反证时间交叠不计最终，源码恢复后重新相邻/full；最新验收待追加。C35b遗留锁和已升级任务现场恢复未闭环，不将TEMP夹具释放锁当真实恢复。
+
+C35a最终本地验收：25靶向通过9.20s，最终同25只撤销Controller10失败15正常6.66s；恢复冻结后67相邻通过14.52s；全量2844 passed/145 subtests passed，0失败0跳过391.46s。CLI AST、compileall、diff-check通过；独立最终只读复审无本卡新增阻断，未自行重跑suite。前轮相邻交叠和中间3失败19正常（CAS空None与{}实现错误）日志保留，不作为最终通过。所有写index命令均前后稳定实际锁身份，跨进程wait写入CAS；新owner失效只针对明确typed wait，metadata-only变更保留已有预算。仅本地代码验收，未部署；T8当前锁/legacy升级未修复，C35b仍开放。

@@ -477,3 +477,8 @@ Evidence:
 `FACT` Controller零差预检允许最新冻结full SHA与全批spec pin/onto、native onto commit完全一致的候选；无冻、缩写、旧pin、混批缺onto身份仍拒绝。差异计数不替代候选身份；未知Git保留既有策略，TaskCLI/Worker复验保持，C13本地未部署。
 
 `FACT` 永久soft能力拒绝是steer队列blocked，不是Task业务blocked；原文与last_delivery_error保留，自动soft扫描跳过，暂时no-pane/inject失败仍pending。CLI/Console/Sentinel明确反馈失败。内部按ID显式urgent与公开新urgent不是同一入口，未验证真实投递；C02本地未部署。
+
+
+### 2026-10-01：原生 index 锁等待（C35a，本地未部署）
+
+Task commit对actual native index路径的稳定外来锁冲突给HERDR_COMMIT_RESULT wait/git_index_lock及75；所有index写入均核对命令前后身份，hook/filter stderr不等于锁证明。Controller只同Task专属标记写60秒等待，不增普通失败预算；typed owner基于Run和持久状态转换，metadata不另起失败周期。EpisodeStore文件锁CAS保留并发新记录；未知/门禁与legacy升级不自动解除。未操作真实T8锁、没有真实集成，不能据此标工作流完成。

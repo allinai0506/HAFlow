@@ -5712,6 +5712,17 @@ def _check_finalize_retry(task, status, now):
         _finalize_retry_exhausted_logged.discard(task_id)
         return False
     key = f"{task_id}:finalize"
+    owner_episode = blocker_queue_episode(task)
+    def expire_owned_wait(current):
+        detail = current.get("detail") or {}
+        if (current.get("reason") == "git_index_lock"
+                and isinstance(detail, dict) and detail.get("owner_episode")
+                and detail["owner_episode"] != owner_episode):
+            return {"__replace__": {}}
+        return None
+    # Only newly typed waits have a trustworthy owner. Never reset generic
+    # failures or legacy escalations; metadata-only saves retain history ID.
+    _attention_store.mutate(key, expire_owned_wait)
     # P1 recovery coherence: `herdr-task clear-escalation` (or any external
     # recovery) removes the shared attention episode from another process.
     # The in-memory exhausted latch must follow the episode: otherwise a
@@ -5745,6 +5756,7 @@ def _check_finalize_retry(task, status, now):
         return True
     if not retry:
         return False
+    wait_episode_before = attention_get(key) or {}
     try:
         outcome = finalize_completed_task(task_id)
     except (OSError, RuntimeError, ValueError, KeyError,
@@ -5758,6 +5770,32 @@ def _check_finalize_retry(task, status, now):
         _escalate_finalize(get_task(task_id) or task,
                            "finalize_subprocess_error",
                            {"error": f"{type(exc).__name__}: {exc}"[:500]})
+        return True
+    if (isinstance(outcome, dict) and outcome.get("kind") == "wait"
+            and outcome.get("reason") == "git_index_lock"
+            and outcome.get("budgeted") is False):
+        fresh = get_task(task_id)
+        if (fresh and fresh.get("status") == status
+                and fresh.get("run_id") == task.get("run_id")
+                and fresh.get("version") == task.get("version")):
+            def persist_wait(current):
+                # Cross-process CAS under the existing EpisodeStore lock:
+                # do not overwrite an episode another driver changed while
+                # the CLI or the authoritative task read was in flight.
+                if current != wait_episode_before:
+                    return None
+                episode = dict(current or {})
+                episode.update(task_id=task_id, workflow_id=fresh.get("workflow_id"),
+                               event_type="finalize", reason="git_index_lock",
+                               attempts=int(episode.get("attempts") or 0),
+                               last_attempt_at=time.time(), next_retry_at=now + 60,
+                               detail={"run_id": fresh.get("run_id"), "version": fresh.get("version"),
+                                       "owner_episode": owner_episode})
+                episode.setdefault("first_seen_at", time.time())
+                return episode
+            _attention_store.mutate(key, persist_wait)
+        # A late result must not clear or overwrite another run/transition's
+        # shared-key episode. Leave its current owner to drive recovery.
         return True
     retryable = True
     if isinstance(outcome, dict) and "retryable" in outcome:
@@ -5919,6 +5957,11 @@ def finalize_completed_task(task_id):
                     f"task={task_id} "
                     f"reason=git_busy retry later"
                 )
+                if (commit_payload.get("task_id") == task_id
+                        and commit_payload.get("result") == "wait"
+                        and commit_payload.get("reason") == "git_index_lock"):
+                    return {"retryable": True, "kind": "wait", "rc": 75,
+                            "reason": "git_index_lock", "budgeted": False}
                 return {"retryable": True, "kind": "wait", "rc": 75}
             elif result.returncode != 0:
                 print(
