@@ -2,6 +2,7 @@
 
 import json
 import hashlib
+import re
 import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -3232,10 +3233,11 @@ DIRECT_DISPATCH_LAUNCH_TIMEOUT = 300
 SUPERVISOR_VERIFY_DISPATCH_TIMEOUT = 120
 
 
-def _dispatch_candidate_ready(project_root, base_branch, specs):
+def _dispatch_candidate_ready(project_root, base_branch, specs, workflow_id=None):
     """候选非空预检:onto 分支相对基线无提交时拒绝派发(转总指挥)。
 
-    r6 曾直派测试 main 空候选并恒 blocked，白烧内环。未知情况
+    r6 曾直派测试 main 空候选并恒 blocked，白烧内环。已冻结完整SHA
+    同时匹配spec pin与实际onto时，等于基线不代表空候选。未知情况
     （缺 refs、git 失败）一律 fail-open 照常派发。
     """
     ontos = sorted(
@@ -3267,6 +3269,28 @@ def _dispatch_candidate_ready(project_root, base_branch, specs):
         if is_empty:
             empty += 1
     if checked and empty == checked:
+        frozen = _scheduler_current_frozen_candidate_sha(workflow_id) if workflow_id else ""
+        if re.fullmatch(r"[0-9a-f]{40}", frozen) and all(
+            spec.get("onto_branch") and spec.get("candidate_sha") == frozen
+            for spec in specs
+        ):
+            proven = True
+            for onto in ontos:
+                try:
+                    resolved = subprocess.run(
+                        ["git", "-C", project_root, "rev-parse", "--verify",
+                         f"{onto}^{{commit}}"],
+                        text=True, capture_output=True, timeout=10,
+                    )
+                except Exception:
+                    return True  # Preserve the existing unknown-Git policy.
+                if resolved.returncode != 0:
+                    return True
+                if resolved.stdout.strip() != frozen:
+                    proven = False
+                    break
+            if proven:
+                return True
         print(
             f"[DIRECT DISPATCH CANDIDATE EMPTY] "
             f"onto={','.join(ontos)} has no commits beyond {base} "
@@ -4104,7 +4128,7 @@ def try_direct_stage_advance(item):
         return False
 
     if not _dispatch_candidate_ready(
-        project_root, project_ctx.get("base_branch"), specs
+        project_root, project_ctx.get("base_branch"), specs, workflow_id=workflow_id
     ):
         return False
 

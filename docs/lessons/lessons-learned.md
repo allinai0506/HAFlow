@@ -5428,3 +5428,13 @@ C30追加验证：`tests/test_blocked_recovery_command_contract.py`提取真实�
 **修复与预防**：复用持久workflow/run/status_history长度与最新转换生成episode；无history旧行保守绑定版本。blocked类队列携带并逐轮核对episode和当前cause，去重queue_key独立带episode；attention沿用原key，不改变既有重试存储。旧消费只释放自己queue_key。构造消息后、发送前再读核对；未知legacy版本变更丢旧权威时，安全补排当前持久blocked，不能因保守判未知造成永久漏仲裁。
 
 **验证与关联证据**：tests/test_blocker_queue_episode.py 10项全部通过，最终反证9失败/1正常；相邻结果见计划；全量见计划C21b。仅本地代码，未部署。外部prompt与数据库转换不属于同一事务，不能声称此修复消除最后一次读到发送之间所有并发窗口；历史事实仍需保留，未知legacy不能凭状态名推断连续性。
+
+## 114. 候选身份不能用相对基线新增提交数替代
+
+**现象与影响**：已冻结候选恰好在base或已被合流时，rev-list base..onto为零，Controller反复拒绝后续测试/评审派发；既有日志出现10次候选空差提示。
+
+**根因与证据**：差异数只说明分支关系，不说明该提交是否为已确认待验证候选。真实TEMP Git和SQLite冻结事实经实际Controller入口到Mock TaskCLI，原版最终3失败/12正常对照；正常冻结base、latest轮换回同SHA和双onto合法批次均被拒。
+
+**修复与预防**：仅在已有零差判断时复用最新冻结台账，要求严格完整40位SHA、每条spec有onto且pin完全一致，再逐onto native commit与frozen匹配。初版遗漏无onto同批spec，独立评审证明会启动无pin Task，回归后收紧all；不改非空与未知Git既有策略，不删除空分支保护。
+
+**验证与关联证据**：tests/test_frozen_base_candidate_dispatch.py 15项，通过真实冻结轮换/跨workflow隔离/短pin/旧spec/onto不匹配/混批缺身份/双onto正例，154扩展相邻和35子测试通过，全量见C13计划；旧fixture接线14项TypeError单行兼容修正，未放宽断言。仅本地未部署，TaskCLI/Worker现有复验仍需执行；冻结读取与外部launch非原子，不用本卡冒充所有并发原子保证。

@@ -32,7 +32,7 @@
 | C10 | 显式codex/claude派发被健康/隔离门禁拒绝 | events6250/8127/8155，TOKEN_EXHAUSTED/ERROR | 保护正确；错误码empty_review_pool对实现也使用需修；恢复路由选实际合格Agent，不擅自绕隔离 |
 | C11 | delivery note多条候选，test-r2/r3启动被拒 | test_baseline_rejected8129/8131 | 门禁正确；唯一交付登记需由主控自动收敛，旧历史不能删除来凑pass |
 | C12 | 本地Task分支不存在origin，--onto派发失败 | controller.out643878/643921 | 已证实；核对launch和candidate快照边界，临时Git无网络回归 |
-| C13 | onto==base被判无新提交，反复退回协调器 | DIRECT DISPATCH CANDIDATE EMPTY 10次 | 待验证；SHA身份与差异基线不可混淆，尤其文档节点与已合流节点 |
+| C13 | onto==base被判无新提交，反复退回协调器 | DIRECT DISPATCH CANDIDATE EMPTY 10次 | 专项已验证：最新冻结full SHA+每条spec onto/pin+native onto commit一致允许零差；未冻结/旧pin/无onto仍拒绝；15靶向、154扩展相邻/35子测试；撤回3失败12正常；全量2805 passed/145子测试，0失败/0跳过，380.36s；本地验证未部署 |
 | C14 | CoW从worktree复制.git指针，Clone共享HEAD/index | recovery20260930-103536与既有恢复文档 | 历史已修复；逐Task检查独立Git元数据与branch归属 |
 | C15 | 用例名FAIL被误判真实失败，耗尽内循环 | 历史evaluator修复 / 恢复文档 | 已进入main；保留定向回归，不重复打补丁 |
 | C16 | runtime done未当settled导致early/busy误判 | 1223 early_done_signal、PR119恢复 | 历史已修复；区分修复前事件与当前done/working真实切换 |
@@ -152,3 +152,7 @@ C15b最终新基线验收：13靶向passed（0.73s），撤销11 failed/2正常�
 C28b验收中：原scanner全GOAL误把自由goal/DoD例子当repro。旧19用例17 failed/2正常；新20原生CLI例target20，撤销18 failed/2正常。独立审查发现中间rpartition reader对合法multiline repro中的假配置区块会错误false；主控完整遗漏runner→EVAL_DONE回归1 failed证明中间假绿。最终new typed末尾bool由program repro_cmd产生，raw命令不改；legacy只唯一完整单行已知字段，重复/缺/坏配置goal_configuration_invalid，不能猜最后区块。添加Bash -n合法证明与modern同literal正向实际repro，新22 targetpassed9.87s、撤销19 failed/3正常9.53s；89专项/10子测试29.13s，compileall/CLI AST/diff通过，独立最终只读复审无新增阻断。冻结源全量2780 passed/145子测试，0失败/0跳过，415.65s；legacy歧义需re-init而非pretend全部旧手写Markdown兼容；未对live clone操作。
 
 C21b审查闭合：首版7靶向/55相邻通过；评审发现消息build期间恢复仍投旧卡，新增2项失败后补发送前再读。legacy无history只version保守身份会因metadata save丢仲裁，新增1失败/9正常后补按当前持久blocked排队，去重仍按episode。最终10靶向0.84s，精确撤回production最终9失败/1正常1.32s。首次full因评审停在598 passed/85子测试、KeyboardInterrupt/exit2（71.57s），不计PASS；首次相邻误写不存在文件exit4/no tests保留。最终源恢复冻结全量2790 passed/145子测试，0失败/0跳过，392.05s；58相邻9.05s，独立最终复审无新增阻断。跨DB到外部prompt仍非原子事务，不声称消除所有最后读到发送窗口；本卡实证关闭等待和build期间失效，以及legacy丢失可达性。未部署。
+
+C13验收中：真实TEMP Git/SQLite→try_direct_stage_advance→Mock TaskCLI，原合法冻结base被rev-list零提交拒绝1 failed/1正常。修复早期缺re import导致2项NameError，自测发现纠正，保留日志不计PASS。独立审查找到mixed batch中无onto/no-pin规格漏检，新增三边界中2失败/12正常；外层all每条spec都有onto且完整pin==latest frozen后闭合，再逐onto native exact commit核对。最终15靶向3.31s、137相邻/35子测试8.32s；精确撤回production3失败/12正常3.11s。首次full因独立审查停在214 passed/9子测试、KeyboardInterrupt/exit2(31.14s)不计PASS；最终冻结full运行中，独立最终只读复审无新增阻断。未知Git仍按原fail-open，未冻结且已知零差仍拒绝；不是放宽TaskCLI/Worker候选复验，不承诺冻结读取到launch跨进程原子。
+
+C13全量接线修正：初次最终full14 failed/2791 passed/145 subtests(367.30s)，全部test_reverification_controller原fixture三参lambda不接受新增workflow_id，明确不是PASS。只为该恒True替身增加workflow_id=None形参，原返回值和断言不变；独立只读复审确认生产字节未变。扩展相邻154 passed/35 subtests(28.40s)，最终完整full2805 passed/145子测试，0失败/0跳过，380.36s。早期137相邻记录保留，仅用于当时范围；最终以154和2805/145的重跑full为准。

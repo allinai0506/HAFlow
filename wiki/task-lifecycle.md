@@ -473,3 +473,5 @@ Evidence:
 `FACT` 显式完整candidate SHA匹配本地--onto分支时，launch可接受未发布候选，并将同pin传给Worker；Worker在独立Clone检出前后重新核对。无pin续接仍要求origin，符号/缩写pin与移动分支拒绝，所有权/后续交付门禁保留。证据：`tests/test_pinned_local_onto.py`（C12，最终2682 passed/145 subtests，本地验证，未部署）。
 
 `FACT` blocked/inner_loop_exhausted队列逐轮验证workflow/run及status_history转换episode、当前cause；恢复再阻塞不得消费旧事件，同episode metadata更新不失效，旧queue清理不得解除新episode去重。legacy无history保守版本绑定；本地C21b，未部署。
+
+`FACT` Controller零差预检允许最新冻结full SHA与全批spec pin/onto、native onto commit完全一致的候选；无冻、缩写、旧pin、混批缺onto身份仍拒绝。差异计数不替代候选身份；未知Git保留既有策略，TaskCLI/Worker复验保持，C13本地未部署。

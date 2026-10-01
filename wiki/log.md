@@ -1625,3 +1625,5 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - 2026-10-01 C28b专项：GOAL自由文本不当配置，program末尾typed requirement、唯一unambiguous legacy兼容；复审中legacy假绿已完整回归闭合。22靶向/89专项+10子测试通过，旧19失败3正常反证；冻结源全量2780 passed/145子测试，0失败/0跳过，415.65s；未部署。
 
 - 2026-10-01 C21b专项：blocked队列绑定持久转换episode，独立queue去重key保留attention原key；9失败1正常反证、10靶向通过，全量2790 passed/145子测试，0失败/0跳过，392.05s；未部署。
+
+- 2026-10-01 C13专项：冻结身份与base相同不代表无候选；零差例外必须全批spec完整身份+最新freeze+native onto exact。独立审查mixed无onto漏洞闭合，15靶向/154扩展相邻+35子测试、3失败12正常反证；最终全量2805 passed/145子测试，0失败/0跳过，380.36s；未部署。
