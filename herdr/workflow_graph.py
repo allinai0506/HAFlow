@@ -149,7 +149,7 @@ def workflow_graph_projection(
         completed = sum(1 for t in live if str(t.get("status")) in COMPLETED_LIKE)
         failed = sum(1 for t in live if str(t.get("status")) == "failed")
         blocked = sum(1 for t in live if str(t.get("status")) == "blocked" or str(t.get("stage_verdict") or "") == "blocked")
-        active = len(live) - completed
+        active = sum(1 for t in live if str(t.get("status")) in WORKING_LIKE or str(t.get("status")) == "rework")
         has_attention = status in {"blocked", "failed", "rework"} or any(tid in blocker_task_ids for tid in task_ids)
         nodes.append(
             {

@@ -5338,3 +5338,36 @@ for n in ('test', 'review'):
 - `services/herdr-controller.py` — 传 `delivered_in_base=True`
 - `bin/herdr-task:2877-2900` — onto 的 origin 校验（fix-loop 语义，未改）
 - `tests/test_dispatch_candidate.py` — 5 条新回归 + 1 条修正为真实形态的夹具
+
+## 111. 工作流图拓扑中节点活跃任务数与阶段完成状态文案错位（2026-10-01）
+
+### 问题背景
+
+在 HAFlow Web 控制台（`http://127.0.0.1:8765/`）查看已结束或已合入的工作流（如 `wf-project-0929-01`）时，界面出现两个明显的显示不准问题：
+1. 阶段节点卡片底部统计虚标，显示「1 运行 · 完成 1」或「2 运行 · 完成 0」，即使实际没有任何智能体在运行；
+2. 已经完成的阶段节点徽章被标注为「待收尾」，与用户预期和实际阶段闭环状态严重冲突。
+
+### 根因分析
+
+1. **活跃任务数采用了粗暴减法推导**：
+   在 `herdr/workflow_graph.py:152` 中，`active` 计算为 `active = len(live) - completed`。
+   `live` 集合包含节点下所有未被取代（non-superseded）的任务。当阶段内存在历史失败（`failed`）或门禁阻塞（`blocked`）任务时，这些终态任务既不是 `completed`，但也绝非 `active`。粗暴减法导致失败与阻塞任务全部被误算为活跃任务。
+2. **节点聚合状态直接复用了任务生命周期字典**：
+   阶段节点在聚合完成后的内部状态是 `"completed"`。但在 `console/herdr_factory_console.py` 中，渲染阶段徽章与侧边详情栏直接使用了任务级别的 `humanStatus` 字典。在任务视角下，`completed` 表示“智能体已交付产物，等待 Git 提交/集成/收尾”，因此显示为「待收尾」；而在阶段节点（Milestone）视角下，它代表该阶段已全部就绪闭环，应为「已完成」。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 用全集减单一子集推导活跃状态 | 状态集合不是二元的（有 working/dispatched/failed/blocked/rework 等），粗减法必漏分类 | 活跃项统计必须使用显式状态白名单（`WORKING_LIKE` 或 `rework`），严禁使用反向补集推导 |
+| 跨语义实体共用状态展示映射字典 | 任务（Task）与阶段节点（Node）虽然共用某些枚举词（如 completed），但面向用户的生命周期语义不同 | 前端展示区分实体层级，节点级使用专用 `humanNodeStatus`，避免展示语义混淆 |
+
+### 操作规范（已固化到源码与回归）
+
+1. **`herdr/workflow_graph.py`**：
+   `active = sum(1 for t in live if str(t.get("status")) in WORKING_LIKE or str(t.get("status")) == "rework")`
+2. **`console/herdr_factory_console.py`**：
+   定义 `humanNodeStatus(s)` 将节点 `completed` 映射为「已完成」，并在卡片和检查器中统一调用。
+3. **回归测试**：
+   - `tests/test_workflow_graph_projection.py::test_failed_task_is_not_counted_as_active`
+   - `tests/test_console_flow_workbench.py::test_node_status_human_label_completed`

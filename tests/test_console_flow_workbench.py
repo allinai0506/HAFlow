@@ -50,6 +50,13 @@ class TestFlowWorkbenchFrontend(unittest.TestCase):
         ):
             self.assertIn(token, self.html, f"missing flow DOM/JS token: {token}")
 
+    def test_node_status_human_label_completed(self):
+        script = re.search(r"<script>(.*?)</script>", self.html, re.DOTALL).group(1)
+        self.assertIn("function humanNodeStatus(", script)
+        self.assertIn("s==='completed'?'已完成'", script.replace(" ", ""))
+        self.assertIn("humanNodeStatus(status)", script)
+        self.assertIn("humanNodeStatus(node.status)", script)
+
     def test_inspector_reuses_drawer_and_controller(self):
         script = re.search(r"<script>(.*?)</script>", self.html, re.DOTALL)
         self.assertIsNotNone(script)

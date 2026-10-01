@@ -62,6 +62,19 @@ class TestStatusAggregation(unittest.TestCase):
         self.assertIn("opencode", node["agents"])
         self.assertTrue(node["has_attention"])
 
+    def test_failed_task_is_not_counted_as_active(self):
+        wf = _sdv1()
+        tasks = [
+            {"task_id": "c1", "node": "implementation", "stage": "implementation", "status": "completed", "agent": "codex"},
+            {"task_id": "f1", "node": "implementation", "stage": "implementation", "status": "failed", "agent": "claude"},
+        ]
+        proj = herdr_graph.workflow_graph_projection(wf, tasks)
+        by_id = {n["id"]: n for n in proj["nodes"]}
+        node = by_id["implementation"]
+        self.assertEqual(node["completed_task_count"], 1)
+        self.assertEqual(node["failed_task_count"], 1)
+        self.assertEqual(node["active_task_count"], 0)
+
     def test_failed_priority_and_working(self):
         wf = _sdv1()
         proj = herdr_graph.workflow_graph_projection(
