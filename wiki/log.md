@@ -1601,3 +1601,5 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - 2026-10-01 — C31初始化证据失效与历史保存：原子失效EVAL_DONE、SHA寻址历史回执、新评估身份避免ABA；同字节跨进程稳定。详见 [[task-lifecycle]] 与教训§111；2673 passed/145 subtests，仅本地验证，未部署。
 
 - 2026-10-01 — C12本地候选续接：显式完整SHA源/Clone双核对，普通未指定pin续接仍走origin；真CoW保留源WIP。127专项、2682全量/145子测试；中间旧夹具ok伪SHA失败保留并替换为原生Git，不改断言。详见 [[task-lifecycle]] 与教训§104；未部署。
+
+- 2026-10-01 — C26b复核补缺失配套输入：保留所选path，不传None回宿主；四类TEMP读/SQLite回归，显式源正常对照。12靶向/64相邻/2687全量+145子测试，378.99s；独立复审无此项阻断，未部署。详见 [[task-lifecycle]] 与教训§91。

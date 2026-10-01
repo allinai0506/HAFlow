@@ -4134,6 +4134,16 @@ TASKS_FILE=/tmp/x/tasks.json WORKFLOWS_FILE=/tmp/x/workflows.json pytest -q "${T
 
 **验证与证据**：同一回归修前及撤销关键修复均`5 failed,2 passed`，修后`7 passed`；相邻专项`59 passed`，隔离全量`2613 passed,145 subtests passed`（355.47s）。`python3.13 -m pytest -q tests/test_state_projection_namespace.py`安全使用临时路径；证据见本轮执行计划C26与该测试。仅本地验证，未重建实盘JSON、未部署；旧章节中的313条为历史快照，不能当作当前数量。
 
+### 2026-10-01 复核补证：缺失文件不是未选择路径
+
+**问题背景**：C26复核用空selected/workflows.json触发迁移，selected缺tasks.json时，调用者传None；底层迁移回退host/tasks.json，将宿主Task导入隔离SQLite。workflows/steering同因；缺checkpoint还会读取宿主文件，即使外键拒绝落库也已越过读取边界。
+
+**经验教训**：路径解析与文件存在性属于不同决策。不存在的已选路径不能被转换成“使用默认值”；只测全套文件都存在或全部都不存在会漏掉配套输入部分缺失。
+
+**操作规范与防护**：SQLiteStateStore传递全部已解析companion路径，迁移reader自行跳过缺失文件；保留明确指定外部源的契约。TEMP四类分别检查宿主未读取、字节不变、隔离库不含宿主对象；显式迁移作正常对照。
+
+**验证与证据**：修前及撤销实现均4 failed/8 passed，修后12靶向与64相邻通过；全量2687 passed/145 subtests passed（378.99s），独立复审无此项阻断。未部署、未修实盘历史投影。证据为执行计划C26b与test_state_projection_namespace.py。
+
 ## 92. SQLite `mode=ro` 并非无副作用：WAL 缺边车时打开会实体化 `-wal`/`-shm`
 
 ### 问题背景

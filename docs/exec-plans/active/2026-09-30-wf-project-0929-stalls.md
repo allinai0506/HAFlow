@@ -1,7 +1,7 @@
 # wf-project-0929-01 自主闭环卡点台账
 
 ## 目标、事实源与范围
-目标：完整追踪每条相关日志与 Task/Run 身份，使工作流通过真实验收自主推进到结束。先建立全量清单，再按依赖逐项修复、逐项提交、逐项验证。原工作区 ui-upgrade 与 /Users/user/HAFlow 有其他任务产物，不覆盖。隔离分支 fix/wf-project-0929-stalls，基线 4d8e177。只读运行状态；本轮交付上限 local commit，未自动合并、部署、重启或触发收费模型。
+目标：完整追踪每条相关日志与 Task/Run 身份，使工作流通过真实验收自主推进到结束。先建立全量清单，再按依赖逐项修复、逐项提交、逐项验证。原工作区 ui-upgrade 与 /Users/user/HAFlow 有其他任务产物，不覆盖。隔离分支 fix/wf-project-0929-stalls，初次基线4d8e177，后采用他人谱系修复并重放至cff721b；本轮首15提交固定5f69f072复核。只读运行状态；本轮交付上限 local commit，未自动合并、部署、重启或触发收费模型。
 
 权威来源：~/.herdr-controller/state.db 只读事务快照（24 Task），全体服务日志、各 Task clone 的 .herdr-loop 日志、共享 notes.jsonl、运行配置、已有 recovery 记录。tasks.json/workflows.json 是可能滞后的投影，不能代替 SQLite。
 
@@ -60,6 +60,15 @@
 | C32 | 分类type仅用于权限判断，授权后丢失，Tab返回全部Provider | test-r4 Blocker-1；当前冻结5d3d615 Controller/TaskQueryContext/Service | 已确认；与C22同一选择边界有关，但类型筛选独立验收，不能仅前端过滤已分页数据 |
 | C33 | 前端ASC页内二次重排破坏后端DESC全局分页顺序 | test-r4 Blocker-2与test-r6 D-01；当前源5d3d615仍保留反向比较 | 已确认同源一张卡；以后端C3裁决为准，前端保留服务端分页顺序，跨页回归 |
 
+| C26b | 缺失迁移配套路径被变成None，回退宿主输入 | A独立复现；主控四类TEMP迁移/文件读取，issue26b-red.log | 本地验证：保留已解析路径；旧及反证4 failed/8 passed；12靶向/64相邻/2687全量+145子测试绿；独立复审无此项阻断，未部署 |
+| C27c | 原生CLI init基线仍在锁外且未受管；Task初始化/采集也分离 | A/B/C/D各自原生并发探针；A/D另有SIGTERM晚写 | 已确认；整个reset→采集→发布同一次锁，新契约不得继承旧baseline；独立提交 |
+| C31b | current回执替换早于history发布，失败重试永久丢原字节 | A中断/C目录故障；主控故障及正常对照 | 已确认；先保存可恢复历史，再失效当前，最后换输入，独立提交 |
+| C21b | 旧耗尽队列跨显式恢复、普通阻塞episode误投 | A/D真实TEMP SQLite queue出口 | 已确认；检查authoritative cause与episode，不能仅status==blocked；独立提交 |
+| C28b | 自由GOAL/DoD文本伪装repro配置，绿色评估被误阻塞 | B/C独立复现；主控quoted/正常对照 | 已确认；配置读取与自由文本隔离，老合约兼容需明确；独立提交 |
+| C28c | linter未启动exit127被抵扣为历史债务并假绿 | B原生missing_linter脚本和原子回执，主控重执行一致 | 已确认；执行失败须独立veto，保留合法diagnostic/debt正常对照；独立提交 |
+| C31c | reset后Supervisor仍把历史BLOCKER作为当前tests evidence | B临时reset→summary→collect，主控重执行一致 | 已确认；历史保留不等同当前引用，需当前状态与身份绑定；不声称已导致生产模型决策 |
+| C15b | ANSI前缀让绿色FAIL标题被识别成失败 | B解析探针、主控1/1却score95复验 | 已确认；C15原历史修复的边界仍不完整，不混同C04日志去重；独立提交 |
+
 ## 执行计划与检查点
 1. 固定日志快照、归属与覆盖账本；逐卡补触发、因果、正常对照、代码边界及验证。
 2. C01：RED→最小实现→专项→全量→自审→local commit。附带补齐Python3.13真实CLI缺失注解导入，这是验证入口依赖。
@@ -105,3 +114,9 @@ C12实施中：显式完整候选SHA匹配本地分支才免远端fetch；源/�
 2026-10-01真实状态刷新：wf仍running；test-r6 cleaned但stage_verdict=blocked，与test-r4排序缺陷互证，review-r2 completed/pass不覆盖测试阻断。test-r6报告完整逐行检查，列5项未覆盖而标题称3项；结构门禁59 run中7 skipped，不写59项实际执行全绿；空表EXPLAIN rows1不证明规模门禁。原报告保留，不改写历史。
 
 2026-10-01后续现场：C33已由既有impl-t8-sort-order-fix接手（agy working，candidate与baseline均5d3d615e07ab2ae9c5f9f04a6254026c420b282b，独立run_6a488dee5db04c979d5d1efa5066b9f7）。不创建重复业务任务或修改活跃Clone，后续核对真实提交/重验，不因启动即关闭C33。
+
+2026-10-01四份固定5f69f07对抗审查完成，合并8项Act on；A/C归档顺序、B/C自由文本、A/B/C/D原生基线、A/D旧队列均有共识。仅OpenAI模型多样性，不声称跨厂商。其他三项由B独立证实、主控待复验；所有发现保持TEMP与代码边界，不冒充本Workflow实际触发。旧健康基线cff721b独立复跑为1 failed/2588 passed/145子测试，410.19s，Controller latch fixture读取边界未闭合，不回写为全绿。
+
+主控重执行B三项独立脚本：missing linter exit127/baseline1仍converged=true；reset后initialized0却blocker_report=true；ANSI绿色1/1却score95且failing_tests非空。仅TEMP原生评估与解析，脚本退出0表示其缺陷断言被复现，不是产品验收通过。材料固定于外部review-b及primary-*日志。
+
+C26b最终本地验收：四个resolved companion paths不再按exists转None；仅存在性归reader判断，显式源继续优先。旧及撤销核心StateStore实现均4 failed/8 passed；恢复精准字节后12靶向；64相邻专项；全量2687 passed/145 subtests passed，0 failed/0 skipped（378.99s）。compileall/diff-check通过，独立只读复审无此项正确性/安全阻断；仅local commit，未部署，未重建实盘投影。checkpoint负例证明宿主文件不被读取，不冒充外键拒绝的宿主行曾持久化。

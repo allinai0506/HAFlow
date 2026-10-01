@@ -1,6 +1,7 @@
 """An isolated state DB must not read or overwrite default host projections."""
 import importlib.machinery
 import importlib.util
+import builtins
 import json
 import os
 from pathlib import Path
@@ -110,3 +111,56 @@ def test_explicit_workflows_file_selects_db_without_state_override(namespaces, m
     monkeypatch.setenv("WORKFLOWS_FILE", str(selected / "workflows.json"))
     cli = task_cli()
     assert cli._get_store().db_path == selected / "state.db"
+
+
+@pytest.mark.parametrize("kind", ["tasks", "workflows", "steering", "checkpoints"])
+def test_missing_selected_companion_never_imports_host(tmp_path, monkeypatch, kind):
+    host = tmp_path / 'host'
+    selected = tmp_path / 'selected'
+    host.mkdir()
+    selected.mkdir()
+    for name in ('WORKFLOWS_FILE', 'TASKS_FILE', 'STEERING_FILE', 'CHECKPOINTS_DIR'):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(state_db, 'CONTROLLER_DIR', host)
+    payload = {
+        'tasks': {'tasks': [{'task_id': 'host-owned-task', 'workflow_id': 'host-wf', 'status': 'working'}]},
+        'workflows': {'workflows': {'host-wf': {'status': 'running'}}},
+        'steering': {'steering_queues': {'host-owned-task': [{'steer_id': 'host-steer', 'instruction': 'host instruction', 'status': 'pending'}]}},
+        'checkpoints': {'checkpoint_id': 'host-cp', 'workflow_id': 'host-wf', 'tasks': []},
+    }[kind]
+    raw = json.dumps(payload)
+    host_file = host / f'{kind}.json'
+    if kind == 'checkpoints':
+        (host / 'checkpoints').mkdir()
+        host_file = host / 'checkpoints' / 'cp_host.json'
+    host_file.write_text(raw)
+    trigger = 'tasks' if kind == 'workflows' else 'workflows'
+    trigger_records = [] if trigger == 'tasks' else {}
+    (selected / f'{trigger}.json').write_text(json.dumps({trigger: trigger_records}))
+    reads = []
+    real_open = builtins.open
+    def record_open(path, *args, **kwargs):
+        if isinstance(path, (str, Path)):
+            reads.append(Path(path))
+        return real_open(path, *args, **kwargs)
+    monkeypatch.setattr(builtins, 'open', record_open)
+    store = SQLiteStateStore(selected / 'state.db', auto_migrate_json=True)
+    assert host_file.read_text() == raw
+    actual = {
+        'tasks': store.get_task('host-owned-task'),
+        'workflows': store.get_workflow('host-wf'),
+        'steering': store.list_steers(task_id='host-owned-task'),
+        'checkpoints': store.list_checkpoints('host-wf'),
+    }[kind]
+    assert host_file not in reads
+    assert not actual
+
+
+def test_explicit_opt_in_migration_source_remains_authoritative(namespaces, monkeypatch):
+    host, selected = namespaces
+    explicit = host / "requested-tasks.json"
+    explicit.write_text(json.dumps({"tasks": [dict(task(), task_id="explicit-task")]}))
+    monkeypatch.setenv("TASKS_FILE", str(explicit))
+    (selected / "workflows.json").write_text('{"workflows": {}}')
+    store = SQLiteStateStore(selected / "state.db", auto_migrate_json=True)
+    assert store.get_task("explicit-task")["workflow_id"] == "selected-workflow"

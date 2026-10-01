@@ -630,11 +630,13 @@ class SQLiteStateStore(StateStore):
                 cp_path = Path(os.environ.get("CHECKPOINTS_DIR") or (self.db_path.parent / "checkpoints"))
 
                 if wf_path.exists() or tasks_path.exists() or st_path.exists():
+                    # A missing selected file is still a selected input.
+                    # None would ask the migration reader for host defaults.
                     self.import_from_json(
-                        workflows_file=wf_path if wf_path.exists() else None,
-                        tasks_file=tasks_path if tasks_path.exists() else None,
-                        steering_file=st_path if st_path.exists() else None,
-                        checkpoints_dir=cp_path if cp_path.exists() else None,
+                        workflows_file=wf_path,
+                        tasks_file=tasks_path,
+                        steering_file=st_path,
+                        checkpoints_dir=cp_path,
                     )
         except Exception:
             pass
