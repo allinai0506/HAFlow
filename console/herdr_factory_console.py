@@ -3092,18 +3092,18 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 1
 @media (max-width: 1000px) { #flowWrap { flex-direction: column; } #flowInspector { width: 100%; border-left: none; border-top: 1px solid var(--border-default); max-height: none; } }
 /* Console shell v1 — approved haflow-flow-canvas-proposal.html */
 body {
-  background: #e7e9ee;
-  padding: 16px;
+  background: #fff;
+  padding: 0;
   font-family: "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 .shell {
   grid-template-columns: 228px minmax(0, 1fr);
-  height: calc(100vh - 32px);
-  min-height: 640px;
+  height: 100vh;
+  min-height: 0;
   background: #fff;
-  border: 1px solid #e1e3e8;
-  border-radius: 16px;
-  box-shadow: 0 16px 48px rgba(18,19,22,.08);
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
   overflow: hidden;
 }
 .sidebar {
@@ -3423,8 +3423,8 @@ body {
 .shell[data-workspace="aux"] #tasks,
 .shell[data-workspace="list"] #tasks { flex: 1; min-height: 0; overflow: auto; padding: 8px 16px 24px; }
 .main { padding-bottom: 38px; }
-.deep-drawer { left: calc(16px + 228px); right: 16px; bottom: 16px; border-bottom-right-radius: 15px; }
-.deep-drawer.collapsed { clip-path: inset(0 0 calc(100% - 38px) 0 round 0 0 15px 15px); }
+.deep-drawer { left: 228px; right: 0; bottom: 0; border-radius: 0; }
+.deep-drawer.collapsed { clip-path: inset(0 0 calc(100% - 38px) 0); }
 @media (max-width: 1000px) {
   body { padding: 0; }
   .shell { height: 100vh; min-height: 0; border-radius: 0; grid-template-columns: 1fr; }
