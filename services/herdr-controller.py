@@ -3332,6 +3332,16 @@ def _scheduler_expected_candidate_sha(workflow_id, project_root, dep_ids, candid
         sha = str(sha or effective.get("candidate_sha") or "").strip()
         if sha:
             return sha
+    if candidate_branch is None:
+        # Delivered dependencies no longer carry an unpublished task branch.
+        # Keep the existing frozen identity only when source HEAD proves the
+        # exact same revision; CLI/Worker still enforce the resulting pin.
+        frozen = _scheduler_current_frozen_candidate_sha(workflow_id)
+        if re.fullmatch(r"[0-9a-f]{40}", frozen):
+            head = scheduler_core.resolve_candidate_sha_for_branch(project_root, "HEAD")
+            if head == frozen:
+                return frozen
+        return ""
     try:
         return scheduler_core.resolve_candidate_sha_for_branch(
             project_root, candidate_branch

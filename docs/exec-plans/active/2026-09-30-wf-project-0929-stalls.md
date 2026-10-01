@@ -167,3 +167,9 @@ C35拆分：增量8文件逐行索引14774行（14116与workflow/task关联，�
 C35a本地修复：Task CLI仅在native实际index.lock路径、命令前后稳定dev/inode/mtime/size、精确File exists时给同Task结构wait/rc75；add clean filter与commit hook的混合stderr不能单凭文本免预算。Git自身解析index并追加.lock，支持linked及GIT_INDEX_FILE。Controller只专属同task marker免普通失败预算，60秒退避；等待持久绑定历史转换episode，metadata-only版本变更不重置旧失败，新Run/新完成周期不继承typed旧等待；EpisodeStore跨进程CAS避免晚写覆盖新记录。通用busy/错误/门禁、legacy未知升级保留原策略。25靶向通过9.20s；最终撤回Controller10失败/15正常6.66s。前轮相邻与反证时间交叠不计最终，源码恢复后重新相邻/full；最新验收待追加。C35b遗留锁和已升级任务现场恢复未闭环，不将TEMP夹具释放锁当真实恢复。
 
 C35a最终本地验收：25靶向通过9.20s，最终同25只撤销Controller10失败15正常6.66s；恢复冻结后67相邻通过14.52s；全量2844 passed/145 subtests passed，0失败0跳过391.46s。CLI AST、compileall、diff-check通过；独立最终只读复审无本卡新增阻断，未自行重跑suite。前轮相邻交叠和中间3失败19正常（CAS空None与{}实现错误）日志保留，不作为最终通过。所有写index命令均前后稳定实际锁身份，跨进程wait写入CAS；新owner失效只针对明确typed wait，metadata-only变更保留已有预算。仅本地代码验收，未部署；T8当前锁/legacy升级未修复，C35b仍开放。
+
+
+C13b（PR127合并前组合回归）：同步main125/126后，已交付git依赖使selector省略onto；冻结候选尚无delivery note时，candidate_branch=None让resolver返回空，实际CLI因delivery_missing拒绝。原C13 mock带pin的planner未覆盖。仅无effective delivery且无branch时，当前workflow最新完整freeze与native source HEAD exact相同才传pin，不恢复未推送onto、不伪造delivery；CLI/Worker既有复验保留。新8例真实selector/Controller/REAL_PLAN/实际CLI preflight，旧及撤销2失败6正常，修后40专项/3子测试；初次collection导入错误不当产品红证据。独立只读复审此组合阻断闭合；最终full待追加。新增路径没有完整启动Worker/Agent，后段复用既有baseline专项。
+
+
+C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后完整全量2871 passed、154 subtests passed、2 skipped（隔离HOME无LaunchAgent），0 failed，454.85s。两项本机只读plist检查另行2 passed（0.07s）。compileall、三入口CLI AST、diff-check通过；独立最终只读复审组合阻断闭合，未自行重跑全量。真实Agent/Worker启动、业务E2E及开放卡未因此验收。

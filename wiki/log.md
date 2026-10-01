@@ -1633,3 +1633,8 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - 2026-10-01 C35a：native index锁严格身份分类、Controller专属等待预算/60秒退避、历史owner与跨进程attention CAS；25靶向及10失败15正常反证，最终相邻/full进行中。T8锁及WIP原样保留，C35b现场恢复未完成；未部署。
 
 C35a最终本地验收：25靶向通过9.20s，最终同25只撤销Controller10失败15正常6.66s；恢复冻结后67相邻通过14.52s；全量2844 passed/145 subtests passed，0失败0跳过391.46s。CLI AST、compileall、diff-check通过；独立最终只读复审无本卡新增阻断，未自行重跑suite。前轮相邻交叠和中间3失败19正常（CAS空None与{}实现错误）日志保留，不作为最终通过。所有写index命令均前后稳定实际锁身份，跨进程wait写入CAS；新owner失效只针对明确typed wait，metadata-only变更保留已有预算。仅本地代码验收，未部署；T8当前锁/legacy升级未修复，C35b仍开放。
+
+- 2026-10-01 C13b：PR127组合审查发现main125省略onto时丢pin，已用最新freeze/native HEAD等值闭合；8靶向、2失败6正常反证、40专项3子测试，独立复审通过，全量进行中。旧中止full日志保留，不能当PASS。
+
+
+C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后完整全量2871 passed、154 subtests passed、2 skipped（隔离HOME无LaunchAgent），0 failed，454.85s。两项本机只读plist检查另行2 passed（0.07s）。compileall、三入口CLI AST、diff-check通过；独立最终只读复审组合阻断闭合，未自行重跑全量。真实Agent/Worker启动、业务E2E及开放卡未因此验收。

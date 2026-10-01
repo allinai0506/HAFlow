@@ -5584,3 +5584,17 @@ C30追加验证：`tests/test_blocked_recovery_command_contract.py`提取真实�
 **修复与预防**：仅命令前后稳定实际native index锁身份+精确原生错误给结构wait/rc75。专属wait不增加普通错误次数，持久60秒退避；以Run/持久转换episode识别当前完成周期，既有EpisodeStore文件锁CAS保护等待写入和旧owner失效，metadata保存不抹错误预算。不删除/移动锁，不自动翻案legacy通用升级。
 
 **验证与关联证据**：tests/test_finalize_git_index_wait.py 25项；真实受控TEMP锁超过5轮不耗预算、锁/HEAD/index/tracked/untracked保留，夹具释放锁后实际Controller在due前不动、due后通过真实CLI将原Task提交；integration用受控busy替身，非真实集成验收。包含独立进程attention竞争、两个stderr伪装、GIT_INDEX_FILE、历史新owner与metadata对照。最终Controller反证10失败15正常；相邻/full见C35a计划。实盘锁创建者未知，当前升级仍需单独安全恢复；两个持久存储和外部Git没有共同事务，不承诺最后读后所有竞态已消除。
+
+
+## 117. 省略已交付任务分支不能省略验收候选身份
+
+**现象与影响**：已冻结、实现已交付而delivery note尚未形成的正常窗口，test/review省略onto后也丢失候选SHA，CLI以delivery_missing拒绝，自动验收不能推进。
+
+**根因与证据**：main125正确省略未推送任务分支，但候选resolver把branch缺失当作pin缺失；旧C13 fixture模拟了带pin计划。恢复真实selector/planner后实际CLI preflight两项失败，六项正常对照保留。
+
+**修复与预防**：只在无effective delivery、candidate_branch=None、当前workflow最新严格40位冻结SHA与native source HEAD exact相同才保留pin。冻结身份与业务delivery是不同事实；不恢复onto、不放宽TaskCLI/Worker复验。
+
+**验证与关联证据**：tests/test_delivered_base_frozen_pin.py八例，撤销2失败6正常，40相邻及3子测试通过；全量结果见C13b计划。实际CLI身份方法被执行，完整Worker后段仍由既有baseline回归验证；无真实Agent/模型调用，未伪造delivery。
+
+
+C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后完整全量2871 passed、154 subtests passed、2 skipped（隔离HOME无LaunchAgent），0 failed，454.85s。两项本机只读plist检查另行2 passed（0.07s）。compileall、三入口CLI AST、diff-check通过；独立最终只读复审组合阻断闭合，未自行重跑全量。真实Agent/Worker启动、业务E2E及开放卡未因此验收。

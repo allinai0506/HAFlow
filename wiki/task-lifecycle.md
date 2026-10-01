@@ -482,3 +482,9 @@ Evidence:
 ### 2026-10-01：原生 index 锁等待（C35a，本地未部署）
 
 Task commit对actual native index路径的稳定外来锁冲突给HERDR_COMMIT_RESULT wait/git_index_lock及75；所有index写入均核对命令前后身份，hook/filter stderr不等于锁证明。Controller只同Task专属标记写60秒等待，不增普通失败预算；typed owner基于Run和持久状态转换，metadata不另起失败周期。EpisodeStore文件锁CAS保留并发新记录；未知/门禁与legacy升级不自动解除。未操作真实T8锁、没有真实集成，不能据此标工作流完成。
+
+
+C13b：已交付依赖省略任务分支onto时，test/review仍须带有可证明的候选pin。在delivery尚未产生时，只有当前workflow最新冻结SHA与source HEAD严格相同可传该pin；仍由TaskCLI和Worker复验，不把冻结当成业务delivery。
+
+
+C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后完整全量2871 passed、154 subtests passed、2 skipped（隔离HOME无LaunchAgent），0 failed，454.85s。两项本机只读plist检查另行2 passed（0.07s）。compileall、三入口CLI AST、diff-check通过；独立最终只读复审组合阻断闭合，未自行重跑全量。真实Agent/Worker启动、业务E2E及开放卡未因此验收。
