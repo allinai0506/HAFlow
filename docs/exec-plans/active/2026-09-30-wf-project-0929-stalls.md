@@ -57,6 +57,9 @@
 | C30 | 仲裁卡/人工升级提示要求blocked→rework，状态机禁止 | build_coordinator_message；_notify_blocked_human_upgrade；临时SQLite非法转换 | 已证实协议矛盾；命令须复用现有合法恢复边，不扩展状态机或force放行 |
 | C31 | re-init新契约后EVAL_DONE旧绿快照仍被当本轮证据 | issue31-probe.json，初始化0但extract返回旧converged/evidence_id | 已复现；原子失效当前快照，保留历史事实；属C03c/C08恢复身份的必要依赖 |
 
+| C32 | 分类type仅用于权限判断，授权后丢失，Tab返回全部Provider | test-r4 Blocker-1；当前冻结5d3d615 Controller/TaskQueryContext/Service | 已确认；与C22同一选择边界有关，但类型筛选独立验收，不能仅前端过滤已分页数据 |
+| C33 | 前端ASC页内二次重排破坏后端DESC全局分页顺序 | test-r4 Blocker-2与test-r6 D-01；当前源5d3d615仍保留反向比较 | 已确认同源一张卡；以后端C3裁决为准，前端保留服务端分页顺序，跨页回归 |
+
 ## 执行计划与检查点
 1. 固定日志快照、归属与覆盖账本；逐卡补触发、因果、正常对照、代码边界及验证。
 2. C01：RED→最小实现→专项→全量→自审→local commit。附带补齐Python3.13真实CLI缺失注解导入，这是验证入口依赖。
@@ -96,3 +99,9 @@ C30本地验证：仲裁卡及人工升级提示采用现有合法blocked→work
 
 
 C31追加验证：初始化在替换输入前原子失效当前EVAL_DONE；旧原始快照以SHA256归档至history/EVAL_DONE-<sha>.json，历史日志与BLOCKER保留但不作为本轮事实。证据ID绑定读取的单份快照SHA，避免重置后相同计数/iteration复用旧身份；同字节跨进程重启仍去重，未传SHA的旧API保持兼容。升级前后同一旧快照可能被重新观察一次，部署需核对既有ledger；不宣称此SHA证明Task/run归属。撤销关键实现4 failed/1正常对照passed，修后5靶向passed；专项80 passed/10 subtests，全量2673 passed/145 subtests、0 failed/0 skipped（385.00s）。失败初始化也不能留下旧绿证据。仅自审、未部署，C03c恢复epoch和C08业务交付仍未关闭。
+
+C12实施中：显式完整候选SHA匹配本地分支才免远端fetch；源/独立Worker Clone两边校验，真实CoW保留源WIP；远端普通续接及所有权继续原规则。专项最终127 passed，反证7 failed/2对照passed，最终全量2682 passed/145 subtests、0 failed/0 skipped（420.72s）；compileall、CLI AST/help与diff-check通过。中间全量1 failed/2681 passed源于原fixture用ok冒充原生Git SHA，已改真实临时Git候选/远端，保留原拒绝/资源回收/不登记/审计断言与失败日志。仅自审，以独立local commit交付，未部署。初次全量2679 passed/145 subtests对应补齐不可变pin边界之前，不能替代本轮最终验收。
+
+2026-10-01真实状态刷新：wf仍running；test-r6 cleaned但stage_verdict=blocked，与test-r4排序缺陷互证，review-r2 completed/pass不覆盖测试阻断。test-r6报告完整逐行检查，列5项未覆盖而标题称3项；结构门禁59 run中7 skipped，不写59项实际执行全绿；空表EXPLAIN rows1不证明规模门禁。原报告保留，不改写历史。
+
+2026-10-01后续现场：C33已由既有impl-t8-sort-order-fix接手（agy working，candidate与baseline均5d3d615e07ab2ae9c5f9f04a6254026c420b282b，独立run_6a488dee5db04c979d5d1efa5066b9f7）。不创建重复业务任务或修改活跃Clone，后续核对真实提交/重验，不因启动即关闭C33。

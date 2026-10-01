@@ -57,6 +57,27 @@ def ensure_branch_available(
             )
 
 
+def pinned_local_onto_matches(repo, branch: str, candidate_sha: Optional[str]) -> bool:
+    """Permit an unpublished local branch only with an exact immutable pin.
+
+    Missing local refs retain the existing remote path. An existing moved ref
+    must fail before checkout; a caller may not silently fetch over a bad pin.
+    """
+    if not candidate_sha:
+        return False
+    local = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "--verify", "--quiet",
+         f"refs/heads/{branch}^{{commit}}"], text=True, capture_output=True,
+    )
+    if local.returncode != 0:
+        return False
+    # Compare the full native object ID itself; resolving a symbolic revision
+    # or abbreviation here would silently weaken the immutable-pin contract.
+    if local.stdout.strip().lower() != str(candidate_sha).strip().lower():
+        raise RuntimeError(f"Local onto branch does not match candidate pin: {branch}")
+    return True
+
+
 def _default_process_provider():
     result = subprocess.run(
         ["ps", "-axo", "pid=,command="],

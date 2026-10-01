@@ -4946,6 +4946,10 @@ T1/T6 完成后已 committed，integrate 对 `origin/agent/gemini-init` 的 fetc
 真实 Git+SQLite `test_local_agent_anchor_integrates_without_remote_anchor` 修复前重现 remote ref 缺失；修复后 source HEAD/anchor 不变，集成 ref 同时包含基线推进和任务成果。集成专项 51 passed，实际 T1/T6 从 committed 到 integrated。
 
 
+### 第104节补充：冻结候选的本地续接必须显式绑定完整SHA（C12）
+本地冻结分支未发布到origin时，launch和Worker的--onto原先统一要求远端，候选存在仍被拒绝。新增路径仅允许显式完整候选SHA与本地ref的原生commit ID逐字一致；源预检在运行资源创建前，Worker在独立Clone检出前后重新核对。无pin仍保留远端路径，移动分支/缩写/符号revision拒绝，活跃分支所有权不绕过。真实Worker CoW回归保留源WIP并只清理隔离Clone；不push、不启动真实Agent，后续门禁不放宽。
+专项最终46 passed，撤销关键实现7 failed/2正常对照passed，恢复9靶向passed；初次fixture的clone origin误指向源而非源的远端，已用真实Worker create_clone替代并保留旧日志。首次自审发现符号revision可被解析成当前SHA，3项失败测试锁定该路径，随后改为完整原生ID比较。最终专项127 passed；全量2682 passed/145 subtests、0 failed/0 skipped（420.72s）。中间全量1 failed/2681 passed：原selective-replan夹具给所有Git返回ok，身份校验在预检拒绝，未进入其原目标Worker缺基线回收。改为真实临时Git候选与本地bare origin，保留全部拒绝/回收/不登记/审计断言；失败日志保留。此前2679通过记录不替代最终源码验收。仅自审、未部署，无真实Agent/model调用。
+
 ## 105. 绿色测试名含 FAIL 不等于失败（2026-09-30）
 
 ### 问题背景

@@ -87,6 +87,7 @@ try:
         GitOperationLock,
         GitProcessActiveError,
         ensure_branch_available,
+        pinned_local_onto_matches,
         ensure_no_git_processes,
     )
 except ImportError:
@@ -96,6 +97,7 @@ except ImportError:
         GitOperationLock,
         GitProcessActiveError,
         ensure_branch_available,
+        pinned_local_onto_matches,
         ensure_no_git_processes,
     )
 
@@ -2868,31 +2870,39 @@ def _launch_task(args):
             print(f"[BRANCH OWNERSHIP ERROR] {exc}")
             sys.exit(2)
 
-        # Fix-loop 续接:任务必须落在既有分支(如开放中的 PR 分支)上。
-        fetch = subprocess.run(
-            [
-                "git", "-C", source_repo,
-                "fetch", "origin", onto_branch,
-            ],
-            text=True,
-            capture_output=True,
-        )
-        remote_ref = subprocess.run(
-            [
-                "git", "-C", source_repo,
-                "rev-parse", "--verify", "--quiet",
-                f"refs/remotes/origin/{onto_branch}",
-            ],
-            text=True,
-            capture_output=True,
-        )
-
-        if fetch.returncode != 0 or remote_ref.returncode != 0:
-            print(
-                f"Onto branch not found on origin: {onto_branch}\n"
-                f"{(fetch.stderr.strip() or fetch.stdout.strip())}"
+        try:
+            pinned_local = pinned_local_onto_matches(
+                source_repo, onto_branch, getattr(args, "candidate_sha", None),
             )
+        except RuntimeError as exc:
+            print(str(exc))
             sys.exit(2)
+        if not pinned_local:
+            # Fix-loop 续接:任务必须落在既有分支(如开放中的 PR 分支)上。
+            fetch = subprocess.run(
+                [
+                    "git", "-C", source_repo,
+                    "fetch", "origin", onto_branch,
+                ],
+                text=True,
+                capture_output=True,
+            )
+            remote_ref = subprocess.run(
+                [
+                    "git", "-C", source_repo,
+                    "rev-parse", "--verify", "--quiet",
+                    f"refs/remotes/origin/{onto_branch}",
+                ],
+                text=True,
+                capture_output=True,
+            )
+
+            if fetch.returncode != 0 or remote_ref.returncode != 0:
+                print(
+                    f"Onto branch not found on origin: {onto_branch}\n"
+                    f"{(fetch.stderr.strip() or fetch.stdout.strip())}"
+                )
+                sys.exit(2)
 
     requested_agent = args.agent if args.agent else "auto"
 
@@ -3081,6 +3091,8 @@ def _launch_task(args):
 
     if onto_branch:
         worker_cmd += ["--onto", onto_branch]
+        if getattr(args, "candidate_sha", None):
+            worker_cmd += ["--candidate-sha", args.candidate_sha]
 
     if prebuilt_pane:
         worker_cmd += ["--pane-id", prebuilt_pane]

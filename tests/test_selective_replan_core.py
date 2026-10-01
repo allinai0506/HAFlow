@@ -970,7 +970,13 @@ class SelectiveReplacementLaunchBaselineTest(unittest.TestCase):
         回收、审计事件落盘。
         """
         from herdr.state_store import get_state_store, reset_state_store
-        aaa = "a" * 40
+        self._git("checkout", "-q", "-b", "candidate")
+        aaa = self._git("rev-parse", "HEAD").stdout.strip()
+        origin = self.root / "origin.git"
+        subprocess.run(["git", "init", "--bare", str(origin)],
+                       check=True, capture_output=True)
+        self._git("remote", "add", "origin", str(origin))
+        self._git("push", "origin", "candidate")
         store = get_state_store(Path(os.environ["HERDR_STATE_DB"]))
         store.save_workflow({"workflow_id": WF, "status": "running"})
         task_bin = self._task_mod
@@ -992,8 +998,8 @@ class SelectiveReplacementLaunchBaselineTest(unittest.TestCase):
         def fake_run(cmd, **kwargs):
             argv = [str(c) for c in (cmd or [])]
             if argv and argv[0] == "git":
-                # onto 预检的 fetch / remote_ref:一律成功。
-                return subprocess.CompletedProcess(cmd, 0, "ok", "")
+                # Native source identity; only the external Worker response is replaced.
+                return real_run(cmd, **kwargs)
             if argv and str(argv[0]).endswith("herdr-worker.py"):
                 return subprocess.CompletedProcess(
                     cmd, 0,

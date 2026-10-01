@@ -452,3 +452,5 @@ Evidence:
 - `tests/test_workflow_continuation.py`
 
 `FACT` 重新init在替换输入前原子失效当前EVAL_DONE，旧快照内容寻址归档history，仅本轮完成快照可被读为评估证据。证据ID含快照SHA，相同字节重启稳定；重置后的同计数不混用旧身份。升级可能重新观察一次旧快照，SHA不替代Task/run归属。证据：`tests/test_loop_reset_evidence_identity.py`（C31，本地验证，未部署）。
+
+`FACT` 显式完整candidate SHA匹配本地--onto分支时，launch可接受未发布候选，并将同pin传给Worker；Worker在独立Clone检出前后重新核对。无pin续接仍要求origin，符号/缩写pin与移动分支拒绝，所有权/后续交付门禁保留。证据：`tests/test_pinned_local_onto.py`（C12，最终2682 passed/145 subtests，本地验证，未部署）。
