@@ -35,18 +35,38 @@ def aggregate_node_status(node_tasks: List[Dict[str, Any]]) -> str:
         return "waiting"
     statuses = [str(t.get("status") or "unknown") for t in live]
     verdicts = [str(t.get("stage_verdict") or "") for t in live]
-    if any(s == "blocked" for s in statuses) or any(v == "blocked" for v in verdicts):
+
+    # Blocked check: blocked status or verdict, unless passed
+    if any((s == "blocked" or v == "blocked") and v != "pass" for s, v in zip(statuses, verdicts)):
         return "blocked"
-    if any(s == "failed" for s in statuses):
-        return "failed"
     if any(s == "rework" for s in statuses):
         return "rework"
-    if any(s in WORKING_LIKE or s == "rework" for s in statuses):
+    if any(s in WORKING_LIKE for s in statuses):
         return "working"
     if all(s in COMPLETED_LIKE for s in statuses):
         return "completed"
-    # Unknown/mixed with no active signal: surface as working to draw attention,
-    # except pure unknown -> waiting is already handled; fallback working.
+    if any(v == "pass" for v in verdicts):
+        return "completed"
+
+    # Terminal tasks without active work: inspect latest task
+    def _task_sort_key(t: Dict[str, Any]) -> float:
+        for k in ("created_at", "updated_at", "last_activity_at"):
+            val = t.get(k)
+            if isinstance(val, (int, float)):
+                return float(val)
+            if isinstance(val, str) and val.replace(".", "", 1).isdigit():
+                return float(val)
+        return 0.0
+
+    sorted_tasks = sorted(live, key=_task_sort_key)
+    latest = sorted_tasks[-1]
+    latest_st = str(latest.get("status") or "")
+    latest_v = str(latest.get("stage_verdict") or "")
+
+    if latest_v == "pass" or latest_st in COMPLETED_LIKE:
+        return "completed"
+    if latest_st == "failed" or any(s == "failed" for s in statuses):
+        return "failed"
     return "working"
 
 
@@ -121,6 +141,10 @@ def workflow_graph_projection(
     nodes_def = norm.get("nodes") or []
     node_ids = {str(n.get("id")) for n in nodes_def if n.get("id")}
 
+    wf_status = str((workflow or {}).get("status") or "") if isinstance(workflow, dict) else ""
+    is_wf_completed = wf_status in {"completed", "cleaned", "archived"}
+    gate_overrides = (workflow or {}).get("gate_overrides") if isinstance(workflow, dict) and isinstance((workflow or {}).get("gate_overrides"), dict) else {}
+
     # Group live tasks by node; unknown-node tasks are ignored (never invent nodes).
     by_node: Dict[str, List[Dict[str, Any]]] = {nid: [] for nid in node_ids}
     for t in _live_tasks(tasks or []):
@@ -143,14 +167,34 @@ def workflow_graph_projection(
         purpose = str(n.get("purpose") or "")
         nts = by_node.get(nid, [])
         live = _live_tasks(nts)
-        status = aggregate_node_status(live)
         agents = sorted({str(t.get("agent")) for t in live if t.get("agent")})
         task_ids = [str(t.get("task_id")) for t in live if t.get("task_id")]
         completed = sum(1 for t in live if str(t.get("status")) in COMPLETED_LIKE)
         failed = sum(1 for t in live if str(t.get("status")) == "failed")
         blocked = sum(1 for t in live if str(t.get("status")) == "blocked" or str(t.get("stage_verdict") or "") == "blocked")
         active = sum(1 for t in live if str(t.get("status")) in WORKING_LIKE or str(t.get("status")) == "rework")
-        has_attention = status in {"blocked", "failed", "rework"} or any(tid in blocker_task_ids for tid in task_ids)
+
+        gate_override = gate_overrides.get(nid) or {}
+        gate_passed = gate_override.get("verdict") == "pass"
+
+        if is_wf_completed:
+            status = "completed"
+            active_count = 0
+            has_attention = False
+        elif gate_passed:
+            if active > 0:
+                status = "working"
+                active_count = max(0, active)
+                has_attention = any(tid in blocker_task_ids for tid in task_ids)
+            else:
+                status = "completed"
+                active_count = 0
+                has_attention = False
+        else:
+            status = aggregate_node_status(live)
+            active_count = max(0, active)
+            has_attention = status in {"blocked", "failed", "rework"} or any(tid in blocker_task_ids for tid in task_ids)
+
         nodes.append(
             {
                 "id": nid,
@@ -160,7 +204,7 @@ def workflow_graph_projection(
                 "purpose": purpose,
                 "status": status,
                 "task_count": len(live),
-                "active_task_count": max(0, active),
+                "active_task_count": active_count,
                 "completed_task_count": completed,
                 "failed_task_count": failed,
                 "blocked_task_count": blocked,

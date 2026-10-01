@@ -8,6 +8,13 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-10-01] fix | 控制台已结束工作流与门禁放行状态投影对齐
+- 背景：控制台画布卡片和详情阶段聚合仅基于任务状态盲目聚合（`any(s == 'failed')`），忽略了工作流已完成终态（`workflow.status in {'completed', 'cleaned', 'archived'}`）以及人工门禁放行裁决（`gate_overrides[node].verdict == 'pass'`），导致已闭环工作流历史上的重试失败仍将「实现」标为红色失败、「测试」标为已阻塞、「收尾」因无任务标为灰色尚未开始。
+- 修复：
+  1. `herdr/workflow_graph.py`: `aggregate_node_status` 增强对任务结论（`stage_verdict == 'pass'`）与最新任务状态的判定；`workflow_graph_projection` 显式解包工作流 `status` 与 `gate_overrides`，当工作流处于完成终态时将所有节点投影为 `completed`（`active_task_count = 0`, `has_attention = False`）；当节点有 pass 裁决且无活动任务时投影为 `completed`。
+  2. `console/herdr_factory_console.py`: `workflow_graph_for` 合并传递工作流运行时元数据；`stage_summary` 接入 `workflow` 参数使已完成工作流各阶段聚合为 `cleaned`；前端 `flowCardFoot` 当 `task_count === 0` 且 `status === 'completed'` 时显示「已完成」；`flowChecklist` 与控制台驾驶舱关注阶段对齐完成态。
+- 证据：`tests/test_workflow_graph_projection.py` 新增 4 项测试，`tests/test_console_stage_summary.py` 新增 2 项测试，全量 2616 项测试与 154 项子测试全绿，compileall 与 git diff --check 均无异常。
+
 ## [2026-09-30] feat | PR #120 控制台 Controller 动作全按钮化 + 待裁决项显式提醒
 - 背景：控制台只为 `blocked/failed/rework` 生成按钮，`bin/herdr-task` 的 `commit/integrate/cleanup/finalize/clear-escalation` 从无 `action_id`，于是"无报错但仍待集成"的任务在 UI 上等同于"没事可做"；Barrier-0 的 DU-10 等人工裁决只以自由文本存在于共享文档区与总指挥终端，`dashboard.attention` 完全不收决策类提醒。
 - 变更：`herdr/controller_actions.py` 新增交付链路逐步骤表（`needs_git` 逐步骤门控：commit/integrate 需 git clone，finalize/cleanup 只需已落定——整表门控会让占多数的非 git 任务仍无按钮）、终化升级三条处置、真实 re-drive（`herdr agent prompt --wait`，区别于 steer 插话队列）与 `collect_workflow_actions` 聚合；`generate_controller_actions` 收敛为仅经 `resolve_workflow_blockers` 调用，避免其破坏性 `force_pass_advance` 兜底落到 `cleaned/superseded` 历史任务上。

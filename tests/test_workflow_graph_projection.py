@@ -151,5 +151,102 @@ class TestContextContract(unittest.TestCase):
         self.assertEqual(proj["context"]["optional"], [])
 
 
+class TestCompletedWorkflowAndGateOverrides(unittest.TestCase):
+    def test_completed_workflow_forces_all_nodes_completed(self):
+        wf = dict(_sdv1())
+        wf["status"] = "completed"
+        tasks = [
+            {"task_id": "req-1", "node": "requirements", "status": "completed"},
+            {"task_id": "impl-1", "node": "implementation", "status": "failed"},
+            {"task_id": "test-1", "node": "test", "status": "blocked"},
+        ]
+        proj = herdr_graph.workflow_graph_projection(wf, tasks)
+        by_id = {n["id"]: n for n in proj["nodes"]}
+        for nid, node in by_id.items():
+            self.assertEqual(node["status"], "completed", f"Node {nid} should be completed")
+            self.assertEqual(node["active_task_count"], 0)
+            self.assertFalse(node["has_attention"])
+        self.assertEqual(by_id["implementation"]["failed_task_count"], 1)
+        self.assertEqual(by_id["test"]["blocked_task_count"], 1)
+        self.assertEqual(by_id["wrapup"]["task_count"], 0)
+
+    def test_gate_override_pass_completes_stage_without_active_tasks(self):
+        wf = dict(_sdv1())
+        wf["status"] = "running"
+        wf["gate_overrides"] = {"test": {"verdict": "pass", "operator": "human"}}
+        tasks = [
+            {"task_id": "test-1", "node": "test", "status": "failed"},
+        ]
+        proj = herdr_graph.workflow_graph_projection(wf, tasks)
+        by_id = {n["id"]: n for n in proj["nodes"]}
+        self.assertEqual(by_id["test"]["status"], "completed")
+        self.assertEqual(by_id["test"]["active_task_count"], 0)
+        self.assertFalse(by_id["test"]["has_attention"])
+
+    def test_gate_override_pass_keeps_working_when_active_tasks_running(self):
+        wf = dict(_sdv1())
+        wf["status"] = "running"
+        wf["gate_overrides"] = {"test": {"verdict": "pass", "operator": "human"}}
+        tasks = [
+            {"task_id": "test-1", "node": "test", "status": "working"},
+        ]
+        proj = herdr_graph.workflow_graph_projection(wf, tasks)
+        by_id = {n["id"]: n for n in proj["nodes"]}
+        self.assertEqual(by_id["test"]["status"], "working")
+        self.assertEqual(by_id["test"]["active_task_count"], 1)
+
+    def test_rework_task_aggregates_to_rework(self):
+        wf = _sdv1()
+        tasks = [
+            {"task_id": "r1", "node": "implementation", "status": "rework", "agent": "claude"},
+        ]
+        proj = herdr_graph.workflow_graph_projection(wf, tasks)
+        by_id = {n["id"]: n for n in proj["nodes"]}
+        self.assertEqual(by_id["implementation"]["status"], "rework")
+        self.assertEqual(by_id["implementation"]["active_task_count"], 1)
+        self.assertTrue(by_id["implementation"]["has_attention"])
+
+    def test_completed_cleaned_archived_workflow_forces_all_nodes_completed(self):
+        for terminal_st in ("completed", "cleaned", "archived"):
+            with self.subTest(terminal_st=terminal_st):
+                wf = dict(_sdv1())
+                wf["status"] = terminal_st
+                tasks = [
+                    {"task_id": "req-1", "node": "requirements", "status": "completed"},
+                    {"task_id": "impl-1", "node": "implementation", "status": "failed"},
+                    {"task_id": "test-1", "node": "test", "status": "blocked"},
+                ]
+                proj = herdr_graph.workflow_graph_projection(wf, tasks)
+                by_id = {n["id"]: n for n in proj["nodes"]}
+                for nid, node in by_id.items():
+                    self.assertEqual(node["status"], "completed", f"Node {nid} should be completed for {terminal_st}")
+                    self.assertEqual(node["active_task_count"], 0)
+                    self.assertFalse(node["has_attention"])
+
+    def test_gate_override_rejected_does_not_force_pass(self):
+        wf = dict(_sdv1())
+        wf["status"] = "running"
+        wf["gate_overrides"] = {"test": {"verdict": "rejected", "operator": "human"}}
+        tasks = [
+            {"task_id": "test-1", "node": "test", "status": "failed"},
+        ]
+        proj = herdr_graph.workflow_graph_projection(wf, tasks)
+        by_id = {n["id"]: n for n in proj["nodes"]}
+        self.assertEqual(by_id["test"]["status"], "failed")
+        self.assertTrue(by_id["test"]["has_attention"])
+
+    def test_failure_after_success_resolves_to_failed(self):
+        wf = _sdv1()
+        tasks = [
+            {"task_id": "t1", "node": "implementation", "status": "completed", "created_at": 100},
+            {"task_id": "t2", "node": "implementation", "status": "failed", "created_at": 200},
+        ]
+        proj = herdr_graph.workflow_graph_projection(wf, tasks)
+        by_id = {n["id"]: n for n in proj["nodes"]}
+        self.assertEqual(by_id["implementation"]["status"], "failed")
+        self.assertEqual(by_id["implementation"]["failed_task_count"], 1)
+        self.assertEqual(by_id["implementation"]["completed_task_count"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()
