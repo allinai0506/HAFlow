@@ -162,6 +162,26 @@ class TestFlowWorkbenchFrontend(unittest.TestCase):
         ):
             self.assertIn(token, self.html, f"existing hook lost: {token}")
 
+    def test_horizontal_pipeline_layout(self):
+        script = re.search(r"<script>(.*?)</script>", self.html, re.DOTALL).group(1)
+        self.assertIn("rankdir:'LR'", script, "Dagre layout must use LR (Horizontal Pipeline)")
+        self.assertIn("ranksep:56", script)
+
+    def test_mousewheel_gesture_anti_misoperation(self):
+        script = re.search(r"<script>(.*?)</script>", self.html, re.DOTALL).group(1)
+        self.assertIn("modifiers:['ctrl','meta']", script, "Mousewheel zoom must require Cmd/Ctrl modifier")
+        self.assertIn("panning:{enabled:true}", script)
+
+    def test_coaxial_port_anchors_and_active_flow(self):
+        script = re.search(r"<script>(.*?)</script>", self.html, re.DOTALL).group(1)
+        self.assertIn("node-anchor left", script)
+        self.assertIn("node-anchor right", script)
+        self.assertIn("inbound-active", script)
+        self.assertIn("outbound-active", script)
+        self.assertIn("connector:{name:'smooth'}", script)
+        self.assertIn("anchor:{name:'right',args:{dx:0}}", script)
+        self.assertIn("anchor:{name:'left',args:{dx:-5}}", script)
+
 
 class TestFlowWorkbenchBackend(unittest.TestCase):
     @classmethod

@@ -3369,17 +3369,67 @@ body {
 #flowInspectorBody { flex: 1; }
 #flowCanvas .flow-node-card {
   box-sizing: border-box;
-  width: 216px;
-  height: 118px;
-  margin: 8px;
+  width: 232px;
+  height: 134px;
+  margin: 0;
   background: #fff;
   border: 1px solid #e5e7ee;
   border-radius: 12px;
   padding: 12px;
   box-shadow: 0 1px 2px rgba(18,19,22,.04), 0 8px 20px rgba(18,19,22,.05);
   cursor: pointer;
-  overflow: hidden;
+  overflow: visible;
+  position: relative;
   font-family: "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", -apple-system, sans-serif;
+}
+#flowCanvas .node-anchor {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #ffffff;
+  border: 2px solid #cbd5e1;
+  pointer-events: none;
+  z-index: 5;
+  box-sizing: border-box;
+  transition: all 0.2s ease;
+}
+#flowCanvas .node-anchor.left {
+  left: -5px;
+  top: 50%;
+  transform: translateY(-50%);
+}
+#flowCanvas .node-anchor.right {
+  right: -5px;
+  top: 50%;
+  transform: translateY(-50%);
+}
+#flowCanvas .node-anchor.inbound-active {
+  border-color: #6366f1;
+  background: #ffffff;
+  box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.25), 0 0 8px rgba(99, 102, 241, 0.6);
+}
+#flowCanvas .node-anchor.outbound-active {
+  border-color: #10b981;
+  background: #ffffff;
+  box-shadow: 0 0 0 2px rgba(16, 185, 129, 0.25), 0 0 8px rgba(16, 185, 129, 0.6);
+}
+#flowInspector .node-anchor,
+.flow-attn .node-anchor {
+  display: none !important;
+}
+@keyframes flowEdgeDash {
+  0% { stroke-dashoffset: 20; }
+  100% { stroke-dashoffset: 0; }
+}
+.flow-gesture-hint {
+  color: #8b909a;
+  font-size: 11px;
+  margin-left: 8px;
+  padding: 2px 8px;
+  background: #f3f4f6;
+  border-radius: 4px;
+  font-weight: normal;
 }
 #flowInspector .flow-node-card,
 .flow-attn .flow-node-card {
@@ -4833,7 +4883,10 @@ function flowCardFoot(n){
 function flowCardInner(n){
   const status=n.status||'waiting';
   const kind=String(n.node_type||'agent').toUpperCase();
-  return '<div class="fn-top"><span class="fn-ico">'+flowIconSvg(n.id)+'</span><span class="fn-kind">'+esc(kind)+'</span><span class="fn-pill">'+esc(humanNodeStatus(status))+'</span></div>'
+  const leftAnchor=n.has_upstream!==false?('<div class="node-anchor left'+(n.inbound_active?' inbound-active':'')+'"></div>'):'';
+  const rightAnchor=n.has_downstream!==false?('<div class="node-anchor right'+(n.outbound_active?' outbound-active':'')+'"></div>'):'';
+  return leftAnchor+rightAnchor
+    +'<div class="fn-top"><span class="fn-ico">'+flowIconSvg(n.id)+'</span><span class="fn-kind">'+esc(kind)+'</span><span class="fn-pill">'+esc(humanNodeStatus(status))+'</span></div>'
     +'<div class="fn-title">'+esc(cleanStageLabel(n.label||n.id||''))+'</div>'
     +'<div class="fn-purpose">'+esc(flowPlain(n.purpose))+'</div>'
     +'<div class="fn-foot">'+esc(flowCardFoot(n))+'</div>';
@@ -4916,12 +4969,12 @@ function selectFlowNode(id){state.flowSelectedNodeId=id;updateFlowSelection();re
 function updateFlowSelection(){try{if(!state.flowGraph||!state.flowGraph.getCellById)return;const g=flowGraphData();(g.nodes||[]).forEach(n=>{try{const cell=state.flowGraph.getCellById(n.id);if(!cell||!cell.getData||!cell.setData)return;const sel=String(state.flowSelectedNodeId||'')===String(n.id);const data=cell.getData()||{};if(!!data.selected===sel)return;cell.setData(Object.assign({},data,{selected:sel}));}catch(err){}});}catch(e){}}
 function destroyFlowGraph(){try{if(state.flowGraph&&state.flowGraph.dispose)state.flowGraph.dispose();}catch(e){}state.flowGraph=null;state.flowGraphWfId=null;const c=document.getElementById('flowCanvas');if(c)c.innerHTML='';}
 function resizeFlowGraph(){try{const cv=document.getElementById('flowCanvas');const host=document.getElementById('flowCanvasWrap')||cv;if(!cv||!host||!state.flowGraph)return;const w=host.clientWidth||cv.clientWidth||800;const h=Math.max(280,cv.clientHeight||host.clientHeight||480);if(state.flowGraph.resize)state.flowGraph.resize(w,h);}catch(e){}}
-function fitFlowGraph(){try{if(!state.flowGraph)return;if(state.flowGraph.zoomToFit){state.flowGraph.zoomToFit({padding:16,maxScale:1});if(state.flowGraph.positionContent)state.flowGraph.positionContent('top',{padding:8});}else if(state.flowGraph.centerContent)state.flowGraph.centerContent();}catch(e){}}
+function fitFlowGraph(){try{if(!state.flowGraph)return;if(state.flowGraph.zoomToFit){state.flowGraph.zoomToFit({padding:24,maxScale:1});if(state.flowGraph.centerContent)state.flowGraph.centerContent();}else if(state.flowGraph.centerContent)state.flowGraph.centerContent();}catch(e){}}
 function flowZoomIn(){try{if(state.flowGraph&&state.flowGraph.zoom)state.flowGraph.zoom(0.15);}catch(e){}}
 function flowZoomOut(){try{if(state.flowGraph&&state.flowGraph.zoom)state.flowGraph.zoom(-0.15);}catch(e){}}
-function renderFlowWorkbench(){const g=flowGraphData();const nodes=g.nodes||[];setWorkspaceMode(state.workflowView);const fs=document.getElementById('flowSummary');if(fs){if(state.workflowView==='flow'&&nodes.length){const working=nodes.filter(n=>n.status==='working').length;fs.style.display='block';fs.innerHTML='<b>'+nodes.length+'</b> 个节点 · <b>'+working+'</b> 个运行中';}else fs.style.display='none';}const bf=document.getElementById('viewFlowBtn');if(bf)bf.classList.toggle('active',state.workflowView!=='list');const bl=document.getElementById('viewListBtn');if(bl)bl.classList.toggle('active',state.workflowView==='list');if(!state.flowSelectedNodeId||!nodes.some(n=>n.id===state.flowSelectedNodeId)){state.flowSelectedNodeId=pickDefaultFlowNodeId(nodes);}renderNodeInspector();renderFlowGraph();}
-function dagreLayoutPositions(nodes,edges){const g=new window.dagre.graphlib.Graph();g.setGraph({rankdir:'TB',ranksep:20,nodesep:64,marginx:24,marginy:8});g.setDefaultEdgeLabel(()=>({}));const W=232,H=134;nodes.forEach(n=>g.setNode(n.id,{width:W,height:H}));edges.forEach(e=>{try{g.setEdge(e.from,e.to);}catch(err){}});window.dagre.layout(g);const pos={};nodes.forEach(n=>{const p=g.node(n.id);if(p)pos[n.id]={x:p.x-W/2,y:p.y-H/2};});return pos;}
-function renderFlowGraph(){const wrap=document.getElementById('flowCanvas');const errBox=document.getElementById('flowError');if(errBox){errBox.style.display='none';errBox.textContent='';}if(!wrap)return;const g=flowGraphData();const nodes=g.nodes||[];const edges=g.edges||[];if(state.flowGraphWfId&&state.flowGraphWfId!==state.workflowId)destroyFlowGraph();if(!nodes.length){destroyFlowGraph();if(errBox){errBox.style.display='block';errBox.textContent='当前工作流暂无可用节点定义（legacy 或空定义，已 fail-soft，不伪造连线）。';}return;}if(typeof window.dagre==='undefined'||!window.dagre.graphlib||!window.dagre.layout){destroyFlowGraph();if(errBox){errBox.style.display='block';errBox.textContent='本地 Dagre 资源缺失（/static/vendor/dagre-3.1.1.min.js），请检查 Console 静态资源。页面其他功能不受影响。';}return;}if(typeof window.X6==='undefined'||!window.X6.Graph){destroyFlowGraph();if(errBox){errBox.style.display='block';errBox.textContent='本地 X6 资源缺失（/static/vendor/x6-3.1.8.min.js），请检查 Console 静态资源。页面其他功能不受影响。';}return;}if(!ensureFlowCardShape()){destroyFlowGraph();if(errBox){errBox.style.display='block';errBox.textContent='本地 X6 缺少 HTML 节点（Shape.HTML），无法绘制流程卡片。';}return;}let pos={};try{pos=dagreLayoutPositions(nodes,edges);}catch(e){destroyFlowGraph();if(errBox){errBox.style.display='block';errBox.textContent='Dagre 布局失败：'+e.message;}return;}try{destroyFlowGraph();const W=wrap.clientWidth||800;const H=480;const graph=new window.X6.Graph({container:wrap,width:W,height:H,background:{color:'transparent'},panning:{enabled:true},mousewheel:{enabled:true,modifiers:[]},interacting:{nodeMovable:false,edgeMovable:false,edgeLabelMovable:false,arrowheadMovable:false,vertexMovable:false,vertexAddable:false,vertexDeletable:false,edgeAddable:false},connecting:{allowBlank:false,allowLoop:false,allowNode:false,allowEdge:false,snap:true},highlighting:{magnetAdsorbed:{name:'stroke',args:{padding:4,attrs:{stroke:'#5e6ad2','stroke-width':2}}}}});state.flowGraph=graph;state.flowGraphWfId=state.workflowId;nodes.forEach(n=>{const p=pos[n.id]||{x:20,y:20};graph.addNode({id:n.id,shape:'flow-card',x:p.x,y:p.y,width:232,height:134,data:Object.assign({},n,{selected:String(state.flowSelectedNodeId||'')===String(n.id)})});});edges.forEach(e=>{try{graph.addEdge({source:{cell:e.from,anchor:{name:'bottom',args:{dy:-8}},connectionPoint:'anchor'},target:{cell:e.to,anchor:{name:'top',args:{dy:8}},connectionPoint:'anchor'},router:{name:'orth',args:{padding:2}},connector:{name:'rounded'},attrs:{line:{stroke:'#c5c9d3','stroke-width':1.6,targetMarker:{name:'block',size:6}}}});}catch(err){}});graph.on('node:click',({node})=>{try{selectFlowNode(node.id);}catch(err){}});updateFlowSelection();fitFlowGraph();requestAnimationFrame(()=>{resizeFlowGraph();fitFlowGraph();});}catch(e){destroyFlowGraph();if(errBox){errBox.style.display='block';errBox.textContent='Flow Canvas 初始化失败：'+e.message;}}}
+function renderFlowWorkbench(){const g=flowGraphData();const nodes=g.nodes||[];setWorkspaceMode(state.workflowView);const fs=document.getElementById('flowSummary');if(fs){if(state.workflowView==='flow'&&nodes.length){const working=nodes.filter(n=>n.status==='working').length;fs.style.display='block';fs.innerHTML='<b>'+nodes.length+'</b> 个节点 · <b>'+working+'</b> 个运行中<span class="flow-gesture-hint">拖拽平移 · ⌘+滚轮缩放</span>';}else fs.style.display='none';}const bf=document.getElementById('viewFlowBtn');if(bf)bf.classList.toggle('active',state.workflowView!=='list');const bl=document.getElementById('viewListBtn');if(bl)bl.classList.toggle('active',state.workflowView==='list');if(!state.flowSelectedNodeId||!nodes.some(n=>n.id===state.flowSelectedNodeId)){state.flowSelectedNodeId=pickDefaultFlowNodeId(nodes);}renderNodeInspector();renderFlowGraph();}
+function dagreLayoutPositions(nodes,edges){const g=new window.dagre.graphlib.Graph();g.setGraph({rankdir:'LR',ranksep:56,nodesep:36,marginx:32,marginy:32});g.setDefaultEdgeLabel(()=>({}));const W=232,H=134;nodes.forEach(n=>g.setNode(n.id,{width:W,height:H}));edges.forEach(e=>{try{g.setEdge(e.from,e.to);}catch(err){}});window.dagre.layout(g);const pos={};nodes.forEach(n=>{const p=g.node(n.id);if(p)pos[n.id]={x:p.x-W/2,y:p.y-H/2};});return pos;}
+function renderFlowGraph(){const wrap=document.getElementById('flowCanvas');const errBox=document.getElementById('flowError');if(errBox){errBox.style.display='none';errBox.textContent='';}if(!wrap)return;const g=flowGraphData();const nodes=g.nodes||[];const edges=g.edges||[];if(state.flowGraphWfId&&state.flowGraphWfId!==state.workflowId)destroyFlowGraph();if(!nodes.length){destroyFlowGraph();if(errBox){errBox.style.display='block';errBox.textContent='当前工作流暂无可用节点定义（legacy 或空定义，已 fail-soft，不伪造连线）。';}return;}if(typeof window.dagre==='undefined'||!window.dagre.graphlib||!window.dagre.layout){destroyFlowGraph();if(errBox){errBox.style.display='block';errBox.textContent='本地 Dagre 资源缺失（/static/vendor/dagre-3.1.1.min.js），请检查 Console 静态资源。页面其他功能不受影响。';}return;}if(typeof window.X6==='undefined'||!window.X6.Graph){destroyFlowGraph();if(errBox){errBox.style.display='block';errBox.textContent='本地 X6 资源缺失（/static/vendor/x6-3.1.8.min.js），请检查 Console 静态资源。页面其他功能不受影响。';}return;}if(!ensureFlowCardShape()){destroyFlowGraph();if(errBox){errBox.style.display='block';errBox.textContent='本地 X6 缺少 HTML 节点（Shape.HTML），无法绘制流程卡片。';}return;}let pos={};try{pos=dagreLayoutPositions(nodes,edges);}catch(e){destroyFlowGraph();if(errBox){errBox.style.display='block';errBox.textContent='Dagre 布局失败：'+e.message;}return;}try{destroyFlowGraph();const W=wrap.clientWidth||800;const H=480;const graph=new window.X6.Graph({container:wrap,width:W,height:H,background:{color:'transparent'},panning:{enabled:true},mousewheel:{enabled:true,modifiers:['ctrl','meta'],minScale:0.45,maxScale:2.0},interacting:{nodeMovable:false,edgeMovable:false,edgeLabelMovable:false,arrowheadMovable:false,vertexMovable:false,vertexAddable:false,vertexDeletable:false,edgeAddable:false},connecting:{allowBlank:false,allowLoop:false,allowNode:false,allowEdge:false,snap:true},highlighting:{magnetAdsorbed:{name:'stroke',args:{padding:4,attrs:{stroke:'#5e6ad2','stroke-width':2}}}}});state.flowGraph=graph;state.flowGraphWfId=state.workflowId;const nodesMap={};nodes.forEach(n=>{nodesMap[n.id]=n;});const activeIncomingNodes=new Set();const activeOutgoingNodes=new Set();edges.forEach(e=>{const fromN=nodesMap[e.from];const toN=nodesMap[e.to];if(fromN&&toN){if(toN.status==='working'&&(fromN.status==='completed'||fromN.status==='working')){activeIncomingNodes.add(toN.id);activeOutgoingNodes.add(fromN.id);}}});nodes.forEach(n=>{const p=pos[n.id]||{x:20,y:20};const nodeData=Object.assign({},n,{selected:String(state.flowSelectedNodeId||'')===String(n.id),inbound_active:activeIncomingNodes.has(n.id),outbound_active:activeOutgoingNodes.has(n.id),has_upstream:Boolean(n.depends_on&&n.depends_on.length),has_downstream:Boolean(n.downstream&&n.downstream.length)});graph.addNode({id:n.id,shape:'flow-card',x:p.x,y:p.y,width:232,height:134,data:nodeData});});edges.forEach(e=>{try{const fromN=nodesMap[e.from];const toN=nodesMap[e.to];const isAct=Boolean(fromN&&toN&&toN.status==='working'&&(fromN.status==='completed'||fromN.status==='working'));const isDone=Boolean(fromN&&toN&&fromN.status==='completed'&&toN.status==='completed');const strokeColor=isAct?'#4f46e5':isDone?'#94a3b8':'#c5c9d3';const strokeWidth=isAct?2.2:1.6;graph.addEdge({source:{cell:e.from,anchor:{name:'right',args:{dx:0}},connectionPoint:'anchor'},target:{cell:e.to,anchor:{name:'left',args:{dx:-5}},connectionPoint:'anchor'},connector:{name:'smooth'},attrs:{line:{stroke:strokeColor,'stroke-width':strokeWidth,strokeDasharray:isAct?'6 4':'none',style:isAct?{animation:'flowEdgeDash 1.2s linear infinite'}:{},targetMarker:{name:'block',size:isAct?7:6,fill:strokeColor,stroke:strokeColor}}},zIndex:isAct?10:1});}catch(err){}});graph.on('node:click',({node})=>{try{selectFlowNode(node.id);}catch(err){}});updateFlowSelection();fitFlowGraph();requestAnimationFrame(()=>{resizeFlowGraph();fitFlowGraph();});}catch(e){destroyFlowGraph();if(errBox){errBox.style.display='block';errBox.textContent='Flow Canvas 初始化失败：'+e.message;}}}
 function flowNodeById(id){const g=flowGraphData();return (g.nodes||[]).find(n=>n.id===id)||null;}
 function flowTasksForNode(nodeId){const ts=(state.workflow&&state.workflow.tasks)||[];return ts.filter(t=>String(t.node||t.stage||'')===String(nodeId)&&t.status!=='superseded'&&!t.superseded_by);}
 function renderNodeInspector(){const body=document.getElementById('flowInspectorBody');const title=document.getElementById('flowInspTitle');const meta=document.getElementById('flowInspMeta');if(!body)return;const node=flowNodeById(state.flowSelectedNodeId);if(!node){if(title)title.textContent='节点详情';if(meta)meta.textContent='—';body.innerHTML='<div class="empty">暂无节点</div>';return;}if(title)title.textContent=cleanStageLabel(node.label||node.id);if(meta)meta.textContent=(node.node_type||'agent').toUpperCase()+' · '+humanNodeStatus(node.status);const tab=state.flowInspectorTab||'summary';if(tab==='tasks'){const nts=flowTasksForNode(node.id);body.innerHTML=nts.length?nts.map(t=>`<div class="flow-task-row" onclick="openTaskDrawer('${esc(t.task_id)}')"><span><strong>${esc(t.task_id)}</strong><span class="muted"> · ${esc(t.agent||'未分配')}</span></span><span>${badge(t.status)}</span></div>`).join(''):'<div class="empty">该节点暂无任务</div>';return;}if(tab==='context'){const ctx=(state.workflow&&state.workflow.context)||{required:[],optional:[]};const req=ctx.required||[];const opt=ctx.optional||[];body.innerHTML=`<div class="proj-sec"><div class="proj-lbl">必需上下文</div>${req.length?req.map(c=>`<div>· ${esc(typeof c==='string'?c:(c.id||c))}</div>`).join(''):'<div class="muted">—</div>'}</div><div class="proj-sec"><div class="proj-lbl">可选上下文</div>${opt.length?opt.map(c=>`<div>· ${esc(typeof c==='string'?c:(c.id||c))}</div>`).join(''):'<div class="muted">—</div>'}</div><div class="muted" style="margin-top:8px">仅显示真实 Context Contract；无绑定信息时不伪造已加载。</div>`;return;}if(tab==='runtime'){const nts=flowTasksForNode(node.id);body.innerHTML=nts.length?nts.map(t=>`<div class="flow-node-card" style="margin-bottom:8px"><div><strong>${esc(t.task_id)}</strong> ${badge(t.status)}</div><dl class="flow-kv" style="margin-top:8px"><dt>执行者</dt><dd>${esc(t.agent||'—')}</dd><dt>工位</dt><dd>${esc(t.pane_id||'—')}</dd><dt>更新</dt><dd>${esc(t.updated_at||t.last_activity_at||'—')}</dd><dt>分支</dt><dd>${esc(t.candidate_sha||t.integration_branch||'—')}</dd><dt>结论</dt><dd>${esc(t.stage_verdict||'—')}</dd></dl></div>`).join(''):'<div class="empty">暂无运行时信息</div>';return;}const nts=flowTasksForNode(node.id);const acts=(state.controllerActionsData&&state.controllerActionsData.actions)||[];const mine=acts.filter(a=>((a.blocker_task_id||a.old_task_id||String(a.action_id||'').split(':')[0])===node.id)||(node.task_ids||[]).includes(a.blocker_task_id||a.old_task_id));const shown=mine.slice(0,2);const actHtml=shown.length?`<div class="flow-attn"><div class="flow-sec">需要处理</div>${shown.map(a=>`<div class="flow-node-card" style="margin-bottom:8px"><div><strong>${esc(a.title||a.action_id)}</strong></div><div class="muted" style="margin:4px 0">${esc(a.effect||a.description||'')}</div><div style="display:flex;gap:8px;justify-content:flex-end"><button class="mini" onclick="locateControllerTask('${esc(a.blocker_task_id||a.old_task_id||'')}')">查看任务</button><button class="btn primary" style="padding:3px 8px;font-size:11.5px" onclick="executeControllerAction('${esc(a.action_id)}','${esc(state.workflowId)}')">一键执行</button></div></div>`).join('')}</div>`:(node.has_attention?'<div class="muted">该节点需关注，暂无可用一键解卡建议，请查看任务详情。</div>':'');body.innerHTML=flowOverviewHtml(node, nts)+actHtml;}
