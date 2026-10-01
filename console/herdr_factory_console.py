@@ -4201,7 +4201,7 @@ function paintCrumb(){
   }
   const o=state.overview||{};
   const setCount=(id,n)=>{const el=document.getElementById(id);if(!el)return;const v=Number(n)||0;el.textContent=String(v);el.hidden=v<=0;};
-  setCount('navWfCount', o.active_workflows);
+  setCount('navWfCount', ((state.project&&state.project.workflows)||[]).length);
   setCount('navAgentCount', o.active_agents);
   setCount('navAlertCount', (typeof visibleAlerts==='function'?visibleAlerts():[]).length);
 }

@@ -3,6 +3,8 @@
 import importlib.machinery
 import importlib.util
 import unittest
+import re
+import subprocess
 from pathlib import Path
 
 
@@ -97,3 +99,52 @@ class TestConsoleShell(unittest.TestCase):
             "dashButton",
         ):
             self.assertIn(token, self.html, token)
+
+    def test_workflow_badge_matches_current_space_rows(self):
+        functions = []
+        for name in ("paintCrumb", "renderShellWorkflows"):
+            match = re.search(
+                rf"function {name}\([^)]*\)\{{.*?\n\}}",
+                self.html,
+                re.DOTALL,
+            )
+            self.assertIsNotNone(match, name)
+            functions.append(match.group(0))
+        script = r"""
+const assert = require('node:assert/strict');
+const elements = new Map();
+const document = {
+  getElementById(id) {
+    if (!elements.has(id)) elements.set(id, {textContent: '', innerHTML: '', hidden: false});
+    return elements.get(id);
+  },
+  querySelectorAll() { return []; },
+  querySelector() { return {dataset: {}}; }
+};
+const state = {overview: {active_workflows: 3}, shellView: 'workflows'};
+function esc(value) { return String(value); }
+function workflowDisplayName(workflow) { return workflow.title; }
+""" + "\n".join(functions) + r"""
+function verify(workflows, expected) {
+  state.project = workflows === null ? null : {workflows};
+  paintCrumb();
+  renderShellWorkflows();
+  const badge = document.getElementById('navWfCount');
+  const rows = (document.getElementById('tasks').innerHTML.match(/class="shell-row"/g) || []).length;
+  assert.equal(rows, expected);
+  assert.equal(badge.textContent, String(rows));
+  assert.equal(badge.hidden, expected === 0);
+}
+verify([{workflow_id: 'wf-current', title: 'Delivered', status: 'completed'}], 1);
+verify([
+  {workflow_id: 'wf-other-1', title: 'Other 1'},
+  {workflow_id: 'wf-other-2', title: 'Other 2'}
+], 2);
+verify([], 0);
+verify(null, 0);
+verify([{workflow_id: 'wf-current', title: 'Delivered', status: 'completed'}], 1);
+"""
+        result = subprocess.run(
+            ["node", "-e", script], capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
