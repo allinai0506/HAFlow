@@ -1672,3 +1672,11 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
   - 工作台切换器解耦：进入仪表板时重置 `workflowSwitcher.dataset.sig`，避免返回工作台时因缓存签名一致导致 `#wfSelect` 未重新渲染。
   - 向下兼容与安全：保留隐藏 `<select id="dashWfSel">` 双向同步保证既有自动化测试与 CLI 工具链无损；行内动作统一使用 `jsArg()` 防范引号截断逃逸，全量输入经 `esc()` 转义。
   - 验收证据：`tests/test_console_linear_dropdown.py` 6 passed；控制台测试集全量 212 passed；`compileall` 与 `git diff --check` 零错误；独立 Reviewer 子代理（google-code-review）审查通过，判定 MERGE_READY。
+
+- 2026-10-01 控制台 | UI 网格基线治理与间距吸附（feat/console-grid-p0-p1-alignment）
+  - 核心痛点解决：按照 `snapping-ui-to-grid` 规范与 `docs/lessons/lessons-learned.md #10`，全面治理控制台四基准线失守与间距裸值散乱问题。
+  - P0 右轴归位：顶部 Header 操作栏（`.actions`）与任务详情抽屉操作栏（`.task-drawer-actions`）Primary CTA `[＋新需求]` 与 `[成果会签]` 统一移至最右侧；新增 `.actions .btn.primary { margin-left: auto; }` 弹性右推规则，确保窄屏换行态主按钮依然贴合右边缘；抽屉主按钮内边距规范化为 `4px 12px`。
+  - P1 左轴贯通：Flow 画布绝对定位工具栏 `#canvasToolbar` 坐标由 12px 修正为 16px（桌面端 `left: 16px; right: 316px;`，响应式 `@media (max-width: 980px)` 下 `left: 16px; right: 16px;`），与 Header 顶栏容器 `padding: 0 16px` 全高度垂直贯通对齐，消除伪左轴参差。
+  - P1 数字轴等宽：为 7 大数值/计数/标识选择器（`.metric b`, `.nav-count`, `.filter-cnt`, `.badge-pill`, `#flowSummary b`, `.task-id`, `.task-drawer-id`）注入 `ui-monospace` 与 `font-variant-numeric: tabular-nums`，彻底解决数据动态更新时的水平跳动。
+  - P2 间距裸值就近吸附：依据 `lessons-learned.md #10` 属性级锚定规范，严格在 `(padding|margin|gap)` 声明内就近吸附（`5px → 4px`、`6px/7px/9px → 8px`、`10px → 8px 或 12px`、`11px → 12px`、`14px → 16px`），未误伤任何 `font-size`、`border-radius` 或 `line-height` 等非间距排版属性；196 处间距声明经 `ai-slop-cleaner` 模式 B 瘦身化简，违规裸值清零。
+  - 验收证据：`pytest tests/test_console*.py` 全量 214 passed；`pytest tests/test_console_frontend_syntax.py` 15 passed（`node -c` 校验干净）；`compileall` 零错误，`git diff --check` 零警告；两轮独立 Reviewer 子代理（google-code-review）审查通过，判定 MERGE_READY。
