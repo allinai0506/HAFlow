@@ -13,6 +13,8 @@ observer enable it explicitly (HERDR_OBSERVER_ENABLED=1).
 import os
 import tempfile
 
+import pytest
+
 os.environ.setdefault(
     "HERDR_WORKFLOW_DOCS_DIR",
     tempfile.mkdtemp(prefix="herdr-test-workflow-docs-"),
@@ -27,3 +29,13 @@ os.environ["HERDR_OBSERVER_ENABLED"] = "0"
 os.environ["HERDR_ATTENTION_FILE"] = os.path.join(
     tempfile.mkdtemp(prefix="herdr-test-attention-"), "attention.json"
 )
+
+# Enabling deterministic observer tests must not implicitly enable model spend.
+os.environ["HERDR_OBSERVER_JEV_ENABLED"] = "0"
+
+
+@pytest.fixture(autouse=True)
+def isolate_model_credentials(monkeypatch):
+    """Explicit fake-key tests may opt in; never inherit real shell credentials."""
+    monkeypatch.delenv("JEV_API_KEY", raising=False)
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)

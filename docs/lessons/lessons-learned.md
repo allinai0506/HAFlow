@@ -5333,6 +5333,16 @@ C31c补充（2026-10-01）：
 
 **验证与关联证据**：`tests/test_loop_current_summary.py`12例：真实eval/reset/collector、中途METRICS写失败、单次read后replace交错、legacy及异常解析。旧最终10 failed/2正常，106相邻通过；全量2742 passed/145子测试，0失败/0跳过（370.78s），详见计划C31c。首次2项测试对init行为假设错误已纠正，日志保留，不当产品失败证据。
 
+C34补充（2026-10-01）：
+
+**问题背景**：全量中确定性Observer gateway测试drain10秒后finding为空，但之后数据库出现finding。前序unittest设置假key，cleanup只恢复原有变量，未删除本来absent的新key，默认启用Jev使确定性测试走外部模型路径。
+
+**经验教训**：凭据生命周期必须精确恢复absence和值；启用旁路诊断不意味着测试应启用模型。单独通过不能证明全量隔离；必须保留失败与迟到持久化证据，不延长timeout遮盖错误依赖。
+
+**操作规范与防护**：修正原helper cleanup，suite每例移除继承Jev凭据并默认禁用Observer模型；确定性gateway明确provider disabled和禁止transport。真实provider错误测试明确opt-in受控loopback，原断言不放宽。生产模块无改动。
+
+**验证与关联证据**：`tests/test_model_test_environment_isolation.py`执行真实unittest.run cleanup absent/present及实际gateway零transport；旧/反证2 failed/1正常，higher judge_many与inner transport各自计数避免spy覆盖/吞异常盲点；最终字节移除禁用保护1 failed/2正常，恢复3 passed；模型/Observer119及扩大155专项通过；全量2745 passed/145子测试，0失败/0跳过（405.16s），详见计划C34。此前外部请求是否发生未直接证明，只证明默认模型路径和key泄漏，不冒称无出站；受控复现无实际请求。C15b代码独立暂存另验。
+
 ## 112. 评估超时必须回收本次创建的进程组（2026-09-30）
 
 ### 问题背景
