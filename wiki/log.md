@@ -1645,3 +1645,10 @@ C35a最终本地验收：25靶向通过9.20s，最终同25只撤销Controller10�
 
 
 C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后完整全量2871 passed、154 subtests passed、2 skipped（隔离HOME无LaunchAgent），0 failed，454.85s。两项本机只读plist检查另行2 passed（0.07s）。compileall、三入口CLI AST、diff-check通过；独立最终只读复审组合阻断闭合，未自行重跑全量。真实Agent/Worker启动、业务E2E及开放卡未因此验收。
+
+- 2026-10-01 控制台 | 仪表板工作流 Linear 风格下拉框落地（feat/linear-workflow-dropdown）
+  - 核心痛点解决：彻底解决执行中工作流 `wf-project-0929-01` 因 title 覆盖原生 select 导致等宽 ID 不可见的问题，统一采用双行信息架构（标题 + 等宽 ID + 活跃/决策胶囊），未匹配工作流提供“已归档或未知”容错呈现。
+  - Linear 规范落地：落地方案 B（分状态组），顶部置顶“全部工作流”聚合视图，按“进行中 / 需决策”与“已完成 / 闲置”分组呈现；支持分组标题点击折叠/展开，搜索输入时自动强制展开命中分组；键盘上下键自动过滤折叠隐藏项；实现全局外部点击与 Escape 键关闭。
+  - 工作台切换器解耦：进入仪表板时重置 `workflowSwitcher.dataset.sig`，避免返回工作台时因缓存签名一致导致 `#wfSelect` 未重新渲染。
+  - 向下兼容与安全：保留隐藏 `<select id="dashWfSel">` 双向同步保证既有自动化测试与 CLI 工具链无损；行内动作统一使用 `jsArg()` 防范引号截断逃逸，全量输入经 `esc()` 转义。
+  - 验收证据：`tests/test_console_linear_dropdown.py` 6 passed；控制台测试集全量 212 passed；`compileall` 与 `git diff --check` 零错误；独立 Reviewer 子代理（google-code-review）审查通过，判定 MERGE_READY。

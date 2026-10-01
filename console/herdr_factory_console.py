@@ -1830,15 +1830,16 @@ button { cursor: pointer; }
 .dash-dot.red{background:var(--danger)}
 .dash-dot.gray{background:var(--text-tertiary)}
 
-/* Workflow Switcher */
+/* Linear Standard Select / Workflow Switcher */
 .wf-switcher {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   margin: 0 0 16px;
 }
 .wf-switcher label {
   font-size: 12px;
+  font-weight: 500;
   color: var(--text-secondary);
 }
 .wf-switcher select {
@@ -1848,6 +1849,298 @@ button { cursor: pointer; }
   border-radius: var(--radius-sm);
   padding: 6px 10px;
   max-width: 520px;
+}
+
+.linear-select {
+  position: relative;
+  display: inline-block;
+}
+.linear-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 10px 0 8px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-sm);
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: all .12s ease;
+  max-width: 540px;
+}
+.linear-trigger:hover {
+  background: var(--bg-hover);
+  border-color: #d1d5db;
+}
+.linear-select.open .linear-trigger,
+.linear-trigger:focus-visible {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 2px var(--primary-subtle);
+  outline: none;
+}
+.trigger-icon {
+  color: var(--text-tertiary);
+  display: flex;
+  align-items: center;
+}
+.trigger-content {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.trigger-title {
+  font-weight: 500;
+  font-size: 12.5px;
+  color: var(--text-primary);
+  text-overflow: ellipsis;
+  overflow: hidden;
+}
+.trigger-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 11px;
+  color: var(--text-tertiary);
+  background: var(--bg-subtle);
+  padding: 1px 5px;
+  border-radius: 4px;
+  border: 1px solid var(--border-subtle);
+}
+.trigger-pills {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.trigger-chevron {
+  color: var(--text-tertiary);
+  margin-left: auto;
+  transition: transform .15s ease;
+  display: flex;
+  align-items: center;
+}
+.linear-select.open .trigger-chevron {
+  transform: rotate(180deg);
+}
+
+.linear-popover {
+  display: none;
+  position: absolute;
+  top: calc(100% + 5px);
+  left: 0;
+  width: 440px;
+  max-height: 440px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  box-shadow: 0 10px 30px -4px rgba(0, 0, 0, 0.12), 0 4px 8px -2px rgba(0, 0, 0, 0.06);
+  z-index: 100;
+  flex-direction: column;
+  overflow: hidden;
+  animation: popIn 0.1s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.linear-select.open .linear-popover {
+  display: flex;
+}
+
+.popover-search-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-default);
+  background: var(--bg-surface);
+}
+.popover-search-icon {
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+}
+.popover-search-input {
+  width: 100%;
+  border: none;
+  background: transparent;
+  outline: none;
+  font-size: 12.5px;
+  color: var(--text-primary);
+}
+.popover-search-input::placeholder {
+  color: var(--text-tertiary);
+}
+.popover-shortcut {
+  font-size: 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-default);
+  color: var(--text-tertiary);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+
+.popover-list {
+  overflow-y: auto;
+  max-height: 360px;
+  padding: 4px;
+}
+.popover-list::-webkit-scrollbar {
+  width: 5px;
+}
+.popover-list::-webkit-scrollbar-thumb {
+  background: #e2e4e9;
+  border-radius: 4px;
+}
+.popover-group {
+  margin-bottom: 4px;
+}
+.popover-group-header {
+  padding: 6px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  user-select: none;
+  transition: background .08s ease;
+}
+.popover-group-header:hover {
+  background: var(--bg-subtle);
+  color: var(--text-secondary);
+}
+.popover-group-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+.popover-group-chevron {
+  color: var(--text-tertiary);
+  transition: transform .15s ease;
+  display: flex;
+  align-items: center;
+}
+.popover-group.collapsed .popover-group-chevron {
+  transform: rotate(-90deg);
+}
+.popover-group.collapsed .popover-group-items {
+  display: none;
+}
+
+.popover-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background .08s ease;
+  position: relative;
+}
+.popover-item:hover,
+.popover-item.keyboard-focus {
+  background: var(--bg-hover);
+}
+.popover-item.selected {
+  background: var(--primary-subtle);
+}
+.popover-item.selected .item-title {
+  color: var(--primary);
+}
+
+.item-check {
+  width: 14px;
+  height: 14px;
+  margin-top: 2px;
+  color: var(--primary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  opacity: 0;
+}
+.popover-item.selected .item-check {
+  opacity: 1;
+}
+.item-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.item-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.item-title {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.item-badges {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.item-sub {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+.item-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  color: var(--text-tertiary);
+}
+.highlight {
+  background: rgba(94, 106, 210, 0.15);
+  color: var(--primary);
+  border-radius: 2px;
+  padding: 0 1px;
+  font-weight: 600;
+}
+.popover-empty {
+  padding: 24px 16px;
+  text-align: center;
+  color: var(--text-tertiary);
+  font-size: 12px;
+}
+.badge-pill {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  line-height: 1.3;
+}
+.badge-pill.active {
+  background: #ecfdf5;
+  color: #047857;
+  border: 1px solid #a7f3d0;
+}
+.badge-pill.attention {
+  background: #fffbeb;
+  color: #b45309;
+  border: 1px solid #fde68a;
+}
+.badge-pill.dot::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
 }
 
 /* 任务看板 */
@@ -3332,6 +3625,7 @@ document.addEventListener('click',e=>{
   if(!e.target.closest('.switcher-wrap'))closeSpaceMenu();
   if(!e.target.closest('.task-menu'))closeAllTaskMenus();
   if(!e.target.closest('.task-drawer-menu-wrap'))closeTaskDrawerMenu();
+  if(!e.target.closest('.linear-select'))closeLinearSelectMenu();
 });
 document.addEventListener('keydown',e=>{
   if(e.key==='Escape'){
@@ -3344,6 +3638,7 @@ document.addEventListener('keydown',e=>{
     closeMoreMenu();
     closeSpaceMenu();
     closeAllTaskMenus();
+    closeLinearSelectMenu();
     const d=document.getElementById('deepDrawer');
     if(d&&!d.classList.contains('collapsed')){
       d.classList.add('collapsed');
@@ -3672,15 +3967,213 @@ function renderOpsCenter(){
 function showOpsAnomaly(a){openModal(a.kind,`<div class="task-meta">${esc(a.task_id||'')} · ${esc(a.agent||'')} · ${esc(a.node||'')}</div><div class="task-meta" style="margin:8px 0">最后事件：${esc(a.last_event||'—')}</div><div class="actions">${(a.actions||[]).map(x=>`<button class="mini" onclick="toast('建议操作：${esc(x)}')">${esc(x)}</button>`).join('')}</div><pre style="margin-top:16px">${esc(JSON.stringify(a.links||{},null,2))}</pre>`)}
 let dashTimer=null;
 function stopDashTimer(){if(dashTimer){clearInterval(dashTimer);dashTimer=null}}
+let dashLinearKeyboardIdx = 0;
+
+function toggleLinearSelectMenu(e){
+  if(e) e.stopPropagation();
+  const sel=document.getElementById('dashLinearSelect');
+  if(!sel) return;
+  const isOpen = sel.classList.toggle('open');
+  if(isOpen){
+    state.dashLinearSearch = '';
+    dashLinearKeyboardIdx = 0;
+    const inp = document.getElementById('dashLinearSearch');
+    if(inp){ inp.value = ''; setTimeout(() => inp.focus(), 50); }
+    renderLinearPopoverList();
+  }
+}
+
+function closeLinearSelectMenu(){
+  const sel=document.getElementById('dashLinearSelect');
+  if(sel) sel.classList.remove('open');
+}
+
+function togglePopoverGroup(key, e){
+  if(e) e.stopPropagation();
+  if(!state.collapsedGroups) state.collapsedGroups = new Set();
+  if(state.collapsedGroups.has(key)) state.collapsedGroups.delete(key);
+  else state.collapsedGroups.add(key);
+  renderLinearPopoverList();
+}
+
+function handleLinearSelectSearch(val){
+  state.dashLinearSearch = (val || '').trim().toLowerCase();
+  dashLinearKeyboardIdx = 0;
+  renderLinearPopoverList();
+}
+
+function handleLinearSelectKeydown(e){
+  const listEl=document.getElementById('dashLinearList');
+  if(!listEl) return;
+  const items = Array.from(listEl.querySelectorAll('.popover-item')).filter(it => !it.closest('.popover-group.collapsed'));
+  if(!items.length) return;
+  if(e.key==='ArrowDown'){
+    e.preventDefault();
+    dashLinearKeyboardIdx = (dashLinearKeyboardIdx + 1) % items.length;
+    items.forEach((it, idx) => it.classList.toggle('keyboard-focus', idx === dashLinearKeyboardIdx));
+    items[dashLinearKeyboardIdx].scrollIntoView({ block: 'nearest' });
+  } else if(e.key==='ArrowUp'){
+    e.preventDefault();
+    dashLinearKeyboardIdx = (dashLinearKeyboardIdx - 1 + items.length) % items.length;
+    items.forEach((it, idx) => it.classList.toggle('keyboard-focus', idx === dashLinearKeyboardIdx));
+    items[dashLinearKeyboardIdx].scrollIntoView({ block: 'nearest' });
+  } else if(e.key==='Enter'){
+    e.preventDefault();
+    if(items[dashLinearKeyboardIdx]) items[dashLinearKeyboardIdx].click();
+  } else if(e.key==='Escape'){
+    e.preventDefault();
+    closeLinearSelectMenu();
+    const btn = document.getElementById('dashLinearTrigger');
+    if(btn) btn.focus();
+  }
+}
+
+function selectLinearWorkflow(wid){
+  state.dashWorkflowId = wid || null;
+  const sel=document.getElementById('dashWfSel');
+  if(sel) sel.value = wid || '';
+  closeLinearSelectMenu();
+  saveViewState();
+  loadDashboard();
+}
+
+function renderLinearPopoverList(){
+  const listEl = document.getElementById('dashLinearList');
+  if(!listEl) return;
+  const wfs = state.dashWorkflows || [];
+  const cur = state.dashWorkflowId || '';
+  const kw = state.dashLinearSearch || '';
+  if(!state.collapsedGroups) state.collapsedGroups = new Set();
+
+  const filtered = wfs.filter(w => {
+    if(!kw) return true;
+    return (w.title && w.title.toLowerCase().includes(kw)) ||
+           (w.workflow_id && w.workflow_id.toLowerCase().includes(kw));
+  });
+
+  let html = '';
+  if(!kw || '全部工作流'.includes(kw)){
+    const isSel = !cur;
+    html += `<div class="popover-item ${isSel ? 'selected' : ''}" onclick="selectLinearWorkflow('')" role="option">
+      <span class="item-check"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg></span>
+      <div class="item-main">
+        <div class="item-header">
+          <span class="item-title">全部工作流</span>
+          <span class="item-badges"><span class="badge-pill" style="background:var(--bg-subtle);color:var(--text-secondary)">聚合</span></span>
+        </div>
+        <div class="item-sub">查看所有活跃工作流的聚合看板</div>
+      </div>
+    </div><div style="height:1px;background:var(--border-subtle);margin:4px 0"></div>`;
+  }
+
+  if(!filtered.length){
+    listEl.innerHTML = html + `<div class="popover-empty">未找到匹配的工作流 “${esc(kw)}”</div>`;
+    return;
+  }
+
+  const activeGroup = filtered.filter(w => (w.active > 0 || w.attention > 0));
+  const idleGroup = filtered.filter(w => (w.active === 0 && w.attention === 0));
+
+  function renderGroup(key, label, items){
+    if(!items.length) return '';
+    const isCollapsed = !kw && state.collapsedGroups.has(key);
+    const chevronSvg = `<svg class="popover-group-chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6"/></svg>`;
+    let gHtml = `<div class="popover-group ${isCollapsed ? 'collapsed' : ''}" data-group="${key}">
+      <div class="popover-group-header" onclick="togglePopoverGroup('${key}', event)">
+        <span class="popover-group-title">${label} (${items.length})</span>
+        ${chevronSvg}
+      </div>
+      <div class="popover-group-items">`;
+    items.forEach(w => {
+      const isSel = (w.workflow_id === cur);
+      const title = w.title || w.workflow_id;
+      let pills = '';
+      if(w.active > 0) pills += `<span class="badge-pill active dot">${w.active} 活</span>`;
+      if(w.attention > 0) pills += `<span class="badge-pill attention dot">${w.attention} 等</span>`;
+      if(!pills) pills = `<span class="badge-pill" style="background:var(--bg-subtle);color:var(--text-tertiary)">完成</span>`;
+
+      function hl(txt){
+        if(!kw || !txt) return esc(txt);
+        const re = new RegExp(`(${kw.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')})`, 'gi');
+        return esc(txt).replace(re, '<span class="highlight">$1</span>');
+      }
+
+      gHtml += `<div class="popover-item ${isSel ? 'selected' : ''}" onclick="selectLinearWorkflow(${jsArg(w.workflow_id)})" role="option">
+        <span class="item-check"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg></span>
+        <div class="item-main">
+          <div class="item-header">
+            <span class="item-title">${hl(title)}</span>
+            <span class="item-badges">${pills}</span>
+          </div>
+          <div class="item-sub">
+            <span class="item-id">${hl(w.workflow_id)}</span>
+          </div>
+        </div>
+      </div>`;
+    });
+    gHtml += `</div></div>`;
+    return gHtml;
+  }
+
+  html += renderGroup('active', '进行中 / 需决策', activeGroup);
+  html += renderGroup('idle', '已完成 / 闲置', idleGroup);
+  listEl.innerHTML = html;
+
+  const renderedItems = Array.from(listEl.querySelectorAll('.popover-item')).filter(it => !it.closest('.popover-group.collapsed'));
+  renderedItems.forEach((it, idx) => it.classList.toggle('keyboard-focus', idx === dashLinearKeyboardIdx));
+}
+
+function updateLinearWorkflowTrigger(workflows, curWid){
+  const contentEl = document.getElementById('dashLinearTriggerContent');
+  if(!contentEl) return;
+  if(!curWid){
+    contentEl.innerHTML = `<span class="trigger-title">全部工作流</span>`;
+    return;
+  }
+  const cw = (workflows || []).find(w => w.workflow_id === curWid);
+  if(!cw){
+    contentEl.innerHTML = `<span class="trigger-title">${esc(curWid)}（已归档或未知）</span><span class="trigger-mono">${esc(curWid)}</span>`;
+    return;
+  }
+  const title = cw.title || cw.workflow_id;
+  let pills = '';
+  if(cw.active > 0) pills += `<span class="badge-pill active dot">${cw.active} 活</span>`;
+  if(cw.attention > 0) pills += `<span class="badge-pill attention dot">${cw.attention} 等</span>`;
+
+  contentEl.innerHTML = `<span class="trigger-title">${esc(title)}</span>`
+    + `<span class="trigger-mono">${esc(cw.workflow_id)}</span>`
+    + (pills ? `<span class="trigger-pills">${pills}</span>` : '');
+}
+
 function showDashboard(){
+  setWorkspaceMode('aux');
   state.dashMode=true;state.opsMode=false;state.shellView='dashboard';saveViewState();syncOpsUi();stopDashTimer();
   document.getElementById('projectTitle').textContent='我的仪表板';
   document.getElementById('workflowSubject').textContent='任务 · 工位实时 · 等你决策 · 每 10 秒自动刷新';
   document.getElementById('workflowSub').textContent='';
-  const sw=document.getElementById('workflowSwitcher');sw.style.display='flex';sw.innerHTML='<label>工作流</label><select id="dashWfSel" onchange="dashSelectWorkflow(this.value)"><option value="">全部工作流</option></select><button class="btn" onclick="dashOpenWorkflow()">进入该工作流</button>';
+  const sw=document.getElementById('workflowSwitcher');
+  delete sw.dataset.sig;
+  sw.style.display='flex';
+  sw.innerHTML='<label>工作流</label>'
+    +'<div class="linear-select" id="dashLinearSelect">'
+      +'<button class="linear-trigger" id="dashLinearTrigger" onclick="toggleLinearSelectMenu(event)" aria-haspopup="listbox">'
+        +'<span class="trigger-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="6" y1="3" x2="6" y2="15"></line><circle cx="18" cy="6" r="3"></circle><circle cx="6" cy="18" r="3"></circle><path d="M18 9a9 9 0 0 1-9 9"></path></svg></span>'
+        +'<div class="trigger-content" id="dashLinearTriggerContent"><span class="trigger-title">全部工作流</span></div>'
+        +'<span class="trigger-chevron"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6"/></svg></span>'
+      +'</button>'
+      +'<div class="linear-popover" id="dashLinearPopover" onclick="event.stopPropagation()">'
+        +'<div class="popover-search-wrap">'
+          +'<span class="popover-search-icon"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg></span>'
+          +'<input type="text" class="popover-search-input" id="dashLinearSearch" placeholder="搜索工作流名称、ID (如 0929 / 待办)..." autocomplete="off" oninput="handleLinearSelectSearch(this.value)" onkeydown="handleLinearSelectKeydown(event)" />'
+          +'<span class="popover-shortcut">ESC</span>'
+        +'</div>'
+        +'<div class="popover-list" id="dashLinearList" role="listbox"></div>'
+      +'</div>'
+      +'<select id="dashWfSel" style="display:none" onchange="dashSelectWorkflow(this.value)"><option value="">全部工作流</option></select>'
+    +'</div>'
+    +'<button class="btn primary" onclick="dashOpenWorkflow()">进入该工作流</button>';
   document.getElementById('stages').innerHTML='';
   document.getElementById('attentionBanner').style.display='none';
-  setWorkspaceMode('aux');
   document.getElementById('tasks').innerHTML='<div class="empty">正在加载仪表板…</div>';
   paintCrumb();
   loadDashboard();
@@ -3736,7 +4229,15 @@ function renderDashboard(){
   const mSpans=document.querySelectorAll('.metrics .metric span');
   if(mSpans[0])mSpans[0].textContent='任务总数';if(mSpans[1])mSpans[1].textContent='活跃任务';if(mSpans[2])mSpans[2].textContent='等你决策';if(mSpans[3])mSpans[3].textContent='卡住';
   const sel=document.getElementById('dashWfSel');
-  if(sel){const cur=state.dashWorkflowId||'';sel.innerHTML='<option value="">全部工作流</option>'+(d.workflows||[]).map(w=>'<option value="'+esc(w.workflow_id)+'"'+(w.workflow_id===cur?' selected':'')+'>'+esc(w.title||w.workflow_id)+'（活 '+w.active+' / 等 '+w.attention+'）</option>').join('');if(cur&&!(d.workflows||[]).some(w=>w.workflow_id===cur)){const o=document.createElement('option');o.value=cur;o.textContent=cur+'（已归档或未知）';o.selected=true;sel.appendChild(o)}}
+  if(sel){
+    const cur=state.dashWorkflowId||'';
+    sel.innerHTML='<option value="">全部工作流</option>'+(d.workflows||[]).map(w=>'<option value="'+esc(w.workflow_id)+'"'+(w.workflow_id===cur?' selected':'')+'>'+esc(w.title||w.workflow_id)+'（活 '+w.active+' / 等 '+w.attention+'）</option>').join('');
+    if(cur&&!(d.workflows||[]).some(w=>w.workflow_id===cur)){const o=document.createElement('option');o.value=cur;o.textContent=cur+'（已归档或未知）';o.selected=true;sel.appendChild(o)}
+    sel.value=cur;
+    state.dashWorkflows = d.workflows || [];
+    updateLinearWorkflowTrigger(d.workflows || [], cur);
+    renderLinearPopoverList();
+  }
   const kpis='<div class="dash-kpis">'
     +'<div class="dash-kpi"><div class="k">任务完成</div><div class="v">'+doneCount+' <small>/ '+d.counts.tasks+'</small></div></div>'
     +'<div class="dash-kpi"><div class="k">进行中</div><div class="v" style="font-size:15px">'+esc(workT?workT.task_id:'—')+'</div><div class="s">'+esc(workT?(workT.agent+' · 工位 '+(workT.pane_id||'—')):'当前无执行中任务')+'</div></div>'

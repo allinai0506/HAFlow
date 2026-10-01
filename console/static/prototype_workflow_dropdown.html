@@ -1,0 +1,1283 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HAFlow - 工作流下拉选择器 Linear 规范动态原型</title>
+  <style>
+    :root {
+      /* Linear Clean Light Palette */
+      --bg-page: #f8f9fa;
+      --bg-sidebar: #fafafa;
+      --bg-surface: #ffffff;
+      --bg-subtle: #f4f5f7;
+      --bg-hover: #f0f1f3;
+      --bg-active: #eceef2;
+      --bg-elevated: #ffffff;
+
+      --text-primary: #121316;
+      --text-secondary: #5f6368;
+      --text-tertiary: #8c919a;
+      --text-inverse: #ffffff;
+
+      --border-default: #e5e7eb;
+      --border-subtle: #f0f1f3;
+      --border-focus: #5e6ad2;
+
+      --primary: #5e6ad2;
+      --primary-hover: #4f5bc4;
+      --primary-subtle: rgba(94, 106, 210, 0.08);
+
+      --success: #16a34a;
+      --success-bg: #f0fdf4;
+      --warning: #d97706;
+      --warning-bg: #fffbeb;
+      --danger: #dc2626;
+      --danger-bg: #fef2f2;
+
+      --radius-sm: 6px;
+      --radius-md: 8px;
+      --radius-lg: 10px;
+      --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.04);
+      --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.06);
+      --shadow-popover: 0 10px 30px -4px rgba(0, 0, 0, 0.12), 0 4px 8px -2px rgba(0, 0, 0, 0.06);
+
+      --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg-page);
+      color: var(--text-primary);
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+      font-size: 13px;
+      line-height: 1.5;
+      -webkit-font-smoothing: antialiased;
+      user-select: none;
+    }
+    button, input, select { font: inherit; }
+    button { cursor: pointer; border: none; background: none; }
+
+    /* Shell Layout */
+    .shell {
+      display: grid;
+      grid-template-columns: 220px 1fr;
+      min-height: 100vh;
+    }
+
+    /* Sidebar Mock */
+    .sidebar {
+      background: var(--bg-sidebar);
+      border-right: 1px solid var(--border-default);
+      padding: 14px 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 4px 8px;
+      font-weight: 600;
+      font-size: 14px;
+      color: var(--text-primary);
+    }
+    .brand-icon {
+      width: 22px;
+      height: 22px;
+      background: #121316;
+      border-radius: 5px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+      font-size: 11px;
+      font-weight: 700;
+    }
+    .factory-pill {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-default);
+      border-radius: var(--radius-sm);
+      padding: 8px 10px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 12px;
+      font-weight: 500;
+    }
+    .nav-section { display: flex; flex-direction: column; gap: 2px; }
+    .nav-title { font-size: 11px; color: var(--text-tertiary); padding: 4px 8px; font-weight: 500; }
+    .nav-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 8px;
+      border-radius: var(--radius-sm);
+      font-size: 12.5px;
+      color: var(--text-secondary);
+      cursor: pointer;
+    }
+    .nav-item:hover { background: var(--bg-hover); color: var(--text-primary); }
+    .nav-item.active { background: #fbeee6; color: #16171b; font-weight: 600; }
+
+    /* Main Area */
+    .main {
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow-y: auto;
+    }
+
+    /* Explanation Banner */
+    .explain-banner {
+      background: #f0f7ff;
+      border-bottom: 1px solid #c7e0ff;
+      padding: 10px 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 12.5px;
+      color: #0b4c8c;
+    }
+    .explain-banner strong { font-weight: 600; color: #022f5d; }
+    .explain-badge {
+      background: #0b4c8c;
+      color: #fff;
+      padding: 2px 7px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 600;
+      margin-right: 6px;
+    }
+
+    /* Top Bar */
+    .header-bar {
+      padding: 16px 24px 12px;
+      border-bottom: 1px solid var(--border-default);
+      background: var(--bg-surface);
+    }
+    .crumb-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 13px;
+      color: var(--text-secondary);
+    }
+    .crumb-row b { color: var(--text-primary); font-weight: 600; }
+    .crumb-sep { color: var(--text-tertiary); }
+
+    /* Workflow Switcher Bar */
+    .switcher-container {
+      padding: 14px 24px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      background: var(--bg-surface);
+      border-bottom: 1px solid var(--border-subtle);
+    }
+    .switcher-label {
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--text-secondary);
+    }
+
+    /* ------------------------------------------------------------- */
+    /* LINEAR CUSTOM COMBOBOX SPECIFICATION (2026)                  */
+    /* ------------------------------------------------------------- */
+    .linear-select {
+      position: relative;
+      display: inline-block;
+    }
+
+    /* 1. Trigger Pill */
+    .linear-trigger {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      height: 32px;
+      padding: 0 10px 0 8px;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-default);
+      border-radius: var(--radius-sm);
+      box-shadow: var(--shadow-sm);
+      color: var(--text-primary);
+      cursor: pointer;
+      transition: all .12s ease;
+      max-width: 480px;
+    }
+    .linear-trigger:hover {
+      background: var(--bg-hover);
+      border-color: #d1d5db;
+    }
+    .linear-select.open .linear-trigger,
+    .linear-trigger:focus-visible {
+      border-color: var(--primary);
+      box-shadow: 0 0 0 2px var(--primary-subtle);
+      outline: none;
+    }
+
+    .trigger-icon {
+      color: var(--text-tertiary);
+      display: flex;
+      align-items: center;
+    }
+    .trigger-content {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      overflow: hidden;
+      white-space: nowrap;
+    }
+    .trigger-title {
+      font-weight: 500;
+      font-size: 12.5px;
+      color: var(--text-primary);
+      text-overflow: ellipsis;
+      overflow: hidden;
+    }
+    .trigger-mono {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--text-tertiary);
+      background: var(--bg-subtle);
+      padding: 1px 5px;
+      border-radius: 4px;
+      border: 1px solid var(--border-subtle);
+    }
+    .trigger-pills {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .badge-pill {
+      font-size: 11px;
+      padding: 1px 6px;
+      border-radius: 999px;
+      font-weight: 500;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      line-height: 1.3;
+    }
+    .badge-pill.active {
+      background: #ecfdf5;
+      color: #047857;
+      border: 1px solid #a7f3d0;
+    }
+    .badge-pill.attention {
+      background: #fffbeb;
+      color: #b45309;
+      border: 1px solid #fde68a;
+    }
+    .badge-pill.dot::before {
+      content: "";
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+      background: currentColor;
+    }
+    .trigger-chevron {
+      color: var(--text-tertiary);
+      margin-left: auto;
+      transition: transform .15s ease;
+      display: flex;
+      align-items: center;
+    }
+    .linear-select.open .trigger-chevron {
+      transform: rotate(180deg);
+    }
+
+    /* 2. Floating Popover Panel */
+    .linear-popover {
+      display: none;
+      position: absolute;
+      top: calc(100% + 5px);
+      left: 0;
+      width: 440px;
+      max-height: 440px;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-default);
+      border-radius: var(--radius-md);
+      box-shadow: var(--shadow-popover);
+      z-index: 100;
+      flex-direction: column;
+      overflow: hidden;
+      animation: popIn 0.1s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    .linear-select.open .linear-popover {
+      display: flex;
+    }
+
+    @keyframes popIn {
+      from { opacity: 0; transform: translateY(-4px) scale(0.99); }
+      to { opacity: 1; transform: translateY(0) scale(1); }
+    }
+
+    /* 3. Popover Search Box */
+    .popover-search-wrap {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      border-bottom: 1px solid var(--border-default);
+      background: var(--bg-surface);
+    }
+    .popover-search-icon {
+      color: var(--text-tertiary);
+      flex-shrink: 0;
+    }
+    .popover-search-input {
+      width: 100%;
+      border: none;
+      background: transparent;
+      outline: none;
+      font-size: 12.5px;
+      color: var(--text-primary);
+    }
+    .popover-search-input::placeholder {
+      color: var(--text-tertiary);
+    }
+    .popover-shortcut {
+      font-size: 10px;
+      font-family: var(--font-mono);
+      background: var(--bg-subtle);
+      border: 1px solid var(--border-default);
+      color: var(--text-tertiary);
+      padding: 1px 4px;
+      border-radius: 3px;
+    }
+
+    /* 4. Popover Items List */
+    .popover-list {
+      overflow-y: auto;
+      max-height: 360px;
+      padding: 4px;
+    }
+    .popover-list::-webkit-scrollbar {
+      width: 5px;
+    }
+    .popover-list::-webkit-scrollbar-thumb {
+      background: #e2e4e9;
+      border-radius: 4px;
+    }
+
+    .popover-group-label {
+      padding: 6px 8px 4px;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-tertiary);
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+    }
+    .popover-group-header {
+      padding: 6px 8px;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-tertiary);
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      cursor: pointer;
+      user-select: none;
+      border-radius: var(--radius-sm);
+      transition: background .1s ease, color .1s ease;
+    }
+    .popover-group-header:hover {
+      background: var(--bg-hover);
+      color: var(--text-secondary);
+    }
+    .popover-group-chevron {
+      transition: transform .15s ease;
+      color: var(--text-tertiary);
+    }
+    .popover-group.collapsed .popover-group-chevron {
+      transform: rotate(-90deg);
+    }
+    .popover-group.collapsed .popover-group-items {
+      display: none;
+    }
+
+    .popover-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      padding: 8px;
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      transition: background .08s ease;
+      position: relative;
+    }
+    .popover-item:hover,
+    .popover-item.keyboard-focus {
+      background: var(--bg-hover);
+    }
+    .popover-item.selected {
+      background: var(--primary-subtle);
+    }
+    .popover-item.selected .item-title {
+      color: var(--primary);
+    }
+
+    .item-check {
+      width: 14px;
+      height: 14px;
+      margin-top: 2px;
+      color: var(--primary);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      opacity: 0;
+    }
+    .popover-item.selected .item-check {
+      opacity: 1;
+    }
+
+    .item-main {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .item-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .item-title {
+      font-size: 12.5px;
+      font-weight: 500;
+      color: var(--text-primary);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .item-badges {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      flex-shrink: 0;
+    }
+    .item-sub {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      color: var(--text-tertiary);
+    }
+    .item-id {
+      font-family: var(--font-mono);
+      color: var(--text-tertiary);
+    }
+    .highlight {
+      background: rgba(94, 106, 210, 0.15);
+      color: var(--primary);
+      border-radius: 2px;
+      padding: 0 1px;
+      font-weight: 600;
+    }
+
+    .popover-empty {
+      padding: 24px 16px;
+      text-align: center;
+      color: var(--text-tertiary);
+      font-size: 12px;
+    }
+
+    /* Action button */
+    .btn-action {
+      height: 32px;
+      padding: 0 12px;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-default);
+      border-radius: var(--radius-sm);
+      color: var(--text-primary);
+      font-weight: 500;
+      font-size: 12.5px;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      transition: all .1s;
+    }
+    .btn-action:hover {
+      background: var(--bg-hover);
+      border-color: #d1d5db;
+    }
+    .btn-action.primary {
+      background: var(--primary);
+      border-color: var(--primary);
+      color: #fff;
+    }
+    .btn-action.primary:hover {
+      background: var(--primary-hover);
+    }
+
+    /* Dashboard Mock Content */
+    .dash-body {
+      padding: 20px 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+    .kpi-row {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 12px;
+    }
+    .kpi-card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-default);
+      border-radius: var(--radius-md);
+      padding: 12px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .kpi-title { font-size: 12px; color: var(--text-secondary); }
+    .kpi-val { font-size: 20px; font-weight: 700; color: var(--text-primary); }
+    .kpi-val.warn { color: var(--warning); }
+    .kpi-sub { font-size: 11px; color: var(--text-tertiary); }
+
+    .tasks-card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-default);
+      border-radius: var(--radius-md);
+      overflow: hidden;
+    }
+    .tasks-header {
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border-default);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-weight: 600;
+      font-size: 13px;
+    }
+    .task-row {
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border-subtle);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+    .task-row:last-child { border-bottom: none; }
+    .task-left { display: flex; align-items: center; gap: 12px; }
+    .task-idx {
+      width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      background: var(--bg-subtle);
+      color: var(--text-secondary);
+      font-size: 11px;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .task-meta-col { display: flex; flex-direction: column; gap: 2px; }
+    .task-id-text { font-family: var(--font-mono); font-weight: 600; font-size: 12.5px; }
+    .task-sub-text { font-size: 11.5px; color: var(--text-secondary); }
+    .tag-failed {
+      background: var(--danger-bg);
+      color: var(--danger);
+      font-size: 11px;
+      font-weight: 600;
+      padding: 2px 7px;
+      border-radius: 4px;
+    }
+    .tag-cleaned {
+      background: var(--success-bg);
+      color: var(--success);
+      font-size: 11px;
+      font-weight: 600;
+      padding: 2px 7px;
+      border-radius: 4px;
+    }
+
+    /* ------------------------------------------------------------- */
+    /* PROTOTYPE SWITCHER (FLOATING BOTTOM BAR)                      */
+    /* ------------------------------------------------------------- */
+    .prototype-bar {
+      position: fixed;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: #18191c;
+      border: 1px solid #2e3036;
+      box-shadow: 0 12px 36px rgba(0, 0, 0, 0.35);
+      border-radius: 999px;
+      padding: 4px 6px 4px 14px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      z-index: 1000;
+      color: #fff;
+    }
+    .proto-badge {
+      background: #5e6ad2;
+      color: #fff;
+      font-size: 10px;
+      font-weight: 700;
+      padding: 2px 6px;
+      border-radius: 4px;
+      letter-spacing: 0.5px;
+    }
+    .proto-tabs {
+      display: flex;
+      align-items: center;
+      gap: 2px;
+    }
+    .proto-tab {
+      color: #8c919a;
+      padding: 6px 12px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all .12s;
+    }
+    .proto-tab:hover {
+      color: #fff;
+      background: rgba(255, 255, 255, 0.08);
+    }
+    .proto-tab.active {
+      color: #fff;
+      background: #2b2d33;
+      font-weight: 600;
+    }
+    .proto-hint {
+      color: #636773;
+      font-size: 11px;
+      border-left: 1px solid #33363e;
+      padding-left: 10px;
+      margin-left: 4px;
+    }
+
+    /* Old native select container for comparison */
+    .old-native-wrap {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .old-native-select {
+      background: #fff;
+      border: 1px solid #d1d5db;
+      padding: 6px 10px;
+      border-radius: 6px;
+      font-size: 13px;
+      max-width: 440px;
+    }
+  </style>
+</head>
+<body>
+
+<div class="shell">
+  <!-- Left Mock Sidebar -->
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-icon">HA</div>
+      <span>HAFlow</span>
+    </div>
+
+    <div class="factory-pill">
+      <div>
+        <div style="font-weight:600">数凭</div>
+        <div style="font-size:11px;color:var(--text-tertiary)">当前工厂</div>
+      </div>
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6"/></svg>
+    </div>
+
+    <div class="nav-section">
+      <div class="nav-title">运转</div>
+      <div class="nav-item">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+        工作台
+      </div>
+      <div class="nav-item active">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-3 3"/></svg>
+        仪表板
+      </div>
+      <div class="nav-item">运维驾驶舱</div>
+      <div class="nav-item">告警</div>
+    </div>
+
+    <div class="nav-section">
+      <div class="nav-title">当前空间</div>
+      <div class="nav-item">工作流 <span style="margin-left:auto;color:var(--text-tertiary)">3</span></div>
+      <div class="nav-item">执行者</div>
+      <div class="nav-item">工位</div>
+    </div>
+  </aside>
+
+  <!-- Right Main Area -->
+  <main class="main">
+    <!-- Top Clarification Banner -->
+    <div class="explain-banner">
+      <div>
+        <span class="explain-badge">真相核对</span>
+        <strong>wf-project-0929-01 并没有丢失！</strong>
+        在旧代码中它被标题覆盖，显示成了 <code>Task: 统一待办工作台 V1 (活 3 / 等 4)</code>。本原型演示 Linear 风格的双行 ID 呈现与即时搜索。
+      </div>
+      <div style="font-size:11px;color:#0b4c8c">按 <code>/</code> 或 <code>⌘K</code> 快速唤起搜索</div>
+    </div>
+
+    <!-- Header Breadcrumb -->
+    <header class="header-bar">
+      <div class="crumb-row">
+        <b>仪表板</b>
+        <span class="crumb-sep">/</span>
+        <span>任务 · 工位实时 · 等你决策 · 每 10 秒自动刷新</span>
+      </div>
+    </header>
+
+    <!-- Workflow Switcher Toolbar -->
+    <section class="switcher-container" id="switcherArea">
+      <!-- Dynamic switcher mounted here based on selected variant -->
+    </section>
+
+    <!-- Mock Dashboard KPI & Tasks -->
+    <div class="dash-body">
+      <div class="kpi-row">
+        <div class="kpi-card">
+          <div class="kpi-title">任务完成</div>
+          <div class="kpi-val" id="kpiDone">24 <small style="font-size:13px;color:var(--text-tertiary);font-weight:400">/ 27</small></div>
+          <div class="kpi-sub">当前工作流进度 88%</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-title">进行中</div>
+          <div class="kpi-val" style="font-size:15px;line-height:28px">impl-t8-sort-order-fix</div>
+          <div class="kpi-sub">opencode · 工位 pane-3</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-title">等你的问题</div>
+          <div class="kpi-val warn" id="kpiAtt">4 <small style="font-size:13px;font-weight:400">个</small></div>
+          <div class="kpi-sub">默认动作已就绪</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-title">卡住 / 异常</div>
+          <div class="kpi-val warn" id="kpiStuck">3</div>
+          <div class="kpi-sub">已生成解卡建议</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-title">交付物</div>
+          <div class="kpi-val">1</div>
+          <div class="kpi-sub">最新有效分支: candidate/0929</div>
+        </div>
+      </div>
+
+      <!-- Task Table -->
+      <div class="tasks-card">
+        <div class="tasks-header">
+          <span id="tasksTableTitle">当前筛选工作流的任务列表 (wf-project-0929-01)</span>
+          <span style="font-size:12px;color:var(--text-tertiary);font-weight:400" id="tasksTableCount">显示 4 项任务</span>
+        </div>
+        <div id="tasksTableBody">
+          <!-- Populated by JS -->
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<!-- Floating Prototype Controller -->
+<div class="prototype-bar">
+  <span class="proto-badge">2026 UI 原型</span>
+  <div class="proto-tabs">
+    <div class="proto-tab" data-variant="old" onclick="switchVariant('old')">现状对照 (原生 Select)</div>
+    <div class="proto-tab" data-variant="A" onclick="switchVariant('A')">方案 A (Linear 经典 Combobox)</div>
+    <div class="proto-tab active" data-variant="B" onclick="switchVariant('B')">方案 B (标准落地 · 状态分组与折叠)</div>
+    <div class="proto-tab" data-variant="C" onclick="switchVariant('C')">方案 C (极简一体化触发器)</div>
+  </div>
+  <div class="proto-hint">按键盘 ← → 快速切换形态</div>
+</div>
+
+<script>
+// Mock Real Workflow Data from HAFlow System
+const WORKFLOWS_DATA = [
+  {
+    workflow_id: 'wf-project-0929-01',
+    title: 'Task：统一待办工作台 V1',
+    active: 3,
+    attention: 4,
+    status: 'working',
+    tasks_count: 27,
+    last_active: '刚刚'
+  },
+  {
+    workflow_id: 'wf-xiyu-bid-poc-a380753e-20260912-155001',
+    title: '',
+    active: 0,
+    attention: 0,
+    status: 'cleaned',
+    tasks_count: 14,
+    last_active: '9月12日'
+  },
+  {
+    workflow_id: 'wf-nexusarchive-54433229-20260912-142153',
+    title: '',
+    active: 0,
+    attention: 0,
+    status: 'cleaned',
+    tasks_count: 18,
+    last_active: '9月12日'
+  },
+  {
+    workflow_id: 'e2e-20260911-213344',
+    title: 'E2E 自动化调度流回归',
+    active: 1,
+    attention: 1,
+    status: 'working',
+    tasks_count: 8,
+    last_active: '9月11日'
+  },
+  {
+    workflow_id: 'e2e-20260911-185343',
+    title: '',
+    active: 2,
+    attention: 2,
+    status: 'working',
+    tasks_count: 12,
+    last_active: '9月11日'
+  },
+  {
+    workflow_id: 'v12-policy-test-001',
+    title: '策略路由决策演练',
+    active: 0,
+    attention: 0,
+    status: 'cleaned',
+    tasks_count: 5,
+    last_active: '9月10日'
+  }
+];
+
+const MOCK_TASKS = {
+  'wf-project-0929-01': [
+    { id: 'test-unified-task-workbench-v1-r2', node: '测试验收', agent: 'claude', pane: 'pane-2', status: 'failed', status_text: '失败卡住' },
+    { id: 'test-unified-task-workbench-v1-r5', node: '测试验收', agent: 'opencode', pane: 'pane-4', status: 'failed', status_text: '失败卡住' },
+    { id: 'wf-project-0929-01-impl-fix', node: '补丁修复', agent: 'pi', pane: 'pane-1', status: 'failed', status_text: '失败卡住' },
+    { id: 'impl-t8-sort-order-fix', node: '代码实现', agent: 'opencode', pane: 'pane-3', status: 'cleaned', status_text: '已完成' },
+  ],
+  '': [
+    { id: 'test-unified-task-workbench-v1-r2', wf: 'wf-project-0929-01', node: '测试验收', agent: 'claude', status: 'failed', status_text: '失败卡住' },
+    { id: 'e2e-213344-impl-001', wf: 'e2e-20260911-213344', node: '回归执行', agent: 'grok', status: 'failed', status_text: '失败卡住' },
+    { id: 'impl-t8-sort-order-fix', wf: 'wf-project-0929-01', node: '代码实现', agent: 'opencode', status: 'cleaned', status_text: '已完成' },
+    { id: 'arch-audit-poc-01', wf: 'wf-xiyu-bid-poc-a380753e', node: '架构自检', agent: 'agy', status: 'cleaned', status_text: '已完成' },
+  ]
+};
+
+let currentVariant = 'B';
+let selectedWorkflowId = 'wf-project-0929-01'; // Default selected to the user's workflow
+let searchKeyword = '';
+let keyboardIndex = 0;
+const prototypeCollapsedGroups = new Set();
+
+function togglePrototypeGroup(key, e) {
+  if (e) e.stopPropagation();
+  if (prototypeCollapsedGroups.has(key)) {
+    prototypeCollapsedGroups.delete(key);
+  } else {
+    prototypeCollapsedGroups.add(key);
+  }
+  renderPopoverItems();
+}
+
+function esc(s) {
+  if (!s) return '';
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function getWorkflowDisplay(wid) {
+  if (!wid) return { title: '全部工作流', id: '', active: 0, attention: 0 };
+  const w = WORKFLOWS_DATA.find(x => x.workflow_id === wid);
+  if (!w) return { title: wid, id: wid, active: 0, attention: 0 };
+  return {
+    title: w.title || w.workflow_id,
+    id: w.workflow_id,
+    active: w.active,
+    attention: w.attention
+  };
+}
+
+function renderTasksTable() {
+  const tasks = MOCK_TASKS[selectedWorkflowId] || MOCK_TASKS[''];
+  const countEl = document.getElementById('tasksTableCount');
+  const titleEl = document.getElementById('tasksTableTitle');
+  const bodyEl = document.getElementById('tasksTableBody');
+
+  titleEl.textContent = selectedWorkflowId ? `工作流任务明细 (${selectedWorkflowId})` : '全部活跃任务明细';
+  countEl.textContent = `共 ${tasks.length} 项`;
+
+  bodyEl.innerHTML = tasks.map((t, idx) => `
+    <div class="task-row">
+      <div class="task-left">
+        <span class="task-idx">${idx + 1}</span>
+        <div class="task-meta-col">
+          <div class="task-id-text">${esc(t.id)}</div>
+          <div class="task-sub-text">${esc(t.node)} · 执行者 ${esc(t.agent)} · 工位 ${esc(t.pane || '—')}</div>
+        </div>
+      </div>
+      <div>
+        <span class="${t.status === 'failed' ? 'tag-failed' : 'tag-cleaned'}">${esc(t.status_text)}</span>
+      </div>
+    </div>
+  `).join('');
+}
+
+// ------------------------------------------------------------------
+// Variant Switcher Implementation
+// ------------------------------------------------------------------
+function switchVariant(v) {
+  currentVariant = v;
+  document.querySelectorAll('.proto-tab').forEach(tab => {
+    tab.classList.toggle('active', tab.dataset.variant === v);
+  });
+  renderSwitcher();
+  renderTasksTable();
+}
+
+function renderSwitcher() {
+  const container = document.getElementById('switcherArea');
+
+  if (currentVariant === 'old') {
+    // 现状对照：原生 SELECT 下拉框
+    container.innerHTML = `
+      <div class="old-native-wrap">
+        <label class="switcher-label">工作流 (现状原生写法):</label>
+        <select class="old-native-select" onchange="onWorkflowChange(this.value)">
+          <option value="">全部工作流</option>
+          ${WORKFLOWS_DATA.map(w => `
+            <option value="${esc(w.workflow_id)}"${w.workflow_id === selectedWorkflowId ? ' selected' : ''}>
+              ${esc(w.title || w.workflow_id)}（活 ${w.active} / 等 ${w.attention}）
+            </option>
+          `).join('')}
+        </select>
+        <button class="btn-action primary" onclick="enterWorkflow()">进入该工作流</button>
+        <div style="font-size:12px;color:var(--danger);margin-left:12px">
+          ⚠️ 缺点：macOS 原生菜单粗大，首行只写着"Task: 统一待办工作台 V1"，把 wf-project-0929-01 吃掉了，且无法搜索！
+        </div>
+      </div>
+    `;
+    return;
+  }
+
+  // Linear Style Combobox (Variants A, B, C)
+  const current = getWorkflowDisplay(selectedWorkflowId);
+
+  let pillsHtml = '';
+  if (current.active > 0) {
+    pillsHtml += `<span class="badge-pill active dot">${current.active} 活</span>`;
+  }
+  if (current.attention > 0) {
+    pillsHtml += `<span class="badge-pill attention dot">${current.attention} 待关注</span>`;
+  }
+
+  container.innerHTML = `
+    <span class="switcher-label">工作流</span>
+
+    <div class="linear-select" id="linearSelect">
+      <!-- 1. Trigger Pill -->
+      <button class="linear-trigger" onclick="toggleLinearMenu(event)" aria-haspopup="listbox" id="triggerBtn">
+        <span class="trigger-icon">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="6" y1="3" x2="15"></line>
+            <circle cx="18" cy="6" r="3"></circle>
+            <circle cx="6" cy="18" r="3"></circle>
+            <path d="M18 9a9 9 0 0 1-9 9"></path>
+          </svg>
+        </span>
+        <div class="trigger-content">
+          <span class="trigger-title">${esc(current.title)}</span>
+          ${current.id ? `<span class="trigger-mono">${esc(current.id)}</span>` : ''}
+          <span class="trigger-pills">${pillsHtml}</span>
+        </div>
+        <span class="trigger-chevron">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="m6 9 6 6 6-6"/>
+          </svg>
+        </span>
+      </button>
+
+      <!-- 2. Linear Popover Panel -->
+      <div class="linear-popover" id="linearPopover" onclick="event.stopPropagation()">
+        <!-- Integrated Search -->
+        <div class="popover-search-wrap">
+          <span class="popover-search-icon">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>
+            </svg>
+          </span>
+          <input
+            type="text"
+            class="popover-search-input"
+            id="popoverSearch"
+            placeholder="搜索工作流名称、ID (如 0929 / 待办)..."
+            autocomplete="off"
+            oninput="handleSearch(this.value)"
+            onkeydown="handleKeydown(event)"
+          />
+          <span class="popover-shortcut">ESC</span>
+        </div>
+
+        <!-- Items List -->
+        <div class="popover-list" id="popoverList" role="listbox">
+          <!-- Populated by renderPopoverItems() -->
+        </div>
+      </div>
+    </div>
+
+    <button class="btn-action primary" onclick="enterWorkflow()">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
+        <polyline points="15 3 21 3 21 9"></polyline>
+        <line x1="10" y1="14" x2="21" y2="3"></line>
+      </svg>
+      进入该工作流
+    </button>
+
+    ${currentVariant === 'B' ? '<span style="font-size:11.5px;color:var(--text-tertiary);margin-left:4px">（方案 B：支持状态分组与执行热度标签）</span>' : ''}
+    ${currentVariant === 'C' ? '<span style="font-size:11.5px;color:var(--text-tertiary);margin-left:4px">（方案 C：极简紧凑触发体验）</span>' : ''}
+  `;
+
+  renderPopoverItems();
+}
+
+function highlightMatch(text, kw) {
+  if (!kw || !text) return esc(text);
+  const regex = new RegExp(`(${kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi');
+  return esc(text).replace(regex, '<span class="highlight">$1</span>');
+}
+
+function renderPopoverItems() {
+  const listEl = document.getElementById('popoverList');
+  if (!listEl) return;
+
+  const kw = searchKeyword.trim().toLowerCase();
+
+  // Filter workflows by title or workflow_id
+  const filtered = WORKFLOWS_DATA.filter(w => {
+    if (!kw) return true;
+    return (w.title && w.title.toLowerCase().includes(kw)) ||
+           w.workflow_id.toLowerCase().includes(kw);
+  });
+
+  let html = '';
+
+  // 1. "全部工作流" item
+  if (!kw || '全部工作流'.includes(kw)) {
+    const isSel = selectedWorkflowId === '';
+    html += `
+      <div class="popover-item ${isSel ? 'selected' : ''}" onclick="selectWorkflow('')" role="option">
+        <span class="item-check">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+        </span>
+        <div class="item-main">
+          <div class="item-header">
+            <span class="item-title">全部工作流</span>
+            <span class="item-badges"><span class="badge-pill" style="background:#f4f5f7;color:var(--text-secondary)">聚合视图</span></span>
+          </div>
+          <div class="item-sub">跨所有活跃工作流的任务总看板</div>
+        </div>
+      </div>
+      <div style="height:1px;background:var(--border-subtle);margin:4px 0"></div>
+    `;
+  }
+
+  if (filtered.length === 0) {
+    listEl.innerHTML = html + `<div class="popover-empty">未找到匹配的工作流 “${esc(searchKeyword)}”</div>`;
+    return;
+  }
+
+  if (currentVariant === 'B') {
+    // 方案 B：分组渲染（活跃进行中 vs 历史归档，支持点击折叠/展开）
+    const activeGroup = filtered.filter(w => w.active > 0 || w.attention > 0);
+    const idleGroup = filtered.filter(w => w.active === 0 && w.attention === 0);
+
+    function renderGroup(key, label, items) {
+      if (!items.length) return '';
+      const isCollapsed = !kw && prototypeCollapsedGroups.has(key);
+      const chevronSvg = `<svg class="popover-group-chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6"/></svg>`;
+      let g = `<div class="popover-group ${isCollapsed ? 'collapsed' : ''}" data-group="${key}">
+        <div class="popover-group-header" onclick="togglePrototypeGroup('${key}', event)">
+          <span>${label} (${items.length})</span>
+          ${chevronSvg}
+        </div>
+        <div class="popover-group-items">`;
+      items.forEach(w => { g += renderItemHtml(w, kw); });
+      g += `</div></div>`;
+      return g;
+    }
+
+    html += renderGroup('active', '进行中 / 需决策', activeGroup);
+    html += renderGroup('idle', '已完成 / 闲置', idleGroup);
+  } else {
+    // 方案 A / C：单列直出（最近优先）
+    html += `<div class="popover-group-label">最近工作流</div>`;
+    filtered.forEach(w => { html += renderItemHtml(w, kw); });
+  }
+
+  listEl.innerHTML = html;
+
+  // Keyboard navigation highlighting
+  const items = listEl.querySelectorAll('.popover-item');
+  items.forEach((item, idx) => {
+    item.classList.toggle('keyboard-focus', idx === keyboardIndex);
+  });
+}
+
+function renderItemHtml(w, kw) {
+  const isSel = selectedWorkflowId === w.workflow_id;
+  const titleText = w.title || w.workflow_id;
+  let pills = '';
+
+  if (w.active > 0) {
+    pills += `<span class="badge-pill active dot">${w.active} 活</span>`;
+  }
+  if (w.attention > 0) {
+    pills += `<span class="badge-pill attention dot">${w.attention} 等</span>`;
+  }
+  if (!pills) {
+    pills = `<span class="badge-pill" style="background:#f4f5f7;color:var(--text-tertiary)">完成</span>`;
+  }
+
+  return `
+    <div class="popover-item ${isSel ? 'selected' : ''}" onclick="selectWorkflow('${esc(w.workflow_id)}')" role="option" data-wid="${esc(w.workflow_id)}">
+      <span class="item-check">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+          <polyline points="20 6 9 17 4 12"/>
+        </svg>
+      </span>
+      <div class="item-main">
+        <div class="item-header">
+          <span class="item-title">${highlightMatch(titleText, kw)}</span>
+          <span class="item-badges">${pills}</span>
+        </div>
+        <div class="item-sub">
+          <span class="item-id">${highlightMatch(w.workflow_id, kw)}</span>
+          <span>·</span>
+          <span>${w.tasks_count} 任务</span>
+          <span>·</span>
+          <span>${w.last_active}</span>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function toggleLinearMenu(e) {
+  if (e) e.stopPropagation();
+  const sel = document.getElementById('linearSelect');
+  if (!sel) return;
+  const isOpen = sel.classList.toggle('open');
+  if (isOpen) {
+    searchKeyword = '';
+    keyboardIndex = 0;
+    renderPopoverItems();
+    setTimeout(() => {
+      const input = document.getElementById('popoverSearch');
+      if (input) input.focus();
+    }, 50);
+  }
+}
+
+function closeLinearMenu() {
+  const sel = document.getElementById('linearSelect');
+  if (sel) sel.classList.remove('open');
+}
+
+function handleSearch(val) {
+  searchKeyword = val;
+  keyboardIndex = 0;
+  renderPopoverItems();
+}
+
+function handleKeydown(e) {
+  const listEl = document.getElementById('popoverList');
+  if (!listEl) return;
+  const items = Array.from(listEl.querySelectorAll('.popover-item'));
+  if (items.length === 0) return;
+
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    keyboardIndex = (keyboardIndex + 1) % items.length;
+    renderPopoverItems();
+    items[keyboardIndex].scrollIntoView({ block: 'nearest' });
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    keyboardIndex = (keyboardIndex - 1 + items.length) % items.length;
+    renderPopoverItems();
+    items[keyboardIndex].scrollIntoView({ block: 'nearest' });
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    if (items[keyboardIndex]) items[keyboardIndex].click();
+  } else if (e.key === 'Escape') {
+    e.preventDefault();
+    closeLinearMenu();
+    document.getElementById('triggerBtn').focus();
+  }
+}
+
+function selectWorkflow(wid) {
+  selectedWorkflowId = wid;
+  closeLinearMenu();
+  renderSwitcher();
+  renderTasksTable();
+}
+
+function onWorkflowChange(wid) {
+  selectedWorkflowId = wid;
+  renderTasksTable();
+}
+
+function enterWorkflow() {
+  if (!selectedWorkflowId) {
+    alert('请先选择一个具体的工作流');
+    return;
+  }
+  alert(`进入工作流控制台：${selectedWorkflowId}`);
+}
+
+// Global click outside listener
+document.addEventListener('click', (e) => {
+  const sel = document.getElementById('linearSelect');
+  if (sel && !sel.contains(e.target)) {
+    closeLinearMenu();
+  }
+});
+
+// Global shortcut / or Cmd+K
+document.addEventListener('keydown', (e) => {
+  if (e.key === '/' || ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k')) {
+    if (document.activeElement.tagName !== 'INPUT' && currentVariant !== 'old') {
+      e.preventDefault();
+      const sel = document.getElementById('linearSelect');
+      if (sel && !sel.classList.contains('open')) {
+        toggleLinearMenu();
+      }
+    }
+  }
+  // Bottom bar switch with Left / Right arrows
+  if (document.activeElement.tagName !== 'INPUT') {
+    const variants = ['old', 'A', 'B', 'C'];
+    const curIdx = variants.indexOf(currentVariant);
+    if (e.key === 'ArrowLeft') {
+      const prev = variants[(curIdx - 1 + variants.length) % variants.length];
+      switchVariant(prev);
+    } else if (e.key === 'ArrowRight') {
+      const next = variants[(curIdx + 1) % variants.length];
+      switchVariant(next);
+    }
+  }
+});
+
+// Initial mount
+switchVariant('A');
+</script>
+
+</body>
+</html>
