@@ -234,6 +234,8 @@ Evidence:
 
 `FACT` 原生CLI与Task自动初始化启用init_loop(capture_baseline=True)，同一锁覆盖初始化、旧baseline失效、受管采集和发布。默认standalone init不执行命令，仍清除旧契约债务；缺基线保守按0。CLI超时失败，Task继续保留既有best-effort告警/启动契约。missing-linter、历史receipt故障顺序与自由文本配置另卡，不以这一修复声明已全部关闭。
 
+`FACT` 静态检查reserved退出124/126/127、负值及128以上不能被baseline抵扣，采集拒绝发布，评分与收敛独立否决旧污染baseline；工具实际exit1/2的历史欠账差值契约保留。验证入口`tests/test_lint_execution_failure_gate.py`。
+
 `FACT` 自动npm默认测试命令为`CI=1 npm test`，避免继承Agent TTY时进入Vitest watch；显式任务命令完整保留。Java子任务测试范围仍须明确契约，不能从根package.json推断。
 
 Evidence:

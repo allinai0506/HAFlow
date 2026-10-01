@@ -157,6 +157,8 @@ def _capture_lint_baseline_unlocked(loop_dir: Path, command: str, cwd: Path) -> 
     )
     if exit_code == 124:
         raise TimeoutError("Lint baseline capture timed out after 120 seconds")
+    if static_check_execution_failed(exit_code):
+        raise RuntimeError(f"Lint baseline command failed to execute: exit {exit_code}")
     lint_errors = parse_lint_output(stdout + stderr, exit_code)
     return _write_baseline_lint_unlocked(loop_dir, lint_errors, 0)
 
@@ -535,6 +537,16 @@ def parse_test_output(output: str, exit_code: int) -> Tuple[int, int, List[str]]
         return 0, 1, [err_msg]
 
 
+def static_check_execution_failed(exit_code: int) -> bool:
+    """Reserved timeout/shell/signal exits are not static-analysis debt.
+
+    Ordinary tool defect exits (including TypeScript's 2) retain the existing
+    baseline contract. The shell reserves 126/127 for execution failures and
+    reports signal termination as 128+signal; the owned runner uses 124 timeout.
+    """
+    return exit_code < 0 or exit_code in (124, 126, 127) or exit_code >= 128
+
+
 def parse_lint_output(output: str, exit_code: int) -> int:
     """Parse linter / typecheck error count from output."""
     if exit_code == 0:
@@ -633,10 +645,13 @@ def calculate_metrics(
         weights["repro"] * repro_val
     )
     
+    static_execution_failed = (static_check_execution_failed(lint_exit_code) or
+                               static_check_execution_failed(type_exit_code))
+
     # Absolute zero-defect rule: cannot score 100.0 if any NEW failures exist.
     # Pre-existing baseline debt is transparent in lint_errors/type_errors
     # but does not cap the score; only the delta gates.
-    if (evaluation_exit_code != 0 or evaluation_errors or test_exit_code != 0 or failing or new_lint > 0 or new_type > 0 or (has_repro and repro_val < 100.0) or out_of_bounds) and composite >= 100.0:
+    if (static_execution_failed or evaluation_exit_code != 0 or evaluation_errors or test_exit_code != 0 or failing or new_lint > 0 or new_type > 0 or (has_repro and repro_val < 100.0) or out_of_bounds) and composite >= 100.0:
         composite = 95.0
 
     return MetricVector(
@@ -674,6 +689,9 @@ def calculate_metrics(
 def is_converged(metrics: MetricVector) -> bool:
     """True if metrics satisfy complete convergence (DoD fulfilled, 0 NEW defects)."""
     if metrics.details.get("evaluation_exit_code", 0) != 0 or metrics.details.get("evaluation_errors"):
+        return False
+    if any(static_check_execution_failed(metrics.details.get(key, 0))
+           for key in ("lint_exit_code", "type_exit_code")):
         return False
     if metrics.details.get("test_exit_code", 0) != 0:
         return False

@@ -65,7 +65,7 @@
 | C31b | current回执替换早于history发布，失败重试永久丢原字节 | A中断/C目录故障；主控故障及正常对照 | 已确认；先保存可恢复历史，再失效当前，最后换输入，独立提交 |
 | C21b | 旧耗尽队列跨显式恢复、普通阻塞episode误投 | A/D真实TEMP SQLite queue出口 | 已确认；检查authoritative cause与episode，不能仅status==blocked；独立提交 |
 | C28b | 自由GOAL/DoD文本伪装repro配置，绿色评估被误阻塞 | B/C独立复现；主控quoted/正常对照 | 已确认；配置读取与自由文本隔离，老合约兼容需明确；独立提交 |
-| C28c | linter未启动exit127被抵扣为历史债务并假绿 | B原生missing_linter脚本和原子回执，主控重执行一致 | 已确认；执行失败须独立veto，保留合法diagnostic/debt正常对照；独立提交 |
+| C28c | linter未启动exit127被抵扣为历史债务并假绿 | B原生missing_linter脚本和原子回执，主控重执行一致 | 专项已验证：reserved执行失败独立veto且拒绝采集假债务；旧污染基线不能假绿；89专项/10子测试通过，19失败/3正常对照反证；全量2718 passed/145子测试，0失败/0跳过，387.92s；仅本地提交，未部署 |
 | C31c | reset后Supervisor仍把历史BLOCKER作为当前tests evidence | B临时reset→summary→collect，主控重执行一致 | 已确认；历史保留不等同当前引用，需当前状态与身份绑定；不声称已导致生产模型决策 |
 | C15b | ANSI前缀让绿色FAIL标题被识别成失败 | B解析探针、主控1/1却score95复验 | 已确认；C15原历史修复的边界仍不完整，不混同C04日志去重；独立提交 |
 
@@ -124,3 +124,7 @@ C26b最终本地验收：四个resolved companion paths不再按exists转None；
 C27c最终本地验收：两个公开producer统一init_loop(capture_baseline=True)，同一次锁覆盖旧基线失效、新契约、受管采集和发布；standalone init默认不执行命令且失效旧债务。Task保留既有best-effort启动及超时阶段警告，CLI超时不再返回成功。旧原生init/eval竞争、SIGTERM晚写、首锁释放时基线不匹配、旧债务继承7 failed/1正常对照；增加实际CLI受控超时后，撤销三个核心文件8 failed/1正常对照；修后9靶向、86相邻/10子测试、全量2696 passed/145 subtests，0 failed/0 skipped（384.91s）。compileall、两CLI AST、init --help、diff-check通过；独立只读复审无此项阻断。初次专项命令误写不存在测试文件，exit4/no tests，日志保留，纠正路径后验证真实执行。仅local commit，未部署。此项不解决C28c缺linter语义、C31b归档中断、C28b配置文本与C03c屏幕epoch，均另卡。
 
 T8现场只读复核：SQLite仍working/version3，但核对native instance name/cwd/workspace/tab/pane后实际Agent idle；当前Clone有前端2文件/2测试/计划及报告WIP，HEAD仍5d3d615未提交，不重复修改。最新物理Clone日志44前端tests通过，lint4行未见失败；报告后端59 run/7 skipped，即52实际执行。GOAL仍npm test，而物理runner执行44定向tests，需结合C05b/C20核对契约；日志自身无Run戳，标physical-clone归属，不拼接为其他Run。报告测试耗时与当前log不同，不当同一次执行证据。未提交/未独立重验，不关闭C33。
+
+C28c验收中：原始20用例18 failed/2合法exit1/2对照；扩展至22用例后恢复核心实现19 failed/3对照。最终专项89 passed/10 subtests（27.82s）。初次相邻运行与反证阶段时间交叠，不作为最终证据；反证恢复精准源字节后重跑专项，最终全量期间冻结生产源码。独立只读复审无本卡新增阻断。保留Task best-effort警告，CLI采集执行失败返回非零，旧污染baseline仍独立否决。
+
+C28c最终：全量2718 passed/145 subtests passed，0 failed/0 skipped（387.92s），exit0；compileall、两CLI AST、diff-check通过。生产源码全量期间冻结；本卡不部署、不修实盘历史数据，其余卡继续逐项。

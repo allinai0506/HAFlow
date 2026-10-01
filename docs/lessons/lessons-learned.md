@@ -5303,6 +5303,16 @@ C29追加验证：`tests/test_evaluator_process_isolation.py`使用独立进程�
 
 C31追加验证：初始化在替换输入前原子失效当前EVAL_DONE；旧原始快照以SHA256归档至history/EVAL_DONE-<sha>.json，历史日志与BLOCKER保留但不作为本轮事实。证据ID绑定读取的单份快照SHA，避免重置后相同计数/iteration复用旧身份；同字节跨进程重启仍去重，未传SHA的旧API保持兼容。升级前后同一旧快照可能被重新观察一次，部署需核对既有ledger；不宣称此SHA证明Task/run归属。撤销关键实现4 failed/1正常对照passed，修后5靶向passed；专项80 passed/10 subtests，全量2673 passed/145 subtests、0 failed/0 skipped（385.00s）。失败初始化也不能留下旧绿证据。仅自审、未部署，C03c恢复epoch和C08业务交付仍未关闭。
 
+C28c补充（2026-10-01）：
+
+**问题背景**：缺linter返回127，fallback解析为1错误并写baseline；以后仍127时差值0，原子回执converged=true。执行失败被误当成历史诊断欠账。
+
+**经验教训**：baseline只能抵扣实际静态诊断；工具无法执行、超时和信号终止不能成为可抵扣债务。仅拒绝新baseline不足，旧版本已污染的baseline也必须在metrics与收敛边界独立否决。
+
+**操作规范与防护**：共享reserved退出分类124/126/127、负值与128以上；capture拒绝发布假债务，评分与is_converged独立veto。实际exit1及TypeScript exit2仍保留既有差值门禁，不把所有非零当新缺陷。Task既有best-effort告警保留，无live数据修复。
+
+**验证与关联证据**：`tests/test_lint_execution_failure_gate.py`包含lint/type失败矩阵、原生CLI缺工具/不可执行、Task告警、旧污染baseline实际持久回执、正常exit1/2。扩展旧实现19 failed/3正常对照；最终89专项/10子测试通过；全量2718 passed/145子测试，0失败/0跳过（387.92s）；仅本地验证未部署，提交结果见本轮计划C28c。任意工具自定义低位配置退出码仍需其具体契约，不用本卡宣称所有配置失败均分类。
+
 ## 112. 评估超时必须回收本次创建的进程组（2026-09-30）
 
 ### 问题背景
