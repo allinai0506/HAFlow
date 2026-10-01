@@ -5319,6 +5319,16 @@ C31追加验证：初始化在替换输入前原子失效当前EVAL_DONE；旧�
 
 C27b追加验证：实际auto-init基线入口旧4 failed/1正常对照passed，修后5 passed；相邻39 passed，全量2657 passed/145 subtests（360.47s）。覆盖超时（含宽限期后强制回收）、SIGTERM中断、并发初始化拒绝、基线债务保留和锁恢复。采集脚本保持原`/bin/sh -c`语义。初次夹具导入失败与宽限期内已完成子进程的观察保留，随后用超过宽限期的受控子进程验证强制回收；不放宽存活/产物断言。原C27记录对应ec334bb，公共执行入口在C27b归入evaluator。仅本地验证，未部署。
 
+### 2026-10-01 复核补证：公开初始化入口必须持锁到基线发布
+
+**问题背景**：独立审查发现原生CLI在init_loop释放锁后仍使用旧subprocess.run采集基线，竞争init可改契约，旧采集随后覆盖新baseline；竞争eval甚至可使用上一契约的债务假绿。SIGTERM只结束CLI，后代晚写仍可发生。Task两段各自持锁也留下初始化/采集间隙。
+
+**经验教训**：单个helper持锁和整个操作持有所有权不同。基线属于本次契约，重新init必须先让旧债务不可用，命令及发布结束后才允许下一生产者。
+
+**操作规范与防护**：init_loop的显式capture_baseline在同一次内核锁内覆盖初始化、旧基线失效、共享受管命令、发布；Task和原生CLI均启用。内部unlocked capture避免再次加锁，standalone capture继续自行持锁。超时不保留旧baseline；CLI失败不返回成功，Task保留既有告警/启动行为。合法exit1已有债务仍可采集；missing-linter退出语义由C28c单独处理。
+
+**验证与证据**：原生进程竞争init/eval、SIGTERM含忽略TERM后代、真实CLI受控超时、Task首锁释放状态、旧债务失效与正常债务对照；撤销三producer/core文件8 failed/1正常对照，修后9靶向、86相邻/10子测试、全量2696 passed/145 subtests（384.91s）。两CLI AST/compileall/help/diff-check通过，独立复审无此项阻断，未部署。证据为执行计划C27c与test_loop_init_baseline_atomicity.py；SIGKILL/主动脱离session仍非保证范围。
+
 ## 113. 自动测试命令必须声明非交互环境（2026-09-30）
 
 ### 问题背景

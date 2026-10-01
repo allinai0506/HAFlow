@@ -61,7 +61,7 @@
 | C33 | 前端ASC页内二次重排破坏后端DESC全局分页顺序 | test-r4 Blocker-2与test-r6 D-01；当前源5d3d615仍保留反向比较 | 已确认同源一张卡；以后端C3裁决为准，前端保留服务端分页顺序，跨页回归 |
 
 | C26b | 缺失迁移配套路径被变成None，回退宿主输入 | A独立复现；主控四类TEMP迁移/文件读取，issue26b-red.log | 本地验证：保留已解析路径；旧及反证4 failed/8 passed；12靶向/64相邻/2687全量+145子测试绿；独立复审无此项阻断，未部署 |
-| C27c | 原生CLI init基线仍在锁外且未受管；Task初始化/采集也分离 | A/B/C/D各自原生并发探针；A/D另有SIGTERM晚写 | 已确认；整个reset→采集→发布同一次锁，新契约不得继承旧baseline；独立提交 |
+| C27c | 原生CLI init基线仍在锁外且未受管；Task初始化/采集也分离 | A/B/C/D各自原生并发探针；A/D另有SIGTERM晚写 | 本地验证：整个reset→采集→发布同一锁；旧baseline失效；9靶向/86相邻+10子测试/2696全量+145子测试，独立复审无此项阻断；未部署 |
 | C31b | current回执替换早于history发布，失败重试永久丢原字节 | A中断/C目录故障；主控故障及正常对照 | 已确认；先保存可恢复历史，再失效当前，最后换输入，独立提交 |
 | C21b | 旧耗尽队列跨显式恢复、普通阻塞episode误投 | A/D真实TEMP SQLite queue出口 | 已确认；检查authoritative cause与episode，不能仅status==blocked；独立提交 |
 | C28b | 自由GOAL/DoD文本伪装repro配置，绿色评估被误阻塞 | B/C独立复现；主控quoted/正常对照 | 已确认；配置读取与自由文本隔离，老合约兼容需明确；独立提交 |
@@ -120,3 +120,7 @@ C12实施中：显式完整候选SHA匹配本地分支才免远端fetch；源/�
 主控重执行B三项独立脚本：missing linter exit127/baseline1仍converged=true；reset后initialized0却blocker_report=true；ANSI绿色1/1却score95且failing_tests非空。仅TEMP原生评估与解析，脚本退出0表示其缺陷断言被复现，不是产品验收通过。材料固定于外部review-b及primary-*日志。
 
 C26b最终本地验收：四个resolved companion paths不再按exists转None；仅存在性归reader判断，显式源继续优先。旧及撤销核心StateStore实现均4 failed/8 passed；恢复精准字节后12靶向；64相邻专项；全量2687 passed/145 subtests passed，0 failed/0 skipped（378.99s）。compileall/diff-check通过，独立只读复审无此项正确性/安全阻断；仅local commit，未部署，未重建实盘投影。checkpoint负例证明宿主文件不被读取，不冒充外键拒绝的宿主行曾持久化。
+
+C27c最终本地验收：两个公开producer统一init_loop(capture_baseline=True)，同一次锁覆盖旧基线失效、新契约、受管采集和发布；standalone init默认不执行命令且失效旧债务。Task保留既有best-effort启动及超时阶段警告，CLI超时不再返回成功。旧原生init/eval竞争、SIGTERM晚写、首锁释放时基线不匹配、旧债务继承7 failed/1正常对照；增加实际CLI受控超时后，撤销三个核心文件8 failed/1正常对照；修后9靶向、86相邻/10子测试、全量2696 passed/145 subtests，0 failed/0 skipped（384.91s）。compileall、两CLI AST、init --help、diff-check通过；独立只读复审无此项阻断。初次专项命令误写不存在测试文件，exit4/no tests，日志保留，纠正路径后验证真实执行。仅local commit，未部署。此项不解决C28c缺linter语义、C31b归档中断、C28b配置文本与C03c屏幕epoch，均另卡。
+
+T8现场只读复核：SQLite仍working/version3，但核对native instance name/cwd/workspace/tab/pane后实际Agent idle；当前Clone有前端2文件/2测试/计划及报告WIP，HEAD仍5d3d615未提交，不重复修改。最新物理Clone日志44前端tests通过，lint4行未见失败；报告后端59 run/7 skipped，即52实际执行。GOAL仍npm test，而物理runner执行44定向tests，需结合C05b/C20核对契约；日志自身无Run戳，标physical-clone归属，不拼接为其他Run。报告测试耗时与当前log不同，不当同一次执行证据。未提交/未独立重验，不关闭C33。

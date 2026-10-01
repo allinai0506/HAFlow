@@ -9,7 +9,6 @@ import argparse
 import json
 import os
 import signal
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -271,29 +270,8 @@ def main():
             lint_cmd=args.lint_cmd,
             max_iterations=args.max_iter,
             repro_cmd=args.repro_cmd,
+            capture_baseline=True,
         )
-        # Baseline-aware gate: snapshot pre-edit lint debt (best-effort).
-        try:
-            from herdr.evaluator import parse_lint_output as _parse_lint
-            from herdr.evaluator import write_baseline_lint as _write_baseline
-            _snapshot_cmd = (args.lint_cmd or "").strip()
-            if _snapshot_cmd:
-                _proc = subprocess.run(
-                    _snapshot_cmd,
-                    cwd=str(target_dir),
-                    text=True,
-                    capture_output=True,
-                    timeout=120,
-                    shell=True,
-                )
-                _out = (_proc.stdout or "") + (_proc.stderr or "")
-                _write_baseline(
-                    target_dir / LOOP_DIR_NAME,
-                    _parse_lint(_out, _proc.returncode),
-                    0,
-                )
-        except Exception as _exc:
-            print(f"[HERDR_LOOP_WARN] Failed to snapshot lint baseline: {_exc}")
         sys.exit(0)
 
     elif args.command == "eval":

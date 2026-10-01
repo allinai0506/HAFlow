@@ -148,13 +148,17 @@ def write_baseline_lint(loop_dir: Path, lint_errors: int, type_errors: int = 0) 
 def capture_lint_baseline(loop_dir: Path, command: str, cwd: Path) -> Path:
     """Own pre-edit lint execution and baseline publication as one lifecycle."""
     with evaluation_lock(loop_dir):
-        exit_code, stdout, stderr = run_evaluation_command(
-            ["/bin/sh", "-c", command], cwd, timeout=120,
-        )
-        if exit_code == 124:
-            raise TimeoutError("Lint baseline capture timed out after 120 seconds")
-        lint_errors = parse_lint_output(stdout + stderr, exit_code)
-        return _write_baseline_lint_unlocked(loop_dir, lint_errors, 0)
+        return _capture_lint_baseline_unlocked(loop_dir, command, cwd)
+
+
+def _capture_lint_baseline_unlocked(loop_dir: Path, command: str, cwd: Path) -> Path:
+    exit_code, stdout, stderr = run_evaluation_command(
+        ["/bin/sh", "-c", command], cwd, timeout=120,
+    )
+    if exit_code == 124:
+        raise TimeoutError("Lint baseline capture timed out after 120 seconds")
+    lint_errors = parse_lint_output(stdout + stderr, exit_code)
+    return _write_baseline_lint_unlocked(loop_dir, lint_errors, 0)
 
 
 def _write_baseline_lint_unlocked(loop_dir: Path, lint_errors: int, type_errors: int = 0) -> Path:
@@ -204,14 +208,19 @@ def init_loop(
     lint_cmd: str = "",
     max_iterations: int = 5,
     repro_cmd: str = "",
+    capture_baseline: bool = False,
 ) -> Path:
-    """Initialize contracts while owning the evaluation namespace."""
+    """Own contract replacement and optional baseline capture as one lifecycle."""
     with evaluation_lock(get_loop_dir(target_dir)):
-        return _init_loop_unlocked(
+        loop_dir = _init_loop_unlocked(
             target_dir=target_dir, goal=goal, acceptance=acceptance,
             test_cmd=test_cmd, lint_cmd=lint_cmd, max_iterations=max_iterations,
             repro_cmd=repro_cmd,
         )
+        command = (lint_cmd or "").strip()
+        if capture_baseline and command and command != "true":
+            _capture_lint_baseline_unlocked(loop_dir, command, Path(target_dir))
+        return loop_dir
 
 
 def _init_loop_unlocked(
@@ -252,6 +261,10 @@ def _init_loop_unlocked(
             receipt_tmp.replace(receipt)
         elif receipt.read_bytes() != previous_snapshot:
             raise RuntimeError("Conflicting historical evaluation receipt")
+
+    # Debt belongs to the previous contract until a new capture succeeds.
+    # An absent baseline has the existing conservative zero-debt semantics.
+    (loop_dir / BASELINE_LINT_FILENAME).unlink(missing_ok=True)
 
     # 1. Write GOAL.md
     goal_md = loop_dir / "GOAL.md"

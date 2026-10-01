@@ -2329,21 +2329,14 @@ def auto_init_task_loop(clone_path, goal, acceptance_list, test_cmd=None, lint_c
             test_cmd=test_cmd or "pytest",
             lint_cmd=lint_cmd or "true",
             repro_cmd=repro_cmd or "",
+            capture_baseline=True,
         )
+    except TimeoutError as e:
+        print(f"[HERDR_LOOP_WARN] Failed to snapshot lint baseline: {e}")
+        return
     except Exception as e:
         print(f"[HERDR_LOOP_WARN] Failed to auto-init loop: {e}")
         return
-
-    # Baseline-aware gate: snapshot pre-edit lint debt once at init.
-    # Eval then gates only on NEW defects (current - baseline).
-    # Best-effort: never fail task launch when snapshot is unavailable.
-    try:
-        from herdr.evaluator import capture_lint_baseline
-        snapshot_cmd = (lint_cmd or "true").strip() or "true"
-        if snapshot_cmd != "true":
-            capture_lint_baseline(clone / ".herdr-loop", snapshot_cmd, clone)
-    except Exception as e:
-        print(f"[HERDR_LOOP_WARN] Failed to snapshot lint baseline: {e}")
 
 
 def _record_router_failure_task(args, node_id, error):
