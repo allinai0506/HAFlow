@@ -64,7 +64,7 @@
 | C27c | 原生CLI init基线仍在锁外且未受管；Task初始化/采集也分离 | A/B/C/D各自原生并发探针；A/D另有SIGTERM晚写 | 本地验证：整个reset→采集→发布同一锁；旧baseline失效；9靶向/86相邻+10子测试/2696全量+145子测试，独立复审无此项阻断；未部署 |
 | C31b | current回执替换早于history发布，失败重试永久丢原字节 | A中断/C目录故障；主控故障及正常对照 | 专项已验证：先归档后失效current再替换输入；故障/中断保持旧契约与原回执；12靶向/91专项+10子测试，11失败/1正常反证；全量2730 passed/145子测试，0失败/0跳过，360.26s；未部署 |
 | C21b | 旧耗尽队列跨显式恢复、普通阻塞episode误投 | A/D真实TEMP SQLite queue出口 | 已确认；检查authoritative cause与episode，不能仅status==blocked；独立提交 |
-| C28b | 自由GOAL/DoD文本伪装repro配置，绿色评估被误阻塞 | B/C独立复现；主控quoted/正常对照 | 已确认；配置读取与自由文本隔离，老合约兼容需明确；独立提交 |
+| C28b | 自由GOAL/DoD文本伪装repro配置，绿色评估被误阻塞 | B/C独立复现；主控quoted/正常对照 | 专项已验证：GOAL末尾program typed requirement；legacy唯一完整单行配置，歧义unknown需re-init；22靶向/89专项+10子测试通过，旧19失败3正常；独立复审闭合legacy假绿；全量2780 passed/145子测试，0失败/0跳过，415.65s；本地验证未部署 |
 | C28c | linter未启动exit127被抵扣为历史债务并假绿 | B原生missing_linter脚本和原子回执，主控重执行一致 | 专项已验证：reserved执行失败独立veto且拒绝采集假债务；旧污染基线不能假绿；89专项/10子测试通过，19失败/3正常对照反证；全量2718 passed/145子测试，0失败/0跳过，387.92s；仅本地提交，未部署 |
 | C31c | reset后Supervisor仍把历史BLOCKER作为当前tests evidence | B临时reset→summary→collect，主控重执行一致 | 专项已验证：modern摘要单份EVAL_DONE状态/计数；仅当前耗尽BLOCKER；invalid未知不fallback，absent legacy兼容；106专项通过/反证10失败2正常；全量2742 passed/145子测试，0失败/0跳过370.78s；未部署 |
 | C15b | ANSI前缀让绿色FAIL标题被识别成失败 | B解析探针、主控1/1却score95复验 | C34独立提交后精准恢复：仅test parser复用ANSI清洗，原始日志保留；新基线13定向pass/反证11失败2正常；98专项/10子测试及2758全量/145子测试通过，0失败/0跳过385.08s；旧失败全量不算PASS |
@@ -148,3 +148,5 @@ C34最终：全量2745 passed/145 subtests passed，0 failed/0 skipped（405.16s
 C15b恢复验收：C34已单独commit16699f8，全量2745/145子测试通过。仅恢复herdr/evaluator.py3行patch及13用例，与原外部字节一致，不覆盖C34记录。新基线target13 passed（0.73s），撤销当前HEAD核心11 failed/2正常（0.48s），恢复fixed后冻结neighbors/full。此前1失败full由C34测试key泄漏及默认model路径独立处理，旧失败/中断永不冒充通过。
 
 C15b最终新基线验收：13靶向passed（0.73s），撤销11 failed/2正常（0.48s），98相邻passed/10子测试（20.48s）；全量2758 passed/145 subtests passed，0 failed/0 skipped（385.08s），exit0。compileall/diff-check通过，独立只读核对恢复patch/test字节与C34护栏无变动。仅local提交，未部署；原失败/中断记录保留，C34已另提交。
+
+C28b验收中：原scanner全GOAL误把自由goal/DoD例子当repro。旧19用例17 failed/2正常；新20原生CLI例target20，撤销18 failed/2正常。独立审查发现中间rpartition reader对合法multiline repro中的假配置区块会错误false；主控完整遗漏runner→EVAL_DONE回归1 failed证明中间假绿。最终new typed末尾bool由program repro_cmd产生，raw命令不改；legacy只唯一完整单行已知字段，重复/缺/坏配置goal_configuration_invalid，不能猜最后区块。添加Bash -n合法证明与modern同literal正向实际repro，新22 targetpassed9.87s、撤销19 failed/3正常9.53s；89专项/10子测试29.13s，compileall/CLI AST/diff通过，独立最终只读复审无新增阻断。冻结源全量2780 passed/145子测试，0失败/0跳过，415.65s；legacy歧义需re-init而非pretend全部旧手写Markdown兼容；未对live clone操作。

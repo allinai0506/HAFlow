@@ -29,6 +29,7 @@ from herdr.evaluator import (
     init_loop,
     is_converged,
     read_baseline_lint,
+    read_repro_requirement,
     run_evaluation_command,
     read_state,
     render_evaluation_markdown,
@@ -110,9 +111,12 @@ def _run_evaluation_locked(target_dir: Path) -> tuple[MetricVector, bool, str]:
     # the optional repro command. Keep existing task clones compatible.
     try:
         goal = (loop_dir / "GOAL.md").read_text(encoding="utf-8")
-        repro_required = any(line.startswith("- **靶向复现用例**:") for line in goal.splitlines())
+        repro_required = read_repro_requirement(goal)
     except (OSError, UnicodeError):
         evaluation_errors.append("goal_contract_unreadable")
+        repro_required = False
+    except ValueError:
+        evaluation_errors.append("goal_configuration_invalid")
         repro_required = False
 
     evaluation_exit = 127

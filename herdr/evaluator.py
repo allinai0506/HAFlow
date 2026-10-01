@@ -203,6 +203,39 @@ def get_loop_dir(base_dir: Path) -> Path:
     return Path(base_dir) / LOOP_DIR_NAME
 
 
+def read_repro_requirement(goal_contract: str) -> bool:
+    """Read typed producer metadata, or an unambiguous legacy config section.
+
+    Free goal/acceptance text is never configuration. New producer metadata
+    is appended last, after every raw command literal, so body examples cannot
+    override it. Ambiguous old multiline display contracts require re-init.
+    """
+    prefix = "<!-- HERDR_REPRO_REQUIRED: "
+    lines = goal_contract.rstrip().splitlines()
+    last = lines[-1] if lines else ""
+    if last.startswith(prefix):
+        if last == prefix + "true -->":
+            return True
+        if last == prefix + "false -->":
+            return False
+        raise ValueError("Invalid typed repro requirement")
+    sections = goal_contract.split("\n## 评估指令配置\n")
+    if len(sections) != 2:
+        raise ValueError("Missing or ambiguous legacy configuration section")
+    configuration = sections[1]
+    fields = {}
+    for line in configuration.splitlines():
+        if not line.strip():
+            continue
+        match = re.fullmatch(r"- \*\*(测试命令|代码质量|靶向复现用例)\*\*: `(.*)`", line)
+        if match is None or match.group(1) in fields:
+            raise ValueError("Ambiguous legacy configuration section")
+        fields[match.group(1)] = match.group(2)
+    if not {"测试命令", "代码质量"}.issubset(fields):
+        raise ValueError("Incomplete legacy configuration section")
+    return "靶向复现用例" in fields
+
+
 def init_loop(
     target_dir: Path,
     goal: str,
@@ -291,6 +324,7 @@ def _init_loop_unlocked(
 """
     if repro_cmd:
         goal_content += f"- **靶向复现用例**: `{repro_cmd}`\n"
+    goal_content += f"<!-- HERDR_REPRO_REQUIRED: {str(bool(repro_cmd)).lower()} -->\n"
     goal_md.write_text(goal_content, encoding="utf-8")
 
     # 2. Write EVALUATOR.sh

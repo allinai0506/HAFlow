@@ -5353,6 +5353,16 @@ C15b补充（2026-10-01）：
 
 **验证与关联证据**：`tests/test_evaluator_ansi_test_output.py`13例含Vitest/Jest、✓/√、FAIL/✕名、真失败、非零exit、明文对照与实际runner原字节/回执。新基线13pass，撤销11 failed/2正常；全量2758 passed/145子测试，0失败/0跳过（385.08s），详见计划C15b，未部署。
 
+C28b补充（2026-10-01）：
+
+**问题背景**：reader扫描整个GOAL是否出现repro字段，自由目标/验收示例误阻塞绿色评估；最初修复只取最后配置区块，又被合法多行repro字面量中的完整伪区块骗成false。
+
+**经验教训**：自由文本不能充当可执行配置；没有结构化边界的旧Markdown无法可靠消歧，不能为了兼容猜最后一块，更不能把不确定性变成成功。
+
+**操作规范与防护**：现有GOAL末尾附program生成typed requirement，来自真实repro_cmd，置于全部原始字段之后，不新建平行事实文件。新reader标记优先；legacy仅唯一完整单行配置，其余unknown/error需重新初始化。实际命令执行和fresh receipt/log完整性门禁保留。
+
+**验证与关联证据**：`tests/test_goal_repro_configuration.py`22例含自由字段/typed伪标记、多行命令、legacy兼容/歧义、原生CLI roundtrip、真实repro漏runner和合法Bash literal正向/反向。中间legacy漏洞完整回归1失败；最终22pass/核心撤销19fail3正常；89专项/10子测试通过，全量见计划C28b，未部署。
+
 ## 112. 评估超时必须回收本次创建的进程组（2026-09-30）
 
 ### 问题背景
