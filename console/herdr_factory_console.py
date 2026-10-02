@@ -3114,7 +3114,7 @@ body {
   font-family: "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 .shell {
-  grid-template-columns: 228px minmax(0, 1fr);
+  grid-template-columns: 48px 220px minmax(0, 1fr);
   height: 100vh;
   min-height: 0;
   background: #fff;
@@ -3123,20 +3123,143 @@ body {
   box-shadow: none;
   overflow: hidden;
 }
+.left-rail {
+  width: 48px;
+  background: #ffffff;
+  border-right: 1px solid #e6e8ee;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  flex-shrink: 0;
+  z-index: 25;
+  height: 100vh;
+  box-sizing: border-box;
+}
+.rail-head {
+  height: 44px;
+  width: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-bottom: 1px solid #e6e8ee;
+  flex-shrink: 0;
+  box-sizing: border-box;
+}
+.rail-brand {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  background: #16171b;
+  color: #ffffff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 800;
+  font-size: 13px;
+  cursor: pointer;
+  user-select: none;
+}
+.rail-nav {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 0;
+}
+.rail-item {
+  width: 32px;
+  height: 32px;
+  margin: 4px 8px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #5e636e;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  position: relative;
+  transition: all 0.12s ease;
+  padding: 0;
+}
+.rail-item:hover {
+  background: #f4f5f8;
+  color: #16171b;
+}
+.rail-item.active, .rail-item.on {
+  background: #f0f2ff;
+  color: #5e6ad2;
+}
+.rail-item.active::before, .rail-item.on::before {
+  content: "";
+  position: absolute;
+  left: -8px;
+  top: 8px;
+  bottom: 8px;
+  width: 3px;
+  background: #5e6ad2;
+  border-radius: 0 2px 2px 0;
+}
+.rail-badge-dot {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #ef4444;
+}
+.rail-foot {
+  padding: 8px 0 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+.rail-avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: #ece7e2;
+  color: #6b4f3a;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 12px;
+  cursor: pointer;
+  border: 1px solid #e6e8ee;
+  user-select: none;
+}
 .sidebar {
   position: relative;
   top: auto;
   height: auto;
-  overflow: auto;
+  overflow: hidden;
   background: #fafafa;
   border-right: 1px solid #e6e8ee;
-  padding: 16px 12px 12px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  width: 220px;
 }
 .brand-row {
+  height: 44px;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 2px 8px 12px;
+  padding: 0 16px;
+  border-bottom: 1px solid #e6e8ee;
+  box-sizing: border-box;
+  flex: none;
+}
+.sidebar-scroll {
+  padding: 12px;
+  overflow-y: auto;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
 }
 .brand {
   display: block;
@@ -3273,13 +3396,142 @@ body {
   overflow: hidden;
 }
 .top {
-  height: 58px;
+  height: 44px;
   flex: none;
   margin: 0;
   padding: 0 16px;
+  display: flex;
   align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   flex-wrap: nowrap;
   border-bottom: 1px solid #e6e8ee;
+  background: #fff;
+  box-sizing: border-box;
+}
+.workflow-tabs-bar {
+  height: 44px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+.tabs-scroll {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  height: 44px;
+}
+.tabs-scroll::-webkit-scrollbar { display: none; }
+.wf-tab {
+  height: 32px;
+  padding: 0 8px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: transparent;
+  color: #5e636e;
+  font-size: 12px;
+  cursor: pointer;
+  position: relative;
+  flex-shrink: 0;
+  max-width: 220px;
+  transition: all 0.12s ease;
+  border: 1px solid transparent;
+  user-select: none;
+}
+.wf-tab:hover {
+  background: #f3f4f6;
+  color: #16171b;
+}
+.wf-tab.active {
+  background: #fff;
+  color: #16171b;
+  font-weight: 600;
+  border-color: #e6e8ee;
+  box-shadow: 0 1px 2px rgba(18, 19, 22, 0.04);
+}
+.wf-tab.active::after {
+  content: "";
+  position: absolute;
+  bottom: -6px;
+  left: 8px;
+  right: 8px;
+  height: 2px;
+  background: #5e6ad2;
+  border-radius: 2px;
+}
+.tab-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.tab-dot.running { background: #10b981; box-shadow: 0 0 0 2px #ecfdf5; }
+.tab-dot.decision { background: #f59e0b; box-shadow: 0 0 0 2px #fffbeb; }
+.tab-dot.blocked { background: #ef4444; box-shadow: 0 0 0 2px #fef2f2; }
+.tab-dot.completed { background: #9ca3af; }
+.tab-dot.waiting { background: #d1d5db; }
+.tab-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.tab-close {
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #8b909a;
+  opacity: 0.6;
+  transition: all 0.1s ease;
+  margin-left: 4px;
+  border: 0;
+  background: transparent;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+}
+.tab-close:hover {
+  background: #e4e6ec;
+  color: #16171b;
+  opacity: 1;
+}
+.btn-new-tab {
+  width: 24px;
+  height: 24px;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #8b909a;
+  border: 1px dashed #e6e8ee;
+  background: transparent;
+  cursor: pointer;
+  font-size: 14px;
+  margin-left: 4px;
+  flex-shrink: 0;
+}
+.btn-new-tab:hover {
+  border-color: #5e6ad2;
+  color: #5e6ad2;
+  background: #f0f2ff;
+}
+.no-tabs {
+  font-size: 12px;
+  color: #8b909a;
+  padding: 0 8px;
 }
 .crumb-line { font-size: 13px; color: #8b909a; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #workflowSubject.wf-subject { font-size: 14px; font-weight: 680; color: #16171b; }
@@ -3369,9 +3621,17 @@ body {
   border-left: 1px solid #e6e8ee;
   background: #fff;
 }
-.flow-insp-head { padding: 16px 16px 8px; border-bottom: 0; }
-.flow-insp-title { font-size: 15px; font-weight: 680; }
-.flow-insp-meta { font-size: 12px; color: #5e636e; margin-top: 3px; }
+.flow-insp-head {
+  height: 44px;
+  padding: 0 16px;
+  border-bottom: 1px solid #e6e8ee;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  box-sizing: border-box;
+}
+.flow-insp-title { font-size: 14px; font-weight: 680; }
+.flow-insp-meta { font-size: 11px; color: #5e636e; }
 .flow-insp-tabs { padding: 0 8px; gap: 2px; }
 .flow-insp-tab { padding: 8px; font-size: 12.5px; border-bottom: 0; }
 .flow-insp-tab.active { color: #16171b; font-weight: 680; box-shadow: inset 0 -2px 0 #5e6ad2; }
@@ -3496,14 +3756,97 @@ body {
 .shell-row small { color: #8b909a; }
 .shell[data-workspace="aux"] #tasks,
 .shell[data-workspace="list"] #tasks { flex: 1; min-height: 0; overflow: auto; padding: 8px 16px 24px; }
-.main { padding-bottom: 38px; }
-.deep-drawer { left: 228px; right: 0; bottom: 0; border-radius: 0; }
+.main {
+  min-width: 0;
+  min-height: 0;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  padding-bottom: 0;
+  background: #fff;
+  overflow: hidden;
+}
+.light-bottom-bar {
+  height: 28px;
+  background: #ffffff;
+  border-top: 1px solid #e6e8ee;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 16px;
+  font-size: 11px;
+  color: #8b909a;
+  z-index: 30;
+  flex-shrink: 0;
+  user-select: none;
+  box-sizing: border-box;
+}
+.bottom-left, .bottom-right {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-width: 0;
+}
+.bottom-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  color: #16171b;
+  flex-shrink: 0;
+}
+.indicator-pip {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #10b981;
+  box-shadow: 0 0 0 2px #ecfdf5;
+}
+.bottom-sep {
+  color: #dcdfe8;
+  font-size: 12px;
+}
+.bottom-ticker {
+  font-size: 11px;
+  color: #5e636e;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bottom-stat {
+  font-size: 11px;
+  color: #8b909a;
+  font-variant-numeric: tabular-nums;
+}
+.bottom-stat b {
+  color: #16171b;
+  font-weight: 600;
+}
+.btn-bottom-action {
+  background: transparent;
+  border: 1px solid #e6e8ee;
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-size: 11px;
+  color: #5e6ad2;
+  font-weight: 600;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.btn-bottom-action:hover {
+  background: #f0f2ff;
+  border-color: #5e6ad2;
+}
+.deep-drawer { left: 268px; right: 0; bottom: 28px; border-radius: 0; }
 .deep-drawer.collapsed { clip-path: inset(0 0 calc(100% - 38px) 0); }
 @media (max-width: 1000px) {
   body { padding: 0; }
   .shell { height: 100vh; min-height: 0; border-radius: 0; grid-template-columns: 1fr; }
-  .sidebar { border-right: 0; border-bottom: 1px solid #e6e8ee; max-height: 220px; }
-  .deep-drawer { left: 0; right: 0; bottom: 0; border-radius: 0; }
+  .left-rail { display: none; }
+  .sidebar { width: 100%; border-right: 0; border-bottom: 1px solid #e6e8ee; max-height: 220px; }
+  .deep-drawer { left: 0; right: 0; bottom: 28px; border-radius: 0; }
   .deep-drawer.collapsed { clip-path: inset(0 0 calc(100% - 38px) 0); }
   .shell[data-workspace="flow"] #canvasToolbar {
     left: 16px;
@@ -3520,55 +3863,87 @@ body {
 }
 </style></head><body>
 <div class="shell" data-view="workbench" data-workspace="flow">
+  <aside class="left-rail">
+    <div class="rail-head">
+      <div class="rail-brand" title="__PRODUCT_NAME__" onclick="showShellView('workbench')">HF</div>
+    </div>
+    <div class="rail-nav">
+      <button type="button" class="rail-item active" data-rail-nav="workbench" onclick="showShellView('workbench')" title="工作台">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 6h6v6H4zM14 4h6v8h-6zM4 16h8v4H4zM16 16h4v4h-4z"/></svg>
+      </button>
+      <button type="button" class="rail-item" data-rail-nav="dashboard" onclick="showShellView('dashboard')" title="仪表板">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/></svg>
+      </button>
+      <button type="button" class="rail-item" data-rail-nav="ops" onclick="showShellView('ops')" title="运维驾驶舱">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 19V5M4 19h16"/><path d="M8 15l3-4 3 2 5-7"/></svg>
+      </button>
+      <button type="button" class="rail-item" data-rail-nav="alerts" onclick="showShellView('alerts')" title="告警中心">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3l8 4v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7l8-4z"/></svg>
+        <span class="rail-badge-dot" id="railAlertDot" style="display:none"></span>
+      </button>
+      <button type="button" class="rail-item" data-rail-nav="workflows" onclick="showShellView('workflows')" title="工作流总览">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+      </button>
+    </div>
+    <div class="rail-foot">
+      <div class="rail-avatar" id="railSpaceAvatar" title="空间">共</div>
+    </div>
+  </aside>
   <aside class="sidebar">
     <div class="brand-row">
       <span class="logo" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg></span>
       <div class="brand">__PRODUCT_NAME__</div>
     </div>
-    <div class="switcher-wrap">
-      <button type="button" class="switcher" id="spaceSwitcher" onclick="toggleSpaceMenu(event)" aria-haspopup="true" aria-label="切换工厂空间">
-        <span class="avatar" id="spaceAvatar">空</span>
-        <span class="switcher-text">
-          <div class="name" id="spaceName">选择空间</div>
-          <div class="meta" id="spaceMeta">当前工厂</div>
-        </span>
-        <span class="chev" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg></span>
-      </button>
-      <div id="spaceMenu" class="space-menu" hidden>
-        <div id="projects" class="projects"></div>
-        <button type="button" class="space-new" onclick="closeSpaceMenu();showNewProjectModal()">新建工厂空间</button>
+    <div class="sidebar-scroll">
+      <div class="switcher-wrap">
+        <button type="button" class="switcher" id="spaceSwitcher" onclick="toggleSpaceMenu(event)" aria-haspopup="true" aria-label="切换工厂空间">
+          <span class="avatar" id="spaceAvatar">空</span>
+          <span class="switcher-text">
+            <div class="name" id="spaceName">选择空间</div>
+            <div class="meta" id="spaceMeta">当前工厂</div>
+          </span>
+          <span class="chev" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg></span>
+        </button>
+        <div id="spaceMenu" class="space-menu" hidden>
+          <div id="projects" class="projects"></div>
+          <button type="button" class="space-new" onclick="closeSpaceMenu();showNewProjectModal()">新建工厂空间</button>
+        </div>
       </div>
-    </div>
-    <div class="nav-group">
-      <h4>运转</h4>
-      <button type="button" class="nav-item on" data-nav="workbench" onclick="showShellView('workbench')"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 6h6v6H4zM14 4h6v8h-6zM4 16h8v4H4zM16 16h4v4h-4z"/></svg><span>工作台</span></button>
-      <button type="button" class="nav-item" data-nav="dashboard" onclick="showShellView('dashboard')"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/></svg><span>仪表板</span></button>
-      <button type="button" class="nav-item" data-nav="ops" onclick="showShellView('ops')"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 19V5M4 19h16"/><path d="M8 15l3-4 3 2 5-7"/></svg><span>运维驾驶舱</span></button>
-      <button type="button" class="nav-item" data-nav="alerts" onclick="showShellView('alerts')"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3l8 4v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7l8-4z"/></svg><span>告警</span><span class="nav-count" id="navAlertCount" hidden>0</span></button>
-    </div>
-    <div class="nav-group">
-      <h4>当前空间</h4>
-      <button type="button" class="nav-item" data-nav="workflows" onclick="showShellView('workflows')"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="6" cy="6" r="2"/><circle cx="18" cy="12" r="2"/><circle cx="6" cy="18" r="2"/><path d="M8 6h6a4 4 0 0 1 4 4v0M8 18h6a4 4 0 0 0 4-4v0"/></svg><span>工作流</span><span class="nav-count" id="navWfCount" hidden>0</span></button>
-      <button type="button" class="nav-item" data-nav="agents" onclick="showShellView('agents')"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="9" cy="8" r="3"/><path d="M3 19c1-3 3-4.5 6-4.5S17 16 18 19"/><circle cx="17" cy="9" r="2"/><path d="M17 14.5c2 .3 3.4 1.4 4 3.5"/></svg><span>执行者</span><span class="nav-count" id="navAgentCount" hidden>0</span></button>
-      <button type="button" class="nav-item" data-nav="slots" onclick="showShellView('slots')"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="6" rx="1.5"/><rect x="3" y="14" width="18" height="6" rx="1.5"/></svg><span>工位</span></button>
-    </div>
-    <div class="nav-group">
-      <h4>治理</h4>
-      <button type="button" class="nav-item" onclick="openControllerCockpitModal()"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M18.4 5.6 17 7M7 17l-1.4 1.4"/></svg><span>Controller</span></button>
-      <button type="button" class="nav-item nav-templates" onclick="showTemplateLibrary()">模板库</button>
-      <button type="button" class="nav-item" onclick="showArchive()"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 7h16v12H4z"/><path d="M8 7V5h8v2"/></svg><span>归档</span></button>
-    </div>
-    <div class="side-foot">
-      <b id="sideFootTitle">当前工厂</b>
-      <span>日志与归档可回看</span>
+      <div class="nav-group">
+        <h4>运转</h4>
+        <button type="button" class="nav-item on" data-nav="workbench" onclick="showShellView('workbench')"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 6h6v6H4zM14 4h6v8h-6zM4 16h8v4H4zM16 16h4v4h-4z"/></svg><span>工作台</span></button>
+        <button type="button" class="nav-item" data-nav="dashboard" onclick="showShellView('dashboard')"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/></svg><span>仪表板</span></button>
+        <button type="button" class="nav-item" data-nav="ops" onclick="showShellView('ops')"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 19V5M4 19h16"/><path d="M8 15l3-4 3 2 5-7"/></svg><span>运维驾驶舱</span></button>
+        <button type="button" class="nav-item" data-nav="alerts" onclick="showShellView('alerts')"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3l8 4v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7l8-4z"/></svg><span>告警</span><span class="nav-count" id="navAlertCount" hidden>0</span></button>
+      </div>
+      <div class="nav-group">
+        <h4>当前空间</h4>
+        <button type="button" class="nav-item" data-nav="workflows" onclick="showShellView('workflows')"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="6" cy="6" r="2"/><circle cx="18" cy="12" r="2"/><circle cx="6" cy="18" r="2"/><path d="M8 6h6a4 4 0 0 1 4 4v0M8 18h6a4 4 0 0 0 4-4v0"/></svg><span>工作流</span><span class="nav-count" id="navWfCount" hidden>0</span></button>
+        <button type="button" class="nav-item" data-nav="agents" onclick="showShellView('agents')"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="9" cy="8" r="3"/><path d="M3 19c1-3 3-4.5 6-4.5S17 16 18 19"/><circle cx="17" cy="9" r="2"/><path d="M17 14.5c2 .3 3.4 1.4 4 3.5"/></svg><span>执行者</span><span class="nav-count" id="navAgentCount" hidden>0</span></button>
+        <button type="button" class="nav-item" data-nav="slots" onclick="showShellView('slots')"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="6" rx="1.5"/><rect x="3" y="14" width="18" height="6" rx="1.5"/></svg><span>工位</span></button>
+      </div>
+      <div class="nav-group">
+        <h4>治理</h4>
+        <button type="button" class="nav-item" onclick="openControllerCockpitModal()"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M18.4 5.6 17 7M7 17l-1.4 1.4"/></svg><span>Controller</span></button>
+        <button type="button" class="nav-item nav-templates" onclick="showTemplateLibrary()">模板库</button>
+        <button type="button" class="nav-item" onclick="showArchive()"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 7h16v12H4z"/><path d="M8 7V5h8v2"/></svg><span>归档</span></button>
+      </div>
+      <div class="side-foot">
+        <b id="sideFootTitle">当前工厂</b>
+        <span>日志与归档可回看</span>
+      </div>
     </div>
   </aside>
   <main class="main">
     <div class="top">
-      <div class="crumb">
+      <div class="crumb visually-hidden" aria-hidden="true">
         <div class="crumb-line"><span id="crumbSection">工作台</span> / <strong id="workflowSubject" class="wf-subject">—</strong></div>
         <small id="workflowSub" class="wf-sub"></small>
         <div id="projectTitle" class="visually-hidden">选择项目</div>
+      </div>
+      <div class="workflow-tabs-bar" id="workflowTabsBar" role="tablist" aria-label="工作流页签">
+        <div class="tabs-scroll" id="workflowTabsList"></div>
+        <button type="button" class="btn-new-tab" onclick="showNewWorkflow()" title="发起新工作流">+</button>
       </div>
       <div class="actions">
         <button class="btn factory-action" onclick="advanceStage()" title="推进当前阶段">进入下一阶段</button>
@@ -3652,6 +4027,23 @@ body {
       <h4>常驻智能体工位</h4><div id="slots"></div>
       <div id="alerts"></div>
     </div>
+    <footer class="light-bottom-bar" id="consoleBottomBar">
+      <div class="bottom-left">
+        <div class="bottom-indicator">
+          <span class="indicator-pip"></span>
+          <span id="bottomStatusText">Controller 正常调度</span>
+        </div>
+        <span class="bottom-sep">·</span>
+        <span class="bottom-ticker" id="bottomTicker">工作流调度就绪</span>
+      </div>
+      <div class="bottom-right">
+        <span class="bottom-stat">活跃执行者: <b id="bottomActiveWorkers">0</b></span>
+        <span class="bottom-stat">轮询延迟: <b id="bottomPollLatency">8ms</b></span>
+        <button type="button" class="btn-bottom-action" onclick="toggleDeepDrawer()">
+          <span id="bottomDrawerText">▲ 底层现场</span>
+        </button>
+      </div>
+    </footer>
   </main>
 </div>
 <div id="modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
@@ -3707,7 +4099,7 @@ body {
 <script src="/static/vendor/dagre-3.1.1.min.js"></script>
 <script src="/static/vendor/x6-3.1.8.min.js"></script>
 <script>
-let state={overview:null,project:null,workflow:null,ops:null,dash:null,projectId:null,workflowId:null,spaceId:null,space:null,opsMode:false,dashMode:false,dashWorkflowId:null,shellView:'workbench',taskFilter:'all',drawerTab:'tty',selectedTaskId:null,taskDrawerTab:'overview',selectedTaskDetail:null,workflowView:'flow',flowSelectedNodeId:null,flowInspectorTab:'summary',flowGraph:null,flowGraphWfId:null,flowHtmlReady:false};
+let state={overview:null,project:null,workflow:null,ops:null,dash:null,projectId:null,workflowId:null,openWorkflowTabIds:[],spaceId:null,space:null,opsMode:false,dashMode:false,dashWorkflowId:null,shellView:'workbench',taskFilter:'all',drawerTab:'tty',selectedTaskId:null,taskDrawerTab:'overview',selectedTaskDetail:null,workflowView:'flow',flowSelectedNodeId:null,flowInspectorTab:'summary',flowGraph:null,flowGraphWfId:null,flowHtmlReady:false};
 const VIEW_KEY='herdrConsoleView';
 function closeMoreMenu(){const dd=document.getElementById('moreDropdown');if(dd)dd.classList.remove('open')}
 function toggleMoreMenu(e){e.stopPropagation();const dd=document.getElementById('moreDropdown');if(dd)dd.classList.toggle('open')}
@@ -4507,7 +4899,24 @@ async function selectSpace(workspaceId,rer=true){
   saveViewState()
 }
 
-async function loadProject(id,rer=true){state.projectId=id;state.project=await api('/api/project?id='+encodeURIComponent(id));if(rer&&state.overview)renderOverview();document.getElementById('projectTitle').textContent=state.project.project.project_name;const w=state.project.workflows;if(!state.workflowId||!w.some(x=>x.workflow_id===state.workflowId))state.workflowId=state.project.latest_workflow_id;renderAgents();renderSlots();renderWorkflowSwitcher();if(state.workflowId)await loadWorkflow(state.workflowId);else clearWorkflow()}
+async function loadProject(id,rer=true){
+  state.projectId=id;
+  state.project=await api('/api/project?id='+encodeURIComponent(id));
+  if(rer&&state.overview)renderOverview();
+  document.getElementById('projectTitle').textContent=state.project.project.project_name;
+  const w=state.project.workflows;
+  if(!state.workflowId||!w.some(x=>x.workflow_id===state.workflowId))state.workflowId=state.project.latest_workflow_id;
+  if(!state.openWorkflowTabIds)state.openWorkflowTabIds=[];
+  if(state.workflowId&&!state.openWorkflowTabIds.includes(state.workflowId)){
+    state.openWorkflowTabIds.push(state.workflowId);
+  }
+  renderAgents();
+  renderSlots();
+  renderWorkflowSwitcher();
+  renderWorkflowTabs();
+  if(state.workflowId)await loadWorkflow(state.workflowId);
+  else clearWorkflow();
+}
 function workflowSubject(w){return (w&&(w.title||w.requirement_subject))||''}
 function workflowDisplayName(w){
   if(!w)return '';
@@ -4538,17 +4947,94 @@ async function loadWorkflow(id){
   destroyFlowGraph();
   state.workflowId=id;
   state.flowSelectedNodeId=null;
+  if(!state.openWorkflowTabIds)state.openWorkflowTabIds=[];
+  if(id&&!state.openWorkflowTabIds.includes(id))state.openWorkflowTabIds.push(id);
   state.workflow=await api('/api/workflow?id='+encodeURIComponent(id));
   try{state.controllerActionsData=await api('/api/workflow/controller-actions?workflow_id='+encodeURIComponent(id))}catch(e){state.controllerActionsData=null}
   try{state.decisionData=await api('/api/workflow/decisions?workflow_id='+encodeURIComponent(id))}catch(e){state.decisionData=null}
   const w=state.workflow.workflow;
   saveViewState();
+  renderWorkflowTabs();
   renderWorkflowHead(w);
   renderStages();
   renderTasks();
   renderFlowWorkbench();
 }
-function clearWorkflow(){destroyFlowGraph();state.workflow=null;state.workflowId=null;state.flowSelectedNodeId=null;saveViewState();document.getElementById('workflowSubject').textContent='暂无工作流';document.getElementById('workflowSub').textContent='';document.getElementById('stages').innerHTML='';const ab=document.getElementById('attentionBanner');if(ab)ab.style.display='none';setWorkspaceMode('aux');document.getElementById('tasks').innerHTML='<div class="empty">暂无任务</div>';paintCrumb()}
+function clearWorkflow(){
+  destroyFlowGraph();
+  state.workflow=null;
+  state.workflowId=null;
+  state.flowSelectedNodeId=null;
+  saveViewState();
+  renderWorkflowTabs();
+  document.getElementById('workflowSubject').textContent='暂无工作流';
+  document.getElementById('workflowSub').textContent='';
+  document.getElementById('stages').innerHTML='';
+  const ab=document.getElementById('attentionBanner');if(ab)ab.style.display='none';
+  setWorkspaceMode('aux');
+  document.getElementById('tasks').innerHTML='<div class="empty">暂无任务</div>';
+  paintCrumb();
+}
+function openWorkflowTab(id){
+  if(!id)return;
+  if(!state.openWorkflowTabIds)state.openWorkflowTabIds=[];
+  if(!state.openWorkflowTabIds.includes(id))state.openWorkflowTabIds.push(id);
+  state.shellView='workbench';
+  state.workflowView='flow';
+  saveViewState();
+  loadWorkflow(id);
+}
+function closeWorkflowTab(id,e){
+  if(e){e.stopPropagation();if(e.preventDefault)e.preventDefault();}
+  if(!state.openWorkflowTabIds)return;
+  const idx=state.openWorkflowTabIds.indexOf(id);
+  if(idx===-1)return;
+  state.openWorkflowTabIds.splice(idx,1);
+  if(state.workflowId===id){
+    if(state.openWorkflowTabIds.length>0){
+      const nextIdx=Math.min(idx,state.openWorkflowTabIds.length-1);
+      const nextId=state.openWorkflowTabIds[nextIdx];
+      loadWorkflow(nextId);
+    }else{
+      clearWorkflow();
+    }
+  }else{
+    renderWorkflowTabs();
+  }
+}
+function renderWorkflowTabs(){
+  const box=document.getElementById('workflowTabsList');
+  if(!box)return;
+  if(!state.openWorkflowTabIds)state.openWorkflowTabIds=[];
+  if(state.workflowId&&!state.openWorkflowTabIds.includes(state.workflowId)){
+    state.openWorkflowTabIds.push(state.workflowId);
+  }
+  const ws=(state.project&&state.project.workflows)||[];
+  const wfMap={};
+  ws.forEach(w=>{wfMap[w.workflow_id]=w;});
+  if(state.workflow&&state.workflow.workflow){
+    wfMap[state.workflow.workflow.workflow_id]=state.workflow.workflow;
+  }
+  if(state.openWorkflowTabIds.length===0){
+    box.innerHTML='<span class="no-tabs">无打开的工作流</span>';
+    return;
+  }
+  box.innerHTML=state.openWorkflowTabIds.map(wid=>{
+    const w=wfMap[wid]||{workflow_id:wid,status:'waiting'};
+    const isActive=wid===state.workflowId;
+    const title=workflowSubject(w)||w.title||wid;
+    const st=w.status||'waiting';
+    let dotClass='waiting';
+    if(st==='working'||st==='running'||st==='active')dotClass='running';
+    else if(st==='blocked'||st==='decision')dotClass='decision';
+    else if(st==='completed'||st==='cleaned'||st==='archived')dotClass='completed';
+    return `<div class="wf-tab ${isActive?'active':''}" onclick="openWorkflowTab('${esc(wid)}')" title="${esc(title)} (${esc(wid)})" role="tab" aria-selected="${isActive}">`+
+      `<span class="tab-dot ${dotClass}" aria-hidden="true"></span>`+
+      `<span class="tab-title">${esc(title)}</span>`+
+      `<button type="button" class="tab-close" onclick="closeWorkflowTab('${esc(wid)}',event)" title="关闭页签" aria-label="关闭页签">×</button>`+
+      `</div>`;
+  }).join('');
+}
 function setTaskFilter(f){state.taskFilter=f;['All','Decision','Attention','Active'].forEach(k=>{const el=document.getElementById('f'+k);if(el)el.classList.toggle('active',f.toLowerCase()===k.toLowerCase())});renderTasks()}
 function isDecisionTask(t){
   if(t.status==='superseded'||t.status==='cleaned')return false;
@@ -4780,26 +5266,38 @@ function paintCrumb(){
   const view=state.opsMode?'ops':state.dashMode?'dashboard':(state.shellView||'workbench');
   const map={workbench:'工作台',dashboard:'仪表板',ops:'运维',alerts:'告警',agents:'执行者',slots:'工位',workflows:'工作流'};
   if(sec)sec.textContent=map[view]||'工作台';
-  document.querySelectorAll('[data-nav]').forEach(el=>el.classList.toggle('on', el.getAttribute('data-nav')===view));
+  const tabsBar=document.getElementById('workflowTabsBar');
+  const crumbEl=document.querySelector('.top .crumb');
+  if(tabsBar&&tabsBar.style)tabsBar.style.display=(view==='workbench'?'flex':'none');
+  if(crumbEl&&crumbEl.classList)crumbEl.classList.toggle('visually-hidden', view==='workbench');
+  document.querySelectorAll('[data-nav]').forEach(el=>el.classList&&el.classList.toggle('on', el.getAttribute('data-nav')===view));
+  document.querySelectorAll('.rail-item[data-rail-nav]').forEach(el=>el.classList&&el.classList.toggle('active', el.getAttribute('data-rail-nav')===view));
   const shell=document.querySelector('.shell');
-  if(shell)shell.dataset.view=view;
+  if(shell&&shell.dataset)shell.dataset.view=view;
   const s=state.space;
   if(s){
     const label=s.label||s.project_name||s.workspace_id||'空间';
     const name=document.getElementById('spaceName');
     const meta=document.getElementById('spaceMeta');
     const av=document.getElementById('spaceAvatar');
+    const rav=document.getElementById('railSpaceAvatar');
     const foot=document.getElementById('sideFootTitle');
     if(name)name.textContent=label;
     if(meta)meta.textContent=relationText(s);
     if(av)av.textContent=String(label).slice(0,1)||'空';
+    if(rav)rav.textContent=String(label).slice(0,1)||'共';
     if(foot)foot.textContent=label+' · '+relationText(s);
   }
   const o=state.overview||{};
   const setCount=(id,n)=>{const el=document.getElementById(id);if(!el)return;const v=Number(n)||0;el.textContent=String(v);el.hidden=v<=0;};
   setCount('navWfCount', ((state.project&&state.project.workflows)||[]).length);
   setCount('navAgentCount', o.active_agents);
-  setCount('navAlertCount', (typeof visibleAlerts==='function'?visibleAlerts():[]).length);
+  const alertCnt=(typeof visibleAlerts==='function'?visibleAlerts():[]).length;
+  setCount('navAlertCount', alertCnt);
+  const railAlert=document.getElementById('railAlertDot');
+  if(railAlert){if(railAlert.style)railAlert.style.display=alertCnt>0?'block':'none';railAlert.hidden=alertCnt<=0;}
+  const bw=document.getElementById('bottomActiveWorkers');
+  if(bw)bw.textContent=String(o.active_agents||o.active_workers||0);
 }
 async function showShellView(view){
   if(view==='dashboard'){state.shellView='dashboard';return showDashboard();}
@@ -4867,8 +5365,11 @@ function renderShellWorkflows(){
 }
 async function openShellWorkflow(id){
   state.shellView='workbench';state.workflowView='flow';saveViewState();
+  if(!state.openWorkflowTabIds)state.openWorkflowTabIds=[];
+  if(id&&!state.openWorkflowTabIds.includes(id))state.openWorkflowTabIds.push(id);
   try{await loadWorkflow(id);}catch(e){toast(e.message,true);return;}
   paintCrumb();
+  renderWorkflowTabs();
   requestAnimationFrame(()=>{resizeFlowGraph();fitFlowGraph();});
 }
 function flowIconSvg(id){
@@ -5509,7 +6010,7 @@ async function retryStageAdvance(wid){
     refreshAll();
   }catch(e){toast('推进失败: '+e.message,true)}
 }
-function toggleDeepDrawer(){const d=document.getElementById('deepDrawer');if(!d)return;const isCollapsed=d.classList.contains('collapsed');d.classList.toggle('collapsed');const txt=document.getElementById('drawerToggleText');if(txt)txt.textContent=isCollapsed?'▼ 折叠收起':'▲ 展开抽屉';if(isCollapsed)refreshDeepDrawer()}
+function toggleDeepDrawer(){const d=document.getElementById('deepDrawer');if(!d)return;const isCollapsed=d.classList.contains('collapsed');d.classList.toggle('collapsed');const txt=document.getElementById('drawerToggleText');if(txt)txt.textContent=isCollapsed?'▼ 折叠收起':'▲ 展开抽屉';const btxt=document.getElementById('bottomDrawerText');if(btxt)btxt.textContent=isCollapsed?'▼ 收起现场':'▲ 底层现场';if(isCollapsed)refreshDeepDrawer()}
 
 function switchDrawerTab(tab){state.drawerTab=tab;['tty','logs','raw'].forEach(t=>{const el=document.getElementById('dtab'+t.charAt(0).toUpperCase()+t.slice(1));if(el)el.classList.toggle('active',t===tab)});refreshDeepDrawer()}
 async function refreshDeepDrawer(){const pre=document.getElementById('drawerPre');if(!pre)return;pre.textContent='正在拉取底层现场数据…';try{if(state.drawerTab==='tty'){const ts=(state.workflow&&state.workflow.tasks)||[];const activeTask=ts.find(t=>['working','dispatched','rework','paused'].includes(t.status))||ts[0];const paneId=activeTask?activeTask.pane_id:(state.project&&state.project.slots&&state.project.slots[0]&&state.project.slots[0].pane_id);if(!paneId){pre.textContent='当前暂无活动工位 TTY';return}const d=await api('/api/pane/read?id='+encodeURIComponent(paneId));pre.textContent=`[工位 ${paneId} 实时终端现场]\n`+(d.output||'（工位暂无输出）')}else if(state.drawerTab==='logs'){const d=await api('/api/logs?kind=controller');pre.textContent='[调度器内核日志 Controller Log]\n'+(d.output||'（暂无日志）')}else if(state.drawerTab==='raw'){if(!state.workflowId){pre.textContent='请先选择一个工作流';return}const d=await api('/api/workflow/projection?id='+encodeURIComponent(state.workflowId));pre.textContent=JSON.stringify(d,null,2)}}catch(e){pre.textContent='拉取失败: '+e.message}}
@@ -5872,7 +6373,7 @@ class Handler(BaseHTTPRequestHandler):
         if not target.is_file():
             return self.send_json(404,error='Not Found')
         suffix=target.suffix.lower()
-        ctype='application/javascript; charset=utf-8' if suffix=='.js' else 'text/css; charset=utf-8' if suffix=='.css' else 'application/octet-stream'
+        ctype='text/html; charset=utf-8' if suffix in ('.html', '.htm') else 'application/javascript; charset=utf-8' if suffix=='.js' else 'text/css; charset=utf-8' if suffix=='.css' else 'application/octet-stream'
         raw=target.read_bytes(); self.send_response(200); self.send_header('Content-Type',ctype); self.send_header('Content-Length',str(len(raw))); self.send_header('Cache-Control','public, max-age=3600'); self.end_headers(); self.wfile.write(raw)
     def query(self):return urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
     def body(self):

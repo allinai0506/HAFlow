@@ -8,6 +8,91 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-10-02] feat | 标准工作区六分区架构落地：48px 浅色左轨、28px 底部栏、共轴 44px 基准线与手绘草图全面对齐
+- 背景：
+  1. 用户出示标准手绘草图架构（`uploaded_media_1790904749095.png`），指出当前界面与手绘原型对比缺少核心分区：
+     - 缺失独立 48px 纯浅色全局左轨（Left Rail）；
+     - 缺失 28px 贯穿式系统状态与底层现场底部栏（Bottom Bar）；
+     - Tabs 页签在手绘中仅局限在中间工作区上缘，不能横跨到右侧检查器；
+     - 顶栏与全局存在水平错位，必须在全屏 Y=44px 处建立单一一贯、无梯田跳变的绝对共轴基准线。
+  2. 坚持 100% 现代纯浅色（Linear Light Theme），绝不用黑底/深蓝背景色块破坏视觉一致性；
+  3. 严格遵循 8pt/4pt 空间网格白名单（0/4/8/12/16/20/24/32px），0 违规。
+- 变更：
+  1. **48px 全局浅色导航轨（Left Rail）**：
+     - `#ffffff` 底色，`border-right: 1px solid #e6e8ee`；
+     - 顶部 44px 品牌头嵌入 32x32px 标识（`(48 - 32) / 2 = 8px` 居中边距）；
+     - 32x32px 标准导航图标，支持工作台、仪表板、驾驶舱、告警、工作流一键切换；
+     - 底部空间身份微标与通知小红点。
+  2. **首行 Y=44px 绝对共轴基准线**：
+     - 左轨头部（`.rail-head` 44px）、侧边栏头部（`.brand-row` 44px）、工作流页签栏（`.workflow-tabs-bar` 44px）、右侧检查器头部（`.flow-insp-head` 44px）在 Y=44px 形成绝对水平贯通线。
+  3. **28px 纯浅色全局底部状态栏（Bottom Bar）**：
+     - `#ffffff` 底色，`border-top: 1px solid #e6e8ee`；
+     - 集成调度器健康指示、当前工作流轮播、活跃执行者计数与毫秒轮询延迟；
+     - 底部快捷动作与既有 `#deepDrawer` 底层物理现场抽屉无缝联动。
+  4. **DOM 契约与全量测试保护**：
+     - 严谨保护既有 DOM ID、挂钩与测试契约；
+     - 扩充 `tests/test_console_standard_layout_tabs.py` 六分区架构契约测试（11 项测试全绿）；
+     - 控制台全量 228 项测试与全量子测试 100% 通过。
+- 证据：
+  - `pytest -v tests/test_console_standard_layout_tabs.py`（11 passed）；
+  - `pytest -q tests/test_console*.py`（228 passed, 76 subtests passed in 3.69s）；
+  - `python3 -m compileall -q herdr services bin tests console`（0 error）；
+  - `git diff --check`（0 violation）；
+  - 高清真机渲染图 `prototype_standard_layout_screenshot.png` 像素级还原手绘草图。
+
+## [2026-10-02] feat | 控制台浅色风格增量迭代：44px 共轴基准线与多工作流 Tab 标签系统落地
+- 背景：
+  1. 风格纠偏与去黑化：响应用户明确指示，摒弃深蓝顶栏与黑色背景，全面回归 HAFlow 标志性的 100% 现代纯浅色（Light Theme）设计系统（白底 `#fff`、浅灰 `#fafafa`、边框 `#e6e8ee`、品牌紫 `#5e6ad2`）。
+  2. 消除水平线断层：根治多区域顶部高低错落（梯田状）的参差问题，以一把水平标尺贯穿屏幕首行，侧栏顶行、中间工作流 Tab 栏、右侧检查器全部严格统一为 44px 高度并共用单一贯穿底线（Y = 44px）。
+  3. 现有架构增量迭代：采纳路线 A（在现有生产控制台 `console/herdr_factory_console.py` 上做最小必要增量），保持现有 2 栏架构与全部现有功能、API 及 2905+ 自动化测试兼容。
+- 变更：
+  1. **首行 44px 绝对共轴基准线**：
+     - `.sidebar .brand-row` 设置固定高度 44px、内边距 `0 16px`、底部分割线 `border-bottom: 1px solid #e6e8ee`；
+     - 主区域顶栏 `.top` 设置高度 44px、底部分割线 `border-bottom: 1px solid #e6e8ee`；
+     - 悬浮胶囊工具栏（`#canvasToolbar`）保持 `position: absolute; top: 12px; left: 16px;`，浮在点阵画布之上，不打断横向基准线。
+  2. **选项 A 动态工作流页签系统**：
+     - 在 `.top` 左侧嵌入 `#workflowTabsBar` 与 `#workflowTabsList`，支持动态添加标签与新建工作流（`+`）；
+     - 实现 `state.openWorkflowTabIds` 动态生命周期管理：`openWorkflowTab(id)`、`closeWorkflowTab(id, e)`、`renderWorkflowTabs()`；
+     - 关闭当前激活页签时自动就近切换至邻近工作流，关闭全部页签时调用 `clearWorkflow()` 优雅置空；
+     - 标签头集成工作流状态指示灯（运行绿色、门禁黄色、卡点红色、完成灰色、等待浅灰）；
+     - 非工作台视图（仪表板、运维、告警等）自适应切回标准面包屑，保持全量视图兼容。
+  3. **原型与生产严格对齐**：
+     - 更新 `console/static/prototype_standard_layout_tabs.html` 与 `console/herdr_factory_console.py`，全量样式符合 4/8/12/16px 白名单规范（0 违规）；
+     - 静态服务 `send_static` 增加 `.html` / `.htm` 映射至 `text/html; charset=utf-8`。
+- 证据：
+  - 专属验收测试：`pytest -v tests/test_console_standard_layout_tabs.py`（10 passed in 0.23s）；
+  - 全量控制台测试：`pytest -q tests/test_console*.py`（227 passed, 76 subtests passed in 9.60s）；
+  - 语法与静态门禁：`python3 -m py_compile`、`compileall`、`git diff --check` 全部 0 警告 0 报错；
+  - 视觉效果核验：高清真机截图 `prototype_standard_layout_screenshot.png` 验证横向无参差、纯浅色质感与水平底线绝对贯通。
+
+## [2026-10-02] fix/refactor | 依 snapping-ui-to-grid 规范对齐产品原型与标准工作区格栅系统
+- 背景：
+  1. 产品原型间距失准：前期生成的交互原型 `console/static/prototype_standard_layout_tabs.html` 存在 34 处脱离 8pt/4pt 系统的非标裸值（5/6/7/9/10/11/13/14px），破坏了仓库既有的格栅对齐原则。
+  2. 四条数学基准线失调：
+     - **P0 右轴**：审查面板操作按钮呈现「左主右次」排列，主 CTA 未贴紧右边界；
+     - **P1 左轴**：侧边栏（Head 14px vs Items 18px）、抽屉（14px）、底部栏（12px）产生多条伪左轴，无法形成 16px 垂直贯穿线；
+     - **P1 数字轴**：标签徽标、Agent 耗时与底部状态统计缺少等宽字体与 `font-variant-numeric: tabular-nums`；
+     - **Left Rail 8px 空间网格**：48px 导航轨内导航项为 36px（两侧边距各 6px，脱离 8pt 网格），需统一优化为 32px（边距各 8px）。
+- 变更：
+  1. **间距白名单就近吸附（34 处违规清零）**：
+     - 原型全量样式执行属性锚定替换（`(padding|margin|gap)`），彻底清除 5/6/7/9/10/11/13/14px 裸值，100% 吸附至 `4/8/12/16/20/24/32px` 白名单；
+  2. **P0 右轴重构**：
+     - Inspector 门禁决策按钮组次序重排为 `[次要: 驳回修复] [主要: 批准放行]`，容器采用 `justify-content: flex-end; gap: 8px;`，Primary CTA 严格贴合右边界；
+  3. **P1 左轴统一**：
+     - 侧栏头部（`12px 16px 12px`）、侧栏分类与列表项（`8px + 8px = 16px`）、发起按钮、抽屉与底部栏统一对齐 16px 左轴；
+  4. **P1 数字与等宽轴注入**：
+     - 为 `.tab-badge`、`.item-meta`、`.meta-tag`、`.agent-pill`、`.bottom-bar`、`.drawer-content` 注入 `font-family: var(--font-mono); font-variant-numeric: tabular-nums;`；
+  5. **Left Rail 8px 空间网格统一**：
+     - 原型与生产控制台（`console/herdr_factory_console.py`）中的 `.rail-item` 统一从 36px 优化为 32px，实现 `(48 - 32) / 2 = 8px` 居中边距，与品牌 Logo（32px）和折叠按钮（32px）完美保持 8pt 节奏；
+  6. **CI 门禁与防护**：
+     - 在 `tests/test_console_standard_layout_tabs.py` 扩充间距白名单校验与四轴吸附原则测试，覆盖原型与生产文件。
+- 证据：
+  - 间距正则扫描：原型与控制台双文件 `grep -E '(padding|margin|gap)[^:;}]*:[^;}]*[^0-9.](5|6|7|9|10|11|13|14)px'` **0 违规**；
+  - 布局专属测试：`pytest -v tests/test_console_standard_layout_tabs.py`（10 passed in 0.44s）；
+  - 全量控制台测试：`pytest -q tests/test_console_*.py`（227 passed, 76 subtests passed）；
+  - 全仓自动化测试：`pytest -q`（2905 passed, 157 subtests passed in 592.96s）；
+  - 静态编译与代码卫生：`compileall` 与 `git diff --check` 0 警告 0 报错；
+  - 视觉回执更新：重新生成高清真机渲染效果图 `prototype_standard_layout_screenshot.png`（158 KB）。
 ## [2026-10-01] feat | 控制台 Linear 风格标准工作流选择器与状态胶囊设计系统规范
 - 背景：
   1. 工作流 ID 遮蔽：原先前端使用 `w.title || w.workflow_id`，导致定义了 title 的工作流（如 `wf-project-0929-01` 对应 `Task：统一待办工作台 V1`）ID 被彻底遮蔽，用户误以为刚执行的工作流未出现在下拉框。

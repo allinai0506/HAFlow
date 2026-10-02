@@ -1,0 +1,1281 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HAFlow 控制台 · 标准 6 分区工作区架构原型 (Sketch Aligned)</title>
+  <style>
+    :root {
+      --bg-app: #ffffff;
+      --bg-sidebar: #fafafa;
+      --bg-canvas: #f7f8fa;
+      --bg-panel: #ffffff;
+      --bg-hover: #f3f4f6;
+      --bg-active: #f6eee8;
+
+      --border-light: #e6e8ee;
+      --border-subtle: #f0f1f4;
+      --border-focus: #5e6ad2;
+
+      --text-main: #16171b;
+      --text-sub: #5e636e;
+      --text-muted: #8b909a;
+
+      --primary: #5e6ad2;
+      --primary-hover: #4f5bc4;
+      --primary-light: #f0f2ff;
+
+      --success: #10b981;
+      --success-bg: #ecfdf5;
+      --success-border: #a7f3d0;
+
+      --warning: #f59e0b;
+      --warning-bg: #fffbeb;
+      --warning-border: #fde68a;
+
+      --danger: #ef4444;
+      --danger-bg: #fef2f2;
+      --danger-border: #fecaca;
+
+      --shadow-sm: 0 1px 2px rgba(18, 19, 22, 0.04);
+      --shadow-md: 0 4px 12px rgba(18, 19, 22, 0.08);
+      --shadow-pill: 0 1px 3px rgba(18, 19, 22, 0.06), 0 1px 2px rgba(18, 19, 22, 0.04);
+
+      --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", sans-serif;
+      --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: var(--font-sans);
+      font-size: 13px;
+      color: var(--text-main);
+      background: var(--bg-app);
+      height: 100vh;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      user-select: none;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    button { font: inherit; cursor: pointer; border: none; background: none; }
+    a { color: inherit; text-decoration: none; }
+
+    .tabular-nums, .tab-badge, .badge-num, .item-meta, .pill-meta b {
+      font-family: var(--font-mono);
+      font-variant-numeric: tabular-nums;
+    }
+
+    /* ---------------------------------------------------- */
+    /* 1. APP SHELL (Flex Column + Top Workspace + Bottom)  */
+    /* ---------------------------------------------------- */
+    .app-shell {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      position: relative;
+    }
+
+    .workspace-row {
+      flex: 1;
+      display: flex;
+      overflow: hidden;
+      min-height: 0;
+    }
+
+    /* ---------------------------------------------------- */
+    /* 2. LEFT RAIL (48px, Pure Light #ffffff)              */
+    /* ---------------------------------------------------- */
+    .left-rail {
+      width: 48px;
+      background: #ffffff;
+      border-right: 1px solid var(--border-light);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      flex-shrink: 0;
+      z-index: 25;
+    }
+
+    .rail-head {
+      height: 44px;
+      width: 48px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-bottom: 1px solid var(--border-light);
+      flex-shrink: 0;
+    }
+    .rail-brand {
+      width: 32px;
+      height: 32px;
+      border-radius: 8px;
+      background: #16171b;
+      color: #ffffff;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 800;
+      font-size: 13px;
+      cursor: pointer;
+    }
+
+    .rail-nav {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+      padding: 8px 0;
+    }
+    .rail-item {
+      width: 32px;
+      height: 32px;
+      margin: 4px 8px;
+      border-radius: 6px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--text-sub);
+      transition: all 0.12s ease;
+      position: relative;
+    }
+    .rail-item:hover {
+      background: var(--bg-hover);
+      color: var(--text-main);
+    }
+    .rail-item.active {
+      background: var(--primary-light);
+      color: var(--primary);
+    }
+    .rail-item.active::before {
+      content: "";
+      position: absolute;
+      left: -8px;
+      top: 6px;
+      bottom: 6px;
+      width: 3px;
+      background: var(--primary);
+      border-radius: 0 2px 2px 0;
+    }
+    .rail-badge-dot {
+      position: absolute;
+      top: 6px;
+      right: 6px;
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--danger);
+    }
+
+    .rail-foot {
+      padding: 8px 0 12px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+    }
+    .rail-avatar {
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      background: #ece7e2;
+      color: #6b4f3a;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 700;
+      font-size: 11px;
+      cursor: pointer;
+      border: 1px solid var(--border-light);
+    }
+
+    /* ---------------------------------------------------- */
+    /* 3. SIDEBAR (220px, Light #fafafa)                    */
+    /* ---------------------------------------------------- */
+    .sidebar {
+      width: 220px;
+      background: var(--bg-sidebar);
+      border-right: 1px solid var(--border-light);
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0;
+      transition: width 0.15s ease;
+      z-index: 20;
+      overflow: hidden;
+      white-space: nowrap;
+    }
+    .sidebar.collapsed {
+      width: 0;
+      border-right: none;
+    }
+
+    .sidebar-head {
+      height: 44px;
+      padding: 0 12px;
+      border-bottom: 1px solid var(--border-light);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: var(--bg-sidebar);
+      flex-shrink: 0;
+    }
+    .sidebar-title {
+      font-weight: 600;
+      font-size: 12px;
+      color: var(--text-main);
+    }
+    .btn-collapse-sidebar {
+      margin-left: auto;
+      width: 24px;
+      height: 24px;
+      border-radius: 4px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--text-muted);
+    }
+    .btn-collapse-sidebar:hover { background: var(--bg-hover); color: var(--text-main); }
+
+    .sidebar-scroll {
+      flex: 1;
+      overflow-y: auto;
+      padding: 12px 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    /* Space Selector Pill */
+    .space-pill {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 4px 8px;
+      background: #ffffff;
+      border: 1px solid var(--border-light);
+      border-radius: 8px;
+      box-shadow: var(--shadow-sm);
+      cursor: pointer;
+    }
+    .space-avatar {
+      width: 20px;
+      height: 20px;
+      border-radius: 4px;
+      background: #ece7e2;
+      color: #6b4f3a;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 10px;
+      font-weight: 700;
+    }
+    .space-name { font-size: 12px; font-weight: 600; color: var(--text-main); }
+    .space-chev { margin-left: auto; color: var(--text-muted); }
+
+    /* Sidebar Workflow Tree */
+    .sidebar-section { display: flex; flex-direction: column; gap: 4px; }
+    .sidebar-section-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 4px 8px;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .sidebar-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 4px 8px;
+      border-radius: 6px;
+      font-size: 12px;
+      color: var(--text-sub);
+      cursor: pointer;
+      transition: all 0.12s ease;
+      position: relative;
+    }
+    .sidebar-item:hover { background: var(--bg-hover); color: var(--text-main); }
+    .sidebar-item.active { background: var(--bg-active); color: var(--primary); font-weight: 600; }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .status-dot.running { background: var(--success); box-shadow: 0 0 0 2px var(--success-bg); }
+    .status-dot.decision { background: var(--warning); box-shadow: 0 0 0 2px var(--warning-bg); }
+    .status-dot.blocked { background: var(--danger); box-shadow: 0 0 0 2px var(--danger-bg); }
+    .status-dot.completed { background: #9ca3af; }
+
+    .item-meta { margin-left: auto; font-size: 10px; color: var(--text-muted); }
+
+    .btn-create-wf {
+      margin-top: 4px;
+      height: 32px;
+      background: #ffffff;
+      border: 1px dashed var(--border-light);
+      border-radius: 6px;
+      color: var(--text-sub);
+      font-size: 12px;
+      font-weight: 500;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      transition: all 0.12s ease;
+    }
+    .btn-create-wf:hover {
+      border-color: var(--primary);
+      color: var(--primary);
+      background: var(--primary-light);
+    }
+
+    /* ---------------------------------------------------- */
+    /* 4. MAIN COLUMN (Middle Tabs + Canvas)                */
+    /* ---------------------------------------------------- */
+    .main-column {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      min-width: 0;
+      background: var(--bg-app);
+    }
+
+    /* 4.1 TABS BAR (Coaxial Baseline: Exactly 44px)        */
+    .tabs-bar {
+      height: 44px;
+      background: #ffffff;
+      border-bottom: 1px solid var(--border-light);
+      display: flex;
+      align-items: center;
+      flex-shrink: 0;
+      z-index: 15;
+      padding: 0 8px;
+    }
+
+    .btn-expand-sidebar {
+      width: 28px;
+      height: 28px;
+      margin-right: 4px;
+      border-radius: 4px;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      color: var(--text-sub);
+    }
+    .btn-expand-sidebar:hover { background: var(--bg-hover); color: var(--text-main); }
+    .btn-expand-sidebar.visible { display: flex; }
+
+    .tabs-scroll-area {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      height: 44px;
+      overflow-x: auto;
+      gap: 4px;
+      min-width: 0;
+    }
+    .tabs-scroll-area::-webkit-scrollbar { display: none; }
+
+    .wf-tab {
+      height: 32px;
+      padding: 0 8px;
+      border-radius: 6px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: transparent;
+      color: var(--text-sub);
+      font-size: 12px;
+      cursor: pointer;
+      position: relative;
+      flex-shrink: 0;
+      max-width: 200px;
+      transition: all 0.12s ease;
+      border: 1px solid transparent;
+    }
+    .wf-tab:hover {
+      background: var(--bg-hover);
+      color: var(--text-main);
+    }
+    .wf-tab.active {
+      background: #ffffff;
+      color: var(--text-main);
+      font-weight: 600;
+      border-color: var(--border-light);
+      box-shadow: var(--shadow-sm);
+    }
+    .wf-tab.active::after {
+      content: "";
+      position: absolute;
+      bottom: -6px;
+      left: 8px;
+      right: 8px;
+      height: 2px;
+      background: var(--primary);
+      border-radius: 2px;
+    }
+
+    .tab-title {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      min-width: 0;
+    }
+    .tab-badge {
+      background: var(--warning-bg);
+      border: 1px solid var(--warning-border);
+      color: #b45309;
+      font-size: 10px;
+      font-weight: 700;
+      padding: 0 4px;
+      height: 16px;
+      border-radius: 4px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .tab-close {
+      width: 16px;
+      height: 16px;
+      border-radius: 3px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--text-muted);
+      opacity: 0.6;
+      transition: all 0.1s ease;
+      margin-left: 2px;
+    }
+    .tab-close:hover {
+      background: #e5e7eb;
+      color: var(--text-main);
+      opacity: 1;
+    }
+
+    .btn-new-tab {
+      width: 24px;
+      height: 24px;
+      border-radius: 4px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--text-muted);
+      border: 1px dashed var(--border-light);
+      margin-left: 4px;
+      flex-shrink: 0;
+    }
+    .btn-new-tab:hover {
+      border-color: var(--primary);
+      color: var(--primary);
+      background: var(--primary-light);
+    }
+
+    .top-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-left: 8px;
+      flex-shrink: 0;
+    }
+    .btn-action {
+      height: 28px;
+      padding: 0 12px;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 500;
+      border: 1px solid var(--border-light);
+      background: #ffffff;
+      color: var(--text-main);
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      box-shadow: var(--shadow-sm);
+    }
+    .btn-action:hover { background: var(--bg-hover); }
+    .btn-action.primary {
+      background: var(--primary);
+      border-color: var(--primary);
+      color: #ffffff;
+      font-weight: 600;
+    }
+    .btn-action.primary:hover { background: var(--primary-hover); }
+
+    /* 4.2 CANVAS WRAP (Dot grid & floating toolbar)        */
+    .canvas-wrap {
+      flex: 1;
+      position: relative;
+      background-color: var(--bg-canvas);
+      background-image: radial-gradient(rgba(18, 19, 22, 0.12) 1px, transparent 1.15px);
+      background-size: 18px 18px;
+      overflow: auto;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding-top: 56px;
+    }
+
+    .canvas-floating-toolbar {
+      position: absolute;
+      top: 12px;
+      left: 16px;
+      right: 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      pointer-events: none;
+      z-index: 10;
+    }
+    .floating-pill {
+      pointer-events: auto;
+      background: rgba(255, 255, 255, 0.94);
+      backdrop-filter: blur(8px);
+      border: 1px solid var(--border-light);
+      border-radius: 8px;
+      padding: 4px 8px;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      box-shadow: var(--shadow-pill);
+    }
+    .pill-btn {
+      height: 24px;
+      padding: 0 8px;
+      border-radius: 4px;
+      font-size: 11.5px;
+      font-weight: 500;
+      color: var(--text-sub);
+    }
+    .pill-btn:hover { background: var(--bg-hover); color: var(--text-main); }
+    .pill-btn.active { background: var(--bg-active); color: var(--text-main); font-weight: 600; }
+    .pill-divider { width: 1px; height: 16px; background: var(--border-light); margin: 0 4px; }
+    .pill-meta { font-size: 11px; color: var(--text-muted); }
+
+    .flow-pipeline {
+      display: flex;
+      align-items: center;
+      gap: 24px;
+      margin-top: 32px;
+      z-index: 2;
+    }
+    .flow-node-card {
+      width: 220px;
+      background: #ffffff;
+      border: 1px solid var(--border-light);
+      border-radius: 8px;
+      padding: 12px 16px;
+      box-shadow: var(--shadow-sm);
+      cursor: pointer;
+      transition: all 0.15s ease;
+      position: relative;
+    }
+    .flow-node-card:hover {
+      box-shadow: var(--shadow-md);
+      transform: translateY(-1px);
+    }
+    .flow-node-card.selected {
+      border-color: var(--primary);
+      box-shadow: 0 0 0 2px rgba(94, 106, 210, 0.2);
+    }
+    .flow-node-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 8px;
+    }
+    .node-type-label {
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      letter-spacing: 0.05em;
+    }
+    .node-title {
+      font-weight: 600;
+      font-size: 13px;
+      color: var(--text-main);
+      margin-bottom: 4px;
+    }
+    .node-desc {
+      font-size: 11.5px;
+      color: var(--text-sub);
+      line-height: 1.4;
+      margin-bottom: 8px;
+    }
+    .node-foot {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 11px;
+      color: var(--text-muted);
+      border-top: 1px solid var(--border-subtle);
+      padding-top: 8px;
+    }
+    .node-agent {
+      font-weight: 600;
+      color: var(--primary);
+    }
+    .pipeline-connector {
+      width: 24px;
+      height: 2px;
+      background: #cbd5e1;
+      position: relative;
+    }
+    .pipeline-connector::after {
+      content: "";
+      position: absolute;
+      right: 0;
+      top: -3px;
+      width: 0;
+      height: 0;
+      border-top: 4px solid transparent;
+      border-bottom: 4px solid transparent;
+      border-left: 6px solid #cbd5e1;
+    }
+
+    /* ---------------------------------------------------- */
+    /* 5. RIGHT SIDE BAR (Inspector, 300px, Light #ffffff)  */
+    /* ---------------------------------------------------- */
+    .inspector-panel {
+      width: 300px;
+      background: #ffffff;
+      border-left: 1px solid var(--border-light);
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0;
+      z-index: 20;
+    }
+
+    .inspector-head {
+      height: 44px;
+      padding: 0 16px;
+      border-bottom: 1px solid var(--border-light);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: #ffffff;
+      flex-shrink: 0;
+    }
+    .insp-head-title {
+      font-weight: 600;
+      font-size: 13px;
+      color: var(--text-main);
+    }
+    .insp-head-sub {
+      font-size: 11px;
+      color: var(--text-muted);
+      margin-left: 8px;
+    }
+
+    .insp-nav-tabs {
+      display: flex;
+      border-bottom: 1px solid var(--border-light);
+      padding: 0 16px;
+      gap: 16px;
+      background: #ffffff;
+      flex-shrink: 0;
+    }
+    .insp-nav-tab {
+      padding: 8px 0;
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--text-sub);
+      cursor: pointer;
+      position: relative;
+    }
+    .insp-nav-tab.active {
+      color: var(--primary);
+      font-weight: 600;
+    }
+    .insp-nav-tab.active::after {
+      content: "";
+      position: absolute;
+      bottom: -1px;
+      left: 0;
+      right: 0;
+      height: 2px;
+      background: var(--primary);
+    }
+
+    .insp-body {
+      flex: 1;
+      overflow-y: auto;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .insp-card {
+      border: 1px solid var(--border-light);
+      border-radius: 8px;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .insp-card-title {
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      letter-spacing: 0.04em;
+    }
+    .insp-prop-row {
+      display: flex;
+      justify-content: space-between;
+      font-size: 12px;
+    }
+    .insp-prop-label { color: var(--text-sub); }
+    .insp-prop-val { font-weight: 500; color: var(--text-main); }
+
+    /* Wireframe preview card matching sketch */
+    .wireframe-box {
+      border: 1px dashed var(--border-light);
+      border-radius: 6px;
+      height: 80px;
+      background: var(--bg-canvas);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+      overflow: hidden;
+    }
+    .wireframe-box::before, .wireframe-box::after {
+      content: "";
+      position: absolute;
+      top: 0; bottom: 0; left: 0; right: 0;
+      background: linear-gradient(to top right, transparent calc(50% - 0.5px), #cbd5e1, transparent calc(50% + 0.5px));
+    }
+    .wireframe-box::after {
+      background: linear-gradient(to top left, transparent calc(50% - 0.5px), #cbd5e1, transparent calc(50% + 0.5px));
+    }
+    .wireframe-label {
+      z-index: 2;
+      background: rgba(255,255,255,0.9);
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+
+    /* Human Gate Card */
+    .gate-decision-box {
+      background: var(--warning-bg);
+      border: 1px solid var(--warning-border);
+      border-radius: 8px;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .gate-title { font-weight: 600; font-size: 12px; color: #92400e; }
+    .gate-desc { font-size: 11.5px; color: #b45309; line-height: 1.4; }
+    .gate-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      margin-top: 4px;
+    }
+    .btn-gate {
+      padding: 4px 12px;
+      border-radius: 4px;
+      font-size: 11.5px;
+      font-weight: 600;
+    }
+    .btn-gate.reject {
+      background: #ffffff;
+      border: 1px solid #d1d5db;
+      color: var(--text-sub);
+    }
+    .btn-gate.reject:hover { background: #f3f4f6; }
+    .btn-gate.pass {
+      background: var(--success);
+      color: #ffffff;
+    }
+    .btn-gate.pass:hover { background: #059669; }
+
+    .tty-box {
+      background: #ffffff;
+      border: 1px solid var(--border-light);
+      border-radius: 6px;
+      padding: 8px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      line-height: 1.5;
+      color: var(--text-sub);
+    }
+
+    /* ---------------------------------------------------- */
+    /* 6. BOTTOM BAR (28px fixed, Pure Light #ffffff)       */
+    /* ---------------------------------------------------- */
+    .light-bottom-bar {
+      height: 28px;
+      background: #ffffff;
+      border-top: 1px solid var(--border-light);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 16px;
+      font-size: 11px;
+      color: var(--text-sub);
+      flex-shrink: 0;
+      z-index: 30;
+    }
+    .bottom-status-left {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      min-width: 0;
+    }
+    .bottom-indicator {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-weight: 600;
+      color: var(--text-main);
+      flex-shrink: 0;
+    }
+    .indicator-pip {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--success);
+      box-shadow: 0 0 0 2px var(--success-bg);
+    }
+    .bottom-ticker {
+      color: var(--text-muted);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .bottom-status-right {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      flex-shrink: 0;
+    }
+    .bottom-link {
+      color: var(--primary);
+      cursor: pointer;
+      font-weight: 600;
+    }
+    .bottom-link:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <div class="app-shell">
+    <div class="workspace-row">
+      <!-- 1. LEFT RAIL (48px fixed, pure light) -->
+      <aside class="left-rail" id="leftRail">
+        <div class="rail-head">
+          <div class="rail-brand" title="HAFlow 生产工作台">HF</div>
+        </div>
+        <nav class="rail-nav" aria-label="一级导航">
+          <button class="rail-item active" title="工作台 (Home)">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+          </button>
+          <button class="rail-item" title="全局检索 (Search)" onclick="toast('调起全局快捷搜索 (⌘K)')">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+          </button>
+          <button class="rail-item" title="告警中心 (Alerts)" onclick="toast('切换至告警中心视图')">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>
+            <span class="rail-badge-dot"></span>
+          </button>
+          <button class="rail-item" title="工作流与模板 (Workflows & Docs)" onclick="toast('切换至模板资产库')">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/></svg>
+          </button>
+          <button class="rail-item" title="工厂治理 (Settings)" onclick="toast('打开 Controller 控制台')">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          </button>
+        </nav>
+        <div class="rail-foot">
+          <div class="rail-avatar" title="当前身份: 上海共事 / 专家">共</div>
+        </div>
+      </aside>
+
+      <!-- 2. SIDEBAR (220px, light #fafafa) -->
+      <aside class="sidebar" id="sidebar">
+        <div class="sidebar-head">
+          <span class="sidebar-title">空间工作流</span>
+          <button class="btn-collapse-sidebar" onclick="toggleSidebar()" title="折叠侧边栏 (⌘B)">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m15 18-6-6 6-6"/></svg>
+          </button>
+        </div>
+
+        <div class="sidebar-scroll">
+          <!-- Space Selector Pill -->
+          <div class="space-pill" onclick="toast('切换工厂空间')">
+            <div class="space-avatar">共</div>
+            <div style="min-width:0;flex:1">
+              <div class="space-name">共事工位工厂</div>
+            </div>
+            <svg class="space-chev" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6"/></svg>
+          </div>
+
+          <!-- Section: Active Workflows -->
+          <div class="sidebar-section">
+            <div class="sidebar-section-head">
+              <span>空间工作流 (选项 A)</span>
+              <span class="tabular-nums">4</span>
+            </div>
+            <div class="sidebar-item active" onclick="openWorkflowTab('wf-01')">
+              <span class="status-dot running"></span>
+              <span style="overflow:hidden;text-overflow:ellipsis">统一待办工作台与登录重构</span>
+              <span class="item-meta tabular-nums">75%</span>
+            </div>
+            <div class="sidebar-item" onclick="openWorkflowTab('wf-02')">
+              <span class="status-dot decision"></span>
+              <span style="overflow:hidden;text-overflow:ellipsis">支付中心对接与结算流</span>
+              <span class="item-meta">需决策</span>
+            </div>
+            <div class="sidebar-item" onclick="openWorkflowTab('wf-03')">
+              <span class="status-dot blocked"></span>
+              <span style="overflow:hidden;text-overflow:ellipsis">审计日志与链路追踪</span>
+              <span class="item-meta">阻塞</span>
+            </div>
+            <div class="sidebar-item" onclick="openWorkflowTab('wf-04')">
+              <span class="status-dot completed"></span>
+              <span style="overflow:hidden;text-overflow:ellipsis">月度运维分析报表生成</span>
+              <span class="item-meta">已完成</span>
+            </div>
+
+            <button class="btn-create-wf" onclick="toast('正在调起工作流模板向导…')">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+              <span>发起新工作流</span>
+            </button>
+          </div>
+        </div>
+      </aside>
+
+      <!-- 3. MAIN COLUMN (Middle Tabs + Canvas) -->
+      <main class="main-column">
+        <!-- TABS BAR (Y=44px single unbroken horizontal line across whole screen) -->
+        <header class="tabs-bar">
+          <button class="btn-expand-sidebar" id="btnExpandSidebar" onclick="toggleSidebar()" title="展开侧边栏 (⌘B)">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m9 18 6-6-6-6"/></svg>
+          </button>
+
+          <!-- Middle Workflow Tabs (Option A) -->
+          <div class="tabs-scroll-area" id="wfTabsList">
+            <!-- Rendered via JS -->
+          </div>
+
+          <button type="button" class="btn-new-tab" onclick="toast('发起新工作流')" title="发起新工作流">+</button>
+
+          <!-- Global Top Actions -->
+          <div class="top-actions">
+            <button class="btn-action primary" onclick="toast('正在向下一阶段推进…')">进入下一阶段</button>
+            <button class="btn-action" title="更多操作">···</button>
+          </div>
+        </header>
+
+        <!-- CANVAS WRAP -->
+        <div class="canvas-wrap">
+          <!-- FLOATING PILL TOOLBAR (Natural overlay, zero stair-stepping) -->
+          <div class="canvas-floating-toolbar">
+            <div class="floating-pill">
+              <button class="pill-btn active">流程图 (DAG)</button>
+              <button class="pill-btn">任务看板 (List)</button>
+              <span class="pill-divider"></span>
+              <span class="pill-meta">候选分支: <b id="metaBranch">candidate/0929</b></span>
+              <span class="pill-meta">执行者策略: <b id="metaRouter">auto (动态负载)</b></span>
+            </div>
+
+            <div class="floating-pill">
+              <button class="pill-btn" onclick="toast('放大')">+</button>
+              <button class="pill-btn" onclick="toast('缩小')">-</button>
+              <button class="pill-btn" onclick="toast('适应画布')">Fit</button>
+            </div>
+          </div>
+
+          <!-- Flow Diagram Nodes -->
+          <div class="flow-pipeline">
+            <div class="flow-node-card" onclick="selectNode('req')">
+              <div class="flow-node-head">
+                <span class="node-type-label">需求阶段</span>
+                <span style="color:#16a34a;font-weight:600;font-size:11px">✓ 已完成</span>
+              </div>
+              <div class="node-title">实施规划与协议</div>
+              <div class="node-desc">系统分层及前后端对齐契约定义完毕</div>
+              <div class="node-foot">
+                <span>工位: <b class="node-agent">claude</b></span>
+                <span class="tabular-nums" style="color:var(--text-muted)">#1</span>
+              </div>
+            </div>
+
+            <div class="pipeline-connector"></div>
+
+            <div class="flow-node-card selected" onclick="selectNode('impl')">
+              <div class="flow-node-head">
+                <span class="node-type-label">实现阶段</span>
+                <span style="color:#2563eb;font-weight:600;font-size:11px">● 执行中</span>
+              </div>
+              <div class="node-title">核心代码实现</div>
+              <div class="node-desc">正在生成 6 分区网格与 Tab 状态机</div>
+              <div class="node-foot">
+                <span>工位: <b class="node-agent">opencode</b></span>
+                <span class="tabular-nums" style="color:var(--text-muted)">#2</span>
+              </div>
+            </div>
+
+            <div class="pipeline-connector"></div>
+
+            <div class="flow-node-card" onclick="selectNode('gate')">
+              <div class="flow-node-head">
+                <span class="node-type-label">强门禁 (Gate)</span>
+                <span style="color:#d97706;font-weight:600;font-size:11px">⚠️ 待拍板</span>
+              </div>
+              <div class="node-title">质量与风控门禁</div>
+              <div class="node-desc">脱敏自检回执已就绪，等待专家复核放行</div>
+              <div class="node-foot">
+                <span>工位: <b class="node-agent">human</b></span>
+                <span class="tabular-nums" style="color:var(--text-muted)">#3</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </main>
+
+      <!-- 4. RIGHT SIDE BAR (Inspector, 300px, light #ffffff) -->
+      <aside class="inspector-panel">
+        <div class="inspector-head">
+          <div style="display:flex;align-items:baseline">
+            <span class="insp-head-title">节点属性</span>
+            <span class="insp-head-sub tabular-nums" id="inspNodeId">node_id: impl</span>
+          </div>
+          <span class="status-dot running" title="当前节点执行中"></span>
+        </div>
+
+        <div class="insp-nav-tabs">
+          <div class="insp-nav-tab active">概览</div>
+          <div class="insp-nav-tab">任务工单</div>
+          <div class="insp-nav-tab">产物与凭证</div>
+          <div class="insp-nav-tab">工位终端</div>
+        </div>
+
+        <div class="insp-body" id="inspBody">
+          <!-- Node Properties -->
+          <div class="insp-card">
+            <div class="insp-card-title">当前节点属性</div>
+            <div class="insp-prop-row">
+              <span class="insp-prop-label">节点标题</span>
+              <span class="insp-prop-val" id="inspPropTitle">核心代码实现</span>
+            </div>
+            <div class="insp-prop-row">
+              <span class="insp-prop-label">阶段类型</span>
+              <span class="insp-prop-val">implementation</span>
+            </div>
+            <div class="insp-prop-row">
+              <span class="insp-prop-label">分派工位</span>
+              <span class="insp-prop-val" style="font-family:var(--font-mono);color:var(--primary)">pane-opencode</span>
+            </div>
+            <div class="insp-prop-row">
+              <span class="insp-prop-label">节点状态</span>
+              <span class="insp-prop-val" style="color:#2563eb">● 运行中 (working)</span>
+            </div>
+          </div>
+
+          <!-- Wireframe preview card matching sketch -->
+          <div class="wireframe-box">
+            <span class="wireframe-label">DAG 节点局部拓扑视图</span>
+          </div>
+
+          <!-- Gate Card -->
+          <div class="gate-decision-box" id="gateCard">
+            <div class="gate-title">⚠️ 人类专家门禁决策 (Human Gate)</div>
+            <div class="gate-desc">强门禁节点执行完毕，系统已完成自检与脱敏。请核验无误后予以批准放行。</div>
+            <div class="gate-actions">
+              <button class="btn-gate reject" onclick="toast('已记录打回批注并注入协调员')">批注打回</button>
+              <button class="btn-gate pass" onclick="approveGate()">✓ 批准放行 (Pass)</button>
+            </div>
+          </div>
+
+          <!-- TTY Output Box -->
+          <div class="insp-card">
+            <div class="insp-card-title">工位现场输出 (Live TTY)</div>
+            <div class="tty-box">
+              $ herdr pane attach w1:opencode<br>
+              [Agent] Task #2 implementation in progress...<br>
+              [Agent] 44px Coaxial Baseline verified: 0 jumps.<br>
+              [Agent] Zero dark background detected. Pure light.
+            </div>
+          </div>
+        </div>
+      </aside>
+    </div>
+
+    <!-- 5. LIGHT BOTTOM BAR (28px fixed) -->
+    <footer class="light-bottom-bar">
+      <div class="bottom-status-left">
+        <div class="bottom-indicator">
+          <span class="indicator-pip"></span>
+          <span>Controller 正常调度</span>
+        </div>
+        <span class="bottom-ticker" id="bottomTicker">工作流: 统一待办工作台与登录重构 · 阶段: 实现 · 分支: candidate/0929</span>
+      </div>
+
+      <div class="bottom-status-right">
+        <span>活跃执行者: <b style="color:var(--text-main)">3</b></span>
+        <span>轮询延迟: <b style="color:var(--text-main)">8ms</b></span>
+        <span class="bottom-link" onclick="toast('滑出白盒终端抽屉')">▲ 底层现场</span>
+      </div>
+    </footer>
+  </div>
+
+  <div id="toast" style="position:fixed;bottom:40px;left:50%;transform:translateX(-50%);background:#16171b;color:#fff;padding:8px 16px;border-radius:6px;font-size:12px;display:none;z-index:999"></div>
+
+  <script>
+    const mockWorkflows = [
+      { id: 'wf-01', title: '统一待办工作台与登录重构', branch: 'candidate/0929', router: 'auto (动态负载)', status: 'running' },
+      { id: 'wf-02', title: '支付中心对接与结算流', branch: 'candidate/pay-v2', router: 'codex (精准交付)', status: 'decision' },
+      { id: 'wf-03', title: '审计日志与链路追踪', branch: 'fix/audit-telemetry', router: 'claude (重构专家)', status: 'blocked' },
+      { id: 'wf-04', title: '月度运维分析报表生成', branch: 'feat/report-cron', router: 'system (定时任务)', status: 'completed' }
+    ];
+
+    let state = {
+      sidebarCollapsed: false,
+      openTabIds: ['wf-01', 'wf-02'],
+      activeWfId: 'wf-01'
+    };
+
+    function toast(msg) {
+      const t = document.getElementById('toast');
+      t.textContent = msg;
+      t.style.display = 'block';
+      setTimeout(() => { t.style.display = 'none'; }, 2400);
+    }
+
+    function toggleSidebar() {
+      state.sidebarCollapsed = !state.sidebarCollapsed;
+      const sb = document.getElementById('sidebar');
+      const expandBtn = document.getElementById('btnExpandSidebar');
+      if (state.sidebarCollapsed) {
+        sb.classList.add('collapsed');
+        expandBtn.classList.add('visible');
+        toast('侧边栏已收起 (⌘B)');
+      } else {
+        sb.classList.remove('collapsed');
+        expandBtn.classList.remove('visible');
+        toast('侧边栏已展开 (⌘B)');
+      }
+    }
+
+    document.addEventListener('keydown', (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'b') {
+        e.preventDefault();
+        toggleSidebar();
+      }
+    });
+
+    function renderTabs() {
+      const container = document.getElementById('wfTabsList');
+      container.innerHTML = state.openTabIds.map(id => {
+        const wf = mockWorkflows.find(w => w.id === id);
+        if (!wf) return '';
+        const isActive = id === state.activeWfId;
+        const badge = wf.status === 'decision' ? '<span class="tab-badge">! 1</span>' : '';
+        return `
+          <div class="wf-tab ${isActive ? 'active' : ''}" onclick="switchWorkflow('${wf.id}')">
+            <span class="status-dot ${wf.status}"></span>
+            <span class="tab-title">${wf.title}</span>
+            ${badge}
+            <span class="tab-close" onclick="closeTab('${wf.id}', event)" title="关闭页签">×</span>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function switchWorkflow(id) {
+      state.activeWfId = id;
+      if (!state.openTabIds.includes(id)) {
+        state.openTabIds.push(id);
+      }
+      renderTabs();
+      updateSidebarActiveItem();
+      const wf = mockWorkflows.find(w => w.id === id);
+      if (wf) {
+        document.getElementById('metaBranch').textContent = wf.branch;
+        document.getElementById('metaRouter').textContent = wf.router;
+        document.getElementById('bottomTicker').textContent = `工作流: ${wf.title} · 状态: ${wf.status} · 分支: ${wf.branch}`;
+        toast(`已切换至工作流: ${wf.title}`);
+      }
+    }
+
+    function openWorkflowTab(id) {
+      if (!state.openTabIds.includes(id)) {
+        state.openTabIds.push(id);
+      }
+      switchWorkflow(id);
+    }
+
+    function closeTab(id, e) {
+      e.stopPropagation();
+      const idx = state.openTabIds.indexOf(id);
+      if (idx === -1) return;
+      state.openTabIds.splice(idx, 1);
+      if (state.activeWfId === id) {
+        if (state.openTabIds.length > 0) {
+          const nextIdx = Math.min(idx, state.openTabIds.length - 1);
+          switchWorkflow(state.openTabIds[nextIdx]);
+        } else {
+          state.activeWfId = null;
+          renderTabs();
+          toast('所有工作流页签已关闭');
+        }
+      } else {
+        renderTabs();
+      }
+    }
+
+    function updateSidebarActiveItem() {
+      document.querySelectorAll('.sidebar-item').forEach(el => {
+        el.classList.remove('active');
+      });
+    }
+
+    function selectNode(type) {
+      document.querySelectorAll('.flow-node-card').forEach(c => c.classList.remove('selected'));
+      const card = event.currentTarget;
+      card.classList.add('selected');
+      const titleEl = document.getElementById('inspPropTitle');
+      const idEl = document.getElementById('inspNodeId');
+      const gateCard = document.getElementById('gateCard');
+      if (type === 'req') {
+        titleEl.textContent = '实施规划与协议';
+        idEl.textContent = 'node_id: req';
+        gateCard.style.display = 'none';
+      } else if (type === 'impl') {
+        titleEl.textContent = '核心代码实现';
+        idEl.textContent = 'node_id: impl';
+        gateCard.style.display = 'none';
+      } else if (type === 'gate') {
+        titleEl.textContent = '质量与风控门禁';
+        idEl.textContent = 'node_id: gate';
+        gateCard.style.display = 'flex';
+      }
+    }
+
+    function approveGate() {
+      toast('✓ 专家门禁批准放行！正在向下一阶段推进…');
+      const gateCard = document.getElementById('gateCard');
+      gateCard.style.opacity = '0.5';
+      setTimeout(() => {
+        gateCard.style.display = 'none';
+        gateCard.style.opacity = '1';
+      }, 1200);
+    }
+
+    renderTabs();
+  </script>
+</body>
+</html>
