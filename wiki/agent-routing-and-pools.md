@@ -252,3 +252,20 @@ Evidence:
 - `herdr/canary_router.py#plan_canary`（只消费 `effective_percentage`）
 - `tests/test_rollout_policy.py`
 - `docs/architecture/adaptive-router-rollout.md`
+
+
+## 节点资源边界（2026-10-02）
+
+原 `max_agents` 只决定静态/动态工位，不限制累计派发；先前把它写成配额的文档不符合代码。新配置拆成 `agent_policy.max_concurrency`（pending/活跃硬上限）和节点 `max_tasks_per_node`（全部历史硬配额）。软件开发模板采用累计 2/2/12/4/4/1。旧配置通过累计阈值确认与审计兼容，不自动改写。
+
+实际入口是 `herdr-task launch` → 工作流文件锁 → `node_capacity` → 路由 → Worker → StateStore。锁键绑定数据库与 workflow，与 caller source/cwd 无关。替换仍需要空闲槽位，不预扣尚未退役的旧任务；所有历史 task_id 都参与累计计数。
+
+`herdr-task panes` 与 workflow graph 复用纯统计函数；Console 展示持久引用数与超限状态。身份不明的引用不作为关闭授权。详见 [[task-lifecycle]] 与 CLI 参考。
+
+回归：`tests/test_node_capacity.py` 覆盖独立进程交错、审计失败拒绝、硬配额及真实 CLI→数据库读取；`tests/test_pane_lifecycle_capacity.py` 覆盖归档与身份保护。
+
+Evidence:
+- `herdr/node_capacity.py#node_usage`
+- `bin/herdr-task#launch_task` / `#_check_launch_capacity` / `#cmd_panes`
+- `herdr/task_resources.py#workflow_launch_lock`
+- `tests/test_node_capacity.py`

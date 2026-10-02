@@ -8,6 +8,7 @@ No I/O, no DOM, no scheduler mutation. Reused by console / API / future UIs.
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
+from .node_capacity import node_usage
 
 COMPLETED_LIKE = {"completed", "committed", "integrated", "cleanup_ready", "cleaned"}
 WORKING_LIKE = {"working", "dispatched", "pending", "agent_done"}
@@ -203,6 +204,7 @@ def workflow_graph_projection(
                 "depends_on": depends_on,
                 "purpose": purpose,
                 "status": status,
+                "resource_usage": node_usage(n, tasks or [], (workflow or {}).get("workflow_id")),
                 "task_count": len(live),
                 "active_task_count": active_count,
                 "completed_task_count": completed,

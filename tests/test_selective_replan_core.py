@@ -1019,6 +1019,9 @@ class SelectiveReplacementLaunchBaselineTest(unittest.TestCase):
             "project_root": str(self.repo), "base_branch": "main",
             "coordinator_pane_id": "1:1", "workflow_file": "wf.yaml",
         }
+        config_path = self.root / "workflow.json"
+        config_path.write_text(json.dumps({"nodes": [{"id": "implementation"}]}))
+        project["workflow_file"] = str(config_path)
         with unittest.mock.patch.object(
                 task_bin, "project_for_workflow", return_value=project), \
             unittest.mock.patch.object(
@@ -1055,6 +1058,97 @@ class SelectiveReplacementLaunchBaselineTest(unittest.TestCase):
         self.assertEqual(
             events[0]["payload"]["failure_code"],
             "replacement_baseline_mismatch")
+        reset_state_store()
+
+
+    def test_launch_distinct_run_replacement_registers_before_retiring(self):
+        from herdr.state_store import get_state_store, reset_state_store
+        self._git("checkout", "-q", "-b", "candidate")
+        aaa = self._git("rev-parse", "HEAD").stdout.strip()
+        origin = self.root / "origin.git"
+        subprocess.run(["git", "init", "--bare", str(origin)],
+                       check=True, capture_output=True)
+        self._git("remote", "add", "origin", str(origin))
+        self._git("push", "origin", "candidate")
+        store = get_state_store(Path(os.environ["HERDR_STATE_DB"]))
+        store.save_workflow({"workflow_id": WF, "status": "running"})
+        store.save_task({"task_id": "old", "workflow_id": WF, "node": "implementation",
+                         "status": "working", "run_id": "old-run"})
+        task_bin = self._task_mod
+        delivered = []
+        def dispatch(task_id, prompt):
+            self.assertIsNotNone(store.get_task(task_id))
+            self.assertEqual(store.get_task("old")["status"], "working")
+            delivered.append(task_id)
+        worker_payload = {
+            "clone": str(self.root / "clone-x"),
+            "branch": "candidate",
+            "baseline_commit": aaa,
+            "baseline_untracked": [],
+            "baseline_fingerprint": {"tracked": {}, "untracked": {}},
+            "onto_branch": "candidate",
+            "pane_id": "pane-1",
+            "pane_source": "dynamic",
+            "agent": "opencode",
+            "agent_name": "x",
+            "agent_session_id": "s",
+        }
+        real_run = subprocess.run
+
+        def fake_run(cmd, **kwargs):
+            argv = [str(c) for c in (cmd or [])]
+            if argv and argv[0] == "git":
+                # Native source identity; only the external Worker response is replaced.
+                return real_run(cmd, **kwargs)
+            if argv and str(argv[0]).endswith("herdr-worker.py"):
+                return subprocess.CompletedProcess(
+                    cmd, 0,
+                    "ok\nHERDR_WORKER_RESULT=" + json.dumps(worker_payload), "")
+            return real_run(cmd, **kwargs)
+
+        args = self._ns(
+            task_id="wf-srp-impl-B-r2", workflow_id=WF, run_id="run-1",
+            node="implementation", stage="implementation",
+            workspace=None, pane=None, agent="auto", clone=None,
+            integration_mode="git", source=str(self.repo),
+            goal="fix B", acceptance=["AC"], onto="candidate",
+            candidate_sha=aaa, task_type="feat", prompt="fix",
+            supersedes="old", supersede_reason="worker cannot continue",
+        )
+        project = {
+            "project_id": "p1", "project_name": "t",
+            "project_root": str(self.repo), "base_branch": "main",
+            "coordinator_pane_id": "1:1", "workflow_file": "wf.yaml",
+        }
+        config_path = self.root / "workflow.json"
+        config_path.write_text(json.dumps({"nodes": [{"id": "implementation"}]}))
+        project["workflow_file"] = str(config_path)
+        with unittest.mock.patch.object(
+                task_bin, "project_for_workflow", return_value=project), \
+            unittest.mock.patch.object(
+                task_bin, "choose_agent", return_value="opencode"), \
+            unittest.mock.patch.object(
+                task_bin, "ensure_stage_topology", return_value={
+                    "workspace_id": "ws", "anchor_pane_id": "anchor",
+                    "tab_id": "tab", "node_label": "impl",
+                    "stage_label": "impl"}), \
+            unittest.mock.patch.object(
+                task_bin, "acquire_pane_for_task", return_value=None), \
+            unittest.mock.patch.object(
+                task_bin.subprocess, "run", side_effect=fake_run), \
+            unittest.mock.patch.object(
+                task_bin, "_reclaim_unregistered_launch_resources") as reclaim, \
+            unittest.mock.patch.object(
+                task_bin, "auto_init_task_loop",
+                return_value=None), \
+            unittest.mock.patch.object(task_bin, "dispatch_task", side_effect=dispatch):
+            task_bin._launch_task(args)
+        self.assertEqual(delivered, ["wf-srp-impl-B-r2"])
+        self.assertEqual(store.get_task("old")["status"], "superseded")
+        self.assertEqual(store.get_task("old")["superseded_by"], "wf-srp-impl-B-r2")
+        self.assertEqual(store.get_task("old")["run_id"], "old-run")
+        self.assertEqual(store.get_task("wf-srp-impl-B-r2")["run_id"], "run-1")
+        reclaim.assert_not_called()
         reset_state_store()
 
 

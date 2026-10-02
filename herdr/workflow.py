@@ -343,6 +343,8 @@ def _normalize_workflow_body(workflow: Dict[str, Any]) -> Dict[str, Any]:
                 "rules": list(node.get("rules") or []),
                 "gate": dict(node.get("gate") or {}),
             }
+            if "max_tasks_per_node" in node:
+                norm_node["max_tasks_per_node"] = node["max_tasks_per_node"]
             if "required_task_ids" in node:
                 norm_node["required_task_ids"] = node["required_task_ids"]
             if "tab_id" in node:
@@ -416,6 +418,8 @@ def _normalize_workflow_body(workflow: Dict[str, Any]) -> Dict[str, Any]:
                 "rules": list(policy.get("rules") or []),
                 "gate": dict(policy.get("gate") or {}),
             }
+            if "max_tasks_per_node" in policy:
+                norm_node["max_tasks_per_node"] = policy["max_tasks_per_node"]
             if tab_id:
                 norm_node["tab_id"] = tab_id
             if anchor_pane_id:

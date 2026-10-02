@@ -488,3 +488,17 @@ C13b：已交付依赖省略任务分支onto时，test/review仍须带有可证�
 
 
 C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后完整全量2871 passed、154 subtests passed、2 skipped（隔离HOME无LaunchAgent），0 failed，454.85s。两项本机只读plist检查另行2 passed（0.07s）。compileall、三入口CLI AST、diff-check通过；独立最终只读复审组合阻断闭合，未自行重跑全量。真实Agent/Worker启动、业务E2E及开放卡未因此验收。
+
+
+## 归档资源与返工（2026-10-02）
+
+状态归档与工位释放分离。Kernel 在带工位引用的归档转换内记录 `pane_lifecycle=orphaned`；`herdr-task reap` 默认为预览，显式 apply 才验证实例身份并关闭动态私有工位。预建工位、锚点、协调器、共享活跃引用与未知身份均保留，clone 不参与回收。
+
+review blocked 的可继续任务默认 `rework`，沿 CLI 的身份验证/CAS/投递链复用 task/run/pane；投递失败持久化 pending，Controller 同一门禁 request_id 重试幂等。选择性返工仅重做被点名任务，后续扫描不得再次 supersede 已 rework 的目标。完成/集成等历史终态保持原候选契约，确需新执行时使用带理由的替换，并消耗累计配额。
+
+Evidence:
+- `herdr/kernel.py#transition_task`
+- `herdr/task_resources.py#reap_task_pane`
+- `bin/herdr-task#cmd_rework`
+- `services/herdr-controller.py#_rework_legacy_retry` / `#_preserve_same_gate_task`
+- `tests/test_pane_lifecycle_capacity.py`

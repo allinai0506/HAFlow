@@ -150,6 +150,11 @@ def transition_task(
         current = None
     # RuntimeState follows the task transition inside the same atomic write:
     # record-only, never influences the transition outcome itself.
+    from .archive import ARCHIVED_STATUSES
+    from .node_capacity import pane_reference
+    if current and to_status in ARCHIVED_STATUSES and pane_reference(current):
+        meta.setdefault("pane_lifecycle", "orphaned")
+        meta.setdefault("pane_orphan_reason", to_status)
     if "runtime" not in meta:
         if current is not None:
             updated_runtime = runtime_state.transition_runtime(current, to_status)

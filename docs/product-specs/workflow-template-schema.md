@@ -79,7 +79,10 @@ stage advance 事件头部的 `base_branch` 字段获取，controller 对 rules
 | `capabilities` | `List[string]`| 否 | `[]` | 该节点所需的工具能力清单（如 `web_search`、`data_extraction`、`analysis`）。 |
 | `permissions` | `List[string]`| 否 | `["read_write"]` | 该节点的权限安全边界，可选：`read_only`, `read_write`, `require_approval`, `admin`。 |
 | `min_agents` | `integer` | 否 | `1` | 允许派发的最小 Agent 数量。 |
-| `max_agents` | `integer` | 否 | `1` | 允许派发的最大并发 Agent 数量。 |
+| `max_concurrency` | `integer` | 否 | 未设置 | 同一节点同时处于 pending 或活跃状态的 Task 硬上限；launch 在跨进程工作流锁内校验。 |
+| `max_agents` | `integer` | 否 | `1` | 已弃用的派发模式开关：1 且非 parallel 使用静态工位，其他值使用动态工位。旧配置超累计阈值需要 `--ack-overflow` 并审计；它不是历史任务硬配额。 |
+
+节点级 `max_tasks_per_node` 是正整数，限制该 workflow/node 的累计 Task 数，包含失败、已完成和 superseded 任务。rework 不新增 Task；替换仍计数。硬上限不能用 `--ack-overflow` 绕过。新字段优先于旧字段，存量 workflow 不自动迁移。
 
 ---
 

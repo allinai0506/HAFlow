@@ -1680,3 +1680,9 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
   - P1 数字轴等宽：为 7 大数值/计数/标识选择器（`.metric b`, `.nav-count`, `.filter-cnt`, `.badge-pill`, `#flowSummary b`, `.task-id`, `.task-drawer-id`）注入 `ui-monospace` 与 `font-variant-numeric: tabular-nums`，彻底解决数据动态更新时的水平跳动。
   - P2 间距裸值就近吸附：依据 `lessons-learned.md #10` 属性级锚定规范，严格在 `(padding|margin|gap)` 声明内就近吸附（`5px → 4px`、`6px/7px/9px → 8px`、`10px → 8px 或 12px`、`11px → 12px`、`14px → 16px`），未误伤任何 `font-size`、`border-radius` 或 `line-height` 等非间距排版属性；196 处间距声明经 `ai-slop-cleaner` 模式 B 瘦身化简，违规裸值清零。
   - 验收证据：`pytest tests/test_console*.py` 全量 214 passed；`pytest tests/test_console_frontend_syntax.py` 15 passed（`node -c` 校验干净）；`compileall` 零错误，`git diff --check` 零警告；两轮独立 Reviewer 子代理（google-code-review）审查通过，判定 MERGE_READY。
+
+
+- 2026-10-02 任务与工位 | 并发开关与累计配额语义拆分
+  - 新增 max_concurrency / max_tasks_per_node、旧字段显式确认审计、panes 与 Controller 资源计数。
+  - 归档标记 orphan，身份验证 reap；可继续任务默认同 task/pane rework，终态替换需理由并计数。
+  - 更新 routing、lifecycle、Schema 与 CLI 参考；验收结果以本轮 sandbox 验证记录为准，不代表已部署。

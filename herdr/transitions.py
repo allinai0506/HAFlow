@@ -20,7 +20,7 @@ TASK_TRANSITIONS: Dict[str, Set[str]] = {
     "pending": {"dispatched", "failed"},
     "dispatched": {"working", "blocked", "agent_done", "paused", "failed", "superseded", "interrupted"},
     "working": {"blocked", "agent_done", "rework", "paused", "failed", "superseded", "interrupted"},
-    "blocked": {"working", "agent_done", "paused", "failed", "superseded", "interrupted"},
+    "blocked": {"rework", "working", "agent_done", "paused", "failed", "superseded", "interrupted"},
     "paused": {"working", "rework", "agent_done", "failed", "superseded", "interrupted"},
     "agent_done": {"completed", "rework", "failed", "superseded", "interrupted"},
     "rework": {"working", "blocked", "agent_done", "paused", "failed", "superseded", "interrupted"},

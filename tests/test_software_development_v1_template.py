@@ -1,10 +1,11 @@
 import unittest
+from pathlib import Path
 from herdr.workflow import load_template, validate_workflow_dag
 
 
 class TestSoftwareDevelopmentV1Template(unittest.TestCase):
     def setUp(self):
-        self.tmpl = load_template("software-development-v1")
+        self.tmpl = load_template(str(Path(__file__).resolve().parents[1] / "workflow_templates/software-development-v1.yaml"))
         self.nodes = self.tmpl["nodes"]
         self.node_map = {n["id"]: n for n in self.nodes}
 
@@ -29,7 +30,7 @@ class TestSoftwareDevelopmentV1Template(unittest.TestCase):
     def test_requirements_dual_adversarial_spec(self):
         node = self.node_map["requirements"]
         policy = node.get("agent_policy", {})
-        self.assertEqual(policy.get("max_agents"), 2)
+        self.assertEqual(policy.get("max_concurrency"), 2)
         self.assertTrue(node.get("parallel"))
 
         roles = policy.get("roles", [])
@@ -43,7 +44,7 @@ class TestSoftwareDevelopmentV1Template(unittest.TestCase):
     def test_plan_dual_adversarial_spec(self):
         node = self.node_map["plan"]
         policy = node.get("agent_policy", {})
-        self.assertEqual(policy.get("max_agents"), 2)
+        self.assertEqual(policy.get("max_concurrency"), 2)
         self.assertTrue(node.get("parallel"))
 
         roles = policy.get("roles", [])
@@ -57,7 +58,7 @@ class TestSoftwareDevelopmentV1Template(unittest.TestCase):
     def test_implementation_adaptive_parallel_spec(self):
         node = self.node_map["implementation"]
         policy = node.get("agent_policy", {})
-        self.assertEqual(policy.get("max_agents"), 3)
+        self.assertEqual(policy.get("max_concurrency"), 3)
         self.assertTrue(node.get("parallel"))
 
         rules_text = " ".join(node.get("rules", []))
@@ -66,21 +67,21 @@ class TestSoftwareDevelopmentV1Template(unittest.TestCase):
     def test_test_stage_exclusion_and_single_pane(self):
         node = self.node_map["test"]
         policy = node.get("agent_policy", {})
-        self.assertEqual(policy.get("max_agents"), 1)
+        self.assertEqual(policy.get("max_concurrency"), 1)
         self.assertFalse(node.get("parallel"))
         self.assertEqual(policy.get("exclude_stage_agents"), ["implementation"])
 
     def test_review_stage_exclusion_and_single_pane(self):
         node = self.node_map["review"]
         policy = node.get("agent_policy", {})
-        self.assertEqual(policy.get("max_agents"), 1)
+        self.assertEqual(policy.get("max_concurrency"), 1)
         self.assertFalse(node.get("parallel"))
         self.assertEqual(policy.get("exclude_stage_agents"), ["implementation"])
 
     def test_wrapup_stage_exclusion_and_single_pane(self):
         node = self.node_map["wrapup"]
         policy = node.get("agent_policy", {})
-        self.assertEqual(policy.get("max_agents"), 1)
+        self.assertEqual(policy.get("max_concurrency"), 1)
         self.assertFalse(node.get("parallel"))
         self.assertEqual(policy.get("exclude_stage_agents"), ["implementation"])
 
@@ -98,3 +99,12 @@ class TestSoftwareDevelopmentV1Template(unittest.TestCase):
         self.assertIn("PR URL", rules)
         # 六步执行规则的未合入分支必须携带 PR URL 指引
         self.assertIn("已建 PR 但未合入", rules)
+
+
+class TestNodeBudgets(unittest.TestCase):
+    def test_bundled_budgets_survive_normalization(self):
+        from pathlib import Path
+        template = load_template(str(Path(__file__).resolve().parents[1] / 'workflow_templates/software-development-v1.yaml'))
+        self.assertEqual({n['id']: n['max_tasks_per_node'] for n in template['nodes']},
+                         {'requirements': 2, 'plan': 2, 'implementation': 12,
+                          'test': 4, 'review': 4, 'wrapup': 1})

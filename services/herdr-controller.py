@@ -1069,9 +1069,69 @@ class SelectiveInvalidationResult(list):
         return obj
 
 
-def _invalidate_single_task(task_id, gate_node_id):
+REWORKABLE_STATUSES = {"blocked", "agent_done", "working", "rework", "paused", "interrupted"}
+
+
+def _rework_retry_task(task, gate_node_id):
+    """Use the CLI ownership/CAS/transport contract; failure retains the Task."""
+    gate_tasks = [t for t in load_tasks() if t.get("workflow_id") == task.get("workflow_id")
+                  and (t.get("node") or t.get("stage")) in gate_node_id.split("+")
+                  and t.get("stage_verdict") == "blocked"]
+    identity = sorted((t.get("task_id", ""), t.get("version", 0),
+                       t.get("stage_verdict_note") or t.get("note") or "") for t in gate_tasks)
+    token = hashlib.sha256(json.dumps(identity, ensure_ascii=False).encode()).hexdigest()[:20]
+    request_id = f"fix-loop:{gate_node_id}:{task['task_id']}:{token}"
+    if task.get("rework_delivery") == "pending" and str(task.get("rework_request_id") or "").startswith(f"fix-loop:{gate_node_id}:"):
+        request_id = task["rework_request_id"]
+    details = "\n".join(f"{t.get('task_id')}: {t.get('stage_verdict_note') or t.get('note') or '读取门禁输出'}"
+                        for t in gate_tasks)
+    result = subprocess.run(
+        [TASK_MANAGER, "rework", task["task_id"], "--request-id", request_id,
+         "--reason", f"fix-loop: gate {gate_node_id} blocked",
+         "--prompt", f"就地修复 gate {gate_node_id} 的阻断项，保留 Task 和 Pane，重新自测。\n{details}"],
+        text=True, capture_output=True, timeout=30,
+    )
+    return result.returncode == 0, result.stderr.strip() or result.stdout.strip()
+
+
+def _preserve_same_gate_task(task, retry_node, gate_ids):
+    return (retry_node in gate_ids
+            and (task.get("node") or task.get("stage")) == retry_node
+            and task.get("status") in REWORKABLE_STATUSES
+            and task.get("stage_verdict") != "blocked"
+            and task.get("rework_delivery") != "pending")
+
+
+def _rework_legacy_retry(workflow_id, retry_node, gate_node_id):
+    if not retry_node:
+        return []
+    reused = []
+    for task in load_tasks():
+        if _preserve_same_gate_task(task, retry_node, gate_node_id.split("+")):
+            continue
+        if (task.get("workflow_id") == workflow_id
+                and (task.get("node") or task.get("stage")) == retry_node
+                and task.get("status") in REWORKABLE_STATUSES):
+            try:
+                ok, error = _rework_retry_task(task, gate_node_id)
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                ok, error = False, str(exc)
+            if not ok:
+                print(f"[FIX LOOP REWORK DEFERRED] {task['task_id']}: {error}")
+                return None
+            reused.append(task["task_id"])
+    return reused
+
+
+def _invalidate_single_task(task_id, gate_node_id, reuse=False):
     """finalize(如需)+supersede 单个任务,返回 (ok, error)。"""
-    status = (get_task(task_id) or {}).get("status")
+    task = get_task(task_id) or {}
+    status = task.get("status")
+    if reuse and status in REWORKABLE_STATUSES:
+        try:
+            return _rework_retry_task(task, gate_node_id)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return False, str(exc)
     if status in ("completed", "cleanup_ready"):
         result = subprocess.run(
             [TASK_MANAGER, "finalize", task_id],
@@ -1154,6 +1214,12 @@ def invalidate_for_fix_loop(workflow_id, gate_node_id, workflow_cfg, retry_node=
 
     # P1-1: selective 目标两阶段提交。阶段一先处理 retry_node 点名目标;
     # 任一目标 pending 即返回,不碰门禁/下游(门禁仍 blocked,下轮可重试)。
+    reused = []
+    if selective_targets is None:
+        reused = _rework_legacy_retry(workflow_id, retry_node, gate_node_id)
+        if reused is None:
+            return []
+
     if selective_targets is not None and retry_node:
         ordered_targets = sorted(selective_targets)
         applied: list = []
@@ -1174,7 +1240,7 @@ def invalidate_for_fix_loop(workflow_id, gate_node_id, workflow_cfg, retry_node=
                 # 崩溃前已作废:视为已落定,不重复 supersede。
                 applied.append(target_id)
                 continue
-            ok, err = _invalidate_single_task(target_id, gate_node_id)
+            ok, err = _invalidate_single_task(target_id, gate_node_id, reuse=True)
             if ok:
                 applied.append(target_id)
             else:
@@ -1206,10 +1272,10 @@ def invalidate_for_fix_loop(workflow_id, gate_node_id, workflow_cfg, retry_node=
                 failed=dict(outcome["failed"]),
             )
         # 阶段一全落定,进入阶段二:门禁/下游/中间节点(仍跳过 preserved)。
-        # 目标已全部 superseded,下方扫描会自然跳过它们(状态已变)。
+        # 目标已返工或归档，阶段二显式跳过，不能再次退役。
 
     supersedeable = FIX_LOOP_SUPERSEDEABLE
-    invalidated = []
+    invalidated = list(reused)
     invalidated_nodes = set()
 
     for task in load_tasks():
@@ -1225,7 +1291,9 @@ def invalidate_for_fix_loop(workflow_id, gate_node_id, workflow_cfg, retry_node=
         task_id = task["task_id"]
         task_node = task.get("node") or task.get("stage")
 
-        if status == "superseded":
+        if selective_targets is None and _preserve_same_gate_task(task, retry_node, [gate_node_id]):
+            continue
+        if task_id in reused or status == "superseded" or (selective_targets is not None and task_id in selective_targets):
             continue
 
         if (
@@ -2016,6 +2084,12 @@ def invalidate_for_merged_fix_loop(
             str(t).strip() for t in selective_target_task_ids if str(t).strip()
         }
 
+    reused = []
+    if selective_targets is None:
+        reused = _rework_legacy_retry(workflow_id, retry_node, "+".join(gate_ids))
+        if reused is None:
+            return []
+
     if selective_targets is not None and retry_node:
         ordered_targets = sorted(selective_targets)
         applied: list = []
@@ -2033,7 +2107,7 @@ def invalidate_for_merged_fix_loop(
             if record.get("status") == "superseded" or record.get("superseded_by"):
                 applied.append(target_id)
                 continue
-            ok, err = _invalidate_single_task(target_id, "+".join(gate_ids))
+            ok, err = _invalidate_single_task(target_id, "+".join(gate_ids), reuse=True)
             if ok:
                 applied.append(target_id)
             else:
@@ -2063,7 +2137,7 @@ def invalidate_for_merged_fix_loop(
                 failed=dict(outcome["failed"]),
             )
 
-    invalidated = []
+    invalidated = list(reused)
     invalidated_nodes = set()
     gate_id_set = set(gate_ids)
     for task in load_tasks():
@@ -2074,7 +2148,9 @@ def invalidate_for_merged_fix_loop(
         status = task.get("status")
         task_id = task["task_id"]
         task_node = task.get("node") or task.get("stage")
-        if status == "superseded":
+        if selective_targets is None and _preserve_same_gate_task(task, retry_node, gate_ids):
+            continue
+        if task_id in reused or status == "superseded" or (selective_targets is not None and task_id in selective_targets):
             continue
         if (
             selective_targets is not None
@@ -2519,7 +2595,7 @@ def handle_fix_loop(workflow_id, gate_node_id, gate_cfg, workflow_cfg):
         return
 
     # PR #110:选择性返工决策先于一切作废——先持久化事实,再定向作废;
-    # 决策为 legacy(None)时 invalidate 行为与历史逐字节一致。
+    # legacy(None) 优先继续原任务；精确候选终态保持历史替换契约。
     selective_ids, replan_plan = _resolve_selective_replan(
         workflow_id, gate_node_id, retry_node, workflow_cfg,
         blocked_gate_tasks, load_tasks(),
@@ -2549,7 +2625,7 @@ def handle_fix_loop(workflow_id, gate_node_id, gate_cfg, workflow_cfg):
 
     if selective_ids is not None:
         # 选择性作废了 retry_node 内部谱系:清除阶段推进闩,
-        # 下一轮 sweep 的 direct dispatch 只补派被作废谱系(-rN)。
+        # 下一轮 sweep 只补派已作废谱系；rework 目标保留原执行。
         clear_stage_advance(workflow_id, retry_node)
 
     loop_count = _bump_fix_loop_count(workflow_id, retry_node)
@@ -4179,7 +4255,8 @@ def try_direct_stage_advance(item):
         # [STAGE ADVANCE WAIT] coordinator=working。
         _redispatch_of = str(spec.get("redispatch_of") or "").strip()
         if _redispatch_of:
-            cmd += ["--supersedes", _redispatch_of]
+            cmd += ["--supersedes", _redispatch_of,
+                    "--supersede-reason", "controller redispatch after explicit invalidation"]
 
         if spec.get("candidate_sha"):
             cmd += ["--candidate-sha", spec["candidate_sha"]]
@@ -4741,6 +4818,7 @@ def redeliver_pending_fix_loop(workflow_id):
         if fix_loop_core.redelivery_handled(
             tasks, summary["retry_node"], episode.get("first_seen_at"),
             target_lineage_roots=summary.get("target_lineage_roots"),
+            rework_requests=summary.get("rework_requests"),
         ):
             attention_clear(key)
             print(
@@ -5267,8 +5345,8 @@ Agent 本轮执行已经结束。
       ~/HAFlow/bin/herdr-task set {task_id} completed --verdict blocked --note "<blocker 清单与修复指引>"
 
    C. 仅当当前任务自身未完成（如实现中途卡死、需在同一工位继续补全）：
-      ~/HAFlow/bin/herdr-task set {task_id} rework
-      然后使用 herdr agent prompt 继续下发指令。
+      ~/HAFlow/bin/herdr-task rework {task_id} --prompt "<本任务修复指引>"
+      保留同一 task_id 与原工位；不要 supersede + launch 扩增 Pane。
 
    D. 如果任务发生不可恢复的崩溃：
       ~/HAFlow/bin/herdr-task set {task_id} failed
@@ -6255,7 +6333,8 @@ loop_count: {loop_count}/{max_loops}
 Controller 已只作废被点名的谱系(共 {len(invalidated)} 个 Task,见 Task Registry),
 实现节点内其余任务保持原样、不重派。
 
-替代任务(如 <task>-r2)由 Controller 通过既有补派管线自动创建并派发,
+可继续的任务由 Controller 就地 rework，复用 Task 和 Pane；
+已终结任务的替代任务(如 <task>-r2)通过既有补派管线创建，记录理由并计入累计配额,
 你**不需要**派发任何 fix task。
 
 ⛔ 禁止:对 --stage {retry_node} 派发全量 fix task。
@@ -6351,7 +6430,9 @@ fix 完成后 DAG 将自动按 test → review → wrapup 顺序重新推进,旧
 Blocker 清单(blocked 结论与修复指引):
 {blockers_text}
 
-你现在只需派发修复 Task(禁止新建 workflow、禁止放弃本 workflow):
+默认继续 retry_node 的原 Task：Controller 已对可继续的任务执行 rework，复用原 Pane。
+请先检查 Task Registry；已有 rework 时等待修复完成，不再 launch。
+只有原任务已经终结、无法继续时，才按明确理由派发替代任务（计入累计配额）：
 
 ~/HAFlow/bin/herdr-task launch --workflow-id {workflow_id} --stage {retry_node} \\
   {onto_flag}--agent auto --task-type fix --integration-mode git \\
@@ -6361,7 +6442,8 @@ Blocker 清单(blocked 结论与修复指引):
   --prompt "<blocker 详情、修复范围与验证方式>"
 
 fix 产出必须落分支("--integration-mode git"),否则测试仍测旧候选而恒 blocked。
-如需再次修复,对旧 fix task 使用 --supersedes。
+如需再次修复，优先 herdr-task rework <task_id> --prompt "<阻断项>"。
+终结任务例外替换需 --supersedes <task_id> --supersede-reason "<无法继续的具体理由>"。
 派发完成后结束当前回合,后续推进交给 Controller。
 
 {docs_block}
@@ -6373,6 +6455,12 @@ fix 产出必须落分支("--integration-mode git"),否则测试仍测旧候选�
 def _handle_fix_loop_item(item):
     """门禁 blocked 的回流通知:作废已由 handle_fix_loop 原子完成,
     这里只负责把 blocker 清单与修复派发指引送到总指挥。"""
+    if "rework_requests" not in item:
+        affected = set(item.get("invalidated") or [])
+        item["rework_requests"] = {t["task_id"]: t["rework_request_id"] for t in load_tasks()
+                                  if t.get("workflow_id") == item["workflow_id"]
+                                  and t.get("task_id") in affected
+                                  and t.get("rework_request_id")}
     workflow_id = item["workflow_id"]
     coord_pane = coordinator_pane_for_workflow(workflow_id)
 

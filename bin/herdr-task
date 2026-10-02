@@ -2790,6 +2790,91 @@ def _validate_selective_replacement_baseline(args, candidate_sha, baseline_commi
     raise SystemExit(2)
 
 
+def _capacity_definition(project):
+    path = project.get("workflow_file")
+    if path:
+        config = json.loads(Path(path).expanduser().read_text(encoding="utf-8"))
+    else:
+        config = project.get("config") or project
+    return normalize_workflow(config)
+
+
+def _check_launch_capacity(args, project, tasks, node_id):
+    from herdr.node_capacity import node_usage, launch_capacity_error
+    try:
+        definition = _capacity_definition(project)
+        node = next((n for n in definition.get("nodes", [])
+                     if (n.get("id") or n.get("key")) == node_id), {"id": node_id})
+        usage = node_usage(node, tasks, args.workflow_id)
+        old_id = getattr(args, "supersedes", None)
+        old = next((t for t in tasks if t.get("task_id") == old_id), None) if old_id else None
+        if old_id and (not old or old.get("workflow_id") != args.workflow_id
+                       or (old.get("node") or old.get("stage")) != node_id):
+            raise ValueError("--supersedes must name an existing task in the same workflow/node")
+        if old_id and not str(getattr(args, "supersede_reason", "") or "").strip():
+            raise ValueError("Replacement requires --supersede-reason; prefer herdr-task rework")
+        error = launch_capacity_error(usage)
+        if error:
+            raise ValueError(error)
+        warning = usage["confirmation_threshold"]
+        overflow = warning is not None and usage["task_count"] + 1 > warning
+        if usage["legacy_max_agents"] is not None:
+            print("[DEPRECATED] max_agents is a legacy dispatch switch; migrate to "
+                  "max_concurrency and max_tasks_per_node")
+        if overflow:
+            print(f"[NODE OVERFLOW] node={node_id} cumulative tasks={usage['task_count']} "
+                  f"pane_refs={usage['pane_count']} legacy max_agents={warning}")
+            print("Existing task_ids: " + ", ".join(usage["task_ids"]))
+            if not getattr(args, "ack_overflow", False):
+                raise ValueError("Legacy cumulative threshold exceeded; use explicit --ack-overflow "
+                                 "(audited), or rework the existing task")
+            _get_store().record_event(
+                "node_overflow_acknowledged",
+                {**usage, "proposed_task_count": usage["task_count"] + 1},
+                workflow_id=args.workflow_id, node_id=node_id, task_id=args.task_id,
+                run_id=args.run_id, source="herdr-task",
+            )
+    except (OSError, RuntimeError, ValueError, TypeError) as exc:
+        print(f"[NODE CAPACITY REJECTED] {exc}; existing task_ids: "
+              + ", ".join(str(t.get("task_id")) for t in tasks
+                          if t.get("workflow_id") == args.workflow_id
+                          and (t.get("node") or t.get("stage")) == node_id))
+        sys.exit(2)
+
+
+def cmd_panes(args):
+    from herdr.node_capacity import node_usage
+    store = _get_store()
+    project = store.get_workflow(args.workflow_id)
+    if not project:
+        print(f"Workflow not found: {args.workflow_id}", file=sys.stderr)
+        sys.exit(2)
+    try:
+        definition = _capacity_definition(project)
+        tasks = store.list_tasks(workflow_id=args.workflow_id)
+        nodes = definition.get("nodes", [])
+        known = {n.get("id") or n.get("key") for n in nodes}
+        nodes = list(nodes) + [{"id": nid} for nid in sorted({
+            t.get("node") or t.get("stage") for t in tasks
+        } - known - {None})]
+        rows = [node_usage(n, tasks, args.workflow_id) for n in nodes]
+    except (OSError, ValueError, TypeError) as exc:
+        print(f"Pane usage unavailable: {exc}", file=sys.stderr)
+        sys.exit(2)
+    result = {"workflow_id": args.workflow_id, "nodes": rows,
+              "note": "pane counts are persisted references, not verified live panes"}
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False))
+    else:
+        print("NODE  TASKS  ACTIVE/MAX_CONCURRENCY  PANE_REFS  MAX_TASKS  OVERFLOW")
+        for row in rows:
+            print(f"{row['node']}  {row['task_count']}  "
+                  f"{row['active_task_count']}/{row['max_concurrency'] or 'unset'}  "
+                  f"{row['pane_count']}  {row['max_tasks_per_node'] or 'unset'}  "
+                  f"{'YES' if row['overflow'] else '-'}")
+        print(result["note"])
+
+
 def _launch_task(args):
     agent_policy = None
     raw_policy = getattr(args, "agent_policy", None)
@@ -2823,6 +2908,8 @@ def _launch_task(args):
     if not project:
         print(f"[WORKFLOW NOT FOUND] {args.workflow_id}; refusing launch")
         sys.exit(2)
+
+    _check_launch_capacity(args, project, data.get("tasks", []), node_id)
 
     exec_fields = execution_fields_from_workflow(project)
     try:
@@ -3364,6 +3451,11 @@ def _launch_task(args):
         args.task_id,
         args.prompt
     )
+    # Retire the previous Task only after the replacement was registered and
+    # delivered. Validation or worker startup failures retain its ownership.
+    if getattr(args, "supersedes", None):
+        supersede_task(args.supersedes, new_task_id=args.task_id,
+                       reason=args.supersede_reason, allow_new_run=True)
 
 def _apply_execution_identity(task, args):
     """Persist the caller's workflow execution identity on a launched Task.
@@ -4042,17 +4134,107 @@ def _with_git_operation_lock(*, include_source_repo=False):
 
 
 def launch_task(args):
-    """Serialize launch-time branch ownership check and task registration."""
+    """Serialize the workflow budget check through task registration across sources."""
+    from herdr.task_resources import workflow_launch_lock, NodeLaunchBusy
     source = getattr(args, "source", None)
-    if not source:
-        return _launch_task(args)
     try:
-        with GitOperationLock(source):
-            ensure_no_git_processes(source)
-            return _launch_task(args)
-    except (GitOperationBusyError, GitProcessActiveError) as exc:
-        print(f"[GIT BUSY] launch: {exc}")
+        with workflow_launch_lock(_get_store().db_path, args.workflow_id):
+            if not source:
+                return _launch_task(args)
+            with GitOperationLock(source):
+                ensure_no_git_processes(source)
+                return _launch_task(args)
+    except (GitOperationBusyError, GitProcessActiveError, NodeLaunchBusy) as exc:
+        print(f"[LAUNCH BUSY] {exc}")
         sys.exit(75)
+
+
+def cmd_reap(args):
+    from herdr.task_resources import reap_task_pane
+    from herdr.archive import ARCHIVED_STATUSES
+    store = _get_store()
+    if not store.get_workflow(args.workflow_id):
+        print(f"Workflow not found: {args.workflow_id}", file=sys.stderr)
+        sys.exit(2)
+    rows = []
+    for task in store.list_tasks(workflow_id=args.workflow_id):
+        if task.get("status") in ARCHIVED_STATUSES:
+            rows.append(reap_task_pane(
+                store, task["task_id"], apply=args.apply,
+                close=lambda pane: _herdr("pane", "close", pane).returncode == 0,
+            ))
+    print(json.dumps({"workflow_id": args.workflow_id, "apply": args.apply,
+                      "tasks": rows}, ensure_ascii=False))
+    if args.apply and any(r["action"] == "retained" for r in rows):
+        sys.exit(2)
+
+
+def cmd_rework(args):
+    from herdr.task_resources import owned_live_pane, workflow_launch_lock
+    from herdr.node_capacity import pane_reference
+    from herdr import kernel
+    store = _get_store()
+    task = store.get_task(args.task_id)
+    if not task:
+        print(f"Task not found: {args.task_id}")
+        sys.exit(2)
+    with workflow_launch_lock(store.db_path, task["workflow_id"]):
+        task = store.get_task(args.task_id)
+        if task["status"] not in {"blocked", "agent_done", "working", "rework", "paused", "interrupted"}:
+            print(f"Cannot rework task from {task['status']}; terminal results remain historical")
+            sys.exit(2)
+        request_id = getattr(args, "request_id", None)
+        if request_id and task.get("rework_request_id") == request_id and task.get("rework_delivery") == "delivered":
+            print(f"[REWORK NOOP] {args.task_id} request already delivered")
+            return
+        owned, reason = owned_live_pane(task)
+        if not owned:
+            print(f"Rework refused: pane ownership {reason}")
+            sys.exit(2)
+        prompt = args.prompt or task.get("rework_prompt") or "继续当前任务，就地修复评审问题并重新自测，不新建 Task。"
+        started_at = time.time()
+        result = kernel.transition_task(
+            args.task_id, "rework", reason=args.reason, source="herdr-task", store=store,
+            expected_status=task["status"], expected_version=task.get("version"),
+            metadata={"rework_prompt": prompt, "rework_delivery": "pending",
+                      "rework_request_id": request_id, "rework_started_at": started_at},
+        )
+        if not result.get("accepted", True):
+            print("Rework refused: task changed")
+            sys.exit(2)
+        # Failed transport leaves a durable pending intent; re-running rework
+        # retries it on the same Task/pane instead of launching another worker.
+        try:
+            sent = _herdr("agent", "prompt", str(pane_reference(task)), prompt)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            print(f"Rework delivery pending: {exc}")
+            sys.exit(2)
+        if sent.returncode != 0:
+            print("Rework delivery pending; retry herdr-task rework on the same task")
+            sys.exit(2)
+        # Clear only the verdict observed before delivery. A new Agent result
+        # or request written while the transport runs belongs to a newer epoch.
+        for _ in range(3):
+            current = store.get_task(args.task_id)
+            if (not current or current.get("rework_request_id") != request_id
+                    or current.get("rework_started_at") != started_at):
+                print("Rework delivered; request changed before receipt, retaining new result")
+                return
+            metadata = {"rework_delivery": "delivered"}
+            if current.get("version") == result.get("current_version"):
+                metadata.update(stage_verdict=None, stage_verdict_note=None)
+            receipt = kernel.transition_task(
+                args.task_id, current["status"], reason="rework_delivered",
+                source="herdr-task", store=store,
+                expected_status=current["status"], expected_version=current.get("version"),
+                metadata=metadata,
+            )
+            if receipt.get("accepted", True):
+                break
+        else:
+            print("Rework delivered; receipt pending due to concurrent changes")
+            sys.exit(2)
+        print(f"[REWORK] {args.task_id} pane={pane_reference(task)} reused")
 
 
 def _run_commit_index_command(task_id, clone, command):
@@ -5132,6 +5314,7 @@ def _herdr(*args):
         [binary, *args],
         text=True,
         capture_output=True,
+        timeout=20,
     )
 
 
@@ -5890,7 +6073,7 @@ def _autosave_clone_wip(task):
     return True
 
 
-def supersede_task(task_id, new_task_id=None, reason=None):
+def supersede_task(task_id, new_task_id=None, reason=None, allow_new_run=False):
     """Mark a task as superseded (replaced by another task or abandoned).
 
     Superseded tasks are excluded from node completion calculations,
@@ -5948,11 +6131,14 @@ def supersede_task(task_id, new_task_id=None, reason=None):
                     "belongs to another workflow"
                 )
                 sys.exit(2)
+            if allow_new_run and (task.get("node") or task.get("stage")) != (replacement.get("node") or replacement.get("stage")):
+                print("[SUPERSEDE REJECTED] replacement belongs to another node")
+                sys.exit(2)
             # 补派按设计就是新执行：controller 保留 --execution-id 并注明
             # "sibling launches keep distinct run_ids"，所以补挂必须允许
             # run 不同，否则存量断链永远补不上。首次作废仍要求同 run。
             if (
-                not relinking
+                not relinking and not allow_new_run
                 and task.get("run_id")
                 and replacement.get("run_id") != task.get("run_id")
             ):
@@ -6738,7 +6924,21 @@ def main():
         default=[]
     )
 
+    rework = sub.add_parser("rework", help="Continue a task on its existing owned pane")
+    rework.add_argument("task_id")
+    rework.add_argument("--prompt")
+    rework.add_argument("--reason", default="review rework")
+    rework.add_argument("--request-id", help="idempotent controller delivery token")
+    reap = sub.add_parser("reap", help="Inspect/reclaim archived dynamic panes with identity checks")
+    reap.add_argument("--workflow-id", required=True)
+    reap.add_argument("--apply", action="store_true", help="Close proven owned panes; default is read-only")
+    panes = sub.add_parser("panes", help="Show cumulative tasks, concurrency, and persisted pane references")
+    panes.add_argument("--workflow-id", required=True)
+    panes.add_argument("--json", action="store_true")
     launch = sub.add_parser("launch")
+    launch.add_argument("--ack-overflow", action="store_true",
+                        help="Acknowledge legacy cumulative overflow (audited); never bypasses hard budgets")
+    launch.add_argument("--supersede-reason", help="Explicit reason for replacement instead of same-task rework")
     launch.add_argument("--task-id", required=True)
     launch.add_argument("--workflow-id", required=True)
     launch.add_argument("--node", default=None, help="Workflow node ID")
@@ -7349,14 +7549,16 @@ def main():
         add_task(args)
 
     elif args.command == "launch":
-        # Atomically supersede the old task before launching the replacement.
-        if getattr(args, "supersedes", None):
-            supersede_task(
-                args.supersedes,
-                new_task_id=args.task_id,
-                reason="superseded by launch --supersedes"
-            )
         launch_task(args)
+
+    elif args.command == "rework":
+        cmd_rework(args)
+
+    elif args.command == "reap":
+        cmd_reap(args)
+
+    elif args.command == "panes":
+        cmd_panes(args)
 
     elif args.command == "dispatch":
         dispatch_task(

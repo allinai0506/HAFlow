@@ -86,7 +86,7 @@ nodes:
     agent_policy:
       preferred: [claude, opencode, codex]
       parallel: true
-      max_agents: 3
+      max_concurrency: 3
     required_outputs:
       - 标书完整章节文档
       - 技术方案说明

@@ -38,6 +38,7 @@ selective_replan:
 
 nodes:
   - id: requirements
+    max_tasks_per_node: 2
     label: 2需求分析
     node_type: agent
     depends_on: []
@@ -47,7 +48,7 @@ nodes:
     default_task_type: docs
     agent_policy:
       preferred: [claude, qodercli, opencode, codex, agy, pi, grok, kimi]
-      max_agents: 2
+      max_concurrency: 2
       roles:
         - name: executor
           label: 需求主起草与边界澄清
@@ -85,6 +86,7 @@ nodes:
       - 创建 Task 时默认使用 --agent auto，由 Agent Router 根据当前 node、task_type 和项目 Agent Pool 动态选择；只有存在明确理由或用户显式指定时才固定具体 Agent。
 
   - id: plan
+    max_tasks_per_node: 2
     label: 3计划
     node_type: agent
     depends_on: [requirements]
@@ -94,7 +96,7 @@ nodes:
     default_task_type: docs
     agent_policy:
       preferred: [claude, qodercli, codex, opencode, agy, pi, grok, kimi]
-      max_agents: 2
+      max_concurrency: 2
       roles:
         - name: executor
           label: 技术架构与解耦拆分
@@ -128,6 +130,7 @@ nodes:
       - 创建 Task 时默认使用 --agent auto，由 Agent Router 根据当前 node、task_type 和项目 Agent Pool 动态选择；只有存在明确理由或用户显式指定时才固定具体 Agent。
 
   - id: implementation
+    max_tasks_per_node: 12
     label: 4实现
     node_type: agent
     depends_on: [plan]
@@ -138,7 +141,7 @@ nodes:
     agent_policy:
       preferred: [opencode, codex, qodercli, agy, claude, pi, grok, kimi]
       parallel: true
-      max_agents: 3
+      max_concurrency: 3
     required_outputs:
       - 代码实现
       - 修改文件说明
@@ -153,6 +156,7 @@ nodes:
       - 创建 Task 时默认使用 --agent auto，由 Agent Router 根据当前 node、task_type 和项目 Agent Pool 动态选择；只有存在明确理由或用户显式指定时才固定具体 Agent。
 
   - id: test
+    max_tasks_per_node: 4
     label: 5测试
     node_type: agent
     depends_on: [implementation]
@@ -162,7 +166,7 @@ nodes:
     default_task_type: test
     agent_policy:
       preferred: [codex, opencode, qodercli, claude, agy, pi, grok, kimi]
-      max_agents: 1
+      max_concurrency: 1
       exclude_stage_agents: [implementation]
     required_outputs:
       - 测试执行记录
@@ -181,6 +185,7 @@ nodes:
       - 创建 Task 时默认使用 --agent auto，由 Agent Router 根据当前 node、task_type 和项目 Agent Pool 动态选择（自动排除实现阶段 Agent）；只有存在明确理由或用户显式指定时才固定具体 Agent。
 
   - id: review
+    max_tasks_per_node: 4
     label: 6评审
     node_type: agent
     depends_on: [implementation]
@@ -190,7 +195,7 @@ nodes:
     default_task_type: test
     agent_policy:
       preferred: [claude, codex, qodercli, opencode, agy, pi, grok, kimi]
-      max_agents: 1
+      max_concurrency: 1
       exclude_stage_agents: [implementation]
     required_outputs:
       - 代码规范审查结论
@@ -206,6 +211,7 @@ nodes:
       - 创建 Task 时默认使用 --agent auto，由 Agent Router 根据当前 node、task_type 和项目 Agent Pool 动态选择（自动排除实现阶段 Agent）；只有存在明确理由或用户显式指定时才固定具体 Agent。
 
   - id: wrapup
+    max_tasks_per_node: 1
     label: 7收尾
     node_type: agent
     depends_on: [test, review]
@@ -218,7 +224,7 @@ nodes:
     default_task_type: docs
     agent_policy:
       preferred: [claude, qodercli, opencode, codex, agy, pi, grok, kimi]
-      max_agents: 1
+      max_concurrency: 1
       exclude_stage_agents: [implementation]
     required_outputs:
       - 最终交付成果说明

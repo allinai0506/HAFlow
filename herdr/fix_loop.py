@@ -180,13 +180,14 @@ def redelivery_handled(
     retry_node: str,
     first_seen_at: Any,
     target_lineage_roots: Optional[List[str]] = None,
+    rework_requests: Optional[Dict[str, str]] = None,
 ) -> bool:
     """True when follow-up work for the retry node appeared after the note.
 
     Selective mode (PR #110, ``target_lineage_roots`` non-empty): a preserved
     task changing proves nothing about the targeted lineages, so handled
-    requires a genuine replacement (``-rN`` member created after the note)
-    for *every* targeted lineage root.
+    requires this event's delivered rework request or a genuine replacement
+    (``-rN`` member created after the note) for every targeted lineage root.
     """
     try:
         seen = float(first_seen_at or 0)
@@ -195,12 +196,23 @@ def redelivery_handled(
     if seen <= 0:
         return False
     roots = [str(r).strip() for r in (target_lineage_roots or []) if str(r).strip()]
+    requests = rework_requests or {}
+    delivered = {str(t.get("task_id")) for t in _node_tasks(tasks, retry_node)
+                 if requests.get(str(t.get("task_id"))) == t.get("rework_request_id")
+                 and requests.get(str(t.get("task_id")))
+                 and t.get("rework_delivery") == "delivered"
+                 and t.get("status") != "superseded"}
+    if requests and not roots and delivered == set(requests):
+        return True
     if roots and lineage_key is not None:
         for root in roots:
             replaced = False
             for task in _node_tasks(tasks, retry_node):
                 if _lineage_root_of(task) != root:
                     continue
+                if str(task.get("task_id")) in delivered:
+                    replaced = True
+                    break
                 if lineage_key(task.get("task_id"))[1] < 2:
                     continue
                 try:
@@ -249,6 +261,9 @@ def summarize_fix_loop_item(item: Dict[str, Any], budget: int = 2000) -> Dict[st
         "exhausted": bool((item or {}).get("exhausted")),
         "blockers": blockers,
     }
+    requests = (item or {}).get("rework_requests")
+    if isinstance(requests, dict) and requests:
+        summary["rework_requests"] = dict(requests)
     # PR #110: selective replan 的 target 谱系随通知一起持久化,
     # redelivery 判断据此保持 target-aware;legacy 事件不带这两个键。
     roots = [
