@@ -34,9 +34,10 @@ class TestConsoleShell(unittest.TestCase):
             'id="projects"',
             "新建工厂空间",
             "toggleSpaceMenu",
-            ">运转<",
-            ">当前空间<",
-            ">治理<",
+            ">空间工作流<",
+            ">空间资源与工位<",
+            ">项目治理与审计<",
+            "toggleSidebar",
             'data-nav="workbench"',
             'data-nav="dashboard"',
             'data-nav="ops"',
@@ -50,6 +51,7 @@ class TestConsoleShell(unittest.TestCase):
             "showArchive()",
         ):
             self.assertIn(token, self.html, token)
+        self.assertNotIn(">运转<", self.html)
 
     def test_topbar_is_breadcrumb_plus_workflow_actions(self):
         for token in (

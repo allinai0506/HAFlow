@@ -1,0 +1,2732 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HAFlow 控制台 · 标准 6 分区工作区架构原型 (Unified Multi-Tab Workspace)</title>
+  <style>
+    :root {
+      --bg-app: #ffffff;
+      --bg-sidebar: #fafafa;
+      --bg-canvas: #f7f8fa;
+      --bg-panel: #ffffff;
+      --bg-hover: #f3f4f6;
+      --bg-active: #f6eee8;
+
+      --border-light: #e6e8ee;
+      --border-subtle: #f0f1f4;
+      --border-focus: #5e6ad2;
+
+      --text-main: #16171b;
+      --text-sub: #5e636e;
+      --text-muted: #8b909a;
+
+      --primary: #5e6ad2;
+      --primary-hover: #4f5bc4;
+      --primary-light: #f0f2ff;
+
+      --success: #10b981;
+      --success-bg: #ecfdf5;
+      --success-border: #a7f3d0;
+
+      --warning: #f59e0b;
+      --warning-bg: #fffbeb;
+      --warning-border: #fde68a;
+
+      --danger: #ef4444;
+      --danger-bg: #fef2f2;
+      --danger-border: #fecaca;
+
+      --shadow-sm: 0 1px 2px rgba(18, 19, 22, 0.04);
+      --shadow-md: 0 4px 12px rgba(18, 19, 22, 0.08);
+      --shadow-pill: 0 1px 3px rgba(18, 19, 22, 0.06), 0 1px 2px rgba(18, 19, 22, 0.04);
+
+      --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", sans-serif;
+      --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: var(--font-sans);
+      font-size: 13px;
+      color: var(--text-main);
+      background: var(--bg-app);
+      height: 100vh;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      user-select: none;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    button { font: inherit; cursor: pointer; border: none; background: none; }
+    a { color: inherit; text-decoration: none; }
+
+    .tabular-nums, .tab-badge, .badge-num, .item-meta, .pill-meta b {
+      font-family: var(--font-mono);
+      font-variant-numeric: tabular-nums;
+    }
+
+    /* ---------------------------------------------------- */
+    /* 1. APP SHELL (Flex Column + Top Workspace + Bottom)  */
+    /* ---------------------------------------------------- */
+    .app-shell {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      position: relative;
+    }
+
+    .workspace-row {
+      flex: 1;
+      display: flex;
+      overflow: hidden;
+      min-height: 0;
+    }
+
+    /* ---------------------------------------------------- */
+    /* 2. LEFT RAIL (48px, Pure Light #ffffff)              */
+    /* ---------------------------------------------------- */
+    .left-rail {
+      width: 48px;
+      background: #ffffff;
+      border-right: 1px solid var(--border-light);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      flex-shrink: 0;
+      z-index: 25;
+    }
+
+    .rail-head {
+      height: 44px;
+      width: 48px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-bottom: 1px solid var(--border-light);
+      flex-shrink: 0;
+    }
+    .rail-brand {
+      width: 32px;
+      height: 32px;
+      border-radius: 8px;
+      background: #16171b;
+      color: #ffffff;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 800;
+      font-size: 13px;
+      cursor: pointer;
+    }
+
+    .rail-nav {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+      padding: 8px 0;
+    }
+    .rail-item {
+      width: 32px;
+      height: 32px;
+      margin: 4px 8px;
+      border-radius: 6px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--text-sub);
+      transition: all 0.12s ease;
+      position: relative;
+    }
+    .rail-item:hover {
+      background: var(--bg-hover);
+      color: var(--text-main);
+    }
+    .rail-item.active {
+      background: var(--primary-light);
+      color: var(--primary);
+    }
+    .rail-item.active::before {
+      content: "";
+      position: absolute;
+      left: -8px;
+      top: 6px;
+      bottom: 6px;
+      width: 3px;
+      background: var(--primary);
+      border-radius: 0 2px 2px 0;
+    }
+    .rail-badge-dot {
+      position: absolute;
+      top: 6px;
+      right: 6px;
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--danger);
+    }
+
+    .rail-foot {
+      padding: 8px 0 12px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+    }
+    .rail-avatar {
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      background: #ece7e2;
+      color: #6b4f3a;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 700;
+      font-size: 11px;
+      cursor: pointer;
+      border: 1px solid var(--border-light);
+    }
+
+    /* ---------------------------------------------------- */
+    /* 3. SIDEBAR (220px, Light #fafafa)                    */
+    /* ---------------------------------------------------- */
+    .sidebar {
+      width: 220px;
+      background: var(--bg-sidebar);
+      border-right: 1px solid var(--border-light);
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0;
+      transition: width 0.15s ease;
+      z-index: 20;
+      overflow: hidden;
+      white-space: nowrap;
+    }
+    .sidebar.collapsed {
+      width: 0;
+      border-right: none;
+    }
+
+    .sidebar-head {
+      height: 44px;
+      padding: 0 12px;
+      border-bottom: 1px solid var(--border-light);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: var(--bg-sidebar);
+      flex-shrink: 0;
+    }
+    .sidebar-title {
+      font-weight: 600;
+      font-size: 12px;
+      color: var(--text-main);
+    }
+    .btn-collapse-sidebar {
+      margin-left: auto;
+      width: 24px;
+      height: 24px;
+      border-radius: 4px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--text-muted);
+    }
+    .btn-collapse-sidebar:hover { background: var(--bg-hover); color: var(--text-main); }
+
+    .sidebar-scroll {
+      flex: 1;
+      overflow-y: auto;
+      padding: 12px 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    /* Zone 1: Space Selector Pill + Primary CTA */
+    .space-pill {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 4px 8px;
+      background: #ffffff;
+      border: 1px solid var(--border-light);
+      border-radius: 8px;
+      box-shadow: var(--shadow-sm);
+      cursor: pointer;
+    }
+    .space-avatar {
+      width: 24px;
+      height: 24px;
+      border-radius: 4px;
+      background: #ece7e2;
+      color: #6b4f3a;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 11px;
+      font-weight: 700;
+      flex-shrink: 0;
+    }
+    .space-name { font-size: 12px; font-weight: 600; color: var(--text-main); }
+    .space-subtext { font-size: 10px; color: var(--text-muted); }
+    .space-chev { margin-left: auto; color: var(--text-muted); }
+
+    .btn-primary-launch {
+      margin-top: 4px;
+      height: 32px;
+      background: var(--primary);
+      border-radius: 6px;
+      color: #ffffff;
+      font-size: 12px;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      transition: all 0.12s ease;
+      box-shadow: 0 1px 2px rgba(94, 106, 210, 0.2);
+    }
+    .btn-primary-launch:hover {
+      background: var(--primary-hover);
+    }
+
+    /* Zone 2: Sidebar Workflow Tree (按生产态分流) */
+    .sidebar-section { display: flex; flex-direction: column; gap: 4px; }
+    .sidebar-section-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 4px 8px;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .sidebar-subgroup-title {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-sub);
+      padding: 4px 8px 0;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .subgroup-badge {
+      font-size: 10px;
+      padding: 0 4px;
+      border-radius: 4px;
+      font-weight: 600;
+      font-family: var(--font-mono);
+    }
+    .subgroup-badge.warning { background: var(--warning-bg); color: #b45309; border: 1px solid var(--warning-border); }
+    .subgroup-badge.running { background: var(--success-bg); color: #047857; border: 1px solid var(--success-border); }
+    .subgroup-badge.completed { background: #f3f4f6; color: #6b7280; border: 1px solid #e5e7eb; }
+
+    .sidebar-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 4px 8px;
+      border-radius: 6px;
+      font-size: 12px;
+      color: var(--text-sub);
+      cursor: pointer;
+      transition: all 0.12s ease;
+      position: relative;
+    }
+    .sidebar-item:hover { background: var(--bg-hover); color: var(--text-main); }
+    .sidebar-item.active { background: var(--bg-active); color: var(--primary); font-weight: 600; }
+    .sidebar-item.highlight-governance {
+      background: #ffffff;
+      border: 1px solid var(--border-light);
+      box-shadow: var(--shadow-sm);
+    }
+    .sidebar-item.highlight-governance:hover {
+      border-color: var(--primary);
+      background: var(--primary-light);
+      color: var(--primary);
+    }
+    .sidebar-item.highlight-governance.active {
+      background: var(--bg-active);
+      border-color: var(--primary);
+      color: var(--primary);
+      font-weight: 600;
+    }
+    .sidebar-item.danger-item {
+      color: var(--danger);
+    }
+    .sidebar-item.danger-item:hover {
+      background: var(--danger-bg);
+      color: #b91c1c;
+    }
+
+    .item-icon { font-size: 14px; flex-shrink: 0; }
+    .item-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+    .warning-text { color: #b45309; font-weight: 600; }
+    .danger-text { color: var(--danger); font-weight: 500; }
+
+    .online-pill {
+      font-size: 9px;
+      background: var(--success-bg);
+      color: #047857;
+      padding: 0 4px;
+      border-radius: 4px;
+      margin-left: 4px;
+      border: 1px solid var(--success-border);
+    }
+    .resource-title { font-size: 11.5px; font-weight: 600; color: var(--text-main); }
+    .resource-sub { font-size: 10px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; }
+
+    .pulse-indicator {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--success);
+      box-shadow: 0 0 0 2px var(--success-bg);
+      margin-left: auto;
+      flex-shrink: 0;
+    }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .status-dot.running { background: var(--success); box-shadow: 0 0 0 2px var(--success-bg); }
+    .status-dot.decision { background: var(--warning); box-shadow: 0 0 0 2px var(--warning-bg); }
+    .status-dot.blocked { background: var(--danger); box-shadow: 0 0 0 2px var(--danger-bg); }
+    .status-dot.completed { background: #9ca3af; }
+
+    .item-meta { margin-left: auto; font-size: 10px; color: var(--text-muted); }
+
+    /* ---------------------------------------------------- */
+    /* 4. MAIN COLUMN (Middle Tabs + Workspace Views)       */
+    /* ---------------------------------------------------- */
+    .main-column {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      min-width: 0;
+      background: var(--bg-app);
+    }
+
+    /* 4.1 TABS BAR (Coaxial Baseline: Exactly 44px)        */
+    .tabs-bar {
+      height: 44px;
+      background: #ffffff;
+      border-bottom: 1px solid var(--border-light);
+      display: flex;
+      align-items: center;
+      flex-shrink: 0;
+      z-index: 15;
+      padding: 0 8px;
+    }
+
+    .btn-expand-sidebar {
+      width: 28px;
+      height: 28px;
+      margin-right: 4px;
+      border-radius: 4px;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      color: var(--text-sub);
+    }
+    .btn-expand-sidebar:hover { background: var(--bg-hover); color: var(--text-main); }
+    .btn-expand-sidebar.visible { display: flex; }
+
+    .tabs-scroll-area {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      height: 44px;
+      overflow-x: auto;
+      gap: 4px;
+      min-width: 0;
+    }
+    .tabs-scroll-area::-webkit-scrollbar { display: none; }
+
+    .wf-tab {
+      height: 32px;
+      padding: 0 8px;
+      border-radius: 6px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: transparent;
+      color: var(--text-sub);
+      font-size: 12px;
+      cursor: pointer;
+      position: relative;
+      flex-shrink: 0;
+      max-width: 220px;
+      transition: all 0.12s ease;
+      border: 1px solid transparent;
+    }
+    .wf-tab:hover {
+      background: var(--bg-hover);
+      color: var(--text-main);
+    }
+    .wf-tab.active {
+      background: #ffffff;
+      color: var(--text-main);
+      font-weight: 600;
+      border-color: var(--border-light);
+      box-shadow: var(--shadow-sm);
+    }
+    .wf-tab.active::after {
+      content: "";
+      position: absolute;
+      bottom: -6px;
+      left: 8px;
+      right: 8px;
+      height: 2px;
+      background: var(--primary);
+      border-radius: 2px;
+    }
+
+    .tab-title {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      min-width: 0;
+    }
+    .tab-badge {
+      background: var(--warning-bg);
+      border: 1px solid var(--warning-border);
+      color: #b45309;
+      font-size: 10px;
+      font-weight: 700;
+      padding: 0 4px;
+      height: 16px;
+      border-radius: 4px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .tab-close {
+      width: 16px;
+      height: 16px;
+      border-radius: 3px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--text-muted);
+      opacity: 0.6;
+      transition: all 0.1s ease;
+      margin-left: 2px;
+    }
+    .tab-close:hover {
+      background: #e5e7eb;
+      color: var(--text-main);
+      opacity: 1;
+    }
+
+    .btn-new-tab {
+      width: 24px;
+      height: 24px;
+      border-radius: 4px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--text-muted);
+      border: 1px dashed var(--border-light);
+      margin-left: 4px;
+      flex-shrink: 0;
+    }
+    .btn-new-tab:hover {
+      border-color: var(--primary);
+      color: var(--primary);
+      background: var(--primary-light);
+    }
+
+    /* Top Action Buttons (Exposed Flow Controls + More Actions) */
+    .top-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-left: 8px;
+      flex-shrink: 0;
+    }
+    .btn-action {
+      height: 28px;
+      padding: 0 12px;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 500;
+      border: 1px solid var(--border-light);
+      background: #ffffff;
+      color: var(--text-main);
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      box-shadow: var(--shadow-sm);
+      transition: all 0.12s ease;
+    }
+    .btn-action:hover { background: var(--bg-hover); }
+    .btn-action.primary {
+      background: var(--primary);
+      border-color: var(--primary);
+      color: #ffffff;
+      font-weight: 600;
+    }
+    .btn-action.primary:hover { background: var(--primary-hover); }
+    .btn-action.paused {
+      background: var(--warning-bg);
+      border-color: var(--warning-border);
+      color: #b45309;
+    }
+
+    /* More Actions Dropdown */
+    .action-dropdown {
+      position: absolute;
+      top: 36px;
+      right: 0;
+      background: #ffffff;
+      border: 1px solid var(--border-light);
+      border-radius: 8px;
+      box-shadow: var(--shadow-md);
+      padding: 4px 0;
+      width: 200px;
+      z-index: 100;
+      display: none;
+    }
+    .action-dropdown.visible { display: block; }
+    .dropdown-item {
+      padding: 8px 12px;
+      font-size: 12px;
+      color: var(--text-main);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      cursor: pointer;
+      transition: background 0.1s ease;
+    }
+    .dropdown-item:hover { background: var(--bg-hover); }
+    .dropdown-divider { height: 1px; background: var(--border-light); margin: 4px 0; }
+
+    /* 4.2 CANVAS WRAP (When Workflow Tab Active)           */
+    .canvas-wrap {
+      flex: 1;
+      position: relative;
+      background-color: var(--bg-canvas);
+      background-image: radial-gradient(rgba(18, 19, 22, 0.12) 1px, transparent 1.15px);
+      background-size: 18px 18px;
+      overflow: auto;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding-top: 56px;
+    }
+
+    .canvas-floating-toolbar {
+      position: absolute;
+      top: 12px;
+      left: 16px;
+      right: 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      pointer-events: none;
+      z-index: 10;
+    }
+    .floating-pill {
+      pointer-events: auto;
+      background: rgba(255, 255, 255, 0.94);
+      backdrop-filter: blur(8px);
+      border: 1px solid var(--border-light);
+      border-radius: 8px;
+      padding: 4px 8px;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      box-shadow: var(--shadow-pill);
+    }
+    .pill-btn {
+      height: 24px;
+      padding: 0 8px;
+      border-radius: 4px;
+      font-size: 11.5px;
+      font-weight: 500;
+      color: var(--text-sub);
+    }
+    .pill-btn:hover { background: var(--bg-hover); color: var(--text-main); }
+    .pill-btn.active { background: var(--bg-active); color: var(--text-main); font-weight: 600; }
+    .pill-divider { width: 1px; height: 16px; background: var(--border-light); margin: 0 4px; }
+    .pill-meta { font-size: 11px; color: var(--text-muted); }
+
+    .flow-pipeline {
+      display: flex;
+      align-items: center;
+      gap: 24px;
+      margin-top: 32px;
+      z-index: 2;
+    }
+    .flow-node-card {
+      width: 220px;
+      background: #ffffff;
+      border: 1px solid var(--border-light);
+      border-radius: 8px;
+      padding: 12px 16px;
+      box-shadow: var(--shadow-sm);
+      cursor: pointer;
+      transition: all 0.15s ease;
+      position: relative;
+    }
+    .flow-node-card:hover {
+      box-shadow: var(--shadow-md);
+      transform: translateY(-1px);
+    }
+    .flow-node-card.selected {
+      border-color: var(--primary);
+      box-shadow: 0 0 0 2px rgba(94, 106, 210, 0.2);
+    }
+    .flow-node-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 8px;
+    }
+    .node-type-label {
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      letter-spacing: 0.05em;
+    }
+    .node-title {
+      font-weight: 600;
+      font-size: 13px;
+      color: var(--text-main);
+      margin-bottom: 4px;
+    }
+    .node-desc {
+      font-size: 11.5px;
+      color: var(--text-sub);
+      line-height: 1.4;
+      margin-bottom: 8px;
+    }
+    .node-foot {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 11px;
+      color: var(--text-muted);
+      border-top: 1px solid var(--border-subtle);
+      padding-top: 8px;
+    }
+    .node-agent {
+      font-weight: 600;
+      color: var(--primary);
+    }
+    .pipeline-connector {
+      width: 24px;
+      height: 2px;
+      background: #cbd5e1;
+      position: relative;
+    }
+    .pipeline-connector::after {
+      content: "";
+      position: absolute;
+      right: 0;
+      top: -3px;
+      width: 0;
+      height: 0;
+      border-top: 4px solid transparent;
+      border-bottom: 4px solid transparent;
+      border-left: 6px solid #cbd5e1;
+    }
+
+    /* ---------------------------------------------------- */
+    /* 4.3 UNIFIED TAB PAGE VIEWS (Option 1: All System Tabs)*/
+    /* ---------------------------------------------------- */
+    .tab-page-view {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow-y: auto;
+      background: var(--bg-canvas);
+      padding: 16px;
+      gap: 16px;
+    }
+
+    .cockpit-banner {
+      background: #ffffff;
+      border: 1px solid var(--border-light);
+      border-radius: 8px;
+      padding: 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      box-shadow: var(--shadow-sm);
+    }
+    .cockpit-title-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .cockpit-icon {
+      font-size: 20px;
+      width: 36px;
+      height: 36px;
+      border-radius: 8px;
+      background: var(--primary-light);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .cockpit-title { font-size: 14px; font-weight: 700; color: var(--text-main); }
+    .cockpit-sub { font-size: 11.5px; color: var(--text-muted); margin-top: 4px; }
+
+    .controller-live-badge {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 11px;
+      color: #047857;
+      background: var(--success-bg);
+      border: 1px solid var(--success-border);
+      padding: 2px 8px;
+      border-radius: 12px;
+    }
+    .pulse-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--success);
+    }
+
+    .cockpit-stat-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+    }
+    .cockpit-stat-card {
+      background: #ffffff;
+      border: 1px solid var(--border-light);
+      border-radius: 8px;
+      padding: 12px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      box-shadow: var(--shadow-sm);
+    }
+    .cockpit-stat-label {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .cockpit-stat-val {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--text-main);
+    }
+    .status-running { color: #047857; }
+
+    .cockpit-section {
+      background: #ffffff;
+      border: 1px solid var(--border-light);
+      border-radius: 8px;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      box-shadow: var(--shadow-sm);
+    }
+    .cockpit-section-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .cockpit-section-title {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--text-main);
+    }
+
+    .ops-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 8px;
+    }
+    .ops-card {
+      border: 1px solid var(--border-light);
+      border-radius: 8px;
+      padding: 12px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      cursor: pointer;
+      transition: all 0.12s ease;
+      background: #ffffff;
+    }
+    .ops-card:hover {
+      border-color: var(--primary);
+      box-shadow: var(--shadow-sm);
+      transform: translateY(-1px);
+    }
+    .ops-card.danger:hover {
+      border-color: var(--danger);
+      background: var(--danger-bg);
+    }
+    .ops-card-head {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .ops-icon { font-size: 14px; }
+    .ops-name { font-size: 12px; font-weight: 600; color: var(--text-main); }
+    .ops-card.danger .ops-name { color: var(--danger); }
+    .ops-desc { font-size: 11.5px; color: var(--text-sub); line-height: 1.4; }
+
+    .live-events-box {
+      background: #fafafa;
+      border: 1px solid var(--border-light);
+      border-radius: 6px;
+      padding: 12px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      line-height: 1.6;
+      color: var(--text-sub);
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    /* Pane Grid for Ops View */
+    .pane-grid {
+      display: grid;
+      grid-template-columns: repeat(6, 1fr);
+      gap: 8px;
+    }
+    .pane-unit {
+      background: #ffffff;
+      border: 1px solid var(--border-light);
+      border-radius: 6px;
+      padding: 8px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      cursor: pointer;
+      transition: all 0.12s ease;
+    }
+    .pane-unit:hover { border-color: var(--primary); transform: translateY(-1px); }
+    .pane-unit.working { border-color: #a7f3d0; background: #ecfdf5; }
+    .pane-head { display: flex; align-items: center; justify-content: space-between; }
+    .pane-id { font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--text-main); }
+    .pane-agent { font-size: 10px; color: var(--text-sub); }
+
+    /* Template Cards Grid */
+    .template-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 12px;
+    }
+    .tpl-card {
+      border: 1px solid var(--border-light);
+      border-radius: 8px;
+      padding: 12px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      background: #ffffff;
+    }
+    .tpl-head { display: flex; align-items: center; justify-content: space-between; }
+    .tpl-title { font-weight: 600; font-size: 13px; color: var(--text-main); }
+    .tpl-desc { font-size: 11.5px; color: var(--text-sub); line-height: 1.4; }
+    .tpl-tags { display: flex; gap: 8px; }
+    .tpl-tag { font-size: 10px; background: var(--bg-hover); padding: 2px 8px; border-radius: 4px; color: var(--text-sub); }
+    .btn-apply-tpl {
+      margin-top: 4px;
+      height: 28px;
+      background: var(--primary-light);
+      color: var(--primary);
+      border-radius: 4px;
+      font-size: 11.5px;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .btn-apply-tpl:hover { background: var(--primary); color: #ffffff; }
+
+    /* Archive and Checkpoint Items */
+    .list-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 16px;
+      border: 1px solid var(--border-light);
+      border-radius: 6px;
+      background: #ffffff;
+      transition: background 0.1s ease;
+    }
+    .list-row:hover { background: var(--bg-hover); }
+    .list-main { display: flex; flex-direction: column; gap: 4px; }
+    .list-title { font-weight: 600; font-size: 12px; color: var(--text-main); }
+    .list-sub { font-size: 11px; color: var(--text-muted); }
+
+    /* ---------------------------------------------------- */
+    /* 5. RIGHT SIDE BAR (Inspector, 300px, Light #ffffff)  */
+    /* ---------------------------------------------------- */
+    .inspector-panel {
+      width: 300px;
+      background: #ffffff;
+      border-left: 1px solid var(--border-light);
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0;
+      z-index: 20;
+    }
+
+    .inspector-head {
+      height: 44px;
+      padding: 0 16px;
+      border-bottom: 1px solid var(--border-light);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: #ffffff;
+      flex-shrink: 0;
+    }
+    .insp-head-title {
+      font-weight: 600;
+      font-size: 13px;
+      color: var(--text-main);
+    }
+    .insp-head-sub {
+      font-size: 11px;
+      color: var(--text-muted);
+      margin-left: 8px;
+    }
+
+    .insp-nav-tabs {
+      display: flex;
+      border-bottom: 1px solid var(--border-light);
+      padding: 0 16px;
+      gap: 16px;
+      background: #ffffff;
+      flex-shrink: 0;
+    }
+    .insp-nav-tab {
+      padding: 8px 0;
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--text-sub);
+      cursor: pointer;
+      position: relative;
+    }
+    .insp-nav-tab.active {
+      color: var(--primary);
+      font-weight: 600;
+    }
+    .insp-nav-tab.active::after {
+      content: "";
+      position: absolute;
+      bottom: -1px;
+      left: 0;
+      right: 0;
+      height: 2px;
+      background: var(--primary);
+    }
+
+    .insp-body {
+      flex: 1;
+      overflow-y: auto;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .insp-card {
+      border: 1px solid var(--border-light);
+      border-radius: 8px;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .insp-card-title {
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      letter-spacing: 0.04em;
+    }
+    .insp-prop-row {
+      display: flex;
+      justify-content: space-between;
+      font-size: 12px;
+    }
+    .insp-prop-label { color: var(--text-sub); }
+    .insp-prop-val { font-weight: 500; color: var(--text-main); }
+
+    .insp-select {
+      height: 32px;
+      border-radius: 6px;
+      border: 1px solid var(--border-light);
+      padding: 0 8px;
+      font-size: 12px;
+      color: var(--text-main);
+      background: #ffffff;
+      outline: none;
+    }
+    .insp-select:focus { border-color: var(--primary); }
+
+    .self-check-badge {
+      font-size: 10px;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-weight: 600;
+    }
+    .self-check-badge.pass {
+      background: var(--success-bg);
+      color: #047857;
+      border: 1px solid var(--success-border);
+    }
+    .check-list {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      font-size: 11.5px;
+      color: var(--text-sub);
+    }
+    .check-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .check-icon {
+      color: var(--success);
+      font-weight: 700;
+    }
+    .btn-recheck {
+      margin-top: 4px;
+      height: 24px;
+      border: 1px solid var(--border-light);
+      border-radius: 4px;
+      font-size: 11px;
+      color: var(--text-sub);
+      background: #ffffff;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .btn-recheck:hover { background: var(--bg-hover); color: var(--text-main); }
+
+    /* Wireframe preview card matching sketch */
+    .wireframe-box {
+      border: 1px dashed var(--border-light);
+      border-radius: 6px;
+      height: 80px;
+      background: var(--bg-canvas);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+      overflow: hidden;
+    }
+    .wireframe-box::before, .wireframe-box::after {
+      content: "";
+      position: absolute;
+      top: 0; bottom: 0; left: 0; right: 0;
+      background: linear-gradient(to top right, transparent calc(50% - 0.5px), #cbd5e1, transparent calc(50% + 0.5px));
+    }
+    .wireframe-box::after {
+      background: linear-gradient(to top left, transparent calc(50% - 0.5px), #cbd5e1, transparent calc(50% + 0.5px));
+    }
+    .wireframe-label {
+      z-index: 2;
+      background: rgba(255,255,255,0.9);
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+
+    /* Human Gate Card */
+    .gate-decision-box {
+      background: var(--warning-bg);
+      border: 1px solid var(--warning-border);
+      border-radius: 8px;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .gate-title { font-weight: 600; font-size: 12px; color: #92400e; }
+    .gate-desc { font-size: 11.5px; color: #b45309; line-height: 1.4; }
+    .gate-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      margin-top: 4px;
+    }
+    .btn-gate {
+      padding: 4px 12px;
+      border-radius: 4px;
+      font-size: 11.5px;
+      font-weight: 600;
+    }
+    .btn-gate.reject {
+      background: #ffffff;
+      border: 1px solid #d1d5db;
+      color: var(--text-sub);
+    }
+    .btn-gate.reject:hover { background: #f3f4f6; }
+    .btn-gate.pass {
+      background: var(--success);
+      color: #ffffff;
+    }
+    .btn-gate.pass:hover { background: #059669; }
+
+    .tty-box {
+      background: #ffffff;
+      border: 1px solid var(--border-light);
+      border-radius: 6px;
+      padding: 8px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      line-height: 1.5;
+      color: var(--text-sub);
+    }
+
+    /* ---------------------------------------------------- */
+    /* 6. BOTTOM BAR (28px fixed, Pure Light #ffffff)       */
+    /* ---------------------------------------------------- */
+    .light-bottom-bar {
+      height: 28px;
+      background: #ffffff;
+      border-top: 1px solid var(--border-light);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 16px;
+      font-size: 11px;
+      color: var(--text-sub);
+      flex-shrink: 0;
+      z-index: 30;
+    }
+    .bottom-status-left {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      min-width: 0;
+    }
+    .bottom-indicator {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-weight: 600;
+      color: var(--text-main);
+      flex-shrink: 0;
+    }
+    .indicator-pip {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--success);
+      box-shadow: 0 0 0 2px var(--success-bg);
+    }
+    .indicator-pip.paused {
+      background: var(--warning);
+      box-shadow: 0 0 0 2px var(--warning-bg);
+    }
+    .bottom-ticker {
+      color: var(--text-muted);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .bottom-status-right {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      flex-shrink: 0;
+    }
+    .bottom-link {
+      color: var(--primary);
+      cursor: pointer;
+      font-weight: 600;
+    }
+    .bottom-link:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <div class="app-shell">
+    <div class="workspace-row">
+      <!-- 1. LEFT RAIL (48px fixed, pure light) -->
+      <aside class="left-rail" id="leftRail">
+        <div class="rail-head">
+          <div class="rail-brand" title="HAFlow 生产工作台">HF</div>
+        </div>
+        <nav class="rail-nav" aria-label="系统一级导航">
+          <button class="rail-item active" id="railNavWorkbench" title="空间工作台 (Workbench)" onclick="openTab('wf-01')">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+          </button>
+          <button class="rail-item" id="railNavDashboard" title="全局仪表板 (Dashboard)" onclick="openTab('dashboard')">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="9"/><rect x="14" y="3" width="7" height="5"/><rect x="14" y="12" width="7" height="9"/><rect x="3" y="16" width="7" height="5"/></svg>
+          </button>
+          <button class="rail-item" id="railNavOps" title="运维驾驶舱 (Ops & Topology)" onclick="openTab('ops')">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="m10 15 5-3-5-3v6Z"/></svg>
+          </button>
+          <button class="rail-item" id="railNavAlerts" title="告警中心 (Alerts)" onclick="openTab('alerts')">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>
+            <span class="rail-badge-dot"></span>
+          </button>
+          <button class="rail-item" id="railNavTemplates" title="模板与规范资产库 (Templates)" onclick="openTab('templates')">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/></svg>
+          </button>
+        </nav>
+        <div class="rail-foot">
+          <div class="rail-avatar" title="当前空间: 数凭 · 当前工厂" onclick="toast('当前空间: 数凭 · 当前工厂')">数</div>
+        </div>
+      </aside>
+
+      <!-- 2. SIDEBAR (220px, light #fafafa) -->
+      <aside class="sidebar" id="sidebar">
+        <div class="sidebar-head">
+          <span class="sidebar-title">空间工作台</span>
+          <button class="btn-collapse-sidebar" onclick="toggleSidebar()" title="折叠侧边栏 (⌘B)">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m15 18-6-6 6-6"/></svg>
+          </button>
+        </div>
+
+        <div class="sidebar-scroll">
+          <!-- Zone 1: Space Switcher Pill + Primary Action CTA -->
+          <div style="display:flex;flex-direction:column;gap:8px">
+            <div class="space-pill" onclick="toast('切换工厂空间')">
+              <div class="space-avatar">数</div>
+              <div style="min-width:0;flex:1">
+                <div class="space-name">数凭 · 当前工厂</div>
+                <div class="space-subtext tabular-nums">4 个工作流 · 18 工位</div>
+              </div>
+              <svg class="space-chev" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6"/></svg>
+            </div>
+
+            <button class="btn-primary-launch" onclick="openTab('new-req')">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+              <span>发起新需求</span>
+            </button>
+          </div>
+
+          <!-- Zone 2: Workflow Tree (按生产态分流) -->
+          <div class="sidebar-section">
+            <div class="sidebar-section-head">
+              <span>空间工作流</span>
+              <span class="tabular-nums">4</span>
+            </div>
+
+            <div class="sidebar-subgroup-title">待拍板 / 阻塞 <span class="subgroup-badge warning">1</span></div>
+            <div class="sidebar-item" id="sidebarWf02" onclick="openTab('wf-02')">
+              <span class="status-dot decision"></span>
+              <span class="item-text" title="[决策] 质量与风控专家门禁">质量与风控专家门禁</span>
+              <span class="item-meta warning-text">需决策</span>
+            </div>
+
+            <div class="sidebar-subgroup-title" style="margin-top:8px">进行中 <span class="subgroup-badge running">3</span></div>
+            <div class="sidebar-item active" id="sidebarWf01" onclick="openTab('wf-01')">
+              <span class="status-dot running"></span>
+              <span class="item-text" title="[运行] 统一待办工作台与登录重构">统一待办工作台与登录重构</span>
+              <span class="item-meta tabular-nums">75%</span>
+            </div>
+            <div class="sidebar-item" id="sidebarWf03" onclick="openTab('wf-03')">
+              <span class="status-dot running"></span>
+              <span class="item-text" title="[运行] 支付中心对接与结算流">支付中心对接与结算流</span>
+              <span class="item-meta tabular-nums">40%</span>
+            </div>
+            <div class="sidebar-item" id="sidebarWf04" onclick="openTab('wf-04')">
+              <span class="status-dot running"></span>
+              <span class="item-text" title="[运行] 审计日志与链路追踪">审计日志与链路追踪</span>
+              <span class="item-meta tabular-nums">20%</span>
+            </div>
+
+            <div class="sidebar-subgroup-title" style="margin-top:8px">历史完成 <span class="subgroup-badge completed">12</span></div>
+            <div class="sidebar-item" id="sidebarWf05" onclick="openTab('wf-05')">
+              <span class="status-dot completed"></span>
+              <span class="item-text" title="[完成] 月度运维分析报表生成">月度运维分析报表生成</span>
+              <span class="item-meta">已完成</span>
+            </div>
+          </div>
+
+          <!-- Zone 3: Fleet & Slots (空间资源与工位) -->
+          <div class="sidebar-section">
+            <div class="sidebar-section-head">
+              <span>空间资源与工位</span>
+              <span class="tabular-nums">4/18</span>
+            </div>
+            <div class="sidebar-item" id="sidebarFleetItem" onclick="openTab('ops')">
+              <span class="item-icon">🤖</span>
+              <div style="min-width:0;flex:1">
+                <div class="resource-title">执行者机队 <span class="online-pill">4 在线</span></div>
+                <div class="resource-sub">Claude, OpenCode, Codex, Human</div>
+              </div>
+            </div>
+            <div class="sidebar-item" id="sidebarPanesItem" onclick="openTab('ops')">
+              <span class="item-icon">🖥️</span>
+              <div style="min-width:0;flex:1">
+                <div class="resource-title">智能体工位</div>
+                <div class="resource-sub">18 个物理 Pane (4 运行中)</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Zone 4: Governance (项目治理与审计) -->
+          <div class="sidebar-section">
+            <div class="sidebar-section-head">
+              <span>项目治理与审计</span>
+            </div>
+            <div class="sidebar-item highlight-governance" id="sidebarControllerItem" onclick="openTab('controller')">
+              <span class="item-icon">🎮</span>
+              <span class="item-text">Controller 控制台</span>
+              <span class="pulse-indicator" title="协调器调度活跃"></span>
+            </div>
+            <div class="sidebar-item" id="sidebarTemplatesItem" onclick="openTab('templates')">
+              <span class="item-icon">📐</span>
+              <span class="item-text">模板规范库</span>
+            </div>
+            <div class="sidebar-item" id="sidebarLogsItem" onclick="openTab('logs')">
+              <span class="item-icon">📜</span>
+              <span class="item-text">调度审计日志</span>
+            </div>
+            <div class="sidebar-item" id="sidebarArchiveItem" onclick="openTab('archive')">
+              <span class="item-icon">📦</span>
+              <span class="item-text">任务归档库</span>
+            </div>
+            <div class="sidebar-item danger-item" onclick="confirmDeregister()">
+              <span class="item-icon">⚠️</span>
+              <span class="item-text">注销项目</span>
+            </div>
+          </div>
+        </div>
+      </aside>
+
+      <!-- 3. MAIN COLUMN (Middle Tabs + Workspace Views) -->
+      <main class="main-column">
+        <!-- TABS BAR (Y=44px single unbroken horizontal line across whole screen) -->
+        <header class="tabs-bar">
+          <button class="btn-expand-sidebar" id="btnExpandSidebar" onclick="toggleSidebar()" title="展开侧边栏 (⌘B)">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m9 18 6-6-6-6"/></svg>
+          </button>
+
+          <!-- Middle Workflow / System Tabs -->
+          <div class="tabs-scroll-area" id="wfTabsList">
+            <!-- Rendered via JS -->
+          </div>
+
+          <button type="button" class="btn-new-tab" onclick="openTab('new-req')" title="发起新工作流">+</button>
+
+          <!-- Global Flow Execution Actions -->
+          <div class="top-actions">
+            <button class="btn-action" id="btnPauseScheduler" onclick="toggleSchedulerPause()" title="挂起或恢复协调器主调度循环">
+              <span id="pauseIcon">⏸</span>
+              <span id="pauseLabel">暂停调度</span>
+            </button>
+            <button class="btn-action" id="btnStepFlow" onclick="stepWorkflow()" title="单步推进下一拓扑就绪节点">
+              <span>⏭</span>
+              <span>单步推进</span>
+            </button>
+            <button class="btn-action primary" onclick="nextStage()">进入下一阶段</button>
+            <div style="position:relative">
+              <button class="btn-action" id="btnMoreActions" onclick="toggleMoreDropdown(event)" title="更多管理操作">···</button>
+              <!-- Dropdown Menu (All open as workspace tabs!) -->
+              <div class="action-dropdown" id="moreDropdown">
+                <div class="dropdown-item" onclick="openTab('controller')">
+                  <span>🎮 Controller 控制台 (Tab)</span>
+                </div>
+                <div class="dropdown-item" onclick="openTab('checkpoints')">
+                  <span>📸 快照中心 (4)</span>
+                </div>
+                <div class="dropdown-item" onclick="openTab('checkpoints')">
+                  <span>⏪ 节点回溯 (Rollback)</span>
+                </div>
+                <div class="dropdown-item" onclick="openTab('checkpoints')">
+                  <span>🔀 候选分支管理</span>
+                </div>
+                <div class="dropdown-item" onclick="runSelfCheck()">
+                  <span>🛡️ 执行者自检</span>
+                </div>
+                <div class="dropdown-divider"></div>
+                <div class="dropdown-item" onclick="openTab('logs')">
+                  <span>📜 调度审计日志</span>
+                </div>
+                <div class="dropdown-item" onclick="openTab('archive')">
+                  <span>📦 任务归档库</span>
+                </div>
+                <div class="dropdown-divider"></div>
+                <div class="dropdown-item danger-text" onclick="confirmDeregister()">
+                  <span>⚠️ 注销项目</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </header>
+
+        <!-- VIEW 1: CANVAS WRAP (When Workflow Tab Active) -->
+        <div class="canvas-wrap" id="canvasWrap">
+          <!-- FLOATING PILL TOOLBAR (Natural overlay, zero stair-stepping) -->
+          <div class="canvas-floating-toolbar">
+            <div class="floating-pill">
+              <button class="pill-btn active" id="btnViewDAG" onclick="switchCanvasView('dag')">流程图 (DAG)</button>
+              <button class="pill-btn" id="btnViewList" onclick="switchCanvasView('list')">任务看板 (List)</button>
+              <span class="pill-divider"></span>
+              <span class="pill-meta">候选分支: <b id="metaBranch">candidate/0929</b></span>
+              <span class="pill-divider"></span>
+              <button class="pill-btn" onclick="openTab('checkpoints')">⏪ 节点回溯</button>
+              <button class="pill-btn" onclick="openTab('checkpoints')">📸 快照: 4 个可用</button>
+            </div>
+
+            <div class="floating-pill">
+              <button class="pill-btn" onclick="toast('放大画布')">+</button>
+              <button class="pill-btn" onclick="toast('缩小画布')">-</button>
+              <button class="pill-btn" onclick="toast('已重置并居中画布')">Fit</button>
+            </div>
+          </div>
+
+          <!-- Flow Diagram Nodes -->
+          <div class="flow-pipeline" id="flowPipeline">
+            <div class="flow-node-card" onclick="selectNode('req')">
+              <div class="flow-node-head">
+                <span class="node-type-label">需求阶段</span>
+                <span style="color:#16a34a;font-weight:600;font-size:11px">✓ 已完成</span>
+              </div>
+              <div class="node-title">实施规划与协议</div>
+              <div class="node-desc">系统分层及前后端对齐契约定义完毕</div>
+              <div class="node-foot">
+                <span>工位: <b class="node-agent">claude</b></span>
+                <span class="tabular-nums" style="color:var(--text-muted)">#1</span>
+              </div>
+            </div>
+
+            <div class="pipeline-connector"></div>
+
+            <div class="flow-node-card selected" onclick="selectNode('impl')">
+              <div class="flow-node-head">
+                <span class="node-type-label">实现阶段</span>
+                <span style="color:#2563eb;font-weight:600;font-size:11px">● 执行中</span>
+              </div>
+              <div class="node-title">核心代码实现</div>
+              <div class="node-desc">正在生成 6 分区网格与 Tab 状态机</div>
+              <div class="node-foot">
+                <span>工位: <b class="node-agent">opencode</b></span>
+                <span class="tabular-nums" style="color:var(--text-muted)">#2</span>
+              </div>
+            </div>
+
+            <div class="pipeline-connector"></div>
+
+            <div class="flow-node-card" onclick="selectNode('gate')">
+              <div class="flow-node-head">
+                <span class="node-type-label">强门禁 (Gate)</span>
+                <span style="color:#d97706;font-weight:600;font-size:11px">⚠️ 待拍板</span>
+              </div>
+              <div class="node-title">质量与风控门禁</div>
+              <div class="node-desc">脱敏自检回执已就绪，等待专家复核放行</div>
+              <div class="node-foot">
+                <span>工位: <b class="node-agent">human</b></span>
+                <span class="tabular-nums" style="color:var(--text-muted)">#3</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- VIEW 2: CONTROLLER COCKPIT VIEW (Tab: controller) -->
+        <div class="tab-page-view" id="viewController" style="display:none">
+          <div class="cockpit-banner">
+            <div class="cockpit-title-row">
+              <div class="cockpit-icon">🎮</div>
+              <div>
+                <div class="cockpit-title">Controller 协调器控制台</div>
+                <div class="cockpit-sub">无遮罩 · 独立 Tab · 全局调度内核状态监测与 10 项白盒治理指令</div>
+              </div>
+            </div>
+            <div class="controller-live-badge">
+              <span class="pulse-dot"></span>
+              <span id="bannerLiveHeartbeat">循环调度活跃 · 1000ms</span>
+            </div>
+          </div>
+
+          <div class="cockpit-stat-grid">
+            <div class="cockpit-stat-card">
+              <span class="cockpit-stat-label">协调器状态</span>
+              <span class="cockpit-stat-val status-running" id="cockpitSchedStatus">● 调度运行中</span>
+            </div>
+            <div class="cockpit-stat-card">
+              <span class="cockpit-stat-label">活跃工位 (Panes)</span>
+              <span class="cockpit-stat-val tabular-nums">4 / 18 就绪</span>
+            </div>
+            <div class="cockpit-stat-card">
+              <span class="cockpit-stat-label">待调度任务队列</span>
+              <span class="cockpit-stat-val tabular-nums">0 pending (通畅)</span>
+            </div>
+            <div class="cockpit-stat-card">
+              <span class="cockpit-stat-label">基线保护模式</span>
+              <span class="cockpit-stat-val" style="color:var(--primary)">严格 CoW 隔离</span>
+            </div>
+          </div>
+
+          <div class="cockpit-section">
+            <div class="cockpit-section-head">
+              <span class="cockpit-section-title">协调器内核与治理指令集 (10 项完整能力)</span>
+              <span style="font-size:11px;color:var(--text-muted)">点击卡片直接下发指令</span>
+            </div>
+
+            <div class="ops-grid">
+              <div class="ops-card" onclick="toggleSchedulerPause()">
+                <div class="ops-card-head"><span class="ops-icon">⏸</span><span class="ops-name">暂停/恢复调度</span></div>
+                <div class="ops-desc">一键挂起或激活后台主协调循环，适合干预排障。</div>
+              </div>
+              <div class="ops-card" onclick="stepWorkflow()">
+                <div class="ops-card-head"><span class="ops-icon">⏭</span><span class="ops-name">单步推进节点</span></div>
+                <div class="ops-desc">微步触发下一个就绪节点的拓扑装配与工位启动。</div>
+              </div>
+              <div class="ops-card" onclick="openTab('checkpoints')">
+                <div class="ops-card-head"><span class="ops-icon">⏪</span><span class="ops-name">节点回溯 (Rollback)</span></div>
+                <div class="ops-desc">打开快照与回溯中心，安全重置有缺陷的节点现场。</div>
+              </div>
+              <div class="ops-card" onclick="openTab('checkpoints')">
+                <div class="ops-card-head"><span class="ops-icon">📸</span><span class="ops-name">快照中心 (Checkpoints)</span></div>
+                <div class="ops-desc">查看、对比或导出当前 DAG 运行时现场快照。</div>
+              </div>
+              <div class="ops-card" onclick="toast('已切换全局 Agent 策略为: 专家复核优先')">
+                <div class="ops-card-head"><span class="ops-icon">👤</span><span class="ops-name">指定执行者</span></div>
+                <div class="ops-desc">覆写路由规则，指派 Claude / OpenCode / Codex / 人类。</div>
+              </div>
+              <div class="ops-card" onclick="runSelfCheck()">
+                <div class="ops-card-head"><span class="ops-icon">🛡️</span><span class="ops-name">执行者自检</span></div>
+                <div class="ops-desc">发起全量代码静态语义检查与出站敏感脱敏审计。</div>
+              </div>
+              <div class="ops-card" onclick="openTab('checkpoints')">
+                <div class="ops-card-head"><span class="ops-icon">🔀</span><span class="ops-name">创建候选分支</span></div>
+                <div class="ops-desc">为当前工作流派生隔离的 CoW 实验工作区。</div>
+              </div>
+              <div class="ops-card" onclick="openTab('logs')">
+                <div class="ops-card-head"><span class="ops-icon">📜</span><span class="ops-name">查看调度日志</span></div>
+                <div class="ops-desc">打开全量调度日志流，白盒化追踪轮询与分派。</div>
+              </div>
+              <div class="ops-card" onclick="openTab('archive')">
+                <div class="ops-card-head"><span class="ops-icon">📦</span><span class="ops-name">任务归档</span></div>
+                <div class="ops-desc">将终态的历史工作流移出活跃视图，保持工作台轻盈。</div>
+              </div>
+              <div class="ops-card danger" onclick="confirmDeregister()">
+                <div class="ops-card-head"><span class="ops-icon">⚠️</span><span class="ops-name">注销项目</span></div>
+                <div class="ops-desc">彻底清除当前工厂注册实例并释放所有物理工位。</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="cockpit-section">
+            <div class="cockpit-section-head">
+              <span class="cockpit-section-title">实时协调器事件日志流 (Coordinator Stream)</span>
+              <button class="btn-action" onclick="openTab('logs')">查看完整日志</button>
+            </div>
+            <div class="live-events-box">
+              <div>[11:36:01] <span style="color:#047857">INFO</span> Controller main loop heartbeat tick #2104 ok. Active panes: 4/18.</div>
+              <div>[11:36:02] <span style="color:#047857">INFO</span> Node 'impl' running on pane-opencode. Output bytes: 14.2 KB.</div>
+              <div>[11:36:03] <span style="color:#b45309">WARN</span> Gate node 'gate' status: awaiting human decision signature.</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- VIEW 3: GLOBAL DASHBOARD (Tab: dashboard) -->
+        <div class="tab-page-view" id="viewDashboard" style="display:none">
+          <div class="cockpit-banner">
+            <div class="cockpit-title-row">
+              <div class="cockpit-icon">📊</div>
+              <div>
+                <div class="cockpit-title">全局生产仪表板 (Global Dashboard)</div>
+                <div class="cockpit-sub">全工厂生产吞吐、工作流交付效率与机队负载热力看板</div>
+              </div>
+            </div>
+            <div class="controller-live-badge"><span class="pulse-dot"></span><span>数据已同步 · 实时</span></div>
+          </div>
+
+          <div class="cockpit-stat-grid">
+            <div class="cockpit-stat-card">
+              <span class="cockpit-stat-label">活跃工作流</span>
+              <span class="cockpit-stat-val tabular-nums">4 运行中</span>
+            </div>
+            <div class="cockpit-stat-card">
+              <span class="cockpit-stat-label">24h 交付完成率</span>
+              <span class="cockpit-stat-val tabular-nums" style="color:#047857">98.2%</span>
+            </div>
+            <div class="cockpit-stat-card">
+              <span class="cockpit-stat-label">单流平均耗时</span>
+              <span class="cockpit-stat-val tabular-nums">14m 32s</span>
+            </div>
+            <div class="cockpit-stat-card">
+              <span class="cockpit-stat-label">阻断与门禁</span>
+              <span class="cockpit-stat-val tabular-nums" style="color:#b45309">1 待拍板</span>
+            </div>
+          </div>
+
+          <div class="cockpit-section">
+            <div class="cockpit-section-head">
+              <span class="cockpit-section-title">执行者集群算力与负载热力矩阵</span>
+            </div>
+            <div class="ops-grid">
+              <div class="ops-card">
+                <div class="ops-card-head"><span class="ops-icon">🤖</span><span class="ops-name">Claude (架构与长程规划)</span></div>
+                <div class="ops-desc">当前负载 82% · 正在承载节点 #1 架构协议输出</div>
+              </div>
+              <div class="ops-card">
+                <div class="ops-card-head"><span class="ops-icon">⚡</span><span class="ops-name">OpenCode (核心编码与测试)</span></div>
+                <div class="ops-desc">当前负载 65% · 正在执行节点 #2 前端组件与 Tab 实现</div>
+              </div>
+              <div class="ops-card">
+                <div class="ops-card-head"><span class="ops-icon">🎯</span><span class="ops-name">Codex (精确交付与算法)</span></div>
+                <div class="ops-desc">当前负载 40% · 正在调度支付流结算微服务</div>
+              </div>
+              <div class="ops-card">
+                <div class="ops-card-head"><span class="ops-icon">👤</span><span class="ops-name">Human Expert (人类专家终审)</span></div>
+                <div class="ops-desc">1 项强门禁就绪，等待拍板放行</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- VIEW 4: OPS & TOPOLOGY COCKPIT (Tab: ops) -->
+        <div class="tab-page-view" id="viewOps" style="display:none">
+          <div class="cockpit-banner">
+            <div class="cockpit-title-row">
+              <div class="cockpit-icon">🖥️</div>
+              <div>
+                <div class="cockpit-title">工厂运维驾驶舱 (Topology & Pane Fleet)</div>
+                <div class="cockpit-sub">18 个物理工位运行现场、状态保活与 TTY 连接池</div>
+              </div>
+            </div>
+            <div class="controller-live-badge"><span class="pulse-dot"></span><span>Sentinel 巡检健康 · 8ms</span></div>
+          </div>
+
+          <div class="cockpit-stat-grid">
+            <div class="cockpit-stat-card">
+              <span class="cockpit-stat-label">物理工位池总量</span>
+              <span class="cockpit-stat-val tabular-nums">18 个物理 Pane</span>
+            </div>
+            <div class="cockpit-stat-card">
+              <span class="cockpit-stat-label">正在工作 (Working)</span>
+              <span class="cockpit-stat-val tabular-nums status-running">4 个 Pane</span>
+            </div>
+            <div class="cockpit-stat-card">
+              <span class="cockpit-stat-label">就绪待命 (Idle)</span>
+              <span class="cockpit-stat-val tabular-nums">14 个 Pane</span>
+            </div>
+            <div class="cockpit-stat-card">
+              <span class="cockpit-stat-label">Sentinel 巡检延迟</span>
+              <span class="cockpit-stat-val tabular-nums" style="color:var(--primary)">8ms</span>
+            </div>
+          </div>
+
+          <div class="cockpit-section">
+            <div class="cockpit-section-head">
+              <span class="cockpit-section-title">物理工位矩阵 (18 Panes Cluster)</span>
+              <span style="font-size:11px;color:var(--text-muted)">点击任意工位直接在右侧挂接 TTY 终端</span>
+            </div>
+            <div class="pane-grid" id="paneGridContainer">
+              <!-- Rendered via JS -->
+            </div>
+          </div>
+        </div>
+
+        <!-- VIEW 5: ALERTS CENTER (Tab: alerts) -->
+        <div class="tab-page-view" id="viewAlerts" style="display:none">
+          <div class="cockpit-banner">
+            <div class="cockpit-title-row">
+              <div class="cockpit-icon">🔔</div>
+              <div>
+                <div class="cockpit-title">空间告警与异常中心 (Alerts & Incidents)</div>
+                <div class="cockpit-sub">全链路阻断报警、超时事件与出站脱敏异常监控</div>
+              </div>
+            </div>
+            <span class="subgroup-badge warning" style="font-size:11px;padding:4px 8px">1 条待处理告警</span>
+          </div>
+
+          <div class="cockpit-stat-grid">
+            <div class="cockpit-stat-card">
+              <span class="cockpit-stat-label">未恢复告警</span>
+              <span class="cockpit-stat-val tabular-nums" style="color:#b45309">1 项活动</span>
+            </div>
+            <div class="cockpit-stat-card">
+              <span class="cockpit-stat-label">门禁等待超时</span>
+              <span class="cockpit-stat-val tabular-nums">1 项挂起</span>
+            </div>
+            <div class="cockpit-stat-card">
+              <span class="cockpit-stat-label">24h 自动自愈</span>
+              <span class="cockpit-stat-val tabular-nums" style="color:#047857">42 次</span>
+            </div>
+            <div class="cockpit-stat-card">
+              <span class="cockpit-stat-label">脱敏红线违规</span>
+              <span class="cockpit-stat-val tabular-nums">0 违规</span>
+            </div>
+          </div>
+
+          <div class="cockpit-section">
+            <div class="cockpit-section-head">
+              <span class="cockpit-section-title">实时告警事件队列</span>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:8px">
+              <div class="list-row" style="border-left:4px solid var(--warning)">
+                <div class="list-main">
+                  <div class="list-title">⚠️ [强门禁挂起超时] 工作流 wf-02 质量与风控专家门禁 已等待 12 分钟</div>
+                  <div class="list-sub">节点: node_id: gate · 责任人: human (专家工位) · 状态: 脱敏回执已就绪，亟待批准</div>
+                </div>
+                <button class="btn-action primary" onclick="openTab('wf-02')">前往拍板</button>
+              </div>
+              <div class="list-row" style="border-left:4px solid var(--success)">
+                <div class="list-main">
+                  <div class="list-title">✓ [已自愈] pane-04 进程响应延迟抖动 (24ms → 8ms)</div>
+                  <div class="list-sub">触发时间: 10 分钟前 · 巡检程序已完成健康探测并解除熔断警告</div>
+                </div>
+                <span style="font-size:11px;color:var(--text-muted)">已解除</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- VIEW 6: TEMPLATES REPOSITORY (Tab: templates) -->
+        <div class="tab-page-view" id="viewTemplates" style="display:none">
+          <div class="cockpit-banner">
+            <div class="cockpit-title-row">
+              <div class="cockpit-icon">📐</div>
+              <div>
+                <div class="cockpit-title">工作流模板与工程协议库 (Templates & Protocols)</div>
+                <div class="cockpit-sub">经生产验证的标准 DAG 流水线蓝图与企业级自动化 SOP</div>
+              </div>
+            </div>
+            <button class="btn-action primary" onclick="toast('正在新建自定义工作流模板…')">＋ 新建模板</button>
+          </div>
+
+          <div class="cockpit-stat-grid">
+            <div class="cockpit-stat-card">
+              <span class="cockpit-stat-label">官方预设模板</span>
+              <span class="cockpit-stat-val tabular-nums">8 个标准模版</span>
+            </div>
+            <div class="cockpit-stat-card">
+              <span class="cockpit-stat-label">Schema 契约标准</span>
+              <span class="cockpit-stat-val tabular-nums">v2.4 (Strict)</span>
+            </div>
+            <div class="cockpit-stat-card">
+              <span class="cockpit-stat-label">脱敏协议遵从率</span>
+              <span class="cockpit-stat-val tabular-nums" style="color:#047857">100%</span>
+            </div>
+            <div class="cockpit-stat-card">
+              <span class="cockpit-stat-label">累计派生实例</span>
+              <span class="cockpit-stat-val tabular-nums">128 个运行</span>
+            </div>
+          </div>
+
+          <div class="cockpit-section">
+            <div class="cockpit-section-head">
+              <span class="cockpit-section-title">生产级交付流水线模板</span>
+            </div>
+            <div class="template-grid">
+              <div class="tpl-card">
+                <div class="tpl-head">
+                  <span class="tpl-title">标准三阶段研发交付流 (Three-Stage Delivery)</span>
+                  <span class="subgroup-badge running">推荐</span>
+                </div>
+                <div class="tpl-desc">实施规划与架构协议 → 核心代码实现 → 人类专家质量风控门禁，适合绝大多数功能开发。</div>
+                <div class="tpl-tags">
+                  <span class="tpl-tag">架构规划</span>
+                  <span class="tpl-tag">TDD 驱动</span>
+                  <span class="tpl-tag">专家门禁</span>
+                </div>
+                <button class="btn-apply-tpl" onclick="openTab('new-req')">以此模板发起新需求</button>
+              </div>
+
+              <div class="tpl-card">
+                <div class="tpl-head">
+                  <span class="tpl-title">敏捷故障定界与热修补流 (Root-Cause Hotfix)</span>
+                  <span class="subgroup-badge warning">排障</span>
+                </div>
+                <div class="tpl-desc">白盒故障复现 → 最小修补实现 → 防回归自动化验证，适合线上缺陷紧急闭环。</div>
+                <div class="tpl-tags">
+                  <span class="tpl-tag">根因定位</span>
+                  <span class="tpl-tag">回归拦截</span>
+                  <span class="tpl-tag">即时签署</span>
+                </div>
+                <button class="btn-apply-tpl" onclick="openTab('new-req')">以此模板发起新需求</button>
+              </div>
+
+              <div class="tpl-card">
+                <div class="tpl-head">
+                  <span class="tpl-title">前后端契约与联调流 (Contract Integration)</span>
+                  <span class="subgroup-badge completed">协同</span>
+                </div>
+                <div class="tpl-desc">OpenAPI 契约生成 → Mock 驱动验证 → 双工位并行实现 → 联调测试。</div>
+                <div class="tpl-tags">
+                  <span class="tpl-tag">并行工位</span>
+                  <span class="tpl-tag">契约对齐</span>
+                </div>
+                <button class="btn-apply-tpl" onclick="openTab('new-req')">以此模板发起新需求</button>
+              </div>
+
+              <div class="tpl-card">
+                <div class="tpl-head">
+                  <span class="tpl-title">代码脱敏与安全出站审计 (Sanitization Audit)</span>
+                  <span class="subgroup-badge running">安全</span>
+                </div>
+                <div class="tpl-desc">敏感资产扫描 → 自动化脱敏转换 → 凭证安全哈希落盘与终审。</div>
+                <div class="tpl-tags">
+                  <span class="tpl-tag">出站安全</span>
+                  <span class="tpl-tag">不可篡改</span>
+                </div>
+                <button class="btn-apply-tpl" onclick="openTab('new-req')">以此模板发起新需求</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- VIEW 7: SCHEDULER LOGS (Tab: logs) -->
+        <div class="tab-page-view" id="viewLogs" style="display:none">
+          <div class="cockpit-banner">
+            <div class="cockpit-title-row">
+              <div class="cockpit-icon">📜</div>
+              <div>
+                <div class="cockpit-title">协调器审计与运行日志 (Scheduler Audit Logs)</div>
+                <div class="cockpit-sub">白盒化事件溯源、主循环轮询流与各工位退出信号记录</div>
+              </div>
+            </div>
+            <button class="btn-action" onclick="toast('正在导出日志包…')">导出日志包</button>
+          </div>
+
+          <div class="cockpit-stat-grid">
+            <div class="cockpit-stat-card">
+              <span class="cockpit-stat-label">今日日志总量</span>
+              <span class="cockpit-stat-val tabular-nums">12,480 条</span>
+            </div>
+            <div class="cockpit-stat-card">
+              <span class="cockpit-stat-label">Error 报错</span>
+              <span class="cockpit-stat-val tabular-nums" style="color:#047857">0 条</span>
+            </div>
+            <div class="cockpit-stat-card">
+              <span class="cockpit-stat-label">Warn 预警</span>
+              <span class="cockpit-stat-val tabular-nums" style="color:#b45309">3 条</span>
+            </div>
+            <div class="cockpit-stat-card">
+              <span class="cockpit-stat-label">日志写入模式</span>
+              <span class="cockpit-stat-val" style="color:var(--primary)">WAL 严格追加</span>
+            </div>
+          </div>
+
+          <div class="cockpit-section">
+            <div class="cockpit-section-head">
+              <span class="cockpit-section-title">实时审计日志流终端 (Auto-Scroll)</span>
+              <div style="display:flex;gap:8px">
+                <button class="pill-btn active">全部 (ALL)</button>
+                <button class="pill-btn">警告 (WARN)</button>
+                <button class="pill-btn">错误 (ERR)</button>
+              </div>
+            </div>
+            <div class="live-events-box" style="height:320px;overflow-y:auto">
+              <div>[11:38:00.102] <span style="color:#047857">[COORDINATOR]</span> Ticking master loop cycle #3412.</div>
+              <div>[11:38:00.120] <span style="color:#047857">[STATE_STORE]</span> Snapshot verification ok. Zero dirty uncommitted entries.</div>
+              <div>[11:38:00.340] <span style="color:#2563eb">[DISPATCH]</span> Task #2 assigned to pane-opencode (PID: 14309).</div>
+              <div>[11:38:01.002] <span style="color:#047857">[COORDINATOR]</span> Active nodes: 1 working, 1 blocked on human gate, 1 completed.</div>
+              <div>[11:38:02.115] <span style="color:#b45309">[GATE]</span> Waiting for human expert signature on 'gate' node...</div>
+              <div>[11:38:03.450] <span style="color:#047857">[HEARTBEAT]</span> Sentinel daemon responded in 7.8ms. Health 100%.</div>
+              <div>[11:38:04.220] <span style="color:#047857">[COW]</span> Reflink APFS snapshot verified. Zero disk fragmentation.</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- VIEW 8: CHECKPOINTS & ROLLBACK (Tab: checkpoints) -->
+        <div class="tab-page-view" id="viewCheckpoints" style="display:none">
+          <div class="cockpit-banner">
+            <div class="cockpit-title-row">
+              <div class="cockpit-icon">📸</div>
+              <div>
+                <div class="cockpit-title">快照中心与现场回溯 (Checkpoints & Rollback)</div>
+                <div class="cockpit-sub">基于 CoW 写时复制的零成本瞬时运行快照，支持任意历史断点一键安全回退</div>
+              </div>
+            </div>
+            <button class="btn-action primary" onclick="toast('📸 正在保存当前运行时快照…')">📸 创建快照</button>
+          </div>
+
+          <div class="cockpit-stat-grid">
+            <div class="cockpit-stat-card">
+              <span class="cockpit-stat-label">存量可用快照</span>
+              <span class="cockpit-stat-val tabular-nums">4 个可用</span>
+            </div>
+            <div class="cockpit-stat-card">
+              <span class="cockpit-stat-label">磁盘快照开销</span>
+              <span class="cockpit-stat-val tabular-nums">1.2 MB (CoW Reflink)</span>
+            </div>
+            <div class="cockpit-stat-card">
+              <span class="cockpit-stat-label">最近快照时间</span>
+              <span class="cockpit-stat-val tabular-nums">3 分钟前</span>
+            </div>
+            <div class="cockpit-stat-card">
+              <span class="cockpit-stat-label">回滚复原耗时</span>
+              <span class="cockpit-stat-val tabular-nums" style="color:#047857">&lt; 80ms</span>
+            </div>
+          </div>
+
+          <div class="cockpit-section">
+            <div class="cockpit-section-head">
+              <span class="cockpit-section-title">检查点历史版本树</span>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:8px">
+              <div class="list-row">
+                <div class="list-main">
+                  <div class="list-title">📸 cp-20261002-0929 · 核心代码实现阶段状态机基线</div>
+                  <div class="list-sub">分支: candidate/0929 · 节点: impl · 关联工位: pane-opencode · 自动生成</div>
+                </div>
+                <button class="btn-action" onclick="toast('✓ 已回退现场至检查点: cp-20261002-0929')">⏪ 回溯至此现场</button>
+              </div>
+
+              <div class="list-row">
+                <div class="list-main">
+                  <div class="list-title">📸 cp-20261002-0845 · 需求规划与架构协议签署通过</div>
+                  <div class="list-sub">分支: candidate/0929 · 节点: req · 关联工位: pane-claude · 阶段收尾快照</div>
+                </div>
+                <button class="btn-action" onclick="toast('✓ 已回退现场至检查点: cp-20261002-0845')">⏪ 回溯至此现场</button>
+              </div>
+
+              <div class="list-row">
+                <div class="list-main">
+                  <div class="list-title">📸 cp-20261001-2210 · 6 分区横向共轴基准线设计基线</div>
+                  <div class="list-sub">分支: main · 历史版本 · 已冻结</div>
+                </div>
+                <button class="btn-action" onclick="toast('✓ 已回退现场至检查点: cp-20261001-2210')">⏪ 回溯至此现场</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- VIEW 9: ARCHIVE REPOSITORY (Tab: archive) -->
+        <div class="tab-page-view" id="viewArchive" style="display:none">
+          <div class="cockpit-banner">
+            <div class="cockpit-title-row">
+              <div class="cockpit-icon">📦</div>
+              <div>
+                <div class="cockpit-title">任务归档与冷存储 (Task Archive)</div>
+                <div class="cockpit-sub">已交付历史工作流、验收凭证、决策签批哈希与产物镜像</div>
+              </div>
+            </div>
+            <button class="btn-action" onclick="toast('正在检索历史归档…')">全文检索</button>
+          </div>
+
+          <div class="cockpit-stat-grid">
+            <div class="cockpit-stat-card">
+              <span class="cockpit-stat-label">已归档任务流</span>
+              <span class="cockpit-stat-val tabular-nums">12 项完成</span>
+            </div>
+            <div class="cockpit-stat-card">
+              <span class="cockpit-stat-label">固化交付产物</span>
+              <span class="cockpit-stat-val tabular-nums">86 个产物</span>
+            </div>
+            <div class="cockpit-stat-card">
+              <span class="cockpit-stat-label">历史平均周期</span>
+              <span class="cockpit-stat-val tabular-nums">1.4h / 需求</span>
+            </div>
+            <div class="cockpit-stat-card">
+              <span class="cockpit-stat-label">存储状态</span>
+              <span class="cockpit-stat-val" style="color:#047857">冷存储不可变</span>
+            </div>
+          </div>
+
+          <div class="cockpit-section">
+            <div class="cockpit-section-head">
+              <span class="cockpit-section-title">已归档工作流列表</span>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:8px">
+              <div class="list-row">
+                <div class="list-main">
+                  <div class="list-title">📦 wf-05 月度运维分析报表生成</div>
+                  <div class="list-sub">归档时间: 2026-10-01 23:40 · 产物: 3 份报表 · 终审: human_expert · 签名通过</div>
+                </div>
+                <div style="display:flex;gap:8px">
+                  <button class="btn-action" onclick="toast('正在调取已归档产物包…')">查看产物</button>
+                  <button class="btn-action" onclick="toast('正在调出验收复盘报告…')">复盘报告</button>
+                </div>
+              </div>
+
+              <div class="list-row">
+                <div class="list-main">
+                  <div class="list-title">📦 wf-00 基础网格系统重构与设计规范对齐</div>
+                  <div class="list-sub">归档时间: 2026-09-30 18:20 · 产物: 11 份源文件 · 验收: 自动化测试 100% 通过</div>
+                </div>
+                <div style="display:flex;gap:8px">
+                  <button class="btn-action" onclick="toast('正在调取已归档产物包…')">查看产物</button>
+                  <button class="btn-action" onclick="toast('正在调出验收复盘报告…')">复盘报告</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- VIEW 10: NEW REQUIREMENT WIZARD (Tab: new-req) -->
+        <div class="tab-page-view" id="viewNewReq" style="display:none">
+          <div class="cockpit-banner">
+            <div class="cockpit-title-row">
+              <div class="cockpit-icon">＋</div>
+              <div>
+                <div class="cockpit-title">发起新生产需求 (Launch New Requirement)</div>
+                <div class="cockpit-sub">定义需求目标、绑定标准交付工作流模板并为工位配置执行机队</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="cockpit-section" style="max-width:720px">
+            <div class="cockpit-section-title">需求基本信息</div>
+            <div style="display:flex;flex-direction:column;gap:12px">
+              <div>
+                <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px">需求主题 / 任务标题</label>
+                <input type="text" placeholder="例如：用户通知中心与 WebSocket 实时广播重构" style="width:100%;height:32px;border:1px solid var(--border-light);border-radius:6px;padding:0 8px;font-size:12px;outline:none" value="工作台统一多页签体系优化">
+              </div>
+
+              <div>
+                <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px">选用工作流模板 (DAG Blueprint)</label>
+                <select class="insp-select" style="width:100%">
+                  <option>标准三阶段研发交付流 (规划 → 实现 → 门禁)</option>
+                  <option>敏捷故障定界与热修补流 (复现 → 修补 → 回归)</option>
+                  <option>前后端契约与联调流 (契约 → Mock → 联调)</option>
+                </select>
+              </div>
+
+              <div>
+                <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px">核心工位执行策略 (Agent Policy)</label>
+                <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px">
+                  <div class="ops-card" style="border-color:var(--primary);background:var(--primary-light)">
+                    <div class="ops-card-head"><span class="ops-name">自动负载均衡</span></div>
+                    <div class="ops-desc">由 Router 实时分派至最优空闲 Agent</div>
+                  </div>
+                  <div class="ops-card">
+                    <div class="ops-card-head"><span class="ops-name">专家重构优先</span></div>
+                    <div class="ops-desc">核心模块优先指定 Claude / Human 专家</div>
+                  </div>
+                  <div class="ops-card">
+                    <div class="ops-card-head"><span class="ops-name">快速吞吐交付</span></div>
+                    <div class="ops-desc">轻量任务优先指派 OpenCode / Codex</div>
+                  </div>
+                </div>
+              </div>
+
+              <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:8px">
+                <button class="btn-action" onclick="closeTab('new-req', event)">取消</button>
+                <button class="btn-action primary" onclick="toast('🚀 需求已成功发起，已自动装配工位并激活 DAG 流水线！');openTab('wf-01')">立即发起工作流</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </main>
+
+      <!-- 4. RIGHT SIDE BAR (Inspector, 300px, light #ffffff) -->
+      <aside class="inspector-panel">
+        <div class="inspector-head">
+          <div style="display:flex;align-items:baseline">
+            <span class="insp-head-title" id="inspHeadTitle">节点属性</span>
+            <span class="insp-head-sub tabular-nums" id="inspNodeId">node_id: impl</span>
+          </div>
+          <span class="status-dot running" id="inspStatusDot" title="当前节点执行中"></span>
+        </div>
+
+        <div class="insp-nav-tabs">
+          <div class="insp-nav-tab active" onclick="switchInspTab(this, 'overview')">概览</div>
+          <div class="insp-nav-tab" onclick="switchInspTab(this, 'tasks')">任务工单</div>
+          <div class="insp-nav-tab" onclick="switchInspTab(this, 'artifacts')">产物与凭证</div>
+          <div class="insp-nav-tab" onclick="switchInspTab(this, 'terminal')">工位终端</div>
+        </div>
+
+        <div class="insp-body" id="inspBody">
+          <!-- Node Properties -->
+          <div class="insp-card">
+            <div class="insp-card-title">当前节点属性</div>
+            <div class="insp-prop-row">
+              <span class="insp-prop-label">节点标题</span>
+              <span class="insp-prop-val" id="inspPropTitle">核心代码实现</span>
+            </div>
+            <div class="insp-prop-row">
+              <span class="insp-prop-label">阶段类型</span>
+              <span class="insp-prop-val" id="inspPropStage">implementation</span>
+            </div>
+            <div class="insp-prop-row">
+              <span class="insp-prop-label">分派工位</span>
+              <span class="insp-prop-val" id="inspPropPane" style="font-family:var(--font-mono);color:var(--primary)">pane-opencode</span>
+            </div>
+            <div class="insp-prop-row">
+              <span class="insp-prop-label">节点状态</span>
+              <span class="insp-prop-val" id="inspPropStatus" style="color:#2563eb">● 运行中 (working)</span>
+            </div>
+          </div>
+
+          <!-- Assign Executor Selector -->
+          <div class="insp-card">
+            <div class="insp-card-title">指定执行者 (Agent Policy)</div>
+            <div style="display:flex;flex-direction:column;gap:8px">
+              <select class="insp-select" id="agentSelector" onchange="onAgentChanged(this.value)">
+                <option value="opencode">opencode (核心开发 / 高效执行)</option>
+                <option value="claude">claude (全能型架构 / 复杂重构)</option>
+                <option value="codex">codex (精准交付 / 算法编写)</option>
+                <option value="human">human (人类专家 / 终审确认)</option>
+              </select>
+              <div style="font-size:11px;color:var(--text-muted);line-height:1.4">
+                策略路由: 动态感知负载，门禁节点自动提升至专家工位。
+              </div>
+            </div>
+          </div>
+
+          <!-- Executor Self-Check -->
+          <div class="insp-card">
+            <div style="display:flex;align-items:center;justify-content:space-between">
+              <div class="insp-card-title">执行者自检 (Self-Check)</div>
+              <span class="self-check-badge pass" id="selfCheckBadge">已通过</span>
+            </div>
+            <div class="check-list">
+              <div class="check-item">
+                <span class="check-icon">✓</span>
+                <span>代码静态检查 0 error</span>
+              </div>
+              <div class="check-item">
+                <span class="check-icon">✓</span>
+                <span>脱敏与安全凭证 100% 遵从</span>
+              </div>
+            </div>
+            <button class="btn-recheck" onclick="runSelfCheck()">
+              <span>重新自检</span>
+            </button>
+          </div>
+
+          <!-- Wireframe preview card matching sketch -->
+          <div class="wireframe-box">
+            <span class="wireframe-label">DAG 节点局部拓扑视图</span>
+          </div>
+
+          <!-- Human Gate Card -->
+          <div class="gate-decision-box" id="gateCard">
+            <div class="gate-title">⚠️ 人类专家门禁决策 (Human Gate)</div>
+            <div class="gate-desc">强门禁节点执行完毕，系统已完成自检与脱敏。请核验无误后予以批准放行。</div>
+            <div class="gate-actions">
+              <button class="btn-gate reject" onclick="toast('已记录打回批注并注入协调员')">批注打回</button>
+              <button class="btn-gate pass" onclick="approveGate()">✓ 批准放行 (Pass)</button>
+            </div>
+          </div>
+
+          <!-- TTY Output Box -->
+          <div class="insp-card">
+            <div class="insp-card-title">工位现场输出 (Live TTY)</div>
+            <div class="tty-box" id="ttyBox">
+              $ herdr pane attach w1:opencode<br>
+              [Agent] Task #2 implementation in progress...<br>
+              [Agent] 44px Coaxial Baseline verified: 0 jumps.<br>
+              [Agent] Zero dark background detected. Pure light.
+            </div>
+          </div>
+        </div>
+      </aside>
+    </div>
+
+    <!-- 5. LIGHT BOTTOM BAR (28px fixed) -->
+    <footer class="light-bottom-bar">
+      <div class="bottom-status-left">
+        <div class="bottom-indicator">
+          <span class="indicator-pip" id="bottomIndicatorPip"></span>
+          <span id="bottomIndicatorText">Controller 正常调度</span>
+        </div>
+        <span class="bottom-ticker" id="bottomTicker">工作流: 统一待办工作台与登录重构 · 阶段: 实现 · 分支: candidate/0929</span>
+      </div>
+
+      <div class="bottom-status-right">
+        <span>活跃执行者: <b style="color:var(--text-main)">4</b></span>
+        <span>轮询延迟: <b style="color:var(--text-main)">8ms</b></span>
+        <span class="bottom-link" onclick="openTab('controller')">▲ Controller 控制台</span>
+      </div>
+    </footer>
+  </div>
+
+  <div id="toast" style="position:fixed;bottom:40px;left:50%;transform:translateX(-50%);background:#16171b;color:#fff;padding:8px 16px;border-radius:6px;font-size:12px;display:none;z-index:9999"></div>
+
+  <script>
+    const mockWorkflows = [
+      { id: 'wf-01', title: '统一待办工作台与登录重构', branch: 'candidate/0929', router: 'auto (动态负载)', status: 'running' },
+      { id: 'wf-02', title: '质量与风控专家门禁', branch: 'candidate/gate-audit', router: 'human (终审专家)', status: 'decision' },
+      { id: 'wf-03', title: '支付中心对接与结算流', branch: 'candidate/pay-v2', router: 'codex (精准交付)', status: 'running' },
+      { id: 'wf-04', title: '审计日志与链路追踪', branch: 'fix/audit-telemetry', router: 'claude (重构专家)', status: 'running' },
+      { id: 'wf-05', title: '月度运维分析报表生成', branch: 'feat/report-cron', router: 'system (定时任务)', status: 'completed' }
+    ];
+
+    const systemTabs = {
+      'controller': { title: '🎮 Controller 控制台', viewId: 'viewController', dot: 'running' },
+      'dashboard': { title: '📊 全局仪表板', viewId: 'viewDashboard', dot: 'running' },
+      'ops': { title: '🖥️ 运维与工位驾驶舱', viewId: 'viewOps', dot: 'running' },
+      'alerts': { title: '🔔 告警与异常中心', viewId: 'viewAlerts', dot: 'decision' },
+      'templates': { title: '📐 模板规范资产库', viewId: 'viewTemplates', dot: 'completed' },
+      'logs': { title: '📜 调度审计日志', viewId: 'viewLogs', dot: 'running' },
+      'checkpoints': { title: '📸 快照与回溯中心', viewId: 'viewCheckpoints', dot: 'running' },
+      'archive': { title: '📦 任务归档库', viewId: 'viewArchive', dot: 'completed' },
+      'new-req': { title: '＋ 发起新需求', viewId: 'viewNewReq', dot: 'decision' }
+    };
+
+    let state = {
+      sidebarCollapsed: false,
+      openTabIds: ['wf-01', 'wf-02'],
+      activeWfId: 'wf-01',
+      schedulerPaused: false
+    };
+
+    function toast(msg) {
+      const t = document.getElementById('toast');
+      t.textContent = msg;
+      t.style.display = 'block';
+      setTimeout(() => { t.style.display = 'none'; }, 2400);
+    }
+
+    function toggleSidebar() {
+      state.sidebarCollapsed = !state.sidebarCollapsed;
+      const sb = document.getElementById('sidebar');
+      const expandBtn = document.getElementById('btnExpandSidebar');
+      if (state.sidebarCollapsed) {
+        sb.classList.add('collapsed');
+        expandBtn.classList.add('visible');
+        toast('侧边栏已收起 (⌘B)');
+      } else {
+        sb.classList.remove('collapsed');
+        expandBtn.classList.remove('visible');
+        toast('侧边栏已展开 (⌘B)');
+      }
+    }
+
+    document.addEventListener('keydown', (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'b') {
+        e.preventDefault();
+        toggleSidebar();
+      }
+      if (e.key === 'Escape') {
+        closeMoreDropdown();
+      }
+    });
+
+    document.addEventListener('click', (e) => {
+      const moreBtn = document.getElementById('btnMoreActions');
+      const moreDrop = document.getElementById('moreDropdown');
+      if (moreBtn && !moreBtn.contains(e.target) && moreDrop && !moreDrop.contains(e.target)) {
+        closeMoreDropdown();
+      }
+    });
+
+    function toggleMoreDropdown(e) {
+      e.stopPropagation();
+      const drop = document.getElementById('moreDropdown');
+      drop.classList.toggle('visible');
+    }
+
+    function closeMoreDropdown() {
+      const drop = document.getElementById('moreDropdown');
+      if (drop) drop.classList.remove('visible');
+    }
+
+    function renderTabs() {
+      const container = document.getElementById('wfTabsList');
+      container.innerHTML = state.openTabIds.map(id => {
+        const isActive = id === state.activeWfId;
+
+        // Check if system tab
+        if (systemTabs[id]) {
+          const sys = systemTabs[id];
+          const dotClass = (id === 'controller' && state.schedulerPaused) ? 'decision' : sys.dot;
+          return `
+            <div class="wf-tab ${isActive ? 'active' : ''}" onclick="switchTab('${id}')">
+              <span class="status-dot ${dotClass}"></span>
+              <span class="tab-title">${sys.title}</span>
+              <span class="tab-close" onclick="closeTab('${id}', event)" title="关闭页签">×</span>
+            </div>
+          `;
+        }
+
+        // Workflow tab
+        const wf = mockWorkflows.find(w => w.id === id);
+        if (!wf) return '';
+        const badge = wf.status === 'decision' ? '<span class="tab-badge">! 1</span>' : '';
+        return `
+          <div class="wf-tab ${isActive ? 'active' : ''}" onclick="switchTab('${wf.id}')">
+            <span class="status-dot ${wf.status}"></span>
+            <span class="tab-title">${wf.title}</span>
+            ${badge}
+            <span class="tab-close" onclick="closeTab('${wf.id}', event)" title="关闭页签">×</span>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function openTab(id) {
+      closeMoreDropdown();
+      if (!state.openTabIds.includes(id)) {
+        state.openTabIds.push(id);
+      }
+      switchTab(id);
+    }
+
+    function openWorkflowTab(id) {
+      openTab(id);
+    }
+
+    function openControllerTab() {
+      openTab('controller');
+    }
+
+    function switchTab(id) {
+      state.activeWfId = id;
+      if (!state.openTabIds.includes(id)) {
+        state.openTabIds.push(id);
+      }
+      renderTabs();
+      updateNavigationHighlight();
+
+      // Hide all workspace views
+      const canvasWrap = document.getElementById('canvasWrap');
+      if (canvasWrap) canvasWrap.style.display = 'none';
+
+      Object.values(systemTabs).forEach(sys => {
+        const el = document.getElementById(sys.viewId);
+        if (el) el.style.display = 'none';
+      });
+
+      // Show targeted view
+      if (systemTabs[id]) {
+        const targetView = document.getElementById(systemTabs[id].viewId);
+        if (targetView) targetView.style.display = 'flex';
+
+        updateInspectorForSystemTab(id);
+        const bottomTicker = document.getElementById('bottomTicker');
+        if (bottomTicker) {
+          bottomTicker.textContent = `视图: ${systemTabs[id].title} · 状态: 就绪 · 模式: 原生独立 Tab`;
+        }
+        toast(`已切换至: ${systemTabs[id].title} (Tab 页签)`);
+        return;
+      }
+
+      // Workflow View
+      if (canvasWrap) canvasWrap.style.display = 'flex';
+      selectNode('impl');
+
+      const wf = mockWorkflows.find(w => w.id === id);
+      if (wf) {
+        document.getElementById('metaBranch').textContent = wf.branch;
+        document.getElementById('bottomTicker').textContent = `工作流: ${wf.title} · 状态: ${wf.status} · 分支: ${wf.branch}`;
+        toast(`已切换至工作流: ${wf.title}`);
+      }
+    }
+
+    function switchWorkflow(id) {
+      switchTab(id);
+    }
+
+    function closeTab(id, e) {
+      e.stopPropagation();
+      const idx = state.openTabIds.indexOf(id);
+      if (idx === -1) return;
+      state.openTabIds.splice(idx, 1);
+      if (state.activeWfId === id) {
+        if (state.openTabIds.length > 0) {
+          const nextIdx = Math.min(idx, state.openTabIds.length - 1);
+          switchTab(state.openTabIds[nextIdx]);
+        } else {
+          state.activeWfId = null;
+          renderTabs();
+          toast('所有工作区页签已关闭');
+        }
+      } else {
+        renderTabs();
+      }
+    }
+
+    function updateNavigationHighlight() {
+      // 1. Sidebar items highlight
+      document.querySelectorAll('.sidebar-item').forEach(el => el.classList.remove('active'));
+      const activeId = state.activeWfId;
+      if (activeId === 'controller') {
+        const item = document.getElementById('sidebarControllerItem');
+        if (item) item.classList.add('active');
+      } else if (activeId === 'templates') {
+        const item = document.getElementById('sidebarTemplatesItem');
+        if (item) item.classList.add('active');
+      } else if (activeId === 'logs') {
+        const item = document.getElementById('sidebarLogsItem');
+        if (item) item.classList.add('active');
+      } else if (activeId === 'archive') {
+        const item = document.getElementById('sidebarArchiveItem');
+        if (item) item.classList.add('active');
+      } else if (activeId === 'ops') {
+        const item = document.getElementById('sidebarPanesItem');
+        if (item) item.classList.add('active');
+      } else if (activeId && activeId.startsWith('wf-')) {
+        const item = document.getElementById('sidebar' + activeId.charAt(0).toUpperCase() + activeId.slice(1).replace('-', ''));
+        if (item) item.classList.add('active');
+      }
+
+      // 2. Left Rail items highlight
+      document.querySelectorAll('.rail-item').forEach(el => el.classList.remove('active'));
+      if (activeId === 'dashboard') {
+        document.getElementById('railNavDashboard')?.classList.add('active');
+      } else if (activeId === 'ops') {
+        document.getElementById('railNavOps')?.classList.add('active');
+      } else if (activeId === 'alerts') {
+        document.getElementById('railNavAlerts')?.classList.add('active');
+      } else if (activeId === 'templates') {
+        document.getElementById('railNavTemplates')?.classList.add('active');
+      } else {
+        document.getElementById('railNavWorkbench')?.classList.add('active');
+      }
+    }
+
+    function updateInspectorForSystemTab(tabKey) {
+      const titleEl = document.getElementById('inspPropTitle');
+      const idEl = document.getElementById('inspNodeId');
+      const stageEl = document.getElementById('inspPropStage');
+      const paneEl = document.getElementById('inspPropPane');
+      const statusEl = document.getElementById('inspPropStatus');
+      const gateCard = document.getElementById('gateCard');
+      const ttyBox = document.getElementById('ttyBox');
+      const headTitle = document.getElementById('inspHeadTitle');
+
+      if (headTitle) headTitle.textContent = '系统模块属性';
+      if (idEl) idEl.textContent = `view_id: ${tabKey}`;
+      if (gateCard) gateCard.style.display = 'none';
+
+      if (tabKey === 'controller') {
+        if (titleEl) titleEl.textContent = 'Controller 调度主循环';
+        if (stageEl) stageEl.textContent = 'coordinator_kernel';
+        if (paneEl) paneEl.textContent = 'daemon:herdr-controller';
+        if (statusEl) {
+          statusEl.textContent = state.schedulerPaused ? '⏸ 调度已暂停' : '● 循环调度中 (1000ms)';
+          statusEl.style.color = state.schedulerPaused ? '#b45309' : '#047857';
+        }
+        if (ttyBox) ttyBox.innerHTML = '$ tail -f ~/.herdr-controller/herdr-controller.log<br>[Controller] Heartbeat tick #2104 OK.<br>[Controller] 4/18 active panes bound.';
+      } else if (tabKey === 'dashboard') {
+        if (titleEl) titleEl.textContent = '全工厂指标看板聚合';
+        if (stageEl) stageEl.textContent = 'telemetry_metrics';
+        if (paneEl) paneEl.textContent = 'service:telemetry';
+        if (statusEl) { statusEl.textContent = '● 指标实时流就绪'; statusEl.style.color = '#047857'; }
+        if (ttyBox) ttyBox.innerHTML = '$ herdr stats --stream<br>[Metrics] throughput: 38 tasks/24h<br>[Metrics] average_latency: 8ms';
+      } else if (tabKey === 'ops') {
+        if (titleEl) titleEl.textContent = '工位池与拓扑探针';
+        if (stageEl) stageEl.textContent = 'pane_pool_supervisor';
+        if (paneEl) paneEl.textContent = 'daemon:herdr-sentinel';
+        if (statusEl) { statusEl.textContent = '● 18 个 Pane 巡检健康'; statusEl.style.color = '#047857'; }
+        if (ttyBox) ttyBox.innerHTML = '$ herdr sentinel check<br>[Sentinel] 18 panes scanned: 0 orphan processes.<br>[Sentinel] CoW memory leak: 0 bytes.';
+      } else if (tabKey === 'alerts') {
+        if (titleEl) titleEl.textContent = '告警与阻断监听器';
+        if (stageEl) stageEl.textContent = 'incident_manager';
+        if (paneEl) paneEl.textContent = 'daemon:herdr-notifier';
+        if (statusEl) { statusEl.textContent = '⚠️ 1 条门禁等待'; statusEl.style.color = '#b45309'; }
+        if (ttyBox) ttyBox.innerHTML = '$ herdr alert list<br>[Alert] [P2] wf-02 gate waiting for human signature.<br>[Notifier] Alert push sent to console.';
+      } else if (tabKey === 'templates') {
+        if (titleEl) titleEl.textContent = '模板 Schema 验证引擎';
+        if (stageEl) stageEl.textContent = 'blueprint_validator';
+        if (paneEl) paneEl.textContent = 'herdr/workflow.py';
+        if (statusEl) { statusEl.textContent = '✓ Schema 校验合规'; statusEl.style.color = '#047857'; }
+        if (ttyBox) ttyBox.innerHTML = '$ herdr template validate --all<br>[Template] 8 official templates passed YAML schema.<br>[Template] 0 protocol drift detected.';
+      } else if (tabKey === 'logs') {
+        if (titleEl) titleEl.textContent = '调度日志追踪引擎';
+        if (stageEl) stageEl.textContent = 'audit_log_stream';
+        if (paneEl) paneEl.textContent = 'herdr/state_db.py';
+        if (statusEl) { statusEl.textContent = '● 实时持久化写入中'; statusEl.style.color = '#047857'; }
+        if (ttyBox) ttyBox.innerHTML = '$ herdr log follow --coordinator<br>[Log] WAL file: state.db sync OK.<br>[Log] Buffer flush: 0 unwritten bytes.';
+      } else if (tabKey === 'checkpoints') {
+        if (titleEl) titleEl.textContent = 'CoW 快照与版本管理器';
+        if (stageEl) stageEl.textContent = 'checkpoint_snapshot';
+        if (paneEl) paneEl.textContent = 'herdr/runtime_state.py';
+        if (statusEl) { statusEl.textContent = '✓ 4 个检查点镜像完整'; statusEl.style.color = '#047857'; }
+        if (ttyBox) ttyBox.innerHTML = '$ herdr checkpoint list<br>[CoW] 4 checkpoints verified via SHA256 checksum.<br>[CoW] Restore latency benchmark: 76ms.';
+      } else if (tabKey === 'archive') {
+        if (titleEl) titleEl.textContent = '冷存储归档索引库';
+        if (stageEl) stageEl.textContent = 'cold_storage_archive';
+        if (paneEl) paneEl.textContent = 'herdr/trajectory.py';
+        if (statusEl) { statusEl.textContent = '● 12 个历史任务归档'; statusEl.style.color = '#047857'; }
+        if (ttyBox) ttyBox.innerHTML = '$ herdr archive inspect<br>[Archive] 12 workflows compressed.<br>[Archive] Artifact signatures all valid.';
+      } else if (tabKey === 'new-req') {
+        if (titleEl) titleEl.textContent = '生产需求向导服务';
+        if (stageEl) stageEl.textContent = 'requirement_launchpad';
+        if (paneEl) paneEl.textContent = 'herdr/factory.py';
+        if (statusEl) { statusEl.textContent = '● 等待提交需求'; statusEl.style.color = '#2563eb'; }
+        if (ttyBox) ttyBox.innerHTML = '$ herdr launch --interactive<br>[Factory] Awaiting user requirement title and template...';
+      }
+    }
+
+    function selectNode(type) {
+      document.querySelectorAll('.flow-node-card').forEach(c => c.classList.remove('selected'));
+      const card = event && event.currentTarget ? event.currentTarget : document.querySelector('.flow-node-card:nth-child(3)');
+      if (card) card.classList.add('selected');
+
+      const titleEl = document.getElementById('inspPropTitle');
+      const idEl = document.getElementById('inspNodeId');
+      const gateCard = document.getElementById('gateCard');
+      const stageEl = document.getElementById('inspPropStage');
+      const paneEl = document.getElementById('inspPropPane');
+      const statusEl = document.getElementById('inspPropStatus');
+      const agentSel = document.getElementById('agentSelector');
+      const ttyBox = document.getElementById('ttyBox');
+      const headTitle = document.getElementById('inspHeadTitle');
+
+      if (headTitle) headTitle.textContent = '节点属性';
+
+      if (type === 'req') {
+        titleEl.textContent = '实施规划与协议';
+        idEl.textContent = 'node_id: req';
+        stageEl.textContent = 'requirements';
+        paneEl.textContent = 'pane-claude';
+        statusEl.textContent = '✓ 已完成 (done)';
+        statusEl.style.color = '#16a34a';
+        agentSel.value = 'claude';
+        gateCard.style.display = 'none';
+        ttyBox.innerHTML = '$ herdr pane attach w1:claude<br>[Claude] Architecture spec finalized.<br>[Claude] Verification baseline signed.';
+      } else if (type === 'impl') {
+        titleEl.textContent = '核心代码实现';
+        idEl.textContent = 'node_id: impl';
+        stageEl.textContent = 'implementation';
+        paneEl.textContent = 'pane-opencode';
+        statusEl.textContent = '● 运行中 (working)';
+        statusEl.style.color = '#2563eb';
+        agentSel.value = 'opencode';
+        gateCard.style.display = 'none';
+        ttyBox.innerHTML = '$ herdr pane attach w1:opencode<br>[Agent] Task #2 implementation in progress...<br>[Agent] 44px Coaxial Baseline verified: 0 jumps.<br>[Agent] Zero dark background detected. Pure light.';
+      } else if (type === 'gate') {
+        titleEl.textContent = '质量与风控门禁';
+        idEl.textContent = 'node_id: gate';
+        stageEl.textContent = 'human_gate';
+        paneEl.textContent = 'pane-human';
+        statusEl.textContent = '⚠️ 待专家放行 (blocked)';
+        statusEl.style.color = '#d97706';
+        agentSel.value = 'human';
+        gateCard.style.display = 'flex';
+        ttyBox.innerHTML = '$ herdr pane attach w1:human<br>[Supervisor] Safety and desensitization verification passed.<br>[Gate] Awaiting human expert signature.';
+      }
+    }
+
+    function approveGate() {
+      toast('✓ 专家门禁批准放行！正在向下一阶段推进…');
+      const gateCard = document.getElementById('gateCard');
+      gateCard.style.opacity = '0.5';
+      setTimeout(() => {
+        gateCard.style.display = 'none';
+        gateCard.style.opacity = '1';
+      }, 1200);
+    }
+
+    function toggleSchedulerPause() {
+      state.schedulerPaused = !state.schedulerPaused;
+      const btn = document.getElementById('btnPauseScheduler');
+      const icon = document.getElementById('pauseIcon');
+      const label = document.getElementById('pauseLabel');
+      const pip = document.getElementById('bottomIndicatorPip');
+      const indicatorText = document.getElementById('bottomIndicatorText');
+      const cockpitStatus = document.getElementById('cockpitSchedStatus');
+      const bannerHeartbeat = document.getElementById('bannerLiveHeartbeat');
+
+      if (state.schedulerPaused) {
+        btn.classList.add('paused');
+        icon.textContent = '▶';
+        label.textContent = '恢复调度';
+        pip.classList.add('paused');
+        indicatorText.textContent = 'Controller 调度已暂停';
+        if (cockpitStatus) {
+          cockpitStatus.textContent = '⏸ 调度已暂停';
+          cockpitStatus.className = 'cockpit-stat-val';
+          cockpitStatus.style.color = '#b45309';
+        }
+        if (bannerHeartbeat) {
+          bannerHeartbeat.textContent = '调度主循环已挂起 (Paused)';
+        }
+        renderTabs();
+        toast('⚠️ 协调器调度主循环已挂起 (Paused)');
+      } else {
+        btn.classList.remove('paused');
+        icon.textContent = '⏸';
+        label.textContent = '暂停调度';
+        pip.classList.remove('paused');
+        indicatorText.textContent = 'Controller 正常调度';
+        if (cockpitStatus) {
+          cockpitStatus.textContent = '● 调度运行中';
+          cockpitStatus.className = 'cockpit-stat-val status-running';
+          cockpitStatus.style.color = '';
+        }
+        if (bannerHeartbeat) {
+          bannerHeartbeat.textContent = '循环调度活跃 · 1000ms';
+        }
+        renderTabs();
+        toast('✓ 协调器调度主循环已恢复 (Resumed)');
+      }
+    }
+
+    function stepWorkflow() {
+      toast('⏭ 单步推进：已触发下一个就绪节点的拓扑装配与工位启动');
+    }
+
+    function nextStage() {
+      toast('🚀 进入下一阶段：已向协调器提交阶段迁移指令');
+    }
+
+    function runSelfCheck() {
+      const badge = document.getElementById('selfCheckBadge');
+      badge.textContent = '巡检中…';
+      badge.className = 'self-check-badge';
+      toast('🛡️ 正在执行全量静态语义及脱敏安全自检…');
+      setTimeout(() => {
+        badge.textContent = '已通过';
+        badge.className = 'self-check-badge pass';
+        toast('✓ 自检完成: 0 error, 100% 规则合规');
+      }, 900);
+    }
+
+    function confirmDeregister() {
+      if (confirm('确认注销当前工厂项目？该操作将回收全部 18 个物理工位并清除本地运行时。')) {
+        toast('⚠️ 已提交注销请求，正在回收工厂工位资源…');
+      }
+    }
+
+    function onAgentChanged(val) {
+      toast(`工位执行者已重定向为: ${val}`);
+    }
+
+    function switchInspTab(el, tab) {
+      document.querySelectorAll('.insp-nav-tab').forEach(t => t.classList.remove('active'));
+      el.classList.add('active');
+      toast(`切换检查器视图: ${tab}`);
+    }
+
+    function switchCanvasView(view) {
+      document.getElementById('btnViewDAG').classList.toggle('active', view === 'dag');
+      document.getElementById('btnViewList').classList.toggle('active', view === 'list');
+      toast(`已切换画布视图: ${view.toUpperCase()}`);
+    }
+
+    function renderPanesGrid() {
+      const container = document.getElementById('paneGridContainer');
+      if (!container) return;
+      const agents = ['opencode', 'claude', 'human', 'codex'];
+      let html = '';
+      for (let i = 1; i <= 18; i++) {
+        const isWorking = i <= 4;
+        const agent = isWorking ? agents[i - 1] : 'idle';
+        html += `
+          <div class="pane-unit ${isWorking ? 'working' : ''}" onclick="toast('正在挂接工位 #pane-${i} 终端…')">
+            <div class="pane-head">
+              <span class="pane-id">pane-${i}</span>
+              <span class="status-dot ${isWorking ? 'running' : 'completed'}"></span>
+            </div>
+            <span class="pane-agent">${agent}</span>
+          </div>
+        `;
+      }
+      container.innerHTML = html;
+    }
+
+    renderTabs();
+    renderPanesGrid();
+  </script>
+</body>
+</html>
