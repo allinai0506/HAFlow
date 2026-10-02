@@ -1,7 +1,15 @@
 # Handoff：`sanitize_clone_sandbox` 删除 launch identity，导致所有新 Task 派发失败
 
-> 状态：**待修复**。当前线上靠一个用户级 git ignore 绕过（见 §6），该绕过不通用。
-> 环境：`~/HAFlow`，release `22fb1a9d2463a766e884ca6d429f01915660050f`，分支基线 `6d5ba25`
+> 状态：**已修复并部署**（2026-10-02 19:55）。
+> 修复提交 `26d9bb2` fix(worker): preserve launch identity across sandbox sanitize during task dispatch
+> 合并提交 `c0cf2a0`（Merge PR #141，分支 `fix/worker-clone-cleanup-preserve-launch-identity`）
+> 采用方案：本文 §4 推荐的 `git clean -fd -e .herdr-launch-identity.json`（§5 的三个否决方案均未被采纳）
+> 回归测试：`tests/test_worker_sanitize_sandbox.py`（随 PR 一并入库，双向断言identity 存活 + 其他未跟踪文件仍被清理）
+> §6 的全局 git ignore 绕过**已移除**，当前环境无任何 workaround 残留。
+>
+> 以下正文按交接当时的证据原样保留，未因修复而改写；仅本状态块与 §6 末尾的绕过小节为事后追加。
+>
+> 原始报告环境：`~/HAFlow`，release `22fb1a9d2463a766e884ca6d429f01915660050f`，分支基线 `6d5ba25`
 > 复现仓库：`/Users/user/nexusarchive-worktrees/gemini`（worktree，`.git` 为文件型指针）
 > 报告时间：2026-10-02
 
@@ -172,19 +180,21 @@ clone 内将没有任何归属标记，`probe_resources` 只能返回 `unknown`
 | 修法 `clean -fd -e .herdr-launch-identity.json` | **存活** ✓ | 已清 ✓ |
 | 修法下对已忽略文件 | 保留（`-fd` 不带 `-x`，语义未变）✓ | — |
 
-### 当前生效的临时绕过（**非修复**，通用性差）
+### 当时的临时绕过（**已于修复后移除**）
 
 ```bash
-# 已写入 /Users/user/.config/git/ignore 第 5-9 行
+# 曾写入 /Users/user/.config/git/ignore 第 5-9 行
 .herdr-launch-identity.json
 ```
 
 作用：让 `git clean -fd` 跳过该文件。**只对这台机器的 git 环境有效**，
 其他机器 / 其他仓库 / CI 环境仍会踩。
 
-回退方式：删除 `~/.config/git/ignore` 中该行及其上方 4 行注释。
-
-> ⚠️ 若采纳 §4 修法并验证通过，**请移除该全局 ignore**，避免长期掩盖同类缺陷。
+**现状（2026-10-02 19:55 后）**：`26d9bb2` 修复部署后，该全局 ignore 已删除，
+`~/.config/git/ignore` 恢复为原始 4 行。独立复核（`git check-ignore` 判定未被忽略）
+已确认部署版 `sanitize_clone_sandbox` 在**无任何绕过**的干净环境下即可保住 identity，
+同时 `junk.txt`、`junkdir/`、`reset --hard` 行为不变，且 `initial=False` 归属回读
+（原 `herdr-worker.py:955` 崩溃点）正常通过。
 
 ---
 
