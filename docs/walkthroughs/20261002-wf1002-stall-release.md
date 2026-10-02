@@ -51,13 +51,15 @@ SHA 缺口由真实调用链确认：实现8be已发布 task ref，但 source HE
 
 实现提交/运行release为 `d93a3c807eea7427d34cf92730c446e1bb3c27c4`，git archive 448文件内容/执行位验证与321源码指纹一致；archive SHA256 `d45b4f5b459c6738c12f6278179e4bb1204a52736e2ae0692292e7041054af96`，manifest `b2b25b7bdde1df94a1f8fe296b0a4b39440634320af67bc7fba4f5f8cfc51bd2`。固定回滚为前一81dc三plist，不退到c0cf；证据 `.omc/stall-pin-release-prepared.json`、`stall-pin-release-backup.json`。
 
-三服务一次bootout等待旧label/PID完全退出后bootstrap成功：Controller43390、Console43392、Sentinel43394；实际进程命令、启动SHA/import根/component hashes全为d93制品，三个关键HTTP均200，无新启动traceback。Notifier原PID/plist不变，未动正在执行的业务Pane。读取/导入release均禁止字节码缓存。证据 `.omc/stall-pin-release-runtime.json`。后续旁路Observer仍记录jev422，未改变执行状态，不作为这两项修复的PASS或新增业务阻塞。
+三服务一次bootout等待旧label/PID完全退出后bootstrap成功：Controller43390、Console43392、Sentinel43394；实际进程命令、启动SHA/import根/component hashes全为d93制品，三个关键HTTP均200，无新启动traceback。Notifier原PID/plist不变，未动正在执行的业务Pane。本主控读取/导入release设置禁止字节码缓存。证据 `.omc/stall-pin-release-runtime.json`。后续旁路Observer仍记录jev422，未改变执行状态，不作为这两项修复的PASS或新增业务阻塞。
 
 旧review空候选intent `fd532f0970ab4ddeae9a1045cc731ec9` 经canonical CLI完整原生资源核查为absent，apply后为resources_absent（不是cancelled）。旧失败已通知协调器，遗留review notified闩但没有ReviewTask；短暂pause目标、核对没有ReviewTask且协调器done seq347后，通过现有Controller `clear_stage_advance` 仅删除本Run的review键，resume由正常新Controller重驱。所有其他stage键不变，未伪造业务结论。证据 `.omc/stall-pin-review-redrive.json`。
 
 23:09真实新自动链已完成：Controller记录 `[STAGE ADVANCED DIRECT] ... node=review tasks=wf-project-1002-01-review-auto`；Task working v4，codex Pane `w13:p26`，Run `run_4c7508b036f04d6b84e6ebc1832dd013`，intent `5c5850ff94c244ad944540e8dc76bea2`。candidate、baseline和真实clone HEAD全部8be，source HEAD仍1638608；独立任务分支 `agent/codex/test-wf-project-1002-01-review-auto`，未借用实现分支。原测试completed v8，candidate/baseline/verified均8be。新review的实时原生身份与持久launch tag匹配，证据 `.omc/stall-pin-live-after-release.json`。
 
 因此本轮候选传递缺陷已部署且真实自动调用链验收通过；旧模型超时已自然恢复，不宣称Provider根因被修复。业务review正在运行，wrapup/PR/业务验收/整个Workflow完成仍未宣称通过。
+
+结案时严格制品attestation因59份新字节码显示unknown，写入者未确认；源码没有漂移。已从原d93提交重新生成git archive（摘要与原制品一致），先逐文件/执行位核对，再使用现有verify_snapshot清除缓存，attestation恢复d93。没有因此再重启服务或改业务代码；保留 `.omc/stall-pin-final-attestation.json` 原unknown及缓存时间证据，不将首次结案检查说成成功。
 
 ## 业务验收边界
 
