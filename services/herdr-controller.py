@@ -3241,11 +3241,13 @@ def is_node_complete(workflow_id, node_id):
     node = next((n for n in cfg.get("nodes", []) if n.get("id") == node_id), {})
     required_ids = node.get("required_task_ids")
     if not active and required_ids is None:
+        # Current-candidate verifier reuse is a real replacement for execution;
+        # missing/stale evidence remains false, including pending obligations.
         return _reverification_satisfies_node(workflow_id, node_id)
 
     if scheduler_core is not None:
         return scheduler_core.node_is_complete(tasks, required_ids)
-    if required_ids is not None:
+    if required_ids is not None or any(t.get("replacement_pending") for t in tasks):
         return False
     return all(
         t.get("status") in (

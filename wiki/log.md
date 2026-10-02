@@ -1870,3 +1870,5 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 2026-10-02：工作流可靠性 PR 阶段完成同快照 CLI/loop 命令绑定及新鲜全量验证（3137 passed、2 skipped、157 subtests passed）；用户授权创建 PR 与本地重启，明确保留 Console 热补丁界面，只更新 Controller/Sentinel。详见 docs/walkthroughs/20261002-workflow-reliability.md；服务实际切换另行记录，不等于生产业务验收。
 
 - 2026-10-02：补齐 installer 的 macOS Bash 3.2 nounset 空数组兼容；真实 /bin/bash + 临时 HOME 覆盖四种服务布局和重启/不重启，保留参数引用与发布校验。根因及回归入口见 docs/lessons/lessons-learned.md §121；本次为代码修复，未再次更新运行服务。
+
+- 2026-10-02：修复 wf1002 已复现的 Worker 身份清理、旧标记空白/软换行边界、非 Git 文档 onto、替换义务及 Git Run 定义隔离。更新 [[task-lifecycle]] 与 CLI 参考，工程教训 §122。新作废保留义务，显式 abandon 不复活，合法当前候选复用与未知证据分开。本地验证记录 docs/walkthroughs/20261002-wf1002-stall-fixes.md；不声称服务已加载或生产工作流已恢复。

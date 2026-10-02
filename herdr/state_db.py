@@ -6367,6 +6367,10 @@ def transition_task(
         validate_task_transition(old_status, to_status, force=force)
 
         meta = dict(metadata or {})
+        if to_status == "superseded" and old_status != "superseded":
+            # New invalidation never silently deletes an output obligation.
+            # An explicit abandon is the only opt-out; old rows stay compatible.
+            meta.setdefault("replacement_pending", True)
         forbidden = set(meta.keys()) & PROTECTED_TASK_METADATA_FIELDS
         if forbidden:
             raise ValueError(f"Cannot overwrite protected task fields via metadata: {sorted(forbidden)}")

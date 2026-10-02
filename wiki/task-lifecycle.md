@@ -444,7 +444,7 @@ Evidence:
 
 Git 模式任务的 Agent 完成、提交成功和集成成功是三种事实。节点依赖完成须等到 integrated/cleanup_ready/cleaned；非 Git 任务保持既有完成集合。Controller、node-status 与 ops-center 复用 `scheduler.node_is_complete`，不得在 completed 时提前启动 verifier。
 
-可在节点配置 `required_task_ids` 声明已批准计划的必需 Task。未派发项、缺失替代项、替代环拒绝完成；只沿真实 `superseded_by` 链解析替代，不按任务名猜谱系。没有配置清单时保持兼容。该清单由节点完成读取方实施，独立调用验证汇聚接口时仍须由调用者先完成节点依赖校验。
+可在节点配置 `required_task_ids` 声明已批准计划的必需 Task。未派发项、缺失替代项、替代环拒绝完成；只沿真实 `superseded_by` 链解析替代，不按任务名猜谱系。新的 `superseded` 转换由 SQLite 原子写入 `replacement_pending=true`，即使没有必需清单，也不会因作废而删除未完成义务。无此字段的历史记录保留旧兼容。该清单由节点完成读取方实施，独立调用验证汇聚接口时仍须由调用者先完成节点依赖校验。
 
 Worktree Clone 转换须保留 source 本地 heads，而不是只把它们映射到 origin/*；`--update-head-ok` 仅在临时 no-checkout 独立元数据导入时使用，不作用于 source。源 dev/anchor 落后于远端时仍需正常同步并重跑验证；保留分支不能代替新基线验收。Candidate 选择排除 superseded/有 superseded_by 的旧任务。
 
@@ -528,3 +528,23 @@ Evidence:
 - `tests/test_workflow_close_claim.py`
 
 相关页面：[[preflight-and-health]]。
+
+## 启动清理、替换与 Run 定义
+
+`FACT` Git Worker 在创建克隆后写入本次启动身份；分支清理只保留调用方传入的本次启动标签，普通源目录残留标签仍清理。reset/clean 非零及被恢复成外来身份的标签在 Pane 创建前失败。Pane 已创建后的失败保留克隆及恢复意图，不删除资源身份依据。
+
+`FACT` `supersede --by` 链接替代任务；替代者必须属于同一 Workflow 和节点，已知跨节点链接在写入前拒绝。不带替代者的新作废保留自动替换义务。`supersede --abandon --reason` 明确撤销本任务义务，不能与 `--by` 同用，不能通过放弃前任改写已有链接。放弃谱系头可解除其前任自动义务，但不能解除配置里的 `required_task_ids`。无可执行任务且存在明确放弃记录时调度返回 wait，不重新 initial launch；节点全部放弃不等同满足其输出合同。合法 verifier reuse 仍以当前候选、策略和冻结 episode 的事实满足执行义务；缺失/过期证据不能满足该义务。完成核心不可用且没有合法复用证据时，待替换义务保持拒绝。
+
+`FACT` 可读取的 Git 和 context Run 定义均冻结为 Run 私有配置；校验与冻结使用同一次读取的映射。注册拒绝已知属于其他 Workflow 的必需任务 ID，保留未知未来 ID 和自定义配置。提供显式 `workflow_file` 的 replay 保留其既有私有定义。缺路径的旧注册签名保持兼容；缺配置并不证明 Run 可执行。新建私有快照失败不注册 Run。
+
+`FACT` 已完成且 `integration_mode=none` 的依赖不提供远端 `--onto`，共享文档按受管接口交接。Git 初次提示声明 `WORKER_WRITE_ROOT`，业务相对路径以本工位 clone 为根；来源目录文件不能冒充该 Task 的产物。旧终端完成标记接受冒号后水平空白，检测先解除软换行，再校验完整任务 ID；输入净化使用相同分隔与边界。
+
+Evidence:
+- `services/herdr-worker.py#sanitize_clone_sandbox` / `#main`
+- `herdr/state_db.py#transition_task`
+- `herdr/scheduler.py#node_is_complete`
+- `herdr/direct_dispatch.py#plan_stage_dispatch` / `#candidate_branch_for_node`
+- `herdr/projects.py#register_workflow`
+- `herdr/completion.py#marker_present` / `#sanitize_prompt`
+- `tests/test_workflow_stall_regressions.py`
+- `tests/test_reverification_controller.py`

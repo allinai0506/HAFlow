@@ -5748,3 +5748,23 @@ scripts/install-herdr-console.sh 的 plist_paths、SNAPSHOT_SERVICES、KICKSTART
 ### 验证命令 / 关联证据
 
 `pytest -q tests/test_installer_bash_compat.py tests/test_service_release.py tests/test_install_herdr_console_deploy.py`。红绿日志见本任务 .omc/bash3-red.log、bash3-final-subset.log；本记录不声称新的本地部署。
+
+---
+
+## 122. 启动身份与替换义务必须穿过真实生产接缝（2026-10-02）
+
+### 问题背景
+
+wf-project-1002-01 的 plan Worker 在创建 Pane 后报 FileNotFoundError：早期 .herdr-launch-identity.json 被真实 git clean -fd 删除，随后身份更新失败。临时 Git + Worker.main 新建分支/onto 回归均失败；旧测试 mock 了 Worker 返回值，没有执行这个接缝。同一工作流中，完成标记冒号后空格漏识别，文档本地分支误作为远端 onto，作废任务缺替代者却允许节点放行。
+
+### 经验教训
+
+内部文件分类只影响产物核算，不能保护文件免受 Git 清理。新状态字段只加在 CLI 会漏掉 Kernel/Store/CAS。测试直接 save_task 构造 superseded 会跳过原子转换新增的义务字段，也可能掩盖合法候选复用被错误阻断。配置校验后重新读取再冻结会引入检查与使用不同输入的窗口。
+
+### 操作规范
+
+仅保留本次启动身份，清理失败在 Pane 前停止，Pane 后失败保留恢复依据。替换义务在既有 SQLite 转换事务统一生成；缺替代者拒绝，显式放弃与配置必需项分开，当前候选 verifier reuse 继续按真实证据满足。Run 冻结同一次已校验读取，不继承已知外来任务绑定。marker 接受格式必须与 prompt 净化同形，软换行后仍检验完整 ID。
+
+### 验证命令 / 关联证据
+
+`pytest -q tests/test_workflow_stall_regressions.py tests/test_reverification_controller.py tests/test_state_transition_gateway.py`；真实 Git、临时 SQLite、CLI→Kernel→Store→Controller 读取与外部 UI 传输替换分别验证。红绿证据 .omc/stall-red-*.log、stall-green-*.log；最终全量和生产边界见 docs/walkthroughs/20261002-wf1002-stall-fixes.md。不把本地绿色称为生产恢复。
