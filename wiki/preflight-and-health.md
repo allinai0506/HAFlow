@@ -98,3 +98,24 @@ Evidence:
 - `herdr/deep_preflight.py:choose_smoke_command` (pi `--print --no-session`)
 - `services/herdr-worker.py#ensure_claude_workspace_trust`
 - `RULES.md:探针无副作用安全`
+
+## 可执行证据与运行版本边界
+
+`FACT` binary_present、request_verified、interactive_ready 是三种独立事实。exit0、空响应或仅输入回显不构成请求成功；认证、模型和配额错误保留具体分类。不可查询的配额标 unknown。预检身份包括实际二进制/配置内容指纹及启动模式，漂移或 TTL 到期需重新探测；二进制读取有大小、时间及读取前后身份边界。
+
+`FACT` Worker 在业务提示派发前核对真实工位身份及交互就绪，信任对话不会被自动批准。启动失败且副作用无法证明时保留资源与恢复记录，不凭 Pane ID 回收未知工位。原生 API 不提供可靠的 stop/kill 或 Tab 实例身份时，不假设具备此能力。
+
+`FACT` 安装器构造完整 ProgramArguments 与对应 HERDR_ROOT，release 内容、执行权限必须与新鲜 git archive 一致；安装器验证后清理字节码缓存，release 服务禁写缓存，运行证明遇到未验证缓存时标 unknown。先验证整个 plist 批次，再逐文件原子发布并备份；未知用户参数要求明确迁移。运行启动指纹和配置指纹分开：doctor 没有当前运行证明时返回 unknown，不把配置更新、目录名称或 HTTP200 当作实际加载版本。自动测试只使用临时 HOME/DB 和 --no-restart，不调用 launchctl。
+
+Evidence:
+- `herdr/deep_preflight.py#preflight_identity`
+- `herdr/agent_adapter.py#startup_readiness`
+- `services/herdr-worker.py#main`
+- `herdr/service_release.py#publish_service_plists`
+- `herdr/service_release.py#runtime_fingerprint`
+- `scripts/install-herdr-console.sh`
+- `tests/test_preflight_runtime_contract.py`
+- `tests/test_worker_readiness_contract.py`
+- `tests/test_service_release.py`
+
+相关页面：[[task-lifecycle]]。

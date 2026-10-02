@@ -2834,6 +2834,8 @@ def process_completion_observation(task, now=None):
     supplies the observed status/version to the StateStore CAS.
     """
     task = task or {}
+    if task.get("completion_protocol") == "receipt-v1":
+        return False
     task_id = task.get("task_id")
     if not task_id:
         return False
@@ -2908,6 +2910,28 @@ def process_completion_observation(task, now=None):
         pass
     enqueue_coordinator_event(result.get("task") or task, "done")
     return True
+
+
+_COMPLETION_SCHEDULING_CURSORS = {}
+
+
+def process_structured_completions(now=None):
+    """Advance a bounded scheduling cursor even when execution gates reject."""
+    from herdr.completion_receipt import consume_completion_receipt, pending_completion_task_ids
+    store = _get_store()
+    key = str(Path(store.db_path).resolve())
+    if key not in _COMPLETION_SCHEDULING_CURSORS and len(_COMPLETION_SCHEDULING_CURSORS) >= 64:
+        _COMPLETION_SCHEDULING_CURSORS.pop(next(iter(_COMPLETION_SCHEDULING_CURSORS)))
+    cursor = _COMPLETION_SCHEDULING_CURSORS.get(key, 0)
+    rows = pending_completion_task_ids(store, now=now, after_rowid=cursor, with_rows=True)
+    if not rows and cursor:
+        rows = pending_completion_task_ids(store, now=now, after_rowid=0, with_rows=True)
+        _COMPLETION_SCHEDULING_CURSORS[key] = 0
+    accepted = 0
+    for task_id, rowid in rows:
+        _COMPLETION_SCHEDULING_CURSORS[key] = rowid
+        accepted += bool(consume_completion_receipt(task_id, store, now=now).get('accepted'))
+    return accepted
 
 
 def process_all_completion_observations(now=None):
@@ -4238,12 +4262,17 @@ def try_direct_stage_advance(item):
             "--agent", "auto",
             "--task-type", spec["task_type"],
             "--integration-mode", spec["integration_mode"],
+            "--dispatch-role", spec.get("dispatch_role") or "worker",
+            "--dispatch-round", str(spec.get("dispatch_round") or 1),
             "--goal", spec["goal"],
             "--prompt", spec["prompt"],
             # Workflow execution identity: sibling launches keep distinct
             # run_ids but share one execution_id for the same execution.
             "--execution-id", workflow_id,
         ]
+
+        if spec.get("artifact_mode"):
+            cmd += ["--artifact-mode", spec["artifact_mode"]]
 
         if spec.get("onto_branch"):
             cmd += ["--onto", spec["onto_branch"]]
@@ -7698,7 +7727,7 @@ def _dispatch_supervisor_retry(task, decision, store):
     prior_intent = _latest_action_dispatch_intent(
         task, store, "RETRY", intervention_id=intervention_id,
     )
-    if prior_intent is not None:
+    if prior_intent is not None and task.get("completion_protocol") != "receipt-v1":
         payload = dict(prior_intent.get("payload") or {})
         payload["dispatch_recovered"] = True
         store.record_event(
@@ -7720,13 +7749,18 @@ def _dispatch_supervisor_retry(task, decision, store):
     working_context_ref = _working_context_ref_for_task(task, store=store)
     if working_context_ref:
         payload["working_context_id"] = working_context_ref
-    store.record_event(
-        "retry_dispatch_intent", payload,
-        workflow_id=task.get("workflow_id"),
-        node_id=task.get("node") or task.get("stage"),
-        task_id=task.get("task_id"), agent_id=task.get("agent"),
-        source="supervisor", run_id=run_id_for_task(task),
-    )
+    if task.get("completion_protocol") != "receipt-v1":
+        store.record_event(
+            "retry_dispatch_intent", payload,
+            workflow_id=task.get("workflow_id"),
+            node_id=task.get("node") or task.get("stage"),
+            task_id=task.get("task_id"), agent_id=task.get("agent"),
+            source="supervisor", run_id=run_id_for_task(task),
+        )
+
+    from herdr.workflow_docs import cli_path
+    import shlex
+    artifact_task = shlex.quote(str(cli_path()))
     prompt = (
         "Supervisor requested a fresh retry iteration for this task.\n"
         "Continue the existing rework/fix loop now, run the configured work "
@@ -7737,9 +7771,21 @@ def _dispatch_supervisor_retry(task, decision, store):
         "HERDR_RETRY_ACTION:RETRY\n"
         + (f"WORKING_CONTEXT_REF:{working_context_ref}\n" if working_context_ref else "")
         + "Load the immutable context by reference before retrying.\n"
-        + (f"herdr-task working-context get --context-id {working_context_ref}\n"
+        + (f"{artifact_task} working-context get --context-id {working_context_ref}\n"
            if working_context_ref else "")
     )
+    if task.get("completion_protocol") == "receipt-v1":
+        from herdr.supervisor_delivery import deliver
+        def send(pane, text):
+            from herdr.supervisor_delivery import current_delivery_task
+            pane = current_delivery_task(task, store, native=True)['pane_id']
+            result = subprocess.run(
+                ["herdr", "agent", "prompt", str(pane), text],
+                text=True, capture_output=True, timeout=SUPERVISOR_VERIFY_DISPATCH_TIMEOUT,
+            )
+            if result.returncode != 0:
+                raise RuntimeError("Supervisor native prompt transport failed")
+        return deliver(task, store, 'RETRY', payload, prompt, send)
     result = subprocess.run(
         ["herdr", "agent", "prompt", str(pane_id), prompt],
         text=True, capture_output=True, timeout=SUPERVISOR_VERIFY_DISPATCH_TIMEOUT,
@@ -7824,7 +7870,7 @@ def _dispatch_supervisor_verification(task, decision, store):
     prior_intent = _latest_verification_dispatch_intent(
         task, store, intervention_id=intervention_id,
     )
-    if prior_intent is not None:
+    if prior_intent is not None and task.get("completion_protocol") != "receipt-v1":
         payload = dict(prior_intent.get("payload") or {})
         payload["dispatch_recovered"] = True
         store.record_event(
@@ -7852,20 +7898,26 @@ def _dispatch_supervisor_verification(task, decision, store):
     working_context_ref = _working_context_ref_for_task(task, store=store)
     if working_context_ref:
         dispatch_payload["working_context_id"] = working_context_ref
-    store.record_event(
-        "verification_dispatch_intent",
-        dispatch_payload,
-        workflow_id=task.get("workflow_id"),
-        node_id=task.get("node") or task.get("stage"),
-        task_id=task.get("task_id"),
-        agent_id=task.get("agent"),
-        source="supervisor",
-        run_id=run_id_for_task(task),
-    )
+    if task.get("completion_protocol") != "receipt-v1":
+        store.record_event(
+            "verification_dispatch_intent",
+            dispatch_payload,
+            workflow_id=task.get("workflow_id"),
+            node_id=task.get("node") or task.get("stage"),
+            task_id=task.get("task_id"),
+            agent_id=task.get("agent"),
+            source="supervisor",
+            run_id=run_id_for_task(task),
+        )
+
+    from herdr.workflow_docs import cli_path
+    import shlex
+    artifact_task = shlex.quote(str(cli_path()))
+    artifact_loop = shlex.quote(str(cli_path().with_name('herdr-loop')))
     prompt = (
         "Supervisor requested a fresh verification execution for this task.\n"
         "Run the existing project verification/test loop now (including "
-        "~/HAFlow/bin/herdr-loop eval when configured), inspect the resulting "
+        f"{artifact_loop} eval when configured), inspect the resulting "
         ".herdr-loop/EVAL_DONE.json, and only report completion after the new "
         "verification evidence is written.\n"
         f"HERDR_VERIFY_INTERVENTION_ID:{intervention_id}\n"
@@ -7873,9 +7925,21 @@ def _dispatch_supervisor_verification(task, decision, store):
         "HERDR_VERIFY_ACTION:VERIFY\n"
         + (f"WORKING_CONTEXT_REF:{working_context_ref}\n" if working_context_ref else "")
         + "Load the immutable context by reference before verification.\n"
-        + (f"herdr-task working-context get --context-id {working_context_ref}\n"
+        + (f"{artifact_task} working-context get --context-id {working_context_ref}\n"
            if working_context_ref else "")
     )
+    if task.get("completion_protocol") == "receipt-v1":
+        from herdr.supervisor_delivery import deliver
+        def send(pane, text):
+            from herdr.supervisor_delivery import current_delivery_task
+            pane = current_delivery_task(task, store, native=True)['pane_id']
+            result = subprocess.run(
+                ["herdr", "agent", "prompt", str(pane), text],
+                text=True, capture_output=True, timeout=SUPERVISOR_VERIFY_DISPATCH_TIMEOUT,
+            )
+            if result.returncode != 0:
+                raise RuntimeError("Supervisor native prompt transport failed")
+        return deliver(task, store, 'VERIFY', dispatch_payload, prompt, send)
     result = subprocess.run(
         ["herdr", "agent", "prompt", str(pane_id), prompt],
         text=True,
@@ -8434,17 +8498,8 @@ def _intervention_execution_evidence(task, intervention, store):
 
 
 def _latest_verification_dispatch(task, store=None):
-    store = store or _get_store()
-    from herdr.trajectory import run_id_for_task
-    rows = store.list_events(
-        task_id=task.get("task_id"), event_type="verification_dispatched",
-        source="supervisor", limit=100, desc=True,
-    )
-    expected_run = run_id_for_task(task)
-    for event in rows:
-        if event.get("run_id") == expected_run:
-            return event
-    return None
+    from herdr.completion import latest_verification_dispatch
+    return latest_verification_dispatch(task, store or _get_store())
 
 
 def _latest_action_dispatch_intent(task, store, action, intervention_id=None):
@@ -8476,120 +8531,18 @@ def _latest_verification_dispatch_intent(task, store=None, intervention_id=None)
 
 
 def _latest_retry_dispatch(task, store=None):
-    store = store or _get_store()
-    from herdr.trajectory import run_id_for_task
-    expected_run = run_id_for_task(task)
-    for event in store.list_events(
-        task_id=task.get("task_id"), event_type="retry_dispatched",
-        source="supervisor", limit=100, desc=True,
-    ):
-        if event.get("run_id") == expected_run:
-            return event
-    return None
+    from herdr.completion import latest_retry_dispatch
+    return latest_retry_dispatch(task, store or _get_store())
 
 
 def _retry_execution_complete_for_rework(task, store=None):
-    """Old deliverables cannot heal a task while a new RETRY lacks dispatch."""
-    store = store or _get_store()
-    try:
-        from herdr.trajectory import run_id_for_task
-        rows = store.list_interventions(
-            run_id=run_id_for_task(task), task_id=task.get("task_id"),
-        )
-        active = [
-            row for row in rows
-            if row.get("action") == "RETRY" and row.get("status") != "superseded"
-        ]
-        latest_agent_done = max(
-            (
-                float(entry.get("timestamp") or 0)
-                for entry in (task.get("status_history") or [])
-                if isinstance(entry, dict) and entry.get("to") == "agent_done"
-            ),
-            default=0.0,
-        )
-        active = [
-            row for row in active
-            if float(row.get("requested_at") or 0) >= latest_agent_done
-        ]
-        if not active:
-            return True
-        latest = max(active, key=lambda row: float(row.get("requested_at") or 0))
-        if latest.get("status") in ("requested", "running", "failed"):
-            dispatch = _latest_retry_dispatch(task, store)
-            return bool(
-                dispatch
-                and (dispatch.get("payload") or {}).get("intervention_id")
-                == latest.get("intervention_id")
-            )
-        return True
-    except Exception:
-        return False
+    from herdr.completion import retry_execution_complete_for_rework
+    return retry_execution_complete_for_rework(task, store or _get_store())
 
 
 def _verification_execution_complete_for_rework(task, store=None):
-    """Old deliverables cannot heal a Task while a new VERIFY lacks evidence."""
-    store = store or _get_store()
-    try:
-        from herdr.trajectory import run_id_for_task
-        verify_rows = store.list_interventions(
-            run_id=run_id_for_task(task),
-            task_id=task.get("task_id"),
-        )
-        active_verify = [
-            row for row in verify_rows
-            if row.get("action") == "VERIFY"
-            and row.get("status") != "superseded"
-        ]
-        latest_agent_done = max(
-            (
-                float(entry.get("timestamp") or 0)
-                for entry in (task.get("status_history") or [])
-                if isinstance(entry, dict) and entry.get("to") == "agent_done"
-            ),
-            default=0.0,
-        )
-        active_verify = [
-            row for row in active_verify
-            if float(row.get("requested_at") or 0) >= latest_agent_done
-        ]
-        if not active_verify:
-            return True
-        latest_verify = max(
-            active_verify,
-            key=lambda row: float(row.get("requested_at") or 0),
-        ) if active_verify else None
-        dispatch = _latest_verification_dispatch(task, store)
-        dispatch_intervention_id = (
-            (dispatch.get("payload") or {}).get("intervention_id")
-            if dispatch is not None else None
-        )
-        if latest_verify and latest_verify.get("status") in ("requested", "running", "failed"):
-            if dispatch_intervention_id != latest_verify.get("intervention_id"):
-                return False
-        if dispatch is None:
-            latest = max(
-                active_verify,
-                key=lambda row: float(row.get("requested_at") or 0),
-            )
-            return latest.get("status") not in ("requested", "running", "failed")
-        intervention_id = (dispatch.get("payload") or {}).get("intervention_id")
-        for event in store.list_events(
-            task_id=task.get("task_id"), event_type="verification_completed",
-            source="trajectory", limit=100, desc=True,
-        ):
-            if event.get("run_id") != run_id_for_task(task):
-                continue
-            payload = event.get("payload") or {}
-            verification = payload.get("verification") or {}
-            if (
-                verification.get("intervention_id") == intervention_id
-                and float(event.get("timestamp") or 0) >= float(dispatch.get("timestamp") or 0)
-            ):
-                return True
-        return False
-    except Exception:
-        return False
+    from herdr.completion import verification_execution_complete_for_rework
+    return verification_execution_complete_for_rework(task, store or _get_store())
 
 
 _INTERVENTION_EXECUTION_OWNER = f"controller:{os.getpid()}:{uuid.uuid4()}"
@@ -8955,6 +8908,12 @@ def check_task_tests_completed(task, store=None, now=None):
     test_evidence = supervisor_evidence.extract_test_evidence(clone_path)
     if not test_evidence:
         return None
+    if task.get('completion_protocol') == 'receipt-v1' and (
+            test_evidence.get('task_id') != task.get('task_id')
+            or test_evidence.get('run_id') != task.get('run_id')
+            or test_evidence.get('epoch') != task.get('completion_epoch')):
+        # Never rebind an old or unattached evaluator snapshot to a current Run.
+        return None
 
     # 3. Build deterministic evidence fingerprint
     evidence_id = supervisor_evidence.build_test_evidence_id(test_evidence)
@@ -8992,6 +8951,15 @@ def check_task_tests_completed(task, store=None, now=None):
     # 6. Materialize the compact verification receipt as immutable evidence.
     verification = {
         "type": "tests_completed",
+        "epoch": test_evidence.get("epoch"),
+        "candidate_sha": test_evidence.get("candidate_sha"),
+        "execution_mode": test_evidence.get("execution_mode", "unknown"),
+        "command": test_evidence.get("command"),
+        "environment": test_evidence.get("environment"),
+        "source_fingerprint": test_evidence.get("source_fingerprint"),
+        "exit_code": test_evidence.get("exit_code"),
+        "counts": {"pass": test_evidence.get("passed_tests"),
+                   "fail": test_evidence.get("failing_count"), "skip": test_evidence.get("skipped_tests")},
         "passed": bool(test_evidence.get("converged", False)),
         "evidence_id": evidence_id,
         "passed_tests": test_evidence.get("passed_tests"),
@@ -9169,6 +9137,8 @@ def handle_event(task_id, agent_status):
             maybe_ack_on_working(task_id)
 
     elif agent_status in {"idle", "done"}:
+        if task.get("completion_protocol") == "receipt-v1":
+            return
         if current_status in {"dispatched", "working", "rework"}:
             has_done_marker, screen = _completion_marker_snapshot(task)
             if agent_status == "idle" and not has_done_marker:
@@ -9644,6 +9614,7 @@ def registry_watcher():
             tasks = load_tasks()
             # Sentinel records observations; Controller is the only actor that
             # promotes a confirmed completion or blocker to a task transition.
+            process_structured_completions(now=now)
             process_all_completion_observations(now=now)
             process_blocked_observations()
             tasks = load_tasks()
@@ -9881,6 +9852,18 @@ def report_integration_gaps():
 
 
 def main():
+    try:
+        from herdr import service_release
+        import_root = Path(service_release.__file__).resolve().parent.parent
+        fingerprint = service_release.runtime_fingerprint(
+            import_root, [Path(__file__).resolve(), Path(service_release.__file__).resolve(),
+                          import_root / "herdr" / "state_store.py", import_root / "herdr" / "kernel.py"],
+        )
+    except Exception:
+        fingerprint = {"running_sha": "unknown", "running_import_root": "unknown", "component_versions": {}}
+    print("HERDR_RUNTIME_FINGERPRINT=" + json.dumps(
+        {"service": "com.user.herdr-controller", "pid": os.getpid(), **fingerprint}, sort_keys=True,
+    ), flush=True)
     print("[CONTROLLER V12] starting")
     print(f"[REGISTRY] {TASKS_FILE}")
     print(

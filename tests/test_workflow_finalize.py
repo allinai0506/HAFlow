@@ -419,17 +419,19 @@ class TestCloseWorkflow(FinalizeTestBase):
         self.assertTrue(os.path.exists(by_id["t-docs"]["clone_path"]))
         self.assertFalse(os.path.exists(by_id["t-sup"]["clone_path"]))
 
-        # 批量路径同样必须落记录字段(与单任务 finalize 一致)
+        # Legacy fixtures persist only Pane IDs: unknown instance ownership
+        # must retain panes and cannot authorize transcript collection.
         records = {t["task_id"]: t for t in self._read_tasks()}
-        self.assertFalse(records["t-git"]["pane_retained"])
-        self.assertEqual(records["t-git"]["resource_retention"], "purged")
-        self.assertTrue(records["t-git"].get("evidence"))
+        self.assertTrue(records["t-git"]["pane_retained"])
+        self.assertEqual(records["t-git"]["resource_retention"], "retained")
+        self.assertIsNone(by_id["t-git"]["evidence"])
 
         closed_tabs = [
             args[2] for args in self.herdr_calls
             if args[:2] == ("tab", "close")
         ]
-        self.assertEqual(sorted(closed_tabs), ["wA:t8", "wA:t9"])
+        self.assertEqual(closed_tabs, [])
+        self.assertEqual(set(report["tabs_skipped"]), {"wA:t8", "wA:t9"})
 
         entry = self._read_workflows()["wf-test"]
         self.assertEqual(entry["status"], "completed")
@@ -452,6 +454,9 @@ class TestCloseWorkflow(FinalizeTestBase):
         with self._patch_herdr():
             report = _ht.close_workflow("wf-test", dry_run=True)
         self.assertEqual(report["tasks"][0]["action"], "dry-run")
+        self.assertFalse(report["tasks"][0]["pane_closed"])
+        self.assertFalse(report["tasks"][0]["clone_deleted"])
+        self.assertTrue(report["tasks"][0]["clone_would_delete"])
         self.assertTrue(os.path.exists(report["tasks"][0]["clone_path"]))
         self.assertEqual(self._read_tasks()[0]["status"], "cleaned")
         self.assertEqual(
@@ -474,7 +479,8 @@ class TestCloseWorkflow(FinalizeTestBase):
         ])
         with self._patch_herdr():
             report = _ht.close_workflow("wf-test")
-        self.assertEqual(report["tabs_closed"], ["wA:t8"])
+        self.assertEqual(report["tabs_closed"], [])
+        self.assertIn("ownership unknown", report["tabs_skipped"]["wA:t8"])
         self.assertIn("wA:t9", report["tabs_skipped"])
         self.assertIn("wA:pFOREIGN", report["tabs_skipped"]["wA:t9"])
         self.assertNotIn(("tab", "close", "wA:t9"), self.herdr_calls)
@@ -498,7 +504,7 @@ class TestCloseWorkflow(FinalizeTestBase):
             set(report["tabs_skipped"]), {"wA:t8", "wA:t9"})
 
     def test_dry_run_reflects_ownership_check(self):
-        # dry-run 必须与真实执行同一套归属校验,不能高估将关闭的 tab
+        # No live ownership probe in dry-run: IDs alone cannot predict closing.
         self.live_panes.append(
             {"pane_id": "wA:pFOREIGN", "tab_id": "wA:t9"})
         self._write_tasks([
@@ -507,24 +513,26 @@ class TestCloseWorkflow(FinalizeTestBase):
         ])
         with self._patch_herdr():
             report = _ht.close_workflow("wf-test", dry_run=True)
-        self.assertEqual(report["tabs_closed"], ["wA:t8"])
+        self.assertEqual(report["tabs_closed"], [])
+        self.assertEqual(report["tabs_would_close"], [])
         self.assertIn("wA:t9", report["tabs_skipped"])
-        self.assertIn("wA:pFOREIGN", report["tabs_skipped"]["wA:t9"])
+        self.assertEqual(report["tabs_skipped"]["wA:t9"], "pane list unavailable")
         # dry-run 仍不得产生任何关闭动作
         closes = [
             a for a in self.herdr_calls
             if (a[0], a[1]) in {("pane", "close"), ("tab", "close")}
         ]
         self.assertEqual(closes, [])
+        self.assertEqual(self.herdr_calls, [])
 
-    def test_include_coordinator_closes_coordinator_pane(self):
+    def test_include_coordinator_retains_unknown_instance(self):
         self._write_tasks([self._mk_task("t-ok", status="cleaned",
                                          integration_ref="refs/x")])
         with self._patch_herdr():
             report = _ht.close_workflow(
                 "wf-test", include_coordinator=True)
-        self.assertTrue(report["coordinator_closed"])
-        self.assertIn(("pane", "close", "wA:p1"), self.herdr_calls)
+        self.assertFalse(report["coordinator_closed"])
+        self.assertNotIn(("pane", "close", "wA:p1"), self.herdr_calls)
 
     def test_unknown_workflow_exits(self):
         self._write_tasks([])

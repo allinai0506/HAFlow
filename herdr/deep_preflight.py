@@ -2,6 +2,7 @@
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 import json
+import hashlib
 import os
 import re
 import subprocess
@@ -15,6 +16,9 @@ try:
 except ImportError:  # 直接以脚本方式运行: python3 herdr/deep_preflight.py
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from herdr.agent_binary import AGENT_BINARIES, resolve_binary
+
+from herdr.supervisor.state import redact_text
+from herdr.agent_adapter import smoke_response_verified
 
 HOME = Path.home()
 HERDR_DIR = HOME / "herdr"
@@ -82,7 +86,7 @@ PROVIDER_PATTERNS = [
     r"bad gateway",
     r"gateway timeout",
     r"\b50[023]\b",
-    r"model.*not found",
+    r"model.*not[ _]found",
     r"provider.*error",
     r"connection (refused|reset|timed out|failed)",
     r"network.*(error|unreachable|timeout)",
@@ -273,7 +277,7 @@ def version_probe(agent, binary):
     text = (res["stdout"] or res["stderr"]).strip()
     if res["timeout"]:
         return False, "timeout"
-    return res["returncode"] == 0, (text.splitlines()[0][:160] if text else "")
+    return res["returncode"] == 0, (redact_text(text).splitlines()[0][:160] if text else "")
 
 
 def help_probe(binary):
@@ -416,7 +420,7 @@ def smoke_probe(agent, binary, cwd, timeout=None):
                 "adapter": adapter,
                 "status": "TIMEOUT",
                 "note": note,
-                "output": combined[-1200:],
+                "output": redact_text(combined)[-1200:],
             }
 
         if classification == "PROVIDER_ERROR" and attempt == 1 and elapsed <= FAST_RETRY_BUDGET:
@@ -432,27 +436,26 @@ def smoke_probe(agent, binary, cwd, timeout=None):
                 "adapter": adapter,
                 "status": classification,
                 "note": note,
-                "output": combined[-1200:],
+                "output": redact_text(combined)[-1200:],
             }
 
         if res["returncode"] == 0:
-            exact_marker = any(
-                line.strip() == "HERDR_PREFLIGHT_OK"
-                for line in combined.splitlines()
-            )
+            verified = smoke_response_verified(agent, res["stdout"])
             note = (
-                f"真实最小调用成功，协议标记精确 ({elapsed}s)"
-                if exact_marker
-                else f"真实最小调用成功，输出受项目规则影响 ({elapsed}s)"
+                f"真实最小调用成功，响应证据已验证 ({elapsed}s)"
+                if verified
+                else f"退出成功但缺少可验证响应证据 ({elapsed}s)"
             )
             if attempt > 1:
                 note += "；第 2 次重试成功"
             return {
                 "attempted": True,
                 "adapter": adapter,
-                "status": "READY",
+                "status": "READY" if verified else "UNKNOWN",
+                "request_verified": verified,
+                "interactive_ready": None,
                 "note": note,
-                "output": combined[-1200:],
+                "output": redact_text(combined)[-1200:],
             }
 
         return {
@@ -460,8 +463,77 @@ def smoke_probe(agent, binary, cwd, timeout=None):
             "adapter": adapter,
             "status": "ERROR",
             "note": f"真实最小调用失败 code={res['returncode']} ({elapsed}s)",
-            "output": combined[-1200:],
+            "output": redact_text(combined)[-1200:],
         }
+
+
+# Read only known agent configuration locations; never publish their contents.
+CONFIG_PATHS = {
+    "codex": [".codex/config.toml", ".codex/auth.json"],
+    "claude": [".claude.json", ".claude/settings.json"],
+    "opencode": [".config/opencode/opencode.json", ".config/opencode/opencode.jsonc"],
+    "pi": [".pi/agent/settings.json", ".pi/agent/auth.json"],
+    "grok": [".grok/auth.json", ".grok/config.json", ".grok/trusted_folders.toml"],
+    "kimi": [".kimi-code/config.toml", ".kimi-code/credentials/kimi-code.json"],
+    "qodercli": [".qoder-cn/settings.json"],
+}
+
+
+def _file_identity(path, max_bytes):
+    path = Path(path).expanduser().resolve()
+    try:
+        stat = path.stat()
+        if not path.is_file() or stat.st_size > max_bytes:
+            return {"path": str(path), "state": "unknown"}
+        digest = hashlib.sha256()
+        deadline = time.monotonic() + 5
+        with path.open("rb") as source:
+            remaining = max_bytes + 1
+            while remaining:
+                if time.monotonic() >= deadline:
+                    return {"path": str(path), "state": "unknown"}
+                chunk = source.read(min(65536, remaining))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+                digest.update(chunk)
+        if remaining == 0:
+            return {"path": str(path), "state": "unknown"}
+        after = path.stat()
+        if (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns) != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
+            return {"path": str(path), "state": "unknown"}
+        return {"path": str(path), "sha256": digest.hexdigest()}
+    except FileNotFoundError:
+        return {"path": str(path), "state": "missing"}
+    except OSError:
+        return {"path": str(path), "state": "unknown"}
+
+
+def preflight_identity(agent, binary, cwd, launch_mode="noninteractive", config_paths=None):
+    """Read-only identity. Digests contain no configuration or credential values.
+
+    Unsupported/unreadable configuration stays unknown; this is not a claim of
+    effective model discovery or remaining quota. No CLI/model is invoked.
+    """
+    root = Path(cwd).expanduser().resolve()
+    if config_paths is None:
+        config_paths = [Path.home() / name for name in CONFIG_PATHS.get(agent, [])]
+        config_paths += [root / name for name in (
+            ".claude/settings.json", ".claude/settings.local.json", ".codex/config.toml",
+            "opencode.json", "opencode.jsonc",
+        )]
+    environment = {key: value for key, value in os.environ.items()
+                   if key.startswith(("CODEX_", "CLAUDE_", "ANTHROPIC_", "OPENAI_", "OPENCODE_", "PI_", "KIMI_", "GROK_", "QODER_"))}
+    payload = {
+        "agent": agent, "binary": _file_identity(binary, 512 * 1024 * 1024) if binary else {"state": "missing"},
+        "project_root": str(root), "launch_mode": launch_mode,
+        "configuration": [_file_identity(path, 1024 * 1024) for path in config_paths],
+        "environment_sha256": hashlib.sha256(json.dumps(environment, sort_keys=True).encode()).hexdigest(),
+    }
+    fingerprint = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+    return {**payload, "fingerprint": fingerprint,
+            "verifiable": payload["binary"].get("sha256") is not None and
+            all(item.get("state") != "unknown" for item in payload["configuration"])}
 
 
 def inspect(project, deep=False, target_agents=None):
@@ -483,6 +555,10 @@ def inspect(project, deep=False, target_agents=None):
             "agent": agent,
             "binary_name": binary_name,
             "binary": binary,
+            "binary_present": bool(binary),
+            "request_verified": None,
+            "interactive_ready": None,
+            "preflight_identity": preflight_identity(agent, binary, project_root),
             "disabled": agent in disabled,
             "auth_hint": auth_hint(agent),
             "version": "",
@@ -508,6 +584,7 @@ def inspect(project, deep=False, target_agents=None):
 
         if deep and agent not in disabled and binary:
             row["deep"] = smoke_probe(agent, binary, project_root)
+            row["request_verified"] = row["deep"].get("request_verified", False)
 
         if agent in disabled:
             row["final_status"] = "DISABLED"

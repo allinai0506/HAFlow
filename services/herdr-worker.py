@@ -29,19 +29,20 @@ CLONE_ROOT = Path(
 )
 
 
-def run_json(cmd):
+def run_json(cmd, timeout=125):
     result = subprocess.run(
         cmd,
         text=True,
-        capture_output=True
+        capture_output=True,
+        timeout=timeout,
     )
 
     if result.returncode != 0:
-        raise RuntimeError(
-            result.stderr.strip()
-            or result.stdout.strip()
-        )
+        from herdr.supervisor.state import redact_text
+        raise RuntimeError(redact_text(result.stderr.strip() or result.stdout.strip()))
 
+    if len(result.stdout) > 65536:
+        raise RuntimeError("Native response exceeds worker budget")
     return json.loads(result.stdout)
 
 
@@ -502,10 +503,11 @@ def build_baseline_fingerprint(repo):
         )
 
     untracked = {}
+    from herdr.repo_hygiene import is_internal_untracked
 
     for relpath in list_untracked(repo):
-        # Controller 自己的上下文文件不属于业务变化
-        if relpath == ".agent-task-context":
+        # Use the same internal artifact contract as adoption/evaluation.
+        if is_internal_untracked(relpath):
             continue
 
         untracked[relpath] = file_fingerprint(
@@ -614,6 +616,7 @@ def prepare_existing_pane(pane_id, clone):
         ["herdr", "pane", "run", pane_id, f"cd {shlex.quote(str(clone))}"],
         text=True,
         capture_output=True,
+        timeout=10,
     )
     if result.returncode != 0:
         raise RuntimeError(
@@ -623,82 +626,6 @@ def prepare_existing_pane(pane_id, clone):
     time.sleep(0.5)
 
 
-
-def ensure_claude_workspace_trust(repo):
-    repo = str(Path(repo).expanduser().resolve())
-
-    config = Path.home() / ".claude.json"
-
-    if config.exists():
-        data = json.loads(
-            config.read_text(encoding="utf-8")
-        )
-    else:
-        data = {}
-
-    projects = data.setdefault(
-        "projects",
-        {}
-    )
-
-    project = projects.setdefault(
-        repo,
-        {}
-    )
-
-    project["hasTrustDialogAccepted"] = True
-
-    tmp = config.with_suffix(".json.tmp")
-
-    tmp.write_text(
-        json.dumps(
-            data,
-            ensure_ascii=False,
-            indent=2
-        ) + "\n",
-        encoding="utf-8"
-    )
-
-    tmp.replace(config)
-
-    print(
-        f"[CLAUDE PREFLIGHT] trusted={repo}"
-    )
-
-
-def ensure_grok_workspace_trust(repo):
-    repo = str(Path(repo).expanduser().resolve())
-    config = Path.home() / ".grok" / "trusted_folders.toml"
-    try:
-        content = config.read_text(encoding="utf-8") if config.exists() else ""
-        header = f'[folders."{repo}"]'
-        if header not in content:
-            entry = f'\n[folders."{repo}"]\ntrusted = true\ndecided_at = {int(time.time())}\n'
-            config.parent.mkdir(parents=True, exist_ok=True)
-            tmp = config.with_suffix(".toml.tmp")
-            tmp.write_text((content.rstrip() + "\n" + entry).lstrip(), encoding="utf-8")
-            tmp.replace(config)
-        print(f"[GROK PREFLIGHT] trusted={repo}")
-    except Exception as e:
-        print(f"[GROK PREFLIGHT ERROR] failed to trust {repo}: {e}")
-
-
-def ensure_kimi_workspace_trust(repo):
-    repo = str(Path(repo).expanduser().resolve())
-    trust_dir = Path.home() / ".kimi-code" / "workspace-trust"
-    try:
-        trust_dir.mkdir(parents=True, exist_ok=True)
-        user = os.environ.get("USER", "user")
-        h = hashlib.sha256(repo.encode("utf-8")).hexdigest()[:12]
-        filename = f"wd_{user}_{h}"
-        target = trust_dir / filename
-        data = {"root": repo, "trustedAt": int(time.time() * 1000)}
-        tmp = target.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-        tmp.replace(target)
-        print(f"[KIMI PREFLIGHT] trusted={repo}")
-    except Exception as e:
-        print(f"[KIMI PREFLIGHT ERROR] failed to trust {repo}: {e}")
 
 
 def unique_agent_name(task_id, pane_id):
@@ -721,13 +648,8 @@ def unique_agent_name(task_id, pane_id):
 
 
 def start_agent(task_id, agent_kind, pane_id, retries=10, delay=0.5):
-    # Temporary safety valve: OpenCode/Bun has crashed on this machine.
-    # Remove ~/.herdr-controller/opencode-disabled to re-enable OpenCode Workers.
-    if (
-        agent_kind == "opencode"
-        and (Path.home() / ".herdr-controller" / "opencode-disabled").exists()
-    ):
-        agent_kind = "pi"
+    if agent_kind == "opencode" and (Path.home() / ".herdr-controller" / "opencode-disabled").exists():
+        raise RuntimeError("opencode disabled locally; reroute before worker launch")
     last_err = None
     for attempt in range(retries):
         try:
@@ -767,8 +689,63 @@ def start_agent(task_id, agent_kind, pane_id, retries=10, delay=0.5):
     raise last_err
 
 
+
+def verify_request_preflight(agent_kind, cwd):
+    """Real minimal request in the actual launch workspace, before Pane/start."""
+    from herdr.deep_preflight import inspect
+    rows = inspect({"project_root": str(cwd)}, deep=True, target_agents=[agent_kind])
+    if len(rows) != 1 or rows[0].get("agent") != agent_kind:
+        raise RuntimeError("Worker Deep Preflight UNKNOWN: unsupported agent")
+    row = rows[0]
+    if not row.get("request_verified") or not row.get("preflight_identity", {}).get("verifiable"):
+        raise RuntimeError(f"Worker Deep Preflight {row.get('final_status', 'UNKNOWN')}: request not verified")
+    return row
+
+
+def wait_startup_ready(agent_kind, pane_id, started, attempts=6, total_timeout=20):
+    """Bounded native identity -> owned transcript -> identity recheck gate."""
+    from herdr.agent_adapter import startup_readiness
+    deadline = time.monotonic() + total_timeout
+    verdict = {"status": "UNKNOWN", "interactive_ready": False, "reason": "probe_failed"}
+    for attempt in range(attempts):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            runtime = run_json(["herdr", "agent", "get", pane_id], timeout=min(3, remaining))["result"]["agent"]
+            verdict = startup_readiness(agent_kind, started, runtime, None)
+            if verdict["reason"] != "transcript_unavailable":
+                return verdict
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            transcript = subprocess.run(
+                ["herdr", "pane", "read", pane_id, "--source", "visible", "--lines", "64"],
+                text=True, capture_output=True, timeout=min(3, remaining),
+            )
+            if transcript.returncode != 0 or len(transcript.stdout) > 32768:
+                verdict = {"status": "UNKNOWN", "interactive_ready": False, "reason": "transcript_unavailable"}
+            else:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                runtime = run_json(["herdr", "agent", "get", pane_id], timeout=min(3, remaining))["result"]["agent"]
+                verdict = startup_readiness(agent_kind, started, runtime, transcript.stdout)
+                if verdict["status"] != "UNKNOWN":
+                    return verdict
+        except (RuntimeError, ValueError, KeyError, TypeError, OSError, subprocess.TimeoutExpired):
+            verdict = {"status": "UNKNOWN", "interactive_ready": False, "reason": "probe_failed"}
+        if attempt + 1 < attempts:
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                time.sleep(min(.5, remaining))
+    return verdict
+
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument('--launch-intent-id', default=None)
+    parser.add_argument("--run-id", default=os.environ.get("HERDR_RUN_ID"),
+                        help="Caller-owned run identity for startup failure evidence.")
 
     parser.add_argument(
         "--task-id",
@@ -856,11 +833,29 @@ def main():
         raise RuntimeError("--base-branch is required in git execution mode")
 
     clone = None
+    agent_started = False
+    agent_start_attempted = False
+    agent = None
+    pane_id = None
+    readiness = None
+    launch_identity = None
+    if args.launch_intent_id:
+        if not args.run_id or Path(args.task_id).name != args.task_id or args.task_id in {'.', '..'}:
+            raise ValueError('launch intent requires bounded task/run identity')
+        # New launches never heal/delete an unregistered prior resource. Its
+        # durable intent must be reconciled first, including untagged crashes.
+        if os.path.lexists(CLONE_ROOT / args.task_id):
+            raise RuntimeError('launch workspace already exists; reconcile prior intent')
+        launch_identity = {'intent_id': args.launch_intent_id, 'task_id': args.task_id,
+                           'run_id': args.run_id, 'phase': 'workspace_created'}
     try:
         if args.execution_mode == "context":
             clone = create_context_task_workspace(
                 args.task_id
             )
+            if launch_identity:
+                from herdr.task_resources import write_worker_launch_identity
+                write_worker_launch_identity(clone, launch_identity, initial=True)
             print(f"[WORKSPACE] {clone}")
             branch = None
             # 无 Git 语义 ⇒ 无锚点;onto_branch 在 context 模式已被前置拒绝。
@@ -876,6 +871,9 @@ def main():
                 args.source,
                 args.task_id
             )
+            if launch_identity:
+                from herdr.task_resources import write_worker_launch_identity
+                write_worker_launch_identity(clone, launch_identity, initial=True)
 
             print(f"[CLONE] {clone}")
 
@@ -936,6 +934,8 @@ def main():
         print(f"[CONTEXT] {ctx}")
         print(f"[COMPLEXITY BASELINE] {complexity_baseline}")
 
+        preflight = verify_request_preflight(args.agent, clone)
+
         if args.pane_id:
             pane_id = args.pane_id
             prepare_existing_pane(pane_id, clone)
@@ -950,25 +950,26 @@ def main():
 
         print(f"[PANE] {pane_id}")
         print(f"[PANE SOURCE] {pane_source}")
+        if launch_identity:
+            launch_identity.update(pane_id=pane_id, pane_source=pane_source, phase='agent_start_requested')
+            write_worker_launch_identity(clone, launch_identity)
 
-        if args.agent == "claude":
-            ensure_claude_workspace_trust(
-                clone
-            )
-        elif args.agent == "grok":
-            ensure_grok_workspace_trust(
-                clone
-            )
-        elif args.agent == "kimi":
-            ensure_kimi_workspace_trust(
-                clone
-            )
-
+        agent_start_attempted = True
         agent = start_agent(
             args.task_id,
             args.agent,
             pane_id
         )
+
+        agent_started = True
+        if launch_identity:
+            session = agent.get('agent_session')
+            launch_identity.update(agent_session_id=session.get('value') if isinstance(session, dict) else session,
+                                   agent_name=agent.get('name'), phase='agent_started')
+            write_worker_launch_identity(clone, launch_identity)
+        readiness = wait_startup_ready(args.agent, pane_id, agent)
+        if not readiness.get("interactive_ready"):
+            raise RuntimeError(f"Worker startup {readiness.get('status', 'UNKNOWN')}: {readiness.get('reason', 'unknown')}")
 
         session = agent.get("agent_session")
         agent_session_id = (
@@ -976,6 +977,9 @@ def main():
             if isinstance(session, dict)
             else session
         )
+        if launch_identity:
+            launch_identity.update(agent_session_id=agent_session_id, agent_name=agent.get('name'), phase='interactive_ready')
+            write_worker_launch_identity(clone, launch_identity)
 
         result = {
             "task_id": args.task_id,
@@ -992,7 +996,12 @@ def main():
             "agent": agent.get("agent"),
             "agent_name": agent.get("name"),
             "agent_session_id": agent_session_id,
-            "status": agent.get("agent_status")
+            "status": "idle",
+            "launch_intent_id": args.launch_intent_id,
+            "request_verified": True,
+            "interactive_ready": True,
+            "preflight_identity": preflight.get("preflight_identity"),
+            "startup_readiness": readiness
         }
 
         print(
@@ -1010,8 +1019,23 @@ def main():
                 ensure_ascii=False
             )
         )
-    except Exception:
-        if clone and clone.exists() and not is_task_active_in_registry(args.task_id):
+    except Exception as exc:
+        session = (agent or {}).get("agent_session")
+        failure = {
+            "launch_intent_id": args.launch_intent_id,
+            "task_id": args.task_id, "run_id": args.run_id,
+            "agent_name": (agent or {}).get("name"),
+            "agent_session_id": session.get("value") if isinstance(session, dict) else session,
+            "pane_id": pane_id, "clone": str(clone.resolve()) if clone else None,
+            "agent_started": agent_started if agent_started else (None if agent_start_attempted else False),
+            "agent_start_attempted": agent_start_attempted, "disposition": "unknown",
+            "recovery_required": agent_start_attempted,
+            "startup_status": (readiness or {}).get("status", "UNKNOWN"),
+            "failure_type": type(exc).__name__,
+        }
+        # Expected identity is the start receipt, never the foreign queried instance.
+        print("HERDR_WORKER_FAILURE=" + json.dumps(failure, sort_keys=True), file=sys.stderr, flush=True)
+        if clone and clone.exists() and not agent_start_attempted and not is_task_active_in_registry(args.task_id):
             print(
                 f"[WORKER ROLLBACK] Cleaning up incomplete clone: {clone}",
                 file=sys.stderr

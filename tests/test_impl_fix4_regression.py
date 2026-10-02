@@ -313,6 +313,18 @@ class H2PureGuards(unittest.TestCase):
 class H1CloseGate(unittest.TestCase):
     """H-1: escalated tasks need explicit human confirmation + revocable."""
 
+    def setUp(self):
+        from herdr.state_store import SQLiteStateStore
+        directory = tempfile.TemporaryDirectory(prefix="h1-close-")
+        self.addCleanup(directory.cleanup)
+        store = SQLiteStateStore(Path(directory.name) / "state.db")
+        store.save_workflow({"workflow_id": "wf-h1", "status": "running"})
+        for task in self._tasks()["tasks"]:
+            store.save_task(task)
+        replacement = patch.object(_ht, "_get_store", return_value=store)
+        replacement.start()
+        self.addCleanup(replacement.stop)
+
     def _tasks(self):
         return {"tasks": [{
             "task_id": "t-h1", "workflow_id": "wf-h1", "status": "completed",

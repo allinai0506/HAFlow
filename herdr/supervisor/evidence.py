@@ -239,6 +239,17 @@ def extract_test_evidence(clone_path: Optional[str]) -> Optional[Dict[str, Any]]
         "snapshot_mtime_ns": snap_path.stat().st_mtime_ns,
         "snapshot_completed_at": snap.get("completed_at"),
     }
+    # Preserve only bounded typed fields from this exact program-generated receipt.
+    for key in ("candidate_sha", "epoch", "task_id", "run_id", "source_fingerprint"):
+        value = snap.get(key)
+        evidence_data[key] = value if isinstance(value, str) and len(value) <= 128 else None
+    for key in ("command", "environment"):
+        value = snap.get(key)
+        evidence_data[key] = _clean(value, 1000 if key == "command" else 80) if isinstance(value, str) else None
+    evidence_data["execution_mode"] = snap.get("execution_mode") if snap.get("execution_mode") in {"execute", "dry-run"} else "unknown"
+    for key in ("exit_code", "runner_exit_code", "skipped_tests"):
+        value = snap.get(key)
+        evidence_data[key] = value if type(value) is int else None
     evidence_data["evidence_id"] = build_test_evidence_id(evidence_data)
     return evidence_data
 

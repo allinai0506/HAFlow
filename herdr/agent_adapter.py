@@ -36,6 +36,7 @@ without any TTY knowledge.
 
 from dataclasses import dataclass
 from datetime import datetime
+import json
 import subprocess
 import time
 from typing import Any, Dict, Optional
@@ -534,3 +535,71 @@ def get_agent_adapter(agent_name: Optional[str] = None) -> AgentAdapter:
 def list_agent_adapters() -> Dict[str, Dict[str, Any]]:
     """List all registered adapters and their capabilities."""
     return {name: adapter.to_dict() for name, adapter in _ADAPTER_REGISTRY.items()}
+
+
+def smoke_response_verified(agent: str, stdout: str) -> bool:
+    """Accept exact plain responses and known CLI assistant/result records.
+
+    Never accept stderr, user/prompt records, help or arbitrary exit-zero text.
+    No new CLI output flags are required; legacy plain marker remains valid.
+    """
+    marker = "HERDR_PREFLIGHT_OK"
+    plain_lines = [line.strip() for line in stdout.splitlines() if line.strip()]
+    if plain_lines and plain_lines[-1] == marker and all(
+        line == marker or line.startswith("Skill conflict:") for line in plain_lines
+    ):
+        return True
+    for line in stdout.splitlines():
+        try:
+            record = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(record, dict):
+            continue
+        if agent == "claude" and record.get("type") == "result":
+            if record.get("subtype") == "success" and record.get("is_error") is False and record.get("result") == marker:
+                return True
+        if agent == "codex" and record.get("type") == "item.completed":
+            item = record.get("item")
+            if isinstance(item, dict) and item.get("type") == "agent_message" and item.get("text") == marker:
+                return True
+    return False
+
+
+def startup_readiness(agent: str, expected_identity: dict, runtime: dict, terminal_text: str | None) -> dict:
+    """Pure gate over a freshly queried native agent and owned terminal snapshot.
+
+    Caller must use agent-get after start and read transcript only after native
+    identity is matched. Missing transcript/identity/status remains unknown.
+    This function never approves trust, sends prompts or performs I/O.
+    """
+    def session(value):
+        return value.get("value") if isinstance(value, dict) else value
+
+    expected_session = expected_identity.get("agent_session_id") or session(expected_identity.get("agent_session"))
+    actual_session = session(runtime.get("agent_session"))
+    expected_name = expected_identity.get("agent_name") or expected_identity.get("name")
+    actual_name = runtime.get("name")
+    result = {"interactive_ready": False, "status": "UNKNOWN", "reason": "insufficient_identity"}
+    if expected_session:
+        if not actual_session:
+            return result
+        match = actual_session == expected_session
+    elif expected_name:
+        if not actual_name:
+            return result
+        match = actual_name == expected_name
+    else:
+        return result
+    if not match:
+        return {**result, "status": "IDENTITY_MISMATCH", "reason": "identity_mismatch"}
+    if terminal_text is None:
+        return {**result, "reason": "transcript_unavailable"}
+    # Central classifier is shared with the noninteractive probe.
+    from herdr.deep_preflight import classify_text
+    blocker = classify_text(terminal_text)
+    if blocker:
+        return {**result, "status": blocker, "reason": "startup_blocked"}
+    if runtime.get("agent_status") != "idle":
+        return {**result, "reason": "interactive_not_idle"}
+    return {"interactive_ready": True, "status": "READY", "reason": "native_identity_idle"}

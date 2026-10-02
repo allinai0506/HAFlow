@@ -5689,3 +5689,44 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
      - `self.assertIn("tabular-nums", self.source)`
      - `self.assertIn("活跃</span>", self.source)`
      - `self.assertIn("需决策</span>", self.source)`
+
+## 120. 工作流可靠性必须覆盖回执生产者、持久化窗口及真实资源边界（2026-10-02）
+
+### 问题背景
+
+工作流监控后进行六项可靠性改进。独立审查以真实 CLI、临时 Git/SQLite 和进程交错复现：完美的测试夹具掩盖真实 EVAL_DONE 缺少候选/执行身份；凭据轮换与提示发送之间的崩溃可能留下永远收不到提示的任务；绿色测试摘要也不能证明当前候选或生产环境已验收。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|---|---|---|
+| 读取层测试手工填入生产者从未生成的字段 | 测试对象必须包含真实生产者 | 至少验证 CLI→核心→SQLite→Controller→报告的实际链，未知身份不能用当前任务补填 |
+| 本地落库后跨原生传输发生中断 | 数据库事务不能提供外部发送的 exactly-once | 持久准备、发送开始、发送回执分阶段；未开始可恢复，已开始未确认保留 unknown |
+| 运行版本从目录名推断，关闭重复调用只做顺序测试 | 配置和标签不是执行事实 | 校验 release 内容；关闭用跨进程所有权与逐资源日志，资源身份未知时保留 |
+| 子进程继承数据库路径、私有文件被误当作跨工位沙箱 | 可用性修复不能扩大权限或夸大隔离 | 工具环境移除数据库/投影路径；明确同 UID 信任边界；凭据由服务端限定有效期 |
+
+### 操作规范（已固化到源码与回归）
+
+1. `completion_receipt` 绑定 task/run/epoch、服务端有效期、既有执行门禁及 CAS；终端文本只用于无协议的历史任务。
+2. `task_checkpoint` 重新验证受管分段的内容与归属；`bounded_tools` 限制输入/输出/超时，保留不确定副作用。
+3. `evaluation_identity` 从实际执行前后源码与步骤退出码生成事实；`delivery_report` 区分观察结果、候选验收及生产验证。
+4. `workflow_close` 使用跨进程生命周期锁、操作日志与实例身份；没有原生 API 能力时不伪造回收成功。
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -q tests/test_completion_receipt.py tests/test_completion_expiry.py tests/test_evaluation_delivery_chain.py
+pytest -q tests/test_dispatch_idempotency.py tests/test_task_checkpoint.py tests/test_bounded_tools.py
+pytest -q tests/test_service_release.py tests/test_workflow_close_claim.py tests/test_close_workflow_receipt_cli.py
+```
+
+预期：专项通过且负向用例保持未知/拒绝，不写生产状态或启动真实 Agent。全量结果以当前源码冻结后的交付记录为准，本条不声明已部署。
+
+### 相关文档 / 关联证据
+
+- `docs/superpowers/specs/2026-10-02-workflow-reliability-design.md`
+- `tests/test_evaluation_delivery_chain.py` — 实际 loop/Controller/验收投影
+- `tests/test_completion_expiry.py` — 服务端过期与缺失身份拒绝
+- `tests/test_workflow_close_claim.py` — 独立进程关闭与恢复
+
+---

@@ -437,6 +437,18 @@ def check_task_stalls(tasks, state):
 
 
 def main():
+    try:
+        from herdr import service_release
+        import_root = Path(service_release.__file__).resolve().parent.parent
+        fingerprint = service_release.runtime_fingerprint(
+            import_root, [Path(__file__).resolve(), Path(service_release.__file__).resolve(),
+                          import_root / "herdr" / "state_store.py", import_root / "herdr" / "kernel.py"],
+        )
+    except Exception:
+        fingerprint = {"running_sha": "unknown", "running_import_root": "unknown", "component_versions": {}}
+    print("HERDR_RUNTIME_FINGERPRINT=" + json.dumps(
+        {"service": "com.user.herdr-sentinel", "pid": os.getpid(), **fingerprint}, sort_keys=True,
+    ), flush=True)
     state = load_json(STATE_FILE, {"seen": {}, "nudged": {}})
 
     print("[HERDR SENTINEL] starting", flush=True)

@@ -1,6 +1,6 @@
 # 工作流可靠性六项改进设计
 
-状态：待设计确认，尚未实现。
+状态：设计已由用户确认，六项实现及本地验收完成；人工边界复核已确认，未部署。最终证据见 docs/walkthroughs/20261002-workflow-reliability.md。
 基线：origin/main ef3964539d93a8d27c1f820418040b7bee6ee998。
 隔离分支：feat/workflow-reliability-1002。
 来源：wf-project-1001-01 实际运行中的完成漏识别、预检与运行差异、重复派发、长报告无检查点、release 参数累积、重复关闭及收尾证据口径错误。

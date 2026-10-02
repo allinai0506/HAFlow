@@ -1,5 +1,8 @@
 """Regression tests for Herdr Worker agent startup commands."""
 
+import contextlib
+import io
+import sys
 import importlib.machinery
 import importlib.util
 import shutil
@@ -77,16 +80,32 @@ class TestStartAgent(unittest.TestCase):
             ],
         )
 
-    def test_ensure_grok_workspace_trust(self):
+    def _assert_trust_blocked_worker_preserves_config(self, agent_kind, relative_config):
         worker = load_worker()
         with tempfile.TemporaryDirectory() as td:
-            with patch.object(worker.Path, "home", return_value=Path(td)):
-                worker.ensure_grok_workspace_trust("/path/to/myrepo")
-                config = Path(td) / ".grok" / "trusted_folders.toml"
-                self.assertTrue(config.exists())
-                content = config.read_text(encoding="utf-8")
-                self.assertIn('[folders."/path/to/myrepo"]', content)
-                self.assertIn("trusted = true", content)
+            home = Path(td)
+            config = home / relative_config
+            config.parent.mkdir(parents=True)
+            before = b'original explicit user trust settings\n'
+            config.write_bytes(before)
+            native = {"result": {"agent": {"agent": agent_kind, "name": "owned",
+                      "agent_session": "owned-session", "agent_status": "idle"}}}
+            argv = ["worker", "--task-id", "trust-blocked", "--source", td,
+                    "--agent", agent_kind, "--execution-mode", "context", "--pane-id", "owned-pane"]
+            with patch.object(worker.Path, "home", return_value=home), \
+                 patch.object(worker, "CLONE_ROOT", home / "clones"), \
+                 patch.object(worker, "verify_request_preflight", return_value={"request_verified": True}), \
+                 patch.object(worker, "run_json", return_value=native), \
+                 patch.object(worker.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "Do you trust this workspace?", "")), \
+                 patch.object(worker.time, "sleep"), patch.object(sys, "argv", argv), \
+                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaisesRegex(RuntimeError, "TRUST_REQUIRED"):
+                    worker.main()
+            self.assertEqual(config.read_bytes(), before)
+            self.assertEqual(list(config.parent.iterdir()), [config])
+
+    def test_grok_blocked_startup_does_not_write_workspace_trust(self):
+        self._assert_trust_blocked_worker_preserves_config("grok", ".grok/trusted_folders.toml")
 
     def test_kimi_start_uses_auto(self):
         worker = load_worker()
@@ -114,20 +133,8 @@ class TestStartAgent(unittest.TestCase):
             ],
         )
 
-    def test_ensure_kimi_workspace_trust(self):
-        import hashlib, json
-        worker = load_worker()
-        with tempfile.TemporaryDirectory() as td:
-            with patch.object(worker.Path, "home", return_value=Path(td)), \
-                 patch.dict(worker.os.environ, {"USER": "testuser"}):
-                repo_path = "/path/to/myrepo"
-                worker.ensure_kimi_workspace_trust(repo_path)
-                h = hashlib.sha256(str(Path(repo_path).resolve()).encode("utf-8")).hexdigest()[:12]
-                target = Path(td) / ".kimi-code" / "workspace-trust" / f"wd_testuser_{h}"
-                self.assertTrue(target.exists())
-                data = json.loads(target.read_text(encoding="utf-8"))
-                self.assertEqual(data["root"], str(Path(repo_path).resolve()))
-                self.assertIn("trustedAt", data)
+    def test_kimi_blocked_startup_does_not_write_workspace_trust(self):
+        self._assert_trust_blocked_worker_preserves_config("kimi", ".kimi-code/workspace-trust/user-setting")
 
 
 

@@ -220,7 +220,8 @@ nodes:
       确认整个 Workflow 完成。必须使用 six-step-finish（六步收尾）技能
       作为标准收尾程序，产出包含逐步（1-6）状态表的收尾报告。
       汇总成果、风险和交付信息。
-    default_integration_mode: git
+    artifact_mode: shared_artifacts
+    default_integration_mode: none
     default_task_type: docs
     agent_policy:
       preferred: [claude, qodercli, opencode, codex, agy, pi, grok, kimi]

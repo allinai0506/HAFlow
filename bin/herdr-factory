@@ -84,12 +84,13 @@ STAGES = [
 ]
 
 
-def run(cmd, check=True):
+def run(cmd, check=True, timeout=None):
     return subprocess.run(
         cmd,
         text=True,
         capture_output=True,
         check=check,
+        timeout=timeout,
     )
 
 
@@ -203,6 +204,15 @@ def unregister_command(path=None, close_workspace=False, force=False):
 
 
 def doctor():
+    from herdr.service_release import SCRIPTS, service_fingerprint
+    # A configured plist or historical startup log cannot prove today's process.
+    for label in SCRIPTS:
+        plist = Path.home() / "Library" / "LaunchAgents" / (label + ".plist")
+        try:
+            fingerprint = service_fingerprint(plist) if plist.is_file() else {"service": label, "configured_sha": "unknown", "configured_import_root": "unknown", "configuration_hash": "unknown", "running_sha": "unknown", "running_import_root": "unknown", "component_versions": {}}
+        except (OSError, ValueError):
+            fingerprint = {"service": label, "configured_sha": "unknown", "running_sha": "unknown", "running_import_root": "unknown", "component_versions": {}}
+        print("SERVICE_RELEASE_FINGERPRINT=" + json.dumps(fingerprint, sort_keys=True))
     checks = []
 
     def add(name, ok, detail=""):
@@ -286,6 +296,7 @@ def run_workflow_preflight(project, workflow_id, agent=None):
     r = run(
         cmd,
         check=False,
+        timeout=210,
     )
 
     if r.returncode != 0:
@@ -332,6 +343,8 @@ def run_workflow_preflight(project, workflow_id, agent=None):
         if record is None:
             raise RuntimeError(f"Workflow registry missing: {workflow_id}")
 
+    record["preflight_identities"] = {item["agent"]: item["preflight_identity"]
+                                      for item in agents if item.get("preflight_identity") and item.get("final_status") == "READY"}
     record["healthy_agents"] = healthy
     record["unhealthy_agents"] = unhealthy
     record["preflight_checked_at"] = datetime.now().isoformat(timespec="seconds")

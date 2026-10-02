@@ -406,3 +406,143 @@ def observation_ready(
         ),
         stale_epoch=bool(observation.get("epoch_changed")),
     ) and task_status in {"dispatched", "working"}
+
+
+# Shared execution gates for terminal samples and structured declarations.
+def latest_verification_dispatch(task, store=None):
+    if store is None:
+        raise ValueError("StateStore is required")
+    from herdr.trajectory import run_id_for_task
+    rows = store.list_events(
+        task_id=task.get("task_id"), event_type="verification_dispatched",
+        source="supervisor", limit=100, desc=True,
+    )
+    expected_run = run_id_for_task(task)
+    for event in rows:
+        if event.get("run_id") == expected_run:
+            return event
+    return None
+
+
+def latest_retry_dispatch(task, store=None):
+    if store is None:
+        raise ValueError("StateStore is required")
+    from herdr.trajectory import run_id_for_task
+    expected_run = run_id_for_task(task)
+    for event in store.list_events(
+        task_id=task.get("task_id"), event_type="retry_dispatched",
+        source="supervisor", limit=100, desc=True,
+    ):
+        if event.get("run_id") == expected_run:
+            return event
+    return None
+
+
+def retry_execution_complete_for_rework(task, store=None):
+    """Old deliverables cannot heal a task while a new RETRY lacks dispatch."""
+    if store is None:
+        raise ValueError("StateStore is required")
+    try:
+        from herdr.trajectory import run_id_for_task
+        rows = store.list_interventions(
+            run_id=run_id_for_task(task), task_id=task.get("task_id"), limit=1001,
+        )
+        if len(rows) > 1000:
+            return False
+        active = [
+            row for row in rows
+            if row.get("action") == "RETRY" and row.get("status") != "superseded"
+        ]
+        latest_agent_done = max(
+            (
+                float(entry.get("timestamp") or 0)
+                for entry in (task.get("status_history") or [])
+                if isinstance(entry, dict) and entry.get("to") == "agent_done"
+            ),
+            default=0.0,
+        )
+        active = [
+            row for row in active
+            if float(row.get("requested_at") or 0) >= latest_agent_done
+        ]
+        if not active:
+            return True
+        latest = max(active, key=lambda row: float(row.get("requested_at") or 0))
+        if latest.get("status") in ("requested", "running", "failed"):
+            dispatch = latest_retry_dispatch(task, store)
+            return bool(
+                dispatch
+                and (dispatch.get("payload") or {}).get("intervention_id")
+                == latest.get("intervention_id")
+            )
+        return True
+    except Exception:
+        return False
+
+
+def verification_execution_complete_for_rework(task, store=None):
+    """Old deliverables cannot heal a Task while a new VERIFY lacks evidence."""
+    if store is None:
+        raise ValueError("StateStore is required")
+    try:
+        from herdr.trajectory import run_id_for_task
+        verify_rows = store.list_interventions(
+            run_id=run_id_for_task(task),
+            task_id=task.get("task_id"), limit=1001,
+        )
+        if len(verify_rows) > 1000:
+            return False
+        active_verify = [
+            row for row in verify_rows
+            if row.get("action") == "VERIFY"
+            and row.get("status") != "superseded"
+        ]
+        latest_agent_done = max(
+            (
+                float(entry.get("timestamp") or 0)
+                for entry in (task.get("status_history") or [])
+                if isinstance(entry, dict) and entry.get("to") == "agent_done"
+            ),
+            default=0.0,
+        )
+        active_verify = [
+            row for row in active_verify
+            if float(row.get("requested_at") or 0) >= latest_agent_done
+        ]
+        if not active_verify:
+            return True
+        latest_verify = max(
+            active_verify,
+            key=lambda row: float(row.get("requested_at") or 0),
+        ) if active_verify else None
+        dispatch = latest_verification_dispatch(task, store)
+        dispatch_intervention_id = (
+            (dispatch.get("payload") or {}).get("intervention_id")
+            if dispatch is not None else None
+        )
+        if latest_verify and latest_verify.get("status") in ("requested", "running", "failed"):
+            if dispatch_intervention_id != latest_verify.get("intervention_id"):
+                return False
+        if dispatch is None:
+            latest = max(
+                active_verify,
+                key=lambda row: float(row.get("requested_at") or 0),
+            )
+            return latest.get("status") not in ("requested", "running", "failed")
+        intervention_id = (dispatch.get("payload") or {}).get("intervention_id")
+        for event in store.list_events(
+            task_id=task.get("task_id"), event_type="verification_completed",
+            source="trajectory", limit=100, desc=True,
+        ):
+            if event.get("run_id") != run_id_for_task(task):
+                continue
+            payload = event.get("payload") or {}
+            verification = payload.get("verification") or {}
+            if (
+                verification.get("intervention_id") == intervention_id
+                and float(event.get("timestamp") or 0) >= float(dispatch.get("timestamp") or 0)
+            ):
+                return True
+        return False
+    except Exception:
+        return False

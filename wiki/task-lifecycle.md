@@ -502,3 +502,29 @@ Evidence:
 - `bin/herdr-task#cmd_rework`
 - `services/herdr-controller.py#_rework_legacy_retry` / `#_preserve_same_gate_task`
 - `tests/test_pane_lifecycle_capacity.py`
+
+## 结构化完成、分段产物与验收投影
+
+`FACT` 新派发且具备 run_id 的任务使用 receipt-v1。私有文件携带 task/run/epoch 和随机凭据，SQLite 只保存凭据哈希；服务端签发有效期为 24 小时。返工/监督重新派发会轮换 epoch；显式 renew-completion 以稳定 operation-id 持久化续签投递，保留 epoch/检查点并撤销旧 bearer。未知、过期、跨 Run 和关闭工作流的声明被拒绝。声明、消费及 agent_done CAS 仍经过最小时长与已有 RETRY/VERIFY 执行门禁；有界恢复扫描以公平游标跨过暂时阻塞的声明，保留其回执供后续重试。完成声明不产生门禁通过或部署成功。无协议的历史任务保留原终端完成策略。
+
+`FACT` 凭据文件权限是 0600、父目录 0700，其安全边界是受信任的操作系统用户。原生 Agent 工位共享用户身份，文件权限不构成敌对同 UID 工位之间的沙箱；同 UID 进程不得互相读取凭据。此实现不声称提供独立 OS 用户或强制 MCP 工具隔离。
+
+`FACT` task/run/epoch 检查点注册于既有 Observation 与 events，分段先脱敏再原子发布；恢复/聚合重新核对受管路径、归属及内容哈希。工具调用记录执行意图与有界结果，超时/截断保持副作用 unknown；工具子进程不继承状态数据库及 JSON 投影路径。执行身份环境是父进程验证后传递的标识，不是数据库授权或密码学执行证明。
+
+`FACT` delivery-report 分开显示 observed_result 与当前候选可采纳的 verification.status。真实 loop 在执行前后采集源码指纹、实际步骤退出码、skip 计数和执行身份；Controller 拒绝把旧 task/run/epoch 的快照绑定到当前执行。候选/epoch/产物校验不满足时保持 unknown；没有生产回执时 production_validation=unknown；超出任务投影预算会标 tasks_truncated，禁止声明全部验证通过。
+
+`FACT` 关闭与重开共享 workflow 范围的跨进程锁，关闭操作及逐资源动作记于 SQLite。已完成动作不重做；无法证明实例身份的 Pane/Tab 保留。dry-run 只返回推演字段，不声明资源已经删除。关闭回执绑定交付报告及其哈希。
+
+Evidence:
+- `herdr/completion_receipt.py#issue_completion_contract`
+- `herdr/completion_receipt.py#consume_completion_receipt`
+- `herdr/task_checkpoint.py#publish_task_checkpoint`
+- `herdr/bounded_tools.py#run_bounded`
+- `herdr/evaluation_identity.py#capture_evaluation_identity`
+- `herdr/delivery_report.py#build_delivery_report`
+- `herdr/workflow_close.py#workflow_lifecycle_lock`
+- `tests/test_evaluation_delivery_chain.py#test_real_loop_cli_to_controller_to_report`
+- `tests/test_completion_expiry.py`
+- `tests/test_workflow_close_claim.py`
+
+相关页面：[[preflight-and-health]]。

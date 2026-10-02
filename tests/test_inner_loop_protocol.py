@@ -206,7 +206,8 @@ class PromptIronRuleInjectionTest(unittest.TestCase):
     def test_normal_flow_steps_included(self):
         src = self._herdr_task_source()
         self.assertIn("GOAL.md", src)
-        self.assertIn("herdr-loop eval", src)
+        self.assertIn("{artifact_loop} eval", src)
+        self.assertIn("cli_path().with_name('herdr-loop')", src)
 
 
 # ---------------------------------------------------------------------------

@@ -119,6 +119,9 @@ def _run_evaluation_locked(target_dir: Path) -> tuple[MetricVector, bool, str]:
         evaluation_errors.append("goal_configuration_invalid")
         repro_required = False
 
+    from herdr.evaluation_identity import capture_evaluation_identity, evaluation_binding
+    execution_before = capture_evaluation_identity(target_dir)
+
     evaluation_exit = 127
     receipt_output = ""
     try:
@@ -217,6 +220,9 @@ def _run_evaluation_locked(target_dir: Path) -> tuple[MetricVector, bool, str]:
     _write_atomic(
         loop_dir / "EVAL_DONE.json",
         json.dumps({
+            **evaluation_binding(execution_before, capture_evaluation_identity(target_dir),
+                command=str(evaluator_sh), test_exit=test_exit, runner_exit=evaluation_exit,
+                errors=evaluation_errors, test_output=test_log),
             "iteration": iteration,
             "completed_at": time.time(),
             "status": new_status,
