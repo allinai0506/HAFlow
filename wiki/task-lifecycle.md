@@ -395,8 +395,9 @@ Evidence:
 
 ### 5.4 Test/review delivery baseline 与 PR 交付核对
 
-- test/review 在运行时资源创建前必须解析到唯一、有效的 workflow delivery；缺失、歧义或
-  invalidated 候选一律 exit 2，并通过 StateStore 写 `test_baseline_rejected` actionable event。
+- test/review 在运行时资源创建前必须解析到唯一、有效的 workflow 交付身份；使用有效
+  delivery 或 CLI 校验接受的本 Workflow 当前显式冻结 pin。缺失、歧义或 invalidated
+  候选一律 exit 2，并通过 StateStore 写 `test_baseline_rejected` actionable event。
 - delivery 候选必须是 clone baseline 的 ancestor；无法证明时拒绝派发，不以 Agent 隔离策略
   替代 FR-6.2 baseline 门禁。
 - `herdr-task check-delivery` 查询指定 head branch 的已合并 GitHub PR，并从 repo path 解析
@@ -484,7 +485,9 @@ Evidence:
 Task commit对actual native index路径的稳定外来锁冲突给HERDR_COMMIT_RESULT wait/git_index_lock及75；所有index写入均核对命令前后身份，hook/filter stderr不等于锁证明。Controller只同Task专属标记写60秒等待，不增普通失败预算；typed owner基于Run和持久状态转换，metadata不另起失败周期。EpisodeStore文件锁CAS保留并发新记录；未知/门禁与legacy升级不自动解除。未操作真实T8锁、没有真实集成，不能据此标工作流完成。
 
 
-C13b：已交付依赖省略任务分支onto时，test/review仍须带有可证明的候选pin。在delivery尚未产生时，只有当前workflow最新冻结SHA与source HEAD严格相同可传该pin；仍由TaskCLI和Worker复验，不把冻结当成业务delivery。
+C13b（2026-10-01 的实现边界）：已交付依赖省略任务分支onto时，test/review仍须带有可证明的候选pin。当时无delivery的回退要求当前workflow最新冻结SHA与source HEAD严格相同；仍由TaskCLI和Worker复验，不把冻结当成业务delivery。
+
+2026-10-02 修正该回退：integrated 可能只发布 task ref，source HEAD 仍是旧基线。Controller 对本 Workflow 当前严格40位冻结 SHA 解析真实 commit，CLI 在无 onto 时也透传 `--candidate-sha`；Worker 从该本地 commit 创建验证任务自己的分支，跳过远端基线 fetch。短 SHA、缺失对象和 blob 在创建 Pane 前拒绝；已有 onto 分支所有权保护不变，不借用实现任务分支。实际 Task 的 candidate / baseline / clone HEAD 必须一致，冻结不生成业务 PASS。回归入口 `tests/test_frozen_base_candidate_dispatch.py`、`tests/test_workflow_stall_regressions.py`，发布记录见 [[../docs/walkthroughs/20261002-wf1002-stall-release]]。
 
 
 C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后完整全量2871 passed、154 subtests passed、2 skipped（隔离HOME无LaunchAgent），0 failed，454.85s。两项本机只读plist检查另行2 passed（0.07s）。compileall、三入口CLI AST、diff-check通过；独立最终只读复审组合阻断闭合，未自行重跑全量。真实Agent/Worker启动、业务E2E及开放卡未因此验收。

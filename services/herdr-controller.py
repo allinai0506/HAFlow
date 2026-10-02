@@ -3435,13 +3435,15 @@ def _scheduler_expected_candidate_sha(workflow_id, project_root, dep_ids, candid
         if sha:
             return sha
     if candidate_branch is None:
-        # Delivered dependencies no longer carry an unpublished task branch.
-        # Keep the existing frozen identity only when source HEAD proves the
-        # exact same revision; CLI/Worker still enforce the resulting pin.
+        # Integration may publish a task ref without changing source HEAD.
+        # A verifier can create its own branch at the proven frozen commit;
+        # it must not borrow the implementation task's owned branch.
         frozen = _scheduler_current_frozen_candidate_sha(workflow_id)
         if re.fullmatch(r"[0-9a-f]{40}", frozen):
-            head = scheduler_core.resolve_candidate_sha_for_branch(project_root, "HEAD")
-            if head == frozen:
+            commit = scheduler_core.resolve_candidate_sha_for_branch(
+                project_root, f"{frozen}^{{commit}}"
+            )
+            if commit == frozen:
                 return frozen
         return ""
     try:

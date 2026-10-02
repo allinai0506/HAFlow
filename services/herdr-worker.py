@@ -208,45 +208,56 @@ def create_clone(source, task_id):
     return clone
 
 
-def create_task_branch(clone, task_id, agent, task_type, base_branch, *, launch_identity=None):
+def create_task_branch(clone, task_id, agent, task_type, base_branch, *, launch_identity=None, candidate_sha=None):
     slug = task_id.lower().replace("_", "-")
     branch = f"agent/{agent}/{task_type}-{slug}"
     ensure_branch_available(branch, _registered_tasks(), task_id=task_id)
 
-    fetch = subprocess.run(
-        [
-            "git", "-C", str(clone),
-            "fetch", "origin", base_branch
-        ],
-        text=True,
-        capture_output=True
-    )
-
-    remote_exists = subprocess.run(
-        [
-            "git", "-C", str(clone),
-            "show-ref", "--verify", "--quiet",
-            f"refs/remotes/origin/{base_branch}"
-        ]
-    ).returncode == 0
-
-    local_exists = subprocess.run(
-        [
-            "git", "-C", str(clone),
-            "show-ref", "--verify", "--quiet",
-            f"refs/heads/{base_branch}"
-        ]
-    ).returncode == 0
-
-    if fetch.returncode == 0 and remote_exists:
-        base_ref = f"origin/{base_branch}"
-    elif local_exists:
-        base_ref = base_branch
-    else:
-        raise RuntimeError(
-            fetch.stderr.strip()
-            or f"Base branch not found: {base_branch}"
+    if candidate_sha:
+        if not re.fullmatch(r"[0-9a-f]{40}", candidate_sha):
+            raise RuntimeError("Candidate pin must be a full immutable commit SHA")
+        resolved = subprocess.run(
+            ["git", "-C", str(clone), "rev-parse", "--verify", f"{candidate_sha}^{{commit}}"],
+            text=True, capture_output=True, timeout=10,
         )
+        if resolved.returncode != 0 or resolved.stdout.strip() != candidate_sha:
+            raise RuntimeError("Candidate pin is not an available commit in this clone")
+        base_ref = candidate_sha
+    else:
+        fetch = subprocess.run(
+            [
+                "git", "-C", str(clone),
+                "fetch", "origin", base_branch
+            ],
+            text=True,
+            capture_output=True
+        )
+
+        remote_exists = subprocess.run(
+            [
+                "git", "-C", str(clone),
+                "show-ref", "--verify", "--quiet",
+                f"refs/remotes/origin/{base_branch}"
+            ]
+        ).returncode == 0
+
+        local_exists = subprocess.run(
+            [
+                "git", "-C", str(clone),
+                "show-ref", "--verify", "--quiet",
+                f"refs/heads/{base_branch}"
+            ]
+        ).returncode == 0
+
+        if fetch.returncode == 0 and remote_exists:
+            base_ref = f"origin/{base_branch}"
+        elif local_exists:
+            base_ref = base_branch
+        else:
+            raise RuntimeError(
+                fetch.stderr.strip()
+                or f"Base branch not found: {base_branch}"
+            )
 
     sanitize_clone_sandbox(clone, launch_identity)
 
@@ -898,6 +909,7 @@ def main():
                     args.task_type,
                     args.base_branch,
                     launch_identity=launch_identity,
+                    candidate_sha=args.candidate_sha,
                 )
 
             print(f"[BRANCH] {branch}")

@@ -1913,3 +1913,5 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 2026-10-02：wf1002 修复集成最新主干 c0cf2a0，发布候选81dc9a3；新全量3197 passed、2 skipped、157 subtests passed。上一条本轮教训交叉引用在合并主干后应为 §124（§122/123 为上游预检/Worker教训），保留原日志，追加更正。三服务受控发布与存量恢复见 docs/walkthroughs/20261002-wf1002-stall-release.md；运行结果另行回填。
 
 - 2026-10-02：wf1002 用户确认后的本地三服务实际切换81dc9a3成功，Notifier原PID/配置不变。Run私有定义、需求附录/采纳、旧r2记账义务显式放弃及旧实现escalation清理已应用，Workflow恢复running。首次bootstrap错误回滚与主控字节码缓存校验失误均保留证据；协调器当前用户handoff模型超时、正式业务test/review仍待完成。见 docs/walkthroughs/20261002-wf1002-stall-release.md。
+
+- 2026-10-02：上述协调器超时已同Provider/会话自然恢复并完成handoff；真实测试由协调器使用81dc及integration别名恢复，candidate/baseline/HEAD均8be，不归功于尚未发布的修复。修复无onto冻结候选传递三接缝，Worker从不可变commit创建自己的分支。旧HEAD相等断言经独立复核更新为HEAD前后实际基线验证，无pin及无效候选仍拒绝；本轮完整验证/部署结果续记 docs/walkthroughs/20261002-wf1002-stall-release.md。

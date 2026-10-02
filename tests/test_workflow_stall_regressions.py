@@ -127,6 +127,127 @@ def test_worker_clean_without_launch_intent_removes_copied_foreign_tag(tmp_path)
     assert not tag.exists()
 
 
+@pytest.fixture
+def frozen_worker(tmp_path, monkeypatch):
+    worker = load('services/herdr-worker.py', 'worker_frozen_commit_launch')
+    source = tmp_path / 'source'
+    source.mkdir()
+    git(source, 'init', '-b', 'main')
+    git(source, 'config', 'user.name', 'Test')
+    git(source, 'config', 'user.email', 'test@example.invalid')
+    git(source, 'config', 'core.hooksPath', '/dev/null')
+    (source / 'f').write_text('base')
+    git(source, 'add', '.')
+    git(source, 'commit', '-m', 'base')
+    git(source, 'checkout', '-b', 'implementation')
+    (source / 'f').write_text('candidate')
+    git(source, 'commit', '-am', 'candidate')
+    frozen = git(source, 'rev-parse', 'HEAD')
+    git(source, 'checkout', 'main')
+    home = tmp_path / 'home'
+    home.mkdir()
+    monkeypatch.setattr(worker.Path, 'home', lambda: home)
+    monkeypatch.setattr(worker, 'CLONE_ROOT', tmp_path / 'clones')
+    monkeypatch.setattr(worker, '_registered_tasks', lambda: [{
+        'task_id': 'impl', 'status': 'integrated', 'branch': 'implementation'}])
+    monkeypatch.setattr(worker, 'is_task_active_in_registry', lambda tid: False)
+    monkeypatch.setattr(worker, 'verify_request_preflight', lambda *a: {'request_verified': True})
+    monkeypatch.setattr(worker, 'create_pane', lambda *a: 'test-pane')
+    monkeypatch.setattr(worker, 'start_agent', lambda *a: {
+        'agent': 'codex', 'name': 'owned', 'agent_session': 'owned-session'})
+    monkeypatch.setattr(worker, 'wait_startup_ready', lambda *a: {
+        'status': 'READY', 'interactive_ready': True})
+    monkeypatch.setattr(worker, 'measure_complexity_baseline', lambda *a: 'disabled')
+    argv = ['worker', '--task-id', 'verify-frozen', '--source', str(source),
+            '--agent', 'codex', '--task-type', 'test', '--base-branch', 'main',
+            '--parent-pane', 'parent', '--launch-intent-id', 'intent-owned', '--run-id', 'run-owned']
+    return worker, source, frozen, argv
+
+
+def test_worker_new_branch_without_onto_starts_at_explicit_frozen_commit(frozen_worker, monkeypatch, capsys):
+    worker, source, frozen, argv = frozen_worker
+    monkeypatch.setattr(sys, 'argv', argv + ['--candidate-sha', frozen])
+    worker.main()
+    result = json.loads(next(line.split('=', 1)[1] for line in capsys.readouterr().out.splitlines()
+                             if line.startswith('HERDR_WORKER_RESULT=')))
+    clone = Path(result['clone'])
+    assert result['baseline_commit'] == frozen == git(clone, 'rev-parse', 'HEAD')
+    assert git(source, 'rev-parse', 'HEAD') != frozen
+    assert result['branch'] == 'agent/codex/test-verify-frozen'
+    assert git(clone, 'branch', '--show-current') != 'implementation'
+    assert result['baseline_fingerprint'] == {'tracked': {}, 'untracked': {}}
+
+
+@pytest.mark.parametrize('invalid', ['short', 'missing', 'blob'])
+def test_worker_pinned_new_branch_rejects_unproven_commit_before_pane(frozen_worker, monkeypatch, invalid):
+    worker, source, frozen, argv = frozen_worker
+    value = frozen[:12] if invalid == 'short' else 'a' * 40
+    if invalid == 'blob':
+        value = git(source, 'rev-parse', 'HEAD:f')
+    monkeypatch.setattr(sys, 'argv', argv + ['--candidate-sha', value])
+    monkeypatch.setattr(worker, 'create_pane', lambda *a: pytest.fail('unproven commit must not create Pane'))
+    with pytest.raises(RuntimeError):
+        worker.main()
+
+
+@pytest.mark.parametrize('source_head', ['behind', 'ahead'])
+def test_real_cli_worker_store_preserve_off_base_frozen_candidate(frozen_worker, tmp_path, monkeypatch, source_head):
+    import contextlib
+    import io
+    from types import SimpleNamespace
+    from herdr import scheduler_facts
+    from herdr.state_store import get_state_store
+    worker, source, frozen, argv = frozen_worker
+    if source_head == 'ahead':
+        git(source, 'checkout', '--detach', frozen)
+        (source / 'f').write_text('source advanced after freeze')
+        git(source, 'commit', '-am', 'advance source only')
+    store = get_state_store(tmp_path / 'state.db')
+    monkeypatch.setenv('HERDR_STATE_DB', str(store.db_path))
+    monkeypatch.setenv('TASKS_FILE', str(tmp_path / 'tasks.json'))
+    monkeypatch.setenv('WORKFLOWS_FILE', str(tmp_path / 'workflows.json'))
+    monkeypatch.setenv('HERDR_WORKFLOW_DOCS_DIR', str(tmp_path / 'workflow-docs'))
+    store.save_workflow({'workflow_id': 'wf-pin', 'status': 'running',
+        'project_root': str(source), 'base_branch': 'main',
+        'config': {'nodes': [{'id': 'test', 'default_task_type': 'test',
+                            'default_integration_mode': 'none'}]}})
+    scheduler_facts.record_candidate_frozen('wf-pin', frozen, db_path=store.db_path)
+    cli = load('bin/herdr-task', 'cli_frozen_commit_launch')
+    monkeypatch.setattr(cli, '_get_store', lambda: store)
+    monkeypatch.setattr(cli, 'project_for_workflow', store.get_workflow)
+    monkeypatch.setattr(cli, 'choose_agent', lambda *a, **k: 'codex')
+    monkeypatch.setattr(cli, 'ensure_stage_topology', lambda *a: {
+        'workspace_id': 'temporary', 'anchor_pane_id': 'parent', 'tab_id': 'temporary'})
+    monkeypatch.setattr(cli, 'acquire_pane_for_task', lambda *a: None)
+    monkeypatch.setattr(cli, 'auto_init_task_loop', lambda *a, **k: None)
+    monkeypatch.setattr(cli, 'release_agent_reservation', lambda *a: None)
+    monkeypatch.setattr(cli, 'dispatch_task', lambda *a: None)
+    monkeypatch.setattr(cli, 'close_pane', lambda *a, **k: None)
+    real_run = subprocess.run
+    def controlled_transport(cmd, **kwargs):
+        if str(cmd[0]).endswith('/herdr-worker.py'):
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with monkeypatch.context() as child, contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                child.setattr(sys, 'argv', cmd)
+                worker.main()
+            return subprocess.CompletedProcess(cmd, 0, stdout.getvalue(), stderr.getvalue())
+        return real_run(cmd, **kwargs)
+    monkeypatch.setattr(cli.subprocess, 'run', controlled_transport)
+    args = SimpleNamespace(task_id='test-frozen', workflow_id='wf-pin', node='test',
+        source=str(source), agent='auto', task_type='test', integration_mode='none',
+        candidate_sha=frozen, onto=None, goal='verify frozen candidate',
+        prompt='verify the current frozen candidate', acceptance=[])
+    cli.launch_task(args)
+    task = store.get_task('test-frozen')
+    assert task['candidate_sha'] == task['baseline_commit'] == frozen
+    assert task['branch'] == 'agent/codex/test-test-frozen'
+    assert git(Path(task['clone_path']), 'rev-parse', 'HEAD') == frozen
+    assert git(source, 'rev-parse', 'HEAD') != frozen
+    intent = store.list_events(event_type='launch_intent', limit=1, desc=True)[0]['payload']
+    assert intent['candidate_sha'] == frozen and intent['phase'] == 'registered'
+    assert not store.list_events(event_type='test_baseline_rejected')
+
+
 def test_finished_non_git_document_branch_is_not_remote_onto():
     tasks = [{'task_id': 'requirements-spec', 'workflow_id': 'wf',
               'node': 'requirements', 'status': 'cleaned', 'integration_mode': 'none',

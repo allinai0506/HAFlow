@@ -33,7 +33,19 @@
 
 恢复实际完成：共享 implementation ID 在保护检查期间已由外部参与者修正，本主控没有覆盖它；核对除该ID外定义不变后，冻结 `/Users/user/.herdr-controller/workflows/wf-project-1002-01/workflow.json` 并通过 Kernel/Store绑定。需求复核附录 `n-1790949258577-d209`、采纳决定 `n-1790949258586-ba70` 为human来源、无Task假回执。canonical abandon 后旧对抗Task为superseded v9，replacement_pending=false，原Run/首次理由保持，需求Task总数仍2。实现Task清除旧escalation后integrated v18，实际task ref仍8be。目标从paused恢复running。证据 `.omc/stall-recovery-applied.json`。
 
-最后现场观察：协调器 w13:p1 正在响应另一条用户handoff请求，真实working，并出现“Timed out waiting for response headers”模型重试；不是陈旧DB working。Controller因此等待，没有强改状态或中断。下游另出现test_baseline_rejected/delivery_missing记录，需要明确绑定8be冻结candidate的合法测试派发；没有伪造delivery/test/review门禁，不把running宣称工作流全部完成。
+81dc 发布后的现场观察：协调器 w13:p1 正在响应另一条用户handoff请求，真实working，并出现“Timed out waiting for response headers”模型重试；不是陈旧DB working。Controller因此等待，没有强改状态或中断。下游另出现test_baseline_rejected/delivery_missing记录，需要明确绑定8be冻结candidate的合法测试派发；没有伪造delivery/test/review门禁，不把running宣称工作流全部完成。
+
+## 后续：协调器恢复与无 onto 候选传递
+
+用户随后明确要求修复模型超时及测试漏传 SHA。同一协调器会话/Provider 在22:03:47成功完成 handoff，22:03:49收到新的阶段事件，后续工具调用持续成功。handoff 文件真实存在，SHA256 `f277deab1a44feba9aa6667759b0072e6dd402ebf0f203b96b63fbcc959b3936`。本轮未改 Provider、放宽 timeout 或中断会话；缺请求 status/request-id，网络、网关排队或客户端 deadline 等细分原因仍 unknown。取证 `.omc/stall-coordinator-timeout-fix.md`。
+
+SHA 缺口由真实调用链确认：实现8be已发布 task ref，但 source HEAD仍1638608；Controller 的已交付规划省略 onto 后，原回退只接受 HEAD==freeze，导致不传 pin，CLI正确拒绝 delivery_missing。直接使用实现的 owned branch 又会被所有权保护拒绝。修复只涉及三个生产文件：Controller用本Workflow当前full40冻结SHA解析真实commit，CLI无onto仍透传pin，Worker从本地候选commit创建验证任务自己的分支。无需远端fetch，不放宽onto所有权，短/缺失/blob对象在Pane前拒绝。
+
+同断言控制回退分别复现 Controller 2 failed、真实CLI链1 failed；修复后专项144 passed、26 subtests passed。真实 CLI→Worker→Git→SQLite 的 candidate / baseline / clone HEAD 全部等于pin，source HEAD保持旧基线；追加受控清理隔离单测1 passed。首轮321输入指纹 `56483e2be7e5d66ee93a256e661c1b054b8aafe178f1c7aade1bbda45d93ca1d` 的全量3205 passed、1 failed、2 skipped、157 subtests，失败仅旧 `head_moved` 断言，记录保留 `.omc/stall-pin-initial-full*`。独立复查确认新Worker精确pin分支下不需要HEAD==freeze，保留未显式pin拒绝与五类负例，将该用例增强为实际派发/CLI身份证明，并将CLI→Worker→Store真链覆盖HEAD behind/ahead。最终321输入指纹 `7a0ac3d1e01f575001f3789f084d35cfa7fea9945cdba307b518753fc7126be4`；本轮完整回归与发布证据回填于下文。
+
+22:33现场已有协调器自行恢复的真实测试Task `test-compliance-race-json-truth`，working，codex w13:p24，candidate8be；其恢复早于本轮新代码部署，不能归为本修复的部署成果，也不再重复启动test-auto。正式业务test/review结论仍按本Run证据门禁处理。
+
+本轮最终全量：3207 passed、2 skipped、157 subtests passed，0 failed，exit0；pytest507.06s，进程507.9s。上述321输入前后无漂移，两个skip仍为隔离HOME缺真实LaunchAgent目录。强合同专项10 passed，独立审查确认HEAD移动不是freeze轮换；compileall/五CLI AST+help/diff共7项exit0，Ruff F仍18，无新增。证据 `.omc/stall-pin-full.log` / `stall-pin-full-result.json` / `stall-pin-source-freeze.json` / `stall-pin-static-checks.json` / `stall-pin-health-result.json`。制品/实际版本/本轮首次自动派发另行记录，不以本地全量伪称业务门禁PASS。
 
 ## 业务验收边界
 
