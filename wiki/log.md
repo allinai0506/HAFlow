@@ -1915,3 +1915,5 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 2026-10-02：wf1002 用户确认后的本地三服务实际切换81dc9a3成功，Notifier原PID/配置不变。Run私有定义、需求附录/采纳、旧r2记账义务显式放弃及旧实现escalation清理已应用，Workflow恢复running。首次bootstrap错误回滚与主控字节码缓存校验失误均保留证据；协调器当前用户handoff模型超时、正式业务test/review仍待完成。见 docs/walkthroughs/20261002-wf1002-stall-release.md。
 
 - 2026-10-02：上述协调器超时已同Provider/会话自然恢复并完成handoff；真实测试由协调器使用81dc及integration别名恢复，candidate/baseline/HEAD均8be，不归功于尚未发布的修复。修复无onto冻结候选传递三接缝，Worker从不可变commit创建自己的分支。旧HEAD相等断言经独立复核更新为HEAD前后实际基线验证，无pin及无效候选仍拒绝；本轮完整验证/部署结果续记 docs/walkthroughs/20261002-wf1002-stall-release.md。
+
+- 2026-10-02：无onto候选pin修复全量3207 passed、2 skipped、157 subtests，独立审查通过后实际发布d93a3c8；三服务运行指纹与制品一致。规范核对旧review intent资源absent后解除仅该Run旧通知闩，新Controller自动派发review-auto到w13:p26，独立分支的candidate/baseline/HEAD均8be，真实调用链验收通过。原test已completed，业务review仍working，未宣称Workflow/业务交付全部PASS。证据见 docs/walkthroughs/20261002-wf1002-stall-release.md。
