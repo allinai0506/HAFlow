@@ -1909,3 +1909,7 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 2026-10-02：补齐 installer 的 macOS Bash 3.2 nounset 空数组兼容；真实 /bin/bash + 临时 HOME 覆盖四种服务布局和重启/不重启，保留参数引用与发布校验。根因及回归入口见 docs/lessons/lessons-learned.md §121；本次为代码修复，未再次更新运行服务。
 
 - 2026-10-02：修复 wf1002 已复现的 Worker 身份清理、旧标记空白/软换行边界、非 Git 文档 onto、替换义务及 Git Run 定义隔离。更新 [[task-lifecycle]] 与 CLI 参考，工程教训 §122。新作废保留义务，显式 abandon 不复活，合法当前候选复用与未知证据分开。本地验证记录 docs/walkthroughs/20261002-wf1002-stall-fixes.md；不声称服务已加载或生产工作流已恢复。
+
+- 2026-10-02：wf1002 修复集成最新主干 c0cf2a0，发布候选81dc9a3；新全量3197 passed、2 skipped、157 subtests passed。上一条本轮教训交叉引用在合并主干后应为 §124（§122/123 为上游预检/Worker教训），保留原日志，追加更正。三服务受控发布与存量恢复见 docs/walkthroughs/20261002-wf1002-stall-release.md；运行结果另行回填。
+
+- 2026-10-02：wf1002 用户确认后的本地三服务实际切换81dc9a3成功，Notifier原PID/配置不变。Run私有定义、需求附录/采纳、旧r2记账义务显式放弃及旧实现escalation清理已应用，Workflow恢复running。首次bootstrap错误回滚与主控字节码缓存校验失误均保留证据；协调器当前用户handoff模型超时、正式业务test/review仍待完成。见 docs/walkthroughs/20261002-wf1002-stall-release.md。
