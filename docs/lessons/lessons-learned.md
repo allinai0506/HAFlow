@@ -5776,3 +5776,31 @@ scripts/install-herdr-console.sh 的 plist_paths、SNAPSHOT_SERVICES、KICKSTART
 - 单元测试：`pytest -q tests/test_agent_router_preflight.py tests/test_preflight_runtime_contract.py tests/test_deep_preflight_accuracy.py`
 - 全量关联测试：`pytest -q tests/test_agent_router_stage_exclusion.py tests/test_adaptive_router.py tests/test_canary_router.py`
 - S6 代码审查报告：`.omc/review-80030f57-7a2b-4988-a486-8bc208e1ccb3.md` (MERGE_READY)
+
+---
+
+## 123. 沙盒重置与清理不得破坏前置落盘的私有资源身份标桩（2026-10-02）
+
+### 问题背景
+
+`herdr-task launch` 在 worker 阶段出现新任务派发必崩故障：`FileNotFoundError: '<clone>/.herdr-launch-identity.json'`，伴随 clone 回滚但已建好的 tmux pane 发生泄漏。根因是 `services/herdr-worker.py` 在 `main()` 中先将 `launch_identity` 写入 clone 根目录作为未跟踪文件（`write_worker_launch_identity(..., initial=True)`），随后的 `create_task_branch` / `checkout_onto_branch` 调用 `sanitize_clone_sandbox`，内部裸执行 `git clean -fd` 清理沙盒未跟踪文件，误将身份标桩文件删除；当 worker 执行到 `initial=False` 的回读安全校验时，因原文件丢失触发 `FileNotFoundError` 导致失败。此前曾有临时在 `~/.config/git/ignore` 中加入该文件的非通用绕过。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|---|---|---|
+| 沙盒粗暴清理误杀关键运行态标桩 | `git clean -fd` 会无差别清除所有未被 `.gitignore` 保护的未跟踪文件 | 破坏性沙盒清理必须对受管的内部标桩文件（如 `.herdr-launch-identity.json`）显式配置 `-e` exclude 排除保护 |
+| 打标与清理顺序颠倒引发状态盲区 | 调整执行顺序（如清理后再打标）会破坏崩溃恢复语义，导致清理期间崩溃时资源无法归属追溯 | 保留“在破坏性操作前先落盘证明归属”的安全顺序；不可随意推迟打标时机 |
+| 依赖机器局部配置临时绕过缺陷 | 用户级 `~/.config/git/ignore` 或仓库级 `.gitignore` 临时放行平台私有文件不是真正修复，无法跨机器/CI 泛化且污染业务仓库 | 修法必须收敛在沙盒清理函数内部；测试时强制配置 `core.excludesFile=/dev/null` 隔离全局 ignore，彻底防范假阳性 |
+
+### 操作规范
+
+1. `services/herdr-worker.py` 的 `sanitize_clone_sandbox` 中，在 `git clean -fd` 执行时显式增加 `-e .herdr-launch-identity.json` 参数。
+2. 任何涉及 `git clean` 清理沙盒的场景，测试用例必须配置 `git config core.excludesFile /dev/null` 排除宿主全局 git 规则干扰，直接断言受保护文件在清理后存活、其余临时垃圾被正常删除。
+3. 移除任何为了绕过沙盒清理而临时写入宿主 `~/.config/git/ignore` 的条目。
+
+### 验证命令 / 关联证据
+
+- 专项回归测试：`pytest -v tests/test_worker_sanitize_sandbox.py tests/test_herdr_worker.py tests/test_worker_baseline_anchor.py`
+- 语法与静态校验：`/opt/homebrew/opt/python@3.13/bin/python3.13 -m compileall -q herdr services bin tests` 与 `git diff --check`
+- S6 代码审查报告：`.omc/review-e4c9f87a-2df8-4f84-96dd-5ab219879f6f.md` (MERGE_READY)

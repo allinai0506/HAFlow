@@ -8,6 +8,22 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-10-02] fix | herdr-worker 沙盒清理保留 launch identity：消除 git clean -fd 误杀导致的新 Task 派发失败
+- 背景：
+  1. 现场反馈 `herdr-task launch` 在 worker 阶段对新 task_id 派发崩溃：`FileNotFoundError: '<clone>/.herdr-launch-identity.json'`，伴随 clone 回滚但已建好的 tmux pane 发生泄漏。
+  2. 根因剖析：
+     - `services/herdr-worker.py` 在 `main()` 中先于分支检出阶段将 `launch_identity` 写入 clone 根目录（`write_worker_launch_identity(clone, launch_identity, initial=True)`），作为未跟踪的身份标桩文件（`.herdr-launch-identity.json`）；
+     - 随后的 `create_task_branch`（普通分支新建）及 `checkout_onto_branch`（`--onto` 既有分支续接）均会调用 `sanitize_clone_sandbox(clone)`；
+     - `sanitize_clone_sandbox` 内部执行裸 `git clean -fd` 清理沙盒，因 `.gitignore` 仅忽略目录 `.herdr/` 未忽略文件 `.herdr-launch-identity.json`，导致该文件被无情删除；
+     - 在随后的 `create_pane` 完成后，worker 调用 `write_worker_launch_identity(clone, launch_identity)`（默认 `initial=False`），该安全校验故意回读原文件做资源归属与租户校验，因文件丢失触发 `FileNotFoundError` 导致失败。
+- 变更：
+  1. **`services/herdr-worker.py` (`sanitize_clone_sandbox`)**：
+     - 在 `git clean -fd` 命令中追加显式排除参数 `-e .herdr-launch-identity.json`，确保沙盒清理时身份标桩文件完好存活，不依赖仓库内任何 `.gitignore` 配置，且单点覆盖 `create_task_branch` 与 `checkout_onto_branch` 的所有调用点。
+  2. **环境临时绕过清理**：
+     - 移除开发机 `~/.config/git/ignore` 中此前作为临时 workaround 写入的 `.herdr-launch-identity.json` 规则，还原纯净全局 Git 配置。
+  3. **自动化测试覆盖**：
+     - 新增 `tests/test_worker_sanitize_sandbox.py`，模拟真实沙盒清理场景（设置 `core.excludesFile=/dev/null` 隔离全局 gitignore），验证沙盒清理后 dirty tracked 文件被 reset、untracked 临时垃圾被清除，同时 `.herdr-launch-identity.json` 完好保留且后续 `initial=False` 校验与更新成功。
+
 ## [2026-10-02] fix | 路由健康体检与探测机制加固：放宽 Smoke 证据提取、消除 UNKNOWN/TIMEOUT 误伤永久禁赛、引入并发受控防超时风暴
 - 背景：
   1. 现场排查发现多智能体自动路由决策（Auto Router）总是一边倒地选 `opencode`，其余 Agent（如 `qodercli`、`kimi`、`codex`、`agy`、`grok`）从未被选中。

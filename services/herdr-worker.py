@@ -111,7 +111,10 @@ def sanitize_clone_sandbox(clone):
     ensuring that subsequent branch switches never collide with developer WIP in the source repo.
     """
     subprocess.run(["git", "-C", str(clone), "reset", "--hard", "HEAD"], capture_output=True)
-    subprocess.run(["git", "-C", str(clone), "clean", "-fd"], capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(clone), "clean", "-fd", "-e", ".herdr-launch-identity.json"],
+        capture_output=True,
+    )
 
 
 def create_clone(source, task_id):
