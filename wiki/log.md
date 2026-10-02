@@ -8,6 +8,27 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-10-02] fix | 路由健康体检与探测机制加固：放宽 Smoke 证据提取、消除 UNKNOWN/TIMEOUT 误伤永久禁赛、引入并发受控防超时风暴
+- 背景：
+  1. 现场排查发现多智能体自动路由决策（Auto Router）总是一边倒地选 `opencode`，其余 Agent（如 `qodercli`、`kimi`、`codex`、`agy`、`grok`）从未被选中。
+  2. 根因剖析：
+     - **CLI 杂音误杀合法 Agent 为 UNKNOWN**：现代 CLI（Qoder、Kimi 等）输出中包含 ANSI 彩色转义码、反引号/星号 Markdown 修饰、版本横幅通知或流式 JSON 输出，导致 `smoke_response_verified` 判定失败返回 `UNKNOWN`。
+     - **UNKNOWN 误入黑名单且路由永久硬过滤**：`bin/herdr-factory` 将所有 `final_status != "READY"`（包含 `UNKNOWN`）全量打入 `unhealthy_agents`，且 `herdr/agent_router.py` 即使在快照过期后也做无差别硬过滤，导致仅慢速启动或有格式杂音的 Agent 一旦体检非 READY 便被永久封杀。
+     - **Preflight 瞬时并发探测风暴**：原逻辑以 `len(allowed)`（机队达 8 个进程）瞬时拉起全部 Agent 进程探测，引发网络带宽与 CPU 剧烈争抢，导致多个 Agent 在 40s 内发生超时。
+- 变更：
+  1. **`herdr/agent_adapter.py` (Smoke 证据链加固)**：
+     - 增加 `_strip_ansi`、`_clean_smoke_token`，清洗 ANSI 颜色码与 Markdown/引号标点；
+     - 引入良性横幅过滤器 `_is_benign_banner_line`，放行版本通知与加载遥测杂音；
+     - 扩展通用结构化消息解析，兼容包含 `user_message` 的流式 JSON 输出，消除误判。
+  2. **`bin/herdr-factory` 与 `herdr/agent_router.py` (消除误伤与支持自愈)**：
+     - `bin/herdr-factory` 仅将真正不健康的 Agent 记入 `unhealthy_agents`，排除安全的 `UNKNOWN`；
+     - `herdr/agent_router.py` 定义 `HARD_UNHEALTHY_STATUSES`，区分快照新鲜度：新鲜快照全量排除不健康 Agent；快照过期后仅硬过滤致命状态，放行 `TIMEOUT`、`UNKNOWN` 进行自愈重试调度。
+  3. **`herdr/deep_preflight.py` (并发控流与超时可配)**：
+     - 引入 `DEFAULT_PREFLIGHT_CONCURRENCY = 4`，通过 `HERDR_PREFLIGHT_CONCURRENCY` 动态调节并发池，消除 8 进程突发争抢，同时兼容 3 进程存量并发测试；
+     - 支持 `HERDR_SMOKE_TIMEOUT` 环境变量覆盖（默认 45s）。
+  4. **自动化测试**：
+     - 新增及回归覆盖 119 项相关自动化测试，包含 ANSI/Markdown/JSON 兼容、快照过期放行 TIMEOUT、排除 AUTH_REQUIRED、并发控流等场景。
+
 ## [2026-10-02] perf | Sidecar 侧边栏交互与刷新性能深度优化：请求并发化、软刷新防闪烁与系统页签保护
 - 背景：
   1. 用户反馈控制台左侧 sidecar 的按钮点击以及页面刷新体感迟钝（延迟 1.5s+），存在点击无即时响应、全屏画布闪烁重绘、切屏后系统页签被重置等问题。
