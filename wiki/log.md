@@ -1917,3 +1917,5 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 2026-10-02：上述协调器超时已同Provider/会话自然恢复并完成handoff；真实测试由协调器使用81dc及integration别名恢复，candidate/baseline/HEAD均8be，不归功于尚未发布的修复。修复无onto冻结候选传递三接缝，Worker从不可变commit创建自己的分支。旧HEAD相等断言经独立复核更新为HEAD前后实际基线验证，无pin及无效候选仍拒绝；本轮完整验证/部署结果续记 docs/walkthroughs/20261002-wf1002-stall-release.md。
 
 - 2026-10-02：无onto候选pin修复全量3207 passed、2 skipped、157 subtests，独立审查通过后实际发布d93a3c8；三服务运行指纹与制品一致。规范核对旧review intent资源absent后解除仅该Run旧通知闩，新Controller自动派发review-auto到w13:p26，独立分支的candidate/baseline/HEAD均8be，真实调用链验收通过。原test已completed，业务review仍working，未宣称Workflow/业务交付全部PASS。证据见 docs/walkthroughs/20261002-wf1002-stall-release.md。
+
+- 2026-10-02：续记最新状态，真实test/review报告业务blocked并进入superseded/pending，正常返工任务fix-compliance-display-mask-export-probes已working；前条状态是23:09快照，HAFlow两项修复未代替业务门禁。运行期间字节码反复生成后，以不变源码/执行位将d93制品设为只读；真实CLI去环境保护复验缓存0、attestation正确，无再重启。详见同发布记录。

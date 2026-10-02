@@ -61,6 +61,10 @@ SHA 缺口由真实调用链确认：实现8be已发布 task ref，但 source HE
 
 结案时严格制品attestation因59份新字节码显示unknown，写入者未确认；源码没有漂移。已从原d93提交重新生成git archive（摘要与原制品一致），先逐文件/执行位核对，再使用现有verify_snapshot清除缓存，attestation恢复d93。没有因此再重启服务或改业务代码；保留 `.omc/stall-pin-final-attestation.json` 原unknown及缓存时间证据，不将首次结案检查说成成功。
 
+随后缓存再次生成（67份），单次清理不能维持只读制品。再次按原archive核对/清理后，仅移除本d93版本目录及文件的写权限，保留所有执行位/内容；原模式保存用于离线回退。以uid501、显式HERDR_ROOT=d93、去掉PYTHONDONTWRITEBYTECODE保护调用真实CLI --help成功，缓存仍0且attestation稳定d93；不改源码、不再重启。证据 `.omc/stall-pin-release-readonly.json` / `stall-pin-final-state.json`。
+
+最新业务状态：原test和review均以blocked结论进入superseded，replacement_pending=true；Controller正常触发返工，新实现任务 `fix-compliance-display-mask-export-probes` 已working。test确认A3展示侧缺少resultOwner掩码，可能切档首帧串旧结论；review指出非法/空JSON以及真实createObjectURL/anchor.click导出副作用回归不足。保留这些真实业务门禁，不归为模型超时或SHA漏传，也不由本HAFlow修复伪造通过。上述23:09working/completed仅为当时快照。
+
 ## 业务验收边界
 
 NexusArchive 固定候选历史日志有 4139 tests passed，但 Task/Run/epoch 为空，不是正式下游门禁。本次原需复核保留 A1 页面顺序、A5 导出组合、A9 error/owner 分项、非法 JSON、JSON字面 null/数组、JSON纯空白、URL/anchor 副作用探针、typecheck、旧实现 RED 及正式 test/review 等未验证项。没有修改业务实现、自动合并或部署 NexusArchive。
