@@ -5730,3 +5730,21 @@ pytest -q tests/test_service_release.py tests/test_workflow_close_claim.py tests
 - `tests/test_workflow_close_claim.py` — 独立进程关闭与恢复
 
 ---
+
+## 121. macOS 系统 Bash 的 nounset 空数组必须走实际安装路径验证（2026-10-02）
+
+### 问题背景
+
+813164f 的本地发布在全部服务迁移到快照后，系统 /bin/bash 3.2.57 以 KICKSTART_SERVICES[@]: unbound variable 中断；此前 --no-restart 测试没有执行重载。临时 HOME 的真实入口回归进一步复现全工作区与无服务布局的同类失败：3 failed、1 passed。
+
+### 经验教训
+
+set -u 下 Bash 3.2 把空数组展开视为未设置变量；只验证混合布局或 bash -n 无法覆盖运行时问题。兼容修复应保护每个可空数组，不关闭 nounset，不生成空参数，并保留逐参数引用。
+
+### 操作规范
+
+scripts/install-herdr-console.sh 的 plist_paths、SNAPSHOT_SERVICES、KICKSTART_SERVICES 使用条件数组展开。实际 /bin/bash 安装测试覆盖全快照、全工作区、混合、无服务，与重启/--no-restart 的组合，含空格及引号路径。仅替换 launchctl、ps、sleep 外部依赖；真实归档、快照校验、plist 发布与安装入口仍执行，禁止测试触碰本机服务。
+
+### 验证命令 / 关联证据
+
+`pytest -q tests/test_installer_bash_compat.py tests/test_service_release.py tests/test_install_herdr_console_deploy.py`。红绿日志见本任务 .omc/bash3-red.log、bash3-final-subset.log；本记录不声称新的本地部署。

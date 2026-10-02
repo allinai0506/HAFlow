@@ -1868,3 +1868,5 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
   - 知识同步 task-lifecycle / preflight-and-health、CLI参考、工程教训#120；完整记录 docs/walkthroughs/20261002-workflow-reliability.md。仅 working_tree，本次未推送、合并、部署或重启，生产验收 unknown。
 
 - 2026-10-02：工作流可靠性 PR 阶段完成同快照 CLI/loop 命令绑定及新鲜全量验证（3137 passed、2 skipped、157 subtests passed）；用户授权创建 PR 与本地重启，明确保留 Console 热补丁界面，只更新 Controller/Sentinel。详见 docs/walkthroughs/20261002-workflow-reliability.md；服务实际切换另行记录，不等于生产业务验收。
+
+- 2026-10-02：补齐 installer 的 macOS Bash 3.2 nounset 空数组兼容；真实 /bin/bash + 临时 HOME 覆盖四种服务布局和重启/不重启，保留参数引用与发布校验。根因及回归入口见 docs/lessons/lessons-learned.md §121；本次为代码修复，未再次更新运行服务。
