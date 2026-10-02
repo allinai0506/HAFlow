@@ -145,6 +145,18 @@ closeWorkflowTab('wf-2');
 closeWorkflowTab('wf-1');
 assert.equal(state.workflowId, null);
 assert.equal(state.openWorkflowTabIds.length, 0);
+
+// 5. Open logs system tab
+openWorkflowTab('__logs__');
+assert.equal(state.workflowId, '__logs__');
+assert.ok(state.openWorkflowTabIds.includes('__logs__'));
+html = document.getElementById('workflowTabsList').innerHTML;
+assert.ok(html.includes('调度审计日志'));
+assert.ok(html.includes('__logs__'));
+
+// 6. Close logs system tab
+closeWorkflowTab('__logs__');
+assert.ok(!state.openWorkflowTabIds.includes('__logs__'));
 """
         res = subprocess.run(["node", "-e", node_script], capture_output=True, text=True, timeout=10)
         self.assertEqual(res.returncode, 0, f"Node tab lifecycle test failed: {res.stderr}")
@@ -294,6 +306,60 @@ assert.equal(state.openWorkflowTabIds.length, 0);
         self.assertIn("toggleSidebar", self.js)
         self.assertIn(".shell.sidebar-collapsed", self.html)
         self.assertIn(".sidebar.collapsed", self.html)
+
+    def test_logs_system_tab_not_modal(self):
+        """13. Verify 调度审计日志 is rendered as a standard workspace tab, not a popup modal."""
+        # 1. logsTabView container exists with controller-panel class
+        self.assertIn('id="logsTabView"', self.html)
+        self.assertIn('class="controller-panel"', self.html)
+
+        # 2. showLogs opens tab, not modal
+        self.assertIn("function showLogs", self.js)
+        show_logs_match = re.search(r"async function showLogs\(.*?\)\{.*?\n\}", self.js, re.DOTALL)
+        self.assertIsNotNone(show_logs_match)
+        show_logs_body = show_logs_match.group(0)
+        self.assertNotIn("openModal", show_logs_body)
+        self.assertIn("setWorkspaceMode('logs')", show_logs_body)
+        self.assertIn("__logs__", show_logs_body)
+
+        # 3. Sidebar logs item invokes showLogs
+        self.assertIn('id="sidebarLogsItem" onclick="showLogs()"', self.html)
+
+    def test_sidecar_perf_and_soft_refresh(self):
+        """14. Verify sidecar performance optimizations: Promise.all, DOM diffing, system tab protection, and fast service status."""
+        # 1. Promise.all parallelization in loadWorkflow
+        load_wf_match = re.search(r"async function loadWorkflow\(id\)\{.*?\n\}", self.js, re.DOTALL)
+        self.assertIsNotNone(load_wf_match)
+        load_wf_body = load_wf_match.group(0)
+        self.assertIn("Promise.all([", load_wf_body)
+        # 2. Soft refresh: conditional destroyFlowGraph only when workflow changes
+        self.assertIn("destroyFlowGraph()", load_wf_body)
+
+        # 3. DOM diffing in renderSidebarWorkflows: data-wf-id and signature cache
+        render_sb_match = re.search(r"function renderSidebarWorkflows\(\)\{.*?\n\}", self.js, re.DOTALL)
+        self.assertIsNotNone(render_sb_match)
+        render_sb_body = render_sb_match.group(0)
+        self.assertIn("data-wf-id", render_sb_body)
+        self.assertIn("container.dataset.sig = listSig", render_sb_body)
+        self.assertNotIn("state.workflowId + '#' + ws.map", render_sb_body)
+
+        # 4. Optimistic UI update in openWorkflowTab
+        open_wf_match = re.search(r"function openWorkflowTab\(id\)\{.*?\n\}", self.js, re.DOTALL)
+        self.assertIsNotNone(open_wf_match)
+        open_wf_body = open_wf_match.group(0)
+        self.assertIn("renderSidebarWorkflows()", open_wf_body)
+
+        # 5. System tab protection in loadProject
+        load_proj_match = re.search(r"async function loadProject\(id,rer=true\)\{.*?\n\}", self.js, re.DOTALL)
+        self.assertIsNotNone(load_proj_match)
+        load_proj_body = load_proj_match.group(0)
+        self.assertIn("isSysTab", load_proj_body)
+
+        # 6. Backend service_status fast launchctl list
+        from console.herdr_factory_console import service_status
+        status = service_status()
+        self.assertIsInstance(status, dict)
+        self.assertIn("com.user.herdr-controller", status)
 
 
 if __name__ == "__main__":
