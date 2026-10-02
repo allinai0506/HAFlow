@@ -291,6 +291,18 @@ def render_context_reference_block(bindings: Optional[Dict[str, str]]) -> str:
     return "\n".join(lines)
 
 
+def validate_artifact_contract(artifact_mode, integration_mode, *, node_id=None, task_type=None):
+    """Missing legacy delivery mode stays unspecified; explicit modes are enforced."""
+    if artifact_mode is None:
+        if node_id == "wrapup" and task_type == "docs" and integration_mode == "git":
+            raise ValueError("artifact_mode must be explicit for legacy docs wrapup with git: choose repository_changes for committed docs, or shared_artifacts with integration_mode=none for a report")
+        return
+    if artifact_mode not in {"repository_changes", "shared_artifacts"}:
+        raise ValueError("artifact_mode must be repository_changes or shared_artifacts")
+    if artifact_mode == "shared_artifacts" and integration_mode != "none":
+        raise ValueError("shared_artifacts requires integration_mode=none; fix node delivery configuration")
+
+
 def validate_integration_for_execution(mode: str, integration_mode_value: Optional[str]) -> None:
     """execution.mode and integration_mode are orthogonal; context must never take the git path."""
     if mode == "context" and (integration_mode_value or "none") == "git":
@@ -343,6 +355,10 @@ def _normalize_workflow_body(workflow: Dict[str, Any]) -> Dict[str, Any]:
                 "rules": list(node.get("rules") or []),
                 "gate": dict(node.get("gate") or {}),
             }
+            validate_artifact_contract(node.get("artifact_mode"), norm_node["default_integration_mode"],
+                                       node_id=node_id, task_type=norm_node["default_task_type"])
+            if "artifact_mode" in node:
+                norm_node["artifact_mode"] = node["artifact_mode"]
             if "max_tasks_per_node" in node:
                 norm_node["max_tasks_per_node"] = node["max_tasks_per_node"]
             if "required_task_ids" in node:
@@ -418,6 +434,10 @@ def _normalize_workflow_body(workflow: Dict[str, Any]) -> Dict[str, Any]:
                 "rules": list(policy.get("rules") or []),
                 "gate": dict(policy.get("gate") or {}),
             }
+            validate_artifact_contract(policy.get("artifact_mode"), norm_node["default_integration_mode"],
+                                       node_id=node_id, task_type=norm_node["default_task_type"])
+            if "artifact_mode" in policy:
+                norm_node["artifact_mode"] = policy["artifact_mode"]
             if "max_tasks_per_node" in policy:
                 norm_node["max_tasks_per_node"] = policy["max_tasks_per_node"]
             if tab_id:

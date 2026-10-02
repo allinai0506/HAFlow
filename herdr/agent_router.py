@@ -81,12 +81,41 @@ def _preflight_checked_ts(record) -> float | None:
         return None
 
 
-def preflight_snapshot_fresh(record, now=None) -> bool:
+def preflight_snapshot_fresh(record, now=None, current_identity=None) -> bool:
+    identities = (record or {}).get("preflight_identities")
+    if identities is not None:
+        if not isinstance(identities, dict) or not identities:
+            return False
+        for agent, identity in identities.items():
+            current = current_identity.get(agent) if current_identity is not None else None
+            if current_identity is not None and current is None:
+                return False
+            if not preflight_snapshot_fresh(
+                {"preflight_identity": identity, "preflight_checked_at": record.get("preflight_checked_at")},
+                now=now, current_identity=current,
+            ):
+                return False
+    identity = (record or {}).get("preflight_identity")
+    if identity is not None:
+        if not isinstance(identity, dict) or not identity.get("verifiable"):
+            return False
+        if current_identity is None:
+            from herdr.deep_preflight import preflight_identity
+            from herdr.agent_binary import AGENT_BINARIES, resolve_binary
+            agent = identity.get("agent")
+            if not agent or not identity.get("project_root"):
+                return False
+            current_identity = preflight_identity(
+                agent, resolve_binary(AGENT_BINARIES.get(agent, agent)),
+                identity["project_root"], identity.get("launch_mode", "noninteractive"),
+            )
+        if not current_identity.get("verifiable") or identity.get("fingerprint") != current_identity.get("fingerprint"):
+            return False
     ts = _preflight_checked_ts(record)
     if ts is None:
-        return True
+        return identity is None and identities is None
     current = time.time() if now is None else now
-    return current - ts <= preflight_ttl_seconds()
+    return 0 <= current - ts <= preflight_ttl_seconds()
 
 def _load(path, default):
     try:

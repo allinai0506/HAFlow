@@ -233,7 +233,8 @@ class TestWorkerResultContract(GitFixture):
              patch.object(worker, "_registered_tasks", return_value=[]), \
              patch.object(worker, "is_task_active_in_registry", return_value=False), \
              patch.object(worker, "prepare_existing_pane"), \
-             patch.object(worker, "ensure_claude_workspace_trust"), \
+             patch.object(worker, "verify_request_preflight", return_value={"request_verified": True}), \
+             patch.object(worker, "wait_startup_ready", return_value={"status": "READY", "interactive_ready": True}), \
              patch.object(
                  worker, "start_agent",
                  return_value={

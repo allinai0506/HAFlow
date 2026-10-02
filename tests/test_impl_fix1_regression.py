@@ -363,7 +363,7 @@ def test_delivery_supersede_and_fix_loop_invalidation_never_fallback(tmp_path):
             ) is None
 
 
-def test_force_is_a_direct_legacy_close_choice():
+def test_force_is_a_direct_legacy_close_choice(tmp_path):
     module = load_script("herdr_task_force_fix1", "bin/herdr-task")
     tasks = [{
         "task_id": "t-force",
@@ -372,7 +372,12 @@ def test_force_is_a_direct_legacy_close_choice():
         "integration_mode": "git",
         "finalize_escalated": True,
     }]
-    with patch.object(module, "load_tasks", return_value={"tasks": tasks}), \
+    store = SQLiteStateStore(tmp_path / "state.db")
+    store.save_workflow({"workflow_id": "wf-force", "status": "running"})
+    for task in tasks:
+        store.save_task(task)
+    with patch.object(module, "_get_store", return_value=store), \
+         patch.object(module, "load_tasks", return_value={"tasks": tasks}), \
          patch.object(module, "_load_workflow_entry", return_value=(None, {})), \
          patch.object(module, "_finalize_one", return_value={"task_id": "t-force", "status": "cleaned", "action": "finalized"}), \
          patch.object(module, "_workflow_stage_tabs", return_value={"tab_ids": [], "workspace_id": None, "coordinator_pane": None, "owned_pane_ids": set()}), \

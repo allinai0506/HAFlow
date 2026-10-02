@@ -1816,3 +1816,15 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
   - 新增 max_concurrency / max_tasks_per_node、旧字段显式确认审计、panes 与 Controller 资源计数。
   - 归档标记 orphan，身份验证 reap；可继续任务默认同 task/pane rework，终态替换需理由并计数。
   - 更新 routing、lifecycle、Schema 与 CLI 参考；验收结果以本轮 sandbox 验证记录为准，不代表已部署。
+
+
+- 2026-10-02 工作流可靠性 | 完成回执、真实预检、幂等派发、分段检查点、版本/关闭与验收绑定
+  - 新协议绑定 task/run/epoch、24h 服务端有效期；显式续签保留检查点，公平扫描跨过阻塞回执；历史任务保持原兼容策略。
+  - 预检区分请求与交互证据；信任对话拒绝，未知资源保留。派发模式明确且跨入口去重，真实 launch intent 可核对恢复。
+  - 原子产物/哈希复核、有界工具及临时 HOME；实际 Worker/loop 生产者到报告保留候选、退出码和 skip，未知不冒充成功。
+  - 安装器核对 archive 内容、权限与缓存；关闭/重开/投递共用生命周期锁、逐资源日志，重用 Pane 绑定实例，dry-run 不声明删除。
+  - 三轮组合审查后已升级人工，用户明确认可原生 API 与同 UID 边界。最后关闭/续签原始反例独立复跑发送 0；新增6项、相关70项通过。
+  - 最终本地全量3134 passed、2 skipped、157 subtests passed，0 failed（449.15s）；两个跳过是隔离 HOME 无已安装 LaunchAgent 的只读检查，临时安装器测试已运行。源码映射无漂移；compile、CLI AST/help、Bash与diff通过；Ruff基线对照新增0。
+  - 知识同步 task-lifecycle / preflight-and-health、CLI参考、工程教训#120；完整记录 docs/walkthroughs/20261002-workflow-reliability.md。仅 working_tree，本次未推送、合并、部署或重启，生产验收 unknown。
+
+- 2026-10-02：工作流可靠性 PR 阶段完成同快照 CLI/loop 命令绑定及新鲜全量验证（3137 passed、2 skipped、157 subtests passed）；用户授权创建 PR 与本地重启，明确保留 Console 热补丁界面，只更新 Controller/Sentinel。详见 docs/walkthroughs/20261002-workflow-reliability.md；服务实际切换另行记录，不等于生产业务验收。

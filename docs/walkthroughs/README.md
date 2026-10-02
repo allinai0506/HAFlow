@@ -31,3 +31,4 @@
    - [`20260930-console-controller-decision-buttons.md`](file:///Users/user/HAFlow/docs/walkthroughs/20260930-console-controller-decision-buttons.md)：PR #120 —— 控制台 Controller 动作全按钮化（交付链路逐步骤门控 + 真实 re-drive）与"待你裁决"显式提醒；含两类"测试全绿但功能死掉"缺陷的运行时门禁复盘。
 
    - [`20260930-console-shell-closeout.md`](20260930-console-shell-closeout.md)：Console Shell v1（PR #116）的历史代码验收、收尾及本机热更新记录；2026-10-01 补交归档。
+   - [`20261002-workflow-reliability.md`](20261002-workflow-reliability.md)：六项工作流可靠性改进、本地调用链验收、崩溃/并发反例与人工复核边界。

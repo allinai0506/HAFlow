@@ -6892,5 +6892,17 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(500,error=e)
 
 def main():
+    try:
+        from herdr import service_release
+        import_root = Path(service_release.__file__).resolve().parent.parent
+        fingerprint = service_release.runtime_fingerprint(
+            import_root, [Path(__file__).resolve(), Path(service_release.__file__).resolve(),
+                          import_root / "herdr" / "state_store.py", import_root / "herdr" / "kernel.py"],
+        )
+    except Exception:
+        fingerprint = {"running_sha": "unknown", "running_import_root": "unknown", "component_versions": {}}
+    print("HERDR_RUNTIME_FINGERPRINT=" + json.dumps(
+        {"service": "com.user.herdr-factory-console", "pid": os.getpid(), **fingerprint}, sort_keys=True,
+    ), flush=True)
     ROOT.mkdir(parents=True,exist_ok=True); print(f'{PRODUCT_NAME}控制台: http://{HOST}:{PORT}',flush=True); ThreadingHTTPServer((HOST,PORT),Handler).serve_forever()
 if __name__=='__main__':main()

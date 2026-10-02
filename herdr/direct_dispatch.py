@@ -204,6 +204,7 @@ def merge_node_policy(node, policy):
     merged["label"] = pick("label")
     merged["required_outputs"] = pick("required_outputs", [])
     merged["rules"] = pick("rules", [])
+    merged["artifact_mode"] = pick("artifact_mode")
     merged["default_task_type"] = pick("default_task_type")
     merged["default_integration_mode"] = pick("default_integration_mode")
     merged["agent_policy"] = pick("agent_policy", {})
@@ -258,6 +259,7 @@ def normalize_node(node):
             node.get("default_integration_mode") or DEFAULT_INTEGRATION_MODE
         ).strip(),
         "roles": roles,
+        "artifact_mode": node.get("artifact_mode"),
     }
 
 
@@ -438,6 +440,8 @@ def _dispatch_spec(
     gate_inventory_block=None,
     redispatch_blocker_note=None,
 ):
+    from .workflow import validate_artifact_contract
+    validate_artifact_contract(node.get("artifact_mode"), integration_mode or node["integration_mode"], node_id=node.get("id"), task_type=node.get("task_type"))
     if onto_branch is None:
         onto_branch = sanitize_branch_name(context_branch)
     spec = {
@@ -460,9 +464,14 @@ def _dispatch_spec(
             gate_inventory_block=gate_inventory_block,
             redispatch_blocker_note=redispatch_blocker_note,
         ),
+        "artifact_mode": node.get("artifact_mode"),
+        "dispatch_role": "worker",
+        "dispatch_round": 1,
         "task_type": node["task_type"],
         "integration_mode": integration_mode or node["integration_mode"],
     }
+    if redispatch_of:
+        spec["redispatch_of"] = redispatch_of
     if onto_branch:
         spec["onto_branch"] = onto_branch
     frozen_sha = str(candidate_sha or "").strip()
@@ -497,6 +506,8 @@ def plan_stage_dispatch(
     if not normalized:
         return {"mode": "fallback", "reason": "node config missing", "specs": []}
 
+    from .workflow import validate_artifact_contract
+    validate_artifact_contract(normalized.get("artifact_mode"), normalized["integration_mode"], node_id=normalized.get("id"), task_type=normalized.get("task_type"))
     dispatch_kind = classify_dispatch(node)
     if dispatch_kind == "native":
         return {"mode": "fallback", "reason": "non-agent node", "specs": []}
@@ -565,6 +576,10 @@ def plan_stage_dispatch(
                     ).get(old_id),
                 )
             )
+        for spec, task in zip(specs, sorted(awaiting, key=lambda item: (item.get("created_at") or 0, item.get("task_id") or ""))):
+            spec["dispatch_role"] = task.get("dispatch_role") or "worker"
+            spec["dispatch_round"] = int(task.get("dispatch_round") or 1) + 1
+            spec["supersedes"] = task["task_id"]
         return {"mode": "dispatch", "reason": "redispatch superseded subset", "specs": specs}
 
     if active:
@@ -623,6 +638,8 @@ def plan_stage_dispatch(
                     gate_inventory_block=gate_inventory_block,
                 )
             )
+        for spec, role in zip(specs, roles):
+            spec["dispatch_role"] = str(role["name"]).strip()
         return {"mode": "dispatch", "reason": "initial node dispatch with roles", "specs": specs}
 
     acceptance = _acceptance_lines(normalized, None)

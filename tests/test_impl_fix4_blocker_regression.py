@@ -521,7 +521,7 @@ def test_fr3_porcelain_parser_preserves_paths_with_spaces():
     ]
 
 
-def test_fr5_legacy_force_remains_a_direct_cli_choice():
+def test_fr5_legacy_force_remains_a_direct_cli_choice(tmp_path):
     module = load_script("herdr_task_force_fix4", "bin/herdr-task")
     tasks = [{
         "task_id": "task-force",
@@ -530,7 +530,11 @@ def test_fr5_legacy_force_remains_a_direct_cli_choice():
         "integration_mode": "git",
         "finalize_escalated": True,
     }]
-    with patch.object(module, "load_tasks", return_value={"tasks": tasks}), patch.object(
+    store = SQLiteStateStore(tmp_path / "state.db")
+    store.save_workflow({"workflow_id": "wf-force", "status": "running"})
+    for task in tasks:
+        store.save_task(task)
+    with patch.object(module, "_get_store", return_value=store), patch.object(module, "load_tasks", return_value={"tasks": tasks}), patch.object(
         module, "_load_workflow_entry", return_value=(None, {})
     ), patch.object(
         module, "_finalize_one",

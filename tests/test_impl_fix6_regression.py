@@ -114,7 +114,11 @@ def test_accept_escalated_report_names_closed_pane_and_retained_unintegrated_clo
     task = {"task_id": "escalated-r1", "workflow_id": "wf-r1-p2-2",
         "status": "committed", "integration_mode": "git", "finalize_escalated": True,
         "pane_id": "pane-test", "clone_path": str(tmp_path / "clone")}
-    with patch.object(task_bin, "load_tasks", return_value={"tasks": [task]}), \
+    store = SQLiteStateStore(tmp_path / "state.db")
+    store.save_workflow({"workflow_id": "wf-r1-p2-2", "status": "running"})
+    store.save_task(task)
+    with patch.object(task_bin, "_get_store", return_value=store), \
+         patch.object(task_bin, "load_tasks", return_value={"tasks": [task]}), \
          patch.object(task_bin, "_load_workflow_entry", return_value=(None, {})), \
          patch.object(task_bin, "_finalize_one", return_value={
              "task_id": "escalated-r1", "status": "committed", "action": "finalized",

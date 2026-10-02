@@ -15,6 +15,8 @@ plist 也不会被重读 —— 于是「脚本成功、进程重启、文案一
 
 import re
 import subprocess
+import plistlib
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -64,10 +66,22 @@ class TestInstallScriptRebuildsReleaseSnapshot(unittest.TestCase):
                     f"脚本未处理 {service} 的 plist；该服务跑冻结快照，"
                     f"不改 plist 就不生效",
                 )
-        self.assertIn(
-            "plutil", text,
-            "改 plist 应用 plutil（无需交互式 PlistBuddy）",
-        )
+        from herdr.service_release import publish_service_plists
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            release = root.resolve() / "releases" / "new"
+            (release / "services").mkdir(parents=True)
+            (release / "services/herdr-controller.py").touch()
+            plist = root / "com.user.herdr-controller.plist"
+            plist.write_bytes(plistlib.dumps({"ProgramArguments": [
+                "/usr/bin/python3", str(root / "releases/old/services/herdr-controller.py")]}))
+            publish_service_plists([plist], release)
+            first = plist.read_bytes()
+            publish_service_plists([plist], release)
+            self.assertEqual(plist.read_bytes(), first)
+            data = plistlib.loads(first)
+            self.assertEqual(data["ProgramArguments"], ["/usr/bin/python3", str(release / "services/herdr-controller.py")])
+            self.assertEqual(data["EnvironmentVariables"]["HERDR_ROOT"], str(release))
 
     def test_console_plist_sets_herdr_root(self):
         """console 通过 HERDR_ROOT 决定 import 哪个 herdr/ 包，漏了它必然加载旧包。"""

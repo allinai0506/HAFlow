@@ -1116,7 +1116,7 @@ class TestStateTransitionGateway:
         # Hook into _finalize_one to simulate a concurrent actor trying to pause during teardown
         pause_attempted_result = {}
 
-        def _mock_finalize_interceptor(t, purge_clones=False, dry_run=False):
+        def _mock_finalize_interceptor(t, purge_clones=False, dry_run=False, close_claim=None):
             # Mid-teardown: workflow MUST already be in 'closing' state
             current_status = store.get_workflow("wf-closing-race")["status"]
             assert current_status == "closing", f"Expected workflow to be 'closing' during teardown, got {current_status}"
@@ -1385,5 +1385,4 @@ class TestStateTransitionGateway:
         )
         assert res["ok"] is True
         assert store.get_workflow("wf-auto-created")["status"] == "running"
-
 

@@ -15,8 +15,7 @@ REFUSED = "refused"
 
 DEFAULT_SKEW_SECONDS = 120
 
-INTERNAL_EXACT = frozenset({".agent-task-context", ".herdr-loop", ".herdr"})
-INTERNAL_PREFIXES = (".herdr-loop/", ".herdr/")
+from .repo_hygiene import INTERNAL_EXACT, INTERNAL_PREFIXES
 
 
 def adoption_skew_seconds(default=DEFAULT_SKEW_SECONDS):

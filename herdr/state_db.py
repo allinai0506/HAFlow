@@ -1691,6 +1691,7 @@ def list_tasks(
     workflow_id: Optional[str] = None,
     status: Optional[str] = None,
     db_path: Optional[Path] = None,
+    limit: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """Fetch tasks optionally filtered by workflow_id and/or status."""
     conn = get_db_connection(db_path)
@@ -1703,7 +1704,10 @@ def list_tasks(
         if status:
             query += " AND status = ?"
             params.append(status)
-        query += " ORDER BY created_at ASC"
+        query += " ORDER BY created_at ASC, task_id ASC"
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(max(0, min(int(limit), 10001)))
         cur = conn.execute(query, tuple(params))
         tasks = []
         for row in cur.fetchall():
@@ -6394,6 +6398,11 @@ def transition_task(
             task_dict["forced"] = True
         for k, v in meta.items():
             task_dict[k] = v
+
+        # A new execution attempt must never consume the prior attempt's receipt.
+        if to_status in {"rework", "pending"} and old_status != to_status:
+            task_dict.pop("completion_epoch", None)
+            task_dict.pop("completion_token_hash", None)
 
         task_dict["status"] = to_status
         task_dict["updated_at"] = now

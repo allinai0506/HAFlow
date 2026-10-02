@@ -335,3 +335,38 @@ panes 输出每节点累计 Task、活跃 Task、去重工位引用及上限。�
 rework 仅允许可继续的非终态任务，验证当前工位实例身份，保留 task_id/run_id/pane_id，清除旧门禁结论。投递失败留下 pending 意图，可在原任务重试。Controller 使用 `--request-id` 去重同一门禁请求。历史终态不复活。
 
 failed/superseded 等归档任务的工位引用在状态转换事务内标记 orphaned。reap 仅回收身份已确认的动态私有工位，保护预建工位、节点锚点、协调器及其他活跃任务引用；未知身份保留。物理关闭成功但状态写回中断时，后续以 pane_missing 证据补齐释放记录，不删除 clone。
+
+## 工作流可靠性：完成回执、检查点与交付投影
+
+以下入口对应本分支实现；工作树验收不代表当前安装服务已经加载。新任务的启动提示提供受管凭据路径及 task/run/epoch，历史无协议任务保留既有兼容行为。
+
+```bash
+# 本轮执行结束的声明，不代替测试、门禁、合并或生产验收。
+herdr-task report-completion <task_id> --identity-file <private_identity.json> \
+  --artifact <observation_id>:<sha256>
+
+# 由控制器显式续签；同一 operation-id 用于崩溃恢复，不用于新一次续签。
+herdr-task renew-completion <task_id> --operation-id <stable_renewal_id>
+
+herdr-task checkpoint-publish --task-id <task_id> --run-id <run_id> --epoch <epoch> \
+  --segment-file <report_segment.txt> --step 1 --next-step '<下一步>'
+herdr-task checkpoint-read --task-id <task_id> --run-id <run_id> --epoch <epoch>
+herdr-task checkpoint-aggregate --task-id <task_id> --run-id <run_id> --epoch <epoch>
+
+herdr-task tool-run --task-id <task_id> --run-id <run_id> --epoch <epoch> \
+  --timeout 60 --output-limit 65536 -- <program> <args>
+
+# 默认只读；--apply 只释放已证明资源不存在的启动意图，不回收未知/外来资源。
+herdr-task launch-reconcile --workflow-id <workflow_id> --node <node_id> \
+  --dispatch-role <role> --candidate-sha <full_sha> --dispatch-round 1
+
+herdr-task delivery-report <workflow_id>
+```
+
+完成凭据由服务端限定 24 小时；续签保留 epoch/检查点，轮换 bearer 并撤销旧凭据。原操作已开始传输但没有成功回执时保留 unknown，不能换一个 ID 盲目重发。关闭/重开与提示发送共享工作流生命周期锁，发送前重新核验当前任务与原生实例。
+
+检查点只接受当前 task/run/epoch、受管路径及完整哈希。最多 1000 分段，单段 1 MiB、聚合 8 MiB；已发布文件被改写时拒绝恢复。tool-run 使用临时 HOME、移除状态/投影路径，防默认数据库误写；超时退出 124、输出预算中断退出 125，均记录副作用 unknown。此隔离不替代操作系统沙箱，工具若依赖用户配置或认证，需明确的受控契约，不能隐式继承操作员环境。
+
+交付投影区分 observed_result 和当前候选可采用的 status；源码变动、旧 epoch、未知执行方式或失效产物均不能复用旧绿色验收。任务历史超过投影预算时 tasks_truncated=true，all_verifications_passed=false。无部署或生产回执时相应状态始终 unknown。
+
+节点应明确 artifact_mode=repository_changes 或 shared_artifacts；后者要求 integration_mode=none。旧纯报告 wrapup/docs/git 缺少显式模式会给出可恢复错误；文档需要 Git 提交时显式选 repository_changes。

@@ -404,6 +404,18 @@ class M3CloseWorkflowGate(unittest.TestCase):
     supersede clears the gate.
     """
 
+    def setUp(self):
+        from herdr.state_store import SQLiteStateStore
+        self.directory = tempfile.TemporaryDirectory(prefix="m3-close-")
+        self.addCleanup(self.directory.cleanup)
+        self.store = SQLiteStateStore(Path(self.directory.name) / "state.db")
+        self.store.save_workflow({"workflow_id": "wf-m3", "status": "running"})
+        for task in self._tasks()["tasks"]:
+            self.store.save_task(task)
+        replacement = patch.object(_ht, "_get_store", return_value=self.store)
+        replacement.start()
+        self.addCleanup(replacement.stop)
+
     def _tasks(self, escalated=True):
         return {
             "tasks": [
@@ -429,10 +441,16 @@ class M3CloseWorkflowGate(unittest.TestCase):
             self.assertEqual(cm.exception.code, 2)
 
     def test_accept_escalated_or_force_or_abandon_closes(self):
-        for kwargs in ({"accept_escalated": True}, {"force": True},
-                       {"abandon": True}):
+        from herdr.state_store import SQLiteStateStore
+        for index, kwargs in enumerate(({"accept_escalated": True}, {"force": True},
+                       {"abandon": True})):
+            store = SQLiteStateStore(Path(self.directory.name) / f"alternative-{index}.db")
+            store.save_workflow({"workflow_id": "wf-m3", "status": "running"})
+            for task in self._tasks()["tasks"]:
+                store.save_task(task)
             with patch.object(_ht, "load_tasks",
                               return_value=self._tasks(True)), \
+                 patch.object(_ht, "_get_store", return_value=store), \
                  patch.object(_ht, "_load_workflow_entry",
                               return_value=(None, {})), \
                  patch.object(_ht, "_finalize_one",
@@ -456,6 +474,8 @@ class M3CloseWorkflowGate(unittest.TestCase):
             {"task_id": "t-m3", "workflow_id": "wf-m3",
              "status": "superseded", "integration_mode": "git",
              "finalize_escalated": True}]}
+        for task in tasks["tasks"]:
+            self.store.save_task(task)
         with patch.object(_ht, "load_tasks", return_value=tasks), \
              patch.object(_ht, "_load_workflow_entry",
                           return_value=(None, {})), \
