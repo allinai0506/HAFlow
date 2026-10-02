@@ -77,11 +77,15 @@ def test_smoke_response_verified_with_banner_and_info_lines():
     assert aa.smoke_response_verified('qodercli', out)
     out2 = 'Warning: model deprecation notice\nHERDR_PREFLIGHT_OK\nDone in 0.3s\n'
     assert aa.smoke_response_verified('kimi', out2)
+    out3 = '2026-10-02 19:08:10.123 [INFO] connected\nHERDR_PREFLIGHT_OK\nFinished in 0.4s\nCost: $0.0001\n'
+    assert aa.smoke_response_verified('qodercli', out3)
 
 
 def test_smoke_response_verified_with_markdown_and_period():
     assert aa.smoke_response_verified('qodercli', '`HERDR_PREFLIGHT_OK`')
     assert aa.smoke_response_verified('kimi', 'HERDR_PREFLIGHT_OK.')
+    assert aa.smoke_response_verified('kimi', '"HERDR_PREFLIGHT_OK".')
+    assert aa.smoke_response_verified('kimi', '“HERDR_PREFLIGHT_OK”。')
     assert aa.smoke_response_verified('agy', '**HERDR_PREFLIGHT_OK**')
 
 

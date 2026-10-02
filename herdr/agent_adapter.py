@@ -546,9 +546,14 @@ def _strip_ansi(text: str) -> str:
 
 
 def _clean_smoke_token(text: str) -> str:
-    """Normalize response token by stripping ANSI, quotes, backticks, asterisks, whitespace, trailing period."""
+    """Normalize response token by stripping ANSI, quotes, backticks, asterisks, whitespace, punctuation."""
     cleaned = _strip_ansi(text).strip()
-    return cleaned.strip("`*'\" \t").rstrip(".")
+    strip_chars = "`*'\" \t.。;:,\n\r“”‘’()[]{}"
+    prev = None
+    while cleaned != prev:
+        prev = cleaned
+        cleaned = cleaned.strip(strip_chars)
+    return cleaned
 
 
 def _is_prompt_echo(line: str) -> bool:
@@ -569,14 +574,17 @@ def _is_benign_banner_line(line: str) -> bool:
         return True
     if cleaned.startswith("[") and ("]" in cleaned):
         return True
+    if re.match(r"^\d{4}[-/]\d{2}[-/]\d{2}", low):
+        return True
     if low.startswith((
         "warning:", "warn:", "info:", "tip:", "notice:", "note:",
         "loading", "loaded", "using model", "model:", "session",
-        "tokens:", "cost:", "time:", "done in", "elapsed",
-        "welcome to", "connecting", "connected"
+        "tokens", "cost", "time", "done", "finished", "completed",
+        "elapsed", "welcome", "connecting", "connected", "duration",
+        "latency", "speed", "total"
     )):
         return True
-    if cleaned.startswith(("---", "===", "___", "***", "```")):
+    if cleaned.startswith(("---", "===", "___", "***", "```", ">")):
         return True
     return False
 
