@@ -8,6 +8,51 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-10-02] feat | 解耦 Left Rail 全局活动栏与 Sidecar 空间资源管理器：消除冗余导航，落地 2026 现代双侧栏四分区架构与可折叠能力
+- 背景：
+  1. 用户指出控制台左侧 48px 全局导航轨（Left Rail）与 220px 侧边栏（Sidecar）内容完全重复（两者均平铺工作台、仪表板、驾驶舱、告警、工作流等一级入口），要求重新设计。
+  2. 参考标准原型蓝图（`prototype_standard_layout_tabs.html`）与 2026 年现代 IDE/SaaS 业界最佳实践（Linear / VS Code / Cursor 双侧栏模式）：
+     - 48px Left Rail 专职全局活动栏（Module Switcher: Workbench, Dashboard, Ops, Alerts, Templates, Avatar）；
+     - 220px Sidecar 专职空间资源与任务探索器（Contextual Factory Space Explorer）；
+     - 彻底消除 sidecar 中冗余的“运转”分组；
+     - 引入 Y=44px 共轴折叠/展开机制（⌘B 快捷键、折叠按钮与页签栏常驻展开按钮）。
+  3. 严守 100% 现代纯浅色（Linear Light Theme）、首行全屏 Y=44px 绝对共轴基准线以及 8pt/4pt 空间网格白名单。
+- 变更：
+  1. **双侧栏架构彻底解耦（Decoupled Left Rail & Sidecar）**：
+     - **Left Rail**：专职 5 个顶层模块路由（工作台、仪表板、运维驾驶舱、告警中心、模板资产库）及空间头像菜单，不堆叠局部空间细节；
+     - **Sidecar 重新梳理为高内聚 4 大生产功能区**：
+       - **Zone 1: 空间状态与顶层动作**：当前空间卡片微标（`space-pill`）+ “+ 发起新需求”高亮主行动点（Primary Launch CTA）；
+       - **Zone 2: 空间工作流树（按生产态动态分流）**：统计空间工作流总量，分类聚合为“待拍板/阻塞”、“进行中”及“历史完成”，支持状态呼吸灯与一键切换；
+       - **Zone 3: 空间资源与工位**：执行者机队阵容微标（在线数/名称）及常驻物理工位状态概览；
+       - **Zone 4: 项目治理与审计**：Controller 协调器调度台（带调度脉冲）、模板规范库、调度审计日志、任务归档库及项目注销。
+  2. **可折叠侧边栏交互（Collapsible Sidebar & ⌘B）**：
+     - `.brand-row` 内置折叠按钮（`#btnCollapseSidebar`）；
+     - 页签栏前置共轴展开按钮（`#btnExpandSidebar`），在侧边栏折叠时平滑显现；
+     - 支持 `⌘B` / `Ctrl+B` 键盘全局快捷键无缝切换折叠/展开；
+     - 折叠时网格由 `48px 220px minmax(0, 1fr)` 动态切换至 `48px 0 minmax(0, 1fr)`，带有 0.15s ease 现代过渡动画。
+  3. **自动化测试与兼容性保障**：
+     - 更新 `tests/test_console_shell.py`，移除废弃的 `>运转<` 检查，增加新分区断言并严格断言 `self.assertNotIn(">运转<", self.html)`；
+     - 扩充 `tests/test_console_standard_layout_tabs.py`，新增第 12 项测试 `test_left_rail_and_sidecar_decoupled_without_duplication`；
+     - 控制台全量 229 项自动化测试 100% 通过（`pytest -q tests/test_console*.py`）。
+
+## [2026-10-02] feat | 治理三域全面标签页化：Controller、模板库与归档全面告别弹窗模态，升级为工作区独立 Tab
+- 背景：
+  1. 用户指出控制台侧边栏“治理”分组下的“模板库”和“归档”仍为弹出框模态（`openModal()`），交互体验与 Controller 及标准多页签工作区不一致，要求按原型图彻底改为工作区独立标签页。
+  2. 保持 100% 现代纯浅色（Linear Light Theme），零深色色块；零后端逻辑改动；严守 8pt/4pt 间距网格白名单。
+- 变更：
+  1. **治理三域独立 Tab 面板体系**：
+     - 在主工作区 `<section class="panel main-panel">` 中注入 `#controllerTabView`、`#templatesTabView`、`#archiveTabView`；
+     - 增加 `.controller-panel[hidden] { display: none !important; }`，保障 `hidden` 属性不被 `display: flex` 覆盖。
+  2. **原生 Tab 动态生命周期打通**：
+     - `openWorkflowTab(id)`、`closeWorkflowTab(id, e)`、`renderWorkflowTabs()` 全面纳入系统级特殊页签：`__ctl__`（Controller）、`__templates__`（模板库）、`__archive__`（归档）；
+     - 点击侧栏相应按钮或在 Tab Bar 中切换时，激活独立面板并保持侧边栏导航按钮（`#navController`、`#navTemplates`、`#navArchive`）与当前 Tab 状态双向联动。
+  3. **彻底废除 `openModal` 弹窗**：
+     - 改写 `openControllerCockpitModal()`、`showTemplateLibrary()`、`showArchive()`，均写入对应工作区面板，消除遮罩层。
+  4. **测试与运行态全量验证**：
+     - 扩展 `tests/test_console_cockpit_runtime.py` 运行时 Mock DOM 拦截支持 `#controllerTabView`；
+     - 全量 228 项自动化测试 100% 通过（`pytest -q tests/test_console*.py`）；
+     - 热更新部署至生产控制台并通过 launchd 重启，服务实时验证通过。
+
 ## [2026-10-02] feat | 标准工作区六分区架构落地：48px 浅色左轨、28px 底部栏、共轴 44px 基准线与手绘草图全面对齐
 - 背景：
   1. 用户出示标准手绘草图架构（`uploaded_media_1790904749095.png`），指出当前界面与手绘原型对比缺少核心分区：

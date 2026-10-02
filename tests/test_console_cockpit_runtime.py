@@ -39,13 +39,15 @@ function document_getElementById() {
   const id = arguments[0];
   if (!__els[id]) {
     const el = { id: id, textContent: '', innerHTML: '', value: '',
-                 style: {}, dataset: {},
+                 style: {}, dataset: {}, hidden: false,
                  classList: { toggle(){}, add(){}, remove(){}, contains(){ return false; } },
                  setAttribute(){}, getAttribute(){ return null; },
                  appendChild(){}, querySelectorAll(){ return []; },
                  addEventListener(){}, focus(){}, remove(){} };
     __els[id] = el;
-    if (id === 'modalBody') {
+    // Intercept both the legacy modal body and the new tab panel so
+    // __probe.modal always captures the most-recently rendered cockpit HTML.
+    if (id === 'modalBody' || id === 'controllerTabView') {
       Object.defineProperty(el, 'innerHTML', {
         set(v) { __probe.modal = v; }, get() { return __probe.modal || ''; },
       });

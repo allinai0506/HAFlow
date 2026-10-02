@@ -244,6 +244,57 @@ assert.equal(state.openWorkflowTabIds.length, 0);
         self.assertIn('.workflow-tabs-bar {\n  height: 44px;', self.html)
         self.assertIn('.flow-insp-head {\n  height: 44px;', self.html)
 
+    def test_left_rail_and_sidecar_decoupled_without_duplication(self):
+        """12. Verify Left Rail and Sidecar have decoupled responsibilities without duplication.
+
+        - Left Rail: 48px global module switcher (Workbench, Dashboard, Ops, Alerts, Templates, Avatar).
+        - Sidecar: Contextual factory space explorer with 4 distinct zones:
+            Zone 1: Space Switcher Pill + Primary CTA (+ 发起新需求)
+            Zone 2: Space Workflow Tree (categorized by live production state: 待拍板, 进行中, 历史完成)
+            Zone 3: Space Resources & Fleet (执行者机队, 智能体工位)
+            Zone 4: Project Governance & Audit (Controller, 模板规范库, 调度审计日志, 任务归档库, 注销项目)
+        - Zero Duplication: No legacy duplicate '运转' group in the sidecar.
+        - Collapsible: Coaxial 44px toggle buttons (btn-collapse-sidebar, btn-expand-sidebar) and ⌘B shortcut.
+        """
+        # 1. Left Rail global items
+        self.assertIn('id="railNavWorkbench"', self.html)
+        self.assertIn('id="railNavDashboard"', self.html)
+        self.assertIn('id="railNavOps"', self.html)
+        self.assertIn('id="railNavAlerts"', self.html)
+        self.assertIn('id="railNavTemplates"', self.html)
+        self.assertIn('id="railSpaceAvatar"', self.html)
+
+        # 2. Sidecar 4 functional zones
+        # Zone 1
+        self.assertIn('class="space-pill"', self.html)
+        self.assertIn('class="btn-primary-launch"', self.html)
+        self.assertIn("发起新需求", self.html)
+        # Zone 2
+        self.assertIn('id="sidebarWorkflowTreeSection"', self.html)
+        self.assertIn('id="sidebarWorkflowGroups"', self.html)
+        self.assertIn("renderSidebarWorkflows", self.js)
+        # Zone 3
+        self.assertIn("空间资源与工位", self.html)
+        self.assertIn('id="sidebarFleetItem"', self.html)
+        self.assertIn('id="sidebarPanesItem"', self.html)
+        # Zone 4
+        self.assertIn("项目治理与审计", self.html)
+        self.assertIn('id="navController"', self.html)
+        self.assertIn('id="navTemplates"', self.html)
+        self.assertIn("模板规范库", self.html)
+        self.assertIn('id="sidebarLogsItem"', self.html)
+        self.assertIn('id="navArchive"', self.html)
+
+        # 3. Zero duplication assertion
+        self.assertNotIn(">运转<", self.html)
+
+        # 4. Collapsible sidebar support
+        self.assertIn('id="btnCollapseSidebar"', self.html)
+        self.assertIn('id="btnExpandSidebar"', self.html)
+        self.assertIn("toggleSidebar", self.js)
+        self.assertIn(".shell.sidebar-collapsed", self.html)
+        self.assertIn(".sidebar.collapsed", self.html)
+
 
 if __name__ == "__main__":
     unittest.main()
