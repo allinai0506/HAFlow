@@ -143,6 +143,19 @@ def generate_controller_actions(
 
     alt_agent = pick_alternative_agent(current_agent)
 
+    reusable = status in {"blocked", "rework", "working", "agent_done", "paused", "interrupted"} and bool(task.get("pane_id") or (task.get("runtime") or {}).get("pane_id"))
+    if reusable:
+        actions.append(ControllerAction(
+            action_id=f"{tid}:rework", title="原工位返工", category="rework",
+            description="保留任务与工位，就地处理评审问题并重新自测。",
+            command_line=build_cli_command("rework", positionals=[tid]),
+            api_endpoint="/api/controller/execute-action",
+            api_payload={"type": "rework", "task_id": tid, "workflow_id": wid},
+            commands=[["rework", tid]], recommended=True,
+            blocker_task_id=tid, effect=f"在原任务 {tid}、原工位返工，不新增任务或 Pane。",
+            stage=stage,
+        ))
+
     # 1. Scenario: Test Failure / Verification Defect (Fix-Loop required)
     if stage in {"test", "verification"} and (status == "failed" or "FAIL" in verdict_note or "defect" in verdict_note.lower()):
         # Action A: Dispatch Fix-Loop in implementation
@@ -175,7 +188,7 @@ def generate_controller_actions(
                     "prompt": fix_prompt,
                     "source": proj_root,
                 },
-                recommended=True,
+                recommended=not reusable,
                 blocker_task_id=tid,
                 effect=f"在实现阶段新建修复任务 {fix_task_id}（执行者 {alt_agent}），修完自动回测；原失败测试任务 {tid or '—'} 保留备查，无需你敲命令。",
                 old_task_id="",
@@ -194,6 +207,7 @@ def generate_controller_actions(
             "source": proj_root,
             "agent": alt_agent,
             "supersedes": tid,
+            "supersede-reason": "operator requested a replacement agent",
             "goal": f"使用 {alt_agent} 重新执行测试验证",
             "prompt": "重新运行测试套件并出具完整验证报告",
         }
@@ -212,6 +226,7 @@ def generate_controller_actions(
                     "stage": "test",
                     "agent": alt_agent,
                     "supersedes": tid,
+                    "supersede_reason": "operator requested a replacement agent",
                     "goal": f"使用 {alt_agent} 重新执行测试验证",
                     "prompt": "重新运行测试套件并出具完整验证报告",
                     "source": proj_root,
@@ -235,6 +250,7 @@ def generate_controller_actions(
             "source": proj_root,
             "agent": alt_agent,
             "supersedes": tid,
+            "supersede-reason": "operator requested a replacement agent",
             "goal": task.get("goal") or f"重新推进 {stage} 阶段目标",
             "prompt": f"重新执行并确保产物落盘: {task.get('goal', stage)}",
         }
@@ -253,11 +269,12 @@ def generate_controller_actions(
                     "stage": stage,
                     "agent": alt_agent,
                     "supersedes": tid,
+                    "supersede_reason": "operator requested a replacement agent",
                     "goal": task.get("goal") or f"重新推进 {stage} 阶段目标",
                     "prompt": f"重新执行并确保产物落盘: {task.get('goal', stage)}",
                     "source": proj_root,
                 },
-                recommended=True,
+                recommended=not reusable,
                 blocker_task_id=tid,
                 effect=f"将作废卡点任务 {tid or '—'}，用 {alt_agent} 新建 {relaunch_task_id} 重跑 {stage}；旧任务标记取代，可回溯。",
                 old_task_id=tid,

@@ -346,7 +346,7 @@ agent_policy:
 
   # 4. 最大/最小并发 Agent 数量限制
   min_agents: 1
-  max_agents: 3
+  max_concurrency: 3
 ```
 
 ### 调度优先级原则

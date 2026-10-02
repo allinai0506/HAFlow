@@ -19,9 +19,9 @@
 2. **[[architecture]] (运行架构与守护进程)**: 掌握常驻 LaunchAgent 守护进程、Unix Domain Socket、调度轮询机制与物理存储路径。
 3. **[[domain-model]] (领域实体与关系模型)**: 掌握 Project、Workflow、Node、Task、Slot、Anchor、Reservation 等核心概念。
 4. **[[tab-node-model]] (Tab=Node 空间现场与自愈模型)**: 理解为什么 Tab 是工作流节点、Anchor Pane 为什么是只读母体，以及系统如何在任务派发前自动检测并自愈现场。
-5. **[[task-lifecycle]] (任务生命周期与基线验收)**: 掌握 11 状态机流转、CoW (Copy-on-Write) Git 克隆隔离、基线指纹快照，以及阶段内交接义务巡检。
+5. **[[task-lifecycle]] (任务生命周期与基线验收)**: 掌握 11 状态机流转、CoW (Copy-on-Write) Git 克隆隔离、基线指纹快照，以及阶段内交接、原位 rework 与身份验证工位回收。
 6. **[[dag-workflow-engine]] (DAG 工作流引擎与 Kahn 算法)**: 理解声明式 YAML 模板解析、拓扑死锁检测与节点就绪（Ready Nodes）动态推进。
-7. **[[agent-routing-and-pools]] (异构 Agent 路由与并发锁)**: 掌握 Node 级策略解析、优先级评分、300s TTL 预占锁与负载均衡算法。
+7. **[[agent-routing-and-pools]] (异构 Agent 路由与并发锁)**: 掌握 Node 级策略解析、优先级评分、300s TTL 预占锁、节点并发/累计配额与负载均衡算法。
 8. **[[preflight-and-health]] (体检与沙盒深层探针)**: 掌握轻量与深度沙盒探针如何保证无副作用检测 Agent 额度与凭证。
 9. **[[common-change-paths]] (高频开发与代码修改指南)**: 针对常见业务与工程需求（如添加新 Agent、修改状态机、重载服务），指导您需要同时关注哪些文件与测试。
 10. **[[ops-center]] (Agent 运维驾驶舱)**: 了解 Dashboard V2 的老板视角、Workflow 卡片、Agent Fleet、异常中心与下钻数据契约。

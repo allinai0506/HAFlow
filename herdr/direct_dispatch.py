@@ -221,7 +221,7 @@ def classify_dispatch(node):
         isinstance(role, dict) and role.get("name") for role in roles
     ):
         return "static_multi"
-    if policy.get("max_agents", 1) == 1 and not node.get("parallel", False):
+    if policy.get("max_concurrency", policy.get("max_agents", 1)) == 1 and not node.get("parallel", False):
         return "static_single"
     return "dynamic"
 

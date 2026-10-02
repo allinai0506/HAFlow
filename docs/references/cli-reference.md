@@ -315,3 +315,23 @@ herdr-task rollout check-guard --agent codex --node implementation \
 - Kill：`HERDR_ADAPTIVE_ROLLOUT_ENABLED=false` 立即全 bucket Legacy，历史保留；
 - 热路径 guard 默认关闭，需要时用 `HERDR_ROLLOUT_HOT_GUARD=1` 开启；
   自动止损默认由 `rollout check-guard --auto-rollback` 显式执行。
+
+
+## 节点配额、原位返工与工位回收
+
+`agent_policy.max_concurrency` 限制 pending/活跃任务，节点 `max_tasks_per_node` 限制全部历史任务。launch 在工作流级跨进程锁内检查，拒绝时列出已有 task_id。替换需要真实空闲并发槽位；满额时先使用同任务 rework。默认软件开发模板累计配额：需求 2、计划 2、实现 12、测试 4、评审 4、收尾 1。
+
+```bash
+herdr-task panes --workflow-id <wf> --json
+herdr-task rework <task_id> --prompt "<阻断项和验证要求>" --reason "review blocked"
+herdr-task reap --workflow-id <wf>             # 只预览
+herdr-task reap --workflow-id <wf> --apply     # 身份验证通过后回收
+```
+
+panes 输出每节点累计 Task、活跃 Task、去重工位引用及上限。引用数来自持久状态，不等于已证实在线的工位数。Console 节点和 Controller 面板常驻相同计数，越线高亮。
+
+旧 `max_agents` 保留派发模式兼容；累计派发超过其数值阈值时，需要显式 `launch --ack-overflow`，并在路由前写入 `node_overflow_acknowledged` 审计事件。新硬配额不允许确认越过。例外替换必须提供 `--supersedes <task_id> --supersede-reason "<原任务无法继续的具体理由>"`；完成替代任务登记和投递后才退役旧任务。
+
+rework 仅允许可继续的非终态任务，验证当前工位实例身份，保留 task_id/run_id/pane_id，清除旧门禁结论。投递失败留下 pending 意图，可在原任务重试。Controller 使用 `--request-id` 去重同一门禁请求。历史终态不复活。
+
+failed/superseded 等归档任务的工位引用在状态转换事务内标记 orphaned。reap 仅回收身份已确认的动态私有工位，保护预建工位、节点锚点、协调器及其他活跃任务引用；未知身份保留。物理关闭成功但状态写回中断时，后续以 pane_missing 证据补齐释放记录，不删除 clone。

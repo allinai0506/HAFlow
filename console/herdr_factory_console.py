@@ -755,8 +755,11 @@ def _find_action(payload, suffix):
     )
     if task is None:
         raise RuntimeError(f'未找到任务 {task_id}（工作流 {wid}）')
+    candidates = (herdr_controller_actions.generate_controller_actions(task, {'workflow_id': wid})
+                  if suffix == 'rework' else
+                  herdr_controller_actions.generate_progress_actions(task, {'workflow_id': wid}))
     action = next(
-        (a for a in herdr_controller_actions.generate_progress_actions(task, {'workflow_id': wid})
+        (a for a in candidates
          if a.action_id.endswith(suffix)),
         None,
     )
@@ -898,7 +901,10 @@ def api_controller_execute_action(payload):
             '--prompt', prompt,
         ]
         if supersedes:
-            cmd += ['--supersedes', supersedes]
+            reason = str(payload.get('supersede_reason') or '').strip()
+            if not reason: raise RuntimeError('替换任务需要 supersede_reason；优先原工位 rework')
+            cmd += ['--supersedes', supersedes, '--supersede-reason', reason]
+        if payload.get('ack_overflow') is True: cmd.append('--ack-overflow')
         r = run(cmd, timeout=30, check=True)
         return {'ok': True, 'task_id': task_id, 'output': r.stdout.strip()}
 
@@ -913,6 +919,9 @@ def api_controller_execute_action(payload):
                 herdr_kernel.force_pass_gate(wid, gate_node_id=t.get('stage') or t.get('node') or '', note=note, operator=op)
         adv_res = manual_advance(wid)
         return {'ok': True, 'advanced': adv_res}
+
+    elif act_type == 'rework':
+        return _run_action_command(_find_action(payload, 'rework'), 30)
 
     elif act_type == 'advance':
         return manual_advance(wid)
@@ -4875,6 +4884,8 @@ function flowIconSvg(id){
   return '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">'+p+'</svg>';
 }
 function flowCardFoot(n){
+  const u=n.resource_usage;
+  if(u)return '累计任务 '+u.task_count+' / '+(u.max_tasks_per_node??'未设')+' · 运行 '+u.active_task_count+' / '+(u.max_concurrency??'未设')+' · 工位引用 '+u.pane_count+(u.overflow?' · 超限':'');
   if(!n.task_count)return (n.status === 'completed' || n.status === 'cleaned') ? '已完成' : '尚未开始';
   const head=(Number(n.active_task_count)||0)+' 运行 · 完成 '+(Number(n.completed_task_count)||0);
   const agents=(n.agents||[]).filter(Boolean).slice(0,2);
@@ -4889,7 +4900,7 @@ function flowCardInner(n){
     +'<div class="fn-top"><span class="fn-ico">'+flowIconSvg(n.id)+'</span><span class="fn-kind">'+esc(kind)+'</span><span class="fn-pill">'+esc(humanNodeStatus(status))+'</span></div>'
     +'<div class="fn-title">'+esc(cleanStageLabel(n.label||n.id||''))+'</div>'
     +'<div class="fn-purpose">'+esc(flowPlain(n.purpose))+'</div>'
-    +'<div class="fn-foot">'+esc(flowCardFoot(n))+'</div>';
+    +'<div class="fn-foot"'+(n.resource_usage?.overflow?' style="color:var(--danger);font-weight:600"':'')+'>'+esc(flowCardFoot(n))+'</div>';
 }
 function ensureFlowCardShape(){
   if(state.flowHtmlReady)return true;
@@ -5633,11 +5644,17 @@ function openControllerCockpitModal(){
   } else {
     unblockSection=`<div class="ctl-empty">✓ 当前没有报错卡点。<div class="muted">若只是还没收尾（保存版本 / 并入目标分支 / 归档），见下方“继续推进”一节。</div></div>`;
   }
+  const resources=(state.workflow?.graph?.nodes||[]).filter(n=>n.resource_usage);
+  const resourceSection=resources.length?'<section><div class="ctl-section-title">节点任务与工位占用</div><div class="ctl-sub">累计包含已归档任务；工位计数为持久引用数，待回收引用单列。</div>'+resources.map(n=>{
+    const u=n.resource_usage;
+    return '<div class="ctl-status-item"'+(u.overflow?' style="color:var(--danger);font-weight:600"':'')+'><strong>'+esc(n.label||n.id)+'</strong><span>'+esc(flowCardFoot(n))+' · 待回收 '+u.orphan_pane_count+'</span></div>';
+  }).join('')+'</section>':'';
   const pipelineSection=renderPipelineActions(allActs);
   const decisionSection=renderDecisionPanel();
 
   const cheatRows=[
-    {name:'换执行者重派',cmd:`bin/herdr-task launch --task-id <new-task-id> --workflow-id ${wid} --stage <stage> --source . --agent <agent> --goal <goal> --prompt <prompt> --supersedes <old-task-id>`,desc:'作废指定卡点旧任务，换执行者重派新任务'},
+    {name:'原工位返工',cmd:`bin/herdr-task rework <task-id> --prompt '<修复指引>'`,desc:'保留 task_id 与工位，就地修复与自测'},
+    {name:'换执行者重派（例外）',cmd:`bin/herdr-task launch --task-id <new-task-id> --workflow-id ${wid} --stage <stage> --source . --agent <agent> --goal <goal> --prompt <prompt> --supersedes <old-task-id> --supersede-reason '<替换理由>'`,desc:'作废指定卡点旧任务，换执行者重派新任务'},
     {name:'强制推进阶段',cmd:`bin/herdr-task advance ${wid}`,desc:'检查并强制推进工作流至下一阶段'},
     {name:'解除升级锁定',cmd:'bin/herdr-task clear-escalation <task-id>',desc:'撤销机器终化升级锁，解除阻断重新流转'},
     {name:'立刻推工位一把',cmd:`herdr agent prompt <pane-id> "提示内容" --wait --timeout 180000`,desc:'马上把指令送到工位并等回执（立即生效）'},
@@ -5645,7 +5662,7 @@ function openControllerCockpitModal(){
   ];
   let cheatSheet=`<details class="ctl-tech"><summary>工程师命令参考（可选展开，终端用户无需使用）</summary><div class="ctl-tech-body"><section class="ctl-cheatsheet" style="box-shadow:none"><div class="ctl-sub">以下命令仅供审计与排查；日常使用请点上面的“一键执行”按钮。</div><div class="ctl-cheat-list">${cheatRows.map((r,i)=>`<div class="ctl-cheat-row"><span class="ctl-cheat-num">${i+1}</span><div><div class="ctl-cheat-name"><span>${esc(r.name)}</span><button class="mini" onclick="copyCliCommand(document.getElementById('ctlCheat${i}').textContent)">复制</button></div><div class="ctl-cheat-cmd"><code id="ctlCheat${i}">${esc(r.cmd)}</code></div><div class="ctl-cheat-desc">${esc(r.desc)}</div></div></div>`).join('')}</div></section></div></details>`;
 
-  const html=`<div class="ctl-wrap">${statusCard}${decisionSection}${unblockSection}${pipelineSection}${cheatSheet}</div>`;
+  const html=`<div class="ctl-wrap">${statusCard}${resourceSection}${decisionSection}${unblockSection}${pipelineSection}${cheatSheet}</div>`;
   openModal(`Controller 调度与解卡控制台 · ${wid}`,html);
 }
 async function advanceStage(){
