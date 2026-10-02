@@ -8,6 +8,22 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-10-02] feat | 调度审计日志全面标签页化：告别弹窗模态，升级为工作区独立 Tab（__logs__）
+- 背景：
+  1. 用户指出控制台侧边栏“项目治理与审计”中的“调度审计日志”不应使用遮罩弹窗（openModal），而应该是工作区标准 Tab 页。
+  2. 随着工作台标准多页签布局确立（工作流流转、Controller 控制台 `__ctl__`、模板资产库 `__templates__`、任务归档库 `__archive__`），调度审计日志作为核心白盒治理能力，应当与治理其他三域保持一致的原生页签体系。
+- 变更：
+  1. **工作区日志 Tab 承载（#logsTabView）**：
+     - 在主工作区面板容器注入 `<div id="logsTabView" class="controller-panel" hidden></div>`；
+     - 增加 `.log-kind-selector`、`.log-kind-btn`、`.log-stream-wrap`、`.log-content-pre` 现代浅色样式，遵循 0/4/8/12/16px 栅格白名单。
+  2. **原生 Tab 生命周期与调度流控制**：
+     - `openWorkflowTab`、`closeWorkflowTab`、`renderWorkflowTabs` 支持 `__logs__` 系统页签；
+     - 支持 4 大物理日志流一键切换：Controller 调度主循环、Error 异常错误流、Sentinel 巡检守卫流、Notifier 通知服务流；
+     - 支持 100/200/500/1000 行限制选择、自动滚屏、自动刷新（3s）、一键复制到剪贴板与日志文件导出；
+     - 服务端 `/api/logs` 增强支持 `n` 行数过滤参数。
+  3. **自动化测试与回归防线**：
+     - `tests/test_console_standard_layout_tabs.py` 新增 `test_logs_system_tab_not_modal`，验证无 `openModal` 且具备完整的 Tab 生命周期。
+
 ## [2026-10-02] feat | 解耦 Left Rail 全局活动栏与 Sidecar 空间资源管理器：消除冗余导航，落地 2026 现代双侧栏四分区架构与可折叠能力
 - 背景：
   1. 用户指出控制台左侧 48px 全局导航轨（Left Rail）与 220px 侧边栏（Sidecar）内容完全重复（两者均平铺工作台、仪表板、驾驶舱、告警、工作流等一级入口），要求重新设计。

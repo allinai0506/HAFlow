@@ -145,6 +145,18 @@ closeWorkflowTab('wf-2');
 closeWorkflowTab('wf-1');
 assert.equal(state.workflowId, null);
 assert.equal(state.openWorkflowTabIds.length, 0);
+
+// 5. Open logs system tab
+openWorkflowTab('__logs__');
+assert.equal(state.workflowId, '__logs__');
+assert.ok(state.openWorkflowTabIds.includes('__logs__'));
+html = document.getElementById('workflowTabsList').innerHTML;
+assert.ok(html.includes('调度审计日志'));
+assert.ok(html.includes('__logs__'));
+
+// 6. Close logs system tab
+closeWorkflowTab('__logs__');
+assert.ok(!state.openWorkflowTabIds.includes('__logs__'));
 """
         res = subprocess.run(["node", "-e", node_script], capture_output=True, text=True, timeout=10)
         self.assertEqual(res.returncode, 0, f"Node tab lifecycle test failed: {res.stderr}")
@@ -294,6 +306,24 @@ assert.equal(state.openWorkflowTabIds.length, 0);
         self.assertIn("toggleSidebar", self.js)
         self.assertIn(".shell.sidebar-collapsed", self.html)
         self.assertIn(".sidebar.collapsed", self.html)
+
+    def test_logs_system_tab_not_modal(self):
+        """13. Verify 调度审计日志 is rendered as a standard workspace tab, not a popup modal."""
+        # 1. logsTabView container exists with controller-panel class
+        self.assertIn('id="logsTabView"', self.html)
+        self.assertIn('class="controller-panel"', self.html)
+
+        # 2. showLogs opens tab, not modal
+        self.assertIn("function showLogs", self.js)
+        show_logs_match = re.search(r"async function showLogs\(.*?\)\{.*?\n\}", self.js, re.DOTALL)
+        self.assertIsNotNone(show_logs_match)
+        show_logs_body = show_logs_match.group(0)
+        self.assertNotIn("openModal", show_logs_body)
+        self.assertIn("setWorkspaceMode('logs')", show_logs_body)
+        self.assertIn("__logs__", show_logs_body)
+
+        # 3. Sidebar logs item invokes showLogs
+        self.assertIn('id="sidebarLogsItem" onclick="showLogs()"', self.html)
 
 
 if __name__ == "__main__":

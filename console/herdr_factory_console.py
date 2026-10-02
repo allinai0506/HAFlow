@@ -4021,6 +4021,12 @@ body {
 .controller-panel{flex:1;min-height:0;overflow-y:auto;padding:24px;background:#ffffff;display:flex;flex-direction:column;gap:16px;}
 .controller-panel[hidden]{display:none !important;}
 .ctl-panel-header{display:flex;align-items:center;gap:8px;padding-bottom:16px;border-bottom:1px solid #e6e8ee;font-size:14px;font-weight:600;color:#16171b;}
+.log-kind-selector{display:inline-flex;align-items:center;background:#f4f5f7;padding:4px;border-radius:6px;gap:4px;}
+.log-kind-btn{border:none;background:transparent;padding:4px 8px;border-radius:4px;font-size:12px;color:#5f6368;cursor:pointer;}
+.log-kind-btn:hover{background:#ffffff;color:#121316;}
+.log-kind-btn.active{background:#ffffff;color:#5e6ad2;font-weight:600;box-shadow:0 1px 2px rgba(18,19,22,0.08);}
+.log-stream-wrap{flex:1;min-height:360px;background:#f8f9fa;border:1px solid #e6e8ee;border-radius:8px;padding:12px 16px;display:flex;flex-direction:column;overflow:hidden;}
+.log-content-pre{flex:1;overflow-y:auto;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:12px;line-height:1.6;color:#121316;white-space:pre-wrap;word-break:break-all;margin:0;}
 </style></head><body>
 <div class="shell" data-view="workbench" data-workspace="flow">
   <aside class="left-rail">
@@ -4240,6 +4246,7 @@ body {
         <div id="controllerTabView" class="controller-panel" hidden></div>
         <div id="templatesTabView" class="controller-panel" hidden></div>
         <div id="archiveTabView" class="controller-panel" hidden></div>
+        <div id="logsTabView" class="controller-panel" hidden></div>
       </section>
     </div>
     <div id="resourceStore" hidden>
@@ -5309,6 +5316,7 @@ function openWorkflowTab(id){
   if(id==='__ctl__'){state.workflowId='__ctl__';if(typeof setWorkspaceMode==='function')setWorkspaceMode('ctl');renderWorkflowTabs();if(typeof paintCrumb==='function')paintCrumb();return;}
   if(id==='__templates__'){state.workflowId='__templates__';if(typeof setWorkspaceMode==='function')setWorkspaceMode('templates');renderWorkflowTabs();if(typeof paintCrumb==='function')paintCrumb();if(typeof showTemplateLibrary==='function')showTemplateLibrary();return;}
   if(id==='__archive__'){state.workflowId='__archive__';if(typeof setWorkspaceMode==='function')setWorkspaceMode('archive');renderWorkflowTabs();if(typeof paintCrumb==='function')paintCrumb();if(typeof showArchive==='function')showArchive();return;}
+  if(id==='__logs__'){state.workflowId='__logs__';if(typeof setWorkspaceMode==='function')setWorkspaceMode('logs');renderWorkflowTabs();if(typeof paintCrumb==='function')paintCrumb();if(typeof showLogs==='function')showLogs();return;}
   if(!state.openWorkflowTabIds)state.openWorkflowTabIds=[];
   if(!state.openWorkflowTabIds.includes(id))state.openWorkflowTabIds.push(id);
   state.shellView='workbench';
@@ -5325,6 +5333,7 @@ function closeWorkflowTab(id,e){
   if(id==='__ctl__'){const ctlP=document.getElementById('controllerTabView');if(ctlP)ctlP.hidden=true;}
   if(id==='__templates__'){const tplP=document.getElementById('templatesTabView');if(tplP)tplP.hidden=true;}
   if(id==='__archive__'){const arcP=document.getElementById('archiveTabView');if(arcP)arcP.hidden=true;}
+  if(id==='__logs__'){const logP=document.getElementById('logsTabView');if(logP)logP.hidden=true;if(typeof logState!=='undefined'&&logState.autoRefreshTimer){clearInterval(logState.autoRefreshTimer);logState.autoRefreshTimer=null;}}
   if(state.workflowId===id){
     if(state.openWorkflowTabIds.length>0){
       const nextIdx=Math.min(idx,state.openWorkflowTabIds.length-1);
@@ -5378,6 +5387,13 @@ function renderWorkflowTabs(){
         `<span class="tab-dot completed" aria-hidden="true"></span>`+
         `<span class="tab-title">📦 任务归档</span>`+
         `<button type="button" class="tab-close" onclick="closeWorkflowTab('__archive__',event)" title="关闭页签" aria-label="关闭页签">×</button>`+
+        `</div>`;
+    }
+    if(wid==='__logs__'){
+      return `<div class="wf-tab ${isActive?'active':''}" onclick="openWorkflowTab('__logs__')" title="调度审计日志" role="tab" aria-selected="${isActive}">`+
+        `<span class="tab-dot running" aria-hidden="true"></span>`+
+        `<span class="tab-title">📜 调度审计日志</span>`+
+        `<button type="button" class="tab-close" onclick="closeWorkflowTab('__logs__',event)" title="关闭页签" aria-label="关闭页签">×</button>`+
         `</div>`;
     }
     const w=wfMap[wid]||{workflow_id:wid,status:'waiting'};
@@ -5633,9 +5649,11 @@ function paintCrumb(){
   const ctlBtn=document.getElementById('navController');
   const tplBtn=document.getElementById('navTemplates');
   const arcBtn=document.getElementById('navArchive');
+  const logBtn=document.getElementById('sidebarLogsItem');
   if(ctlBtn&&ctlBtn.classList)ctlBtn.classList.toggle('on',state.workflowId==='__ctl__');
   if(tplBtn&&tplBtn.classList)tplBtn.classList.toggle('on',state.workflowId==='__templates__');
   if(arcBtn&&arcBtn.classList)arcBtn.classList.toggle('on',state.workflowId==='__archive__');
+  if(logBtn&&logBtn.classList)logBtn.classList.toggle('on',state.workflowId==='__logs__');
   const railActiveId = (state.workflowId === '__templates__') ? 'templates' : view;
   document.querySelectorAll('.rail-item[data-rail-nav]').forEach(el=>el.classList&&el.classList.toggle('active', el.getAttribute('data-rail-nav')===railActiveId));
   const shell=document.querySelector('.shell');
@@ -5860,7 +5878,7 @@ function flowOverviewHtml(node, tasks){
 function flowGraphData(){return (state.workflow&&state.workflow.graph)||{nodes:[],edges:[]};}
 function initFlowGraph(){renderFlowGraph();}
 function pickDefaultFlowNodeId(nodes){if(!nodes||!nodes.length)return null;const order=['blocked','failed','working','rework'];for(const st of order){const hit=nodes.find(n=>n.status===st);if(hit)return hit.id;}const completed=new Set(nodes.filter(n=>n.status==='completed').map(n=>n.id));const waitingNext=nodes.find(n=>n.status==='waiting'&&(n.depends_on||[]).every(d=>completed.has(d)));if(waitingNext)return waitingNext.id;const waiting=nodes.find(n=>n.status==='waiting');if(waiting)return waiting.id;return nodes[0].id;}
-function setWorkspaceMode(mode){const fw=document.getElementById('flowWrap');const tl=document.getElementById('tasks');const st=document.getElementById('stages');const fs=document.getElementById('flowSummary');const ctlP=document.getElementById('controllerTabView');const tplP=document.getElementById('templatesTabView');const arcP=document.getElementById('archiveTabView');const shell=document.querySelector('.shell');if(shell)shell.dataset.workspace=mode||'flow';const isSys=(mode==='aux'||mode==='ctl'||mode==='templates'||mode==='archive');const bar=document.getElementById('canvasToolbar');if(bar)bar.style.display=isSys?'none':'flex';const tg=document.querySelector('.flow-view-toggle');if(tg)tg.style.display=isSys?'none':'inline-flex';const tf=document.querySelector('.task-filters');if(tf)tf.style.display=(isSys||mode!=='list')?'none':'flex';if(fw)fw.style.display=mode==='flow'?'flex':'none';if(fs)fs.style.display=(mode==='flow')?'block':'none';if(st)st.style.display='none';if(tl)tl.style.display=(mode==='flow'||mode==='ctl'||mode==='templates'||mode==='archive')?'none':'block';if(ctlP)ctlP.hidden=(mode!=='ctl');if(tplP)tplP.hidden=(mode!=='templates');if(arcP)arcP.hidden=(mode!=='archive');}
+function setWorkspaceMode(mode){const fw=document.getElementById('flowWrap');const tl=document.getElementById('tasks');const st=document.getElementById('stages');const fs=document.getElementById('flowSummary');const ctlP=document.getElementById('controllerTabView');const tplP=document.getElementById('templatesTabView');const arcP=document.getElementById('archiveTabView');const logP=document.getElementById('logsTabView');const shell=document.querySelector('.shell');if(shell)shell.dataset.workspace=mode||'flow';const isSys=(mode==='aux'||mode==='ctl'||mode==='templates'||mode==='archive'||mode==='logs');const bar=document.getElementById('canvasToolbar');if(bar)bar.style.display=isSys?'none':'flex';const tg=document.querySelector('.flow-view-toggle');if(tg)tg.style.display=isSys?'none':'inline-flex';const tf=document.querySelector('.task-filters');if(tf)tf.style.display=(isSys||mode!=='list')?'none':'flex';if(fw)fw.style.display=mode==='flow'?'flex':'none';if(fs)fs.style.display=(mode==='flow')?'block':'none';if(st)st.style.display='none';if(tl)tl.style.display=(mode==='flow'||mode==='ctl'||mode==='templates'||mode==='archive'||mode==='logs')?'none':'block';if(ctlP)ctlP.hidden=(mode!=='ctl');if(tplP)tplP.hidden=(mode!=='templates');if(arcP)arcP.hidden=(mode!=='archive');if(logP)logP.hidden=(mode!=='logs');}
 function switchWorkflowView(v){state.workflowView=(v==='list'?'list':'flow');const bf=document.getElementById('viewFlowBtn');if(bf)bf.classList.toggle('active',state.workflowView==='flow');const bl=document.getElementById('viewListBtn');if(bl)bl.classList.toggle('active',state.workflowView==='list');setWorkspaceMode(state.workflowView);if(state.workflowView==='flow')requestAnimationFrame(()=>{resizeFlowGraph();fitFlowGraph();});else renderTasks();}
 function switchFlowInspectorTab(t){state.flowInspectorTab=t;['Summary','Tasks','Context','Runtime'].forEach(k=>{const el=document.getElementById('flowTab'+k);if(el)el.classList.toggle('active',k.toLowerCase()===t);});renderNodeInspector();}
 function selectFlowNode(id){state.flowSelectedNodeId=id;updateFlowSelection();renderNodeInspector();}
@@ -6572,7 +6590,191 @@ async function advanceStage(){
     }
   });
 }
-async function showLogs(){try{const d=await api('/api/logs?kind=controller');openModal('控制器日志',`<pre>${esc(d.output)}</pre>`)}catch(e){toast(e.message,true)}}
+let logState = {
+  kind: 'controller',
+  lines: 200,
+  autoRefreshTimer: null
+};
+
+function renderLogsTabSkeleton(){
+  return `<div class="ctl-panel-header">`+
+    `<div style="display:flex;justify-content:space-between;align-items:center;width:100%;flex-wrap:wrap;gap:8px">`+
+      `<div><strong>📜 调度审计日志</strong><span class="muted" style="margin-left:8px;font-weight:400">· 协调器事件溯源、主循环轮询流与各工位物理日志</span></div>`+
+      `<div style="display:flex;gap:8px;align-items:center">`+
+        `<button class="btn" onclick="refreshLogsTab()" title="刷新日志">🔄 刷新</button>`+
+        `<button class="btn" onclick="copyCurrentLog()" title="复制日志到剪贴板">📋 复制</button>`+
+        `<button class="btn" onclick="exportLogsFile()" title="导出日志文件">⬇️ 导出</button>`+
+      `</div>`+
+    `</div>`+
+  `</div>`+
+  `<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:8px">`+
+    `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">`+
+      `<div class="log-kind-selector">`+
+        `<button class="btn mini log-kind-btn ${logState.kind==='controller'?'active':''}" id="logKindController" onclick="switchLogKind('controller')">协调器 (Controller)</button>`+
+        `<button class="btn mini log-kind-btn ${logState.kind==='controller_err'?'active':''}" id="logKindControllerErr" onclick="switchLogKind('controller_err')">错误流 (Error)</button>`+
+        `<button class="btn mini log-kind-btn ${logState.kind==='sentinel'?'active':''}" id="logKindSentinel" onclick="switchLogKind('sentinel')">巡检守卫 (Sentinel)</button>`+
+        `<button class="btn mini log-kind-btn ${logState.kind==='notifier'?'active':''}" id="logKindNotifier" onclick="switchLogKind('notifier')">通知服务 (Notifier)</button>`+
+      `</div>`+
+      `<select id="logLineCount" onchange="switchLogLineCount(this.value)" style="padding:4px 8px;font-size:12px;border:1px solid #e6e8ee;border-radius:6px;background:#ffffff">`+
+        `<option value="100"${logState.lines===100?' selected':''}>最近 100 行</option>`+
+        `<option value="200"${logState.lines===200?' selected':''}>最近 200 行</option>`+
+        `<option value="500"${logState.lines===500?' selected':''}>最近 500 行</option>`+
+        `<option value="1000"${logState.lines===1000?' selected':''}>最近 1000 行</option>`+
+      `</select>`+
+    `</div>`+
+    `<div style="display:flex;gap:16px;align-items:center">`+
+      `<label style="display:inline-flex;align-items:center;gap:4px;font-size:12px;color:#5f6368;cursor:pointer;user-select:none">`+
+        `<input type="checkbox" id="logAutoScroll" checked style="margin:0">`+
+        `<span>自动滚屏</span>`+
+      `</label>`+
+      `<label style="display:inline-flex;align-items:center;gap:4px;font-size:12px;color:#5f6368;cursor:pointer;user-select:none">`+
+        `<input type="checkbox" id="logAutoRefresh" onchange="toggleLogAutoRefresh(this.checked)" style="margin:0">`+
+        `<span>自动刷新 (3s)</span>`+
+      `</label>`+
+    `</div>`+
+  `</div>`+
+  `<div class="cockpit-stat-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:8px">`+
+    `<div style="background:#ffffff;border:1px solid #e6e8ee;border-radius:8px;padding:12px 16px;box-shadow:0 1px 2px rgba(18,19,22,0.04)">`+
+      `<div style="font-size:11px;color:#5f6368;font-weight:500">当前日志流</div>`+
+      `<div id="logStatKind" style="font-size:14px;font-weight:600;color:#121316;margin-top:4px">Controller 主循环</div>`+
+    `</div>`+
+    `<div style="background:#ffffff;border:1px solid #e6e8ee;border-radius:8px;padding:12px 16px;box-shadow:0 1px 2px rgba(18,19,22,0.04)">`+
+      `<div style="font-size:11px;color:#5f6368;font-weight:500">日志行数</div>`+
+      `<div id="logStatLines" style="font-size:14px;font-weight:600;color:#121316;margin-top:4px;font-variant-numeric:tabular-nums">0 行</div>`+
+    `</div>`+
+    `<div style="background:#ffffff;border:1px solid #e6e8ee;border-radius:8px;padding:12px 16px;box-shadow:0 1px 2px rgba(18,19,22,0.04)">`+
+      `<div style="font-size:11px;color:#5f6368;font-weight:500">持久化模式</div>`+
+      `<div style="font-size:14px;font-weight:600;color:#5e6ad2;margin-top:4px">WAL 严格追加</div>`+
+    `</div>`+
+    `<div style="background:#ffffff;border:1px solid #e6e8ee;border-radius:8px;padding:12px 16px;box-shadow:0 1px 2px rgba(18,19,22,0.04)">`+
+      `<div style="font-size:11px;color:#5f6368;font-weight:500">更新时间</div>`+
+      `<div id="logStatUpdated" style="font-size:14px;font-weight:600;color:#047857;margin-top:4px;font-variant-numeric:tabular-nums">—</div>`+
+    `</div>`+
+  `</div>`+
+  `<div class="log-stream-wrap">`+
+    `<pre id="logContentPre" class="log-content-pre">正在拉取调度审计日志…</pre>`+
+  `</div>`;
+}
+
+async function showLogs(kind){
+  if(kind)logState.kind=kind;
+  const logEl=document.getElementById('logsTabView');
+  setWorkspaceMode('logs');
+  if(!state.openWorkflowTabIds)state.openWorkflowTabIds=[];
+  if(!state.openWorkflowTabIds.includes('__logs__'))state.openWorkflowTabIds.push('__logs__');
+  state.workflowId='__logs__';
+  renderWorkflowTabs();
+  paintCrumb();
+  if(logEl){
+    if(!document.getElementById('logContentPre')){
+      logEl.innerHTML=renderLogsTabSkeleton();
+    }
+    logEl.hidden=false;
+  }
+  await loadLogContent();
+}
+
+async function loadLogContent(isAuto){
+  const pre=document.getElementById('logContentPre');
+  const statLines=document.getElementById('logStatLines');
+  const statUpdated=document.getElementById('logStatUpdated');
+  const statKind=document.getElementById('logStatKind');
+  if(!pre)return;
+  if(!isAuto&&(!pre.textContent||!pre.textContent.trim())){
+    pre.textContent='正在拉取调度审计日志…';
+  }
+  try{
+    const d=await api('/api/logs?kind='+encodeURIComponent(logState.kind)+'&n='+encodeURIComponent(logState.lines));
+    const output=(d&&d.output)||'（暂无日志输出）';
+    pre.textContent=output;
+    const lineCount=output.trim()?output.split('\n').length:0;
+    if(statLines)statLines.textContent=lineCount+' 行';
+    if(statUpdated){
+      const now=new Date();
+      statUpdated.textContent=now.toTimeString().split(' ')[0];
+    }
+    const kindNames={
+      controller:'Controller 主循环',
+      controller_err:'Error 异常流',
+      sentinel:'Sentinel 巡检',
+      notifier:'Notifier 通知'
+    };
+    if(statKind)statKind.textContent=kindNames[logState.kind]||logState.kind;
+    const autoScrollEl=document.getElementById('logAutoScroll');
+    if(autoScrollEl&&autoScrollEl.checked){
+      pre.scrollTop=pre.scrollHeight;
+    }
+  }catch(e){
+    if(!isAuto)toast(e.message,true);
+    if(pre)pre.textContent='拉取日志失败: '+e.message;
+  }
+}
+
+function switchLogKind(kind){
+  logState.kind=kind;
+  ['controller','controller_err','sentinel','notifier'].forEach(k=>{
+    const btn=document.getElementById('logKind'+(k==='controller'?'Controller':k==='controller_err'?'ControllerErr':k==='sentinel'?'Sentinel':'Notifier'));
+    if(btn)btn.classList.toggle('active',k===kind);
+  });
+  loadLogContent();
+}
+
+function switchLogLineCount(val){
+  logState.lines=parseInt(val,10)||200;
+  loadLogContent();
+}
+
+function refreshLogsTab(){
+  loadLogContent();
+  toast('日志已刷新');
+}
+
+function copyCurrentLog(){
+  const pre=document.getElementById('logContentPre');
+  if(!pre||!pre.textContent){toast('暂无日志内容可复制',true);return;}
+  if(navigator.clipboard&&navigator.clipboard.writeText){
+    navigator.clipboard.writeText(pre.textContent).then(()=>{toast('已复制日志到剪贴板！');}).catch(()=>{toast('复制失败',true);});
+  }else{
+    const ta=document.createElement('textarea');
+    ta.value=pre.textContent;
+    document.body.appendChild(ta);
+    ta.select();
+    try{document.execCommand('copy');toast('已复制日志到剪贴板！');}catch(e){toast('复制失败',true);}
+    document.body.removeChild(ta);
+  }
+}
+
+function exportLogsFile(){
+  const pre=document.getElementById('logContentPre');
+  if(!pre||!pre.textContent){toast('暂无日志内容可导出',true);return;}
+  const blob=new Blob([pre.textContent],{type:'text/plain;charset=utf-8'});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a');
+  a.href=url;
+  a.download=`haflow-${logState.kind}-${Date.now()}.log`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  toast('已导出日志文件');
+}
+
+function toggleLogAutoRefresh(enabled){
+  if(logState.autoRefreshTimer){
+    clearInterval(logState.autoRefreshTimer);
+    logState.autoRefreshTimer=null;
+  }
+  if(enabled){
+    logState.autoRefreshTimer=setInterval(()=>{
+      if(state.workflowId==='__logs__'&&!document.hidden){
+        loadLogContent(true);
+      }
+    },3000);
+    toast('已开启 3s 自动刷新');
+  }else{
+    toast('已关闭自动刷新');
+  }
+}
 const ARCHIVE_STATUS_CHOICES=[['archived','已归档'],['all','全部状态'],['active','进行中'],['cleaned','已完成'],['superseded','已取代'],['failed','失败'],['completed','待收尾']];
 let archiveQuery={page:0,size:50,project_id:'',workflow_id:'',agent:'',status:'archived',q:''};
 function getKnownWorkflowsForProject(pid){
@@ -6716,7 +6918,7 @@ async function showArchive(){
   if(state.projectId){
     archiveQuery.project_id=state.projectId;
   }
-  if(state.workflowId&&state.workflowId!=='__ctl__'&&state.workflowId!=='__templates__'&&state.workflowId!=='__archive__'){
+  if(state.workflowId&&state.workflowId!=='__ctl__'&&state.workflowId!=='__templates__'&&state.workflowId!=='__archive__'&&state.workflowId!=='__logs__'){
     archiveQuery.workflow_id=state.workflowId;
   }
   archiveQuery.page=0;
@@ -6814,7 +7016,14 @@ class Handler(BaseHTTPRequestHandler):
                 x=project_by_id(self.query().get('id',[''])[0]);
                 if not x:raise RuntimeError('项目不存在')
                 return self.send_json(200,preflight(x))
-            if p=='/api/logs':return self.send_json(200,{'output':tail_log(self.query().get('kind',['controller'])[0])})
+            if p=='/api/logs':
+                q=self.query()
+                kind=q.get('kind',['controller'])[0]
+                try:
+                    n_lines=int(q.get('n',['200'])[0])
+                except (ValueError,TypeError):
+                    n_lines=200
+                return self.send_json(200,{'output':tail_log(kind,n=n_lines)})
             if p=='/api/kernel/checkpoints':
                 wid=self.query().get('workflow_id',[''])[0]
                 if not wid:raise RuntimeError('workflow_id 不能为空')
