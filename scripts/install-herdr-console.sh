@@ -16,6 +16,7 @@ agent_dir="${HOME}/Library/LaunchAgents"
 domain="gui/$(id -u)"
 
 SERVICES=(com.user.herdr-factory-console com.user.herdr-controller com.user.herdr-sentinel com.user.herdr-notifier)
+# Bash 3.2 + nounset treats empty arrays as unset; guard every optional expansion.
 SNAPSHOT_SERVICES=()
 KICKSTART_SERVICES=()
 for service in "${SERVICES[@]}"; do
@@ -105,7 +106,7 @@ for service in "${SERVICES[@]}"; do
   plist="${agent_dir}/${service}.plist"
   [[ -f "${plist}" ]] && plist_paths+=("${plist}")
 done
-PYTHONPATH="${repo_root}${PYTHONPATH:+:${PYTHONPATH}}" python3 -m herdr.service_release "${release_dir}" "${plist_paths[@]}"
+PYTHONPATH="${repo_root}${PYTHONPATH:+:${PYTHONPATH}}" python3 -m herdr.service_release "${release_dir}" ${plist_paths[@]+"${plist_paths[@]}"}
 
 if [[ "${restart}" != "1" ]]; then
   echo "配置已发布；running_sha / running_import_root=unknown（--no-restart，未重载服务）"
@@ -117,11 +118,11 @@ fi
 #
 # 关键：bootout + bootstrap 才会重读 plist；kickstart 不会。
 # ---------------------------------------------------------------------------
-for service in "${SNAPSHOT_SERVICES[@]}"; do
+for service in ${SNAPSHOT_SERVICES[@]+"${SNAPSHOT_SERVICES[@]}"}; do
   launchctl bootout "${domain}/${service}" >/dev/null 2>&1 || true
 done
 sleep 1
-for service in "${SNAPSHOT_SERVICES[@]}" "${KICKSTART_SERVICES[@]}"; do
+for service in ${SNAPSHOT_SERVICES[@]+"${SNAPSHOT_SERVICES[@]}"} ${KICKSTART_SERVICES[@]+"${KICKSTART_SERVICES[@]}"}; do
   if [[ -f "${agent_dir}/${service}.plist" ]]; then
     launchctl bootstrap "${domain}" "${agent_dir}/${service}.plist" >/dev/null 2>&1 \
       || launchctl kickstart -k "${domain}/${service}" >/dev/null 2>&1 \
@@ -137,7 +138,7 @@ done
 # ---------------------------------------------------------------------------
 sleep 3
 status=0
-for service in "${SNAPSHOT_SERVICES[@]}"; do
+for service in ${SNAPSHOT_SERVICES[@]+"${SNAPSHOT_SERVICES[@]}"}; do
   pid="$(launchctl list | awk -v s="${service}" '$3==s {print $1; exit}')"
   if [[ -z "${pid}" || "${pid}" == "-" ]]; then
     echo "  ✗ ${service} 未运行" >&2
