@@ -8,6 +8,30 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-10-02] perf | Sidecar 侧边栏交互与刷新性能深度优化：请求并发化、软刷新防闪烁与系统页签保护
+- 背景：
+  1. 用户反馈控制台左侧 sidecar 的按钮点击以及页面刷新体感迟钝（延迟 1.5s+），存在点击无即时响应、全屏画布闪烁重绘、切屏后系统页签被重置等问题。
+  2. 根因剖析：
+     - **串行级联请求**：`loadWorkflow` 依次等待 `/api/workflow`、`/api/workflow/controller-actions` 和 `/api/workflow/decisions` 3 个 HTTP 请求，无任何并发；
+     - **画布破坏性重绘**：`loadWorkflow` 在发起网络请求前即提前调用 `destroyFlowGraph()` 清空画布，造成长达数百毫秒的白屏闪烁；
+     - **DOM 盲目全量重建**：`renderSidebarWorkflows()` 在微小状态变更时重写整个侧边栏 innerHTML，导致点击瞬间 active 样式延迟更新；
+     - **系统页签被切屏刷新重置**：`loadProject` 在页面可见性刷新（`visibilitychange`）时未保护 `__ctl__`、`__templates__`、`__archive__`、`__logs__`，粗暴覆盖为 `latest_workflow_id`；
+     - **后端冗余子进程**：`project_detail` 内的 `slots()` 二次调用 `panes()`，多次派生子进程放大接口响应延迟；`service_status()` 4 次串行 `launchctl print`（耗时 ~85ms）。
+- 变更：
+  1. **前端请求全量并发化（Promise.all）与软刷新防闪烁**：
+     - `loadWorkflow` 采用 `Promise.all` 并发拉取工作流详情、控制器操作与拍板决策，网络等待耗时降低 60%+；
+     - 限制 `destroyFlowGraph()` 仅在工作流 ID 发生实质性变更（`prevWfId !== id`）时触发，消除同流刷新及高频轮询下的空白闪烁；
+  2. **DOM 签名对比与瞬时交互响应（Optimistic UI）**：
+     - `renderSidebarWorkflows` 引入工作流状态签名缓存（`container.dataset.sig`），当列表未变更时仅通过 `data-wf-id` 切换 `.active` class，消除卡死体感；
+     - `openWorkflowTab` 优先乐观更新 `state.workflowId` 与侧边栏状态，并为 `__ctl__` 系统页签直接挂载驾驶舱面板；
+  3. **系统原生页签常驻保护（isSysTab Protection）**：
+     - `loadProject` 增加 `isSysTab` 校验，切屏与刷新时完整保留系统页签处于激活状态，不再被业务工作流篡改覆盖；
+  4. **后端性能调优与进程复用**：
+     - `service_status()` 改用单次 `launchctl list` 解析服务运行状态（耗时由 ~85ms 降至 ~9ms）；
+     - `project_detail()` 复用外层已查询的 `p_panes`，消除 `slots()` 内部的重复 `panes()` 进程派生，且通过 `try/except TypeError` 严格保持单参猴子补丁向后兼容。
+  5. **自动化测试与回归保障**：
+     - `tests/test_console_standard_layout_tabs.py` 新增 `test_sidecar_perf_and_soft_refresh` 专项回归测试，全量 231 项测试 100% 绿灯通过。
+
 ## [2026-10-02] feat | 调度审计日志全面标签页化：告别弹窗模态，升级为工作区独立 Tab（__logs__）
 - 背景：
   1. 用户指出控制台侧边栏“项目治理与审计”中的“调度审计日志”不应使用遮罩弹窗（openModal），而应该是工作区标准 Tab 页。

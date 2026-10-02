@@ -277,9 +277,10 @@ def deep_preflight(p, agent=None):
         raise RuntimeError("Deep Preflight JSON 解析失败") from e
 
 
-def slots(p):
+def slots(p, p_panes=None):
     cfg=load_json(Path(p.get('workflow_file','')),{}) ; stage_by_tab={s.get('tab_id'):s for s in cfg.get('stages',[])}; anchors={s.get('anchor_pane_id') for s in cfg.get('stages',[])}; binds=load_json(SLOTS_FILE,{'panes':{}}).get('panes',{}); claimed={t.get('pane_id'):t.get('task_id') for t in tasks() if t.get('pane_id')}; out=[]
-    for x in panes(p.get('workspace_id')):
+    all_panes = p_panes if p_panes is not None else panes(p.get('workspace_id'))
+    for x in all_panes:
         pid=x.get('pane_id'); tid=x.get('tab_id')
         if not pid or tid not in stage_by_tab or pid in anchors:continue
         rt=agent_runtime(pid); s=stage_by_tab[tid]
@@ -287,9 +288,17 @@ def slots(p):
     return out
 
 def service_status():
-    uid=os.getuid(); names=['com.user.herdr-controller','com.user.herdr-notifier','com.user.herdr-sentinel','com.user.herdr-factory-console']; out={}
-    for n in names:
-        r=run(['launchctl','print',f'gui/{uid}/{n}'],5); out[n]='running' if r.returncode==0 and 'state = running' in r.stdout else 'stopped'
+    names=['com.user.herdr-controller','com.user.herdr-notifier','com.user.herdr-sentinel','com.user.herdr-factory-console']
+    out={n:'stopped' for n in names}
+    try:
+        r=run(['launchctl','list'],5)
+        if r.returncode==0:
+            for line in r.stdout.splitlines():
+                parts=line.strip().split('\t')
+                if len(parts)>=3 and parts[2] in names:
+                    out[parts[2]]='running' if parts[0]!='-' and parts[0].isdigit() else 'stopped'
+    except Exception:
+        pass
     return out
 
 
@@ -421,7 +430,12 @@ def project_detail(pid):
     p=project_by_id(pid)
     if not p:raise RuntimeError('项目不存在')
     ws=workflows_for_project(pid)
-    return {'project':p,'workflows':ws,'latest_workflow_id':ws[0]['workflow_id'] if ws else None,'tabs':tabs(p.get('workspace_id')),'panes':panes(p.get('workspace_id')),'slots':slots(p),'agents':preflight(p)}
+    p_panes=panes(p.get('workspace_id'))
+    try:
+        s=slots(p,p_panes=p_panes)
+    except TypeError:
+        s=slots(p)
+    return {'project':p,'workflows':ws,'latest_workflow_id':ws[0]['workflow_id'] if ws else None,'tabs':tabs(p.get('workspace_id')),'panes':p_panes,'slots':s,'agents':preflight(p)}
 
 def workflow_stages(wid, p):
     """阶段卡片来源:优先 workflow.json 的 nodes(id/label),回退内置 STAGES。
@@ -5148,7 +5162,8 @@ async function loadProject(id,rer=true){
   if(rer&&state.overview)renderOverview();
   document.getElementById('projectTitle').textContent=state.project.project.project_name;
   const w=state.project.workflows;
-  if(!state.workflowId||!w.some(x=>x.workflow_id===state.workflowId))state.workflowId=state.project.latest_workflow_id;
+  const isSysTab=state.workflowId&&(state.workflowId.startsWith('__')||['__ctl__','__templates__','__archive__','__logs__'].includes(state.workflowId));
+  if(!isSysTab&&(!state.workflowId||!w.some(x=>x.workflow_id===state.workflowId)))state.workflowId=state.project.latest_workflow_id;
   if(!state.openWorkflowTabIds)state.openWorkflowTabIds=[];
   if(state.workflowId&&!state.openWorkflowTabIds.includes(state.workflowId)){
     state.openWorkflowTabIds.push(state.workflowId);
@@ -5157,8 +5172,13 @@ async function loadProject(id,rer=true){
   renderSlots();
   renderWorkflowSwitcher();
   renderWorkflowTabs();
-  if(state.workflowId)await loadWorkflow(state.workflowId);
-  else clearWorkflow();
+  if(isSysTab){
+    paintCrumb();
+  }else if(state.workflowId){
+    await loadWorkflow(state.workflowId);
+  }else{
+    clearWorkflow();
+  }
 }
 function workflowSubject(w){return (w&&(w.title||w.requirement_subject))||''}
 function workflowDisplayName(w){
@@ -5187,20 +5207,30 @@ function renderWorkflowSwitcher(){
   box.innerHTML='<label>工作流</label><select id="wfSelect" onchange="state.workflowId=this.value;loadWorkflow(this.value)">'+ws.map(x=>`<option value="${esc(x.workflow_id)}"${x.workflow_id===state.workflowId?' selected':''}>${esc(workflowDisplayName(x))}</option>`).join('')+'</select>'
 }
 async function loadWorkflow(id){
-  destroyFlowGraph();
+  const prevWfId=state.flowGraphWfId||state.workflowId;
   state.workflowId=id;
   state.flowSelectedNodeId=null;
   if(!state.openWorkflowTabIds)state.openWorkflowTabIds=[];
   if(id&&!state.openWorkflowTabIds.includes(id))state.openWorkflowTabIds.push(id);
-  state.workflow=await api('/api/workflow?id='+encodeURIComponent(id));
-  try{state.controllerActionsData=await api('/api/workflow/controller-actions?workflow_id='+encodeURIComponent(id))}catch(e){state.controllerActionsData=null}
-  try{state.decisionData=await api('/api/workflow/decisions?workflow_id='+encodeURIComponent(id))}catch(e){state.decisionData=null}
+  const _fetchDecs=()=>api('/api/workflow/decisions?workflow_id='+encodeURIComponent(id));
+  const [wfRes,actionsRes,decisionsRes]=await Promise.all([
+    api('/api/workflow?id='+encodeURIComponent(id)),
+    api('/api/workflow/controller-actions?workflow_id='+encodeURIComponent(id)).catch(()=>null),
+    _fetchDecs().catch(()=>null)
+  ]);
+  state.workflow=wfRes;
+  state.controllerActionsData=actionsRes;
+  state.decisionData=decisionsRes;
+  if(false){state.decisionData=await api('/api/workflow/decisions?workflow_id='+encodeURIComponent(id));}
   const w=state.workflow.workflow;
   saveViewState();
   renderWorkflowTabs();
   renderWorkflowHead(w);
   renderStages();
   renderTasks();
+  if(prevWfId!==id){
+    destroyFlowGraph();
+  }
   renderFlowWorkbench();
   if(typeof renderSidebarWorkflows==='function')renderSidebarWorkflows();
 }
@@ -5246,8 +5276,19 @@ function renderSidebarWorkflows(){
 
   if(!ws.length){
     container.innerHTML = '<div style="padding:12px 8px;font-size:11.5px;color:#8b909a;text-align:center">当前空间暂无工作流</div>';
+    container.dataset.sig = '';
     return;
   }
+
+  const listSig = ws.map(w => `${w.workflow_id}:${w.status||'waiting'}:${w.progress||0}`).join('|');
+  if(container.dataset.sig === listSig) {
+    container.querySelectorAll('.sidebar-item[data-wf-id]').forEach(el => {
+      const wid = el.getAttribute('data-wf-id');
+      el.classList.toggle('active', wid === state.workflowId);
+    });
+    return;
+  }
+  container.dataset.sig = listSig;
 
   const blocked = [];
   const running = [];
@@ -5272,7 +5313,7 @@ function renderSidebarWorkflows(){
       const isActive = w.workflow_id === state.workflowId;
       const title = (typeof workflowSubject==='function'?workflowSubject(w):'') || w.title || w.workflow_id;
       html += `
-        <div class="sidebar-item ${isActive ? 'active' : ''}" onclick="openWorkflowTab('${esc(w.workflow_id)}')" title="${esc(title)} (${esc(w.workflow_id)})">
+        <div class="sidebar-item ${isActive ? 'active' : ''}" data-wf-id="${esc(w.workflow_id)}" onclick="openWorkflowTab('${esc(w.workflow_id)}')" title="${esc(title)} (${esc(w.workflow_id)})">
           <span class="status-dot decision"></span>
           <span class="item-text">${esc(title)}</span>
           <span class="item-meta warning-text">需决策</span>
@@ -5287,7 +5328,7 @@ function renderSidebarWorkflows(){
       const title = (typeof workflowSubject==='function'?workflowSubject(w):'') || w.title || w.workflow_id;
       const meta = w.progress ? `${w.progress}%` : (w.status === 'working' ? '进行中' : '就绪');
       html += `
-        <div class="sidebar-item ${isActive ? 'active' : ''}" onclick="openWorkflowTab('${esc(w.workflow_id)}')" title="${esc(title)} (${esc(w.workflow_id)})">
+        <div class="sidebar-item ${isActive ? 'active' : ''}" data-wf-id="${esc(w.workflow_id)}" onclick="openWorkflowTab('${esc(w.workflow_id)}')" title="${esc(title)} (${esc(w.workflow_id)})">
           <span class="status-dot running"></span>
           <span class="item-text">${esc(title)}</span>
           <span class="item-meta tabular-nums">${esc(meta)}</span>
@@ -5301,7 +5342,7 @@ function renderSidebarWorkflows(){
       const isActive = w.workflow_id === state.workflowId;
       const title = (typeof workflowSubject==='function'?workflowSubject(w):'') || w.title || w.workflow_id;
       html += `
-        <div class="sidebar-item ${isActive ? 'active' : ''}" onclick="openWorkflowTab('${esc(w.workflow_id)}')" title="${esc(title)} (${esc(w.workflow_id)})">
+        <div class="sidebar-item ${isActive ? 'active' : ''}" data-wf-id="${esc(w.workflow_id)}" onclick="openWorkflowTab('${esc(w.workflow_id)}')" title="${esc(title)} (${esc(w.workflow_id)})">
           <span class="status-dot completed"></span>
           <span class="item-text">${esc(title)}</span>
           <span class="item-meta">已完成</span>
@@ -5313,12 +5354,15 @@ function renderSidebarWorkflows(){
 }
 function openWorkflowTab(id){
   if(!id)return;
-  if(id==='__ctl__'){state.workflowId='__ctl__';if(typeof setWorkspaceMode==='function')setWorkspaceMode('ctl');renderWorkflowTabs();if(typeof paintCrumb==='function')paintCrumb();return;}
-  if(id==='__templates__'){state.workflowId='__templates__';if(typeof setWorkspaceMode==='function')setWorkspaceMode('templates');renderWorkflowTabs();if(typeof paintCrumb==='function')paintCrumb();if(typeof showTemplateLibrary==='function')showTemplateLibrary();return;}
-  if(id==='__archive__'){state.workflowId='__archive__';if(typeof setWorkspaceMode==='function')setWorkspaceMode('archive');renderWorkflowTabs();if(typeof paintCrumb==='function')paintCrumb();if(typeof showArchive==='function')showArchive();return;}
-  if(id==='__logs__'){state.workflowId='__logs__';if(typeof setWorkspaceMode==='function')setWorkspaceMode('logs');renderWorkflowTabs();if(typeof paintCrumb==='function')paintCrumb();if(typeof showLogs==='function')showLogs();return;}
   if(!state.openWorkflowTabIds)state.openWorkflowTabIds=[];
   if(!state.openWorkflowTabIds.includes(id))state.openWorkflowTabIds.push(id);
+  state.workflowId=id;
+  if(typeof renderSidebarWorkflows==='function')renderSidebarWorkflows();
+  if(typeof renderWorkflowTabs==='function')renderWorkflowTabs();
+  if(id==='__ctl__'){if(typeof setWorkspaceMode==='function')setWorkspaceMode('ctl');if(typeof paintCrumb==='function')paintCrumb();if(typeof openControllerCockpitModal==='function')openControllerCockpitModal();return;}
+  if(id==='__templates__'){if(typeof setWorkspaceMode==='function')setWorkspaceMode('templates');if(typeof paintCrumb==='function')paintCrumb();if(typeof showTemplateLibrary==='function')showTemplateLibrary();return;}
+  if(id==='__archive__'){if(typeof setWorkspaceMode==='function')setWorkspaceMode('archive');if(typeof paintCrumb==='function')paintCrumb();if(typeof showArchive==='function')showArchive();return;}
+  if(id==='__logs__'){if(typeof setWorkspaceMode==='function')setWorkspaceMode('logs');if(typeof paintCrumb==='function')paintCrumb();if(typeof showLogs==='function')showLogs();return;}
   state.shellView='workbench';
   state.workflowView='flow';
   saveViewState();

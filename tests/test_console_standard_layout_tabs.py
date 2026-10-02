@@ -325,6 +325,42 @@ assert.ok(!state.openWorkflowTabIds.includes('__logs__'));
         # 3. Sidebar logs item invokes showLogs
         self.assertIn('id="sidebarLogsItem" onclick="showLogs()"', self.html)
 
+    def test_sidecar_perf_and_soft_refresh(self):
+        """14. Verify sidecar performance optimizations: Promise.all, DOM diffing, system tab protection, and fast service status."""
+        # 1. Promise.all parallelization in loadWorkflow
+        load_wf_match = re.search(r"async function loadWorkflow\(id\)\{.*?\n\}", self.js, re.DOTALL)
+        self.assertIsNotNone(load_wf_match)
+        load_wf_body = load_wf_match.group(0)
+        self.assertIn("Promise.all([", load_wf_body)
+        # 2. Soft refresh: conditional destroyFlowGraph only when workflow changes
+        self.assertIn("destroyFlowGraph()", load_wf_body)
+
+        # 3. DOM diffing in renderSidebarWorkflows: data-wf-id and signature cache
+        render_sb_match = re.search(r"function renderSidebarWorkflows\(\)\{.*?\n\}", self.js, re.DOTALL)
+        self.assertIsNotNone(render_sb_match)
+        render_sb_body = render_sb_match.group(0)
+        self.assertIn("data-wf-id", render_sb_body)
+        self.assertIn("container.dataset.sig = listSig", render_sb_body)
+        self.assertNotIn("state.workflowId + '#' + ws.map", render_sb_body)
+
+        # 4. Optimistic UI update in openWorkflowTab
+        open_wf_match = re.search(r"function openWorkflowTab\(id\)\{.*?\n\}", self.js, re.DOTALL)
+        self.assertIsNotNone(open_wf_match)
+        open_wf_body = open_wf_match.group(0)
+        self.assertIn("renderSidebarWorkflows()", open_wf_body)
+
+        # 5. System tab protection in loadProject
+        load_proj_match = re.search(r"async function loadProject\(id,rer=true\)\{.*?\n\}", self.js, re.DOTALL)
+        self.assertIsNotNone(load_proj_match)
+        load_proj_body = load_proj_match.group(0)
+        self.assertIn("isSysTab", load_proj_body)
+
+        # 6. Backend service_status fast launchctl list
+        from console.herdr_factory_console import service_status
+        status = service_status()
+        self.assertIsInstance(status, dict)
+        self.assertIn("com.user.herdr-controller", status)
+
 
 if __name__ == "__main__":
     unittest.main()
