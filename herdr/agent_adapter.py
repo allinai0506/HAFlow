@@ -37,6 +37,7 @@ without any TTY knowledge.
 from dataclasses import dataclass
 from datetime import datetime
 import json
+import re
 import subprocess
 import time
 from typing import Any, Dict, Optional
@@ -537,6 +538,49 @@ def list_agent_adapters() -> Dict[str, Dict[str, Any]]:
     return {name: adapter.to_dict() for name, adapter in _ADAPTER_REGISTRY.items()}
 
 
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
+
+
+def _strip_ansi(text: str) -> str:
+    return _ANSI_ESCAPE_RE.sub("", text)
+
+
+def _clean_smoke_token(text: str) -> str:
+    """Normalize response token by stripping ANSI, quotes, backticks, asterisks, whitespace, trailing period."""
+    cleaned = _strip_ansi(text).strip()
+    return cleaned.strip("`*'\" \t").rstrip(".")
+
+
+def _is_prompt_echo(line: str) -> bool:
+    """Detect if a line is echoing the user preflight probe prompt."""
+    low = _strip_ansi(line).strip().lower()
+    return "reply with exactly" in low or "and nothing else" in low
+
+
+def _is_benign_banner_line(line: str) -> bool:
+    """Return True if line is a recognized harmless CLI startup/banner/telemetry/warning line."""
+    cleaned = _strip_ansi(line).strip()
+    if not cleaned:
+        return True
+    if _is_prompt_echo(cleaned):
+        return False
+    low = cleaned.lower()
+    if cleaned.startswith("Skill conflict:"):
+        return True
+    if cleaned.startswith("[") and ("]" in cleaned):
+        return True
+    if low.startswith((
+        "warning:", "warn:", "info:", "tip:", "notice:", "note:",
+        "loading", "loaded", "using model", "model:", "session",
+        "tokens:", "cost:", "time:", "done in", "elapsed",
+        "welcome to", "connecting", "connected"
+    )):
+        return True
+    if cleaned.startswith(("---", "===", "___", "***", "```")):
+        return True
+    return False
+
+
 def smoke_response_verified(agent: str, stdout: str) -> bool:
     """Accept exact plain responses and known CLI assistant/result records.
 
@@ -544,25 +588,54 @@ def smoke_response_verified(agent: str, stdout: str) -> bool:
     No new CLI output flags are required; legacy plain marker remains valid.
     """
     marker = "HERDR_PREFLIGHT_OK"
-    plain_lines = [line.strip() for line in stdout.splitlines() if line.strip()]
-    if plain_lines and plain_lines[-1] == marker and all(
-        line == marker or line.startswith("Skill conflict:") for line in plain_lines
-    ):
-        return True
-    for line in stdout.splitlines():
+
+    raw_lines = stdout.splitlines()
+
+    # 1. Check structured JSON records line by line
+    for line in raw_lines:
+        clean = _strip_ansi(line).strip()
         try:
-            record = json.loads(line)
+            record = json.loads(clean)
         except (ValueError, TypeError):
             continue
         if not isinstance(record, dict):
             continue
+        if record.get("is_error") is True:
+            continue
+        # Never accept user prompt / input echoes:
+        if record.get("type") in ("user_message", "user", "input") or record.get("role") == "user":
+            continue
+
+        # Claude-specific format: {"type":"result","subtype":"success","is_error":false,"result":"HERDR_PREFLIGHT_OK"}
         if agent == "claude" and record.get("type") == "result":
-            if record.get("subtype") == "success" and record.get("is_error") is False and record.get("result") == marker:
+            if record.get("subtype") == "success" and _clean_smoke_token(str(record.get("result", ""))) == marker:
                 return True
+
+        # Codex-specific format: {"type":"item.completed","item":{"type":"agent_message","text":"HERDR_PREFLIGHT_OK"}}
         if agent == "codex" and record.get("type") == "item.completed":
             item = record.get("item")
-            if isinstance(item, dict) and item.get("type") == "agent_message" and item.get("text") == marker:
+            if isinstance(item, dict) and item.get("type") == "agent_message" and _clean_smoke_token(str(item.get("text", ""))) == marker:
                 return True
+
+        # General / Qoder / Kimi / other structured assistant outputs:
+        rec_type = record.get("type")
+        rec_role = record.get("role")
+        if rec_type in ("assistant", "agent_message", "message", "result", "chat") or rec_role in ("assistant", "agent", "system"):
+            for key in ("text", "content", "result", "message"):
+                val = record.get(key)
+                if isinstance(val, str) and _clean_smoke_token(val) == marker:
+                    return True
+                elif isinstance(val, dict) and _clean_smoke_token(str(val.get("text", ""))) == marker:
+                    return True
+
+    # 2. Check plain text lines (handling ANSI, markdown, trailing dot, banner lines)
+    plain_lines = [_strip_ansi(line).strip() for line in raw_lines if _strip_ansi(line).strip()]
+    if plain_lines:
+        has_marker = any(_clean_smoke_token(line) == marker for line in plain_lines)
+        if has_marker:
+            if all(_clean_smoke_token(line) == marker or _is_benign_banner_line(line) for line in plain_lines):
+                return True
+
     return False
 
 

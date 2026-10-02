@@ -5748,3 +5748,31 @@ scripts/install-herdr-console.sh 的 plist_paths、SNAPSHOT_SERVICES、KICKSTART
 ### 验证命令 / 关联证据
 
 `pytest -q tests/test_installer_bash_compat.py tests/test_service_release.py tests/test_install_herdr_console_deploy.py`。红绿日志见本任务 .omc/bash3-red.log、bash3-final-subset.log；本记录不声称新的本地部署。
+
+---
+
+## 122. Agent 路由健康检查必须防范 CLI 格式杂音、并发风暴与过度防御导致的死锁（2026-10-02）
+
+### 问题背景
+
+多智能体自动路由在生产现场出现“永远只选 opencode”的单点故障。现场排查揭示三大根因：现代 CLI（如 Qoder、Kimi）输出中带有 ANSI 彩色控制符、Markdown 符号或良性日志横幅，导致 `smoke_response_verified` 判定失败误判为 `UNKNOWN`；预检逻辑以 `len(allowed)`（多达 8 个进程）并发探测拉满 CPU 与网络，导致部分 Agent 超时成为 `TIMEOUT`；路由决策将 `UNKNOWN` 与 `TIMEOUT` 均当做不健康黑名单，且快照过期后仍然无差别硬过滤，导致候选人全被排除，系统永久失去自愈能力。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|---|---|---|
+| CLI 协议演化带来输出格式杂音（ANSI/Markdown/横幅/JSON） | 不能假设所有 Agent 的 CLI 严格输出纯单行 ASCII marker | 证据提取必须剥离 ANSI 颜色码、清理外层 Markdown/标点，放行良性横幅行，并支持通用 JSON 消息提取 |
+| 并发探测风暴争抢资源引发虚假超时 | 探针并发度不能与候选节点数量无界绑定 | 探针必须采用受控线程池（默认并发度 4，支持环境变量配置），防范突发并发打崩网络与 CPU |
+| 软性故障（TIMEOUT/UNKNOWN）被永久硬过滤 | 探测超时或未知格式不等于不可逆硬故障（如 TOKEN_EXHAUSTED、AUTH_REQUIRED） | 区分硬故障与软故障；快照过期后放行 TIMEOUT 与 UNKNOWN 尝试调度，允许系统自愈；仅硬故障持续隔离 |
+
+### 操作规范
+
+1. `smoke_response_verified` 引入 `_strip_ansi`、`_clean_smoke_token` 及 `_is_benign_banner_line`，区分 JSON 模式与纯文本模式的 prompt echo 检查。
+2. `herdr/agent_router.py` 定义 `HARD_UNHEALTHY_STATUSES`，新鲜快照严格隔离所有异常，过期快照放行软性故障进行调度自愈。
+3. `herdr/deep_preflight.py` 设定 `DEFAULT_PREFLIGHT_CONCURRENCY = 4`，支持 `HERDR_PREFLIGHT_CONCURRENCY` 动态控流。
+
+### 验证命令 / 关联证据
+
+- 单元测试：`pytest -q tests/test_agent_router_preflight.py tests/test_preflight_runtime_contract.py tests/test_deep_preflight_accuracy.py`
+- 全量关联测试：`pytest -q tests/test_agent_router_stage_exclusion.py tests/test_adaptive_router.py tests/test_canary_router.py`
+- S6 代码审查报告：`.omc/review-80030f57-7a2b-4988-a486-8bc208e1ccb3.md` (MERGE_READY)

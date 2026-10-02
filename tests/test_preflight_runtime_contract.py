@@ -67,6 +67,29 @@ def test_warning_with_real_plain_response_keeps_legacy_support():
     assert not aa.smoke_response_verified('codex', 'Reply with exactly HERDR_PREFLIGHT_OK and nothing else.\nHERDR_PREFLIGHT_OK')
 
 
+def test_smoke_response_verified_with_ansi_and_trailing_newlines():
+    assert aa.smoke_response_verified('qodercli', '\x1b[32mHERDR_PREFLIGHT_OK\x1b[0m\n\n')
+    assert aa.smoke_response_verified('kimi', '\x1b[1mHERDR_PREFLIGHT_OK\x1b[0m\n')
+
+
+def test_smoke_response_verified_with_banner_and_info_lines():
+    out = '[INFO] Plugin loaded\nTip: session auto-saved\nHERDR_PREFLIGHT_OK\n'
+    assert aa.smoke_response_verified('qodercli', out)
+    out2 = 'Warning: model deprecation notice\nHERDR_PREFLIGHT_OK\nDone in 0.3s\n'
+    assert aa.smoke_response_verified('kimi', out2)
+
+
+def test_smoke_response_verified_with_markdown_and_period():
+    assert aa.smoke_response_verified('qodercli', '`HERDR_PREFLIGHT_OK`')
+    assert aa.smoke_response_verified('kimi', 'HERDR_PREFLIGHT_OK.')
+    assert aa.smoke_response_verified('agy', '**HERDR_PREFLIGHT_OK**')
+
+
+def test_smoke_response_verified_structured_assistant_envelope():
+    assert aa.smoke_response_verified('qodercli', '{"type":"assistant","content":"HERDR_PREFLIGHT_OK"}')
+    assert aa.smoke_response_verified('kimi', '{"role":"assistant","content":"HERDR_PREFLIGHT_OK"}')
+
+
 def test_per_agent_identity_map_drift_is_stale(tmp_path):
     binary=tmp_path/'codex'; binary.write_text('v1')
     identity=dp.preflight_identity('codex',str(binary),str(tmp_path),config_paths=[])
@@ -106,3 +129,23 @@ def test_installed_large_agent_binary_can_be_fingerprinted(tmp_path):
     result=preflight_identity('opencode',binary,tmp_path,config_paths=[])
     assert result['verifiable'] is True
     assert len(result['binary']['sha256'])==64
+
+
+def test_preflight_concurrency_bounded(monkeypatch, tmp_path):
+    created_workers = []
+    real_executor = dp.ThreadPoolExecutor
+
+    def fake_executor(*args, **kwargs):
+        workers = kwargs.get("max_workers")
+        if workers is None and args:
+            workers = args[0]
+        created_workers.append(workers)
+        return real_executor(*args, **kwargs)
+
+    monkeypatch.setattr(dp, "ThreadPoolExecutor", fake_executor)
+    monkeypatch.setenv("HERDR_PREFLIGHT_CONCURRENCY", "3")
+    with patch.object(dp, "resolve_binary", return_value=None), \
+         patch.object(dp, "project_pool", return_value={"allowed_agents": ["a", "b", "c", "d", "e", "f", "g", "h"]}):
+        dp.inspect({"project_id": "p", "project_root": str(tmp_path)}, deep=False)
+
+    assert created_workers == [3]

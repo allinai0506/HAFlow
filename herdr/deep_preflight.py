@@ -262,7 +262,8 @@ def classify_text(text):
 SMOKE_TIMEOUTS = {
     "claude": 90,
 }
-DEFAULT_SMOKE_TIMEOUT = 40
+DEFAULT_SMOKE_TIMEOUT = int(os.environ.get("HERDR_SMOKE_TIMEOUT", "45"))
+DEFAULT_PREFLIGHT_CONCURRENCY = 4
 
 
 def auth_hint(agent):
@@ -597,10 +598,16 @@ def inspect(project, deep=False, target_agents=None):
 
         return row
 
-    # Agent probes are independent subprocesses. Run them concurrently while
-    # collecting in allowed-list order so routing preferences and JSON output
+    # Agent probes are independent subprocesses. Run them concurrently with bounded
+    # parallelism to avoid CPU and network exhaustion causing spurious timeouts.
+    # Collecting in allowed-list order so routing preferences and JSON output
     # remain deterministic.
-    with ThreadPoolExecutor(max_workers=max(1, len(allowed))) as executor:
+    try:
+        configured_concurrency = int(os.environ.get("HERDR_PREFLIGHT_CONCURRENCY", str(DEFAULT_PREFLIGHT_CONCURRENCY)))
+    except (ValueError, TypeError):
+        configured_concurrency = DEFAULT_PREFLIGHT_CONCURRENCY
+    max_workers = max(1, min(len(allowed), configured_concurrency))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
         rows = list(executor.map(inspect_agent, allowed))
 
     return rows

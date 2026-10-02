@@ -204,6 +204,72 @@ class PreflightHardeningTest(unittest.TestCase):
             agent_router.choose_agent(self.wf_id, "test", "test", requested="pi")
         self.assertIn("preflight", str(ctx.exception).lower())
 
+    def test_stale_snapshot_allows_timeout_agent_selection(self):
+        # 启动慢导致 TIMEOUT 的 Agent，在快照过期后应允许尝试
+        self.store.save_task({
+            "task_id": "task-impl-1",
+            "workflow_id": self.wf_id,
+            "node": "implementation",
+            "stage": "implementation",
+            "agent": "opencode",
+            "status": "completed",
+        })
+        self._save_workflow(
+            healthy=["opencode"],
+            unhealthy={"codex": "TIMEOUT"},
+            checked_at=_iso(datetime.now() - timedelta(seconds=7200)),
+        )
+        with patch(
+            "herdr.agent_router.workflow_config_for",
+            return_value=self._node_cfg("test", ["codex", "claude"], exclude=["implementation"]),
+        ):
+            chosen = agent_router.choose_agent(self.wf_id, "test", "test", requested="auto")
+        self.assertEqual(chosen, "codex")
+
+    def test_fresh_snapshot_still_excludes_timeout_agent(self):
+        # 快照尚新鲜时，TIMEOUT 仍须被排除
+        self.store.save_task({
+            "task_id": "task-impl-1",
+            "workflow_id": self.wf_id,
+            "node": "implementation",
+            "stage": "implementation",
+            "agent": "opencode",
+            "status": "completed",
+        })
+        self._save_workflow(
+            healthy=["opencode", "claude"],
+            unhealthy={"codex": "TIMEOUT"},
+            checked_at=_iso(datetime.now()),
+        )
+        with patch(
+            "herdr.agent_router.workflow_config_for",
+            return_value=self._node_cfg("test", ["codex", "claude"], exclude=["implementation"]),
+        ):
+            chosen = agent_router.choose_agent(self.wf_id, "test", "test", requested="auto")
+        self.assertEqual(chosen, "claude")
+
+    def test_stale_snapshot_still_excludes_hard_unhealthy(self):
+        # 即使快照过期，AUTH_REQUIRED / TOKEN_EXHAUSTED 等致命状态仍须被永久排除
+        self.store.save_task({
+            "task_id": "task-impl-1",
+            "workflow_id": self.wf_id,
+            "node": "implementation",
+            "stage": "implementation",
+            "agent": "opencode",
+            "status": "completed",
+        })
+        self._save_workflow(
+            healthy=["opencode"],
+            unhealthy={"pi": "AUTH_REQUIRED", "codex": "TOKEN_EXHAUSTED"},
+            checked_at=_iso(datetime.now() - timedelta(seconds=7200)),
+        )
+        with patch(
+            "herdr.agent_router.workflow_config_for",
+            return_value=self._node_cfg("test", ["pi", "codex", "claude"], exclude=["implementation"]),
+        ):
+            chosen = agent_router.choose_agent(self.wf_id, "test", "test", requested="auto")
+        self.assertEqual(chosen, "claude")
+
 
 if __name__ == "__main__":
     unittest.main()
