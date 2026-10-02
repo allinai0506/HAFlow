@@ -5751,7 +5751,63 @@ scripts/install-herdr-console.sh 的 plist_paths、SNAPSHOT_SERVICES、KICKSTART
 
 ---
 
-## 122. 启动身份与替换义务必须穿过真实生产接缝（2026-10-02）
+## 122. Agent 路由健康检查必须防范 CLI 格式杂音、并发风暴与过度防御导致的死锁（2026-10-02）
+
+### 问题背景
+
+多智能体自动路由在生产现场出现“永远只选 opencode”的单点故障。现场排查揭示三大根因：现代 CLI（如 Qoder、Kimi）输出中带有 ANSI 彩色控制符、Markdown 符号或良性日志横幅，导致 `smoke_response_verified` 判定失败误判为 `UNKNOWN`；预检逻辑以 `len(allowed)`（多达 8 个进程）并发探测拉满 CPU 与网络，导致部分 Agent 超时成为 `TIMEOUT`；路由决策将 `UNKNOWN` 与 `TIMEOUT` 均当做不健康黑名单，且快照过期后仍然无差别硬过滤，导致候选人全被排除，系统永久失去自愈能力。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|---|---|---|
+| CLI 协议演化带来输出格式杂音（ANSI/Markdown/横幅/JSON） | 不能假设所有 Agent 的 CLI 严格输出纯单行 ASCII marker | 证据提取必须剥离 ANSI 颜色码、清理外层 Markdown/标点，放行良性横幅行，并支持通用 JSON 消息提取 |
+| 并发探测风暴争抢资源引发虚假超时 | 探针并发度不能与候选节点数量无界绑定 | 探针必须采用受控线程池（默认并发度 4，支持环境变量配置），防范突发并发打崩网络与 CPU |
+| 软性故障（TIMEOUT/UNKNOWN）被永久硬过滤 | 探测超时或未知格式不等于不可逆硬故障（如 TOKEN_EXHAUSTED、AUTH_REQUIRED） | 区分硬故障与软故障；快照过期后放行 TIMEOUT 与 UNKNOWN 尝试调度，允许系统自愈；仅硬故障持续隔离 |
+
+### 操作规范
+
+1. `smoke_response_verified` 引入 `_strip_ansi`、`_clean_smoke_token` 及 `_is_benign_banner_line`，区分 JSON 模式与纯文本模式的 prompt echo 检查。
+2. `herdr/agent_router.py` 定义 `HARD_UNHEALTHY_STATUSES`，新鲜快照严格隔离所有异常，过期快照放行软性故障进行调度自愈。
+3. `herdr/deep_preflight.py` 设定 `DEFAULT_PREFLIGHT_CONCURRENCY = 4`，支持 `HERDR_PREFLIGHT_CONCURRENCY` 动态控流。
+
+### 验证命令 / 关联证据
+
+- 单元测试：`pytest -q tests/test_agent_router_preflight.py tests/test_preflight_runtime_contract.py tests/test_deep_preflight_accuracy.py`
+- 全量关联测试：`pytest -q tests/test_agent_router_stage_exclusion.py tests/test_adaptive_router.py tests/test_canary_router.py`
+- S6 代码审查报告：`.omc/review-80030f57-7a2b-4988-a486-8bc208e1ccb3.md` (MERGE_READY)
+
+---
+
+## 123. 沙盒重置与清理不得破坏前置落盘的私有资源身份标桩（2026-10-02）
+
+### 问题背景
+
+`herdr-task launch` 在 worker 阶段出现新任务派发必崩故障：`FileNotFoundError: '<clone>/.herdr-launch-identity.json'`，伴随 clone 回滚但已建好的 tmux pane 发生泄漏。根因是 `services/herdr-worker.py` 在 `main()` 中先将 `launch_identity` 写入 clone 根目录作为未跟踪文件（`write_worker_launch_identity(..., initial=True)`），随后的 `create_task_branch` / `checkout_onto_branch` 调用 `sanitize_clone_sandbox`，内部裸执行 `git clean -fd` 清理沙盒未跟踪文件，误将身份标桩文件删除；当 worker 执行到 `initial=False` 的回读安全校验时，因原文件丢失触发 `FileNotFoundError` 导致失败。此前曾有临时在 `~/.config/git/ignore` 中加入该文件的非通用绕过。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|---|---|---|
+| 沙盒粗暴清理误杀关键运行态标桩 | `git clean -fd` 会无差别清除所有未被 `.gitignore` 保护的未跟踪文件 | 破坏性沙盒清理必须对受管的内部标桩文件（如 `.herdr-launch-identity.json`）显式配置 `-e` exclude 排除保护 |
+| 打标与清理顺序颠倒引发状态盲区 | 调整执行顺序（如清理后再打标）会破坏崩溃恢复语义，导致清理期间崩溃时资源无法归属追溯 | 保留“在破坏性操作前先落盘证明归属”的安全顺序；不可随意推迟打标时机 |
+| 依赖机器局部配置临时绕过缺陷 | 用户级 `~/.config/git/ignore` 或仓库级 `.gitignore` 临时放行平台私有文件不是真正修复，无法跨机器/CI 泛化且污染业务仓库 | 修法必须收敛在沙盒清理函数内部；测试时强制配置 `core.excludesFile=/dev/null` 隔离全局 ignore，彻底防范假阳性 |
+
+### 操作规范
+
+1. `services/herdr-worker.py` 的 `sanitize_clone_sandbox` 中，在 `git clean -fd` 执行时显式增加 `-e .herdr-launch-identity.json` 参数。
+2. 任何涉及 `git clean` 清理沙盒的场景，测试用例必须配置 `git config core.excludesFile /dev/null` 排除宿主全局 git 规则干扰，直接断言受保护文件在清理后存活、其余临时垃圾被正常删除。
+3. 移除任何为了绕过沙盒清理而临时写入宿主 `~/.config/git/ignore` 的条目。
+
+### 验证命令 / 关联证据
+
+- 专项回归测试：`pytest -v tests/test_worker_sanitize_sandbox.py tests/test_herdr_worker.py tests/test_worker_baseline_anchor.py`
+- 语法与静态校验：`/opt/homebrew/opt/python@3.13/bin/python3.13 -m compileall -q herdr services bin tests` 与 `git diff --check`
+- S6 代码审查报告：`.omc/review-e4c9f87a-2df8-4f84-96dd-5ab219879f6f.md` (MERGE_READY)
+
+---
+
+## 124. 启动身份与替换义务必须穿过真实生产接缝（2026-10-02）
 
 ### 问题背景
 

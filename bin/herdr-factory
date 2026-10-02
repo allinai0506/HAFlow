@@ -320,7 +320,7 @@ def run_workflow_preflight(project, workflow_id, agent=None):
     unhealthy = {
         item["agent"]: item.get("final_status")
         for item in agents
-        if item.get("final_status") != "READY"
+        if item.get("final_status") not in ("READY", "UNKNOWN")
     }
 
     if not healthy:

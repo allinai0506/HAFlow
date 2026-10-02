@@ -52,6 +52,20 @@ DEFAULT_TASK_TYPE_PREFERENCES = {
 # 保持 legacy 记录与既有单 Agent 优雅回退语义不变。
 DEFAULT_PREFLIGHT_TTL_SECONDS = 1800.0
 
+# 致命/硬故障状态：即使 Preflight 快照过期，也绝不自动入选或调度。
+# 非硬故障状态（如 TIMEOUT、UNKNOWN、WARN）在快照过期后允许尝试，避免因瞬态超时永久禁赛。
+HARD_UNHEALTHY_STATUSES = {
+    "TOKEN_EXHAUSTED",
+    "AUTH_REQUIRED",
+    "PROVIDER_ERROR",
+    "LOCAL_ERROR",
+    "TRUST_REQUIRED",
+    "UPDATE_BLOCKED",
+    "MISSING",
+    "DISABLED",
+    "ERROR",
+}
+
 
 def preflight_ttl_seconds() -> float:
     raw = os.environ.get("HERDR_PREFLIGHT_TTL")
@@ -430,7 +444,18 @@ def _choose_agent_impl(
         selected = None
 
     healthy = set(record.get("healthy_agents", []))
-    unhealthy_agents = set((record.get("unhealthy_agents") or {}).keys())
+    unhealthy_raw = record.get("unhealthy_agents") or {}
+    if isinstance(unhealthy_raw, dict):
+        unhealthy_map = unhealthy_raw
+        unhealthy_agents = set(unhealthy_map.keys())
+        hard_unhealthy = {
+            a for a, st in unhealthy_map.items()
+            if st in HARD_UNHEALTHY_STATUSES or st not in ("TIMEOUT", "UNKNOWN", "WARN")
+        }
+    else:
+        unhealthy_map = {a: "UNHEALTHY" for a in unhealthy_raw}
+        unhealthy_agents = set(unhealthy_raw)
+        hard_unhealthy = set(unhealthy_raw)
     snapshot_fresh = preflight_snapshot_fresh(record)
 
     if selected:
@@ -453,8 +478,8 @@ def _choose_agent_impl(
             raise RuntimeError(
                 f"Agent '{selected}' is disabled for project {project_id}"
             )
-        if healthy and selected not in healthy:
-            status = record.get("unhealthy_agents", {}).get(
+        if (selected in hard_unhealthy) or (snapshot_fresh and healthy and selected not in healthy):
+            status = unhealthy_map.get(
                 selected,
                 "NOT_READY",
             )
@@ -516,18 +541,20 @@ def _choose_agent_impl(
             if agent:
                 reserved_loads[agent] = reserved_loads.get(agent, 0) + 1
 
+        # 当快照新鲜时，排除所有已知不健康状态 (unhealthy_agents)；
+        # 当快照过期时，仅永久硬过滤致命状态 (hard_unhealthy)，
+        # 允许尝试 TIMEOUT / UNKNOWN 等非致命或瞬态状态。
+        excluded_unhealthy = (
+            unhealthy_agents if snapshot_fresh else hard_unhealthy
+        )
+
         candidates = [
             agent
             for agent in _candidate_order(pool, stage, task_type, node_policy)
             if (
                 agent in allowed
                 and agent not in disabled
-                # 已知不健康的 Agent 永不自动入选:冷启动(healthy 为空)时
-                # 也不能把任务派给 AUTH_REQUIRED / TOKEN_EXHAUSTED 的 Agent。
-                and agent not in unhealthy_agents
-                # 新鲜快照才信任 healthy 名单做交集;过期快照只做减法
-                # (unhealthy),不做"只允许当时健康的集合"的限制,避免把
-                # 任务锁死在一个可能已全灭的旧集合里。
+                and agent not in excluded_unhealthy
                 and (
                     not snapshot_fresh
                     or not healthy
