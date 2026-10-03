@@ -35,6 +35,33 @@ class TestConsoleFrontendSyntaxAndContracts(unittest.TestCase):
         cls.console = _load_console()
         cls.html = getattr(cls.console, "HTML_TEMPLATE", "")
 
+    def test_sidebar_workflow_title_refreshes_without_status_change(self):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node unavailable")
+        script = re.search(r"<script>(.*?)</script>", self.html, re.DOTALL).group(1)
+        start = script.index("function renderSidebarWorkflows(){")
+        end = script.index("function openWorkflowTab(", start)
+        harness = r"""
+const container = {dataset: {}, innerHTML: '', querySelectorAll: () => []};
+const document = {getElementById: id => id === 'sidebarWorkflowGroups' ? container : {textContent: ''}};
+const state = {workflowId: 'wf-title', project: {workflows: [{workflow_id: 'wf-title', title: '原始名称', status: 'running'}]}};
+const workflowSubject = w => w.title || w.requirement_subject || '';
+const esc = value => String(value);
+""" + script[start:end] + r"""
+renderSidebarWorkflows();
+if (!container.innerHTML.includes('原始名称')) process.exit(1);
+state.project.workflows[0].title = '改名后的完整需求';
+renderSidebarWorkflows();
+if (!container.innerHTML.includes('改名后的完整需求')) process.exit(2);
+state.project.workflows[0].title = '';
+state.project.workflows[0].requirement_subject = '新的需求主题';
+renderSidebarWorkflows();
+if (!container.innerHTML.includes('新的需求主题')) process.exit(3);
+"""
+        result = subprocess.run([node, "-e", harness], text=True, capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr or "sidebar title failed to refresh")
+
     def test_html_template_is_raw_string_in_source(self):
         """Guard against Python escape issues: HTML_TEMPLATE must be declared as raw string r''' or r\"\"\"."""
         source = (ROOT / "console" / "herdr_factory_console.py").read_text(encoding="utf-8")
