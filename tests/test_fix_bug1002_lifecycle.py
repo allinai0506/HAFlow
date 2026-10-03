@@ -237,3 +237,55 @@ print(json.dumps(recover_launch_resources(store,intent,runner=native)))
     assert all(row['status']=='resources_absent' for row in results)
     assert (tmp_path/'closed').read_text().splitlines()==['close']
     assert not clone.exists()
+
+
+def test_worker_split_receipt_survives_process_exit_before_caller_write(tmp_path):
+    import subprocess, sys
+    from pathlib import Path
+    clone = tmp_path/'clone'; clone.mkdir()
+    worker_path = Path(__file__).resolve().parents[1]/'services/herdr-worker.py'
+    script = '''import importlib.util,json,os,sys
+from pathlib import Path
+from herdr.task_resources import write_worker_launch_identity
+spec=importlib.util.spec_from_file_location('split_crash_worker',sys.argv[1])
+worker=importlib.util.module_from_spec(spec);spec.loader.exec_module(worker)
+clone=Path(sys.argv[2])
+identity={'intent_id':'intent','task_id':'t','run_id':'r','phase':'workspace_created'}
+write_worker_launch_identity(clone,identity,initial=True)
+worker.run_json=lambda argv: {'result':{'pane':{'pane_id':'p','terminal_id':'term-owned'}}}
+worker.create_pane('parent',clone,identity)
+os._exit(23)
+'''
+    result = subprocess.run([sys.executable,'-c',script,str(worker_path),str(clone)],
+                            env={**__import__('os').environ,'HERDR_STATE_DB':str(tmp_path/'state.db')},
+                            capture_output=True,text=True,timeout=15)
+    assert result.returncode == 23, result.stderr
+    identity = __import__('json').loads((clone/'.herdr-launch-identity.json').read_text())
+    assert identity['phase'] == 'pane_allocated'
+    assert identity['pane_id'] == 'p' and identity['pane_source'] == 'dynamic'
+    assert identity['terminal_id'] == 'term-owned'
+
+
+def test_worker_split_receipt_write_failure_retains_allocated_workspace(tmp_path,monkeypatch,capsys):
+    import importlib.util, sys
+    from pathlib import Path
+    import herdr.task_resources as resources
+    spec=importlib.util.spec_from_file_location('split_write_fail_worker',Path(__file__).resolve().parents[1]/'services/herdr-worker.py')
+    worker=importlib.util.module_from_spec(spec);spec.loader.exec_module(worker)
+    monkeypatch.setattr(worker,'CLONE_ROOT',tmp_path/'clones')
+    monkeypatch.setattr(worker,'verify_request_preflight',lambda *a,**k:{'request_verified':True})
+    monkeypatch.setattr(worker,'is_task_active_in_registry',lambda _:False)
+    monkeypatch.setattr(worker,'write_task_context',lambda *a,**k:(None,None))
+    monkeypatch.setattr(worker,'run_json',lambda argv,**k:{'result':{'pane':{'pane_id':'p','terminal_id':'term-owned'}}})
+    monkeypatch.setattr(worker,'rollback_unstarted_pane',lambda *a:False)
+    original=resources.write_worker_launch_identity
+    def write(clone,identity,**kw):
+        if identity.get('phase')=='pane_allocated':raise OSError('receipt write failed')
+        return original(clone,identity,**kw)
+    monkeypatch.setattr(resources,'write_worker_launch_identity',write)
+    monkeypatch.setattr(sys,'argv',['worker','--task-id','t','--source',str(tmp_path),'--agent','codex',
+                                  '--execution-mode','context','--parent-pane','parent','--launch-intent-id','intent','--run-id','r'])
+    with __import__('pytest').raises(OSError,match='receipt write failed'):worker.main()
+    assert (tmp_path/'clones'/'t').exists()
+    failure=__import__('json').loads(next(line.split('=',1)[1] for line in capsys.readouterr().err.splitlines() if line.startswith('HERDR_WORKER_FAILURE=')))
+    assert failure['pane_id']=='p' and failure['recovery_required'] is True

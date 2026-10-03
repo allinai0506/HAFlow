@@ -81,3 +81,96 @@ def test_browser_checklist_does_not_claim_unblocked_when_manifest_blocks():
     items=json.loads(result.stdout)
     assert any(item[0]=='bad' and 'foreign' in item[1] for item in items)
     assert not any(item[0]=='ok' and item[1]=='无失败、无阻塞' for item in items)
+
+
+def test_real_runtime_repair_preserves_content_addressed_config_and_audit(tmp_path,monkeypatch):
+    from types import SimpleNamespace
+    from herdr import projects
+    from herdr.node_config import update_required_tasks,read_configuration
+    cfg=tmp_path/'shared.json'
+    cfg.write_text(json.dumps({'workspace_id':'workspace','project_root':str(tmp_path),
+                              'nodes':[{'id':'implementation','tab_id':'old-tab','anchor_pane_id':'old-pane'}]}))
+    shared=cfg.read_bytes();store=SQLiteStateStore(tmp_path/'state.db')
+    for wid in ['wf','other']:
+        store.save_workflow({'workflow_id':wid,'status':'running','workflow_file':str(cfg)})
+    monkeypatch.setattr(projects,'_get_store',lambda:store)
+    update=update_required_tasks(store,'wf','implementation',['future'],expected_sha=hashlib.sha256(shared).hexdigest(),reason='required output')
+    path=Path(update['workflow_file']);snapshot=path.read_bytes()
+    monkeypatch.setattr(projects,'_workspace_alive',lambda _:True)
+    monkeypatch.setattr(projects,'_run',lambda *a,**kw: SimpleNamespace(returncode=1))
+    monkeypatch.setattr(projects,'_run_json',lambda argv: {'result':{'tab':{'tab_id':'new-tab'},'root_pane':{'pane_id':'new-pane'}}})
+    repaired=projects.ensure_node_runtime('wf','implementation')
+    assert repaired['tab_id']=='new-tab'
+    assert path.read_bytes()==snapshot,'runtime repair overwrote immutable audited configuration'
+    assert read_configuration(store,'wf')[2]==update['config_sha']
+    assert cfg.read_bytes()==shared and store.get_workflow('other')['workflow_file']==str(cfg)
+    view=projects.workflow_config_for('wf')
+    node=next(n for n in view['nodes'] if n['id']=='implementation')
+    assert node['tab_id']=='new-tab' and node['anchor_pane_id']=='new-pane'
+    assert node['required_task_ids']==['future']
+    assert store.get_workflow('wf')['node_runtime']['implementation']['tab_id']=='new-tab'
+    assert len(store.list_events(event_type='node_config_updated',workflow_id='wf'))==1
+    assert store.list_events(event_type='node_runtime_updated',workflow_id='wf')
+    monkeypatch.setattr(projects,'_run',lambda *a,**kw: SimpleNamespace(returncode=0))
+    again=projects.ensure_node_runtime('wf','implementation')
+    assert again['tab_id']=='new-tab' and again['anchor_pane_id']=='new-pane'
+    assert len(store.list_events(event_type='node_runtime_updated',workflow_id='wf'))==1
+    second=update_required_tasks(store,'wf','implementation',['next-future'],expected_sha=update['config_sha'],reason='next required output')
+    assert second['before_sha']==update['config_sha']
+    assert path.read_bytes()==snapshot
+    assert projects.workflow_config_for('wf')['nodes'][0]['tab_id']=='new-tab'
+
+
+from tests.test_dispatch_idempotency import launch_transport_scene
+
+
+def test_actual_launch_topology_preserves_snapshot_and_projects_runtime_readers(launch_transport_scene,tmp_path,monkeypatch):
+    from types import SimpleNamespace
+    from herdr import projects,topology,pane_pool,task_resources
+    from herdr.node_config import update_required_tasks
+    cli,store,args=launch_transport_scene
+    cfg=tmp_path/'workflow.json';cfg.write_text(json.dumps({'workspace_id':'w','project_root':str(tmp_path),
+        'nodes':[{'id':'n','label':'Node','tab_id':'old-tab','anchor_pane_id':'old-anchor','default_integration_mode':'none'}]}))
+    record=store.get_workflow('wf');record['workflow_file']=str(cfg);record['workspace_id']='w';store.save_workflow(record)
+    update=update_required_tasks(store,'wf','n',[],expected_sha=hashlib.sha256(cfg.read_bytes()).hexdigest(),reason='configuration baseline')
+    snapshot=Path(update['workflow_file']);before=snapshot.read_bytes()
+    monkeypatch.setattr(cli,'ensure_stage_topology',topology.ensure_stage_topology)
+    calls=[]
+    real_run=cli.subprocess.run
+    def transport(argv,**kwargs):
+        calls.append(argv)
+        if 'herdr-worker.py' in str(argv[0]):
+            return SimpleNamespace(returncode=1,stdout='',stderr='controlled worker stop before Agent launch')
+        if argv[0] != 'herdr':return real_run(argv,**kwargs)
+        key=argv[1:3]
+        if key==['tab','list']:result={'tabs':[]}
+        elif key==['tab','create']:result={'tab':{'tab_id':'new-tab'}}
+        elif key==['pane','list']:result={'panes':[{'pane_id':'new-anchor','tab_id':'new-tab','cwd':str(tmp_path),'label':'Herdr Anchor · n'}]}
+        elif key==['pane','rename']:result={}
+        else:raise AssertionError(argv)
+        return SimpleNamespace(returncode=0,stdout=json.dumps({'result':result}),stderr='')
+    monkeypatch.setattr(cli.subprocess,'run',transport)
+    monkeypatch.setattr(sys,'argv',['herdr-task','launch','--task-id','actual','--workflow-id','wf','--node','n','--source',str(tmp_path),'--task-type','docs','--integration-mode','none','--goal','report','--prompt','report'])
+    with pytest.raises(SystemExit) as exc:cli.main()
+    assert exc.value.code==1
+    assert any('herdr-worker.py' in str(cmd[0]) for cmd in calls)
+    assert snapshot.read_bytes()==before,'actual launch topology overwrote immutable configuration'
+    assert hashlib.sha256(before).hexdigest()==update['config_sha']
+    fresh=store.get_workflow('wf');assert fresh['node_runtime']['n']['tab_id']=='new-tab'
+    store.save_workflow({'workflow_id':'other','project_id':'p','status':'running','workflow_file':str(cfg),
+                         'node_runtime':{'n':{'tab_id':'foreign-tab','anchor_pane_id':'foreign-anchor'}}})
+    assert projects.workflow_config_for('other')['nodes'][0]['tab_id']=='foreign-tab'
+    assert projects.workflow_config_for('wf')['nodes'][0]['anchor_pane_id']=='new-anchor'
+    assert topology._workflow_config('wf')[2]['nodes'][0]['tab_id']=='new-tab'
+    assert cli.load_workflow('wf')['nodes'][0]['anchor_pane_id']=='new-anchor'
+    close_topology=cli._workflow_stage_tabs('wf',[])
+    assert close_topology['tab_ids']==['new-tab'] and 'new-anchor' in close_topology['owned_pane_ids']
+    monkeypatch.setattr(pane_pool,'_pane_list',lambda _:[{'pane_id':'new-anchor','tab_id':'new-tab'},{'pane_id':'available','tab_id':'new-tab'}])
+    monkeypatch.setattr(pane_pool,'_claimed_panes',lambda:{})
+    monkeypatch.setattr(pane_pool,'_bindings',lambda:{})
+    monkeypatch.setattr(pane_pool,'_live_agent',lambda _:None)
+    slots=pane_pool.list_slots_for_project(fresh)
+    assert [slot['pane_id'] for slot in slots]==['available']
+    store.save_task({'task_id':'anchor-task','workflow_id':'wf','node':'n','status':'superseded','pane_id':'new-anchor','pane_source':'dynamic'})
+    verdict=task_resources.reap_task_pane(store,'anchor-task',probe=lambda _:pytest.fail('anchor must be protected before transport'))
+    assert verdict['reason']=='anchor_or_coordinator_pane'

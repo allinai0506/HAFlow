@@ -117,3 +117,9 @@ herdr-deep-preflight --workflow-id <workflow> --agent <agent> --deep --apply
 ### PR候选最终验收
 
 最新全量 `pytest -q -ra`：3308 passed、2 skipped、157 subtests passed，0 failed，退出0，563.01秒。两项跳过均为临时HOME没有launchd安装目录的环境用例。代码/测试SHA256前后相同：`0a08a795f140bbc3d0eff09c710462146816370c83859b5874ba690f6e49adbe`；日志 `/tmp/FIX_BUG1002-pr-pytest-v2.log`。跨模型独立路由76项、收尾93项通过，作者专项121/110项通过；compileall、无扩展CLI AST、diff检查通过。评审结论MERGE_READY，用户授权交付为GitHub待审查PR；Nexus Gitee PR #1518已open且源SHA核对一致。先前3244计数及未提交陈述为本地阶段历史记录，当前验收以本节为准。未合并、部署、重启或生产复跑。
+
+### 合并前P1审查闭环
+
+GH PR144自动审查两条P1经真实实证成立：split返回后杀Worker遗漏持久分配回执，以及runtime topology写入改变node-config审计snapshot。补修在managed锁内持久split回执，写盘失败仍保留已分配现场；实际launch/topology与projects统一将运行拓扑保存到StateStore，teardown/reap/pool/CLI读取仅叠加所属workflow的runtime，原始snapshot/config_sha不变。234专项及12子测试通过，Worker41专项通过；独立复审和最新全量结果待本节后续记录。原生跨系统非原子边界继续明确保留。
+
+合并候选最终验收：3312 passed、2 skipped、157 subtests passed，0 failed，退出0，552.14秒；两skip为隔离HOME无launchd安装目录。代码SHA256前后一致：`dcd26b383b723b8fe7e7b940d21a26b5ec3b2192d411b070953bda4f6813bf50`。日志 `/tmp/FIX_BUG1002-pr-pytest-v4.log`；独立reviewer gpt-6-astra 126专项+3子测试、Worker30专项通过，MERGE_READY。历史v3在681通过时因补全topology调用链主动停止，不作为最终结果。

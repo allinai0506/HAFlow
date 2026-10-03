@@ -25,16 +25,6 @@ def _load(path, default):
         return default
 
 
-def _save_atomic(path, data):
-    path = Path(path)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    tmp.replace(path)
-
-
 def _run_json(cmd):
     r = subprocess.run(cmd, text=True, capture_output=True)
     if r.returncode != 0:
@@ -70,7 +60,8 @@ def _workflow_config(workflow_id):
     workflow = _load(workflow_file, None)
     if not workflow:
         raise RuntimeError(f"Workflow config invalid: {workflow_file}")
-    return record, workflow_file, workflow
+    from .projects import _with_node_runtime
+    return record, workflow_file, _with_node_runtime(workflow, record)
 
 
 def _tabs(workspace_id):
@@ -266,7 +257,8 @@ def ensure_stage_topology(workflow_id, stage_key):
             n["anchor_pane_id"] = anchor_pane_id
 
     if tab_changed or anchor_changed:
-        _save_atomic(workflow_file, workflow)
+        from .projects import save_workflow_config_for
+        save_workflow_config_for(workflow_id, workflow, runtime_node_id=stage_key)
         print(
             "[TOPOLOGY HEALED] "
             f"workflow={workflow_id} "

@@ -283,6 +283,19 @@ def validate_required_task_scope(config, workflow_id, store=None):
     return config
 
 
+def _with_node_runtime(config, record):
+    """Project mutable topology over a definition without changing its snapshot."""
+    runtime = record.get("node_runtime") or {}
+    for group, key in (("nodes", "id"), ("stages", "key")):
+        for node in config.get(group) or []:
+            values = runtime.get(node.get(key) or node.get("id") or node.get("key"))
+            if isinstance(values, dict):
+                for field in ("tab_id", "anchor_pane_id"):
+                    if field in values:
+                        node[field] = values[field]
+    return config
+
+
 def workflow_config_for(workflow_id):
     record = project_for_workflow(workflow_id)
     if record and record.get("workflow_file"):
@@ -290,24 +303,52 @@ def workflow_config_for(workflow_id):
         if path.exists():
             cfg = _load(path, None)
             if cfg:
-                return validate_required_task_scope(normalize_workflow(cfg), workflow_id)
+                return _with_node_runtime(validate_required_task_scope(normalize_workflow(cfg), workflow_id), record)
     if LEGACY_WORKFLOW_FILE.exists():
         cfg = _load(LEGACY_WORKFLOW_FILE, None)
         if cfg:
-            return validate_required_task_scope(normalize_workflow(cfg), workflow_id)
+            return _with_node_runtime(validate_required_task_scope(normalize_workflow(cfg), workflow_id), record or {})
     return None
 
 
-def save_workflow_config_for(workflow_id, workflow_data):
-    record = project_for_workflow(workflow_id)
-    if record and record.get("workflow_file"):
-        path = Path(record["workflow_file"]).expanduser()
-        _save(path, workflow_data)
+def save_workflow_config_for(workflow_id, workflow_data, *, runtime_node_id=None):
+    """Save only repaired topology in StateStore; definitions remain immutable."""
+    from . import state_db
+    store = _get_store()
+    if not runtime_node_id:
+        raise ValueError("runtime update requires explicit node identity")
+    desired = find_node(workflow_data, runtime_node_id)
+    if not desired:
+        raise ValueError("runtime node missing")
+    values = {field: desired.get(field) for field in ("tab_id", "anchor_pane_id")}
+    conn = state_db.get_db_connection(store.db_path)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT metadata_json FROM workflows WHERE workflow_id = ?", (workflow_id,)).fetchone()
+        if row is None:
+            raise ValueError("workflow missing during runtime update")
+        record = json.loads(row["metadata_json"] or "{}")
+        path = Path(record.get("workflow_file") or LEGACY_WORKFLOW_FILE).expanduser()
+        if not path.is_file() or path.stat().st_size > 1024 * 1024:
+            raise ValueError("workflow configuration unavailable")
+        definition = normalize_workflow(json.loads(path.read_text()))
+        if not find_node(definition, runtime_node_id):
+            raise ValueError("runtime node removed during repair")
+        runtime = dict(record.get("node_runtime") or {})
+        previous = runtime.get(runtime_node_id)
+        runtime[runtime_node_id] = values
+        state_db.update_workflow_metadata(workflow_id, {"node_runtime": runtime}, conn=conn)
+        state_db.record_event({"event_type": "node_runtime_updated", "workflow_id": workflow_id,
+                               "node_id": runtime_node_id, "source": "projects",
+                               "payload": {"previous": previous, "runtime": values,
+                                           "workflow_file": str(path)}}, conn=conn)
+        conn.execute("COMMIT")
         return True
-    if LEGACY_WORKFLOW_FILE.exists():
-        _save(LEGACY_WORKFLOW_FILE, workflow_data)
-        return True
-    return False
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.close()
 
 
 SUBJECT_MAX_LEN = 64
@@ -1227,7 +1268,7 @@ def ensure_node_runtime(workflow_id_or_root, node_id):
 
     If the Tab was closed/deleted, recreate it.
     If the Anchor Pane was closed/purged, detect or split a new Anchor Pane.
-    Persists repaired runtime mappings to workflow.json.
+    Persists workflow-owned repaired mappings in mutable StateStore metadata.
     """
     workflow_id = None
     project = None
@@ -1348,7 +1389,7 @@ def ensure_node_runtime(workflow_id_or_root, node_id):
                 s["anchor_pane_id"] = anchor_pane_id
 
         if workflow_id:
-            save_workflow_config_for(workflow_id, normalized)
+            save_workflow_config_for(workflow_id, normalized, runtime_node_id=node["id"])
         elif project and project.get("workflow_file"):
             _save(project["workflow_file"], normalized)
 

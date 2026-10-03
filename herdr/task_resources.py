@@ -79,6 +79,8 @@ def _reap_task_pane(store, task_id, *, apply=False, probe=None, close=None):
             definition = workflow.get('config') or workflow
             if workflow.get('workflow_file'):
                 definition = json.loads(Path(workflow['workflow_file']).expanduser().read_text())
+            from .projects import _with_node_runtime
+            definition = _with_node_runtime(definition, workflow)
         except (OSError, ValueError, TypeError):
             return {**row, 'reason': 'workflow_topology_unknown'}
         protected = {workflow.get('coordinator_pane_id'), definition.get('coordinator_pane_id')}

@@ -5901,3 +5901,23 @@ PR发布必须核验review/test的verified_candidate_sha，声明candidate_sha�
 Nexus CoW integration分支复用Agent白名单、branch/worktree全部context归属，不能一概接受herdr前缀或提前绕开protected分支。外部脚本回归192项通过；HAFlow最终全量结果随后补证。
 
 最终补证：26项本地处理完整，当前代码全量3244 passed、2 skipped、157subtests，0failed；跳过为隔离HOME无launchd agent目录的安装测试。范围/版本/命令/证据和未执行项见 `docs/product-specs/fix-bug1002.md`。
+
+### PR144 合并前审查补证：副作用回执和不可变配置（2026-10-03）
+
+**现象与根因**：Worker在native split返回后、锁外写launch tag前崩溃，磁盘仍workspace_created；另ensure_node_runtime把动态tab/anchor写回node-config-set的内容寻址snapshot，历史config_sha失效。真实子进程退出与update_required_tasks→ensure_node_runtime故障注入分别复现。
+
+**修复**：split后在managed lifecycle锁内持久回执；持久写失败仍从本次已分配内存身份恢复并保留目录。运行拓扑存入StateStore node_runtime及同事务audit，配置读取只overlay拓扑，node-config CAS读取原始不可变字节。
+
+**验证**：tests/test_fix_bug1002_lifecycle.py 子进程os._exit和receipt OSError；tests/test_fix_bug1002_config.py真实配置更新→runtime装配→snapshot hash/event SHA→后续CAS。原生split与磁盘写间不具跨系统原子性，未持久未知结果仍须显式身份恢复。
+
+**操作规范**：状态提交、回执落盘与native副作用是不同边界，覆盖成功和写回异常路径；内容寻址文件禁止承载易变运行拓扑。继续使用既有StateStore，不创建平行权威源。
+
+### CoW目录与Git元数据隔离须分别核验（FIX_BUG1002收尾）
+
+**现象与根因**：Nexus沙盒文件目录已复制，但.git为文本，`git rev-parse --git-common-dir`仍指向外部worktree公共Git；通用finish因此枚举外部gemini工位，并因dev被主worktree占用停止。文件系统CoW不自动隔离Git指针。
+
+**处置**：在任何worktree删除前停止，复制公共Git到本沙盒私有.git，隔离私有副本的继承worktree登记，再核对absolute-git-dir指向沙盒；不删除外部worktree、文件或其当前引用分支。squash落地用API merged及is_branch_landed内容等价共同证明，不把通用forge探测失败当作未合入。
+
+**证据**：PR1518 merged，dev `e5db586ad`；收尾记录和原指针已归档到本任务_archive。原始git-dir指向`nexusarchive/.git/worktrees/gemini`，修复后指向FIX_BUG1002-nexus/.git。
+
+**操作规范**：复制工作区后编码前同时检查.git类型、absolute-git-dir、git-common-dir和worktree list；跨目录指针必须先独立化。通用收尾不得清理继承的外部工位登记所指目录。

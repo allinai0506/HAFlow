@@ -1954,3 +1954,7 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 交付目标为隔离工作树；未提交、推送、合并、部署或重启生产，详见docs/product-specs/fix-bug1002.md。
 
 - 2026-10-03 FIX_BUG1002 PR阶段：同步最新main并保留上游Run/替换义务；本任务工程教训在合并主干教训后编号为126。跨模型复核补充预检短锁/旧结果覆盖及context目录收尾回归。部署与生产验收仍为独立阶段。
+
+- 2026-10-03 PR144合并前P1闭环：split回执在受管锁内持久，写失败保留已分配现场；runtime tab/anchor改为StateStore元数据+审计，配置读取overlay但snapshot字节/config_sha保持不可变。新增真实崩溃、持久失败及配置→装配→CAS回归。
+
+- 2026-10-03 FIX_BUG1002收尾边界：发现Nexus CoW继承外部Git指针，先独立化Git元数据再清理自有branch；外部worktree及其当前引用分支保留。记录CoW目录/Git隔离双重检查教训。

@@ -719,6 +719,10 @@ def _create_pane(parent_pane, clone, launch_identity=None):
     if launch_identity is not None:
         launch_identity.update(pane_id=pane['pane_id'], pane_source='dynamic',
                                terminal_id=pane.get('terminal_id'), phase='pane_allocated')
+        # Persist the native allocation receipt before releasing the managed
+        # lifecycle lock or returning to caller-side startup preparation.
+        from herdr.task_resources import write_worker_launch_identity
+        write_worker_launch_identity(clone, launch_identity)
     return pane['pane_id']
 
 
@@ -1138,6 +1142,11 @@ def main():
             )
         )
     except Exception as exc:
+        # Receipt persistence can fail after native split but before assignment
+        # of create_pane's return value. Never mistake that allocation for absent.
+        if pane_id is None and launch_identity and launch_identity.get('pane_id'):
+            pane_id = launch_identity['pane_id']
+            pane_source = launch_identity.get('pane_source')
         session = (agent or {}).get("agent_session")
         failure = {
             "launch_intent_id": args.launch_intent_id,

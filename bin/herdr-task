@@ -218,8 +218,8 @@ def load_workflow(workflow_id=None):
                     try:
                         config = json.loads(Path(wf["workflow_file"]).expanduser().read_text())
                         if isinstance(config, dict) and config:
-                            from herdr.projects import validate_required_task_scope
-                            return validate_required_task_scope(normalize_workflow(config), workflow_id, store=store)
+                            from herdr.projects import validate_required_task_scope, _with_node_runtime
+                            return _with_node_runtime(validate_required_task_scope(normalize_workflow(config), workflow_id, store=store), wf)
                     except OSError:
                         pass
                 return normalize_workflow(wf)
@@ -6062,6 +6062,9 @@ def _workflow_stage_tabs(workflow_id, tasks):
             cfg = json.load(f)
     except (json.JSONDecodeError, OSError):
         return empty
+
+    from herdr.projects import _with_node_runtime
+    cfg = _with_node_runtime(cfg, project)
 
     items = cfg.get("nodes") or cfg.get("stages", [])
     tab_ids = sorted({
