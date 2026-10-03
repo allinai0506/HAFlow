@@ -6646,7 +6646,7 @@ def _autosave_clone_wip(task):
     return True
 
 
-def supersede_task(task_id, new_task_id=None, reason=None, allow_new_run=False, abandon=False):
+def supersede_task(task_id, new_task_id=None, reason=None, allow_new_run=False, abandon=False, allow_pending=False):
     """Mark a task as superseded (replaced by another task or abandoned).
 
     Replacement obligations remain until the linked task delivers. Only an
@@ -6654,6 +6654,12 @@ def supersede_task(task_id, new_task_id=None, reason=None, allow_new_run=False, 
     """
     if abandon and (new_task_id or not str(reason or "").strip()):
         print("[SUPERSEDE REJECTED] --abandon requires a reason and cannot be combined with --by")
+        sys.exit(2)
+    if not new_task_id and not abandon and not allow_pending:
+        print(
+            "[SUPERSEDE REJECTED] supersede requires either --by <replacement_task_id> "
+            "or --abandon --reason <reason> to prevent unlinked zombie obligations"
+        )
         sys.exit(2)
     data = load_tasks()
     task = find_task(data, task_id)
@@ -7501,6 +7507,32 @@ def create_pull_request(args):
     print(json.dumps(result, ensure_ascii=False))
 
 
+def merge_pull_request(args):
+    from herdr.pr_delivery import merge_task_pr
+    result = merge_task_pr(
+        _get_store(),
+        args.task_id,
+        pr_number=args.number,
+        merge_method=getattr(args, "method", "merge"),
+    )
+    print(json.dumps(result, ensure_ascii=False))
+
+
+def check_zombie_obligations(data=None):
+    if data is None:
+        data = load_tasks()
+    tasks = data.get("tasks", []) if isinstance(data, dict) else (data or [])
+    zombies = []
+    for t in tasks:
+        if isinstance(t, dict):
+            if (t.get("status") == "superseded"
+                    and t.get("replacement_pending")
+                    and not t.get("superseded_by")):
+                zombies.append(t)
+    return zombies
+
+
+
 def main():
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
@@ -7822,6 +7854,8 @@ def main():
     supersede_cmd.add_argument("--reason", default=None)
     supersede_cmd.add_argument("--abandon", action="store_true",
                                help="Explicitly remove this task obligation; requires --reason and no --by")
+    supersede_cmd.add_argument("--allow-pending", action="store_true",
+                               help="Allow unlinked supersede pending redispatch (controller orchestration only)")
 
     clear_esc_cmd = sub.add_parser(
         "clear-escalation",
@@ -7989,6 +8023,15 @@ def main():
     pr_cmd.add_argument("--title", required=True)
     pr_cmd.add_argument("--body-file")
     pr_cmd.add_argument("--draft", action="store_true")
+
+    merge_pr_cmd = sub.add_parser("merge-pr", help="门禁裁决候选校验后合并PR (fail-closed 对齐 candidate_sha)")
+    merge_pr_cmd.add_argument("task_id")
+    merge_pr_cmd.add_argument("--number", type=int, default=None, help="PR number")
+    merge_pr_cmd.add_argument("--method", default="merge", choices=["merge", "squash", "rebase"], help="Merge method")
+
+    check_ob_cmd = sub.add_parser("check-obligations", help="扫描任务状态机僵尸 obligation (replacement_pending 无替代者)")
+    check_ob_cmd.add_argument("--workflow-id", default=None)
+    check_ob_cmd.add_argument("--json", action="store_true")
 
     check_delivery_cmd = sub.add_parser(
         "check-delivery",
@@ -8324,6 +8367,7 @@ def main():
             new_task_id=args.new_task_id,
             reason=args.reason,
             abandon=args.abandon,
+            allow_pending=getattr(args, "allow_pending", False),
         )
 
     elif args.command == "clear-escalation":
@@ -8557,6 +8601,30 @@ def main():
         except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as exc:
             print(f"[PR PUBLICATION REFUSED] {exc}", file=sys.stderr)
             sys.exit(2)
+
+    elif args.command == "merge-pr":
+        try:
+            merge_pull_request(args)
+        except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as exc:
+            print(f"[PR MERGE REFUSED] {exc}", file=sys.stderr)
+            sys.exit(2)
+
+    elif args.command == "check-obligations":
+        zombies = check_zombie_obligations()
+        if args.workflow_id:
+            zombies = [z for z in zombies if str(z.get("workflow_id") or "") == str(args.workflow_id)]
+        if args.json:
+            print(json.dumps(zombies, ensure_ascii=False))
+        else:
+            if not zombies:
+                print("[OBLIGATIONS CLEAN] No zombie obligations found")
+            else:
+                for z in zombies:
+                    print(
+                        f"[ZOMBIE OBLIGATION] task_id={z.get('task_id')} "
+                        f"workflow_id={z.get('workflow_id')} node={z.get('node') or z.get('stage')}"
+                    )
+        sys.exit(1 if zombies else 0)
 
     elif args.command == "check-delivery":
         check_delivery_for_pr(

@@ -126,16 +126,25 @@ def node_tasks(
 
 
 def required_task_issues(tasks_for_node, required_task_ids, *, all_tasks=(), workflow_id=None, node_id=None):
-    """Explain failed required-task lineage without borrowing foreign evidence."""
+    """Explain failed required-task lineage and zombie obligations without borrowing foreign evidence."""
+    issues = []
+    # §1.7 Invariant: Scan for zombie obligations (declared replacement_pending but no superseded_by).
+    for t in (tasks_for_node or []):
+        if isinstance(t, dict):
+            if (t.get("status") == "superseded"
+                    and t.get("replacement_pending")
+                    and not t.get("superseded_by")):
+                issues.append({"task_id": t.get("task_id"), "reason": "zombie_obligation_unreplaced"})
+
     if required_task_ids is None:
-        return []
+        return issues
     if (not isinstance(required_task_ids, list) or len(required_task_ids) > 64
             or any(not isinstance(tid, str) or not tid.strip() for tid in required_task_ids)
             or len(set(required_task_ids)) != len(required_task_ids)):
-        return [{"task_id": None, "reason": "required_task_ids_invalid"}]
+        issues.append({"task_id": None, "reason": "required_task_ids_invalid"})
+        return issues
     by_id = {t.get("task_id"): t for t in tasks_for_node if isinstance(t, dict)}
     inventory = {t.get("task_id"): t for t in all_tasks if isinstance(t, dict)}
-    issues = []
     for required_id in required_task_ids:
         current, seen = required_id, set()
         while current not in seen:
@@ -194,6 +203,8 @@ def node_is_complete(tasks_for_node: Sequence[Dict[str, Any]], required_task_ids
                     # replacement work, never a configured required output.
                     break
                 current = task.get("superseded_by")
+                if not current:
+                    return False
                 replacement = by_id.get(current)
                 if replacement and any(task.get(key) and replacement.get(key)
                         and task[key] != replacement[key] for key in ("workflow_id", "node")):

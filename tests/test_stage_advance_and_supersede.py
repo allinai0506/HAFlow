@@ -235,7 +235,7 @@ class TestSupersedeTask(unittest.TestCase):
         path = self._store([{"task_id": "old-2", "status": "cleaned"}])
         try:
             _ht.TASKS_FILE = path
-            _ht.supersede_task("old-2")
+            _ht.supersede_task("old-2", allow_pending=True)
             with open(path) as f:
                 data = json.load(f)
             t = next(x for x in data["tasks"] if x["task_id"] == "old-2")

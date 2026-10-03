@@ -493,7 +493,7 @@ class TestStateTransitionGateway:
         env["WORKFLOWS_FILE"] = str(tmp_path / "workflows.json")
         env["PYTHONPATH"] = str(Path(__file__).resolve().parent.parent)
 
-        cmd = ["python3", str(bin_path), "supersede", "t-cli-02", "--reason", "abandoned by user"]
+        cmd = ["python3", str(bin_path), "supersede", "t-cli-02", "--abandon", "--reason", "abandoned by user"]
         res = subprocess.run(cmd, env=env, text=True, capture_output=True)
         assert res.returncode == 0, res.stderr
 

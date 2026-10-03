@@ -152,3 +152,25 @@ def teardown_output_diagnosis(porcelain: str, *, task_id: str) -> dict:
     return {'reason': 'unpreserved_worktree_output' if paths else '',
             'blocked_files': paths[:MAX_LISTED_FILES], 'blocked_total': len(paths),
             'remediation_cmd': f'git -C <clone> status; herdr-task commit {task_id}; herdr-task integrate {task_id}'}
+
+
+def check_source_cleanliness(source_path: str | os.PathLike) -> tuple[bool, list[str]]:
+    """Check if source repo has uncommitted tracked modifications/deletions before worker clone (§2.12).
+
+    Returns (is_clean, dirty_paths). Non-git sources return (True, []).
+    """
+    import subprocess
+    source_p = os.path.expanduser(str(source_path))
+    git_dir = os.path.join(source_p, ".git")
+    if not os.path.exists(git_dir):
+        return True, []
+    try:
+        proc = subprocess.run(
+            ["git", "-C", source_p, "status", "--porcelain", "--untracked-files=no"],
+            capture_output=True, text=True, check=True, timeout=10
+        )
+        paths = parse_porcelain_paths(proc.stdout)
+        filtered = [p for p in paths if not is_internal_untracked(p)]
+        return len(filtered) == 0, filtered
+    except Exception as exc:
+        return False, [f"cleanliness_check_error:{exc}"]

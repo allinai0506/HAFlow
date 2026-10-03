@@ -237,6 +237,7 @@ class ControllerAutoRecoverTest(unittest.TestCase):
         fake_run.assert_called_once_with(
             [
                 controller.TASK_MANAGER, "supersede", "wf-req-challenger",
+                "--allow-pending",
                 "--reason", "auto-recover: infrastructure failure",
             ],
             text=True,

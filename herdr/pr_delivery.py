@@ -32,17 +32,18 @@ class PullRequestClient:
         if not self.token:
             raise ValueError('PR provider credential is not configured')
 
-    def _request(self, method, values):
+    def _request(self, method, values, subpath=''):
         headers = {'Accept':'application/json', 'User-Agent':'HAFlow'}
         if self.host == 'github.com':
             headers['Authorization'] = f'Bearer {self.token}'
             headers['X-GitHub-Api-Version'] = '2022-11-28'
         else:
             values = {**values, 'access_token':self.token}
-        url = self.root + self.path
+        url = self.root + self.path + (f'/{subpath}' if subpath else '')
         data = None
         if method == 'GET':
-            url += '?' + urlencode(values)
+            if values:
+                url += '?' + urlencode(values)
         else:
             data = json.dumps(values).encode()
             headers['Content-Type'] = 'application/json'
@@ -65,6 +66,12 @@ class PullRequestClient:
 
     def create(self, head, base, title, body, draft):
         return self._request('POST', {'head':head,'base':base,'title':title,'body':body,'draft':draft})
+
+    def get_pr(self, number):
+        return self._request('GET', {}, subpath=str(number))
+
+    def merge(self, number, merge_method='merge'):
+        return self._request('PUT', {'merge_method': merge_method}, subpath=f'{number}/merge')
 
 
 def _git(repo, *args):
@@ -161,4 +168,55 @@ def create_task_pr(store, task_id, *, title, body='', draft=False, client=None):
                    'branch':branch,'base':base,'state':'open','provider':identity[0]}
         store.record_event('pull_request_created',receipt,task_id=task_id,
                            workflow_id=task['workflow_id'],source='herdr-task')
+        return receipt
+
+
+def merge_task_pr(store, task_id, *, pr_number=None, client=None, merge_method='merge'):
+    """Merge an open PR after verifying its head matches the gate-certified candidate sha (§1.6)."""
+    initial = store.get_task(task_id)
+    if not initial:
+        raise ValueError('task not found')
+    with workflow_launch_lock(store.db_path, f"pr:{initial['workflow_id']}"):
+        task = store.get_task(task_id)
+        sha, branch, base = _publication(task, wd.load_notes(task['workflow_id']), store)
+        repo = Path(task.get('source_repo') or '').expanduser()
+        if not repo.is_dir():
+            raise ValueError('integrated source repository missing')
+        identity = repository_identity(_git(repo, 'remote', 'get-url', 'origin'))
+        client = client or PullRequestClient(*identity)
+
+        if pr_number is not None:
+            pr = client.get_pr(pr_number)
+        else:
+            rows = client.list_open(branch, base)
+            pr = _matching_pr(rows, branch, base, sha)
+            if not pr:
+                raise ValueError('no matching open PR found to merge')
+
+        # §1.6 Fail-closed candidate sha verification: PR head MUST match gate-verified candidate sha
+        pr_head_sha = str((pr.get('head') or {}).get('sha') or '').strip()
+        if not pr_head_sha:
+            raise ValueError('PR provider did not attest candidate head sha')
+
+        from .scheduler import shas_identical
+        if not shas_identical(pr_head_sha, sha):
+            raise ValueError(
+                f"PR head {pr_head_sha} differs from gate-certified candidate {sha}; "
+                "refusing to merge unverified candidate"
+            )
+
+        target_number = pr.get('number') or pr_number
+        client.merge(target_number, merge_method=merge_method)
+        receipt = {
+            'number': target_number,
+            'candidate_sha': sha,
+            'merged_sha': pr_head_sha,
+            'branch': branch,
+            'base': base,
+            'merge_method': merge_method,
+            'provider': identity[0],
+            'status': 'merged',
+        }
+        store.record_event('pull_request_merged', receipt, task_id=task_id,
+                           workflow_id=task['workflow_id'], source='herdr-task')
         return receipt
