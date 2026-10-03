@@ -92,7 +92,11 @@ class AutoAcceptUnitTest(unittest.TestCase):
     def test_non_gate_with_changes_is_completed(self):
         result, set_status, _ = self._run("implementation", BASELINE_CHANGED)
         self.assertTrue(result)
-        set_status.assert_called_once_with("t1", "completed")
+        set_status.assert_called_once_with(
+            "t1", "completed", expected_status="agent_done", expected_version=None,
+            source="herdr-controller:auto-accept",
+            metadata={"auto_accept_reason": "controlled_changes", "acceptance_mode": "auto"},
+        )
 
     def test_requirements_and_plan_are_non_gate(self):
         for node in ("requirements", "plan"):

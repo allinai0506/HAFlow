@@ -311,7 +311,7 @@ class ControllerOntoWiringTest(unittest.TestCase):
             "node": _node(),
         }
 
-    def test_launch_receives_onto_from_dependency_branch(self):
+    def test_launch_receives_frozen_sha_without_shared_dependency_branch(self):
         subprocess.run(
             ["git", "-C", str(self.repo), "checkout", "-qb", "agent/opencode/feat-new"],
             check=True)
@@ -326,9 +326,11 @@ class ControllerOntoWiringTest(unittest.TestCase):
         self.assertTrue(_ctl.try_direct_stage_advance(self._item()))
         launch = [c for c in self.commands if "launch" in c]
         self.assertEqual(len(launch), 1)
-        self.assertIn("--onto", launch[0])
-        self.assertIn("agent/opencode/feat-new",
-                      launch[0][launch[0].index("--onto") + 1])
+        self.assertNotIn("--onto", launch[0])
+        self.assertIn("--candidate-sha", launch[0])
+        self.assertEqual(launch[0][launch[0].index("--candidate-sha") + 1],
+                         subprocess.check_output(["git", "-C", str(self.repo), "rev-parse",
+                                                  "agent/opencode/feat-new"], text=True).strip())
 
     def test_vacuous_candidate_falls_back_without_launch(self):
         subprocess.run(

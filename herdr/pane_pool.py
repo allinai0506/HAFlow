@@ -89,6 +89,9 @@ def list_slots_for_project(project):
     if not workflow:
         return []
 
+    from .projects import _with_node_runtime
+    workflow = _with_node_runtime(workflow, project)
+
     items = workflow.get("nodes") or workflow.get("stages", [])
     node_by_tab = {
         item.get("tab_id"): item

@@ -448,7 +448,10 @@ def _dispatch_spec(
 ):
     from .workflow import validate_artifact_contract
     validate_artifact_contract(node.get("artifact_mode"), integration_mode or node["integration_mode"], node_id=node.get("id"), task_type=node.get("task_type"))
-    if onto_branch is None:
+    if node["id"] in {"test", "review"} and str(candidate_sha or "").strip():
+        # Parallel verifiers own separate branches at one immutable candidate.
+        onto_branch = None
+    elif onto_branch is None:
         onto_branch = sanitize_branch_name(context_branch)
     spec = {
         "task_id": task_id,
@@ -480,6 +483,8 @@ def _dispatch_spec(
         spec["redispatch_of"] = redispatch_of
     if onto_branch:
         spec["onto_branch"] = onto_branch
+    elif node["id"] in {"test", "review"} and candidate_sha and context_branch:
+        spec["candidate_branch"] = sanitize_branch_name(context_branch)
     frozen_sha = str(candidate_sha or "").strip()
     if frozen_sha:
         spec["candidate_sha"] = frozen_sha

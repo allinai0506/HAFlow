@@ -3343,7 +3343,8 @@ def _dispatch_candidate_ready(project_root, base_branch, specs, workflow_id=None
     （缺 refs、git 失败）一律 fail-open 照常派发。
     """
     ontos = sorted(
-        {s.get("onto_branch") for s in (specs or []) if s.get("onto_branch")}
+        {s.get("onto_branch") or s.get("candidate_branch") for s in (specs or [])
+         if s.get("onto_branch") or s.get("candidate_branch")}
     )
     if not ontos:
         return True
@@ -3373,7 +3374,7 @@ def _dispatch_candidate_ready(project_root, base_branch, specs, workflow_id=None
     if checked and empty == checked:
         frozen = _scheduler_current_frozen_candidate_sha(workflow_id) if workflow_id else ""
         if re.fullmatch(r"[0-9a-f]{40}", frozen) and all(
-            spec.get("onto_branch") and spec.get("candidate_sha") == frozen
+            (spec.get("onto_branch") or spec.get("candidate_branch")) and spec.get("candidate_sha") == frozen
             for spec in specs
         ):
             proven = True
@@ -6749,7 +6750,8 @@ Node Agent 策略
         candidate_flags = ""
         candidate_block = ""
         if frozen_sha:
-            onto_line = f"   --onto {frozen_branch}\n" if frozen_branch else ""
+            onto_line = (f"   --onto {frozen_branch}\n"
+                         if frozen_branch and next_stage not in ("test", "review") else "")
             candidate_flags = (
                 f"{onto_line}   --candidate-sha {frozen_sha}"
             )
@@ -7275,7 +7277,9 @@ def task_changes_recorded(task):
     except Exception:
         return False
 
-    output = (result.stdout or "") + "\n" + (result.stderr or "")
+    if result.returncode != 0:
+        return False
+    output = result.stdout or ""
     for line in output.splitlines():
         if line.startswith("HERDR_BASELINE_RESULT="):
             try:
@@ -7306,11 +7310,23 @@ def try_auto_accept(task_id):
 
     if node_is_gate(workflow_id, node_id):
         return False
+    if task.get("stage_verdict") == "blocked":
+        return False
+    # Review roles may share a requirements/plan node with its author.
+    # Legacy task IDs also carry the role when dispatch_role was not recorded.
+    role_text = " ".join(str(task.get(key) or "").lower() for key in
+                         ("dispatch_role", "agent_role", "role", "task_id"))
+    if re.search(r"(?:^|[^a-z])(review(?:er)?|adversarial)(?:$|[^a-z])", role_text):
+        return False
 
     if not task_changes_recorded(task):
         return False
 
-    if not set_task_status(task_id, "completed"):
+    if not set_task_status(
+        task_id, "completed", expected_status="agent_done",
+        expected_version=_task_version(task), source="herdr-controller:auto-accept",
+        metadata={"auto_accept_reason": "controlled_changes", "acceptance_mode": "auto"},
+    ):
         return False
 
     print(

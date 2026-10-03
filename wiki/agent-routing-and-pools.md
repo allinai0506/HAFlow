@@ -269,3 +269,14 @@ Evidence:
 - `bin/herdr-task#launch_task` / `#_check_launch_capacity` / `#cmd_panes`
 - `herdr/task_resources.py#workflow_launch_lock`
 - `tests/test_node_capacity.py`
+
+## 同节点多角色隔离
+
+`FACT` 自动路由、显式Agent和workflow override都经过同一串行候选/reservation路径。同workflow同节点不同dispatch_role排除非superseded历史任务（含已完成任务）及在途reservation的Agent；同role重试仍可用原Agent。只有既有隔离opt-out加非空reuse_reason，并先落router_opt_out_used事件，才允许复用。
+
+`FACT` 两次launch路由调用均传dispatch_role；读取角色占用、兼容候选刷新和reservation发布处于跨进程路由锁内。独立同时启动的进程用例证明architect/adversarial得到不同Agent；单进程重复调用不能替代该竞争证据。健康检查与局部刷新见[[preflight-and-health]]。
+
+Evidence:
+- `herdr/agent_router.py#choose_agent`
+- `bin/herdr-task#_launch_task`
+- `tests/test_fix_bug1002_routing.py`

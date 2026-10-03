@@ -362,7 +362,12 @@ def _normalize_workflow_body(workflow: Dict[str, Any]) -> Dict[str, Any]:
             if "max_tasks_per_node" in node:
                 norm_node["max_tasks_per_node"] = node["max_tasks_per_node"]
             if "required_task_ids" in node:
-                norm_node["required_task_ids"] = node["required_task_ids"]
+                from .scheduler import required_task_issues
+                required = node["required_task_ids"]
+                issues = required_task_issues([], required)
+                if any(item["reason"] == "required_task_ids_invalid" for item in issues):
+                    raise ValueError(f"node={node_id}: required_task_ids must be a unique list of up to 64 nonempty IDs")
+                norm_node["required_task_ids"] = required
             if "tab_id" in node:
                 norm_node["tab_id"] = node["tab_id"]
             if "anchor_pane_id" in node:

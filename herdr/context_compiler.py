@@ -150,6 +150,15 @@ def compile_working_context(
         "workflow_status": snapshot["workflow"].get("status"),
         "workflow_current_stage": snapshot["workflow"].get("current_stage"),
     }
+    from .workflow_graph import workflow_graph_projection
+    frontier = workflow_graph_projection({**(snapshot["workflow"].get("config") or {}),
+                                           "workflow_id": workflow_id,
+                                           "status": snapshot["workflow"].get("status")},
+                                          snapshot["tasks"])
+    current_state.update(workflow_current_nodes=frontier.get("current_nodes", []),
+                         workflow_ready_nodes=frontier.get("ready_nodes", []),
+                         workflow_derived_current_stage=frontier.get("current_stage", ""),
+                         workflow_frontier_source="derived_context_scope")
     runtime = target.get("runtime") if isinstance(target.get("runtime"), Mapping) else {}
     if runtime.get("status"):
         current_state["runtime_status"] = runtime.get("status")
@@ -159,6 +168,8 @@ def compile_working_context(
         "task_status": f"task:{current_task_id}",
         "current_node": f"task:{current_task_id}",
     }
+    for key in ("workflow_current_nodes", "workflow_ready_nodes", "workflow_derived_current_stage", "workflow_frontier_source"):
+        current_state_refs[key] = f"workflow:{workflow_id}"
     if snapshot["workflow"].get("status") is not None:
         current_state_refs["workflow_status"] = f"workflow:{workflow_id}"
     if snapshot["workflow"].get("current_stage") is not None:

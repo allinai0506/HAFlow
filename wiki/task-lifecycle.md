@@ -141,7 +141,7 @@ Evidence:
 
 ### 1.3 完成标记的折行容错契约 (Wrap-Tolerant Marker Detection)
 
-`FACT` `working → agent_done` 的唯一常驻通路是「Pane 可见屏幕上出现
+`FACT` 无receipt-v1协议的legacy任务，其终端观测通路是「Pane 可见屏幕上出现
 `HERDR_TASK_DONE:<task_id>` + `agent_status == idle` + elapsed ≥ 60s + 两次
 间隔确认」。Sentinel 只写 `completion_observations` 样本，Controller 独占
 `compare_and_set_completion_transition` 的 CAS 落盘（见 §1.2 的 FR-1 分层）。
@@ -551,3 +551,42 @@ Evidence:
 - `herdr/completion.py#marker_present` / `#sanitize_prompt`
 - `tests/test_workflow_stall_regressions.py`
 - `tests/test_reverification_controller.py`
+
+## 自动验收与启动失败现场
+
+`FACT` 非门禁任务的自动验收拒绝已有 blocked 裁决及 review/reviewer/adversarial 角色。受控变更只证明变更验收，不产生评审 pass；状态转换使用 agent_done 与版本 CAS，既有状态事件和任务 metadata 记录 `acceptance_mode=auto`、`auto_accept_reason=controlled_changes`。
+
+`FACT` Worker已取得pane后，未尝试Agent start且能证明本进程私有动态分配时可rollback；无法证明或已经尝试start则保留clone和私有身份文件。失败回执包含pane来源及恢复标记。身份文件不是成功启动或完成凭据，未知实例不自动关闭。Git 工位 context 明确留在分配分支、集成前不得自行 push/创建 PR。
+
+Evidence:
+- `services/herdr-controller.py#try_auto_accept`
+- `services/herdr-worker.py#main`
+- `services/herdr-worker.py#write_task_context`
+- `tests/test_fix_bug1002.py#test_auto_accept_persists_explicit_evidence_and_rejects_stale_snapshot`
+- `tests/test_fix_bug1002.py#test_worker_retains_identity_if_pane_allocated_before_identity_write_failure`
+
+
+## FIX_BUG1002 恢复与平台交付
+
+`FACT` launch identity区分workspace_created、pane_allocated、agent_start_requested及已启动阶段。split回执保存terminal_id；跨进程reconcile只回收tag/task/run/intent匹配、未尝试start、native terminal一致且显式agent=null的动态pane。失败clone归档到task.failed-intent，确认资源absence后才释放intent并允许重claim。allocation_failed不等待lease到期，但不授予删除未知实例的权限。
+
+`FACT` `launch-reconcile`默认只读，`--apply`执行认证回收；旧tag缺terminal_id可由操作者运行`--authorize-terminal-id <token> --confirm-agent-never-started --reason <evidence>`，该命令只认证、不close，随后单独apply。idle、agent=null或产物存在均不能自动证明never-started。不同role查询失败明确列requested/available。
+
+`FACT` managed动态split、rollback、reconcile、reap与CLI close共用跨进程文件锁。native pane close没有expected terminal/CAS；直接native人工操作不受HAFlow锁控制，因此最后身份检查与close之间的人工并发竞态仍在，不能声称原生原子instance-close。
+
+`FACT` legacy持久完成恢复入口为`authorize-completion <task> --run-id <run> --expected-version <version> --reason <evidence>`：在SQLite事务内核验当前执行后签发receipt-v1并记审计，不改变任务状态，不认证成功。返回report_command供操作者明确提交声明；Controller继续走既有receipt验证与消费。working续修使用同实例`rework`，不新增working→pending边。
+
+`FACT` `create-pr <integrated-task> --title ... --body-file ...`是平台交付入口。它要求task-owned integration refs、当前集成SHA、同workflow同SHA的独立review/test pass及有效delivery记录。推送源为明确SHA，fetch/push仓库身份必须一致；已有远端不同SHA拒绝覆盖；未知API结果下一次通过open PR inventory对账。任务仍不得预push，H-2未放宽。创建PR不等于合并或部署。
+
+`UNKNOWN` 本次实现尚未部署，未执行生产恢复或真实外部PR发布；测试使用临时Git远端、HTTP provider和native受控transport。全量结果待最终交付记录填写。
+
+Evidence:
+- `herdr/task_resources.py#recover_launch_resources` / `#authorize_launch_recovery`
+- `services/herdr-worker.py#create_pane` / `#rollback_unstarted_pane`
+- `herdr/completion_receipt.py#authorize_legacy_completion`
+- `herdr/pr_delivery.py#create_task_pr`
+- `bin/herdr-task#cmd_launch_reconcile` / `#cmd_rework` / `#create_pull_request`
+- `tests/test_fix_bug1002_lifecycle.py`
+- `tests/test_fix_bug1002_delivery.py`
+
+相关页面：[[agent-routing-and-pools]]、[[ops-center]]、[[preflight-and-health]]。

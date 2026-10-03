@@ -182,6 +182,7 @@ class ControllerCandidateShaWiringTest(unittest.TestCase):
         self.assertTrue(_ctl.try_direct_stage_advance(self._item("review")))
         launch = [c for c in self.commands if "launch" in c]
         self.assertEqual(len(launch), 2)
+        self.assertTrue(all("--onto" not in command for command in launch))
         shas = [launch[i][launch[i].index("--candidate-sha") + 1]
                 for i in range(2)]
         self.assertEqual(shas, [self.sha, self.sha])
@@ -780,7 +781,7 @@ class FrozenIdentityFallbackWiringTest(unittest.TestCase):
         self.assertEqual(branch, "")
 
     def test_fallback_prompt_carries_frozen_candidate(self):
-        """回落提示词必须含 --candidate-sha 与 --onto,不允许总指挥重猜。
+        """回落提示词必须含冻结 --candidate-sha，并行验收不得共享 --onto。
 
         走真实调用链 _handle_coordinator_item(stage_advance),让
         try_direct_stage_advance 真实返回 False(规则化直派不可用),
@@ -791,7 +792,8 @@ class FrozenIdentityFallbackWiringTest(unittest.TestCase):
         self.assertTrue(sent, "coordinator prompt must be sent")
         message = sent[0]
         self.assertIn(f"--candidate-sha {sha}", message)
-        self.assertIn("--onto agent/x/feat-c", message)
+        self.assertNotIn("--onto agent/x/feat-c", message)
+        self.assertIn("candidate_branch: agent/x/feat-c", message)
         # 身份必须整块出现在 launch 指令里,而不是只有一句说明。
         self.assertIn("--workflow-id wf-fb-1", message)
         self.assertIn("--node test", message)
@@ -1659,11 +1661,15 @@ class PersistedPlannedCoverageTest(unittest.TestCase):
             with patch.object(projects, "_get_store", return_value=store), patch.object(_ctl, "load_tasks", side_effect=store.list_tasks):
                 self.assertFalse(_ctl.is_node_complete("wf-1", "implementation"))
 
-    def test_normalization_preserves_manifest_and_invalid_values(self):
+    def test_normalization_preserves_manifest_and_rejects_invalid_values(self):
         from herdr.workflow import normalize_workflow
-        for manifest in (["t1", "t3"], [], "", 0, {}):
+        for manifest in (["t1", "t3"], []):
             with self.subTest(manifest=manifest):
                 normalized = normalize_workflow({"nodes": [{"id": "implementation", "required_task_ids": manifest}]})
                 self.assertEqual(normalized["nodes"][0]["required_task_ids"], manifest)
                 self.assertEqual(normalize_workflow(normalized)["nodes"][0]["required_task_ids"], manifest)
+        for manifest in ("", 0, {}):
+            with self.subTest(manifest=manifest):
+                with self.assertRaisesRegex(ValueError, "required_task_ids"):
+                    normalize_workflow({"nodes": [{"id": "implementation", "required_task_ids": manifest}]})
         self.assertNotIn("required_task_ids", normalize_workflow({"nodes": [{"id": "implementation"}]})["nodes"][0])

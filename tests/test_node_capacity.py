@@ -283,3 +283,16 @@ def test_legacy_overflow_ack_preserves_dispatch_semantics(scene):
     with pytest.raises(Routed):
         cli._launch_task(args)
     assert len(store.list_events(event_type='node_overflow_acknowledged')) == 1
+
+
+def test_budget_diagnostics_name_cumulative_superseded_and_active_counts(scene):
+    from herdr.node_capacity import node_usage, launch_capacity_error
+    _,store,config,_,_=scene
+    node=config['nodes'][0];node['max_tasks_per_node']=2
+    usage=node_usage(node,store.list_tasks(),'wf')
+    assert usage['registered_task_count']==usage['task_count']==2
+    assert usage['superseded_task_count']==1
+    assert usage['task_count_source']=='all_registered_including_superseded'
+    assert usage['active_task_count_source']=='concurrent_statuses'
+    assert usage['active_task_count']==0
+    assert 'including 1 superseded' in launch_capacity_error(usage)

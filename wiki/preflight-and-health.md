@@ -119,3 +119,17 @@ Evidence:
 - `tests/test_service_release.py`
 
 相关页面：[[task-lifecycle]]。
+
+## Workflow定向及部分刷新
+
+`FACT` `herdr-deep-preflight --workflow-id <wf> --agent <agent> --deep --apply`使用真实已注册adapter请求探针，并回写StateStore及兼容投影。部分刷新只更新preflight_agent_checked_at与该Agent identity/健康结论；仅配置完整全池结果齐备时更新preflight_checked_at，不能把局部探针年龄写成全局新鲜。
+
+`FACT` Router对过期软故障候选先执行现有deep请求验证，只有READY、request_verified及verifiable identity才选择；首选失败可继续其它兼容候选，显式指定Agent不会被静默替换。单Agent新鲜证据可单独采用，binary/config/root/mode指纹漂移则重新核验。硬故障不会因TTL过期自动解除，只能显式定向刷新重验。历史无身份字段的新鲜快照仍有兼容路径，不声称已迁移所有旧记录。
+
+`UNKNOWN` 请求探针可能涉及真实模型费用；本轮只验证受控transport，没有生产探针或运行服务更新。clone内worker预检失败仍走launch recovery，不在该阶段跨身份重复创建资源。
+
+Evidence:
+- `herdr/deep_preflight.py#refresh_workflow_preflight`
+- `herdr/agent_router.py#choose_agent`
+- `tests/test_fix_bug1002_routing.py`
+- `tests/test_preflight_runtime_contract.py`

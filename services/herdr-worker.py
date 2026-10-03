@@ -265,7 +265,7 @@ def create_task_branch(clone, task_id, agent, task_type, base_branch, *, launch_
             text=True, capture_output=True, timeout=10,
         )
         if resolved.returncode != 0 or resolved.stdout.strip() != candidate_sha:
-            raise RuntimeError("Candidate pin is not an available commit in this clone")
+            raise RuntimeError("Frozen candidate commit is unavailable in source clone")
         base_ref = candidate_sha
     else:
         fetch = subprocess.run(
@@ -639,6 +639,12 @@ def write_task_context(clone, agent, branch, shared_docs=None, mode="git", conte
     lines = []
     if mode == "context":
         lines.append("mode=context")
+    else:
+        lines.extend([
+            "branch_policy=stay_on_assigned_branch",
+            "delivery_policy=no_push_or_pr_before_integration",
+            "Do not create or switch branches. Do not push or create a PR before platform integration.",
+        ])
     lines.extend([
         f"agent={agent}",
         f"branch={branch or '-'}",
@@ -658,7 +664,45 @@ def write_task_context(clone, agent, branch, shared_docs=None, mode="git", conte
     return ctx, complexity_baseline
 
 
-def create_pane(parent_pane, clone):
+def rollback_unstarted_pane(clone, pane_id, pane_source, identity):
+    from herdr.task_resources import workflow_launch_lock
+    from herdr.state_store import get_state_store
+    with workflow_launch_lock(get_state_store().db_path, 'managed-dynamic-pane-lifecycle'):
+        return _rollback_unstarted_pane(clone, pane_id, pane_source, identity)
+
+
+def _rollback_unstarted_pane(clone, pane_id, pane_source, identity):
+    """In-process allocation proof plus private cwd and empty native registry."""
+    if not identity or pane_source != 'dynamic' or not pane_id or not identity.get('terminal_id'):
+        return False
+    try:
+        tag_path = Path(clone) / '.herdr-launch-identity.json'
+        if Path(clone).is_symlink() or tag_path.is_symlink():
+            return False
+        tag = json.loads(tag_path.read_text())
+        if any(tag.get(k) != identity.get(k) for k in ('intent_id','task_id','run_id')):
+            return False
+        for _ in range(2):
+            pane = run_json(['herdr','pane','get',pane_id], timeout=2).get('result',{}).get('pane',{})
+            if pane.get('terminal_id') != identity['terminal_id'] or not pane.get('cwd') or Path(pane['cwd']).resolve() != Path(clone).resolve():
+                return False
+            agent = run_json(['herdr','agent','get',pane_id], timeout=2).get('result',{})
+            if 'agent' not in agent or agent['agent'] not in (None, {}):
+                return False
+        run_json(['herdr','pane','close',pane_id], timeout=2)
+        return True
+    except (OSError, ValueError, RuntimeError, KeyError, TypeError, subprocess.TimeoutExpired):
+        return False
+
+
+def create_pane(parent_pane, clone, launch_identity=None):
+    from herdr.task_resources import workflow_launch_lock
+    from herdr.state_store import get_state_store
+    with workflow_launch_lock(get_state_store().db_path, 'managed-dynamic-pane-lifecycle'):
+        return _create_pane(parent_pane, clone, launch_identity)
+
+
+def _create_pane(parent_pane, clone, launch_identity=None):
     data = run_json([
         "herdr",
         "pane",
@@ -671,7 +715,15 @@ def create_pane(parent_pane, clone):
         "--no-focus"
     ])
 
-    return data["result"]["pane"]["pane_id"]
+    pane = data["result"]["pane"]
+    if launch_identity is not None:
+        launch_identity.update(pane_id=pane['pane_id'], pane_source='dynamic',
+                               terminal_id=pane.get('terminal_id'), phase='pane_allocated')
+        # Persist the native allocation receipt before releasing the managed
+        # lifecycle lock or returning to caller-side startup preparation.
+        from herdr.task_resources import write_worker_launch_identity
+        write_worker_launch_identity(clone, launch_identity)
+    return pane['pane_id']
 
 
 def prepare_existing_pane(pane_id, clone):
@@ -900,6 +952,7 @@ def main():
     agent_start_attempted = False
     agent = None
     pane_id = None
+    pane_source = None
     readiness = None
     launch_identity = None
     if args.launch_intent_id:
@@ -1011,15 +1064,18 @@ def main():
                 raise RuntimeError(
                     "--parent-pane is required when --pane-id is not provided"
                 )
-            pane_id = create_pane(args.parent_pane, clone)
+            pane_id = create_pane(args.parent_pane, clone, launch_identity)
             pane_source = "dynamic"
 
         print(f"[PANE] {pane_id}")
         print(f"[PANE SOURCE] {pane_source}")
         if launch_identity:
-            launch_identity.update(pane_id=pane_id, pane_source=pane_source, phase='agent_start_requested')
+            launch_identity.update(pane_id=pane_id, pane_source=pane_source, phase='pane_allocated')
             write_worker_launch_identity(clone, launch_identity)
 
+        if launch_identity:
+            launch_identity.update(phase='agent_start_requested')
+            write_worker_launch_identity(clone, launch_identity)
         agent_start_attempted = True
         agent = start_agent(
             args.task_id,
@@ -1086,19 +1142,27 @@ def main():
             )
         )
     except Exception as exc:
+        # Receipt persistence can fail after native split but before assignment
+        # of create_pane's return value. Never mistake that allocation for absent.
+        if pane_id is None and launch_identity and launch_identity.get('pane_id'):
+            pane_id = launch_identity['pane_id']
+            pane_source = launch_identity.get('pane_source')
         session = (agent or {}).get("agent_session")
         failure = {
             "launch_intent_id": args.launch_intent_id,
             "task_id": args.task_id, "run_id": args.run_id,
             "agent_name": (agent or {}).get("name"),
             "agent_session_id": session.get("value") if isinstance(session, dict) else session,
-            "pane_id": pane_id, "clone": str(clone.resolve()) if clone else None,
+            "pane_id": pane_id, "pane_source": pane_source, "clone": str(clone.resolve()) if clone else None,
             "agent_started": agent_started if agent_started else (None if agent_start_attempted else False),
             "agent_start_attempted": agent_start_attempted, "disposition": "unknown",
             "recovery_required": agent_start_attempted or pane_id is not None,
             "startup_status": (readiness or {}).get("status", "UNKNOWN"),
             "failure_type": type(exc).__name__,
         }
+        if not agent_start_attempted and pane_id and rollback_unstarted_pane(clone, pane_id, pane_source, launch_identity):
+            failure.update(disposition='pane_reclaimed', recovery_required=False)
+            pane_id = None
         # Expected identity is the start receipt, never the foreign queried instance.
         print("HERDR_WORKER_FAILURE=" + json.dumps(failure, sort_keys=True), file=sys.stderr, flush=True)
         if clone and clone.exists() and pane_id is None and not agent_start_attempted and not is_task_active_in_registry(args.task_id):

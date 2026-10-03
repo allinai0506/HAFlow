@@ -38,6 +38,10 @@ def node_usage(node, tasks, workflow_id=None):
     concurrent_overflow = concurrency is not None and len(active) > concurrency
     return {
         'node': nid, 'task_count': len(selected), 'active_task_count': len(active),
+        'registered_task_count': len(selected),
+        'superseded_task_count': sum(t.get('status') == 'superseded' for t in selected),
+        'task_count_source': 'all_registered_including_superseded',
+        'active_task_count_source': 'concurrent_statuses',
         'pane_count': len(panes), 'pane_ids': panes,
         'pane_count_source': 'persisted_references',
         'orphan_pane_count': len({str(pane_reference(t)) for t in selected
@@ -56,7 +60,9 @@ def launch_capacity_error(usage):
     count = usage['task_count'] + 1
     limit = usage['max_tasks_per_node']
     if limit is not None and count > limit:
-        return f'cumulative task count {count} exceeds max_tasks_per_node={limit}'
+        return (f'cumulative task count {count} exceeds max_tasks_per_node={limit}; '
+                f'registered={usage["task_count"]} including {usage.get("superseded_task_count", 0)} superseded; '
+                f'active={usage["active_task_count"]}')
     # The old owner stays active until successful replacement delivery.
     # Launch therefore requires a real free slot even for replacements.
     active = usage['active_task_count'] + 1

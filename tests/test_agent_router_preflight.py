@@ -24,7 +24,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
-from herdr import agent_router
+from herdr import agent_router, deep_preflight
 from herdr.state_store import get_state_store
 
 
@@ -44,6 +44,11 @@ class PreflightHardeningTest(unittest.TestCase):
         self.wf_id = "wf-preflight-hardening"
         self.patchers = [
             patch("herdr.agent_router._get_store", return_value=self.store),
+            patch("herdr.deep_preflight.preflight_identity", return_value={"verifiable":True,"fingerprint":"controlled"}),
+            patch("herdr.deep_preflight.inspect", side_effect=lambda *args, **kw: [
+                {"agent": a, "final_status": "READY", "request_verified": True,
+                 "preflight_identity": {"verifiable": True, "fingerprint": "controlled"}}
+                for a in kw["target_agents"]]),
             patch("herdr.agent_router.POOLS_FILE", self.pools_file),
             patch("herdr.agent_router.RESERVATIONS_FILE", self.reservations_file),
             patch("herdr.agent_router.ROUTER_LOCK_FILE", self.lock_file),
@@ -59,6 +64,7 @@ class PreflightHardeningTest(unittest.TestCase):
         record = {
             "workflow_id": self.wf_id,
             "project_id": "test-proj",
+            "project_root": str(self.tmp_path),
             "status": "running",
             "healthy_agents": list(healthy),
             "unhealthy_agents": dict(unhealthy),

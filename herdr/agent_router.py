@@ -47,13 +47,12 @@ DEFAULT_TASK_TYPE_PREFERENCES = {
 
 # Preflight 快照保鲜期:超过该秒数的 healthy_agents 名单不再被信任为
 # "当前健康"(Agent 凭证/配额会在工作流运行中途过期,如 pi AUTH_REQUIRED)。
-# 过期后路由回落到 allowed - disabled - unhealthy,而不是把任务派给一个
-# 数小时前健康、现在可能已死的 Agent。缺失/不可解析的时间戳视为新鲜,
+# 过期后兼容候选必须重新验证真实请求。缺失时间戳保持 legacy 兼容,
 # 保持 legacy 记录与既有单 Agent 优雅回退语义不变。
 DEFAULT_PREFLIGHT_TTL_SECONDS = 1800.0
 
 # 致命/硬故障状态：即使 Preflight 快照过期，也绝不自动入选或调度。
-# 非硬故障状态（如 TIMEOUT、UNKNOWN、WARN）在快照过期后允许尝试，避免因瞬态超时永久禁赛。
+# 瞬态状态过期后只允许重新验证，不授权直接派发。
 HARD_UNHEALTHY_STATUSES = {
     "TOKEN_EXHAUSTED",
     "AUTH_REQUIRED",
@@ -130,6 +129,21 @@ def preflight_snapshot_fresh(record, now=None, current_identity=None) -> bool:
         return identity is None and identities is None
     current = time.time() if now is None else now
     return 0 <= current - ts <= preflight_ttl_seconds()
+
+def _agent_request_fresh(record, agent):
+    from herdr.deep_preflight import preflight_identity
+    from herdr.agent_binary import AGENT_BINARIES, resolve_binary
+    identity = (record.get("preflight_identities") or {}).get(agent) or {}
+    checked = (record.get("preflight_agent_checked_at") or {}).get(agent, 0)
+    if not identity.get("verifiable") or not 0 <= time.time() - checked <= preflight_ttl_seconds():
+        return False
+    root = identity.get("project_root") or record.get("project_root")
+    if not root:
+        return False
+    current = preflight_identity(agent, resolve_binary(AGENT_BINARIES.get(agent, agent)), root,
+                                 identity.get("launch_mode", "noninteractive"))
+    return current.get("verifiable") is True and current.get("fingerprint") == identity.get("fingerprint")
+
 
 def _load(path, default):
     try:
@@ -362,7 +376,21 @@ def _record_router_opt_out(
             f"agent reuse ({type(exc).__name__}: {exc})"
         ) from exc
 
-def _choose_agent_impl(
+def _choose_agent_impl(workflow_id, stage, task_type, requested="auto", reservation_key=None,
+                       run_id=None, decided_at=None, dispatch_role="worker", _refresh_budget=1):
+    ROUTER_LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(ROUTER_LOCK_FILE, "a+", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            return _choose_agent_locked(workflow_id, stage, task_type, requested=requested,
+                                        reservation_key=reservation_key, run_id=run_id,
+                                        decided_at=decided_at, dispatch_role=dispatch_role,
+                                        lock=lock, _refresh_budget=_refresh_budget)
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+def _choose_agent_locked(
     workflow_id,
     stage,
     task_type,
@@ -370,6 +398,9 @@ def _choose_agent_impl(
     reservation_key=None,
     run_id=None,
     decided_at=None,
+    dispatch_role="worker",
+    lock=None,
+    _refresh_budget=1,
 ):
     if workflow_id:
         record = workflow_record(workflow_id)
@@ -486,28 +517,6 @@ def _choose_agent_impl(
             raise RuntimeError(
                 f"Agent '{selected}' failed Workflow Deep Preflight: {status}"
             )
-        if selected in stage_used_agents:
-            _opt_out, _opt_reason = _isolation_opt_out(node_policy)
-            _record_router_opt_out(
-                workflow_id,
-                stage,
-                selected,
-                _opt_reason,
-                stage_used_agents,
-                task_id=reservation_key or "",
-                run_id=run_id or "",
-            )
-        return selected, {
-            "workflow_id": workflow_id or "",
-            "stage": stage,
-            "task_type": task_type,
-            "candidates": [selected],
-            "active_loads": {},
-            "reserved_loads": {},
-            "run_id": run_id or "",
-            "task_id": reservation_key or "",
-        }
-
     # Canary config probe (one small file read; missing/invalid means
     # disabled). Read outside the lock; only an enabled config makes the
     # locked section do any canary work. Any unexpected failure here is
@@ -520,181 +529,212 @@ def _choose_agent_impl(
         except Exception:  # noqa: BLE001 -- canary fails open
             canary_cfg = None
 
-    ROUTER_LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    reservations = _load(
+        RESERVATIONS_FILE,
+        {"reservations": {}},
+    )
+    reservations = _clean_reservations(reservations)
 
-    with open(ROUTER_LOCK_FILE, "a+", encoding="utf-8") as lock:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+    active_loads = _active_agent_loads(project_id)
+    reserved_loads = {}
 
-        reservations = _load(
-            RESERVATIONS_FILE,
-            {"reservations": {}},
-        )
-        reservations = _clean_reservations(reservations)
+    for item in reservations.get("reservations", {}).values():
+        if item.get("project_id") != project_id:
+            continue
+        agent = item.get("agent")
+        if agent:
+            reserved_loads[agent] = reserved_loads.get(agent, 0) + 1
 
-        active_loads = _active_agent_loads(project_id)
-        reserved_loads = {}
+    # Read persisted role ownership inside the same cross-process lock as reservation.
+    role_used = set()
+    if dispatch_role:
+        for item in [*_get_store().list_tasks(), *reservations.get("reservations", {}).values()]:
+            if (item.get("workflow_id") == workflow_id
+                    and (item.get("node") or item.get("stage")) == stage
+                    and item.get("status") != "superseded"
+                    and item.get("task_id") != reservation_key
+                    and (item.get("dispatch_role") or "worker") != dispatch_role
+                    and item.get("agent")):
+                role_used.add(item["agent"])
+    stage_used_agents.update(role_used)
 
-        for item in reservations.get("reservations", {}).values():
-            if item.get("project_id") != project_id:
-                continue
-            agent = item.get("agent")
-            if agent:
-                reserved_loads[agent] = reserved_loads.get(agent, 0) + 1
+    # 当快照新鲜时，排除所有已知不健康状态 (unhealthy_agents)；
+    # 过期时瞬态故障可进入重新验证候选，但不得直接获得派发资格。
+    excluded_unhealthy = (
+        unhealthy_agents if snapshot_fresh else hard_unhealthy
+    )
 
-        # 当快照新鲜时，排除所有已知不健康状态 (unhealthy_agents)；
-        # 当快照过期时，仅永久硬过滤致命状态 (hard_unhealthy)，
-        # 允许尝试 TIMEOUT / UNKNOWN 等非致命或瞬态状态。
-        excluded_unhealthy = (
-            unhealthy_agents if snapshot_fresh else hard_unhealthy
-        )
-
-        candidates = [
-            agent
-            for agent in _candidate_order(pool, stage, task_type, node_policy)
-            if (
-                agent in allowed
-                and agent not in disabled
-                and agent not in excluded_unhealthy
-                and (
-                    not snapshot_fresh
-                    or not healthy
-                    or agent in healthy
-                )
+    candidates = [
+        agent
+        for agent in ([selected] if selected else _candidate_order(pool, stage, task_type, node_policy))
+        if (
+            agent in allowed
+            and agent not in disabled
+            and agent not in excluded_unhealthy
+            and (
+                not snapshot_fresh
+                or not healthy
+                or agent in healthy
             )
-        ]
+        )
+    ]
 
-        if stage_used_agents:
-            _opt_out, _opt_reason = _isolation_opt_out(node_policy)
-            if _opt_out:
-                if not _opt_reason:
-                    fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
-                    raise RuntimeError(
-                        f"Isolation opt-out for stage '{stage}' requires "
-                        "a non-empty reuse_reason (R9 fail-closed)"
-                    )
-                # Defer the audit until ranking identifies the reused agent.
-            else:
-                filtered = [a for a in candidates if a not in stage_used_agents]
-                if not filtered:
-                    fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
-                    raise RuntimeError(
-                        f"No available Agent for stage '{stage}': all candidates "
-                        f"{candidates} were used in stage(s) "
-                        f"{', '.join(exclude_stages)} "
-                        f"(excluded: {sorted(stage_used_agents)}). "
-                        "Isolation is fail-closed; provide explicit opt-out "
-                        "(agent_policy.allow_reuse_implementation_agents=true + "
-                        "reuse_reason) to bypass."
-                    )
-                candidates = filtered
+    if stage_used_agents:
+        _opt_out, _opt_reason = _isolation_opt_out(node_policy)
+        if _opt_out:
+            if not _opt_reason:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+                raise RuntimeError(
+                    f"Isolation opt-out for stage '{stage}' requires "
+                    "a non-empty reuse_reason (R9 fail-closed)"
+                )
+            # Defer the audit until ranking identifies the reused agent.
+        else:
+            filtered = [a for a in candidates if a not in stage_used_agents]
+            if not filtered:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+                raise RuntimeError(
+                    f"No available Agent for stage '{stage}': all candidates "
+                    f"{candidates} were used in stage(s) "
+                    f"{', '.join(exclude_stages)} "
+                    f"(excluded: {sorted(stage_used_agents)}). "
+                    "Isolation is fail-closed; provide explicit opt-out "
+                    "(agent_policy.allow_reuse_implementation_agents=true + "
+                    "reuse_reason) to bypass."
+                )
+            candidates = filtered
 
-        if not candidates:
+    # A stale status never authorizes execution. Bound refresh to compatible candidates.
+    if not snapshot_fresh and candidates:
+        from herdr.deep_preflight import refresh_workflow_preflight
+        pending = [agent for agent in candidates if not preflight_snapshot_fresh({
+            "preflight_checked_at": (record.get("preflight_agent_checked_at") or {}).get(agent, 0),
+            "preflight_identity": (record.get("preflight_identities") or {}).get(agent, {}),
+        })]
+        if pending and _refresh_budget:
+            # Provider transport cannot hold the global reservation lock.
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
-            raise RuntimeError(
-                f"No enabled Agent available for project {project_id}"
-            )
+            refresh_workflow_preflight(workflow_id, pending, store=_get_store())
+            # Rebuild every policy, workflow fact and role exclusion under a new short lock.
+            return _choose_agent_impl(workflow_id, stage, task_type, requested=requested,
+                                      reservation_key=reservation_key, run_id=run_id,
+                                      decided_at=decided_at, dispatch_role=dispatch_role,
+                                      _refresh_budget=_refresh_budget - 1)
+        verified = set(record.get("healthy_agents", []))
+        candidates = [agent for agent in candidates
+                      if agent in verified and _agent_request_fresh(record, agent)]
+        if not candidates:
+            raise RuntimeError("Workflow Deep Preflight: no request-verified compatible Agent")
 
-        # Canary gate (Adaptive Router v2): planning happens inside the
-        # lock because the diversion target must come from this exact
-        # validated candidate list and the reservation must record the
-        # final agent in the same critical section. Reads are bounded;
-        # the gate is closed entirely unless the operator enabled it.
-        canary_plan = None
-        canary_plan_ctx = None
-        canary_error = None
-        if canary_cfg is not None:
-            try:
-                canary_plan = _canary.plan_canary(
-                    config=canary_cfg,
-                    candidates=candidates,
-                    node=stage,
-                    task_type=task_type,
-                    task_id=reservation_key or "",
-                    run_id=run_id or "",
-                    db_path=getattr(_get_store(), "db_path", None),
-                    decided_at=(
-                        float(decided_at)
-                        if decided_at is not None else time.time()
-                    ),
-                    active_loads=active_loads,
-                    reserved_loads=reserved_loads,
-                    exclude_run_id=run_id or None,
-                )
-            except Exception as exc:  # noqa: BLE001 -- canary fails open
-                canary_error = f"{type(exc).__name__}: {exc}"
-            if canary_plan is not None:
-                canary_plan_ctx = {
-                    "workflow_id": workflow_id or "",
-                    "stage": stage,
-                    "task_type": task_type,
-                    "run_id": run_id or "",
-                    "task_id": reservation_key or "",
-                    "recommended": canary_plan.recommended,
-                    "rankings": [dict(row) for row in canary_plan.rankings],
-                    "gate": dict(canary_plan.gate),
-                }
-
-        ranked = sorted(
-            enumerate(candidates),
-            key=lambda item: (
-                active_loads.get(item[1], 0)
-                + reserved_loads.get(item[1], 0),
-                item[0],
-            ),
+    if not candidates:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        raise RuntimeError(
+            f"No enabled Agent available for project {project_id}"
         )
 
-        legacy_pick = ranked[0][1]
-        selected = legacy_pick
-        canary_persisted = False
-        if canary_plan is not None and canary_plan.hash_divert \
-                and canary_plan.recommended != legacy_pick:
-            # No persisted canary decision, no canary execution: the
-            # diversion fact must be durably recorded inside this
-            # critical section BEFORE the diverted agent is committed
-            # and reserved. A failed write means the legacy pick runs.
-            if _persist_canary_diversion_in_lock(
-                workflow_id,
-                stage,
-                task_type,
-                reservation_key or "",
-                run_id or "",
-                legacy_pick,
-                decided_at,
-                canary_plan,
-            ):
-                selected = canary_plan.recommended
-                canary_persisted = True
-            else:
-                canary_error = (
-                    "canary decision persistence failed; "
-                    "diverted back to legacy"
-                )
-
-        if selected in stage_used_agents:
-            _opt_out, _opt_reason = _isolation_opt_out(node_policy)
-            if _opt_out and _opt_reason:
-                _record_router_opt_out(
-                    workflow_id,
-                    stage,
-                    selected,
-                    _opt_reason,
-                    stage_used_agents,
-                    task_id=reservation_key or "",
-                    run_id=run_id or "",
-                )
-
-        if reservation_key:
-            reservations.setdefault("reservations", {})[reservation_key] = {
-                "project_id": project_id,
-                "workflow_id": workflow_id,
+    # Canary gate (Adaptive Router v2): planning happens inside the
+    # lock because the diversion target must come from this exact
+    # validated candidate list and the reservation must record the
+    # final agent in the same critical section. Reads are bounded;
+    # the gate is closed entirely unless the operator enabled it.
+    canary_plan = None
+    canary_plan_ctx = None
+    canary_error = None
+    if canary_cfg is not None:
+        try:
+            canary_plan = _canary.plan_canary(
+                config=canary_cfg,
+                candidates=candidates,
+                node=stage,
+                task_type=task_type,
+                task_id=reservation_key or "",
+                run_id=run_id or "",
+                db_path=getattr(_get_store(), "db_path", None),
+                decided_at=(
+                    float(decided_at)
+                    if decided_at is not None else time.time()
+                ),
+                active_loads=active_loads,
+                reserved_loads=reserved_loads,
+                exclude_run_id=run_id or None,
+            )
+        except Exception as exc:  # noqa: BLE001 -- canary fails open
+            canary_error = f"{type(exc).__name__}: {exc}"
+        if canary_plan is not None:
+            canary_plan_ctx = {
+                "workflow_id": workflow_id or "",
                 "stage": stage,
                 "task_type": task_type,
-                "agent": selected,
-                "created_at": time.time(),
+                "run_id": run_id or "",
+                "task_id": reservation_key or "",
+                "recommended": canary_plan.recommended,
+                "rankings": [dict(row) for row in canary_plan.rankings],
+                "gate": dict(canary_plan.gate),
             }
-            _save(RESERVATIONS_FILE, reservations)
 
-        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+    ranked = sorted(
+        enumerate(candidates),
+        key=lambda item: (
+            active_loads.get(item[1], 0)
+            + reserved_loads.get(item[1], 0),
+            item[0],
+        ),
+    )
+
+    legacy_pick = ranked[0][1]
+    selected = legacy_pick
+    canary_persisted = False
+    if canary_plan is not None and canary_plan.hash_divert \
+            and canary_plan.recommended != legacy_pick:
+        # No persisted canary decision, no canary execution: the
+        # diversion fact must be durably recorded inside this
+        # critical section BEFORE the diverted agent is committed
+        # and reserved. A failed write means the legacy pick runs.
+        if _persist_canary_diversion_in_lock(
+            workflow_id,
+            stage,
+            task_type,
+            reservation_key or "",
+            run_id or "",
+            legacy_pick,
+            decided_at,
+            canary_plan,
+        ):
+            selected = canary_plan.recommended
+            canary_persisted = True
+        else:
+            canary_error = (
+                "canary decision persistence failed; "
+                "diverted back to legacy"
+            )
+
+    if selected in stage_used_agents:
+        _opt_out, _opt_reason = _isolation_opt_out(node_policy)
+        if _opt_out and _opt_reason:
+            _record_router_opt_out(
+                workflow_id,
+                stage,
+                selected,
+                _opt_reason,
+                stage_used_agents,
+                task_id=reservation_key or "",
+                run_id=run_id or "",
+            )
+
+    if reservation_key:
+        reservations.setdefault("reservations", {})[reservation_key] = {
+            "project_id": project_id,
+            "workflow_id": workflow_id,
+            "stage": stage,
+            "task_type": task_type,
+            "agent": selected,
+            "created_at": time.time(),
+            "dispatch_role": dispatch_role,
+            "task_id": reservation_key,
+        }
+        _save(RESERVATIONS_FILE, reservations)
+
+    fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
     result_ctx = {
         "workflow_id": workflow_id or "",
@@ -939,6 +979,7 @@ def choose_agent(
     requested="auto",
     reservation_key=None,
     run_id=None,
+    dispatch_role="worker",
 ):
     """Select the production agent.
 
@@ -957,6 +998,7 @@ def choose_agent(
         reservation_key=reservation_key,
         run_id=run_id,
         decided_at=decided_at,
+        dispatch_role=dispatch_role,
     )
     canary = shadow_ctx.get("canary_plan")
     if canary is not None:

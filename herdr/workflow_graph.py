@@ -95,7 +95,7 @@ def _normalize_definition(workflow: Optional[Dict[str, Any]]) -> Dict[str, Any]:
                     }
                 )
         if clean:
-            return {"nodes": clean, "stages": [], "context": workflow.get("context") if isinstance(workflow.get("context"), dict) else None}
+            return {"nodes": clean, "stages": [], "configuration_error":"workflow_config_invalid", "context": workflow.get("context") if isinstance(workflow.get("context"), dict) else None}
         stages = workflow.get("stages") if isinstance(workflow.get("stages"), list) else []
         if stages:
             clean_nodes = []
@@ -136,9 +136,13 @@ def workflow_graph_projection(
     workflow: Optional[Dict[str, Any]],
     tasks: Optional[List[Dict[str, Any]]],
     blockers: Optional[List[Dict[str, Any]]] = None,
+    *, all_tasks=None,
 ) -> Dict[str, Any]:
     """Project workflow definition + tasks into nodes/edges for canvas rendering."""
+    from .scheduler import required_task_issues, node_is_complete
     norm = _normalize_definition(workflow)
+    workflow_id = (workflow or {}).get("workflow_id")
+    owned = [t for t in (tasks or []) if workflow_id is None or t.get("workflow_id") == workflow_id]
     nodes_def = norm.get("nodes") or []
     node_ids = {str(n.get("id")) for n in nodes_def if n.get("id")}
 
@@ -148,7 +152,7 @@ def workflow_graph_projection(
 
     # Group live tasks by node; unknown-node tasks are ignored (never invent nodes).
     by_node: Dict[str, List[Dict[str, Any]]] = {nid: [] for nid in node_ids}
-    for t in _live_tasks(tasks or []):
+    for t in _live_tasks(owned):
         key = _node_key(t)
         if key in by_node:
             # keep original record for counts but ensure live filtering already done
@@ -196,6 +200,18 @@ def workflow_graph_projection(
             active_count = max(0, active)
             has_attention = status in {"blocked", "failed", "rework"} or any(tid in blocker_task_ids for tid in task_ids)
 
+        lineage = [t for t in owned if _node_key(t) == nid]
+        issues = required_task_issues(lineage, n.get("required_task_ids"),
+            all_tasks=all_tasks if all_tasks is not None else tasks or [],
+            workflow_id=workflow_id, node_id=nid)
+        if norm.get("configuration_error") or (workflow or {}).get("configuration_error"):
+            issues = [{"task_id":None,"reason":"workflow_config_invalid"}] + issues
+        if issues or ("required_task_ids" in n and status == "completed" and not node_is_complete(lineage,n["required_task_ids"])):
+            if not issues:
+                issues = [{"task_id":None,"reason":"required_task_incomplete"}]
+            status = "blocked"
+            has_attention = True
+
         nodes.append(
             {
                 "id": nid,
@@ -213,6 +229,7 @@ def workflow_graph_projection(
                 "agents": agents,
                 "task_ids": task_ids,
                 "has_attention": bool(has_attention),
+                "completion_issues": issues,
             }
         )
 
@@ -227,7 +244,14 @@ def workflow_graph_projection(
     for n in nodes:
         n["downstream"] = downstream.get(n["id"], [])
 
-    return {"nodes": nodes, "edges": edges, "context": _context_ids(norm)}
+    current = [n["id"] for n in nodes if n["status"] in {"working","rework"}]
+    completed_nodes = {n["id"] for n in nodes if n["status"] == "completed"}
+    ready = [n["id"] for n in nodes if n["status"] == "waiting" and all(d in completed_nodes for d in n["depends_on"])]
+    frontier = current or ready
+    return {"nodes": nodes, "edges": edges, "context": _context_ids(norm),
+            "current_nodes":current,"ready_nodes":ready,
+            "current_stage":frontier[0] if len(frontier)==1 else "",
+            "current_stage_source":"derived_nodes"}
 
 
 def pick_default_node(projection: Dict[str, Any]) -> Optional[str]:

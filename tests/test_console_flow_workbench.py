@@ -212,6 +212,11 @@ class TestFlowWorkbenchBackend(unittest.TestCase):
             Path(wf_path).unlink(missing_ok=True)
         self.assertIn("graph", detail)
         self.assertIn("context", detail)
+        self.assertEqual(detail["workflow"]["ready_nodes"], ["implementation"])
+        self.assertEqual(detail["workflow"]["current_nodes"], [])
+        self.assertEqual(detail["workflow"]["derived_current_stage"], "implementation")
+        self.assertEqual(detail["workflow"]["current_stage_source"], "derived_nodes")
+        self.assertNotIn("current_stage", detail["workflow"])
         nodes = {n["id"]: n for n in detail["graph"]["nodes"]}
         self.assertIn("plan", nodes)
         self.assertIn("implementation", nodes)
