@@ -72,8 +72,8 @@ class TestSanitizeCloneSandbox(unittest.TestCase):
         self.assertTrue((self.repo / "junk_dir" / "nested.txt").exists())
         self.assertEqual((self.repo / "tracked.txt").read_text(), "dirty uncommitted edit\n")
 
-        # Run sanitize_clone_sandbox
-        worker.sanitize_clone_sandbox(self.repo)
+        # The caller supplies this launch's ownership, as Worker.main does.
+        worker.sanitize_clone_sandbox(self.repo, launch_identity=identity)
 
         # Assert:
         # 1. Tracked file is reset to clean HEAD state

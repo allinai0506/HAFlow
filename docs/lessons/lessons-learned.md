@@ -5804,3 +5804,27 @@ scripts/install-herdr-console.sh 的 plist_paths、SNAPSHOT_SERVICES、KICKSTART
 - 专项回归测试：`pytest -v tests/test_worker_sanitize_sandbox.py tests/test_herdr_worker.py tests/test_worker_baseline_anchor.py`
 - 语法与静态校验：`/opt/homebrew/opt/python@3.13/bin/python3.13 -m compileall -q herdr services bin tests` 与 `git diff --check`
 - S6 代码审查报告：`.omc/review-e4c9f87a-2df8-4f84-96dd-5ab219879f6f.md` (MERGE_READY)
+
+---
+
+## 124. 启动身份与替换义务必须穿过真实生产接缝（2026-10-02）
+
+### 问题背景
+
+wf-project-1002-01 的 plan Worker 在创建 Pane 后报 FileNotFoundError：早期 .herdr-launch-identity.json 被真实 git clean -fd 删除，随后身份更新失败。临时 Git + Worker.main 新建分支/onto 回归均失败；旧测试 mock 了 Worker 返回值，没有执行这个接缝。同一工作流中，完成标记冒号后空格漏识别，文档本地分支误作为远端 onto，作废任务缺替代者却允许节点放行。
+
+后续 test 派发暴露另一处接缝：integrated 只发布实现 task ref，源码 HEAD 仍旧。Controller 因 HEAD 不等冻结 SHA 省略 pin；CLI 又仅在 onto 存在时向 Worker 转交 pin。直接借用实现任务分支会被合法所有权保护拒绝。
+
+### 经验教训
+
+内部文件分类只影响产物核算，不能保护文件免受 Git 清理。新状态字段只加在 CLI 会漏掉 Kernel/Store/CAS。测试直接 save_task 构造 superseded 会跳过原子转换新增的义务字段，也可能掩盖合法候选复用被错误阻断。配置校验后重新读取再冻结会引入检查与使用不同输入的窗口。
+
+### 操作规范
+
+仅保留本次启动身份，清理失败在 Pane 前停止，Pane 后失败保留恢复依据。替换义务在既有 SQLite 转换事务统一生成；缺替代者拒绝，显式放弃与配置必需项分开，当前候选 verifier reuse 继续按真实证据满足。Run 冻结同一次已校验读取，不继承已知外来任务绑定。marker 接受格式必须与 prompt 净化同形，软换行后仍检验完整 ID。
+
+无 onto 的验证派发也要完整传递当前冻结 SHA，并让 Worker 从已证实存在的不可变 commit 创建自己的分支，保留实现分支所有权。用真实 CLI→Worker→Git→SQLite→读取链验证 candidate、baseline、HEAD 一致；Worker 返回值替身不能证明基线。模型 headers timeout 后若同一会话已经成功完成，不中断、不重复投递，不把自然恢复说成已部署的 Provider 修复。
+
+### 验证命令 / 关联证据
+
+`pytest -q tests/test_workflow_stall_regressions.py tests/test_reverification_controller.py tests/test_state_transition_gateway.py`；真实 Git、临时 SQLite、CLI→Kernel→Store→Controller 读取与外部 UI 传输替换分别验证。红绿证据 .omc/stall-red-*.log、stall-green-*.log；最终全量和生产边界见 docs/walkthroughs/20261002-wf1002-stall-fixes.md。不把本地绿色称为生产恢复。

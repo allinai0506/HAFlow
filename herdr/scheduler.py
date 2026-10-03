@@ -135,12 +135,16 @@ def node_is_complete(tasks_for_node: Sequence[Dict[str, Any]], required_task_ids
     active = [t for t in tasks if t.get("status") != "superseded" and not t.get("superseded_by")]
     if not active:
         return False
-    if required_task_ids is not None:
-        if not isinstance(required_task_ids, list) or any(
-                not isinstance(tid, str) or not tid.strip() for tid in required_task_ids):
-            return False
+    if required_task_ids is not None and (not isinstance(required_task_ids, list) or any(
+            not isinstance(tid, str) or not tid.strip() for tid in required_task_ids)):
+        return False
+    obligations = list(required_task_ids or []) + [
+        t.get("task_id") for t in tasks if t.get("replacement_pending")]
+    if obligations:
         by_id = {t.get("task_id"): t for t in tasks}
-        for required_id in required_task_ids:
+        for required_id in obligations:
+            if not required_id:
+                return False
             seen = set()
             current = required_id
             while current not in seen:
@@ -150,7 +154,17 @@ def node_is_complete(tasks_for_node: Sequence[Dict[str, Any]], required_task_ids
                     return False
                 if task.get("status") != "superseded" and not task.get("superseded_by"):
                     break
+                if (task.get("replacement_pending") is False
+                        and not task.get("superseded_by")
+                        and required_id not in (required_task_ids or [])):
+                    # Explicitly abandoning the lineage head resolves automatic
+                    # replacement work, never a configured required output.
+                    break
                 current = task.get("superseded_by")
+                replacement = by_id.get(current)
+                if replacement and any(task.get(key) and replacement.get(key)
+                        and task[key] != replacement[key] for key in ("workflow_id", "node")):
+                    return False
             else:
                 return False
     return all(

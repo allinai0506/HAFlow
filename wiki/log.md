@@ -1907,3 +1907,15 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 2026-10-02：工作流可靠性 PR 阶段完成同快照 CLI/loop 命令绑定及新鲜全量验证（3137 passed、2 skipped、157 subtests passed）；用户授权创建 PR 与本地重启，明确保留 Console 热补丁界面，只更新 Controller/Sentinel。详见 docs/walkthroughs/20261002-workflow-reliability.md；服务实际切换另行记录，不等于生产业务验收。
 
 - 2026-10-02：补齐 installer 的 macOS Bash 3.2 nounset 空数组兼容；真实 /bin/bash + 临时 HOME 覆盖四种服务布局和重启/不重启，保留参数引用与发布校验。根因及回归入口见 docs/lessons/lessons-learned.md §121；本次为代码修复，未再次更新运行服务。
+
+- 2026-10-02：修复 wf1002 已复现的 Worker 身份清理、旧标记空白/软换行边界、非 Git 文档 onto、替换义务及 Git Run 定义隔离。更新 [[task-lifecycle]] 与 CLI 参考，工程教训 §122。新作废保留义务，显式 abandon 不复活，合法当前候选复用与未知证据分开。本地验证记录 docs/walkthroughs/20261002-wf1002-stall-fixes.md；不声称服务已加载或生产工作流已恢复。
+
+- 2026-10-02：wf1002 修复集成最新主干 c0cf2a0，发布候选81dc9a3；新全量3197 passed、2 skipped、157 subtests passed。上一条本轮教训交叉引用在合并主干后应为 §124（§122/123 为上游预检/Worker教训），保留原日志，追加更正。三服务受控发布与存量恢复见 docs/walkthroughs/20261002-wf1002-stall-release.md；运行结果另行回填。
+
+- 2026-10-02：wf1002 用户确认后的本地三服务实际切换81dc9a3成功，Notifier原PID/配置不变。Run私有定义、需求附录/采纳、旧r2记账义务显式放弃及旧实现escalation清理已应用，Workflow恢复running。首次bootstrap错误回滚与主控字节码缓存校验失误均保留证据；协调器当前用户handoff模型超时、正式业务test/review仍待完成。见 docs/walkthroughs/20261002-wf1002-stall-release.md。
+
+- 2026-10-02：上述协调器超时已同Provider/会话自然恢复并完成handoff；真实测试由协调器使用81dc及integration别名恢复，candidate/baseline/HEAD均8be，不归功于尚未发布的修复。修复无onto冻结候选传递三接缝，Worker从不可变commit创建自己的分支。旧HEAD相等断言经独立复核更新为HEAD前后实际基线验证，无pin及无效候选仍拒绝；本轮完整验证/部署结果续记 docs/walkthroughs/20261002-wf1002-stall-release.md。
+
+- 2026-10-02：无onto候选pin修复全量3207 passed、2 skipped、157 subtests，独立审查通过后实际发布d93a3c8；三服务运行指纹与制品一致。规范核对旧review intent资源absent后解除仅该Run旧通知闩，新Controller自动派发review-auto到w13:p26，独立分支的candidate/baseline/HEAD均8be，真实调用链验收通过。原test已completed，业务review仍working，未宣称Workflow/业务交付全部PASS。证据见 docs/walkthroughs/20261002-wf1002-stall-release.md。
+
+- 2026-10-02：续记最新状态，真实test/review报告业务blocked并进入superseded/pending，正常返工任务fix-compliance-display-mask-export-probes已working；前条状态是23:09快照，HAFlow两项修复未代替业务门禁。运行期间字节码反复生成后，以不变源码/执行位将d93制品设为只读；真实CLI去环境保护复验缓存0、attestation正确，无再重启。详见同发布记录。

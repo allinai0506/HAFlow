@@ -104,17 +104,22 @@ def create_context_task_workspace(task_id):
     return workspace
 
 
-def sanitize_clone_sandbox(clone):
+def sanitize_clone_sandbox(clone, launch_identity=None):
     """Purge uncommitted working tree edits and untracked files copied into the clone sandbox.
 
     Since the clone sandbox is an isolated CoW copy, resetting it does not touch the source repo,
     ensuring that subsequent branch switches never collide with developer WIP in the source repo.
     """
-    subprocess.run(["git", "-C", str(clone), "reset", "--hard", "HEAD"], capture_output=True)
-    subprocess.run(
-        ["git", "-C", str(clone), "clean", "-fd", "-e", ".herdr-launch-identity.json"],
-        capture_output=True,
-    )
+    subprocess.run(["git", "-C", str(clone), "reset", "--hard", "HEAD"],
+                   capture_output=True, check=True)
+    # Only this launch's tag survives; copied source tags are ordinary WIP.
+    exclusions = ["-e", "/.herdr-launch-identity.json"] if launch_identity else []
+    subprocess.run(["git", "-C", str(clone), "clean", "-fd",
+                    *exclusions], capture_output=True, check=True)
+    if launch_identity:
+        from herdr.task_resources import write_worker_launch_identity
+        # A tracked/foreign tag restored by reset must fail before Pane creation.
+        write_worker_launch_identity(clone, launch_identity)
 
 
 def create_clone(source, task_id):
@@ -203,47 +208,58 @@ def create_clone(source, task_id):
     return clone
 
 
-def create_task_branch(clone, task_id, agent, task_type, base_branch):
+def create_task_branch(clone, task_id, agent, task_type, base_branch, *, launch_identity=None, candidate_sha=None):
     slug = task_id.lower().replace("_", "-")
     branch = f"agent/{agent}/{task_type}-{slug}"
     ensure_branch_available(branch, _registered_tasks(), task_id=task_id)
 
-    fetch = subprocess.run(
-        [
-            "git", "-C", str(clone),
-            "fetch", "origin", base_branch
-        ],
-        text=True,
-        capture_output=True
-    )
-
-    remote_exists = subprocess.run(
-        [
-            "git", "-C", str(clone),
-            "show-ref", "--verify", "--quiet",
-            f"refs/remotes/origin/{base_branch}"
-        ]
-    ).returncode == 0
-
-    local_exists = subprocess.run(
-        [
-            "git", "-C", str(clone),
-            "show-ref", "--verify", "--quiet",
-            f"refs/heads/{base_branch}"
-        ]
-    ).returncode == 0
-
-    if fetch.returncode == 0 and remote_exists:
-        base_ref = f"origin/{base_branch}"
-    elif local_exists:
-        base_ref = base_branch
+    if candidate_sha:
+        if not re.fullmatch(r"[0-9a-f]{40}", candidate_sha):
+            raise RuntimeError("Candidate pin must be a full immutable commit SHA")
+        resolved = subprocess.run(
+            ["git", "-C", str(clone), "rev-parse", "--verify", f"{candidate_sha}^{{commit}}"],
+            text=True, capture_output=True, timeout=10,
+        )
+        if resolved.returncode != 0 or resolved.stdout.strip() != candidate_sha:
+            raise RuntimeError("Candidate pin is not an available commit in this clone")
+        base_ref = candidate_sha
     else:
-        raise RuntimeError(
-            fetch.stderr.strip()
-            or f"Base branch not found: {base_branch}"
+        fetch = subprocess.run(
+            [
+                "git", "-C", str(clone),
+                "fetch", "origin", base_branch
+            ],
+            text=True,
+            capture_output=True
         )
 
-    sanitize_clone_sandbox(clone)
+        remote_exists = subprocess.run(
+            [
+                "git", "-C", str(clone),
+                "show-ref", "--verify", "--quiet",
+                f"refs/remotes/origin/{base_branch}"
+            ]
+        ).returncode == 0
+
+        local_exists = subprocess.run(
+            [
+                "git", "-C", str(clone),
+                "show-ref", "--verify", "--quiet",
+                f"refs/heads/{base_branch}"
+            ]
+        ).returncode == 0
+
+        if fetch.returncode == 0 and remote_exists:
+            base_ref = f"origin/{base_branch}"
+        elif local_exists:
+            base_ref = base_branch
+        else:
+            raise RuntimeError(
+                fetch.stderr.strip()
+                or f"Base branch not found: {base_branch}"
+            )
+
+    sanitize_clone_sandbox(clone, launch_identity)
 
     result = subprocess.run(
         [
@@ -263,7 +279,7 @@ def create_task_branch(clone, task_id, agent, task_type, base_branch):
     return branch
 
 
-def checkout_onto_branch(clone, onto_branch, *, candidate_sha=None):
+def checkout_onto_branch(clone, onto_branch, *, candidate_sha=None, launch_identity=None):
     """检出既有分支(fix-loop 续接:commit 直落开放中的 PR 分支)。
 
     基线指纹在调用方紧随其后执行。普通续接完成 origin 同步；显式完整
@@ -272,7 +288,7 @@ def checkout_onto_branch(clone, onto_branch, *, candidate_sha=None):
     ensure_branch_available(onto_branch, _registered_tasks())
 
     if pinned_local_onto_matches(clone, onto_branch, candidate_sha):
-        sanitize_clone_sandbox(clone)
+        sanitize_clone_sandbox(clone, launch_identity)
         result = subprocess.run(
             ["git", "-C", str(clone), "switch", onto_branch],
             text=True, capture_output=True,
@@ -308,7 +324,7 @@ def checkout_onto_branch(clone, onto_branch, *, candidate_sha=None):
             + (f"\n{detail}" if detail else "")
         )
 
-    sanitize_clone_sandbox(clone)
+    sanitize_clone_sandbox(clone, launch_identity)
 
     local_exists = subprocess.run(
         [
@@ -883,14 +899,17 @@ def main():
             if args.onto:
                 # 必须先于 build_baseline_fingerprint:
                 # PR 分支的既有提交不能被记入本任务的基线变更。
-                branch = checkout_onto_branch(clone, args.onto, candidate_sha=args.candidate_sha)
+                branch = checkout_onto_branch(clone, args.onto, candidate_sha=args.candidate_sha,
+                                             launch_identity=launch_identity)
             else:
                 branch = create_task_branch(
                     clone,
                     args.task_id,
                     args.agent,
                     args.task_type,
-                    args.base_branch
+                    args.base_branch,
+                    launch_identity=launch_identity,
+                    candidate_sha=args.candidate_sha,
                 )
 
             print(f"[BRANCH] {branch}")
@@ -1032,13 +1051,13 @@ def main():
             "pane_id": pane_id, "clone": str(clone.resolve()) if clone else None,
             "agent_started": agent_started if agent_started else (None if agent_start_attempted else False),
             "agent_start_attempted": agent_start_attempted, "disposition": "unknown",
-            "recovery_required": agent_start_attempted,
+            "recovery_required": agent_start_attempted or pane_id is not None,
             "startup_status": (readiness or {}).get("status", "UNKNOWN"),
             "failure_type": type(exc).__name__,
         }
         # Expected identity is the start receipt, never the foreign queried instance.
         print("HERDR_WORKER_FAILURE=" + json.dumps(failure, sort_keys=True), file=sys.stderr, flush=True)
-        if clone and clone.exists() and not agent_start_attempted and not is_task_active_in_registry(args.task_id):
+        if clone and clone.exists() and pane_id is None and not agent_start_attempted and not is_task_active_in_registry(args.task_id):
             print(
                 f"[WORKER ROLLBACK] Cleaning up incomplete clone: {clone}",
                 file=sys.stderr

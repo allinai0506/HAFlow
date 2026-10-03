@@ -29,12 +29,6 @@ ORCH_MARKER_PREFIX = "HERDR_ORCH_TASK:"
 # (blank/whitespace-only lines, unindented lines) keep their newline so
 # unrelated text can never be spliced into a marker.
 _SOFT_WRAP_RE = re.compile(r"\r?\n[ \t]+(?=\S)")
-# Task ids are slug-shaped.  A literal followed by more of these characters is
-# a longer, different marker and must never satisfy a shorter task id.
-_IDENT_CHARS = frozenset(
-    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_."
-)
-
 MIN_COMPLETION_SECONDS = 60.0
 # Sentinel polls once every three seconds.  A second marker sighting is only
 # a confirmation when it comes from a later poll, not from a repeated read in
@@ -109,17 +103,13 @@ def marker_literal(task_id: str, prefix: str = DONE_MARKER_PREFIX) -> str:
     return f"{prefix}{task_id}"
 
 
-def _contains_marker_token(text: str, literal: str) -> bool:
-    """Substring search that refuses to stop inside a longer identifier."""
-    start = 0
-    while True:
-        idx = text.find(literal, start)
-        if idx == -1:
-            return False
-        end = idx + len(literal)
-        if text[end:end + 1] not in _IDENT_CHARS:
-            return True
-        start = idx + 1
+def _marker_pattern(task_id: str, prefix: str, *, wrapped=False):
+    """Same task boundary and horizontal separator for detection and hygiene."""
+    join = r"(?:\r?\n[ \t]+(?=\S))?" if wrapped else ""
+    token = join.join(re.escape(char) for char in prefix)
+    token += r"[ \t]*" + join
+    token += join.join(re.escape(char) for char in task_id)
+    return re.compile(token + f"(?!{join}[A-Za-z0-9_.-])")
 
 
 def marker_present(
@@ -139,13 +129,9 @@ def marker_present(
     """
     if not screen or not task_id:
         return False
-    literal = marker_literal(task_id, prefix)
-    if _contains_marker_token(screen, literal):
-        return True
+    pattern = _marker_pattern(task_id, prefix)
     unwrapped = _SOFT_WRAP_RE.sub("", screen)
-    if unwrapped == screen:
-        return False
-    return _contains_marker_token(unwrapped, literal)
+    return bool(pattern.search(unwrapped))
 
 
 def sanitize_completion_marker(text: str, task_id: str) -> tuple[str, int]:
@@ -158,9 +144,9 @@ def sanitize_completion_marker(text: str, task_id: str) -> tuple[str, int]:
         return text, 0
     count = 0
     for prefix in (DONE_MARKER_PREFIX, BLOCKER_MARKER_PREFIX):
-        literal = marker_literal(task_id, prefix)
-        count += text.count(literal)
-        text = text.replace(literal, f"{prefix}<TASK_ID>")
+        text, replaced = _marker_pattern(task_id, prefix, wrapped=True).subn(
+            lambda match: f"{prefix}<TASK_ID>", text)
+        count += replaced
     return text, count
 
 

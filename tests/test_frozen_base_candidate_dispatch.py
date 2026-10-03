@@ -5,6 +5,7 @@ import subprocess
 from unittest.mock import Mock
 import pytest
 from herdr import scheduler_facts
+from herdr.direct_dispatch import plan_stage_dispatch
 
 
 @pytest.fixture
@@ -149,3 +150,39 @@ def test_proven_multi_spec_multi_onto_batch_can_dispatch(scene):
     assert controller.try_direct_stage_advance(item)
     assert len(launches) == 2
     assert all(cmd[cmd.index("--candidate-sha") + 1] == sha for cmd in launches)
+
+
+@pytest.mark.parametrize("node_id", ["test", "review"])
+def test_integrated_task_ref_off_base_dispatches_frozen_sha_without_borrowing_branch(scene, monkeypatch, node_id):
+    controller, repo, db, base_sha, spec, item, launches = scene
+    def git(*args):
+        return subprocess.run(["git", "-C", str(repo), *args], check=True,
+                              capture_output=True, text=True).stdout.strip()
+    git("checkout", "-q", "candidate")
+    (repo / "f").write_text("implementation candidate")
+    git("commit", "-qam", "implementation", "--no-gpg-sign")
+    frozen = git("rev-parse", "HEAD")
+    git("checkout", "-q", "main")
+    assert git("rev-parse", "HEAD") == base_sha != frozen
+    scheduler_facts.record_candidate_frozen("wf-candidate", frozen,
+        source_node="implementation", delivery_branch="candidate", db_path=db)
+    controller.load_tasks.return_value = [{"task_id": "impl", "workflow_id": "wf-candidate",
+        "node": "implementation", "status": "integrated", "integration_mode": "git",
+        "branch": "candidate", "integrated_commit": frozen}]
+    monkeypatch.setattr(controller.direct_dispatch_planner, "plan_stage_dispatch", plan_stage_dispatch)
+    item.update(node_id=node_id, node={"id": node_id, "depends_on": ["implementation"],
+        "purpose": "Verify the frozen implementation candidate",
+        "default_task_type": "test", "default_integration_mode": "none"})
+    assert controller.try_direct_stage_advance(item)
+    assert len(launches) == 1
+    cmd = launches[0]
+    assert "--onto" not in cmd
+    assert "--candidate-sha" in cmd
+    assert cmd[cmd.index("--candidate-sha") + 1] == frozen
+
+
+@pytest.mark.parametrize("frozen", ["a" * 40, "abc123"])
+def test_frozen_off_base_candidate_must_be_a_real_full_commit(scene, frozen):
+    controller, repo, db, sha, spec, item, launches = scene
+    scheduler_facts.record_candidate_frozen("wf-candidate", frozen, db_path=db)
+    assert controller._scheduler_expected_candidate_sha("wf-candidate", str(repo), [], None) == ""
