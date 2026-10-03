@@ -375,6 +375,30 @@ if (task.get("replacement_pending") is False
   `僵尸 obligation: <task_id> 声明待替代但无替代者`），而非静默 `False`。
 - 增加一条不变量巡检：扫描全部 `tasks.json`，报告任何 `replacement_pending and not superseded_by` 的任务。
 
+**与 #144（`f8e9dc8`）的关系 —— 该 PR 未修此项，勿误判为已修**
+
+`f8e9dc8 fix: resolve workflow delivery and recovery deadlocks (FIX_BUG1002) (#144)`
+确实改动了本节相关代码（`bin/herdr-task` +291 行、`herdr/scheduler.py` +37 行），
+且**收尾时正在运行的 release 正是该版本**（`releases/f8e9dc86…`）。经逐行核对：
+
+```python
+# bin/herdr-task:6649
+def supersede_task(task_id, new_task_id=None, reason=None, allow_new_run=False, abandon=False):
+    ...
+# :6702 / :6706
+meta = {"replacement_pending": not abandon}
+if new_task_id: meta["superseded_by"] = new_task_id
+# ↑ 不传 --by 也不传 --abandon 时，replacement_pending=True 且无 superseded_by —— 僵尸形态仍可产生
+```
+
+`:7818` 的帮助文本已写明「use `--by` to link a replacement or `--abandon` to explicitly remove the obligation」，
+`:6656` 也校验了 `--abandon` 与 `--by` 互斥，`:6669` 允许只回填 `superseded_by` 而不动 `status`。
+但**未强制**「必须二选一」，`scheduler.py:15-16` 的 obligations 追链逻辑也**完全未改**。
+
+实测证据（收尾时用 `releases/f8e9dc86…` 逐节点复现）：
+`test` / `review` 两节点的实际门禁任务 `status=completed` 且在 `NODE_DONE_STATUSES` 内，
+`node_is_complete` 仍返回 `False`。**该缺陷在 #144 之后依然存在。**
+
 **本次处置**：对 `test-compliance-race-json-truth` → `test-compliance-display-mask-export-probes`、
 `wf-project-1002-01-review-auto` → `review-compliance-display-mask-export-probes`
 如实标注替代关系（两者均为 `completed`+`pass` 的真实替代任务，非伪造血缘），
