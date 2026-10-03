@@ -1393,6 +1393,12 @@ button { cursor: pointer; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.project small.project-path {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  overflow: visible;
+  text-overflow: clip;
+}
 .sidebar-spacer {
   flex: 1;
 }
@@ -3508,6 +3514,19 @@ body {
 }
 .item-icon { font-size: 14px; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; }
 .item-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+#sidebarWorkflowGroups .sidebar-item {
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr) auto;
+  align-items: start;
+}
+#sidebarWorkflowGroups .status-dot { margin-top: 4px; }
+#sidebarWorkflowGroups .item-text {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  overflow: visible;
+  text-overflow: clip;
+}
+#sidebarWorkflowGroups .item-meta { white-space: nowrap; }
 .warning-text { color: #b45309; font-weight: 600; }
 .danger-text { color: #ef4444; font-weight: 500; }
 .online-pill {
@@ -3710,6 +3729,15 @@ body {
   padding: 0 8px;
 }
 .crumb-line { font-size: 13px; color: #8b909a; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.space-name, .resource-sub, .trigger-title, .item-title, #sideFootTitle {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  overflow: visible;
+  text-overflow: clip;
+  min-width: 0;
+}
+.linear-trigger { height: auto; min-height: 32px; padding-top: 4px; padding-bottom: 4px; }
+.trigger-content { white-space: normal; min-width: 0; flex-wrap: wrap; }
 #workflowSubject.wf-subject { font-size: 14px; font-weight: 680; color: #16171b; }
 #workflowSub { display: block; margin-top: 2px; font-size: 11.5px; color: #8b909a; }
 .top .btn { height: 30px; border-radius: 8px; }
@@ -5076,7 +5104,7 @@ function renderOverview(){
         <span class="${relationClass(s)}" style="font-size:11px">${esc(relationText(s))}</span>
       </div>
       <small>${esc(s.workspace_id)} · ${s.tab_count||0} 个工作流节点 · ${s.pane_count||0} 个智能体工位</small>
-      <small>${esc(s.project_root||'未识别项目目录')}</small>
+      <small class="project-path">${esc(s.project_root||'未识别项目目录')}</small>
     </button>`).join(''):'<div class="empty">暂无项目空间</div>';
 
   document.getElementById('alerts').innerHTML=alerts.length?alerts.map(a=>`
@@ -5285,7 +5313,7 @@ function renderSidebarWorkflows(){
     return;
   }
 
-  const listSig = ws.map(w => `${w.workflow_id}:${w.status||'waiting'}:${w.progress||0}`).join('|');
+  const listSig = JSON.stringify(ws.map(w => [w.workflow_id, w.status||'waiting', w.progress||0, workflowSubject(w)||w.workflow_id]));
   if(container.dataset.sig === listSig) {
     container.querySelectorAll('.sidebar-item[data-wf-id]').forEach(el => {
       const wid = el.getAttribute('data-wf-id');
