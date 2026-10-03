@@ -84,6 +84,11 @@ def candidate_branch_for_node(
             # 交付物已在 base 上：onto 若指向本地任务分支，launch 会因
             # origin 无该分支而拒绝派发。跳过，让候选回退到 base。
             continue
+        if delivered_in_base and task.get("integration_mode") == "none" \
+                and task.get("status") in {"completed", "committed", "integrated", "cleanup_ready", "cleaned"}:
+            # Non-Git deliverables use the shared document contract, not an
+            # unpublished task branch as the next Worker's Git baseline.
+            continue
         branch = sanitize_branch_name(task.get("branch"))
         if not branch:
             continue
@@ -313,7 +318,7 @@ def lineage_redispatch_candidates(node_tasks):
         ):
             continue
         _, _, head = max(members, key=lambda item: (item[0], item[1]))
-        if not head.get("superseded_by"):
+        if not head.get("superseded_by") and head.get("replacement_pending") is not False:
             candidates.append(head)
     return candidates
 
@@ -589,6 +594,10 @@ def plan_stage_dispatch(
             "reason": "node has active tasks",
             "specs": [],
         }
+
+    if any(t.get("replacement_pending") is False and not t.get("superseded_by") for t in node_tasks):
+        return {"mode": "wait", "reason": "node tasks explicitly abandoned; confirm remaining scope",
+                "specs": []}
 
     if dispatch_kind == "dynamic":
         return {"mode": "fallback", "reason": "dynamic node requires planning", "specs": []}

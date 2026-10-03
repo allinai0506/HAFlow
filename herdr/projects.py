@@ -458,8 +458,7 @@ def freeze_run_definition(workflow_id, definition=None, *, source_file=None):
             run_dir = docs_root() / validate_workflow_id(workflow_id)
             run_dir.mkdir(parents=True, exist_ok=True)
             snapshot = run_dir / "workflow.json"
-            clean_def = _clean_workflow_definition_for_new_run(definition)
-            _save(snapshot, clean_def)
+            _save(snapshot, definition)
             return str(snapshot)
         except (ValueError, OSError) as exc:
             print(
@@ -485,13 +484,26 @@ def register_workflow(workflow_id, project, requirement="", title="", execution=
     # Single-write contract: workflow_file and metadata are merged into the
     # entry before the one save_workflow call below. No second write follows.
     resolved_workflow_file = workflow_file or project.get("workflow_file")
-
-    # Workflow Run Isolation: always snapshot workflow definition so every run
-    # gets an isolated, clean definition that doesn't mutate or inherit dynamic fields.
-    snapshot_file = _snapshot_workflow_definition(workflow_id, resolved_workflow_file)
-    if snapshot_file:
-        resolved_workflow_file = snapshot_file
-
+    store = _get_store()
+    source_path = Path(resolved_workflow_file).expanduser()
+    if source_path.exists():
+        definition = _load(source_path, None)
+        if not isinstance(definition, dict):
+            raise ValueError("Workflow definition is unreadable or not an object")
+        for node in definition.get("nodes", []):
+            required_ids = node.get("required_task_ids") or []
+            if not isinstance(required_ids, list):
+                raise ValueError("required_task_ids must be a list")
+            for task_id in required_ids:
+                task = store.get_task(task_id)
+                if task and task.get("workflow_id") != workflow_id:
+                    raise ValueError(f"required task {task_id} belongs to another workflow; "
+                                     "update the project definition before creating a new run")
+        if not workflow_file:
+            snapshot_file = freeze_run_definition(workflow_id, definition=definition)
+            if not snapshot_file:
+                raise RuntimeError("Workflow definition snapshot failed; run was not registered")
+            resolved_workflow_file = snapshot_file
     wf_entry = {
         "workflow_id": workflow_id,
         "title": title,
@@ -515,7 +527,6 @@ def register_workflow(workflow_id, project, requirement="", title="", execution=
         wf_entry["execution"] = execution
     if context:
         wf_entry["context"] = context
-    store = _get_store()
     store.save_workflow(wf_entry)
     try:
         from .state_store import sync_workflows_projection

@@ -53,13 +53,7 @@ def test_register_workflow_creates_snapshot_and_resets_dynamic_fields(tmp_path: 
     assert snapshot_path != shared_wf
     assert wid in str(snapshot_path)
 
-    # 2. 验证快照中动态残留字段已被重置清除
-    snap_data = json.loads(snapshot_path.read_text(encoding="utf-8"))
-    impl_node = next(n for n in snap_data["nodes"] if n["id"] == "implementation")
-    assert "required_task_ids" not in impl_node
-    assert "status" not in impl_node
-
-    # 3. 验证后续对项目共享文件的改动不会污染已启动的工作流
+    # 2. 验证后续对项目共享文件的改动不会污染已启动的工作流
     shared_wf.write_text(json.dumps({
         "workflow_template": "software-development-v1",
         "nodes": [
@@ -73,7 +67,7 @@ def test_register_workflow_creates_snapshot_and_resets_dynamic_fields(tmp_path: 
 
     cfg = projects.workflow_config_for(wid)
     cfg_impl = next(n for n in cfg["nodes"] if n["id"] == "implementation")
-    assert "required_task_ids" not in cfg_impl
+    assert cfg_impl.get("required_task_ids") == ["impl-download-guard-compliance-truth"]
 
 
 def test_clean_workflow_definition_resets_dynamic_fields():

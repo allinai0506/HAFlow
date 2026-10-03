@@ -395,8 +395,9 @@ Evidence:
 
 ### 5.4 Test/review delivery baseline 与 PR 交付核对
 
-- test/review 在运行时资源创建前必须解析到唯一、有效的 workflow delivery；缺失、歧义或
-  invalidated 候选一律 exit 2，并通过 StateStore 写 `test_baseline_rejected` actionable event。
+- test/review 在运行时资源创建前必须解析到唯一、有效的 workflow 交付身份；使用有效
+  delivery 或 CLI 校验接受的本 Workflow 当前显式冻结 pin。缺失、歧义或 invalidated
+  候选一律 exit 2，并通过 StateStore 写 `test_baseline_rejected` actionable event。
 - delivery 候选必须是 clone baseline 的 ancestor；无法证明时拒绝派发，不以 Agent 隔离策略
   替代 FR-6.2 baseline 门禁。
 - `herdr-task check-delivery` 查询指定 head branch 的已合并 GitHub PR，并从 repo path 解析
@@ -444,7 +445,7 @@ Evidence:
 
 Git 模式任务的 Agent 完成、提交成功和集成成功是三种事实。节点依赖完成须等到 integrated/cleanup_ready/cleaned；非 Git 任务保持既有完成集合。Controller、node-status 与 ops-center 复用 `scheduler.node_is_complete`，不得在 completed 时提前启动 verifier。
 
-可在节点配置 `required_task_ids` 声明已批准计划的必需 Task。未派发项、缺失替代项、替代环拒绝完成；只沿真实 `superseded_by` 链解析替代，不按任务名猜谱系。没有配置清单时保持兼容。该清单由节点完成读取方实施，独立调用验证汇聚接口时仍须由调用者先完成节点依赖校验。
+可在节点配置 `required_task_ids` 声明已批准计划的必需 Task。未派发项、缺失替代项、替代环拒绝完成；只沿真实 `superseded_by` 链解析替代，不按任务名猜谱系。新的 `superseded` 转换由 SQLite 原子写入 `replacement_pending=true`，即使没有必需清单，也不会因作废而删除未完成义务。无此字段的历史记录保留旧兼容。该清单由节点完成读取方实施，独立调用验证汇聚接口时仍须由调用者先完成节点依赖校验。
 
 Worktree Clone 转换须保留 source 本地 heads，而不是只把它们映射到 origin/*；`--update-head-ok` 仅在临时 no-checkout 独立元数据导入时使用，不作用于 source。源 dev/anchor 落后于远端时仍需正常同步并重跑验证；保留分支不能代替新基线验收。Candidate 选择排除 superseded/有 superseded_by 的旧任务。
 
@@ -484,7 +485,9 @@ Evidence:
 Task commit对actual native index路径的稳定外来锁冲突给HERDR_COMMIT_RESULT wait/git_index_lock及75；所有index写入均核对命令前后身份，hook/filter stderr不等于锁证明。Controller只同Task专属标记写60秒等待，不增普通失败预算；typed owner基于Run和持久状态转换，metadata不另起失败周期。EpisodeStore文件锁CAS保留并发新记录；未知/门禁与legacy升级不自动解除。未操作真实T8锁、没有真实集成，不能据此标工作流完成。
 
 
-C13b：已交付依赖省略任务分支onto时，test/review仍须带有可证明的候选pin。在delivery尚未产生时，只有当前workflow最新冻结SHA与source HEAD严格相同可传该pin；仍由TaskCLI和Worker复验，不把冻结当成业务delivery。
+C13b（2026-10-01 的实现边界）：已交付依赖省略任务分支onto时，test/review仍须带有可证明的候选pin。当时无delivery的回退要求当前workflow最新冻结SHA与source HEAD严格相同；仍由TaskCLI和Worker复验，不把冻结当成业务delivery。
+
+2026-10-02 修正该回退：integrated 可能只发布 task ref，source HEAD 仍是旧基线。Controller 对本 Workflow 当前严格40位冻结 SHA 解析真实 commit，CLI 在无 onto 时也透传 `--candidate-sha`；Worker 从该本地 commit 创建验证任务自己的分支，跳过远端基线 fetch。短 SHA、缺失对象和 blob 在创建 Pane 前拒绝；已有 onto 分支所有权保护不变，不借用实现任务分支。实际 Task 的 candidate / baseline / clone HEAD 必须一致，冻结不生成业务 PASS。回归入口 `tests/test_frozen_base_candidate_dispatch.py`、`tests/test_workflow_stall_regressions.py`，发布记录见 [[../docs/walkthroughs/20261002-wf1002-stall-release]]。
 
 
 C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后完整全量2871 passed、154 subtests passed、2 skipped（隔离HOME无LaunchAgent），0 failed，454.85s。两项本机只读plist检查另行2 passed（0.07s）。compileall、三入口CLI AST、diff-check通过；独立最终只读复审组合阻断闭合，未自行重跑全量。真实Agent/Worker启动、业务E2E及开放卡未因此验收。
@@ -528,3 +531,23 @@ Evidence:
 - `tests/test_workflow_close_claim.py`
 
 相关页面：[[preflight-and-health]]。
+
+## 启动清理、替换与 Run 定义
+
+`FACT` Git Worker 在创建克隆后写入本次启动身份；分支清理只保留调用方传入的本次启动标签，普通源目录残留标签仍清理。reset/clean 非零及被恢复成外来身份的标签在 Pane 创建前失败。Pane 已创建后的失败保留克隆及恢复意图，不删除资源身份依据。
+
+`FACT` `supersede --by` 链接替代任务；替代者必须属于同一 Workflow 和节点，已知跨节点链接在写入前拒绝。不带替代者的新作废保留自动替换义务。`supersede --abandon --reason` 明确撤销本任务义务，不能与 `--by` 同用，不能通过放弃前任改写已有链接。放弃谱系头可解除其前任自动义务，但不能解除配置里的 `required_task_ids`。无可执行任务且存在明确放弃记录时调度返回 wait，不重新 initial launch；节点全部放弃不等同满足其输出合同。合法 verifier reuse 仍以当前候选、策略和冻结 episode 的事实满足执行义务；缺失/过期证据不能满足该义务。完成核心不可用且没有合法复用证据时，待替换义务保持拒绝。
+
+`FACT` 可读取的 Git 和 context Run 定义均冻结为 Run 私有配置；校验与冻结使用同一次读取的映射。注册拒绝已知属于其他 Workflow 的必需任务 ID，保留未知未来 ID 和自定义配置。提供显式 `workflow_file` 的 replay 保留其既有私有定义。缺路径的旧注册签名保持兼容；缺配置并不证明 Run 可执行。新建私有快照失败不注册 Run。
+
+`FACT` 已完成且 `integration_mode=none` 的依赖不提供远端 `--onto`，共享文档按受管接口交接。Git 初次提示声明 `WORKER_WRITE_ROOT`，业务相对路径以本工位 clone 为根；来源目录文件不能冒充该 Task 的产物。旧终端完成标记接受冒号后水平空白，检测先解除软换行，再校验完整任务 ID；输入净化使用相同分隔与边界。
+
+Evidence:
+- `services/herdr-worker.py#sanitize_clone_sandbox` / `#main`
+- `herdr/state_db.py#transition_task`
+- `herdr/scheduler.py#node_is_complete`
+- `herdr/direct_dispatch.py#plan_stage_dispatch` / `#candidate_branch_for_node`
+- `herdr/projects.py#register_workflow`
+- `herdr/completion.py#marker_present` / `#sanitize_prompt`
+- `tests/test_workflow_stall_regressions.py`
+- `tests/test_reverification_controller.py`

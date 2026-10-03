@@ -3337,8 +3337,8 @@ def _launch_task(args):
 
     if onto_branch:
         worker_cmd += ["--onto", onto_branch]
-        if getattr(args, "candidate_sha", None):
-            worker_cmd += ["--candidate-sha", args.candidate_sha]
+    if getattr(args, "candidate_sha", None):
+        worker_cmd += ["--candidate-sha", args.candidate_sha]
 
     if prebuilt_pane:
         worker_cmd += ["--pane-id", prebuilt_pane]
@@ -3779,7 +3779,11 @@ def dispatch_task(task_id, prompt):
         "the prefix HERDR_TASK_DONE: followed immediately by this task id.\n")
 
     prompt = (
-        prompt
+        (f"WORKER_WRITE_ROOT: {task['clone_path']}\n"
+         "业务相对路径以此目录为根；来源项目路径仅供定位，业务产物写入本工位克隆。\n"
+         "共享报告使用工作流受管文档接口发布；不要把来源目录文件视为本 Task 的产物。\n\n"
+         if task.get("clone_path") and task.get("execution_mode") != "context" else "")
+        + prompt
         + context_suffix
         + working_context_suffix
         + loop_suffix
@@ -6481,12 +6485,15 @@ def _autosave_clone_wip(task):
     return True
 
 
-def supersede_task(task_id, new_task_id=None, reason=None, allow_new_run=False):
+def supersede_task(task_id, new_task_id=None, reason=None, allow_new_run=False, abandon=False):
     """Mark a task as superseded (replaced by another task or abandoned).
 
-    Superseded tasks are excluded from node completion calculations,
-    allowing the DAG to advance when replacement tasks complete successfully.
+    Replacement obligations remain until the linked task delivers. Only an
+    explicit abandon removes the obligation without a replacement.
     """
+    if abandon and (new_task_id or not str(reason or "").strip()):
+        print("[SUPERSEDE REJECTED] --abandon requires a reason and cannot be combined with --by")
+        sys.exit(2)
     data = load_tasks()
     task = find_task(data, task_id)
 
@@ -6504,7 +6511,7 @@ def supersede_task(task_id, new_task_id=None, reason=None, allow_new_run=False):
     # （scheduler.node_is_complete）断在第一跳，实现节点永远判不出完成，
     # Controller 只会刷 [STAGE ADVANCE WAIT] coordinator=working。
     relinking = old_status == "superseded"
-    if relinking and not new_task_id:
+    if relinking and not new_task_id and not abandon:
         print(
             f"Illegal transition: "
             f"{task_id}: {old_status} -> superseded"
@@ -6528,7 +6535,12 @@ def supersede_task(task_id, new_task_id=None, reason=None, allow_new_run=False):
         )
         sys.exit(2)
 
-    meta = {}
+    if abandon and task.get("superseded_by"):
+        print("[SUPERSEDE REJECTED] linked replacement cannot be abandoned by changing its predecessor")
+        sys.exit(2)
+    meta = {"replacement_pending": not abandon}
+    if abandon:
+        meta["abandon_reason"] = reason
     if new_task_id:
         meta["superseded_by"] = new_task_id
         replacement = find_task(data, new_task_id)
@@ -6539,7 +6551,7 @@ def supersede_task(task_id, new_task_id=None, reason=None, allow_new_run=False):
                     "belongs to another workflow"
                 )
                 sys.exit(2)
-            if allow_new_run and (task.get("node") or task.get("stage")) != (replacement.get("node") or replacement.get("stage")):
+            if (task.get("node") or task.get("stage")) != (replacement.get("node") or replacement.get("stage")):
                 print("[SUPERSEDE REJECTED] replacement belongs to another node")
                 sys.exit(2)
             # 补派按设计就是新执行：controller 保留 --execution-id 并注明
@@ -7626,13 +7638,14 @@ def main():
 
     supersede_cmd = sub.add_parser(
         "supersede",
-        help="permanently discard that task branch commits (superseded tasks "
-             "are excluded from completion; differs from --accept-escalated "
-             "which keeps deliverables and clear-escalation which re-drives)",
+        help="supersede a task while retaining its replacement obligation; "
+             "use --by to link a replacement or --abandon to explicitly remove the obligation",
     )
     supersede_cmd.add_argument("task_id")
     supersede_cmd.add_argument("--by", dest="new_task_id", default=None)
     supersede_cmd.add_argument("--reason", default=None)
+    supersede_cmd.add_argument("--abandon", action="store_true",
+                               help="Explicitly remove this task obligation; requires --reason and no --by")
 
     clear_esc_cmd = sub.add_parser(
         "clear-escalation",
@@ -8124,7 +8137,8 @@ def main():
         supersede_task(
             args.task_id,
             new_task_id=args.new_task_id,
-            reason=args.reason
+            reason=args.reason,
+            abandon=args.abandon,
         )
 
     elif args.command == "clear-escalation":

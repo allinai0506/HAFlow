@@ -44,7 +44,7 @@ def test_actual_dispatch_reaches_cli_frozen_identity(actual_scene, monkeypatch, 
 
 
 @pytest.mark.parametrize("variant", ["absent", "short", "wrong", "other_workflow", "latest_wrong", "head_moved"])
-def test_unproven_head_is_not_given_a_frozen_pin(actual_scene, variant):
+def test_current_workflow_commit_proof_is_required_for_frozen_pin(actual_scene, variant):
     controller, repo, db, sha, item, calls, cli = actual_scene
     if variant != "absent":
         frozen = sha[:12] if variant == "short" else "a" * 40 if variant == "wrong" else sha
@@ -54,7 +54,18 @@ def test_unproven_head_is_not_given_a_frozen_pin(actual_scene, variant):
     if variant == "head_moved":
         (repo / "f").write_text("new HEAD")
         subprocess.run(["git", "-C", str(repo), "commit", "-am", "moved"], check=True, capture_output=True)
-    assert controller._scheduler_expected_candidate_sha("wf-candidate", str(repo), ["implementation"], None) == ""
+        head = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                              check=True, capture_output=True, text=True).stdout.strip()
+        assert head != sha
+        assert controller._scheduler_expected_candidate_sha("wf-candidate", str(repo), ["implementation"], None) == sha
+        assert controller.try_direct_stage_advance(item)
+        assert len(calls) == 1 and "--onto" not in calls[0]
+        claim = calls[0][calls[0].index("--candidate-sha") + 1]
+        assert claim == sha
+        assert cli._preflight_delivery_identity("wf-candidate", "test", "test-current", claim) == {
+            "candidate_sha": sha, "identity_source": "frozen"}
+    else:
+        assert controller._scheduler_expected_candidate_sha("wf-candidate", str(repo), ["implementation"], None) == ""
     with pytest.raises(SystemExit) as error:
         cli._preflight_delivery_identity("wf-candidate", "test", "test-current", "")
     assert error.value.code == 2

@@ -239,11 +239,8 @@ class ControllerReverificationTest(unittest.TestCase):
         not a rewrite: the record of *what that task verified* must survive,
         which is exactly what makes it usable as reuse evidence later.
         """
-        existing = self.store.get_task(task_id) or {}
-        record = dict(existing)
-        record.update({"task_id": task_id, "workflow_id": WF,
-                       "status": "superseded", "superseded_by": by})
-        self.store.save_task(record)
+        self.store.transition_task(task_id, "superseded", "fix-loop invalidation",
+                                   metadata={"superseded_by": by}, force=True)
 
     def rotate(self, rel, text="x"):
         """Start a rework round the way fix-loop does; returns the new SHA.
