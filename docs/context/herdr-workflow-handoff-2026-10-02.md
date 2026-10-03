@@ -14,10 +14,28 @@
 最终 implementation / test / review 三节点交付成功并全部并入 `dev`（PR !1514 + PR !1520）。
 过程中暴露 **29 个 HAFlow 问题**，其中 7 个为阻断级。
 
-> **收尾修订说明（2026-10-03）**：§1.6、§1.7、§2.12 为收尾阶段新发现，其中 §1.6 已造成实际生产影响
+> **收尾修订（2026-10-03）**：§1.6、§1.7、§2.12 为收尾阶段新发现，其中 §1.6 已造成实际生产影响
 > （主干一度带着未裁决的缺陷代码上线）。交付遗留技术债见 §6 附录 A。
 
-其中最值得注意的不是单个 bug，而是**两条协议层面的死结**（§1.2、§3.1）：平台约定「收尾节点分支不推送」，而任务需求要求「Agent 创建 PR 并保持待审查」，而 Herdr 本身**不具备建 PR 能力**。这三者无法同时满足，任何单点修复都绕不开。
+其中最值得注意的不是单个 bug，而是**两条协议层面的死结**（§1.2、§3.1）：平台约定「收尾节点分支不推送」，而任务需求要求「Agent 创建 PR 并保持待审查」，而当时 Herdr **不具备建 PR 能力**。这三者无法同时满足，任何单点修复都绕不开。
+
+> **⚠️ 二次订正（2026-10-03）——上段关于「不具备建 PR 能力」的说法已过时**
+>
+> `f8e9dc8`（PR #144）已同时解决 §4.1 与 §4.2 两个协议死结，§4 不再是开放项：
+>
+> - **§4.2（跨 workflow `required_task_ids`）已按「配置错误」方案修复**：
+>   `herdr/projects.py:268` 新增 `validate_required_task_scope()`，在 `workflow_config_for()`（`:306/:310`）
+>   加载每个工作流时校验，`workflow_id` 不符即 `raise ValueError("required_task_out_of_workflow")`，
+>   跨节点亦拦（`required_task_out_of_node`）。§1.3 末尾「缺陷仍在」的表述同步作废。
+> - **§4.1 已落地为方案 B（Herdr 平台建 PR）**：
+>   `herdr/pr_delivery.py` 新增 `PullRequestClient`（GitHub + Gitee，自读 `GH_TOKEN`/`GITEE_TOKEN`），
+>   `create(head, base, title, body, draft)` 即 Gitee `/repos/{owner}/{repo}/pulls` 的 POST；
+>   入口 `bin/herdr-task create_pull_request`（`:7492`）。归属由 `_publication()` 强校验
+>   （要求任务自带 `herdr/integration-<task_id>` 与 `refs/herdr/tasks/<task_id>`）。
+>
+> 因此 §1.2「Agent 提前 push + 自建 PR 导致终化拒绝」的**冲突前提已消失**：
+> 平台已有归属清晰的建 PR 能力，任务需求模板中的「Agent 建 PR」写法应当随之改写，
+> 否则仍会诱导 Agent 走自建分支的老路。**该模板改写是 #144 之后仍待完成的一步。**
 
 ---
 
@@ -27,7 +45,7 @@
 |---|------|------|------|
 | 1.1 | P0 | Agent 自建分支导致终化拒绝，且 `commits=0` 误导 | `git_adoption.py` |
 | 1.2 | P0 | Agent 提前 push + 自建 PR 导致终化拒绝（与需求冲突） | `git_adoption.py:260` |
-| 1.3 | P0 | `required_task_ids` 跨 workflow → 节点永久无法完成 | `scheduler.py:138-155` |
+| 1.3 | P0 | `required_task_ids` 跨 workflow → 节点永久无法完成 **✅ 已由 #144 修复** | `projects.py:268` |
 | 1.4 | P0 | `[AUTO ACCEPT]` 绕过验收门禁，`stage_verdict` 空放行 | `herdr-controller.py` |
 | 1.5 | P0 | `ensure_branch_available` 零豁免 → Scheduler v1 并行验收不可执行 | `git_coordination.py:43-57` |
 | 1.6 | P0 | 终化合并不校验门禁裁决对象与 PR head 一致性，缺陷代码可直接进主干 | `herdr-controller.py` 集成路径 |
@@ -188,7 +206,13 @@ def _check_remote_contained(commits, remote_shas):
 2. 项目 `workflow.json` 载入时校验 `required_task_ids` 的每个 id 是否属于本工作流，不合规则拒绝启动并报明确错误。
 
 **本次处置**：仅改配置值指向本工作流任务（1 行，已备份 `workflow.json.bak-215101`），
-**未改平台代码**，缺陷仍在。
+**未改平台代码**。
+
+> **✅ 已修复（2026-10-03 订正）**：本节原结论「缺陷仍在」**已过时**。
+> `f8e9dc8`（#144）新增 `herdr/projects.py:268 validate_required_task_scope()`，
+> 在 `workflow_config_for()` 加载期即拒绝跨 workflow / 跨节点的 `required_task_ids`，
+> 并新增独立原因码 `required_task_out_of_workflow`（原建议 1 亦一并落地，ops-center 可显示原因）。
+> 详见 §4.2。本节保留为缺陷成因记录。
 
 ---
 
@@ -793,21 +817,65 @@ Controller 随后清理 Pane，**产出静默成为孤儿**——无提交、无
 
 ---
 
-## 4. 需要你决策的协议矛盾
+## 4. 协议矛盾（已由 `f8e9dc8` / #144 解决，2026-10-03 订正）
 
-### 4.1 谁负责创建 PR
+> **本节不再是开放项。** 以下两个协议死结已由 `f8e9dc8`（PR #144）落地解决，
+> 原「需要你决策」的表述已过时。订正依据为对 `origin/main` 的逐行核对，非推测。
+
+### 4.1 谁负责创建 PR → 已定为方案 B（Herdr 平台建 PR）
+
+原 A/B 二选一：
 
 | 方案 | 优点 | 代价 |
 |---|---|---|
-| **A. 平台支持 Agent 建 PR** | 满足现有任务需求模板 | 终化的 `foreign_commit_in_range` 需为「本任务自推」开归属凭据，削弱 H-2 保护 |
+| A. 平台支持 Agent 建 PR | 满足现有任务需求模板 | 终化的 `foreign_commit_in_range` 需为「本任务自推」开归属凭据，削弱 H-2 保护 |
 | **B. Herdr integrate 建 PR** | 守住 F-1，归属清晰 | 平台需补建 PR 能力；任务需求模板需改写 |
 
-在 A/B 之间定调前，§1.2 无解。
+**落地实况（方案 B 已实现）**
 
-### 4.2 `required_task_ids` 指向跨 workflow task_id 时的语义
+- `herdr/pr_delivery.py` 新增 `PullRequestClient`：GitHub 走 `api.github.com` + `Bearer`,
+  Gitee 走 `gitee.com/api/v5` + `access_token`，凭据自动读 `GH_TOKEN` / `GITEE_TOKEN`，
+  凭据缺失时 fail-closed 抛错而非静默降级。
+- `create(head, base, title, body, draft)` 直接 POST `/repos/{owner}/{repo}/pulls`。
+- 入口：`bin/herdr-task create_pull_request`（`:7492`）。
+- **归属保护未削弱**：`_publication()` 要求任务持有 `herdr/integration-<task_id>` 与
+  `refs/herdr/tasks/<task_id>`，且 `note.candidate_sha == task.integrated_commit`、
+  `note.delivery_branch == branch`，否则拒绝发布。`git_adoption.py` 的
+  `foreign_commit_in_range`（`:485` / `:672`）保护保持不变。
 
-- 视为**配置错误**（应在项目定义校验期拒绝）→ 采纳 §1.3 建议 2
+**仍待完成的一步**：任务需求模板中「Agent 创建 PR 并保持待审查」的措辞尚未随之改写。
+本次 workflow 中该措辞仍在诱导 Agent 自建分支、自推远端（§1.1 / §1.2 的直接诱因），
+尽管平台此时已具备合规建 PR 能力。**建议改写模板**，否则冲突会以「Agent 不知道平台能建」的形式复发。
+
+### 4.2 `required_task_ids` 指向跨 workflow task_id 时的语义 → 已定为「配置错误」
+
+原二选一：
+
+- 视为**配置错误**（应在项目定义校验期拒绝）→ 采纳 §1.3 建议 2 ✅ **已采纳并实现**
 - 视为**合法的跨工作流续接门禁** → 需扩展解析，但必须新增独立判决态以保留 `JOIN_MISSING_CANDIDATE` 的安全信号
+
+**落地实况**（`herdr/projects.py:268`）
+
+```python
+def validate_required_task_scope(config, workflow_id, store=None):
+    """Reject known foreign references; absent IDs may be future dispatches."""
+    for node in config.get("nodes") or []:
+        for task_id in node.get("required_task_ids") or []:
+            task = store.get_task(task_id)
+            if task is None:
+                continue                      # 未注册 id 视为未来派发，放行
+            if task.get("workflow_id") != workflow_id:
+                reason = "required_task_out_of_workflow"
+            elif (task.get("node") or task.get("stage")) != node.get("id"):
+                reason = "required_task_out_of_node"
+            if reason:
+                raise ValueError(f"node={node.get('id')}: {reason}: {task_id}")
+```
+
+- 在 `workflow_config_for()` 的每条加载路径（`:306` / `:310`）调用，**加载期即拒绝**，符合建议 2。
+- 比建议更严：**跨节点引用也一并拦截**（`required_task_out_of_node`）。
+- `task is None` 时放行，保留了「引用尚未派发的任务」这一合法用法（注释：absent IDs may be future dispatches）。
+- §1.3 末尾「缺陷仍在，未改平台代码」**作废**——该缺陷已修复。
 
 ---
 
