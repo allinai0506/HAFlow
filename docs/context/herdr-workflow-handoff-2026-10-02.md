@@ -10,7 +10,7 @@
 
 ## 0. 摘要
 
-本次 workflow 跨越 3 个节点、经历 2 次服务器重启、1 次派发被中断，最终 implementation节点交付成功（`integrated` + `verdict=pass`，PR #1514）。过程中暴露 **19 个 HAFlow 问题**，其中 4 个为阻断级。
+本次 workflow 跨越 3 个节点、经历 2 次服务器重启、1 次派发被中断，最终 implementation节点交付成功（`integrated` + `verdict=pass`，PR #1514）。过程中暴露 **26 个 HAFlow 问题**，其中 5 个为阻断级。
 
 其中最值得注意的不是单个 bug，而是**两条协议层面的死结**（§1.2、§3.1）：平台约定「收尾节点分支不推送」，而任务需求要求「Agent 创建 PR 并保持待审查」，而 Herdr 本身**不具备建 PR 能力**。这三者无法同时满足，任何单点修复都绕不开。
 
@@ -24,6 +24,7 @@
 | 1.2 | P0 | Agent 提前 push + 自建 PR 导致终化拒绝（与需求冲突） | `git_adoption.py:260` |
 | 1.3 | P0 | `required_task_ids` 跨 workflow → 节点永久无法完成 | `scheduler.py:138-155` |
 | 1.4 | P0 | `[AUTO ACCEPT]` 绕过验收门禁，`stage_verdict` 空放行 | `herdr-controller.py` |
+| 1.5 | P0 | `ensure_branch_available` 零豁免 → Scheduler v1 并行验收不可执行 | `git_coordination.py:43-57` |
 | 2.1 | P1 | Supervisor 判 `work_off_track` 却仍放行完成 | `herdr-controller.py` |
 | 2.2 | P1 | launch 失败后 pane 泄漏 | `herdr-worker.py:980/987` |
 | 2.3 | P1 | `launch-reconcile` 无法回收泄漏 pane | `task_resources.py:249` |
@@ -33,6 +34,8 @@
 | 2.7 | P1 | recovery `idle` 分支 fail-closed，丢失的 DONE 永不补登 | `herdr-controller.py:9363-9368` |
 | 2.8 | P1 | `node_usage` 累计计数含 `superseded` 墓碑 | `node_capacity.py:22-24`（`:24` 为 `selected` 赋值行） |
 | 2.9 | P1 | `dispatch` 只接受 `pending`，`working` 无法回退 | `bin/herdr-task:3710` |
+| 2.10 | P1 | 悬空 launch intent 堵死同 `task_id` 重试（校验排在资源登记之后） | `bin/herdr-task:3073/3090/3411` |
+| 2.11 | P1 | Agent Router 不做 preflight 可行性过滤，首选不可用即崩栈 | `herdr-worker.py:720` |
 | 3.1 | P2 | 同节点无 Agent 多样性保证 | `agent_router.py:421-430` |
 | 3.2 | P2 | `note-add --kind` 不支持 `review` | `bin/herdr-task:7733-7746` |
 | 3.3 | P2 | `gitee-pr.sh create --head` 源恒为 HEAD | `scripts/gitee-pr.sh:269` |
@@ -40,6 +43,9 @@
 | 3.5 | P2 | 项目 `workflow.json` 无 schema 校验，可手工注入非法值 | `projects.py` |
 | 3.6 | P2 | ops-center 节点异常不给出原因 | `bin/herdr-task:794-808` |
 | 3.7 | P2 | `current_stage` 字段残留为空 | `workflows.json` |
+| 3.8 | P2 | `agent-worktree-guard` 对 CoW clone 的 `herdr/*` 分支拒绝 commit，豁免不可达 | NexusArchive `scripts/agent-worktree-guard.sh:244-254` |
+| 3.9 | P2 | `completed` 与「已集成」零校验，未 commit 的 staged 产出变孤儿 | `transitions.py` |
+| 3.10 | P2 | `--onto` 本地专属 ref 必须同时透传 `--candidate-sha` | `git_coordination.py:60-78` |
 
 ---
 
@@ -205,6 +211,66 @@ def _check_remote_contained(commits, remote_shas):
 
 ---
 
+### 1.5 `ensure_branch_available` 零豁免 → Scheduler v1 声明的并行验收结构性不可执行
+
+**现象**
+
+Scheduler v1 在 test 与 review 节点职责中均写明「与 test 节点并行执行（同 implementation 前置），验证同一冻结
+`candidate_sha`」，且派发指令模板对两个节点强制同一 `--onto`。但按模板派发 review 必然失败：
+
+```
+$ herdr-task launch --task-id review-... --node review \
+    --onto herdr/integration-impl-compliance-race-json-truth \
+    --candidate-sha ca8b6d7fcc0cba9da47a344af834170f72ac2b5b
+[NODE OVERFLOW] node=review cumulative tasks=1 legacy max_agents=1
+[BRANCH OWNERSHIP ERROR] Git branch is already owned by active task
+    test-compliance-display-mask-export-probes: herdr/integration-impl-compliance-race-json-truth
+# exit 2
+```
+
+**根因**
+
+`herdr/git_coordination.py:43-57` 的 `ensure_branch_available` 对分支所有权**零豁免**，唯一跳过条件是自我豁免：
+
+```python
+ACTIVE_BRANCH_STATUSES = frozenset({
+    "pending", "dispatched", "working", "blocked", "agent_done", "rework",
+    "paused", "interrupted", "completed", "committed", "integrated", "cleanup_ready"})
+
+for task in tasks:
+    owner = str(task.get("task_id") or "")
+    if owner == task_id or task.get("status") not in ACTIVE_BRANCH_STATUSES:
+        continue
+    if task.get("branch") == branch:
+        raise BranchOwnershipError(...)
+```
+
+无「同 workflow」「同候选」「验收节点并行」任何例外。`ACTIVE_BRANCH_STATUSES` 含 `integrated`，故 `--onto`
+分支的锁**要到 `cleaned` 才释放**。
+
+**关键结论：并行并非不可实现**
+
+已验证的合法路径是：**非首个验收节点省略 `--onto`**，让 Herdr 自铸 `agent/<agent>/test-<task_id>` 分支，
+仅以 `--candidate-sha` 钉住冻结提交。上一轮 `wf-project-1002-01-review-auto` 即此形态
+（`onto=None` + `candidate_sha=8be3099a6...`），实测其 clone HEAD **逐字符等于** `8be3099a6`，且 clone 内代码
+确为该候选（`deriveDisplayReadiness` 出现 0 次）——证明 `candidate_sha` 在 `onto=None` 时仍被真实 checkout。
+
+故缺陷不在能力，而在**指令模板对 test/review 双节点强制同一 `--onto`，自我阻塞**。
+
+**影响**
+
+Scheduler v1 声明的并行验收在默认模板下必然失败；操作者若不深挖，只能得出「并行不可行」的错误结论，
+或绕开冻结身份校验以规避冲突——后者会直接击穿 `wrapup` 的 SHA 一致性门禁。
+
+**建议**
+
+- `ensure_branch_available` 增加豁免：同 `workflow_id` 且 `candidate_sha` 相同的验收节点（test/review）
+  应允许共享 `--onto`。
+- 或修正调度器指令模板：非首个验收节点不下发 `--onto`，只下发 `--candidate_sha`。
+- 独立评估锁释放语义：`integrated` 是否应继续持有 `--onto` 分支锁。
+
+---
+
 ## 2. P1 — 流程可靠性
 
 ### 2.1 Supervisor 判 `work_off_track` 却仍放行
@@ -362,6 +428,86 @@ if task["status"] != "pending" and not (receipt_delivery and task["status"] == "
 
 ---
 
+### 2.10 悬空 launch intent 永久堵死同task_id 重试（本轮取得精确机制）
+
+§2.4 已记录「launch 失败必留intent」。本轮在 review 节点**连续两次**踩中，并取得精确机制证据：
+
+```
+[BRANCH OWNERSHIP ERROR] ...      # 第 1 次：§1.5 的所有权冲突
+$ herdr-task launch --task-id review-... （同 task_id 重试）
+[DISPATCH IN_PROGRESS] task=review-...; reconcile intent-owned resources before retrying
+# exit 75
+```
+
+**调用顺序是根因**（`bin/herdr-task`，release `d93a3c807`）：
+
+| 行号 | 动作 |
+|------|------|
+| `:3073` | `begin_launch_intent(...)` 领取 intent（写入 claimed 态） |
+| `:3090` | `record_launch_resources(...)` 记录 clone/pane/run_id |
+| `:3411` | `ensure_branch_available(...)` → 抛 `BranchOwnershipError` |
+| `:3417` | `sys.exit(2)` —— **未释放 intent** |
+| `:3084` | 下次同 task_id 命中 `claim['status'] != 'claimed'` → `exit 75` |
+
+即**所有权校验排在资源登记之后**，失败路径无 `finally` 释放。后果是 `launch-reconcile` 只能报
+`resource_status=absent, reason=workspace_absent_complete_native_inventory`（intent 存在但未持有资源），
+必须人工执行 `launch-reconcile --apply` 才能解锁。
+
+**第二条泄漏路径**：worker 侧 deep preflight 失败（`services/herdr-worker.py:720` 抛 `RuntimeError`）
+以裸 traceback 崩栈，herdr-task 同样不释放 intent。本轮两次崩溃均需人工 `--apply`。
+
+**文档/实现不符**：`herdr-task --help` 中 `launch-reconcile` 描述写明
+「apply releases `--abandon` to explicitly remove the obligation」，但该子命令的 argparse 定义只有
+`--apply`，**无 `--abandon` 参数**。
+
+**建议**
+
+- `bin/herdr-task:3411` 的失败路径包 `try/finally`，或把 `ensure_branch_available` 前移到
+  `begin_launch_intent` 之前（它只依赖 `data.get("tasks")`，无需 intent）。
+- worker 崩栈时由herdr-task 捕获子进程非零退出并释放 intent。
+- 补齐 `--abandon`，或修正帮助文本。
+
+---
+
+### 2.11 Agent Router 不做 deep preflight 可行性过滤，选中首选即崩栈
+
+§2.5 / §2.6 从快照新鲜度角度分析 preflight。本轮取得**选择阶段**的独立证据，且修正了失败模式判断。
+
+review 节点策略首选 Agent 为 `claude`，`--agent auto` 据此选中，随后：
+
+```
+[WORKER ROLLBACK] Cleaning up incomplete clone: .../clones/review-compliance-display-mask-export-probes
+Traceback (most recent call last):
+  File "services/herdr-worker.py", line 959, in main
+    preflight = verify_request_preflight(args.agent, clone)
+  File "services/herdr-worker.py", line 720, in verify_request_preflight
+    raise RuntimeError(f"Worker Deep Preflight {row.get('final_status','UNKNOWN')}: request not verified")
+RuntimeError: Worker Deep Preflight ERROR: request not verified
+```
+
+只读体检四个候选（`herdr.deep_preflight.inspect(deep=True)`）：
+
+| agent | `final_status` | `request_verified` |
+|--------|-----------------|--------------------|
+| **claude**（review 首选） | `ERROR` | `false` |
+| qodercli | `ERROR` | `false` |
+| codex | `READY` | `true` |
+| agy | `READY` | `true` |
+
+即策略首选的两个 Agent 恰好都不可用，而 Router **不做可行性过滤、不降级到次选、不输出结构化拒绝原因**，
+直接崩栈并回收 clone。
+
+**修正**：§2.5 曾判断preflight 问题是 fail-open 致误判；实际在派发路径上是 **fail-closed 崩栈**。
+两者都需修，但处置方向不同——此处需要的是「排序阶段剔除不可用项」或「失败后重排候选重试一次」。
+
+**建议**
+
+- `agent_router` 在候选排序阶段先按 `deep_preflight` 可用性过滤，再应用偏好顺序。
+- 或 `verify_request_preflight` 失败时自动重排候选重试一次，仍失败才报错。
+- 报错应为结构化（哪几个 agent、各自的 `final_status`），而非裸 traceback。
+
+---
+
 ## 3. P2 — 可用性与可观测性
 
 ### 3.1 同节点无 Agent 多样性保证
@@ -412,6 +558,59 @@ if ! git push origin "HEAD:$head_branch"; then
 
 `workflows.json` 中 `wf-project-1002-01` 的 `current_stage = ""`，而工作流推进正常。
 该字段疑似死字段或未被维护，建议确认后清理或补齐。
+
+---
+
+### 3.8 `agent-worktree-guard` 对 CoW clone 的 `herdr/*` 分支结构性拒绝 commit
+
+NexusArchive 仓库的 `scripts/agent-worktree-guard.sh:244-254` 用正则 `^agent/([^/]+)/` 从分支名解析
+`branch_agent`，仅匹配 `agent/<agent>/...` 形态。Herdr 集成分支命名为 `herdr/integration-*`，解析结果为空，
+于是 CoW（copy-on-write）clone 路径下**任何 commit 都被拒绝**。
+
+逃生开关 `ALLOW_NON_AGENT_BRANCH` 位于同文件 `:303`，**排在 CoW 块的 `exit 1` 之后**，该路径下不可达——
+即 hook 注释中承诺的豁免对 CoW clone 实际无效。
+
+调用点：NexusArchive `.husky/pre-commit:62-68`。
+
+**本workflow 中的实际后果**：fix 任务的产出已完成并暂存在工作区（4 文件 +366/-15），但无法自行 commit，
+表现为「Agent 声称完成却无提交」的僵局，最终需人工补提交 `ca8b6d7fcc` 并 `--no-verify` 绕过
+（该绕过的 10 个门禁已逐个手动取证全绿，理由写入 commit message）。
+
+**建议**：把 `ALLOW_NON_AGENT_BRANCH` 判断前移到 CoW 块之前；或让 `branch_agent` 支持
+`herdr/integration-*` 形态；或按分支前缀而非单一正则决定是否适用 Agent 隔离规则。
+
+---
+
+### 3.9 `completed` 与「已集成」零校验，未 commit 的 staged 产出被判完成后变孤儿
+
+Agent 只执行 `git add` 而不 commit（或commit 被 §3.8 拒绝），Herdr 生命周期仍可到达 `completed`；
+Controller 随后清理 Pane，**产出静默成为孤儿**——无提交、无 PR、无告警。
+
+本次 workflow 中该状态差点造成 §3.8 的僵局无人察觉。
+
+**建议**：`task_type=test` / `docs` 等只读任务在 `completed` 前应校验工作区洁净；
+`feat` / `fix` 等产出型任务应校验「存在提交或明确的空产出声明」，否则拒绝进入 `completed`。
+
+---
+
+### 3.10 `--onto` 指向本地专属 ref 时必须同时透传 `--candidate-sha`
+
+两处耦合缺失会导致 `Onto branch not found on origin`：
+
+- `herdr/git_coordination.py:60-78` `pinned_local_onto_matches`：仅当 `--candidate-sha` 非空**且**本地
+  `refs/heads/<branch>` 存在并与其逐字符相等时，才允许「未发布到origin 的本地分支」被检出；
+  已有 ref 被移动时直接抛错，不允许静默 `fetch` 覆盖。
+- `services/herdr-worker.py:307-325` `checkout_onto_branch` 快路径同样依赖 `candidate_sha` 非空。
+- `herdr/direct_dispatch.py:40-107` `candidate_branch_for_node` 要求 `--onto` 存在于 `refs/remotes/origin/`，
+  否则回落 `git fetch origin`。
+
+本次 workflow 中 `herdr/integration-impl-compliance-race-json-truth` 原本**不存在于 origin**
+（clone 里那条 `refs/remotes/origin/...` 是本地伪造的误导项），漏传 `--candidate-sha` 必然复现
+0929-01 同源事故。补提交后必须 `git push origin <branch>` 让主仓 `refs/heads` 与
+`refs/remotes/origin/` 同步，Controller 的 `_scheduler_freeze_candidate` 才能从分支实时重算出正确候选。
+
+**建议**：CLI 层把 `--candidate-sha` 与 `--onto` 绑定校验——`--onto` 不在 `refs/remotes/origin/` 时
+强制要求 `--candidate-sha`，并在缺失时给出可执行的错误提示而非让 worker 深处失败。
 
 ---
 
@@ -478,6 +677,31 @@ if ! git push origin "HEAD:$head_branch"; then
 
 ```bash
 cd ~/HAFlow
+
+# §1.5 分支所有权零豁免（注意：仅 owner==task_id 自我豁免）
+sed -n '43,57p' herdr/git_coordination.py
+sed -n '13,28p' herdr/git_coordination.py   # ACTIVE_BRANCH_STATUSES 含 integrated → 锁到 cleaned 才释放
+
+# §2.10 悬空 intent 的调用顺序（:3073 领取 → :3090 登记资源 → :3411 抛错 → :3417 exit(2) 不释放）
+sed -n '3073,3076p;3090,3092p;3411,3417p' bin/herdr-task
+# 帮助文本声明 --abandon，但 argparse 只有 --apply
+herdr-task launch-reconcile --help | grep -- --abandon || echo "确认：--abandon 不存在"
+
+# §2.11 Agent preflight 可行性（claude/qodercli ERROR，codex/agy READY）
+python3 - <<'PY'
+from herdr.deep_preflight import inspect
+for r in inspect({"project_root": "/Users/user/nexusarchive-worktrees/gemini"},
+                 deep=True, target_agents=["claude","codex","qodercli","agy"]):
+    print(r["agent"], r["final_status"], r["request_verified"])
+PY
+
+# §3.10 candidate_sha 与 --onto 的耦合
+sed -n '60,78p' herdr/git_coordination.py       # pinned_local_onto_matches
+sed -n '40,107p' herdr/direct_dispatch.py | grep -n 'refs/remotes/origin'
+
+# §3.8 CoW clone 的 herdr/* 分支拒绝（NexusArchive 仓库侧）
+sed -n '244,254p' /Users/user/nexusarchive-worktrees/gemini/scripts/agent-worktree-guard.sh
+sed -n '300,305p' /Users/user/nexusarchive-worktrees/gemini/scripts/agent-worktree-guard.sh  # 豁免在 exit 1 之后
 
 # §1.3 因果对照
 python3 - <<'PY'
