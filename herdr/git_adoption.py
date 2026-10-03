@@ -715,7 +715,13 @@ def explain(verdict, detail):
     commits = detail.get("commits", 0)
     baseline = detail.get("baseline") or "none"
     basis = detail.get("basis", "none")
-    return (
+    msg = (
         f"verdict={verdict} reason={reason} "
         f"commits={commits} baseline={baseline} basis={basis}"
     )
+    if reason == "current_branch_mismatch":
+        curr = detail.get("current_branch")
+        exp = detail.get("expected_branches")
+        if curr is not None or exp is not None:
+            msg += f" current_branch={curr} expected={exp}"
+    return msg

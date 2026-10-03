@@ -151,6 +151,7 @@ nodes:
       - 严格按照 Task 定义的范围执行，必须保证修改仅局限于 Task 目标内。
       - 自适应解耦并发原则：仅当计划阶段拆解的任务完全解耦且修改文件互不重叠时，允许派发多 Agent 并发执行（上限 3 个）；若模块强耦合或属于单点重构，必须强制单 Agent 顺序执行，严禁无序切碎制造 Git 合并冲突与 Pane 膨胀。
       - 提交前必须自测，确保修改与验收标准一致。
+      - 规范与集成治理：Worker Agent 仅在本地克隆工作区自测，严禁直接向远端执行 git push 或提 PR，严禁随意切换或重命名 Git 分支，所有代码交付与集成由流水线控制器统一收编。
       - 禁止使用普通 git status 判断修改范围，必须以 verify-baseline 为准。
       - 仅当 workflow_id 以 e2e- 开头时：验收不得依赖 Pane/TUI 是否能读到完成文本；Task 的 acceptance criteria 必须以 Herdr 生命周期到达 done/agent_done 且 verify-baseline 返回 BASELINE_MATCH 为完成依据；不得要求 E2E_*_OK 或 HERDR_TASK_DONE 必须能通过 pane read 读取；满足上述条件直接 completed，不要因为 alternate-screen 空白而 rework。
       - 创建 Task 时默认使用 --agent auto，由 Agent Router 根据当前 node、task_type 和项目 Agent Pool 动态选择；只有存在明确理由或用户显式指定时才固定具体 Agent。

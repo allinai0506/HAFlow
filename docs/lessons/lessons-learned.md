@@ -5804,3 +5804,37 @@ scripts/install-herdr-console.sh 的 plist_paths、SNAPSHOT_SERVICES、KICKSTART
 - 专项回归测试：`pytest -v tests/test_worker_sanitize_sandbox.py tests/test_herdr_worker.py tests/test_worker_baseline_anchor.py`
 - 语法与静态校验：`/opt/homebrew/opt/python@3.13/bin/python3.13 -m compileall -q herdr services bin tests` 与 `git diff --check`
 - S6 代码审查报告：`.omc/review-e4c9f87a-2df8-4f84-96dd-5ab219879f6f.md` (MERGE_READY)
+
+---
+
+## 124. 工作流跨 Run 快照隔离、控制器 CPU 空转风暴消除与 Worker Push 治理（2026-10-03）
+
+### 问题背景
+
+真实业务工作流（如 `wf-project-1002-01`）在执行过程中出现全节点停滞：
+1. **跨工作流状态污染**：上一个工作流的 `required_task_ids` 残留在项目共享 `workflow.json` 中，新工作流启动时原样继承，导致调度器 `node_is_complete` 永远在寻找上一个工作流的任务，实现节点永远判为未完成，下游测试与评审节点永远得不到触发就绪信号。
+2. **控制器 91.8% CPU 空转风暴**：`services/herdr-controller.py` 轮询 363 个任务时，对所有处于 `cleaned/committed/integrated` 的 264 个任务每秒反复调用 `workflow_closed`，每次新建 SQLite 连接并执行 4 条 PRAGMA，触发全库 29 张表与 30 多个复杂触发器的模式解析（AST 编译），造成控制面严重拥塞。
+3. **Agent 自行 Push 触发 Git Adoption 死锁**：实现任务提示词要求 Agent 提 PR，Agent 在沙盒克隆内执行 `git push origin`，导致 Git Adoption 判定为 `foreign_commit_in_range` / `current_branch_mismatch` 并进入 `commit_refused` 死锁。
+4. **Jev 语义判定 HTTP 422 报错**：`herdr/observer/signals.py` 向 Jev API 传入字符串类型 `criteria`，违背 TypeSafe SystemOne Schema 契约导致 422 校验拒绝。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|---|---|---|
+| 项目级定义与单次 Run 状态生命周期混淆 | 跨 Run 复用可变文件会造成动态运行态字段（如 `required_task_ids`、`active_task_ids`）污染新工作流 | 启动新工作流必须进行深拷贝快照隔离，并强制清理顶层与节点级的动态运行时字段 |
+| 轮询主循环高频跨库查询引发模式解析风暴 | 终态判断不全导致循环中高频对非活动任务重复执行 SQLite 连接与触发器编译 | 扩展终端状态集合（`TERMINAL_LIKE_STATUSES`），引入轮询批次内的 `_wf_closed_cache` 局部缓存，彻底消除无效连接风暴；同时确保 `committed` 任务的终化重试不被饥饿丢弃 |
+| Worker Agent 沙盒越权 Push 制造安全冲突 | 仅凭提示词纪律无法约束自主 Agent 向远端执行 `git push` | 在沙盒装配阶段物理安装双重 Push Guard（`pre-push` 拦截脚本 + `remote.origin.pushUrl=DISABLED_FOR_WORKER_LOCAL_TEST_ONLY`），彻底阻断沙盒越权推送；代码交付由平台统一收编 |
+| 第三方语义模型 Schema 契约不匹配 | 题型入参未严格遵循官方 Schema 导致请求被校验中间件拦截 | `noul` 题型引导词合并到 `instructions`，移除不合法的字符串 `criteria`；HTTP 异常处理必须完整回显服务端返回的 Body |
+
+### 操作规范
+
+1. **`herdr/projects.py`**：在 `register_workflow` 中强制调用 `_snapshot_workflow_definition`，并通过 `_clean_workflow_definition_for_new_run` 彻底清洗 `required_task_ids`、`task_ids`、`active_task_ids`、`status`、`error` 等动态字段。
+2. **`services/herdr-controller.py`**：定义 `TERMINAL_LIKE_STATUSES = ("completed", "failed", "superseded", "cleaned", "committed", "integrated", "cleanup_ready")`，利用局部闭包缓存减少 `workflow_closed` 查询，并将终化重试条件精确覆盖到 `status in ("completed", "committed")`。
+3. **`services/herdr-worker.py`**：引入 `install_worker_sandbox_push_guard`，兼容 `core.hooksPath` 并重定向 `remote.origin.pushUrl`。
+4. **`herdr/observer/signals.py` & `herdr/decision/providers/jev.py`**：将引导提示并入 `instructions`，移除字符串 `criteria`，并在 `_http_post_json` 中暴露完整的 HTTP 422 错误载荷。
+
+### 验证命令 / 关联证据
+
+- 专项测试套件：`pytest -v tests/test_commit_adopt.py tests/test_git_adoption.py tests/test_workflow_snapshot_isolation.py tests/test_jev_criteria_schema.py tests/test_worker_push_guard.py tests/test_review_blockers_regression.py tests/test_finalize_git_index_wait.py tests/test_herdr_worker.py` (92 passed)
+- 全量自动化测试：`pytest -q` (3180 passed, 157 subtests passed)
+- 代码静态检查：`python3 -m compileall -q herdr services bin tests` 与 `git diff --check`

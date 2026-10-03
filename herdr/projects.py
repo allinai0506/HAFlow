@@ -354,7 +354,52 @@ def generate_workflow_id(project, prefix="wf", now=None):
     return candidate_id
 
 
-def _snapshot_workflow_definition(workflow_id, source_file):
+def _clean_workflow_definition_for_new_run(cfg):
+    """Clean transient/dynamic runtime fields from workflow definition for a fresh run.
+
+    Removes node-level, stage-level, and root-level fields like `required_task_ids`, active task references,
+    and runtime status to ensure clean isolation between workflow runs.
+    """
+    if not isinstance(cfg, dict):
+        return cfg
+    cleaned = dict(cfg)
+    for field in ("status", "completed_at", "started_at", "current_stage"):
+        cleaned.pop(field, None)
+
+    dynamic_node_fields = {
+        "required_task_ids",
+        "task_ids",
+        "active_task_ids",
+        "status",
+        "completed_at",
+        "started_at",
+        "error",
+        "error_message",
+        "blockers",
+    }
+
+    if "nodes" in cleaned and isinstance(cleaned["nodes"], list):
+        nodes = []
+        for node in cleaned["nodes"]:
+            if isinstance(node, dict):
+                node_copy = {k: v for k, v in node.items() if k not in dynamic_node_fields}
+                nodes.append(node_copy)
+            else:
+                nodes.append(node)
+        cleaned["nodes"] = nodes
+    if "stages" in cleaned and isinstance(cleaned["stages"], list):
+        stages = []
+        for stage in cleaned["stages"]:
+            if isinstance(stage, dict):
+                stage_copy = {k: v for k, v in stage.items() if k not in dynamic_node_fields}
+                stages.append(stage_copy)
+            else:
+                stages.append(stage)
+        cleaned["stages"] = stages
+    return cleaned
+
+
+def _snapshot_workflow_definition(workflow_id, source_file, sanitize=True):
     """Workflow Run Definition Snapshot：把创建时刻的项目级定义固化为 Run 私有不可变文件。
 
     项目共享 workflow.json 代表"下一次 Workflow 用的当前模板"，会在模板切换时被覆盖；
@@ -375,6 +420,8 @@ def _snapshot_workflow_definition(workflow_id, source_file):
         if cfg is None:
             reason = f"定义源不可读: {source_file}"
         else:
+            if sanitize:
+                cfg = _clean_workflow_definition_for_new_run(cfg)
             run_dir = docs_root() / validate_workflow_id(workflow_id)
             run_dir.mkdir(parents=True, exist_ok=True)
             snapshot = run_dir / "workflow.json"
@@ -411,7 +458,8 @@ def freeze_run_definition(workflow_id, definition=None, *, source_file=None):
             run_dir = docs_root() / validate_workflow_id(workflow_id)
             run_dir.mkdir(parents=True, exist_ok=True)
             snapshot = run_dir / "workflow.json"
-            _save(snapshot, definition)
+            clean_def = _clean_workflow_definition_for_new_run(definition)
+            _save(snapshot, clean_def)
             return str(snapshot)
         except (ValueError, OSError) as exc:
             print(
@@ -436,7 +484,14 @@ def register_workflow(workflow_id, project, requirement="", title="", execution=
     subject = title or requirement_subject(requirement) or "未命名工作流"
     # Single-write contract: workflow_file and metadata are merged into the
     # entry before the one save_workflow call below. No second write follows.
-    resolved_workflow_file = workflow_file or project["workflow_file"]
+    resolved_workflow_file = workflow_file or project.get("workflow_file")
+
+    # Workflow Run Isolation: always snapshot workflow definition so every run
+    # gets an isolated, clean definition that doesn't mutate or inherit dynamic fields.
+    snapshot_file = _snapshot_workflow_definition(workflow_id, resolved_workflow_file)
+    if snapshot_file:
+        resolved_workflow_file = snapshot_file
+
     wf_entry = {
         "workflow_id": workflow_id,
         "title": title,
@@ -458,11 +513,6 @@ def register_workflow(workflow_id, project, requirement="", title="", execution=
                 wf_entry[key] = value
     if execution:
         wf_entry["execution"] = execution
-        snapshot_file = _snapshot_workflow_definition(
-            workflow_id, project.get("workflow_file")
-        )
-        if snapshot_file and not workflow_file:
-            wf_entry["workflow_file"] = snapshot_file
     if context:
         wf_entry["context"] = context
     store = _get_store()
