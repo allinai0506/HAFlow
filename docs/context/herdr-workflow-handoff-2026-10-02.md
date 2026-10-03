@@ -48,8 +48,8 @@
 | 1.3 | P0 | `required_task_ids` 跨 workflow → 节点永久无法完成 **✅ 已由 #144 修复** | `projects.py:268` |
 | 1.4 | P0 | `[AUTO ACCEPT]` 绕过验收门禁，`stage_verdict` 空放行 | `herdr-controller.py` |
 | 1.5 | P0 | `ensure_branch_available` 零豁免 → Scheduler v1 并行验收不可执行 | `git_coordination.py:43-57` |
-| 1.6 | P0 | 终化合并不校验门禁裁决对象与 PR head 一致性，缺陷代码可直接进主干 | `herdr-controller.py` 集成路径 |
-| 1.7 | P0 | 僵尸 obligation（`replacement_pending` + `superseded_by=None`）使节点永久无法完成 | `scheduler.py:174/187/196` |
+| 1.6 | P0 | 终合并不校验门禁裁决对象与 PR head 一致性 **✅ 已由 #145 修复** | `pr_delivery.py` |
+| 1.7 | P0 | 僵尸 obligation 使节点永久无法完成 **✅ 已由 #145 修复** | `scheduler.py` |
 | 2.1 | P1 | Supervisor 判 `work_off_track` 却仍放行完成 | `herdr-controller.py` |
 | 2.2 | P1 | launch 失败后 pane 泄漏 | `herdr-worker.py:980/987` |
 | 2.3 | P1 | `launch-reconcile` 无法回收泄漏 pane | `task_resources.py:249` |
@@ -61,7 +61,7 @@
 | 2.9 | P1 | `dispatch` 只接受 `pending`，`working` 无法回退 | `bin/herdr-task:3710` |
 | 2.10 | P1 | 悬空 launch intent 堵死同 `task_id` 重试（校验排在资源登记之后） | `bin/herdr-task:3073/3090/3411` |
 | 2.11 | P1 | Agent Router 不做 preflight 可行性过滤，首选不可用即崩栈 | `herdr-worker.py:720` |
-| 2.12 | P1 | 已并入 `dev` 的修复可在 worktree 被无声回退，无任何一致性守卫 | `agent-worktree-guard.sh` 缺 `origin/dev` 校验 |
+| 2.12 | P1 | 已并入 `dev` 的修复可在 worktree 被无声回退 **✅ 已由 #145 修复** | `repo_hygiene.py` |
 | 3.1 | P2 | 同节点无 Agent 多样性保证 | `agent_router.py:421-430` |
 | 3.2 | P2 | `note-add --kind` 不支持 `review` | `bin/herdr-task:7733-7746` |
 | 3.3 | P2 | `gitee-pr.sh create --head` 源恒为 HEAD | `scripts/gitee-pr.sh:269` |
@@ -301,7 +301,12 @@ Scheduler v1 声明的并行验收在默认模板下必然失败；操作者若�
 - 或修正调度器指令模板：非首个验收节点不下发 `--onto`，只下发 `--candidate_sha`。
 - 独立评估锁释放语义：`integrated` 是否应继续持有 `--onto` 分支锁。
 
-### 1.6 终化合并不校验「门禁裁决对象」与「PR head」一致性 ⚠️ 已造成实际影响
+### 1.6 终化合并不校验「门禁裁决对象」与「PR head」一致性 ⚠️ 已造成实际影响 · ✅ 已由 #145 修复
+
+> **✅ 已修复（`1d6955e`，PR #145）**：`herdr/pr_delivery.py` 与 `bin/herdr-task` 新增 `merge-pr`，
+> 合并前校验 PR head SHA 必须等于门禁裁决的 candidate_sha（`shas_identical`，不符即 fail-closed 拒绝合并），
+> 并落 `pull_request_merged` 事件收据（记录 `candidate_sha` 与 `merged_sha`）。
+> ⚠️ 守卫需随 release 部署后才在运行时生效；截至本文修订，运行中的 Controller 仍为 `f8e9dc86`（#144）。
 
 **这是本次收尾阶段发现、且已实际造成生产影响的缺陷。**
 
@@ -348,7 +353,13 @@ src/pages/archives/ComplianceReportView.tsx         displayResult 0 处 ❌
 为 `ca8b6d7fcc` 另建 PR !1520（base=`dev`），并在其描述中如实标注两项门禁 pass 均为人工覆盖放行、
 原 `blocked` 结论逐字保留、以及「合并本 PR 等于接受 M-01 现状」。该 PR 已合并，`dev` 现与 `ca8b6d7fcc` 逐字一致。
 
-### 1.7 僵尸 obligation 使节点永久无法完成，且无自愈路径
+### 1.7 僵尸 obligation 使节点永久无法完成，且无自愈路径 · ✅ 已由 #145 修复
+
+> **✅ 已修复（`1d6955e`，PR #145）**：`required_task_issues` 新增僵尸扫描，产出 `zombie_obligation_unreplaced`；
+> `node_is_complete` 遇之 fail-closed；`herdr-task supersede` 强制 `--by` 或 `--abandon`
+> （不再允许留下无替代者的任务）；新增 `herdr-task check-obligations [--workflow-id] [--json]`
+> 全库巡检命令（本节建议 3 已落地）。回归测试 `tests/test_zombie_obligation_regression.py`（本机 9 项全过）。
+> ⚠️ 同上，运行时生效需待 release 部署。
 
 **现象**
 
@@ -665,7 +676,10 @@ RuntimeError: Worker Deep Preflight ERROR: request not verified
 - 或 `verify_request_preflight` 失败时自动重排候选重试一次，仍失败才报错。
 - 报错应为结构化（哪几个 agent、各自的 `final_status`），而非裸 traceback。
 
-### 2.12 已并入 `dev` 的修复可在 worktree 被无声回退，无任何一致性守卫
+### 2.12 已并入 `dev` 的修复可在 worktree 被无声回退，无任何一致性守卫 · ✅ 已由 #145 修复
+
+> **✅ 已修复（`1d6955e`，PR #145）**：新增 `herdr/repo_hygiene.py` 的 `check_source_cleanliness`，
+> 检测 source root 的未提交跟踪文件改动/删除。回归测试 `tests/test_worker_clone_hygiene_regression.py`。
 
 **现象**
 
@@ -846,6 +860,23 @@ Controller 随后清理 Pane，**产出静默成为孤儿**——无提交、无
 **仍待完成的一步**：任务需求模板中「Agent 创建 PR 并保持待审查」的措辞尚未随之改写。
 本次 workflow 中该措辞仍在诱导 Agent 自建分支、自推远端（§1.1 / §1.2 的直接诱因），
 尽管平台此时已具备合规建 PR 能力。**建议改写模板**，否则冲突会以「Agent 不知道平台能建」的形式复发。
+
+> **⚠️ 三次订正（2026-10-03）—— 核实缺陷前必须扫全分支，不能只看 `origin/main`**
+>
+> 撰写本节的收尾过程中，**连续三次把「已修复」误判为「未修复」**，根因相同：
+> 只检索了 `origin/main`，未检索其他分支与 open PR。三次误判如下：
+>
+> 1. §4.1 / §4.2 被判「未决」→ 实为 `f8e9dc8`（#144）已解决（`projects.py:268`、`pr_delivery.py`）。
+> 2. §1.6 / §1.7 / §2.12 被判「未修」→ 实为 `1d6955e`（#145）已修复。
+> 3. 在 #145 分支上重复劳动，重写了 `6bb4b86` 已包含的模板改动（幸而测试全过、无副作用）。
+>
+> **方法论**（给后续读者与自动化助手）：
+> - 断言「某缺陷未修」之前，必须同时检索 `git log --all`、所有远端分支、以及 open PR；
+>   仅凭 `origin/main` 的文件内容**不足以支撑「未修」结论**。
+> - squash 合并（!1517/!1518/#144/#145 皆如此）会导致 head sha 不等于 dev 侧 sha，
+>   **祖先关系判定不适用于此类合并**，必须用内容级判定。
+> - 反向亦然：断言「已修」同样需要内容级核验，不能只读标题或提交信息。
+
 
 ### 4.2 `required_task_ids` 指向跨 workflow task_id 时的语义 → 已定为「配置错误」
 
