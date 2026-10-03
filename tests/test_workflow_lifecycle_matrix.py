@@ -165,7 +165,7 @@ class TestWorkflowLifecycleMatrix:
 
         # Pause then supersede directly
         _run_task_cli(["pause", "t-pause"], temp_herdr_env)
-        res = _run_task_cli(["supersede", "t-pause", "--reason", "abandoned while paused"], temp_herdr_env)
+        res = _run_task_cli(["supersede", "t-pause", "--abandon", "--reason", "abandoned while paused"], temp_herdr_env)
         assert res.returncode == 0, res.stderr
         assert _get_task(temp_herdr_env, "t-pause")["status"] == "superseded"
 
@@ -270,7 +270,7 @@ class TestWorkflowLifecycleMatrix:
         for st in ("dispatched", "working", "rework", "blocked", "paused", "cleaned"):
             t_id = f"t-sup-{st}"
             _seed_task(temp_herdr_env, t_id, status=st)
-            res = _run_task_cli(["supersede", t_id, "--reason", "lifecycle test"], temp_herdr_env)
+            res = _run_task_cli(["supersede", t_id, "--abandon", "--reason", "lifecycle test"], temp_herdr_env)
             assert res.returncode == 0, f"Failed to supersede from {st}: {res.stderr}"
             assert _get_task(temp_herdr_env, t_id)["status"] == "superseded"
 

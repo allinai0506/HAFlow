@@ -53,13 +53,23 @@ def delivery(tmp_path, monkeypatch):
 
 
 class Provider:
-    def __init__(self): self.rows=[]; self.created=0
+    def __init__(self): self.rows=[]; self.created=0; self.merged=None
     def list_open(self, head, base): return self.rows
     def create(self, head, base, title, body, draft):
         self.created += 1
         row={'number':1,'html_url':'https://github.com/test/project/pull/1',
              'state':'open','head':{'sha':self.sha,'ref':head},'base':{'ref':base}}
         self.rows=[row]; return row
+    def get_pr(self, number):
+        for r in self.rows:
+            if r.get('number') == number: return r
+        return {'number': number, 'html_url': f'https://github.com/test/project/pull/{number}',
+                'state': 'open', 'head': {'sha': getattr(self, 'pr_head_sha', self.sha), 'ref': 'herdr/integration-t'},
+                'base': {'ref': 'main'}}
+    def merge(self, number, merge_method='merge'):
+        self.merged = number
+        return {'merged': True, 'sha': getattr(self, 'pr_head_sha', self.sha)}
+
 
 
 def test_platform_publication_uses_integrated_sha_even_from_anchor(delivery):
@@ -207,3 +217,50 @@ def test_pr_requires_actual_gate_candidate_evidence(delivery,verified):
         create_task_pr(store,'t',title='Fix',client=provider)
     assert provider.created == 0
     assert subprocess.run(['git','-C',str(remote),'show-ref'],capture_output=True).returncode == 1
+
+
+def test_merge_task_pr_verifies_gate_sha_and_merges(delivery):
+    from herdr.pr_delivery import merge_task_pr
+    store, repo, remote, sha = delivery
+    provider = Provider()
+    provider.sha = sha
+    result = merge_task_pr(store, 't', pr_number=1, client=provider)
+    assert result['status'] == 'merged'
+    assert result['candidate_sha'] == sha
+    assert provider.merged == 1
+    assert store.list_events(task_id='t', event_type='pull_request_merged')
+
+
+def test_merge_task_pr_rejects_unverified_candidate_sha(delivery):
+    from herdr.pr_delivery import merge_task_pr
+    store, repo, remote, sha = delivery
+    provider = Provider()
+    provider.sha = sha
+    # Simulate §1.6: PR head is an unverified old commit, while gate verified 'sha'
+    provider.pr_head_sha = '8be3099a60000000000000000000000000000000'
+    with pytest.raises(ValueError, match='differs from gate-certified candidate'):
+        merge_task_pr(store, 't', pr_number=1, client=provider)
+    assert provider.merged is None
+    assert not store.list_events(task_id='t', event_type='pull_request_merged')
+
+
+def test_merge_pr_cli(delivery, monkeypatch):
+    from herdr.pr_delivery import PullRequestClient
+    import importlib.machinery
+    import importlib.util
+    import sys
+    from herdr import pr_delivery
+    store, repo, remote, sha = delivery
+    provider = Provider()
+    provider.sha = sha
+    monkeypatch.setattr(pr_delivery, 'PullRequestClient', lambda *args: provider)
+
+    path = Path(__file__).resolve().parents[1] / 'bin/herdr-task'
+    spec = importlib.util.spec_from_loader('bug1002_merge_cli', importlib.machinery.SourceFileLoader('bug1002_merge_cli', str(path)))
+    cli = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cli)
+
+    monkeypatch.setattr(sys, 'argv', ['herdr-task', 'merge-pr', 't', '--number', '1', '--method', 'squash'])
+    cli.main()
+    assert provider.merged == 1
+    assert store.list_events(task_id='t', event_type='pull_request_merged')

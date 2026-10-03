@@ -272,7 +272,7 @@ def test_real_cli_supersede_retains_obligation_until_linked_replacement(tmp_path
     for tid, status in [('spec', 'cleaned'), ('review', 'failed')]:
         store.save_task({'task_id': tid, 'workflow_id': 'wf', 'node': 'requirements', 'status': status})
     cli = load('bin/herdr-task', 'cli_supersede_obligation')
-    cli.supersede_task('review', reason='retry with new worker')
+    cli.supersede_task('review', reason='retry with new worker', allow_pending=True)
     assert store.get_task('review').get('replacement_pending') is True
     ctrl = load('services/herdr-controller.py', 'ctrl_supersede_obligation')
     monkeypatch.setattr(ctrl, 'load_tasks', lambda: store.list_tasks(workflow_id='wf'))

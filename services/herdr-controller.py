@@ -1152,6 +1152,7 @@ def _invalidate_single_task(task_id, gate_node_id, reuse=False):
     result = subprocess.run(
         [
             TASK_MANAGER, "supersede", task_id,
+            "--allow-pending",
             "--reason", f"fix-loop: gate {gate_node_id} blocked",
         ],
         text=True,
@@ -1347,6 +1348,7 @@ def invalidate_for_fix_loop(workflow_id, gate_node_id, workflow_cfg, retry_node=
         result = subprocess.run(
             [
                 TASK_MANAGER, "supersede", task_id,
+                "--allow-pending",
                 "--reason", f"fix-loop: gate {gate_node_id} blocked",
             ],
             text=True,
@@ -1516,6 +1518,7 @@ def recover_infra_failed_tasks(workflow_id, tasks=None):
         result = subprocess.run(
             [
                 TASK_MANAGER, "supersede", task_id,
+                "--allow-pending",
                 "--reason", "auto-recover: infrastructure failure",
             ],
             text=True,
@@ -1616,6 +1619,7 @@ def recover_router_isolation_tasks(workflow_id, tasks=None):
         result = subprocess.run(
             [
                 TASK_MANAGER, "supersede", task.get("task_id"),
+                "--allow-pending",
                 "--reason", "router pool recovered; replacement eligible",
             ],
             text=True,
@@ -2177,6 +2181,7 @@ def invalidate_for_merged_fix_loop(
             continue
         result = subprocess.run(
             [TASK_MANAGER, "supersede", task_id,
+             "--allow-pending",
              "--reason", f"fix-loop: gates {'+'.join(gate_ids)} blocked"],
             text=True, capture_output=True,
         )
