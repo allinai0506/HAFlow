@@ -1,8 +1,8 @@
 # Handoff：workflow `wf-project-1002-01` 期间发现的 HAFlow 问题清单
 
-> 报告时间：2026-10-02
-> 触发场景：NexusArchive「合规报告请求竞态 + JSON 导出假成功」工作流全流程（requirements → plan → implementation）
-> 涉及 release：`22fb1a9d` → `c0fdee6c` → `c0cf2a00`（当前）
+> 报告时间：2026-10-02（**2026-10-03 收尾修订**）
+> 触发场景：NexusArchive「合规报告请求竞态 + JSON 导出假成功」工作流全流程（requirements → plan → implementation → test → review）
+> 涉及 release：`22fb1a9d` → `c0fdee6c` → `c0cf2a00` → `cb6223d1` → `f8e9dc86`（收尾时当前）
 > 代码基线：`~/HAFlow` @ `c0cf2a0`（`main`）
 > 本文档只做记录与建议，**未修改任何 HAFlow 代码**（唯一例外见 §4，已修复并部署）
 
@@ -10,7 +10,12 @@
 
 ## 0. 摘要
 
-本次 workflow 跨越 3 个节点、经历 2 次服务器重启、1 次派发被中断，最终 implementation节点交付成功（`integrated` + `verdict=pass`，PR #1514）。过程中暴露 **26 个 HAFlow 问题**，其中 5 个为阻断级。
+本次 workflow 跨越 5 个节点、经历 2 次服务器重启、1 次派发被中断、2 轮 fix-loop、3 次门禁人工覆盖放行，
+最终 implementation / test / review 三节点交付成功并全部并入 `dev`（PR !1514 + PR !1520）。
+过程中暴露 **29 个 HAFlow 问题**，其中 7 个为阻断级。
+
+> **收尾修订说明（2026-10-03）**：§1.6、§1.7、§2.12 为收尾阶段新发现，其中 §1.6 已造成实际生产影响
+> （主干一度带着未裁决的缺陷代码上线）。交付遗留技术债见 §6 附录 A。
 
 其中最值得注意的不是单个 bug，而是**两条协议层面的死结**（§1.2、§3.1）：平台约定「收尾节点分支不推送」，而任务需求要求「Agent 创建 PR 并保持待审查」，而 Herdr 本身**不具备建 PR 能力**。这三者无法同时满足，任何单点修复都绕不开。
 
@@ -25,6 +30,8 @@
 | 1.3 | P0 | `required_task_ids` 跨 workflow → 节点永久无法完成 | `scheduler.py:138-155` |
 | 1.4 | P0 | `[AUTO ACCEPT]` 绕过验收门禁，`stage_verdict` 空放行 | `herdr-controller.py` |
 | 1.5 | P0 | `ensure_branch_available` 零豁免 → Scheduler v1 并行验收不可执行 | `git_coordination.py:43-57` |
+| 1.6 | P0 | 终化合并不校验门禁裁决对象与 PR head 一致性，缺陷代码可直接进主干 | `herdr-controller.py` 集成路径 |
+| 1.7 | P0 | 僵尸 obligation（`replacement_pending` + `superseded_by=None`）使节点永久无法完成 | `scheduler.py:174/187/196` |
 | 2.1 | P1 | Supervisor 判 `work_off_track` 却仍放行完成 | `herdr-controller.py` |
 | 2.2 | P1 | launch 失败后 pane 泄漏 | `herdr-worker.py:980/987` |
 | 2.3 | P1 | `launch-reconcile` 无法回收泄漏 pane | `task_resources.py:249` |
@@ -36,6 +43,7 @@
 | 2.9 | P1 | `dispatch` 只接受 `pending`，`working` 无法回退 | `bin/herdr-task:3710` |
 | 2.10 | P1 | 悬空 launch intent 堵死同 `task_id` 重试（校验排在资源登记之后） | `bin/herdr-task:3073/3090/3411` |
 | 2.11 | P1 | Agent Router 不做 preflight 可行性过滤，首选不可用即崩栈 | `herdr-worker.py:720` |
+| 2.12 | P1 | 已并入 `dev` 的修复可在 worktree 被无声回退，无任何一致性守卫 | `agent-worktree-guard.sh` 缺 `origin/dev` 校验 |
 | 3.1 | P2 | 同节点无 Agent 多样性保证 | `agent_router.py:421-430` |
 | 3.2 | P2 | `note-add --kind` 不支持 `review` | `bin/herdr-task:7733-7746` |
 | 3.3 | P2 | `gitee-pr.sh create --head` 源恒为 HEAD | `scripts/gitee-pr.sh:269` |
@@ -268,6 +276,109 @@ Scheduler v1 声明的并行验收在默认模板下必然失败；操作者若�
   应允许共享 `--onto`。
 - 或修正调度器指令模板：非首个验收节点不下发 `--onto`，只下发 `--candidate_sha`。
 - 独立评估锁释放语义：`integrated` 是否应继续持有 `--onto` 分支锁。
+
+### 1.6 终化合并不校验「门禁裁决对象」与「PR head」一致性 ⚠️ 已造成实际影响
+
+**这是本次收尾阶段发现、且已实际造成生产影响的缺陷。**
+
+**现象**
+
+`wf-project-1002-01` 的两个门禁（`test` / `review`）最终裁决对象均为 `ca8b6d7fcc`（第二轮候选，含展示侧结果身份掩码）。
+但 Gitee 上待审查的 PR !1514 其 head 停在**第一轮候选 `8be3099a6`** —— 该 PR 从创建起就从未指向门禁裁决对象。
+
+```
+PR !1514  head = agent/opencode/feat-impl-compliance-race-json-truth @ 8be3099a6
+门禁裁决   = ca8b6d7fcc  (parent 即 8be3099a6)
+```
+
+`ca8b6d7fcc` 虽已推到 `origin/herdr/integration-impl-compliance-race-json-truth`，但**没有任何 PR 指向它**。
+
+**后果**
+
+`2026-10-03T16:52:57+08:00` PR !1514 被合并，合并的是 `8be3099a6`。合并后 `dev` 上：
+
+```
+src/pages/archives/hooks/useComplianceReport.ts      seq 守卫 3 处 ✅  displayResult 0 处 ❌
+src/pages/archives/ComplianceReportView.tsx         displayResult 0 处 ❌
+```
+
+即**主干一度带着已知缺陷 M-01 上线**：提交帧缺少档案标识时仍会误显 loading。
+门禁的 `pass` 裁决（且是两次人工覆盖放行后的 pass）对应的代码根本没进主干，而进了主干的代码从未被门禁裁决过。
+
+**根因**
+
+集成 / 终化路径只校验「PR 是否 open」「target 分支是否已并入」，**不比对 `candidate_sha` 与最近一次门禁裁决的 `candidate_sha` 是否一致**。
+事件模板下发的 `candidate_sha` 连续两个节点（test、review）都是陈旧值 `8be3099a6`（见 §2.10 相关），
+而该陈旧值从未被任何一致性检查拦下。
+
+**建议**
+
+- 合并 / 终化前 **fail-closed** 比对：`PR.head.sha` 必须等于（或为）该 workflow 最近一次门禁裁决记录的 `candidate_sha`，
+  不一致则拒绝合并并要求操作者显式声明「以旧候选合并」及其理由。
+- 门禁裁决落库时记录被裁决的 `candidate_sha`，作为该 workflow 的不可变验收基线；
+  调度器下发候选身份时应以此为基准，而非缓存的 base 派生值。
+- 为 `herdr-task supersede`/集成路径补一条回归：构造「门禁裁决 A、PR head B」的 workflow，断言合并被拒。
+
+**补救（本工作流已执行）**
+
+为 `ca8b6d7fcc` 另建 PR !1520（base=`dev`），并在其描述中如实标注两项门禁 pass 均为人工覆盖放行、
+原 `blocked` 结论逐字保留、以及「合并本 PR 等于接受 M-01 现状」。该 PR 已合并，`dev` 现与 `ca8b6d7fcc` 逐字一致。
+
+### 1.7 僵尸 obligation 使节点永久无法完成，且无自愈路径
+
+**现象**
+
+收尾时 `test` 与 `review` 两节点的任务**全部 `completed`**、`stage_verdict=pass`，但
+`node-status` 持续报 `status=in_progress  complete=False`，`stage advance` 卡住不推进。
+
+```python
+# scheduler.py node_is_complete
+active = [t for t in tasks if t.get("status") != "superseded" and not t.get("superseded_by")]
+#   → test-compliance-display-mask-export-probes: status=completed, active=True
+#     且 str("completed") in NODE_DONE_STATUSES == True
+obligations = list(required_task_ids or []) + [
+    t.get("task_id") for t in tasks if t.get("replacement_pending")]        # :174
+#   → 混入 test-compliance-race-json-truth: status=superseded,
+#     replacement_pending=True, superseded_by=None   ← 僵尸
+for required_id in obligations:
+    ...
+    current = task.get("superseded_by")                                   # :196 → None
+    replacement = by_id.get(current)                                      # :197 → None
+    # 下一轮 while: task = by_id.get(None) → None → return False           # :187
+```
+
+**机制**：`replacement_pending=True` 的任务被收进 `obligations`，但它的 `superseded_by` 为 `None`，
+血缘链追到 `None` 后 `by_id.get(None)` 返回 `None`，直接 `return False`。
+
+**为何严重**
+
+1. **与实际完成状态完全脱钩** —— 判定失败的原因不在门禁任务本身，而在一条早已 `superseded` 的墓碑记录上。
+   排查者看节点任务列表会看到「都完成了」，但 `complete=False`，极具误导性，且没有任何错误信息指向真正的元凶。
+2. **无自愈路径** —— Controller 的 `stage advance` 在 `complete=False` 时不会推进；
+   `node_usage` / `supersede` 等常规路径都不会自动补齐 `superseded_by`。
+   最终必须人工执行 `herdr-task supersede --by <替代任务>` 才能解开（本次即如此处置）。
+3. **`:190-195` 的 abandon 分支存在覆盖缺口** —— 该分支以 `replacement_pending is False` 为条件，
+   恰好**不覆盖** `replacement_pending=True` 且 `superseded_by=None` 这一僵尸形态：
+
+```python
+if (task.get("replacement_pending") is False
+        and not task.get("superseded_by")
+        and required_id not in (required_task_ids or [])):
+    break          # ← 要求 replacement_pending 已是 False，僵尸形态进不来
+```
+
+**建议**
+
+- `supersede` 落库时**强制三选一**：`--by <替代任务_id>` 或 `--abandon`，
+  不允许留下 `status=superseded` + `replacement_pending=True` + `superseded_by=None` 的组合。
+- `node_is_complete` 对该组合 **fail-loud**：显式抛错或返回可读原因（如
+  `僵尸 obligation: <task_id> 声明待替代但无替代者`），而非静默 `False`。
+- 增加一条不变量巡检：扫描全部 `tasks.json`，报告任何 `replacement_pending and not superseded_by` 的任务。
+
+**本次处置**：对 `test-compliance-race-json-truth` → `test-compliance-display-mask-export-probes`、
+`wf-project-1002-01-review-auto` → `review-compliance-display-mask-export-probes`
+如实标注替代关系（两者均为 `completed`+`pass` 的真实替代任务，非伪造血缘），
+三节点 `node_is_complete` 随即由 `False` 翻为 `True`。
 
 ---
 
@@ -506,6 +617,50 @@ RuntimeError: Worker Deep Preflight ERROR: request not verified
 - 或 `verify_request_preflight` 失败时自动重排候选重试一次，仍失败才报错。
 - 报错应为结构化（哪几个 agent、各自的 `final_status`），而非裸 traceback。
 
+### 2.12 已并入 `dev` 的修复可在 worktree 被无声回退，无任何一致性守卫
+
+**现象**
+
+收尾时发现 `wf-project-1002-01` 的 source root（`~/nexusarchive-worktrees/gemini`）已被并行工作切换到
+`agent/codex/fix-bug1002-herdr-delivery`，并留下 25 个文件、`+55/-731` 的**未提交改动**。
+其内容实质是把**两个已 merged 进 `dev` 的修复整体回退**：
+
+| 未提交改动 | 被撤销的已合入修复 |
+|---|---|
+| 删 `UserService.verifyUserPassword`、删 `DisableMfaModal.tsx`、MFA 测试 -218 | !1517 fix(security): MFA 禁用无密码校验漏洞 |
+| `scripts/agent-worktree-guard.sh` -17、删 `scripts/test/test-agent-worktree-guard-cow.sh` -34 | !1518 fix: Herdr PR 源身份与 CoW 交付门禁 |
+
+**核验**（`origin/dev` 内容级判定，非 head sha 祖先判定 —— 两个 PR 走 squash，dev 侧 sha 与 head sha 不同）
+
+```
+origin/dev 含 verifyUserPassword                  ✅
+origin/dev 含 DisableMfaModal.tsx                 ✅
+origin/dev 含 test-agent-worktree-guard-cow.sh    ✅
+origin/dev 的 agent-worktree-guard.sh 含 CoW 门禁  ✅
+```
+
+**根因**
+
+1. **worktree 复用无同步校验** —— `~/nexusarchive-worktrees/gemini` 是多个 workflow 轮流使用的 source root，
+   切分支后不会与 `origin/dev` 对齐；`agent-worktree-guard.sh` 只管分支所有权，不校验内容是否回退了已合入的修复。
+2. **无任务认领的孤儿改动无人清理** —— `tasks.json` 中无 `running` / `pending` 任务，
+   这些改动不属于任何在跑的工作流，也没有任何机制在 workflow 结束时回收未提交残留。
+3. **最危险的一点**：这类改动**提交即扩散**。若被 Agent 当作本任务成果提交，
+   会把已修复的 MFA 漏洞与交付门禁一起推回主干，且 diff 看起来像"正常的代码清理"。
+
+**建议**
+
+- `agent-worktree-guard.sh` 增加提交前一致性检查：若工作树相对 `origin/dev` **删除**了
+  `dev` 上已存在的安全 / 门禁关键符号（如 `verifyUserPassword`、`CoW` 门禁函数），直接 fail-closed 拒绝提交。
+- Controller 在每个节点收尾时校验 source root 工作区：存在未提交改动则产出 attention，
+  并记录「改动归属哪个 task」，孤儿改动不得静默留存到下一个 workflow。
+- 长期：切换 source root 分支时先要求工作区干净，或自动 stash 并与 task_id 绑定。
+
+**本次处置**：先备份（`worktree.patch` + 6 个被删文件原件 + `HEAD`/`BRANCH`，
+`git apply --reverse --check` 验证可完整还原），
+再 `git checkout -- .` 与定向 `git clean -fd`，四项关键内容全部回到已合入 `dev` 的状态，工作树与 `HEAD` 一致。
+本工作流自身的合规前端改动不在该 25 个文件内（`src/pages/archives` 在清理前即为干净），无自伤。
+
 ---
 
 ## 3. P2 — 可用性与可观测性
@@ -646,13 +801,36 @@ Controller 随后清理 Pane，**产出静默成为孤儿**——无提交、无
 
 ## 6. 附录 A：本次 workflow 的交付状态（供交叉核对）
 
+### 6.1 最终交付（2026-10-03 收尾时）
+
 | 项 | 值 |
 |---|---|
-| 任务 | `impl-compliance-race-json-truth`，`integrated` + `stage_verdict=pass` |
-| 提交 | `6f5fb1c18`（取数竞态）、`8be3099a6`（JSON 导出真实性） |
-| 改动 | 4 文件 +877/-22，均在允许范围内 |
-| 测试 | 42 + 9 = 51 条 |
-| PR | #1514 → https://gitee.com/allinai888/dianzikuaijidangan/pulls/1514（待审查，未合并） |
+| implementation 节点 | `impl-compliance-race-json-truth`，`cleaned` + `stage_verdict=pass` |
+| 第一轮提交 | `6f5fb1c18`（取数竞态）、`8be3099a6`（JSON 导出真实性） |
+| 第二轮提交 | `ca8b6d7fcc`（展示侧结果身份掩码 + 哨兵收窄 + 导出副作用回归），4 文件 +366/-15 |
+| 门禁裁决对象 | `ca8b6d7fcc`（test / review 两节点均为 `pass`） |
+| PR !1514 | 已 merged（合并的是第一轮 `8be3099a6`，见 §1.6） |
+| PR !1520 | 已 merged（`ca8b6d7fcc`，16:58:45），为 §1.6 的补救 |
+| `dev` 现状 | `ecf7c7da3`，合规模块与 `ca8b6d7fcc` **逐字一致**（`src/pages/archives` 残余 diff 为空） |
+| 节点状态 | implementation / test / review 均 `complete=True`；wrapup 未派发 |
+| 工作区 | 干净，0 改动 |
+
+**门禁裁决的透明度（重要）**：两个门禁的 `pass` **均非门禁原生通过，而是人工覆盖放行** ——
+test 经操作者控制台 FORCE PASS，review 经授权由 `herdr-task set --verdict pass` 强制放行。
+两处原 `blocked` 结论已逐字保留在各自 `stage_verdict_note`（review 的开头标注 `[FORCE PASS by operator]`）。
+
+### 6.2 交付遗留技术债（已随 PR !1520 进入主干，属主干现状）
+
+以下三项经裁决**不在本工作流内修复，转技术债**。合并 PR !1520 等于接受 M-01 现状。
+
+| # | 缺口 | 性质 | 说明 |
+|---|---|---|---|
+| **M-01** | 提交帧缺档案标识时误显 loading；`useComplianceReport.race.test.ts` 的 H1b 用例**复制被测公式**，不构成可证伪回归 | 测试套件加固 | 已认账：M-01 的判据系派发时额外加严，**超出原始规格**（原始规格仅要求「缺标识时使在途请求失效」，该点已满足）。基线同样复现、单帧、无数据串档、无非法下载。语义张力：`error` 非空且 `result` 陈旧时 `displayLoading = s.loading`，依赖 loading/error 互斥不变量 |
+| **M-02** | 13 条并发用例**非逐条基线必红**，无法证明旧实现必然失败 | 测试套件加固 | 与 M-01 同批登记 |
+| **L-01** | `ca8b6d7fcc` 以 `--no-verify` 提交，10 个门禁原始收据未留存 | 提交留痕规范 | 根本修法：**禁止 `--no-verify` 成为常规手段**。该提交为解除 `agent-worktree-guard.sh` 对 CoW clone 的结构性拒绝（§3.8）而被迫使用 |
+
+**复核状态（收尾时）**：`dev` 已含 M-01 相关代码（`displayResult` hook 10 处 / view 7 处），
+即修复了误显 loading 的**行为**，但**缺可证伪回归**去锁住它。补测时应优先补回归而非再改实现。
 
 ---
 
@@ -698,6 +876,32 @@ PY
 # §3.10 candidate_sha 与 --onto 的耦合
 sed -n '60,78p' herdr/git_coordination.py       # pinned_local_onto_matches
 sed -n '40,107p' herdr/direct_dispatch.py | grep -n 'refs/remotes/origin'
+
+# §1.6 门禁裁决对象与 PR head 脱节（PR !1514 head vs 门禁 candidate_sha）
+curl -s -H "Authorization: token $GITEE_TOKEN" \
+  "https://gitee.com/api/v5/repos/allinai888/dianzikuaijidangan/pulls/1514" \
+  | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['state'], d['head']['sha'][:12])"
+# 对照门禁裁决记录：candidate_sha 应为 ca8b6d7fcc…
+
+# §1.7 僵尸 obligation：不变量巡检（全库扫描）
+python3 - <<'PY'
+import json, glob
+for p in glob.glob('/Users/user/.herdr-controller/tasks.json'):
+    d = json.load(open(p)); ts = d.get('tasks', d) if isinstance(d, dict) else d
+    for t in ts:
+        if t.get('replacement_pending') and not t.get('superseded_by'):
+            print(f"  ZOMBIE {t.get('workflow_id')} {t.get('node')} {t.get('task_id')}")
+PY
+# 复现节点永不完成：reproduce → node_is_complete 为 False，但任务实际全 completed
+# PYTHONPATH=<release> python3 -c "from herdr.scheduler import node_is_complete; ..."
+
+# §2.12 已合入 dev 的修复被 worktree 回退（内容级判定，不能用 head sha 祖先关系）
+cd ~/nexusarchive
+for f in src/pages/settings/mfa/components/DisableMfaModal.tsx \
+         scripts/test/test-agent-worktree-guard-cow.sh; do
+  git cat-file -e origin/dev:$f 2>/dev/null && echo "  dev 已含 $f（若工作树缺失即为回退）"
+done
+git status --porcelain -- src/pages/settings/mfa scripts/test
 
 # §3.8 CoW clone 的 herdr/* 分支拒绝（NexusArchive 仓库侧）
 sed -n '244,254p' /Users/user/nexusarchive-worktrees/gemini/scripts/agent-worktree-guard.sh
