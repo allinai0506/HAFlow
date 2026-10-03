@@ -109,3 +109,11 @@ herdr-deep-preflight --workflow-id <workflow> --agent <agent> --deep --apply
 主仓库compileall、无扩展Python CLI AST/帮助入口、两沙盒diff检查及Nexus bash语法检查通过。独立评审最后对全量3个兼容失败的收敛复核109通过，真实输出保护不放宽；相关实现专项203通过。没有剩余已确认阻塞缺陷。
 
 主沙盒为独立CoW而非注册Herdr Task，没有伪称本任务verify-baseline已运行；受控CLI/Controller→核心→临时SQLite/文件→公开读回的链路由测试验收。修改尚未提交、推送、合并、部署或重启生产；真实外部PR发布、生产重跑和最终文案新截图未执行。原生无CAS边界如上保留。
+
+## PR阶段同步与复核（2026-10-03）
+
+以上最终交付证据记录上一轮本地阶段；用户随后明确授权提交PR。主沙盒同步origin/main `c52a41a`，保留上游Run快照、替换任务义务及Worker推送保护；Nexus同步origin/dev `272c97915`。跨模型独立审查为gpt-6-astra，补齐预检全局锁网络等待、同Agent旧探针覆盖新结果及合法context目录误拒绝的并发/兼容回归。合法context纯目录完成物理收尾后默认保留Artifact；未知身份和Git未保存产出继续阻止清理。最新冻结候选的测试与评审证据由下方PR阶段验收记录说明。
+
+### PR候选最终验收
+
+最新全量 `pytest -q -ra`：3308 passed、2 skipped、157 subtests passed，0 failed，退出0，563.01秒。两项跳过均为临时HOME没有launchd安装目录的环境用例。代码/测试SHA256前后相同：`0a08a795f140bbc3d0eff09c710462146816370c83859b5874ba690f6e49adbe`；日志 `/tmp/FIX_BUG1002-pr-pytest-v2.log`。跨模型独立路由76项、收尾93项通过，作者专项121/110项通过；compileall、无扩展CLI AST、diff检查通过。评审结论MERGE_READY，用户授权交付为GitHub待审查PR；Nexus Gitee PR #1518已open且源SHA核对一致。先前3244计数及未提交陈述为本地阶段历史记录，当前验收以本节为准。未合并、部署、重启或生产复跑。

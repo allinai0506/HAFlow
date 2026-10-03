@@ -44,6 +44,7 @@ class PreflightHardeningTest(unittest.TestCase):
         self.wf_id = "wf-preflight-hardening"
         self.patchers = [
             patch("herdr.agent_router._get_store", return_value=self.store),
+            patch("herdr.deep_preflight.preflight_identity", return_value={"verifiable":True,"fingerprint":"controlled"}),
             patch("herdr.deep_preflight.inspect", side_effect=lambda *args, **kw: [
                 {"agent": a, "final_status": "READY", "request_verified": True,
                  "preflight_identity": {"verifiable": True, "fingerprint": "controlled"}}

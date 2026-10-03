@@ -5703,6 +5703,11 @@ def _teardown_output_guard(task):
                 identity = {}
             if identity.get("task_id") != task.get("task_id") or (task.get("run_id") and identity.get("run_id") != task.get("run_id")):
                 return {"reason": "clone_identity_changed"}
+        # Context workspaces are plain directories. Their artifacts remain in
+        # place; Git metadata, when present, must still pass the Git output gate.
+        if (task.get("execution_mode") == "context" and task.get("integration_mode") == "none"
+                and path.is_dir() and not os.path.lexists(path / ".git")):
+            return {"reason": ""}
         root = run_bounded(["git", "-C", str(path), "rev-parse", "--show-toplevel"], timeout=5, output_limit=8192)
         if root["status"] != "completed" or root["exit_code"] or Path(root["stdout"].strip()).resolve() != path.resolve():
             return {"reason": "clone_git_inventory_unknown"}
@@ -5737,6 +5742,8 @@ def clone_deletable(task):
     output = _teardown_output_guard(task)
     if output["reason"]:
         return False, output["reason"]
+    if task.get("execution_mode") == "context" and task.get("integration_mode") == "none":
+        return False, "context artifacts retained; explicit purge required"
     if task.get("integration_ref") or task.get("integration_branch"):
         return True, "integrated"
     if task.get("status") == "superseded":

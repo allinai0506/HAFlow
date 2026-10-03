@@ -108,3 +108,65 @@ def test_late_output_retention_prevents_workflow_completed(tmp_path,cli,monkeypa
     assert store.get_workflow('wf')['status']!='completed'
     assert store.get_task('t')['status']=='integrated'
     assert repo.exists() and store.list_events(event_type='teardown_output_retained')
+
+@pytest.mark.parametrize('command', ['finalize', 'close-workflow'])
+@pytest.mark.parametrize('has_output', [False, True])
+def test_context_workspace_real_cli_retains_artifacts(tmp_path, monkeypatch, cli, command, has_output):
+    import os, sys
+    from herdr.state_store import get_state_store
+    spec = importlib.util.spec_from_file_location('context_worker', Path(__file__).resolve().parents[1]/'services/herdr-worker.py')
+    worker = importlib.util.module_from_spec(spec); spec.loader.exec_module(worker)
+    monkeypatch.setattr(worker, 'CLONE_ROOT', tmp_path/'clones')
+    repo = worker.create_context_task_workspace('context-task')
+    if has_output:
+        (repo/'artifact.txt').write_text('context artifact must survive')
+    store = get_state_store(tmp_path/'state.db')
+    store.save_workflow({'workflow_id':'wf','status':'running','project_id':'p'})
+    store.save_task({'task_id':'context-task','workflow_id':'wf','node':'docs','status':'completed',
+                    'clone_path':str(repo),'execution_mode':'context','integration_mode':'none',
+                    'integration_ref':'untrusted-ref','integration_sha':'a'*40})
+    env = {**os.environ,'HERDR_STATE_DB':str(tmp_path/'state.db'),'TASKS_FILE':str(tmp_path/'tasks.json')}
+    result = subprocess.run([sys.executable,str(Path(__file__).resolve().parents[1]/'bin/herdr-task'),command,
+                             'context-task' if command=='finalize' else 'wf'],env=env,text=True,capture_output=True,timeout=20)
+    assert result.returncode == 0, result.stdout+result.stderr
+    assert repo.exists() and not (repo/'.git').exists()
+    if has_output:
+        assert (repo/'artifact.txt').read_text() == 'context artifact must survive'
+    assert store.get_task('context-task')['status'] == 'cleaned'
+    assert store.get_task('context-task')['clone_retained'] is True
+    if command == 'close-workflow':
+        assert store.get_workflow('wf')['status'] == 'completed'
+
+
+def test_context_metadata_cannot_bypass_git_or_identity_guard(tmp_path,cli):
+    repo = tmp_path/'repo'; repo.mkdir()
+    task = {'task_id':'t','clone_path':str(repo),'execution_mode':'context','integration_mode':'none',
+            'status':'completed','integration_ref':'fake'}
+    (repo/'.herdr-launch-identity.json').write_text('{"task_id":"other"}')
+    assert cli._teardown_output_guard(task)['reason'] == 'clone_identity_changed'
+    (repo/'.herdr-launch-identity.json').unlink()
+    subprocess.run(['git','-C',str(repo),'init'],check=True,capture_output=True)
+    (repo/'output').write_text('valuable')
+    assert cli._teardown_output_guard(task)['reason'] == 'unpreserved_worktree_output'
+    assert cli.clone_deletable(task)[0] is False
+
+@pytest.mark.parametrize('mode', [{}, {'execution_mode':'context','integration_mode':'git'},
+                                  {'execution_mode':'git','integration_mode':'none'}])
+def test_unknown_plain_workspace_still_refused(tmp_path,cli,mode):
+    repo = tmp_path/'plain'; repo.mkdir()
+    assert cli._teardown_output_guard({'task_id':'t','clone_path':str(repo),**mode})['reason'] == 'clone_git_inventory_unknown'
+
+
+def test_context_clone_requires_explicit_purge_even_if_superseded(tmp_path,cli,monkeypatch):
+    repo = tmp_path/'plain'; repo.mkdir(); (repo/'artifact').write_text('valuable')
+    task = {'task_id':'t','clone_path':str(repo),'execution_mode':'context','integration_mode':'none',
+            'status':'superseded','integration_ref':'fake','integration_sha':'a'*40}
+    assert cli.clone_deletable(task)[0] is False
+    monkeypatch.setattr(cli,'dump_transcript',lambda _:None)
+    monkeypatch.setattr(cli,'close_pane',lambda _:False)
+    calls=[]
+    monkeypatch.setattr(cli,'delete_clone_safely',lambda path:calls.append(path) or True)
+    assert not cli._finalize_one(task)['clone_deleted']
+    assert not calls
+    assert cli._finalize_one(task,purge_clones=True)['clone_deleted']
+    assert calls == [str(repo)]
