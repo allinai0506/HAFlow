@@ -19,7 +19,7 @@ def test_real_reconcile_cli_only_proven_absence_releases(tmp_path, resource_stat
         record_launch_resources(store, intent, {'planned_clone_path': str(clone), 'run_id': 'r'}, now=101)
     if resource_status in ('owned', 'foreign'):
         clone.mkdir(parents=True)
-        tag = {'intent_id': intent['intent_id'] if resource_status == 'owned' else 'foreign', 'task_id': 't', 'run_id': 'r', 'phase': 'workspace_created'}
+        tag = {'intent_id': intent['intent_id'] if resource_status == 'owned' else 'foreign', 'task_id': 't', 'run_id': 'r', 'phase': 'agent_start_requested'}
         (clone / '.herdr-launch-identity.json').write_text(json.dumps(tag))
     bindir = tmp_path / 'bin'
     bindir.mkdir()

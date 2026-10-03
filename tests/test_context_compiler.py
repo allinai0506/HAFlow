@@ -5086,3 +5086,16 @@ def test_dispatch_rejects_context_ref_for_wrong_target(tmp_path: Path):
     )
     assert result["status"] == "failed"
     assert calls == []
+
+
+def test_context_exposes_scoped_derived_frontier_without_overwriting_legacy(tmp_path):
+    from herdr.context_compiler import compile_working_context
+    db=tmp_path/'state.db';_seed_workflow(db)
+    _seed_task(db,_task('impl',node='implementation',status='completed'))
+    _seed_task(db,_task('review',node='review',status='working'))
+    context=compile_working_context(workflow_id='wf-context',task_id='review',agent_role='reviewer',db_path=db)
+    assert context.current_state['workflow_current_stage']=='review'
+    assert context.current_state['workflow_current_nodes']==['review']
+    assert context.current_state['workflow_derived_current_stage']=='review'
+    assert context.current_state['workflow_frontier_source']=='derived_context_scope'
+    assert context.current_state_refs['workflow_current_nodes']=='workflow:wf-context'

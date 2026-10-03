@@ -265,6 +265,24 @@ def project_for_workflow(workflow_id):
     return None
 
 
+def validate_required_task_scope(config, workflow_id, store=None):
+    """Reject known foreign references; absent IDs may be future dispatches."""
+    store = store if store is not None else _get_store()
+    for node in config.get("nodes") or []:
+        for task_id in node.get("required_task_ids") or []:
+            task = store.get_task(task_id)
+            if task is None:
+                continue
+            reason = None
+            if task.get("workflow_id") != workflow_id:
+                reason = "required_task_out_of_workflow"
+            elif (task.get("node") or task.get("stage")) != node.get("id"):
+                reason = "required_task_out_of_node"
+            if reason:
+                raise ValueError(f"node={node.get('id')}: {reason}: {task_id}")
+    return config
+
+
 def workflow_config_for(workflow_id):
     record = project_for_workflow(workflow_id)
     if record and record.get("workflow_file"):
@@ -272,11 +290,11 @@ def workflow_config_for(workflow_id):
         if path.exists():
             cfg = _load(path, None)
             if cfg:
-                return normalize_workflow(cfg)
+                return validate_required_task_scope(normalize_workflow(cfg), workflow_id)
     if LEGACY_WORKFLOW_FILE.exists():
         cfg = _load(LEGACY_WORKFLOW_FILE, None)
         if cfg:
-            return normalize_workflow(cfg)
+            return validate_required_task_scope(normalize_workflow(cfg), workflow_id)
     return None
 
 

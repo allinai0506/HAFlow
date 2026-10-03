@@ -268,7 +268,7 @@ class TestSupersededStats(unittest.TestCase):
     def _card(self):
         with patch.object(
             _ht, "_agent_runtime_status", side_effect=lambda _: None
-        ):
+        ), patch.object(_ht, "load_workflow", return_value={"nodes": [{"id": "plan"}]}):
             payload = _ht._ops_center_payload(
                 workflow_id="wf-1", now=1000, include_tasks=False
             )

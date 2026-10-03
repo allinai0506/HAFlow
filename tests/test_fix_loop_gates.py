@@ -605,9 +605,12 @@ class CloseWorkflowGateTest(unittest.TestCase):
         self.addCleanup(self.herdr_patcher.stop)
 
         clone = os.path.join(self.clone_root, "t1")
-        os.makedirs(os.path.join(clone, ".git"))
+        os.makedirs(clone)
+        subprocess.run(["git", "-C", clone, "init"], check=True, capture_output=True)
         with open(os.path.join(clone, "f.txt"), "w") as f:
             f.write("x")
+        subprocess.run(["git", "-C", clone, "add", "."], check=True, capture_output=True)
+        subprocess.run(["git", "-C", clone, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "baseline"], check=True, capture_output=True)
 
         self.tasks_file.write_text(json.dumps({"tasks": [
             {

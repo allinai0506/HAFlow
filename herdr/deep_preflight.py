@@ -606,11 +606,69 @@ def inspect(project, deep=False, target_agents=None):
         configured_concurrency = int(os.environ.get("HERDR_PREFLIGHT_CONCURRENCY", str(DEFAULT_PREFLIGHT_CONCURRENCY)))
     except (ValueError, TypeError):
         configured_concurrency = DEFAULT_PREFLIGHT_CONCURRENCY
-    max_workers = max(1, min(len(allowed), configured_concurrency))
+    max_workers = max(1, min(len(allowed), configured_concurrency, DEFAULT_PREFLIGHT_CONCURRENCY))
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         rows = list(executor.map(inspect_agent, allowed))
 
     return rows
+
+
+def refresh_workflow_preflight(workflow_id, target_agents=None, *, store=None, _locked=False):
+    """Probe and persist request outcomes in the authoritative workflow record."""
+    if store is None:
+        from herdr.agent_router import _get_store
+        store = _get_store()
+    if not _locked:
+        import fcntl
+        from herdr.agent_router import ROUTER_LOCK_FILE
+        ROUTER_LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with ROUTER_LOCK_FILE.open("a+") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            return refresh_workflow_preflight(workflow_id, target_agents, store=store, _locked=True)
+    record = store.get_workflow(workflow_id)
+    if not record or not record.get("project_id"):
+        raise ValueError("Workflow not found: " + workflow_id)
+    project = project_by_id(record["project_id"]) or record
+    root = project.get("project_root") or record.get("project_root")
+    if not root:
+        raise ValueError("Workflow preflight requires project_root")
+    project = {**project, "project_id": record["project_id"], "project_root": root}
+    allowed = list(project_pool(record["project_id"]).get("allowed_agents", AGENTS))
+    targets = list(dict.fromkeys(target_agents if target_agents is not None else allowed))
+    if len(targets) > len(AGENTS) or any(agent not in AGENTS for agent in targets):
+        raise ValueError("Unknown or excessive preflight candidates")
+    rows = inspect(project, deep=True, target_agents=targets)
+    healthy = set(record.get("healthy_agents", []))
+    unhealthy = dict(record.get("unhealthy_agents") or {})
+    checked = dict(record.get("preflight_agent_checked_at") or {})
+    identities = dict(record.get("preflight_identities") or {})
+    now = time.time()
+    observed = set()
+    for row in rows:
+        agent = row.get("agent")
+        if agent not in targets or agent in observed:
+            raise ValueError("Unexpected preflight result identity")
+        observed.add(agent)
+        identity = row.get("preflight_identity") or {}
+        ready = (row.get("final_status") == "READY" and row.get("request_verified") is True
+                 and identity.get("verifiable") is True)
+        healthy.discard(agent)
+        if ready:
+            healthy.add(agent); unhealthy.pop(agent, None)
+        else:
+            unhealthy[agent] = row.get("final_status", "UNKNOWN")
+        checked[agent] = now
+        identities[agent] = identity
+    for agent in set(targets) - observed:
+        healthy.discard(agent); unhealthy[agent] = "UNKNOWN"
+    updates = dict(healthy_agents=sorted(healthy), unhealthy_agents=unhealthy,
+                   preflight_agent_checked_at=checked, preflight_identities=identities)
+    if set(targets) == set(allowed) and observed == set(allowed):
+        updates["preflight_checked_at"] = now
+    record = store.update_workflow_metadata(workflow_id, updates)
+    from herdr.state_store import sync_workflows_projection
+    sync_workflows_projection(store=store)
+    return record
 
 
 def print_table(rows, project_id, deep):
@@ -654,6 +712,8 @@ def print_table(rows, project_id, deep):
 
 def main():
     ap = argparse.ArgumentParser(description="Herdr Factory Deep Agent Preflight")
+    ap.add_argument("--workflow-id", help="Refresh an authoritative workflow snapshot")
+    ap.add_argument("--apply", action="store_true", help="Persist actual deep request results")
     ap.add_argument("--project-id")
     ap.add_argument("--project-root")
     ap.add_argument("--agent", action="append", dest="agents", help="Check specific agent(s) only")
@@ -661,6 +721,14 @@ def main():
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--auto-disable", action="store_true", help="Disable only agents with explicit hard failures from deep probes")
     args = ap.parse_args()
+
+    if args.apply:
+        if not args.workflow_id or not args.deep:
+            ap.error("--apply requires --workflow-id and --deep")
+        targets = [agent.strip() for item in (args.agents or []) for agent in item.split(",") if agent.strip()]
+        record = refresh_workflow_preflight(args.workflow_id, targets or None)
+        print(json.dumps(record, ensure_ascii=False))
+        return
 
     if args.project_id:
         project = project_by_id(args.project_id)

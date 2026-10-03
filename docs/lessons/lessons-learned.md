@@ -5768,7 +5768,7 @@ scripts/install-herdr-console.sh 的 plist_paths、SNAPSHOT_SERVICES、KICKSTART
 ### 操作规范
 
 1. `smoke_response_verified` 引入 `_strip_ansi`、`_clean_smoke_token` 及 `_is_benign_banner_line`，区分 JSON 模式与纯文本模式的 prompt echo 检查。
-2. `herdr/agent_router.py` 定义 `HARD_UNHEALTHY_STATUSES`，新鲜快照严格隔离所有异常，过期快照放行软性故障进行调度自愈。
+2. `herdr/agent_router.py` 定义 `HARD_UNHEALTHY_STATUSES`，新鲜快照隔离异常；2026-10-03补证：过期软故障只允许进入真实deep请求重验，READY/request_verified/verifiable identity齐备才可选择，不能因TTL失效直接放行执行。定向部分刷新只更新该Agent时间/identity，不将全局快照伪装新鲜。
 3. `herdr/deep_preflight.py` 设定 `DEFAULT_PREFLIGHT_CONCURRENCY = 4`，支持 `HERDR_PREFLIGHT_CONCURRENCY` 动态控流。
 
 ### 验证命令 / 关联证据
@@ -5863,3 +5863,41 @@ wf-project-1002-01 的 plan Worker 在创建 Pane 后报 FileNotFoundError：早
 - 全量自动化测试：`pytest -q` (3180 passed, 157 subtests passed)
 - 代码静态检查：`python3 -m compileall -q herdr services bin tests` 与 `git diff --check`
 
+## 126. 配置拒绝必须贯穿读取与呈现；自动验收不得代替评审（2026-10-03）
+
+### 问题背景
+FIX_BUG1002 handoff 的 required ID 指向外部 workflow，导致任务已集成但节点永远 pending。新增入口校验后，独立审查又复现 `_safe_workflow` 吞掉配置异常，丢失 required IDs，使卡片反而显示 completed。另有已有 blocked 或同节点对抗评审任务被自动完成、验收长调用期间状态变化的边界。
+
+### 经验教训
+fail-closed 不能只存在于解析核心；装配、错误转换和呈现也必须保留拒绝语义。受控变更证据不等同于评审通过。观察模式 PAUSE 只是一条建议，应从日志和事件的 enforcement 字段区分实际干预。
+
+### 操作规范
+配置载入异常保留明确诊断，卡片不得落入缺省完成规则。跨 workflow 仅用于诊断归属，不借用其任务成果。自动验收通过现有 CAS 绑定状态与版本，证据写入原状态事件；保持 pass/blocked 裁决契约。Pane已分配后的失败先区分never-started与start-requested。已证明本进程私有动态分配且未尝试start可rollback；跨进程回收还需split回执terminal_id及实时token核验。未知实例/曾启动执行保留，失败clone安全归档而非删除。managed分配/回收共享全局文件锁；原生close无CAS且人工直接native操作不受锁约束，需明确竞态边界。
+
+### 验证命令 / 关联证据
+`pytest -q tests/test_fix_bug1002.py tests/test_auto_acceptance.py tests/test_herdr_task_ops_center.py tests/test_worker_readiness_contract.py tests/test_supervisor_interception.py`；`tests/test_fix_bug1002.py` 覆盖临时SQLite CAS、配置异常→卡片、真实CLI note写入→公开读回及Worker故障注入。全量结果见 `.omc/verify-FIX_BUG1002.md`；本地验证不等于生产验收。
+
+
+### FIX_BUG1002 全范围续修补证
+
+恢复能力必须有真实操作入口，不能只写“身份未知需人工处理”。`launch-reconcile`提供带完整参数的恢复命令，旧token绑定要求显式never-started证据与reason；认证只写tag/audit，后续apply才回收。legacy完成恢复按run/version签发receipt-v1，声明、验收、合并、部署仍分开，不由idle或文件推定成功。状态继续复用rework，禁止working机械退pending。
+
+交付顺序修复集中在平台：task先集成、同候选独立review/test pass，再按明确SHA发布PR。H-2保持，不能为允许任务自行push而降低归属门禁。fetch/push远端仓库身份需一致；未知POST结果通过远端open PR inventory恢复，避免重复创建。配置调整发布本workflow不可变快照，expected-sha阻断陈旧修改，指针与审计同事务，不改共享项目配置。
+
+同节点多角色隔离要检查历史任务和reservation，不仅检查正在working的任务；显式Agent也经过同一锁与审计路径。预检必须验证真实已注册adapter请求能力，局部刷新不抬全局时间；Controller/Console解释DAG使用节点集合，current_stage只在唯一前沿时派生。
+
+外部NexusArchive `gitee-pr.sh --head`需同时校验当前源分支，不能仅作为push目标；校验在认证/API之前完成，再按解析的SHA推送。独立CoW修复与HAFlow平台交付是两个验收对象，不等于原工作树已更新或外部PR已发布。
+
+证据：`tests/test_fix_bug1002_lifecycle.py`、`tests/test_fix_bug1002_routing.py`（含独立进程role竞争）、`tests/test_fix_bug1002_config.py`（真实CLI与独立并发修改）、`tests/test_fix_bug1002_delivery.py`（真实本地HTTP provider及Git远端）。外部Nexus `scripts/test/test-gitee-pr-head.sh`新5 passed/0 fail/0 skip、既有160 passed/0 fail/0 skip，日志`/tmp/FIX_BUG1002-nexus-gitee.log`；尚未应用业务原工作树。当前源码全量结果待主控最终填写，不复用旧版统计；尚未部署、重启或真实外部发PR。
+
+#### 最新handoff六项补证
+
+冻结候选身份与任务分支身份分开：并行test/review各自创建任务分支，实际HEAD精确等于candidate SHA；共享onto不能通过放宽ownership修复。本地专属onto没有SHA应在持久intent之前拒绝。
+
+completed是接受状态，不是集成证据。物理收尾检查真实Git staged/dirty/untracked产出，转写后及关闭/删除动作前重新检查，发现新产出保留现场并失败返回；workflow外层不能忽略retained子结果继续标记完成。受控交错真实Git回归曾证明只检查开头会删除转写期间新产物。
+
+PR发布必须核验review/test的verified_candidate_sha，声明candidate_sha与pass不足以证明现场候选。默认dispatch_role=worker是传输角色，不能遮蔽真实test/review节点；node优先stage以免旧stage伪装implementation。
+
+Nexus CoW integration分支复用Agent白名单、branch/worktree全部context归属，不能一概接受herdr前缀或提前绕开protected分支。外部脚本回归192项通过；HAFlow最终全量结果随后补证。
+
+最终补证：26项本地处理完整，当前代码全量3244 passed、2 skipped、157subtests，0failed；跳过为隔离HOME无launchd agent目录的安装测试。范围/版本/命令/证据和未执行项见 `docs/product-specs/fix-bug1002.md`。

@@ -139,3 +139,16 @@ def launch_precheck_message(
 def main_repo_from_env(default: str = "") -> str:
     """Resolve the main-repo path for hygiene probes (test seam)."""
     return os.environ.get("HERDR_MAIN_REPO", default)
+
+
+def teardown_output_diagnosis(porcelain: str, *, task_id: str) -> dict:
+    """Reuse hygiene path semantics, including non-infrastructure untracked output."""
+    paths = parse_porcelain_paths(porcelain)
+    for line in str(porcelain or '').splitlines():
+        if line.startswith('?? '):
+            path = _decode_git_path(line[3:])
+            if path and not is_internal_untracked(path) and path not in paths:
+                paths.append(path)
+    return {'reason': 'unpreserved_worktree_output' if paths else '',
+            'blocked_files': paths[:MAX_LISTED_FILES], 'blocked_total': len(paths),
+            'remediation_cmd': f'git -C <clone> status; herdr-task commit {task_id}; herdr-task integrate {task_id}'}

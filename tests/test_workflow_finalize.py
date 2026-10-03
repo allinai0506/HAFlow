@@ -112,9 +112,12 @@ class FinalizeTestBase(unittest.TestCase):
 
     def _mk_clone(self, task_id):
         clone = os.path.join(self.clone_root, task_id)
-        os.makedirs(os.path.join(clone, ".git"))
+        os.makedirs(clone)
+        subprocess.run(["git", "-C", clone, "init"], check=True, capture_output=True)
         with open(os.path.join(clone, "file.txt"), "w") as f:
             f.write("x")
+        subprocess.run(["git", "-C", clone, "add", "."], check=True, capture_output=True)
+        subprocess.run(["git", "-C", clone, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "baseline"], check=True, capture_output=True)
         return clone
 
     def _mk_task(self, task_id="t-1", status="cleaned", stage="implementation",
@@ -255,14 +258,15 @@ class TestFinalizeTask(FinalizeTestBase):
         self.assertEqual(report["status"], "cleaned")
         self.assertEqual(self._read_tasks()[0]["status"], "cleaned")
 
-    def test_committed_not_integrated_keeps_clone(self):
-        self._write_tasks([self._mk_task("t-cm", status="committed",
-                                         integration_mode="git")])
-        with self._patch_herdr():
-            report = _ht.finalize_task("t-cm")
-        self.assertEqual(report["status"], "committed")
-        self.assertTrue(os.path.exists(report["clone_path"]))
-        self.assertIn("integrate", report["clone_retained_reason"])
+    def test_committed_not_integrated_keeps_clone_and_pane(self):
+        task = self._mk_task("t-cm", status="committed", integration_mode="git")
+        self._write_tasks([task])
+        with self._patch_herdr(), self.assertRaises(SystemExit) as exc:
+            _ht.finalize_task("t-cm")
+        self.assertEqual(exc.exception.code, 2)
+        self.assertEqual(self._read_tasks()[0]["status"], "committed")
+        self.assertTrue(os.path.exists(task["clone_path"]))
+        self._assert_no_herdr_calls()
 
     def test_idempotent_when_pane_already_gone(self):
         self._write_tasks([self._mk_task("t-idem", status="cleaned",
@@ -278,6 +282,7 @@ class TestFinalizeTask(FinalizeTestBase):
     def test_refuses_clone_outside_clone_root(self):
         outside = os.path.join(self.tmp.name, "outside-repo")
         os.makedirs(outside)
+        subprocess.run(["git", "-C", outside, "init"], check=True, capture_output=True)
         task = self._mk_task("t-out", status="cleaned",
                              integration_ref="refs/x")
         task["clone_path"] = outside

@@ -137,6 +137,7 @@ def test_dry_run_never_reports_executed_resources_or_queries_transport(tmp_path,
     from tests.test_fix_loop_pr1 import _load_module
     m=_load_module('close_dry_run_semantics',ROOT/'bin/herdr-task')
     store=seed(tmp_path);clone=tmp_path/'clone';clone.mkdir()
+    subprocess.run(['git','-C',str(clone),'init'],check=True,capture_output=True)
     store.save_task({'task_id':'t','workflow_id':'wf','status':'cleaned','pane_id':'p','clone_path':str(clone),'integration_ref':'refs/integrated'})
     monkeypatch.setattr(m,'_get_store',lambda:store)
     monkeypatch.setattr(m,'load_tasks',lambda:{'tasks':store.list_tasks()})

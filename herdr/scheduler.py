@@ -125,6 +125,40 @@ def node_tasks(
     return matched
 
 
+def required_task_issues(tasks_for_node, required_task_ids, *, all_tasks=(), workflow_id=None, node_id=None):
+    """Explain failed required-task lineage without borrowing foreign evidence."""
+    if required_task_ids is None:
+        return []
+    if (not isinstance(required_task_ids, list) or len(required_task_ids) > 64
+            or any(not isinstance(tid, str) or not tid.strip() for tid in required_task_ids)
+            or len(set(required_task_ids)) != len(required_task_ids)):
+        return [{"task_id": None, "reason": "required_task_ids_invalid"}]
+    by_id = {t.get("task_id"): t for t in tasks_for_node if isinstance(t, dict)}
+    inventory = {t.get("task_id"): t for t in all_tasks if isinstance(t, dict)}
+    issues = []
+    for required_id in required_task_ids:
+        current, seen = required_id, set()
+        while current not in seen:
+            seen.add(current)
+            task = by_id.get(current)
+            if task is None:
+                other = inventory.get(current)
+                reason = "required_task_missing"
+                if other is not None and workflow_id is not None:
+                    if other.get("workflow_id") != workflow_id:
+                        reason = "required_task_out_of_workflow"
+                    elif node_id is not None and (other.get("node") or other.get("stage")) != node_id:
+                        reason = "required_task_out_of_node"
+                issues.append({"task_id": current, "reason": reason})
+                break
+            if task.get("status") != "superseded" and not task.get("superseded_by"):
+                break
+            current = task.get("superseded_by")
+        else:
+            issues.append({"task_id": required_id, "reason": "required_task_lineage_cycle"})
+    return issues
+
+
 def node_is_complete(tasks_for_node: Sequence[Dict[str, Any]], required_task_ids=None) -> bool:
     """节点完成判定(与控制器 is_node_complete 同口径的纯函数版本)。
 
@@ -135,8 +169,7 @@ def node_is_complete(tasks_for_node: Sequence[Dict[str, Any]], required_task_ids
     active = [t for t in tasks if t.get("status") != "superseded" and not t.get("superseded_by")]
     if not active:
         return False
-    if required_task_ids is not None and (not isinstance(required_task_ids, list) or any(
-            not isinstance(tid, str) or not tid.strip() for tid in required_task_ids)):
+    if required_task_issues(tasks, required_task_ids):
         return False
     obligations = list(required_task_ids or []) + [
         t.get("task_id") for t in tasks if t.get("replacement_pending")]

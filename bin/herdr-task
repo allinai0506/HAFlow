@@ -218,10 +218,13 @@ def load_workflow(workflow_id=None):
                     try:
                         config = json.loads(Path(wf["workflow_file"]).expanduser().read_text())
                         if isinstance(config, dict) and config:
-                            return normalize_workflow(config)
-                    except (OSError, ValueError, TypeError):
+                            from herdr.projects import validate_required_task_scope
+                            return validate_required_task_scope(normalize_workflow(config), workflow_id, store=store)
+                    except OSError:
                         pass
                 return normalize_workflow(wf)
+        except (ValueError, TypeError):
+            raise
         except Exception:
             pass
         workflow = workflow_config_for(workflow_id)
@@ -566,7 +569,7 @@ def _safe_workflow(workflow_id):
         workflow_label = workflow.get("name") or workflow_id
         return workflow, workflow_label
     except Exception:
-        return None, workflow_id
+        return {"configuration_error": "workflow_config_invalid"}, workflow_id
 
 
 def _safe_text(value):
@@ -761,7 +764,10 @@ def _node_delivery_complete(tasks, required_task_ids=None):
     return node_is_complete(tasks, required_task_ids)
 
 
-def _build_workflow_cards(workflows_tasks, now):
+def _build_workflow_cards(workflows_tasks, now, all_tasks=None):
+    from herdr.scheduler import required_task_issues
+    inventory = all_tasks if all_tasks is not None else [
+        t for group in workflows_tasks.values() for t in group]
     cards = []
     for workflow_id in sorted(workflows_tasks):
         wf_tasks = workflows_tasks.get(workflow_id, [])
@@ -800,7 +806,8 @@ def _build_workflow_cards(workflows_tasks, now):
                 status = "failed"
             elif counts["blocked"] > 0:
                 status = "blocked"
-            elif _node_delivery_complete(node_tasks, (node_meta.get(node_id) or {}).get("required_task_ids")):
+            elif not (workflow or {}).get("configuration_error") and _node_delivery_complete(
+                    node_tasks, (node_meta.get(node_id) or {}).get("required_task_ids")):
                 status = "completed"
             elif counts["active"] > 0:
                 status = "in_progress"
@@ -820,6 +827,11 @@ def _build_workflow_cards(workflows_tasks, now):
                 "failed": counts["failed"],
                 "superseded": counts["superseded"],
                 "status": status,
+                "completion_issues": ([{"task_id": None, "reason": "workflow_config_invalid"}]
+                    if (workflow or {}).get("configuration_error") else required_task_issues(
+                    node_tasks, (node_meta.get(node_id) or {}).get("required_task_ids"),
+                    all_tasks=inventory, workflow_id=workflow_id, node_id=node_id,
+                )),
                 "drilldown_task": drilldown_task.get("task_id") if drilldown_task else None,
             }
             nodes.append(node_summary)
@@ -1086,7 +1098,7 @@ def _ops_center_payload(workflow_id=None, now=None, include_tasks=False):
         if wf in workflows:
             workflows[wf].append(task)
 
-    workflow_cards = _build_workflow_cards(workflows, now)
+    workflow_cards = _build_workflow_cards(workflows, now, all_tasks=all_tasks)
     agent_fleet = _build_agent_fleet(tasks, now)
     anomalies = _build_anomalies(tasks, now)
     boss = _build_boss_summary(tasks, workflows, anomalies)
@@ -2801,6 +2813,7 @@ def _validate_selective_replacement_baseline(args, candidate_sha, baseline_commi
 
 
 def cmd_launch_reconcile(args):
+    import shlex
     from herdr.task_resources import (dispatch_identity, _latest_intent, workflow_launch_lock,
                                       inventory_launch_resources, reconcile_launch_intent, registered_launch_task)
     try:
@@ -2810,6 +2823,10 @@ def cmd_launch_reconcile(args):
         with workflow_launch_lock(store.db_path, args.workflow_id):
             intent = _latest_intent(store, key)
             if not intent:
+                alternatives = store.list_events(workflow_id=args.workflow_id, node_id=args.node, event_type='launch_intent', source='launch', desc=True, limit=100)
+                roles = sorted({e['payload'].get('role', 'worker') for e in alternatives if e['payload'].get('candidate_sha', '') == (args.candidate_sha or '') and e['payload'].get('dispatch_round', 1) == args.dispatch_round})
+                if roles:
+                    raise ValueError('launch intent role mismatch: requested=' + args.dispatch_role + '; available=' + ','.join(roles))
                 raise ValueError('launch intent not found')
             registered = registered_launch_task(store, intent)
             if registered:
@@ -2818,12 +2835,25 @@ def cmd_launch_reconcile(args):
                 report = {'resource_status': 'foreign', 'task_id': intent['task_id'], 'applied': False,
                           'reason': 'task_id_reused_by_another_identity'}
             else:
+                if getattr(args, 'authorize_terminal_id', None):
+                    if args.apply or not args.confirm_agent_never_started or not args.reason:
+                        raise ValueError('Authorization requires --confirm-agent-never-started --reason and a separate subsequent --apply')
+                    from herdr.task_resources import authorize_launch_recovery
+                    report = authorize_launch_recovery(store, intent, args.authorize_terminal_id, args.reason)
+                    print(json.dumps(report, ensure_ascii=False))
+                    return
                 report = inventory_launch_resources(intent)
                 report.update(intent_id=intent['intent_id'], task_id=intent['task_id'], applied=False)
-                if args.apply and report['resource_status'] == 'absent':
-                    reconcile_launch_intent(store, intent, lambda actual: 'absent')
-                    release_agent_reservation(intent['task_id'])
-                    report['applied'] = True
+                report['recovery_command'] = 'herdr-task launch-reconcile --workflow-id ' + shlex.quote(args.workflow_id) + ' --node ' + shlex.quote(args.node) + ' --dispatch-role ' + shlex.quote(args.dispatch_role) + ' --candidate-sha ' + shlex.quote(args.candidate_sha or '') + ' --dispatch-round ' + str(args.dispatch_round) + ' --apply'
+                if report.get('resource_status') != 'absent':
+                    report['authentication_help'] = 'Inspect herdr pane get <pane_id>; only with evidence no Agent start occurred, run this command without --apply plus --authorize-terminal-id <terminal_id> --confirm-agent-never-started --reason <evidence>; then repeat --apply. Started/foreign instances require task recovery rather than reclamation.'
+                if args.apply:
+                    from herdr.task_resources import recover_launch_resources
+                    recovered = recover_launch_resources(store, intent)
+                    report.update(recovered)
+                    if recovered['status'] == 'resources_absent':
+                        release_agent_reservation(intent['task_id'])
+                        report['applied'] = True
             print(json.dumps(report, ensure_ascii=False))
     except (OSError, ValueError, RuntimeError) as exc:
         print(f'[LAUNCH RECONCILE REJECTED] {exc}', file=sys.stderr)
@@ -3049,6 +3079,16 @@ def _launch_task(args):
             raise ValueError('task_id must be a bounded single workspace name')
         planned_clone = clone_root / args.task_id
         candidate = str(getattr(args, "candidate_sha", None) or "").strip()
+        onto = getattr(args, "onto", None)
+        if onto and not candidate and exec_fields["execution_mode"] == "git":
+            source = str(Path(project.get("project_root") or args.source).expanduser().resolve())
+            remote = subprocess.run(["git", "-C", source, "show-ref", "--verify", "--quiet",
+                                     f"refs/remotes/origin/{onto}"], capture_output=True)
+            local = subprocess.run(["git", "-C", source, "rev-parse", "--verify",
+                                    f"refs/heads/{onto}^{{commit}}"], text=True, capture_output=True)
+            if remote.returncode and local.returncode == 0:
+                raise ValueError(f"Local-only --onto {onto} requires --candidate-sha {local.stdout.strip()}; "
+                                 "read and verify this frozen commit before relaunching")
         duplicate = find_dispatch_task(store, args.workflow_id, node_id, args.dispatch_role,
                                        candidate, args.dispatch_round)
         if duplicate:
@@ -3077,6 +3117,12 @@ def _launch_task(args):
     except ValueError as exc:
         print(f"[DISPATCH REJECTED] {exc}")
         sys.exit(2)
+    if claim['status'] == 'recovery_required':
+        from herdr.task_resources import recover_launch_resources
+        recovered = recover_launch_resources(store, claim['intent'])
+        if recovered['status'] == 'resources_absent':
+            release_agent_reservation(claim['intent']['task_id'])
+            claim = begin_launch_intent(store, workflow_id=args.workflow_id, node_id=node_id, role=args.dispatch_role, candidate_sha=candidate, dispatch_round=args.dispatch_round, task_id=args.task_id, supersedes=getattr(args, 'supersedes', None))
     if claim['status'] != 'claimed':
         if claim['status'] == 'duplicate':
             print(f"[DISPATCH DUPLICATE] {claim['task']['task_id']}")
@@ -3202,6 +3248,7 @@ def _launch_task(args):
                         requested_agent,
                         reservation_key=args.task_id,
                         run_id=getattr(args, "run_id", None),
+                        dispatch_role=args.dispatch_role,
                     )
                 except RuntimeError as exc:
                     try:
@@ -3228,6 +3275,7 @@ def _launch_task(args):
                 requested_agent,
                 reservation_key=args.task_id,
                 run_id=getattr(args, "run_id", None),
+                dispatch_role=args.dispatch_role,
             )
         except RuntimeError as exc:
             # Fail-closed lifecycle: persist a task-level actionable failure;
@@ -3373,7 +3421,7 @@ def _launch_task(args):
                             'pane_id': failure.get('pane_id'), 'clone_path': failure.get('clone'),
                             'run_id': run_id, 'agent_session_id': failure.get('agent_session_id'),
                             'agent_name': failure.get('agent_name'), 'ownership': 'unknown',
-                            'recovery_required': True,
+                            'recovery_required': True, 'allocation_failed': True,
                         })
                         _get_store().record_event("launch_recovery_required", failure,
                             workflow_id=args.workflow_id, node_id=node_id, task_id=args.task_id,
@@ -3710,7 +3758,7 @@ def dispatch_task(task_id, prompt):
     if task["status"] != "pending" and not (receipt_delivery and task["status"] == "dispatched"):
         print(
             f"Task cannot dispatch from status: "
-            f"{task['status']}"
+            f"{task['status']}; use herdr-task rework {task_id} --prompt '<repair instructions>' for the same owned execution"
         )
         sys.exit(2)
 
@@ -5638,6 +5686,46 @@ def delete_clone_safely(clone_path):
     return True
 
 
+def _teardown_output_guard(task):
+    """Bounded read-only output gate before closing a Pane or deleting its clone."""
+    from herdr.repo_hygiene import teardown_output_diagnosis
+    from herdr.bounded_tools import run_bounded
+    clone = task.get("clone_path")
+    if clone and os.path.lexists(os.path.expanduser(clone)):
+        path = Path(clone).expanduser()
+        if path.is_symlink():
+            return {"reason": "clone_identity_unknown"}
+        tag = path / ".herdr-launch-identity.json"
+        if tag.exists():
+            try:
+                identity = json.loads(tag.read_text()) if not tag.is_symlink() and tag.stat().st_size <= 8192 else {}
+            except (OSError, ValueError):
+                identity = {}
+            if identity.get("task_id") != task.get("task_id") or (task.get("run_id") and identity.get("run_id") != task.get("run_id")):
+                return {"reason": "clone_identity_changed"}
+        root = run_bounded(["git", "-C", str(path), "rev-parse", "--show-toplevel"], timeout=5, output_limit=8192)
+        if root["status"] != "completed" or root["exit_code"] or Path(root["stdout"].strip()).resolve() != path.resolve():
+            return {"reason": "clone_git_inventory_unknown"}
+        result = run_bounded(["git", "-C", str(path), "status", "--porcelain", "--untracked-files=all"], timeout=5, output_limit=65536)
+        if result["status"] != "completed" or result["exit_code"]:
+            return {"reason": "clone_git_inventory_unknown"}
+        diagnosis = teardown_output_diagnosis(result["stdout"], task_id=task.get("task_id", ""))
+        if diagnosis["reason"]:
+            return diagnosis
+    if (task.get("integration_mode") == "git" and task.get("status") in {"completed", "committed"}):
+        return {"reason": "git_finalize_pending", "remediation_cmd": "herdr-task commit " + str(task.get("task_id")) + "; herdr-task integrate " + str(task.get("task_id"))}
+    return {"reason": ""}
+
+
+def _record_output_retention(task, diagnosis, *, authorized_via=""):
+    store = _get_store()
+    if store.get_task(task.get("task_id")):
+        from herdr import kernel
+        kernel.update_task_metadata(task["task_id"], {"resource_retention": "retained", "output_retention": diagnosis}, store=store)
+        store.record_event("teardown_output_retained" if not authorized_via else "teardown_output_override", {**diagnosis, "authorized_via": authorized_via},
+                           task_id=task["task_id"], workflow_id=task.get("workflow_id"), source="herdr-task")
+
+
 def clone_deletable(task):
     """clone 承载的成果是否已安全沉淀。
 
@@ -5646,6 +5734,9 @@ def clone_deletable(task):
     (如 mode=none 的 docs 任务)成果只存在于 clone 与终端转写中,
     默认保留 clone,由 --purge-clones 显式授权删除。
     """
+    output = _teardown_output_guard(task)
+    if output["reason"]:
+        return False, output["reason"]
     if task.get("integration_ref") or task.get("integration_branch"):
         return True, "integrated"
     if task.get("status") == "superseded":
@@ -5695,7 +5786,9 @@ def dump_transcript(task):
 def close_pane(pane_id):
     if not pane_id:
         return False
-    return _herdr("pane", "close", pane_id).returncode == 0
+    from herdr.task_resources import workflow_launch_lock
+    with workflow_launch_lock(_get_store().db_path, 'managed-dynamic-pane-lifecycle'):
+        return _herdr("pane", "close", pane_id).returncode == 0
 
 
 def _advance_to_cleaned(task_id, status):
@@ -5736,7 +5829,7 @@ def _close_owned_pane(identity):
     return proven
 
 
-def _finalize_one(task, purge_clones=False, dry_run=False, close_claim=None):
+def _finalize_one(task, purge_clones=False, dry_run=False, close_claim=None, output_override=""):
     """对单个已收敛任务执行物理收尾,返回报告行。幂等。"""
     task_id = task.get("task_id")
     status = task.get("status")
@@ -5756,6 +5849,16 @@ def _finalize_one(task, purge_clones=False, dry_run=False, close_claim=None):
         "action": "finalized",
     }
 
+    output = _teardown_output_guard(task)
+    authorization = output_override or ("purge-clones" if purge_clones else "")
+    if output["reason"]:
+        row["output_guard"] = output
+        row["clone_retained_reason"] = output["reason"]
+        if not dry_run:
+            _record_output_retention(task, output, authorized_via=authorization)
+        if not authorization:
+            return {**row, "action": "retained", "pane_retained_reason": output["reason"], "pane_would_close": False, "clone_would_delete": False}
+        row["output_override"] = authorization
     deletable, reason = clone_deletable(task)
 
     if dry_run:
@@ -5769,20 +5872,31 @@ def _finalize_one(task, purge_clones=False, dry_run=False, close_claim=None):
             row["clone_retained_reason"] = reason
         return row
 
+    def retain_new_output():
+        current_output = _teardown_output_guard(task)
+        if current_output["reason"] and not authorization:
+            row.update(action="retained", output_guard=current_output,
+                       clone_retained_reason=current_output["reason"], pane_retained_reason=current_output["reason"])
+            _record_output_retention(task, current_output)
+            return True
+        return False
+
     if close_claim is None:
         row["evidence"] = dump_transcript(task)
+        if retain_new_output():
+            return row
         row["pane_closed"] = close_pane(pane_id)
     else:
         identity = _close_task_identity(task)
         def close_owned():
             evidence = dump_transcript(task)
             # Transcript collection may race with runtime replacement.
-            return {"closed": close_pane(pane_id) if _close_owned_pane(identity) else False,
+            return {"closed": close_pane(pane_id) if _close_owned_pane(identity) and not retain_new_output() else False,
                     "evidence": evidence}
         action = close_claim.action(
             "pane:" + str(pane_id) + ':' + __import__('hashlib').sha256(
                 json.dumps(identity, sort_keys=True).encode()).hexdigest(),
-            identity, _close_owned_pane, close_owned,
+            identity, lambda value: not retain_new_output() and _close_owned_pane(value), close_owned,
         )
         result = action.get("result") or {}
         row["evidence"] = result.get("evidence")
@@ -5790,6 +5904,11 @@ def _finalize_one(task, purge_clones=False, dry_run=False, close_claim=None):
         if not row["pane_closed"]:
             row["pane_retained_reason"] = "runtime ownership unknown, changed, absent, or close failed"
 
+    if row.get("action") == "retained":
+        return row
+    if retain_new_output():
+        return row
+    deletable, reason = clone_deletable(task)
     if task.get("clone_path"):
         if deletable or purge_clones:
             if close_claim is None:
@@ -5802,18 +5921,22 @@ def _finalize_one(task, purge_clones=False, dry_run=False, close_claim=None):
                 def owns_clone(original):
                     try:
                         current = os.stat(original["path"])
-                        return (current.st_dev, current.st_ino) == (original["device"], original["inode"])
+                        return ((current.st_dev, current.st_ino) == (original["device"], original["inode"])
+                                and not retain_new_output())
                     except OSError:
                         return False
                 action = close_claim.action(
                     "clone:" + task_id, identity, owns_clone,
-                    lambda: delete_clone_safely(clone),
+                    lambda: delete_clone_safely(clone) if not retain_new_output() else False,
                 )
                 row["clone_deleted"] = bool(action.get("result"))
             if not row["clone_deleted"]:
                 row["clone_retained_reason"] = "clone path absent or unsafe"
         else:
             row["clone_retained_reason"] = reason
+
+    if row.get("action") == "retained":
+        return row
 
     if status in FINALIZE_ADVANCE:
         row["status"] = _advance_to_cleaned(task_id, status)
@@ -5824,7 +5947,8 @@ def _finalize_one(task, purge_clones=False, dry_run=False, close_claim=None):
         from herdr import kernel
         meta_updates = {
             "pane_retained": bool(close_claim and not row["pane_closed"] and pane_id),
-            "resource_retention": "retained" if close_claim and not row["pane_closed"] and pane_id else "purged",
+            "resource_retention": "retained" if (close_claim and not row["pane_closed"] and pane_id) or (task.get("clone_path") and not row["clone_deleted"] and os.path.exists(task["clone_path"])) else "purged",
+            "clone_retained": bool(task.get("clone_path") and not row["clone_deleted"] and os.path.exists(task["clone_path"])),
         }
         if row["evidence"]:
             meta_updates["evidence"] = row["evidence"]
@@ -5851,6 +5975,10 @@ def finalize_task(task_id, force=False, purge_clones=False):
         sys.exit(2)
 
     row = _finalize_one(task, purge_clones=purge_clones)
+
+    if row.get("action") == "retained":
+        print("[FINALIZE ABORT] " + json.dumps(row, ensure_ascii=False))
+        sys.exit(2)
 
     print(f"[FINALIZE] {task_id} status={row['status']} "
           f"pane_closed={row['pane_closed']}")
@@ -6210,6 +6338,22 @@ def _close_workflow_owned(
         )
         sys.exit(2)
 
+    output_authorizations = {}
+    for task in tasks:
+        if task.get("status") == "failed":
+            continue
+        output = _teardown_output_guard(task)
+        if not output["reason"]:
+            continue
+        authorized = ("purge-clones" if purge_clones else "force" if force else "abandon" if abandon else
+                      "accept-escalated" if accept_escalated and task.get("task_id") in escalated_git else "")
+        if not dry_run:
+            _record_output_retention(task, output, authorized_via=authorized)
+        if not authorized and not dry_run:
+            print("[CLOSE ABORT] unpreserved task output: " + json.dumps({"task_id": task["task_id"], **output}, ensure_ascii=False))
+            sys.exit(2)
+        output_authorizations[task["task_id"]] = authorized
+
     # 2. Record closing state under the outer cross-process lifecycle ownership.
     if not dry_run and entry and entry.get("status") not in {"closing", "completed"}:
         from herdr import kernel
@@ -6252,9 +6396,16 @@ def _close_workflow_owned(
                 "clone_retained_reason": "failed task kept for debugging",
             })
             continue
-        report["tasks"].append(
-            _finalize_one(task, purge_clones=purge_clones, dry_run=dry_run, close_claim=close_claim)
-        )
+        finalize_options = dict(purge_clones=purge_clones, dry_run=dry_run, close_claim=close_claim)
+        authorization = output_authorizations.get(task["task_id"])
+        if authorization:
+            finalize_options["output_override"] = authorization
+        report["tasks"].append(_finalize_one(task, **finalize_options))
+
+    if any(row.get("action") == "retained" and (row.get("output_guard") or {}).get("reason")
+           for row in report["tasks"]) and not dry_run:
+        print("[CLOSE ABORT] output changed during teardown: " + json.dumps(report, ensure_ascii=False))
+        sys.exit(2)
 
     topo = _workflow_stage_tabs(workflow_id, tasks)
     live_panes = (
@@ -7328,6 +7479,18 @@ def check_delivery_for_pr(
     return {"equivalent": equivalent, "warn": warn, "fields": fields}
 
 
+def create_pull_request(args):
+    from herdr.pr_delivery import create_task_pr
+    body = ""
+    if args.body_file:
+        path = Path(args.body_file).expanduser()
+        if path.stat().st_size > 65536:
+            raise ValueError("PR body exceeds publication budget")
+        body = path.read_text()
+    result = create_task_pr(_get_store(), args.task_id, title=args.title, body=body, draft=args.draft)
+    print(json.dumps(result, ensure_ascii=False))
+
+
 def main():
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
@@ -7392,6 +7555,9 @@ def main():
     launch_reconcile.add_argument('--candidate-sha', default='')
     launch_reconcile.add_argument('--dispatch-round', type=int, default=1)
     launch_reconcile.add_argument('--apply', action='store_true')
+    launch_reconcile.add_argument('--authorize-terminal-id', help='Bind an inspected native terminal_id to a legacy never-started allocation; does not close it')
+    launch_reconcile.add_argument('--confirm-agent-never-started', action='store_true', help='Explicit operator attestation; idle or missing agent alone is insufficient')
+    launch_reconcile.add_argument('--reason', help='Evidence supporting never-started authorization')
     launch = sub.add_parser("launch")
     launch.add_argument("--ack-overflow", action="store_true",
                         help="Acknowledge legacy cumulative overflow (audited); never bypasses hard budgets")
@@ -7732,22 +7898,8 @@ def main():
         help="向 workflow 共享文档区追加一条记录（append-only，代码隔离文档共享）",
     )
     note_add_cmd.add_argument("--workflow-id", required=True)
-    note_add_cmd.add_argument(
-        "--kind",
-        required=True,
-        choices=[
-            "requirement",
-            "spec",
-            "plan",
-            "decision",
-            "evidence",
-            "gate",
-            "delivery",
-            "invalidation",
-            "note",
-            "wrapup",
-        ],
-    )
+    from herdr.workflow_docs import NOTE_KINDS
+    note_add_cmd.add_argument("--kind", required=True, choices=NOTE_KINDS)
     note_add_cmd.add_argument("--title", required=True)
     note_body = note_add_cmd.add_mutually_exclusive_group()
     note_body.add_argument("--text", default=None, help="条目正文")
@@ -7804,6 +7956,29 @@ def main():
         "--supersedes", default=None,
         help="explicit prior delivery identity replaced by this candidate",
     )
+
+    node_config = sub.add_parser("node-config", help="读取可审计配置及修改所需SHA")
+    node_config.add_argument("workflow_id")
+    node_config.add_argument("node")
+    node_config_set = sub.add_parser("node-config-set", help="校验并更新本workflow的required_task_ids，不修改共享项目文件")
+    node_config_set.add_argument("workflow_id")
+    node_config_set.add_argument("node")
+    node_config_set.add_argument("--expected-sha", required=True)
+    node_config_set.add_argument("--reason", required=True)
+    required = node_config_set.add_mutually_exclusive_group(required=True)
+    required.add_argument("--required-task-id", action="append")
+    required.add_argument("--clear-required-tasks", action="store_true")
+    authorize = sub.add_parser("authorize-completion", help="为legacy任务授权持久完成声明契约；不认定任务已完成")
+    authorize.add_argument("task_id")
+    authorize.add_argument("--run-id", required=True)
+    authorize.add_argument("--expected-version", type=int, required=True)
+    authorize.add_argument("--reason", required=True)
+
+    pr_cmd = sub.add_parser("create-pr", help="平台为已集成且验收通过的候选推送并创建待审查PR")
+    pr_cmd.add_argument("task_id")
+    pr_cmd.add_argument("--title", required=True)
+    pr_cmd.add_argument("--body-file")
+    pr_cmd.add_argument("--draft", action="store_true")
 
     check_delivery_cmd = sub.add_parser(
         "check-delivery",
@@ -8342,6 +8517,36 @@ def main():
             node=getattr(args, "node", "wrapup"),
             supersedes=getattr(args, "supersedes", None),
         )
+
+    elif args.command in {"node-config", "node-config-set", "authorize-completion"}:
+        try:
+            if args.command == "authorize-completion":
+                from herdr.completion_receipt import authorize_legacy_completion
+                result = authorize_legacy_completion(args.task_id, args.run_id, args.expected_version, args.reason, _get_store())
+                import shlex
+                result["report_command"] = shlex.join(["herdr-task", "report-completion", args.task_id, "--identity-file", result["path"]])
+            elif args.command == "node-config-set":
+                from herdr.node_config import update_required_tasks
+                result = update_required_tasks(_get_store(), args.workflow_id, args.node,
+                    args.required_task_id or [], expected_sha=args.expected_sha, reason=args.reason)
+            else:
+                from herdr.node_config import read_configuration
+                _, config, sha = read_configuration(_get_store(), args.workflow_id)
+                matches = [n for n in config.get("nodes", []) if (n.get("id") or n.get("key")) == args.node]
+                if len(matches) != 1:
+                    raise ValueError("node missing or ambiguous")
+                result = {"workflow_id":args.workflow_id,"node":matches[0],"config_sha":sha}
+            print(json.dumps(result, ensure_ascii=False))
+        except (ValueError, OSError, RuntimeError) as exc:
+            print(f"[CONFIGURATION/RECOVERY REFUSED] {exc}", file=sys.stderr)
+            sys.exit(2)
+
+    elif args.command == "create-pr":
+        try:
+            create_pull_request(args)
+        except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as exc:
+            print(f"[PR PUBLICATION REFUSED] {exc}", file=sys.stderr)
+            sys.exit(2)
 
     elif args.command == "check-delivery":
         check_delivery_for_pr(

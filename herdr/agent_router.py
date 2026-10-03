@@ -47,13 +47,12 @@ DEFAULT_TASK_TYPE_PREFERENCES = {
 
 # Preflight 快照保鲜期:超过该秒数的 healthy_agents 名单不再被信任为
 # "当前健康"(Agent 凭证/配额会在工作流运行中途过期,如 pi AUTH_REQUIRED)。
-# 过期后路由回落到 allowed - disabled - unhealthy,而不是把任务派给一个
-# 数小时前健康、现在可能已死的 Agent。缺失/不可解析的时间戳视为新鲜,
+# 过期后兼容候选必须重新验证真实请求。缺失时间戳保持 legacy 兼容,
 # 保持 legacy 记录与既有单 Agent 优雅回退语义不变。
 DEFAULT_PREFLIGHT_TTL_SECONDS = 1800.0
 
 # 致命/硬故障状态：即使 Preflight 快照过期，也绝不自动入选或调度。
-# 非硬故障状态（如 TIMEOUT、UNKNOWN、WARN）在快照过期后允许尝试，避免因瞬态超时永久禁赛。
+# 瞬态状态过期后只允许重新验证，不授权直接派发。
 HARD_UNHEALTHY_STATUSES = {
     "TOKEN_EXHAUSTED",
     "AUTH_REQUIRED",
@@ -370,6 +369,7 @@ def _choose_agent_impl(
     reservation_key=None,
     run_id=None,
     decided_at=None,
+    dispatch_role="worker",
 ):
     if workflow_id:
         record = workflow_record(workflow_id)
@@ -486,28 +486,6 @@ def _choose_agent_impl(
             raise RuntimeError(
                 f"Agent '{selected}' failed Workflow Deep Preflight: {status}"
             )
-        if selected in stage_used_agents:
-            _opt_out, _opt_reason = _isolation_opt_out(node_policy)
-            _record_router_opt_out(
-                workflow_id,
-                stage,
-                selected,
-                _opt_reason,
-                stage_used_agents,
-                task_id=reservation_key or "",
-                run_id=run_id or "",
-            )
-        return selected, {
-            "workflow_id": workflow_id or "",
-            "stage": stage,
-            "task_type": task_type,
-            "candidates": [selected],
-            "active_loads": {},
-            "reserved_loads": {},
-            "run_id": run_id or "",
-            "task_id": reservation_key or "",
-        }
-
     # Canary config probe (one small file read; missing/invalid means
     # disabled). Read outside the lock; only an enabled config makes the
     # locked section do any canary work. Any unexpected failure here is
@@ -541,16 +519,28 @@ def _choose_agent_impl(
             if agent:
                 reserved_loads[agent] = reserved_loads.get(agent, 0) + 1
 
+        # Read persisted role ownership inside the same cross-process lock as reservation.
+        role_used = set()
+        if dispatch_role:
+            for item in [*_get_store().list_tasks(), *reservations.get("reservations", {}).values()]:
+                if (item.get("workflow_id") == workflow_id
+                        and (item.get("node") or item.get("stage")) == stage
+                        and item.get("status") != "superseded"
+                        and item.get("task_id") != reservation_key
+                        and (item.get("dispatch_role") or "worker") != dispatch_role
+                        and item.get("agent")):
+                    role_used.add(item["agent"])
+        stage_used_agents.update(role_used)
+
         # 当快照新鲜时，排除所有已知不健康状态 (unhealthy_agents)；
-        # 当快照过期时，仅永久硬过滤致命状态 (hard_unhealthy)，
-        # 允许尝试 TIMEOUT / UNKNOWN 等非致命或瞬态状态。
+        # 过期时瞬态故障可进入重新验证候选，但不得直接获得派发资格。
         excluded_unhealthy = (
             unhealthy_agents if snapshot_fresh else hard_unhealthy
         )
 
         candidates = [
             agent
-            for agent in _candidate_order(pool, stage, task_type, node_policy)
+            for agent in ([selected] if selected else _candidate_order(pool, stage, task_type, node_policy))
             if (
                 agent in allowed
                 and agent not in disabled
@@ -587,6 +577,22 @@ def _choose_agent_impl(
                         "reuse_reason) to bypass."
                     )
                 candidates = filtered
+
+        # A stale status never authorizes execution. Bound refresh to compatible candidates.
+        if not snapshot_fresh and candidates:
+            from herdr.deep_preflight import refresh_workflow_preflight
+            pending = [agent for agent in candidates if not preflight_snapshot_fresh({
+                "preflight_checked_at": (record.get("preflight_agent_checked_at") or {}).get(agent, 0),
+                "preflight_identity": (record.get("preflight_identities") or {}).get(agent, {}),
+            })]
+            if pending:
+                record = refresh_workflow_preflight(workflow_id, pending, store=_get_store(), _locked=True)
+            verified = set(record.get("healthy_agents", []))
+            checked = record.get("preflight_agent_checked_at", {})
+            candidates = [agent for agent in candidates
+                          if agent in verified and 0 <= time.time() - checked.get(agent, 0) <= preflight_ttl_seconds()]
+            if not candidates:
+                raise RuntimeError("Workflow Deep Preflight: no request-verified compatible Agent")
 
         if not candidates:
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
@@ -691,6 +697,8 @@ def _choose_agent_impl(
                 "task_type": task_type,
                 "agent": selected,
                 "created_at": time.time(),
+                "dispatch_role": dispatch_role,
+                "task_id": reservation_key,
             }
             _save(RESERVATIONS_FILE, reservations)
 
@@ -939,6 +947,7 @@ def choose_agent(
     requested="auto",
     reservation_key=None,
     run_id=None,
+    dispatch_role="worker",
 ):
     """Select the production agent.
 
@@ -957,6 +966,7 @@ def choose_agent(
         reservation_key=reservation_key,
         run_id=run_id,
         decided_at=decided_at,
+        dispatch_role=dispatch_role,
     )
     canary = shadow_ctx.get("canary_plan")
     if canary is not None:

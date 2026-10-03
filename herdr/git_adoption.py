@@ -712,6 +712,11 @@ def explain(verdict, detail):
     """One-line human explanation of a classification result."""
     detail = detail or {}
     reason = detail.get("reason", "unknown")
+    if reason == "current_branch_mismatch":
+        actual = detail.get("current_branch") or "unknown"
+        expected = ",".join(detail.get("expected_branches") or []) or "unknown"
+        return (f"verdict={verdict} reason={reason} actual={actual} "
+                f"expected={expected} commits=unknown")
     commits = detail.get("commits", 0)
     baseline = detail.get("baseline") or "none"
     basis = detail.get("basis", "none")

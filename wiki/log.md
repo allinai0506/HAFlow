@@ -1934,3 +1934,21 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 2026-10-02：无onto候选pin修复全量3207 passed、2 skipped、157 subtests，独立审查通过后实际发布d93a3c8；三服务运行指纹与制品一致。规范核对旧review intent资源absent后解除仅该Run旧通知闩，新Controller自动派发review-auto到w13:p26，独立分支的candidate/baseline/HEAD均8be，真实调用链验收通过。原test已completed，业务review仍working，未宣称Workflow/业务交付全部PASS。证据见 docs/walkthroughs/20261002-wf1002-stall-release.md。
 
 - 2026-10-02：续记最新状态，真实test/review报告业务blocked并进入superseded/pending，正常返工任务fix-compliance-display-mask-export-probes已working；前条状态是23:09快照，HAFlow两项修复未代替业务门禁。运行期间字节码反复生成后，以不变源码/执行位将d93制品设为只读；真实CLI去环境保护复验缓存0、attestation正确，无再重启。详见同发布记录。
+
+## [2026-10-03] update | FIX_BUG1002 首批验收与恢复边界
+- Updated [[task-lifecycle]]: 自动验收CAS、裁决/评审隔离及启动失败证据保留。
+- Updated [[ops-center]]: required task 配置与跨域诊断，配置失败不误显示完成。
+- 仅本地沙盒；平台建PR、pane自动回收和preflight刷新尚未实现，不代表部署或生产验收。
+
+## [2026-10-03] update | FIX_BUG1002 全范围本地恢复与交付能力
+- Updated [[task-lifecycle]]: terminal_id绑定、never-started回收、legacy声明授权、同实例rework及集成后平台create-pr；原生无close CAS、人类native并发不受managed锁的边界明确保留。
+- Updated [[preflight-and-health]]、[[agent-routing-and-pools]]: 过期兼容候选真实请求重验、workflow部分刷新及同节点跨角色/跨进程reservation隔离。
+- Updated [[ops-center]]: SHA绑定的workflow-local配置快照与审计、completion_issues呈现及DAG current/ready集合。
+- 规格保留原20项并追加handoff六项，共26项；追加项最终结果及当前源码全量统计待主控填写。外部Nexus脚本独立CoW新5项与既有160项通过，不等于已应用业务原工作树。
+- 未部署、未重启、未真实外部发PR；本地测试不等于生产验收。补证归入docs/lessons/lessons-learned.md既有§122/§124。
+
+## [2026-10-03] verified | FIX_BUG1002 26项本地验收收敛
+- 原20项及新增6项均已本地处理，SHA冻结并行候选、本地onto预拒绝、未commit产出保护、外部Nexus CoW提交门禁追加完成。
+- 当前源码全量3244 passed、2 skipped、157subtests，退出0；两个跳过为隔离HOME下的launchd安装测试。外部脚本192通过，0失败/跳过。
+- 独立Agent评审无已确认剩余阻塞；最后文案以真实JS执行验证，不把早期截图当成最新截图。
+- 交付目标为隔离工作树；未提交、推送、合并、部署或重启生产，详见docs/product-specs/fix-bug1002.md。

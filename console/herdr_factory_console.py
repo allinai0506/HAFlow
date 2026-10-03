@@ -112,6 +112,10 @@ def workflow_definition_for(wid,p,w):
         cfg=herdr_projects.workflow_config_for(wid)
         if cfg and cfg.get('nodes'):
             return cfg
+    except (ValueError, TypeError):
+        path=(w or {}).get('workflow_file') or (p or {}).get('workflow_file')
+        raw=load_json(Path(path),{}) if path else {}
+        return {**raw,'configuration_error':'workflow_config_invalid'}
     except Exception:
         pass
     try:
@@ -145,7 +149,7 @@ def workflow_graph_for(wid,p,w,ts):
             for k in ("status","gate_overrides","current_stage","workflow_id"):
                 if w.get(k) is not None:
                     payload[k]=w[k]
-        return herdr_workflow_graph.workflow_graph_projection(payload,ts or [],blockers)
+        return herdr_workflow_graph.workflow_graph_projection(payload,ts or [],blockers,all_tasks=tasks())
     except Exception:
         return {'nodes':[],'edges':[],'context':{'required':[],'optional':[]}}
 
@@ -463,7 +467,8 @@ def workflow_detail(wid):
         x=stage_summary(ts,k,workflow=w); x['label']=l; ss.append(x)
     stall_info=herdr_projection.detect_workflow_stalls(wid,ts,workflow=w)
     graph=workflow_graph_for(wid,p,w,ts)
-    return {'workflow':{'workflow_id':wid,**_with_subject(w)},'project':p,'stages':ss,'tasks':ts,'graph':graph,'context':graph.get('context',{'required':[],'optional':[]}),'coordinator':agent_runtime(w.get('coordinator_pane_id')),'candidate_branch':w.get('candidate_branch'),'agent_override':w.get('agent_override','auto'),'stall':stall_info}
+    derived={'current_nodes':graph.get('current_nodes',[]),'ready_nodes':graph.get('ready_nodes',[]),'derived_current_stage':graph.get('current_stage',''),'current_stage_source':graph.get('current_stage_source','derived_nodes')}
+    return {'workflow':{'workflow_id':wid,**_with_subject(w),**derived},'project':p,'stages':ss,'tasks':ts,'graph':graph,'context':graph.get('context',{'required':[],'optional':[]}),'coordinator':agent_runtime(w.get('coordinator_pane_id')),'candidate_branch':w.get('candidate_branch'),'agent_override':w.get('agent_override','auto'),'stall':stall_info}
 
 
 def task_detail(tid):
@@ -5891,6 +5896,8 @@ function flowChecklist(node){
     if(!waiting.length)items.push(['ok','上游依赖已满足']);
     else items.push(['wait','等待上游 · '+waiting.map(labelOf).join('、')]);
   }
+  const issueLabels={required_task_missing:'必需任务缺失',required_task_out_of_workflow:'必需任务属于其他工作流',required_task_out_of_node:'必需任务属于其他节点',required_task_lineage_cycle:'任务替代关系存在循环',required_task_ids_invalid:'必需任务配置无效',workflow_config_invalid:'工作流配置无效',required_task_incomplete:'必需任务尚未完成'};
+  (node.completion_issues||[]).forEach(issue=>items.push(['bad',(issueLabels[issue.reason]||issue.reason)+(issue.task_id?' · '+issue.task_id:'')]));
   const agents=(node.agents||[]).filter(Boolean);
   if(!agents.length){
     if(node.status==='completed')items.push(['ok','阶段已收尾完成']);
@@ -5902,6 +5909,7 @@ function flowChecklist(node){
     if(node.status==='completed')items.push(['ok','历史失败/阻塞已处理放行（历史失败 '+failed+' · 阻塞 '+blocked+'）']);
     else items.push(['bad','失败 '+failed+' · 阻塞 '+blocked]);
   }
+  else if(node.status==='blocked'||(node.completion_issues||[]).length)items.push(['bad','节点仍有未解除的阻塞']);
   else items.push(['ok','无失败、无阻塞']);
   const down=node.downstream||[];
   if(!down.length)items.push(['ok','终点节点']);

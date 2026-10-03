@@ -52,6 +52,11 @@ def owned_live_pane(task, probe=None):
 
 
 def reap_task_pane(store, task_id, *, apply=False, probe=None, close=None):
+    with workflow_launch_lock(store.db_path, 'managed-dynamic-pane-lifecycle'):
+        return _reap_task_pane(store, task_id, apply=apply, probe=probe, close=close)
+
+
+def _reap_task_pane(store, task_id, *, apply=False, probe=None, close=None):
     """Release only archived, privately owned dynamic panes; preserve clones."""
     from . import kernel
     initial = store.get_task(task_id)
@@ -181,7 +186,7 @@ def begin_launch_intent(store, *, workflow_id, node_id, role='worker', candidate
         return {'status': 'duplicate', 'task': task}
     previous = _latest_intent(store, key)
     if previous and previous['phase'] != 'resources_absent':
-        status = 'in_progress' if now < previous['lease_until'] else 'recovery_required'
+        status = 'in_progress' if now < previous['lease_until'] and not (previous.get('resources') or {}).get('allocation_failed') else 'recovery_required'
         return {'status': status, 'intent': previous}
     intent = {'key': key, 'intent_id': uuid.uuid4().hex,
               'workflow_id': workflow_id, 'node_id': node_id, 'role': role,
@@ -354,3 +359,121 @@ def inventory_launch_resources(intent, runner=None, *, timeout=10):
     if tag:
         return {'resource_status': 'owned', 'reason': 'private_workspace_tag_matches', 'clone_tag': tag}
     return {'resource_status': 'absent', 'reason': 'workspace_absent_complete_native_inventory'}
+
+
+def recover_launch_resources(store, intent, *, runner=None, timeout=10):
+    with workflow_launch_lock(store.db_path, 'managed-dynamic-pane-lifecycle'):
+        return _recover_launch_resources(store, intent, runner=runner, timeout=timeout)
+
+
+def _recover_launch_resources(store, intent, *, runner=None, timeout=10):
+    """Reclaim only an intent-tagged workspace whose Agent never started.
+
+    Keep the failed workspace as evidence. Recheck the private tag, native cwd
+    and explicit empty agent registry immediately before closing dynamic panes.
+    Caller holds the same cross-process workflow launch lock as allocation.
+    """
+    import os
+    if runner is None:
+        def runner(argv, budget):
+            from .bounded_tools import run_bounded
+            result = run_bounded(argv, timeout=budget, output_limit=65536)
+            return result['exit_code'] if result['status'] == 'completed' else 1, result['stdout'], result['stderr']
+    current = _latest_intent(store, intent['key'])
+    if not current or current['intent_id'] != intent['intent_id']:
+        raise ValueError('launch intent changed during recovery')
+    if store.get_task(current['task_id']):
+        return reconcile_launch_intent(store, current, lambda _: 'unknown')
+    report = inventory_launch_resources(current, runner=runner, timeout=timeout)
+    if report['resource_status'] == 'absent':
+        return reconcile_launch_intent(store, current, lambda _: 'absent')
+    retained = {'status': 'recovery_required', **report}
+    tag = report.get('clone_tag')
+    if not tag or tag.get('phase') not in {'workspace_created', 'pane_allocated'}:
+        return retained
+    clone = Path(current['resources']['planned_clone_path'])
+    tag_path = clone / '.herdr-launch-identity.json'
+    deadline = time.monotonic() + timeout
+    def native(argv):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError('recovery deadline')
+        code, stdout, _ = runner(argv, remaining)
+        if code or len(stdout.encode()) > 65536:
+            raise ValueError('native recovery unavailable')
+        return json.loads(stdout)['result']
+    def validate():
+        if clone.is_symlink() or tag_path.is_symlink() or json.loads(tag_path.read_text()) != tag:
+            raise ValueError('workspace identity changed')
+        pane = report.get('pane_id')
+        if tag.get('pane_id') and not pane and report.get('resource_status') != 'owned':
+            raise ValueError('pane absence unverified')
+        if pane:
+            if tag.get('pane_source') != 'dynamic' or tag.get('pane_id') != pane or not tag.get('terminal_id'):
+                raise ValueError('dynamic pane ownership unknown')
+            live = native(['herdr', 'pane', 'get', pane]).get('pane')
+            if not isinstance(live, dict) or live.get('terminal_id') != tag.get('terminal_id') or not live.get('cwd') or Path(live['cwd']).resolve() != clone.resolve():
+                raise ValueError('pane workspace identity changed')
+            agent = native(['herdr', 'agent', 'get', pane])
+            if 'agent' not in agent or agent['agent'] not in (None, {}):
+                raise ValueError('pane agent absence unverified')
+        return pane
+    try:
+        pane = validate()
+        # Persist evidence before destructive native action; interruption remains
+        # retryable from this same tag without granting a second allocation.
+        if pane:
+            validate()
+            native(['herdr', 'pane', 'close', pane])
+        after_close = inventory_launch_resources(current, runner=runner, timeout=max(0.1, deadline-time.monotonic()))
+        if after_close.get('resource_status') != 'owned' or after_close.get('reason') != 'private_workspace_tag_matches':
+            raise ValueError('additional launch resources remain or native inventory is incomplete')
+        if clone.is_symlink() or json.loads(tag_path.read_text()) != tag:
+            raise ValueError('workspace changed before archival')
+        archive = clone.parent / (clone.name + '.failed-' + current['intent_id'])
+        if os.path.lexists(archive):
+            raise ValueError('failed workspace archive already exists')
+        clone.rename(archive)
+        result = reconcile_launch_intent(store, current, lambda item: inventory_launch_resources(
+            item, runner=runner, timeout=max(0.1,deadline-time.monotonic()))['resource_status'])
+        return {**result, 'archived_clone': str(archive)}
+    except (OSError, ValueError, KeyError, TypeError, TimeoutError, RuntimeError, subprocess.TimeoutExpired) as exc:
+        return {**retained, 'reason': 'recovery_unverified:' + type(exc).__name__}
+
+
+def authorize_launch_recovery(store, intent, terminal_id, reason, *, runner=None):
+    """Explicit operator attestation binds a legacy unstarted allocation token.
+
+    This does not close anything. The caller must explicitly attest that no
+    Agent start was attempted; native emptiness alone is insufficient.
+    """
+    if not terminal_id or len(terminal_id) > 128 or not reason.strip() or len(reason.encode()) > 2048:
+        raise ValueError('Recovery authorization requires terminal identity and bounded evidence reason')
+    with workflow_launch_lock(store.db_path, 'managed-dynamic-pane-lifecycle'):
+        current = _latest_intent(store, intent['key'])
+        if not current or current['intent_id'] != intent['intent_id'] or store.get_task(current['task_id']):
+            raise ValueError('Launch identity changed or registered')
+        report = inventory_launch_resources(current, runner=runner)
+        tag = report.get('clone_tag')
+        pane = report.get('pane_id')
+        if not tag or not pane or tag.get('agent_session_id') or tag.get('agent_name') or tag.get('pane_source') != 'dynamic':
+            raise ValueError('Recovery requires a private dynamic workspace without started agent evidence')
+        if runner is None:
+            def runner(argv, budget):
+                from .bounded_tools import run_bounded
+                result=run_bounded(argv,timeout=budget,output_limit=65536)
+                return result['exit_code'] if result['status']=='completed' else 1,result['stdout'],result['stderr']
+        code, stdout, _ = runner(['herdr','pane','get',pane], 2)
+        if code or json.loads(stdout).get('result',{}).get('pane',{}).get('terminal_id') != terminal_id:
+            raise ValueError('Recovery terminal identity mismatch')
+        code, stdout, _ = runner(['herdr','agent','get',pane], 2)
+        agent=json.loads(stdout).get('result',{})
+        if code or 'agent' not in agent or agent['agent'] not in (None, {}):
+            raise ValueError('Recovery requires explicit empty native agent registry')
+        updated={**tag,'pane_id':pane,'terminal_id':terminal_id,'phase':'pane_allocated',
+                 'recovery_authorized_reason':reason}
+        write_worker_launch_identity(current['resources']['planned_clone_path'],updated)
+        store.record_event('launch_recovery_authorized', {'intent_id':intent['intent_id'],
+            'pane_id':pane,'terminal_id':terminal_id,'reason':reason,'certifies_success':False},
+            workflow_id=intent['workflow_id'],node_id=intent['node_id'],task_id=intent['task_id'],source='herdr-task')
+        return {'authorized':True,'intent_id':intent['intent_id'],'terminal_id':terminal_id}

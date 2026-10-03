@@ -240,3 +240,24 @@ def consume_completion_receipt(task_id, store, now=None):
         raise
     finally:
         conn.close()
+
+
+def authorize_legacy_completion(task_id, run_id, expected_version, reason, store):
+    """Operator authorizes a receipt credential, never certifies completion.
+
+    Explicit run/version binds an inspected legacy execution. No screen, idle
+    state or artifact can trigger this operation automatically.
+    """
+    if not isinstance(reason, str) or not reason.strip() or len(reason.encode()) > 2048:
+        raise ValueError('Completion authorization requires a bounded evidence reason')
+    def prepare(conn, contract):
+        task = _task(conn, task_id)
+        if (task.get('run_id') != run_id or not run_id or task.get('version') != expected_version
+                or task.get('status') not in {'working','dispatched','rework'}
+                or task.get('completion_protocol') == 'receipt-v1'):
+            raise ValueError('Legacy execution identity/version changed or already authorized')
+        state_db.record_event({'event_type':'completion_authorized','workflow_id':task.get('workflow_id'),
+            'task_id':task_id,'run_id':run_id,'source':'herdr-task','timestamp':time.time(),
+            'payload':{'run_id':run_id,'expected_version':expected_version,'reason':reason,
+                       'epoch':contract['epoch'],'certifies_success':False}}, conn=conn)
+    return issue_completion_contract(task_id, store, prepare=prepare)

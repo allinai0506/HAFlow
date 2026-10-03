@@ -131,3 +131,34 @@ Evidence:
 - `console/herdr_factory_console.py#agent_loads`
 - `console/herdr_factory_console.py#task_detail`
 - `tests/test_console_project_creation.py#ConsoleWorkflowStagesTest.test_tasks_for_workflow_reads_state_store_not_json_projection`
+
+
+## Required task 配置诊断
+
+`FACT` 节点卡片 JSON 的 `completion_issues` 区分 required task 缺失、跨 workflow、跨节点、谱系循环和配置无效。配置加载失败时节点不会按默认规则误显示 completed。诊断不会将外部 workflow 的成果纳入本节点验收，`JOIN_MISSING_CANDIDATE` 判决保留。
+
+`FACT` 项目与 CLI 文件配置入口拒绝已知跨域 required ID；未派发 ID 可以保留为未来义务，实际完成仍要求本节点能解析其谱系。配置结构要求唯一非空字符串列表，最多64个。
+
+`UNKNOWN` 本次未验证生产 Console 是否展示新增 JSON 字段；API 诊断不等于浏览器呈现已更新。
+
+Evidence:
+- `herdr/scheduler.py#required_task_issues`
+- `herdr/projects.py#validate_required_task_scope`
+- `bin/herdr-task#load_workflow`
+- `bin/herdr-task#_build_workflow_cards`
+- `tests/test_fix_bug1002.py#test_ops_config_error_cannot_look_completed`
+
+## Workflow定向配置与DAG前沿
+
+`FACT` `node-config <workflow> <node>`返回当前节点和config_sha；`node-config-set`要求expected-sha、reason及required-task-id列表或clear-required-tasks。归属/结构校验后发布不可变workflow-local配置快照，权威workflow指针和node_config_updated审计同事务提交，不改共享项目原件。并发更新只接受匹配当前SHA的一方，另一方需重新读取。
+
+`FACT` Console图投影和checklist显示completion_issues的具体原因；坏配置不会落入缺省completed。current_nodes和ready_nodes是DAG集合；仅当前/就绪frontier恰为一个节点时派生current_stage，并标current_stage_source=derived_nodes。并行节点不压成一个伪当前阶段。
+
+`UNKNOWN` 新字段和checklist本地源码/测试已覆盖，生产浏览器显示尚未验收；未修改生产配置。全量结果待最终交付记录填写。
+
+Evidence:
+- `herdr/node_config.py#read_configuration` / `#update_required_tasks`
+- `herdr/workflow_graph.py#workflow_graph_projection`
+- `console/herdr_factory_console.py#workflow_definition_for` / `#workflow_graph_for`
+- `console/herdr_factory_console.py` 的 `flowChecklist`
+- `tests/test_fix_bug1002_config.py`

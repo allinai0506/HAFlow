@@ -313,7 +313,8 @@ def run_checkpoint(
             payload["evidence_id"] = evidence_id
         log(
             f"[SUPERVISOR] task={task_id} trigger={trigger} "
-            f"provider={evaluation.get('provider')} action={decision.action} "
+            f"provider={evaluation.get('provider')} mode={'enforce' if enforce_on else 'observe'} "
+            f"action={decision.action} "
             f"why={'; '.join(decision.reasons)}"
         )
         handled = False
