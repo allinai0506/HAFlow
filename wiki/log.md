@@ -8,6 +8,21 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-10-03] fix | 工作流跨Run快照隔离、控制器CPU空转风暴消除、Jev 422契约修复与Worker Push双重防护
+- 背景：
+  1. 真实业务工作流（`wf-project-1002-01`）实现阶段完成后停滞无法向下推进，且控制器 CPU 长期处于 91.8% 满载假死状态。
+  2. 根因剖析：
+     - **跨工作流状态污染**：项目共享 `workflow.json` 中遗留上一工作流的 `required_task_ids`，新工作流启动时原样继承，导致调度器永远判定实现节点未完成；
+     - **主轮询 SQLite 模式重编译风暴**：对 264 个非活动任务每秒重复建连并编译全库 30+ 触发器 AST，耗尽 CPU；
+     - **Worker 越权 Push 导致 Git Adoption 死锁**：Agent 误执行 `git push origin` 触发安全拒绝与死锁；
+     - **Jev HTTP 422 格式错误**：`noul` 题型传入了字符串 `criteria`，违背 Schema 契约导致校验拦截。
+- 变更：
+  1. **`herdr/projects.py`**：工作流启动时强制深拷贝快照隔离并清洗所有节点与阶段的动态运行时字段（`required_task_ids`, `task_ids`, `active_task_ids` 等）；
+  2. **`services/herdr-controller.py`**：补充终端状态过滤（`TERMINAL_LIKE_STATUSES`），引入局部缓存避免重复查询 `workflow_closed`，并确保 `committed` 任务的终化重试不被饥饿丢弃；
+  3. **`services/herdr-worker.py`**：沙盒工位安装双重 Push Guard（`pre-push` 拦截脚本 + `remote.origin.pushUrl=DISABLED_FOR_WORKER_LOCAL_TEST_ONLY`），彻底阻断 Worker 越权推送；
+  4. **`herdr/observer/signals.py` & `herdr/decision/providers/jev.py`**：合并引导词至 `instructions` 并移除非法 `criteria` 字符串，且完整回显 HTTP 422 响应体便于诊断；
+  5. **自动化测试**：新增 `test_workflow_snapshot_isolation.py`、`test_worker_push_guard.py`、`test_jev_criteria_schema.py` 等测试套件，全量 3180+ 测试全绿。
+
 ## [2026-10-02] fix | herdr-worker 沙盒清理保留 launch identity：消除 git clean -fd 误杀导致的新 Task 派发失败
 - 背景：
   1. 现场反馈 `herdr-task launch` 在 worker 阶段对新 task_id 派发崩溃：`FileNotFoundError: '<clone>/.herdr-launch-identity.json'`，伴随 clone 回滚但已建好的 tmux pane 发生泄漏。

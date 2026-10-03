@@ -205,7 +205,51 @@ def create_clone(source, task_id):
             file=sys.stderr
         )
 
+    install_worker_sandbox_push_guard(clone)
     return clone
+
+
+def install_worker_sandbox_push_guard(clone):
+    """Install local push guard in worker sandbox clone.
+
+    Prevents Worker Agents from pushing to origin or creating PRs directly from sandbox,
+    which would otherwise trigger Git Adoption foreign commit / branch mismatch rejections.
+    """
+    try:
+        git_dir = Path(clone) / ".git"
+        if git_dir.is_dir():
+            script = (
+                "#!/bin/sh\n"
+                "echo '[GIT GUARD REJECT] Worker Agent is restricted to local sandbox testing only. Direct git push/PR from worker clone is disabled.' >&2\n"
+                "exit 1\n"
+            )
+            target_dirs = [git_dir / "hooks"]
+            hp = subprocess.run(
+                ["git", "-C", str(clone), "config", "--get", "core.hooksPath"],
+                capture_output=True, text=True,
+            )
+            if hp.returncode == 0 and hp.stdout.strip():
+                custom_hooks = Path(hp.stdout.strip())
+                if not custom_hooks.is_absolute():
+                    custom_hooks = Path(clone) / custom_hooks
+                target_dirs.append(custom_hooks)
+
+            for hdir in target_dirs:
+                try:
+                    hdir.mkdir(parents=True, exist_ok=True)
+                    pre_push = hdir / "pre-push"
+                    pre_push.write_text(script, encoding="utf-8")
+                    pre_push.chmod(0o755)
+                except Exception:
+                    pass
+
+            subprocess.run(
+                ["git", "-C", str(clone), "config", "remote.origin.pushUrl", "DISABLED_FOR_WORKER_LOCAL_TEST_ONLY"],
+                capture_output=True, check=False,
+            )
+    except Exception as exc:
+        print(f"[WORKER GUARD WARN] clone={clone}: {exc}", file=sys.stderr)
+
 
 
 def create_task_branch(clone, task_id, agent, task_type, base_branch, *, launch_identity=None, candidate_sha=None):

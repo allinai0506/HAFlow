@@ -271,13 +271,15 @@ def question_for(signal: Signal) -> Dict[str, Any]:
 
     The summary is redacted before it leaves the process: summaries can embed
     action commands or log lines, which the provider must never receive raw.
+    Under TypeSafe SystemOne schema, noul questions cannot use string criteria;
+    guidance is merged into instructions.
     """
     return {
         "instructions": (
             f"观察到的候选问题（{signal.finding_type}）：{redact_text(signal.summary)} "
             "请仅依据提供的事实与证据，判断该问题是否存在明确证据。"
+            "证据不足或证据不支持时给出低概率；不要猜测提供的事实之外的情况。"
         ),
-        "criteria": "证据不足或证据不支持时给出低概率；不要猜测提供的事实之外的情况。",
     }
 
 

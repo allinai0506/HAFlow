@@ -297,8 +297,7 @@ def _reducer_output(provider: Any, payload: Dict[str, Any]) -> Dict[str, Any]:
             for index, item in enumerate(candidates.get(category) or []):
                 key = f"{category}:{index}"
                 questions[key] = {
-                    "instructions": f"Is this {category} item important for the next agent?",
-                    "criteria": "Return a probability from 0 to 1.",
+                    "instructions": f"Is this {category} item important for the next agent? Return a probability from 0 to 1.",
                 }
                 candidate_index[key] = (category, item)
         if questions and hasattr(provider, "judge_many"):
@@ -325,7 +324,7 @@ def _reducer_output(provider: Any, payload: Dict[str, Any]) -> Dict[str, Any]:
         }
         if options:
             result = provider.choose(
-                {"instructions": "Select the single most important current finding.", "criteria": "Return one option key."},
+                {"instructions": "Select the single most important current finding. Return one option key."},
                 payload, options,
             )
             selected = getattr(result, "value", None)

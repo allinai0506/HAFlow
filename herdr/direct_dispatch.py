@@ -423,7 +423,8 @@ node: {node["id"]} ({node["label"]})
 {criteria}
 
 完成后确保产物已写入当前工作目录并结束回合；
-不要手工创建 Clone / Pane / 分支 / Agent，工位已由 Herdr 装配。{gate_note}""".strip()
+不要手工创建 Clone / Pane / 分支 / Agent，工位已由 Herdr 装配；
+严禁向远程执行 git push 或提 PR，Worker Agent 仅在本地工作区自测，严禁随意切换或重命名 Git 分支，所有代码交付与集成由流水线控制器统一收编。{gate_note}""".strip()
 
 
 def _dispatch_spec(

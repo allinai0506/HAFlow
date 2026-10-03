@@ -142,6 +142,10 @@ class JevDecisionProvider(DecisionProvider):
         body["type"] = qtype
         if criteria is not None:
             body["criteria"] = criteria
+        if qtype == "noul" and isinstance(body.get("criteria"), str):
+            extra = body.pop("criteria").strip()
+            if extra:
+                body["instructions"] = f"{body.get('instructions', '')} {extra}".strip()
         return body
 
     @staticmethod
@@ -194,8 +198,14 @@ class JevDecisionProvider(DecisionProvider):
     def judge(self, question: Question, state: Union[str, dict, list]) -> DecisionResult:
         body = normalize_question(question)
         criteria = body.pop("criteria", None)
+        if isinstance(criteria, str) and criteria.strip():
+            body["instructions"] = f"{body.get('instructions', '')} {criteria.strip()}".strip()
+            criteria = None
+        q_payload = {"type": "noul", **body}
+        if isinstance(criteria, dict) and criteria:
+            q_payload["criteria"] = criteria
         answers, latency, usage = self._ask(
-            {"q": {"type": "noul", **body, **({"criteria": criteria} if criteria else {})}},
+            {"q": q_payload},
             state,
         )
         return self._result(answers["q"], latency, usage)

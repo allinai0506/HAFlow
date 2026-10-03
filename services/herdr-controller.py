@@ -9604,6 +9604,15 @@ def registry_watcher():
         "agent_done",
         "rework",
     }
+    TERMINAL_LIKE_STATUSES = (
+        "completed",
+        "failed",
+        "superseded",
+        "cleaned",
+        "committed",
+        "integrated",
+        "cleanup_ready",
+    )
 
     last_advance_check = 0
 
@@ -9623,17 +9632,22 @@ def registry_watcher():
             process_blocked_observations()
             tasks = load_tasks()
             task_ids_now = set()
+            _wf_closed_cache = {}
+
+            def _is_wf_closed(wfid):
+                if not wfid:
+                    return False
+                if wfid not in _wf_closed_cache:
+                    _wf_closed_cache[wfid] = bool(workflow_closed(wfid))
+                return _wf_closed_cache[wfid]
 
             for task in tasks:
                 task_id = task["task_id"]
                 status = task.get("status")
                 task_ids_now.add(task_id)
 
-                if status in (
-                    "completed",
-                    "failed",
-                    "superseded"
-                ) or workflow_closed(task.get("workflow_id")):
+                wf_id = task.get("workflow_id")
+                if status in TERMINAL_LIKE_STATUSES or _is_wf_closed(wf_id):
                     with lock:
                         running = (
                             task_id
@@ -9653,9 +9667,7 @@ def registry_watcher():
 
                     # 基础设施失败(投递熔断/进程崩溃)自动作废补派,
                     # 不让整个节点空等人工 relaunch。
-                    if status == "failed" and not workflow_closed(
-                        task.get("workflow_id")
-                    ):
+                    if status == "failed" and not _is_wf_closed(wf_id):
                         try:
                             recover_router_isolation_tasks(
                                 task.get("workflow_id"), tasks
@@ -9666,9 +9678,9 @@ def registry_watcher():
                         except (OSError, RuntimeError, ValueError, AttributeError) as exc:
                             print(f"[AUTO RECOVER ERROR] {exc}")
 
-                    # completed + git 的终化重试必须在这里驱动:
+                    # completed/committed + git 的终化重试必须在这里驱动:
                     # 该分支随即 continue,走不到后方的重试块。
-                    if status == "completed":
+                    if status in ("completed", "committed"):
                         try:
                             _check_finalize_retry(task, status, now)
                         except (OSError, RuntimeError, ValueError, KeyError,
@@ -9794,7 +9806,7 @@ def registry_watcher():
                 #      continue,走不到这里);这里覆盖 committed 等终化中状态。
                 _check_finalize_retry(task, status, now)
 
-                if status == "rework" and not workflow_closed(task.get("workflow_id")):
+                if status == "rework" and not _is_wf_closed(task.get("workflow_id")):
                     pane_id = task.get("pane_id")
                     if pane_id:
                         runtime = get_agent_runtime_status(pane_id)
