@@ -5921,3 +5921,35 @@ Nexus CoW integration分支复用Agent白名单、branch/worktree全部context�
 **证据**：PR1518 merged，dev `e5db586ad`；收尾记录和原指针已归档到本任务_archive。原始git-dir指向`nexusarchive/.git/worktrees/gemini`，修复后指向FIX_BUG1002-nexus/.git。
 
 **操作规范**：复制工作区后编码前同时检查.git类型、absolute-git-dir、git-common-dir和worktree list；跨目录指针必须先独立化。通用收尾不得清理继承的外部工位登记所指目录。
+
+
+## 127. 多智能体流水线系统性硬化：补派闭环、原子启动、环境信任与门禁静态校验（2026-10-04）
+
+### 问题背景
+在多智能体流水线长周期运行中，暴露了四类阻断节点推进和引发挂起的系统级隐患：
+1. 补派断链：重试或替代任务发起时未指定 `--supersedes`，导致 Scheduler 持续报错 `zombie_obligation_unreplaced`，后续节点永远无法推进；
+2. 启动意图超前：Worker 在原生 Agent 进入 `interactive_ready` 之前就过早推进并持久化了 `agent_started` 意图，就绪阻塞或失败时留下孤儿动态 Pane 和僵尸分配意图；
+3. 环境信任副作用外溢与挂起：Worker 运行时尝试暗中改写全局配置引发并发冲突或安全告警；未受信任的工作区在后台启动时弹出 TUI 交互弹窗导致静默挂起；
+4. 门禁重言式缺陷：人工或模型手写门禁判定脚本时未核对 TSV Schema，出现列越界（如 `$5 > 4`）或同列自比（`$2 == $2` / `$4 != $4`）甚至互斥枚举自比等重言式恒真或恒假漏洞，破坏流水线安全把关。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 替代与重试未关联旧任务 | 失去血缘追踪（lineage）会遗留未清偿义务，导致调度器僵死 | 凡是替代已作废任务的启动，必须强制指定 `--supersedes <prev_task_id>` |
+| 过早持久化就绪意图 | 外部进程失败可能发生在意图声明与实际可用之间 | 状态持久化必须位于就绪确认之后；未就绪失败幂等回收动态分配，意图置 `resources_absent` |
+| 启动回滚误删工作区 | 销毁 Clone 工作区导致无法排查启动失败真实原因（如 TUI 报错或进程日志） | 失败回滚仅关闭分配的动态 Pane，严禁删除已尝试启动的 Clone 现场 |
+| 运行时动态写全局配置 | Worker 作为独立工位进程严禁越权污染宿主全局配置 | 工作区信任（Grok / Claude）前置沉淀在 Factory 初始化装配期预埋 |
+| 手写门禁判定脚本逻辑缺陷 | 门禁 Shell / awk 脚本存在重言式恒真或恒假隐患 | 引入独立语法与 TSV Schema 静态语义校验器，在 DAG 编译期 fail-closed |
+
+### 操作规范
+1. **补派契约**：在 `bin/herdr-task launch` 和 `direct_dispatch` 中固化校验：若当前节点存在未清偿义务（`status == 'superseded' and replacement_pending and not superseded_by`），强制要求 `--supersedes`；
+2. **启动原子化**：Worker 仅在 `startup_readiness` 确认 `interactive_ready: True` 后持久化 `agent_started`；未就绪异常下，若为动态 Pane 则受锁关闭，向父进程报告 `disposition='rolled_back', recovery_required=False`，主进程执行 `abort_launch_intent`；
+3. **保留排查证据**：受 `agent_start_attempted` 保护，尝试启动后的 Clone 目录绝不删除；
+4. **环境装配分离**：工作区信任通过 `herdr/workspace_trust.py` 在 `herdr-factory` 初始化装配期预埋，Worker 运行时只读；
+5. **门禁静态语义校验**：`herdr/gate_validator.py` 在工作流装载时校验 Shell 引号平衡、awk 大括号配对、列越界及同列比较重言式。
+
+### 验证命令 / 关联证据
+- 新增单元测试：`pytest tests/test_dispatch_supersede_enforcement.py tests/test_workspace_trust.py tests/test_gate_validator.py tests/test_worker_startup_atomic_rollback.py` (15/15 passed)；
+- 核心回归测试：`pytest tests/test_worker_readiness_contract.py tests/test_herdr_worker.py tests/test_dispatch_idempotency.py tests/test_node_capacity.py tests/test_workflow_stall_regressions.py tests/test_preflight_runtime_contract.py tests/test_dynamic_workflow_schema.py tests/test_workflow_engine.py tests/test_workflow_snapshot_isolation.py tests/test_workflow_lifecycle_matrix.py tests/test_fix_bug1002_lifecycle.py` (176/176 passed)；
+- S6 独立评审工件：`.omc/review-0f4d0031-5b2c-4b9d-b665-f57c61df269f.md`（MERGE_READY）。

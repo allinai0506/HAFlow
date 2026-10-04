@@ -2698,6 +2698,29 @@ def _reclaim_unregistered_launch_resources(
             )
 
 
+def _validate_supersedes_for_launch(args, node_id, store):
+    """Enforce that relaunching / replacing in a node with pending replacement obligations
+    MUST explicitly provide --supersedes <prev_task_id>."""
+    if not getattr(args, "workflow_id", None) or not node_id:
+        return
+    if getattr(args, "supersedes", None):
+        return
+    node_tasks = [
+        t for t in store.list_tasks(workflow_id=args.workflow_id)
+        if (t.get("node") == node_id or t.get("stage") == node_id)
+    ]
+    # Any task in this node that was superseded with replacement_pending: True and no superseded_by
+    unreplaced = [
+        t["task_id"] for t in node_tasks
+        if t.get("status") == "superseded" and t.get("replacement_pending") and not t.get("superseded_by")
+    ]
+    if unreplaced:
+        raise ValueError(
+            f"Node '{node_id}' has pending replacement obligation(s): {', '.join(unreplaced)}. "
+            f"Relaunch must explicitly specify --supersedes <prev_task_id> to close the lineage chain."
+        )
+
+
 def _validate_test_review_baseline(args, baseline_commit, source_repo):
     """Fail-closed baseline proof for a test/review launch.
 
@@ -3154,6 +3177,7 @@ def _launch_task(args):
             raise ValueError("parallel role node requires explicit --dispatch-role")
         args.dispatch_role = requested_role or (predecessor or {}).get("dispatch_role") or "worker"
         args.dispatch_round = getattr(args, "dispatch_round", None) or (int(predecessor.get("dispatch_round") or 1) + 1 if predecessor else 1)
+        _validate_supersedes_for_launch(args, node_id, store)
         clone_root = Path(os.environ.get('HERDR_CLONES_DIR') or Path.home() / '.herdr-controller/clones').expanduser().resolve()
         if Path(args.task_id).name != args.task_id or args.task_id in {'.', '..'} or len(args.task_id) > 128:
             raise ValueError('task_id must be a bounded single workspace name')
@@ -3498,16 +3522,20 @@ def _launch_task(args):
                 try:
                     failure = json.loads(line.split("=", 1)[1])
                     if failure.get("task_id") == args.task_id and failure.get("run_id") == run_id:
-                        from herdr.task_resources import record_launch_resources
-                        launch_intent = record_launch_resources(store, launch_intent, {
-                            'pane_id': failure.get('pane_id'), 'clone_path': failure.get('clone'),
-                            'run_id': run_id, 'agent_session_id': failure.get('agent_session_id'),
-                            'agent_name': failure.get('agent_name'), 'ownership': 'unknown',
-                            'recovery_required': True, 'allocation_failed': True,
-                        })
-                        _get_store().record_event("launch_recovery_required", failure,
-                            workflow_id=args.workflow_id, node_id=node_id, task_id=args.task_id,
-                            run_id=run_id, source="herdr-task")
+                        if failure.get("recovery_required") is False and failure.get("disposition") in ("rolled_back", "pane_reclaimed"):
+                            from herdr.task_resources import abort_launch_intent
+                            abort_launch_intent(store, launch_intent, reason=failure.get("failure_type", "worker_startup_failed"))
+                        else:
+                            from herdr.task_resources import record_launch_resources
+                            launch_intent = record_launch_resources(store, launch_intent, {
+                                'pane_id': failure.get('pane_id'), 'clone_path': failure.get('clone'),
+                                'run_id': run_id, 'agent_session_id': failure.get('agent_session_id'),
+                                'agent_name': failure.get('agent_name'), 'ownership': 'unknown',
+                                'recovery_required': True, 'allocation_failed': True,
+                            })
+                            _get_store().record_event("launch_recovery_required", failure,
+                                workflow_id=args.workflow_id, node_id=node_id, task_id=args.task_id,
+                                run_id=run_id, source="herdr-task")
                 except (ValueError, TypeError):
                     pass
         print(

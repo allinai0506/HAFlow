@@ -8,6 +8,23 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-10-04] fix | 多智能体流水线系统性硬化：补派契约强制闭环、原子启动与未就绪回滚、环境信任装配预埋及门禁静态语义校验
+- 背景：
+  1. 真实流水线长程执行中暴露四项系统级阻断隐患：
+     - 重试或替代任务发起时未指定 `--supersedes`，导致调度器持续报错 `zombie_obligation_unreplaced`，后续阶段永远停滞；
+     - Worker 在原生 Agent 进入 `interactive_ready` 之前过早持久化 `agent_started` 意图，就绪阻塞或失败时留下孤儿动态 Pane 和僵尸分配意图；
+     - Worker 运行时尝试暗写全局用户配置引发冲突；未受信任目录后台启动时弹出 TUI 交互弹窗导致静默挂起；
+     - 门禁脚本未核对 TSV Schema，出现列越界或同列自比（重言式恒真/恒假），使得质量门禁把关失效。
+- 变更：
+  1. **`bin/herdr-task` & `herdr/direct_dispatch.py`**：强制拦截在存在未清偿义务的节点上缺少 `--supersedes` 的派发，补派规格自动填充 `spec["supersedes"]`；
+  2. **`services/herdr-worker.py` & `herdr/task_resources.py`**：启动握手严格在 `interactive_ready: True` 确认后才推进 `agent_started`；未就绪失败幂等回收动态 Pane 并终止意图（`abort_launch_intent`），同时严格受 `agent_start_attempted` 保护保留 Clone 目录供事后排查；
+  3. **`herdr/workspace_trust.py` & `bin/herdr-factory`**：沉淀独立工作区信任模块（支持 Grok / Claude 幂等安全预埋），并在 Factory 初始化装配期预埋信任，Worker 运行时严格保持只读与零外部配置副作用；
+  4. **`herdr/gate_validator.py` & `herdr/workflow.py`**：新增独立门禁语法与静态语义校验器（拦截 awk/sh 语法错误、列越界、同一列自比恒真/恒假），并在 DAG 静态装载时自动校验拦截；
+  5. **自动化测试**：新增 `test_dispatch_supersede_enforcement.py`、`test_worker_startup_atomic_rollback.py`、`test_workspace_trust.py`、`test_gate_validator.py` 等测试套件，全量 3341 项自动化测试 100% 通过。
+- 证据：
+  - 15 项新增测试 100% PASS，176 项核心回归 100% PASS，全库 3341 项测试通过；
+  - S6 独立评审工件 `.omc/review-0f4d0031-5b2c-4b9d-b665-f57c61df269f.md` 裁定 `MERGE_READY`。
+
 ## [2026-10-03] fix | 工作流跨Run快照隔离、控制器CPU空转风暴消除、Jev 422契约修复与Worker Push双重防护
 - 背景：
   1. 真实业务工作流（`wf-project-1002-01`）实现阶段完成后停滞无法向下推进，且控制器 CPU 长期处于 91.8% 满载假死状态。

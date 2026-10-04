@@ -481,6 +481,7 @@ def _dispatch_spec(
     }
     if redispatch_of:
         spec["redispatch_of"] = redispatch_of
+        spec["supersedes"] = redispatch_of
     if onto_branch:
         spec["onto_branch"] = onto_branch
     elif node["id"] in {"test", "review"} and candidate_sha and context_branch:
