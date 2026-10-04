@@ -2351,6 +2351,17 @@ def auto_init_task_loop(clone_path, goal, acceptance_list, test_cmd=None, lint_c
         return
 
 
+def _is_isolation_rejection(exc):
+    try:
+        from herdr.agent_router import RouterIsolationRejection
+        if isinstance(exc, RouterIsolationRejection):
+            return True
+    except ImportError:
+        pass
+    msg = str(exc).lower()
+    return "isolation" in msg or "prohibited for stage" in msg or ("candidates" in msg and "used in stage" in msg)
+
+
 def _record_router_failure_task(args, node_id, error, *,
                                 reason="router_isolation_rejected",
                                 failure_code=None, remediation=None):
@@ -3196,7 +3207,7 @@ def _launch_task(args):
         duplicate = find_dispatch_task(store, args.workflow_id, node_id, args.dispatch_role,
                                        candidate, args.dispatch_round)
         if duplicate:
-            print(f"[DISPATCH DUPLICATE] {duplicate['task_id']}")
+            print(f"[DISPATCH DUPLICATE] proposed={args.task_id} existing={duplicate['task_id']}")
             return
         if find_task(data, args.task_id):
             raise ValueError(f"Task ID already exists with another dispatch identity: {args.task_id}")
@@ -3229,7 +3240,7 @@ def _launch_task(args):
             claim = begin_launch_intent(store, workflow_id=args.workflow_id, node_id=node_id, role=args.dispatch_role, candidate_sha=candidate, dispatch_round=args.dispatch_round, task_id=args.task_id, supersedes=getattr(args, 'supersedes', None))
     if claim['status'] != 'claimed':
         if claim['status'] == 'duplicate':
-            print(f"[DISPATCH DUPLICATE] {claim['task']['task_id']}")
+            print(f"[DISPATCH DUPLICATE] proposed={args.task_id} existing={claim['task']['task_id']}")
             return
         print(f"[DISPATCH {claim['status'].upper()}] task={claim['intent']['task_id']}; "
               "reconcile intent-owned resources before retrying")
@@ -3355,13 +3366,30 @@ def _launch_task(args):
                         dispatch_role=args.dispatch_role,
                     )
                 except RuntimeError as exc:
-                    try:
-                        _record_router_failure_task(args, node_id, exc)
-                    except RuntimeError as persist_exc:
-                        print(f"[ROUTER LIFECYCLE ERROR] {persist_exc}")
+                    if _is_isolation_rejection(exc):
+                        try:
+                            _record_router_failure_task(args, node_id, exc)
+                        except RuntimeError as persist_exc:
+                            print(f"[ROUTER LIFECYCLE ERROR] {persist_exc}")
+                            sys.exit(2)
+                        print(f"[ROUTER OPT-OUT REJECTED] {exc}")
                         sys.exit(2)
-                    print(f"[ROUTER OPT-OUT REJECTED] {exc}")
-                    sys.exit(2)
+                    else:
+                        launch_intent = getattr(args, "_launch_intent", None)
+                        if launch_intent:
+                            try:
+                                from herdr.task_resources import abort_launch_intent
+                                abort_launch_intent(store, launch_intent, reason="router_rejected")
+                            except Exception:
+                                pass
+                        try:
+                            release_agent_reservation(args.task_id)
+                        except Exception:
+                            pass
+                        print(f"[ROUTER REJECTED] {exc}")
+                        if "preflight" in str(exc).lower():
+                            print("Run './bin/herdr-deep-preflight --deep' to inspect agent connectivity and credentials.")
+                        sys.exit(2)
             finally:
                 _projects.workflow_config_for = _orig_proj_wcf
         finally:
@@ -3382,20 +3410,37 @@ def _launch_task(args):
                 dispatch_role=args.dispatch_role,
             )
         except RuntimeError as exc:
-            # Fail-closed lifecycle: persist a task-level actionable failure;
-            # topology/Pane creation has not happened yet.
-            try:
-                _record_router_failure_task(args, node_id, exc)
-            except RuntimeError as persist_exc:
-                print(f"[ROUTER LIFECYCLE ERROR] {persist_exc}")
+            if _is_isolation_rejection(exc):
+                # Fail-closed lifecycle: persist a task-level actionable failure;
+                # topology/Pane creation has not happened yet.
+                try:
+                    _record_router_failure_task(args, node_id, exc)
+                except RuntimeError as persist_exc:
+                    print(f"[ROUTER LIFECYCLE ERROR] {persist_exc}")
+                    sys.exit(2)
+                print(f"[ROUTER REJECTED] {exc}")
+                print(
+                    "Isolation is fail-closed. Re-launch with explicit "
+                    "--allow-reuse-implementation-agents --reuse-reason '<why>' "
+                    "to opt out (the opt-out audit must persist)."
+                )
                 sys.exit(2)
-            print(f"[ROUTER REJECTED] {exc}")
-            print(
-                "Isolation is fail-closed. Re-launch with explicit "
-                "--allow-reuse-implementation-agents --reuse-reason '<why>' "
-                "to opt out (the opt-out audit must persist)."
-            )
-            sys.exit(2)
+            else:
+                launch_intent = getattr(args, "_launch_intent", None)
+                if launch_intent:
+                    try:
+                        from herdr.task_resources import abort_launch_intent
+                        abort_launch_intent(store, launch_intent, reason="router_rejected")
+                    except Exception:
+                        pass
+                try:
+                    release_agent_reservation(args.task_id)
+                except Exception:
+                    pass
+                print(f"[ROUTER REJECTED] {exc}")
+                if "preflight" in str(exc).lower():
+                    print("Run './bin/herdr-deep-preflight --deep' to inspect agent connectivity and credentials.")
+                sys.exit(2)
 
     # Only after routing and delivery identity checks succeed do we create
     # runtime resources.  All gates are deliberately before topology/Panes:
@@ -8047,6 +8092,15 @@ def main():
     cp_fork_cmd.add_argument("new_workflow_id")
     cp_fork_cmd.add_argument("--title", default=None, help="新工作流标题")
 
+    freeze_cmd = sub.add_parser(
+        "freeze-candidate",
+        help="Freeze or re-freeze candidate SHA for workflow verifiers",
+    )
+    freeze_cmd.add_argument("workflow_id")
+    freeze_cmd.add_argument("--candidate-sha", required=True, help="Candidate commit SHA to freeze")
+    freeze_cmd.add_argument("--delivery-branch", default="", help="Delivery branch name")
+    freeze_cmd.add_argument("--source-node", default="", help="Source stage/node that produced this candidate")
+
     note_add_cmd = sub.add_parser(
         "note-add",
         help="向 workflow 共享文档区追加一条记录（append-only，代码隔离文档共享）",
@@ -8681,6 +8735,16 @@ def main():
             node=getattr(args, "node", "wrapup"),
             supersedes=getattr(args, "supersedes", None),
         )
+
+    elif args.command == "freeze-candidate":
+        from herdr.scheduler_facts import record_candidate_frozen
+        res = record_candidate_frozen(
+            args.workflow_id,
+            args.candidate_sha,
+            source_node=getattr(args, "source_node", ""),
+            delivery_branch=getattr(args, "delivery_branch", ""),
+        )
+        print(f"[CANDIDATE FROZEN] workflow={args.workflow_id} candidate_sha={args.candidate_sha} status={res.get('status', 'recorded')}")
 
     elif args.command in {"node-config", "node-config-set", "authorize-completion"}:
         try:

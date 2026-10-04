@@ -5953,3 +5953,40 @@ Nexus CoW integration分支复用Agent白名单、branch/worktree全部context�
 - 新增单元测试：`pytest tests/test_dispatch_supersede_enforcement.py tests/test_workspace_trust.py tests/test_gate_validator.py tests/test_worker_startup_atomic_rollback.py` (15/15 passed)；
 - 核心回归测试：`pytest tests/test_worker_readiness_contract.py tests/test_herdr_worker.py tests/test_dispatch_idempotency.py tests/test_node_capacity.py tests/test_workflow_stall_regressions.py tests/test_preflight_runtime_contract.py tests/test_dynamic_workflow_schema.py tests/test_workflow_engine.py tests/test_workflow_snapshot_isolation.py tests/test_workflow_lifecycle_matrix.py tests/test_fix_bug1002_lifecycle.py` (176/176 passed)；
 - S6 独立评审工件：`.omc/review-0f4d0031-5b2c-4b9d-b665-f57c61df269f.md`（MERGE_READY）。
+
+---
+
+## 128. 路由健康拒绝解耦（防节点容量死锁）、签发笔记全链路接线与候选重冻闭环（2026-10-04）
+
+### 问题背景
+在多智能体流水线任务派发与审计加固中，暴露了 5 项影响可用性与可解释性的缺陷：
+1. **健康拒绝落 failed 锁死槽位**：Router 在 Deep Preflight 探测失败或未就绪时，原逻辑无差别调用 `_record_router_failure_task` 在 `tasks.json` 持久化记录失败任务。在 `max_tasks_per_node=1` 的单工位节点上，瞬态网络或探针抖动导致槽位被永久耗尽，后续自愈重试直接死锁；
+2. **CLI 误导性隔离提示**：Agent 健康探测失败时，CLI 输出了针对跨阶段隔离的“Isolation is fail-closed... opt out”提示，误导用户通过 opt-out 绕过，掩盖了真实的环境与凭证问题；
+3. **共享文档区缺失 `kind=sign-off`**：`NOTE_KINDS` 未纳入 `sign-off`，导致审批签发记录无法被机器验证通过，且无法在后续节点计算上下文相关度时得到权重赋分；
+4. **重复派发日志歧义**：`[DISPATCH DUPLICATE]` 仅打印既有任务 ID，造成提议 ID 与存量 ID 混淆；
+5. **缺少 CLI 候选重冻入口**：全仓缺少显式重冻候选 SHA 的命令，难以在复验阶段由运维或上层编排主动触发重冻。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 瞬态健康失败写入持久化任务终态 | 探测失败（健康/连通性）与安全违规（跨阶段隔离）是完全不同的故障语义 | 仅安全底线（隔离阻断）持久化失败以满足 FR-6 审计；健康拒绝仅清理内存/意图资源（`abort_launch_intent`），绝不消耗节点配额 |
+| 异常类型非结构化导致误导提示 | 使用通用的 `RuntimeError` 导致上层只能靠粗暴的兜底文案处理错误 | 建立领域异常层级（`RouterIsolationRejection` / `RouterHealthRejection` / `RouterPolicyRejection`），上层精准分流恢复与诊断提示 |
+| 审计文档类型定义不完备 | 流程中合法存在的签发（sign-off）行为若不在 Schema 白名单中会被拒绝或当作未知 | 核心文档常量 `NOTE_KINDS` 与 `CONTEXT_KINDS` 必须同步覆盖所有受管生命周期笔记 |
+| 日志标识单向模糊 | 遇到去重拦截时，只报已存在者无法定位是谁发起了冲突提议 | 去重日志必须对称输出 `proposed` 与 `existing` 双向 ID |
+| 候选冻结仅存在内部 API | 无 CLI 暴露使得人工介入或独立脚本无法执行关键编排动作 | 编排核心动作必须具备幂等 CLI 入口，且严格遵循最新事件幂等的剧集语义 |
+
+### 操作规范
+1. **异常体系**：在 `herdr/agent_router.py` 定义继承自 `RuntimeError` 的类型化异常，保证向下兼容；
+2. **拒绝处置分流**：在 `bin/herdr-task launch` 中引入 `_is_isolation_rejection`：
+   - 隔离拒绝：持久化失败任务，输出 fail-closed 及 opt-out 引导；
+   - 健康/策略拒绝：执行 `abort_launch_intent` 并释放 reservation，不再写入 `tasks.json`，输出 deep-preflight 自检引导；
+3. **签发笔记接线**：在 `herdr/workflow_docs.py` 中将 `sign-off` 加入 `NOTE_KINDS` 与 `CONTEXT_KINDS`；
+4. **派发日志优化**：`bin/herdr-task` 在拦截重复时统一打印 `[DISPATCH DUPLICATE] proposed={args.task_id} existing={duplicate['task_id']}`；
+5. **候选重冻命令**：`bin/herdr-task freeze-candidate <workflow_id> --candidate-sha <SHA>` 调用 `record_candidate_frozen`，严格依据最新一条记录判断幂等（支持 A -> B -> A 重新轮转）。
+
+### 验证命令 / 关联证据
+- 专项测试套件：`pytest -v tests/test_router_health_and_defects_remedy.py` (7/7 passed)；
+- 关联回归套件：`pytest tests/test_agent_router*.py tests/test_workflow_docs*.py tests/test_canary_router.py tests/test_dispatch_idempotency.py tests/test_dispatch_candidate.py tests/test_frozen_base_candidate_dispatch.py` (139/139 passed)；
+- S6 独立审查报告：`.omc/review-b80982fa-74b8-4bce-9898-736219f8e996.md`（MERGE_READY）。
+
