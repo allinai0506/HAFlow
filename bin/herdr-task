@@ -2351,7 +2351,9 @@ def auto_init_task_loop(clone_path, goal, acceptance_list, test_cmd=None, lint_c
         return
 
 
-def _record_router_failure_task(args, node_id, error):
+def _record_router_failure_task(args, node_id, error, *,
+                                reason="router_isolation_rejected",
+                                failure_code=None, remediation=None):
     """Persist one actionable no-Pane launch failure for FR-6."""
     now = _now()
     task_id = getattr(args, "task_id", "")
@@ -2370,7 +2372,7 @@ def _record_router_failure_task(args, node_id, error):
         "integration_mode": getattr(args, "integration_mode", "none"),
         "goal": getattr(args, "goal", ""),
         "acceptance_criteria": list(getattr(args, "acceptance", []) or []),
-        "failure_reason": "router_isolation_rejected",
+        "failure_reason": reason,
         "failure_detail": detail,
         "actionable": True,
         "pane_dispatched": False,
@@ -2379,7 +2381,7 @@ def _record_router_failure_task(args, node_id, error):
         "status_history": [{
             "from": "pending",
             "to": "failed",
-            "reason": "router_isolation_rejected",
+            "reason": reason,
             "source": "herdr-task",
             "timestamp": now,
             "detail": detail,
@@ -2409,13 +2411,19 @@ def _record_router_failure_task(args, node_id, error):
         "stage": node_id,
         "result": "failed",
         "failure_code": (
-            "router_opt_out_audit_failed"
-            if "audit" in detail.lower()
-            else "empty_review_pool"
+            failure_code
+            or (
+                "router_opt_out_audit_failed"
+                if "audit" in detail.lower()
+                else "empty_review_pool"
+            )
         ),
         "actionable": True,
         "pane_dispatched": False,
-        "remediation": "add an eligible Agent or explicitly opt out with --allow-reuse-implementation-agents --reuse-reason",
+        "remediation": (
+            remediation
+            or "add an eligible Agent or explicitly opt out with --allow-reuse-implementation-agents --reuse-reason"
+        ),
     }
     lifecycle_errors = []
     try:
@@ -2545,6 +2553,78 @@ def _preflight_delivery_identity(workflow_id, node_id, task_id, claim=""):
             "candidate exists for this dispatch claim",
         )
     return effective
+
+
+def _preflight_baseline_freshness(args, source_repo, base_branch):
+    """Refuse a stale candidate baseline before creating clone/Pane (scheme A).
+
+    Position is the contract: this runs after routing + delivery-identity
+    checks and before `ensure_stage_topology` / pane acquisition / worker
+    spawn, so a refusal provably creates zero clone/Pane side effects.
+    The launch intent is already claimed at this point, so refusal winds it
+    down exactly like a router failure (failed task + finish intent +
+    release reservation). Post-resource FR-6.2 validators stay untouched as
+    the fail-closed backstop for the residual check-to-checkout race.
+    """
+    node_id = getattr(args, "node", "") or getattr(args, "stage", "")
+    claim = str(getattr(args, "candidate_sha", None) or "").strip()
+    onto = str(getattr(args, "onto", None) or "").strip()
+    if not claim and not onto:
+        # Fresh-branch launches check out live origin/<base>; nothing to prove.
+        return None
+    from herdr import launch_baseline as _lb
+    probe = _lb.probe_claim_freshness(
+        source_repo, base_branch=base_branch,
+        claim_sha=claim, onto_branch=onto or None,
+    )
+    if probe["status"] in ("fresh", "skipped"):
+        return probe
+    if probe["status"] == "unknown":
+        print(
+            "[BASELINE PREFLIGHT] baseline freshness unknown "
+            f"({probe.get('detail')}); proceeding, FR-6.2 stays fail-closed."
+        )
+        return probe
+    verdict = _lb.decide_baseline_failfast(
+        dev_tip=probe["dev_tip"], claim_sha=probe["claim_sha"],
+        behind_by=probe["behind_by"], claim_label=onto or "candidate",
+    )
+    detail = f"{verdict['message']} {verdict['remediation']}"[:1000]
+    try:
+        _get_store().record_event(
+            "baseline_stale_refused",
+            {
+                "workflow_id": getattr(args, "workflow_id", ""),
+                "task_id": getattr(args, "task_id", ""),
+                "stage": node_id,
+                "failure_code": "baseline_stale",
+                "behind_by": verdict["behind_by"],
+                "dev_tip": verdict["dev_tip"],
+                "claim_sha": verdict["claim_sha"],
+                "detail": detail[:500],
+                "actionable": True,
+                "remediation": verdict["remediation"],
+            },
+            workflow_id=getattr(args, "workflow_id", ""),
+            node_id=node_id, task_id=getattr(args, "task_id", ""),
+            source="herdr-task",
+        )
+    except (OSError, ValueError, RuntimeError, AttributeError,
+            sqlite3.Error) as exc:
+        print(f"[BASELINE EVENT WARN] rejection audit unavailable: {exc}",
+              file=sys.stderr)
+    _record_router_failure_task(
+        args, node_id, detail,
+        reason="baseline_stale",
+        failure_code="baseline_stale",
+        remediation=verdict["remediation"],
+    )
+    print(
+        f"[BASELINE STALE] workflow={getattr(args, 'workflow_id', '')} "
+        f"task={getattr(args, 'task_id', '')}; {detail}; "
+        "launch refused before creating clone/Pane (fail-fast)."
+    )
+    raise SystemExit(2)
 
 
 def _reclaim_unregistered_launch_resources(
@@ -3294,11 +3374,13 @@ def _launch_task(args):
             sys.exit(2)
 
     # Only after routing and delivery identity checks succeed do we create
-    # runtime resources.  Both gates are deliberately before topology/Panes.
+    # runtime resources.  All gates are deliberately before topology/Panes:
+    # delivery identity, then baseline freshness (scheme A fail-fast).
     _preflight_delivery_identity(
         args.workflow_id, node_id, args.task_id,
         claim=getattr(args, "candidate_sha", None),
     )
+    _preflight_baseline_freshness(args, source_repo, base_branch)
     stage_config = ensure_stage_topology(
         args.workflow_id,
         node_id,
