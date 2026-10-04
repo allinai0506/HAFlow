@@ -123,6 +123,7 @@ def test_native_identity_precedes_unowned_transcript_classification():
     assert response['status']=='IDENTITY_MISMATCH'
     assert aa.startup_readiness('codex', {'agent_name':'instance'}, {'name':'instance','agent_status':'idle'}, None)['status']=='UNKNOWN'
     assert aa.startup_readiness('codex', {'agent_name':'instance'}, {'name':'instance','agent_status':'idle'}, '')['status']=='READY'
+    assert aa.startup_readiness('codex', {'agent_name':'instance'}, {'name':'instance','agent_status':'done'}, '')['status']=='READY'
 
 
 def test_installed_large_agent_binary_can_be_fingerprinted(tmp_path):

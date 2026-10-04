@@ -4292,7 +4292,7 @@ def try_direct_stage_advance(item):
         # 永远为空。required_task_ids 的链式解析（scheduler.node_is_complete）
         # 因此断在第一跳，实现节点永远判不出完成，日志只剩
         # [STAGE ADVANCE WAIT] coordinator=working。
-        _redispatch_of = str(spec.get("redispatch_of") or "").strip()
+        _redispatch_of = str(spec.get("redispatch_of") or spec.get("supersedes") or "").strip()
         if _redispatch_of:
             cmd += ["--supersedes", _redispatch_of,
                     "--supersede-reason", "controller redispatch after explicit invalidation"]

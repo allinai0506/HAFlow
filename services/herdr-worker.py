@@ -664,6 +664,22 @@ def write_task_context(clone, agent, branch, shared_docs=None, mode="git", conte
     return ctx, complexity_baseline
 
 
+def rollback_unready_startup(clone, pane_id, pane_source, identity=None, agent=None):
+    """Idempotently roll back an unready agent dynamic pane before agent_started."""
+    if pane_source != 'dynamic' or not pane_id:
+        return False
+    try:
+        from herdr.task_resources import workflow_launch_lock
+        from herdr.state_store import get_state_store
+        db_path = get_state_store().db_path
+        with workflow_launch_lock(db_path, 'managed-dynamic-pane-lifecycle'):
+            run_json(['herdr', 'pane', 'close', pane_id], timeout=3)
+            return True
+    except Exception as exc:
+        print(f"[ROLLBACK UNREADY STARTUP WARN] {exc}", file=sys.stderr)
+        return False
+
+
 def rollback_unstarted_pane(clone, pane_id, pane_source, identity):
     from herdr.task_resources import workflow_launch_lock
     from herdr.state_store import get_state_store
@@ -1076,6 +1092,7 @@ def main():
         if launch_identity:
             launch_identity.update(phase='agent_start_requested')
             write_worker_launch_identity(clone, launch_identity)
+
         agent_start_attempted = True
         agent = start_agent(
             args.task_id,
@@ -1083,15 +1100,11 @@ def main():
             pane_id
         )
 
-        agent_started = True
-        if launch_identity:
-            session = agent.get('agent_session')
-            launch_identity.update(agent_session_id=session.get('value') if isinstance(session, dict) else session,
-                                   agent_name=agent.get('name'), phase='agent_started')
-            write_worker_launch_identity(clone, launch_identity)
         readiness = wait_startup_ready(args.agent, pane_id, agent)
         if not readiness.get("interactive_ready"):
             raise RuntimeError(f"Worker startup {readiness.get('status', 'UNKNOWN')}: {readiness.get('reason', 'unknown')}")
+
+        agent_started = True
 
         session = agent.get("agent_session")
         agent_session_id = (
@@ -1162,6 +1175,9 @@ def main():
         }
         if not agent_start_attempted and pane_id and rollback_unstarted_pane(clone, pane_id, pane_source, launch_identity):
             failure.update(disposition='pane_reclaimed', recovery_required=False)
+            pane_id = None
+        elif agent_start_attempted and not agent_started and pane_id and pane_source == 'dynamic' and rollback_unready_startup(clone, pane_id, pane_source, launch_identity, agent):
+            failure.update(disposition='rolled_back', recovery_required=False, agent_started=False)
             pane_id = None
         # Expected identity is the start receipt, never the foreign queried instance.
         print("HERDR_WORKER_FAILURE=" + json.dumps(failure, sort_keys=True), file=sys.stderr, flush=True)

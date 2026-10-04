@@ -1,0 +1,85 @@
+"""Standardized workspace trust configuration for CLI agents (Grok, Claude, etc.).
+
+Pre-seeds permissions to avoid background modal/TTY authorization popups.
+"""
+
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+
+def ensure_grok_workspace_trust(repo_path: Path | str) -> bool:
+    """Register workspace path in ~/.grok/trusted_folders.toml."""
+    try:
+        resolved = str(Path(repo_path).expanduser().resolve())
+        config = Path.home() / ".grok" / "trusted_folders.toml"
+        content = config.read_text(encoding="utf-8") if config.exists() else ""
+        header = f'[folders."{resolved}"]'
+        if header not in content:
+            entry = f'\n[folders."{resolved}"]\ntrusted = true\ndecided_at = {int(time.time())}\n'
+            config.parent.mkdir(parents=True, exist_ok=True)
+            tmp = config.with_suffix(".toml.tmp")
+            tmp.write_text((content.rstrip() + "\n" + entry).lstrip(), encoding="utf-8")
+            tmp.replace(config)
+        return True
+    except Exception as exc:
+        print(f"[WORKSPACE TRUST WARN] grok trust failed for {repo_path}: {exc}", file=sys.stderr)
+        return False
+
+
+def ensure_claude_workspace_trust(repo_path: Path | str) -> bool:
+    """Register workspace path in ~/.claude.json."""
+    try:
+        resolved = str(Path(repo_path).expanduser().resolve())
+        config = Path.home() / ".claude.json"
+        data = {}
+        if config.exists():
+            try:
+                data = json.loads(config.read_text(encoding="utf-8"))
+            except Exception:
+                data = {}
+        trusted = data.setdefault("trustedDirectories", [])
+        if resolved not in trusted:
+            trusted.append(resolved)
+            config.parent.mkdir(parents=True, exist_ok=True)
+            tmp = config.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            tmp.replace(config)
+        return True
+    except Exception as exc:
+        print(f"[WORKSPACE TRUST WARN] claude trust failed for {repo_path}: {exc}", file=sys.stderr)
+        return False
+
+
+def ensure_workspace_trust(repo_path: Path | str, agents: list[str] | None = None) -> bool:
+    """Ensure workspace trust for specified agents or all supported agents."""
+    supported = {
+        "grok": ensure_grok_workspace_trust,
+        "claude": ensure_claude_workspace_trust,
+    }
+    targets = agents if agents is not None else list(supported.keys())
+    success = True
+    for agent in targets:
+        handler = supported.get(agent)
+        if handler:
+            if not handler(repo_path):
+                success = False
+    return success
+
+
+def ensure_controller_env_trust(project_root: Path | str | None = None, clone_root: Path | str | None = None) -> bool:
+    """Pre-seed trust for project root, clone root, and common controller directories."""
+    default_clone_root = Path(os.environ.get("HERDR_CLONES_DIR") or Path.home() / ".herdr-controller" / "clones")
+    active_clone_root = Path(clone_root).expanduser().resolve() if clone_root else default_clone_root
+    
+    roots_to_trust = [active_clone_root]
+    if project_root:
+        roots_to_trust.append(Path(project_root).expanduser().resolve())
+
+    all_ok = True
+    for root in roots_to_trust:
+        if not ensure_workspace_trust(root):
+            all_ok = False
+    return all_ok

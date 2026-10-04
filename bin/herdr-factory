@@ -435,6 +435,12 @@ def start_workflow(
             context=context_bindings if mode == "context" else None,
         )
 
+    try:
+        from herdr.workspace_trust import ensure_controller_env_trust
+        ensure_controller_env_trust(project.get("project_root"))
+    except Exception as trust_exc:
+        print(f"[FACTORY TRUST WARN] {trust_exc}")
+
     ensure_pool_for_project(project["project_id"])
     healthy_agents, unhealthy_agents = run_workflow_preflight(
         project,

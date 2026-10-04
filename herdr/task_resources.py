@@ -225,6 +225,16 @@ def finish_launch_intent(store, intent, *, now=None):
     _launch_event(store, {**current, 'phase': 'registered'}, now)
 
 
+def abort_launch_intent(store, intent, *, reason='worker_startup_failed', now=None):
+    """Mark an unstarted/rolled-back launch intent as resources_absent so it does not block relaunch."""
+    current = _latest_intent(store, intent['key'])
+    if not current or current['intent_id'] != intent['intent_id']:
+        return None
+    rolled_back = {**current, 'phase': 'resources_absent', 'abort_reason': reason}
+    _launch_event(store, rolled_back, now)
+    return rolled_back
+
+
 def registered_launch_task(store, intent):
     task = store.get_task(intent['task_id'])
     if not task:

@@ -681,6 +681,6 @@ def startup_readiness(agent: str, expected_identity: dict, runtime: dict, termin
     blocker = classify_text(terminal_text)
     if blocker:
         return {**result, "status": blocker, "reason": "startup_blocked"}
-    if runtime.get("agent_status") != "idle":
+    if runtime.get("agent_status") not in ("idle", "done"):
         return {**result, "reason": "interactive_not_idle"}
     return {"interactive_ready": True, "status": "READY", "reason": "native_identity_idle"}
