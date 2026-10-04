@@ -23,6 +23,27 @@ except ImportError:
     from herdr.projects import workflow_config_for
     from herdr.workflow import find_node
 
+
+class RouterRejectionError(RuntimeError):
+    """Base error for all router rejections."""
+    pass
+
+
+class RouterIsolationRejection(RouterRejectionError):
+    """Cross-stage isolation or role reuse violation; actionable via opt-out."""
+    pass
+
+
+class RouterHealthRejection(RouterRejectionError):
+    """Agent health / deep preflight check failure; transient or environment issue."""
+    pass
+
+
+class RouterPolicyRejection(RouterRejectionError):
+    """Agent disabled, not allowed, or no enabled candidate in project config."""
+    pass
+
+
 DEFAULT_ALLOWED = ["opencode", "codex", "qodercli", "claude", "agy", "pi", "grok", "kimi"]
 
 DEFAULT_STAGE_PREFERENCES = {
@@ -493,7 +514,7 @@ def _choose_agent_locked(
         if selected in stage_used_agents:
             _opt_out, _opt_reason = _isolation_opt_out(node_policy)
             if not (_opt_out and _opt_reason):
-                raise RuntimeError(
+                raise RouterIsolationRejection(
                     f"Agent '{selected}' is prohibited for stage '{stage}' "
                     f"because it was used in stage(s): {', '.join(exclude_stages)} "
                     f"(excluded agents: {sorted(stage_used_agents)}). "
@@ -502,11 +523,11 @@ def _choose_agent_locked(
                     "reuse_reason) to bypass."
                 )
         if selected not in allowed:
-            raise RuntimeError(
+            raise RouterPolicyRejection(
                 f"Agent '{selected}' is not allowed for project {project_id}"
             )
         if selected in disabled:
-            raise RuntimeError(
+            raise RouterPolicyRejection(
                 f"Agent '{selected}' is disabled for project {project_id}"
             )
         if (selected in hard_unhealthy) or (snapshot_fresh and healthy and selected not in healthy):
@@ -514,7 +535,7 @@ def _choose_agent_locked(
                 selected,
                 "NOT_READY",
             )
-            raise RuntimeError(
+            raise RouterHealthRejection(
                 f"Agent '{selected}' failed Workflow Deep Preflight: {status}"
             )
     # Canary config probe (one small file read; missing/invalid means
@@ -584,7 +605,7 @@ def _choose_agent_locked(
         if _opt_out:
             if not _opt_reason:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
-                raise RuntimeError(
+                raise RouterIsolationRejection(
                     f"Isolation opt-out for stage '{stage}' requires "
                     "a non-empty reuse_reason (R9 fail-closed)"
                 )
@@ -593,7 +614,7 @@ def _choose_agent_locked(
             filtered = [a for a in candidates if a not in stage_used_agents]
             if not filtered:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
-                raise RuntimeError(
+                raise RouterIsolationRejection(
                     f"No available Agent for stage '{stage}': all candidates "
                     f"{candidates} were used in stage(s) "
                     f"{', '.join(exclude_stages)} "
@@ -624,11 +645,11 @@ def _choose_agent_locked(
         candidates = [agent for agent in candidates
                       if agent in verified and _agent_request_fresh(record, agent)]
         if not candidates:
-            raise RuntimeError("Workflow Deep Preflight: no request-verified compatible Agent")
+            raise RouterHealthRejection("Workflow Deep Preflight: no request-verified compatible Agent")
 
     if not candidates:
         fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
-        raise RuntimeError(
+        raise RouterPolicyRejection(
             f"No enabled Agent available for project {project_id}"
         )
 

@@ -34,6 +34,7 @@ NOTE_KINDS = (
     "plan",
     "review",
     "decision",
+    "sign-off",
     "evidence",
     "gate",
     "delivery",
@@ -49,7 +50,7 @@ SOURCES = (SOURCE_AGENT, SOURCE_CONTROLLER, SOURCE_HUMAN)
 
 EVIDENCE_KINDS = frozenset({"evidence", "gate", "delivery"})
 CONTEXT_KINDS = frozenset(
-    {"requirement", "spec", "plan", "review", "decision", "invalidation", "wrapup"}
+    {"requirement", "spec", "plan", "review", "decision", "sign-off", "invalidation", "wrapup"}
 )
 
 MAX_TITLE = 200

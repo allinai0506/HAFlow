@@ -8,6 +8,25 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-10-04] fix | 路由健康拒绝解耦（防节点槽位死锁）、签发笔记全链路接线与候选重冻 CLI 闭环
+- 背景：
+  1. 多 Agent 派发时，若目标 Agent 未就绪或健康体检失败，原实现错误调用 `_record_router_failure_task` 在 `tasks.json` 落失败任务，导致单任务节点（`max_tasks_per_node=1`）槽位被永久耗尽，后续自愈重试死锁；
+  2. 健康失败时向 CLI 输出误导性的 `Isolation is fail-closed... opt out` 文案，掩盖了真实连通性/凭证问题；
+  3. 共享文档区缺少对 `sign-off` 笔记类型的支持，导致审批签发无法作为合法上下文被机器校验和纳入评分；
+  4. 重复派发日志（`[DISPATCH DUPLICATE]`）仅输出既有任务 ID，造成提议与存量审计混淆；
+  5. 缺乏候选 SHA 重冻结的 CLI 入口，无法在工作流复验阶段进行命令式重新冻结。
+- 变更：
+  1. **`herdr/agent_router.py`**：引入结构化异常层次 `RouterRejectionError`（包含 `RouterIsolationRejection`、`RouterHealthRejection`、`RouterPolicyRejection`），均继承自 `RuntimeError` 保证向下兼容；
+  2. **`bin/herdr-task`**：
+     - 隔离拒绝（Fail-closed）保留失败持久化以满足 FR-6 审计要求；
+     - 健康探测/策略拒绝仅调用 `abort_launch_intent` 和 `release_agent_reservation` 清理临时意图，绝不持久化写入 `tasks.json` 消耗节点槽位，并输出明确的 preflight 诊断提示；
+     - 重复派发明确打印 `proposed={args.task_id} existing={duplicate['task_id']}`；
+     - 新增 `freeze-candidate` CLI 子命令，对接 `herdr.scheduler_facts.record_candidate_frozen`。
+  3. **`herdr/workflow_docs.py`**：将 `sign-off` 同步纳入 `NOTE_KINDS` 与 `CONTEXT_KINDS`。
+  4. **自动化测试**：新增 `tests/test_router_health_and_defects_remedy.py`（7 项专项测试全部通过，关联回归 139 项全通）。
+- 证据：
+  - 专项测试 7/7 passed，路由与派发回归 139/139 passed，S6 独立评审裁定 `MERGE_READY`。
+
 ## [2026-10-04] fix | 多智能体流水线系统性硬化：补派契约强制闭环、原子启动与未就绪回滚、环境信任装配预埋及门禁静态语义校验
 - 背景：
   1. 真实流水线长程执行中暴露四项系统级阻断隐患：
