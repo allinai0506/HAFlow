@@ -377,10 +377,15 @@ def test_scenario_8_frontend_templates_and_safety_checks(ops_test_env):
     assert "confirmOpsForcePass" in html
     # Check that reason is required and cancelled clicks do not call api
     assert "forcePassReason" in html or "ctlReasonInput" in html
+    assert "kernelForcePassReason" in html
+    assert "btnSubmitKernelForcePass" in html
     # Check anti-double-click guard
     assert "_opsActionBusy" in html
     # Check differentiated feedback logic in runOpsAnomalyAction
     assert "res.partial" in html or "partial" in html
+    # Check expected_version and expected_pane_id bindings in frontend
+    assert "expected_version" in html
+    assert "expected_pane_id" in html
 
 
 # 9. 真实 HTTP 路由 -> Handler -> SQLite 临时数据库 -> 状态回读端到端集成测试
@@ -431,6 +436,262 @@ def test_scenario_9_http_route_integration_to_sqlite(ops_test_env):
         assert task["stage_verdict"] == "blocked", "Integration test failed: stage_verdict was changed to pass!"
         wf = store.get_workflow("wf-ops-01")
         assert "test" not in (wf.get("gate_overrides") or {}), "Integration test failed: gate_overrides was modified!"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+# 10. 目标节点参数冲突拒绝，无状态副作用（校验与执行统一单一目标节点）
+def test_scenario_10_conflicting_node_parameters_rejected(ops_test_env):
+    """Rejection when node, stage, or gate_node_id have conflicting distinct values."""
+    # 10.1 In api_controller_execute_action
+    payload = {
+        "type": "force_pass",
+        "workflow_id": "wf-ops-01",
+        "task_id": "wf-ops-01-test",
+        "node": "test",
+        "gate_node_id": "implementation",
+        "confirmed": True,
+        "reason": "测试参数冲突防护",
+    }
+    with pytest.raises(RuntimeError) as exc:
+        c.api_controller_execute_action(payload)
+    assert "目标节点参数冲突" in str(exc.value)
+
+    # Verify zero side-effects
+    store = ops_test_env["store"]
+    assert store.get_task("wf-ops-01-test")["stage_verdict"] == "blocked"
+    assert store.get_task("wf-ops-01-reworkable")["stage_verdict"] == "blocked"
+    wf = store.get_workflow("wf-ops-01")
+    assert not (wf.get("gate_overrides") or {})
+
+    # 10.2 In api_kernel_force_pass
+    k_payload = {
+        "workflow_id": "wf-ops-01",
+        "gate_node_id": "test",
+        "node": "plan",
+        "confirmed": True,
+        "reason": "测试参数冲突防护",
+    }
+    with pytest.raises(RuntimeError) as exc2:
+        c.api_kernel_force_pass(k_payload)
+    assert "目标节点参数冲突" in str(exc2.value)
+    assert not (store.get_workflow("wf-ops-01").get("gate_overrides") or {})
+
+
+# 11. /api/kernel/force-pass 与控制台放行遵循完全一致的人工豁免校验
+def test_scenario_11_kernel_force_pass_parity_validation(ops_test_env):
+    """Parity of /api/kernel/force-pass with manual gate force pass constraints."""
+    store = ops_test_env["store"]
+
+    # 11.1 Missing confirmation
+    with pytest.raises(RuntimeError) as exc:
+        c.api_kernel_force_pass({
+            "workflow_id": "wf-ops-01",
+            "gate_node_id": "test",
+            "reason": "人工核验",
+        })
+    assert "显式确认" in str(exc.value)
+
+    # 11.2 Default or empty note
+    for dis in ["human forced pass", "经人工核验，次要阻断项已评估无害，特批放行", "", "   "]:
+        with pytest.raises(RuntimeError) as exc:
+            c.api_kernel_force_pass({
+                "workflow_id": "wf-ops-01",
+                "gate_node_id": "test",
+                "confirmed": True,
+                "note": dis,
+            })
+        assert "原因" in str(exc.value)
+
+    # 11.3 Missing gate node
+    with pytest.raises(RuntimeError) as exc:
+        c.api_kernel_force_pass({
+            "workflow_id": "wf-ops-01",
+            "confirmed": True,
+            "reason": "合法人工原因",
+            "gate_node_id": "",
+        })
+    assert "缺少明确的目标门禁节点" in str(exc.value)
+
+    # 11.4 Gate node does not belong to workflow
+    with pytest.raises(RuntimeError) as exc:
+        c.api_kernel_force_pass({
+            "workflow_id": "wf-ops-01",
+            "gate_node_id": "nonexistent_node",
+            "confirmed": True,
+            "reason": "合法人工原因",
+        })
+    assert "不属于工作流" in str(exc.value)
+
+    # 11.5 Task attribution and node mismatch if task_id provided
+    with pytest.raises(RuntimeError) as exc:
+        c.api_kernel_force_pass({
+            "workflow_id": "wf-ops-01",
+            "gate_node_id": "implementation",
+            "task_id": "wf-ops-01-test",  # belongs to 'test'
+            "confirmed": True,
+            "reason": "合法人工原因",
+        })
+    assert "节点错配" in str(exc.value)
+
+    # 11.6 Valid manual pass via api_kernel_force_pass (releases gate without advancing workflow)
+    res = c.api_kernel_force_pass({
+        "workflow_id": "wf-ops-01",
+        "gate_node_id": "test",
+        "task_id": "wf-ops-01-test",
+        "confirmed": True,
+        "reason": "经过主管和QA联合签名，该测试缺陷已豁免",
+        "operator": "lead_qa",
+    })
+    assert res.get("workflow_id") == "wf-ops-01"
+    assert "wf-ops-01-test" in res.get("updated_tasks", [])
+
+    # Check store
+    t = store.get_task("wf-ops-01-test")
+    assert t["stage_verdict"] == "pass"
+    assert "lead_qa" in t["stage_verdict_note"]
+    assert "经过主管和QA联合签名" in t["stage_verdict_note"]
+
+    wf = store.get_workflow("wf-ops-01")
+    overrides = wf.get("gate_overrides") or {}
+    assert "test" in overrides
+    assert overrides["test"]["note"] == "经过主管和QA联合签名，该测试缺陷已豁免"
+    assert overrides["test"]["operator"] == "lead_qa"
+
+
+# 12. 旧页面请求遇到新运行实例：必须拒绝
+def test_scenario_12_stale_request_meets_new_running_instance(ops_test_env):
+    """When a task has moved to a new running instance (pane), stale requests must be rejected."""
+    store = ops_test_env["store"]
+    # Task has pane-rework-01
+    # 12.1 In ops_repair with stale pane
+    payload = {
+        "type": "ops_repair",
+        "workflow_id": "wf-ops-01",
+        "task_id": "wf-ops-01-reworkable",
+        "node": "implementation",
+        "expected_pane_id": "pane-old-99",
+    }
+    with pytest.raises(RuntimeError) as exc:
+        c.api_controller_execute_action(payload)
+    assert "任务运行实例已变化" in str(exc.value)
+
+    # 12.2 In api_kernel_force_pass with stale pane
+    with pytest.raises(RuntimeError) as exc:
+        c.api_kernel_force_pass({
+            "workflow_id": "wf-ops-01",
+            "task_id": "wf-ops-01-reworkable",
+            "gate_node_id": "implementation",
+            "expected_pane_id": "pane-old-99",
+            "confirmed": True,
+            "reason": "人工豁免尝试",
+        })
+    assert "任务运行实例已变化" in str(exc.value)
+
+    # Ensure no side effects
+    t = store.get_task("wf-ops-01-reworkable")
+    assert t["stage_verdict"] == "blocked"
+
+
+# 13. 写入/执行边界版本检查：防止校验后状态再次变化的竞态
+def test_scenario_13_write_boundary_version_conflict_rejection(ops_test_env):
+    """State change between initial check and write boundary is blocked."""
+    store = ops_test_env["store"]
+    from herdr import kernel as herdr_kernel
+
+    # 13.1 force_pass_gate write-boundary check with expected_version mismatch
+    with pytest.raises(RuntimeError) as exc:
+        herdr_kernel.force_pass_gate(
+            workflow_id="wf-ops-01",
+            gate_node_id="implementation",
+            note="合法人工作废",
+            store=store,
+            expected_version=999,  # actual is 1
+        )
+    assert "任务版本已在写入边界发生变化" in str(exc.value)
+
+    # Check that task metadata and gate overrides were NOT written
+    t = store.get_task("wf-ops-01-reworkable")
+    assert t["stage_verdict"] == "blocked"
+    wf = store.get_workflow("wf-ops-01")
+    assert "implementation" not in (wf.get("gate_overrides") or {})
+
+    # 13.2 ops_repair execution boundary check
+    with pytest.raises(RuntimeError) as exc:
+        c.api_controller_execute_action({
+            "type": "ops_repair",
+            "workflow_id": "wf-ops-01",
+            "task_id": "wf-ops-01-reworkable",
+            "node": "implementation",
+            "expected_version": 999,
+        })
+    assert "任务状态已在执行前发生变化" in str(exc.value) or "任务版本已变化" in str(exc.value)
+
+
+# 14. 真实 HTTP 路由 -> Handler -> SQLite: /api/kernel/force-pass 集成校验
+def test_scenario_14_http_route_kernel_force_pass_integration(ops_test_env):
+    """Integration test: /api/kernel/force-pass over HTTP to SQLite."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+
+    server = ThreadingHTTPServer(("127.0.0.1", port), c.Handler)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+
+    try:
+        url = f"http://127.0.0.1:{port}/api/kernel/force-pass"
+
+        # 1. Rejected request: default note and no confirmed flag
+        bad_req = urllib.request.Request(
+            url,
+            data=json.dumps({
+                "workflow_id": "wf-ops-01",
+                "gate_node_id": "test",
+                "note": "human forced pass",
+            }).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        status = None
+        try:
+            with urllib.request.urlopen(bad_req) as resp:
+                status = resp.status
+        except urllib.error.HTTPError as e:
+            status = e.code
+        assert status in (400, 500)
+
+        # Store untouched
+        store = ops_test_env["store"]
+        assert store.get_task("wf-ops-01-test")["stage_verdict"] == "blocked"
+
+        # 2. Approved request: explicit confirmation and user-provided reason
+        good_req = urllib.request.Request(
+            url,
+            data=json.dumps({
+                "workflow_id": "wf-ops-01",
+                "gate_node_id": "test",
+                "task_id": "wf-ops-01-test",
+                "confirmed": True,
+                "reason": "集成测试真实放行",
+                "operator": "tester",
+            }).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(good_req) as resp:
+            assert resp.status == 200
+            body = json.loads(resp.read().decode("utf-8"))
+            data = body.get("data") if "data" in body else body
+            assert data.get("workflow_id") == "wf-ops-01"
+
+        # Check SQLite store
+        assert store.get_task("wf-ops-01-test")["stage_verdict"] == "pass"
+        wf = store.get_workflow("wf-ops-01")
+        assert "test" in (wf.get("gate_overrides") or {})
+        assert (wf.get("gate_overrides") or {})["test"]["note"] == "集成测试真实放行"
     finally:
         server.shutdown()
         server.server_close()

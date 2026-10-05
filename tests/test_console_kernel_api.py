@@ -115,7 +115,7 @@ def test_api_kernel_force_pass(console_kernel_env):
     _seed_wf(console_kernel_env, wid, status="running")
     _seed_task(console_kernel_env, "t_gate", wid, "gate1", status="completed", verdict="blocked")
 
-    res = c.api_kernel_force_pass({"workflow_id": wid, "gate_node_id": "gate1", "note": "Emergency override"})
+    res = c.api_kernel_force_pass({"workflow_id": wid, "gate_node_id": "gate1", "note": "Emergency override", "confirmed": True})
     assert res["ok"] is True
     assert "t_gate" in res["updated_tasks"]
 

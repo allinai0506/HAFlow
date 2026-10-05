@@ -380,18 +380,28 @@ def force_pass_gate(
     note: str = "human forced pass",
     operator: str = "human",
     store: Optional[StateStore] = None,
+    expected_version: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Forcibly mark a gate node verdict as passed/approved with an audit note."""
     s = _get_store(store)
     tasks = s.list_tasks(workflow_id=workflow_id)
+
+    matching_tasks = [
+        t for t in tasks
+        if gate_node_id in (t.get("node"), t.get("stage")) and t.get("status") != "superseded"
+    ]
+
+    # Write-boundary verification: check expected_version against matching tasks before any write
+    if expected_version is not None:
+        for t in matching_tasks:
+            cur_ver = t.get("version")
+            if cur_ver != expected_version:
+                raise RuntimeError(
+                    f"任务版本已在写入边界发生变化（期望版本 {expected_version}，当前版本 {cur_ver}），写入已拒绝，请刷新页面"
+                )
+
     updated_tasks = []
-
-    for task in tasks:
-        if gate_node_id not in (task.get("node"), task.get("stage")):
-            continue
-        if task.get("status") == "superseded":
-            continue
-
+    for task in matching_tasks:
         tid = task.get("task_id")
         update_task_metadata(
             task_id=tid,

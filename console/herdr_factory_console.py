@@ -68,6 +68,15 @@ def ops_center(workflow_id=None,include_tasks=False):
     for c in data.get('workflow_cards') or []:
         s=subjects.get(c.get('workflow_id'))
         if s:c['workflow_label']=s
+    all_t_map = {t.get('task_id'): t for t in tasks()}
+    for a in data.get('anomalies') or []:
+        tid = a.get('task_id')
+        if tid and tid in all_t_map:
+            t = all_t_map[tid]
+            if a.get('version') is None:
+                a['version'] = t.get('version')
+            if not a.get('pane_id'):
+                a['pane_id'] = t.get('pane_id')
     return data
 
 def projects():return list(load_json(PROJECTS_FILE,{'projects':{}}).get('projects',{}).values())
@@ -613,14 +622,110 @@ def api_kernel_rollback(b):
     reason=str(b.get('reason') or 'manual_rollback').strip()
     return herdr_kernel.rollback_workflow(wid,target_node_id=target,reason=reason)
 
+DEFAULT_DISALLOWED_NOTES = {
+    '人类在控制台强制放行并推进',
+    '运维驾驶舱异常中枢一键修复放行',
+    '运维驾驶舱异常中枢一键修复执行',
+    'human forced pass',
+    'human',
+    '经人工核验，次要阻断项已评估无害，特批放行',
+    '人工放行',
+    'force pass',
+}
+
+def _resolve_target_node(payload):
+    """Resolve target node from node, stage, gate_node_id in payload.
+
+    If multiple distinct non-empty values are provided, reject immediately
+    to prevent 'validate node X, force pass node Y' privilege escalation.
+    """
+    candidates = {}
+    for key in ('node', 'stage', 'gate_node_id'):
+        val = str(payload.get(key) or '').strip()
+        if val:
+            candidates[key] = val
+    unique_vals = set(candidates.values())
+    if len(unique_vals) > 1:
+        details = ", ".join(f"{k}={v}" for k, v in sorted(candidates.items()))
+        raise RuntimeError(f"目标节点参数冲突（{details}），禁止多节点错配请求")
+    return next(iter(unique_vals)) if unique_vals else ""
+
+def _validate_force_pass_params(payload, wid, wf=None, task=None):
+    """Unified validation for manual gate force-pass requests.
+
+    Shared across /api/controller/execute-action and /api/kernel/force-pass.
+    Returns (gate_node, reason, operator).
+    """
+    if not (payload.get('confirmed') is True or payload.get('confirm') is True):
+        raise RuntimeError('人工强制放行必须经过显式确认（缺少 confirmation 标记）')
+
+    reason = str(payload.get('reason') or payload.get('note') or '').strip()
+    if not reason or reason in DEFAULT_DISALLOWED_NOTES:
+        raise RuntimeError('人工强制放行必须填写非空原因，禁止使用系统默认文案')
+
+    gate = _resolve_target_node(payload)
+    if not gate:
+        raise RuntimeError('缺少明确的目标门禁节点，禁止全工作流隐式放行')
+
+    # If task is provided, ensure gate matches task node
+    if task:
+        task_node = str(task.get('node') or task.get('stage') or '').strip()
+        if task_node and gate != task_node:
+            raise RuntimeError(f'任务节点错配: 请求目标节点为 {gate}，当前任务节点为 {task_node}，请刷新页面')
+
+    # Verify gate belongs to the workflow
+    wf_tasks = tasks_for_workflow(wid)
+    matching_tasks = [t for t in wf_tasks if gate in (t.get('node'), t.get('stage'))]
+    wf_cfg_nodes = (wf.get('config') or {}).get('nodes') or [] if isinstance(wf, dict) else []
+    wf_cfg_node_ids = {n.get('id') for n in wf_cfg_nodes if isinstance(n, dict)}
+    if not matching_tasks and gate not in wf_cfg_node_ids:
+        raise RuntimeError(f'目标门禁节点 {gate} 不属于工作流 {wid}')
+
+    op = str(payload.get('operator') or 'human').strip()
+    return gate, reason, op
+
 def api_kernel_force_pass(b):
-    wid=str(b.get('workflow_id') or '').strip()
-    gate=str(b.get('gate_node_id') or '').strip()
-    if not wid:raise RuntimeError('workflow_id 不能为空')
-    if not gate:raise RuntimeError('gate_node_id 不能为空')
-    note=str(b.get('note') or 'human forced pass').strip()
-    op=str(b.get('operator') or 'human').strip()
-    return herdr_kernel.force_pass_gate(wid,gate_node_id=gate,note=note,operator=op)
+    b = b or {}
+    wid = str(b.get('workflow_id') or '').strip()
+    if not wid: raise RuntimeError('workflow_id 不能为空')
+    wf = workflows().get(wid)
+    if not wf:
+        try:
+            wf = herdr_kernel._get_store().get_workflow(wid)
+        except Exception:
+            wf = None
+    if not wf and not tasks_for_workflow(wid):
+        raise RuntimeError(f'未找到工作流 {wid}')
+
+    task_id = str(b.get('task_id') or '').strip()
+    task = None
+    if task_id:
+        store = herdr_kernel._get_store()
+        task = store.get_task(task_id) if hasattr(store, 'get_task') else None
+        if not task:
+            raise RuntimeError(f'未找到任务 {task_id}（工作流 {wid}）')
+        if task.get('workflow_id') != wid:
+            raise RuntimeError(f'任务 {task_id} 不属于工作流 {wid}（所属工作流错配）')
+        if task.get('status') == 'superseded':
+            raise RuntimeError(f'任务 {task_id} 已被替换或作废，请刷新页面')
+
+    gate, reason, op = _validate_force_pass_params(b, wid, wf, task=task)
+
+    exp_ver = b.get('expected_version')
+    if task and exp_ver is not None and task.get('version') != exp_ver:
+        raise RuntimeError(f'任务版本已变化（期望版本 {exp_ver}，当前版本 {task.get("version")}），请刷新页面')
+
+    exp_pane = str(b.get('expected_pane_id') or '').strip()
+    if task and exp_pane and str(task.get('pane_id') or '').strip() != exp_pane:
+        raise RuntimeError('任务运行实例已变化，请刷新页面')
+
+    return herdr_kernel.force_pass_gate(
+        wid,
+        gate_node_id=gate,
+        note=reason,
+        operator=op,
+        expected_version=exp_ver,
+    )
 
 def api_kernel_checkpoint_create(b):
     wid=str(b.get('workflow_id') or '').strip()
@@ -926,7 +1031,7 @@ def api_controller_execute_action(payload):
         if task.get('status') == 'superseded':
             raise RuntimeError(f'任务 {task_id} 已被替换或作废，请刷新页面')
 
-        req_node = str(payload.get('node') or payload.get('stage') or payload.get('gate_node_id') or '').strip()
+        req_node = _resolve_target_node(payload)
         task_node = str(task.get('node') or task.get('stage') or '').strip()
         if req_node and task_node and req_node != task_node:
             raise RuntimeError(f'任务节点错配: 请求节点为 {req_node}，当前任务节点为 {task_node}，请刷新页面')
@@ -978,33 +1083,17 @@ def api_controller_execute_action(payload):
         return {'ok': True, 'task_id': task_id, 'output': r.stdout.strip()}
 
     elif act_type in ('force_pass', 'force_pass_advance'):
-        if not (payload.get('confirmed') is True or payload.get('confirm') is True):
-            raise RuntimeError('人工强制放行必须经过显式确认（缺少 confirmation 标记）')
+        gate, reason, op = _validate_force_pass_params(payload, wid, wf, task=task)
+        exp_ver = payload.get('expected_version')
 
-        reason = str(payload.get('reason') or payload.get('note') or '').strip()
-        default_notes = {
-            '人类在控制台强制放行并推进',
-            '运维驾驶舱异常中枢一键修复放行',
-            '运维驾驶舱异常中枢一键修复执行',
-            'human forced pass',
-            'human',
-        }
-        if not reason or reason in default_notes:
-            raise RuntimeError('人工强制放行必须填写非空原因，禁止使用系统默认文案')
-
-        gate = str(payload.get('gate_node_id') or payload.get('node') or payload.get('stage') or '').strip()
-        if not gate:
-            raise RuntimeError('缺少明确的目标门禁节点，禁止全工作流隐式放行')
-
-        wf_tasks = tasks_for_workflow(wid)
-        matching_tasks = [t for t in wf_tasks if gate in (t.get('node'), t.get('stage'))]
-        wf_cfg_nodes = (wf.get('config') or {}).get('nodes') or [] if isinstance(wf, dict) else []
-        wf_cfg_node_ids = {n.get('id') for n in wf_cfg_nodes if isinstance(n, dict)}
-        if not matching_tasks and gate not in wf_cfg_node_ids:
-            raise RuntimeError(f'目标门禁节点 {gate} 不属于工作流 {wid}')
-
-        op = str(payload.get('operator') or 'human').strip()
-        gate_res = herdr_kernel.force_pass_gate(wid, gate_node_id=gate, note=reason, operator=op)
+        # Execution/write boundary check: pass expected_version to force_pass_gate
+        gate_res = herdr_kernel.force_pass_gate(
+            wid,
+            gate_node_id=gate,
+            note=reason,
+            operator=op,
+            expected_version=exp_ver,
+        )
 
         adv_res = None
         adv_err = None
@@ -1036,6 +1125,11 @@ def api_controller_execute_action(payload):
         }
 
     elif act_type == 'rework':
+        if task_id and payload.get('expected_version') is not None:
+            s = herdr_kernel._get_store()
+            fresh_task = s.get_task(task_id) if hasattr(s, 'get_task') else None
+            if fresh_task and fresh_task.get('version') != payload.get('expected_version'):
+                raise RuntimeError('任务状态已在执行前发生变化，请刷新页面')
         return _run_action_command(_find_action(payload, 'rework'), 30)
 
     elif act_type == 'advance':
@@ -1071,6 +1165,29 @@ def api_controller_execute_action(payload):
     elif act_type in ('retry', 'ops_repair'):
         if not task_id or not task:
             raise RuntimeError('task_id 不能为空')
+
+        # Execution boundary check: re-verify task status, version, and running instance before dispatching recovery
+        s = herdr_kernel._get_store()
+        fresh_task = s.get_task(task_id) if hasattr(s, 'get_task') else None
+        if fresh_task:
+            if payload.get('expected_version') is not None:
+                cur_v = fresh_task.get('version')
+                exp_v = payload.get('expected_version')
+                if cur_v != exp_v:
+                    raise RuntimeError(f'任务状态已在执行前发生变化（期望版本 {exp_v}，当前版本 {cur_v}），请刷新页面')
+            if payload.get('expected_pane_id') is not None:
+                cur_p = str(fresh_task.get('pane_id') or '').strip()
+                exp_p = str(payload.get('expected_pane_id') or '').strip()
+                if exp_p != cur_p:
+                    raise RuntimeError('任务运行实例已变化，请刷新页面')
+            elif payload.get('pane_id') is not None:
+                cur_p = str(fresh_task.get('pane_id') or '').strip()
+                exp_p = str(payload.get('pane_id') or '').strip()
+                if exp_p and cur_p and exp_p != cur_p:
+                    raise RuntimeError(f'任务运行实例已变化（请求实例 {exp_p}，当前实例 {cur_p}），请刷新页面')
+            if fresh_task.get('status') == 'superseded':
+                raise RuntimeError(f'任务 {task_id} 已被替换或作废，请刷新页面')
+            task = fresh_task
 
         rework_act = None
         try:
@@ -4972,7 +5089,7 @@ async function runOpsAnomalyAction(actType,wid,tid,node,options){
   options=options||{};
   if(actType==='force_pass'||actType==='force_pass_advance'){
     if(!options.confirmed){
-      confirmOpsForcePass(wid,tid,node);
+      confirmOpsForcePass(wid,tid,node,options);
       return;
     }
   }
@@ -4996,6 +5113,15 @@ async function runOpsAnomalyAction(actType,wid,tid,node,options){
       confirmed:!!options.confirmed,
       operator:options.operator||'human_ops'
     };
+    if(options.expected_version!==undefined&&options.expected_version!==null&&options.expected_version!==''){
+      payload.expected_version=parseInt(options.expected_version,10);
+    }else if(options.version!==undefined&&options.version!==null&&options.version!==''){
+      payload.expected_version=parseInt(options.version,10);
+    }
+    if(options.expected_pane_id||options.pane_id){
+      payload.expected_pane_id=options.expected_pane_id||options.pane_id;
+      payload.pane_id=options.pane_id||options.expected_pane_id;
+    }
     const res=await api('/api/controller/execute-action',{
       method:'POST',
       body:JSON.stringify(payload)
@@ -5025,10 +5151,13 @@ async function runOpsAnomalyAction(actType,wid,tid,node,options){
   }
 }
 
-function confirmOpsForcePass(wid,tid,node){
+function confirmOpsForcePass(wid,tid,node,options){
+  options=options||{};
   const widEsc=esc(wid||'');
   const tidEsc=esc(tid||'');
   const nodeEsc=esc(node||'');
+  const expVer=(options.expected_version!==undefined&&options.expected_version!==null)?options.expected_version:(options.version!==undefined&&options.version!==null?options.version:'');
+  const expPane=esc(options.expected_pane_id||options.pane_id||'');
   openModal('人工强制放行确认 (高风险)',`
     <div style="line-height:1.6">
       <div style="margin-bottom:8px"><strong>目标工作流:</strong> <code>${widEsc}</code></div>
@@ -5045,23 +5174,32 @@ function confirmOpsForcePass(wid,tid,node){
       </div>
       <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px">
         <button class="btn" onclick="closeModal()">取消</button>
-        <button id="btnSubmitForcePass" class="btn warning" onclick="submitOpsForcePass('${widEsc}','${tidEsc}','${nodeEsc}')">确认强制放行</button>
+        <button id="btnSubmitForcePass" class="btn warning">确认强制放行</button>
       </div>
     </div>
   `);
-}
-
-function submitOpsForcePass(wid,tid,node){
-  const el=document.getElementById('forcePassReason');
-  const reason=(el?el.value:'').trim();
-  if(!reason){
-    toast('必须填写强制放行原因',true);
-    return;
-  }
   const btn=document.getElementById('btnSubmitForcePass');
-  if(btn)btn.disabled=true;
-  closeModal();
-  runOpsAnomalyAction('force_pass',wid,tid,node,{confirmed:true,reason:reason});
+  if(btn){
+    btn.onclick=()=>{
+      const el=document.getElementById('forcePassReason');
+      const reason=(el?el.value:'').trim();
+      if(!reason){
+        toast('必须填写强制放行原因',true);
+        return;
+      }
+      btn.disabled=true;
+      closeModal();
+      const opts={confirmed:true,reason:reason};
+      if(expVer!==''&&expVer!=='undefined'&&expVer!=='null'){
+        opts.expected_version=parseInt(expVer,10);
+      }
+      if(expPane){
+        opts.expected_pane_id=expPane;
+        opts.pane_id=expPane;
+      }
+      runOpsAnomalyAction('force_pass',wid,tid,node,opts);
+    };
+  }
 }
 
 function renderOpsCenter(){
@@ -5194,8 +5332,8 @@ function renderOpsCenter(){
           <div class="ops-anomaly-event">最后事件: ${esc(a.last_event||'无详细事件记录')}</div>
         </div>
         <div class="ops-anomaly-actions">
-          ${a.kind==='FAILED'?`<button class="btn mini primary" onclick="runOpsAnomalyAction('ops_repair','${esc(a.workflow_id||'')}','${esc(a.task_id||'')}','${esc(a.node||'')}')">一键重试修复</button>`:''}
-          ${isBlocked?`<button class="btn mini warning" onclick="confirmOpsForcePass('${esc(a.workflow_id||'')}','${esc(a.task_id||'')}','${esc(a.node||'')}')">强制放行推进</button>`:''}
+          ${a.kind==='FAILED'?`<button class="btn mini primary" onclick="runOpsAnomalyAction('ops_repair','${esc(a.workflow_id||'')}','${esc(a.task_id||'')}','${esc(a.node||'')}',{expected_version:${a.version!==undefined&&a.version!==null?a.version:'null'},expected_pane_id:'${esc(a.pane_id||'')}',pane_id:'${esc(a.pane_id||'')}'})">一键重试修复</button>`:''}
+          ${isBlocked?`<button class="btn mini warning" onclick="confirmOpsForcePass('${esc(a.workflow_id||'')}','${esc(a.task_id||'')}','${esc(a.node||'')}',{expected_version:${a.version!==undefined&&a.version!==null?a.version:'null'},expected_pane_id:'${esc(a.pane_id||'')}',pane_id:'${esc(a.pane_id||'')}'})">强制放行推进</button>`:''}
           ${a.pane_id?`<button class="btn mini" onclick="showPane('${esc(a.pane_id)}')">打开终端</button>`:''}
           ${a.task_id?`<button class="btn mini" onclick="openTaskDrawer('${esc(a.task_id)}')">任务详情</button>`:''}
           <button class="btn mini" onclick="showOpsAnomaly(${JSON.stringify(a).replaceAll('"','&quot;')})">更多处理 ···</button>
@@ -5294,16 +5432,17 @@ function showOpsAnomaly(a){
   const wid=a.workflow_id||'';
   const tid=a.task_id||'';
   const node=a.node||'';
+  const aOpts=`{expected_version:${a.version!==undefined&&a.version!==null?a.version:'null'},expected_pane_id:'${esc(a.pane_id||'')}',pane_id:'${esc(a.pane_id||'')}'}`;
   const actionsList=(a.actions||[]).map(x=>{
     let clickFn="toast('建议操作："+esc(x)+"')";
     if(x==='重试'||x==='自动修复'){
-      clickFn="closeModal();runOpsAnomalyAction('ops_repair','"+esc(wid)+"','"+esc(tid)+"','"+esc(node)+"')";
+      clickFn="closeModal();runOpsAnomalyAction('ops_repair','"+esc(wid)+"','"+esc(tid)+"','"+esc(node)+"',"+aOpts+")";
     }else if(x==='打开 Pane'&&a.pane_id){
       clickFn="closeModal();showPane('"+esc(a.pane_id)+"')";
     }else if(x==='让总指挥处理'){
-      clickFn="closeModal();runOpsAnomalyAction('advance','"+esc(wid)+"','"+esc(tid)+"','"+esc(node)+"')";
+      clickFn="closeModal();runOpsAnomalyAction('advance','"+esc(wid)+"','"+esc(tid)+"','"+esc(node)+"',"+aOpts+")";
     }else if(x==='强制放行'||x==='人工放行'){
-      clickFn="closeModal();confirmOpsForcePass('"+esc(wid)+"','"+esc(tid)+"','"+esc(node)+"')";
+      clickFn="closeModal();confirmOpsForcePass('"+esc(wid)+"','"+esc(tid)+"','"+esc(node)+"',"+aOpts+")";
     }
     return `<button class="btn mini primary" onclick="${clickFn}">${esc(x)}</button>`;
   }).join('');
@@ -6302,7 +6441,7 @@ function renderTasks(){
           `:''}
           ${t.stage_verdict==='blocked'?`
             <div class="task-dropdown-divider"></div>
-            <button class="task-dropdown-item primary" onclick="closeAllTaskMenus();forcePassTask('${esc(t.workflow_id||state.workflowId)}','${esc(t.node||t.stage)}')">强制放行</button>
+            <button class="task-dropdown-item primary" onclick="closeAllTaskMenus();forcePassTask('${esc(t.workflow_id||state.workflowId)}','${esc(t.node||t.stage)}',{task_id:'${esc(t.task_id||'')}',expected_version:${t.version!==undefined&&t.version!==null?t.version:'null'},expected_pane_id:'${esc(t.pane_id||'')}',pane_id:'${esc(t.pane_id||'')}'})">强制放行</button>
           `:''}
         </div>
       </div>
@@ -6972,7 +7111,7 @@ function taskDrawerMenuHtml(t){
   h+=`<button class="task-dropdown-item" onclick="closeTaskDrawerMenu();askCoordinator('${id}')">让总指挥处理</button>`;
   if(canSteerTask(t)){h+=`<div class="task-dropdown-divider"></div><button class="task-dropdown-item" style="color:var(--primary)" onclick="closeTaskDrawerMenu();showSteerModal('${id}')">留话指导</button><button class="task-dropdown-item danger" onclick="closeTaskDrawerMenu();haltTaskPrompt('${id}')">紧急叫停</button>`}
   if(canForceReviewTask(t)){h+=`<div class="task-dropdown-divider"></div><button class="task-dropdown-item" style="color:var(--warning);font-weight:600" onclick="closeTaskDrawerMenu();forceReviewTask('${id}')">唤醒评审</button>`}
-  if(canForcePassTask(t)){h+=`<div class="task-dropdown-divider"></div><button class="task-dropdown-item primary" onclick="closeTaskDrawerMenu();forcePassTask('${esc(t.workflow_id||state.workflowId||'')}','${esc(t.node||t.stage||'')}')">强制放行</button>`}
+  if(canForcePassTask(t)){h+=`<div class="task-dropdown-divider"></div><button class="task-dropdown-item primary" onclick="closeTaskDrawerMenu();forcePassTask('${esc(t.workflow_id||state.workflowId||'')}','${esc(t.node||t.stage||'')}',{task_id:'${esc(t.task_id||id||'')}',expected_version:${t.version!==undefined&&t.version!==null?t.version:'null'},expected_pane_id:'${esc(paneId||t.pane_id||'')}',pane_id:'${esc(paneId||t.pane_id||'')}'})">强制放行</button>`}
   return h;
 }
 function toggleTaskDrawerMenu(e){if(e)e.stopPropagation();const m=document.getElementById('taskDrawerMenu');if(m)m.classList.toggle('open')}
@@ -7104,7 +7243,78 @@ async function toggleWorkflowPause(){if(!state.workflowId)return toast('当前�
 async function stepWorkflow(){if(!state.workflowId)return toast('当前没有工作流',true);try{toast('正在单步推进…');const res=await api('/api/kernel/step',{method:'POST',body:JSON.stringify({workflow_id:state.workflowId})});if(res.ok){await loadWorkflow(state.workflowId);toast('单步已推进: '+res.stepped_label+' ('+res.stepped_node+')')}else{toast('无法单步推进: '+(res.reason==='no_ready_nodes'?'当前无就绪节点':res.reason),true)}}catch(e){toast(e.message,true)}}
 function showRollbackModal(){if(!state.workflowId)return toast('当前没有工作流',true);const stages=(state.workflow&&state.workflow.stages)||[];if(!stages.length)return toast('工作流暂无节点',true);const options=stages.map(s=>`<option value="${esc(s.key)}">${esc(cleanStageLabel(s.label))} (${esc(s.key)})</option>`).join('');openModal('节点回溯 (Rollback)',`<div class="form"><label for="rbTarget">回溯目标节点（该节点及所有下游任务将被重置作废）</label><select id="rbTarget">${options}</select><label for="rbReason">回溯原因</label><input id="rbReason" type="text" value="人工核验需求变更或发现重大缺陷"><button class="btn primary" style="background:#dc2626;border-color:#ef4444" onclick="executeRollback()">确认回溯</button><div class="muted">警告：此操作不可撤销，下游所有产物与任务将被标记为作废。</div></div>`)}
 async function executeRollback(){const target=document.getElementById('rbTarget').value;const reason=document.getElementById('rbReason').value;closeModal();try{toast('正在执行回溯…');const res=await api('/api/kernel/rollback',{method:'POST',body:JSON.stringify({workflow_id:state.workflowId,target_node_id:target,reason:reason})});await loadWorkflow(state.workflowId);toast('已成功回溯至 '+target+'，作废 '+res.invalidated_tasks.length+' 个任务')}catch(e){toast(e.message,true)}}
-async function forcePassTask(wid,nodeId){showPromptModal({title:'人工强制放行门禁',label:'请输入强制放行的审计说明与依据：',defaultValue:'经人工核验，次要阻断项已评估无害，特批放行',onConfirm:async(note)=>{try{toast('正在强制放行…');await api('/api/kernel/force-pass',{method:'POST',body:JSON.stringify({workflow_id:wid,gate_node_id:nodeId,note:note})});await loadWorkflow(wid);toast('门禁已强制放行')}catch(e){toast(e.message,true)}}})}
+function forcePassTask(wid,nodeId,options){
+  options=options||{};
+  const widEsc=esc(wid||'');
+  const nodeEsc=esc(nodeId||'');
+  const tid=options.task_id||'';
+  const tidEsc=esc(tid);
+  const expVer=(options.expected_version!==undefined&&options.expected_version!==null)?options.expected_version:(options.version!==undefined&&options.version!==null?options.version:'');
+  const expPane=options.expected_pane_id||options.pane_id||'';
+  openModal('人工强制放行门禁确认 (高风险)',`
+    <div style="line-height:1.6">
+      <div style="margin-bottom:8px"><strong>目标工作流:</strong> <code>${widEsc}</code></div>
+      <div style="margin-bottom:8px"><strong>目标门禁节点:</strong> <span class="badge warning">${nodeEsc||'未指定'}</span></div>
+      ${tid?`<div style="margin-bottom:8px"><strong>关联任务:</strong> <code>${tidEsc}</code></div>`:''}
+      <div class="ctl-effect" style="margin:12px 0;padding:12px;background:var(--warning-bg);border:1px solid var(--warning);border-radius:8px;color:var(--text-primary)">
+        <strong>⚠️ 影响范围警告:</strong><br>
+        本操作为<b>人工强制豁免</b>，将直接把该节点的门禁判定标记为 <code>pass</code>，并在工作流持久化记录豁免审计凭证。<br>
+        <b>此入口仅执行门禁放行，不自动推进工作流。绝不能替代自动修复，必须由工程师人工核验产物后方可放行。</b>
+      </div>
+      <div style="margin-top:12px">
+        <label for="kernelForcePassReason" style="font-weight:600;font-size:12px;color:var(--text-primary);display:block;margin-bottom:4px">放行原因与核验结论（必填）:</label>
+        <textarea id="kernelForcePassReason" class="input" style="width:100%;height:72px;box-sizing:border-box" placeholder="请详细填写人工豁免原因、核验人及结论..."></textarea>
+      </div>
+      <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px">
+        <button class="btn" onclick="closeModal()">取消</button>
+        <button id="btnSubmitKernelForcePass" class="btn warning">确认强制放行</button>
+      </div>
+    </div>
+  `);
+  const btn=document.getElementById('btnSubmitKernelForcePass');
+  if(btn){
+    btn.onclick=async()=>{
+      const el=document.getElementById('kernelForcePassReason');
+      const reason=(el?el.value:'').trim();
+      if(!reason){
+        toast('必须填写强制放行原因',true);
+        return;
+      }
+      btn.disabled=true;
+      closeModal();
+      try{
+        toast('正在强制放行…');
+        const body={
+          workflow_id:wid,
+          gate_node_id:nodeId,
+          node:nodeId,
+          note:reason,
+          reason:reason,
+          confirmed:true,
+          operator:'human'
+        };
+        if(tid){
+          body.task_id=tid;
+        }
+        if(expVer!==''&&expVer!==undefined&&expVer!==null){
+          body.expected_version=parseInt(expVer,10);
+        }
+        if(expPane){
+          body.expected_pane_id=expPane;
+          body.pane_id=expPane;
+        }
+        await api('/api/kernel/force-pass',{
+          method:'POST',
+          body:JSON.stringify(body)
+        });
+        await loadWorkflow(wid);
+        toast('门禁已强制放行');
+      }catch(e){
+        toast('强制放行失败: '+e.message,true);
+      }
+    };
+  }
+}
 async function showCheckpointsModal(){if(!state.workflowId)return toast('当前没有工作流',true);try{const cps=await api('/api/kernel/checkpoints?workflow_id='+encodeURIComponent(state.workflowId));let listHtml='<div class="muted" style="margin-bottom:12px">暂无历史快照</div>';if(cps&&cps.length){listHtml=cps.map(c=>`<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--line)"><div><strong>${esc(c.tag||'无标签')}</strong><div class="task-meta">${esc(c.checkpoint_id)} · ${c.task_count} 任务 · ${new Date(c.created_at*1000).toLocaleString()}</div></div><button class="btn" style="padding:3px 8px;font-size:12px;color:var(--danger)" onclick="restoreWorkflowCheckpoint('${esc(c.checkpoint_id)}')">恢复此快照</button></div>`).join('')}openModal('工作流快照中心',`<div class="form"><div style="display:flex;gap:8px;margin-bottom:16px"><input id="cpTagInput" type="text" placeholder="快照标签（如：修改前基准）" style="flex:1"><button class="btn primary" onclick="createWorkflowCheckpoint()">创建快照</button></div><h4>历史快照</h4><div style="max-height:240px;overflow-y:auto">${listHtml}</div></div>`)}catch(e){toast(e.message,true)}}
 async function createWorkflowCheckpoint(){const tag=document.getElementById('cpTagInput')?.value||'';try{toast('正在保存快照…');await api('/api/kernel/checkpoint',{method:'POST',body:JSON.stringify({workflow_id:state.workflowId,tag:tag})});toast('快照已保存');showCheckpointsModal()}catch(e){toast(e.message,true)}}
 async function restoreWorkflowCheckpoint(cpid){showConfirmModal({title:'恢复工作流快照',message:'确定要将工作流恢复到快照 '+cpid+' 吗？当前未保存的节点状态将被覆盖。',confirmText:'确认恢复',danger:true,onConfirm:async()=>{try{toast('正在恢复快照…');await api('/api/kernel/checkpoint/restore',{method:'POST',body:JSON.stringify({workflow_id:state.workflowId,checkpoint_id:cpid})});closeModal();await loadWorkflow(state.workflowId);toast('已恢复至快照 '+cpid)}catch(e){toast(e.message,true)}}})}

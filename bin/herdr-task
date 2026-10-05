@@ -1035,6 +1035,7 @@ def _build_anomalies(tasks, now):
                     "agent": task.get("agent"),
                     "node": task.get("node") or task.get("stage"),
                     "pane_id": task.get("pane_id"),
+                    "version": task.get("version"),
                     "last_event_seconds": (now - last_activity) if last_activity else None,
                     "last_event": _format_age((now - last_activity) if last_activity else None),
                     "actions": suggestion["actions"],
