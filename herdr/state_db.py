@@ -7123,15 +7123,35 @@ def force_pass_gate(
             "updated_at": now,
         })
         overrides = dict(wf_dict.get("gate_overrides") or {})
-        overrides[gate_node_id] = {
+        history_overrides = list(wf_dict.get("gate_overrides_history") or [])
+        override_record = {
             "verdict": "pass",
             "note": note,
             "operator": operator,
             "timestamp": now,
         }
         if task_id:
-            overrides[gate_node_id]["task_id"] = task_id
+            override_record["task_id"] = task_id
+            target_post_ver = (target_task.get("version") or 0) + 1
+            override_record["task_version"] = target_post_ver
+            override_record["task_versions"] = {task_id: target_post_ver}
+            override_record["task_ids"] = [task_id]
+        else:
+            snapshot_versions = {
+                t["task_id"]: (t.get("version") or 0) + 1
+                for t in tasks_to_update
+            }
+            override_record["task_versions"] = snapshot_versions
+            override_record["task_ids"] = sorted(list(snapshot_versions.keys()))
+
+        overrides[gate_node_id] = override_record
+        history_entry = dict(override_record)
+        history_entry["node_id"] = gate_node_id
+        history_entry["action"] = "force_pass"
+        history_overrides.append(history_entry)
+
         wf_dict["gate_overrides"] = overrides
+        wf_dict["gate_overrides_history"] = history_overrides
         save_workflow(wf_dict, db_path=None, conn=conn)
 
         if should_close:

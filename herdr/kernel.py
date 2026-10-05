@@ -454,18 +454,41 @@ def force_pass_gate(
 
         wf_entry = s.get_workflow(workflow_id)
         if wf_entry:
+            now = time.time()
             overrides = dict(wf_entry.get("gate_overrides") or {})
-            overrides[gate_node_id] = {
+            history_overrides = list(wf_entry.get("gate_overrides_history") or [])
+            override_record = {
                 "verdict": "pass",
                 "note": note,
                 "operator": operator,
-                "timestamp": time.time(),
+                "timestamp": now,
             }
             if task_id:
-                overrides[gate_node_id]["task_id"] = task_id
+                override_record["task_id"] = task_id
+                target_post_ver = (target_task.get("version") or 0) + 1
+                override_record["task_version"] = target_post_ver
+                override_record["task_versions"] = {task_id: target_post_ver}
+                override_record["task_ids"] = [task_id]
+            else:
+                snapshot_versions = {
+                    t["task_id"]: (t.get("version") or 0) + 1
+                    for t in tasks_to_update
+                }
+                override_record["task_versions"] = snapshot_versions
+                override_record["task_ids"] = sorted(list(snapshot_versions.keys()))
+
+            overrides[gate_node_id] = override_record
+            history_entry = dict(override_record)
+            history_entry["node_id"] = gate_node_id
+            history_entry["action"] = "force_pass"
+            history_overrides.append(history_entry)
+
             update_workflow_metadata(
                 workflow_id=workflow_id,
-                updates={"gate_overrides": overrides},
+                updates={
+                    "gate_overrides": overrides,
+                    "gate_overrides_history": history_overrides,
+                },
                 store=s,
             )
 
@@ -539,6 +562,23 @@ def rollback_workflow(
     for n_id in affected_nodes:
         advances.pop(n_id, None)
 
+    # Invalidate active gate_overrides for affected nodes and preserve in audit history
+    overrides = dict(wf_fresh.get("gate_overrides") or {})
+    history_overrides = list(wf_fresh.get("gate_overrides_history") or [])
+    invalidated_overrides = []
+    for n_id in affected_nodes:
+        old_ov = overrides.pop(n_id, None)
+        if old_ov:
+            invalidated_overrides.append(n_id)
+            history_overrides.append({
+                "node_id": n_id,
+                "action": "invalidated_by_rollback",
+                "rollback_target": target_node_id,
+                "reason": reason,
+                "timestamp": time.time(),
+                "prior_override": old_ov,
+            })
+
     s_file = get_stage_state_file()
     if s_file.exists():
         try:
@@ -564,12 +604,15 @@ def rollback_workflow(
         "reason": reason,
         "affected_nodes": list(affected_nodes),
         "invalidated_tasks": invalidated,
+        "invalidated_gate_overrides": invalidated_overrides,
         "timestamp": time.time(),
     })
     update_workflow_metadata(
         workflow_id=workflow_id,
         updates={
             "stage_advancing": advances,
+            "gate_overrides": overrides,
+            "gate_overrides_history": history_overrides,
             "history": history,
         },
         store=s,
@@ -581,6 +624,7 @@ def rollback_workflow(
         "target_node_id": target_node_id,
         "affected_nodes": list(affected_nodes),
         "invalidated_tasks": invalidated,
+        "invalidated_gate_overrides": invalidated_overrides,
     }
 
 

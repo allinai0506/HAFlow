@@ -8,6 +8,27 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-10-05] fix | 门禁放行失效边界闭环：快照版本绑定、回溯级联失效与跨端有效性判定统一（防旧豁免掩盖新阻塞）
+- 背景：
+  1. 旧放行记录（`gate_overrides`）持久化时未绑定豁免时的任务版本快照与完整任务集合，读取时单任务豁免仅检查其他任务，节点级豁免直接放行全节点；
+  2. 被豁免任务后续若更新并重新阻塞（`stage_verdict="blocked"`），或节点后续新增了阻塞任务，旧豁免记录仍使阶段摘要与画布显示为虚假完成；
+  3. `rollback_workflow` 回溯时清理了推进锁并作废了任务，但遗漏了受影响节点的旧 `gate_overrides`，回溯重跑后旧记录仍会覆盖新现场。
+- 变更：
+  1. **`herdr/state_db.py` & `herdr/kernel.py`**：
+     - `force_pass_gate` 持久化显式绑定生效快照：单任务记录 `task_id`、`task_version` 及 `task_versions`；节点级记录 `task_ids` 列表与各任务 `task_versions`；
+     - 将“历史审批事实”与“当前适用豁免”解耦，在工作流元数据中追加 `gate_overrides_history` 审计账本；
+     - `rollback_workflow` 在回溯下游受影响节点集合（`affected_nodes`）时，级联将 active `gate_overrides` 弹出作废，并写入 `gate_overrides_history`（标记 `action="invalidated_by_rollback"`）。
+  2. **`herdr/workflow_graph.py` & `console/herdr_factory_console.py`**：
+     - 在 `workflow_graph.py` 沉淀权威纯函数 `is_gate_override_valid(gate_override, live_tasks)`，供画布投影与 Console `stage_summary` 共用；
+     - 单任务豁免在任务再次阻塞（`stage_verdict="blocked"`）、版本漂移或非 pass 时自动失效；
+     - 节点级豁免在存活任务集合发生增删变化（如新增未确认任务）、任务再次阻塞或版本变化时自动失效，如实暴露真实阻塞。
+  3. **自动化测试**：
+     - `tests/test_console_ops_repair_gate_separation.py` 扩充 Scenario 23（已豁免任务再次阻塞）、Scenario 24（节点放行后新增阻塞任务）、Scenario 25（放行后回溯再执行及审计保留），25 项全通；
+     - 453 项全量控制台与工作流测试全通。
+- 证据：
+  - 453 passed, 79 subtests passed in 41.39s；`python3 -m compileall` 零报错；`git diff --check` 零违规。
+
+
 ## [2026-10-05] fix | 运维修复与门禁放行解耦加固：会签接口统一约束、多任务节点失败穿透消除与空节点交错快照闭环
 - 背景：
   1. 会签接口 `/api/task/signoff` approve 分支直接调用放行内核，绕过了二次显式确认、人工非空原因、任务归属与版本快照校验；

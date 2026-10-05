@@ -171,21 +171,8 @@ def stage_summary(ts,key,workflow=None):
     live=[t for t in xs if t.get('status')!='superseded' and not t.get('superseded_by')]
     wf_status=(workflow or {}).get('status') if isinstance(workflow,dict) else ''
     is_wf_completed=wf_status in {'completed','cleaned','archived'}
-    gate_override=((workflow or {}).get('gate_overrides') or {}).get(key) or {}
-    override_tid = gate_override.get('task_id')
-    gate_passed = False
-    if gate_override.get('verdict') == 'pass':
-        if not override_tid:
-            gate_passed = True
-        else:
-            other_live = [t for t in live if str(t.get('task_id')) != str(override_tid)]
-            other_blocked_or_failed = any(
-                str(t.get('status')) in {'blocked', 'failed', 'rework'}
-                or (str(t.get('stage_verdict') or '') in {'blocked', 'failed'} and str(t.get('stage_verdict') or '') != 'pass')
-                for t in other_live
-            )
-            if not other_blocked_or_failed:
-                gate_passed = True
+    gate_override = ((workflow or {}).get('gate_overrides') or {}).get(key) or {}
+    gate_passed = herdr_workflow_graph.is_gate_override_valid(gate_override, live)
 
     if not xs:
         if is_wf_completed:

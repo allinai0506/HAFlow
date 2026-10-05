@@ -22,8 +22,12 @@ from http.server import ThreadingHTTPServer
 import pytest
 from unittest.mock import patch, MagicMock
 
+import sqlite3
+import time
 from console import herdr_factory_console as c
 from herdr.state_store import get_state_store
+from herdr import kernel as herdr_kernel
+from herdr import workflow_graph as herdr_workflow_graph
 
 
 @pytest.fixture
@@ -1457,3 +1461,263 @@ def test_scenario_22_failed_task_not_masked_by_newer_completed_or_integrated_tas
     t_b_exempted = {**t_b_failed, "stage_verdict": "pass"}
     assert c.stage_summary([t_b_exempted, t_a_completed], "implementation")["status"] == "cleaned"
     assert herdr_workflow_graph.aggregate_node_status([t_b_exempted, t_a_completed]) == "completed"
+
+
+def test_scenario_23_exempted_task_reblocked_invalidates_gate_override(tmp_path, monkeypatch):
+    """Scenario 23: Task A is force-passed at version 1 (becoming v2, pass).
+
+    Subsequently, task A is re-run or updated to version 3, producing a new blocked verdict.
+    The old gate override MUST be recognized as expired/invalid, and stage_summary / workflow_graph
+    must report 'blocked' with zero masking.
+    """
+    db_file = tmp_path / "state.db"
+    store = get_state_store(db_file)
+    monkeypatch.setenv("HERDR_STATE_DB", str(db_file))
+
+    conn = sqlite3.connect(str(db_file))
+    conn.row_factory = sqlite3.Row
+
+    now = time.time()
+    wf_cfg = {
+        "nodes": [
+            {"id": "test", "label": "Test Gate", "node_type": "gate", "depends_on": []},
+        ]
+    }
+    conn.execute("""
+        INSERT INTO workflows (workflow_id, title, status, config_json, metadata_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?);
+    """, ("wf-ops-01", "Test WF", "running", json.dumps(wf_cfg), json.dumps({}), now, now))
+
+    conn.execute("""
+        INSERT INTO tasks (task_id, workflow_id, node, stage, agent, status, stage_verdict, stage_verdict_note, version, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+    """, ("wf-ops-01-test-a", "wf-ops-01", "test", "test", "codex", "blocked", "blocked", "assertion failed", 1, now, now))
+    conn.commit()
+
+    # Step 1: Force pass task A
+    res = herdr_kernel.force_pass_gate(
+        workflow_id="wf-ops-01",
+        gate_node_id="test",
+        task_id="wf-ops-01-test-a",
+        expected_version=1,
+        note="人工放行任务 A",
+        store=store,
+    )
+    assert res["ok"] is True
+
+    t_a_passed = store.get_task("wf-ops-01-test-a")
+    assert t_a_passed["version"] == 2
+    assert t_a_passed["stage_verdict"] == "pass"
+
+    wf_passed = store.get_workflow("wf-ops-01")
+    override = wf_passed.get("gate_overrides", {}).get("test")
+    assert override is not None
+    assert override["task_id"] == "wf-ops-01-test-a"
+    assert override["task_version"] == 2
+    assert override["task_versions"] == {"wf-ops-01-test-a": 2}
+
+    # Verify initial projection is cleaned / completed
+    assert c.stage_summary([t_a_passed], "test", workflow=wf_passed)["status"] == "cleaned"
+    proj_passed = herdr_workflow_graph.workflow_graph_projection(
+        {**wf_cfg, "workflow_id": "wf-ops-01", "status": "running", "gate_overrides": wf_passed.get("gate_overrides")},
+        [t_a_passed],
+    )
+    assert next(n for n in proj_passed["nodes"] if n["id"] == "test")["status"] == "completed"
+
+    # Step 2: Task A re-runs, advances to version 3, and produces a new blocked verdict
+    conn.execute("""
+        UPDATE tasks SET
+            version = 3,
+            status = 'blocked',
+            stage_verdict = 'blocked',
+            stage_verdict_note = 'new test run failed again',
+            updated_at = ?
+        WHERE task_id = 'wf-ops-01-test-a';
+    """, (time.time(),))
+    conn.commit()
+
+    t_a_reblocked = store.get_task("wf-ops-01-test-a")
+    assert t_a_reblocked["version"] == 3
+    assert t_a_reblocked["stage_verdict"] == "blocked"
+
+    # Step 3: Verify the old override is recognized as invalid and both summary and graph report blocked
+    assert herdr_workflow_graph.is_gate_override_valid(override, [t_a_reblocked]) is False
+    summary_reblocked = c.stage_summary([t_a_reblocked], "test", workflow=wf_passed)
+    assert summary_reblocked["status"] == "blocked"
+
+    proj_reblocked = herdr_workflow_graph.workflow_graph_projection(
+        {**wf_cfg, "workflow_id": "wf-ops-01", "status": "running", "gate_overrides": wf_passed.get("gate_overrides")},
+        [t_a_reblocked],
+    )
+    test_node_reblocked = next(n for n in proj_reblocked["nodes"] if n["id"] == "test")
+    assert test_node_reblocked["status"] == "blocked"
+    assert test_node_reblocked["has_attention"] is True
+
+
+def test_scenario_24_node_level_override_invalidated_by_newly_added_blocked_task(tmp_path, monkeypatch):
+    """Scenario 24: Node-level force pass granted when node had only task A.
+
+    Subsequently, a new task B is added to the node and B is blocked.
+    The node-level override must NOT mask task B; stage_summary and workflow_graph
+    must report 'blocked' with zero masking.
+    """
+    db_file = tmp_path / "state.db"
+    store = get_state_store(db_file)
+    monkeypatch.setenv("HERDR_STATE_DB", str(db_file))
+
+    conn = sqlite3.connect(str(db_file))
+    conn.row_factory = sqlite3.Row
+
+    now = time.time()
+    wf_cfg = {
+        "nodes": [
+            {"id": "test", "label": "Test Gate", "node_type": "gate", "depends_on": []},
+        ]
+    }
+    conn.execute("""
+        INSERT INTO workflows (workflow_id, title, status, config_json, metadata_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?);
+    """, ("wf-ops-01", "Test WF", "running", json.dumps(wf_cfg), json.dumps({}), now, now))
+
+    conn.execute("""
+        INSERT INTO tasks (task_id, workflow_id, node, stage, agent, status, stage_verdict, stage_verdict_note, version, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+    """, ("wf-ops-01-test-a", "wf-ops-01", "test", "test", "codex", "blocked", "blocked", "assertion failed", 1, now, now))
+    conn.commit()
+
+    # Step 1: Node-level force pass with complete snapshot mapping
+    res = herdr_kernel.force_pass_gate(
+        workflow_id="wf-ops-01",
+        gate_node_id="test",
+        expected_task_versions={"wf-ops-01-test-a": 1},
+        note="放行当前节点所有任务",
+        store=store,
+    )
+    assert res["ok"] is True
+
+    t_a_passed = store.get_task("wf-ops-01-test-a")
+    wf_passed = store.get_workflow("wf-ops-01")
+    override = wf_passed.get("gate_overrides", {}).get("test")
+    assert override is not None
+    assert override["task_ids"] == ["wf-ops-01-test-a"]
+    assert override["task_versions"] == {"wf-ops-01-test-a": 2}
+
+    assert c.stage_summary([t_a_passed], "test", workflow=wf_passed)["status"] == "cleaned"
+    proj_passed = herdr_workflow_graph.workflow_graph_projection(
+        {**wf_cfg, "workflow_id": "wf-ops-01", "status": "running", "gate_overrides": wf_passed.get("gate_overrides")},
+        [t_a_passed],
+    )
+    assert next(n for n in proj_passed["nodes"] if n["id"] == "test")["status"] == "completed"
+
+    # Step 2: Subsequently, a new blocked task B is added to node test
+    conn.execute("""
+        INSERT INTO tasks (task_id, workflow_id, node, stage, agent, status, stage_verdict, stage_verdict_note, version, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+    """, ("wf-ops-01-test-b", "wf-ops-01", "test", "test", "opencode", "blocked", "blocked", "syntax error in subtest", 1, time.time(), time.time()))
+    conn.commit()
+
+    t_b_blocked = store.get_task("wf-ops-01-test-b")
+    all_live = [t_a_passed, t_b_blocked]
+
+    # Step 3: Verify the node-level override is invalid against the new task set
+    assert herdr_workflow_graph.is_gate_override_valid(override, all_live) is False
+    summary_new_task = c.stage_summary(all_live, "test", workflow=wf_passed)
+    assert summary_new_task["status"] == "blocked"
+
+    proj_new_task = herdr_workflow_graph.workflow_graph_projection(
+        {**wf_cfg, "workflow_id": "wf-ops-01", "status": "running", "gate_overrides": wf_passed.get("gate_overrides")},
+        all_live,
+    )
+    test_node_new_task = next(n for n in proj_new_task["nodes"] if n["id"] == "test")
+    assert test_node_new_task["status"] == "blocked"
+    assert test_node_new_task["has_attention"] is True
+
+
+def test_scenario_25_rollback_invalidates_gate_overrides_and_preserves_audit(tmp_path, monkeypatch):
+    """Scenario 25: Rollback invalidates active gate_overrides for affected downstream nodes.
+
+    Workflow has DAG impl -> test. Node test is force-passed.
+    Subsequently, workflow rolls back to impl.
+    The active gate_overrides for test MUST be invalidated (removed from gate_overrides),
+    while preserved in gate_overrides_history and workflow history for audit.
+    When a new task is dispatched on test and blocks, it reports blocked.
+    """
+    db_file = tmp_path / "state.db"
+    store = get_state_store(db_file)
+    monkeypatch.setenv("HERDR_STATE_DB", str(db_file))
+
+    conn = sqlite3.connect(str(db_file))
+    conn.row_factory = sqlite3.Row
+
+    now = time.time()
+    wf_cfg = {
+        "nodes": [
+            {"id": "impl", "label": "Implementation", "node_type": "agent", "depends_on": []},
+            {"id": "test", "label": "Test Gate", "node_type": "gate", "depends_on": ["impl"]},
+        ]
+    }
+    conn.execute("""
+        INSERT INTO workflows (workflow_id, title, status, config_json, metadata_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?);
+    """, ("wf-ops-01", "Test WF", "running", json.dumps(wf_cfg), json.dumps({}), now, now))
+
+    conn.execute("""
+        INSERT INTO tasks (task_id, workflow_id, node, stage, agent, status, stage_verdict, stage_verdict_note, version, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+    """, ("wf-ops-01-test-1", "wf-ops-01", "test", "test", "codex", "blocked", "blocked", "assertion failed", 1, now, now))
+    conn.commit()
+
+    # Step 1: Force pass node test
+    res_pass = herdr_kernel.force_pass_gate(
+        workflow_id="wf-ops-01",
+        gate_node_id="test",
+        task_id="wf-ops-01-test-1",
+        expected_version=1,
+        note="人工放行测试节点",
+        store=store,
+    )
+    assert res_pass["ok"] is True
+
+    wf_before_rb = store.get_workflow("wf-ops-01")
+    assert "test" in (wf_before_rb.get("gate_overrides") or {})
+
+    # Step 2: Roll back to impl
+    rb_res = herdr_kernel.rollback_workflow(
+        workflow_id="wf-ops-01",
+        target_node_id="impl",
+        reason="spec refinement needed",
+        store=store,
+    )
+    assert rb_res["ok"] is True
+    assert "test" in rb_res["affected_nodes"]
+    assert "test" in rb_res["invalidated_gate_overrides"]
+
+    # Verify workflow state after rollback: active override removed, history recorded
+    wf_after_rb = store.get_workflow("wf-ops-01")
+    active_overrides = wf_after_rb.get("gate_overrides") or {}
+    assert "test" not in active_overrides
+
+    history_overrides = wf_after_rb.get("gate_overrides_history") or []
+    inval_records = [r for r in history_overrides if r.get("action") == "invalidated_by_rollback"]
+    assert len(inval_records) == 1
+    assert inval_records[0]["node_id"] == "test"
+    assert inval_records[0]["rollback_target"] == "impl"
+
+    # Step 3: Re-execution: new task 2 is dispatched on test and blocks
+    conn.execute("""
+        INSERT INTO tasks (task_id, workflow_id, node, stage, agent, status, stage_verdict, stage_verdict_note, version, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+    """, ("wf-ops-01-test-2", "wf-ops-01", "test", "test", "codex", "blocked", "blocked", "new run blocked", 1, time.time(), time.time()))
+    conn.commit()
+
+    t_new = store.get_task("wf-ops-01-test-2")
+    summary_rerun = c.stage_summary([t_new], "test", workflow=wf_after_rb)
+    assert summary_rerun["status"] == "blocked"
+
+    proj_rerun = herdr_workflow_graph.workflow_graph_projection(
+        {**wf_cfg, "workflow_id": "wf-ops-01", "status": "running", "gate_overrides": wf_after_rb.get("gate_overrides")},
+        [t_new],
+    )
+    test_node_rerun = next(n for n in proj_rerun["nodes"] if n["id"] == "test")
+    assert test_node_rerun["status"] == "blocked"
+    assert test_node_rerun["has_attention"] is True
