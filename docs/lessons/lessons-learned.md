@@ -5990,3 +5990,37 @@ Nexus CoW integration分支复用Agent白名单、branch/worktree全部context�
 - 关联回归套件：`pytest tests/test_agent_router*.py tests/test_workflow_docs*.py tests/test_canary_router.py tests/test_dispatch_idempotency.py tests/test_dispatch_candidate.py tests/test_frozen_base_candidate_dispatch.py` (139/139 passed)；
 - S6 独立审查报告：`.omc/review-b80982fa-74b8-4bce-9898-736219f8e996.md`（MERGE_READY）。
 
+
+
+---
+
+## 129. 运维中心一键修复与门禁放行彻底解耦（防自动越权豁免）、前置归属校验与显式人工审计（2026-10-05）
+
+### 问题背景
+在 `allinai0506/HAFlow` 运维中心驾驶舱的异常中枢中，暴露了严重的门禁越权与安全隐患：
+1. **自动修复失败隐式放行门禁**：`console/herdr_factory_console.py` 的 `api_controller_execute_action` 在处理 `ops_repair` / `retry` 动作时，对 `rework` 和 `redrive` 异常进行了静默吞错，随后级联调用 `herdr_kernel.force_pass_gate` 与 `manual_advance`。当测试门禁卡点任务无可用恢复动作或恢复失败时，系统擅自将 `stage_verdict` 篡改为 `pass` 并推进下游，击穿了流水线质量门禁；
+2. **人工豁免缺乏独立通道与显式约束**：人工强制放行缺少必填原因说明和二次确认，前端在异常卡片点击即可触发默认模版原因的放行请求，且缺少对目标门禁节点的明确范围限制（容易隐式全流放行）；
+3. **过期与错配请求未严格拦截**：未对当前请求的 `workflow_id`、`task_id`、节点与运行实例进行前置权威校验，存在已作废（superseded）任务仍被触发恢复或跨工作流错配的风险；
+4. **推进失败伪报成功**：当门禁放行成功但后续 `manual_advance` 推进失败时，直接吞错返回成功，未真实反馈部分完成状态。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 修复失败后降级调用更强力的放行操作 | “一个动作报错就试下一个更强的动作”是严重的安全坏味道；普通修复绝不能升级为豁免 | 彻底解耦恢复通道与豁免通道：自动修复仅执行安全工位动作，不适用或失败必须保留阻塞 |
+| 人工豁免与普通修复混淆在同一交互逻辑 | 豁免是高风险行为，必须具有独立意图、显式确认与不可抵赖的责任审计 | 强制放行必须显式确认（`confirmed: True`）、强制填写人工原因、明确指定目标门禁节点 |
+| 过度依赖前端校验而忽视服务端前置防御 | 前端弹窗或禁用按钮容易被并发或非法请求绕过 | 服务端在执行任何动作前必须重新读取权威存储，强校验工作流归属、节点匹配、版本与运行实例 |
+| 级联操作部分失败时整体伪报成功 | 门禁豁免已持久化但工作流推进受阻属于典型 partial 状态，伪报成功会误导排障 | 明确区分全部成功与部分完成，向调用方和前端返回 `partial: True` 及真实推进错误 |
+
+### 操作规范
+1. **解耦通道**：彻底删除 `ops_repair` / `retry` 中的 `force_pass_gate` 与 `manual_advance` 兜底降级；仅按当前状态确定并执行 `rework` / `redrive`，无安全动作明确返回拒绝；
+2. **异常不吞**：命令失败或超时错误直接向外抛出，保留原始执行信息，严禁继续发送另一条恢复命令或自动放行；
+3. **前置强校验**：核验工作流与任务存在性、拒绝 `status == 'superseded'` 任务、核验 `req_node == task_node`、核验版本与 pane 实例，错配一律拒绝；
+4. **人工放行契约**：要求 `confirmed=True`、非空且非默认模版的原因说明、明确归属于该工作流的门禁节点；推进失败如实返回 `partial: True` 与 `advance_error`；
+5. **前端交互加固**：卡片放行按钮绑定二次确认弹窗，强制输入原因，取消不发请求；引入 `_opsActionBusy` 信号量防止连击重复提交。
+
+### 验证命令 / 关联证据
+- 新增专项测试套件：`pytest -v tests/test_console_ops_repair_gate_separation.py`（9/9 passed，覆盖 8 大场景及端到端 HTTP Server → Handler → SQLite 临时库集成测试）；
+- 控制台回归测试：`pytest -q tests/test_console*.py`（246/246 passed, 76 subtests）；
+- 全项目 Python 语法与字节码编译：`python3 -m compileall -q herdr services bin tests console`（clean compile）；
+- S6 独立评审工件：`.omc/review-3d6997cd-1453-468f-afc1-a1d4b2ccb8ea.md`（MERGE_READY）。

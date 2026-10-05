@@ -1994,3 +1994,13 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 2026-10-03 PR144合并前P1闭环：split回执在受管锁内持久，写失败保留已分配现场；runtime tab/anchor改为StateStore元数据+审计，配置读取overlay但snapshot字节/config_sha保持不可变。新增真实崩溃、持久失败及配置→装配→CAS回归。
 
 - 2026-10-03 FIX_BUG1002收尾边界：发现Nexus CoW继承外部Git指针，先独立化Git元数据再清理自有branch；外部worktree及其当前引用分支保留。记录CoW目录/Git隔离双重检查教训。
+
+
+## [2026-10-05] update | 运维中心一键修复与门禁放行解耦与人工审计闭环
+- Updated [[ops-center]]: 彻底分离“重试修复”(`ops_repair`/`retry`)与“人工强制放行”(`force_pass`/`force_pass_advance`)；
+  - 自动修复通道仅按当前状态执行安全工位动作（`rework`/`redrive`），不适用或失败必须报错保留阻塞，彻底移除隐式降级调用 `force_pass_gate` 与 `manual_advance`；
+  - 人工强制放行必须显式确认（`confirmed: True`）、非空且非默认原因、明确指定归属目标工作流的门禁节点；放行成功推进失败如实报告 `partial: True`；
+  - 前端增加 `confirmOpsForcePass` 二次确认弹窗与 `_opsActionBusy` 防重复提交保护；
+  - 前置重读权威状态，强校验工作流/任务归属、拦截已作废（superseded）任务及版本/运行实例错配。
+- 专项测试 `tests/test_console_ops_repair_gate_separation.py`（9/9 passed 含端到端 HTTP Server 到 SQLite 回读集成测试）；全量控制台测试 246 passed；S6 审查通过（MERGE_READY）。
+- 关联教训沉淀至 `docs/lessons/lessons-learned.md` §129。
