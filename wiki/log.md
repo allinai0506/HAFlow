@@ -8,6 +8,24 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-10-05] fix | 运维修复与门禁放行解耦加固：会签接口统一约束、多任务节点失败穿透投影与版本映射任务集合闭环
+- 背景：
+  1. 会签接口 `/api/task/signoff` approve 分支直接调用放行内核，绕过了二次显式确认、人工非空原因、任务归属与版本快照校验；
+  2. 多任务节点状态聚合（`herdr/workflow_graph.py` 与 Console `stage_summary`）存在“最新任务通过即标记节点完成”的兜底误判，导致较早失败且未被替换/豁免的任务被虚假掩盖为 completed/cleaned；
+  3. 节点级放行若仅提供单一 `expected_version`，在节点存在多个任务时无法证明任务集合未被并发增删替换（例如并发新增 version 相同的任务被隐式全部放行）。
+- 变更：
+  1. **`console/herdr_factory_console.py`**：
+     - 将 `api_task_signoff` 统一接入 `_validate_force_pass_params`，对会签批准强制校验显式确认、非空人工理由（屏蔽默认系统文案）、任务与工作流归属、以及版本与工位快照；前端协同工作舱完善二次确认与反馈必填约束；
+     - 调整 Console `stage_summary` 与 `herdr/workflow_graph.py::aggregate_node_status`，剔除 `latest_v == 'pass'` 兜底穿透，确保多任务节点中未被替换、未被豁免的失败任务（`status == 'failed' and stage_verdict != 'pass'`）保留真实的 failed / 需关注状态；
+  2. **`herdr/state_db.py` & `herdr/kernel.py`**：
+     - 在存在有效任务的节点级放行中，严格禁止使用单一 `expected_version` 隐式放行全节点任务集合，要求必须提供完整的 `expected_task_versions` 映射核验所有任务；
+     - 允许内核级底层无版本期望的调用（如测试与内部维护），兼顾并发乐观锁安全性与底层控制元语调用灵活性。
+  3. **自动化测试**：
+     - `tests/test_console_ops_repair_gate_separation.py` 补充 Scenario 18（会签全流程保护）、Scenario 19（多任务失败不被新通过掩盖）、Scenario 20（单一版本号拒绝全节点放行）；
+     - 更新 `test_universal_substrate_e2e.py` 与相关回归测试，448 项全量关联测试通过。
+- 证据：
+  - 448 项测试全绿（448 passed, 79 subtests passed in 44.21s）；`python3 -m compileall` 零报错；`git diff --check` 零违规。
+
 ## [2026-10-04] fix | 路由健康拒绝解耦（防节点槽位死锁）、签发笔记全链路接线与候选重冻 CLI 闭环
 - 背景：
   1. 多 Agent 派发时，若目标 Agent 未就绪或健康体检失败，原实现错误调用 `_record_router_failure_task` 在 `tasks.json` 落失败任务，导致单任务节点（`max_tasks_per_node=1`）槽位被永久耗尽，后续自愈重试死锁；

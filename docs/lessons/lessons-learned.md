@@ -6011,16 +6011,20 @@ Nexus CoW integration分支复用Agent白名单、branch/worktree全部context�
 | 人工豁免与普通修复混淆在同一交互逻辑 | 豁免是高风险行为，必须具有独立意图、显式确认与不可抵赖的责任审计 | 强制放行必须显式确认（`confirmed: True`）、强制填写人工原因、明确指定目标门禁节点 |
 | 过度依赖前端校验而忽视服务端前置防御 | 前端弹窗或禁用按钮容易被并发或非法请求绕过 | 服务端在执行任何动作前必须重新读取权威存储，强校验工作流归属、节点匹配、版本与运行实例 |
 | 级联操作部分失败时整体伪报成功 | 门禁豁免已持久化但工作流推进受阻属于典型 partial 状态，伪报成功会误导排障 | 明确区分全部成功与部分完成，向调用方和前端返回 `partial: True` 及真实推进错误 |
+| 会签批准直接调用放行内核绕过防护 | 业务审批入口与底层内核调用未统一接入门禁前置校验，导致审批可以被作为绕过通道 | 会签批准必须接入统一放行校验网关，要求明确确认、非空反馈与快照版本 |
+| 多任务节点以最新任务状态代表全节点完成 | 较早失败且未被替换/豁免的任务被最新任务的通过或完成掩盖，产生虚假完成幻象 | 状态聚合中严禁以 `latest_v == 'pass'` 穿透掩盖失败；未豁免的失败任务必须如实保留 failed |
+| 节点级放行允许单一版本号代表任务集合 | 单一版本号无法证明任务集合未被并发增删或替换，相同版本数值会引发并发越权覆盖 | 存在有效任务的节点级放行必须提供完整的 `expected_task_versions` 映射严格核验所有任务 |
 
 ### 操作规范
 1. **解耦通道**：彻底删除 `ops_repair` / `retry` 中的 `force_pass_gate` 与 `manual_advance` 兜底降级；仅按当前状态确定并执行 `rework` / `redrive`，无安全动作明确返回拒绝；
 2. **异常不吞**：命令失败或超时错误直接向外抛出，保留原始执行信息，严禁继续发送另一条恢复命令或自动放行；
 3. **前置强校验**：核验工作流与任务存在性、拒绝 `status == 'superseded'` 任务、核验 `req_node == task_node`、核验版本与 pane 实例，错配一律拒绝；
 4. **人工放行契约**：要求 `confirmed=True`、非空且非默认模版的原因说明、明确归属于该工作流的门禁节点；推进失败如实返回 `partial: True` 与 `advance_error`；
-5. **前端交互加固**：卡片放行按钮绑定二次确认弹窗，强制输入原因，取消不发请求；引入 `_opsActionBusy` 信号量防止连击重复提交。
+5. **前端交互加固**：卡片放行按钮绑定二次确认弹窗，强制输入原因，取消不发请求；引入 `_opsActionBusy` 信号量防止连击重复提交；会签操作舱支持显式确认与非空反馈；
+6. **聚合与映射闭环**：多任务节点聚合移除 `latest_v == 'pass'` 兜底，保留未豁免失败任务的阻断；节点级放行在有匹配任务时严格强制 `expected_task_versions` 任务映射核验。
 
 ### 验证命令 / 关联证据
-- 新增专项测试套件：`pytest -v tests/test_console_ops_repair_gate_separation.py`（9/9 passed，覆盖 8 大场景及端到端 HTTP Server → Handler → SQLite 临时库集成测试）；
-- 控制台回归测试：`pytest -q tests/test_console*.py`（246/246 passed, 76 subtests）；
+- 新增专项测试套件：`pytest -v tests/test_console_ops_repair_gate_separation.py`（20/20 passed，涵盖单节点/多任务/并发竞态/会签全流程/节点映射全场景）；
+- 控制台与工作流回归测试：`pytest -q tests/test_workflow*.py tests/test_console*.py`（448 passed, 79 subtests passed in 44.21s）；
 - 全项目 Python 语法与字节码编译：`python3 -m compileall -q herdr services bin tests console`（clean compile）；
-- S6 独立评审工件：`.omc/review-3d6997cd-1453-468f-afc1-a1d4b2ccb8ea.md`（MERGE_READY）。
+- 代码格式检查：`git diff --check`（clean diff）。
