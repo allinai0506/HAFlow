@@ -303,6 +303,29 @@ def test_scenario_5_force_pass_requires_confirmation_reason_and_target(ops_test_
         })
     assert "不属于工作流" in str(exc.value)
 
+    # 5.5 Missing expected_version when task_id provided
+    with pytest.raises(RuntimeError) as exc:
+        c.api_controller_execute_action({
+            "type": "force_pass",
+            "workflow_id": "wf-ops-01",
+            "gate_node_id": "test",
+            "task_id": "wf-ops-01-test",
+            "confirmed": True,
+            "reason": "人工核查通过",
+        })
+    assert "expected_version" in str(exc.value)
+
+    # 5.6 Missing version snapshot protection on node-level pass
+    with pytest.raises(RuntimeError) as exc:
+        c.api_controller_execute_action({
+            "type": "force_pass",
+            "workflow_id": "wf-ops-01",
+            "gate_node_id": "test",
+            "confirmed": True,
+            "reason": "人工核查通过",
+        })
+    assert "版本快照保护字段" in str(exc.value)
+
     # State untouched
     store = ops_test_env["store"]
     t = store.get_task("wf-ops-01-test")
@@ -317,6 +340,7 @@ def test_scenario_6_legitimate_force_pass_scoped_with_audit(ops_test_env):
         "type": "force_pass_advance",
         "workflow_id": "wf-ops-01",
         "gate_node_id": "test",
+        "expected_version": 1,
         "confirmed": True,
         "reason": "已知非核心偶发用例失败，主管核查允许放行",
         "operator": "lead_engineer",
@@ -351,6 +375,7 @@ def test_scenario_7_force_pass_succeeds_but_advance_fails_returns_partial(ops_te
         "type": "force_pass_advance",
         "workflow_id": "wf-ops-01",
         "gate_node_id": "test",
+        "expected_version": 1,
         "confirmed": True,
         "reason": "测试门禁人工豁免",
         "operator": "admin",
@@ -373,8 +398,9 @@ def test_scenario_7_force_pass_succeeds_but_advance_fails_returns_partial(ops_te
 # 8. 前端取消确认或后端返回拒绝：不执行变更，或明确展示失败
 def test_scenario_8_frontend_templates_and_safety_checks(ops_test_env):
     html = getattr(c, "HTML_TEMPLATE", "")
-    # Check that confirmOpsForcePass exists in HTML/JS
+    # Check that confirmOpsForcePass exists in HTML/JS and triggers advance
     assert "confirmOpsForcePass" in html
+    assert "runOpsAnomalyAction('force_pass_advance'" in html
     # Check that reason is required and cancelled clicks do not call api
     assert "forcePassReason" in html or "ctlReasonInput" in html
     assert "kernelForcePassReason" in html
@@ -530,16 +556,29 @@ def test_scenario_11_kernel_force_pass_parity_validation(ops_test_env):
             "workflow_id": "wf-ops-01",
             "gate_node_id": "implementation",
             "task_id": "wf-ops-01-test",  # belongs to 'test'
+            "expected_version": 1,
             "confirmed": True,
             "reason": "合法人工原因",
         })
     assert "节点错配" in str(exc.value)
+
+    # 11.5b Missing expected_version when task_id is provided: must reject
+    with pytest.raises(RuntimeError) as exc:
+        c.api_kernel_force_pass({
+            "workflow_id": "wf-ops-01",
+            "gate_node_id": "test",
+            "task_id": "wf-ops-01-test",
+            "confirmed": True,
+            "reason": "合法人工原因",
+        })
+    assert "expected_version" in str(exc.value)
 
     # 11.6 Valid manual pass via api_kernel_force_pass (releases gate without advancing workflow)
     res = c.api_kernel_force_pass({
         "workflow_id": "wf-ops-01",
         "gate_node_id": "test",
         "task_id": "wf-ops-01-test",
+        "expected_version": 1,
         "confirmed": True,
         "reason": "经过主管和QA联合签名，该测试缺陷已豁免",
         "operator": "lead_qa",
@@ -583,6 +622,7 @@ def test_scenario_12_stale_request_meets_new_running_instance(ops_test_env):
             "workflow_id": "wf-ops-01",
             "task_id": "wf-ops-01-reworkable",
             "gate_node_id": "implementation",
+            "expected_version": 1,
             "expected_pane_id": "pane-old-99",
             "confirmed": True,
             "reason": "人工豁免尝试",
@@ -667,13 +707,36 @@ def test_scenario_14_http_route_kernel_force_pass_integration(ops_test_env):
         store = ops_test_env["store"]
         assert store.get_task("wf-ops-01-test")["stage_verdict"] == "blocked"
 
-        # 2. Approved request: explicit confirmation and user-provided reason
+        # 1b. Rejected request: missing expected_version when task_id provided
+        bad_req_ver = urllib.request.Request(
+            url,
+            data=json.dumps({
+                "workflow_id": "wf-ops-01",
+                "gate_node_id": "test",
+                "task_id": "wf-ops-01-test",
+                "confirmed": True,
+                "reason": "集成测试真实放行",
+                "operator": "tester",
+            }).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        status_ver = None
+        try:
+            with urllib.request.urlopen(bad_req_ver) as resp:
+                status_ver = resp.status
+        except urllib.error.HTTPError as e:
+            status_ver = e.code
+        assert status_ver in (400, 500)
+
+        # 2. Approved request: explicit confirmation and user-provided reason with expected_version
         good_req = urllib.request.Request(
             url,
             data=json.dumps({
                 "workflow_id": "wf-ops-01",
                 "gate_node_id": "test",
                 "task_id": "wf-ops-01-test",
+                "expected_version": 1,
                 "confirmed": True,
                 "reason": "集成测试真实放行",
                 "operator": "tester",
@@ -776,6 +839,8 @@ def test_scenario_16_multitask_node_version_isolation_and_scope(ops_test_env):
     import sqlite3
 
     conn = sqlite3.connect(db_path)
+    # Supersede original single test task so node 'test' specifically has dual tasks A and B
+    conn.execute("UPDATE tasks SET status = 'superseded' WHERE task_id = 'wf-ops-01-test'")
     # Seed two tasks under node 'test': Task A at version 3, Task B at version 7
     conn.execute("""
         INSERT INTO tasks (task_id, workflow_id, node, stage, agent, status, stage_verdict, pane_id, version, created_at, updated_at)
@@ -806,6 +871,21 @@ def test_scenario_16_multitask_node_version_isolation_and_scope(ops_test_env):
     assert t_b["stage_verdict"] == "blocked"
     assert t_b["version"] == 7
 
+    # Verify read projection: stage_summary and workflow_graph_projection MUST remain blocked, NOT cleaned/completed!
+    from herdr import workflow_graph as herdr_workflow_graph
+    wf_after_a = store.get_workflow("wf-ops-01")
+    stage_sum = c.stage_summary([t_a, t_b], "test", workflow=wf_after_a)
+    assert stage_sum["status"] == "blocked", f"stage_summary must remain blocked, got {stage_sum['status']}"
+
+    wf_proj_payload = dict(wf_after_a.get("config") or {})
+    wf_proj_payload["workflow_id"] = "wf-ops-01"
+    wf_proj_payload["status"] = wf_after_a.get("status")
+    wf_proj_payload["gate_overrides"] = wf_after_a.get("gate_overrides")
+    graph_proj = herdr_workflow_graph.workflow_graph_projection(wf_proj_payload, [t_a, t_b])
+    test_node = next(n for n in graph_proj["nodes"] if n["id"] == "test")
+    assert test_node["status"] == "blocked", f"workflow_graph_projection node must remain blocked, got {test_node['status']}"
+    assert test_node["has_attention"] is True
+
     # 2. Target Task B with expected_version=7: must SUCCEED
     res_b = herdr_kernel.force_pass_gate(
         workflow_id="wf-ops-01",
@@ -835,7 +915,18 @@ def test_scenario_16_multitask_node_version_isolation_and_scope(ops_test_env):
         )
     assert "存在多个不同版本的任务" in str(exc.value)
 
-    # 4. Node-level pass with expected_task_versions mapping: succeeds for all tasks
+    # 3b. Partial expected_task_versions mapping (only {"wf-ops-01-test-a": 3} when tasks are A and B): MUST be rejected
+    with pytest.raises(RuntimeError) as exc_partial:
+        herdr_kernel.force_pass_gate(
+            workflow_id="wf-ops-01",
+            gate_node_id="test",
+            expected_task_versions={"wf-ops-01-test-a": 3},
+            note="尝试部分版本映射放行",
+            store=store,
+        )
+    assert "版本映射不完整或不匹配" in str(exc_partial.value)
+
+    # 4. Node-level pass with complete expected_task_versions mapping: succeeds for all tasks
     res_map = herdr_kernel.force_pass_gate(
         workflow_id="wf-ops-01",
         gate_node_id="test",
@@ -846,6 +937,21 @@ def test_scenario_16_multitask_node_version_isolation_and_scope(ops_test_env):
     assert res_map["ok"] is True
     assert "wf-ops-01-test-a" in res_map["updated_tasks"]
     assert "wf-ops-01-test-b" in res_map["updated_tasks"]
+
+    # Now both tasks are passed; verify stage_summary is cleaned and workflow_graph_projection is completed
+    t_a_passed = store.get_task("wf-ops-01-test-a")
+    t_b_passed = store.get_task("wf-ops-01-test-b")
+    wf_after_all = store.get_workflow("wf-ops-01")
+    stage_sum_all = c.stage_summary([t_a_passed, t_b_passed], "test", workflow=wf_after_all)
+    assert stage_sum_all["status"] == "cleaned"
+
+    wf_proj_payload_all = dict(wf_after_all.get("config") or {})
+    wf_proj_payload_all["workflow_id"] = "wf-ops-01"
+    wf_proj_payload_all["status"] = wf_after_all.get("status")
+    wf_proj_payload_all["gate_overrides"] = wf_after_all.get("gate_overrides")
+    graph_proj_all = herdr_workflow_graph.workflow_graph_projection(wf_proj_payload_all, [t_a_passed, t_b_passed])
+    test_node_all = next(n for n in graph_proj_all["nodes"] if n["id"] == "test")
+    assert test_node_all["status"] == "completed"
     conn.close()
 
 

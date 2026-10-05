@@ -62,7 +62,7 @@ def _seed_wf(env, wid, status="running"):
     env["wf_file"].write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
-def _seed_task(env, tid, wid, node, status="completed", verdict=None):
+def _seed_task(env, tid, wid, node, status="completed", verdict=None, version=1):
     data = json.loads(env["tasks_file"].read_text(encoding="utf-8"))
     data["tasks"].append({
         "task_id": tid,
@@ -70,6 +70,7 @@ def _seed_task(env, tid, wid, node, status="completed", verdict=None):
         "node": node,
         "status": status,
         "stage_verdict": verdict,
+        "version": version,
     })
     env["tasks_file"].write_text(json.dumps(data, indent=2), encoding="utf-8")
 
@@ -115,7 +116,18 @@ def test_api_kernel_force_pass(console_kernel_env):
     _seed_wf(console_kernel_env, wid, status="running")
     _seed_task(console_kernel_env, "t_gate", wid, "gate1", status="completed", verdict="blocked")
 
-    res = c.api_kernel_force_pass({"workflow_id": wid, "gate_node_id": "gate1", "note": "Emergency override", "confirmed": True})
+    # Missing expected_version must be rejected
+    with pytest.raises(RuntimeError) as exc:
+        c.api_kernel_force_pass({"workflow_id": wid, "gate_node_id": "gate1", "note": "Emergency override", "confirmed": True})
+    assert "版本快照保护字段" in str(exc.value)
+
+    res = c.api_kernel_force_pass({
+        "workflow_id": wid,
+        "gate_node_id": "gate1",
+        "note": "Emergency override",
+        "confirmed": True,
+        "expected_version": 1,
+    })
     assert res["ok"] is True
     assert "t_gate" in res["updated_tasks"]
 

@@ -172,7 +172,20 @@ def stage_summary(ts,key,workflow=None):
     wf_status=(workflow or {}).get('status') if isinstance(workflow,dict) else ''
     is_wf_completed=wf_status in {'completed','cleaned','archived'}
     gate_override=((workflow or {}).get('gate_overrides') or {}).get(key) or {}
-    gate_passed=gate_override.get('verdict')=='pass'
+    override_tid = gate_override.get('task_id')
+    gate_passed = False
+    if gate_override.get('verdict') == 'pass':
+        if not override_tid:
+            gate_passed = True
+        else:
+            other_live = [t for t in live if str(t.get('task_id')) != str(override_tid)]
+            other_blocked_or_failed = any(
+                str(t.get('status')) in {'blocked', 'failed', 'rework'}
+                or (str(t.get('stage_verdict') or '') in {'blocked', 'failed'} and str(t.get('stage_verdict') or '') != 'pass')
+                for t in other_live
+            )
+            if not other_blocked_or_failed:
+                gate_passed = True
 
     if not xs:
         if is_wf_completed:
@@ -186,9 +199,9 @@ def stage_summary(ts,key,workflow=None):
     else:
         ss=[t.get('status','unknown') for t in live]
         verdicts=[str(t.get('stage_verdict') or '') for t in live]
-        if any(s=='blocked' and v!='pass' for s,v in zip(ss,verdicts)): st='blocked'
+        if any((s=='blocked' or v=='blocked') and v!='pass' for s,v in zip(ss,verdicts)): st='blocked'
         elif any(s in {'working','dispatched','pending','rework','agent_done'} for s in ss): st='working'
-        elif any(v=='pass' for v in verdicts) or all(s in {'completed','committed','integrated','cleanup_ready','cleaned'} for s in ss):
+        elif all(s in {'completed','committed','integrated','cleanup_ready','cleaned'} or v=='pass' for s,v in zip(ss,verdicts)):
             st='cleaned'
         else:
             def _k(t):
@@ -667,19 +680,37 @@ def _validate_force_pass_params(payload, wid, wf=None, task=None):
     if not gate:
         raise RuntimeError('缺少明确的目标门禁节点，禁止全工作流隐式放行')
 
-    # If task is provided, ensure gate matches task node
+    # If task is provided, ensure gate matches task node and snapshot protections are met
     if task:
         task_node = str(task.get('node') or task.get('stage') or '').strip()
         if task_node and gate != task_node:
             raise RuntimeError(f'任务节点错配: 请求目标节点为 {gate}，当前任务节点为 {task_node}，请刷新页面')
 
+        if payload.get('expected_version') is None:
+            raise RuntimeError('放行处置请求缺少 expected_version 版本保护字段，禁止无版本约束的放行处置，请刷新页面')
+        cur_ver = task.get('version')
+        exp_ver = payload.get('expected_version')
+        if cur_ver != exp_ver:
+            raise RuntimeError(f'任务版本已变化（期望版本 {exp_ver}，当前版本 {cur_ver}），请刷新页面')
+
+        exp_pane = str(payload.get('expected_pane_id') or payload.get('pane_id') or '').strip()
+        cur_pane = str(task.get('pane_id') or '').strip()
+        if exp_pane and cur_pane != exp_pane:
+            raise RuntimeError('任务运行实例已变化，请刷新页面')
+
     # Verify gate belongs to the workflow
     wf_tasks = tasks_for_workflow(wid)
-    matching_tasks = [t for t in wf_tasks if gate in (t.get('node'), t.get('stage'))]
+    matching_tasks = [t for t in wf_tasks if gate in (t.get('node'), t.get('stage')) and t.get('status') != 'superseded']
     wf_cfg_nodes = (wf.get('config') or {}).get('nodes') or [] if isinstance(wf, dict) else []
     wf_cfg_node_ids = {n.get('id') for n in wf_cfg_nodes if isinstance(n, dict)}
     if not matching_tasks and gate not in wf_cfg_node_ids:
         raise RuntimeError(f'目标门禁节点 {gate} 不属于工作流 {wid}')
+
+    if not task and matching_tasks:
+        has_task_map = bool(payload.get('expected_task_versions'))
+        has_single_ver = payload.get('expected_version') is not None
+        if not has_task_map and not has_single_ver:
+            raise RuntimeError('节点级放行请求缺少任务版本快照保护字段（expected_task_versions 或 expected_version），禁止无版本约束的放行处置，请刷新页面')
 
     op = str(payload.get('operator') or 'human').strip()
     return gate, reason, op
@@ -712,12 +743,8 @@ def api_kernel_force_pass(b):
     gate, reason, op = _validate_force_pass_params(b, wid, wf, task=task)
 
     exp_ver = b.get('expected_version')
-    if task and exp_ver is not None and task.get('version') != exp_ver:
-        raise RuntimeError(f'任务版本已变化（期望版本 {exp_ver}，当前版本 {task.get("version")}），请刷新页面')
-
-    exp_pane = str(b.get('expected_pane_id') or '').strip()
-    if task and exp_pane and str(task.get('pane_id') or '').strip() != exp_pane:
-        raise RuntimeError('任务运行实例已变化，请刷新页面')
+    exp_task_vers = b.get('expected_task_versions')
+    exp_pane = str(b.get('expected_pane_id') or b.get('pane_id') or '').strip()
 
     return herdr_kernel.force_pass_gate(
         wid,
@@ -727,6 +754,7 @@ def api_kernel_force_pass(b):
         expected_version=exp_ver,
         task_id=task_id or None,
         expected_pane_id=exp_pane or None,
+        expected_task_versions=exp_task_vers,
     )
 
 def api_kernel_checkpoint_create(b):
@@ -1085,14 +1113,12 @@ def api_controller_execute_action(payload):
         return {'ok': True, 'task_id': task_id, 'output': r.stdout.strip()}
 
     elif act_type in ('force_pass', 'force_pass_advance'):
-        if task and payload.get('expected_version') is None:
-            raise RuntimeError('放行处置请求缺少 expected_version 版本保护字段，禁止无版本约束的放行处置，请刷新页面')
-
         gate, reason, op = _validate_force_pass_params(payload, wid, wf, task=task)
         exp_ver = payload.get('expected_version')
+        exp_task_vers = payload.get('expected_task_versions')
         exp_pane = str(payload.get('expected_pane_id') or payload.get('pane_id') or '').strip()
 
-        # Execution/write boundary check: pass expected_version, task_id, expected_pane_id to force_pass_gate
+        # Execution/write boundary check: pass expected_version, task_id, expected_pane_id, expected_task_versions to force_pass_gate
         gate_res = herdr_kernel.force_pass_gate(
             wid,
             gate_node_id=gate,
@@ -1101,6 +1127,7 @@ def api_controller_execute_action(payload):
             expected_version=exp_ver,
             task_id=task_id or None,
             expected_pane_id=exp_pane or None,
+            expected_task_versions=exp_task_vers,
         )
 
         adv_res = None
@@ -5206,7 +5233,7 @@ function confirmOpsForcePass(wid,tid,node,options){
         opts.expected_pane_id=expPane;
         opts.pane_id=expPane;
       }
-      runOpsAnomalyAction('force_pass',wid,tid,node,opts);
+      runOpsAnomalyAction('force_pass_advance',wid,tid,node,opts);
     };
   }
 }

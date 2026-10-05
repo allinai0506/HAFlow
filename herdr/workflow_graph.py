@@ -44,9 +44,7 @@ def aggregate_node_status(node_tasks: List[Dict[str, Any]]) -> str:
         return "rework"
     if any(s in WORKING_LIKE for s in statuses):
         return "working"
-    if all(s in COMPLETED_LIKE for s in statuses):
-        return "completed"
-    if any(v == "pass" for v in verdicts):
+    if all(s in COMPLETED_LIKE or v == "pass" for s, v in zip(statuses, verdicts)):
         return "completed"
 
     # Terminal tasks without active work: inspect latest task
@@ -180,7 +178,20 @@ def workflow_graph_projection(
         active = sum(1 for t in live if str(t.get("status")) in WORKING_LIKE or str(t.get("status")) == "rework")
 
         gate_override = gate_overrides.get(nid) or {}
-        gate_passed = gate_override.get("verdict") == "pass"
+        override_tid = gate_override.get("task_id")
+        gate_passed = False
+        if gate_override.get("verdict") == "pass":
+            if not override_tid:
+                gate_passed = True
+            else:
+                other_live = [t for t in live if str(t.get("task_id")) != str(override_tid)]
+                other_blocked_or_failed = any(
+                    str(t.get("status")) in {"blocked", "failed", "rework"}
+                    or (str(t.get("stage_verdict") or "") in {"blocked", "failed"} and str(t.get("stage_verdict") or "") != "pass")
+                    for t in other_live
+                )
+                if not other_blocked_or_failed:
+                    gate_passed = True
 
         if is_wf_completed:
             status = "completed"

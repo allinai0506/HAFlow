@@ -2004,3 +2004,11 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
   - 前置重读权威状态，强校验工作流/任务归属、拦截已作废（superseded）任务及版本/运行实例错配。
 - 专项测试 `tests/test_console_ops_repair_gate_separation.py`（9/9 passed 含端到端 HTTP Server 到 SQLite 回读集成测试）；全量控制台测试 246 passed；S6 审查通过（MERGE_READY）。
 - 关联教训沉淀至 `docs/lessons/lessons-learned.md` §129。
+
+## [2026-10-05] update | 门禁放行范围投影对齐、节点版本完整性校验与接口防绕过闭环
+- Updated [[ops-center]], [[workflow-engine]]:
+  - 范围与投影对齐：`herdr/workflow_graph.py` 与 `console/herdr_factory_console.py::stage_summary` 严格感知 `gate_overrides` 中 `task_id`，单任务豁免绝不误将含其他阻塞/失败任务的多任务节点投影为通过/已清理；
+  - 节点版本映射完整性：`herdr/state_db.py` 与 `herdr/kernel.py` 的 `force_pass_gate` 在接收 `expected_task_versions` 时强制比对有效任务全集，拒绝不完整映射以防未确认任务被意外放行，同时 CAS 乐观锁 `exp_v` 直接绑定调用方期望版本；
+  - 接口双入口对齐：`/api/controller/execute-action` 与 `/api/kernel/force-pass` 统一通过 `_validate_force_pass_params` 强制要求快照版本保护字段，杜绝直接调用或旧客户端绕过防护；
+  - 运维中心“强制放行推进”动作修复：前端 `confirmOpsForcePass` 纠正调用 `force_pass_advance`，放行后正常尝试推进后续阶段。
+- 测试与验证：`tests/test_console_ops_repair_gate_separation.py`（17/17 passed）、`tests/test_console*.py`（254/254 passed, 76 subtests）、`python3 -m compileall` 及 `git diff --check` 全部 0 警告 0 报错。

@@ -54,6 +54,7 @@ def console_actions_env(tmp_path, monkeypatch):
                 "stage_verdict": "blocked",
                 "stage_verdict_note": "FAIL: 2 blocking defects",
                 "agent": "qodercli",
+                "version": 1,
             }
         ]
     }
@@ -114,11 +115,24 @@ def test_api_controller_execute_action_force_pass_advance(console_actions_env):
             "gate_node_id": "test",
         })
 
+    # Missing expected_version must be refused
+    with pytest.raises(RuntimeError) as exc:
+        c.api_controller_execute_action({
+            "type": "force_pass_advance",
+            "workflow_id": "wf-test-01",
+            "stage": "test",
+            "gate_node_id": "test",
+            "confirmed": True,
+            "reason": "人工在控制台审核确认通过",
+        })
+    assert "版本快照保护字段" in str(exc.value)
+
     payload = {
         "type": "force_pass_advance",
         "workflow_id": "wf-test-01",
         "stage": "test",
         "gate_node_id": "test",
+        "expected_version": 1,
         "confirmed": True,
         "reason": "人工在控制台审核确认通过",
     }

@@ -7051,15 +7051,21 @@ def force_pass_gate(
             tasks_to_update = [target_task]
         else:
             if expected_task_versions is not None:
+                matching_tids = {t.get("task_id") for t in matching_tasks}
+                provided_tids = set(expected_task_versions.keys())
+                if matching_tids != provided_tids:
+                    raise RuntimeError(
+                        f"节点级放行版本映射不完整或不匹配: 当前节点有效任务为 {sorted(matching_tids)}，"
+                        f"提交映射为 {sorted(provided_tids)}，必须完整核验所有任务版本"
+                    )
                 for t in matching_tasks:
                     tid = t.get("task_id")
-                    if tid in expected_task_versions:
-                        exp_v = expected_task_versions[tid]
-                        cur_v = t.get("version")
-                        if cur_v != exp_v:
-                            raise RuntimeError(
-                                f"任务 {tid} 版本已在写入边界发生变化（期望版本 {exp_v}，当前版本 {cur_v}），写入已拒绝，请刷新页面"
-                            )
+                    exp_v = expected_task_versions[tid]
+                    cur_v = t.get("version")
+                    if cur_v != exp_v:
+                        raise RuntimeError(
+                            f"任务 {tid} 版本已在写入边界发生变化（期望版本 {exp_v}，当前版本 {cur_v}），写入已拒绝，请刷新页面"
+                        )
             elif expected_version is not None:
                 if len(matching_tasks) == 1:
                     cur_v = matching_tasks[0].get("version")
@@ -7086,8 +7092,13 @@ def force_pass_gate(
         updated_tasks = []
         for t in tasks_to_update:
             tid = t["task_id"]
-            # Target optimistic version for task CAS write
-            exp_v = t.get("version") if (expected_version is not None or expected_task_versions is not None) else None
+            # Target optimistic version for task CAS write directly from caller expected parameters
+            if expected_task_versions is not None:
+                exp_v = expected_task_versions.get(tid)
+            elif expected_version is not None:
+                exp_v = expected_version
+            else:
+                exp_v = None
             payload = {k: v for k, v in t.items() if k not in {
                 "task_id", "workflow_id", "node", "stage", "agent", "status",
                 "stage_verdict", "stage_verdict_note", "pane_id", "goal", "blocker",
