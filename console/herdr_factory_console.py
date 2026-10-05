@@ -980,6 +980,33 @@ def api_controller_execute_action(payload):
     elif act_type == 'halt':
         return api_task_halt(payload)
 
+    elif act_type in ('retry', 'ops_repair'):
+        task_id = str(payload.get('task_id') or '').strip()
+        wid = str(payload.get('workflow_id') or '').strip()
+        if task_id and wid:
+            try:
+                return _run_action_command(_find_action(payload, 'rework'), 30)
+            except Exception:
+                pass
+            try:
+                return _run_action_command(_find_action(payload, 'redrive'), 200)
+            except Exception:
+                pass
+        gate = str(payload.get('node') or payload.get('stage') or '').strip()
+        if wid and gate:
+            try:
+                herdr_kernel.force_pass_gate(wid, gate_node_id=gate, note='运维驾驶舱异常中枢一键修复放行', operator='ops')
+                return {'ok': True, 'advanced': manual_advance(wid)}
+            except Exception:
+                pass
+        if wid:
+            try:
+                adv = manual_advance(wid)
+                return {'ok': True, 'advanced': adv}
+            except Exception:
+                pass
+        raise RuntimeError(f'无法自动修复工作流 {wid}（任务 {task_id}），请打开终端排查或手动处理')
+
     raise RuntimeError(f'未知的控制器动作类型: {act_type}')
 
 
@@ -3004,12 +3031,74 @@ pre { margin: 0; white-space: pre-wrap; word-break: break-word; font-family: ui-
 .fleet-header { font-size: 11px; font-weight: 600; color: var(--text-tertiary); background: var(--bg-subtle); text-transform: uppercase; letter-spacing: 0.5px; }
 .fleet-row:last-child { border-bottom: 0; }
 .fleet-row:hover { background: var(--bg-hover); }
-.ops-section { margin-bottom: 16px; }
-.ops-section h3 { font-size: 13px; font-weight: 600; margin: 0 0 8px; color: var(--text-primary); }
-.ops-card { background: var(--bg-surface); border: 1px solid var(--border-default); border-radius: var(--radius-sm); padding: 12px 16px; margin-bottom: 8px; transition: border-color .15s ease; }
-.ops-card:hover { border-color: var(--primary); }
-.ops-card-head { display: flex; justify-content: space-between; align-items: center; font-size: 13px; font-weight: 600; margin-bottom: 4px; }
-.ops-nodes { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+/* Ops Center Split-View Redesign */
+.ops-dashboard-grid { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(360px, 1fr); gap: 16px; align-items: start; margin-top: 8px; }
+@media (max-width: 1080px) { .ops-dashboard-grid { grid-template-columns: 1fr; } }
+.ops-col-left, .ops-col-right { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.ops-panel-anomaly, .ops-panel-fleet { background: var(--bg-surface); border: 1px solid var(--border-default); border-radius: var(--radius-md); padding: 16px; box-shadow: var(--shadow-sm); }
+.ops-section-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; flex-wrap: wrap; gap: 8px; }
+.ops-section-title { font-size: 13px; font-weight: 600; color: var(--text-primary); display: flex; align-items: center; gap: 8px; }
+.ops-badge { font-size: 11px; font-weight: 600; color: var(--text-secondary); background: var(--bg-subtle); border: 1px solid var(--border-subtle); padding: 2px 8px; border-radius: 999px; }
+.ops-badge.danger { background: rgba(220, 38, 38, 0.12); color: var(--danger); border-color: rgba(220, 38, 38, 0.3); }
+.ops-filter-pills { display: inline-flex; background: var(--bg-subtle); padding: 2px; border-radius: 6px; border: 1px solid var(--border-subtle); gap: 2px; }
+.ops-filter-pill { border: none; background: transparent; font-size: 11.5px; padding: 4px 8px; border-radius: 4px; cursor: pointer; color: var(--text-secondary); font-weight: 500; transition: all .15s ease; }
+.ops-filter-pill:hover { color: var(--text-primary); background: var(--bg-hover); }
+.ops-filter-pill.active { background: var(--bg-surface); color: var(--text-primary); font-weight: 600; box-shadow: 0 1px 2px rgba(0,0,0,0.06); }
+
+.ops-card { background: var(--bg-surface); border: 1px solid var(--border-default); border-radius: var(--radius-md); padding: 16px; margin-bottom: 12px; transition: border-color .15s ease, box-shadow .15s ease; box-shadow: var(--shadow-sm); }
+.ops-card:hover { border-color: rgba(94, 106, 210, 0.5); }
+.ops-card.is-failed { border-left: 3px solid var(--danger); }
+.ops-card.is-blocked { border-left: 3px solid var(--warning); }
+.ops-card.is-working { border-left: 3px solid var(--primary); }
+.ops-card.is-completed { border-left: 3px solid var(--success); }
+
+.ops-card-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 8px; }
+.ops-card-title-group { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1; }
+.ops-card-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-tertiary); flex-shrink: 0; }
+.ops-card-dot.is-working { background: var(--primary); }
+.ops-card-dot.is-completed { background: var(--success); }
+.ops-card-dot.is-blocked { background: var(--warning); }
+.ops-card-dot.is-failed { background: var(--danger); }
+
+.ops-card-name { font-size: 13.5px; font-weight: 600; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ops-card-status-badge { font-size: 10.5px; font-weight: 600; padding: 2px 8px; border-radius: 999px; }
+.ops-card-status-badge.is-working { background: var(--primary-subtle); color: var(--primary); }
+.ops-card-status-badge.is-completed { background: rgba(22, 163, 74, 0.12); color: var(--success); }
+.ops-card-status-badge.is-blocked { background: var(--warning-bg); color: var(--warning); }
+.ops-card-status-badge.is-failed { background: rgba(220, 38, 38, 0.12); color: var(--danger); }
+
+.ops-card-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.ops-card-time { font-size: 11.5px; color: var(--text-tertiary); }
+.ops-card-meta-line { font-size: 12px; color: var(--text-secondary); margin-bottom: 8px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+
+.ops-card-progress-wrap { margin: 8px 0 12px; }
+.ops-progress-bar { height: 6px; border-radius: 999px; background: var(--bg-subtle); border: 1px solid var(--border-subtle); overflow: hidden; }
+.ops-progress-fill { height: 100%; border-radius: 999px; background: var(--success); transition: width .3s ease; }
+.ops-card.is-failed .ops-progress-fill { background: var(--danger); }
+.ops-card.is-blocked .ops-progress-fill { background: var(--warning); }
+.ops-progress-meta { display: flex; justify-content: space-between; font-size: 11px; color: var(--text-secondary); margin-top: 4px; }
+
+.ops-stage-callout { display: flex; justify-content: space-between; align-items: center; background: var(--bg-subtle); border: 1px solid var(--border-subtle); border-radius: 6px; padding: 8px 12px; font-size: 12px; gap: 8px; }
+.ops-stage-callout.is-failed { background: rgba(220, 38, 38, 0.06); border-color: rgba(220, 38, 38, 0.25); color: var(--danger); }
+.ops-stage-callout.is-blocked { background: rgba(217, 119, 6, 0.06); border-color: rgba(217, 119, 6, 0.25); color: var(--warning); }
+.ops-stage-callout.is-working { background: var(--primary-subtle); border-color: rgba(94, 106, 210, 0.25); color: var(--primary); }
+.ops-callout-content { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1; }
+.ops-callout-text { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ops-toggle-details-btn { border: none; background: transparent; color: var(--text-tertiary); font-size: 11px; cursor: pointer; padding: 2px 8px; border-radius: 4px; flex-shrink: 0; }
+.ops-toggle-details-btn:hover { color: var(--text-primary); background: var(--bg-hover); }
+
+.ops-card-nodes-detail { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--border-subtle); }
+
+.ops-anomaly-card { background: var(--bg-surface); border: 1px solid rgba(220, 38, 38, 0.25); border-left: 3px solid var(--danger); border-radius: var(--radius-sm); padding: 12px; margin-bottom: 8px; font-size: 12px; }
+.ops-anomaly-card.is-blocked { border-color: rgba(217, 119, 6, 0.25); border-left-color: var(--warning); }
+.ops-anomaly-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.ops-anomaly-event { font-size: 11px; color: var(--text-secondary); margin: 8px 0; background: var(--bg-subtle); padding: 4px 8px; border-radius: 4px; word-break: break-all; }
+.ops-anomaly-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+
+.ops-empty-clean { text-align: center; padding: 24px 16px; background: var(--bg-subtle); border: 1px dashed var(--border-subtle); border-radius: var(--radius-sm); }
+.ops-empty-icon { font-size: 20px; margin-bottom: 4px; }
+.ops-empty-title { font-size: 13px; font-weight: 600; color: var(--text-primary); }
+.ops-empty-sub { font-size: 11.5px; color: var(--text-secondary); margin-top: 2px; }
 
 /* Controller cockpit — light high-contrast redesign (Linear clean) */
 code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; background: var(--bg-subtle); border: 1px solid var(--border-subtle); border-radius: 4px; padding: 1px 4px; color: var(--text-primary); }
@@ -4480,6 +4569,17 @@ function syncOpsUi(){
   db.textContent=state.dashMode?'← 返回工厂':'我的仪表板';
   db.className=state.dashMode?'btn primary':'btn';
   db.onclick=state.dashMode?exitDashboard:showDashboard;
+  let oh=document.getElementById('opsHeaderActions');
+  if(!oh){
+    oh=document.createElement('div');
+    oh.id='opsHeaderActions';
+    oh.style.display='none';
+    oh.style.alignItems='center';
+    oh.style.gap='8px';
+    oh.innerHTML='<span id="opsTimerBadge" class="fn-pill" style="font-size:11px;padding:2px 8px;border-radius:12px;background:var(--bg-subtle);border:1px solid var(--border-subtle);color:var(--text-secondary)">自动刷新 · 10s</span><button class="btn" id="opsRefreshBtn" onclick="triggerOpsRefresh()" style="padding:4px 12px;font-size:12px">⟳ 立即刷新</button>';
+    actions.appendChild(oh);
+  }
+  oh.style.display=state.opsMode?'inline-flex':'none';
   closeMoreMenu();
   document.querySelectorAll('.factory-action').forEach(button=>{button.hidden=state.opsMode});
   document.querySelectorAll('.factory-action').forEach(button=>{if(state.dashMode)button.hidden=true});
@@ -4690,26 +4790,61 @@ async function populateTemplateSelect(selId='newTemplate'){
     sel.innerHTML=ts.map(t=>`<option value="${esc(t.id)}"${t.id==='software-development-v1'?' selected':''}>${esc(t.id)} · ${esc(t.label||'')}（${t.node_count} 节点）</option>`).join('')
   }catch(e){}
 }
+let opsTimer=null;
+let opsCountdown=10;
+function startOpsTimer(){
+  stopOpsTimer();
+  opsCountdown=10;
+  updateOpsTimerBadge();
+  opsTimer=setInterval(()=>{
+    if(!state.opsMode){stopOpsTimer();return}
+    if(document.hidden)return;
+    opsCountdown--;
+    updateOpsTimerBadge();
+    if(opsCountdown<=0){
+      opsCountdown=10;
+      loadOpsCenter();
+    }
+  },1000);
+}
+function stopOpsTimer(){
+  if(opsTimer){clearInterval(opsTimer);opsTimer=null}
+}
+function updateOpsTimerBadge(){
+  const b=document.getElementById('opsTimerBadge');
+  if(b)b.textContent='自动刷新 · '+opsCountdown+'s';
+}
+async function triggerOpsRefresh(){
+  opsCountdown=10;
+  updateOpsTimerBadge();
+  const btn=document.getElementById('opsRefreshBtn');
+  if(btn){btn.disabled=true;btn.textContent='刷新中…'}
+  await loadOpsCenter();
+  if(btn){btn.disabled=false;btn.textContent='⟳ 立即刷新'}
+}
+
 function showOpsCenter(){
   state.opsMode=true;state.dashMode=false;state.shellView='ops';stopDashTimer();
   saveViewState();
   syncOpsUi();
   document.getElementById('projectTitle').textContent='运维驾驶舱';
-  document.getElementById('workflowSubject').textContent='四层运维视图 · 每 10 分钟自动刷新';
+  document.getElementById('workflowSubject').textContent='四层运维视图 · 全局驾驶舱';
   document.getElementById('workflowSub').textContent='';
   document.getElementById('workflowSwitcher').style.display='none';
   document.getElementById('stages').innerHTML='';
   setWorkspaceMode('aux');
-  document.getElementById('tasks').innerHTML='<div class="empty">正在加载运维数据…</div>';
+  document.getElementById('tasks').innerHTML='<div class="empty">正在加载运维驾驶舱数据…</div>';
   paintCrumb();
-  loadOpsCenter()
+  loadOpsCenter();
+  startOpsTimer();
 }
 async function exitOpsCenter(){
+  stopOpsTimer();
   state.opsMode=false;
   state.shellView='workbench';
   saveViewState();
   syncOpsUi();
-  await refreshAll()
+  await refreshAll();
 }
 async function loadOpsCenter(){
   try{
@@ -4727,6 +4862,49 @@ async function loadOpsCenter(){
     }
   }
 }
+
+function filterOpsWorkflows(filter){
+  state.opsWfFilter=filter;
+  renderOpsCenter();
+}
+
+function toggleOpsCardNodes(e,wid){
+  if(e)e.stopPropagation();
+  state.opsExpandedNodes=state.opsExpandedNodes||{};
+  state.opsExpandedNodes[wid]=!state.opsExpandedNodes[wid];
+  const el=document.getElementById('nodes-'+wid);
+  const textEl=document.getElementById('toggleText-'+wid);
+  if(el){
+    const open=state.opsExpandedNodes[wid];
+    el.style.display=open?'flex':'none';
+    if(textEl)textEl.textContent=open?'收起详情 ▲':'节点明细 ▼';
+  }
+}
+
+async function runOpsAnomalyAction(actType,wid,tid,node){
+  try{
+    toast('正在执行操作: '+actType+' …');
+    const payload={
+      type:actType,
+      action_type:actType,
+      workflow_id:wid,
+      task_id:tid,
+      node:node,
+      stage:node,
+      gate_node_id:node,
+      note:'运维驾驶舱异常中枢一键修复执行'
+    };
+    const res=await api('/api/controller/execute-action',{
+      method:'POST',
+      body:JSON.stringify(payload)
+    });
+    toast('操作成功: '+(res.task_id||res.advanced||'已生效'));
+    await loadOpsCenter();
+  }catch(e){
+    toast('操作失败: '+e.message,true);
+  }
+}
+
 function renderOpsCenter(){
   const d=state.ops||{},b=d.boss||{},cards=d.workflow_cards||[],fleet=d.agent_fleet||[],anoms=d.anomalies||[];
   document.getElementById('mProjects').textContent=b.running_workflows||0;
@@ -4735,13 +4913,252 @@ function renderOpsCenter(){
   document.getElementById('mAlerts').textContent=anoms.length;
   const mSpans=document.querySelectorAll('.metrics .metric span');
   if(mSpans[0])mSpans[0].textContent='运行工作流';if(mSpans[1])mSpans[1].textContent='活跃执行者';if(mSpans[2])mSpans[2].textContent='需要关注';if(mSpans[3])mSpans[3].textContent='异常告警';
-  document.getElementById('tasks').innerHTML=`<div class="ops-section"><h3>工作流 / 阶段节点</h3>${cards.length?cards.map(c=>`<div class="ops-card"><div class="ops-card-head"><strong>${esc(c.workflow_label||c.workflow_id)}</strong><span>${formatElapsed(c.runtime_seconds)}</span></div><div class="task-meta">${esc(c.workflow_id)} · ${c.tasks.active} 运行 · ${c.tasks.completed} 完成 · ${c.tasks.blocked} 阻塞 · ${c.tasks.failed} 失败</div><div class="ops-nodes">${c.nodes.map(n=>`<span class="badge ${esc(n.status)}">${esc(cleanStageLabel(n.node_label))} · ${esc(humanNodeStatus(n.status))}</span>`).join('')}</div></div>`).join(''):'<div class="empty">暂无运行中的工作流</div>'}</div><div class="ops-section"><h3>执行者舰队</h3><div class="fleet-table"><div class="fleet-header"><span>执行者</span><span>健康状态</span><span>当前任务</span><span>负载</span><span>运行耗时</span><span>最后结果</span></div>${fleet.length?fleet.map(a=>`<div class="fleet-row"><strong>${esc(a.agent)}</strong><span class="${opsHealthClass(a.health)}">${esc(healthLabel(a.health))}</span><span class="task-id" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(a.current_task||'—')}</span><span>负载 ${a.load}</span><span>${formatElapsed(a.runtime_seconds)}</span><span class="task-meta" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(a.last_result||'—')}</span></div>`).join(''):'<div class="empty" style="grid-column:span 6">暂无执行者数据</div>'}</div></div>`;
-  document.querySelectorAll('.ops-card').forEach((el,i)=>{el.style.cursor='pointer';el.onclick=()=>openWorkflowFromOps(cards[i].workflow_id)});
-  document.getElementById('agents').innerHTML='<div class="empty">运行时状态、任务注册表状态和最后事件已合并到执行者舰队。</div>';
-  document.getElementById('slots').innerHTML='<div class="empty">点击现有工作流页面可进入工位 / 任务 详情。</div>';
-  document.getElementById('alerts').innerHTML=anoms.length?anoms.map(a=>`<div class="alert-row"><div><strong>${esc(a.kind)}</strong><div class="task-meta">${esc(a.task_id||'')} · ${esc(a.agent||'')} · ${esc(a.last_event||'')}</div></div><button class="mini" onclick="showOpsAnomaly(${JSON.stringify(a).replaceAll('"','&quot;')})">处理</button></div>`).join(''):'<div class="empty">暂无异常</div>';
+
+  state.opsWfFilter=state.opsWfFilter||'all';
+  let activeWfs=0,attentionWfs=0,completedWfs=0;
+  cards.forEach(c=>{
+    const isFailed=(c.tasks.failed>0)||(c.nodes||[]).some(n=>n.status==='failed');
+    const isBlocked=(c.tasks.blocked>0)||(c.nodes||[]).some(n=>n.status==='blocked');
+    const isActive=(c.tasks.active>0)||(c.nodes||[]).some(n=>n.status==='working');
+    if(isActive)activeWfs++;
+    if(isFailed||isBlocked)attentionWfs++;
+    if(!isActive&&!isFailed&&!isBlocked)completedWfs++;
+  });
+
+  const filteredCards=cards.filter(c=>{
+    const isFailed=(c.tasks.failed>0)||(c.nodes||[]).some(n=>n.status==='failed');
+    const isBlocked=(c.tasks.blocked>0)||(c.nodes||[]).some(n=>n.status==='blocked');
+    const isActive=(c.tasks.active>0)||(c.nodes||[]).some(n=>n.status==='working');
+    if(state.opsWfFilter==='active')return isActive;
+    if(state.opsWfFilter==='attention')return isFailed||isBlocked;
+    if(state.opsWfFilter==='completed')return !isActive&&!isFailed&&!isBlocked;
+    return true;
+  });
+
+  const wfCardsHtml=filteredCards.length?filteredCards.map(c=>{
+    const nodes=c.nodes||[];
+    const totalNodes=nodes.length;
+    const completedNodes=nodes.filter(n=>n.status==='completed'||n.status==='superseded').length;
+    const failedNode=nodes.find(n=>n.status==='failed');
+    const blockedNode=nodes.find(n=>n.status==='blocked');
+    const workingNode=nodes.find(n=>n.status==='working');
+
+    let statusClass='is-idle';
+    let statusText='就绪';
+    let summaryIcon='○';
+    let summaryText='等待调度推进';
+    let summaryClass='is-idle';
+
+    if(failedNode||c.tasks.failed>0){
+      statusClass='is-failed';
+      statusText='执行失败';
+      summaryIcon='🚨';
+      summaryClass='is-failed';
+      summaryText='关键阶段失败: '+cleanStageLabel(failedNode?failedNode.node_label:'未命名')+'（任务异常中断）';
+    }else if(blockedNode||c.tasks.blocked>0){
+      statusClass='is-blocked';
+      statusText='阻塞阻断';
+      summaryIcon='⏸';
+      summaryClass='is-blocked';
+      summaryText='关键阶段阻塞: '+cleanStageLabel(blockedNode?blockedNode.node_label:'未命名')+'（等待人工/前置条件）';
+    }else if(workingNode||c.tasks.active>0){
+      statusClass='is-working';
+      statusText='正在运行';
+      summaryIcon='⚡';
+      summaryClass='is-working';
+      summaryText='正在推进阶段: '+cleanStageLabel(workingNode?workingNode.node_label:'执行中');
+    }else if(totalNodes>0&&completedNodes===totalNodes){
+      statusClass='is-completed';
+      statusText='已完成';
+      summaryIcon='✓';
+      summaryClass='is-completed';
+      summaryText='全部 '+totalNodes+' 个阶段已全部顺利完成';
+    }
+
+    const pct=totalNodes>0?Math.round((completedNodes/totalNodes)*100):(c.tasks.completed>0?100:0);
+    const isExpanded=!!(state.opsExpandedNodes&&state.opsExpandedNodes[c.workflow_id]);
+
+    return `
+      <div class="ops-card ${statusClass}" data-wf-id="${esc(c.workflow_id)}">
+        <div class="ops-card-head">
+          <div class="ops-card-title-group">
+            <span class="ops-card-dot ${statusClass}"></span>
+            <strong class="ops-card-name" title="${esc(c.workflow_label||c.workflow_id)}">${esc(c.workflow_label||c.workflow_id)}</strong>
+            <span class="ops-card-status-badge ${statusClass}">${statusText}</span>
+          </div>
+          <div class="ops-card-actions">
+            <span class="ops-card-time">${formatElapsed(c.runtime_seconds)}</span>
+            <button class="btn mini primary" onclick="event.stopPropagation();openWorkflowFromOps('${esc(c.workflow_id)}')">进入工作流 ➔</button>
+          </div>
+        </div>
+        <div class="ops-card-meta-line">
+          <code>${esc(c.workflow_id)}</code> · ${c.tasks.active} 运行 · ${c.tasks.completed} 完成 · ${c.tasks.blocked} 阻塞 · ${c.tasks.failed} 失败
+        </div>
+        <div class="ops-card-progress-wrap">
+          <div class="ops-progress-bar">
+            <div class="ops-progress-fill" style="width:${pct}%;"></div>
+          </div>
+          <div class="ops-progress-meta">
+            <span>阶段进度: <b>${completedNodes}/${totalNodes}</b> (${pct}%)</span>
+            <span>总计任务: ${c.tasks.active+c.tasks.completed+c.tasks.blocked+c.tasks.failed} 个</span>
+          </div>
+        </div>
+        <div class="ops-stage-callout ${summaryClass}">
+          <div class="ops-callout-content">
+            <span class="ops-callout-icon">${summaryIcon}</span>
+            <span class="ops-callout-text">${esc(summaryText)}</span>
+          </div>
+          <button class="ops-toggle-details-btn" onclick="toggleOpsCardNodes(event,'${esc(c.workflow_id)}')">
+            <span id="toggleText-${esc(c.workflow_id)}">${isExpanded?'收起详情 ▲':('节点明细 ('+totalNodes+') ▼')}</span>
+          </button>
+        </div>
+        <div id="nodes-${esc(c.workflow_id)}" class="ops-card-nodes-detail" style="display:${isExpanded?'flex':'none'}">
+          ${nodes.map(n=>`<span class="badge ${esc(n.status)}">${esc(cleanStageLabel(n.node_label))} · ${esc(humanNodeStatus(n.status))}</span>`).join('')}
+        </div>
+      </div>
+    `;
+  }).join(''):'<div class="empty">当前筛选条件下暂无工作流</div>';
+
+  const anomsHtml=anoms.length?anoms.map(a=>{
+    const isBlocked=a.kind==='BLOCKED'||a.kind==='UPDATE_BLOCKED';
+    return `
+      <div class="ops-anomaly-card ${isBlocked?'is-blocked':''}">
+        <div class="ops-anomaly-head">
+          <div style="display:flex;align-items:center;gap:8px">
+            <span class="badge ${isBlocked?'blocked':'failed'}">${esc(a.kind)}</span>
+            <strong>${esc(a.workflow_id||'未知工作流')}</strong>
+          </div>
+          <span class="task-meta">${formatElapsed(a.last_event_seconds||0)}前</span>
+        </div>
+        <div class="ops-anomaly-body">
+          <div class="task-meta">阶段: <b>${esc(a.node||'—')}</b> · 执行者: <b>${esc(a.agent||'—')}</b> · 任务: <code>${esc(a.task_id||'—')}</code></div>
+          <div class="ops-anomaly-event">最后事件: ${esc(a.last_event||'无详细事件记录')}</div>
+        </div>
+        <div class="ops-anomaly-actions">
+          ${a.kind==='FAILED'?`<button class="btn mini primary" onclick="runOpsAnomalyAction('ops_repair','${esc(a.workflow_id||'')}','${esc(a.task_id||'')}','${esc(a.node||'')}')">一键重试修复</button>`:''}
+          ${isBlocked?`<button class="btn mini warning" onclick="runOpsAnomalyAction('force_pass','${esc(a.workflow_id||'')}','${esc(a.task_id||'')}','${esc(a.node||'')}')">强制放行推进</button>`:''}
+          ${a.pane_id?`<button class="btn mini" onclick="showPane('${esc(a.pane_id)}')">打开终端</button>`:''}
+          ${a.task_id?`<button class="btn mini" onclick="openTaskDrawer('${esc(a.task_id)}')">任务详情</button>`:''}
+          <button class="btn mini" onclick="showOpsAnomaly(${JSON.stringify(a).replaceAll('"','&quot;')})">更多处理 ···</button>
+        </div>
+      </div>
+    `;
+  }).join(''):`
+    <div class="ops-empty-clean">
+      <div class="ops-empty-icon">🟢</div>
+      <div class="ops-empty-title">当前无异常阻断</div>
+      <div class="ops-empty-sub">全集群工作流与执行者健康运行中</div>
+    </div>
+  `;
+
+  const fleetHtml=fleet.length?`
+    <div class="fleet-table">
+      <div class="fleet-header">
+        <span>执行者</span>
+        <span>健康状态</span>
+        <span>当前任务</span>
+        <span>负载</span>
+        <span>耗时</span>
+      </div>
+      ${fleet.map(a=>`
+        <div class="fleet-row">
+          <strong>${esc(a.agent)}</strong>
+          <span class="${opsHealthClass(a.health)}">${esc(healthLabel(a.health))}</span>
+          <span class="task-id" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${a.current_task?`<a onclick="openTaskDrawer('${esc(a.current_task)}')">${esc(a.current_task)}</a>`:'—'}</span>
+          <span>负载 ${a.load}</span>
+          <span>${formatElapsed(a.runtime_seconds)}</span>
+        </div>
+      `).join('')}
+    </div>
+  `:'<div class="empty">暂无执行者数据</div>';
+
+  document.getElementById('tasks').innerHTML=`
+    <div class="ops-dashboard-grid">
+      <div class="ops-col-left">
+        <div class="ops-section-head">
+          <div class="ops-section-title">
+            <span>工作流 / 阶段节点</span>
+            <span class="ops-badge" id="opsWfCount">${cards.length}</span>
+          </div>
+          <div class="ops-filter-pills" role="tablist">
+            <button class="ops-filter-pill ${state.opsWfFilter==='all'?'active':''}" onclick="filterOpsWorkflows('all')">全部 (${cards.length})</button>
+            <button class="ops-filter-pill ${state.opsWfFilter==='active'?'active':''}" onclick="filterOpsWorkflows('active')">运行中 (${activeWfs})</button>
+            <button class="ops-filter-pill ${state.opsWfFilter==='attention'?'active':''}" onclick="filterOpsWorkflows('attention')">需关注 (${attentionWfs})</button>
+            <button class="ops-filter-pill ${state.opsWfFilter==='completed'?'active':''}" onclick="filterOpsWorkflows('completed')">已完成 (${completedWfs})</button>
+          </div>
+        </div>
+        <div id="opsWorkflowCards" class="ops-cards-container">
+          ${wfCardsHtml}
+        </div>
+      </div>
+      <div class="ops-col-right">
+        <div class="ops-panel-anomaly">
+          <div class="ops-section-head">
+            <div class="ops-section-title">
+              <span class="ops-anomaly-icon">🚨</span>
+              <span>异常与阻断中枢</span>
+              <span class="ops-badge ${anoms.length?'danger':''}" id="opsAnomalyCount">${anoms.length}</span>
+            </div>
+          </div>
+          <div id="opsAnomalyList" class="ops-anomaly-container">
+            ${anomsHtml}
+          </div>
+        </div>
+        <div class="ops-panel-fleet">
+          <div class="ops-section-head">
+            <div class="ops-section-title">
+              <span>执行者舰队</span>
+              <span class="ops-badge" id="opsFleetCount">${fleet.length}</span>
+            </div>
+          </div>
+          <div id="opsFleetList" class="fleet-table-wrap">
+            ${fleetHtml}
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  document.querySelectorAll('.ops-card').forEach((el)=>{
+    const wid=el.dataset.wfId;
+    if(wid){
+      el.style.cursor='pointer';
+      el.onclick=()=>openWorkflowFromOps(wid);
+    }
+  });
+
+  const alertsEl=document.getElementById('alerts');
+  if(alertsEl)alertsEl.innerHTML=anoms.length?anoms.map(a=>`<div class="alert-row"><div><strong>${esc(a.kind)}</strong><div class="task-meta">${esc(a.task_id||'')} · ${esc(a.agent||'')} · ${esc(a.last_event||'')}</div></div><button class="mini" onclick="showOpsAnomaly(${JSON.stringify(a).replaceAll('"','&quot;')})">处理</button></div>`).join(''):'<div class="empty">暂无异常</div>';
 }
-function showOpsAnomaly(a){openModal(a.kind,`<div class="task-meta">${esc(a.task_id||'')} · ${esc(a.agent||'')} · ${esc(a.node||'')}</div><div class="task-meta" style="margin:8px 0">最后事件：${esc(a.last_event||'—')}</div><div class="actions">${(a.actions||[]).map(x=>`<button class="mini" onclick="toast('建议操作：${esc(x)}')">${esc(x)}</button>`).join('')}</div><pre style="margin-top:16px">${esc(JSON.stringify(a.links||{},null,2))}</pre>`)}
+
+function showOpsAnomaly(a){
+  const wid=a.workflow_id||'';
+  const tid=a.task_id||'';
+  const node=a.node||'';
+  const actionsList=(a.actions||[]).map(x=>{
+    let clickFn="toast('建议操作："+esc(x)+"')";
+    if(x==='重试'||x==='自动修复'){
+      clickFn="closeModal();runOpsAnomalyAction('ops_repair','"+esc(wid)+"','"+esc(tid)+"','"+esc(node)+"')";
+    }else if(x==='打开 Pane'&&a.pane_id){
+      clickFn="closeModal();showPane('"+esc(a.pane_id)+"')";
+    }else if(x==='让总指挥处理'){
+      clickFn="closeModal();runOpsAnomalyAction('advance','"+esc(wid)+"','"+esc(tid)+"','"+esc(node)+"')";
+    }
+    return `<button class="btn mini primary" onclick="${clickFn}">${esc(x)}</button>`;
+  }).join('');
+
+  openModal(a.kind,`
+    <div class="task-meta">${esc(wid)} · ${esc(tid)} · ${esc(a.agent||'')} · ${esc(node)}</div>
+    <div class="task-meta" style="margin:8px 0;background:var(--bg-subtle);padding:8px;border-radius:4px">最后事件：${esc(a.last_event||'—')}</div>
+    <div style="font-size:12px;font-weight:600;margin:12px 0 8px">快捷处置动作：</div>
+    <div class="actions" style="display:flex;gap:8px;flex-wrap:wrap">
+      ${actionsList}
+      ${tid?`<button class="btn mini" onclick="closeModal();openTaskDrawer('${esc(tid)}')">查看任务详情</button>`:''}
+    </div>
+    <div style="font-size:12px;font-weight:600;margin:16px 0 8px">CLI 诊断与修复命令：</div>
+    <pre style="margin-top:4px;font-size:11.5px;max-height:160px;overflow:auto">${esc(JSON.stringify(a.links||{},null,2))}</pre>
+  `);
+}
 let dashTimer=null;
 function stopDashTimer(){if(dashTimer){clearInterval(dashTimer);dashTimer=null}}
 let dashLinearKeyboardIdx = 0;
@@ -5045,6 +5462,7 @@ function renderDashboard(){
 async function dashSignoff(taskId,wid,node,act){try{await api('/api/task/signoff',{method:'POST',body:JSON.stringify({task_id:taskId,workflow_id:wid,node:node,action:act,operator:'仪表板'})});await loadDashboard()}catch(e){toast('操作失败：'+e.message,true)}}
 async function dashExec(endpoint,payload){try{await api(endpoint||'/api/controller/execute-action',{method:'POST',body:JSON.stringify(payload||{})});await loadDashboard()}catch(e){toast('操作失败：'+e.message,true)}}
 async function openWorkflowFromOps(id){
+  stopOpsTimer();
   state.opsMode=false;state.dashMode=false;state.shellView='workbench';stopDashTimer();
   syncOpsUi();
   state.workflowId=id;
@@ -5060,6 +5478,7 @@ async function openWorkflowFromOps(id){
     state.opsMode=true;
     saveViewState();
     syncOpsUi();
+    startOpsTimer();
     await loadOpsCenter()
   }
 }
