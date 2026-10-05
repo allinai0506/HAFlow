@@ -340,6 +340,7 @@ def test_scenario_6_legitimate_force_pass_scoped_with_audit(ops_test_env):
         "type": "force_pass_advance",
         "workflow_id": "wf-ops-01",
         "gate_node_id": "test",
+        "task_id": "wf-ops-01-test",
         "expected_version": 1,
         "confirmed": True,
         "reason": "已知非核心偶发用例失败，主管核查允许放行",
@@ -375,6 +376,7 @@ def test_scenario_7_force_pass_succeeds_but_advance_fails_returns_partial(ops_te
         "type": "force_pass_advance",
         "workflow_id": "wf-ops-01",
         "gate_node_id": "test",
+        "task_id": "wf-ops-01-test",
         "expected_version": 1,
         "confirmed": True,
         "reason": "测试门禁人工豁免",
@@ -645,6 +647,7 @@ def test_scenario_13_write_boundary_version_conflict_rejection(ops_test_env):
         herdr_kernel.force_pass_gate(
             workflow_id="wf-ops-01",
             gate_node_id="implementation",
+            task_id="wf-ops-01-reworkable",
             note="合法人工作废",
             store=store,
             expected_version=999,  # actual is 1
@@ -913,7 +916,25 @@ def test_scenario_16_multitask_node_version_isolation_and_scope(ops_test_env):
             note="尝试全局单一版本放行不同版本节点",
             store=store,
         )
-    assert "存在多个不同版本的任务" in str(exc.value)
+    assert "禁止使用单一 expected_version" in str(exc.value)
+
+    # 3a. Even if all tasks in the node happen to have the same version (e.g. both version 3),
+    # a single expected_version without task_id MUST still be rejected to prevent task-set race bypass!
+    conn.execute("UPDATE tasks SET version = 3, stage_verdict = 'blocked' WHERE task_id = 'wf-ops-01-test-b'")
+    conn.commit()
+    with pytest.raises(RuntimeError) as exc_same_ver:
+        herdr_kernel.force_pass_gate(
+            workflow_id="wf-ops-01",
+            gate_node_id="test",
+            expected_version=3,
+            note="尝试用相同版本单一 expected_version 绕过任务集合校验",
+            store=store,
+        )
+    assert "禁止使用单一 expected_version" in str(exc_same_ver.value)
+
+    # Restore Task B to version 7
+    conn.execute("UPDATE tasks SET version = 7 WHERE task_id = 'wf-ops-01-test-b'")
+    conn.commit()
 
     # 3b. Partial expected_task_versions mapping (only {"wf-ops-01-test-a": 3} when tasks are A and B): MUST be rejected
     with pytest.raises(RuntimeError) as exc_partial:
@@ -1032,3 +1053,263 @@ def test_scenario_17_controller_action_snapshot_binding_and_rejection(ops_test_e
     assert "payload.expected_version=matchedTask.version" in src
     assert "payload.expected_pane_id=matchedTask.pane_id" in src
     assert "expVer=matchedTask.version" in src
+
+
+# 18. 会签接口 /api/task/signoff 防护与统一校验
+def test_scenario_18_task_signoff_force_pass_parity_and_protections(ops_test_env):
+    """Verify /api/task/signoff approve branch cannot bypass gate protections."""
+    from pathlib import Path
+    store = ops_test_env["store"]
+    t = store.get_task("wf-ops-01-test")
+    assert t["stage_verdict"] == "blocked"
+    cur_ver = t["version"]
+
+    # 18.1 Missing confirmed flag: REJECTED
+    with pytest.raises(RuntimeError) as exc:
+        c.api_task_signoff({
+            "workflow_id": "wf-ops-01",
+            "task_id": "wf-ops-01-test",
+            "node": "test",
+            "action": "approve",
+            "feedback": "合法非空会签原因",
+            "expected_version": cur_ver,
+            # confirmed omitted
+        })
+    assert "显式确认" in str(exc.value)
+
+    # 18.2 Empty feedback / reason: REJECTED
+    with pytest.raises(RuntimeError) as exc:
+        c.api_task_signoff({
+            "workflow_id": "wf-ops-01",
+            "task_id": "wf-ops-01-test",
+            "node": "test",
+            "action": "approve",
+            "confirmed": True,
+            "feedback": "",
+            "expected_version": cur_ver,
+        })
+    assert "非空原因" in str(exc.value)
+
+    # 18.3 Default canned text: REJECTED
+    with pytest.raises(RuntimeError) as exc:
+        c.api_task_signoff({
+            "workflow_id": "wf-ops-01",
+            "task_id": "wf-ops-01-test",
+            "node": "test",
+            "action": "approve",
+            "confirmed": True,
+            "feedback": "人工在协同工作舱会签放行",
+            "expected_version": cur_ver,
+        })
+    assert "系统默认文案" in str(exc.value)
+
+    # 18.4 Missing expected_version when targeting task: REJECTED
+    with pytest.raises(RuntimeError) as exc:
+        c.api_task_signoff({
+            "workflow_id": "wf-ops-01",
+            "task_id": "wf-ops-01-test",
+            "node": "test",
+            "action": "approve",
+            "confirmed": True,
+            "feedback": "产物人工核验通过",
+            # expected_version omitted
+        })
+    assert "expected_version" in str(exc.value)
+
+    # 18.5 Task node mismatch: REJECTED
+    with pytest.raises(RuntimeError) as exc:
+        c.api_task_signoff({
+            "workflow_id": "wf-ops-01",
+            "task_id": "wf-ops-01-test",
+            "node": "implementation",  # mismatched node
+            "action": "approve",
+            "confirmed": True,
+            "feedback": "产物人工核验通过",
+            "expected_version": cur_ver,
+        })
+    assert "任务节点错配" in str(exc.value)
+
+    # 18.6 Stale expected_version: REJECTED
+    with pytest.raises(RuntimeError) as exc:
+        c.api_task_signoff({
+            "workflow_id": "wf-ops-01",
+            "task_id": "wf-ops-01-test",
+            "node": "test",
+            "action": "approve",
+            "confirmed": True,
+            "feedback": "产物人工核验通过",
+            "expected_version": cur_ver + 99,
+        })
+    assert "任务版本已变化" in str(exc.value)
+
+    # Verify state was NOT modified by any rejected signoff requests
+    t_after = store.get_task("wf-ops-01-test")
+    assert t_after["stage_verdict"] == "blocked"
+    wf_after = store.get_workflow("wf-ops-01")
+    assert "test" not in (wf_after.get("gate_overrides") or {})
+
+    # 18.7 Fully valid signoff: SUCCEEDS
+    res = c.api_task_signoff({
+        "workflow_id": "wf-ops-01",
+        "task_id": "wf-ops-01-test",
+        "node": "test",
+        "action": "approve",
+        "confirmed": True,
+        "feedback": "经过专家组复核成果无误，特批放行",
+        "expected_version": cur_ver,
+        "operator": "lead_architect",
+    })
+    assert res.get("ok") is True
+    assert res.get("action") == "approve"
+    t_pass = store.get_task("wf-ops-01-test")
+    assert t_pass["stage_verdict"] == "pass"
+    assert "经过专家组复核成果无误" in t_pass["stage_verdict_note"]
+
+    # 18.8 Frontend template checks: submitSignoffDecision requires non-empty reason and passes snapshot
+    src = Path("console/herdr_factory_console.py").read_text(encoding="utf-8")
+    assert "submitSignoffDecision" in src
+    assert "body.confirmed=true" in src
+    assert "body.expected_version" in src
+    assert "openSignoffChamber" in src
+
+
+# 19. 较早任务失败、较新任务获准放行：多任务节点不得误判为完成
+def test_scenario_19_older_failed_task_not_masked_by_newer_task_gate_pass(ops_test_env):
+    """Verify older failed task preserves failed/attention status when only newer task is force-passed."""
+    store = ops_test_env["store"]
+    db_path = ops_test_env["db_path"]
+    from herdr import workflow_graph as herdr_workflow_graph
+    import sqlite3
+
+    conn = sqlite3.connect(db_path)
+    # Supersede original single test task
+    conn.execute("UPDATE tasks SET status = 'superseded' WHERE task_id = 'wf-ops-01-test'")
+    # Seed dual tasks under 'test':
+    # Task B: earlier created (t=100), status=failed, no verdict (stage_verdict=None)
+    # Task A: later created (t=200), status=blocked, stage_verdict=blocked
+    conn.execute("""
+        INSERT INTO tasks (task_id, workflow_id, node, stage, agent, status, stage_verdict, pane_id, version, created_at, updated_at)
+        VALUES ('wf-ops-01-test-b', 'wf-ops-01', 'test', 'test', 'auto', 'failed', NULL, 'pane-b', 1, 100, 100)
+    """)
+    conn.execute("""
+        INSERT INTO tasks (task_id, workflow_id, node, stage, agent, status, stage_verdict, pane_id, version, created_at, updated_at)
+        VALUES ('wf-ops-01-test-a', 'wf-ops-01', 'test', 'test', 'auto', 'blocked', 'blocked', 'pane-a', 1, 200, 200)
+    """)
+    conn.commit()
+
+    # Force pass ONLY Task A
+    res_a = c.api_kernel_force_pass({
+        "workflow_id": "wf-ops-01",
+        "gate_node_id": "test",
+        "task_id": "wf-ops-01-test-a",
+        "expected_version": 1,
+        "confirmed": True,
+        "reason": "仅豁免通过新任务 A",
+        "operator": "qa_lead",
+    })
+    assert res_a["ok"] is True
+    assert res_a["updated_tasks"] == ["wf-ops-01-test-a"]
+
+    # Verify Task A is pass, Task B is untouched and still failed
+    t_a = store.get_task("wf-ops-01-test-a")
+    t_b = store.get_task("wf-ops-01-test-b")
+    assert t_a["stage_verdict"] == "pass"
+    assert t_b["status"] == "failed"
+    assert t_b["stage_verdict"] in (None, "", "unknown")
+
+    # Read projection:
+    wf = store.get_workflow("wf-ops-01")
+    # stage_summary MUST NOT be 'cleaned', it MUST be 'failed'
+    sum_res = c.stage_summary([t_a, t_b], "test", workflow=wf)
+    assert sum_res["status"] == "failed", f"stage_summary must be failed, got {sum_res['status']}"
+
+    # workflow_graph_projection MUST NOT be 'completed', it MUST be 'failed' and require attention
+    wf_proj_payload = dict(wf.get("config") or {})
+    wf_proj_payload["workflow_id"] = "wf-ops-01"
+    wf_proj_payload["status"] = wf.get("status")
+    wf_proj_payload["gate_overrides"] = wf.get("gate_overrides")
+    graph = herdr_workflow_graph.workflow_graph_projection(wf_proj_payload, [t_a, t_b])
+    node = next(n for n in graph["nodes"] if n["id"] == "test")
+    assert node["status"] == "failed", f"node status must be failed, got {node['status']}"
+    assert node["has_attention"] is True
+
+    # Now also force pass Task B
+    res_b = c.api_kernel_force_pass({
+        "workflow_id": "wf-ops-01",
+        "gate_node_id": "test",
+        "task_id": "wf-ops-01-test-b",
+        "expected_version": 1,
+        "confirmed": True,
+        "reason": "补充核验豁免旧任务 B",
+        "operator": "qa_lead",
+    })
+    assert res_b["ok"] is True
+
+    # Now both tasks are passed: stage is cleaned and node is completed
+    t_b_passed = store.get_task("wf-ops-01-test-b")
+    wf_all = store.get_workflow("wf-ops-01")
+    assert c.stage_summary([t_a, t_b_passed], "test", workflow=wf_all)["status"] == "cleaned"
+    wf_proj_all = dict(wf_all.get("config") or {})
+    wf_proj_all["workflow_id"] = "wf-ops-01"
+    wf_proj_all["status"] = wf_all.get("status")
+    wf_proj_all["gate_overrides"] = wf_all.get("gate_overrides")
+    graph_all = herdr_workflow_graph.workflow_graph_projection(wf_proj_all, [t_a, t_b_passed])
+    node_all = next(n for n in graph_all["nodes"] if n["id"] == "test")
+    assert node_all["status"] == "completed"
+    conn.close()
+
+
+# 20. 节点级放行禁止使用单一 expected_version 绕过集合校验
+def test_scenario_20_node_level_force_pass_requires_task_mapping(ops_test_env):
+    """Verify node-level pass without task_id strictly rejects single expected_version."""
+    store = ops_test_env["store"]
+    db_path = ops_test_env["db_path"]
+    import sqlite3
+
+    conn = sqlite3.connect(db_path)
+    conn.execute("UPDATE tasks SET status = 'superseded' WHERE task_id = 'wf-ops-01-test'")
+    # Seed dual tasks under 'test' both at version 1
+    conn.execute("""
+        INSERT INTO tasks (task_id, workflow_id, node, stage, agent, status, stage_verdict, pane_id, version, created_at, updated_at)
+        VALUES ('wf-ops-01-test-x', 'wf-ops-01', 'test', 'test', 'auto', 'blocked', 'blocked', 'pane-x', 1, 100, 100)
+    """)
+    conn.execute("""
+        INSERT INTO tasks (task_id, workflow_id, node, stage, agent, status, stage_verdict, pane_id, version, created_at, updated_at)
+        VALUES ('wf-ops-01-test-y', 'wf-ops-01', 'test', 'test', 'auto', 'blocked', 'blocked', 'pane-y', 1, 100, 100)
+    """)
+    conn.commit()
+
+    # 20.1 Single expected_version without task_id rejected by execute-action
+    with pytest.raises(RuntimeError) as exc1:
+        c.api_controller_execute_action({
+            "type": "force_pass",
+            "workflow_id": "wf-ops-01",
+            "gate_node_id": "test",
+            "expected_version": 1,
+            "confirmed": True,
+            "reason": "尝试单一版本放行整节点",
+        })
+    assert "expected_task_versions" in str(exc1.value)
+
+    # 20.2 Single expected_version without task_id rejected by api_kernel_force_pass
+    with pytest.raises(RuntimeError) as exc2:
+        c.api_kernel_force_pass({
+            "workflow_id": "wf-ops-01",
+            "gate_node_id": "test",
+            "expected_version": 1,
+            "confirmed": True,
+            "reason": "尝试单一版本放行整节点",
+        })
+    assert "expected_task_versions" in str(exc2.value)
+
+    # 20.3 Full expected_task_versions mapping SUCCEEDS
+    res = c.api_kernel_force_pass({
+        "workflow_id": "wf-ops-01",
+        "gate_node_id": "test",
+        "expected_task_versions": {"wf-ops-01-test-x": 1, "wf-ops-01-test-y": 1},
+        "confirmed": True,
+        "reason": "提供完整映射放行整节点",
+    })
+    assert res["ok"] is True
+    assert set(res["updated_tasks"]) == {"wf-ops-01-test-x", "wf-ops-01-test-y"}
+    conn.close()

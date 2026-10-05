@@ -130,6 +130,7 @@ def test_api_controller_execute_action_force_pass_advance(console_actions_env):
     payload = {
         "type": "force_pass_advance",
         "workflow_id": "wf-test-01",
+        "task_id": "wf-test-01-test",
         "stage": "test",
         "gate_node_id": "test",
         "expected_version": 1,

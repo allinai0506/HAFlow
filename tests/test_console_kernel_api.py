@@ -121,9 +121,21 @@ def test_api_kernel_force_pass(console_kernel_env):
         c.api_kernel_force_pass({"workflow_id": wid, "gate_node_id": "gate1", "note": "Emergency override", "confirmed": True})
     assert "版本快照保护字段" in str(exc.value)
 
+    # Node-level pass with single expected_version must be rejected
+    with pytest.raises(RuntimeError) as exc_node:
+        c.api_kernel_force_pass({
+            "workflow_id": wid,
+            "gate_node_id": "gate1",
+            "note": "Emergency override",
+            "confirmed": True,
+            "expected_version": 1,
+        })
+    assert "expected_task_versions" in str(exc_node.value)
+
     res = c.api_kernel_force_pass({
         "workflow_id": wid,
         "gate_node_id": "gate1",
+        "task_id": "t_gate",
         "note": "Emergency override",
         "confirmed": True,
         "expected_version": 1,

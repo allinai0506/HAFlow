@@ -416,6 +416,11 @@ def force_pass_gate(
                 )
             tasks_to_update = [target_task]
         else:
+            if expected_version is not None and matching_tasks:
+                raise RuntimeError(
+                    f"节点级放行禁止使用单一 expected_version 进行版本保护，当前节点存在有效任务 {[t.get('task_id') for t in matching_tasks]}，"
+                    f"必须使用 expected_task_versions 映射进行完整任务集合校验，或指定具体的 task_id 进行单任务放行"
+                )
             if expected_task_versions is not None:
                 matching_tids = {t.get("task_id") for t in matching_tasks}
                 provided_tids = set(expected_task_versions.keys())
@@ -431,13 +436,6 @@ def force_pass_gate(
                     if cur_v != exp_v:
                         raise RuntimeError(
                             f"任务 {tid} 版本已在写入边界发生变化（期望版本 {exp_v}，当前版本 {cur_v}），写入已拒绝，请刷新页面"
-                        )
-            elif expected_version is not None:
-                for t in matching_tasks:
-                    cur_ver = t.get("version")
-                    if cur_ver != expected_version:
-                        raise RuntimeError(
-                            f"任务版本已在写入边界发生变化（期望版本 {expected_version}，当前版本 {cur_ver}），写入已拒绝，请刷新页面"
                         )
             tasks_to_update = matching_tasks
 
