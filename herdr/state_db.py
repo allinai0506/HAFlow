@@ -377,6 +377,9 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
         );
     """)
 
+    from .recovery_store import ensure_schema as ensure_recovery_schema
+    ensure_recovery_schema(conn)
+
     conn.execute("""
         CREATE TABLE IF NOT EXISTS tasks (
             task_id TEXT PRIMARY KEY,
@@ -1575,20 +1578,10 @@ def save_task(
     conn: Optional[sqlite3.Connection] = None,
 ) -> None:
     """Upsert a task record."""
-    should_close = False
-    if conn is None:
-        conn = get_db_connection(db_path)
-        should_close = True
-
     tid = task_dict.get("task_id")
     if not tid:
         raise ValueError("task_id is required")
     wid = task_dict.get("workflow_id") or "default"
-
-    # Auto-ensure parent workflow exists to prevent foreign key violation
-    cur_wf = conn.execute("SELECT 1 FROM workflows WHERE workflow_id = ?", (wid,))
-    if not cur_wf.fetchone():
-        save_workflow({"workflow_id": wid, "title": wid, "status": "pending"}, db_path, conn=conn)
 
     now = time.time()
     node = task_dict.get("node") or task_dict.get("stage", "")
@@ -1609,7 +1602,15 @@ def save_task(
     }}
     payload_json = json.dumps(payload, ensure_ascii=False)
 
+    should_close = conn is None
+    if should_close:
+        conn = get_db_connection(db_path)
     try:
+        if should_close:
+            conn.execute('BEGIN IMMEDIATE')
+        # Parent creation and task/obligation writes share this transaction.
+        if not conn.execute("SELECT 1 FROM workflows WHERE workflow_id = ?", (wid,)).fetchone():
+            save_workflow({"workflow_id": wid, "title": wid, "status": "pending"}, db_path, conn=conn)
         conn.execute("""
             INSERT INTO tasks (task_id, workflow_id, node, stage, agent, status, stage_verdict, stage_verdict_note, pane_id, goal, blocker, payload_json, created_at, updated_at, version)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
@@ -1628,6 +1629,10 @@ def save_task(
                 updated_at=excluded.updated_at,
                 version=COALESCE(tasks.version, 0) + 1;
         """, (tid, wid, node, stage, agent, status, verdict, verdict_note, pane_id, goal, blocker, payload_json, created_at, now))
+        from .recovery_store import ensure_for_workflow
+        ensure_for_workflow(conn, wid, now=now)
+        if should_close:
+            conn.execute('COMMIT')
         # Outcome choke point (write path only): a task reaching a terminal
         # status may now be settleable. Best-effort and fail-open; the
         # canonical resolver lives in herdr.execution_outcome.
@@ -1644,6 +1649,10 @@ def save_task(
                 try_autofinalize_for_task(str(tid), db_path=db_path)
             except Exception:
                 pass
+    except BaseException:
+        if should_close and conn.in_transaction:
+            conn.execute('ROLLBACK')
+        raise
     finally:
         if should_close:
             conn.close()
