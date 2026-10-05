@@ -123,7 +123,7 @@ class TestStageSummarySuperseded(unittest.TestCase):
     def test_retry_success_after_failure_stage_cleaned(self):
         wf = {"status": "running"}
         tasks = [
-            {"task_id": "t1", "stage": "implementation", "status": "failed", "created_at": 100},
+            {"task_id": "t1", "stage": "implementation", "status": "failed", "superseded_by": "t2", "created_at": 100},
             {"task_id": "t2", "stage": "implementation", "status": "completed", "created_at": 200},
         ]
         summary = self.module.stage_summary(tasks, "implementation", workflow=wf)

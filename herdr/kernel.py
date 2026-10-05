@@ -416,9 +416,9 @@ def force_pass_gate(
                 )
             tasks_to_update = [target_task]
         else:
-            if expected_version is not None and matching_tasks:
+            if expected_version is not None:
                 raise RuntimeError(
-                    f"节点级放行禁止使用单一 expected_version 进行版本保护，当前节点存在有效任务 {[t.get('task_id') for t in matching_tasks]}，"
+                    f"节点级放行禁止使用单一 expected_version 进行版本保护，当前节点有效任务为 {[t.get('task_id') for t in matching_tasks]}，"
                     f"必须使用 expected_task_versions 映射进行完整任务集合校验，或指定具体的 task_id 进行单任务放行"
                 )
             if expected_task_versions is not None:

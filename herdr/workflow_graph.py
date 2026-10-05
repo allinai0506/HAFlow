@@ -63,7 +63,7 @@ def aggregate_node_status(node_tasks: List[Dict[str, Any]]) -> str:
     latest_v = str(latest.get("stage_verdict") or "")
 
     unexempted_failed = any(s == "failed" and v != "pass" for s, v in zip(statuses, verdicts))
-    if unexempted_failed and (any(v == "pass" for v in verdicts) or latest_st not in COMPLETED_LIKE):
+    if unexempted_failed:
         return "failed"
 
     if latest_st in COMPLETED_LIKE:

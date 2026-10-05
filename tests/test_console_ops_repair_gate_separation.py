@@ -1313,3 +1313,147 @@ def test_scenario_20_node_level_force_pass_requires_task_mapping(ops_test_env):
     assert res["ok"] is True
     assert set(res["updated_tasks"]) == {"wf-ops-01-test-x", "wf-ops-01-test-y"}
     conn.close()
+
+
+# 21. 空节点预检后新增任务在事务内被拒绝并零副作用回滚
+def test_scenario_21_empty_node_interleaved_task_creation_rejected(ops_test_env):
+    """Verify empty node force pass requires expected_task_versions={} and rejects interleaved task creation."""
+    store = ops_test_env["store"]
+    db_path = ops_test_env["db_path"]
+    import sqlite3
+
+    conn = sqlite3.connect(db_path)
+    # Ensure test node exists in workflow config and all previous tasks are marked superseded (so matching_tasks is empty)
+    conn.execute("UPDATE tasks SET status = 'superseded' WHERE workflow_id = 'wf-ops-01' AND (node = 'test' OR stage = 'test')")
+    conn.commit()
+
+    # 21.1 Missing expected_task_versions on empty node must be rejected at pre-validation
+    with pytest.raises(RuntimeError) as exc_missing:
+        c.api_kernel_force_pass({
+            "workflow_id": "wf-ops-01",
+            "gate_node_id": "test",
+            "confirmed": True,
+            "reason": "未传快照试图放行空节点",
+        })
+    assert "expected_task_versions" in str(exc_missing.value)
+
+    # 21.2 Explicit expected_task_versions={} passes pre-validation
+    gate, reason, op = c._validate_force_pass_params({
+        "workflow_id": "wf-ops-01",
+        "gate_node_id": "test",
+        "expected_task_versions": {},
+        "confirmed": True,
+        "reason": "确认此时节点无任务",
+    }, "wf-ops-01", wf=store.get_workflow("wf-ops-01"))
+    assert gate == "test"
+
+    # 21.3 Simulate interleaving: another connection creates task B on node test before transaction starts
+    conn.execute("""
+        INSERT INTO tasks (task_id, workflow_id, node, stage, agent, status, stage_verdict, pane_id, version, created_at, updated_at)
+        VALUES ('wf-ops-01-test-interleaved', 'wf-ops-01', 'test', 'test', 'auto', 'blocked', 'blocked', 'pane-b', 1, 200, 200)
+    """)
+    conn.commit()
+
+    # 21.4 Old pre-validated request with expected_task_versions={} executes
+    # Within BEGIN IMMEDIATE transaction, kernel detects task set has expanded from {} to {'wf-ops-01-test-interleaved'} and REJECTS
+    from herdr import kernel as herdr_kernel
+    with pytest.raises(RuntimeError) as exc_race:
+        herdr_kernel.force_pass_gate(
+            "wf-ops-01",
+            gate_node_id="test",
+            note=reason,
+            operator="human",
+            expected_task_versions={},
+        )
+    assert "版本映射不完整或不匹配" in str(exc_race.value)
+
+    # 21.5 State verification: Task B must remain blocked, NO gate_override for test
+    task_b = store.get_task("wf-ops-01-test-interleaved")
+    assert task_b["stage_verdict"] == "blocked"
+    assert task_b["version"] == 1
+    wf_after = store.get_workflow("wf-ops-01")
+    overrides = wf_after.get("gate_overrides") or {}
+    assert "test" not in overrides
+
+    # 21.6 Refreshed request with expected_task_versions={"wf-ops-01-test-interleaved": 1} succeeds
+    res_valid = c.api_kernel_force_pass({
+        "workflow_id": "wf-ops-01",
+        "gate_node_id": "test",
+        "expected_task_versions": {"wf-ops-01-test-interleaved": 1},
+        "confirmed": True,
+        "reason": "刷新页面后按实际任务集合放行",
+    })
+    assert res_valid["ok"] is True
+    assert res_valid["updated_tasks"] == ["wf-ops-01-test-interleaved"]
+    task_b_passed = store.get_task("wf-ops-01-test-interleaved")
+    assert task_b_passed["stage_verdict"] == "pass"
+    conn.close()
+
+
+# 22. 较早任务失败独立阻止节点完成，不被较晚任务的 completed/integrated 掩盖
+def test_scenario_22_failed_task_not_masked_by_newer_completed_or_integrated_task(ops_test_env):
+    """Verify unreplaced, unexempted failed tasks independently prevent node from completing."""
+    from herdr import workflow_graph as herdr_workflow_graph
+    store = ops_test_env["store"]
+
+    # B: older task, failed, unexempted (stage_verdict != pass), unreplaced (status != superseded)
+    t_b_failed = {
+        "task_id": "t-b-older",
+        "workflow_id": "wf-ops-01",
+        "node": "implementation",
+        "stage": "implementation",
+        "status": "failed",
+        "stage_verdict": "failed",
+        "created_at": 100,
+    }
+
+    # Case 1: Newer task A has stage_verdict='pass'
+    t_a_pass = {
+        "task_id": "t-a-newer",
+        "workflow_id": "wf-ops-01",
+        "node": "implementation",
+        "stage": "implementation",
+        "status": "completed",
+        "stage_verdict": "pass",
+        "created_at": 200,
+    }
+    assert c.stage_summary([t_b_failed, t_a_pass], "implementation")["status"] == "failed"
+    assert herdr_workflow_graph.aggregate_node_status([t_b_failed, t_a_pass]) == "failed"
+
+    # Case 2: Newer task A is completed, no verdict
+    t_a_completed = {
+        "task_id": "t-a-newer",
+        "workflow_id": "wf-ops-01",
+        "node": "implementation",
+        "stage": "implementation",
+        "status": "completed",
+        "stage_verdict": "",
+        "created_at": 200,
+    }
+    assert c.stage_summary([t_b_failed, t_a_completed], "implementation")["status"] == "failed"
+    assert herdr_workflow_graph.aggregate_node_status([t_b_failed, t_a_completed]) == "failed"
+
+    # Case 3: Newer task A is integrated, no verdict
+    t_a_integrated = {
+        "task_id": "t-a-newer",
+        "workflow_id": "wf-ops-01",
+        "node": "implementation",
+        "stage": "implementation",
+        "status": "integrated",
+        "stage_verdict": "",
+        "created_at": 200,
+    }
+    assert c.stage_summary([t_b_failed, t_a_integrated], "implementation")["status"] == "failed"
+    assert herdr_workflow_graph.aggregate_node_status([t_b_failed, t_a_integrated]) == "failed"
+
+    # Contrast 1: If B was superseded (replaced by retry), B is excluded from live
+    t_b_superseded = {**t_b_failed, "status": "superseded", "superseded_by": "t-a-newer"}
+    assert c.stage_summary([t_b_superseded, t_a_completed], "implementation")["status"] == "cleaned"
+    assert herdr_workflow_graph.aggregate_node_status([t_b_superseded, t_a_completed]) == "completed"
+    assert c.stage_summary([t_b_superseded, t_a_integrated], "implementation")["status"] == "cleaned"
+    assert herdr_workflow_graph.aggregate_node_status([t_b_superseded, t_a_integrated]) == "completed"
+
+    # Contrast 2: If B was explicitly force-passed (stage_verdict='pass'), both are passed
+    t_b_exempted = {**t_b_failed, "stage_verdict": "pass"}
+    assert c.stage_summary([t_b_exempted, t_a_completed], "implementation")["status"] == "cleaned"
+    assert herdr_workflow_graph.aggregate_node_status([t_b_exempted, t_a_completed]) == "completed"

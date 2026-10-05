@@ -214,7 +214,7 @@ def stage_summary(ts,key,workflow=None):
             latest_st=str(latest.get('status') or '')
             latest_v=str(latest.get('stage_verdict') or '')
             unexempted_failed = any(s == 'failed' and v != 'pass' for s, v in zip(ss, verdicts))
-            if unexempted_failed and (any(v == 'pass' for v in verdicts) or latest_st not in {'completed','committed','integrated','cleanup_ready','cleaned'}):
+            if unexempted_failed:
                 st = 'failed'
             elif latest_st in {'completed','committed','integrated','cleanup_ready','cleaned'}:
                 st='cleaned'
@@ -710,10 +710,12 @@ def _validate_force_pass_params(payload, wid, wf=None, task=None):
     if not matching_tasks and gate not in wf_cfg_node_ids:
         raise RuntimeError(f'目标门禁节点 {gate} 不属于工作流 {wid}')
 
-    if not task and matching_tasks:
+    if not task:
+        if payload.get('expected_version') is not None:
+            raise RuntimeError('节点级放行禁止使用单一 expected_version，必须提供 expected_task_versions 映射（无任务节点应为 {}），请刷新页面')
         exp_task_vers = payload.get('expected_task_versions')
-        if not isinstance(exp_task_vers, dict) or not exp_task_vers:
-            raise RuntimeError('节点级放行请求缺少任务版本快照保护字段（expected_task_versions），必须提供覆盖该节点当前所有有效任务的版本快照映射，禁止使用单一 expected_version 隐式放行全节点任务集合，请刷新页面')
+        if not isinstance(exp_task_vers, dict):
+            raise RuntimeError('节点级放行请求缺少任务版本快照保护字段（expected_task_versions），必须显式绑定任务版本快照（无任务节点必须提供空映射 {}），禁止无快照放行，请刷新页面')
         matching_tids = {t.get('task_id') for t in matching_tasks}
         provided_tids = set(exp_task_vers.keys())
         if matching_tids != provided_tids:
@@ -7417,13 +7419,23 @@ function forcePassTask(wid,nodeId,options){
         };
         if(tid){
           body.task_id=tid;
-        }
-        if(expVer!==''&&expVer!==undefined&&expVer!==null){
-          body.expected_version=parseInt(expVer,10);
-        }
-        if(expPane){
-          body.expected_pane_id=expPane;
-          body.pane_id=expPane;
+          if(expVer!==''&&expVer!==undefined&&expVer!==null){
+            body.expected_version=parseInt(expVer,10);
+          }
+          if(expPane){
+            body.expected_pane_id=expPane;
+            body.pane_id=expPane;
+          }
+        }else{
+          const allTasks=(state.workflow&&state.workflow.tasks)||[];
+          const nodeTasks=allTasks.filter(t=>(t.node===nodeId||t.stage===nodeId)&&t.status!=='superseded');
+          const taskMap={};
+          for(const t of nodeTasks){
+            if(t&&t.task_id){
+              taskMap[t.task_id]=t.version!==undefined&&t.version!==null?t.version:1;
+            }
+          }
+          body.expected_task_versions=taskMap;
         }
         await api('/api/kernel/force-pass',{
           method:'POST',

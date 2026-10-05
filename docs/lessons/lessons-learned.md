@@ -6014,6 +6014,8 @@ Nexus CoW integration分支复用Agent白名单、branch/worktree全部context�
 | 会签批准直接调用放行内核绕过防护 | 业务审批入口与底层内核调用未统一接入门禁前置校验，导致审批可以被作为绕过通道 | 会签批准必须接入统一放行校验网关，要求明确确认、非空反馈与快照版本 |
 | 多任务节点以最新任务状态代表全节点完成 | 较早失败且未被替换/豁免的任务被最新任务的通过或完成掩盖，产生虚假完成幻象 | 状态聚合中严禁以 `latest_v == 'pass'` 穿透掩盖失败；未豁免的失败任务必须如实保留 failed |
 | 节点级放行允许单一版本号代表任务集合 | 单一版本号无法证明任务集合未被并发增删或替换，相同版本数值会引发并发越权覆盖 | 存在有效任务的节点级放行必须提供完整的 `expected_task_versions` 映射严格核验所有任务 |
+| 空节点放行未绑定空快照引发并发新增越权放行 | 预检认为节点无任务而跳过快照要求，写入事务前并发插入的任务会在未被确认的情况下被放行 | 节点级放行必须显式绑定任务快照映射（无任务时传 `{}`），并在 SQLite 事务内严格比对实际任务集合，集合不一致立即完整回滚 |
+| 较新任务完成/集成掩盖较早任务失败 | 多任务节点若以最新任务处于 completed/integrated 态兜底判定全节点完成，会掩盖未经替换或豁免的早期失败 | 状态聚合中未被替换（未置 `superseded` / `superseded_by`）、未被明确豁免的失败任务，独立阻断节点判定完成，严禁基于时间戳排除 |
 
 ### 操作规范
 1. **解耦通道**：彻底删除 `ops_repair` / `retry` 中的 `force_pass_gate` 与 `manual_advance` 兜底降级；仅按当前状态确定并执行 `rework` / `redrive`，无安全动作明确返回拒绝；
@@ -6021,10 +6023,11 @@ Nexus CoW integration分支复用Agent白名单、branch/worktree全部context�
 3. **前置强校验**：核验工作流与任务存在性、拒绝 `status == 'superseded'` 任务、核验 `req_node == task_node`、核验版本与 pane 实例，错配一律拒绝；
 4. **人工放行契约**：要求 `confirmed=True`、非空且非默认模版的原因说明、明确归属于该工作流的门禁节点；推进失败如实返回 `partial: True` 与 `advance_error`；
 5. **前端交互加固**：卡片放行按钮绑定二次确认弹窗，强制输入原因，取消不发请求；引入 `_opsActionBusy` 信号量防止连击重复提交；会签操作舱支持显式确认与非空反馈；
-6. **聚合与映射闭环**：多任务节点聚合移除 `latest_v == 'pass'` 兜底，保留未豁免失败任务的阻断；节点级放行在有匹配任务时严格强制 `expected_task_versions` 任务映射核验。
+6. **聚合与映射闭环**：多任务节点聚合消除以最新任务 completed/integrated/pass 掩盖未豁免失败任务的逻辑，历史任务必须通过显式替换（`status == 'superseded'` 或 `superseded_by`）排除；节点级放行强制要求 `expected_task_versions: dict`（无任务节点必须显式提供 `{}`），并在 SQLite 强事务内严格校验实际任务集合与提交映射完全一致，出现并发新增或替换时坚决回滚。
 
 ### 验证命令 / 关联证据
-- 新增专项测试套件：`pytest -v tests/test_console_ops_repair_gate_separation.py`（20/20 passed，涵盖单节点/多任务/并发竞态/会签全流程/节点映射全场景）；
-- 控制台与工作流回归测试：`pytest -q tests/test_workflow*.py tests/test_console*.py`（448 passed, 79 subtests passed in 44.21s）；
+- 新增专项测试套件：`pytest -v tests/test_console_ops_repair_gate_separation.py`（22/22 passed，涵盖单节点/多任务/并发竞态/会签全流程/节点映射全场景/空节点交错快照拒绝/较新完成任务防失败掩盖）；
+- 阶段摘要回归测试：`pytest -v tests/test_console_stage_summary.py`（11 passed, 3 subtests passed）；
+- 控制台与工作流回归测试：`pytest -q tests/test_workflow*.py tests/test_console*.py`（450 passed, 79 subtests passed in 43.06s）；
 - 全项目 Python 语法与字节码编译：`python3 -m compileall -q herdr services bin tests console`（clean compile）；
 - 代码格式检查：`git diff --check`（clean diff）。
