@@ -105,11 +105,22 @@ def test_api_controller_execute_action_launch(console_actions_env):
 
 
 def test_api_controller_execute_action_force_pass_advance(console_actions_env):
+    # Missing confirmation must be refused
+    with pytest.raises(RuntimeError):
+        c.api_controller_execute_action({
+            "type": "force_pass_advance",
+            "workflow_id": "wf-test-01",
+            "stage": "test",
+            "gate_node_id": "test",
+        })
+
     payload = {
         "type": "force_pass_advance",
         "workflow_id": "wf-test-01",
         "stage": "test",
         "gate_node_id": "test",
+        "confirmed": True,
+        "reason": "人工在控制台审核确认通过",
     }
     with patch.object(c.herdr_kernel, "force_pass_gate") as mock_gate, patch.object(c, "manual_advance") as mock_adv:
         mock_adv.return_value = {"ok": True, "advanced": True}
