@@ -381,60 +381,100 @@ def force_pass_gate(
     operator: str = "human",
     store: Optional[StateStore] = None,
     expected_version: Optional[int] = None,
+    task_id: Optional[str] = None,
+    expected_pane_id: Optional[str] = None,
+    expected_task_versions: Optional[Dict[str, int]] = None,
 ) -> Dict[str, Any]:
     """Forcibly mark a gate node verdict as passed/approved with an audit note."""
     s = _get_store(store)
-    tasks = s.list_tasks(workflow_id=workflow_id)
-
-    matching_tasks = [
-        t for t in tasks
-        if gate_node_id in (t.get("node"), t.get("stage")) and t.get("status") != "superseded"
-    ]
-
-    # Write-boundary verification: check expected_version against matching tasks before any write
-    if expected_version is not None:
-        for t in matching_tasks:
-            cur_ver = t.get("version")
-            if cur_ver != expected_version:
-                raise RuntimeError(
-                    f"任务版本已在写入边界发生变化（期望版本 {expected_version}，当前版本 {cur_ver}），写入已拒绝，请刷新页面"
-                )
-
-    updated_tasks = []
-    for task in matching_tasks:
-        tid = task.get("task_id")
-        update_task_metadata(
-            task_id=tid,
-            updates={
-                "stage_verdict": "pass",
-                "stage_verdict_note": f"[FORCE PASS by {operator}] {note}",
-            },
-            store=s,
-        )
-        updated_tasks.append(tid)
-
-    # Also record in workflow entry gate_overrides
-    wf_entry = s.get_workflow(workflow_id)
-    if wf_entry:
-        overrides = dict(wf_entry.get("gate_overrides") or {})
-        overrides[gate_node_id] = {
-            "verdict": "pass",
-            "note": note,
-            "operator": operator,
-            "timestamp": time.time(),
-        }
-        update_workflow_metadata(
+    if hasattr(s, "force_pass_gate"):
+        res = s.force_pass_gate(
             workflow_id=workflow_id,
-            updates={"gate_overrides": overrides},
-            store=s,
+            gate_node_id=gate_node_id,
+            note=note,
+            operator=operator,
+            expected_version=expected_version,
+            task_id=task_id,
+            expected_pane_id=expected_pane_id,
+            expected_task_versions=expected_task_versions,
         )
+    else:
+        tasks = s.list_tasks(workflow_id=workflow_id)
+        matching_tasks = [
+            t for t in tasks
+            if gate_node_id in (t.get("node"), t.get("stage")) and t.get("status") != "superseded"
+        ]
 
-    return {
-        "ok": True,
-        "workflow_id": workflow_id,
-        "gate_node_id": gate_node_id,
-        "updated_tasks": updated_tasks,
-    }
+        tasks_to_update = []
+        if task_id:
+            target_task = next((t for t in matching_tasks if t.get("task_id") == task_id), None)
+            if not target_task:
+                raise RuntimeError(f"未找到任务 {task_id}（工作流 {workflow_id}）")
+            if expected_version is not None and target_task.get("version") != expected_version:
+                raise RuntimeError(
+                    f"任务版本已在写入边界发生变化（期望版本 {expected_version}，当前版本 {target_task.get('version')}），写入已拒绝，请刷新页面"
+                )
+            tasks_to_update = [target_task]
+        else:
+            if expected_task_versions is not None:
+                for t in matching_tasks:
+                    tid = t.get("task_id")
+                    if tid in expected_task_versions:
+                        exp_v = expected_task_versions[tid]
+                        cur_v = t.get("version")
+                        if cur_v != exp_v:
+                            raise RuntimeError(
+                                f"任务 {tid} 版本已在写入边界发生变化（期望版本 {exp_v}，当前版本 {cur_v}），写入已拒绝，请刷新页面"
+                            )
+            elif expected_version is not None:
+                for t in matching_tasks:
+                    cur_ver = t.get("version")
+                    if cur_ver != expected_version:
+                        raise RuntimeError(
+                            f"任务版本已在写入边界发生变化（期望版本 {expected_version}，当前版本 {cur_ver}），写入已拒绝，请刷新页面"
+                        )
+            tasks_to_update = matching_tasks
+
+        updated_tasks = []
+        for task in tasks_to_update:
+            tid = task.get("task_id")
+            update_task_metadata(
+                task_id=tid,
+                updates={
+                    "stage_verdict": "pass",
+                    "stage_verdict_note": f"[FORCE PASS by {operator}] {note}",
+                },
+                store=s,
+            )
+            updated_tasks.append(tid)
+
+        wf_entry = s.get_workflow(workflow_id)
+        if wf_entry:
+            overrides = dict(wf_entry.get("gate_overrides") or {})
+            overrides[gate_node_id] = {
+                "verdict": "pass",
+                "note": note,
+                "operator": operator,
+                "timestamp": time.time(),
+            }
+            if task_id:
+                overrides[gate_node_id]["task_id"] = task_id
+            update_workflow_metadata(
+                workflow_id=workflow_id,
+                updates={"gate_overrides": overrides},
+                store=s,
+            )
+
+        res = {
+            "ok": True,
+            "workflow_id": workflow_id,
+            "gate_node_id": gate_node_id,
+            "updated_tasks": updated_tasks,
+        }
+
+    sync_tasks_projection(store=s)
+    sync_workflows_projection(store=s)
+    return res
 
 
 # ============================================================

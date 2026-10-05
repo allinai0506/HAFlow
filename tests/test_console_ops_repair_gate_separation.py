@@ -695,3 +695,234 @@ def test_scenario_14_http_route_kernel_force_pass_integration(ops_test_env):
     finally:
         server.shutdown()
         server.server_close()
+
+
+# 15. 并发修改竞态拦截与原子事务保护：同一事务内核验版本、写放行与更新工作流
+def test_scenario_15_concurrent_modification_race_rejection(ops_test_env):
+    """Verify atomic SQLite transaction protection against concurrent modifications."""
+    store = ops_test_env["store"]
+    db_path = ops_test_env["db_path"]
+    from herdr import kernel as herdr_kernel
+    import sqlite3
+
+    # Ensure task is at version 3 with pane 'run-a'
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "UPDATE tasks SET version = 3, pane_id = 'run-a', stage_verdict = 'blocked' WHERE task_id = 'wf-ops-01-test'"
+    )
+    conn.commit()
+
+    # Another concurrent writer updates task to version 4 and pane 'run-b' before or during execution
+    conn2 = sqlite3.connect(db_path)
+    conn2.execute(
+        "UPDATE tasks SET version = 4, pane_id = 'run-b' WHERE task_id = 'wf-ops-01-test'"
+    )
+    conn2.commit()
+    conn2.close()
+
+    # Stale attempt with expected_version=3, expected_pane_id='run-a' MUST be rejected
+    with pytest.raises(RuntimeError) as exc:
+        herdr_kernel.force_pass_gate(
+            workflow_id="wf-ops-01",
+            gate_node_id="test",
+            task_id="wf-ops-01-test",
+            expected_version=3,
+            expected_pane_id="run-a",
+            note="竞态测试放行",
+            store=store,
+        )
+    assert "已变化" in str(exc.value)
+
+    # Verify zero side-effects in SQLite: task verdict not pass, gate_overrides not written
+    cur = conn.execute("SELECT stage_verdict, version FROM tasks WHERE task_id = 'wf-ops-01-test'")
+    row = cur.fetchone()
+    assert row[0] == "blocked"
+    assert row[1] == 4
+
+    cur_wf = conn.execute("SELECT metadata_json FROM workflows WHERE workflow_id = 'wf-ops-01'")
+    meta = json.loads(cur_wf.fetchone()[0] or "{}")
+    assert not (meta.get("gate_overrides") or {})
+
+    # Now with fresh snapshot (version=4, pane='run-b'), it succeeds atomically
+    res = herdr_kernel.force_pass_gate(
+        workflow_id="wf-ops-01",
+        gate_node_id="test",
+        task_id="wf-ops-01-test",
+        expected_version=4,
+        expected_pane_id="run-b",
+        note="最新快照放行",
+        store=store,
+    )
+    assert res["ok"] is True
+    assert "wf-ops-01-test" in res["updated_tasks"]
+
+    cur = conn.execute("SELECT stage_verdict, version FROM tasks WHERE task_id = 'wf-ops-01-test'")
+    row = cur.fetchone()
+    assert row[0] == "pass"
+    assert row[1] == 5  # incremented by 1
+
+    cur_wf = conn.execute("SELECT metadata_json FROM workflows WHERE workflow_id = 'wf-ops-01'")
+    meta = json.loads(cur_wf.fetchone()[0] or "{}")
+    assert "test" in (meta.get("gate_overrides") or {})
+    conn.close()
+
+
+# 16. 多任务节点版本独立性与放行范围界定
+def test_scenario_16_multitask_node_version_isolation_and_scope(ops_test_env):
+    """Verify nodes with multiple tasks of differing versions can be passed per-task without conflict."""
+    store = ops_test_env["store"]
+    db_path = ops_test_env["db_path"]
+    from herdr import kernel as herdr_kernel
+    import sqlite3
+
+    conn = sqlite3.connect(db_path)
+    # Seed two tasks under node 'test': Task A at version 3, Task B at version 7
+    conn.execute("""
+        INSERT INTO tasks (task_id, workflow_id, node, stage, agent, status, stage_verdict, pane_id, version, created_at, updated_at)
+        VALUES ('wf-ops-01-test-a', 'wf-ops-01', 'test', 'test', 'auto', 'completed', 'blocked', 'pane-a', 3, 1000, 1000)
+    """)
+    conn.execute("""
+        INSERT INTO tasks (task_id, workflow_id, node, stage, agent, status, stage_verdict, pane_id, version, created_at, updated_at)
+        VALUES ('wf-ops-01-test-b', 'wf-ops-01', 'test', 'test', 'auto', 'completed', 'blocked', 'pane-b', 7, 1000, 1000)
+    """)
+    conn.commit()
+
+    # 1. Target Task A with expected_version=3: must SUCCEED, not fail because Task B is version 7
+    res_a = herdr_kernel.force_pass_gate(
+        workflow_id="wf-ops-01",
+        gate_node_id="test",
+        task_id="wf-ops-01-test-a",
+        expected_version=3,
+        note="放行任务 A",
+        store=store,
+    )
+    assert res_a["ok"] is True
+    assert res_a["updated_tasks"] == ["wf-ops-01-test-a"]
+
+    # Verify Task A is pass, Task B is still blocked at version 7
+    t_a = store.get_task("wf-ops-01-test-a")
+    t_b = store.get_task("wf-ops-01-test-b")
+    assert t_a["stage_verdict"] == "pass"
+    assert t_b["stage_verdict"] == "blocked"
+    assert t_b["version"] == 7
+
+    # 2. Target Task B with expected_version=7: must SUCCEED
+    res_b = herdr_kernel.force_pass_gate(
+        workflow_id="wf-ops-01",
+        gate_node_id="test",
+        task_id="wf-ops-01-test-b",
+        expected_version=7,
+        note="放行任务 B",
+        store=store,
+    )
+    assert res_b["ok"] is True
+    assert res_b["updated_tasks"] == ["wf-ops-01-test-b"]
+    assert store.get_task("wf-ops-01-test-b")["stage_verdict"] == "pass"
+
+    # 3. Node-level pass without task_id when tasks have different versions: rejected with clear guidance
+    # Reset Task A to v3, Task B to v7, both blocked
+    conn.execute("UPDATE tasks SET version = 3, stage_verdict = 'blocked' WHERE task_id = 'wf-ops-01-test-a'")
+    conn.execute("UPDATE tasks SET version = 7, stage_verdict = 'blocked' WHERE task_id = 'wf-ops-01-test-b'")
+    conn.commit()
+
+    with pytest.raises(RuntimeError) as exc:
+        herdr_kernel.force_pass_gate(
+            workflow_id="wf-ops-01",
+            gate_node_id="test",
+            expected_version=3,
+            note="尝试全局单一版本放行不同版本节点",
+            store=store,
+        )
+    assert "存在多个不同版本的任务" in str(exc.value)
+
+    # 4. Node-level pass with expected_task_versions mapping: succeeds for all tasks
+    res_map = herdr_kernel.force_pass_gate(
+        workflow_id="wf-ops-01",
+        gate_node_id="test",
+        expected_task_versions={"wf-ops-01-test-a": 3, "wf-ops-01-test-b": 7},
+        note="通过版本映射放行节点所有任务",
+        store=store,
+    )
+    assert res_map["ok"] is True
+    assert "wf-ops-01-test-a" in res_map["updated_tasks"]
+    assert "wf-ops-01-test-b" in res_map["updated_tasks"]
+    conn.close()
+
+
+# 17. Controller 动作生成快照绑定与服务端强制版本约束
+def test_scenario_17_controller_action_snapshot_binding_and_rejection(ops_test_env):
+    """Verify Controller actions carry version/pane snapshot and backend rejects unconstrained force_pass."""
+    store = ops_test_env["store"]
+    from herdr import controller_actions
+    from unittest.mock import patch
+    from pathlib import Path
+
+    # Ensure task has version and pane
+    task = store.get_task("wf-ops-01-reworkable")
+    assert task is not None
+    assert task.get("version") is not None
+    cur_ver = task["version"]
+    cur_pane = task.get("pane_id")
+
+    wf = store.get_workflow("wf-ops-01")
+    actions = controller_actions.generate_controller_actions(task, wf)
+
+    # 1. Action generator binds expected_version and expected_pane_id
+    rework_act = next((a for a in actions if a.category == "rework" and "rework" in a.action_id), None)
+    assert rework_act is not None
+    assert rework_act.api_payload.get("expected_version") == cur_ver
+    assert rework_act.api_payload.get("expected_pane_id") == cur_pane
+
+    pass_act = next((a for a in actions if a.category == "bypass"), None)
+    assert pass_act is not None
+    assert pass_act.api_payload.get("expected_version") == cur_ver
+    assert pass_act.api_payload.get("expected_pane_id") == cur_pane
+
+    # 2. Server-side api_controller_execute_action: missing expected_version when targeting task is REJECTED
+    with pytest.raises(RuntimeError) as exc:
+        c.api_controller_execute_action({
+            "type": "force_pass_advance",
+            "workflow_id": "wf-ops-01",
+            "task_id": "wf-ops-01-reworkable",
+            "gate_node_id": "implementation",
+            "confirmed": True,
+            "reason": "缺少版本约束的放行",
+            # expected_version omitted
+        })
+    assert "缺少 expected_version" in str(exc.value)
+
+    # 3. Server-side api_controller_execute_action: stale expected_version is REJECTED
+    with pytest.raises(RuntimeError) as exc2:
+        c.api_controller_execute_action({
+            "type": "force_pass_advance",
+            "workflow_id": "wf-ops-01",
+            "task_id": "wf-ops-01-reworkable",
+            "gate_node_id": "implementation",
+            "expected_version": cur_ver + 999,
+            "confirmed": True,
+            "reason": "陈旧版本约束的放行",
+        })
+    assert "任务版本已变化" in str(exc2.value)
+
+    # 4. Server-side api_controller_execute_action: matching version and pane SUCCEEDS
+    with patch.object(c, "manual_advance") as mock_adv:
+        mock_adv.return_value = {"ok": True, "advanced": True}
+        res = c.api_controller_execute_action({
+            "type": "force_pass_advance",
+            "workflow_id": "wf-ops-01",
+            "task_id": "wf-ops-01-reworkable",
+            "gate_node_id": "implementation",
+            "expected_version": cur_ver,
+            "expected_pane_id": cur_pane,
+            "confirmed": True,
+            "reason": "快照完整且一致的合法放行",
+            "operator": "controller_lead",
+        })
+        assert res.get("ok") is True
+        assert res.get("gate_passed") is True
+
+    # 5. Frontend template source verification: executeControllerAction and forcePassTask bind snapshot
+    src = Path("console/herdr_factory_console.py").read_text(encoding="utf-8")
+    assert "payload.expected_version=matchedTask.version" in src
+    assert "payload.expected_pane_id=matchedTask.pane_id" in src
+    assert "expVer=matchedTask.version" in src

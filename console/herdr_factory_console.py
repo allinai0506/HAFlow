@@ -725,6 +725,8 @@ def api_kernel_force_pass(b):
         note=reason,
         operator=op,
         expected_version=exp_ver,
+        task_id=task_id or None,
+        expected_pane_id=exp_pane or None,
     )
 
 def api_kernel_checkpoint_create(b):
@@ -1083,24 +1085,31 @@ def api_controller_execute_action(payload):
         return {'ok': True, 'task_id': task_id, 'output': r.stdout.strip()}
 
     elif act_type in ('force_pass', 'force_pass_advance'):
+        if task and payload.get('expected_version') is None:
+            raise RuntimeError('放行处置请求缺少 expected_version 版本保护字段，禁止无版本约束的放行处置，请刷新页面')
+
         gate, reason, op = _validate_force_pass_params(payload, wid, wf, task=task)
         exp_ver = payload.get('expected_version')
+        exp_pane = str(payload.get('expected_pane_id') or payload.get('pane_id') or '').strip()
 
-        # Execution/write boundary check: pass expected_version to force_pass_gate
+        # Execution/write boundary check: pass expected_version, task_id, expected_pane_id to force_pass_gate
         gate_res = herdr_kernel.force_pass_gate(
             wid,
             gate_node_id=gate,
             note=reason,
             operator=op,
             expected_version=exp_ver,
+            task_id=task_id or None,
+            expected_pane_id=exp_pane or None,
         )
 
         adv_res = None
         adv_err = None
-        try:
-            adv_res = manual_advance(wid)
-        except Exception as e:
-            adv_err = str(e)
+        if act_type == 'force_pass_advance':
+            try:
+                adv_res = manual_advance(wid)
+            except Exception as e:
+                adv_err = str(e)
 
         if adv_err:
             return {
@@ -6244,6 +6253,21 @@ async function executeControllerAction(actId,wid){
   const cmdLine=act.command_line||actId;
   const effect=act.effect||act.description||'';
   const targetTask=act.blocker_task_id||act.old_task_id||(act.api_payload&&act.api_payload.task_id)||'';
+  if(targetTask){
+    const allTasks=(state.workflow&&state.workflow.tasks)||[];
+    const matchedTask=allTasks.find(t=>String(t.task_id)===String(targetTask));
+    if(matchedTask){
+      if(payload.expected_version===undefined&&matchedTask.version!==undefined){
+        payload.expected_version=matchedTask.version;
+      }
+      if(payload.expected_pane_id===undefined&&matchedTask.pane_id){
+        payload.expected_pane_id=matchedTask.pane_id;
+      }
+      if(payload.pane_id===undefined&&matchedTask.pane_id){
+        payload.pane_id=matchedTask.pane_id;
+      }
+    }
+  }
   const isForcePass=(payload.type==='force_pass'||payload.type==='force_pass_advance');
   const reasonHtml=isForcePass?`
     <div style="margin-top:12px">
@@ -7249,8 +7273,16 @@ function forcePassTask(wid,nodeId,options){
   const nodeEsc=esc(nodeId||'');
   const tid=options.task_id||'';
   const tidEsc=esc(tid);
-  const expVer=(options.expected_version!==undefined&&options.expected_version!==null)?options.expected_version:(options.version!==undefined&&options.version!==null?options.version:'');
-  const expPane=options.expected_pane_id||options.pane_id||'';
+  let expVer=(options.expected_version!==undefined&&options.expected_version!==null)?options.expected_version:(options.version!==undefined&&options.version!==null?options.version:'');
+  let expPane=options.expected_pane_id||options.pane_id||'';
+  if(tid&&(expVer===''||!expPane)){
+    const allTasks=(state.workflow&&state.workflow.tasks)||[];
+    const matchedTask=allTasks.find(t=>String(t.task_id)===String(tid));
+    if(matchedTask){
+      if(expVer===''&&matchedTask.version!==undefined){expVer=matchedTask.version;}
+      if(!expPane&&matchedTask.pane_id){expPane=matchedTask.pane_id;}
+    }
+  }
   openModal('人工强制放行门禁确认 (高风险)',`
     <div style="line-height:1.6">
       <div style="margin-bottom:8px"><strong>目标工作流:</strong> <code>${widEsc}</code></div>

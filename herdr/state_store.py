@@ -265,8 +265,24 @@ class StateStore(ABC):
         self,
         task_id: str,
         updates: Dict[str, Any],
+        expected_version: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Atomically update non-protected metadata fields of a task without touching status."""
+        pass
+
+    @abstractmethod
+    def force_pass_gate(
+        self,
+        workflow_id: str,
+        gate_node_id: str,
+        note: str = "human forced pass",
+        operator: str = "human",
+        expected_version: Optional[int] = None,
+        task_id: Optional[str] = None,
+        expected_pane_id: Optional[str] = None,
+        expected_task_versions: Optional[Dict[str, int]] = None,
+    ) -> Dict[str, Any]:
+        """Atomically force-pass a gate node within a single database transaction."""
         pass
 
     # Steering
@@ -808,11 +824,36 @@ class SQLiteStateStore(StateStore):
         self,
         task_id: str,
         updates: Dict[str, Any],
+        expected_version: Optional[int] = None,
     ) -> Dict[str, Any]:
         return state_db.update_task_metadata(
             task_id=task_id,
             updates=updates,
             db_path=self.db_path,
+            expected_version=expected_version,
+        )
+
+    def force_pass_gate(
+        self,
+        workflow_id: str,
+        gate_node_id: str,
+        note: str = "human forced pass",
+        operator: str = "human",
+        expected_version: Optional[int] = None,
+        task_id: Optional[str] = None,
+        expected_pane_id: Optional[str] = None,
+        expected_task_versions: Optional[Dict[str, int]] = None,
+    ) -> Dict[str, Any]:
+        return state_db.force_pass_gate(
+            workflow_id=workflow_id,
+            gate_node_id=gate_node_id,
+            note=note,
+            operator=operator,
+            db_path=self.db_path,
+            expected_version=expected_version,
+            task_id=task_id,
+            expected_pane_id=expected_pane_id,
+            expected_task_versions=expected_task_versions,
         )
 
     # Steering
