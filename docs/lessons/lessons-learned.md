@@ -6151,3 +6151,19 @@ if any(op['status'] not in {'resolved','superseded'}
 
 ### 验证命令 / 关联证据
 `pytest -q tests/test_fix_loop_recovery.py tests/test_selective_replan_core.py tests/test_fix_loop_gates.py tests/test_selective_replan_controller.py` 180 passed；修复前三个新回归（指纹跨代一致 / 后继同 verdict 升级不扣预算 / 闩释放保留指纹）均 RED 复现缺陷，修复后转绿；全量 `pytest -q` 3593 passed + 157 subtests。变更：`herdr/fix_loop.py` verdict_fingerprint 去 task_id；`services/herdr-controller.py` `_fix_loop_latch_blocks` 释放路径保留 `|fp`。
+
+## §135 指标口径必须覆盖全部 runner；不得用一端计数证明另一端增量（2026-10-06）
+
+### 问题背景
+test-01-r5 的 acceptance2 曾拿前端 vitest 计数（4248）证明后端测试增量，而后端 JUnit 参数化实例（矩阵 98、后端 6905）在受管指标里完全不可见，形成错误判据。根因：`parse_test_output` first-match-wins 且不支持 Maven Surefire/JUnit 格式。
+
+### 经验教训
+受管指标的口径缺陷会静默放大为验收误判。解析器逐格式匹配后立即返回，意味着"第一个认得的 runner"定义了全局口径；跨技术栈组合日志（前端 vitest + 后端 JUnit）必须聚合，且聚合必须防同格式双计（surefire 的 per-class "Time elapsed" 行与 Results 汇总行并存）。
+
+### 操作规范
+1. 新增测试 runner 接入评估器时必须同时更新口径测试（tests/test_evaluator_multi_runner_metrics.py）。
+2. 验收判据引用受管计数时，先确认计数覆盖了被判据约束的测试面；覆盖不到即声明 unknown，不得以另一端计数替代。
+3. gitignored 的内部装配文件不得用 git 排除式 pathspec（`:!path`）排除——会撞 ignored-file advice 使 add 必然 exit 1；先 add -A 再 `git reset -- <paths>` 摘除。
+
+### 验证命令 / 关联证据
+`pytest -q tests/test_evaluator_multi_runner_metrics.py tests/test_autosave_clone_wip.py tests/test_workflow_closed_cli_error.py tests/test_pane_transcript_archive.py` 全绿（前两类修复前三用例 RED 复现现场症状）；全量 3604 passed + 157 subtests，唯一失败 test_no_spacing_grid_violations 经 pristine main 复跑确认为 #157 引入的存量失败。

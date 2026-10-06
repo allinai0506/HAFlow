@@ -17,6 +17,15 @@ from .observation import ObservationStore
 COMPLETION_CREDENTIAL_TTL_SECONDS = 24 * 60 * 60
 
 
+class WorkflowClosedError(ValueError):
+    """Completion lifecycle touched on a closed workflow.
+
+    Still a ValueError for existing catchers, but typed so the CLI can turn
+    the previously raw traceback into one actionable line (reopen first).
+    """
+    pass
+
+
 def _connection(store):
     conn = state_db.get_db_connection(store.db_path)
     conn.execute('''CREATE TABLE IF NOT EXISTS completion_receipts (
@@ -97,7 +106,8 @@ def issue_completion_contract(task_id, store, *, prepare=None, renew=False):
         conn.execute('BEGIN IMMEDIATE')
         task = _task(conn, task_id)
         if not _workflow_open(conn, task):
-            raise ValueError('Workflow is closed')
+            raise WorkflowClosedError(
+                f'Workflow is closed: {task.get("workflow_id") or "unknown"}')
         if not task.get('run_id'):
             raise ValueError('Task has no run identity')
         if renew:
@@ -155,7 +165,8 @@ def report_completion(task_id, identity, artifacts, store):
         conn.execute('BEGIN IMMEDIATE')
         task = _task(conn, task_id)
         if not _workflow_open(conn, task):
-            raise ValueError('Workflow is closed')
+            raise WorkflowClosedError(
+                f'Workflow is closed: {task.get("workflow_id") or "unknown"}')
         valid = (identity.get('task_id') == task_id and identity.get('run_id') == task.get('run_id')
                  and identity.get('epoch') == task.get('completion_epoch')
                  and hmac.compare_digest(hashlib.sha256(str(identity.get('token', '')).encode()).hexdigest(),

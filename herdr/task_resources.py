@@ -3,6 +3,7 @@ from contextlib import contextmanager
 import fcntl
 import hashlib
 import json
+import os
 import subprocess
 from pathlib import Path
 import time
@@ -15,6 +16,61 @@ from .observer.live import probe_live_runtime
 
 class NodeLaunchBusy(RuntimeError):
     pass
+
+
+TRANSCRIPT_RETENTION_DAYS = 14
+
+
+def _transcript_retention_days():
+    raw = os.environ.get('HERDR_TRANSCRIPT_RETENTION_DAYS', '')
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return TRANSCRIPT_RETENTION_DAYS
+
+
+def _prune_transcript_archives(root, now, *, max_checks=400):
+    """Bounded retention sweep over pane-transcript archives; best-effort."""
+    cutoff = now - _transcript_retention_days() * 86400
+    checked = 0
+    try:
+        candidates = Path(root).glob('*/pane-transcript-*.txt')
+        for path in candidates:
+            checked += 1
+            if checked > max_checks:
+                return
+            try:
+                if path.stat().st_mtime < cutoff:
+                    path.unlink()
+            except OSError:
+                continue
+    except OSError:
+        return
+
+
+def archive_pane_transcript(task_id, pane, text, *, root, now=None):
+    """Persist one pane's scrollback as post-reclaim evidence (best-effort).
+
+    Once a pane is closed, its full text is unrecoverable — the S6 summary
+    alone cannot support later audits. Archives live under
+    ``<root>/<task_id>/pane-transcript-<stamp>.txt`` and are pruned after
+    HERDR_TRANSCRIPT_RETENTION_DAYS (default 14). Any failure returns None
+    and never blocks the reclaim itself.
+    """
+    if not text:
+        return None
+    now = time.time() if now is None else now
+    try:
+        directory = Path(root) / str(task_id)
+        directory.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime('%Y%m%dT%H%M%SZ', time.gmtime(now))
+        target = directory / f'pane-transcript-{stamp}-{uuid.uuid4().hex[:8]}.txt'
+        target.write_text(
+            f'pane: {pane}\narchived_at: {stamp}\n\n{text}', encoding='utf-8')
+        _prune_transcript_archives(root, now)
+        return str(target)
+    except OSError:
+        return None
 
 
 @contextmanager
@@ -51,12 +107,15 @@ def owned_live_pane(task, probe=None):
     return proven, verdict.get('reason') or 'unknown'
 
 
-def reap_task_pane(store, task_id, *, apply=False, probe=None, close=None):
+def reap_task_pane(store, task_id, *, apply=False, probe=None, close=None,
+                   capture=None, transcript_root=None):
     with workflow_launch_lock(store.db_path, 'managed-dynamic-pane-lifecycle'):
-        return _reap_task_pane(store, task_id, apply=apply, probe=probe, close=close)
+        return _reap_task_pane(store, task_id, apply=apply, probe=probe, close=close,
+                               capture=capture, transcript_root=transcript_root)
 
 
-def _reap_task_pane(store, task_id, *, apply=False, probe=None, close=None):
+def _reap_task_pane(store, task_id, *, apply=False, probe=None, close=None,
+                    capture=None, transcript_root=None):
     """Release only archived, privately owned dynamic panes; preserve clones."""
     from . import kernel
     initial = store.get_task(task_id)
@@ -101,6 +160,14 @@ def _reap_task_pane(store, task_id, *, apply=False, probe=None, close=None):
             return {**row, 'reason': verdict.get('reason') or 'unknown'}
         if not apply:
             return {**row, 'action': 'would_release', 'reason': verdict.get('reason')}
+        transcript_path = None
+        if not missing and capture is not None and transcript_root:
+            # 关 pane 前最后取证窗口：归档失败绝不阻断回收。
+            try:
+                transcript_path = archive_pane_transcript(
+                    task_id, pane, capture(pane), root=transcript_root)
+            except (OSError, RuntimeError, subprocess.TimeoutExpired, ValueError):
+                transcript_path = None
         if not missing:
             if close is None:
                 raise ValueError('reap apply requires a pane-close transport')
@@ -119,7 +186,11 @@ def _reap_task_pane(store, task_id, *, apply=False, probe=None, close=None):
         )
         if not result.get('accepted', True):
             return {**row, 'reason': 'metadata_changed_retry_required'}
-        return {**row, 'action': 'released', 'reason': 'pane_missing' if missing else 'identity_match'}
+        result = {**row, 'action': 'released',
+                  'reason': 'pane_missing' if missing else 'identity_match'}
+        if transcript_root:
+            result['transcript_archived'] = bool(transcript_path)
+        return result
 
 
 def dispatch_identity(workflow_id, node_id, role, candidate_sha, dispatch_round):

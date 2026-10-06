@@ -2081,3 +2081,4 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 
 - 2026-10-06: close inventory uses Git untracked-directory summaries before bounded output; internal evidence cannot crowd out protected user output, and tracked internal changes remain protected.
 - 2026-10-06：fix-loop 重复扣预算根因=verdict 指纹含易失 task_id 且闩释放清指纹；指纹改纯语义（branch+note+affected），释放保留 |fp，后继代同结论走升级不再开轮。
+- 2026-10-06：终态卫生批修复——supersede WIP 自动保存改 add -A 后 reset 内部路径（gitignored 文件曾使 add 必败）；closed workflow 的 CLI 报错改为 WorkflowClosedError 一行指引；verify-metrics 口径聚合多 runner 并支持 surefire；reap 前归档 pane scrollback（默认保留 14 天）。console 布局测试失败为 #157 存量。

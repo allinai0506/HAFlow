@@ -4658,6 +4658,20 @@ def launch_task(args):
         sys.exit(75)
 
 
+def _capture_pane_transcript(pane):
+    """Full scrollback of one tmux pane ('' on any failure); reap archives it
+    before close so post-mortem audits keep the full text, not just the S6
+    summary."""
+    try:
+        result = subprocess.run(
+            ["tmux", "capture-pane", "-p", "-S", "-", "-t", pane],
+            text=True, capture_output=True, timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return result.stdout if result.returncode == 0 else ""
+
+
 def cmd_reap(args):
     from herdr.task_resources import reap_task_pane
     from herdr.archive import ARCHIVED_STATUSES
@@ -4671,6 +4685,8 @@ def cmd_reap(args):
             rows.append(reap_task_pane(
                 store, task["task_id"], apply=args.apply,
                 close=lambda pane: _herdr("pane", "close", pane).returncode == 0,
+                capture=_capture_pane_transcript,
+                transcript_root=EVIDENCE_ROOT,
             ))
     print(json.dumps({"workflow_id": args.workflow_id, "apply": args.apply,
                       "tasks": rows}, ensure_ascii=False))
@@ -6892,10 +6908,16 @@ def _autosave_clone_wip(task):
         status = _git("status", "--porcelain")
         if status.returncode != 0 or not (status.stdout or "").strip():
             return False
-        add = _git("add", "-A", *[":!" + path for path in sorted(INTERNAL_UNTRACKED_EXACT)])
+        # 不能用 ':!path' 排除式 pathspec：被 .gitignore 忽略的内部文件
+        # （.agent-task-context 等）会触发 git 的 ignored-file advice 让
+        # add 直接 exit 1，每个 supersede 必现。先全量 add，再把内部
+        # 路径从暂存区摘除（对不存在/未跟踪路径 reset 恒安全）。
+        add = _git("add", "-A")
         if add.returncode != 0:
-            print(f"[WIP AUTOSAVE WARN] {task_id}: git add failed")
+            print(f"[WIP AUTOSAVE WARN] {task_id}: git add failed: "
+                  f"{(add.stderr or '').strip()[:200]}")
             return False
+        _git("reset", "-q", "--", *sorted(INTERNAL_UNTRACKED_EXACT))
         staged = _git("diff", "--cached", "--quiet")
         if staged.returncode == 0:
             return False
@@ -9056,4 +9078,16 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    from herdr.completion_receipt import WorkflowClosedError
+
+    try:
+        main()
+    except WorkflowClosedError as exc:
+        # 派单/续作/回执撞上已关闭工作流：给一行可操作的错误，
+        # 不再把 ValueError 裸 traceback 抛给调用方。
+        print(
+            f"[WORKFLOW CLOSED] 工作流已关闭（{exc}）。"
+            "请先 `herdr-task reopen-workflow <workflow-id>` 恢复后再派单或续作。",
+            file=sys.stderr,
+        )
+        sys.exit(2)

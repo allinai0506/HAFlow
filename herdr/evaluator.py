@@ -474,95 +474,133 @@ def _is_failing_test_line(line: str) -> bool:
     return "✕" in line or "FAIL " in line
 
 
+_SUREFIRE_RE = re.compile(
+    r"Tests run:\s*(\d+)"
+    r"(?:,\s*Failures:\s*(\d+))?"
+    r"(?:,\s*Errors:\s*(\d+))?"
+    r"(?:,\s*Skipped:\s*(\d+))?"
+)
+
+
 def parse_test_output(output: str, exit_code: int) -> Tuple[int, int, List[str]]:
     """Extract passed, total, and failing test names from test output.
-    
-    Supports pytest, vitest, jest, and generic test runners.
-    Returns: (passed_count, total_count, failing_tests_list)
+
+    Supports pytest, vitest, jest, Maven Surefire/JUnit, and generic runners.
+    Every recognizable summary in the log is aggregated instead of
+    first-match-wins: a combined frontend(vitest)+backend(surefire) run must
+    count both sides, otherwise JUnit parameterized instances are invisible
+    to the managed metrics and frontend counts get mistaken for the whole
+    increment. Returns: (passed_count, total_count, failing_tests_list)
     """
     # Normalize only the parser view; the runner keeps original log bytes.
     output = strip_ansi_codes(output)
     failing: List[str] = []
-    
-    # 1. Check Pytest format: "1 failed, 4 passed in 0.15s" (with or without =)
-    pytest_match = re.search(r"(?:=+)?\s*([\d\w\s,]+)\s+in\s+[\d\.]+s", output)
-    if pytest_match:
-        summary_str = pytest_match.group(1)
+    passed_sum = 0
+    total_sum = 0
+    matched = False
+
+    # 1. pytest summaries: "1 failed, 4 passed in 0.15s" (one per invocation)
+    for m in re.finditer(r"(?:=+)?\s*([\d\w\s,]+)\s+in\s+[\d\.]+s", output):
+        summary_str = m.group(1)
         passed_m = re.search(r"(\d+)\s+passed", summary_str)
         failed_m = re.search(r"(\d+)\s+failed", summary_str)
         error_m = re.search(r"(\d+)\s+error", summary_str)
-        
-        if passed_m or failed_m or error_m:
-            passed = int(passed_m.group(1)) if passed_m else 0
-            failed = int(failed_m.group(1)) if failed_m else 0
-            errors = int(error_m.group(1)) if error_m else 0
-            total_failed = failed + errors
-            total = passed + total_failed
-            
+        if not (passed_m or failed_m or error_m):
+            continue
+        matched = True
+        passed = int(passed_m.group(1)) if passed_m else 0
+        failed = int(failed_m.group(1)) if failed_m else 0
+        errors = int(error_m.group(1)) if error_m else 0
+        passed_sum += passed
+        total_sum += passed + failed + errors
+        for line in output.splitlines():
+            if line.startswith("FAILED ") or line.startswith("ERROR "):
+                parts = line.split(maxsplit=1)
+                if len(parts) > 1:
+                    target = parts[1].split(" - ")[0].strip()
+                    if target not in failing:
+                        failing.append(target)
+
+    # 2. vitest summaries: "Tests  1 failed | 11 passed (12)"
+    vitest_matched = False
+    for m in re.finditer(
+            r"Tests\s+(?:(\d+)\s+failed\s*\|\s*)?(?:(\d+)\s+passed\s*)?\((\d+)\)",
+            output):
+        vitest_matched = True
+        matched = True
+        failed = int(m.group(1)) if m.group(1) else 0
+        passed = int(m.group(2)) if m.group(2) else 0
+        total = int(m.group(3)) if m.group(3) else (passed + failed)
+        passed_sum += passed
+        total_sum += total
+    if vitest_matched:
+        for line in output.splitlines():
+            if _is_failing_test_line(line):
+                cleaned = line.replace("FAIL", "").replace("✕", "").strip()
+                if cleaned and cleaned not in failing:
+                    failing.append(cleaned)
+
+    # 3. jest summaries: "Tests: X failed, Y passed, Z total"
+    for m in re.finditer(
+            r"Tests:\s*(?:(\d+)\s+failed,\s*)?(?:(\d+)\s+passed,\s*)?(\d+)\s+total",
+            output):
+        matched = True
+        failed = int(m.group(1)) if m.group(1) else 0
+        passed = int(m.group(2)) if m.group(2) else 0
+        total = int(m.group(3)) if m.group(3) else (passed + failed)
+        passed_sum += passed
+        total_sum += total
+        for line in output.splitlines():
+            if _is_failing_test_line(line):
+                cleaned = line.replace("FAIL", "").replace("✕", "").strip()
+                if cleaned and cleaned not in failing:
+                    failing.append(cleaned)
+
+    # 4. Maven Surefire / JUnit totals: "Tests run: N, Failures: F, Errors: E,
+    # Skipped: S". Per-class lines carry "Time elapsed" and are excluded:
+    # summing them against the Results totals would double count. Surefire's
+    # run count includes skipped, so passed = run - failures - errors - skipped.
+    for line in output.splitlines():
+        m = _SUREFIRE_RE.search(line)
+        if not m or "Time elapsed" in line:
+            continue
+        matched = True
+        run = int(m.group(1))
+        failures = int(m.group(2) or 0)
+        errors = int(m.group(3) or 0)
+        skipped = int(m.group(4) or 0)
+        passed_sum += max(0, run - failures - errors - skipped)
+        total_sum += run
+
+    # 5. Python standard unittest: "Ran X test(s) in Ys" (+OK / failures=N)
+    unittest_segments = list(re.finditer(r"Ran\s+(\d+)\s+tests?\s+in\s+[\d\.]+s", output))
+    if unittest_segments:
+        matched = True
+        ut_total = sum(int(m.group(1)) for m in unittest_segments)
+        ut_ok = exit_code == 0 and ("\nOK" in output or output.endswith("OK"))
+        if ut_ok:
+            passed_sum += ut_total
+            total_sum += ut_total
+        else:
+            failed_cnt = 0
+            fail_m = re.search(r"failures=(\d+)", output)
+            err_m = re.search(r"errors=(\d+)", output)
+            if fail_m:
+                failed_cnt += int(fail_m.group(1))
+            if err_m:
+                failed_cnt += int(err_m.group(1))
+            if failed_cnt == 0:
+                failed_cnt = 1
+            passed_sum += max(0, ut_total - failed_cnt)
+            total_sum += ut_total
             for line in output.splitlines():
-                if line.startswith("FAILED ") or line.startswith("ERROR "):
-                    parts = line.split(maxsplit=1)
-                    if len(parts) > 1:
-                        target = parts[1].split(" - ")[0].strip()
-                        if target not in failing:
-                            failing.append(target)
-                        
-            return passed, max(total, 1 if exit_code != 0 else 0), failing
+                if line.startswith("FAIL: ") or line.startswith("ERROR: "):
+                    target = line.split(maxsplit=1)[1].strip()
+                    if target not in failing:
+                        failing.append(target)
 
-    # 2. Check Vitest format: "Tests  1 failed | 11 passed (12)" or "Tests  12 passed (12)"
-    vitest_pipe_match = re.search(r"Tests\s+(?:(\d+)\s+failed\s*\|\s*)?(?:(\d+)\s+passed\s*)?\((\d+)\)", output)
-    if vitest_pipe_match:
-        failed_str, passed_str, total_str = vitest_pipe_match.groups()
-        failed = int(failed_str) if failed_str else 0
-        passed = int(passed_str) if passed_str else 0
-        total = int(total_str) if total_str else (passed + failed)
-        
-        for line in output.splitlines():
-            if _is_failing_test_line(line):
-                cleaned = line.replace("FAIL", "").replace("✕", "").strip()
-                if cleaned and cleaned not in failing:
-                    failing.append(cleaned)
-        return passed, total, failing
-
-    # 3. Check Jest format: "Tests: X failed, Y passed, Z total"
-    jest_match = re.search(r"Tests:\s*(?:(\d+)\s+failed,\s*)?(?:(\d+)\s+passed,\s*)?(\d+)\s+total", output)
-    if jest_match:
-        failed_str, passed_str, total_str = jest_match.groups()
-        failed = int(failed_str) if failed_str else 0
-        passed = int(passed_str) if passed_str else 0
-        total = int(total_str) if total_str else (passed + failed)
-        
-        for line in output.splitlines():
-            if _is_failing_test_line(line):
-                cleaned = line.replace("FAIL", "").replace("✕", "").strip()
-                if cleaned and cleaned not in failing:
-                    failing.append(cleaned)
-        return passed, total, failing
-
-    # 4. Check Python standard unittest format: "Ran X test(s) in Ys"
-    unittest_match = re.search(r"Ran\s+(\d+)\s+tests?\s+in\s+[\d\.]+s", output)
-    if unittest_match:
-        total = int(unittest_match.group(1))
-        if exit_code == 0 and ("\nOK" in output or output.endswith("OK")):
-            return total, total, []
-        
-        failed_cnt = 0
-        fail_m = re.search(r"failures=(\d+)", output)
-        err_m = re.search(r"errors=(\d+)", output)
-        if fail_m:
-            failed_cnt += int(fail_m.group(1))
-        if err_m:
-            failed_cnt += int(err_m.group(1))
-        if failed_cnt == 0:
-            failed_cnt = 1
-        
-        passed = max(0, total - failed_cnt)
-        for line in output.splitlines():
-            if line.startswith("FAIL: ") or line.startswith("ERROR: "):
-                target = line.split(maxsplit=1)[1].strip()
-                if target not in failing:
-                    failing.append(target)
-        return passed, total, failing
+    if matched:
+        return passed_sum, max(total_sum, 1 if exit_code != 0 else 0), failing
 
     # 5. Fallback: generic exit code
     if exit_code == 0:
