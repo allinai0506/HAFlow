@@ -6029,3 +6029,46 @@ Nexus CoW integration分支复用Agent白名单、branch/worktree全部context�
 ### 验证命令 / 关联证据
 - `pytest -v tests/test_stage_advance_and_supersede.py` (29 passed, 9 subtests)
 - `pytest -q tests/test_stage_advance_and_supersede.py tests/test_direct_stage_dispatch.py tests/test_dispatch_*.py tests/test_controller_*.py` (185 passed, 35 subtests)
+
+
+## 131. 运维中心一键修复与门禁放行彻底解耦（防自动越权豁免）、前置归属校验与显式人工审计（2026-10-05）
+
+### 问题背景
+在 `allinai0506/HAFlow` 运维中心驾驶舱的异常中枢中，暴露了严重的门禁越权与安全隐患：
+1. **自动修复失败隐式放行门禁**：`console/herdr_factory_console.py` 的 `api_controller_execute_action` 在处理 `ops_repair` / `retry` 动作时，对 `rework` 和 `redrive` 异常进行了静默吞错，随后级联调用 `herdr_kernel.force_pass_gate` 与 `manual_advance`。当测试门禁卡点任务无可用恢复动作或恢复失败时，系统擅自将 `stage_verdict` 篡改为 `pass` 并推进下游，击穿了流水线质量门禁；
+2. **人工豁免缺乏独立通道与显式约束**：人工强制放行缺少必填原因说明和二次确认，前端在异常卡片点击即可触发默认模版原因的放行请求，且缺少对目标门禁节点的明确范围限制（容易隐式全流放行）；
+3. **过期与错配请求未严格拦截**：未对当前请求的 `workflow_id`、`task_id`、节点与运行实例进行前置权威校验，存在已作废（superseded）任务仍被触发恢复或跨工作流错配的风险；
+4. **推进失败伪报成功**：当门禁放行成功但后续 `manual_advance` 推进失败时，直接吞错返回成功，未真实反馈部分完成状态。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 修复失败后降级调用更强力的放行操作 | “一个动作报错就试下一个更强的动作”是严重的安全坏味道；普通修复绝不能升级为豁免 | 彻底解耦恢复通道与豁免通道：自动修复仅执行安全工位动作，不适用或失败必须保留阻塞 |
+| 人工豁免与普通修复混淆在同一交互逻辑 | 豁免是高风险行为，必须具有独立意图、显式确认与不可抵赖的责任审计 | 强制放行必须显式确认（`confirmed: True`）、强制填写人工原因、明确指定目标门禁节点 |
+| 过度依赖前端校验而忽视服务端前置防御 | 前端弹窗或禁用按钮容易被并发或非法请求绕过 | 服务端在执行任何动作前必须重新读取权威存储，强校验工作流归属、节点匹配、版本与运行实例 |
+| 级联操作部分失败时整体伪报成功 | 门禁豁免已持久化但工作流推进受阻属于典型 partial 状态，伪报成功会误导排障 | 明确区分全部成功与部分完成，向调用方和前端返回 `partial: True` 及真实推进错误 |
+| 会签批准直接调用放行内核绕过防护 | 业务审批入口与底层内核调用未统一接入门禁前置校验，导致审批可以被作为绕过通道 | 会签批准必须接入统一放行校验网关，要求明确确认、非空反馈与快照版本 |
+| 多任务节点以最新任务状态代表全节点完成 | 较早失败且未被替换/豁免的任务被最新任务的通过或完成掩盖，产生虚假完成幻象 | 状态聚合中严禁以 `latest_v == 'pass'` 穿透掩盖失败；未豁免的失败任务必须如实保留 failed |
+| 节点级放行允许单一版本号代表任务集合 | 单一版本号无法证明任务集合未被并发增删或替换，相同版本数值会引发并发越权覆盖 | 存在有效任务的节点级放行必须提供完整的 `expected_task_versions` 映射严格核验所有任务 |
+| 空节点放行未绑定空快照引发并发新增越权放行 | 预检认为节点无任务而跳过快照要求，写入事务前并发插入的任务会在未被确认的情况下被放行 | 节点级放行必须显式绑定任务快照映射（无任务时传 `{}`），并在 SQLite 事务内严格比对实际任务集合，集合不一致立即完整回滚 |
+| 较新任务完成/集成掩盖较早任务失败 | 多任务节点若以最新任务处于 completed/integrated 态兜底判定全节点完成，会掩盖未经替换或豁免的早期失败 | 状态聚合中未被替换（未置 `superseded` / `superseded_by`）、未被明确豁免的失败任务，独立阻断节点判定完成，严禁基于时间戳排除 |
+| 旧门禁放行记录无失效边界掩盖新阻塞 | 放行记录未绑定任务版本与节点任务集合，导致任务再次阻塞、新增阻塞任务或回溯重跑后旧记录仍继续覆盖 | 豁免记录必须显式绑定生效任务及版本快照；建立统一有效性判定函数（`is_gate_override_valid`），任务重新产生阻塞结论、版本漂移或节点集合变化立即失效；回溯（`rollback_workflow`）级联清除受影响节点 active 豁免并转入历史审计 |
+
+### 操作规范
+1. **解耦通道**：彻底删除 `ops_repair` / `retry` 中的 `force_pass_gate` 与 `manual_advance` 兜底降级；仅按当前状态确定并执行 `rework` / `redrive`，无安全动作明确返回拒绝；
+2. **异常不吞**：命令失败或超时错误直接向外抛出，保留原始执行信息，严禁继续发送另一条恢复命令或自动放行；
+3. **前置强校验**：核验工作流与任务存在性、拒绝 `status == 'superseded'` 任务、核验 `req_node == task_node`、核验版本与 pane 实例，错配一律拒绝；
+4. **人工放行契约**：要求 `confirmed=True`、非空且非默认模版的原因说明、明确归属于该工作流的门禁节点；推进失败如实返回 `partial: True` 与 `advance_error`；
+5. **前端交互加固**：卡片放行按钮绑定二次确认弹窗，强制输入原因，取消不发请求；引入 `_opsActionBusy` 信号量防止连击重复提交；会签操作舱支持显式确认与非空反馈；
+6. **聚合与映射闭环**：多任务节点聚合消除以最新任务 completed/integrated/pass 掩盖未豁免失败任务的逻辑，历史任务必须通过显式替换（`status == 'superseded'` 或 `superseded_by`）排除；节点级放行强制要求 `expected_task_versions: dict`（无任务节点必须显式提供 `{}`），并在 SQLite 强事务内严格校验实际任务集合与提交映射完全一致，出现并发新增或替换时坚决回滚；
+7. **放行失效边界与回溯闭环**：`force_pass_gate` 显式写入单任务或节点级任务集合与版本快照，并将历史审批追加至 `gate_overrides_history`；在 `herdr/workflow_graph.py` 沉淀统一有效性判定 `is_gate_override_valid`，阶段摘要与画布投影共用，一旦任务再次阻塞、版本漂移或节点任务集合变化立即失效；`rollback_workflow` 级联作废下游受影响节点的 active `gate_overrides` 并保留审计记录，杜绝回溯重做现场被旧记录穿透覆盖。
+
+### 验证命令 / 关联证据
+- 新增专项测试套件：`pytest -v tests/test_console_ops_repair_gate_separation.py`（25/25 passed，涵盖单节点/多任务/并发竞态/会签全流程/节点映射全场景/空节点交错快照拒绝/较新完成任务防失败掩盖/已豁免任务再次阻塞失效/新增阻塞任务失效/回溯自动失效与审计保留）；
+- 阶段摘要回归测试：`pytest -v tests/test_console_stage_summary.py`（11 passed, 3 subtests passed）；
+- 画布投影回归测试：`pytest -v tests/test_workflow_graph_projection.py`（18 passed, 3 subtests passed）；
+- 控制台与工作流回归测试：`pytest -q tests/test_workflow*.py tests/test_console*.py`（453 passed, 79 subtests passed in 41.39s）；
+- 全项目 Python 语法与字节码编译：`python3 -m compileall -q herdr services bin tests console`（clean compile）；
+- 代码格式检查：`git diff --check`（clean diff）。
+

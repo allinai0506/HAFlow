@@ -44,9 +44,7 @@ def aggregate_node_status(node_tasks: List[Dict[str, Any]]) -> str:
         return "rework"
     if any(s in WORKING_LIKE for s in statuses):
         return "working"
-    if all(s in COMPLETED_LIKE for s in statuses):
-        return "completed"
-    if any(v == "pass" for v in verdicts):
+    if all(s in COMPLETED_LIKE or v == "pass" for s, v in zip(statuses, verdicts)):
         return "completed"
 
     # Terminal tasks without active work: inspect latest task
@@ -64,11 +62,103 @@ def aggregate_node_status(node_tasks: List[Dict[str, Any]]) -> str:
     latest_st = str(latest.get("status") or "")
     latest_v = str(latest.get("stage_verdict") or "")
 
-    if latest_v == "pass" or latest_st in COMPLETED_LIKE:
+    unexempted_failed = any(s == "failed" and v != "pass" for s, v in zip(statuses, verdicts))
+    if unexempted_failed:
+        return "failed"
+
+    if latest_st in COMPLETED_LIKE:
         return "completed"
     if latest_st == "failed" or any(s == "failed" for s in statuses):
         return "failed"
     return "working"
+
+
+def is_gate_override_valid(
+    gate_override: Optional[Dict[str, Any]],
+    live_tasks: List[Dict[str, Any]],
+) -> bool:
+    """Determine whether a stored gate override is currently applicable to the live tasks.
+
+    Separates historical audit records from active applicability.
+    A gate override is INVALID if:
+    1. Not a dict or verdict != "pass".
+    2. Single-task override (task_id specified):
+       - Target task is not in live_tasks (superseded or removed).
+       - Target task has status in {'blocked', 'rework'}.
+       - Target task has stage_verdict in {'blocked', 'failed'} or stage_verdict != 'pass'.
+       - Target task's version != snapshot version (re-run/updated after pass).
+       - Any other live task on the node is blocked or failed (unless that other task has verdict == 'pass').
+    3. Node-level override (no task_id):
+       - Live task set != snapshot task_ids set (tasks added or removed since pass).
+       - Any live task has stage_verdict in {'blocked', 'failed'} and stage_verdict != 'pass'.
+       - Any live task has status in {'blocked', 'rework'}.
+       - Any live task version != snapshot version (re-run/updated after pass).
+    """
+    if not isinstance(gate_override, dict) or gate_override.get("verdict") != "pass":
+        return False
+
+    override_tid = gate_override.get("task_id")
+    task_versions = gate_override.get("task_versions")
+    if not isinstance(task_versions, dict):
+        task_versions = {}
+
+    snapshot_task_ids = gate_override.get("task_ids")
+    if snapshot_task_ids is None and task_versions:
+        snapshot_task_ids = sorted(list(task_versions.keys()))
+
+    live_by_id = {str(t.get("task_id")): t for t in live_tasks if t.get("task_id")}
+    live_ids = set(live_by_id.keys())
+
+    if override_tid:
+        target_tid = str(override_tid)
+        if target_tid not in live_by_id:
+            return False
+
+        target_task = live_by_id[target_tid]
+        target_st = str(target_task.get("status") or "")
+        target_v = str(target_task.get("stage_verdict") or "")
+
+        if target_st in {"blocked", "rework"}:
+            return False
+        if target_v in {"blocked", "failed"} or target_v != "pass":
+            return False
+
+        expected_v = task_versions.get(target_tid)
+        if expected_v is None:
+            expected_v = gate_override.get("task_version")
+        if expected_v is not None and target_task.get("version") != expected_v:
+            return False
+
+        for tid, t in live_by_id.items():
+            if tid == target_tid:
+                continue
+            other_st = str(t.get("status") or "")
+            other_v = str(t.get("stage_verdict") or "")
+            if other_st in {"blocked", "failed", "rework"}:
+                return False
+            if other_v in {"blocked", "failed"} and other_v != "pass":
+                return False
+
+        return True
+    else:
+        if snapshot_task_ids is not None:
+            if live_ids != set(str(tid) for tid in snapshot_task_ids):
+                return False
+
+        for tid, t in live_by_id.items():
+            st = str(t.get("status") or "")
+            v = str(t.get("stage_verdict") or "")
+            if st in {"blocked", "rework"}:
+                return False
+            if v in {"blocked", "failed"} and v != "pass":
+                return False
+            if tid in task_versions:
+                if t.get("version") != task_versions[tid]:
+                    return False
+                if v != "pass":
+                    return False
+
+        return True
 
 
 def _normalize_definition(workflow: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -180,7 +270,7 @@ def workflow_graph_projection(
         active = sum(1 for t in live if str(t.get("status")) in WORKING_LIKE or str(t.get("status")) == "rework")
 
         gate_override = gate_overrides.get(nid) or {}
-        gate_passed = gate_override.get("verdict") == "pass"
+        gate_passed = is_gate_override_valid(gate_override, live)
 
         if is_wf_completed:
             status = "completed"

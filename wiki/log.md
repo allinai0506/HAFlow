@@ -8,6 +8,50 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-10-05] fix | 门禁放行失效边界闭环：快照版本绑定、回溯级联失效与跨端有效性判定统一（防旧豁免掩盖新阻塞）
+- 背景：
+  1. 旧放行记录（`gate_overrides`）持久化时未绑定豁免时的任务版本快照与完整任务集合，读取时单任务豁免仅检查其他任务，节点级豁免直接放行全节点；
+  2. 被豁免任务后续若更新并重新阻塞（`stage_verdict="blocked"`），或节点后续新增了阻塞任务，旧豁免记录仍使阶段摘要与画布显示为虚假完成；
+  3. `rollback_workflow` 回溯时清理了推进锁并作废了任务，但遗漏了受影响节点的旧 `gate_overrides`，回溯重跑后旧记录仍会覆盖新现场。
+- 变更：
+  1. **`herdr/state_db.py` & `herdr/kernel.py`**：
+     - `force_pass_gate` 持久化显式绑定生效快照：单任务记录 `task_id`、`task_version` 及 `task_versions`；节点级记录 `task_ids` 列表与各任务 `task_versions`；
+     - 将“历史审批事实”与“当前适用豁免”解耦，在工作流元数据中追加 `gate_overrides_history` 审计账本；
+     - `rollback_workflow` 在回溯下游受影响节点集合（`affected_nodes`）时，级联将 active `gate_overrides` 弹出作废，并写入 `gate_overrides_history`（标记 `action="invalidated_by_rollback"`）。
+  2. **`herdr/workflow_graph.py` & `console/herdr_factory_console.py`**：
+     - 在 `workflow_graph.py` 沉淀权威纯函数 `is_gate_override_valid(gate_override, live_tasks)`，供画布投影与 Console `stage_summary` 共用；
+     - 单任务豁免在任务再次阻塞（`stage_verdict="blocked"`）、版本漂移或非 pass 时自动失效；
+     - 节点级豁免在存活任务集合发生增删变化（如新增未确认任务）、任务再次阻塞或版本变化时自动失效，如实暴露真实阻塞。
+  3. **自动化测试**：
+     - `tests/test_console_ops_repair_gate_separation.py` 扩充 Scenario 23（已豁免任务再次阻塞）、Scenario 24（节点放行后新增阻塞任务）、Scenario 25（放行后回溯再执行及审计保留），25 项全通；
+     - 453 项全量控制台与工作流测试全通。
+- 证据：
+  - 453 passed, 79 subtests passed in 41.39s；`python3 -m compileall` 零报错；`git diff --check` 零违规。
+
+
+## [2026-10-05] fix | 运维修复与门禁放行解耦加固：会签接口统一约束、多任务节点失败穿透消除与空节点交错快照闭环
+- 背景：
+  1. 会签接口 `/api/task/signoff` approve 分支直接调用放行内核，绕过了二次显式确认、人工非空原因、任务归属与版本快照校验；
+  2. 多任务节点状态聚合（`herdr/workflow_graph.py` 与 Console `stage_summary`）存在“最新任务完成即标记节点完成”的兜底误判，导致较早失败且未被替换/豁免的任务被虚假掩盖为 completed/cleaned；
+  3. 节点级放行若仅提供单一 `expected_version`，在节点存在多个任务时无法证明任务集合未被并发增删替换；
+  4. 空节点在预检与事务开始之间若并发新增任务，未显式绑定空快照（`expected_task_versions={}`）会导致旧请求越权放行未经确认的新任务。
+- 变更：
+  1. **`console/herdr_factory_console.py`**：
+     - 将 `api_task_signoff` 统一接入 `_validate_force_pass_params`，对会签批准强制校验显式确认、非空人工理由（屏蔽默认系统文案）、任务与工作流归属、以及版本与工位快照；前端协同工作舱完善二次确认与反馈必填约束；
+     - 调整 Console `stage_summary` 与 `herdr/workflow_graph.py::aggregate_node_status`，彻底消除以创建时间或较新任务完成/通过而掩盖历史失败的逻辑；未被替换（未 `superseded`）、未被明确豁免的失败任务，独立阻断节点判定为完成；
+     - 节点级放行强制要求提供 `expected_task_versions: dict`（无任务节点必须显式提供 `{}`），并在前端 `forcePassTask` 中对节点级放行自动收集当前任务映射。
+  2. **`herdr/state_db.py` & `herdr/kernel.py`**：
+     - 节点级放行严格禁止传入单一 `expected_version`，必须使用 `expected_task_versions` 映射；
+     - 在写入事务内严格比对实际任务集合与提交映射，当预检为空节点提交 `{}` 但事务前新增任务时，在事务边界触发拒绝并完整回滚，消除越权放行竞态；
+     - 允许内核级底层无版本期望的调用（如测试与内部维护），兼顾并发乐观锁安全性与底层控制元语调用灵活性。
+  3. **自动化测试**：
+     - `tests/test_console_ops_repair_gate_separation.py` 覆盖 22 项全流程专项测试，包含 Scenario 21（空节点预检后新增任务在事务内拒绝并回滚）与 Scenario 22（较早任务失败独立阻止节点完成，不被较晚任务 completed/integrated 掩盖）；
+     - 更新 `tests/test_console_stage_summary.py`，确保历史失败基于替换关系排除；
+     - 450 项全量关联测试通过。
+- 证据：
+  - 450 项测试全绿（450 passed, 79 subtests passed in 43.06s）；`python3 -m compileall` 零报错；`git diff --check` 零违规。
+
+
 ## [2026-10-04] fix | 路由健康拒绝解耦（防节点槽位死锁）、签发笔记全链路接线与候选重冻 CLI 闭环
 - 背景：
   1. 多 Agent 派发时，若目标 Agent 未就绪或健康体检失败，原实现错误调用 `_record_router_failure_task` 在 `tasks.json` 落失败任务，导致单任务节点（`max_tasks_per_node=1`）槽位被永久耗尽，后续自愈重试死锁；
@@ -1995,6 +2039,23 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 
 - 2026-10-03 FIX_BUG1002收尾边界：发现Nexus CoW继承外部Git指针，先独立化Git元数据再清理自有branch；外部worktree及其当前引用分支保留。记录CoW目录/Git隔离双重检查教训。
 
+## [2026-10-05] update | 运维中心一键修复与门禁放行解耦与人工审计闭环
+- Updated [[ops-center]]: 彻底分离“重试修复”(`ops_repair`/`retry`)与“人工强制放行”(`force_pass`/`force_pass_advance`)；
+  - 自动修复通道仅按当前状态执行安全工位动作（`rework`/`redrive`），不适用或失败必须报错保留阻塞，彻底移除隐式降级调用 `force_pass_gate` 与 `manual_advance`；
+  - 人工强制放行必须显式确认（`confirmed: True`）、非空且非默认原因、明确指定归属目标工作流的门禁节点；放行成功推进失败如实报告 `partial: True`；
+  - 前端增加 `confirmOpsForcePass` 二次确认弹窗与 `_opsActionBusy` 防重复提交保护；
+  - 前置重读权威状态，强校验工作流/任务归属、拦截已作废（superseded）任务及版本/运行实例错配。
+- 专项测试 `tests/test_console_ops_repair_gate_separation.py`（9/9 passed 含端到端 HTTP Server 到 SQLite 回读集成测试）；全量控制台测试 246 passed；S6 审查通过（MERGE_READY）。
+- 关联教训沉淀至 `docs/lessons/lessons-learned.md` §131。
+
+## [2026-10-05] update | 门禁放行范围投影对齐、节点版本完整性校验与接口防绕过闭环
+- Updated [[ops-center]], [[workflow-engine]]:
+  - 范围与投影对齐：`herdr/workflow_graph.py` 与 `console/herdr_factory_console.py::stage_summary` 严格感知 `gate_overrides` 中 `task_id`，单任务豁免绝不误将含其他阻塞/失败任务的多任务节点投影为通过/已清理；
+  - 节点版本映射完整性：`herdr/state_db.py` 与 `herdr/kernel.py` 的 `force_pass_gate` 在接收 `expected_task_versions` 时强制比对有效任务全集，拒绝不完整映射以防未确认任务被意外放行，同时 CAS 乐观锁 `exp_v` 直接绑定调用方期望版本；
+  - 接口双入口对齐：`/api/controller/execute-action` 与 `/api/kernel/force-pass` 统一通过 `_validate_force_pass_params` 强制要求快照版本保护字段，杜绝直接调用或旧客户端绕过防护；
+  - 运维中心“强制放行推进”动作修复：前端 `confirmOpsForcePass` 纠正调用 `force_pass_advance`，放行后正常尝试推进后续阶段。
+- 测试与验证：`tests/test_console_ops_repair_gate_separation.py`（17/17 passed）、`tests/test_console*.py`（254/254 passed, 76 subtests）、`python3 -m compileall` 及 `git diff --check` 全部 0 警告 0 报错。
+
 ## [2026-10-05] Added | 阻塞验收的持久恢复闭环
 - Added [[workflow-progress-recovery]]: 统一事实评估、同事务义务、租约执行、committed 后继与未知交付核验；工作树实现与部署验收分开记录。
 
@@ -2002,3 +2063,4 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 背景：`wf-nexusarchive-1005-01` 中前驱节点完成但自身任务全被 supersede 且无活跃 replacement，旧推进锁只检查前驱回退，导致 `'notified'` 锁永久驻留、每轮扫描静默跳过。
 - 修复：`reconcile_stage_advance_states` 在前驱完成时检查自身节点谱系；若全量任务被作废且无活跃后继，主动撤销推进锁；`direct_dispatch.node_tasks_for_latch` 提供包含作废任务的全量视图。
 - 回归：`tests/test_stage_advance_and_supersede.py` 新增 4 项场景测试，调度与派发套件 185 项全部通过。
+

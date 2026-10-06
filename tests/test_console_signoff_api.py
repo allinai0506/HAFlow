@@ -64,6 +64,7 @@ def _seed_task(env, tid="task-signoff-1", wid="wf-test-5", node="executive_brief
         "status": status,
         "stage_verdict": "blocked",
         "pane_id": "pane-mock-1",
+        "version": 1,
     })
     env["tasks_file"].write_text(json.dumps(t_data), encoding="utf-8")
 
@@ -78,7 +79,19 @@ def test_api_task_signoff_approve(console_signoff_env):
         "feedback": "各项财务数据均已核准，批准放行！",
         "operator": "CEO",
     }
-    res = c.api_task_signoff(req_body)
+
+    # Missing confirmation must be rejected
+    with pytest.raises(RuntimeError) as exc_conf:
+        c.api_task_signoff(req_body)
+    assert "显式确认" in str(exc_conf.value)
+
+    # Missing expected_version must be rejected
+    with pytest.raises(RuntimeError) as exc_ver:
+        c.api_task_signoff({**req_body, "confirmed": True})
+    assert "expected_version" in str(exc_ver.value)
+
+    # Valid signoff with confirmation and expected_version succeeds
+    res = c.api_task_signoff({**req_body, "confirmed": True, "expected_version": 1})
     assert res.get("ok") is True
     assert res.get("action") == "approve"
 

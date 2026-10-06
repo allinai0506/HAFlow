@@ -116,14 +116,24 @@ def generate_controller_actions(
 
     alt_agent = pick_alternative_agent(current_agent)
 
+    task_ver = task.get("version")
+    task_pane = task.get("pane_id") or (task.get("runtime") or {}).get("pane_id")
+
     reusable = status in {"blocked", "rework", "working", "agent_done", "paused", "interrupted"} and bool(task.get("pane_id") or (task.get("runtime") or {}).get("pane_id"))
     if reusable:
+        rework_payload = {"type": "rework", "task_id": tid, "workflow_id": wid}
+        if task_ver is not None:
+            rework_payload["expected_version"] = task_ver
+        if task_pane:
+            rework_payload["expected_pane_id"] = task_pane
+            rework_payload["pane_id"] = task_pane
+
         actions.append(ControllerAction(
             action_id=f"{tid}:rework", title="原工位返工", category="rework",
             description="保留任务与工位，就地处理评审问题并重新自测。",
             command_line=build_cli_command("rework", positionals=[tid]),
             api_endpoint="/api/controller/execute-action",
-            api_payload={"type": "rework", "task_id": tid, "workflow_id": wid},
+            api_payload=rework_payload,
             commands=[["rework", tid]], recommended=True,
             blocker_task_id=tid, effect=f"在原任务 {tid}、原工位返工，不新增任务或 Pane。",
             stage=stage,
@@ -262,6 +272,20 @@ def generate_controller_actions(
         advance_cmd = f"bin/herdr-task set {shlex.quote(tid)} completed --verdict pass && bin/herdr-task advance {shlex.quote(wid)}"
     else:
         advance_cmd = build_cli_command("advance", positionals=[wid])
+
+    pass_payload = {
+        "type": "force_pass_advance",
+        "workflow_id": wid,
+        "stage": stage,
+        "task_id": tid,
+        "gate_node_id": stage,
+    }
+    if task_ver is not None:
+        pass_payload["expected_version"] = task_ver
+    if task_pane:
+        pass_payload["expected_pane_id"] = task_pane
+        pass_payload["pane_id"] = task_pane
+
     actions.append(
         ControllerAction(
             action_id=f"{tid}:force_pass_advance" if tid else "force_pass_advance",
@@ -270,13 +294,7 @@ def generate_controller_actions(
             category="bypass",
             command_line=advance_cmd,
             api_endpoint="/api/controller/execute-action",
-            api_payload={
-                "type": "force_pass_advance",
-                "workflow_id": wid,
-                "stage": stage,
-                "task_id": tid,
-                "gate_node_id": stage,
-            },
+            api_payload=pass_payload,
             is_destructive=True,
             recommended=False,
             blocker_task_id=tid,

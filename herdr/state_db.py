@@ -6859,6 +6859,7 @@ def update_task_metadata(
     updates: Dict[str, Any],
     db_path: Optional[Path] = None,
     conn: Optional[sqlite3.Connection] = None,
+    expected_version: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Atomically update non-protected metadata fields of a task without touching status or identity."""
     forbidden = set(updates.keys()) & PROTECTED_TASK_METADATA_FIELDS
@@ -6878,6 +6879,11 @@ def update_task_metadata(
         row = cur.fetchone()
         if not row:
             raise ValueError(f"Task '{task_id}' not found")
+
+        if expected_version is not None and row["version"] != expected_version:
+            raise RuntimeError(
+                f"任务版本已在写入边界发生变化（期望版本 {expected_version}，当前版本 {row['version']}），写入已拒绝，请刷新页面"
+            )
 
         now = time.time()
         payload = json.loads(row["payload_json"] or "{}")
@@ -6974,6 +6980,198 @@ def update_workflow_metadata(
             conn.execute("COMMIT;")
 
         return wf
+    except Exception:
+        if should_close:
+            try:
+                conn.execute("ROLLBACK;")
+            except Exception:
+                pass
+        raise
+    finally:
+        if should_close:
+            conn.close()
+
+
+def force_pass_gate(
+    workflow_id: str,
+    gate_node_id: str,
+    note: str = "human forced pass",
+    operator: str = "human",
+    db_path: Optional[Path] = None,
+    conn: Optional[sqlite3.Connection] = None,
+    expected_version: Optional[int] = None,
+    task_id: Optional[str] = None,
+    expected_pane_id: Optional[str] = None,
+    expected_task_versions: Optional[Dict[str, int]] = None,
+) -> Dict[str, Any]:
+    """Atomically check and force-pass a gate node within a single immediate transaction."""
+    should_close = False
+    if conn is None:
+        conn = get_db_connection(db_path)
+        should_close = True
+
+    try:
+        if should_close:
+            conn.execute("BEGIN IMMEDIATE;")
+
+        cur_wf = conn.execute("SELECT * FROM workflows WHERE workflow_id = ?", (workflow_id,))
+        wf_row = cur_wf.fetchone()
+        if not wf_row:
+            raise ValueError(f"Workflow '{workflow_id}' not found")
+
+        cur_tasks = conn.execute(
+            "SELECT * FROM tasks WHERE workflow_id = ? ORDER BY created_at ASC", (workflow_id,)
+        )
+        all_task_rows = cur_tasks.fetchall()
+        all_tasks = [_decode_task_row(r) for r in all_task_rows]
+
+        matching_tasks = [
+            t for t in all_tasks
+            if gate_node_id in (t.get("node"), t.get("stage")) and t.get("status") != "superseded"
+        ]
+
+        tasks_to_update = []
+        if task_id:
+            target_task = next((t for t in matching_tasks if t.get("task_id") == task_id), None)
+            if not target_task:
+                any_t = next((t for t in all_tasks if t.get("task_id") == task_id), None)
+                if not any_t:
+                    raise RuntimeError(f"未找到任务 {task_id}（工作流 {workflow_id}）")
+                if any_t.get("status") == "superseded":
+                    raise RuntimeError(f"任务 {task_id} 已被替换或作废，请刷新页面")
+                t_node = any_t.get("node") or any_t.get("stage")
+                raise RuntimeError(f"任务 {task_id} 属于节点 {t_node}，与目标门禁节点 {gate_node_id} 不匹配")
+
+            if expected_pane_id is not None:
+                cur_pane = str(target_task.get("pane_id") or "").strip()
+                exp_pane = str(expected_pane_id).strip()
+                if cur_pane != exp_pane:
+                    raise RuntimeError(
+                        f"任务运行实例已变化（期望实例 {expected_pane_id}，当前实例 {cur_pane}），写入已拒绝，请刷新页面"
+                    )
+
+            if expected_version is not None:
+                cur_ver = target_task.get("version")
+                if cur_ver != expected_version:
+                    raise RuntimeError(
+                        f"任务版本已在写入边界发生变化（期望版本 {expected_version}，当前版本 {cur_ver}），写入已拒绝，请刷新页面"
+                    )
+
+            tasks_to_update = [target_task]
+        else:
+            if expected_version is not None:
+                raise RuntimeError(
+                    f"节点级放行禁止使用单一 expected_version 进行版本保护，当前节点有效任务为 {[t.get('task_id') for t in matching_tasks]}，"
+                    f"必须使用 expected_task_versions 映射进行完整任务集合校验，或指定具体的 task_id 进行单任务放行"
+                )
+            if expected_task_versions is not None:
+                matching_tids = {t.get("task_id") for t in matching_tasks}
+                provided_tids = set(expected_task_versions.keys())
+                if matching_tids != provided_tids:
+                    raise RuntimeError(
+                        f"节点级放行版本映射不完整或不匹配: 当前节点有效任务为 {sorted(matching_tids)}，"
+                        f"提交映射为 {sorted(provided_tids)}，必须完整核验所有任务版本"
+                    )
+                for t in matching_tasks:
+                    tid = t.get("task_id")
+                    exp_v = expected_task_versions[tid]
+                    cur_v = t.get("version")
+                    if cur_v != exp_v:
+                        raise RuntimeError(
+                            f"任务 {tid} 版本已在写入边界发生变化（期望版本 {exp_v}，当前版本 {cur_v}），写入已拒绝，请刷新页面"
+                        )
+            tasks_to_update = matching_tasks
+
+        now = time.time()
+        updated_tasks = []
+        for t in tasks_to_update:
+            tid = t["task_id"]
+            # Target optimistic version for task CAS write directly from caller expected parameters
+            if expected_task_versions is not None:
+                exp_v = expected_task_versions.get(tid)
+            elif expected_version is not None:
+                exp_v = expected_version
+            else:
+                exp_v = None
+            payload = {k: v for k, v in t.items() if k not in {
+                "task_id", "workflow_id", "node", "stage", "agent", "status",
+                "stage_verdict", "stage_verdict_note", "pane_id", "goal", "blocker",
+                "created_at", "version"
+            }}
+            payload_json = json.dumps(payload, ensure_ascii=False)
+            verdict = "pass"
+            verdict_note = f"[FORCE PASS by {operator}] {note}"
+
+            cur = conn.execute("""
+                UPDATE tasks SET
+                    stage_verdict = ?,
+                    stage_verdict_note = ?,
+                    payload_json = ?,
+                    updated_at = ?,
+                    version = COALESCE(version, 0) + 1
+                WHERE task_id = ? AND (? IS NULL OR version = ?);
+            """, (verdict, verdict_note, payload_json, now, tid, exp_v, exp_v))
+
+            if cur.rowcount == 0:
+                raise RuntimeError(
+                    f"任务 {tid} 版本已在写入边界发生变化（期望版本 {exp_v}），写入已拒绝，请刷新页面"
+                )
+            updated_tasks.append(tid)
+
+        meta = json.loads(wf_row["metadata_json"] or "{}")
+        cfg = json.loads(wf_row["config_json"] or "{}")
+        wf_dict = dict(meta)
+        wf_dict.update({
+            "workflow_id": wf_row["workflow_id"],
+            "title": wf_row["title"],
+            "status": wf_row["status"],
+            "template_name": wf_row["template_name"],
+            "current_stage": wf_row["current_stage"],
+            "config": cfg,
+            "created_at": wf_row["created_at"],
+            "updated_at": now,
+        })
+        overrides = dict(wf_dict.get("gate_overrides") or {})
+        history_overrides = list(wf_dict.get("gate_overrides_history") or [])
+        override_record = {
+            "verdict": "pass",
+            "note": note,
+            "operator": operator,
+            "timestamp": now,
+        }
+        if task_id:
+            override_record["task_id"] = task_id
+            target_post_ver = (target_task.get("version") or 0) + 1
+            override_record["task_version"] = target_post_ver
+            override_record["task_versions"] = {task_id: target_post_ver}
+            override_record["task_ids"] = [task_id]
+        else:
+            snapshot_versions = {
+                t["task_id"]: (t.get("version") or 0) + 1
+                for t in tasks_to_update
+            }
+            override_record["task_versions"] = snapshot_versions
+            override_record["task_ids"] = sorted(list(snapshot_versions.keys()))
+
+        overrides[gate_node_id] = override_record
+        history_entry = dict(override_record)
+        history_entry["node_id"] = gate_node_id
+        history_entry["action"] = "force_pass"
+        history_overrides.append(history_entry)
+
+        wf_dict["gate_overrides"] = overrides
+        wf_dict["gate_overrides_history"] = history_overrides
+        save_workflow(wf_dict, db_path=None, conn=conn)
+
+        if should_close:
+            conn.execute("COMMIT;")
+
+        return {
+            "ok": True,
+            "workflow_id": workflow_id,
+            "gate_node_id": gate_node_id,
+            "updated_tasks": updated_tasks,
+        }
     except Exception:
         if should_close:
             try:

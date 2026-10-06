@@ -380,51 +380,128 @@ def force_pass_gate(
     note: str = "human forced pass",
     operator: str = "human",
     store: Optional[StateStore] = None,
+    expected_version: Optional[int] = None,
+    task_id: Optional[str] = None,
+    expected_pane_id: Optional[str] = None,
+    expected_task_versions: Optional[Dict[str, int]] = None,
 ) -> Dict[str, Any]:
     """Forcibly mark a gate node verdict as passed/approved with an audit note."""
     s = _get_store(store)
-    tasks = s.list_tasks(workflow_id=workflow_id)
-    updated_tasks = []
-
-    for task in tasks:
-        if gate_node_id not in (task.get("node"), task.get("stage")):
-            continue
-        if task.get("status") == "superseded":
-            continue
-
-        tid = task.get("task_id")
-        update_task_metadata(
-            task_id=tid,
-            updates={
-                "stage_verdict": "pass",
-                "stage_verdict_note": f"[FORCE PASS by {operator}] {note}",
-            },
-            store=s,
-        )
-        updated_tasks.append(tid)
-
-    # Also record in workflow entry gate_overrides
-    wf_entry = s.get_workflow(workflow_id)
-    if wf_entry:
-        overrides = dict(wf_entry.get("gate_overrides") or {})
-        overrides[gate_node_id] = {
-            "verdict": "pass",
-            "note": note,
-            "operator": operator,
-            "timestamp": time.time(),
-        }
-        update_workflow_metadata(
+    if hasattr(s, "force_pass_gate"):
+        res = s.force_pass_gate(
             workflow_id=workflow_id,
-            updates={"gate_overrides": overrides},
-            store=s,
+            gate_node_id=gate_node_id,
+            note=note,
+            operator=operator,
+            expected_version=expected_version,
+            task_id=task_id,
+            expected_pane_id=expected_pane_id,
+            expected_task_versions=expected_task_versions,
         )
+    else:
+        tasks = s.list_tasks(workflow_id=workflow_id)
+        matching_tasks = [
+            t for t in tasks
+            if gate_node_id in (t.get("node"), t.get("stage")) and t.get("status") != "superseded"
+        ]
 
-    return {
-        "ok": True,
-        "workflow_id": workflow_id,
-        "gate_node_id": gate_node_id,
-        "updated_tasks": updated_tasks,
-    }
+        tasks_to_update = []
+        if task_id:
+            target_task = next((t for t in matching_tasks if t.get("task_id") == task_id), None)
+            if not target_task:
+                raise RuntimeError(f"未找到任务 {task_id}（工作流 {workflow_id}）")
+            if expected_version is not None and target_task.get("version") != expected_version:
+                raise RuntimeError(
+                    f"任务版本已在写入边界发生变化（期望版本 {expected_version}，当前版本 {target_task.get('version')}），写入已拒绝，请刷新页面"
+                )
+            tasks_to_update = [target_task]
+        else:
+            if expected_version is not None:
+                raise RuntimeError(
+                    f"节点级放行禁止使用单一 expected_version 进行版本保护，当前节点有效任务为 {[t.get('task_id') for t in matching_tasks]}，"
+                    f"必须使用 expected_task_versions 映射进行完整任务集合校验，或指定具体的 task_id 进行单任务放行"
+                )
+            if expected_task_versions is not None:
+                matching_tids = {t.get("task_id") for t in matching_tasks}
+                provided_tids = set(expected_task_versions.keys())
+                if matching_tids != provided_tids:
+                    raise RuntimeError(
+                        f"节点级放行版本映射不完整或不匹配: 当前节点有效任务为 {sorted(matching_tids)}，"
+                        f"提交映射为 {sorted(provided_tids)}，必须完整核验所有任务版本"
+                    )
+                for t in matching_tasks:
+                    tid = t.get("task_id")
+                    exp_v = expected_task_versions[tid]
+                    cur_v = t.get("version")
+                    if cur_v != exp_v:
+                        raise RuntimeError(
+                            f"任务 {tid} 版本已在写入边界发生变化（期望版本 {exp_v}，当前版本 {cur_v}），写入已拒绝，请刷新页面"
+                        )
+            tasks_to_update = matching_tasks
+
+        updated_tasks = []
+        for task in tasks_to_update:
+            tid = task.get("task_id")
+            update_task_metadata(
+                task_id=tid,
+                updates={
+                    "stage_verdict": "pass",
+                    "stage_verdict_note": f"[FORCE PASS by {operator}] {note}",
+                },
+                store=s,
+            )
+            updated_tasks.append(tid)
+
+        wf_entry = s.get_workflow(workflow_id)
+        if wf_entry:
+            now = time.time()
+            overrides = dict(wf_entry.get("gate_overrides") or {})
+            history_overrides = list(wf_entry.get("gate_overrides_history") or [])
+            override_record = {
+                "verdict": "pass",
+                "note": note,
+                "operator": operator,
+                "timestamp": now,
+            }
+            if task_id:
+                override_record["task_id"] = task_id
+                target_post_ver = (target_task.get("version") or 0) + 1
+                override_record["task_version"] = target_post_ver
+                override_record["task_versions"] = {task_id: target_post_ver}
+                override_record["task_ids"] = [task_id]
+            else:
+                snapshot_versions = {
+                    t["task_id"]: (t.get("version") or 0) + 1
+                    for t in tasks_to_update
+                }
+                override_record["task_versions"] = snapshot_versions
+                override_record["task_ids"] = sorted(list(snapshot_versions.keys()))
+
+            overrides[gate_node_id] = override_record
+            history_entry = dict(override_record)
+            history_entry["node_id"] = gate_node_id
+            history_entry["action"] = "force_pass"
+            history_overrides.append(history_entry)
+
+            update_workflow_metadata(
+                workflow_id=workflow_id,
+                updates={
+                    "gate_overrides": overrides,
+                    "gate_overrides_history": history_overrides,
+                },
+                store=s,
+            )
+
+        res = {
+            "ok": True,
+            "workflow_id": workflow_id,
+            "gate_node_id": gate_node_id,
+            "updated_tasks": updated_tasks,
+        }
+
+    sync_tasks_projection(store=s)
+    sync_workflows_projection(store=s)
+    return res
 
 
 # ============================================================
@@ -485,6 +562,23 @@ def rollback_workflow(
     for n_id in affected_nodes:
         advances.pop(n_id, None)
 
+    # Invalidate active gate_overrides for affected nodes and preserve in audit history
+    overrides = dict(wf_fresh.get("gate_overrides") or {})
+    history_overrides = list(wf_fresh.get("gate_overrides_history") or [])
+    invalidated_overrides = []
+    for n_id in affected_nodes:
+        old_ov = overrides.pop(n_id, None)
+        if old_ov:
+            invalidated_overrides.append(n_id)
+            history_overrides.append({
+                "node_id": n_id,
+                "action": "invalidated_by_rollback",
+                "rollback_target": target_node_id,
+                "reason": reason,
+                "timestamp": time.time(),
+                "prior_override": old_ov,
+            })
+
     s_file = get_stage_state_file()
     if s_file.exists():
         try:
@@ -510,12 +604,15 @@ def rollback_workflow(
         "reason": reason,
         "affected_nodes": list(affected_nodes),
         "invalidated_tasks": invalidated,
+        "invalidated_gate_overrides": invalidated_overrides,
         "timestamp": time.time(),
     })
     update_workflow_metadata(
         workflow_id=workflow_id,
         updates={
             "stage_advancing": advances,
+            "gate_overrides": overrides,
+            "gate_overrides_history": history_overrides,
             "history": history,
         },
         store=s,
@@ -527,6 +624,7 @@ def rollback_workflow(
         "target_node_id": target_node_id,
         "affected_nodes": list(affected_nodes),
         "invalidated_tasks": invalidated,
+        "invalidated_gate_overrides": invalidated_overrides,
     }
 
 

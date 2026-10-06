@@ -237,6 +237,7 @@ class TestUniversalSubstrateEndToEnd:
             "pane_id": "pane-mock-gate",
             "goal": "高管决策简报会签",
             "started_at": 1773479200,
+            "version": 1,
         }
         tasks_db["tasks"].append(task_gate)
         kernel.save_tasks_data(tasks_db)
@@ -252,6 +253,8 @@ class TestUniversalSubstrateEndToEnd:
             "action": "approve",
             "feedback": "商业洞察深刻，财务核算准确，准予交付！",
             "operator": "CEO",
+            "confirmed": True,
+            "expected_version": 1,
         })
         assert signoff_res.get("ok") is True
         assert signoff_res.get("action") == "approve"
