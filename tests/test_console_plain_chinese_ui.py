@@ -149,6 +149,14 @@ class TestConsoleCopyIsPlainChinese(unittest.TestCase):
                     f"console 源码仍含旧术语: {token}",
                 )
 
+    def test_toast_error_persists_and_has_friendly_translation(self):
+        self.assertIn("friendlyErrorChinese", CONSOLE_SRC)
+        self.assertIn("closeToast", CONSOLE_SRC)
+        self.assertIn("toast-close", CONSOLE_SRC)
+        self.assertIn("toast-msg", CONSOLE_SRC)
+        self.assertIn("代码提交前门禁失败", CONSOLE_SRC)
+        self.assertIn("Git 索引被其他操作锁定中", CONSOLE_SRC)
+
 
 if __name__ == "__main__":
     unittest.main()
