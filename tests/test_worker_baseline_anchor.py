@@ -277,7 +277,8 @@ class TestWorkerResultContract(GitFixture):
         self.make_onto_origin()
         payload, output, _events = self._run_worker_main("anchor-result-onto", onto="feat/wip")
 
-        self.assertEqual(payload["branch"], "feat/wip")
+        self.assertEqual(payload["branch"], "agent/claude/feat-anchor-result-onto")
+        self.assertEqual(payload["onto_branch"], "feat/wip")
         self.assertEqual(payload["onto_branch"], "feat/wip")
         self.assertEqual(payload["baseline_commit"], self.pr_tip)
         self.assertIn(f"[BASELINE COMMIT] {self.pr_tip}", output)

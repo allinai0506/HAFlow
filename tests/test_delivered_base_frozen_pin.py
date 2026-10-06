@@ -48,7 +48,11 @@ def test_current_workflow_commit_proof_is_required_for_frozen_pin(actual_scene, 
     controller, repo, db, sha, item, calls, cli = actual_scene
     if variant != "absent":
         frozen = sha[:12] if variant == "short" else "a" * 40 if variant == "wrong" else sha
-        scheduler_facts.record_candidate_frozen("other" if variant == "other_workflow" else "wf-candidate", frozen, db_path=db)
+        if variant in {'short', 'other_workflow'}:
+            with pytest.raises(ValueError):
+                scheduler_facts.record_candidate_frozen('other' if variant == 'other_workflow' else 'wf-candidate', frozen, db_path=db)
+        else:
+            scheduler_facts.record_candidate_frozen('wf-candidate', frozen, db_path=db)
     if variant == "latest_wrong":
         scheduler_facts.record_candidate_frozen("wf-candidate", "a" * 40, db_path=db)
     if variant == "head_moved":

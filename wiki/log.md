@@ -2070,3 +2070,5 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 验证：专项套件 25/25 passed，全量回归 3535 passed（排除已知超时 HTTP 集成测试），PR 冲突状态 CLEAN/MERGEABLE，已合并入 main@0be44bd。
 - 教训：沉淀至 §132（跨 PR 测试隔离：新守卫逻辑提前拦截时需精确 mock 而非注释掉断言）。
 
+
+- 2026-10-06：更新 workflow-progress-recovery，记录权威快照、证据迁移、在途后继消费、发布 episode 与独立业务回执；当前为工作树实现，生产激活和业务复跑未执行。

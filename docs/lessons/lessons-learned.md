@@ -6105,3 +6105,17 @@ if any(op['status'] not in {'resolved','superseded'}
 - Controller 动作套件：`pytest -q tests/test_console_controller_actions_api.py`（7 passed）
 - 全量回归（排除已知超时 HTTP 集成测试）：`pytest -q --deselect tests/test_console_ops_repair_gate_separation.py::test_scenario_9_http_route_integration_to_sqlite`（3535 passed, 1 deselected, 157 subtests passed in 551.75s）
 
+
+## §133 重复修复必须验证恢复消费，而非只验证发送（2026-10-06）
+
+### 问题背景
+`wf-nexusarchive-1005-01` 的 PR #144–153 修复了局部守卫，但历史身份缺失、已送达动作未消费、任务分支所有权混用和活动时间冻结候选仍组合成死锁。专项绿灯后的独立审查再次复现空恢复 inventory 重发，以及已送达 successor 自身成为 affected 后被再次返工。
+
+### 经验教训
+发送前判断与送达后消费是两套必须同时验证的边界。Workflow/Run/epoch/候选/请求身份不能由时间或执行声明推测；恢复后的副作用必须基于当前权威快照。业务测试报告不能由通用测试分数替代。外部证明正确也不能把慢 Git/文件读取放在全局 SQLite 写锁内；迁移审计不应复制原始任意 payload。
+
+### 操作规范
+统一事务快照、同代发布 episode、Task 专属引用、交付一对一映射、短写事务 CAS 和白名单逆迁移。返工只消费当前失败，已经在途的正式后继只等待结果。验收列出实际配置的全部 AC-N，并绑定校验后的 checkpoint；显式预算增加保留历史计数。上述反例已固化到 `tests/test_workflow_repair_contracts.py`，不得以放宽断言替代修复。
+
+### 验证命令 / 关联证据
+`pytest -q tests/test_workflow_repair_contracts.py tests/test_recovery_store.py tests/test_workflow_recovery.py tests/test_recovery_entrypoints.py` 实际 87 passed。工作树 `.omc/evidence/` 保留第一轮 7 个 RED 反例及第二轮 successor 自体 RED；生产数据库只读 backup 的新迁移 apply/rollback 演练有独立 plan/receipt。以上不代表已部署或 NexusArchive 业务验收成功。

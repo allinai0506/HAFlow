@@ -35,6 +35,22 @@ Evidence:
 - `tests/test_recovery_successor.py`
 - `tests/test_workflow_recovery.py`
 
+## FACT：快照、发布与已送达动作的闭环
+
+SQLite 的统一快照同时提供 Workflow、固定配置和 Task 身份；候选只读取当前代次、`critical-path-scheduler` 的明确冻结事件。未知 execution_id / Run、配置缺失、测试预算不足必须在派发前拒绝。历史身份迁移只使用同 Workflow/Task/Run 的 INITIAL 与当前 epoch 交付回执；apply 和 rollback 使用原行与事件水位 CAS，审计仅保存迁移字段的逆操作，禁止复制任意 Task 内容。外部 Git/Artifact 校验在写事务前完成，事务内重查身份和版本。
+
+恢复先消费已登记 rework request、已送达 successor，或当前受影响对象自身的在途 successor。Run、epoch、request、双向 lineage 与一对一映射缺一即 unknown；未知交付不得补发。只有当前候选的有效失败参与返工，已发送动作继续剩余步骤。Task 使用自己的分支和 `refs/herdr/tasks/<task_id>`；onto 只定义基线，rebase 后实际 HEAD 必须先持久化，再输出集成引用。已集成重试仍清除升级标记。
+
+发布事件携带生产者固定的候选 episode，迟到发布不能覆盖后来候选；清理和报告更新不产生发布事件。业务验收回执独立于通用评分，绑定当前候选、Run、epoch、全部配置 AC-N 和校验后的 checkpoint。预算增加须显式有界授权、配置哈希 CAS 与审计，不能重置历史计数。
+
+Evidence:
+- `herdr/recovery_store.py#read_snapshot`
+- `herdr/workflow_repair_migration.py#apply`
+- `herdr/workflow_recovery.py#existing_delivery_details`
+- `herdr/scheduler_facts.py#publish_integrated_candidate`
+- `herdr/task_checkpoint.py#record_business_acceptance`
+- `tests/test_workflow_repair_contracts.py`
+
 ## UNKNOWN：现场业务验收与发布
 
 本页描述工作树实现，不能证明已部署或原 NexusArchive 业务测试已通过。发布需独立不可变 release、只读 shadow 对比、单执行者切换及授权后的现场复跑。源仓库 WIP 的归属与业务修复范围需由负责人确认。

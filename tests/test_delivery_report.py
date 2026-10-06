@@ -13,6 +13,7 @@ def api():
 def execution(tmp_path):
     store=SQLiteStateStore(tmp_path/'state.db')
     store.save_workflow({'workflow_id':'wf-report','status':'completed','candidate_sha':'a'*40})
+    store.record_event('candidate_frozen', {'candidate_sha':'a'*40}, workflow_id='wf-report', source='critical-path-scheduler')
     store.save_task({'task_id':'test-a','workflow_id':'wf-report','run_id':'run-a','status':'agent_done','candidate_sha':'a'*40})
     return store
 

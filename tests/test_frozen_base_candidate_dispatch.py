@@ -26,6 +26,10 @@ def scene(tmp_path, monkeypatch):
     sha = git("rev-parse", "HEAD")
     git("branch", "candidate")
     db = tmp_path / "state.db"
+    monkeypatch.setenv('HERDR_STATE_DB', str(db))
+    from herdr.state_store import SQLiteStateStore
+    SQLiteStateStore(db).save_workflow({'workflow_id': 'wf-candidate', 'status': 'running',
+        'execution_id': 'gen', 'project_root': str(repo)})
     read_facts = scheduler_facts.list_candidate_frozen_events
     monkeypatch.setattr(scheduler_facts, "list_candidate_frozen_events",
                         lambda workflow_id, db_path=None: read_facts(workflow_id, db_path=db))
@@ -76,7 +80,11 @@ def test_empty_candidate_requires_current_full_identity(scene, variant):
     controller, repo, db, sha, spec, item, launches = scene
     frozen = sha[:12] if variant == "short_freeze" else sha
     workflow = "other-workflow" if variant == "other_workflow" else "wf-candidate"
-    scheduler_facts.record_candidate_frozen(workflow, frozen, db_path=db)
+    if variant in {'short_freeze', 'other_workflow'}:
+        with pytest.raises(ValueError):
+            scheduler_facts.record_candidate_frozen(workflow, frozen, db_path=db)
+    else:
+        scheduler_facts.record_candidate_frozen(workflow, frozen, db_path=db)
     if variant == "short_spec":
         spec["candidate_sha"] = sha[:12]
     elif variant == "stale_spec":
@@ -184,5 +192,9 @@ def test_integrated_task_ref_off_base_dispatches_frozen_sha_without_borrowing_br
 @pytest.mark.parametrize("frozen", ["a" * 40, "abc123"])
 def test_frozen_off_base_candidate_must_be_a_real_full_commit(scene, frozen):
     controller, repo, db, sha, spec, item, launches = scene
-    scheduler_facts.record_candidate_frozen("wf-candidate", frozen, db_path=db)
+    if len(frozen) != 40:
+        with pytest.raises(ValueError):
+            scheduler_facts.record_candidate_frozen('wf-candidate', frozen, db_path=db)
+    else:
+        scheduler_facts.record_candidate_frozen('wf-candidate', frozen, db_path=db)
     assert controller._scheduler_expected_candidate_sha("wf-candidate", str(repo), [], None) == ""

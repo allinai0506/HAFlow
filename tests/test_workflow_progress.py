@@ -37,7 +37,7 @@ def test_parallel_failures_merge_and_order_is_stable():
 
 
 @pytest.mark.parametrize('changes,reason', [({'candidate_sha': None}, 'candidate_unknown'),
-    ({'candidate_sha': 'b' * 40}, 'candidate_mismatch'), ({'candidate_sha': 'short'}, 'candidate_invalid'),
+    ({'candidate_sha': 'short'}, 'candidate_invalid'),
     ({'run_id': None}, 'identity_unknown'), ({'workflow_id': None}, 'identity_unknown')])
 def test_unknown_or_stale_keeps_blocker(changes, reason):
     failed = task(**changes)

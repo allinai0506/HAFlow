@@ -25,7 +25,7 @@ def delivery_confirmed(task, receipts=()):
 
 
 def has_confirmed_delivery(store, task):
-    conn = state_db.get_db_connection(store.db_path)
+    conn = state_db.get_readonly_db_connection(store.db_path)
     try:
         return delivery_confirmed(task, _receipts(conn, task))
     finally:
@@ -53,7 +53,7 @@ def confirmed_rework(conn, task, request_id):
 
 
 def has_confirmed_rework(store, task, request_id):
-    conn = state_db.get_db_connection(store.db_path)
+    conn = state_db.get_readonly_db_connection(store.db_path)
     try:
         return confirmed_rework(conn, task, request_id)
     finally:

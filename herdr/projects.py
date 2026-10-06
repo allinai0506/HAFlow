@@ -297,6 +297,15 @@ def _with_node_runtime(config, record):
 
 
 def workflow_config_for(workflow_id):
+    store = _get_store()
+    if hasattr(store, "read_workflow_snapshot"):
+        try:
+            record, cfg, _ = store.read_workflow_snapshot(workflow_id)
+        except ValueError:
+            return None
+        if cfg.get("nodes"):
+            return _with_node_runtime(validate_required_task_scope(cfg, workflow_id), record)
+        return None  # Legacy definitions require an explicit evidence migration.
     record = project_for_workflow(workflow_id)
     if record and record.get("workflow_file"):
         path = Path(record["workflow_file"]).expanduser()
@@ -544,6 +553,7 @@ def register_workflow(workflow_id, project, requirement="", title="", execution=
     # entry before the one save_workflow call below. No second write follows.
     resolved_workflow_file = workflow_file or project.get("workflow_file")
     store = _get_store()
+    definition = None
     source_path = Path(resolved_workflow_file).expanduser()
     if source_path.exists():
         definition = _load(source_path, None)
@@ -575,6 +585,8 @@ def register_workflow(workflow_id, project, requirement="", title="", execution=
         "coordinator_pane_id": project["coordinator_pane_id"],
         "workflow_file": resolved_workflow_file,
         "requirement": requirement,
+        "execution_id": (metadata.get("execution_id") if isinstance(metadata, dict) else None) or workflow_id,
+        "config": normalize_workflow(definition) if definition else {},
         "startup_ready": False,
         "status": "running",
     }

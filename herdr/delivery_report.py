@@ -1,6 +1,7 @@
 """Read-only projection of bound execution evidence; never infer deployment."""
 from . import state_db
 from .observation import ObservationStore
+from .task_checkpoint import has_business_acceptance, read_task_checkpoints
 
 
 def _verification(task, candidate, store):
@@ -45,8 +46,7 @@ def build_delivery_report(workflow_id, store):
     workflow = store.get_workflow(workflow_id)
     if workflow is None:
         raise ValueError('Unknown workflow')
-    frozen = store.list_events(workflow_id=workflow_id, event_type='candidate_frozen', limit=1, desc=True)
-    candidate = ((frozen[0].get('payload') or {}).get('candidate_sha') if frozen else None) or workflow.get('candidate_sha')
+    candidate = workflow.get('candidate_sha')
     tasks = []
     records = state_db.list_tasks(workflow_id=workflow_id, limit=1001, db_path=store.db_path)
     truncated = len(records) > 1000
@@ -54,16 +54,25 @@ def build_delivery_report(workflow_id, store):
         evaluation = store.get_latest_eval_result(task['run_id']) if task.get('run_id') else None
         if evaluation and (evaluation.get('task_id') != task['task_id'] or evaluation.get('workflow_id') != workflow_id):
             evaluation = None
+        checkpoints = {'status': 'unknown', 'segments': []}
+        if task.get('run_id') and task.get('completion_epoch'):
+            try:
+                checkpoints = read_task_checkpoints(task['task_id'], task['run_id'], task['completion_epoch'], store=store)
+            except (ValueError, OSError):
+                checkpoints = {'status': 'invalid', 'segments': []}
+        business = 'pass' if has_business_acceptance(store, task, candidate) else 'unknown'
         tasks.append({'task_id': task['task_id'], 'run_id': task.get('run_id'), 'status': task['status'],
                       'candidate_sha': task.get('candidate_sha'), 'stage_verdict': task.get('stage_verdict'),
                       'verification': _verification(task, candidate, store),
-                      'evaluation': evaluation,
+                      'evaluation': evaluation, 'business_acceptance': business, 'checkpoints': checkpoints,
                       'outcome': state_db.get_execution_outcome(task['task_id'], task['run_id'], db_path=store.db_path)
                       if task.get('run_id') else None})
     gates = store.list_events(workflow_id=workflow_id, event_type='join_gate_verdict', limit=100, desc=True)
     return {'schema_version': 1, 'workflow_id': workflow_id, 'workflow_status': workflow['status'],
             'candidate_sha': candidate, 'tasks': tasks, 'tasks_truncated': truncated, 'gates': gates,
             'all_verifications_passed': not truncated and bool(tasks) and all(t['verification']['status'] == 'pass' for t in tasks),
+            'business_acceptance': 'pass' if not truncated and bool(tasks) and all(t['business_acceptance'] == 'pass' for t in tasks) else 'unknown',
             'merge_status': 'unknown', 'deployment_status': 'unknown', 'production_validation': 'unknown',
             'limitations': ['Completion declarations do not certify delivery or production acceptance.',
+                            'Generic runner scores do not certify business acceptance.',
                             'Unattested execution mode, candidate, artifact, or runtime remains unknown.']}

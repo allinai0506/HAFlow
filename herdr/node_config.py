@@ -15,6 +15,10 @@ def read_configuration(store, workflow_id):
     workflow = store.get_workflow(workflow_id)
     if not workflow:
         raise ValueError('workflow not found')
+    if workflow.get('config', {}).get('nodes'):
+        config = workflow['config']
+        raw = (json.dumps(config, ensure_ascii=False, indent=2) + '\n').encode()
+        return workflow, config, hashlib.sha256(raw).hexdigest()
     path = Path(workflow.get('workflow_file') or '').expanduser()
     if not path.is_file() or path.stat().st_size > 1024*1024:
         raise ValueError('workflow configuration unavailable or exceeds budget')
@@ -66,15 +70,20 @@ def update_required_tasks(store, workflow_id, node_id, required_ids, *, expected
         conn = state_db.get_db_connection(store.db_path)
         try:
             conn.execute('BEGIN IMMEDIATE')
-            row = conn.execute('SELECT status, metadata_json FROM workflows WHERE workflow_id = ?', (workflow_id,)).fetchone()
+            row = conn.execute('SELECT status, metadata_json, config_json FROM workflows WHERE workflow_id = ?', (workflow_id,)).fetchone()
             if row is None:
                 raise ValueError('workflow disappeared during configuration update')
             fresh = {**json.loads(row['metadata_json'] or '{}'), 'status':row['status']}
             if fresh.get('workflow_file') != workflow.get('workflow_file') or fresh['status'] != workflow['status']:
                 raise ValueError('workflow changed during configuration update')
-            if hashlib.sha256(Path(workflow['workflow_file']).read_bytes()).hexdigest() != before:
+            if workflow.get('config', {}).get('nodes'):
+                raw = (json.dumps(json.loads(row['config_json']), ensure_ascii=False, indent=2) + '\n').encode()
+            else:
+                raw = Path(workflow['workflow_file']).read_bytes()
+            if hashlib.sha256(raw).hexdigest() != before:
                 raise ValueError('configuration changed during update')
             state_db.update_workflow_metadata(workflow_id,{'workflow_file':str(target)},conn=conn)
+            conn.execute('UPDATE workflows SET config_json=? WHERE workflow_id=?', (json.dumps(config), workflow_id))
             result = {'workflow_id':workflow_id,'node_id':node_id,'before_sha':before,'config_sha':after,
                       'required_task_ids':required_ids,'previous_required_task_ids':previous,'reason':reason,
                       'workflow_file':str(target)}
@@ -85,3 +94,34 @@ def update_required_tasks(store, workflow_id, node_id, required_ids, *, expected
         except Exception:
             conn.execute('ROLLBACK');raise
         finally: conn.close()
+
+
+def extend_budget(store, workflow_id, node_id, *, expected_sha, additional, operator, reason):
+    """One explicit bounded grant; history is retained and concurrent grants CAS."""
+    if type(additional) is not int or not 1 <= additional <= 8:
+        raise ValueError('budget grant must be bounded to 1..8 additional tasks')
+    if not operator.strip() or not reason.strip() or len(reason) > 1000:
+        raise ValueError('operator and bounded reason required')
+    from . import recovery_store
+    with workflow_launch_lock(store.db_path, workflow_id), recovery_store._transaction(store.db_path) as conn:
+        workflow, config, _ = recovery_store._snapshot(conn, workflow_id)
+        raw = (json.dumps(config, ensure_ascii=False, indent=2) + '\n').encode()
+        if hashlib.sha256(raw).hexdigest() != expected_sha:
+            raise ValueError('configuration changed')
+        if workflow.get('status') != 'running' or not workflow.get('execution_id'):
+            raise ValueError('active workflow generation required')
+        matches = [n for n in config.get('nodes', []) if n.get('id') == node_id]
+        if len(matches) != 1 or type(matches[0].get('max_tasks_per_node')) is not int:
+            raise ValueError('explicit finite node budget required')
+        node = matches[0]
+        old = node['max_tasks_per_node']
+        if not 1 <= old < old + additional <= 64:
+            raise ValueError('total budget must be bounded to 64 tasks')
+        node['max_tasks_per_node'] = old + additional
+        conn.execute('UPDATE workflows SET config_json=? WHERE workflow_id=?', (json.dumps(config), workflow_id))
+        result = {'workflow_id': workflow_id, 'node_id': node_id,
+                  'execution_id': workflow['execution_id'], 'previous_limit': old,
+                  'max_tasks_per_node': old + additional, 'operator': operator, 'reason': reason}
+        state_db.record_event({'event_type': 'node_budget_extended', 'workflow_id': workflow_id,
+                              'node_id': node_id, 'source': 'herdr-task', 'payload': result}, conn=conn)
+        return result

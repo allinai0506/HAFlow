@@ -1498,28 +1498,19 @@ def save_workflow(
 
 def get_workflow(workflow_id: str, db_path: Optional[Path] = None) -> Optional[Dict[str, Any]]:
     """Fetch a workflow by its workflow_id."""
-    conn = get_db_connection(db_path)
+    from .recovery_store import _workflow_snapshot
     try:
-        cur = conn.execute("SELECT * FROM workflows WHERE workflow_id = ?", (workflow_id,))
-        row = cur.fetchone()
-        if not row:
-            return None
-
-        meta = json.loads(row["metadata_json"] or "{}")
-        cfg = json.loads(row["config_json"] or "{}")
-
-        wf = dict(meta)
-        wf.update({
-            "workflow_id": row["workflow_id"],
-            "title": row["title"],
-            "status": row["status"],
-            "template_name": row["template_name"],
-            "current_stage": row["current_stage"],
-            "config": cfg,
-            "created_at": row["created_at"],
-            "updated_at": row["updated_at"],
-        })
-        return wf
+        conn = get_readonly_db_connection(db_path)
+    except FileNotFoundError:
+        return None
+    try:
+        conn.execute('BEGIN')
+        try:
+            return _workflow_snapshot(conn, workflow_id)[0]
+        except ValueError as exc:
+            if str(exc) == 'workflow not found':
+                return None
+            raise
     finally:
         conn.close()
 
@@ -1529,29 +1520,18 @@ def list_workflows(
     db_path: Optional[Path] = None,
 ) -> List[Dict[str, Any]]:
     """Fetch all workflows, optionally filtered by status."""
-    conn = get_db_connection(db_path)
+    from .recovery_store import _workflow_snapshot
     try:
+        conn = get_readonly_db_connection(db_path)
+    except FileNotFoundError:
+        return []
+    try:
+        conn.execute('BEGIN')
         if status:
-            cur = conn.execute("SELECT * FROM workflows WHERE status = ? ORDER BY created_at DESC", (status,))
+            rows = conn.execute("SELECT workflow_id FROM workflows WHERE status=? ORDER BY created_at DESC", (status,)).fetchall()
         else:
-            cur = conn.execute("SELECT * FROM workflows ORDER BY created_at DESC")
-        results = []
-        for row in cur.fetchall():
-            meta = json.loads(row["metadata_json"] or "{}")
-            cfg = json.loads(row["config_json"] or "{}")
-            wf = dict(meta)
-            wf.update({
-                "workflow_id": row["workflow_id"],
-                "title": row["title"],
-                "status": row["status"],
-                "template_name": row["template_name"],
-                "current_stage": row["current_stage"],
-                "config": cfg,
-                "created_at": row["created_at"],
-                "updated_at": row["updated_at"],
-            })
-            results.append(wf)
-        return results
+            rows = conn.execute("SELECT workflow_id FROM workflows ORDER BY created_at DESC").fetchall()
+        return [_workflow_snapshot(conn, row['workflow_id'])[0] for row in rows]
     finally:
         conn.close()
 

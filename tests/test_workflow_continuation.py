@@ -215,6 +215,7 @@ def test_real_sqlite_controller_and_projection_chain(scene, tmp_path):
     definition = tmp_path / 'workflow.json'
     definition.write_text(json.dumps(cfg))
     wf['workflow_file'] = str(definition)
+    wf['config'] = cfg
     store = SQLiteStateStore(tmp_path / 'state.db', auto_migrate_json=False)
     store.save_workflow(wf)
     store.save_task(tasks[0])

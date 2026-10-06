@@ -1072,9 +1072,12 @@ class SelectiveInvalidationResult(list):
 REWORKABLE_STATUSES = {"blocked", "agent_done", "working", "rework", "paused", "interrupted"}
 
 
-def _rework_retry_task(task, gate_node_id, request_id=None):
+def _rework_retry_task(task, gate_node_id, request_id=None, failure_facts=None):
     """Use the CLI ownership/CAS/transport contract; failure retains the Task."""
-    gate_tasks = [t for t in load_tasks() if t.get("workflow_id") == task.get("workflow_id")
+    gate_tasks = [t for t in (failure_facts if failure_facts is not None else load_tasks())
+                  if t.get("workflow_id") == task.get("workflow_id")
+                  and t.get("status") != "superseded" and not t.get("superseded_by")
+                  and t.get("candidate_sha") == task.get("candidate_sha")
                   and (t.get("node") or t.get("stage")) in gate_node_id.split("+")
                   and t.get("stage_verdict") == "blocked"]
     if request_id is None:
@@ -1677,12 +1680,9 @@ def _scheduler_current_frozen_candidate_sha(workflow_id):
     if scheduler_facts_store is None:
         return ""
     try:
-        events = scheduler_facts_store.list_candidate_frozen_events(workflow_id)
-    except Exception:
-        return ""
-    if not events:
-        return ""
-    return str((events[-1].get("payload") or {}).get("candidate_sha") or "")
+        return scheduler_facts_store.latest_frozen_candidate_sha(workflow_id)
+    except (ValueError, OSError):
+        return ''
 
 
 def _scheduler_current_frozen_branch(workflow_id):
@@ -3440,14 +3440,20 @@ def _dispatch_candidate_ready(project_root, base_branch, specs, workflow_id=None
 # ============================================================
 # Critical-Path Scheduler v1:候选冻结 + 汇聚门禁 (HAFlow PR #107)
 #
-# - _scheduler_expected_candidate_sha:delivery note 优先,分支 HEAD 兜底;
+# - _scheduler_expected_candidate_sha:已发布episode优先，未发布基线沿用旧选择；
 #   失败一律返回 ""(fail-open 原语义,门禁侧 fail-closed)。
 # - _scheduler_freeze_candidate:implementation 完成后冻结候选(幂等)。
 # - _scheduler_join_gate_allows:join 语义节点的确定性放行判定。
 # ============================================================
 
 def _scheduler_expected_candidate_sha(workflow_id, project_root, dep_ids, candidate_branch):
-    """解析期望候选 SHA:delivery note 优先,分支 HEAD 兜底。"""
+    """Use the published candidate; legacy baseline selection never publishes it."""
+    frozen = _scheduler_current_frozen_candidate_sha(workflow_id)
+    if re.fullmatch(r'[0-9a-f]{40}', frozen or ''):
+        if scheduler_core is None:
+            return ''
+        resolved = scheduler_core.resolve_candidate_sha_for_branch(project_root, f'{frozen}^{{commit}}')
+        return frozen if resolved == frozen else ''
     if (
         scheduler_core is None
         or delivery_record_mod is None
@@ -3507,29 +3513,35 @@ def _scheduler_freeze_candidate(workflow_id, project_root, source_node, dep_ids=
     """
     if scheduler_core is None or scheduler_facts_store is None:
         return ""
-    candidate_branch = None
+    # Activity and delivery-note edits are not candidate publication events.
+    from herdr import recovery_store, state_db
+    store = _get_store()
+    workflow, _, _ = recovery_store.read_snapshot(store.db_path, workflow_id)
+    epoch = max(float(workflow.get('created_at') or 0), float(workflow.get('reopened_at') or 0))
+    conn = state_db.get_readonly_db_connection(store.db_path)
     try:
-        if direct_dispatch_planner is not None:
-            candidate_branch = direct_dispatch_planner.candidate_branch_for_node(
-                load_tasks(), workflow_id, source_node, dep_ids or []
-            )
-    except Exception:
-        candidate_branch = None
-    sha = _scheduler_expected_candidate_sha(
-        workflow_id, project_root, dep_ids or [], candidate_branch
-    )
-    if not sha:
-        return ""
+        publication = conn.execute("SELECT * FROM events WHERE workflow_id=? AND event_type='candidate_published' AND source='herdr-task' AND json_extract(payload_json,'$.execution_id')=? AND timestamp>=? ORDER BY id DESC LIMIT 1",
+                                   (workflow_id, workflow.get('execution_id'), epoch)).fetchone()
+        episode = conn.execute("SELECT id FROM events WHERE workflow_id=? AND event_type='candidate_frozen' AND source='critical-path-scheduler' AND timestamp>=? ORDER BY id DESC LIMIT 1", (workflow_id, epoch)).fetchone()
+    finally:
+        conn.close()
+    if publication is None or (episode and publication['id'] <= episode['id']):
+        frozen = workflow.get('candidate_sha') or ''
+        if not frozen:
+            return ''
+        resolved = scheduler_core.resolve_candidate_sha_for_branch(project_root, f'{frozen}^{{commit}}')
+        return frozen if resolved == frozen else ''
+    sha = json.loads(publication['payload_json']).get('candidate_sha')
+    if scheduler_core.resolve_candidate_sha_for_branch(project_root, f'{sha}^{{commit}}') != sha:
+        return ''
     try:
-        scheduler_facts_store.record_candidate_frozen(
-            workflow_id, sha,
-            source_node=source_node,
-            delivery_branch=candidate_branch or "",
-        )
-    except Exception as exc:
-        print(f"[SCHEDULER FREEZE WARN] workflow={workflow_id}: {exc}")
-        return ""
-    return sha
+        scheduler_facts_store.record_candidate_frozen(workflow_id, sha, source_node=source_node,
+            db_path=store.db_path, expected_episode_id=json.loads(publication['payload_json']).get('expected_episode_id'),
+            publication_event_id=publication['id'])
+    except ValueError as exc:
+        print(f"[SCHEDULER FREEZE REJECTED] workflow={workflow_id}: {exc}")
+        return ''
+    return recovery_store.read_snapshot(store.db_path, workflow_id)[0].get('candidate_sha') or ''
 
 
 def _scheduler_previous_candidate_sha(workflow_id):
@@ -4430,25 +4442,33 @@ def execute_workflow_recovery(operation, owner):
     from herdr.repo_hygiene import check_source_cleanliness
     store = _get_store()
     wid, payload = operation['workflow_id'], operation['payload']
-    workflow = store.get_workflow(wid) or {}
-    config = workflow_config_for(wid) or {}
+    workflow, config, snapshot_tasks = recovery_store.read_snapshot(store.db_path, wid)
     source = workflow.get('project_root')
     if not source:
         return 'waiting_human', {'reason': 'project_identity_unknown'}
-    verifying = operation['detail'].get('action') == 'verify'
+    from herdr.workflow_recovery import existing_delivery_details
+    bound = existing_delivery_details(operation, workflow, snapshot_tasks, store)
+    if bound:
+        operation = dict(operation, detail={**operation['detail'], **bound})
+    verifying = (operation['detail'].get('action') == 'verify'
+                 or bool(operation['detail'].get('successor_ids') or operation['detail'].get('rework_ids')))
+    if not workflow.get('execution_id') or not config.get('nodes'):
+        return 'waiting_human', {'reason': 'workflow_identity_or_config_unknown'}
     if not verifying:
         clean, paths = check_source_cleanliness(source)
         if not clean:
             return 'waiting_human', {'reason': 'source_wip_requires_decision', 'dirty_paths': paths[:50]}
     target_ids = payload.get('task_ids') if payload['kind'] == 'finalize' else payload.get('affected_task_ids')
-    targets = [store.get_task(tid) for tid in target_ids or []]
+    by_id = {t['task_id']: t for t in snapshot_tasks}
+    targets = [by_id.get(tid) for tid in target_ids or []]
     if not targets or any(t is None for t in targets):
         return 'waiting_human', {'reason': 'recovery_target_unknown'}
     details = {'execution_id': workflow.get('execution_id'), 'successor_ids': [], 'rework_ids': [], 'target_runs': {}, 'source_runs': {}, 'repair_map': {}, 'rework_requests': {},
                'gate_nodes': sorted({n['id'] for n in config.get('nodes') or []
-                   if (resolve_gate_config(n, n['id']) or {}).get('retry_node') == payload.get('retry_node')})}
+                   if n['id'] != 'wrapup' and (resolve_gate_config(n, n['id']) or {}).get('retry_node') == payload.get('retry_node')})}
     if verifying:
         details.update(operation['detail'])
+    details['gate_nodes'] = [gate for gate in details['gate_nodes'] if gate != 'wrapup']
     def step(name, validate=True):
         if validate:
             recovery_store.renew_owner(store.db_path, operation['id'], owner, time.time(), lease_seconds=180)
@@ -4471,6 +4491,8 @@ def execute_workflow_recovery(operation, owner):
                 step('existing_delivery_linking')
                 link_committed_successor(store, predecessor['task_id'], successor_id,
                     successor.get('expected_predecessor_version'), payload['candidate_sha'], 'verified recovery delivery')
+            if (details.get('repair_map', {}).get(successor_id) or {}).get('kind') == 'delivered_successor':
+                continue
             details.setdefault('repair_map', {})[predecessor['task_id']] = {
                 'kind': 'successor', 'task_id': successor_id, 'run_id': details['target_runs'][successor_id],
                 'source_run_id': details.get('source_runs', {}).get(predecessor['task_id'])}
@@ -4546,7 +4568,7 @@ def execute_workflow_recovery(operation, owner):
             request_id = 'recovery:' + uuid.uuid4().hex
             details['rework_requests'][tid] = request_id
             step('rework_started')
-            ok, _ = _rework_retry_task(task, '+'.join(payload['gate_nodes']), request_id=request_id)
+            ok, _ = _rework_retry_task(task, '+'.join(payload['gate_nodes']), request_id=request_id, failure_facts=payload.get('facts') or [])
             fresh = store.get_task(tid) or {}
             if not ok or not has_confirmed_rework(store, fresh, request_id):
                 return 'waiting_human', {'reason': 'rework_delivery_unconfirmed', **details}
@@ -4566,7 +4588,11 @@ def execute_workflow_recovery(operation, owner):
         return 'awaiting_result', {'step': 'awaiting_new_candidate', **details}
     step('gates_invalidating')
     for gate in payload['gate_nodes']:
+        if gate in details.get('invalidated_gate_nodes', []):
+            continue
         invalidate_for_fix_loop(wid, gate, config, retry_node=None)
+        details.setdefault('invalidated_gate_nodes', []).append(gate)
+        step('gate_invalidated', validate=False)
     remaining = [t for t in store.list_tasks(workflow_id=wid) if t.get('status') != 'superseded'
                  and not t.get('superseded_by') and t.get('stage_verdict') == 'blocked'
                  and (t.get('node') or t.get('stage')) in payload['gate_nodes']]
@@ -4606,7 +4632,9 @@ def check_workflow_stage_advance(workflow_id):
     record = _get_store().get_workflow(workflow_id)
     if record and record.get('status') == 'running':
         recovery_store.reconcile(_get_store().db_path, workflow_id)
-        assessment = assess_workflow(record, workflow_config_for(workflow_id) or {}, load_tasks())
+        record, snapshot_config, snapshot_tasks = recovery_store.read_snapshot(_get_store().db_path, workflow_id)
+        reconcile_stage_advance_states(workflow_id, snapshot_config)
+        assessment = assess_workflow(record, snapshot_config, snapshot_tasks)
         if not assessment['can_advance']:
             return
 

@@ -6,11 +6,19 @@ from herdr import recovery_store as rs
 from herdr import state_db
 
 
+def _save_published_workflow(record, *, conn):
+    state_db.save_workflow(record, conn=conn)
+    if record.get('candidate_sha'):
+        state_db.record_event({'workflow_id': record['workflow_id'],
+            'event_type': 'candidate_frozen', 'source': 'critical-path-scheduler',
+            'payload': {'candidate_sha': record['candidate_sha']}}, conn=conn)
+
+
 def _seed(path):
     conn = state_db.get_db_connection(path)
     rs.ensure_schema(conn)
     with conn:
-        state_db.save_workflow({'workflow_id': 'w', 'status': 'running', 'execution_id': 'gen', 'candidate_sha': 'A', 'config': {'nodes': {}}}, conn=conn)
+        _save_published_workflow({'workflow_id': 'w', 'status': 'running', 'execution_id': 'gen', 'candidate_sha': 'A', 'config': {'nodes': {}}}, conn=conn)
     conn.close()
 
 
@@ -199,7 +207,7 @@ def test_real_assessment_fact_hook_transaction(tmp_path):
     rs.ensure_schema(conn)
     with conn:
         conn.execute('BEGIN IMMEDIATE')
-        state_db.save_workflow({'workflow_id': 'w', 'status': 'running', 'execution_id': 'generation', 'candidate_sha': sha, 'config': config}, conn=conn)
+        _save_published_workflow({'workflow_id': 'w', 'status': 'running', 'execution_id': 'generation', 'candidate_sha': sha, 'config': config}, conn=conn)
         state_db.save_task({'task_id': 'impl', 'workflow_id': 'w', 'node': 'implementation', 'status': 'committed', 'run_id': 'impl-run', 'execution_id': 'generation', 'candidate_sha': sha}, conn=conn)
         state_db.save_task({'task_id': 'test', 'workflow_id': 'w', 'node': 'test', 'status': 'cleaned', 'stage_verdict': 'blocked', 'run_id': 'test-run', 'execution_id': 'generation', 'candidate_sha': sha}, conn=conn)
         rs.ensure_for_workflow(conn, 'w', 10)
@@ -212,7 +220,7 @@ def test_real_assessment_fact_hook_transaction(tmp_path):
     conn.close()
 
 
-def test_snapshot_derives_candidate_event_and_bounded_config(tmp_path):
+def test_snapshot_derives_candidate_event_without_importing_legacy_file(tmp_path):
     import json
     path = tmp_path / 'snapshot.db'
     config_path = tmp_path / 'workflow.json'
@@ -222,13 +230,14 @@ def test_snapshot_derives_candidate_event_and_bounded_config(tmp_path):
     sha = 'c' * 40
     with conn:
         conn.execute('BEGIN IMMEDIATE')
-        state_db.save_workflow({'workflow_id': 'w', 'status': 'running', 'created_at': 10, 'execution_id': 'generation', 'workflow_file': str(config_path)}, conn=conn)
+        _save_published_workflow({'workflow_id': 'w', 'status': 'running', 'created_at': 10, 'execution_id': 'generation', 'workflow_file': str(config_path)}, conn=conn)
         state_db.record_event({'workflow_id': 'w', 'event_type': 'candidate_frozen', 'source': 'critical-path-scheduler', 'timestamp': 11, 'payload': {'candidate_sha': sha}}, conn=conn)
         state_db.save_task({'task_id': 'impl', 'workflow_id': 'w', 'node': 'implementation', 'status': 'committed', 'run_id': 'impl-run', 'execution_id': 'generation', 'candidate_sha': sha}, conn=conn)
         state_db.save_task({'task_id': 'test', 'workflow_id': 'w', 'node': 'test', 'status': 'cleaned', 'stage_verdict': 'blocked', 'run_id': 'run', 'execution_id': 'generation', 'candidate_sha': sha}, conn=conn)
         rs.ensure_for_workflow(conn, 'w', 12)
     row = rs.list_operations(path, 'w')[0]
-    assert row['status'] == 'pending', (row['payload']['reason'], row['detail'])
+    assert row['status'] == 'waiting_human'
+    assert row['payload']['reason'] == 'gate_unknown'
     assert row['payload']['candidate_sha'] == sha
     assert 'candidate_sha' not in json.loads(conn.execute("SELECT metadata_json FROM workflows WHERE workflow_id='w'").fetchone()[0])
     conn.close()
@@ -336,7 +345,7 @@ def _lineage_db(tmp_path, impl_verdict=None, impl_status='committed'):
     conn = state_db.get_db_connection(path)
     with conn:
         conn.execute('BEGIN IMMEDIATE')
-        state_db.save_workflow({'workflow_id': 'w', 'status': 'running', 'execution_id': 'gen', 'candidate_sha': sha, 'config': {'nodes': [{'id': 'implementation'}, {'id': 'test', 'gate': {'retry_node': 'implementation'}}, {'id': 'review', 'gate': {'retry_node': 'implementation'}}]}}, conn=conn)
+        _save_published_workflow({'workflow_id': 'w', 'status': 'running', 'execution_id': 'gen', 'candidate_sha': sha, 'config': {'nodes': [{'id': 'implementation'}, {'id': 'test', 'gate': {'retry_node': 'implementation'}}, {'id': 'review', 'gate': {'retry_node': 'implementation'}}]}}, conn=conn)
         state_db.save_task({'task_id': 'impl', 'workflow_id': 'w', 'node': 'implementation', 'status': impl_status, 'run_id': 'impl-run', 'execution_id': 'gen', 'candidate_sha': sha, 'commit': sha, 'stage_verdict': impl_verdict, 'stage_verdict_note': 'original defect' if impl_verdict else None}, conn=conn)
         for gate in ('test', 'review'):
             state_db.save_task({'task_id': gate, 'workflow_id': 'w', 'node': gate, 'status': 'cleaned', 'stage_verdict': 'blocked', 'run_id': gate + '-run', 'execution_id': 'gen', 'candidate_sha': sha, 'stage_verdict_affected_task_ids': ['impl']}, conn=conn)

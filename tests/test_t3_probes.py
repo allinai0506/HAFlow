@@ -659,7 +659,7 @@ class L3IntegratedCommit(GitBase):
                 _ht.integrate_task("t-l3")
         stored = _ht._get_store().get_task("t-l3")
         self.assertEqual(stored["status"], "integrated")
-        self.assertEqual(stored["commit"], head_before)
+        self.assertEqual(stored["commit"], stored["integrated_commit"])
         self.assertIn("integrated_commit", stored)
         self.assertIn("integration_head_before_rebase", stored)
         self.assertEqual(stored["integration_head_before_rebase"],

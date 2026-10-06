@@ -123,13 +123,14 @@ def test_project_config_rejects_known_foreign_required_task(tmp_path):
     config_file.write_text(json.dumps({'nodes': [
         {'id': 'implementation', 'required_task_ids': ['foreign']}]}))
     store.save_workflow({'workflow_id': 'wf-1', 'status': 'running',
-                         'workflow_file': str(config_file)})
+                         'workflow_file': str(config_file), 'config': json.loads(config_file.read_text())})
     store.save_task({**_task(task_id='foreign'), 'workflow_id': 'wf-other'})
     with patch.object(projects, '_get_store', return_value=store):
         with pytest.raises(ValueError, match='required_task_out_of_workflow'):
             projects.workflow_config_for('wf-1')
     config_file.write_text(json.dumps({'nodes': [
         {'id': 'implementation', 'required_task_ids': ['not-yet-dispatched']}]}))
+    store.save_workflow({**store.get_workflow('wf-1'), 'config': json.loads(config_file.read_text())})
     with patch.object(projects, '_get_store', return_value=store):
         assert projects.workflow_config_for('wf-1')['nodes'][0]['required_task_ids'] == ['not-yet-dispatched']
 

@@ -452,6 +452,7 @@ class MetricVector:
     new_lint_errors: Optional[int] = None
     new_type_errors: Optional[int] = None
     details: Dict[str, Any] = field(default_factory=dict)
+    business_acceptance: str = 'unknown'  # Generic metrics never prove a business gate.
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -713,6 +714,8 @@ def calculate_metrics(
         details={
             "out_of_bounds_files": out_of_bounds,
             "test_exit_code": test_exit_code,
+            "coverage_scope": "selected_test_runner_only",
+            "business_acceptance": "unknown",
             "evaluation_exit_code": evaluation_exit_code,
             "evaluation_errors": list(evaluation_errors or []),
             "lint_exit_code": lint_exit_code,
@@ -775,10 +778,12 @@ def render_metrics_markdown(metrics: MetricVector, iteration: int, max_iteration
 
 | 指标维度 | 当前值 | 目标值 | 判定 |
 |---|---|---|---|
-| 正确性 (Correctness) | `{metrics.correctness}%` ({metrics.passed_tests}/{metrics.total_tests}) | `100.0%` | {'✅' if metrics.correctness == 100 else '❌'} |
+| 所选测试通过率 (Correctness) | `{metrics.correctness}%` ({metrics.passed_tests}/{metrics.total_tests}) | `100.0%` | {'✅' if metrics.correctness == 100 else '❌'} |
 | 代码质量 (Quality) | {quality_cell} | `100.0%` | {'✅' if metrics.quality == 100 else '❌'} |
 | 边界控制 (Scope) | `{metrics.scope}%` | `100.0%` | {'✅' if metrics.scope == 100 else '❌'} |
 {repro_line}
+
+业务验收：unknown。通用评分只描述所选测试命令；验收以候选绑定的 checkpoint 回执为准。
 
 *更新时间: {time.strftime('%Y-%m-%d %H:%M:%S')}*
 """.strip()

@@ -121,7 +121,7 @@ class ControllerReverificationTest(unittest.TestCase):
 
         from herdr.state_store import get_state_store
         self.store = get_state_store(self.db)
-        self.store.save_workflow({"workflow_id": WF, "status": "running"})
+        self.store.save_workflow({"workflow_id": WF, "status": "running", "execution_id": "gen", "config": self._workflow_cfg()})
 
         self.launches = []
         self.queue = []
@@ -316,6 +316,8 @@ class ControllerReverificationTest(unittest.TestCase):
                                status="completed", stage_verdict="pass",
                                updated_at=_bump())
 
+        facts.record_candidate_frozen(WF, self.head, db_path=self.db)
+
     def _policy_file(self, test_scope):
         """A workflow file whose `test` scope is `test_scope` (None = no block)."""
         path = self.root / f"policy-{abs(hash(tuple(test_scope or ())))}.yaml"
@@ -366,6 +368,7 @@ class ControllerReverificationTest(unittest.TestCase):
         """
         self._seed_implementation_done()
         a = self.head
+        facts.record_candidate_frozen(WF, a, db_path=self.db)
         self._sweep()
         self.assertEqual(_ctl._scheduler_freeze_candidate(
             WF, str(self.repo), "implementation", ["implementation"]), a)
@@ -667,6 +670,7 @@ class ControllerReverificationTest(unittest.TestCase):
         self.supersede(f"{WF}-test-auto", f"{WF}-impl-side")
         self.save_task(task_id=f"{WF}-impl-side", node="implementation",
                        stage="implementation", branch="side", updated_at=_bump())
+        facts.record_candidate_frozen(WF, right, db_path=self.db)
 
         self._sweep()
         self.assertIsNone(

@@ -323,12 +323,26 @@ def create_task_branch(clone, task_id, agent, task_type, base_branch, *, launch_
     return branch
 
 
-def checkout_onto_branch(clone, onto_branch, *, candidate_sha=None, launch_identity=None):
+def checkout_onto_branch(clone, onto_branch, *, candidate_sha=None, launch_identity=None, task_id=None, agent=None, task_type=None):
     """检出既有分支(fix-loop 续接:commit 直落开放中的 PR 分支)。
 
     基线指纹在调用方紧随其后执行。普通续接完成 origin 同步；显式完整
     candidate SHA 则核对独立本地分支，保证既有提交不属于本任务变更。
     """
+    if task_id:
+        # Onto is a baseline reference, never the new Task's branch ownership.
+        if not pinned_local_onto_matches(clone, onto_branch, candidate_sha):
+            fetch = subprocess.run(['git', '-C', str(clone), 'fetch', 'origin', onto_branch],
+                                   text=True, capture_output=True, timeout=30, check=False)
+            if fetch.returncode:
+                raise RuntimeError('Onto baseline unavailable: ' + fetch.stderr.strip())
+            resolved = subprocess.check_output(['git', '-C', str(clone), 'rev-parse',
+                                                f'refs/remotes/origin/{onto_branch}'], text=True).strip()
+            if candidate_sha and resolved != candidate_sha:
+                raise RuntimeError('Onto baseline differs from candidate pin')
+            candidate_sha = resolved
+        return create_task_branch(clone, task_id, agent, task_type, onto_branch,
+                                  candidate_sha=candidate_sha, launch_identity=launch_identity)
     ensure_branch_available(onto_branch, _registered_tasks())
 
     if pinned_local_onto_matches(clone, onto_branch, candidate_sha):
@@ -1013,7 +1027,8 @@ def main():
                 # 必须先于 build_baseline_fingerprint:
                 # PR 分支的既有提交不能被记入本任务的基线变更。
                 branch = checkout_onto_branch(clone, args.onto, candidate_sha=args.candidate_sha,
-                                             launch_identity=launch_identity)
+                                             launch_identity=launch_identity, task_id=args.task_id,
+                                             agent=args.agent, task_type=args.task_type)
             else:
                 branch = create_task_branch(
                     clone,

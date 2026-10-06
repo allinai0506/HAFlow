@@ -14,6 +14,8 @@ WorkflowEvent 形式落盘,回答"这次 test/review 到底验证了哪个版本
 
 from __future__ import annotations
 
+import json
+import re
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -94,67 +96,120 @@ def record_scheduler_decision(
 
 
 def record_candidate_frozen(
-    workflow_id,
-    candidate_sha,
-    source_node="",
-    delivery_branch="",
-    db_path=None,
+    workflow_id, candidate_sha, source_node="", delivery_branch="", db_path=None,
+    expected_episode_id=None, publication_event_id=None,
 ):
-    """Freeze a candidate SHA as the expected revision (idempotent).
+    """Explicit candidate publication, serialized with episode CAS.
 
-    Idempotency is defined against the *latest* freeze only, never against the
-    whole history. Candidate identity is an episode, not a set: freezing
-    A -> B -> A is a real rotation back to A, and the newest freeze must win.
-    Comparing against all prior events would make that third freeze a no-op and
-    leave latest_frozen_candidate_sha() reporting B while the live candidate is
-    A again — every later verifier would then target a stale expected SHA and
-    the workflow would deadlock.
+    Same-SHA replay is idempotent; A -> B -> A remains three episodes.
+    Scheduler consumption additionally binds a durable integration publication.
     """
+    from . import recovery_store, state_db
     sha = str(candidate_sha or "").strip()
-    if not sha:
-        raise ValueError("candidate_sha is required")
+    if not re.fullmatch(r'[0-9a-fA-F]{40}', sha):
+        raise ValueError('candidate_sha must be a full commit SHA')
     store = _store(db_path)
-    prior = list_candidate_frozen_events(workflow_id, db_path=db_path)
-    if prior:
-        latest = str(
-            (prior[-1].get("payload") or {}).get("candidate_sha") or ""
-        )
-        if latest == sha:
-            return {"status": "exists", "event": prior[-1]}
-    rotated_from = ""
-    if prior:
-        rotated_from = str(
-            (prior[-1].get("payload") or {}).get("candidate_sha") or ""
-        )
-    event = store.record_event(
-        EVENT_CANDIDATE_FROZEN,
-        {
-            "candidate_sha": sha,
-            "source_node": str(source_node or ""),
-            "delivery_branch": str(delivery_branch or ""),
-            "rotated_from": rotated_from,
-        },
-        workflow_id=workflow_id,
-        source=SCHEDULER_EVENT_SOURCE,
-        timestamp=time.time(),
-    )
-    return {"status": "created", "event": event}
+    with recovery_store._transaction(store.db_path) as conn:
+        workflow_row = conn.execute('SELECT metadata_json,created_at FROM workflows WHERE workflow_id=?', (workflow_id,)).fetchone()
+        if workflow_row is None:
+            raise ValueError('workflow not found')
+        metadata = json.loads(workflow_row['metadata_json'] or '{}')
+        epoch = max(float(workflow_row['created_at'] or 0), float(metadata.get('reopened_at') or 0))
+        row = conn.execute("SELECT * FROM events WHERE workflow_id=? AND event_type='candidate_frozen' AND source=? AND timestamp>=? ORDER BY id DESC LIMIT 1",
+                           (workflow_id, SCHEDULER_EVENT_SOURCE, epoch)).fetchone()
+        latest_id = row['id'] if row else 0
+        if expected_episode_id is not None and expected_episode_id != latest_id:
+            raise ValueError('candidate episode changed')
+        prior = json.loads(row['payload_json']) if row else {}
+        if publication_event_id is not None:
+            if publication_event_id <= latest_id:
+                return {'status': 'exists', 'event': dict(row)}
+            pub = conn.execute("SELECT * FROM events WHERE id=? AND workflow_id=? AND event_type='candidate_published' AND source='herdr-task'",
+                               (publication_event_id, workflow_id)).fetchone()
+            workflow, _, tasks = recovery_store._snapshot(conn, workflow_id)
+            value = json.loads(pub['payload_json']) if pub else {}
+            task = next((t for t in tasks if pub and t['task_id'] == pub['task_id']), {})
+            if value.get('expected_episode_id') != latest_id:
+                raise ValueError('candidate publication episode changed')
+            if (not pub or value.get('candidate_sha') != sha or not workflow.get('execution_id')
+                    or value.get('execution_id') != workflow['execution_id']
+                    or task.get('run_id') != pub['run_id'] or task.get('execution_id') != workflow['execution_id']
+                    or task.get('integrated_commit') != sha or task.get('superseded_by')
+                    or task.get('status') not in {'integrated', 'cleanup_ready', 'cleaned'}):
+                raise ValueError('candidate publication identity unknown')
+            if publication_event_id <= prior.get('publication_event_id', 0):
+                return {'status': 'exists', 'event': dict(row)}
+        if prior.get('candidate_sha') == sha:
+            return {'status': 'exists', 'event': dict(row)}
+        event = state_db.record_event({'event_type': EVENT_CANDIDATE_FROZEN,
+            'workflow_id': workflow_id, 'source': SCHEDULER_EVENT_SOURCE,
+            'payload': {'candidate_sha': sha, 'source_node': str(source_node or ''),
+                        'delivery_branch': str(delivery_branch or ''),
+                        'rotated_from': prior.get('candidate_sha', ''),
+                        'publication_event_id': publication_event_id or 0}}, conn=conn)
+        return {'status': 'created', 'event': event}
+
+
+def publish_integrated_candidate(store, task_id):
+    """The integrate entry publishes once per immutable Task/Run result."""
+    from . import recovery_store, state_db
+    with recovery_store._transaction(store.db_path) as conn:
+        row = conn.execute('SELECT * FROM tasks WHERE task_id=?', (task_id,)).fetchone()
+        task = state_db._decode_task_row(row) if row else {}
+        wid = task.get('workflow_id')
+        workflow, _, _ = recovery_store._snapshot(conn, wid)
+        sha = task.get('integrated_commit')
+        if (task.get('status') not in {'integrated', 'cleanup_ready', 'cleaned'}
+                or not re.fullmatch(r'[0-9a-f]{40}', sha or '') or task.get('commit') != sha
+                or not task.get('run_id') or not workflow.get('execution_id')
+                or task.get('execution_id') != workflow['execution_id'] or not task.get('integration_ref')):
+            raise ValueError('integrated publication identity unknown')
+        prior = conn.execute("SELECT * FROM events WHERE workflow_id=? AND task_id=? AND run_id=? AND event_type='candidate_published' AND source='herdr-task' AND json_extract(payload_json,'$.candidate_sha')=? ORDER BY id DESC LIMIT 1",
+                             (wid, task_id, task['run_id'], sha)).fetchone()
+        if prior:
+            return dict(prior)
+        parent_episode = task.get('integration_publication_episode_id')
+        if sha == workflow.get('candidate_sha'):
+            return {'status': 'already_frozen', 'candidate_episode_id': workflow['candidate_episode_id']}
+        if type(parent_episode) is not int or parent_episode != workflow.get('candidate_episode_id'):
+            raise ValueError('integrated publication episode unknown or changed')
+        return state_db.record_event({'event_type': 'candidate_published', 'workflow_id': wid,
+            'task_id': task_id, 'node_id': task.get('node') or task.get('stage'), 'run_id': task['run_id'],
+            'source': 'herdr-task', 'payload': {'candidate_sha': sha,
+                'execution_id': workflow['execution_id'], 'integration_ref': task['integration_ref'],
+                'expected_episode_id': parent_episode}}, conn=conn)
 
 
 def list_candidate_frozen_events(workflow_id, db_path=None):
     """List frozen-candidate events in chronological order."""
-    return _store(db_path).list_events(
-        workflow_id=workflow_id,
-        event_type=EVENT_CANDIDATE_FROZEN,
-    )
+    from . import recovery_store, state_db
+    try:
+        conn = state_db.get_readonly_db_connection(state_db.resolve_state_db_path(db_path))
+    except FileNotFoundError:
+        return []
+    try:
+        conn.execute('BEGIN')
+        workflow, _ = recovery_store._workflow_snapshot(conn, workflow_id)
+        epoch = max(float(workflow.get('created_at') or 0), float(workflow.get('reopened_at') or 0))
+        return [dict(row, payload=json.loads(row['payload_json'])) for row in conn.execute(
+            "SELECT * FROM events WHERE workflow_id=? AND event_type='candidate_frozen' AND source=? AND timestamp>=? ORDER BY id",
+            (workflow_id, SCHEDULER_EVENT_SOURCE, epoch))]
+    except ValueError as exc:
+        if str(exc) == 'workflow not found':
+            return []
+        raise
+    finally:
+        conn.close()
 
 
 def latest_frozen_candidate_sha(workflow_id, db_path=None):
     """Return the newest frozen candidate SHA, or "" when none."""
-    events = list_candidate_frozen_events(workflow_id, db_path=db_path)
-    if not events:
-        return ""
-    return str((events[-1].get("payload") or {}).get("candidate_sha") or "")
+    from . import recovery_store, state_db
+    try:
+        workflow, _, _ = recovery_store.read_snapshot(state_db.resolve_state_db_path(db_path), workflow_id)
+    except (FileNotFoundError, ValueError):
+        return ''
+    return str(workflow.get('candidate_sha') or '')
 
 
 def list_reverification_decisions(workflow_id, db_path=None, limit=None):
