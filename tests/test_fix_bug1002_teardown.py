@@ -170,3 +170,43 @@ def test_context_clone_requires_explicit_purge_even_if_superseded(tmp_path,cli,m
     assert not calls
     assert cli._finalize_one(task,purge_clones=True)['clone_deleted']
     assert calls == [str(repo)]
+
+
+@pytest.mark.parametrize('output', ['internal_only', 'user_directory', 'tracked_internal'])
+def test_large_internal_evidence_does_not_exhaust_inventory_before_filtering(tmp_path, cli, output):
+    repo = tmp_path / 'large-evidence'; repo.mkdir()
+    def git(*args):
+        return subprocess.run(['git', '-C', str(repo), *args], check=True, capture_output=True, text=True)
+    git('init', '-b', 'task'); git('config', 'user.name', 'Test'); git('config', 'user.email', 'test@example.invalid')
+    infra = repo / '.herdr-loop'; infra.mkdir()
+    tracked = infra / 'tracked.txt'; tracked.write_text('base')
+    git('add', '.'); git('commit', '-m', 'base')
+    evidence = infra / 'evidence'; evidence.mkdir()
+    for index in range(900):
+        (evidence / (str(index) + '-' + 'x' * 80 + '.txt')).write_text('test evidence')
+    if output == 'user_directory':
+        docs = repo / 'docs'; docs.mkdir(); (docs / 'valuable.md').write_text('user deliverable')
+    if output == 'tracked_internal':
+        tracked.write_text('tracked change must remain protected')
+    result = cli._teardown_output_guard({'task_id': 't', 'clone_path': str(repo), 'integration_mode': 'none'})
+    assert result['reason'] == ('' if output == 'internal_only' else 'unpreserved_worktree_output')
+    if output == 'tracked_internal':
+        assert '.herdr-loop/tracked.txt' in result['blocked_files']
+
+
+@pytest.mark.parametrize('probe', ['root', 'status'])
+def test_inventory_os_error_is_unknown_before_teardown(tmp_path, cli, monkeypatch, probe):
+    from herdr import bounded_tools
+    repo = tmp_path / 'clone'; repo.mkdir()
+    calls = 0
+    def denied(argv, **kwargs):
+        nonlocal calls
+        calls += 1
+        if probe == 'root' or calls == 2:
+            raise PermissionError('probe process termination not permitted')
+        return {'status': 'completed', 'exit_code': 0, 'stdout': str(repo) + '\n', 'stderr': ''}
+    monkeypatch.setattr(bounded_tools, 'run_bounded', denied)
+    monkeypatch.setattr(cli, 'close_pane', lambda _: pytest.fail('unknown inventory cannot tear down'))
+    result = cli._teardown_output_guard({'task_id': 't', 'clone_path': str(repo), 'integration_mode': 'none'})
+    assert result == {'reason': 'clone_git_inventory_unknown'}
+    assert repo.exists()

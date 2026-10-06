@@ -80,7 +80,7 @@ def test_reopen_preserves_old_action_identity_and_new_operation(tmp_path):
         old=c.operation_id
         c.action('pane:p',{'run':'old'},lambda i:True,lambda:calls.append('old'))
         c.complete({'closed':'old'})
-    store.save_workflow({'workflow_id':'wf','status':'in_progress','reopened_at':'new-generation'})
+    store.save_workflow({'workflow_id':'wf','status':'in_progress','reopened_at':__import__('time').time()+1})
     with m.workflow_close_claim(store,'wf') as c:
         assert c.state=='owner' and c.operation_id!=old
         c.action('pane:p',{'run':'new'},lambda i:True,lambda:calls.append('new'))

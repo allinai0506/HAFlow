@@ -2149,6 +2149,13 @@ def set_status(task_id, new_status, verdict=None, note=None, affected_task_ids=N
         print(f"Task not found: {task_id}")
         sys.exit(1)
 
+    if (verdict in ('pass', 'approved') and task.get('completion_protocol') == 'receipt-v1'
+            and (task.get('node') or task.get('stage')) in ('test', 'review')):
+        from herdr.task_checkpoint import has_business_acceptance
+        if not has_business_acceptance(_get_store(), task, task.get('candidate_sha')):
+            print('Business acceptance checkpoint receipt required before passing gate', file=sys.stderr)
+            sys.exit(2)
+
     # PR #110: 结构化归因目标仅允许随 blocked 结论持久化;pass 或未给
     # verdict 时携带 affected-task-id 直接拒绝(不静默忽略)。
     affected_ids = []
@@ -2244,6 +2251,9 @@ def set_status(task_id, new_status, verdict=None, note=None, affected_task_ids=N
             except Exception as exc:
                 print(f"Error updating task {task_id}: {exc}", file=sys.stderr)
                 sys.exit(2)
+
+            t_file = globals().get("TASKS_FILE") or os.environ.get("TASKS_FILE")
+            sync_tasks_projection(store=store, tasks_file=Path(t_file) if t_file else None)
 
             if verdict:
                 _record_gate_note(task, verdict, note)
@@ -3055,11 +3065,10 @@ def cmd_task_checkpoint(args):
 
 
 def _capacity_definition(project):
+    config = project.get("config")
     path = project.get("workflow_file")
-    if path:
-        config = json.loads(Path(path).expanduser().read_text(encoding="utf-8"))
-    else:
-        config = project.get("config") or project
+    if not isinstance(config, dict) or not config.get('nodes'):
+        config = json.loads(Path(path).expanduser().read_text(encoding="utf-8")) if path else project
     return normalize_workflow(config)
 
 
@@ -3169,12 +3178,27 @@ def _launch_task(args):
         print(f"[WORKFLOW NOT FOUND] {args.workflow_id}; refusing launch")
         sys.exit(2)
 
+    # New/migrated workflows own the execution identity. A manual Task launch
+    # inherits it just like scheduler dispatch, and cannot override it.
+    execution_id = project.get('execution_id')
+    if execution_id:
+        requested_execution = getattr(args, 'execution_id', None)
+        if requested_execution and requested_execution != execution_id:
+            print('[EXECUTION IDENTITY REJECTED] workflow generation mismatch', file=sys.stderr)
+            sys.exit(2)
+        args.execution_id = execution_id
+
     exec_fields = execution_fields_from_workflow(project)
     try:
         from herdr.workflow import validate_artifact_contract
         from herdr.task_resources import find_dispatch_task, begin_launch_intent
         store = _get_store()
         definition = _capacity_definition(project)
+        from herdr.business_gate import business_gate_blockers
+        authority, pinned, owned_tasks = store.read_workflow_snapshot(args.workflow_id)
+        missing_business = business_gate_blockers(store, authority, pinned or definition, owned_tasks, node_id)
+        if missing_business:
+            raise ValueError('business acceptance unavailable: ' + ', '.join(missing_business))
         node = next((n for n in definition.get("nodes", []) if n.get("id") == node_id), {})
         configured_mode = node.get("artifact_mode")
         requested_mode = getattr(args, "artifact_mode", None)
@@ -3826,6 +3850,7 @@ def _launch_task(args):
         "status": "pending",
         "goal": args.goal,
         "acceptance_criteria": args.acceptance,
+        "candidate_episode_id": project.get("candidate_episode_id"),
     }
     replay_of = getattr(args, "replay_of", None)
     if replay_of:
@@ -5378,6 +5403,15 @@ def _adopt_head_if_attributable(task_id, task, clone):
     sys.exit(4)
 
 
+def _publish_integrated_task(task_id):
+    from herdr.scheduler_facts import publish_integrated_candidate
+    try:
+        publish_integrated_candidate(_get_store(), task_id)
+    except ValueError as exc:
+        # Legacy integration can finish, but cannot silently publish a candidate.
+        print(f'[CANDIDATE PUBLICATION REJECTED] {exc}', file=sys.stderr)
+
+
 @_with_git_operation_lock(include_source_repo=True)
 def integrate_task(task_id):
     data = load_tasks()
@@ -5396,6 +5430,8 @@ def integrate_task(task_id):
 
     if task["status"] == "integrated":
         if task.get("commit") and task.get("integration_ref"):
+            clear_finalize_escalation(task_id)
+            _publish_integrated_task(task_id)
             print(f"[INTEGRATED] {task_id} (already)")
             print(f"[HERDR REF] {task.get('integration_ref')}")
             print(
@@ -5433,6 +5469,12 @@ def integrate_task(task_id):
     clone = os.path.realpath(
         os.path.expanduser(clone)
     )
+
+    checked_out = subprocess.run(['git', '-C', clone, 'symbolic-ref', '--quiet', '--short', 'HEAD'],
+                                 text=True, capture_output=True, check=False, timeout=10)
+    if checked_out.returncode or checked_out.stdout.strip() != branch:
+        print('[INTEGRATE REJECTED] clone branch ownership differs from Task')
+        sys.exit(2)
 
     baseline = task.get("baseline_fingerprint")
     if baseline is None:
@@ -5551,6 +5593,24 @@ def integrate_task(task_id):
         print(f"[BRANCH OWNERSHIP ERROR] {exc}")
         sys.exit(5)
 
+    from herdr import kernel, recovery_store
+    authority, _, _ = recovery_store.read_snapshot(_get_store().db_path, task['workflow_id'])
+    parent_episode = task.get('integration_publication_episode_id')
+    if parent_episode is None:
+        parent_episode = task.get('candidate_episode_id')
+        if parent_episode is None and not authority['candidate_episode_id']:
+            parent_episode = 0  # Initial publication has no predecessor episode.
+        if parent_episode is None and _git_head_sha(clone) == authority.get('candidate_sha'):
+            # An explicit manual freeze already published this exact result.
+            parent_episode = authority['candidate_episode_id']
+        if parent_episode is None:
+            print('[INTEGRATE REJECTED] publication episode unknown; evidence migration required')
+            sys.exit(2)
+        if parent_episode != authority['candidate_episode_id'] and _git_head_sha(clone) != authority.get('candidate_sha'):
+            print('[INTEGRATE REJECTED] publication episode changed')
+            sys.exit(2)
+        kernel.update_task_metadata(task_id, {'integration_publication_episode_id': parent_episode}, store=_get_store())
+
     # Agent init anchors are local worktree baselines, not remote branches.
     # Fetch a task-scoped ref while holding the existing source Git lock.
     if base_branch.startswith("agent/") and base_branch.endswith("-init"):
@@ -5580,7 +5640,7 @@ def integrate_task(task_id):
          f"refs/remotes/{remote_ref}"],
         check=False,
     ).returncode == 0
-    if remote_exists:
+    if remote_exists and task.get('onto_branch') != branch:
         local_head = _git_head_sha(clone)
         head_in_remote = (
             _git_is_ancestor(clone, local_head, remote_ref)
@@ -5689,6 +5749,14 @@ def integrate_task(task_id):
         )
         sys.exit(4)
 
+    # Rebase changes identity even if exporting the ref later fails. Persist
+    # the immutable result before transport; retry uses this new commit.
+    from herdr import kernel
+    integrated_commit = _git_head_sha(clone)
+    kernel.update_task_metadata(task_id, {
+        'commit': integrated_commit,
+        'integration_head_before_rebase': integration_head_before_rebase,
+    }, store=_get_store())
     herdr_ref = f"refs/herdr/tasks/{task_id}"
 
     subprocess.run(
@@ -5700,19 +5768,6 @@ def integrate_task(task_id):
             clone,
             f"{branch}:{herdr_ref}",
             "--force"
-        ],
-        check=True
-    )
-
-    subprocess.run(
-        [
-            "git",
-            "-C",
-            main_repo,
-            "branch",
-            "-f",
-            branch,
-            herdr_ref
         ],
         check=True
     )
@@ -5741,6 +5796,7 @@ def integrate_task(task_id):
         "base_branch": base_branch,
         "source_repo": main_repo,
         "integrated_commit": integrated_commit,
+        "commit": integrated_commit,
         "integration_head_before_rebase": integration_head_before_rebase,
     }, store=_get_store())
 
@@ -5749,6 +5805,8 @@ def integrate_task(task_id):
         "integrated"
     )
 
+    clear_finalize_escalation(task_id)
+    _publish_integrated_task(task_id)
     print(f"[INTEGRATED] {task_id}")
     print(f"[PROJECT] {main_repo}")
     print(f"[BASE BRANCH] {base_branch}")
@@ -5899,11 +5957,17 @@ def _teardown_output_guard(task):
         if (task.get("execution_mode") == "context" and task.get("integration_mode") == "none"
                 and path.is_dir() and not os.path.lexists(path / ".git")):
             return {"reason": ""}
-        root = run_bounded(["git", "-C", str(path), "rev-parse", "--show-toplevel"], timeout=5, output_limit=8192)
-        if root["status"] != "completed" or root["exit_code"] or Path(root["stdout"].strip()).resolve() != path.resolve():
-            return {"reason": "clone_git_inventory_unknown"}
-        result = run_bounded(["git", "-C", str(path), "status", "--porcelain", "--untracked-files=all"], timeout=5, output_limit=65536)
-        if result["status"] != "completed" or result["exit_code"]:
+        try:
+            root = run_bounded(["git", "-C", str(path), "rev-parse", "--show-toplevel"], timeout=5, output_limit=8192)
+            if root["status"] != "completed" or root["exit_code"] or Path(root["stdout"].strip()).resolve() != path.resolve():
+                return {"reason": "clone_git_inventory_unknown"}
+            # Collapse untracked directories before the output cap. Internal evidence
+            # is already excluded by diagnosis; tracked files remain individually
+            # visible, including tracked changes under an internal directory.
+            result = run_bounded(["git", "-C", str(path), "status", "--porcelain", "--untracked-files=normal"], timeout=5, output_limit=65536)
+            if result["status"] != "completed" or result["exit_code"]:
+                return {"reason": "clone_git_inventory_unknown"}
+        except (OSError, ValueError):
             return {"reason": "clone_git_inventory_unknown"}
         diagnosis = teardown_output_diagnosis(result["stdout"], task_id=task.get("task_id", ""))
         if diagnosis["reason"]:
@@ -6365,6 +6429,15 @@ def close_workflow(
     confirm_force=None,
 ):
     from herdr.workflow_close import workflow_close_claim
+    if not abandon:
+        from herdr.business_gate import business_gate_blockers
+        store = _get_store()
+        if store.get_workflow(workflow_id):
+            authority, config, owned_tasks = store.read_workflow_snapshot(workflow_id)
+            missing_business = business_gate_blockers(store, authority, config, owned_tasks)
+            if missing_business:
+                print('[CLOSE ABORT] business acceptance unavailable: ' + ', '.join(missing_business))
+                sys.exit(2)
     options = dict(include_coordinator=include_coordinator, purge_clones=purge_clones,
                    abandon=abandon, force=force, accept_escalated=accept_escalated)
     with workflow_close_claim(_get_store(), workflow_id, dry_run=dry_run, options=options) as claim:
@@ -7216,6 +7289,33 @@ def force_advance(workflow_id, stage=None):
         f"[ADVANCE] stage-state cleared for workflow={workflow_id}."
         " Controller will re-evaluate within ~2 seconds."
     )
+
+
+def cmd_workflow_migration(args):
+    from herdr import workflow_repair_migration as migration, state_db
+    try:
+        db_path = state_db.resolve_state_db_path()
+        if args.output and Path(args.output).exists():
+            raise ValueError('output file already exists')
+        if args.action == 'plan':
+            result = migration.plan(db_path, args.workflow_id)
+        else:
+            if not args.input:
+                raise ValueError('--input reviewed plan/receipt is required')
+            data = json.loads(Path(args.input).read_text())
+            if data.get('workflow_id') != args.workflow_id:
+                raise ValueError('workflow scope mismatch')
+            result = migration.apply(db_path, data) if args.action == 'apply' else migration.rollback(db_path, data)
+        output = json.dumps(result, ensure_ascii=False, indent=2)
+        if args.output:
+            path = Path(args.output)
+            with path.open('x') as stream:
+                stream.write(output + '\n')
+        else:
+            print(output)
+    except (OSError, ValueError, TypeError, sqlite3.Error) as exc:
+        print(f'[MIGRATION REJECTED] {exc}', file=sys.stderr)
+        sys.exit(2)
 
 
 def cmd_workflow_recovery(args):
@@ -8470,9 +8570,55 @@ def main():
     recovery_decide.add_argument('--reason', required=True)
     recovery_decide.add_argument('--until', type=float)
 
+    migrate = sub.add_parser('workflow-migrate', help='Evidence-backed legacy identity/config migration')
+    migrate.add_argument('workflow_id')
+    migrate.add_argument('--action', choices=['plan', 'apply', 'rollback'], default='plan')
+    migrate.add_argument('--input', help='Reviewed plan or rollback receipt JSON')
+    migrate.add_argument('--output', help='New output file (never overwritten)')
+
+    budget = sub.add_parser('node-budget-extend', help='Explicit bounded cumulative budget grant with config CAS')
+    budget.add_argument('workflow_id')
+    budget.add_argument('node')
+    budget.add_argument('--expected-sha', required=True)
+    budget.add_argument('--additional', type=int, required=True)
+    budget.add_argument('--operator', required=True)
+    budget.add_argument('--reason', required=True)
+
+    acceptance = sub.add_parser('acceptance-record', help='Bind explicit business verdict to verified report checkpoints')
+    acceptance.add_argument('--task-id', required=True)
+    acceptance.add_argument('--run-id', required=True)
+    acceptance.add_argument('--epoch', required=True)
+    acceptance.add_argument('--candidate-sha', required=True)
+    acceptance.add_argument('--verdict', choices=['pass', 'blocked'], required=True)
+    acceptance.add_argument('--artifact', action='append', required=True)
+    acceptance.add_argument('--criterion', action='append', required=True)
+
     args = parser.parse_args()
 
-    if args.command in ('recovery-status', 'recovery-decide'):
+    if args.command == 'acceptance-record':
+        from herdr.task_checkpoint import record_business_acceptance
+        try:
+            references = []
+            for item in args.artifact:
+                obs, digest = item.split(':', 1)
+                references.append({'observation_id': obs, 'sha256': digest})
+            print(json.dumps(record_business_acceptance(_get_store(), args.task_id, args.run_id,
+                args.epoch, args.candidate_sha, args.verdict, references, args.criterion), ensure_ascii=False))
+        except (ValueError, OSError) as exc:
+            print(f'[ACCEPTANCE REJECTED] {exc}', file=sys.stderr)
+            sys.exit(2)
+    elif args.command == 'node-budget-extend':
+        from herdr.node_config import extend_budget
+        try:
+            print(json.dumps(extend_budget(_get_store(), args.workflow_id, args.node,
+                expected_sha=args.expected_sha, additional=args.additional,
+                operator=args.operator, reason=args.reason), ensure_ascii=False))
+        except ValueError as exc:
+            print(f'[BUDGET REJECTED] {exc}', file=sys.stderr)
+            sys.exit(2)
+    elif args.command == 'workflow-migrate':
+        cmd_workflow_migration(args)
+    elif args.command in ('recovery-status', 'recovery-decide'):
         cmd_workflow_recovery(args)
     elif args.command == "add":
         add_task(args)

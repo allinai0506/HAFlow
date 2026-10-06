@@ -372,3 +372,11 @@ herdr-task delivery-report <workflow_id>
 交付投影区分 observed_result 和当前候选可采用的 status；源码变动、旧 epoch、未知执行方式或失效产物均不能复用旧绿色验收。任务历史超过投影预算时 tasks_truncated=true，all_verifications_passed=false。无部署或生产回执时相应状态始终 unknown。
 
 节点应明确 artifact_mode=repository_changes 或 shared_artifacts；后者要求 integration_mode=none。旧纯报告 wrapup/docs/git 缺少显式模式会给出可恢复错误；文档需要 Git 提交时显式选 repository_changes。
+
+### 有证据迁移、预算增加与业务回执
+
+`herdr-task workflow-migrate <workflow_id> --action plan --output <新文件>` 只读生成计划；review 后以 `--action apply --input <计划> --output <新回执>` 做 CAS 迁移。`--action rollback --input <回执>` 只回滚未被后续写入改变的迁移字段。禁止根据文件名猜测历史 Run；审计不复制 Task 任意内容。
+
+`herdr-task node-budget-extend <workflow_id> <node> --expected-sha <配置哈希> --additional <1..8> --operator <操作者> --reason <理由>` 显式增加累计上限，总上限 64，保留历史计数。配置哈希来自当前固定配置，不是候选 Git SHA。
+
+`herdr-task checkpoint-read --task-id <Task> --run-id <Run> --epoch <epoch>` 返回已登记片段及配置的 AC-N。`herdr-task acceptance-record --task-id <Task> --run-id <Run> --epoch <epoch> --candidate-sha <40位SHA> --verdict pass --artifact <observation_id:sha256> --criterion AC-1=pass ...` 必须覆盖全部配置标准，绑定本轮片段。通用评分和执行测试结果不会自动生成业务 PASS；实际 artifact 语法以 `--help` 为准。

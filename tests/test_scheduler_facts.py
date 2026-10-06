@@ -22,20 +22,20 @@ def db(tmp_path, monkeypatch):
 class TestCandidateFrozen:
     def test_freeze_is_idempotent(self, db):
         first = facts.record_candidate_frozen(
-            "wf-facts-01", "sha-A", source_node="implementation", db_path=db
+            "wf-facts-01", "a" * 40, source_node="implementation", db_path=db
         )
         assert first["status"] == "created"
-        second = facts.record_candidate_frozen("wf-facts-01", "sha-A", db_path=db)
+        second = facts.record_candidate_frozen("wf-facts-01", "a" * 40, db_path=db)
         assert second["status"] == "exists"
         events = facts.list_candidate_frozen_events("wf-facts-01", db_path=db)
         assert len(events) == 1
 
     def test_rotation_records_prior_sha(self, db):
-        facts.record_candidate_frozen("wf-facts-01", "sha-A", db_path=db)
-        rotated = facts.record_candidate_frozen("wf-facts-01", "sha-B", db_path=db)
+        facts.record_candidate_frozen("wf-facts-01", "a" * 40, db_path=db)
+        rotated = facts.record_candidate_frozen("wf-facts-01", "b" * 40, db_path=db)
         assert rotated["status"] == "created"
-        assert rotated["event"]["payload"]["rotated_from"] == "sha-A"
-        assert facts.latest_frozen_candidate_sha("wf-facts-01", db_path=db) == "sha-B"
+        assert rotated["event"]["payload"]["rotated_from"] == "a" * 40
+        assert facts.latest_frozen_candidate_sha("wf-facts-01", db_path=db) == "b" * 40
 
     def test_empty_sha_rejected(self, db):
         with pytest.raises(ValueError):
@@ -52,47 +52,47 @@ class TestCandidateRotationABA:
     """
 
     def test_refreeze_returns_to_previous_sha(self, db):
-        facts.record_candidate_frozen("wf-facts-01", "sha-A", db_path=db)
-        facts.record_candidate_frozen("wf-facts-01", "sha-B", db_path=db)
-        third = facts.record_candidate_frozen("wf-facts-01", "sha-A", db_path=db)
+        facts.record_candidate_frozen("wf-facts-01", "a" * 40, db_path=db)
+        facts.record_candidate_frozen("wf-facts-01", "b" * 40, db_path=db)
+        third = facts.record_candidate_frozen("wf-facts-01", "a" * 40, db_path=db)
 
         assert third["status"] == "created"
-        assert third["event"]["payload"]["candidate_sha"] == "sha-A"
-        assert third["event"]["payload"]["rotated_from"] == "sha-B"
-        assert facts.latest_frozen_candidate_sha("wf-facts-01", db_path=db) == "sha-A"
+        assert third["event"]["payload"]["candidate_sha"] == "a" * 40
+        assert third["event"]["payload"]["rotated_from"] == "b" * 40
+        assert facts.latest_frozen_candidate_sha("wf-facts-01", db_path=db) == "a" * 40
 
     def test_refreeze_appends_third_event(self, db):
-        facts.record_candidate_frozen("wf-facts-01", "sha-A", db_path=db)
-        facts.record_candidate_frozen("wf-facts-01", "sha-B", db_path=db)
-        facts.record_candidate_frozen("wf-facts-01", "sha-A", db_path=db)
+        facts.record_candidate_frozen("wf-facts-01", "a" * 40, db_path=db)
+        facts.record_candidate_frozen("wf-facts-01", "b" * 40, db_path=db)
+        facts.record_candidate_frozen("wf-facts-01", "a" * 40, db_path=db)
 
         events = facts.list_candidate_frozen_events("wf-facts-01", db_path=db)
         assert [e["payload"]["candidate_sha"] for e in events] == [
-            "sha-A", "sha-B", "sha-A",
+            "a" * 40, "b" * 40, "a" * 40,
         ]
 
     def test_same_sha_as_latest_is_still_noop(self, db):
-        facts.record_candidate_frozen("wf-facts-01", "sha-A", db_path=db)
-        facts.record_candidate_frozen("wf-facts-01", "sha-B", db_path=db)
-        repeat = facts.record_candidate_frozen("wf-facts-01", "sha-B", db_path=db)
+        facts.record_candidate_frozen("wf-facts-01", "a" * 40, db_path=db)
+        facts.record_candidate_frozen("wf-facts-01", "b" * 40, db_path=db)
+        repeat = facts.record_candidate_frozen("wf-facts-01", "b" * 40, db_path=db)
 
         assert repeat["status"] == "exists"
         assert len(facts.list_candidate_frozen_events("wf-facts-01", db_path=db)) == 2
 
     def test_aba_freeze_repairs_join_gate_expectation(self, db):
         """The live candidate is A again, so the gate must expect A."""
-        facts.record_candidate_frozen("wf-facts-01", "sha-A", db_path=db)
-        facts.record_candidate_frozen("wf-facts-01", "sha-B", db_path=db)
-        facts.record_candidate_frozen("wf-facts-01", "sha-A", db_path=db)
+        facts.record_candidate_frozen("wf-facts-01", "a" * 40, db_path=db)
+        facts.record_candidate_frozen("wf-facts-01", "b" * 40, db_path=db)
+        facts.record_candidate_frozen("wf-facts-01", "a" * 40, db_path=db)
 
-        assert facts.latest_frozen_candidate_sha("wf-facts-01", db_path=db) == "sha-A"
+        assert facts.latest_frozen_candidate_sha("wf-facts-01", db_path=db) == "a" * 40
 
 
 class TestDecisionAudit:
     def test_scheduler_decision_roundtrip(self, db):
         facts.record_scheduler_decision(
             "wf-facts-01", ["test", "review"],
-            expected_candidate_sha="sha-A",
+            expected_candidate_sha="a" * 40,
             dispatched=["wf-facts-01-test-auto"],
             db_path=db,
         )
@@ -108,7 +108,7 @@ class TestDecisionAudit:
     def test_join_gate_verdict_roundtrip(self, db):
         facts.record_join_gate_verdict(
             "wf-facts-01", "wrapup", True, "join_satisfied",
-            {"candidate_sha": "sha-A"}, db_path=db,
+            {"candidate_sha": "a" * 40}, db_path=db,
         )
         store = get_state_store(db)
         events = store.list_events(

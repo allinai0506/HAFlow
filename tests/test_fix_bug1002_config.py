@@ -131,7 +131,7 @@ def test_actual_launch_topology_preserves_snapshot_and_projects_runtime_readers(
     cli,store,args=launch_transport_scene
     cfg=tmp_path/'workflow.json';cfg.write_text(json.dumps({'workspace_id':'w','project_root':str(tmp_path),
         'nodes':[{'id':'n','label':'Node','tab_id':'old-tab','anchor_pane_id':'old-anchor','default_integration_mode':'none'}]}))
-    record=store.get_workflow('wf');record['workflow_file']=str(cfg);record['workspace_id']='w';store.save_workflow(record)
+    record=store.get_workflow('wf');record['workflow_file']=str(cfg);record['workspace_id']='w';record['config']={};store.save_workflow(record)
     update=update_required_tasks(store,'wf','n',[],expected_sha=hashlib.sha256(cfg.read_bytes()).hexdigest(),reason='configuration baseline')
     snapshot=Path(update['workflow_file']);before=snapshot.read_bytes()
     monkeypatch.setattr(cli,'ensure_stage_topology',topology.ensure_stage_topology)
@@ -157,7 +157,7 @@ def test_actual_launch_topology_preserves_snapshot_and_projects_runtime_readers(
     assert snapshot.read_bytes()==before,'actual launch topology overwrote immutable configuration'
     assert hashlib.sha256(before).hexdigest()==update['config_sha']
     fresh=store.get_workflow('wf');assert fresh['node_runtime']['n']['tab_id']=='new-tab'
-    store.save_workflow({'workflow_id':'other','project_id':'p','status':'running','workflow_file':str(cfg),
+    store.save_workflow({'workflow_id':'other','project_id':'p','status':'running','workflow_file':str(cfg),'config':json.loads(cfg.read_text()),
                          'node_runtime':{'n':{'tab_id':'foreign-tab','anchor_pane_id':'foreign-anchor'}}})
     assert projects.workflow_config_for('other')['nodes'][0]['tab_id']=='foreign-tab'
     assert projects.workflow_config_for('wf')['nodes'][0]['anchor_pane_id']=='new-anchor'

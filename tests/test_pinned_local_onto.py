@@ -34,6 +34,14 @@ def checkout(repo, branch, pin):
     return _worker.checkout_onto_branch(repo, branch, **kwargs)
 
 
+def seed_launch_workflow(tmp_path, monkeypatch):
+    from herdr.state_store import reset_state_store
+    monkeypatch.setenv('HERDR_STATE_DB', str(tmp_path / 'launch.db'))
+    reset_state_store()
+    _ht._get_store().save_workflow({'workflow_id': 'wf-temp', 'status': 'running',
+        'execution_id': 'wf-temp', 'config': {'nodes': [{'id': 'implementation', 'depends_on': []}]}})
+
+
 def launch_preflight(source, pin, monkeypatch):
     monkeypatch.setattr(_ht, 'load_tasks', lambda: {'tasks': []})
     monkeypatch.setattr(_ht, 'project_for_workflow', lambda _: {
@@ -50,6 +58,7 @@ def launch_preflight(source, pin, monkeypatch):
 
 def test_cli_allows_exact_pinned_local_candidate_before_runtime_creation(tmp_path, monkeypatch):
     source, pin = repository(tmp_path)
+    seed_launch_workflow(tmp_path, monkeypatch)
     launch_preflight(source, pin, monkeypatch)
 
 
@@ -93,6 +102,7 @@ def test_pinned_branch_does_not_bypass_active_ownership(tmp_path, monkeypatch):
 
 def test_cli_transmits_same_pin_to_worker_without_launching_agent(tmp_path, monkeypatch):
     source, pin = repository(tmp_path)
+    seed_launch_workflow(tmp_path, monkeypatch)
     monkeypatch.setattr(_ht, 'load_tasks', lambda: {'tasks': []})
     monkeypatch.setattr(_ht, 'project_for_workflow', lambda _: {
         'project_root': str(source), 'base_branch': 'main', 'execution': {'mode': 'git'}})

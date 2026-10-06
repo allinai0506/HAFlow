@@ -598,10 +598,11 @@ class FrozenCandidateFactTest(unittest.TestCase):
         self.tmp.cleanup()
 
     def _freeze(self, sha):
-        with patch.object(_ctl, "_scheduler_expected_candidate_sha",
-                          return_value=sha),             patch.object(_ctl, "load_tasks", return_value=[]):
-            return _ctl._scheduler_freeze_candidate(
-                "wf-frozen-1", str(self.root), "implementation", [])
+        from herdr.scheduler_facts import record_candidate_frozen
+        # Explicit publication replaces inferred activity/branch rotation.
+        record_candidate_frozen('wf-frozen-1', sha, db_path=self.db)
+        with patch.object(_ctl.scheduler_core, 'resolve_candidate_sha_for_branch', return_value=sha):
+            return _ctl._scheduler_freeze_candidate('wf-frozen-1', str(self.root), 'implementation', [])
 
     def test_freeze_records_fact_and_no_delivery_note(self):
         from herdr import scheduler_facts as sf
@@ -1655,7 +1656,7 @@ class PersistedPlannedCoverageTest(unittest.TestCase):
             cfg = Path(td) / "workflow.json"
             cfg.write_text(json.dumps({"nodes": [{"id": "implementation", "required_task_ids": ["t1", "t3"]}]}))
             store = SQLiteStateStore(Path(td) / "state.db")
-            store.save_workflow({"workflow_id": "wf-1", "status": "running", "workflow_file": str(cfg)})
+            store.save_workflow({"workflow_id": "wf-1", "status": "running", "workflow_file": str(cfg), "config": json.loads(cfg.read_text())})
             store.save_task(_task("t1", "integrated", "implementation", integration_mode="git"))
             store.save_task(_task("t3", "superseded", "implementation", integration_mode="git"))
             with patch.object(projects, "_get_store", return_value=store), patch.object(_ctl, "load_tasks", side_effect=store.list_tasks):

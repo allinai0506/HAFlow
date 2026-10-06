@@ -39,46 +39,45 @@ def _event(conn, operation, action, now, detail=None):
                               'identity_key': operation['identity_key'], 'detail': detail or {}}}, conn=conn)
 
 
-def _snapshot(conn, workflow_id):
-    from herdr.state_db import _decode_task_row
+def _workflow_snapshot(conn, workflow_id):
     row = conn.execute('SELECT * FROM workflows WHERE workflow_id=?', (workflow_id,)).fetchone()
     if row is None:
         raise ValueError('workflow not found')
     workflow = json.loads(row['metadata_json'] or '{}')
-    workflow.update({k: row[k] for k in ('workflow_id', 'status', 'created_at', 'updated_at')})
+    workflow.update({k: row[k] for k in ('workflow_id', 'title', 'template_name', 'current_stage', 'status', 'created_at', 'updated_at')})
+    if len((row['config_json'] or '').encode()) > 262144:
+        raise ValueError('pinned configuration exceeds snapshot budget')
     config = json.loads(row['config_json'] or '{}')
-    if not config.get('nodes') and workflow.get('workflow_file'):
-        from herdr.workflow import normalize_workflow, yaml
-        path = Path(workflow['workflow_file']).expanduser()
-        try:
-            with path.open('rb') as stream:
-                raw = stream.read(262145)
-            if len(raw) > 262144:
-                raise ValueError('workflow config exceeds recovery read budget')
-            text = raw.decode('utf-8')
-            if path.suffix.lower() in ('.yaml', '.yml'):
-                if yaml is None:
-                    raise ValueError('YAML parser unavailable')
-                loaded = yaml.safe_load(text)
-            else:
-                loaded = json.loads(text)
-            if not isinstance(loaded, dict):
-                raise ValueError('workflow config must be a mapping')
-            config = normalize_workflow(loaded)
-        except (OSError, UnicodeError, ValueError, TypeError, RuntimeError):
-            config = {}
-        except Exception as exc:
-            # PyYAML's parser exception is not a ValueError.
-            if yaml is None or not isinstance(exc, yaml.YAMLError):
-                raise
-            config = {}
     epoch = max(float(workflow.get('created_at') or 0), float(workflow.get('reopened_at') or 0))
-    frozen = conn.execute("SELECT payload_json FROM events WHERE workflow_id=? AND event_type='candidate_frozen' AND source='critical-path-scheduler' AND timestamp>=? ORDER BY id DESC LIMIT 1", (workflow_id, epoch)).fetchone()
-    if frozen:
-        workflow['candidate_sha'] = json.loads(frozen['payload_json']).get('candidate_sha')
+    frozen = conn.execute("SELECT id,payload_json FROM events WHERE workflow_id=? AND event_type='candidate_frozen' AND source='critical-path-scheduler' AND timestamp>=? ORDER BY id DESC LIMIT 1", (workflow_id, epoch)).fetchone()
+    workflow['candidate_sha'] = json.loads(frozen['payload_json']).get('candidate_sha') if frozen else None
+    workflow['candidate_episode_id'] = frozen['id'] if frozen else 0
     workflow['config'] = config
-    tasks = [_decode_task_row(r) for r in conn.execute('SELECT * FROM tasks WHERE workflow_id=?', (workflow_id,))]
+    return workflow, config
+
+
+def _snapshot(conn, workflow_id):
+    from herdr.state_db import _decode_task_row
+    workflow, config = _workflow_snapshot(conn, workflow_id)
+    tasks = [_decode_task_row(r) for r in conn.execute('SELECT * FROM tasks WHERE workflow_id=? LIMIT 10001', (workflow_id,))]
+    if len(tasks) > 10000:
+        raise ValueError('workflow tasks exceed snapshot budget')
     return workflow, config, tasks
+
+
+def read_snapshot(db_path, workflow_id):
+    """Read workflow, pinned configuration and tasks from one SQLite snapshot.
+
+    Candidate publication events override the metadata projection. This entry
+    never imports mutable files or initializes a missing database.
+    """
+    from herdr.state_db import get_readonly_db_connection
+    conn = get_readonly_db_connection(db_path)
+    try:
+        conn.execute('BEGIN')
+        return _snapshot(conn, workflow_id)
+    finally:
+        conn.close()
 
 
 def ensure_obligations(conn, workflow, config, tasks, now=None):
@@ -243,12 +242,15 @@ def _validate_step(conn, operation, now, step=None, detail=None):
         successor = by_id.get(successor_id) or {}
         predecessor_id = successor.get('supersedes')
         predecessor = by_id.get(predecessor_id) or {}
-        if (predecessor_id in original_affected and predecessor.get('superseded_by') == successor_id
+        if ((predecessor_id in original_affected or successor_id in original_affected)
+                and predecessor.get('superseded_by') == successor_id
                 and successor.get('workflow_id') == operation['workflow_id']
                 and successor.get('execution_id') == workflow.get('execution_id')):
             confirmed_successors.add(successor_id)
+    from herdr.recovery_successor import confirmed_rework
     delivered_reworks = {task_id for task_id in receipt.get('rework_ids') or []
-                         if task_id in by_id and by_id[task_id].get('rework_delivery') == 'delivered'}
+                         if task_id in by_id and confirmed_rework(conn, by_id[task_id],
+                             (receipt.get('rework_requests') or {}).get(task_id))}
     assessed = assess_workflow(workflow, config, tasks)['obligations']
     current = next((facts for facts in assessed if facts.get('identity_key') == operation['identity_key']), None)
     expected_gates = set(payload.get('task_ids') or [])
@@ -275,8 +277,10 @@ def _validate_step(conn, operation, now, step=None, detail=None):
                 continue
             delivered_clear = (task['task_id'] in delivered_reworks
                                and task.get('run_id') == original.get('run_id')
-                               and key in ('stage_verdict', 'stage_verdict_note')
-                               and task.get(key) in (None, ''))
+                               and ((key in ('stage_verdict', 'stage_verdict_note') and task.get(key) in (None, ''))
+                                    or (key == 'commit' and receipt.get('action') == 'verify'
+                                        and isinstance(task.get('commit'), str)
+                                        and len(task['commit']) == 40)))
             if not delivered_clear:
                 raise ValueError('recovery source facts changed before effect')
     return operation
@@ -360,7 +364,33 @@ def decide_operation(db_path, operation_id, expected_version, operator, action, 
 
 def settle_result(db_path, operation_id, expected_version, now):
     """Settle only from fresh same-transaction task facts and the core proof."""
+    from types import SimpleNamespace
+
     from herdr.workflow_recovery import result_status
+
+    from .observation import ObservationStore
+    from .task_checkpoint import business_acceptance_receipt, has_business_acceptance
+    observations = ObservationStore(db_path)
+    evidence_store = SimpleNamespace(db_path=db_path)
+    from .state_db import get_readonly_db_connection
+    reader = get_readonly_db_connection(db_path)
+    try:
+        reader.execute('BEGIN')
+        prepared_op = _get(reader, operation_id)
+        prepared_workflow, _, prepared_tasks = _snapshot(reader, prepared_op['workflow_id'])
+        prepared_scope = {t['task_id']: t.get('version') for t in prepared_tasks}
+        acceptance = {}
+        evidence_ids = {}
+        for task in prepared_tasks:
+            if task.get('completion_protocol') == 'receipt-v1' and (task.get('node') or task.get('stage')) in (prepared_op['detail'].get('gate_nodes') or []):
+                acceptance[task['task_id']] = has_business_acceptance(evidence_store, task,
+                    prepared_workflow.get('candidate_sha'), conn=reader, observations=observations)
+                receipt = business_acceptance_receipt(reader, task, prepared_workflow.get('candidate_sha'))
+                evidence_ids[task['task_id']] = receipt['id'] if receipt else None
+    finally:
+        reader.close()
+    # No Git/content hashing occurs under BEGIN IMMEDIATE. Recheck the exact
+    # episode, Task versions and latest business-receipt IDs before settling.
     with _transaction(db_path) as conn:
         op = _get(conn, operation_id)
         if op['version'] != expected_version or op['status'] != 'awaiting_result':
@@ -368,7 +398,17 @@ def settle_result(db_path, operation_id, expected_version, now):
         workflow, _, tasks = _snapshot(conn, op['workflow_id'])
         if workflow['status'] != 'running' or workflow.get('startup_ready') is False:
             return op
-        outcome = result_status(op, workflow, tasks)
+        if (prepared_op['version'] != op['version']
+                or prepared_workflow.get('candidate_episode_id') != workflow.get('candidate_episode_id')
+                or prepared_workflow.get('execution_id') != workflow.get('execution_id')
+                or {t['task_id']: t.get('version') for t in tasks} != prepared_scope):
+            raise ValueError('recovery acceptance snapshot changed')
+        for task in tasks:
+            if task['task_id'] in evidence_ids:
+                receipt = business_acceptance_receipt(conn, task, workflow.get('candidate_sha'))
+                if (receipt['id'] if receipt else None) != evidence_ids[task['task_id']]:
+                    raise ValueError('recovery acceptance receipt changed')
+        outcome = result_status(op, workflow, tasks, acceptance=acceptance)
         if outcome and outcome[0] == 'resolved':
             from herdr.recovery_successor import confirmed_rework
             by_id = {task['task_id']:task for task in tasks}

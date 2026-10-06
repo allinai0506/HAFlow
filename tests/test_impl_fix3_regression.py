@@ -1059,6 +1059,7 @@ def make_router_lifecycle(tmp_path, monkeypatch):
             "project_root": str(root),
             "execution": {"mode": "git"},
             "workflow_file": str(workflow_file),
+            "config": json.loads(workflow_file.read_text()),
         }
     )
     store.save_task(

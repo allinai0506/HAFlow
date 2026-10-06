@@ -4,7 +4,6 @@ import hashlib
 import json
 import re
 
-
 _DEFAULT_GATES = {'test': 'implementation', 'review': 'implementation', 'wrapup': 'implementation'}
 _FACT_FIELDS = ('task_id', 'workflow_id', 'run_id', 'execution_id', 'workflow_run_id',
                 'node', 'stage', 'candidate_sha', 'commit', 'stage_verdict', 'stage_verdict_note',
@@ -67,7 +66,7 @@ def _identity_reason(workflow, facts, candidate):
         return 'candidate_invalid'
     if candidate != current:
         return 'candidate_mismatch'
-    if not workflow.get('workflow_id') or not _generation(workflow)[0]:
+    if not workflow.get('workflow_id') or not workflow.get('execution_id'):
         return 'identity_unknown'
     for fact in facts:
         if (workflow.get('execution_id')
@@ -76,7 +75,7 @@ def _identity_reason(workflow, facts, candidate):
         if (fact.get('candidate_sha') or fact.get('commit')) != candidate:
             return 'candidate_mismatch' if (fact.get('candidate_sha') or fact.get('commit')) else 'candidate_unknown'
         if (fact.get('workflow_id') != workflow.get('workflow_id') or not fact.get('task_id')
-                or not (fact.get('run_id') or fact.get('execution_id'))):
+                or not fact.get('run_id')):
             return 'identity_unknown'
     return None
 
@@ -84,10 +83,20 @@ def _identity_reason(workflow, facts, candidate):
 def assess_workflow(workflow, config, tasks):
     """Return original blocking tasks plus fail-closed grouped recovery decisions."""
     current = active_tasks(workflow, tasks)
-    blockers = [task for task in current if _blocking(task)]
+    def relevant(task):
+        # Historical gate verdicts are immutable, but are not current failures.
+        candidate = task.get('candidate_sha')
+        return not (task.get('stage_verdict') == 'blocked' and not task.get('finalize_escalated')
+                    and candidate and workflow.get('candidate_sha')
+                    and re.fullmatch(r'[0-9a-fA-F]{40}', str(candidate))
+                    and candidate != workflow['candidate_sha'])
+    blockers = [task for task in current if _blocking(task) and relevant(task)]
     nodes = {node.get('id'): node for node in (config or {}).get('nodes', [])}
     groups = {}
     for task in blockers:
+        if (task.get('status') == 'rework' and task.get('stage_verdict') != 'blocked'
+                and not task.get('blocker') and not task.get('finalize_escalated')):
+            continue  # In-flight repair waits; it is not a new failed gate.
         node_id = task.get('node') or task.get('stage')
         kind = 'finalize' if task.get('finalize_escalated') else 'fix_loop'
         retry = node_id if kind == 'finalize' else _gate(nodes, node_id)
@@ -114,6 +123,13 @@ def assess_workflow(workflow, config, tasks):
             reason = 'finalize_escalated'
         if reason is None and (workflow.get('status') != 'running' or workflow.get('startup_ready') is False):
             reason = 'workflow_inactive'
+        if reason is None and kind == 'fix_loop':
+            from .node_capacity import launch_capacity_error, node_usage
+            verifiers = [n for n in nodes.values() if n.get('id') != 'wrapup'
+                         and _gate(nodes, n.get('id')) == retry]
+            if any(launch_capacity_error(node_usage(n, tasks, workflow.get('workflow_id')))
+                   for n in verifiers):
+                reason = 'verifier_budget_exhausted'
         if reason is None and kind == 'fix_loop' and not affected:
             reason = 'affected_tasks_unknown'
         identity_facts = [{**{key: task.get(key) for key in _FACT_FIELDS},

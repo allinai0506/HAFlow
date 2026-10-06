@@ -2070,3 +2070,13 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 验证：专项套件 25/25 passed，全量回归 3535 passed（排除已知超时 HTTP 集成测试），PR 冲突状态 CLEAN/MERGEABLE，已合并入 main@0be44bd。
 - 教训：沉淀至 §132（跨 PR 测试隔离：新守卫逻辑提前拦截时需精确 mock 而非注释掉断言）。
 
+
+- 2026-10-06：更新 workflow-progress-recovery，记录权威快照、证据迁移、在途后继消费、发布 episode 与独立业务回执；当前为工作树实现，生产激活和业务复跑未执行。
+
+- 2026-10-06：生产复跑发现 EVALUATION 通用成功模板仍误宣 DoD；追加报告层反例与修复，业务回执仍独立于通用评分。
+
+- 2026-10-06：补证业务blocked仍派wrapup与预算双读取漏口；共享业务前进guard覆盖五类入口，固定config用于launch容量，保留legacy非业务协议策略。
+
+- 2026-10-06: activation review found verifier-cohort freshness race; shared business gate now rechecks the entire SQL cohort after all artifact hashes, preserving legacy reuse.
+
+- 2026-10-06: close inventory uses Git untracked-directory summaries before bounded output; internal evidence cannot crowd out protected user output, and tracked internal changes remain protected.

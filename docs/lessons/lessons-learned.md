@@ -6105,3 +6105,33 @@ if any(op['status'] not in {'resolved','superseded'}
 - Controller 动作套件：`pytest -q tests/test_console_controller_actions_api.py`（7 passed）
 - 全量回归（排除已知超时 HTTP 集成测试）：`pytest -q --deselect tests/test_console_ops_repair_gate_separation.py::test_scenario_9_http_route_integration_to_sqlite`（3535 passed, 1 deselected, 157 subtests passed in 551.75s）
 
+
+## §133 重复修复必须验证恢复消费，而非只验证发送（2026-10-06）
+
+### 问题背景
+`wf-nexusarchive-1005-01` 的 PR #144–153 修复了局部守卫，但历史身份缺失、已送达动作未消费、任务分支所有权混用和活动时间冻结候选仍组合成死锁。专项绿灯后的独立审查再次复现空恢复 inventory 重发，以及已送达 successor 自身成为 affected 后被再次返工。
+
+### 经验教训
+发送前判断与送达后消费是两套必须同时验证的边界。Workflow/Run/epoch/候选/请求身份不能由时间或执行声明推测；恢复后的副作用必须基于当前权威快照。业务测试报告不能由通用测试分数替代。外部证明正确也不能把慢 Git/文件读取放在全局 SQLite 写锁内；迁移审计不应复制原始任意 payload。
+
+### 操作规范
+统一事务快照、同代发布 episode、Task 专属引用、交付一对一映射、短写事务 CAS 和白名单逆迁移。返工只消费当前失败，已经在途的正式后继只等待结果。验收列出实际配置的全部 AC-N，并绑定校验后的 checkpoint；显式预算增加保留历史计数。上述反例已固化到 `tests/test_workflow_repair_contracts.py`，不得以放宽断言替代修复。
+
+### 验证命令 / 关联证据
+`pytest -q tests/test_workflow_repair_contracts.py tests/test_recovery_store.py tests/test_workflow_recovery.py tests/test_recovery_entrypoints.py` 实际 87 passed。工作树 `.omc/evidence/` 保留第一轮 7 个 RED 反例及第二轮 successor 自体 RED；生产数据库只读 backup 的新迁移 apply/rollback 演练有独立 plan/receipt。以上不代表已部署或 NexusArchive 业务验收成功。
+
+生产复跑补证：test-r6 的 METRICS 明确 business_acceptance=unknown，但旧 EVALUATION 成功模板仍声称 DoD 完全满足、安全完成工单。已追加真实 RED 回归 test_generic_success_report_does_not_certify_business_or_completion；两个通用报告模板均只声明所选命令及通用评分，不认证业务验收或完成授权。
+
+生产前进补证：review最新业务blocked且operation894等待时，Controller仍靠stage pass派发wrapup（26838/26846）。业务证明须在所有前进入口授权，而非只在恢复结案时读取；共享guard覆盖Controller/CLI/kernel/PR/close，拒绝发生在intent/push/teardown前，未知不造返工义务。另SQL review预算6但launch读旧workflow.json的4，已用固定config优先与损坏旧文件回归封堵双权威。
+
+#### 2026-10-06: verifier cohort freshness
+- Problem: review proof could turn blocked while a later test artifact was being hashed, after review had passed an individual freshness check.
+- Cause: per-gate CAS does not establish a consistent multi-gate authorization snapshot.
+- Resolution: validate all external artifacts first, then compare every receipt, task version, candidate episode, pinned config and active cohort together in one read-only SQL transaction.
+- Prevention: real kernel and PR regressions inject a newer blocked review, config changes and a new verifier head during later artifact validation.
+
+#### 2026-10-06: filter before bounded teardown inventory
+- Problem: 1800 internal test evidence files exhausted the raw Git inventory cap before infrastructure paths could be filtered.
+- Cause: untracked-file expansion preceded the existing diagnosis filter.
+- Resolution: summarize untracked directories in Git before applying the unchanged output cap; preserve individual tracked-change detection.
+- Prevention: real Git regressions distinguish large internal-only evidence, untracked user directories and tracked internal changes. Treat OS probe failures as unknown and reject teardown. Preserve historical documents with Run-bound checkpoints and reversible artifact relocation without rewriting verdicts or bypassing branch hooks.

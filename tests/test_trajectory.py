@@ -291,6 +291,8 @@ def test_normal_launch_persists_one_new_run_id_for_initial_trajectory_events(tmp
     db_path = tmp_path / "state.db"
     monkeypatch.setenv("HERDR_STATE_DB", str(db_path))
 
+    task_mod._get_store().save_workflow({"workflow_id": "workflow-1", "status": "running",
+        "execution_id": "workflow-1", "config": {"nodes": [{"id": "implementation", "depends_on": []}]}})
     worker_result = {
         "clone": str(tmp_path / "clone"),
         "branch": "context/task-launch-run-id",

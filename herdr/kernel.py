@@ -642,19 +642,18 @@ def _is_task_completed(task: Dict[str, Any]) -> bool:
 
 def step_workflow(workflow_id: str) -> Dict[str, Any]:
     """Execute a single step: compute ready nodes and dispatch or advance exactly one ready node."""
-    wf_data = load_workflows_data()
-    wf_entry = wf_data.get("workflows", {}).get(workflow_id)
-    if not wf_entry:
-        raise ValueError(f"Workflow '{workflow_id}' not found")
-
-    cfg = wf_entry.get("config") or {}
-    norm_cfg = workflow.normalize_workflow(cfg)
-    nodes = norm_cfg.get("nodes", [])
+    store = _get_store()
+    if hasattr(store, 'read_workflow_snapshot'):
+        wf_entry, norm_cfg, wf_tasks = store.read_workflow_snapshot(workflow_id)
+    else:
+        wf_entry = load_workflows_data().get('workflows', {}).get(workflow_id)
+        if not wf_entry:
+            raise ValueError(f"Workflow '{workflow_id}' not found")
+        norm_cfg = workflow.normalize_workflow(wf_entry.get('config') or {})
+        wf_tasks = [t for t in load_tasks_data().get('tasks', []) if t.get('workflow_id') == workflow_id]
+    nodes = norm_cfg.get('nodes', [])
     if not nodes:
-        raise ValueError(f"Workflow '{workflow_id}' has no nodes in config")
-
-    tasks_data = load_tasks_data()
-    wf_tasks = [t for t in tasks_data.get("tasks", []) if t.get("workflow_id") == workflow_id]
+        raise ValueError(f"Workflow '{workflow_id}' has no pinned nodes in config")
 
     from .workflow_progress import assess_workflow
     assessment = assess_workflow(wf_entry, norm_cfg, wf_tasks)
@@ -686,6 +685,11 @@ def step_workflow(workflow_id: str) -> Dict[str, Any]:
 
     stepped = eligible_ready[0]
     stepped_id = stepped["id"]
+    from .business_gate import business_gate_blockers
+    missing_business = business_gate_blockers(store, wf_entry, norm_cfg, wf_tasks, stepped_id)
+    if missing_business:
+        return {'ok': False, 'workflow_id': workflow_id, 'reason': 'business_acceptance_unavailable',
+                'blocker_task_ids': missing_business}
 
     # Keep workflow paused to enforce single-step execution control
     transition_workflow(

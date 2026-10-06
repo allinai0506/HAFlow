@@ -31,6 +31,7 @@ def test_real_loop_cli_to_controller_to_report(tmp_path,monkeypatch,failed,chang
     assert worker.build_baseline_fingerprint(clone)['untracked'] == {}
     store=SQLiteStateStore(tmp_path/'state.db')
     store.save_workflow({'workflow_id':'wf-chain','status':'running','candidate_sha':candidate})
+    store.record_event('candidate_frozen', {'candidate_sha':candidate}, workflow_id='wf-chain', source='critical-path-scheduler')
     store.save_task({'task_id':'test-chain','workflow_id':'wf-chain','run_id':'run-chain','status':'working',
         'clone_path':str(clone),'candidate_sha':candidate,'verified_candidate_sha':candidate})
     identity=issue_completion_contract('test-chain',store)

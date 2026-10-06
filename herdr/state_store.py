@@ -664,6 +664,10 @@ class SQLiteStateStore(StateStore):
     def get_workflow(self, workflow_id: str) -> Optional[Dict[str, Any]]:
         return state_db.get_workflow(workflow_id, db_path=self.db_path)
 
+    def read_workflow_snapshot(self, workflow_id):
+        from .recovery_store import read_snapshot
+        return read_snapshot(self.db_path, workflow_id)
+
     def list_workflows(self, status: Optional[str] = None) -> List[Dict[str, Any]]:
         return state_db.list_workflows(status=status, db_path=self.db_path)
 

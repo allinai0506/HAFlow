@@ -128,6 +128,7 @@ def _real_committed_launch_scene(tmp_path, monkeypatch):
                    project_root=str(repo), base_branch='main', config=config,
                    candidate_sha=sha, startup_ready=True)
     store.save_workflow(project)
+    store.record_event('candidate_frozen', {'candidate_sha': sha}, workflow_id='wf', source='critical-path-scheduler')
     store.save_task(dict(task_id='old', workflow_id='wf', node='implementation',
                         status='committed', run_id='old-run', execution_id='execution',
                         commit=sha, branch='old-branch', dispatch_role='worker', dispatch_round=1))

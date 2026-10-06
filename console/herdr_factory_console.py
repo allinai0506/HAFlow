@@ -80,7 +80,7 @@ def ops_center(workflow_id=None,include_tasks=False):
     return data
 
 def projects():return list(load_json(PROJECTS_FILE,{'projects':{}}).get('projects',{}).values())
-def workflows():return load_json(WORKFLOWS_FILE,{'workflows':{}}).get('workflows',{})
+def workflows():return herdr_kernel.load_workflows_data().get('workflows',{})
 def tasks():return herdr_kernel.load_tasks_data().get('tasks',[])
 def project_by_id(pid):return next((p for p in projects() if p.get('project_id')==pid),None)
 def project_for_workflow(wid):

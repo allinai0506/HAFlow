@@ -336,6 +336,8 @@ def test_dispatch_duplicate_output_clarity(tmp_path):
 def test_freeze_candidate_cli(tmp_path):
     root = Path(__file__).resolve().parents[1]
     db = tmp_path / "state.db"
+    from herdr.state_store import SQLiteStateStore
+    SQLiteStateStore(db).save_workflow({'workflow_id': 'wf-freeze-test', 'status': 'running'})
     env = {
         **os.environ,
         "HOME": str(tmp_path),
@@ -348,7 +350,7 @@ def test_freeze_candidate_cli(tmp_path):
             str(root / "bin/herdr-task"),
             "freeze-candidate",
             "wf-freeze-test",
-            "--candidate-sha", "c0ffee123456",
+            "--candidate-sha", "c" * 40,
             "--delivery-branch", "feature/test",
             "--source-node", "impl",
         ],
@@ -359,8 +361,8 @@ def test_freeze_candidate_cli(tmp_path):
     )
     assert res.returncode == 0, res.stderr
     assert "[CANDIDATE FROZEN]" in res.stdout
-    assert "c0ffee123456" in res.stdout
+    assert "c" * 40 in res.stdout
 
     # Verify state store has the frozen event
     from herdr.scheduler_facts import latest_frozen_candidate_sha
-    assert latest_frozen_candidate_sha("wf-freeze-test", db_path=db) == "c0ffee123456"
+    assert latest_frozen_candidate_sha("wf-freeze-test", db_path=db) == "c" * 40
