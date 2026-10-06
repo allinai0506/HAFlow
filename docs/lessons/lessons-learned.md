@@ -6152,3 +6152,13 @@ if any(op['status'] not in {'resolved','superseded'}
 - Cause: untracked-file expansion preceded the existing diagnosis filter.
 - Resolution: summarize untracked directories in Git before applying the unchanged output cap; preserve individual tracked-change detection.
 - Prevention: real Git regressions distinguish large internal-only evidence, untracked user directories and tracked internal changes. Treat OS probe failures as unknown and reject teardown. Preserve historical documents with Run-bound checkpoints and reversible artifact relocation without rewriting verdicts or bypassing branch hooks.
+
+### 首派回执与后续恢复的生命周期冲突（#156）
+
+**现象**：首个Task故障作废后，扫描识别需要补派，但resolved首派记录不允许claim，队列长期为空。
+
+**根因**：首次登记事实被复用为整个节点后续派发的准入状态，历史完成记录与当前恢复责任混在一起。
+
+**修复**：保留旧resolved，为合法替代谱系建立独立派发义务，身份绑定前序Task/Run；扫描和协调器读取同一当前记录，替代登记验证supersedes。
+
+**防复发**：用真实Controller/CLI/SQLite覆盖首派登记、故障自动作废、四轮扫描、替代登记及重复派发幂等；同时验证部分替代、再次故障和旧identity拒绝。

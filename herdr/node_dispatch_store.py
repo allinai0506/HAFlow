@@ -3,6 +3,7 @@ import json
 import time
 
 from . import node_dispatch as core, recovery_store as rs
+from .direct_dispatch import lineage_redispatch_candidates
 
 
 def _write(conn, op, status, detail, now, *, next_due=None, owner=None, lease=None, started=None, attempts=None):
@@ -22,18 +23,36 @@ def _operations(conn, wid):
         "SELECT * FROM workflow_recovery_operations WHERE workflow_id=? AND identity_key LIKE 'node_dispatch:%' AND status NOT IN ('resolved','superseded') ORDER BY id DESC LIMIT 1000", (wid,))]
 
 
+def _node_operation(conn, workflow, config, node):
+    key = core.payload(workflow, config, node)['identity_key']
+    row = conn.execute("""SELECT * FROM workflow_recovery_operations
+        WHERE identity_key=? OR (workflow_id=? AND identity_key LIKE 'node_dispatch:%'
+            AND json_extract(payload_json,'$.generation_key')=?) ORDER BY id DESC LIMIT 1""",
+        (key, workflow['workflow_id'], key)).fetchone()
+    return rs._decode(row) if row else None
+
+
 def reconcile_workflow(db_path, wid, *, legacy_notified=(), discover=True, now=None):
     now = time.time() if now is None else now
     with rs._transaction(db_path) as conn:
         workflow, config, tasks = rs._snapshot(conn, wid)
         current_tasks = [t for t in tasks if not t.get('execution_id')
                          or t.get('execution_id') == workflow.get('execution_id')]
-        if discover and core.active(workflow) and not current_tasks:
+        if discover and core.active(workflow):
             for node in config.get('nodes') or []:
                 if (not node.get('id') or node.get('depends_on') or node.get('node_type', 'agent') != 'agent'):
                     continue
-                facts = core.payload(workflow, config, node)
-                legacy = node['id'] in legacy_notified
+                previous = _node_operation(conn, workflow, config, node)
+                node_tasks = [t for t in current_tasks if (t.get('node') or t.get('stage')) == node['id']]
+                candidates = lineage_redispatch_candidates(node_tasks)
+                predecessors = None
+                if previous and previous['status'] in core.TERMINAL and candidates:
+                    predecessors = sorted(({'task_id': t['task_id'], 'run_id': t.get('run_id')}
+                                           for t in candidates), key=lambda t: t['task_id'])
+                elif current_tasks:
+                    continue
+                facts = core.payload(workflow, config, node, predecessors, previous['id'] if predecessors else None)
+                legacy = not predecessors and node['id'] in legacy_notified
                 detail = ({'reason': 'legacy_dispatch_unknown', 'origin': 'legacy_notified',
                            'deadline_at': now + core.WAIT_SECONDS} if legacy else {})
                 cur = conn.execute('''INSERT INTO workflow_recovery_operations
@@ -83,9 +102,7 @@ def operation_for_node(db_path, wid, node_id):
         node = next((n for n in config.get('nodes') or [] if n.get('id') == node_id), None)
         if not node:
             return None
-        identity = core.payload(workflow, config, node)['identity_key']
-        row = conn.execute('SELECT * FROM workflow_recovery_operations WHERE identity_key=?', (identity,)).fetchone()
-        return rs._decode(row) if row else None
+        return _node_operation(conn, workflow, config, node)
     finally:
         conn.close()
 
@@ -94,8 +111,9 @@ def claim(db_path, operation_id, owner, now=None):
     now = time.time() if now is None else now
     with rs._transaction(db_path) as conn:
         op = rs._get(conn, operation_id)
-        workflow, config, _ = rs._snapshot(conn, op['workflow_id'])
+        workflow, config, tasks = rs._snapshot(conn, op['workflow_id'])
         if (not owner or not core.active(workflow) or not core.current(op, workflow, config)
+                or not core.predecessors_current(op, workflow, tasks)
                 or op['status'] != 'pending' or op['started'] or op['next_due_at'] > now or op['attempts'] >= 3):
             return None
         return _write(conn, op, 'running', {}, now, owner=owner, lease=now + 660, next_due=now + 660,
@@ -106,8 +124,9 @@ def start(db_path, operation_id, owner, now=None):
     now = time.time() if now is None else now
     with rs._transaction(db_path) as conn:
         op = rs._owned(conn, operation_id, owner, now)
-        workflow, config, _ = rs._snapshot(conn, op['workflow_id'])
-        if not core.active(workflow) or not core.current(op, workflow, config) or op['started']:
+        workflow, config, tasks = rs._snapshot(conn, op['workflow_id'])
+        if (not core.active(workflow) or not core.current(op, workflow, config) or op['started']
+                or not core.predecessors_current(op, workflow, tasks)):
             raise ValueError('dispatch no longer owns current unsent generation')
         return _write(conn, op, 'running', {'sent_at': now, 'deadline_at': now + core.WAIT_SECONDS},
                       now, owner=owner, lease=now + 660, next_due=now + core.CHECK_SECONDS, started=1)
@@ -147,10 +166,13 @@ def defer(db_path, operation_id, reason, now=None, owner=None):
 
 def validate_launch(conn, operation_id, workflow_id, node_id, now):
     op = rs._get(conn, operation_id)
-    workflow, config, _ = rs._snapshot(conn, workflow_id)
+    workflow, config, tasks = rs._snapshot(conn, workflow_id)
+    node = next((n for n in config.get('nodes') or [] if n.get('id') == node_id), None)
+    latest = _node_operation(conn, workflow, config, node) if node else None
     if (op['payload'].get('kind') != 'node_dispatch' or op['workflow_id'] != workflow_id
             or op['payload']['node_id'] != node_id or not workflow.get('execution_id')
             or not core.active(workflow) or not core.current(op, workflow, config)
+            or not latest or latest['id'] != op['id'] or not core.predecessors_current(op, workflow, tasks)
             or not op['started'] or op['status'] not in {'running', 'awaiting_result', 'resolved', 'waiting_human'}
             or op['detail'].get('deadline_at', 0) <= now or op['detail'].get('origin') == 'legacy_notified'):
         raise ValueError('dispatch operation does not authorize this launch')
@@ -160,9 +182,12 @@ def validate_launch(conn, operation_id, workflow_id, node_id, now):
 def record_intent(db_path, intent, now):
     from . import state_db
     with rs._transaction(db_path) as conn:
-        _, workflow = validate_launch(conn, intent['dispatch_operation_id'], intent['workflow_id'], intent['node_id'], now)
+        op, workflow = validate_launch(conn, intent['dispatch_operation_id'], intent['workflow_id'], intent['node_id'], now)
         if intent.get('execution_id') != workflow['execution_id'] or not intent['resources'].get('run_id'):
             raise ValueError('dispatch launch intent requires current execution and run identity')
+        predecessors = op['payload'].get('predecessors') or []
+        if predecessors and intent.get('supersedes') not in {p['task_id'] for p in predecessors}:
+            raise ValueError('replacement dispatch requires its predecessor')
         state_db.record_event({'event_type': 'launch_intent', 'payload': intent,
             'workflow_id': intent['workflow_id'], 'node_id': intent['node_id'], 'task_id': intent['key'],
             'source': 'launch', 'timestamp': now}, conn=conn)
@@ -172,12 +197,16 @@ def validate_task_registration(conn, task, now):
     operation_id = task.get('dispatch_operation_id')
     if operation_id is None:
         return
-    _, workflow = validate_launch(conn, operation_id, task['workflow_id'], task.get('node') or task.get('stage'), now)
+    op, workflow = validate_launch(conn, operation_id, task['workflow_id'], task.get('node') or task.get('stage'), now)
     if not task.get('run_id') or task.get('execution_id') != workflow.get('execution_id'):
         raise ValueError('dispatch task requires current run and execution identity')
     row = conn.execute("SELECT payload_json FROM events WHERE workflow_id=? AND event_type='launch_intent' AND source='launch' AND json_extract(payload_json,'$.intent_id')=? ORDER BY id DESC LIMIT 1",
                        (task['workflow_id'], task.get('launch_intent_id'))).fetchone()
     intent = json.loads(row['payload_json']) if row else {}
+    predecessors = op['payload'].get('predecessors') or []
+    if predecessors and (task.get('supersedes') != intent.get('supersedes')
+                         or task.get('supersedes') not in {p['task_id'] for p in predecessors}):
+        raise ValueError('replacement task requires matching predecessor intent')
     if (intent.get('dispatch_operation_id') != operation_id or intent.get('task_id') != task['task_id']
             or intent.get('node_id') != (task.get('node') or task.get('stage'))
             or (intent.get('resources') or {}).get('run_id') != task['run_id']
@@ -218,4 +247,4 @@ def recover_registration_identity(conn, workflow_id, task_id):
     intent = json.loads(row['payload_json'])
     return {'dispatch_operation_id': intent['dispatch_operation_id'],
             'launch_intent_id': intent['intent_id'], 'execution_id': intent['execution_id'],
-            'run_id': intent['resources']['run_id']}
+            'run_id': intent['resources']['run_id'], 'supersedes': intent.get('supersedes')}

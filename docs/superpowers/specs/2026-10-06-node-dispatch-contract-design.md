@@ -99,3 +99,13 @@ RED：pytest -q tests/test_node_dispatch_contract.py
 ## 实施细化（授权范围内）
 
 新事务函数放在 herdr/node_dispatch_store.py，复用现有 recovery 表与事务入口，避免把首节点生命周期混进返工证明。队列入队时即领取持久租约，携带 operation/owner；租约过期恢复丢失队列。resolved 允许原发送截止内补齐同一派发的并行 Task，但始终禁止再次发送。tasks 历史必须先按 execution 过滤；未完成义务先于历史容量限制被读取。当前基线已对齐 origin/main 91f084c；与原 defa607 的源码内容一致。
+
+## 首派完成后的替代派发生命周期
+
+首派resolved是历史登记证据，不能充当后续补派的准入锁。当前代次存在合法superseded且replacement_pending未被明确取消的谱系头时，沿用lineage_redispatch_candidates，建立独立派发记录；前序Task/Run集合纳入identity，原resolved不重置。扫描和协调器均查询当前节点最新记录，旧队列不能认领新记录。替代launch intent及Task必须携带本记录的 --supersedes，全部前序任务均有绑定的替代Task后才resolved。新记录仍保持固定期限、持久核验、unknown不重发和人工待办。
+
+发送和launch前再次核验前序Task/Run及待补派资格；部分前序撤销时未发送计划终止，下一轮为剩余合法谱系建立新责任，prior_operation_id关联旧计划，避免取消后恢复撞旧终态。已登记supersedes身份不可擦除或重绑定。
+
+## P1补派修正验收（bcd5c5b后续）
+
+当前补派/DB专项83 passed；独立Spec/Standards通过。完整回归实际结果3644 passed、2 failed、157 subtests passed；两项既有短预算用例未改源码或断言，随后主控及两位独立评审原样复验均2 passed。npm反例在未改bcd5c5b隔离基线同样出现；Git首次仅能确定清单未知且安全保留，不能断言具体超时根因。保留首次失败，不改写为单次全量PASS。交付为更新同一PR，不合并/部署，真实Agent全流程未验证。

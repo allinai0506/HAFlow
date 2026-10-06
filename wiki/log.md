@@ -2082,3 +2082,5 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 2026-10-06: close inventory uses Git untracked-directory summaries before bounded output; internal evidence cannot crowd out protected user output, and tracked internal changes remain protected.
 
 - 2026-10-06：workflow-progress-recovery 增补首节点 node_dispatch 持久义务、发送前预占、固定登记截止、CLI intent/Task 绑定和零任务展示。记录历史上限、旧代次、丢队列及旧配置反例；当前仅本地工作树，不代表已部署或真实 Agent 自动完成。
+
+- 2026-10-06：#156审查确认resolved首派阻断基础设施故障补派；补充独立replacement派发记录、前序身份及完整生命周期回归，保留历史首派证据。

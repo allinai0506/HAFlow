@@ -79,3 +79,9 @@ Evidence:
 - `tests/test_node_dispatch_contract.py`
 
 UNKNOWN：本节是本地工作树实现。真实 Agent 接单、生产部署和从新建到交付的无人干预完成尚未验证。
+
+## 首派完成后的替代派发生命周期
+
+首派resolved是历史登记证据，不能充当后续补派的准入锁。当前代次存在合法superseded且replacement_pending未被明确取消的谱系头时，沿用lineage_redispatch_candidates，建立独立派发记录；前序Task/Run集合纳入identity，原resolved不重置。扫描和协调器均查询当前节点最新记录，旧队列不能认领新记录。替代launch intent及Task必须携带本记录的 --supersedes，全部前序任务均有绑定的替代Task后才resolved。新记录仍保持固定期限、持久核验、unknown不重发和人工待办。
+
+发送和launch前再次核验前序Task/Run及待补派资格；部分前序撤销时未发送计划终止，下一轮为剩余合法谱系建立新责任，prior_operation_id关联旧计划，避免取消后恢复撞旧终态。已登记supersedes身份不可擦除或重绑定。

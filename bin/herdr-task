@@ -2417,6 +2417,8 @@ def _record_router_failure_task(args, node_id, error, *,
                     candidate_sha=launch_intent['candidate_sha'],
                     artifact_mode=getattr(args, "artifact_mode", None),
                     launch_intent_id=launch_intent['intent_id'])
+    if launch_intent and launch_intent.get('supersedes'):
+        task['supersedes'] = launch_intent['supersedes']
     if launch_intent and launch_intent.get('dispatch_operation_id') is not None:
         task.update(dispatch_operation_id=launch_intent['dispatch_operation_id'],
                     execution_id=launch_intent['execution_id'])
@@ -3869,6 +3871,8 @@ def _launch_task(args):
     _apply_execution_identity(task, args)
     if launch_intent.get('dispatch_operation_id') is not None:
         task['dispatch_operation_id'] = launch_intent['dispatch_operation_id']
+        if launch_intent.get('supersedes'):
+            task['supersedes'] = launch_intent['supersedes']
     if raw_policy:
         task["agent_policy"] = agent_policy
     if exec_fields["execution_mode"] == "context":

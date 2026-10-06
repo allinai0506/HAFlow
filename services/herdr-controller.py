@@ -7231,6 +7231,7 @@ task_type:
    --source {project_root}
 {candidate_flags}
 {('   --dispatch-operation-id ' + str(dispatch_op['id'])) if dispatch_op else ''}
+{('   替代派发：每个前序任务各建一个替代Task，分别携带 --supersedes ' + ', --supersedes '.join(p['task_id'] for p in dispatch_op['payload'].get('predecessors', []))) if dispatch_op and dispatch_op['payload'].get('predecessors') else ''}
 
 6. 默认使用本节点 policy：
 

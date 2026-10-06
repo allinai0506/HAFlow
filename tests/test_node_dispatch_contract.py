@@ -44,7 +44,11 @@ def scene(tmp_path, monkeypatch):
         monkeypatch.setattr(ctrl, name, function)
     ctrl.STAGE_STATE_FILE = str(tmp_path / 'stage-state.json')
     sent = []
+    real_run = ctrl.subprocess.run
     def external_call(command, **kwargs):
+        if len(command) > 1 and command[1] == 'supersede':
+            import sys
+            return real_run([sys.executable, str(ROOT / 'bin/herdr-task'), *command[1:]], **kwargs)
         assert command[:3] == ['herdr', 'agent', 'prompt']
         sent.append(command)
         return SimpleNamespace(returncode=0, stdout='', stderr='')
@@ -104,15 +108,21 @@ def started_operation(scene):
     return nd.start(scene.store.db_path, op['id'], 'owner', now=1000)
 
 
-def register_task(scene, op, task_id='work', role='worker'):
+def register_task(scene, op, task_id='work', role='worker', predecessor=None):
     from herdr.task_resources import begin_launch_intent
+    predecessors = op['payload'].get('predecessors') or []
+    supersedes = predecessor or (predecessors[0]['task_id'] if predecessors else None)
     intent = begin_launch_intent(scene.store, workflow_id='wf', node_id='implementation',
         task_id=task_id, role=role, dispatch_operation_id=op['id'], run_id='run-' + task_id,
-        execution_id='execution-1', now=scene.clock[0])['intent']
+        execution_id='execution-1', supersedes=supersedes,
+        dispatch_round=int(scene.store.get_task(supersedes).get('dispatch_round') or 1) + 1 if supersedes else 1,
+        now=scene.clock[0])['intent']
     task = {'task_id': task_id, 'workflow_id': 'wf', 'node': 'implementation', 'status': 'pending',
             'execution_id': 'execution-1', 'run_id': 'run-' + task_id,
             'dispatch_operation_id': op['id'], 'launch_intent_id': intent['intent_id'],
-            'dispatch_role': role, 'dispatch_round': 1}
+            'dispatch_role': role, 'dispatch_round': intent['dispatch_round']}
+    if supersedes:
+        task['supersedes'] = supersedes
     scene.store.save_task(task)
     return task
 
@@ -283,7 +293,8 @@ def test_zero_task_projection_exposes_wait_and_expired_human_decision(scene):
     assert stalled['dispatch']['decision_needed']
 
 
-def test_real_cli_launch_binds_intent_and_task_to_operation(tmp_path, monkeypatch):
+@pytest.mark.parametrize('replacement', [False, True])
+def test_real_cli_launch_binds_intent_and_task_to_operation(tmp_path, monkeypatch, replacement):
     # Existing harness only substitutes native Pane/Worker/Agent resources.
     spec = importlib.util.spec_from_file_location('dispatch_cli_test_harness', ROOT / 'tests/test_recovery_entrypoints.py')
     entries = importlib.util.module_from_spec(spec)
@@ -317,10 +328,31 @@ def test_real_cli_launch_binds_intent_and_task_to_operation(tmp_path, monkeypatc
     result = nd.transport_finished(store.db_path, op['id'], 'controller', reason='dispatch_awaiting_task')
     assert result['status'] == 'resolved'
     assert result['detail']['registered_runs'] == {'new': 'new-run'}
-    assert calls['worker'] == calls['prompt'] == 1
+    if replacement:
+        cli.supersede_task('new', allow_pending=True, reason='infrastructure failure')
+        nd.reconcile_workflow(store.db_path, 'wf')
+        retry = nd.operation_for_node(store.db_path, 'wf', 'implementation')
+        assert retry['id'] != op['id']
+        nd.claim(store.db_path, retry['id'], 'retry')
+        nd.start(store.db_path, retry['id'], 'retry')
+        args = make_args()
+        args.task_id = 'new-r2'
+        args.supersedes = 'new'
+        args.dispatch_round = 2
+        args.run_id = 'retry-run'
+        args.dispatch_operation_id = retry['id']
+        cli.launch_task(args)
+        replacement_task = store.get_task('new-r2')
+        assert replacement_task['dispatch_operation_id'] == retry['id']
+        assert replacement_task['supersedes'] == 'new'
+        assert store.get_task('new')['superseded_by'] == 'new-r2'
+        nd.reconcile_workflow(store.db_path, 'wf')
+        assert nd.operation_for_node(store.db_path, 'wf', 'implementation')['status'] == 'resolved'
+
+    assert calls['worker'] == calls['prompt'] == (2 if replacement else 1)
     # Repeating the CLI command uses its actual persistent identity and creates no new resources.
     cli.launch_task(args)
-    assert calls['worker'] == calls['prompt'] == 1
+    assert calls['worker'] == calls['prompt'] == (2 if replacement else 1)
     reset_state_store()
 
 
@@ -509,3 +541,207 @@ def test_lookup_of_unregistered_workflow_has_no_dispatch_obligation(scene):
     assert nd.operation_for_node(scene.store.db_path, 'not-registered', 'implementation') is None
     assert scene.store.get_workflow('not-registered') is None
     assert scene.store.list_events(workflow_id='not-registered') == []
+
+
+def test_resolved_intake_allows_distinct_replacement_lifecycle(scene):
+    from herdr import node_dispatch_store as nd
+    original = started_operation(scene)
+    register_task(scene, original)
+    nd.transport_finished(scene.store.db_path, original['id'], 'owner', reason='registered', now=1000)
+    scene.store.transition_task('work', 'dispatched', 'dispatch', source='test')
+    scene.store.transition_task('work', 'failed', 'agent_process_crash', source='test')
+    assert scene.ctrl.recover_infra_failed_tasks('wf') is True
+    assert scene.store.get_task('work')['replacement_pending'] is True
+    for _ in range(4):
+        scene.ctrl.check_workflow_stage_advance('wf')
+        scene.ctrl.check_workflow_recovery('wf')
+    assert scene.ctrl.coordinator_queue.qsize() == 1
+    item = scene.ctrl.coordinator_queue.get_nowait()
+    replacement = nd.operation_for_node(scene.store.db_path, 'wf', 'implementation')
+    assert replacement['id'] != original['id']
+    assert replacement['payload']['predecessors'] == [{'task_id': 'work', 'run_id': 'run-work'}]
+    scene.ctrl._handle_coordinator_item(item)
+    assert len(scene.sent) == 1
+    assert '--supersedes work' in ' '.join(scene.sent[0])
+    assert '--dispatch-operation-id ' + str(replacement['id']) in ' '.join(scene.sent[0])
+    task = register_task(scene, replacement, 'work-r2')
+    assert task['dispatch_operation_id'] == replacement['id']
+    for _ in range(4):
+        scene.ctrl.check_workflow_stage_advance('wf')
+        scene.ctrl.check_workflow_recovery('wf')
+    assert scene.ctrl.coordinator_queue.empty()
+    operations = dispatch_operations(scene)
+    assert len(operations) == 2
+    assert all(op['status'] == 'resolved' for op in operations)
+    assert operations[0]['detail']['registered_task_ids'] == ['work']
+    assert operations[1]['detail']['registered_task_ids'] == ['work-r2']
+
+
+@pytest.mark.parametrize('abandoned', [False, True])
+def test_replacement_requires_superseded_pending_predecessor(scene, abandoned):
+    from herdr import node_dispatch_store as nd
+    original = started_operation(scene)
+    register_task(scene, original)
+    nd.transport_finished(scene.store.db_path, original['id'], 'owner', reason='registered', now=1000)
+    scene.store.transition_task('work', 'failed', 'agent_process_crash')
+    if abandoned:
+        scene.store.transition_task('work', 'superseded', 'abandoned', metadata={'replacement_pending': False})
+    nd.reconcile_workflow(scene.store.db_path, 'wf', now=1000)
+    assert nd.operation_for_node(scene.store.db_path, 'wf', 'implementation')['id'] == original['id']
+    assert len(dispatch_operations(scene)) == 1
+
+
+def test_replacement_rejects_old_dispatch_and_wrong_predecessor(scene):
+    from herdr import node_dispatch_store as nd
+    from herdr.task_resources import begin_launch_intent
+    original = started_operation(scene)
+    register_task(scene, original)
+    nd.transport_finished(scene.store.db_path, original['id'], 'owner', reason='registered', now=1000)
+    scene.store.transition_task('work', 'failed', 'agent_process_crash')
+    scene.store.transition_task('work', 'superseded', 'recover')
+    nd.reconcile_workflow(scene.store.db_path, 'wf', now=1000)
+    replacement = nd.operation_for_node(scene.store.db_path, 'wf', 'implementation')
+    nd.claim(scene.store.db_path, replacement['id'], 'replacement', now=1000)
+    nd.start(scene.store.db_path, replacement['id'], 'replacement', now=1000)
+    with pytest.raises(ValueError, match='authorize'):
+        register_task(scene, original, 'stale', 'stale-role')
+    with pytest.raises(ValueError, match='predecessor'):
+        begin_launch_intent(scene.store, workflow_id='wf', node_id='implementation',
+            task_id='unrelated', role='different-role', dispatch_operation_id=replacement['id'],
+            run_id='unrelated-run', execution_id='execution-1', now=1000)
+
+
+def test_replacement_inventory_requires_each_predecessor_and_can_recover_again(scene):
+    from herdr import node_dispatch_store as nd
+    original = started_operation(scene)
+    register_task(scene, original, 'a', 'a-role')
+    register_task(scene, original, 'b', 'b-role')
+    nd.transport_finished(scene.store.db_path, original['id'], 'owner', reason='registered', now=1000)
+    for task_id in ['a', 'b']:
+        scene.store.transition_task(task_id, 'failed', 'crash')
+        scene.store.transition_task(task_id, 'superseded', 'recover')
+    nd.reconcile_workflow(scene.store.db_path, 'wf', now=1000)
+    retry = nd.operation_for_node(scene.store.db_path, 'wf', 'implementation')
+    nd.claim(scene.store.db_path, retry['id'], 'retry', now=1000)
+    nd.start(scene.store.db_path, retry['id'], 'retry', now=1000)
+    register_task(scene, retry, 'a-r2', 'a-role', predecessor='a')
+    nd.transport_finished(scene.store.db_path, retry['id'], 'retry', reason='partial', now=1000)
+    assert nd.operation_for_node(scene.store.db_path, 'wf', 'implementation')['status'] == 'awaiting_result'
+    register_task(scene, retry, 'b-r2', 'b-role', predecessor='b')
+    nd.reconcile_workflow(scene.store.db_path, 'wf', now=1000)
+    assert nd.operation_for_node(scene.store.db_path, 'wf', 'implementation')['status'] == 'resolved'
+    scene.store.transition_task('a-r2', 'failed', 'crash')
+    scene.store.transition_task('a-r2', 'superseded', 'recover')
+    nd.reconcile_workflow(scene.store.db_path, 'wf', now=1000)
+    next_retry = nd.operation_for_node(scene.store.db_path, 'wf', 'implementation')
+    assert next_retry['id'] not in {retry['id'], original['id']}
+    assert next_retry['payload']['predecessors'] == [{'task_id': 'a-r2', 'run_id': 'run-a-r2'}]
+    assert len(dispatch_operations(scene)) == 3
+
+
+@pytest.mark.parametrize('mutation', ['abandoned', 'run', 'linked'])
+def test_queued_replacement_revalidates_predecessor_before_send(scene, mutation):
+    from herdr import node_dispatch_store as nd
+    original = started_operation(scene)
+    register_task(scene, original)
+    nd.transport_finished(scene.store.db_path, original['id'], 'owner', reason='registered', now=1000)
+    scene.store.transition_task('work', 'failed', 'crash')
+    scene.store.transition_task('work', 'superseded', 'recover')
+    scene.ctrl.check_workflow_stage_advance('wf')
+    item = scene.ctrl.coordinator_queue.get_nowait()
+    task = scene.store.get_task('work')
+    task[{'abandoned': 'replacement_pending', 'run': 'run_id', 'linked': 'superseded_by'}[mutation]] = {
+        'abandoned': False, 'run': 'other-run', 'linked': 'other-task'}[mutation]
+    if mutation == 'run':
+        # Simulate a concurrent damaged stored row; normal save preserves bound Run identity.
+        import json
+        from herdr import state_db
+        conn = state_db.get_db_connection(scene.store.db_path)
+        conn.execute('UPDATE tasks SET payload_json=? WHERE task_id=?', (json.dumps(task), 'work'))
+        conn.close()
+    else:
+        scene.store.save_task(task)
+    scene.ctrl._handle_coordinator_item(item)
+    assert scene.sent == []
+    assert nd.operation_for_node(scene.store.db_path, 'wf', 'implementation')['status'] == 'superseded'
+
+
+@pytest.mark.parametrize('restore', [False, True])
+def test_invalid_unsent_replacement_preserves_remaining_obligations(scene, restore):
+    from herdr import node_dispatch_store as nd
+    original = started_operation(scene)
+    register_task(scene, original, 'a', 'a-role')
+    register_task(scene, original, 'b', 'b-role')
+    nd.transport_finished(scene.store.db_path, original['id'], 'owner', reason='registered', now=1000)
+    for task_id in ['a', 'b']:
+        scene.store.transition_task(task_id, 'failed', 'crash')
+        scene.store.transition_task(task_id, 'superseded', 'recover')
+    scene.ctrl.check_workflow_stage_advance('wf')
+    stale_item = scene.ctrl.coordinator_queue.get_nowait()
+    cancelled_id = stale_item['dispatch_operation_id']
+    scene.store.update_task_metadata('a', {'replacement_pending': False})
+    scene.ctrl._handle_coordinator_item(stale_item)
+    assert scene.sent == []
+    assert nd.operation_for_node(scene.store.db_path, 'wf', 'implementation')['status'] == 'superseded'
+    if restore:
+        scene.store.update_task_metadata('a', {'replacement_pending': True})
+    for _ in range(4):
+        scene.ctrl.check_workflow_stage_advance('wf')
+        scene.ctrl.check_workflow_recovery('wf')
+    assert scene.ctrl.coordinator_queue.qsize() == 1
+    current_item = scene.ctrl.coordinator_queue.get_nowait()
+    current = nd.operation_for_node(scene.store.db_path, 'wf', 'implementation')
+    assert current['id'] != cancelled_id
+    assert current['payload']['prior_operation_id'] == cancelled_id
+    assert {p['task_id'] for p in current['payload']['predecessors']} == ({'a', 'b'} if restore else {'b'})
+    scene.ctrl._handle_coordinator_item(stale_item)
+    assert scene.sent == []
+    scene.ctrl._handle_coordinator_item(current_item)
+    assert len(scene.sent) == 1
+    register_task(scene, current, 'b-r2', 'b-role', predecessor='b')
+    if restore:
+        register_task(scene, current, 'a-r2', 'a-role', predecessor='a')
+    nd.reconcile_workflow(scene.store.db_path, 'wf', now=1000)
+    assert nd.operation_for_node(scene.store.db_path, 'wf', 'implementation')['status'] == 'resolved'
+
+
+@pytest.mark.parametrize('supersedes', [None, 'unrelated'])
+def test_bound_replacement_cannot_erase_or_change_predecessor(scene, supersedes):
+    from herdr import node_dispatch_store as nd
+    original = started_operation(scene)
+    register_task(scene, original)
+    nd.transport_finished(scene.store.db_path, original['id'], 'owner', reason='registered', now=1000)
+    scene.store.transition_task('work', 'failed', 'crash')
+    scene.store.transition_task('work', 'superseded', 'recover')
+    nd.reconcile_workflow(scene.store.db_path, 'wf', now=1000)
+    retry = nd.operation_for_node(scene.store.db_path, 'wf', 'implementation')
+    nd.claim(scene.store.db_path, retry['id'], 'retry', now=1000)
+    nd.start(scene.store.db_path, retry['id'], 'retry', now=1000)
+    task = register_task(scene, retry, 'work-r2')
+    task['supersedes'] = supersedes
+    with pytest.raises(ValueError, match='registration identity'):
+        scene.store.save_task(task)
+    assert scene.store.get_task('work-r2')['supersedes'] == 'work'
+
+
+
+def test_damaged_replacement_rejects_nonempty_predecessor_conflict(scene):
+    from herdr import node_dispatch_store as nd, state_db
+    import json
+    original = started_operation(scene)
+    register_task(scene, original)
+    nd.transport_finished(scene.store.db_path, original['id'], 'owner', reason='registered', now=1000)
+    scene.store.transition_task('work', 'failed', 'crash')
+    scene.store.transition_task('work', 'superseded', 'recover')
+    nd.reconcile_workflow(scene.store.db_path, 'wf', now=1000)
+    retry = nd.operation_for_node(scene.store.db_path, 'wf', 'implementation')
+    nd.claim(scene.store.db_path, retry['id'], 'retry', now=1000)
+    nd.start(scene.store.db_path, retry['id'], 'retry', now=1000)
+    task = register_task(scene, retry, 'work-r2')
+    damaged = dict(task, supersedes='unrelated')
+    damaged.pop('run_id')
+    conn = state_db.get_db_connection(scene.store.db_path)
+    conn.execute('UPDATE tasks SET payload_json=? WHERE task_id=?', (json.dumps(damaged), 'work-r2'))
+    conn.close()
+    with pytest.raises(ValueError, match='conflicts with durable'):
+        scene.store.save_task(task)

@@ -27,3 +27,11 @@ Global Constraints: working_tree；不调用真实 Agent/模型，不修改生�
 ## 最终验收
 
 继续后的残缺身份与未登记Workflow兼容缺陷已修正并经独立复核。最终当前源码 `pytest -q`：3632 passed、157 subtests passed，554.13s，exit 0；compileall、CLI/AST与diff检查exit 0。历史失败及升级记录保留。交付为隔离working_tree，无提交、推送、部署或生产服务操作。
+
+## 首派完成后的替代派发生命周期
+
+首派resolved是历史登记证据，不能充当后续补派的准入锁。当前代次存在合法superseded且replacement_pending未被明确取消的谱系头时，沿用lineage_redispatch_candidates，建立独立派发记录；前序Task/Run集合纳入identity，原resolved不重置。扫描和协调器均查询当前节点最新记录，旧队列不能认领新记录。替代launch intent及Task必须携带本记录的 --supersedes，全部前序任务均有绑定的替代Task后才resolved。新记录仍保持固定期限、持久核验、unknown不重发和人工待办。
+
+## P1补派修正验收（bcd5c5b后续）
+
+当前补派/DB专项83 passed；独立Spec/Standards通过。完整回归实际结果3644 passed、2 failed、157 subtests passed；两项既有短预算用例未改源码或断言，随后主控及两位独立评审原样复验均2 passed。npm反例在未改bcd5c5b隔离基线同样出现；Git首次仅能确定清单未知且安全保留，不能断言具体超时根因。保留首次失败，不改写为单次全量PASS。交付为更新同一PR，不合并/部署，真实Agent全流程未验证。
