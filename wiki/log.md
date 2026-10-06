@@ -2080,3 +2080,4 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 2026-10-06: activation review found verifier-cohort freshness race; shared business gate now rechecks the entire SQL cohort after all artifact hashes, preserving legacy reuse.
 
 - 2026-10-06: close inventory uses Git untracked-directory summaries before bounded output; internal evidence cannot crowd out protected user output, and tracked internal changes remain protected.
+- 2026-10-06：fix-loop 重复扣预算根因=verdict 指纹含易失 task_id 且闩释放清指纹；指纹改纯语义（branch+note+affected），释放保留 |fp，后继代同结论走升级不再开轮。

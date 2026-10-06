@@ -6135,3 +6135,19 @@ if any(op['status'] not in {'resolved','superseded'}
 - Cause: untracked-file expansion preceded the existing diagnosis filter.
 - Resolution: summarize untracked directories in Git before applying the unchanged output cap; preserve individual tracked-change detection.
 - Prevention: real Git regressions distinguish large internal-only evidence, untracked user directories and tracked internal changes. Treat OS probe failures as unknown and reject teardown. Preserve historical documents with Run-bound checkpoints and reversible artifact relocation without rewriting verdicts or bypassing branch hooks.
+
+## §134 修复循环的 verdict 指纹不得含易失实例标识，重置预算必须保留语义指纹（2026-10-06）
+
+### 问题背景
+现场实测：test-01-r3 终结后，test-01-r4 作为后继代任务重记录同一 blocked 结论，`handle_fix_loop` 判为新 verdict 再次作废并扣 loop 预算，反复打事件。
+
+### 经验教训
+`verdict_fingerprint` 把 blocker task_id 混入摘要，而 task_id 是逐轮更换的易失实例标识——同一语义 verdict 在每轮重试后必然"变新"，`is_repeat_verdict` 永远失配。同时闩释放（redo 完成）会连指纹一起清除，预算重置后同一结论可以无限次重新进入循环。去重/预算类机制的键必须由语义内容（branch、结论说明、affected 目标）构成，任何随轮次变化的实例字段都会让"重复"不可判定。
+
+### 操作规范
+1. verdict 指纹只含语义维度：suggested_branch + blocker note + affected_task_ids（目标敏感性由 affected 承担，PR #110）。
+2. 闩释放清计数（新 redo 新预算）但保留 `|fp`：后继代重记录同一结论走 repeat_verdict 升级，不得用新预算再开一轮。
+3. 预算扣减必须以"发生了新的语义 verdict"为前提，而不是"存在可作废对象"。
+
+### 验证命令 / 关联证据
+`pytest -q tests/test_fix_loop_recovery.py tests/test_selective_replan_core.py tests/test_fix_loop_gates.py tests/test_selective_replan_controller.py` 180 passed；修复前三个新回归（指纹跨代一致 / 后继同 verdict 升级不扣预算 / 闩释放保留指纹）均 RED 复现缺陷，修复后转绿；全量 `pytest -q` 3593 passed + 157 subtests。变更：`herdr/fix_loop.py` verdict_fingerprint 去 task_id；`services/herdr-controller.py` `_fix_loop_latch_blocks` 释放路径保留 `|fp`。
