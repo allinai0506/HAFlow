@@ -6119,3 +6119,13 @@ if any(op['status'] not in {'resolved','superseded'}
 
 ### 验证命令 / 关联证据
 `pytest -q tests/test_workflow_repair_contracts.py tests/test_recovery_store.py tests/test_workflow_recovery.py tests/test_recovery_entrypoints.py` 实际 87 passed。工作树 `.omc/evidence/` 保留第一轮 7 个 RED 反例及第二轮 successor 自体 RED；生产数据库只读 backup 的新迁移 apply/rollback 演练有独立 plan/receipt。以上不代表已部署或 NexusArchive 业务验收成功。
+
+生产复跑补证：test-r6 的 METRICS 明确 business_acceptance=unknown，但旧 EVALUATION 成功模板仍声称 DoD 完全满足、安全完成工单。已追加真实 RED 回归 test_generic_success_report_does_not_certify_business_or_completion；两个通用报告模板均只声明所选命令及通用评分，不认证业务验收或完成授权。
+
+生产前进补证：review最新业务blocked且operation894等待时，Controller仍靠stage pass派发wrapup（26838/26846）。业务证明须在所有前进入口授权，而非只在恢复结案时读取；共享guard覆盖Controller/CLI/kernel/PR/close，拒绝发生在intent/push/teardown前，未知不造返工义务。另SQL review预算6但launch读旧workflow.json的4，已用固定config优先与损坏旧文件回归封堵双权威。
+
+#### 2026-10-06: verifier cohort freshness
+- Problem: review proof could turn blocked while a later test artifact was being hashed, after review had passed an individual freshness check.
+- Cause: per-gate CAS does not establish a consistent multi-gate authorization snapshot.
+- Resolution: validate all external artifacts first, then compare every receipt, task version, candidate episode, pinned config and active cohort together in one read-only SQL transaction.
+- Prevention: real kernel and PR regressions inject a newer blocked review, config changes and a new verifier head during later artifact validation.

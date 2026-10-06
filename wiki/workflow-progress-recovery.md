@@ -51,6 +51,12 @@ Evidence:
 - `herdr/task_checkpoint.py#record_business_acceptance`
 - `tests/test_workflow_repair_contracts.py`
 
+## FACT：业务回执同时授权前进
+
+恢复结案校验不是全部前进入口。生产复跑曾在 review 最新业务 blocked 时，仅靠 stage pass 派发 wrapup（事件26838/26846）。统一 `task_checkpoint.business_gate_blockers` 在 Controller join/sweep/direct、CLI launch intent 前、kernel step、PR publication/merge、正常 close claim 前拒绝缺失或失效的 receipt-v1 业务证明。完整当前候选、execution、Run/epoch、AC覆盖、最新回执、artifact校验后重新读取版本/episode；unknown 只等待，不产生新的实现返工。单一依赖也需校验，Controller 不信任空/旧 Task 投影。没有业务 completion 协议的 legacy 任务继续旧阶段策略，但不能追认业务 PASS。
+
+Task 容量也必须读取固定 config；生产曾显示 SQL review预算6，而 launch 仍读旧 workflow.json 的4，导致已批准预算不能使用。固定配置优先于可变文件，回归使用损坏旧文件证明不会回退读取。
+
 ## UNKNOWN：现场业务验收与发布
 
 本页描述工作树实现，不能证明已部署或原 NexusArchive 业务测试已通过。发布需独立不可变 release、只读 shadow 对比、单执行者切换及授权后的现场复跑。源仓库 WIP 的归属与业务修复范围需由负责人确认。

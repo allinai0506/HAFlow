@@ -685,6 +685,11 @@ def step_workflow(workflow_id: str) -> Dict[str, Any]:
 
     stepped = eligible_ready[0]
     stepped_id = stepped["id"]
+    from .business_gate import business_gate_blockers
+    missing_business = business_gate_blockers(store, wf_entry, norm_cfg, wf_tasks, stepped_id)
+    if missing_business:
+        return {'ok': False, 'workflow_id': workflow_id, 'reason': 'business_acceptance_unavailable',
+                'blocker_task_ids': missing_business}
 
     # Keep workflow paused to enforce single-step execution control
     transition_workflow(

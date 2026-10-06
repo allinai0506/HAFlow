@@ -2072,3 +2072,9 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 
 
 - 2026-10-06：更新 workflow-progress-recovery，记录权威快照、证据迁移、在途后继消费、发布 episode 与独立业务回执；当前为工作树实现，生产激活和业务复跑未执行。
+
+- 2026-10-06：生产复跑发现 EVALUATION 通用成功模板仍误宣 DoD；追加报告层反例与修复，业务回执仍独立于通用评分。
+
+- 2026-10-06：补证业务blocked仍派wrapup与预算双读取漏口；共享业务前进guard覆盖五类入口，固定config用于launch容量，保留legacy非业务协议策略。
+
+- 2026-10-06: activation review found verifier-cohort freshness race; shared business gate now rechecks the entire SQL cohort after all artifact hashes, preserving legacy reuse.

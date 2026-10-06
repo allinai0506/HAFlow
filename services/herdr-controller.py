@@ -3988,6 +3988,21 @@ def _scheduler_join_gate_allows(workflow_id, node, tasks):
     判定失败/异常一律拒绝(Fail-Closed)。
     """
     node = node or {}
+    try:
+        from herdr.recovery_store import read_snapshot
+        from herdr.business_gate import business_gate_blockers
+        store = _get_store()
+        if store.get_workflow(workflow_id):
+            authority, config, owned_tasks = read_snapshot(store.db_path, workflow_id)
+            missing = business_gate_blockers(store, authority, config, owned_tasks, node.get('id'))
+            if missing:
+                print(f'[BUSINESS GATE WAIT] workflow={workflow_id} node={node.get("id")} tasks={missing}')
+                return False
+        elif any(t.get('completion_protocol') == 'receipt-v1' for t in tasks):
+            return False
+    except (OSError, ValueError) as exc:
+        print(f'[BUSINESS GATE WAIT] workflow={workflow_id}: {type(exc).__name__}')
+        return False
     deps = list(node.get("depends_on") or [])
     node_type = str(node.get("node_type") or "")
     # Join-before-dispatch applies to two shapes:

@@ -55,3 +55,9 @@ Files: herdr/evaluator.py, checkpoints.py, completion.py, node_capacity.py, bin/
 ## S3 Round 1 修订
 已按独立reviewer四项意见补齐：read_snapshot不读外部配置；迁移旧文件有SHA+DB CAS；代次接受集合与当前epoch回执明确；迁移事务保留并改绑started operation身份，禁止新effects副本；消费后继续幂等gate失效，不错误直接等待；rollback进度CAS。规格末节为具体契约。
 新增RED集合：迁移started operation后verify不重发；仅旧epoch拒绝；多代次拒绝；外部配置在apply前改变拒绝；迁移后任务进展阻止rollback；gate失效三崩溃点恢复。
+
+## 生产复跑补充：业务证据必须授权全部前进入口
+恢复result closure消费回执并不足够：同候选review最新blocked且operation894 awaiting_result时，wrapup仍经stagepass派发。暂停workflow并正式halt/hold已有wrapup，不重复派实现返工。统一task_checkpoint前置guard，覆盖Controller join/sweep/direct、CLI launch intent前、kernel step、PR publish/merge、成功close；保留显式abandon及无receipt业务契约的legacy兼容。新候选receipt-v1业务门禁必须同workflow/eID/Run/epoch/candidate、最新完整PASS及checkpoint校验，未知等待。新增RED实际入口反例，再最小修复与全量/独立验证。
+
+### Activation cohort race correction
+Forward authorization now lives in `herdr/business_gate.py`. Prepare all verifier identities and latest receipts in one SQL snapshot, validate every artifact without a SQL transaction, then recheck the complete cohort, pinned configuration and candidate episode together. Controller, CLI, kernel, publication and close share this boundary. Legacy reverification reuse remains governed by its existing scheduler contract; receipt-v1 workflows require actual business evidence. Existing CLI regression fixtures gain real temporary SQL authority without weakening assertions.

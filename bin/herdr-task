@@ -3065,11 +3065,10 @@ def cmd_task_checkpoint(args):
 
 
 def _capacity_definition(project):
+    config = project.get("config")
     path = project.get("workflow_file")
-    if path:
-        config = json.loads(Path(path).expanduser().read_text(encoding="utf-8"))
-    else:
-        config = project.get("config") or project
+    if not isinstance(config, dict) or not config.get('nodes'):
+        config = json.loads(Path(path).expanduser().read_text(encoding="utf-8")) if path else project
     return normalize_workflow(config)
 
 
@@ -3195,6 +3194,11 @@ def _launch_task(args):
         from herdr.task_resources import find_dispatch_task, begin_launch_intent
         store = _get_store()
         definition = _capacity_definition(project)
+        from herdr.business_gate import business_gate_blockers
+        authority, pinned, owned_tasks = store.read_workflow_snapshot(args.workflow_id)
+        missing_business = business_gate_blockers(store, authority, pinned or definition, owned_tasks, node_id)
+        if missing_business:
+            raise ValueError('business acceptance unavailable: ' + ', '.join(missing_business))
         node = next((n for n in definition.get("nodes", []) if n.get("id") == node_id), {})
         configured_mode = node.get("artifact_mode")
         requested_mode = getattr(args, "artifact_mode", None)
@@ -6419,6 +6423,15 @@ def close_workflow(
     confirm_force=None,
 ):
     from herdr.workflow_close import workflow_close_claim
+    if not abandon:
+        from herdr.business_gate import business_gate_blockers
+        store = _get_store()
+        if store.get_workflow(workflow_id):
+            authority, config, owned_tasks = store.read_workflow_snapshot(workflow_id)
+            missing_business = business_gate_blockers(store, authority, config, owned_tasks)
+            if missing_business:
+                print('[CLOSE ABORT] business acceptance unavailable: ' + ', '.join(missing_business))
+                sys.exit(2)
     options = dict(include_coordinator=include_coordinator, purge_clones=purge_clones,
                    abandon=abandon, force=force, accept_escalated=accept_escalated)
     with workflow_close_claim(_get_store(), workflow_id, dry_run=dry_run, options=options) as claim:

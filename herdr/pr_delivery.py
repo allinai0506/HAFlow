@@ -1,14 +1,14 @@
 """Publish an accepted, integrated candidate without relaxing adoption ownership."""
 import json
 import os
-from pathlib import Path
 import re
 import subprocess
+from pathlib import Path
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from . import workflow_docs as wd
-from .delivery_record import select_effective_delivery, _body_value
+from .delivery_record import _body_value, select_effective_delivery
 from .task_resources import workflow_launch_lock
 
 
@@ -95,6 +95,7 @@ def _publication(task, notes, store):
         raise ValueError('delivery identity does not bind the integrated candidate')
     if _body_value(note,'review_task') == _body_value(note,'test_gate'):
         raise ValueError('review and test gates must be distinct tasks')
+    gates = []
     for field in ('review_task','test_gate'):
         gate = store.get_task(_body_value(note,field)) or {}
         # Generic worker is the default launch transport role, not a gate identity.
@@ -106,6 +107,11 @@ def _publication(task, notes, store):
         if (gate.get('workflow_id') != task['workflow_id'] or gate.get('stage_verdict') != 'pass'
                 or gate.get('candidate_sha') != sha or gate.get('verified_candidate_sha') != sha or gate.get('status') not in {'completed','committed','integrated','cleanup_ready','cleaned'}):
             raise ValueError('delivery gate does not certify this workflow candidate')
+        gates.append(gate)
+    from .business_gate import business_gates_blockers
+    if business_gates_blockers(store, store.get_workflow(task['workflow_id']) or {}, gates,
+                               {g.get('node') or g.get('stage') for g in gates}):
+        raise ValueError('delivery gate business acceptance unavailable')
     return sha, branch, task.get('base_branch') or _body_value(note,'base') or 'main'
 
 

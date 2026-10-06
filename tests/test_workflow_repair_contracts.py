@@ -511,3 +511,261 @@ def test_active_delivered_successor_is_consumed_as_current_target(store):
     assert detail is not None, 'in-flight INITIAL successor must not be dispatched again'
     operation['detail'] = detail
     assert repair_coverage(operation, [old, new]) == []
+
+
+def test_generic_success_report_does_not_certify_business_or_completion():
+    from herdr.evaluator import (
+        calculate_metrics,
+        render_evaluation_markdown,
+        render_metrics_markdown,
+    )
+    metrics = calculate_metrics(test_output='Tests  4248 passed (4248)', test_exit_code=0,
+                                lint_output='', lint_exit_code=0)
+    assert metrics.composite_score == 100
+    for report in (render_metrics_markdown(metrics, 1, 3), render_evaluation_markdown(metrics, 1, 3)):
+        assert '业务验收：unknown' in report
+        assert 'DoD)：完全满足' not in report
+        assert '安全提交并完成当前工单' not in report
+        assert '单元/集成测试：全部通过' not in report
+
+
+def business_forward_fixture(store):
+    from herdr.task_checkpoint import (
+        publish_task_checkpoint,
+        record_business_acceptance,
+    )
+    cfg = {'nodes': [{'id': 'implementation'}, {'id': 'test', 'depends_on': ['implementation']},
+                    {'id': 'review', 'depends_on': ['implementation']},
+                    {'id': 'wrapup', 'depends_on': ['test', 'review']}]}
+    store.save_workflow(workflow(config=cfg))
+    store.record_event('candidate_frozen', {'candidate_sha': SHA}, workflow_id='wf',
+                       source='critical-path-scheduler', timestamp=101)
+    store.save_task(task('impl', 'implementation', status='cleaned', stage_verdict=None, commit=SHA))
+    for tid in ['test', 'review']:
+        store.save_task(task(tid, tid, stage_verdict='pass', verified_candidate_sha=SHA,
+                            completion_protocol='receipt-v1', completion_epoch='epoch', acceptance_criteria=['D1']))
+        ref = publish_task_checkpoint(tid, 'run-' + tid, 'epoch', 'D1 endpoint proof', 1, store=store)
+        record_business_acceptance(store, tid, 'run-' + tid, 'epoch', SHA,
+                                  'pass' if tid == 'test' else 'blocked',
+                                  [{'observation_id': ref['observation_id'], 'sha256': ref['sha256']}],
+                                  ['AC-1=pass' if tid == 'test' else 'AC-1=blocked'])
+    return cfg
+
+
+def test_kernel_forward_does_not_use_stagepass_over_business_blocked(store):
+    from herdr import kernel
+    business_forward_fixture(store)
+    before = store.list_events(workflow_id='wf')
+    result = kernel.step_workflow('wf')
+    assert result['ok'] is False, 'business blocked must reject before forward transition'
+    assert result['reason'] == 'business_acceptance_unavailable'
+    assert store.get_workflow('wf')['status'] == 'running'
+    assert store.list_events(workflow_id='wf') == before
+
+
+def test_controller_join_rejects_business_blocked(store):
+    import importlib.util
+    from pathlib import Path
+    cfg = business_forward_fixture(store)
+    spec = importlib.util.spec_from_file_location('business_join_controller', Path(__file__).resolve().parents[1] / 'services/herdr-controller.py')
+    ctl = importlib.util.module_from_spec(spec); spec.loader.exec_module(ctl)
+    assert ctl._scheduler_join_gate_allows('wf', cfg['nodes'][-1], store.list_tasks(workflow_id='wf')) is False
+
+
+def business_review_pass(store):
+    from herdr.task_checkpoint import read_task_checkpoints, record_business_acceptance
+    t = store.get_task('review')
+    report = read_task_checkpoints('review', t['run_id'], t['completion_epoch'], store=store)
+    x = report['segments'][0]
+    record_business_acceptance(store, 'review', t['run_id'], t['completion_epoch'], SHA, 'pass',
+                              [{'observation_id': x['observation_id'], 'sha256': x['sha256']}], ['AC-1=pass'])
+
+
+def test_business_forward_current_complete_proof_allows_step(store):
+    from herdr import kernel
+    business_forward_fixture(store)
+    business_review_pass(store)
+    result = kernel.step_workflow('wf')
+    assert result['ok'] is True and result['stepped_node'] == 'wrapup'
+
+
+@pytest.mark.parametrize('change', ['epoch', 'run', 'generation', 'episode', 'artifact'])
+def test_business_forward_rejects_stale_or_changed_proof(store, change):
+    from pathlib import Path
+
+    from herdr.observation import ObservationStore
+    from herdr.business_gate import business_gate_blockers
+    from herdr.task_checkpoint import read_task_checkpoints
+    business_forward_fixture(store); business_review_pass(store)
+    if change == 'artifact':
+        t = store.get_task('review')
+        report = read_task_checkpoints('review', t['run_id'], t['completion_epoch'], store=store)
+        obs = ObservationStore(store.db_path).get(report['segments'][0]['observation_id'])
+        Path(obs.content_ref).chmod(0o600)
+        Path(obs.content_ref).write_text('changed')
+    else:
+        field, value = {'epoch': ('completion_epoch', 'new'), 'run': ('run_id', 'new'),
+                        'generation': ('execution_id', 'new'), 'episode': ('candidate_episode_id', -1)}[change]
+        if field == 'run_id':
+            conn = state_db.get_db_connection(store.db_path)
+            conn.execute("UPDATE tasks SET payload_json=json_set(payload_json,'$.run_id',?),version=version+1 WHERE task_id='review'", (value,))
+            conn.commit(); conn.close()
+        else:
+            store.update_task_metadata('review', {field: value})
+    wf, cfg, tasks = recovery_store.read_snapshot(store.db_path, 'wf')
+    assert business_gate_blockers(store, wf, cfg, tasks, 'wrapup') == ['review']
+    assert not recovery_store.list_operations(store.db_path, 'wf'), 'unknown proof is not a new repair failure'
+
+
+def test_business_forward_rechecks_newer_blocked_during_artifact_validation(store, monkeypatch):
+    import herdr.task_checkpoint as cp
+    business_forward_fixture(store); business_review_pass(store)
+    original = cp.validate_checkpoint_artifact
+    injected = False
+    def changed(task_record, reference, **kwargs):
+        nonlocal injected
+        result = original(task_record, reference, **kwargs)
+        if task_record['task_id'] == 'review' and not injected:
+            injected = True
+            store.record_event('business_acceptance_recorded', {'epoch': 'epoch', 'candidate_sha': SHA,
+                'execution_id': 'generation', 'verdict': 'blocked'}, workflow_id='wf', task_id='review',
+                run_id='run-review', source='checkpoint')
+        return result
+    monkeypatch.setattr(cp, 'validate_checkpoint_artifact', changed)
+    wf, cfg, tasks = recovery_store.read_snapshot(store.db_path, 'wf')
+    assert __import__('herdr.business_gate', fromlist=['business_gate_blockers']).business_gate_blockers(store, wf, cfg, tasks, 'wrapup') == ['review']
+
+
+def task_cli_module():
+    import importlib.machinery
+    import importlib.util
+    from pathlib import Path
+    loader = importlib.machinery.SourceFileLoader('business_forward_task_cli', str(Path(__file__).resolve().parents[1] / 'bin/herdr-task'))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec); loader.exec_module(module)
+    return module
+
+
+def test_cli_launch_business_rejects_before_intent_or_routing(store, monkeypatch):
+    import argparse
+    business_forward_fixture(store); cli = task_cli_module()
+    monkeypatch.setattr(cli, 'project_for_workflow', lambda _: store.get_workflow('wf'))
+    monkeypatch.setattr(cli, 'load_tasks', lambda: store.export_tasks_json())
+    args = argparse.Namespace(task_id='wrapup-new', workflow_id='wf', node='wrapup', stage=None,
+        run_id=None, execution_id=None, agent_policy=None, artifact_mode=None, integration_mode='none',
+        task_type='docs', supersedes=None, dispatch_role='worker', dispatch_round=1)
+    before = store.list_events(workflow_id='wf')
+    with pytest.raises(SystemExit) as exc:
+        cli._launch_task(args)
+    assert exc.value.code == 2
+    assert store.list_events(workflow_id='wf') == before
+    assert store.get_task('wrapup-new') is None
+
+
+def test_close_business_rejects_before_claim_or_teardown(store):
+    business_forward_fixture(store); cli = task_cli_module()
+    before = store.list_events(workflow_id='wf')
+    with pytest.raises(SystemExit) as exc:
+        cli.close_workflow('wf')
+    assert exc.value.code == 2
+    assert store.list_events(workflow_id='wf') == before
+    assert store.get_workflow('wf')['status'] == 'running'
+
+
+def test_pr_publication_business_rejects_exact_delivery_gate(store):
+    from herdr.pr_delivery import _publication
+    business_forward_fixture(store)
+    impl = dict(store.get_task('impl'), status='integrated', integrated_commit=SHA,
+                integration_branch='herdr/integration-impl', integration_ref='refs/herdr/tasks/impl')
+    note = {'kind': 'delivery', 'candidate_sha': SHA, 'delivery_branch': 'herdr/integration-impl',
+            'review_task': 'review', 'test_gate': 'test', 'body': 'explicit delivery'}
+    with pytest.raises(ValueError, match='business acceptance'):
+        _publication(impl, [note], store)
+
+
+def test_launch_capacity_prefers_pinned_config_over_mutable_file(tmp_path):
+    cli = task_cli_module()
+    path = tmp_path / 'old-workflow.json'
+    path.write_text('invalid stale file must not be read')
+    cfg = {'nodes': [{'id': 'review', 'max_tasks_per_node': 6}]}
+    result = cli._capacity_definition({'config': cfg, 'workflow_file': str(path)})
+    assert result['nodes'][0]['max_tasks_per_node'] == 6
+
+
+def test_business_forward_single_dependency_is_also_checked(store):
+    from herdr.business_gate import business_gate_blockers
+    cfg = business_forward_fixture(store)
+    cfg['nodes'].append({'id': 'postreview', 'depends_on': ['review']})
+    store.save_workflow(dict(store.get_workflow('wf'), config=cfg))
+    wf, config, tasks = recovery_store.read_snapshot(store.db_path, 'wf')
+    assert business_gate_blockers(store, wf, config, tasks, 'postreview') == ['review']
+
+
+def test_controller_business_guard_uses_primary_when_task_projection_is_empty(store):
+    import importlib.util
+    from pathlib import Path
+    cfg = business_forward_fixture(store)
+    spec = importlib.util.spec_from_file_location('primary_business_join_controller', Path(__file__).resolve().parents[1] / 'services/herdr-controller.py')
+    ctl = importlib.util.module_from_spec(spec); spec.loader.exec_module(ctl)
+    assert ctl._scheduler_join_gate_allows('wf', cfg['nodes'][-1], []) is False
+
+
+def test_business_forward_rechecks_entire_group_after_later_gate_hashing(store, monkeypatch):
+    import herdr.task_checkpoint as cp
+    from herdr import kernel
+    business_forward_fixture(store); business_review_pass(store)
+    original = cp.validate_checkpoint_artifact
+    injected = False
+    def changed(task_record, reference, **kwargs):
+        nonlocal injected
+        result = original(task_record, reference, **kwargs)
+        if task_record['task_id'] == 'test' and not injected:
+            injected = True
+            store.record_event('business_acceptance_recorded', {'epoch': 'epoch', 'candidate_sha': SHA,
+                'execution_id': 'generation', 'verdict': 'blocked'}, workflow_id='wf', task_id='review',
+                run_id='run-review', source='checkpoint')
+        return result
+    monkeypatch.setattr(cp, 'validate_checkpoint_artifact', changed)
+    result = kernel.step_workflow('wf')
+    assert result['ok'] is False, 'earlier review proof changed while later test was hashing'
+    assert result['reason'] == 'business_acceptance_unavailable'
+    assert store.get_workflow('wf')['status'] == 'running'
+
+
+@pytest.mark.parametrize('mutation', ['configuration', 'new_head', 'review_blocked'])
+def test_business_publication_rechecks_cohort_after_external_validation(store, monkeypatch, mutation):
+    import herdr.task_checkpoint as cp
+    from herdr.business_gate import business_gate_blockers
+    from herdr.pr_delivery import _publication
+    cfg = business_forward_fixture(store); business_review_pass(store)
+    original = cp.validate_checkpoint_artifact
+    injected = False
+    def changed(task_record, reference, **kwargs):
+        nonlocal injected
+        result = original(task_record, reference, **kwargs)
+        if task_record['task_id'] == 'test' and not injected:
+            injected = True
+            if mutation == 'configuration':
+                cfg['nodes'][-1]['depends_on'].append('new-gate')
+                store.save_workflow(dict(store.get_workflow('wf'), config=cfg))
+            elif mutation == 'new_head':
+                new = dict(store.get_task('review'), task_id='new-review', created_at=200,
+                           run_id='run-new-review', superseded_by=None)
+                store.save_task(new)
+            else:
+                store.record_event('business_acceptance_recorded', {'epoch': 'epoch', 'candidate_sha': SHA,
+                    'execution_id': 'generation', 'verdict': 'blocked'}, workflow_id='wf', task_id='review',
+                    run_id='run-review', source='checkpoint')
+        return result
+    monkeypatch.setattr(cp, 'validate_checkpoint_artifact', changed)
+    wf, config, tasks = recovery_store.read_snapshot(store.db_path, 'wf')
+    if mutation == 'review_blocked':
+        impl = dict(store.get_task('impl'), status='integrated', integrated_commit=SHA,
+            integration_branch='herdr/integration-impl', integration_ref='refs/herdr/tasks/impl')
+        note = {'kind': 'delivery', 'candidate_sha': SHA, 'delivery_branch': 'herdr/integration-impl',
+            'review_task': 'review', 'test_gate': 'test', 'body': 'explicit delivery'}
+        with pytest.raises(ValueError, match='business acceptance'):
+            _publication(impl, [note], store)
+    else:
+        assert business_gate_blockers(store, wf, config, tasks, 'wrapup')
+    assert injected

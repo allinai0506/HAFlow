@@ -427,6 +427,8 @@ def test_router_failure_does_not_acquire_a_pane(tmp_path, monkeypatch):
     module = load_script("herdr_task_router_failure_fix1", "bin/herdr-task")
     db_path = tmp_path / "state.db"
     monkeypatch.setenv("HERDR_STATE_DB", str(db_path))
+    module._get_store().save_workflow({"workflow_id": "wf-no-pane", "status": "running",
+        "execution_id": "wf-no-pane", "config": {"nodes": [{"id": "test", "depends_on": []}]}})
     args = SimpleNamespace(
         task_id="task-no-pane", workflow_id="wf-no-pane", node="test", stage=None,
         agent="auto", task_type="test", integration_mode="none", onto=None,
