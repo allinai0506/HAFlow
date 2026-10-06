@@ -118,7 +118,6 @@ def test_blocked_default_action_is_rework_with_same_task():
 
 def test_console_rework_action_is_executable_and_scoped(resource_scene, monkeypatch):
     from console import herdr_factory_console as console
-    kernel.transition_task('task', 'blocked', reason='fixture', store=resource_scene)
     monkeypatch.setattr(console, 'tasks_for_workflow', lambda wid: resource_scene.list_tasks(workflow_id=wid))
     calls = []
     monkeypatch.setattr(console, 'run', lambda cmd, *a, **kw:
@@ -129,6 +128,18 @@ def test_console_rework_action_is_executable_and_scoped(resource_scene, monkeypa
     with pytest.raises(RuntimeError):
         console.api_controller_execute_action({'type': 'rework', 'workflow_id': 'other', 'task_id': 'task'})
 
+
+
+def test_console_managed_blocked_rework_requires_recovery_decision(resource_scene, monkeypatch):
+    from console import herdr_factory_console as console
+    kernel.transition_task('task', 'blocked', reason='fixture', store=resource_scene)
+    monkeypatch.setattr(console, 'tasks_for_workflow', lambda wid: resource_scene.list_tasks(workflow_id=wid))
+    def forbid(*args, **kwargs):
+        raise AssertionError('persistent recovery must own blocked task rework')
+    monkeypatch.setattr(console, 'run', forbid)
+    with pytest.raises(RuntimeError, match='持久恢复'):
+        console.api_controller_execute_action({'type':'rework','workflow_id':'wf','task_id':'task'})
+    assert resource_scene.get_task('task')['status'] == 'blocked'
 
 def test_rework_transport_failure_is_retryable_without_task_allocation(resource_scene, monkeypatch):
     cli = _load_module('resource_retry_cli', HERDR_ROOT / 'bin/herdr-task')

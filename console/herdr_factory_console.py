@@ -582,8 +582,27 @@ def ask_coordinator(tid):
     return {'ok':True}
 
 def _blocked_verdict_tasks(wid):
-    return [t for t in tasks_for_workflow(wid)
-            if t.get('status')!='superseded' and t.get('stage_verdict')=='blocked']
+    return [t for t in herdr_controller_actions.resolve_workflow_blockers(
+        tasks_for_workflow(wid), {'workflow_id':wid, **(workflows().get(wid) or {})})
+        if t.get('stage_verdict')=='blocked']
+
+def api_workflow_recovery(wid):
+    from herdr import recovery_store
+    db_path=Path(os.environ['HERDR_STATE_DB']) if os.environ.get('HERDR_STATE_DB') else Path(TASKS_FILE).parent/'state.db'
+    return {'workflow_id':wid,'operations':recovery_store.list_operations(db_path,wid)}
+
+def api_workflow_recovery_decide(b):
+    from herdr import recovery_store
+    db_path=Path(os.environ['HERDR_STATE_DB']) if os.environ.get('HERDR_STATE_DB') else Path(TASKS_FILE).parent/'state.db'
+    wid=str(b.get('workflow_id') or '').strip()
+    operation_id=int(b['operation_id'])
+    operations=recovery_store.list_operations(db_path,wid)
+    if not any(op['id']==operation_id for op in operations):
+        raise RuntimeError('恢复义务不属于该工作流')
+    result=recovery_store.decide_operation(db_path,operation_id,int(b['expected_version']),
+        str(b.get('operator') or ''),str(b.get('action') or ''),str(b.get('reason') or ''),
+        time.time(),until=b.get('until'))
+    return {'ok':True,'operation':result}
 
 def manual_advance(wid):
     d=workflow_detail(wid); done=None; nxt=None
@@ -871,6 +890,9 @@ def api_workflow_controller_actions(wid):
     blockers = herdr_controller_actions.resolve_workflow_blockers(ts, wf)
     p = project_for_workflow(wid) or {}
     proj_root = p.get('project_root') or wf.get('project_root') or ''
+    operations = api_workflow_recovery(wid).get('operations',[])
+    managed = {tid for op in operations if op['status'] not in {'resolved','superseded'}
+               for tid in op['payload'].get('task_ids') or []}
     actions_list = [
         act.to_dict()
         for act in herdr_controller_actions.collect_workflow_actions(
@@ -878,10 +900,12 @@ def api_workflow_controller_actions(wid):
             workflow_paused=str(wf.get('status') or '') == 'paused',
         )
     ]
+    actions_list = [a for a in actions_list if a.get('blocker_task_id') not in managed]
     return {
         'workflow_id': wid,
         'blockers': blockers,
         'actions': actions_list,
+        'recovery': operations,
     }
 
 def pipeline_step_commands(step):
@@ -1037,6 +1061,12 @@ def api_controller_execute_action(payload):
     act_type = str(payload.get('type') or payload.get('action_type') or '').strip()
     wid = str(payload.get('workflow_id') or '').strip()
     if not wid: raise RuntimeError('workflow_id 不能为空')
+    if act_type in {'launch','force_pass_advance','rework'}:
+        # Discover canonical task facts before accepting a stale cockpit action.
+        tasks_for_workflow(wid)
+        if any(op['status'] not in {'resolved','superseded'}
+               for op in api_workflow_recovery(wid)['operations']):
+            raise RuntimeError('该工作流存在持久恢复义务，请通过恢复待办裁决，禁止重复派发或绕过门禁')
 
     # Re-read authoritative workflow
     wf = workflows().get(wid)
@@ -7566,6 +7596,7 @@ function openControllerCockpitModal(){
   }).join('')+'</section>':'';
   const pipelineSection=renderPipelineActions(allActs);
   const decisionSection=renderDecisionPanel();
+  const recoverySection=renderRecoveryPanel(wid);
 
   const cheatRows=[
     {name:'原工位返工',cmd:`bin/herdr-task rework <task-id> --prompt '<修复指引>'`,desc:'保留 task_id 与工位，就地修复与自测'},
@@ -7577,7 +7608,7 @@ function openControllerCockpitModal(){
   ];
   let cheatSheet=`<details class="ctl-tech"><summary>工程师命令参考（可选展开，终端用户无需使用）</summary><div class="ctl-tech-body"><section class="ctl-cheatsheet" style="box-shadow:none"><div class="ctl-sub">以下命令仅供审计与排查；日常使用请点上面的“一键执行”按钮。</div><div class="ctl-cheat-list">${cheatRows.map((r,i)=>`<div class="ctl-cheat-row"><span class="ctl-cheat-num">${i+1}</span><div><div class="ctl-cheat-name"><span>${esc(r.name)}</span><button class="mini" onclick="copyCliCommand(document.getElementById('ctlCheat${i}').textContent)">复制</button></div><div class="ctl-cheat-cmd"><code id="ctlCheat${i}">${esc(r.cmd)}</code></div><div class="ctl-cheat-desc">${esc(r.desc)}</div></div></div>`).join('')}</div></section></div></details>`;
 
-  const html=`<div class="ctl-wrap">${statusCard}${resourceSection}${decisionSection}${unblockSection}${pipelineSection}${cheatSheet}</div>`;
+  const html=`<div class="ctl-wrap">${statusCard}${resourceSection}${recoverySection}${decisionSection}${unblockSection}${pipelineSection}${cheatSheet}</div>`;
   const _ctlEl=document.getElementById('controllerTabView');
   if(_ctlEl){_ctlEl.innerHTML=`<div class="ctl-panel-header"><strong>🎮 Controller 调度与解卡控制台</strong><span class="muted" style="margin-left:8px;font-weight:400">· ${esc(wid)}</span></div>`+html;_ctlEl.hidden=false;}
   setWorkspaceMode('ctl');
@@ -7585,6 +7616,29 @@ function openControllerCockpitModal(){
   if(!state.openWorkflowTabIds.includes('__ctl__'))state.openWorkflowTabIds.push('__ctl__');
   state.workflowId='__ctl__';
   renderWorkflowTabs();
+}
+function renderRecoveryPanel(wid){
+  const operations=(state.controllerActionsData?.recovery||[]).filter(o=>!['resolved','superseded'].includes(o.status));
+  if(!operations.length)return '';
+  const labels={pending:'等待执行',running:'正在处理',waiting:'有期限暂缓',waiting_human:'等待人工处理',awaiting_result:'等待新候选验收'};
+  const reasons={source_wip_requires_decision:'源仓库存在未处理改动，请先确认归属和处理方式',delivery_unknown:'交付结果未知，请核对现有后继',successor_delivery_unconfirmed:'后继交付尚未确认',candidate_unknown:'候选身份尚未确认',candidate_mismatch:'验收候选与当前候选不一致',recovery_successor_failed:'修复任务仍未通过，需要人工处理',finalize_escalated:'交付需要人工排除前置障碍',workflow_execution_unknown:'工作流执行身份尚未确认'};
+  return '<section><div class="ctl-section-title">恢复待办</div>'+operations.map(o=>{
+    const reason=o.detail?.reason||o.payload?.reason||'';
+    const action=o.started?'verify':'retry';
+    const controls=o.status==='waiting_human'?`<button class="mini" onclick="decideRecovery(${o.id},${o.version},'${action}','${esc(wid)}')">${o.started?'核对现有任务':'前置问题已处理，重试'}</button><button class="mini" onclick="decideRecovery(${o.id},${o.version},'hold','${esc(wid)}')">暂缓一小时</button>`:'';
+    return `<div class="ctl-blocker"><strong>${esc(labels[o.status]||o.status)}</strong><div class="muted">${esc(reasons[reason]||reason)} · ${esc((o.payload?.task_ids||[]).join(', '))}</div><div>${controls}</div></div>`;
+  }).join('')+'</section>';
+}
+function decideRecovery(id,version,action,wid){
+  showPromptModal({title:'记录恢复决策',label:'本次处理人的名称',onConfirm:(operator)=>{
+    if(!operator?.trim())return;
+    showPromptModal({title:'记录处理依据',label:'重试前请先处理提示的前置问题',onConfirm:async(reason)=>{
+      if(!reason?.trim())return;
+      const body={workflow_id:wid,operation_id:id,expected_version:version,operator,reason,action};
+      if(action==='hold')body.until=Date.now()/1000+3600;
+      try{await api('/api/workflow/recovery/decision',{method:'POST',body:JSON.stringify(body)});toast('已记录，等待核对和执行');await loadWorkflow(wid)}catch(e){toast('处理失败: '+e.message,true)}
+    }});
+  }});
 }
 async function advanceStage(){
   showConfirmModal({
@@ -8054,6 +8108,8 @@ class Handler(BaseHTTPRequestHandler):
             if p=='/api/workflow/controller-actions':
                 wid=self.query().get('workflow_id',[''])[0] or self.query().get('id',[''])[0]
                 return self.send_json(200,api_workflow_controller_actions(wid))
+            if p=='/api/workflow/recovery':
+                return self.send_json(200,api_workflow_recovery(self.query().get('workflow_id',[''])[0]))
             if p=='/api/workflow/decisions':
                 wid=self.query().get('workflow_id',[''])[0] or self.query().get('id',[''])[0]
                 return self.send_json(200,api_workflow_decisions(wid))
@@ -8105,6 +8161,7 @@ class Handler(BaseHTTPRequestHandler):
             if p=='/api/controller/execute-action':return self.send_json(200,api_controller_execute_action(b))
             if p=='/api/workflow/decision/raise':return self.send_json(200,api_workflow_decide_raise(b))
             if p=='/api/workflow/decision':return self.send_json(200,api_workflow_decide_resolve(b))
+            if p=='/api/workflow/recovery/decision':return self.send_json(200,api_workflow_recovery_decide(b))
             return self.send_json(404,error='Not Found')
         except Exception as e:
             self.log_message('POST %s failed: %s', self.path, e)

@@ -350,8 +350,9 @@ def test_scenario_6_legitimate_force_pass_scoped_with_audit(ops_test_env):
         "reason": "已知非核心偶发用例失败，主管核查允许放行",
         "operator": "lead_engineer",
     }
-    with patch.object(c, "manual_advance", return_value={"completed_stage": "test", "next_stage": "wrapup"}):
-        res = c.api_controller_execute_action(payload)
+    with patch.object(c, "api_workflow_recovery", return_value={"operations": []}):
+        with patch.object(c, "manual_advance", return_value={"completed_stage": "test", "next_stage": "wrapup"}):
+            res = c.api_controller_execute_action(payload)
 
     assert res.get("ok") is True
     assert res.get("gate_passed") is True
@@ -386,8 +387,9 @@ def test_scenario_7_force_pass_succeeds_but_advance_fails_returns_partial(ops_te
         "reason": "测试门禁人工豁免",
         "operator": "admin",
     }
-    with patch.object(c, "manual_advance", side_effect=RuntimeError("后续阶段 wrapup 依赖未就绪")):
-        res = c.api_controller_execute_action(payload)
+    with patch.object(c, "api_workflow_recovery", return_value={"operations": []}):
+        with patch.object(c, "manual_advance", side_effect=RuntimeError("后续阶段 wrapup 依赖未就绪")):
+            res = c.api_controller_execute_action(payload)
 
     # Must report partial=True, ok=False, not pseudo-success
     assert res.get("ok") is False
@@ -1010,47 +1012,50 @@ def test_scenario_17_controller_action_snapshot_binding_and_rejection(ops_test_e
     assert pass_act.api_payload.get("expected_pane_id") == cur_pane
 
     # 2. Server-side api_controller_execute_action: missing expected_version when targeting task is REJECTED
-    with pytest.raises(RuntimeError) as exc:
-        c.api_controller_execute_action({
-            "type": "force_pass_advance",
-            "workflow_id": "wf-ops-01",
-            "task_id": "wf-ops-01-reworkable",
-            "gate_node_id": "implementation",
-            "confirmed": True,
-            "reason": "缺少版本约束的放行",
-            # expected_version omitted
-        })
+    with patch.object(c, "api_workflow_recovery", return_value={"operations": []}):
+        with pytest.raises(RuntimeError) as exc:
+            c.api_controller_execute_action({
+                "type": "force_pass_advance",
+                "workflow_id": "wf-ops-01",
+                "task_id": "wf-ops-01-reworkable",
+                "gate_node_id": "implementation",
+                "confirmed": True,
+                "reason": "缺少版本约束的放行",
+                # expected_version omitted
+            })
     assert "缺少 expected_version" in str(exc.value)
 
     # 3. Server-side api_controller_execute_action: stale expected_version is REJECTED
-    with pytest.raises(RuntimeError) as exc2:
-        c.api_controller_execute_action({
-            "type": "force_pass_advance",
-            "workflow_id": "wf-ops-01",
-            "task_id": "wf-ops-01-reworkable",
-            "gate_node_id": "implementation",
-            "expected_version": cur_ver + 999,
-            "confirmed": True,
-            "reason": "陈旧版本约束的放行",
-        })
+    with patch.object(c, "api_workflow_recovery", return_value={"operations": []}):
+        with pytest.raises(RuntimeError) as exc2:
+            c.api_controller_execute_action({
+                "type": "force_pass_advance",
+                "workflow_id": "wf-ops-01",
+                "task_id": "wf-ops-01-reworkable",
+                "gate_node_id": "implementation",
+                "expected_version": cur_ver + 999,
+                "confirmed": True,
+                "reason": "陈旧版本约束的放行",
+            })
     assert "任务版本已变化" in str(exc2.value)
 
     # 4. Server-side api_controller_execute_action: matching version and pane SUCCEEDS
-    with patch.object(c, "manual_advance") as mock_adv:
-        mock_adv.return_value = {"ok": True, "advanced": True}
-        res = c.api_controller_execute_action({
-            "type": "force_pass_advance",
-            "workflow_id": "wf-ops-01",
-            "task_id": "wf-ops-01-reworkable",
-            "gate_node_id": "implementation",
-            "expected_version": cur_ver,
-            "expected_pane_id": cur_pane,
-            "confirmed": True,
-            "reason": "快照完整且一致的合法放行",
-            "operator": "controller_lead",
-        })
-        assert res.get("ok") is True
-        assert res.get("gate_passed") is True
+    with patch.object(c, "api_workflow_recovery", return_value={"operations": []}):
+        with patch.object(c, "manual_advance") as mock_adv:
+            mock_adv.return_value = {"ok": True, "advanced": True}
+            res = c.api_controller_execute_action({
+                "type": "force_pass_advance",
+                "workflow_id": "wf-ops-01",
+                "task_id": "wf-ops-01-reworkable",
+                "gate_node_id": "implementation",
+                "expected_version": cur_ver,
+                "expected_pane_id": cur_pane,
+                "confirmed": True,
+                "reason": "快照完整且一致的合法放行",
+                "operator": "controller_lead",
+            })
+            assert res.get("ok") is True
+            assert res.get("gate_passed") is True
 
     # 5. Frontend template source verification: executeControllerAction and forcePassTask bind snapshot
     src = Path("console/herdr_factory_console.py").read_text(encoding="utf-8")

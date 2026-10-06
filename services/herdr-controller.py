@@ -1072,19 +1072,21 @@ class SelectiveInvalidationResult(list):
 REWORKABLE_STATUSES = {"blocked", "agent_done", "working", "rework", "paused", "interrupted"}
 
 
-def _rework_retry_task(task, gate_node_id):
+def _rework_retry_task(task, gate_node_id, request_id=None):
     """Use the CLI ownership/CAS/transport contract; failure retains the Task."""
     gate_tasks = [t for t in load_tasks() if t.get("workflow_id") == task.get("workflow_id")
                   and (t.get("node") or t.get("stage")) in gate_node_id.split("+")
                   and t.get("stage_verdict") == "blocked"]
-    identity = sorted((t.get("task_id", ""), t.get("version", 0),
-                       t.get("stage_verdict_note") or t.get("note") or "") for t in gate_tasks)
-    token = hashlib.sha256(json.dumps(identity, ensure_ascii=False).encode()).hexdigest()[:20]
-    request_id = f"fix-loop:{gate_node_id}:{task['task_id']}:{token}"
-    if task.get("rework_delivery") == "pending" and str(task.get("rework_request_id") or "").startswith(f"fix-loop:{gate_node_id}:"):
-        request_id = task["rework_request_id"]
-    details = "\n".join(f"{t.get('task_id')}: {t.get('stage_verdict_note') or t.get('note') or '读取门禁输出'}"
-                        for t in gate_tasks)
+    if request_id is None:
+        identity = sorted((t.get("task_id", ""), t.get("version", 0),
+                           t.get("stage_verdict_note") or t.get("note") or "") for t in gate_tasks)
+        token = hashlib.sha256(json.dumps(identity, ensure_ascii=False).encode()).hexdigest()[:20]
+        request_id = f"fix-loop:{gate_node_id}:{task['task_id']}:{token}"
+        if task.get("rework_delivery") == "pending" and str(task.get("rework_request_id") or "").startswith(f"fix-loop:{gate_node_id}:"):
+            request_id = task["rework_request_id"]
+    from herdr.supervisor.state import redact_text
+    details = "\n".join(redact_text(f"{t.get('task_id')}: {t.get('stage_verdict_note') or t.get('note') or '读取门禁输出'}")[:2000]
+                        for t in gate_tasks[:20])
     result = subprocess.run(
         [TASK_MANAGER, "rework", task["task_id"], "--request-id", request_id,
          "--reason", f"fix-loop: gate {gate_node_id} blocked",
@@ -3265,17 +3267,28 @@ def is_node_complete(workflow_id, node_id):
 
 
 def reconcile_stage_advance_states(workflow_id, workflow_cfg):
-    """Revoke 'notified' stage-state entries when their predecessor nodes
-    have regressed (e.g., a task failed or was superseded with no replacement).
+    """Revoke 'notified' stage-state entries when the node they guard has
+    regressed — either because a predecessor regressed, or because the node's
+    own task lineage died with no live member left to re-dispatch.
 
-    Without this, a stage whose predecessor regresses after the coordinator
-    was already notified would never be re-triggered — because
-    mark_stage_advance_queued returns False for 'notified' entries and the
-    node never appears in get_ready_nodes again.
+    Without this, a stage that regresses after the coordinator was already
+    notified would never be re-triggered — because mark_stage_advance_queued
+    returns False for 'notified' entries and the node never appears in
+    get_ready_nodes again.
+
+    Both regression shapes deadlock the sweep silently:
+
+    * predecessor regressed (upstream check below);
+    * the node's own tasks were all superseded while its predecessors stayed
+      complete — a fix-loop backflow whose promised replacements were never
+      created (zombie obligations). Real deadlock: wf-nexusarchive-1005-01,
+      where `test`/`review` kept their 'notified' lock forever and the
+      controller skipped both every sweep with no log line at all.
     """
     with lock:
         state = load_stage_state()
         changed = False
+        wf_tasks = None
 
         nodes_by_id = {
             n["id"]: n
@@ -3299,14 +3312,30 @@ def reconcile_stage_advance_states(workflow_id, workflow_cfg):
                 is_node_complete(workflow_id, dep)
                 for dep in deps
             )
-            if not predecessors_complete:
-                del state[key]
-                changed = True
-                print(
-                    f"[STAGE REVOKE] "
-                    f"workflow={workflow_id} node={node_id}: "
-                    "predecessors no longer complete, revoking 'notified' lock"
-                )
+            if predecessors_complete:
+                # Upstream is intact, so the node can still regress on its own:
+                # fix-loop may have superseded everything it dispatched without
+                # the replacements ever landing. Tasks load at most once per call.
+                if wf_tasks is None:
+                    wf_tasks = load_tasks()
+                if direct_dispatch_planner is not None and (
+                    direct_dispatch_planner.lineage_redispatch_candidates(
+                        direct_dispatch_planner.node_tasks_for_latch(wf_tasks, workflow_id, node_id)
+                    )
+                ):
+                    reason = "own lineage fully superseded with no live task"
+                else:
+                    continue
+            else:
+                reason = "predecessors no longer complete"
+
+            del state[key]
+            changed = True
+            print(
+                f"[STAGE REVOKE] "
+                f"workflow={workflow_id} node={node_id}: "
+                f"{reason}, revoking 'notified' lock"
+            )
 
         if changed:
             save_stage_state(state)
@@ -4393,6 +4422,174 @@ def try_direct_stage_advance(item):
     return True
 
 
+def execute_workflow_recovery(operation, owner):
+    """Run existing Task primitives only after the durable recovery claim."""
+    from herdr import recovery_store
+    from herdr.workflow_recovery import successor_launch_command, repair_coverage
+    from herdr.recovery_successor import has_confirmed_delivery, has_confirmed_rework, choose_recovery_source
+    from herdr.repo_hygiene import check_source_cleanliness
+    store = _get_store()
+    wid, payload = operation['workflow_id'], operation['payload']
+    workflow = store.get_workflow(wid) or {}
+    config = workflow_config_for(wid) or {}
+    source = workflow.get('project_root')
+    if not source:
+        return 'waiting_human', {'reason': 'project_identity_unknown'}
+    verifying = operation['detail'].get('action') == 'verify'
+    if not verifying:
+        clean, paths = check_source_cleanliness(source)
+        if not clean:
+            return 'waiting_human', {'reason': 'source_wip_requires_decision', 'dirty_paths': paths[:50]}
+    target_ids = payload.get('task_ids') if payload['kind'] == 'finalize' else payload.get('affected_task_ids')
+    targets = [store.get_task(tid) for tid in target_ids or []]
+    if not targets or any(t is None for t in targets):
+        return 'waiting_human', {'reason': 'recovery_target_unknown'}
+    details = {'execution_id': workflow.get('execution_id'), 'successor_ids': [], 'rework_ids': [], 'target_runs': {}, 'source_runs': {}, 'repair_map': {}, 'rework_requests': {},
+               'gate_nodes': sorted({n['id'] for n in config.get('nodes') or []
+                   if (resolve_gate_config(n, n['id']) or {}).get('retry_node') == payload.get('retry_node')})}
+    if verifying:
+        details.update(operation['detail'])
+    def step(name, validate=True):
+        if validate:
+            recovery_store.renew_owner(store.db_path, operation['id'], owner, time.time(), lease_seconds=180)
+        recovery_store.record_step(store.db_path, operation['id'], owner, name, details, time.time(), validate=validate)
+    if verifying:
+        from herdr.recovery_successor import link_committed_successor
+        confirmed = details.get('successor_ids') or []
+        reworked = details.get('rework_ids') or []
+        if not confirmed and not reworked:
+            return 'waiting_human', {'reason': 'delivery_inventory_missing'}
+        for successor_id in confirmed:
+            successor = store.get_task(successor_id)
+            if not successor or not has_confirmed_delivery(store, successor):
+                return 'waiting_human', {'reason': 'delivery_unknown'}
+            details.setdefault('target_runs', {}).setdefault(successor_id, successor['run_id'])
+            predecessor = store.get_task(successor.get('recovery_predecessor') or successor.get('supersedes'))
+            if not predecessor:
+                return 'waiting_human', {'reason': 'recovery_predecessor_unknown'}
+            if not predecessor.get('superseded_by'):
+                step('existing_delivery_linking')
+                link_committed_successor(store, predecessor['task_id'], successor_id,
+                    successor.get('expected_predecessor_version'), payload['candidate_sha'], 'verified recovery delivery')
+            details.setdefault('repair_map', {})[predecessor['task_id']] = {
+                'kind': 'successor', 'task_id': successor_id, 'run_id': details['target_runs'][successor_id],
+                'source_run_id': details.get('source_runs', {}).get(predecessor['task_id'])}
+        for task_id in reworked:
+            task = store.get_task(task_id) or {}
+            expected_request = details.get('rework_requests', {}).get(task_id)
+            if payload['kind'] != 'finalize' and not has_confirmed_rework(store, task, expected_request):
+                return 'waiting_human', {'reason': 'rework_delivery_unconfirmed'}
+            details.setdefault('repair_map', {}).setdefault(task_id, {
+                'kind': 'finalize' if payload['kind'] == 'finalize' else 'rework',
+                'task_id': task_id, 'run_id': details.get('target_runs', {}).get(task_id),
+                'source_run_id': details.get('source_runs', {}).get(task_id),
+                'request_id': expected_request, 'completion_epoch':task.get('completion_epoch'),
+                'completion_identity_path':task.get('completion_identity_path')})
+        missing = repair_coverage(dict(operation, detail=details), store.list_tasks(workflow_id=wid))
+        if missing:
+            return 'waiting_human', {'reason': 'repair_coverage_incomplete', 'missing_task_ids': missing, **details}
+        step('existing_delivery_verified', validate=False)
+        if payload['kind'] == 'finalize':
+            return 'awaiting_result', {'step': 'awaiting_delivery', **details}
+    if payload['kind'] == 'finalize':
+        # A failed candidate is never integrated as a prerequisite for repairing it.
+        if any(t.get('stage_verdict') == 'blocked' for t in store.list_tasks(workflow_id=wid)
+               if t.get('status') != 'superseded' and not t.get('superseded_by')):
+            return 'waiting_human', {'reason': 'candidate_requires_repair_before_integration'}
+        for task in targets:
+            details['rework_ids'].append(task['task_id'])
+            details['source_runs'][task['task_id']] = task.get('run_id')
+            details['repair_map'][task['task_id']] = {'kind':'finalize', 'task_id':task['task_id'],
+                'run_id':task.get('run_id'), 'source_run_id':task.get('run_id')}
+            details['target_runs'][task['task_id']] = task.get('run_id')
+            step('finalize_started')
+            if not clear_finalize_escalation(task['task_id']):
+                return 'waiting_human', {'reason': 'escalation_clear_failed', **details}
+            finalize_completed_task(task['task_id'])
+            fresh = store.get_task(task['task_id']) or {}
+            if fresh.get('finalize_escalated'):
+                return 'waiting_human', {'reason': fresh.get('finalize_escalate_reason') or 'finalize_refused', **details}
+        return 'awaiting_result', {'step': 'awaiting_delivery', **details}
+    for task in ([] if verifying else targets):
+        tid = task['task_id']
+        details['source_runs'][tid] = task.get('run_id')
+        if task.get('status') == 'committed':
+            if not workflow.get('execution_id'):
+                return 'waiting_human', {'reason': 'workflow_execution_unknown'}
+            next_id = next_recovery_task_id(tid, store.list_tasks(workflow_id=wid))
+            details['successor_ids'].append(next_id)
+            from herdr.supervisor.state import redact_text
+            prompt = ('仅修复当前授权范围内的验收阻断，不扩大范围；若需要修改约定范围外文件，'
+                      '持久报告 blocked 请求人工裁决。\n' + '\n'.join(
+                redact_text(str(f.get('stage_verdict_note') or f.get('blocker') or ''))[:2000]
+                for f in (payload.get('facts') or [])[:20]))
+            try:
+                recovery_source = choose_recovery_source(task, source)
+            except ValueError as exc:
+                return 'waiting_human', {'reason':str(exc), **details}
+            details.setdefault('source_paths', {})[tid] = recovery_source
+            command = successor_launch_command(TASK_MANAGER, workflow, task, next_id, recovery_source, prompt)
+            step('successor_launch_started')
+            result = subprocess.run(command, text=True, capture_output=True, timeout=120)
+            successor = store.get_task(next_id)
+            if result.returncode or not successor or not has_confirmed_delivery(store, successor):
+                return 'waiting_human', {'reason': 'successor_delivery_unconfirmed', **details}
+            if (store.get_task(tid) or {}).get('superseded_by') != next_id:
+                return 'waiting_human', {'reason': 'successor_lineage_unconfirmed', **details}
+            details['target_runs'][next_id] = successor['run_id']
+            details['repair_map'][tid] = {'kind':'successor', 'task_id':next_id,
+                'run_id':successor['run_id'], 'source_run_id':task.get('run_id')}
+            step('successor_delivery_confirmed', validate=False)
+        elif task.get('status') in REWORKABLE_STATUSES:
+            details['rework_ids'].append(tid)
+            details['target_runs'][tid] = task.get('run_id')
+            request_id = 'recovery:' + uuid.uuid4().hex
+            details['rework_requests'][tid] = request_id
+            step('rework_started')
+            ok, _ = _rework_retry_task(task, '+'.join(payload['gate_nodes']), request_id=request_id)
+            fresh = store.get_task(tid) or {}
+            if not ok or not has_confirmed_rework(store, fresh, request_id):
+                return 'waiting_human', {'reason': 'rework_delivery_unconfirmed', **details}
+            details['repair_map'][tid] = {'kind':'rework', 'task_id':tid,
+                'run_id':task.get('run_id'), 'source_run_id':task.get('run_id'),
+                'request_id':request_id, 'completion_epoch':fresh.get('completion_epoch'),
+                'completion_identity_path':fresh.get('completion_identity_path')}
+            step('rework_delivery_confirmed', validate=False)
+        else:
+            return 'waiting_human', {'reason': 'target_requires_explicit_replacement', 'missing_task_ids':[tid], **details}
+    missing = repair_coverage(dict(operation, detail=details), store.list_tasks(workflow_id=wid))
+    if missing:
+        return 'waiting_human', {'reason': 'repair_coverage_incomplete', 'missing_task_ids': missing, **details}
+    # Existing invalidation receives no retry node: targets are already delivered
+    # and must not be finalized/reworked a second time.
+    if verifying and workflow.get('candidate_sha') != payload.get('candidate_sha'):
+        return 'awaiting_result', {'step': 'awaiting_new_candidate', **details}
+    step('gates_invalidating')
+    for gate in payload['gate_nodes']:
+        invalidate_for_fix_loop(wid, gate, config, retry_node=None)
+    remaining = [t for t in store.list_tasks(workflow_id=wid) if t.get('status') != 'superseded'
+                 and not t.get('superseded_by') and t.get('stage_verdict') == 'blocked'
+                 and (t.get('node') or t.get('stage')) in payload['gate_nodes']]
+    if remaining:
+        return 'waiting_human', {'reason': 'gate_invalidation_incomplete', **details}
+    clear_stage_advance(wid, payload['retry_node'])
+    return 'awaiting_result', {'step': 'awaiting_new_candidate', **details}
+
+
+def next_recovery_task_id(task_id, tasks):
+    from herdr.controller_actions import next_replacement_id
+    occupied = {t.get('task_id') for t in tasks}
+    next_id = next_replacement_id(task_id)
+    while next_id in occupied:
+        next_id = next_replacement_id(next_id)
+    return next_id
+
+
+def check_workflow_recovery(workflow_id):
+    from herdr.workflow_recovery import drive_recovery
+    return drive_recovery(_get_store(), workflow_id, execute_workflow_recovery)
+
+
 def check_workflow_stage_advance(workflow_id):
     if not workflow_id:
         return
@@ -4401,6 +4598,17 @@ def check_workflow_stage_advance(workflow_id):
     # vacuously "complete" at every stage and would ghost-advance forever.
     if workflow_closed(workflow_id):
         return
+
+    # Discovery precedes Pane lookup and DAG readiness. Recovery execution runs
+    # in the bounded background sweep; the database owns the obligation.
+    from herdr import recovery_store
+    from herdr.workflow_progress import assess_workflow
+    record = _get_store().get_workflow(workflow_id)
+    if record and record.get('status') == 'running':
+        recovery_store.reconcile(_get_store().db_path, workflow_id)
+        assessment = assess_workflow(record, workflow_config_for(workflow_id) or {}, load_tasks())
+        if not assessment['can_advance']:
+            return
 
     pane = coordinator_pane_for_workflow(workflow_id)
     if not pane:
@@ -5021,6 +5229,10 @@ def schedule_workflow_continuations(workflow_ids, now):
     def scan():
         try:
             for wid in workflow_ids:
+                try:
+                    check_workflow_recovery(wid)
+                except Exception as exc:
+                    print(f"[RECOVERY CHECK ERROR] workflow={wid}: {type(exc).__name__}")
                 try:
                     check_workflow_continuation(wid, now=now)
                 except Exception as exc:
@@ -5988,6 +6200,18 @@ def finalize_completed_task(task_id):
             f"status={task.get('status')}"
         )
         return {"retryable": False, "kind": "skip"}
+
+    if task.get('superseded_by'):
+        return {'retryable': False, 'kind': 'retired_lineage'}
+
+    # Acceptance and delivery are separate: never land a known failed candidate.
+    if task.get('integration_mode') == 'git' and task.get('commit'):
+        failed_sha = task['commit']
+        for verifier in _get_store().list_tasks(workflow_id=task.get('workflow_id')):
+            if (verifier.get('status') != 'superseded' and not verifier.get('superseded_by')
+                    and verifier.get('stage_verdict') == 'blocked'
+                    and verifier.get('candidate_sha') == failed_sha):
+                return {'retryable': False, 'kind': 'candidate_blocked'}
 
     # Collaboration accelerator: authoritative task completion closes the
     # handoffs targeting it, so handoff latency metrics stay trustworthy.

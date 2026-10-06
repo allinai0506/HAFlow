@@ -656,6 +656,12 @@ def step_workflow(workflow_id: str) -> Dict[str, Any]:
     tasks_data = load_tasks_data()
     wf_tasks = [t for t in tasks_data.get("tasks", []) if t.get("workflow_id") == workflow_id]
 
+    from .workflow_progress import assess_workflow
+    assessment = assess_workflow(wf_entry, norm_cfg, wf_tasks)
+    if not assessment['can_advance']:
+        return {'ok': False, 'workflow_id': workflow_id, 'reason': 'workflow_blocked',
+                'blocker_task_ids': [t['task_id'] for t in assessment['blockers']]}
+
     completed_nodes: Set[str] = set()
     for n in nodes:
         n_id = n["id"]

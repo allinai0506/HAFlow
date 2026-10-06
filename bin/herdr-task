@@ -3196,6 +3196,16 @@ def _launch_task(args):
         planned_clone = clone_root / args.task_id
         candidate = str(getattr(args, "candidate_sha", None) or "").strip()
         onto = getattr(args, "onto", None)
+        committed_recovery = bool(predecessor and predecessor.get('status') == 'committed')
+        if committed_recovery:
+            if candidate != predecessor.get('commit'):
+                raise ValueError('Committed recovery requires exact predecessor --candidate-sha')
+            if onto and onto == predecessor.get('branch'):
+                raise ValueError('Committed recovery cannot use predecessor branch as --onto')
+            workflow_execution = (store.get_workflow(args.workflow_id) or {}).get('execution_id')
+            if (not workflow_execution or getattr(args, 'execution_id', None) != workflow_execution
+                    or (predecessor.get('execution_id') and predecessor['execution_id'] != workflow_execution)):
+                raise ValueError('Committed recovery requires authoritative workflow execution identity')
         if onto and not candidate and exec_fields["execution_mode"] == "git":
             source = str(Path(project.get("project_root") or args.source).expanduser().resolve())
             remote = subprocess.run(["git", "-C", source, "show-ref", "--verify", "--quiet",
@@ -3208,6 +3218,8 @@ def _launch_task(args):
         duplicate = find_dispatch_task(store, args.workflow_id, node_id, args.dispatch_role,
                                        candidate, args.dispatch_round)
         if duplicate:
+            if committed_recovery:
+                _finish_committed_recovery_launch(store, duplicate, predecessor, args.supersede_reason)
             print(f"[DISPATCH DUPLICATE] proposed={args.task_id} existing={duplicate['task_id']}")
             return
         if find_task(data, args.task_id):
@@ -3241,6 +3253,8 @@ def _launch_task(args):
             claim = begin_launch_intent(store, workflow_id=args.workflow_id, node_id=node_id, role=args.dispatch_role, candidate_sha=candidate, dispatch_round=args.dispatch_round, task_id=args.task_id, supersedes=getattr(args, 'supersedes', None))
     if claim['status'] != 'claimed':
         if claim['status'] == 'duplicate':
+            if committed_recovery:
+                _finish_committed_recovery_launch(store, claim['task'], predecessor, args.supersede_reason)
             print(f"[DISPATCH DUPLICATE] proposed={args.task_id} existing={claim['task']['task_id']}")
             return
         print(f"[DISPATCH {claim['status'].upper()}] task={claim['intent']['task_id']}; "
@@ -3438,6 +3452,9 @@ def _launch_task(args):
                     release_agent_reservation(args.task_id)
                 except Exception:
                     pass
+                from herdr.agent_router import RouterHealthRejection, RouterPolicyRejection
+                if not isinstance(exc, (RouterHealthRejection, RouterPolicyRejection)):
+                    _record_router_failure_task(args, node_id, exc)
                 print(f"[ROUTER REJECTED] {exc}")
                 if "preflight" in str(exc).lower():
                     print("Run './bin/herdr-deep-preflight --deep' to inspect agent connectivity and credentials.")
@@ -3832,8 +3849,11 @@ def _launch_task(args):
         now,
     )
 
-    data["tasks"].append(task)
-    save_tasks(data)
+    if committed_recovery:
+        task.update(recovery_predecessor=predecessor['task_id'],
+                    expected_predecessor_version=predecessor['version'],
+                    expected_predecessor_sha=predecessor['commit'])
+    store.save_task(task)
 
     from herdr.task_resources import finish_launch_intent
     finish_launch_intent(store, launch_intent)
@@ -3866,8 +3886,23 @@ def _launch_task(args):
     # Retire the previous Task only after the replacement was registered and
     # delivered. Validation or worker startup failures retain its ownership.
     if getattr(args, "supersedes", None):
-        supersede_task(args.supersedes, new_task_id=args.task_id,
-                       reason=args.supersede_reason, allow_new_run=True)
+        if committed_recovery:
+            _finish_committed_recovery_launch(store, store.get_task(args.task_id), predecessor, args.supersede_reason)
+        else:
+            supersede_task(args.supersedes, new_task_id=args.task_id,
+                           reason=args.supersede_reason, allow_new_run=True)
+
+def _finish_committed_recovery_launch(store, task, predecessor, reason):
+    from herdr.recovery_successor import has_confirmed_delivery, link_committed_successor
+    if not has_confirmed_delivery(store, task):
+        print('[DISPATCH RECOVERY_REQUIRED] registered successor delivery unconfirmed; reconcile retained intent')
+        sys.exit(2)
+    if (task.get('recovery_predecessor') != predecessor['task_id']
+            or task.get('expected_predecessor_sha') != predecessor.get('commit')
+            or type(task.get('expected_predecessor_version')) is not int):
+        raise ValueError('Recovery successor lacks captured predecessor identity')
+    return link_committed_successor(store, predecessor['task_id'], task['task_id'],
+        task['expected_predecessor_version'], task['expected_predecessor_sha'], reason)
 
 def _apply_execution_identity(task, args):
     """Persist the caller's workflow execution identity on a launched Task.
@@ -7182,6 +7217,22 @@ def force_advance(workflow_id, stage=None):
         " Controller will re-evaluate within ~2 seconds."
     )
 
+
+def cmd_workflow_recovery(args):
+    from herdr import recovery_store, state_db
+    try:
+        db_path = state_db.resolve_state_db_path()
+        if args.command == 'recovery-status':
+            result = {'workflow_id': args.workflow_id,
+                      'operations': recovery_store.list_operations(db_path, args.workflow_id)}
+        else:
+            result = recovery_store.decide_operation(db_path, args.operation_id, args.expected_version,
+                args.operator, args.action, args.reason, time.time(), until=args.until)
+        print(json.dumps(result, ensure_ascii=False))
+    except (OSError, ValueError, sqlite3.Error) as exc:
+        print(f'[RECOVERY REJECTED] {exc}', file=sys.stderr)
+        sys.exit(2)
+
 def list_tasks(workflow_id=None):
     data = load_tasks()
 
@@ -8409,9 +8460,21 @@ def main():
     rollout_guard.add_argument("--source", default="guard")
     rollout_guard.add_argument("--json", action="store_true")
 
+    recovery_status = sub.add_parser('recovery-status', help='只读工作流持久恢复义务')
+    recovery_status.add_argument('--workflow-id', required=True)
+    recovery_decide = sub.add_parser('recovery-decide', help='按版本确认恢复重试或有期限等待')
+    recovery_decide.add_argument('--operation-id', type=int, required=True)
+    recovery_decide.add_argument('--expected-version', type=int, required=True)
+    recovery_decide.add_argument('--operator', required=True)
+    recovery_decide.add_argument('--action', choices=['retry', 'hold', 'verify'], required=True)
+    recovery_decide.add_argument('--reason', required=True)
+    recovery_decide.add_argument('--until', type=float)
+
     args = parser.parse_args()
 
-    if args.command == "add":
+    if args.command in ('recovery-status', 'recovery-decide'):
+        cmd_workflow_recovery(args)
+    elif args.command == "add":
         add_task(args)
 
     elif args.command == "launch":

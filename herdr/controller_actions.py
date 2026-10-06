@@ -86,36 +86,9 @@ def build_cli_command(
 
 
 def resolve_workflow_blockers(tasks: List[Dict[str, Any]], workflow: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Filter tasks to find only currently active blocking items.
-
-    Strictly ignores superseded tasks (already replaced by newer rounds)
-    and successfully completed/cleaned tasks.
-    """
-    blockers = []
-    for t in tasks:
-        status = t.get("status")
-        # Invariant: Superseded and cleaned tasks are historical artifacts and NEVER active blockers
-        if status in {"superseded", "cleaned"}:
-            continue
-
-        verdict = t.get("stage_verdict")
-        blocker_field = t.get("blocker")
-        has_blocker_reason = bool(blocker_field and len(str(blocker_field).strip()))
-
-        is_blocked = (
-            verdict == "blocked"
-            or status in {"blocked", "failed", "rework"}
-            or has_blocker_reason
-        )
-
-        # Skip completed/committed/integrated tasks unless explicitly marked with an unresolved blocked verdict
-        if status in {"completed", "committed", "integrated"} and verdict != "blocked":
-            continue
-
-        if is_blocked:
-            blockers.append(t)
-
-    return blockers
+    """Cleanup ends execution, never an unresolved acceptance or delivery fact."""
+    from .workflow_progress import assess_workflow
+    return assess_workflow(workflow, workflow.get('config') or {}, tasks)['blockers']
 
 
 def pick_alternative_agent(current_agent: str) -> str:

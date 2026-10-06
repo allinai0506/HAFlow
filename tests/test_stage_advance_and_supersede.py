@@ -203,6 +203,136 @@ class TestReconcile(unittest.TestCase):
         finally:
             os.unlink(tmp)
 
+    def test_notified_revoked_when_own_lineage_all_superseded(self):
+        """Regression: latch must also open when the node's OWN tasks died.
+
+        Production deadlock (wf-nexusarchive-1005-01): the `test` gate was
+        blocked, fix-loop superseded the dispatched tasks, but their promised
+        replacements were never created (replacement_pending with no
+        superseded_by). The node regressed while its predecessor
+        `implementation` stayed complete, so the upstream-only check kept the
+        'notified' lock. mark_stage_advance_queued then returned False every
+        sweep and the node was silently skipped forever.
+        """
+        wf = "wf-reconcile-zombie"
+        workflow_cfg = {
+            "nodes": [
+                {"id": "implementation", "depends_on": []},
+                {"id": "test", "depends_on": ["implementation"]},
+            ]
+        }
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", delete=False
+        ) as f:
+            json.dump({f"{wf}:test": "notified"}, f)
+            tmp = f.name
+        try:
+            self.ctrl.STAGE_STATE_FILE = tmp
+            # Predecessor is complete, so the upstream check passes...
+            self.ctrl.load_tasks = lambda: [
+                {"task_id": "impl-1", "workflow_id": wf, "node": "implementation",
+                 "stage": "implementation", "status": "cleaned"},
+                # ...while this node's only task is a zombie obligation.
+                {"task_id": "test-1", "workflow_id": wf, "node": "test",
+                 "stage": "test", "status": "superseded",
+                 "replacement_pending": True, "superseded_by": None},
+            ]
+            self.ctrl.reconcile_stage_advance_states(wf, workflow_cfg)
+            with open(tmp) as f:
+                state = json.load(f)
+            self.assertNotIn(f"{wf}:test", state)
+        finally:
+            os.unlink(tmp)
+
+    def test_notified_revoked_when_own_lineage_fully_superseded_no_pending(self):
+        """Same regression via the fully-superseded shape (no replacement_pending)."""
+        wf = "wf-reconcile-zombie2"
+        workflow_cfg = {
+            "nodes": [
+                {"id": "implementation", "depends_on": []},
+                {"id": "test", "depends_on": ["implementation"]},
+            ]
+        }
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", delete=False
+        ) as f:
+            json.dump({f"{wf}:test": "notified"}, f)
+            tmp = f.name
+        try:
+            self.ctrl.STAGE_STATE_FILE = tmp
+            self.ctrl.load_tasks = lambda: [
+                {"task_id": "impl-1", "workflow_id": wf, "node": "implementation",
+                 "stage": "implementation", "status": "cleaned"},
+                {"task_id": "test-1", "workflow_id": wf, "node": "test",
+                 "stage": "test", "status": "superseded", "superseded_by": "test-2"},
+                {"task_id": "test-2", "workflow_id": wf, "node": "test",
+                 "stage": "test", "status": "superseded", "superseded_by": None},
+            ]
+            self.ctrl.reconcile_stage_advance_states(wf, workflow_cfg)
+            with open(tmp) as f:
+                state = json.load(f)
+            self.assertNotIn(f"{wf}:test", state)
+        finally:
+            os.unlink(tmp)
+
+    def test_notified_preserved_when_own_lineage_has_live_task(self):
+        """Guard against over-revoking: a live task means the node is progressing."""
+        wf = "wf-reconcile-keep"
+        workflow_cfg = {
+            "nodes": [
+                {"id": "implementation", "depends_on": []},
+                {"id": "test", "depends_on": ["implementation"]},
+            ]
+        }
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", delete=False
+        ) as f:
+            json.dump({f"{wf}:test": "notified"}, f)
+            tmp = f.name
+        try:
+            self.ctrl.STAGE_STATE_FILE = tmp
+            self.ctrl.load_tasks = lambda: [
+                {"task_id": "impl-1", "workflow_id": wf, "node": "implementation",
+                 "stage": "implementation", "status": "cleaned"},
+                {"task_id": "test-1", "workflow_id": wf, "node": "test",
+                 "stage": "test", "status": "superseded", "superseded_by": "test-2"},
+                {"task_id": "test-2", "workflow_id": wf, "node": "test",
+                 "stage": "test", "status": "working"},
+            ]
+            self.ctrl.reconcile_stage_advance_states(wf, workflow_cfg)
+            with open(tmp) as f:
+                state = json.load(f)
+            self.assertEqual(state.get(f"{wf}:test"), "notified")
+        finally:
+            os.unlink(tmp)
+
+    def test_notified_preserved_when_node_never_had_tasks(self):
+        """Guard: an empty node has not regressed; nothing to re-dispatch."""
+        wf = "wf-reconcile-empty"
+        workflow_cfg = {
+            "nodes": [
+                {"id": "implementation", "depends_on": []},
+                {"id": "test", "depends_on": ["implementation"]},
+            ]
+        }
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", delete=False
+        ) as f:
+            json.dump({f"{wf}:test": "notified"}, f)
+            tmp = f.name
+        try:
+            self.ctrl.STAGE_STATE_FILE = tmp
+            self.ctrl.load_tasks = lambda: [
+                {"task_id": "impl-1", "workflow_id": wf, "node": "implementation",
+                 "stage": "implementation", "status": "cleaned"},
+            ]
+            self.ctrl.reconcile_stage_advance_states(wf, workflow_cfg)
+            with open(tmp) as f:
+                state = json.load(f)
+            self.assertEqual(state.get(f"{wf}:test"), "notified")
+        finally:
+            os.unlink(tmp)
+
 
 # ---------------------------------------------------------------------------
 # 4. supersede_task

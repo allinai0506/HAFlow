@@ -76,11 +76,10 @@ def test_api_workflow_controller_actions_query(console_actions_env):
     assert "wf-test-01-old" not in blocker_ids
     assert "wf-test-01-test" in blocker_ids
 
-    # Actions must include command_line
-    actions = res["actions"]
-    assert len(actions) >= 1
-    assert any("bin/herdr-task launch" in a["command_line"] for a in actions)
-    assert any(a["action_id"].endswith(":dispatch_fix_loop") for a in actions)
+    assert res['actions'] == []
+    assert len(res['recovery']) == 1
+    assert res['recovery'][0]['payload']['task_ids'] == ['wf-test-01-test']
+    assert res['recovery'][0]['status'] == 'waiting_human'
 
 
 def test_api_controller_execute_action_launch(console_actions_env):
@@ -93,16 +92,10 @@ def test_api_controller_execute_action_launch(console_actions_env):
         "prompt": "修复测试缺陷",
     }
     with patch.object(c, "run") as mock_run:
-        mock_run.return_value = MagicMock(returncode=0, stdout='{"task_id": "wf-test-01-fix-1"}', stderr="")
-        res = c.api_controller_execute_action(payload)
-        assert res.get("ok") is True
-        assert res.get("task_id") == "wf-test-01-fix-1"
-        assert mock_run.called
-        cmd_args = mock_run.call_args[0][0]
-        assert "--task-id" in cmd_args
-        assert "wf-test-01-fix-1" in cmd_args
-        assert "--workflow-id" in cmd_args
-        assert "wf-test-01" in cmd_args
+        c.api_workflow_controller_actions('wf-test-01')
+        with pytest.raises(RuntimeError, match='持久恢复'):
+            c.api_controller_execute_action(payload)
+        mock_run.assert_not_called()
 
 
 def test_api_controller_execute_action_force_pass_advance(console_actions_env):
@@ -115,16 +108,17 @@ def test_api_controller_execute_action_force_pass_advance(console_actions_env):
             "gate_node_id": "test",
         })
 
-    # Missing expected_version must be refused
-    with pytest.raises(RuntimeError) as exc:
-        c.api_controller_execute_action({
-            "type": "force_pass_advance",
-            "workflow_id": "wf-test-01",
-            "stage": "test",
-            "gate_node_id": "test",
-            "confirmed": True,
-            "reason": "人工在控制台审核确认通过",
-        })
+    # Missing expected_version must be refused (isolate from recovery obligation check)
+    with patch.object(c, "api_workflow_recovery", return_value={"operations": []}):
+        with pytest.raises(RuntimeError) as exc:
+            c.api_controller_execute_action({
+                "type": "force_pass_advance",
+                "workflow_id": "wf-test-01",
+                "stage": "test",
+                "gate_node_id": "test",
+                "confirmed": True,
+                "reason": "人工在控制台审核确认通过",
+            })
     assert "版本快照保护字段" in str(exc.value)
 
     payload = {
@@ -138,9 +132,8 @@ def test_api_controller_execute_action_force_pass_advance(console_actions_env):
         "reason": "人工在控制台审核确认通过",
     }
     with patch.object(c.herdr_kernel, "force_pass_gate") as mock_gate, patch.object(c, "manual_advance") as mock_adv:
-        mock_adv.return_value = {"ok": True, "advanced": True}
-        res = c.api_controller_execute_action(payload)
-        assert res.get("ok") is True
-        assert res.get("advanced") == {"ok": True, "advanced": True}
-        mock_gate.assert_called_once()
-        mock_adv.assert_called_once_with("wf-test-01")
+        c.api_workflow_controller_actions('wf-test-01')
+        with pytest.raises(RuntimeError, match='持久恢复'):
+            c.api_controller_execute_action(payload)
+        mock_gate.assert_not_called()
+        mock_adv.assert_not_called()

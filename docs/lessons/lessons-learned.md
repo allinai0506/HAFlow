@@ -5991,10 +5991,47 @@ Nexus CoW integration分支复用Agent白名单、branch/worktree全部context�
 - S6 独立审查报告：`.omc/review-b80982fa-74b8-4bce-9898-736219f8e996.md`（MERGE_READY）。
 
 
+## 129. 局部门禁安全不能替代全局恢复活性（2026-10-05）
 
----
+### 问题背景
+`wf-nexusarchive-1005-01` 出现 test cleaned/blocked、implementation committed/finalize_escalated、review 未派发。旧路径只从完成工作流或 READY 节点的依赖发现 fix-loop；AND join 未就绪导致修复入口消失。Console 手工推进正确拒绝 blocked，却没有统一持久执行入口。
 
-## 129. 运维中心一键修复与门禁放行彻底解耦（防自动越权豁免）、前置归属校验与显式人工审计（2026-10-05）
+### 经验教训
+每个入口拒绝非法推进只能保证局部安全，不能保证失败事实始终有负责人、有期限、有后续动作。恢复应由失败事实触发，独立于正向 DAG 与 Agent 是否存活。注册、实际派发、交付、验收必须分别取证，不能用单个“完成”状态替代。
+
+### 操作规范
+在原 SQLite 事务中同时写 Task 与恢复义务；语义身份排除活动时间，以 CAS 租约认领，副作用前重查代次、候选、谱系。unknown 交付禁止盲目重发；人工 retry/hold/verify 绑定当前版本。committed 前驱保留历史，通过已确认交付的 successor 修复；不得为修复而先集成失败候选。失败提交可能仅存在前驱 clone，后继必须从包含精确 SHA 的干净登记仓库克隆；项目根与克隆源不能混为一谈。每个原受影响目标必须有完整修复映射；同 Run rework 还必须绑定本轮 request ID 与实际交付回执，不能复用上一请求的 delivered 标记。最终结案必须验证新候选全部门禁。该约束已固化到恢复专项和跨入口回归测试。
+
+### 验证命令 / 关联证据
+- `pytest -q tests/test_recovery_entrypoints.py tests/test_recovery_store.py tests/test_recovery_successor.py tests/test_workflow_progress.py tests/test_workflow_recovery.py`
+- `tests/test_recovery_entrypoints.py#test_controller_records_failure_even_without_coordinator_or_ready_join`：并行 review 缺席且无 coordinator 仍登记。
+- `tests/test_recovery_entrypoints.py#test_failed_candidate_never_finalizes_via_legacy_watcher`：修复前 RED 到达 integrate transport，修复后拒绝集成。
+- 最终计数和未验证项记录于本轮 `.omc/verify-1005fixbug.md`；不将旧测试通过作为本轮或线上验收证明。
+
+
+## 130. 阶段推进锁自愈必须覆盖自身谱系死亡（2026-10-06）
+
+### 问题背景
+在 `wf-nexusarchive-1005-01` 真实死锁排查中，`test` 门禁处于阻塞，fix-loop 作废了已派发的任务，但后续替代任务并未落地（`replacement_pending=True` 且 `superseded_by=None`，沦为僵尸义务）。当前节点发生回退，而其前驱依赖 `implementation` 保持 `completed`。旧的 `reconcile_stage_advance_states` 仅在前驱不完成时撤销 `'notified'` 状态锁，导致该节点被判定为前驱完好而一直保留 `'notified'` 锁。Controller 在每轮扫描中 `mark_stage_advance_queued` 均返回 `False`，导致该节点被永久静默跳过，工作流陷入死锁。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 阶段推进锁仅检查前驱是否回退 | 节点自身的任务谱系全部作废且无活跃替代任务时，节点同样已回退 | 推进锁自愈必须双向判定：不仅检查前驱完整性，在前驱完整时还必须检查自身节点名下是否还存在活跃任务 |
+| 活跃任务过滤器排除了被作废的任务头 | 判定节点是否需要重派发时，被作废的任务是替代者缺席的直接证据 | 引入 `node_tasks_for_latch`，保留全量任务（含 `superseded`），供重派发候选器分析谱系活性 |
+
+### 操作规范
+1. 在 `herdr/direct_dispatch.py` 中提供 `node_tasks_for_latch(tasks, workflow_id, node_id)` 获取节点名下的全量任务；
+2. 在 `services/herdr-controller.py` 的 `reconcile_stage_advance_states` 中：在前驱完成的分支下，通过 `lineage_redispatch_candidates` 检查自身谱系是否存在无活跃替代任务的作废头；若存在，以 `"own lineage fully superseded with no live task"` 为由主动释放 `'notified'` 锁；
+3. 补充 4 项单测回归用例，防范自愈不触发或误撤销存活任务的锁。
+
+### 验证命令 / 关联证据
+- `pytest -v tests/test_stage_advance_and_supersede.py` (29 passed, 9 subtests)
+- `pytest -q tests/test_stage_advance_and_supersede.py tests/test_direct_stage_dispatch.py tests/test_dispatch_*.py tests/test_controller_*.py` (185 passed, 35 subtests)
+
+
+## 131. 运维中心一键修复与门禁放行彻底解耦（防自动越权豁免）、前置归属校验与显式人工审计（2026-10-05）
 
 ### 问题背景
 在 `allinai0506/HAFlow` 运维中心驾驶舱的异常中枢中，暴露了严重的门禁越权与安全隐患：
@@ -6034,3 +6071,4 @@ Nexus CoW integration分支复用Agent白名单、branch/worktree全部context�
 - 控制台与工作流回归测试：`pytest -q tests/test_workflow*.py tests/test_console*.py`（453 passed, 79 subtests passed in 41.39s）；
 - 全项目 Python 语法与字节码编译：`python3 -m compileall -q herdr services bin tests console`（clean compile）；
 - 代码格式检查：`git diff --check`（clean diff）。
+

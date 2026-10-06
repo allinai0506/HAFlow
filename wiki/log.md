@@ -2039,7 +2039,6 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 
 - 2026-10-03 FIX_BUG1002收尾边界：发现Nexus CoW继承外部Git指针，先独立化Git元数据再清理自有branch；外部worktree及其当前引用分支保留。记录CoW目录/Git隔离双重检查教训。
 
-
 ## [2026-10-05] update | 运维中心一键修复与门禁放行解耦与人工审计闭环
 - Updated [[ops-center]]: 彻底分离“重试修复”(`ops_repair`/`retry`)与“人工强制放行”(`force_pass`/`force_pass_advance`)；
   - 自动修复通道仅按当前状态执行安全工位动作（`rework`/`redrive`），不适用或失败必须报错保留阻塞，彻底移除隐式降级调用 `force_pass_gate` 与 `manual_advance`；
@@ -2047,7 +2046,7 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
   - 前端增加 `confirmOpsForcePass` 二次确认弹窗与 `_opsActionBusy` 防重复提交保护；
   - 前置重读权威状态，强校验工作流/任务归属、拦截已作废（superseded）任务及版本/运行实例错配。
 - 专项测试 `tests/test_console_ops_repair_gate_separation.py`（9/9 passed 含端到端 HTTP Server 到 SQLite 回读集成测试）；全量控制台测试 246 passed；S6 审查通过（MERGE_READY）。
-- 关联教训沉淀至 `docs/lessons/lessons-learned.md` §129。
+- 关联教训沉淀至 `docs/lessons/lessons-learned.md` §131。
 
 ## [2026-10-05] update | 门禁放行范围投影对齐、节点版本完整性校验与接口防绕过闭环
 - Updated [[ops-center]], [[workflow-engine]]:
@@ -2056,3 +2055,12 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
   - 接口双入口对齐：`/api/controller/execute-action` 与 `/api/kernel/force-pass` 统一通过 `_validate_force_pass_params` 强制要求快照版本保护字段，杜绝直接调用或旧客户端绕过防护；
   - 运维中心“强制放行推进”动作修复：前端 `confirmOpsForcePass` 纠正调用 `force_pass_advance`，放行后正常尝试推进后续阶段。
 - 测试与验证：`tests/test_console_ops_repair_gate_separation.py`（17/17 passed）、`tests/test_console*.py`（254/254 passed, 76 subtests）、`python3 -m compileall` 及 `git diff --check` 全部 0 警告 0 报错。
+
+## [2026-10-05] Added | 阻塞验收的持久恢复闭环
+- Added [[workflow-progress-recovery]]: 统一事实评估、同事务义务、租约执行、committed 后继与未知交付核验；工作树实现与部署验收分开记录。
+
+## [2026-10-06] fix | 阶段推进锁自身任务谱系死亡自愈与防静默跳过死锁
+- 背景：`wf-nexusarchive-1005-01` 中前驱节点完成但自身任务全被 supersede 且无活跃 replacement，旧推进锁只检查前驱回退，导致 `'notified'` 锁永久驻留、每轮扫描静默跳过。
+- 修复：`reconcile_stage_advance_states` 在前驱完成时检查自身节点谱系；若全量任务被作废且无活跃后继，主动撤销推进锁；`direct_dispatch.node_tasks_for_latch` 提供包含作废任务的全量视图。
+- 回归：`tests/test_stage_advance_and_supersede.py` 新增 4 项场景测试，调度与派发套件 185 项全部通过。
+
