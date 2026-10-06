@@ -21,13 +21,13 @@ def payload(workflow, config, node, predecessors=None, prior_operation_id=None):
     base_key = 'node_dispatch:' + hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
     if predecessors:
         identity['predecessors'] = predecessors
-        if prior_operation_id is not None:
-            identity['prior_operation_id'] = prior_operation_id
+    if prior_operation_id is not None:
+        identity['prior_operation_id'] = prior_operation_id
     return {**identity, 'generation_key': base_key, 'kind': 'node_dispatch', 'responsible': 'coordinator',
             'recovery_responsible': 'controller',
             'required_task_ids': node.get('required_task_ids'),
             'identity_key': ('node_dispatch:' + hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
-                             if predecessors else base_key)}
+                             if predecessors or prior_operation_id is not None else base_key)}
 
 
 def current(operation, workflow, config):
@@ -67,6 +67,11 @@ def predecessors_current(operation, workflow, tasks):
     return True
 
 
+def _valid_required(required):
+    return required is None or (isinstance(required, list) and bool(required)
+        and len(required) <= 64 and all(isinstance(task_id, str) and task_id.strip() for task_id in required))
+
+
 def result(operation, workflow, config, tasks, now):
     if not current(operation, workflow, config):
         return ('waiting_human' if operation['started'] else 'superseded', {'reason': 'dispatch_generation_changed'})
@@ -78,10 +83,22 @@ def result(operation, workflow, config, tasks, now):
                  'decision_needed': '前序任务补派责任已变化，核对替代派发结果及当前任务谱系'})
     registered = registered_tasks(operation, workflow, tasks)
     predecessors = operation['payload'].get('predecessors') or []
+    if (not operation['started'] and not predecessors and workflow.get('execution_id')
+            and operation['status'] in {'pending', 'running'}):
+        existing = [t for t in tasks if t.get('workflow_id') == operation['workflow_id']
+                    and (t.get('node') or t.get('stage')) == operation['payload']['node_id']
+                    and t.get('execution_id') == workflow.get('execution_id')
+                    and t.get('task_id') and t.get('run_id')]
+        required = operation['payload'].get('required_task_ids')
+        inventory_owned = _valid_required(required) and (required is None
+            or set(required).issubset({t['task_id'] for t in existing}))
+        if existing and inventory_owned:
+            return 'superseded', {'reason': 'dispatch_existing_tasks',
+                'responsibility_transferred_to': 'registered_tasks',
+                'task_runs': {t['task_id']: t['run_id'] for t in existing}}
     required = None if predecessors else operation['payload'].get('required_task_ids')
     ids = sorted(t['task_id'] for t in registered)
-    valid_required = required is None or (isinstance(required, list) and bool(required)
-                     and len(required) <= 64 and all(isinstance(t, str) and t.strip() for t in required))
+    valid_required = _valid_required(required)
     replacement_complete = not predecessors or {t.get('supersedes') for t in registered}.issuperset(
         p['task_id'] for p in predecessors)
     if registered and replacement_complete and valid_required and (required is None or set(required).issubset(ids)):

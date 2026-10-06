@@ -32,13 +32,13 @@ def _node_operation(conn, workflow, config, node):
     return rs._decode(row) if row else None
 
 
-def reconcile_workflow(db_path, wid, *, legacy_notified=(), discover=True, now=None):
+def reconcile_workflow(db_path, wid, *, legacy_notified=(), discover=True, intake_enabled=True, now=None):
     now = time.time() if now is None else now
     with rs._transaction(db_path) as conn:
         workflow, config, tasks = rs._snapshot(conn, wid)
         current_tasks = [t for t in tasks if not t.get('execution_id')
                          or t.get('execution_id') == workflow.get('execution_id')]
-        if discover and core.active(workflow):
+        if discover and intake_enabled and core.active(workflow):
             for node in config.get('nodes') or []:
                 if (not node.get('id') or node.get('depends_on') or node.get('node_type', 'agent') != 'agent'):
                     continue
@@ -46,12 +46,13 @@ def reconcile_workflow(db_path, wid, *, legacy_notified=(), discover=True, now=N
                 node_tasks = [t for t in current_tasks if (t.get('node') or t.get('stage')) == node['id']]
                 candidates = lineage_redispatch_candidates(node_tasks)
                 predecessors = None
-                if previous and previous['status'] in core.TERMINAL and candidates:
+                if candidates and (not previous or previous['status'] in core.TERMINAL):
                     predecessors = sorted(({'task_id': t['task_id'], 'run_id': t.get('run_id')}
                                            for t in candidates), key=lambda t: t['task_id'])
-                elif current_tasks:
+                elif node_tasks:
                     continue
-                facts = core.payload(workflow, config, node, predecessors, previous['id'] if predecessors else None)
+                prior_id = previous['id'] if previous and previous['status'] in core.TERMINAL else None
+                facts = core.payload(workflow, config, node, predecessors, prior_id)
                 legacy = not predecessors and node['id'] in legacy_notified
                 detail = ({'reason': 'legacy_dispatch_unknown', 'origin': 'legacy_notified',
                            'deadline_at': now + core.WAIT_SECONDS} if legacy else {})
@@ -65,6 +66,11 @@ def reconcile_workflow(db_path, wid, *, legacy_notified=(), discover=True, now=N
                     rs._event(conn, rs._get(conn, row['id']), 'dispatch_registered', now, detail)
         for op in _operations(conn, wid):
             if op['status'] in core.TERMINAL:
+                continue
+            if (not intake_enabled and not op['started'] and op['status'] in {'pending', 'running'}
+                    and core.current(op, workflow, config)):
+                _write(conn, op, 'superseded', {'reason': 'dispatch_direct_mode',
+                    'responsibility_transferred_to': 'direct_scheduler'}, now)
                 continue
             if op['status'] == 'waiting' and (op['next_due_at'] or 0) > now and core.current(op, workflow, config):
                 continue
@@ -112,6 +118,10 @@ def claim(db_path, operation_id, owner, now=None):
     with rs._transaction(db_path) as conn:
         op = rs._get(conn, operation_id)
         workflow, config, tasks = rs._snapshot(conn, op['workflow_id'])
+        outcome = core.result(op, workflow, config, tasks, now)
+        if outcome and outcome[1].get('reason') == 'dispatch_existing_tasks':
+            _write(conn, op, *outcome, now)
+            return None
         if (not owner or not core.active(workflow) or not core.current(op, workflow, config)
                 or not core.predecessors_current(op, workflow, tasks)
                 or op['status'] != 'pending' or op['started'] or op['next_due_at'] > now or op['attempts'] >= 3):
@@ -125,6 +135,10 @@ def start(db_path, operation_id, owner, now=None):
     with rs._transaction(db_path) as conn:
         op = rs._owned(conn, operation_id, owner, now)
         workflow, config, tasks = rs._snapshot(conn, op['workflow_id'])
+        outcome = core.result(op, workflow, config, tasks, now)
+        if outcome and outcome[1].get('reason') == 'dispatch_existing_tasks':
+            _write(conn, op, *outcome, now)
+            return None
         if (not core.active(workflow) or not core.current(op, workflow, config) or op['started']
                 or not core.predecessors_current(op, workflow, tasks)):
             raise ValueError('dispatch no longer owns current unsent generation')

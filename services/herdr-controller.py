@@ -4627,19 +4627,28 @@ def next_recovery_task_id(task_id, tasks):
 
 
 def check_workflow_recovery(workflow_id):
-    from herdr.node_dispatch_store import reconcile_workflow
-    reconcile_workflow(_get_store().db_path, workflow_id, discover=False)
+    reconcile_node_dispatches(workflow_id, discover=False)
     from herdr.workflow_recovery import drive_recovery
     return drive_recovery(_get_store(), workflow_id, execute_workflow_recovery)
 
 
-def reconcile_node_dispatches(workflow_id):
-    from herdr.node_dispatch_store import reconcile_workflow
+def reconcile_node_dispatches(workflow_id, *, discover=True):
+    from herdr.node_dispatch_store import reconcile_workflow, operation_for_node
     state = load_stage_state()
     legacy = [key[len(workflow_id) + 1:] for key, value in state.items()
               if key.startswith(workflow_id + ':') and value == 'notified']
+    enabled = coordinator_intake_enabled()
+    if not enabled:
+        record = _get_store().get_workflow(workflow_id) or {}
+        for node in (record.get('config') or {}).get('nodes') or []:
+            if node.get('depends_on'):
+                continue
+            op = operation_for_node(_get_store().db_path, workflow_id, node['id'])
+            if op and not op['started'] and op['status'] in ('pending', 'running'):
+                # Release the old latch before committing transfer; no direct queue is created yet.
+                clear_stage_advance(workflow_id, node['id'])
     return reconcile_workflow(_get_store().db_path, workflow_id,
-                              legacy_notified=legacy, discover=coordinator_intake_enabled())
+                              legacy_notified=legacy, discover=discover and enabled, intake_enabled=enabled)
 
 
 def check_workflow_stage_advance(workflow_id):
@@ -4912,10 +4921,14 @@ def check_workflow_stage_advance(workflow_id):
                 continue
 
             dispatch_claim = None
-            if not deps and coordinator_intake_enabled():
+            if not deps:
                 from herdr.node_dispatch_store import operation_for_node, claim
                 op = operation_for_node(_get_store().db_path, workflow_id, ready_id)
-                if op:
+                if coordinator_intake_enabled() and not op and _get_store().get_workflow(workflow_id):
+                    continue
+                if op and not coordinator_intake_enabled() and op['status'] not in ('resolved', 'superseded'):
+                    continue
+                if op and coordinator_intake_enabled():
                     import uuid
                     dispatch_claim = claim(_get_store().db_path, op['id'], uuid.uuid4().hex)
                     if dispatch_claim is None:
@@ -6932,6 +6945,13 @@ def _handle_coordinator_item(item):
                     "native executor unavailable; manual handling required"
                 )
                 return
+        if item.get('stage') in (None, '', 'start') and not coordinator_intake_enabled():
+            if _get_store().get_workflow(item['workflow_id']):
+                from herdr.node_dispatch_store import operation_for_node
+                reconcile_node_dispatches(item['workflow_id'], discover=False)
+                previous_dispatch = operation_for_node(_get_store().db_path, item['workflow_id'], target_node_id)
+                if previous_dispatch and previous_dispatch['status'] not in ('resolved', 'superseded'):
+                    return
         # 总指挥接单:新工作流首个节点(start -> first)默认交总指挥理解
         # 需求后再派发;HERDR_COORDINATOR_INTAKE=0 或非首节点保持直派。
         if (
@@ -7274,7 +7294,9 @@ task_type:
                             claimed = claim(_get_store().db_path, dispatch_op['id'], dispatch_owner)
                             if claimed is None:
                                 return
-                        start(_get_store().db_path, dispatch_op['id'], dispatch_owner)
+                        if start(_get_store().db_path, dispatch_op['id'], dispatch_owner) is None:
+                            clear_stage_advance(workflow_id, target_node_id)
+                            return
                     try:
                         result = subprocess.run(
                             ["herdr", "agent", "prompt", coord_pane, message,

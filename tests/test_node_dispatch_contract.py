@@ -293,7 +293,7 @@ def test_zero_task_projection_exposes_wait_and_expired_human_decision(scene):
     assert stalled['dispatch']['decision_needed']
 
 
-@pytest.mark.parametrize('replacement', [False, True])
+@pytest.mark.parametrize('replacement', [None, 'new-r2', 'replacement-work'])
 def test_real_cli_launch_binds_intent_and_task_to_operation(tmp_path, monkeypatch, replacement):
     # Existing harness only substitutes native Pane/Worker/Agent resources.
     spec = importlib.util.spec_from_file_location('dispatch_cli_test_harness', ROOT / 'tests/test_recovery_entrypoints.py')
@@ -336,17 +336,29 @@ def test_real_cli_launch_binds_intent_and_task_to_operation(tmp_path, monkeypatc
         nd.claim(store.db_path, retry['id'], 'retry')
         nd.start(store.db_path, retry['id'], 'retry')
         args = make_args()
-        args.task_id = 'new-r2'
+        args.task_id = replacement
         args.supersedes = 'new'
         args.dispatch_round = 2
         args.run_id = 'retry-run'
         args.dispatch_operation_id = retry['id']
-        cli.launch_task(args)
-        replacement_task = store.get_task('new-r2')
+        if replacement == 'replacement-work':
+            from herdr.supervisor_delivery import DeliveryUnknown
+            calls['fail_prompt'] = True
+            with pytest.raises(DeliveryUnknown):
+                cli._launch_task(args)
+            calls['fail_prompt'] = False
+        else:
+            cli.launch_task(args)
+        replacement_task = store.get_task(replacement)
         assert replacement_task['dispatch_operation_id'] == retry['id']
         assert replacement_task['supersedes'] == 'new'
-        assert store.get_task('new')['superseded_by'] == 'new-r2'
-        nd.reconcile_workflow(store.db_path, 'wf')
+        if replacement == 'replacement-work':
+            assert store.get_task('new').get('superseded_by') is None
+        else:
+            assert store.get_task('new')['superseded_by'] == replacement
+        for _ in range(4):
+            nd.reconcile_workflow(store.db_path, 'wf')
+        assert nd.operation_for_node(store.db_path, 'wf', 'implementation')['id'] == retry['id']
         assert nd.operation_for_node(store.db_path, 'wf', 'implementation')['status'] == 'resolved'
 
     assert calls['worker'] == calls['prompt'] == (2 if replacement else 1)
@@ -745,3 +757,272 @@ def test_damaged_replacement_rejects_nonempty_predecessor_conflict(scene):
     conn.close()
     with pytest.raises(ValueError, match='conflicts with durable'):
         scene.store.save_task(task)
+
+
+
+def test_legacy_task_without_intake_history_has_persistent_replacement(scene):
+    from herdr import node_dispatch_store as nd
+    scene.store.save_task({'task_id': 'legacy', 'workflow_id': 'wf', 'node': 'implementation',
+        'status': 'dispatched', 'execution_id': 'execution-1', 'run_id': 'legacy-run',
+        'dispatch_role': 'worker', 'dispatch_round': 1})
+    scene.store.transition_task('legacy', 'failed', 'agent_process_crash', source='test')
+    assert scene.ctrl.recover_infra_failed_tasks('wf')
+    for _ in range(4):
+        scene.ctrl.check_workflow_stage_advance('wf')
+        scene.ctrl.check_workflow_recovery('wf')
+    assert scene.ctrl.coordinator_queue.qsize() == 1
+    item = scene.ctrl.coordinator_queue.get_nowait()
+    op = nd.operation_for_node(scene.store.db_path, 'wf', 'implementation')
+    assert op and op['payload']['predecessors'] == [{'task_id': 'legacy', 'run_id': 'legacy-run'}]
+    scene.ctrl._handle_coordinator_item(item)
+    assert len(scene.sent) == 1
+    register_task(scene, op, 'legacy-replacement')
+    scene.ctrl.check_workflow_recovery('wf')
+    assert nd.operation_for_node(scene.store.db_path, 'wf', 'implementation')['status'] == 'resolved'
+    assert scene.ctrl.coordinator_queue.empty()
+
+
+def test_multiple_roots_discover_empty_node_despite_other_root_tasks(scene):
+    from herdr import node_dispatch_store as nd
+    workflow = scene.store.get_workflow('wf')
+    workflow['config']['nodes'].insert(1, {'id': 'independent', 'depends_on': []})
+    scene.store.save_workflow(workflow)
+    scene.store.save_task({'task_id': 'existing', 'workflow_id': 'wf', 'node': 'implementation',
+        'status': 'dispatched', 'execution_id': 'execution-1', 'run_id': 'existing-run'})
+    scene.ctrl.check_workflow_stage_advance('wf')
+    assert scene.ctrl.coordinator_queue.qsize() == 1
+    item = scene.ctrl.coordinator_queue.get_nowait()
+    assert item['node_id'] == 'independent'
+    assert nd.operation_for_node(scene.store.db_path, 'wf', 'independent') is not None
+    scene.ctrl._handle_coordinator_item(item)
+    assert len(scene.sent) == 1
+
+
+@pytest.mark.parametrize('reserved', [False, True])
+def test_direct_mode_retires_unsent_intake_and_allows_completed_root(scene, monkeypatch, reserved):
+    from herdr import node_dispatch_store as nd
+    nd.reconcile_workflow(scene.store.db_path, 'wf', now=1000)
+    op = nd.operation_for_node(scene.store.db_path, 'wf', 'implementation')
+    if reserved:
+        nd.claim(scene.store.db_path, op['id'], 'queued-owner', now=1000)
+        scene.ctrl.mark_stage_advance_queued('wf', 'implementation')
+    monkeypatch.setenv('HERDR_COORDINATOR_INTAKE', '0')
+    scene.store.save_task({'task_id': 'direct', 'workflow_id': 'wf', 'node': 'implementation',
+        'status': 'completed', 'stage_verdict': 'pass', 'execution_id': 'execution-1',
+        'run_id': 'direct-run', 'integration_mode': 'none'})
+    scene.clock[0] += 3 * 3600
+    scene.ctrl.check_workflow_stage_advance('wf')
+    assert nd.operation_for_node(scene.store.db_path, 'wf', 'implementation')['status'] == 'superseded'
+    assert scene.ctrl.coordinator_queue.qsize() == 1
+    assert scene.ctrl.coordinator_queue.get_nowait()['node_id'] == 'test'
+
+
+def test_registered_non_suffix_replacement_is_not_discovered_twice(scene):
+    from herdr import node_dispatch_store as nd
+    original = started_operation(scene)
+    register_task(scene, original)
+    nd.transport_finished(scene.store.db_path, original['id'], 'owner', reason='registered', now=1000)
+    scene.store.transition_task('work', 'failed', 'crash')
+    scene.store.transition_task('work', 'superseded', 'recover')
+    nd.reconcile_workflow(scene.store.db_path, 'wf', now=1000)
+    retry = nd.operation_for_node(scene.store.db_path, 'wf', 'implementation')
+    nd.claim(scene.store.db_path, retry['id'], 'retry', now=1000)
+    nd.start(scene.store.db_path, retry['id'], 'retry', now=1000)
+    task = register_task(scene, retry, 'replacement-work')
+    # Actual CLI registers supersedes before delivery and reverse-link success.
+    assert scene.store.get_task('work').get('superseded_by') is None
+    for _ in range(4):
+        nd.reconcile_workflow(scene.store.db_path, 'wf', now=1000)
+        scene.ctrl.check_workflow_stage_advance('wf')
+    assert nd.operation_for_node(scene.store.db_path, 'wf', 'implementation')['id'] == retry['id']
+    assert len(dispatch_operations(scene)) == 2
+    assert scene.ctrl.coordinator_queue.empty()
+    assert scene.store.get_task(task['task_id'])['supersedes'] == 'work'
+
+
+
+def test_direct_mode_reenable_creates_new_unsent_intake_epoch(scene, monkeypatch):
+    from herdr import node_dispatch_store as nd
+    nd.reconcile_workflow(scene.store.db_path, 'wf', now=1000)
+    original = nd.operation_for_node(scene.store.db_path, 'wf', 'implementation')
+    monkeypatch.setenv('HERDR_COORDINATOR_INTAKE', '0')
+    scene.ctrl.check_workflow_recovery('wf')
+    assert nd.operation_for_node(scene.store.db_path, 'wf', 'implementation')['status'] == 'superseded'
+    monkeypatch.setenv('HERDR_COORDINATOR_INTAKE', '1')
+    scene.ctrl.check_workflow_stage_advance('wf')
+    current = nd.operation_for_node(scene.store.db_path, 'wf', 'implementation')
+    assert current['id'] != original['id']
+    assert current['payload']['prior_operation_id'] == original['id']
+    scene.ctrl._handle_coordinator_item(scene.ctrl.coordinator_queue.get_nowait())
+    assert len(scene.sent) == 1
+
+
+def test_direct_mode_keeps_sent_unknown_intake_responsibility(scene, monkeypatch):
+    from herdr import node_dispatch_store as nd
+    scene.ctrl._handle_coordinator_item(scene.item)
+    original = nd.operation_for_node(scene.store.db_path, 'wf', 'implementation')
+    monkeypatch.setenv('HERDR_COORDINATOR_INTAKE', '0')
+    for _ in range(4):
+        scene.ctrl.check_workflow_stage_advance('wf')
+        scene.ctrl.check_workflow_recovery('wf')
+    scene.ctrl._handle_coordinator_item(scene.item)
+    current = nd.operation_for_node(scene.store.db_path, 'wf', 'implementation')
+    assert current['id'] == original['id']
+    assert current['status'] == 'awaiting_result'
+    assert current['detail']['deadline_at'] == original['detail']['deadline_at']
+    assert scene.ctrl.coordinator_queue.empty()
+    assert len(scene.sent) == 1
+
+
+
+def test_durable_arbitrary_name_lineage_preserves_latest_recovery_and_legacy_groups():
+    from herdr.direct_dispatch import lineage_redispatch_candidates
+    tasks = [{'task_id': 'old-r9', 'status': 'superseded', 'replacement_pending': True},
+             {'task_id': 'replacement-work', 'supersedes': 'old-r9', 'status': 'failed'}]
+    assert lineage_redispatch_candidates(tasks) == []
+    tasks[1].update(status='superseded', replacement_pending=True)
+    assert lineage_redispatch_candidates(tasks) == [tasks[1]]
+    tasks[1]['replacement_pending'] = False
+    assert lineage_redispatch_candidates(tasks) == []
+    tasks.append({'task_id': 'old-r10', 'status': 'dispatched'})
+    tasks[1]['replacement_pending'] = True
+    assert lineage_redispatch_candidates(tasks) == []
+
+
+@pytest.mark.parametrize('reverse_link', [False, True])
+def test_mixed_legacy_history_keeps_latest_explicit_recovery(scene, reverse_link):
+    from herdr.direct_dispatch import lineage_redispatch_candidates
+    from herdr import node_dispatch_store as nd
+    tasks = [{'task_id': name, 'workflow_id': 'wf', 'node': 'implementation',
+              'status': 'superseded', 'execution_id': 'execution-1', 'run_id': 'run-' + name,
+              'replacement_pending': True} for name in ['job', 'job-r2', 'job-r3', 'new-name']]
+    tasks[-1]['supersedes'] = 'job-r3'
+    if reverse_link:
+        tasks[1]['superseded_by'] = 'job-r3'
+        tasks[1]['supersedes'] = 'job'
+    assert lineage_redispatch_candidates(tasks) == [tasks[-1]]
+    for task in tasks:
+        scene.store.save_task(task)
+    nd.reconcile_workflow(scene.store.db_path, 'wf', now=1000)
+    op = nd.operation_for_node(scene.store.db_path, 'wf', 'implementation')
+    assert op['payload']['predecessors'] == [{'task_id': 'new-name', 'run_id': 'run-new-name'}]
+
+
+def test_direct_mode_does_not_bypass_manual_hold(scene, monkeypatch):
+    from herdr import node_dispatch_store as nd
+    nd.reconcile_workflow(scene.store.db_path, 'wf', now=1000)
+    op = nd.operation_for_node(scene.store.db_path, 'wf', 'implementation')
+    recovery_store.decide_operation(scene.store.db_path, op['id'], op['version'],
+        operator='human', action='hold', reason='wait for decision', until=4600, now=1000)
+    monkeypatch.setenv('HERDR_COORDINATOR_INTAKE', '0')
+    for _ in range(4):
+        scene.ctrl.check_workflow_stage_advance('wf')
+        scene.ctrl.check_workflow_recovery('wf')
+    current = nd.operation_for_node(scene.store.db_path, 'wf', 'implementation')
+    assert current['status'] == 'waiting'
+    assert current['next_due_at'] == 4600
+    assert scene.ctrl.coordinator_queue.empty()
+    scene.ctrl._handle_coordinator_item(scene.item)
+    assert scene.sent == []
+
+
+@pytest.mark.parametrize('reverse_link', [False, True])
+def test_arbitrary_rename_followed_by_legacy_suffix_keeps_latest(scene, reverse_link):
+    from herdr.direct_dispatch import lineage_redispatch_candidates
+    from herdr import node_dispatch_store as nd
+    tasks = [{'task_id': name, 'workflow_id': 'wf', 'node': 'implementation',
+              'status': 'superseded', 'execution_id': 'execution-1', 'run_id': 'run-' + name,
+              'replacement_pending': True} for name in ['job', 'job-r2', 'job-r3', 'new-name', 'new-name-r2']]
+    tasks[-2]['supersedes'] = 'job-r3'
+    if reverse_link:
+        tasks[-2]['superseded_by'] = 'new-name-r2'
+    assert lineage_redispatch_candidates(tasks) == [tasks[-1]]
+    for task in tasks:
+        scene.store.save_task(task)
+    nd.reconcile_workflow(scene.store.db_path, 'wf', now=1000)
+    assert nd.operation_for_node(scene.store.db_path, 'wf', 'implementation')['payload']['predecessors'] == [
+        {'task_id': 'new-name-r2', 'run_id': 'run-new-name-r2'}]
+
+
+def test_explicit_link_overrides_legacy_suffix_cycle():
+    from herdr.direct_dispatch import lineage_redispatch_candidates
+    tasks = [{'task_id': name, 'status': 'superseded', 'replacement_pending': True}
+             for name in ['job', 'job-r2', 'job-r3', 'job-r4', 'job-r5']]
+    tasks[2]['supersedes'] = 'job-r5'
+    from itertools import permutations
+    for ordering in permutations(tasks):
+        assert lineage_redispatch_candidates(ordering) == [tasks[2]]
+
+
+@pytest.mark.parametrize('reserved', [False, True])
+def test_pending_intake_adopts_arriving_legacy_task_before_send(scene, reserved):
+    from herdr import node_dispatch_store as nd
+    nd.reconcile_workflow(scene.store.db_path, 'wf', now=1000)
+    original = nd.operation_for_node(scene.store.db_path, 'wf', 'implementation')
+    if reserved:
+        nd.claim(scene.store.db_path, original['id'], 'owner', now=1000)
+    scene.store.save_task({'task_id': 'legacy', 'workflow_id': 'wf', 'node': 'implementation',
+        'status': 'dispatched', 'execution_id': 'execution-1', 'run_id': 'legacy-run',
+        'dispatch_role': 'worker', 'dispatch_round': 1})
+    if reserved:
+        assert nd.start(scene.store.db_path, original['id'], 'owner', now=1000) is None
+    else:
+        assert nd.claim(scene.store.db_path, original['id'], 'owner', now=1000) is None
+    assert nd.operation_for_node(scene.store.db_path, 'wf', 'implementation')['status'] == 'superseded'
+    scene.store.transition_task('legacy', 'failed', 'agent_process_crash')
+    assert scene.ctrl.recover_infra_failed_tasks('wf')
+    scene.ctrl.check_workflow_stage_advance('wf')
+    retry = nd.operation_for_node(scene.store.db_path, 'wf', 'implementation')
+    assert retry['id'] != original['id']
+    assert retry['payload']['predecessors'] == [{'task_id': 'legacy', 'run_id': 'legacy-run'}]
+    assert scene.ctrl.coordinator_queue.qsize() == 1
+
+
+
+def test_unsent_partial_legacy_inventory_keeps_remaining_responsibility(scene):
+    from herdr import node_dispatch_store as nd
+    workflow = scene.store.get_workflow('wf')
+    workflow['config']['nodes'][0]['required_task_ids'] = ['a', 'b']
+    scene.store.save_workflow(workflow)
+    nd.reconcile_workflow(scene.store.db_path, 'wf', now=1000)
+    original = nd.operation_for_node(scene.store.db_path, 'wf', 'implementation')
+    scene.store.save_task({'task_id': 'a', 'workflow_id': 'wf', 'node': 'implementation',
+        'status': 'dispatched', 'run_id': 'a-run', 'execution_id': 'execution-1'})
+    nd.reconcile_workflow(scene.store.db_path, 'wf', now=1000)
+    assert nd.operation_for_node(scene.store.db_path, 'wf', 'implementation')['status'] == 'pending'
+    scene.store.save_task({'task_id': 'b', 'workflow_id': 'wf', 'node': 'implementation',
+        'status': 'dispatched', 'run_id': 'b-run', 'execution_id': 'execution-1'})
+    nd.reconcile_workflow(scene.store.db_path, 'wf', now=1000)
+    latest = nd.operation_for_node(scene.store.db_path, 'wf', 'implementation')
+    assert latest['id'] == original['id']
+    assert latest['status'] == 'superseded'
+    assert latest['detail']['task_runs'] == {'a': 'a-run', 'b': 'b-run'}
+
+
+def test_explicit_chain_wins_equal_rank_legacy_leaf():
+    from itertools import permutations
+    from herdr.task_lineage import lineage_redispatch_candidates
+    tasks = [{'task_id': name, 'status': 'superseded', 'replacement_pending': True,
+              'created_at': 1000}
+             for name in ['job', 'job-r2', 'job-r3', 'job-r4', 'job-r5']]
+    tasks[0]['supersedes'] = 'job-r2'
+    tasks[1]['supersedes'] = 'job-r3'
+    for ordering in permutations(tasks):
+        assert lineage_redispatch_candidates(ordering) == [tasks[0]]
+
+
+@pytest.mark.parametrize('reverse', [False, True])
+def test_equal_weight_durable_branches_have_stable_tie_break(reverse):
+    from itertools import permutations
+    from herdr.task_lineage import lineage_redispatch_candidates
+    tasks = [{'task_id': name, 'status': 'superseded', 'replacement_pending': True,
+              'created_at': 1000} for name in ['job', 'job-r2', 'alias']]
+    if reverse:
+        tasks[0]['superseded_by'] = 'alias'
+    else:
+        tasks[2]['supersedes'] = 'job'
+    tasks[1]['supersedes'] = 'job'
+    # Equal graph rank, evidence depth and timestamp: ID is a stable fallback,
+    # not evidence that either concurrent branch happened later.
+    for ordering in permutations(tasks):
+        assert lineage_redispatch_candidates(ordering) == [tasks[1]]

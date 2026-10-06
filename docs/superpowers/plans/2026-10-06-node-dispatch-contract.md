@@ -35,3 +35,15 @@ Global Constraints: working_tree；不调用真实 Agent/模型，不修改生�
 ## P1补派修正验收（bcd5c5b后续）
 
 当前补派/DB专项83 passed；独立Spec/Standards通过。完整回归实际结果3644 passed、2 failed、157 subtests passed；两项既有短预算用例未改源码或断言，随后主控及两位独立评审原样复验均2 passed。npm反例在未改bcd5c5b隔离基线同样出现；Git首次仅能确定清单未知且安全保留，不能断言具体超时根因。保留首次失败，不改写为单次全量PASS。交付为更新同一PR，不合并/部署，真实Agent全流程未验证。
+
+## 存量、模式与显式替代关系
+
+首节点责任按节点任务发现；其他起点已有Task不阻止空节点建立待办。存量当前代次superseded且仍需替代的任务，即使没有首派历史，也建立第一条绑定前序Task/Run的派发责任。关闭总指挥接单时，只结束尚未发送的待办，释放旧阶段锁并移交直接调度；已发送未知交付继续核验，不借开关重发。重新启用时追加新epoch并保留退役记录。替代谱系合并持久supersedes关系与旧-rN命名兼容，登记后的替代Task不依赖反向superseded_by落盘即可阻止重复补派。
+
+模式移交仅适用于pending/running且未发送；人工hold及waiting_human不因切换模式失效。谱系同时处理显式、反向及传统隐式后继顺序，改名后再进入旧-rN命名仍选择最新后继，显式关系优先于有冲突的名称推断。
+
+谱系选择不依赖数据库返回顺序：冲突环只舍弃进入持久后继的推断边；同rank时优先持久关系深度，再登记时间，最后Task ID稳定决胜。Task ID不证明时间先后；纯持久闭环继续拒绝补派。未发送首派遇到已登记的当前执行库存时，仅库存完整且身份明确才移交责任；部分库存和人工hold保留原义务。
+
+## 授权恢复后的最终验证
+
+第三轮排列缺陷升级后，用户授权继续。修正弱边剪除与同权叶子决胜，保留所有升级及历史失败事实。当前全量pytest -q：3667 passed、157 subtests passed，567.04s，exit 0；六文件专项273 passed、44 subtests passed，33.47s；compileall、两CLI AST、diff检查exit 0。独立Spec169 passed/23subtests，Standards209 passed/35subtests，两者19200排列一致且临时SQLite反例正确。交付更新PR #156，不合并部署。当前main新增#157/#158，完整结果绑定PR分支，未宣称合并后或真实Agent全流程通过。
