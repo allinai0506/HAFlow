@@ -6007,3 +6007,25 @@ Nexus CoW integration分支复用Agent白名单、branch/worktree全部context�
 - `tests/test_recovery_entrypoints.py#test_controller_records_failure_even_without_coordinator_or_ready_join`：并行 review 缺席且无 coordinator 仍登记。
 - `tests/test_recovery_entrypoints.py#test_failed_candidate_never_finalizes_via_legacy_watcher`：修复前 RED 到达 integrate transport，修复后拒绝集成。
 - 最终计数和未验证项记录于本轮 `.omc/verify-1005fixbug.md`；不将旧测试通过作为本轮或线上验收证明。
+
+
+## 130. 阶段推进锁自愈必须覆盖自身谱系死亡（2026-10-06）
+
+### 问题背景
+在 `wf-nexusarchive-1005-01` 真实死锁排查中，`test` 门禁处于阻塞，fix-loop 作废了已派发的任务，但后续替代任务并未落地（`replacement_pending=True` 且 `superseded_by=None`，沦为僵尸义务）。当前节点发生回退，而其前驱依赖 `implementation` 保持 `completed`。旧的 `reconcile_stage_advance_states` 仅在前驱不完成时撤销 `'notified'` 状态锁，导致该节点被判定为前驱完好而一直保留 `'notified'` 锁。Controller 在每轮扫描中 `mark_stage_advance_queued` 均返回 `False`，导致该节点被永久静默跳过，工作流陷入死锁。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 阶段推进锁仅检查前驱是否回退 | 节点自身的任务谱系全部作废且无活跃替代任务时，节点同样已回退 | 推进锁自愈必须双向判定：不仅检查前驱完整性，在前驱完整时还必须检查自身节点名下是否还存在活跃任务 |
+| 活跃任务过滤器排除了被作废的任务头 | 判定节点是否需要重派发时，被作废的任务是替代者缺席的直接证据 | 引入 `node_tasks_for_latch`，保留全量任务（含 `superseded`），供重派发候选器分析谱系活性 |
+
+### 操作规范
+1. 在 `herdr/direct_dispatch.py` 中提供 `node_tasks_for_latch(tasks, workflow_id, node_id)` 获取节点名下的全量任务；
+2. 在 `services/herdr-controller.py` 的 `reconcile_stage_advance_states` 中：在前驱完成的分支下，通过 `lineage_redispatch_candidates` 检查自身谱系是否存在无活跃替代任务的作废头；若存在，以 `"own lineage fully superseded with no live task"` 为由主动释放 `'notified'` 锁；
+3. 补充 4 项单测回归用例，防范自愈不触发或误撤销存活任务的锁。
+
+### 验证命令 / 关联证据
+- `pytest -v tests/test_stage_advance_and_supersede.py` (29 passed, 9 subtests)
+- `pytest -q tests/test_stage_advance_and_supersede.py tests/test_direct_stage_dispatch.py tests/test_dispatch_*.py tests/test_controller_*.py` (185 passed, 35 subtests)

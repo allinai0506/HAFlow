@@ -1997,3 +1997,8 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 
 ## [2026-10-05] Added | 阻塞验收的持久恢复闭环
 - Added [[workflow-progress-recovery]]: 统一事实评估、同事务义务、租约执行、committed 后继与未知交付核验；工作树实现与部署验收分开记录。
+
+## [2026-10-06] fix | 阶段推进锁自身任务谱系死亡自愈与防静默跳过死锁
+- 背景：`wf-nexusarchive-1005-01` 中前驱节点完成但自身任务全被 supersede 且无活跃 replacement，旧推进锁只检查前驱回退，导致 `'notified'` 锁永久驻留、每轮扫描静默跳过。
+- 修复：`reconcile_stage_advance_states` 在前驱完成时检查自身节点谱系；若全量任务被作废且无活跃后继，主动撤销推进锁；`direct_dispatch.node_tasks_for_latch` 提供包含作废任务的全量视图。
+- 回归：`tests/test_stage_advance_and_supersede.py` 新增 4 项场景测试，调度与派发套件 185 项全部通过。
