@@ -5957,11 +5957,17 @@ def _teardown_output_guard(task):
         if (task.get("execution_mode") == "context" and task.get("integration_mode") == "none"
                 and path.is_dir() and not os.path.lexists(path / ".git")):
             return {"reason": ""}
-        root = run_bounded(["git", "-C", str(path), "rev-parse", "--show-toplevel"], timeout=5, output_limit=8192)
-        if root["status"] != "completed" or root["exit_code"] or Path(root["stdout"].strip()).resolve() != path.resolve():
-            return {"reason": "clone_git_inventory_unknown"}
-        result = run_bounded(["git", "-C", str(path), "status", "--porcelain", "--untracked-files=all"], timeout=5, output_limit=65536)
-        if result["status"] != "completed" or result["exit_code"]:
+        try:
+            root = run_bounded(["git", "-C", str(path), "rev-parse", "--show-toplevel"], timeout=5, output_limit=8192)
+            if root["status"] != "completed" or root["exit_code"] or Path(root["stdout"].strip()).resolve() != path.resolve():
+                return {"reason": "clone_git_inventory_unknown"}
+            # Collapse untracked directories before the output cap. Internal evidence
+            # is already excluded by diagnosis; tracked files remain individually
+            # visible, including tracked changes under an internal directory.
+            result = run_bounded(["git", "-C", str(path), "status", "--porcelain", "--untracked-files=normal"], timeout=5, output_limit=65536)
+            if result["status"] != "completed" or result["exit_code"]:
+                return {"reason": "clone_git_inventory_unknown"}
+        except (OSError, ValueError):
             return {"reason": "clone_git_inventory_unknown"}
         diagnosis = teardown_output_diagnosis(result["stdout"], task_id=task.get("task_id", ""))
         if diagnosis["reason"]:

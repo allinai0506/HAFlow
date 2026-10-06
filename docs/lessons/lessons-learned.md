@@ -6129,3 +6129,9 @@ if any(op['status'] not in {'resolved','superseded'}
 - Cause: per-gate CAS does not establish a consistent multi-gate authorization snapshot.
 - Resolution: validate all external artifacts first, then compare every receipt, task version, candidate episode, pinned config and active cohort together in one read-only SQL transaction.
 - Prevention: real kernel and PR regressions inject a newer blocked review, config changes and a new verifier head during later artifact validation.
+
+#### 2026-10-06: filter before bounded teardown inventory
+- Problem: 1800 internal test evidence files exhausted the raw Git inventory cap before infrastructure paths could be filtered.
+- Cause: untracked-file expansion preceded the existing diagnosis filter.
+- Resolution: summarize untracked directories in Git before applying the unchanged output cap; preserve individual tracked-change detection.
+- Prevention: real Git regressions distinguish large internal-only evidence, untracked user directories and tracked internal changes. Treat OS probe failures as unknown and reject teardown. Preserve historical documents with Run-bound checkpoints and reversible artifact relocation without rewriting verdicts or bypassing branch hooks.

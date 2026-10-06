@@ -2078,3 +2078,5 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 2026-10-06：补证业务blocked仍派wrapup与预算双读取漏口；共享业务前进guard覆盖五类入口，固定config用于launch容量，保留legacy非业务协议策略。
 
 - 2026-10-06: activation review found verifier-cohort freshness race; shared business gate now rechecks the entire SQL cohort after all artifact hashes, preserving legacy reuse.
+
+- 2026-10-06: close inventory uses Git untracked-directory summaries before bounded output; internal evidence cannot crowd out protected user output, and tracked internal changes remain protected.
