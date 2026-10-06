@@ -323,6 +323,25 @@ def lineage_redispatch_candidates(node_tasks):
     return candidates
 
 
+def node_tasks_for_latch(tasks, workflow_id, node_id):
+    """该 workflow 下某节点的**全部**任务（含 superseded），供闩的自愈判定使用。
+
+    与 :func:`herdr.scheduler.node_tasks`（只取活跃任务）相反：阶段推进闩要
+    回答的是"这个节点名下还有没有活着的任务"，被作废的谱系头正是活着的
+    替代者缺席的证据，必须一并纳入判定。
+    """
+    matched = []
+    for task in tasks or []:
+        if not isinstance(task, dict):
+            continue
+        if task.get("workflow_id") != workflow_id:
+            continue
+        if node_id not in (task.get("node"), task.get("stage")):
+            continue
+        matched.append(task)
+    return matched
+
+
 def initial_task_id(workflow_id, node_id, existing_ids):
     base = f"{workflow_id}-{node_id}-auto"
     if base not in existing_ids:

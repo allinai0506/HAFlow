@@ -3267,17 +3267,28 @@ def is_node_complete(workflow_id, node_id):
 
 
 def reconcile_stage_advance_states(workflow_id, workflow_cfg):
-    """Revoke 'notified' stage-state entries when their predecessor nodes
-    have regressed (e.g., a task failed or was superseded with no replacement).
+    """Revoke 'notified' stage-state entries when the node they guard has
+    regressed — either because a predecessor regressed, or because the node's
+    own task lineage died with no live member left to re-dispatch.
 
-    Without this, a stage whose predecessor regresses after the coordinator
-    was already notified would never be re-triggered — because
-    mark_stage_advance_queued returns False for 'notified' entries and the
-    node never appears in get_ready_nodes again.
+    Without this, a stage that regresses after the coordinator was already
+    notified would never be re-triggered — because mark_stage_advance_queued
+    returns False for 'notified' entries and the node never appears in
+    get_ready_nodes again.
+
+    Both regression shapes deadlock the sweep silently:
+
+    * predecessor regressed (upstream check below);
+    * the node's own tasks were all superseded while its predecessors stayed
+      complete — a fix-loop backflow whose promised replacements were never
+      created (zombie obligations). Real deadlock: wf-nexusarchive-1005-01,
+      where `test`/`review` kept their 'notified' lock forever and the
+      controller skipped both every sweep with no log line at all.
     """
     with lock:
         state = load_stage_state()
         changed = False
+        wf_tasks = None
 
         nodes_by_id = {
             n["id"]: n
@@ -3301,14 +3312,30 @@ def reconcile_stage_advance_states(workflow_id, workflow_cfg):
                 is_node_complete(workflow_id, dep)
                 for dep in deps
             )
-            if not predecessors_complete:
-                del state[key]
-                changed = True
-                print(
-                    f"[STAGE REVOKE] "
-                    f"workflow={workflow_id} node={node_id}: "
-                    "predecessors no longer complete, revoking 'notified' lock"
-                )
+            if predecessors_complete:
+                # Upstream is intact, so the node can still regress on its own:
+                # fix-loop may have superseded everything it dispatched without
+                # the replacements ever landing. Tasks load at most once per call.
+                if wf_tasks is None:
+                    wf_tasks = load_tasks()
+                if direct_dispatch_planner is not None and (
+                    direct_dispatch_planner.lineage_redispatch_candidates(
+                        direct_dispatch_planner.node_tasks_for_latch(wf_tasks, workflow_id, node_id)
+                    )
+                ):
+                    reason = "own lineage fully superseded with no live task"
+                else:
+                    continue
+            else:
+                reason = "predecessors no longer complete"
+
+            del state[key]
+            changed = True
+            print(
+                f"[STAGE REVOKE] "
+                f"workflow={workflow_id} node={node_id}: "
+                f"{reason}, revoking 'notified' lock"
+            )
 
         if changed:
             save_stage_state(state)
