@@ -62,6 +62,7 @@ def _task(task_id="t1", status="agent_done", stage="review",
 class SetVerdictTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="herdr-verdict-")
+        self.addCleanup(setattr, _ht, "TASKS_FILE", _ht.TASKS_FILE)
         _ht.TASKS_FILE = str(Path(self.tmp.name) / "tasks.json")
 
     def _registry(self):
@@ -164,6 +165,7 @@ class BuildFixLoopMessageTest(unittest.TestCase):
 class GateVerdictTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="herdr-gateverdict-")
+        self.addCleanup(setattr, _ctl, "TASKS_FILE", _ctl.TASKS_FILE)
         _ctl.TASKS_FILE = str(Path(self.tmp.name) / "tasks.json")
 
     def _write(self, tasks):
@@ -367,8 +369,21 @@ class StageAdvanceGateTest(unittest.TestCase):
                 "wf-1": workflow_entry or {"status": "in_progress"}
             }
         }))
-        _ctl.WORKFLOWS_FILE = str(workflows_file)
-        self.addCleanup(setattr, _ctl, "WORKFLOWS_FILE", _ctl.WORKFLOWS_FILE)
+        from herdr.state_store import get_state_store
+        self.store = get_state_store(Path(tmp.name) / "state.db")
+        entry = dict(workflow_entry or {"status": "running"})
+        if entry.get("status") == "in_progress":
+            entry["status"] = "running"
+        self.store.save_workflow(dict(entry, workflow_id="wf-1", config=self._workflow_cfg()))
+        for task in registry:
+            self.store.save_task(task)
+        self.registry = registry
+        store_patch = patch.object(_ctl, "_get_store", return_value=self.store)
+        store_patch.start()
+        self.addCleanup(store_patch.stop)
+        file_patch = patch.object(_ctl, "WORKFLOWS_FILE", str(workflows_file))
+        file_patch.start()
+        self.addCleanup(file_patch.stop)
 
         patchers = [
             patch.object(_ctl, "workflow_config_for",
@@ -394,6 +409,16 @@ class StageAdvanceGateTest(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
 
+    def _assert_waiting_obligation(self, task_id):
+        from herdr.recovery_store import list_operations
+        operations = list_operations(self.store.db_path, "wf-1")
+        self.assertEqual(len(operations), 1)
+        self.assertEqual(operations[0]["status"], "waiting_human")
+        self.assertEqual(operations[0]["payload"]["reason"], "candidate_unknown")
+        self.assertEqual(operations[0]["payload"]["task_ids"], [task_id])
+        self.assertEqual(self.store.get_task(task_id)["stage_verdict"], "blocked")
+        self.assertEqual(self.store.get_task(task_id)["status"], "cleaned")
+
     def test_blocked_gate_dependency_routes_to_fix_loop(self):
         fixloop_calls, advance_marks = [], []
         self._patch_env(
@@ -409,7 +434,8 @@ class StageAdvanceGateTest(unittest.TestCase):
 
         _ctl.check_workflow_stage_advance("wf-1")
 
-        self.assertEqual(fixloop_calls, ["review"])
+        self.assertEqual(fixloop_calls, [])
+        self._assert_waiting_obligation("rev1")
         self.assertEqual(advance_marks, [])
 
     def test_passing_gate_advances_normally(self):
@@ -449,7 +475,8 @@ class StageAdvanceGateTest(unittest.TestCase):
         ) as close_mock:
             _ctl.check_workflow_stage_advance("wf-1")
 
-        self.assertEqual(fixloop_calls, ["wrapup"])
+        self.assertEqual(fixloop_calls, [])
+        self._assert_waiting_obligation("wrap1")
         close_mock.assert_not_called()
         self.assertEqual(advance_marks, [])
 
@@ -577,6 +604,9 @@ class CloseWorkflowGateTest(unittest.TestCase):
         self.stage_state_file = root / "stage-state.json"
         self.clone_root = os.path.realpath(str(root / "clones"))
 
+        for name in ("TASKS_FILE", "WORKFLOWS_FILE", "STAGE_STATE_FILE",
+                     "EVIDENCE_ROOT", "CLONE_ROOT"):
+            self.addCleanup(setattr, _ht, name, getattr(_ht, name))
         _ht.TASKS_FILE = str(self.tasks_file)
         _ht.WORKFLOWS_FILE = str(self.workflows_file)
         _ht.STAGE_STATE_FILE = str(self.stage_state_file)

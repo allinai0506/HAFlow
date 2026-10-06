@@ -94,6 +94,12 @@ class SweepBlockedVerdictTest(unittest.TestCase):
         _prev_tasks_file = getattr(_ctrl, "TASKS_FILE", None)
         _ctrl.TASKS_FILE = str(Path(tmp.name) / "tasks.json")
         self.addCleanup(setattr, _ctrl, "TASKS_FILE", _prev_tasks_file)
+        from herdr.state_store import get_state_store
+        self.store = get_state_store(Path(tmp.name) / "state.db")
+        self.store.save_workflow({"workflow_id": "wf-1", "status": "running",
+                                  "config": _workflow_cfg()})
+        for task in registry:
+            self.store.save_task(task)
         self.fixloop_calls = []
         self.advance_marks = []
         self.notifies = []
@@ -102,6 +108,7 @@ class SweepBlockedVerdictTest(unittest.TestCase):
         self.addCleanup(setattr, _ctrl, "WORKFLOWS_FILE", _prev_workflows_file)
 
         patchers = [
+            patch.object(_ctrl, "_get_store", return_value=self.store),
             patch.object(_ctrl, "workflow_config_for",
                          return_value=_workflow_cfg()),
             patch.object(_ctrl, "project_for_workflow",
@@ -129,6 +136,14 @@ class SweepBlockedVerdictTest(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
 
+    def _blocked_operation(self):
+        from herdr.recovery_store import list_operations
+        operations = list_operations(self.store.db_path, "wf-1")
+        self.assertEqual(len(operations), 1)
+        self.assertEqual(operations[0]["status"], "waiting_human")
+        self.assertEqual(operations[0]["payload"]["reason"], "candidate_unknown")
+        return operations[0]
+
     def _plan_blocked_registry(self):
         return [
             _task("plan-e", "cleaned", "plan", stage_verdict="pass"),
@@ -146,20 +161,24 @@ class SweepBlockedVerdictTest(unittest.TestCase):
 
         self.assertEqual(self.advance_marks, [])
         self.assertEqual(self.fixloop_calls, [])
-        self.assertEqual(len(self.notifies), 1)
-        self.assertTrue(all(
-            t["status"] != "superseded" for t in registry))
-        episode = _ctrl._attention_store.get("wf-1:upstream_blocked:test")
-        self.assertIsNotNone(episode)
-        self.assertEqual(episode.get("reason"), "upstream_blocked")
+        operation = self._blocked_operation()
+        self.assertEqual(operation["payload"]["task_ids"], ["plan-c"])
+        for task in registry:
+            persisted = self.store.get_task(task["task_id"])
+            self.assertEqual(persisted["status"], task["status"])
+            self.assertEqual(persisted["stage_verdict"], task["stage_verdict"])
 
     def test_second_sweep_does_not_renotify(self):
         self._patch_env(self._plan_blocked_registry())
 
         _ctrl.check_workflow_stage_advance("wf-1")
+        first = self._blocked_operation()
         _ctrl.check_workflow_stage_advance("wf-1")
-
-        self.assertEqual(len(self.notifies), 1)
+        second = self._blocked_operation()
+        self.assertEqual(second["id"], first["id"])
+        self.assertEqual(second["version"], first["version"])
+        self.assertEqual(self.advance_marks, [])
+        self.assertEqual(self.store.get_task("plan-c")["stage_verdict"], "blocked")
 
     def test_voided_verdict_resumes_advance(self):
         registry = [

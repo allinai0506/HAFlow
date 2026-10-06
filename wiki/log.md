@@ -1994,3 +1994,6 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 2026-10-03 PR144合并前P1闭环：split回执在受管锁内持久，写失败保留已分配现场；runtime tab/anchor改为StateStore元数据+审计，配置读取overlay但snapshot字节/config_sha保持不可变。新增真实崩溃、持久失败及配置→装配→CAS回归。
 
 - 2026-10-03 FIX_BUG1002收尾边界：发现Nexus CoW继承外部Git指针，先独立化Git元数据再清理自有branch；外部worktree及其当前引用分支保留。记录CoW目录/Git隔离双重检查教训。
+
+## [2026-10-05] Added | 阻塞验收的持久恢复闭环
+- Added [[workflow-progress-recovery]]: 统一事实评估、同事务义务、租约执行、committed 后继与未知交付核验；工作树实现与部署验收分开记录。
