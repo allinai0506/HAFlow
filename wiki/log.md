@@ -2064,3 +2064,9 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 修复：`reconcile_stage_advance_states` 在前驱完成时检查自身节点谱系；若全量任务被作废且无活跃后继，主动撤销推进锁；`direct_dispatch.node_tasks_for_latch` 提供包含作废任务的全量视图。
 - 回归：`tests/test_stage_advance_and_supersede.py` 新增 4 项场景测试，调度与派发套件 185 项全部通过。
 
+## [2026-10-06] fix | ops 修复与门禁解耦冲突修复，测试隔离完善（PR #151 合并）
+- 背景：PR #151（ops 修复与门禁解耦）与已合并的 PR #152（持久恢复义务）冲突；#152 在 `api_controller_execute_action` 新增恢复义务守卫，提前拦截了 #151 专项测试中"缺少 expected_version"等路径，导致 scenario 6、7、17 及 controller actions 套件各 1 条断言失败。
+- 修复：对需要测试 force_pass 校验层而非恢复义务层的子用例，精确注入 `patch.object(c, "api_workflow_recovery", return_value={"operations": []})` 隔离，保留其余真实调用；不拓宽断言，不注释子用例。
+- 验证：专项套件 25/25 passed，全量回归 3535 passed（排除已知超时 HTTP 集成测试），PR 冲突状态 CLEAN/MERGEABLE，已合并入 main@0be44bd。
+- 教训：沉淀至 §132（跨 PR 测试隔离：新守卫逻辑提前拦截时需精确 mock 而非注释掉断言）。
+

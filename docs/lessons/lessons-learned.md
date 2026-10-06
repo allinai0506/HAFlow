@@ -6072,3 +6072,36 @@ Nexus CoW integration分支复用Agent白名单、branch/worktree全部context�
 - 全项目 Python 语法与字节码编译：`python3 -m compileall -q herdr services bin tests console`（clean compile）；
 - 代码格式检查：`git diff --check`（clean diff）。
 
+
+---
+
+## §132 跨 PR 测试隔离：新守卫逻辑提前拦截时需精确 mock 而非注释掉断言
+
+### 问题背景
+PR #151（ops 修复与门禁解耦）与 PR #152（持久恢复义务）先后合并入 main。将 #152 合并进 #151 分支后，`api_controller_execute_action` 新增了一条优先级最高的守卫：
+
+```python
+if any(op['status'] not in {'resolved','superseded'}
+       for op in api_workflow_recovery(wid)['operations']):
+    raise RuntimeError('该工作流存在持久恢复义务，请通过恢复待办裁决，禁止重复派发或绕过门禁')
+```
+
+该守卫在所有业务校验（含"缺少 expected_version"）之前执行。测试夹具写入 blocked 任务时，`save_task` 自动调用 `ensure_for_workflow` 注册恢复义务，导致 PR #151 中专项测试 scenario 6、7、17 及 `test_console_controller_actions_api.py` 中"缺少版本约束"子断言全部失败——错误信息变为恢复义务拦截而非版本校验拦截。
+
+### 经验教训
+1. **守卫顺序即测试路径**：生产代码的防御层按顺序执行，任何新的优先守卫都会改变测试命中的分支。合并入依赖 PR 后必须重新审视所有断言"命中哪一层校验"。
+2. **精确 mock，不要拓宽或删除断言**：正确修法是对"专门测试某一校验层"的子用例注入 `patch.object(c, "api_workflow_recovery", return_value={"operations": []})` 隔离上游守卫，而不是放宽断言（改为 `pytest.raises(RuntimeError)` 不检查消息）或注释掉子用例。保留下游守卫的真实断言——recovery 义务测试仍使用真实调用。
+3. **mock 粒度匹配子用例粒度**：scenario 17 含 3 个独立子断言（缺少版本/陈旧版本/匹配版本），每个子断言独立包裹 mock，避免 mock 状态溢出影响其他子步骤。
+4. **合并后立即重跑专项**：两个 PR 功能上互不冲突，但测试路径彼此干扰。合并后最先运行受影响的专项套件，确认失败原因，再决定是修改生产代码还是修复测试隔离。
+
+### 操作规范
+- 合并依赖 PR 后，立即运行受影响专项测试套件，不要只跑全量等出结果。
+- 新增优先守卫时，同步检查其他 PR/分支的测试是否有子用例依赖"守卫未命中"的路径，在 PR 描述中注明。
+- 测试中需要绕过某守卫时，优先 `patch.object` 精确注入，保留被测层的真实断言，禁止仅改 `pytest.raises` 不检查 message。
+
+### 验证命令 / 关联证据
+- PR #151 合并提交：`28725d6637df44f945d9639a25ab2eee6ce85d21`（fix(ops): merge main + test isolation）
+- 专项套件：`pytest -q tests/test_console_ops_repair_gate_separation.py`（25 passed）
+- Controller 动作套件：`pytest -q tests/test_console_controller_actions_api.py`（7 passed）
+- 全量回归（排除已知超时 HTTP 集成测试）：`pytest -q --deselect tests/test_console_ops_repair_gate_separation.py::test_scenario_9_http_route_integration_to_sqlite`（3535 passed, 1 deselected, 157 subtests passed in 551.75s）
+
