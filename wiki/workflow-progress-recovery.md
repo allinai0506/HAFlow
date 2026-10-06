@@ -62,3 +62,20 @@ Task 容量也必须读取固定 config；生产曾显示 SQL review预算6，�
 本页描述工作树实现，不能证明已部署或原 NexusArchive 业务测试已通过。发布需独立不可变 release、只读 shadow 对比、单执行者切换及授权后的现场复跑。源仓库 WIP 的归属与业务修复范围需由负责人确认。
 
 相关页面：[[dag-workflow-engine]]、[[task-lifecycle]]、[[index]]。
+
+## FACT：首节点派发到任务登记的持久责任（本地实现）
+
+默认总指挥接单首节点在 SQLite `workflow_recovery_operations` 登记 `node_dispatch`。Workflow 零 Task 时也能读取待办。队列发送前预占同库租约，队列项携带 operation/owner；内存队列丢失后通过租约恢复，不让 JSON queued 永久压住派发。配置或代次变化拒绝旧队列，缺少当前 obligation 不回落到无跟踪发送。
+
+外部发送前持久化 started 与固定 900 秒任务登记截止；Agent 命令成功只记录等待登记，不证明推进。CLI `launch --dispatch-operation-id` 把当前代次、Run 与 operation 绑定到真实 intent 和 Task，写事务拒绝伪造/跨代次登记。显式 required_task_ids 必须齐全；没有清单时只证明首个有效 Task 登记，不证明拆分完整、Worker 开始工作或工作流交付完成。同一已落实派发在原截止内可登记后续并行 Task，不能再发送该派发。
+
+超时/非零/发送后失联先核验，不盲目重发。没有任务登记证据到期转 waiting_human；缺 Pane/忙碌等发送前问题最多三次，有期限暂缓不被普通扫描提前结束。历史 notified 空节点以明确 migration origin 登记未知交付，首次迁移建立核验期限，不虚构历史发送时间。所有终态历史在扫描前过滤，防止容量上限挤掉当前义务。
+
+Evidence:
+- `herdr/node_dispatch.py#payload/result/wait_projection`
+- `herdr/node_dispatch_store.py#reconcile_workflow/claim/start/validate_task_registration`
+- `services/herdr-controller.py#reconcile_node_dispatches/check_workflow_stage_advance/_handle_coordinator_item`
+- `herdr/task_resources.py#begin_launch_intent`
+- `tests/test_node_dispatch_contract.py`
+
+UNKNOWN：本节是本地工作树实现。真实 Agent 接单、生产部署和从新建到交付的无人干预完成尚未验证。

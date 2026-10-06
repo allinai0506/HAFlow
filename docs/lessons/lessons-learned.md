@@ -5040,6 +5040,23 @@ python3.13 -m pytest -q tests/test_scheduler_dispatch_e2e.py tests/test_herdr_ta
 
 ---
 
+
+### 第 106 节补充：任务尚未创建时，派发本身也需要恢复契约
+
+#### 问题背景
+首节点总指挥调用返回 0 却没有创建 Task，Controller 写 notified 并输出 STAGE ADVANCED。零 Task 绕过 continuation 和阶段悬挂检查。独立审查又复现发送前丢失内存队列、旧配置回落无跟踪发送、旧代次 Task 阻止新义务、终态历史挤掉当前义务。
+
+#### 经验教训
+外部命令返回与实际任务登记是两种事实。防重复闩必须配合有期限的持久责任；给 notified 加 TTL 然后盲目重发会把停滞变成重复副作用。查询必须在 LIMIT 前排除终态历史，代次过滤不能在下一层被全量历史判断撤销。
+
+#### 操作规范
+在同库登记派发义务，入队预占租约、发送前写 started、实际 CLI intent 与 Task 绑定 operation/Run/配置代次；未知交付只核验，到期转明确人工决定。JSON queued 不是队列恢复权威。等待期限不能被轮询或日志延长，hold 必须尊重原到期时间。 修复损坏 Task 载荷时，四个登记身份字段必须一起核对原持久 intent；只检查 operation ID 会把缺失 Run/execution/intent 误认为权威空值。缺失字段可以从原证据补齐，已有非空冲突必须拒绝，不能用新请求自证旧身份。
+
+#### 验证命令与证据
+`pytest -q tests/test_node_dispatch_contract.py tests/test_direct_stage_dispatch.py`。新增测试保留真实 Controller/CLI/SQLite，仅替换外部 Pane/Worker/Agent 传输；受控时钟、独立连接竞争和丢队列/旧配置/千条终态历史均有行为断言。初始复现 2 failed；本地验证与线上 Agent/部署验收分开报告。
+
+---
+
 ## 107. 语法检查通过 ≠ 功能可用：控制台"全绿但按钮打不开"
 
 ### 问题背景

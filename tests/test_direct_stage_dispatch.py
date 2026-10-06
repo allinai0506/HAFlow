@@ -712,6 +712,23 @@ class CoordinatorIntakeTest(unittest.TestCase):
     def setUp(self):
         self.ctrl = _load_controller("ctrl_coordinator_intake_test")
         self.prompts = []
+        from herdr.state_store import get_state_store, reset_state_store
+        sandbox = tempfile.TemporaryDirectory(prefix="herdr-intake-contract-")
+        self.addCleanup(sandbox.cleanup)
+        root = Path(sandbox.name)
+        env = patch.dict(os.environ, {'HERDR_STATE_DB': str(root / 'state.db'),
+            'TASKS_FILE': str(root / 'tasks.json'), 'WORKFLOWS_FILE': str(root / 'workflows.json')})
+        env.start()
+        self.addCleanup(env.stop)
+        reset_state_store()
+        self.addCleanup(reset_state_store)
+        store = get_state_store(root / 'state.db')
+        store.save_workflow({'workflow_id': 'wf-1', 'status': 'running', 'execution_id': 'intake-test',
+                             'startup_ready': True, 'config': {'nodes': [self._intake_node()]}})
+        store_patch = patch.object(self.ctrl, '_get_store', return_value=store)
+        store_patch.start()
+        self.addCleanup(store_patch.stop)
+        self.ctrl.STAGE_STATE_FILE = str(root / 'stage-state.json')
 
     def _intake_node(self):
         return {
