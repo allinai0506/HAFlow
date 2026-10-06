@@ -47,3 +47,7 @@ Global Constraints: working_tree；不调用真实 Agent/模型，不修改生�
 ## 授权恢复后的最终验证
 
 第三轮排列缺陷升级后，用户授权继续。修正弱边剪除与同权叶子决胜，保留所有升级及历史失败事实。当前全量pytest -q：3667 passed、157 subtests passed，567.04s，exit 0；六文件专项273 passed、44 subtests passed，33.47s；compileall、两CLI AST、diff检查exit 0。独立Spec169 passed/23subtests，Standards209 passed/35subtests，两者19200排列一致且临时SQLite反例正确。交付更新PR #156，不合并部署。当前main新增#157/#158，完整结果绑定PR分支，未宣称合并后或真实Agent全流程通过。
+
+## main冲突收口
+
+推送后GitHub报告CONFLICTING，因此将origin/main9ac1d75合入当前分支；冲突仅lessons/wiki日志追加历史，完整保留两侧内容。整合全量3670 passed、1 failed、157subtests，559.10s，exit1；唯一Console间距失败在git archive main原样复现，与本轮派发改动无关，不改断言。独立集成Spec204pass/73sub、Standards244pass/108sub，均LGTM。另披露#158既有task_id排序note造成任意改名指纹变化的独立缺陷，未扩修。交付本轮修复和可合并PR分支，不宣称整个系统全绿或生产通过。

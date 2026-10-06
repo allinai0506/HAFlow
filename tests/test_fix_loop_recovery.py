@@ -85,6 +85,21 @@ class VerdictFingerprintTest(unittest.TestCase):
         self.assertFalse(is_repeat_verdict("", ""))
         self.assertFalse(is_repeat_verdict(None, fp))
 
+    def test_verdict_identity_survives_task_generation_change(self):
+        """同一结论被后继代任务(r4)重记录时,指纹必须与 r3 一致。
+
+        task_id 是易失的实例标识;若进入指纹,同语义 verdict 在每轮
+        重试后都会被判为"新 verdict",repeat 检测永远失配,fix-loop
+        对已终结 Task 反复下发并扣预算。
+        """
+        r3 = verdict_fingerprint(
+            "agent/b", [{"task_id": "test-01-r3", "note": "missing engine"}]
+        )
+        r4 = verdict_fingerprint(
+            "agent/b", [{"task_id": "test-01-r4", "note": "missing engine"}]
+        )
+        self.assertEqual(r3, r4)
+
 
 class InvalidationLatchTest(unittest.TestCase):
     def test_stale_completion_blocks(self):
@@ -292,6 +307,50 @@ class ControllerWiringTest(unittest.TestCase):
         self.assertTrue(item["exhausted"])
         self.assertEqual(item["escalation_reason"], "repeat_verdict")
 
+    def test_successor_generation_same_verdict_escalates_without_new_loop(self):
+        """后继代任务重记录同一结论:升级而非再开一轮扣预算。
+
+        现场缺陷:test-01-r3 终结后,test-01-r4 携带同一 blocked 结论,
+        因指纹含 task_id 被判为新 verdict,fix-loop 再次作废+扣预算,
+        如此反复。修复后必须走 repeat_verdict 升级路径。
+        """
+        self._write_stage({})
+        r3 = self._blocked_task(task_id="test-01-r3")
+        with self._patch.object(
+            self.ctl, "load_tasks", return_value=[r3]
+        ), self._patch.object(
+            self.ctl,
+            "invalidate_for_fix_loop",
+            return_value=["test-01-r3"],
+        ) as invalidated:
+            self.ctl.handle_fix_loop(
+                "wf-1", "test", self._gate(3), self._cfg()
+            )
+        invalidated.assert_called_once()
+        first = self.queue.get_nowait()
+        self.assertFalse(first.get("exhausted"))
+        self.assertEqual(first["loop_count"], 1)
+
+        r4 = self._blocked_task(task_id="test-01-r4")
+        with self._patch.object(
+            self.ctl, "load_tasks", return_value=[r4]
+        ), self._patch.object(
+            self.ctl, "invalidate_for_fix_loop"
+        ) as invalidated2:
+            self.ctl.handle_fix_loop(
+                "wf-1", "test", self._gate(3), self._cfg()
+            )
+        invalidated2.assert_not_called()
+        second = self.queue.get_nowait()
+        self.assertTrue(second["exhausted"])
+        self.assertEqual(second["escalation_reason"], "repeat_verdict")
+        state = __import__("json").loads(
+            (self.root / "stage-state.json").read_text()
+        )
+        self.assertEqual(
+            state["wf-1|fixloop|implementation"], 1, "预算不得被重复扣减"
+        )
+
     def test_new_verdict_after_exhaustion_reescalates(self):
         self._write_stage({"wf-1|fixloop|implementation": 3})
         blocked = self._blocked_task(note="missing engine")
@@ -411,6 +470,48 @@ class ControllerWiringTest(unittest.TestCase):
         )
         self.assertIsNone(
             self.ctl._attention_store.get("wf-1:fix_loop_exhausted:test")
+        )
+
+    def test_latch_release_keeps_last_verdict_fingerprint(self):
+        """闩释放保留最近一次 verdict 指纹。
+
+        释放时清计数是设计(新 redo 新预算),但清指纹会让后继任务
+        重记录的同一结论逃过 repeat 检测,再次进入循环扣预算。
+        """
+        import time as _time
+
+        latch_ts = _time.time() - 10
+        self._write_stage(
+            {
+                "wf-1|fixloop|implementation": 1,
+                "wf-1|fixloop|implementation|fp": "vfp-abc123",
+                "wf-1|fixloop|implementation|pending_redo": {
+                    "ts": latch_ts,
+                    "gate": "test",
+                },
+            }
+        )
+        fresh = [
+            {
+                "task_id": "t2",
+                "workflow_id": "wf-1",
+                "node": "implementation",
+                "stage": "implementation",
+                "status": "cleaned",
+                "updated_at": latch_ts + 100,
+            }
+        ]
+        self.assertFalse(
+            self.ctl._fix_loop_latch_blocks("wf-1", "implementation", fresh)
+        )
+        state = __import__("json").loads(
+            (self.root / "stage-state.json").read_text()
+        )
+        self.assertNotIn(
+            "wf-1|fixloop|implementation|pending_redo", state
+        )
+        self.assertEqual(
+            state.get("wf-1|fixloop|implementation|fp"), "vfp-abc123"
         )
 
     def test_busy_timeout_persists_for_redelivery(self):

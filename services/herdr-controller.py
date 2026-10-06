@@ -5093,9 +5093,10 @@ def _fix_loop_latch_targets(workflow_id, node_id):
 def _fix_loop_latch_blocks(workflow_id, node_id, tasks=None):
     """作废闩:被回流作废的节点在出现真正重做完成前挡住自动推进。
 
-    有重做完成时顺带清除闩、指纹、计数与升级记录,下一轮阻断重新计数。
-    Selective 闩(PR #110)只有全部目标谱系重做完成才解除;
-    被保留任务的任何更新都不会放行。
+    有重做完成时顺带清除闩、计数与升级记录,下一轮阻断重新计数;
+    指纹保留,后继任务重记录同一结论时按 repeat_verdict 升级而不是
+    用新预算再开一轮。Selective 闩(PR #110)只有全部目标谱系重做
+    完成才解除;被保留任务的任何更新都不会放行。
     """
     latch_ts, latch_gate = _fix_loop_latch_info(workflow_id, node_id)
     if not latch_ts:
@@ -5115,7 +5116,9 @@ def _fix_loop_latch_blocks(workflow_id, node_id, tasks=None):
             state.pop(
                 f"{workflow_id}|fixloop|{node_id}|pending_redo", None
             )
-            state.pop(f"{workflow_id}|fixloop|{node_id}|fp", None)
+            # |fp 故意保留:计数归零给 redo 新预算,但指纹必须留存,
+            # 否则后继代任务重记录同一结论会逃过 repeat 检测,
+            # fix-loop 对已终结 Task 反复下发并逐轮扣预算。
             state.pop(f"{workflow_id}|fixloop|{node_id}", None)
             save_stage_state(state)
         for _gate in _gates_to_clear:

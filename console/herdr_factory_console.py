@@ -3306,18 +3306,49 @@ button { cursor: pointer; }
   padding: 12px 16px;
   border-radius: var(--radius-md);
   display: none;
-  max-width: 420px;
+  max-width: 540px;
+  max-height: 80vh;
   z-index: 90;
   box-shadow: var(--shadow-md);
   font-size: 13px;
   line-height: 1.4;
   color: var(--text-primary);
+  user-select: text;
+  -webkit-user-select: text;
 }
 .toast.show {
   display: flex;
-  align-items: center;
-  gap: 8px;
+  align-items: flex-start;
+  gap: 10px;
   animation: slideUp .15s ease-out;
+}
+.toast.danger-toast {
+  border-color: var(--danger);
+  box-shadow: 0 4px 16px rgba(239, 68, 68, 0.2);
+}
+.toast-msg {
+  flex: 1;
+  word-break: break-word;
+  white-space: pre-wrap;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+.toast-close {
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 2px 6px;
+  font-size: 15px;
+  font-weight: bold;
+  line-height: 1;
+  border-radius: 4px;
+  flex-shrink: 0;
+  margin-left: 4px;
+}
+.toast-close:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
 }
 
 /* Typography & Helpers */
@@ -4912,11 +4943,49 @@ async function api(p,o={}){
   if(!r.ok||d.ok===false)throw new Error(d.error||('HTTP '+r.status));
   return d.data??d
 }
+function friendlyErrorChinese(raw){
+  const msg=String(raw||'').trim();
+  if(!msg)return '操作失败，请重试';
+  if(/pre-commit script failed/i.test(msg)||/husky.*failed/i.test(msg)){
+    if(/check-node-version-sources/i.test(msg)||/Node 版本/i.test(msg)){
+      return '代码提交前门禁失败：检测到 Node 版本声明不一致（或存在临时测试脚本干扰）。\n\n' + msg;
+    }
+    if(/ArchitectureTest/i.test(msg)||/architecture check failed/i.test(msg)){
+      return '代码提交前门禁失败：后端架构规范检查未通过。\n\n' + msg;
+    }
+    return '代码提交前预检门禁（Git Hooks）拦截：请检查提交内容是否符合仓库门禁约束。\n\n' + msg;
+  }
+  if(/git_index_lock/i.test(msg)||/Unable to create.*index\.lock/i.test(msg)){
+    return 'Git 索引被其他操作锁定中，请稍候几秒后重试。\n\n' + msg;
+  }
+  if(/merge conflict|conflict/i.test(msg)){
+    return '分支合并发生代码冲突，请核对分支基线。\n\n' + msg;
+  }
+  if(/命令超时|timeout/i.test(msg)){
+    return '操作执行超时，可能由于后台进程负载过高或正在编译。\n\n' + msg;
+  }
+  return msg;
+}
+let toastTimer=null;
 function toast(m,b=false){
   const e=document.getElementById('toast');
-  e.textContent=m;
-  e.className='toast show '+(b?'danger-text':'good-text');
-  setTimeout(()=>e.classList.remove('show'),4200)
+  if(!e)return;
+  if(toastTimer){clearTimeout(toastTimer);toastTimer=null;}
+  const displayMsg=b?friendlyErrorChinese(m):String(m||'');
+  e.className='toast show '+(b?'danger-text danger-toast':'good-text');
+  e.innerHTML='<div class="toast-msg">'+esc(displayMsg)+'</div>'+(b?'<button class="toast-close" title="点击关闭" onclick="closeToast()">×</button>':'');
+  if(b){
+    // 错误信息不自动消失，等待用户查看、复制并在点击后再消失
+    e.onclick=function(evt){if(evt.target===e)closeToast();};
+  }else{
+    e.onclick=null;
+    toastTimer=setTimeout(closeToast,4200);
+  }
+}
+function closeToast(){
+  const e=document.getElementById('toast');
+  if(e){e.classList.remove('show');e.className='toast';}
+  if(toastTimer){clearTimeout(toastTimer);toastTimer=null;}
 }
 function esc(s){
   return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))

@@ -52,17 +52,21 @@ def verdict_fingerprint(
 ) -> str:
     """Stable identity of one blocked verdict (order-independent).
 
-    ``affected_task_ids`` (PR #110) joins the fingerprint when present: the
-    same blocker note targeting task B and later targeting task C are two
-    different verdicts, not a repeat. ``None``/empty keeps the legacy digest
-    byte-identical, so workflows without selective replan are unaffected.
+    The digest carries semantic content only — suggested branch, blocker
+    notes and affected targets. ``task_id`` is deliberately excluded: it is
+    an ephemeral instance id, so the same verdict re-recorded by a successor
+    generation (``test-01-r4`` after ``test-01-r3``) must still compare
+    equal, or repeat detection never matches and the fix-loop re-fires
+    against terminated tasks, burning budget each round. Target sensitivity
+    stays with ``affected_task_ids`` (PR #110): the same note aimed at task
+    B and later at task C are two different verdicts. ``None``/empty keeps
+    the legacy digest, so workflows without selective replan are unaffected.
     """
     parts = [str(suggested_branch or "")]
     for blocker in sorted(
         (b or {} for b in (blockers or [])),
         key=lambda b: str(b.get("task_id") or ""),
     ):
-        parts.append(str(blocker.get("task_id") or ""))
         parts.append(str(blocker.get("note") or ""))
     ids = sorted({str(t).strip() for t in (affected_task_ids or []) if str(t).strip()})
     if ids:
