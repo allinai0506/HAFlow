@@ -5454,7 +5454,7 @@ def _validate_context_source_existence(
             if (
                 str(context.get("run_scope") or "") == str(context.get("workflow_id") or "")
                 and str(task_id) != str(context.get("task_id") or "")
-                and str(task_id) not in verified_handoff_tasks
+                and str(task_id) not in relevant_peer_tasks
             ):
                 return False
             if str(task.get("workflow_id") or "") != str(context.get("workflow_id") or ""):
@@ -5537,6 +5537,51 @@ def _validate_context_source_existence(
             if target_task_id not in endpoints:
                 continue
             verified_handoff_tasks.update(endpoints - {target_task_id})
+
+    # Dependency-closure peers are DB-grounded relevance (workflow DAG +
+    # latest task per depended node), mirroring the compiler's
+    # priority_task_ids. The compiler deliberately includes predecessor
+    # evidence in launch-boundary contexts; rejecting it here made every
+    # such compile fail ([WORKING_CONTEXT SKIPPED] ValueError) while the
+    # save path comment itself is "relevant-aware: current task +
+    # dependency closure + handoff peers". Forged/unlinked refs stay
+    # rejected: membership is recomputed from the workflow config and the
+    # task table, never taken from context content.
+    def _dependency_closure_peers() -> set[str]:
+        from .context_sources import _dependency_ids, _scope_task_for_node
+        peers: set[str] = set()
+        try:
+            target = task_record(str(context.get("task_id") or ""))
+            wf_row = conn.execute(
+                "SELECT * FROM workflows WHERE workflow_id = ?",
+                (str(context.get("workflow_id") or ""),),
+            ).fetchone()
+            if target is None or wf_row is None:
+                return peers
+            from .context_sources import _decode_workflow_row
+            workflow = _decode_workflow_row(wf_row)
+            rows = conn.execute(
+                "SELECT task_id, node, stage, created_at FROM tasks WHERE workflow_id = ?",
+                (str(context.get("workflow_id") or ""),),
+            ).fetchall()
+            candidates = [
+                {"task_id": r["task_id"], "node": r["node"],
+                 "stage": r["stage"], "created_at": r["created_at"]}
+                for r in rows
+            ]
+            for dependency_id in _dependency_ids(target, workflow):
+                dep = _scope_task_for_node(dependency_id, candidates)
+                if dep and dep.get("task_id"):
+                    peers.add(str(dep["task_id"]))
+        except Exception:
+            # Fail closed: on any auxiliary error keep the previous
+            # strict behavior (own task + verified handoffs only).
+            return set()
+        return peers
+
+    relevant_peer_tasks: set[str] = set(verified_handoff_tasks)
+    if str(context.get("run_scope") or "") == str(context.get("workflow_id") or ""):
+        relevant_peer_tasks.update(_dependency_closure_peers())
 
     def _task_derived_ref_valid(task: Mapping[str, Any], remainder: str) -> bool:
         parts = remainder.split(":")
@@ -5714,7 +5759,7 @@ def _validate_context_source_existence(
                 and (
                     str(context.get("run_scope") or "") != str(context.get("workflow_id") or "")
                     or str(referenced_task) == str(context.get("task_id") or "")
-                    or str(referenced_task) in verified_handoff_tasks
+                    or str(referenced_task) in relevant_peer_tasks
                 )
             ):
                 taskless_allowed_runs.add(str(task.get("run_id") or ""))

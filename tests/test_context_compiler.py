@@ -257,6 +257,29 @@ def test_storage_rejects_unlinked_legacy_sibling_finding(tmp_path: Path):
         state_db.save_working_context(forged, db_path=db)
 
 
+def test_launch_boundary_saves_dependency_closure_observation(tmp_path: Path):
+    # 启动边界（workflow scope）编译器会带入依赖闭包的前置任务证据；
+    # 校验器必须放行 DAG 关联的引用（与“拒绝未关联兄弟”对照）。
+    db = tmp_path / "state.db"
+    _seed_workflow(db)
+    upstream = _task("task-launch-dep-upstream", node="implementation")
+    upstream.pop("workflow_run_id", None)
+    upstream["execution_id"] = "wf-context"
+    downstream = _task("task-launch-dep-downstream", node="review")
+    downstream.pop("workflow_run_id", None)
+    downstream["execution_id"] = "wf-context"
+    upstream = _seed_task(db, upstream)
+    downstream = _seed_task(db, downstream)
+    observation = create_observation(
+        run_id=upstream["run_id"], task_id=upstream["task_id"], workflow_id="wf-context",
+        source_type="verification", source_ref="verification:launch-dep",
+        content="bounded", store=ObservationStore(db),
+    )
+    # review depends_on implementation：上游 observation 进相关集，存盘不得报 crosses run scope
+    context = _compile(db, downstream, "reviewer")
+    assert observation.observation_id in json.dumps(context.to_mapping(), ensure_ascii=False)
+
+
 def test_storage_rejects_unrelated_legacy_collaboration_scope_expansion(tmp_path: Path):
     db = tmp_path / "state.db"
     _seed_workflow(db)
