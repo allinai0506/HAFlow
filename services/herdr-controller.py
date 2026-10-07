@@ -27,6 +27,7 @@ try:
     from herdr.projects import (
         project_for_workflow,
         workflow_config_for,
+        ensure_coordinator_running,
     )
     from herdr.workflow import find_node, get_ready_nodes, is_workflow_completed
     from herdr.state_store import get_state_store
@@ -41,6 +42,7 @@ except ImportError:
     from herdr_projects import (
         project_for_workflow,
         workflow_config_for,
+        ensure_coordinator_running,
     )
     from herdr_workflow import find_node, get_ready_nodes, is_workflow_completed
     from herdr_state_store import get_state_store
@@ -5361,7 +5363,7 @@ def check_all_workflows_stage_advance():
 
 
 
-def coordinator_status(workflow_id=None):
+def coordinator_status(workflow_id=None, auto_heal=True):
     pane_id = coordinator_pane_for_workflow(
         workflow_id
     )
@@ -5393,6 +5395,31 @@ def coordinator_status(workflow_id=None):
             f"workflow={workflow_id} "
             f"pane={pane_id}: {e}"
         )
+        if auto_heal and workflow_id:
+            try:
+                proj = project_for_workflow(workflow_id) or {}
+                proj_id = proj.get("project_id")
+                if proj_id and ensure_coordinator_running(proj_id, pane_id):
+                    print(
+                        f"[COORDINATOR AUTO-HEAL SUCCESS] "
+                        f"workflow={workflow_id} "
+                        f"pane={pane_id}"
+                    )
+                    # Re-check status after starting
+                    try:
+                        out = subprocess.check_output(
+                            ["herdr", "agent", "get", pane_id],
+                            text=True,
+                        )
+                        return json.loads(out)["result"]["agent"].get("agent_status", "unknown")
+                    except Exception:
+                        pass
+            except Exception as heal_exc:
+                print(
+                    f"[COORDINATOR AUTO-HEAL FAILED] "
+                    f"workflow={workflow_id} "
+                    f"pane={pane_id}: {heal_exc}"
+                )
         return "unknown"
 
 
@@ -6957,9 +6984,23 @@ def _handle_coordinator_item(item):
                     return
         # 总指挥接单:新工作流首个节点(start -> first)默认交总指挥理解
         # 需求后再派发;HERDR_COORDINATOR_INTAKE=0 或非首节点保持直派。
+        # 当总指挥持续异常/停滞时(例如 Agent 无法拉活或反复失败), 回退到直派快路径避免死锁。
+        intake_key = f"{item['workflow_id']}:stage_advance:{target_node_id}"
+        intake_stalled = False
+        if item.get("stage") in (None, "", "start"):
+            ep = attention_get(intake_key) or {}
+            if int(ep.get("attempts") or 0) >= 2 and ep.get("reason") == "coordinator_stalled":
+                intake_stalled = True
+                print(
+                    f"[COORDINATOR INTAKE FALLBACK] "
+                    f"workflow={item['workflow_id']} "
+                    f"node={target_node_id}: coordinator stalled {ep.get('attempts')} times, falling back to direct dispatch"
+                )
+
         if (
             item.get("stage") in (None, "", "start")
             and coordinator_intake_enabled()
+            and not intake_stalled
         ):
             item = dict(item, intake=True)
             if _get_store().get_workflow(item['workflow_id']):
