@@ -8,6 +8,30 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-10-07] feat | 接入 ReviewBench 代码评审回归评测套件与独立评测工具链
+- 背景：
+  1. HAFlow 研发流中缺少标准化的代码评审有效性与回归评测手段，修改 Reviewer 提示词与上下文组装后无法系统衡量误报率与漏检率；
+  2. 需要对接业界规范 ReviewBench 官方评分体系（锁定 commit `e1cb1a0dad8105ebea45caa00c194eaf2d2e7b5d`），使用 HAFlow 真实历史缺陷沉淀回归案例。
+- 变更：
+  1. **`bin/herdr-review-bench`**：
+     - 提供独立 CLI 工具，支持 `run`（执行基线/候选评测）与 `compare`（横向比对两次评测）子命令；
+     - 严格隔离模型 API Key（环境变量读取）、案例隔离工作区与报告持久化目录。
+  2. **`herdr/review_benchmark.py`**：
+     - 实现 ReviewBench 契约校验（PR 元数据、行号跨度、发现项结构）；
+     - 实现临时 Git 环境隔离抽取、被测 Agent 驱动与解析、ReviewBench 官方 `npm run judge` 评分器调用封装；
+     - 明确区分审核完成/启动失败/超时/输出不可解析状态，绝不静默吞错；
+     - 生成结构化中文报告（`report.md`）与可机器读取结果（`results.json`），支持综合比对报告。
+  3. **`tests/fixtures/review_benchmark/`**：
+     - 收录 3 个真实已核验的 HAFlow 历史缺陷案例（PR #147、PR #158、PR #149），配齐真实 base/head SHA、已确认缺陷位置与测试回归证据。
+  4. **`tests/test_review_benchmark.py`**：
+     - 接入 14 项零模型依赖的自动化单元测试，覆盖契约格式、无效 SHA、案例遗漏、超时与格式异常处理。
+- 证据：
+  - `pytest -q tests/test_review_benchmark.py` 全部通过（14 passed in 0.22s）；
+  - `python3 -m compileall -q herdr bin/herdr-review-bench tests/test_review_benchmark.py` 零语法错误；
+  - `git diff --check` 零空白违规；
+  - 真实评测命令 `run` 与 `compare` 端到端执行通过。
+
+
 ## [2026-10-05] fix | 门禁放行失效边界闭环：快照版本绑定、回溯级联失效与跨端有效性判定统一（防旧豁免掩盖新阻塞）
 - 背景：
   1. 旧放行记录（`gate_overrides`）持久化时未绑定豁免时的任务版本快照与完整任务集合，读取时单任务豁免仅检查其他任务，节点级豁免直接放行全节点；

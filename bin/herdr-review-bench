@@ -1,0 +1,304 @@
+#!/usr/bin/env python3
+"""bin/herdr-review-bench
+
+Entry point for HAFlow code review benchmark execution, judging, and comparison.
+Supports:
+  bin/herdr-review-bench run --config <cfg.json> --output <dir>
+  bin/herdr-review-bench compare --before <dir> --after <dir> --output <file>
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import time
+
+HERDR_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(HERDR_ROOT))
+
+from herdr.review_benchmark import (
+    compare_benchmarks,
+    generate_chinese_report,
+    prepare_isolated_workspace,
+    pr_key,
+    run_agent_review,
+    validate_candidate_output,
+    validate_manifest,
+)
+
+
+REVIEWBENCH_LOCKED_SHA = "e1cb1a0dad8105ebea45caa00c194eaf2d2e7b5d"
+
+
+def find_or_setup_reviewbench(target_cache_dir: Optional[Path] = None) -> Path:
+    """Find local or cache ReviewBench repository locked at official SHA."""
+    cache_dir = target_cache_dir or Path(os.path.expanduser("~/.cache/review-bench-src"))
+    if not cache_dir.exists() or not (cache_dir / "package.json").exists():
+        cache_dir.parent.mkdir(parents=True, exist_ok=True)
+        print(f"Setting up ReviewBench at {cache_dir} (locked to {REVIEWBENCH_LOCKED_SHA})...")
+        subprocess.run(
+            ["git", "clone", "https://github.com/review-bench/ReviewBench", str(cache_dir)],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(cache_dir), "checkout", REVIEWBENCH_LOCKED_SHA],
+            check=True,
+        )
+        subprocess.run(
+            ["npm", "install"],
+            cwd=str(cache_dir),
+            check=True,
+        )
+    return cache_dir
+
+
+def cmd_run(args: argparse.Namespace) -> int:
+    config_path = Path(args.config).resolve()
+    if not config_path.exists():
+        print(f"Error: configuration file not found: {config_path}", file=sys.stderr)
+        return 1
+
+    with open(config_path, "r", encoding="utf-8") as f:
+        config = json.load(f)
+
+    output_dir = Path(args.output).resolve()
+    candidate_dir = output_dir / "candidate"
+    scoring_dir = output_dir / "scoring"
+    workspaces_dir = output_dir / "workspaces"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    candidate_dir.mkdir(parents=True, exist_ok=True)
+    scoring_dir.mkdir(parents=True, exist_ok=True)
+
+    manifest_path = Path(config.get("benchmark", {}).get("manifest", "tests/fixtures/review_benchmark/corpus/manifest.json"))
+    if not manifest_path.is_absolute():
+        manifest_path = (HERDR_ROOT / manifest_path).resolve()
+
+    golden_dir = Path(config.get("benchmark", {}).get("golden_dir", "tests/fixtures/review_benchmark/golden"))
+    if not golden_dir.is_absolute():
+        golden_dir = (HERDR_ROOT / golden_dir).resolve()
+
+    if not manifest_path.exists():
+        print(f"Error: manifest file not found: {manifest_path}", file=sys.stderr)
+        return 1
+
+    with open(manifest_path, "r", encoding="utf-8") as f:
+        manifest_entries = json.load(f)
+
+    validate_manifest(manifest_entries)
+
+    agent_name = config.get("agent", "agy")
+    system_prompt = config.get("review", {}).get("system_prompt")
+    timeout_sec = config.get("review", {}).get("timeout_seconds", 300)
+
+    print(f"=== Starting Review Benchmark Run: {config.get('name', 'benchmark')} ===")
+    print(f"Manifest PRs: {len(manifest_entries)}")
+    print(f"Agent: {agent_name}")
+    print(f"Output directory: {output_dir}")
+
+    t_start = time.time()
+    execution_summary = {
+        "total_planned": len(manifest_entries),
+        "completed": 0,
+        "failed": 0,
+        "failure_details": {},
+        "elapsed_seconds": 0.0,
+    }
+
+    # Step 1 & 2: Review execution in isolated workspaces
+    candidate_files = []
+    for idx, entry in enumerate(manifest_entries):
+        key = pr_key(entry["repo"], entry["pr_number"], entry["head"])
+        label = f"[{idx + 1}/{len(manifest_entries)}] {key}"
+        print(f"\n--> Preparing workspace for {label}")
+
+        ws_dir = workspaces_dir / key
+        try:
+            # Use current repo root as source if repo matches or clone
+            source_repo = str(HERDR_ROOT)
+            _, diff_content = prepare_isolated_workspace(
+                repo_url_or_path=source_repo,
+                base_sha=entry["base"],
+                head_sha=entry["head"],
+                target_dir=ws_dir,
+            )
+
+            print(f"    Invoking review Agent '{agent_name}'...")
+            candidate_output = run_agent_review(
+                agent_name=agent_name,
+                repo_dir=ws_dir,
+                pr_info=entry,
+                diff_content=diff_content,
+                timeout_seconds=timeout_sec,
+                system_prompt=system_prompt,
+            )
+
+            validate_candidate_output(candidate_output)
+
+            candidate_file = candidate_dir / f"{key}.json"
+            candidate_file.write_text(json.dumps(candidate_output, indent=2, ensure_ascii=False), encoding="utf-8")
+            candidate_files.append(candidate_file)
+            execution_summary["completed"] += 1
+            if "candidate_findings_map" not in execution_summary:
+                execution_summary["candidate_findings_map"] = {}
+            execution_summary["candidate_findings_map"][key] = candidate_output.get("findings", [])
+            print(f"    ✓ Review finished, findings: {len(candidate_output['findings'])}")
+
+        except Exception as exc:
+            execution_summary["failed"] += 1
+            execution_summary["failure_details"][key] = str(exc)
+            print(f"    ✗ Review execution FAILED: {exc}", file=sys.stderr)
+
+    execution_summary["elapsed_seconds"] = time.time() - t_start
+
+    # Step 3: Call ReviewBench official judge
+    results_file = scoring_dir / "results.json"
+    details_file = scoring_dir / "results.details.json"
+    judge_cfg = config.get("judge", {})
+    provider = judge_cfg.get("provider", "deepseek")
+    model_id = judge_cfg.get("model", "deepseek-v4-flash")
+    scorer_sha = judge_cfg.get("sha", REVIEWBENCH_LOCKED_SHA)
+
+    rb_dir = find_or_setup_reviewbench()
+
+    judge_cmd = [
+        "npm", "run", "judge", "--",
+        "--candidate", str(candidate_dir),
+        "--golden", str(golden_dir),
+        "--manifest", str(manifest_path),
+        "--provider", provider,
+        "--model", model_id,
+        "--output", str(results_file),
+        "--repo-dir", str(workspaces_dir),
+        "--concurrency", "1",
+        "--no-strict",
+    ]
+
+    print(f"\n--> Invoking official ReviewBench judge ({provider}/{model_id})...")
+    judge_success = False
+    try:
+        proc = subprocess.run(
+            judge_cmd,
+            cwd=str(rb_dir),
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+        if proc.returncode == 0:
+            judge_success = True
+            print("    ✓ ReviewBench judge scoring completed successfully.")
+        else:
+            print(f"    ⚠ ReviewBench judge exited with code {proc.returncode}")
+            print(f"    Judge stderr:\n{proc.stderr[:1000]}")
+    except Exception as exc:
+        print(f"    ⚠ Could not invoke ReviewBench judge: {exc}")
+
+    # Step 4: Load results and generate Chinese report
+    results_json = {}
+    details_json = []
+    if results_file.exists():
+        try:
+            results_json = json.loads(results_file.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    if details_file.exists():
+        try:
+            details_json = json.loads(details_file.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+
+    # If results.json wasn't created by judge (e.g. offline/dry-run or judge failure), provide fallback structure
+    if not results_json:
+        results_json = {
+            "metrics": {
+                "overall": {
+                    "grounded_recall": 0.0 if execution_summary["completed"] > 0 else None,
+                    "grounded_precision": 0.0 if execution_summary["completed"] > 0 else None,
+                    "augmented_recall": 0.0 if execution_summary["completed"] > 0 else None,
+                    "augmented_precision": 0.0 if execution_summary["completed"] > 0 else None,
+                }
+            },
+            "status": "judge_failed_or_offline" if not judge_success else "completed",
+        }
+        results_file.write_text(json.dumps(results_json, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    # Mirror results.json to top-level output for standard CLI contract
+    top_results_file = output_dir / "results.json"
+    top_results_file.write_text(json.dumps(results_json, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    # Build report.md
+    version_info = {
+        "code_sha": subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip() or "HEAD",
+        "agent_config": f"{agent_name} ({config_path.name})",
+        "judge_config": f"{provider}/{model_id}",
+        "scorer_sha": scorer_sha,
+        "cost_usd": "未知 (直连 API)",
+    }
+
+    report_md = generate_chinese_report(
+        results_json=results_json,
+        details_json=details_json,
+        execution_summary=execution_summary,
+        version_info=version_info,
+    )
+
+    report_file = output_dir / "report.md"
+    report_file.write_text(report_md, encoding="utf-8")
+    print(f"\n✓ Generated report: {report_file}")
+    print(f"✓ Generated results: {top_results_file}")
+
+    return 0
+
+
+def cmd_compare(args: argparse.Namespace) -> int:
+    before_dir = Path(args.before).resolve()
+    after_dir = Path(args.after).resolve()
+    output_file = Path(args.output).resolve() if args.output else None
+
+    if not before_dir.exists():
+        print(f"Error: before directory not found: {before_dir}", file=sys.stderr)
+        return 1
+    if not after_dir.exists():
+        print(f"Error: after directory not found: {after_dir}", file=sys.stderr)
+        return 1
+
+    try:
+        report = compare_benchmarks(before_dir, after_dir, output_file)
+        if output_file:
+            print(f"✓ Comparison report written to: {output_file}")
+        else:
+            print(report)
+        return 0
+    except Exception as exc:
+        print(f"Error comparing runs: {exc}", file=sys.stderr)
+        return 1
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="HAFlow Code Review Benchmark Tool")
+    subparsers = parser.add_subparsers(dest="subcommand", required=True)
+
+    # run command
+    run_parser = subparsers.add_parser("run", help="Run benchmark on historical cases")
+    run_parser.add_argument("--config", required=True, help="Path to run configuration JSON")
+    run_parser.add_argument("--output", required=True, help="Path to output directory")
+
+    # compare command
+    compare_parser = subparsers.add_parser("compare", help="Compare two benchmark runs")
+    compare_parser.add_argument("--before", required=True, help="Before benchmark directory")
+    compare_parser.add_argument("--after", required=True, help="After benchmark directory")
+    compare_parser.add_argument("--output", default=None, help="Output comparison markdown path")
+
+    args = parser.parse_args()
+    if args.subcommand == "run":
+        sys.exit(cmd_run(args))
+    elif args.subcommand == "compare":
+        sys.exit(cmd_compare(args))
+
+
+if __name__ == "__main__":
+    main()

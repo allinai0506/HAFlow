@@ -1,0 +1,17 @@
+{
+  "name": "baseline-rule",
+  "agent": "rule",
+  "judge": {
+    "provider": "deepseek",
+    "model": "deepseek-v4-flash",
+    "sha": "e1cb1a0dad8105ebea45caa00c194eaf2d2e7b5d"
+  },
+  "benchmark": {
+    "manifest": "tests/fixtures/review_benchmark/corpus/manifest.json",
+    "golden_dir": "tests/fixtures/review_benchmark/golden"
+  },
+  "review": {
+    "timeout_seconds": 300,
+    "system_prompt": "You are a senior code reviewer for HAFlow. Review the given git diff against the codebase and find defects, security flaws, and regression bugs. Return findings strictly in JSON format."
+  }
+}

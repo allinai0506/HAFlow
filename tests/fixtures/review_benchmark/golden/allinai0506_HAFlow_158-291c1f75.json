@@ -1,0 +1,32 @@
+{
+  "pr_key": "allinai0506_HAFlow_158-291c1f75",
+  "pr": {
+    "repo": "https://github.com/allinai0506/HAFlow",
+    "pr_number": 158,
+    "base": "91f084c30daaed8b4a65ee3a759c60639300b39c",
+    "head": "291c1f75987ff82f56ec9ac5dc598441f4461543"
+  },
+  "findings": [
+    {
+      "file": "herdr/fix_loop.py",
+      "start_line": 61,
+      "end_line": 66,
+      "message": "verdict_fingerprint 包含了易失的 task_id，当后继代任务（如 test-01-r4）重记录与上一代（test-01-r3）相同的 blocked 结论时，指纹会被判定为新 verdict，导致 repeat 检测失配；且 _fix_loop_latch_blocks 释放路径清除指纹，使同结论能无限次以新预算重启 fix-loop 并重复扣减预算。指纹计算应去除 task_id 维度，仅保留纯语义（branch+note+affected），并在释放路径保留指纹。",
+      "tp_fp": "tp",
+      "severity": "critical",
+      "category": "correctness",
+      "scope": "introduced-by-pr",
+      "difficulty": "hard",
+      "context_required": "diff-plus-related-files",
+      "tp_fp_justification": "已确认缺陷：PR #158 修复前（base SHA 91f084c30daaed8b4a65ee3a759c60639300b39c），herdr/fix_loop.py:65 遍历 blocker 时将 blocker.get('task_id') 加入指纹，后继代任务生成新 task_id 后指纹发生变化，跳过 repeat_verdict 升级分支，导致已终结 Task 被反复作废并扣减预算。修复提交 291c1f75987ff82f56ec9ac5dc598441f4461543 及 tests/test_fix_loop_recovery.py 中的 test_verdict_identity_survives_task_generation_change 与 test_successor_generation_same_verdict_escalates_without_new_loop 铁证证实。",
+      "severity_justification": "Critical: 导致预算被无限透支、死循环作废已完成任务。",
+      "category_justification": "Correctness: 指纹维度混入易失实例身份导致状态机逻辑判定失效。",
+      "producer": "human_curated",
+      "source": {
+        "type": "human_curated",
+        "alignment": "ground_truth",
+        "verified_commit": "291c1f75987ff82f56ec9ac5dc598441f4461543"
+      }
+    }
+  ]
+}
