@@ -245,6 +245,17 @@ class StateStore(ABC):
         """Record a durable completion observation."""
 
     @abstractmethod
+    def observe_blocker_marker(
+        self,
+        task_id: str,
+        *,
+        marker_present: bool,
+        event_payload: dict[str, Any] | None = None,
+        observed_at: float | None = None,
+    ) -> dict[str, Any]:
+        """Track durable BLOCKER marker presence; classify and record."""
+
+    @abstractmethod
     def get_completion_observation(
         self, task_id: str,
     ) -> dict[str, Any] | None:
@@ -801,6 +812,22 @@ class SQLiteStateStore(StateStore):
             task_id,
             marker_present=marker_present,
             agent_status=agent_status,
+            observed_at=observed_at,
+            db_path=self.db_path,
+        )
+
+    def observe_blocker_marker(
+        self,
+        task_id: str,
+        *,
+        marker_present: bool,
+        event_payload: dict[str, Any] | None = None,
+        observed_at: float | None = None,
+    ) -> dict[str, Any]:
+        return state_db.observe_blocker_marker(
+            task_id,
+            marker_present=marker_present,
+            event_payload=event_payload,
             observed_at=observed_at,
             db_path=self.db_path,
         )

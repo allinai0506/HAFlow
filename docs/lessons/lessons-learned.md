@@ -6212,7 +6212,24 @@ test-01-r5 的 acceptance2 曾拿前端 vitest 计数（4248）证明后端测�
 ### 验证命令 / 关联证据
 `pytest -q tests/test_evaluator_multi_runner_metrics.py tests/test_autosave_clone_wip.py tests/test_workflow_closed_cli_error.py tests/test_pane_transcript_archive.py` 全绿（前两类修复前三用例 RED 复现现场症状）；全量 3604 passed + 157 subtests，唯一失败 test_no_spacing_grid_violations 经 pristine main 复跑确认为 #157 引入的存量失败。
 
-## §136 人工恢复必须重建责任并绑定所确认的身份（2026-10-07）
+## §136 采样事件绑定当前版本号时，旧屏幕残留会自证新鲜；必须以持久在场周期鉴定内容的新旧（2026-10-07）
+
+### 问题背景
+wf-project-0929 审计复现 C03c：任务被 BLOCKER 观察置为 blocked 后，显式恢复（blocked→working，版本号递增）时 Pane 屏幕上的旧 BLOCKER 标记不消失；Sentinel 巡检把同一屏幕内容绑定任务**当前**版本号记成新的 `blocked_marker_observed`；Controller 的版本 CAS 无法识别它来自恢复前旧屏幕，任务再次 blocked。"拒绝旧事件"与"恢复仲裁队列"等既有修复都覆盖不了"旧屏幕被重新采样成新事件"这条路径。
+
+### 经验教训
+屏幕字节无法自证新旧，而"绑定采样时刻的任务版本"会让任何残留内容在下一次巡检自动获得新鲜版本号——版本匹配只能证明"样本在状态写入之后采集"，证明不了"内容产生于状态写入之后"。完成路径的 `observe_completion` 早已用持久行 + epoch 重置 + absent→present 周期解决同类问题（旧屏幕重放），但同构的 BLOCKER 路径没有移植该纪律，于是同一类缺陷换个入口复发。鉴别内容新旧的根本手段只有内容侧的时间序列证据：真实新事件之前必然存在一次"内容不可见"的观察，残留则永远连续在场。
+
+### 操作规范
+1. 观察类事件若绑定任务当前版本号，必须同时在持久层维护所观察内容的在场状态（如 completion_observations.blocker_present），事件与在场状态同事务落盘；采样判定以"先前样本是否已被消费 + 在场周期/版本事实"分层：未消费样本在版本失效时必须可重采样（否则元数据写即造成漏报）；版本仍有效时，无关屏幕刷新不得重复采样，否则 Controller 不可用期间每轮 record 会增长事件并持续跳过 pending steer。
+2. 已消费（阻塞已发生并恢复）之后，屏幕字节差异不能作为"新发生"的证据——恢复动作本身（如恢复指令注入 pane）就会改变字节，凭差异重采样会造成"恢复动作触发再阻塞"的循环；该象限只由"标记消失→再现"的完整巡检周期重新武装。极端的亚巡检间隔再耗尽是接受性漏检，由人工与停滞观察兜底，须在文档中如实声明。
+3. 内容读取失败（空捕获/rc!=0）不得当作"不可见"记录；决策逻辑收敛为核心纯函数（blocker_sample_action），外壳只做装配；同一观察对象的新增持久状态复用既有行/表结构（只增列、状态不变不写），不得另建平行事实源。
+4. 在场事实与业务动作的状态门槛分开：巡检已在 blocked/rework 读到的 absent 也必须保存；新阻塞样本仍只在 dispatched/working 产生。否则合法返工期间已经观察到标记消失，恢复后仍会被旧在场记录永久抑制。
+
+### 验证命令 / 关联证据
+合并前补充验证：同版本变屏去重、真实 steering 投递、rework/blocked 期间 absent 持久化共 5 条回归先失败，最小修复后 `pytest -q tests/test_blocker_resample_discipline.py` 26 passed。原两项 P1 另经真实 Controller CAS、SQLite 写后失败回滚及独立连接并发探针验证。基点 `cd6b95e` 与 PR `87106b2` 的真实 main() 对照确认 rework 漏记 absent 为本 PR 引入。此前四轮评审与 22 例记录属于旧版本；合并主干后的全量结果和最终独立评审以 PR #161 最新验证记录为准。变更：`herdr/state_db.py` observe_blocker_marker/_blocker_sample_consumed、`herdr/completion.py` blocker_sample_action、`services/herdr-sentinel.py` BLOCKER 分支与 pane_visible、`herdr/state_store.py`。
+
+## §137 人工恢复必须重建责任并绑定所确认的身份（2026-10-07）
 
 ### 问题背景
 取消补派与历史派发未登记是两种卡点。原通用“重试”无法改变取消范围，主图仍显示无阻塞；未完成启动记录又使安全重试长期不可用。

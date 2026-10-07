@@ -139,8 +139,10 @@ class SentinelBlockerDetectionTest(unittest.TestCase):
         return (HERDR_ROOT / "services" / "herdr-sentinel.py").read_text(encoding="utf-8")
 
     def _blocker_check(self, src):
+        # Presence is observed for every active status; the action branch
+        # below still limits new blocker samples to dispatched/working.
         return re.search(
-            r'status in \{"dispatched", "working"\} and _comp\.marker_present\(\s*'
+            r"blocker_present = _comp\.marker_present\(\s*"
             r"screen,\s*task_id,\s*_comp\.BLOCKER_MARKER_PREFIX",
             src,
         )
