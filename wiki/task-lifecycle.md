@@ -590,3 +590,16 @@ Evidence:
 - `tests/test_fix_bug1002_delivery.py`
 
 相关页面：[[agent-routing-and-pools]]、[[ops-center]]、[[preflight-and-health]]。
+
+## 工程交付检查与受限返工
+
+`FACT` 节点可声明delivery_contract并固定到Task。delivery-check与完成声明不同：检查回执覆盖授权产物、验证结果及仓库指纹；report-completion及消费声明拒绝缺失或陈旧通过，commit包含收编路径再次执行检查，实际hook保留。旧任务无契约时保持兼容，不宣称机器检查覆盖了仓库全部要求。
+
+`FACT` 普通completed→rework仍非法。delivery-repair仅在未提交、同Run/代次、原工位所有权、明确范围及三轮预算成立时由事务准入。持久发送回执可补齐中断后的delivered；未知发送不重发。详见[交付配置指南](../docs/guides/task-delivery-contract.md)及[[workflow-progress-recovery]]。
+
+Evidence:
+- `herdr/task_delivery.py#check_delivery`
+- `herdr/completion_receipt.py#report_completion`
+- `herdr/delivery_rework.py#repair_delivery`
+- `herdr/state_db.py#transition_task`
+- `tests/test_delivery_rework.py#test_full_repair_commit_integrate_then_operation_resolves`

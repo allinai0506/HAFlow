@@ -3205,6 +3205,9 @@ def _launch_task(args):
         if missing_business:
             raise ValueError('business acceptance unavailable: ' + ', '.join(missing_business))
         node = next((n for n in definition.get("nodes", []) if n.get("id") == node_id), {})
+        if node.get("delivery_contract") is not None:
+            from herdr.task_delivery import validate_contract
+            validate_contract(node["delivery_contract"])
         configured_mode = node.get("artifact_mode")
         requested_mode = getattr(args, "artifact_mode", None)
         if configured_mode and requested_mode and configured_mode != requested_mode:
@@ -3887,6 +3890,10 @@ def _launch_task(args):
         now,
     )
 
+    if node.get("delivery_contract") is not None:
+        from herdr.task_delivery import validate_contract
+        task["delivery_contract"] = validate_contract(node["delivery_contract"])
+
     if committed_recovery:
         task.update(recovery_predecessor=predecessor['task_id'],
                     expected_predecessor_version=predecessor['version'],
@@ -4092,6 +4099,10 @@ def dispatch_task(task_id, prompt):
             print(f"[PROMPT HYGIENE] task={task_id} sanitized_markers={_sanitized_n}")
     except (ImportError, AttributeError):
         pass
+
+    if not receipt_delivery:
+        from herdr.task_delivery import instruction_block
+        prompt += instruction_block(task)
 
     if receipt_delivery:
         from herdr.supervisor_delivery import deliver, DeliveryUnknown
@@ -4785,6 +4796,8 @@ def cmd_rework(args):
             store.update_task_metadata(args.task_id, {'rework_delivery':'delivered'})
             print(f"[REWORK] {args.task_id} pane={pane_reference(task)} reused")
             return result
+        from herdr.task_delivery import instruction_block
+        prompt += instruction_block(task)
         started_at = time.time()
         result = kernel.transition_task(
             args.task_id, "rework", reason=args.reason, source="herdr-task", store=store,
@@ -4982,6 +4995,15 @@ def commit_task(task_id, message=None):
         if staged_new.returncode:
             raise subprocess.CalledProcessError(staged_new.returncode, staged_new.args,
                                                 staged_new.stdout, staged_new.stderr)
+
+    if task.get("delivery_contract") is not None:
+        from herdr.task_delivery import check_delivery
+        delivery = check_delivery(task_id, store=_get_store())
+        if delivery['status'] != 'ready':
+            print('HERDR_COMMIT_RESULT=' + json.dumps({'task_id': task_id,
+                  'result': 'delivery_blocked' if delivery['status'] == 'blocked' else 'delivery_unknown',
+                  'delivery': delivery}, ensure_ascii=False))
+            sys.exit(7)
 
     # 必须确实存在 staged changes
     staged = subprocess.run(
@@ -8260,6 +8282,9 @@ def main():
     renew_cmd.add_argument("task_id")
     renew_cmd.add_argument("--operation-id", required=True)
 
+    delivery_check = sub.add_parser("delivery-check", help="Validate pinned repository delivery before completion")
+    delivery_check.add_argument("task_id")
+
     receipt_cmd = sub.add_parser("report-completion")
     receipt_cmd.add_argument("task_id")
     receipt_cmd.add_argument("--identity-file", required=True)
@@ -8905,6 +8930,17 @@ def main():
 
     elif args.command == "renew-completion":
         cmd_renew_completion(args)
+
+    elif args.command == "delivery-check":
+        from herdr.task_delivery import check_delivery
+        try:
+            result = check_delivery(args.task_id, store=_get_store())
+            print(json.dumps(result, ensure_ascii=False))
+            sys.exit(0 if result["status"] == "ready" else 3)
+        except (OSError, ValueError, KeyError) as exc:
+            from herdr.supervisor.state import redact_text
+            print(json.dumps({"status": "unknown", "error": redact_text(str(exc))}, ensure_ascii=False))
+            sys.exit(2)
 
     elif args.command == "report-completion":
         from herdr.completion_receipt import report_completion

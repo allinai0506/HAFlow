@@ -27,7 +27,7 @@ def successor_launch_command(cli, workflow, predecessor, successor_id, source, p
 def repair_coverage(operation, tasks):
     """Return uncovered original IDs; '<unknown>' denotes missing original scope."""
     payload, detail = operation.get('payload') or {}, operation.get('detail') or {}
-    expected = sorted(set(payload.get('task_ids' if payload.get('kind') == 'finalize' else 'affected_task_ids') or []))
+    expected = sorted(set(payload.get('task_ids' if payload.get('kind') in {'finalize', 'delivery'} else 'affected_task_ids') or []))
     if not expected:
         return ['<unknown>']
     mapping = detail.get('repair_map') or {}
@@ -122,7 +122,7 @@ def result_status(operation, workflow, tasks, acceptance=None):
         return 'waiting_human', {'reason': 'recovery_successor_failed'}
     if any(t.get('status') not in {'integrated', 'cleanup_ready', 'cleaned'} for t in targets):
         return None
-    if payload.get('kind') == 'finalize':
+    if payload.get('kind') in {'finalize', 'delivery'}:
         if all(not t.get('finalize_escalated') and t.get('status') in {'integrated', 'cleanup_ready', 'cleaned'} for t in targets):
             return 'resolved', {'reason': 'delivery_finalized'}
         return None

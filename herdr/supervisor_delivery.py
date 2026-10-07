@@ -76,10 +76,11 @@ def deliver(task, store, action, payload, prompt, send, *, boundary=lambda phase
                 nonlocal prepared
                 if prepare_task is not None:
                     prepare_task(conn)
-                extra = ''
+                from .task_delivery import instruction_block
+                extra = instruction_block(task)
                 if action in ('INITIAL', 'REWORK'):
                     from .task_checkpoint import checkpoint_instruction_block
-                    extra = checkpoint_instruction_block(dict(task, completion_epoch=contract['epoch']), contract['epoch'])
+                    extra += checkpoint_instruction_block(dict(task, completion_epoch=contract['epoch']), contract['epoch'])
                 body=dict(payload,completion_epoch=contract['epoch'],identity_path=contract['path'],
                     prompt=prompt+extra+'\nWhen finished, submit the structured completion declaration:\n'+shlex.quote(str(cli_path()))+' report-completion '+shlex.quote(task['task_id'])+' --identity-file '+shlex.quote(contract['path'])+'\nThe server credential expires after 24 hours; ask the controller to renew and deliver a new contract if expired.\nThis declaration does not certify acceptance, merge, or deployment.\n')
                 record(prefix+'_dispatch_prepared',body,conn)

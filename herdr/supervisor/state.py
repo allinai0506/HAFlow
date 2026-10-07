@@ -30,9 +30,9 @@ MAX_CRITERIA_ITEMS = 6
 # whole value is replaced by a redaction marker.
 _SECRET_PATTERNS = (
     re.compile(
-        r"(?i)\b(api[_-]?key|apikey|client[_-]?secret|access[_-]?token|"
+        r"(?i)[\"']?\b(api[_-]?key|apikey|client[_-]?secret|access[_-]?token|"
         r"refresh[_-]?token|private[_-]?key|secret|token|password|passwd|authorization)"
-        r"\b\s*[:=]\s*\S+"
+        r"\b[\"']?\s*[:=]\s*(?:\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|[^\s,;}\]]+)"
     ),
     re.compile(r"(?i)(?:\b|(?<=_))sk-[A-Za-z0-9_\-\*]{8,}"),
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),

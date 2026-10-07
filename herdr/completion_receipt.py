@@ -159,11 +159,17 @@ def completion_instruction(task_id, store):
 def report_completion(task_id, identity, artifacts, store):
     if not isinstance(artifacts, list) or len(artifacts) > 20:
         raise ValueError('Artifact references exceed budget')
+    from .task_delivery import require_delivery, receipt_is_current
+    initial = store.get_task(task_id) or {}
+    delivery = require_delivery(initial, store)
     observations = ObservationStore(store.db_path)
     conn = _connection(store)
     try:
         conn.execute('BEGIN IMMEDIATE')
         task = _task(conn, task_id)
+        if delivery is not None and (task.get('version') != initial.get('version') or task.get('run_id') != initial.get('run_id')
+                                     or not receipt_is_current(conn, task, delivery)):
+            raise ValueError('delivery task changed before completion')
         if not _workflow_open(conn, task):
             raise WorkflowClosedError(
                 f'Workflow is closed: {task.get("workflow_id") or "unknown"}')
@@ -203,11 +209,21 @@ def report_completion(task_id, identity, artifacts, store):
 
 
 def consume_completion_receipt(task_id, store, now=None):
+    from .task_delivery import require_delivery, receipt_is_current
+    initial = store.get_task(task_id) or {}
+    try:
+        delivery = require_delivery(initial, store)
+    except (ValueError, OSError):
+        return {'accepted': False, 'reason': 'delivery_not_ready'}
     observations = ObservationStore(store.db_path)
     conn = _connection(store)
     try:
         conn.execute('BEGIN IMMEDIATE')
         task = _task(conn, task_id)
+        if delivery is not None and (task.get('version') != initial.get('version') or task.get('run_id') != initial.get('run_id')
+                                     or not receipt_is_current(conn, task, delivery)):
+            conn.rollback()
+            return {'accepted': False, 'reason': 'delivery_not_ready'}
         row = conn.execute('SELECT receipt_id,payload FROM completion_receipts WHERE task_id=? AND run_id=? AND epoch=? AND consumed=0',
                            (task_id, task.get('run_id'), task.get('completion_epoch'))).fetchone()
         effective_now = _timestamp(time.time() if now is None else now)

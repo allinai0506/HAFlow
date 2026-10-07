@@ -4486,6 +4486,9 @@ def execute_workflow_recovery(operation, owner):
     store = _get_store()
     wid, payload = operation['workflow_id'], operation['payload']
     workflow, config, snapshot_tasks = recovery_store.read_snapshot(store.db_path, wid)
+    if payload.get('kind') == 'delivery':
+        from herdr.delivery_rework import execute_delivery_recovery
+        return execute_delivery_recovery(store, operation, owner)
     source = workflow.get('project_root')
     if not source:
         return 'waiting_human', {'reason': 'project_identity_unknown'}
@@ -5472,7 +5475,11 @@ COORDINATOR_DISCIPLINE = """
    你只做验收判定与必要修复指引。
 3. 只读核验优先: verify-baseline / verify-metrics / 读取产物文件;
    禁止整段读取 Pane 全文。
-4. 若你判断当前上下文已明显过大,先执行 /compact 再继续本事件。
+4. 派发前核对任务文件范围与实际仓库提交/CI要求。将必要工程产物及已授权检查
+   登记到节点 delivery_contract（version=1、allowed_paths、required_files、checks、auto_rework）；
+   范围冲突须先明确裁决，不用“只改代码”排除门禁必需的测试或复盘。
+   执行与配置说明见 docs/guides/task-delivery-contract.md；缺配置不宣称机器验收已覆盖仓库门禁。
+5. 若你判断当前上下文已明显过大,先执行 /compact 再继续本事件。
 """.strip()
 
 
@@ -6447,6 +6454,14 @@ def finalize_completed_task(task_id):
                     return {"retryable": True, "kind": "error", "rc": 3}
                 skip_integrate = True
                 task = get_task(task_id)
+            elif (result.returncode == 7 and commit_payload.get("task_id") == task_id
+                  and commit_payload.get("result") == "delivery_blocked"):
+                delivery = commit_payload.get("delivery") or {}
+                from herdr.task_delivery import record_delivery_failure
+                if record_delivery_failure(task, delivery, store=_get_store()):
+                    print(f"[DELIVERY BLOCKED] task={task_id} waiting for scoped repair")
+                    return {"retryable": False, "kind": "delivery", "rc": 7}
+                return {"retryable": False, "kind": "stale_delivery_result", "rc": 7}
             elif result.returncode == 4:
                 print(
                     f"[FINALIZE REFUSED] "
@@ -6472,6 +6487,7 @@ def finalize_completed_task(task_id):
                             "reason": "git_index_lock", "budgeted": False}
                 return {"retryable": True, "kind": "wait", "rc": 75}
             elif result.returncode != 0:
+                from herdr.task_delivery import diagnostic_tail
                 print(
                     f"[COMMIT ERROR] "
                     f"task={task_id} "
@@ -6483,10 +6499,7 @@ def finalize_completed_task(task_id):
                     "finalize_commit_error",
                     {
                         "rc": result.returncode,
-                        "detail": (
-                            result.stderr.strip()
-                            or result.stdout.strip()
-                        )[:500],
+                        "detail": diagnostic_tail(result.stdout, result.stderr),
                     },
                 )
                 return {"retryable": True, "kind": "error", "rc": result.returncode}

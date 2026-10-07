@@ -225,6 +225,21 @@ def _validate_step(conn, operation, now, step=None, detail=None):
     original_workflow = dict(workflow, candidate_sha=payload.get('candidate_sha'))
     if payload.get('identity') and recovery_identity(original_workflow, payload.get('facts') or []) != payload['identity']:
         raise ValueError('recovery generation changed before effect')
+    if payload.get('kind') == 'delivery':
+        by_id = {task['task_id']: task for task in tasks}
+        from .delivery_rework import repair_reason
+        from .recovery_successor import confirmed_rework_receipt
+        for fact in payload.get('facts') or []:
+            task = by_id.get(fact.get('task_id')) or {}
+            if (not task.get('run_id') or task.get('run_id') != fact.get('run_id')
+                    or task.get('execution_id') != workflow.get('execution_id')):
+                raise ValueError('delivery repair identity changed before effect')
+            request = (receipt.get('rework_requests') or {}).get(task.get('task_id'))
+            if confirmed_rework_receipt(conn, task, request):
+                continue
+            if repair_reason(task) or task.get('delivery_failure') != fact.get('delivery_failure'):
+                raise ValueError('delivery repair facts changed before effect')
+        return operation
     if payload.get('candidate_sha') != workflow.get('candidate_sha'):
         if receipt.get('action') == 'verify' and step in ('renew_owner', 'verify_receipts'):
             return operation
