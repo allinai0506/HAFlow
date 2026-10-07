@@ -1,0 +1,32 @@
+{
+  "pr_key": "allinai0506_HAFlow_108-7709da70",
+  "pr": {
+    "repo": "https://github.com/allinai0506/HAFlow",
+    "pr_number": 108,
+    "base": "3a8465903f1ba9cdbaf42992f10cc0ee5921b174",
+    "head": "7709da70c2c395806f3df8359899d229786ab843"
+  },
+  "findings": [
+    {
+      "file": "herdr/reverification.py",
+      "start_line": 657,
+      "end_line": 672,
+      "message": "decision_identity 和 plan_identity 仅使用 (workflow_id, from_sha, to_sha, verifier, policy_fingerprint) 构造唯一标识，未绑定具体候选冻结轮次（candidate_frozen_event_id / episode_id）。当工作流回滚（rollback）并重新冻结到曾经出现过的 SHA 时，查询会命中上一轮历史中已生成的旧复用事实，将未经当期实际验证的候选直接放行。",
+      "tp_fp": "tp",
+      "severity": "high",
+      "category": "architecture",
+      "scope": "introduced-by-pr",
+      "difficulty": "hard",
+      "context_required": "diff-plus-related-files",
+      "tp_fp_justification": "确凿缺陷：Commit 7709da70 在引入 Selective Reverification v1 时，重用事实查询未绑定 candidate episode。在随后的独立审查及修复提交 2879a1ff1e0fe0271e0f30cca74ff16379900774 中将其作为 P1-1 闭环，并在 tests/test_reverification_v1.py 中增加了回滚后陈旧复用事实不被采信的回归防线。",
+      "severity_justification": "High: 导致回滚后的工作流产生假阳性测试覆盖证明，使代码未经测试即可流转。",
+      "category_justification": "Architecture: 跨生命周期的事实泄漏与作用域未解耦，违背了事实权威性与轮次隔离原则。",
+      "producer": "human_curated",
+      "source": {
+        "type": "human_curated",
+        "alignment": "ground_truth",
+        "verified_commit": "2879a1ff1e0fe0271e0f30cca74ff16379900774"
+      }
+    }
+  ]
+}

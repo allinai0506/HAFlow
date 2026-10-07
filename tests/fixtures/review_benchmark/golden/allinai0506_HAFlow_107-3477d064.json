@@ -1,0 +1,32 @@
+{
+  "pr_key": "allinai0506_HAFlow_107-3477d064",
+  "pr": {
+    "repo": "https://github.com/allinai0506/HAFlow",
+    "pr_number": 107,
+    "base": "a957663a38f48a399668c4d6b970f0d82ab885cf",
+    "head": "3477d064da8541451840959c419b94146b185053"
+  },
+  "findings": [
+    {
+      "file": "herdr/scheduler.py",
+      "start_line": 152,
+      "end_line": 165,
+      "message": "extract_task_candidate_sha 仅从任务属性中提取 candidate_sha 或 baseline_commit，未将派发声明（claim）与克隆现场客观证据（evidence/baseline_commit）分离并验证一致性。当派发声称验证候选 A 但克隆实际基于 B 时，未校验的声明仍会被当作有效覆盖证据，导致汇合门禁在 claim/evidence 不一致时产生错误判定。",
+      "tp_fp": "tp",
+      "severity": "high",
+      "category": "correctness",
+      "scope": "introduced-by-pr",
+      "difficulty": "hard",
+      "context_required": "diff-plus-related-files",
+      "tp_fp_justification": "确凿缺陷：Commit 3477d064 在实现 Critical-Path Scheduler v1 时引入此逻辑。在随后的审查与修复提交 e6408e7df2b3313b01dd8c3f7fb4caf5567d9f1b 中，明确指出 candidate_sha 无法证明 Agent 实际验证的版本，并在 scheduler.py 中拆分 extract_task_candidate_claim 与 extract_task_verified_sha，且在 evaluate_join_gate 中新增 claim_evidence_mismatch 校验拦截。",
+      "severity_justification": "High: 破坏了流水线汇合门禁对候选版本证明的真实性保证，导致未经验证的代码可能被放行合入。",
+      "category_justification": "Correctness: 混淆了声明与客观证据，缺失一致性校验逻辑。",
+      "producer": "human_curated",
+      "source": {
+        "type": "human_curated",
+        "alignment": "ground_truth",
+        "verified_commit": "e6408e7df2b3313b01dd8c3f7fb4caf5567d9f1b"
+      }
+    }
+  ]
+}

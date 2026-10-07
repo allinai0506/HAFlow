@@ -1,0 +1,32 @@
+{
+  "pr_key": "allinai0506_HAFlow_110-2b9f2177",
+  "pr": {
+    "repo": "https://github.com/allinai0506/HAFlow",
+    "pr_number": 110,
+    "base": "79d54abda0a453dfe555f52f1957c501c98e2ca3",
+    "head": "2b9f2177fa15446e8d5fd5bce0d95d82e41342ac"
+  },
+  "findings": [
+    {
+      "file": "herdr/fix_loop.py",
+      "start_line": 48,
+      "end_line": 68,
+      "message": "verdict_fingerprint 函数在计算受阻结论的稳定指纹时，将易失的实例标识 blocker.get('task_id') 混入哈希输入。当后继代任务（如 test-01-r4）重记录与上一代相同的 blocked 结论时，因 task_id 变化导致指纹失配，绕过了 is_repeat_verdict 升级逻辑，导致已终结 Task 被反复作废并透支循环预算。",
+      "tp_fp": "tp",
+      "severity": "critical",
+      "category": "correctness",
+      "scope": "introduced-by-pr",
+      "difficulty": "medium",
+      "context_required": "diff-plus-related-files",
+      "tp_fp_justification": "确凿缺陷：Commit 2b9f2177 引入的选择性返工在 herdr/fix_loop.py:65 遍历 blocker 时加入了 task_id。该缺陷在 PR #158（修复提交 291c1f75987ff82f56ec9ac5dc598441f4461543）中被定位并根除，tests/test_fix_loop_recovery.py 中的用例证明了 task_id 导致指纹跨代失配并引发死循环扣减预算的问题。",
+      "severity_justification": "Critical: 导致重试预算失控、死循环作废已完成任务并耗尽工作流资源。",
+      "category_justification": "Correctness: 实例身份与语义指纹混淆，破坏了状态机幂等与收敛保证。",
+      "producer": "human_curated",
+      "source": {
+        "type": "human_curated",
+        "alignment": "ground_truth",
+        "verified_commit": "291c1f75987ff82f56ec9ac5dc598441f4461543"
+      }
+    }
+  ]
+}
