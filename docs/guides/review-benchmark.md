@@ -40,7 +40,7 @@ ReviewBench 评分器自动克隆并锁定到 `~/.cache/review-bench-src`：
 git clone https://github.com/review-bench/ReviewBench ~/.cache/review-bench-src
 cd ~/.cache/review-bench-src
 git checkout e1cb1a0dad8105ebea45caa00c194eaf2d2e7b5d
-npm install
+npm ci
 ```
 
 ---

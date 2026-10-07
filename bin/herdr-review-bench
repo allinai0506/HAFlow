@@ -23,6 +23,7 @@ sys.path.insert(0, str(HERDR_ROOT))
 
 from herdr.review_benchmark import (
     compare_benchmarks,
+    extract_and_validate_metrics,
     generate_chinese_report,
     prepare_isolated_workspace,
     pr_key,
@@ -39,36 +40,56 @@ def find_or_setup_reviewbench(
     target_cache_dir: Optional[Path] = None,
     target_sha: str = REVIEWBENCH_LOCKED_SHA,
 ) -> Tuple[Path, str]:
-    """Find local or cache ReviewBench repository and ensure it is checked out at target SHA.
+    """Find local or cache ReviewBench repository and ensure it is checked out at target SHA
 
+    with strictly reproducible dependencies locked via `npm ci`.
+    Sequence:
+    1. Clone if missing
+    2. Checkout target_sha strictly
+    3. Verify HEAD == target_sha
+    4. Run `npm ci` so dependencies match the locked revision
     Returns (cache_dir, verified_actual_sha).
     """
     cache_dir = target_cache_dir or Path(os.path.expanduser("~/.cache/review-bench-src"))
-    if not cache_dir.exists() or not (cache_dir / "package.json").exists():
+    if not cache_dir.exists() or not (cache_dir / ".git").exists():
         cache_dir.parent.mkdir(parents=True, exist_ok=True)
-        print(f"Setting up ReviewBench at {cache_dir} (locked to {target_sha})...")
+        print(f"Cloning ReviewBench into {cache_dir}...")
         subprocess.run(
             ["git", "clone", "https://github.com/review-bench/ReviewBench", str(cache_dir)],
             check=True,
         )
-        subprocess.run(
-            ["npm", "install"],
-            cwd=str(cache_dir),
-            check=True,
-        )
 
-    # Always verify and checkout the exact target SHA on every run
+    # 1. Fetch to ensure target_sha is present locally
     subprocess.run(
         ["git", "-C", str(cache_dir), "checkout", "-f", target_sha],
         check=True,
         capture_output=True,
     )
+
+    # 2. Verify HEAD matches target_sha
     actual_sha = subprocess.run(
         ["git", "-C", str(cache_dir), "rev-parse", "HEAD"],
         capture_output=True,
         text=True,
         check=True,
     ).stdout.strip()
+    if not actual_sha.startswith(target_sha) and not target_sha.startswith(actual_sha):
+        raise RuntimeError(
+            f"ReviewBench repo HEAD ({actual_sha}) does not match expected target SHA ({target_sha})"
+        )
+
+    # 3. Ensure exact dependencies locked via npm ci (or npm install if no package-lock)
+    node_modules = cache_dir / "node_modules"
+    pkg_lock = cache_dir / "package-lock.json"
+    install_cmd = ["npm", "ci"] if pkg_lock.exists() else ["npm", "install"]
+    print(f"Ensuring locked dependencies via {' '.join(install_cmd)} at {actual_sha[:8]}...")
+    subprocess.run(
+        install_cmd,
+        cwd=str(cache_dir),
+        check=True,
+        capture_output=True,
+    )
+
     return cache_dir, actual_sha
 
 
@@ -222,25 +243,41 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(f"    ⚠ Could not invoke ReviewBench judge: {exc}")
 
     # Step 4: Load results and generate Chinese report
-    results_json = {}
+    results_raw = {}
     details_json = []
+    results_parse_ok = False
     if results_file.exists():
         try:
-            results_json = json.loads(results_file.read_text(encoding="utf-8"))
+            results_raw = json.loads(results_file.read_text(encoding="utf-8"))
+            results_parse_ok = True
         except Exception:
-            pass
+            results_parse_ok = False
     if details_file.exists():
         try:
             details_json = json.loads(details_file.read_text(encoding="utf-8"))
         except Exception:
             pass
 
-    # Integrity invariant: If judge failed, NEVER fabricate 0.0 scores or pretend success.
-    if not judge_success or not results_json:
+    # Extract & validate metrics
+    extracted_metrics = extract_and_validate_metrics(results_raw) if results_parse_ok else None
+
+    # Strict run success criteria:
+    # 1. subprocess returned 0
+    # 2. results file exists and is parseable
+    # 3. required metrics are complete and valid
+    is_run_successful = bool(judge_success and results_parse_ok and extracted_metrics is not None)
+
+    if is_run_successful:
+        # Wrap results with explicit status="completed" and normalized metrics for downstream compare
+        results_json = dict(results_raw)
+        results_json["status"] = "completed"
+        results_json["metrics"] = extracted_metrics
+        results_file.write_text(json.dumps(results_json, indent=2, ensure_ascii=False), encoding="utf-8")
+    else:
         results_json = {
             "metrics": None,
             "status": "judge_failed",
-            "error": "ReviewBench official judge did not exit successfully. Check provider/model credentials.",
+            "error": "ReviewBench official judge did not complete successfully or produce valid required metrics.",
         }
         results_file.write_text(json.dumps(results_json, indent=2, ensure_ascii=False), encoding="utf-8")
 
@@ -269,8 +306,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     print(f"\n✓ Generated report: {report_file}")
     print(f"✓ Generated results: {top_results_file}")
 
-    if not judge_success:
-        print("\n✗ Benchmark run FAILED at scoring step (judge failed). Metrics were not fabricated.", file=sys.stderr)
+    if not is_run_successful:
+        print("\n✗ Benchmark run FAILED at scoring step (judge failed, results missing, or metrics incomplete).", file=sys.stderr)
         return 1
 
     return 0

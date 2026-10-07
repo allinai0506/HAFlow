@@ -78,6 +78,51 @@ def validate_manifest(manifest: List[Dict[str, Any]]) -> None:
                 raise ValueError(f"manifest[{idx}] missing '{key}'")
 
 
+def extract_and_validate_metrics(results_data: Any) -> Optional[Dict[str, Any]]:
+    """Extract and validate metrics from ReviewBench output.
+
+    Official ReviewBench judge outputs an aggregate object with `macro` and `micro`
+    stratified metrics containing `overall`: { grounded_precision, grounded_recall, ... }.
+    Alternatively, wrapped outputs may have a top-level `metrics` object.
+
+    Returns the normalized metrics dict:
+      {
+        "overall": MetricSet,
+        "macro": StratifiedMetrics,
+        "micro": StratifiedMetrics,
+        ...
+      }
+    or None if valid required metrics cannot be found.
+    """
+    if not isinstance(results_data, dict):
+        return None
+
+    # Case 1: Standard ReviewBench output has `macro.overall` and `micro.overall`
+    macro = results_data.get("macro")
+    micro = results_data.get("micro")
+    if isinstance(macro, dict) and isinstance(macro.get("overall"), dict):
+        overall = macro["overall"]
+        req_keys = ("grounded_precision", "grounded_recall", "augmented_precision", "augmented_recall")
+        if all(k in overall for k in req_keys):
+            return {
+                "overall": overall,
+                "macro": macro,
+                "micro": micro,
+                "by_severity": macro.get("by_severity", {}),
+                "by_category": macro.get("by_category", {}),
+            }
+
+    # Case 2: Top-level `metrics.overall` structure
+    metrics = results_data.get("metrics")
+    if isinstance(metrics, dict) and isinstance(metrics.get("overall"), dict):
+        overall = metrics["overall"]
+        req_keys = ("grounded_precision", "grounded_recall", "augmented_precision", "augmented_recall")
+        if all(k in overall for k in req_keys):
+            return metrics
+
+    return None
+
+
 def prepare_isolated_workspace(
     repo_url_or_path: str,
     base_sha: str,
@@ -326,7 +371,8 @@ def generate_chinese_report(
     failure_details = execution_summary.get("failure_details", {})
     elapsed_seconds = execution_summary.get("elapsed_seconds", 0.0)
 
-    metrics_obj = results_json.get("metrics") if isinstance(results_json, dict) else None
+    # Extract normalized metrics from results_json
+    metrics_obj = extract_and_validate_metrics(results_json)
     overall_metrics = metrics_obj.get("overall", {}) if isinstance(metrics_obj, dict) else {}
     gp = overall_metrics.get("grounded_precision")
     gr = overall_metrics.get("grounded_recall")
@@ -454,19 +500,22 @@ def compare_benchmarks(
         after_res = json.load(f)
 
     # Integrity guard: do NOT allow comparing runs that failed judging or emitted unverified metrics
-    if before_res.get("status") != "completed" or before_res.get("metrics") is None:
+    b_metrics = extract_and_validate_metrics(before_res)
+    a_metrics = extract_and_validate_metrics(after_res)
+
+    if before_res.get("status") != "completed" or b_metrics is None:
         raise ValueError(
             f"Cannot compare: baseline run at {before_dir} did not complete judging successfully "
             f"(status: {before_res.get('status')}). Refusing to fabricate benchmark regressions."
         )
-    if after_res.get("status") != "completed" or after_res.get("metrics") is None:
+    if after_res.get("status") != "completed" or a_metrics is None:
         raise ValueError(
             f"Cannot compare: candidate run at {after_dir} did not complete judging successfully "
             f"(status: {after_res.get('status')}). Refusing to fabricate benchmark regressions."
         )
 
-    b_overall = before_res.get("metrics", {}).get("overall", {})
-    a_overall = after_res.get("metrics", {}).get("overall", {})
+    b_overall = b_metrics.get("overall", {})
+    a_overall = a_metrics.get("overall", {})
 
     def _diff_stat(key: str) -> Tuple[str, str, str]:
         bv = b_overall.get(key)

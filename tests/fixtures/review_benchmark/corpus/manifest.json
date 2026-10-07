@@ -6,7 +6,7 @@
     "base": "a957663a38f48a399668c4d6b970f0d82ab885cf",
     "head": "3477d064da8541451840959c419b94146b185053",
     "title": "feat: Critical-Path Scheduler v1 (PR #107)",
-    "body": "引入关键路径调度器（Critical-Path Scheduler v1），在门禁汇合节点（join gate）评估依赖分支的完成状态与候选版本绑定。然而最初实现中 extract_task_candidate_sha 仅根据任务记录的字段提取，未分离派发声明（claim）与克隆现场证据（baseline_commit），导致未经真实克隆验证的候选声明也能通过汇合门禁。",
+    "body": "Introduce Critical-Path Scheduler v1: parallelize test and review stages on implementation completion bound to an immutable candidate SHA, and evaluate multi-dependency join gates deterministically.",
     "nwo": "allinai0506/HAFlow",
     "language": "Python"
   },
@@ -17,7 +17,7 @@
     "base": "79d54abda0a453dfe555f52f1957c501c98e2ca3",
     "head": "2b9f2177fa15446e8d5fd5bce0d95d82e41342ac",
     "title": "feat: Selective Replan v1 (explicit task-targeted fix-loop)",
-    "body": "实现选择性返工机制（Selective Replan v1），支持门禁 blocked 之后针对被点名的实现任务进行局部重做。然而在 fix-loop 指纹实现中，verdict_fingerprint 将易失的 task_id 纳入指纹哈希计算，导致后继代任务生成新 task_id 后无法命中 repeat verdict，破坏了重复判定与重试预算控制契约。",
+    "body": "Introduce Selective Replan v1: narrow fix-loop invalidations to implementation tasks explicitly targeted by structured gate blockers instead of re-running the entire implementation stage.",
     "nwo": "allinai0506/HAFlow",
     "language": "Python"
   },
@@ -28,7 +28,7 @@
     "base": "3a8465903f1ba9cdbaf42992f10cc0ee5921b174",
     "head": "7709da70c2c395806f3df8359899d229786ab843",
     "title": "feat: Selective Reverification v1 (PR #108)",
-    "body": "实现选择性重新验证机制（Selective Reverification v1），非影响范围变更无需重新执行全部验证器。但决策身份与计划身份（decision_identity / plan_identity）最初仅绑定了 (from_sha, to_sha)，缺少候选冻结事件唯一标识（candidate_frozen_event_id / episode_id），导致工作流回滚到旧 SHA 时复活了过期轮次的复用事实，产生未经证明的候选被放行的漏洞。",
+    "body": "Introduce Selective Reverification v1: allow verifiers to reuse previous passing verification results across candidate revisions when changes are outside the declared impact scope.",
     "nwo": "allinai0506/HAFlow",
     "language": "Python"
   }

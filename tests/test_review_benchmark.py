@@ -24,6 +24,7 @@ sys.path.insert(0, str(HERDR_ROOT))
 
 from herdr.review_benchmark import (
     compare_benchmarks,
+    extract_and_validate_metrics,
     extract_findings_from_response,
     generate_chinese_report,
     pr_key,
@@ -278,6 +279,68 @@ class TestReportAndComparison(unittest.TestCase):
             with self.assertRaises(ValueError) as ctx:
                 compare_benchmarks(before_dir, after_dir)
             self.assertIn("Refusing to fabricate benchmark regressions", str(ctx.exception))
+
+    def test_extract_and_validate_metrics_official_and_wrapped(self):
+        # Official ReviewBench output structure (macro / micro)
+        official_data = {
+            "macro": {
+                "overall": {
+                    "grounded_precision": 0.8,
+                    "grounded_recall": 0.9,
+                    "augmented_precision": 0.85,
+                    "augmented_recall": 0.95,
+                }
+            },
+            "micro": {"overall": {}},
+            "per_pr": [],
+        }
+        extracted = extract_and_validate_metrics(official_data)
+        self.assertIsNotNone(extracted)
+        self.assertEqual(extracted["overall"]["grounded_recall"], 0.9)
+
+        # Wrapped output structure (metrics.overall)
+        wrapped_data = {
+            "metrics": {
+                "overall": {
+                    "grounded_precision": 0.8,
+                    "grounded_recall": 0.9,
+                    "augmented_precision": 0.85,
+                    "augmented_recall": 0.95,
+                }
+            }
+        }
+        extracted_w = extract_and_validate_metrics(wrapped_data)
+        self.assertIsNotNone(extracted_w)
+        self.assertEqual(extracted_w["overall"]["grounded_recall"], 0.9)
+
+        # Invalid structure missing required keys
+        invalid_data = {"macro": {"overall": {"grounded_recall": 0.9}}}
+        self.assertIsNone(extract_and_validate_metrics(invalid_data))
+
+    def test_manifest_is_neutral_and_blind(self):
+        manifest_path = HERDR_ROOT / "tests/fixtures/review_benchmark/corpus/manifest.json"
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            manifest = json.load(f)
+
+        # Verify no defect answers, specific bug identifiers or consequence leaks in body
+        forbidden_leak_terms = [
+            "extract_task_candidate_sha",
+            "verdict_fingerprint",
+            "decision_identity",
+            "plan_identity",
+            "然而",
+            "漏洞",
+            "透支循环预算",
+            "破坏了重复判定",
+        ]
+        for entry in manifest:
+            body = entry.get("body", "")
+            for term in forbidden_leak_terms:
+                self.assertNotIn(
+                    term,
+                    body,
+                    f"Manifest PR #{entry.get('pr_number')} leaks defect answer '{term}' in body",
+                )
 
 
 class TestWorkspaceIsolation(unittest.TestCase):

@@ -8,6 +8,22 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-10-07] fix | 强化代码评审评测真实性（Benchmark Integrity Round 2）：中性 PR 描述防止盲测答案泄漏、ReviewBench 官方契约兼容与依赖锁定、打分成功显式门禁
+- 背景：
+  1. Manifest 中的 PR `body` 包含了具体缺陷函数名与答案性后果，由于审查 Agent 可见 `body`，破坏了盲测（Blind Test）原则；
+  2. 官方 ReviewBench 成功输出采用 `macro` / `micro` 层级，本身不含顶层 `status`，导致 `compare_benchmarks` 拦截了官方合法评测结果；
+  3. 子进程使用 `--no-strict` 时即使没有输出有效 metrics 也可能 exit 0，原判定逻辑存在假阳性成功漏洞；
+  4. 评分器仓库克隆时先在默认分支执行 `npm install` 再切 SHA，导致依赖与锁定代码不一致。
+- 变更：
+  1. **盲测中性化**：Manifest 中的 `body` 重构为中性功能描述，移除具体错误标识符（如 `extract_task_candidate_sha`、`verdict_fingerprint`、`decision_identity`）与缺陷答案；
+  2. **契约自适应提取与显式 status 包装**：`extract_and_validate_metrics` 兼容 ReviewBench 官方 `macro.overall` 与包装格式；评测成功后由 HAFlow wrapper 显式注入 `status: "completed"` 供 `compare` 校验；
+  3. **严格判定成功条件**：`cmd_run` 成功要求 `subprocess == 0 AND results exists AND parseable AND metrics complete`，任一失败一律标记 `judge_failed` 并返回非零退出码（exit 1）；
+  4. **依赖锁定一致性**：`find_or_setup_reviewbench` 调整执行顺序为 `checkout <target_sha>` → 校验 HEAD → 执行 `npm ci`，确保代码与 node_modules 严格源自同一版本。
+- 证据：
+  - `pytest -q tests/test_review_benchmark.py` 18 passed in 0.66s（含中性描述无泄漏测试与官方结构指标提取测试）；
+  - `python3 -m compileall -q herdr bin/herdr-review-bench tests/test_review_benchmark.py` clean；
+  - `git diff --check` clean。
+
 ## [2026-10-07] fix | 修复代码评审评测真实性（Benchmark Integrity）：Golden 缺陷引入语义对齐、工作区物理纯净隔离、评分器 SHA 校验与失败状态阻断
 - 背景：
   1. 初版评测集错误地使用了修复提交作为 head SHA，导致将修好代码当缺陷才能得分的逻辑反转；
