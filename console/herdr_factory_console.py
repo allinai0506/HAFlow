@@ -587,9 +587,9 @@ def _blocked_verdict_tasks(wid):
         if t.get('stage_verdict')=='blocked']
 
 def api_workflow_recovery(wid):
-    from herdr import recovery_store
+    from herdr import dispatch_recovery
     db_path=Path(os.environ['HERDR_STATE_DB']) if os.environ.get('HERDR_STATE_DB') else Path(TASKS_FILE).parent/'state.db'
-    return {'workflow_id':wid,'operations':recovery_store.list_operations(db_path,wid)}
+    return {'workflow_id':wid,'operations':dispatch_recovery.list_operations(db_path,wid)}
 
 def api_workflow_recovery_decide(b):
     from herdr import recovery_store
@@ -599,6 +599,15 @@ def api_workflow_recovery_decide(b):
     operations=recovery_store.list_operations(db_path,wid)
     if not any(op['id']==operation_id for op in operations):
         raise RuntimeError('恢复义务不属于该工作流')
+    if b.get('action') == 'check_resources':
+        from herdr import dispatch_recovery
+        return dispatch_recovery.check_resources(db_path,wid,operation_id,int(b['expected_version']),
+            b.get('operator'),b.get('reason'),candidate_sha=b.get('candidate_sha'))
+    if b.get('action') in {'restore_scope', 'confirm_absent'}:
+        from herdr import dispatch_recovery
+        return dispatch_recovery.decide(db_path,wid,operation_id,int(b['expected_version']),
+            b.get('operator'),b['action'],b.get('reason'),confirmed_absent=b.get('confirmed_absent'),
+            candidate_sha=b.get('candidate_sha'),confirmed_lineage=b.get('confirmed_lineage'),lineage_snapshot=b.get('lineage_snapshot'))
     result=recovery_store.decide_operation(db_path,operation_id,int(b['expected_version']),
         str(b.get('operator') or ''),str(b.get('action') or ''),str(b.get('reason') or ''),
         time.time(),until=b.get('until'))
@@ -3319,7 +3328,7 @@ button { cursor: pointer; }
 .toast.show {
   display: flex;
   align-items: flex-start;
-  gap: 10px;
+  gap: 12px;
   animation: slideUp .15s ease-out;
 }
 .toast.danger-toast {
@@ -3338,7 +3347,7 @@ button { cursor: pointer; }
   border: none;
   color: var(--text-secondary);
   cursor: pointer;
-  padding: 2px 6px;
+  padding: 2px 8px;
   font-size: 15px;
   font-weight: bold;
   line-height: 1;
@@ -6147,7 +6156,9 @@ function renderWorkflowSwitcher(){
 }
 async function loadWorkflow(id){
   const prevWfId=state.flowGraphWfId||state.workflowId;
-  state.workflowId=id;
+  const loadSequence=state.workflowLoadSequence=(state.workflowLoadSequence||0)+1;
+  const refreshingController=state.workflowId==='__ctl__'&&state.workflow?.workflow?.workflow_id===id;
+  if(!refreshingController)state.workflowId=id;
   state.flowSelectedNodeId=null;
   if(!state.openWorkflowTabIds)state.openWorkflowTabIds=[];
   if(id&&!state.openWorkflowTabIds.includes(id))state.openWorkflowTabIds.push(id);
@@ -6157,6 +6168,8 @@ async function loadWorkflow(id){
     api('/api/workflow/controller-actions?workflow_id='+encodeURIComponent(id)).catch(()=>null),
     _fetchDecs().catch(()=>null)
   ]);
+  if(loadSequence!==state.workflowLoadSequence)return;
+  const keepController=state.workflowId==='__ctl__'&&state.workflow?.workflow?.workflow_id===id;
   state.workflow=wfRes;
   state.controllerActionsData=actionsRes;
   state.decisionData=decisionsRes;
@@ -6170,7 +6183,7 @@ async function loadWorkflow(id){
   if(prevWfId!==id){
     destroyFlowGraph();
   }
-  renderFlowWorkbench();
+  if(keepController)openControllerCockpitModal();else renderFlowWorkbench();
   if(typeof renderSidebarWorkflows==='function')renderSidebarWorkflows();
 }
 function clearWorkflow(){
@@ -6813,13 +6826,18 @@ function flowCardFoot(n){
   const agents=(n.agents||[]).filter(Boolean).slice(0,2);
   return agents.length?head+' · '+agents.join(' · '):head;
 }
+function flowNodeStatus(node,fallback){
+  if(recoveryUnavailable())return '状态未确认';
+  const op=currentRecovery(node.id)[0];
+  return op?({waiting_human:'待人工确认',awaiting_result:'核验派发',waiting:'已暂缓',pending:'等待派发',running:'正在派发'}[op.status]||'需恢复'):fallback;
+}
 function flowCardInner(n){
   const status=n.status||'waiting';
   const kind=String(n.node_type||'agent').toUpperCase();
   const leftAnchor=n.has_upstream!==false?('<div class="node-anchor left'+(n.inbound_active?' inbound-active':'')+'"></div>'):'';
   const rightAnchor=n.has_downstream!==false?('<div class="node-anchor right'+(n.outbound_active?' outbound-active':'')+'"></div>'):'';
   return leftAnchor+rightAnchor
-    +'<div class="fn-top"><span class="fn-ico">'+flowIconSvg(n.id)+'</span><span class="fn-kind">'+esc(kind)+'</span><span class="fn-pill">'+esc(humanNodeStatus(status))+'</span></div>'
+    +'<div class="fn-top"><span class="fn-ico">'+flowIconSvg(n.id)+'</span><span class="fn-kind">'+esc(kind)+'</span><span class="fn-pill">'+esc(flowNodeStatus(n,humanNodeStatus(status)))+'</span></div>'
     +'<div class="fn-title">'+esc(cleanStageLabel(n.label||n.id||''))+'</div>'
     +'<div class="fn-purpose">'+esc(flowPlain(n.purpose))+'</div>'
     +'<div class="fn-foot"'+(n.resource_usage?.overflow?' style="color:var(--danger);font-weight:600"':'')+'>'+esc(flowCardFoot(n))+'</div>';
@@ -6878,6 +6896,8 @@ function flowChecklist(node){
     else items.push(['bad','失败 '+failed+' · 阻塞 '+blocked]);
   }
   else if(node.status==='blocked'||(node.completion_issues||[]).length)items.push(['bad','节点仍有未解除的阻塞']);
+  else if(recoveryUnavailable())items.push(['bad','恢复状态读取失败，卡点未确认']);
+  else if(currentRecovery(node.id).length)items.push(['bad','存在派发恢复待办，需要核查或人工确认']);
   else items.push(['ok','无失败、无阻塞']);
   const down=node.downstream||[];
   if(!down.length)items.push(['ok','终点节点']);
@@ -6892,7 +6912,7 @@ function flowOverviewHtml(node, tasks){
   }).join('');
   const live=(tasks||[]).filter(t=>['cleaned','completed','committed','integrated','superseded'].indexOf(t.status)<0).slice(0,6);
   const rows=live.length?live.map(t=>'<div class="flow-task-row" onclick="openTaskDrawer(\''+esc(t.task_id)+'\')"><div><b>'+esc(t.task_id)+'</b><small>'+esc(t.agent||'未分配')+'</small></div><span class="fn-pill">'+esc(humanStatus(t.status))+'</span></div>').join(''):'<div class="empty">暂无进行中的任务</div>';
-  return '<div class="flow-reads"><em>读作</em>'+esc(flowReads(node))+'</div><div class="flow-sec">本节点现状</div>'+checks+'<div class="flow-sec">当前任务</div>'+rows;
+  return dispatchConfirmationHtml(node.id)+currentRecovery(node.id).map(o=>recoveryCard(o,state.workflowId)).join('')+'<div class="flow-reads"><em>读作</em>'+esc(flowReads(node))+'</div><div class="flow-sec">本节点现状</div>'+checks+'<div class="flow-sec">当前任务</div>'+rows;
 }
 
 function flowGraphData(){return (state.workflow&&state.workflow.graph)||{nodes:[],edges:[]};}
@@ -6908,12 +6928,12 @@ function resizeFlowGraph(){try{const cv=document.getElementById('flowCanvas');co
 function fitFlowGraph(){try{if(!state.flowGraph)return;if(state.flowGraph.zoomToFit){state.flowGraph.zoomToFit({padding:24,maxScale:1});if(state.flowGraph.centerContent)state.flowGraph.centerContent();}else if(state.flowGraph.centerContent)state.flowGraph.centerContent();}catch(e){}}
 function flowZoomIn(){try{if(state.flowGraph&&state.flowGraph.zoom)state.flowGraph.zoom(0.15);}catch(e){}}
 function flowZoomOut(){try{if(state.flowGraph&&state.flowGraph.zoom)state.flowGraph.zoom(-0.15);}catch(e){}}
-function renderFlowWorkbench(){const g=flowGraphData();const nodes=g.nodes||[];setWorkspaceMode(state.workflowView);const fs=document.getElementById('flowSummary');if(fs){if(state.workflowView==='flow'&&nodes.length){const working=nodes.filter(n=>n.status==='working').length;fs.style.display='block';fs.innerHTML='<b>'+nodes.length+'</b> 个节点 · <b>'+working+'</b> 个运行中<span class="flow-gesture-hint">拖拽平移 · ⌘+滚轮缩放</span>';}else fs.style.display='none';}const bf=document.getElementById('viewFlowBtn');if(bf)bf.classList.toggle('active',state.workflowView!=='list');const bl=document.getElementById('viewListBtn');if(bl)bl.classList.toggle('active',state.workflowView==='list');if(!state.flowSelectedNodeId||!nodes.some(n=>n.id===state.flowSelectedNodeId)){state.flowSelectedNodeId=pickDefaultFlowNodeId(nodes);}renderNodeInspector();renderFlowGraph();}
+function renderFlowWorkbench(){const g=flowGraphData();const nodes=g.nodes||[];setWorkspaceMode(state.workflowView);const fs=document.getElementById('flowSummary');if(fs){if(state.workflowView==='flow'&&nodes.length){const working=nodes.filter(n=>n.status==='working').length;fs.style.display='block';fs.innerHTML='<b>'+nodes.length+'</b> 个节点 · <b>'+working+'</b> 个运行中<span class="flow-gesture-hint">拖拽平移 · ⌘+滚轮缩放</span>';}else fs.style.display='none';}const bf=document.getElementById('viewFlowBtn');if(bf)bf.classList.toggle('active',state.workflowView!=='list');const bl=document.getElementById('viewListBtn');if(bl)bl.classList.toggle('active',state.workflowView==='list');if(!state.flowSelectedNodeId||!nodes.some(n=>n.id===state.flowSelectedNodeId)){state.flowSelectedNodeId=pickDefaultFlowNodeId(nodes);}const recoveries=currentRecovery();const ticker=document.getElementById('bottomTicker');if(ticker)ticker.textContent=recoveryUnavailable()?'恢复状态读取失败，卡点未确认':recoveries.length?'有 '+recoveries.length+' 项恢复待办，请查看卡点':'工作流调度就绪';if(fs&&recoveryUnavailable())fs.innerHTML+=renderRecoveryPanel(state.workflow.workflow.workflow_id);if(fs&&recoveries.length)fs.innerHTML+=`<div role="status" class="flow-attn">${recoveries.length} 项恢复待办：${esc(recoveries.map(o=>cleanStageLabel(o.recovery?.node_label||o.payload?.node_id||'')+' · '+(o.recovery?.summary||'需处理')).join('；'))} <button class="mini" onclick="openControllerCockpitModal()">查看卡点与恢复操作</button></div>`;renderNodeInspector();renderFlowGraph();}
 function dagreLayoutPositions(nodes,edges){const g=new window.dagre.graphlib.Graph();g.setGraph({rankdir:'LR',ranksep:56,nodesep:36,marginx:32,marginy:32});g.setDefaultEdgeLabel(()=>({}));const W=232,H=134;nodes.forEach(n=>g.setNode(n.id,{width:W,height:H}));edges.forEach(e=>{try{g.setEdge(e.from,e.to);}catch(err){}});window.dagre.layout(g);const pos={};nodes.forEach(n=>{const p=g.node(n.id);if(p)pos[n.id]={x:p.x-W/2,y:p.y-H/2};});return pos;}
 function renderFlowGraph(){const wrap=document.getElementById('flowCanvas');const errBox=document.getElementById('flowError');if(errBox){errBox.style.display='none';errBox.textContent='';}if(!wrap)return;const g=flowGraphData();const nodes=g.nodes||[];const edges=g.edges||[];if(state.flowGraphWfId&&state.flowGraphWfId!==state.workflowId)destroyFlowGraph();if(!nodes.length){destroyFlowGraph();if(errBox){errBox.style.display='block';errBox.textContent='当前工作流暂无可用节点定义（legacy 或空定义，已 fail-soft，不伪造连线）。';}return;}if(typeof window.dagre==='undefined'||!window.dagre.graphlib||!window.dagre.layout){destroyFlowGraph();if(errBox){errBox.style.display='block';errBox.textContent='本地 Dagre 资源缺失（/static/vendor/dagre-3.1.1.min.js），请检查 Console 静态资源。页面其他功能不受影响。';}return;}if(typeof window.X6==='undefined'||!window.X6.Graph){destroyFlowGraph();if(errBox){errBox.style.display='block';errBox.textContent='本地 X6 资源缺失（/static/vendor/x6-3.1.8.min.js），请检查 Console 静态资源。页面其他功能不受影响。';}return;}if(!ensureFlowCardShape()){destroyFlowGraph();if(errBox){errBox.style.display='block';errBox.textContent='本地 X6 缺少 HTML 节点（Shape.HTML），无法绘制流程卡片。';}return;}let pos={};try{pos=dagreLayoutPositions(nodes,edges);}catch(e){destroyFlowGraph();if(errBox){errBox.style.display='block';errBox.textContent='Dagre 布局失败：'+e.message;}return;}try{destroyFlowGraph();const W=wrap.clientWidth||800;const H=480;const graph=new window.X6.Graph({container:wrap,width:W,height:H,background:{color:'transparent'},panning:{enabled:true},mousewheel:{enabled:true,modifiers:['ctrl','meta'],minScale:0.45,maxScale:2.0},interacting:{nodeMovable:false,edgeMovable:false,edgeLabelMovable:false,arrowheadMovable:false,vertexMovable:false,vertexAddable:false,vertexDeletable:false,edgeAddable:false},connecting:{allowBlank:false,allowLoop:false,allowNode:false,allowEdge:false,snap:true},highlighting:{magnetAdsorbed:{name:'stroke',args:{padding:4,attrs:{stroke:'#5e6ad2','stroke-width':2}}}}});state.flowGraph=graph;state.flowGraphWfId=state.workflowId;const nodesMap={};nodes.forEach(n=>{nodesMap[n.id]=n;});const activeIncomingNodes=new Set();const activeOutgoingNodes=new Set();edges.forEach(e=>{const fromN=nodesMap[e.from];const toN=nodesMap[e.to];if(fromN&&toN){if(toN.status==='working'&&(fromN.status==='completed'||fromN.status==='working')){activeIncomingNodes.add(toN.id);activeOutgoingNodes.add(fromN.id);}}});nodes.forEach(n=>{const p=pos[n.id]||{x:20,y:20};const nodeData=Object.assign({},n,{selected:String(state.flowSelectedNodeId||'')===String(n.id),inbound_active:activeIncomingNodes.has(n.id),outbound_active:activeOutgoingNodes.has(n.id),has_upstream:Boolean(n.depends_on&&n.depends_on.length),has_downstream:Boolean(n.downstream&&n.downstream.length)});graph.addNode({id:n.id,shape:'flow-card',x:p.x,y:p.y,width:232,height:134,data:nodeData});});edges.forEach(e=>{try{const fromN=nodesMap[e.from];const toN=nodesMap[e.to];const isAct=Boolean(fromN&&toN&&toN.status==='working'&&(fromN.status==='completed'||fromN.status==='working'));const isDone=Boolean(fromN&&toN&&fromN.status==='completed'&&toN.status==='completed');const strokeColor=isAct?'#4f46e5':isDone?'#94a3b8':'#c5c9d3';const strokeWidth=isAct?2.2:1.6;graph.addEdge({source:{cell:e.from,anchor:{name:'right',args:{dx:0}},connectionPoint:'anchor'},target:{cell:e.to,anchor:{name:'left',args:{dx:-5}},connectionPoint:'anchor'},connector:{name:'smooth'},attrs:{line:{stroke:strokeColor,'stroke-width':strokeWidth,strokeDasharray:isAct?'6 4':'none',style:isAct?{animation:'flowEdgeDash 1.2s linear infinite'}:{},targetMarker:{name:'block',size:isAct?7:6,fill:strokeColor,stroke:strokeColor}}},zIndex:isAct?10:1});}catch(err){}});graph.on('node:click',({node})=>{try{selectFlowNode(node.id);}catch(err){}});updateFlowSelection();fitFlowGraph();requestAnimationFrame(()=>{resizeFlowGraph();fitFlowGraph();});}catch(e){destroyFlowGraph();if(errBox){errBox.style.display='block';errBox.textContent='Flow Canvas 初始化失败：'+e.message;}}}
 function flowNodeById(id){const g=flowGraphData();return (g.nodes||[]).find(n=>n.id===id)||null;}
 function flowTasksForNode(nodeId){const ts=(state.workflow&&state.workflow.tasks)||[];return ts.filter(t=>String(t.node||t.stage||'')===String(nodeId)&&t.status!=='superseded'&&!t.superseded_by);}
-function renderNodeInspector(){const body=document.getElementById('flowInspectorBody');const title=document.getElementById('flowInspTitle');const meta=document.getElementById('flowInspMeta');if(!body)return;const node=flowNodeById(state.flowSelectedNodeId);if(!node){if(title)title.textContent='节点详情';if(meta)meta.textContent='—';body.innerHTML='<div class="empty">暂无节点</div>';return;}if(title)title.textContent=cleanStageLabel(node.label||node.id);if(meta)meta.textContent=(node.node_type||'agent').toUpperCase()+' · '+humanNodeStatus(node.status);const tab=state.flowInspectorTab||'summary';if(tab==='tasks'){const nts=flowTasksForNode(node.id);body.innerHTML=nts.length?nts.map(t=>`<div class="flow-task-row" onclick="openTaskDrawer('${esc(t.task_id)}')"><span><strong>${esc(t.task_id)}</strong><span class="muted"> · ${esc(t.agent||'未分配')}</span></span><span>${badge(t.status)}</span></div>`).join(''):'<div class="empty">该节点暂无任务</div>';return;}if(tab==='context'){const ctx=(state.workflow&&state.workflow.context)||{required:[],optional:[]};const req=ctx.required||[];const opt=ctx.optional||[];body.innerHTML=`<div class="proj-sec"><div class="proj-lbl">必需上下文</div>${req.length?req.map(c=>`<div>· ${esc(typeof c==='string'?c:(c.id||c))}</div>`).join(''):'<div class="muted">—</div>'}</div><div class="proj-sec"><div class="proj-lbl">可选上下文</div>${opt.length?opt.map(c=>`<div>· ${esc(typeof c==='string'?c:(c.id||c))}</div>`).join(''):'<div class="muted">—</div>'}</div><div class="muted" style="margin-top:8px">仅显示真实 Context Contract；无绑定信息时不伪造已加载。</div>`;return;}if(tab==='runtime'){const nts=flowTasksForNode(node.id);body.innerHTML=nts.length?nts.map(t=>`<div class="flow-node-card" style="margin-bottom:8px"><div><strong>${esc(t.task_id)}</strong> ${badge(t.status)}</div><dl class="flow-kv" style="margin-top:8px"><dt>执行者</dt><dd>${esc(t.agent||'—')}</dd><dt>工位</dt><dd>${esc(t.pane_id||'—')}</dd><dt>更新</dt><dd>${esc(t.updated_at||t.last_activity_at||'—')}</dd><dt>分支</dt><dd>${esc(t.candidate_sha||t.integration_branch||'—')}</dd><dt>结论</dt><dd>${esc(t.stage_verdict||'—')}</dd></dl></div>`).join(''):'<div class="empty">暂无运行时信息</div>';return;}const nts=flowTasksForNode(node.id);const acts=(state.controllerActionsData&&state.controllerActionsData.actions)||[];const mine=acts.filter(a=>((a.blocker_task_id||a.old_task_id||String(a.action_id||'').split(':')[0])===node.id)||(node.task_ids||[]).includes(a.blocker_task_id||a.old_task_id));const shown=mine.slice(0,2);const actHtml=shown.length?`<div class="flow-attn"><div class="flow-sec">需要处理</div>${shown.map(a=>`<div class="flow-node-card" style="margin-bottom:8px"><div><strong>${esc(a.title||a.action_id)}</strong></div><div class="muted" style="margin:4px 0">${esc(a.effect||a.description||'')}</div><div style="display:flex;gap:8px;justify-content:flex-end"><button class="mini" onclick="locateControllerTask('${esc(a.blocker_task_id||a.old_task_id||'')}')">查看任务</button><button class="btn primary" style="padding:3px 8px;font-size:11.5px" onclick="executeControllerAction('${esc(a.action_id)}','${esc(state.workflowId)}')">一键执行</button></div></div>`).join('')}</div>`:(node.has_attention?'<div class="muted">该节点需关注，暂无可用一键解卡建议，请查看任务详情。</div>':'');body.innerHTML=flowOverviewHtml(node, nts)+actHtml;}
+function renderNodeInspector(){const body=document.getElementById('flowInspectorBody');const title=document.getElementById('flowInspTitle');const meta=document.getElementById('flowInspMeta');if(!body)return;const node=flowNodeById(state.flowSelectedNodeId);if(!node){if(title)title.textContent='节点详情';if(meta)meta.textContent='—';body.innerHTML='<div class="empty">暂无节点</div>';return;}if(title)title.textContent=cleanStageLabel(node.label||node.id);if(meta)meta.textContent=(node.node_type||'agent').toUpperCase()+' · '+flowNodeStatus(node,humanNodeStatus(node.status));const tab=state.flowInspectorTab||'summary';if(tab==='tasks'){const nts=flowTasksForNode(node.id);body.innerHTML=nts.length?nts.map(t=>`<div class="flow-task-row" onclick="openTaskDrawer('${esc(t.task_id)}')"><span><strong>${esc(t.task_id)}</strong><span class="muted"> · ${esc(t.agent||'未分配')}</span></span><span>${badge(t.status)}</span></div>`).join(''):'<div class="empty">该节点暂无任务</div>';return;}if(tab==='context'){const ctx=(state.workflow&&state.workflow.context)||{required:[],optional:[]};const req=ctx.required||[];const opt=ctx.optional||[];body.innerHTML=`<div class="proj-sec"><div class="proj-lbl">必需上下文</div>${req.length?req.map(c=>`<div>· ${esc(typeof c==='string'?c:(c.id||c))}</div>`).join(''):'<div class="muted">—</div>'}</div><div class="proj-sec"><div class="proj-lbl">可选上下文</div>${opt.length?opt.map(c=>`<div>· ${esc(typeof c==='string'?c:(c.id||c))}</div>`).join(''):'<div class="muted">—</div>'}</div><div class="muted" style="margin-top:8px">仅显示真实 Context Contract；无绑定信息时不伪造已加载。</div>`;return;}if(tab==='runtime'){const nts=flowTasksForNode(node.id);body.innerHTML=nts.length?nts.map(t=>`<div class="flow-node-card" style="margin-bottom:8px"><div><strong>${esc(t.task_id)}</strong> ${badge(t.status)}</div><dl class="flow-kv" style="margin-top:8px"><dt>执行者</dt><dd>${esc(t.agent||'—')}</dd><dt>工位</dt><dd>${esc(t.pane_id||'—')}</dd><dt>更新</dt><dd>${esc(t.updated_at||t.last_activity_at||'—')}</dd><dt>分支</dt><dd>${esc(t.candidate_sha||t.integration_branch||'—')}</dd><dt>结论</dt><dd>${esc(t.stage_verdict||'—')}</dd></dl></div>`).join(''):'<div class="empty">暂无运行时信息</div>';return;}const nts=flowTasksForNode(node.id);const acts=(state.controllerActionsData&&state.controllerActionsData.actions)||[];const mine=acts.filter(a=>((a.blocker_task_id||a.old_task_id||String(a.action_id||'').split(':')[0])===node.id)||(node.task_ids||[]).includes(a.blocker_task_id||a.old_task_id));const shown=mine.slice(0,2);const actHtml=shown.length?`<div class="flow-attn"><div class="flow-sec">需要处理</div>${shown.map(a=>`<div class="flow-node-card" style="margin-bottom:8px"><div><strong>${esc(a.title||a.action_id)}</strong></div><div class="muted" style="margin:4px 0">${esc(a.effect||a.description||'')}</div><div style="display:flex;gap:8px;justify-content:flex-end"><button class="mini" onclick="locateControllerTask('${esc(a.blocker_task_id||a.old_task_id||'')}')">查看任务</button><button class="btn primary" style="padding:3px 8px;font-size:11.5px" onclick="executeControllerAction('${esc(a.action_id)}','${esc(state.workflowId)}')">一键执行</button></div></div>`).join('')}</div>`:(node.has_attention?'<div class="muted">该节点需关注，暂无可用一键解卡建议，请查看任务详情。</div>':'');body.innerHTML=flowOverviewHtml(node, nts)+actHtml;}
 window.addEventListener('resize',()=>{try{if(state.workflowView!=='list'){resizeFlowGraph();fitFlowGraph();}}catch(e){}});
 
 function renderAgents(){const rs=state.project.agents||[];document.getElementById('agents').innerHTML=rs.length?rs.map(a=>`<div class="agent-row"><span><i class="dot ${esc(a.status)}"></i>${esc(a.agent)}</span><span class="muted">${esc(agentStatusLabel(a.status))} · 负载 ${a.load} · 认证 ${esc(authHintLabel(a.auth_hint))}</span></div>`).join(''):'<div class="empty">暂无执行者信息</div>'}function renderSlots(){const rs=state.project.slots||[];document.getElementById('slots').innerHTML=rs.length?rs.map(s=>`<div class="slot-row"><div><div>${esc(s.pane_id)} · ${esc(cleanStageLabel(s.stage_label))}</div><div class="task-meta">绑定 ${esc(s.bound_agent)} · 运行时 ${esc(s.live_agent||'空闲')} · ${esc(s.claimed_by?'被任务占用':'未占用')}</div></div><button class="mini" onclick="bindSlotPrompt('${esc(s.pane_id)}')">绑定</button></div>`).join(''):'<div class="empty">暂无用户预建智能体工位</div>'}
@@ -7624,10 +7644,11 @@ async function submitDecision(decisionId){
 }
 function openControllerCockpitModal(){
   const w=state.workflow&&state.workflow.workflow;
-  const wid=state.workflowId||(w&&w.workflow_id)||'未选择工作流';
+  const wid=(w&&w.workflow_id)||state.workflowId||'未选择工作流';
   const stall=state.workflow&&state.workflow.stall;
   const allActs=(state.controllerActionsData&&state.controllerActionsData.actions)||[];
   const blockers=(state.controllerActionsData&&state.controllerActionsData.blockers)||[];
+  const recoveryCount=currentRecovery().length;
   const acts=allActs.filter(a=>a.group!=='pipeline');
   if(!state.controllerActionsMap)state.controllerActionsMap={};
   allActs.forEach(a=>{state.controllerActionsMap[a.action_id]=a;});
@@ -7636,7 +7657,7 @@ function openControllerCockpitModal(){
   const stageName=isWfDone?'已全部完成':(curStage?(curStage.label||curStage.key):'就绪/空闲');
   const isStalled=Boolean(stall&&stall.is_stalled);
 
-  let statusCard=`<section class="ctl-status${isStalled?' is-stalled':''}"><div class="ctl-status-head"><span class="ctl-status-title"><span class="ctl-dot"></span>调度状态与等待条件</span><span class="badge ${isStalled?'failed':'cleaned'}">${isStalled?'推进停滞':'调度运转中'}</span></div><div class="ctl-status-grid"><div class="ctl-status-item"><span class="ctl-k">当前关注阶段</span><strong>${esc(stageName)}</strong></div><div class="ctl-status-item"><span class="ctl-k">活跃卡点</span><strong>${blockers.length} 项</strong></div><div class="ctl-status-item is-full"><span class="ctl-k">${isStalled?'停滞原因':'轮询状态'}</span><span class="ctl-note">${isStalled?`⚠️ ${esc(stall.message)}`:'✓ Controller 后台轮询正常，正在监控 DAG 拓扑门禁'}</span></div></div></section>`;
+  let statusCard=`<section class="ctl-status${isStalled?' is-stalled':''}"><div class="ctl-status-head"><span class="ctl-status-title"><span class="ctl-dot"></span>调度状态与等待条件</span><span class="badge ${isStalled?'failed':'cleaned'}">${isStalled?'推进停滞':'调度运转中'}</span></div><div class="ctl-status-grid"><div class="ctl-status-item"><span class="ctl-k">当前关注阶段</span><strong>${esc(stageName)}</strong></div><div class="ctl-status-item"><span class="ctl-k">活跃卡点</span><strong>${recoveryUnavailable()?'未确认':blockers.length+recoveryCount+' 项'}</strong></div><div class="ctl-status-item is-full"><span class="ctl-k">${isStalled?'停滞原因':'轮询状态'}</span><span class="ctl-note">${isStalled?`⚠️ ${esc(stall.message)}`:'✓ Controller 后台轮询正常，正在监控 DAG 拓扑门禁'}</span></div></div></section>`;
 
   let unblockSection='';
   if(blockers.length||acts.length){
@@ -7655,7 +7676,7 @@ function openControllerCockpitModal(){
       return `<section style="margin-bottom:16px">${head}<div class="ctl-actions">${cards}</div></section>`;
     }).join('');
     unblockSection=`<section><div class="ctl-section-title">按卡点任务一键解卡 <span class="ctl-count">${blockers.length||acts.length}</span></div><div class="ctl-sub">每个卡点任务独立分组：先看“卡点原因”，再点对应按钮即可执行，无需手动敲命令。</div>${sections}</section>`;
-  } else {
+  } else if(!recoveryCount&&!recoveryUnavailable()) {
     unblockSection=`<div class="ctl-empty">✓ 当前没有报错卡点。<div class="muted">若只是还没收尾（保存版本 / 并入目标分支 / 归档），见下方“继续推进”一节。</div></div>`;
   }
   const resources=(state.workflow?.graph?.nodes||[]).filter(n=>n.resource_usage);
@@ -7686,20 +7707,50 @@ function openControllerCockpitModal(){
   state.workflowId='__ctl__';
   renderWorkflowTabs();
 }
-function renderRecoveryPanel(wid){
-  const operations=(state.controllerActionsData?.recovery||[]).filter(o=>!['resolved','superseded'].includes(o.status));
-  if(!operations.length)return '';
-  const labels={pending:'等待执行',running:'正在处理',waiting:'有期限暂缓',waiting_human:'等待人工处理',awaiting_result:'等待新候选验收'};
+function currentRecovery(nodeId){
+  return (state.controllerActionsData?.recovery||[]).filter(o=>!['resolved','superseded'].includes(o.status)&&(!nodeId||o.payload?.node_id===nodeId));
+}
+function dispatchConfirmations(nodeId){return (state.controllerActionsData?.recovery||[]).filter(o=>o.confirmation&&(!nodeId||o.payload?.node_id===nodeId));}
+function dispatchConfirmationHtml(nodeId){return dispatchConfirmations(nodeId).map(o=>'<div class="flow-attn" role="status">派发已确认：'+esc(o.confirmation.task_ids.join('、'))+' · 查看任务列表可跟踪实际执行</div>').join('');}
+function recoveryUnavailable(){return Boolean(state.workflow&&!state.controllerActionsData);}
+function recoveryCard(o,wid){
+  const r=o.recovery;
+  const labels={pending:'等待派发',running:'正在处理',waiting:'已暂缓',waiting_human:'等待人工确认',awaiting_result:'等待总指挥建立任务'};
   const reasons={dispatch_task_missing:'未确认目标任务登记，请核对已有派发并补足需求',dispatch_delivery_unknown:'派发结果未知，先核验已有任务',dispatch_awaiting_task:'通知已返回，正在核验实际任务登记',legacy_dispatch_unknown:'历史通知无登记证据，正在核验',coordinator_missing:'总指挥工位不可用，等待前置问题处理',dispatch_generation_changed:'工作流代次或配置已变化，旧派发需核对',coordinator_busy:'总指挥忙碌，等待下一次检查',source_wip_requires_decision:'源仓库存在未处理改动，请先确认归属和处理方式',delivery_unknown:'交付结果未知，请核对现有后继',successor_delivery_unconfirmed:'后继交付尚未确认',candidate_unknown:'候选身份尚未确认',candidate_mismatch:'验收候选与当前候选不一致',recovery_successor_failed:'修复任务仍未通过，需要人工处理',finalize_escalated:'交付需要人工排除前置障碍',workflow_execution_unknown:'工作流执行身份尚未确认'};
-  return '<section><div class="ctl-section-title">恢复待办</div>'+operations.map(o=>{
-    const reason=o.detail?.reason||o.payload?.reason||'';
-    const dispatch=o.payload?.kind==='node_dispatch';
-    const label=dispatch&&o.status==='awaiting_result'?'等待总指挥建立任务':(labels[o.status]||o.status);
-    const timing=dispatch?`节点 ${o.payload.node_id} · 负责人：总指挥 · 恢复：Controller · 下次检查：${o.next_due_at?new Date(o.next_due_at*1000).toLocaleString():'等待人工决定'}${o.detail?.deadline_at?' · 截止：'+new Date(o.detail.deadline_at*1000).toLocaleString():''}`:(o.payload?.task_ids||[]).join(', ');
-    const action=o.started?'verify':'retry';
-    const controls=o.status==='waiting_human'?`<button class="mini" onclick="decideRecovery(${o.id},${o.version},'${action}','${esc(wid)}')">${o.started?'核对现有任务':'前置问题已处理，重试'}</button><button class="mini" onclick="decideRecovery(${o.id},${o.version},'hold','${esc(wid)}')">暂缓一小时</button>`:'';
-    return `<div class="ctl-blocker"><strong>${esc(label)}</strong><div class="muted">${esc(reasons[reason]||reason)} · ${esc(timing)}${o.detail?.decision_needed?' · '+esc(o.detail.decision_needed):''}</div><div>${controls}</div></div>`;
-  }).join('')+'</section>';
+  const code=o.detail?.reason||o.payload?.reason;
+  const reason=r?.summary||o.detail?.decision_needed||reasons[code]||code||'等待恢复处理';
+  const controls=r?(r.actions||[]).map(a=>`<button class="mini" data-recovery-action="${esc(a.action)}" onclick="openRecoveryDecision(${o.id},'${esc(a.action)}')">${esc(a.label)}</button>`).join(''):(o.status==='waiting_human'?`<button class="mini" onclick="decideRecovery(${o.id},${o.version},'${o.started?'verify':'retry'}','${esc(wid)}')">${o.started?'核对现有任务':'前置问题已处理，重试'}</button><button class="mini" onclick="decideRecovery(${o.id},${o.version},'hold','${esc(wid)}')">暂缓一小时</button>`:'');
+  return `<div class="ctl-blocker"><strong>${esc(cleanStageLabel(r?.node_label||o.payload?.node_id||'恢复待办'))} · ${esc(labels[o.status]||o.status)}</strong><div>${esc(reason)}</div>${r?`<p class="muted">${esc(r.explanation)}</p><p>${esc(r.next_step)}</p><div>${(r.resource_checks||[]).map(c=>`<p>${esc(c.task_id||'旧启动')}：${esc(c.message)}</p>`).join('')}</div><div class="muted">验收版本：${esc((r.candidate_sha||'未确认').slice(0,12))}</div>`:''}<div class="muted">负责人：总指挥 · 恢复：Controller · ${o.status!=='waiting_human'&&o.next_due_at?'下次检查：'+new Date(o.next_due_at*1000).toLocaleString():'等待人工决定'}${o.detail?.deadline_at?' · 截止：'+new Date(o.detail.deadline_at*1000).toLocaleString():''}</div><div>${controls}</div></div>`;
+}
+function renderRecoveryPanel(wid){
+  if(recoveryUnavailable())return '<section role="alert">无法读取恢复状态，尚不能确认是否有卡点。<button class="mini" onclick="loadWorkflow(state.workflow.workflow.workflow_id)">刷新恢复状态</button></section>';
+  const operations=currentRecovery();
+  return (operations.length?'<section><div class="ctl-section-title">恢复待办</div>'+operations.map(o=>recoveryCard(o,wid)).join('')+'</section>':'')+dispatchConfirmationHtml();
+}
+function openRecoveryDecision(id,action){
+  const o=currentRecovery().find(o=>o.id===id);
+  const choice=o?.recovery?.actions?.find(a=>a.action===action);
+  if(!choice){toast('恢复条件已变化，请刷新页面',true);return;}
+  const wid=o.workflow_id;
+  const resend=['restore_scope','confirm_absent'].includes(action);
+  const bindLineage=action==='restore_scope'&&o.recovery.lineage?.some(t=>t.requires_binding);
+  openModal(choice.label,`<form id="recoveryForm" class="form"><p>${esc(o.recovery.summary)}</p><p>${esc(o.recovery.next_step)}</p><p class="muted">节点：${esc(cleanStageLabel(o.recovery.node_label||o.payload.node_id))} · 验收版本：${esc(o.recovery.candidate_sha||'未确认')}</p><label for="recoveryOperator">处理人</label><input id="recoveryOperator" required maxlength="128"><label for="recoveryReason">核查结果与处理依据</label><textarea id="recoveryReason" required maxlength="1000" rows="3"></textarea>${resend?'<label><input id="recoveryConfirmed" type="checkbox" required style="width:auto">我已查看任务列表及旧工位，确认没有旧任务执行，授权对当前版本重新派发。</label><p class="muted">这是人工核查回执，不代表业务验收通过。系统仍会复查启动记录、候选和依赖。</p>':''}${bindLineage?`<p>旧任务：${esc(o.recovery.lineage.map(t=>t.task_id+' / '+(t.run_id||'身份未确认')).join('；'))}</p><label><input id="recoveryLineage" type="checkbox" required style="width:auto">确认以上Task/Run属于本次工作流执行，授权补齐其执行归属。</label>`:''}<p id="recoveryError" role="alert"></p><button id="recoverySubmit" type="submit" class="btn primary">${esc(choice.label)}</button><button type="button" class="btn" onclick="closeModal()">取消</button></form>`);
+  const form=document.getElementById('recoveryForm');
+  const ownsForm=()=>form.isConnected&&document.getElementById('recoveryForm')===form&&document.getElementById('modal')?.classList.contains('open')&&(state.workflowId===wid||(state.workflowId==='__ctl__'&&state.workflow?.workflow?.workflow_id===wid));
+  form.onsubmit=async(event)=>{
+    event.preventDefault();const button=document.getElementById('recoverySubmit');button.disabled=true;
+    const body={workflow_id:wid,operation_id:o.id,expected_version:o.version,operator:document.getElementById('recoveryOperator').value.trim(),reason:document.getElementById('recoveryReason').value.trim(),action,candidate_sha:o.recovery.candidate_sha,confirmed_absent:document.getElementById('recoveryConfirmed')?.checked===true,confirmed_lineage:document.getElementById('recoveryLineage')?.checked===true,lineage_snapshot:(o.recovery.lineage||[]).map(t=>({task_id:t.task_id,run_id:t.run_id,version:t.version}))};
+    if(action==='hold')body.until=Date.now()/1000+3600;
+    try{
+      const result=await api('/api/workflow/recovery/decision',{method:'POST',body:JSON.stringify(body)});
+      if(!ownsForm())return;
+      closeModal();await loadWorkflow(body.workflow_id);
+      if(state.workflowId!==wid&&!(state.workflowId==='__ctl__'&&state.workflow?.workflow?.workflow_id===wid))return;
+      openControllerCockpitModal();
+      if(action==='check_resources')toast(result.checks.every(c=>c.status==='resources_absent')?'已确认启动资源不存在，可继续恢复':'现场尚未确认资源不存在，仍禁止重发，请查看恢复待办');
+      else toast(resend?'已建立恢复待办，Controller将派发；尚未确认任务登记':'已记录，等待核对和执行');
+    }catch(error){if(ownsForm()){document.getElementById('recoveryError').textContent=error.message;button.disabled=false;}}
+  };
 }
 function decideRecovery(id,version,action,wid){
   showPromptModal({title:'记录恢复决策',label:'本次处理人的名称',onConfirm:(operator)=>{

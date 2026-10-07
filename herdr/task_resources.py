@@ -206,7 +206,12 @@ def dispatch_identity(workflow_id, node_id, role, candidate_sha, dispatch_round)
     return 'launch:' + hashlib.sha256(json.dumps(fields).encode()).hexdigest()
 
 
-def _launch_event(store, intent, now=None):
+def _launch_event(store, intent, now=None, *, conn=None):
+    if conn is not None:
+        from .state_db import record_event
+        return record_event({"event_type":"launch_intent", "payload":dict(intent),
+            "workflow_id":intent["workflow_id"], "node_id":intent["node_id"],
+            "task_id":intent["key"], "source":"launch", "timestamp":now}, conn=conn)
     if intent.get('dispatch_operation_id') is not None and intent['phase'] == 'allocating' and set(intent.get('resources') or {}) == {'run_id'}:
         from .node_dispatch_store import record_intent
         record_intent(store.db_path, intent, time.time() if now is None else now)
@@ -216,7 +221,10 @@ def _launch_event(store, intent, now=None):
                        source='launch', timestamp=time.time() if now is None else now)
 
 
-def _latest_intent(store, key):
+def _latest_intent(store, key, *, conn=None):
+    if conn is not None:
+        row = conn.execute("SELECT payload_json FROM events WHERE task_id=? AND event_type='launch_intent' AND source='launch' ORDER BY timestamp DESC,id DESC LIMIT 1", (key,)).fetchone()
+        return json.loads(row["payload_json"]) if row else None
     events = store.list_events(task_id=key, event_type='launch_intent',
                                source='launch', limit=1, desc=True)
     return events[0]['payload'] if events else None
@@ -245,6 +253,14 @@ def begin_launch_intent(store, *, workflow_id, node_id, role='worker', candidate
     A lease is an attention deadline, never permission to repeat an uncertain
     allocation. Both automatic and manual launches must use this identity.
     """
+    from .state_db import get_readonly_db_connection
+    from .dispatch_recovery import require_authorization
+    conn = get_readonly_db_connection(store.db_path)
+    try:
+        conn.execute('BEGIN')
+        require_authorization(conn, workflow_id, node_id, dispatch_operation_id)
+    finally:
+        conn.close()
     now = time.time() if now is None else now
     if not 1 <= lease_seconds <= 600:
         raise ValueError('launch lease must be between 1 and 600 seconds')
@@ -296,15 +312,15 @@ def record_launch_resources(store, intent, resource_identity, *, now=None):
     return updated
 
 
-def finish_launch_intent(store, intent, *, now=None):
+def finish_launch_intent(store, intent, *, now=None, conn=None):
     """Registration precedes completion, so interrupted finish is deduplicated."""
-    task = registered_launch_task(store, intent)
+    task = registered_launch_task(store, intent, conn=conn)
     if not task:
         raise ValueError('registered task does not match launch intent')
-    current = _latest_intent(store, intent['key'])
+    current = _latest_intent(store, intent['key'], conn=conn)
     if not current or current['intent_id'] != intent['intent_id']:
         raise ValueError('launch intent no longer owns registration')
-    _launch_event(store, {**current, 'phase': 'registered'}, now)
+    _launch_event(store, {**current, 'phase': 'registered'}, now, conn=conn)
 
 
 def abort_launch_intent(store, intent, *, reason='worker_startup_failed', now=None):
@@ -317,8 +333,16 @@ def abort_launch_intent(store, intent, *, reason='worker_startup_failed', now=No
     return rolled_back
 
 
-def registered_launch_task(store, intent):
-    task = store.get_task(intent['task_id'])
+def _intent_task(store, intent, conn=None):
+    if conn is None:
+        return store.get_task(intent['task_id'])
+    from .state_db import _decode_task_row
+    row = conn.execute('SELECT * FROM tasks WHERE task_id=?', (intent['task_id'],)).fetchone()
+    return _decode_task_row(row) if row else None
+
+
+def registered_launch_task(store, intent, *, conn=None):
+    task = _intent_task(store, intent, conn)
     if not task:
         return None
     if dispatch_identity(task.get('workflow_id'), task.get('node') or task.get('stage'),
@@ -329,18 +353,18 @@ def registered_launch_task(store, intent):
     return task if not run_id or task.get('run_id') == run_id else None
 
 
-def reconcile_launch_intent(store, intent, probe_resources, *, now=None):
+def reconcile_launch_intent(store, intent, probe_resources, *, now=None, conn=None):
     """Transport returns absent only after checking ALL intent-tagged resources.
 
     owned/foreign/unknown do not grant permission to allocate or delete anything.
     The caller can adopt verified owned resources and finish registration instead.
     Run under workflow_launch_lock; probes must impose their own finite timeout.
     """
-    current = _latest_intent(store, intent['key'])
+    current = _latest_intent(store, intent['key'], conn=conn)
     if not current or current['intent_id'] != intent['intent_id']:
         raise ValueError('launch intent changed during recovery')
-    if store.get_task(current['task_id']):
-        task = registered_launch_task(store, current)
+    if _intent_task(store, current, conn):
+        task = registered_launch_task(store, current, conn=conn)
         if task:
             return {'status': 'registered', 'task': task}
         return {'status': 'recovery_required', 'resource_status': 'foreign', 'intent': current}
@@ -348,7 +372,7 @@ def reconcile_launch_intent(store, intent, probe_resources, *, now=None):
     if verdict != 'absent':
         return {'status': 'recovery_required', 'resource_status': verdict, 'intent': current}
     recovered = {**current, 'phase': 'resources_absent'}
-    _launch_event(store, recovered, now)
+    _launch_event(store, recovered, now, conn=conn)
     return {'status': 'resources_absent', 'intent': recovered}
 
 

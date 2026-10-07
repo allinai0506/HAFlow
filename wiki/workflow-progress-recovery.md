@@ -111,3 +111,16 @@ Evidence:
 - `tests/test_downstream_dispatch_contract.py`
 
 UNKNOWN：此节描述隔离工作树源码。原工作流恢复、真实 Agent 接单、服务部署和业务测试审核结论未在本轮执行。
+
+## 用户可操作的派发恢复（隔离源码）
+
+主流程图、节点详情、底栏与 Controller 都投影同一恢复责任；读取失败显示“状态未确认”，不能显示“无卡点”。节点详情或 Controller 的恢复卡说明当前候选、卡点原因、核查结果和可用动作。
+
+- **恢复验收范围并重新派发**：检查旧工位与任务列表后，填写处理人、依据并确认无旧任务执行。旧取消头必须有 Run；历史 execution 缺失时额外展示 Task/Run，要求确认归属。提交绑定精确 Task/Run/version，旧责任退休，新责任待 Controller 派发。
+- **核查启动现场**：有未结案启动记录时先核查。复用既有资源 inventory，只结束证明缺席的 intent；核查期间版本或身份变化拒绝，intent 回执、待办结果和审计在最终事务一起提交；存在、归属不明、超时保持阻止重发，卡片显示分项原因。
+- **确认旧任务未运行并重新派发**：未登记 Task 的未知交付，经人工检查、说明依据后创建新授权。既有任务、未结束 intent、旧未知责任、候选变化或上游身份缺失均拒绝。
+
+恢复成功提示只证明“已建立恢复待办”。Controller 仍沿 claim→send→launch intent→Task 登记核验；只有当前责任有真实登记证据，界面才显示“派发已确认”。人工新授权后，旧 operation 和无绑定迟到启动/登记不能接管新责任。通用核验及暂缓仍保留。未知现场并非可安全强制重发，界面明确保留卡点。
+
+Evidence: `herdr/dispatch_recovery.py`、`herdr/task_resources.py#begin_launch_intent`、`herdr/state_db.py#save_task`、`tests/test_dispatch_recovery_ui.py`。
+本节描述实现契约，不替代部署和原工作流业务验收。

@@ -1604,6 +1604,9 @@ def save_task(
         if not conn.execute("SELECT 1 FROM workflows WHERE workflow_id = ?", (wid,)).fetchone():
             save_workflow({"workflow_id": wid, "title": wid, "status": "pending"}, db_path, conn=conn)
         existing = conn.execute('SELECT workflow_id,node,payload_json FROM tasks WHERE task_id=?', (tid,)).fetchone()
+        if not existing or status not in {'superseded', 'cleaned', 'completed'}:
+            from .dispatch_recovery import require_authorization
+            require_authorization(conn, wid, node, task_dict.get('dispatch_operation_id'))
         if existing:
             try:
                 previous = json.loads(existing['payload_json'])
