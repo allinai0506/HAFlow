@@ -236,6 +236,65 @@ def read_repro_requirement(goal_contract: str) -> bool:
     return "靶向复现用例" in fields
 
 
+def select_default_test_command(markers: Dict[str, bool]) -> Dict[str, str]:
+    """Choose the auto-init test command from repo stack markers (C05b).
+
+    Explicit ``--test-cmd`` contracts are decided by the caller and never
+    reach this function.  When the caller would have to guess, ambiguity is
+    a recoverable refusal — never a silent default: a root ``package.json``
+    outranking everything else launched frontend tests against backend tasks
+    in multi-stack repos, and inventing a Java default would do the same in
+    reverse.  An empty marker set keeps the historical ``pytest`` fallback.
+    """
+    stack_files: Dict[str, List[str]] = {}
+    if markers.get("package_json"):
+        stack_files.setdefault("javascript", []).append("package.json")
+    python_files = [
+        name for name, label in
+        (("pytest_ini", "pytest.ini"), ("tests_dir", "tests/"))
+        if markers.get(name)
+    ]
+    if python_files:
+        stack_files.setdefault("python", []).extend(python_files)
+    if markers.get("cargo_toml"):
+        stack_files.setdefault("rust", []).append("Cargo.toml")
+    java_files = [
+        name for name, label in
+        (("pom_xml", "pom.xml"), ("build_gradle", "build.gradle"))
+        if markers.get(name)
+    ]
+    if java_files:
+        stack_files.setdefault("java", []).extend(java_files)
+
+    if len(stack_files) > 1:
+        detected = "; ".join(
+            f"{stack} [{', '.join(files)}]"
+            for stack, files in sorted(stack_files.items())
+        )
+        return {
+            "refusal": "multi_stack_ambiguous",
+            "detail": (
+                f"multiple stacks detected at repo root: {detected}; "
+                "relaunch with an explicit --test-cmd for the task's stack"
+            ),
+        }
+    if "java" in stack_files:
+        return {
+            "refusal": "java_without_explicit_contract",
+            "detail": (
+                "no trusted default test command for Java; "
+                "relaunch with an explicit --test-cmd"
+            ),
+        }
+    if "javascript" in stack_files:
+        return {"command": "CI=1 npm test"}
+    if "python" in stack_files:
+        return {"command": "pytest"}
+    if "rust" in stack_files:
+        return {"command": "cargo test"}
+    return {"command": "pytest"}
+
+
 def init_loop(
     target_dir: Path,
     goal: str,
