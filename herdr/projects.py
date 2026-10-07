@@ -7,6 +7,8 @@ import os
 import re
 import subprocess
 import sys
+import threading
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -685,6 +687,41 @@ def _start_coordinator(project_id, coordinator_pane_id):
         "--",
         "--auto",
     ])
+
+
+_COORDINATOR_HEAL_LOCK = threading.Lock()
+_COORDINATOR_HEAL_ATTEMPTS: dict[str, float] = {}
+
+
+def ensure_coordinator_running(project_id, coordinator_pane_id, min_interval_seconds=30.0):
+    """Ensure the coordinator agent is running on the given coordinator pane.
+
+    If the pane is alive but no agent is currently active, attempts to start
+    the coordinator agent with rate limiting to prevent rapid restart loops.
+    Returns True if the coordinator agent is alive (or was successfully started),
+    False otherwise.
+    """
+    if not coordinator_pane_id or not _pane_alive(coordinator_pane_id):
+        return False
+
+    if _coordinator_alive(coordinator_pane_id):
+        return True
+
+    now = time.time()
+    key = f"{project_id}:{coordinator_pane_id}"
+    with _COORDINATOR_HEAL_LOCK:
+        last_attempt = _COORDINATOR_HEAL_ATTEMPTS.get(key, 0.0)
+        if now - last_attempt < min_interval_seconds:
+            return False
+        _COORDINATOR_HEAL_ATTEMPTS[key] = now
+
+    try:
+        _start_coordinator(project_id, coordinator_pane_id)
+    except Exception as exc:
+        print(f"[COORDINATOR AUTO-HEAL ERROR] project={project_id} pane={coordinator_pane_id}: {exc}")
+        return False
+
+    return _coordinator_alive(coordinator_pane_id)
 
 def project_alive(project):
     if not project:
