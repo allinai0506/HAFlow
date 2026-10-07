@@ -6203,3 +6203,19 @@ test-01-r5 的 acceptance2 曾拿前端 vitest 计数（4248）证明后端测�
 
 ### 验证命令 / 关联证据
 `pytest -q tests/test_evaluator_multi_runner_metrics.py tests/test_autosave_clone_wip.py tests/test_workflow_closed_cli_error.py tests/test_pane_transcript_archive.py` 全绿（前两类修复前三用例 RED 复现现场症状）；全量 3604 passed + 157 subtests，唯一失败 test_no_spacing_grid_violations 经 pristine main 复跑确认为 #157 引入的存量失败。
+
+## §136 采样事件绑定当前版本号时，旧屏幕残留会自证新鲜；必须以持久在场周期鉴定内容的新旧（2026-10-07）
+
+### 问题背景
+wf-project-0929 审计复现 C03c：任务被 BLOCKER 观察置为 blocked 后，显式恢复（blocked→working，版本号递增）时 Pane 屏幕上的旧 BLOCKER 标记不消失；Sentinel 巡检把同一屏幕内容绑定任务**当前**版本号记成新的 `blocked_marker_observed`；Controller 的版本 CAS 无法识别它来自恢复前旧屏幕，任务再次 blocked。"拒绝旧事件"与"恢复仲裁队列"等既有修复都覆盖不了"旧屏幕被重新采样成新事件"这条路径。
+
+### 经验教训
+屏幕字节无法自证新旧，而"绑定采样时刻的任务版本"会让任何残留内容在下一次巡检自动获得新鲜版本号——版本匹配只能证明"样本在状态写入之后采集"，证明不了"内容产生于状态写入之后"。完成路径的 `observe_completion` 早已用持久行 + epoch 重置 + absent→present 周期解决同类问题（旧屏幕重放），但同构的 BLOCKER 路径没有移植该纪律，于是同一类缺陷换个入口复发。鉴别内容新旧的根本手段只有内容侧的时间序列证据：真实新事件之前必然存在一次"内容不可见"的观察，残留则永远连续在场。
+
+### 操作规范
+1. 观察类事件若绑定任务当前版本号，必须同时在持久层维护所观察内容的在场状态（如 completion_observations.blocker_present），仅"首次出现"或"缺失→再现周期"允许采样为事件；连续在场一律视为残留。
+2. 内容读取失败（空捕获）不得当作"不可见"记录，否则会伪造出给残留背书的周期；决策逻辑收敛为核心纯函数（blocker_sample_action），外壳只做装配。
+3. 为同一观察对象新增持久状态时复用既有行/表结构（只增列、状态不变不写），不得另建平行事实源；事件 payload 可附内容指纹（screen_sha256）供取证，但不作为判定依据。
+
+### 验证命令 / 关联证据
+`pytest -q tests/test_blocker_resample_discipline.py`（审计复现序列：record→blocked→恢复→同屏幕重采样必须 residue；absent→present 必须 record）9 passed；`pytest -q tests/test_blocked_observation_cas_storm.py tests/test_inner_loop_blocker_delivery.py tests/test_inner_loop_protocol.py` 全过；全量 3693 passed + 157 subtests，3 failed 均与本项无关（#157 console 间距存量、prompt binding 既有、源码形状断言随结构同步更新）。变更：`herdr/state_db.py` observe_blocker_marker、`herdr/completion.py` blocker_sample_action、`services/herdr-sentinel.py` BLOCKER 分支、`herdr/state_store.py`。
