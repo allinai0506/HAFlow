@@ -2102,3 +2102,5 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 
 ## [2026-10-07] update | 用户可操作派发恢复
 - Updated [[workflow-progress-recovery]]：增加范围恢复、启动现场核查、未交付确认表单与实际登记回执；明确旧身份显式确认、版本竞争、读取失败及迟到启动边界。
+
+- 2026-10-07：#159 复审修复——reap 归档传输误用 tmux capture-pane 抓取 Herdr Pane ID（非 tmux 目标），实测回收成功、归档失败、无归档文件；改为与 dump_transcript 及 observer live transcript 三处一致的 herdr pane read --source recent-unwrapped --lines 20000，失败语义不变。同批修正 test_pane_transcript_archive.py 两测试类从未进入默认收集（类名不以 Test 开头）与两处不存在的 Path.utime，并补 cmd_reap → 真实 capture 传输的接线回归（11 例全过，修复前收集为 0）。
