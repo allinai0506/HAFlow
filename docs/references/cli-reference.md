@@ -66,6 +66,10 @@ herdr-task launch \
 > 不存在即 fail-fast，本地分支与 origin 分叉同样拒绝（仅允许本地领先）。
 > `--supersedes <task_id>` 派发同时原子作废旧 Task（`failed→superseded` 合法）。
 
+首节点总指挥接单提示包含派发义务 ID 时，每个 Task 的 `launch` 命令必须携带 `--dispatch-operation-id <operation_id>`。Controller 产生此 ID；不要自行生成或借用其他节点的 ID。CLI 在写事务中核对当前 Workflow 代次、节点和固定配置，并把 ID 绑定到真实 launch intent 与 Task 的 Run 身份。旧手工命令仍可不带该参数，但不能据此证明总指挥派发已经落实。
+
+通知返回成功只表示输送结束。Controller 继续核验任务登记，发送开始后 900 秒仍缺少登记证据则转人工待办。超时或非零返回属于结果未知，先核对现有任务，不直接重发。使用 `herdr-task recovery-status --workflow-id <workflow_id>` 读取义务、下一次检查时间和截止时间。显式 `required_task_ids` 必须全部登记；没有清单时只证明首个有效 Task 登记，不证明 Worker 已开始工作或整个工作流完成。
+
 ### 2.2 `herdr-task node-status`
 查询 Workflow 指定节点的任务状态与 DAG 依赖摘要。
 ```bash

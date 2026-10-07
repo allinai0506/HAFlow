@@ -155,6 +155,8 @@ def drive_recovery(store, workflow_id, execute, now=None):
     now = time.time() if now is None else now
     operations = recovery_store.reconcile(store.db_path, workflow_id, now, active_only=True, limit=32)
     for op in operations:
+        if (op.get('payload') or {}).get('kind') == 'node_dispatch':
+            continue  # Only the coordinator queue can send a first-node dispatch.
         if op['status'] == 'awaiting_result':
             recovery_store.settle_result(store.db_path, op['id'], op['version'], now)
             continue

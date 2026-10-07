@@ -5040,6 +5040,23 @@ python3.13 -m pytest -q tests/test_scheduler_dispatch_e2e.py tests/test_herdr_ta
 
 ---
 
+
+### 第 106 节补充：任务尚未创建时，派发本身也需要恢复契约
+
+#### 问题背景
+首节点总指挥调用返回 0 却没有创建 Task，Controller 写 notified 并输出 STAGE ADVANCED。零 Task 绕过 continuation 和阶段悬挂检查。独立审查又复现发送前丢失内存队列、旧配置回落无跟踪发送、旧代次 Task 阻止新义务、终态历史挤掉当前义务。
+
+#### 经验教训
+外部命令返回与实际任务登记是两种事实。防重复闩必须配合有期限的持久责任；给 notified 加 TTL 然后盲目重发会把停滞变成重复副作用。查询必须在 LIMIT 前排除终态历史，代次过滤不能在下一层被全量历史判断撤销。
+
+#### 操作规范
+在同库登记派发义务，入队预占租约、发送前写 started、实际 CLI intent 与 Task 绑定 operation/Run/配置代次；未知交付只核验，到期转明确人工决定。JSON queued 不是队列恢复权威。等待期限不能被轮询或日志延长，hold 必须尊重原到期时间。 修复损坏 Task 载荷时，四个登记身份字段必须一起核对原持久 intent；只检查 operation ID 会把缺失 Run/execution/intent 误认为权威空值。缺失字段可以从原证据补齐，已有非空冲突必须拒绝，不能用新请求自证旧身份。
+
+#### 验证命令与证据
+`pytest -q tests/test_node_dispatch_contract.py tests/test_direct_stage_dispatch.py`。新增测试保留真实 Controller/CLI/SQLite，仅替换外部 Pane/Worker/Agent 传输；受控时钟、独立连接竞争和丢队列/旧配置/千条终态历史均有行为断言。初始复现 2 failed；本地验证与线上 Agent/部署验收分开报告。
+
+---
+
 ## 107. 语法检查通过 ≠ 功能可用：控制台"全绿但按钮打不开"
 
 ### 问题背景
@@ -6136,6 +6153,25 @@ if any(op['status'] not in {'resolved','superseded'}
 - Resolution: summarize untracked directories in Git before applying the unchanged output cap; preserve individual tracked-change detection.
 - Prevention: real Git regressions distinguish large internal-only evidence, untracked user directories and tracked internal changes. Treat OS probe failures as unknown and reject teardown. Preserve historical documents with Run-bound checkpoints and reversible artifact relocation without rewriting verdicts or bypassing branch hooks.
 
+### 首派回执与后续恢复的生命周期冲突（#156）
+
+**现象**：首个Task故障作废后，扫描识别需要补派，但resolved首派记录不允许claim，队列长期为空。
+
+**根因**：首次登记事实被复用为整个节点后续派发的准入状态，历史完成记录与当前恢复责任混在一起。
+
+**修复**：保留旧resolved，为合法替代谱系建立独立派发义务，身份绑定前序Task/Run；扫描和协调器读取同一当前记录，替代登记验证supersedes。
+
+**防复发**：用真实Controller/CLI/SQLite覆盖首派登记、故障自动作废、四轮扫描、替代登记及重复派发幂等；同时验证部分替代、再次故障和旧identity拒绝。
+
+### 控制契约接管旧状态与运行模式（#156第二次复审）
+
+**现象**：新责任记录缺少存量历史时丢弃合法补派；另一起点有任务使空起点未建责任；关闭intake后旧pending阻断后继；非-rN替代Task已登记仍生成多余补派。
+
+**根因**：新契约将历史记录当准入前提、按Workflow总任务判断节点，缺少未发送责任的模式移交，并将名称当作唯一谱系事实。
+
+**修复**：按节点接管存量补派；退役未发送责任并移交direct scheduler，保留已发送未知核验；追加epoch而不重置旧事实；显式supersedes合并既有命名谱系。
+
+**防复发**：真实Controller/CLI/SQLite验证存量恢复、多起点、pending与已预占待办切换模式、重新启用、已发送未知不重发，以及投递结果未知但非-rN替代Task已登记。
 ## §134 修复循环的 verdict 指纹不得含易失实例标识，重置预算必须保留语义指纹（2026-10-06）
 
 ### 问题背景

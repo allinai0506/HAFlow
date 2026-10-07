@@ -2417,6 +2417,11 @@ def _record_router_failure_task(args, node_id, error, *,
                     candidate_sha=launch_intent['candidate_sha'],
                     artifact_mode=getattr(args, "artifact_mode", None),
                     launch_intent_id=launch_intent['intent_id'])
+    if launch_intent and launch_intent.get('supersedes'):
+        task['supersedes'] = launch_intent['supersedes']
+    if launch_intent and launch_intent.get('dispatch_operation_id') is not None:
+        task.update(dispatch_operation_id=launch_intent['dispatch_operation_id'],
+                    execution_id=launch_intent['execution_id'])
     store.save_task(task)
     if launch_intent:
         from herdr.task_resources import finish_launch_intent
@@ -3242,6 +3247,8 @@ def _launch_task(args):
         duplicate = find_dispatch_task(store, args.workflow_id, node_id, args.dispatch_role,
                                        candidate, args.dispatch_round)
         if duplicate:
+            if getattr(args, 'dispatch_operation_id', None) is not None and duplicate.get('dispatch_operation_id') != args.dispatch_operation_id:
+                raise ValueError('existing task belongs to another dispatch operation')
             if committed_recovery:
                 _finish_committed_recovery_launch(store, duplicate, predecessor, args.supersede_reason)
             print(f"[DISPATCH DUPLICATE] proposed={args.task_id} existing={duplicate['task_id']}")
@@ -3265,7 +3272,9 @@ def _launch_task(args):
         claim = begin_launch_intent(store, workflow_id=args.workflow_id, node_id=node_id,
                                     role=args.dispatch_role, candidate_sha=candidate,
                                     dispatch_round=args.dispatch_round, task_id=args.task_id,
-                                    supersedes=getattr(args, "supersedes", None))
+                                    supersedes=getattr(args, "supersedes", None),
+                                    dispatch_operation_id=getattr(args, "dispatch_operation_id", None),
+                                    run_id=run_id, execution_id=getattr(args, "execution_id", None))
     except ValueError as exc:
         print(f"[DISPATCH REJECTED] {exc}")
         sys.exit(2)
@@ -3274,7 +3283,7 @@ def _launch_task(args):
         recovered = recover_launch_resources(store, claim['intent'])
         if recovered['status'] == 'resources_absent':
             release_agent_reservation(claim['intent']['task_id'])
-            claim = begin_launch_intent(store, workflow_id=args.workflow_id, node_id=node_id, role=args.dispatch_role, candidate_sha=candidate, dispatch_round=args.dispatch_round, task_id=args.task_id, supersedes=getattr(args, 'supersedes', None))
+            claim = begin_launch_intent(store, workflow_id=args.workflow_id, node_id=node_id, role=args.dispatch_role, candidate_sha=candidate, dispatch_round=args.dispatch_round, task_id=args.task_id, supersedes=getattr(args, 'supersedes', None), dispatch_operation_id=getattr(args, 'dispatch_operation_id', None), run_id=run_id, execution_id=getattr(args, 'execution_id', None))
     if claim['status'] != 'claimed':
         if claim['status'] == 'duplicate':
             if committed_recovery:
@@ -3860,6 +3869,10 @@ def _launch_task(args):
     if bound_sha:
         task["candidate_sha"] = bound_sha
     _apply_execution_identity(task, args)
+    if launch_intent.get('dispatch_operation_id') is not None:
+        task['dispatch_operation_id'] = launch_intent['dispatch_operation_id']
+        if launch_intent.get('supersedes'):
+            task['supersedes'] = launch_intent['supersedes']
     if raw_policy:
         task["agent_policy"] = agent_policy
     if exec_fields["execution_mode"] == "context":
@@ -7913,6 +7926,7 @@ def main():
     launch.add_argument("--supersede-reason", help="Explicit reason for replacement instead of same-task rework")
     launch.add_argument("--artifact-mode", choices=["repository_changes", "shared_artifacts"])
     launch.add_argument("--dispatch-role", default=None, help="Stable node role shared by automatic/manual launches")
+    launch.add_argument("--dispatch-operation-id", type=int, default=None, help="Bind coordinator dispatch to its durable operation")
     launch.add_argument("--dispatch-round", type=int, default=None, help="New rounds require --supersedes")
     launch.add_argument("--task-id", required=True)
     launch.add_argument("--workflow-id", required=True)

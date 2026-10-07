@@ -2080,4 +2080,12 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 2026-10-06: activation review found verifier-cohort freshness race; shared business gate now rechecks the entire SQL cohort after all artifact hashes, preserving legacy reuse.
 
 - 2026-10-06: close inventory uses Git untracked-directory summaries before bounded output; internal evidence cannot crowd out protected user output, and tracked internal changes remain protected.
+
+- 2026-10-06：workflow-progress-recovery 增补首节点 node_dispatch 持久义务、发送前预占、固定登记截止、CLI intent/Task 绑定和零任务展示。记录历史上限、旧代次、丢队列及旧配置反例；当前仅本地工作树，不代表已部署或真实 Agent 自动完成。
+
+- 2026-10-06：#156审查确认resolved首派阻断基础设施故障补派；补充独立replacement派发记录、前序身份及完整生命周期回归，保留历史首派证据。
+
+- 2026-10-06：#156第二次复审补齐无首派历史的存量任务接管、多起点按节点发现、未发送接单责任的模式移交，以及非-rN替代任务的持久谱系识别。
+
+- 2026-10-06：PR #156复审补齐存量接管、模式移交和任意命名替代关系；授权恢复后以排列及真实SQLite验证谱系选择确定性，真实Agent/部署未执行。
 - 2026-10-06：fix-loop 重复扣预算根因=verdict 指纹含易失 task_id 且闩释放清指纹；指纹改纯语义（branch+note+affected），释放保留 |fp，后继代同结论走升级不再开轮。

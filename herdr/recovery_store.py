@@ -106,6 +106,8 @@ def ensure_obligations(conn, workflow, config, tasks, now=None):
             _event(conn, op, 'registered', now)
         result.append(op)
     for row in conn.execute("SELECT * FROM workflow_recovery_operations WHERE workflow_id=? AND status NOT IN ('superseded','resolved')", (workflow['workflow_id'],)).fetchall():
+        if json.loads(row['payload_json']).get('kind') == 'node_dispatch':
+            continue  # Its independent dispatch lifecycle owns reconciliation.
         if row['identity_key'] not in identities:
             if (row['status'] == 'awaiting_result' or (row['started'] and row['status'] == 'running')
                     or (row['started'] and row['status'] == 'pending'
@@ -155,6 +157,8 @@ def _transaction(db_path):
 
 def _expire(conn, workflow_id, now):
     for row in conn.execute("SELECT * FROM workflow_recovery_operations WHERE workflow_id=? AND ((status='running' AND lease_until<=?) OR (status='waiting' AND next_due_at<=?))", (workflow_id, now, now)).fetchall():
+        if json.loads(row['payload_json']).get('kind') == 'node_dispatch' and row['status'] == 'running':
+            continue  # Unknown transport is checked against its fixed dispatch deadline.
         unknown = row['status'] == 'running' and row['started']
         status = 'waiting_human' if unknown or row['status'] == 'waiting' or row['attempts'] >= 3 else 'pending'
         detail = {**json.loads(row['detail_json']), 'reason': 'delivery_unknown' if unknown else 'lease_expired' if row['status'] == 'running' else 'hold_expired'}
@@ -348,6 +352,11 @@ def decide_operation(db_path, operation_id, expected_version, operator, action, 
             raise ValueError('stale recovery facts or inactive workflow')
         if action == 'retry' and ((op['payload'].get('status') == 'waiting_human' and op['payload'].get('reason') != 'finalize_escalated') or op['started']):
             raise ValueError('retry prerequisites unknown; delivery must be verified')
+        if op['payload'].get('kind') == 'node_dispatch':
+            from .node_dispatch import current
+            _, config = _workflow_snapshot(conn, op['workflow_id'])
+            if not current(op, workflow, config):
+                raise ValueError('stale dispatch generation or configuration')
         if action == 'verify':
             from herdr.workflow_progress import recovery_identity
             if op['status'] not in ('waiting_human', 'awaiting_result') or not op['started']:

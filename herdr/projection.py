@@ -337,6 +337,17 @@ def detect_workflow_stalls(
                 "target_task_id": None,
             }
 
+    # First-node obligations exist before any Task and are read from SQLite.
+    if wf_entry and wf_entry.get('startup_ready') is not False:
+        from herdr import state_db
+        from herdr.node_dispatch_store import read_wait_projection
+        try:
+            dispatch_wait = read_wait_projection(state_db.resolve_state_db_path(), workflow_id, now)
+        except (OSError, ValueError, RuntimeError):
+            dispatch_wait = None
+        if dispatch_wait:
+            return dispatch_wait
+
     # Planned obligations survive Task cleanup and superseded historical rows.
     if wf_entry:
         from herdr.projects import workflow_config_for, inspect_continuation

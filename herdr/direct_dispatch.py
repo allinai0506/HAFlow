@@ -20,7 +20,7 @@ import os
 import re
 from pathlib import Path
 
-REPLACEMENT_SUFFIX_RE = re.compile(r"-r(\d+)$")
+from .task_lineage import REPLACEMENT_SUFFIX_RE, lineage_key, lineage_redispatch_candidates
 
 # onto 只接受合法分支名:非法值一律丢弃(fail-open 原行为)。
 # 允许 slash（agent/... 功能分支常见），拒绝路径穿越/空白/shell 元字符。
@@ -283,44 +283,6 @@ def next_replacement_id(old_task_id, existing_ids):
         if candidate not in existing_ids:
             return candidate
         index += 1
-
-
-def lineage_key(task_id):
-    """替换谱系键：(谱系根, 序号)。x -> (x, 1)；x-r2 -> (x, 2)。"""
-    text = str(task_id or "")
-    match = REPLACEMENT_SUFFIX_RE.search(text)
-    if match:
-        return text[: match.start()], int(match.group(1))
-    return text, 1
-
-
-def lineage_redispatch_candidates(node_tasks):
-    """每条替换谱系里"需要补派"的最新一发（没有则不含该谱系）。
-
-    规则：谱系内只要还有任一非 superseded 成员（在跑/已落定），该谱系就
-    已有代表，不再补派；只有当整个谱系都已作废时，才取序号最新的一发
-    作为补派对象（且它必须还没有替代者）。
-
-    补派必须按谱系去重：历史被作废任务若被反复补派，会随 fix-loop 轮次
-    指数放大（2 -> 4 -> 8 个并发重复任务，实测事故见 lessons §61）。
-    """
-    groups = {}
-    for task in node_tasks:
-        root, index = lineage_key(task.get("task_id"))
-        groups.setdefault(root, []).append(
-            (index, float(task.get("created_at") or 0), task)
-        )
-
-    candidates = []
-    for members in groups.values():
-        if any(
-            task.get("status") != "superseded" for _, _, task in members
-        ):
-            continue
-        _, _, head = max(members, key=lambda item: (item[0], item[1]))
-        if not head.get("superseded_by") and head.get("replacement_pending") is not False:
-            candidates.append(head)
-    return candidates
 
 
 def node_tasks_for_latch(tasks, workflow_id, node_id):

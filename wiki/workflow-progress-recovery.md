@@ -62,3 +62,34 @@ Task 容量也必须读取固定 config；生产曾显示 SQL review预算6，�
 本页描述工作树实现，不能证明已部署或原 NexusArchive 业务测试已通过。发布需独立不可变 release、只读 shadow 对比、单执行者切换及授权后的现场复跑。源仓库 WIP 的归属与业务修复范围需由负责人确认。
 
 相关页面：[[dag-workflow-engine]]、[[task-lifecycle]]、[[index]]。
+
+## FACT：首节点派发到任务登记的持久责任（本地实现）
+
+默认总指挥接单首节点在 SQLite `workflow_recovery_operations` 登记 `node_dispatch`。Workflow 零 Task 时也能读取待办。队列发送前预占同库租约，队列项携带 operation/owner；内存队列丢失后通过租约恢复，不让 JSON queued 永久压住派发。配置或代次变化拒绝旧队列，缺少当前 obligation 不回落到无跟踪发送。
+
+外部发送前持久化 started 与固定 900 秒任务登记截止；Agent 命令成功只记录等待登记，不证明推进。CLI `launch --dispatch-operation-id` 把当前代次、Run 与 operation 绑定到真实 intent 和 Task，写事务拒绝伪造/跨代次登记。显式 required_task_ids 必须齐全；没有清单时只证明首个有效 Task 登记，不证明拆分完整、Worker 开始工作或工作流交付完成。同一已落实派发在原截止内可登记后续并行 Task，不能再发送该派发。
+
+超时/非零/发送后失联先核验，不盲目重发。没有任务登记证据到期转 waiting_human；缺 Pane/忙碌等发送前问题最多三次，有期限暂缓不被普通扫描提前结束。历史 notified 空节点以明确 migration origin 登记未知交付，首次迁移建立核验期限，不虚构历史发送时间。所有终态历史在扫描前过滤，防止容量上限挤掉当前义务。
+
+Evidence:
+- `herdr/node_dispatch.py#payload/result/wait_projection`
+- `herdr/node_dispatch_store.py#reconcile_workflow/claim/start/validate_task_registration`
+- `services/herdr-controller.py#reconcile_node_dispatches/check_workflow_stage_advance/_handle_coordinator_item`
+- `herdr/task_resources.py#begin_launch_intent`
+- `tests/test_node_dispatch_contract.py`
+
+UNKNOWN：本节是本地工作树实现。真实 Agent 接单、生产部署和从新建到交付的无人干预完成尚未验证。
+
+## 首派完成后的替代派发生命周期
+
+首派resolved是历史登记证据，不能充当后续补派的准入锁。当前代次存在合法superseded且replacement_pending未被明确取消的谱系头时，沿用lineage_redispatch_candidates，建立独立派发记录；前序Task/Run集合纳入identity，原resolved不重置。扫描和协调器均查询当前节点最新记录，旧队列不能认领新记录。替代launch intent及Task必须携带本记录的 --supersedes，全部前序任务均有绑定的替代Task后才resolved。新记录仍保持固定期限、持久核验、unknown不重发和人工待办。
+
+发送和launch前再次核验前序Task/Run及待补派资格；部分前序撤销时未发送计划终止，下一轮为剩余合法谱系建立新责任，prior_operation_id关联旧计划，避免取消后恢复撞旧终态。已登记supersedes身份不可擦除或重绑定。
+
+## 存量、模式与显式替代关系
+
+首节点责任按节点任务发现；其他起点已有Task不阻止空节点建立待办。存量当前代次superseded且仍需替代的任务，即使没有首派历史，也建立第一条绑定前序Task/Run的派发责任。关闭总指挥接单时，只结束尚未发送的待办，释放旧阶段锁并移交直接调度；已发送未知交付继续核验，不借开关重发。重新启用时追加新epoch并保留退役记录。替代谱系合并持久supersedes关系与旧-rN命名兼容，登记后的替代Task不依赖反向superseded_by落盘即可阻止重复补派。
+
+模式移交仅适用于pending/running且未发送；人工hold及waiting_human不因切换模式失效。谱系同时处理显式、反向及传统隐式后继顺序，改名后再进入旧-rN命名仍选择最新后继，显式关系优先于有冲突的名称推断。
+
+谱系选择不依赖数据库返回顺序：冲突环只舍弃进入持久后继的推断边；同rank时优先持久关系深度，再登记时间，最后Task ID稳定决胜。Task ID不证明时间先后；纯持久闭环继续拒绝补派。未发送首派遇到已登记的当前执行库存时，仅库存完整且身份明确才移交责任；部分库存和人工hold保留原义务。

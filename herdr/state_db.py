@@ -1591,6 +1591,38 @@ def save_task(
         # Parent creation and task/obligation writes share this transaction.
         if not conn.execute("SELECT 1 FROM workflows WHERE workflow_id = ?", (wid,)).fetchone():
             save_workflow({"workflow_id": wid, "title": wid, "status": "pending"}, db_path, conn=conn)
+        existing = conn.execute('SELECT workflow_id,node,payload_json FROM tasks WHERE task_id=?', (tid,)).fetchone()
+        if existing:
+            try:
+                previous = json.loads(existing['payload_json'])
+            except (TypeError, json.JSONDecodeError):
+                previous = None
+            if not isinstance(previous, dict):
+                previous = {}
+            identity_keys = ('dispatch_operation_id', 'run_id', 'execution_id', 'launch_intent_id')
+            if any(previous.get(key) in (None, '') for key in identity_keys):
+                from .node_dispatch_store import recover_registration_identity
+                durable = recover_registration_identity(conn, existing['workflow_id'], tid)
+                if durable:
+                    if any(previous.get(key) not in (None, '') and previous[key] != durable[key]
+                           for key in (*identity_keys, 'supersedes')):
+                        raise ValueError('dispatch registration identity conflicts with durable launch intent')
+                    previous.update(durable)
+                elif previous.get('dispatch_operation_id') is not None:
+                    raise ValueError('dispatch registration identity is incomplete without durable launch intent')
+            if previous.get('dispatch_operation_id') is not None and previous.get('supersedes') is None:
+                from .node_dispatch_store import recover_registration_identity
+                durable = recover_registration_identity(conn, existing['workflow_id'], tid)
+                previous['supersedes'] = durable.get('supersedes')
+            if previous.get('dispatch_operation_id') != task_dict.get('dispatch_operation_id'):
+                raise ValueError('cannot rebind an existing task to another dispatch operation')
+            if previous.get('dispatch_operation_id') is not None and (
+                    existing['workflow_id'] != wid or existing['node'] != node
+                    or any(previous.get(key) != task_dict.get(key) for key in ('run_id', 'execution_id', 'launch_intent_id', 'supersedes'))):
+                raise ValueError('cannot change dispatch task registration identity')
+        elif task_dict.get('dispatch_operation_id') is not None:
+            from .node_dispatch_store import validate_task_registration
+            validate_task_registration(conn, task_dict, now)
         conn.execute("""
             INSERT INTO tasks (task_id, workflow_id, node, stage, agent, status, stage_verdict, stage_verdict_note, pane_id, goal, blocker, payload_json, created_at, updated_at, version)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)

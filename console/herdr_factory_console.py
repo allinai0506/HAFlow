@@ -7690,12 +7690,15 @@ function renderRecoveryPanel(wid){
   const operations=(state.controllerActionsData?.recovery||[]).filter(o=>!['resolved','superseded'].includes(o.status));
   if(!operations.length)return '';
   const labels={pending:'等待执行',running:'正在处理',waiting:'有期限暂缓',waiting_human:'等待人工处理',awaiting_result:'等待新候选验收'};
-  const reasons={source_wip_requires_decision:'源仓库存在未处理改动，请先确认归属和处理方式',delivery_unknown:'交付结果未知，请核对现有后继',successor_delivery_unconfirmed:'后继交付尚未确认',candidate_unknown:'候选身份尚未确认',candidate_mismatch:'验收候选与当前候选不一致',recovery_successor_failed:'修复任务仍未通过，需要人工处理',finalize_escalated:'交付需要人工排除前置障碍',workflow_execution_unknown:'工作流执行身份尚未确认'};
+  const reasons={dispatch_task_missing:'未确认目标任务登记，请核对已有派发并补足需求',dispatch_delivery_unknown:'派发结果未知，先核验已有任务',dispatch_awaiting_task:'通知已返回，正在核验实际任务登记',legacy_dispatch_unknown:'历史通知无登记证据，正在核验',coordinator_missing:'总指挥工位不可用，等待前置问题处理',dispatch_generation_changed:'工作流代次或配置已变化，旧派发需核对',coordinator_busy:'总指挥忙碌，等待下一次检查',source_wip_requires_decision:'源仓库存在未处理改动，请先确认归属和处理方式',delivery_unknown:'交付结果未知，请核对现有后继',successor_delivery_unconfirmed:'后继交付尚未确认',candidate_unknown:'候选身份尚未确认',candidate_mismatch:'验收候选与当前候选不一致',recovery_successor_failed:'修复任务仍未通过，需要人工处理',finalize_escalated:'交付需要人工排除前置障碍',workflow_execution_unknown:'工作流执行身份尚未确认'};
   return '<section><div class="ctl-section-title">恢复待办</div>'+operations.map(o=>{
     const reason=o.detail?.reason||o.payload?.reason||'';
+    const dispatch=o.payload?.kind==='node_dispatch';
+    const label=dispatch&&o.status==='awaiting_result'?'等待总指挥建立任务':(labels[o.status]||o.status);
+    const timing=dispatch?`节点 ${o.payload.node_id} · 负责人：总指挥 · 恢复：Controller · 下次检查：${o.next_due_at?new Date(o.next_due_at*1000).toLocaleString():'等待人工决定'}${o.detail?.deadline_at?' · 截止：'+new Date(o.detail.deadline_at*1000).toLocaleString():''}`:(o.payload?.task_ids||[]).join(', ');
     const action=o.started?'verify':'retry';
     const controls=o.status==='waiting_human'?`<button class="mini" onclick="decideRecovery(${o.id},${o.version},'${action}','${esc(wid)}')">${o.started?'核对现有任务':'前置问题已处理，重试'}</button><button class="mini" onclick="decideRecovery(${o.id},${o.version},'hold','${esc(wid)}')">暂缓一小时</button>`:'';
-    return `<div class="ctl-blocker"><strong>${esc(labels[o.status]||o.status)}</strong><div class="muted">${esc(reasons[reason]||reason)} · ${esc((o.payload?.task_ids||[]).join(', '))}</div><div>${controls}</div></div>`;
+    return `<div class="ctl-blocker"><strong>${esc(label)}</strong><div class="muted">${esc(reasons[reason]||reason)} · ${esc(timing)}${o.detail?.decision_needed?' · '+esc(o.detail.decision_needed):''}</div><div>${controls}</div></div>`;
   }).join('')+'</section>';
 }
 function decideRecovery(id,version,action,wid){

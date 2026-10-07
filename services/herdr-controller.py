@@ -4627,8 +4627,28 @@ def next_recovery_task_id(task_id, tasks):
 
 
 def check_workflow_recovery(workflow_id):
+    reconcile_node_dispatches(workflow_id, discover=False)
     from herdr.workflow_recovery import drive_recovery
     return drive_recovery(_get_store(), workflow_id, execute_workflow_recovery)
+
+
+def reconcile_node_dispatches(workflow_id, *, discover=True):
+    from herdr.node_dispatch_store import reconcile_workflow, operation_for_node
+    state = load_stage_state()
+    legacy = [key[len(workflow_id) + 1:] for key, value in state.items()
+              if key.startswith(workflow_id + ':') and value == 'notified']
+    enabled = coordinator_intake_enabled()
+    if not enabled:
+        record = _get_store().get_workflow(workflow_id) or {}
+        for node in (record.get('config') or {}).get('nodes') or []:
+            if node.get('depends_on'):
+                continue
+            op = operation_for_node(_get_store().db_path, workflow_id, node['id'])
+            if op and not op['started'] and op['status'] in ('pending', 'running'):
+                # Release the old latch before committing transfer; no direct queue is created yet.
+                clear_stage_advance(workflow_id, node['id'])
+    return reconcile_workflow(_get_store().db_path, workflow_id,
+                              legacy_notified=legacy, discover=discover and enabled, intake_enabled=enabled)
 
 
 def check_workflow_stage_advance(workflow_id):
@@ -4649,12 +4669,17 @@ def check_workflow_stage_advance(workflow_id):
         recovery_store.reconcile(_get_store().db_path, workflow_id)
         record, snapshot_config, snapshot_tasks = recovery_store.read_snapshot(_get_store().db_path, workflow_id)
         reconcile_stage_advance_states(workflow_id, snapshot_config)
+        reconcile_node_dispatches(workflow_id)
         assessment = assess_workflow(record, snapshot_config, snapshot_tasks)
         if not assessment['can_advance']:
             return
 
     pane = coordinator_pane_for_workflow(workflow_id)
     if not pane:
+        from herdr.node_dispatch_store import defer
+        for op in recovery_store.list_operations(_get_store().db_path, workflow_id):
+            if op['payload'].get('kind') == 'node_dispatch':
+                defer(_get_store().db_path, op['id'], 'coordinator_missing')
         return
 
     workflow_cfg = workflow_config_for(workflow_id)
@@ -4709,6 +4734,14 @@ def check_workflow_stage_advance(workflow_id):
             for n in workflow_cfg.get("nodes", [])
             if is_node_complete(workflow_id, n["id"])
         }
+
+        from herdr.node_dispatch_store import operation_for_node
+        for root in workflow_cfg.get('nodes', []):
+            if root.get('depends_on'):
+                continue
+            dispatch = operation_for_node(_get_store().db_path, workflow_id, root['id'])
+            if dispatch and dispatch['status'] not in ('resolved', 'superseded'):
+                completed_nodes.discard(root['id'])
 
         # PR #110:选择性返工只作废 retry_node 内被点名的谱系,其余任务
         # 仍 completed-like——is_node_complete 会把节点误判为完成,
@@ -4887,6 +4920,22 @@ def check_workflow_stage_advance(workflow_id):
                 )
                 continue
 
+            dispatch_claim = None
+            if not deps:
+                from herdr.node_dispatch_store import operation_for_node, claim
+                op = operation_for_node(_get_store().db_path, workflow_id, ready_id)
+                if coordinator_intake_enabled() and not op and _get_store().get_workflow(workflow_id):
+                    continue
+                if op and not coordinator_intake_enabled() and op['status'] not in ('resolved', 'superseded'):
+                    continue
+                if op and coordinator_intake_enabled():
+                    import uuid
+                    dispatch_claim = claim(_get_store().db_path, op['id'], uuid.uuid4().hex)
+                    if dispatch_claim is None:
+                        continue
+                    # SQLite reservation owns queued delivery; a lost JSON latch cannot suppress recovery.
+                    clear_stage_advance(workflow_id, ready_id)
+
             if not mark_stage_advance_queued(workflow_id, ready_id):
                 continue
 
@@ -4899,6 +4948,8 @@ def check_workflow_stage_advance(workflow_id):
                     "next_stage": ready_id,
                     "stage_label": ready_node.get("label", ready_id),
                     "node": ready_node,
+                    "dispatch_operation_id": dispatch_claim['id'] if dispatch_claim else None,
+                    "dispatch_owner": dispatch_claim['owner'] if dispatch_claim else None,
                 }
             )
 
@@ -6880,6 +6931,8 @@ def _handle_coordinator_item(item):
     # Workflow Stage Advance
     # ==============================================
     if item.get("kind") == "stage_advance":
+        dispatch_op = None
+        dispatch_owner = None
         node = item.get("node")
         target_node_id = item.get("node_id") or item.get("next_stage")
         if not node:
@@ -6895,6 +6948,13 @@ def _handle_coordinator_item(item):
                     "native executor unavailable; manual handling required"
                 )
                 return
+        if item.get('stage') in (None, '', 'start') and not coordinator_intake_enabled():
+            if _get_store().get_workflow(item['workflow_id']):
+                from herdr.node_dispatch_store import operation_for_node
+                reconcile_node_dispatches(item['workflow_id'], discover=False)
+                previous_dispatch = operation_for_node(_get_store().db_path, item['workflow_id'], target_node_id)
+                if previous_dispatch and previous_dispatch['status'] not in ('resolved', 'superseded'):
+                    return
         # 总指挥接单:新工作流首个节点(start -> first)默认交总指挥理解
         # 需求后再派发;HERDR_COORDINATOR_INTAKE=0 或非首节点保持直派。
         if (
@@ -6902,6 +6962,24 @@ def _handle_coordinator_item(item):
             and coordinator_intake_enabled()
         ):
             item = dict(item, intake=True)
+            if _get_store().get_workflow(item['workflow_id']):
+                from herdr.node_dispatch_store import operation_for_node
+                reconcile_node_dispatches(item['workflow_id'])
+                dispatch_op = operation_for_node(_get_store().db_path, item['workflow_id'], target_node_id)
+                if not dispatch_op:
+                    print(f"[STAGE DISPATCH DROP] workflow={item['workflow_id']} node={target_node_id}: no current obligation")
+                    return
+                if item.get('dispatch_operation_id') is not None:
+                    if (item['dispatch_operation_id'] != dispatch_op['id']
+                            or item.get('dispatch_owner') != dispatch_op['owner']
+                            or dispatch_op['status'] != 'running' or dispatch_op['started']):
+                        return
+                    dispatch_owner = item['dispatch_owner']
+                elif dispatch_op['status'] != 'pending' or dispatch_op['started']:
+                    return
+                pinned = _get_store().get_workflow(item['workflow_id'])['config']
+                node = find_node(pinned, target_node_id)
+                item = dict(item, node=node)
             print(
                 f"[COORDINATOR INTAKE] "
                 f"workflow={item['workflow_id']} "
@@ -6916,6 +6994,10 @@ def _handle_coordinator_item(item):
         workflow_id = item["workflow_id"]
         coord_pane = coordinator_pane_for_workflow(workflow_id)
         if not coord_pane:
+            if dispatch_op:
+                from herdr.node_dispatch_store import defer
+                defer(_get_store().db_path, dispatch_op['id'], 'coordinator_missing', owner=dispatch_owner)
+                clear_stage_advance(workflow_id, target_node_id)
             print(
                 f"[STAGE ADVANCE SKIP] "
                 f"no coordinator pane for workflow={workflow_id}"
@@ -7171,6 +7253,8 @@ task_type:
    --node {next_stage}
    --source {project_root}
 {candidate_flags}
+{('   --dispatch-operation-id ' + str(dispatch_op['id'])) if dispatch_op else ''}
+{('   替代派发：每个前序任务各建一个替代Task，分别携带 --supersedes ' + ', --supersedes '.join(p['task_id'] for p in dispatch_op['payload'].get('predecessors', []))) if dispatch_op and dispatch_op['payload'].get('predecessors') else ''}
 
 6. 默认使用本节点 policy：
 
@@ -7205,22 +7289,39 @@ task_type:
 {COORDINATOR_DISCIPLINE}
 """.strip()
 
-                    result = subprocess.run(
-                        [
-                            "herdr",
-                            "agent",
-                            "prompt",
-                            coord_pane,
-                            message,
-                            "--wait",
-                            "--timeout",
-                            "600000"
-                        ],
-                        text=True,
-                        capture_output=True
-                    )
-
-                    if result.returncode == 0:
+                    if dispatch_op:
+                        from herdr.node_dispatch_store import claim, start, transport_finished
+                        import uuid
+                        if dispatch_owner is None:
+                            dispatch_owner = uuid.uuid4().hex
+                            claimed = claim(_get_store().db_path, dispatch_op['id'], dispatch_owner)
+                            if claimed is None:
+                                return
+                        if start(_get_store().db_path, dispatch_op['id'], dispatch_owner) is None:
+                            clear_stage_advance(workflow_id, target_node_id)
+                            return
+                    try:
+                        result = subprocess.run(
+                            ["herdr", "agent", "prompt", coord_pane, message,
+                             "--wait", "--timeout", "600000"],
+                            text=True, capture_output=True, timeout=600,
+                        )
+                    except Exception:
+                        if not dispatch_op:
+                            raise
+                        result = None
+                    if dispatch_op:
+                        receipt = transport_finished(_get_store().db_path, dispatch_op['id'], dispatch_owner,
+                            reason='dispatch_awaiting_task' if result and result.returncode == 0 else 'dispatch_delivery_unknown')
+                        mark_stage_advance_notified(workflow_id, target_node_id)
+                        if receipt['status'] == 'resolved':
+                            print(f"[STAGE ADVANCED] workflow={workflow_id} {stage} -> {next_stage}")
+                            maybe_compact_coordinator(workflow_id, reason=f"stage_advance:{next_stage}")
+                        else:
+                            print(f"[STAGE DISPATCH AWAITING_TASK] workflow={workflow_id} "
+                                  f"node={target_node_id} operation={receipt['id']} "
+                                  f"status={receipt['status']} deadline={receipt['detail'].get('deadline_at')}")
+                    elif result.returncode == 0:
                         mark_stage_advance_notified(
                             workflow_id,
                             target_node_id
@@ -7252,6 +7353,9 @@ task_type:
 
                 elapsed = time.time() - wait_started
                 if elapsed >= liveness.stage_advance_sla():
+                    if dispatch_op:
+                        from herdr.node_dispatch_store import defer
+                        defer(_get_store().db_path, dispatch_op['id'], 'coordinator_busy', owner=dispatch_owner)
                     # 有界等待:总指挥长期不可用(僵尸 pane / 状态僵死)时,
                     # 释放阶段闩并记录 attention,绝不占用 workflow 调度锁空转。
                     clear_stage_advance(

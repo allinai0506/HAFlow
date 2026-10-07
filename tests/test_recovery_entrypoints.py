@@ -47,7 +47,18 @@ def test_controller_records_failure_even_without_coordinator_or_ready_join(tmp_p
     conn.execute('DELETE FROM workflow_recovery_operations')
     conn.close()
     ctl.check_workflow_stage_advance('wf')
-    assert len(recovery_store.list_operations(store.db_path, 'wf')) == 1
+    operations = recovery_store.list_operations(store.db_path, 'wf')
+    assert len(operations) == 2
+    failures = [op for op in operations if op['payload'].get('kind') == 'fix_loop']
+    assert len(failures) == 1
+    assert failures[0]['payload']['task_ids'] == ['test']
+    assert failures[0]['status'] == 'waiting_human'
+    dispatches = [op for op in operations if op['payload'].get('kind') == 'node_dispatch']
+    assert len(dispatches) == 1
+    assert dispatches[0]['payload']['node_id'] == 'implementation'
+    assert dispatches[0]['status'] == 'pending'
+    assert dispatches[0]['started'] == 0
+    assert ctl.coordinator_queue.empty()  # blocked gate still prevents positive dispatch
     reset_state_store()
 
 
