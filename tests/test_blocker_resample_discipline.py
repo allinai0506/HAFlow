@@ -46,6 +46,7 @@ class BlockerSampleActionTest(unittest.TestCase):
             blocker_sample_action(
                 marker_present=False,
                 last_blocker_present=True,
+                current_version=3,
                 prior_event_version=1,
                 prior_event_consumed=True,
                 prior_event_screen_sha256="a",
@@ -59,6 +60,7 @@ class BlockerSampleActionTest(unittest.TestCase):
             blocker_sample_action(
                 marker_present=True,
                 last_blocker_present=False,
+                current_version=3,
                 prior_event_version=1,
                 prior_event_consumed=True,
                 prior_event_screen_sha256="a",
@@ -72,6 +74,7 @@ class BlockerSampleActionTest(unittest.TestCase):
             blocker_sample_action(
                 marker_present=True,
                 last_blocker_present=None,
+                current_version=1,
                 prior_event_version=None,
                 prior_event_consumed=False,
                 prior_event_screen_sha256=None,
@@ -80,12 +83,13 @@ class BlockerSampleActionTest(unittest.TestCase):
             "record",
         )
 
-    def test_unconsumed_prior_sample_stays_re_samplable(self):
+    def test_unconsumed_sample_with_stale_version_records(self):
         """场景 A：元数据写使未消费样本版本失效后，必须继续提供可消费样本。"""
         self.assertEqual(
             blocker_sample_action(
                 marker_present=True,
                 last_blocker_present=True,
+                current_version=2,
                 prior_event_version=1,
                 prior_event_consumed=False,
                 prior_event_screen_sha256="a",
@@ -94,39 +98,72 @@ class BlockerSampleActionTest(unittest.TestCase):
             "record",
         )
 
-    def test_consumed_prior_with_same_screen_bytes_is_residue(self):
-        """C03c：已消费样本的屏幕逐字节未变，即旧残留。"""
+    def test_unconsumed_sample_with_changed_screen_records(self):
         self.assertEqual(
             blocker_sample_action(
                 marker_present=True,
                 last_blocker_present=True,
+                current_version=1,
                 prior_event_version=1,
-                prior_event_consumed=True,
-                prior_event_screen_sha256="a",
-                screen_sha256="a",
-            ),
-            "residue",
-        )
-
-    def test_consumed_prior_with_changed_screen_bytes_records(self):
-        """恢复后快速再耗尽（两次巡检之间完成 absent→present）也是新阻塞。"""
-        self.assertEqual(
-            blocker_sample_action(
-                marker_present=True,
-                last_blocker_present=True,
-                prior_event_version=3,
-                prior_event_consumed=True,
+                prior_event_consumed=False,
                 prior_event_screen_sha256="a",
                 screen_sha256="b",
             ),
             "record",
         )
 
-    def test_legacy_consumed_prior_without_fingerprint_fails_toward_no_reblock(self):
+    def test_unconsumed_version_current_sample_is_not_duplicated(self):
+        """Controller 不可用期间未消费样本不得每巡检复制一条（事件量有界）。"""
         self.assertEqual(
             blocker_sample_action(
                 marker_present=True,
                 last_blocker_present=True,
+                current_version=1,
+                prior_event_version=1,
+                prior_event_consumed=False,
+                prior_event_screen_sha256="a",
+                screen_sha256="a",
+            ),
+            "residue",
+        )
+
+    def test_unconsumed_legacy_sample_with_current_version_is_not_duplicated(self):
+        self.assertEqual(
+            blocker_sample_action(
+                marker_present=True,
+                last_blocker_present=True,
+                current_version=1,
+                prior_event_version=1,
+                prior_event_consumed=False,
+                prior_event_screen_sha256=None,
+                screen_sha256="a",
+            ),
+            "residue",
+        )
+
+    def test_consumed_residue_is_residue_regardless_of_screen_bytes(self):
+        """C03c：已消费样本之后，同屏或变屏（steer 注入/人工输入）都是残留。"""
+        for sha in ("a", "b"):
+            self.assertEqual(
+                blocker_sample_action(
+                    marker_present=True,
+                    last_blocker_present=True,
+                    current_version=3,
+                    prior_event_version=1,
+                    prior_event_consumed=True,
+                    prior_event_screen_sha256="a",
+                    screen_sha256=sha,
+                ),
+                "residue",
+                sha,
+            )
+
+    def test_consumed_legacy_prior_without_fingerprint_is_residue(self):
+        self.assertEqual(
+            blocker_sample_action(
+                marker_present=True,
+                last_blocker_present=True,
+                current_version=3,
                 prior_event_version=1,
                 prior_event_consumed=True,
                 prior_event_screen_sha256=None,
@@ -250,8 +287,14 @@ class ObserveBlockerMarkerTests(unittest.TestCase):
         self.assertEqual(len(events), 2)
         self.assertEqual(events[-1]["payload"]["observed_version"], version_after)
 
-    def test_fast_re_exhaustion_without_absent_patrol_is_recorded(self):
-        """两次巡检之间完成 absent→present 的再耗尽，凭指纹变化识别为新阻塞。"""
+    def test_consumed_residue_with_changed_screen_bytes_waits_for_cycle(self):
+        """已消费残留 + 屏幕变化 = residue（第三轮评审确定性复现的再阻塞根因）。
+
+        steer 注入、人工输入等恢复动作都会改变 pane 字节，字节差异不能证明
+        标记是新写的。已消费象限只由 absent→present 周期重新武装采样；两次
+        巡检之间完成整个再耗尽周期的极端情形是已文档化的接受性漏检，由
+        SLA/停滞降级机制兜底。
+        """
         self.assertEqual(self._observe(True, "sha-1")["action"], "record")
         self._transition("blocked", "inner_loop_exhausted", "herdr-controller")
         self._transition("working", "cli_set_status", "herdr-task")
@@ -259,8 +302,13 @@ class ObserveBlockerMarkerTests(unittest.TestCase):
         # 恢复后同屏幕 -> residue（C03c 保持修复）。
         self.assertEqual(self._observe(True, "sha-1")["action"], "residue")
 
-        # 屏幕已变化但从未观察到 absent -> 指纹不同即为新发生。
-        self.assertEqual(self._observe(True, "sha-2")["action"], "record")
+        # 屏幕因恢复动作变化（如 steer 注入）但标记未消失 -> 仍是 residue。
+        self.assertEqual(self._observe(True, "sha-2")["action"], "residue")
+        self.assertEqual(len(self._blocked_events()), 1)
+
+        # absent→present 周期重新武装采样。
+        self.assertEqual(self._observe(False)["action"], "absent")
+        self.assertEqual(self._observe(True, "sha-3")["action"], "record")
         self.assertEqual(len(self._blocked_events()), 2)
 
     def test_legacy_prior_without_fingerprint_is_residue(self):
@@ -467,11 +515,18 @@ class SentinelMainLoopResiduePatrolTest(unittest.TestCase):
         adapter_patcher.start()
         self.addCleanup(adapter_patcher.stop)
 
-    def _drive_main(self, screen_text, sweeps=2):
+    def _drive_main(self, screens, sweeps=2):
+        """驱动真实 main()；screens 为每轮 sweep 的 pane 可见屏幕（不足时复用末项）。"""
+        if isinstance(screens, str):
+            screens = [screens]
+        state = {"sweep": 0}
+
         def fake_run(cmd, timeout=10):
             if cmd[:3] == ["herdr", "pane", "read"]:
+                idx = min(state["sweep"], len(screens) - 1)
+                state["sweep"] += 1
                 return subprocess.CompletedProcess(
-                    args=cmd, returncode=0, stdout=screen_text, stderr=""
+                    args=cmd, returncode=0, stdout=screens[idx], stderr=""
                 )
             if cmd[:2] == ["herdr", "agent"] and "get" in cmd:
                 return subprocess.CompletedProcess(
@@ -517,14 +572,20 @@ class SentinelMainLoopResiduePatrolTest(unittest.TestCase):
         self.assertEqual(errors, [])
 
     def test_residue_does_not_block_steering_delivery_or_reblock(self):
-        """旧标记可见时：恢复指令照常投递，且不再产生新的阻塞事件。"""
+        """旧标记可见时：恢复指令照常投递，注入改变屏幕后也不得重阻塞。
+
+        第三轮评审以真实 main() 确定性复现的再阻塞循环：sweep1 残留不采样
+        但指令照常投递 → 注入使 pane 字节变化 → sweep2 若凭指纹差异重采样，
+        Controller 会再次阻塞。本回归锁定注入后屏幕变化仍判 residue。
+        """
         queued = self.steering.queue_steer(
             "impl-t6", "继续推进当前修复", operator="human",
             execute_dispatch=False,
         )
         self.assertTrue(queued.get("ok"), queued)
 
-        self._drive_main(self.SCREEN_RESIDUE, sweeps=2)
+        injected = self.SCREEN_RESIDUE + "\n> 继续推进当前修复"
+        self._drive_main([self.SCREEN_RESIDUE, injected], sweeps=2)
 
         data = self.steering.load_steering_data()
         item = data["steering_queues"]["impl-t6"][0]

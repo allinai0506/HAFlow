@@ -219,6 +219,7 @@ def blocker_sample_action(
     *,
     marker_present: bool,
     last_blocker_present: bool | None,
+    current_version: int | None,
     prior_event_version: int | None,
     prior_event_consumed: bool,
     prior_event_screen_sha256: str | None,
@@ -229,19 +230,25 @@ def blocker_sample_action(
     A ``blocked_marker_observed`` sample binds the task's *current* version at
     sample time, so screen residue that outlives a ``set-status`` reopen is
     re-stamped as fresh and re-blocks the task (C03c).  Screen bytes cannot
-    prove their own age, so the decision cross-checks three durable facts:
+    prove their own age — steer injection, operator input and unrelated
+    repaints all change them — so the decision leans on three durable facts:
 
     - ``last_blocker_present``: an absent -> present patrol cycle proves the
-      previous occurrence is gone (the re-dispatched agent repainted).
+      previous occurrence is gone; this is the only sound "new occurrence"
+      evidence once the prior sample was consumed.
     - ``prior_event_consumed``: whether the latest prior sample actually
-      caused the working -> blocked transition.  An unconsumed sample that a
-      metadata write invalidated must stay re-samplable, or a genuine blocker
-      is lost until the screen changes (PR #161 review, scenario A).
-    - the prior sample's ``screen_sha256``: equal bytes mean the consumed
-      occurrence is still on screen (residue); different bytes mean the pane
-      changed since it was sampled, so a re-exhaustion that never showed an
-      absent patrol is still a new occurrence (PR #161 review — "always an
-      absent patrol in between" is not a sound premise).
+      caused the working -> blocked transition.  An unconsumed sample whose
+      version is still current and whose screen is unchanged remains
+      consumable, so re-recording it would only grow the ledger while the
+      Controller is unavailable.  A metadata write that invalidates its
+      version must keep the sighting re-samplable, or a genuine blocker is
+      lost (PR #161 review, scenario A).
+    - screen fingerprints support only the unconsumed branch, where a byte
+      change proves the previous sample no longer describes the pane.
+
+    A re-exhaustion that completes inside one poll interval after a resume
+    (no absent patrol ever observed) is an accepted, documented miss of the
+    consumed branch: the SLA/stall machinery covers the stuck task.
     """
     if not marker_present:
         return "absent"
@@ -249,23 +256,27 @@ def blocker_sample_action(
         # absent -> present: the old occurrence is provably gone.
         return "record"
     if prior_event_version is None:
-        # First sighting for this task.
+        # First sighting for this task (or an unparseable legacy payload).
         return "record"
     if not prior_event_consumed:
-        # The prior sample never became a block (e.g. a metadata write
-        # invalidated its version before the Controller consumed it):
-        # re-sample so a genuine blocker stays deliverable.
+        version_current = (
+            current_version is not None
+            and prior_event_version == current_version
+        )
+        same_screen = (
+            prior_event_screen_sha256 is not None
+            and prior_event_screen_sha256 == screen_sha256
+        )
+        if version_current and (same_screen or prior_event_screen_sha256 is None):
+            # The existing sample is still consumable; do not duplicate it.
+            return "residue"
+        # A metadata write invalidated the sample's version (scenario A), or
+        # the pane changed under an unconsumed sample: re-sample.
         return "record"
-    if prior_event_screen_sha256 is None:
-        # Legacy sample without a fingerprint: cannot compare content, so
-        # fail toward not re-blocking and wait for a cycle or a screen change.
-        return "residue"
-    if screen_sha256 == prior_event_screen_sha256:
-        # Same screen as the consumed occurrence: residue (C03c).
-        return "residue"
-    # Screen changed since the consumed occurrence was sampled: a new
-    # occurrence, even when no patrol ever saw the marker absent.
-    return "record"
+    # Consumed: only an absent -> present cycle re-arms sampling.  Byte
+    # difference against the consumed sample is residue, not evidence —
+    # recovery actions themselves (steer injection) change the screen.
+    return "residue"
 
 
 def should_accept(

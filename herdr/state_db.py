@@ -2018,6 +2018,14 @@ def observe_completion(
         conn.close()
 
 
+def _coerce_version(value: Any) -> Optional[int]:
+    """Best-effort int coercion for version fields carried in payloads."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _blocker_sample_consumed(
     status_history: Any, sample_timestamp: float,
 ) -> bool:
@@ -2111,10 +2119,9 @@ def observe_blocker_marker(
             if prior is not None:
                 prior_timestamp = float(prior["timestamp"])
                 prior_payload = json.loads(prior["payload_json"] or "{}")
-                try:
-                    prior_version = int(prior_payload.get("observed_version"))
-                except (TypeError, ValueError):
-                    prior_version = None
+                prior_version = _coerce_version(
+                    prior_payload.get("observed_version")
+                )
                 prior_hash = prior_payload.get("screen_sha256")
                 prior_consumed = _blocker_sample_consumed(
                     json.loads(task_row["payload_json"] or "{}").get(
@@ -2125,6 +2132,9 @@ def observe_blocker_marker(
         action = completion_policy.blocker_sample_action(
             marker_present=marker_present,
             last_blocker_present=last_present,
+            current_version=_coerce_version(
+                (event_payload or {}).get("observed_version")
+            ),
             prior_event_version=prior_version,
             prior_event_consumed=prior_consumed,
             prior_event_screen_sha256=prior_hash,
