@@ -78,11 +78,19 @@ def save_json_atomic(path, data):
 
 
 def pane_visible(pane_id):
+    """Return one visible-screen capture; "" when the read failed.
+
+    A failed read must look exactly like the exception path: an error
+    payload on stdout (rc != 0) is not a screen, and treating it as one
+    would fabricate the absent half of the blocker presence cycle (C03c).
+    """
     try:
         r = run(
             ["herdr", "pane", "read", pane_id, "--source", "visible"],
             timeout=10,
         )
+        if r.returncode != 0:
+            return ""
         return (r.stdout or "") + "\n" + (r.stderr or "")
     except Exception:
         return ""

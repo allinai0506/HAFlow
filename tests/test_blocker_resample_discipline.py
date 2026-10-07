@@ -10,12 +10,15 @@ working（版本递增），屏幕内容完全未变；下一次巡检把同一�
 期」才允许采样为事件；连续在场的屏幕残留一律判为 residue。
 """
 
+import importlib
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 HERDR_ROOT = Path(__file__).resolve().parent.parent
 if str(HERDR_ROOT) not in sys.path:
@@ -235,6 +238,44 @@ class ObserveBlockerMarkerTests(unittest.TestCase):
         finally:
             reopened.close()
         self.assertEqual(row[0], 1)
+
+
+class PaneVisibleFailureSemanticsTest(unittest.TestCase):
+    """pane read 失败（rc!=0）必须等同读取异常：空串，而非"无标记的屏幕"。
+
+    独立评审实测：pane 不存在时 CLI 以 rc=1 退出且 stdout 输出 JSON 错误。
+    若把该错误负载当作屏幕内容，残留判定会得到伪造的 absent 半周期，
+    C03c 症状可经此缝隙复发。
+    """
+
+    def setUp(self):
+        self.sentinel = importlib.import_module("services.herdr-sentinel")
+
+    def test_failed_read_with_error_payload_is_unknown_not_absent(self):
+        failed = subprocess.CompletedProcess(
+            args=[],
+            returncode=1,
+            stdout='{"error":{"code":"pane_not_found","message":"x"}}',
+            stderr="",
+        )
+        with patch.object(self.sentinel, "run", return_value=failed):
+            self.assertEqual(self.sentinel.pane_visible("w1:p1"), "")
+
+    def test_successful_read_returns_screen_text(self):
+        ok = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout="HERDR_TASK_BLOCKER:impl-t6\n",
+            stderr="",
+        )
+        with patch.object(self.sentinel, "run", return_value=ok):
+            self.assertIn(
+                "HERDR_TASK_BLOCKER", self.sentinel.pane_visible("w1:p1")
+            )
+
+    def test_raising_read_stays_empty(self):
+        with patch.object(self.sentinel, "run", side_effect=OSError("timeout")):
+            self.assertEqual(self.sentinel.pane_visible("w1:p1"), "")
 
 
 if __name__ == "__main__":
