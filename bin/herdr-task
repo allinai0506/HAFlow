@@ -4672,13 +4672,16 @@ def launch_task(args):
 
 
 def _capture_pane_transcript(pane):
-    """Full scrollback of one tmux pane ('' on any failure); reap archives it
+    """Full scrollback of one Herdr pane ('' on any failure); reap archives it
     before close so post-mortem audits keep the full text, not just the S6
-    summary."""
+    summary.  Transport is the Herdr pane reader with dump_transcript's
+    bounded source: a Herdr Pane ID is not a tmux target, so capture-pane
+    archived nothing while the reclaim still succeeded (#159 review)."""
     try:
-        result = subprocess.run(
-            ["tmux", "capture-pane", "-p", "-S", "-", "-t", pane],
-            text=True, capture_output=True, timeout=15,
+        result = _herdr(
+            "pane", "read", pane,
+            "--source", "recent-unwrapped",
+            "--lines", "20000",
         )
     except (OSError, subprocess.TimeoutExpired):
         return ""
