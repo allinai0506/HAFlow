@@ -362,6 +362,12 @@ def _normalize_workflow_body(workflow: Dict[str, Any]) -> Dict[str, Any]:
                 "rules": list(node.get("rules") or []),
                 "gate": dict(node.get("gate") or {}),
             }
+            if node.get("delivery_contract") is not None:
+                from .task_delivery import validate_contract, scope_conflicts
+                norm_node["delivery_contract"] = validate_contract(node["delivery_contract"])
+                conflicts = scope_conflicts(norm_node["delivery_contract"])
+                if conflicts:
+                    raise ValueError("delivery scope conflict: " + ", ".join(conflicts))
             validate_artifact_contract(node.get("artifact_mode"), norm_node["default_integration_mode"],
                                        node_id=node_id, task_type=norm_node["default_task_type"])
             if "artifact_mode" in node:

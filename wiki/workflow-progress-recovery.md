@@ -124,3 +124,16 @@ UNKNOWN：此节描述隔离工作树源码。原工作流恢复、真实 Agent 
 
 Evidence: `herdr/dispatch_recovery.py`、`herdr/task_resources.py#begin_launch_intent`、`herdr/state_db.py#save_task`、`tests/test_dispatch_recovery_ui.py`。
 本节描述实现契约，不替代部署和原工作流业务验收。
+
+## 未提交工程产物的恢复责任
+
+`FACT` delivery_incomplete携带真实delivery_checked拒绝回执时产生delivery类型责任。此责任不同于冻结候选修复，不因candidate_sha为空默认candidate_unknown。范围冲突和未知身份仍等待人工；auto_rework授权且原Task/Run未提交时，Controller复用原工位及receipt-v1安排有限返工。
+
+`FACT` 责任记录真实source_runs、request及新完成epoch；结果只有原Task真实集成后才resolved。没有新增候选不妨碍工程交付返工，但测试派发仍受原冻结门禁。旧恢复身份在未包含交付字段时保持原哈希，升级不使既有责任失效。
+
+Evidence:
+- `herdr/workflow_progress.py#assess_workflow`
+- `herdr/recovery_store.py#_validate_step`
+- `herdr/delivery_rework.py#execute_delivery_recovery`
+- `herdr/workflow_recovery.py#result_status`
+- `tests/test_delivery_rework.py#test_existing_recovery_identities_survive_delivery_extension`

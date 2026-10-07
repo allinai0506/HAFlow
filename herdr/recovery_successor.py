@@ -40,6 +40,13 @@ def confirmed_rework(conn, task, request_id):
         return False
     if task.get('completion_protocol') != 'receipt-v1':
         return bool(task.get('run_id'))
+    return confirmed_rework_receipt(conn, task, request_id)
+
+
+def confirmed_rework_receipt(conn, task, request_id):
+    """Verify current dispatch proof even when interruption left metadata pending."""
+    if not request_id or task.get('rework_request_id') != request_id or not task.get('run_id'):
+        return False
     row = conn.execute("SELECT payload_json FROM events WHERE task_id=? AND run_id=? AND workflow_id=? AND node_id=? AND event_type='rework_dispatched' AND source='herdr-task' AND json_extract(payload_json,'$.intervention_id')=? ORDER BY id DESC LIMIT 1",
                        (task['task_id'], task.get('run_id'), task.get('workflow_id'), task.get('node') or task.get('stage'), request_id)).fetchone()
     if not row:

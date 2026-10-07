@@ -6604,7 +6604,11 @@ def transition_task(
                 "current_status": old_status,
                 "current_version": current_version,
             }
-        validate_task_transition(old_status, to_status, force=force)
+        if old_status == "completed" and to_status == "rework" and not force:
+            from .delivery_rework import validate_repair_transition
+            validate_repair_transition(_decode_task_row(row), dict(metadata or {}), source, conn)
+        else:
+            validate_task_transition(old_status, to_status, force=force)
 
         meta = dict(metadata or {})
         if to_status == "superseded" and old_status != "superseded":

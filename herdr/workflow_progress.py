@@ -24,6 +24,8 @@ def recovery_identity(workflow, facts):
     normalized = []
     for fact in facts:
         value = {key: fact.get(key) for key in _FACT_FIELDS}
+        if 'delivery_failure' in fact:
+            value.update(delivery_failure=fact['delivery_failure'], delivery_rework_attempts=fact.get('delivery_rework_attempts'))
         value['affected_task_ids'] = sorted(set(value.get('affected_task_ids') or []))
         normalized.append(value)
     normalized.sort(key=lambda value: json.dumps(value, sort_keys=True))
@@ -98,8 +100,9 @@ def assess_workflow(workflow, config, tasks):
                 and not task.get('blocker') and not task.get('finalize_escalated')):
             continue  # In-flight repair waits; it is not a new failed gate.
         node_id = task.get('node') or task.get('stage')
-        kind = 'finalize' if task.get('finalize_escalated') else 'fix_loop'
-        retry = node_id if kind == 'finalize' else _gate(nodes, node_id)
+        kind = ('delivery' if task.get('finalize_escalate_reason') == 'delivery_incomplete'
+                and task.get('delivery_failure') else 'finalize' if task.get('finalize_escalated') else 'fix_loop')
+        retry = node_id if kind in {'finalize', 'delivery'} else _gate(nodes, node_id)
         key = (kind, retry, (task.get('candidate_sha') or task.get('commit')))
         groups.setdefault(key, []).append(task)
     obligations = []
@@ -114,7 +117,13 @@ def assess_workflow(workflow, config, tasks):
                             and (task.get('candidate_sha') or task.get('commit')) == candidate)
         facts = sorted(failed, key=lambda task: str(task.get('task_id') or ''))
         affected_facts = [task for task in current if task.get('task_id') in affected and task not in facts]
-        reason = _identity_reason(workflow, facts + affected_facts, candidate)
+        if kind == 'delivery':
+            from .delivery_rework import repair_reason
+            reason = next((r for r in map(repair_reason, facts) if r), None)
+            if (not workflow.get('execution_id') or any(t.get('execution_id') != workflow['execution_id'] for t in facts)):
+                reason = 'delivery_identity_unknown'
+        else:
+            reason = _identity_reason(workflow, facts + affected_facts, candidate)
         if reason is None and affected - {task.get('task_id') for task in facts + affected_facts}:
             reason = 'identity_unknown'
         if reason is None and (not retry or retry not in nodes):
@@ -134,6 +143,9 @@ def assess_workflow(workflow, config, tasks):
             reason = 'affected_tasks_unknown'
         identity_facts = [{**{key: task.get(key) for key in _FACT_FIELDS},
                            'affected_task_ids': sorted(affected)} for task in facts + affected_facts]
+        if kind == 'delivery':
+            for fact, task in zip(identity_facts, facts + affected_facts):
+                fact.update(delivery_failure=task.get('delivery_failure'), delivery_rework_attempts=task.get('delivery_rework_attempts'))
         slot = {'workflow_id': workflow.get('workflow_id'), 'generation': _generation(workflow),
                 'candidate_sha': candidate, 'retry_node': retry, 'kind': kind}
         obligations.append({'kind': kind, 'retry_node': retry,

@@ -32,7 +32,7 @@ def validate_tool_input(argv, input_data=b'', *, timeout=30, output_limit=65536)
     return input_data
 
 
-def run_bounded(argv, input_data=b'', *, timeout=30, output_limit=65536, cwd=None, env=None):
+def run_bounded(argv, input_data=b'', *, timeout=30, output_limit=65536, cwd=None, env=None, redact_output=True):
     data = validate_tool_input(argv, input_data, timeout=timeout, output_limit=output_limit)
     buffers = {'stdout': bytearray(), 'stderr': bytearray()}
     status, total = 'completed', 0
@@ -103,9 +103,13 @@ def run_bounded(argv, input_data=b'', *, timeout=30, output_limit=65536, cwd=Non
         buffers = {'stdout': bytearray(), 'stderr': bytearray()}
     elif status == 'timeout':
         buffers = {name: value[:value.rfind(b'\n') + 1] for name, value in buffers.items()}
-    stdout = redact_text(bytes(buffers['stdout']).decode('utf-8', errors='replace')).encode()[:output_limit].decode('utf-8', errors='ignore')
+    # Trusted machine-readable callers may compute identities from exact data.
+    # Raw bytes must never be used directly as diagnostics or model input.
+    clean = redact_text if redact_output else lambda text: text
+    errors = 'replace' if redact_output else 'strict'
+    stdout = clean(bytes(buffers['stdout']).decode('utf-8', errors=errors)).encode()[:output_limit].decode('utf-8', errors='ignore')
     remaining = output_limit - len(stdout.encode())
-    stderr = redact_text(bytes(buffers['stderr']).decode('utf-8', errors='replace')).encode()[:remaining].decode('utf-8', errors='ignore')
+    stderr = clean(bytes(buffers['stderr']).decode('utf-8', errors=errors)).encode()[:remaining].decode('utf-8', errors='ignore')
     return {'status': status, 'exit_code': process.returncode,
             'stdout': stdout, 'stderr': stderr,
             'side_effects': 'possible' if status == 'completed' else 'unknown',
