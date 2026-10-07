@@ -5046,14 +5046,22 @@ python3.13 -m pytest -q tests/test_scheduler_dispatch_e2e.py tests/test_herdr_ta
 #### 问题背景
 首节点总指挥调用返回 0 却没有创建 Task，Controller 写 notified 并输出 STAGE ADVANCED。零 Task 绕过 continuation 和阶段悬挂检查。独立审查又复现发送前丢失内存队列、旧配置回落无跟踪发送、旧代次 Task 阻止新义务、终态历史挤掉当前义务。
 
+同类缺口在有依赖的 test/review 再次出现：首节点 SQLite 闭环没有覆盖下游，旧 notified 与空任务组合仍能静默阻断。
+
 #### 经验教训
 外部命令返回与实际任务登记是两种事实。防重复闩必须配合有期限的持久责任；给 notified 加 TTL 然后盲目重发会把停滞变成重复副作用。查询必须在 LIMIT 前排除终态历史，代次过滤不能在下一层被全量历史判断撤销。
+
+人工说明文字不是授权事实：hold 会覆盖 reason，重试保护必须核验当前取消任务及旧未结案交付。已被 reuse 满足的节点不能留下永远不会被调度的 pending 派发责任。
 
 #### 操作规范
 在同库登记派发义务，入队预占租约、发送前写 started、实际 CLI intent 与 Task 绑定 operation/Run/配置代次；未知交付只核验，到期转明确人工决定。JSON queued 不是队列恢复权威。等待期限不能被轮询或日志延长，hold 必须尊重原到期时间。 修复损坏 Task 载荷时，四个登记身份字段必须一起核对原持久 intent；只检查 operation ID 会把缺失 Run/execution/intent 误认为权威空值。缺失字段可以从原证据补齐，已有非空冲突必须拒绝，不能用新请求自证旧身份。
 
+下游直接与协调器派发都绑定候选 episode、上游 Run 与真实 intent。已计划多角色时核对全部 Task；只有完整 resources_absent 否定回执才允许安全重试。旧测试替身只 return 0 会缺失登记证据，应保留真实 intent、Task 和后继谱系，不能放宽验收断言。
+
 #### 验证命令与证据
 `pytest -q tests/test_node_dispatch_contract.py tests/test_direct_stage_dispatch.py`。新增测试保留真实 Controller/CLI/SQLite，仅替换外部 Pane/Worker/Agent 传输；受控时钟、独立连接竞争和丢队列/旧配置/千条终态历史均有行为断言。初始复现 2 failed；本地验证与线上 Agent/部署验收分开报告。
+
+下游回归：`pytest -q tests/test_downstream_dispatch_contract.py tests/test_reverification_controller.py`。首次六个下游契约用例 RED；独立审查复现 hold→retry 取消绕过及 reuse 空责任后，新增事实校验与相应行为回归。真实 CLI 下游测试保留临时 Git/SQLite/候选校验，仅替换外部 Worker/Pane/Agent；未操作生产工作流。
 
 ---
 

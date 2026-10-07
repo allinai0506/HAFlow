@@ -236,7 +236,7 @@ def list_reverification_decisions(workflow_id, db_path=None, limit=None):
 
 
 def find_reuse_fact(workflow_id, verifier, candidate_sha, policy_identity=None,
-                    episode_id=None, db_path=None):
+                    episode_id=None, db_path=None, conn=None):
     """Return the newest reuse fact bound to this exact verifier/candidate/episode.
 
     ``None`` when there is none. Every binding here is exact on purpose:
@@ -264,8 +264,16 @@ def find_reuse_fact(workflow_id, verifier, candidate_sha, policy_identity=None,
         return None
     # One workflow's verification rounds are few, but the read is on the sweep
     # path and runs once per branch per sweep, so it is bounded anyway.
-    for event in reversed(list_reverification_decisions(
-            workflow_id, db_path=db_path, limit=REUSE_LOOKUP_SCAN_LIMIT)):
+    if conn is None:
+        events = reversed(list_reverification_decisions(
+            workflow_id, db_path=db_path, limit=REUSE_LOOKUP_SCAN_LIMIT))
+    else:
+        events = ({'id': row['id'], 'timestamp': row['timestamp'],
+                   'payload': json.loads(row['payload_json'])} for row in conn.execute(
+            "SELECT id,timestamp,payload_json FROM events WHERE workflow_id=? "
+            "AND event_type=? ORDER BY id DESC LIMIT ?",
+            (workflow_id, EVENT_REVERIFICATION_DECISION, REUSE_LOOKUP_SCAN_LIMIT)))
+    for event in events:
         payload = event.get("payload") or {}
         if str(payload.get("decision") or "") != "reuse":
             continue

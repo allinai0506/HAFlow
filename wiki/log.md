@@ -2090,3 +2090,6 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 2026-10-06：PR #156复审补齐存量接管、模式移交和任意命名替代关系；授权恢复后以排列及真实SQLite验证谱系选择确定性，真实Agent/部署未执行。
 - 2026-10-06：fix-loop 重复扣预算根因=verdict 指纹含易失 task_id 且闩释放清指纹；指纹改纯语义（branch+note+affected），释放保留 |fp，后继代同结论走升级不再开轮。
 - 2026-10-06：终态卫生批修复——supersede WIP 自动保存改 add -A 后 reset 内部路径（gitignored 文件曾使 add 必败）；closed workflow 的 CLI 报错改为 WorkflowClosedError 一行指引；verify-metrics 口径聚合多 runner 并支持 surefire；reap 前归档 pane scrollback（默认保留 14 天）。console 布局测试失败为 #157 存量。
+
+## [2026-10-07] update | 下游节点派发持久责任
+- Updated [[workflow-progress-recovery]]：扩展下游派发的候选和依赖身份、租约恢复、直接发送核验、resources_absent 有界重试、取消及 reuse 责任转移；隔离代码验证与生产恢复分开。
