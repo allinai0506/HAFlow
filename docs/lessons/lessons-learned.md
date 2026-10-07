@@ -6213,9 +6213,9 @@ wf-project-0929 审计复现 C03c：任务被 BLOCKER 观察置为 blocked 后�
 屏幕字节无法自证新旧，而"绑定采样时刻的任务版本"会让任何残留内容在下一次巡检自动获得新鲜版本号——版本匹配只能证明"样本在状态写入之后采集"，证明不了"内容产生于状态写入之后"。完成路径的 `observe_completion` 早已用持久行 + epoch 重置 + absent→present 周期解决同类问题（旧屏幕重放），但同构的 BLOCKER 路径没有移植该纪律，于是同一类缺陷换个入口复发。鉴别内容新旧的根本手段只有内容侧的时间序列证据：真实新事件之前必然存在一次"内容不可见"的观察，残留则永远连续在场。
 
 ### 操作规范
-1. 观察类事件若绑定任务当前版本号，必须同时在持久层维护所观察内容的在场状态（如 completion_observations.blocker_present），仅"首次出现"或"缺失→再现周期"允许采样为事件；连续在场一律视为残留。
-2. 内容读取失败（空捕获）不得当作"不可见"记录，否则会伪造出给残留背书的周期；决策逻辑收敛为核心纯函数（blocker_sample_action），外壳只做装配。
-3. 为同一观察对象新增持久状态时复用既有行/表结构（只增列、状态不变不写），不得另建平行事实源；事件 payload 可附内容指纹（screen_sha256）供取证，但不作为判定依据。
+1. 观察类事件若绑定任务当前版本号，必须同时在持久层维护所观察内容的在场状态（如 completion_observations.blocker_present），事件与在场状态同事务落盘；采样判定以"先前样本是否已被消费 + 屏幕/版本事实"分层：未消费样本在版本失效或屏幕变化时必须可重采样（否则元数据写即造成漏报），版本未变且屏幕未变则去重（Controller 不可用期间事件量有界）。
+2. 已消费（阻塞已发生并恢复）之后，屏幕字节差异不能作为"新发生"的证据——恢复动作本身（如恢复指令注入 pane）就会改变字节，凭差异重采样会造成"恢复动作触发再阻塞"的循环；该象限只由"标记消失→再现"的完整巡检周期重新武装。极端的亚巡检间隔再耗尽是接受性漏检，由人工与停滞观察兜底，须在文档中如实声明。
+3. 内容读取失败（空捕获/rc!=0）不得当作"不可见"记录；决策逻辑收敛为核心纯函数（blocker_sample_action），外壳只做装配；同一观察对象的新增持久状态复用既有行/表结构（只增列、状态不变不写），不得另建平行事实源。
 
 ### 验证命令 / 关联证据
-`pytest -q tests/test_blocker_resample_discipline.py`（审计复现序列：record→blocked→恢复→同屏幕重采样必须 residue；absent→present 必须 record）9 passed；`pytest -q tests/test_blocked_observation_cas_storm.py tests/test_inner_loop_blocker_delivery.py tests/test_inner_loop_protocol.py` 全过；全量 3693 passed + 157 subtests，3 failed 均与本项无关（#157 console 间距存量、prompt binding 既有、源码形状断言随结构同步更新）。变更：`herdr/state_db.py` observe_blocker_marker、`herdr/completion.py` blocker_sample_action、`services/herdr-sentinel.py` BLOCKER 分支、`herdr/state_store.py`。
+`pytest -q tests/test_blocker_resample_discipline.py` 22 passed（真实 main() 主循环回归：residue 下恢复指令照常投递且注入变屏不重阻塞、真实崩溃不被遮蔽）；`pytest -q` blocker/steering 相关专项 90 passed；全量 3707 passed + 157 subtests，2 failed 均与本项无关（#157 console 间距存量；prompt binding 为非 ASCII 目录名 + shlex.quote 环境假失败，ASCII 路径 3/3 过）。四轮独立评审（第 3 轮以真实 main() 确定性复现注入再阻塞循环后返工，第 4 轮 MERGE_READY 0 阻塞）。变更：`herdr/state_db.py` observe_blocker_marker/_blocker_sample_consumed、`herdr/completion.py` blocker_sample_action、`services/herdr-sentinel.py` BLOCKER 分支与 pane_visible、`herdr/state_store.py`。

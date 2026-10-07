@@ -47,7 +47,7 @@
 | C25 | console BrokenPipe/转义警告、STARTUP WAIT、Git busy | console.err、startup8次、GIT BUSY75后成功 | 分类核对；网络断开/正常等待不冒充bug，确认重试有界和成功后解除 |
 | C26 | 全局JSON投影滞后，UI/诊断可能读到不同状态 | SQLite latest_dispatch != workflows.json；tasks projection缺Task | 已证实投影差异；检查权威读取/导出刷新，不另建事实源 |
 | C03b | 运行信号抹掉等待仲裁的blocked状态，重启也自动恢复working | status_history；handle_event/reconcile_task_state | 已复现；当前修复保留仲裁事实、恢复队列，强历史优先于遗留metadata，正常恢复作对照 |
-| C03c | 显式恢复后合法旧BLOCKER仍可被新采样再次消费 | Sentinel当前屏幕重复读取；process_blocked_observations | 本地验证：Sentinel持久跟踪BLOCKER在场状态（completion_observations.blocker_present），仅首次出现或absent→present周期采样，屏幕残留不再绑定新版本号；决策收敛纯函数blocker_sample_action；pane_visible rc!=0视为未知（评审闭环）。回归test_blocker_resample_discipline复现审计序列；全量3697 passed/157 subtests，2 failed均非本项（#157 console间距存量；prompt binding为非ASCII沙盒目录名+shlex.quote环境假失败，ASCII路径3/3过）；独立评审两轮均MERGE_READY、0阻塞；未部署 |
+| C03c | 显式恢复后合法旧BLOCKER仍可被新采样再次消费 | Sentinel当前屏幕重复读取；process_blocked_observations | 本地验证：Sentinel持久跟踪BLOCKER在场状态（completion_observations.blocker_present），事件与在场状态同事务原子落盘；决策纯函数blocker_sample_action——未消费象限按版本/指纹去重重采样（元数据写失效后可恢复，场景A），已消费象限仅absent→present周期重新武装（steer注入等屏幕变化不重阻塞）；pane_visible rc!=0视为未知；residue不短路巡检（崩溃检测前移、恢复指令照常投递）。回归test_blocker_resample_discipline 22例含真实main()主循环回归（注入变屏不重阻塞、真实崩溃不被遮蔽）；全量3707 passed/157 subtests，2 failed均非本项（#157 console间距存量；prompt binding为非ASCII目录名+shlex.quote环境假失败，ASCII路径3/3过）；独立评审四轮（M/M/NF/M）终MERGE_READY、0阻塞；未部署 |
 | C27 | 评估超时只终止直接shell，后代进程可继续运行 | bin/herdr-loop subprocess.run；隔离就绪子进程探针 | 隔离实验确认；处理本次创建的进程组，验证超时/中断和正常返回 |
 | C28 | 外层脚本exit17/缺lint回执，仍100分converged | 隔离真实run_evaluation写EVAL_DONE=true | 已复现；完整检查runner退出、步骤回执和新鲜日志，防缺失默认成功 |
 | C29 | 同工位并发eval共享日志，读到另一个进程结果并假绿 | 独立进程/受控交错探针，2 lint errors被覆盖为1 | 已复现；跨进程锁覆盖eval/init/基线写入，busy不改他人快照；专门验证中断恢复 |
