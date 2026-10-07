@@ -215,6 +215,65 @@ def observation_is_current(
         return False
 
 
+def blocker_sample_action(
+    *,
+    marker_present: bool,
+    last_blocker_present: bool | None,
+    current_version: int | None,
+    prior_event_version: int | None,
+    prior_event_consumed: bool,
+    prior_event_screen_sha256: str | None,
+    screen_sha256: str | None,
+) -> str:
+    """Classify one Sentinel BLOCKER sighting: record, residue, or absent.
+
+    A ``blocked_marker_observed`` sample binds the task's *current* version at
+    sample time, so screen residue that outlives a ``set-status`` reopen is
+    re-stamped as fresh and re-blocks the task (C03c).  Screen bytes cannot
+    prove their own age — steer injection, operator input and unrelated
+    repaints all change them — so the decision leans on three durable facts:
+
+    - ``last_blocker_present``: an absent -> present patrol cycle proves the
+      previous occurrence is gone; this is the only sound "new occurrence"
+      evidence once the prior sample was consumed.
+    - ``prior_event_consumed``: whether the latest prior sample actually
+      caused the working -> blocked transition.  An unconsumed sample whose
+      version is still current remains consumable even when the pane
+      repaints, so re-recording it would only grow the ledger while the
+      Controller is unavailable.  A metadata write that invalidates its
+      version must keep the sighting re-samplable, or a genuine blocker is
+      lost (PR #161 review, scenario A).
+    - ``current_version`` / ``prior_event_version``: a version mismatch
+      invalidates an unconsumed sample; screen fingerprints do not.
+
+    A re-exhaustion that completes inside one poll interval after a resume
+    (no absent patrol ever observed) is an accepted, documented miss of the
+    consumed branch.  Automatic re-blocking is not guaranteed in that case.
+    """
+    if not marker_present:
+        return "absent"
+    if last_blocker_present is False:
+        # absent -> present: the old occurrence is provably gone.
+        return "record"
+    if prior_event_version is None:
+        # First sighting for this task (or an unparseable legacy payload).
+        return "record"
+    if not prior_event_consumed:
+        version_current = (
+            current_version is not None
+            and prior_event_version == current_version
+        )
+        if version_current:
+            # The existing sample is still consumable; do not duplicate it.
+            return "residue"
+        # A metadata write invalidated the sample's version (scenario A).
+        return "record"
+    # Consumed: only an absent -> present cycle re-arms sampling.  Byte
+    # difference against the consumed sample is residue, not evidence —
+    # recovery actions themselves (steer injection) change the screen.
+    return "residue"
+
+
 def should_accept(
     *,
     marker_present: bool,

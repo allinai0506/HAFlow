@@ -2091,5 +2091,11 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 2026-10-06：fix-loop 重复扣预算根因=verdict 指纹含易失 task_id 且闩释放清指纹；指纹改纯语义（branch+note+affected），释放保留 |fp，后继代同结论走升级不再开轮。
 - 2026-10-06：终态卫生批修复——supersede WIP 自动保存改 add -A 后 reset 内部路径（gitignored 文件曾使 add 必败）；closed workflow 的 CLI 报错改为 WorkflowClosedError 一行指引；verify-metrics 口径聚合多 runner 并支持 surefire；reap 前归档 pane scrollback（默认保留 14 天）。console 布局测试失败为 #157 存量。
 
+- 2026-10-07：C03c 修复——显式恢复后旧 BLOCKER 屏幕残留不再重采样再阻塞。根因是采样事件绑定任务当前版本号，屏幕内容无法自证新旧；修复沿用完成路径 observe_completion 的在场周期纪律：completion_observations 新增 blocker_present 列，仅首次出现或 absent→present 周期采样 blocked_marker_observed，决策收敛为 herdr/completion.py 纯函数 blocker_sample_action，Controller 版本 CAS 不变。回归 tests/test_blocker_resample_discipline.py 复现审计序列（record→blocked→恢复→同屏幕重采样=residue）。
+
+- 2026-10-07：C03c 四轮独立评审闭环收口——第 3 轮以真实 main() 确定性复现两类问题并返工：residue 不得短路同任务巡检（崩溃检测前移、恢复指令照常投递）；"指纹变化即新阻塞"在已消费象限不成立（恢复指令注入 pane 本身就改变字节），改为已消费象限仅 absent→present 周期重新武装、未消费象限按版本/指纹去重重采样，事件与在场状态同事务原子落盘。第 4 轮 MERGE_READY 0 阻塞；主循环回归锁定注入变屏不重阻塞、真实崩溃不被遮蔽。
+
 ## [2026-10-07] update | 下游节点派发持久责任
 - Updated [[workflow-progress-recovery]]：扩展下游派发的候选和依赖身份、租约恢复、直接发送核验、resources_absent 有界重试、取消及 reuse 责任转移；隔离代码验证与生产恢复分开。
+
+- 2026-10-07：PR #161 合并前独立核验补齐两条实际回归：未消费且版本有效的样本不再因无关屏幕刷新重复采样，避免事件增长与 pending steer 饥饿；blocked/rework 巡检已读到的 absent 同样持久记录，恢复后新标记可采样，产生阻塞事件的状态范围不变。5 条回归先 RED，修后 26 例通过；此前“按版本/指纹重采样”的记录以本条和工程教训 §136 为准。同步主干 #162 并保留双方日志，最终全量及独立复核见 PR 验证记录；未部署。

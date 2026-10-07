@@ -1,5 +1,6 @@
 #!/opt/homebrew/bin/python3
 
+import hashlib
 import json
 import os
 import sqlite3
@@ -77,11 +78,19 @@ def save_json_atomic(path, data):
 
 
 def pane_visible(pane_id):
+    """Return one visible-screen capture; "" when the read failed.
+
+    A failed read must look exactly like the exception path: an error
+    payload on stdout (rc != 0) is not a screen, and treating it as one
+    would fabricate the absent half of the blocker presence cycle (C03c).
+    """
     try:
         r = run(
             ["herdr", "pane", "read", pane_id, "--source", "visible"],
             timeout=10,
         )
+        if r.returncode != 0:
+            return ""
         return (r.stdout or "") + "\n" + (r.stderr or "")
     except Exception:
         return ""
@@ -282,6 +291,35 @@ def _record_sentinel_event(store, task, event_type, payload):
         )
     except (OSError, ValueError, RuntimeError, AttributeError, sqlite3.Error) as exc:
         print(f"[SENTINEL EVENT WARN] {event_type}: {exc}", file=sys.stderr, flush=True)
+
+
+def _screen_fingerprint(screen):
+    """Content hash of one pane capture; forensic evidence, not an epoch."""
+    return hashlib.sha256(screen.encode("utf-8", "replace")).hexdigest()
+
+
+def _observe_blocker_presence(store, task_id, *, marker_present, event_payload=None):
+    """Best-effort durable BLOCKER presence tracking (never blocks the sweep).
+
+    For a present marker the observer also appends the
+    ``blocked_marker_observed`` sample atomically on a ``record`` verdict;
+    the return value is the sighting classification (or ``"skip"`` when the
+    observation could not be made).
+    """
+    try:
+        result = store.observe_blocker_marker(
+            task_id,
+            marker_present=marker_present,
+            event_payload=event_payload,
+        )
+        return str((result or {}).get("action") or "skip")
+    except (OSError, ValueError, RuntimeError, AttributeError, sqlite3.Error) as exc:
+        print(
+            f"[SENTINEL BLOCKER WARN] task={task_id} presence observe: {exc}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return "skip"
 
 
 def restart_controller():
@@ -562,29 +600,9 @@ def main():
                         flush=True,
                     )
 
-            # Inner loop exhausted: record the observation only.  The
-            # Controller transitions the task to blocked and owns arbitration.
-            if status in {"dispatched", "working"} and _comp.marker_present(
-                screen, task_id, _comp.BLOCKER_MARKER_PREFIX
-            ):
-                _record_sentinel_event(
-                    store,
-                    task,
-                    "blocked_marker_observed",
-                    {
-                        "next_status": "blocked",
-                        "reason": "inner_loop_exhausted",
-                        "observed_status": status,
-                        "observed_version": task.get("version"),
-                        "observed_updated_at": task.get("updated_at"),
-                    },
-                )
-                print(
-                    f"[SENTINEL BLOCKER] task={task_id} pane={pane_id} — inner loop exhausted, observation sent to Controller",
-                    flush=True,
-                )
-                continue
-
+            # Infrastructure crash first: a crashed process outranks blocker
+            # sampling, and a screen that carries crash text must not feed
+            # the blocker fingerprint (PR #161 review).
             if any(pattern in screen for pattern in CRASH_PATTERNS):
                 observe_crash_pattern(
                     task,
@@ -593,6 +611,45 @@ def main():
                     versions=state.setdefault("crash_versions", {}),
                 )
                 continue
+
+            # Inner loop exhausted: record the observation only.  The
+            # Controller transitions the task to blocked and owns arbitration.
+            # C03c: the marker on screen may be residue from a pre-reopen
+            # attempt, which a version-matching Controller cannot tell from a
+            # fresh exhaustion.  Only a first sighting, an absent -> present
+            # cycle, or a version-invalidated unconsumed sample is recorded;
+            # unrelated screen changes do not prove a new occurrence.
+            blocker_present = _comp.marker_present(
+                screen, task_id, _comp.BLOCKER_MARKER_PREFIX
+            )
+            # Preserve observed absence during blocked/rework too, so a
+            # later resume can recognize the next occurrence.  Failed pane
+            # reads return an empty string and must not fabricate absence.
+            if screen and not blocker_present:
+                _observe_blocker_presence(store, task_id, marker_present=False)
+            if status in {"dispatched", "working"} and blocker_present:
+                blocker_action = _observe_blocker_presence(
+                    store,
+                    task_id,
+                    marker_present=True,
+                    event_payload={
+                        "next_status": "blocked",
+                        "reason": "inner_loop_exhausted",
+                        "observed_status": status,
+                        "observed_version": task.get("version"),
+                        "observed_updated_at": task.get("updated_at"),
+                        "screen_sha256": _screen_fingerprint(screen),
+                    },
+                )
+                if blocker_action == "record":
+                    print(
+                        f"[SENTINEL BLOCKER] task={task_id} pane={pane_id} — inner loop exhausted, observation sent to Controller",
+                        flush=True,
+                    )
+                    continue
+                # Residue suppresses only the duplicate blocker sample:
+                # pending-steer delivery below is an independent check
+                # and must still run (PR #161 review).
 
             age = now - state["seen"][task_id]
             if (
