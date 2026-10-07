@@ -298,10 +298,20 @@ def _screen_fingerprint(screen):
     return hashlib.sha256(screen.encode("utf-8", "replace")).hexdigest()
 
 
-def _observe_blocker_presence(store, task_id, *, marker_present):
-    """Best-effort durable BLOCKER presence tracking (never blocks the sweep)."""
+def _observe_blocker_presence(store, task_id, *, marker_present, event_payload=None):
+    """Best-effort durable BLOCKER presence tracking (never blocks the sweep).
+
+    For a present marker the observer also appends the
+    ``blocked_marker_observed`` sample atomically on a ``record`` verdict;
+    the return value is the sighting classification (or ``"skip"`` when the
+    observation could not be made).
+    """
     try:
-        result = store.observe_blocker_marker(task_id, marker_present=marker_present)
+        result = store.observe_blocker_marker(
+            task_id,
+            marker_present=marker_present,
+            event_payload=event_payload,
+        )
         return str((result or {}).get("action") or "skip")
     except (OSError, ValueError, RuntimeError, AttributeError, sqlite3.Error) as exc:
         print(
@@ -590,44 +600,9 @@ def main():
                         flush=True,
                     )
 
-            # Inner loop exhausted: record the observation only.  The
-            # Controller transitions the task to blocked and owns arbitration.
-            # C03c: the marker on screen may be residue from a pre-reopen
-            # attempt, which a version-matching Controller cannot tell from a
-            # fresh exhaustion.  Only a first sighting or an absent -> present
-            # cycle is sampled; continuous presence is residue and stays
-            # unsampled until the screen changes.
-            if status in {"dispatched", "working"}:
-                blocker_present = _comp.marker_present(
-                    screen, task_id, _comp.BLOCKER_MARKER_PREFIX
-                )
-                if blocker_present:
-                    if _observe_blocker_presence(
-                        store, task_id, marker_present=True
-                    ) == "record":
-                        _record_sentinel_event(
-                            store,
-                            task,
-                            "blocked_marker_observed",
-                            {
-                                "next_status": "blocked",
-                                "reason": "inner_loop_exhausted",
-                                "observed_status": status,
-                                "observed_version": task.get("version"),
-                                "observed_updated_at": task.get("updated_at"),
-                                "screen_sha256": _screen_fingerprint(screen),
-                            },
-                        )
-                        print(
-                            f"[SENTINEL BLOCKER] task={task_id} pane={pane_id} — inner loop exhausted, observation sent to Controller",
-                            flush=True,
-                        )
-                    continue
-                # An unreadable pane is not evidence of absence: an empty
-                # capture must not fabricate the absent half of the cycle.
-                if screen:
-                    _observe_blocker_presence(store, task_id, marker_present=False)
-
+            # Infrastructure crash first: a crashed process outranks blocker
+            # sampling, and a screen that carries crash text must not feed
+            # the blocker fingerprint (PR #161 review).
             if any(pattern in screen for pattern in CRASH_PATTERNS):
                 observe_crash_pattern(
                     task,
@@ -636,6 +611,46 @@ def main():
                     versions=state.setdefault("crash_versions", {}),
                 )
                 continue
+
+            # Inner loop exhausted: record the observation only.  The
+            # Controller transitions the task to blocked and owns arbitration.
+            # C03c: the marker on screen may be residue from a pre-reopen
+            # attempt, which a version-matching Controller cannot tell from a
+            # fresh exhaustion.  Only a first sighting, an absent -> present
+            # cycle, an unconsumed prior sample, or a screen change since the
+            # consumed sample is recorded; continuous presence with unchanged
+            # screen bytes is residue.
+            if status in {"dispatched", "working"}:
+                blocker_present = _comp.marker_present(
+                    screen, task_id, _comp.BLOCKER_MARKER_PREFIX
+                )
+                if blocker_present:
+                    blocker_action = _observe_blocker_presence(
+                        store,
+                        task_id,
+                        marker_present=True,
+                        event_payload={
+                            "next_status": "blocked",
+                            "reason": "inner_loop_exhausted",
+                            "observed_status": status,
+                            "observed_version": task.get("version"),
+                            "observed_updated_at": task.get("updated_at"),
+                            "screen_sha256": _screen_fingerprint(screen),
+                        },
+                    )
+                    if blocker_action == "record":
+                        print(
+                            f"[SENTINEL BLOCKER] task={task_id} pane={pane_id} — inner loop exhausted, observation sent to Controller",
+                            flush=True,
+                        )
+                        continue
+                    # Residue suppresses only the duplicate blocker sample:
+                    # pending-steer delivery below is an independent check
+                    # and must still run (PR #161 review).
+                # An unreadable pane is not evidence of absence: an empty
+                # capture must not fabricate the absent half of the cycle.
+                elif screen:
+                    _observe_blocker_presence(store, task_id, marker_present=False)
 
             age = now - state["seen"][task_id]
             if (

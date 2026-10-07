@@ -2018,33 +2018,73 @@ def observe_completion(
         conn.close()
 
 
+def _blocker_sample_consumed(
+    status_history: Any, sample_timestamp: float,
+) -> bool:
+    """Whether a working -> blocked transition happened after the sample.
+
+    The Controller consumes a ``blocked_marker_observed`` sample by winning
+    its version CAS; the transition appends a ``status_history`` entry whose
+    ``to`` is ``blocked``.  A sample with no such later entry was never
+    consumed — invalidating it (a metadata write bumping the version) must
+    not silently drop a genuine blocker.
+    """
+    if isinstance(status_history, str):
+        try:
+            status_history = json.loads(status_history)
+        except (TypeError, ValueError):
+            return False
+    if not isinstance(status_history, list):
+        return False
+    for entry in status_history:
+        if not isinstance(entry, dict) or entry.get("to") != "blocked":
+            continue
+        try:
+            if float(entry.get("timestamp") or 0) > float(sample_timestamp):
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
 def observe_blocker_marker(
     task_id: str,
     *,
     marker_present: bool,
+    event_payload: Optional[Dict[str, Any]] = None,
     observed_at: Optional[float] = None,
     db_path: Optional[Path] = None,
 ) -> Dict[str, Any]:
-    """Track durable BLOCKER marker presence; classify the sighting (C03c).
+    """Track durable BLOCKER marker presence; classify and record (C03c).
 
     The Controller can only version-check a ``blocked_marker_observed``
     sample, so the Sentinel must never re-sample screen residue: after a
     ``set-status`` reopen the stale marker would be re-stamped with the new
     version and re-block the task.  This records the marker presence of the
-    latest patrol and returns whether the sighting may become an event.  Only
-    ``blocker_present`` and ``updated_at`` are written, so the completion
+    latest patrol, classifies the sighting via
+    ``completion.blocker_sample_action`` and — for a ``record`` verdict —
+    appends the ``blocked_marker_observed`` event **in the same
+    transaction**, so a presence commit can never outlive its sample write
+    (PR #161 review, scenario B).  Only ``blocker_present`` and
+    ``updated_at`` are written to the completion row, so the completion
     row's own epoch state is never disturbed.
+
+    ``event_payload`` is the shell-assembled sample body (observed_version,
+    observed_status, screen_sha256, ...); it is required whenever
+    ``marker_present`` is true.
     """
     from . import completion as completion_policy
 
     now = float(observed_at if observed_at is not None else time.time())
     if not math.isfinite(now):
         raise ValueError("observed_at must be finite")
+    if marker_present and not isinstance(event_payload, dict):
+        raise ValueError("event_payload is required for a present blocker marker")
     conn = get_db_connection(db_path)
     try:
         conn.execute("BEGIN IMMEDIATE;")
         task_row = conn.execute(
-            "SELECT 1 FROM tasks WHERE task_id = ?", (task_id,)
+            "SELECT * FROM tasks WHERE task_id = ?", (task_id,)
         ).fetchone()
         if task_row is None:
             raise ValueError(f"Task '{task_id}' not found")
@@ -2057,20 +2097,53 @@ def observe_blocker_marker(
             if row is None or row["blocker_present"] is None
             else bool(row["blocker_present"])
         )
-        prior_sample_exists = False
+        prior_version = None
+        prior_consumed = False
+        prior_hash = None
+        prior_timestamp = None
         if marker_present:
             prior = conn.execute(
-                "SELECT id FROM events "
+                "SELECT payload_json, timestamp FROM events "
                 "WHERE task_id = ? AND event_type = 'blocked_marker_observed' "
                 "ORDER BY timestamp DESC, id DESC LIMIT 1",
                 (task_id,),
             ).fetchone()
-            prior_sample_exists = prior is not None
+            if prior is not None:
+                prior_timestamp = float(prior["timestamp"])
+                prior_payload = json.loads(prior["payload_json"] or "{}")
+                try:
+                    prior_version = int(prior_payload.get("observed_version"))
+                except (TypeError, ValueError):
+                    prior_version = None
+                prior_hash = prior_payload.get("screen_sha256")
+                prior_consumed = _blocker_sample_consumed(
+                    json.loads(task_row["payload_json"] or "{}").get(
+                        "status_history"
+                    ),
+                    prior_timestamp,
+                )
         action = completion_policy.blocker_sample_action(
             marker_present=marker_present,
             last_blocker_present=last_present,
-            prior_sample_exists=prior_sample_exists,
+            prior_event_version=prior_version,
+            prior_event_consumed=prior_consumed,
+            prior_event_screen_sha256=prior_hash,
+            screen_sha256=(event_payload or {}).get("screen_sha256"),
         )
+        if action == "record":
+            record_event(
+                {
+                    "event_type": "blocked_marker_observed",
+                    "payload": dict(event_payload or {}),
+                    "workflow_id": task_row["workflow_id"],
+                    "node_id": task_row["node"] or task_row["stage"],
+                    "task_id": task_id,
+                    "agent_id": task_row["agent"],
+                    "source": "herdr-sentinel",
+                    "timestamp": now,
+                },
+                conn=conn,
+            )
         if last_present is None or last_present != marker_present:
             conn.execute(
                 """INSERT INTO completion_observations
