@@ -353,8 +353,12 @@ def decide_operation(db_path, operation_id, expected_version, operator, action, 
         if action == 'retry' and ((op['payload'].get('status') == 'waiting_human' and op['payload'].get('reason') != 'finalize_escalated') or op['started']):
             raise ValueError('retry prerequisites unknown; delivery must be verified')
         if op['payload'].get('kind') == 'node_dispatch':
-            from .node_dispatch import current
-            _, config = _workflow_snapshot(conn, op['workflow_id'])
+            from .node_dispatch import current, scope_cancelled
+            from .node_dispatch_store import _snapshot as dispatch_snapshot, _prior_delivery_unknown
+            workflow, config, dispatch_tasks = dispatch_snapshot(conn, op['workflow_id'])
+            if action == 'retry' and (scope_cancelled(op, workflow, dispatch_tasks)
+                                      or _prior_delivery_unknown(conn, op)):
+                raise ValueError('dispatch scope cancelled or prior delivery unknown; verify responsibility first')
             if not current(op, workflow, config):
                 raise ValueError('stale dispatch generation or configuration')
         if action == 'verify':

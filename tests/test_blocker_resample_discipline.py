@@ -6,8 +6,8 @@ working（版本递增），屏幕内容完全未变；下一次巡检把同一�
 它来自恢复前的旧屏幕，任务再次 blocked。
 
 修复纪律：持久跟踪 BLOCKER 标记在场状态，并结合三个持久事实判定采样——
-absent→present 周期、先前样本是否已被 Controller 消费、先前样本的屏幕指纹
-是否与当前屏幕一致。residue 只抑制重复的阻塞事件采样，不得短路同一任务的
+absent→present 周期、先前样本是否已被 Controller 消费、先前样本的版本
+是否仍可消费。residue 只抑制重复的阻塞事件采样，不得短路同一任务的
 崩溃检测与待投递指令处理（PR #161 评审）。
 """
 
@@ -98,7 +98,7 @@ class BlockerSampleActionTest(unittest.TestCase):
             "record",
         )
 
-    def test_unconsumed_sample_with_changed_screen_records(self):
+    def test_unconsumed_sample_with_changed_screen_is_not_duplicated(self):
         self.assertEqual(
             blocker_sample_action(
                 marker_present=True,
@@ -109,7 +109,7 @@ class BlockerSampleActionTest(unittest.TestCase):
                 prior_event_screen_sha256="a",
                 screen_sha256="b",
             ),
-            "record",
+            "residue",
         )
 
     def test_unconsumed_version_current_sample_is_not_duplicated(self):
@@ -481,7 +481,7 @@ class SentinelMainLoopResiduePatrolTest(unittest.TestCase):
             "pane_id": "w1:p1",
             "started_at": time.time(),
         })
-        # 播种一段已消费的阻塞 episode：record（含指纹）→ blocked → 显式恢复。
+        # 先播种未消费样本；需要旧残留的场景再执行真实阻塞与恢复。
         fingerprint = self.sentinel._screen_fingerprint(self.SCREEN_RESIDUE + "\n")
         self.store.observe_blocker_marker(
             "impl-t6",
@@ -494,6 +494,16 @@ class SentinelMainLoopResiduePatrolTest(unittest.TestCase):
                 "screen_sha256": fingerprint,
             },
         )
+        patcher = patch.object(self.sentinel, "STATE_FILE", self.state_file)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        adapter_patcher = patch(
+            "herdr.steering.get_agent_adapter", return_value=_FakeSteerAdapter()
+        )
+        adapter_patcher.start()
+        self.addCleanup(adapter_patcher.stop)
+
+    def _consume_and_resume(self):
         kernel.transition_task(
             task_id="impl-t6", to_status="blocked",
             reason="inner_loop_exhausted", source="herdr-controller",
@@ -505,15 +515,6 @@ class SentinelMainLoopResiduePatrolTest(unittest.TestCase):
             store=self.store,
         )
         self.assertEqual(self.store.get_task("impl-t6")["status"], "working")
-
-        patcher = patch.object(self.sentinel, "STATE_FILE", self.state_file)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        adapter_patcher = patch(
-            "herdr.steering.get_agent_adapter", return_value=_FakeSteerAdapter()
-        )
-        adapter_patcher.start()
-        self.addCleanup(adapter_patcher.stop)
 
     def _drive_main(self, screens, sweeps=2):
         """驱动真实 main()；screens 为每轮 sweep 的 pane 可见屏幕（不足时复用末项）。"""
@@ -578,6 +579,7 @@ class SentinelMainLoopResiduePatrolTest(unittest.TestCase):
         但指令照常投递 → 注入使 pane 字节变化 → sweep2 若凭指纹差异重采样，
         Controller 会再次阻塞。本回归锁定注入后屏幕变化仍判 residue。
         """
+        self._consume_and_resume()
         queued = self.steering.queue_steer(
             "impl-t6", "继续推进当前修复", operator="human",
             execute_dispatch=False,
@@ -601,6 +603,7 @@ class SentinelMainLoopResiduePatrolTest(unittest.TestCase):
 
     def test_residue_does_not_mask_a_real_process_crash(self):
         """旧标记与新的 Bun has crashed 同时可见时，崩溃事件照常记录并置 failed。"""
+        self._consume_and_resume()
         self._drive_main(
             self.SCREEN_RESIDUE + "\nBun has crashed", sweeps=2
         )
@@ -615,6 +618,73 @@ class SentinelMainLoopResiduePatrolTest(unittest.TestCase):
             task_id="impl-t6", event_type="blocked_marker_observed"
         )
         self.assertEqual(len(events), 1, "residue must not re-block")
+
+    def test_unconsumed_repaints_do_not_duplicate_current_version_sample(self):
+        """Controller 未消费时，同一版本的持续标记不因无关刷新增长事件。"""
+        version = self.store.get_task("impl-t6")["version"]
+        self._drive_main([
+            self.SCREEN_RESIDUE + f"\nclock={tick}" for tick in range(3)
+        ], sweeps=3)
+        events = self.store.list_events(
+            task_id="impl-t6", event_type="blocked_marker_observed"
+        )
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["payload"]["observed_version"], version)
+
+    def test_unconsumed_repaints_do_not_starve_pending_steer(self):
+        """每轮变屏不能令 record→continue 持续跳过真实 steering 投递。"""
+        queued = self.steering.queue_steer(
+            "impl-t6", "继续推进当前修复", operator="human",
+            execute_dispatch=False,
+        )
+        self.assertTrue(queued.get("ok"), queued)
+        self._drive_main([
+            self.SCREEN_RESIDUE + f"\nclock={tick}" for tick in range(3)
+        ], sweeps=3)
+        item = self.steering.load_steering_data()["steering_queues"]["impl-t6"][0]
+        self.assertEqual(item["status"], "dispatched")
+        self.assertEqual(item["delivery_attempt_count"], 1)
+        events = self.store.list_events(
+            task_id="impl-t6", event_type="blocked_marker_observed"
+        )
+        versions = [event["payload"]["observed_version"] for event in events]
+        # 投递会更新元数据版本，允许补采新版本，但同版本不得重复。
+        self.assertEqual(len(versions), len(set(versions)))
+
+    def test_absence_during_rework_rearms_sampling_after_return_to_working(self):
+        """返工时实际读到 absent 必须保留；采样仍只在 working/dispatched 执行。"""
+        self._assert_absence_rearms_after_status("rework")
+
+    def test_absence_while_blocked_rearms_sampling_after_return_to_working(self):
+        self._assert_absence_rearms_after_status("blocked")
+
+    def _assert_absence_rearms_after_status(self, paused_status):
+        self._consume_and_resume()
+        kernel.transition_task(
+            task_id="impl-t6", to_status=paused_status,
+            reason="cli_set_status", source="herdr-task", store=self.store,
+        )
+        self._drive_main([
+            "applying revision", "revision progress", self.SCREEN_RESIDUE
+        ], sweeps=3)
+        with sqlite3.connect(self.db_path) as conn:
+            present = conn.execute(
+                "SELECT blocker_present FROM completion_observations WHERE task_id=?",
+                ("impl-t6",),
+            ).fetchone()[0]
+        self.assertEqual(present, 0, f"observed absence in {paused_status} must be durable")
+        self.assertEqual(len(self.store.list_events(
+            task_id="impl-t6", event_type="blocked_marker_observed"
+        )), 1, f"{paused_status} must not record a blocker sample")
+        kernel.transition_task(
+            task_id="impl-t6", to_status="working",
+            reason="runtime_signal", source="herdr-controller", store=self.store,
+        )
+        self._drive_main(self.SCREEN_RESIDUE, sweeps=2)
+        events = self.store.list_events(
+            task_id="impl-t6", event_type="blocked_marker_observed"
+        )
+        self.assertEqual(len(events), 2, "new occurrence must remain consumable")
 
 
 if __name__ == "__main__":

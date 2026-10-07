@@ -617,40 +617,39 @@ def main():
             # C03c: the marker on screen may be residue from a pre-reopen
             # attempt, which a version-matching Controller cannot tell from a
             # fresh exhaustion.  Only a first sighting, an absent -> present
-            # cycle, an unconsumed prior sample, or a screen change since the
-            # consumed sample is recorded; continuous presence with unchanged
-            # screen bytes is residue.
-            if status in {"dispatched", "working"}:
-                blocker_present = _comp.marker_present(
-                    screen, task_id, _comp.BLOCKER_MARKER_PREFIX
+            # cycle, or a version-invalidated unconsumed sample is recorded;
+            # unrelated screen changes do not prove a new occurrence.
+            blocker_present = _comp.marker_present(
+                screen, task_id, _comp.BLOCKER_MARKER_PREFIX
+            )
+            # Preserve observed absence during blocked/rework too, so a
+            # later resume can recognize the next occurrence.  Failed pane
+            # reads return an empty string and must not fabricate absence.
+            if screen and not blocker_present:
+                _observe_blocker_presence(store, task_id, marker_present=False)
+            if status in {"dispatched", "working"} and blocker_present:
+                blocker_action = _observe_blocker_presence(
+                    store,
+                    task_id,
+                    marker_present=True,
+                    event_payload={
+                        "next_status": "blocked",
+                        "reason": "inner_loop_exhausted",
+                        "observed_status": status,
+                        "observed_version": task.get("version"),
+                        "observed_updated_at": task.get("updated_at"),
+                        "screen_sha256": _screen_fingerprint(screen),
+                    },
                 )
-                if blocker_present:
-                    blocker_action = _observe_blocker_presence(
-                        store,
-                        task_id,
-                        marker_present=True,
-                        event_payload={
-                            "next_status": "blocked",
-                            "reason": "inner_loop_exhausted",
-                            "observed_status": status,
-                            "observed_version": task.get("version"),
-                            "observed_updated_at": task.get("updated_at"),
-                            "screen_sha256": _screen_fingerprint(screen),
-                        },
+                if blocker_action == "record":
+                    print(
+                        f"[SENTINEL BLOCKER] task={task_id} pane={pane_id} — inner loop exhausted, observation sent to Controller",
+                        flush=True,
                     )
-                    if blocker_action == "record":
-                        print(
-                            f"[SENTINEL BLOCKER] task={task_id} pane={pane_id} — inner loop exhausted, observation sent to Controller",
-                            flush=True,
-                        )
-                        continue
-                    # Residue suppresses only the duplicate blocker sample:
-                    # pending-steer delivery below is an independent check
-                    # and must still run (PR #161 review).
-                # An unreadable pane is not evidence of absence: an empty
-                # capture must not fabricate the absent half of the cycle.
-                elif screen:
-                    _observe_blocker_presence(store, task_id, marker_present=False)
+                    continue
+                # Residue suppresses only the duplicate blocker sample:
+                # pending-steer delivery below is an independent check
+                # and must still run (PR #161 review).
 
             age = now - state["seen"][task_id]
             if (

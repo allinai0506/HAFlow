@@ -238,17 +238,17 @@ def blocker_sample_action(
       evidence once the prior sample was consumed.
     - ``prior_event_consumed``: whether the latest prior sample actually
       caused the working -> blocked transition.  An unconsumed sample whose
-      version is still current and whose screen is unchanged remains
-      consumable, so re-recording it would only grow the ledger while the
+      version is still current remains consumable even when the pane
+      repaints, so re-recording it would only grow the ledger while the
       Controller is unavailable.  A metadata write that invalidates its
       version must keep the sighting re-samplable, or a genuine blocker is
       lost (PR #161 review, scenario A).
-    - screen fingerprints support only the unconsumed branch, where a byte
-      change proves the previous sample no longer describes the pane.
+    - ``current_version`` / ``prior_event_version``: a version mismatch
+      invalidates an unconsumed sample; screen fingerprints do not.
 
     A re-exhaustion that completes inside one poll interval after a resume
     (no absent patrol ever observed) is an accepted, documented miss of the
-    consumed branch: the SLA/stall machinery covers the stuck task.
+    consumed branch.  Automatic re-blocking is not guaranteed in that case.
     """
     if not marker_present:
         return "absent"
@@ -263,15 +263,10 @@ def blocker_sample_action(
             current_version is not None
             and prior_event_version == current_version
         )
-        same_screen = (
-            prior_event_screen_sha256 is not None
-            and prior_event_screen_sha256 == screen_sha256
-        )
-        if version_current and (same_screen or prior_event_screen_sha256 is None):
+        if version_current:
             # The existing sample is still consumable; do not duplicate it.
             return "residue"
-        # A metadata write invalidated the sample's version (scenario A), or
-        # the pane changed under an unconsumed sample: re-sample.
+        # A metadata write invalidated the sample's version (scenario A).
         return "record"
     # Consumed: only an absent -> present cycle re-arms sampling.  Byte
     # difference against the consumed sample is residue, not evidence —

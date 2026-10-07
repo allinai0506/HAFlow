@@ -568,10 +568,12 @@ class StageAdvanceGateTest(unittest.TestCase):
         _ctl.check_workflow_stage_advance("wf-1")
 
         self.assertEqual(fixloop_calls, [])
-        # implementation 节点未完成且依赖已满足 → 既有 ready-node 语义会
-        # 重新提示派发(总指挥看到活动 fix task 即空转结束,属既有噪音,
-        # 非本机制引入);关键是 review 不 ready、无第二次 fix_loop。
-        self.assertEqual(advance_marks, ["implementation"])
+        # Existing live repair owns implementation. Durable node dispatch must
+        # neither send another implementation prompt nor advance review.
+        self.assertEqual(advance_marks, [])
+        self.assertEqual(self.store.get_task("fix1")["status"], "working")
+        self.assertEqual({t["task_id"] for t in self.store.list_tasks(workflow_id="wf-1")},
+                         {"req1", "impl1", "fix1", "rev1"})
 
     def test_reflow_resumes_gate_after_fix_completes(self):
         # fix 完成后:implementation 恢复完成,review 节点(全 superseded)

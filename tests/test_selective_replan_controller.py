@@ -732,6 +732,8 @@ class ControllerSelectiveReplanTest(unittest.TestCase):
         implementation 误判为完成;若 sweep 不纠正,替代任务永远没有
         补派窗口,工作流会带着一个被作废的谱系直接收口。
         """
+        self.store.save_workflow({"workflow_id": WF, "status": "running",
+                                  "config": self._wf_cfg()})
         self.freeze()
         self._seed_completed_upstream()
         self.seed_three_impl()
