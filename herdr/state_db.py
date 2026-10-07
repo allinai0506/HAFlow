@@ -417,6 +417,7 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
             consecutive_samples INTEGER NOT NULL DEFAULT 0,
             vanished INTEGER NOT NULL DEFAULT 0,
             epoch_changed INTEGER NOT NULL DEFAULT 0,
+            blocker_present INTEGER,
             updated_at REAL NOT NULL,
             FOREIGN KEY (task_id) REFERENCES tasks(task_id) ON DELETE CASCADE
         );
@@ -1126,12 +1127,23 @@ def _ensure_completion_columns(conn: sqlite3.Connection) -> None:
         row["name"]
         for row in conn.execute("PRAGMA table_info(completion_observations);")
     }
-    if "last_observed_at" in columns:
+    if "last_observed_at" not in columns:
+        try:
+            conn.execute(
+                "ALTER TABLE completion_observations "
+                "ADD COLUMN last_observed_at REAL;"
+            )
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc).lower():
+                raise
+    if "blocker_present" in columns:
         return
+    # C03c: durable BLOCKER marker presence, so screen residue that outlives
+    # a reopen is never re-sampled as a fresh blocker.
     try:
         conn.execute(
             "ALTER TABLE completion_observations "
-            "ADD COLUMN last_observed_at REAL;"
+            "ADD COLUMN blocker_present INTEGER;"
         )
     except sqlite3.OperationalError as exc:
         if "duplicate column name" not in str(exc).lower():
@@ -1996,6 +2008,82 @@ def observe_completion(
         })
         conn.execute("COMMIT;")
         return result
+    except Exception:
+        try:
+            conn.execute("ROLLBACK;")
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
+
+
+def observe_blocker_marker(
+    task_id: str,
+    *,
+    marker_present: bool,
+    observed_at: Optional[float] = None,
+    db_path: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Track durable BLOCKER marker presence; classify the sighting (C03c).
+
+    The Controller can only version-check a ``blocked_marker_observed``
+    sample, so the Sentinel must never re-sample screen residue: after a
+    ``set-status`` reopen the stale marker would be re-stamped with the new
+    version and re-block the task.  This records the marker presence of the
+    latest patrol and returns whether the sighting may become an event.  Only
+    ``blocker_present`` and ``updated_at`` are written, so the completion
+    row's own epoch state is never disturbed.
+    """
+    from . import completion as completion_policy
+
+    now = float(observed_at if observed_at is not None else time.time())
+    if not math.isfinite(now):
+        raise ValueError("observed_at must be finite")
+    conn = get_db_connection(db_path)
+    try:
+        conn.execute("BEGIN IMMEDIATE;")
+        task_row = conn.execute(
+            "SELECT 1 FROM tasks WHERE task_id = ?", (task_id,)
+        ).fetchone()
+        if task_row is None:
+            raise ValueError(f"Task '{task_id}' not found")
+        row = conn.execute(
+            "SELECT blocker_present FROM completion_observations WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()
+        last_present = (
+            None
+            if row is None or row["blocker_present"] is None
+            else bool(row["blocker_present"])
+        )
+        prior_sample_exists = False
+        if marker_present:
+            prior = conn.execute(
+                "SELECT id FROM events "
+                "WHERE task_id = ? AND event_type = 'blocked_marker_observed' "
+                "ORDER BY timestamp DESC, id DESC LIMIT 1",
+                (task_id,),
+            ).fetchone()
+            prior_sample_exists = prior is not None
+        action = completion_policy.blocker_sample_action(
+            marker_present=marker_present,
+            last_blocker_present=last_present,
+            prior_sample_exists=prior_sample_exists,
+        )
+        if last_present is None or last_present != marker_present:
+            conn.execute(
+                """INSERT INTO completion_observations
+                    (task_id, blocker_present, updated_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(task_id) DO UPDATE SET
+                        blocker_present=excluded.blocker_present,
+                        updated_at=excluded.updated_at;
+                """,
+                (task_id, int(marker_present), now),
+            )
+        conn.execute("COMMIT;")
+        return {"task_id": task_id, "action": action}
     except Exception:
         try:
             conn.execute("ROLLBACK;")

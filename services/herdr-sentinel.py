@@ -1,5 +1,6 @@
 #!/opt/homebrew/bin/python3
 
+import hashlib
 import json
 import os
 import sqlite3
@@ -284,6 +285,25 @@ def _record_sentinel_event(store, task, event_type, payload):
         print(f"[SENTINEL EVENT WARN] {event_type}: {exc}", file=sys.stderr, flush=True)
 
 
+def _screen_fingerprint(screen):
+    """Content hash of one pane capture; forensic evidence, not an epoch."""
+    return hashlib.sha256(screen.encode("utf-8", "replace")).hexdigest()
+
+
+def _observe_blocker_presence(store, task_id, *, marker_present):
+    """Best-effort durable BLOCKER presence tracking (never blocks the sweep)."""
+    try:
+        result = store.observe_blocker_marker(task_id, marker_present=marker_present)
+        return str((result or {}).get("action") or "skip")
+    except (OSError, ValueError, RuntimeError, AttributeError, sqlite3.Error) as exc:
+        print(
+            f"[SENTINEL BLOCKER WARN] task={task_id} presence observe: {exc}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return "skip"
+
+
 def restart_controller():
     try:
         run(
@@ -564,26 +584,41 @@ def main():
 
             # Inner loop exhausted: record the observation only.  The
             # Controller transitions the task to blocked and owns arbitration.
-            if status in {"dispatched", "working"} and _comp.marker_present(
-                screen, task_id, _comp.BLOCKER_MARKER_PREFIX
-            ):
-                _record_sentinel_event(
-                    store,
-                    task,
-                    "blocked_marker_observed",
-                    {
-                        "next_status": "blocked",
-                        "reason": "inner_loop_exhausted",
-                        "observed_status": status,
-                        "observed_version": task.get("version"),
-                        "observed_updated_at": task.get("updated_at"),
-                    },
+            # C03c: the marker on screen may be residue from a pre-reopen
+            # attempt, which a version-matching Controller cannot tell from a
+            # fresh exhaustion.  Only a first sighting or an absent -> present
+            # cycle is sampled; continuous presence is residue and stays
+            # unsampled until the screen changes.
+            if status in {"dispatched", "working"}:
+                blocker_present = _comp.marker_present(
+                    screen, task_id, _comp.BLOCKER_MARKER_PREFIX
                 )
-                print(
-                    f"[SENTINEL BLOCKER] task={task_id} pane={pane_id} — inner loop exhausted, observation sent to Controller",
-                    flush=True,
-                )
-                continue
+                if blocker_present:
+                    if _observe_blocker_presence(
+                        store, task_id, marker_present=True
+                    ) == "record":
+                        _record_sentinel_event(
+                            store,
+                            task,
+                            "blocked_marker_observed",
+                            {
+                                "next_status": "blocked",
+                                "reason": "inner_loop_exhausted",
+                                "observed_status": status,
+                                "observed_version": task.get("version"),
+                                "observed_updated_at": task.get("updated_at"),
+                                "screen_sha256": _screen_fingerprint(screen),
+                            },
+                        )
+                        print(
+                            f"[SENTINEL BLOCKER] task={task_id} pane={pane_id} — inner loop exhausted, observation sent to Controller",
+                            flush=True,
+                        )
+                    continue
+                # An unreadable pane is not evidence of absence: an empty
+                # capture must not fabricate the absent half of the cycle.
+                if screen:
+                    _observe_blocker_presence(store, task_id, marker_present=False)
 
             if any(pattern in screen for pattern in CRASH_PATTERNS):
                 observe_crash_pattern(

@@ -215,6 +215,36 @@ def observation_is_current(
         return False
 
 
+def blocker_sample_action(
+    *,
+    marker_present: bool,
+    last_blocker_present: bool | None,
+    prior_sample_exists: bool,
+) -> str:
+    """Classify one Sentinel BLOCKER sighting: record, residue, or absent.
+
+    A ``blocked_marker_observed`` sample binds the task's *current* version at
+    sample time, so screen residue that outlives a ``set-status`` reopen is
+    re-stamped as fresh and re-blocks the task (C03c).  Screen bytes cannot
+    prove their own age; durable marker presence can.  A genuine new
+    exhaustion is always preceded by a patrol that saw the marker absent (the
+    re-dispatched agent repaints the pane), while residue never leaves the
+    screen.  ``last_blocker_present`` is the previous patrol's durable state
+    (``None`` = no tracking yet); ``prior_sample_exists`` says whether this
+    task ever recorded a ``blocked_marker_observed`` event.
+    """
+    if not marker_present:
+        return "absent"
+    if last_blocker_present is False:
+        # absent -> present: the old occurrence is provably gone.
+        return "record"
+    if prior_sample_exists:
+        # Same occurrence still on screen since its sample: residue.
+        return "residue"
+    # First sighting for this task, or a retry after a lost event write.
+    return "record"
+
+
 def should_accept(
     *,
     marker_present: bool,

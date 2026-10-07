@@ -139,8 +139,11 @@ class SentinelBlockerDetectionTest(unittest.TestCase):
         return (HERDR_ROOT / "services" / "herdr-sentinel.py").read_text(encoding="utf-8")
 
     def _blocker_check(self, src):
+        # C03c: the wrap-tolerant marker check now gates the presence-observing
+        # blocker branch instead of standing alone in an ``and`` chain.
         return re.search(
-            r'status in \{"dispatched", "working"\} and _comp\.marker_present\(\s*'
+            r'status in \{"dispatched", "working"\}:\s*'
+            r"blocker_present = _comp\.marker_present\(\s*"
             r"screen,\s*task_id,\s*_comp\.BLOCKER_MARKER_PREFIX",
             src,
         )
