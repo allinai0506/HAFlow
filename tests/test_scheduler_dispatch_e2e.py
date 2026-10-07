@@ -801,6 +801,15 @@ class FrozenIdentityFallbackWiringTest(unittest.TestCase):
 
     def _run_real_fallback(self, sha):
         """Let direct dispatch really fall back, then capture the prompt."""
+        from herdr.state_store import get_state_store
+        store = get_state_store(self.db)
+        config = {"nodes": [
+            _node("implementation", depends_on=[]), _node("test")]}
+        store.save_workflow({"workflow_id": "wf-fb-1", "status": "running",
+                             "execution_id": "fallback-gen", "config": config})
+        store.save_task({"task_id": "fb-impl", "workflow_id": "wf-fb-1",
+                         "execution_id": "fallback-gen", "run_id": "fb-run",
+                         "node": "implementation", "status": "completed"})
         if sha:
             self._freeze(sha, branch="agent/x/feat-c")
         project_ctx = {
@@ -829,8 +838,7 @@ class FrozenIdentityFallbackWiringTest(unittest.TestCase):
         # direct_dispatch_planner=None makes try_direct_stage_advance return
         # False at its first guard — the genuine fallback path.
         with patch.object(_ctl, "project_for_workflow", return_value=project_ctx), \
-            patch.object(_ctl, "workflow_config_for", return_value={
-                "nodes": [_node("test")]}), \
+            patch.object(_ctl, "workflow_config_for", return_value=config), \
             patch.object(_ctl, "workflow_closed", return_value=False), \
             patch.object(_ctl, "coordinator_status", return_value="idle"), \
             patch.object(_ctl, "coordinator_pane_for_workflow",

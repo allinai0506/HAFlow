@@ -1,4 +1,4 @@
-"""First-node dispatch transactions in the existing workflow recovery table."""
+"""Node dispatch transactions in the existing workflow recovery table."""
 import json
 import time
 
@@ -32,15 +32,54 @@ def _node_operation(conn, workflow, config, node):
     return rs._decode(row) if row else None
 
 
+def _prior_unresolved(conn, workflow_id, node_id, *, excluding_key):
+    return conn.execute(
+        "SELECT id FROM workflow_recovery_operations WHERE workflow_id=? "
+        "AND identity_key LIKE 'node_dispatch:%' AND json_extract(payload_json,'$.node_id')=? "
+        "AND identity_key!=? AND status NOT IN ('resolved','superseded') AND started=1 LIMIT 1",
+        (workflow_id, node_id, excluding_key)).fetchone()
+
+
+def _prior_delivery_unknown(conn, op):
+    return _prior_unresolved(conn, op['workflow_id'], op['payload']['node_id'],
+                             excluding_key=op['identity_key']) is not None
+
+
+def _snapshot(conn, wid):
+    """Upstream identity and reuse are read in the same transaction as the lease."""
+    from . import scheduler, scheduler_facts, reverification
+    workflow, config, tasks = rs._snapshot(conn, wid)
+    facts = []
+    for node_id in scheduler.verifier_branch_node_ids(config):
+        fact = scheduler_facts.find_reuse_fact(wid, node_id, workflow.get('candidate_sha'),
+            policy_identity=reverification.policy_identity(reverification.policy_from_workflow(config)),
+            episode_id=workflow.get('candidate_episode_id'), conn=conn)
+        if fact:
+            facts.append(fact)
+    workflow['_dispatch_reuse_facts'] = facts
+    workflow['_dispatch_dependency_runs'] = {
+        node['id']: sorted(({'task_id': t['task_id'], 'run_id': t.get('run_id')}
+            for t in tasks if (t.get('node') or t.get('stage')) == node['id']
+            and t.get('status') != 'superseded' and not t.get('superseded_by')
+            and (not t.get('execution_id') or t['execution_id'] == workflow.get('execution_id'))),
+            key=lambda t: t['task_id']) or [
+                {'reuse_event_id': f['event_id']} for f in facts if f['verifier'] == node['id']]
+        for node in config.get('nodes') or []}
+    return workflow, config, tasks
+
+
 def reconcile_workflow(db_path, wid, *, legacy_notified=(), discover=True, intake_enabled=True, now=None):
     now = time.time() if now is None else now
     with rs._transaction(db_path) as conn:
-        workflow, config, tasks = rs._snapshot(conn, wid)
+        workflow, config, tasks = _snapshot(conn, wid)
         current_tasks = [t for t in tasks if not t.get('execution_id')
                          or t.get('execution_id') == workflow.get('execution_id')]
-        if discover and intake_enabled and core.active(workflow):
+        if discover and core.active(workflow):
             for node in config.get('nodes') or []:
-                if (not node.get('id') or node.get('depends_on') or node.get('node_type', 'agent') != 'agent'):
+                if (not node.get('id') or node.get('node_type', 'agent') != 'agent'
+                        or (not node.get('depends_on') and not intake_enabled)
+                        or not core.dependencies_ready(workflow, config, node, current_tasks)
+                        or core.verification_reused(workflow, config, node['id'], current_tasks)):
                     continue
                 previous = _node_operation(conn, workflow, config, node)
                 node_tasks = [t for t in current_tasks if (t.get('node') or t.get('stage')) == node['id']]
@@ -49,25 +88,36 @@ def reconcile_workflow(db_path, wid, *, legacy_notified=(), discover=True, intak
                 if candidates and (not previous or previous['status'] in core.TERMINAL):
                     predecessors = sorted(({'task_id': t['task_id'], 'run_id': t.get('run_id')}
                                            for t in candidates), key=lambda t: t['task_id'])
-                elif node_tasks:
+                elif node_tasks and (not node.get('depends_on') or not core.cancelled_inventory(node_tasks)):
                     continue
                 prior_id = previous['id'] if previous and previous['status'] in core.TERMINAL else None
                 facts = core.payload(workflow, config, node, predecessors, prior_id)
                 legacy = not predecessors and node['id'] in legacy_notified
                 detail = ({'reason': 'legacy_dispatch_unknown', 'origin': 'legacy_notified',
                            'deadline_at': now + core.WAIT_SECONDS} if legacy else {})
+                status, started = ('awaiting_result', 1) if legacy else ('pending', 0)
+                if core.cancelled_inventory(node_tasks):
+                    status, started = 'waiting_human', 0
+                    detail = {'reason': 'dispatch_scope_cancelled',
+                              'decision_needed': '该节点任务已明确取消补派；确认剩余验收范围'}
+                prior_unknown = _prior_unresolved(conn, wid, node['id'], excluding_key=facts['identity_key'])
+                if prior_unknown:
+                    status, started = 'waiting_human', 0
+                    detail = {'reason': 'dispatch_prior_delivery_unknown',
+                              'prior_operation_id': prior_unknown['id'],
+                              'decision_needed': '旧派发已开始且交付未明确，先核验，禁止重叠派发'}
                 cur = conn.execute('''INSERT INTO workflow_recovery_operations
                     (identity_key,workflow_id,payload_json,status,next_due_at,started,detail_json,created_at,updated_at)
                     VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(identity_key) DO NOTHING''',
-                    (facts['identity_key'], wid, json.dumps(facts), 'awaiting_result' if legacy else 'pending',
-                     now if not legacy else now + core.CHECK_SECONDS, int(legacy), json.dumps(detail), now, now))
+                    (facts['identity_key'], wid, json.dumps(facts), status,
+                     now if not legacy else now + core.CHECK_SECONDS, started, json.dumps(detail), now, now))
                 if cur.rowcount:
                     row = conn.execute('SELECT id FROM workflow_recovery_operations WHERE identity_key=?', (facts['identity_key'],)).fetchone()
                     rs._event(conn, rs._get(conn, row['id']), 'dispatch_registered', now, detail)
         for op in _operations(conn, wid):
             if op['status'] in core.TERMINAL:
                 continue
-            if (not intake_enabled and not op['started'] and op['status'] in {'pending', 'running'}
+            if (not intake_enabled and not op['payload'].get('dependency_runs') and not op['started'] and op['status'] in {'pending', 'running'}
                     and core.current(op, workflow, config)):
                 _write(conn, op, 'superseded', {'reason': 'dispatch_direct_mode',
                     'responsibility_transferred_to': 'direct_scheduler'}, now)
@@ -104,7 +154,7 @@ def operation_for_node(db_path, wid, node_id):
         conn.execute('BEGIN')
         if not conn.execute('SELECT 1 FROM workflows WHERE workflow_id=?', (wid,)).fetchone():
             return None
-        workflow, config = rs._workflow_snapshot(conn, wid)
+        workflow, config, _ = _snapshot(conn, wid)
         node = next((n for n in config.get('nodes') or [] if n.get('id') == node_id), None)
         if not node:
             return None
@@ -117,32 +167,39 @@ def claim(db_path, operation_id, owner, now=None):
     now = time.time() if now is None else now
     with rs._transaction(db_path) as conn:
         op = rs._get(conn, operation_id)
-        workflow, config, tasks = rs._snapshot(conn, op['workflow_id'])
+        workflow, config, tasks = _snapshot(conn, op['workflow_id'])
         outcome = core.result(op, workflow, config, tasks, now)
-        if outcome and outcome[1].get('reason') == 'dispatch_existing_tasks':
+        if outcome:
             _write(conn, op, *outcome, now)
             return None
         if (not owner or not core.active(workflow) or not core.current(op, workflow, config)
-                or not core.predecessors_current(op, workflow, tasks)
+                or not core.predecessors_current(op, workflow, tasks) or not core.ready(op, workflow, config, tasks)
+                or _prior_delivery_unknown(conn, op)
                 or op['status'] != 'pending' or op['started'] or op['next_due_at'] > now or op['attempts'] >= 3):
             return None
         return _write(conn, op, 'running', {}, now, owner=owner, lease=now + 660, next_due=now + 660,
                       attempts=op['attempts'] + 1)
 
 
-def start(db_path, operation_id, owner, now=None):
+def start(db_path, operation_id, owner, now=None, *, expected_task_ids=None):
     now = time.time() if now is None else now
     with rs._transaction(db_path) as conn:
         op = rs._owned(conn, operation_id, owner, now)
-        workflow, config, tasks = rs._snapshot(conn, op['workflow_id'])
+        workflow, config, tasks = _snapshot(conn, op['workflow_id'])
         outcome = core.result(op, workflow, config, tasks, now)
-        if outcome and outcome[1].get('reason') == 'dispatch_existing_tasks':
+        if outcome and outcome[1].get('reason') in {'dispatch_existing_tasks', 'dispatch_verification_reused'}:
             _write(conn, op, *outcome, now)
             return None
         if (not core.active(workflow) or not core.current(op, workflow, config) or op['started']
-                or not core.predecessors_current(op, workflow, tasks)):
+                or not core.predecessors_current(op, workflow, tasks) or not core.ready(op, workflow, config, tasks)
+                or _prior_delivery_unknown(conn, op)):
             raise ValueError('dispatch no longer owns current unsent generation')
-        return _write(conn, op, 'running', {'sent_at': now, 'deadline_at': now + core.WAIT_SECONDS},
+        detail = {'sent_at': now, 'deadline_at': now + core.WAIT_SECONDS}
+        if expected_task_ids is not None:
+            if not core._valid_required(expected_task_ids) or len(set(expected_task_ids)) != len(expected_task_ids):
+                raise ValueError('direct dispatch requires a bounded unique task inventory')
+            detail['expected_task_ids'] = expected_task_ids
+        return _write(conn, op, 'running', detail,
                       now, owner=owner, lease=now + 660, next_due=now + core.CHECK_SECONDS, started=1)
 
 
@@ -156,18 +213,49 @@ def transport_finished(db_path, operation_id, owner, *, reason, now=None):
         if op['owner'] != owner or op['status'] != 'running' or not op['started']:
             return op
         op = _write(conn, op, 'awaiting_result', {'reason': reason}, now, next_due=now)
-        workflow, config, tasks = rs._snapshot(conn, op['workflow_id'])
+        workflow, config, tasks = _snapshot(conn, op['workflow_id'])
         outcome = core.result(op, workflow, config, tasks, now)
         if outcome:
             return _write(conn, op, *outcome, now)
         return op
 
 
+def direct_finished(db_path, operation_id, owner, attempted_task_ids, now=None):
+    """Only durable resources_absent receipts can authorize another direct attempt."""
+    now = time.time() if now is None else now
+    with rs._transaction(db_path) as conn:
+        op = rs._get(conn, operation_id)
+        if op['status'] in core.TERMINAL or op['status'] == 'waiting_human':
+            return op
+        if op['owner'] != owner or op['status'] != 'running' or not op['started']:
+            return op
+        workflow, config, tasks = _snapshot(conn, op['workflow_id'])
+        absent = bool(attempted_task_ids) and not core.registered_tasks(op, workflow, tasks)
+        for task_id in attempted_task_ids:
+            row = conn.execute("SELECT payload_json FROM events WHERE workflow_id=? "
+                "AND event_type='launch_intent' AND source='launch' "
+                "AND json_extract(payload_json,'$.dispatch_operation_id')=? "
+                "AND json_extract(payload_json,'$.task_id')=? ORDER BY id DESC LIMIT 1",
+                (op['workflow_id'], op['id'], task_id)).fetchone()
+            intent = json.loads(row['payload_json']) if row else {}
+            absent = absent and intent.get('phase') == 'resources_absent'
+        if absent and core.current(op, workflow, config) and core.ready(op, workflow, config, tasks):
+            return _write(conn, op, 'waiting_human' if op['attempts'] >= 3 else 'pending',
+                {'reason': 'dispatch_resources_absent', 'deadline_at': None,
+                 'decision_needed': '资源已确认未创建；修正派发前置条件后可重试'},
+                now, next_due=now + core.CHECK_SECONDS, started=0)
+        outcome = core.result(op, workflow, config, tasks, now)
+        if outcome:
+            return _write(conn, op, *outcome, now)
+        return _write(conn, op, 'awaiting_result', {'reason': 'dispatch_delivery_unknown'},
+                      now, next_due=now + core.CHECK_SECONDS)
+
+
 def defer(db_path, operation_id, reason, now=None, owner=None):
     now = time.time() if now is None else now
     with rs._transaction(db_path) as conn:
         op = rs._get(conn, operation_id)
-        workflow, config, _ = rs._snapshot(conn, op['workflow_id'])
+        workflow, config, _ = _snapshot(conn, op['workflow_id'])
         held = op['status'] == 'running' and owner and op['owner'] == owner and op['lease_until'] > now
         if (op['started'] or (not held and (op['status'] != 'pending' or op['next_due_at'] > now))
                 or not core.active(workflow) or not core.current(op, workflow, config)):
@@ -180,13 +268,14 @@ def defer(db_path, operation_id, reason, now=None, owner=None):
 
 def validate_launch(conn, operation_id, workflow_id, node_id, now):
     op = rs._get(conn, operation_id)
-    workflow, config, tasks = rs._snapshot(conn, workflow_id)
+    workflow, config, tasks = _snapshot(conn, workflow_id)
     node = next((n for n in config.get('nodes') or [] if n.get('id') == node_id), None)
     latest = _node_operation(conn, workflow, config, node) if node else None
     if (op['payload'].get('kind') != 'node_dispatch' or op['workflow_id'] != workflow_id
             or op['payload']['node_id'] != node_id or not workflow.get('execution_id')
             or not core.active(workflow) or not core.current(op, workflow, config)
             or not latest or latest['id'] != op['id'] or not core.predecessors_current(op, workflow, tasks)
+            or not core.ready(op, workflow, config, tasks) or _prior_delivery_unknown(conn, op)
             or not op['started'] or op['status'] not in {'running', 'awaiting_result', 'resolved', 'waiting_human'}
             or op['detail'].get('deadline_at', 0) <= now or op['detail'].get('origin') == 'legacy_notified'):
         raise ValueError('dispatch operation does not authorize this launch')
@@ -199,6 +288,8 @@ def record_intent(db_path, intent, now):
         op, workflow = validate_launch(conn, intent['dispatch_operation_id'], intent['workflow_id'], intent['node_id'], now)
         if intent.get('execution_id') != workflow['execution_id'] or not intent['resources'].get('run_id'):
             raise ValueError('dispatch launch intent requires current execution and run identity')
+        if op['payload'].get('candidate_sha') and intent.get('candidate_sha') != op['payload']['candidate_sha']:
+            raise ValueError('dispatch intent candidate does not match current episode')
         predecessors = op['payload'].get('predecessors') or []
         if predecessors and intent.get('supersedes') not in {p['task_id'] for p in predecessors}:
             raise ValueError('replacement dispatch requires its predecessor')
@@ -212,6 +303,8 @@ def validate_task_registration(conn, task, now):
     if operation_id is None:
         return
     op, workflow = validate_launch(conn, operation_id, task['workflow_id'], task.get('node') or task.get('stage'), now)
+    if op['payload'].get('candidate_sha') and task.get('candidate_sha') != op['payload']['candidate_sha']:
+        raise ValueError('dispatch task candidate does not match current episode')
     if not task.get('run_id') or task.get('execution_id') != workflow.get('execution_id'):
         raise ValueError('dispatch task requires current run and execution identity')
     row = conn.execute("SELECT payload_json FROM events WHERE workflow_id=? AND event_type='launch_intent' AND source='launch' AND json_extract(payload_json,'$.intent_id')=? ORDER BY id DESC LIMIT 1",
@@ -238,7 +331,7 @@ def read_wait_projection(db_path, wid, now):
         conn.execute('BEGIN')
         if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='workflow_recovery_operations'").fetchone():
             return None
-        workflow, config = rs._workflow_snapshot(conn, wid)
+        workflow, config, _ = _snapshot(conn, wid)
         if not core.active(workflow):
             return None
         operations = [op for op in _operations(conn, wid)

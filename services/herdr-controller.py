@@ -4317,6 +4317,13 @@ def try_direct_stage_advance(item):
     ):
         return False
 
+    dispatch_operation_id = item.get('dispatch_operation_id')
+    dispatch_owner = item.get('dispatch_owner')
+    if dispatch_operation_id is not None:
+        from herdr.node_dispatch_store import start
+        if start(_get_store().db_path, dispatch_operation_id, dispatch_owner,
+                 expected_task_ids=[spec['task_id'] for spec in specs]) is None:
+            return True
     launched = []
 
     for spec in specs:
@@ -4336,8 +4343,11 @@ def try_direct_stage_advance(item):
             "--prompt", spec["prompt"],
             # Workflow execution identity: sibling launches keep distinct
             # run_ids but share one execution_id for the same execution.
-            "--execution-id", workflow_id,
+            "--execution-id", project_ctx.get("execution_id") or workflow_id,
         ]
+
+        if dispatch_operation_id is not None:
+            cmd += ["--dispatch-operation-id", str(dispatch_operation_id)]
 
         if spec.get("artifact_mode"):
             cmd += ["--artifact-mode", spec["artifact_mode"]]
@@ -4384,6 +4394,14 @@ def try_direct_stage_advance(item):
                     f"[DIRECT DISPATCH ERROR] "
                     f"task={spec['task_id']}: {output}"
                 )
+            if dispatch_operation_id is not None:
+                from herdr.node_dispatch_store import direct_finished
+                receipt = direct_finished(_get_store().db_path, dispatch_operation_id,
+                    dispatch_owner, [*launched, spec['task_id']])
+                mark_stage_advance_notified(workflow_id, ready_id)
+                print(f"[STAGE DISPATCH AWAITING_TASK] workflow={workflow_id} "
+                      f"node={ready_id} operation={receipt['id']} status={receipt['status']}")
+                return True  # A started launch must never fall through to a second transport.
             failed_task = get_task(spec["task_id"])
             if failed_task and failed_task.get("status") == "failed" and (
                 failed_task.get("failure_reason") == "router_isolation_rejected"
@@ -4423,6 +4441,14 @@ def try_direct_stage_advance(item):
         launched.append(spec["task_id"])
 
     mark_stage_advance_notified(workflow_id, ready_id)
+    if dispatch_operation_id is not None:
+        from herdr.node_dispatch_store import transport_finished
+        receipt = transport_finished(_get_store().db_path, dispatch_operation_id,
+            dispatch_owner, reason='dispatch_awaiting_task')
+        if receipt['status'] != 'resolved':
+            print(f"[STAGE DISPATCH AWAITING_TASK] workflow={workflow_id} "
+                  f"node={ready_id} operation={receipt['id']} status={receipt['status']}")
+            return True
 
     print(
         f"[STAGE ADVANCED DIRECT] "
@@ -4650,7 +4676,7 @@ def reconcile_node_dispatches(workflow_id, *, discover=True):
                 # Release the old latch before committing transfer; no direct queue is created yet.
                 clear_stage_advance(workflow_id, node['id'])
     return reconcile_workflow(_get_store().db_path, workflow_id,
-                              legacy_notified=legacy, discover=discover and enabled, intake_enabled=enabled)
+                              legacy_notified=legacy, discover=discover, intake_enabled=enabled)
 
 
 def check_workflow_stage_advance(workflow_id):
@@ -4923,14 +4949,14 @@ def check_workflow_stage_advance(workflow_id):
                 continue
 
             dispatch_claim = None
-            if not deps:
+            if not deps or _get_store().get_workflow(workflow_id):
                 from herdr.node_dispatch_store import operation_for_node, claim
                 op = operation_for_node(_get_store().db_path, workflow_id, ready_id)
-                if coordinator_intake_enabled() and not op and _get_store().get_workflow(workflow_id):
+                if (deps or coordinator_intake_enabled()) and not op and _get_store().get_workflow(workflow_id):
                     continue
-                if op and not coordinator_intake_enabled() and op['status'] not in ('resolved', 'superseded'):
+                if op and not deps and not coordinator_intake_enabled() and op['status'] not in ('resolved', 'superseded'):
                     continue
-                if op and coordinator_intake_enabled():
+                if op and (deps or coordinator_intake_enabled()):
                     import uuid
                     dispatch_claim = claim(_get_store().db_path, op['id'], uuid.uuid4().hex)
                     if dispatch_claim is None:
@@ -6982,6 +7008,35 @@ def _handle_coordinator_item(item):
                 previous_dispatch = operation_for_node(_get_store().db_path, item['workflow_id'], target_node_id)
                 if previous_dispatch and previous_dispatch['status'] not in ('resolved', 'superseded'):
                     return
+        # Downstream nodes have the same durable responsibility as initial intake.
+        # Keep legacy unregistered callers compatible; native workflows must own a lease.
+        if ((node or {}).get('depends_on') or coordinator_intake_enabled()) and _get_store().get_workflow(item['workflow_id']):
+            from herdr.node_dispatch_store import operation_for_node, claim
+            reconcile_node_dispatches(item['workflow_id'])
+            dispatch_op = operation_for_node(_get_store().db_path, item['workflow_id'], target_node_id)
+            if not dispatch_op:
+                return
+            if item.get('dispatch_operation_id') is not None:
+                if (item['dispatch_operation_id'] != dispatch_op['id']
+                        or item.get('dispatch_owner') != dispatch_op['owner']
+                        or dispatch_op['status'] != 'running' or dispatch_op['started']):
+                    return
+                dispatch_owner = item['dispatch_owner']
+            else:
+                import uuid
+                dispatch_op = claim(_get_store().db_path, dispatch_op['id'], uuid.uuid4().hex)
+                if dispatch_op is None:
+                    return
+                dispatch_owner = dispatch_op['owner']
+            item = dict(item, dispatch_operation_id=dispatch_op['id'], dispatch_owner=dispatch_owner)
+            pinned = _get_store().get_workflow(item['workflow_id'])['config']
+            node = find_node(pinned, target_node_id)
+            item = dict(item, node=node)
+            if not _scheduler_join_gate_allows(item['workflow_id'], node, load_tasks()):
+                from herdr.node_dispatch_store import defer
+                defer(_get_store().db_path, dispatch_op['id'], 'join_gate_blocked', owner=dispatch_owner)
+                clear_stage_advance(item['workflow_id'], target_node_id)
+                return
         # 总指挥接单:新工作流首个节点(start -> first)默认交总指挥理解
         # 需求后再派发;HERDR_COORDINATOR_INTAKE=0 或非首节点保持直派。
         # 当总指挥持续异常/停滞时(例如 Agent 无法拉活或反复失败), 回退到直派快路径避免死锁。
@@ -7003,24 +7058,6 @@ def _handle_coordinator_item(item):
             and not intake_stalled
         ):
             item = dict(item, intake=True)
-            if _get_store().get_workflow(item['workflow_id']):
-                from herdr.node_dispatch_store import operation_for_node
-                reconcile_node_dispatches(item['workflow_id'])
-                dispatch_op = operation_for_node(_get_store().db_path, item['workflow_id'], target_node_id)
-                if not dispatch_op:
-                    print(f"[STAGE DISPATCH DROP] workflow={item['workflow_id']} node={target_node_id}: no current obligation")
-                    return
-                if item.get('dispatch_operation_id') is not None:
-                    if (item['dispatch_operation_id'] != dispatch_op['id']
-                            or item.get('dispatch_owner') != dispatch_op['owner']
-                            or dispatch_op['status'] != 'running' or dispatch_op['started']):
-                        return
-                    dispatch_owner = item['dispatch_owner']
-                elif dispatch_op['status'] != 'pending' or dispatch_op['started']:
-                    return
-                pinned = _get_store().get_workflow(item['workflow_id'])['config']
-                node = find_node(pinned, target_node_id)
-                item = dict(item, node=node)
             print(
                 f"[COORDINATOR INTAKE] "
                 f"workflow={item['workflow_id']} "

@@ -299,6 +299,12 @@ class TestWorkflowLifecycleMatrix:
                 {"id": "impl", "depends_on": ["plan"]},
             ]
         }
+        from herdr.state_store import get_state_store
+        get_state_store(temp_herdr_env["root"] / "state.db").save_workflow({
+            "workflow_id": wf_id, "status": "running", "config": mock_cfg})
+        policies = temp_herdr_env["root"] / "stage-policies.json"
+        policies.write_text("{}", encoding="utf-8")
+        monkeypatch.setattr(ctrl, "STAGE_POLICIES_FILE", str(policies))
         monkeypatch.setattr(ctrl, "workflow_config_for", lambda wid: mock_cfg)
         monkeypatch.setattr(ctrl, "project_for_workflow", lambda wid: {"project_name": "test", "project_root": "/tmp/test", "startup_ready": True, "coordinator_pane_id": "wD:p1"})
 

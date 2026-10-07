@@ -93,3 +93,21 @@ UNKNOWN：本节是本地工作树实现。真实 Agent 接单、生产部署和
 模式移交仅适用于pending/running且未发送；人工hold及waiting_human不因切换模式失效。谱系同时处理显式、反向及传统隐式后继顺序，改名后再进入旧-rN命名仍选择最新后继，显式关系优先于有冲突的名称推断。
 
 谱系选择不依赖数据库返回顺序：冲突环只舍弃进入持久后继的推断边；同rank时优先持久关系深度，再登记时间，最后Task ID稳定决胜。Task ID不证明时间先后；纯持久闭环继续拒绝补派。未发送首派遇到已登记的当前执行库存时，仅库存完整且身份明确才移交责任；部分库存和人工hold保留原义务。
+
+
+## FACT：下游节点派发也保留持久责任（隔离源码）
+
+默认接单首节点和依赖已满足的 Agent 节点复用同库 node_dispatch。下游身份绑定候选 episode/SHA、固定配置及上游 Task/Run 或当前 reuse 证据。排队租约是恢复权威，JSON queued/notified 不得永久吞掉下游派发。Controller 直接 launch 和总指挥 prompt 均带 operation ID，真实 CLI intent/Task 登记核验当前依赖、候选及执行身份。
+
+外部返回成功但未登记 Task 只进入 awaiting_result。直接派发的全部计划 Task 都须登记；部分角色缺席不得宣称推进。发送后未知交付不转第二条传输；只有同 operation 的完整 resources_absent 回执且无登记任务，才按既有三次预算重试。历史 notified 空节点迁移为有期限的未知交付核验。明确取消补派的节点有人工范围确认责任；hold/retry 不能擦除当前取消事实或旧未结案交付。目标已由当前 reuse 满足时不创建空责任，未发送责任转移给 reuse；已发送未知仍保留核验。
+
+Evidence:
+- `herdr/node_dispatch.py#dependencies_ready`
+- `herdr/node_dispatch.py#result`
+- `herdr/node_dispatch_store.py#direct_finished`
+- `herdr/node_dispatch_store.py#validate_launch`
+- `services/herdr-controller.py#check_workflow_stage_advance`
+- `services/herdr-controller.py#_handle_coordinator_item`
+- `tests/test_downstream_dispatch_contract.py`
+
+UNKNOWN：此节描述隔离工作树源码。原工作流恢复、真实 Agent 接单、服务部署和业务测试审核结论未在本轮执行。

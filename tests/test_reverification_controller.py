@@ -133,6 +133,32 @@ class ControllerReverificationTest(unittest.TestCase):
             argv = [str(c) for c in (cmd or [])]
             if len(argv) > 1 and argv[1] == "launch":
                 self.launches.append(argv)
+                # External transport is substituted; dispatch evidence must remain real.
+                from herdr.task_resources import begin_launch_intent
+                def arg(name, default=None):
+                    return argv[argv.index(name) + 1] if name in argv else default
+                task_id = arg('--task-id')
+                node_id = arg('--node')
+                run_id = 'run-' + task_id + '-' + (arg('--candidate-sha', '') or '')[:12]
+                op_id = int(arg('--dispatch-operation-id')) if '--dispatch-operation-id' in argv else None
+                claim = begin_launch_intent(self.store, workflow_id=WF, node_id=node_id,
+                    task_id=task_id, role=arg('--dispatch-role', 'worker'),
+                    dispatch_round=int(arg('--dispatch-round', '1')),
+                    supersedes=arg('--supersedes'), candidate_sha=arg('--candidate-sha', ''),
+                    dispatch_operation_id=op_id, execution_id='gen', run_id=run_id)
+                assert 'intent' in claim, (argv, claim)
+                intent = claim['intent']
+                self.store.save_task({'task_id': task_id, 'workflow_id': WF, 'node': node_id,
+                    'stage': node_id, 'status': 'pending', 'run_id': run_id, 'execution_id': 'gen',
+                    'dispatch_operation_id': op_id, 'launch_intent_id': intent['intent_id'],
+                    'candidate_sha': arg('--candidate-sha'), 'dispatch_role': arg('--dispatch-role', 'worker'),
+                    'dispatch_round': int(arg('--dispatch-round', '1')), 'supersedes': arg('--supersedes')})
+                from herdr.task_resources import finish_launch_intent
+                finish_launch_intent(self.store, intent)
+                if arg('--supersedes'):
+                    self.store.transition_task(arg('--supersedes'), 'superseded',
+                        'replacement registered and delivered',
+                        metadata={'superseded_by': task_id, 'replacement_pending': True}, force=True)
             return subprocess.CompletedProcess(cmd, 0, "Task dispatched: x", "")
 
         # Replace the controller's `subprocess` binding with a shim, not with a
@@ -144,6 +170,7 @@ class ControllerReverificationTest(unittest.TestCase):
         self._patched = []
         self._patch("_ctl.coordinator_queue", _Queue(self.queue))
         self._patch("_ctl.project_for_workflow", lambda wf: {
+            "execution_id": "gen",
             "project_root": str(self.repo),
             "base_branch": _git(self.repo, "rev-parse",
                                 "--abbrev-ref", "HEAD").stdout.strip(),
@@ -224,6 +251,10 @@ class ControllerReverificationTest(unittest.TestCase):
             "node": "implementation", "stage": "implementation",
         })
         record.update(overrides)
+        record.setdefault('execution_id', 'gen')
+        record.setdefault('run_id', 'seed-' + task_id)
+        record.setdefault('dispatch_role', 'worker')
+        record.setdefault('dispatch_round', 1)
         self.store.save_task(record)
 
     def supersede(self, task_id, by):
@@ -240,7 +271,7 @@ class ControllerReverificationTest(unittest.TestCase):
         which is exactly what makes it usable as reuse evidence later.
         """
         self.store.transition_task(task_id, "superseded", "fix-loop invalidation",
-                                   metadata={"superseded_by": by}, force=True)
+                                   metadata={"superseded_by": None, "replacement_pending": True}, force=True)
 
     def rotate(self, rel, text="x"):
         """Start a rework round the way fix-loop does; returns the new SHA.
@@ -271,7 +302,7 @@ class ControllerReverificationTest(unittest.TestCase):
         impl_id = f"{WF}-impl-{_bump()}"
         for task in self.store.list_tasks(workflow_id=WF):
             node = str(task.get("node") or task.get("stage") or "")
-            if node == "test" and task.get("status") != "superseded":
+            if node in ("test", "review") and task.get("status") != "superseded":
                 self.supersede(str(task.get("task_id") or ""), impl_id)
             if node == "implementation" and task.get("status") in (
                     "completed", "committed", "integrated", "cleanup_ready",
@@ -391,7 +422,7 @@ class ControllerReverificationTest(unittest.TestCase):
         _ctl.check_workflow_stage_advance(WF)
         for item in list(self.queue):
             if item.get("kind") == "stage_advance":
-                _ctl.try_direct_stage_advance(item)
+                _ctl._handle_coordinator_item(item)
 
     def test_first_freeze_creates_no_reverification_plan(self):
         """首个候选没有 A -> B episode,不应产生任何重新验证决策。"""
@@ -436,7 +467,9 @@ class ControllerReverificationTest(unittest.TestCase):
         b = self.rotate("docs/a.md", "d")
         self.finish_rework()
         self._sweep()
-        self.save_task(task_id=f"{WF}-review-auto", node="review",
+        current_review = next(argv[argv.index('--task-id') + 1] for argv in self.launches
+                              if argv[argv.index('--node') + 1] == 'review')
+        self.save_task(task_id=current_review, node="review",
                        stage="review", status="completed", stage_verdict="pass",
                        candidate_sha=b, verified_candidate_sha=b,
                        updated_at=_bump())
@@ -741,7 +774,12 @@ class ControllerReverificationTest(unittest.TestCase):
         self.save_task(task_id=f"{WF}-test-c", node="test", stage="test",
                        candidate_sha=b, verified_candidate_sha=b,
                        status="completed", stage_verdict="pass",
+                       supersedes=f"{WF}-test-auto", dispatch_round=2,
                        updated_at=_bump())
+        # The fresh B verification replaces the prior A lineage; it is not a
+        # second worker with the same role/round dispatch identity.
+        self.store.transition_task(f"{WF}-test-auto", "superseded", "fresh B verification",
+                                   metadata={"superseded_by": f"{WF}-test-c"}, force=True)
         c = self.rotate("herdr/scheduler.py", "code")
         self.finish_rework()
         self._sweep()
