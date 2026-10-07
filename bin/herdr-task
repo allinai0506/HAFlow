@@ -2339,7 +2339,7 @@ def auto_init_task_loop(clone_path, goal, acceptance_list, test_cmd=None, lint_c
             or (clone / "build.gradle.kts").exists(),
         }
         decision = select_default_test_command(markers)
-        if "refusal" in decision:
+        if "refused" in decision:
             return decision
         test_cmd = decision["command"]
 
@@ -2371,6 +2371,37 @@ def auto_init_task_loop(clone_path, goal, acceptance_list, test_cmd=None, lint_c
     except Exception as e:
         print(f"[HERDR_LOOP_WARN] Failed to auto-init loop: {e}")
         return
+
+
+def _refuse_loop_launch(args, refusal, *, clone_path, pane_id, pane_source):
+    """Recoverable C05b refusal: reclaim allocated resources, persist one
+    auditable event, and exit 2 with the remediation (mirrors the selective
+    baseline rejection path)."""
+    _reclaim_unregistered_launch_resources(
+        args, clone_path=clone_path, pane_id=pane_id,
+        pane_source=pane_source,
+    )
+    try:
+        _get_store().record_event(
+            "test_cmd_refused",
+            {
+                "refusal_code": refusal.get("refused"),
+                "detail": str(refusal.get("detail", ""))[:300],
+                "actionable": True,
+                "remediation": "relaunch with an explicit --test-cmd for the task's stack",
+            },
+            workflow_id=getattr(args, "workflow_id", None),
+            node_id=getattr(args, "node", None),
+            source="herdr-task",
+        )
+    except (OSError, ValueError, RuntimeError, AttributeError, sqlite3.Error) as exc:
+        print(f"[TEST CMD REFUSED WARN] could not persist refusal event: {exc}",
+              file=sys.stderr)
+    print(
+        f"[TEST CMD REFUSED] {refusal.get('refused')}: "
+        f"{refusal.get('detail', '')}"
+    )
+    sys.exit(2)
 
 
 def _is_isolation_rejection(exc):
@@ -3808,15 +3839,10 @@ def _launch_task(args):
     )
     if _loop_refusal:
         # C05b: 缺显式契约且栈歧义时拒绝启动——宁可失败也不跑错测试。
-        _reclaim_unregistered_launch_resources(
-            args, clone_path=clone_path, pane_id=pane_id,
-            pane_source=pane_source,
+        _refuse_loop_launch(
+            args, _loop_refusal, clone_path=clone_path,
+            pane_id=pane_id, pane_source=pane_source,
         )
-        print(
-            f"[TEST CMD REFUSED] {_loop_refusal['refused']}: "
-            f"{_loop_refusal.get('detail', '')}"
-        )
-        sys.exit(2)
 
     # 3. 注册 Task
     data = load_tasks()
