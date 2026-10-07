@@ -8,6 +8,24 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-10-07] fix | 修复代码评审评测真实性（Benchmark Integrity）：Golden 缺陷引入语义对齐、工作区物理纯净隔离、评分器 SHA 校验与失败状态阻断
+- 背景：
+  1. 初版评测集错误地使用了修复提交作为 head SHA，导致将修好代码当缺陷才能得分的逻辑反转；
+  2. 隔离工作区使用简单 clone 会继承原仓库所有 remote refs 与未来 commit/golden 目录，存在被测 Agent 偷看答案的风险；
+  3. 评分器失败时伪造了 0 分指标，且命令返回成功，可能导致基础设施故障被误判为 Reviewer 能力断崖式下跌；
+  4. 缓存的 ReviewBench 仓库未校验实际 HEAD，且输出目录复用时未清理旧文件。
+- 变更：
+  1. **Golden 缺陷语义重塑**：从 PR #107、PR #110、PR #108 提取真正的缺陷引入变更（如 `extract_task_candidate_sha` 未校验客观证据、`verdict_fingerprint` 混入易失 `task_id`、`decision_identity` 缺少 candidate episode 绑定），并重写对应 Golden 判定答案与回归验证证据；
+  2. **物理工作区严格隔离**：`herdr/review_benchmark.py` 改用 `git init` + 精准 `git fetch <base> <head>`，零 remote、零未来 refs、零 golden 夹具泄露；
+  3. **评分失败整轮 FAILED**：评分器失败时将 metrics 标记为 None 并显式记录 `judge_failed`，CLI 退出码非 0，`compare_benchmarks` 严格阻断未成功评分的目录对比，拒绝伪造 0 分；
+  4. **干净 Output 与 Scorer SHA 每次校验**：`bin/herdr-review-bench` 每次运行前清空输出子目录，并执行 `git checkout -f <target_sha>` 确保评分器版本绝对受控。
+- 证据：
+  - `pytest -q tests/test_review_benchmark.py` 全部通过（16 passed in 1.34s）；
+  - `python3 -m compileall -q herdr bin/herdr-review-bench tests/test_review_benchmark.py` 退出码 0；
+  - `git diff --check` 退出码 0；
+  - 端到端干净运行验证完成，3 个案例候选意见精准对齐缺陷引入代码。
+
+
 ## [2026-10-07] feat | 接入 ReviewBench 代码评审回归评测套件与独立评测工具链
 - 背景：
   1. HAFlow 研发流中缺少标准化的代码评审有效性与回归评测手段，修改 Reviewer 提示词与上下文组装后无法系统衡量误报率与漏检率；

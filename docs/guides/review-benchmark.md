@@ -21,9 +21,9 @@ Review Benchmark 是一个用于评测 AI Agent 对 HAFlow 代码审查能力的
 
 | 案例 ID | PR | Base SHA | Head SHA | 缺陷类型 | 验证证据 |
 |---|---|---|---|---|---|
-| `allinai0506_HAFlow_147-8aa3ca43` | #147 | `79f5bfc0` | `8aa3ca43` | 派发前未 fail-fast 校验候选基线是否落后于 dev，导致孤儿 Pane 和悬空预留 | `tests/test_dispatch_baseline_failfast.py` (11 passed) |
-| `allinai0506_HAFlow_158-291c1f75` | #158 | `91f084c3` | `291c1f75` | `verdict_fingerprint` 包含易失 `task_id` 导致同结论逃逸 repeat 检测，fix-loop 循环扣减预算 | `tests/test_fix_loop_recovery.py` (3 passed) |
-| `allinai0506_HAFlow_149-42ab1b32` | #149 | `6b0f5162` | `42ab1b32` | 路由探针健康检查失败被错误持久化为隔离违规任务，永久锁死单任务节点容量槽位 | `tests/test_router_health_and_defects_remedy.py` (7 passed) |
+| `allinai0506_HAFlow_107-3477d064` | #107 | `a957663a` | `3477d064` | `extract_task_candidate_sha` 未校验克隆真实 baseline_commit，导致声明与客观证据不一致的候选通过汇合门禁 | `e6408e7df2b3` (P1-2 修复) / `tests/test_scheduler_dispatch_e2e.py` |
+| `allinai0506_HAFlow_110-2b9f2177` | #110 | `79d54abd` | `2b9f2177` | `verdict_fingerprint` 包含易失 `task_id`，后继代任务生成新 ID 导致 repeat 检测失配，死循环扣减预算 | `291c1f75987f` (PR #158 修复) / `tests/test_fix_loop_recovery.py` |
+| `allinai0506_HAFlow_108-7709da70` | #108 | `3a846590` | `7709da70` | `decision_identity` 未绑定候选冻结 episode ID，导致工作流回滚复活历史旧复用事实 | `2879a1ff1e0f` (PR #108 审修复) / `tests/test_reverification_v1.py` |
 
 ---
 

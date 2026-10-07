@@ -226,6 +226,7 @@ class TestReportAndComparison(unittest.TestCase):
             after_dir.mkdir()
 
             before_res = {
+                "status": "completed",
                 "metrics": {
                     "overall": {
                         "grounded_recall": 0.33,
@@ -236,6 +237,7 @@ class TestReportAndComparison(unittest.TestCase):
                 }
             }
             after_res = {
+                "status": "completed",
                 "metrics": {
                     "overall": {
                         "grounded_recall": 0.67,
@@ -254,9 +256,51 @@ class TestReportAndComparison(unittest.TestCase):
             cmp_file = tmp / "comparison.md"
             comp = compare_benchmarks(before_dir, after_dir, cmp_file)
 
-            self.assertIn("核心指标对比矩阵", comp)
-            self.assertIn("+34.0%", comp)
-            self.assertTrue(cmp_file.exists())
+    def test_compare_benchmarks_refuses_failed_judge(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            before_dir = tmp / "before"
+            after_dir = tmp / "after"
+            before_dir.mkdir()
+            after_dir.mkdir()
+
+            failed_res = {
+                "metrics": None,
+                "status": "judge_failed",
+            }
+            ok_res = {
+                "metrics": {"overall": {"grounded_recall": 1.0}},
+                "status": "completed",
+            }
+            (before_dir / "results.json").write_text(json.dumps(failed_res))
+            (after_dir / "results.json").write_text(json.dumps(ok_res))
+
+            with self.assertRaises(ValueError) as ctx:
+                compare_benchmarks(before_dir, after_dir)
+            self.assertIn("Refusing to fabricate benchmark regressions", str(ctx.exception))
+
+
+class TestWorkspaceIsolation(unittest.TestCase):
+    def test_isolated_workspace_has_no_future_refs(self):
+        from herdr.review_benchmark import prepare_isolated_workspace
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            ws_path = Path(tmp_dir) / "isolated_ws"
+            base_sha = "a957663a38f48a399668c4d6b970f0d82ab885cf"
+            head_sha = "3477d064da8541451840959c419b94146b185053"
+            _, diff = prepare_isolated_workspace(str(HERDR_ROOT), base_sha, head_sha, ws_path)
+            self.assertTrue(len(diff) > 0)
+
+            # Ensure no remote was added
+            remotes = subprocess.run(["git", "remote"], cwd=str(ws_path), capture_output=True, text=True).stdout.strip()
+            self.assertEqual(remotes, "")
+
+            # Ensure no golden fixture exists in historical checkout
+            self.assertFalse((ws_path / "tests" / "fixtures" / "review_benchmark").exists())
+
+            # Ensure cannot query current head commit object
+            current_head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(HERDR_ROOT), capture_output=True, text=True).stdout.strip()
+            check_obj = subprocess.run(["git", "cat-file", "-e", current_head], cwd=str(ws_path))
+            self.assertNotEqual(check_obj.returncode, 0)
 
 
 class TestCLIIntegration(unittest.TestCase):

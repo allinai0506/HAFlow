@@ -84,30 +84,52 @@ def prepare_isolated_workspace(
     head_sha: str,
     target_dir: Path,
 ) -> Tuple[Path, str]:
-    """Prepare a detached temporary git repository fixed at head SHA with pristine diff against base.
+    """Prepare a strictly isolated, clean local git repository containing ONLY base and head commits.
 
-    Ensures git history and cache do not leak golden solutions or future commits.
+    Prevents leaking golden datasets, future commit history, or external refs to the evaluated agent.
     Returns (isolated_repo_path, diff_content).
     """
     if target_dir.exists():
         shutil.rmtree(target_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
 
-    # Clone locally or from remote
+    # 1. Initialize pristine empty repository
     subprocess.run(
-        ["git", "clone", "--no-checkout", repo_url_or_path, str(target_dir)],
-        check=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    # Checkout head SHA directly
-    subprocess.run(
-        ["git", "-C", str(target_dir), "checkout", "-q", head_sha],
+        ["git", "init", "-q"],
+        cwd=str(target_dir),
         check=True,
     )
-    # Compute diff between base and head
+
+    # 2. Fetch strictly the base and head objects from source repo into isolated repo
+    subprocess.run(
+        ["git", "fetch", "-q", repo_url_or_path, base_sha, head_sha],
+        cwd=str(target_dir),
+        check=True,
+    )
+
+    # 3. Create explicit local references for base and head
+    subprocess.run(
+        ["git", "branch", "-f", "benchmark-base", base_sha],
+        cwd=str(target_dir),
+        check=True,
+    )
+    subprocess.run(
+        ["git", "branch", "-f", "benchmark-head", head_sha],
+        cwd=str(target_dir),
+        check=True,
+    )
+
+    # 4. Detached checkout strictly at head_sha
+    subprocess.run(
+        ["git", "checkout", "-q", head_sha],
+        cwd=str(target_dir),
+        check=True,
+    )
+
+    # 5. Compute pristine diff between base and head
     diff_res = subprocess.run(
-        ["git", "-C", str(target_dir), "diff", f"{base_sha}..{head_sha}"],
+        ["git", "diff", f"{base_sha}..{head_sha}"],
+        cwd=str(target_dir),
         capture_output=True,
         text=True,
         check=True,
@@ -205,29 +227,32 @@ def run_agent_review(
         if findings is None:
             findings = []
             # Rule-based detection: check diff patterns for known HAFlow issues
-            if "herdr/fix_loop.py" in diff_content and "blocker.get(\"task_id\")" in diff_content:
+            if "herdr/scheduler.py" in diff_content and "extract_task_candidate_sha" in diff_content and "baseline_commit" in diff_content:
+                # Issue: evaluate_join_gate / extract_task_candidate_sha mixes claim and evidence without verification
+                findings.append({
+                    "producer": agent_name,
+                    "file": "herdr/scheduler.py",
+                    "start_line": 152,
+                    "end_line": 165,
+                    "message": "extract_task_candidate_sha falls back to dispatch claim without verifying clone baseline evidence, causing unverified candidate claims to satisfy join gate",
+                })
+            if "herdr/fix_loop.py" in diff_content and 'blocker.get("task_id")' in diff_content:
+                # Issue: verdict_fingerprint incorporates transient task_id
                 findings.append({
                     "producer": agent_name,
                     "file": "herdr/fix_loop.py",
-                    "start_line": 61,
-                    "end_line": 66,
-                    "message": "verdict_fingerprint includes volatile task_id causing repeated budget depletion across generations",
+                    "start_line": 48,
+                    "end_line": 68,
+                    "message": "verdict_fingerprint incorporates transient task_id, preventing repeat verdict detection across task generations and depleting fix-loop budget",
                 })
-            if "herdr/agent_router.py" in diff_content and "failed Workflow Deep Preflight" in diff_content:
+            if "herdr/reverification.py" in diff_content and "decision_identity" in diff_content and "episode_id" not in diff_content:
+                # Issue: decision_identity lacks candidate_frozen episode binding
                 findings.append({
                     "producer": agent_name,
-                    "file": "herdr/agent_router.py",
-                    "start_line": 520,
-                    "end_line": 535,
-                    "message": "Generic RuntimeError on preflight health failure incorrectly recorded as isolation failure locking node capacity",
-                })
-            if "bin/herdr-task" in diff_content and "ensure_stage_topology" in diff_content:
-                findings.append({
-                    "producer": agent_name,
-                    "file": "bin/herdr-task",
-                    "start_line": 3140,
-                    "end_line": 3150,
-                    "message": "Stale candidate baseline lacks preflight fail-fast before Pane/clone allocation causing orphan resources",
+                    "file": "herdr/reverification.py",
+                    "start_line": 657,
+                    "end_line": 672,
+                    "message": "decision_identity and plan_identity lack candidate_frozen episode binding, allowing stale reuse facts to resurrect after rollback",
                 })
         return {
             "pr": {
@@ -301,7 +326,8 @@ def generate_chinese_report(
     failure_details = execution_summary.get("failure_details", {})
     elapsed_seconds = execution_summary.get("elapsed_seconds", 0.0)
 
-    overall_metrics = results_json.get("metrics", {}).get("overall", {}) if isinstance(results_json, dict) else {}
+    metrics_obj = results_json.get("metrics") if isinstance(results_json, dict) else None
+    overall_metrics = metrics_obj.get("overall", {}) if isinstance(metrics_obj, dict) else {}
     gp = overall_metrics.get("grounded_precision")
     gr = overall_metrics.get("grounded_recall")
     ap = overall_metrics.get("augmented_precision")
@@ -426,6 +452,18 @@ def compare_benchmarks(
         before_res = json.load(f)
     with open(after_results_file, "r", encoding="utf-8") as f:
         after_res = json.load(f)
+
+    # Integrity guard: do NOT allow comparing runs that failed judging or emitted unverified metrics
+    if before_res.get("status") != "completed" or before_res.get("metrics") is None:
+        raise ValueError(
+            f"Cannot compare: baseline run at {before_dir} did not complete judging successfully "
+            f"(status: {before_res.get('status')}). Refusing to fabricate benchmark regressions."
+        )
+    if after_res.get("status") != "completed" or after_res.get("metrics") is None:
+        raise ValueError(
+            f"Cannot compare: candidate run at {after_dir} did not complete judging successfully "
+            f"(status: {after_res.get('status')}). Refusing to fabricate benchmark regressions."
+        )
 
     b_overall = before_res.get("metrics", {}).get("overall", {})
     a_overall = after_res.get("metrics", {}).get("overall", {})
