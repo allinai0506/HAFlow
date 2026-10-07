@@ -2093,3 +2093,6 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 
 ## [2026-10-07] update | 下游节点派发持久责任
 - Updated [[workflow-progress-recovery]]：扩展下游派发的候选和依赖身份、租约恢复、直接发送核验、resources_absent 有界重试、取消及 reuse 责任转移；隔离代码验证与生产恢复分开。
+
+## [2026-10-07] update | 用户可操作派发恢复
+- Updated [[workflow-progress-recovery]]：增加范围恢复、启动现场核查、未交付确认表单与实际登记回执；明确旧身份显式确认、版本竞争、读取失败及迟到启动边界。

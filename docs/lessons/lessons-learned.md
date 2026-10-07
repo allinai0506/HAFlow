@@ -6211,3 +6211,17 @@ test-01-r5 的 acceptance2 曾拿前端 vitest 计数（4248）证明后端测�
 
 ### 验证命令 / 关联证据
 `pytest -q tests/test_evaluator_multi_runner_metrics.py tests/test_autosave_clone_wip.py tests/test_workflow_closed_cli_error.py tests/test_pane_transcript_archive.py` 全绿（前两类修复前三用例 RED 复现现场症状）；全量 3604 passed + 157 subtests，唯一失败 test_no_spacing_grid_violations 经 pristine main 复跑确认为 #157 引入的存量失败。
+
+## §136 人工恢复必须重建责任并绑定所确认的身份（2026-10-07）
+
+### 问题背景
+取消补派与历史派发未登记是两种卡点。原通用“重试”无法改变取消范围，主图仍显示无阻塞；未完成启动记录又使安全重试长期不可用。
+
+### 经验教训
+按钮存在不代表恢复路径成立。将未知交付直接重置 pending 会复活旧命令；只校验 operation 版本不能发现表单打开后 Task/Run 已变化。终态 registered intent 也不能一律视为未结案，必须用同 Task/Run 的真实登记与终态验证。
+
+### 操作规范
+人工决策绑定候选、代次、operation version 和精确 Task/Run/version；缺 Run 不猜测，缺 execution 要求显式确认并审计。旧责任永久退休，事务创建新 epoch；资源核查复用既有 inventory，归属未知仍阻止重发。启动前与登记写事务都阻断迟到旧调用。外部核查只读采集，最终事务复验版本与精确 intent，再一起提交资源回执、待办结果与审计；不能静默跳过版本冲突却返回成功。UI 成功区分责任建立和真实任务登记，读取失败不得宣称无卡点。
+
+### 验证命令 / 关联证据
+`tests/test_dispatch_recovery_ui.py` 覆盖真实 Console API→SQLite→Controller、独立连接竞争、注册后取消、旧调用拒绝、身份变化、缺失上游身份与迟到表单结果；浏览器临时 Console 表单另行验证。部署或业务结论须使用本次交付记录，不能由单元测试推断。

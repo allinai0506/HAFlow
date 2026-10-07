@@ -473,8 +473,8 @@ def test_console_renders_dispatch_wait_owner_deadline_and_decision(tmp_path):
     if node is None:
         pytest.skip('node unavailable for Console runtime rendering')
     source = (ROOT / 'console/herdr_factory_console.py').read_text()
-    renderer = source.split('function renderRecoveryPanel(wid){', 1)[1].split('function decideRecovery(', 1)[0]
-    renderer = 'function renderRecoveryPanel(wid){' + renderer
+    renderer = source.split('function currentRecovery(nodeId){', 1)[1].split('function decideRecovery(', 1)[0]
+    renderer = 'function currentRecovery(nodeId){' + renderer
     operations = [{'id': 1, 'version': 4, 'status': 'awaiting_result', 'started': 1,
                    'next_due_at': 1030, 'detail': {'deadline_at': 1900},
                    'payload': {'kind': 'node_dispatch', 'node_id': '<implementation>'}},
@@ -482,6 +482,7 @@ def test_console_renders_dispatch_wait_owner_deadline_and_decision(tmp_path):
                    'detail': {'reason': 'dispatch_task_missing', 'decision_needed': '请核对需求与已有派发'},
                    'payload': {'kind': 'node_dispatch', 'node_id': 'implementation'}}]
     script = ('const state={controllerActionsData:{recovery:' + json.dumps(operations) + '}};\n'
+              'function cleanStageLabel(x){return String(x);}'
               'function esc(x){return String(x).replaceAll("<","&lt;").replaceAll(">","&gt;");}\n'
               + renderer + '\nconsole.log(renderRecoveryPanel("wf"));')
     result = subprocess.run([node, '-e', script], text=True, capture_output=True, timeout=10)
