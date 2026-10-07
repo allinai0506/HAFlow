@@ -1,0 +1,32 @@
+{
+  "pr_key": "allinai0506_HAFlow_147-8aa3ca43",
+  "pr": {
+    "repo": "https://github.com/allinai0506/HAFlow",
+    "pr_number": 147,
+    "base": "79f5bfc00c95c90ebe69260a2b9b5d12645a102a",
+    "head": "8aa3ca4347f6f4e2f08cc161466dc20cc746212c"
+  },
+  "findings": [
+    {
+      "file": "bin/herdr-task",
+      "start_line": 3140,
+      "end_line": 3150,
+      "message": "候选基线落后于 dev 分支（stale claim/baseline）时未在派发前进行 fail-fast 校验，导致任务直接进入 Pane 创建和 clone 准备阶段，产生孤儿 Pane、孤儿目录与悬空预留资源。应在 intent-claim 后、资源创建前预检基线新鲜度，并在落后时拒绝派发。",
+      "tp_fp": "tp",
+      "severity": "high",
+      "category": "correctness",
+      "scope": "introduced-by-pr",
+      "difficulty": "medium",
+      "context_required": "diff-plus-related-files",
+      "tp_fp_justification": "已确认缺陷：PR #147 修复前（base SHA 79f5bfc00c95c90ebe69260a2b9b5d12645a102a），_launch_task 在领取 intent 后直接执行 ensure_stage_topology 和 acquire_pane_for_task。当候选基线落后于主干 dev 时，直到 worker 运行后才报错，留下未清理资源。修复提交 8aa3ca43 增加了 _preflight_baseline_freshness 并在 tests/test_dispatch_baseline_failfast.py 提供完整回归验证。",
+      "severity_justification": "High: 导致资源泄漏、孤儿 Pane 和无效派发循环。",
+      "category_justification": "Correctness: 缺乏前置校验导致错误进入资源分配阶段。",
+      "producer": "human_curated",
+      "source": {
+        "type": "human_curated",
+        "alignment": "ground_truth",
+        "verified_commit": "8aa3ca4347f6f4e2f08cc161466dc20cc746212c"
+      }
+    }
+  ]
+}

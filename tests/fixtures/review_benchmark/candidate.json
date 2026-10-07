@@ -1,0 +1,17 @@
+{
+  "name": "candidate-improved-rule",
+  "agent": "rule",
+  "judge": {
+    "provider": "deepseek",
+    "model": "deepseek-v4-flash",
+    "sha": "e1cb1a0dad8105ebea45caa00c194eaf2d2e7b5d"
+  },
+  "benchmark": {
+    "manifest": "tests/fixtures/review_benchmark/corpus/manifest.json",
+    "golden_dir": "tests/fixtures/review_benchmark/golden"
+  },
+  "review": {
+    "timeout_seconds": 300,
+    "system_prompt": "You are a senior principal architect reviewing HAFlow diffs. Strict focus on state machines, isolation, and race conditions."
+  }
+}

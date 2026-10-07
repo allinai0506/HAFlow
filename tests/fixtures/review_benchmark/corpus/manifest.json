@@ -1,0 +1,35 @@
+[
+  {
+    "repo": "https://github.com/allinai0506/HAFlow",
+    "pr_number": 147,
+    "pr_url": "https://github.com/allinai0506/HAFlow/pull/147",
+    "base": "79f5bfc00c95c90ebe69260a2b9b5d12645a102a",
+    "head": "8aa3ca4347f6f4e2f08cc161466dc20cc746212c",
+    "title": "fix(dispatch): fail-fast stale candidate baseline before clone/Pane (#147)",
+    "body": "派发前校验候选基线是否为 dev 祖先（方案 A）：stale 即拒并给出 dev 前进数与 rebase/新基线处置，拒绝发生在 intent-claim 之后、clone/Pane 创建之前，落 failed 任务 + finish intent + 释放预留，零孤儿。未知 git 状态 fail-open，FR-6.2 保持 fail-closed 兜底。",
+    "nwo": "allinai0506/HAFlow",
+    "language": "Python"
+  },
+  {
+    "repo": "https://github.com/allinai0506/HAFlow",
+    "pr_number": 158,
+    "pr_url": "https://github.com/allinai0506/HAFlow/pull/158",
+    "base": "91f084c30daaed8b4a65ee3a759c60639300b39c",
+    "head": "291c1f75987ff82f56ec9ac5dc598441f4461543",
+    "title": "fix(workflow): fix-loop 对已终结 Task 重复下发并扣预算 (#158)",
+    "body": "后继代任务(test-01-r4)重记录与 test-01-r3 相同的 blocked 结论时, verdict_fingerprint 因含易失 task_id 判为新 verdict,repeat 检测失配; 闩释放又清掉 |fp 与计数,同一结论可用新预算无限重开循环,逐轮作废已终结任务并扣预算。\n\n- verdict_fingerprint 去除 task_id 维度:语义由 branch+note+affected 承担,目标敏感性不受影响(PR #110 语义保留)\n- _fix_loop_latch_blocks 释放路径保留 |fp:计数归零仍给 redo 新预算,但重记录的同一结论走 repeat_verdict 升级,不再进入新一轮扣减",
+    "nwo": "allinai0506/HAFlow",
+    "language": "Python"
+  },
+  {
+    "repo": "https://github.com/allinai0506/HAFlow",
+    "pr_number": 149,
+    "pr_url": "https://github.com/allinai0506/HAFlow/pull/149",
+    "base": "6b0f51629880613046bdd091e2cdb5e74f1e05ab",
+    "head": "42ab1b32d9918b735421d1cee95752c7edd598e8",
+    "title": "fix(dispatch): resolve defects #1, #3, #4, #6, #7 and refine router rejection semantics (#149)",
+    "body": "- #4: add 'sign-off' to NOTE_KINDS and CONTEXT_KINDS in workflow_docs.py\n- #7: distinguish isolation vs health/policy rejections in agent_router.py; abort launch intent and release reservation instead of persisting failed task on router health failure, avoiding node capacity locking\n- #3: remove misleading isolation opt-out hint on router health rejections, provide actionable deep-preflight suggestion\n- #6: print proposed and existing task_id explicitly on DISPATCH DUPLICATE\n- #1: add herdr-task freeze-candidate CLI command for candidate re-freezing",
+    "nwo": "allinai0506/HAFlow",
+    "language": "Python"
+  }
+]
