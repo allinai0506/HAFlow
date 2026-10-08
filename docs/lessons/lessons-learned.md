@@ -6390,3 +6390,17 @@ wf-nexusarchive-1008-01 中 max_tasks_per_node=2 把 superseded 旧任务也算�
 
 ### 验证命令 / 关联证据
 `pytest -q tests/test_node_capacity.py`（24 passed：退役行正反、真实报错串、满额语义）；全量 3900 passed（唯一失败为 #170 干净主干同败）；独立评审 round1 NEEDS_FIXES（B1 谓词/B2 文档）→修复→round2 MERGE_READY（`.omc/review-kadian-node-capacity.md`）。
+
+## 146. 显式替代可复用当前 pending operation，拒绝必须枚举精确原因（2026-10-08）
+
+### 问题背景
+wf-nexusarchive-1008-01 手工替代重派时复用 dispatch-operation-id 被拒（dispatch operation does not authorize），消息不指明哪一条件失败，被迫不带 operation-id 派发丢失账本。DB 实证：目标节点存在 superseded op 与 pending op（started=0、无 deadline_at）。
+
+### 经验教训
+准入拒绝必须枚举精确失败条件并附当前 operation id，恢复者不该靠猜。显式替代（--supersedes 指向同节点 superseded 任务）可复用当前 pending operation 保持账本；但豁免必须限定非终态 op（resolved/superseded 不豁免），deadline 只对已启动 operation 生效——pending 无 deadline 字段，误判即误伤。
+
+### 操作规范
+纯函数 `can_launch_with_replacement`（终态拦截＋同节点 superseded 指针）；`_launch_refusals` 枚举原因（kind/workflow/node/execution/active/generation/latest/predecessors/ready/prior_delivery/deadline/legacy/started/status）；`validate_task_registration` 同步传递 supersedes intent。
+
+### 验证命令 / 关联证据
+`pytest -q tests/test_dispatch_recovery_ui.py`（49 passed：替代复用＋终态拒绝＋精准原因）；dispatch 族 5 文件 176 passed；全量 3901 passed（唯一失败为 #170 干净主干同败）；独立评审 round1 NEEDS_FIXES（终态 op 未拦截）→修复→round2 MERGE_READY（`.omc/review-kadian-dispatch-replace.md`）。

@@ -2250,3 +2250,4 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
   - `python3 -m compileall -q herdr services bin tests` clean；
   - `git diff --check` clean。
 - 2026-10-08：节点硬预算退役判据（§145）——superseded 与 superseded_by 退役行不再占 max_tasks_per_node；round1 评审抓出 committed+superseded_by 谱系退役行漏判，修复后 round2 MERGE_READY。全量 3900 passed。
+- 2026-10-08：替代重派复用 operation（§146）——显式 --supersedes 可复用当前 pending operation，拒绝枚举精确原因；round1 评审抓出终态 op 未拦截，修复后 round2 MERGE_READY。全量 3901 passed。
