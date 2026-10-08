@@ -82,7 +82,10 @@ def test_single_runner_logs_keep_legacy_semantics():
 
 def test_unrecognised_output_falls_back_to_exit_code():
     passed, total, failing = parse_test_output("nothing here\n", 0)
-    assert (passed, total) == (1, 1)
+    # C07: no recognizable test summary → (0, 1, [output])
+    assert passed == 0
+    assert total == 1
+    assert failing
     passed, total, failing = parse_test_output("boom\n", 1)
     assert passed == 0
     assert total == 1
