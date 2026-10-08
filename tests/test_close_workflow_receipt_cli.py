@@ -151,3 +151,35 @@ def test_dry_run_never_reports_executed_resources_or_queries_transport(tmp_path,
     assert report['tabs_closed']==[] and report['tabs_would_close']==[]
     assert report['coordinator_closed'] is False and report['execution_mode']=='dry-run'
     assert store.get_workflow('wf')['status']=='running' and clone.exists()
+
+
+def test_abort_names_clone_path_for_unsettled_git(tmp_path):
+    store=seed(tmp_path)
+    store.save_task({'task_id':'impl','workflow_id':'wf','status':'completed','integration_mode':'git','clone_path':'/tmp/demo/clones/impl-atomic-fix'})
+    result=cli(tmp_path)
+    assert result.returncode==2,(result.stdout,result.stderr)
+    assert 'impl' in result.stdout
+    assert '/tmp/demo/clones/impl-atomic-fix' in result.stdout
+
+
+def test_abort_names_status_and_clone_for_blocking(tmp_path):
+    store=seed(tmp_path)
+    store.save_task({'task_id':'w1','workflow_id':'wf','status':'working','integration_mode':'git','clone_path':'/tmp/demo/clones/w1'})
+    result=cli(tmp_path)
+    assert result.returncode==2,(result.stdout,result.stderr)
+    assert 'w1' in result.stdout and 'working' in result.stdout
+    assert '/tmp/demo/clones/w1' in result.stdout
+
+
+def test_abort_substitutes_real_clone_in_remediation(tmp_path):
+    store=seed(tmp_path)
+    clone=tmp_path/'clone';clone.mkdir()
+    subprocess.run(['git','-C',str(clone),'init','-q'],check=True)
+    subprocess.run(['git','-C',str(clone),'config','user.email','t@e.invalid'],check=True)
+    subprocess.run(['git','-C',str(clone),'config','user.name','t'],check=True)
+    (clone/'note.txt').write_text('unpreserved\n')
+    store.save_task({'task_id':'g1','workflow_id':'wf','status':'integrated','integration_mode':'git','clone_path':str(clone)})
+    result=cli(tmp_path)
+    assert result.returncode==2,(result.stdout,result.stderr)
+    assert '<clone>' not in result.stdout
+    assert str(clone) in result.stdout

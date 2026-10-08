@@ -6670,6 +6670,10 @@ def _close_workflow_owned(
             "[CLOSE ABORT] workflow has unsettled tasks: "
             + ", ".join(blocking)
         )
+        for t in tasks:
+            if t.get("task_id") in blocking:
+                print(f'  {t["task_id"]}({t.get("status")} @ {t.get("clone_path") or "no-clone"}): '
+                      f'wait for settle, steer, or supersede with --reason')
         sys.exit(2)
 
     # completed/committed 且 git 集成的任务尚未走完 commit/integrate 管线;
@@ -6688,6 +6692,10 @@ def _close_workflow_owned(
             "(commit/integrate not settled): "
             + ", ".join(unsettled_git)
         )
+        for t in tasks:
+            if t.get("task_id") in unsettled_git:
+                print(f'  {t["task_id"]}(completed @ {t.get("clone_path") or "no-clone"}): '
+                      f'herdr-task commit {t["task_id"]} / herdr-task integrate {t["task_id"]}')
         print(
             "  等待 Controller 终化重试收敛;或手工收口: "
             "herdr-task commit <task_id>(completed)/ "
@@ -6757,7 +6765,10 @@ def _close_workflow_owned(
         if not dry_run:
             _record_output_retention(task, output, authorized_via=authorized)
         if not authorized and not dry_run:
-            print("[CLOSE ABORT] unpreserved task output: " + json.dumps({"task_id": task["task_id"], **output}, ensure_ascii=False))
+            shown = dict(output)
+            if shown.get("remediation_cmd") and task.get("clone_path"):
+                shown["remediation_cmd"] = shown["remediation_cmd"].replace("<clone>", str(task["clone_path"]))
+            print("[CLOSE ABORT] unpreserved task output: " + json.dumps({"task_id": task["task_id"], **shown}, ensure_ascii=False))
             sys.exit(2)
         output_authorizations[task["task_id"]] = authorized
 
