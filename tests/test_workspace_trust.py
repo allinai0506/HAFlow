@@ -72,6 +72,30 @@ class TestWorkspaceTrust(unittest.TestCase):
             self.assertIn(str(proj_root.resolve()), content)
             self.assertIn(str(clone_root.resolve()), content)
 
+    def test_launch_preseed_trusts_planned_clone_for_grok(self):
+        """Per-clone pre-seed must register the not-yet-created clone path."""
+        clone = self.home / "clones" / "task-1"
+
+        with patch("pathlib.Path.home", return_value=self.home):
+            self.assertTrue(workspace_trust.ensure_workspace_trust(str(clone), ["grok"]))
+            grok_conf = self.home / ".grok" / "trusted_folders.toml"
+            self.assertTrue(grok_conf.exists())
+            self.assertIn(str(clone.resolve()), grok_conf.read_text(encoding="utf-8"))
+
+    def test_trust_required_failure_detected(self):
+        self.assertTrue(workspace_trust.is_trust_required_failure(
+            "Worker startup TRUST_REQUIRED in clone"))
+        self.assertFalse(workspace_trust.is_trust_required_failure("Worker failed: timeout"))
+        self.assertFalse(workspace_trust.is_trust_required_failure(""))
+
+    def test_merge_trust_failure_unhealthy(self):
+        record = {"healthy_agents": ["grok", "codex"], "unhealthy_agents": {"kimi": "UNKNOWN"}}
+        unhealthy, healthy = workspace_trust.merge_trust_failure_unhealthy(record, "grok")
+        self.assertEqual(unhealthy["grok"], "TRUST_REQUIRED")
+        self.assertEqual(unhealthy["kimi"], "UNKNOWN")
+        self.assertNotIn("grok", healthy)
+        self.assertIn("codex", healthy)
+
 
 if __name__ == "__main__":
     unittest.main()

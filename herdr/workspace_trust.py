@@ -69,6 +69,23 @@ def ensure_workspace_trust(repo_path: Path | str, agents: list[str] | None = Non
     return success
 
 
+TRUST_REQUIRED = "TRUST_REQUIRED"
+
+
+def is_trust_required_failure(text) -> bool:
+    """Detect a worker startup failure caused by workspace trust."""
+    return bool(text) and TRUST_REQUIRED in str(text)
+
+
+def merge_trust_failure_unhealthy(record, agent, status: str = TRUST_REQUIRED):
+    """Pure merge: mark agent unhealthy so auto routing skips it next time."""
+    record = record or {}
+    unhealthy = dict(record.get("unhealthy_agents") or {})
+    unhealthy[agent] = status
+    healthy = [item for item in (record.get("healthy_agents") or []) if item != agent]
+    return unhealthy, healthy
+
+
 def ensure_controller_env_trust(project_root: Path | str | None = None, clone_root: Path | str | None = None) -> bool:
     """Pre-seed trust for project root, clone root, and common controller directories."""
     default_clone_root = Path(os.environ.get("HERDR_CLONES_DIR") or Path.home() / ".herdr-controller" / "clones")
