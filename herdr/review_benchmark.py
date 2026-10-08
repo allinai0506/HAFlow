@@ -757,7 +757,6 @@ def generate_macos_seatbelt_profile(repo_dir: Path, isolated_auth_dir: Optional[
     for rd in [
         home / "actions-runner-haflow",
         home / "actions-runner",
-        Path("/Users/user/actions-runner-haflow"),
     ]:
         if rd.exists():
             runner_denials.append(f'(deny file-read* (subpath "{rd.resolve()}"))')
