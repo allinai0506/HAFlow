@@ -89,6 +89,47 @@ def writable_task(task):
             and not re.search(r'(?:^|[^a-z])(review(?:er)?|adversarial|read.?only)(?:$|[^a-z])', role))
 
 
+_FIX_TOKEN_RE = re.compile(r'(?:^|[^a-z])(fix|bugfix|hotfix)(?:[^a-z]|$)', re.IGNORECASE)
+_RETROSPECTIVE_RE = re.compile(r'bug|report|postmortem|retrospective|复盘|review|root.?cause|防复发', re.IGNORECASE)
+
+
+def _fix_token_hit(value):
+    return bool(value and _FIX_TOKEN_RE.search(str(value)))
+
+
+def fix_task_needs_retrospective(task_id=None, task_type=None, node_id=None, branch=None, label=None):
+    """Heuristic: word-boundary fix/bugfix/hotfix in any naming signal."""
+    return any(_fix_token_hit(value) for value in (task_id, task_type, node_id, branch, label))
+
+
+def retrospective_satisfied(contract):
+    try:
+        required = (contract or {}).get('required_files') or []
+    except (AttributeError, TypeError):
+        return False
+    for item in required:
+        if _RETROSPECTIVE_RE.search(str((item or {}).get('path') or '')):
+            return True
+    return False
+
+
+def validate_fix_retrospective(task_id=None, task_type=None, node_id=None, branch=None,
+                               label=None, contract=None, integration_mode=None):
+    """Plan/dispatch gate: fix-like git work must pin a retrospective doc."""
+    if str(integration_mode or '').lower() != 'git':
+        return None
+    if not fix_task_needs_retrospective(task_id=task_id, task_type=task_type,
+                                         node_id=node_id, branch=branch, label=label):
+        return None
+    if contract is None:
+        return None
+    if retrospective_satisfied(contract):
+        return None
+    raise ValueError('fix task requires retrospective delivery contract: register a postmortem/复盘 '
+                     'required_files entry (e.g. docs/bug-reports/<date>-<slug>.md) in the node '
+                     'delivery_contract before dispatch')
+
+
 def instruction_block(task):
     if not writable_task(task):
         return ''
