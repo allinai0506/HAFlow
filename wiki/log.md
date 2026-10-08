@@ -2169,3 +2169,5 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 
 - 2026-10-08：含 fix 任务 plan 期复盘门禁——task_id/task_type/node/分支词边界命中 fix/bugfix/hotfix 且已登记契约但缺复盘条目的 git 派发，在 normalize 与 launch 预检直接拒绝（§133）。首版过宽误拦无契约旧链路 6 例后收窄；全量 3878 passed，独立评审 MERGE_READY。
 - 2026-10-08：Agent 信任路由双修——launch 期按 clone 预埋信任（防首次 TRUST_REQUIRED）＋Worker 启动失败回写 unhealthy（防重复选中）（§138）。Worker 零信任纪律不受影响；全量 3884 passed（1 个 #170 干净主干同败），独立评审 MERGE_READY。
+
+- 2026-10-08：close-workflow 三处 abort 信息增强（blocking/unsettled 附状态与 clone 路径，remediation_cmd 占位符换真实路径；零拦截语义改动）。定向 10 passed，全量 3887 passed（1 个 #170 主干同败），独立评审 MERGE_READY。
