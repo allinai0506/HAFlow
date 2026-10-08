@@ -77,11 +77,13 @@ class TestAutoPRReview(unittest.TestCase):
         workflow_file = HERDR_ROOT / ".github" / "workflows" / "ha-review.yml"
         content = workflow_file.read_text(encoding="utf-8")
 
-        # Must fetch and checkout the actual PR head commit (not temporary merge commit)
+        # Must fetch the actual PR head commit (not temporary merge commit)
         self.assertIn("${{ github.event.pull_request.head.sha }}", content)
         self.assertIn("${{ github.event.pull_request.base.sha }}", content)
         self.assertIn("--base", content)
         self.assertIn("--head", content)
+        # Security: Do NOT checkout the untrusted PR head commit into execution workspace
+        self.assertNotIn("git checkout ${{ github.event.pull_request.head.sha }}", content)
 
     # 3. Rule 正常且 AI 正常
     def test_03_rule_success_and_ai_success(self):

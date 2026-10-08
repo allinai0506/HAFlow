@@ -19,37 +19,41 @@ permissions:
 jobs:
   review:
     name: Automated Rule & Shadow Review
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, haflow]
     if: github.repository == 'allinai0506/HAFlow'
     steps:
-      - name: Checkout base branch
+      - name: Checkout trusted base branch
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           fetch-depth: 0
 
-      - name: Fetch PR head commit
+      - name: Fetch PR head commit ref (data only, never checkout)
         run: |
           git fetch origin ${{ github.event.pull_request.head.sha }}
-          git checkout ${{ github.event.pull_request.head.sha }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.13'
+        continue-on-error: true
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
+          python3 -m pip install --upgrade pip || true
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
-          pip install pytest
+          pip install pytest || true
 
       - name: Run Auto PR Review
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
+          PATH: /Users/user/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+          HERDR_SECURE_LLM_RUNNER: "1"
+          HERDR_ALLOW_AGY_SHADOW: "1"
+          HERDR_AGY_EFFORT: "low"
         run: |
           python3 bin/herdr-review-bench auto-pr-review \
             --repo . \
