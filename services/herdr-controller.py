@@ -1640,6 +1640,18 @@ def recover_router_isolation_tasks(workflow_id, tasks=None):
                 f"task={task.get('task_id')} eligible pool restored"
             )
         else:
+            try:
+                fresh = get_task(task.get("task_id"))
+            except (OSError, RuntimeError, ValueError, AttributeError):
+                fresh = None
+            if (fresh or {}).get("status") == "superseded" or (fresh or {}).get("superseded_by"):
+                recovered = True
+                print(
+                    f"[ROUTER RECOVERY] workflow={workflow_id} "
+                    f"task={task.get('task_id')} already superseded "
+                    f"by={(fresh or {}).get('superseded_by')}; nothing to do"
+                )
+                continue
             print(
                 f"[ROUTER RECOVERY ERROR] task={task.get('task_id')}: "
                 f"{result.stderr.strip() or result.stdout.strip()}"
