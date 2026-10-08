@@ -128,8 +128,8 @@ class TestAutoPRReview(unittest.TestCase):
                 return {"agent": agent_name, "findings": []}
             mock_run.side_effect = side_effect
 
-            # Allow agy shadow execution for this mock
-            with patch.dict(os.environ, {"HERDR_ALLOW_AGY_SHADOW": "1", "HERDR_SECURE_LLM_RUNNER": "1"}):
+            # Allow agy shadow execution for this mock with isolated runner environment
+            with patch.dict(os.environ, {"HERDR_ALLOW_AGY_SHADOW": "1", "HERDR_SECURE_LLM_RUNNER": "1", "HERDR_ISOLATED_CONTAINER": "1"}):
                 res = review_diff(self.repo, diff, reviewer_agent="rule", shadow_mode=True, shadow_agent="agy")
 
         # Crucial invariant: Rule success must NOT be compromised by shadow timeout
@@ -324,18 +324,47 @@ class TestAutoPRReview(unittest.TestCase):
     # 11. 安全执行环境不满足要求时禁止启动危险 CLI
     def test_11_dangerous_cli_forbidden_in_unisolated_env(self):
         # 1. Verify default flags in run_agent_review use --sandbox and forbid --dangerously-skip-permissions
-        with patch("shutil.which", return_value="/mock/agy"), patch("subprocess.run") as mock_proc:
+        # and verify child process env is sanitized to strip GITHUB_TOKEN and SSH_AUTH_SOCK
+        with patch("shutil.which", return_value="/mock/agy"), patch("subprocess.run") as mock_proc, patch.dict(
+            os.environ, {"GITHUB_TOKEN": "secret_token_123", "SSH_AUTH_SOCK": "/tmp/ssh.sock"}
+        ):
             mock_proc.return_value = MagicMock(returncode=0, stdout='{"response": "[]"}')
             run_agent_review("agy", self.repo, {"pr_number": 1, "repo": "test", "base": "a", "head": "b"}, "diff", 60)
             executed_cmd = mock_proc.call_args[0][0]
             self.assertIn("--sandbox", executed_cmd)
             self.assertNotIn("--dangerously-skip-permissions", executed_cmd)
 
+            # Security assertion: child process environment MUST NOT contain GITHUB_TOKEN or SSH_AUTH_SOCK
+            executed_env = mock_proc.call_args[1].get("env", {})
+            self.assertNotIn("GITHUB_TOKEN", executed_env)
+            self.assertNotIn("SSH_AUTH_SOCK", executed_env)
+
         # 2. Verify review_diff skips agy when secure runner isolation is absent
         with patch("shutil.which", return_value="/mock/agy"), patch.dict(os.environ, {}, clear=True):
             res = review_diff(self.repo, "diff", reviewer_agent="rule", shadow_mode=True, shadow_agent="agy")
             self.assertEqual(res["shadow_status"], "shadow_skipped")
             self.assertIn("Safe isolated LLM runner environment not configured", res["shadow"]["reason"])
+
+        # 3. Verify workstation isolation preflight: detects private credentials in HOME and skips shadow review
+        with patch("shutil.which", return_value="/mock/agy"), patch.dict(
+            os.environ, {"HERDR_SECURE_LLM_RUNNER": "1", "HOME": str(self.repo)}, clear=True
+        ):
+            # Create mock private key in repo's .ssh directory
+            mock_ssh = self.repo / ".ssh"
+            mock_ssh.mkdir(parents=True, exist_ok=True)
+            (mock_ssh / "id_rsa").write_text("dummy-private-key", encoding="utf-8")
+
+            res = review_diff(self.repo, "diff", reviewer_agent="rule", shadow_mode=True, shadow_agent="agy")
+            self.assertEqual(res["shadow_status"], "shadow_skipped")
+            self.assertIn("developer workstation ($HOME contains private credentials", res["shadow"]["reason"])
+
+            # Verify explicit override via HERDR_ALLOW_UNISOLATED_RUNNER allows execution
+            with patch("subprocess.run") as mock_exec, patch.dict(
+                os.environ, {"HERDR_ALLOW_UNISOLATED_RUNNER": "1"}
+            ):
+                mock_exec.return_value = MagicMock(returncode=0, stdout='{"response": "[]"}')
+                res_override = review_diff(self.repo, "diff", reviewer_agent="rule", shadow_mode=True, shadow_agent="agy")
+                self.assertEqual(res_override["shadow_status"], "shadow_success")
 
     # 12. 评论内容不会泄漏密钥
     def test_12_sensitive_token_redaction(self):

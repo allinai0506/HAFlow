@@ -6425,3 +6425,25 @@ wf-nexusarchive-1008-01 手工替代重派时复用 dispatch-operation-id 被拒
 
 ### 验证命令 / 关联证据
 `pytest -q tests/test_auto_pr_review.py tests/test_review_benchmark.py tests/test_finding_verifier.py` 51 passed；覆盖工作流配置、Rule/AI 超时/失败/跳过、Finding Verifier uncertain 留存、单例评论更新、旧 SHA 阻止覆盖、Fork PR 403 优雅容错、危险 CLI 拦截与敏感 Token 脱敏等 12 项测试；GitHub Actions 真实 PR 端到端验证通过。
+
+## 148. Self-hosted Runner 宿主机沙盒穿透风险与深层防御边界实证（2026-10-08）
+
+### 问题背景
+在 Self-hosted Runner 上启用 AI Reviewer (`agy --sandbox`) 闭环时，深层排查发现仅靠 `--sandbox` 无法建立真正的安全边界：
+1. `agy` 的只读工具（`view_file`、`grep` 等）缺乏工作区根目录约束，可跨目录读取宿主机任意文件（实证已直接读取 `~/.gemini/installation_id`）；
+2. 当 `run_command` 被终端沙盒初次拦截时，模型可在下一轮自动携带 `BypassSandbox: true` 绕过沙盒直接在宿主机执行命令；
+3. CI 工作流向审查步骤注入了带有写权限的 `GITHUB_TOKEN`，且子进程默认继承了整个父进程环境变量；
+4. 当 Runner 部署在真实开发机宿主机并以开发者身份运行时，其 `$HOME` 包含大量私有 SSH 私钥（`~/.ssh/id_*`）与敏感凭据，存在被不可信 PR 通过 Prompt Injection 实施数据外逸与未授权命令执行的重大隐患。
+
+### 经验教训
+1. **声明不是证明**：`HERDR_SECURE_LLM_RUNNER=1` 只是环境变量，不能代替 OS/容器级特权隔离。
+2. **CLI 沙盒不等于只读隔离**：`--sandbox` 不限制只读工具，且存在应用层重试逃逸（`BypassSandbox`）；对不可信输入（PR Diff），下游 AI 必须在隔离环境内运行，并杜绝接触宿主机真实 `$HOME`。
+3. **凭据必须在调用链路源头物理剥离**：子进程启动前必须主动从 `env` 中剥离 `GITHUB_TOKEN`、`GH_TOKEN`、`SSH_AUTH_SOCK` 等所有敏感凭据，杜绝凭据泄漏至 AI 审查子进程；且严禁在公共 CI 脚本中硬编码个人宿主机路径。
+
+### 操作规范
+1. **子进程环境清洗**：`run_agent_review` 启动任何下游 Reviewer 前，严格剥离 `GITHUB_TOKEN`、`GH_TOKEN`、`SSH_AUTH_SOCK`、`AWS_*` 等写权限令牌。
+2. **宿主机边界探针**：`check_runner_security_isolation()` 自动扫描 `$HOME/.ssh` 私钥；在未配置容器或专用运行用户（如 `github-runner`）的开发机上，强制跳过 AI 影子审核（`shadow_skipped`），除非显式声明 `HERDR_ALLOW_UNISOLATED_RUNNER=1`。
+3. **生产部署强制规范**：生产 Self-hosted Runner 必须运行在 Docker 隔离容器或独立的无特权操作系统用户下，且开发者主目录设置为 `chmod 700`，确保不可信 PR 彻底物理隔离。
+
+### 验证命令 / 关联证据
+`pytest -v tests/test_auto_pr_review.py::TestAutoPRReview::test_11_dangerous_cli_forbidden_in_unisolated_env`（验证子进程凭据物理剥离与私钥探针自动降级为 `shadow_skipped`）；沙盒穿透实证会话记录（`aa34823a-d7b2-4289-84b9-a47f6e821ea9`、`96852c72-8165-416a-87ce-e5f0b18a77ee`）。

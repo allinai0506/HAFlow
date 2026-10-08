@@ -137,3 +137,15 @@ pytest -q tests/test_review_benchmark.py
 - SHA 错配与缺少必要字段检测
 - Agent 超时、启动失败、格式错误与正常 0 问题区分
 - 中文报告渲染与差异计算
+
+---
+
+## 7. 安全沙盒边界与 Runner 隔离规范 (Security & Isolation Specification)
+
+依据工程协议 Section IV 安全边界规范：
+1. **子进程凭据脱敏**：`herdr-review-bench` 启动任何下游 AI Reviewer 子进程时，自动从 `env` 中剥离 `GITHUB_TOKEN`、`GH_TOKEN`、`SSH_AUTH_SOCK`、`AWS_*`，杜绝子进程接触写权限令牌。
+2. **宿主机边界探测**：自动检测 `$HOME/.ssh` 中是否存在私钥（`id_rsa` / `id_ed25519` 等）。在未配置容器或无特权专用用户的开发机上，默认安全跳过（`shadow_skipped`）AI 影子执行，严防 Prompt Injection 尝试越界读取宿主机敏感凭据。
+3. **生产 Runner 隔离推荐**：
+   - **方案 A（容器隔离）**：在 Docker/OCI 隔离容器中运行 Runner，设置 `HERDR_ISOLATED_CONTAINER=1`。
+   - **方案 B（专用无特权用户）**：在独立操作系统用户（如 `github-runner`）下运行 Runner，对开发者主目录设置 `chmod 700 /Users/developer`。
+   - **测试覆盖重载**：在受控测试环境中若确需在宿主机直接测试，显式设置 `HERDR_ALLOW_UNISOLATED_RUNNER=1`。

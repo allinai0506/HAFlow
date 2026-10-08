@@ -8,6 +8,22 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-10-08] sec | Self-hosted Runner 宿主机沙盒穿透实证与深层防御边界加固：子进程凭据物理剥离、宿主机私钥探针熔断、生产 Runner 容器化规范
+
+- 背景：
+  1. 在 Self-hosted Runner 上实际调通 `agy --sandbox` 闭环后，进一步执行红蓝对抗安全渗透验证；
+  2. 实证发现：`agy --sandbox` 的只读工具（`view_file`）缺乏工作区路径边界，可跨目录读取宿主机任意文件；且 `run_command` 被终端沙盒拦截后，模型自动通过 `BypassSandbox: true` 绕过沙盒直接在宿主机执行命令；
+  3. CI 步骤向环境注入了写权限 `GITHUB_TOKEN`，在宿主机共享开发者 `$HOME`（包含 `~/.ssh` 私钥）时，存在被恶意 PR 通过 Prompt Injection 窃取私钥与 GitHub Token 的高危隐患。
+- 变更：
+  1. **子进程环境变量物理清洗 (`herdr/review_benchmark.py`)**：启动 `agy` 或任何下游 AI Reviewer 子进程前，严格从 `child_env` 中剥离 `GITHUB_TOKEN`、`GH_TOKEN`、`SSH_AUTH_SOCK`、`AWS_*`，杜绝子进程接触写权限令牌；
+  2. **宿主机边界探针与自动熔断 (`check_runner_security_isolation`)**：自动扫描 `$HOME/.ssh` 私钥；在未配置容器或专用无特权运行用户（如 `github-runner`）的开发机上，强制跳过 AI 影子审核（`shadow_skipped`），除非显式声明 `HERDR_ALLOW_UNISOLATED_RUNNER=1`；
+  3. **CI 配置去宿主机化 (`.github/workflows/ha-review.yml`)**：彻底剔除在 public 工作流中硬编码的个人宿主机路径（`HOME: /Users/user`），改为由宿主机 Runner 本地 `.env` 自治提供；
+  4. **生产隔离规范补充 (`scripts/setup-self-hosted-runner.sh` & `docs/guides/review-benchmark.md`)**：明确生产环境 Self-hosted Runner 必须运行在独立系统用户（对开发者目录设置 `chmod 700`）或 Docker 容器内。
+- 证据：
+  1. 实证会话记录 `aa34823a-d7b2-4289-84b9-a47f6e821ea9`、`96852c72-8165-416a-87ce-e5f0b18a77ee` 记录沙盒绕过与读取现象；
+  2. `pytest -v tests/test_auto_pr_review.py::TestAutoPRReview::test_11_dangerous_cli_forbidden_in_unisolated_env` 验证凭据剥离与探针熔断全绿；
+  3. 51 项测试套件 100% PASS。
+
 ## [2026-10-08] feat | 实现 HAFlow PR 自动审核闭环（Auto PR Review V1）：GitHub Actions 触发、安全边界沙盒化、单例评论幂等防刷屏与四工件审计
 
 - 背景：

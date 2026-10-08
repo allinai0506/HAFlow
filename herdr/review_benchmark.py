@@ -616,10 +616,25 @@ def run_agent_review(
     else:
         raise RuntimeError(f"agent_startup_failed: unsupported agent '{agent_name}'")
 
+    # Security boundary: sanitize environment to prevent token leakage to child AI processes
+    child_env = os.environ.copy()
+    for sensitive_var in (
+        "GITHUB_TOKEN",
+        "GH_TOKEN",
+        "GITHUB_PAT",
+        "SSH_AUTH_SOCK",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SESSION_TOKEN",
+        "HERDR_GITHUB_TOKEN",
+    ):
+        child_env.pop(sensitive_var, None)
+
     try:
         proc = subprocess.run(
             cmd,
             cwd=str(repo_dir),
+            env=child_env,
             capture_output=True,
             text=True,
             timeout=timeout_seconds,
@@ -684,6 +699,46 @@ def run_agent_review(
     if audit_info:
         res_llm["audit"] = audit_info
     return res_llm
+
+
+def check_runner_security_isolation() -> Tuple[bool, str]:
+    """Verify whether runner environment provides technical isolation from host credentials.
+
+    Returns (is_isolated, reason).
+    Enforces Section IV of HAFlow engineering protocol:
+    1. Container isolation check (Docker/OCI container).
+    2. Dedicated unprivileged runner user check (e.g. runner/github-runner).
+    3. Workstation boundary check: detect if host HOME contains sensitive private keys (~/.ssh/id_*).
+    """
+    # 1. Container isolation check
+    if os.path.exists("/.dockerenv") or os.environ.get("HERDR_ISOLATED_CONTAINER") == "1":
+        return True, "Isolated container environment verified"
+
+    # 2. Dedicated unprivileged runner user check
+    runner_user = os.environ.get("USER", "")
+    if runner_user in ("runner", "github-runner", "_actions-runner", "actions-runner") or os.environ.get("HERDR_DEDICATED_RUNNER") == "1":
+        return True, "Dedicated unprivileged runner user verified"
+
+    # 3. Workstation credential check: detect if host HOME contains sensitive private keys
+    home = Path(os.environ.get("HOME", "/"))
+    ssh_dir = home / ".ssh"
+    private_key_names = ("id_rsa", "id_ed25519", "id_ecdsa", "id_dsa")
+    found_keys = []
+    if ssh_dir.exists():
+        for k in private_key_names:
+            if (ssh_dir / k).exists():
+                found_keys.append(k)
+
+    if found_keys:
+        if os.environ.get("HERDR_ALLOW_UNISOLATED_RUNNER") == "1":
+            return True, f"Unhardened developer workstation execution explicitly allowed via HERDR_ALLOW_UNISOLATED_RUNNER=1 (keys detected: {', '.join(found_keys)})"
+        return False, (
+            f"Self-hosted runner is executing directly on developer workstation ($HOME contains private credentials: {', '.join(found_keys)}); "
+            f"AI shadow review safely disabled per Section IV security policy to prevent host credential exposure. "
+            f"Run inside an isolated container, under a dedicated runner user without personal credentials, or set HERDR_ALLOW_UNISOLATED_RUNNER=1."
+        )
+
+    return True, "No private host credentials detected in runner HOME"
 
 
 DEFAULT_REVIEWER = "rule-contract-context-v1"
@@ -827,33 +882,44 @@ def review_diff(
                     "findings": [],
                 }
             else:
-                try:
-                    shadow_result = run_agent_review(
-                        agent_name=target_shadow_agent,
-                        repo_dir=repo_path,
-                        pr_info=pr_data,
-                        diff_content=diff_content,
-                        timeout_seconds=timeout_seconds,
-                        system_prompt=system_prompt,
-                    )
-                    shadow_status = "shadow_success"
-                    shadow_result["status"] = "shadow_success"
-                except (TimeoutError, subprocess.TimeoutExpired) as exc:
-                    shadow_status = "shadow_timeout"
+                is_isolated, isolation_reason = check_runner_security_isolation()
+                if not is_isolated:
+                    shadow_status = "shadow_skipped"
+                    shadow_skip_reason = isolation_reason
                     shadow_result = {
-                        "status": "shadow_timeout",
+                        "status": "shadow_skipped",
                         "agent": target_shadow_agent,
-                        "error": str(exc),
+                        "reason": shadow_skip_reason,
                         "findings": [],
                     }
-                except Exception as exc:
-                    shadow_status = "shadow_failed"
-                    shadow_result = {
-                        "status": "shadow_failed",
-                        "agent": target_shadow_agent,
-                        "error": str(exc),
-                        "findings": [],
-                    }
+                else:
+                    try:
+                        shadow_result = run_agent_review(
+                            agent_name=target_shadow_agent,
+                            repo_dir=repo_path,
+                            pr_info=pr_data,
+                            diff_content=diff_content,
+                            timeout_seconds=timeout_seconds,
+                            system_prompt=system_prompt,
+                        )
+                        shadow_status = "shadow_success"
+                        shadow_result["status"] = "shadow_success"
+                    except (TimeoutError, subprocess.TimeoutExpired) as exc:
+                        shadow_status = "shadow_timeout"
+                        shadow_result = {
+                            "status": "shadow_timeout",
+                            "agent": target_shadow_agent,
+                            "error": str(exc),
+                            "findings": [],
+                        }
+                    except Exception as exc:
+                        shadow_status = "shadow_failed"
+                        shadow_result = {
+                            "status": "shadow_failed",
+                            "agent": target_shadow_agent,
+                            "error": str(exc),
+                            "findings": [],
+                        }
         else:
             try:
                 shadow_result = run_agent_review(
