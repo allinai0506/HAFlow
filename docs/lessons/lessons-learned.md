@@ -6270,3 +6270,17 @@ wf-nexusarchive-1007-01的实际派发仅允许三Java文件，bugfix分支commi
 
 ### 验证命令 / 关联证据
 `pytest -q tests/test_task_delivery.py` 新增 `test_fix_task_requires_retrospective_contract`（RED→GREEN：正反例、normalize 拒/放、launch 级纯校验、无契约兼容）；全量 `pytest -q` 3878 passed；独立评审 MERGE_READY（`.omc/review-kadian-xiufu.md`）。
+
+## 138. 派发前必须预埋克隆路径信任，Worker 启动失败必须回写路由健康（2026-10-08）
+
+### 问题背景
+auto 路由两次选中 grok，均卡 `TRUST_REQUIRED` 后靠人工改显式 codex 脱困。根因两层：Deep Preflight 只探 `project_root` 的信任，而 grok 按精确路径匹配信任文件，CoW 克隆子目录从未被预埋；Worker 启动失败只打印退出，不回写 `unhealthy_agents`，auto 重试确定性再次选中同一 agent。
+
+### 经验教训
+探测环境与运行环境不一致时，探测通过不等于运行通过：凡运行时路径与探测路径不同的资源（信任、凭证、挂载），必须在派发侧对真实运行路径重做预埋。同时失败必须回写健康快照，否则重试是确定性复现而非恢复——`TRUST_REQUIRED` 本就在硬故障集合，进不了快照就永远起不了作用。
+
+### 操作规范
+launch 选定 agent 后、Worker 启动前对本次 clone 路径做该 agent 信任预埋（复用 `ensure_workspace_trust`，warn-only 不阻拦派发；Worker 运行时只读纪律不受影响，预埋发生在 launch 外壳）。Worker 输出命中 `TRUST_REQUIRED` 时合并回写 `unhealthy_agents` 并同步投影，auto 重试自动换候选。
+
+### 验证命令 / 关联证据
+`pytest -q tests/test_workspace_trust.py`（预埋写入、失败识别、健康合并正反例）；全量 3884 passed，唯一失败为干净主干同败的 #170 遗留；独立评审 MERGE_READY（`.omc/review-kadian-trust.md`）。

@@ -3606,6 +3606,12 @@ def _launch_task(args):
             print(tracked_status)
 
     # 1. 创建 Clone + Pane + Agent
+    try:
+        from herdr.workspace_trust import ensure_workspace_trust as _ensure_clone_trust
+        if getattr(args, "integration_mode", None) == "git":
+            _ensure_clone_trust(str(planned_clone), [resolved_agent])
+    except Exception as exc:
+        print(f"[WORKSPACE TRUST WARN] pre-seed failed for {args.task_id}: {exc}")
     worker_script = HERDR_ROOT / "services" / "herdr-worker.py"
     if not worker_script.exists():
         worker_script = Path(os.path.expanduser("~/HAFlow/services/herdr-worker.py"))
@@ -3662,6 +3668,27 @@ def _launch_task(args):
         sys.exit(75)
 
     if worker.returncode != 0:
+        try:
+            from herdr.workspace_trust import (
+                is_trust_required_failure as _is_trust_failure,
+                merge_trust_failure_unhealthy as _merge_trust_unhealthy,
+            )
+            _worker_output = (worker.stderr or "") + "\n" + (worker.stdout or "")
+            if _is_trust_failure(_worker_output):
+                _wf_record = store.get_workflow(args.workflow_id) or {}
+                _unhealthy, _healthy = _merge_trust_unhealthy(_wf_record, resolved_agent)
+                store.update_workflow_metadata(args.workflow_id, {
+                    "healthy_agents": _healthy, "unhealthy_agents": _unhealthy,
+                })
+                try:
+                    from herdr.state_store import sync_workflows_projection
+                    sync_workflows_projection(store=store)
+                except Exception:
+                    pass
+                print(f"[ROUTER HEALTH] {resolved_agent} marked TRUST_REQUIRED; "
+                      f"auto retry will pick another agent")
+        except Exception as exc:
+            print(f"[ROUTER HEALTH WARN] trust failure write-back failed: {exc}")
         for line in worker.stderr.splitlines():
             if line.startswith("HERDR_WORKER_FAILURE="):
                 try:
