@@ -807,12 +807,48 @@ def git_escalated_tasks(workflow_id):
     ]
 
 
+def close_retry_interval(attempts):
+    """Bounded exponential backoff between auto-close attempts (60s..600s)."""
+    try:
+        attempts = max(0, int(attempts))
+    except (TypeError, ValueError):
+        attempts = 0
+    return min(60 * (2 ** attempts), 600)
+
+
+def _note_close_backoff(workflow_id, close_key):
+    """Record a failed auto-close attempt and throttle the next retry."""
+    try:
+        episode = attention_get(close_key) or {}
+        attempts = int(episode.get("attempts") or 0) + 1
+    except (TypeError, ValueError):
+        attempts = 1
+    interval = close_retry_interval(attempts - 1)
+    attention_note(
+        close_key,
+        {"task_id": f"{workflow_id}:close", "workflow_id": workflow_id},
+        "auto_close_failed",
+        "auto_close_failed",
+        attempts=attempts,
+    )
+    attention_throttle(close_key, interval=interval)
+    print(
+        f"[CLOSE RETRY BACKOFF] "
+        f"workflow={workflow_id} "
+        f"attempt={attempts} next_in={interval}s"
+    )
+
+
 def maybe_close_completed_workflow(workflow_id):
     """Workflow 全部节点完成后,自动执行物理收尾(关 pane/删 clone/归档)。
 
     close-workflow 自带幂等与终态闸门;这里只负责防重入派发。
     """
     if not workflow_id or workflow_id in _workflow_close_inflight:
+        return
+
+    close_key = f"{workflow_id}:auto-close"
+    if attention_blocks_retry(close_key):
         return
 
     entry = _workflow_entry(workflow_id)
@@ -858,12 +894,20 @@ def maybe_close_completed_workflow(workflow_id):
 
     def _run():
         try:
-            result = subprocess.run(
-                [TASK_MANAGER, "close-workflow", workflow_id],
-                text=True,
-                capture_output=True,
-                timeout=900,
-            )
+            try:
+                result = subprocess.run(
+                    [TASK_MANAGER, "close-workflow", workflow_id],
+                    text=True,
+                    capture_output=True,
+                    timeout=900,
+                )
+            except Exception as exc:
+                print(
+                    f"[WORKFLOW CLOSE ERROR] "
+                    f"workflow={workflow_id}: close transport failed: {exc}"
+                )
+                _note_close_backoff(workflow_id, close_key)
+                return
             if result.stdout.strip():
                 print(result.stdout.strip())
             if result.returncode != 0:
@@ -872,6 +916,9 @@ def maybe_close_completed_workflow(workflow_id):
                     f"workflow={workflow_id}: "
                     f"{result.stderr.strip() or result.stdout.strip()}"
                 )
+                _note_close_backoff(workflow_id, close_key)
+            else:
+                attention_clear(close_key)
         finally:
             _workflow_close_inflight.discard(workflow_id)
 
