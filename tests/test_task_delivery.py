@@ -340,3 +340,38 @@ def test_non_utf8_git_metadata_is_rejected_before_proof(delivery_env, monkeypatc
     with pytest.raises(ValueError, match='UTF-8'):
         delivery.check_delivery('t', store=store)
     assert not store.list_events(task_id='t', event_type='delivery_checked')
+
+
+def test_fix_task_requires_retrospective_contract():
+    from herdr import task_delivery as delivery
+    assert delivery.fix_task_needs_retrospective(task_id='impl-atomic-fix')
+    assert delivery.fix_task_needs_retrospective(task_type='fix')
+    assert not delivery.fix_task_needs_retrospective(task_id='prefix-task')
+    assert not delivery.fix_task_needs_retrospective(task_id='implementation')
+    good = {'version': 1, 'allowed_paths': ['src/*', 'docs/*'],
+            'required_files': [{'path': 'docs/bug-reports/2026-10-08-fix.md', 'headings': []}],
+            'checks': [], 'auto_rework': False}
+    bad = {'version': 1, 'allowed_paths': ['src/*'],
+           'required_files': [], 'checks': [], 'auto_rework': False}
+    assert delivery.retrospective_satisfied(good)
+    assert not delivery.retrospective_satisfied(bad)
+    assert not delivery.retrospective_satisfied(None)
+    from herdr.workflow import normalize_workflow
+    with pytest.raises(ValueError, match='retrospective|复盘'):
+        normalize_workflow({'nodes': [{'id': 'implementation', 'default_task_type': 'fix',
+                                       'default_integration_mode': 'git', 'delivery_contract': bad}]})
+    normalize_workflow({'nodes': [{'id': 'implementation', 'default_task_type': 'fix',
+                                   'default_integration_mode': 'git', 'delivery_contract': good}]})
+    with pytest.raises(ValueError, match='retrospective|复盘'):
+        delivery.validate_fix_retrospective(task_id='impl-atomic-fix', task_type='fix',
+                                            node_id='implementation', branch=None,
+                                            contract=bad, integration_mode='git')
+    delivery.validate_fix_retrospective(task_id='impl-atomic-fix', task_type='fix',
+                                        node_id='implementation', branch=None,
+                                        contract=good, integration_mode='git')
+    delivery.validate_fix_retrospective(task_id='impl-atomic-fix', task_type='fix',
+                                        node_id='implementation', branch=None,
+                                        contract=None, integration_mode='none')
+    delivery.validate_fix_retrospective(task_id='new', task_type='fix',
+                                        node_id='implementation', branch=None,
+                                        contract=None, integration_mode='git')

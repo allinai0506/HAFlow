@@ -6,6 +6,8 @@
 
 读取源仓库AGENTS.md、适用局部规则、实际commit和CI门禁、复盘模板。逐项登记允许文件和必需产物。若需求写明只改三份Java文件而门禁要求复盘，先请协调者明确补充文档范围，再登记契约。不能换分支名、关闭hook或默认扩大范围。
 
+含 fix 的任务（task_id/task_type/node/分支按词边界命中 fix/bugfix/hotfix）在 plan 期就必须登记复盘文档：已登记契约但缺复盘 `required_files`（路径含 bug/report/postmortem/retrospective/复盘/review 任一）的 git 派发，会在 `normalize_workflow` 与 `launch` 直接拒绝。无契约旧任务走原兼容路径，不追溯改写。
+
 契约示例（使用项目实际路径与命令替换本示例）：
 
 ```json

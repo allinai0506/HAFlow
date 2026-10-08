@@ -368,6 +368,11 @@ def _normalize_workflow_body(workflow: Dict[str, Any]) -> Dict[str, Any]:
                 conflicts = scope_conflicts(norm_node["delivery_contract"])
                 if conflicts:
                     raise ValueError("delivery scope conflict: " + ", ".join(conflicts))
+            from .task_delivery import validate_fix_retrospective
+            validate_fix_retrospective(task_type=norm_node["default_task_type"],
+                                       node_id=node_id, label=label,
+                                       contract=norm_node.get("delivery_contract"),
+                                       integration_mode=norm_node["default_integration_mode"])
             validate_artifact_contract(node.get("artifact_mode"), norm_node["default_integration_mode"],
                                        node_id=node_id, task_type=norm_node["default_task_type"])
             if "artifact_mode" in node:

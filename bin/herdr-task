@@ -3268,6 +3268,10 @@ def _launch_task(args):
         if Path(args.task_id).name != args.task_id or args.task_id in {'.', '..'} or len(args.task_id) > 128:
             raise ValueError('task_id must be a bounded single workspace name')
         planned_clone = clone_root / args.task_id
+        from herdr.task_delivery import validate_fix_retrospective
+        validate_fix_retrospective(task_id=args.task_id, task_type=getattr(args, "task_type", None),
+                                   node_id=node_id, contract=node.get("delivery_contract"),
+                                   integration_mode=getattr(args, "integration_mode", None))
         candidate = str(getattr(args, "candidate_sha", None) or "").strip()
         onto = getattr(args, "onto", None)
         committed_recovery = bool(predecessor and predecessor.get('status') == 'committed')

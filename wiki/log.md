@@ -2166,3 +2166,5 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 ## [2026-10-07] Updated | 工程交付要求与未提交恢复责任
 - Updated [[task-lifecycle]]: 固定交付契约、完成与提交复验、受限completed返工及回执恢复。
 - Updated [[workflow-progress-recovery]]: delivery责任无候选准入，仍保留测试冻结门禁和旧恢复身份兼容。
+
+- 2026-10-08：含 fix 任务 plan 期复盘门禁——task_id/task_type/node/分支词边界命中 fix/bugfix/hotfix 且已登记契约但缺复盘条目的 git 派发，在 normalize 与 launch 预检直接拒绝（§133）。首版过宽误拦无契约旧链路 6 例后收窄；全量 3878 passed，独立评审 MERGE_READY。

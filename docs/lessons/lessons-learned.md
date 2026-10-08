@@ -6256,3 +6256,17 @@ wf-nexusarchive-1007-01的实际派发仅允许三Java文件，bugfix分支commi
 
 ### 验证命令 / 关联证据
 `pytest -q tests/test_task_delivery.py tests/test_delivery_rework.py`：覆盖范围冲突、真实hook拒绝、收编拒绝、旧Run并发结果、JSON脱敏、发送后中断、旧恢复身份及实际临时Git集成链。生产升级与原工作流复跑另需实际证据。
+
+## 133. 含 fix 任务必须在 plan 期机器拦截缺复盘派发，提示词纪律不能代替门禁（2026-10-08）
+
+### 问题背景
+任务名 `impl-atomic-fix` 使分支以 `-fix` 结尾，命中目标仓 bugfix 门禁正则（要求缺陷复盘文档），commit 连败后转人工。复盘发现派发契约只允许了业务文件、未登记复盘产物，而 `COORDINATOR_DISCIPLINE` 第 4 条的“派发前登记”只是提示词纪律，没有机器检查；§132 修了提交侧分流与盲重试，但 plan 期仍可放行缺复盘的 fix 派发。
+
+### 经验教训
+命名信号必须转成机器门禁：task_id/task_type/node/分支按词边界命中 fix/bugfix/hotfix 的 git 任务，若已登记契约却无复盘类 `required_files`，在 plan 期直接拒绝。首版门禁过宽（连无契约旧链路一起拦，全量 6 failed）证明拦截面必须与兼容语义对齐：无契约走原兼容路径，只拦已登记契约但缺复盘条目者——这正是当年事故的精确形状（契约有三 Java 文件、缺复盘）。
+
+### 操作规范
+纯函数放 `herdr/task_delivery.py`（词边界启发式 + 通用复盘路径模式 `bug|report|postmortem|retrospective|复盘|review` + `validate_fix_retrospective`），`herdr/workflow.py` normalize 与 `bin/herdr-task` launch 预检双点调用，均在副作用前抛可操作错误（含示例路径）。不在 HAFlow 硬编码目标仓正则；不更名分支、不加 `--no-verify`。
+
+### 验证命令 / 关联证据
+`pytest -q tests/test_task_delivery.py` 新增 `test_fix_task_requires_retrospective_contract`（RED→GREEN：正反例、normalize 拒/放、launch 级纯校验、无契约兼容）；全量 `pytest -q` 3878 passed；独立评审 MERGE_READY（`.omc/review-kadian-xiufu.md`）。
