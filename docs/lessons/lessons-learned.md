@@ -6376,3 +6376,17 @@ PR #160 契约核查发现：Controller 原有降级机制仅在总指挥长等�
 
 ### 验证命令 / 关联证据
 `pytest -q tests/test_finding_verifier.py tests/test_review_benchmark.py` 38 passed；在真实历史 PR 样本回放中，反事实误报拦截率 100%（5/5 纯反事实幻觉被剔除），真实缺陷误杀率 0%（2/2 TP 稳定保留）。
+
+## 145. 硬预算谓词必须用统一退役判据，退役行占槽=派发死锁（2026-10-08）
+
+### 问题背景
+wf-nexusarchive-1008-01 中 max_tasks_per_node=2 把 superseded 旧任务也算进硬预算，独立 challenger 工位永远派不出。首修只认 status=='superseded'，round1 评审抓出 recovery 谱系退役行（committed + superseded_by，`link_committed_successor` 只回填指针不改状态）仍占槽——原死锁换一类行复现。
+
+### 经验教训
+预算谓词必须复用仓库统一的退役判据（status=='superseded' 或带 superseded_by），单看 status 会漏掉指针式退役。诊断计数（registered/superseded/retired/budget）与拒绝消息要同 PR 对齐；文档四处（schema/cli-reference/wiki/历史 spec 变更行）同步，避免模板作者按旧契约估配额。
+
+### 操作规范
+`budget_tasks` 排除 retired；`locked_overflow` 独立于 `overflow`（后者保留原语义）；在役 failed/completed 仍计数；替换在旧任务退役前仍占槽。
+
+### 验证命令 / 关联证据
+`pytest -q tests/test_node_capacity.py`（24 passed：退役行正反、真实报错串、满额语义）；全量 3900 passed（唯一失败为 #170 干净主干同败）；独立评审 round1 NEEDS_FIXES（B1 谓词/B2 文档）→修复→round2 MERGE_READY（`.omc/review-kadian-node-capacity.md`）。

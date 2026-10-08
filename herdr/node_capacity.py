@@ -36,10 +36,17 @@ def node_usage(node, tasks, workflow_id=None):
     panes = sorted({str(pane_reference(t)) for t in selected if pane_reference(t)})
     total_overflow = total_limit is not None and len(selected) > total_limit
     concurrent_overflow = concurrency is not None and len(active) > concurrency
+    # Unified retirement predicate (status==superseded or superseded_by):
+    # a retired row can never revive, so it must not hold the hard budget.
+    retired = [t for t in selected if t.get('status') == 'superseded' or t.get('superseded_by')]
+    budget_tasks = [t for t in selected if t not in retired]
+    locked_overflow = total_limit is not None and len(budget_tasks) + 1 > total_limit
     return {
         'node': nid, 'task_count': len(selected), 'active_task_count': len(active),
         'registered_task_count': len(selected),
+        'budget_task_count': len(budget_tasks),
         'superseded_task_count': sum(t.get('status') == 'superseded' for t in selected),
+        'retired_task_count': len(retired),
         'task_count_source': 'all_registered_including_superseded',
         'active_task_count_source': 'concurrent_statuses',
         'pane_count': len(panes), 'pane_ids': panes,
@@ -52,16 +59,19 @@ def node_usage(node, tasks, workflow_id=None):
         'legacy_max_agents': legacy, 'confirmation_threshold': warning_limit,
         'overflow': total_overflow or concurrent_overflow or
                     (warning_limit is not None and len(selected) > warning_limit),
+        'locked_overflow': locked_overflow,
     }
 
 
 def launch_capacity_error(usage):
     """Hard budgets apply even when an operator acknowledges legacy overflow."""
-    count = usage['task_count'] + 1
+    count = usage.get('budget_task_count', usage['task_count']) + 1
     limit = usage['max_tasks_per_node']
     if limit is not None and count > limit:
-        return (f'cumulative task count {count} exceeds max_tasks_per_node={limit}; '
-                f'registered={usage["task_count"]} including {usage.get("superseded_task_count", 0)} superseded; '
+        return (f'task count {count} exceeds max_tasks_per_node={limit}; '
+                f'registered={usage["task_count"]} including {usage.get("superseded_task_count", 0)} superseded '
+                f'({usage.get("retired_task_count", usage.get("superseded_task_count", 0))} retired); '
+                f'budget={usage.get("budget_task_count", usage["task_count"])}; '
                 f'active={usage["active_task_count"]}')
     # The old owner stays active until successful replacement delivery.
     # Launch therefore requires a real free slot even for replacements.

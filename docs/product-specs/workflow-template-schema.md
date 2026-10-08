@@ -82,7 +82,7 @@ stage advance 事件头部的 `base_branch` 字段获取，controller 对 rules
 | `max_concurrency` | `integer` | 否 | 未设置 | 同一节点同时处于 pending 或活跃状态的 Task 硬上限；launch 在跨进程工作流锁内校验。 |
 | `max_agents` | `integer` | 否 | `1` | 已弃用的派发模式开关：1 且非 parallel 使用静态工位，其他值使用动态工位。旧配置超累计阈值需要 `--ack-overflow` 并审计；它不是历史任务硬配额。 |
 
-节点级 `max_tasks_per_node` 是正整数，限制该 workflow/node 的累计 Task 数，包含失败、已完成和 superseded 任务。rework 不新增 Task；替换仍计数。硬上限不能用 `--ack-overflow` 绕过。新字段优先于旧字段，存量 workflow 不自动迁移。
+节点级 `max_tasks_per_node` 是正整数，限制该 workflow/node 的累计在役 Task 数：失败、已完成等在役任务计数；已退役行（status=superseded，或带 `superseded_by` 的谱系退役行）不占预算，因为退役行不可复活、占槽会造成派发死锁。rework 不新增 Task；替换在旧任务退役前仍计数。硬上限不能用 `--ack-overflow` 绕过。新字段优先于旧字段，存量 workflow 不自动迁移。
 
 ---
 
