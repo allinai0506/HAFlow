@@ -6326,3 +6326,17 @@ wf-nexusarchive-1008-01 test/review-auto 隔离失败后，恢复路径与并发
 
 ### 验证命令 / 关联证据
 `pytest -q tests/test_impl_fix3_regression.py`（并发 supersede 正例＋真失败负例）；全量 3892 passed（唯一失败为 #170 干净主干同败）；独立评审 MERGE_READY（`.omc/review-kadian-router-recovery.md`）。
+
+## 142. 自动收尾失败必须退避重试，inflight 闩只防并发不防重复（2026-10-08）
+
+### 问题背景
+wf-nexusarchive-1008-01 逻辑完成后，close 因 requirements-executor2 未落盘 abort，`maybe_close_completed_workflow` 每 sweep 重调 close——18 连击 abort 风暴＋DB 事件复写。`_workflow_close_inflight` 只在线程内存活期间防重入，失败摘闩后下轮照发。
+
+### 经验教训
+任何“失败即摘闩”的派发都必须配失败退避，否则 abort 会变成 sweep 频率的日志/DDoS。复用既有 attention 基建（note＋throttle＋blocks check），指数退避 60s 起 600s 封顶；成功清闩。transport 异常（超时等）与非零返回必须同语义记退避——超时恰是最可能复发的失败。
+
+### 操作规范
+只加派发节流，不改 close 判定与终态闸门；人工落盘后下个窗口即收敛。不设 give-up 上限（重试本身有价值）。
+
+### 验证命令 / 关联证据
+`pytest -q tests/test_liveness_guard.py`（退避边界/窗口跳过/失败记 episode/transport 异常/成功清闩）；全量 3896 passed（唯一失败为 #170 干净主干同败）；独立评审 round1 NEEDS_FIXES（传输异常漏记）→修复→round2 MERGE_READY（`.omc/review-kadian-close-backoff.md`）。

@@ -318,6 +318,112 @@ class ControllerLivenessWiringTest(unittest.TestCase):
             run_mock.assert_not_called()
 
 
+class AutoCloseBackoffTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="herdr-close-backoff-")
+        self.store = liveness.EpisodeStore(Path(self.tmp.name) / "attention.json")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_close_retry_interval_is_bounded_exponential(self):
+        controller = importlib.import_module("services.herdr-controller")
+        self.assertEqual(controller.close_retry_interval(0), 60)
+        self.assertEqual(controller.close_retry_interval(1), 120)
+        self.assertEqual(controller.close_retry_interval(2), 240)
+        self.assertEqual(controller.close_retry_interval(100), 600)
+
+    def test_backoff_window_skips_dispatch(self):
+        controller = importlib.import_module("services.herdr-controller")
+        with patch.object(controller, "_workflow_close_inflight", set()), \
+             patch.object(controller, "attention_blocks_retry", return_value=True), \
+             patch.object(controller.subprocess, "run") as run_mock:
+            controller.maybe_close_completed_workflow("wf-backoff")
+            time.sleep(0.2)
+            run_mock.assert_not_called()
+
+    def test_failed_close_records_backoff_episode(self):
+        import subprocess
+        controller = importlib.import_module("services.herdr-controller")
+        live_file = Path(self.tmp.name) / "workflow.json"
+        live_file.write_text("{}", encoding="utf-8")
+
+        class FakeStore:
+            def get_workflow(self, workflow_id):
+                return {"workflow_id": workflow_id, "status": "running"}
+
+        failed = subprocess.CompletedProcess([], 2, "[CLOSE ABORT] x", "")
+        with patch.object(controller, "_get_store", return_value=FakeStore()), \
+             patch.object(controller, "_workflow_entry",
+                          return_value={"status": "running",
+                                        "workflow_file": str(live_file)}), \
+             patch.object(controller, "git_finalize_pending_tasks", return_value=[]), \
+             patch.object(controller, "git_escalated_tasks", return_value=[]), \
+             patch.object(controller, "_workflow_close_inflight", set()), \
+             patch.object(controller, "_attention_store", self.store), \
+             patch.object(controller.subprocess, "run", return_value=failed) as run_mock:
+            controller.maybe_close_completed_workflow("wf-backoff-fail")
+            time.sleep(0.5)
+            self.assertEqual(run_mock.call_count, 1)
+        episode = self.store.get("wf-backoff-fail:auto-close")
+        self.assertIsNotNone(episode)
+        self.assertEqual(episode["reason"], "auto_close_failed")
+        self.assertGreater(episode["next_retry_at"], time.time())
+
+    def test_transport_exception_records_backoff_episode(self):
+        import subprocess
+        controller = importlib.import_module("services.herdr-controller")
+        live_file = Path(self.tmp.name) / "workflow-timeout.json"
+        live_file.write_text("{}", encoding="utf-8")
+
+        class FakeStore:
+            def get_workflow(self, workflow_id):
+                return {"workflow_id": workflow_id, "status": "running"}
+
+        with patch.object(controller, "_get_store", return_value=FakeStore()), \
+             patch.object(controller, "_workflow_entry",
+                          return_value={"status": "running",
+                                        "workflow_file": str(live_file)}), \
+             patch.object(controller, "git_finalize_pending_tasks", return_value=[]), \
+             patch.object(controller, "git_escalated_tasks", return_value=[]), \
+             patch.object(controller, "_workflow_close_inflight", set()), \
+             patch.object(controller, "_attention_store", self.store), \
+             patch.object(controller.subprocess, "run",
+                          side_effect=subprocess.TimeoutExpired([], 900)):
+            controller.maybe_close_completed_workflow("wf-backoff-timeout")
+            time.sleep(0.5)
+        episode = self.store.get("wf-backoff-timeout:auto-close")
+        self.assertIsNotNone(episode)
+        self.assertGreater(episode["next_retry_at"], time.time())
+
+    def test_successful_close_clears_backoff_episode(self):
+        import subprocess
+        controller = importlib.import_module("services.herdr-controller")
+        live_file = Path(self.tmp.name) / "workflow-ok.json"
+        live_file.write_text("{}", encoding="utf-8")
+
+        class FakeStore:
+            def get_workflow(self, workflow_id):
+                return {"workflow_id": workflow_id, "status": "running"}
+
+        ok = subprocess.CompletedProcess([], 0, "[WORKFLOW CLOSED] wf-backoff-ok", "")
+        with patch.object(controller, "_get_store", return_value=FakeStore()), \
+             patch.object(controller, "_workflow_entry",
+                          return_value={"status": "running",
+                                        "workflow_file": str(live_file)}), \
+             patch.object(controller, "git_finalize_pending_tasks", return_value=[]), \
+             patch.object(controller, "git_escalated_tasks", return_value=[]), \
+             patch.object(controller, "_workflow_close_inflight", set()), \
+             patch.object(controller, "_attention_store", self.store):
+            self.store.upsert("wf-backoff-ok:auto-close",
+                              {"reason": "auto_close_failed", "attempts": 2,
+                               "next_retry_at": 0})
+            with patch.object(controller.subprocess, "run", return_value=ok):
+                controller.maybe_close_completed_workflow("wf-backoff-ok")
+                time.sleep(0.5)
+        self.assertIsNone(self.store.get("wf-backoff-ok:auto-close"))
+
+
 class CoordinatorCompactTest(unittest.TestCase):
     """阶段/fix-loop 边界的总指挥 /compact 注入(2026-09-17 效率优化)。
 

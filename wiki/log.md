@@ -2177,3 +2177,4 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 2026-10-08：信任预埋扩面（§140）——线上 plan-challenger（none 模式 grok）TRUST_REQUIRED 回滚暴露 git 门槛过窄，改为模式无关决策；回写端经实战验证正常。全量 3891 passed，独立评审 MERGE_READY。
 
 - 2026-10-08：恢复判定以终态为准（§141）——router 隔离恢复并发 supersede 误报 ERROR，改为重读持久化状态判定；线上 test-auto-r2 已用 grok 恢复派发。全量 3892 passed，独立评审 MERGE_READY。
+- 2026-10-08：自动收尾失败退避（§142）——close abort 风暴（18 连击）改为指数退避 60s→600s；round1 评审抓出传输异常漏记，修复后 round2 MERGE_READY。全量 3896 passed。
