@@ -323,7 +323,7 @@ herdr-task rollout check-guard --agent codex --node implementation \
 
 ## 节点配额、原位返工与工位回收
 
-`agent_policy.max_concurrency` 限制 pending/活跃任务，节点 `max_tasks_per_node` 限制全部历史任务。launch 在工作流级跨进程锁内检查，拒绝时列出已有 task_id。替换需要真实空闲并发槽位；满额时先使用同任务 rework。默认软件开发模板累计配额：需求 2、计划 2、实现 12、测试 4、评审 4、收尾 1。
+`agent_policy.max_concurrency` 限制 pending/活跃任务，节点 `max_tasks_per_node` 限制累计在役历史任务（已退役行——`status=superseded` 或带 `superseded_by` 的谱系行——不占预算）。launch 在工作流级跨进程锁内检查，拒绝时列出已有 task_id。替换需要真实空闲并发槽位；满额时先使用同任务 rework。默认软件开发模板累计配额：需求 2、计划 2、实现 12、测试 4、评审 4、收尾 1。
 
 ```bash
 herdr-task panes --workflow-id <wf> --json

@@ -141,10 +141,13 @@ def test_runtime_released_pane_does_not_resurrect_legacy_reference(scene):
 
 @pytest.mark.parametrize('ack', [False, True])
 def test_hard_task_budget_cannot_be_acknowledged_away(scene, ack, capsys):
-    cli, _, config, file, args = scene
+    cli, store, config, file, args = scene
     config['nodes'][0]['max_tasks_per_node'] = 2
     config['nodes'][0]['agent_policy'] = {'max_concurrency': 2}
     file.write_text(json.dumps(config))
+    for i in range(2):
+        store.save_task({'task_id': f'active-{i}', 'workflow_id': 'wf', 'node': 'plan', 'status': 'working'})
+    store.save_task({'task_id': 'old-2', 'workflow_id': 'wf', 'node': 'plan', 'status': 'superseded'})
     args.ack_overflow = ack
     with pytest.raises(SystemExit) as exc:
         cli._launch_task(args)
@@ -189,8 +192,9 @@ def test_independent_launchers_with_distinct_sources_serialize_budget(scene, tmp
     import time
     cli, store, config, file, args = scene
     config['nodes'][0]['max_tasks_per_node'] = 3
-    config['nodes'][0]['agent_policy'] = {'max_concurrency': 2}
+    config['nodes'][0]['agent_policy'] = {'max_concurrency': 3}
     file.write_text(json.dumps(config))
+    store.save_task({'task_id': 'active-1', 'workflow_id': 'wf', 'node': 'plan', 'status': 'working'})
     script = tmp_path / 'launcher.py'
     script.write_text('''
 import importlib.machinery, importlib.util, sys, time
@@ -292,7 +296,47 @@ def test_budget_diagnostics_name_cumulative_superseded_and_active_counts(scene):
     usage=node_usage(node,store.list_tasks(),'wf')
     assert usage['registered_task_count']==usage['task_count']==2
     assert usage['superseded_task_count']==1
+    assert usage['budget_task_count']==1
+    assert usage['retired_task_count']==1
     assert usage['task_count_source']=='all_registered_including_superseded'
     assert usage['active_task_count_source']=='concurrent_statuses'
     assert usage['active_task_count']==0
-    assert 'including 1 superseded' in launch_capacity_error(usage)
+    assert usage['max_tasks_per_node']==2
+    node['max_tasks_per_node']=1
+    usage=node_usage(node,store.list_tasks(),'wf')
+    error=launch_capacity_error(usage)
+    assert error is not None and 'budget=1' in error and 'including 1 superseded' in error
+
+
+def test_retired_superseded_by_row_does_not_consume_budget(scene):
+    from herdr.node_capacity import node_usage, launch_capacity_error
+    _,store,config,_,_=scene
+    node=config['nodes'][0];node['max_tasks_per_node']=2
+    node['agent_policy']={'max_concurrency': 2}
+    store.save_task({'task_id': 'retired', 'workflow_id': 'wf', 'node': 'plan',
+                     'status': 'committed', 'superseded_by': 'successor'})
+    usage=node_usage(node,store.list_tasks(),'wf')
+    assert usage['retired_task_count']==2
+    assert usage['budget_task_count']==1
+    assert launch_capacity_error(usage) is None
+    store.save_task({'task_id': 'live-committed', 'workflow_id': 'wf', 'node': 'plan',
+                     'status': 'committed'})
+    usage=node_usage(node,store.list_tasks(),'wf')
+    assert usage['budget_task_count']==2
+    assert launch_capacity_error(usage) is not None
+
+
+@pytest.mark.parametrize('limit', [2])
+def test_superseded_tasks_do_not_consume_hard_budget(scene, limit):
+    from herdr.node_capacity import node_usage, launch_capacity_error
+    cli, store, config, file, args = scene
+    config['nodes'][0]['max_tasks_per_node'] = limit
+    config['nodes'][0]['agent_policy'] = {'max_concurrency': 2}
+    file.write_text(json.dumps(config))
+    with pytest.raises(Routed):
+        cli._launch_task(args)
+    usage = node_usage(config['nodes'][0], store.list_tasks(), 'wf')
+    assert usage['registered_task_count'] == 2
+    assert usage['budget_task_count'] == 1
+    assert usage['superseded_task_count'] == 1
+    assert launch_capacity_error(usage) is None

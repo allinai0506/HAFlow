@@ -42,6 +42,7 @@
 | 2.6 | 本地能力实现/专项验收 | deep-preflight --workflow-id --agent --deep --apply回写StateStore；部分刷新只更新该Agent时间/身份，全池完整结果才刷新全局时间 |
 | 2.7 | 本地恢复闭环/专项验收 | authorize-completion以显式run/version/reason签发receipt-v1；不改working、不认定成功；后续report-completion与Controller消费仍核验task/run/epoch |
 | 2.8 | 契约澄清/诊断补全 | max_tasks_per_node累计注册含superseded，max_concurrency当前并发；新增registered/superseded计数与来源，硬限制不变；241专项通过 |
+| 2.8a | 2026-10-08 变更记录 | `max_tasks_per_node` 预算谓词改为统一退役判据（status=superseded 或带 superseded_by 的谱系行不占预算，在役 failed/completed 仍计数）；新增 budget/retired 诊断计数；专项 24 passed |
 | 2.9 | 既有能力补可发现性/专项验收 | working/paused/interrupted走同task/pane rework且核验实例；dispatch错误给出修复命令，不添加working→pending |
 | 3.1 | 本地修复/专项验收 | 同节点不同dispatch_role排除非superseded历史任务和在途reservation使用的Agent；独立进程竞争验收；显式复用仍需reason及持久审计 |
 | 3.2 | 本地修复/专项验收 | review纳入共享NOTE_KINDS与context；真实note-add→ledger→note-list读回 |
