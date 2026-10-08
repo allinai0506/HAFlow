@@ -79,7 +79,11 @@ def format_chinese_review_report(
     # Context size calculation
     shadow_audit = shadow.get("audit") or review_result.get("audit")
     if shadow_audit and isinstance(shadow_audit, dict):
-        ctx_chars = shadow_audit.get("assembled_chars") or shadow_audit.get("chars")
+        ctx_chars = (
+            shadow_audit.get("final_context_size")
+            or shadow_audit.get("assembled_chars")
+            or shadow_audit.get("chars")
+        )
         ctx_str = f"{ctx_chars} 字符" if ctx_chars is not None else "N/A"
     else:
         ctx_str = "N/A"
