@@ -1,0 +1,17 @@
+{
+  "case_id": "allinai0506_HAFlow_106-b747fbd4",
+  "pr_number": 106,
+  "base_sha": "3838b737039017cf0b1749c9098749f10fa5cc51",
+  "defect_sha": "b747fbd468a3cc02c3b0b8bc641a9bfdd67e6653",
+  "defects_count": 1,
+  "defects": [
+    {
+      "file": "herdr/rollout_policy.py",
+      "start_line": 387,
+      "end_line": 423,
+      "category": "workflow_state",
+      "severity": "critical",
+      "verified_commit": "a5d8dd7b0d6246ef2d198fb41937a0b37d173228"
+    }
+  ]
+}

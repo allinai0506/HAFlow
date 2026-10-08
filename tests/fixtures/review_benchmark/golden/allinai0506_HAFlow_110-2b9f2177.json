@@ -11,21 +11,21 @@
       "file": "herdr/fix_loop.py",
       "start_line": 48,
       "end_line": 68,
-      "message": "verdict_fingerprint 函数在计算受阻结论的稳定指纹时，将易失的实例标识 blocker.get('task_id') 混入哈希输入。当后继代任务（如 test-01-r4）重记录与上一代相同的 blocked 结论时，因 task_id 变化导致指纹失配，绕过了 is_repeat_verdict 升级逻辑，导致已终结 Task 被反复作废并透支循环预算。",
+      "message": "verdict_fingerprint 在计算指纹时盲目引入易失 task_id，导致后续代际任务针对同一阻塞原因计算出的指纹不同，使 repeat_verdict 重复判定失效，透支循环预算。",
       "tp_fp": "tp",
-      "severity": "critical",
-      "category": "correctness",
+      "severity": "high",
+      "category": "workflow_state",
       "scope": "introduced-by-pr",
-      "difficulty": "medium",
+      "difficulty": "hard",
       "context_required": "diff-plus-related-files",
-      "tp_fp_justification": "确凿缺陷：Commit 2b9f2177 引入的选择性返工在 herdr/fix_loop.py:65 遍历 blocker 时加入了 task_id。该缺陷在 PR #158（修复提交 291c1f75987ff82f56ec9ac5dc598441f4461543）中被定位并根除，tests/test_fix_loop_recovery.py 中的用例证明了 task_id 导致指纹跨代失配并引发死循环扣减预算的问题。",
-      "severity_justification": "Critical: 导致重试预算失控、死循环作废已完成任务并耗尽工作流资源。",
-      "category_justification": "Correctness: 实例身份与语义指纹混淆，破坏了状态机幂等与收敛保证。",
+      "tp_fp_justification": "确凿缺陷：Commit 2b9f2177 在引入 Selective Replan v1 时保留了易失 task_id。在 PR #110 独立审查及修复提交 03fbf1434642953ddfda7bc868f80f693440b713 中明确将其重构，去除易失 task_id 维度。",
+      "severity_justification": "High: 违反 HAFlow 系统状态机或事实层权威不变量约束。",
+      "category_justification": "Workflow_state: 归属于 workflow_state 类别的核心系统逻辑漏洞。",
       "producer": "human_curated",
       "source": {
         "type": "human_curated",
         "alignment": "ground_truth",
-        "verified_commit": "291c1f75987ff82f56ec9ac5dc598441f4461543"
+        "verified_commit": "03fbf1434642953ddfda7bc868f80f693440b713"
       }
     }
   ]

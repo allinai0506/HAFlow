@@ -1,0 +1,32 @@
+{
+  "pr_key": "allinai0506_HAFlow_103-fb9ea2f3",
+  "pr": {
+    "repo": "https://github.com/allinai0506/HAFlow",
+    "pr_number": 103,
+    "base": "5cd1e0d7ffebe3c2317ad8215a67b6fc4714049b",
+    "head": "fb9ea2f31466defc7c480eb9c933e637f016d999"
+  },
+  "findings": [
+    {
+      "file": "herdr/agent_router.py",
+      "start_line": 645,
+      "end_line": 665,
+      "message": "canary 路由决策在执行分流与资源预留时，未在事务临界区内强制持久化决策记录。若 record_shadow_decision 写入失败或在预留后才异步记录，会导致已被金丝雀路由分流执行的真实任务缺乏对应的持久化决策事件，造成评测分流结果与实际执行不一致；且配置解析对非法 UTF-8 未作防御导致路由崩溃。",
+      "tp_fp": "tp",
+      "severity": "high",
+      "category": "workflow_state",
+      "scope": "introduced-by-pr",
+      "difficulty": "hard",
+      "context_required": "diff-plus-related-files",
+      "tp_fp_justification": "确凿缺陷：Commit fb9ea2f3 在金丝雀路由实现中存在决策写盘与执行解耦漏洞。在 PR #103 提交 8d099a1 中指出“无持久化金丝雀决策则绝不执行金丝雀路由”，将写入置入路由临界区，写盘失败时回退 legacy 路由，并在 tests/test_canary_evaluation.py 中添加回归测试。",
+      "severity_justification": "High: 违反 HAFlow 系统状态机或事实层权威不变量约束。",
+      "category_justification": "Workflow_state: 归属于 workflow_state 类别的核心系统逻辑漏洞。",
+      "producer": "human_curated",
+      "source": {
+        "type": "human_curated",
+        "alignment": "ground_truth",
+        "verified_commit": "8d099a1561fa6ce4c511a03126cb7880a29a2c9d"
+      }
+    }
+  ]
+}

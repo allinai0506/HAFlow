@@ -1,0 +1,32 @@
+{
+  "pr_key": "allinai0506_HAFlow_155-034cf32b",
+  "pr": {
+    "repo": "https://github.com/allinai0506/HAFlow",
+    "pr_number": 155,
+    "base": "4d1a1b18e3f9817048bac6165ad0841f5663807a",
+    "head": "034cf32bdfd88a694e1b9a55977ef4046a16e31a"
+  },
+  "findings": [
+    {
+      "file": "herdr/state_db.py",
+      "start_line": 5450,
+      "end_line": 5460,
+      "message": "_validate_context_source_existence 在校验任务工作上下文引用时，在 workflow scope 下仅放行当前任务自身和 verified_handoff_tasks。然而 context compiler 在 launch 边界显式引入了依赖闭包（dependency-closure）任务的证据引用；校验器未将 DAG 依赖前驱纳入合法集合，导致合法的工作上下文在持久化保存时被判非法抛出 ValueError，频繁触发 [WORKING_CONTEXT SKIPPED]。",
+      "tp_fp": "tp",
+      "severity": "high",
+      "category": "contract",
+      "scope": "introduced-by-pr",
+      "difficulty": "hard",
+      "context_required": "diff-plus-related-files",
+      "tp_fp_justification": "确凿缺陷：Commit 034cf32b 在 state_db 中对 context source 进行了过严校验。在 PR #155 提交 91f084c 中，修复了该处逻辑，新增 _dependency_closure_peers 解析并在 workflow scope 下允许依赖闭包任务引用，tests/test_context_compiler.py 附带回归测试。",
+      "severity_justification": "High: 违反 HAFlow 系统状态机或事实层权威不变量约束。",
+      "category_justification": "Contract: 归属于 contract 类别的核心系统逻辑漏洞。",
+      "producer": "human_curated",
+      "source": {
+        "type": "human_curated",
+        "alignment": "ground_truth",
+        "verified_commit": "91f084c30daaed8b4a65ee3a759c60639300b39c"
+      }
+    }
+  ]
+}

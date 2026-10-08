@@ -2193,3 +2193,59 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
   - `pytest -q tests/test_coordinator_auto_heal.py tests/test_direct_stage_dispatch.py` 65 passed；
   - `python3 -m compileall -q herdr services bin tests` clean；
   - `git diff --check` clean。
+
+## [2026-10-08] feat | Reviewer Production Validation V1：影子模式持久化、状态分流防掩盖、测试夹具误伤根除与 6 个真实 PR 回放验证
+- 背景：
+  1. 确认评审耗时边界：本地 600ms 为 AST 解析与 4-Tier 上下文预算装配耗时，不含大模型外部推理延时（真实 AI Reviewer 需另加推理耗时）；
+  2. 修复自动回退掩盖隐患：原顶层统一返回 `completed` 容易掩盖新候选崩溃，必须严格分流 `success` 与 `fallback_success`，禁止将回退成功混淆为候选成功；
+  3. 修复 PR #166 测试夹具误伤：原规则评审器仅检查 diff 内容子串，导致修改测试夹具和缺陷描述的文件被误报警，需严格约束仅当被改动的生产文件位于 diff `+++ b/` 头时才触发；
+  4. 生产级影子模式落盘：影子评审结果必须独立持久化到 `.omc/shadow_reviews/`，记录双臂耗时、上下文审计与检出差异，确保可观测性且不随主流程退出丢失。
+- 变更：
+  1. **状态分类精细化**：`herdr/review_benchmark.py` 将顶层状态拆分为 `success`（候选直接成功）与 `fallback_success`（候选失败但旧版兜底），并在顶层携带 `fallback_detail` 明确错误归因；
+  2. **生产文件修改守卫**：在 `run_agent_review` 中增加 `modified_files = {line[6:] for line in diff if line.startswith('+++ b/')}`，彻底杜绝测试夹具与文档变更带来的规则误报（PR #166 误报归零）；
+  3. **影子事实持久化落盘**：`review_diff` 自动将每次影子模式的执行快照（含时间戳、PR 元数据、双臂延迟、Context 审计大小与检出列表）写入 `.omc/shadow_reviews/shadow_<pr>_<ts>.json`；
+  4. **跨子系统 6 个真实 PR 回放**：对 PR #167、PR #166、PR #161、PR #158、PR #155、PR #154 进行批次回放验证，证实 Context 装配耗时稳定在 560~640ms，硬预算严格 <= 35,000 字符（0 溢出），影子事实 100% 持久化成功，PR #158 与 PR #155 跨文件契约精准检出，其余非缺陷 PR 0 误报。
+- 证据：
+  - `pytest -q tests/test_review_benchmark.py` 22 passed in 1.79s；
+  - `python3 -m compileall -q herdr services bin tests` clean；
+  - `git diff --check` clean；
+  - 生产验证日志落盘于 `.omc/shadow_reviews/`。
+
+## [2026-10-08] feat | Real LLM Reviewer Production Validation：真实 AI 影子审核链路落盘、Token/耗时边界度量、跨文件分析约束核验与 Finding 逐条证据核实
+- 背景：
+  1. 验证真实 AI 端到端审查延时与 Token 消耗，证明 4-Tier Context Assembly（<=35,000 字符）在真实大模型上的可行性；
+  2. 严格控制变量与风险：`rule` 保持为主审核器与阻断门禁，LLM 仅在影子模式非阻塞运行；
+  3. 核验 `modified_files` 守卫作用域，确认其仅约束规则级正则触发，未限制真实 LLM 的跨文件语义分析能力；
+  4. 选定未经 Prompt 优化的真实历史 PR，对真实模型输出逐条人工核实（区分真实缺陷、误报与无法确认）。
+- 变更：
+  1. **Prompt 与执行边界收敛**：`herdr/review_benchmark.py` 在 `run_agent_review` 中加入严格事实源指令（约束模型仅基于提供的 diff 与组装上下文评估，禁止调用工具或探测本地脏工作区），默认启用 `--effort low`，耗时从 >180s 降至 8~26s；
+  2. **影子日志完整性扩展**：在 `shadow_payload` 中持久化记录 `shadow_tokens`（输入/输出/思考/缓存读取数）与 `shadow_raw_response`，确保模型真实输出可追溯；
+  3. **未优化 PR 验证矩阵**：
+     - PR #157（UI Toast）：0 检出（True Negative，8.2s，28,293 tokens）；
+     - PR #153（Controller Latch）：0 检出（True Negative，11.9s，33,257 tokens）；
+     - PR #149（Router Rejection）：2 检出（FP：模型误判 `args._launch_intent` 未赋值，实则位于 `bin/herdr-task:3249`；26.6s，33,751 tokens）；
+     - PR #167（C05b Multi-stack Contract）：0 检出（True Negative，9.9s，33,645 tokens）；
+     - PR #160（Coordinator Auto-heal）：3 检出（2 FP + 1 待观察：`coordinator_stalled` 判定误报，异步拉活竞态属于低风险架构提示；14.6s，33,726 tokens）；
+     - PR #152（Recovery Obligations）：3 检出（FP：误判 `_record_router_failure_task` 及基础模块未导入，实则位于顶层与 2365 行；11.9s，33,864 tokens）；
+  4. **黄金对照 PR 交叉检验**：
+     - PR #158（Fix-loop Budget）：精准命中 `herdr/fix_loop.py:66-69` 暂态 `task_id` 引入排序漂移的黄金缺陷（Matched TP！）；
+     - PR #155（Context Boundary）：识别出测试用例 `test_launch_boundary_saves_dependency_closure_observation` 未实际调用 `save_working_context` 的假绿缺陷。
+- 证据：
+  - `pytest -q tests/test_review_benchmark.py` 22 passed；全量测试 3834 passed in 601s；`compileall` 与 `git diff --check` 零违规；
+  - 完整审查日志落盘于 `.omc/shadow_reviews/`。
+
+## [2026-10-08] feat | Finding Verifier Safety V1：事实核验三态裁决与反事实证据守卫
+- 背景：
+  1. 初版 Finding Verifier 二元化判定过于绝对（将正则命中简单等同于缺陷成立），反事实搜索缺乏作用域守卫（易将非相关局部导入或条件赋值当作反证而误杀真实缺陷）；
+  2. 确立安全核验底线：没有充分证据证明成立就不判 verified，没有充分反证推翻就不判 rejected；宁可保留为 uncertain，也绝不错误驳回真实 TP。
+- 变更：
+  1. **三态判定模型建立**：在 `herdr/finding_verifier.py` 中收紧 `verified`、`rejected`、`uncertain` 判定条件，无法闭环证明触发条件与后果的缺陷断言降为 `uncertain` 并安全保留；
+  2. **反事实证据作用域守卫**：检查反证是否处于相同文件版本、同层作用域与可达执行路径（过滤 `TYPE_CHECKING`、注释、死代码分支、跨类同名方法与局部延迟导入）；
+  3. **对抗性测试套件**：新增 `tests/test_finding_verifier.py`（16 项测试），覆盖跨作用域同名变量、局部导入、条件分支赋值、异常分支赋值等对抗性场景；
+  4. **全链路接入**：在 `herdr/review_benchmark.py` 的影子审核输出中无缝接入 `verify_findings`，记录 `shadow_rejected_findings` 与核验审计。
+- 证据：
+  - `pytest -v tests/test_finding_verifier.py tests/test_review_benchmark.py` 38 passed；
+  - 在真实历史 PR 样本回放中，反事实误报拦截率 100%（5/5 纯反事实幻觉被剔除），真实缺陷误杀率 0%（2/2 TP 稳定保留）；
+  - 单次核验额外耗时平均 45ms（远低于 100ms 上限）；
+  - `python3 -m compileall -q herdr services bin tests` clean；
+  - `git diff --check` clean。

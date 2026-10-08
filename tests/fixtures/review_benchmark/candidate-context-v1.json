@@ -1,7 +1,7 @@
 {
   "name": "rule-contract-context-v1",
   "agent": "rule-contract-context-v1",
-  "experiment_id": "reviewer-context-v1-fix1",
+  "experiment_id": "reviewer-context-v1",
   "judge": {
     "provider": "openrouter",
     "model": "anthropic/claude-sonnet-4.6",

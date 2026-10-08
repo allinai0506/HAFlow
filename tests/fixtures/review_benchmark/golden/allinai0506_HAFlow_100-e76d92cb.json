@@ -1,0 +1,32 @@
+{
+  "pr_key": "allinai0506_HAFlow_100-e76d92cb",
+  "pr": {
+    "repo": "https://github.com/allinai0506/HAFlow",
+    "pr_number": 100,
+    "base": "885316b3d30b35a9e2031d957f71535d6b87514e",
+    "head": "e76d92cb25d9f0fa99c9bc6940cd0beb84d8e75c"
+  },
+  "findings": [
+    {
+      "file": "herdr/execution_outcome.py",
+      "start_line": 224,
+      "end_line": 237,
+      "message": "resolve_execution_outcome 生成的 outcome_id 采用字符串格式化拼接，在包含下划线的 task_id 和 run_id 场景下（如 task=a_b, run=c 对比 task=a, run=b_c）存在定界符哈希碰撞漏洞，破坏了执行结果事实层的全局唯一确定性标识约束。",
+      "tp_fp": "tp",
+      "severity": "high",
+      "category": "identity",
+      "scope": "introduced-by-pr",
+      "difficulty": "hard",
+      "context_required": "diff-plus-related-files",
+      "tp_fp_justification": "确凿缺陷：Commit e76d92cb 将 outcome_id 改为下划线连接，引入了分隔符碰撞问题。在提交 3440d9feb4b9ab76de886c72108e73e3b850166b 中指出该定界符碰撞问题，改为 JSON 序列化后进行 SHA256 哈希作为唯一标识，并在 tests/test_execution_outcome.py 中编写了碰撞防范回归用例。",
+      "severity_justification": "High: 违反 HAFlow 系统状态机或事实层权威不变量约束。",
+      "category_justification": "Identity: 归属于 identity 类别的核心系统逻辑漏洞。",
+      "producer": "human_curated",
+      "source": {
+        "type": "human_curated",
+        "alignment": "ground_truth",
+        "verified_commit": "3440d9feb4b9ab76de886c72108e73e3b850166b"
+      }
+    }
+  ]
+}
