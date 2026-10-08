@@ -128,4 +128,5 @@ pytest -q tests/test_review_benchmark.py
 - 影子审核：`agy`（安全沙盒环境）
 - 证据核验：`herdr/finding_verifier.py`
 - 审计工件：自动生成并上传 4 份 JSON 审计工件，并由机器人发表/更新唯一的中文评审评论。
+- 幂等防刷屏：基于 SHA 校验自动更新既有评论，防止重复发帖与过期覆盖。
 
