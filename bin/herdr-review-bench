@@ -408,6 +408,33 @@ def cmd_review(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_auto_pr_review(args: argparse.Namespace) -> int:
+    from herdr.pr_review_bot import execute_auto_pr_review
+
+    repo_dir = Path(args.repo).resolve()
+    result = execute_auto_pr_review(
+        repo_dir=repo_dir,
+        base_sha=args.base,
+        head_sha=args.head,
+        pr_number=args.pr_number,
+        pr_title=args.pr_title or "",
+        pr_body=args.pr_body or "",
+        output_dir=Path(args.output_dir),
+        github_token=args.github_token,
+        repo_slug=args.repo_slug,
+        reviewer_agent=args.agent or "rule",
+        shadow_agent=args.shadow_agent or "agy",
+        timeout_seconds=args.timeout,
+    )
+    print(f"=== Auto PR Review Finished: Status={result.get('status')} Shadow={result.get('shadow_status')} ===")
+    print(f"Artifacts saved to: {args.output_dir}")
+    comment_res = result.get("comment_result", {})
+    print(f"PR Comment status: {comment_res.get('status')} (URL: {comment_res.get('comment_url', 'N/A')})")
+    if result.get("status") == "failed":
+        return 1
+    return 0
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="HAFlow Code Review Benchmark Tool")
     subparsers = parser.add_subparsers(dest="subcommand", required=True)
@@ -437,6 +464,21 @@ def main() -> None:
     review_parser.add_argument("--timeout", type=int, default=180, help="Timeout in seconds")
     review_parser.add_argument("--output", default=None, help="Output JSON path for findings")
 
+    # auto-pr-review command
+    auto_parser = subparsers.add_parser("auto-pr-review", help="Execute automated PR review with artifact upload & PR comment")
+    auto_parser.add_argument("--repo", default=".", help="Repository root path (default: current directory)")
+    auto_parser.add_argument("--base", required=True, help="PR Base commit SHA")
+    auto_parser.add_argument("--head", required=True, help="PR Head commit SHA")
+    auto_parser.add_argument("--pr-number", required=True, help="PR Number")
+    auto_parser.add_argument("--pr-title", default="", help="PR Title")
+    auto_parser.add_argument("--pr-body", default="", help="PR Body")
+    auto_parser.add_argument("--output-dir", default=".omc/review_artifacts", help="Output directory for 4 audit artifacts")
+    auto_parser.add_argument("--github-token", default=None, help="GitHub token for writing comment (or GITHUB_TOKEN env)")
+    auto_parser.add_argument("--repo-slug", default=None, help="GitHub repository slug (e.g. allinai0506/HAFlow)")
+    auto_parser.add_argument("--agent", default="rule", help="Primary reviewer agent (default: rule)")
+    auto_parser.add_argument("--shadow-agent", default="agy", help="Shadow reviewer agent (default: agy)")
+    auto_parser.add_argument("--timeout", type=int, default=180, help="Review timeout in seconds")
+
     args = parser.parse_args()
     if args.subcommand == "run":
         sys.exit(cmd_run(args))
@@ -444,6 +486,8 @@ def main() -> None:
         sys.exit(cmd_compare(args))
     elif args.subcommand == "review":
         sys.exit(cmd_review(args))
+    elif args.subcommand == "auto-pr-review":
+        sys.exit(cmd_auto_pr_review(args))
 
 
 if __name__ == "__main__":

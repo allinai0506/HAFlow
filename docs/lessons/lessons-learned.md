@@ -6404,3 +6404,24 @@ wf-nexusarchive-1008-01 手工替代重派时复用 dispatch-operation-id 被拒
 
 ### 验证命令 / 关联证据
 `pytest -q tests/test_dispatch_recovery_ui.py`（49 passed：替代复用＋终态拒绝＋精准原因）；dispatch 族 5 文件 176 passed；全量 3901 passed（唯一失败为 #170 干净主干同败）；独立评审 round1 NEEDS_FIXES（终态 op 未拦截）→修复→round2 MERGE_READY（`.omc/review-kadian-dispatch-replace.md`）。
+
+## 147. PR 自动审核闭环的安全边界隔离与单例评论幂等设计（2026-10-08）
+
+### 问题背景
+在将代码评审工具（Rule 主审核 + LLM 影子审核 + Finding Verifier）集成至 GitHub Actions CI 闭环时，面临三大工程挑战：
+1. 安全凭据隔离：若直接在带有私有开发凭据的宿主机上执行不可信 PR，或向 PR 暴露带有写权限的 Token，存在重大密钥泄露与任意代码执行风险；同时无隔离环境下滥用 `--dangerously-skip-permissions` 会使 Agent 具备危险的 shell 执行能力。
+2. 状态正交与影子旁路解耦：AI 影子审核的超时、奔溃或环境缺失不能伪装成成功，更绝不能篡改 Rule 主门禁的三态裁决。
+3. 评论刷屏与并发竞态：PR 频繁推送更新（synchronize）会导致多轮 Review 评论并发刷屏；若未校验最新 commit SHA，早期构建慢的旧任务回写可能覆盖较新 commit 的正确结论。
+
+### 经验教训
+1. **安全第一：宁可降级影子，绝不降低安全红线**：在未配置安全容器/沙盒环境的 Runner 上，强制跳过 AI 影子审核并显式标记 `shadow_skipped`；默认禁用 `--dangerously-skip-permissions`，强制采用 `--sandbox` 隔离。主审核器（Rule）继续充当确定性主门禁，保证 CI 零安全风险上线。
+2. **状态四态正交记录，影子独立定性**：主状态（`success` / `fallback_success` / `failed`）与影子状态（`shadow_success` / `shadow_failed` / `shadow_timeout` / `shadow_skipped`）彻底解耦，影子失败禁止显示为零缺陷，且影子异常绝不改变 Rule 主门禁结果。
+3. **单例评论与最新 SHA 屏障防篡改**：通过特定 HTML 注释标记维护 PR 内唯一机器人评论，二次触发时执行 PATCH 更新；并在回写前校验 GitHub PR 当前最新 HEAD SHA，阻断旧构建覆盖新构建的竞态风险；配合 GitHub Actions `concurrency: cancel-in-progress` 自动取消过期流水线。
+
+### 操作规范
+1. **工作流安全收敛**：统一使用标准 `pull_request` 事件（`opened`/`synchronize`/`reopened`），严格禁止使用 `pull_request_target`；代码检出 PR 真实的 HEAD SHA，禁止以 `HEAD~1` 代替 Base。
+2. **评论与工件脱敏落盘**：评论与 4 个审计工件（`review-result.json`, `shadow-review.json`, `context-audit.json`, `finding-verification.json`）落盘前必须经过全量正则与环境变量凭据脱敏。
+3. **回写单例与防过期锁**：调用 GitHub API 更新评论前，先校验当前 PR head SHA 是否一致；若不一致则标记 `stale_sha_skipped` 放弃写回；利用唯一 marker 定位已有评论并更新。
+
+### 验证命令 / 关联证据
+`pytest -q tests/test_auto_pr_review.py tests/test_review_benchmark.py tests/test_finding_verifier.py` 51 passed；覆盖工作流配置、Rule/AI 超时/失败/跳过、Finding Verifier uncertain 留存、单例评论更新、旧 SHA 阻止覆盖、Fork PR 403 优雅容错、危险 CLI 拦截与敏感 Token 脱敏等 12 项测试；GitHub Actions 真实 PR 端到端验证通过。

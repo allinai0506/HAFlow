@@ -594,11 +594,17 @@ def run_agent_review(
     # Execute real CLI agent
     cmd = []
     if agent_name in ("agy", "llm", "agy-reviewer"):
+        if shutil.which("agy") is None:
+            raise FileNotFoundError(f"executable 'agy' not found in PATH")
         effort = os.environ.get("HERDR_AGY_EFFORT", "low").strip()
+        # Security boundary: Default to sandbox mode. Forbid dangerously-skip-permissions in unisolated runs.
+        permission_flag = "--sandbox"
+        if os.environ.get("HERDR_ALLOW_DANGEROUS_PERMISSIONS") == "1":
+            permission_flag = "--dangerously-skip-permissions"
         cmd = [
             "agy",
             "--output-format", "json",
-            "--dangerously-skip-permissions",
+            permission_flag,
             "--disable-slash-commands",
             "--effort", effort,
             "--print", prompt,
@@ -741,45 +747,159 @@ def review_diff(
         if active_agent != FALLBACK_REVIEWER:
             fallback_used = True
             fallback_reason = str(exc)
-            primary_result = run_agent_review(
-                agent_name=FALLBACK_REVIEWER,
-                repo_dir=repo_path,
-                pr_info=pr_data,
-                diff_content=diff_content,
-                timeout_seconds=timeout_seconds,
-                system_prompt=system_prompt,
-            )
-            primary_result["fallback"] = {
-                "triggered": True,
-                "original_agent": active_agent,
-                "reason": fallback_reason,
-            }
+            try:
+                primary_result = run_agent_review(
+                    agent_name=FALLBACK_REVIEWER,
+                    repo_dir=repo_path,
+                    pr_info=pr_data,
+                    diff_content=diff_content,
+                    timeout_seconds=timeout_seconds,
+                    system_prompt=system_prompt,
+                )
+                primary_result["fallback"] = {
+                    "triggered": True,
+                    "original_agent": active_agent,
+                    "reason": fallback_reason,
+                }
+            except Exception as fb_exc:
+                shadow_status = "shadow_skipped"
+                skip_reason = f"Shadow agent '{target_shadow_agent}' matches primary reviewer" if is_shadow else "Shadow mode not requested"
+                return {
+                    "status": "failed",
+                    "error": f"Primary failed ({fallback_reason}) and fallback failed ({fb_exc})",
+                    "agent": active_agent,
+                    "findings": [],
+                    "fallback_used": True,
+                    "shadow_status": shadow_status,
+                    "shadow": {
+                        "status": shadow_status,
+                        "agent": target_shadow_agent,
+                        "reason": skip_reason,
+                        "findings": [],
+                    },
+                }
         else:
-            raise
+            shadow_status = "shadow_skipped"
+            skip_reason = f"Shadow agent '{target_shadow_agent}' matches primary reviewer" if is_shadow else "Shadow mode not requested"
+            return {
+                "status": "failed",
+                "error": str(exc),
+                "agent": active_agent,
+                "findings": [],
+                "fallback_used": False,
+                "shadow_status": shadow_status,
+                "shadow": {
+                    "status": shadow_status,
+                    "agent": target_shadow_agent,
+                    "reason": skip_reason,
+                    "findings": [],
+                },
+            }
 
     # 2. Shadow review execution (if shadow mode is requested and primary is not already shadow candidate)
+    shadow_status = "shadow_skipped"
     shadow_result = None
+    shadow_skip_reason = None
+
     if is_shadow and active_agent != target_shadow_agent:
-        try:
-            shadow_result = run_agent_review(
-                agent_name=target_shadow_agent,
-                repo_dir=repo_path,
-                pr_info=pr_data,
-                diff_content=diff_content,
-                timeout_seconds=timeout_seconds,
-                system_prompt=system_prompt,
-            )
-        except Exception as exc:
-            shadow_result = {
-                "agent": target_shadow_agent,
-                "error": str(exc),
-                "findings": [],
-            }
+        if target_shadow_agent in ("agy", "llm", "agy-reviewer"):
+            if not shutil.which("agy"):
+                shadow_status = "shadow_skipped"
+                shadow_skip_reason = "Executable 'agy' not found in PATH (LLM runner environment not configured)"
+                shadow_result = {
+                    "status": "shadow_skipped",
+                    "agent": target_shadow_agent,
+                    "reason": shadow_skip_reason,
+                    "findings": [],
+                }
+            elif (
+                os.environ.get("HERDR_SECURE_LLM_RUNNER") != "1"
+                and os.environ.get("HERDR_ALLOW_AGY_SHADOW") != "1"
+            ):
+                shadow_status = "shadow_skipped"
+                shadow_skip_reason = (
+                    "Safe isolated LLM runner environment not configured; shadow review disabled per security policy to prevent unisolated execution"
+                )
+                shadow_result = {
+                    "status": "shadow_skipped",
+                    "agent": target_shadow_agent,
+                    "reason": shadow_skip_reason,
+                    "findings": [],
+                }
+            else:
+                try:
+                    shadow_result = run_agent_review(
+                        agent_name=target_shadow_agent,
+                        repo_dir=repo_path,
+                        pr_info=pr_data,
+                        diff_content=diff_content,
+                        timeout_seconds=timeout_seconds,
+                        system_prompt=system_prompt,
+                    )
+                    shadow_status = "shadow_success"
+                    shadow_result["status"] = "shadow_success"
+                except (TimeoutError, subprocess.TimeoutExpired) as exc:
+                    shadow_status = "shadow_timeout"
+                    shadow_result = {
+                        "status": "shadow_timeout",
+                        "agent": target_shadow_agent,
+                        "error": str(exc),
+                        "findings": [],
+                    }
+                except Exception as exc:
+                    shadow_status = "shadow_failed"
+                    shadow_result = {
+                        "status": "shadow_failed",
+                        "agent": target_shadow_agent,
+                        "error": str(exc),
+                        "findings": [],
+                    }
+        else:
+            try:
+                shadow_result = run_agent_review(
+                    agent_name=target_shadow_agent,
+                    repo_dir=repo_path,
+                    pr_info=pr_data,
+                    diff_content=diff_content,
+                    timeout_seconds=timeout_seconds,
+                    system_prompt=system_prompt,
+                )
+                shadow_status = "shadow_success"
+                shadow_result["status"] = "shadow_success"
+            except (TimeoutError, subprocess.TimeoutExpired) as exc:
+                shadow_status = "shadow_timeout"
+                shadow_result = {
+                    "status": "shadow_timeout",
+                    "agent": target_shadow_agent,
+                    "error": str(exc),
+                    "findings": [],
+                }
+            except Exception as exc:
+                shadow_status = "shadow_failed"
+                shadow_result = {
+                    "status": "shadow_failed",
+                    "agent": target_shadow_agent,
+                    "error": str(exc),
+                    "findings": [],
+                }
+    else:
+        shadow_status = "shadow_skipped"
+        shadow_skip_reason = (
+            f"Shadow agent '{target_shadow_agent}' matches primary reviewer"
+            if is_shadow
+            else "Shadow mode not requested"
+        )
+        shadow_result = {
+            "status": "shadow_skipped",
+            "agent": target_shadow_agent,
+            "reason": shadow_skip_reason,
+            "findings": [],
+        }
 
     # Explicit 3-tier status taxonomy:
     # 1. 'success': configured agent succeeded on its own merits
     # 2. 'fallback_success': candidate failed, legacy fallback rescued the pipeline (must NOT count towards candidate success)
-    # 3. 'failed': both failed (raised above if fallback also failed)
+    # 3. 'failed': both failed (handled above)
     top_status = "fallback_success" if fallback_used else "success"
 
     response: Dict[str, Any] = {
@@ -788,15 +908,18 @@ def review_diff(
         "findings": primary_result.get("findings", []),
         "agent": primary_result.get("agent"),
         "fallback_used": fallback_used,
+        "shadow_status": shadow_status,
+        "shadow": shadow_result,
     }
     if fallback_used:
         response["fallback_detail"] = primary_result.get("fallback")
+    if shadow_skip_reason:
+        response["shadow_skip_reason"] = shadow_skip_reason
     if "audit" in primary_result:
         response["audit"] = primary_result["audit"]
-    if shadow_result is not None:
-        response["shadow"] = shadow_result
 
-        # Production Validation requirement: Shadow results must be persisted for observability
+    # Production Validation requirement: Shadow results must be persisted for observability if shadow mode was active
+    if is_shadow and shadow_result is not None:
         shadow_log_dir = Path(os.environ.get("HERDR_SHADOW_LOG_DIR", ".omc/shadow_reviews")).resolve()
         try:
             shadow_log_dir.mkdir(parents=True, exist_ok=True)
@@ -810,6 +933,7 @@ def review_diff(
                 "primary_findings_count": len(primary_result.get("findings", [])),
                 "primary_time_ms": primary_result.get("usage", {}).get("time_in_ms", 0),
                 "shadow_agent": shadow_result.get("agent"),
+                "shadow_status": shadow_status,
                 "shadow_findings": shadow_result.get("findings", []),
                 "shadow_findings_count": len(shadow_result.get("findings", [])),
                 "shadow_rejected_findings": shadow_result.get("rejected_findings", []),
@@ -819,7 +943,7 @@ def review_diff(
                 "shadow_tokens": shadow_result.get("usage", {}).get("tokens"),
                 "shadow_raw_response": shadow_result.get("raw_response"),
                 "shadow_audit": shadow_result.get("audit"),
-                "shadow_error": shadow_result.get("error"),
+                "shadow_error": shadow_result.get("error") or shadow_result.get("reason"),
             }
             log_file.write_text(json.dumps(shadow_payload, indent=2, ensure_ascii=False), encoding="utf-8")
             response["shadow_persisted_to"] = str(log_file)
