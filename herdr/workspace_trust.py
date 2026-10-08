@@ -53,20 +53,34 @@ def ensure_claude_workspace_trust(repo_path: Path | str) -> bool:
         return False
 
 
+_TRUST_HANDLERS = {
+    "grok": ensure_grok_workspace_trust,
+    "claude": ensure_claude_workspace_trust,
+}
+
+
 def ensure_workspace_trust(repo_path: Path | str, agents: list[str] | None = None) -> bool:
     """Ensure workspace trust for specified agents or all supported agents."""
-    supported = {
-        "grok": ensure_grok_workspace_trust,
-        "claude": ensure_claude_workspace_trust,
-    }
-    targets = agents if agents is not None else list(supported.keys())
+    targets = agents if agents is not None else list(_TRUST_HANDLERS.keys())
     success = True
     for agent in targets:
-        handler = supported.get(agent)
+        handler = _TRUST_HANDLERS.get(agent)
         if handler:
             if not handler(repo_path):
                 success = False
     return success
+
+
+def preseed_trust_target(clone_path, agent):
+    """Decide whether launch should pre-seed trust for this clone+agent.
+
+    Mode-independent: any agent start in a fresh clone needs trust, so the
+    integration mode must not gate this. Agents without a trust handler
+    (e.g. codex) and empty paths skip.
+    """
+    if not clone_path or agent not in _TRUST_HANDLERS:
+        return None
+    return str(clone_path)
 
 
 TRUST_REQUIRED = "TRUST_REQUIRED"

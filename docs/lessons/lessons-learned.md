@@ -6298,3 +6298,17 @@ DB 已 `agent_done` 但 verdict 不触发，协调循环表现为空转，只能
 
 ### 验证命令 / 关联证据
 `pytest -q tests/test_auto_acceptance.py`（VerdictDeferralUnitTest 正反全覆盖）；全量 3890 passed（唯一失败为 #170 干净主干同败）；独立评审 MERGE_READY（`.omc/review-kadian-verdict.md`）。
+
+## 140. 信任预埋不得按集成模式设门槛，任何新 clone 启动都需要信任（2026-10-08）
+
+### 问题背景
+wf-nexusarchive-1008-01 plan-challenger（grok，integration=none）`Worker startup TRUST_REQUIRED` 回滚：#172 的预埋只覆盖 git 模式，但 Worker 无论何种集成模式都会在全新 clone 目录启动 agent。回写端正常（grok 标 unhealthy 后 executor 用 codex 恢复），基于实时日志 20 分钟内定位。
+
+### 经验教训
+资源需求看的是运行时行为，不是任务分类：信任、凭证这类“进程在新目录启动即需要”的东西，门槛只能设在“有无新目录＋agent 有无信任门”上。按 integration_mode 设门是把分类维度错接到资源维度上。
+
+### 操作规范
+`preseed_trust_target(clone_path, agent)` 纯决策（模式无关），launch 期 warn-only 调用。handler 映射收敛为模块级 `_TRUST_HANDLERS` 单一事实源。
+
+### 验证命令 / 关联证据
+`pytest -q tests/test_workspace_trust.py`（模式无关用例 RED→GREEN）；全量 3891 passed（唯一失败为 #170 干净主干同败）；独立评审 MERGE_READY（`.omc/review-kadian-trust-all.md`）。线上：预埋后新 clone 应出现在 `~/.grok/trusted_folders.toml`。

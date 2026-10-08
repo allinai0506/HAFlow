@@ -2173,3 +2173,5 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 2026-10-08：close-workflow 三处 abort 信息增强（blocking/unsettled 附状态与 clone 路径，remediation_cmd 占位符换真实路径；零拦截语义改动）。定向 10 passed，全量 3887 passed（1 个 #170 主干同败），独立评审 MERGE_READY。
 
 - 2026-10-08：verdict defer 可见性——done 快路径 miss 时输出原因码（§139），快路径条件与人工兜底不动。全量 3890 passed（1 个 #170 主干同败），独立评审 MERGE_READY。
+
+- 2026-10-08：信任预埋扩面（§140）——线上 plan-challenger（none 模式 grok）TRUST_REQUIRED 回滚暴露 git 门槛过窄，改为模式无关决策；回写端经实战验证正常。全量 3891 passed，独立评审 MERGE_READY。
