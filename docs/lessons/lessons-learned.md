@@ -6340,3 +6340,21 @@ wf-nexusarchive-1008-01 逻辑完成后，close 因 requirements-executor2 未�
 
 ### 验证命令 / 关联证据
 `pytest -q tests/test_liveness_guard.py`（退避边界/窗口跳过/失败记 episode/transport 异常/成功清闩）；全量 3896 passed（唯一失败为 #170 干净主干同败）；独立评审 round1 NEEDS_FIXES（传输异常漏记）→修复→round2 MERGE_READY（`.omc/review-kadian-close-backoff.md`）。
+
+## 143. 总指挥停滞直派降级与失败计数的生命周期闭环（2026-10-08）
+
+### 问题背景
+PR #160 契约核查发现：Controller 原有降级机制仅在总指挥长等待超时（600s）时累计 `attempts`；而遇到总指挥 Pane 缺失（`not coord_pane`）或 Agent 进程立即崩溃（prompt exit code != 0 或执行异常）时仅清空阶段闩，未调用 `attention_note` 记录失败计数，导致反复崩溃无法累加 `attempts`，永不触发直派降级阈值（`attempts >= 2`），工作流永久卡死。此外，若失败计数未随成功推进清理，偶发崩溃会导致历史残存计数与未来的独立偶发故障跨时段拼接，误触发直派降级。
+
+### 经验教训
+1. **快速失败分支不能逃逸降级统计**：超时往往是慢崩溃，进程崩溃与资源缺失是快崩溃。错误处理路径若仅做清理（`clear_stage_advance`）而绕过 Attention 事实沉淀，会造成"越严重的立即故障越无法触发自愈"的反直觉死锁。
+2. **失败计数必须有明确的成功清零点**：任何基于阈值的熔断/降级机制，其失败计数必须与业务成功闭环绑定。缺少清零机制会导致状态单调递增，将跨越数小时的多次无关联偶发故障误判为持续性雪崩。
+3. **顺序双写不能伪装成原子事务**：状态机闩文件与 AttentionStore 分属不同物理存储，顺序写入存在非原子窗口。必须通过显式异常日志暴露清理失败，并配合时效窗口（`task_stall_after` 30 分钟）作为兜底，杜绝静默残留。
+
+### 操作规范
+1. **快失败与慢超时统一事实落盘**：总指挥 Pane 缺失、Agent 执行异常、返回码非 0 与长等待超时，统一接入 `attention_note`，以严格契约 `reason="coordinator_stalled"` 累积 `attempts` 并记录 `last_attempt_at=now` 与详细错误上下文。
+2. **推进成功即刻清理 Attention Episode**：在 `mark_stage_advance_notified` 入口将推进成功与 `attention_clear` 绑定，对齐目标节点标识 `target_node_id`，以 `try...except` 捕获异常输出明确告警日志。
+3. **时效截断与非连续故障重置**：计算递增前检查 `(now - last_attempt_at) > task_stall_after()`（30 分钟）；超时则自动重置为 1（判定为两次独立偶发故障而非连续故障）；接单入口处增加 `is_recent` 时效性约束，拒绝基于过期记录回退。
+
+### 验证命令 / 关联证据
+`pytest -v tests/test_coordinator_auto_heal.py` 18 passed，包含：连续 Pane 缺失/Agent 崩溃/执行异常累积降级、单次故障不误降级、成功推进后彻底清零、过期故障重置计数（> 30 分钟）以及清理异常安全日志捕获；全链路套件 `pytest -q tests/test_coordinator_auto_heal.py tests/test_direct_stage_dispatch.py` 65 passed；`compileall` 与 `git diff --check` clean。

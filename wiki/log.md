@@ -2178,3 +2178,18 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 
 - 2026-10-08：恢复判定以终态为准（§141）——router 隔离恢复并发 supersede 误报 ERROR，改为重读持久化状态判定；线上 test-auto-r2 已用 grok 恢复派发。全量 3892 passed，独立评审 MERGE_READY。
 - 2026-10-08：自动收尾失败退避（§142）——close abort 风暴（18 连击）改为指数退避 60s→600s；round1 评审抓出传输异常漏记，修复后 round2 MERGE_READY。全量 3896 passed。
+
+## [2026-10-08] fix | 总指挥停滞直派降级与失败计数的生命周期闭环
+- 背景：
+  1. PR #160 契约核查发现：Controller 原有降级机制仅在总指挥长等待超时（600s）时累计 `attempts`；而遇到总指挥 Pane 缺失（`not coord_pane`）或 Agent 进程立即崩溃（prompt exit code != 0 或执行异常）时仅清空阶段闩，未调用 `attention_note` 记录失败计数，导致反复崩溃无法累加 `attempts`，永不触发直派降级阈值（`attempts >= 2`），工作流卡死；
+  2. 失败计数缺少成功清理入口：偶发单次故障如果未在推进成功时清零，会导致跨时段的独立偶发故障错误累积触发降级。
+- 变更：
+  1. **快失败统一事实沉淀**：总指挥 Pane 缺失、Agent prompt 非 0 退出与执行异常分支统一调用 `attention_note` 记录 `reason="coordinator_stalled"`，并累加连续失败计数 `attempts`；
+  2. **成功推进闭环清理**：在 `mark_stage_advance_notified` 入口增加防御性 `attention_clear(f"{workflow_id}:stage_advance:{target_node_id}")`，对齐目标节点标识，并通过 `try...except` 记录告警日志防止非原子跨存储异常阻断；
+  3. **时效约束与非连续重置**：`_stage_advance_next_attempts` 引入 `(now - last_attempt_at) > task_stall_after()`（30 分钟）检查，超时自动重置为 1；接单入口增加 `is_recent` 时效性约束，防止过期记录误判；
+  4. **撤销无依据兼容**：保持严格相等 `ep.get("reason") == "coordinator_stalled"`，不扩散未验证的命名状态集合。
+- 证据：
+  - `pytest -v tests/test_coordinator_auto_heal.py` 18 passed，全覆盖 Pane 缺失、Agent 崩溃、异常捕获、单次偶发隔离、成功清零、过期重置与清理异常日志；
+  - `pytest -q tests/test_coordinator_auto_heal.py tests/test_direct_stage_dispatch.py` 65 passed；
+  - `python3 -m compileall -q herdr services bin tests` clean；
+  - `git diff --check` clean。
