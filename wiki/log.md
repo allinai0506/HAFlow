@@ -2171,3 +2171,5 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 2026-10-08：Agent 信任路由双修——launch 期按 clone 预埋信任（防首次 TRUST_REQUIRED）＋Worker 启动失败回写 unhealthy（防重复选中）（§138）。Worker 零信任纪律不受影响；全量 3884 passed（1 个 #170 干净主干同败），独立评审 MERGE_READY。
 
 - 2026-10-08：close-workflow 三处 abort 信息增强（blocking/unsettled 附状态与 clone 路径，remediation_cmd 占位符换真实路径；零拦截语义改动）。定向 10 passed，全量 3887 passed（1 个 #170 主干同败），独立评审 MERGE_READY。
+
+- 2026-10-08：verdict defer 可见性——done 快路径 miss 时输出原因码（§139），快路径条件与人工兜底不动。全量 3890 passed（1 个 #170 主干同败），独立评审 MERGE_READY。

@@ -523,5 +523,42 @@ class DoneEventWiringTest(unittest.TestCase):
         decision.assert_not_called()
 
 
+class VerdictDeferralUnitTest(unittest.TestCase):
+    def setUp(self):
+        self.ctrl = _load_controller()
+
+    def test_non_gate_reasons(self):
+        classify = self.ctrl.classify_verdict_deferral
+        self.assertEqual(
+            classify(is_gate=False, auto_accept_on=False, has_changes=True),
+            "auto_accept_disabled",
+        )
+        self.assertEqual(
+            classify(is_gate=False, stage_verdict="blocked", has_changes=True),
+            "stage_verdict_blocked",
+        )
+        self.assertEqual(
+            classify(is_gate=False, role_text="reviewer", has_changes=True),
+            "review_role",
+        )
+        self.assertEqual(
+            classify(is_gate=False, has_changes=False), "no_task_changes"
+        )
+        self.assertEqual(classify(is_gate=False, has_changes=True), "")
+
+    def test_gate_reasons(self):
+        classify = self.ctrl.classify_verdict_deferral
+        self.assertEqual(
+            classify(is_gate=True, auto_verdict_on=False),
+            "auto_verdict_disabled",
+        )
+        self.assertEqual(
+            classify(is_gate=True, gate_verdict=None),
+            "gate_signal_missing_or_conflict",
+        )
+        self.assertEqual(classify(is_gate=True, gate_verdict="pass"), "")
+        self.assertEqual(classify(is_gate=True, gate_verdict="blocked"), "")
+
+
 if __name__ == "__main__":
     unittest.main()
