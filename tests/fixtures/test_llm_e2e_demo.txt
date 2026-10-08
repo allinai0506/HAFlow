@@ -1,1 +1,2 @@
 # Auto Review LLM E2E Acceptance Test
+# Step 2: PR synchronize retest validation
