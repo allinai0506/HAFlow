@@ -3213,17 +3213,26 @@ def mark_stage_advance_queued(
 
 def mark_stage_advance_notified(
     workflow_id,
-    stage
+    target_node_id
 ):
     key = stage_advance_key(
         workflow_id,
-        stage
+        target_node_id
     )
 
     with lock:
         state = load_stage_state()
         state[key] = "notified"
         save_stage_state(state)
+
+    try:
+        attention_clear(f"{workflow_id}:stage_advance:{target_node_id}")
+    except Exception as exc:
+        print(
+            f"[STAGE ADVANCE ATTENTION CLEAR ERROR] "
+            f"workflow={workflow_id} "
+            f"node={target_node_id}: {exc}"
+        )
 
 
 def clear_stage_advance(
@@ -7039,6 +7048,13 @@ def _handle_fix_loop_item(item):
         )
 
 
+def _stage_advance_next_attempts(episode):
+    last_attempt = float(episode.get("last_attempt_at") or 0)
+    if last_attempt > 0 and (time.time() - last_attempt) > liveness.task_stall_after():
+        return 1
+    return int(episode.get("attempts") or 0) + 1
+
+
 def _handle_coordinator_item(item):
     """Actual item handling logic (stage_advance or normal task event)."""
     # ==============================================
@@ -7116,7 +7132,9 @@ def _handle_coordinator_item(item):
         intake_stalled = False
         if item.get("stage") in (None, "", "start"):
             ep = attention_get(intake_key) or {}
-            if int(ep.get("attempts") or 0) >= 2 and ep.get("reason") == "coordinator_stalled":
+            last_attempt = float(ep.get("last_attempt_at") or 0)
+            is_recent = last_attempt == 0 or (time.time() - last_attempt) <= liveness.task_stall_after()
+            if int(ep.get("attempts") or 0) >= 2 and ep.get("reason") == "coordinator_stalled" and is_recent:
                 intake_stalled = True
                 print(
                     f"[COORDINATOR INTAKE FALLBACK] "
@@ -7148,9 +7166,24 @@ def _handle_coordinator_item(item):
                 from herdr.node_dispatch_store import defer
                 defer(_get_store().db_path, dispatch_op['id'], 'coordinator_missing', owner=dispatch_owner)
                 clear_stage_advance(workflow_id, target_node_id)
+            else:
+                clear_stage_advance(workflow_id, target_node_id)
+            key = f"{workflow_id}:stage_advance:{target_node_id}"
+            episode = attention_get(key) or {}
+            attempts = _stage_advance_next_attempts(episode)
+            attention_note(
+                key,
+                {"task_id": f"stage_advance:{target_node_id}", "workflow_id": workflow_id},
+                "stage_advance",
+                reason="coordinator_stalled",
+                attempts=attempts,
+                next_retry_at=time.time() + liveness.attention_retry_interval(),
+                detail="coordinator pane missing",
+            )
             print(
                 f"[STAGE ADVANCE SKIP] "
-                f"no coordinator pane for workflow={workflow_id}"
+                f"no coordinator pane for workflow={workflow_id} "
+                f"attempts={attempts}"
             )
             return
 
@@ -7456,10 +7489,9 @@ task_type:
                              "--wait", "--timeout", "600000"],
                             text=True, capture_output=True, timeout=600,
                         )
-                    except Exception:
-                        if not dispatch_op:
-                            raise
+                    except Exception as exc:
                         result = None
+                        exc_err = str(exc)
                     if dispatch_op:
                         receipt = transport_finished(_get_store().db_path, dispatch_op['id'], dispatch_owner,
                             reason='dispatch_awaiting_task' if result and result.returncode == 0 else 'dispatch_delivery_unknown')
@@ -7471,7 +7503,7 @@ task_type:
                             print(f"[STAGE DISPATCH AWAITING_TASK] workflow={workflow_id} "
                                   f"node={target_node_id} operation={receipt['id']} "
                                   f"status={receipt['status']} deadline={receipt['detail'].get('deadline_at')}")
-                    elif result.returncode == 0:
+                    elif result and result.returncode == 0:
                         mark_stage_advance_notified(
                             workflow_id,
                             target_node_id
@@ -7492,11 +7524,25 @@ task_type:
                             workflow_id,
                             target_node_id
                         )
+                        err_detail = (result.stderr.strip() or result.stdout.strip()) if result else (exc_err if 'exc_err' in locals() and exc_err else "prompt execution failed")
+                        key = f"{workflow_id}:stage_advance:{target_node_id}"
+                        episode = attention_get(key) or {}
+                        attempts = _stage_advance_next_attempts(episode)
+                        attention_note(
+                            key,
+                            {"task_id": f"stage_advance:{target_node_id}", "workflow_id": workflow_id},
+                            "stage_advance",
+                            reason="coordinator_stalled",
+                            attempts=attempts,
+                            next_retry_at=time.time() + liveness.attention_retry_interval(),
+                            detail=f"coordinator prompt failed: {err_detail[:200]}",
+                        )
 
                         print(
                             f"[STAGE ADVANCE ERROR] "
                             f"workflow={workflow_id}: "
-                            f"{result.stderr.strip() or result.stdout.strip()}"
+                            f"{err_detail} "
+                            f"attempts={attempts}"
                         )
 
                     break
@@ -7514,7 +7560,7 @@ task_type:
                     )
                     key = f"{workflow_id}:stage_advance:{target_node_id}"
                     episode = attention_get(key) or {}
-                    attempts = int(episode.get("attempts") or 0) + 1
+                    attempts = _stage_advance_next_attempts(episode)
                     attention_note(
                         key,
                         {"task_id": f"stage_advance:{target_node_id}", "workflow_id": workflow_id},
