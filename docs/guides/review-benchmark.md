@@ -116,3 +116,16 @@ pytest -q tests/test_review_benchmark.py
 - SHA 错配与缺少必要字段检测
 - Agent 超时、启动失败、格式错误与正常 0 问题区分
 - 中文报告渲染与差异计算
+
+---
+
+## 7. GitHub Actions 自动代码评审 (Auto PR Review V1)
+
+在 PR 开启与更新时，HAFlow 自动触发审查闭环：
+- 工作流：`.github/workflows/ha-review.yml`
+- 执行命令：`bin/herdr-review-bench auto-pr-review`
+- 主门禁：`rule`
+- 影子审核：`agy`（安全沙盒环境）
+- 证据核验：`herdr/finding_verifier.py`
+- 审计工件：自动生成并上传 4 份 JSON 审计工件，并由机器人发表/更新唯一的中文评审评论。
+
