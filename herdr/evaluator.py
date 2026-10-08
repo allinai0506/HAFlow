@@ -665,10 +665,17 @@ def parse_test_output(output: str, exit_code: int) -> Tuple[int, int, List[str]]
         return passed_sum, max(total_sum, 1 if exit_code != 0 else 0), failing
 
     # 5. Fallback: generic exit code
+    # If no recognizable test summary was found, do not fabricate a passing count.
+    # Empty output with exit 0 means no evidence of any test running.
+    output_stripped = output.strip()
     if exit_code == 0:
-        return 1, 1, []
+        if not output_stripped:
+            return 0, 0, []
+        # Non-empty but unrecognizable output with exit 0: treat as failure
+        # (likely a test that produced no recognizable summary)
+        return 0, 1, [output_stripped[:200]]
     else:
-        # Extract probable failure line
+        # Non-zero exit: extract probable failure line
         lines = [line.strip() for line in output.splitlines() if line.strip()]
         err_msg = lines[-1] if lines else "Process failed with non-zero exit code"
         if err_msg.startswith("FAILED ") or err_msg.startswith("ERROR "):
