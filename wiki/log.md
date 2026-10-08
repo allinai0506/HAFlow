@@ -8,6 +8,22 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-10-08] sec | PR #185 安全隔离阻塞项修复：macOS Seatbelt 内核沙盒动态绑定、最小环境变量白名单、主动内核探针与伪造绕过彻底移除
+
+- 背景：
+  1. PR #185 审核过程中明确核心阻塞项：AI Reviewer 必须在真正受限的操作系统权限环境中执行，严禁依靠环境变量（如 `HERDR_SECURE_LLM_RUNNER=1`）声明或声明绕过安全；
+  2. 环境变量不能采用全量复制加黑名单删除模式，必须收敛为极简白名单；
+  3. 必须通过操作系统内核级访问控制（如 macOS Seatbelt），物理阻断 AI 对开发者个人 Home、SSH 密钥、Runner 管理凭据的读取和对工作区的写入。
+- 变更：
+  1. **操作系统级内核沙盒 (`herdr/review_benchmark.py`)**：动态生成 macOS Seatbelt Scheme profile，通过 `/usr/bin/sandbox-exec` 将 `agy` 子进程包装运行在 XNU 内核沙盒中，默认对 `$HOME` 实施 `deny file-read*`，仅白名单放行代码快照与模型必要依赖；对代码仓库与 Home 施加 `deny file-write*` 只读保护；
+  2. **最小环境变量白名单 (`STRICT_ENV_WHITELIST_KEYS`)**：子进程杜绝继承父进程环境，严格使用白名单字典构建全新环境，物理隔绝 `GITHUB_TOKEN`、`GH_TOKEN`、`SSH_AUTH_SOCK`、`AWS_*` 等敏感令牌；
+  3. **主动内核探针与移除环境凭据伪造 (`verify_os_security_isolation`)**：引入 active kernel probe 实时验证沙盒 deny 机制生效；彻底移除通过环境变量声明“安全隔离”或“放行未隔离”的逻辑，无真实 OS 沙盒时严格熔断返回 `shadow_skipped`；
+  4. **全量实证测试套件 (`tests/test_os_sandbox_boundary.py`)**：实测验证 Canary 文件读取拦截、Runner 凭据读取拦截、写保护拦截、快照读取放行与未隔离安全熔断。
+- 证据：
+  1. `pytest -v tests/test_os_sandbox_boundary.py` 7/7 PASS；
+  2. 58 项自动审查与边界测试 100% PASS；
+  3. 真实 `review_diff` 在 macOS Seatbelt 下端到端运行真实 `agy`，状态为 `shadow_success` 且 isolation 记录为 `macos-seatbelt`。
+
 ## [2026-10-08] sec | Self-hosted Runner 宿主机沙盒穿透实证与深层防御边界加固：子进程凭据物理剥离、宿主机私钥探针熔断、生产 Runner 容器化规范
 
 - 背景：

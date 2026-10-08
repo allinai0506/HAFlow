@@ -6436,14 +6436,14 @@ wf-nexusarchive-1008-01 手工替代重派时复用 dispatch-operation-id 被拒
 4. 当 Runner 部署在真实开发机宿主机并以开发者身份运行时，其 `$HOME` 包含大量私有 SSH 私钥（`~/.ssh/id_*`）与敏感凭据，存在被不可信 PR 通过 Prompt Injection 实施数据外逸与未授权命令执行的重大隐患。
 
 ### 经验教训
-1. **声明不是证明**：`HERDR_SECURE_LLM_RUNNER=1` 只是环境变量，不能代替 OS/容器级特权隔离。
-2. **CLI 沙盒不等于只读隔离**：`--sandbox` 不限制只读工具，且存在应用层重试逃逸（`BypassSandbox`）；对不可信输入（PR Diff），下游 AI 必须在隔离环境内运行，并杜绝接触宿主机真实 `$HOME`。
-3. **凭据必须在调用链路源头物理剥离**：子进程启动前必须主动从 `env` 中剥离 `GITHUB_TOKEN`、`GH_TOKEN`、`SSH_AUTH_SOCK` 等所有敏感凭据，杜绝凭据泄漏至 AI 审查子进程；且严禁在公共 CI 脚本中硬编码个人宿主机路径。
+1. **声明绝非证明，严禁依赖环境变量声称安全**：`HERDR_SECURE_LLM_RUNNER=1` 等环境变量不能替代技术隔离；必须通过真实 OS 内核沙盒（macOS Seatbelt `sandbox-exec`）或容器环境实施强制限制，未探测到可信隔离时严格返回 `shadow_skipped`。
+2. **应用层 CLI 沙盒无法防御模型越界**：`agy --sandbox` 的只读工具不具备工作区边界，且应用层存在 `BypassSandbox: true` 逃逸能力。必须由宿主操作系统内核从系统调用层面（`open`, `read`, `write`）直接拦截非授权文件与命令。
+3. **最小环境变量白名单原则**：杜绝复制宿主机全量环境变量再进行黑名单剔除；子进程必须采用最小白名单（`PATH`, `HOME`, `USER`, 代理变量），物理隔绝所有 GitHub 写 Token 与 SSH 凭据。
 
 ### 操作规范
-1. **子进程环境清洗**：`run_agent_review` 启动任何下游 Reviewer 前，严格剥离 `GITHUB_TOKEN`、`GH_TOKEN`、`SSH_AUTH_SOCK`、`AWS_*` 等写权限令牌。
-2. **宿主机边界探针**：`check_runner_security_isolation()` 自动扫描 `$HOME/.ssh` 私钥；在未配置容器或专用运行用户（如 `github-runner`）的开发机上，强制跳过 AI 影子审核（`shadow_skipped`），除非显式声明 `HERDR_ALLOW_UNISOLATED_RUNNER=1`。
-3. **生产部署强制规范**：生产 Self-hosted Runner 必须运行在 Docker 隔离容器或独立的无特权操作系统用户下，且开发者主目录设置为 `chmod 700`，确保不可信 PR 彻底物理隔离。
+1. **操作系统级内核沙盒（macOS Seatbelt）**：在 macOS Runner 上动态生成 Seatbelt Profile，默认拒绝 `$HOME` 绝大部分读取，仅放行审查仓库、模型配置（`~/.gemini`）与必要系统依赖；对 `$HOME` 和代码仓库施加强制只读保护（`deny file-write*`）。
+2. **主动内核探针探测**：`verify_os_security_isolation` 执行 active kernel probe，验证内核 deny 规则真实有效；探针失败或非隔离环境立即熔断为 `shadow_skipped`。
+3. **环境白名单注入**：`run_agent_review` 仅注入 `STRICT_ENV_WHITELIST_KEYS`，杜绝任何外部 Token 穿透。
 
 ### 验证命令 / 关联证据
-`pytest -v tests/test_auto_pr_review.py::TestAutoPRReview::test_11_dangerous_cli_forbidden_in_unisolated_env`（验证子进程凭据物理剥离与私钥探针自动降级为 `shadow_skipped`）；沙盒穿透实证会话记录（`aa34823a-d7b2-4289-84b9-a47f6e821ea9`、`96852c72-8165-416a-87ce-e5f0b18a77ee`）。
+`pytest -v tests/test_os_sandbox_boundary.py tests/test_auto_pr_review.py`（7 项 OS 级边界用例全部 PASS，涵盖私有 Canary 文件拦截、Runner 凭据拦截、写保护拦截、允许快照放行与白名单校验）；沙盒穿透实证会话记录（`aa34823a-d7b2-4289-84b9-a47f6e821ea9`、`96852c72-8165-416a-87ce-e5f0b18a77ee`）。
