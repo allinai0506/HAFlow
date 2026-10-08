@@ -1,0 +1,17 @@
+{
+  "case_id": "allinai0506_HAFlow_110-2b9f2177",
+  "pr_number": 110,
+  "base_sha": "79d54abda0a453dfe555f52f1957c501c98e2ca3",
+  "defect_sha": "2b9f2177fa15446e8d5fd5bce0d95d82e41342ac",
+  "defects_count": 1,
+  "defects": [
+    {
+      "file": "herdr/fix_loop.py",
+      "start_line": 48,
+      "end_line": 68,
+      "category": "workflow_state",
+      "severity": "high",
+      "verified_commit": "03fbf1434642953ddfda7bc868f80f693440b713"
+    }
+  ]
+}

@@ -1,0 +1,32 @@
+{
+  "pr_key": "allinai0506_HAFlow_102-5cd1e0d7",
+  "pr": {
+    "repo": "https://github.com/allinai0506/HAFlow",
+    "pr_number": 102,
+    "base": "dab4172c79072d1f930928c84479c7c5c7206d4e",
+    "head": "5cd1e0d7ffebe3c2317ad8215a67b6fc4714049b"
+  },
+  "findings": [
+    {
+      "file": "herdr/state_db.py",
+      "start_line": 1172,
+      "end_line": 1187,
+      "message": "get_readonly_db_connection 仅依赖 SQLite 连接字符串的 mode=ro 和 PRAGMA query_only=ON 来保证只读。在 WAL 模式下，当数据库的 -wal/-shm 文件尚未生成且所在目录可写时，SQLite 即使以 mode=ro 打开仍会在磁盘上创建 -wal/-shm 副车文件，破坏了诊断只读操作绝对无文件系统副作用的工程约束。",
+      "tp_fp": "tp",
+      "severity": "medium",
+      "category": "contract",
+      "scope": "introduced-by-pr",
+      "difficulty": "hard",
+      "context_required": "diff-plus-related-files",
+      "tp_fp_justification": "确凿缺陷：Commit 5cd1e0d7 声明只读连接无副作用，但在 WAL 模式下打开无 sidecar 的数据库仍会产生 OS 文件。在 PR #102 提交 149cd5a 中指出该问题，修复前置检查 SQLite header 字节并在副车文件缺失时抛出 ReadonlyWalSidecarError fail-closed，在 tests/test_shadow_evaluation.py 中验证。",
+      "severity_justification": "Medium: 违反 HAFlow 系统状态机或事实层权威不变量约束。",
+      "category_justification": "Contract: 归属于 contract 类别的核心系统逻辑漏洞。",
+      "producer": "human_curated",
+      "source": {
+        "type": "human_curated",
+        "alignment": "ground_truth",
+        "verified_commit": "149cd5a98f3d4ed20a3f63496fa4d336eaed90e2"
+      }
+    }
+  ]
+}

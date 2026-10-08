@@ -1,0 +1,32 @@
+{
+  "pr_key": "allinai0506_HAFlow_106-b747fbd4",
+  "pr": {
+    "repo": "https://github.com/allinai0506/HAFlow",
+    "pr_number": 106,
+    "base": "3838b737039017cf0b1749c9098749f10fa5cc51",
+    "head": "b747fbd468a3cc02c3b0b8bc641a9bfdd67e6653"
+  },
+  "findings": [
+    {
+      "file": "herdr/rollout_policy.py",
+      "start_line": 387,
+      "end_line": 423,
+      "message": "evaluate_guard 在安全守卫评测遇到异常、配置缺失或数据库故障时，返回 triggered=False；而上层调用方 should_force_legacy 将 triggered=False 误判为“状态正常无风险”，导致在守卫评测系统瘫痪时反而放行了自适应流量，违背了“任何故障一律回退 Legacy 安全基线”的 fail-closed 核心契约。",
+      "tp_fp": "tp",
+      "severity": "critical",
+      "category": "workflow_state",
+      "scope": "introduced-by-pr",
+      "difficulty": "hard",
+      "context_required": "diff-plus-related-files",
+      "tp_fp_justification": "确凿缺陷：Commit b747fbd 在实现 rollout 安全守卫时，异常路径返回 triggered=False。在随后的独立审查及修复提交 a5d8dd7b0d6246ef2d198fb41937a0b37d173228 中明确指出该 P1 缺陷，重构为显式 status 维度区分 evaluated 与 could_not_evaluate，并在 tests/test_rollout_policy.py 中增加断言。",
+      "severity_justification": "Critical: 违反 HAFlow 系统状态机或事实层权威不变量约束。",
+      "category_justification": "Workflow_state: 归属于 workflow_state 类别的核心系统逻辑漏洞。",
+      "producer": "human_curated",
+      "source": {
+        "type": "human_curated",
+        "alignment": "ground_truth",
+        "verified_commit": "a5d8dd7b0d6246ef2d198fb41937a0b37d173228"
+      }
+    }
+  ]
+}

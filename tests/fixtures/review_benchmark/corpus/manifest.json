@@ -31,5 +31,82 @@
     "body": "Introduce Selective Reverification v1: allow verifiers to reuse previous passing verification results across candidate revisions when changes are outside the declared impact scope.",
     "nwo": "allinai0506/HAFlow",
     "language": "Python"
+  },
+  {
+    "repo": "https://github.com/allinai0506/HAFlow",
+    "pr_number": 155,
+    "pr_url": "https://github.com/allinai0506/HAFlow/pull/155",
+    "base": "4d1a1b18e3f9817048bac6165ad0841f5663807a",
+    "head": "034cf32bdfd88a694e1b9a55977ef4046a16e31a",
+    "title": "feat(context): launch-boundary working context validation (PR #155)",
+    "body": "Validate source task references and boundaries when compiling and saving working context for task dispatch.",
+    "nwo": "allinai0506/HAFlow",
+    "language": "Python"
+  },
+  {
+    "repo": "https://github.com/allinai0506/HAFlow",
+    "pr_number": 118,
+    "pr_url": "https://github.com/allinai0506/HAFlow/pull/118",
+    "base": "dac0fd8908dec0b0b1a6fb526364ab8f8ecd0696",
+    "head": "6c7b4a963fbd27336ec20fec820a1cfd34eda5a2",
+    "title": "feat(controller): process sentinel blocked observations via CAS transitions (PR #118)",
+    "body": "Consume blocked observations from sentinel events and transition tasks to blocked status using compare-and-set updates.",
+    "nwo": "allinai0506/HAFlow",
+    "language": "Python"
+  },
+  {
+    "repo": "https://github.com/allinai0506/HAFlow",
+    "pr_number": 102,
+    "pr_url": "https://github.com/allinai0506/HAFlow/pull/102",
+    "base": "dab4172c79072d1f930928c84479c7c5c7206d4e",
+    "head": "5cd1e0d7ffebe3c2317ad8215a67b6fc4714049b",
+    "title": "feat(state_db): read-only database connection for diagnostics (PR #102)",
+    "body": "Provide isolated read-only SQLite database connections with query_only pragma for shadow evaluations and diagnostics.",
+    "nwo": "allinai0506/HAFlow",
+    "language": "Python"
+  },
+  {
+    "repo": "https://github.com/allinai0506/HAFlow",
+    "pr_number": 103,
+    "pr_url": "https://github.com/allinai0506/HAFlow/pull/103",
+    "base": "5cd1e0d7ffebe3c2317ad8215a67b6fc4714049b",
+    "head": "fb9ea2f31466defc7c480eb9c933e637f016d999",
+    "title": "feat(router): adaptive agent router canary mode and shadow evaluation (PR #103)",
+    "body": "Add canary traffic routing and shadow decision recording to evaluate agent performance before full rollout.",
+    "nwo": "allinai0506/HAFlow",
+    "language": "Python"
+  },
+  {
+    "repo": "https://github.com/allinai0506/HAFlow",
+    "pr_number": 100,
+    "pr_url": "https://github.com/allinai0506/HAFlow/pull/100",
+    "base": "885316b3d30b35a9e2031d957f71535d6b87514e",
+    "head": "e76d92cb25d9f0fa99c9bc6940cd0beb84d8e75c",
+    "title": "fix(outcome): bind outcome_id to task+run and fail-closed unknown facts (PR #100)",
+    "body": "Bind outcome_id deterministically to task and run to avoid primary key collisions across execution attempts, and fail closed when facts are unknown.",
+    "nwo": "allinai0506/HAFlow",
+    "language": "Python"
+  },
+  {
+    "repo": "https://github.com/allinai0506/HAFlow",
+    "pr_number": 106,
+    "pr_url": "https://github.com/allinai0506/HAFlow/pull/106",
+    "base": "3838b737039017cf0b1749c9098749f10fa5cc51",
+    "head": "b747fbd468a3cc02c3b0b8bc641a9bfdd67e6653",
+    "title": "feat: Adaptive Router Controlled Rollout per-bucket staged expansion (PR #106)",
+    "body": "Provide auditable per-bucket rollout controls with safety guard evaluations across adaptive agent routing arms.",
+    "nwo": "allinai0506/HAFlow",
+    "language": "Python"
+  },
+  {
+    "repo": "https://github.com/allinai0506/HAFlow",
+    "pr_number": 85,
+    "pr_url": "https://github.com/allinai0506/HAFlow/pull/85",
+    "base": "74dac0bf2f86f7f9b082d178cd3395f488f9748e",
+    "head": "6f76cd6f40e2222c4ca78f1dfe3f27ac54a739ff",
+    "title": "fix(loop): fix-loop dead-stall recovery redelivery budget and invalidation latch (PR #85)",
+    "body": "Implement fix-loop dead-stall recovery with redelivery backoff and invalidation latches across task invalidations.",
+    "nwo": "allinai0506/HAFlow",
+    "language": "Python"
   }
 ]

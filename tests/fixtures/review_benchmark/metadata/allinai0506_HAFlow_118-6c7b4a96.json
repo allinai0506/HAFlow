@@ -1,0 +1,17 @@
+{
+  "case_id": "allinai0506_HAFlow_118-6c7b4a96",
+  "pr_number": 118,
+  "base_sha": "dac0fd8908dec0b0b1a6fb526364ab8f8ecd0696",
+  "defect_sha": "6c7b4a963fbd27336ec20fec820a1cfd34eda5a2",
+  "defects_count": 1,
+  "defects": [
+    {
+      "file": "services/herdr-controller.py",
+      "start_line": 2860,
+      "end_line": 2885,
+      "category": "concurrency",
+      "severity": "high",
+      "verified_commit": "09542bebaebc2afbefb5b1a1be5040f0dbd52702"
+    }
+  ]
+}

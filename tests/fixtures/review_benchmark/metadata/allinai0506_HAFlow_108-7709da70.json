@@ -1,0 +1,17 @@
+{
+  "case_id": "allinai0506_HAFlow_108-7709da70",
+  "pr_number": 108,
+  "base_sha": "3a8465903f1ba9cdbaf42992f10cc0ee5921b174",
+  "defect_sha": "7709da70c2c395806f3df8359899d229786ab843",
+  "defects_count": 1,
+  "defects": [
+    {
+      "file": "herdr/reverification.py",
+      "start_line": 657,
+      "end_line": 672,
+      "category": "identity",
+      "severity": "high",
+      "verified_commit": "2879a1ff1e0fe0271e0f30cca74ff16379900774"
+    }
+  ]
+}

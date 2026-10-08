@@ -1,0 +1,17 @@
+{
+  "case_id": "allinai0506_HAFlow_103-fb9ea2f3",
+  "pr_number": 103,
+  "base_sha": "5cd1e0d7ffebe3c2317ad8215a67b6fc4714049b",
+  "defect_sha": "fb9ea2f31466defc7c480eb9c933e637f016d999",
+  "defects_count": 1,
+  "defects": [
+    {
+      "file": "herdr/agent_router.py",
+      "start_line": 645,
+      "end_line": 665,
+      "category": "workflow_state",
+      "severity": "high",
+      "verified_commit": "8d099a1561fa6ce4c511a03126cb7880a29a2c9d"
+    }
+  ]
+}

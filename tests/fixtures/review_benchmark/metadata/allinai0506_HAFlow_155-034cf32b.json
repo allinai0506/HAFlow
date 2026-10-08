@@ -1,0 +1,17 @@
+{
+  "case_id": "allinai0506_HAFlow_155-034cf32b",
+  "pr_number": 155,
+  "base_sha": "4d1a1b18e3f9817048bac6165ad0841f5663807a",
+  "defect_sha": "034cf32bdfd88a694e1b9a55977ef4046a16e31a",
+  "defects_count": 1,
+  "defects": [
+    {
+      "file": "herdr/state_db.py",
+      "start_line": 5450,
+      "end_line": 5460,
+      "category": "contract",
+      "severity": "high",
+      "verified_commit": "91f084c30daaed8b4a65ee3a759c60639300b39c"
+    }
+  ]
+}

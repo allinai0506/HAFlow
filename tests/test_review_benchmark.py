@@ -13,6 +13,7 @@ Covers:
 """
 
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -375,6 +376,205 @@ class TestCLIIntegration(unittest.TestCase):
         )
         self.assertEqual(res.returncode, 0)
         self.assertIn("HAFlow Code Review Benchmark Tool", res.stdout)
+
+
+class TestDatasetV1Integrity(unittest.TestCase):
+    def test_dataset_v1_manifest_and_golden_alignment(self):
+        manifest_path = HERDR_ROOT / "tests/fixtures/review_benchmark/corpus/manifest.json"
+        golden_dir = HERDR_ROOT / "tests/fixtures/review_benchmark/golden"
+        meta_dir = HERDR_ROOT / "tests/fixtures/review_benchmark/metadata"
+
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            manifest = json.load(f)
+
+        self.assertGreaterEqual(len(manifest), 10, "Dataset V1 must contain at least 10 PR cases")
+        self.assertEqual(len(manifest), 10, "Dataset V1 has exactly 10 strictly verified PR cases")
+
+        golden_files = list(golden_dir.glob("*.json"))
+        self.assertEqual(len(golden_files), len(manifest), "Golden files count must match manifest count")
+
+        for entry in manifest:
+            pr_num = entry["pr_number"]
+            base_sha = entry["base"]
+            head_sha = entry["head"]
+            key = pr_key(entry["repo"], pr_num, head_sha)
+
+            golden_file = golden_dir / f"{key}.json"
+            self.assertTrue(golden_file.exists(), f"Missing golden fixture for {key}")
+
+            meta_file = meta_dir / f"{key}.json"
+            self.assertTrue(meta_file.exists(), f"Missing metadata file for {key}")
+
+            # Verify base and head commits exist in git
+            base_check = subprocess.run(["git", "cat-file", "-e", f"{base_sha}^{{commit}}"], cwd=str(HERDR_ROOT))
+            self.assertEqual(base_check.returncode, 0, f"Base commit {base_sha} does not exist in git")
+
+            head_check = subprocess.run(["git", "cat-file", "-e", f"{head_sha}^{{commit}}"], cwd=str(HERDR_ROOT))
+            self.assertEqual(head_check.returncode, 0, f"Head commit {head_sha} does not exist in git")
+
+            # Verify PR git diff contains the modified files (B1/B2 blocker check)
+            diff_files = subprocess.run(
+                ["git", "diff", "--name-only", f"{base_sha}...{head_sha}"],
+                cwd=str(HERDR_ROOT),
+                capture_output=True,
+                text=True,
+            ).stdout.splitlines()
+
+            # Verify golden findings point to valid files and lines in head commit
+            with open(golden_file, "r", encoding="utf-8") as gf:
+                gdata = json.load(gf)
+
+            self.assertEqual(gdata["pr_key"], key)
+            self.assertGreaterEqual(len(gdata["findings"]), 1, f"Golden case {key} must have >= 1 defect finding")
+
+            for finding in gdata["findings"]:
+                f_path = finding["file"]
+                s_line = finding["start_line"]
+                e_line = finding["end_line"]
+
+                # Ensure file is actively touched by the PR git diff
+                self.assertIn(
+                    f_path,
+                    diff_files,
+                    f"Golden finding file {f_path} is NOT touched in PR diff {base_sha}...{head_sha}!",
+                )
+
+                # Ensure file exists in the defect head commit
+                file_check = subprocess.run(["git", "cat-file", "-e", f"{head_sha}:{f_path}"], cwd=str(HERDR_ROOT))
+                self.assertEqual(file_check.returncode, 0, f"{f_path} does not exist in {head_sha}")
+
+                # Ensure line numbers are within bounds
+                content = subprocess.run(["git", "show", f"{head_sha}:{f_path}"], cwd=str(HERDR_ROOT), capture_output=True, text=True).stdout
+                total_lines = len(content.splitlines())
+                self.assertTrue(1 <= s_line <= e_line <= total_lines, f"Invalid lines {s_line}-{e_line} in {f_path} (total {total_lines})")
+
+                # Verify verified_commit exists
+                v_commit = finding.get("source", {}).get("verified_commit")
+                if v_commit:
+                    vc_check = subprocess.run(["git", "cat-file", "-e", f"{v_commit}^{{commit}}"], cwd=str(HERDR_ROOT))
+                    self.assertEqual(vc_check.returncode, 0, f"Verified commit {v_commit} does not exist in git")
+
+    def test_context_budget_hard_limit_and_allocator(self):
+        """Verify Budget Allocator guarantees len(assembled) <= max_budget_chars with headers and metadata."""
+        from herdr.review_benchmark import retrieve_and_assemble_context
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            # Create several python files with functions
+            for i in range(10):
+                lines = [f"def function_{i}_{j}():\n    return '{'x'*200}'\n" for j in range(10)]
+                (tmp / f"module_{i}.py").write_text("\n".join(lines), encoding="utf-8")
+
+            dummy_pr = {
+                "title": "feat: module validation and saving for function",
+                "body": "Ensure function validation works",
+            }
+            # Large diff
+            large_diff = "diff --git a/test.py b/test.py\n" + ("+ line of diff\n" * 3000)
+
+            # Test multiple budget thresholds
+            for budget in (20000, 25000, 35000):
+                assembled, audit = retrieve_and_assemble_context(
+                    repo_dir=tmp,
+                    pr_info=dummy_pr,
+                    diff_content=large_diff,
+                    max_budget_chars=budget,
+                )
+                self.assertLessEqual(len(assembled), budget, f"Assembled context {len(assembled)} exceeded budget {budget}!")
+                self.assertEqual(len(assembled), audit["final_context_size"])
+                # Ensure each retrieved snippet is accounted for and has valid provenance
+                for item in audit["retrieved_context"]:
+                    self.assertIn("file", item)
+                    self.assertIn("symbol", item)
+                    self.assertIn("start_line", item)
+                    self.assertIn("end_line", item)
+                    self.assertFalse(item.get("partial", False))
+
+    def test_ast_function_spans_and_partial_marking(self):
+        """Verify AST extraction captures complete functions and marks partial=True on syntax error."""
+        from herdr.review_benchmark import extract_function_spans
+        valid_code = (
+            "def outer_fn(x):\n"
+            "    def inner_fn(y):\n"
+            "        return y * 2\n"
+            "    return inner_fn(x)\n\n"
+            "def second_fn():\n"
+            "    pass\n"
+        )
+        spans = extract_function_spans(valid_code)
+        span_dict = {s[0]: s for s in spans}
+        self.assertIn("outer_fn", span_dict)
+        self.assertIn("inner_fn", span_dict)
+        self.assertIn("second_fn", span_dict)
+        self.assertEqual(span_dict["outer_fn"][1], 1)
+        self.assertEqual(span_dict["outer_fn"][2], 4)
+        self.assertFalse(span_dict["outer_fn"][3])  # partial is False
+
+        # Invalid syntax fallback
+        invalid_code = "def broken_syntax(:\n    return 42\n"
+        spans_inv = extract_function_spans(invalid_code)
+        self.assertEqual(len(spans_inv), 1)
+        self.assertEqual(spans_inv[0][0], "broken_syntax")
+        self.assertTrue(spans_inv[0][3])  # partial is True
+        self.assertIn("syntax_fallback", spans_inv[0][4])
+
+    def test_review_diff_official_integration_and_fallback(self):
+        """Verify official review integration defaults to rule-contract-context-v1 and supports fallback."""
+        from herdr.review_benchmark import review_diff, DEFAULT_REVIEWER, FALLBACK_REVIEWER
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            (tmp / "test.py").write_text("def dummy():\n    pass\n", encoding="utf-8")
+            diff = "--- a/test.py\n+++ b/test.py\n@@ -1 +1 @@\n-def dummy():\n+def dummy_updated():\n"
+
+            # 1. Default reviewer is rule-contract-context-v1
+            res_default = review_diff(tmp, diff)
+            self.assertEqual(res_default["status"], "success")
+            self.assertEqual(res_default["agent"], DEFAULT_REVIEWER)
+            self.assertFalse(res_default["fallback_used"])
+            self.assertIn("audit", res_default)
+
+            # 2. Fallback via explicit agent
+            res_fallback_agent = review_diff(tmp, diff, reviewer_agent="rule")
+            self.assertEqual(res_fallback_agent["status"], "success")
+            self.assertEqual(res_fallback_agent["agent"], FALLBACK_REVIEWER)
+            self.assertFalse(res_fallback_agent["fallback_used"])
+
+            # 3. Fallback via environment variable
+            os.environ["HERDR_REVIEW_FALLBACK"] = "1"
+            try:
+                res_env_fallback = review_diff(tmp, diff)
+                self.assertEqual(res_env_fallback["status"], "success")
+                self.assertEqual(res_env_fallback["agent"], FALLBACK_REVIEWER)
+            finally:
+                os.environ.pop("HERDR_REVIEW_FALLBACK", None)
+
+            # 4. Shadow mode execution alongside fallback
+            res_shadow = review_diff(tmp, diff, reviewer_agent="rule", shadow_mode=True)
+            self.assertEqual(res_shadow["status"], "success")
+            self.assertEqual(res_shadow["agent"], "rule")
+            self.assertIn("shadow", res_shadow)
+            self.assertEqual(res_shadow["shadow"]["agent"], DEFAULT_REVIEWER)
+            self.assertIn("shadow_persisted_to", res_shadow)
+            self.assertTrue(Path(res_shadow["shadow_persisted_to"]).exists())
+            persisted_data = json.loads(Path(res_shadow["shadow_persisted_to"]).read_text(encoding="utf-8"))
+            self.assertIn("shadow_rejected_findings", persisted_data)
+            self.assertIn("shadow_rejected_count", persisted_data)
+
+            # 5. CLI review subcommand sanity
+            cmd = [
+                sys.executable,
+                str(HERDR_ROOT / "bin" / "herdr-review-bench"),
+                "review",
+                "--repo", str(tmp),
+                "--diff", str(tmp / "diff.txt"),
+                "--agent", "rule",
+            ]
+            (tmp / "diff.txt").write_text(diff, encoding="utf-8")
+            cli_res = subprocess.run(cmd, capture_output=True, text=True)
+            self.assertEqual(cli_res.returncode, 0, f"CLI error: {cli_res.stderr}")
+            parsed_out = json.loads(cli_res.stdout)
+            self.assertEqual(parsed_out["status"], "success")
+            self.assertEqual(parsed_out["agent"], "rule")
 
 
 if __name__ == "__main__":

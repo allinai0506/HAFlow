@@ -1,0 +1,32 @@
+{
+  "pr_key": "allinai0506_HAFlow_85-6f76cd6f",
+  "pr": {
+    "repo": "https://github.com/allinai0506/HAFlow",
+    "pr_number": 85,
+    "base": "74dac0bf2f86f7f9b082d178cd3395f488f9748e",
+    "head": "6f76cd6f40e2222c4ca78f1dfe3f27ac54a739ff"
+  },
+  "findings": [
+    {
+      "file": "herdr/fix_loop.py",
+      "start_line": 101,
+      "end_line": 126,
+      "message": "redelivery_handled 在判断修复任务是否已被有效承接时，仅检查是否存在 updated_at > first_seen_at 的任务；对于已被作废（status == \"superseded\" 或包含 \"superseded_by\"）的历史陈旧任务，其时间戳变更依然会被误判为有效工作已承接，导致无效的修复任务使重试机制误以为已完成，引发流水线永久挂起死锁。",
+      "tp_fp": "tp",
+      "severity": "high",
+      "category": "workflow_state",
+      "scope": "introduced-by-pr",
+      "difficulty": "hard",
+      "context_required": "diff-plus-related-files",
+      "tp_fp_justification": "确凿缺陷：Commit 6f76cd6f 引入该缺陷，在合并提交 3be436239ae86990f4e29943a2693e1625e21fb9 的后续修复分支中被修补并在 tests/test_fix_loop_recovery.py 中覆盖。",
+      "severity_justification": "High: 违反 HAFlow 系统状态机或事实层权威不变量约束。",
+      "category_justification": "Workflow_state: 归属于 workflow_state 类别的核心系统逻辑漏洞。",
+      "producer": "human_curated",
+      "source": {
+        "type": "human_curated",
+        "alignment": "ground_truth",
+        "verified_commit": "3be436239ae86990f4e29943a2693e1625e21fb9"
+      }
+    }
+  ]
+}

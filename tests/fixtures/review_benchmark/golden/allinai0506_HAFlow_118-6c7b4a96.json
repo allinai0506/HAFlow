@@ -1,0 +1,32 @@
+{
+  "pr_key": "allinai0506_HAFlow_118-6c7b4a96",
+  "pr": {
+    "repo": "https://github.com/allinai0506/HAFlow",
+    "pr_number": 118,
+    "base": "dac0fd8908dec0b0b1a6fb526364ab8f8ecd0696",
+    "head": "6c7b4a963fbd27336ec20fec820a1cfd34eda5a2"
+  },
+  "findings": [
+    {
+      "file": "services/herdr-controller.py",
+      "start_line": 2860,
+      "end_line": 2885,
+      "message": "process_blocked_observations 在处理 Sentinel 上报的 blocked_marker_observed 事件时，缺少对样本新鲜度的前置校验。当任务版本因其他操作递增后，旧样本的 CAS 状态转移必然失败；但循环每次轮询仍重复读取同一条旧事件并发起 CAS，且每次拒绝都向事件账本写入一条 blocked_observation_cas_rejected，造成 CAS 风暴并刷爆事件日志。",
+      "tp_fp": "tp",
+      "severity": "high",
+      "category": "concurrency",
+      "scope": "introduced-by-pr",
+      "difficulty": "hard",
+      "context_required": "diff-plus-related-files",
+      "tp_fp_justification": "确凿缺陷：Commit 6c7b4a96 在 controller 中每次 sweep 都用旧样本尝试 CAS 并无界追加拒绝事件。在 PR #118 提交 09542be 中指出真实事故中 25 分钟产生 238 条重复拒绝事件，修复增加了 observation_is_current 前置过滤与事件去重，并添加 tests/test_blocked_observation_cas_storm.py。",
+      "severity_justification": "High: 违反 HAFlow 系统状态机或事实层权威不变量约束。",
+      "category_justification": "Concurrency: 归属于 concurrency 类别的核心系统逻辑漏洞。",
+      "producer": "human_curated",
+      "source": {
+        "type": "human_curated",
+        "alignment": "ground_truth",
+        "verified_commit": "09542bebaebc2afbefb5b1a1be5040f0dbd52702"
+      }
+    }
+  ]
+}
