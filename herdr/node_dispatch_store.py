@@ -266,26 +266,76 @@ def defer(db_path, operation_id, reason, now=None, owner=None):
                       now, next_due=now + core.CHECK_SECONDS, attempts=attempts)
 
 
-def validate_launch(conn, operation_id, workflow_id, node_id, now):
-    op = rs._get(conn, operation_id)
-    workflow, config, tasks = _snapshot(conn, workflow_id)
+def can_launch_with_replacement(op, intent, tasks):
+    """Pure admission: an explicit --supersedes replacement may reuse its operation."""
+    replacement = (intent or {}).get('supersedes')
+    if not replacement:
+        return False
+    if op.get('status') in core.TERMINAL:
+        return False
+    old = next((t for t in tasks or [] if t.get('task_id') == replacement), None)
+    if not old or old.get('status') != 'superseded':
+        return False
+    if (old.get('node') or old.get('stage')) != op['payload'].get('node_id'):
+        return False
+    return True
+
+
+def _launch_refusals(conn, op, workflow, config, tasks, node_id, now, *, allow_unstarted):
+    """Enumerate precise refusal reasons so recovery does not have to guess."""
     node = next((n for n in config.get('nodes') or [] if n.get('id') == node_id), None)
     latest = _node_operation(conn, workflow, config, node) if node else None
-    if (op['payload'].get('kind') != 'node_dispatch' or op['workflow_id'] != workflow_id
-            or op['payload']['node_id'] != node_id or not workflow.get('execution_id')
-            or not core.active(workflow) or not core.current(op, workflow, config)
-            or not latest or latest['id'] != op['id'] or not core.predecessors_current(op, workflow, tasks)
-            or not core.ready(op, workflow, config, tasks) or _prior_delivery_unknown(conn, op)
-            or not op['started'] or op['status'] not in {'running', 'awaiting_result', 'resolved', 'waiting_human'}
-            or op['detail'].get('deadline_at', 0) <= now or op['detail'].get('origin') == 'legacy_notified'):
-        raise ValueError('dispatch operation does not authorize this launch')
+    reasons = []
+    if op['payload'].get('kind') != 'node_dispatch':
+        reasons.append('operation kind is not node_dispatch')
+    if op['workflow_id'] != workflow.get('workflow_id'):
+        reasons.append('operation belongs to a different workflow')
+    if op['payload'].get('node_id') != node_id:
+        reasons.append('operation targets a different node')
+    if not workflow.get('execution_id'):
+        reasons.append('workflow execution identity missing')
+    if not core.active(workflow):
+        reasons.append('workflow is not active')
+    if not core.current(op, workflow, config):
+        reasons.append('operation generation is stale')
+    if not latest or latest['id'] != op['id']:
+        suffix = f" (current={latest['id']})" if latest else ''
+        reasons.append('operation is not the current node operation' + suffix)
+    if not core.predecessors_current(op, workflow, tasks):
+        reasons.append('operation predecessors changed')
+    if not core.ready(op, workflow, config, tasks):
+        reasons.append('node is not ready for dispatch')
+    if _prior_delivery_unknown(conn, op):
+        reasons.append('a prior dispatch delivery is unresolved')
+    if op['started'] and op['detail'].get('deadline_at', 0) <= now:
+        reasons.append('operation deadline expired')
+    if op['detail'].get('origin') == 'legacy_notified':
+        reasons.append('legacy operation must be reconciled, not launched')
+    if not allow_unstarted:
+        if not op['started']:
+            reasons.append('operation was never started')
+        if op['status'] not in {'running', 'awaiting_result', 'resolved', 'waiting_human'}:
+            reasons.append(f"operation status {op['status']} does not authorize a launch")
+    return reasons
+
+
+def validate_launch(conn, operation_id, workflow_id, node_id, now, *, intent=None, tasks_view=None):
+    op = rs._get(conn, operation_id)
+    workflow, config, tasks = _snapshot(conn, workflow_id)
+    if tasks_view is not None:
+        tasks = tasks_view
+    allow_unstarted = can_launch_with_replacement(op, intent, tasks)
+    reasons = _launch_refusals(conn, op, workflow, config, tasks, node_id, now,
+                               allow_unstarted=allow_unstarted)
+    if reasons:
+        raise ValueError('dispatch operation does not authorize this launch: ' + '; '.join(reasons))
     return op, workflow
 
 
 def record_intent(db_path, intent, now):
     from . import state_db
     with rs._transaction(db_path) as conn:
-        op, workflow = validate_launch(conn, intent['dispatch_operation_id'], intent['workflow_id'], intent['node_id'], now)
+        op, workflow = validate_launch(conn, intent['dispatch_operation_id'], intent['workflow_id'], intent['node_id'], now, intent=intent)
         if intent.get('execution_id') != workflow['execution_id'] or not intent['resources'].get('run_id'):
             raise ValueError('dispatch launch intent requires current execution and run identity')
         if op['payload'].get('candidate_sha') and intent.get('candidate_sha') != op['payload']['candidate_sha']:
@@ -302,7 +352,9 @@ def validate_task_registration(conn, task, now):
     operation_id = task.get('dispatch_operation_id')
     if operation_id is None:
         return
-    op, workflow = validate_launch(conn, operation_id, task['workflow_id'], task.get('node') or task.get('stage'), now)
+    op, workflow = validate_launch(conn, operation_id, task['workflow_id'],
+                                   task.get('node') or task.get('stage'), now,
+                                   intent={'supersedes': task.get('supersedes')})
     if op['payload'].get('candidate_sha') and task.get('candidate_sha') != op['payload']['candidate_sha']:
         raise ValueError('dispatch task candidate does not match current episode')
     if not task.get('run_id') or task.get('execution_id') != workflow.get('execution_id'):

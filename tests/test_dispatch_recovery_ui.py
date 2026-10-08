@@ -442,3 +442,50 @@ def test_resource_check_refuses_intent_changed_during_probe(scene, monkeypatch):
     events=scene.store.list_events(task_id=intent['key'],event_type='launch_intent',source='launch',desc=True)
     assert len(events)==2 and all(e['payload']['phase']=='allocating' for e in events)
     assert nd.operation_for_node(scene.store.db_path,'wf','test')==old
+
+
+def test_can_launch_with_replacement_allows_superseded_pointer():
+    from herdr.node_dispatch_store import can_launch_with_replacement
+    op = {'id': 'op-1', 'status': 'pending', 'payload': {'node_id': 'review'}}
+    intent = {'dispatch_operation_id': 'op-1', 'supersedes': 'old-review'}
+    tasks = [{'task_id': 'old-review', 'node': 'review', 'status': 'superseded'}]
+    assert can_launch_with_replacement(op, intent, tasks) is True
+
+
+def test_can_launch_with_replacement_refuses_terminal_operation():
+    from herdr.node_dispatch_store import can_launch_with_replacement
+    intent = {'dispatch_operation_id': 'op-1', 'supersedes': 'old-review'}
+    tasks = [{'task_id': 'old-review', 'node': 'review', 'status': 'superseded'}]
+    for status in ('resolved', 'superseded'):
+        op = {'id': 'op-1', 'status': status, 'payload': {'node_id': 'review'}}
+        assert can_launch_with_replacement(op, intent, tasks) is False
+
+
+def test_can_launch_with_replacement_refuses_non_superseded():
+    from herdr.node_dispatch_store import can_launch_with_replacement
+    op = {'id': 'op-1', 'payload': {'node_id': 'review'}}
+    intent = {'dispatch_operation_id': 'op-1', 'supersedes': 'old-review'}
+    tasks = [{'task_id': 'old-review', 'node': 'review', 'status': 'working'}]
+    assert can_launch_with_replacement(op, intent, tasks) is False
+
+
+def test_explicit_replacement_reuses_pending_operation_with_precise_reasons(scene):
+    from herdr import node_dispatch_store as nd, state_db
+    from herdr.task_resources import begin_launch_intent
+    nd.reconcile_workflow(scene.store.db_path, 'wf', now=1000)
+    op = nd.operation_for_node(scene.store.db_path, 'wf', 'implementation')
+    assert op['status'] == 'pending' and not op['started']
+    scene.store.save_task({'task_id': 'old-impl', 'workflow_id': 'wf', 'node': 'implementation',
+        'execution_id': 'execution-1', 'run_id': 'old-run', 'status': 'superseded',
+        'dispatch_role': 'worker', 'dispatch_round': 1})
+    conn = state_db.get_db_connection(scene.store.db_path)
+    try:
+        with pytest.raises(ValueError, match='never started'):
+            nd.validate_launch(conn, op['id'], 'wf', 'implementation', 1000)
+    finally:
+        conn.close()
+    intent = begin_launch_intent(scene.store, workflow_id='wf', node_id='implementation',
+        task_id='impl-r2', role='worker', dispatch_operation_id=op['id'], run_id='run-impl-r2',
+        execution_id='execution-1', supersedes='old-impl', dispatch_round=2,
+        now=scene.clock[0])['intent']
+    assert intent['dispatch_operation_id'] == op['id']
