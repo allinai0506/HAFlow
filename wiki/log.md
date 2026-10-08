@@ -8,6 +8,34 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-10-08] feat | 实现 HAFlow PR 自动审核闭环（Auto PR Review V1）：GitHub Actions 触发、安全边界沙盒化、单例评论幂等防刷屏与四工件审计
+
+- 背景：
+  1. HAFlow 仓库已有代码评审 Benchmark 工具链、Rule/LLM 审查能力与 Finding Verifier，但尚未打通 PR 提交后自动触发审核与结果回写评论的闭环；
+  2. 直接在宿主机无沙盒运行不可信 PR 存在严重安全风险，滥用 `--dangerously-skip-permissions` 会暴露任意 shell 执行危害；
+  3. PR 更新（synchronize）可能触发多轮构建，旧 SHA 结果若并发写回会覆盖新 SHA 结果，且容易产生大量垃圾评论刷屏。
+- 变更：
+  1. **GitHub Actions 自动化流水线 (`.github/workflows/ha-review.yml`)**：
+     - 监听 `pull_request` 的 `opened`、`synchronize`、`reopened` 事件；
+     - 配置 `concurrency: cancel-in-progress: true` 自动取消旧任务；
+     - 严格使用 `pull_request`（禁止 `pull_request_target`），防范 Fork PR 提权与写凭据泄露；
+     - 检出 PR 真实的 head SHA 与 base SHA，不使用 `HEAD~1` 模糊指代。
+  2. **安全隔离沙盒与四态影子评审 (`herdr/review_benchmark.py`)**：
+     - 默认以 `--sandbox` 启动 `agy`，严禁无隔离使用 `--dangerously-skip-permissions`；
+     - 未配置安全隔离 LLM Runner 环境时，AI 影子审核显式标记为 `shadow_skipped`，由 Rule 主审核器独立充当稳定主门禁；
+     - 影子审核独立记录 `shadow_success`、`shadow_failed`、`shadow_timeout`、`shadow_skipped`，影子失败不改变 Rule 门禁结果。
+  3. **单例评论回写与防过期锁 (`herdr/pr_review_bot.py`)**：
+     - 每个 PR 通过隐藏 marker 维护唯一机器人评论，后续构建通过 `PATCH` 原地更新；
+     - 回写前校验 GitHub 当前最新 head SHA，若不匹配标记 `stale_sha_skipped` 放弃写回；
+     - 生成结构化中文报告，包含 Rule 状态、AI 影子状态、Finding Verifier 三态统计及发现项明细；
+     - 评论与工件强制进行 Token/密钥敏感信息脱敏。
+  4. **四项必备审计工件落盘**：
+     - 保存 `review-result.json`、`shadow-review.json`、`context-audit.json`、`finding-verification.json` 并上传至 GitHub Actions Artifacts。
+- 证据：
+  - `pytest -q tests/test_auto_pr_review.py tests/test_review_benchmark.py tests/test_finding_verifier.py` 51 passed in 3.01s；
+  - `python3 -m compileall -q herdr services bin tests` clean；
+  - `git diff --check` clean。
+
 ## [2026-10-07] fix | 强化代码评审评测真实性（Benchmark Integrity Round 2）：中性 PR 描述防止盲测答案泄漏、ReviewBench 官方契约兼容与依赖锁定、打分成功显式门禁
 - 背景：
   1. Manifest 中的 PR `body` 包含了具体缺陷函数名与答案性后果，由于审查 Agent 可见 `body`，破坏了盲测（Blind Test）原则；
