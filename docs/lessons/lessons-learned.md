@@ -6313,6 +6313,20 @@ wf-nexusarchive-1008-01 plan-challenger（grok，integration=none）`Worker star
 ### 验证命令 / 关联证据
 `pytest -q tests/test_workspace_trust.py`（模式无关用例 RED→GREEN）；全量 3891 passed（唯一失败为 #170 干净主干同败）；独立评审 MERGE_READY（`.omc/review-kadian-trust-all.md`）。线上：预埋后新 clone 应出现在 `~/.grok/trusted_folders.toml`。
 
+## 141. 恢复动作必须以持久化终态为准，不以 CLI 返回码为准（2026-10-08）
+
+### 问题背景
+wf-nexusarchive-1008-01 test/review-auto 隔离失败后，恢复路径与并发重派同时 supersede 同一任务，`supersede --allow-pending` 报 `Illegal transition: superseded -> superseded` ERROR——尽管替代链已建立、requeue 已推进，恢复仍被记为失败。
+
+### 经验教训
+任何“先读快照、再调 CLI”的恢复动作都存在 TOCTOU 窗口：失败返回码只说明本次调用没生效，不说明目标没达成。恢复判定必须重读持久化状态——已达终态即成功，只有仍停滞才算真失败。
+
+### 操作规范
+`recover_router_isolation_tasks` supersede 非零后重读任务：已 superseded（状态或 `superseded_by` 任一）即判恢复；仍 failed 才记 ERROR。调用方 fire-and-forget，返回值变化无外部影响。
+
+### 验证命令 / 关联证据
+`pytest -q tests/test_impl_fix3_regression.py`（并发 supersede 正例＋真失败负例）；全量 3892 passed（唯一失败为 #170 干净主干同败）；独立评审 MERGE_READY（`.omc/review-kadian-router-recovery.md`）。
+
 ## 142. 自动收尾失败必须退避重试，inflight 闩只防并发不防重复（2026-10-08）
 
 ### 问题背景
