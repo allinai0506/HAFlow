@@ -562,6 +562,7 @@ def parse_test_output(output: str, exit_code: int) -> Tuple[int, int, List[str]]
     matched = False
 
     # 1. pytest summaries: "1 failed, 4 passed in 0.15s" (one per invocation)
+    pytest_matched = False
     for m in re.finditer(r"(?:=+)?\s*([\d\w\s,]+)\s+in\s+[\d\.]+s", output):
         summary_str = m.group(1)
         passed_m = re.search(r"(\d+)\s+passed", summary_str)
@@ -570,6 +571,7 @@ def parse_test_output(output: str, exit_code: int) -> Tuple[int, int, List[str]]
         if not (passed_m or failed_m or error_m):
             continue
         matched = True
+        pytest_matched = True
         passed = int(passed_m.group(1)) if passed_m else 0
         failed = int(failed_m.group(1)) if failed_m else 0
         errors = int(error_m.group(1)) if error_m else 0
@@ -582,6 +584,7 @@ def parse_test_output(output: str, exit_code: int) -> Tuple[int, int, List[str]]
                     target = parts[1].split(" - ")[0].strip()
                     if target not in failing:
                         failing.append(target)
+
 
     # 2. vitest summaries: "Tests  1 failed | 11 passed (12)"
     vitest_matched = False
@@ -660,6 +663,25 @@ def parse_test_output(output: str, exit_code: int) -> Tuple[int, int, List[str]]
                     target = line.split(maxsplit=1)[1].strip()
                     if target not in failing:
                         failing.append(target)
+
+    # 6. Fallback runner: pytest short summary without timing (e.g. "4248 passed" or "= 1 failed, 4 passed =")
+    # Only evaluated if none of the explicit multi-runner summaries above matched.
+    if not matched:
+        for line in output.splitlines():
+            line_clean = line.strip(" =\t")
+            if line_clean.startswith("Test Files") or line_clean.startswith("Tests") or line_clean.startswith("[INFO]"):
+                continue
+            passed_m = re.search(r"\b(\d+)\s+passed\b", line_clean)
+            failed_m = re.search(r"\b(\d+)\s+failed\b", line_clean)
+            error_m = re.search(r"\b(\d+)\s+error\b", line_clean)
+            if passed_m or failed_m or error_m:
+                matched = True
+                passed = int(passed_m.group(1)) if passed_m else 0
+                failed = int(failed_m.group(1)) if failed_m else 0
+                errors = int(error_m.group(1)) if error_m else 0
+                passed_sum += passed
+                total_sum += passed + failed + errors
+                break
 
     if matched:
         return passed_sum, max(total_sum, 1 if exit_code != 0 else 0), failing

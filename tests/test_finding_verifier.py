@@ -396,5 +396,47 @@ class FindingVerifierSafetyTestCase(unittest.TestCase):
             self.assertTrue(res["counter_evidence"]["ast_parsed"])
 
 
+    def test_reject_chinese_unclosed_string_claim_when_ast_parses_cleanly(self):
+        """Claims of '存在未闭合字符串' or unclosed strings must be REJECTED when AST parses cleanly."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            sample_code = (
+                "def generate_macos_seatbelt_profile(repo_dir, isolated_auth_dir=None):\n"
+                "    return '''(version 1)\n(allow default)\n'''\n"
+            )
+            (tmp / "seatbelt.py").write_text(sample_code, encoding="utf-8")
+            finding = {
+                "file": "seatbelt.py",
+                "start_line": 1,
+                "end_line": 2,
+                "message": "generate_macos_seatbelt_profile 存在未闭合字符串，导致解析异常",
+            }
+            res = verify_finding(finding, repo_dir=tmp)
+            self.assertEqual(res["verification_status"], "rejected")
+            self.assertIn("counter_evidence_found", res["verification_reason"])
+            self.assertTrue(res["counter_evidence"]["ast_parsed"])
+
+    def test_reject_chinese_symbol_not_defined_claim_when_symbol_exists(self):
+        """Claims of 'symbol 未定义' must be REJECTED when symbol definition or import is reachable."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            sample_code = (
+                "def verify_os_security_isolation(repo_dir):\n"
+                "    return True, 'verified', {}\n"
+            )
+            (tmp / "sec.py").write_text(sample_code, encoding="utf-8")
+            finding = {
+                "file": "sec.py",
+                "start_line": 1,
+                "end_line": 2,
+                "message": "verify_os_security_isolation 未定义，调用将触发 NameError",
+            }
+            res = verify_finding(finding, repo_dir=tmp)
+            self.assertEqual(res["verification_status"], "rejected")
+            self.assertIn("counter_evidence_found", res["verification_reason"])
+            self.assertEqual(res["counter_evidence"]["type"], "definition_exists")
+            self.assertEqual(res["counter_evidence"]["symbol"], "verify_os_security_isolation")
+
+
 if __name__ == "__main__":
     unittest.main()

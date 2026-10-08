@@ -8,6 +8,24 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-10-09] sec | PR #185 P1 受控出站代理（Controlled Egress Proxy）与 P2 零静默凭据清理闭环
+
+- 背景：
+  1. 复核指出 P1：Seatbelt 仅限制 443 端口不等于限制目的地白名单，允许连接互联网上任意 HTTPS 服务器，存在专用 Reviewer API Key 被外传到非授权主机的风险；必须通过受控出站代理限制目标 Host，并剥离内核层直接 443 外联；
+  2. 复核指出 P2：临时认证目录清理使用 `shutil.rmtree(..., ignore_errors=True)` 会静默掩盖删除失败，缺乏可观测性与路径范围校验；
+  3. AI 审核评论出现“存在未闭合字符串”与“函数未定义”等中文负向存在幻觉，未被 Finding Verifier 自动驳回。
+- 变更：
+  1. **P1 受控出站代理 (`herdr/egress_proxy.py`)**：新增标准库 `ControlledEgressProxy`，严格校验 CONNECT 目标 Host 与 443 端口；仅放行 `generativelanguage.googleapis.com`、`*.googleapis.com` 等受信任白名单，任何非白名单目的地（如 `attacker.com`）立即返回 `HTTP 403 Forbidden` 并断开连接；同时支持透传宿主机上游代理（如 `127.0.0.1:7897`）；
+  2. **P1 内核级剥离直接 443 外联**：Seatbelt Profile 彻底移除 `(allow network-outbound (remote tcp "*:443"))`，仅允许向本地代理端口 `remote tcp "localhost:{egress_proxy_port}"` 发起出站 TCP 连接；子进程无论直接连接外部 IP 还是宿主机其他端口均被内核以 `Operation not permitted` 拦截；
+  3. **P2 零静默凭据清理与安全路径范围校验 (`secure_cleanup_auth_dir`)**：严禁静默忽略异常（禁用 `ignore_errors=True`）；严格校验待清理路径必须位于临时目录且具有 `haflow-reviewer-auth-` 前缀（防止误删非临时目录）；执行后核验物理不存在，并将清理结果 (`verified_removed`) 与审计日志显式回写至隔离元数据；
+  4. **双语语法与符号反驳规则扩展 (`herdr/finding_verifier.py`)**：Check B 扩展中英文“未定义 / 未声明 / 不存在”符号匹配，并在符号存在定义或 Import 时判定 `rejected`；Check E 扩展中英文“未闭合字符串 / unterminated string / 语法错误”匹配，当目标文件通过 `ast.parse()` 解析时直接判定 `rejected`。
+- 证据：
+  1. `pytest -v tests/test_os_sandbox_boundary.py` 20/20 PASS（含直接 443 拦截、非授权 Host 403 拦截、白名单 Host 放行、动态代理端口放行与清理验证）；
+  2. `pytest -v tests/test_finding_verifier.py` 19/19 PASS（含中文未闭合字符串反驳、中文符号未定义反驳）；
+  3. 全量测试 `tests/test_os_sandbox_boundary.py tests/test_auto_pr_review.py tests/test_finding_verifier.py tests/test_review_benchmark.py` 74/74 PASS；
+  4. `python3 -m compileall -q herdr services bin tests` clean；
+  5. `git diff --check` clean。
+
 ## [2026-10-08] sec | PR #185 P1/P2 最终安全收敛：真实执行身份准确标注、专用认证目录动态化/防软链接/自动擦除、出入站最小网络权限收紧与 AST 语法误报驳回
 
 - 背景：

@@ -6471,3 +6471,31 @@ wf-nexusarchive-1008-01 手工替代重派时复用 dispatch-operation-id 被拒
 
 ### 验证命令 / 关联证据
 `pytest -v tests/test_os_sandbox_boundary.py`（16 项 OS 边界、网络端口白名单与凭据隔离实测用例 100% PASS）；`pytest -v tests/test_finding_verifier.py`（17 项 AST 语法与反驳用例 PASS）；`pytest -v tests/test_auto_pr_review.py`（13 项用例 PASS）；GitHub Actions Run 与 PR #185 评审链证据。
+
+## 150. 受控出站代理（Controlled Egress Proxy）与零静默凭据清理闭环（2026-10-09）
+
+### 问题背景
+在 PR #185 边界深化审查中发现两个关键安全隐患：
+1. **端口放行不等于目的地白名单**：此前 Seatbelt 声明 `(allow network-outbound (remote tcp "*:443"))`，仅限制了协议端口，但允许连接互联网上任意 HTTPS 服务器。若不可信 PR 诱导模型执行出站网络请求，专用 Reviewer API Key 仍存在被外传到任意服务器的风险；
+2. **凭据清理静默吞异常**：清理临时认证目录时使用 `shutil.rmtree(..., ignore_errors=True)`，掩盖了潜在的清理失败与凭据残余，且缺乏对待清理路径的边界校验；
+3. **上下文裁剪诱发的负向存在幻觉**：模型因审查上下文切片，产生“未闭合字符串”或“函数未定义”等不符事实的中文 Finding。
+
+### 经验教训
+1. **网络出站目的地硬收口：内核级端口封锁 + 受控代理白名单**：
+   - Seatbelt 内核层彻底移除 `(remote tcp "*:443")`，直接拒绝任何直接外联；
+   - 启动本地受控出站代理（`ControlledEgressProxy`），仅在 Seatbelt 中放行 `localhost:{egress_proxy_port}`；
+   - 代理层严格校验目标 Host（仅放行 `generativelanguage.googleapis.com`、`*.googleapis.com` 等白名单），任何非白名单目的地（如 `attacker.com`、内网 IP 等）立即返回 `HTTP 403 Forbidden` 并切断连接；同时支持透传宿主机上游代理；
+2. **认证清理零静默与严格路径边界**：
+   - 清理路径必须严格限制在 `/tmp` 下以 `haflow-reviewer-auth-` 为前缀的目录，严禁意外删除其他路径；
+   - 禁用 `ignore_errors=True`，在执行 `rmtree` 后核验路径物理消失，显式向隔离元数据回写 `verified_removed` 或失败告警记录；
+3. **双语语法与符号反驳闭环**：
+   - `finding_verifier` 扩展中英文“未闭合字符串 / 未定义”等负向断言识别；在 AST 全文件解析成功时，自动作为 counter-evidence 定性为 `rejected`。
+
+### 操作规范
+1. **受控代理固化**：在 `herdr/egress_proxy.py` 中实现标准库 `ControlledEgressProxy`，由 `review_benchmark.py` 在执行 AI 审核时动态启动并在退出时可靠终止；
+2. **Seatbelt 剥离直接 443**：在 `generate_macos_seatbelt_profile` 中仅放行动态代理端口 `localhost:{egress_proxy_port}`；
+3. **安全清理固化**：在 `review_benchmark.py` 中固化 `secure_cleanup_auth_dir`；
+4. **反驳规则固化**：在 `herdr/finding_verifier.py` 中更新 Check B 与 Check E。
+
+### 验证命令 / 关联证据
+`pytest -v tests/test_os_sandbox_boundary.py tests/test_finding_verifier.py`（20 项 OS 边界与受控代理测试 100% PASS，包含直接 443 拦截、非授权 Host 403 拦截、白名单 Host 放行、动态端口限制与清理验证）；全量自动化测试（74 项测试 100% PASS）。

@@ -18,6 +18,7 @@ from herdr.review_benchmark import (
     probe_macos_seatbelt,
     review_diff,
     run_agent_review,
+    secure_cleanup_auth_dir,
     verify_os_security_isolation,
 )
 
@@ -325,8 +326,8 @@ class TestOSSandboxBoundary(unittest.TestCase):
         )
 
     @unittest.skipUnless(sys.platform == "darwin" and shutil.which("sandbox-exec"), "Requires macOS sandbox-exec")
-    def test_14_os_kernel_allows_outbound_https_port_443(self):
-        """macOS Seatbelt kernel must allow outbound connections to HTTPS port 443 for LLM API (P1-2)."""
+    def test_14a_os_kernel_denies_direct_outbound_to_external_https_host(self):
+        """macOS Seatbelt kernel must deny direct outbound connections to external HTTPS hosts (P1 blocker resolved)."""
         profile = generate_macos_seatbelt_profile(self.repo_dir)
         sandbox_bin = shutil.which("sandbox-exec")
         cmd = [
@@ -335,11 +336,100 @@ class TestOSSandboxBoundary(unittest.TestCase):
             profile,
             sys.executable,
             "-c",
-            "import socket; s = socket.socket(); s.connect(('1.1.1.1', 443)); print('connected_443_ok')",
+            "import socket; s = socket.socket(); s.connect(('1.1.1.1', 443))",
         ]
         proc = subprocess.run(cmd, capture_output=True, text=True)
-        self.assertEqual(proc.returncode, 0)
-        self.assertIn("connected_443_ok", proc.stdout)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertTrue(
+            "PermissionError" in proc.stderr or "Operation not permitted" in proc.stderr,
+            f"Expected direct 443 connection to be denied by kernel, got: {proc.stderr}",
+        )
+
+    def test_14b_controlled_egress_proxy_enforces_whitelist_and_blocks_unauthorized_destinations(self):
+        """Controlled egress proxy must return 403 Forbidden for unauthorized destinations (P1)."""
+        import socket
+        from herdr.egress_proxy import ControlledEgressProxy
+
+        proxy = ControlledEgressProxy(allowed_patterns=["generativelanguage.googleapis.com", "*.googleapis.com"])
+        proxy_port = proxy.start()
+        try:
+            # 1. Connect to unauthorized destination (e.g. attacker.com:443)
+            s = socket.create_connection(("127.0.0.1", proxy_port), timeout=5.0)
+            s.sendall(b"CONNECT attacker.com:443 HTTP/1.1\r\nHost: attacker.com:443\r\n\r\n")
+            resp = s.recv(1024).decode("utf-8", errors="ignore")
+            s.close()
+            self.assertIn("403 Forbidden", resp)
+
+            summary = proxy.get_audit_summary()
+            self.assertGreaterEqual(summary["denied"], 1)
+            self.assertEqual(summary["events"][-1]["host"], "attacker.com")
+            self.assertEqual(summary["events"][-1]["action"], "DENIED")
+        finally:
+            proxy.stop()
+
+    def test_14c_controlled_egress_proxy_allows_whitelisted_destination(self):
+        """Controlled egress proxy must approve whitelisted Google Gemini API destination (P1)."""
+        import socket
+        from herdr.egress_proxy import ControlledEgressProxy
+
+        proxy = ControlledEgressProxy(allowed_patterns=["generativelanguage.googleapis.com", "*.googleapis.com"])
+        proxy_port = proxy.start()
+        try:
+            s = socket.create_connection(("127.0.0.1", proxy_port), timeout=5.0)
+            s.sendall(b"CONNECT generativelanguage.googleapis.com:443 HTTP/1.1\r\nHost: generativelanguage.googleapis.com:443\r\n\r\n")
+            resp = s.recv(1024).decode("utf-8", errors="ignore")
+            s.close()
+            self.assertIn("200 Connection Established", resp)
+
+            summary = proxy.get_audit_summary()
+            self.assertGreaterEqual(summary["allowed"], 1)
+            self.assertEqual(summary["events"][-1]["host"], "generativelanguage.googleapis.com")
+            self.assertEqual(summary["events"][-1]["action"], "ALLOWED")
+        finally:
+            proxy.stop()
+
+    @unittest.skipUnless(sys.platform == "darwin" and shutil.which("sandbox-exec"), "Requires macOS sandbox-exec")
+    def test_14d_seatbelt_outbound_strictly_restricted_to_controlled_proxy_port(self):
+        """macOS Seatbelt kernel allows outbound connection strictly to local proxy port while denying other ports."""
+        import socket
+        from herdr.egress_proxy import ControlledEgressProxy
+
+        proxy = ControlledEgressProxy()
+        proxy_port = proxy.start()
+        try:
+            profile = generate_macos_seatbelt_profile(self.repo_dir, egress_proxy_port=proxy_port)
+            sandbox_bin = shutil.which("sandbox-exec")
+
+            # Connecting to authorized proxy port should NOT trigger PermissionError from sandbox
+            cmd_ok = [
+                sandbox_bin,
+                "-p",
+                profile,
+                sys.executable,
+                "-c",
+                f"import socket; s = socket.socket(); s.connect(('127.0.0.1', {proxy_port})); print('proxy_conn_ok')",
+            ]
+            proc_ok = subprocess.run(cmd_ok, capture_output=True, text=True)
+            self.assertEqual(proc_ok.returncode, 0)
+            self.assertIn("proxy_conn_ok", proc_ok.stdout)
+
+            # Connecting to any other port (e.g. 19875) must be DENIED by kernel
+            cmd_denied = [
+                sandbox_bin,
+                "-p",
+                profile,
+                sys.executable,
+                "-c",
+                "import socket; s = socket.socket(); s.connect(('127.0.0.1', 19875))",
+            ]
+            proc_denied = subprocess.run(cmd_denied, capture_output=True, text=True)
+            self.assertNotEqual(proc_denied.returncode, 0)
+            self.assertTrue(
+                "PermissionError" in proc_denied.stderr or "Operation not permitted" in proc_denied.stderr,
+                f"Expected other port connection to be denied by kernel, got: {proc_denied.stderr}",
+            )
+        finally:
+            proxy.stop()
 
     def test_15_dynamic_auth_dir_permissions_and_symlink_defense(self):
         """Dynamic auth directory must have 0700 permissions and reject symlinks (P1-1 & P1-2)."""
@@ -360,7 +450,8 @@ class TestOSSandboxBoundary(unittest.TestCase):
                 self.assertIn("host user", meta["user_isolation_note"].lower())
                 # cleanup temp dir
                 if meta.get("is_temp_auth_dir"):
-                    shutil.rmtree(auth_dir, ignore_errors=True)
+                    secure_cleanup_auth_dir(meta)
+                    self.assertEqual(meta["cleanup_record"]["status"], "verified_removed")
 
             # 2. Verify refusal of symlinks
             with tempfile.TemporaryDirectory() as t_dir:
@@ -376,6 +467,36 @@ class TestOSSandboxBoundary(unittest.TestCase):
                     is_iso, reason, _ = verify_os_security_isolation(self.repo_dir)
                     self.assertFalse(is_iso)
                     self.assertIn("symlink", reason)
+
+    def test_16_temporary_auth_dir_cleanup_validation_and_audit(self):
+        """Temporary auth dir cleanup must verify deletion, refuse non-temp paths, and record audit status (P2)."""
+        import tempfile
+
+        # 1. Successful cleanup of verified temporary reviewer directory
+        temp_dir = tempfile.mkdtemp(prefix="haflow-reviewer-auth-")
+        meta = {
+            "is_temp_auth_dir": True,
+            "isolated_auth_dir": temp_dir,
+        }
+        res = secure_cleanup_auth_dir(meta)
+        self.assertTrue(res["cleaned"])
+        self.assertEqual(res["status"], "verified_removed")
+        self.assertFalse(os.path.exists(temp_dir))
+        self.assertEqual(meta["cleanup_record"]["status"], "verified_removed")
+
+        # 2. Safety invariant: refusal to clean paths without valid reviewer prefix
+        unsafe_dir = tempfile.mkdtemp(prefix="unsafe-other-dir-")
+        try:
+            meta_unsafe = {
+                "is_temp_auth_dir": True,
+                "isolated_auth_dir": unsafe_dir,
+            }
+            res_unsafe = secure_cleanup_auth_dir(meta_unsafe)
+            self.assertFalse(res_unsafe["cleaned"])
+            self.assertEqual(res_unsafe["status"], "path_validation_failed")
+            self.assertTrue(os.path.exists(unsafe_dir))
+        finally:
+            shutil.rmtree(unsafe_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":

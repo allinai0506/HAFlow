@@ -18,6 +18,7 @@ import sys
 import tempfile
 import time
 from typing import Any, Dict, List, Optional, Tuple
+import warnings
 
 
 def pr_key(repo: str, pr_number: int, head: str) -> str:
@@ -614,18 +615,35 @@ def run_agent_review(
         ]
 
         # Verify or apply OS-level technical sandbox isolation
+        egress_proxy = None
         if isolation_meta is None:
             is_iso, iso_reason, isolation_meta = verify_os_security_isolation(repo_dir)
             if not is_iso:
                 raise PermissionError(f"security_boundary_violation: {iso_reason}")
 
         if isolation_meta.get("isolation_type") == "macos-seatbelt":
+            # P1: Start controlled egress proxy enforcing destination host whitelist
+            from herdr.egress_proxy import ControlledEgressProxy
+            host_upstream = (
+                os.environ.get("HTTPS_PROXY")
+                or os.environ.get("https_proxy")
+                or os.environ.get("HTTP_PROXY")
+                or os.environ.get("http_proxy")
+            )
+            egress_proxy = ControlledEgressProxy(upstream_proxy_url=host_upstream)
+            proxy_port = egress_proxy.start()
+            auth_dir = Path(isolation_meta["isolated_auth_dir"]) if isolation_meta.get("isolated_auth_dir") else None
+            profile = generate_macos_seatbelt_profile(repo_dir, isolated_auth_dir=auth_dir, egress_proxy_port=proxy_port)
+            isolation_meta["profile"] = profile
+            isolation_meta["egress_proxy_port"] = proxy_port
+
             sandbox_bin = isolation_meta.get("sandbox_exec", "/usr/bin/sandbox-exec")
-            profile = isolation_meta.get("profile", "")
             cmd = [sandbox_bin, "-p", profile] + cmd
     elif agent_name == "pi":
+        egress_proxy = None
         cmd = ["pi", "--print", prompt]
     elif agent_name == "opencode":
+        egress_proxy = None
         cmd = ["opencode", "--prompt", prompt]
     else:
         raise RuntimeError(f"agent_startup_failed: unsupported agent '{agent_name}'")
@@ -636,6 +654,17 @@ def run_agent_review(
         child_env["HOME"] = isolation_meta["isolated_auth_dir"]
     if isolation_meta and isolation_meta.get("isolated_api_key"):
         child_env["GEMINI_API_KEY"] = isolation_meta["isolated_api_key"]
+
+    if isolation_meta and isolation_meta.get("egress_proxy_port"):
+        proxy_url = f"http://127.0.0.1:{isolation_meta['egress_proxy_port']}"
+        child_env["HTTP_PROXY"] = proxy_url
+        child_env["HTTPS_PROXY"] = proxy_url
+        child_env["ALL_PROXY"] = proxy_url
+        child_env["http_proxy"] = proxy_url
+        child_env["https_proxy"] = proxy_url
+        child_env["all_proxy"] = proxy_url
+        child_env["NO_PROXY"] = "localhost,127.0.0.1"
+        child_env["no_proxy"] = "localhost,127.0.0.1"
 
     if "PATH" not in child_env:
         child_env["PATH"] = os.environ.get("PATH", "/usr/bin:/bin")
@@ -660,11 +689,17 @@ def run_agent_review(
     except Exception as exc:
         raise RuntimeError(f"agent_startup_failed: {exc}") from exc
     finally:
-        # P1-2: Wipe temporary reviewer auth directory after review execution finishes
+        # P1: Terminate controlled egress proxy and record audit
+        if egress_proxy is not None:
+            try:
+                egress_proxy.stop()
+            except Exception:
+                pass
+            if isolation_meta is not None:
+                isolation_meta["egress_audit"] = egress_proxy.get_audit_summary()
+        # P2: Verified, deterministic cleanup of temporary reviewer auth directory
         if isolation_meta and isolation_meta.get("is_temp_auth_dir"):
-            temp_auth_path = isolation_meta.get("isolated_auth_dir")
-            if temp_auth_path and os.path.exists(temp_auth_path):
-                shutil.rmtree(temp_auth_path, ignore_errors=True)
+            secure_cleanup_auth_dir(isolation_meta)
 
     if proc.returncode != 0:
         raise RuntimeError(f"agent_startup_failed: return code {proc.returncode}, stderr: {proc.stderr[:300]}")
@@ -718,6 +753,12 @@ def run_agent_review(
     }
     if audit_info:
         res_llm["audit"] = audit_info
+    if isolation_meta:
+        res_llm["isolation"] = {
+            "type": isolation_meta.get("isolation_type"),
+            "cleanup": isolation_meta.get("cleanup_record"),
+            "egress_audit": isolation_meta.get("egress_audit"),
+        }
     return res_llm
 
 
@@ -740,13 +781,90 @@ STRICT_ENV_WHITELIST_KEYS = (
 )
 
 
-def generate_macos_seatbelt_profile(repo_dir: Path, isolated_auth_dir: Optional[Path] = None) -> str:
+def secure_cleanup_auth_dir(isolation_meta: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Securely and deterministically wipe temporary reviewer authentication directory.
+
+    Enforces P2 safety constraints:
+    - Verifies path is strictly the temporary directory created in this session (matching prefix and temp root).
+    - Prevents accidental deletion of system or developer paths.
+    - Uses ignore_errors=False to detect failures; checks directory non-existence.
+    - Records explicit cleanup status, timestamps, and error details in isolation metadata.
+    - Emits explicit alerts if cleanup fails.
+    """
+    result = {
+        "attempted": False,
+        "cleaned": False,
+        "status": "not_applicable",
+        "path": None,
+        "error": None,
+    }
+    if not isolation_meta or not isolation_meta.get("is_temp_auth_dir"):
+        return result
+
+    raw_path = isolation_meta.get("isolated_auth_dir")
+    if not raw_path:
+        result["status"] = "missing_path"
+        isolation_meta["cleanup_record"] = result
+        return result
+
+    p = Path(raw_path).resolve()
+    result["path"] = str(p)
+    result["attempted"] = True
+
+    # Restriction: Must be strictly a temporary directory created with prefix 'haflow-reviewer-auth-'
+    # located under system temp directory
+    system_temp_roots = [
+        Path("/tmp").resolve(),
+        Path("/private/tmp").resolve(),
+        Path(tempfile.gettempdir()).resolve(),
+    ]
+    is_under_temp = any(p == t or t in p.parents for t in system_temp_roots)
+    has_valid_name = p.name.startswith("haflow-reviewer-auth-")
+
+    if not is_under_temp or not has_valid_name:
+        err_msg = f"Security safety invariant violated: refusal to clean untrusted/non-temp path '{p}'"
+        result["status"] = "path_validation_failed"
+        result["error"] = err_msg
+        isolation_meta["cleanup_record"] = result
+        warnings.warn(err_msg, category=RuntimeWarning)
+        return result
+
+    if not p.exists():
+        result["status"] = "already_absent"
+        result["cleaned"] = True
+        isolation_meta["cleanup_record"] = result
+        return result
+
+    try:
+        shutil.rmtree(p, ignore_errors=False)
+        if p.exists():
+            raise RuntimeError(f"Directory '{p}' still exists after rmtree call")
+        result["cleaned"] = True
+        result["status"] = "verified_removed"
+    except Exception as exc:
+        err_msg = f"Failed to securely clean temporary auth directory '{p}': {exc}"
+        result["cleaned"] = False
+        result["status"] = "cleanup_failed"
+        result["error"] = str(exc)
+        warnings.warn(err_msg, category=RuntimeWarning)
+
+    isolation_meta["cleanup_record"] = result
+    return result
+
+
+def generate_macos_seatbelt_profile(
+    repo_dir: Path,
+    isolated_auth_dir: Optional[Path] = None,
+    egress_proxy_port: Optional[int] = None,
+) -> str:
     """Generate macOS Seatbelt kernel profile strictly limiting filesystem read/write and network access.
 
     Addresses PR #185 P1 & P2 audit findings:
     - P1-1: Host ~/.gemini is completely DENIED at kernel level.
     - P1-2: Host Keychain databases are completely DENIED at kernel level.
-    - P1-2: Network ingress is completely DENIED; network egress is strictly limited to HTTPS (443), DNS (53), and local proxy if present.
+    - P1 (Network): Direct outbound to arbitrary external HTTPS (443) hosts is DENIED.
+      Outbound network is restricted strictly to local controlled egress proxy (localhost:{egress_proxy_port})
+      which validates destination host against whitelist (e.g. *.googleapis.com).
     - P1-2: Dedicated isolated reviewer directory is permitted only if strictly validated (not symlink, 0700).
     - P2: Entire /Users and /Volumes filesystem trees are DENIED by default.
     - Read-only access is strictly granted ONLY to the reviewed repository snapshot.
@@ -768,17 +886,12 @@ def generate_macos_seatbelt_profile(repo_dir: Path, isolated_auth_dir: Optional[
         auth_resolved = isolated_auth_dir.resolve()
         isolated_allow_rules = f'\n(allow file-read* (subpath "{auth_resolved}"))\n(allow file-write* (subpath "{auth_resolved}"))'
 
-    # P1-2 Network egress filtering: allow only HTTPS (443), DNS (53), and explicit proxy ports
+    # P1 Network egress filtering:
+    # Kernel DENIES network-outbound by default. Direct outbound to external 443 is strictly forbidden.
+    # Outbound access is strictly limited to local controlled egress proxy port.
     proxy_rules = []
-    for p_key in ("http_proxy", "https_proxy", "all_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
-        p_val = os.environ.get(p_key, "")
-        if p_val:
-            m = re.search(r":(\d+)", p_val)
-            if m:
-                port = m.group(1)
-                rule = f'(allow network-outbound (remote tcp "localhost:{port}"))'
-                if rule not in proxy_rules:
-                    proxy_rules.append(rule)
+    if egress_proxy_port:
+        proxy_rules.append(f'(allow network-outbound (remote tcp "localhost:{egress_proxy_port}"))')
     extra_proxy_rules = ("\n" + "\n".join(proxy_rules)) if proxy_rules else ""
 
     return f"""(version 1)
@@ -813,10 +926,12 @@ def generate_macos_seatbelt_profile(repo_dir: Path, isolated_auth_dir: Optional[
 (allow file-read* (subpath "/private/tmp"))
 (allow file-write* (subpath "/private/tmp"))
 (allow file-write* (subpath "/var/folders"))
-;; P1-2: Strict network lockdown: deny inbound; restrict outbound to HTTPS (443) and DNS (53)
+;; P1: Strict network lockdown:
+;; 1. Inbound network connections completely denied
 (deny network-inbound)
+;; 2. Outbound network connections denied by default (no direct external 443 allowed)
 (deny network-outbound)
-(allow network-outbound (remote tcp "*:443"))
+;; 3. DNS resolution permitted
 (allow network-outbound (remote udp "*:53"))
 (allow network-outbound (remote tcp "*:53")){extra_proxy_rules}
 """

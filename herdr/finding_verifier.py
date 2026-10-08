@@ -248,6 +248,17 @@ def _check_symbol_absence_refutation(
                             "snippet": lines[idx - 1].strip() if 1 <= idx <= len(lines) else "",
                         }
 
+    # 3. Check if symbol is an imported name in module or scope
+    import_ce = _check_import_absence_refutation(tree, parents, symbol_name, target_scope, lines)
+    if import_ce:
+        return {
+            "type": "definition_exists",
+            "symbol": symbol_name,
+            "line": import_ce["line"],
+            "scope": import_ce["scope"],
+            "snippet": import_ce["snippet"],
+        }
+
     return None
 
 
@@ -483,14 +494,22 @@ def verify_finding(
         # -------------------------------------------------------------
         # Refutation Check B: Function/Class/Symbol Not Defined Claim
         # -------------------------------------------------------------
-        def_match = re.search(
-            r"[`']?([A-Za-z0-9_]+)['`]?\s*is\s*(?:neither|not)\s*(?:defined|declared|implemented)",
-            msg,
-            re.IGNORECASE,
-        ) or re.search(
-            r"[`']?([A-Za-z0-9_]+)['`]?\s*(?:is undefined|does not exist)",
-            msg,
-            re.IGNORECASE,
+        def_match = (
+            re.search(
+                r"[`']?([A-Za-z0-9_]+)['`]?\s*(?:is\s*(?:neither|not)\s*(?:defined|declared|implemented)|is undefined|does not exist)",
+                msg,
+                re.IGNORECASE,
+            )
+            or re.search(
+                r"[`']?([A-Za-z0-9_]+)['`]?\s*(?:未定义|未声明|不存在|未被定义)",
+                msg,
+                re.IGNORECASE,
+            )
+            or re.search(
+                r"(?:未定义|未声明|不存在的?)\s*(?:函数|类|变量|方法|symbol)?\s*[`']?([A-Za-z0-9_]+)['`]?",
+                msg,
+                re.IGNORECASE,
+            )
         )
         if def_match:
             sym_name = def_match.group(1).strip()
@@ -557,7 +576,8 @@ def verify_finding(
         # Refutation Check E: Syntax Error / Incomplete Syntax Claim
         # -------------------------------------------------------------
         syntax_err_match = re.search(
-            r"(?:SyntaxError|invalid syntax|unexpected EOF|Incomplete function definition|unclosed function call|missing closing statement)",
+            r"(?:SyntaxError|invalid syntax|unexpected EOF|Incomplete function definition|unclosed function call|missing closing statement|"
+            r"unterminated string|unclosed string|未闭合字符串|未闭合|语法错误|字符串未闭合|未闭合括号|unclosed parenthesis)",
             msg,
             re.IGNORECASE,
         )
