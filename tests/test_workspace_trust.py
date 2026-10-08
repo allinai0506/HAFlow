@@ -96,6 +96,21 @@ class TestWorkspaceTrust(unittest.TestCase):
         self.assertNotIn("grok", healthy)
         self.assertIn("codex", healthy)
 
+    def test_preseed_target_is_mode_independent(self):
+        """Trust is needed whenever an agent starts in a fresh clone,
+        regardless of integration mode; agents without a trust gate skip."""
+        self.assertEqual(
+            workspace_trust.preseed_trust_target("/tmp/clones/t1", "grok"),
+            "/tmp/clones/t1",
+        )
+        self.assertEqual(
+            workspace_trust.preseed_trust_target("/tmp/clones/t1", "claude"),
+            "/tmp/clones/t1",
+        )
+        self.assertIsNone(workspace_trust.preseed_trust_target("/tmp/clones/t1", "codex"))
+        self.assertIsNone(workspace_trust.preseed_trust_target("", "grok"))
+        self.assertIsNone(workspace_trust.preseed_trust_target(None, "grok"))
+
 
 if __name__ == "__main__":
     unittest.main()

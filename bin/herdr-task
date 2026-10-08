@@ -3607,9 +3607,13 @@ def _launch_task(args):
 
     # 1. 创建 Clone + Pane + Agent
     try:
-        from herdr.workspace_trust import ensure_workspace_trust as _ensure_clone_trust
-        if getattr(args, "integration_mode", None) == "git":
-            _ensure_clone_trust(str(planned_clone), [resolved_agent])
+        from herdr.workspace_trust import (
+            ensure_workspace_trust as _ensure_clone_trust,
+            preseed_trust_target as _preseed_target,
+        )
+        _preseed_path = _preseed_target(str(planned_clone), resolved_agent)
+        if _preseed_path is not None:
+            _ensure_clone_trust(_preseed_path, [resolved_agent])
     except Exception as exc:
         print(f"[WORKSPACE TRUST WARN] pre-seed failed for {args.task_id}: {exc}")
     worker_script = HERDR_ROOT / "services" / "herdr-worker.py"
