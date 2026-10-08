@@ -370,23 +370,28 @@ class TestOSSandboxBoundary(unittest.TestCase):
     def test_14c_controlled_egress_proxy_allows_whitelisted_destination(self):
         """Controlled egress proxy must approve whitelisted Google Gemini API destination (P1)."""
         import socket
+        from unittest.mock import patch
         from herdr.egress_proxy import ControlledEgressProxy
 
         proxy = ControlledEgressProxy(allowed_patterns=["generativelanguage.googleapis.com", "*.googleapis.com"])
-        proxy_port = proxy.start()
+        dummy_r, dummy_w = socket.socketpair()
         try:
-            s = socket.create_connection(("127.0.0.1", proxy_port), timeout=5.0)
-            s.sendall(b"CONNECT generativelanguage.googleapis.com:443 HTTP/1.1\r\nHost: generativelanguage.googleapis.com:443\r\n\r\n")
-            resp = s.recv(1024).decode("utf-8", errors="ignore")
-            s.close()
-            self.assertIn("200 Connection Established", resp)
+            with patch.object(proxy, "connect_upstream", return_value=dummy_w):
+                proxy_port = proxy.start()
+                s = socket.create_connection(("127.0.0.1", proxy_port), timeout=5.0)
+                s.sendall(b"CONNECT generativelanguage.googleapis.com:443 HTTP/1.1\r\nHost: generativelanguage.googleapis.com:443\r\n\r\n")
+                resp = s.recv(1024).decode("utf-8", errors="ignore")
+                s.close()
+                self.assertIn("200 Connection Established", resp)
 
-            summary = proxy.get_audit_summary()
-            self.assertGreaterEqual(summary["allowed"], 1)
-            self.assertEqual(summary["events"][-1]["host"], "generativelanguage.googleapis.com")
-            self.assertEqual(summary["events"][-1]["action"], "ALLOWED")
+                summary = proxy.get_audit_summary()
+                self.assertGreaterEqual(summary["allowed"], 1)
+                self.assertEqual(summary["events"][-1]["host"], "generativelanguage.googleapis.com")
+                self.assertEqual(summary["events"][-1]["action"], "ALLOWED")
         finally:
             proxy.stop()
+            dummy_r.close()
+            dummy_w.close()
 
     @unittest.skipUnless(sys.platform == "darwin" and shutil.which("sandbox-exec"), "Requires macOS sandbox-exec")
     def test_14d_seatbelt_outbound_strictly_restricted_to_controlled_proxy_port(self):

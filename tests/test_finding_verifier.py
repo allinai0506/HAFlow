@@ -437,6 +437,27 @@ class FindingVerifierSafetyTestCase(unittest.TestCase):
             self.assertEqual(res["counter_evidence"]["type"], "definition_exists")
             self.assertEqual(res["counter_evidence"]["symbol"], "verify_os_security_isolation")
 
+    def test_adversarial_resource_leak_unclosed_connection_not_rejected_by_check_e(self):
+        """Resource leak findings mentioning '未闭合' (e.g. 数据库连接未闭合) must NOT be rejected as syntax errors."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            sample_code = (
+                "def fetch_data():\n"
+                "    conn = create_connection()\n"
+                "    return conn.query()\n"
+            )
+            (tmp / "db.py").write_text(sample_code, encoding="utf-8")
+            finding = {
+                "file": "db.py",
+                "start_line": 2,
+                "end_line": 3,
+                "message": "数据库连接未闭合，在异常退出时存在连接泄漏风险",
+            }
+            res = verify_finding(finding, repo_dir=tmp)
+            # Should NOT be rejected by Check E (valid syntax refutation)
+            self.assertNotEqual(res["verification_status"], "rejected")
+            self.assertEqual(res["verification_status"], "uncertain")
+
 
 if __name__ == "__main__":
     unittest.main()

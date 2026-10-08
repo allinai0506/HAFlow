@@ -577,7 +577,7 @@ def verify_finding(
         # -------------------------------------------------------------
         syntax_err_match = re.search(
             r"(?:SyntaxError|invalid syntax|unexpected EOF|Incomplete function definition|unclosed function call|missing closing statement|"
-            r"unterminated string|unclosed string|未闭合字符串|未闭合|语法错误|字符串未闭合|未闭合括号|unclosed parenthesis)",
+            r"unterminated string|unclosed string|未闭合字符串|字符串未闭合|未闭合括号|括号未闭合|未闭合代码块|语法错误|unclosed parenthesis)",
             msg,
             re.IGNORECASE,
         )

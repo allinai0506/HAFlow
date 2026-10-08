@@ -21,8 +21,8 @@
   4. **双语语法与符号反驳规则扩展 (`herdr/finding_verifier.py`)**：Check B 扩展中英文“未定义 / 未声明 / 不存在”符号匹配，并在符号存在定义或 Import 时判定 `rejected`；Check E 扩展中英文“未闭合字符串 / unterminated string / 语法错误”匹配，当目标文件通过 `ast.parse()` 解析时直接判定 `rejected`。
 - 证据：
   1. `pytest -v tests/test_os_sandbox_boundary.py` 20/20 PASS（含直接 443 拦截、非授权 Host 403 拦截、白名单 Host 放行、动态代理端口放行与清理验证）；
-  2. `pytest -v tests/test_finding_verifier.py` 19/19 PASS（含中文未闭合字符串反驳、中文符号未定义反驳）；
-  3. 全量测试 `tests/test_os_sandbox_boundary.py tests/test_auto_pr_review.py tests/test_finding_verifier.py tests/test_review_benchmark.py` 74/74 PASS；
+  2. `pytest -v tests/test_finding_verifier.py` 20/20 PASS（含中文未闭合字符串反驳、中文符号未定义反驳、防误伤未闭合连接/资源反驳用例）；
+  3. 全量测试 `tests/test_os_sandbox_boundary.py tests/test_auto_pr_review.py tests/test_finding_verifier.py tests/test_review_benchmark.py` 75/75 PASS；
   4. `python3 -m compileall -q herdr services bin tests` clean；
   5. `git diff --check` clean。
 
