@@ -64,6 +64,13 @@ class TestAutoPRReview(unittest.TestCase):
         self.assertNotIn("pull_request_target", content, "Must not use pull_request_target")
         self.assertIn("concurrency:", content)
         self.assertIn("cancel-in-progress: true", content)
+        # Security boundary: PR title and body must be passed via env variables to prevent script injection
+        self.assertIn("PR_TITLE: ${{ github.event.pull_request.title }}", content)
+        self.assertIn("PR_BODY: ${{ github.event.pull_request.body }}", content)
+        self.assertIn('--pr-title "$PR_TITLE"', content)
+        self.assertIn('--pr-body "$PR_BODY"', content)
+        self.assertNotIn('--pr-title "${{ github.event.pull_request.title }}"', content)
+        self.assertNotIn('--pr-body "${{ github.event.pull_request.body }}"', content)
 
     # 2. synchronize 更新后重新审核
     def test_02_synchronize_trigger_and_commit_alignment(self):

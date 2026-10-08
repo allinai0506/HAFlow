@@ -763,7 +763,7 @@ def review_diff(
                 }
             except Exception as fb_exc:
                 shadow_status = "shadow_skipped"
-                skip_reason = f"Shadow agent '{target_shadow_agent}' matches primary reviewer" if is_shadow else "Shadow mode not requested"
+                skip_reason = "Primary review failed before shadow execution could proceed" if is_shadow else "Shadow mode not requested"
                 return {
                     "status": "failed",
                     "error": f"Primary failed ({fallback_reason}) and fallback failed ({fb_exc})",
@@ -780,7 +780,7 @@ def review_diff(
                 }
         else:
             shadow_status = "shadow_skipped"
-            skip_reason = f"Shadow agent '{target_shadow_agent}' matches primary reviewer" if is_shadow else "Shadow mode not requested"
+            skip_reason = "Primary review failed before shadow execution could proceed" if is_shadow else "Shadow mode not requested"
             return {
                 "status": "failed",
                 "error": str(exc),

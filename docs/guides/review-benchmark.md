@@ -79,6 +79,27 @@ bin/herdr-review-bench compare \
 ```
 对比报告自动计算 Recall 与 Precision 的 Delta 变化矩阵及趋势提示。
 
+### 4.4 自动化 PR 审核闭环 (`auto-pr-review`)
+在 CI 流水线或本地针对指定 PR 执行完整的规则审核、影子审核、Fact-Check 与工件生成：
+```bash
+python3 bin/herdr-review-bench auto-pr-review \
+  --repo . \
+  --base "<BASE_SHA>" \
+  --head "<HEAD_SHA>" \
+  --pr-number "<PR_NUMBER>" \
+  --pr-title "$PR_TITLE" \
+  --pr-body "$PR_BODY" \
+  --output-dir ".omc/review_artifacts" \
+  --github-token "$GITHUB_TOKEN" \
+  --repo-slug "allinai0506/HAFlow" \
+  --agent "rule" \
+  --shadow-agent "agy" \
+  --timeout 180
+```
+核心产出：
+- 生成 4 项标准审计工件至 `--output-dir`：`review-result.json`、`shadow-review.json`、`context-audit.json`、`finding-verification.json`。
+- 自动向 GitHub PR 提交或原地更新单例审核评论（携带 HEAD SHA 防过期覆盖保护）。
+
 ---
 
 ## 5. 配置文件说明 (`baseline.json`)

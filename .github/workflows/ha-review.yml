@@ -48,14 +48,16 @@ jobs:
       - name: Run Auto PR Review
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
         run: |
           python3 bin/herdr-review-bench auto-pr-review \
             --repo . \
             --base "${{ github.event.pull_request.base.sha }}" \
             --head "${{ github.event.pull_request.head.sha }}" \
             --pr-number "${{ github.event.pull_request.number }}" \
-            --pr-title "${{ github.event.pull_request.title }}" \
-            --pr-body "${{ github.event.pull_request.body }}" \
+            --pr-title "$PR_TITLE" \
+            --pr-body "$PR_BODY" \
             --output-dir ".omc/review_artifacts" \
             --github-token "${GITHUB_TOKEN}" \
             --repo-slug "${{ github.repository }}" \

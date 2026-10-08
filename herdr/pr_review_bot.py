@@ -186,7 +186,9 @@ def build_audit_artifacts(
 
     # 3. context-audit.json
     context_file = output_dir / "context-audit.json"
-    audit_data = review_result.get("audit") or review_result.get("primary", {}).get("audit") or shadow_data.get("audit")
+    primary_obj = review_result.get("primary") or {}
+    shadow_obj = shadow_data or {}
+    audit_data = review_result.get("audit") or primary_obj.get("audit") or shadow_obj.get("audit")
     if not audit_data:
         audit_data = {
             "status": "not_applicable",
@@ -265,7 +267,7 @@ def post_or_update_pr_comment(
         return {"status": "api_error", "reason": f"failed to query PR metadata: {exc}"}
 
     # Step 2: Query existing comments to find bot marker
-    comments_url = f"{api_base}/repos/{repo_slug}/issues/{pr_number}/comments"
+    comments_url = f"{api_base}/repos/{repo_slug}/issues/{pr_number}/comments?per_page=100"
     req_comments = urllib.request.Request(comments_url, headers=headers)
     existing_comment_id = None
     try:
