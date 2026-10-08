@@ -937,6 +937,64 @@ def test_router_isolation_failure_recovers_after_pool_becomes_eligible(tmp_path)
     assert command[1:3] == ["supersede", "review-router-failed"]
 
 
+def test_router_recovery_treats_concurrent_supersede_as_recovered(tmp_path):
+    controller = load_script("ctrl-router-recovery-race", "services/herdr-controller.py")
+    from herdr import agent_router
+    store = SQLiteStateStore(tmp_path / "state.db")
+    store.save_workflow({"workflow_id": "wf-router-race", "status": "running"})
+    store.save_task({
+        "task_id": "review-router-race",
+        "workflow_id": "wf-router-race",
+        "node": "review",
+        "stage": "review",
+        "agent": "auto",
+        "status": "failed",
+        "failure_reason": "router_isolation_rejected",
+        "task_type": "test",
+    })
+    race = subprocess.CompletedProcess(
+        [], 1, "",
+        "Illegal transition: review-router-race: superseded -> superseded")
+    already = {"task_id": "review-router-race", "status": "superseded",
+               "superseded_by": "review-router-race-r2"}
+    with patch.object(controller, "_get_store", return_value=store), patch.object(
+        agent_router, "choose_agent", return_value="claude"
+    ), patch.object(controller.subprocess, "run", return_value=race), patch.object(
+        controller, "get_task", return_value=already
+    ):
+        assert controller.recover_router_isolation_tasks(
+            "wf-router-race", store.list_tasks()
+        ) is True
+
+
+def test_router_recovery_still_reports_genuine_supersede_failure(tmp_path):
+    controller = load_script("ctrl-router-recovery-neg", "services/herdr-controller.py")
+    from herdr import agent_router
+    store = SQLiteStateStore(tmp_path / "state.db")
+    store.save_workflow({"workflow_id": "wf-router-neg", "status": "running"})
+    store.save_task({
+        "task_id": "review-router-neg",
+        "workflow_id": "wf-router-neg",
+        "node": "review",
+        "stage": "review",
+        "agent": "auto",
+        "status": "failed",
+        "failure_reason": "router_isolation_rejected",
+        "task_type": "test",
+    })
+    denied = subprocess.CompletedProcess([], 2, "", "supersede refused: budget exhausted")
+    still_failed = {"task_id": "review-router-neg", "status": "failed",
+                    "failure_reason": "router_isolation_rejected"}
+    with patch.object(controller, "_get_store", return_value=store), patch.object(
+        agent_router, "choose_agent", return_value="claude"
+    ), patch.object(controller.subprocess, "run", return_value=denied), patch.object(
+        controller, "get_task", return_value=still_failed
+    ):
+        assert controller.recover_router_isolation_tasks(
+            "wf-router-neg", store.list_tasks()
+        ) is False
+
+
 def test_unknown_workflow_does_not_create_ghost_failed_task(tmp_path, monkeypatch):
     module = load_script("herdr-task-unknown-workflow-fix3", "bin/herdr-task")
     os.environ["HERDR_STATE_DB"] = str(tmp_path / "state.db")
