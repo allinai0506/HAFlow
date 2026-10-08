@@ -38,16 +38,29 @@ class TestOSSandboxBoundary(unittest.TestCase):
         except Exception:
             pass
 
-    def test_01_verify_os_isolation_detects_real_kernel_seatbelt(self):
-        """Active probe must verify macOS Seatbelt kernel enforcement or container."""
+    def test_01_verify_os_isolation_detects_real_kernel_seatbelt_with_dedicated_identity(self):
+        """Active probe must verify macOS Seatbelt kernel enforcement when dedicated identity is present."""
         if sys.platform == "darwin":
             sandbox_exec = shutil.which("sandbox-exec")
             if sandbox_exec:
+                from unittest.mock import patch
+                with patch.dict(os.environ, {"HERDR_REVIEWER_GEMINI_API_KEY": "fake_test_key_12345"}):
+                    is_isolated, reason, meta = verify_os_security_isolation(self.repo_dir)
+                    self.assertTrue(is_isolated)
+                    self.assertEqual(meta.get("isolation_type"), "macos-seatbelt")
+                    self.assertIn("sandbox_exec", meta)
+                    self.assertIn("profile", meta)
+                    self.assertIn("isolated_auth_dir", meta)
+
+    def test_01b_verify_os_isolation_fails_closed_without_dedicated_identity(self):
+        """Without dedicated reviewer identity, must fail closed to protect ~/.gemini and Keychain."""
+        if sys.platform == "darwin":
+            from unittest.mock import patch
+            with patch.dict(os.environ, {}, clear=True):
                 is_isolated, reason, meta = verify_os_security_isolation(self.repo_dir)
-                self.assertTrue(is_isolated)
-                self.assertEqual(meta.get("isolation_type"), "macos-seatbelt")
-                self.assertIn("sandbox_exec", meta)
-                self.assertIn("profile", meta)
+                self.assertFalse(is_isolated)
+                self.assertIn("~/.gemini", reason)
+                self.assertIn("Keychain", reason)
 
     def test_02_strict_environment_whitelist(self):
         """Child AI subprocesses must receive ONLY whitelisted environment variables."""
@@ -170,6 +183,106 @@ class TestOSSandboxBoundary(unittest.TestCase):
             res = review_diff(self.repo_dir, "diff", reviewer_agent="rule", shadow_mode=True, shadow_agent="agy")
             self.assertEqual(res["shadow_status"], "shadow_skipped")
             self.assertIn("No OS sandbox", res["shadow"]["reason"])
+
+    @unittest.skipUnless(sys.platform == "darwin" and shutil.which("sandbox-exec"), "Requires macOS sandbox-exec")
+    def test_08_os_kernel_denies_host_gemini_directory(self):
+        """macOS Seatbelt kernel must deny reading or writing ~/.gemini directory (P1-1)."""
+        gemini_dir = Path.home() / ".gemini"
+        if gemini_dir.exists():
+            profile = generate_macos_seatbelt_profile(self.repo_dir)
+            sandbox_bin = shutil.which("sandbox-exec")
+            test_target = next((f for f in gemini_dir.iterdir() if f.is_file()), gemini_dir / "installation_id")
+            cmd = [
+                sandbox_bin,
+                "-p",
+                profile,
+                sys.executable,
+                "-c",
+                f"open('{test_target}', 'r').read()",
+            ]
+            proc = subprocess.run(cmd, capture_output=True, text=True)
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertTrue(
+                "PermissionError" in proc.stderr or "Operation not permitted" in proc.stderr,
+                f"Expected permission error, got: {proc.stderr}",
+            )
+            # Try writing to .gemini
+            write_cmd = [
+                sandbox_bin,
+                "-p",
+                profile,
+                sys.executable,
+                "-c",
+                f"open('{gemini_dir}/test_leak.txt', 'w').write('bad')",
+            ]
+            proc_w = subprocess.run(write_cmd, capture_output=True, text=True)
+            self.assertNotEqual(proc_w.returncode, 0)
+            self.assertFalse((gemini_dir / "test_leak.txt").exists())
+
+    @unittest.skipUnless(sys.platform == "darwin" and shutil.which("sandbox-exec"), "Requires macOS sandbox-exec")
+    def test_09_os_kernel_denies_keychains(self):
+        """macOS Seatbelt kernel must deny reading user and system Keychain databases (P1-2)."""
+        profile = generate_macos_seatbelt_profile(self.repo_dir)
+        sandbox_bin = shutil.which("sandbox-exec")
+        keychain_paths = [
+            Path.home() / "Library/Keychains/login.keychain-db",
+            Path("/Library/Keychains/System.keychain"),
+        ]
+        for kc in keychain_paths:
+            if kc.exists():
+                cmd = [
+                    sandbox_bin,
+                    "-p",
+                    profile,
+                    sys.executable,
+                    "-c",
+                    f"open('{kc}', 'r').read()",
+                ]
+                proc = subprocess.run(cmd, capture_output=True, text=True)
+                self.assertNotEqual(proc.returncode, 0)
+                self.assertTrue(
+                    "PermissionError" in proc.stderr or "Operation not permitted" in proc.stderr,
+                    f"Expected permission error on {kc}, got: {proc.stderr}",
+                )
+
+    @unittest.skipUnless(sys.platform == "darwin" and shutil.which("sandbox-exec"), "Requires macOS sandbox-exec")
+    def test_10_os_kernel_denies_entire_users_tree_except_repo(self):
+        """macOS Seatbelt kernel must deny reading outside the reviewed repo in /Users (P2)."""
+        profile = generate_macos_seatbelt_profile(self.repo_dir)
+        sandbox_bin = shutil.which("sandbox-exec")
+        cmd = [
+            sandbox_bin,
+            "-p",
+            profile,
+            sys.executable,
+            "-c",
+            "import os; os.listdir('/Users')",
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertTrue(
+            "PermissionError" in proc.stderr or "Operation not permitted" in proc.stderr,
+            f"Expected permission error on /Users, got: {proc.stderr}",
+        )
+
+    @unittest.skipUnless(sys.platform == "darwin" and shutil.which("sandbox-exec"), "Requires macOS sandbox-exec")
+    def test_11_os_kernel_global_deny_file_write(self):
+        """macOS Seatbelt kernel must globally deny writes outside /tmp (P2)."""
+        profile = generate_macos_seatbelt_profile(self.repo_dir)
+        sandbox_bin = shutil.which("sandbox-exec")
+        targets = ["/Library/test_leak.txt", "/opt/test_leak.txt"]
+        for target in targets:
+            cmd = [
+                sandbox_bin,
+                "-p",
+                profile,
+                sys.executable,
+                "-c",
+                f"open('{target}', 'w').write('bad')",
+            ]
+            proc = subprocess.run(cmd, capture_output=True, text=True)
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertFalse(Path(target).exists())
 
 
 if __name__ == "__main__":

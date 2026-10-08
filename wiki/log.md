@@ -8,6 +8,27 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-10-08] sec | PR #185 P1/P2 安全阻塞项清零：主用户 ~/.gemini 与 Keychain 内核级硬拒绝、/Users 树默认收紧、共享宿主机无隔离凭据安全熔断 (fail-closed) 与影子全异常保护
+
+- 背景：
+  1. PR #185 自动化复核发现沙盒权限过宽阻塞项：macOS Seatbelt 放行了主用户 `~/.gemini` 与 Keychain 路径，存在不可信 PR 越权读取开发者主认证材料的高危风险；
+  2. `(allow default)` 未对 `/Users`、`/Volumes` 及全局写操作形成严密边界；
+  3. 宿主机未分离独立认证身份时，若勉强执行 AI 审核将必然接触主用户认证材料；
+  4. 影子审核逻辑外层缺少统一异常兜底，存在异常击穿影响主门禁的风险。
+- 变更：
+  1. **P1-1 主用户模型配置与凭据硬拒绝**：Seatbelt 内核沙盒显式配置 `(deny file-read* (subpath "{home}/.gemini"))` 与 `(deny file-write* (subpath "{home}/.gemini"))`，彻底阻断对主用户模型认证目录的任何接触；
+  2. **P1-2 Keychain 访问彻底封锁**：内核沙盒显式拒绝主用户 `~/Library/Keychains` 以及系统级 `/Library/Keychains`、`/System/Library/Keychains`；
+  3. **P2 文件系统权限最小化收紧**：加入全局 `(deny file-write*)`，并对 `/Users` 与 `/Volumes` 全树默认实施 `deny file-read*`，仅对被审仓库快照与 `/tmp` 临时执行目录放行；
+  4. **专用凭据契约与共享宿主机安全熔断 (Fail-Closed)**：确立 `HERDR_REVIEWER_GEMINI_API_KEY` 与 `HERDR_REVIEWER_AUTH_DIR` 专用凭据契约；在未分离专用运行身份的个人宿主机上，严格判定为未隔离并安全跳过（`shadow_skipped`），绝不冒充 `SECURITY_VALID`，Rule 审核器充当唯一可靠门禁；
+  5. **影子异常全捕获防护**：`review_diff` 顶层统一捕获影子审核所有阶段（环境探针、隔离验证、子进程执行、输出解析）的异常，确保影子旁路任何故障 100% 不破坏 Rule 主门禁；
+  6. **真实内核边界测试完备覆盖 (`tests/test_os_sandbox_boundary.py`)**：12 项真实系统调用边界测试全部 PASS（涵盖 `.gemini` 拦截、Keychain 拦截、`/Users` 树拦截、全局写拦截、无凭据安全熔断等）。
+- 证据：
+  1. `pytest -v tests/test_os_sandbox_boundary.py` 12/12 PASS；
+  2. `pytest -v tests/test_auto_pr_review.py` 13/13 PASS；
+  3. `pytest -q tests/test_finding_verifier.py tests/test_review_benchmark.py` 38/38 PASS；
+  4. `python3 -m compileall -q herdr services bin tests` clean；
+  5. `git diff --check` clean。
+
 ## [2026-10-08] sec | PR #185 安全隔离阻塞项修复：macOS Seatbelt 内核沙盒动态绑定、最小环境变量白名单、主动内核探针与伪造绕过彻底移除
 
 - 背景：

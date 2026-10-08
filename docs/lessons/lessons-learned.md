@@ -6447,3 +6447,26 @@ wf-nexusarchive-1008-01 手工替代重派时复用 dispatch-operation-id 被拒
 
 ### 验证命令 / 关联证据
 `pytest -v tests/test_os_sandbox_boundary.py tests/test_auto_pr_review.py`（7 项 OS 级边界用例全部 PASS，涵盖私有 Canary 文件拦截、Runner 凭据拦截、写保护拦截、允许快照放行与白名单校验）；沙盒穿透实证会话记录（`aa34823a-d7b2-4289-84b9-a47f6e821ea9`、`96852c72-8165-416a-87ce-e5f0b18a77ee`）。
+
+## 149. 共享宿主机认证材料硬隔离与不可信 PR 审核的 Fail-Closed 决策原则（2026-10-08）
+
+### 问题背景
+在 PR #185 自动化复核过程中发现，即便建立了 macOS Seatbelt 沙盒，由于初始版本放行了主用户 `~/.gemini` 与 Keychain 路径以复用宿主机的模型登录凭据，导致沙盒权限边界过宽：
+1. `~/.gemini` 包含 OAuth Token、会话数据与配置；若 AI Reviewer 的工具（`view_file` 等）发生提示词注入越界，仍能读取主开发者的认证材料；
+2. 宿主机 Keychain 数据库包含开发者私有密码与凭据，绝不应暴露给审查不可信 PR 的子进程；
+3. `(allow default)` 缺少对 `/Users`、`/Volumes` 及非临时文件系统写入的严密封闭。
+核心矛盾在于：在共享宿主机上，如果缺少独立的 Reviewer 认证凭据，强行运行真实 LLM 就必然牺牲隔离性；反之，若实施硬隔离，LLM 就无法获得合法凭据。
+
+### 经验教训
+1. **认证与隔离不可兼得时，严格选择安全（Fail-Closed）**：不可信代码审核绝不能以妥协主开发者私有凭据为代价。未配置独立隔离凭据（`HERDR_REVIEWER_GEMINI_API_KEY`）或独立受限用户/容器时，必须诚实返回 `shadow_skipped`，严禁通过放行个人目录蒙混过关。
+2. **Rule 主审核器提供生产确定性兜底**：HAFlow 架构中 Rule 主审核器独立运行且具备完备的工程规则集；AI 影子审核仅为旁路探针，跳过影子审核绝不影响 PR 主门禁的完整性与安全性。
+3. **全局默认拒绝写（deny file-write*）与系统级凭据封锁**：Seatbelt Profile 必须声明全局 `deny file-write*`，仅对 `/tmp` 临时执行目录放行写入；不仅拒绝用户级 Keychain，还必须同步拒绝系统级 `/Library/Keychains`。
+
+### 操作规范
+1. **硬拒绝主用户模型与钥匙串目录**：在 macOS Seatbelt Profile 中硬编码 `(deny file-read* (subpath "{home}/.gemini"))`、`(deny file-write* (subpath "{home}/.gemini"))` 及 `(deny file-read* (subpath "{home}/Library/Keychains"))`。
+2. **全树收紧与全局禁止写入**：显式对 `/Users` 与 `/Volumes` 设置 `deny file-read*`；首行声明 `(deny file-write*)`，工作区与宿主机默认只读。
+3. **安全隔离判定 fail-closed**：`verify_os_security_isolation` 在 macOS 上仅在检测到 `HERDR_REVIEWER_GEMINI_API_KEY` 或专用 `HERDR_REVIEWER_AUTH_DIR` 时才放行 Seatbelt 执行，否则返回明确的安全策略拒绝说明。
+4. **影子异常全捕获兜底**：`review_diff` 顶层统一包裹 try-except，确保影子阶段任何探针或执行崩溃绝不反噬 Rule 主门禁。
+
+### 验证命令 / 关联证据
+`pytest -v tests/test_os_sandbox_boundary.py`（12 项 OS 边界与凭据隔离实测用例 100% PASS）；`pytest -v tests/test_auto_pr_review.py`（13 项用例 PASS）；GitHub Actions Run 与 PR #185 评审链证据。
