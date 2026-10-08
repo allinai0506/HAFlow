@@ -15,6 +15,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -633,7 +634,6 @@ def run_agent_review(
     child_env = {k: os.environ[k] for k in STRICT_ENV_WHITELIST_KEYS if k in os.environ}
     if isolation_meta and isolation_meta.get("isolated_auth_dir"):
         child_env["HOME"] = isolation_meta["isolated_auth_dir"]
-        child_env["USER"] = "herdr-ai-reviewer"
     if isolation_meta and isolation_meta.get("isolated_api_key"):
         child_env["GEMINI_API_KEY"] = isolation_meta["isolated_api_key"]
 
@@ -659,6 +659,12 @@ def run_agent_review(
         raise RuntimeError(f"agent_startup_failed: executable not found for '{agent_name}': {exc}") from exc
     except Exception as exc:
         raise RuntimeError(f"agent_startup_failed: {exc}") from exc
+    finally:
+        # P1-2: Wipe temporary reviewer auth directory after review execution finishes
+        if isolation_meta and isolation_meta.get("is_temp_auth_dir"):
+            temp_auth_path = isolation_meta.get("isolated_auth_dir")
+            if temp_auth_path and os.path.exists(temp_auth_path):
+                shutil.rmtree(temp_auth_path, ignore_errors=True)
 
     if proc.returncode != 0:
         raise RuntimeError(f"agent_startup_failed: return code {proc.returncode}, stderr: {proc.stderr[:300]}")
@@ -735,14 +741,15 @@ STRICT_ENV_WHITELIST_KEYS = (
 
 
 def generate_macos_seatbelt_profile(repo_dir: Path, isolated_auth_dir: Optional[Path] = None) -> str:
-    """Generate macOS Seatbelt kernel profile strictly limiting filesystem read/write.
+    """Generate macOS Seatbelt kernel profile strictly limiting filesystem read/write and network access.
 
     Addresses PR #185 P1 & P2 audit findings:
     - P1-1: Host ~/.gemini is completely DENIED at kernel level.
     - P1-2: Host Keychain databases are completely DENIED at kernel level.
-    - P2: Entire /Users filesystem tree is DENIED by default.
+    - P1-2: Network ingress is completely DENIED; network egress is strictly limited to HTTPS (443), DNS (53), and local proxy if present.
+    - P1-2: Dedicated isolated reviewer directory is permitted only if strictly validated (not symlink, 0700).
+    - P2: Entire /Users and /Volumes filesystem trees are DENIED by default.
     - Read-only access is strictly granted ONLY to the reviewed repository snapshot.
-    - Dedicated isolated reviewer directory is permitted if configured.
     """
     home = Path.home().resolve()
     repo_resolved = repo_dir.resolve()
@@ -761,6 +768,19 @@ def generate_macos_seatbelt_profile(repo_dir: Path, isolated_auth_dir: Optional[
     if isolated_auth_dir:
         auth_resolved = isolated_auth_dir.resolve()
         isolated_allow_rules = f'\n(allow file-read* (subpath "{auth_resolved}"))\n(allow file-write* (subpath "{auth_resolved}"))'
+
+    # P1-2 Network egress filtering: allow only HTTPS (443), DNS (53), and explicit proxy ports
+    proxy_rules = []
+    for p_key in ("http_proxy", "https_proxy", "all_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
+        p_val = os.environ.get(p_key, "")
+        if p_val:
+            m = re.search(r":(\d+)", p_val)
+            if m:
+                port = m.group(1)
+                rule = f'(allow network-outbound (remote tcp "localhost:{port}"))'
+                if rule not in proxy_rules:
+                    proxy_rules.append(rule)
+    extra_proxy_rules = ("\n" + "\n".join(proxy_rules)) if proxy_rules else ""
 
     return f"""(version 1)
 (allow default)
@@ -794,6 +814,12 @@ def generate_macos_seatbelt_profile(repo_dir: Path, isolated_auth_dir: Optional[
 (allow file-read* (subpath "/private/tmp"))
 (allow file-write* (subpath "/private/tmp"))
 (allow file-write* (subpath "/var/folders"))
+;; P1-2: Strict network lockdown: deny inbound; restrict outbound to HTTPS (443) and DNS (53)
+(deny network-inbound)
+(deny network-outbound)
+(allow network-outbound (remote tcp "*:443"))
+(allow network-outbound (remote udp "*:53"))
+(allow network-outbound (remote tcp "*:53")){extra_proxy_rules}
 """
 
 
@@ -858,8 +884,22 @@ def verify_os_security_isolation(repo_dir: Path) -> Tuple[bool, str, Dict[str, A
             isolated_auth_dir_env = os.environ.get("HERDR_REVIEWER_AUTH_DIR")
 
             if isolated_api_key or isolated_auth_dir_env:
-                isolated_dir = Path(isolated_auth_dir_env) if isolated_auth_dir_env else Path("/tmp/haflow-reviewer-auth")
-                isolated_dir.mkdir(parents=True, exist_ok=True)
+                is_temp_created = False
+                if isolated_auth_dir_env:
+                    raw_auth_path = Path(isolated_auth_dir_env)
+                    if raw_auth_path.is_symlink() or not raw_auth_path.is_dir():
+                        return False, "Configured HERDR_REVIEWER_AUTH_DIR must be a real directory and cannot be a symlink", {}
+                    isolated_dir = raw_auth_path.resolve()
+                    try:
+                        os.chmod(isolated_dir, 0o700)
+                    except Exception as perm_err:
+                        return False, f"Failed to secure HERDR_REVIEWER_AUTH_DIR permissions (0700): {perm_err}", {}
+                else:
+                    temp_dir_str = tempfile.mkdtemp(prefix="haflow-reviewer-auth-")
+                    isolated_dir = Path(temp_dir_str).resolve()
+                    os.chmod(isolated_dir, 0o700)
+                    is_temp_created = True
+
                 profile = generate_macos_seatbelt_profile(repo_dir, isolated_auth_dir=isolated_dir)
                 return True, "macOS Seatbelt OS-level kernel sandbox with dedicated reviewer identity verified", {
                     "isolation_type": "macos-seatbelt",
@@ -867,6 +907,10 @@ def verify_os_security_isolation(repo_dir: Path) -> Tuple[bool, str, Dict[str, A
                     "profile": profile,
                     "isolated_auth_dir": str(isolated_dir),
                     "isolated_api_key": isolated_api_key,
+                    "is_temp_auth_dir": is_temp_created,
+                    "actual_execution_user": os.environ.get("USER", "user"),
+                    "uid": os.getuid() if hasattr(os, "getuid") else None,
+                    "user_isolation_note": "Executing as host user under macOS Seatbelt kernel sandbox, not a separate OS user account",
                 }
             else:
                 return False, (

@@ -284,6 +284,99 @@ class TestOSSandboxBoundary(unittest.TestCase):
             self.assertNotEqual(proc.returncode, 0)
             self.assertFalse(Path(target).exists())
 
+    @unittest.skipUnless(sys.platform == "darwin" and shutil.which("sandbox-exec"), "Requires macOS sandbox-exec")
+    def test_12_os_kernel_denies_network_inbound(self):
+        """macOS Seatbelt kernel must deny network binding / listening (P1-2)."""
+        profile = generate_macos_seatbelt_profile(self.repo_dir)
+        sandbox_bin = shutil.which("sandbox-exec")
+        cmd = [
+            sandbox_bin,
+            "-p",
+            profile,
+            sys.executable,
+            "-c",
+            "import socket; s = socket.socket(); s.bind(('127.0.0.1', 19876))",
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertTrue(
+            "PermissionError" in proc.stderr or "Operation not permitted" in proc.stderr,
+            f"Expected permission error on bind(), got: {proc.stderr}",
+        )
+
+    @unittest.skipUnless(sys.platform == "darwin" and shutil.which("sandbox-exec"), "Requires macOS sandbox-exec")
+    def test_13_os_kernel_denies_unauthorized_outbound_network_ports(self):
+        """macOS Seatbelt kernel must deny outbound connections to non-HTTPS ports like 80/22 (P1-2)."""
+        profile = generate_macos_seatbelt_profile(self.repo_dir)
+        sandbox_bin = shutil.which("sandbox-exec")
+        cmd = [
+            sandbox_bin,
+            "-p",
+            profile,
+            sys.executable,
+            "-c",
+            "import socket; s = socket.socket(); s.connect(('1.1.1.1', 80))",
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertTrue(
+            "PermissionError" in proc.stderr or "Operation not permitted" in proc.stderr,
+            f"Expected permission error on port 80, got: {proc.stderr}",
+        )
+
+    @unittest.skipUnless(sys.platform == "darwin" and shutil.which("sandbox-exec"), "Requires macOS sandbox-exec")
+    def test_14_os_kernel_allows_outbound_https_port_443(self):
+        """macOS Seatbelt kernel must allow outbound connections to HTTPS port 443 for LLM API (P1-2)."""
+        profile = generate_macos_seatbelt_profile(self.repo_dir)
+        sandbox_bin = shutil.which("sandbox-exec")
+        cmd = [
+            sandbox_bin,
+            "-p",
+            profile,
+            sys.executable,
+            "-c",
+            "import socket; s = socket.socket(); s.connect(('1.1.1.1', 443)); print('connected_443_ok')",
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0)
+        self.assertIn("connected_443_ok", proc.stdout)
+
+    def test_15_dynamic_auth_dir_permissions_and_symlink_defense(self):
+        """Dynamic auth directory must have 0700 permissions and reject symlinks (P1-1 & P1-2)."""
+        import stat
+        import tempfile
+        from unittest.mock import patch
+
+        if sys.platform == "darwin" and shutil.which("sandbox-exec"):
+            # 1. Verify dynamic creation creates secure 0700 directory
+            with patch.dict(os.environ, {"HERDR_REVIEWER_GEMINI_API_KEY": "fake_key_123"}, clear=True):
+                is_iso, _, meta = verify_os_security_isolation(self.repo_dir)
+                self.assertTrue(is_iso)
+                auth_dir = Path(meta["isolated_auth_dir"])
+                self.assertTrue(auth_dir.exists())
+                mode = stat.S_IMODE(os.stat(auth_dir).st_mode)
+                self.assertEqual(mode, 0o700)
+                self.assertEqual(meta["actual_execution_user"], os.environ.get("USER", "user"))
+                self.assertIn("host user", meta["user_isolation_note"].lower())
+                # cleanup temp dir
+                if meta.get("is_temp_auth_dir"):
+                    shutil.rmtree(auth_dir, ignore_errors=True)
+
+            # 2. Verify refusal of symlinks
+            with tempfile.TemporaryDirectory() as t_dir:
+                real_dir = Path(t_dir) / "real"
+                real_dir.mkdir()
+                sym_dir = Path(t_dir) / "symlink"
+                sym_dir.symlink_to(real_dir)
+                with patch.dict(
+                    os.environ,
+                    {"HERDR_REVIEWER_GEMINI_API_KEY": "fake_key_123", "HERDR_REVIEWER_AUTH_DIR": str(sym_dir)},
+                    clear=True,
+                ):
+                    is_iso, reason, _ = verify_os_security_isolation(self.repo_dir)
+                    self.assertFalse(is_iso)
+                    self.assertIn("symlink", reason)
+
 
 if __name__ == "__main__":
     unittest.main()

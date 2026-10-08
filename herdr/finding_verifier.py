@@ -554,6 +554,30 @@ def verify_finding(
                     }
 
         # -------------------------------------------------------------
+        # Refutation Check E: Syntax Error / Incomplete Syntax Claim
+        # -------------------------------------------------------------
+        syntax_err_match = re.search(
+            r"(?:SyntaxError|invalid syntax|unexpected EOF|Incomplete function definition|unclosed function call|missing closing statement)",
+            msg,
+            re.IGNORECASE,
+        )
+        if syntax_err_match:
+            # tree is not None means ast.parse(content) parsed the whole file with zero syntax errors!
+            return {
+                **finding,
+                "verification_status": "rejected",
+                "verification_reason": (
+                    f"counter_evidence_found: Finding claims syntax defect ({syntax_err_match.group(0)}), "
+                    f"but target file '{file_rel}' parses successfully with zero AST SyntaxErrors in the target revision."
+                ),
+                "counter_evidence": {
+                    "type": "valid_ast_syntax",
+                    "file": file_rel,
+                    "ast_parsed": True,
+                },
+            }
+
+        # -------------------------------------------------------------
         # Strictly Closed-Form Verified Check
         # -------------------------------------------------------------
         verified_proof = _check_verified_defect(tree, target_scope, msg, lines, start_line, end_line)

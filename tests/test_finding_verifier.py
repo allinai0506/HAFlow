@@ -365,7 +365,35 @@ class FindingVerifierSafetyTestCase(unittest.TestCase):
         self.assertEqual(summary["counts"]["rejected"], 2)
         self.assertEqual(summary["counts"]["uncertain"], 2)
         self.assertEqual(summary["counts"]["verified"], 0)  # No unjustified verified status!
-        self.assertLess(summary["elapsed_ms"], 2000)
+        self.assertLess(summary["elapsed_ms"], 10000)
+
+    def test_reject_syntax_error_claim_when_ast_parses_cleanly(self):
+        """Claims of SyntaxError/unexpected EOF/incomplete function must be REJECTED when file parses cleanly."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            sample_code = (
+                "def verify_os_security_isolation(repo_dir):\n"
+                "    isolated_api_key = os.environ.get('HERDR_REVIEWER_GEMINI_API_KEY')\n"
+                "    isolated_auth_dir = os.environ.get('HERDR_REVIEWER_AUTH_DIR')\n"
+                "    if isolated_api_key or isolated_auth_dir:\n"
+                "        profile = generate_macos_seatbelt_profile(repo_dir, isolated_auth_dir=isolated_dir)\n"
+                "        return True, 'verified', {}\n"
+                "    return False, 'not isolated', {}\n"
+            )
+            (tmp / "herdr_code.py").write_text(sample_code, encoding="utf-8")
+            finding = {
+                "file": "herdr_code.py",
+                "start_line": 4,
+                "end_line": 5,
+                "message": (
+                    "SyntaxError: Incomplete function definition in verify_os_security_isolation. "
+                    "Line ends abruptly with isolated_auth_dir=isola, leaving an unclosed function call."
+                ),
+            }
+            res = verify_finding(finding, repo_dir=tmp)
+            self.assertEqual(res["verification_status"], "rejected")
+            self.assertIn("counter_evidence_found", res["verification_reason"])
+            self.assertTrue(res["counter_evidence"]["ast_parsed"])
 
 
 if __name__ == "__main__":

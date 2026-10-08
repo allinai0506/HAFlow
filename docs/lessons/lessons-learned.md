@@ -6459,14 +6459,15 @@ wf-nexusarchive-1008-01 手工替代重派时复用 dispatch-operation-id 被拒
 
 ### 经验教训
 1. **认证与隔离不可兼得时，严格选择安全（Fail-Closed）**：不可信代码审核绝不能以妥协主开发者私有凭据为代价。未配置独立隔离凭据（`HERDR_REVIEWER_GEMINI_API_KEY`）或独立受限用户/容器时，必须诚实返回 `shadow_skipped`，严禁通过放行个人目录蒙混过关。
-2. **Rule 主审核器提供生产确定性兜底**：HAFlow 架构中 Rule 主审核器独立运行且具备完备的工程规则集；AI 影子审核仅为旁路探针，跳过影子审核绝不影响 PR 主门禁的完整性与安全性。
-3. **全局默认拒绝写（deny file-write*）与系统级凭据封锁**：Seatbelt Profile 必须声明全局 `deny file-write*`，仅对 `/tmp` 临时执行目录放行写入；不仅拒绝用户级 Keychain，还必须同步拒绝系统级 `/Library/Keychains`。
+2. **执行身份如实标注，禁止伪称独立系统用户**：通过子进程环境变量修改 `USER` / `HOME` 不改变操作系统 UID。执行身份真实仍为宿主机用户，隔离必须且完全依赖 Seatbelt 内核系统调用拦截，不夸大宣称系统用户级隔离。
+3. **认证目录动态化与最小网络出站收紧**：专用认证目录严禁使用可预测固定路径，必须使用临时随机目录（`0700` 权限、防软链接攻击、进程退出自动安全擦除）；Seatbelt 必须显式封锁 `network-inbound`，并对 `network-outbound` 施加严格端口白名单（仅 443、53 及显式代理），阻断凭据通过非授权端口外逸。
+4. **语法误报确凿反驳**：对于声称代码存在 SyntaxError / incomplete syntax 的误报，若代码在同 revision 下成功通过 AST 解析，直接作为 counter-evidence 定性为 `rejected`。
 
 ### 操作规范
 1. **硬拒绝主用户模型与钥匙串目录**：在 macOS Seatbelt Profile 中硬编码 `(deny file-read* (subpath "{home}/.gemini"))`、`(deny file-write* (subpath "{home}/.gemini"))` 及 `(deny file-read* (subpath "{home}/Library/Keychains"))`。
-2. **全树收紧与全局禁止写入**：显式对 `/Users` 与 `/Volumes` 设置 `deny file-read*`；首行声明 `(deny file-write*)`，工作区与宿主机默认只读。
-3. **安全隔离判定 fail-closed**：`verify_os_security_isolation` 在 macOS 上仅在检测到 `HERDR_REVIEWER_GEMINI_API_KEY` 或专用 `HERDR_REVIEWER_AUTH_DIR` 时才放行 Seatbelt 执行，否则返回明确的安全策略拒绝说明。
-4. **影子异常全捕获兜底**：`review_diff` 顶层统一包裹 try-except，确保影子阶段任何探针或执行崩溃绝不反噬 Rule 主门禁。
+2. **全树收紧、全局只读与最小网络白名单**：显式对 `/Users` 与 `/Volumes` 设置 `deny file-read*`；首行声明 `(deny file-write*)`；加入 `(deny network-inbound)`、`(deny network-outbound)`，仅白名单放行 443 / 53 及显式本地代理。
+3. **动态私有认证目录与安全生命周期**：动态通过 `tempfile.mkdtemp(prefix="haflow-reviewer-auth-")` 创建 `0700` 私有目录，运行结束通过 `finally` 执行 `shutil.rmtree` 彻底销毁；专用 API Key 遵循最小权限原则（仅推理权限，一键可吊销）。
+4. **影子异常全捕获与语法误报驳回**：`review_diff` 顶层统一包裹 try-except，确保影子阶段任何探针或执行崩溃绝不反噬 Rule 主门禁；`finding_verifier` 增加 AST 语法反驳规则。
 
 ### 验证命令 / 关联证据
-`pytest -v tests/test_os_sandbox_boundary.py`（12 项 OS 边界与凭据隔离实测用例 100% PASS）；`pytest -v tests/test_auto_pr_review.py`（13 项用例 PASS）；GitHub Actions Run 与 PR #185 评审链证据。
+`pytest -v tests/test_os_sandbox_boundary.py`（16 项 OS 边界、网络端口白名单与凭据隔离实测用例 100% PASS）；`pytest -v tests/test_finding_verifier.py`（17 项 AST 语法与反驳用例 PASS）；`pytest -v tests/test_auto_pr_review.py`（13 项用例 PASS）；GitHub Actions Run 与 PR #185 评审链证据。

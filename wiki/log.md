@@ -8,26 +8,26 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
-## [2026-10-08] sec | PR #185 P1/P2 安全阻塞项清零：主用户 ~/.gemini 与 Keychain 内核级硬拒绝、/Users 树默认收紧、共享宿主机无隔离凭据安全熔断 (fail-closed) 与影子全异常保护
+## [2026-10-08] sec | PR #185 P1/P2 最终安全收敛：真实执行身份准确标注、专用认证目录动态化/防软链接/自动擦除、出入站最小网络权限收紧与 AST 语法误报驳回
 
 - 背景：
-  1. PR #185 自动化复核发现沙盒权限过宽阻塞项：macOS Seatbelt 放行了主用户 `~/.gemini` 与 Keychain 路径，存在不可信 PR 越权读取开发者主认证材料的高危风险；
-  2. `(allow default)` 未对 `/Users`、`/Volumes` 及全局写操作形成严密边界；
-  3. 宿主机未分离独立认证身份时，若勉强执行 AI 审核将必然接触主用户认证材料；
-  4. 影子审核逻辑外层缺少统一异常兜底，存在异常击穿影响主门禁的风险。
+  1. 自动化复核指出 P1-1：更换环境变量 `USER` 并不改变操作系统 UID，不能作为独立系统用户隔离的证据，必须如实标注实际执行身份为宿主机用户并依靠内核 Seatbelt 提供隔离；
+  2. P1-2：固定路径 `/tmp/haflow-reviewer-auth` 存在软链接劫持与残留风险；未限制网络出站会导致 AI 子进程可能向任意网络端口外泄专用凭据；
+  3. AI 评论中由于 Context 裁剪出现声称 `SyntaxError` 的虚假发现，未被 Finding Verifier 自动驳回。
 - 变更：
-  1. **P1-1 主用户模型配置与凭据硬拒绝**：Seatbelt 内核沙盒显式配置 `(deny file-read* (subpath "{home}/.gemini"))` 与 `(deny file-write* (subpath "{home}/.gemini"))`，彻底阻断对主用户模型认证目录的任何接触；
-  2. **P1-2 Keychain 访问彻底封锁**：内核沙盒显式拒绝主用户 `~/Library/Keychains` 以及系统级 `/Library/Keychains`、`/System/Library/Keychains`；
-  3. **P2 文件系统权限最小化收紧**：加入全局 `(deny file-write*)`，并对 `/Users` 与 `/Volumes` 全树默认实施 `deny file-read*`，仅对被审仓库快照与 `/tmp` 临时执行目录放行；
-  4. **专用凭据契约与共享宿主机安全熔断 (Fail-Closed)**：确立 `HERDR_REVIEWER_GEMINI_API_KEY` 与 `HERDR_REVIEWER_AUTH_DIR` 专用凭据契约；在未分离专用运行身份的个人宿主机上，严格判定为未隔离并安全跳过（`shadow_skipped`），绝不冒充 `SECURITY_VALID`，Rule 审核器充当唯一可靠门禁；
-  5. **影子异常全捕获防护**：`review_diff` 顶层统一捕获影子审核所有阶段（环境探针、隔离验证、子进程执行、输出解析）的异常，确保影子旁路任何故障 100% 不破坏 Rule 主门禁；
-  6. **真实内核边界测试完备覆盖 (`tests/test_os_sandbox_boundary.py`)**：12 项真实系统调用边界测试全部 PASS（涵盖 `.gemini` 拦截、Keychain 拦截、`/Users` 树拦截、全局写拦截、无凭据安全熔断等）。
+  1. **P1-1 真实执行身份如实标注**：移除虚假的 `child_env["USER"] = "herdr-ai-reviewer"`，隔离元数据准确记录 `actual_execution_user` 为当前宿主机用户（如 `user`）与真实 UID，明确安全隔离纯粹由 macOS Seatbelt XNU 内核 Profile（`sandbox-exec`）实现；
+  2. **P1-2 动态私有认证目录与全生命周期安全清理**：改用 `tempfile.mkdtemp(prefix="haflow-reviewer-auth-")` 动态生成随机唯一认证目录，权限严格设为 `0700`；对外部指定的 `HERDR_REVIEWER_AUTH_DIR` 进行前置防软链接（`is_symlink()` 拦截）与真实目录校验；`run_agent_review` 引入 `finally` 块，执行完毕立即调用 `shutil.rmtree` 彻底擦除，杜绝任何凭据与状态残留；
+  3. **P1-2 最小网络权限收紧（出入站内核级封锁）**：Seatbelt Profile 中加入 `(deny network-inbound)`（禁止端口监听/反弹 Shell 服务），加入 `(deny network-outbound)`，仅白名单放行 HTTPS（443）、DNS（53）及环境变量显式指定的本地代理端口，彻底阻断 AI 子进程向非授权端口/内网主机外泄凭据；
+  4. **专用凭据运营规范固化**：明确 `HERDR_REVIEWER_GEMINI_API_KEY` 遵循最小权限（仅模型调用，无云管理权限），发生泄露可独立一键吊销；
+  5. **Finding Verifier AST 语法误报自动驳回**：在 `herdr/finding_verifier.py` 中引入 Refutation Check E，当 Finding 声称存在 SyntaxError / incomplete syntax，而文件在同 commit 下通过 `ast.parse()` 成功解析时，直接判定为 `rejected`（反事实证据：`counter_evidence_valid_syntax`）；
+  6. **实证测试完备覆盖**：新增端口监听拦截、非 443 出站端口拦截、443 正常放行、动态目录 `0700` 权限/防软链接、AST 语法反事实驳回等用例。
 - 证据：
-  1. `pytest -v tests/test_os_sandbox_boundary.py` 12/12 PASS；
-  2. `pytest -v tests/test_auto_pr_review.py` 13/13 PASS；
-  3. `pytest -q tests/test_finding_verifier.py tests/test_review_benchmark.py` 38/38 PASS；
-  4. `python3 -m compileall -q herdr services bin tests` clean；
-  5. `git diff --check` clean。
+  1. `pytest -v tests/test_os_sandbox_boundary.py` 16/16 PASS；
+  2. `pytest -v tests/test_finding_verifier.py` 17/17 PASS；
+  3. `pytest -v tests/test_auto_pr_review.py` 13/13 PASS；
+  4. `pytest -q tests/test_review_benchmark.py` 22/22 PASS；
+  5. `python3 -m compileall -q herdr services bin tests` clean；
+  6. `git diff --check` clean。
 
 ## [2026-10-08] sec | PR #185 安全隔离阻塞项修复：macOS Seatbelt 内核沙盒动态绑定、最小环境变量白名单、主动内核探针与伪造绕过彻底移除
 
