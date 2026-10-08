@@ -6284,3 +6284,17 @@ launch 选定 agent 后、Worker 启动前对本次 clone 路径做该 agent 信
 
 ### 验证命令 / 关联证据
 `pytest -q tests/test_workspace_trust.py`（预埋写入、失败识别、健康合并正反例）；全量 3884 passed，唯一失败为干净主干同败的 #170 遗留；独立评审 MERGE_READY（`.omc/review-kadian-trust.md`）。
+
+## 139. 快路径 defer 必须说出原因码，verdict 空转不靠猜（2026-10-08）
+
+### 问题背景
+DB 已 `agent_done` 但 verdict 不触发，协调循环表现为空转，只能人工 sign-off＋advance。快路径条件刻意严格（门禁要文件＋屏幕双信号一致），人工是设计内兜底；缺的是可见性——defer 时没有任何记录指明是哪一个条件不满足。
+
+### 经验教训
+凡是有多条件短路的快路径，miss 时必须输出机器可读的原因码，否则排障只能重读全部源码。原因分类必须是纯函数，与快路径条件同义且同测，避免诊断与实现各自演化。
+
+### 操作规范
+`classify_verdict_deferral` 纯分类（非门禁：开关/blocked verdict/review 角色/无变更；门禁：开关/信号缺失或冲突），`verdict_defer_reason` 薄封装复用既有谓词，done 事件 miss 且仍 `agent_done` 时打一行 `[VERDICT DEFERRED]`。不动快路径条件、不自动推进。
+
+### 验证命令 / 关联证据
+`pytest -q tests/test_auto_acceptance.py`（VerdictDeferralUnitTest 正反全覆盖）；全量 3890 passed（唯一失败为 #170 干净主干同败）；独立评审 MERGE_READY（`.omc/review-kadian-verdict.md`）。

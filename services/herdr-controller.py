@@ -7523,6 +7523,15 @@ task_type:
             finalize_completed_task(task_id)
             return
 
+        if event_type == "done":
+            try:
+                _defer_task = get_task(task_id)
+                if _defer_task is not None and _defer_task.get("status") == "agent_done":
+                    _defer_reason = verdict_defer_reason(_defer_task) or "accept_race_or_unknown"
+                    print(f"[VERDICT DEFERRED] task={task_id} reason={_defer_reason}")
+            except Exception:
+                pass
+
         while True:
             task = get_task(task_id)
 
@@ -8034,6 +8043,56 @@ def try_auto_verdict(task_id):
         f"verdict={verdict} source={source}"
     )
     return True
+
+
+def classify_verdict_deferral(*, is_gate, auto_accept_on=True, auto_verdict_on=True,
+                              stage_verdict=None, role_text="", has_changes=False,
+                              gate_verdict=None):
+    """Pure: name why the done-event fast path would defer to the coordinator.
+
+    Returns "" when the fast path should have fired; a "" on a real miss
+    means a CAS race or an unknown miss, never silence.
+    """
+    if not is_gate:
+        if not auto_accept_on:
+            return "auto_accept_disabled"
+        if stage_verdict == "blocked":
+            return "stage_verdict_blocked"
+        if re.search(r"(?:^|[^a-z])(review(?:er)?|adversarial)(?:$|[^a-z])",
+                     str(role_text or "").lower()):
+            return "review_role"
+        if not has_changes:
+            return "no_task_changes"
+        return ""
+    if not auto_verdict_on:
+        return "auto_verdict_disabled"
+    if gate_verdict not in ("pass", "blocked"):
+        return "gate_signal_missing_or_conflict"
+    return ""
+
+
+def verdict_defer_reason(task):
+    """Best-effort reason why agent_done did not fast-path to verdict/completion."""
+    try:
+        workflow_id = task.get("workflow_id")
+        node_id = task.get("node") or task.get("stage")
+        is_gate = node_is_gate(workflow_id, node_id) if workflow_id and node_id else True
+        role_text = " ".join(str(task.get(key) or "") for key in
+                             ("dispatch_role", "agent_role", "role", "task_id"))
+        gate_verdict = None
+        if is_gate:
+            gate_verdict, _, _ = read_gate_verdict(task)
+        return classify_verdict_deferral(
+            is_gate=is_gate,
+            auto_accept_on=auto_accept_enabled(),
+            auto_verdict_on=auto_verdict_enabled(),
+            stage_verdict=task.get("stage_verdict"),
+            role_text=role_text,
+            has_changes=task_changes_recorded(task) if not is_gate else False,
+            gate_verdict=gate_verdict,
+        )
+    except Exception:
+        return "defer_reason_unknown"
 
 
 def check_task_deliverables_ready(task):
