@@ -48,7 +48,7 @@ def _workflow_record(workflow_id):
     data = _load(fallback, {"workflows": {}})
     record = data.get("workflows", {}).get(workflow_id)
     if not record:
-        raise RuntimeError(f"Workflow not registered: {workflow_id}")
+        raise RuntimeError(f"未找到工作流注册记录: {workflow_id}")
     return record
 
 
@@ -56,10 +56,10 @@ def _workflow_config(workflow_id):
     record = _workflow_record(workflow_id)
     workflow_file = Path(record.get("workflow_file", "")).expanduser()
     if not workflow_file.exists():
-        raise RuntimeError(f"Workflow config not found: {workflow_file}")
+        raise RuntimeError(f"未找到工作流配置文件: {workflow_file}")
     workflow = _load(workflow_file, None)
     if not workflow:
-        raise RuntimeError(f"Workflow config invalid: {workflow_file}")
+        raise RuntimeError(f"工作流配置文件内容无效或无法解析: {workflow_file}")
     from .projects import _with_node_runtime
     return record, workflow_file, _with_node_runtime(workflow, record)
 
@@ -211,9 +211,9 @@ def ensure_stage_topology(workflow_id, stage_key):
     )
 
     if not workspace_id:
-        raise RuntimeError(f"Workflow has no workspace_id: {workflow_id}")
+        raise RuntimeError(f"工作流未绑定工作区 ID (workspace_id): {workflow_id}")
     if not project_root or project_root == "/":
-        raise RuntimeError(f"Workflow has no valid project_root: {workflow_id}")
+        raise RuntimeError(f"工作流项目根目录无效: {workflow_id}")
 
     stage = next(
         (
@@ -233,7 +233,7 @@ def ensure_stage_topology(workflow_id, stage_key):
             None,
         )
     if not stage:
-        raise RuntimeError(f"Unknown workflow stage: {stage_key}")
+        raise RuntimeError(f"未找到工作流阶段/节点: {stage_key}")
 
     tab_id, tab_changed = _resolve_or_create_tab(
         workspace_id, project_root, stage

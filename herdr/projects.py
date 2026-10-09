@@ -612,7 +612,7 @@ def mark_workflow_startup_ready(workflow_id, healthy_agents=None, unhealthy_agen
     store = _get_store()
     record = store.get_workflow(workflow_id)
     if not record:
-        raise RuntimeError(f"Workflow registry missing: {workflow_id}")
+        raise RuntimeError(f"未找到工作流注册记录: {workflow_id}")
 
     record["startup_ready"] = True
     if healthy_agents is not None:
@@ -722,6 +722,85 @@ def ensure_coordinator_running(project_id, coordinator_pane_id, min_interval_sec
         return False
 
     return _coordinator_alive(coordinator_pane_id)
+
+
+def _recover_coordinator_pane(workspace_id, project_root):
+    """Workspace 存活但协调器 Pane 丢失时，在既有 Workspace 内就地重建协调器 Pane。
+
+    安全边界（对齐 RULES 拓扑动态自愈红线）：绝不整体重建 Workspace，绝不改名或
+    复用非协调器 Pane。策略优先级：
+      1. 重新挂接已标注"总指挥"的存活 Pane（幂等自愈，天然吸收瞬时探测误报）；
+      2. 协调器 Tab 仍在但无"总指挥" Pane 时，从该 Tab 内任一存活 Pane 分裂一个
+         全新 Pane 作为协调器（只增不改）；
+      3. 协调器 Tab 缺失/已空时，在既有 Workspace 内新建"1总指挥"Tab。
+    返回 (pane_id, tab_id)；任何一步无法安全完成时返回 (None, None)，由调用方降级。
+    """
+    tabs = (
+        (_run_json(["herdr", "tab", "list", "--workspace", workspace_id]).get("result") or {})
+        .get("tabs")
+        or []
+    )
+    panes = (
+        (_run_json(["herdr", "pane", "list", "--workspace", workspace_id]).get("result") or {})
+        .get("panes")
+        or []
+    )
+
+    coord_tab = next((t for t in tabs if "总指挥" in (t.get("label") or "")), None)
+    if coord_tab is not None:
+        tab_id = coord_tab.get("tab_id")
+        tab_panes = [p for p in panes if p.get("tab_id") == tab_id]
+        existing = next((p for p in tab_panes if p.get("label") == "总指挥"), None)
+        if existing and existing.get("pane_id"):
+            return existing["pane_id"], tab_id
+        if tab_panes and tab_panes[0].get("pane_id"):
+            split = _run_json([
+                "herdr", "pane", "split", tab_panes[0]["pane_id"],
+                "--direction", "right", "--cwd", project_root, "--no-focus",
+            ])
+            pane_id = ((split.get("result") or {}).get("pane") or {}).get("pane_id")
+            if pane_id:
+                _run(["herdr", "pane", "rename", pane_id, "总指挥"], check=False)
+                return pane_id, tab_id
+            return None, None
+
+    created = _run_json([
+        "herdr", "tab", "create", "--workspace", workspace_id,
+        "--cwd", project_root, "--label", "1总指挥", "--no-focus",
+    ])
+    result = created.get("result") or {}
+    tab_id = (result.get("tab") or {}).get("tab_id")
+    pane_id = (result.get("root_pane") or {}).get("pane_id")
+    if not tab_id or not pane_id:
+        return None, None
+    _run(["herdr", "tab", "rename", tab_id, "1总指挥"], check=False)
+    _run(["herdr", "pane", "rename", pane_id, "总指挥"], check=False)
+    return pane_id, tab_id
+
+
+def _persist_coordinator_pane(record, coordinator_pane_id, coordinator_tab_id=None):
+    """将就地恢复的协调器 Pane/Tab 回写到项目级权威来源（projects.json + workflow.json）。"""
+    root = record.get("project_root")
+    data = load_projects()
+    entry = (data.get("projects") or {}).get(root)
+    if entry is not None:
+        entry["coordinator_pane_id"] = coordinator_pane_id
+        save_projects(data)
+
+    updated = dict(record, coordinator_pane_id=coordinator_pane_id)
+
+    workflow_file = record.get("workflow_file")
+    if workflow_file and Path(workflow_file).expanduser().is_file():
+        cfg = _load(workflow_file, None)
+        if isinstance(cfg, dict):
+            coord = cfg.get("coordinator") or {}
+            coord["pane_id"] = coordinator_pane_id
+            if coordinator_tab_id:
+                coord["tab_id"] = coordinator_tab_id
+            cfg["coordinator"] = coord
+            _save(workflow_file, cfg)
+    return updated
+
 
 def project_alive(project):
     if not project:
@@ -1228,11 +1307,19 @@ def ensure_project(root, template_name=None):
         # are part of the project state and must be preserved.
         if _workspace_alive(workspace_id):
             if not _pane_alive(coordinator_pane_id):
-                raise RuntimeError(
-                    "Registered Herdr Workspace is alive but coordinator Pane "
-                    f"is missing: workspace={workspace_id} "
-                    f"pane={coordinator_pane_id}. Refusing automatic reprovision."
+                healed_pane, healed_tab = _recover_coordinator_pane(workspace_id, root)
+                if not healed_pane:
+                    raise RuntimeError(
+                        f"工作区会话仍存活（{workspace_id}），但协调器窗格已丢失（{coordinator_pane_id}）"
+                        "且无法在既有工作区内就地恢复。请手动检查/重建『1总指挥』标签页，"
+                        "或关闭旧会话后重试。"
+                    )
+                record = _persist_coordinator_pane(record, healed_pane, healed_tab)
+                print(
+                    f"[COORDINATOR PANE HEALED] workspace={workspace_id} "
+                    f"stale_pane={coordinator_pane_id} pane={healed_pane} tab={healed_tab}"
                 )
+                coordinator_pane_id = healed_pane
 
             if not _coordinator_alive(coordinator_pane_id):
                 _start_coordinator(
@@ -1281,18 +1368,28 @@ def ensure_context_project(root, template_name, context_bindings=None):
         canonical = str(Path(path).expanduser().resolve())
         # Context 是文件系统引用：目录或普通文件（Markdown/PDF/Excel/JSON…）均合法。
         if not Path(canonical).exists():
-            raise RuntimeError(f"Context path not found: {ctx_id}={path}")
+            raise RuntimeError(f"未找到 Context 绑定路径 (Context path not found): {ctx_id}={path}")
         resolved[ctx_id] = canonical
 
     record = project_by_root(root)
     if record:
         if _workspace_alive(record.get("workspace_id", "")):
-            if not _pane_alive(record.get("coordinator_pane_id", "")):
-                raise RuntimeError(
-                    "Registered Context Workspace is alive but coordinator Pane "
-                    f"is missing: workspace={record.get('workspace_id')} "
-                    f"pane={record.get('coordinator_pane_id')}. "
-                    "Refusing automatic reprovision."
+            stale_pane = record.get("coordinator_pane_id", "")
+            if not _pane_alive(stale_pane):
+                healed_pane, healed_tab = _recover_coordinator_pane(
+                    record.get("workspace_id", ""), root
+                )
+                if not healed_pane:
+                    raise RuntimeError(
+                        f"工作区会话仍存活（{record.get('workspace_id')}），"
+                        f"但协调器窗格已丢失（{stale_pane}）且无法在既有工作区内就地恢复。"
+                        "请手动检查/重建『1总指挥』标签页，或关闭旧会话后重试。"
+                    )
+                record = _persist_coordinator_pane(record, healed_pane, healed_tab)
+                _start_coordinator(record["project_id"], healed_pane)
+                print(
+                    f"[COORDINATOR PANE HEALED] workspace={record.get('workspace_id')} "
+                    f"stale_pane={stale_pane} pane={healed_pane} tab={healed_tab}"
                 )
             # Workspace Identity != Workflow Template：
             # 同一业务 Workspace 可依次运行不同 context 模板（无活跃工作流时）。
@@ -1341,18 +1438,18 @@ def ensure_node_runtime(workflow_id_or_root, node_id):
                 workflow_cfg = workflow_config_for(workflow_id)
 
     if not workflow_cfg:
-        raise RuntimeError(f"Workflow config missing for: {workflow_id_or_root}")
+        raise RuntimeError(f"未找到工作流配置: {workflow_id_or_root}")
 
     workspace_id = workflow_cfg.get("workspace_id")
     if not workspace_id or not _workspace_alive(workspace_id):
-        raise RuntimeError(f"Herdr workspace is not alive: {workspace_id}")
+        raise RuntimeError(f"Herdr 工作区会话不存在或已退出: {workspace_id}")
 
     project_root = workflow_cfg.get("project_root", os.getcwd())
 
     # Find node (by id or stage key)
     node = find_node(workflow_cfg, node_id)
     if not node:
-        raise RuntimeError(f"Node '{node_id}' not found in workflow definition.")
+        raise RuntimeError(f"在工作流定义中未找到节点 '{node_id}'。")
 
     tab_id = node.get("tab_id")
     anchor_pane_id = node.get("anchor_pane_id")
