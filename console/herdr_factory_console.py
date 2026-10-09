@@ -3910,6 +3910,30 @@ body {
   align-items: center;
   justify-content: space-between;
 }
+.sidebar-subgroup-title.collapsible {
+  cursor: pointer;
+  user-select: none;
+  border-radius: 4px;
+}
+.sidebar-subgroup-title.collapsible:hover {
+  color: #16171b;
+  background: #f3f4f6;
+}
+.sidebar-subgroup-left {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.sidebar-subgroup-arrow {
+  display: inline-block;
+  font-size: 9px;
+  color: #8b909a;
+  transition: transform 0.15s ease;
+  line-height: 1;
+}
+.sidebar-subgroup-title.collapsed .sidebar-subgroup-arrow {
+  transform: rotate(-90deg);
+}
 .subgroup-badge {
   font-size: 10px;
   padding: 0 4px;
@@ -3920,6 +3944,26 @@ body {
 .subgroup-badge.warning { background: #fffbeb; color: #b45309; border: 1px solid #fde68a; }
 .subgroup-badge.running { background: #ecfdf5; color: #047857; border: 1px solid #a7f3d0; }
 .subgroup-badge.completed { background: #f3f4f6; color: #6b7280; border: 1px solid #e5e7eb; }
+.sidebar-completed-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  padding: 4px 8px;
+  margin-top: 4px;
+  font-size: 11px;
+  color: #5e6ad2;
+  background: transparent;
+  border: 1px dashed #d5d9eb;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  box-sizing: border-box;
+}
+.sidebar-completed-toggle:hover {
+  background: #f0f2ff;
+  border-color: #5e6ad2;
+}
 .sidebar-item {
   display: flex;
   align-items: center;
@@ -4823,7 +4867,7 @@ body {
 <script src="/static/vendor/dagre-3.1.1.min.js"></script>
 <script src="/static/vendor/x6-3.1.8.min.js"></script>
 <script>
-let state={overview:null,project:null,workflow:null,ops:null,dash:null,projectId:null,workflowId:null,openWorkflowTabIds:[],sidebarCollapsed:false,spaceId:null,space:null,opsMode:false,dashMode:false,dashWorkflowId:null,shellView:'workbench',taskFilter:'all',drawerTab:'tty',selectedTaskId:null,taskDrawerTab:'overview',selectedTaskDetail:null,workflowView:'flow',flowSelectedNodeId:null,flowInspectorTab:'summary',flowGraph:null,flowGraphWfId:null,flowHtmlReady:false};
+let state={overview:null,project:null,workflow:null,ops:null,dash:null,projectId:null,workflowId:null,openWorkflowTabIds:[],sidebarCollapsed:false,completedExpanded:false,completedVisibleLimit:5,spaceId:null,space:null,opsMode:false,dashMode:false,dashWorkflowId:null,shellView:'workbench',taskFilter:'all',drawerTab:'tty',selectedTaskId:null,taskDrawerTab:'overview',selectedTaskDetail:null,workflowView:'flow',flowSelectedNodeId:null,flowInspectorTab:'summary',flowGraph:null,flowGraphWfId:null,flowHtmlReady:false};
 const VIEW_KEY='herdrConsoleView';
 function closeMoreMenu(){const dd=document.getElementById('moreDropdown');if(dd)dd.classList.remove('open')}
 function toggleMoreMenu(e){e.stopPropagation();const dd=document.getElementById('moreDropdown');if(dd)dd.classList.toggle('open')}
@@ -6232,7 +6276,11 @@ function renderSidebarWorkflows(){
     return;
   }
 
-  const listSig = JSON.stringify(ws.map(w => [w.workflow_id, w.status||'waiting', w.progress||0, workflowSubject(w)||w.workflow_id]));
+  const listSig = JSON.stringify([
+    Boolean(state.completedExpanded),
+    state.completedVisibleLimit || 5,
+    ws.map(w => [w.workflow_id, w.status||'waiting', w.progress||0, workflowSubject(w)||w.workflow_id])
+  ]);
   if(container.dataset.sig === listSig) {
     container.querySelectorAll('.sidebar-item[data-wf-id]').forEach(el => {
       const wid = el.getAttribute('data-wf-id');
@@ -6289,8 +6337,37 @@ function renderSidebarWorkflows(){
   }
 
   if(completed.length > 0){
-    html += `<div class="sidebar-subgroup-title" style="${(blocked.length > 0 || running.length > 0) ? 'margin-top:8px' : ''}">历史完成 <span class="subgroup-badge completed">${completed.length}</span></div>`;
-    completed.forEach(w => {
+    const limit = state.completedVisibleLimit || 5;
+    const isExpanded = !!state.completedExpanded;
+    let visibleCompleted = completed;
+    let hasHidden = false;
+
+    if(!isExpanded && completed.length > limit){
+      hasHidden = true;
+      visibleCompleted = completed.slice(0, limit);
+      // 若当前选中的历史任务在截断范围之外，将其加入可见列表，确保选中项高亮可定位
+      if(state.workflowId){
+        const activeIdx = completed.findIndex(w => w.workflow_id === state.workflowId);
+        if(activeIdx >= limit){
+          visibleCompleted = visibleCompleted.concat([completed[activeIdx]]);
+        }
+      }
+    }
+
+    const titleStyle = (blocked.length > 0 || running.length > 0) ? 'margin-top:8px' : '';
+    html += `
+      <div class="sidebar-subgroup-title collapsible ${!isExpanded && completed.length > limit ? '' : ''}"
+           style="${titleStyle}"
+           onclick="toggleCompletedExpanded()"
+           title="${isExpanded ? '点击折叠收起更多历史任务' : '点击展开全部历史任务'}">
+        <span class="sidebar-subgroup-left">
+          <span>历史完成</span>
+          <span class="sidebar-subgroup-arrow">${isExpanded ? '▼' : '▶'}</span>
+        </span>
+        <span class="subgroup-badge completed">${completed.length}</span>
+      </div>`;
+
+    visibleCompleted.forEach(w => {
       const isActive = w.workflow_id === state.workflowId;
       const title = (typeof workflowSubject==='function'?workflowSubject(w):'') || w.title || w.workflow_id;
       html += `
@@ -6300,9 +6377,30 @@ function renderSidebarWorkflows(){
           <span class="item-meta">已完成</span>
         </div>`;
     });
+
+    if(completed.length > limit){
+      if(!isExpanded){
+        const remainingCount = completed.length - visibleCompleted.length;
+        html += `
+          <button type="button" class="sidebar-completed-toggle" onclick="toggleCompletedExpanded()" title="展开所有历史完成任务">
+            展开更多 (${remainingCount > 0 ? '剩余 ' + remainingCount + ' 项' : '全部'})
+          </button>`;
+      } else {
+        html += `
+          <button type="button" class="sidebar-completed-toggle" onclick="toggleCompletedExpanded()" title="收起超出的历史完成任务">
+            收起历史任务 (仅显示前 ${limit} 项)
+          </button>`;
+      }
+    }
   }
 
   container.innerHTML = html;
+}
+function toggleCompletedExpanded(){
+  state.completedExpanded = !state.completedExpanded;
+  const container = document.getElementById('sidebarWorkflowGroups');
+  if(container) container.dataset.sig = '';
+  renderSidebarWorkflows();
 }
 function openWorkflowTab(id){
   if(!id)return;
