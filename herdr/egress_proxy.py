@@ -25,8 +25,6 @@ logger = logging.getLogger("herdr.egress_proxy")
 
 DEFAULT_ALLOWED_DESTINATIONS = [
     "generativelanguage.googleapis.com",
-    "oauth2.googleapis.com",
-    "*.googleapis.com",
 ]
 
 

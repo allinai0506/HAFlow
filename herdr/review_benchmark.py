@@ -699,7 +699,11 @@ def run_agent_review(
                 isolation_meta["egress_audit"] = egress_proxy.get_audit_summary()
         # P2: Verified, deterministic cleanup of temporary reviewer auth directory
         if isolation_meta and isolation_meta.get("is_temp_auth_dir"):
-            secure_cleanup_auth_dir(isolation_meta)
+            cleanup_res = secure_cleanup_auth_dir(isolation_meta)
+            if not cleanup_res.get("cleaned") or cleanup_res.get("status") not in ("verified_removed", "already_absent"):
+                raise RuntimeError(
+                    f"security_exception: temporary auth directory cleanup failed: {cleanup_res.get('error') or cleanup_res.get('status')}"
+                )
 
     if proc.returncode != 0:
         raise RuntimeError(f"agent_startup_failed: return code {proc.returncode}, stderr: {proc.stderr[:300]}")
@@ -782,7 +786,7 @@ STRICT_ENV_WHITELIST_KEYS = (
 
 
 def secure_cleanup_auth_dir(isolation_meta: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    """Securely and deterministically wipe temporary reviewer authentication directory.
+    """Remove temporary reviewer authentication directory and verify its physical deletion.
 
     Enforces P2 safety constraints:
     - Verifies path is strictly the temporary directory created in this session (matching prefix and temp root).
@@ -862,9 +866,9 @@ def generate_macos_seatbelt_profile(
     Addresses PR #185 P1 & P2 audit findings:
     - P1-1: Host ~/.gemini is completely DENIED at kernel level.
     - P1-2: Host Keychain databases are completely DENIED at kernel level.
-    - P1 (Network): Direct outbound to arbitrary external HTTPS (443) hosts is DENIED.
+    - P1 (Network): Direct outbound to arbitrary external HTTPS (443) hosts and direct DNS (UDP/TCP 53) are DENIED.
       Outbound network is restricted strictly to local controlled egress proxy (localhost:{egress_proxy_port})
-      which validates destination host against whitelist (e.g. *.googleapis.com).
+      which validates destination host against whitelist (e.g. generativelanguage.googleapis.com).
     - P1-2: Dedicated isolated reviewer directory is permitted only if strictly validated (not symlink, 0700).
     - P2: Entire /Users and /Volumes filesystem trees are DENIED by default.
     - Read-only access is strictly granted ONLY to the reviewed repository snapshot.
@@ -929,11 +933,8 @@ def generate_macos_seatbelt_profile(
 ;; P1: Strict network lockdown:
 ;; 1. Inbound network connections completely denied
 (deny network-inbound)
-;; 2. Outbound network connections denied by default (no direct external 443 allowed)
-(deny network-outbound)
-;; 3. DNS resolution permitted
-(allow network-outbound (remote udp "*:53"))
-(allow network-outbound (remote tcp "*:53")){extra_proxy_rules}
+;; 2. Outbound network connections denied by default (no direct external 443 or DNS 53 allowed)
+(deny network-outbound){extra_proxy_rules}
 """
 
 
@@ -1194,8 +1195,16 @@ def review_diff(
                             system_prompt=system_prompt,
                             isolation_meta=isolation_meta,
                         )
-                        shadow_status = "shadow_success"
-                        shadow_result["status"] = "shadow_success"
+                        cleanup_rec = isolation_meta.get("cleanup_record") if isolation_meta else None
+                        if cleanup_rec and cleanup_rec.get("status") not in ("verified_removed", "already_absent", "not_applicable"):
+                            shadow_status = "shadow_failed"
+                            shadow_result["status"] = "shadow_failed"
+                            shadow_result["error"] = (
+                                f"security_exception: temporary auth directory cleanup failed: {cleanup_rec.get('error') or cleanup_rec.get('status')}"
+                            )
+                        else:
+                            shadow_status = "shadow_success"
+                            shadow_result["status"] = "shadow_success"
                         shadow_result["isolation"] = {
                             "type": isolation_meta.get("isolation_type", "unknown"),
                             "reason": isolation_reason,

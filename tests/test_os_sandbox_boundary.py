@@ -346,24 +346,37 @@ class TestOSSandboxBoundary(unittest.TestCase):
         )
 
     def test_14b_controlled_egress_proxy_enforces_whitelist_and_blocks_unauthorized_destinations(self):
-        """Controlled egress proxy must return 403 Forbidden for unauthorized destinations (P1)."""
+        """Controlled egress proxy must return 403 Forbidden for unauthorized destinations and non-Gemini Google APIs (P1)."""
         import socket
         from herdr.egress_proxy import ControlledEgressProxy
 
-        proxy = ControlledEgressProxy(allowed_patterns=["generativelanguage.googleapis.com", "*.googleapis.com"])
+        # Use default whitelist (strictly generativelanguage.googleapis.com)
+        proxy = ControlledEgressProxy()
         proxy_port = proxy.start()
         try:
-            # 1. Connect to unauthorized destination (e.g. attacker.com:443)
+            # 1. Connect to unauthorized external destination (e.g. attacker.com:443)
             s = socket.create_connection(("127.0.0.1", proxy_port), timeout=5.0)
             s.sendall(b"CONNECT attacker.com:443 HTTP/1.1\r\nHost: attacker.com:443\r\n\r\n")
             resp = s.recv(1024).decode("utf-8", errors="ignore")
             s.close()
             self.assertIn("403 Forbidden", resp)
 
+            # 2. Connect to unauthorized Google APIs (e.g. storage, drive, cloudresourcemanager)
+            unauthorized_hosts = [
+                "storage.googleapis.com",
+                "drive.googleapis.com",
+                "cloudresourcemanager.googleapis.com",
+            ]
+            for host in unauthorized_hosts:
+                s = socket.create_connection(("127.0.0.1", proxy_port), timeout=5.0)
+                s.sendall(f"CONNECT {host}:443 HTTP/1.1\r\nHost: {host}:443\r\n\r\n".encode())
+                resp = s.recv(1024).decode("utf-8", errors="ignore")
+                s.close()
+                self.assertIn("403 Forbidden", resp, f"Expected 403 Forbidden for {host}")
+
             summary = proxy.get_audit_summary()
-            self.assertGreaterEqual(summary["denied"], 1)
-            self.assertEqual(summary["events"][-1]["host"], "attacker.com")
-            self.assertEqual(summary["events"][-1]["action"], "DENIED")
+            self.assertEqual(summary["denied"], 1 + len(unauthorized_hosts))
+            self.assertEqual(summary["allowed"], 0)
         finally:
             proxy.stop()
 
@@ -373,7 +386,7 @@ class TestOSSandboxBoundary(unittest.TestCase):
         from unittest.mock import patch
         from herdr.egress_proxy import ControlledEgressProxy
 
-        proxy = ControlledEgressProxy(allowed_patterns=["generativelanguage.googleapis.com", "*.googleapis.com"])
+        proxy = ControlledEgressProxy()
         dummy_r, dummy_w = socket.socketpair()
         try:
             with patch.object(proxy, "connect_upstream", return_value=dummy_w):
@@ -435,6 +448,44 @@ class TestOSSandboxBoundary(unittest.TestCase):
             )
         finally:
             proxy.stop()
+
+    @unittest.skipUnless(sys.platform == "darwin" and shutil.which("sandbox-exec"), "Requires macOS sandbox-exec")
+    def test_14e_seatbelt_denies_direct_dns_outbound_udp_and_tcp(self):
+        """macOS Seatbelt kernel must deny direct DNS queries (UDP 53 and TCP 53) to external DNS servers (P1)."""
+        profile = generate_macos_seatbelt_profile(self.repo_dir, egress_proxy_port=54321)
+        sandbox_bin = shutil.which("sandbox-exec")
+
+        # 1. Direct UDP 53 must be denied by kernel
+        cmd_udp = [
+            sandbox_bin,
+            "-p",
+            profile,
+            sys.executable,
+            "-c",
+            "import socket; s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.sendto(b'ping', ('8.8.8.8', 53))",
+        ]
+        proc_udp = subprocess.run(cmd_udp, capture_output=True, text=True)
+        self.assertNotEqual(proc_udp.returncode, 0)
+        self.assertTrue(
+            "PermissionError" in proc_udp.stderr or "Operation not permitted" in proc_udp.stderr,
+            f"Expected UDP 53 to be denied by kernel, got: {proc_udp.stderr}",
+        )
+
+        # 2. Direct TCP 53 must be denied by kernel
+        cmd_tcp = [
+            sandbox_bin,
+            "-p",
+            profile,
+            sys.executable,
+            "-c",
+            "import socket; s = socket.socket(); s.connect(('8.8.8.8', 53))",
+        ]
+        proc_tcp = subprocess.run(cmd_tcp, capture_output=True, text=True)
+        self.assertNotEqual(proc_tcp.returncode, 0)
+        self.assertTrue(
+            "PermissionError" in proc_tcp.stderr or "Operation not permitted" in proc_tcp.stderr,
+            f"Expected TCP 53 to be denied by kernel, got: {proc_tcp.stderr}",
+        )
 
     def test_15_dynamic_auth_dir_permissions_and_symlink_defense(self):
         """Dynamic auth directory must have 0700 permissions and reject symlinks (P1-1 & P1-2)."""
@@ -502,6 +553,62 @@ class TestOSSandboxBoundary(unittest.TestCase):
             self.assertTrue(os.path.exists(unsafe_dir))
         finally:
             shutil.rmtree(unsafe_dir, ignore_errors=True)
+
+    def test_17_auth_dir_cleanup_failure_blocks_shadow_success(self):
+        """Temporary auth dir cleanup failure must raise security exception and block shadow_success (P2)."""
+        import json
+        from unittest.mock import patch
+        from herdr.review_benchmark import run_agent_review, review_diff
+
+        # 1. In run_agent_review: cleanup failure in finally block must raise RuntimeError
+        failed_cleanup_meta = {
+            "is_temp_auth_dir": True,
+            "isolated_auth_dir": "/tmp/haflow-reviewer-auth-fake",
+            "isolation_type": "macos_seatbelt",
+        }
+        with patch("herdr.review_benchmark.secure_cleanup_auth_dir") as mock_cleanup, \
+             patch("subprocess.run") as mock_run:
+            mock_cleanup.return_value = {
+                "cleaned": False,
+                "status": "cleanup_failed",
+                "error": "Simulated disk permission error",
+            }
+            mock_run.return_value.returncode = 0
+            mock_run.return_value.stdout = json.dumps({"response": "Looks good", "usage": {}})
+
+            with self.assertRaises(RuntimeError) as cm:
+                run_agent_review(
+                    agent_name="agy",
+                    repo_dir=self.repo_dir,
+                    pr_info={"repo": "test/test", "pr_number": 185, "base": "main", "head": "feat"},
+                    diff_content="--- a/f\n+++ b/f\n@@ -1 +1 @@\n-a\n+b\n",
+                    isolation_meta=failed_cleanup_meta,
+                )
+            self.assertIn("security_exception", str(cm.exception))
+            self.assertIn("cleanup failed", str(cm.exception))
+
+        # 2. In review_diff: cleanup failure must force shadow_status to shadow_failed
+        def mock_run_agent(agent_name, **kwargs):
+            if agent_name == "agy":
+                raise RuntimeError("security_exception: temporary auth directory cleanup failed: Permission denied")
+            return {"status": "success", "agent": agent_name, "findings": [], "rejected_findings": []}
+
+        with patch("shutil.which", return_value="/usr/local/bin/agy"), \
+             patch("herdr.review_benchmark.verify_os_security_isolation") as mock_iso, \
+             patch("herdr.review_benchmark.run_agent_review", side_effect=mock_run_agent):
+            mock_iso.return_value = (True, "isolated", {"isolation_type": "macos_seatbelt"})
+            res = review_diff(
+                repo_dir=self.repo_dir,
+                diff_content="--- a/file\n+++ b/file\n@@ -1 +1 @@\n-old\n+new\n",
+                pr_info={"repo": "test/test", "pr_number": 185, "base": "main", "head": "feat"},
+                reviewer_agent="rule",
+                shadow_mode=True,
+                shadow_agent="agy",
+            )
+            self.assertEqual(res["shadow_status"], "shadow_failed")
+            self.assertEqual(res["shadow"]["status"], "shadow_failed")
+            self.assertIn("security_exception", res["shadow"]["error"])
+            self.assertNotEqual(res["shadow_status"], "shadow_success")
 
 
 if __name__ == "__main__":
