@@ -271,7 +271,9 @@ def _notify_blocked_human_upgrade(task, episode_id, active_seconds):
             "exhausted.\n"
             "Human confirmation required; no destructive command was run.\n"
             f"  herdr-task set {task_id} working  # after human guidance\n"
-            f"  herdr-task supersede {task_id} --reason ...  # discard branch commits\n"
+            f"  herdr-task supersede {task_id} --abandon "
+            f'--reason "blocked {int(active_seconds)}s, repush budget exhausted"  '
+            "# discard branch commits\n"
             f"  herdr-task close-workflow {workflow_id} --force  # direct force close"
         )
         notify_fn = getattr(notifier, "notify_human_upgrade", None)

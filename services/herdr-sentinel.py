@@ -254,6 +254,66 @@ def update_statuses(changes, expected=None, epochs=None, versions=None):
     return changed
 
 
+RECEIPT_V1_PROTOCOL = "receipt-v1"
+
+
+def receipt_completion_hint(task):
+    """Name the channel that can settle a receipt-v1 task (never the marker).
+
+    Screen-marker CAS is structurally impossible for ``receipt-v1`` tasks:
+    ``Controller.process_completion_observation`` returns early for that
+    protocol, so the sample is never consumed.  Point at the structured
+    receipt and the identity file instead.
+    """
+    task = task or {}
+    task_id = task.get("task_id") or "unknown"
+    identity_path = task.get("completion_identity_path")
+    lines = [
+        f"Task {task_id} uses the receipt-v1 completion protocol: a "
+        f"HERDR_TASK_DONE screen marker alone can never settle it.",
+        f"  herdr-task report-completion {task_id} --identity-file "
+        f"{identity_path or '<completion_identity_path missing>'}",
+        "If the credential expired: herdr-task renew-completion "
+        f"{task_id} --operation-id <new-op-id>, then retry report-completion.",
+        f"  herdr-task supersede {task_id} --abandon "
+        f'--reason "receipt-v1 completion not submitted"  # drop the obligation',
+    ]
+    return "\n".join(lines)
+
+
+def stall_alert_body(task, idle_seconds):
+    """Actionable stall-alert body, protocol-aware.
+
+    A stalled ``receipt-v1`` task gets the receipt-recovery commands; all
+    other tasks get abandon/supersede.  Text carries copy-paste commands
+    only and never auto-executes (same rule as the Controller's
+    human-upgrade channel).
+
+    Every emitted command must run as printed: the reason token carries a
+    concrete value instead of an ellipsis, so pasting it cannot silently
+    record ``"..."`` as the audit reason.
+    """
+    task = task or {}
+    task_id = task.get("task_id") or "unknown"
+    workflow_id = task.get("workflow_id") or "unknown"
+    idle = int(idle_seconds or 0)
+    if task.get("completion_protocol") == RECEIPT_V1_PROTOCOL:
+        return (
+            f"Task {task_id} stalled {idle}s in "
+            f"{task.get('status') or 'unknown'}; "
+            f"workflow={workflow_id}. "
+            "No automatic recovery was run.\n"
+            + receipt_completion_hint(task)
+        )
+    return (
+        f"Task {task_id} stalled {idle}s in {task.get('status') or 'unknown'}; "
+        f"workflow={workflow_id}. No automatic recovery was run.\n"
+        f'  herdr-task supersede {task_id} --abandon --reason "stalled {idle}s '
+        f'without progress"  # discard branch commits\n'
+        f"  herdr-task close-workflow {workflow_id} --force  # direct force close"
+    )
+
+
 def observe_crash_pattern(task, *, changes, expected, versions):
     """Record and enqueue an infrastructure crash transition atomically later."""
     task_id = (task or {}).get("task_id")
@@ -291,6 +351,120 @@ def _record_sentinel_event(store, task, event_type, payload):
         )
     except (OSError, ValueError, RuntimeError, AttributeError, sqlite3.Error) as exc:
         print(f"[SENTINEL EVENT WARN] {event_type}: {exc}", file=sys.stderr, flush=True)
+
+
+def observe_completion_sample(task, store, *, now, state=None, screen=None):
+    """Record one durable completion sample for a dispatched/working task.
+
+    Extracted from the main sweep loop so the protocol routing (legacy FACT
+    screen-marker path vs ``receipt-v1`` structured-receipt path) is unit
+    testable.  FR-1 unchanged: Sentinel records the sample, never promotes.
+    For ``receipt-v1`` tasks the screen-marker CAS announcement is
+    deliberately skipped — the Controller cannot consume that sample — and
+    the operator is pointed at the receipt channel exactly once per version.
+
+    ``screen`` is the pane capture the caller already paid for; passing it in
+    keeps one ``herdr pane read`` subprocess per task per sweep (the original
+    inline loop's cost).  ``None`` means the capture still has to be taken.
+    """
+    task = task or {}
+    store = store if store is not None else _get_store()
+    task_id = task.get("task_id")
+    pane_id = task.get("pane_id")
+    if not task_id or not pane_id:
+        return False
+    state = state if state is not None else {}
+    if screen is None:
+        screen = pane_visible(pane_id)
+    from herdr import completion as _comp
+
+    done_marker_present = _comp.marker_present(screen, task_id)
+    marker_present = done_marker_present
+    agent_state = agent_status(pane_id)
+    try:
+        observation = store.observe_completion(
+            task_id,
+            marker_present=marker_present,
+            agent_status=agent_state,
+            observed_at=now,
+        )
+    except (AttributeError, OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
+        _record_sentinel_event(
+            store,
+            task,
+            "completion_observation_failed",
+            {"reason": str(exc)[:300]},
+        )
+        observation = {}
+    if observation.get("epoch_changed"):
+        _record_sentinel_event(
+            store,
+            task,
+            "completion_observation_reset",
+            {"reason": "task_epoch_changed", "version": task.get("version")},
+        )
+    if observation.get("uncertain"):
+        _record_sentinel_event(
+            store,
+            task,
+            "completion_uncertain",
+            {"reason": "marker_vanished", "task_id": task_id},
+        )
+    signal = _comp.classify_signal(marker_present, agent_state)
+    if signal == "unknown" and marker_present:
+        _record_sentinel_event(
+            store,
+            task,
+            "agent_status_unknown",
+            {"task_id": task_id, "reason": "agent_status_unreadable"},
+        )
+    elif signal == "early":
+        early_state = state.setdefault("completion", {}).setdefault(task_id, {})
+        early_n = int(early_state.get("early_count") or 0) + 1
+        early_state["early_count"] = early_n
+        _record_sentinel_event(
+            store,
+            task,
+            "early_done_signal",
+            {"task_id": task_id, "count": early_n, "agent_status": agent_state},
+        )
+        if early_n >= 3:
+            print(
+                f"[SENTINEL EARLY] task={task_id} marker present while busy; "
+                "Controller will arbitrate, no Sentinel flip",
+                flush=True,
+            )
+    if observation.get("ready"):
+        if task.get("completion_protocol") == RECEIPT_V1_PROTOCOL:
+            announced = state.setdefault("completion", {}).setdefault(task_id, {})
+            version = observation.get("observed_version")
+            if announced.get("receipt_hint_version") != version:
+                announced["receipt_hint_version"] = version
+                _record_sentinel_event(
+                    store,
+                    task,
+                    "receipt_v1_marker_ignored",
+                    {
+                        "task_id": task_id,
+                        "observed_version": version,
+                        "reason": "receipt_v1_requires_structured_receipt",
+                    },
+                )
+                print(
+                    f"[SENTINEL RECEIPT-V1] task={task_id} "
+                    f"version={version}; screen-marker CAS is impossible for "
+                    "receipt-v1 — submit the structured receipt instead "
+                    "(see receipt_completion_hint)",
+                    flush=True,
+                )
+        else:
+            print(
+                f"[SENTINEL COMPLETION READY] task={task_id} "
+                f"version={observation.get('observed_version')}; "
+                "Controller CAS pending",
+                flush=True,
+            )
+    return True
 
 
 def _screen_fingerprint(screen):
@@ -338,8 +512,15 @@ def restart_controller():
         print(f"[SENTINEL ERROR] Controller restart: {e}", flush=True)
 
 
-def notify_stall(alert):
-    """Best-effort stall notification (deep-linked to the console)."""
+def notify_stall(alert, task=None):
+    """Best-effort stall notification (deep-linked to the console).
+
+    The body is protocol-aware so the operator receives a runnable recovery
+    command instead of a bare notice: a ``receipt-v1`` task names the
+    structured-receipt channel, all other tasks name abandon/supersede.
+    Emitted text carries copy-paste commands only and never auto-executes
+    (same rule as the Controller's human-upgrade channel).
+    """
     try:
         import importlib
 
@@ -348,15 +529,35 @@ def notify_stall(alert):
             workflow_id=alert.get("workflow_id"),
             task_id=alert.get("task_id"),
         )
+        idle = alert.get("idle_seconds")
+        try:
+            idle = int(idle)
+        except (TypeError, ValueError):
+            idle = 0
+        lines = [
+            f"任务停留在 {alert.get('status')} 已 {idle}s，"
+            "无任何状态推进，需要关注。",
+        ]
+        hint = stall_alert_body(
+            dict(task or {}, task_id=alert.get("task_id"),
+                 workflow_id=alert.get("workflow_id"), status=alert.get("status")),
+            idle,
+        )
         notifier.notify(
             "Herdr Factory · 任务停滞",
             f"{alert.get('workflow_id', 'unknown')} · {alert.get('task_id')}",
-            f"任务停留在 {alert.get('status')} 已 {alert.get('idle_seconds')}s，"
-            "无任何状态推进，需要关注。",
+            "\n".join(lines) + "\n" + _truncate(hint, 1400),
             url=url,
         )
     except Exception as exc:
         print(f"[SENTINEL NOTIFY ERROR] {exc}", file=sys.stderr, flush=True)
+
+
+def _truncate(text, limit):
+    text = str(text or "")
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1] + "…"
 
 
 def notify_dispatch_fuse(breach):
@@ -402,6 +603,40 @@ def _pane_delivery_evidence(pane_id, task_id):
         "has_marker": marker_present(screen, task_id, ORCH_MARKER_PREFIX),
         "agent_status": agent_status(pane_id),
     }
+
+
+def reap_terminal_completion_samples(tasks, store=None, db_module=None):
+    """Delete durable completion samples of tasks that reached a terminal status.
+
+    A ``completed``/``cleaned``/``failed``/``superseded`` task can never consume
+    its sample again, and its stale ``observed_version`` misleads future reads
+    (observed version 9 vs actual task version 12 on a cleaned task, seen
+    2026-10-09).  CAS acceptance already deletes the consumed row atomically;
+    this covers every other path to a terminal status.  Returns the number of
+    rows removed.
+
+    ``db_module`` is injectable for tests; production resolves the real
+    ``herdr.state_db``.
+    """
+    from herdr.transitions import TERMINAL_TASK_STATUSES
+
+    if db_module is None:
+        from herdr import state_db as db_module
+
+    store = store if store is not None else _get_store()
+    removed = 0
+    for task in tasks or []:
+        if task.get("status") not in TERMINAL_TASK_STATUSES:
+            continue
+        task_id = task.get("task_id")
+        if not task_id:
+            continue
+        try:
+            if db_module.clear_completion_observation(task_id):
+                removed += 1
+        except (AttributeError, OSError, RuntimeError, ValueError):
+            continue
+    return removed
 
 
 def check_dispatch_fuse(tasks, state):
@@ -451,15 +686,27 @@ def check_dispatch_fuse(tasks, state):
     return changed
 
 
-def check_task_stalls(tasks, state):
+def check_task_stalls(tasks, state, notify_fn=None, now=None):
     """停滞检测:任务处于未终态且长时间无任何状态变迁 -> 告警一次。
 
     这补上了哨兵此前只扫描 pane 完成标记、对"控制面停滞"完全失明的盲区。
+
+    The single notification entry point is :func:`notify_stall`, whose body
+    is protocol-aware: a ``receipt-v1`` task gets the structured-receipt
+    recovery commands, other tasks get supersede/force.  ``notify_fn`` is an
+    injection seam for tests only; production routes through ``notify_stall``
+    so the liveness-guard contract (one call, dedupe, episode clear) never
+    diverges between test and production.
+    ``now`` is injectable for deterministic tests; production passes None.
     """
+    now = time.time() if now is None else float(now)
     episodes = state.get("stalls") or {}
-    alerts, updated = liveness.evaluate_task_stalls(tasks, episodes, time.time())
+    alerts, updated = liveness.evaluate_task_stalls(tasks, episodes, now)
+
+    by_id = {t.get("task_id"): t for t in tasks or [] if t.get("task_id")}
 
     for alert in alerts:
+        task = by_id.get(alert["task_id"]) or {}
         print(
             f"[SENTINEL STALL] "
             f"task={alert['task_id']} "
@@ -468,7 +715,14 @@ def check_task_stalls(tasks, state):
             f"workflow={alert.get('workflow_id')}",
             flush=True,
         )
-        notify_stall(alert)
+        if notify_fn is not None:
+            notify_fn(
+                alert.get("task_id"),
+                alert.get("workflow_id"),
+                stall_alert_body(task, alert.get("idle_seconds", 0)),
+            )
+        else:
+            notify_stall(alert, task)
 
     state["stalls"] = updated
     return updated != episodes
@@ -520,85 +774,18 @@ def main():
             state["seen"].setdefault(task_id, now)
 
             screen = pane_visible(pane_id)
-            from herdr import completion as _comp
-
-            done_marker = _comp.marker_literal(task_id)
-            blocker_marker = _comp.marker_literal(
-                task_id, _comp.BLOCKER_MARKER_PREFIX
-            )
-            orchestration_marker = _comp.marker_literal(
-                task_id, _comp.ORCH_MARKER_PREFIX
-            )
-            done_marker_present = _comp.marker_present(screen, task_id)
 
             # FR-1: Sentinel is an observer.  It records a durable sample and
             # never promotes a task; Controller consumes the sample and owns
-            # the final CAS-backed transition.
+            # the final CAS-backed transition.  The extraction keeps the
+            # protocol routing (legacy FACT vs receipt-v1) unit testable.
             if status in {"dispatched", "working"}:
-                from herdr import completion as _comp
+                observe_completion_sample(
+                    task, store, now=now, state=state, screen=screen
+                )
+            from herdr import completion as _comp
 
-                marker_present = done_marker_present
-                agent_state = agent_status(pane_id)
-                try:
-                    observation = store.observe_completion(
-                        task_id,
-                        marker_present=marker_present,
-                        agent_status=agent_state,
-                        observed_at=now,
-                    )
-                except (AttributeError, OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
-                    _record_sentinel_event(
-                        store,
-                        task,
-                        "completion_observation_failed",
-                        {"reason": str(exc)[:300]},
-                    )
-                    observation = {}
-                if observation.get("epoch_changed"):
-                    _record_sentinel_event(
-                        store,
-                        task,
-                        "completion_observation_reset",
-                        {"reason": "task_epoch_changed", "version": task.get("version")},
-                    )
-                if observation.get("uncertain"):
-                    _record_sentinel_event(
-                        store,
-                        task,
-                        "completion_uncertain",
-                        {"reason": "marker_vanished", "task_id": task_id},
-                    )
-                signal = _comp.classify_signal(marker_present, agent_state)
-                if signal == "unknown" and marker_present:
-                    _record_sentinel_event(
-                        store,
-                        task,
-                        "agent_status_unknown",
-                        {"task_id": task_id, "reason": "agent_status_unreadable"},
-                    )
-                elif signal == "early":
-                    early_state = state.setdefault("completion", {}).setdefault(task_id, {})
-                    early_n = int(early_state.get("early_count") or 0) + 1
-                    early_state["early_count"] = early_n
-                    _record_sentinel_event(
-                        store,
-                        task,
-                        "early_done_signal",
-                        {"task_id": task_id, "count": early_n, "agent_status": agent_state},
-                    )
-                    if early_n >= 3:
-                        print(
-                            f"[SENTINEL EARLY] task={task_id} marker present while busy; "
-                            "Controller will arbitrate, no Sentinel flip",
-                            flush=True,
-                        )
-                if observation.get("ready"):
-                    print(
-                        f"[SENTINEL COMPLETION READY] task={task_id} "
-                        f"version={observation.get('observed_version')}; "
-                        "Controller CAS pending",
-                        flush=True,
-                    )
+            done_marker_present = _comp.marker_present(screen, task_id)
 
             # Infrastructure crash first: a crashed process outranks blocker
             # sampling, and a screen that carries crash text must not feed
@@ -738,6 +925,16 @@ def main():
                 "crash_versions",
             ):
                 state.pop(key, None)
+        try:
+            reaped = reap_terminal_completion_samples(tasks, store)
+        except Exception as exc:
+            print(f"[SENTINEL REAP WARN] {exc}", file=sys.stderr, flush=True)
+            reaped = 0
+        if reaped:
+            print(
+                f"[SENTINEL REAP] removed {reaped} stale completion samples",
+                flush=True,
+            )
         if wrote or fuse_changed:
             check_task_stalls(tasks, state)
             save_json_atomic(STATE_FILE, state)
