@@ -137,3 +137,13 @@ pytest -q tests/test_review_benchmark.py
 - SHA 错配与缺少必要字段检测
 - Agent 超时、启动失败、格式错误与正常 0 问题区分
 - 中文报告渲染与差异计算
+
+---
+
+## 7. 安全沙盒边界与 Runner 隔离规范 (Security & Isolation Specification)
+
+依据工程协议 Section IV 安全边界规范与 PR #185 阻塞项加固要求：
+1. **真实操作系统级沙盒 (macOS Seatbelt)**：在 macOS Self-hosted Runner 上，`herdr-review-bench` 自动通过 `/usr/bin/sandbox-exec` 动态编织内核级 Seatbelt 规则包裹 `agy` 子进程；默认拒绝宿主机 `$HOME` 所有目录（包括 `~/.ssh`、`actions-runner-*`、`~/.aws`、`Documents` 等）读取与写入，仅以只读方式放行被审查代码仓库 snapshot、`~/.gemini` 模型缓存配置与系统 Keychain。
+2. **最小环境变量白名单**：子进程杜绝复制父进程环境，严格使用白名单 (`PATH`, `HOME`, `USER`, 代理变量) 构建新环境，物理阻绝 `GITHUB_TOKEN`、`SSH_AUTH_SOCK` 进入 AI 子进程。
+3. **主动内核探针与零环境伪造**：`verify_os_security_isolation` 在执行前主动对内核 deny 规则执行探针验证；严禁通过任何环境变量声明或伪造隔离。未具备真实 OS 沙盒、容器或无特权隔离时，AI 审核严格熔断返回 `shadow_skipped`。
+4. **Rule 审核与旁路解耦**：Rule Reviewer 始终作为唯一确定性主门禁，AI 影子审核仅作为只读旁路审计，任何沙盒跳过或失败不影响主门禁通过。

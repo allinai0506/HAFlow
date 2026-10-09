@@ -1,0 +1,615 @@
+#!/usr/bin/env python3
+"""tests/test_os_sandbox_boundary.py
+
+Empirical OS-level sandbox boundary verification test suite.
+Validates that AI reviewer subprocesses run under strictly enforced OS-level
+Seatbelt/container boundaries rather than declarative environment variables.
+"""
+import os
+import shutil
+import subprocess
+import sys
+import unittest
+from pathlib import Path
+
+from herdr.review_benchmark import (
+    STRICT_ENV_WHITELIST_KEYS,
+    generate_macos_seatbelt_profile,
+    probe_macos_seatbelt,
+    review_diff,
+    run_agent_review,
+    secure_cleanup_auth_dir,
+    verify_os_security_isolation,
+)
+
+
+class TestOSSandboxBoundary(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.repo_dir = Path(__file__).resolve().parent.parent
+        cls.canary_path = Path.home() / ".haflow_protected_test_credential.txt"
+        cls.canary_path.write_text("TEST_CANARY_PROTECTED_SECRET_DO_NOT_EXPOSE", encoding="utf-8")
+        os.chmod(cls.canary_path, 0o600)
+
+    @classmethod
+    def tearDownClass(cls):
+        try:
+            if cls.canary_path.exists():
+                cls.canary_path.unlink()
+        except Exception:
+            pass
+
+    def test_01_verify_os_isolation_detects_real_kernel_seatbelt_with_dedicated_identity(self):
+        """Active probe must verify macOS Seatbelt kernel enforcement when dedicated identity is present."""
+        if sys.platform == "darwin":
+            sandbox_exec = shutil.which("sandbox-exec")
+            if sandbox_exec:
+                from unittest.mock import patch
+                with patch.dict(os.environ, {"HERDR_REVIEWER_GEMINI_API_KEY": "fake_test_key_12345"}):
+                    is_isolated, reason, meta = verify_os_security_isolation(self.repo_dir)
+                    self.assertTrue(is_isolated)
+                    self.assertEqual(meta.get("isolation_type"), "macos-seatbelt")
+                    self.assertIn("sandbox_exec", meta)
+                    self.assertIn("profile", meta)
+                    self.assertIn("isolated_auth_dir", meta)
+
+    def test_01b_verify_os_isolation_fails_closed_without_dedicated_identity(self):
+        """Without dedicated reviewer identity, must fail closed to protect ~/.gemini and Keychain."""
+        if sys.platform == "darwin":
+            from unittest.mock import patch
+            with patch.dict(os.environ, {}, clear=True):
+                is_isolated, reason, meta = verify_os_security_isolation(self.repo_dir)
+                self.assertFalse(is_isolated)
+                self.assertIn("~/.gemini", reason)
+                self.assertIn("Keychain", reason)
+
+    def test_02_strict_environment_whitelist(self):
+        """Child AI subprocesses must receive ONLY whitelisted environment variables."""
+        test_env = {
+            "PATH": "/usr/bin:/bin",
+            "HOME": str(Path.home()),
+            "USER": "testuser",
+            "GITHUB_TOKEN": "secret_gh_write_token",
+            "GH_TOKEN": "secret_gh_token",
+            "GITHUB_PAT": "secret_gh_pat",
+            "SSH_AUTH_SOCK": "/tmp/ssh.sock",
+            "AWS_SECRET_ACCESS_KEY": "aws_secret",
+            "CUSTOM_SECRET": "top_secret",
+        }
+        child_env = {k: test_env[k] for k in STRICT_ENV_WHITELIST_KEYS if k in test_env}
+        self.assertNotIn("GITHUB_TOKEN", child_env)
+        self.assertNotIn("GH_TOKEN", child_env)
+        self.assertNotIn("GITHUB_PAT", child_env)
+        self.assertNotIn("SSH_AUTH_SOCK", child_env)
+        self.assertNotIn("AWS_SECRET_ACCESS_KEY", child_env)
+        self.assertNotIn("CUSTOM_SECRET", child_env)
+        self.assertIn("PATH", child_env)
+        self.assertIn("HOME", child_env)
+        self.assertIn("USER", child_env)
+
+    @unittest.skipUnless(sys.platform == "darwin" and shutil.which("sandbox-exec"), "Requires macOS sandbox-exec")
+    def test_03_os_kernel_denies_reading_developer_home_canary(self):
+        """macOS Seatbelt must return PermissionError / Operation not permitted for developer home canary."""
+        profile = generate_macos_seatbelt_profile(self.repo_dir)
+        sandbox_bin = shutil.which("sandbox-exec")
+        cmd = [
+            sandbox_bin,
+            "-p",
+            profile,
+            sys.executable,
+            "-c",
+            f"open('{self.canary_path}', 'r').read()",
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertTrue(
+            "PermissionError" in proc.stderr or "Operation not permitted" in proc.stderr,
+            f"Expected permission error, got: {proc.stderr}",
+        )
+
+    @unittest.skipUnless(sys.platform == "darwin" and shutil.which("sandbox-exec"), "Requires macOS sandbox-exec")
+    def test_04_os_kernel_denies_reading_runner_credentials(self):
+        """macOS Seatbelt must return PermissionError for runner credentials file if present."""
+        runner_cred = Path.home() / "actions-runner-haflow" / ".credentials"
+        if not runner_cred.exists():
+            runner_cred = Path("/Users/user/actions-runner-haflow/.credentials")
+        if runner_cred.exists():
+            profile = generate_macos_seatbelt_profile(self.repo_dir)
+            sandbox_bin = shutil.which("sandbox-exec")
+            cmd = [
+                sandbox_bin,
+                "-p",
+                profile,
+                sys.executable,
+                "-c",
+                f"open('{runner_cred}', 'r').read()",
+            ]
+            proc = subprocess.run(cmd, capture_output=True, text=True)
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertTrue(
+                "PermissionError" in proc.stderr or "Operation not permitted" in proc.stderr,
+                f"Expected permission error, got: {proc.stderr}",
+            )
+
+    @unittest.skipUnless(sys.platform == "darwin" and shutil.which("sandbox-exec"), "Requires macOS sandbox-exec")
+    def test_05_os_kernel_denies_writing_to_repository_and_home(self):
+        """macOS Seatbelt must deny file write operations inside the repository and developer home."""
+        profile = generate_macos_seatbelt_profile(self.repo_dir)
+        sandbox_bin = shutil.which("sandbox-exec")
+        exploit_file = self.repo_dir / "test_sandbox_exploit_marker.txt"
+        cmd = [
+            sandbox_bin,
+            "-p",
+            profile,
+            sys.executable,
+            "-c",
+            f"open('{exploit_file}', 'w').write('pwned')",
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertFalse(exploit_file.exists())
+
+    @unittest.skipUnless(sys.platform == "darwin" and shutil.which("sandbox-exec"), "Requires macOS sandbox-exec")
+    def test_06_os_kernel_allows_reading_allowed_repo_snapshot(self):
+        """macOS Seatbelt must allow reading files in the repository under review."""
+        profile = generate_macos_seatbelt_profile(self.repo_dir)
+        sandbox_bin = shutil.which("sandbox-exec")
+        readme = self.repo_dir / "README.md"
+        cmd = [
+            sandbox_bin,
+            "-p",
+            profile,
+            sys.executable,
+            "-c",
+            f"print(open('{readme}', 'r').readline())",
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0)
+        self.assertIn("HAFlow", proc.stdout)
+
+    def test_07_env_vars_cannot_bypass_unisolated_safety_skip(self):
+        """Environment variables cannot forge isolation; review_diff skips when OS isolation fails."""
+        from unittest.mock import patch
+
+        with patch("herdr.review_benchmark.verify_os_security_isolation", return_value=(False, "No OS sandbox", {})), patch.dict(
+            os.environ,
+            {
+                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                "HERDR_SECURE_LLM_RUNNER": "1",
+                "HERDR_ALLOW_AGY_SHADOW": "1",
+                "HERDR_ALLOW_UNISOLATED_RUNNER": "1",
+            },
+            clear=True,
+        ):
+            res = review_diff(self.repo_dir, "diff", reviewer_agent="rule", shadow_mode=True, shadow_agent="agy")
+            self.assertEqual(res["shadow_status"], "shadow_skipped")
+            self.assertIn("No OS sandbox", res["shadow"]["reason"])
+
+    @unittest.skipUnless(sys.platform == "darwin" and shutil.which("sandbox-exec"), "Requires macOS sandbox-exec")
+    def test_08_os_kernel_denies_host_gemini_directory(self):
+        """macOS Seatbelt kernel must deny reading or writing ~/.gemini directory (P1-1)."""
+        gemini_dir = Path.home() / ".gemini"
+        if gemini_dir.exists():
+            profile = generate_macos_seatbelt_profile(self.repo_dir)
+            sandbox_bin = shutil.which("sandbox-exec")
+            test_target = next((f for f in gemini_dir.iterdir() if f.is_file()), gemini_dir / "installation_id")
+            cmd = [
+                sandbox_bin,
+                "-p",
+                profile,
+                sys.executable,
+                "-c",
+                f"open('{test_target}', 'r').read()",
+            ]
+            proc = subprocess.run(cmd, capture_output=True, text=True)
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertTrue(
+                "PermissionError" in proc.stderr or "Operation not permitted" in proc.stderr,
+                f"Expected permission error, got: {proc.stderr}",
+            )
+            # Try writing to .gemini
+            write_cmd = [
+                sandbox_bin,
+                "-p",
+                profile,
+                sys.executable,
+                "-c",
+                f"open('{gemini_dir}/test_leak.txt', 'w').write('bad')",
+            ]
+            proc_w = subprocess.run(write_cmd, capture_output=True, text=True)
+            self.assertNotEqual(proc_w.returncode, 0)
+            self.assertFalse((gemini_dir / "test_leak.txt").exists())
+
+    @unittest.skipUnless(sys.platform == "darwin" and shutil.which("sandbox-exec"), "Requires macOS sandbox-exec")
+    def test_09_os_kernel_denies_keychains(self):
+        """macOS Seatbelt kernel must deny reading user and system Keychain databases (P1-2)."""
+        profile = generate_macos_seatbelt_profile(self.repo_dir)
+        sandbox_bin = shutil.which("sandbox-exec")
+        keychain_paths = [
+            Path.home() / "Library/Keychains/login.keychain-db",
+            Path("/Library/Keychains/System.keychain"),
+        ]
+        for kc in keychain_paths:
+            if kc.exists():
+                cmd = [
+                    sandbox_bin,
+                    "-p",
+                    profile,
+                    sys.executable,
+                    "-c",
+                    f"open('{kc}', 'r').read()",
+                ]
+                proc = subprocess.run(cmd, capture_output=True, text=True)
+                self.assertNotEqual(proc.returncode, 0)
+                self.assertTrue(
+                    "PermissionError" in proc.stderr or "Operation not permitted" in proc.stderr,
+                    f"Expected permission error on {kc}, got: {proc.stderr}",
+                )
+
+    @unittest.skipUnless(sys.platform == "darwin" and shutil.which("sandbox-exec"), "Requires macOS sandbox-exec")
+    def test_10_os_kernel_denies_entire_users_tree_except_repo(self):
+        """macOS Seatbelt kernel must deny reading outside the reviewed repo in /Users (P2)."""
+        profile = generate_macos_seatbelt_profile(self.repo_dir)
+        sandbox_bin = shutil.which("sandbox-exec")
+        cmd = [
+            sandbox_bin,
+            "-p",
+            profile,
+            sys.executable,
+            "-c",
+            "import os; os.listdir('/Users')",
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertTrue(
+            "PermissionError" in proc.stderr or "Operation not permitted" in proc.stderr,
+            f"Expected permission error on /Users, got: {proc.stderr}",
+        )
+
+    @unittest.skipUnless(sys.platform == "darwin" and shutil.which("sandbox-exec"), "Requires macOS sandbox-exec")
+    def test_11_os_kernel_global_deny_file_write(self):
+        """macOS Seatbelt kernel must globally deny writes outside /tmp (P2)."""
+        profile = generate_macos_seatbelt_profile(self.repo_dir)
+        sandbox_bin = shutil.which("sandbox-exec")
+        targets = ["/Library/test_leak.txt", "/opt/test_leak.txt"]
+        for target in targets:
+            cmd = [
+                sandbox_bin,
+                "-p",
+                profile,
+                sys.executable,
+                "-c",
+                f"open('{target}', 'w').write('bad')",
+            ]
+            proc = subprocess.run(cmd, capture_output=True, text=True)
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertFalse(Path(target).exists())
+
+    @unittest.skipUnless(sys.platform == "darwin" and shutil.which("sandbox-exec"), "Requires macOS sandbox-exec")
+    def test_12_os_kernel_denies_network_inbound(self):
+        """macOS Seatbelt kernel must deny network binding / listening (P1-2)."""
+        profile = generate_macos_seatbelt_profile(self.repo_dir)
+        sandbox_bin = shutil.which("sandbox-exec")
+        cmd = [
+            sandbox_bin,
+            "-p",
+            profile,
+            sys.executable,
+            "-c",
+            "import socket; s = socket.socket(); s.bind(('127.0.0.1', 19876))",
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertTrue(
+            "PermissionError" in proc.stderr or "Operation not permitted" in proc.stderr,
+            f"Expected permission error on bind(), got: {proc.stderr}",
+        )
+
+    @unittest.skipUnless(sys.platform == "darwin" and shutil.which("sandbox-exec"), "Requires macOS sandbox-exec")
+    def test_13_os_kernel_denies_unauthorized_outbound_network_ports(self):
+        """macOS Seatbelt kernel must deny outbound connections to non-HTTPS ports like 80/22 (P1-2)."""
+        profile = generate_macos_seatbelt_profile(self.repo_dir)
+        sandbox_bin = shutil.which("sandbox-exec")
+        cmd = [
+            sandbox_bin,
+            "-p",
+            profile,
+            sys.executable,
+            "-c",
+            "import socket; s = socket.socket(); s.connect(('1.1.1.1', 80))",
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertTrue(
+            "PermissionError" in proc.stderr or "Operation not permitted" in proc.stderr,
+            f"Expected permission error on port 80, got: {proc.stderr}",
+        )
+
+    @unittest.skipUnless(sys.platform == "darwin" and shutil.which("sandbox-exec"), "Requires macOS sandbox-exec")
+    def test_14a_os_kernel_denies_direct_outbound_to_external_https_host(self):
+        """macOS Seatbelt kernel must deny direct outbound connections to external HTTPS hosts (P1 blocker resolved)."""
+        profile = generate_macos_seatbelt_profile(self.repo_dir)
+        sandbox_bin = shutil.which("sandbox-exec")
+        cmd = [
+            sandbox_bin,
+            "-p",
+            profile,
+            sys.executable,
+            "-c",
+            "import socket; s = socket.socket(); s.connect(('1.1.1.1', 443))",
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertTrue(
+            "PermissionError" in proc.stderr or "Operation not permitted" in proc.stderr,
+            f"Expected direct 443 connection to be denied by kernel, got: {proc.stderr}",
+        )
+
+    def test_14b_controlled_egress_proxy_enforces_whitelist_and_blocks_unauthorized_destinations(self):
+        """Controlled egress proxy must return 403 Forbidden for unauthorized destinations and non-Gemini Google APIs (P1)."""
+        import socket
+        from herdr.egress_proxy import ControlledEgressProxy
+
+        # Use default whitelist (strictly generativelanguage.googleapis.com)
+        proxy = ControlledEgressProxy()
+        proxy_port = proxy.start()
+        try:
+            # 1. Connect to unauthorized external destination (e.g. attacker.com:443)
+            s = socket.create_connection(("127.0.0.1", proxy_port), timeout=5.0)
+            s.sendall(b"CONNECT attacker.com:443 HTTP/1.1\r\nHost: attacker.com:443\r\n\r\n")
+            resp = s.recv(1024).decode("utf-8", errors="ignore")
+            s.close()
+            self.assertIn("403 Forbidden", resp)
+
+            # 2. Connect to unauthorized Google APIs (e.g. storage, drive, cloudresourcemanager)
+            unauthorized_hosts = [
+                "storage.googleapis.com",
+                "drive.googleapis.com",
+                "cloudresourcemanager.googleapis.com",
+            ]
+            for host in unauthorized_hosts:
+                s = socket.create_connection(("127.0.0.1", proxy_port), timeout=5.0)
+                s.sendall(f"CONNECT {host}:443 HTTP/1.1\r\nHost: {host}:443\r\n\r\n".encode())
+                resp = s.recv(1024).decode("utf-8", errors="ignore")
+                s.close()
+                self.assertIn("403 Forbidden", resp, f"Expected 403 Forbidden for {host}")
+
+            summary = proxy.get_audit_summary()
+            self.assertEqual(summary["denied"], 1 + len(unauthorized_hosts))
+            self.assertEqual(summary["allowed"], 0)
+        finally:
+            proxy.stop()
+
+    def test_14c_controlled_egress_proxy_allows_whitelisted_destination(self):
+        """Controlled egress proxy must approve whitelisted Google Gemini API destination (P1)."""
+        import socket
+        from unittest.mock import patch
+        from herdr.egress_proxy import ControlledEgressProxy
+
+        proxy = ControlledEgressProxy()
+        dummy_r, dummy_w = socket.socketpair()
+        try:
+            with patch.object(proxy, "connect_upstream", return_value=dummy_w):
+                proxy_port = proxy.start()
+                s = socket.create_connection(("127.0.0.1", proxy_port), timeout=5.0)
+                s.sendall(b"CONNECT generativelanguage.googleapis.com:443 HTTP/1.1\r\nHost: generativelanguage.googleapis.com:443\r\n\r\n")
+                resp = s.recv(1024).decode("utf-8", errors="ignore")
+                s.close()
+                self.assertIn("200 Connection Established", resp)
+
+                summary = proxy.get_audit_summary()
+                self.assertGreaterEqual(summary["allowed"], 1)
+                self.assertEqual(summary["events"][-1]["host"], "generativelanguage.googleapis.com")
+                self.assertEqual(summary["events"][-1]["action"], "ALLOWED")
+        finally:
+            proxy.stop()
+            dummy_r.close()
+            dummy_w.close()
+
+    @unittest.skipUnless(sys.platform == "darwin" and shutil.which("sandbox-exec"), "Requires macOS sandbox-exec")
+    def test_14d_seatbelt_outbound_strictly_restricted_to_controlled_proxy_port(self):
+        """macOS Seatbelt kernel allows outbound connection strictly to local proxy port while denying other ports."""
+        import socket
+        from herdr.egress_proxy import ControlledEgressProxy
+
+        proxy = ControlledEgressProxy()
+        proxy_port = proxy.start()
+        try:
+            profile = generate_macos_seatbelt_profile(self.repo_dir, egress_proxy_port=proxy_port)
+            sandbox_bin = shutil.which("sandbox-exec")
+
+            # Connecting to authorized proxy port should NOT trigger PermissionError from sandbox
+            cmd_ok = [
+                sandbox_bin,
+                "-p",
+                profile,
+                sys.executable,
+                "-c",
+                f"import socket; s = socket.socket(); s.connect(('127.0.0.1', {proxy_port})); print('proxy_conn_ok')",
+            ]
+            proc_ok = subprocess.run(cmd_ok, capture_output=True, text=True)
+            self.assertEqual(proc_ok.returncode, 0)
+            self.assertIn("proxy_conn_ok", proc_ok.stdout)
+
+            # Connecting to any other port (e.g. 19875) must be DENIED by kernel
+            cmd_denied = [
+                sandbox_bin,
+                "-p",
+                profile,
+                sys.executable,
+                "-c",
+                "import socket; s = socket.socket(); s.connect(('127.0.0.1', 19875))",
+            ]
+            proc_denied = subprocess.run(cmd_denied, capture_output=True, text=True)
+            self.assertNotEqual(proc_denied.returncode, 0)
+            self.assertTrue(
+                "PermissionError" in proc_denied.stderr or "Operation not permitted" in proc_denied.stderr,
+                f"Expected other port connection to be denied by kernel, got: {proc_denied.stderr}",
+            )
+        finally:
+            proxy.stop()
+
+    @unittest.skipUnless(sys.platform == "darwin" and shutil.which("sandbox-exec"), "Requires macOS sandbox-exec")
+    def test_14e_seatbelt_denies_direct_dns_outbound_udp_and_tcp(self):
+        """macOS Seatbelt kernel must deny direct DNS queries (UDP 53 and TCP 53) to external DNS servers (P1)."""
+        profile = generate_macos_seatbelt_profile(self.repo_dir, egress_proxy_port=54321)
+        sandbox_bin = shutil.which("sandbox-exec")
+
+        # 1. Direct UDP 53 must be denied by kernel
+        cmd_udp = [
+            sandbox_bin,
+            "-p",
+            profile,
+            sys.executable,
+            "-c",
+            "import socket; s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.sendto(b'ping', ('8.8.8.8', 53))",
+        ]
+        proc_udp = subprocess.run(cmd_udp, capture_output=True, text=True)
+        self.assertNotEqual(proc_udp.returncode, 0)
+        self.assertTrue(
+            "PermissionError" in proc_udp.stderr or "Operation not permitted" in proc_udp.stderr,
+            f"Expected UDP 53 to be denied by kernel, got: {proc_udp.stderr}",
+        )
+
+        # 2. Direct TCP 53 must be denied by kernel
+        cmd_tcp = [
+            sandbox_bin,
+            "-p",
+            profile,
+            sys.executable,
+            "-c",
+            "import socket; s = socket.socket(); s.connect(('8.8.8.8', 53))",
+        ]
+        proc_tcp = subprocess.run(cmd_tcp, capture_output=True, text=True)
+        self.assertNotEqual(proc_tcp.returncode, 0)
+        self.assertTrue(
+            "PermissionError" in proc_tcp.stderr or "Operation not permitted" in proc_tcp.stderr,
+            f"Expected TCP 53 to be denied by kernel, got: {proc_tcp.stderr}",
+        )
+
+    def test_15_dynamic_auth_dir_permissions_and_symlink_defense(self):
+        """Dynamic auth directory must have 0700 permissions and reject symlinks (P1-1 & P1-2)."""
+        import stat
+        import tempfile
+        from unittest.mock import patch
+
+        if sys.platform == "darwin" and shutil.which("sandbox-exec"):
+            # 1. Verify dynamic creation creates secure 0700 directory
+            with patch.dict(os.environ, {"HERDR_REVIEWER_GEMINI_API_KEY": "fake_key_123"}, clear=True):
+                is_iso, _, meta = verify_os_security_isolation(self.repo_dir)
+                self.assertTrue(is_iso)
+                auth_dir = Path(meta["isolated_auth_dir"])
+                self.assertTrue(auth_dir.exists())
+                mode = stat.S_IMODE(os.stat(auth_dir).st_mode)
+                self.assertEqual(mode, 0o700)
+                self.assertEqual(meta["actual_execution_user"], os.environ.get("USER", "user"))
+                self.assertIn("host user", meta["user_isolation_note"].lower())
+                # cleanup temp dir
+                if meta.get("is_temp_auth_dir"):
+                    secure_cleanup_auth_dir(meta)
+                    self.assertEqual(meta["cleanup_record"]["status"], "verified_removed")
+
+            # 2. Verify refusal of symlinks
+            with tempfile.TemporaryDirectory() as t_dir:
+                real_dir = Path(t_dir) / "real"
+                real_dir.mkdir()
+                sym_dir = Path(t_dir) / "symlink"
+                sym_dir.symlink_to(real_dir)
+                with patch.dict(
+                    os.environ,
+                    {"HERDR_REVIEWER_GEMINI_API_KEY": "fake_key_123", "HERDR_REVIEWER_AUTH_DIR": str(sym_dir)},
+                    clear=True,
+                ):
+                    is_iso, reason, _ = verify_os_security_isolation(self.repo_dir)
+                    self.assertFalse(is_iso)
+                    self.assertIn("symlink", reason)
+
+    def test_16_temporary_auth_dir_cleanup_validation_and_audit(self):
+        """Temporary auth dir cleanup must verify deletion, refuse non-temp paths, and record audit status (P2)."""
+        import tempfile
+
+        # 1. Successful cleanup of verified temporary reviewer directory
+        temp_dir = tempfile.mkdtemp(prefix="haflow-reviewer-auth-")
+        meta = {
+            "is_temp_auth_dir": True,
+            "isolated_auth_dir": temp_dir,
+        }
+        res = secure_cleanup_auth_dir(meta)
+        self.assertTrue(res["cleaned"])
+        self.assertEqual(res["status"], "verified_removed")
+        self.assertFalse(os.path.exists(temp_dir))
+        self.assertEqual(meta["cleanup_record"]["status"], "verified_removed")
+
+        # 2. Safety invariant: refusal to clean paths without valid reviewer prefix
+        unsafe_dir = tempfile.mkdtemp(prefix="unsafe-other-dir-")
+        try:
+            meta_unsafe = {
+                "is_temp_auth_dir": True,
+                "isolated_auth_dir": unsafe_dir,
+            }
+            res_unsafe = secure_cleanup_auth_dir(meta_unsafe)
+            self.assertFalse(res_unsafe["cleaned"])
+            self.assertEqual(res_unsafe["status"], "path_validation_failed")
+            self.assertTrue(os.path.exists(unsafe_dir))
+        finally:
+            shutil.rmtree(unsafe_dir, ignore_errors=True)
+
+    def test_17_auth_dir_cleanup_failure_blocks_shadow_success(self):
+        """Temporary auth dir cleanup failure must raise security exception and block shadow_success (P2)."""
+        import json
+        from unittest.mock import patch
+        from herdr.review_benchmark import run_agent_review, review_diff
+
+        # 1. In run_agent_review: cleanup failure in finally block must raise RuntimeError
+        failed_cleanup_meta = {
+            "is_temp_auth_dir": True,
+            "isolated_auth_dir": "/tmp/haflow-reviewer-auth-fake",
+            "isolation_type": "macos_seatbelt",
+        }
+        with patch("herdr.review_benchmark.secure_cleanup_auth_dir") as mock_cleanup, \
+             patch("subprocess.run") as mock_run:
+            mock_cleanup.return_value = {
+                "cleaned": False,
+                "status": "cleanup_failed",
+                "error": "Simulated disk permission error",
+            }
+            mock_run.return_value.returncode = 0
+            mock_run.return_value.stdout = json.dumps({"response": "Looks good", "usage": {}})
+
+            with self.assertRaises(RuntimeError) as cm:
+                run_agent_review(
+                    agent_name="agy",
+                    repo_dir=self.repo_dir,
+                    pr_info={"repo": "test/test", "pr_number": 185, "base": "main", "head": "feat"},
+                    diff_content="--- a/f\n+++ b/f\n@@ -1 +1 @@\n-a\n+b\n",
+                    isolation_meta=failed_cleanup_meta,
+                )
+            self.assertIn("security_exception", str(cm.exception))
+            self.assertIn("cleanup failed", str(cm.exception))
+
+        # 2. In review_diff: cleanup failure must force shadow_status to shadow_failed
+        def mock_run_agent(agent_name, **kwargs):
+            if agent_name == "agy":
+                raise RuntimeError("security_exception: temporary auth directory cleanup failed: Permission denied")
+            return {"status": "success", "agent": agent_name, "findings": [], "rejected_findings": []}
+
+        with patch("shutil.which", return_value="/usr/local/bin/agy"), \
+             patch("herdr.review_benchmark.verify_os_security_isolation") as mock_iso, \
+             patch("herdr.review_benchmark.run_agent_review", side_effect=mock_run_agent):
+            mock_iso.return_value = (True, "isolated", {"isolation_type": "macos_seatbelt"})
+            res = review_diff(
+                repo_dir=self.repo_dir,
+                diff_content="--- a/file\n+++ b/file\n@@ -1 +1 @@\n-old\n+new\n",
+                pr_info={"repo": "test/test", "pr_number": 185, "base": "main", "head": "feat"},
+                reviewer_agent="rule",
+                shadow_mode=True,
+                shadow_agent="agy",
+            )
+            self.assertEqual(res["shadow_status"], "shadow_failed")
+            self.assertEqual(res["shadow"]["status"], "shadow_failed")
+            self.assertIn("security_exception", res["shadow"]["error"])
+            self.assertNotEqual(res["shadow_status"], "shadow_success")
+
+
+if __name__ == "__main__":
+    unittest.main()

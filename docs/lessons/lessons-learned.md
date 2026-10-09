@@ -6425,3 +6425,77 @@ wf-nexusarchive-1008-01 手工替代重派时复用 dispatch-operation-id 被拒
 
 ### 验证命令 / 关联证据
 `pytest -q tests/test_auto_pr_review.py tests/test_review_benchmark.py tests/test_finding_verifier.py` 51 passed；覆盖工作流配置、Rule/AI 超时/失败/跳过、Finding Verifier uncertain 留存、单例评论更新、旧 SHA 阻止覆盖、Fork PR 403 优雅容错、危险 CLI 拦截与敏感 Token 脱敏等 12 项测试；GitHub Actions 真实 PR 端到端验证通过。
+
+## 148. Self-hosted Runner 宿主机沙盒穿透风险与深层防御边界实证（2026-10-08）
+
+### 问题背景
+在 Self-hosted Runner 上启用 AI Reviewer (`agy --sandbox`) 闭环时，深层排查发现仅靠 `--sandbox` 无法建立真正的安全边界：
+1. `agy` 的只读工具（`view_file`、`grep` 等）缺乏工作区根目录约束，可跨目录读取宿主机任意文件（实证已直接读取 `~/.gemini/installation_id`）；
+2. 当 `run_command` 被终端沙盒初次拦截时，模型可在下一轮自动携带 `BypassSandbox: true` 绕过沙盒直接在宿主机执行命令；
+3. CI 工作流向审查步骤注入了带有写权限的 `GITHUB_TOKEN`，且子进程默认继承了整个父进程环境变量；
+4. 当 Runner 部署在真实开发机宿主机并以开发者身份运行时，其 `$HOME` 包含大量私有 SSH 私钥（`~/.ssh/id_*`）与敏感凭据，存在被不可信 PR 通过 Prompt Injection 实施数据外逸与未授权命令执行的重大隐患。
+
+### 经验教训
+1. **声明绝非证明，严禁依赖环境变量声称安全**：`HERDR_SECURE_LLM_RUNNER=1` 等环境变量不能替代技术隔离；必须通过真实 OS 内核沙盒（macOS Seatbelt `sandbox-exec`）或容器环境实施强制限制，未探测到可信隔离时严格返回 `shadow_skipped`。
+2. **应用层 CLI 沙盒无法防御模型越界**：`agy --sandbox` 的只读工具不具备工作区边界，且应用层存在 `BypassSandbox: true` 逃逸能力。必须由宿主操作系统内核从系统调用层面（`open`, `read`, `write`）直接拦截非授权文件与命令。
+3. **最小环境变量白名单原则**：杜绝复制宿主机全量环境变量再进行黑名单剔除；子进程必须采用最小白名单（`PATH`, `HOME`, `USER`, 代理变量），物理隔绝所有 GitHub 写 Token 与 SSH 凭据。
+
+### 操作规范
+1. **操作系统级内核沙盒（macOS Seatbelt）**：在 macOS Runner 上动态生成 Seatbelt Profile，默认拒绝 `$HOME` 绝大部分读取，仅放行审查仓库、模型配置（`~/.gemini`）与必要系统依赖；对 `$HOME` 和代码仓库施加强制只读保护（`deny file-write*`）。
+2. **主动内核探针探测**：`verify_os_security_isolation` 执行 active kernel probe，验证内核 deny 规则真实有效；探针失败或非隔离环境立即熔断为 `shadow_skipped`。
+3. **环境白名单注入**：`run_agent_review` 仅注入 `STRICT_ENV_WHITELIST_KEYS`，杜绝任何外部 Token 穿透。
+
+### 验证命令 / 关联证据
+`pytest -v tests/test_os_sandbox_boundary.py tests/test_auto_pr_review.py`（7 项 OS 级边界用例全部 PASS，涵盖私有 Canary 文件拦截、Runner 凭据拦截、写保护拦截、允许快照放行与白名单校验）；沙盒穿透实证会话记录（`aa34823a-d7b2-4289-84b9-a47f6e821ea9`、`96852c72-8165-416a-87ce-e5f0b18a77ee`）。
+
+## 149. 共享宿主机认证材料硬隔离与不可信 PR 审核的 Fail-Closed 决策原则（2026-10-08）
+
+### 问题背景
+在 PR #185 自动化复核过程中发现，即便建立了 macOS Seatbelt 沙盒，由于初始版本放行了主用户 `~/.gemini` 与 Keychain 路径以复用宿主机的模型登录凭据，导致沙盒权限边界过宽：
+1. `~/.gemini` 包含 OAuth Token、会话数据与配置；若 AI Reviewer 的工具（`view_file` 等）发生提示词注入越界，仍能读取主开发者的认证材料；
+2. 宿主机 Keychain 数据库包含开发者私有密码与凭据，绝不应暴露给审查不可信 PR 的子进程；
+3. `(allow default)` 缺少对 `/Users`、`/Volumes` 及非临时文件系统写入的严密封闭。
+核心矛盾在于：在共享宿主机上，如果缺少独立的 Reviewer 认证凭据，强行运行真实 LLM 就必然牺牲隔离性；反之，若实施硬隔离，LLM 就无法获得合法凭据。
+
+### 经验教训
+1. **认证与隔离不可兼得时，严格选择安全（Fail-Closed）**：不可信代码审核绝不能以妥协主开发者私有凭据为代价。未配置独立隔离凭据（`HERDR_REVIEWER_GEMINI_API_KEY`）或独立受限用户/容器时，必须诚实返回 `shadow_skipped`，严禁通过放行个人目录蒙混过关。
+2. **执行身份如实标注，禁止伪称独立系统用户**：通过子进程环境变量修改 `USER` / `HOME` 不改变操作系统 UID。执行身份真实仍为宿主机用户，隔离必须且完全依赖 Seatbelt 内核系统调用拦截，不夸大宣称系统用户级隔离。
+3. **认证目录动态化与最小网络出站收紧**：专用认证目录严禁使用可预测固定路径，必须使用临时随机目录（`0700` 权限、防软链接攻击、进程退出自动安全擦除）；Seatbelt 必须显式封锁 `network-inbound`，并对 `network-outbound` 施加严格端口白名单（仅 443、53 及显式代理），阻断凭据通过非授权端口外逸。
+4. **语法误报确凿反驳**：对于声称代码存在 SyntaxError / incomplete syntax 的误报，若代码在同 revision 下成功通过 AST 解析，直接作为 counter-evidence 定性为 `rejected`。
+
+### 操作规范
+1. **硬拒绝主用户模型与钥匙串目录**：在 macOS Seatbelt Profile 中硬编码 `(deny file-read* (subpath "{home}/.gemini"))`、`(deny file-write* (subpath "{home}/.gemini"))` 及 `(deny file-read* (subpath "{home}/Library/Keychains"))`。
+2. **全树收紧、全局只读与最小网络白名单**：显式对 `/Users` 与 `/Volumes` 设置 `deny file-read*`；首行声明 `(deny file-write*)`；加入 `(deny network-inbound)`、`(deny network-outbound)`，仅白名单放行 443 / 53 及显式本地代理。
+3. **动态私有认证目录与安全生命周期**：动态通过 `tempfile.mkdtemp(prefix="haflow-reviewer-auth-")` 创建 `0700` 私有目录，运行结束通过 `finally` 执行 `shutil.rmtree` 彻底销毁；专用 API Key 遵循最小权限原则（仅推理权限，一键可吊销）。
+4. **影子异常全捕获与语法误报驳回**：`review_diff` 顶层统一包裹 try-except，确保影子阶段任何探针或执行崩溃绝不反噬 Rule 主门禁；`finding_verifier` 增加 AST 语法反驳规则。
+
+### 验证命令 / 关联证据
+`pytest -v tests/test_os_sandbox_boundary.py`（16 项 OS 边界、网络端口白名单与凭据隔离实测用例 100% PASS）；`pytest -v tests/test_finding_verifier.py`（17 项 AST 语法与反驳用例 PASS）；`pytest -v tests/test_auto_pr_review.py`（13 项用例 PASS）；GitHub Actions Run 与 PR #185 评审链证据。
+
+## 150. 受控出站代理（Controlled Egress Proxy）与零静默凭据清理闭环（2026-10-09）
+
+### 问题背景
+在 PR #185 边界深化审查中发现两个关键安全隐患：
+1. **端口放行不等于目的地白名单**：此前 Seatbelt 声明 `(allow network-outbound (remote tcp "*:443"))`，仅限制了协议端口，但允许连接互联网上任意 HTTPS 服务器。若不可信 PR 诱导模型执行出站网络请求，专用 Reviewer API Key 仍存在被外传到任意服务器的风险；
+2. **凭据清理静默吞异常**：清理临时认证目录时使用 `shutil.rmtree(..., ignore_errors=True)`，掩盖了潜在的清理失败与凭据残余，且缺乏对待清理路径的边界校验；
+3. **上下文裁剪诱发的负向存在幻觉**：模型因审查上下文切片，产生“未闭合字符串”或“函数未定义”等不符事实的中文 Finding。
+
+### 经验教训
+1. **网络出站目的地硬收口：内核级端口封锁 + 受控代理白名单**：
+   - Seatbelt 内核层彻底移除 `(remote tcp "*:443")`，直接拒绝任何直接外联；
+   - 启动本地受控出站代理（`ControlledEgressProxy`），仅在 Seatbelt 中放行 `localhost:{egress_proxy_port}`；
+   - 代理层严格校验目标 Host（仅放行 `generativelanguage.googleapis.com`、`*.googleapis.com` 等白名单），任何非白名单目的地（如 `attacker.com`、内网 IP 等）立即返回 `HTTP 403 Forbidden` 并切断连接；同时支持透传宿主机上游代理；
+2. **认证清理零静默与严格路径边界**：
+   - 清理路径必须严格限制在 `/tmp` 下以 `haflow-reviewer-auth-` 为前缀的目录，严禁意外删除其他路径；
+   - 禁用 `ignore_errors=True`，在执行 `rmtree` 后核验路径物理消失，显式向隔离元数据回写 `verified_removed` 或失败告警记录；
+3. **双语语法与符号反驳闭环**：
+   - `finding_verifier` 扩展中英文“未闭合字符串 / 未定义”等负向断言识别；在 AST 全文件解析成功时，自动作为 counter-evidence 定性为 `rejected`。
+
+### 操作规范
+1. **受控代理固化**：在 `herdr/egress_proxy.py` 中实现标准库 `ControlledEgressProxy`，由 `review_benchmark.py` 在执行 AI 审核时动态启动并在退出时可靠终止；
+2. **Seatbelt 剥离直接 443**：在 `generate_macos_seatbelt_profile` 中仅放行动态代理端口 `localhost:{egress_proxy_port}`；
+3. **安全清理固化**：在 `review_benchmark.py` 中固化 `secure_cleanup_auth_dir`；
+4. **反驳规则固化**：在 `herdr/finding_verifier.py` 中更新 Check B 与 Check E。
+
+### 验证命令 / 关联证据
+`pytest -v tests/test_os_sandbox_boundary.py tests/test_finding_verifier.py`（20 项 OS 边界与受控代理测试 100% PASS，包含直接 443 拦截、非授权 Host 403 拦截、白名单 Host 放行、动态端口限制与清理验证）；全量自动化测试（74 项测试 100% PASS）。

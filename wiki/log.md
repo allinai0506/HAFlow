@@ -8,6 +8,77 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-10-09] sec | PR #185 P1 受控出站代理（Controlled Egress Proxy）与 P2 零静默凭据清理闭环
+
+- 背景：
+  1. 复核指出 P1：Seatbelt 仅限制 443 端口不等于限制目的地白名单，允许连接互联网上任意 HTTPS 服务器，存在专用 Reviewer API Key 被外传到非授权主机的风险；必须通过受控出站代理限制目标 Host，并剥离内核层直接 443 外联；
+  2. 复核指出 P2：临时认证目录清理使用 `shutil.rmtree(..., ignore_errors=True)` 会静默掩盖删除失败，缺乏可观测性与路径范围校验；
+  3. AI 审核评论出现“存在未闭合字符串”与“函数未定义”等中文负向存在幻觉，未被 Finding Verifier 自动驳回。
+- 变更：
+  1. **P1 受控出站代理与 Gemini 最小白名单收敛 (`herdr/egress_proxy.py`)**：新增标准库 `ControlledEgressProxy`，严格校验 CONNECT 目标 Host 与 443 端口；白名单从宽泛的 `*.googleapis.com` 严格收敛至经过真实调用验证必需的 `generativelanguage.googleapis.com`；对非授权 Google API（如 `storage.googleapis.com`、`drive.googleapis.com`、`cloudresourcemanager.googleapis.com`）及任意外部主机一律返回 `HTTP 403 Forbidden` 并阻断隧道；同时支持透传宿主机上游代理（如 `127.0.0.1:7897`）；
+  2. **P1 内核级剥离直接 443 与 DNS (UDP/TCP 53) 外联**：Seatbelt Profile 彻底移除 `(allow network-outbound (remote tcp "*:443"))` 与 `(remote udp/tcp "*:53")`，仅允许向本地受控代理端口 `remote tcp "localhost:{egress_proxy_port}"` 发起出站 TCP 连接；AI 进程无法直接向外部 DNS 服务器发送数据（杜绝 DNS 数据外传隐蔽信道），域名解析全权交由受控代理在宿主机侧完成；直接外联与 DNS 查询均被 XNU 内核以 `Operation not permitted` 物理拦截；
+  3. **P2 零静默凭据清理与安全异常阻断 (`secure_cleanup_auth_dir` / `run_agent_review`)**：严禁静默忽略异常（禁用 `ignore_errors=True`）；严格校验待清理路径必须位于临时目录且具有 `haflow-reviewer-auth-` 前缀；清理失败或物理未删除时立即抛出 `security_exception`，阻断 `shadow_success` 状态并强制将审核结果置为 `shadow_failed`，杜绝在 PR 评论中掩盖凭据清理异常；
+  4. **双语语法与符号反驳规则扩展 (`herdr/finding_verifier.py`)**：Check B 扩展中英文“未定义 / 未声明 / 不存在”符号匹配，并在符号存在定义或 Import 时判定 `rejected`；Check E 扩展中英文语法反驳，收敛至语法级 token（防误伤未闭合连接等资源泄漏），当目标文件通过 `ast.parse()` 解析时判定 `rejected`。
+- 证据：
+  1. `pytest -v tests/test_os_sandbox_boundary.py` 22/22 PASS（含直接 443 拦截、DNS UDP/TCP 53 内核拦截、非授权 Google API 403 拦截、Gemini 域名放行、动态代理端口放行与清理失败异常阻断验证）；
+  2. `pytest -v tests/test_finding_verifier.py` 20/20 PASS（含中文未闭合字符串反驳、中文符号未定义反驳、防误伤未闭合连接/资源反驳用例）；
+  3. 全量测试 `tests/test_os_sandbox_boundary.py tests/test_auto_pr_review.py tests/test_finding_verifier.py tests/test_review_benchmark.py` 77/77 PASS；
+  4. `python3 -m compileall -q herdr services bin tests` clean；
+  5. `git diff --check` clean。
+
+## [2026-10-08] sec | PR #185 P1/P2 最终安全收敛：真实执行身份准确标注、专用认证目录动态化/防软链接/自动擦除、出入站最小网络权限收紧与 AST 语法误报驳回
+
+- 背景：
+  1. 自动化复核指出 P1-1：更换环境变量 `USER` 并不改变操作系统 UID，不能作为独立系统用户隔离的证据，必须如实标注实际执行身份为宿主机用户并依靠内核 Seatbelt 提供隔离；
+  2. P1-2：固定路径 `/tmp/haflow-reviewer-auth` 存在软链接劫持与残留风险；未限制网络出站会导致 AI 子进程可能向任意网络端口外泄专用凭据；
+  3. AI 评论中由于 Context 裁剪出现声称 `SyntaxError` 的虚假发现，未被 Finding Verifier 自动驳回。
+- 变更：
+  1. **P1-1 真实执行身份如实标注**：移除虚假的 `child_env["USER"] = "herdr-ai-reviewer"`，隔离元数据准确记录 `actual_execution_user` 为当前宿主机用户（如 `user`）与真实 UID，明确安全隔离纯粹由 macOS Seatbelt XNU 内核 Profile（`sandbox-exec`）实现；
+  2. **P1-2 动态私有认证目录与全生命周期安全清理**：改用 `tempfile.mkdtemp(prefix="haflow-reviewer-auth-")` 动态生成随机唯一认证目录，权限严格设为 `0700`；对外部指定的 `HERDR_REVIEWER_AUTH_DIR` 进行前置防软链接（`is_symlink()` 拦截）与真实目录校验；`run_agent_review` 引入 `finally` 块，执行完毕立即调用 `shutil.rmtree` 彻底擦除，杜绝任何凭据与状态残留；
+  3. **P1-2 最小网络权限收紧（出入站内核级封锁）**：Seatbelt Profile 中加入 `(deny network-inbound)`（禁止端口监听/反弹 Shell 服务），加入 `(deny network-outbound)`，仅白名单放行 HTTPS（443）、DNS（53）及环境变量显式指定的本地代理端口，彻底阻断 AI 子进程向非授权端口/内网主机外泄凭据；
+  4. **专用凭据运营规范固化**：明确 `HERDR_REVIEWER_GEMINI_API_KEY` 遵循最小权限（仅模型调用，无云管理权限），发生泄露可独立一键吊销；
+  5. **Finding Verifier AST 语法误报自动驳回**：在 `herdr/finding_verifier.py` 中引入 Refutation Check E，当 Finding 声称存在 SyntaxError / incomplete syntax，而文件在同 commit 下通过 `ast.parse()` 成功解析时，直接判定为 `rejected`（反事实证据：`counter_evidence_valid_syntax`）；
+  6. **实证测试完备覆盖**：新增端口监听拦截、非 443 出站端口拦截、443 正常放行、动态目录 `0700` 权限/防软链接、AST 语法反事实驳回等用例。
+- 证据：
+  1. `pytest -v tests/test_os_sandbox_boundary.py` 16/16 PASS；
+  2. `pytest -v tests/test_finding_verifier.py` 17/17 PASS；
+  3. `pytest -v tests/test_auto_pr_review.py` 13/13 PASS；
+  4. `pytest -q tests/test_review_benchmark.py` 22/22 PASS；
+  5. `python3 -m compileall -q herdr services bin tests` clean；
+  6. `git diff --check` clean。
+
+## [2026-10-08] sec | PR #185 安全隔离阻塞项修复：macOS Seatbelt 内核沙盒动态绑定、最小环境变量白名单、主动内核探针与伪造绕过彻底移除
+
+- 背景：
+  1. PR #185 审核过程中明确核心阻塞项：AI Reviewer 必须在真正受限的操作系统权限环境中执行，严禁依靠环境变量（如 `HERDR_SECURE_LLM_RUNNER=1`）声明或声明绕过安全；
+  2. 环境变量不能采用全量复制加黑名单删除模式，必须收敛为极简白名单；
+  3. 必须通过操作系统内核级访问控制（如 macOS Seatbelt），物理阻断 AI 对开发者个人 Home、SSH 密钥、Runner 管理凭据的读取和对工作区的写入。
+- 变更：
+  1. **操作系统级内核沙盒 (`herdr/review_benchmark.py`)**：动态生成 macOS Seatbelt Scheme profile，通过 `/usr/bin/sandbox-exec` 将 `agy` 子进程包装运行在 XNU 内核沙盒中，默认对 `$HOME` 实施 `deny file-read*`，仅白名单放行代码快照与模型必要依赖；对代码仓库与 Home 施加 `deny file-write*` 只读保护；
+  2. **最小环境变量白名单 (`STRICT_ENV_WHITELIST_KEYS`)**：子进程杜绝继承父进程环境，严格使用白名单字典构建全新环境，物理隔绝 `GITHUB_TOKEN`、`GH_TOKEN`、`SSH_AUTH_SOCK`、`AWS_*` 等敏感令牌；
+  3. **主动内核探针与移除环境凭据伪造 (`verify_os_security_isolation`)**：引入 active kernel probe 实时验证沙盒 deny 机制生效；彻底移除通过环境变量声明“安全隔离”或“放行未隔离”的逻辑，无真实 OS 沙盒时严格熔断返回 `shadow_skipped`；
+  4. **全量实证测试套件 (`tests/test_os_sandbox_boundary.py`)**：实测验证 Canary 文件读取拦截、Runner 凭据读取拦截、写保护拦截、快照读取放行与未隔离安全熔断。
+- 证据：
+  1. `pytest -v tests/test_os_sandbox_boundary.py` 7/7 PASS；
+  2. 58 项自动审查与边界测试 100% PASS；
+  3. 真实 `review_diff` 在 macOS Seatbelt 下端到端运行真实 `agy`，状态为 `shadow_success` 且 isolation 记录为 `macos-seatbelt`。
+
+## [2026-10-08] sec | Self-hosted Runner 宿主机沙盒穿透实证与深层防御边界加固：子进程凭据物理剥离、宿主机私钥探针熔断、生产 Runner 容器化规范
+
+- 背景：
+  1. 在 Self-hosted Runner 上实际调通 `agy --sandbox` 闭环后，进一步执行红蓝对抗安全渗透验证；
+  2. 实证发现：`agy --sandbox` 的只读工具（`view_file`）缺乏工作区路径边界，可跨目录读取宿主机任意文件；且 `run_command` 被终端沙盒拦截后，模型自动通过 `BypassSandbox: true` 绕过沙盒直接在宿主机执行命令；
+  3. CI 步骤向环境注入了写权限 `GITHUB_TOKEN`，在宿主机共享开发者 `$HOME`（包含 `~/.ssh` 私钥）时，存在被恶意 PR 通过 Prompt Injection 窃取私钥与 GitHub Token 的高危隐患。
+- 变更：
+  1. **子进程环境变量物理清洗 (`herdr/review_benchmark.py`)**：启动 `agy` 或任何下游 AI Reviewer 子进程前，严格从 `child_env` 中剥离 `GITHUB_TOKEN`、`GH_TOKEN`、`SSH_AUTH_SOCK`、`AWS_*`，杜绝子进程接触写权限令牌；
+  2. **宿主机边界探针与自动熔断 (`check_runner_security_isolation`)**：自动扫描 `$HOME/.ssh` 私钥；在未配置容器或专用无特权运行用户（如 `github-runner`）的开发机上，强制跳过 AI 影子审核（`shadow_skipped`），除非显式声明 `HERDR_ALLOW_UNISOLATED_RUNNER=1`；
+  3. **CI 配置去宿主机化 (`.github/workflows/ha-review.yml`)**：彻底剔除在 public 工作流中硬编码的个人宿主机路径（`HOME: /Users/user`），改为由宿主机 Runner 本地 `.env` 自治提供；
+  4. **生产隔离规范补充 (`scripts/setup-self-hosted-runner.sh` & `docs/guides/review-benchmark.md`)**：明确生产环境 Self-hosted Runner 必须运行在独立系统用户（对开发者目录设置 `chmod 700`）或 Docker 容器内。
+- 证据：
+  1. 实证会话记录 `aa34823a-d7b2-4289-84b9-a47f6e821ea9`、`96852c72-8165-416a-87ce-e5f0b18a77ee` 记录沙盒绕过与读取现象；
+  2. `pytest -v tests/test_auto_pr_review.py::TestAutoPRReview::test_11_dangerous_cli_forbidden_in_unisolated_env` 验证凭据剥离与探针熔断全绿；
+  3. 51 项测试套件 100% PASS。
+
 ## [2026-10-08] feat | 实现 HAFlow PR 自动审核闭环（Auto PR Review V1）：GitHub Actions 触发、安全边界沙盒化、单例评论幂等防刷屏与四工件审计
 
 - 背景：

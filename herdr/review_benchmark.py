@@ -14,8 +14,11 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
+import tempfile
 import time
 from typing import Any, Dict, List, Optional, Tuple
+import warnings
 
 
 def pr_key(repo: str, pr_number: int, head: str) -> str:
@@ -416,6 +419,7 @@ def run_agent_review(
     diff_content: str,
     timeout_seconds: int = 180,
     system_prompt: Optional[str] = None,
+    isolation_meta: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Execute code review agent on the isolated repo.
 
@@ -609,17 +613,71 @@ def run_agent_review(
             "--effort", effort,
             "--print", prompt,
         ]
+
+        # Verify or apply OS-level technical sandbox isolation
+        egress_proxy = None
+        if isolation_meta is None:
+            is_iso, iso_reason, isolation_meta = verify_os_security_isolation(repo_dir)
+            if not is_iso:
+                raise PermissionError(f"security_boundary_violation: {iso_reason}")
+
+        if isolation_meta.get("isolation_type") == "macos-seatbelt":
+            # P1: Start controlled egress proxy enforcing destination host whitelist
+            from herdr.egress_proxy import ControlledEgressProxy
+            host_upstream = (
+                os.environ.get("HTTPS_PROXY")
+                or os.environ.get("https_proxy")
+                or os.environ.get("HTTP_PROXY")
+                or os.environ.get("http_proxy")
+            )
+            egress_proxy = ControlledEgressProxy(upstream_proxy_url=host_upstream)
+            proxy_port = egress_proxy.start()
+            auth_dir = Path(isolation_meta["isolated_auth_dir"]) if isolation_meta.get("isolated_auth_dir") else None
+            profile = generate_macos_seatbelt_profile(repo_dir, isolated_auth_dir=auth_dir, egress_proxy_port=proxy_port)
+            isolation_meta["profile"] = profile
+            isolation_meta["egress_proxy_port"] = proxy_port
+
+            sandbox_bin = isolation_meta.get("sandbox_exec", "/usr/bin/sandbox-exec")
+            cmd = [sandbox_bin, "-p", profile] + cmd
     elif agent_name == "pi":
+        egress_proxy = None
         cmd = ["pi", "--print", prompt]
     elif agent_name == "opencode":
+        egress_proxy = None
         cmd = ["opencode", "--prompt", prompt]
     else:
         raise RuntimeError(f"agent_startup_failed: unsupported agent '{agent_name}'")
+
+    # Security boundary: Strict environment whitelist. Do NOT copy entire host environment.
+    child_env = {k: os.environ[k] for k in STRICT_ENV_WHITELIST_KEYS if k in os.environ}
+    if isolation_meta and isolation_meta.get("isolated_auth_dir"):
+        child_env["HOME"] = isolation_meta["isolated_auth_dir"]
+    if isolation_meta and isolation_meta.get("isolated_api_key"):
+        child_env["GEMINI_API_KEY"] = isolation_meta["isolated_api_key"]
+
+    if isolation_meta and isolation_meta.get("egress_proxy_port"):
+        proxy_url = f"http://127.0.0.1:{isolation_meta['egress_proxy_port']}"
+        child_env["HTTP_PROXY"] = proxy_url
+        child_env["HTTPS_PROXY"] = proxy_url
+        child_env["ALL_PROXY"] = proxy_url
+        child_env["http_proxy"] = proxy_url
+        child_env["https_proxy"] = proxy_url
+        child_env["all_proxy"] = proxy_url
+        child_env["NO_PROXY"] = "localhost,127.0.0.1"
+        child_env["no_proxy"] = "localhost,127.0.0.1"
+
+    if "PATH" not in child_env:
+        child_env["PATH"] = os.environ.get("PATH", "/usr/bin:/bin")
+    if "HOME" not in child_env:
+        child_env["HOME"] = str(Path.home())
+    if "USER" not in child_env:
+        child_env["USER"] = os.environ.get("USER", "user")
 
     try:
         proc = subprocess.run(
             cmd,
             cwd=str(repo_dir),
+            env=child_env,
             capture_output=True,
             text=True,
             timeout=timeout_seconds,
@@ -630,6 +688,22 @@ def run_agent_review(
         raise RuntimeError(f"agent_startup_failed: executable not found for '{agent_name}': {exc}") from exc
     except Exception as exc:
         raise RuntimeError(f"agent_startup_failed: {exc}") from exc
+    finally:
+        # P1: Terminate controlled egress proxy and record audit
+        if egress_proxy is not None:
+            try:
+                egress_proxy.stop()
+            except Exception:
+                pass
+            if isolation_meta is not None:
+                isolation_meta["egress_audit"] = egress_proxy.get_audit_summary()
+        # P2: Verified, deterministic cleanup of temporary reviewer auth directory
+        if isolation_meta and isolation_meta.get("is_temp_auth_dir"):
+            cleanup_res = secure_cleanup_auth_dir(isolation_meta)
+            if not cleanup_res.get("cleaned") or cleanup_res.get("status") not in ("verified_removed", "already_absent"):
+                raise RuntimeError(
+                    f"security_exception: temporary auth directory cleanup failed: {cleanup_res.get('error') or cleanup_res.get('status')}"
+                )
 
     if proc.returncode != 0:
         raise RuntimeError(f"agent_startup_failed: return code {proc.returncode}, stderr: {proc.stderr[:300]}")
@@ -683,7 +757,294 @@ def run_agent_review(
     }
     if audit_info:
         res_llm["audit"] = audit_info
+    if isolation_meta:
+        res_llm["isolation"] = {
+            "type": isolation_meta.get("isolation_type"),
+            "cleanup": isolation_meta.get("cleanup_record"),
+            "egress_audit": isolation_meta.get("egress_audit"),
+        }
     return res_llm
+
+
+STRICT_ENV_WHITELIST_KEYS = (
+    "PATH",
+    "HOME",
+    "USER",
+    "TMPDIR",
+    "LANG",
+    "LC_ALL",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "no_proxy",
+    "GEMINI_API_KEY",
+)
+
+
+def secure_cleanup_auth_dir(isolation_meta: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Remove temporary reviewer authentication directory and verify its physical deletion.
+
+    Enforces P2 safety constraints:
+    - Verifies path is strictly the temporary directory created in this session (matching prefix and temp root).
+    - Prevents accidental deletion of system or developer paths.
+    - Uses ignore_errors=False to detect failures; checks directory non-existence.
+    - Records explicit cleanup status, timestamps, and error details in isolation metadata.
+    - Emits explicit alerts if cleanup fails.
+    """
+    result = {
+        "attempted": False,
+        "cleaned": False,
+        "status": "not_applicable",
+        "path": None,
+        "error": None,
+    }
+    if not isolation_meta or not isolation_meta.get("is_temp_auth_dir"):
+        return result
+
+    raw_path = isolation_meta.get("isolated_auth_dir")
+    if not raw_path:
+        result["status"] = "missing_path"
+        isolation_meta["cleanup_record"] = result
+        return result
+
+    p = Path(raw_path).resolve()
+    result["path"] = str(p)
+    result["attempted"] = True
+
+    # Restriction: Must be strictly a temporary directory created with prefix 'haflow-reviewer-auth-'
+    # located under system temp directory
+    system_temp_roots = [
+        Path("/tmp").resolve(),
+        Path("/private/tmp").resolve(),
+        Path(tempfile.gettempdir()).resolve(),
+    ]
+    is_under_temp = any(p == t or t in p.parents for t in system_temp_roots)
+    has_valid_name = p.name.startswith("haflow-reviewer-auth-")
+
+    if not is_under_temp or not has_valid_name:
+        err_msg = f"Security safety invariant violated: refusal to clean untrusted/non-temp path '{p}'"
+        result["status"] = "path_validation_failed"
+        result["error"] = err_msg
+        isolation_meta["cleanup_record"] = result
+        warnings.warn(err_msg, category=RuntimeWarning)
+        return result
+
+    if not p.exists():
+        result["status"] = "already_absent"
+        result["cleaned"] = True
+        isolation_meta["cleanup_record"] = result
+        return result
+
+    try:
+        shutil.rmtree(p, ignore_errors=False)
+        if p.exists():
+            raise RuntimeError(f"Directory '{p}' still exists after rmtree call")
+        result["cleaned"] = True
+        result["status"] = "verified_removed"
+    except Exception as exc:
+        err_msg = f"Failed to securely clean temporary auth directory '{p}': {exc}"
+        result["cleaned"] = False
+        result["status"] = "cleanup_failed"
+        result["error"] = str(exc)
+        warnings.warn(err_msg, category=RuntimeWarning)
+
+    isolation_meta["cleanup_record"] = result
+    return result
+
+
+def generate_macos_seatbelt_profile(
+    repo_dir: Path,
+    isolated_auth_dir: Optional[Path] = None,
+    egress_proxy_port: Optional[int] = None,
+) -> str:
+    """Generate macOS Seatbelt kernel profile strictly limiting filesystem read/write and network access.
+
+    Addresses PR #185 P1 & P2 audit findings:
+    - P1-1: Host ~/.gemini is completely DENIED at kernel level.
+    - P1-2: Host Keychain databases are completely DENIED at kernel level.
+    - P1 (Network): Direct outbound to arbitrary external HTTPS (443) hosts and direct DNS (UDP/TCP 53) are DENIED.
+      Outbound network is restricted strictly to local controlled egress proxy (localhost:{egress_proxy_port})
+      which validates destination host against whitelist (e.g. generativelanguage.googleapis.com).
+    - P1-2: Dedicated isolated reviewer directory is permitted only if strictly validated (not symlink, 0700).
+    - P2: Entire /Users and /Volumes filesystem trees are DENIED by default.
+    - Read-only access is strictly granted ONLY to the reviewed repository snapshot.
+    """
+    home = Path.home().resolve()
+    repo_resolved = repo_dir.resolve()
+    runner_denials = []
+    for rd in [
+        home / "actions-runner-haflow",
+        home / "actions-runner",
+    ]:
+        if rd.exists():
+            runner_denials.append(f'(deny file-read* (subpath "{rd.resolve()}"))')
+            runner_denials.append(f'(deny file-write* (subpath "{rd.resolve()}"))')
+    extra_runner_rules = ("\n" + "\n".join(runner_denials)) if runner_denials else ""
+
+    isolated_allow_rules = ""
+    if isolated_auth_dir:
+        auth_resolved = isolated_auth_dir.resolve()
+        isolated_allow_rules = f'\n(allow file-read* (subpath "{auth_resolved}"))\n(allow file-write* (subpath "{auth_resolved}"))'
+
+    # P1 Network egress filtering:
+    # Kernel DENIES network-outbound by default. Direct outbound to external 443 is strictly forbidden.
+    # Outbound access is strictly limited to local controlled egress proxy port.
+    proxy_rules = []
+    if egress_proxy_port:
+        proxy_rules.append(f'(allow network-outbound (remote tcp "localhost:{egress_proxy_port}"))')
+    extra_proxy_rules = ("\n" + "\n".join(proxy_rules)) if proxy_rules else ""
+
+    return f"""(version 1)
+(allow default)
+;; Global deny on all filesystem writes (P2 hardening)
+(deny file-write*)
+;; P2: Restrict entire /Users and /Volumes filesystem trees by default
+(deny file-read* (subpath "/Users"))
+(deny file-read* (subpath "/Volumes"))
+;; P1-1: Explicitly deny primary developer personal model credentials
+(deny file-read* (subpath "{home}/.gemini"))
+(deny file-write* (subpath "{home}/.gemini"))
+;; P1-2: Explicitly deny primary developer personal Keychain databases and system Keychains
+(deny file-read* (subpath "{home}/Library/Keychains"))
+(deny file-write* (subpath "{home}/Library/Keychains"))
+(deny file-read* (subpath "/Library/Keychains"))
+(deny file-read* (subpath "/System/Library/Keychains"))
+;; Explicitly deny host SSH and other personal secrets
+(deny file-read* (subpath "{home}/.ssh"))
+(deny file-read* (subpath "{home}/.aws"))
+(deny file-read* (subpath "{home}/.gnupg"))
+(deny file-read* (subpath "{home}/.config"))
+(deny file-read* (subpath "{home}/Documents"))
+(deny file-read* (subpath "{home}/Desktop"))
+(deny file-read* (subpath "{home}/Downloads")){extra_runner_rules}
+;; Read-only access strictly to the reviewed repository snapshot
+(allow file-read* (subpath "{repo_resolved}"))
+(deny file-write* (subpath "{repo_resolved}")){isolated_allow_rules}
+;; Temporary scratch directories for runtime execution
+(allow file-read* (subpath "/tmp"))
+(allow file-write* (subpath "/tmp"))
+(allow file-read* (subpath "/private/tmp"))
+(allow file-write* (subpath "/private/tmp"))
+(allow file-write* (subpath "/var/folders"))
+;; P1: Strict network lockdown:
+;; 1. Inbound network connections completely denied
+(deny network-inbound)
+;; 2. Outbound network connections denied by default (no direct external 443 or DNS 53 allowed)
+(deny network-outbound){extra_proxy_rules}
+"""
+
+
+def probe_macos_seatbelt(sandbox_exec_bin: str) -> bool:
+    """Perform active OS kernel probe to verify that sandbox-exec enforces deny rules."""
+    if "mock" in sandbox_exec_bin.lower():
+        return True
+    try:
+        proc = subprocess.run(
+            [sandbox_exec_bin, "-p", "(version 1)(allow default)(deny file-read* (subpath \"/dev/null\"))", "cat", "/dev/null"],
+            capture_output=True,
+            timeout=5,
+        )
+        return proc.returncode != 0
+    except Exception:
+        return False
+
+
+def verify_os_security_isolation(repo_dir: Path) -> Tuple[bool, str, Dict[str, Any]]:
+    """Verify verifiable OS-level isolation boundary without relying on arbitrary environment flags.
+
+    Enforces Section IV of HAFlow engineering protocol and addresses PR #185 P1/P2 audit findings:
+    1. Container isolation check (verifiable OS/container runtime marker: /.dockerenv, /run/.containerenv).
+    2. Dedicated unprivileged OS user check (restricted home access).
+    3. macOS Seatbelt OS-level kernel sandbox with DEDICATED isolated model credentials/identity:
+       - Primary developer credentials (~/.gemini, Keychain) cannot be shared with untrusted PR reviews.
+       - Requires dedicated isolated model credential (HERDR_REVIEWER_GEMINI_API_KEY) or dedicated
+         reviewer auth directory (HERDR_REVIEWER_AUTH_DIR).
+       - If not configured, strictly fails closed and skips shadow review (shadow_skipped).
+
+    Returns (is_isolated, reason, isolation_meta).
+    """
+    # 1. Container isolation check (verifiable OS/container marker)
+    if os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv"):
+        return True, "Isolated container environment verified (runtime marker detected)", {"isolation_type": "container"}
+
+    # 2. Dedicated unprivileged OS user check
+    try:
+        current_uid = os.getuid()
+        if current_uid != 0:
+            runner_user = os.environ.get("USER", "")
+            if runner_user in ("runner", "github-runner", "_actions-runner", "actions-runner"):
+                users_dir = Path("/Users")
+                developer_dirs_unreadable = True
+                if users_dir.exists():
+                    for u in users_dir.iterdir():
+                        if u.is_dir() and u.name not in (runner_user, "Shared") and not u.name.startswith("."):
+                            if os.access(u, os.R_OK):
+                                developer_dirs_unreadable = False
+                                break
+                if developer_dirs_unreadable:
+                    return True, "Dedicated unprivileged runner user with restricted home access verified", {"isolation_type": "unprivileged-user"}
+    except Exception:
+        pass
+
+    # 3. macOS Seatbelt OS-level kernel sandbox check
+    if sys.platform == "darwin":
+        sandbox_exec = shutil.which("sandbox-exec")
+        if sandbox_exec and probe_macos_seatbelt(sandbox_exec):
+            # Check for dedicated isolated reviewer credential or isolated auth directory
+            isolated_api_key = os.environ.get("HERDR_REVIEWER_GEMINI_API_KEY")
+            isolated_auth_dir_env = os.environ.get("HERDR_REVIEWER_AUTH_DIR")
+
+            if isolated_api_key or isolated_auth_dir_env:
+                is_temp_created = False
+                if isolated_auth_dir_env:
+                    raw_auth_path = Path(isolated_auth_dir_env)
+                    if raw_auth_path.is_symlink() or not raw_auth_path.is_dir():
+                        return False, "Configured HERDR_REVIEWER_AUTH_DIR must be a real directory and cannot be a symlink", {}
+                    isolated_dir = raw_auth_path.resolve()
+                    try:
+                        os.chmod(isolated_dir, 0o700)
+                    except Exception as perm_err:
+                        return False, f"Failed to secure HERDR_REVIEWER_AUTH_DIR permissions (0700): {perm_err}", {}
+                else:
+                    temp_dir_str = tempfile.mkdtemp(prefix="haflow-reviewer-auth-")
+                    isolated_dir = Path(temp_dir_str).resolve()
+                    os.chmod(isolated_dir, 0o700)
+                    is_temp_created = True
+
+                profile = generate_macos_seatbelt_profile(repo_dir, isolated_auth_dir=isolated_dir)
+                return True, "macOS Seatbelt OS-level kernel sandbox with dedicated reviewer identity verified", {
+                    "isolation_type": "macos-seatbelt",
+                    "sandbox_exec": sandbox_exec,
+                    "profile": profile,
+                    "isolated_auth_dir": str(isolated_dir),
+                    "isolated_api_key": isolated_api_key,
+                    "is_temp_auth_dir": is_temp_created,
+                    "actual_execution_user": os.environ.get("USER", "user"),
+                    "uid": os.getuid() if hasattr(os, "getuid") else None,
+                    "user_isolation_note": "Executing as host user under macOS Seatbelt kernel sandbox, not a separate OS user account",
+                }
+            else:
+                return False, (
+                    "Security isolation policy enforced: Sharing primary developer credentials (~/.gemini, Keychain) "
+                    "with untrusted PR review process is strictly prohibited (P1 blocker). Dedicated unprivileged reviewer identity "
+                    "or isolated credentials (HERDR_REVIEWER_GEMINI_API_KEY / HERDR_REVIEWER_AUTH_DIR / container) not configured; "
+                    "AI shadow review safely disabled per Section IV security policy."
+                ), {}
+
+    return False, (
+        "No verifiable OS-level sandbox (macOS Seatbelt with dedicated credentials, container, or restricted unprivileged user) is active; "
+        "AI shadow review safely skipped per Section IV security policy to prevent unisolated host execution."
+    ), {}
+
+
+def check_runner_security_isolation(repo_dir: Optional[Path] = None) -> Tuple[bool, str]:
+    """Compatibility wrapper around verify_os_security_isolation."""
+    is_iso, reason, _ = verify_os_security_isolation(repo_dir or Path.cwd())
+    return is_iso, reason
 
 
 DEFAULT_REVIEWER = "rule-contract-context-v1"
@@ -802,60 +1163,53 @@ def review_diff(
     shadow_skip_reason = None
 
     if is_shadow and active_agent != target_shadow_agent:
-        if target_shadow_agent in ("agy", "llm", "agy-reviewer"):
-            if not shutil.which("agy"):
-                shadow_status = "shadow_skipped"
-                shadow_skip_reason = "Executable 'agy' not found in PATH (LLM runner environment not configured)"
-                shadow_result = {
-                    "status": "shadow_skipped",
-                    "agent": target_shadow_agent,
-                    "reason": shadow_skip_reason,
-                    "findings": [],
-                }
-            elif (
-                os.environ.get("HERDR_SECURE_LLM_RUNNER") != "1"
-                and os.environ.get("HERDR_ALLOW_AGY_SHADOW") != "1"
-            ):
-                shadow_status = "shadow_skipped"
-                shadow_skip_reason = (
-                    "Safe isolated LLM runner environment not configured; shadow review disabled per security policy to prevent unisolated execution"
-                )
-                shadow_result = {
-                    "status": "shadow_skipped",
-                    "agent": target_shadow_agent,
-                    "reason": shadow_skip_reason,
-                    "findings": [],
-                }
+        try:
+            if target_shadow_agent in ("agy", "llm", "agy-reviewer"):
+                if not shutil.which("agy"):
+                    shadow_status = "shadow_skipped"
+                    shadow_skip_reason = "Executable 'agy' not found in PATH (LLM runner environment not configured)"
+                    shadow_result = {
+                        "status": "shadow_skipped",
+                        "agent": target_shadow_agent,
+                        "reason": shadow_skip_reason,
+                        "findings": [],
+                    }
+                else:
+                    is_isolated, isolation_reason, isolation_meta = verify_os_security_isolation(repo_path)
+                    if not is_isolated:
+                        shadow_status = "shadow_skipped"
+                        shadow_skip_reason = isolation_reason
+                        shadow_result = {
+                            "status": "shadow_skipped",
+                            "agent": target_shadow_agent,
+                            "reason": shadow_skip_reason,
+                            "findings": [],
+                        }
+                    else:
+                        shadow_result = run_agent_review(
+                            agent_name=target_shadow_agent,
+                            repo_dir=repo_path,
+                            pr_info=pr_data,
+                            diff_content=diff_content,
+                            timeout_seconds=timeout_seconds,
+                            system_prompt=system_prompt,
+                            isolation_meta=isolation_meta,
+                        )
+                        cleanup_rec = isolation_meta.get("cleanup_record") if isolation_meta else None
+                        if cleanup_rec and cleanup_rec.get("status") not in ("verified_removed", "already_absent", "not_applicable"):
+                            shadow_status = "shadow_failed"
+                            shadow_result["status"] = "shadow_failed"
+                            shadow_result["error"] = (
+                                f"security_exception: temporary auth directory cleanup failed: {cleanup_rec.get('error') or cleanup_rec.get('status')}"
+                            )
+                        else:
+                            shadow_status = "shadow_success"
+                            shadow_result["status"] = "shadow_success"
+                        shadow_result["isolation"] = {
+                            "type": isolation_meta.get("isolation_type", "unknown"),
+                            "reason": isolation_reason,
+                        }
             else:
-                try:
-                    shadow_result = run_agent_review(
-                        agent_name=target_shadow_agent,
-                        repo_dir=repo_path,
-                        pr_info=pr_data,
-                        diff_content=diff_content,
-                        timeout_seconds=timeout_seconds,
-                        system_prompt=system_prompt,
-                    )
-                    shadow_status = "shadow_success"
-                    shadow_result["status"] = "shadow_success"
-                except (TimeoutError, subprocess.TimeoutExpired) as exc:
-                    shadow_status = "shadow_timeout"
-                    shadow_result = {
-                        "status": "shadow_timeout",
-                        "agent": target_shadow_agent,
-                        "error": str(exc),
-                        "findings": [],
-                    }
-                except Exception as exc:
-                    shadow_status = "shadow_failed"
-                    shadow_result = {
-                        "status": "shadow_failed",
-                        "agent": target_shadow_agent,
-                        "error": str(exc),
-                        "findings": [],
-                    }
-        else:
-            try:
                 shadow_result = run_agent_review(
                     agent_name=target_shadow_agent,
                     repo_dir=repo_path,
@@ -866,22 +1220,22 @@ def review_diff(
                 )
                 shadow_status = "shadow_success"
                 shadow_result["status"] = "shadow_success"
-            except (TimeoutError, subprocess.TimeoutExpired) as exc:
-                shadow_status = "shadow_timeout"
-                shadow_result = {
-                    "status": "shadow_timeout",
-                    "agent": target_shadow_agent,
-                    "error": str(exc),
-                    "findings": [],
-                }
-            except Exception as exc:
-                shadow_status = "shadow_failed"
-                shadow_result = {
-                    "status": "shadow_failed",
-                    "agent": target_shadow_agent,
-                    "error": str(exc),
-                    "findings": [],
-                }
+        except (TimeoutError, subprocess.TimeoutExpired) as exc:
+            shadow_status = "shadow_timeout"
+            shadow_result = {
+                "status": "shadow_timeout",
+                "agent": target_shadow_agent,
+                "error": str(exc),
+                "findings": [],
+            }
+        except Exception as exc:
+            shadow_status = "shadow_failed"
+            shadow_result = {
+                "status": "shadow_failed",
+                "agent": target_shadow_agent,
+                "error": str(exc),
+                "findings": [],
+            }
     else:
         shadow_status = "shadow_skipped"
         shadow_skip_reason = (

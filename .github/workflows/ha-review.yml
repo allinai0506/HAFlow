@@ -50,8 +50,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
-          HOME: /Users/user
-          USER: user
           PATH: /Users/user/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
           HERDR_SECURE_LLM_RUNNER: "1"
           HERDR_ALLOW_AGY_SHADOW: "1"

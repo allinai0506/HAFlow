@@ -119,7 +119,10 @@ class TestAutoPRReview(unittest.TestCase):
     # 4. Rule 正常但 AI 超时
     def test_04_rule_success_and_ai_timeout(self):
         diff = "--- a/test.py\n+++ b/test.py\n@@ -1 +1 @@\n-def sample():\n+def sample_v2():\n"
-        with patch("herdr.review_benchmark.run_agent_review") as mock_run:
+        with patch("herdr.review_benchmark.run_agent_review") as mock_run, patch(
+            "herdr.review_benchmark.verify_os_security_isolation",
+            return_value=(True, "OS sandbox verified", {"isolation_type": "macos-seatbelt"}),
+        ):
             def side_effect(agent_name, **kwargs):
                 if agent_name == "rule":
                     return {"agent": "rule", "findings": [], "usage": {"time_in_ms": 10}}
@@ -128,9 +131,7 @@ class TestAutoPRReview(unittest.TestCase):
                 return {"agent": agent_name, "findings": []}
             mock_run.side_effect = side_effect
 
-            # Allow agy shadow execution for this mock
-            with patch.dict(os.environ, {"HERDR_ALLOW_AGY_SHADOW": "1", "HERDR_SECURE_LLM_RUNNER": "1"}):
-                res = review_diff(self.repo, diff, reviewer_agent="rule", shadow_mode=True, shadow_agent="agy")
+            res = review_diff(self.repo, diff, reviewer_agent="rule", shadow_mode=True, shadow_agent="agy")
 
         # Crucial invariant: Rule success must NOT be compromised by shadow timeout
         self.assertEqual(res["status"], "success")
@@ -152,7 +153,7 @@ class TestAutoPRReview(unittest.TestCase):
     def test_05_rule_success_and_ai_unavailable_skipped(self):
         diff = "--- a/test.py\n+++ b/test.py\n@@ -1 +1 @@\n-def sample():\n+def sample_v2():\n"
         # In default unisolated or agy-missing environment, shadow review is skipped safely
-        with patch.dict(os.environ, {}, clear=True):
+        with patch("herdr.review_benchmark.verify_os_security_isolation", return_value=(False, "No verifiable OS-level sandbox", {})):
             res = review_diff(self.repo, diff, reviewer_agent="rule", shadow_mode=True, shadow_agent="agy")
 
         self.assertEqual(res["status"], "success")
@@ -323,19 +324,68 @@ class TestAutoPRReview(unittest.TestCase):
 
     # 11. 安全执行环境不满足要求时禁止启动危险 CLI
     def test_11_dangerous_cli_forbidden_in_unisolated_env(self):
-        # 1. Verify default flags in run_agent_review use --sandbox and forbid --dangerously-skip-permissions
-        with patch("shutil.which", return_value="/mock/agy"), patch("subprocess.run") as mock_proc:
+        # 1. Verify run_agent_review applies OS sandbox wrapping and strict environment whitelist
+        with patch("shutil.which", return_value="/mock/agy"), patch("subprocess.run") as mock_proc, patch.dict(
+            os.environ, {"GITHUB_TOKEN": "secret_token_123", "SSH_AUTH_SOCK": "/tmp/ssh.sock", "AWS_SECRET_ACCESS_KEY": "aws_secret"}
+        ):
             mock_proc.return_value = MagicMock(returncode=0, stdout='{"response": "[]"}')
-            run_agent_review("agy", self.repo, {"pr_number": 1, "repo": "test", "base": "a", "head": "b"}, "diff", 60)
+            isolation_meta = {
+                "isolation_type": "macos-seatbelt",
+                "sandbox_exec": "/usr/bin/sandbox-exec",
+                "profile": "(version 1)(allow default)",
+            }
+            run_agent_review(
+                "agy",
+                self.repo,
+                {"pr_number": 1, "repo": "test", "base": "a", "head": "b"},
+                "diff",
+                60,
+                isolation_meta=isolation_meta,
+            )
             executed_cmd = mock_proc.call_args[0][0]
+            # OS kernel sandbox wrapper must wrap agy
+            self.assertEqual(executed_cmd[0], "/usr/bin/sandbox-exec")
+            self.assertEqual(executed_cmd[1], "-p")
             self.assertIn("--sandbox", executed_cmd)
             self.assertNotIn("--dangerously-skip-permissions", executed_cmd)
 
-        # 2. Verify review_diff skips agy when secure runner isolation is absent
-        with patch("shutil.which", return_value="/mock/agy"), patch.dict(os.environ, {}, clear=True):
+            # Security assertion: child process environment MUST use strict whitelist
+            executed_env = mock_proc.call_args[1].get("env", {})
+            self.assertNotIn("GITHUB_TOKEN", executed_env)
+            self.assertNotIn("SSH_AUTH_SOCK", executed_env)
+            self.assertNotIn("AWS_SECRET_ACCESS_KEY", executed_env)
+            self.assertIn("PATH", executed_env)
+
+        # 2. Verify direct invocation of run_agent_review raises PermissionError if OS isolation fails
+        with patch("shutil.which", return_value="/mock/agy"), patch(
+            "herdr.review_benchmark.verify_os_security_isolation",
+            return_value=(False, "No verifiable OS-level sandbox", {}),
+        ):
+            with self.assertRaises(PermissionError):
+                run_agent_review(
+                    "agy",
+                    self.repo,
+                    {"pr_number": 1, "repo": "test", "base": "a", "head": "b"},
+                    "diff",
+                    60,
+                )
+
+        # 3. Verify review_diff skips agy when OS isolation is absent, and env vars CANNOT bypass it
+        with patch("shutil.which", return_value="/mock/agy"), patch(
+            "herdr.review_benchmark.verify_os_security_isolation",
+            return_value=(False, "No verifiable OS-level sandbox active", {}),
+        ), patch.dict(
+            os.environ,
+            {
+                "HERDR_SECURE_LLM_RUNNER": "1",
+                "HERDR_ALLOW_AGY_SHADOW": "1",
+                "HERDR_ALLOW_UNISOLATED_RUNNER": "1",
+            },
+            clear=True,
+        ):
             res = review_diff(self.repo, "diff", reviewer_agent="rule", shadow_mode=True, shadow_agent="agy")
             self.assertEqual(res["shadow_status"], "shadow_skipped")
-            self.assertIn("Safe isolated LLM runner environment not configured", res["shadow"]["reason"])
+            self.assertIn("No verifiable OS-level sandbox", res["shadow"]["reason"])
 
     # 12. 评论内容不会泄漏密钥
     def test_12_sensitive_token_redaction(self):

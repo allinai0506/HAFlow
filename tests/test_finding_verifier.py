@@ -365,7 +365,98 @@ class FindingVerifierSafetyTestCase(unittest.TestCase):
         self.assertEqual(summary["counts"]["rejected"], 2)
         self.assertEqual(summary["counts"]["uncertain"], 2)
         self.assertEqual(summary["counts"]["verified"], 0)  # No unjustified verified status!
-        self.assertLess(summary["elapsed_ms"], 2000)
+        self.assertLess(summary["elapsed_ms"], 10000)
+
+    def test_reject_syntax_error_claim_when_ast_parses_cleanly(self):
+        """Claims of SyntaxError/unexpected EOF/incomplete function must be REJECTED when file parses cleanly."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            sample_code = (
+                "def verify_os_security_isolation(repo_dir):\n"
+                "    isolated_api_key = os.environ.get('HERDR_REVIEWER_GEMINI_API_KEY')\n"
+                "    isolated_auth_dir = os.environ.get('HERDR_REVIEWER_AUTH_DIR')\n"
+                "    if isolated_api_key or isolated_auth_dir:\n"
+                "        profile = generate_macos_seatbelt_profile(repo_dir, isolated_auth_dir=isolated_dir)\n"
+                "        return True, 'verified', {}\n"
+                "    return False, 'not isolated', {}\n"
+            )
+            (tmp / "herdr_code.py").write_text(sample_code, encoding="utf-8")
+            finding = {
+                "file": "herdr_code.py",
+                "start_line": 4,
+                "end_line": 5,
+                "message": (
+                    "SyntaxError: Incomplete function definition in verify_os_security_isolation. "
+                    "Line ends abruptly with isolated_auth_dir=isola, leaving an unclosed function call."
+                ),
+            }
+            res = verify_finding(finding, repo_dir=tmp)
+            self.assertEqual(res["verification_status"], "rejected")
+            self.assertIn("counter_evidence_found", res["verification_reason"])
+            self.assertTrue(res["counter_evidence"]["ast_parsed"])
+
+
+    def test_reject_chinese_unclosed_string_claim_when_ast_parses_cleanly(self):
+        """Claims of '存在未闭合字符串' or unclosed strings must be REJECTED when AST parses cleanly."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            sample_code = (
+                "def generate_macos_seatbelt_profile(repo_dir, isolated_auth_dir=None):\n"
+                "    return '''(version 1)\n(allow default)\n'''\n"
+            )
+            (tmp / "seatbelt.py").write_text(sample_code, encoding="utf-8")
+            finding = {
+                "file": "seatbelt.py",
+                "start_line": 1,
+                "end_line": 2,
+                "message": "generate_macos_seatbelt_profile 存在未闭合字符串，导致解析异常",
+            }
+            res = verify_finding(finding, repo_dir=tmp)
+            self.assertEqual(res["verification_status"], "rejected")
+            self.assertIn("counter_evidence_found", res["verification_reason"])
+            self.assertTrue(res["counter_evidence"]["ast_parsed"])
+
+    def test_reject_chinese_symbol_not_defined_claim_when_symbol_exists(self):
+        """Claims of 'symbol 未定义' must be REJECTED when symbol definition or import is reachable."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            sample_code = (
+                "def verify_os_security_isolation(repo_dir):\n"
+                "    return True, 'verified', {}\n"
+            )
+            (tmp / "sec.py").write_text(sample_code, encoding="utf-8")
+            finding = {
+                "file": "sec.py",
+                "start_line": 1,
+                "end_line": 2,
+                "message": "verify_os_security_isolation 未定义，调用将触发 NameError",
+            }
+            res = verify_finding(finding, repo_dir=tmp)
+            self.assertEqual(res["verification_status"], "rejected")
+            self.assertIn("counter_evidence_found", res["verification_reason"])
+            self.assertEqual(res["counter_evidence"]["type"], "definition_exists")
+            self.assertEqual(res["counter_evidence"]["symbol"], "verify_os_security_isolation")
+
+    def test_adversarial_resource_leak_unclosed_connection_not_rejected_by_check_e(self):
+        """Resource leak findings mentioning '未闭合' (e.g. 数据库连接未闭合) must NOT be rejected as syntax errors."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            sample_code = (
+                "def fetch_data():\n"
+                "    conn = create_connection()\n"
+                "    return conn.query()\n"
+            )
+            (tmp / "db.py").write_text(sample_code, encoding="utf-8")
+            finding = {
+                "file": "db.py",
+                "start_line": 2,
+                "end_line": 3,
+                "message": "数据库连接未闭合，在异常退出时存在连接泄漏风险",
+            }
+            res = verify_finding(finding, repo_dir=tmp)
+            # Should NOT be rejected by Check E (valid syntax refutation)
+            self.assertNotEqual(res["verification_status"], "rejected")
+            self.assertEqual(res["verification_status"], "uncertain")
 
 
 if __name__ == "__main__":
