@@ -63,11 +63,17 @@ def verdict_fingerprint(
     the legacy digest, so workflows without selective replan are unaffected.
     """
     parts = [str(suggested_branch or "")]
+    # Use note as the sorting key and deduplicate by note content.
+    # task_id is deliberately excluded as it's an ephemeral instance id.
+    seen_notes = set()
     for blocker in sorted(
         (b or {} for b in (blockers or [])),
-        key=lambda b: str(b.get("task_id") or ""),
+        key=lambda b: str(b.get("note") or ""),
     ):
-        parts.append(str(blocker.get("note") or ""))
+        note = str(blocker.get("note") or "")
+        if note and note not in seen_notes:
+            seen_notes.add(note)
+            parts.append(note)
     ids = sorted({str(t).strip() for t in (affected_task_ids or []) if str(t).strip()})
     if ids:
         parts.append("affected:" + ",".join(ids))
