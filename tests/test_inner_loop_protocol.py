@@ -149,8 +149,20 @@ class SentinelBlockerDetectionTest(unittest.TestCase):
 
     def test_blocker_marker_defined_in_sentinel(self):
         src = self._sentinel_source()
-        self.assertIn("marker_literal(task_id", src,
-                      "Sentinel must compose task-owned markers centrally")
+        # Detection must go through the shared wrap-tolerant choke point.
+        # This supersedes a literal ``marker_literal(task_id`` presence check:
+        # that call site only ever produced dead local assignments (the three
+        # markers were computed and never read), so the old assertion could
+        # pass while a naive raw substring check lived right next to it.
+        self.assertRegex(
+            src, r"_comp\.marker_present\(\s*screen,\s*task_id",
+            "Sentinel must resolve task-owned markers via the shared contract",
+        )
+        self.assertNotRegex(
+            src, r"['\"]HERDR_TASK_DONE.*['\"]\s+in\s+screen",
+            "Sentinel must never raw-substring a marker against the screen; "
+            "hard-wrapped markers are invisible to that read",
+        )
         self.assertIn("BLOCKER_MARKER_PREFIX", src,
                       "Sentinel must resolve the blocker marker via the shared contract")
 
