@@ -4568,7 +4568,311 @@ body {
 .log-kind-btn.active{background:#ffffff;color:#5e6ad2;font-weight:600;box-shadow:0 1px 2px rgba(18,19,22,0.08);}
 .log-stream-wrap{flex:1;min-height:360px;background:#f8f9fa;border:1px solid #e6e8ee;border-radius:8px;padding:12px 16px;display:flex;flex-direction:column;overflow:hidden;}
 .log-content-pre{flex:1;overflow-y:auto;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:12px;line-height:1.6;color:#121316;white-space:pre-wrap;word-break:break-all;margin:0;}
-</style></head><body>
+</style><style>
+
+/* --- Obsidian Component Polish & Pixel-Perfect Line Alignment --- */
+:root {
+  --header-row-height: 48px;
+  --line-color: #e2e8f0;
+}
+.left-rail {
+  border-right: 1px solid var(--line-color) !important;
+  background: #ffffff !important;
+}
+.rail-head {
+  height: var(--header-row-height) !important;
+  border-bottom: 1px solid var(--line-color) !important;
+  box-sizing: border-box !important;
+}
+.sidebar {
+  border-right: 1px solid var(--line-color) !important;
+  background: #f8fafc !important;
+  position: relative !important;
+}
+.sidebar-head, .sidebar-head.brand-row, .brand-row {
+  height: var(--header-row-height) !important;
+  min-height: var(--header-row-height) !important;
+  max-height: var(--header-row-height) !important;
+  border-bottom: 1px solid var(--line-color) !important;
+  background: #ffffff !important;
+  box-sizing: border-box !important;
+  padding: 0 16px !important;
+}
+.sidebar-title {
+  font-size: 13px !important;
+  font-weight: 600 !important;
+  letter-spacing: -0.01em !important;
+  color: #0f172a !important;
+}
+.space-pill {
+  padding: 8px 12px !important;
+  background: #ffffff !important;
+  border: 1px solid rgba(0, 0, 0, 0.08) !important;
+  border-radius: 8px !important;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04) !important;
+  transition: all 0.15s ease !important;
+}
+.space-pill:hover {
+  border-color: rgba(0, 0, 0, 0.16) !important;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.06) !important;
+}
+.space-avatar {
+  width: 22px !important;
+  height: 22px !important;
+  border-radius: 6px !important;
+  background: #eff6ff !important;
+  color: #2563eb !important;
+  font-weight: 600 !important;
+  font-size: 11px !important;
+}
+.space-name {
+  font-size: 12.5px !important;
+  font-weight: 500 !important;
+  color: #0f172a !important;
+}
+.sidebar-section-head {
+  padding: 8px 8px 4px !important;
+  font-size: 11px !important;
+  font-weight: 600 !important;
+  letter-spacing: 0.02em !important;
+  color: #64748b !important;
+}
+.sidebar-section-head .tabular-nums {
+  font-size: 11px !important;
+  color: #94a3b8 !important;
+  font-weight: 500 !important;
+}
+.sidebar-subgroup-title {
+  padding: 4px 8px 2px !important;
+  font-size: 11px !important;
+  font-weight: 600 !important;
+  color: #64748b !important;
+}
+.subgroup-badge {
+  font-size: 10px !important;
+  padding: 2px 8px !important;
+  border-radius: 10px !important;
+  font-weight: 500 !important;
+}
+.subgroup-badge.warning {
+  background: #fef3c7 !important;
+  color: #d97706 !important;
+}
+.subgroup-badge.running {
+  background: #dbeafe !important;
+  color: #2563eb !important;
+}
+.subgroup-badge.completed {
+  background: #f1f5f9 !important;
+  color: #64748b !important;
+}
+.sidebar-item {
+  padding: 4px 8px !important;
+  border-radius: 6px !important;
+  font-size: 12.5px !important;
+  color: #475569 !important;
+  transition: all 0.15s ease !important;
+  margin-bottom: 1px !important;
+}
+.sidebar-item:hover {
+  background: #f1f5f9 !important;
+  color: #0f172a !important;
+}
+.sidebar-item.active {
+  background: #ffffff !important;
+  color: #0f172a !important;
+  font-weight: 600 !important;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08), 0 0 0 1px rgba(0, 0, 0, 0.04) !important;
+}
+.item-icon-svg {
+  flex-shrink: 0 !important;
+  margin-right: 8px !important;
+  color: #64748b !important;
+  transition: color 0.15s ease !important;
+}
+.sidebar-item:hover .item-icon-svg {
+  color: #1e293b !important;
+}
+.sidebar-item.active .item-icon-svg {
+  color: #2563eb !important;
+}
+.online-pill {
+  font-size: 10px !important;
+  padding: 2px 8px !important;
+  border-radius: 10px !important;
+  background: #ecfdf5 !important;
+  color: #059669 !important;
+  border: none !important;
+  font-weight: 500 !important;
+}
+.resource-sub {
+  font-size: 11px !important;
+  color: #94a3b8 !important;
+  margin-top: 1px !important;
+}
+.resource-title {
+  font-size: 12px !important;
+  font-weight: 500 !important;
+  color: #1e293b !important;
+}
+.btn-primary-launch {
+  height: 32px !important;
+  background: #2563eb !important;
+  border-radius: 6px !important;
+  color: #ffffff !important;
+  font-size: 12px !important;
+  font-weight: 500 !important;
+  box-shadow: 0 1px 2px rgba(37, 99, 235, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.2) !important;
+  transition: all 0.15s ease !important;
+}
+.btn-primary-launch:hover {
+  background: #1d4ed8 !important;
+}
+.top {
+  height: var(--header-row-height) !important;
+  min-height: var(--header-row-height) !important;
+  max-height: var(--header-row-height) !important;
+  border-bottom: 1px solid var(--line-color) !important;
+  background: #ffffff !important;
+  box-sizing: border-box !important;
+  padding: 0 16px !important;
+  margin: 0 !important;
+}
+.workflow-tabs-bar {
+  height: var(--header-row-height) !important;
+  border-bottom: none !important;
+  background: transparent !important;
+  padding: 0 !important;
+}
+.tabs-scroll {
+  position: relative !important;
+  padding: 4px !important;
+  gap: 2px !important;
+  background: rgba(0, 0, 0, 0.03) !important;
+  border-radius: 8px !important;
+  height: 38px !important;
+  align-items: center !important;
+  border: 1px solid rgba(0, 0, 0, 0.04) !important;
+}
+.wf-tab-sliding-pill {
+  position: absolute !important;
+  top: 4px !important;
+  bottom: 4px !important;
+  background: #ffffff !important;
+  border-radius: 6px !important;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08), 0 0 0 1px rgba(0, 0, 0, 0.04) !important;
+  transition: transform 0.22s cubic-bezier(0.25, 1, 0.5, 1), width 0.22s cubic-bezier(0.25, 1, 0.5, 1) !important;
+  pointer-events: none !important;
+  z-index: 1 !important;
+}
+.wf-tab {
+  height: 30px !important;
+  padding: 0 8px !important;
+  border-radius: 6px !important;
+  border: none !important;
+  background: transparent !important;
+  color: var(--text-secondary, #5f6368) !important;
+  font-weight: 500 !important;
+  position: relative !important;
+  z-index: 2 !important;
+  transition: color 0.15s ease !important;
+  box-shadow: none !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 8px !important;
+}
+.wf-tab:hover {
+  color: var(--text-primary, #121316) !important;
+}
+.wf-tab.active {
+  color: var(--text-primary, #121316) !important;
+  font-weight: 600 !important;
+}
+.wf-tab.active::after {
+  display: none !important;
+}
+.tab-icon-svg {
+  flex-shrink: 0 !important;
+  color: #64748b !important;
+  vertical-align: middle !important;
+  transition: color 0.15s ease !important;
+}
+.wf-tab:hover .tab-icon-svg {
+  color: #1e293b !important;
+}
+.wf-tab.active .tab-icon-svg {
+  color: #2563eb !important;
+}
+.side-foot {
+  height: 48px !important;
+  min-height: 48px !important;
+  padding: 8px 16px !important;
+  border-top: 1px solid var(--line-color) !important;
+  background: #ffffff !important;
+  box-sizing: border-box !important;
+  margin-top: auto !important;
+  display: flex !important;
+  flex-direction: column !important;
+  justify-content: center !important;
+}
+.side-foot b {
+  font-size: 11.5px !important;
+  color: #1e293b !important;
+  font-weight: 600 !important;
+  line-height: 1.2 !important;
+}
+.side-foot span {
+  font-size: 10.5px !important;
+  color: #64748b !important;
+  line-height: 1.2 !important;
+  margin-top: 2px !important;
+}
+.deep-drawer {
+  border-top: 1px solid var(--line-color) !important;
+  background: #ffffff !important;
+}
+.drawer-head {
+  height: 48px !important;
+  border-bottom: 1px solid var(--line-color) !important;
+  background: #ffffff !important;
+  box-sizing: border-box !important;
+  padding: 0 16px !important;
+}
+.deep-drawer.collapsed {
+  transform: translateY(calc(100% - 48px)) !important;
+  clip-path: none !important;
+}
+.drawer-pill {
+  background: #eff6ff !important;
+  border: 1px solid rgba(37, 99, 235, 0.2) !important;
+  color: #2563eb !important;
+  border-radius: 6px !important;
+  padding: 3px 8px !important;
+  font-size: 11px !important;
+  font-weight: 600 !important;
+}
+.light-bottom-bar {
+  border-top: 1px solid var(--line-color) !important;
+  background: #ffffff !important;
+  box-sizing: border-box !important;
+}
+.sidebar-resizer-handle {
+  position: absolute !important;
+  top: 0 !important;
+  right: -3px !important;
+  bottom: 0 !important;
+  width: 6px !important;
+  cursor: col-resize !important;
+  z-index: 50 !important;
+  transition: background 0.15s ease !important;
+}
+.sidebar-resizer-handle:hover, .sidebar-resizer-handle.is-dragging {
+  background: #3b82f6 !important;
+  opacity: 0.6 !important;
+}
+
+</style>
+</head><body>
 <div class="shell" data-view="workbench" data-workspace="flow">
   <aside class="left-rail">
     <div class="rail-head">
@@ -4644,14 +4948,14 @@ body {
           <span class="tabular-nums" id="sidebarResourceCounts">0</span>
         </div>
         <div class="sidebar-item" id="sidebarFleetItem" onclick="showShellView('agents')" title="查看执行者阵容" data-nav="agents">
-          <span class="item-icon">🤖</span>
+          <svg class="item-icon-svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
           <div style="min-width:0;flex:1">
             <div class="resource-title">执行者机队 <span class="online-pill" id="sidebarOnlinePill">0 在线</span></div>
             <div class="resource-sub" id="sidebarFleetNames">暂无执行者</div>
           </div>
         </div>
         <div class="sidebar-item" id="sidebarPanesItem" onclick="showShellView('slots')" title="查看常驻智能体工位" data-nav="slots">
-          <span class="item-icon">🖥️</span>
+          <svg class="item-icon-svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M3 9h18"/><path d="M9 21V9"/></svg>
           <div style="min-width:0;flex:1">
             <div class="resource-title">智能体工位</div>
             <div class="resource-sub" id="sidebarPanesSummary">暂无工位</div>
@@ -4672,20 +4976,20 @@ body {
           <span class="pulse-indicator" title="协调器调度活跃"></span>
         </div>
         <div class="sidebar-item" id="navTemplates" onclick="showTemplateLibrary()" title="工作流模板规范资产库">
-          <span class="item-icon">📐</span>
+          <svg class="item-icon-svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
           <span class="item-text">模板规范库</span>
           <button type="button" class="visually-hidden" onclick="showTemplateLibrary()">模板库</button>
         </div>
         <div class="sidebar-item" id="sidebarLogsItem" onclick="showLogs()" title="查看调度审计日志">
-          <span class="item-icon">📜</span>
+          <svg class="item-icon-svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1-2.5-2.5Z"/><path d="M6 6h10"/><path d="M6 10h10"/></svg>
           <span class="item-text">调度审计日志</span>
         </div>
         <div class="sidebar-item" id="navArchive" onclick="showArchive()" title="查看任务归档库">
-          <span class="item-icon">📦</span>
+          <svg class="item-icon-svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 8v13H3V8"/><path d="M1 3h22v5H1z"/><path d="M10 12h4"/></svg>
           <span class="item-text">任务归档库</span>
         </div>
         <div class="sidebar-item danger-item" onclick="showUnregisterProjectModal()" title="注销当前项目工厂">
-          <span class="item-icon">⚠️</span>
+          <svg class="item-icon-svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
           <span class="item-text">注销项目</span>
         </div>
       </div>
@@ -4714,7 +5018,7 @@ body {
         <div class="dropdown factory-action" id="moreDropdown">
           <button class="btn icon-only" onclick="toggleMoreMenu(event)" aria-label="更多操作" title="更多操作">···</button>
           <div class="dropdown-menu">
-            <button class="dropdown-item" onclick="closeMoreMenu();openControllerCockpitModal()">🎮 Controller 控制台</button>
+            <button class="dropdown-item" onclick="closeMoreMenu();openControllerCockpitModal()">Controller 控制台</button>
             <button class="dropdown-item" onclick="closeMoreMenu();createCandidate()">创建候选分支</button>
             <button class="dropdown-item" onclick="closeMoreMenu();runPreflight()">执行者自检</button>
             <button class="dropdown-item" onclick="closeMoreMenu();showArchive()">任务归档</button>
@@ -5142,7 +5446,7 @@ async function showTemplateLibrary(){
   renderWorkflowTabs();
   paintCrumb();
   if(tplEl){
-    tplEl.innerHTML=`<div class="ctl-panel-header"><div style="display:flex;justify-content:space-between;align-items:center;width:100%"><div><strong>📐 工作流模板规范库</strong><span class="muted" style="margin-left:8px;font-weight:400">· 模板定义工作流节点与 DAG 依赖</span></div><button class="btn primary" onclick="showTemplateEditor()"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg><span>新建模板</span></button></div></div><div class="empty">正在加载模板…</div>`;
+    tplEl.innerHTML=`<div class="ctl-panel-header"><div style="display:flex;justify-content:space-between;align-items:center;width:100%"><div><strong>工作流模板规范库</strong><span class="muted" style="margin-left:8px;font-weight:400">· 模板定义工作流节点与 DAG 依赖</span></div><button class="btn primary" onclick="showTemplateEditor()"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg><span>新建模板</span></button></div></div><div class="empty">正在加载模板…</div>`;
   }
   try{
     const ts=await fetchTemplates();
@@ -5159,7 +5463,7 @@ async function showTemplateLibrary(){
         </div>
       </div>`).join(''):'<div class="empty">暂无模板</div>';
     if(tplEl){
-      tplEl.innerHTML=`<div class="ctl-panel-header"><div style="display:flex;justify-content:space-between;align-items:center;width:100%"><div><strong>📐 工作流模板规范库</strong><span class="muted" style="margin-left:8px;font-weight:400">· 模板定义工作流节点与 DAG 依赖</span></div><button class="btn primary" onclick="showTemplateEditor()"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg><span>新建模板</span></button></div></div><div class="muted" style="margin-bottom:8px">模板定义工作流的节点与 DAG 依赖。自定义模板保存到 ~/.herdr-controller/templates/，对新启动的工作流即时生效，不影响已运行的工作流。</div>${cards}`;
+      tplEl.innerHTML=`<div class="ctl-panel-header"><div style="display:flex;justify-content:space-between;align-items:center;width:100%"><div><strong>工作流模板规范库</strong><span class="muted" style="margin-left:8px;font-weight:400">· 模板定义工作流节点与 DAG 依赖</span></div><button class="btn primary" onclick="showTemplateEditor()"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg><span>新建模板</span></button></div></div><div class="muted" style="margin-bottom:8px">模板定义工作流的节点与 DAG 依赖。自定义模板保存到 ~/.herdr-controller/templates/，对新启动的工作流即时生效，不影响已运行的工作流。</div>${cards}`;
     }
   }catch(e){toast(e.message,true)}
 }
@@ -6465,28 +6769,28 @@ function renderWorkflowTabs(){
     if(wid==='__ctl__'){
       return `<div class="wf-tab ${isActive?'active':''}" onclick="openWorkflowTab('__ctl__')" title="Controller 调度与解卡控制台" role="tab" aria-selected="${isActive}">`+
         `<span class="tab-dot running" aria-hidden="true"></span>`+
-        `<span class="tab-title">🎮 Controller 控制台</span>`+
+        `<svg class="tab-icon-svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polygon points="10 8 16 12 10 16 10 8"/></svg><span class="tab-title">Controller 控制台</span>`+
         `<button type="button" class="tab-close" onclick="closeWorkflowTab('__ctl__',event)" title="关闭页签" aria-label="关闭页签">×</button>`+
         `</div>`;
     }
     if(wid==='__templates__'){
       return `<div class="wf-tab ${isActive?'active':''}" onclick="openWorkflowTab('__templates__')" title="工作流模板规范库" role="tab" aria-selected="${isActive}">`+
         `<span class="tab-dot completed" aria-hidden="true"></span>`+
-        `<span class="tab-title">📐 模板规范库</span>`+
+        `<svg class="tab-icon-svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg><span class="tab-title">模板规范库</span>`+
         `<button type="button" class="tab-close" onclick="closeWorkflowTab('__templates__',event)" title="关闭页签" aria-label="关闭页签">×</button>`+
         `</div>`;
     }
     if(wid==='__archive__'){
       return `<div class="wf-tab ${isActive?'active':''}" onclick="openWorkflowTab('__archive__')" title="任务归档与冷存储" role="tab" aria-selected="${isActive}">`+
         `<span class="tab-dot completed" aria-hidden="true"></span>`+
-        `<span class="tab-title">📦 任务归档</span>`+
+        `<svg class="tab-icon-svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 8v13H3V8"/><path d="M1 3h22v5H1z"/><path d="M10 12h4"/></svg><span class="tab-title">任务归档</span>`+
         `<button type="button" class="tab-close" onclick="closeWorkflowTab('__archive__',event)" title="关闭页签" aria-label="关闭页签">×</button>`+
         `</div>`;
     }
     if(wid==='__logs__'){
       return `<div class="wf-tab ${isActive?'active':''}" onclick="openWorkflowTab('__logs__')" title="调度审计日志" role="tab" aria-selected="${isActive}">`+
         `<span class="tab-dot running" aria-hidden="true"></span>`+
-        `<span class="tab-title">📜 调度审计日志</span>`+
+        `<svg class="tab-icon-svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1-2.5-2.5Z"/><path d="M6 6h10"/><path d="M6 10h10"/></svg><span class="tab-title">调度审计日志</span>`+
         `<button type="button" class="tab-close" onclick="closeWorkflowTab('__logs__',event)" title="关闭页签" aria-label="关闭页签">×</button>`+
         `</div>`;
     }
@@ -7798,7 +8102,7 @@ function openControllerCockpitModal(){
 
   const html=`<div class="ctl-wrap">${statusCard}${resourceSection}${recoverySection}${decisionSection}${unblockSection}${pipelineSection}${cheatSheet}</div>`;
   const _ctlEl=document.getElementById('controllerTabView');
-  if(_ctlEl){_ctlEl.innerHTML=`<div class="ctl-panel-header"><strong>🎮 Controller 调度与解卡控制台</strong><span class="muted" style="margin-left:8px;font-weight:400">· ${esc(wid)}</span></div>`+html;_ctlEl.hidden=false;}
+  if(_ctlEl){_ctlEl.innerHTML=`<div class="ctl-panel-header"><strong>Controller 调度与解卡控制台</strong><span class="muted" style="margin-left:8px;font-weight:400">· ${esc(wid)}</span></div>`+html;_ctlEl.hidden=false;}
   setWorkspaceMode('ctl');
   if(!state.openWorkflowTabIds)state.openWorkflowTabIds=[];
   if(!state.openWorkflowTabIds.includes('__ctl__'))state.openWorkflowTabIds.push('__ctl__');
@@ -7884,7 +8188,7 @@ let logState = {
 function renderLogsTabSkeleton(){
   return `<div class="ctl-panel-header">`+
     `<div style="display:flex;justify-content:space-between;align-items:center;width:100%;flex-wrap:wrap;gap:8px">`+
-      `<div><strong>📜 调度审计日志</strong><span class="muted" style="margin-left:8px;font-weight:400">· 协调器事件溯源、主循环轮询流与各工位物理日志</span></div>`+
+      `<div><strong>调度审计日志</strong><span class="muted" style="margin-left:8px;font-weight:400">· 协调器事件溯源、主循环轮询流与各工位物理日志</span></div>`+
       `<div style="display:flex;gap:8px;align-items:center">`+
         `<button class="btn" onclick="refreshLogsTab()" title="刷新日志">🔄 刷新</button>`+
         `<button class="btn" onclick="copyCurrentLog()" title="复制日志到剪贴板">📋 复制</button>`+
@@ -8209,7 +8513,7 @@ async function showArchive(){
   archiveQuery.page=0;
   const arcEl=document.getElementById('archiveTabView');
   if(arcEl){
-    arcEl.innerHTML=`<div class="ctl-panel-header"><div style="display:flex;justify-content:space-between;align-items:center;width:100%"><div><strong>📦 任务归档与冷存储</strong><span class="muted" style="margin-left:8px;font-weight:400">· 历史已完成或已归档工作流任务检索</span></div></div></div>`+archiveFiltersHtml();
+    arcEl.innerHTML=`<div class="ctl-panel-header"><div style="display:flex;justify-content:space-between;align-items:center;width:100%"><div><strong>任务归档与冷存储</strong><span class="muted" style="margin-left:8px;font-weight:400">· 历史已完成或已归档工作流任务检索</span></div></div></div>`+archiveFiltersHtml();
   }
   setWorkspaceMode('archive');
   if(!state.openWorkflowTabIds)state.openWorkflowTabIds=[];
@@ -8240,7 +8544,86 @@ async function bindSlotPrompt(p){
   });
 }
 setInterval(()=>{if(!document.hidden)refreshAll()},600000);document.addEventListener('visibilitychange',()=>{if(!document.hidden)refreshAll()});(function(){const v=loadViewState();if(!v)return;state.opsMode=!!v.opsMode;state.dashMode=!!v.dashMode;state.dashWorkflowId=v.dashWorkflowId||null;state.spaceId=v.spaceId||null;state.workflowId=v.workflowId||null;state.shellView=v.shellView||'workbench'})();async function initFromUrlOrState(){const p=new URLSearchParams(window.location.search);let qWf=p.get('workflow_id');const qTask=p.get('task_id'),qPane=p.get('pane_id'),qOps=p.get('ops'),qView=p.get('view');if(!qWf&&qTask){try{const td=await api('/api/task?id='+encodeURIComponent(qTask));if(td&&td.task&&td.task.workflow_id)qWf=td.task.workflow_id}catch(e){}}if(!qWf&&!qTask&&!qPane&&!qOps&&!qView){state.opsMode?showOpsCenter():refreshAll();return}if(qOps==='1'||qOps==='true')state.opsMode=true;if(qView==='dashboard'){state.dashMode=true;state.opsMode=false;if(qWf)state.dashWorkflowId=qWf}if(qWf&&!state.dashMode){state.opsMode=false;state.dashWorkflowId=null;state.workflowId=qWf;try{const d=await api('/api/workflow?id='+encodeURIComponent(qWf));if(d&&d.project){if(d.project.project_id)state.projectId=d.project.project_id;if(d.project.workspace_id)state.spaceId=d.project.workspace_id}}catch(e){}}if(state.dashMode){await showDashboard()}else if(state.opsMode){await showOpsCenter()}else{await refreshAll();if(qWf&&state.workflowId!==qWf){try{await loadWorkflow(qWf)}catch(e){}}if(qTask){const el=document.querySelector(`[data-task-id="${CSS.escape?CSS.escape(qTask):qTask}"]`);if(el){el.scrollIntoView({behavior:'smooth',block:'center'});el.classList.add('task-highlight')}await openTaskDrawer(qTask)}else if(qPane){await showPane(qPane)}}}initFromUrlOrState();
-</script></body></html>'''
+</script>
+<script>
+(function(){
+  function setupSlidingPill() {
+    const tabsList = document.getElementById(workflowTabsList);
+    if (!tabsList) return;
+    let pill = tabsList.querySelector(.wf-tab-sliding-pill);
+    if (!pill) {
+      pill = document.createElement(div);
+      pill.className = wf-tab-sliding-pill;
+      tabsList.prepend(pill);
+    }
+    const activeTab = tabsList.querySelector(.wf-tab.active);
+    if (activeTab) {
+      const parentRect = tabsList.getBoundingClientRect();
+      const tabRect = activeTab.getBoundingClientRect();
+      pill.style.transform = `translateX(${tabRect.left - parentRect.left + tabsList.scrollLeft}px)`;
+      pill.style.width = `${tabRect.width}px`;
+      pill.style.display = block;
+    } else {
+      pill.style.display = none;
+    }
+  }
+
+  const origRenderTabs = window.renderWorkflowTabs;
+  if (typeof origRenderTabs === function) {
+    window.renderWorkflowTabs = function() {
+      origRenderTabs.apply(this, arguments);
+      setTimeout(setupSlidingPill, 10);
+    };
+  }
+
+  function setupSidebarResizer() {
+    const sidebar = document.getElementById(sidebar);
+    if (!sidebar) return;
+    let handle = sidebar.querySelector(.sidebar-resizer-handle);
+    if (!handle) {
+      handle = document.createElement(div);
+      handle.className = sidebar-resizer-handle;
+      handle.title = 按住拖动调整宽度，双击复位;
+      sidebar.appendChild(handle);
+    }
+    let isDragging = false, startX = 0, startW = 280;
+    const savedW = localStorage.getItem(haflow_custom_sidebar_w);
+    if (savedW) sidebar.style.width = savedW + px;
+
+    handle.addEventListener(mousedown, (e) => {
+      isDragging = true;
+      startX = e.clientX;
+      startW = sidebar.getBoundingClientRect().width;
+      handle.classList.add(is-dragging);
+      document.body.style.cursor = col-resize;
+      document.body.style.userSelect = none;
+    });
+    window.addEventListener(mousemove, (e) => {
+      if (!isDragging) return;
+      const newW = Math.max(220, Math.min(460, startW + (e.clientX - startX)));
+      sidebar.style.width = newW + px;
+    });
+    window.addEventListener(mouseup, () => {
+      if (!isDragging) return;
+      isDragging = false;
+      handle.classList.remove(is-dragging);
+      document.body.style.cursor = ;
+      document.body.style.userSelect = ;
+      localStorage.setItem(haflow_custom_sidebar_w, sidebar.getBoundingClientRect().width);
+    });
+    handle.addEventListener(dblclick, () => {
+      sidebar.style.width = 280px;
+      localStorage.setItem(haflow_custom_sidebar_w, 280);
+    });
+  }
+
+  window.addEventListener(DOMContentLoaded, () => {
+    setupSidebarResizer();
+    setupSlidingPill();
+  });
+})();
+</script>
+</body></html>'''
 HTML=HTML_TEMPLATE.replace('__PRODUCT_NAME__',PRODUCT_NAME).replace('__PRODUCT_TAGLINE__',PRODUCT_TAGLINE)
 
 class Handler(BaseHTTPRequestHandler):
