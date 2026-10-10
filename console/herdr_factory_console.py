@@ -4375,20 +4375,34 @@ body {
   flex-shrink: 0;
 }
 #flowSummary {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
   border: 1px solid #e6e8ee;
-  border-bottom: 1px solid #e6e8ee;
-  border-radius: 999px;
-  background: rgba(255,255,255,.94);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.94);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
   padding: 4px 12px;
   font-size: 12px;
   color: #5e636e;
   white-space: nowrap;
+  box-shadow: 0 1px 2px rgba(18, 19, 22, 0.04);
 }
 #flowSummary b {
   color: #16171b;
   font-weight: 680;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-variant-numeric: tabular-nums;
+}
+.flow-status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #10b981;
+  display: inline-block;
+  flex-shrink: 0;
+  box-shadow: 0 0 0 2px rgba(16, 185, 129, 0.2);
 }
 .shell[data-workspace="list"] #flowSummary,
 .shell[data-workspace="list"] .flow-controls { display: none !important; }
@@ -4487,13 +4501,24 @@ body {
   100% { stroke-dashoffset: 0; }
 }
 .flow-gesture-hint {
-  color: #8b909a;
+  color: #8c919d;
   font-size: 11px;
   margin-left: 8px;
   padding: 2px 8px;
-  background: #f3f4f6;
+  background: #f0f2f5;
   border-radius: 4px;
-  font-weight: normal;
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.flow-gesture-hint kbd {
+  font-family: inherit;
+  font-size: 10px;
+  background: #fff;
+  border: 1px solid #dcdfe6;
+  border-radius: 3px;
+  padding: 0 4px;
 }
 #flowInspector .flow-node-card,
 .flow-attn .flow-node-card {
@@ -4532,7 +4557,66 @@ body {
 .flow-mark.bad { color: #dc2626; }
 .flow-task-row b { display: block; font-size: 12px; font-weight: 650; max-width: 188px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .flow-task-row small { display: block; color: #8b909a; font-size: 11.5px; }
-.flow-attn { margin-top: 12px; background: #fffbeb; border: 1px solid rgba(217,119,6,.35); border-radius: 10px; padding: 12px; }
+.flow-attn {
+  margin-top: 8px;
+  background: rgba(254, 252, 232, 0.95);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid #fde047;
+  border-radius: 8px;
+  padding: 8px 12px;
+  box-shadow: 0 1px 3px rgba(234, 179, 8, 0.08);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+  color: #854d0e;
+}
+.flow-attn-content {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+}
+.flow-attn-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: #fef08a;
+  color: #713f12;
+  font-weight: 600;
+  font-size: 11px;
+  padding: 0 8px;
+  border-radius: 4px;
+  height: 20px;
+  flex-shrink: 0;
+}
+.flow-attn-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #713f12;
+}
+.flow-attn-action {
+  flex-shrink: 0;
+  background: #fff !important;
+  color: #854d0e !important;
+  border: 1px solid #fde047 !important;
+  border-radius: 6px !important;
+  padding: 4px 8px !important;
+  font-size: 11.5px !important;
+  font-weight: 600 !important;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+}
+.flow-attn-action:hover {
+  background: #fef08a !important;
+  border-color: #eab308 !important;
+  color: #713f12 !important;
+}
 .shell-page { padding: 4px 4px 28px; }
 .shell-page h3 { margin: 8px 0 12px; font-size: 16px; font-weight: 680; }
 .shell-row {
@@ -7543,8 +7627,51 @@ function destroyFlowGraph(){try{if(state.flowGraph&&state.flowGraph.dispose)stat
 function resizeFlowGraph(){try{const cv=document.getElementById('flowCanvas');const host=document.getElementById('flowCanvasWrap')||cv;if(!cv||!host||!state.flowGraph)return;const w=host.clientWidth||cv.clientWidth||800;const h=Math.max(280,cv.clientHeight||host.clientHeight||480);if(state.flowGraph.resize)state.flowGraph.resize(w,h);}catch(e){}}
 function fitFlowGraph(){try{if(!state.flowGraph)return;if(state.flowGraph.zoomToFit){state.flowGraph.zoomToFit({padding:24,maxScale:1});if(state.flowGraph.centerContent)state.flowGraph.centerContent();}else if(state.flowGraph.centerContent)state.flowGraph.centerContent();}catch(e){}}
 function flowZoomIn(){try{if(state.flowGraph&&state.flowGraph.zoom)state.flowGraph.zoom(0.15);}catch(e){}}
-function flowZoomOut(){try{if(state.flowGraph&&state.flowGraph.zoom)state.flowGraph.zoom(-0.15);}catch(e){}}
-function renderFlowWorkbench(){const g=flowGraphData();const nodes=g.nodes||[];setWorkspaceMode(state.workflowView);const fs=document.getElementById('flowSummary');if(fs){if(state.workflowView==='flow'&&nodes.length){const working=nodes.filter(n=>n.status==='working').length;fs.style.display='block';fs.innerHTML='<b>'+nodes.length+'</b> 个节点 · <b>'+working+'</b> 个运行中<span class="flow-gesture-hint">拖拽平移 · ⌘+滚轮缩放</span>';}else fs.style.display='none';}const bf=document.getElementById('viewFlowBtn');if(bf)bf.classList.toggle('active',state.workflowView!=='list');const bl=document.getElementById('viewListBtn');if(bl)bl.classList.toggle('active',state.workflowView==='list');if(!state.flowSelectedNodeId||!nodes.some(n=>n.id===state.flowSelectedNodeId)){state.flowSelectedNodeId=pickDefaultFlowNodeId(nodes);}const recoveries=currentRecovery();const ticker=document.getElementById('bottomTicker');if(ticker)ticker.textContent=recoveryUnavailable()?'恢复状态读取失败，卡点未确认':recoveries.length?'有 '+recoveries.length+' 项恢复待办，请查看卡点':'工作流调度就绪';if(fs&&recoveryUnavailable())fs.innerHTML+=renderRecoveryPanel(state.workflow.workflow.workflow_id);if(fs&&recoveries.length)fs.innerHTML+=`<div role="status" class="flow-attn">${recoveries.length} 项恢复待办：${esc(recoveries.map(o=>cleanStageLabel(o.recovery?.node_label||o.payload?.node_id||'')+' · '+(o.recovery?.summary||'需处理')).join('；'))} <button class="mini" onclick="openControllerCockpitModal()">查看卡点与恢复操作</button></div>`;renderNodeInspector();renderFlowGraph();}
+function renderFlowWorkbench(){
+  const g=flowGraphData();const nodes=g.nodes||[];
+  setWorkspaceMode(state.workflowView);
+  const fs=document.getElementById('flowSummary');
+  if(fs){
+    if(state.workflowView==='flow'&&nodes.length){
+      const working=nodes.filter(n=>n.status==='working').length;
+      fs.style.display='inline-flex';
+      const dotHtml=working>0?'<span class="flow-status-dot" style="background:#5e6ad2;box-shadow:0 0 0 2px rgba(94,106,210,.25)"></span>':'<span class="flow-status-dot"></span>';
+      fs.innerHTML=dotHtml+'<span><b>'+nodes.length+'</b> 个节点 · <b>'+working+'</b> 个运行中</span><span class="flow-gesture-hint">拖拽平移 · <kbd>⌘</kbd>+滚轮缩放</span>';
+    }else{
+      fs.style.display='none';
+    }
+  }
+  const bf=document.getElementById('viewFlowBtn');if(bf)bf.classList.toggle('active',state.workflowView!=='list');
+  const bl=document.getElementById('viewListBtn');if(bl)bl.classList.toggle('active',state.workflowView==='list');
+  if(!state.flowSelectedNodeId||!nodes.some(n=>n.id===state.flowSelectedNodeId)){state.flowSelectedNodeId=pickDefaultFlowNodeId(nodes);}
+  const recoveries=currentRecovery();
+  const ticker=document.getElementById('bottomTicker');
+  if(ticker)ticker.textContent=recoveryUnavailable()?'恢复状态读取失败，卡点未确认':recoveries.length?'有 '+recoveries.length+' 项恢复待办，请查看卡点':'工作流调度就绪';
+  const oldAttn=document.getElementById('flowAttnBanner');
+  if(oldAttn)oldAttn.remove();
+  if(fs&&recoveryUnavailable())fs.innerHTML+=renderRecoveryPanel(state.workflow.workflow.workflow_id);
+  if(fs&&recoveries.length){
+    const cleanItems=recoveries.map(o=>cleanStageLabel(o.recovery?.node_label||o.payload?.node_id||'')+' · '+(o.recovery?.summary||'需处理')).filter(Boolean).join('；');
+    fs.insertAdjacentHTML('afterend',`
+      <div role="status" class="flow-attn" id="flowAttnBanner">
+        <div class="flow-attn-content">
+          <span class="flow-attn-tag">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"></path>
+              <line x1="12" y1="9" x2="12" y2="13"></line>
+              <line x1="12" y1="17" x2="12.01" y2="17"></line>
+            </svg>
+            ${recoveries.length} 项恢复待办
+          </span>
+          <span class="flow-attn-text" title="${esc(cleanItems)}">${esc(cleanItems)}</span>
+        </div>
+        <button class="flow-attn-action" onclick="openControllerCockpitModal()">查看卡点与恢复操作</button>
+      </div>
+    `);
+  }
+  renderNodeInspector();
+  renderFlowGraph();
+}
 function dagreLayoutPositions(nodes,edges){const g=new window.dagre.graphlib.Graph();g.setGraph({rankdir:'LR',ranksep:56,nodesep:36,marginx:32,marginy:32});g.setDefaultEdgeLabel(()=>({}));const W=232,H=134;nodes.forEach(n=>g.setNode(n.id,{width:W,height:H}));edges.forEach(e=>{try{g.setEdge(e.from,e.to);}catch(err){}});window.dagre.layout(g);const pos={};nodes.forEach(n=>{const p=g.node(n.id);if(p)pos[n.id]={x:p.x-W/2,y:p.y-H/2};});return pos;}
 function renderFlowGraph(){const wrap=document.getElementById('flowCanvas');const errBox=document.getElementById('flowError');if(errBox){errBox.style.display='none';errBox.textContent='';}if(!wrap)return;const g=flowGraphData();const nodes=g.nodes||[];const edges=g.edges||[];if(state.flowGraphWfId&&state.flowGraphWfId!==state.workflowId)destroyFlowGraph();if(!nodes.length){destroyFlowGraph();if(errBox){errBox.style.display='block';errBox.textContent='当前工作流暂无可用节点定义（legacy 或空定义，已 fail-soft，不伪造连线）。';}return;}if(typeof window.dagre==='undefined'||!window.dagre.graphlib||!window.dagre.layout){destroyFlowGraph();if(errBox){errBox.style.display='block';errBox.textContent='本地 Dagre 资源缺失（/static/vendor/dagre-3.1.1.min.js），请检查 Console 静态资源。页面其他功能不受影响。';}return;}if(typeof window.X6==='undefined'||!window.X6.Graph){destroyFlowGraph();if(errBox){errBox.style.display='block';errBox.textContent='本地 X6 资源缺失（/static/vendor/x6-3.1.8.min.js），请检查 Console 静态资源。页面其他功能不受影响。';}return;}if(!ensureFlowCardShape()){destroyFlowGraph();if(errBox){errBox.style.display='block';errBox.textContent='本地 X6 缺少 HTML 节点（Shape.HTML），无法绘制流程卡片。';}return;}let pos={};try{pos=dagreLayoutPositions(nodes,edges);}catch(e){destroyFlowGraph();if(errBox){errBox.style.display='block';errBox.textContent='Dagre 布局失败：'+e.message;}return;}try{destroyFlowGraph();const W=wrap.clientWidth||800;const H=480;const graph=new window.X6.Graph({container:wrap,width:W,height:H,background:{color:'transparent'},panning:{enabled:true},mousewheel:{enabled:true,modifiers:['ctrl','meta'],minScale:0.45,maxScale:2.0},interacting:{nodeMovable:false,edgeMovable:false,edgeLabelMovable:false,arrowheadMovable:false,vertexMovable:false,vertexAddable:false,vertexDeletable:false,edgeAddable:false},connecting:{allowBlank:false,allowLoop:false,allowNode:false,allowEdge:false,snap:true},highlighting:{magnetAdsorbed:{name:'stroke',args:{padding:4,attrs:{stroke:'#5e6ad2','stroke-width':2}}}}});state.flowGraph=graph;state.flowGraphWfId=state.workflowId;const nodesMap={};nodes.forEach(n=>{nodesMap[n.id]=n;});const activeIncomingNodes=new Set();const activeOutgoingNodes=new Set();edges.forEach(e=>{const fromN=nodesMap[e.from];const toN=nodesMap[e.to];if(fromN&&toN){if(toN.status==='working'&&(fromN.status==='completed'||fromN.status==='working')){activeIncomingNodes.add(toN.id);activeOutgoingNodes.add(fromN.id);}}});nodes.forEach(n=>{const p=pos[n.id]||{x:20,y:20};const nodeData=Object.assign({},n,{selected:String(state.flowSelectedNodeId||'')===String(n.id),inbound_active:activeIncomingNodes.has(n.id),outbound_active:activeOutgoingNodes.has(n.id),has_upstream:Boolean(n.depends_on&&n.depends_on.length),has_downstream:Boolean(n.downstream&&n.downstream.length)});graph.addNode({id:n.id,shape:'flow-card',x:p.x,y:p.y,width:232,height:134,data:nodeData});});edges.forEach(e=>{try{const fromN=nodesMap[e.from];const toN=nodesMap[e.to];const isAct=Boolean(fromN&&toN&&toN.status==='working'&&(fromN.status==='completed'||fromN.status==='working'));const isDone=Boolean(fromN&&toN&&fromN.status==='completed'&&toN.status==='completed');const strokeColor=isAct?'#4f46e5':isDone?'#94a3b8':'#c5c9d3';const strokeWidth=isAct?2.2:1.6;graph.addEdge({source:{cell:e.from,anchor:{name:'right',args:{dx:0}},connectionPoint:'anchor'},target:{cell:e.to,anchor:{name:'left',args:{dx:-5}},connectionPoint:'anchor'},connector:{name:'smooth'},attrs:{line:{stroke:strokeColor,'stroke-width':strokeWidth,strokeDasharray:isAct?'6 4':'none',style:isAct?{animation:'flowEdgeDash 1.2s linear infinite'}:{},targetMarker:{name:'block',size:isAct?7:6,fill:strokeColor,stroke:strokeColor}}},zIndex:isAct?10:1});}catch(err){}});graph.on('node:click',({node})=>{try{selectFlowNode(node.id);}catch(err){}});updateFlowSelection();fitFlowGraph();requestAnimationFrame(()=>{resizeFlowGraph();fitFlowGraph();});}catch(e){destroyFlowGraph();if(errBox){errBox.style.display='block';errBox.textContent='Flow Canvas 初始化失败：'+e.message;}}}
 function flowNodeById(id){const g=flowGraphData();return (g.nodes||[]).find(n=>n.id===id)||null;}
