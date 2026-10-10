@@ -74,8 +74,8 @@ def _identity_reason(workflow, facts, candidate):
         if (workflow.get('execution_id')
                 and fact.get('execution_id') != workflow['execution_id']):
             return 'identity_unknown'
-        if (fact.get('candidate_sha') or fact.get('commit')) != candidate:
-            return 'candidate_mismatch' if (fact.get('candidate_sha') or fact.get('commit')) else 'candidate_unknown'
+        if (fact.get('commit') or fact.get('candidate_sha')) != candidate:
+            return 'candidate_mismatch' if (fact.get('commit') or fact.get('candidate_sha')) else 'candidate_unknown'
         if (fact.get('workflow_id') != workflow.get('workflow_id') or not fact.get('task_id')
                 or not fact.get('run_id')):
             return 'identity_unknown'
@@ -103,7 +103,7 @@ def assess_workflow(workflow, config, tasks):
         kind = ('delivery' if task.get('finalize_escalate_reason') == 'delivery_incomplete'
                 and task.get('delivery_failure') else 'finalize' if task.get('finalize_escalated') else 'fix_loop')
         retry = node_id if kind in {'finalize', 'delivery'} else _gate(nodes, node_id)
-        key = (kind, retry, (task.get('candidate_sha') or task.get('commit')))
+        key = (kind, retry, (task.get('commit') or task.get('candidate_sha')))
         groups.setdefault(key, []).append(task)
     obligations = []
     for (kind, retry, candidate), failed in groups.items():
@@ -114,7 +114,7 @@ def assess_workflow(workflow, config, tasks):
         if not affected:
             affected.update(task['task_id'] for task in current
                             if task.get('task_id') and (task.get('node') or task.get('stage')) == retry
-                            and (task.get('candidate_sha') or task.get('commit')) == candidate)
+                            and (task.get('commit') or task.get('candidate_sha')) == candidate)
         facts = sorted(failed, key=lambda task: str(task.get('task_id') or ''))
         affected_facts = [task for task in current if task.get('task_id') in affected and task not in facts]
         if kind == 'delivery':
