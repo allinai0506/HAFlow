@@ -4559,7 +4559,7 @@ body {
   #flowWrap { flex-direction: column; }
   #flowInspector { width: 100%; max-height: none; border-left: none; border-top: 1px solid #e6e8ee; }
 }
-.controller-panel{flex:1;min-height:0;overflow-y:auto;padding:24px;background:#ffffff;display:flex;flex-direction:column;gap:16px;}
+.controller-panel{flex:1;min-height:0;overflow-y:auto;padding:24px 24px 80px 24px;background:#ffffff;display:flex;flex-direction:column;gap:16px;}
 .controller-panel[hidden]{display:none !important;}
 .ctl-panel-header{display:flex;align-items:center;gap:8px;padding-bottom:16px;border-bottom:1px solid #e6e8ee;font-size:14px;font-weight:600;color:#16171b;}
 .log-kind-selector{display:inline-flex;align-items:center;background:#f4f5f7;padding:4px;border-radius:6px;gap:4px;}
@@ -5223,7 +5223,34 @@ function showPromptModal({title,label,defaultValue='',confirmText='确定',onCon
   const btn=document.getElementById('modalPromptBtn');
   if(btn)btn.onclick=async()=>{const val=input?input.value.trim():'';closeModal();if(onConfirm)await onConfirm(val)}
 }
-function saveViewState(){try{localStorage.setItem(VIEW_KEY,JSON.stringify({opsMode:state.opsMode,dashMode:state.dashMode,dashWorkflowId:state.dashWorkflowId||null,spaceId:state.spaceId,workflowId:state.workflowId,shellView:state.shellView||'workbench'}))}catch(e){}}
+function syncUrlView(){
+  try{
+    const u=new URL(window.location.href);
+    const v=state.opsMode?'ops':state.dashMode?'dashboard':(state.shellView||'workbench');
+    if(v==='workbench'){
+      u.searchParams.delete('view');
+      u.searchParams.delete('ops');
+      if(state.workflowId&&state.workflowId!=='__templates__'&&state.workflowId!=='__ctl__'&&state.workflowId!=='__archive__'&&state.workflowId!=='__logs__'){
+        u.searchParams.set('workflow_id',state.workflowId);
+      }else{
+        u.searchParams.delete('workflow_id');
+      }
+    }else{
+      u.searchParams.set('view',v);
+      if(v==='dashboard'&&state.dashWorkflowId){
+        u.searchParams.set('workflow_id',state.dashWorkflowId);
+      }else{
+        u.searchParams.delete('workflow_id');
+      }
+      u.searchParams.delete('ops');
+    }
+    const newUrl=u.pathname+u.search+u.hash;
+    if(window.location.pathname+window.location.search+window.location.hash!==newUrl){
+      window.history.replaceState(null,'',newUrl);
+    }
+  }catch(e){}
+}
+function saveViewState(){try{localStorage.setItem(VIEW_KEY,JSON.stringify({opsMode:state.opsMode,dashMode:state.dashMode,dashWorkflowId:state.dashWorkflowId||null,spaceId:state.spaceId,workflowId:state.workflowId,shellView:state.shellView||'workbench'}));syncUrlView();}catch(e){}}
 function loadViewState(){try{return JSON.parse(localStorage.getItem(VIEW_KEY)||'null')}catch(e){return null}}
 async function waitForWorkflowJob(jobId){
   try{
@@ -5443,6 +5470,8 @@ async function showTemplateLibrary(){
   if(!state.openWorkflowTabIds)state.openWorkflowTabIds=[];
   if(!state.openWorkflowTabIds.includes('__templates__'))state.openWorkflowTabIds.push('__templates__');
   state.workflowId='__templates__';
+  state.opsMode=false;state.dashMode=false;state.shellView='templates';
+  saveViewState();
   renderWorkflowTabs();
   paintCrumb();
   if(tplEl){
@@ -8543,33 +8572,118 @@ async function bindSlotPrompt(p){
     }
   });
 }
-setInterval(()=>{if(!document.hidden)refreshAll()},600000);document.addEventListener('visibilitychange',()=>{if(!document.hidden)refreshAll()});(function(){const v=loadViewState();if(!v)return;state.opsMode=!!v.opsMode;state.dashMode=!!v.dashMode;state.dashWorkflowId=v.dashWorkflowId||null;state.spaceId=v.spaceId||null;state.workflowId=v.workflowId||null;state.shellView=v.shellView||'workbench'})();async function initFromUrlOrState(){const p=new URLSearchParams(window.location.search);let qWf=p.get('workflow_id');const qTask=p.get('task_id'),qPane=p.get('pane_id'),qOps=p.get('ops'),qView=p.get('view');if(!qWf&&qTask){try{const td=await api('/api/task?id='+encodeURIComponent(qTask));if(td&&td.task&&td.task.workflow_id)qWf=td.task.workflow_id}catch(e){}}if(!qWf&&!qTask&&!qPane&&!qOps&&!qView){state.opsMode?showOpsCenter():refreshAll();return}if(qOps==='1'||qOps==='true')state.opsMode=true;if(qView==='dashboard'){state.dashMode=true;state.opsMode=false;if(qWf)state.dashWorkflowId=qWf}if(qWf&&!state.dashMode){state.opsMode=false;state.dashWorkflowId=null;state.workflowId=qWf;try{const d=await api('/api/workflow?id='+encodeURIComponent(qWf));if(d&&d.project){if(d.project.project_id)state.projectId=d.project.project_id;if(d.project.workspace_id)state.spaceId=d.project.workspace_id}}catch(e){}}if(state.dashMode){await showDashboard()}else if(state.opsMode){await showOpsCenter()}else{await refreshAll();if(qWf&&state.workflowId!==qWf){try{await loadWorkflow(qWf)}catch(e){}}if(qTask){const el=document.querySelector(`[data-task-id="${CSS.escape?CSS.escape(qTask):qTask}"]`);if(el){el.scrollIntoView({behavior:'smooth',block:'center'});el.classList.add('task-highlight')}await openTaskDrawer(qTask)}else if(qPane){await showPane(qPane)}}}initFromUrlOrState();
+setInterval(()=>{if(!document.hidden)refreshAll()},600000);
+document.addEventListener('visibilitychange',()=>{if(!document.hidden)refreshAll()});
+(function(){
+  const v=loadViewState();
+  if(!v)return;
+  state.opsMode=!!v.opsMode;
+  state.dashMode=!!v.dashMode;
+  state.dashWorkflowId=v.dashWorkflowId||null;
+  state.spaceId=v.spaceId||null;
+  state.workflowId=v.workflowId||null;
+  state.shellView=v.shellView||'workbench';
+})();
+async function initFromUrlOrState(){
+  const p=new URLSearchParams(window.location.search);
+  let qWf=p.get('workflow_id');
+  const qTask=p.get('task_id'),qPane=p.get('pane_id'),qOps=p.get('ops'),qView=p.get('view');
+  if(!qWf&&qTask){
+    try{
+      const td=await api('/api/task?id='+encodeURIComponent(qTask));
+      if(td&&td.task&&td.task.workflow_id)qWf=td.task.workflow_id;
+    }catch(e){}
+  }
+  if(!qWf&&!qTask&&!qPane&&!qOps&&!qView){
+    if(state.opsMode)showOpsCenter();
+    else if(state.dashMode)showDashboard();
+    else if(state.workflowId==='__templates__')showTemplateLibrary();
+    else if(state.shellView&&state.shellView!=='workbench')showShellView(state.shellView);
+    else refreshAll();
+    return;
+  }
+  if(qOps==='1'||qOps==='true'||qView==='ops'){
+    state.opsMode=true;
+    state.dashMode=false;
+    state.shellView='ops';
+  }else if(qView==='dashboard'){
+    state.dashMode=true;
+    state.opsMode=false;
+    state.shellView='dashboard';
+    if(qWf)state.dashWorkflowId=qWf;
+  }else if(qView==='templates'){
+    state.opsMode=false;
+    state.dashMode=false;
+    state.shellView='templates';
+    state.workflowId='__templates__';
+  }else if(qView&&['alerts','agents','slots','workflows','workbench'].includes(qView)){
+    state.opsMode=false;
+    state.dashMode=false;
+    state.shellView=qView;
+  }
+  if(qWf&&!state.dashMode&&state.workflowId!=='__templates__'){
+    state.opsMode=false;
+    state.dashWorkflowId=null;
+    state.workflowId=qWf;
+    try{
+      const d=await api('/api/workflow?id='+encodeURIComponent(qWf));
+      if(d&&d.project){
+        if(d.project.project_id)state.projectId=d.project.project_id;
+        if(d.project.workspace_id)state.spaceId=d.project.workspace_id;
+      }
+    }catch(e){}
+  }
+  if(state.dashMode){
+    await showDashboard();
+  }else if(state.opsMode){
+    await showOpsCenter();
+  }else if(state.workflowId==='__templates__'||state.shellView==='templates'){
+    await showTemplateLibrary();
+  }else if(state.shellView&&state.shellView!=='workbench'){
+    await refreshAll();
+    showShellView(state.shellView);
+  }else{
+    await refreshAll();
+    if(qWf&&state.workflowId!==qWf){
+      try{await loadWorkflow(qWf);}catch(e){}
+    }
+    if(qTask){
+      const el=document.querySelector(`[data-task-id="${CSS.escape?CSS.escape(qTask):qTask}"]`);
+      if(el){el.scrollIntoView({behavior:'smooth',block:'center'});el.classList.add('task-highlight');}
+      await openTaskDrawer(qTask);
+    }else if(qPane){
+      await showPane(qPane);
+    }
+  }
+}
+window.addEventListener('popstate',()=>{initFromUrlOrState();});
+initFromUrlOrState();
 </script>
 <script>
 (function(){
   function setupSlidingPill() {
-    const tabsList = document.getElementById(workflowTabsList);
+    const tabsList = document.getElementById('workflowTabsList');
     if (!tabsList) return;
-    let pill = tabsList.querySelector(.wf-tab-sliding-pill);
+    let pill = tabsList.querySelector('.wf-tab-sliding-pill');
     if (!pill) {
-      pill = document.createElement(div);
-      pill.className = wf-tab-sliding-pill;
+      pill = document.createElement('div');
+      pill.className = 'wf-tab-sliding-pill';
       tabsList.prepend(pill);
     }
-    const activeTab = tabsList.querySelector(.wf-tab.active);
+    const activeTab = tabsList.querySelector('.wf-tab.active');
     if (activeTab) {
       const parentRect = tabsList.getBoundingClientRect();
       const tabRect = activeTab.getBoundingClientRect();
       pill.style.transform = `translateX(${tabRect.left - parentRect.left + tabsList.scrollLeft}px)`;
       pill.style.width = `${tabRect.width}px`;
-      pill.style.display = block;
+      pill.style.display = 'block';
     } else {
-      pill.style.display = none;
+      pill.style.display = 'none';
     }
   }
 
   const origRenderTabs = window.renderWorkflowTabs;
-  if (typeof origRenderTabs === function) {
+  if (typeof origRenderTabs === 'function') {
     window.renderWorkflowTabs = function() {
       origRenderTabs.apply(this, arguments);
       setTimeout(setupSlidingPill, 10);
@@ -8577,47 +8691,47 @@ setInterval(()=>{if(!document.hidden)refreshAll()},600000);document.addEventList
   }
 
   function setupSidebarResizer() {
-    const sidebar = document.getElementById(sidebar);
+    const sidebar = document.getElementById('sidebar');
     if (!sidebar) return;
-    let handle = sidebar.querySelector(.sidebar-resizer-handle);
+    let handle = sidebar.querySelector('.sidebar-resizer-handle');
     if (!handle) {
-      handle = document.createElement(div);
-      handle.className = sidebar-resizer-handle;
-      handle.title = 按住拖动调整宽度，双击复位;
+      handle = document.createElement('div');
+      handle.className = 'sidebar-resizer-handle';
+      handle.title = '按住拖动调整宽度，双击复位';
       sidebar.appendChild(handle);
     }
     let isDragging = false, startX = 0, startW = 280;
-    const savedW = localStorage.getItem(haflow_custom_sidebar_w);
-    if (savedW) sidebar.style.width = savedW + px;
+    const savedW = localStorage.getItem('haflow_custom_sidebar_w');
+    if (savedW) sidebar.style.width = savedW + 'px';
 
-    handle.addEventListener(mousedown, (e) => {
+    handle.addEventListener('mousedown', (e) => {
       isDragging = true;
       startX = e.clientX;
       startW = sidebar.getBoundingClientRect().width;
-      handle.classList.add(is-dragging);
-      document.body.style.cursor = col-resize;
-      document.body.style.userSelect = none;
+      handle.classList.add('is-dragging');
+      document.body.style.cursor = 'col-resize';
+      document.body.style.userSelect = 'none';
     });
-    window.addEventListener(mousemove, (e) => {
+    window.addEventListener('mousemove', (e) => {
       if (!isDragging) return;
       const newW = Math.max(220, Math.min(460, startW + (e.clientX - startX)));
-      sidebar.style.width = newW + px;
+      sidebar.style.width = newW + 'px';
     });
-    window.addEventListener(mouseup, () => {
+    window.addEventListener('mouseup', () => {
       if (!isDragging) return;
       isDragging = false;
-      handle.classList.remove(is-dragging);
-      document.body.style.cursor = ;
-      document.body.style.userSelect = ;
-      localStorage.setItem(haflow_custom_sidebar_w, sidebar.getBoundingClientRect().width);
+      handle.classList.remove('is-dragging');
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      localStorage.setItem('haflow_custom_sidebar_w', sidebar.getBoundingClientRect().width);
     });
-    handle.addEventListener(dblclick, () => {
-      sidebar.style.width = 280px;
-      localStorage.setItem(haflow_custom_sidebar_w, 280);
+    handle.addEventListener('dblclick', () => {
+      sidebar.style.width = '280px';
+      localStorage.setItem('haflow_custom_sidebar_w', '280');
     });
   }
 
-  window.addEventListener(DOMContentLoaded, () => {
+  window.addEventListener('DOMContentLoaded', () => {
     setupSidebarResizer();
     setupSlidingPill();
   });
