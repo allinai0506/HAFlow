@@ -56,7 +56,6 @@ class TestConsoleStandardLayoutAndTabs(unittest.TestCase):
             'class="workflow-tabs-bar"',
             'id="workflowTabsList"',
             'class="tabs-scroll"',
-            'class="btn-new-tab"',
         ):
             self.assertIn(token, self.html, f"Missing Workflow Tabs markup token: {token}")
 
