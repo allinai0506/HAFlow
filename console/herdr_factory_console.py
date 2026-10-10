@@ -4271,7 +4271,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: 12px;
   z-index: 4;
   pointer-events: none;
 }
@@ -4281,7 +4281,7 @@ body {
 }
 .shell[data-workspace="list"] #canvasToolbar { position: relative; margin: 12px 16px 0; }
 .shell[data-workspace="aux"] #canvasToolbar { display: none !important; }
-.toolbar-left, .canvas-tools { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.toolbar-left, .canvas-tools { display: flex; align-items: center; gap: 12px; min-width: 0; }
 .canvas-tools { margin-left: auto; }
 .flow-view-toggle {
   background: #fff;
@@ -4289,6 +4289,8 @@ body {
   border-radius: 8px;
   padding: 2px;
   box-shadow: 0 1px 2px rgba(18,19,22,.04);
+  height: 32px;
+  box-sizing: border-box;
 }
 .flow-view-toggle .filter-btn { padding: 4px 8px; border-radius: 6px; }
 .flow-view-toggle .filter-btn.active { background: #f6eee8; color: #16171b; font-weight: 650; box-shadow: none; }
@@ -4298,6 +4300,8 @@ body {
   gap: 8px;
   min-width: 0;
   max-width: 480px;
+  height: 32px;
+  box-sizing: border-box;
   background: rgba(255, 255, 255, 0.94);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
@@ -4384,6 +4388,8 @@ body {
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
   padding: 4px 12px;
+  height: 32px;
+  box-sizing: border-box;
   font-size: 12px;
   color: #5e636e;
   white-space: nowrap;
@@ -4405,10 +4411,68 @@ body {
   box-shadow: 0 0 0 2px rgba(16, 185, 129, 0.2);
 }
 .shell[data-workspace="list"] #flowSummary,
-.shell[data-workspace="list"] .flow-controls { display: none !important; }
-.flow-controls { position: static; gap: 0; background: #fff; border: 1px solid #e6e8ee; border-radius: 8px; overflow: hidden; }
-.flow-controls .btn { padding: 4px 8px; border: 0; border-radius: 0; border-left: 1px solid #e6e8ee; box-shadow: none; background: #fff; }
-.flow-controls .btn:first-child { border-left: 0; }
+.shell[data-workspace="list"] .flow-zoom-group { display: none !important; }
+.flow-zoom-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(255, 255, 255, 0.94);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid #e6e8ee;
+  border-radius: 8px;
+  padding: 2px 4px 2px 12px;
+  height: 32px;
+  box-sizing: border-box;
+  box-shadow: 0 1px 2px rgba(18, 19, 22, 0.04);
+}
+.flow-zoom-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: #8c919d;
+  user-select: none;
+}
+.flow-zoom-hint kbd {
+  font-family: inherit;
+  font-size: 10px;
+  background: #f0f2f5;
+  border: 1px solid #dcdfe6;
+  border-radius: 3px;
+  padding: 0 4px;
+  color: #5e636e;
+}
+.flow-zoom-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
+  border-left: 1px solid #e6e8ee;
+  padding-left: 4px;
+}
+.flow-zoom-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 24px;
+  padding: 0 8px;
+  border: 0;
+  background: transparent;
+  color: #5e636e;
+  border-radius: 6px;
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.flow-zoom-btn:hover {
+  background: #f0f2f5;
+  color: #16171b;
+}
+.flow-zoom-btn svg {
+  width: 13px;
+  height: 13px;
+}
 #flowWrap { flex: 1; min-height: 0; background: transparent; }
 #flowCanvasWrap {
   min-height: 0;
@@ -5244,10 +5308,17 @@ body {
           </div>
           <div class="canvas-tools">
             <div id="flowSummary"></div>
-            <div class="flow-controls">
-              <button class="btn" onclick="flowZoomIn()" title="放大">+</button>
-              <button class="btn" onclick="flowZoomOut()" title="缩小">−</button>
-              <button class="btn" onclick="fitFlowGraph()" title="自适应">Fit</button>
+            <div class="flow-zoom-group" id="flowZoomGroup">
+              <span class="flow-zoom-hint">拖拽平移 · <kbd>⌘</kbd>+滚轮</span>
+              <div class="flow-zoom-actions">
+                <button class="flow-zoom-btn" onclick="flowZoomIn()" title="放大 (Zoom In)" aria-label="放大">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                </button>
+                <button class="flow-zoom-btn" onclick="flowZoomOut()" title="缩小 (Zoom Out)" aria-label="缩小">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                </button>
+                <button class="flow-zoom-btn" onclick="fitFlowGraph()" title="自适应视图 (Fit View)">Fit</button>
+              </div>
             </div>
           </div>
         </div>
@@ -7636,7 +7707,7 @@ function renderFlowWorkbench(){
       const working=nodes.filter(n=>n.status==='working').length;
       fs.style.display='inline-flex';
       const dotHtml=working>0?'<span class="flow-status-dot" style="background:#5e6ad2;box-shadow:0 0 0 2px rgba(94,106,210,.25)"></span>':'<span class="flow-status-dot"></span>';
-      fs.innerHTML=dotHtml+'<span><b>'+nodes.length+'</b> 个节点 · <b>'+working+'</b> 个运行中</span><span class="flow-gesture-hint">拖拽平移 · <kbd>⌘</kbd>+滚轮缩放</span>';
+      fs.innerHTML=dotHtml+'<span><b>'+nodes.length+'</b> 个节点 · <b>'+working+'</b> 个运行中</span>';
     }else{
       fs.style.display='none';
     }
