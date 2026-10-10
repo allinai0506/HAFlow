@@ -4707,7 +4707,6 @@ body {
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m9 18 6-6-6-6"/></svg>
         </button>
         <div class="tabs-scroll" id="workflowTabsList"></div>
-        <button type="button" class="btn-new-tab" onclick="showNewWorkflow()" title="发起新工作流">+</button>
       </div>
       <div class="actions">
         <button class="btn factory-action" onclick="advanceStage()" title="推进当前阶段">进入下一阶段</button>
