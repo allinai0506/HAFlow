@@ -6634,16 +6634,24 @@ async function editWorkflowTitle(wid){
     defaultValue:curTitle,
     confirmText:'保存',
     onConfirm:async(newTitle)=>{
-      if(newTitle===curTitle)return;
+      const trimmed=(newTitle||'').trim();
+      if(trimmed===curTitle)return;
       try{
-        await api('/api/workflow/rename',{workflow_id:id,title:newTitle});
+        await api('/api/workflow/rename',{
+          method:'POST',
+          body:JSON.stringify({workflow_id:id,title:trimmed})
+        });
         toast('工作流名称已更新');
         if(state.workflow&&state.workflow.workflow&&state.workflow.workflow.workflow_id===id){
-          state.workflow.workflow.title=newTitle;
+          state.workflow.workflow.title=trimmed;
+          state.workflow.workflow.requirement_subject=trimmed;
         }
         if(state.project&&state.project.workflows){
           const target=state.project.workflows.find(x=>x.workflow_id===id);
-          if(target)target.title=newTitle;
+          if(target){
+            target.title=trimmed;
+            target.requirement_subject=trimmed;
+          }
         }
         if(state.workflow&&state.workflow.workflow&&state.workflow.workflow.workflow_id===id){
           renderWorkflowHead(state.workflow.workflow);
