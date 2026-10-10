@@ -4282,8 +4282,11 @@ body {
 .shell[data-workspace="list"] #canvasToolbar { position: relative; margin: 12px 16px 0; }
 .shell[data-workspace="aux"] #canvasToolbar { display: none !important; }
 .toolbar-left, .canvas-tools { display: flex; align-items: center; gap: 12px; min-width: 0; }
-.canvas-tools { margin-left: auto; }
+.toolbar-left { flex-shrink: 1; }
+.canvas-tools { margin-left: auto; flex-shrink: 0; }
 .flow-view-toggle {
+  display: inline-flex;
+  align-items: center;
   background: #fff;
   border: 1px solid #e6e8ee;
   border-radius: 8px;
@@ -4291,8 +4294,15 @@ body {
   box-shadow: 0 1px 2px rgba(18,19,22,.04);
   height: 32px;
   box-sizing: border-box;
+  flex-shrink: 0;
+  white-space: nowrap;
 }
-.flow-view-toggle .filter-btn { padding: 4px 8px; border-radius: 6px; }
+.flow-view-toggle .filter-btn {
+  padding: 4px 8px;
+  border-radius: 6px;
+  white-space: nowrap !important;
+  flex-shrink: 0;
+}
 .flow-view-toggle .filter-btn.active { background: #f6eee8; color: #16171b; font-weight: 650; box-shadow: none; }
 .canvas-wf-meta {
   display: flex;
@@ -4309,6 +4319,8 @@ body {
   border-radius: 8px;
   padding: 4px 8px;
   box-shadow: 0 1px 2px rgba(18, 19, 22, 0.04);
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 .canvas-wf-title-wrap {
   display: flex;
@@ -4425,6 +4437,8 @@ body {
   height: 32px;
   box-sizing: border-box;
   box-shadow: 0 1px 2px rgba(18, 19, 22, 0.04);
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 .flow-zoom-hint {
   display: inline-flex;
@@ -4433,6 +4447,8 @@ body {
   font-size: 11px;
   color: #8c919d;
   user-select: none;
+  white-space: nowrap !important;
+  flex-shrink: 0;
 }
 .flow-zoom-hint kbd {
   font-family: inherit;
@@ -4442,6 +4458,7 @@ body {
   border-radius: 3px;
   padding: 0 4px;
   color: #5e636e;
+  white-space: nowrap;
 }
 .flow-zoom-actions {
   display: inline-flex;
@@ -4449,6 +4466,8 @@ body {
   gap: 0;
   border-left: 1px solid #e6e8ee;
   padding-left: 4px;
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 .flow-zoom-btn {
   display: inline-flex;
@@ -4622,20 +4641,25 @@ body {
 .flow-task-row b { display: block; font-size: 12px; font-weight: 650; max-width: 188px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .flow-task-row small { display: block; color: #8b909a; font-size: 11.5px; }
 .flow-attn {
-  margin-top: 8px;
-  background: rgba(254, 252, 232, 0.95);
+  position: absolute;
+  top: 52px;
+  left: 16px;
+  right: 16px;
+  z-index: 3;
+  background: rgba(254, 252, 232, 0.96);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
   border: 1px solid #fde047;
   border-radius: 8px;
   padding: 8px 12px;
-  box-shadow: 0 1px 3px rgba(234, 179, 8, 0.08);
+  box-shadow: 0 2px 6px rgba(234, 179, 8, 0.1);
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
   font-size: 12px;
   color: #854d0e;
+  box-sizing: border-box;
 }
 .flow-attn-content {
   display: flex;
@@ -4643,6 +4667,7 @@ body {
   gap: 8px;
   min-width: 0;
   flex: 1;
+  white-space: nowrap;
 }
 .flow-attn-tag {
   display: inline-flex;
@@ -4654,17 +4679,20 @@ body {
   font-size: 11px;
   padding: 0 8px;
   border-radius: 4px;
-  height: 20px;
+  height: 22px;
   flex-shrink: 0;
+  white-space: nowrap;
 }
 .flow-attn-text {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   color: #713f12;
+  min-width: 0;
 }
 .flow-attn-action {
   flex-shrink: 0;
+  white-space: nowrap;
   background: #fff !important;
   color: #854d0e !important;
   border: 1px solid #fde047 !important;
@@ -7721,10 +7749,10 @@ function renderFlowWorkbench(){
   if(ticker)ticker.textContent=recoveryUnavailable()?'恢复状态读取失败，卡点未确认':recoveries.length?'有 '+recoveries.length+' 项恢复待办，请查看卡点':'工作流调度就绪';
   const oldAttn=document.getElementById('flowAttnBanner');
   if(oldAttn)oldAttn.remove();
-  if(fs&&recoveryUnavailable())fs.innerHTML+=renderRecoveryPanel(state.workflow.workflow.workflow_id);
-  if(fs&&recoveries.length){
+  const hostWrap=document.getElementById('flowCanvasWrap');
+  if(hostWrap&&recoveries.length){
     const cleanItems=recoveries.map(o=>cleanStageLabel(o.recovery?.node_label||o.payload?.node_id||'')+' · '+(o.recovery?.summary||'需处理')).filter(Boolean).join('；');
-    fs.insertAdjacentHTML('afterend',`
+    hostWrap.insertAdjacentHTML('afterbegin',`
       <div role="status" class="flow-attn" id="flowAttnBanner">
         <div class="flow-attn-content">
           <span class="flow-attn-tag">
