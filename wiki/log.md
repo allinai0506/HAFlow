@@ -2350,3 +2350,6 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
   - `git diff --check` clean。
 - 2026-10-08：节点硬预算退役判据（§145）——superseded 与 superseded_by 退役行不再占 max_tasks_per_node；round1 评审抓出 committed+superseded_by 谱系退役行漏判，修复后 round2 MERGE_READY。全量 3900 passed。
 - 2026-10-08：替代重派复用 operation（§146）——显式 --supersedes 可复用当前 pending operation，拒绝枚举精确原因；round1 评审抓出终态 op 未拦截，修复后 round2 MERGE_READY。全量 3901 passed。
+
+## [2026-10-10] update | 部分启动归档回执的排序与安全重试
+- Updated [[workflow-progress-recovery]]：补充旧代次仅停留在启动提示时的人工确认、Pane/clone 归属核验、归档回执与 CAS 失败后安全重试契约。
