@@ -6499,3 +6499,28 @@ wf-nexusarchive-1008-01 手工替代重派时复用 dispatch-operation-id 被拒
 
 ### 验证命令 / 关联证据
 `pytest -v tests/test_os_sandbox_boundary.py tests/test_finding_verifier.py`（20 项 OS 边界与受控代理测试 100% PASS，包含直接 443 拦截、非授权 Host 403 拦截、白名单 Host 放行、动态端口限制与清理验证）；全量自动化测试（74 项测试 100% PASS）。
+
+## 151. 外部清理与状态回执必须共享可排序的恢复时间（2026-10-10）
+
+### 问题背景
+
+PR #192 的部分启动恢复会先关闭旧 Pane、归档私有 clone，再持久化 `resources_absent` 回执，最后通过 CAS 释放当前 dispatch。并发版本变化可能让最后一步 CAS 失败，操作员刷新后按回执重试。若恢复 helper 使用与 dispatch 不同的时间来源，事件查询可能仍选中较新的旧 `allocating` 记录；原 clone 已被归档，重试便会重新探测不存在的原路径并再次卡住。该问题在确定性时钟测试中复现：旧 intent 时间戳为 1002，恢复动作按 1004 执行，但 helper 的回执时间早于旧 intent。
+
+### 经验教训
+
+1. **持久化事件的“最新”必须与排序键一致**：追加式日志若按事件时间排序，恢复动作的准备/完成事件必须使用调用方本次操作时间；单靠更晚写入的数据库 ID，无法覆盖所有按时间优先的读取路径。
+2. **外部副作用与数据库 CAS 之间必须有可恢复收据**：Pane 关闭、目录归档等不可回滚动作完成后，即使最终 CAS 失败，也必须留下身份绑定的完成回执；重试应先验证归档与 Pane 缺席，再继续 CAS，不重复执行清理。
+3. **异常恢复测试要覆盖副作用已完成、事务尚未完成的窗口**：只测正常成功与前置校验拒绝，无法发现“资源已移走但状态读取仍显示旧阶段”的死锁。
+
+### 操作规范
+
+1. 恢复 helper 接收并复用顶层操作的 `now`，为准备事件、完成回执和 dispatch 状态写入提供一致的时间基准。
+2. 对外部资源执行清理前记录准备阶段；清理后写包含 intent、Task、workflow/node、候选、Pane/terminal、transcript hash 和归档路径的完成收据。
+3. 重试先按 intent key 读取最新持久记录；若已归档，则核验收据、归档目录身份及 Pane 缺席，再继续 CAS。版本或候选变化时不得撤销或重做资源清理。
+4. 用可控并发测试制造“Pane 已关闭且 clone 已归档、旧 operation 版本被另一事务更新”的交错，验证第一次 CAS 被拒、刷新后重试成功且 Pane 只关闭一次。
+
+### 验证命令 / 关联证据
+
+`pytest -q tests/test_dispatch_recovery_ui.py tests/test_launch_reconcile_cli.py tests/test_node_dispatch_contract.py tests/test_scheduler_dispatch_e2e.py tests/test_console_standard_layout_tabs.py`（227 passed，12 subtests passed）；`git diff --check`、`python3 -m compileall -q herdr services bin tests`、`python3 -m py_compile bin/herdr-task` 通过。全量 `pytest -q` 为 3991 passed、27 failed、163 subtests passed；失败项已如实保留，未作为本次专项通过依据。
+
+证据：PR #192；`herdr/task_resources.py#retire_partial_launch`；`herdr/dispatch_recovery.py#abandon_partial_launch`；`tests/test_dispatch_recovery_ui.py#test_audited_partial_launch_retirement_unblocks_only_current_dispatch`；`tests/test_launch_reconcile_cli.py#test_partial_launch_retirement_recovers_after_archive_before_receipt`。

@@ -119,10 +119,11 @@ UNKNOWN：此节描述隔离工作树源码。原工作流恢复、真实 Agent 
 - **恢复验收范围并重新派发**：检查旧工位与任务列表后，填写处理人、依据并确认无旧任务执行。旧取消头必须有 Run；历史 execution 缺失时额外展示 Task/Run，要求确认归属。提交绑定精确 Task/Run/version，旧责任退休，新责任待 Controller 派发。
 - **核查启动现场**：有未结案启动记录时先核查。复用既有资源 inventory，只结束证明缺席的 intent；核查期间版本或身份变化拒绝，intent 回执、待办结果和审计在最终事务一起提交；存在、归属不明、超时保持阻止重发，卡片显示分项原因。
 - **确认旧任务未运行并重新派发**：未登记 Task 的未知交付，经人工检查、说明依据后创建新授权。既有任务、未结束 intent、旧未知责任、候选变化或上游身份缺失均拒绝。
+- **确认旧启动仅停留在启动提示并重新派发**：对 stale generation 的动态 Pane，操作员须绑定 transcript SHA-256 并确认仅有启动提示；系统重新核验 Pane/terminal/cwd、Agent 缺席、私有 clone tag、Task 与 intent 身份后关闭 Pane、归档 clone 并落 `resources_absent` 回执。完成外部清理后若 dispatch CAS 失败，重试先验证归档回执及 Pane 缺席，再继续 CAS；不得重复关闭或归档。此动作只处理经确认的旧启动，不代表真实工作流已验收。
 
 恢复成功提示只证明“已建立恢复待办”。Controller 仍沿 claim→send→launch intent→Task 登记核验；只有当前责任有真实登记证据，界面才显示“派发已确认”。人工新授权后，旧 operation 和无绑定迟到启动/登记不能接管新责任。通用核验及暂缓仍保留。未知现场并非可安全强制重发，界面明确保留卡点。
 
-Evidence: `herdr/dispatch_recovery.py`、`herdr/task_resources.py#begin_launch_intent`、`herdr/state_db.py#save_task`、`tests/test_dispatch_recovery_ui.py`。
+Evidence: `herdr/dispatch_recovery.py`、`herdr/dispatch_recovery.py#abandon_partial_launch`、`herdr/task_resources.py#begin_launch_intent`、`herdr/task_resources.py#retire_partial_launch`、`herdr/state_db.py#save_task`、`tests/test_dispatch_recovery_ui.py#test_audited_partial_launch_retirement_unblocks_only_current_dispatch`、`tests/test_launch_reconcile_cli.py#test_partial_launch_retirement_recovers_after_archive_before_receipt`。
 本节描述实现契约，不替代部署和原工作流业务验收。
 
 ## 未提交工程产物的恢复责任
