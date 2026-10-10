@@ -189,3 +189,20 @@ def test_affected_implementation_missing_generation_cannot_automate():
     implementation = task('implementation', status='committed', stage_verdict='pass', run_id='legacy-implementation')
     implementation.pop('execution_id', None)
     assert assess_workflow(WF, CFG, [failed, implementation])['obligations'][0]['reason'] == 'identity_unknown'
+
+
+def test_implementation_task_with_newer_commit_and_stale_candidate_sha_recovers():
+    # Implementation produced commit=SHA, while its input candidate_sha was an older base 'b'*40
+    impl = task('implementation', execution_id='generation-1', status='committed', stage_verdict='pass',
+                candidate_sha='b' * 40, commit=SHA)
+    # Verifier blocked on the output candidate SHA
+    verifier = task('test', execution_id='generation-1', candidate_sha=SHA, stage_verdict='blocked')
+    result = assess_workflow(WF, CFG, [impl, verifier])
+    assert result['can_advance'] is False
+    assert result['blockers'] == [verifier]
+    assert len(result['obligations']) == 1
+    ob = result['obligations'][0]
+    assert ob['status'] == 'pending'
+    assert ob['kind'] == 'fix_loop'
+    assert ob['affected_task_ids'] == [impl['task_id']]
+    assert ob['candidate_sha'] == SHA
