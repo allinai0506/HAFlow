@@ -360,6 +360,21 @@ assert.ok(!state.openWorkflowTabIds.includes('__logs__'));
         self.assertIsInstance(status, dict)
         self.assertIn("com.user.herdr-controller", status)
 
+    def test_flow_attn_bar_alignment_and_grid(self):
+        """15. Verify flow recovery attention banner spans across full width aligned to Inspector."""
+        # 1. HTML container exists in flowCanvasWrap
+        self.assertIn('id="flowAttnBar"', self.html)
+        self.assertIn('class="flow-attn-bar"', self.html)
+
+        # 2. CSS rules satisfy full-width alignment and zero spacing violations
+        self.assertIn('.flow-attn-bar {', self.html)
+        self.assertIn('border-bottom: 1px solid rgba(217,119,6,.35);', self.html)
+        self.assertIn('padding: 8px 16px;', self.html)
+
+        # 3. JS renders banner into flowAttnBar, not flowSummary
+        self.assertIn("document.getElementById('flowAttnBar')", self.js)
+        self.assertNotIn("fs.innerHTML+=`<div role=\"status\" class=\"flow-attn\">", self.js)
+
 
 if __name__ == "__main__":
     unittest.main()

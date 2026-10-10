@@ -69,3 +69,126 @@ def test_reconciliation_never_adopts_task_id_reused_by_foreign_run(tmp_path):
         assert result['status'] == 'recovery_required'
         assert result['resource_status'] == 'foreign'
         assert store.list_events(event_type='launch_intent', limit=1, desc=True)[0]['payload']['phase'] == 'allocating'
+
+
+def _partial_launch_fixture(tmp_path):
+    import hashlib
+    from herdr.task_resources import begin_launch_intent, record_launch_resources
+    store = get_state_store(tmp_path / 'partial.db')
+    clone = tmp_path / 'clones' / 'partial-task'
+    clone.mkdir(parents=True)
+    intent = begin_launch_intent(store, workflow_id='wf', node_id='test',
+        candidate_sha='old-sha', task_id='partial-task', run_id='run-12', now=100)['intent']
+    identity = {'workflow_id': 'wf', 'node_id': 'test', 'candidate_sha': 'old-sha',
+        'intent_id': intent['intent_id'], 'task_id': 'partial-task', 'run_id': 'run-12',
+        'pane_id': 'pane-12', 'terminal_id': 'terminal-12', 'pane_source': 'dynamic',
+        'phase': 'agent_start_requested'}
+    record_launch_resources(store, intent, {'planned_clone_path': str(clone),
+        'run_id': 'run-12', 'pane_id': 'pane-12', 'terminal_id': 'terminal-12',
+        'pane_source': 'dynamic'}, now=101)
+    from herdr.task_resources import write_worker_launch_identity
+    write_worker_launch_identity(clone, identity, initial=True)
+    transcript = 'OpenCode startup\nWaiting for task instructions.\n'
+    digest = hashlib.sha256(transcript.encode()).hexdigest()
+    return store, intent, clone, transcript, digest
+
+
+def test_partial_launch_retirement_archives_exact_unstarted_private_launch(tmp_path):
+    from herdr.task_resources import retire_partial_launch
+    store, intent, clone, transcript, digest = _partial_launch_fixture(tmp_path)
+    closed = []
+    def runner(argv, _timeout):
+        if argv[1:3] == ['pane', 'get']:
+            return 0, json.dumps({'result': {'pane': {'pane_id': 'pane-12',
+                'terminal_id': 'terminal-12', 'cwd': str(clone)}}}), ''
+        if argv[1:3] == ['agent', 'get']:
+            return 0, json.dumps({'result': {'agent': None}}), ''
+        if argv[1:3] == ['pane', 'read']:
+            return 0, transcript, ''
+        if argv[1:3] == ['pane', 'close']:
+            closed.append(argv[3]); return 0, '{}', ''
+        if argv[1:3] == ['pane', 'list']:
+            panes = [] if closed else [{'pane_id': 'pane-12', 'cwd': str(clone)}]
+            return 0, json.dumps({'result': {'panes': panes}}), ''
+        raise AssertionError(argv)
+    result = retire_partial_launch(store, intent, expected_intent_id=intent['intent_id'],
+        expected_task_id='partial-task', expected_workflow_id='wf', expected_node_id='test',
+        expected_candidate_sha='old-sha', expected_terminal_id='terminal-12',
+        expected_pane_id='pane-12', operator='human', reason='startup only',
+        transcript_sha256=digest, confirmed_startup_only=True, runner=runner, now=200)
+    assert result['status'] == 'resources_absent'
+    assert closed == ['pane-12']
+    assert not clone.exists() and Path(result['archived_clone']).is_dir()
+    latest = store.list_events(event_type='launch_intent', desc=True, limit=1)[0]['payload']
+    assert latest['phase'] == 'resources_absent'
+    assert latest['retirement']['transcript_sha256'] == digest
+
+
+@pytest.mark.parametrize('failure', ['transcript_changed', 'agent_active'])
+def test_partial_launch_retirement_refuses_changed_or_active_runtime(tmp_path, failure):
+    from herdr.task_resources import retire_partial_launch
+    store, intent, clone, transcript, digest = _partial_launch_fixture(tmp_path)
+    closed = []
+    def runner(argv, _timeout):
+        if argv[1:3] == ['pane', 'get']:
+            return 0, json.dumps({'result': {'pane': {'pane_id': 'pane-12',
+                'terminal_id': 'terminal-12', 'cwd': str(clone)}}}), ''
+        if argv[1:3] == ['agent', 'get']:
+            agent = None if failure == 'transcript_changed' else {'agent_session': 'active'}
+            return 0, json.dumps({'result': {'agent': agent}}), ''
+        if argv[1:3] == ['pane', 'read']:
+            text = transcript if failure == 'agent_active' else transcript + 'task output\n'
+            return 0, text, ''
+        if argv[1:3] == ['pane', 'close']:
+            closed.append(argv[3]); return 0, '{}', ''
+        raise AssertionError(argv)
+    with pytest.raises(ValueError):
+        retire_partial_launch(store, intent, expected_intent_id=intent['intent_id'],
+            expected_task_id='partial-task', expected_workflow_id='wf', expected_node_id='test',
+            expected_candidate_sha='old-sha', expected_terminal_id='terminal-12',
+            expected_pane_id='pane-12', operator='human', reason='startup only',
+            transcript_sha256=digest, confirmed_startup_only=True, runner=runner, now=200)
+    assert closed == []
+    assert clone.is_dir()
+    latest = store.list_events(event_type='launch_intent', desc=True, limit=1)[0]['payload']
+    assert latest['phase'] == 'allocating'
+
+
+def test_partial_launch_retirement_recovers_after_archive_before_receipt(tmp_path, monkeypatch):
+    from herdr import task_resources
+    store, intent, clone, transcript, digest = _partial_launch_fixture(tmp_path)
+    closed = []
+    def runner(argv, _timeout):
+        if argv[1:3] == ['pane', 'get']:
+            if closed:
+                return 1, '', 'pane absent'
+            return 0, json.dumps({'result': {'pane': {'pane_id': 'pane-12',
+                'terminal_id': 'terminal-12', 'cwd': str(clone)}}}), ''
+        if argv[1:3] == ['agent', 'get']:
+            return 0, json.dumps({'result': {'agent': None}}), ''
+        if argv[1:3] == ['pane', 'read']:
+            return 0, transcript, ''
+        if argv[1:3] == ['pane', 'close']:
+            closed.append(argv[3]); return 0, '{}', ''
+        if argv[1:3] == ['pane', 'list']:
+            panes = [] if closed else [{'pane_id': 'pane-12', 'cwd': str(clone)}]
+            return 0, json.dumps({'result': {'panes': panes}}), ''
+        raise AssertionError(argv)
+    write = task_resources._launch_event
+    def fail_receipt(target, value, at=None, **kwargs):
+        if value.get('phase') == 'resources_absent':
+            raise OSError('simulated event write failure')
+        return write(target, value, at, **kwargs)
+    monkeypatch.setattr(task_resources, '_launch_event', fail_receipt)
+    args = dict(expected_intent_id=intent['intent_id'], expected_task_id='partial-task',
+        expected_workflow_id='wf', expected_node_id='test', expected_candidate_sha='old-sha',
+        expected_terminal_id='terminal-12', expected_pane_id='pane-12', operator='human',
+        reason='startup only', transcript_sha256=digest, confirmed_startup_only=True,
+        runner=runner, now=200)
+    with pytest.raises(OSError):
+        task_resources.retire_partial_launch(store, intent, **args)
+    monkeypatch.setattr(task_resources, '_launch_event', write)
+    result = task_resources.retire_partial_launch(store, intent, **args)
+    assert result['status'] == 'resources_absent'
+    assert len(closed) == 1
+    assert Path(result['archived_clone']).is_dir()

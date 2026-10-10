@@ -8727,6 +8727,23 @@ def main():
     recovery_decide.add_argument('--action', choices=['retry', 'hold', 'verify'], required=True)
     recovery_decide.add_argument('--reason', required=True)
     recovery_decide.add_argument('--until', type=float)
+    partial_retire = sub.add_parser('partial-launch-retire', help='审计并归档旧代未登记部分启动后解除当前派发阻断')
+    partial_retire.add_argument('--workflow-id', required=True)
+    partial_retire.add_argument('--operation-id', type=int, required=True)
+    partial_retire.add_argument('--expected-version', type=int, required=True)
+    partial_retire.add_argument('--prior-operation-id', type=int, required=True)
+    partial_retire.add_argument('--expected-prior-version', type=int, required=True)
+    partial_retire.add_argument('--candidate-sha', required=True)
+    partial_retire.add_argument('--intent-id', required=True)
+    partial_retire.add_argument('--task-id', required=True)
+    partial_retire.add_argument('--pane-id', required=True)
+    partial_retire.add_argument('--terminal-id', required=True)
+    partial_retire.add_argument('--transcript-sha256', required=True)
+    partial_retire.add_argument('--operator', required=True)
+    partial_retire.add_argument('--reason', required=True)
+    partial_retire.add_argument('--confirm-startup-only', action='store_true', required=True)
+    partial_preview = sub.add_parser('partial-launch-preview', help='只读显示指定 Pane transcript 并生成 SHA-256')
+    partial_preview.add_argument('--pane-id', required=True)
 
     migrate = sub.add_parser('workflow-migrate', help='Evidence-backed legacy identity/config migration')
     migrate.add_argument('workflow_id')
@@ -8776,6 +8793,32 @@ def main():
             sys.exit(2)
     elif args.command == 'workflow-migrate':
         cmd_workflow_migration(args)
+    elif args.command == 'partial-launch-preview':
+        import hashlib
+        try:
+            probe = subprocess.run(['herdr', 'pane', 'read', args.pane_id], text=True,
+                capture_output=True, check=False, timeout=10)
+            if probe.returncode != 0 or len(probe.stdout.encode()) > 65536:
+                raise ValueError('Pane transcript 不可读或超过 64 KiB')
+            print(json.dumps({'pane_id': args.pane_id, 'transcript': probe.stdout,
+                'sha256': hashlib.sha256(probe.stdout.encode()).hexdigest()}, ensure_ascii=False))
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            print(f'[PARTIAL LAUNCH PREVIEW REJECTED] {exc}', file=sys.stderr)
+            sys.exit(2)
+    elif args.command == 'partial-launch-retire':
+        from herdr import dispatch_recovery, state_db
+        try:
+            report = dispatch_recovery.abandon_partial_launch(state_db.resolve_state_db_path(),
+                args.workflow_id, args.operation_id, args.expected_version,
+                args.prior_operation_id, args.expected_prior_version, operator=args.operator,
+                reason=args.reason, candidate_sha=args.candidate_sha, intent_id=args.intent_id,
+                task_id=args.task_id, pane_id=args.pane_id, terminal_id=args.terminal_id,
+                transcript_sha256=args.transcript_sha256,
+                confirmed_startup_only=args.confirm_startup_only)
+            print(json.dumps(report, ensure_ascii=False))
+        except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
+            print(f'[PARTIAL LAUNCH RETIREMENT REJECTED] {exc}', file=sys.stderr)
+            sys.exit(2)
     elif args.command in ('recovery-status', 'recovery-decide'):
         cmd_workflow_recovery(args)
     elif args.command == "add":

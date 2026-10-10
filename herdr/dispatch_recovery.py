@@ -44,6 +44,56 @@ def _pending_intents(intents, inventory):
     return pending
 
 
+def _stale_partial_launch(conn, op, context):
+    workflow, _, tasks, _, intents = context
+    if op['detail'].get('reason') != 'dispatch_prior_delivery_unknown':
+        return None
+    prior_id = op['detail'].get('prior_operation_id')
+    if not isinstance(prior_id, int) or prior_id == op['id']:
+        return None
+    try:
+        prior = rs._get(conn, prior_id)
+    except ValueError:
+        return None
+    if (prior['workflow_id'] != op['workflow_id'] or not prior['started']
+            or prior['status'] != 'waiting_human'
+            or prior['payload'].get('node_id') != op['payload'].get('node_id')
+            or prior['payload'].get('candidate_sha') == workflow.get('candidate_sha')):
+        return None
+    task_ids = {t.get('task_id') for t in tasks}
+    def eligible_phase(intent):
+        if intent.get('phase') not in {'registered', 'resources_absent'}:
+            return True
+        if intent.get('phase') != 'resources_absent':
+            return False
+        receipt = intent.get('retirement') or {}
+        resources = intent.get('resources') or {}
+        return bool(receipt.get('archived_clone')
+            and resources.get('retirement_archive') == receipt.get('archived_clone')
+            and receipt.get('intent_id') == intent.get('intent_id')
+            and receipt.get('task_id') == intent.get('task_id')
+            and receipt.get('workflow_id') == workflow.get('workflow_id')
+            and receipt.get('node_id') == op['payload'].get('node_id')
+            and receipt.get('candidate_sha') == prior['payload'].get('candidate_sha')
+            and receipt.get('pane_id') == (resources.get('pane_id') or '')
+            and receipt.get('terminal_id') == (resources.get('terminal_id') or '')
+            and len(str(receipt.get('transcript_sha256') or '')) == 64)
+    candidates = [i for i in intents if i.get('dispatch_operation_id') == prior_id
+        and i.get('candidate_sha') == prior['payload'].get('candidate_sha')
+        and i.get('task_id') not in task_ids and eligible_phase(i)
+        and (i.get('resources') or {}).get('planned_clone_path')
+        and (i.get('resources') or {}).get('pane_id')
+        and (i.get('resources') or {}).get('terminal_id')]
+    if len(candidates) != 1:
+        return None
+    intent = candidates[0]
+    return {'prior_operation_id': prior['id'], 'prior_version': prior['version'],
+        'intent_id': intent['intent_id'], 'task_id': intent['task_id'],
+        'pane_id': intent['resources']['pane_id'],
+        'terminal_id': intent['resources']['terminal_id'],
+        'prior_candidate_sha': prior['payload'].get('candidate_sha')}
+
+
 def _view(conn, op, context):
     from . import scheduler
     workflow, config, tasks, inventory, intents = context
@@ -81,6 +131,10 @@ def _view(conn, op, context):
             actions.append({'action': 'verify', 'label': '核对现有任务'})
         if pending_intents:
             actions.append({'action': 'check_resources', 'label': '核查启动现场'})
+        partial = _stale_partial_launch(conn, op, context)
+        if partial:
+            actions.append({'action': 'abandon_partial_launch', 'label': '归档并废弃旧代部分启动',
+                            **partial})
         if not blocked:
             if cancelled:
                 actions.append({'action': 'restore_scope', 'label': '恢复验收范围并重新派发'})
@@ -257,6 +311,99 @@ def check_resources(db_path, workflow_id, operation_id, expected_version, operat
                 'workflow_id':workflow_id, 'node_id':op['payload']['node_id'],
                 'source':'console-recovery', 'timestamp':now}, conn=conn)
         return {'ok': True, 'checks': checks}
+
+
+def abandon_partial_launch(db_path, workflow_id, operation_id, expected_version,
+                           prior_operation_id, expected_prior_version, *, operator, reason,
+                           candidate_sha, intent_id, task_id, pane_id, terminal_id,
+                           transcript_sha256, confirmed_startup_only, now=None, runner=None):
+    """Archive a stale generation's partial launch, then release current dispatch by CAS."""
+    from . import task_resources, state_db
+    now = time.time() if now is None else now
+    with task_resources.workflow_launch_lock(db_path, workflow_id):
+        conn = state_db.get_readonly_db_connection(db_path)
+        try:
+            conn.execute('BEGIN')
+            op = rs._get(conn, operation_id)
+            prior = rs._get(conn, prior_operation_id)
+            context = _context(conn, op)
+            workflow, _, tasks, _, intents = context
+            partial = _stale_partial_launch(conn, op, context)
+            if (op['version'] != expected_version or op['status'] != 'waiting_human'
+                    or prior['version'] != expected_prior_version
+                    or prior['status'] != 'waiting_human'
+                    or prior['id'] != op['detail'].get('prior_operation_id')
+                    or workflow_id != op['workflow_id']
+                    or candidate_sha != workflow.get('candidate_sha')
+                    or not partial or partial['intent_id'] != intent_id
+                    or partial['task_id'] != task_id or partial['pane_id'] != pane_id
+                    or partial['terminal_id'] != terminal_id):
+                raise ValueError('恢复身份、候选或 operation 版本已变化')
+            if any(t.get('task_id') == task_id for t in tasks):
+                raise ValueError('旧启动已登记 Task，禁止废弃')
+            intent = next(i for i in intents if i.get('intent_id') == intent_id)
+            if prior['payload'].get('candidate_sha') == candidate_sha:
+                raise ValueError('旧启动属于当前候选，不能作为 stale partial launch 处置')
+        finally:
+            conn.close()
+        resource = task_resources.retire_partial_launch(
+            __import__('herdr.state_store', fromlist=['get_state_store']).get_state_store(db_path), intent,
+            expected_intent_id=intent_id, expected_task_id=task_id,
+            expected_workflow_id=workflow_id, expected_node_id=op['payload']['node_id'],
+            expected_candidate_sha=partial['prior_candidate_sha'],
+            expected_terminal_id=terminal_id, expected_pane_id=pane_id,
+            operator=operator, reason=reason, transcript_sha256=transcript_sha256,
+            confirmed_startup_only=confirmed_startup_only, runner=runner, now=now)
+        if resource.get('status') != 'resources_absent':
+            raise ValueError('旧启动资源尚未完整归档，当前派发仍保持阻断')
+        with rs._transaction(db_path) as conn:
+            current = rs._get(conn, operation_id)
+            old = rs._get(conn, prior_operation_id)
+            context = _context(conn, current)
+            workflow, _, tasks, _, latest_intents = context
+            latest = next((item for item in latest_intents
+                           if item.get('intent_id') == intent_id), None)
+            retirement = (latest or {}).get('retirement') or {}
+            resource_receipt = resource.get('retirement') or {}
+            if (current['version'] != expected_version or current['status'] != 'waiting_human'
+                    or old['version'] != expected_prior_version or old['status'] != 'waiting_human'
+                    or old['id'] != current['detail'].get('prior_operation_id')
+                    or candidate_sha != workflow.get('candidate_sha')
+                    or any(t.get('task_id') == task_id for t in tasks)
+                    or not latest or latest.get('phase') != 'resources_absent'
+                    or latest.get('dispatch_operation_id') != prior_operation_id
+                    or latest.get('task_id') != task_id
+                    or latest.get('candidate_sha') != prior['payload'].get('candidate_sha')
+                    or retirement.get('transcript_sha256') != transcript_sha256.lower()
+                    or retirement.get('pane_id') != pane_id
+                    or retirement.get('terminal_id') != terminal_id
+                    or retirement.get('workflow_id') != workflow_id
+                    or retirement.get('node_id') != current['payload']['node_id']
+                    or retirement.get('candidate_sha') != prior['payload'].get('candidate_sha')
+                    or retirement.get('task_id') != task_id
+                    or retirement.get('intent_id') != intent_id
+                    or retirement.get('archived_clone') != resource.get('archived_clone')
+                    or resource_receipt.get('archived_clone') != resource.get('archived_clone')):
+                raise ValueError('归档后 CAS 复核失败；保留归档，刷新恢复待办再重试')
+            receipt = {'operator': operator.strip(), 'reason': reason.strip(),
+                'action': 'abandon_partial_launch', 'candidate_sha': candidate_sha,
+                'prior_candidate_sha': partial['prior_candidate_sha'], 'prior_operation_id': prior_operation_id,
+                'prior_version': expected_prior_version, 'intent_id': intent_id, 'task_id': task_id,
+                'pane_id': pane_id, 'terminal_id': terminal_id,
+                'archived_clone': resource['archived_clone'],
+                'transcript_sha256': transcript_sha256, 'at': now}
+            nd._write(conn, old, 'superseded', {'reason': 'dispatch_partial_launch_retired',
+                'partial_launch_retirement': receipt}, now)
+            nd._write(conn, current, 'pending', {'reason': 'dispatch_partial_launch_retired',
+                'prior_operation_id': None, 'partial_launch_retirement': receipt}, now,
+                next_due=now, started=0, owner=None, lease=None)
+            from .state_db import record_event
+            record_event({'event_type': 'dispatch_partial_launch_retired', 'payload': receipt,
+                'workflow_id': workflow_id, 'node_id': current['payload']['node_id'],
+                'source': 'console-recovery', 'timestamp': now}, conn=conn)
+            return {'ok': True, 'operation': rs._get(conn, operation_id),
+                    'retired_operation': rs._get(conn, prior_operation_id), 'receipt': receipt,
+                    'resource_receipt': resource}
 
 
 def require_authorization(conn, workflow_id, node_id, operation_id=None):
