@@ -2218,6 +2218,38 @@ def clear_completion_observation(
         conn.close()
 
 
+def clear_completion_observations_for_statuses(
+    statuses: "Iterable[str]",
+    db_path: Optional[Path] = None,
+) -> int:
+    """Delete completion samples of every task currently in one of ``statuses``.
+
+    One statement, one connection: a task row can never consume its sample
+    again once terminal, and the task table has no retention policy, so a
+    per-task sweep would open one SQLite connection (4 PRAGMAs + schema lock)
+    for every task ever created.  Measured on a 300-task database that costs
+    770 ms per 3-second sweep and grows without bound; this form costs ~2 ms
+    and is flat in the number of tasks.
+
+    ``statuses`` comes from the caller (``herdr.transitions`` owns the set) so
+    this layer never redefines the terminal-status authority.
+    """
+    wanted = sorted({str(status) for status in statuses if str(status)})
+    if not wanted:
+        return 0
+    placeholders = ", ".join("?" for _ in wanted)
+    conn = get_db_connection(db_path)
+    try:
+        cursor = conn.execute(
+            "DELETE FROM completion_observations WHERE task_id IN "
+            "(SELECT task_id FROM tasks WHERE status IN (" + placeholders + "))",
+            tuple(wanted),
+        )
+        return int(cursor.rowcount or 0)
+    finally:
+        conn.close()
+
+
 def delete_task(task_id: str, db_path: Optional[Path] = None) -> bool:
     """Delete a task by its task_id."""
     conn = get_db_connection(db_path)

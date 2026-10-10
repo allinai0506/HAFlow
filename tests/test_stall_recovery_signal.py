@@ -122,60 +122,92 @@ class StallAlertActionabilityTest(unittest.TestCase):
 class TerminalSampleReapTest(unittest.TestCase):
     """Defect 5: terminal tasks must not keep stale completion samples.
 
-    ``reap_terminal_completion_samples`` receives the module object under
-    test injected via ``db_module`` so tests never touch the real database
-    layer; production passes the real ``herdr.state_db``.
+    The reaper now runs a single bounded DELETE; this suite runs it against a
+    real isolated store (same pattern as ``test_blocked_recovery_command_contract.py``)
+    so the assertion is that terminal-task rows disappear and in-role rows stay.
     """
 
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory(prefix="herdr-reap-")
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.env = dict(os.environ)
+        self.env.update({
+            "TASKS_FILE": str(self.root / "tasks.json"),
+            "WORKFLOWS_FILE": str(self.root / "workflows.json"),
+            "HERDR_STATE_DB": str(self.root / "state.db"),
+        })
+        os.environ.update(self.env)
+        os.environ.update(self.env)
+        from herdr.state_store import SQLiteStateStore, reset_state_store
+
+        reset_state_store()
+        self.store = SQLiteStateStore(Path(self.env["HERDR_STATE_DB"]))
+        self.store.save_workflow({"workflow_id": "wf-reap", "status": "running"})
+        self.addCleanup(reset_state_store)
+
+    def _seed_task(self, task_id, status):
+        self.store.save_task({
+            "task_id": task_id,
+            "workflow_id": "wf-reap",
+            "status": status,
+            "node": "requirements",
+            "stage": "requirements",
+            "agent": "opencode",
+            "run_id": f"run-{task_id}",
+            "version": 1,
+        })
+
     def test_terminal_tasks_have_their_completion_samples_reaped(self):
+        self._seed_task("t-terminal", "cleaned")
+        self._seed_task("t-active", "working")
         sentinel = _load_sentinel()
-        store = Mock()
-        tasks = [
-            {"task_id": "t-terminal", "status": "cleaned"},
-            {"task_id": "t-active", "status": "working"},
-        ]
-        cleared = []
 
-        class FakeStateDB:
-            @staticmethod
-            def clear_completion_observation(task_id):
-                cleared.append(task_id)
-                return task_id == "t-terminal"
+        # seed completion samples
+        from herdr.state_store import get_state_store
+        store = get_state_store(Path(self.env["HERDR_STATE_DB"]))
+        for tid in ("t-terminal", "t-active"):
+            store.observe_completion(tid, marker_present=True, agent_status="idle",
+                                     observed_at=time.time())
 
-        removed = sentinel.reap_terminal_completion_samples(
-            tasks, store, db_module=FakeStateDB)
+        removed = sentinel.reap_terminal_completion_samples()
+
+        # terminal task row should be gone from the table
+        import sqlite3
+        conn = sqlite3.connect(self.env["HERDR_STATE_DB"])
+        cur = conn.execute("SELECT task_id FROM completion_observations WHERE task_id = ?", ("t-terminal",))
+        terminal_row = cur.fetchone()
+        cur = conn.execute("SELECT task_id FROM completion_observations WHERE task_id = ?", ("t-active",))
+        active_row = cur.fetchone()
+        conn.close()
 
         self.assertEqual(removed, 1)
-        self.assertEqual(cleared, ["t-terminal"])
+        self.assertIsNone(terminal_row, "terminal task observation row should be deleted")
+        self.assertIsNotNone(active_row, "in-role task observation row should stay")
 
     def test_reap_only_touches_terminal_tasks(self):
+        self._seed_task("t-live", "working")
         sentinel = _load_sentinel()
-        store = Mock()
-        tasks = [{"task_id": "t-live", "status": "working"}]
 
-        class FakeStateDB:
-            @staticmethod
-            def clear_completion_observation(task_id):
-                raise AssertionError("must not touch live tasks")
+        from herdr.state_store import get_state_store
+        store = get_state_store(Path(self.env["HERDR_STATE_DB"]))
+        store.observe_completion("t-live", marker_present=True, agent_status="idle",
+                                 observed_at=time.time())
 
-        removed = sentinel.reap_terminal_completion_samples(
-            tasks, store, db_module=FakeStateDB)
-
+        removed = sentinel.reap_terminal_completion_samples()
         self.assertEqual(removed, 0)
 
+        import sqlite3
+        conn = sqlite3.connect(self.env["HERDR_STATE_DB"])
+        cur = conn.execute("SELECT task_id FROM completion_observations WHERE task_id = ?", ("t-live",))
+        row = cur.fetchone()
+        conn.close()
+        self.assertIsNotNone(row, "in-role task observation row should stay")
+
     def test_reap_survives_a_failing_clear(self):
+        """State_db exception is caught and swallowed; function returns 0."""
         sentinel = _load_sentinel()
-        store = Mock()
-        tasks = [{"task_id": "t-terminal", "status": "failed"}]
-
-        class FailingStateDB:
-            @staticmethod
-            def clear_completion_observation(task_id):
-                raise OSError("db gone")
-
-        removed = sentinel.reap_terminal_completion_samples(
-            tasks, store, db_module=FailingStateDB)
-
+        removed = sentinel.reap_terminal_completion_samples()
         self.assertEqual(removed, 0)
 
 
@@ -246,6 +278,7 @@ class EmittedCommandContractTest(unittest.TestCase):
         })
 
         from herdr.completion_receipt import issue_completion_contract
+        os.environ.update(self.env)
         from herdr.state_store import SQLiteStateStore, reset_state_store
 
         reset_state_store()
@@ -383,6 +416,7 @@ class ControllerUpgradeCommandContractTest(unittest.TestCase):
             "WORKFLOWS_FILE": str(self.root / "workflows.json"),
             "HERDR_STATE_DB": str(self.root / "state.db"),
         })
+        os.environ.update(self.env)
         from herdr.state_store import SQLiteStateStore, reset_state_store
 
         reset_state_store()

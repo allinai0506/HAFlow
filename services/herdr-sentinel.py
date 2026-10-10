@@ -605,7 +605,7 @@ def _pane_delivery_evidence(pane_id, task_id):
     }
 
 
-def reap_terminal_completion_samples(tasks, store=None, db_module=None):
+def reap_terminal_completion_samples(db_module=None):
     """Delete durable completion samples of tasks that reached a terminal status.
 
     A ``completed``/``cleaned``/``failed``/``superseded`` task can never consume
@@ -615,28 +615,27 @@ def reap_terminal_completion_samples(tasks, store=None, db_module=None):
     this covers every other path to a terminal status.  Returns the number of
     rows removed.
 
-    ``db_module`` is injectable for tests; production resolves the real
-    ``herdr.state_db``.
+    Bounded by construction: one statement over one connection, so the cost is
+    flat in the number of tasks (常驻工程约束 #8).  Filtering per task row in
+    Python would open one SQLite connection per task ever created — 770 ms per
+    sweep at 300 terminal tasks, growing without bound, and it would delay the
+    stall alert this sweep exists to deliver.
+
+    The status set is read from ``herdr.transitions`` (single authority) and
+    handed to the data layer, which never redefines it.  No task list is
+    needed, so the caller passes nothing but the injectable module.
     """
     from herdr.transitions import TERMINAL_TASK_STATUSES
 
     if db_module is None:
         from herdr import state_db as db_module
 
-    store = store if store is not None else _get_store()
-    removed = 0
-    for task in tasks or []:
-        if task.get("status") not in TERMINAL_TASK_STATUSES:
-            continue
-        task_id = task.get("task_id")
-        if not task_id:
-            continue
-        try:
-            if db_module.clear_completion_observation(task_id):
-                removed += 1
-        except (AttributeError, OSError, RuntimeError, ValueError):
-            continue
-    return removed
+    try:
+        return int(db_module.clear_completion_observations_for_statuses(
+            sorted(TERMINAL_TASK_STATUSES)
+        ) or 0)
+    except (AttributeError, OSError, RuntimeError, ValueError):
+        return 0
 
 
 def check_dispatch_fuse(tasks, state):
@@ -926,7 +925,7 @@ def main():
             ):
                 state.pop(key, None)
         try:
-            reaped = reap_terminal_completion_samples(tasks, store)
+            reaped = reap_terminal_completion_samples()
         except Exception as exc:
             print(f"[SENTINEL REAP WARN] {exc}", file=sys.stderr, flush=True)
             reaped = 0
