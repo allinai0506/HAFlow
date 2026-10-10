@@ -61,10 +61,26 @@ def _stale_partial_launch(conn, op, context):
             or prior['payload'].get('candidate_sha') == workflow.get('candidate_sha')):
         return None
     task_ids = {t.get('task_id') for t in tasks}
+    def eligible_phase(intent):
+        if intent.get('phase') not in {'registered', 'resources_absent'}:
+            return True
+        if intent.get('phase') != 'resources_absent':
+            return False
+        receipt = intent.get('retirement') or {}
+        resources = intent.get('resources') or {}
+        return bool(receipt.get('archived_clone')
+            and resources.get('retirement_archive') == receipt.get('archived_clone')
+            and receipt.get('intent_id') == intent.get('intent_id')
+            and receipt.get('task_id') == intent.get('task_id')
+            and receipt.get('workflow_id') == workflow.get('workflow_id')
+            and receipt.get('node_id') == op['payload'].get('node_id')
+            and receipt.get('candidate_sha') == prior['payload'].get('candidate_sha')
+            and receipt.get('pane_id') == (resources.get('pane_id') or '')
+            and receipt.get('terminal_id') == (resources.get('terminal_id') or '')
+            and len(str(receipt.get('transcript_sha256') or '')) == 64)
     candidates = [i for i in intents if i.get('dispatch_operation_id') == prior_id
         and i.get('candidate_sha') == prior['payload'].get('candidate_sha')
-        and i.get('task_id') not in task_ids
-        and i.get('phase') not in {'registered', 'resources_absent'}
+        and i.get('task_id') not in task_ids and eligible_phase(i)
         and (i.get('resources') or {}).get('planned_clone_path')
         and (i.get('resources') or {}).get('pane_id')
         and (i.get('resources') or {}).get('terminal_id')]
@@ -337,7 +353,7 @@ def abandon_partial_launch(db_path, workflow_id, operation_id, expected_version,
             expected_candidate_sha=partial['prior_candidate_sha'],
             expected_terminal_id=terminal_id, expected_pane_id=pane_id,
             operator=operator, reason=reason, transcript_sha256=transcript_sha256,
-            confirmed_startup_only=confirmed_startup_only, runner=runner)
+            confirmed_startup_only=confirmed_startup_only, runner=runner, now=now)
         if resource.get('status') != 'resources_absent':
             raise ValueError('旧启动资源尚未完整归档，当前派发仍保持阻断')
         with rs._transaction(db_path) as conn:
@@ -345,15 +361,30 @@ def abandon_partial_launch(db_path, workflow_id, operation_id, expected_version,
             old = rs._get(conn, prior_operation_id)
             context = _context(conn, current)
             workflow, _, tasks, _, latest_intents = context
-            latest_partial = _stale_partial_launch(conn, current, context)
-            if (current['version'] != expected_version or old['version'] != expected_prior_version
-                    or candidate_sha != workflow.get('candidate_sha') or not latest_partial
-                    or latest_partial['intent_id'] != intent_id
-                    or any(t.get('task_id') == task_id for t in tasks)):
+            latest = next((item for item in latest_intents
+                           if item.get('intent_id') == intent_id), None)
+            retirement = (latest or {}).get('retirement') or {}
+            resource_receipt = resource.get('retirement') or {}
+            if (current['version'] != expected_version or current['status'] != 'waiting_human'
+                    or old['version'] != expected_prior_version or old['status'] != 'waiting_human'
+                    or old['id'] != current['detail'].get('prior_operation_id')
+                    or candidate_sha != workflow.get('candidate_sha')
+                    or any(t.get('task_id') == task_id for t in tasks)
+                    or not latest or latest.get('phase') != 'resources_absent'
+                    or latest.get('dispatch_operation_id') != prior_operation_id
+                    or latest.get('task_id') != task_id
+                    or latest.get('candidate_sha') != prior['payload'].get('candidate_sha')
+                    or retirement.get('transcript_sha256') != transcript_sha256.lower()
+                    or retirement.get('pane_id') != pane_id
+                    or retirement.get('terminal_id') != terminal_id
+                    or retirement.get('workflow_id') != workflow_id
+                    or retirement.get('node_id') != current['payload']['node_id']
+                    or retirement.get('candidate_sha') != prior['payload'].get('candidate_sha')
+                    or retirement.get('task_id') != task_id
+                    or retirement.get('intent_id') != intent_id
+                    or retirement.get('archived_clone') != resource.get('archived_clone')
+                    or resource_receipt.get('archived_clone') != resource.get('archived_clone')):
                 raise ValueError('归档后 CAS 复核失败；保留归档，刷新恢复待办再重试')
-            latest = next((i for i in latest_intents if i.get('intent_id') == intent_id), None)
-            if not latest or latest.get('phase') != 'resources_absent':
-                raise ValueError('启动资源缺少 resources_absent 持久回执')
             receipt = {'operator': operator.strip(), 'reason': reason.strip(),
                 'action': 'abandon_partial_launch', 'candidate_sha': candidate_sha,
                 'prior_candidate_sha': partial['prior_candidate_sha'], 'prior_operation_id': prior_operation_id,

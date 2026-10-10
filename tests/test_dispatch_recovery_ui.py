@@ -121,7 +121,7 @@ def test_console_read_and_post_share_recovery_contract(scene, monkeypatch):
 
 def test_frontend_resource_check_records_absence_before_restore(scene, monkeypatch):
     old=cancelled(scene)
-    from herdr import dispatch_recovery, task_resources
+    from herdr import dispatch_recovery, node_dispatch_store as nd, task_resources
     scene.store.record_event('launch_intent', {'key':'old-key','intent_id':'old-intent',
         'node_id':'test','workflow_id':'wf','task_id':'never-registered','phase':'allocating',
         'execution_id':'execution-1','resources':{}},workflow_id='wf',node_id='test',task_id='old-key',source='launch',timestamp=1000)
@@ -130,6 +130,93 @@ def test_frontend_resource_check_records_absence_before_restore(scene, monkeypat
     assert result['checks'][0]['status']=='resources_absent'
     current=nd.operation_for_node(scene.store.db_path,'wf','test')
     assert decision(scene,current,'restore_scope')['operation']['status']=='pending'
+
+
+def test_audited_partial_launch_retirement_unblocks_only_current_dispatch(scene, tmp_path):
+    import hashlib, json
+    from herdr import dispatch_recovery, node_dispatch_store as nd, scheduler_facts, task_resources
+    from tests.test_downstream_dispatch_contract import downstream
+    downstream(scene)
+    nd.reconcile_workflow(scene.store.db_path, 'wf', now=1000)
+    old = nd.operation_for_node(scene.store.db_path, 'wf', 'test')
+    old = nd.claim(scene.store.db_path, old['id'], 'controller', now=1000)
+    old = nd.start(scene.store.db_path, old['id'], 'controller', now=1000)
+    clone = tmp_path / 'clones' / 'old-partial'
+    clone.mkdir(parents=True)
+    intent = task_resources.begin_launch_intent(scene.store, workflow_id='wf', node_id='test',
+        candidate_sha=SHA, task_id='old-partial-task', dispatch_operation_id=old['id'],
+        run_id='old-partial-run', execution_id='execution-1', now=1001)['intent']
+    resources = {'planned_clone_path': str(clone), 'run_id': 'old-partial-run',
+        'pane_id': 'pane-partial', 'terminal_id': 'terminal-partial', 'pane_source': 'dynamic'}
+    intent = task_resources.record_launch_resources(scene.store, intent, resources, now=1002)
+    tag = {'workflow_id': 'wf', 'node_id': 'test', 'candidate_sha': SHA,
+        'intent_id': intent['intent_id'], 'task_id': 'old-partial-task',
+        'run_id': 'old-partial-run', 'pane_id': 'pane-partial',
+        'terminal_id': 'terminal-partial', 'pane_source': 'dynamic',
+        'phase': 'agent_start_requested'}
+    task_resources.write_worker_launch_identity(clone, tag, initial=True)
+    scheduler_facts.record_candidate_frozen('wf', 'b' * 40, db_path=scene.store.db_path)
+    nd.reconcile_workflow(scene.store.db_path, 'wf', now=1003)
+    current = nd.operation_for_node(scene.store.db_path, 'wf', 'test')
+    assert current['id'] != old['id']
+    assert current['status'] == 'waiting_human'
+    assert current['detail']['reason'] == 'dispatch_prior_delivery_unknown'
+    prior = next(item for item in recovery_store.list_operations(scene.store.db_path, 'wf')
+                 if item['id'] == old['id'])
+    transcript = 'Agent startup\nWaiting for task instructions.\n'
+    digest = hashlib.sha256(transcript.encode()).hexdigest()
+    closed = []
+    race_once = [True]
+    def runner(argv, _timeout):
+        if argv[1:3] == ['pane', 'get']:
+            return 0, json.dumps({'result': {'pane': {'pane_id': 'pane-partial',
+                'terminal_id': 'terminal-partial', 'cwd': str(clone)}}}), ''
+        if argv[1:3] == ['agent', 'get']:
+            return 0, json.dumps({'result': {'agent': None}}), ''
+        if argv[1:3] == ['pane', 'read']:
+            return 0, transcript, ''
+        if argv[1:3] == ['pane', 'close']:
+            closed.append(argv[3])
+            if race_once[0]:
+                with recovery_store._transaction(scene.store.db_path) as conn:
+                    changed = recovery_store._get(conn, prior['id'])
+                    nd._write(conn, changed, 'waiting_human', {'race_marker': 'version changed'}, 1004)
+                race_once[0] = False
+            return 0, '{}', ''
+        if argv[1:3] == ['pane', 'list']:
+            panes = [] if closed else [{'pane_id': 'pane-partial', 'cwd': str(clone)}]
+            return 0, json.dumps({'result': {'panes': panes}}), ''
+        raise AssertionError(argv)
+    recovery_args = dict(db_path=scene.store.db_path, workflow_id='wf', operation_id=current['id'],
+        expected_version=current['version'], prior_operation_id=prior['id'],
+        expected_prior_version=prior['version'], operator='human', reason='startup only',
+        candidate_sha='b' * 40, intent_id=intent['intent_id'], task_id='old-partial-task',
+        pane_id='pane-partial', terminal_id='terminal-partial', transcript_sha256=digest,
+        confirmed_startup_only=True, runner=runner, now=1004)
+    event_count = len(scene.store.list_events(event_type='launch_intent'))
+    for stale in ({'expected_version': current['version'] + 1}, {'candidate_sha': 'c' * 40}):
+        with pytest.raises(ValueError):
+            dispatch_recovery.abandon_partial_launch(**{**recovery_args, **stale})
+        assert clone.is_dir() and closed == []
+        assert len(scene.store.list_events(event_type='launch_intent')) == event_count
+    with pytest.raises(ValueError, match='CAS'):
+        dispatch_recovery.abandon_partial_launch(**recovery_args)
+    assert closed == ['pane-partial'] and not clone.exists()
+    # The native archive completed, but the concurrent version change prevented
+    # dispatch release. Refreshing the recovery action must safely finish from
+    # the durable resources_absent receipt without closing or deleting again.
+    refreshed = next(item for item in dispatch_recovery.list_operations(scene.store.db_path, 'wf')
+                     if item['id'] == current['id'])
+    action = next(a for a in refreshed['recovery']['actions']
+                  if a['action'] == 'abandon_partial_launch')
+    retry_args = {**recovery_args, 'expected_prior_version': action['prior_version']}
+    result = dispatch_recovery.abandon_partial_launch(**retry_args)
+    assert result['ok']
+    assert result['retired_operation']['status'] == 'superseded'
+    assert result['operation']['status'] == 'pending'
+    assert result['receipt']['archived_clone'] and Path(result['receipt']['archived_clone']).is_dir()
+    assert closed == ['pane-partial']
+    assert nd.claim(scene.store.db_path, current['id'], 'next-controller', now=1005)
 
 
 def test_frontend_resource_check_never_converts_unknown_into_absence(scene, monkeypatch):
