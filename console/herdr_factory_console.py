@@ -571,6 +571,21 @@ def set_agent_override(wid,agent):
     if not w:raise RuntimeError('工作流不存在')
     w['agent_override']=agent or 'auto'; save_json(WORKFLOWS_FILE,d); return {'workflow_id':wid,'agent_override':w['agent_override']}
 
+def update_workflow_title(wid,title):
+    t=(title or '').strip()
+    try:
+        from herdr.state_store import get_state_store, sync_workflows_projection
+        s=get_state_store()
+        s.update_workflow_metadata(wid, {'title': t})
+        sync_workflows_projection(store=s)
+    except Exception:
+        pass
+    d=load_json(WORKFLOWS_FILE,{'workflows':{}}); w=d.get('workflows',{}).get(wid)
+    if w:
+        w['title']=t
+        save_json(WORKFLOWS_FILE,d)
+    return {'workflow_id':wid,'title':t}
+
 def bind_slot(pid,agent):
     d=load_json(SLOTS_FILE,{'panes':{}}); d.setdefault('panes',{})[pid]={'agent':agent or 'auto'}; save_json(SLOTS_FILE,d); return {'pane_id':pid,'agent':agent or 'auto'}
 
@@ -4277,6 +4292,88 @@ body {
 }
 .flow-view-toggle .filter-btn { padding: 4px 8px; border-radius: 6px; }
 .flow-view-toggle .filter-btn.active { background: #f6eee8; color: #16171b; font-weight: 650; box-shadow: none; }
+.canvas-wf-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  max-width: 480px;
+  background: rgba(255, 255, 255, 0.94);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid #e6e8ee;
+  border-radius: 8px;
+  padding: 4px 8px;
+  box-shadow: 0 1px 2px rgba(18, 19, 22, 0.04);
+}
+.canvas-wf-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.canvas-wf-title {
+  font-size: 13px;
+  font-weight: 650;
+  color: #16171b;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 240px;
+  cursor: pointer;
+  line-height: 20px;
+}
+.canvas-wf-title:hover {
+  color: #c96442;
+}
+.canvas-wf-edit-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #8c919d;
+  border-radius: 4px;
+  cursor: pointer;
+  opacity: 0.7;
+  transition: opacity 0.15s, color 0.15s, background 0.15s;
+}
+.canvas-wf-edit-btn:hover {
+  opacity: 1;
+  color: #16171b;
+  background: #f0f2f5;
+}
+.canvas-wf-id-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: #f7f8fa;
+  border: 1px solid #e6e8ee;
+  border-radius: 6px;
+  padding: 0 8px;
+  height: 20px;
+  font-size: 11px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+  color: #5e636e;
+  cursor: pointer;
+  user-select: none;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+.canvas-wf-id-pill:hover {
+  background: #fff;
+  border-color: #c96442;
+  color: #c96442;
+}
+.canvas-wf-id-pill svg {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+}
 #flowSummary {
   border: 1px solid #e6e8ee;
   border-bottom: 1px solid #e6e8ee;
@@ -5018,6 +5115,7 @@ body {
         <div class="dropdown factory-action" id="moreDropdown">
           <button class="btn icon-only" onclick="toggleMoreMenu(event)" aria-label="更多操作" title="更多操作">···</button>
           <div class="dropdown-menu">
+            <button class="dropdown-item" onclick="closeMoreMenu();editWorkflowTitle()">修改工作流名称</button>
             <button class="dropdown-item" onclick="closeMoreMenu();openControllerCockpitModal()">Controller 控制台</button>
             <button class="dropdown-item" onclick="closeMoreMenu();createCandidate()">创建候选分支</button>
             <button class="dropdown-item" onclick="closeMoreMenu();runPreflight()">执行者自检</button>
@@ -5048,6 +5146,7 @@ body {
       <section class="panel main-panel">
         <div id="canvasToolbar">
           <div class="toolbar-left">
+            <div id="canvasWfMeta" class="canvas-wf-meta" style="display:none"></div>
             <div class="flow-view-toggle" role="tablist" aria-label="工作流视图切换">
               <button class="filter-btn active" id="viewFlowBtn" onclick="switchWorkflowView('flow')">流程图</button>
               <button class="filter-btn" id="viewListBtn" onclick="switchWorkflowView('list')">任务列表</button>
@@ -6511,6 +6610,82 @@ function workflowDisplayName(w){
   const subj=workflowSubject(w);
   return subj?`${subj} (${w.workflow_id})`:w.workflow_id;
 }
+function copyWorkflowId(wid){
+  const id=wid||state.workflowId;
+  if(!id||id.startsWith('__'))return;
+  if(navigator.clipboard&&navigator.clipboard.writeText){
+    navigator.clipboard.writeText(id).then(()=>{
+      toast('已复制工作流编号: '+id);
+    }).catch(()=>{
+      toast('复制失败，请手动复制: '+id, true);
+    });
+  }else{
+    toast('工作流编号: '+id);
+  }
+}
+async function editWorkflowTitle(wid){
+  const id=wid||state.workflowId;
+  if(!id||id.startsWith('__'))return toast('当前工作流不可重命名',true);
+  const w=(state.workflow&&state.workflow.workflow&&state.workflow.workflow.workflow_id===id)?state.workflow.workflow:((state.project&&state.project.workflows)||[]).find(x=>x.workflow_id===id);
+  const curTitle=w?(w.title||w.requirement_subject||''):'';
+  showPromptModal({
+    title:'修改工作流名称',
+    label:'工作流名称 / 业务主题',
+    defaultValue:curTitle,
+    confirmText:'保存',
+    onConfirm:async(newTitle)=>{
+      if(newTitle===curTitle)return;
+      try{
+        await api('/api/workflow/rename',{workflow_id:id,title:newTitle});
+        toast('工作流名称已更新');
+        if(state.workflow&&state.workflow.workflow&&state.workflow.workflow.workflow_id===id){
+          state.workflow.workflow.title=newTitle;
+        }
+        if(state.project&&state.project.workflows){
+          const target=state.project.workflows.find(x=>x.workflow_id===id);
+          if(target)target.title=newTitle;
+        }
+        if(state.workflow&&state.workflow.workflow&&state.workflow.workflow.workflow_id===id){
+          renderWorkflowHead(state.workflow.workflow);
+        }
+        renderWorkflowTabs();
+        if(typeof renderSidebarWorkflows==='function')renderSidebarWorkflows();
+      }catch(err){
+        toast('更新工作流名称失败: '+(err.message||err),true);
+      }
+    }
+  });
+}
+function renderWorkflowMetaBadge(w){
+  const box=document.getElementById('canvasWfMeta');
+  if(!box)return;
+  if(!w||!w.workflow_id||String(w.workflow_id).startsWith('__')){
+    box.style.display='none';
+    box.innerHTML='';
+    return;
+  }
+  const wid=w.workflow_id;
+  const subj=workflowSubject(w)||wid;
+  box.style.display='inline-flex';
+  box.innerHTML=`
+    <div class="canvas-wf-title-wrap">
+      <span class="canvas-wf-title" onclick="editWorkflowTitle('${esc(wid)}')" title="点击修改工作流名称">${esc(subj)}</span>
+      <button class="canvas-wf-edit-btn" onclick="editWorkflowTitle('${esc(wid)}')" title="修改工作流名称" aria-label="修改工作流名称">
+        <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
+          <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path>
+        </svg>
+      </button>
+    </div>
+    <span class="canvas-wf-id-pill" onclick="copyWorkflowId('${esc(wid)}')" title="点击复制工作流编号 (${esc(wid)})">
+      <span>${esc(wid)}</span>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+      </svg>
+    </span>
+  `;
+}
 function renderWorkflowHead(w){
   const subj=workflowSubject(w);
   document.getElementById('workflowSubject').textContent=subj||w.workflow_id;
@@ -6520,6 +6695,7 @@ function renderWorkflowHead(w){
   parts.push('执行者 '+(a==='auto'?'自动分配':a));
   if(w.candidate_branch)parts.push('候选分支 '+w.candidate_branch);
   document.getElementById('workflowSub').textContent=parts.join(' · ');
+  renderWorkflowMetaBadge(w);
   paintCrumb();
 }
 function renderWorkflowSwitcher(){
@@ -6570,6 +6746,7 @@ function clearWorkflow(){
   state.flowSelectedNodeId=null;
   saveViewState();
   renderWorkflowTabs();
+  renderWorkflowMetaBadge(null);
   document.getElementById('workflowSubject').textContent='暂无工作流';
   document.getElementById('workflowSub').textContent='';
   document.getElementById('stages').innerHTML='';
@@ -8859,6 +9036,7 @@ class Handler(BaseHTTPRequestHandler):
                 force=bool(b.get('force',False))
                 return self.send_json(200,herdr_projects.unregister_project(pid,close_workspace=close_ws,force=force))
             if p=='/api/template':return self.send_json(200,save_template(str(b.get('name') or ''),str(b.get('yaml') or '')))
+            if p=='/api/workflow/rename':return self.send_json(200,update_workflow_title(str(b['workflow_id']),str(b.get('title') or '')))
             if p=='/api/workflow/agent':return self.send_json(200,set_agent_override(str(b['workflow_id']),str(b.get('agent') or 'auto')))
             if p=='/api/workflow/candidate':return self.send_json(200,create_candidate(str(b['workflow_id'])))
             if p=='/api/workflow/advance':return self.send_json(200,manual_advance(str(b['workflow_id'])))
