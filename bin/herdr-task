@@ -1008,11 +1008,16 @@ def _build_anomalies(tasks, now):
             continue
 
         pane_id = task.get("pane_id")
-        if pane_id and pane_id in runtime_cache:
-            runtime_status = runtime_cache[pane_id]
-        elif pane_id:
-            runtime_status = _agent_runtime_status(pane_id)
-            runtime_cache[pane_id] = runtime_status
+        status = task.get("status")
+        if (
+            pane_id
+            and (status in ACTIVE_TASK_STATUSES or status in ("dispatched", "working", "agent_done", "rework", "blocked"))
+        ):
+            if pane_id in runtime_cache:
+                runtime_status = runtime_cache[pane_id]
+            else:
+                runtime_status = _agent_runtime_status(pane_id)
+                runtime_cache[pane_id] = runtime_status
         else:
             runtime_status = None
 

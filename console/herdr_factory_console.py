@@ -571,6 +571,21 @@ def set_agent_override(wid,agent):
     if not w:raise RuntimeError('工作流不存在')
     w['agent_override']=agent or 'auto'; save_json(WORKFLOWS_FILE,d); return {'workflow_id':wid,'agent_override':w['agent_override']}
 
+def update_workflow_title(wid,title):
+    t=(title or '').strip()
+    try:
+        from herdr.state_store import get_state_store, sync_workflows_projection
+        s=get_state_store()
+        s.update_workflow_metadata(wid, {'title': t})
+        sync_workflows_projection(store=s)
+    except Exception:
+        pass
+    d=load_json(WORKFLOWS_FILE,{'workflows':{}}); w=d.get('workflows',{}).get(wid)
+    if w:
+        w['title']=t
+        save_json(WORKFLOWS_FILE,d)
+    return {'workflow_id':wid,'title':t}
+
 def bind_slot(pid,agent):
     d=load_json(SLOTS_FILE,{'panes':{}}); d.setdefault('panes',{})[pid]={'agent':agent or 'auto'}; save_json(SLOTS_FILE,d); return {'pane_id':pid,'agent':agent or 'auto'}
 
@@ -4264,7 +4279,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: 12px;
   z-index: 4;
   pointer-events: none;
 }
@@ -4274,26 +4289,131 @@ body {
 }
 .shell[data-workspace="list"] #canvasToolbar { position: relative; margin: 12px 16px 0; }
 .shell[data-workspace="aux"] #canvasToolbar { display: none !important; }
-.toolbar-left, .canvas-tools { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.canvas-tools { margin-left: auto; }
+.toolbar-left, .canvas-tools { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.toolbar-left { flex-shrink: 1; }
+.canvas-tools { margin-left: auto; flex-shrink: 0; }
 .flow-view-toggle {
+  display: inline-flex;
+  align-items: center;
   background: #fff;
   border: 1px solid #e6e8ee;
   border-radius: 8px;
   padding: 2px;
   box-shadow: 0 1px 2px rgba(18,19,22,.04);
+  height: 32px;
+  box-sizing: border-box;
+  flex-shrink: 0;
+  white-space: nowrap;
 }
-.flow-view-toggle .filter-btn { padding: 4px 8px; border-radius: 6px; }
+.flow-view-toggle .filter-btn {
+  padding: 4px 8px;
+  border-radius: 6px;
+  white-space: nowrap !important;
+  flex-shrink: 0;
+}
 .flow-view-toggle .filter-btn.active { background: #f6eee8; color: #16171b; font-weight: 650; box-shadow: none; }
-#flowSummary {
+.canvas-wf-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  max-width: 480px;
+  height: 32px;
+  box-sizing: border-box;
+  background: rgba(255, 255, 255, 0.94);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
   border: 1px solid #e6e8ee;
-  border-bottom: 1px solid #e6e8ee;
-  border-radius: 999px;
-  background: rgba(255,255,255,.94);
+  border-radius: 8px;
+  padding: 4px 8px;
+  box-shadow: 0 1px 2px rgba(18, 19, 22, 0.04);
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.canvas-wf-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.canvas-wf-title {
+  font-size: 13px;
+  font-weight: 650;
+  color: #16171b;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 240px;
+  cursor: pointer;
+  line-height: 20px;
+}
+.canvas-wf-title:hover {
+  color: #c96442;
+}
+.canvas-wf-edit-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #8c919d;
+  border-radius: 4px;
+  cursor: pointer;
+  opacity: 0.7;
+  transition: opacity 0.15s, color 0.15s, background 0.15s;
+}
+.canvas-wf-edit-btn:hover {
+  opacity: 1;
+  color: #16171b;
+  background: #f0f2f5;
+}
+.canvas-wf-id-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: #f7f8fa;
+  border: 1px solid #e6e8ee;
+  border-radius: 6px;
+  padding: 0 8px;
+  height: 20px;
+  font-size: 11px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+  color: #5e636e;
+  cursor: pointer;
+  user-select: none;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+.canvas-wf-id-pill:hover {
+  background: #fff;
+  border-color: #c96442;
+  color: #c96442;
+}
+.canvas-wf-id-pill svg {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+}
+#flowSummary {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid #e6e8ee;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.94);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
   padding: 4px 12px;
+  height: 32px;
+  box-sizing: border-box;
   font-size: 12px;
   color: #5e636e;
   white-space: nowrap;
+  box-shadow: 0 1px 2px rgba(18, 19, 22, 0.04);
 }
 #flowSummary b {
   color: #16171b;
@@ -4301,11 +4421,85 @@ body {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-variant-numeric: tabular-nums;
 }
+.flow-status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #10b981;
+  display: inline-block;
+  flex-shrink: 0;
+  box-shadow: 0 0 0 2px rgba(16, 185, 129, 0.2);
+}
 .shell[data-workspace="list"] #flowSummary,
-.shell[data-workspace="list"] .flow-controls { display: none !important; }
-.flow-controls { position: static; gap: 0; background: #fff; border: 1px solid #e6e8ee; border-radius: 8px; overflow: hidden; }
-.flow-controls .btn { padding: 4px 8px; border: 0; border-radius: 0; border-left: 1px solid #e6e8ee; box-shadow: none; background: #fff; }
-.flow-controls .btn:first-child { border-left: 0; }
+.shell[data-workspace="list"] .flow-zoom-group { display: none !important; }
+.flow-zoom-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(255, 255, 255, 0.94);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid #e6e8ee;
+  border-radius: 8px;
+  padding: 2px 4px 2px 12px;
+  height: 32px;
+  box-sizing: border-box;
+  box-shadow: 0 1px 2px rgba(18, 19, 22, 0.04);
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.flow-zoom-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: #8c919d;
+  user-select: none;
+  white-space: nowrap !important;
+  flex-shrink: 0;
+}
+.flow-zoom-hint kbd {
+  font-family: inherit;
+  font-size: 10px;
+  background: #f0f2f5;
+  border: 1px solid #dcdfe6;
+  border-radius: 3px;
+  padding: 0 4px;
+  color: #5e636e;
+  white-space: nowrap;
+}
+.flow-zoom-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
+  border-left: 1px solid #e6e8ee;
+  padding-left: 4px;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.flow-zoom-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 24px;
+  padding: 0 8px;
+  border: 0;
+  background: transparent;
+  color: #5e636e;
+  border-radius: 6px;
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.flow-zoom-btn:hover {
+  background: #f0f2f5;
+  color: #16171b;
+}
+.flow-zoom-btn svg {
+  width: 13px;
+  height: 13px;
+}
 #flowWrap { flex: 1; min-height: 0; background: transparent; }
 #flowCanvasWrap {
   min-height: 0;
@@ -4424,13 +4618,24 @@ body {
   100% { stroke-dashoffset: 0; }
 }
 .flow-gesture-hint {
-  color: #8b909a;
+  color: #8c919d;
   font-size: 11px;
   margin-left: 8px;
   padding: 2px 8px;
-  background: #f3f4f6;
+  background: #f0f2f5;
   border-radius: 4px;
-  font-weight: normal;
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.flow-gesture-hint kbd {
+  font-family: inherit;
+  font-size: 10px;
+  background: #fff;
+  border: 1px solid #dcdfe6;
+  border-radius: 3px;
+  padding: 0 4px;
 }
 #flowInspector .flow-node-card,
 .flow-attn .flow-node-card {
@@ -4469,7 +4674,75 @@ body {
 .flow-mark.bad { color: #dc2626; }
 .flow-task-row b { display: block; font-size: 12px; font-weight: 650; max-width: 188px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .flow-task-row small { display: block; color: #8b909a; font-size: 11.5px; }
-.flow-attn { margin-top: 12px; background: #fffbeb; border: 1px solid rgba(217,119,6,.35); border-radius: 10px; padding: 12px; }
+.flow-attn {
+  position: absolute;
+  top: 52px;
+  left: 16px;
+  right: 16px;
+  z-index: 3;
+  background: rgba(254, 252, 232, 0.96);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid #fde047;
+  border-radius: 8px;
+  padding: 8px 12px;
+  box-shadow: 0 2px 6px rgba(234, 179, 8, 0.1);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+  color: #854d0e;
+  box-sizing: border-box;
+}
+.flow-attn-content {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+  white-space: nowrap;
+}
+.flow-attn-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: #fef08a;
+  color: #713f12;
+  font-weight: 600;
+  font-size: 11px;
+  padding: 0 8px;
+  border-radius: 4px;
+  height: 22px;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.flow-attn-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #713f12;
+  min-width: 0;
+}
+.flow-attn-action {
+  flex-shrink: 0;
+  white-space: nowrap;
+  background: #fff !important;
+  color: #854d0e !important;
+  border: 1px solid #fde047 !important;
+  border-radius: 6px !important;
+  padding: 4px 8px !important;
+  font-size: 11.5px !important;
+  font-weight: 600 !important;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+}
+.flow-attn-action:hover {
+  background: #fef08a !important;
+  border-color: #eab308 !important;
+  color: #713f12 !important;
+}
 .shell-page { padding: 4px 4px 28px; }
 .shell-page h3 { margin: 8px 0 12px; font-size: 16px; font-weight: 680; }
 .shell-row {
@@ -4593,7 +4866,7 @@ body {
   #flowWrap { flex-direction: column; }
   #flowInspector { width: 100%; max-height: none; border-left: none; border-top: 1px solid #e6e8ee; }
 }
-.controller-panel{flex:1;min-height:0;overflow-y:auto;padding:24px;background:#ffffff;display:flex;flex-direction:column;gap:16px;}
+.controller-panel{flex:1;min-height:0;overflow-y:auto;padding:24px 24px 80px 24px;background:#ffffff;display:flex;flex-direction:column;gap:16px;}
 .controller-panel[hidden]{display:none !important;}
 .ctl-panel-header{display:flex;align-items:center;gap:8px;padding-bottom:16px;border-bottom:1px solid #e6e8ee;font-size:14px;font-weight:600;color:#16171b;}
 .log-kind-selector{display:inline-flex;align-items:center;background:#f4f5f7;padding:4px;border-radius:6px;gap:4px;}
@@ -4602,7 +4875,311 @@ body {
 .log-kind-btn.active{background:#ffffff;color:#5e6ad2;font-weight:600;box-shadow:0 1px 2px rgba(18,19,22,0.08);}
 .log-stream-wrap{flex:1;min-height:360px;background:#f8f9fa;border:1px solid #e6e8ee;border-radius:8px;padding:12px 16px;display:flex;flex-direction:column;overflow:hidden;}
 .log-content-pre{flex:1;overflow-y:auto;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:12px;line-height:1.6;color:#121316;white-space:pre-wrap;word-break:break-all;margin:0;}
-</style></head><body>
+</style><style>
+
+/* --- Obsidian Component Polish & Pixel-Perfect Line Alignment --- */
+:root {
+  --header-row-height: 48px;
+  --line-color: #e2e8f0;
+}
+.left-rail {
+  border-right: 1px solid var(--line-color) !important;
+  background: #ffffff !important;
+}
+.rail-head {
+  height: var(--header-row-height) !important;
+  border-bottom: 1px solid var(--line-color) !important;
+  box-sizing: border-box !important;
+}
+.sidebar {
+  border-right: 1px solid var(--line-color) !important;
+  background: #f8fafc !important;
+  position: relative !important;
+}
+.sidebar-head, .sidebar-head.brand-row, .brand-row {
+  height: var(--header-row-height) !important;
+  min-height: var(--header-row-height) !important;
+  max-height: var(--header-row-height) !important;
+  border-bottom: 1px solid var(--line-color) !important;
+  background: #ffffff !important;
+  box-sizing: border-box !important;
+  padding: 0 16px !important;
+}
+.sidebar-title {
+  font-size: 13px !important;
+  font-weight: 600 !important;
+  letter-spacing: -0.01em !important;
+  color: #0f172a !important;
+}
+.space-pill {
+  padding: 8px 12px !important;
+  background: #ffffff !important;
+  border: 1px solid rgba(0, 0, 0, 0.08) !important;
+  border-radius: 8px !important;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04) !important;
+  transition: all 0.15s ease !important;
+}
+.space-pill:hover {
+  border-color: rgba(0, 0, 0, 0.16) !important;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.06) !important;
+}
+.space-avatar {
+  width: 22px !important;
+  height: 22px !important;
+  border-radius: 6px !important;
+  background: #eff6ff !important;
+  color: #2563eb !important;
+  font-weight: 600 !important;
+  font-size: 11px !important;
+}
+.space-name {
+  font-size: 12.5px !important;
+  font-weight: 500 !important;
+  color: #0f172a !important;
+}
+.sidebar-section-head {
+  padding: 8px 8px 4px !important;
+  font-size: 11px !important;
+  font-weight: 600 !important;
+  letter-spacing: 0.02em !important;
+  color: #64748b !important;
+}
+.sidebar-section-head .tabular-nums {
+  font-size: 11px !important;
+  color: #94a3b8 !important;
+  font-weight: 500 !important;
+}
+.sidebar-subgroup-title {
+  padding: 4px 8px 2px !important;
+  font-size: 11px !important;
+  font-weight: 600 !important;
+  color: #64748b !important;
+}
+.subgroup-badge {
+  font-size: 10px !important;
+  padding: 2px 8px !important;
+  border-radius: 10px !important;
+  font-weight: 500 !important;
+}
+.subgroup-badge.warning {
+  background: #fef3c7 !important;
+  color: #d97706 !important;
+}
+.subgroup-badge.running {
+  background: #dbeafe !important;
+  color: #2563eb !important;
+}
+.subgroup-badge.completed {
+  background: #f1f5f9 !important;
+  color: #64748b !important;
+}
+.sidebar-item {
+  padding: 4px 8px !important;
+  border-radius: 6px !important;
+  font-size: 12.5px !important;
+  color: #475569 !important;
+  transition: all 0.15s ease !important;
+  margin-bottom: 1px !important;
+}
+.sidebar-item:hover {
+  background: #f1f5f9 !important;
+  color: #0f172a !important;
+}
+.sidebar-item.active {
+  background: #ffffff !important;
+  color: #0f172a !important;
+  font-weight: 600 !important;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08), 0 0 0 1px rgba(0, 0, 0, 0.04) !important;
+}
+.item-icon-svg {
+  flex-shrink: 0 !important;
+  margin-right: 8px !important;
+  color: #64748b !important;
+  transition: color 0.15s ease !important;
+}
+.sidebar-item:hover .item-icon-svg {
+  color: #1e293b !important;
+}
+.sidebar-item.active .item-icon-svg {
+  color: #2563eb !important;
+}
+.online-pill {
+  font-size: 10px !important;
+  padding: 2px 8px !important;
+  border-radius: 10px !important;
+  background: #ecfdf5 !important;
+  color: #059669 !important;
+  border: none !important;
+  font-weight: 500 !important;
+}
+.resource-sub {
+  font-size: 11px !important;
+  color: #94a3b8 !important;
+  margin-top: 1px !important;
+}
+.resource-title {
+  font-size: 12px !important;
+  font-weight: 500 !important;
+  color: #1e293b !important;
+}
+.btn-primary-launch {
+  height: 32px !important;
+  background: #2563eb !important;
+  border-radius: 6px !important;
+  color: #ffffff !important;
+  font-size: 12px !important;
+  font-weight: 500 !important;
+  box-shadow: 0 1px 2px rgba(37, 99, 235, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.2) !important;
+  transition: all 0.15s ease !important;
+}
+.btn-primary-launch:hover {
+  background: #1d4ed8 !important;
+}
+.top {
+  height: var(--header-row-height) !important;
+  min-height: var(--header-row-height) !important;
+  max-height: var(--header-row-height) !important;
+  border-bottom: 1px solid var(--line-color) !important;
+  background: #ffffff !important;
+  box-sizing: border-box !important;
+  padding: 0 16px !important;
+  margin: 0 !important;
+}
+.workflow-tabs-bar {
+  height: var(--header-row-height) !important;
+  border-bottom: none !important;
+  background: transparent !important;
+  padding: 0 !important;
+}
+.tabs-scroll {
+  position: relative !important;
+  padding: 4px !important;
+  gap: 2px !important;
+  background: rgba(0, 0, 0, 0.03) !important;
+  border-radius: 8px !important;
+  height: 38px !important;
+  align-items: center !important;
+  border: 1px solid rgba(0, 0, 0, 0.04) !important;
+}
+.wf-tab-sliding-pill {
+  position: absolute !important;
+  top: 4px !important;
+  bottom: 4px !important;
+  background: #ffffff !important;
+  border-radius: 6px !important;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08), 0 0 0 1px rgba(0, 0, 0, 0.04) !important;
+  transition: transform 0.22s cubic-bezier(0.25, 1, 0.5, 1), width 0.22s cubic-bezier(0.25, 1, 0.5, 1) !important;
+  pointer-events: none !important;
+  z-index: 1 !important;
+}
+.wf-tab {
+  height: 30px !important;
+  padding: 0 8px !important;
+  border-radius: 6px !important;
+  border: none !important;
+  background: transparent !important;
+  color: var(--text-secondary, #5f6368) !important;
+  font-weight: 500 !important;
+  position: relative !important;
+  z-index: 2 !important;
+  transition: color 0.15s ease !important;
+  box-shadow: none !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 8px !important;
+}
+.wf-tab:hover {
+  color: var(--text-primary, #121316) !important;
+}
+.wf-tab.active {
+  color: var(--text-primary, #121316) !important;
+  font-weight: 600 !important;
+}
+.wf-tab.active::after {
+  display: none !important;
+}
+.tab-icon-svg {
+  flex-shrink: 0 !important;
+  color: #64748b !important;
+  vertical-align: middle !important;
+  transition: color 0.15s ease !important;
+}
+.wf-tab:hover .tab-icon-svg {
+  color: #1e293b !important;
+}
+.wf-tab.active .tab-icon-svg {
+  color: #2563eb !important;
+}
+.side-foot {
+  height: 48px !important;
+  min-height: 48px !important;
+  padding: 8px 16px !important;
+  border-top: 1px solid var(--line-color) !important;
+  background: #ffffff !important;
+  box-sizing: border-box !important;
+  margin-top: auto !important;
+  display: flex !important;
+  flex-direction: column !important;
+  justify-content: center !important;
+}
+.side-foot b {
+  font-size: 11.5px !important;
+  color: #1e293b !important;
+  font-weight: 600 !important;
+  line-height: 1.2 !important;
+}
+.side-foot span {
+  font-size: 10.5px !important;
+  color: #64748b !important;
+  line-height: 1.2 !important;
+  margin-top: 2px !important;
+}
+.deep-drawer {
+  border-top: 1px solid var(--line-color) !important;
+  background: #ffffff !important;
+}
+.drawer-head {
+  height: 48px !important;
+  border-bottom: 1px solid var(--line-color) !important;
+  background: #ffffff !important;
+  box-sizing: border-box !important;
+  padding: 0 16px !important;
+}
+.deep-drawer.collapsed {
+  transform: translateY(calc(100% - 48px)) !important;
+  clip-path: none !important;
+}
+.drawer-pill {
+  background: #eff6ff !important;
+  border: 1px solid rgba(37, 99, 235, 0.2) !important;
+  color: #2563eb !important;
+  border-radius: 6px !important;
+  padding: 3px 8px !important;
+  font-size: 11px !important;
+  font-weight: 600 !important;
+}
+.light-bottom-bar {
+  border-top: 1px solid var(--line-color) !important;
+  background: #ffffff !important;
+  box-sizing: border-box !important;
+}
+.sidebar-resizer-handle {
+  position: absolute !important;
+  top: 0 !important;
+  right: -3px !important;
+  bottom: 0 !important;
+  width: 6px !important;
+  cursor: col-resize !important;
+  z-index: 50 !important;
+  transition: background 0.15s ease !important;
+}
+.sidebar-resizer-handle:hover, .sidebar-resizer-handle.is-dragging {
+  background: #3b82f6 !important;
+  opacity: 0.6 !important;
+}
+
+</style>
+</head><body>
 <div class="shell" data-view="workbench" data-workspace="flow">
   <aside class="left-rail">
     <div class="rail-head">
@@ -4678,14 +5255,14 @@ body {
           <span class="tabular-nums" id="sidebarResourceCounts">0</span>
         </div>
         <div class="sidebar-item" id="sidebarFleetItem" onclick="showShellView('agents')" title="查看执行者阵容" data-nav="agents">
-          <span class="item-icon">🤖</span>
+          <svg class="item-icon-svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
           <div style="min-width:0;flex:1">
             <div class="resource-title">执行者机队 <span class="online-pill" id="sidebarOnlinePill">0 在线</span></div>
             <div class="resource-sub" id="sidebarFleetNames">暂无执行者</div>
           </div>
         </div>
         <div class="sidebar-item" id="sidebarPanesItem" onclick="showShellView('slots')" title="查看常驻智能体工位" data-nav="slots">
-          <span class="item-icon">🖥️</span>
+          <svg class="item-icon-svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M3 9h18"/><path d="M9 21V9"/></svg>
           <div style="min-width:0;flex:1">
             <div class="resource-title">智能体工位</div>
             <div class="resource-sub" id="sidebarPanesSummary">暂无工位</div>
@@ -4706,20 +5283,20 @@ body {
           <span class="pulse-indicator" title="协调器调度活跃"></span>
         </div>
         <div class="sidebar-item" id="navTemplates" onclick="showTemplateLibrary()" title="工作流模板规范资产库">
-          <span class="item-icon">📐</span>
+          <svg class="item-icon-svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
           <span class="item-text">模板规范库</span>
           <button type="button" class="visually-hidden" onclick="showTemplateLibrary()">模板库</button>
         </div>
         <div class="sidebar-item" id="sidebarLogsItem" onclick="showLogs()" title="查看调度审计日志">
-          <span class="item-icon">📜</span>
+          <svg class="item-icon-svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1-2.5-2.5Z"/><path d="M6 6h10"/><path d="M6 10h10"/></svg>
           <span class="item-text">调度审计日志</span>
         </div>
         <div class="sidebar-item" id="navArchive" onclick="showArchive()" title="查看任务归档库">
-          <span class="item-icon">📦</span>
+          <svg class="item-icon-svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 8v13H3V8"/><path d="M1 3h22v5H1z"/><path d="M10 12h4"/></svg>
           <span class="item-text">任务归档库</span>
         </div>
         <div class="sidebar-item danger-item" onclick="showUnregisterProjectModal()" title="注销当前项目工厂">
-          <span class="item-icon">⚠️</span>
+          <svg class="item-icon-svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
           <span class="item-text">注销项目</span>
         </div>
       </div>
@@ -4747,7 +5324,8 @@ body {
         <div class="dropdown factory-action" id="moreDropdown">
           <button class="btn icon-only" onclick="toggleMoreMenu(event)" aria-label="更多操作" title="更多操作">···</button>
           <div class="dropdown-menu">
-            <button class="dropdown-item" onclick="closeMoreMenu();openControllerCockpitModal()">🎮 Controller 控制台</button>
+            <button class="dropdown-item" onclick="closeMoreMenu();editWorkflowTitle()">修改工作流名称</button>
+            <button class="dropdown-item" onclick="closeMoreMenu();openControllerCockpitModal()">Controller 控制台</button>
             <button class="dropdown-item" onclick="closeMoreMenu();createCandidate()">创建候选分支</button>
             <button class="dropdown-item" onclick="closeMoreMenu();runPreflight()">执行者自检</button>
             <button class="dropdown-item" onclick="closeMoreMenu();showArchive()">任务归档</button>
@@ -4777,6 +5355,7 @@ body {
       <section class="panel main-panel">
         <div id="canvasToolbar">
           <div class="toolbar-left">
+            <div id="canvasWfMeta" class="canvas-wf-meta" style="display:none"></div>
             <div class="flow-view-toggle" role="tablist" aria-label="工作流视图切换">
               <button class="filter-btn active" id="viewFlowBtn" onclick="switchWorkflowView('flow')">流程图</button>
               <button class="filter-btn" id="viewListBtn" onclick="switchWorkflowView('list')">任务列表</button>
@@ -4790,10 +5369,17 @@ body {
           </div>
           <div class="canvas-tools">
             <div id="flowSummary"></div>
-            <div class="flow-controls">
-              <button class="btn" onclick="flowZoomIn()" title="放大">+</button>
-              <button class="btn" onclick="flowZoomOut()" title="缩小">−</button>
-              <button class="btn" onclick="fitFlowGraph()" title="自适应">Fit</button>
+            <div class="flow-zoom-group" id="flowZoomGroup">
+              <span class="flow-zoom-hint">拖拽平移 · <kbd>⌘</kbd>+滚轮</span>
+              <div class="flow-zoom-actions">
+                <button class="flow-zoom-btn" onclick="flowZoomIn()" title="放大 (Zoom In)" aria-label="放大">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                </button>
+                <button class="flow-zoom-btn" onclick="flowZoomOut()" title="缩小 (Zoom Out)" aria-label="缩小">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                </button>
+                <button class="flow-zoom-btn" onclick="fitFlowGraph()" title="自适应视图 (Fit View)">Fit</button>
+              </div>
             </div>
           </div>
         </div>
@@ -4953,7 +5539,34 @@ function showPromptModal({title,label,defaultValue='',confirmText='确定',onCon
   const btn=document.getElementById('modalPromptBtn');
   if(btn)btn.onclick=async()=>{const val=input?input.value.trim():'';closeModal();if(onConfirm)await onConfirm(val)}
 }
-function saveViewState(){try{localStorage.setItem(VIEW_KEY,JSON.stringify({opsMode:state.opsMode,dashMode:state.dashMode,dashWorkflowId:state.dashWorkflowId||null,spaceId:state.spaceId,workflowId:state.workflowId,shellView:state.shellView||'workbench'}))}catch(e){}}
+function syncUrlView(){
+  try{
+    const u=new URL(window.location.href);
+    const v=state.opsMode?'ops':state.dashMode?'dashboard':(state.shellView||'workbench');
+    if(v==='workbench'){
+      u.searchParams.delete('view');
+      u.searchParams.delete('ops');
+      if(state.workflowId&&state.workflowId!=='__templates__'&&state.workflowId!=='__ctl__'&&state.workflowId!=='__archive__'&&state.workflowId!=='__logs__'){
+        u.searchParams.set('workflow_id',state.workflowId);
+      }else{
+        u.searchParams.delete('workflow_id');
+      }
+    }else{
+      u.searchParams.set('view',v);
+      if(v==='dashboard'&&state.dashWorkflowId){
+        u.searchParams.set('workflow_id',state.dashWorkflowId);
+      }else{
+        u.searchParams.delete('workflow_id');
+      }
+      u.searchParams.delete('ops');
+    }
+    const newUrl=u.pathname+u.search+u.hash;
+    if(window.location.pathname+window.location.search+window.location.hash!==newUrl){
+      window.history.replaceState(null,'',newUrl);
+    }
+  }catch(e){}
+}
+function saveViewState(){try{localStorage.setItem(VIEW_KEY,JSON.stringify({opsMode:state.opsMode,dashMode:state.dashMode,dashWorkflowId:state.dashWorkflowId||null,spaceId:state.spaceId,workflowId:state.workflowId,shellView:state.shellView||'workbench'}));syncUrlView();}catch(e){}}
 function loadViewState(){try{return JSON.parse(localStorage.getItem(VIEW_KEY)||'null')}catch(e){return null}}
 async function waitForWorkflowJob(jobId){
   try{
@@ -5173,10 +5786,12 @@ async function showTemplateLibrary(){
   if(!state.openWorkflowTabIds)state.openWorkflowTabIds=[];
   if(!state.openWorkflowTabIds.includes('__templates__'))state.openWorkflowTabIds.push('__templates__');
   state.workflowId='__templates__';
+  state.opsMode=false;state.dashMode=false;state.shellView='templates';
+  saveViewState();
   renderWorkflowTabs();
   paintCrumb();
   if(tplEl){
-    tplEl.innerHTML=`<div class="ctl-panel-header"><div style="display:flex;justify-content:space-between;align-items:center;width:100%"><div><strong>📐 工作流模板规范库</strong><span class="muted" style="margin-left:8px;font-weight:400">· 模板定义工作流节点与 DAG 依赖</span></div><button class="btn primary" onclick="showTemplateEditor()"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg><span>新建模板</span></button></div></div><div class="empty">正在加载模板…</div>`;
+    tplEl.innerHTML=`<div class="ctl-panel-header"><div style="display:flex;justify-content:space-between;align-items:center;width:100%"><div><strong>工作流模板规范库</strong><span class="muted" style="margin-left:8px;font-weight:400">· 模板定义工作流节点与 DAG 依赖</span></div><button class="btn primary" onclick="showTemplateEditor()"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg><span>新建模板</span></button></div></div><div class="empty">正在加载模板…</div>`;
   }
   try{
     const ts=await fetchTemplates();
@@ -5193,7 +5808,7 @@ async function showTemplateLibrary(){
         </div>
       </div>`).join(''):'<div class="empty">暂无模板</div>';
     if(tplEl){
-      tplEl.innerHTML=`<div class="ctl-panel-header"><div style="display:flex;justify-content:space-between;align-items:center;width:100%"><div><strong>📐 工作流模板规范库</strong><span class="muted" style="margin-left:8px;font-weight:400">· 模板定义工作流节点与 DAG 依赖</span></div><button class="btn primary" onclick="showTemplateEditor()"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg><span>新建模板</span></button></div></div><div class="muted" style="margin-bottom:8px">模板定义工作流的节点与 DAG 依赖。自定义模板保存到 ~/.herdr-controller/templates/，对新启动的工作流即时生效，不影响已运行的工作流。</div>${cards}`;
+      tplEl.innerHTML=`<div class="ctl-panel-header"><div style="display:flex;justify-content:space-between;align-items:center;width:100%"><div><strong>工作流模板规范库</strong><span class="muted" style="margin-left:8px;font-weight:400">· 模板定义工作流节点与 DAG 依赖</span></div><button class="btn primary" onclick="showTemplateEditor()"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg><span>新建模板</span></button></div></div><div class="muted" style="margin-bottom:8px">模板定义工作流的节点与 DAG 依赖。自定义模板保存到 ~/.herdr-controller/templates/，对新启动的工作流即时生效，不影响已运行的工作流。</div>${cards}`;
     }
   }catch(e){toast(e.message,true)}
 }
@@ -6212,6 +6827,90 @@ function workflowDisplayName(w){
   const subj=workflowSubject(w);
   return subj?`${subj} (${w.workflow_id})`:w.workflow_id;
 }
+function copyWorkflowId(wid){
+  const id=wid||state.workflowId;
+  if(!id||id.startsWith('__'))return;
+  if(navigator.clipboard&&navigator.clipboard.writeText){
+    navigator.clipboard.writeText(id).then(()=>{
+      toast('已复制工作流编号: '+id);
+    }).catch(()=>{
+      toast('复制失败，请手动复制: '+id, true);
+    });
+  }else{
+    toast('工作流编号: '+id);
+  }
+}
+async function editWorkflowTitle(wid){
+  const id=wid||state.workflowId;
+  if(!id||id.startsWith('__'))return toast('当前工作流不可重命名',true);
+  const w=(state.workflow&&state.workflow.workflow&&state.workflow.workflow.workflow_id===id)?state.workflow.workflow:((state.project&&state.project.workflows)||[]).find(x=>x.workflow_id===id);
+  const curTitle=w?(w.title||w.requirement_subject||''):'';
+  showPromptModal({
+    title:'修改工作流名称',
+    label:'工作流名称 / 业务主题',
+    defaultValue:curTitle,
+    confirmText:'保存',
+    onConfirm:async(newTitle)=>{
+      const trimmed=(newTitle||'').trim();
+      if(trimmed===curTitle)return;
+      try{
+        await api('/api/workflow/rename',{
+          method:'POST',
+          body:JSON.stringify({workflow_id:id,title:trimmed})
+        });
+        toast('工作流名称已更新');
+        if(state.workflow&&state.workflow.workflow&&state.workflow.workflow.workflow_id===id){
+          state.workflow.workflow.title=trimmed;
+          state.workflow.workflow.requirement_subject=trimmed;
+        }
+        if(state.project&&state.project.workflows){
+          const target=state.project.workflows.find(x=>x.workflow_id===id);
+          if(target){
+            target.title=trimmed;
+            target.requirement_subject=trimmed;
+          }
+        }
+        if(state.workflow&&state.workflow.workflow&&state.workflow.workflow.workflow_id===id){
+          renderWorkflowHead(state.workflow.workflow);
+        }
+        renderWorkflowTabs();
+        if(typeof renderSidebarWorkflows==='function')renderSidebarWorkflows();
+      }catch(err){
+        toast('更新工作流名称失败: '+(err.message||err),true);
+      }
+    }
+  });
+}
+function renderWorkflowMetaBadge(w){
+  const box=document.getElementById('canvasWfMeta');
+  if(!box)return;
+  if(!w||!w.workflow_id||String(w.workflow_id).startsWith('__')){
+    box.style.display='none';
+    box.innerHTML='';
+    return;
+  }
+  const wid=w.workflow_id;
+  const subj=workflowSubject(w)||wid;
+  box.style.display='inline-flex';
+  box.innerHTML=`
+    <div class="canvas-wf-title-wrap">
+      <span class="canvas-wf-title" onclick="editWorkflowTitle('${esc(wid)}')" title="点击修改工作流名称">${esc(subj)}</span>
+      <button class="canvas-wf-edit-btn" onclick="editWorkflowTitle('${esc(wid)}')" title="修改工作流名称" aria-label="修改工作流名称">
+        <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
+          <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path>
+        </svg>
+      </button>
+    </div>
+    <span class="canvas-wf-id-pill" onclick="copyWorkflowId('${esc(wid)}')" title="点击复制工作流编号 (${esc(wid)})">
+      <span>${esc(wid)}</span>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+      </svg>
+    </span>
+  `;
+}
 function renderWorkflowHead(w){
   const subj=workflowSubject(w);
   document.getElementById('workflowSubject').textContent=subj||w.workflow_id;
@@ -6221,6 +6920,7 @@ function renderWorkflowHead(w){
   parts.push('执行者 '+(a==='auto'?'自动分配':a));
   if(w.candidate_branch)parts.push('候选分支 '+w.candidate_branch);
   document.getElementById('workflowSub').textContent=parts.join(' · ');
+  renderWorkflowMetaBadge(w);
   paintCrumb();
 }
 function renderWorkflowSwitcher(){
@@ -6271,6 +6971,7 @@ function clearWorkflow(){
   state.flowSelectedNodeId=null;
   saveViewState();
   renderWorkflowTabs();
+  renderWorkflowMetaBadge(null);
   document.getElementById('workflowSubject').textContent='暂无工作流';
   document.getElementById('workflowSub').textContent='';
   document.getElementById('stages').innerHTML='';
@@ -6499,28 +7200,28 @@ function renderWorkflowTabs(){
     if(wid==='__ctl__'){
       return `<div class="wf-tab ${isActive?'active':''}" onclick="openWorkflowTab('__ctl__')" title="Controller 调度与解卡控制台" role="tab" aria-selected="${isActive}">`+
         `<span class="tab-dot running" aria-hidden="true"></span>`+
-        `<span class="tab-title">🎮 Controller 控制台</span>`+
+        `<svg class="tab-icon-svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polygon points="10 8 16 12 10 16 10 8"/></svg><span class="tab-title">Controller 控制台</span>`+
         `<button type="button" class="tab-close" onclick="closeWorkflowTab('__ctl__',event)" title="关闭页签" aria-label="关闭页签">×</button>`+
         `</div>`;
     }
     if(wid==='__templates__'){
       return `<div class="wf-tab ${isActive?'active':''}" onclick="openWorkflowTab('__templates__')" title="工作流模板规范库" role="tab" aria-selected="${isActive}">`+
         `<span class="tab-dot completed" aria-hidden="true"></span>`+
-        `<span class="tab-title">📐 模板规范库</span>`+
+        `<svg class="tab-icon-svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg><span class="tab-title">模板规范库</span>`+
         `<button type="button" class="tab-close" onclick="closeWorkflowTab('__templates__',event)" title="关闭页签" aria-label="关闭页签">×</button>`+
         `</div>`;
     }
     if(wid==='__archive__'){
       return `<div class="wf-tab ${isActive?'active':''}" onclick="openWorkflowTab('__archive__')" title="任务归档与冷存储" role="tab" aria-selected="${isActive}">`+
         `<span class="tab-dot completed" aria-hidden="true"></span>`+
-        `<span class="tab-title">📦 任务归档</span>`+
+        `<svg class="tab-icon-svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 8v13H3V8"/><path d="M1 3h22v5H1z"/><path d="M10 12h4"/></svg><span class="tab-title">任务归档</span>`+
         `<button type="button" class="tab-close" onclick="closeWorkflowTab('__archive__',event)" title="关闭页签" aria-label="关闭页签">×</button>`+
         `</div>`;
     }
     if(wid==='__logs__'){
       return `<div class="wf-tab ${isActive?'active':''}" onclick="openWorkflowTab('__logs__')" title="调度审计日志" role="tab" aria-selected="${isActive}">`+
         `<span class="tab-dot running" aria-hidden="true"></span>`+
-        `<span class="tab-title">📜 调度审计日志</span>`+
+        `<svg class="tab-icon-svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1-2.5-2.5Z"/><path d="M6 6h10"/><path d="M6 10h10"/></svg><span class="tab-title">调度审计日志</span>`+
         `<button type="button" class="tab-close" onclick="closeWorkflowTab('__logs__',event)" title="关闭页签" aria-label="关闭页签">×</button>`+
         `</div>`;
     }
@@ -7060,13 +7761,163 @@ function resizeFlowGraph(){try{const cv=document.getElementById('flowCanvas');co
 function fitFlowGraph(){try{if(!state.flowGraph)return;if(state.flowGraph.zoomToFit){state.flowGraph.zoomToFit({padding:24,maxScale:1});if(state.flowGraph.centerContent)state.flowGraph.centerContent();}else if(state.flowGraph.centerContent)state.flowGraph.centerContent();}catch(e){}}
 function flowZoomIn(){try{if(state.flowGraph&&state.flowGraph.zoom)state.flowGraph.zoom(0.15);}catch(e){}}
 function flowZoomOut(){try{if(state.flowGraph&&state.flowGraph.zoom)state.flowGraph.zoom(-0.15);}catch(e){}}
-function renderFlowWorkbench(){const g=flowGraphData();const nodes=g.nodes||[];setWorkspaceMode(state.workflowView);const fs=document.getElementById('flowSummary');if(fs){if(state.workflowView==='flow'&&nodes.length){const working=nodes.filter(n=>n.status==='working').length;fs.style.display='block';fs.innerHTML='<b>'+nodes.length+'</b> 个节点 · <b>'+working+'</b> 个运行中<span class="flow-gesture-hint">拖拽平移 · ⌘+滚轮缩放</span>';}else fs.style.display='none';}const bf=document.getElementById('viewFlowBtn');if(bf)bf.classList.toggle('active',state.workflowView!=='list');const bl=document.getElementById('viewListBtn');if(bl)bl.classList.toggle('active',state.workflowView==='list');if(!state.flowSelectedNodeId||!nodes.some(n=>n.id===state.flowSelectedNodeId)){state.flowSelectedNodeId=pickDefaultFlowNodeId(nodes);}const recoveries=currentRecovery();const ticker=document.getElementById('bottomTicker');if(ticker)ticker.textContent=recoveryUnavailable()?'恢复状态读取失败，卡点未确认':recoveries.length?'有 '+recoveries.length+' 项恢复待办，请查看卡点':'工作流调度就绪';const attnBar=document.getElementById('flowAttnBar');if(attnBar){if(state.workflowView==='flow'&&recoveryUnavailable()){attnBar.style.display='flex';attnBar.innerHTML=`<div class="flow-attn-text" role="status"><span>⚠ 恢复状态读取失败，卡点未确认</span></div><button class="mini" onclick="loadWorkflow(state.workflow.workflow.workflow_id)">刷新恢复状态</button>`;}else if(state.workflowView==='flow'&&recoveries.length){attnBar.style.display='flex';attnBar.innerHTML=`<div class="flow-attn-text" role="status"><span>⚠ ${recoveries.length} 项恢复待办：${esc(recoveries.map(o=>cleanStageLabel(o.recovery?.node_label||o.payload?.node_id||'')+' · '+(o.recovery?.summary||'需处理')).join('；'))}</span></div><button class="mini" onclick="openControllerCockpitModal()">查看卡点与恢复操作</button>`;}else{attnBar.style.display='none';attnBar.innerHTML='';}}renderNodeInspector();renderFlowGraph();}
+function renderFlowWorkbench(){
+  const g=flowGraphData();const nodes=g.nodes||[];
+  setWorkspaceMode(state.workflowView);
+  const fs=document.getElementById('flowSummary');
+  if(fs){
+    if(state.workflowView==='flow'&&nodes.length){
+      const working=nodes.filter(n=>n.status==='working').length;
+      fs.style.display='inline-flex';
+      const dotHtml=working>0?'<span class="flow-status-dot" style="background:#5e6ad2;box-shadow:0 0 0 2px rgba(94,106,210,.25)"></span>':'<span class="flow-status-dot"></span>';
+      fs.innerHTML=dotHtml+'<span><b>'+nodes.length+'</b> 个节点 · <b>'+working+'</b> 个运行中</span><span class="flow-gesture-hint">拖拽平移 · <kbd>⌘</kbd>+滚轮缩放</span>';
+    }else{
+      fs.style.display='none';
+    }
+  }
+  const bf=document.getElementById('viewFlowBtn');if(bf)bf.classList.toggle('active',state.workflowView!=='list');
+  const bl=document.getElementById('viewListBtn');if(bl)bl.classList.toggle('active',state.workflowView==='list');
+  if(!state.flowSelectedNodeId||!nodes.some(n=>n.id===state.flowSelectedNodeId)){state.flowSelectedNodeId=pickDefaultFlowNodeId(nodes);}
+  const recoveries=currentRecovery();
+  const ticker=document.getElementById('bottomTicker');
+  if(ticker)ticker.textContent=recoveryUnavailable()?'恢复状态读取失败，卡点未确认':recoveries.length?'有 '+recoveries.length+' 项恢复待办，请查看卡点':'工作流调度就绪';
+  const attnBar=document.getElementById('flowAttnBar');
+  if(attnBar){
+    if(state.workflowView==='flow'&&recoveryUnavailable()){
+      attnBar.style.display='flex';
+      attnBar.innerHTML=`<div class="flow-attn-text" role="status"><span>⚠ 恢复状态读取失败，卡点未确认</span></div><button class="mini" onclick="loadWorkflow(state.workflow.workflow.workflow_id)">刷新恢复状态</button>`;
+    }else if(state.workflowView==='flow'&&recoveries.length){
+      attnBar.style.display='flex';
+      attnBar.innerHTML=`<div class="flow-attn-text" role="status"><span>⚠ ${recoveries.length} 项恢复待办：${esc(recoveries.map(o=>cleanStageLabel(o.recovery?.node_label||o.payload?.node_id||'')+' · '+(o.recovery?.summary||'需处理')).join('；'))}</span></div><button class="mini" onclick="openControllerCockpitModal()">查看卡点与恢复操作</button>`;
+    }else{
+      attnBar.style.display='none';
+      attnBar.innerHTML='';
+    }
+  }
+  renderNodeInspector();
+  renderFlowGraph();
+}
 function dagreLayoutPositions(nodes,edges){const g=new window.dagre.graphlib.Graph();g.setGraph({rankdir:'LR',ranksep:56,nodesep:36,marginx:32,marginy:32});g.setDefaultEdgeLabel(()=>({}));const W=232,H=134;nodes.forEach(n=>g.setNode(n.id,{width:W,height:H}));edges.forEach(e=>{try{g.setEdge(e.from,e.to);}catch(err){}});window.dagre.layout(g);const pos={};nodes.forEach(n=>{const p=g.node(n.id);if(p)pos[n.id]={x:p.x-W/2,y:p.y-H/2};});return pos;}
-function renderFlowGraph(){const wrap=document.getElementById('flowCanvas');const errBox=document.getElementById('flowError');if(errBox){errBox.style.display='none';errBox.textContent='';}if(!wrap)return;const g=flowGraphData();const nodes=g.nodes||[];const edges=g.edges||[];if(state.flowGraphWfId&&state.flowGraphWfId!==state.workflowId)destroyFlowGraph();if(!nodes.length){destroyFlowGraph();if(errBox){errBox.style.display='block';errBox.textContent='当前工作流暂无可用节点定义（legacy 或空定义，已 fail-soft，不伪造连线）。';}return;}if(typeof window.dagre==='undefined'||!window.dagre.graphlib||!window.dagre.layout){destroyFlowGraph();if(errBox){errBox.style.display='block';errBox.textContent='本地 Dagre 资源缺失（/static/vendor/dagre-3.1.1.min.js），请检查 Console 静态资源。页面其他功能不受影响。';}return;}if(typeof window.X6==='undefined'||!window.X6.Graph){destroyFlowGraph();if(errBox){errBox.style.display='block';errBox.textContent='本地 X6 资源缺失（/static/vendor/x6-3.1.8.min.js），请检查 Console 静态资源。页面其他功能不受影响。';}return;}if(!ensureFlowCardShape()){destroyFlowGraph();if(errBox){errBox.style.display='block';errBox.textContent='本地 X6 缺少 HTML 节点（Shape.HTML），无法绘制流程卡片。';}return;}let pos={};try{pos=dagreLayoutPositions(nodes,edges);}catch(e){destroyFlowGraph();if(errBox){errBox.style.display='block';errBox.textContent='Dagre 布局失败：'+e.message;}return;}try{destroyFlowGraph();const W=wrap.clientWidth||800;const H=480;const graph=new window.X6.Graph({container:wrap,width:W,height:H,background:{color:'transparent'},panning:{enabled:true},mousewheel:{enabled:true,modifiers:['ctrl','meta'],minScale:0.45,maxScale:2.0},interacting:{nodeMovable:false,edgeMovable:false,edgeLabelMovable:false,arrowheadMovable:false,vertexMovable:false,vertexAddable:false,vertexDeletable:false,edgeAddable:false},connecting:{allowBlank:false,allowLoop:false,allowNode:false,allowEdge:false,snap:true},highlighting:{magnetAdsorbed:{name:'stroke',args:{padding:4,attrs:{stroke:'#5e6ad2','stroke-width':2}}}}});state.flowGraph=graph;state.flowGraphWfId=state.workflowId;const nodesMap={};nodes.forEach(n=>{nodesMap[n.id]=n;});const activeIncomingNodes=new Set();const activeOutgoingNodes=new Set();edges.forEach(e=>{const fromN=nodesMap[e.from];const toN=nodesMap[e.to];if(fromN&&toN){if(toN.status==='working'&&(fromN.status==='completed'||fromN.status==='working')){activeIncomingNodes.add(toN.id);activeOutgoingNodes.add(fromN.id);}}});nodes.forEach(n=>{const p=pos[n.id]||{x:20,y:20};const nodeData=Object.assign({},n,{selected:String(state.flowSelectedNodeId||'')===String(n.id),inbound_active:activeIncomingNodes.has(n.id),outbound_active:activeOutgoingNodes.has(n.id),has_upstream:Boolean(n.depends_on&&n.depends_on.length),has_downstream:Boolean(n.downstream&&n.downstream.length)});graph.addNode({id:n.id,shape:'flow-card',x:p.x,y:p.y,width:232,height:134,data:nodeData});});edges.forEach(e=>{try{const fromN=nodesMap[e.from];const toN=nodesMap[e.to];const isAct=Boolean(fromN&&toN&&toN.status==='working'&&(fromN.status==='completed'||fromN.status==='working'));const isDone=Boolean(fromN&&toN&&fromN.status==='completed'&&toN.status==='completed');const strokeColor=isAct?'#4f46e5':isDone?'#94a3b8':'#c5c9d3';const strokeWidth=isAct?2.2:1.6;graph.addEdge({source:{cell:e.from,anchor:{name:'right',args:{dx:0}},connectionPoint:'anchor'},target:{cell:e.to,anchor:{name:'left',args:{dx:-5}},connectionPoint:'anchor'},connector:{name:'smooth'},attrs:{line:{stroke:strokeColor,'stroke-width':strokeWidth,strokeDasharray:isAct?'6 4':'none',style:isAct?{animation:'flowEdgeDash 1.2s linear infinite'}:{},targetMarker:{name:'block',size:isAct?7:6,fill:strokeColor,stroke:strokeColor}}},zIndex:isAct?10:1});}catch(err){}});graph.on('node:click',({node})=>{try{selectFlowNode(node.id);}catch(err){}});updateFlowSelection();fitFlowGraph();requestAnimationFrame(()=>{resizeFlowGraph();fitFlowGraph();});}catch(e){destroyFlowGraph();if(errBox){errBox.style.display='block';errBox.textContent='Flow Canvas 初始化失败：'+e.message;}}}
+function renderFlowGraph(){
+  const wrap=document.getElementById('flowCanvas');
+  const errBox=document.getElementById('flowError');
+  if(errBox){errBox.style.display='none';errBox.textContent='';}
+  if(!wrap)return;
+  const g=flowGraphData();
+  const nodes=g.nodes||[];
+  const edges=g.edges||[];
+  if(!nodes.length){
+    destroyFlowGraph();
+    if(errBox){errBox.style.display='block';errBox.textContent='当前工作流暂无可用节点定义（legacy 或空定义，已 fail-soft，不伪造连线）。';}
+    return;
+  }
+  if(state.flowGraph&&state.flowGraphWfId===state.workflowId){
+    updateFlowSelection();
+    return;
+  }
+  if(typeof window.dagre==='undefined'||!window.dagre.graphlib||!window.dagre.layout){
+    destroyFlowGraph();
+    if(errBox){errBox.style.display='block';errBox.textContent='本地 Dagre 资源缺失（/static/vendor/dagre-3.1.1.min.js），请检查 Console 静态资源。页面其他功能不受影响。';}
+    return;
+  }
+  if(typeof window.X6==='undefined'||!window.X6.Graph){
+    destroyFlowGraph();
+    if(errBox){errBox.style.display='block';errBox.textContent='本地 X6 资源缺失（/static/vendor/x6-3.1.8.min.js），请检查 Console 静态资源。页面其他功能不受影响。';}
+    return;
+  }
+  if(!ensureFlowCardShape()){
+    destroyFlowGraph();
+    if(errBox){errBox.style.display='block';errBox.textContent='本地 X6 缺少 HTML 节点（Shape.HTML），无法绘制流程卡片。';}
+    return;
+  }
+  let pos={};
+  try{pos=dagreLayoutPositions(nodes,edges);}catch(e){
+    destroyFlowGraph();
+    if(errBox){errBox.style.display='block';errBox.textContent='Dagre 布局失败：'+e.message;}
+    return;
+  }
+  try{
+    destroyFlowGraph();
+    const W=wrap.clientWidth||800;
+    const H=480;
+    const graph=new window.X6.Graph({
+      container:wrap,width:W,height:H,background:{color:'transparent'},
+      panning:{enabled:true},
+      mousewheel:{enabled:true,modifiers:['ctrl','meta'],minScale:0.45,maxScale:2.0},
+      interacting:{nodeMovable:false,edgeMovable:false,edgeLabelMovable:false,arrowheadMovable:false,vertexMovable:false,vertexAddable:false,vertexDeletable:false,edgeAddable:false},
+      connecting:{allowBlank:false,allowLoop:false,allowNode:false,allowEdge:false,snap:true},
+      highlighting:{magnetAdsorbed:{name:'stroke',args:{padding:4,attrs:{stroke:'#5e6ad2','stroke-width':2}}}}
+    });
+    state.flowGraph=graph;
+    state.flowGraphWfId=state.workflowId;
+    const nodesMap={};
+    nodes.forEach(n=>{nodesMap[n.id]=n;});
+    const activeIncomingNodes=new Set();
+    const activeOutgoingNodes=new Set();
+    edges.forEach(e=>{
+      const fromN=nodesMap[e.from];
+      const toN=nodesMap[e.to];
+      if(fromN&&toN){
+        if(toN.status==='working'&&(fromN.status==='completed'||fromN.status==='working')){
+          activeIncomingNodes.add(toN.id);
+          activeOutgoingNodes.add(fromN.id);
+        }
+      }
+    });
+    nodes.forEach(n=>{
+      const p=pos[n.id]||{x:20,y:20};
+      const nodeData=Object.assign({},n,{
+        selected:String(state.flowSelectedNodeId||'')===String(n.id),
+        inbound_active:activeIncomingNodes.has(n.id),
+        outbound_active:activeOutgoingNodes.has(n.id),
+        has_upstream:Boolean(n.depends_on&&n.depends_on.length),
+        has_downstream:Boolean(n.downstream&&n.downstream.length)
+      });
+      graph.addNode({id:n.id,shape:'flow-card',x:p.x,y:p.y,width:232,height:134,data:nodeData});
+    });
+    edges.forEach(e=>{
+      try{
+        const fromN=nodesMap[e.from];
+        const toN=nodesMap[e.to];
+        const isAct=Boolean(fromN&&toN&&toN.status==='working'&&(fromN.status==='completed'||fromN.status==='working'));
+        const isDone=Boolean(fromN&&toN&&fromN.status==='completed'&&toN.status==='completed');
+        const strokeColor=isAct?'#4f46e5':isDone?'#94a3b8':'#c5c9d3';
+        const strokeWidth=isAct?2.2:1.6;
+        graph.addEdge({
+          source:{cell:e.from,anchor:{name:'right',args:{dx:0}},connectionPoint:'anchor'},
+          target:{cell:e.to,anchor:{name:'left',args:{dx:-5}},connectionPoint:'anchor'},
+          connector:{name:'smooth'},
+          attrs:{
+            line:{
+              stroke:strokeColor,
+              'stroke-width':strokeWidth,
+              strokeDasharray:isAct?'6 4':'none',
+              style:isAct?{animation:'flowEdgeDash 1.2s linear infinite'}:{},
+              targetMarker:{name:'block',size:isAct?7:6,fill:strokeColor,stroke:strokeColor}
+            }
+          },
+          zIndex:isAct?10:1
+        });
+      }catch(err){}
+    });
+    graph.on('node:click',({node})=>{try{selectFlowNode(node.id);}catch(err){}});
+    updateFlowSelection();
+    fitFlowGraph();
+  }catch(e){
+    destroyFlowGraph();
+    if(errBox){errBox.style.display='block';errBox.textContent='Flow Canvas 初始化失败：'+e.message;}
+  }
+}
 function flowNodeById(id){const g=flowGraphData();return (g.nodes||[]).find(n=>n.id===id)||null;}
 function flowTasksForNode(nodeId){const ts=(state.workflow&&state.workflow.tasks)||[];return ts.filter(t=>String(t.node||t.stage||'')===String(nodeId)&&t.status!=='superseded'&&!t.superseded_by);}
 function renderNodeInspector(){const body=document.getElementById('flowInspectorBody');const title=document.getElementById('flowInspTitle');const meta=document.getElementById('flowInspMeta');if(!body)return;const node=flowNodeById(state.flowSelectedNodeId);if(!node){if(title)title.textContent='节点详情';if(meta)meta.textContent='—';body.innerHTML='<div class="empty">暂无节点</div>';return;}if(title)title.textContent=cleanStageLabel(node.label||node.id);if(meta)meta.textContent=(node.node_type||'agent').toUpperCase()+' · '+flowNodeStatus(node,humanNodeStatus(node.status));const tab=state.flowInspectorTab||'summary';if(tab==='tasks'){const nts=flowTasksForNode(node.id);body.innerHTML=nts.length?nts.map(t=>`<div class="flow-task-row" onclick="openTaskDrawer('${esc(t.task_id)}')"><span><strong>${esc(t.task_id)}</strong><span class="muted"> · ${esc(t.agent||'未分配')}</span></span><span>${badge(t.status)}</span></div>`).join(''):'<div class="empty">该节点暂无任务</div>';return;}if(tab==='context'){const ctx=(state.workflow&&state.workflow.context)||{required:[],optional:[]};const req=ctx.required||[];const opt=ctx.optional||[];body.innerHTML=`<div class="proj-sec"><div class="proj-lbl">必需上下文</div>${req.length?req.map(c=>`<div>· ${esc(typeof c==='string'?c:(c.id||c))}</div>`).join(''):'<div class="muted">—</div>'}</div><div class="proj-sec"><div class="proj-lbl">可选上下文</div>${opt.length?opt.map(c=>`<div>· ${esc(typeof c==='string'?c:(c.id||c))}</div>`).join(''):'<div class="muted">—</div>'}</div><div class="muted" style="margin-top:8px">仅显示真实 Context Contract；无绑定信息时不伪造已加载。</div>`;return;}if(tab==='runtime'){const nts=flowTasksForNode(node.id);body.innerHTML=nts.length?nts.map(t=>`<div class="flow-node-card" style="margin-bottom:8px"><div><strong>${esc(t.task_id)}</strong> ${badge(t.status)}</div><dl class="flow-kv" style="margin-top:8px"><dt>执行者</dt><dd>${esc(t.agent||'—')}</dd><dt>工位</dt><dd>${esc(t.pane_id||'—')}</dd><dt>更新</dt><dd>${esc(t.updated_at||t.last_activity_at||'—')}</dd><dt>分支</dt><dd>${esc(t.candidate_sha||t.integration_branch||'—')}</dd><dt>结论</dt><dd>${esc(t.stage_verdict||'—')}</dd></dl></div>`).join(''):'<div class="empty">暂无运行时信息</div>';return;}const nts=flowTasksForNode(node.id);const acts=(state.controllerActionsData&&state.controllerActionsData.actions)||[];const mine=acts.filter(a=>((a.blocker_task_id||a.old_task_id||String(a.action_id||'').split(':')[0])===node.id)||(node.task_ids||[]).includes(a.blocker_task_id||a.old_task_id));const shown=mine.slice(0,2);const actHtml=shown.length?`<div class="flow-attn"><div class="flow-sec">需要处理</div>${shown.map(a=>`<div class="flow-node-card" style="margin-bottom:8px"><div><strong>${esc(a.title||a.action_id)}</strong></div><div class="muted" style="margin:4px 0">${esc(a.effect||a.description||'')}</div><div style="display:flex;gap:8px;justify-content:flex-end"><button class="mini" onclick="locateControllerTask('${esc(a.blocker_task_id||a.old_task_id||'')}')">查看任务</button><button class="btn primary" style="padding:3px 8px;font-size:11.5px" onclick="executeControllerAction('${esc(a.action_id)}','${esc(state.workflowId)}')">一键执行</button></div></div>`).join('')}</div>`:(node.has_attention?'<div class="muted">该节点需关注，暂无可用一键解卡建议，请查看任务详情。</div>':'');body.innerHTML=flowOverviewHtml(node, nts)+actHtml;}
-window.addEventListener('resize',()=>{try{if(state.workflowView!=='list'){resizeFlowGraph();fitFlowGraph();}}catch(e){}});
+let _resizeFlowDebounce=null;
+window.addEventListener('resize',()=>{
+  clearTimeout(_resizeFlowDebounce);
+  _resizeFlowDebounce=setTimeout(()=>{
+    try{if(state.workflowView!=='list'){resizeFlowGraph();fitFlowGraph();}}catch(e){}
+  },100);
+});
 
 function renderAgents(){const rs=state.project.agents||[];document.getElementById('agents').innerHTML=rs.length?rs.map(a=>`<div class="agent-row"><span><i class="dot ${esc(a.status)}"></i>${esc(a.agent)}</span><span class="muted">${esc(agentStatusLabel(a.status))} · 负载 ${a.load} · 认证 ${esc(authHintLabel(a.auth_hint))}</span></div>`).join(''):'<div class="empty">暂无执行者信息</div>'}function renderSlots(){const rs=state.project.slots||[];document.getElementById('slots').innerHTML=rs.length?rs.map(s=>`<div class="slot-row"><div><div>${esc(s.pane_id)} · ${esc(cleanStageLabel(s.stage_label))}</div><div class="task-meta">绑定 ${esc(s.bound_agent)} · 运行时 ${esc(s.live_agent||'空闲')} · ${esc(s.claimed_by?'被任务占用':'未占用')}</div></div><button class="mini" onclick="bindSlotPrompt('${esc(s.pane_id)}')">绑定</button></div>`).join(''):'<div class="empty">暂无用户预建智能体工位</div>'}
 function openModal(t,h){document.getElementById('modalTitle').textContent=t;document.getElementById('modalBody').innerHTML=h;document.getElementById('modal').classList.add('open')}function closeModal(){document.getElementById('modal').classList.remove('open')}
@@ -7832,7 +8683,7 @@ function openControllerCockpitModal(){
 
   const html=`<div class="ctl-wrap">${statusCard}${resourceSection}${recoverySection}${decisionSection}${unblockSection}${pipelineSection}${cheatSheet}</div>`;
   const _ctlEl=document.getElementById('controllerTabView');
-  if(_ctlEl){_ctlEl.innerHTML=`<div class="ctl-panel-header"><strong>🎮 Controller 调度与解卡控制台</strong><span class="muted" style="margin-left:8px;font-weight:400">· ${esc(wid)}</span></div>`+html;_ctlEl.hidden=false;}
+  if(_ctlEl){_ctlEl.innerHTML=`<div class="ctl-panel-header"><strong>Controller 调度与解卡控制台</strong><span class="muted" style="margin-left:8px;font-weight:400">· ${esc(wid)}</span></div>`+html;_ctlEl.hidden=false;}
   setWorkspaceMode('ctl');
   if(!state.openWorkflowTabIds)state.openWorkflowTabIds=[];
   if(!state.openWorkflowTabIds.includes('__ctl__'))state.openWorkflowTabIds.push('__ctl__');
@@ -7920,7 +8771,7 @@ let logState = {
 function renderLogsTabSkeleton(){
   return `<div class="ctl-panel-header">`+
     `<div style="display:flex;justify-content:space-between;align-items:center;width:100%;flex-wrap:wrap;gap:8px">`+
-      `<div><strong>📜 调度审计日志</strong><span class="muted" style="margin-left:8px;font-weight:400">· 协调器事件溯源、主循环轮询流与各工位物理日志</span></div>`+
+      `<div><strong>调度审计日志</strong><span class="muted" style="margin-left:8px;font-weight:400">· 协调器事件溯源、主循环轮询流与各工位物理日志</span></div>`+
       `<div style="display:flex;gap:8px;align-items:center">`+
         `<button class="btn" onclick="refreshLogsTab()" title="刷新日志">🔄 刷新</button>`+
         `<button class="btn" onclick="copyCurrentLog()" title="复制日志到剪贴板">📋 复制</button>`+
@@ -8245,7 +9096,7 @@ async function showArchive(){
   archiveQuery.page=0;
   const arcEl=document.getElementById('archiveTabView');
   if(arcEl){
-    arcEl.innerHTML=`<div class="ctl-panel-header"><div style="display:flex;justify-content:space-between;align-items:center;width:100%"><div><strong>📦 任务归档与冷存储</strong><span class="muted" style="margin-left:8px;font-weight:400">· 历史已完成或已归档工作流任务检索</span></div></div></div>`+archiveFiltersHtml();
+    arcEl.innerHTML=`<div class="ctl-panel-header"><div style="display:flex;justify-content:space-between;align-items:center;width:100%"><div><strong>任务归档与冷存储</strong><span class="muted" style="margin-left:8px;font-weight:400">· 历史已完成或已归档工作流任务检索</span></div></div></div>`+archiveFiltersHtml();
   }
   setWorkspaceMode('archive');
   if(!state.openWorkflowTabIds)state.openWorkflowTabIds=[];
@@ -8275,8 +9126,162 @@ async function bindSlotPrompt(p){
     }
   });
 }
-setInterval(()=>{if(!document.hidden)refreshAll()},600000);document.addEventListener('visibilitychange',()=>{if(!document.hidden)refreshAll()});(function(){const v=loadViewState();if(!v)return;state.opsMode=!!v.opsMode;state.dashMode=!!v.dashMode;state.dashWorkflowId=v.dashWorkflowId||null;state.spaceId=v.spaceId||null;state.workflowId=v.workflowId||null;state.shellView=v.shellView||'workbench'})();async function initFromUrlOrState(){const p=new URLSearchParams(window.location.search);let qWf=p.get('workflow_id');const qTask=p.get('task_id'),qPane=p.get('pane_id'),qOps=p.get('ops'),qView=p.get('view');if(!qWf&&qTask){try{const td=await api('/api/task?id='+encodeURIComponent(qTask));if(td&&td.task&&td.task.workflow_id)qWf=td.task.workflow_id}catch(e){}}if(!qWf&&!qTask&&!qPane&&!qOps&&!qView){state.opsMode?showOpsCenter():refreshAll();return}if(qOps==='1'||qOps==='true')state.opsMode=true;if(qView==='dashboard'){state.dashMode=true;state.opsMode=false;if(qWf)state.dashWorkflowId=qWf}if(qWf&&!state.dashMode){state.opsMode=false;state.dashWorkflowId=null;state.workflowId=qWf;try{const d=await api('/api/workflow?id='+encodeURIComponent(qWf));if(d&&d.project){if(d.project.project_id)state.projectId=d.project.project_id;if(d.project.workspace_id)state.spaceId=d.project.workspace_id}}catch(e){}}if(state.dashMode){await showDashboard()}else if(state.opsMode){await showOpsCenter()}else{await refreshAll();if(qWf&&state.workflowId!==qWf){try{await loadWorkflow(qWf)}catch(e){}}if(qTask){const el=document.querySelector(`[data-task-id="${CSS.escape?CSS.escape(qTask):qTask}"]`);if(el){el.scrollIntoView({behavior:'smooth',block:'center'});el.classList.add('task-highlight')}await openTaskDrawer(qTask)}else if(qPane){await showPane(qPane)}}}initFromUrlOrState();
-</script></body></html>'''
+setInterval(()=>{if(!document.hidden)refreshAll()},600000);
+document.addEventListener('visibilitychange',()=>{if(!document.hidden)refreshAll()});
+(function(){const v=loadViewState();if(!v)return;state.opsMode=!!v.opsMode;state.dashMode=!!v.dashMode;state.dashWorkflowId=v.dashWorkflowId||null;state.spaceId=v.spaceId||null;state.workflowId=v.workflowId||null;state.shellView=v.shellView||'workbench';})();
+async function initFromUrlOrState(){
+  const p=new URLSearchParams(window.location.search);
+  let qWf=p.get('workflow_id');
+  const qTask=p.get('task_id'),qPane=p.get('pane_id'),qOps=p.get('ops'),qView=p.get('view');
+  if(!qWf&&qTask){
+    try{
+      const td=await api('/api/task?id='+encodeURIComponent(qTask));
+      if(td&&td.task&&td.task.workflow_id)qWf=td.task.workflow_id;
+    }catch(e){}
+  }
+  if(!qWf&&!qTask&&!qPane&&!qOps&&!qView){
+    if(state.dashMode)showDashboard();
+    else if(state.workflowId==='__templates__')showTemplateLibrary();
+    else if(state.shellView&&state.shellView!=='workbench')showShellView(state.shellView);
+    else state.opsMode?showOpsCenter():refreshAll();
+    return;
+  }
+  if(qOps==='1'||qOps==='true'||qView==='ops'){
+    state.opsMode=true;
+    state.dashMode=false;
+    state.shellView='ops';
+  }else if(qView==='dashboard'){
+    state.dashMode=true;
+    state.opsMode=false;
+    state.shellView='dashboard';
+    if(qWf)state.dashWorkflowId=qWf;
+  }else if(qView==='templates'){
+    state.opsMode=false;
+    state.dashMode=false;
+    state.shellView='templates';
+    state.workflowId='__templates__';
+  }else if(qView&&['alerts','agents','slots','workflows','workbench'].includes(qView)){
+    state.opsMode=false;
+    state.dashMode=false;
+    state.shellView=qView;
+  }
+  if(qWf&&!state.dashMode&&state.workflowId!=='__templates__'){
+    state.opsMode=false;
+    state.dashWorkflowId=null;
+    state.workflowId=qWf;
+    try{
+      const d=await api('/api/workflow?id='+encodeURIComponent(qWf));
+      if(d&&d.project){
+        if(d.project.project_id)state.projectId=d.project.project_id;
+        if(d.project.workspace_id)state.spaceId=d.project.workspace_id;
+      }
+    }catch(e){}
+  }
+  if(state.dashMode){
+    await showDashboard();
+  }else if(state.opsMode){
+    await showOpsCenter();
+  }else if(state.workflowId==='__templates__'||state.shellView==='templates'){
+    await showTemplateLibrary();
+  }else if(state.shellView&&state.shellView!=='workbench'){
+    await refreshAll();
+    showShellView(state.shellView);
+  }else{
+    await refreshAll();
+    if(qWf&&state.workflowId!==qWf){
+      try{await loadWorkflow(qWf);}catch(e){}
+    }
+    if(qTask){
+      const el=document.querySelector(`[data-task-id="${CSS.escape?CSS.escape(qTask):qTask}"]`);
+      if(el){el.scrollIntoView({behavior:'smooth',block:'center'});el.classList.add('task-highlight');}
+      await openTaskDrawer(qTask);
+    }else if(qPane){
+      await showPane(qPane);
+    }
+  }
+}
+window.addEventListener('popstate',()=>{initFromUrlOrState();});
+initFromUrlOrState();
+</script>
+<script>
+(function(){
+  function setupSlidingPill() {
+    const tabsList = document.getElementById('workflowTabsList');
+    if (!tabsList) return;
+    let pill = tabsList.querySelector('.wf-tab-sliding-pill');
+    if (!pill) {
+      pill = document.createElement('div');
+      pill.className = 'wf-tab-sliding-pill';
+      tabsList.prepend(pill);
+    }
+    const activeItem = tabsList.querySelector('.wf-tab.active');
+    if (activeItem) {
+      const parentRect = tabsList.getBoundingClientRect();
+      const tabRect = activeItem.getBoundingClientRect();
+      pill.style.transform = `translateX(${tabRect.left - parentRect.left + tabsList.scrollLeft}px)`;
+      pill.style.width = `${tabRect.width}px`;
+      pill.style.display = 'block';
+    } else {
+      pill.style.display = 'none';
+    }
+  }
+
+  const origRenderTabs = window.renderWorkflowTabs;
+  if (typeof origRenderTabs === 'function') {
+    window.renderWorkflowTabs = function() {
+      origRenderTabs.apply(this, arguments);
+      setTimeout(setupSlidingPill, 10);
+    };
+  }
+
+  function setupSidebarResizer() {
+    const sidebar = document.getElementById('sidebar');
+    if (!sidebar) return;
+    let handle = sidebar.querySelector('.sidebar-resizer-handle');
+    if (!handle) {
+      handle = document.createElement('div');
+      handle.className = 'sidebar-resizer-handle';
+      handle.title = '按住拖动调整宽度，双击复位';
+      sidebar.appendChild(handle);
+    }
+    let isDragging = false, startX = 0, startW = 280;
+    const savedW = localStorage.getItem('haflow_custom_sidebar_w');
+    if (savedW) sidebar.style.width = savedW + 'px';
+
+    handle.addEventListener('mousedown', (e) => {
+      isDragging = true;
+      startX = e.clientX;
+      startW = sidebar.getBoundingClientRect().width;
+      handle.classList.add('is-dragging');
+      document.body.style.cursor = 'col-resize';
+      document.body.style.userSelect = 'none';
+    });
+    window.addEventListener('mousemove', (e) => {
+      if (!isDragging) return;
+      const newW = Math.max(220, Math.min(460, startW + (e.clientX - startX)));
+      sidebar.style.width = newW + 'px';
+    });
+    window.addEventListener('mouseup', () => {
+      if (!isDragging) return;
+      isDragging = false;
+      handle.classList.remove('is-dragging');
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      localStorage.setItem('haflow_custom_sidebar_w', sidebar.getBoundingClientRect().width);
+    });
+    handle.addEventListener('dblclick', () => {
+      sidebar.style.width = '280px';
+      localStorage.setItem('haflow_custom_sidebar_w', '280');
+    });
+  }
+
+  window.addEventListener('DOMContentLoaded', () => {
+    setupSidebarResizer();
+    setupSlidingPill();
+  });
+})();
+</script>
+</body></html>'''
 HTML=HTML_TEMPLATE.replace('__PRODUCT_NAME__',PRODUCT_NAME).replace('__PRODUCT_TAGLINE__',PRODUCT_TAGLINE)
 
 class Handler(BaseHTTPRequestHandler):
@@ -8398,6 +9403,7 @@ class Handler(BaseHTTPRequestHandler):
                 force=bool(b.get('force',False))
                 return self.send_json(200,herdr_projects.unregister_project(pid,close_workspace=close_ws,force=force))
             if p=='/api/template':return self.send_json(200,save_template(str(b.get('name') or ''),str(b.get('yaml') or '')))
+            if p=='/api/workflow/rename':return self.send_json(200,update_workflow_title(str(b['workflow_id']),str(b.get('title') or '')))
             if p=='/api/workflow/agent':return self.send_json(200,set_agent_override(str(b['workflow_id']),str(b.get('agent') or 'auto')))
             if p=='/api/workflow/candidate':return self.send_json(200,create_candidate(str(b['workflow_id'])))
             if p=='/api/workflow/advance':return self.send_json(200,manual_advance(str(b['workflow_id'])))
