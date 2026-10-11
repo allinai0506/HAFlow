@@ -993,6 +993,227 @@ class TestReviewBenchContextModes(unittest.TestCase):
             self.assertIn("## 1. 核心指标对比矩阵", report_str)
             self.assertIn("未知", report_str)
 
+    def test_model_identity_resolution_and_runtime_evidence(self):
+        """Distinguish claimed model vs verified model with runtime evidence."""
+        # 1. Config only without runtime evidence -> unconfirmed
+        res_unconf = resolve_agent_identity("agy", review_cfg={"model": "claimed-A"})
+        self.assertFalse(res_unconf["model_confirmed"])
+        self.assertEqual(res_unconf["model_name"], "claimed-A")
+        self.assertEqual(res_unconf["details"]["source"], "config_only_unconfirmed")
+
+        # 2. Claimed model doesn't match runtime evidence -> unconfirmed mismatch
+        res_mismatch = resolve_agent_identity(
+            "agy",
+            review_cfg={"model": "claimed-A"},
+            runtime_evidence={"model": "actual-B"},
+        )
+        self.assertFalse(res_mismatch["model_confirmed"])
+        self.assertEqual(res_mismatch["model_name"], "actual-B")
+        self.assertEqual(res_mismatch["details"]["source"], "runtime_mismatch")
+
+        # 3. Matching runtime evidence -> confirmed
+        res_conf = resolve_agent_identity(
+            "agy",
+            review_cfg={"model": "claimed-A"},
+            runtime_evidence={"model": "claimed-A"},
+        )
+        self.assertTrue(res_conf["model_confirmed"])
+        self.assertEqual(res_conf["model_name"], "claimed-A")
+        self.assertEqual(res_conf["details"]["source"], "runtime_evidence")
+
+        # 4. Deterministic rule reviewer -> confirmed
+        res_rule = resolve_agent_identity("rule", review_cfg=None)
+        self.assertTrue(res_rule["model_confirmed"])
+        self.assertEqual(res_rule["model_name"], "rule")
+        self.assertEqual(res_rule["details"]["source"], "deterministic_rule")
+
+    def test_comparability_audit_comprehensive_conditions(self):
+        """Test PR keys mismatch, partial failures, effort difference, same context mode, budget and judge/scorer verification."""
+        base_run = {
+            "status": "completed",
+            "context_config": {"context_mode": "diff_only", "context_budget_chars": 35000},
+            "judge_config": "deepseek/deepseek-v4-flash",
+            "scorer_sha": "e1cb1a0dad8105ebea45caa00c194eaf2d2e7b5d",
+            "execution_summary": {
+                "total_planned": 2,
+                "completed": 2,
+                "failed": 0,
+                "fallback_count": 0,
+                "agent_identity": {
+                    "agent": "agy",
+                    "model_name": "gemini-3.8-flash",
+                    "model_confirmed": True,
+                    "cli_version": "1.3.3",
+                    "details": {"effort": "low"},
+                },
+                "samples": [
+                    {"key": "pr_1", "base": "aaa", "head": "bbb", "base_diff_chars": 1000},
+                    {"key": "pr_2", "base": "ccc", "head": "ddd", "base_diff_chars": 2000},
+                ],
+            },
+        }
+
+        # 1. PR keys mismatch
+        cand_keys = json.loads(json.dumps(base_run))
+        cand_keys["context_config"]["context_mode"] = "existing_four_tier"
+        cand_keys["execution_summary"]["samples"] = [
+            {"key": "pr_1", "base": "aaa", "head": "bbb", "base_diff_chars": 1000},
+            {"key": "pr_999", "base": "ccc", "head": "ddd", "base_diff_chars": 2000},
+        ]
+        is_comp, disc = check_benchmark_comparability(base_run, cand_keys)
+        self.assertFalse(is_comp)
+        self.assertTrue(any("评测 PR 集合不一致" in d for d in disc))
+
+        # 2. Partial failures (candidate failed 1 sample)
+        cand_fail = json.loads(json.dumps(base_run))
+        cand_fail["context_config"]["context_mode"] = "existing_four_tier"
+        cand_fail["execution_summary"]["completed"] = 1
+        cand_fail["execution_summary"]["failed"] = 1
+        is_comp, disc = check_benchmark_comparability(base_run, cand_fail)
+        self.assertFalse(is_comp)
+        self.assertTrue(any("包含失败样本" in d for d in disc))
+
+        # 3. Effort difference (low vs high)
+        cand_effort = json.loads(json.dumps(base_run))
+        cand_effort["context_config"]["context_mode"] = "existing_four_tier"
+        cand_effort["execution_summary"]["agent_identity"]["details"]["effort"] = "high"
+        is_comp, disc = check_benchmark_comparability(base_run, cand_effort)
+        self.assertFalse(is_comp)
+        self.assertTrue(any("effort" in d for d in disc))
+
+        # 4. Same context mode (both diff_only)
+        cand_same_mode = json.loads(json.dumps(base_run))
+        is_comp, disc = check_benchmark_comparability(base_run, cand_same_mode)
+        self.assertFalse(is_comp)
+        self.assertTrue(any("两组请求上下文模式相同" in d for d in disc))
+
+        # 5. Missing budget
+        cand_no_budget = json.loads(json.dumps(base_run))
+        cand_no_budget["context_config"] = {"context_mode": "existing_four_tier"}
+        is_comp, disc = check_benchmark_comparability(base_run, cand_no_budget)
+        self.assertFalse(is_comp)
+        self.assertTrue(any("预算" in d for d in disc))
+
+        # 6. Judge configuration mismatch
+        cand_diff_judge = json.loads(json.dumps(base_run))
+        cand_diff_judge["context_config"]["context_mode"] = "existing_four_tier"
+        cand_diff_judge["judge_config"] = "openai/gpt-4o"
+        is_comp, disc = check_benchmark_comparability(base_run, cand_diff_judge)
+        self.assertFalse(is_comp)
+        self.assertTrue(any("裁判模型配置不一致" in d for d in disc))
+
+        # 7. Scorer SHA mismatch
+        cand_diff_scorer = json.loads(json.dumps(base_run))
+        cand_diff_scorer["context_config"]["context_mode"] = "existing_four_tier"
+        cand_diff_scorer["scorer_sha"] = "0000000000000000000000000000000000000000"
+        is_comp, disc = check_benchmark_comparability(base_run, cand_diff_scorer)
+        self.assertFalse(is_comp)
+        self.assertTrue(any("评分器版本不一致" in d for d in disc))
+
+    def test_token_usage_partial_coverage_and_aggregation(self):
+        """Token aggregation preserves missing metrics as '未知' and labels partial coverage."""
+        base_run = {
+            "status": "completed",
+            "context_config": {"context_mode": "diff_only", "context_budget_chars": 35000},
+            "judge_config": "deepseek/deepseek-v4-flash",
+            "scorer_sha": "e1cb1a0dad8105ebea45caa00c194eaf2d2e7b5d",
+            "execution_summary": {
+                "total_planned": 2,
+                "completed": 2,
+                "failed": 0,
+                "fallback_count": 0,
+                "agent_identity": {"agent": "agy", "model_name": "gemini", "model_confirmed": True},
+                "samples": [{"key": "1"}, {"key": "2"}],
+            },
+            "usage_summary": {
+                "input_tokens": 100,
+                "output_tokens": 20,
+                "thinking_tokens": "未知",
+                "total_tokens": "120 (已知部分合计: 1/2 样本)",
+                "token_details": {
+                    "total_tokens": {"raw_sum": 120, "is_complete": False, "count": 1, "total_samples": 2},
+                },
+            },
+            "metrics": {"overall": {"grounded_recall": 0.5, "grounded_precision": 0.5, "augmented_recall": 0.5, "augmented_precision": 0.5}},
+        }
+        cand_run = json.loads(json.dumps(base_run))
+        cand_run["context_config"]["context_mode"] = "existing_four_tier"
+        cand_run["usage_summary"]["total_tokens"] = 300
+        cand_run["usage_summary"]["token_details"] = {
+            "total_tokens": {"raw_sum": 300, "is_complete": True, "count": 2, "total_samples": 2},
+        }
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            b_dir = tmp / "b"
+            a_dir = tmp / "a"
+            b_dir.mkdir()
+            a_dir.mkdir()
+            (b_dir / "results.json").write_text(json.dumps(base_run), encoding="utf-8")
+            (a_dir / "results.json").write_text(json.dumps(cand_run), encoding="utf-8")
+
+            report = compare_benchmarks(b_dir, a_dir)
+            self.assertIn("120 (已知部分合计: 1/2 样本)", report)
+            self.assertIn("+180 (基于已知部分计算)", report)
+
+    def test_quality_decision_logic_tradeoff_and_precision_drop(self):
+        """Precision drop without recall change is not 'quality parity'; opposite recall/precision shifts are reported as trade-off."""
+        base_run = {
+            "status": "completed",
+            "context_config": {"context_mode": "diff_only", "context_budget_chars": 35000},
+            "judge_config": "deepseek/deepseek-v4-flash",
+            "scorer_sha": "e1cb1a0dad8105ebea45caa00c194eaf2d2e7b5d",
+            "execution_summary": {
+                "total_planned": 1,
+                "completed": 1,
+                "failed": 0,
+                "fallback_count": 0,
+                "agent_identity": {"agent": "agy", "model_name": "gemini", "model_confirmed": True},
+                "samples": [{"key": "1"}],
+            },
+            "usage_summary": {},
+            "metrics": {"overall": {"grounded_recall": 0.50, "grounded_precision": 0.80, "augmented_recall": 0.50, "augmented_precision": 0.80}},
+        }
+
+        # Case 1: Recall flat, precision drops
+        cand_p_drop = json.loads(json.dumps(base_run))
+        cand_p_drop["context_config"]["context_mode"] = "existing_four_tier"
+        cand_p_drop["metrics"]["overall"]["grounded_precision"] = 0.50
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            b_dir = tmp / "b1"
+            a_dir = tmp / "a1"
+            b_dir.mkdir()
+            a_dir.mkdir()
+            (b_dir / "results.json").write_text(json.dumps(base_run), encoding="utf-8")
+            (a_dir / "results.json").write_text(json.dumps(cand_p_drop), encoding="utf-8")
+
+            report = compare_benchmarks(b_dir, a_dir)
+            self.assertIn("准确率下降 -30.0%", report)
+            self.assertIn("不应视为质量持平", report)
+            self.assertNotIn("质量持平（召回率 Delta: +0.0%", report)
+
+        # Case 2: Recall up (+20%), precision down (-20%) -> Trade-off
+        cand_tradeoff = json.loads(json.dumps(base_run))
+        cand_tradeoff["context_config"]["context_mode"] = "existing_four_tier"
+        cand_tradeoff["metrics"]["overall"]["grounded_recall"] = 0.70
+        cand_tradeoff["metrics"]["overall"]["grounded_precision"] = 0.60
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            b_dir = tmp / "b2"
+            a_dir = tmp / "a2"
+            b_dir.mkdir()
+            a_dir.mkdir()
+            (b_dir / "results.json").write_text(json.dumps(base_run), encoding="utf-8")
+            (a_dir / "results.json").write_text(json.dumps(cand_tradeoff), encoding="utf-8")
+
+            report = compare_benchmarks(b_dir, a_dir)
+            self.assertIn("反向权衡（Trade-off）", report)
+            self.assertIn("不认定为单纯的整体质量提升或下降", report)
+            self.assertNotIn("检索模式带来了审核质量提升", report)
+
     def test_cli_review_context_mode_flags(self):
         """CLI review command accepts --context-mode and --context-budget and forwards them."""
         with tempfile.TemporaryDirectory() as tmp_dir:

@@ -54,16 +54,32 @@ def extract_base_diff(diff_content: str, max_budget_chars: int = 35000) -> Tuple
     return base_diff, changed_files
 
 
-def resolve_agent_identity(agent_name: str, review_cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """Resolve and confirm reviewer agent identity, model, and CLI version."""
+def resolve_agent_identity(
+    agent_name: str,
+    review_cfg: Optional[Dict[str, Any]] = None,
+    runtime_evidence: Optional[Dict[str, Any]] = None,
+    cli_version: Optional[str] = None,
+    query_cli_version: bool = True,
+) -> Dict[str, Any]:
+    """Resolve and confirm reviewer agent identity, model, and CLI version.
+
+    Strictly differentiates between 'requested model from configuration/environment'
+    and 'effective model supported by runtime execution evidence'.
+    Only marks model_confirmed=True when verified by actual runtime evidence
+    or when running deterministic rule-based reviewers.
+    """
     review_cfg = review_cfg or {}
+    runtime_evidence = runtime_evidence or {}
     model_name = "unknown"
-    cli_version = "unknown"
+    cli_version = cli_version or review_cfg.get("cli_version") or "unknown"
     model_confirmed = False
     details: Dict[str, Any] = {}
 
+    requested_model = review_cfg.get("model")
+    runtime_model = runtime_evidence.get("model") or runtime_evidence.get("model_name") or runtime_evidence.get("actual_model")
+
     if agent_name in ("agy", "llm", "agy-reviewer"):
-        if shutil.which("agy"):
+        if cli_version == "unknown" and query_cli_version and shutil.which("agy"):
             try:
                 ver_res = subprocess.run(["agy", "--version"], capture_output=True, text=True, timeout=5)
                 if ver_res.returncode == 0:
@@ -71,53 +87,86 @@ def resolve_agent_identity(agent_name: str, review_cfg: Optional[Dict[str, Any]]
             except Exception:
                 pass
 
-        configured_model = review_cfg.get("model") or os.environ.get("HERDR_AGY_MODEL")
-        if configured_model:
-            model_name = str(configured_model).strip()
-            model_confirmed = True
-            details["source"] = "config/env"
-        else:
-            settings_path = Path.home() / ".gemini" / "antigravity-cli" / "settings.json"
-            if settings_path.exists():
-                try:
-                    s_data = json.loads(settings_path.read_text(encoding="utf-8"))
-                    if s_data.get("model"):
-                        model_name = str(s_data["model"]).strip()
-                        model_confirmed = True
-                        details["source"] = "agy_settings"
-                except Exception:
-                    pass
+        env_model = os.environ.get("HERDR_AGY_MODEL")
+        claimed_model = str(requested_model or env_model or "").strip() or None
+        details["requested_model"] = claimed_model
 
         effort = os.environ.get("HERDR_AGY_EFFORT", "low").strip()
         details["effort"] = effort
         perm = "--sandbox" if os.environ.get("HERDR_ALLOW_DANGEROUS_PERMISSIONS") != "1" else "--dangerously-skip-permissions"
         details["permission_flag"] = perm
 
+        if runtime_model:
+            model_name = str(runtime_model).strip()
+            if claimed_model and claimed_model != model_name:
+                model_confirmed = False
+                details["source"] = "runtime_mismatch"
+                details["mismatch"] = f"claimed '{claimed_model}' but runtime evidence is '{model_name}'"
+            else:
+                model_confirmed = True
+                details["source"] = "runtime_evidence"
+        else:
+            model_name = claimed_model or "unknown"
+            model_confirmed = False
+            details["source"] = "config_only_unconfirmed" if claimed_model else "unknown"
+            details["reason"] = "no_runtime_evidence"
+
     elif agent_name.startswith("rule") or agent_name == "mock":
-        model_name = agent_name
-        cli_version = "internal-rule"
-        model_confirmed = True
-        details["source"] = "deterministic_rule"
-    elif agent_name == "pi":
-        model_name = review_cfg.get("model") or os.environ.get("HERDR_PI_MODEL") or "unknown"
-        model_confirmed = bool(model_name != "unknown")
-        if shutil.which("pi"):
+        claimed_model = str(requested_model or "").strip() or None
+        if runtime_model:
+            model_name = str(runtime_model).strip()
+            details["requested_model"] = claimed_model
+            if claimed_model and claimed_model != model_name:
+                model_confirmed = False
+                details["source"] = "runtime_mismatch"
+                details["mismatch"] = f"claimed '{claimed_model}' but runtime evidence is '{model_name}'"
+            else:
+                model_confirmed = True
+                details["source"] = "mock_runtime_evidence"
+        else:
+            if claimed_model and claimed_model != agent_name:
+                model_name = claimed_model
+                model_confirmed = False
+                details["requested_model"] = claimed_model
+                details["source"] = "unconfirmed_claimed_model"
+                details["reason"] = "no_runtime_evidence"
+            else:
+                model_name = agent_name
+                cli_version = "internal-rule"
+                model_confirmed = True
+                details["source"] = "deterministic_rule"
+
+    elif agent_name in ("pi", "opencode"):
+        env_key = f"HERDR_{agent_name.upper()}_MODEL"
+        claimed_model = str(requested_model or os.environ.get(env_key) or "").strip() or None
+        details["requested_model"] = claimed_model
+        if shutil.which(agent_name):
             try:
-                ver_res = subprocess.run(["pi", "--version"], capture_output=True, text=True, timeout=5)
+                ver_res = subprocess.run([agent_name, "--version"], capture_output=True, text=True, timeout=5)
                 if ver_res.returncode == 0:
                     cli_version = ver_res.stdout.strip()
             except Exception:
                 pass
-    elif agent_name == "opencode":
-        model_name = review_cfg.get("model") or os.environ.get("HERDR_OPENCODE_MODEL") or "unknown"
-        model_confirmed = bool(model_name != "unknown")
-        if shutil.which("opencode"):
-            try:
-                ver_res = subprocess.run(["opencode", "--version"], capture_output=True, text=True, timeout=5)
-                if ver_res.returncode == 0:
-                    cli_version = ver_res.stdout.strip()
-            except Exception:
-                pass
+
+        if runtime_model:
+            model_name = str(runtime_model).strip()
+            if claimed_model and claimed_model != model_name:
+                model_confirmed = False
+                details["source"] = "runtime_mismatch"
+                details["mismatch"] = f"claimed '{claimed_model}' but runtime evidence is '{model_name}'"
+            else:
+                model_confirmed = True
+                details["source"] = "runtime_evidence"
+        else:
+            model_name = claimed_model or "unknown"
+            model_confirmed = False
+            details["source"] = "config_only_unconfirmed" if claimed_model else "unknown"
+            details["reason"] = "no_runtime_evidence"
+
+    else:
+        model_name = str(runtime_model or requested_model or "unknown").strip()
+        model_confirmed = bool(runtime_model)
+        details["source"] = "generic_agent"
 
     return {
         "agent": agent_name,
@@ -518,6 +567,7 @@ def run_agent_review(
     *,
     context_mode: Optional[str] = None,
     context_budget_chars: Optional[int] = None,
+    review_cfg: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Execute code review agent on the isolated repo.
 
@@ -706,6 +756,15 @@ def run_agent_review(
         eff_ctx_mode = audit_info.get("effective_context_mode", eff_mode) if audit_info else eff_mode
         fb_reason = audit_info.get("fallback_reason") if audit_info else None
 
+        runtime_model = pr_info.get("runtime_model") or pr_info.get("mock_model")
+        eff_review_cfg = review_cfg or pr_info.get("review_cfg") or {}
+        agent_identity = resolve_agent_identity(
+            agent_name,
+            review_cfg=eff_review_cfg,
+            runtime_evidence={"model": runtime_model} if runtime_model else None,
+            query_cli_version=False,
+        )
+
         res: Dict[str, Any] = {
             "pr": {
                 "repo": pr_info["repo"],
@@ -714,6 +773,7 @@ def run_agent_review(
                 "head": pr_info["head"],
             },
             "agent": agent_name,
+            "agent_identity": agent_identity,
             "findings": findings,
             "usage": {"time_in_ms": int((time.time() - t0) * 1000), "tokens": None},
             "prompt_meta": {
@@ -728,6 +788,7 @@ def run_agent_review(
                 "context_chars": context_chars,
                 "context_fingerprint": context_fingerprint,
                 "base_diff_chars": len(base_diff),
+                "agent_identity": agent_identity,
             },
         }
         if audit_info:
@@ -957,11 +1018,13 @@ def run_agent_review(
 
     response_text = proc.stdout
     token_usage = None
+    runtime_model = None
     if agent_name in ("agy", "llm", "agy-reviewer"):
         try:
             agy_meta = json.loads(proc.stdout)
             response_text = agy_meta.get("response", "")
             token_usage = agy_meta.get("usage")
+            runtime_model = agy_meta.get("model") or agy_meta.get("model_name")
         except Exception:
             response_text = proc.stdout
 
@@ -985,6 +1048,14 @@ def run_agent_review(
         except Exception as verif_err:
             verification_summary = {"error": str(verif_err)}
 
+    eff_review_cfg = review_cfg or pr_info.get("review_cfg") or {}
+    agent_identity = resolve_agent_identity(
+        agent_name,
+        review_cfg=eff_review_cfg,
+        runtime_evidence={"model": runtime_model} if runtime_model else None,
+        query_cli_version=False,
+    )
+
     res_llm = {
         "pr": {
             "repo": pr_info["repo"],
@@ -993,6 +1064,7 @@ def run_agent_review(
             "head": pr_info["head"],
         },
         "agent": agent_name,
+        "agent_identity": agent_identity,
         "findings": retained_findings,
         "rejected_findings": rejected_findings,
         "verification": verification_summary,
@@ -1013,6 +1085,7 @@ def run_agent_review(
             "context_chars": context_chars,
             "context_fingerprint": context_fingerprint,
             "base_diff_chars": len(base_diff),
+            "agent_identity": agent_identity,
         },
     }
     if audit_info:
@@ -1769,8 +1842,9 @@ def generate_chinese_report(
         f"- **ReviewBench 评分器 SHA**: `{version_info.get('scorer_sha', 'e1cb1a0dad8105ebea45caa00c194eaf2d2e7b5d')}`",
         "",
         "## 5. 执行开销",
-        f"- **评测实际总耗时**: {elapsed_seconds:.2f} 秒",
-        f"- **评审累积执行耗时**: {total_review_time_ms / 1000:.2f} 秒 (各 PR 评审命令实际耗时之和)",
+        f"- **评测实际总耗时**: {elapsed_seconds:.2f} 秒 (全流程端到端耗时)",
+        f"- **评测执行阶段耗时**: {execution_summary.get('review_stage_elapsed_seconds', elapsed_seconds):.2f} 秒 (工作区准备与各 PR 评审)",
+        f"- **评审累积执行耗时**: {total_review_time_ms / 1000:.2f} 秒 (各 PR 评审操作实际耗时之和，含失败重试/异常尝试)",
         f"- **真实 Token 用量**:",
         f"  - 输入 Token (input_tokens): {input_tokens}",
         f"  - 输出 Token (output_tokens): {output_tokens}",
@@ -1800,6 +1874,7 @@ def check_benchmark_comparability(
     b_cfg = before_results.get("context_config", {})
     a_cfg = after_results.get("context_config", {})
 
+    # 1. Reviewer Agent
     b_agent = b_exec.get("agent_identity", {}) or b_version.get("agent_identity", {})
     a_agent = a_exec.get("agent_identity", {}) or a_version.get("agent_identity", {})
 
@@ -1813,6 +1888,7 @@ def check_benchmark_comparability(
             f"评审 Agent 不一致 (基线: '{b_agent_name}', 改进版: '{a_agent_name}')。禁止将不同 Agent (如规则与 LLM) 称为同模型对照。"
         )
 
+    # 2. Model Confirmation & Identity
     b_model = b_agent.get("model_name", "unknown")
     a_model = a_agent.get("model_name", "unknown")
     b_confirmed = b_agent.get("model_confirmed", False)
@@ -1820,20 +1896,43 @@ def check_benchmark_comparability(
 
     if not b_confirmed or not a_confirmed or b_model == "unknown" or a_model == "unknown":
         discrepancies.append(
-            f"无法确认同模型: 实际模型身份未完全确认 (基线: '{b_model}', 改进版: '{a_model}')。不得据此输出严格的同模型优劣结论。"
+            f"无法确认同模型: 实际模型身份未完全确认 (基线: '{b_model}' [confirmed={b_confirmed}], 改进版: '{a_model}' [confirmed={a_confirmed}])。不得据此输出严格的同模型优劣结论。"
         )
     elif b_model != a_model:
         discrepancies.append(
             f"模型不一致 (基线: '{b_model}', 改进版: '{a_model}')。违反单变量控制要求。"
         )
 
-    b_budget = b_cfg.get("context_budget_chars") or b_exec.get("context_budget_chars")
-    a_budget = a_cfg.get("context_budget_chars") or a_exec.get("context_budget_chars")
-    if b_budget and a_budget and b_budget != a_budget:
+    # 3. CLI Version & Agent Execution Params (Effort)
+    b_cli = b_agent.get("cli_version")
+    a_cli = a_agent.get("cli_version")
+    if b_cli and a_cli and b_cli != "unknown" and a_cli != "unknown" and b_cli != "internal-rule" and a_cli != "internal-rule" and b_cli != a_cli:
+        discrepancies.append(f"CLI 版本不一致 (基线: '{b_cli}', 改进版: '{a_cli}')。")
+
+    b_effort = b_agent.get("details", {}).get("effort")
+    a_effort = a_agent.get("details", {}).get("effort")
+    if b_effort and a_effort and b_effort != a_effort:
+        discrepancies.append(f"推理强度/思考预算 (effort) 不一致 (基线: '{b_effort}', 改进版: '{a_effort}')。")
+
+    # 4. Context Mode Independent Variable
+    b_mode = b_cfg.get("context_mode") or b_exec.get("requested_context_mode") or b_version.get("context_mode")
+    a_mode = a_cfg.get("context_mode") or a_exec.get("requested_context_mode") or a_version.get("context_mode")
+    if not b_mode or not a_mode:
+        discrepancies.append("缺少请求上下文模式记录，无法验证对照自变量。")
+    elif b_mode == a_mode:
+        discrepancies.append(f"两组请求上下文模式相同 ('{b_mode}')，未构成 diff_only 与 existing_four_tier 的上下文对照自变量。")
+
+    # 5. Context Budget
+    b_budget = b_cfg.get("context_budget_chars") or b_exec.get("context_budget_chars") or b_version.get("context_budget_chars")
+    a_budget = a_cfg.get("context_budget_chars") or a_exec.get("context_budget_chars") or a_version.get("context_budget_chars")
+    if not b_budget or not a_budget:
+        discrepancies.append("缺少上下文预算上限记录，无法确认预算一致性。")
+    elif b_budget != a_budget:
         discrepancies.append(
             f"上下文预算上限不一致 (基线: {b_budget} 字符, 改进版: {a_budget} 字符)。"
         )
 
+    # 6. Fallbacks
     b_fallbacks = b_exec.get("fallback_count", 0)
     a_fallbacks = a_exec.get("fallback_count", 0)
     if b_fallbacks > 0 or a_fallbacks > 0:
@@ -1841,14 +1940,62 @@ def check_benchmark_comparability(
             f"评测包含降级样本 (基线降级 {b_fallbacks} 例, 改进版降级 {a_fallbacks} 例)。降级样本已退回基础 diff，无法完整代表请求的上下文模式。"
         )
 
-    b_judge = b_version.get("judge_config")
-    a_judge = a_version.get("judge_config")
-    if b_judge and a_judge and b_judge != a_judge:
+    # 7. Manifest PR Samples & Base/Head SHA Consistency
+    b_samples = b_exec.get("samples") or []
+    a_samples = a_exec.get("samples") or []
+    if b_samples and a_samples:
+        b_keys = [s.get("key") for s in b_samples if s.get("key")]
+        a_keys = [s.get("key") for s in a_samples if s.get("key")]
+        if set(b_keys) != set(a_keys):
+            discrepancies.append(
+                f"评测 PR 集合不一致 (基线包含 {len(b_keys)} 个案例，改进版包含 {len(a_keys)} 个案例，重合 {len(set(b_keys) & set(a_keys))} 个)。未在相同 PR 集合上进行对照。"
+            )
+        else:
+            b_smap = {s["key"]: s for s in b_samples if "key" in s}
+            a_smap = {s["key"]: s for s in a_samples if "key" in s}
+            for k in b_keys:
+                bs = b_smap[k]
+                as_ = a_smap[k]
+                if bs.get("base") and as_.get("base") and bs.get("base") != as_.get("base"):
+                    discrepancies.append(f"案例 {k} 的 base SHA 不一致 (基线: {bs.get('base')[:8]}, 改进版: {as_.get('base')[:8]})。")
+                if bs.get("head") and as_.get("head") and bs.get("head") != as_.get("head"):
+                    discrepancies.append(f"案例 {k} 的 head SHA 不一致 (基线: {bs.get('head')[:8]}, 改进版: {as_.get('head')[:8]})。")
+                if bs.get("base_diff_chars") and as_.get("base_diff_chars") and bs.get("base_diff_chars") != as_.get("base_diff_chars"):
+                    discrepancies.append(f"案例 {k} 的基础 diff 长度不一致 (基线: {bs.get('base_diff_chars')} 字符, 改进版: {as_.get('base_diff_chars')} 字符)。未满足相同基础 diff 契约。")
+
+    # 8. Planned, Completed, Failed Sample Counts (Denominator Verification)
+    b_plan = b_exec.get("total_planned")
+    a_plan = a_exec.get("total_planned")
+    b_done = b_exec.get("completed")
+    a_done = a_exec.get("completed")
+    b_failed = b_exec.get("failed", 0)
+    a_failed = a_exec.get("failed", 0)
+
+    if b_plan is not None and a_plan is not None and b_plan != a_plan:
+        discrepancies.append(f"计划案例总数不一致 (基线: {b_plan}, 改进版: {a_plan})。")
+
+    if b_failed > 0 or a_failed > 0:
+        discrepancies.append(
+            f"评测包含失败样本 (基线失败 {b_failed} 例, 改进版失败 {a_failed} 例)。样本失败导致实际计分集合不完整 (基线完成 {b_done}/{b_plan}, 改进版完成 {a_done}/{a_plan})。"
+        )
+
+    if b_done is not None and a_done is not None and b_done != a_done:
+        discrepancies.append(f"完成案例数不一致 (基线完成 {b_done}, 改进版完成 {a_done})。")
+
+    # 9. Judge Configuration
+    b_judge = before_results.get("judge_config") or b_version.get("judge_config")
+    a_judge = after_results.get("judge_config") or a_version.get("judge_config")
+    if not b_judge or not a_judge:
+        discrepancies.append("裁判模型配置缺失，无法确认同裁判评分条件。")
+    elif b_judge != a_judge:
         discrepancies.append(f"裁判模型配置不一致 (基线: '{b_judge}', 改进版: '{a_judge}')。")
 
-    b_scorer = b_version.get("scorer_sha")
-    a_scorer = a_version.get("scorer_sha")
-    if b_scorer and a_scorer and b_scorer != a_scorer:
+    # 10. Scorer Version (SHA)
+    b_scorer = before_results.get("scorer_sha") or b_version.get("scorer_sha")
+    a_scorer = after_results.get("scorer_sha") or a_version.get("scorer_sha")
+    if not b_scorer or not a_scorer:
+        discrepancies.append("评分器版本缺失，无法确认同评分器版本。")
+    elif b_scorer != a_scorer:
         discrepancies.append(f"评分器版本不一致 (基线: '{b_scorer[:8]}', 改进版: '{a_scorer[:8]}')。")
 
     return (len(discrepancies) == 0, discrepancies)
@@ -1939,6 +2086,11 @@ def compare_benchmarks(
     b_model_str = f"{b_model} ({'已确认' if b_model_conf else '无法确认同模型'})"
     a_model_str = f"{a_model} ({'已确认' if a_model_conf else '无法确认同模型'})"
 
+    b_cli = b_agent.get("cli_version", "未知")
+    a_cli = a_agent.get("cli_version", "未知")
+    b_effort = b_agent.get("details", {}).get("effort", "未知")
+    a_effort = a_agent.get("details", {}).get("effort", "未知")
+
     b_budget = b_cfg.get("context_budget_chars") or b_exec.get("context_budget_chars") or b_version.get("context_budget_chars", "未知")
     a_budget = a_cfg.get("context_budget_chars") or a_exec.get("context_budget_chars") or a_version.get("context_budget_chars", "未知")
 
@@ -1946,8 +2098,15 @@ def compare_benchmarks(
     a_plan = a_exec.get("total_planned", "未知")
     b_done = b_exec.get("completed", "未知")
     a_done = a_exec.get("completed", "未知")
+    b_failed = b_exec.get("failed", 0)
+    a_failed = a_exec.get("failed", 0)
     b_fall = b_exec.get("fallback_count", 0)
     a_fall = a_exec.get("fallback_count", 0)
+
+    b_judge = before_res.get("judge_config") or b_version.get("judge_config", "未知")
+    a_judge = after_res.get("judge_config") or a_version.get("judge_config", "未知")
+    b_scorer = before_res.get("scorer_sha") or b_version.get("scorer_sha", "未知")
+    a_scorer = after_res.get("scorer_sha") or a_version.get("scorer_sha", "未知")
 
     def _val_diff(bv: Any, av: Any, unit: str = "") -> Tuple[str, str, str]:
         if isinstance(bv, (int, float)) and isinstance(av, (int, float)):
@@ -1958,6 +2117,35 @@ def compare_benchmarks(
         a_s = f"{av}{unit}" if av not in (None, "未知") else "未知"
         return b_s, a_s, "未知"
 
+    def _token_diff(b_u: Dict[str, Any], a_u: Dict[str, Any], key: str) -> Tuple[str, str, str]:
+        b_val = b_u.get(key)
+        a_val = a_u.get(key)
+        b_dtl = b_u.get("token_details", {}).get(key, {}) if isinstance(b_u.get("token_details"), dict) else {}
+        a_dtl = a_u.get("token_details", {}).get(key, {}) if isinstance(a_u.get("token_details"), dict) else {}
+
+        b_disp = str(b_val) if b_val not in (None, "") else "未知"
+        a_disp = str(a_val) if a_val not in (None, "") else "未知"
+
+        b_raw = b_dtl.get("raw_sum") if isinstance(b_dtl, dict) and b_dtl.get("raw_sum") is not None else (b_val if isinstance(b_val, (int, float)) else None)
+        a_raw = a_dtl.get("raw_sum") if isinstance(a_dtl, dict) and a_dtl.get("raw_sum") is not None else (a_val if isinstance(a_val, (int, float)) else None)
+
+        b_comp = b_dtl.get("is_complete", False) if isinstance(b_dtl, dict) and "is_complete" in b_dtl else isinstance(b_val, (int, float))
+        a_comp = a_dtl.get("is_complete", False) if isinstance(a_dtl, dict) and "is_complete" in a_dtl else isinstance(a_val, (int, float))
+
+        if isinstance(b_raw, (int, float)) and isinstance(a_raw, (int, float)):
+            delta = a_raw - b_raw
+            sign = "+" if delta >= 0 else ""
+            if b_comp and a_comp:
+                delta_str = f"{sign}{delta}"
+            else:
+                delta_str = f"{sign}{delta} (基于已知部分计算)"
+            return b_disp, a_disp, delta_str
+        return b_disp, a_disp, "未知"
+
+    b_stage_s = b_exec.get("review_stage_elapsed_seconds")
+    a_stage_s = a_exec.get("review_stage_elapsed_seconds")
+    stage_b, stage_a, stage_d = _val_diff(b_stage_s, a_stage_s, "秒")
+
     b_e2e = b_exec.get("elapsed_seconds")
     a_e2e = a_exec.get("elapsed_seconds")
     e2e_b, e2e_a, e2e_d = _val_diff(b_e2e, a_e2e, "秒")
@@ -1966,10 +2154,10 @@ def compare_benchmarks(
     a_rev_s = (a_usage.get("total_review_time_ms") / 1000.0) if isinstance(a_usage.get("total_review_time_ms"), (int, float)) else None
     rev_b, rev_a, rev_d = _val_diff(b_rev_s, a_rev_s, "秒")
 
-    in_b, in_a, in_d = _val_diff(b_usage.get("input_tokens"), a_usage.get("input_tokens"))
-    out_b, out_a, out_d = _val_diff(b_usage.get("output_tokens"), a_usage.get("output_tokens"))
-    thk_b, thk_a, thk_d = _val_diff(b_usage.get("thinking_tokens"), a_usage.get("thinking_tokens"))
-    tot_b, tot_a, tot_d = _val_diff(b_usage.get("total_tokens"), a_usage.get("total_tokens"))
+    in_b, in_a, in_d = _token_diff(b_usage, a_usage, "input_tokens")
+    out_b, out_a, out_d = _token_diff(b_usage, a_usage, "output_tokens")
+    thk_b, thk_a, thk_d = _token_diff(b_usage, a_usage, "thinking_tokens")
+    tot_b, tot_a, tot_d = _token_diff(b_usage, a_usage, "total_tokens")
 
     p_ch_b, p_ch_a, p_ch_d = _val_diff(b_usage.get("avg_prompt_chars"), a_usage.get("avg_prompt_chars"), "字")
     c_ch_b, c_ch_a, c_ch_d = _val_diff(b_usage.get("avg_context_chars"), a_usage.get("avg_context_chars"), "字")
@@ -1996,10 +2184,13 @@ def compare_benchmarks(
         "|---|---|---|---|",
         f"| 评审 Agent | `{b_agent_name}` | `{a_agent_name}` | {'✓ 一致' if b_agent_name == a_agent_name and b_agent_name != '未知' else '⚠ 存在差异'} |",
         f"| 模型身份 | `{b_model_str}` | `{a_model_str}` | {'✓ 确认同模型' if b_model_conf and a_model_conf and b_model == a_model else '⚠ 无法确认同模型'} |",
-        f"| 请求上下文模式 | `{b_mode}` | `{a_mode}` | {'(对照自变量)' if b_mode != a_mode else '模式相同'} |",
+        f"| CLI 版本 / effort | `{b_cli}` / `{b_effort}` | `{a_cli}` / `{a_effort}` | {'✓ 一致' if b_cli == a_cli and b_effort == a_effort else '⚠ 存在差异'} |",
+        f"| 请求上下文模式 | `{b_mode}` | `{a_mode}` | {'(对照自变量)' if b_mode != a_mode else '模式相同 (未构成自变量)'} |",
         f"| 上下文预算上限 | `{b_budget}` | `{a_budget}` | {'✓ 一致' if b_budget == a_budget and b_budget != '未知' else '⚠ 存在差异'} |",
-        f"| 计划 / 完成案例 | {b_plan} / {b_done} | {a_plan} / {a_done} | {'✓ 案例数一致' if b_plan == a_plan and b_done == a_done else '⚠ 存在差异'} |",
+        f"| 计划 / 完成案例 | {b_plan} / {b_done} (失败: {b_failed}) | {a_plan} / {a_done} (失败: {a_failed}) | {'✓ 案例数一致' if b_plan == a_plan and b_done == a_done and b_failed == 0 and a_failed == 0 else '⚠ 存在差异或失败'} |",
         f"| 降级案例数 | {b_fall} | {a_fall} | {'✓ 无降级' if b_fall == 0 and a_fall == 0 else f'⚠ 包含降级 ({b_fall} / {a_fall})'} |",
+        f"| 裁判模型配置 | `{b_judge}` | `{a_judge}` | {'✓ 一致' if b_judge == a_judge and b_judge != '未知' else '⚠ 存在差异'} |",
+        f"| 评分器版本 SHA | `{str(b_scorer)[:8]}` | `{str(a_scorer)[:8]}` | {'✓ 一致' if b_scorer == a_scorer and b_scorer != '未知' else '⚠ 存在差异'} |",
         "",
     ]
 
@@ -2018,7 +2209,7 @@ def compare_benchmarks(
             lines.append(f"> - {disc}")
         lines.extend([
             ">",
-            "> 依据评测纪律，在无法确认同模型或存在降级/环境差异时，**不得据此输出严格的同模型优劣结论**。",
+            "> 依据评测纪律，在无法确认严格单变量受控或存在降级/失败/环境差异时，**不得据此输出严格的同模型优劣结论**。",
             "",
         ])
 
@@ -2027,11 +2218,12 @@ def compare_benchmarks(
         "",
         "| 统计项目 | 基线 (Before) | 改进版 (After) | 差异 (Delta) | 说明 |",
         "|---|---|---|---|---|",
-        f"| 评测端到端总耗时 | {e2e_b} | {e2e_a} | {e2e_d} | 包含工作区准备、评审与官方裁判打分全流程 |",
-        f"| 评审累积执行耗时 | {rev_b} | {rev_a} | {rev_d} | 各 PR 实际调用 reviewer 命令执行耗时之和 |",
-        f"| 输入 Token (input_tokens) | {in_b} | {in_a} | {in_d} | 真实 API usage 统计（若无记录则为未知） |",
-        f"| 输出 Token (output_tokens) | {out_b} | {out_a} | {out_d} | 真实 API usage 统计（若无记录则为未知） |",
-        f"| 思考 Token (thinking_tokens) | {thk_b} | {thk_a} | {thk_d} | 真实 API usage 统计（若无记录则为未知） |",
+        f"| 评测执行总耗时 | {stage_b} | {stage_a} | {stage_d} | 所有 PR 工作区准备与评审操作之和（含成功及失败尝试） |",
+        f"| 全流程端到端耗时 | {e2e_b} | {e2e_a} | {e2e_d} | 从评测启动至官方裁判打分完成的全流程耗时 |",
+        f"| 评审操作累积耗时 | {rev_b} | {rev_a} | {rev_d} | 各 PR 完整评审操作（含检索组装、Reviewer 与 Verifier）耗时之和 |",
+        f"| 输入 Token (input_tokens) | {in_b} | {in_a} | {in_d} | 真实 API usage 统计（缺失为未知，部分覆盖标明样本数） |",
+        f"| 输出 Token (output_tokens) | {out_b} | {out_a} | {out_d} | 真实 API usage 统计（缺失为未知，部分覆盖标明样本数） |",
+        f"| 思考 Token (thinking_tokens) | {thk_b} | {thk_a} | {thk_d} | 真实 API usage 统计（缺失为未知，部分覆盖标明样本数） |",
         f"| 总计 Token (total_tokens) | {tot_b} | {tot_a} | {tot_d} | 真实 API usage 统计（严禁通过字符数折算） |",
         f"| 平均 Prompt 字符数 | {p_ch_b} | {p_ch_a} | {p_ch_d} | 完整 Prompt 字符规模 |",
         f"| 平均有效上下文大小 | {c_ch_b} | {c_ch_a} | {c_ch_d} | 基础 diff 及追加源码上下文规模 |",
@@ -2042,17 +2234,70 @@ def compare_benchmarks(
         "",
     ])
 
-    # Factual analysis
-    if not is_comparable:
-        lines.append("- **审核质量结论**: 由于两组评测存在不可比因素（如模型未确认或存在降级），数据不能证明审核质量差异是由源码上下文直接引起。")
-    elif gr_d.startswith("+") and gr_d != "+0.0%":
-        lines.append(f"- **审核质量结论**: 检索模式带来了审核质量提升，基础召回率提升 {gr_d}，基础准确率变化 {gp_d}。")
-    elif gr_d.startswith("-"):
-        lines.append(f"- **审核质量结论**: 检索模式未带来审核质量提升，基础召回率下降 {gr_d}，表明额外源码上下文可能引入了噪声。")
-    else:
-        lines.append(f"- **审核质量结论**: 检索模式在现有黄金缺陷用例上质量持平（召回率 Delta: {gr_d}，准确率 Delta: {gp_d}）。")
+    bv_r = b_overall.get("grounded_recall")
+    av_r = a_overall.get("grounded_recall")
+    bv_p = b_overall.get("grounded_precision")
+    av_p = a_overall.get("grounded_precision")
 
-    lines.append(f"- **额外耗时评估**: 评审命令执行累积耗时变化为 `{rev_d}`，端到端评测耗时变化为 `{e2e_d}`。")
+    has_num_diff = all(isinstance(v, (int, float)) for v in (bv_r, av_r, bv_p, av_p))
+
+    if not is_comparable:
+        lines.append(
+            "- **审核质量评估**: 无法得出单变量质量结论。由于两组评测存在不可比因素（如模型身份未确认、评测案例/配置不一致、包含失败或降级样本等），"
+            "观测到的指标差异不能归因于源码上下文检索模式。"
+        )
+    elif has_num_diff:
+        delta_r = round((av_r - bv_r) * 100, 2)
+        delta_p = round((av_p - bv_p) * 100, 2)
+
+        r_improved = delta_r > 0
+        r_declined = delta_r < 0
+        p_improved = delta_p > 0
+        p_declined = delta_p < 0
+
+        if r_improved and p_improved:
+            quality_desc = (
+                f"在当前受测 reviewer 上，额外源码上下文使召回率与准确率均实现提升 "
+                f"（基础召回率 {gr_d}，基础准确率 {gp_d}）。"
+            )
+        elif r_declined and p_declined:
+            quality_desc = (
+                f"在当前受测 reviewer 上，额外源码上下文导致召回率与准确率均出现下滑 "
+                f"（基础召回率 {gr_d}，基础准确率 {gp_d}），额外上下文可能引入了干扰噪声。"
+            )
+        elif (r_improved and p_declined) or (r_declined and p_improved):
+            quality_desc = (
+                f"在当前受测 reviewer 上，召回率与准确率呈现反向权衡（Trade-off）："
+                f"基础召回率变化 {gr_d}，基础准确率变化 {gp_d}。"
+                f"{'召回率有所提升但准确率下降，表明额外上下文在帮助检出更多线索的同时引入了误报；' if r_improved else '准确率有所提升但召回率下降；'}"
+                f"在未预设 F-score 或业务权重的前提下，不认定为单纯的整体质量提升或下降。"
+            )
+        elif delta_r == 0 and delta_p == 0:
+            quality_desc = (
+                f"在当前受测 reviewer 上，两组核心指标完全持平 "
+                f"（基础召回率 Delta: {gr_d}，基础准确率 Delta: {gp_d}），未体现额外质量增益。"
+            )
+        elif delta_r == 0:
+            p_text = f"准确率提高 {gp_d}" if p_improved else f"准确率下降 {gp_d}"
+            quality_desc = (
+                f"在当前受测 reviewer 上，基础召回率持平 ({gr_d})，但{p_text}。"
+                f"{'由于准确率显著下降，不应视为质量持平；' if p_declined else '误报减少带来准确率改进；'}"
+                f"需结合业务对误报的容忍度综合评估。"
+            )
+        else:
+            r_text = f"召回率提升 {gr_d}" if r_improved else f"召回率下降 {gp_d}"
+            quality_desc = (
+                f"在当前受测 reviewer 上，基础准确率持平 ({gp_d})，但{r_text}。"
+            )
+
+        lines.append(f"- **审核质量评估**: {quality_desc}")
+    else:
+        lines.append(
+            f"- **审核质量评估**: 基础召回率变化 {gr_d}，基础准确率变化 {gp_d}。"
+            f"缺少完整数值指标，不做整体优劣推断。"
+        )
+
+    lines.append(f"- **额外耗时评估**: 评审操作累积耗时变化为 `{rev_d}`，全流程评测耗时变化为 `{e2e_d}`。")
     lines.append(f"- **额外用量评估**: 总计 Token 消耗变化为 `{tot_d}`，平均 Prompt 字符数膨胀 `{p_ch_d}`，有效上下文扩展 `{c_ch_d}`。")
 
     lines.extend([

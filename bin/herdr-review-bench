@@ -182,6 +182,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     model_name = agent_info.get("model_name", "unknown")
     model_conf = agent_info.get("model_confirmed", False)
     cli_ver = agent_info.get("cli_version", "unknown")
+    if "cli_version" not in review_cfg and cli_ver != "unknown":
+        review_cfg["cli_version"] = cli_ver
 
     print(f"=== Starting Review Benchmark Run: {config.get('name', 'benchmark')} ===")
     print(f"Manifest PRs: {len(manifest_entries)}")
@@ -214,6 +216,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         key = pr_key(entry["repo"], entry["pr_number"], entry["head"])
         label = f"[{idx + 1}/{len(manifest_entries)}] {key}"
         print(f"\n--> Preparing workspace for {label}")
+        t_sample_start = time.time()
 
         ws_dir = workspaces_dir / key
         try:
@@ -248,6 +251,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                 system_prompt=system_prompt,
                 context_mode=context_mode,
                 context_budget_chars=context_budget_chars,
+                review_cfg=review_cfg,
             )
 
             validate_candidate_output(candidate_output)
@@ -262,6 +266,17 @@ def cmd_run(args: argparse.Namespace) -> int:
                 audit_file = audit_dir / f"{key}.context-audit.json"
                 audit_file.write_text(json.dumps(candidate_output["audit"], indent=2, ensure_ascii=False), encoding="utf-8")
 
+            if "agent_identity" in candidate_output:
+                sample_agent_id = candidate_output["agent_identity"]
+                if not agent_info.get("model_confirmed") and sample_agent_id.get("model_confirmed"):
+                    agent_info = sample_agent_id
+                    execution_summary["agent_identity"] = agent_info
+                elif agent_info.get("model_confirmed") and sample_agent_id.get("model_name") != agent_info.get("model_name"):
+                    agent_info["model_confirmed"] = False
+                    agent_info.setdefault("details", {})["mismatch"] = (
+                        f"multiple models detected across samples: {agent_info.get('model_name')} vs {sample_agent_id.get('model_name')}"
+                    )
+
             c_meta = candidate_output.get("context_meta", {})
             eff_mode = c_meta.get("effective_context_mode", context_mode)
             execution_summary["effective_context_modes"][eff_mode] = execution_summary["effective_context_modes"].get(eff_mode, 0) + 1
@@ -269,13 +284,17 @@ def cmd_run(args: argparse.Namespace) -> int:
                 execution_summary["fallback_count"] += 1
                 execution_summary["fallback_details"][key] = c_meta.get("fallback_reason")
 
-            review_ms = candidate_output.get("usage", {}).get("time_in_ms", 0)
+            review_ms = candidate_output.get("usage", {}).get("time_in_ms")
+            if review_ms is None:
+                review_ms = int((time.time() - t_sample_start) * 1000)
             execution_summary["total_review_time_ms"] += review_ms
 
             sample_record = {
                 "key": key,
                 "repo": entry.get("repo"),
                 "pr_number": entry.get("pr_number"),
+                "base": entry.get("base"),
+                "head": entry.get("head"),
                 "status": "completed",
                 "requested_context_mode": c_meta.get("requested_context_mode", context_mode),
                 "effective_context_mode": eff_mode,
@@ -296,29 +315,33 @@ def cmd_run(args: argparse.Namespace) -> int:
             print(f"    ✓ Review finished, findings: {len(candidate_output['findings'])}")
 
         except Exception as exc:
+            failed_time_ms = int((time.time() - t_sample_start) * 1000)
+            execution_summary["total_review_time_ms"] += failed_time_ms
             execution_summary["failed"] += 1
             execution_summary["failure_details"][key] = str(exc)
             execution_summary["samples"].append({
                 "key": key,
                 "repo": entry.get("repo"),
                 "pr_number": entry.get("pr_number"),
+                "base": entry.get("base"),
+                "head": entry.get("head"),
                 "status": "failed",
                 "requested_context_mode": context_mode,
+                "time_in_ms": failed_time_ms,
                 "error": str(exc),
             })
             print(f"    ✗ Review execution FAILED: {exc}", file=sys.stderr)
 
-    execution_summary["elapsed_seconds"] = time.time() - t_start
+    t_review_end = time.time()
+    review_stage_elapsed_seconds = round(t_review_end - t_start, 2)
+    execution_summary["review_stage_elapsed_seconds"] = review_stage_elapsed_seconds
 
     # Step 2.5: Compute aggregated usage and character summary
     total_prompt_chars = 0
     total_context_chars = 0
     samples_with_chars = 0
-    inp_tok_sum = 0
-    out_tok_sum = 0
-    thk_tok_sum = 0
-    tot_tok_sum = 0
-    tokens_available = False
+    token_metrics = ["input_tokens", "output_tokens", "thinking_tokens", "total_tokens"]
+    token_stats = {k: {"sum": 0, "count": 0} for k in token_metrics}
 
     for s in execution_summary["samples"]:
         if s.get("status") == "completed":
@@ -337,26 +360,43 @@ def cmd_run(args: argparse.Namespace) -> int:
                 thk = toks.get("thinking_tokens") if toks.get("thinking_tokens") is not None else toks.get("reasoning_tokens")
                 tot = toks.get("total_tokens")
 
-                if any(isinstance(v, (int, float)) for v in (inp, out, thk, tot)):
-                    tokens_available = True
-                    if isinstance(inp, (int, float)):
-                        inp_tok_sum += int(inp)
-                    if isinstance(out, (int, float)):
-                        out_tok_sum += int(out)
-                    if isinstance(thk, (int, float)):
-                        thk_tok_sum += int(thk)
-                    if isinstance(tot, (int, float)):
-                        tot_tok_sum += int(tot)
+                val_map = {
+                    "input_tokens": inp,
+                    "output_tokens": out,
+                    "thinking_tokens": thk,
+                    "total_tokens": tot,
+                }
+                for k, v in val_map.items():
+                    if isinstance(v, (int, float)):
+                        token_stats[k]["sum"] += int(v)
+                        token_stats[k]["count"] += 1
 
-    completed_cnt = max(execution_summary["completed"], 1)
+    completed_cnt = execution_summary["completed"]
+    token_details = {}
+    formatted_tokens = {}
+
+    for k in token_metrics:
+        c = token_stats[k]["count"]
+        s = token_stats[k]["sum"]
+        if c == 0:
+            formatted_tokens[k] = "未知"
+            token_details[k] = {"raw_sum": None, "count": 0, "total_samples": completed_cnt, "is_complete": False}
+        elif c == completed_cnt:
+            formatted_tokens[k] = s
+            token_details[k] = {"raw_sum": s, "count": c, "total_samples": completed_cnt, "is_complete": True}
+        else:
+            formatted_tokens[k] = f"{s} (已知部分合计: {c}/{completed_cnt} 样本)"
+            token_details[k] = {"raw_sum": s, "count": c, "total_samples": completed_cnt, "is_complete": False}
+
     usage_summary = {
         "total_review_time_ms": execution_summary["total_review_time_ms"],
-        "avg_review_time_ms": round(execution_summary["total_review_time_ms"] / completed_cnt, 2),
-        "tokens_available": tokens_available,
-        "input_tokens": inp_tok_sum if tokens_available else "未知",
-        "output_tokens": out_tok_sum if tokens_available else "未知",
-        "thinking_tokens": thk_tok_sum if tokens_available else "未知",
-        "total_tokens": tot_tok_sum if tokens_available else "未知",
+        "avg_review_time_ms": round(execution_summary["total_review_time_ms"] / max(completed_cnt, 1), 2),
+        "tokens_available": any(token_stats[k]["count"] > 0 for k in token_metrics),
+        "input_tokens": formatted_tokens["input_tokens"],
+        "output_tokens": formatted_tokens["output_tokens"],
+        "thinking_tokens": formatted_tokens["thinking_tokens"],
+        "total_tokens": formatted_tokens["total_tokens"],
+        "token_details": token_details,
         "avg_prompt_chars": round(total_prompt_chars / max(samples_with_chars, 1), 1) if samples_with_chars > 0 else 0.0,
         "avg_context_chars": round(total_context_chars / max(samples_with_chars, 1), 1) if samples_with_chars > 0 else 0.0,
     }
@@ -388,6 +428,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     print(f"\n--> Invoking official ReviewBench judge ({provider}/{model_id})...")
     judge_success = False
+    t_judge_start = time.time()
     try:
         proc = subprocess.run(
             judge_cmd,
@@ -404,6 +445,12 @@ def cmd_run(args: argparse.Namespace) -> int:
             print(f"    Judge stderr:\n{proc.stderr[:1000]}")
     except Exception as exc:
         print(f"    ⚠ Could not invoke ReviewBench judge: {exc}")
+    t_judge_end = time.time()
+    judge_elapsed_seconds = round(t_judge_end - t_judge_start, 2)
+    execution_summary["judge_elapsed_seconds"] = judge_elapsed_seconds
+    total_e2e_elapsed_seconds = round(t_judge_end - t_start, 2)
+    execution_summary["elapsed_seconds"] = total_e2e_elapsed_seconds
+    execution_summary["total_e2e_elapsed_seconds"] = total_e2e_elapsed_seconds
 
     # Step 4: Load results and generate Chinese report
     results_raw = {}
@@ -430,6 +477,17 @@ def cmd_run(args: argparse.Namespace) -> int:
     # 3. required metrics are complete and valid
     is_run_successful = bool(judge_success and results_parse_ok and extracted_metrics is not None)
 
+    version_info = {
+        "code_sha": subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip() or "HEAD",
+        "agent_config": f"{agent_name} ({config_path.name})",
+        "context_mode": context_mode,
+        "context_budget_chars": context_budget_chars,
+        "agent_identity": agent_info,
+        "judge_config": f"{provider}/{model_id}",
+        "scorer_sha": actual_scorer_sha,
+        "cost_usd": "未知 (直连 API)",
+    }
+
     if is_run_successful:
         # Wrap results with explicit status="completed" and normalized metrics for downstream compare
         results_json = dict(results_raw)
@@ -445,6 +503,9 @@ def cmd_run(args: argparse.Namespace) -> int:
     results_json["execution_summary"] = execution_summary
     results_json["usage_summary"] = usage_summary
     results_json["agent_identity"] = agent_info
+    results_json["version_info"] = version_info
+    results_json["judge_config"] = f"{provider}/{model_id}"
+    results_json["scorer_sha"] = actual_scorer_sha
     results_json["context_config"] = {
         "context_mode": context_mode,
         "context_budget_chars": context_budget_chars,
@@ -456,17 +517,6 @@ def cmd_run(args: argparse.Namespace) -> int:
     top_results_file.write_text(json.dumps(results_json, indent=2, ensure_ascii=False), encoding="utf-8")
 
     # Build report.md
-    version_info = {
-        "code_sha": subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip() or "HEAD",
-        "agent_config": f"{agent_name} ({config_path.name})",
-        "context_mode": context_mode,
-        "context_budget_chars": context_budget_chars,
-        "agent_identity": agent_info,
-        "judge_config": f"{provider}/{model_id}",
-        "scorer_sha": actual_scorer_sha,
-        "cost_usd": "未知 (直连 API)",
-    }
-
     report_md = generate_chinese_report(
         results_json=results_json,
         details_json=details_json,
