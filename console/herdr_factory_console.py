@@ -9128,16 +9128,7 @@ async function bindSlotPrompt(p){
 }
 setInterval(()=>{if(!document.hidden)refreshAll()},600000);
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)refreshAll()});
-(function(){
-  const v=loadViewState();
-  if(!v)return;
-  state.opsMode=!!v.opsMode;
-  state.dashMode=!!v.dashMode;
-  state.dashWorkflowId=v.dashWorkflowId||null;
-  state.spaceId=v.spaceId||null;
-  state.workflowId=v.workflowId||null;
-  state.shellView=v.shellView||'workbench';
-})();
+(function(){const v=loadViewState();if(!v)return;state.opsMode=!!v.opsMode;state.dashMode=!!v.dashMode;state.dashWorkflowId=v.dashWorkflowId||null;state.spaceId=v.spaceId||null;state.workflowId=v.workflowId||null;state.shellView=v.shellView||'workbench';})();
 async function initFromUrlOrState(){
   const p=new URLSearchParams(window.location.search);
   let qWf=p.get('workflow_id');
@@ -9149,11 +9140,10 @@ async function initFromUrlOrState(){
     }catch(e){}
   }
   if(!qWf&&!qTask&&!qPane&&!qOps&&!qView){
-    if(state.opsMode)showOpsCenter();
-    else if(state.dashMode)showDashboard();
+    if(state.dashMode)showDashboard();
     else if(state.workflowId==='__templates__')showTemplateLibrary();
     else if(state.shellView&&state.shellView!=='workbench')showShellView(state.shellView);
-    else refreshAll();
+    else state.opsMode?showOpsCenter():refreshAll();
     return;
   }
   if(qOps==='1'||qOps==='true'||qView==='ops'){
@@ -9224,10 +9214,10 @@ initFromUrlOrState();
       pill.className = 'wf-tab-sliding-pill';
       tabsList.prepend(pill);
     }
-    const activeTab = tabsList.querySelector('.wf-tab.active');
-    if (activeTab) {
+    const activeItem = tabsList.querySelector('.wf-tab.active');
+    if (activeItem) {
       const parentRect = tabsList.getBoundingClientRect();
-      const tabRect = activeTab.getBoundingClientRect();
+      const tabRect = activeItem.getBoundingClientRect();
       pill.style.transform = `translateX(${tabRect.left - parentRect.left + tabsList.scrollLeft}px)`;
       pill.style.width = `${tabRect.width}px`;
       pill.style.display = 'block';
