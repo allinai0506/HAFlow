@@ -137,7 +137,29 @@ commit/integrate 路径；验收以 Task Workspace 产物与 verify-baseline 文
 - **对严谨性要求高的节点**（如架构评审、合规审核、最终把关）：使用 `fixed: claude`。
 - **对代码实现/并行搬砖要求高的节点**：使用 `preferred: [opencode, codex, qodercli]` 并设置 `parallel: true`。
 
-### 3.3 模板本地调试流程
+### 3.3 核心开发模板选型决策指南
+
+HAFlow 内置了两套核心软件开发工作流模板，面向不同复杂度的任务场景：
+
+| 维度 | `code-craft-v1` (代码工坊) | `software-development-v1` (标准流程) |
+|---|---|---|
+| **核心架构** | 单工位 TDD 闭环 + 外环洁净室双门禁 | 6 阶段全面架构 (需求/计划/实现/测试/评审/收尾) |
+| **节点数量** | 4 节点 (`craft` → `cleanroom_test` & `cleanroom_review` → `wrapup`) | 6 节点 (`requirements` → `plan` → `impl` → `test` & `review` → `wrapup`) |
+| **协作模式** | 单 Agent 贯通开发，外环独立双门禁 | 需求与计划双角色对抗，实现支持解耦多并发 |
+| **适用场景** | 需求边界清晰、单 Agent 可闭环、修改集中在少数模块 | 需求含隐式规则、跨模块改造、涉及架构拆分与多工位协作 |
+| **典型任务** | 确定性 Bug 修复、局部 API 契约修复、局部重构、小功能完善 | 复杂业务功能、底层重构、前后端及数据库联动、大型迁移 |
+| **返工目标** | `retry_node: craft` (回流至代码工坊) | `retry_node: implementation` (支持 Selective Replan) |
+
+#### 选型指引建议：
+- **优先选用 `code-craft-v1`**：当任务目标非常聚焦（例如根据已知测试报错修 Bug，或对已有类进行独立重构），无需启动多工位反复讨论需求和拆分任务，单工位 TDD 紧反馈配合外环洁净室验证最具性价比。
+- **选用 `software-development-v1`**：当任务存在需求不确定性、涉及复杂的业务规则、或需要拆分成多个子任务由不同工位并发执行时，必须经过 `requirements` 和 `plan` 的双角色（主起草 + 对抗审查）推演，保障技术架构的稳健性。
+
+### 3.4 门禁配置与交付契约规范
+1. **显式声明 `gate`**：若节点属于验证或评审门禁（非默认的 `test`/`review`/`wrapup` 命名，如 `cleanroom_test`），必须显式声明 `gate: {retry_node: <target_node>}`，否则 Controller 无法将其识别为门禁节点，阻断自动裁决与 fix-loop 回流。
+2. **门禁结论契约**：门禁节点的机器可采纳结论严格受限于 `HERDR_GATE_VERDICT: pass` 或 `HERDR_GATE_VERDICT: blocked`（二选一），严禁使用未经机器注册的自定义状态（如 `REWORK` 或 `FAIL`）。
+3. **收尾节点规则**：收尾节点必须使用 `six-step-finish`，通过 `herdr-task create-pr` 建立交付 PR；严禁在工作流内自动执行 PR 合并，明确区分“工作流交付收尾”与“代码合入”。
+
+### 3.5 模板本地调试流程
 1. 将模板存入 `~/.herdr-controller/templates/my-template.yaml`；
 2. 运行 `herdr-factory templates`，确认列表中能正常读取其标签、节点数量；
 3. 运行自动化测试检查 DAG 逻辑：

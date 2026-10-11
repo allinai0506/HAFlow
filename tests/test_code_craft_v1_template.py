@@ -39,6 +39,7 @@ class TestCodeCraftV1Template(unittest.TestCase):
         self.assertFalse(test_node.get("parallel", True))
         self.assertEqual(test_node.get("default_integration_mode"), "none")
         self.assertEqual(test_node.get("default_task_type"), "test")
+        self.assertEqual(test_node.get("gate", {}).get("retry_node"), "craft")
 
         policy = test_node.get("agent_policy", {})
         self.assertEqual(policy.get("max_concurrency"), 1)
@@ -51,6 +52,7 @@ class TestCodeCraftV1Template(unittest.TestCase):
         self.assertFalse(review_node.get("parallel", True))
         self.assertEqual(review_node.get("default_integration_mode"), "none")
         self.assertEqual(review_node.get("default_task_type"), "test")
+        self.assertEqual(review_node.get("gate", {}).get("retry_node"), "craft")
 
         policy = review_node.get("agent_policy", {})
         self.assertEqual(policy.get("max_concurrency"), 1)
@@ -62,9 +64,11 @@ class TestCodeCraftV1Template(unittest.TestCase):
         self.assertEqual(sorted(wrapup.get("depends_on", [])), sorted(["cleanroom_test", "cleanroom_review"]))
         self.assertFalse(wrapup.get("parallel", True))
         self.assertEqual(wrapup.get("artifact_mode"), "shared_artifacts")
+        self.assertEqual(wrapup.get("gate", {}).get("retry_node"), "craft")
 
         policy = wrapup.get("agent_policy", {})
         self.assertEqual(policy.get("max_concurrency"), 1)
+        self.assertEqual(policy.get("exclude_stage_agents"), ["craft"])
         self.assertTrue(policy.get("allow_soft_degrade"))
 
         rules = "\n".join(wrapup.get("rules", []))
@@ -79,6 +83,21 @@ class TestCodeCraftV1Template(unittest.TestCase):
         reverif = self.tmpl.get("reverification", {})
         self.assertIn("cleanroom_test", reverif)
         self.assertIn("cleanroom_review", reverif)
+
+    def test_controller_resolve_gate_config_for_cleanroom_nodes(self):
+        import importlib
+        ctl = importlib.import_module("services.herdr-controller")
+        test_gate = ctl.resolve_gate_config(self.node_map["cleanroom_test"], "cleanroom_test")
+        self.assertIsNotNone(test_gate)
+        self.assertEqual(test_gate["retry_node"], "craft")
+
+        review_gate = ctl.resolve_gate_config(self.node_map["cleanroom_review"], "cleanroom_review")
+        self.assertIsNotNone(review_gate)
+        self.assertEqual(review_gate["retry_node"], "craft")
+
+        wrapup_gate = ctl.resolve_gate_config(self.node_map["wrapup"], "wrapup")
+        self.assertIsNotNone(wrapup_gate)
+        self.assertEqual(wrapup_gate["retry_node"], "craft")
 
 
 if __name__ == "__main__":
