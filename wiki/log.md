@@ -2409,3 +2409,22 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
   - 全量历史回归测试 125+ 项无回归通过；
   - `python3 -m compileall -q herdr services bin tests` clean；
   - `git diff --check` clean。
+
+## [2026-10-11] fix | ReviewBench 同模型单变量对照与执行契约修复 (PR #197)
+- 背景：
+  1. PR #197 评测基线审计发现整组模型身份在循环中易被后续样本错误覆盖；
+  2. 严格单变量对照缺乏有效系统提示词与超时时间等执行条件的一致性强校验；
+  3. Token 统计分母错误使用完成样本数而非评审尝试数，且丢失解析失败但已调用模型的真实 usage；
+  4. 评审耗时统计边界混入工作区准备耗时；
+  5. 召回率质量分支存在变量笔误 (`gp_d` 代替 `gr_d`)。
+- 变更：
+  1. **整组模型身份聚合** (`herdr/review_benchmark.py`, `bin/herdr-review-bench`)：实现纯函数 `aggregate_group_agent_identity`，保证整组确认当且仅当所有尝试均已确认且模型一致；任何未确认或漂移样本永久置为 False，不被后续正常样本冲掉；
+  2. **严格单变量可比性闭环** (`herdr/review_benchmark.py`, `bin/herdr-review-bench`)：强制约束对照方向为 `diff_only -> existing_four_tier`；校验默认值解析后的有效提示词指纹 `system_prompt_fingerprint` 与有效 `timeout_seconds`；校验基础 diff SHA-256 内容指纹 `base_diff_fingerprint` 与 1 对 1 案例一致性；反例阻断并给出清晰警告；
+  3. **Token 失败用量覆盖率** (`bin/herdr-review-bench`, `herdr/review_benchmark.py`)：统计分母严格采用 `review_attempts` 尝试数，排除工作区准备失败；解析失败但带用量（如 `output_parse_failed`）保留已知用量，部分覆盖格式化为 `(已知部分合计: x/y 样本)`；
+  4. **统一评审计时边界** (`bin/herdr-review-bench`)：将评审耗时精确收敛至 `run_agent_review()` 跨度，剔除工作区准备耗时；`avg_review_time_ms` 分母为实际尝试数（无尝试为 `None`，杜绝 `max(count, 1)` 伪造）；
+  5. **质量分支变量修复与 9 方向矩阵** (`herdr/review_benchmark.py`, `tests/test_review_benchmark.py`)：修复 `gp_d` 笔误为 `gr_d`，全面覆盖 9 种 (recall, precision) 变化组合。
+- 证据：
+  - 核心评测与集成测试：`tests/test_review_benchmark.py` 47/47 passed；
+  - 自动评审测试：`tests/test_auto_pr_review.py` 13/13 passed；
+  - 语法编译与格式检查：`py_compile`、`compileall`、`git diff --check` 全部 0 报错；
+  - S6 独立评审工件 `.omc/review-48423e5e-f483-48ea-af18-37b5f3b6b744.md` 裁定 `MERGE_READY`。

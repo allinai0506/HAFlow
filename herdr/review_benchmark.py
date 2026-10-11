@@ -24,6 +24,12 @@ import warnings
 VALID_CONTEXT_MODES = ("diff_only", "existing_four_tier")
 DEFAULT_CONTEXT_MODE = "existing_four_tier"
 DEFAULT_CONTEXT_BUDGET_CHARS = 35000
+DEFAULT_SYSTEM_PROMPT = (
+    "You are reviewing a Pull Request. Evaluate strictly based on the provided git diff "
+    "and assembled repository context below. Do not use external tools, run commands, "
+    "or inspect the local filesystem."
+)
+DEFAULT_RULE_SYSTEM_PROMPT = "You are reviewing a Pull Request."
 
 
 def validate_context_config(context_mode: Any = None, context_budget_chars: Any = None) -> Tuple[str, int]:
@@ -177,6 +183,123 @@ def resolve_agent_identity(
     }
 
 
+def aggregate_group_agent_identity(
+    samples: List[Dict[str, Any]],
+    base_agent_info: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Aggregate whole-group reviewer model identity across all benchmark samples.
+
+    Contract:
+    1. Each sample entering review retains its own identity result and evidence source.
+    2. Whole-group model_confirmed=True IF AND ONLY IF:
+       - At least one review attempt occurred (review_attempted == True);
+       - All attempted actual model identities have valid runtime evidence;
+       - All attempted model identities are confirmed (model_confirmed == True);
+       - Actual model identities are consistent across all attempts (no drift);
+       - No declared model mismatch against runtime evidence.
+    3. Any unconfirmed, unknown, or drifting sample permanently invalidates group confirmation.
+    4. Workspace preparation failure does not create review attempts or model evidence.
+    """
+    attempted_samples = [s for s in samples if s.get("review_attempted") is True]
+
+    agent_name = base_agent_info.get("agent", "unknown")
+    cli_version = base_agent_info.get("cli_version", "unknown")
+    claimed_model = (
+        base_agent_info.get("details", {}).get("requested_model")
+        or (base_agent_info.get("model_name") if base_agent_info.get("model_name") != "unknown" else None)
+    )
+
+    if not attempted_samples:
+        details = dict(base_agent_info.get("details", {}))
+        details["source"] = "no_review_attempts"
+        details["reason"] = "no review attempts occurred"
+        return {
+            "agent": agent_name,
+            "model_name": claimed_model or "unknown",
+            "cli_version": cli_version,
+            "model_confirmed": False,
+            "details": details,
+        }
+
+    observed_models: List[str] = []
+    unconfirmed_samples: List[Tuple[str, str, str]] = []
+    mismatch_samples: List[Tuple[str, str, str]] = []
+
+    for s in attempted_samples:
+        s_id = s.get("agent_identity") or {}
+        s_model = s_id.get("model_name") or "unknown"
+        s_conf = s_id.get("model_confirmed", False)
+        s_source = s_id.get("details", {}).get("source", "unknown")
+
+        valid_evidence = (
+            bool(s_conf)
+            and s_model not in ("unknown", None, "")
+            and s_source in ("runtime_evidence", "mock_runtime_evidence", "deterministic_rule")
+        )
+
+        if not valid_evidence:
+            unconfirmed_samples.append((s.get("key", "unknown"), s_model, s_source))
+        else:
+            observed_models.append(s_model)
+            if claimed_model and s_model != claimed_model:
+                mismatch_samples.append((s.get("key", "unknown"), claimed_model, s_model))
+
+    distinct_models = sorted(list(set(observed_models)))
+
+    details = dict(base_agent_info.get("details", {}))
+    if claimed_model:
+        details["requested_model"] = claimed_model
+
+    if unconfirmed_samples:
+        details["source"] = "unconfirmed_samples"
+        details["reason"] = f"unconfirmed model identity in {len(unconfirmed_samples)} attempt(s)"
+        details["unconfirmed_samples"] = unconfirmed_samples
+        return {
+            "agent": agent_name,
+            "model_name": distinct_models[0] if len(distinct_models) == 1 else (claimed_model or "unknown"),
+            "cli_version": cli_version,
+            "model_confirmed": False,
+            "details": details,
+        }
+
+    if len(distinct_models) > 1:
+        details["source"] = "runtime_drift"
+        details["mismatch"] = f"multiple models detected across samples: {distinct_models}"
+        details["observed_models"] = distinct_models
+        return {
+            "agent": agent_name,
+            "model_name": f"mixed: {','.join(distinct_models)}",
+            "cli_version": cli_version,
+            "model_confirmed": False,
+            "details": details,
+        }
+
+    if mismatch_samples:
+        details["source"] = "runtime_mismatch"
+        details["mismatch"] = f"claimed '{claimed_model}' but runtime evidence is '{distinct_models[0]}'"
+        details["mismatch_samples"] = mismatch_samples
+        return {
+            "agent": agent_name,
+            "model_name": distinct_models[0],
+            "cli_version": cli_version,
+            "model_confirmed": False,
+            "details": details,
+        }
+
+    # All conditions satisfied: exactly one confirmed model, matching declaration
+    confirmed_model = distinct_models[0]
+    details["source"] = "runtime_evidence"
+    details["observed_models"] = distinct_models
+    return {
+        "agent": agent_name,
+        "model_name": confirmed_model,
+        "cli_version": cli_version,
+        "model_confirmed": True,
+        "details": details,
+    }
+
+
+
 def pr_key(repo: str, pr_number: int, head: str) -> str:
     """Generate official ReviewBench PR key."""
     repo_name = repo.replace("https://github.com/", "").replace("/", "_")
@@ -230,12 +353,19 @@ def validate_manifest(manifest: List[Dict[str, Any]]) -> None:
     """Validate manifest list entries."""
     if not isinstance(manifest, list) or len(manifest) == 0:
         raise ValueError("Manifest must be a non-empty list of PR entries")
+    seen_keys = set()
     for idx, entry in enumerate(manifest):
         if not isinstance(entry, dict):
             raise ValueError(f"manifest[{idx}] must be an object")
         for key in ("repo", "pr_number", "base", "head"):
             if key not in entry:
                 raise ValueError(f"manifest[{idx}] missing '{key}'")
+        k = pr_key(entry["repo"], entry["pr_number"], entry["head"])
+        if k in seen_keys:
+            raise ValueError(
+                f"Duplicate PR entry detected: '{k}'. Duplicate cases cannot produce distinct candidate files."
+            )
+        seen_keys.add(k)
 
 
 def extract_and_validate_metrics(results_data: Any) -> Optional[Dict[str, Any]]:
@@ -676,9 +806,9 @@ def run_agent_review(
 
             # Rule-based detection: check diff patterns across the full diff for known HAFlow issues
             # Only trigger findings on the actual production code files touched by the diff, not tests/fixtures.
-            modified_files = {line[6:].strip() for line in diff_content.splitlines() if line.startswith("+++ b/")}
+            modified_files = {line[6:].strip() for line in effective_content.splitlines() if line.startswith("+++ b/")}
 
-            if "herdr/scheduler.py" in modified_files and "extract_task_candidate_sha" in diff_content and "baseline_commit" in diff_content:
+            if "herdr/scheduler.py" in modified_files and "extract_task_candidate_sha" in effective_content and "baseline_commit" in effective_content:
                 # Issue: evaluate_join_gate / extract_task_candidate_sha mixes claim and evidence without verification
                 findings.append({
                     "producer": agent_name,
@@ -687,7 +817,7 @@ def run_agent_review(
                     "end_line": 165,
                     "message": "extract_task_candidate_sha falls back to dispatch claim without verifying clone baseline evidence, causing unverified candidate claims to satisfy join gate",
                 })
-            if "herdr/fix_loop.py" in modified_files and 'blocker.get("task_id")' in diff_content:
+            if "herdr/fix_loop.py" in modified_files and 'blocker.get("task_id")' in effective_content:
                 # Issue: verdict_fingerprint incorporates transient task_id
                 findings.append({
                     "producer": agent_name,
@@ -696,7 +826,7 @@ def run_agent_review(
                     "end_line": 68,
                     "message": "verdict_fingerprint incorporates transient task_id, preventing repeat verdict detection across task generations and depleting fix-loop budget",
                 })
-            if "herdr/reverification.py" in modified_files and "decision_identity" in diff_content and "episode_id" not in diff_content:
+            if "herdr/reverification.py" in modified_files and "decision_identity" in effective_content and "episode_id" not in effective_content:
                 # Issue: decision_identity lacks candidate_frozen episode binding
                 findings.append({
                     "producer": agent_name,
@@ -713,12 +843,12 @@ def run_agent_review(
             # storage engine sidecar/coordination preconditions violates zero-side-effect isolation contract.
             if agent_name in ("rule-contract-v1", "rule-contract-context-v1"):
                 current_file = ""
-                for line in diff_content.splitlines():
+                for line in effective_content.splitlines():
                     if line.startswith("+++ b/"):
                         current_file = line[6:]
                     elif line.startswith("+") and not line.startswith("+++"):
                         m = re.match(r"^\+\s*def\s+([A-Za-z0-9_]*readonly[A-Za-z0-9_]*)\(", line, re.IGNORECASE)
-                        if m and not current_file.startswith("tests/") and "mode=ro" in diff_content and "query_only" in diff_content:
+                        if m and not current_file.startswith("tests/") and "mode=ro" in effective_content and "query_only" in effective_content:
                             fn_name = m.group(1)
                             findings.append({
                                 "producer": agent_name,
@@ -775,7 +905,10 @@ def run_agent_review(
             "agent": agent_name,
             "agent_identity": agent_identity,
             "findings": findings,
-            "usage": {"time_in_ms": int((time.time() - t0) * 1000), "tokens": None},
+            "usage": {
+                "time_in_ms": pr_info.get("mock_time_in_ms") if pr_info.get("mock_time_in_ms") is not None else int((time.time() - t0) * 1000),
+                "tokens": pr_info.get("mock_tokens") or pr_info.get("tokens"),
+            },
             "prompt_meta": {
                 "prompt_chars": prompt_chars,
                 "prompt_fingerprint": prompt_fingerprint,
@@ -1028,10 +1161,23 @@ def run_agent_review(
         except Exception:
             response_text = proc.stdout
 
+    eff_review_cfg = review_cfg or pr_info.get("review_cfg") or {}
+    sample_agent_identity = resolve_agent_identity(
+        agent_name,
+        review_cfg=eff_review_cfg,
+        runtime_evidence={"model": runtime_model} if runtime_model else None,
+        query_cli_version=False,
+    )
+
     try:
         findings = extract_findings_from_response(response_text, agent_name)
     except Exception as exc:
-        raise ValueError(f"output_parse_failed: {exc}\nRaw: {response_text[:300]}") from exc
+        err = ValueError(f"output_parse_failed: {exc}\nRaw: {response_text[:300]}")
+        err.token_usage = token_usage
+        err.tokens = token_usage
+        err.runtime_model = runtime_model
+        err.agent_identity = sample_agent_identity
+        raise err from exc
 
     # Reviewer Finding Verification V1: Fact-check candidate findings
     retained_findings = findings
@@ -1903,7 +2049,7 @@ def check_benchmark_comparability(
             f"模型不一致 (基线: '{b_model}', 改进版: '{a_model}')。违反单变量控制要求。"
         )
 
-    # 3. CLI Version & Agent Execution Params (Effort)
+    # 3. CLI Version & Agent Execution Params (Effort & Permissions)
     b_cli = b_agent.get("cli_version")
     a_cli = a_agent.get("cli_version")
     if b_cli and a_cli and b_cli != "unknown" and a_cli != "unknown" and b_cli != "internal-rule" and a_cli != "internal-rule" and b_cli != a_cli:
@@ -1911,16 +2057,23 @@ def check_benchmark_comparability(
 
     b_effort = b_agent.get("details", {}).get("effort")
     a_effort = a_agent.get("details", {}).get("effort")
-    if b_effort and a_effort and b_effort != a_effort:
+    if b_effort and a_effort and b_effort != "N/A" and a_effort != "N/A" and b_effort != a_effort:
         discrepancies.append(f"推理强度/思考预算 (effort) 不一致 (基线: '{b_effort}', 改进版: '{a_effort}')。")
 
-    # 4. Context Mode Independent Variable
+    b_perm = b_agent.get("details", {}).get("permission_flag")
+    a_perm = a_agent.get("details", {}).get("permission_flag")
+    if b_perm and a_perm and b_perm != "N/A" and a_perm != "N/A" and b_perm != a_perm:
+        discrepancies.append(f"权限模式 (permission_flag) 不一致 (基线: '{b_perm}', 改进版: '{a_perm}')。")
+
+    # 4. Context Mode Independent Variable & Direction
     b_mode = b_cfg.get("context_mode") or b_exec.get("requested_context_mode") or b_version.get("context_mode")
     a_mode = a_cfg.get("context_mode") or a_exec.get("requested_context_mode") or a_version.get("context_mode")
     if not b_mode or not a_mode:
         discrepancies.append("缺少请求上下文模式记录，无法验证对照自变量。")
     elif b_mode == a_mode:
         discrepancies.append(f"两组请求上下文模式相同 ('{b_mode}')，未构成 diff_only 与 existing_four_tier 的上下文对照自变量。")
+    elif b_mode != "diff_only" or a_mode != "existing_four_tier":
+        discrepancies.append(f"对照方向不符合标准要求 (必须为基线 diff_only → 改进版 existing_four_tier，实际为 '{b_mode}' → '{a_mode}')。")
 
     # 5. Context Budget
     b_budget = b_cfg.get("context_budget_chars") or b_exec.get("context_budget_chars") or b_version.get("context_budget_chars")
@@ -1932,7 +2085,35 @@ def check_benchmark_comparability(
             f"上下文预算上限不一致 (基线: {b_budget} 字符, 改进版: {a_budget} 字符)。"
         )
 
-    # 6. Fallbacks
+    # 6. Execution Config: Effective Timeout & System Prompt
+    b_exec_cfg = before_results.get("execution_config") or b_exec.get("execution_config") or {}
+    a_exec_cfg = after_results.get("execution_config") or a_exec.get("execution_config") or {}
+
+    b_timeout = b_exec_cfg.get("timeout_seconds") if "timeout_seconds" in b_exec_cfg else b_version.get("timeout_seconds")
+    a_timeout = a_exec_cfg.get("timeout_seconds") if "timeout_seconds" in a_exec_cfg else a_version.get("timeout_seconds")
+    if b_timeout is None or a_timeout is None:
+        discrepancies.append("缺少超时时间配置记录，无法确认执行条件一致。")
+    elif b_timeout != a_timeout:
+        discrepancies.append(f"超时时间不一致 (基线: {b_timeout} 秒, 改进版: {a_timeout} 秒)。")
+
+    b_sp_fp = (
+        b_exec_cfg.get("system_prompt_fingerprint")
+        or b_version.get("system_prompt_fingerprint")
+        or (hashlib.sha256(b_exec_cfg["system_prompt"].encode("utf-8")).hexdigest() if "system_prompt" in b_exec_cfg and b_exec_cfg["system_prompt"] is not None else None)
+    )
+    a_sp_fp = (
+        a_exec_cfg.get("system_prompt_fingerprint")
+        or a_version.get("system_prompt_fingerprint")
+        or (hashlib.sha256(a_exec_cfg["system_prompt"].encode("utf-8")).hexdigest() if "system_prompt" in a_exec_cfg and a_exec_cfg["system_prompt"] is not None else None)
+    )
+    if not b_sp_fp or not a_sp_fp:
+        discrepancies.append("缺少系统提示词/指令指纹记录，无法确认提示词一致性。")
+    elif b_sp_fp != a_sp_fp:
+        b_sp = b_exec_cfg.get("system_prompt", b_sp_fp[:8])
+        a_sp = a_exec_cfg.get("system_prompt", a_sp_fp[:8])
+        discrepancies.append(f"系统提示词/指令不一致 (基线: '{b_sp}', 改进版: '{a_sp}')。")
+
+    # 7. Fallbacks
     b_fallbacks = b_exec.get("fallback_count", 0)
     a_fallbacks = a_exec.get("fallback_count", 0)
     if b_fallbacks > 0 or a_fallbacks > 0:
@@ -1940,15 +2121,25 @@ def check_benchmark_comparability(
             f"评测包含降级样本 (基线降级 {b_fallbacks} 例, 改进版降级 {a_fallbacks} 例)。降级样本已退回基础 diff，无法完整代表请求的上下文模式。"
         )
 
-    # 7. Manifest PR Samples & Base/Head SHA Consistency
+    # 8. Manifest PR Samples & Base/Head SHA & Base Diff Fingerprint
     b_samples = b_exec.get("samples") or []
     a_samples = a_exec.get("samples") or []
-    if b_samples and a_samples:
+    if not b_samples or not a_samples:
+        discrepancies.append("缺少评测样本记录，无法确认样本一致性。")
+    else:
+        if len(b_samples) != len(a_samples):
+            discrepancies.append(
+                f"评测 PR 样本数量不一致 (基线包含 {len(b_samples)} 个案例，改进版包含 {len(a_samples)} 个案例)。"
+            )
         b_keys = [s.get("key") for s in b_samples if s.get("key")]
         a_keys = [s.get("key") for s in a_samples if s.get("key")]
         if set(b_keys) != set(a_keys):
             discrepancies.append(
                 f"评测 PR 集合不一致 (基线包含 {len(b_keys)} 个案例，改进版包含 {len(a_keys)} 个案例，重合 {len(set(b_keys) & set(a_keys))} 个)。未在相同 PR 集合上进行对照。"
+            )
+        elif b_keys != a_keys:
+            discrepancies.append(
+                f"评测 PR 顺序不一致 (基线案例顺序与改进版不匹配)。未在相同 PR 顺序上进行对照。"
             )
         else:
             b_smap = {s["key"]: s for s in b_samples if "key" in s}
@@ -1963,7 +2154,14 @@ def check_benchmark_comparability(
                 if bs.get("base_diff_chars") and as_.get("base_diff_chars") and bs.get("base_diff_chars") != as_.get("base_diff_chars"):
                     discrepancies.append(f"案例 {k} 的基础 diff 长度不一致 (基线: {bs.get('base_diff_chars')} 字符, 改进版: {as_.get('base_diff_chars')} 字符)。未满足相同基础 diff 契约。")
 
-    # 8. Planned, Completed, Failed Sample Counts (Denominator Verification)
+                b_diff_fp = bs.get("base_diff_fingerprint")
+                a_diff_fp = as_.get("base_diff_fingerprint")
+                if not b_diff_fp or not a_diff_fp:
+                    discrepancies.append(f"案例 {k} 缺少基础 diff 内容指纹记录，无法确认基础 diff 内容一致。")
+                elif b_diff_fp != a_diff_fp:
+                    discrepancies.append(f"案例 {k} 的基础 diff 内容指纹不一致。")
+
+    # 9. Planned, Completed, Failed Sample Counts (Denominator Verification)
     b_plan = b_exec.get("total_planned")
     a_plan = a_exec.get("total_planned")
     b_done = b_exec.get("completed")
@@ -1982,7 +2180,12 @@ def check_benchmark_comparability(
     if b_done is not None and a_done is not None and b_done != a_done:
         discrepancies.append(f"完成案例数不一致 (基线完成 {b_done}, 改进版完成 {a_done})。")
 
-    # 9. Judge Configuration
+    if b_plan is not None and len(b_samples) != b_plan:
+        discrepancies.append(f"基线样本记录数 ({len(b_samples)}) 与计划数 ({b_plan}) 不吻合。")
+    if a_plan is not None and len(a_samples) != a_plan:
+        discrepancies.append(f"改进版样本记录数 ({len(a_samples)}) 与计划数 ({a_plan}) 不吻合。")
+
+    # 10. Judge Configuration
     b_judge = before_results.get("judge_config") or b_version.get("judge_config")
     a_judge = after_results.get("judge_config") or a_version.get("judge_config")
     if not b_judge or not a_judge:
@@ -1990,7 +2193,7 @@ def check_benchmark_comparability(
     elif b_judge != a_judge:
         discrepancies.append(f"裁判模型配置不一致 (基线: '{b_judge}', 改进版: '{a_judge}')。")
 
-    # 10. Scorer Version (SHA)
+    # 11. Scorer Version (SHA)
     b_scorer = before_results.get("scorer_sha") or b_version.get("scorer_sha")
     a_scorer = after_results.get("scorer_sha") or a_version.get("scorer_sha")
     if not b_scorer or not a_scorer:
@@ -2285,7 +2488,7 @@ def compare_benchmarks(
                 f"需结合业务对误报的容忍度综合评估。"
             )
         else:
-            r_text = f"召回率提升 {gr_d}" if r_improved else f"召回率下降 {gp_d}"
+            r_text = f"召回率提升 {gr_d}" if r_improved else f"召回率下降 {gr_d}"
             quality_desc = (
                 f"在当前受测 reviewer 上，基础准确率持平 ({gp_d})，但{r_text}。"
             )

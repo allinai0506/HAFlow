@@ -18,6 +18,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from typing import Any, Dict, List, Optional, Tuple
 import unittest
 
 HERDR_ROOT = Path(__file__).resolve().parent.parent
@@ -26,7 +27,9 @@ sys.path.insert(0, str(HERDR_ROOT))
 from herdr.review_benchmark import (
     DEFAULT_CONTEXT_BUDGET_CHARS,
     DEFAULT_CONTEXT_MODE,
+    DEFAULT_SYSTEM_PROMPT,
     VALID_CONTEXT_MODES,
+    aggregate_group_agent_identity,
     check_benchmark_comparability,
     compare_benchmarks,
     extract_and_validate_metrics,
@@ -867,9 +870,19 @@ class TestReviewBenchContextModes(unittest.TestCase):
         base_run = {
             "status": "completed",
             "context_config": {"context_mode": "diff_only", "context_budget_chars": 35000},
+            "judge_config": "deepseek/deepseek-v4-flash",
+            "scorer_sha": "e1cb1a0dad8105ebea45caa00c194eaf2d2e7b5d",
+            "execution_config": {
+                "timeout_seconds": 300,
+                "system_prompt": "You are reviewing a Pull Request.",
+                "system_prompt_fingerprint": "hash_sp_default",
+                "context_budget_chars": 35000,
+                "context_mode": "diff_only",
+            },
             "execution_summary": {
                 "total_planned": 1,
                 "completed": 1,
+                "failed": 0,
                 "fallback_count": 0,
                 "elapsed_seconds": 10.0,
                 "agent_identity": {
@@ -878,6 +891,15 @@ class TestReviewBenchContextModes(unittest.TestCase):
                     "model_confirmed": True,
                     "cli_version": "1.3.3",
                 },
+                "samples": [
+                    {
+                        "key": "pr_1",
+                        "base": "a" * 40,
+                        "head": "b" * 40,
+                        "base_diff_chars": 1000,
+                        "base_diff_fingerprint": "fp_diff_1",
+                    }
+                ],
             },
             "usage_summary": {
                 "total_review_time_ms": 8000,
@@ -1034,6 +1056,13 @@ class TestReviewBenchContextModes(unittest.TestCase):
             "context_config": {"context_mode": "diff_only", "context_budget_chars": 35000},
             "judge_config": "deepseek/deepseek-v4-flash",
             "scorer_sha": "e1cb1a0dad8105ebea45caa00c194eaf2d2e7b5d",
+            "execution_config": {
+                "timeout_seconds": 300,
+                "system_prompt": "You are reviewing a Pull Request.",
+                "system_prompt_fingerprint": "hash_sp_default",
+                "context_budget_chars": 35000,
+                "context_mode": "diff_only",
+            },
             "execution_summary": {
                 "total_planned": 2,
                 "completed": 2,
@@ -1047,8 +1076,8 @@ class TestReviewBenchContextModes(unittest.TestCase):
                     "details": {"effort": "low"},
                 },
                 "samples": [
-                    {"key": "pr_1", "base": "aaa", "head": "bbb", "base_diff_chars": 1000},
-                    {"key": "pr_2", "base": "ccc", "head": "ddd", "base_diff_chars": 2000},
+                    {"key": "pr_1", "base": "aaa", "head": "bbb", "base_diff_chars": 1000, "base_diff_fingerprint": "fp_1"},
+                    {"key": "pr_2", "base": "ccc", "head": "ddd", "base_diff_chars": 2000, "base_diff_fingerprint": "fp_2"},
                 ],
             },
         }
@@ -1057,8 +1086,8 @@ class TestReviewBenchContextModes(unittest.TestCase):
         cand_keys = json.loads(json.dumps(base_run))
         cand_keys["context_config"]["context_mode"] = "existing_four_tier"
         cand_keys["execution_summary"]["samples"] = [
-            {"key": "pr_1", "base": "aaa", "head": "bbb", "base_diff_chars": 1000},
-            {"key": "pr_999", "base": "ccc", "head": "ddd", "base_diff_chars": 2000},
+            {"key": "pr_1", "base": "aaa", "head": "bbb", "base_diff_chars": 1000, "base_diff_fingerprint": "fp_1"},
+            {"key": "pr_999", "base": "ccc", "head": "ddd", "base_diff_chars": 2000, "base_diff_fingerprint": "fp_2"},
         ]
         is_comp, disc = check_benchmark_comparability(base_run, cand_keys)
         self.assertFalse(is_comp)
@@ -1163,13 +1192,28 @@ class TestReviewBenchContextModes(unittest.TestCase):
             "context_config": {"context_mode": "diff_only", "context_budget_chars": 35000},
             "judge_config": "deepseek/deepseek-v4-flash",
             "scorer_sha": "e1cb1a0dad8105ebea45caa00c194eaf2d2e7b5d",
+            "execution_config": {
+                "timeout_seconds": 300,
+                "system_prompt": "You are reviewing a Pull Request.",
+                "system_prompt_fingerprint": "hash_sp_default",
+                "context_budget_chars": 35000,
+                "context_mode": "diff_only",
+            },
             "execution_summary": {
                 "total_planned": 1,
                 "completed": 1,
                 "failed": 0,
                 "fallback_count": 0,
                 "agent_identity": {"agent": "agy", "model_name": "gemini", "model_confirmed": True},
-                "samples": [{"key": "1"}],
+                "samples": [
+                    {
+                        "key": "1",
+                        "base": "a" * 40,
+                        "head": "b" * 40,
+                        "base_diff_chars": 100,
+                        "base_diff_fingerprint": "fp_diff_1",
+                    }
+                ],
             },
             "usage_summary": {},
             "metrics": {"overall": {"grounded_recall": 0.50, "grounded_precision": 0.80, "augmented_recall": 0.50, "augmented_precision": 0.80}},
@@ -1261,6 +1305,686 @@ class TestReviewBenchContextModes(unittest.TestCase):
             res = subprocess.run(cmd, capture_output=True, text=True)
             self.assertNotEqual(res.returncode, 0)
             self.assertIn("Invalid review context configuration", res.stderr)
+
+    def test_quality_decision_9_directions_matrix(self):
+        """Test all 9 combinations of (recall, precision) delta: up, flat, down."""
+        directions = [
+            # (b_rec, a_rec, b_prec, a_prec, expected_substrings, forbidden_substrings)
+            # 1. both up
+            (0.5, 0.7, 0.6, 0.8, ["均实现提升", "+20.0%", "+20.0%"], ["下滑", "权衡"]),
+            # 2. both down
+            (0.7, 0.5, 0.8, 0.6, ["均出现下滑", "-20.0%", "-20.0%"], ["提升", "权衡"]),
+            # 3. recall up, precision down -> trade-off
+            (0.5, 0.7, 0.8, 0.6, ["反向权衡", "+20.0%", "-20.0%"], ["均实现提升"]),
+            # 4. recall down, precision up -> trade-off
+            (0.7, 0.5, 0.6, 0.8, ["反向权衡", "-20.0%", "+20.0%"], ["均实现提升"]),
+            # 5. both flat
+            (0.5, 0.5, 0.6, 0.6, ["完全持平", "+0.0%", "+0.0%"], ["下滑", "提升"]),
+            # 6. recall flat, precision down
+            (0.5, 0.5, 0.8, 0.6, ["准确率下降 -20.0%", "不应视为质量持平"], ["完全持平"]),
+            # 7. recall flat, precision up
+            (0.5, 0.5, 0.6, 0.8, ["准确率提高 +20.0%"], ["不应视为质量持平"]),
+            # 8. recall up, precision flat
+            (0.5, 0.7, 0.6, 0.6, ["召回率提升 +20.0%"], ["不应视为质量持平"]),
+            # 9. recall down, precision flat -> MUST use gr_d (-30.0%), NOT gp_d (+0.0%)!
+            (0.5, 0.2, 0.8, 0.8, ["召回率下降 -30.0%"], ["召回率下降 +0.0%"]),
+        ]
+
+        base_run = {
+            "status": "completed",
+            "context_config": {"context_mode": "diff_only", "context_budget_chars": 35000},
+            "judge_config": "deepseek/deepseek-v4-flash",
+            "scorer_sha": "e1cb1a0dad8105ebea45caa00c194eaf2d2e7b5d",
+            "execution_config": {
+                "timeout_seconds": 300,
+                "system_prompt": "You are reviewing a Pull Request.",
+                "system_prompt_fingerprint": "hash_sp_default",
+                "context_budget_chars": 35000,
+                "context_mode": "diff_only",
+            },
+            "execution_summary": {
+                "total_planned": 1,
+                "completed": 1,
+                "failed": 0,
+                "fallback_count": 0,
+                "agent_identity": {"agent": "agy", "model_name": "gemini", "model_confirmed": True},
+                "samples": [
+                    {
+                        "key": "1",
+                        "base": "a" * 40,
+                        "head": "b" * 40,
+                        "base_diff_chars": 100,
+                        "base_diff_fingerprint": "fp_diff_1",
+                    }
+                ],
+            },
+            "usage_summary": {},
+            "metrics": {"overall": {}},
+        }
+
+        for idx, (b_rec, a_rec, b_prec, a_prec, exp_subs, forb_subs) in enumerate(directions):
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                tmp = Path(tmp_dir)
+                b_dir = tmp / "b"
+                a_dir = tmp / "a"
+                b_dir.mkdir()
+                a_dir.mkdir()
+
+                b_data = json.loads(json.dumps(base_run))
+                b_data["metrics"]["overall"] = {
+                    "grounded_recall": b_rec,
+                    "grounded_precision": b_prec,
+                    "augmented_recall": b_rec,
+                    "augmented_precision": b_prec,
+                }
+                a_data = json.loads(json.dumps(base_run))
+                a_data["context_config"]["context_mode"] = "existing_four_tier"
+                a_data["metrics"]["overall"] = {
+                    "grounded_recall": a_rec,
+                    "grounded_precision": a_prec,
+                    "augmented_recall": a_rec,
+                    "augmented_precision": a_prec,
+                }
+
+                (b_dir / "results.json").write_text(json.dumps(b_data), encoding="utf-8")
+                (a_dir / "results.json").write_text(json.dumps(a_data), encoding="utf-8")
+
+                report = compare_benchmarks(b_dir, a_dir)
+                for sub in exp_subs:
+                    self.assertIn(sub, report, f"Direction {idx} expected '{sub}' in report: {report}")
+                for sub in forb_subs:
+                    self.assertNotIn(sub, report, f"Direction {idx} forbidden '{sub}' in report: {report}")
+
+    def test_comparability_rejects_divergent_prompts_and_timeouts(self):
+        """Strict comparability must reject runs with divergent system prompts, timeouts, or reversed mode direction."""
+        base_run = {
+            "status": "completed",
+            "context_config": {"context_mode": "diff_only", "context_budget_chars": 35000},
+            "judge_config": "deepseek/deepseek-v4-flash",
+            "scorer_sha": "e1cb1a0dad8105ebea45caa00c194eaf2d2e7b5d",
+            "execution_config": {
+                "timeout_seconds": 300,
+                "system_prompt": "Check only security.",
+                "system_prompt_fingerprint": "hash_sec",
+                "context_budget_chars": 35000,
+                "context_mode": "diff_only",
+            },
+            "execution_summary": {
+                "total_planned": 1,
+                "completed": 1,
+                "failed": 0,
+                "fallback_count": 0,
+                "agent_identity": {
+                    "agent": "agy",
+                    "model_name": "gemini",
+                    "model_confirmed": True,
+                    "cli_version": "1.3.3",
+                    "details": {"effort": "low"},
+                },
+                "samples": [
+                    {
+                        "key": "pr_1",
+                        "base": "a" * 40,
+                        "head": "b" * 40,
+                        "base_diff_chars": 1000,
+                        "base_diff_fingerprint": "fp_diff_123",
+                    }
+                ],
+            },
+            "version_info": {
+                "judge_config": "deepseek/deepseek-v4-flash",
+                "scorer_sha": "e1cb1a0dad8105ebea45caa00c194eaf2d2e7b5d",
+            },
+            "metrics": {
+                "overall": {
+                    "grounded_recall": 0.5,
+                    "grounded_precision": 0.5,
+                    "augmented_recall": 0.5,
+                    "augmented_precision": 0.5,
+                }
+            },
+        }
+
+        # Subtest 1: System prompt divergence
+        cand_diff_prompt = json.loads(json.dumps(base_run))
+        cand_diff_prompt["context_config"]["context_mode"] = "existing_four_tier"
+        cand_diff_prompt["execution_config"]["system_prompt"] = "Check only naming."
+        cand_diff_prompt["execution_config"]["system_prompt_fingerprint"] = "hash_naming"
+        is_comp, disc = check_benchmark_comparability(base_run, cand_diff_prompt)
+        self.assertFalse(is_comp, "Divergent system prompts should not be strictly comparable")
+        self.assertTrue(any("提示词" in d or "prompt" in d.lower() for d in disc))
+
+        # Subtest 2: Timeout divergence (300 vs 1)
+        cand_diff_timeout = json.loads(json.dumps(base_run))
+        cand_diff_timeout["context_config"]["context_mode"] = "existing_four_tier"
+        cand_diff_timeout["execution_config"]["timeout_seconds"] = 1
+        is_comp, disc = check_benchmark_comparability(base_run, cand_diff_timeout)
+        self.assertFalse(is_comp, "Divergent timeouts should not be strictly comparable")
+        self.assertTrue(any("超时" in d or "timeout" in d.lower() for d in disc))
+
+        # Subtest 3: Reversed mode direction (existing_four_tier -> diff_only)
+        rev_base = json.loads(json.dumps(base_run))
+        rev_base["context_config"]["context_mode"] = "existing_four_tier"
+        rev_cand = json.loads(json.dumps(base_run))
+        rev_cand["context_config"]["context_mode"] = "diff_only"
+        is_comp, disc = check_benchmark_comparability(rev_base, rev_cand)
+        self.assertFalse(is_comp, "Reversed direction should not be strictly comparable")
+        self.assertTrue(any("对照方向" in d or "diff_only" in d for d in disc))
+
+        # Subtest 4: Missing base diff fingerprint
+        cand_no_fp = json.loads(json.dumps(base_run))
+        cand_no_fp["context_config"]["context_mode"] = "existing_four_tier"
+        del cand_no_fp["execution_summary"]["samples"][0]["base_diff_fingerprint"]
+        is_comp, disc = check_benchmark_comparability(base_run, cand_no_fp)
+        self.assertFalse(is_comp, "Missing base diff fingerprint should not be strictly comparable")
+        self.assertTrue(any("指纹" in d or "fingerprint" in d.lower() for d in disc))
+
+
+class TestGroupModelIdentityTable(unittest.TestCase):
+    """Unit tests for Section A: Group model identity aggregation across 6 contract scenarios."""
+
+    def test_aggregate_group_agent_identity_6_scenarios_table(self):
+        # Case 1: No declaration, A -> A => Confirmed A
+        base_unclaimed = {"agent": "agy", "model_name": "unknown", "cli_version": "1.3.3", "model_confirmed": False, "details": {}}
+        s_a1 = {"review_attempted": True, "agent_identity": {"model_name": "gemini-2.5", "model_confirmed": True, "details": {"source": "runtime_evidence"}}}
+        s_a2 = {"review_attempted": True, "agent_identity": {"model_name": "gemini-2.5", "model_confirmed": True, "details": {"source": "runtime_evidence"}}}
+        res1 = aggregate_group_agent_identity([s_a1, s_a2], base_unclaimed)
+        self.assertTrue(res1["model_confirmed"])
+        self.assertEqual(res1["model_name"], "gemini-2.5")
+
+        # Case 2: No declaration, A -> B -> A => Unconfirmed, preserves runtime_drift
+        s_b = {"review_attempted": True, "agent_identity": {"model_name": "claude-3.7", "model_confirmed": True, "details": {"source": "runtime_evidence"}}}
+        res2 = aggregate_group_agent_identity([s_a1, s_b, s_a2], base_unclaimed)
+        self.assertFalse(res2["model_confirmed"])
+        self.assertEqual(res2["details"].get("source"), "runtime_drift")
+        self.assertIn("multiple models detected", res2["details"].get("mismatch", ""))
+
+        # Case 3: No declaration, unknown -> A => Unconfirmed, preserves unconfirmed_samples
+        s_unk = {"review_attempted": True, "agent_identity": {"model_name": "unknown", "model_confirmed": False, "details": {"source": "unknown"}}}
+        res3 = aggregate_group_agent_identity([s_unk, s_a1], base_unclaimed)
+        self.assertFalse(res3["model_confirmed"])
+        self.assertEqual(res3["details"].get("source"), "unconfirmed_samples")
+
+        # Case 4: Declared A, A -> unknown => Unconfirmed
+        base_decl_a = {"agent": "agy", "model_name": "gemini-2.5", "cli_version": "1.3.3", "model_confirmed": False, "details": {"requested_model": "gemini-2.5"}}
+        res4 = aggregate_group_agent_identity([s_a1, s_unk], base_decl_a)
+        self.assertFalse(res4["model_confirmed"])
+        self.assertEqual(res4["details"].get("source"), "unconfirmed_samples")
+
+        # Case 5: Declared A, B -> A => Unconfirmed, preserves mismatch / drift
+        res5 = aggregate_group_agent_identity([s_b, s_a1], base_decl_a)
+        self.assertFalse(res5["model_confirmed"])
+        self.assertIn(res5["details"].get("source"), ("runtime_drift", "runtime_mismatch"))
+
+        # Case 6: Any declaration, no review attempts => Unconfirmed, preserves no_review_attempts
+        s_no_attempt = {"review_attempted": False, "error": "workspace_prep_failed"}
+        res6 = aggregate_group_agent_identity([s_no_attempt], base_decl_a)
+        self.assertFalse(res6["model_confirmed"])
+        self.assertEqual(res6["details"].get("source"), "no_review_attempts")
+        self.assertEqual(res6["details"].get("reason"), "no review attempts occurred")
+
+
+class TestTokenCoverageAndTimingContracts(unittest.TestCase):
+    """Unit tests for Section C (Token failure coverage) and Section D (Review timing boundary)."""
+
+    def test_token_coverage_aggregation_scenarios(self):
+        # Helper to compute usage summary using the exact bin/herdr-review-bench logic
+        def compute_tokens(samples, review_attempts):
+            token_metrics = ["input_tokens", "output_tokens", "thinking_tokens", "total_tokens"]
+            token_stats = {k: {"sum": 0, "count": 0} for k in token_metrics}
+            for s in samples:
+                if s.get("review_attempted") is True:
+                    toks = s.get("tokens")
+                    if isinstance(toks, dict):
+                        inp = toks.get("input_tokens")
+                        out = toks.get("output_tokens")
+                        thk = toks.get("thinking_tokens")
+                        tot = toks.get("total_tokens")
+                        for k, v in [("input_tokens", inp), ("output_tokens", out), ("thinking_tokens", thk), ("total_tokens", tot)]:
+                            if isinstance(v, (int, float)):
+                                token_stats[k]["sum"] += int(v)
+                                token_stats[k]["count"] += 1
+            token_details = {}
+            formatted = {}
+            for k in token_metrics:
+                c = token_stats[k]["count"]
+                s = token_stats[k]["sum"]
+                if review_attempts == 0 or c == 0:
+                    formatted[k] = "未知"
+                    token_details[k] = {"raw_sum": None, "count": 0, "total_samples": review_attempts, "is_complete": False}
+                elif c == review_attempts:
+                    formatted[k] = s
+                    token_details[k] = {"raw_sum": s, "count": c, "total_samples": review_attempts, "is_complete": True}
+                else:
+                    formatted[k] = f"{s} (已知部分合计: {c}/{review_attempts} 样本)"
+                    token_details[k] = {"raw_sum": s, "count": c, "total_samples": review_attempts, "is_complete": False}
+            return formatted, token_details
+
+        # Scenario 1: Only input=100, output=20 -> thinking, total remain unknown
+        s1 = [{"review_attempted": True, "tokens": {"input_tokens": 100, "output_tokens": 20}}]
+        fmt1, dtl1 = compute_tokens(s1, 1)
+        self.assertEqual(fmt1["input_tokens"], 100)
+        self.assertTrue(dtl1["input_tokens"]["is_complete"])
+        self.assertEqual(fmt1["output_tokens"], 20)
+        self.assertTrue(dtl1["output_tokens"]["is_complete"])
+        self.assertEqual(fmt1["thinking_tokens"], "未知")
+        self.assertFalse(dtl1["thinking_tokens"]["is_complete"])
+        self.assertEqual(fmt1["total_tokens"], "未知")
+        self.assertFalse(dtl1["total_tokens"]["is_complete"])
+
+        # Scenario 2: Two success attempts, one without usage, one total=120 -> total=120, coverage 1/2
+        s2 = [
+            {"review_attempted": True, "tokens": None},
+            {"review_attempted": True, "tokens": {"total_tokens": 120}},
+        ]
+        fmt2, dtl2 = compute_tokens(s2, 2)
+        self.assertEqual(fmt2["total_tokens"], "120 (已知部分合计: 1/2 样本)")
+        self.assertFalse(dtl2["total_tokens"]["is_complete"])
+        self.assertEqual(dtl2["total_tokens"]["raw_sum"], 120)
+
+        # Scenario 3: One timeout usage unknown, one success total=120 -> coverage 1/2
+        s3 = [
+            {"review_attempted": True, "status": "failed", "tokens": None},
+            {"review_attempted": True, "status": "completed", "tokens": {"total_tokens": 120}},
+        ]
+        fmt3, dtl3 = compute_tokens(s3, 2)
+        self.assertEqual(fmt3["total_tokens"], "120 (已知部分合计: 1/2 样本)")
+        self.assertFalse(dtl3["total_tokens"]["is_complete"])
+
+        # Scenario 4: One prep failure not entering review, one success total=120 -> review attempts=1, coverage 1/1
+        s4 = [
+            {"review_attempted": False, "status": "failed", "tokens": None},
+            {"review_attempted": True, "status": "completed", "tokens": {"total_tokens": 120}},
+        ]
+        fmt4, dtl4 = compute_tokens(s4, 1)
+        self.assertEqual(fmt4["total_tokens"], 120)
+        self.assertTrue(dtl4["total_tokens"]["is_complete"])
+
+        # Scenario 5: Received usage then findings parse failed -> sample failed, usage preserved and counted
+        s5 = [
+            {"review_attempted": True, "status": "failed", "tokens": {"total_tokens": 80}},
+            {"review_attempted": True, "status": "completed", "tokens": {"total_tokens": 120}},
+        ]
+        fmt5, dtl5 = compute_tokens(s5, 2)
+        self.assertEqual(fmt5["total_tokens"], 200)
+        self.assertTrue(dtl5["total_tokens"]["is_complete"])
+
+        # Scenario 6: No review attempts -> tokens_available False, all unknown
+        s6 = [
+            {"review_attempted": False, "status": "failed"},
+        ]
+        fmt6, dtl6 = compute_tokens(s6, 0)
+        self.assertEqual(fmt6["total_tokens"], "未知")
+        self.assertFalse(dtl6["total_tokens"]["is_complete"])
+
+    def test_timing_boundary_contracts(self):
+        # Scenario 1: First sample prep 7s, fails (not reviewed); Second sample prep 2s, review 3s
+        # -> review_attempts: 1, total_review_time: 3s, avg_review_time: 3s
+        t_rev_total_1 = 3000
+        attempts_1 = 1
+        avg_1 = round(t_rev_total_1 / attempts_1, 2) if attempts_1 > 0 else None
+        self.assertEqual(avg_1, 3000.0)
+
+        # Scenario 2: First sample prep 2s, review 300s timeout; Second prep 2s, review 3s success
+        # -> review_attempts: 2, total_review_time: 303s, avg_review_time: 151.5s
+        t_rev_total_2 = 303000
+        attempts_2 = 2
+        avg_2 = round(t_rev_total_2 / attempts_2, 2) if attempts_2 > 0 else None
+        self.assertEqual(avg_2, 151500.0)
+
+        # Scenario 3: 0 review attempts -> avg is None, NOT max(count, 1) fabricated
+        attempts_0 = 0
+        avg_0 = round(0 / attempts_0, 2) if attempts_0 > 0 else None
+        self.assertIsNone(avg_0)
+
+
+class TestRealCallChainIntegration(unittest.TestCase):
+    """End-to-end integration tests for cmd_run and compare_benchmarks verifying real call chains."""
+
+    @classmethod
+    def setUpClass(cls):
+        from importlib.machinery import SourceFileLoader
+        import importlib.util
+        hrb_path = HERDR_ROOT / "bin" / "herdr-review-bench"
+        loader = SourceFileLoader("hrb_integration", str(hrb_path))
+        spec = importlib.util.spec_from_loader("hrb_integration", loader)
+        cls.hrb = importlib.util.module_from_spec(spec)
+        loader.exec_module(cls.hrb)
+
+    def _run_with_mock_judge(self, config_file: Path, output_dir: Path, judge_metrics: Optional[Dict[str, Any]] = None):
+        import argparse
+        import unittest.mock
+
+        metrics = judge_metrics or {
+            "overall": {
+                "grounded_recall": 0.5,
+                "grounded_precision": 0.8,
+                "augmented_recall": 0.5,
+                "augmented_precision": 0.8,
+            }
+        }
+
+        orig_sp_run = subprocess.run
+
+        def mock_subprocess_run(cmd, *args, **kwargs):
+            if isinstance(cmd, list) and len(cmd) > 2 and cmd[0] == "npm" and cmd[1] == "run" and cmd[2] == "judge":
+                out_idx = cmd.index("--output")
+                rf = Path(cmd[out_idx + 1])
+                rf.parent.mkdir(parents=True, exist_ok=True)
+                rf.write_text(json.dumps({"metrics": metrics}), encoding="utf-8")
+                return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="judge success", stderr="")
+            return orig_sp_run(cmd, *args, **kwargs)
+
+        with unittest.mock.patch.object(self.hrb, "find_or_setup_reviewbench", return_value=(output_dir, "e1cb1a0dad8105ebea45caa00c194eaf2d2e7b5d")):
+            with unittest.mock.patch("subprocess.run", side_effect=mock_subprocess_run):
+                args = argparse.Namespace(config=str(config_file), output=str(output_dir))
+                return self.hrb.cmd_run(args)
+
+    def test_integration_1_strict_context_comparison_holds(self):
+        """Integration I: diff_only -> existing_four_tier pairing strictly comparable via real cmd_run."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            mf = tmp / "manifest.json"
+            with open(HERDR_ROOT / "tests/fixtures/review_benchmark/corpus/manifest.json", encoding="utf-8") as f:
+                mf_data = json.load(f)[:1]
+            mf.write_text(json.dumps(mf_data), encoding="utf-8")
+
+            b_cfg = tmp / "b_cfg.yaml"
+            b_cfg.write_text(f"""
+name: b_diff_only
+agent: rule
+benchmark:
+  manifest: {mf}
+review:
+  context_mode: diff_only
+  context_budget_chars: 35000
+  timeout_seconds: 300
+""")
+            b_out = tmp / "b_out"
+
+            a_cfg = tmp / "a_cfg.yaml"
+            a_cfg.write_text(f"""
+name: a_ctx
+agent: rule
+benchmark:
+  manifest: {mf}
+review:
+  context_mode: existing_four_tier
+  context_budget_chars: 35000
+  timeout_seconds: 300
+""")
+            a_out = tmp / "a_out"
+
+            ret_b = self._run_with_mock_judge(b_cfg, b_out)
+            ret_a = self._run_with_mock_judge(a_cfg, a_out)
+            self.assertEqual(ret_b, 0)
+            self.assertEqual(ret_a, 0)
+
+            # Validate generated results.json files
+            b_res = json.loads((b_out / "results.json").read_text(encoding="utf-8"))
+            a_res = json.loads((a_out / "results.json").read_text(encoding="utf-8"))
+            self.assertEqual(b_res["status"], "completed")
+            self.assertEqual(a_res["status"], "completed")
+            self.assertTrue(b_res["agent_identity"]["model_confirmed"])
+            self.assertTrue(a_res["agent_identity"]["model_confirmed"])
+
+            # Verify strict comparability and report generation
+            is_comp, disc = check_benchmark_comparability(b_res, a_res)
+            self.assertTrue(is_comp, f"Expected strictly comparable, got discrepancies: {disc}")
+
+            report = compare_benchmarks(b_out, a_out)
+            self.assertIn("单变量控制结论", report)
+            self.assertIn("两组评测已满足严格单变量同模型控制条件", report)
+            self.assertIn("主要来源于上下文检索模式的不同", report)
+            self.assertNotIn("单变量控制警告", report)
+
+    def test_integration_2_divergent_prompt_and_timeout_blocked(self):
+        """Integration II: Divergent prompts and timeouts blocked via real cmd_run results."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            mf = tmp / "manifest.json"
+            with open(HERDR_ROOT / "tests/fixtures/review_benchmark/corpus/manifest.json", encoding="utf-8") as f:
+                mf_data = json.load(f)[:1]
+            mf.write_text(json.dumps(mf_data), encoding="utf-8")
+
+            # Counterexample 1: Divergent system prompts
+            b_sec_cfg = tmp / "b_sec.yaml"
+            b_sec_cfg.write_text(f"""
+name: b_sec
+agent: rule
+benchmark:
+  manifest: {mf}
+review:
+  context_mode: diff_only
+  system_prompt: 'Check only security.'
+  timeout_seconds: 300
+""")
+            b_sec_out = tmp / "b_sec_out"
+
+            a_nam_cfg = tmp / "a_nam.yaml"
+            a_nam_cfg.write_text(f"""
+name: a_nam
+agent: rule
+benchmark:
+  manifest: {mf}
+review:
+  context_mode: existing_four_tier
+  system_prompt: 'Check only naming.'
+  timeout_seconds: 300
+""")
+            a_nam_out = tmp / "a_nam_out"
+
+            self.assertEqual(self._run_with_mock_judge(b_sec_cfg, b_sec_out), 0)
+            self.assertEqual(self._run_with_mock_judge(a_nam_cfg, a_nam_out), 0)
+
+            report_prompt = compare_benchmarks(b_sec_out, a_nam_out)
+            self.assertIn("单变量控制警告", report_prompt)
+            self.assertIn("系统提示词/指令不一致", report_prompt)
+            self.assertIn("无法得出单变量质量结论", report_prompt)
+            self.assertNotIn("单变量控制结论", report_prompt)
+
+            # Counterexample 2: Divergent timeouts
+            b_t300_cfg = tmp / "b_t300.yaml"
+            b_t300_cfg.write_text(f"""
+name: b_t300
+agent: rule
+benchmark:
+  manifest: {mf}
+review:
+  context_mode: diff_only
+  timeout_seconds: 300
+""")
+            b_t300_out = tmp / "b_t300_out"
+
+            a_t1_cfg = tmp / "a_t1.yaml"
+            a_t1_cfg.write_text(f"""
+name: a_t1
+agent: rule
+benchmark:
+  manifest: {mf}
+review:
+  context_mode: existing_four_tier
+  timeout_seconds: 1
+""")
+            a_t1_out = tmp / "a_t1_out"
+
+            self.assertEqual(self._run_with_mock_judge(b_t300_cfg, b_t300_out), 0)
+            self.assertEqual(self._run_with_mock_judge(a_t1_cfg, a_t1_out), 0)
+
+            report_timeout = compare_benchmarks(b_t300_out, a_t1_out)
+            self.assertIn("单变量控制警告", report_timeout)
+            self.assertIn("超时时间不一致", report_timeout)
+            self.assertIn("无法得出单变量质量结论", report_timeout)
+            self.assertNotIn("单变量控制结论", report_timeout)
+
+    def test_integration_3_multisample_failure_boundaries_written_to_disk(self):
+        """Integration III: Multi-sample run with prep failure, review timeout, parse failure with tokens, and drift."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            mf_data = [
+                # Sample 1: Prep failure (non-existent commit SHAs)
+                {"repo": "https://github.com/allinai0506/HAFlow", "pr_number": 991, "base": "0" * 40, "head": "1" * 40},
+                # Sample 2: PR 107, will raise TimeoutError
+                {"repo": "https://github.com/allinai0506/HAFlow", "pr_number": 107, "base": "a957663a38f48a399668c4d6b970f0d82ab885cf", "head": "3477d064da8541451840959c419b94146b185053"},
+                # Sample 3: PR 108, will raise ValueError with tokens & model-A
+                {"repo": "https://github.com/allinai0506/HAFlow", "pr_number": 108, "base": "a957663a38f48a399668c4d6b970f0d82ab885cf", "head": "3477d064da8541451840959c419b94146b185053"},
+                # Sample 4: PR 109, will succeed with tokens & model-B
+                {"repo": "https://github.com/allinai0506/HAFlow", "pr_number": 109, "base": "a957663a38f48a399668c4d6b970f0d82ab885cf", "head": "3477d064da8541451840959c419b94146b185053"},
+            ]
+            mf = tmp / "mf.json"
+            mf.write_text(json.dumps(mf_data), encoding="utf-8")
+
+            cfg_file = tmp / "cfg.yaml"
+            cfg_file.write_text(f"""
+name: multisample_test
+agent: agy
+benchmark:
+  manifest: {mf}
+review:
+  context_mode: diff_only
+  timeout_seconds: 300
+""")
+            out_dir = tmp / "out"
+
+            orig_rar = self.hrb.run_agent_review
+
+            def mock_rar(agent_name, repo_dir, pr_info, *a, **kw):
+                pr_num = pr_info["pr_number"]
+                if pr_num == 107:
+                    raise TimeoutError("agent_review_timed_out")
+                elif pr_num == 108:
+                    exc = ValueError("output_parse_failed: malformed json")
+                    exc.token_usage = {"total_tokens": 150, "input_tokens": 100, "output_tokens": 50}
+                    exc.agent_identity = {"agent": "agy", "model_name": "model-A", "model_confirmed": True, "details": {"source": "runtime_evidence"}}
+                    raise exc
+                elif pr_num == 109:
+                    return {
+                        "pr": pr_info,
+                        "agent": agent_name,
+                        "findings": [],
+                        "agent_identity": {"agent": "agy", "model_name": "model-B", "model_confirmed": True, "details": {"source": "runtime_evidence"}},
+                        "usage": {"time_in_ms": 50, "tokens": {"total_tokens": 200, "input_tokens": 150, "output_tokens": 50}},
+                        "prompt_meta": {"prompt_chars": 100, "prompt_fingerprint": "fp"},
+                        "context_meta": {"requested_context_mode": "diff_only", "effective_context_mode": "diff_only", "context_budget_chars": 35000},
+                    }
+                return orig_rar(agent_name, repo_dir, pr_info, *a, **kw)
+
+            import unittest.mock
+            with unittest.mock.patch.object(self.hrb, "run_agent_review", side_effect=mock_rar):
+                self._run_with_mock_judge(cfg_file, out_dir)
+
+            res = json.loads((out_dir / "results.json").read_text(encoding="utf-8"))
+            es = res["execution_summary"]
+            us = res["usage_summary"]
+
+            # Assert sample counts and review_attempted status
+            self.assertEqual(es["total_planned"], 4)
+            self.assertEqual(es["review_attempts"], 3)  # Sample 1 prep failure excluded from attempts
+            self.assertEqual(es["completed"], 1)
+            self.assertEqual(es["failed"], 3)
+
+            # Sample 1: prep failure
+            self.assertFalse(es["samples"][0]["review_attempted"])
+            self.assertIsNone(es["samples"][0]["time_in_ms"])
+            self.assertIn("workspace_prep_failed", es["samples"][0]["error"])
+
+            # Sample 2: review timeout
+            self.assertTrue(es["samples"][1]["review_attempted"])
+            self.assertEqual(es["samples"][1]["status"], "failed")
+            self.assertIsNone(es["samples"][1]["tokens"])
+
+            # Sample 3: parse failure with tokens preserved
+            self.assertTrue(es["samples"][2]["review_attempted"])
+            self.assertEqual(es["samples"][2]["status"], "failed")
+            self.assertEqual(es["samples"][2]["tokens"]["total_tokens"], 150)
+
+            # Sample 4: review success
+            self.assertTrue(es["samples"][3]["review_attempted"])
+            self.assertEqual(es["samples"][3]["status"], "completed")
+
+            # Group model identity: unconfirmed due to unknown sample 2 and drift between model-A & model-B
+            self.assertFalse(res["agent_identity"]["model_confirmed"])
+
+            # Token coverage: 3 review attempts, 2 samples have tokens (150 + 200 = 350)
+            self.assertEqual(us["total_tokens"], "350 (已知部分合计: 2/3 样本)")
+            self.assertFalse(us["token_details"]["total_tokens"]["is_complete"])
+            self.assertEqual(us["token_details"]["total_tokens"]["raw_sum"], 350)
+
+            # Average review time: denominator is actual review_attempts (3), not total samples or completed
+            self.assertIsNotNone(us["avg_review_time_ms"])
+
+    def test_integration_group_model_identity_cases_via_cmd_run(self):
+        """Integration verification that group model identity aggregation is written to disk correctly across cases."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            mf_data = [
+                {"repo": "https://github.com/allinai0506/HAFlow", "pr_number": 107, "base": "a957663a38f48a399668c4d6b970f0d82ab885cf", "head": "3477d064da8541451840959c419b94146b185053"},
+                {"repo": "https://github.com/allinai0506/HAFlow", "pr_number": 108, "base": "a957663a38f48a399668c4d6b970f0d82ab885cf", "head": "3477d064da8541451840959c419b94146b185053"},
+            ]
+            mf = tmp / "mf_2.json"
+            mf.write_text(json.dumps(mf_data), encoding="utf-8")
+
+            # Case A: A -> A through cmd_run => Group confirmed A
+            cfg_a = tmp / "cfg_a.yaml"
+            cfg_a.write_text(f"""
+name: test_a
+agent: agy
+benchmark:
+  manifest: {mf}
+review:
+  context_mode: diff_only
+""")
+            out_a = tmp / "out_a"
+
+            def mock_rar_a(agent_name, repo_dir, pr_info, *a, **kw):
+                return {
+                    "pr": pr_info, "agent": agent_name, "findings": [],
+                    "agent_identity": {"agent": "agy", "model_name": "model-A", "model_confirmed": True, "details": {"source": "runtime_evidence"}},
+                    "usage": {"time_in_ms": 10}, "prompt_meta": {"prompt_chars": 10}, "context_meta": {"requested_context_mode": "diff_only"},
+                }
+
+            import unittest.mock
+            with unittest.mock.patch.object(self.hrb, "run_agent_review", side_effect=mock_rar_a):
+                self._run_with_mock_judge(cfg_a, out_a)
+            res_a = json.loads((out_a / "results.json").read_text(encoding="utf-8"))
+            self.assertTrue(res_a["agent_identity"]["model_confirmed"])
+            self.assertEqual(res_a["agent_identity"]["model_name"], "model-A")
+
+            # Case B: A -> B through cmd_run => Drift detected, not confirmed
+            out_b = tmp / "out_b"
+
+            def mock_rar_b(agent_name, repo_dir, pr_info, *a, **kw):
+                m_name = "model-A" if pr_info["pr_number"] == 107 else "model-B"
+                return {
+                    "pr": pr_info, "agent": agent_name, "findings": [],
+                    "agent_identity": {"agent": "agy", "model_name": m_name, "model_confirmed": True, "details": {"source": "runtime_evidence"}},
+                    "usage": {"time_in_ms": 10}, "prompt_meta": {"prompt_chars": 10}, "context_meta": {"requested_context_mode": "diff_only"},
+                }
+
+            with unittest.mock.patch.object(self.hrb, "run_agent_review", side_effect=mock_rar_b):
+                self._run_with_mock_judge(cfg_a, out_b)
+            res_b = json.loads((out_b / "results.json").read_text(encoding="utf-8"))
+            self.assertFalse(res_b["agent_identity"]["model_confirmed"])
+            self.assertEqual(res_b["agent_identity"]["details"]["source"], "runtime_drift")
+
+            # Case C: Declared model-A, runtime evidence is B -> A => Mismatch/drift, not confirmed
+            cfg_c = tmp / "cfg_c.yaml"
+            cfg_c.write_text(f"""
+name: test_c
+agent: agy
+benchmark:
+  manifest: {mf}
+review:
+  context_mode: diff_only
+  model: model-A
+""")
+            out_c = tmp / "out_c"
+
+            with unittest.mock.patch.object(self.hrb, "run_agent_review", side_effect=mock_rar_b):
+                self._run_with_mock_judge(cfg_c, out_c)
+            res_c = json.loads((out_c / "results.json").read_text(encoding="utf-8"))
+            self.assertFalse(res_c["agent_identity"]["model_confirmed"])
+            self.assertIn(res_c["agent_identity"]["details"]["source"], ("runtime_drift", "runtime_mismatch"))
 
 
 if __name__ == "__main__":

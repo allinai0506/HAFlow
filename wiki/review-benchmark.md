@@ -46,11 +46,15 @@ review:
 | 对照条件 | 校验规则 | 违背处置 |
 |---|---|---|
 | Reviewer Agent | 两组 `agent` 必须一致 | 标记 `⚠ 存在差异`，阻断结论输出 |
-| 模型身份 | 两组 `model_name` 一致且 `model_confirmed=True` | 标记 `⚠ 无法确认同模型`，阻断结论输出 |
-| 基础 Diff | 两组提取逻辑统一通过 `extract_base_diff` | 保证字符级一致 |
-| 上下文预算 | 两组 `context_budget_chars` 必须相等 | 标记 `⚠ 存在差异` |
-| 案例完整性 | 计划案例与完成案例数必须一致 | 标记 `⚠ 存在差异` |
+| 模型身份 | 整组所有尝试有效确认同模型且无运行时漂移 (`model_confirmed=True`) | 标记 `⚠ 无法确认同模型`，阻断严格结论输出 |
+| 对照方向 | 严格限制为基线 `diff_only` → 改进版 `existing_four_tier` | 标记 `⚠ 对照方向不符合标准要求`，阻断结论输出 |
+| 系统提示词/指令 | 两组默认值解析后的有效提示词指纹 (`system_prompt_fingerprint`) 必须一致 | 标记 `⚠ 系统提示词/指令不一致`，阻断结论输出 |
+| 执行超时 | 两组有效 `timeout_seconds` 必须相等 | 标记 `⚠ 超时时间不一致`，阻断结论输出 |
+| 基础 Diff | 字符级长度及 SHA-256 内容指纹 (`base_diff_fingerprint`) 必须一致 | 标记 `⚠ 基础 diff 内容/长度不一致`，阻断结论输出 |
+| 上下文预算 | 两组 `context_budget_chars` 必须相等 | 标记 `⚠ 存在差异`，阻断结论输出 |
+| 案例完整性 | 样本数量、顺序、Base/Head SHA 必须 1 对 1 吻合，且与计划数一致 | 标记 `⚠ 存在差异或失败`，阻断结论输出 |
 | 降级样本 | 两组 `fallback_count` 必须为 0 | 标记 `⚠ 包含降级样本`，不可作为四层收益证据 |
+| 用量与耗时分母 | 统一以进入 `run_agent_review()` 为尝试界限，排除工作区准备失败 | 标记部分覆盖 `(已知部分合计: x/y 样本)`，杜绝填零伪造 |
 
 ---
 
@@ -61,8 +65,12 @@ Evidence:
 - `herdr/review_benchmark.py#validate_context_config`
 - `herdr/review_benchmark.py#extract_base_diff`
 - `herdr/review_benchmark.py#resolve_agent_identity`
+- `herdr/review_benchmark.py#aggregate_group_agent_identity`
 - `herdr/review_benchmark.py#check_benchmark_comparability`
 - `herdr/review_benchmark.py#compare_benchmarks`
 - `bin/herdr-review-bench:cmd_run`
 - `bin/herdr-review-bench:cmd_review`
 - `tests/test_review_benchmark.py#TestReviewBenchContextModes`
+- `tests/test_review_benchmark.py#TestGroupModelIdentityTable`
+- `tests/test_review_benchmark.py#TestTokenCoverageAndTimingContracts`
+- `tests/test_review_benchmark.py#TestRealCallChainIntegration`
