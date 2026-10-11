@@ -8,6 +8,7 @@ compatible with GitHub ReviewBench contracts.
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -19,6 +20,112 @@ import tempfile
 import time
 from typing import Any, Dict, List, Optional, Tuple
 import warnings
+
+VALID_CONTEXT_MODES = ("diff_only", "existing_four_tier")
+DEFAULT_CONTEXT_MODE = "existing_four_tier"
+DEFAULT_CONTEXT_BUDGET_CHARS = 35000
+
+
+def validate_context_config(context_mode: Any = None, context_budget_chars: Any = None) -> Tuple[str, int]:
+    """Validate and normalize review context mode and budget limits."""
+    mode = DEFAULT_CONTEXT_MODE if context_mode is None else context_mode
+    if mode not in VALID_CONTEXT_MODES:
+        raise ValueError(
+            f"Invalid context_mode '{context_mode}'. Supported modes are: {list(VALID_CONTEXT_MODES)}"
+        )
+    budget = DEFAULT_CONTEXT_BUDGET_CHARS if context_budget_chars is None else context_budget_chars
+    if not isinstance(budget, int) or isinstance(budget, bool) or budget <= 0:
+        raise ValueError(
+            f"Invalid context_budget_chars '{context_budget_chars}'. Must be a positive integer."
+        )
+    return mode, budget
+
+
+def extract_base_diff(diff_content: str, max_budget_chars: int = 35000) -> Tuple[str, List[str]]:
+    """Extract Tier-1 base diff with baseline preservation (up to 15,000 chars, capped by budget)."""
+    changed_files = []
+    current_file = ""
+    for line in diff_content.splitlines():
+        if line.startswith("diff --git "):
+            parts = line.split()
+            current_file = parts[-1][2:] if parts[-1].startswith("b/") else parts[-1]
+            changed_files.append(current_file)
+    base_diff = diff_content[:min(15000, max_budget_chars)]
+    return base_diff, changed_files
+
+
+def resolve_agent_identity(agent_name: str, review_cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Resolve and confirm reviewer agent identity, model, and CLI version."""
+    review_cfg = review_cfg or {}
+    model_name = "unknown"
+    cli_version = "unknown"
+    model_confirmed = False
+    details: Dict[str, Any] = {}
+
+    if agent_name in ("agy", "llm", "agy-reviewer"):
+        if shutil.which("agy"):
+            try:
+                ver_res = subprocess.run(["agy", "--version"], capture_output=True, text=True, timeout=5)
+                if ver_res.returncode == 0:
+                    cli_version = ver_res.stdout.strip()
+            except Exception:
+                pass
+
+        configured_model = review_cfg.get("model") or os.environ.get("HERDR_AGY_MODEL")
+        if configured_model:
+            model_name = str(configured_model).strip()
+            model_confirmed = True
+            details["source"] = "config/env"
+        else:
+            settings_path = Path.home() / ".gemini" / "antigravity-cli" / "settings.json"
+            if settings_path.exists():
+                try:
+                    s_data = json.loads(settings_path.read_text(encoding="utf-8"))
+                    if s_data.get("model"):
+                        model_name = str(s_data["model"]).strip()
+                        model_confirmed = True
+                        details["source"] = "agy_settings"
+                except Exception:
+                    pass
+
+        effort = os.environ.get("HERDR_AGY_EFFORT", "low").strip()
+        details["effort"] = effort
+        perm = "--sandbox" if os.environ.get("HERDR_ALLOW_DANGEROUS_PERMISSIONS") != "1" else "--dangerously-skip-permissions"
+        details["permission_flag"] = perm
+
+    elif agent_name.startswith("rule") or agent_name == "mock":
+        model_name = agent_name
+        cli_version = "internal-rule"
+        model_confirmed = True
+        details["source"] = "deterministic_rule"
+    elif agent_name == "pi":
+        model_name = review_cfg.get("model") or os.environ.get("HERDR_PI_MODEL") or "unknown"
+        model_confirmed = bool(model_name != "unknown")
+        if shutil.which("pi"):
+            try:
+                ver_res = subprocess.run(["pi", "--version"], capture_output=True, text=True, timeout=5)
+                if ver_res.returncode == 0:
+                    cli_version = ver_res.stdout.strip()
+            except Exception:
+                pass
+    elif agent_name == "opencode":
+        model_name = review_cfg.get("model") or os.environ.get("HERDR_OPENCODE_MODEL") or "unknown"
+        model_confirmed = bool(model_name != "unknown")
+        if shutil.which("opencode"):
+            try:
+                ver_res = subprocess.run(["opencode", "--version"], capture_output=True, text=True, timeout=5)
+                if ver_res.returncode == 0:
+                    cli_version = ver_res.stdout.strip()
+            except Exception:
+                pass
+
+    return {
+        "agent": agent_name,
+        "model_name": model_name,
+        "cli_version": cli_version,
+        "model_confirmed": model_confirmed,
+        "details": details,
+    }
 
 
 def pr_key(repo: str, pr_number: int, head: str) -> str:
@@ -301,34 +408,22 @@ def retrieve_and_assemble_context(
         if kw in domain_synonyms:
             expanded_keywords.update(domain_synonyms[kw])
 
-    # 1. Parse changed files from diff
-    changed_files = []
-    file_diff_map = {}
-    current_file = ""
-    for line in diff_content.splitlines():
-        if line.startswith("diff --git "):
-            parts = line.split()
-            current_file = parts[-1][2:] if parts[-1].startswith("b/") else parts[-1]
-            changed_files.append(current_file)
-            file_diff_map[current_file] = [line]
-        elif current_file:
-            file_diff_map[current_file].append(line)
+    base_diff, changed_files = extract_base_diff(diff_content, max_budget_chars)
 
     audit: Dict[str, Any] = {
+        "requested_context_mode": "existing_four_tier",
+        "effective_context_mode": "existing_four_tier",
+        "fallback_reason": None,
         "original_diff_bytes": len(diff_content.encode("utf-8")),
         "context_budget": max_budget_chars,
         "changed_files": changed_files,
-        "included_files": [],
-        "truncated_files": [],
+        "included_files": [f for f in changed_files if f in base_diff],
+        "truncated_files": [f for f in changed_files if f not in base_diff],
         "expanded_symbols": [],
         "retrieved_context": [],
         "final_context_size": 0,
+        "base_diff_size": len(base_diff),
     }
-
-    # Baseline preservation: include initial 15,000 chars of diff (Tier 1 core)
-    base_diff = diff_content[:15000]
-    audit["included_files"] = [f for f in changed_files if f in base_diff]
-    audit["truncated_files"] = [f for f in changed_files if f not in base_diff]
 
     header = "\n\n# --- RETRIEVED CONTRACT & CALLER/CALLEE CONTEXT ---\n\n"
     sep = "\n\n"
@@ -420,6 +515,9 @@ def run_agent_review(
     timeout_seconds: int = 180,
     system_prompt: Optional[str] = None,
     isolation_meta: Optional[Dict[str, Any]] = None,
+    *,
+    context_mode: Optional[str] = None,
+    context_budget_chars: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Execute code review agent on the isolated repo.
 
@@ -430,13 +528,18 @@ def run_agent_review(
     - Timeout
     - Parse failure
     """
+    req_mode = context_mode if context_mode is not None else pr_info.get("context_mode")
+    req_budget = context_budget_chars if context_budget_chars is not None else pr_info.get("context_budget_chars")
+    eff_mode, eff_budget = validate_context_config(req_mode, req_budget)
+    base_diff, changed_files = extract_base_diff(diff_content, eff_budget)
+
     prompt = (
         f"{system_prompt or 'You are reviewing a Pull Request.'}\n\n"
         f"PR Title: {pr_info.get('title', '')}\n"
         f"PR Description: {pr_info.get('body', '')}\n\n"
         "Here is the git diff for this PR:\n"
         "```diff\n"
-        f"{diff_content[:15000]}\n"
+        f"{base_diff}\n"
         "```\n\n"
         "Please review this diff for bugs, regressions, logic flaws, and architectural defects.\n"
         "Output ONLY a JSON array of findings with schema:\n"
@@ -456,19 +559,70 @@ def run_agent_review(
         # Deterministic / rule-based reviewer for offline testing & benchmark baseline
         findings = pr_info.get("mock_findings")
         audit_info = None
+        if eff_mode == "diff_only":
+            effective_content = base_diff
+            audit_info = {
+                "requested_context_mode": "diff_only",
+                "effective_context_mode": "diff_only",
+                "fallback_reason": None,
+                "original_diff_bytes": len(diff_content.encode("utf-8")),
+                "context_budget": eff_budget,
+                "changed_files": changed_files,
+                "included_files": [f for f in changed_files if f in base_diff],
+                "truncated_files": [f for f in changed_files if f not in base_diff],
+                "expanded_symbols": [],
+                "retrieved_context": [],
+                "final_context_size": len(base_diff),
+                "base_diff_size": len(base_diff),
+            }
+        else:
+            if repo_dir and (repo_dir / ".git").exists():
+                try:
+                    effective_content, audit_info = retrieve_and_assemble_context(
+                        repo_dir=repo_dir,
+                        pr_info=pr_info,
+                        diff_content=diff_content,
+                        max_budget_chars=eff_budget,
+                    )
+                    audit_info["requested_context_mode"] = "existing_four_tier"
+                    audit_info["effective_context_mode"] = "existing_four_tier"
+                    audit_info["fallback_reason"] = None
+                    audit_info["base_diff_size"] = len(base_diff)
+                except Exception as exc:
+                    effective_content = base_diff
+                    audit_info = {
+                        "requested_context_mode": "existing_four_tier",
+                        "effective_context_mode": "diff_only",
+                        "fallback_reason": f"retrieval_failed: {exc}",
+                        "original_diff_bytes": len(diff_content.encode("utf-8")),
+                        "context_budget": eff_budget,
+                        "changed_files": changed_files,
+                        "included_files": [f for f in changed_files if f in base_diff],
+                        "truncated_files": [f for f in changed_files if f not in base_diff],
+                        "expanded_symbols": [],
+                        "retrieved_context": [],
+                        "final_context_size": len(base_diff),
+                        "base_diff_size": len(base_diff),
+                    }
+            else:
+                effective_content = base_diff
+                audit_info = {
+                    "requested_context_mode": "existing_four_tier",
+                    "effective_context_mode": "diff_only",
+                    "fallback_reason": "retrieval_failed: repo_dir_missing_or_not_git",
+                    "original_diff_bytes": len(diff_content.encode("utf-8")),
+                    "context_budget": eff_budget,
+                    "changed_files": changed_files,
+                    "included_files": [f for f in changed_files if f in base_diff],
+                    "truncated_files": [f for f in changed_files if f not in base_diff],
+                    "expanded_symbols": [],
+                    "retrieved_context": [],
+                    "final_context_size": len(base_diff),
+                    "base_diff_size": len(base_diff),
+                }
+
         if findings is None:
             findings = []
-
-            # Determine effective review context:
-            # Baseline & contract-v1 use standard diff; context-v1 uses assembled expanded context
-            effective_content = diff_content
-            if agent_name == "rule-contract-context-v1":
-                effective_content, audit_info = retrieve_and_assemble_context(
-                    repo_dir=repo_dir,
-                    pr_info=pr_info,
-                    diff_content=diff_content,
-                    max_budget_chars=35000,
-                )
 
             # Rule-based detection: check diff patterns across the full diff for known HAFlow issues
             # Only trigger findings on the actual production code files touched by the diff, not tests/fixtures.
@@ -545,6 +699,13 @@ def run_agent_review(
                         "message": "_validate_context_source_existence only permits own-task and verified_handoff_tasks under workflow run_scope, rejecting dependency-closure task references and violating the launch-boundary working context validation contract.",
                     })
 
+        prompt_chars = len(prompt)
+        prompt_fingerprint = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+        context_chars = len(effective_content)
+        context_fingerprint = hashlib.sha256(effective_content.encode("utf-8")).hexdigest()
+        eff_ctx_mode = audit_info.get("effective_context_mode", eff_mode) if audit_info else eff_mode
+        fb_reason = audit_info.get("fallback_reason") if audit_info else None
+
         res: Dict[str, Any] = {
             "pr": {
                 "repo": pr_info["repo"],
@@ -554,25 +715,100 @@ def run_agent_review(
             },
             "agent": agent_name,
             "findings": findings,
-            "usage": {"time_in_ms": int((time.time() - t0) * 1000)},
+            "usage": {"time_in_ms": int((time.time() - t0) * 1000), "tokens": None},
+            "prompt_meta": {
+                "prompt_chars": prompt_chars,
+                "prompt_fingerprint": prompt_fingerprint,
+            },
+            "context_meta": {
+                "requested_context_mode": eff_mode,
+                "effective_context_mode": eff_ctx_mode,
+                "fallback_reason": fb_reason,
+                "context_budget_chars": eff_budget,
+                "context_chars": context_chars,
+                "context_fingerprint": context_fingerprint,
+                "base_diff_chars": len(base_diff),
+            },
         }
         if audit_info:
+            audit_info["prompt_chars"] = prompt_chars
+            audit_info["prompt_fingerprint"] = prompt_fingerprint
+            audit_info["context_chars"] = context_chars
+            audit_info["context_fingerprint"] = context_fingerprint
             res["audit"] = audit_info
         return res
 
-    # Assemble 4-Tier Context for real LLM reviewer if supported
-    effective_content = diff_content
+    # Assemble 4-Tier Context or Diff-Only for real LLM reviewer
+    requested_context_mode = eff_mode
+    effective_context_mode = eff_mode
+    fallback_reason = None
     audit_info = None
-    if repo_dir and (repo_dir / ".git").exists():
-        try:
-            effective_content, audit_info = retrieve_and_assemble_context(
-                repo_dir=repo_dir,
-                pr_info=pr_info,
-                diff_content=diff_content,
-                max_budget_chars=35000,
-            )
-        except Exception:
-            effective_content = diff_content
+
+    if requested_context_mode == "diff_only":
+        effective_content = base_diff
+        audit_info = {
+            "requested_context_mode": "diff_only",
+            "effective_context_mode": "diff_only",
+            "fallback_reason": None,
+            "original_diff_bytes": len(diff_content.encode("utf-8")),
+            "context_budget": eff_budget,
+            "changed_files": changed_files,
+            "included_files": [f for f in changed_files if f in base_diff],
+            "truncated_files": [f for f in changed_files if f not in base_diff],
+            "expanded_symbols": [],
+            "retrieved_context": [],
+            "final_context_size": len(base_diff),
+            "base_diff_size": len(base_diff),
+        }
+    elif requested_context_mode == "existing_four_tier":
+        if repo_dir and (repo_dir / ".git").exists():
+            try:
+                effective_content, audit_info = retrieve_and_assemble_context(
+                    repo_dir=repo_dir,
+                    pr_info=pr_info,
+                    diff_content=diff_content,
+                    max_budget_chars=eff_budget,
+                )
+                audit_info["requested_context_mode"] = "existing_four_tier"
+                audit_info["effective_context_mode"] = "existing_four_tier"
+                audit_info["fallback_reason"] = None
+                audit_info["base_diff_size"] = len(base_diff)
+            except Exception as exc:
+                effective_content = base_diff
+                effective_context_mode = "diff_only"
+                fallback_reason = f"retrieval_failed: {exc}"
+                audit_info = {
+                    "requested_context_mode": "existing_four_tier",
+                    "effective_context_mode": "diff_only",
+                    "fallback_reason": fallback_reason,
+                    "original_diff_bytes": len(diff_content.encode("utf-8")),
+                    "context_budget": eff_budget,
+                    "changed_files": changed_files,
+                    "included_files": [f for f in changed_files if f in base_diff],
+                    "truncated_files": [f for f in changed_files if f not in base_diff],
+                    "expanded_symbols": [],
+                    "retrieved_context": [],
+                    "final_context_size": len(base_diff),
+                    "base_diff_size": len(base_diff),
+                }
+        else:
+            effective_content = base_diff
+            effective_context_mode = "diff_only"
+            fallback_reason = "repo_dir_missing_or_not_git"
+            audit_info = {
+                "requested_context_mode": "existing_four_tier",
+                "effective_context_mode": "diff_only",
+                "fallback_reason": fallback_reason,
+                "original_diff_bytes": len(diff_content.encode("utf-8")),
+                "context_budget": eff_budget,
+                "changed_files": changed_files,
+                "included_files": [f for f in changed_files if f in base_diff],
+                "truncated_files": [f for f in changed_files if f not in base_diff],
+                "expanded_symbols": [],
+                "retrieved_context": [],
+                "final_context_size": len(base_diff),
+                "base_diff_size": len(base_diff),
+            }
 
     prompt = (
         f"{system_prompt or 'You are reviewing a Pull Request. Evaluate strictly based on the provided git diff and assembled repository context below. Do not use external tools, run commands, or inspect the local filesystem.'}\n\n"
@@ -594,6 +830,17 @@ def run_agent_review(
         "]\n"
         "If no defects are found, output `[]`."
     )
+
+    prompt_chars = len(prompt)
+    prompt_fingerprint = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+    context_chars = len(effective_content)
+    context_fingerprint = hashlib.sha256(effective_content.encode("utf-8")).hexdigest()
+
+    if audit_info:
+        audit_info["prompt_chars"] = prompt_chars
+        audit_info["prompt_fingerprint"] = prompt_fingerprint
+        audit_info["context_chars"] = context_chars
+        audit_info["context_fingerprint"] = context_fingerprint
 
     # Execute real CLI agent
     cmd = []
@@ -751,9 +998,22 @@ def run_agent_review(
         "verification": verification_summary,
         "usage": {
             "time_in_ms": int((time.time() - t0) * 1000),
-            "tokens": token_usage or {},
+            "tokens": token_usage,
         },
         "raw_response": response_text.strip(),
+        "prompt_meta": {
+            "prompt_chars": prompt_chars,
+            "prompt_fingerprint": prompt_fingerprint,
+        },
+        "context_meta": {
+            "requested_context_mode": requested_context_mode,
+            "effective_context_mode": effective_context_mode,
+            "fallback_reason": fallback_reason,
+            "context_budget_chars": eff_budget,
+            "context_chars": context_chars,
+            "context_fingerprint": context_fingerprint,
+            "base_diff_chars": len(base_diff),
+        },
     }
     if audit_info:
         res_llm["audit"] = audit_info
@@ -1061,6 +1321,8 @@ def review_diff(
     shadow_mode: bool = False,
     timeout_seconds: int = 180,
     system_prompt: Optional[str] = None,
+    context_mode: Optional[str] = None,
+    context_budget_chars: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Execute code review on a git diff with fallback mechanism and optional shadow mode.
 
@@ -1103,6 +1365,8 @@ def review_diff(
             diff_content=diff_content,
             timeout_seconds=timeout_seconds,
             system_prompt=system_prompt,
+            context_mode=context_mode,
+            context_budget_chars=context_budget_chars,
         )
     except Exception as exc:
         if active_agent != FALLBACK_REVIEWER:
@@ -1116,6 +1380,8 @@ def review_diff(
                     diff_content=diff_content,
                     timeout_seconds=timeout_seconds,
                     system_prompt=system_prompt,
+                    context_mode=context_mode,
+                    context_budget_chars=context_budget_chars,
                 )
                 primary_result["fallback"] = {
                     "triggered": True,
@@ -1194,6 +1460,8 @@ def review_diff(
                             timeout_seconds=timeout_seconds,
                             system_prompt=system_prompt,
                             isolation_meta=isolation_meta,
+                            context_mode=context_mode,
+                            context_budget_chars=context_budget_chars,
                         )
                         cleanup_rec = isolation_meta.get("cleanup_record") if isolation_meta else None
                         if cleanup_rec and cleanup_rec.get("status") not in ("verified_removed", "already_absent", "not_applicable"):
@@ -1217,6 +1485,8 @@ def review_diff(
                     diff_content=diff_content,
                     timeout_seconds=timeout_seconds,
                     system_prompt=system_prompt,
+                    context_mode=context_mode,
+                    context_budget_chars=context_budget_chars,
                 )
                 shadow_status = "shadow_success"
                 shadow_result["status"] = "shadow_success"
@@ -1271,6 +1541,10 @@ def review_diff(
         response["shadow_skip_reason"] = shadow_skip_reason
     if "audit" in primary_result:
         response["audit"] = primary_result["audit"]
+    if "context_meta" in primary_result:
+        response["context_meta"] = primary_result["context_meta"]
+    if "prompt_meta" in primary_result:
+        response["prompt_meta"] = primary_result["prompt_meta"]
 
     # Production Validation requirement: Shadow results must be persisted for observability if shadow mode was active
     if is_shadow and shadow_result is not None:
@@ -1318,6 +1592,8 @@ def review_pr(
     shadow_mode: bool = False,
     timeout_seconds: int = 180,
     system_prompt: Optional[str] = None,
+    context_mode: Optional[str] = None,
+    context_budget_chars: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Execute code review on a git commit range (base_ref..head_ref)."""
     repo_path = Path(repo_dir).resolve()
@@ -1341,6 +1617,8 @@ def review_pr(
         shadow_mode=shadow_mode,
         timeout_seconds=timeout_seconds,
         system_prompt=system_prompt,
+        context_mode=context_mode,
+        context_budget_chars=context_budget_chars,
     )
 
 
@@ -1355,8 +1633,29 @@ def generate_chinese_report(
     total_planned = execution_summary.get("total_planned", 0)
     completed = execution_summary.get("completed", 0)
     failed = execution_summary.get("failed", 0)
+    fallback_count = execution_summary.get("fallback_count", 0)
+    fallback_details = execution_summary.get("fallback_details", {})
     failure_details = execution_summary.get("failure_details", {})
     elapsed_seconds = execution_summary.get("elapsed_seconds", 0.0)
+
+    req_context_mode = execution_summary.get("requested_context_mode") or version_info.get("context_mode") or "existing_four_tier"
+    budget_chars = execution_summary.get("context_budget_chars") or version_info.get("context_budget_chars") or 35000
+
+    agent_identity = execution_summary.get("agent_identity") or version_info.get("agent_identity") or {}
+    model_name = agent_identity.get("model_name") or "未知"
+    cli_ver = agent_identity.get("cli_version") or "未知"
+    is_model_confirmed = agent_identity.get("model_confirmed", False)
+
+    usage_summary = execution_summary.get("usage_summary") or results_json.get("usage_summary") or {}
+    total_review_time_ms = usage_summary.get("total_review_time_ms")
+    if total_review_time_ms is None:
+        total_review_time_ms = execution_summary.get("total_review_time_ms", 0)
+    input_tokens = usage_summary.get("input_tokens", "未知")
+    output_tokens = usage_summary.get("output_tokens", "未知")
+    thinking_tokens = usage_summary.get("thinking_tokens", "未知")
+    total_tokens = usage_summary.get("total_tokens", "未知")
+    avg_prompt_chars = usage_summary.get("avg_prompt_chars", 0.0)
+    avg_context_chars = usage_summary.get("avg_context_chars", 0.0)
 
     # Extract normalized metrics from results_json
     metrics_obj = extract_and_validate_metrics(results_json)
@@ -1377,8 +1676,17 @@ def generate_chinese_report(
         "## 1. 运行完整性",
         f"- **计划案例数**: {total_planned}",
         f"- **成功完成数**: {completed}",
+        f"- **降级案例数**: {fallback_count}",
         f"- **失败案例数**: {failed}",
+        f"- **请求上下文模式**: `{req_context_mode}`",
     ]
+
+    if fallback_count > 0:
+        lines.append("- **降级原因明细**:")
+        for pr_id, reason in fallback_details.items():
+            lines.append(f"  - `{pr_id}`: {reason} (从 `{req_context_mode}` 降级为 `diff_only`)")
+    else:
+        lines.append("- **降级原因明细**: 无降级，全量完成案例均符合请求上下文模式")
 
     if failed > 0:
         lines.append("- **失败原因明细**:")
@@ -1448,21 +1756,102 @@ def generate_chinese_report(
     if item_idx == 1:
         lines.append("*（本轮评测无候选审查条目产生）*")
 
+    model_status_label = "已确认" if is_model_confirmed else "无法确认同模型"
     lines.extend([
         "",
         "## 4. 版本与环境信息",
         f"- **代码基线 SHA**: `{version_info.get('code_sha', 'HEAD')}`",
         f"- **评审 Agent 配置**: `{version_info.get('agent_config', 'default')}`",
+        f"- **评审上下文模式**: `{req_context_mode}` (预算上限: {budget_chars} 字符)",
+        f"- **评审模型身份**: `{model_name}` ({model_status_label})",
+        f"- **评审 CLI 版本**: `{cli_ver}`",
         f"- **裁判模型配置**: `{version_info.get('judge_config', 'deepseek/deepseek-v4-flash')}`",
         f"- **ReviewBench 评分器 SHA**: `{version_info.get('scorer_sha', 'e1cb1a0dad8105ebea45caa00c194eaf2d2e7b5d')}`",
         "",
         "## 5. 执行开销",
         f"- **评测实际总耗时**: {elapsed_seconds:.2f} 秒",
+        f"- **评审累积执行耗时**: {total_review_time_ms / 1000:.2f} 秒 (各 PR 评审命令实际耗时之和)",
+        f"- **真实 Token 用量**:",
+        f"  - 输入 Token (input_tokens): {input_tokens}",
+        f"  - 输出 Token (output_tokens): {output_tokens}",
+        f"  - 思考 Token (thinking_tokens): {thinking_tokens}",
+        f"  - 总计 Token (total_tokens): {total_tokens}",
+        f"- **提示词规模统计**:",
+        f"  - 平均 Prompt 字符数: {avg_prompt_chars:.1f} 字符",
+        f"  - 平均有效上下文大小: {avg_context_chars:.1f} 字符",
         f"- **API 成本支出**: {version_info.get('cost_usd', '未知 (本地/直连环境)')}",
         "",
     ])
 
     return "\n".join(lines)
+
+
+def check_benchmark_comparability(
+    before_results: Dict[str, Any],
+    after_results: Dict[str, Any],
+) -> Tuple[bool, List[str]]:
+    """Verify single-variable comparability between two benchmark runs."""
+    discrepancies: List[str] = []
+
+    b_version = before_results.get("version_info", {})
+    a_version = after_results.get("version_info", {})
+    b_exec = before_results.get("execution_summary", {})
+    a_exec = after_results.get("execution_summary", {})
+    b_cfg = before_results.get("context_config", {})
+    a_cfg = after_results.get("context_config", {})
+
+    b_agent = b_exec.get("agent_identity", {}) or b_version.get("agent_identity", {})
+    a_agent = a_exec.get("agent_identity", {}) or a_version.get("agent_identity", {})
+
+    b_agent_parts = b_version.get("agent_config", "").split()
+    a_agent_parts = a_version.get("agent_config", "").split()
+    b_agent_name = b_agent.get("agent") or (b_agent_parts[0] if b_agent_parts else "unknown")
+    a_agent_name = a_agent.get("agent") or (a_agent_parts[0] if a_agent_parts else "unknown")
+
+    if b_agent_name != a_agent_name:
+        discrepancies.append(
+            f"评审 Agent 不一致 (基线: '{b_agent_name}', 改进版: '{a_agent_name}')。禁止将不同 Agent (如规则与 LLM) 称为同模型对照。"
+        )
+
+    b_model = b_agent.get("model_name", "unknown")
+    a_model = a_agent.get("model_name", "unknown")
+    b_confirmed = b_agent.get("model_confirmed", False)
+    a_confirmed = a_agent.get("model_confirmed", False)
+
+    if not b_confirmed or not a_confirmed or b_model == "unknown" or a_model == "unknown":
+        discrepancies.append(
+            f"无法确认同模型: 实际模型身份未完全确认 (基线: '{b_model}', 改进版: '{a_model}')。不得据此输出严格的同模型优劣结论。"
+        )
+    elif b_model != a_model:
+        discrepancies.append(
+            f"模型不一致 (基线: '{b_model}', 改进版: '{a_model}')。违反单变量控制要求。"
+        )
+
+    b_budget = b_cfg.get("context_budget_chars") or b_exec.get("context_budget_chars")
+    a_budget = a_cfg.get("context_budget_chars") or a_exec.get("context_budget_chars")
+    if b_budget and a_budget and b_budget != a_budget:
+        discrepancies.append(
+            f"上下文预算上限不一致 (基线: {b_budget} 字符, 改进版: {a_budget} 字符)。"
+        )
+
+    b_fallbacks = b_exec.get("fallback_count", 0)
+    a_fallbacks = a_exec.get("fallback_count", 0)
+    if b_fallbacks > 0 or a_fallbacks > 0:
+        discrepancies.append(
+            f"评测包含降级样本 (基线降级 {b_fallbacks} 例, 改进版降级 {a_fallbacks} 例)。降级样本已退回基础 diff，无法完整代表请求的上下文模式。"
+        )
+
+    b_judge = b_version.get("judge_config")
+    a_judge = a_version.get("judge_config")
+    if b_judge and a_judge and b_judge != a_judge:
+        discrepancies.append(f"裁判模型配置不一致 (基线: '{b_judge}', 改进版: '{a_judge}')。")
+
+    b_scorer = b_version.get("scorer_sha")
+    a_scorer = a_version.get("scorer_sha")
+    if b_scorer and a_scorer and b_scorer != a_scorer:
+        discrepancies.append(f"评分器版本不一致 (基线: '{b_scorer[:8]}', 改进版: '{a_scorer[:8]}')。")
+
+    return (len(discrepancies) == 0, discrepancies)
 
 
 def compare_benchmarks(
@@ -1521,6 +1910,70 @@ def compare_benchmarks(
     ar_b, ar_a, ar_d = _diff_stat("augmented_recall")
     ap_b, ap_a, ap_d = _diff_stat("augmented_precision")
 
+    is_comparable, discrepancies = check_benchmark_comparability(before_res, after_res)
+
+    # Context & usage statistics extraction
+    b_exec = before_res.get("execution_summary", {})
+    a_exec = after_res.get("execution_summary", {})
+    b_usage = before_res.get("usage_summary") or b_exec.get("usage_summary", {})
+    a_usage = after_res.get("usage_summary") or a_exec.get("usage_summary", {})
+    b_version = before_res.get("version_info", {})
+    a_version = after_res.get("version_info", {})
+    b_cfg = before_res.get("context_config", {})
+    a_cfg = after_res.get("context_config", {})
+
+    b_mode = b_cfg.get("context_mode") or b_exec.get("requested_context_mode") or b_version.get("context_mode", "未知")
+    a_mode = a_cfg.get("context_mode") or a_exec.get("requested_context_mode") or a_version.get("context_mode", "未知")
+
+    b_agent = b_exec.get("agent_identity", {}) or b_version.get("agent_identity", {})
+    a_agent = a_exec.get("agent_identity", {}) or a_version.get("agent_identity", {})
+    b_agent_parts = b_version.get("agent_config", "").split()
+    a_agent_parts = a_version.get("agent_config", "").split()
+    b_agent_name = b_agent.get("agent") or (b_agent_parts[0] if b_agent_parts else "未知")
+    a_agent_name = a_agent.get("agent") or (a_agent_parts[0] if a_agent_parts else "未知")
+
+    b_model = b_agent.get("model_name", "未知")
+    a_model = a_agent.get("model_name", "未知")
+    b_model_conf = b_agent.get("model_confirmed", False)
+    a_model_conf = a_agent.get("model_confirmed", False)
+    b_model_str = f"{b_model} ({'已确认' if b_model_conf else '无法确认同模型'})"
+    a_model_str = f"{a_model} ({'已确认' if a_model_conf else '无法确认同模型'})"
+
+    b_budget = b_cfg.get("context_budget_chars") or b_exec.get("context_budget_chars") or b_version.get("context_budget_chars", "未知")
+    a_budget = a_cfg.get("context_budget_chars") or a_exec.get("context_budget_chars") or a_version.get("context_budget_chars", "未知")
+
+    b_plan = b_exec.get("total_planned", "未知")
+    a_plan = a_exec.get("total_planned", "未知")
+    b_done = b_exec.get("completed", "未知")
+    a_done = a_exec.get("completed", "未知")
+    b_fall = b_exec.get("fallback_count", 0)
+    a_fall = a_exec.get("fallback_count", 0)
+
+    def _val_diff(bv: Any, av: Any, unit: str = "") -> Tuple[str, str, str]:
+        if isinstance(bv, (int, float)) and isinstance(av, (int, float)):
+            delta = av - bv
+            d_str = f"{'+' if delta >= 0 else ''}{delta:.2f}{unit}" if isinstance(delta, float) else f"{'+' if delta >= 0 else ''}{delta}{unit}"
+            return f"{bv}{unit}", f"{av}{unit}", d_str
+        b_s = f"{bv}{unit}" if bv not in (None, "未知") else "未知"
+        a_s = f"{av}{unit}" if av not in (None, "未知") else "未知"
+        return b_s, a_s, "未知"
+
+    b_e2e = b_exec.get("elapsed_seconds")
+    a_e2e = a_exec.get("elapsed_seconds")
+    e2e_b, e2e_a, e2e_d = _val_diff(b_e2e, a_e2e, "秒")
+
+    b_rev_s = (b_usage.get("total_review_time_ms") / 1000.0) if isinstance(b_usage.get("total_review_time_ms"), (int, float)) else None
+    a_rev_s = (a_usage.get("total_review_time_ms") / 1000.0) if isinstance(a_usage.get("total_review_time_ms"), (int, float)) else None
+    rev_b, rev_a, rev_d = _val_diff(b_rev_s, a_rev_s, "秒")
+
+    in_b, in_a, in_d = _val_diff(b_usage.get("input_tokens"), a_usage.get("input_tokens"))
+    out_b, out_a, out_d = _val_diff(b_usage.get("output_tokens"), a_usage.get("output_tokens"))
+    thk_b, thk_a, thk_d = _val_diff(b_usage.get("thinking_tokens"), a_usage.get("thinking_tokens"))
+    tot_b, tot_a, tot_d = _val_diff(b_usage.get("total_tokens"), a_usage.get("total_tokens"))
+
+    p_ch_b, p_ch_a, p_ch_d = _val_diff(b_usage.get("avg_prompt_chars"), a_usage.get("avg_prompt_chars"), "字")
+    c_ch_b, c_ch_a, c_ch_d = _val_diff(b_usage.get("avg_context_chars"), a_usage.get("avg_context_chars"), "字")
+
     lines = [
         "# HAFlow 代码评审回归评测对比报告",
         "",
@@ -1537,13 +1990,80 @@ def compare_benchmarks(
         f"| 增强召回率 (Augmented Recall) | {ar_b} | {ar_a} | {ar_d} | {'📈 提升' if '+' in ar_d and ar_d != '+0.0%' else ('📉 下降' if '-' in ar_d else '➖ 持平')} |",
         f"| 增强准确率 (Augmented Precision) | {ap_b} | {ap_a} | {ap_d} | {'📈 提升' if '+' in ap_d and ap_d != '+0.0%' else ('📉 下降' if '-' in ap_d else '➖ 持平')} |",
         "",
-        "## 2. 案例检出变化明细",
+        "## 2. 单变量对照与可比性检查",
+        "",
+        "| 对照条件 | 基线 (Before) | 改进版 (After) | 一致性与状态 |",
+        "|---|---|---|---|",
+        f"| 评审 Agent | `{b_agent_name}` | `{a_agent_name}` | {'✓ 一致' if b_agent_name == a_agent_name and b_agent_name != '未知' else '⚠ 存在差异'} |",
+        f"| 模型身份 | `{b_model_str}` | `{a_model_str}` | {'✓ 确认同模型' if b_model_conf and a_model_conf and b_model == a_model else '⚠ 无法确认同模型'} |",
+        f"| 请求上下文模式 | `{b_mode}` | `{a_mode}` | {'(对照自变量)' if b_mode != a_mode else '模式相同'} |",
+        f"| 上下文预算上限 | `{b_budget}` | `{a_budget}` | {'✓ 一致' if b_budget == a_budget and b_budget != '未知' else '⚠ 存在差异'} |",
+        f"| 计划 / 完成案例 | {b_plan} / {b_done} | {a_plan} / {a_done} | {'✓ 案例数一致' if b_plan == a_plan and b_done == a_done else '⚠ 存在差异'} |",
+        f"| 降级案例数 | {b_fall} | {a_fall} | {'✓ 无降级' if b_fall == 0 and a_fall == 0 else f'⚠ 包含降级 ({b_fall} / {a_fall})'} |",
+        "",
+    ]
+
+    if is_comparable:
+        lines.extend([
+            "> [!NOTE]",
+            f"> **单变量控制结论**：两组评测已满足严格单变量同模型控制条件（同一模型 `{b_model}`、相同基础 diff、相同评审预算与评测集）。两组差异主要来源于上下文检索模式的不同。",
+            "",
+        ])
+    else:
+        lines.extend([
+            "> [!WARNING]",
+            "> **单变量控制警告**：本次对比未完全满足严格单变量同模型控制条件，具体差异项如下：",
+        ])
+        for disc in discrepancies:
+            lines.append(f"> - {disc}")
+        lines.extend([
+            ">",
+            "> 依据评测纪律，在无法确认同模型或存在降级/环境差异时，**不得据此输出严格的同模型优劣结论**。",
+            "",
+        ])
+
+    lines.extend([
+        "## 3. 耗时与用量对比矩阵",
+        "",
+        "| 统计项目 | 基线 (Before) | 改进版 (After) | 差异 (Delta) | 说明 |",
+        "|---|---|---|---|---|",
+        f"| 评测端到端总耗时 | {e2e_b} | {e2e_a} | {e2e_d} | 包含工作区准备、评审与官方裁判打分全流程 |",
+        f"| 评审累积执行耗时 | {rev_b} | {rev_a} | {rev_d} | 各 PR 实际调用 reviewer 命令执行耗时之和 |",
+        f"| 输入 Token (input_tokens) | {in_b} | {in_a} | {in_d} | 真实 API usage 统计（若无记录则为未知） |",
+        f"| 输出 Token (output_tokens) | {out_b} | {out_a} | {out_d} | 真实 API usage 统计（若无记录则为未知） |",
+        f"| 思考 Token (thinking_tokens) | {thk_b} | {thk_a} | {thk_d} | 真实 API usage 统计（若无记录则为未知） |",
+        f"| 总计 Token (total_tokens) | {tot_b} | {tot_a} | {tot_d} | 真实 API usage 统计（严禁通过字符数折算） |",
+        f"| 平均 Prompt 字符数 | {p_ch_b} | {p_ch_a} | {p_ch_d} | 完整 Prompt 字符规模 |",
+        f"| 平均有效上下文大小 | {c_ch_b} | {c_ch_a} | {c_ch_d} | 基础 diff 及追加源码上下文规模 |",
+        "",
+        "## 4. 上下文扩展收益分析",
+        "",
+        "> **核心问题解答**：对当前实际使用的 reviewer，额外提供符号定义、调用关系和契约源码，是否改善审核质量？额外耗时与用量是多少？",
+        "",
+    ])
+
+    # Factual analysis
+    if not is_comparable:
+        lines.append("- **审核质量结论**: 由于两组评测存在不可比因素（如模型未确认或存在降级），数据不能证明审核质量差异是由源码上下文直接引起。")
+    elif gr_d.startswith("+") and gr_d != "+0.0%":
+        lines.append(f"- **审核质量结论**: 检索模式带来了审核质量提升，基础召回率提升 {gr_d}，基础准确率变化 {gp_d}。")
+    elif gr_d.startswith("-"):
+        lines.append(f"- **审核质量结论**: 检索模式未带来审核质量提升，基础召回率下降 {gr_d}，表明额外源码上下文可能引入了噪声。")
+    else:
+        lines.append(f"- **审核质量结论**: 检索模式在现有黄金缺陷用例上质量持平（召回率 Delta: {gr_d}，准确率 Delta: {gp_d}）。")
+
+    lines.append(f"- **额外耗时评估**: 评审命令执行累积耗时变化为 `{rev_d}`，端到端评测耗时变化为 `{e2e_d}`。")
+    lines.append(f"- **额外用量评估**: 总计 Token 消耗变化为 `{tot_d}`，平均 Prompt 字符数膨胀 `{p_ch_d}`，有效上下文扩展 `{c_ch_d}`。")
+
+    lines.extend([
+        "",
+        "## 5. 案例检出变化明细",
         "",
         "详见各轮独立报告：",
         f"- 基线报告: [{before_report_file.name}]({before_report_file})",
         f"- 改进版报告: [{after_report_file.name}]({after_report_file})",
         "",
-    ]
+    ])
 
     report_content = "\n".join(lines)
     if output_file:

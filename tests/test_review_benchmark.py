@@ -24,13 +24,21 @@ HERDR_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(HERDR_ROOT))
 
 from herdr.review_benchmark import (
+    DEFAULT_CONTEXT_BUDGET_CHARS,
+    DEFAULT_CONTEXT_MODE,
+    VALID_CONTEXT_MODES,
+    check_benchmark_comparability,
     compare_benchmarks,
     extract_and_validate_metrics,
+    extract_base_diff,
     extract_findings_from_response,
     generate_chinese_report,
     pr_key,
+    resolve_agent_identity,
+    retrieve_and_assemble_context,
     run_agent_review,
     validate_candidate_output,
+    validate_context_config,
     validate_finding,
     validate_manifest,
 )
@@ -575,6 +583,463 @@ class TestDatasetV1Integrity(unittest.TestCase):
             parsed_out = json.loads(cli_res.stdout)
             self.assertEqual(parsed_out["status"], "success")
             self.assertEqual(parsed_out["agent"], "rule")
+
+
+class TestReviewBenchContextModes(unittest.TestCase):
+    """Unit tests for ReviewBench same-model context modes comparison (diff_only vs existing_four_tier)."""
+
+    def setUp(self):
+        self.sample_pr_info = {
+            "repo": "https://github.com/allinai0506/HAFlow",
+            "pr_number": 199,
+            "base": "0123456789abcdef0123456789abcdef01234567",
+            "head": "abcdef0123456789abcdef0123456789abcdef01",
+            "title": "Fix context boundary bug",
+            "body": "Fixes context boundary resolution and verification",
+        }
+        self.sample_diff = (
+            "--- a/herdr/scheduler.py\n"
+            "+++ b/herdr/scheduler.py\n"
+            "@@ -150,10 +150,15 @@\n"
+            "-def old_func():\n"
+            "+def extract_task_candidate_sha(baseline_commit):\n"
+            "+    # evaluate_join_gate check\n"
+            "+    pass\n"
+        )
+
+    def test_default_compatibility(self):
+        """Unconfigured review config defaults to existing_four_tier and 35000 chars budget."""
+        mode, budget = validate_context_config(None, None)
+        self.assertEqual(mode, DEFAULT_CONTEXT_MODE)
+        self.assertEqual(mode, "existing_four_tier")
+        self.assertEqual(budget, DEFAULT_CONTEXT_BUDGET_CHARS)
+        self.assertEqual(budget, 35000)
+
+        # run_agent_review without explicit kwargs defaults to existing_four_tier
+        res = run_agent_review(
+            agent_name="rule",
+            repo_dir=Path("/tmp"),
+            pr_info=self.sample_pr_info,
+            diff_content=self.sample_diff,
+        )
+        self.assertIn("context_meta", res)
+        c_meta = res["context_meta"]
+        self.assertEqual(c_meta["requested_context_mode"], "existing_four_tier")
+        self.assertEqual(c_meta["context_budget_chars"], 35000)
+
+    def test_context_config_validation(self):
+        """Invalid context mode or non-positive/non-int budget fail-fast with ValueError."""
+        # Invalid mode
+        with self.assertRaises(ValueError) as ctx:
+            validate_context_config("invalid_mode", 35000)
+        self.assertIn("Invalid context_mode", str(ctx.exception))
+
+        # Invalid budget <= 0
+        with self.assertRaises(ValueError) as ctx:
+            validate_context_config("diff_only", 0)
+        self.assertIn("Must be a positive integer", str(ctx.exception))
+
+        with self.assertRaises(ValueError) as ctx:
+            validate_context_config("existing_four_tier", -500)
+        self.assertIn("Must be a positive integer", str(ctx.exception))
+
+        # Invalid budget type
+        with self.assertRaises(ValueError) as ctx:
+            validate_context_config("diff_only", "35000")  # type: ignore
+        self.assertIn("Must be a positive integer", str(ctx.exception))
+
+        # run_agent_review fail-fast before calling model
+        with self.assertRaises(ValueError):
+            run_agent_review(
+                agent_name="rule",
+                repo_dir=Path("/tmp"),
+                pr_info=self.sample_pr_info,
+                diff_content=self.sample_diff,
+                context_mode="unsupported_mode",
+            )
+
+    def test_base_diff_fairness_and_identity(self):
+        """Both modes receive character-for-character identical base_diff; four-tier expansion does not displace base_diff."""
+        # Create a large diff (> 20,000 chars)
+        repeated_lines = ["+    line_content_padding_for_large_diff_testing = 12345\n"] * 400
+        large_diff = (
+            "--- a/herdr/scheduler.py\n"
+            "+++ b/herdr/scheduler.py\n"
+            "@@ -1,5 +1,405 @@\n"
+            + "".join(repeated_lines)
+        )
+        self.assertGreater(len(large_diff), 20000)
+
+        # Extract base_diff with 35,000 budget (capped at 15,000 per Tier-1 logic)
+        base_diff_1, files_1 = extract_base_diff(large_diff, max_budget_chars=35000)
+        self.assertEqual(len(base_diff_1), 15000)
+
+        # In diff_only mode:
+        res_diff_only = run_agent_review(
+            agent_name="rule",
+            repo_dir=Path("/tmp"),
+            pr_info=self.sample_pr_info,
+            diff_content=large_diff,
+            context_mode="diff_only",
+            context_budget_chars=35000,
+        )
+        # In existing_four_tier mode (mock repo):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            subprocess.run(["git", "init", "-q"], cwd=str(tmp), check=True)
+            res_four_tier = run_agent_review(
+                agent_name="rule",
+                repo_dir=tmp,
+                pr_info=self.sample_pr_info,
+                diff_content=large_diff,
+                context_mode="existing_four_tier",
+                context_budget_chars=35000,
+            )
+
+        # Both runs report identical base_diff_chars
+        self.assertEqual(res_diff_only["context_meta"]["base_diff_chars"], 15000)
+        self.assertEqual(res_four_tier["context_meta"]["base_diff_chars"], 15000)
+        self.assertEqual(res_diff_only["context_meta"]["base_diff_chars"], res_four_tier["context_meta"]["base_diff_chars"])
+
+    def test_mode_enforcement(self):
+        """diff_only mode performs NO repo retrieval, while existing_four_tier retrieves repo context."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            subprocess.run(["git", "init", "-q"], cwd=str(tmp), check=True)
+            target_py = tmp / "herdr" / "state_db.py"
+            target_py.parent.mkdir(parents=True, exist_ok=True)
+            target_py.write_text(
+                "def _validate_context_source_existence(run_scope, workflow_id, verified_handoff_tasks):\n"
+                "    # working_context validation\n"
+                "    return True\n",
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "add", "."], cwd=str(tmp), check=True)
+            subprocess.run(["git", "commit", "-m", "init", "-q"], cwd=str(tmp), check=True)
+
+            diff_sample = (
+                "--- a/herdr/state_db.py\n"
+                "+++ b/herdr/state_db.py\n"
+                "@@ -1,3 +1,3 @@\n"
+                "-def old(): pass\n"
+                "+def _validate_context_source_existence(): pass\n"
+            )
+
+            # 1. diff_only: context contains only base diff, no expanded symbols
+            res_diff = run_agent_review(
+                agent_name="rule-contract-context-v1",
+                repo_dir=tmp,
+                pr_info=self.sample_pr_info,
+                diff_content=diff_sample,
+                context_mode="diff_only",
+                context_budget_chars=35000,
+            )
+            c_meta_diff = res_diff["context_meta"]
+            self.assertEqual(c_meta_diff["requested_context_mode"], "diff_only")
+            self.assertEqual(c_meta_diff["effective_context_mode"], "diff_only")
+            self.assertIsNone(c_meta_diff["fallback_reason"])
+            self.assertEqual(c_meta_diff["context_chars"], len(diff_sample))
+            self.assertEqual(res_diff["audit"]["expanded_symbols"], [])
+            self.assertEqual(res_diff["audit"]["retrieved_context"], [])
+
+            # 2. existing_four_tier: performs retrieval, retrieves symbols from state_db.py
+            res_four = run_agent_review(
+                agent_name="rule-contract-context-v1",
+                repo_dir=tmp,
+                pr_info=self.sample_pr_info,
+                diff_content=diff_sample,
+                context_mode="existing_four_tier",
+                context_budget_chars=35000,
+            )
+            c_meta_four = res_four["context_meta"]
+            self.assertEqual(c_meta_four["requested_context_mode"], "existing_four_tier")
+            self.assertEqual(c_meta_four["effective_context_mode"], "existing_four_tier")
+            self.assertIsNone(c_meta_four["fallback_reason"])
+            self.assertGreater(c_meta_four["context_chars"], c_meta_diff["context_chars"])
+            self.assertIn("_validate_context_source_existence", res_four["audit"]["expanded_symbols"])
+
+    def test_budget_compliance_and_truncation(self):
+        """Very small context_budget_chars strictly limits both base_diff and total context."""
+        diff = "--- a/test.py\n+++ b/test.py\n@@ -1 +1 @@\n" + ("+line\n" * 1000)
+        self.assertGreater(len(diff), 5000)
+
+        # Budget of 1200 chars
+        base_diff, _ = extract_base_diff(diff, max_budget_chars=1200)
+        self.assertLessEqual(len(base_diff), 1200)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            subprocess.run(["git", "init", "-q"], cwd=str(tmp), check=True)
+            res = run_agent_review(
+                agent_name="rule",
+                repo_dir=tmp,
+                pr_info=self.sample_pr_info,
+                diff_content=diff,
+                context_mode="existing_four_tier",
+                context_budget_chars=1200,
+            )
+            self.assertLessEqual(res["context_meta"]["context_chars"], 1200)
+
+    def test_fallback_traceability_and_integrity(self):
+        """Strictly distinguish: successful 4-tier, explicit diff_only, and fallback to diff_only."""
+        # 1. Explicit diff_only
+        res_explicit = run_agent_review(
+            agent_name="rule",
+            repo_dir=Path("/nonexistent_dir"),
+            pr_info=self.sample_pr_info,
+            diff_content=self.sample_diff,
+            context_mode="diff_only",
+        )
+        self.assertEqual(res_explicit["context_meta"]["requested_context_mode"], "diff_only")
+        self.assertEqual(res_explicit["context_meta"]["effective_context_mode"], "diff_only")
+        self.assertIsNone(res_explicit["context_meta"]["fallback_reason"])
+
+        # 2. Fallback to diff_only (requested 4-tier, but repo_dir lacks .git or raises)
+        res_fallback = run_agent_review(
+            agent_name="rule",
+            repo_dir=Path("/nonexistent_dir"),
+            pr_info=self.sample_pr_info,
+            diff_content=self.sample_diff,
+            context_mode="existing_four_tier",
+        )
+        self.assertEqual(res_fallback["context_meta"]["requested_context_mode"], "existing_four_tier")
+        self.assertEqual(res_fallback["context_meta"]["effective_context_mode"], "diff_only")
+        self.assertIsNotNone(res_fallback["context_meta"]["fallback_reason"])
+        self.assertIn("retrieval_failed", res_fallback["context_meta"]["fallback_reason"])
+
+    def test_prompt_and_context_fingerprints(self):
+        """Prompt and context character lengths and SHA-256 fingerprints are generated and valid."""
+        res = run_agent_review(
+            agent_name="rule",
+            repo_dir=Path("/tmp"),
+            pr_info=self.sample_pr_info,
+            diff_content=self.sample_diff,
+            context_mode="diff_only",
+        )
+        p_meta = res["prompt_meta"]
+        c_meta = res["context_meta"]
+
+        self.assertIsInstance(p_meta["prompt_chars"], int)
+        self.assertGreater(p_meta["prompt_chars"], 0)
+        self.assertEqual(len(p_meta["prompt_fingerprint"]), 64)
+
+        self.assertIsInstance(c_meta["context_chars"], int)
+        self.assertGreater(c_meta["context_chars"], 0)
+        self.assertEqual(len(c_meta["context_fingerprint"]), 64)
+
+    def test_usage_and_latency_integrity(self):
+        """Missing tokens are preserved as None/'未知'; E2E elapsed vs review cumulative execution time are distinct."""
+        res = run_agent_review(
+            agent_name="rule",
+            repo_dir=Path("/tmp"),
+            pr_info=self.sample_pr_info,
+            diff_content=self.sample_diff,
+        )
+        # For rule / mock, tokens is None (not fabricated as 0)
+        self.assertIsNone(res["usage"]["tokens"])
+        self.assertIsInstance(res["usage"]["time_in_ms"], int)
+
+        # Chinese report formats missing tokens as '未知'
+        report = generate_chinese_report(
+            results_json={"metrics": {"overall": {"grounded_recall": 1.0, "grounded_precision": 1.0, "augmented_recall": 1.0, "augmented_precision": 1.0}}},
+            details_json=[],
+            execution_summary={
+                "total_planned": 1,
+                "completed": 1,
+                "failed": 0,
+                "fallback_count": 0,
+                "elapsed_seconds": 2.5,
+                "total_review_time_ms": 1500,
+            },
+            version_info={
+                "context_mode": "diff_only",
+                "context_budget_chars": 35000,
+            },
+        )
+        self.assertIn("真实 Token 用量", report)
+        self.assertIn("输入 Token (input_tokens): 未知", report)
+        self.assertIn("评测实际总耗时**: 2.50 秒", report)
+        self.assertIn("评审累积执行耗时**: 1.50 秒", report)
+
+    def test_comparability_audit_and_report(self):
+        """check_benchmark_comparability detects single-variable discrepancies and compare_benchmarks reports them."""
+        # Baseline run
+        base_run = {
+            "status": "completed",
+            "context_config": {"context_mode": "diff_only", "context_budget_chars": 35000},
+            "execution_summary": {
+                "total_planned": 1,
+                "completed": 1,
+                "fallback_count": 0,
+                "elapsed_seconds": 10.0,
+                "agent_identity": {
+                    "agent": "agy",
+                    "model_name": "gemini-3.8-flash",
+                    "model_confirmed": True,
+                    "cli_version": "1.3.3",
+                },
+            },
+            "usage_summary": {
+                "total_review_time_ms": 8000,
+                "input_tokens": 1200,
+                "output_tokens": 400,
+                "total_tokens": 1600,
+                "avg_prompt_chars": 3500,
+                "avg_context_chars": 2000,
+            },
+            "version_info": {
+                "judge_config": "deepseek/deepseek-v4-flash",
+                "scorer_sha": "e1cb1a0dad8105ebea45caa00c194eaf2d2e7b5d",
+            },
+            "metrics": {
+                "overall": {
+                    "grounded_recall": 0.50,
+                    "grounded_precision": 0.60,
+                    "augmented_recall": 0.50,
+                    "augmented_precision": 0.60,
+                }
+            },
+        }
+
+        # 1. Perfectly controlled 4-tier run
+        after_run = json.loads(json.dumps(base_run))
+        after_run["context_config"]["context_mode"] = "existing_four_tier"
+        after_run["usage_summary"]["total_review_time_ms"] = 12000
+        after_run["usage_summary"]["input_tokens"] = 3500
+        after_run["usage_summary"]["total_tokens"] = 3900
+        after_run["metrics"]["overall"]["grounded_recall"] = 0.75
+
+        is_comp, disc = check_benchmark_comparability(base_run, after_run)
+        self.assertTrue(is_comp)
+        self.assertEqual(len(disc), 0)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            b_dir = tmp / "before"
+            a_dir = tmp / "after"
+            b_dir.mkdir()
+            a_dir.mkdir()
+            (b_dir / "results.json").write_text(json.dumps(base_run), encoding="utf-8")
+            (a_dir / "results.json").write_text(json.dumps(after_run), encoding="utf-8")
+            (b_dir / "report.md").write_text("# Before", encoding="utf-8")
+            (a_dir / "report.md").write_text("# After", encoding="utf-8")
+
+            report_str = compare_benchmarks(b_dir, a_dir)
+            self.assertIn("## 2. 单变量对照与可比性检查", report_str)
+            self.assertIn("✓ 确认同模型", report_str)
+            self.assertIn("## 3. 耗时与用量对比矩阵", report_str)
+            self.assertIn("输入 Token (input_tokens)", report_str)
+            self.assertIn("## 4. 上下文扩展收益分析", report_str)
+
+        # 2. Unconfirmed model discrepancy
+        unconf_run = json.loads(json.dumps(after_run))
+        unconf_run["execution_summary"]["agent_identity"]["model_confirmed"] = False
+        is_comp, disc = check_benchmark_comparability(base_run, unconf_run)
+        self.assertFalse(is_comp)
+        self.assertTrue(any("无法确认同模型" in d for d in disc))
+
+        # 3. Model mismatch discrepancy
+        mismatch_run = json.loads(json.dumps(after_run))
+        mismatch_run["execution_summary"]["agent_identity"]["model_name"] = "claude-3-7-sonnet"
+        is_comp, disc = check_benchmark_comparability(base_run, mismatch_run)
+        self.assertFalse(is_comp)
+        self.assertTrue(any("模型不一致" in d for d in disc))
+
+        # 4. Fallback run discrepancy
+        fallback_run = json.loads(json.dumps(after_run))
+        fallback_run["execution_summary"]["fallback_count"] = 1
+        is_comp, disc = check_benchmark_comparability(base_run, fallback_run)
+        self.assertFalse(is_comp)
+        self.assertTrue(any("包含降级样本" in d for d in disc))
+
+    def test_legacy_report_backwards_compatibility(self):
+        """Comparing a legacy results.json (without context_config or usage_summary) works smoothly without error."""
+        legacy_run = {
+            "status": "completed",
+            "metrics": {
+                "overall": {
+                    "grounded_recall": 0.40,
+                    "grounded_precision": 0.50,
+                    "augmented_recall": 0.40,
+                    "augmented_precision": 0.50,
+                }
+            },
+        }
+        modern_run = {
+            "status": "completed",
+            "context_config": {"context_mode": "diff_only", "context_budget_chars": 35000},
+            "execution_summary": {"completed": 1, "total_planned": 1},
+            "metrics": {
+                "overall": {
+                    "grounded_recall": 0.60,
+                    "grounded_precision": 0.70,
+                    "augmented_recall": 0.60,
+                    "augmented_precision": 0.70,
+                }
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            b_dir = tmp / "before"
+            a_dir = tmp / "after"
+            b_dir.mkdir()
+            a_dir.mkdir()
+            (b_dir / "results.json").write_text(json.dumps(legacy_run), encoding="utf-8")
+            (a_dir / "results.json").write_text(json.dumps(modern_run), encoding="utf-8")
+            (b_dir / "report.md").write_text("# Before", encoding="utf-8")
+            (a_dir / "report.md").write_text("# After", encoding="utf-8")
+
+            report_str = compare_benchmarks(b_dir, a_dir)
+            self.assertIn("## 1. 核心指标对比矩阵", report_str)
+            self.assertIn("未知", report_str)
+
+    def test_cli_review_context_mode_flags(self):
+        """CLI review command accepts --context-mode and --context-budget and forwards them."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            diff_file = tmp / "sample.diff"
+            diff_file.write_text(self.sample_diff, encoding="utf-8")
+            cmd = [
+                sys.executable,
+                str(HERDR_ROOT / "bin" / "herdr-review-bench"),
+                "review",
+                "--repo", str(tmp),
+                "--diff", str(diff_file),
+                "--agent", "rule",
+                "--context-mode", "diff_only",
+                "--context-budget", "20000",
+            ]
+            res = subprocess.run(cmd, capture_output=True, text=True)
+            self.assertEqual(res.returncode, 0, f"CLI error: {res.stderr}")
+            out_json = json.loads(res.stdout)
+            self.assertEqual(out_json["status"], "success")
+            c_meta = out_json.get("context_meta", {})
+            self.assertEqual(c_meta.get("requested_context_mode"), "diff_only")
+            self.assertEqual(c_meta.get("context_budget_chars"), 20000)
+
+    def test_cli_run_early_validation_rejection(self):
+        """CLI run command fails early with non-zero exit code when given invalid context config in YAML/JSON."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            bad_cfg_file = tmp / "bad_cfg.yaml"
+            bad_cfg_file.write_text(
+                "agent: rule\n"
+                "review:\n"
+                "  context_mode: unsupported_mode_xyz\n"
+                "  context_budget_chars: 35000\n",
+                encoding="utf-8",
+            )
+            out_dir = tmp / "out"
+            cmd = [
+                sys.executable,
+                str(HERDR_ROOT / "bin" / "herdr-review-bench"),
+                "run",
+                "--config", str(bad_cfg_file),
+                "--output", str(out_dir),
+            ]
+            res = subprocess.run(cmd, capture_output=True, text=True)
+            self.assertNotEqual(res.returncode, 0)
+            self.assertIn("Invalid review context configuration", res.stderr)
 
 
 if __name__ == "__main__":
