@@ -3273,10 +3273,21 @@ def _launch_task(args):
         if Path(args.task_id).name != args.task_id or args.task_id in {'.', '..'} or len(args.task_id) > 128:
             raise ValueError('task_id must be a bounded single workspace name')
         planned_clone = clone_root / args.task_id
+        from herdr.compliance_scaffolding import is_fix_task, update_contract_whitelist, build_bug_report_template
+        if is_fix_task(task_id=args.task_id, task_type=getattr(args, "task_type", None),
+                       node_id=node_id, branch=getattr(args, "onto", None)):
+            if node.get("delivery_contract"):
+                rel_path, _ = build_bug_report_template({
+                    "task_id": args.task_id,
+                    "task_type": getattr(args, "task_type", None),
+                    "branch": getattr(args, "onto", None),
+                })
+                node["delivery_contract"] = update_contract_whitelist(node["delivery_contract"], rel_path=rel_path)
         from herdr.task_delivery import validate_fix_retrospective
         validate_fix_retrospective(task_id=args.task_id, task_type=getattr(args, "task_type", None),
                                    node_id=node_id, contract=node.get("delivery_contract"),
-                                   integration_mode=getattr(args, "integration_mode", None))
+                                   integration_mode=getattr(args, "integration_mode", None) or node.get("integration_mode") or node.get("default_integration_mode"))
+
         candidate = str(getattr(args, "candidate_sha", None) or "").strip()
         onto = getattr(args, "onto", None)
         committed_recovery = bool(predecessor and predecessor.get('status') == 'committed')
@@ -4722,6 +4733,56 @@ def verify_metrics(task_id, min_score=99.9, if_present=False):
         sys.exit(5)
 
 
+def differential_test(args):
+    """Evaluate differential test failures between candidate and base."""
+    from herdr.differential_testing import (
+        compute_differential_verdict,
+        extract_failing_tests,
+        read_base_test_snapshot,
+    )
+    cand_path = getattr(args, "candidate_output", None)
+    if not cand_path:
+        print("ERROR: --candidate-output is required for differential-test", file=sys.stderr)
+        sys.exit(2)
+    if not os.path.isfile(cand_path):
+        print(f"ERROR: candidate output file not found: {cand_path}", file=sys.stderr)
+        sys.exit(1)
+
+    base_failures = []
+    base_snap_path = getattr(args, "base_snapshot", None)
+    base_out_path = getattr(args, "base_output", None)
+
+    if base_snap_path:
+        if not os.path.isfile(base_snap_path):
+            print(f"ERROR: base snapshot file not found: {base_snap_path}", file=sys.stderr)
+            sys.exit(1)
+        snap = read_base_test_snapshot(base_snap_path)
+        base_failures = snap.get("failing_tests", [])
+    elif base_out_path:
+        if not os.path.isfile(base_out_path):
+            print(f"ERROR: base output file not found: {base_out_path}", file=sys.stderr)
+            sys.exit(1)
+        out = Path(base_out_path).read_text(encoding="utf-8", errors="replace")
+        base_failures = extract_failing_tests(out, exit_code=getattr(args, "base_exit_code", 0))
+
+    cand_out = Path(cand_path).read_text(encoding="utf-8", errors="replace")
+    candidate_failures = extract_failing_tests(cand_out, exit_code=getattr(args, "candidate_exit_code", 0))
+
+    # Defensive: non-zero exit code without parsed test names is an unmasked defect
+    cand_exit = getattr(args, "candidate_exit_code", 0)
+    if cand_exit != 0 and not candidate_failures:
+        candidate_failures = [f"test_process_exit_code_{cand_exit}"]
+
+    result = compute_differential_verdict(candidate_failures, base_failures)
+    print(f"DIFFERENTIAL_TEST: verdict={result.verdict} delta={len(result.delta_failures)} pre_existing={len(result.pre_existing_failures)}")
+    if result.warning:
+        print(f"WARNING: {result.warning}")
+    print("HERDR_DIFFERENTIAL_TEST_RESULT=" + json.dumps(result.to_dict(), ensure_ascii=False))
+    if result.verdict != "pass":
+        sys.exit(1)
+
+
+
 def _with_git_operation_lock(*, include_source_repo=False):
     """Serialize Git operations and fail closed while another Git process runs."""
     def decorate(func):
@@ -4978,7 +5039,7 @@ def _run_commit_index_command(task_id, clone, command):
 
 
 @_with_git_operation_lock()
-def commit_task(task_id, message=None):
+def commit_task(task_id, message=None, allow_rebase=False):
     data = load_tasks()
     task = find_task(data, task_id)
 
@@ -5109,7 +5170,7 @@ def commit_task(task_id, message=None):
     if staged.returncode == 0:
         # 空 index:可能是 Agent 直接提交后的干净工作区,尝试收编 HEAD。
         # 真空任务仍 exit 3,无法归属的推进 exit 4,状态一律不变(除收编成功)。
-        _adopt_head_if_attributable(task_id, task, clone)
+        _adopt_head_if_attributable(task_id, task, clone, allow_rebase=allow_rebase)
         return
 
     if message is None:
@@ -5366,7 +5427,7 @@ def _git_head_history(clone, head, limit=100):
     return commits or []
 
 
-def _adopt_head_if_attributable(task_id, task, clone):
+def _adopt_head_if_attributable(task_id, task, clone, allow_rebase=False):
     """空 index 收编:ADOPT 登记 HEAD,EMPTY exit 3,REFUSED exit 4。"""
     from herdr.git_adoption import classify_commit_state, explain
 
@@ -5382,6 +5443,18 @@ def _adopt_head_if_attributable(task_id, task, clone):
     # F-1: the task's own (and onto) branch never counts as foreign, so
     # a legitimate agent-side push of the task branch cannot refuse.
     exclude_branches = [b for b in (branch, onto) if b]
+    task_val = task.get("allow_rebase")
+    onto_val = bool(onto)
+    env_val = os.environ.get("HERDR_ADOPT_ALLOW_REBASE", "").strip().lower() in ("1", "true", "yes")
+
+    if allow_rebase:
+        effective_allow_rebase = True
+    elif task_val is not None:
+        effective_allow_rebase = bool(task_val)
+    elif onto_val:
+        effective_allow_rebase = True
+    else:
+        effective_allow_rebase = env_val
 
     interval = None
     history = None
@@ -5443,6 +5516,7 @@ def _adopt_head_if_attributable(task_id, task, clone):
         enumeration_failed=enumeration_failed,
         remote_probe_failed=remote_probe_failed,
         current_branch=current_branch,
+        allow_rebase=effective_allow_rebase,
     )
     basis = detail.get("basis") or "none"
     reason = detail.get("reason") or "unknown"
@@ -8185,9 +8259,24 @@ def main():
         help="Skip cleanly (exit 0) if task does not have .herdr-loop configured",
     )
 
+    diff_cmd = sub.add_parser(
+        "differential-test",
+        help="Run differential testing comparison between candidate and base test results",
+    )
+    diff_cmd.add_argument("--candidate-output", help="Path to candidate test execution output file")
+    diff_cmd.add_argument("--base-output", help="Path to base branch test execution output file")
+    diff_cmd.add_argument("--base-snapshot", help="Path to base branch BASELINE_TEST.json snapshot")
+    diff_cmd.add_argument("--candidate-exit-code", type=int, default=0, help="Exit code of candidate test run")
+    diff_cmd.add_argument("--base-exit-code", type=int, default=0, help="Exit code of base test run")
+
     commit_cmd = sub.add_parser("commit")
     commit_cmd.add_argument("task_id")
     commit_cmd.add_argument("--message")
+    commit_cmd.add_argument(
+        "--allow-rebase",
+        action="store_true",
+        help="allow adoption of rebased commits with rewritten committer date",
+    )
 
     integrate = sub.add_parser("integrate")
     integrate.add_argument("task_id")
@@ -8732,6 +8821,23 @@ def main():
     recovery_decide.add_argument('--action', choices=['retry', 'hold', 'verify'], required=True)
     recovery_decide.add_argument('--reason', required=True)
     recovery_decide.add_argument('--until', type=float)
+    partial_retire = sub.add_parser('partial-launch-retire', help='审计并归档旧代未登记部分启动后解除当前派发阻断')
+    partial_retire.add_argument('--workflow-id', required=True)
+    partial_retire.add_argument('--operation-id', type=int, required=True)
+    partial_retire.add_argument('--expected-version', type=int, required=True)
+    partial_retire.add_argument('--prior-operation-id', type=int, required=True)
+    partial_retire.add_argument('--expected-prior-version', type=int, required=True)
+    partial_retire.add_argument('--candidate-sha', required=True)
+    partial_retire.add_argument('--intent-id', required=True)
+    partial_retire.add_argument('--task-id', required=True)
+    partial_retire.add_argument('--pane-id', required=True)
+    partial_retire.add_argument('--terminal-id', required=True)
+    partial_retire.add_argument('--transcript-sha256', required=True)
+    partial_retire.add_argument('--operator', required=True)
+    partial_retire.add_argument('--reason', required=True)
+    partial_retire.add_argument('--confirm-startup-only', action='store_true', required=True)
+    partial_preview = sub.add_parser('partial-launch-preview', help='只读显示指定 Pane transcript 并生成 SHA-256')
+    partial_preview.add_argument('--pane-id', required=True)
 
     migrate = sub.add_parser('workflow-migrate', help='Evidence-backed legacy identity/config migration')
     migrate.add_argument('workflow_id')
@@ -8781,6 +8887,32 @@ def main():
             sys.exit(2)
     elif args.command == 'workflow-migrate':
         cmd_workflow_migration(args)
+    elif args.command == 'partial-launch-preview':
+        import hashlib
+        try:
+            probe = subprocess.run(['herdr', 'pane', 'read', args.pane_id], text=True,
+                capture_output=True, check=False, timeout=10)
+            if probe.returncode != 0 or len(probe.stdout.encode()) > 65536:
+                raise ValueError('Pane transcript 不可读或超过 64 KiB')
+            print(json.dumps({'pane_id': args.pane_id, 'transcript': probe.stdout,
+                'sha256': hashlib.sha256(probe.stdout.encode()).hexdigest()}, ensure_ascii=False))
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            print(f'[PARTIAL LAUNCH PREVIEW REJECTED] {exc}', file=sys.stderr)
+            sys.exit(2)
+    elif args.command == 'partial-launch-retire':
+        from herdr import dispatch_recovery, state_db
+        try:
+            report = dispatch_recovery.abandon_partial_launch(state_db.resolve_state_db_path(),
+                args.workflow_id, args.operation_id, args.expected_version,
+                args.prior_operation_id, args.expected_prior_version, operator=args.operator,
+                reason=args.reason, candidate_sha=args.candidate_sha, intent_id=args.intent_id,
+                task_id=args.task_id, pane_id=args.pane_id, terminal_id=args.terminal_id,
+                transcript_sha256=args.transcript_sha256,
+                confirmed_startup_only=args.confirm_startup_only)
+            print(json.dumps(report, ensure_ascii=False))
+        except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
+            print(f'[PARTIAL LAUNCH RETIREMENT REJECTED] {exc}', file=sys.stderr)
+            sys.exit(2)
     elif args.command in ('recovery-status', 'recovery-decide'):
         cmd_workflow_recovery(args)
     elif args.command == "add":
@@ -8825,10 +8957,14 @@ def main():
             if_present=args.if_present,
         )
 
+    elif args.command == "differential-test":
+        differential_test(args)
+
     elif args.command == "commit":
         commit_task(
             args.task_id,
-            args.message
+            args.message,
+            allow_rebase=getattr(args, "allow_rebase", False),
         )
 
     elif args.command == "integrate":

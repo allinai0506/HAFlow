@@ -559,6 +559,195 @@ def _recover_launch_resources(store, intent, *, runner=None, timeout=10):
         return {**retained, 'reason': 'recovery_unverified:' + type(exc).__name__}
 
 
+def retire_partial_launch(store, intent, *, expected_intent_id, expected_task_id,
+                           expected_workflow_id, expected_node_id, expected_candidate_sha,
+                           expected_terminal_id, expected_pane_id, operator, reason,
+                           transcript_sha256, confirmed_startup_only, runner=None,
+                           now=None, timeout=15):
+    """Close/archive one explicitly attested startup-only dynamic launch.
+
+    The human attestation is bound to the exact, freshly-read transcript hash;
+    native pane, agent, workspace tag, task inventory and intent identities are
+    independently rechecked before any close/archive side effect.
+    """
+    import re
+    import os
+
+    if confirmed_startup_only is not True:
+        raise ValueError('必须明确确认 Pane 仅停留在启动提示')
+    if (not isinstance(operator, str) or not operator.strip() or len(operator) > 128
+            or not isinstance(reason, str) or not reason.strip() or len(reason.encode()) > 2048):
+        raise ValueError('请填写处理人及有界处理依据')
+    if not isinstance(transcript_sha256, str) or not re.fullmatch(r'[a-fA-F0-9]{64}', transcript_sha256):
+        raise ValueError('transcript SHA-256 格式无效')
+    deadline = time.monotonic() + timeout
+    if runner is None:
+        def runner(argv, budget):
+            from .bounded_tools import run_bounded
+            result = run_bounded(argv, timeout=budget, output_limit=65536)
+            return result['exit_code'] if result['status'] == 'completed' else 1, result['stdout'], result['stderr']
+
+    current = _latest_intent(store, intent.get('key'))
+    if (not current or current.get('intent_id') != expected_intent_id
+            or expected_intent_id != intent.get('intent_id')
+            or current.get('task_id') != expected_task_id
+            or current.get('workflow_id') != expected_workflow_id
+            or current.get('node_id') != expected_node_id
+            or current.get('candidate_sha') != expected_candidate_sha
+            or current.get('phase') == 'registered'):
+        raise ValueError('启动 intent 身份或阶段已变化')
+    already_absent = current.get('phase') == 'resources_absent'
+    if _intent_task(store, current):
+        raise ValueError('旧启动已有登记任务，禁止归档')
+    resources = current.get('resources') or {}
+    clone = Path(resources.get('planned_clone_path') or '')
+    if (not clone.is_absolute()
+            or resources.get('pane_id') != expected_pane_id
+            or resources.get('terminal_id') != expected_terminal_id
+            or resources.get('pane_source') != 'dynamic'
+            or not resources.get('run_id')):
+        raise ValueError('私有动态 clone/pane 身份不完整')
+    tag_path = clone / '.herdr-launch-identity.json'
+    archive = clone.parent / (clone.name + '.abandoned-' + expected_intent_id)
+
+    def native(argv):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError('partial launch recovery deadline')
+        code, stdout, _ = runner(argv, remaining)
+        if code or len(stdout.encode()) > 65536:
+            raise ValueError('native partial launch inspection failed')
+        try:
+            return json.loads(stdout).get('result')
+        except (TypeError, ValueError):
+            raise ValueError('native partial launch response is invalid')
+
+    def check_tag(path):
+        if path.is_symlink() or path.stat().st_size > 8192:
+            raise ValueError('private launch tag is unsafe')
+        tag = json.loads(path.read_text(encoding='utf-8'))
+        expected = {'intent_id': expected_intent_id, 'task_id': expected_task_id,
+            'workflow_id': expected_workflow_id, 'node_id': expected_node_id,
+            'candidate_sha': expected_candidate_sha, 'run_id': resources['run_id'],
+            'pane_id': expected_pane_id, 'terminal_id': expected_terminal_id,
+            'pane_source': 'dynamic', 'phase': 'agent_start_requested'}
+        if any(tag.get(key) != value for key, value in expected.items()):
+            raise ValueError('private launch tag identity mismatch')
+        return tag
+
+    def check_runtime():
+        tag = check_tag(tag_path)
+        pane_result = native(['herdr', 'pane', 'get', expected_pane_id])
+        pane = pane_result.get('pane') if isinstance(pane_result, dict) else None
+        if (not isinstance(pane, dict) or pane.get('pane_id') != expected_pane_id
+                or pane.get('terminal_id') != expected_terminal_id
+                or not pane.get('cwd')
+                or Path(pane['cwd']).expanduser().resolve() != clone.resolve()):
+            raise ValueError('live pane terminal/cwd identity mismatch')
+        agent_result = native(['herdr', 'agent', 'get', expected_pane_id])
+        if (not isinstance(agent_result, dict) or 'agent' not in agent_result
+                or agent_result['agent'] not in (None, {})):
+            raise ValueError('pane has an Agent session or its absence is unknown')
+        text_result = runner(['herdr', 'pane', 'read', expected_pane_id],
+            max(0.1, deadline - time.monotonic()))
+        if text_result[0] or len(text_result[1].encode()) > 65536:
+            raise ValueError('pane transcript cannot be verified')
+        digest = hashlib.sha256(text_result[1].encode()).hexdigest()
+        if digest.lower() != transcript_sha256.lower():
+            raise ValueError('pane transcript changed after human review')
+        # Human attestation is required because startup prompts are provider-specific;
+        # the hash binds that review to the exact bytes checked here.
+        if confirmed_startup_only is not True:
+            raise ValueError('startup-only transcript was not confirmed')
+        if check_tag(tag_path) != tag or _latest_intent(store, current['key']).get('intent_id') != expected_intent_id:
+            raise ValueError('intent or workspace identity changed before close')
+        if _intent_task(store, current):
+            raise ValueError('Task registered during partial launch recovery')
+        return tag
+
+    if already_absent:
+        receipt = current.get('retirement') or {}
+        archive = Path(receipt.get('archived_clone') or '')
+        if (receipt.get('transcript_sha256') != transcript_sha256.lower()
+                or receipt.get('pane_id') != expected_pane_id
+                or receipt.get('terminal_id') != expected_terminal_id
+                or receipt.get('workflow_id') != expected_workflow_id
+                or receipt.get('node_id') != expected_node_id
+                or receipt.get('candidate_sha') != expected_candidate_sha
+                or receipt.get('task_id') != expected_task_id
+                or receipt.get('intent_id') != expected_intent_id
+                or resources.get('retirement_archive') != str(archive)
+                or archive.is_symlink() or not archive.is_dir()):
+            raise ValueError('启动 intent 已归档，但回执或 clone 归属无法复核')
+        check_tag(archive / '.herdr-launch-identity.json')
+        panes_result = native(['herdr', 'pane', 'list'])
+        panes = panes_result.get('panes') if isinstance(panes_result, dict) else panes_result
+        if (not isinstance(panes, list) or len(panes) > 64
+                or any(not isinstance(item, dict) or not item.get('pane_id') for item in panes)
+                or any(item['pane_id'] == expected_pane_id for item in panes)):
+            raise ValueError('归档启动仍存在或无法核实 live Pane')
+        return {'status': 'resources_absent', 'archived_clone': str(archive),
+            'intent_id': expected_intent_id, 'retirement': receipt, 'idempotent': True}
+
+    preparing = current
+    if current.get('phase') == 'retirement_preparing':
+        prior_receipt = current.get('retirement') or {}
+        if (prior_receipt.get('transcript_sha256') != transcript_sha256.lower()
+                or prior_receipt.get('pane_id') != expected_pane_id
+                or prior_receipt.get('terminal_id') != expected_terminal_id):
+            raise ValueError('待恢复归档回执与本次确认不匹配')
+    else:
+        check_runtime()
+        preparing = {**current, 'phase': 'retirement_preparing', 'retirement': {
+            'operator': operator.strip(), 'reason': reason.strip(),
+            'transcript_sha256': transcript_sha256.lower(), 'pane_id': expected_pane_id,
+            'terminal_id': expected_terminal_id, 'workflow_id': expected_workflow_id,
+            'node_id': expected_node_id, 'candidate_sha': expected_candidate_sha,
+            'task_id': expected_task_id, 'intent_id': expected_intent_id,
+            'started_at': time.time() if now is None else now}}
+        _launch_event(store, preparing, now)
+
+    if os.path.lexists(archive):
+        if os.path.lexists(clone):
+            raise ValueError('原始 clone 和归档同时存在')
+        check_tag(archive / '.herdr-launch-identity.json')
+        panes_result = native(['herdr', 'pane', 'list'])
+        panes = panes_result.get('panes') if isinstance(panes_result, dict) else panes_result
+        if (not isinstance(panes, list) or len(panes) > 64
+                or any(not isinstance(item, dict) or not item.get('pane_id') for item in panes)
+                or any(item['pane_id'] == expected_pane_id for item in panes)):
+            raise ValueError('archived launch still has a live or unverified pane')
+    else:
+        if clone.is_symlink() or not clone.is_dir():
+            raise ValueError('私有 clone 在恢复期间消失或被替换')
+        panes_result = native(['herdr', 'pane', 'list'])
+        panes = panes_result.get('panes') if isinstance(panes_result, dict) else panes_result
+        if (not isinstance(panes, list) or len(panes) > 64
+                or any(not isinstance(item, dict) or not item.get('pane_id') for item in panes)):
+            raise ValueError('native pane inventory is incomplete')
+        pane_present = any(item['pane_id'] == expected_pane_id for item in panes)
+        if pane_present:
+            check_runtime()
+            if current.get('phase') == 'retirement_preparing':
+                check_runtime()
+            native(['herdr', 'pane', 'close', expected_pane_id])
+            after_result = native(['herdr', 'pane', 'list'])
+            after = after_result.get('panes') if isinstance(after_result, dict) else after_result
+            if (not isinstance(after, list) or len(after) > 64
+                    or any(not isinstance(item, dict) or not item.get('pane_id') for item in after)
+                    or any(item['pane_id'] == expected_pane_id for item in after)):
+                raise ValueError('closed pane absence could not be verified')
+        check_tag(tag_path)
+        os.rename(clone, archive)
+    receipt = {**preparing['retirement'], 'archived_clone': str(archive),
+        'completed_at': time.time() if now is None else now}
+    absent = {**preparing, 'phase': 'resources_absent', 'resources': {
+        **preparing['resources'], 'retirement_archive': str(archive)}, 'retirement': receipt}
+    _launch_event(store, absent, now)
+    return {'status': 'resources_absent', 'archived_clone': str(archive),
+        'intent_id': expected_intent_id, 'retirement': receipt}
+
+
 def authorize_launch_recovery(store, intent, terminal_id, reason, *, runner=None):
     """Explicit operator attestation binds a legacy unstarted allocation token.
 

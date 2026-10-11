@@ -603,3 +603,11 @@ Evidence:
 - `herdr/delivery_rework.py#repair_delivery`
 - `herdr/state_db.py#transition_task`
 - `tests/test_delivery_rework.py#test_full_repair_commit_integrate_then_operation_resolves`
+
+## Sentinel 停滞硬超时看门狗 (Hard Timeout Watchdog)
+
+`FACT` Sentinel 在 `check_task_stalls` 中对长期处于 `STALL_WATCH_STATUSES` 且无推进（`idle_seconds >= task_hard_timeout_seconds()`，默认 3600s，可通过 `HERDR_TASK_HARD_TIMEOUT` 与 `HERDR_TASK_HARD_TIMEOUT_ENABLED` 配置）的任务执行硬超时处置：调用 `update_statuses` 并带入观察到的 `expected_status` 与 `expected_version` 执行原子 CAS 转换为 `failed`（`failure_reason: hard_timeout_watchdog`，`failure_detail: sentinel watchdog: hard_timeout_watchdog`），记录 `task_hard_timeout` 事实事件并按 task episode 去重。并发交错导致版本或状态变迁时 CAS 安全拒绝，不误杀刚产生活动推进的任务。
+
+Evidence:
+- `services/herdr-sentinel.py#check_task_stalls` / `#task_hard_timeout_seconds`
+- `tests/test_sentinel_hard_timeout.py`

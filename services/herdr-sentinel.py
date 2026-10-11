@@ -41,6 +41,25 @@ def dispatch_fuse_enabled():
     return value.strip().lower() not in ("0", "false", "off", "no")
 
 
+DEFAULT_TASK_HARD_TIMEOUT_SECONDS = 3600.0
+
+
+def task_hard_timeout_enabled():
+    value = os.environ.get("HERDR_TASK_HARD_TIMEOUT_ENABLED", "1")
+    return value.strip().lower() not in ("0", "false", "off", "no")
+
+
+def task_hard_timeout_seconds():
+    raw = os.environ.get("HERDR_TASK_HARD_TIMEOUT")
+    if raw is None or not raw.strip():
+        return DEFAULT_TASK_HARD_TIMEOUT_SECONDS
+    try:
+        val = float(raw.strip())
+        return val if val > 0 else DEFAULT_TASK_HARD_TIMEOUT_SECONDS
+    except (ValueError, TypeError):
+        return DEFAULT_TASK_HARD_TIMEOUT_SECONDS
+
+
 def run(cmd, timeout=10):
     return subprocess.run(
         cmd,
@@ -156,7 +175,7 @@ def update_statuses(changes, expected=None, epochs=None, versions=None):
             continue
 
         old_status = authoritative.get("status")
-        if old_status not in ACTIVE:
+        if old_status not in ACTIVE and old_status not in liveness.STALL_WATCH_STATUSES:
             continue
         observed_status = expected.get(task_id, old_status)
         observed_version = versions.get(task_id, authoritative.get("version"))
@@ -180,16 +199,20 @@ def update_statuses(changes, expected=None, epochs=None, versions=None):
             if completion.get("accepted", False):
                 changed = True
             continue
+        meta = {
+            "sentinel_reason": reason,
+            "sentinel_updated_at": int(time.time()),
+        }
+        if new_status == "failed":
+            meta["failure_reason"] = reason
+            meta["failure_detail"] = f"sentinel watchdog: {reason}"
         try:
             result = store.compare_and_set_task_transition(
                 task_id=task_id,
                 to_status=new_status,
                 reason=reason,
                 source="herdr-sentinel",
-                metadata={
-                    "sentinel_reason": reason,
-                    "sentinel_updated_at": int(time.time()),
-                },
+                metadata=meta,
                 expected_status=observed_status,
                 expected_version=observed_version,
                 expected_updated_at=observed_updated,
@@ -205,7 +228,7 @@ def update_statuses(changes, expected=None, epochs=None, versions=None):
                     to_status=new_status,
                     reason=reason,
                     source="herdr-sentinel",
-                    metadata={"sentinel_reason": reason},
+                    metadata=meta,
                     store=store,
                 )
             except Exception as exc:
@@ -724,7 +747,74 @@ def check_task_stalls(tasks, state, notify_fn=None, now=None):
             notify_stall(alert, task)
 
     state["stalls"] = updated
-    return updated != episodes
+    changed = updated != episodes
+
+    # Hard timeout watchdog: Transition long STALL/idle-spinning tasks to failed
+    timeouts = state.setdefault("timeouts", {})
+    hard_timeout = task_hard_timeout_seconds()
+    hard_timeout_on = task_hard_timeout_enabled()
+
+    for task in tasks or []:
+        tid = task.get("task_id")
+        status = task.get("status")
+        if not tid or status not in liveness.STALL_WATCH_STATUSES:
+            timeouts.pop(tid, None)
+            continue
+
+        updated_raw = task.get("updated_at") or task.get("last_activity_at") or 0
+        try:
+            updated_at = float(updated_raw)
+        except (ValueError, TypeError):
+            continue
+        if not updated_at:
+            continue
+
+        idle_seconds = now - updated_at
+        if idle_seconds < hard_timeout:
+            timeouts.pop(tid, None)
+            continue
+
+        existing_timeout = timeouts.get(tid)
+        if existing_timeout and existing_timeout.get("updated_at") == updated_at:
+            continue
+
+        if not hard_timeout_on:
+            continue
+
+        store = _get_store()
+        print(
+            f"[SENTINEL TIMEOUT] task={tid} status={status} idle={int(idle_seconds)}s — hard timeout exceeded, auto-failing task",
+            flush=True,
+        )
+        task_ver = task.get("version")
+        ver_map = {tid: task_ver} if task_ver is not None else None
+        if update_statuses(
+            {tid: ("failed", "hard_timeout_watchdog")},
+            expected={tid: status},
+            versions=ver_map,
+        ):
+            changed = True
+            timeouts[tid] = {
+                "timed_out_at": now,
+                "idle_seconds": int(idle_seconds),
+                "updated_at": updated_at,
+            }
+            _record_sentinel_event(
+                store,
+                task,
+                "task_hard_timeout",
+                {
+                    "idle_seconds": int(idle_seconds),
+                    "previous_status": status,
+                    "hard_timeout": hard_timeout,
+                },
+            )
+
+    for tid in list(timeouts.keys()):
+        if tid not in by_id:
+            timeouts.pop(tid, None)
+
+    return changed
 
 
 def main():

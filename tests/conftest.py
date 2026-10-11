@@ -39,3 +39,15 @@ def isolate_model_credentials(monkeypatch):
     """Explicit fake-key tests may opt in; never inherit real shell credentials."""
     monkeypatch.delenv("JEV_API_KEY", raising=False)
     monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def reset_global_state_store():
+    """Reset the global StateStore singleton and isolate environment variables to prevent cross-test pollution."""
+    old_env = dict(os.environ)
+    from herdr.state_store import reset_state_store
+    reset_state_store()
+    yield
+    os.environ.clear()
+    os.environ.update(old_env)
+    reset_state_store()

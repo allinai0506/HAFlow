@@ -618,6 +618,14 @@ def api_workflow_recovery_decide(b):
         from herdr import dispatch_recovery
         return dispatch_recovery.check_resources(db_path,wid,operation_id,int(b['expected_version']),
             b.get('operator'),b.get('reason'),candidate_sha=b.get('candidate_sha'))
+    if b.get('action') == 'abandon_partial_launch':
+        from herdr import dispatch_recovery
+        return dispatch_recovery.abandon_partial_launch(db_path, wid, operation_id,
+            int(b['expected_version']), int(b['prior_operation_id']), int(b['expected_prior_version']),
+            operator=b.get('operator'), reason=b.get('reason'), candidate_sha=b.get('candidate_sha'),
+            intent_id=b.get('intent_id'), task_id=b.get('task_id'), pane_id=b.get('pane_id'),
+            terminal_id=b.get('terminal_id'), transcript_sha256=b.get('transcript_sha256'),
+            confirmed_startup_only=b.get('confirmed_startup_only'))
     if b.get('action') in {'restore_scope', 'confirm_absent'}:
         from herdr import dispatch_recovery
         return dispatch_recovery.decide(db_path,wid,operation_id,int(b['expected_version']),
@@ -4502,6 +4510,32 @@ body {
   background-size: 18px 18px;
   padding-top: 52px;
 }
+.flow-attn-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 16px;
+  background: #fffbeb;
+  border-bottom: 1px solid rgba(217,119,6,.35);
+  font-size: 12px;
+  color: #92400e;
+  z-index: 5;
+  box-sizing: border-box;
+}
+.flow-attn-bar .flow-attn-text {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.flow-attn-bar .mini {
+  padding: 4px 8px;
+  font-size: 12px;
+}
 #flowCanvas { flex: 1; height: auto; min-height: 0; width: 100% !important; max-width: 100%; background: transparent; }
 #flowCanvas .x6-graph-svg, #flowCanvas .x6-graph { background: transparent !important; }
 #flowCanvas .x6-node text { display: none; }
@@ -5284,7 +5318,6 @@ body {
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m9 18 6-6-6-6"/></svg>
         </button>
         <div class="tabs-scroll" id="workflowTabsList"></div>
-        <button type="button" class="btn-new-tab" onclick="showNewWorkflow()" title="发起新工作流">+</button>
       </div>
       <div class="actions">
         <button class="btn factory-action" onclick="advanceStage()" title="推进当前阶段">进入下一阶段</button>
@@ -5352,6 +5385,7 @@ body {
         </div>
         <div id="flowWrap">
           <div id="flowCanvasWrap">
+            <div id="flowAttnBar" class="flow-attn-bar" style="display:none"></div>
             <div id="flowCanvas" role="application" aria-label="工作流 DAG 画布"></div>
             <div id="flowError" role="alert"></div>
           </div>
@@ -7717,7 +7751,7 @@ function flowOverviewHtml(node, tasks){
 function flowGraphData(){return (state.workflow&&state.workflow.graph)||{nodes:[],edges:[]};}
 function initFlowGraph(){renderFlowGraph();}
 function pickDefaultFlowNodeId(nodes){if(!nodes||!nodes.length)return null;const order=['blocked','failed','working','rework'];for(const st of order){const hit=nodes.find(n=>n.status===st);if(hit)return hit.id;}const completed=new Set(nodes.filter(n=>n.status==='completed').map(n=>n.id));const waitingNext=nodes.find(n=>n.status==='waiting'&&(n.depends_on||[]).every(d=>completed.has(d)));if(waitingNext)return waitingNext.id;const waiting=nodes.find(n=>n.status==='waiting');if(waiting)return waiting.id;return nodes[0].id;}
-function setWorkspaceMode(mode){const fw=document.getElementById('flowWrap');const tl=document.getElementById('tasks');const st=document.getElementById('stages');const fs=document.getElementById('flowSummary');const ctlP=document.getElementById('controllerTabView');const tplP=document.getElementById('templatesTabView');const arcP=document.getElementById('archiveTabView');const logP=document.getElementById('logsTabView');const shell=document.querySelector('.shell');if(shell)shell.dataset.workspace=mode||'flow';const isSys=(mode==='aux'||mode==='ctl'||mode==='templates'||mode==='archive'||mode==='logs');const bar=document.getElementById('canvasToolbar');if(bar)bar.style.display=isSys?'none':'flex';const tg=document.querySelector('.flow-view-toggle');if(tg)tg.style.display=isSys?'none':'inline-flex';const tf=document.querySelector('.task-filters');if(tf)tf.style.display=(isSys||mode!=='list')?'none':'flex';if(fw)fw.style.display=mode==='flow'?'flex':'none';if(fs)fs.style.display=(mode==='flow')?'block':'none';if(st)st.style.display='none';if(tl)tl.style.display=(mode==='flow'||mode==='ctl'||mode==='templates'||mode==='archive'||mode==='logs')?'none':'block';if(ctlP)ctlP.hidden=(mode!=='ctl');if(tplP)tplP.hidden=(mode!=='templates');if(arcP)arcP.hidden=(mode!=='archive');if(logP)logP.hidden=(mode!=='logs');}
+function setWorkspaceMode(mode){const fw=document.getElementById('flowWrap');const tl=document.getElementById('tasks');const st=document.getElementById('stages');const fs=document.getElementById('flowSummary');const ab=document.getElementById('flowAttnBar');const ctlP=document.getElementById('controllerTabView');const tplP=document.getElementById('templatesTabView');const arcP=document.getElementById('archiveTabView');const logP=document.getElementById('logsTabView');const shell=document.querySelector('.shell');if(shell)shell.dataset.workspace=mode||'flow';const isSys=(mode==='aux'||mode==='ctl'||mode==='templates'||mode==='archive'||mode==='logs');const bar=document.getElementById('canvasToolbar');if(bar)bar.style.display=isSys?'none':'flex';const tg=document.querySelector('.flow-view-toggle');if(tg)tg.style.display=isSys?'none':'inline-flex';const tf=document.querySelector('.task-filters');if(tf)tf.style.display=(isSys||mode!=='list')?'none':'flex';if(fw)fw.style.display=mode==='flow'?'flex':'none';if(fs)fs.style.display=(mode==='flow')?'block':'none';if(ab&&isSys)ab.style.display='none';if(st)st.style.display='none';if(tl)tl.style.display=(mode==='flow'||mode==='ctl'||mode==='templates'||mode==='archive'||mode==='logs')?'none':'block';if(ctlP)ctlP.hidden=(mode!=='ctl');if(tplP)tplP.hidden=(mode!=='templates');if(arcP)arcP.hidden=(mode!=='archive');if(logP)logP.hidden=(mode!=='logs');}
 function switchWorkflowView(v){state.workflowView=(v==='list'?'list':'flow');const bf=document.getElementById('viewFlowBtn');if(bf)bf.classList.toggle('active',state.workflowView==='flow');const bl=document.getElementById('viewListBtn');if(bl)bl.classList.toggle('active',state.workflowView==='list');setWorkspaceMode(state.workflowView);if(state.workflowView==='flow')requestAnimationFrame(()=>{resizeFlowGraph();fitFlowGraph();});else renderTasks();}
 function switchFlowInspectorTab(t){state.flowInspectorTab=t;['Summary','Tasks','Context','Runtime'].forEach(k=>{const el=document.getElementById('flowTab'+k);if(el)el.classList.toggle('active',k.toLowerCase()===t);});renderNodeInspector();}
 function selectFlowNode(id){state.flowSelectedNodeId=id;updateFlowSelection();renderNodeInspector();}
@@ -7736,7 +7770,7 @@ function renderFlowWorkbench(){
       const working=nodes.filter(n=>n.status==='working').length;
       fs.style.display='inline-flex';
       const dotHtml=working>0?'<span class="flow-status-dot" style="background:#5e6ad2;box-shadow:0 0 0 2px rgba(94,106,210,.25)"></span>':'<span class="flow-status-dot"></span>';
-      fs.innerHTML=dotHtml+'<span><b>'+nodes.length+'</b> 个节点 · <b>'+working+'</b> 个运行中</span>';
+      fs.innerHTML=dotHtml+'<span><b>'+nodes.length+'</b> 个节点 · <b>'+working+'</b> 个运行中</span><span class="flow-gesture-hint">拖拽平移 · <kbd>⌘</kbd>+滚轮缩放</span>';
     }else{
       fs.style.display='none';
     }
@@ -7747,27 +7781,18 @@ function renderFlowWorkbench(){
   const recoveries=currentRecovery();
   const ticker=document.getElementById('bottomTicker');
   if(ticker)ticker.textContent=recoveryUnavailable()?'恢复状态读取失败，卡点未确认':recoveries.length?'有 '+recoveries.length+' 项恢复待办，请查看卡点':'工作流调度就绪';
-  const oldAttn=document.getElementById('flowAttnBanner');
-  if(oldAttn)oldAttn.remove();
-  const hostWrap=document.getElementById('flowCanvasWrap');
-  if(hostWrap&&recoveries.length){
-    const cleanItems=recoveries.map(o=>cleanStageLabel(o.recovery?.node_label||o.payload?.node_id||'')+' · '+(o.recovery?.summary||'需处理')).filter(Boolean).join('；');
-    hostWrap.insertAdjacentHTML('afterbegin',`
-      <div role="status" class="flow-attn" id="flowAttnBanner">
-        <div class="flow-attn-content">
-          <span class="flow-attn-tag">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-              <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"></path>
-              <line x1="12" y1="9" x2="12" y2="13"></line>
-              <line x1="12" y1="17" x2="12.01" y2="17"></line>
-            </svg>
-            ${recoveries.length} 项恢复待办
-          </span>
-          <span class="flow-attn-text" title="${esc(cleanItems)}">${esc(cleanItems)}</span>
-        </div>
-        <button class="flow-attn-action" onclick="openControllerCockpitModal()">查看卡点与恢复操作</button>
-      </div>
-    `);
+  const attnBar=document.getElementById('flowAttnBar');
+  if(attnBar){
+    if(state.workflowView==='flow'&&recoveryUnavailable()){
+      attnBar.style.display='flex';
+      attnBar.innerHTML=`<div class="flow-attn-text" role="status"><span>⚠ 恢复状态读取失败，卡点未确认</span></div><button class="mini" onclick="loadWorkflow(state.workflow.workflow.workflow_id)">刷新恢复状态</button>`;
+    }else if(state.workflowView==='flow'&&recoveries.length){
+      attnBar.style.display='flex';
+      attnBar.innerHTML=`<div class="flow-attn-text" role="status"><span>⚠ ${recoveries.length} 项恢复待办：${esc(recoveries.map(o=>cleanStageLabel(o.recovery?.node_label||o.payload?.node_id||'')+' · '+(o.recovery?.summary||'需处理')).join('；'))}</span></div><button class="mini" onclick="openControllerCockpitModal()">查看卡点与恢复操作</button>`;
+    }else{
+      attnBar.style.display='none';
+      attnBar.innerHTML='';
+    }
   }
   renderNodeInspector();
   renderFlowGraph();
@@ -8692,12 +8717,14 @@ function openRecoveryDecision(id,action){
   const wid=o.workflow_id;
   const resend=['restore_scope','confirm_absent'].includes(action);
   const bindLineage=action==='restore_scope'&&o.recovery.lineage?.some(t=>t.requires_binding);
-  openModal(choice.label,`<form id="recoveryForm" class="form"><p>${esc(o.recovery.summary)}</p><p>${esc(o.recovery.next_step)}</p><p class="muted">节点：${esc(cleanStageLabel(o.recovery.node_label||o.payload.node_id))} · 验收版本：${esc(o.recovery.candidate_sha||'未确认')}</p><label for="recoveryOperator">处理人</label><input id="recoveryOperator" required maxlength="128"><label for="recoveryReason">核查结果与处理依据</label><textarea id="recoveryReason" required maxlength="1000" rows="3"></textarea>${resend?'<label><input id="recoveryConfirmed" type="checkbox" required style="width:auto">我已查看任务列表及旧工位，确认没有旧任务执行，授权对当前版本重新派发。</label><p class="muted">这是人工核查回执，不代表业务验收通过。系统仍会复查启动记录、候选和依赖。</p>':''}${bindLineage?`<p>旧任务：${esc(o.recovery.lineage.map(t=>t.task_id+' / '+(t.run_id||'身份未确认')).join('；'))}</p><label><input id="recoveryLineage" type="checkbox" required style="width:auto">确认以上Task/Run属于本次工作流执行，授权补齐其执行归属。</label>`:''}<p id="recoveryError" role="alert"></p><button id="recoverySubmit" type="submit" class="btn primary">${esc(choice.label)}</button><button type="button" class="btn" onclick="closeModal()">取消</button></form>`);
+  const partial=action==='abandon_partial_launch';
+  openModal(choice.label,`<form id="recoveryForm" class="form"><p>${esc(o.recovery.summary)}</p><p>${esc(o.recovery.next_step)}</p><p class="muted">节点：${esc(cleanStageLabel(o.recovery.node_label||o.payload.node_id))} · 验收版本：${esc(o.recovery.candidate_sha||'未确认')}</p><label for="recoveryOperator">处理人</label><input id="recoveryOperator" required maxlength="128"><label for="recoveryReason">核查结果与处理依据</label><textarea id="recoveryReason" required maxlength="1000" rows="3"></textarea>${resend?'<label><input id="recoveryConfirmed" type="checkbox" required style="width:auto">我已查看任务列表及旧工位，确认没有旧任务执行，授权对当前版本重新派发。</label><p class="muted">这是人工核查回执，不代表业务验收通过。系统仍会复查启动记录、候选和依赖。</p>':''}${partial?`<p>旧工位：${esc(choice.pane_id)} · Terminal：${esc(choice.terminal_id)}</p><p>先在终端检查 <code>herdr pane read ${esc(choice.pane_id)}</code>，只允许归档明确停留在启动提示的现场；确认 transcript 未包含任务指令或工作产出后，将其 SHA-256 填入。</p><label for="recoveryTranscriptSha256">已复核 transcript SHA-256</label><input id="recoveryTranscriptSha256" required maxlength=64 pattern="[a-fA-F0-9]{64}"><label><input id="recoveryPartialConfirmed" type="checkbox" required style="width:auto">我已检查上方工位 transcript，确认仅有启动提示且没有开始执行任务。</label>`:''}${bindLineage?`<p>旧任务：${esc(o.recovery.lineage.map(t=>t.task_id+' / '+(t.run_id||'身份未确认')).join('；'))}</p><label><input id="recoveryLineage" type="checkbox" required style="width:auto">确认以上任务 / Run属于本次工作流执行，授权补齐其执行归属。</label>`:''}<p id="recoveryError" role="alert"></p><button id="recoverySubmit" type="submit" class="btn primary">${esc(choice.label)}</button><button type="button" class="btn" onclick="closeModal()">取消</button></form>`);
   const form=document.getElementById('recoveryForm');
   const ownsForm=()=>form.isConnected&&document.getElementById('recoveryForm')===form&&document.getElementById('modal')?.classList.contains('open')&&(state.workflowId===wid||(state.workflowId==='__ctl__'&&state.workflow?.workflow?.workflow_id===wid));
   form.onsubmit=async(event)=>{
     event.preventDefault();const button=document.getElementById('recoverySubmit');button.disabled=true;
     const body={workflow_id:wid,operation_id:o.id,expected_version:o.version,operator:document.getElementById('recoveryOperator').value.trim(),reason:document.getElementById('recoveryReason').value.trim(),action,candidate_sha:o.recovery.candidate_sha,confirmed_absent:document.getElementById('recoveryConfirmed')?.checked===true,confirmed_lineage:document.getElementById('recoveryLineage')?.checked===true,lineage_snapshot:(o.recovery.lineage||[]).map(t=>({task_id:t.task_id,run_id:t.run_id,version:t.version}))};
+    if(action==='abandon_partial_launch')Object.assign(body,{prior_operation_id:choice.prior_operation_id,expected_prior_version:choice.prior_version,intent_id:choice.intent_id,task_id:choice.task_id,pane_id:choice.pane_id,terminal_id:choice.terminal_id,transcript_sha256:document.getElementById('recoveryTranscriptSha256').value.trim(),confirmed_startup_only:document.getElementById('recoveryPartialConfirmed')?.checked===true});
     if(action==='hold')body.until=Date.now()/1000+3600;
     try{
       const result=await api('/api/workflow/recovery/decision',{method:'POST',body:JSON.stringify(body)});

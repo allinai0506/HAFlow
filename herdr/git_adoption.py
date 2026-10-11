@@ -140,6 +140,7 @@ def classify_commit_state(
     enumeration_failed=False,
     remote_probe_failed=False,
     current_branch=None,
+    allow_rebase=False,
 ):
     """Classify an empty-index commit attempt.
 
@@ -178,12 +179,19 @@ def classify_commit_state(
             equal ``task['branch']`` (ordinary tasks) or one of
             ``{task['branch'], onto_branch}`` (onto mode). Unknown or
             mismatched refuses with ``current_branch_mismatch``; never guess.
+        allow_rebase: allow legitimate platform rebase replay commits where
+            committer_ts >= cutoff but author_ts < cutoff.
 
     Returns:
         ``(verdict, detail)`` where verdict is ``adopt``/``empty``/``refused``
         and detail carries ``reason``, ``commits``, ``baseline``, ``basis``,
         plus ``noop_commits`` (empty-change commits) and ``changed_paths``.
     """
+    effective_allow_rebase = bool(
+        allow_rebase
+        or onto_branch
+        or os.environ.get("HERDR_ADOPT_ALLOW_REBASE", "").strip().lower() in ("1", "true", "yes")
+    )
     skew = DEFAULT_SKEW_SECONDS if skew_seconds is None else max(0, int(skew_seconds))
     created = _coerce_epoch(created_at)
     if created is None:
@@ -211,6 +219,7 @@ def classify_commit_state(
             branch=branch,
             onto_branch=onto_branch,
             current_branch=current_branch,
+            allow_rebase=effective_allow_rebase,
         )
     return _classify_by_time(
         head=head,
@@ -223,6 +232,7 @@ def classify_commit_state(
         enumeration_failed=enumeration_failed,
         remote_probe_failed=remote_probe_failed,
         current_branch=current_branch,
+        allow_rebase=effective_allow_rebase,
     )
 
 
@@ -273,18 +283,24 @@ def _check_remote_contained(commits, remote_shas):
     return None
 
 
-def _stale_commits(commits, cutoff):
+def _stale_commits(commits, cutoff, allow_rebase=False):
     """Commits predating the task: committer OR author timestamp old.
 
     H-2 rebase rewrites ``%ct`` (committer) to now while ``%at`` (author)
-    stays old. Either timestamp predating the cutoff refuses.
-    Missing ``author_ts`` is benign (legacy callers).
+    stays old. When allow_rebase is False, either timestamp predating
+    cutoff refuses (foreign commit tampering protection).
+    When allow_rebase is True (legitimate platform rebase replay),
+    commits whose committer_ts >= cutoff are accepted even if author_ts < cutoff,
+    because git rebase legitimately preserves historical author dates.
+    Commits whose committer_ts < cutoff are always stale.
     """
     stale = []
     for item in commits or []:
         cts = _coerce_epoch((item or {}).get("committer_ts"))
         ats = _coerce_epoch((item or {}).get("author_ts"))
-        if cts is None or cts < cutoff or (ats is not None and ats < cutoff):
+        if cts is None or cts < cutoff:
+            stale.append(item.get("sha"))
+        elif not allow_rebase and (ats is not None and ats < cutoff):
             stale.append(item.get("sha"))
     return stale
 
@@ -338,6 +354,7 @@ def _classify_with_anchor(
     branch=None,
     onto_branch=None,
     current_branch=None,
+    allow_rebase=False,
 ):
     if not _valid_sha(head):
         return REFUSED, {
@@ -491,7 +508,7 @@ def _classify_with_anchor(
             "noop_commits": noops,
             "changed_paths": changed,
         }
-    stale = _stale_commits(commits, cutoff)
+    stale = _stale_commits(commits, cutoff, allow_rebase=allow_rebase)
     if stale:
         return REFUSED, {
             "reason": "commit_predates_task",
@@ -515,7 +532,7 @@ def _classify_with_anchor(
 def _classify_by_time(
     *, head, onto_branch, branch, task_id, cutoff, head_history,
     remote_shas=None, enumeration_failed=False, remote_probe_failed=False,
-    current_branch=None,
+    current_branch=None, allow_rebase=False,
 ):
     if not is_task_branch(branch, task_id):
         return REFUSED, {
@@ -678,7 +695,7 @@ def _classify_by_time(
             "noop_commits": noops,
             "changed_paths": changed,
         }
-    stale = _stale_commits(attributable, cutoff)
+    stale = _stale_commits(attributable, cutoff, allow_rebase=allow_rebase)
     if stale:
         return REFUSED, {
             "reason": "unattributable_commits",

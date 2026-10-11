@@ -408,3 +408,12 @@ Evidence: `herdr/git_adoption.py#classify_commit_state` / `#_check_remote_contai
 `#git_escalated_tasks` / `#git_finalize_pending_tasks` /
 `tests/test_t3_probes.py#L2EmptyReleasable` / `#M3CloseWorkflowGate` /
 `tests/test_impl_fix4_regression.py`
+
+## Git 采纳防伪机制与平台 Rebase 重放识别
+
+`FACT` 空 index 收编机制（`herdr-task commit` / `_adopt_head_if_attributable` / `classify_commit_state`）对区间提交施加防伪检查。当开启合法平台 Rebase 重放模式时（`allow_rebase: true`，支持 CLI `--allow-rebase` 传参、Task 显式配置、`onto_branch` 存在时自动启用，或 `HERDR_ADOPT_ALLOW_REBASE` 环境变量开启），`_stale_commits` 识别 Git Rebase 保持历史 Author Date 的合法行为，只要 Committer Date 新鲜（`cts >= cutoff`）即判定为有效区间提交采纳，消除自指死锁；而真正外来篡改（`cts < cutoff`）或远端分支包含（`origin/*`）依然严格拒绝（`commit_predates_task` / `foreign_commit_in_range`）。
+
+Evidence:
+- `herdr/git_adoption.py#_stale_commits` / `#classify_commit_state`
+- `bin/herdr-task#commit_task` / `#_adopt_head_if_attributable`
+- `tests/test_git_adoption_rebase.py`
