@@ -6576,3 +6576,39 @@ HAFlow 作为企业级多任务通用 Agent 编排系统，必须支撑招投标
 ### 验证命令 / 关联证据
 
 `pytest tests/test_domain_adapters.py tests/test_workflow_reconciliation.py tests/test_task_bypass_gate.py`（17 项专项单元与 CLI 测试 100% PASS）；`pytest tests/test_compliance_scaffolding.py tests/test_differential_testing.py tests/test_git_adoption_rebase.py`（27 项回归测试全量通过）；`bin/herdr-workflow reconcile --help`、`bin/herdr-task bypass-gate --help` 命令行验证；`python3 -m compileall -q herdr services bin tests`、`git diff --check` clean。
+
+---
+
+## 154. ReviewBench 同模型单变量对照与多上下文模式设计（2026-10-11）
+
+### 问题背景
+
+在代码评审基准评测（ReviewBench）中，传统评测通常直接比较不同 Agent 或单一固定上下文模式的输出，无法量化回答核心问题：
+> “对当前实际使用的 reviewer，额外提供符号定义、调用关系和契约源码，是否改善审核质量？额外耗时与用量是多少？”
+
+在设计上下文对照实验时，极易陷入以下虚假对照与失真陷阱：
+1. **基础 Diff 截取不对齐**：两组实验如果分别由不同逻辑截取 diff，导致一组看到更多变更、另一组看到更少变更，把 diff 长度差异误归因为四层检索收益；
+2. **扩展上下文挤占变更**：在硬字符预算下，四层源码如果抢占了原本保留的基础 diff，导致模型漏审被挤掉的代码改动；
+3. **隐蔽降级假装成功**：四层检索出现异常或缺失仓库依赖时，退回仅 diff 模式，若未显式标记 `fallback_reason`，会导致降级样本被统计为四层成功样本；
+4. **Token 凭空折算与虚假零成本**：缺少 API 真实 usage 时，按字符数除以 4 虚构 Token，或把未统计成本标记为 $0.00；
+5. **模型身份不可信**：不同环境、不同 CLI 版本的模型配置漂移，将不同模型甚至规则型 reviewer 之间的差异误判为上下文对照收益。
+
+### 经验教训
+
+| 风险点 | 根因 | 防御规范 |
+|---|---|---|
+| **基础 Diff 偏差** | 动态截取导致两组看到的 diff 范围不一致 | 统一通过 `extract_base_diff` 截取（保留 15,000 字符 Tier-1 上限）；`existing_four_tier` 仅在尾部追加，严禁削减基础变更 |
+| **预算硬边界越界** | 检索组装未扣除标题与分隔符开销 | `retrieve_and_assemble_context` 严格扣除 header 与分隔符开销；硬边界 `<= max_budget_chars` |
+| **虚假四层成功** | 检索异常静默退回 diff | 显式三态隔离：四层成功、显式 `diff_only`、异常降级；降级记录 `fallback_reason` 并阻断可比性判定 |
+| **Token 凭空捏造** | 字符数折算与缺失置零 | 仅采纳 API 真实 `usage` 字典；未统计时保留“未知”，杜绝字符数除以 4 猜测 |
+| **假同模型对比** | 无法验证 reviewer 底层模型一致性 | `resolve_agent_identity` 安全解析模型身份与版本；无法确认时标记 `model_confirmed: false`，拒绝输出同模型优劣结论 |
+
+### 操作规范
+
+1. **配置透传与早期校验**：在 `review` 配置中增加 `context_mode: diff_only | existing_four_tier` 与 `context_budget_chars`，通过 `validate_context_config` 进行早期非法参数拦截；
+2. **单变量对照自动审计**：在生成对比报告时统一调用 `check_benchmark_comparability`，自动核对 Agent、模型确认状态、模式自变量、预算、案例总数与降级数；
+3. **多维结果可核查性**：在 `results.json` 与 `audit.json` 中完整记录 `prompt_chars`、`prompt_fingerprint`、`context_chars`、`context_fingerprint`、`base_diff_chars`。
+
+### 验证命令 / 关联证据
+
+`pytest -q tests/test_review_benchmark.py tests/test_auto_pr_review.py`（47 项专项测试 100% PASS）；`pytest -q`（全库 4,088 项回归测试 100% PASS）；`bin/herdr-review-bench run` 与 `bin/herdr-review-bench compare` 端到端对比生成验证；`wiki/review-benchmark.md`、`wiki/log.md` 知识闭环。

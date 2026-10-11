@@ -8,6 +8,7 @@ compatible with GitHub ReviewBench contracts.
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -19,6 +20,284 @@ import tempfile
 import time
 from typing import Any, Dict, List, Optional, Tuple
 import warnings
+
+VALID_CONTEXT_MODES = ("diff_only", "existing_four_tier")
+DEFAULT_CONTEXT_MODE = "existing_four_tier"
+DEFAULT_CONTEXT_BUDGET_CHARS = 35000
+DEFAULT_SYSTEM_PROMPT = (
+    "You are reviewing a Pull Request. Evaluate strictly based on the provided git diff "
+    "and assembled repository context below. Do not use external tools, run commands, "
+    "or inspect the local filesystem."
+)
+DEFAULT_RULE_SYSTEM_PROMPT = "You are reviewing a Pull Request."
+
+
+def validate_context_config(context_mode: Any = None, context_budget_chars: Any = None) -> Tuple[str, int]:
+    """Validate and normalize review context mode and budget limits."""
+    mode = DEFAULT_CONTEXT_MODE if context_mode is None else context_mode
+    if mode not in VALID_CONTEXT_MODES:
+        raise ValueError(
+            f"Invalid context_mode '{context_mode}'. Supported modes are: {list(VALID_CONTEXT_MODES)}"
+        )
+    budget = DEFAULT_CONTEXT_BUDGET_CHARS if context_budget_chars is None else context_budget_chars
+    if not isinstance(budget, int) or isinstance(budget, bool) or budget <= 0:
+        raise ValueError(
+            f"Invalid context_budget_chars '{context_budget_chars}'. Must be a positive integer."
+        )
+    return mode, budget
+
+
+def extract_base_diff(diff_content: str, max_budget_chars: int = 35000) -> Tuple[str, List[str]]:
+    """Extract Tier-1 base diff with baseline preservation (up to 15,000 chars, capped by budget)."""
+    changed_files = []
+    current_file = ""
+    for line in diff_content.splitlines():
+        if line.startswith("diff --git "):
+            parts = line.split()
+            current_file = parts[-1][2:] if parts[-1].startswith("b/") else parts[-1]
+            changed_files.append(current_file)
+    base_diff = diff_content[:min(15000, max_budget_chars)]
+    return base_diff, changed_files
+
+
+def resolve_agent_identity(
+    agent_name: str,
+    review_cfg: Optional[Dict[str, Any]] = None,
+    runtime_evidence: Optional[Dict[str, Any]] = None,
+    cli_version: Optional[str] = None,
+    query_cli_version: bool = True,
+) -> Dict[str, Any]:
+    """Resolve and confirm reviewer agent identity, model, and CLI version.
+
+    Strictly differentiates between 'requested model from configuration/environment'
+    and 'effective model supported by runtime execution evidence'.
+    Only marks model_confirmed=True when verified by actual runtime evidence
+    or when running deterministic rule-based reviewers.
+    """
+    review_cfg = review_cfg or {}
+    runtime_evidence = runtime_evidence or {}
+    model_name = "unknown"
+    cli_version = cli_version or review_cfg.get("cli_version") or "unknown"
+    model_confirmed = False
+    details: Dict[str, Any] = {}
+
+    requested_model = review_cfg.get("model")
+    runtime_model = runtime_evidence.get("model") or runtime_evidence.get("model_name") or runtime_evidence.get("actual_model")
+
+    if agent_name in ("agy", "llm", "agy-reviewer"):
+        if cli_version == "unknown" and query_cli_version and shutil.which("agy"):
+            try:
+                ver_res = subprocess.run(["agy", "--version"], capture_output=True, text=True, timeout=5)
+                if ver_res.returncode == 0:
+                    cli_version = ver_res.stdout.strip()
+            except Exception:
+                pass
+
+        env_model = os.environ.get("HERDR_AGY_MODEL")
+        claimed_model = str(requested_model or env_model or "").strip() or None
+        details["requested_model"] = claimed_model
+
+        effort = os.environ.get("HERDR_AGY_EFFORT", "low").strip()
+        details["effort"] = effort
+        perm = "--sandbox" if os.environ.get("HERDR_ALLOW_DANGEROUS_PERMISSIONS") != "1" else "--dangerously-skip-permissions"
+        details["permission_flag"] = perm
+
+        if runtime_model:
+            model_name = str(runtime_model).strip()
+            if claimed_model and claimed_model != model_name:
+                model_confirmed = False
+                details["source"] = "runtime_mismatch"
+                details["mismatch"] = f"claimed '{claimed_model}' but runtime evidence is '{model_name}'"
+            else:
+                model_confirmed = True
+                details["source"] = "runtime_evidence"
+        else:
+            model_name = claimed_model or "unknown"
+            model_confirmed = False
+            details["source"] = "config_only_unconfirmed" if claimed_model else "unknown"
+            details["reason"] = "no_runtime_evidence"
+
+    elif agent_name.startswith("rule") or agent_name == "mock":
+        claimed_model = str(requested_model or "").strip() or None
+        if runtime_model:
+            model_name = str(runtime_model).strip()
+            details["requested_model"] = claimed_model
+            if claimed_model and claimed_model != model_name:
+                model_confirmed = False
+                details["source"] = "runtime_mismatch"
+                details["mismatch"] = f"claimed '{claimed_model}' but runtime evidence is '{model_name}'"
+            else:
+                model_confirmed = True
+                details["source"] = "mock_runtime_evidence"
+        else:
+            if claimed_model and claimed_model != agent_name:
+                model_name = claimed_model
+                model_confirmed = False
+                details["requested_model"] = claimed_model
+                details["source"] = "unconfirmed_claimed_model"
+                details["reason"] = "no_runtime_evidence"
+            else:
+                model_name = agent_name
+                cli_version = "internal-rule"
+                model_confirmed = True
+                details["source"] = "deterministic_rule"
+
+    elif agent_name in ("pi", "opencode"):
+        env_key = f"HERDR_{agent_name.upper()}_MODEL"
+        claimed_model = str(requested_model or os.environ.get(env_key) or "").strip() or None
+        details["requested_model"] = claimed_model
+        if shutil.which(agent_name):
+            try:
+                ver_res = subprocess.run([agent_name, "--version"], capture_output=True, text=True, timeout=5)
+                if ver_res.returncode == 0:
+                    cli_version = ver_res.stdout.strip()
+            except Exception:
+                pass
+
+        if runtime_model:
+            model_name = str(runtime_model).strip()
+            if claimed_model and claimed_model != model_name:
+                model_confirmed = False
+                details["source"] = "runtime_mismatch"
+                details["mismatch"] = f"claimed '{claimed_model}' but runtime evidence is '{model_name}'"
+            else:
+                model_confirmed = True
+                details["source"] = "runtime_evidence"
+        else:
+            model_name = claimed_model or "unknown"
+            model_confirmed = False
+            details["source"] = "config_only_unconfirmed" if claimed_model else "unknown"
+            details["reason"] = "no_runtime_evidence"
+
+    else:
+        model_name = str(runtime_model or requested_model or "unknown").strip()
+        model_confirmed = bool(runtime_model)
+        details["source"] = "generic_agent"
+
+    return {
+        "agent": agent_name,
+        "model_name": model_name,
+        "cli_version": cli_version,
+        "model_confirmed": model_confirmed,
+        "details": details,
+    }
+
+
+def aggregate_group_agent_identity(
+    samples: List[Dict[str, Any]],
+    base_agent_info: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Aggregate whole-group reviewer model identity across all benchmark samples.
+
+    Contract:
+    1. Each sample entering review retains its own identity result and evidence source.
+    2. Whole-group model_confirmed=True IF AND ONLY IF:
+       - At least one review attempt occurred (review_attempted == True);
+       - All attempted actual model identities have valid runtime evidence;
+       - All attempted model identities are confirmed (model_confirmed == True);
+       - Actual model identities are consistent across all attempts (no drift);
+       - No declared model mismatch against runtime evidence.
+    3. Any unconfirmed, unknown, or drifting sample permanently invalidates group confirmation.
+    4. Workspace preparation failure does not create review attempts or model evidence.
+    """
+    attempted_samples = [s for s in samples if s.get("review_attempted") is True]
+
+    agent_name = base_agent_info.get("agent", "unknown")
+    cli_version = base_agent_info.get("cli_version", "unknown")
+    claimed_model = (
+        base_agent_info.get("details", {}).get("requested_model")
+        or (base_agent_info.get("model_name") if base_agent_info.get("model_name") != "unknown" else None)
+    )
+
+    if not attempted_samples:
+        details = dict(base_agent_info.get("details", {}))
+        details["source"] = "no_review_attempts"
+        details["reason"] = "no review attempts occurred"
+        return {
+            "agent": agent_name,
+            "model_name": claimed_model or "unknown",
+            "cli_version": cli_version,
+            "model_confirmed": False,
+            "details": details,
+        }
+
+    observed_models: List[str] = []
+    unconfirmed_samples: List[Tuple[str, str, str]] = []
+    mismatch_samples: List[Tuple[str, str, str]] = []
+
+    for s in attempted_samples:
+        s_id = s.get("agent_identity") or {}
+        s_model = s_id.get("model_name") or "unknown"
+        s_conf = s_id.get("model_confirmed", False)
+        s_source = s_id.get("details", {}).get("source", "unknown")
+
+        valid_evidence = (
+            bool(s_conf)
+            and s_model not in ("unknown", None, "")
+            and s_source in ("runtime_evidence", "mock_runtime_evidence", "deterministic_rule")
+        )
+
+        if not valid_evidence:
+            unconfirmed_samples.append((s.get("key", "unknown"), s_model, s_source))
+        else:
+            observed_models.append(s_model)
+            if claimed_model and s_model != claimed_model:
+                mismatch_samples.append((s.get("key", "unknown"), claimed_model, s_model))
+
+    distinct_models = sorted(list(set(observed_models)))
+
+    details = dict(base_agent_info.get("details", {}))
+    if claimed_model:
+        details["requested_model"] = claimed_model
+
+    if unconfirmed_samples:
+        details["source"] = "unconfirmed_samples"
+        details["reason"] = f"unconfirmed model identity in {len(unconfirmed_samples)} attempt(s)"
+        details["unconfirmed_samples"] = unconfirmed_samples
+        return {
+            "agent": agent_name,
+            "model_name": distinct_models[0] if len(distinct_models) == 1 else (claimed_model or "unknown"),
+            "cli_version": cli_version,
+            "model_confirmed": False,
+            "details": details,
+        }
+
+    if len(distinct_models) > 1:
+        details["source"] = "runtime_drift"
+        details["mismatch"] = f"multiple models detected across samples: {distinct_models}"
+        details["observed_models"] = distinct_models
+        return {
+            "agent": agent_name,
+            "model_name": f"mixed: {','.join(distinct_models)}",
+            "cli_version": cli_version,
+            "model_confirmed": False,
+            "details": details,
+        }
+
+    if mismatch_samples:
+        details["source"] = "runtime_mismatch"
+        details["mismatch"] = f"claimed '{claimed_model}' but runtime evidence is '{distinct_models[0]}'"
+        details["mismatch_samples"] = mismatch_samples
+        return {
+            "agent": agent_name,
+            "model_name": distinct_models[0],
+            "cli_version": cli_version,
+            "model_confirmed": False,
+            "details": details,
+        }
+
+    # All conditions satisfied: exactly one confirmed model, matching declaration
+    confirmed_model = distinct_models[0]
+    details["source"] = "runtime_evidence"
+    details["observed_models"] = distinct_models
+    return {
+        "agent": agent_name,
+        "model_name": confirmed_model,
+        "cli_version": cli_version,
+        "model_confirmed": True,
+        "details": details,
+    }
+
 
 
 def pr_key(repo: str, pr_number: int, head: str) -> str:
@@ -74,12 +353,19 @@ def validate_manifest(manifest: List[Dict[str, Any]]) -> None:
     """Validate manifest list entries."""
     if not isinstance(manifest, list) or len(manifest) == 0:
         raise ValueError("Manifest must be a non-empty list of PR entries")
+    seen_keys = set()
     for idx, entry in enumerate(manifest):
         if not isinstance(entry, dict):
             raise ValueError(f"manifest[{idx}] must be an object")
         for key in ("repo", "pr_number", "base", "head"):
             if key not in entry:
                 raise ValueError(f"manifest[{idx}] missing '{key}'")
+        k = pr_key(entry["repo"], entry["pr_number"], entry["head"])
+        if k in seen_keys:
+            raise ValueError(
+                f"Duplicate PR entry detected: '{k}'. Duplicate cases cannot produce distinct candidate files."
+            )
+        seen_keys.add(k)
 
 
 def extract_and_validate_metrics(results_data: Any) -> Optional[Dict[str, Any]]:
@@ -301,34 +587,22 @@ def retrieve_and_assemble_context(
         if kw in domain_synonyms:
             expanded_keywords.update(domain_synonyms[kw])
 
-    # 1. Parse changed files from diff
-    changed_files = []
-    file_diff_map = {}
-    current_file = ""
-    for line in diff_content.splitlines():
-        if line.startswith("diff --git "):
-            parts = line.split()
-            current_file = parts[-1][2:] if parts[-1].startswith("b/") else parts[-1]
-            changed_files.append(current_file)
-            file_diff_map[current_file] = [line]
-        elif current_file:
-            file_diff_map[current_file].append(line)
+    base_diff, changed_files = extract_base_diff(diff_content, max_budget_chars)
 
     audit: Dict[str, Any] = {
+        "requested_context_mode": "existing_four_tier",
+        "effective_context_mode": "existing_four_tier",
+        "fallback_reason": None,
         "original_diff_bytes": len(diff_content.encode("utf-8")),
         "context_budget": max_budget_chars,
         "changed_files": changed_files,
-        "included_files": [],
-        "truncated_files": [],
+        "included_files": [f for f in changed_files if f in base_diff],
+        "truncated_files": [f for f in changed_files if f not in base_diff],
         "expanded_symbols": [],
         "retrieved_context": [],
         "final_context_size": 0,
+        "base_diff_size": len(base_diff),
     }
-
-    # Baseline preservation: include initial 15,000 chars of diff (Tier 1 core)
-    base_diff = diff_content[:15000]
-    audit["included_files"] = [f for f in changed_files if f in base_diff]
-    audit["truncated_files"] = [f for f in changed_files if f not in base_diff]
 
     header = "\n\n# --- RETRIEVED CONTRACT & CALLER/CALLEE CONTEXT ---\n\n"
     sep = "\n\n"
@@ -420,6 +694,10 @@ def run_agent_review(
     timeout_seconds: int = 180,
     system_prompt: Optional[str] = None,
     isolation_meta: Optional[Dict[str, Any]] = None,
+    *,
+    context_mode: Optional[str] = None,
+    context_budget_chars: Optional[int] = None,
+    review_cfg: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Execute code review agent on the isolated repo.
 
@@ -430,14 +708,21 @@ def run_agent_review(
     - Timeout
     - Parse failure
     """
-    prompt = (
-        f"{system_prompt or 'You are reviewing a Pull Request.'}\n\n"
+    req_mode = context_mode if context_mode is not None else pr_info.get("context_mode")
+    req_budget = context_budget_chars if context_budget_chars is not None else pr_info.get("context_budget_chars")
+    eff_mode, eff_budget = validate_context_config(req_mode, req_budget)
+    base_diff, changed_files = extract_base_diff(diff_content, eff_budget)
+
+    eff_rule_sys_prompt = system_prompt if system_prompt is not None else DEFAULT_RULE_SYSTEM_PROMPT
+    rule_prefix = (
+        f"{eff_rule_sys_prompt}\n\n"
         f"PR Title: {pr_info.get('title', '')}\n"
         f"PR Description: {pr_info.get('body', '')}\n\n"
         "Here is the git diff for this PR:\n"
         "```diff\n"
-        f"{diff_content[:15000]}\n"
-        "```\n\n"
+    )
+    rule_suffix = (
+        "\n```\n\n"
         "Please review this diff for bugs, regressions, logic flaws, and architectural defects.\n"
         "Output ONLY a JSON array of findings with schema:\n"
         "[\n"
@@ -450,31 +735,85 @@ def run_agent_review(
         "]\n"
         "If no defects are found, output `[]`."
     )
+    prompt = f"{rule_prefix}{base_diff}{rule_suffix}"
+    rule_common_prompt = f"{rule_prefix}<COMMON_CONTEXT_PLACEHOLDER>{rule_suffix}"
+    common_prompt_fingerprint = hashlib.sha256(rule_common_prompt.encode("utf-8")).hexdigest()
 
     t0 = time.time()
     if agent_name in ("mock", "rule", "rule-contract-v1", "rule-contract-context-v1"):
         # Deterministic / rule-based reviewer for offline testing & benchmark baseline
         findings = pr_info.get("mock_findings")
         audit_info = None
+        if eff_mode == "diff_only":
+            effective_content = base_diff
+            audit_info = {
+                "requested_context_mode": "diff_only",
+                "effective_context_mode": "diff_only",
+                "fallback_reason": None,
+                "original_diff_bytes": len(diff_content.encode("utf-8")),
+                "context_budget": eff_budget,
+                "changed_files": changed_files,
+                "included_files": [f for f in changed_files if f in base_diff],
+                "truncated_files": [f for f in changed_files if f not in base_diff],
+                "expanded_symbols": [],
+                "retrieved_context": [],
+                "final_context_size": len(base_diff),
+                "base_diff_size": len(base_diff),
+            }
+        else:
+            if repo_dir and (repo_dir / ".git").exists():
+                try:
+                    effective_content, audit_info = retrieve_and_assemble_context(
+                        repo_dir=repo_dir,
+                        pr_info=pr_info,
+                        diff_content=diff_content,
+                        max_budget_chars=eff_budget,
+                    )
+                    audit_info["requested_context_mode"] = "existing_four_tier"
+                    audit_info["effective_context_mode"] = "existing_four_tier"
+                    audit_info["fallback_reason"] = None
+                    audit_info["base_diff_size"] = len(base_diff)
+                except Exception as exc:
+                    effective_content = base_diff
+                    audit_info = {
+                        "requested_context_mode": "existing_four_tier",
+                        "effective_context_mode": "diff_only",
+                        "fallback_reason": f"retrieval_failed: {exc}",
+                        "original_diff_bytes": len(diff_content.encode("utf-8")),
+                        "context_budget": eff_budget,
+                        "changed_files": changed_files,
+                        "included_files": [f for f in changed_files if f in base_diff],
+                        "truncated_files": [f for f in changed_files if f not in base_diff],
+                        "expanded_symbols": [],
+                        "retrieved_context": [],
+                        "final_context_size": len(base_diff),
+                        "base_diff_size": len(base_diff),
+                    }
+            else:
+                effective_content = base_diff
+                audit_info = {
+                    "requested_context_mode": "existing_four_tier",
+                    "effective_context_mode": "diff_only",
+                    "fallback_reason": "retrieval_failed: repo_dir_missing_or_not_git",
+                    "original_diff_bytes": len(diff_content.encode("utf-8")),
+                    "context_budget": eff_budget,
+                    "changed_files": changed_files,
+                    "included_files": [f for f in changed_files if f in base_diff],
+                    "truncated_files": [f for f in changed_files if f not in base_diff],
+                    "expanded_symbols": [],
+                    "retrieved_context": [],
+                    "final_context_size": len(base_diff),
+                    "base_diff_size": len(base_diff),
+                }
+
         if findings is None:
             findings = []
 
-            # Determine effective review context:
-            # Baseline & contract-v1 use standard diff; context-v1 uses assembled expanded context
-            effective_content = diff_content
-            if agent_name == "rule-contract-context-v1":
-                effective_content, audit_info = retrieve_and_assemble_context(
-                    repo_dir=repo_dir,
-                    pr_info=pr_info,
-                    diff_content=diff_content,
-                    max_budget_chars=35000,
-                )
-
             # Rule-based detection: check diff patterns across the full diff for known HAFlow issues
             # Only trigger findings on the actual production code files touched by the diff, not tests/fixtures.
-            modified_files = {line[6:].strip() for line in diff_content.splitlines() if line.startswith("+++ b/")}
+            modified_files = {line[6:].strip() for line in effective_content.splitlines() if line.startswith("+++ b/")}
 
-            if "herdr/scheduler.py" in modified_files and "extract_task_candidate_sha" in diff_content and "baseline_commit" in diff_content:
+            if "herdr/scheduler.py" in modified_files and "extract_task_candidate_sha" in effective_content and "baseline_commit" in effective_content:
                 # Issue: evaluate_join_gate / extract_task_candidate_sha mixes claim and evidence without verification
                 findings.append({
                     "producer": agent_name,
@@ -483,7 +822,7 @@ def run_agent_review(
                     "end_line": 165,
                     "message": "extract_task_candidate_sha falls back to dispatch claim without verifying clone baseline evidence, causing unverified candidate claims to satisfy join gate",
                 })
-            if "herdr/fix_loop.py" in modified_files and 'blocker.get("task_id")' in diff_content:
+            if "herdr/fix_loop.py" in modified_files and 'blocker.get("task_id")' in effective_content:
                 # Issue: verdict_fingerprint incorporates transient task_id
                 findings.append({
                     "producer": agent_name,
@@ -492,7 +831,7 @@ def run_agent_review(
                     "end_line": 68,
                     "message": "verdict_fingerprint incorporates transient task_id, preventing repeat verdict detection across task generations and depleting fix-loop budget",
                 })
-            if "herdr/reverification.py" in modified_files and "decision_identity" in diff_content and "episode_id" not in diff_content:
+            if "herdr/reverification.py" in modified_files and "decision_identity" in effective_content and "episode_id" not in effective_content:
                 # Issue: decision_identity lacks candidate_frozen episode binding
                 findings.append({
                     "producer": agent_name,
@@ -509,12 +848,12 @@ def run_agent_review(
             # storage engine sidecar/coordination preconditions violates zero-side-effect isolation contract.
             if agent_name in ("rule-contract-v1", "rule-contract-context-v1"):
                 current_file = ""
-                for line in diff_content.splitlines():
+                for line in effective_content.splitlines():
                     if line.startswith("+++ b/"):
                         current_file = line[6:]
                     elif line.startswith("+") and not line.startswith("+++"):
                         m = re.match(r"^\+\s*def\s+([A-Za-z0-9_]*readonly[A-Za-z0-9_]*)\(", line, re.IGNORECASE)
-                        if m and not current_file.startswith("tests/") and "mode=ro" in diff_content and "query_only" in diff_content:
+                        if m and not current_file.startswith("tests/") and "mode=ro" in effective_content and "query_only" in effective_content:
                             fn_name = m.group(1)
                             findings.append({
                                 "producer": agent_name,
@@ -545,6 +884,22 @@ def run_agent_review(
                         "message": "_validate_context_source_existence only permits own-task and verified_handoff_tasks under workflow run_scope, rejecting dependency-closure task references and violating the launch-boundary working context validation contract.",
                     })
 
+        prompt_chars = len(prompt)
+        prompt_fingerprint = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+        context_chars = len(effective_content)
+        context_fingerprint = hashlib.sha256(effective_content.encode("utf-8")).hexdigest()
+        eff_ctx_mode = audit_info.get("effective_context_mode", eff_mode) if audit_info else eff_mode
+        fb_reason = audit_info.get("fallback_reason") if audit_info else None
+
+        runtime_model = pr_info.get("runtime_model") or pr_info.get("mock_model")
+        eff_review_cfg = review_cfg or pr_info.get("review_cfg") or {}
+        agent_identity = resolve_agent_identity(
+            agent_name,
+            review_cfg=eff_review_cfg,
+            runtime_evidence={"model": runtime_model} if runtime_model else None,
+            query_cli_version=False,
+        )
+
         res: Dict[str, Any] = {
             "pr": {
                 "repo": pr_info["repo"],
@@ -553,35 +908,123 @@ def run_agent_review(
                 "head": pr_info["head"],
             },
             "agent": agent_name,
+            "agent_identity": agent_identity,
             "findings": findings,
-            "usage": {"time_in_ms": int((time.time() - t0) * 1000)},
+            "usage": {
+                "time_in_ms": pr_info.get("mock_time_in_ms") if pr_info.get("mock_time_in_ms") is not None else int((time.time() - t0) * 1000),
+                "tokens": pr_info.get("mock_tokens") or pr_info.get("tokens"),
+            },
+            "prompt_meta": {
+                "prompt_chars": prompt_chars,
+                "prompt_fingerprint": prompt_fingerprint,
+                "common_prompt_fingerprint": common_prompt_fingerprint,
+            },
+            "context_meta": {
+                "requested_context_mode": eff_mode,
+                "effective_context_mode": eff_ctx_mode,
+                "fallback_reason": fb_reason,
+                "context_budget_chars": eff_budget,
+                "context_chars": context_chars,
+                "context_fingerprint": context_fingerprint,
+                "base_diff_chars": len(base_diff),
+                "agent_identity": agent_identity,
+            },
         }
         if audit_info:
+            audit_info["prompt_chars"] = prompt_chars
+            audit_info["prompt_fingerprint"] = prompt_fingerprint
+            audit_info["common_prompt_fingerprint"] = common_prompt_fingerprint
+            audit_info["context_chars"] = context_chars
+            audit_info["context_fingerprint"] = context_fingerprint
             res["audit"] = audit_info
         return res
 
-    # Assemble 4-Tier Context for real LLM reviewer if supported
-    effective_content = diff_content
+    # Assemble 4-Tier Context or Diff-Only for real LLM reviewer
+    requested_context_mode = eff_mode
+    effective_context_mode = eff_mode
+    fallback_reason = None
     audit_info = None
-    if repo_dir and (repo_dir / ".git").exists():
-        try:
-            effective_content, audit_info = retrieve_and_assemble_context(
-                repo_dir=repo_dir,
-                pr_info=pr_info,
-                diff_content=diff_content,
-                max_budget_chars=35000,
-            )
-        except Exception:
-            effective_content = diff_content
 
-    prompt = (
-        f"{system_prompt or 'You are reviewing a Pull Request. Evaluate strictly based on the provided git diff and assembled repository context below. Do not use external tools, run commands, or inspect the local filesystem.'}\n\n"
+    if requested_context_mode == "diff_only":
+        effective_content = base_diff
+        audit_info = {
+            "requested_context_mode": "diff_only",
+            "effective_context_mode": "diff_only",
+            "fallback_reason": None,
+            "original_diff_bytes": len(diff_content.encode("utf-8")),
+            "context_budget": eff_budget,
+            "changed_files": changed_files,
+            "included_files": [f for f in changed_files if f in base_diff],
+            "truncated_files": [f for f in changed_files if f not in base_diff],
+            "expanded_symbols": [],
+            "retrieved_context": [],
+            "final_context_size": len(base_diff),
+            "base_diff_size": len(base_diff),
+        }
+    elif requested_context_mode == "existing_four_tier":
+        if repo_dir and (repo_dir / ".git").exists():
+            try:
+                effective_content, audit_info = retrieve_and_assemble_context(
+                    repo_dir=repo_dir,
+                    pr_info=pr_info,
+                    diff_content=diff_content,
+                    max_budget_chars=eff_budget,
+                )
+                audit_info["requested_context_mode"] = "existing_four_tier"
+                audit_info["effective_context_mode"] = "existing_four_tier"
+                audit_info["fallback_reason"] = None
+                audit_info["base_diff_size"] = len(base_diff)
+            except Exception as exc:
+                effective_content = base_diff
+                effective_context_mode = "diff_only"
+                fallback_reason = f"retrieval_failed: {exc}"
+                audit_info = {
+                    "requested_context_mode": "existing_four_tier",
+                    "effective_context_mode": "diff_only",
+                    "fallback_reason": fallback_reason,
+                    "original_diff_bytes": len(diff_content.encode("utf-8")),
+                    "context_budget": eff_budget,
+                    "changed_files": changed_files,
+                    "included_files": [f for f in changed_files if f in base_diff],
+                    "truncated_files": [f for f in changed_files if f not in base_diff],
+                    "expanded_symbols": [],
+                    "retrieved_context": [],
+                    "final_context_size": len(base_diff),
+                    "base_diff_size": len(base_diff),
+                }
+        else:
+            effective_content = base_diff
+            effective_context_mode = "diff_only"
+            fallback_reason = "repo_dir_missing_or_not_git"
+            audit_info = {
+                "requested_context_mode": "existing_four_tier",
+                "effective_context_mode": "diff_only",
+                "fallback_reason": fallback_reason,
+                "original_diff_bytes": len(diff_content.encode("utf-8")),
+                "context_budget": eff_budget,
+                "changed_files": changed_files,
+                "included_files": [f for f in changed_files if f in base_diff],
+                "truncated_files": [f for f in changed_files if f not in base_diff],
+                "expanded_symbols": [],
+                "retrieved_context": [],
+                "final_context_size": len(base_diff),
+                "base_diff_size": len(base_diff),
+            }
+
+    eff_llm_sys_prompt = system_prompt or (
+        "You are reviewing a Pull Request. Evaluate strictly based on the provided git diff "
+        "and assembled repository context below. Do not use external tools, run commands, "
+        "or inspect the local filesystem."
+    )
+    llm_prefix = (
+        f"{eff_llm_sys_prompt}\n\n"
         f"PR Title: {pr_info.get('title', '')}\n"
         f"PR Description: {pr_info.get('body', '')}\n\n"
         "Here is the git diff and assembled repository context for this PR:\n"
         "```diff\n"
-        f"{effective_content}\n"
-        "```\n\n"
+    )
+    llm_suffix = (
+        "\n```\n\n"
         "Please review this diff and context for bugs, regressions, contract violations, logic flaws, and architectural defects.\n"
         "Output ONLY a JSON array of findings with schema:\n"
         "[\n"
@@ -594,6 +1037,21 @@ def run_agent_review(
         "]\n"
         "If no defects are found, output `[]`."
     )
+    prompt = f"{llm_prefix}{effective_content}{llm_suffix}"
+    llm_common_prompt = f"{llm_prefix}<COMMON_CONTEXT_PLACEHOLDER>{llm_suffix}"
+    common_prompt_fingerprint = hashlib.sha256(llm_common_prompt.encode("utf-8")).hexdigest()
+
+    prompt_chars = len(prompt)
+    prompt_fingerprint = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+    context_chars = len(effective_content)
+    context_fingerprint = hashlib.sha256(effective_content.encode("utf-8")).hexdigest()
+
+    if audit_info:
+        audit_info["prompt_chars"] = prompt_chars
+        audit_info["prompt_fingerprint"] = prompt_fingerprint
+        audit_info["common_prompt_fingerprint"] = common_prompt_fingerprint
+        audit_info["context_chars"] = context_chars
+        audit_info["context_fingerprint"] = context_fingerprint
 
     # Execute real CLI agent
     cmd = []
@@ -710,18 +1168,34 @@ def run_agent_review(
 
     response_text = proc.stdout
     token_usage = None
+    runtime_model = None
     if agent_name in ("agy", "llm", "agy-reviewer"):
         try:
             agy_meta = json.loads(proc.stdout)
             response_text = agy_meta.get("response", "")
             token_usage = agy_meta.get("usage")
+            runtime_model = agy_meta.get("model") or agy_meta.get("model_name")
         except Exception:
             response_text = proc.stdout
+
+    eff_review_cfg = review_cfg or pr_info.get("review_cfg") or {}
+    sample_agent_identity = resolve_agent_identity(
+        agent_name,
+        review_cfg=eff_review_cfg,
+        runtime_evidence={"model": runtime_model} if runtime_model else None,
+        query_cli_version=False,
+    )
 
     try:
         findings = extract_findings_from_response(response_text, agent_name)
     except Exception as exc:
-        raise ValueError(f"output_parse_failed: {exc}\nRaw: {response_text[:300]}") from exc
+        err = ValueError(f"output_parse_failed: {exc}\nRaw: {response_text[:300]}")
+        err.token_usage = token_usage
+        err.tokens = token_usage
+        err.runtime_model = runtime_model
+        err.agent_identity = sample_agent_identity
+        err.common_prompt_fingerprint = common_prompt_fingerprint
+        raise err from exc
 
     # Reviewer Finding Verification V1: Fact-check candidate findings
     retained_findings = findings
@@ -738,6 +1212,14 @@ def run_agent_review(
         except Exception as verif_err:
             verification_summary = {"error": str(verif_err)}
 
+    eff_review_cfg = review_cfg or pr_info.get("review_cfg") or {}
+    agent_identity = resolve_agent_identity(
+        agent_name,
+        review_cfg=eff_review_cfg,
+        runtime_evidence={"model": runtime_model} if runtime_model else None,
+        query_cli_version=False,
+    )
+
     res_llm = {
         "pr": {
             "repo": pr_info["repo"],
@@ -746,14 +1228,30 @@ def run_agent_review(
             "head": pr_info["head"],
         },
         "agent": agent_name,
+        "agent_identity": agent_identity,
         "findings": retained_findings,
         "rejected_findings": rejected_findings,
         "verification": verification_summary,
         "usage": {
             "time_in_ms": int((time.time() - t0) * 1000),
-            "tokens": token_usage or {},
+            "tokens": token_usage,
         },
         "raw_response": response_text.strip(),
+        "prompt_meta": {
+            "prompt_chars": prompt_chars,
+            "prompt_fingerprint": prompt_fingerprint,
+            "common_prompt_fingerprint": common_prompt_fingerprint,
+        },
+        "context_meta": {
+            "requested_context_mode": requested_context_mode,
+            "effective_context_mode": effective_context_mode,
+            "fallback_reason": fallback_reason,
+            "context_budget_chars": eff_budget,
+            "context_chars": context_chars,
+            "context_fingerprint": context_fingerprint,
+            "base_diff_chars": len(base_diff),
+            "agent_identity": agent_identity,
+        },
     }
     if audit_info:
         res_llm["audit"] = audit_info
@@ -1061,6 +1559,8 @@ def review_diff(
     shadow_mode: bool = False,
     timeout_seconds: int = 180,
     system_prompt: Optional[str] = None,
+    context_mode: Optional[str] = None,
+    context_budget_chars: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Execute code review on a git diff with fallback mechanism and optional shadow mode.
 
@@ -1103,6 +1603,8 @@ def review_diff(
             diff_content=diff_content,
             timeout_seconds=timeout_seconds,
             system_prompt=system_prompt,
+            context_mode=context_mode,
+            context_budget_chars=context_budget_chars,
         )
     except Exception as exc:
         if active_agent != FALLBACK_REVIEWER:
@@ -1116,6 +1618,8 @@ def review_diff(
                     diff_content=diff_content,
                     timeout_seconds=timeout_seconds,
                     system_prompt=system_prompt,
+                    context_mode=context_mode,
+                    context_budget_chars=context_budget_chars,
                 )
                 primary_result["fallback"] = {
                     "triggered": True,
@@ -1194,6 +1698,8 @@ def review_diff(
                             timeout_seconds=timeout_seconds,
                             system_prompt=system_prompt,
                             isolation_meta=isolation_meta,
+                            context_mode=context_mode,
+                            context_budget_chars=context_budget_chars,
                         )
                         cleanup_rec = isolation_meta.get("cleanup_record") if isolation_meta else None
                         if cleanup_rec and cleanup_rec.get("status") not in ("verified_removed", "already_absent", "not_applicable"):
@@ -1217,6 +1723,8 @@ def review_diff(
                     diff_content=diff_content,
                     timeout_seconds=timeout_seconds,
                     system_prompt=system_prompt,
+                    context_mode=context_mode,
+                    context_budget_chars=context_budget_chars,
                 )
                 shadow_status = "shadow_success"
                 shadow_result["status"] = "shadow_success"
@@ -1271,6 +1779,10 @@ def review_diff(
         response["shadow_skip_reason"] = shadow_skip_reason
     if "audit" in primary_result:
         response["audit"] = primary_result["audit"]
+    if "context_meta" in primary_result:
+        response["context_meta"] = primary_result["context_meta"]
+    if "prompt_meta" in primary_result:
+        response["prompt_meta"] = primary_result["prompt_meta"]
 
     # Production Validation requirement: Shadow results must be persisted for observability if shadow mode was active
     if is_shadow and shadow_result is not None:
@@ -1318,6 +1830,8 @@ def review_pr(
     shadow_mode: bool = False,
     timeout_seconds: int = 180,
     system_prompt: Optional[str] = None,
+    context_mode: Optional[str] = None,
+    context_budget_chars: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Execute code review on a git commit range (base_ref..head_ref)."""
     repo_path = Path(repo_dir).resolve()
@@ -1341,6 +1855,8 @@ def review_pr(
         shadow_mode=shadow_mode,
         timeout_seconds=timeout_seconds,
         system_prompt=system_prompt,
+        context_mode=context_mode,
+        context_budget_chars=context_budget_chars,
     )
 
 
@@ -1355,8 +1871,29 @@ def generate_chinese_report(
     total_planned = execution_summary.get("total_planned", 0)
     completed = execution_summary.get("completed", 0)
     failed = execution_summary.get("failed", 0)
+    fallback_count = execution_summary.get("fallback_count", 0)
+    fallback_details = execution_summary.get("fallback_details", {})
     failure_details = execution_summary.get("failure_details", {})
     elapsed_seconds = execution_summary.get("elapsed_seconds", 0.0)
+
+    req_context_mode = execution_summary.get("requested_context_mode") or version_info.get("context_mode") or "existing_four_tier"
+    budget_chars = execution_summary.get("context_budget_chars") or version_info.get("context_budget_chars") or 35000
+
+    agent_identity = execution_summary.get("agent_identity") or version_info.get("agent_identity") or {}
+    model_name = agent_identity.get("model_name") or "未知"
+    cli_ver = agent_identity.get("cli_version") or "未知"
+    is_model_confirmed = agent_identity.get("model_confirmed", False)
+
+    usage_summary = execution_summary.get("usage_summary") or results_json.get("usage_summary") or {}
+    total_review_time_ms = usage_summary.get("total_review_time_ms")
+    if total_review_time_ms is None:
+        total_review_time_ms = execution_summary.get("total_review_time_ms", 0)
+    input_tokens = usage_summary.get("input_tokens", "未知")
+    output_tokens = usage_summary.get("output_tokens", "未知")
+    thinking_tokens = usage_summary.get("thinking_tokens", "未知")
+    total_tokens = usage_summary.get("total_tokens", "未知")
+    avg_prompt_chars = usage_summary.get("avg_prompt_chars", 0.0)
+    avg_context_chars = usage_summary.get("avg_context_chars", 0.0)
 
     # Extract normalized metrics from results_json
     metrics_obj = extract_and_validate_metrics(results_json)
@@ -1377,8 +1914,17 @@ def generate_chinese_report(
         "## 1. 运行完整性",
         f"- **计划案例数**: {total_planned}",
         f"- **成功完成数**: {completed}",
+        f"- **降级案例数**: {fallback_count}",
         f"- **失败案例数**: {failed}",
+        f"- **请求上下文模式**: `{req_context_mode}`",
     ]
+
+    if fallback_count > 0:
+        lines.append("- **降级原因明细**:")
+        for pr_id, reason in fallback_details.items():
+            lines.append(f"  - `{pr_id}`: {reason} (从 `{req_context_mode}` 降级为 `diff_only`)")
+    else:
+        lines.append("- **降级原因明细**: 无降级，全量完成案例均符合请求上下文模式")
 
     if failed > 0:
         lines.append("- **失败原因明细**:")
@@ -1448,21 +1994,290 @@ def generate_chinese_report(
     if item_idx == 1:
         lines.append("*（本轮评测无候选审查条目产生）*")
 
+    model_status_label = "已确认" if is_model_confirmed else "无法确认同模型"
     lines.extend([
         "",
         "## 4. 版本与环境信息",
         f"- **代码基线 SHA**: `{version_info.get('code_sha', 'HEAD')}`",
         f"- **评审 Agent 配置**: `{version_info.get('agent_config', 'default')}`",
+        f"- **评审上下文模式**: `{req_context_mode}` (预算上限: {budget_chars} 字符)",
+        f"- **评审模型身份**: `{model_name}` ({model_status_label})",
+        f"- **评审 CLI 版本**: `{cli_ver}`",
         f"- **裁判模型配置**: `{version_info.get('judge_config', 'deepseek/deepseek-v4-flash')}`",
         f"- **ReviewBench 评分器 SHA**: `{version_info.get('scorer_sha', 'e1cb1a0dad8105ebea45caa00c194eaf2d2e7b5d')}`",
         "",
         "## 5. 执行开销",
-        f"- **评测实际总耗时**: {elapsed_seconds:.2f} 秒",
+        f"- **评测实际总耗时**: {elapsed_seconds:.2f} 秒 (全流程端到端耗时)",
+        f"- **评测执行阶段耗时**: {execution_summary.get('review_stage_elapsed_seconds', elapsed_seconds):.2f} 秒 (工作区准备与各 PR 评审)",
+        f"- **评审累积执行耗时**: {total_review_time_ms / 1000:.2f} 秒 (各 PR 评审操作实际耗时之和，含失败重试/异常尝试)",
+        f"- **真实 Token 用量**:",
+        f"  - 输入 Token (input_tokens): {input_tokens}",
+        f"  - 输出 Token (output_tokens): {output_tokens}",
+        f"  - 思考 Token (thinking_tokens): {thinking_tokens}",
+        f"  - 总计 Token (total_tokens): {total_tokens}",
+        f"- **提示词规模统计**:",
+        f"  - 平均 Prompt 字符数: {avg_prompt_chars:.1f} 字符",
+        f"  - 平均有效上下文大小: {avg_context_chars:.1f} 字符",
         f"- **API 成本支出**: {version_info.get('cost_usd', '未知 (本地/直连环境)')}",
         "",
     ])
 
     return "\n".join(lines)
+
+
+def compute_golden_fingerprint(golden_dir: Optional[Union[str, Path]]) -> Optional[str]:
+    """Compute SHA-256 fingerprint over all JSON files in golden directory.
+
+    Sorts JSON files by relative path (forward-slash normalized).
+    Hashes relative path and file content.
+    Independent of directory path, absolute locations, and file modification times.
+    """
+    if golden_dir is None:
+        return None
+    p_dir = Path(golden_dir).resolve()
+    if not p_dir.exists() or not p_dir.is_dir():
+        return None
+
+    json_files = sorted(
+        [p for p in p_dir.rglob("*.json") if p.is_file()],
+        key=lambda p: str(p.relative_to(p_dir)).replace("\\", "/"),
+    )
+    if not json_files:
+        return None
+
+    hasher = hashlib.sha256()
+    for f in json_files:
+        rel_path = str(f.relative_to(p_dir)).replace("\\", "/")
+        hasher.update(rel_path.encode("utf-8"))
+        hasher.update(b"\0")
+        hasher.update(f.read_bytes())
+        hasher.update(b"\0")
+    return hasher.hexdigest()
+
+
+def check_benchmark_comparability(
+    before_results: Dict[str, Any],
+    after_results: Dict[str, Any],
+) -> Tuple[bool, List[str]]:
+    """Verify single-variable comparability between two benchmark runs."""
+    discrepancies: List[str] = []
+
+    b_version = before_results.get("version_info", {})
+    a_version = after_results.get("version_info", {})
+    b_exec = before_results.get("execution_summary", {})
+    a_exec = after_results.get("execution_summary", {})
+    b_cfg = before_results.get("context_config", {})
+    a_cfg = after_results.get("context_config", {})
+
+    # 1. Reviewer Agent
+    b_agent = b_exec.get("agent_identity", {}) or b_version.get("agent_identity", {})
+    a_agent = a_exec.get("agent_identity", {}) or a_version.get("agent_identity", {})
+
+    b_agent_parts = b_version.get("agent_config", "").split()
+    a_agent_parts = a_version.get("agent_config", "").split()
+    b_agent_name = b_agent.get("agent") or (b_agent_parts[0] if b_agent_parts else "unknown")
+    a_agent_name = a_agent.get("agent") or (a_agent_parts[0] if a_agent_parts else "unknown")
+
+    if b_agent_name != a_agent_name:
+        discrepancies.append(
+            f"评审 Agent 不一致 (基线: '{b_agent_name}', 改进版: '{a_agent_name}')。禁止将不同 Agent (如规则与 LLM) 称为同模型对照。"
+        )
+
+    # 2. Model Confirmation & Identity
+    b_model = b_agent.get("model_name", "unknown")
+    a_model = a_agent.get("model_name", "unknown")
+    b_confirmed = b_agent.get("model_confirmed", False)
+    a_confirmed = a_agent.get("model_confirmed", False)
+
+    if not b_confirmed or not a_confirmed or b_model == "unknown" or a_model == "unknown":
+        discrepancies.append(
+            f"无法确认同模型: 实际模型身份未完全确认 (基线: '{b_model}' [confirmed={b_confirmed}], 改进版: '{a_model}' [confirmed={a_confirmed}])。不得据此输出严格的同模型优劣结论。"
+        )
+    elif b_model != a_model:
+        discrepancies.append(
+            f"模型不一致 (基线: '{b_model}', 改进版: '{a_model}')。违反单变量控制要求。"
+        )
+
+    # 3. CLI Version & Agent Execution Params (Effort & Permissions)
+    b_cli = b_agent.get("cli_version")
+    a_cli = a_agent.get("cli_version")
+    is_b_rule = b_agent_name in ("mock", "rule", "rule-contract-v1", "rule-contract-context-v1") or b_cli in ("internal-rule", "N/A")
+    is_a_rule = a_agent_name in ("mock", "rule", "rule-contract-v1", "rule-contract-context-v1") or a_cli in ("internal-rule", "N/A")
+
+    if not is_b_rule and (not b_cli or str(b_cli).strip() in ("", "unknown")):
+        discrepancies.append(
+            f"基线评审 Agent 使用外部 CLI 但缺少有效 CLI 版本证据 ('{b_cli}')，无法确认执行环境一致。"
+        )
+    if not is_a_rule and (not a_cli or str(a_cli).strip() in ("", "unknown")):
+        discrepancies.append(
+            f"改进版评审 Agent 使用外部 CLI 但缺少有效 CLI 版本证据 ('{a_cli}')，无法确认执行环境一致。"
+        )
+
+    if b_cli and a_cli and b_cli != "unknown" and a_cli != "unknown" and b_cli != "internal-rule" and a_cli != "internal-rule" and b_cli != a_cli:
+        discrepancies.append(f"CLI 版本不一致 (基线: '{b_cli}', 改进版: '{a_cli}')。")
+
+    b_effort = b_agent.get("details", {}).get("effort")
+    a_effort = a_agent.get("details", {}).get("effort")
+    if b_effort and a_effort and b_effort != "N/A" and a_effort != "N/A" and b_effort != a_effort:
+        discrepancies.append(f"推理强度/思考预算 (effort) 不一致 (基线: '{b_effort}', 改进版: '{a_effort}')。")
+
+    b_perm = b_agent.get("details", {}).get("permission_flag")
+    a_perm = a_agent.get("details", {}).get("permission_flag")
+    if b_perm and a_perm and b_perm != "N/A" and a_perm != "N/A" and b_perm != a_perm:
+        discrepancies.append(f"权限模式 (permission_flag) 不一致 (基线: '{b_perm}', 改进版: '{a_perm}')。")
+
+    # 4. Context Mode Independent Variable & Direction
+    b_mode = b_cfg.get("context_mode") or b_exec.get("requested_context_mode") or b_version.get("context_mode")
+    a_mode = a_cfg.get("context_mode") or a_exec.get("requested_context_mode") or a_version.get("context_mode")
+    if not b_mode or not a_mode:
+        discrepancies.append("缺少请求上下文模式记录，无法验证对照自变量。")
+    elif b_mode == a_mode:
+        discrepancies.append(f"两组请求上下文模式相同 ('{b_mode}')，未构成 diff_only 与 existing_four_tier 的上下文对照自变量。")
+    elif b_mode != "diff_only" or a_mode != "existing_four_tier":
+        discrepancies.append(f"对照方向不符合标准要求 (必须为基线 diff_only → 改进版 existing_four_tier，实际为 '{b_mode}' → '{a_mode}')。")
+
+    # 5. Context Budget
+    b_budget = b_cfg.get("context_budget_chars") or b_exec.get("context_budget_chars") or b_version.get("context_budget_chars")
+    a_budget = a_cfg.get("context_budget_chars") or a_exec.get("context_budget_chars") or a_version.get("context_budget_chars")
+    if not b_budget or not a_budget:
+        discrepancies.append("缺少上下文预算上限记录，无法确认预算一致性。")
+    elif b_budget != a_budget:
+        discrepancies.append(
+            f"上下文预算上限不一致 (基线: {b_budget} 字符, 改进版: {a_budget} 字符)。"
+        )
+
+    # 6. Execution Config: Effective Timeout & System Prompt
+    b_exec_cfg = before_results.get("execution_config") or b_exec.get("execution_config") or {}
+    a_exec_cfg = after_results.get("execution_config") or a_exec.get("execution_config") or {}
+
+    b_timeout = b_exec_cfg.get("timeout_seconds") if "timeout_seconds" in b_exec_cfg else b_version.get("timeout_seconds")
+    a_timeout = a_exec_cfg.get("timeout_seconds") if "timeout_seconds" in a_exec_cfg else a_version.get("timeout_seconds")
+    if b_timeout is None or a_timeout is None:
+        discrepancies.append("缺少超时时间配置记录，无法确认执行条件一致。")
+    elif b_timeout != a_timeout:
+        discrepancies.append(f"超时时间不一致 (基线: {b_timeout} 秒, 改进版: {a_timeout} 秒)。")
+
+    b_sp_fp = (
+        b_exec_cfg.get("system_prompt_fingerprint")
+        or b_version.get("system_prompt_fingerprint")
+        or (hashlib.sha256(b_exec_cfg["system_prompt"].encode("utf-8")).hexdigest() if "system_prompt" in b_exec_cfg and b_exec_cfg["system_prompt"] is not None else None)
+    )
+    a_sp_fp = (
+        a_exec_cfg.get("system_prompt_fingerprint")
+        or a_version.get("system_prompt_fingerprint")
+        or (hashlib.sha256(a_exec_cfg["system_prompt"].encode("utf-8")).hexdigest() if "system_prompt" in a_exec_cfg and a_exec_cfg["system_prompt"] is not None else None)
+    )
+    if not b_sp_fp or not a_sp_fp:
+        discrepancies.append("缺少系统提示词/指令指纹记录，无法确认提示词一致性。")
+    elif b_sp_fp != a_sp_fp:
+        b_sp = b_exec_cfg.get("system_prompt", b_sp_fp[:8])
+        a_sp = a_exec_cfg.get("system_prompt", a_sp_fp[:8])
+        discrepancies.append(f"系统提示词/指令不一致 (基线: '{b_sp}', 改进版: '{a_sp}')。")
+
+    # 7. Fallbacks
+    b_fallbacks = b_exec.get("fallback_count", 0)
+    a_fallbacks = a_exec.get("fallback_count", 0)
+    if b_fallbacks > 0 or a_fallbacks > 0:
+        discrepancies.append(
+            f"评测包含降级样本 (基线降级 {b_fallbacks} 例, 改进版降级 {a_fallbacks} 例)。降级样本已退回基础 diff，无法完整代表请求的上下文模式。"
+        )
+
+    # 8. Manifest PR Samples & Base/Head SHA & Base Diff Fingerprint
+    b_samples = b_exec.get("samples") or []
+    a_samples = a_exec.get("samples") or []
+    if not b_samples or not a_samples:
+        discrepancies.append("缺少评测样本记录，无法确认样本一致性。")
+    else:
+        if len(b_samples) != len(a_samples):
+            discrepancies.append(
+                f"评测 PR 样本数量不一致 (基线包含 {len(b_samples)} 个案例，改进版包含 {len(a_samples)} 个案例)。"
+            )
+        b_keys = [s.get("key") for s in b_samples if s.get("key")]
+        a_keys = [s.get("key") for s in a_samples if s.get("key")]
+        if set(b_keys) != set(a_keys):
+            discrepancies.append(
+                f"评测 PR 集合不一致 (基线包含 {len(b_keys)} 个案例，改进版包含 {len(a_keys)} 个案例，重合 {len(set(b_keys) & set(a_keys))} 个)。未在相同 PR 集合上进行对照。"
+            )
+        elif b_keys != a_keys:
+            discrepancies.append(
+                f"评测 PR 顺序不一致 (基线案例顺序与改进版不匹配)。未在相同 PR 顺序上进行对照。"
+            )
+        else:
+            b_smap = {s["key"]: s for s in b_samples if "key" in s}
+            a_smap = {s["key"]: s for s in a_samples if "key" in s}
+            for k in b_keys:
+                bs = b_smap[k]
+                as_ = a_smap[k]
+                if bs.get("base") and as_.get("base") and bs.get("base") != as_.get("base"):
+                    discrepancies.append(f"案例 {k} 的 base SHA 不一致 (基线: {bs.get('base')[:8]}, 改进版: {as_.get('base')[:8]})。")
+                if bs.get("head") and as_.get("head") and bs.get("head") != as_.get("head"):
+                    discrepancies.append(f"案例 {k} 的 head SHA 不一致 (基线: {bs.get('head')[:8]}, 改进版: {as_.get('head')[:8]})。")
+                if bs.get("base_diff_chars") and as_.get("base_diff_chars") and bs.get("base_diff_chars") != as_.get("base_diff_chars"):
+                    discrepancies.append(f"案例 {k} 的基础 diff 长度不一致 (基线: {bs.get('base_diff_chars')} 字符, 改进版: {as_.get('base_diff_chars')} 字符)。未满足相同基础 diff 契约。")
+
+                b_diff_fp = bs.get("base_diff_fingerprint")
+                a_diff_fp = as_.get("base_diff_fingerprint")
+                if not b_diff_fp or not a_diff_fp:
+                    discrepancies.append(f"案例 {k} 缺少基础 diff 内容指纹记录，无法确认基础 diff 内容一致。")
+                elif b_diff_fp != a_diff_fp:
+                    discrepancies.append(f"案例 {k} 的基础 diff 内容指纹不一致。")
+
+                b_prompt_fp = bs.get("common_prompt_fingerprint")
+                a_prompt_fp = as_.get("common_prompt_fingerprint")
+                if not b_prompt_fp or not a_prompt_fp:
+                    discrepancies.append(f"案例 {k} 缺少共同提示词指纹记录，无法确认提示词输入一致。")
+                elif b_prompt_fp != a_prompt_fp:
+                    discrepancies.append(f"案例 {k} 的共同提示词指纹不一致 (PR 标题/正文或提示词模板存在差异)。")
+
+    # 9. Planned, Completed, Failed Sample Counts (Denominator Verification)
+    b_plan = b_exec.get("total_planned")
+    a_plan = a_exec.get("total_planned")
+    b_done = b_exec.get("completed")
+    a_done = a_exec.get("completed")
+    b_failed = b_exec.get("failed", 0)
+    a_failed = a_exec.get("failed", 0)
+
+    if b_plan is not None and a_plan is not None and b_plan != a_plan:
+        discrepancies.append(f"计划案例总数不一致 (基线: {b_plan}, 改进版: {a_plan})。")
+
+    if b_failed > 0 or a_failed > 0:
+        discrepancies.append(
+            f"评测包含失败样本 (基线失败 {b_failed} 例, 改进版失败 {a_failed} 例)。样本失败导致实际计分集合不完整 (基线完成 {b_done}/{b_plan}, 改进版完成 {a_done}/{a_plan})。"
+        )
+
+    if b_done is not None and a_done is not None and b_done != a_done:
+        discrepancies.append(f"完成案例数不一致 (基线完成 {b_done}, 改进版完成 {a_done})。")
+
+    if b_plan is not None and len(b_samples) != b_plan:
+        discrepancies.append(f"基线样本记录数 ({len(b_samples)}) 与计划数 ({b_plan}) 不吻合。")
+    if a_plan is not None and len(a_samples) != a_plan:
+        discrepancies.append(f"改进版样本记录数 ({len(a_samples)}) 与计划数 ({a_plan}) 不吻合。")
+
+    # 10. Judge Configuration
+    b_judge = before_results.get("judge_config") or b_version.get("judge_config")
+    a_judge = after_results.get("judge_config") or a_version.get("judge_config")
+    if not b_judge or not a_judge:
+        discrepancies.append("裁判模型配置缺失，无法确认同裁判评分条件。")
+    elif b_judge != a_judge:
+        discrepancies.append(f"裁判模型配置不一致 (基线: '{b_judge}', 改进版: '{a_judge}')。")
+
+    # 11. Scorer Version (SHA)
+    b_scorer = before_results.get("scorer_sha") or b_version.get("scorer_sha")
+    a_scorer = after_results.get("scorer_sha") or a_version.get("scorer_sha")
+    if not b_scorer or not a_scorer:
+        discrepancies.append("评分器版本缺失，无法确认同评分器版本。")
+    elif b_scorer != a_scorer:
+        discrepancies.append(f"评分器版本不一致 (基线: '{b_scorer[:8]}', 改进版: '{a_scorer[:8]}')。")
+
+    # 12. Golden Content Fingerprint
+    b_golden_fp = before_results.get("golden_fingerprint") or b_version.get("golden_fingerprint")
+    a_golden_fp = after_results.get("golden_fingerprint") or a_version.get("golden_fingerprint")
+    if not b_golden_fp or not a_golden_fp:
+        discrepancies.append("缺少评测裁判黄金标准 (golden) 内容指纹记录，无法确认评分标准一致。")
+    elif b_golden_fp != a_golden_fp:
+        discrepancies.append("评测裁判黄金标准 (golden) 内容指纹不一致。")
+
+    return (len(discrepancies) == 0, discrepancies)
 
 
 def compare_benchmarks(
@@ -1521,6 +2336,113 @@ def compare_benchmarks(
     ar_b, ar_a, ar_d = _diff_stat("augmented_recall")
     ap_b, ap_a, ap_d = _diff_stat("augmented_precision")
 
+    is_comparable, discrepancies = check_benchmark_comparability(before_res, after_res)
+
+    # Context & usage statistics extraction
+    b_exec = before_res.get("execution_summary", {})
+    a_exec = after_res.get("execution_summary", {})
+    b_usage = before_res.get("usage_summary") or b_exec.get("usage_summary", {})
+    a_usage = after_res.get("usage_summary") or a_exec.get("usage_summary", {})
+    b_version = before_res.get("version_info", {})
+    a_version = after_res.get("version_info", {})
+    b_cfg = before_res.get("context_config", {})
+    a_cfg = after_res.get("context_config", {})
+
+    b_mode = b_cfg.get("context_mode") or b_exec.get("requested_context_mode") or b_version.get("context_mode", "未知")
+    a_mode = a_cfg.get("context_mode") or a_exec.get("requested_context_mode") or a_version.get("context_mode", "未知")
+
+    b_agent = b_exec.get("agent_identity", {}) or b_version.get("agent_identity", {})
+    a_agent = a_exec.get("agent_identity", {}) or a_version.get("agent_identity", {})
+    b_agent_parts = b_version.get("agent_config", "").split()
+    a_agent_parts = a_version.get("agent_config", "").split()
+    b_agent_name = b_agent.get("agent") or (b_agent_parts[0] if b_agent_parts else "未知")
+    a_agent_name = a_agent.get("agent") or (a_agent_parts[0] if a_agent_parts else "未知")
+
+    b_model = b_agent.get("model_name", "未知")
+    a_model = a_agent.get("model_name", "未知")
+    b_model_conf = b_agent.get("model_confirmed", False)
+    a_model_conf = a_agent.get("model_confirmed", False)
+    b_model_str = f"{b_model} ({'已确认' if b_model_conf else '无法确认同模型'})"
+    a_model_str = f"{a_model} ({'已确认' if a_model_conf else '无法确认同模型'})"
+
+    b_cli = b_agent.get("cli_version", "未知")
+    a_cli = a_agent.get("cli_version", "未知")
+    b_effort = b_agent.get("details", {}).get("effort", "未知")
+    a_effort = a_agent.get("details", {}).get("effort", "未知")
+
+    b_budget = b_cfg.get("context_budget_chars") or b_exec.get("context_budget_chars") or b_version.get("context_budget_chars", "未知")
+    a_budget = a_cfg.get("context_budget_chars") or a_exec.get("context_budget_chars") or a_version.get("context_budget_chars", "未知")
+
+    b_plan = b_exec.get("total_planned", "未知")
+    a_plan = a_exec.get("total_planned", "未知")
+    b_done = b_exec.get("completed", "未知")
+    a_done = a_exec.get("completed", "未知")
+    b_failed = b_exec.get("failed", 0)
+    a_failed = a_exec.get("failed", 0)
+    b_fall = b_exec.get("fallback_count", 0)
+    a_fall = a_exec.get("fallback_count", 0)
+
+    b_judge = before_res.get("judge_config") or b_version.get("judge_config", "未知")
+    a_judge = after_res.get("judge_config") or a_version.get("judge_config", "未知")
+    b_scorer = before_res.get("scorer_sha") or b_version.get("scorer_sha", "未知")
+    a_scorer = after_res.get("scorer_sha") or a_version.get("scorer_sha", "未知")
+    b_golden_fp = before_res.get("golden_fingerprint") or b_version.get("golden_fingerprint", "未知")
+    a_golden_fp = after_res.get("golden_fingerprint") or a_version.get("golden_fingerprint", "未知")
+
+    def _val_diff(bv: Any, av: Any, unit: str = "") -> Tuple[str, str, str]:
+        if isinstance(bv, (int, float)) and isinstance(av, (int, float)):
+            delta = av - bv
+            d_str = f"{'+' if delta >= 0 else ''}{delta:.2f}{unit}" if isinstance(delta, float) else f"{'+' if delta >= 0 else ''}{delta}{unit}"
+            return f"{bv}{unit}", f"{av}{unit}", d_str
+        b_s = f"{bv}{unit}" if bv not in (None, "未知") else "未知"
+        a_s = f"{av}{unit}" if av not in (None, "未知") else "未知"
+        return b_s, a_s, "未知"
+
+    def _token_diff(b_u: Dict[str, Any], a_u: Dict[str, Any], key: str) -> Tuple[str, str, str]:
+        b_val = b_u.get(key)
+        a_val = a_u.get(key)
+        b_dtl = b_u.get("token_details", {}).get(key, {}) if isinstance(b_u.get("token_details"), dict) else {}
+        a_dtl = a_u.get("token_details", {}).get(key, {}) if isinstance(a_u.get("token_details"), dict) else {}
+
+        b_disp = str(b_val) if b_val not in (None, "") else "未知"
+        a_disp = str(a_val) if a_val not in (None, "") else "未知"
+
+        b_raw = b_dtl.get("raw_sum") if isinstance(b_dtl, dict) and b_dtl.get("raw_sum") is not None else (b_val if isinstance(b_val, (int, float)) else None)
+        a_raw = a_dtl.get("raw_sum") if isinstance(a_dtl, dict) and a_dtl.get("raw_sum") is not None else (a_val if isinstance(a_val, (int, float)) else None)
+
+        b_comp = b_dtl.get("is_complete", False) if isinstance(b_dtl, dict) and "is_complete" in b_dtl else isinstance(b_val, (int, float))
+        a_comp = a_dtl.get("is_complete", False) if isinstance(a_dtl, dict) and "is_complete" in a_dtl else isinstance(a_val, (int, float))
+
+        if isinstance(b_raw, (int, float)) and isinstance(a_raw, (int, float)):
+            delta = a_raw - b_raw
+            sign = "+" if delta >= 0 else ""
+            if b_comp and a_comp:
+                delta_str = f"{sign}{delta}"
+            else:
+                delta_str = f"{sign}{delta} (基于已知部分计算)"
+            return b_disp, a_disp, delta_str
+        return b_disp, a_disp, "未知"
+
+    b_stage_s = b_exec.get("review_stage_elapsed_seconds")
+    a_stage_s = a_exec.get("review_stage_elapsed_seconds")
+    stage_b, stage_a, stage_d = _val_diff(b_stage_s, a_stage_s, "秒")
+
+    b_e2e = b_exec.get("elapsed_seconds")
+    a_e2e = a_exec.get("elapsed_seconds")
+    e2e_b, e2e_a, e2e_d = _val_diff(b_e2e, a_e2e, "秒")
+
+    b_rev_s = (b_usage.get("total_review_time_ms") / 1000.0) if isinstance(b_usage.get("total_review_time_ms"), (int, float)) else None
+    a_rev_s = (a_usage.get("total_review_time_ms") / 1000.0) if isinstance(a_usage.get("total_review_time_ms"), (int, float)) else None
+    rev_b, rev_a, rev_d = _val_diff(b_rev_s, a_rev_s, "秒")
+
+    in_b, in_a, in_d = _token_diff(b_usage, a_usage, "input_tokens")
+    out_b, out_a, out_d = _token_diff(b_usage, a_usage, "output_tokens")
+    thk_b, thk_a, thk_d = _token_diff(b_usage, a_usage, "thinking_tokens")
+    tot_b, tot_a, tot_d = _token_diff(b_usage, a_usage, "total_tokens")
+
+    p_ch_b, p_ch_a, p_ch_d = _val_diff(b_usage.get("avg_prompt_chars"), a_usage.get("avg_prompt_chars"), "字")
+    c_ch_b, c_ch_a, c_ch_d = _val_diff(b_usage.get("avg_context_chars"), a_usage.get("avg_context_chars"), "字")
+
     lines = [
         "# HAFlow 代码评审回归评测对比报告",
         "",
@@ -1537,13 +2459,138 @@ def compare_benchmarks(
         f"| 增强召回率 (Augmented Recall) | {ar_b} | {ar_a} | {ar_d} | {'📈 提升' if '+' in ar_d and ar_d != '+0.0%' else ('📉 下降' if '-' in ar_d else '➖ 持平')} |",
         f"| 增强准确率 (Augmented Precision) | {ap_b} | {ap_a} | {ap_d} | {'📈 提升' if '+' in ap_d and ap_d != '+0.0%' else ('📉 下降' if '-' in ap_d else '➖ 持平')} |",
         "",
-        "## 2. 案例检出变化明细",
+        "## 2. 单变量对照与可比性检查",
+        "",
+        "| 对照条件 | 基线 (Before) | 改进版 (After) | 一致性与状态 |",
+        "|---|---|---|---|",
+        f"| 评审 Agent | `{b_agent_name}` | `{a_agent_name}` | {'✓ 一致' if b_agent_name == a_agent_name and b_agent_name != '未知' else '⚠ 存在差异'} |",
+        f"| 模型身份 | `{b_model_str}` | `{a_model_str}` | {'✓ 确认同模型' if b_model_conf and a_model_conf and b_model == a_model else '⚠ 无法确认同模型'} |",
+        f"| CLI 版本 / effort | `{b_cli}` / `{b_effort}` | `{a_cli}` / `{a_effort}` | {'✓ 一致' if b_cli == a_cli and b_effort == a_effort else '⚠ 存在差异'} |",
+        f"| 请求上下文模式 | `{b_mode}` | `{a_mode}` | {'(对照自变量)' if b_mode != a_mode else '模式相同 (未构成自变量)'} |",
+        f"| 上下文预算上限 | `{b_budget}` | `{a_budget}` | {'✓ 一致' if b_budget == a_budget and b_budget != '未知' else '⚠ 存在差异'} |",
+        f"| 计划 / 完成案例 | {b_plan} / {b_done} (失败: {b_failed}) | {a_plan} / {a_done} (失败: {a_failed}) | {'✓ 案例数一致' if b_plan == a_plan and b_done == a_done and b_failed == 0 and a_failed == 0 else '⚠ 存在差异或失败'} |",
+        f"| 降级案例数 | {b_fall} | {a_fall} | {'✓ 无降级' if b_fall == 0 and a_fall == 0 else f'⚠ 包含降级 ({b_fall} / {a_fall})'} |",
+        f"| 裁判模型配置 | `{b_judge}` | `{a_judge}` | {'✓ 一致' if b_judge == a_judge and b_judge != '未知' else '⚠ 存在差异'} |",
+        f"| 评分器版本 SHA | `{str(b_scorer)[:8]}` | `{str(a_scorer)[:8]}` | {'✓ 一致' if b_scorer == a_scorer and b_scorer != '未知' else '⚠ 存在差异'} |",
+        f"| Golden 标准指纹 | `{str(b_golden_fp)[:8]}` | `{str(a_golden_fp)[:8]}` | {'✓ 一致' if b_golden_fp == a_golden_fp and b_golden_fp != '未知' else '⚠ 存在差异或缺失'} |",
+        "",
+    ]
+
+    if is_comparable:
+        lines.extend([
+            "> [!NOTE]",
+            f"> **单变量控制结论**：两组评测已满足严格单变量同模型控制条件（同一模型 `{b_model}`、相同基础 diff、相同评审预算与评测集）。两组差异主要来源于上下文检索模式的不同。",
+            "",
+        ])
+    else:
+        lines.extend([
+            "> [!WARNING]",
+            "> **单变量控制警告**：本次对比未完全满足严格单变量同模型控制条件，具体差异项如下：",
+        ])
+        for disc in discrepancies:
+            lines.append(f"> - {disc}")
+        lines.extend([
+            ">",
+            "> 依据评测纪律，在无法确认严格单变量受控或存在降级/失败/环境差异时，**不得据此输出严格的同模型优劣结论**。",
+            "",
+        ])
+
+    lines.extend([
+        "## 3. 耗时与用量对比矩阵",
+        "",
+        "| 统计项目 | 基线 (Before) | 改进版 (After) | 差异 (Delta) | 说明 |",
+        "|---|---|---|---|---|",
+        f"| 评测执行总耗时 | {stage_b} | {stage_a} | {stage_d} | 所有 PR 工作区准备与评审操作之和（含成功及失败尝试） |",
+        f"| 全流程端到端耗时 | {e2e_b} | {e2e_a} | {e2e_d} | 从评测启动至官方裁判打分完成的全流程耗时 |",
+        f"| 评审操作累积耗时 | {rev_b} | {rev_a} | {rev_d} | 各 PR 完整评审操作（含检索组装、Reviewer 与 Verifier）耗时之和 |",
+        f"| 输入 Token (input_tokens) | {in_b} | {in_a} | {in_d} | 真实 API usage 统计（缺失为未知，部分覆盖标明样本数） |",
+        f"| 输出 Token (output_tokens) | {out_b} | {out_a} | {out_d} | 真实 API usage 统计（缺失为未知，部分覆盖标明样本数） |",
+        f"| 思考 Token (thinking_tokens) | {thk_b} | {thk_a} | {thk_d} | 真实 API usage 统计（缺失为未知，部分覆盖标明样本数） |",
+        f"| 总计 Token (total_tokens) | {tot_b} | {tot_a} | {tot_d} | 真实 API usage 统计（严禁通过字符数折算） |",
+        f"| 平均 Prompt 字符数 | {p_ch_b} | {p_ch_a} | {p_ch_d} | 完整 Prompt 字符规模 |",
+        f"| 平均有效上下文大小 | {c_ch_b} | {c_ch_a} | {c_ch_d} | 基础 diff 及追加源码上下文规模 |",
+        "",
+        "## 4. 上下文扩展收益分析",
+        "",
+        "> **核心问题解答**：对当前实际使用的 reviewer，额外提供符号定义、调用关系和契约源码，是否改善审核质量？额外耗时与用量是多少？",
+        "",
+    ])
+
+    bv_r = b_overall.get("grounded_recall")
+    av_r = a_overall.get("grounded_recall")
+    bv_p = b_overall.get("grounded_precision")
+    av_p = a_overall.get("grounded_precision")
+
+    has_num_diff = all(isinstance(v, (int, float)) for v in (bv_r, av_r, bv_p, av_p))
+
+    if not is_comparable:
+        lines.append(
+            "- **审核质量评估**: 无法得出单变量质量结论。由于两组评测存在不可比因素（如模型身份未确认、评测案例/配置不一致、包含失败或降级样本等），"
+            "观测到的指标差异不能归因于源码上下文检索模式。"
+        )
+    elif has_num_diff:
+        delta_r = round((av_r - bv_r) * 100, 2)
+        delta_p = round((av_p - bv_p) * 100, 2)
+
+        r_improved = delta_r > 0
+        r_declined = delta_r < 0
+        p_improved = delta_p > 0
+        p_declined = delta_p < 0
+
+        if r_improved and p_improved:
+            quality_desc = (
+                f"在当前受测 reviewer 上，额外源码上下文使召回率与准确率均实现提升 "
+                f"（基础召回率 {gr_d}，基础准确率 {gp_d}）。"
+            )
+        elif r_declined and p_declined:
+            quality_desc = (
+                f"在当前受测 reviewer 上，额外源码上下文导致召回率与准确率均出现下滑 "
+                f"（基础召回率 {gr_d}，基础准确率 {gp_d}），额外上下文可能引入了干扰噪声。"
+            )
+        elif (r_improved and p_declined) or (r_declined and p_improved):
+            quality_desc = (
+                f"在当前受测 reviewer 上，召回率与准确率呈现反向权衡（Trade-off）："
+                f"基础召回率变化 {gr_d}，基础准确率变化 {gp_d}。"
+                f"{'召回率有所提升但准确率下降，表明额外上下文在帮助检出更多线索的同时引入了误报；' if r_improved else '准确率有所提升但召回率下降；'}"
+                f"在未预设 F-score 或业务权重的前提下，不认定为单纯的整体质量提升或下降。"
+            )
+        elif delta_r == 0 and delta_p == 0:
+            quality_desc = (
+                f"在当前受测 reviewer 上，两组核心指标完全持平 "
+                f"（基础召回率 Delta: {gr_d}，基础准确率 Delta: {gp_d}），未体现额外质量增益。"
+            )
+        elif delta_r == 0:
+            p_text = f"准确率提高 {gp_d}" if p_improved else f"准确率下降 {gp_d}"
+            quality_desc = (
+                f"在当前受测 reviewer 上，基础召回率持平 ({gr_d})，但{p_text}。"
+                f"{'由于准确率显著下降，不应视为质量持平；' if p_declined else '误报减少带来准确率改进；'}"
+                f"需结合业务对误报的容忍度综合评估。"
+            )
+        else:
+            r_text = f"召回率提升 {gr_d}" if r_improved else f"召回率下降 {gr_d}"
+            quality_desc = (
+                f"在当前受测 reviewer 上，基础准确率持平 ({gp_d})，但{r_text}。"
+            )
+
+        lines.append(f"- **审核质量评估**: {quality_desc}")
+    else:
+        lines.append(
+            f"- **审核质量评估**: 基础召回率变化 {gr_d}，基础准确率变化 {gp_d}。"
+            f"缺少完整数值指标，不做整体优劣推断。"
+        )
+
+    lines.append(f"- **额外耗时评估**: 评审操作累积耗时变化为 `{rev_d}`，全流程评测耗时变化为 `{e2e_d}`。")
+    lines.append(f"- **额外用量评估**: 总计 Token 消耗变化为 `{tot_d}`，平均 Prompt 字符数膨胀 `{p_ch_d}`，有效上下文扩展 `{c_ch_d}`。")
+
+    lines.extend([
+        "",
+        "## 5. 案例检出变化明细",
         "",
         "详见各轮独立报告：",
         f"- 基线报告: [{before_report_file.name}]({before_report_file})",
         f"- 改进版报告: [{after_report_file.name}]({after_report_file})",
         "",
-    ]
+    ])
 
     report_content = "\n".join(lines)
     if output_file:

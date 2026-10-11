@@ -55,6 +55,7 @@
 | **通用配置驱动与受控 MCP 生态容器 (Dynamic Config & MCP Mesh)** | [[dag-workflow-engine]] | `herdr/mcp.py`, `herdr/workflow.py` |
 | **状态流转网关、嵌入式状态引擎、统一事件流、检查点快照 (State Transition Gateway, StateStore, WorkflowEvent & Checkpoint Store)** | [[task-lifecycle]], [[domain-model]] | `herdr/transitions.py`, `herdr/kernel.py`, `herdr/state_store.py`, `herdr/state_db.py`, `bin/herdr-task` |
 | **跨节点文档/证据共享与 stale 治理 (Workflow Shared Docs)** | [[task-lifecycle]] §5 | `herdr/workflow_docs.py`, `bin/herdr-task:note-add/note-list` |
+| **代码审查基准评测与上下文对照实验 (ReviewBench)** | [[review-benchmark]] | `herdr/review_benchmark.py`, `bin/herdr-review-bench` |
 | **更新或扩展 Wiki 本身** | [[WIKI]] / [[log]] | `wiki/WIKI.md` |
 
 ---
@@ -78,6 +79,7 @@
 - **[[trajectory-observer]]**: 运行过程诊断层——确定性 signal + Provider 确认 + 结构化 Finding（只检测/解释/建议，不执行修复）
 - **[[semantic-context-compact]]**: Working Memory 层——bounded Trajectory/Observation/Finding 输入、程序验证引用和 append-only ContextPack（不删除原始历史）
 - **[[semantic-context-compact]] §Context Compiler V1**: 按 Task/Workflow 状态、依赖和 Agent 角色编译带 provenance 的不可变 WorkingContext；Handoff 只传 `context_id`
+- **[[review-benchmark]]**: 代码审查基准评测、同模型单变量对照、基础 diff 一致性与真实 Token 用量审计
 - **[[common-change-paths]]**: 常见业务修改的完整关联文件、注意陷阱与验证命令
 - **[[ops-center]]**: 分层 Agent 运维视图、运行时/任务状态对照、时长与异常聚合
 - **[[WIKI]]**: Wiki 维护规范、证据契约与更新触发条件

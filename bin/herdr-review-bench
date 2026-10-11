@@ -10,6 +10,7 @@ Supports:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -22,17 +23,44 @@ HERDR_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(HERDR_ROOT))
 
 from herdr.review_benchmark import (
+    DEFAULT_CONTEXT_BUDGET_CHARS,
+    DEFAULT_CONTEXT_MODE,
+    DEFAULT_RULE_SYSTEM_PROMPT,
+    DEFAULT_SYSTEM_PROMPT,
+    VALID_CONTEXT_MODES,
+    aggregate_group_agent_identity,
     compare_benchmarks,
+    compute_golden_fingerprint,
     extract_and_validate_metrics,
+    extract_base_diff,
     generate_chinese_report,
     prepare_isolated_workspace,
     pr_key,
+    resolve_agent_identity,
     review_diff,
     review_pr,
     run_agent_review,
     validate_candidate_output,
+    validate_context_config,
     validate_manifest,
 )
+
+
+def load_benchmark_config(config_path: Path) -> dict:
+    """Load benchmark configuration supporting JSON and YAML formats."""
+    text = config_path.read_text(encoding="utf-8")
+    if config_path.suffix.lower() in (".yaml", ".yml"):
+        import yaml
+        config = yaml.safe_load(text)
+    else:
+        try:
+            config = json.loads(text)
+        except Exception:
+            import yaml
+            config = yaml.safe_load(text)
+    if not isinstance(config, dict):
+        raise ValueError(f"Configuration file must be a dictionary, got {type(config).__name__}")
+    return config
 
 
 REVIEWBENCH_LOCKED_SHA = "e1cb1a0dad8105ebea45caa00c194eaf2d2e7b5d"
@@ -101,8 +129,11 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(f"Error: configuration file not found: {config_path}", file=sys.stderr)
         return 1
 
-    with open(config_path, "r", encoding="utf-8") as f:
-        config = json.load(f)
+    try:
+        config = load_benchmark_config(config_path)
+    except Exception as exc:
+        print(f"Error loading configuration file {config_path}: {exc}", file=sys.stderr)
+        return 1
 
     output_dir = Path(args.output).resolve()
     candidate_dir = output_dir / "candidate"
@@ -129,6 +160,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     if not golden_dir.is_absolute():
         golden_dir = (HERDR_ROOT / golden_dir).resolve()
 
+    golden_fingerprint = compute_golden_fingerprint(golden_dir)
+
     if not manifest_path.exists():
         print(f"Error: manifest file not found: {manifest_path}", file=sys.stderr)
         return 1
@@ -139,21 +172,72 @@ def cmd_run(args: argparse.Namespace) -> int:
     validate_manifest(manifest_entries)
 
     agent_name = config.get("agent", "agy")
-    system_prompt = config.get("review", {}).get("system_prompt")
-    timeout_sec = config.get("review", {}).get("timeout_seconds", 300)
+    review_cfg = config.get("review", {})
+    system_prompt = review_cfg.get("system_prompt")
+    timeout_sec = int(review_cfg.get("timeout_seconds", 300))
+
+    # 1. Context mode configuration & fail-fast validation before execution
+    raw_context_mode = review_cfg.get("context_mode")
+    raw_budget = review_cfg.get("context_budget_chars")
+    try:
+        context_mode, context_budget_chars = validate_context_config(raw_context_mode, raw_budget)
+    except ValueError as ve:
+        print(f"Error: Invalid review context configuration: {ve}", file=sys.stderr)
+        return 1
+
+    # Effective system prompt resolution
+    if system_prompt is not None:
+        effective_system_prompt = str(system_prompt).strip()
+    elif agent_name in ("mock", "rule", "rule-contract-v1", "rule-contract-context-v1"):
+        effective_system_prompt = DEFAULT_RULE_SYSTEM_PROMPT
+    else:
+        effective_system_prompt = DEFAULT_SYSTEM_PROMPT
+    system_prompt_fingerprint = hashlib.sha256(effective_system_prompt.encode("utf-8")).hexdigest()
+
+    # 2. Agent & model identity resolution (base/configured identity)
+    agent_info = resolve_agent_identity(agent_name, review_cfg)
+    model_name = agent_info.get("model_name", "unknown")
+    model_conf = agent_info.get("model_confirmed", False)
+    cli_ver = agent_info.get("cli_version", "unknown")
+    if "cli_version" not in review_cfg and cli_ver != "unknown":
+        review_cfg["cli_version"] = cli_ver
+
+    execution_config = {
+        "timeout_seconds": timeout_sec,
+        "system_prompt": effective_system_prompt,
+        "system_prompt_fingerprint": system_prompt_fingerprint,
+        "context_budget_chars": context_budget_chars,
+        "context_mode": context_mode,
+        "effort": agent_info.get("details", {}).get("effort", "low" if agent_name in ("agy", "llm", "agy-reviewer") else "N/A"),
+        "permission_flag": agent_info.get("details", {}).get("permission_flag", "--sandbox" if agent_name in ("agy", "llm", "agy-reviewer") else "N/A"),
+        "cli_version": cli_ver,
+    }
 
     print(f"=== Starting Review Benchmark Run: {config.get('name', 'benchmark')} ===")
     print(f"Manifest PRs: {len(manifest_entries)}")
-    print(f"Agent: {agent_name}")
+    print(f"Agent: {agent_name} (model: {model_name}, confirmed: {model_conf}, cli: {cli_ver})")
+    print(f"Context mode: {context_mode} (budget: {context_budget_chars} chars)")
+    if not model_conf:
+        print(f"    ⚠ Notice: Reviewer model identity unconfirmed ({agent_info.get('details', {}).get('source', 'unknown')})")
     print(f"Output directory: {output_dir}")
 
     t_start = time.time()
-    execution_summary = {
+    execution_summary: Dict[str, Any] = {
         "total_planned": len(manifest_entries),
+        "review_attempts": 0,
         "completed": 0,
         "failed": 0,
+        "fallback_count": 0,
         "failure_details": {},
+        "fallback_details": {},
+        "samples": [],
         "elapsed_seconds": 0.0,
+        "total_review_time_ms": 0,
+        "requested_context_mode": context_mode,
+        "context_budget_chars": context_budget_chars,
+        "effective_context_modes": {},
+        "candidate_findings_map": {},
+        "execution_config": execution_config,
     }
 
     # Step 1 & 2: Review execution in isolated workspaces
@@ -164,6 +248,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(f"\n--> Preparing workspace for {label}")
 
         ws_dir = workspaces_dir / key
+        diff_content = ""
         try:
             # Use current repo root as source if repo matches or clone
             source_repo = str(HERDR_ROOT)
@@ -185,16 +270,46 @@ def cmd_run(args: argparse.Namespace) -> int:
                     head_link.symlink_to(f"../{key}")
                 except Exception:
                     pass
+        except Exception as prep_exc:
+            execution_summary["failed"] += 1
+            execution_summary["failure_details"][key] = f"workspace_prep_failed: {prep_exc}"
+            execution_summary["samples"].append({
+                "key": key,
+                "repo": entry.get("repo"),
+                "pr_number": entry.get("pr_number"),
+                "base": entry.get("base"),
+                "head": entry.get("head"),
+                "status": "failed",
+                "review_attempted": False,
+                "time_in_ms": None,
+                "error": f"workspace_prep_failed: {prep_exc}",
+                "requested_context_mode": context_mode,
+            })
+            print(f"    ✗ Workspace preparation FAILED: {prep_exc}", file=sys.stderr)
+            continue
 
-            print(f"    Invoking review Agent '{agent_name}'...")
+        base_diff, _ = extract_base_diff(diff_content, context_budget_chars)
+        base_diff_fp = hashlib.sha256(base_diff.encode("utf-8")).hexdigest()
+
+        # Review attempt: precisely timed boundary
+        execution_summary["review_attempts"] += 1
+        t_review_start = time.time()
+        print(f"    Invoking review Agent '{agent_name}' ({context_mode})...")
+        try:
             candidate_output = run_agent_review(
                 agent_name=agent_name,
                 repo_dir=ws_dir,
                 pr_info=entry,
                 diff_content=diff_content,
                 timeout_seconds=timeout_sec,
-                system_prompt=system_prompt,
+                system_prompt=effective_system_prompt,
+                context_mode=context_mode,
+                context_budget_chars=context_budget_chars,
+                review_cfg=review_cfg,
             )
+            t_review_end = time.time()
+            review_ms = int((t_review_end - t_review_start) * 1000)
+            execution_summary["total_review_time_ms"] += review_ms
 
             validate_candidate_output(candidate_output)
 
@@ -208,18 +323,157 @@ def cmd_run(args: argparse.Namespace) -> int:
                 audit_file = audit_dir / f"{key}.context-audit.json"
                 audit_file.write_text(json.dumps(candidate_output["audit"], indent=2, ensure_ascii=False), encoding="utf-8")
 
+            sample_agent_id = candidate_output.get("agent_identity")
+
+            c_meta = candidate_output.get("context_meta", {})
+            eff_mode = c_meta.get("effective_context_mode", context_mode)
+            execution_summary["effective_context_modes"][eff_mode] = execution_summary["effective_context_modes"].get(eff_mode, 0) + 1
+            if eff_mode != context_mode or c_meta.get("fallback_reason"):
+                execution_summary["fallback_count"] += 1
+                execution_summary["fallback_details"][key] = c_meta.get("fallback_reason")
+
+            sample_record = {
+                "key": key,
+                "repo": entry.get("repo"),
+                "pr_number": entry.get("pr_number"),
+                "base": entry.get("base"),
+                "head": entry.get("head"),
+                "status": "completed",
+                "review_attempted": True,
+                "requested_context_mode": c_meta.get("requested_context_mode", context_mode),
+                "effective_context_mode": eff_mode,
+                "fallback_reason": c_meta.get("fallback_reason"),
+                "prompt_chars": candidate_output.get("prompt_meta", {}).get("prompt_chars"),
+                "prompt_fingerprint": candidate_output.get("prompt_meta", {}).get("prompt_fingerprint"),
+                "common_prompt_fingerprint": candidate_output.get("prompt_meta", {}).get("common_prompt_fingerprint"),
+                "context_chars": c_meta.get("context_chars"),
+                "context_fingerprint": c_meta.get("context_fingerprint"),
+                "base_diff_chars": c_meta.get("base_diff_chars", len(base_diff)),
+                "base_diff_fingerprint": base_diff_fp,
+                "agent_identity": sample_agent_id,
+                "time_in_ms": review_ms,
+                "tokens": candidate_output.get("usage", {}).get("tokens"),
+                "findings_count": len(candidate_output.get("findings", [])),
+            }
+            execution_summary["samples"].append(sample_record)
+
             execution_summary["completed"] += 1
-            if "candidate_findings_map" not in execution_summary:
-                execution_summary["candidate_findings_map"] = {}
             execution_summary["candidate_findings_map"][key] = candidate_output.get("findings", [])
             print(f"    ✓ Review finished, findings: {len(candidate_output['findings'])}")
 
-        except Exception as exc:
+        except Exception as rev_exc:
+            t_review_end = time.time()
+            review_ms = int((t_review_end - t_review_start) * 1000)
+            execution_summary["total_review_time_ms"] += review_ms
             execution_summary["failed"] += 1
-            execution_summary["failure_details"][key] = str(exc)
-            print(f"    ✗ Review execution FAILED: {exc}", file=sys.stderr)
+            execution_summary["failure_details"][key] = str(rev_exc)
 
-    execution_summary["elapsed_seconds"] = time.time() - t_start
+            sample_toks = getattr(rev_exc, "token_usage", None) or getattr(rev_exc, "tokens", None)
+            sample_agent_id = getattr(rev_exc, "agent_identity", None)
+            if not sample_agent_id:
+                sample_agent_id = resolve_agent_identity(
+                    agent_name,
+                    review_cfg=review_cfg,
+                    runtime_evidence=None,
+                    query_cli_version=False,
+                )
+
+            sample_record = {
+                "key": key,
+                "repo": entry.get("repo"),
+                "pr_number": entry.get("pr_number"),
+                "base": entry.get("base"),
+                "head": entry.get("head"),
+                "status": "failed",
+                "review_attempted": True,
+                "requested_context_mode": context_mode,
+                "base_diff_chars": len(base_diff),
+                "base_diff_fingerprint": base_diff_fp,
+                "common_prompt_fingerprint": getattr(rev_exc, "common_prompt_fingerprint", None),
+                "agent_identity": sample_agent_id,
+                "time_in_ms": review_ms,
+                "tokens": sample_toks,
+                "error": str(rev_exc),
+            }
+            execution_summary["samples"].append(sample_record)
+            print(f"    ✗ Review execution FAILED: {rev_exc}", file=sys.stderr)
+
+    t_review_end = time.time()
+    review_stage_elapsed_seconds = round(t_review_end - t_start, 2)
+    execution_summary["review_stage_elapsed_seconds"] = review_stage_elapsed_seconds
+
+    # Whole-group agent identity aggregation across all review attempts
+    agent_info = aggregate_group_agent_identity(execution_summary["samples"], agent_info)
+    execution_summary["agent_identity"] = agent_info
+
+    # Step 2.5: Compute aggregated usage and character summary
+    review_attempts = execution_summary["review_attempts"]
+    total_prompt_chars = 0
+    total_context_chars = 0
+    samples_with_chars = 0
+    token_metrics = ["input_tokens", "output_tokens", "thinking_tokens", "total_tokens"]
+    token_stats = {k: {"sum": 0, "count": 0} for k in token_metrics}
+
+    for s in execution_summary["samples"]:
+        if s.get("review_attempted") is True:
+            p_len = s.get("prompt_chars")
+            c_len = s.get("context_chars")
+            if isinstance(p_len, int):
+                total_prompt_chars += p_len
+                samples_with_chars += 1
+            if isinstance(c_len, int):
+                total_context_chars += c_len
+
+            toks = s.get("tokens")
+            if isinstance(toks, dict):
+                inp = toks.get("input_tokens") if toks.get("input_tokens") is not None else toks.get("prompt_tokens")
+                out = toks.get("output_tokens") if toks.get("output_tokens") is not None else toks.get("completion_tokens")
+                thk = toks.get("thinking_tokens") if toks.get("thinking_tokens") is not None else toks.get("reasoning_tokens")
+                tot = toks.get("total_tokens")
+
+                val_map = {
+                    "input_tokens": inp,
+                    "output_tokens": out,
+                    "thinking_tokens": thk,
+                    "total_tokens": tot,
+                }
+                for k, v in val_map.items():
+                    if isinstance(v, (int, float)):
+                        token_stats[k]["sum"] += int(v)
+                        token_stats[k]["count"] += 1
+
+    token_details = {}
+    formatted_tokens = {}
+
+    for k in token_metrics:
+        c = token_stats[k]["count"]
+        s = token_stats[k]["sum"]
+        if review_attempts == 0 or c == 0:
+            formatted_tokens[k] = "未知"
+            token_details[k] = {"raw_sum": None, "count": 0, "total_samples": review_attempts, "is_complete": False}
+        elif c == review_attempts:
+            formatted_tokens[k] = s
+            token_details[k] = {"raw_sum": s, "count": c, "total_samples": review_attempts, "is_complete": True}
+        else:
+            formatted_tokens[k] = f"{s} (已知部分合计: {c}/{review_attempts} 样本)"
+            token_details[k] = {"raw_sum": s, "count": c, "total_samples": review_attempts, "is_complete": False}
+
+    avg_review_ms = round(execution_summary["total_review_time_ms"] / review_attempts, 2) if review_attempts > 0 else None
+
+    usage_summary = {
+        "total_review_time_ms": execution_summary["total_review_time_ms"],
+        "avg_review_time_ms": avg_review_ms,
+        "tokens_available": bool(review_attempts > 0 and any(token_stats[k]["count"] > 0 for k in token_metrics)),
+        "input_tokens": formatted_tokens["input_tokens"],
+        "output_tokens": formatted_tokens["output_tokens"],
+        "thinking_tokens": formatted_tokens["thinking_tokens"],
+        "total_tokens": formatted_tokens["total_tokens"],
+        "token_details": token_details,
+        "avg_prompt_chars": round(total_prompt_chars / max(samples_with_chars, 1), 1) if samples_with_chars > 0 else 0.0,
+        "avg_context_chars": round(total_context_chars / max(samples_with_chars, 1), 1) if samples_with_chars > 0 else 0.0,
+    }
+    execution_summary["usage_summary"] = usage_summary
+    execution_summary["agent_identity"] = agent_info
 
     # Step 3: Call ReviewBench official judge
     results_file = scoring_dir / "results.json"
@@ -246,6 +500,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     print(f"\n--> Invoking official ReviewBench judge ({provider}/{model_id})...")
     judge_success = False
+    t_judge_start = time.time()
     try:
         proc = subprocess.run(
             judge_cmd,
@@ -262,6 +517,12 @@ def cmd_run(args: argparse.Namespace) -> int:
             print(f"    Judge stderr:\n{proc.stderr[:1000]}")
     except Exception as exc:
         print(f"    ⚠ Could not invoke ReviewBench judge: {exc}")
+    t_judge_end = time.time()
+    judge_elapsed_seconds = round(t_judge_end - t_judge_start, 2)
+    execution_summary["judge_elapsed_seconds"] = judge_elapsed_seconds
+    total_e2e_elapsed_seconds = round(t_judge_end - t_start, 2)
+    execution_summary["elapsed_seconds"] = total_e2e_elapsed_seconds
+    execution_summary["total_e2e_elapsed_seconds"] = total_e2e_elapsed_seconds
 
     # Step 4: Load results and generate Chinese report
     results_raw = {}
@@ -288,33 +549,51 @@ def cmd_run(args: argparse.Namespace) -> int:
     # 3. required metrics are complete and valid
     is_run_successful = bool(judge_success and results_parse_ok and extracted_metrics is not None)
 
+    version_info = {
+        "code_sha": subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip() or "HEAD",
+        "agent_config": f"{agent_name} ({config_path.name})",
+        "context_mode": context_mode,
+        "context_budget_chars": context_budget_chars,
+        "timeout_seconds": timeout_sec,
+        "system_prompt_fingerprint": system_prompt_fingerprint,
+        "golden_fingerprint": golden_fingerprint,
+        "agent_identity": agent_info,
+        "judge_config": f"{provider}/{model_id}",
+        "scorer_sha": actual_scorer_sha,
+        "cost_usd": "未知 (直连 API)",
+    }
+
     if is_run_successful:
         # Wrap results with explicit status="completed" and normalized metrics for downstream compare
         results_json = dict(results_raw)
         results_json["status"] = "completed"
         results_json["metrics"] = extracted_metrics
-        results_file.write_text(json.dumps(results_json, indent=2, ensure_ascii=False), encoding="utf-8")
     else:
         results_json = {
             "metrics": None,
             "status": "judge_failed",
             "error": "ReviewBench official judge did not complete successfully or produce valid required metrics.",
         }
-        results_file.write_text(json.dumps(results_json, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    results_json["execution_summary"] = execution_summary
+    results_json["execution_config"] = execution_config
+    results_json["usage_summary"] = usage_summary
+    results_json["agent_identity"] = agent_info
+    results_json["golden_fingerprint"] = golden_fingerprint
+    results_json["version_info"] = version_info
+    results_json["judge_config"] = f"{provider}/{model_id}"
+    results_json["scorer_sha"] = actual_scorer_sha
+    results_json["context_config"] = {
+        "context_mode": context_mode,
+        "context_budget_chars": context_budget_chars,
+    }
+    results_file.write_text(json.dumps(results_json, indent=2, ensure_ascii=False), encoding="utf-8")
 
     # Mirror results.json to top-level output for standard CLI contract
     top_results_file = output_dir / "results.json"
     top_results_file.write_text(json.dumps(results_json, indent=2, ensure_ascii=False), encoding="utf-8")
 
     # Build report.md
-    version_info = {
-        "code_sha": subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip() or "HEAD",
-        "agent_config": f"{agent_name} ({config_path.name})",
-        "judge_config": f"{provider}/{model_id}",
-        "scorer_sha": actual_scorer_sha,
-        "cost_usd": "未知 (直连 API)",
-    }
-
     report_md = generate_chinese_report(
         results_json=results_json,
         details_json=details_json,
@@ -380,6 +659,8 @@ def cmd_review(args: argparse.Namespace) -> int:
             shadow_agent=args.shadow_agent,
             shadow_mode=shadow_mode,
             timeout_seconds=args.timeout,
+            context_mode=args.context_mode,
+            context_budget_chars=args.context_budget,
         )
     elif args.base:
         head = args.head or "HEAD"
@@ -392,6 +673,8 @@ def cmd_review(args: argparse.Namespace) -> int:
             shadow_agent=args.shadow_agent,
             shadow_mode=shadow_mode,
             timeout_seconds=args.timeout,
+            context_mode=args.context_mode,
+            context_budget_chars=args.context_budget,
         )
     else:
         print("Error: either --diff <file> or --base <ref> must be provided", file=sys.stderr)
@@ -461,6 +744,8 @@ def main() -> None:
     review_parser.add_argument("--shadow-agent", default=None, help="Shadow reviewer agent (default: rule-contract-context-v1 or agy)")
     review_parser.add_argument("--title", default=None, help="PR or commit title")
     review_parser.add_argument("--body", default=None, help="PR or commit description")
+    review_parser.add_argument("--context-mode", choices=["diff_only", "existing_four_tier"], default="existing_four_tier", help="Context assembly mode: diff_only or existing_four_tier (default: existing_four_tier)")
+    review_parser.add_argument("--context-budget", type=int, default=35000, help="Context budget in characters (default: 35000)")
     review_parser.add_argument("--timeout", type=int, default=180, help="Timeout in seconds")
     review_parser.add_argument("--output", default=None, help="Output JSON path for findings")
 
