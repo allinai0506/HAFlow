@@ -713,14 +713,16 @@ def run_agent_review(
     eff_mode, eff_budget = validate_context_config(req_mode, req_budget)
     base_diff, changed_files = extract_base_diff(diff_content, eff_budget)
 
-    prompt = (
-        f"{system_prompt or 'You are reviewing a Pull Request.'}\n\n"
+    eff_rule_sys_prompt = system_prompt if system_prompt is not None else DEFAULT_RULE_SYSTEM_PROMPT
+    rule_prefix = (
+        f"{eff_rule_sys_prompt}\n\n"
         f"PR Title: {pr_info.get('title', '')}\n"
         f"PR Description: {pr_info.get('body', '')}\n\n"
         "Here is the git diff for this PR:\n"
         "```diff\n"
-        f"{base_diff}\n"
-        "```\n\n"
+    )
+    rule_suffix = (
+        "\n```\n\n"
         "Please review this diff for bugs, regressions, logic flaws, and architectural defects.\n"
         "Output ONLY a JSON array of findings with schema:\n"
         "[\n"
@@ -733,6 +735,9 @@ def run_agent_review(
         "]\n"
         "If no defects are found, output `[]`."
     )
+    prompt = f"{rule_prefix}{base_diff}{rule_suffix}"
+    rule_common_prompt = f"{rule_prefix}<COMMON_CONTEXT_PLACEHOLDER>{rule_suffix}"
+    common_prompt_fingerprint = hashlib.sha256(rule_common_prompt.encode("utf-8")).hexdigest()
 
     t0 = time.time()
     if agent_name in ("mock", "rule", "rule-contract-v1", "rule-contract-context-v1"):
@@ -912,6 +917,7 @@ def run_agent_review(
             "prompt_meta": {
                 "prompt_chars": prompt_chars,
                 "prompt_fingerprint": prompt_fingerprint,
+                "common_prompt_fingerprint": common_prompt_fingerprint,
             },
             "context_meta": {
                 "requested_context_mode": eff_mode,
@@ -927,6 +933,7 @@ def run_agent_review(
         if audit_info:
             audit_info["prompt_chars"] = prompt_chars
             audit_info["prompt_fingerprint"] = prompt_fingerprint
+            audit_info["common_prompt_fingerprint"] = common_prompt_fingerprint
             audit_info["context_chars"] = context_chars
             audit_info["context_fingerprint"] = context_fingerprint
             res["audit"] = audit_info
@@ -1004,14 +1011,20 @@ def run_agent_review(
                 "base_diff_size": len(base_diff),
             }
 
-    prompt = (
-        f"{system_prompt or 'You are reviewing a Pull Request. Evaluate strictly based on the provided git diff and assembled repository context below. Do not use external tools, run commands, or inspect the local filesystem.'}\n\n"
+    eff_llm_sys_prompt = system_prompt or (
+        "You are reviewing a Pull Request. Evaluate strictly based on the provided git diff "
+        "and assembled repository context below. Do not use external tools, run commands, "
+        "or inspect the local filesystem."
+    )
+    llm_prefix = (
+        f"{eff_llm_sys_prompt}\n\n"
         f"PR Title: {pr_info.get('title', '')}\n"
         f"PR Description: {pr_info.get('body', '')}\n\n"
         "Here is the git diff and assembled repository context for this PR:\n"
         "```diff\n"
-        f"{effective_content}\n"
-        "```\n\n"
+    )
+    llm_suffix = (
+        "\n```\n\n"
         "Please review this diff and context for bugs, regressions, contract violations, logic flaws, and architectural defects.\n"
         "Output ONLY a JSON array of findings with schema:\n"
         "[\n"
@@ -1024,6 +1037,9 @@ def run_agent_review(
         "]\n"
         "If no defects are found, output `[]`."
     )
+    prompt = f"{llm_prefix}{effective_content}{llm_suffix}"
+    llm_common_prompt = f"{llm_prefix}<COMMON_CONTEXT_PLACEHOLDER>{llm_suffix}"
+    common_prompt_fingerprint = hashlib.sha256(llm_common_prompt.encode("utf-8")).hexdigest()
 
     prompt_chars = len(prompt)
     prompt_fingerprint = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
@@ -1033,6 +1049,7 @@ def run_agent_review(
     if audit_info:
         audit_info["prompt_chars"] = prompt_chars
         audit_info["prompt_fingerprint"] = prompt_fingerprint
+        audit_info["common_prompt_fingerprint"] = common_prompt_fingerprint
         audit_info["context_chars"] = context_chars
         audit_info["context_fingerprint"] = context_fingerprint
 
@@ -1177,6 +1194,7 @@ def run_agent_review(
         err.tokens = token_usage
         err.runtime_model = runtime_model
         err.agent_identity = sample_agent_identity
+        err.common_prompt_fingerprint = common_prompt_fingerprint
         raise err from exc
 
     # Reviewer Finding Verification V1: Fact-check candidate findings
@@ -1222,6 +1240,7 @@ def run_agent_review(
         "prompt_meta": {
             "prompt_chars": prompt_chars,
             "prompt_fingerprint": prompt_fingerprint,
+            "common_prompt_fingerprint": common_prompt_fingerprint,
         },
         "context_meta": {
             "requested_context_mode": requested_context_mode,
@@ -2006,6 +2025,36 @@ def generate_chinese_report(
     return "\n".join(lines)
 
 
+def compute_golden_fingerprint(golden_dir: Optional[Union[str, Path]]) -> Optional[str]:
+    """Compute SHA-256 fingerprint over all JSON files in golden directory.
+
+    Sorts JSON files by relative path (forward-slash normalized).
+    Hashes relative path and file content.
+    Independent of directory path, absolute locations, and file modification times.
+    """
+    if golden_dir is None:
+        return None
+    p_dir = Path(golden_dir).resolve()
+    if not p_dir.exists() or not p_dir.is_dir():
+        return None
+
+    json_files = sorted(
+        [p for p in p_dir.rglob("*.json") if p.is_file()],
+        key=lambda p: str(p.relative_to(p_dir)).replace("\\", "/"),
+    )
+    if not json_files:
+        return None
+
+    hasher = hashlib.sha256()
+    for f in json_files:
+        rel_path = str(f.relative_to(p_dir)).replace("\\", "/")
+        hasher.update(rel_path.encode("utf-8"))
+        hasher.update(b"\0")
+        hasher.update(f.read_bytes())
+        hasher.update(b"\0")
+    return hasher.hexdigest()
+
+
 def check_benchmark_comparability(
     before_results: Dict[str, Any],
     after_results: Dict[str, Any],
@@ -2052,6 +2101,18 @@ def check_benchmark_comparability(
     # 3. CLI Version & Agent Execution Params (Effort & Permissions)
     b_cli = b_agent.get("cli_version")
     a_cli = a_agent.get("cli_version")
+    is_b_rule = b_agent_name in ("mock", "rule", "rule-contract-v1", "rule-contract-context-v1") or b_cli in ("internal-rule", "N/A")
+    is_a_rule = a_agent_name in ("mock", "rule", "rule-contract-v1", "rule-contract-context-v1") or a_cli in ("internal-rule", "N/A")
+
+    if not is_b_rule and (not b_cli or str(b_cli).strip() in ("", "unknown")):
+        discrepancies.append(
+            f"基线评审 Agent 使用外部 CLI 但缺少有效 CLI 版本证据 ('{b_cli}')，无法确认执行环境一致。"
+        )
+    if not is_a_rule and (not a_cli or str(a_cli).strip() in ("", "unknown")):
+        discrepancies.append(
+            f"改进版评审 Agent 使用外部 CLI 但缺少有效 CLI 版本证据 ('{a_cli}')，无法确认执行环境一致。"
+        )
+
     if b_cli and a_cli and b_cli != "unknown" and a_cli != "unknown" and b_cli != "internal-rule" and a_cli != "internal-rule" and b_cli != a_cli:
         discrepancies.append(f"CLI 版本不一致 (基线: '{b_cli}', 改进版: '{a_cli}')。")
 
@@ -2161,6 +2222,13 @@ def check_benchmark_comparability(
                 elif b_diff_fp != a_diff_fp:
                     discrepancies.append(f"案例 {k} 的基础 diff 内容指纹不一致。")
 
+                b_prompt_fp = bs.get("common_prompt_fingerprint")
+                a_prompt_fp = as_.get("common_prompt_fingerprint")
+                if not b_prompt_fp or not a_prompt_fp:
+                    discrepancies.append(f"案例 {k} 缺少共同提示词指纹记录，无法确认提示词输入一致。")
+                elif b_prompt_fp != a_prompt_fp:
+                    discrepancies.append(f"案例 {k} 的共同提示词指纹不一致 (PR 标题/正文或提示词模板存在差异)。")
+
     # 9. Planned, Completed, Failed Sample Counts (Denominator Verification)
     b_plan = b_exec.get("total_planned")
     a_plan = a_exec.get("total_planned")
@@ -2200,6 +2268,14 @@ def check_benchmark_comparability(
         discrepancies.append("评分器版本缺失，无法确认同评分器版本。")
     elif b_scorer != a_scorer:
         discrepancies.append(f"评分器版本不一致 (基线: '{b_scorer[:8]}', 改进版: '{a_scorer[:8]}')。")
+
+    # 12. Golden Content Fingerprint
+    b_golden_fp = before_results.get("golden_fingerprint") or b_version.get("golden_fingerprint")
+    a_golden_fp = after_results.get("golden_fingerprint") or a_version.get("golden_fingerprint")
+    if not b_golden_fp or not a_golden_fp:
+        discrepancies.append("缺少评测裁判黄金标准 (golden) 内容指纹记录，无法确认评分标准一致。")
+    elif b_golden_fp != a_golden_fp:
+        discrepancies.append("评测裁判黄金标准 (golden) 内容指纹不一致。")
 
     return (len(discrepancies) == 0, discrepancies)
 
@@ -2310,6 +2386,8 @@ def compare_benchmarks(
     a_judge = after_res.get("judge_config") or a_version.get("judge_config", "未知")
     b_scorer = before_res.get("scorer_sha") or b_version.get("scorer_sha", "未知")
     a_scorer = after_res.get("scorer_sha") or a_version.get("scorer_sha", "未知")
+    b_golden_fp = before_res.get("golden_fingerprint") or b_version.get("golden_fingerprint", "未知")
+    a_golden_fp = after_res.get("golden_fingerprint") or a_version.get("golden_fingerprint", "未知")
 
     def _val_diff(bv: Any, av: Any, unit: str = "") -> Tuple[str, str, str]:
         if isinstance(bv, (int, float)) and isinstance(av, (int, float)):
@@ -2394,6 +2472,7 @@ def compare_benchmarks(
         f"| 降级案例数 | {b_fall} | {a_fall} | {'✓ 无降级' if b_fall == 0 and a_fall == 0 else f'⚠ 包含降级 ({b_fall} / {a_fall})'} |",
         f"| 裁判模型配置 | `{b_judge}` | `{a_judge}` | {'✓ 一致' if b_judge == a_judge and b_judge != '未知' else '⚠ 存在差异'} |",
         f"| 评分器版本 SHA | `{str(b_scorer)[:8]}` | `{str(a_scorer)[:8]}` | {'✓ 一致' if b_scorer == a_scorer and b_scorer != '未知' else '⚠ 存在差异'} |",
+        f"| Golden 标准指纹 | `{str(b_golden_fp)[:8]}` | `{str(a_golden_fp)[:8]}` | {'✓ 一致' if b_golden_fp == a_golden_fp and b_golden_fp != '未知' else '⚠ 存在差异或缺失'} |",
         "",
     ]
 

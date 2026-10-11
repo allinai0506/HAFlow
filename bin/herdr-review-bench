@@ -30,6 +30,7 @@ from herdr.review_benchmark import (
     VALID_CONTEXT_MODES,
     aggregate_group_agent_identity,
     compare_benchmarks,
+    compute_golden_fingerprint,
     extract_and_validate_metrics,
     extract_base_diff,
     generate_chinese_report,
@@ -159,6 +160,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     if not golden_dir.is_absolute():
         golden_dir = (HERDR_ROOT / golden_dir).resolve()
 
+    golden_fingerprint = compute_golden_fingerprint(golden_dir)
+
     if not manifest_path.exists():
         print(f"Error: manifest file not found: {manifest_path}", file=sys.stderr)
         return 1
@@ -174,10 +177,10 @@ def cmd_run(args: argparse.Namespace) -> int:
     timeout_sec = int(review_cfg.get("timeout_seconds", 300))
 
     # 1. Context mode configuration & fail-fast validation before execution
-    context_mode = review_cfg.get("context_mode", DEFAULT_CONTEXT_MODE)
-    context_budget_chars = int(review_cfg.get("context_budget_chars", DEFAULT_CONTEXT_BUDGET_CHARS))
+    raw_context_mode = review_cfg.get("context_mode")
+    raw_budget = review_cfg.get("context_budget_chars")
     try:
-        context_mode, context_budget_chars = validate_context_config(context_mode, context_budget_chars)
+        context_mode, context_budget_chars = validate_context_config(raw_context_mode, raw_budget)
     except ValueError as ve:
         print(f"Error: Invalid review context configuration: {ve}", file=sys.stderr)
         return 1
@@ -342,6 +345,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                 "fallback_reason": c_meta.get("fallback_reason"),
                 "prompt_chars": candidate_output.get("prompt_meta", {}).get("prompt_chars"),
                 "prompt_fingerprint": candidate_output.get("prompt_meta", {}).get("prompt_fingerprint"),
+                "common_prompt_fingerprint": candidate_output.get("prompt_meta", {}).get("common_prompt_fingerprint"),
                 "context_chars": c_meta.get("context_chars"),
                 "context_fingerprint": c_meta.get("context_fingerprint"),
                 "base_diff_chars": c_meta.get("base_diff_chars", len(base_diff)),
@@ -385,6 +389,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                 "requested_context_mode": context_mode,
                 "base_diff_chars": len(base_diff),
                 "base_diff_fingerprint": base_diff_fp,
+                "common_prompt_fingerprint": getattr(rev_exc, "common_prompt_fingerprint", None),
                 "agent_identity": sample_agent_id,
                 "time_in_ms": review_ms,
                 "tokens": sample_toks,
@@ -551,6 +556,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         "context_budget_chars": context_budget_chars,
         "timeout_seconds": timeout_sec,
         "system_prompt_fingerprint": system_prompt_fingerprint,
+        "golden_fingerprint": golden_fingerprint,
         "agent_identity": agent_info,
         "judge_config": f"{provider}/{model_id}",
         "scorer_sha": actual_scorer_sha,
@@ -573,6 +579,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     results_json["execution_config"] = execution_config
     results_json["usage_summary"] = usage_summary
     results_json["agent_identity"] = agent_info
+    results_json["golden_fingerprint"] = golden_fingerprint
     results_json["version_info"] = version_info
     results_json["judge_config"] = f"{provider}/{model_id}"
     results_json["scorer_sha"] = actual_scorer_sha

@@ -32,6 +32,7 @@ from herdr.review_benchmark import (
     aggregate_group_agent_identity,
     check_benchmark_comparability,
     compare_benchmarks,
+    compute_golden_fingerprint,
     extract_and_validate_metrics,
     extract_base_diff,
     extract_findings_from_response,
@@ -869,6 +870,7 @@ class TestReviewBenchContextModes(unittest.TestCase):
         # Baseline run
         base_run = {
             "status": "completed",
+            "golden_fingerprint": "golden_fp_default",
             "context_config": {"context_mode": "diff_only", "context_budget_chars": 35000},
             "judge_config": "deepseek/deepseek-v4-flash",
             "scorer_sha": "e1cb1a0dad8105ebea45caa00c194eaf2d2e7b5d",
@@ -898,6 +900,7 @@ class TestReviewBenchContextModes(unittest.TestCase):
                         "head": "b" * 40,
                         "base_diff_chars": 1000,
                         "base_diff_fingerprint": "fp_diff_1",
+                        "common_prompt_fingerprint": "prompt_fp_default",
                     }
                 ],
             },
@@ -912,6 +915,7 @@ class TestReviewBenchContextModes(unittest.TestCase):
             "version_info": {
                 "judge_config": "deepseek/deepseek-v4-flash",
                 "scorer_sha": "e1cb1a0dad8105ebea45caa00c194eaf2d2e7b5d",
+                "golden_fingerprint": "golden_fp_default",
             },
             "metrics": {
                 "overall": {
@@ -1053,6 +1057,7 @@ class TestReviewBenchContextModes(unittest.TestCase):
         """Test PR keys mismatch, partial failures, effort difference, same context mode, budget and judge/scorer verification."""
         base_run = {
             "status": "completed",
+            "golden_fingerprint": "golden_fp_default",
             "context_config": {"context_mode": "diff_only", "context_budget_chars": 35000},
             "judge_config": "deepseek/deepseek-v4-flash",
             "scorer_sha": "e1cb1a0dad8105ebea45caa00c194eaf2d2e7b5d",
@@ -1062,6 +1067,11 @@ class TestReviewBenchContextModes(unittest.TestCase):
                 "system_prompt_fingerprint": "hash_sp_default",
                 "context_budget_chars": 35000,
                 "context_mode": "diff_only",
+            },
+            "version_info": {
+                "judge_config": "deepseek/deepseek-v4-flash",
+                "scorer_sha": "e1cb1a0dad8105ebea45caa00c194eaf2d2e7b5d",
+                "golden_fingerprint": "golden_fp_default",
             },
             "execution_summary": {
                 "total_planned": 2,
@@ -1076,8 +1086,8 @@ class TestReviewBenchContextModes(unittest.TestCase):
                     "details": {"effort": "low"},
                 },
                 "samples": [
-                    {"key": "pr_1", "base": "aaa", "head": "bbb", "base_diff_chars": 1000, "base_diff_fingerprint": "fp_1"},
-                    {"key": "pr_2", "base": "ccc", "head": "ddd", "base_diff_chars": 2000, "base_diff_fingerprint": "fp_2"},
+                    {"key": "pr_1", "base": "aaa", "head": "bbb", "base_diff_chars": 1000, "base_diff_fingerprint": "fp_1", "common_prompt_fingerprint": "pfp_1"},
+                    {"key": "pr_2", "base": "ccc", "head": "ddd", "base_diff_chars": 2000, "base_diff_fingerprint": "fp_2", "common_prompt_fingerprint": "pfp_2"},
                 ],
             },
         }
@@ -1189,6 +1199,7 @@ class TestReviewBenchContextModes(unittest.TestCase):
         """Precision drop without recall change is not 'quality parity'; opposite recall/precision shifts are reported as trade-off."""
         base_run = {
             "status": "completed",
+            "golden_fingerprint": "golden_fp_default",
             "context_config": {"context_mode": "diff_only", "context_budget_chars": 35000},
             "judge_config": "deepseek/deepseek-v4-flash",
             "scorer_sha": "e1cb1a0dad8105ebea45caa00c194eaf2d2e7b5d",
@@ -1199,12 +1210,17 @@ class TestReviewBenchContextModes(unittest.TestCase):
                 "context_budget_chars": 35000,
                 "context_mode": "diff_only",
             },
+            "version_info": {
+                "judge_config": "deepseek/deepseek-v4-flash",
+                "scorer_sha": "e1cb1a0dad8105ebea45caa00c194eaf2d2e7b5d",
+                "golden_fingerprint": "golden_fp_default",
+            },
             "execution_summary": {
                 "total_planned": 1,
                 "completed": 1,
                 "failed": 0,
                 "fallback_count": 0,
-                "agent_identity": {"agent": "agy", "model_name": "gemini", "model_confirmed": True},
+                "agent_identity": {"agent": "agy", "model_name": "gemini", "model_confirmed": True, "cli_version": "1.3.3"},
                 "samples": [
                     {
                         "key": "1",
@@ -1212,6 +1228,7 @@ class TestReviewBenchContextModes(unittest.TestCase):
                         "head": "b" * 40,
                         "base_diff_chars": 100,
                         "base_diff_fingerprint": "fp_diff_1",
+                        "common_prompt_fingerprint": "pfp_1",
                     }
                 ],
             },
@@ -1332,6 +1349,7 @@ class TestReviewBenchContextModes(unittest.TestCase):
 
         base_run = {
             "status": "completed",
+            "golden_fingerprint": "golden_fp_default",
             "context_config": {"context_mode": "diff_only", "context_budget_chars": 35000},
             "judge_config": "deepseek/deepseek-v4-flash",
             "scorer_sha": "e1cb1a0dad8105ebea45caa00c194eaf2d2e7b5d",
@@ -1342,12 +1360,17 @@ class TestReviewBenchContextModes(unittest.TestCase):
                 "context_budget_chars": 35000,
                 "context_mode": "diff_only",
             },
+            "version_info": {
+                "judge_config": "deepseek/deepseek-v4-flash",
+                "scorer_sha": "e1cb1a0dad8105ebea45caa00c194eaf2d2e7b5d",
+                "golden_fingerprint": "golden_fp_default",
+            },
             "execution_summary": {
                 "total_planned": 1,
                 "completed": 1,
                 "failed": 0,
                 "fallback_count": 0,
-                "agent_identity": {"agent": "agy", "model_name": "gemini", "model_confirmed": True},
+                "agent_identity": {"agent": "agy", "model_name": "gemini", "model_confirmed": True, "cli_version": "1.3.3"},
                 "samples": [
                     {
                         "key": "1",
@@ -1355,6 +1378,7 @@ class TestReviewBenchContextModes(unittest.TestCase):
                         "head": "b" * 40,
                         "base_diff_chars": 100,
                         "base_diff_fingerprint": "fp_diff_1",
+                        "common_prompt_fingerprint": "pfp_1",
                     }
                 ],
             },
@@ -1402,6 +1426,7 @@ class TestReviewBenchContextModes(unittest.TestCase):
             "context_config": {"context_mode": "diff_only", "context_budget_chars": 35000},
             "judge_config": "deepseek/deepseek-v4-flash",
             "scorer_sha": "e1cb1a0dad8105ebea45caa00c194eaf2d2e7b5d",
+            "golden_fingerprint": "golden_fp_default",
             "execution_config": {
                 "timeout_seconds": 300,
                 "system_prompt": "Check only security.",
@@ -1428,12 +1453,14 @@ class TestReviewBenchContextModes(unittest.TestCase):
                         "head": "b" * 40,
                         "base_diff_chars": 1000,
                         "base_diff_fingerprint": "fp_diff_123",
+                        "common_prompt_fingerprint": "pfp_123",
                     }
                 ],
             },
             "version_info": {
                 "judge_config": "deepseek/deepseek-v4-flash",
                 "scorer_sha": "e1cb1a0dad8105ebea45caa00c194eaf2d2e7b5d",
+                "golden_fingerprint": "golden_fp_default",
             },
             "metrics": {
                 "overall": {
@@ -1985,6 +2012,335 @@ review:
             res_c = json.loads((out_c / "results.json").read_text(encoding="utf-8"))
             self.assertFalse(res_c["agent_identity"]["model_confirmed"])
             self.assertIn(res_c["agent_identity"]["details"]["source"], ("runtime_drift", "runtime_mismatch"))
+
+
+class TestAcceptanceComparabilityAndBudgetTables(unittest.TestCase):
+    """Fixed acceptance tests for PR #197 closeout: Comparability omissions & Budget type validation."""
+
+    @classmethod
+    def setUpClass(cls):
+        from importlib.machinery import SourceFileLoader
+        import importlib.util
+        hrb_path = HERDR_ROOT / "bin" / "herdr-review-bench"
+        loader = SourceFileLoader("hrb_acc_tests", str(hrb_path))
+        spec = importlib.util.spec_from_loader("hrb_acc_tests", loader)
+        cls.hrb = importlib.util.module_from_spec(spec)
+        loader.exec_module(cls.hrb)
+
+    def _run_cmd(self, config_file: Path, output_dir: Path, judge_metrics: Optional[Dict[str, Any]] = None) -> int:
+        import argparse
+        import unittest.mock
+
+        metrics = judge_metrics or {
+            "overall": {
+                "grounded_recall": 0.5,
+                "grounded_precision": 0.8,
+                "augmented_recall": 0.5,
+                "augmented_precision": 0.8,
+            }
+        }
+
+        orig_sp_run = subprocess.run
+
+        def mock_subprocess_run(cmd, *args, **kwargs):
+            if isinstance(cmd, list) and len(cmd) > 2 and cmd[0] == "npm" and cmd[1] == "run" and cmd[2] == "judge":
+                out_idx = cmd.index("--output")
+                rf = Path(cmd[out_idx + 1])
+                rf.parent.mkdir(parents=True, exist_ok=True)
+                rf.write_text(json.dumps({"metrics": metrics}), encoding="utf-8")
+                return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="judge success", stderr="")
+            return orig_sp_run(cmd, *args, **kwargs)
+
+        with unittest.mock.patch.object(self.hrb, "find_or_setup_reviewbench", return_value=(output_dir, "e1cb1a0dad8105ebea45caa00c194eaf2d2e7b5d")):
+            with unittest.mock.patch("subprocess.run", side_effect=mock_subprocess_run):
+                args = argparse.Namespace(config=str(config_file), output=str(output_dir))
+                return self.hrb.cmd_run(args)
+
+    def _create_base_and_after_runs(self):
+        golden_fp = "golden_fp_test_123"
+        common_prompt_fp = "prompt_fp_test_abc"
+
+        base_run = {
+            "status": "completed",
+            "golden_fingerprint": golden_fp,
+            "context_config": {"context_mode": "diff_only", "context_budget_chars": 35000},
+            "judge_config": "deepseek/deepseek-v4-flash",
+            "scorer_sha": "e1cb1a0dad8105ebea45caa00c194eaf2d2e7b5d",
+            "execution_config": {
+                "timeout_seconds": 300,
+                "system_prompt": "You are reviewing a Pull Request.",
+                "system_prompt_fingerprint": "hash_sp_default",
+                "context_budget_chars": 35000,
+                "context_mode": "diff_only",
+            },
+            "execution_summary": {
+                "total_planned": 1,
+                "completed": 1,
+                "failed": 0,
+                "fallback_count": 0,
+                "elapsed_seconds": 10.0,
+                "agent_identity": {
+                    "agent": "agy",
+                    "model_name": "gemini-3.8-flash",
+                    "model_confirmed": True,
+                    "cli_version": "1.3.3",
+                    "details": {"effort": "low", "permission_flag": "--sandbox"},
+                },
+                "samples": [
+                    {
+                        "key": "pr_1",
+                        "base": "a" * 40,
+                        "head": "b" * 40,
+                        "base_diff_chars": 1000,
+                        "base_diff_fingerprint": "fp_diff_1",
+                        "common_prompt_fingerprint": common_prompt_fp,
+                    }
+                ],
+            },
+            "usage_summary": {
+                "total_review_time_ms": 8000,
+                "input_tokens": 1200,
+                "output_tokens": 400,
+                "total_tokens": 1600,
+                "avg_prompt_chars": 3500,
+                "avg_context_chars": 2000,
+            },
+            "version_info": {
+                "judge_config": "deepseek/deepseek-v4-flash",
+                "scorer_sha": "e1cb1a0dad8105ebea45caa00c194eaf2d2e7b5d",
+                "golden_fingerprint": golden_fp,
+            },
+            "metrics": {
+                "overall": {
+                    "grounded_recall": 0.50,
+                    "grounded_precision": 0.60,
+                    "augmented_recall": 0.50,
+                    "augmented_precision": 0.60,
+                }
+            },
+        }
+
+        after_run = json.loads(json.dumps(base_run))
+        after_run["context_config"]["context_mode"] = "existing_four_tier"
+        after_run["usage_summary"]["total_review_time_ms"] = 12000
+        after_run["usage_summary"]["input_tokens"] = 3500
+        after_run["usage_summary"]["total_tokens"] = 3900
+        after_run["metrics"]["overall"]["grounded_recall"] = 0.75
+
+        return base_run, after_run
+
+    # --- Section IV.A: Comparability Acceptance Table ---
+
+    def test_table_a_1_valid_baseline_control_comparable(self):
+        """A.1 有效基准对照：严格可比成立。"""
+        base_run, after_run = self._create_base_and_after_runs()
+        is_comp, disc = check_benchmark_comparability(base_run, after_run)
+        self.assertTrue(is_comp, f"Expected comparable, got: {disc}")
+        self.assertEqual(len(disc), 0)
+
+    def test_table_a_2_divergent_pr_title_blocked(self):
+        """A.2 仅改变 PR title：不可比，报告共同提示词差异。"""
+        base_run, after_run = self._create_base_and_after_runs()
+        after_run["execution_summary"]["samples"][0]["common_prompt_fingerprint"] = "prompt_fp_different_title"
+        is_comp, disc = check_benchmark_comparability(base_run, after_run)
+        self.assertFalse(is_comp, "Divergent PR title must fail comparability")
+        self.assertTrue(any("共同提示词" in d for d in disc), f"Expected '共同提示词' in discrepancies: {disc}")
+
+    def test_table_a_3_divergent_pr_body_blocked(self):
+        """A.3 仅改变 PR body：不可比，报告共同提示词差异。"""
+        base_run, after_run = self._create_base_and_after_runs()
+        after_run["execution_summary"]["samples"][0]["common_prompt_fingerprint"] = "prompt_fp_different_body"
+        is_comp, disc = check_benchmark_comparability(base_run, after_run)
+        self.assertFalse(is_comp, "Divergent PR body must fail comparability")
+        self.assertTrue(any("共同提示词" in d for d in disc), f"Expected '共同提示词' in discrepancies: {disc}")
+
+    def test_table_a_4_divergent_golden_finding_blocked(self):
+        """A.4 仅改变某 golden 缺陷条目：不可比，报告 golden 内容差异。"""
+        base_run, after_run = self._create_base_and_after_runs()
+        after_run["golden_fingerprint"] = "diff_golden_fp"
+        after_run["version_info"]["golden_fingerprint"] = "diff_golden_fp"
+        is_comp, disc = check_benchmark_comparability(base_run, after_run)
+        self.assertFalse(is_comp, "Divergent golden content must fail comparability")
+        self.assertTrue(any("golden" in d.lower() or "黄金标准" in d for d in disc), f"Expected golden in discrepancies: {disc}")
+
+    def test_table_a_5_cli_version_unknown_blocked(self):
+        """A.5 CLI 版本为 unknown：不可比，报告缺少 CLI 版本有效证据。"""
+        base_run, after_run = self._create_base_and_after_runs()
+        after_run["execution_summary"]["agent_identity"]["cli_version"] = "unknown"
+        is_comp, disc = check_benchmark_comparability(base_run, after_run)
+        self.assertFalse(is_comp, "Unknown CLI version for external reviewer must fail strict comparability")
+        self.assertTrue(any("cli" in d.lower() or "版本" in d for d in disc), f"Expected CLI version discrepancy: {disc}")
+
+    def test_table_a_6_same_golden_in_different_directories(self):
+        """A.6 相同 golden 集合置于不同目录：严格可比成立。"""
+        from herdr.review_benchmark import compute_golden_fingerprint
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            dir1 = tmp / "golden_dir1"
+            dir2 = tmp / "golden_dir2"
+            dir1.mkdir()
+            dir2.mkdir()
+            sample_golden = json.dumps([{"file": "a.py", "line": 1, "message": "bug"}])
+            (dir1 / "item1.json").write_text(sample_golden, encoding="utf-8")
+            (dir2 / "item1.json").write_text(sample_golden, encoding="utf-8")
+
+            fp1 = compute_golden_fingerprint(dir1)
+            fp2 = compute_golden_fingerprint(dir2)
+            self.assertIsNotNone(fp1)
+            self.assertEqual(fp1, fp2)
+
+            base_run, after_run = self._create_base_and_after_runs()
+            base_run["golden_fingerprint"] = fp1
+            base_run["version_info"]["golden_fingerprint"] = fp1
+            after_run["golden_fingerprint"] = fp2
+            after_run["version_info"]["golden_fingerprint"] = fp2
+
+            is_comp, disc = check_benchmark_comparability(base_run, after_run)
+            self.assertTrue(is_comp, f"Expected comparable across same content in diff dirs, got: {disc}")
+
+    def test_table_a_7_old_results_missing_fingerprints_readable_without_strict_attribution(self):
+        """A.7 旧结果缺少新增指纹：可读取，展示数值与差值，不输出严格归因结论。"""
+        base_run, after_run = self._create_base_and_after_runs()
+        # Strip all new fingerprints to simulate legacy results
+        del base_run["golden_fingerprint"]
+        del base_run["version_info"]["golden_fingerprint"]
+        del after_run["golden_fingerprint"]
+        del after_run["version_info"]["golden_fingerprint"]
+        del base_run["execution_summary"]["samples"][0]["common_prompt_fingerprint"]
+        del after_run["execution_summary"]["samples"][0]["common_prompt_fingerprint"]
+
+        is_comp, disc = check_benchmark_comparability(base_run, after_run)
+        self.assertFalse(is_comp, "Old results missing fingerprints must not be strictly comparable")
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            b_dir = tmp / "before"
+            a_dir = tmp / "after"
+            b_dir.mkdir()
+            a_dir.mkdir()
+            (b_dir / "results.json").write_text(json.dumps(base_run), encoding="utf-8")
+            (a_dir / "results.json").write_text(json.dumps(after_run), encoding="utf-8")
+            (b_dir / "report.md").write_text("# Before", encoding="utf-8")
+            (a_dir / "report.md").write_text("# After", encoding="utf-8")
+
+            report = compare_benchmarks(b_dir, a_dir)
+            self.assertIn("50.0%", report)
+            self.assertIn("75.0%", report)
+            self.assertIn("+25.0%", report)
+            self.assertIn("单变量控制警告", report)
+            self.assertNotIn("单变量控制结论", report)
+
+    # --- Section IV.B: Budget Acceptance Table ---
+
+    def test_table_b_1_budget_true_fails_fast(self):
+        """B.1 配置 context_budget_chars: true：受控错误，退出码 1，prep=0，review=0。"""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            cfg = tmp / "cfg.yaml"
+            out = tmp / "out"
+            cfg.write_text("""
+name: test_budget_true
+agent: rule
+benchmark:
+  manifest: tests/fixtures/review_benchmark/corpus/manifest.json
+review:
+  context_mode: diff_only
+  context_budget_chars: true
+""")
+            ret = self._run_cmd(cfg, out)
+            self.assertEqual(ret, 1)
+            self.assertFalse((out / "results.json").exists())
+            self.assertFalse((out / "workspaces").exists())
+
+    def test_table_b_2_budget_float_fails_fast(self):
+        """B.2 配置 context_budget_chars: 1.5：受控错误，退出码 1，prep=0，review=0。"""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            cfg = tmp / "cfg.yaml"
+            out = tmp / "out"
+            cfg.write_text("""
+name: test_budget_float
+agent: rule
+benchmark:
+  manifest: tests/fixtures/review_benchmark/corpus/manifest.json
+review:
+  context_mode: diff_only
+  context_budget_chars: 1.5
+""")
+            ret = self._run_cmd(cfg, out)
+            self.assertEqual(ret, 1)
+            self.assertFalse((out / "results.json").exists())
+            self.assertFalse((out / "workspaces").exists())
+
+    def test_table_b_3_budget_bad_string_fails_fast_without_unhandled_traceback(self):
+        """B.3 配置 context_budget_chars: "bad"：受控错误，退出码 1，无未处理异常。"""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            cfg = tmp / "cfg.yaml"
+            out = tmp / "out"
+            cfg.write_text("""
+name: test_budget_bad
+agent: rule
+benchmark:
+  manifest: tests/fixtures/review_benchmark/corpus/manifest.json
+review:
+  context_mode: diff_only
+  context_budget_chars: "bad"
+""")
+            # Must return 1 without raising unhandled ValueError
+            ret = self._run_cmd(cfg, out)
+            self.assertEqual(ret, 1)
+            self.assertFalse((out / "results.json").exists())
+            self.assertFalse((out / "workspaces").exists())
+
+    def test_table_b_4_budget_35000_succeeds(self):
+        """B.4 配置 context_budget_chars: 35000：正常执行，预算为 35000。"""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            mf = tmp / "manifest.json"
+            with open(HERDR_ROOT / "tests/fixtures/review_benchmark/corpus/manifest.json", encoding="utf-8") as f:
+                mf_data = json.load(f)[:1]
+            mf.write_text(json.dumps(mf_data), encoding="utf-8")
+
+            cfg = tmp / "cfg.yaml"
+            out = tmp / "out"
+            cfg.write_text(f"""
+name: test_budget_35000
+agent: rule
+benchmark:
+  manifest: {mf}
+review:
+  context_mode: diff_only
+  context_budget_chars: 35000
+""")
+            ret = self._run_cmd(cfg, out)
+            self.assertEqual(ret, 0)
+            res = json.loads((out / "results.json").read_text(encoding="utf-8"))
+            self.assertEqual(res["execution_summary"]["context_budget_chars"], 35000)
+
+    def test_table_b_5_budget_unconfigured_uses_default(self):
+        """B.5 不配置该项：正常执行，采用默认预算。"""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            mf = tmp / "manifest.json"
+            with open(HERDR_ROOT / "tests/fixtures/review_benchmark/corpus/manifest.json", encoding="utf-8") as f:
+                mf_data = json.load(f)[:1]
+            mf.write_text(json.dumps(mf_data), encoding="utf-8")
+
+            cfg = tmp / "cfg.yaml"
+            out = tmp / "out"
+            cfg.write_text(f"""
+name: test_budget_default
+agent: rule
+benchmark:
+  manifest: {mf}
+review:
+  context_mode: diff_only
+""")
+            ret = self._run_cmd(cfg, out)
+            self.assertEqual(ret, 0)
+            res = json.loads((out / "results.json").read_text(encoding="utf-8"))
+            self.assertEqual(res["execution_summary"]["context_budget_chars"], DEFAULT_CONTEXT_BUDGET_CHARS)
 
 
 if __name__ == "__main__":
