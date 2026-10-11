@@ -1,0 +1,130 @@
+name: code-craft-v1
+label: 代码工坊与洁净室门禁流程
+version: "1.0"
+description: 单工位 TDD 紧反馈工坊 + 外环洁净室门禁架构 (代码工坊 -> 洁净室测试 / 洁净室评审 -> 收尾)
+
+reverification:
+  version: selective-reverification-v1
+  cleanroom_test:
+    reusable_only_if_changes_within:
+      - "docs/**/*.md"
+  cleanroom_review:
+    reusable_only_if_changes_within: []
+
+selective_replan:
+  version: selective-replan-v1
+  mode: explicit_task_targets
+  retry_node: craft
+
+nodes:
+  - id: craft
+    max_tasks_per_node: 4
+    label: 1代码工坊
+    node_type: agent
+    depends_on: []
+    parallel: false
+    purpose: 单工位闭环研发工坊：在单一工作区内闭环完成需求澄清、测试驱动先行（TDD RED->GREEN->REFACTOR）、自测验证与代码提交，杜绝跨工位频繁握手带来的上下文丢失。
+    default_integration_mode: git
+    default_task_type: feat
+    agent_policy:
+      preferred: [agy, claude, codex, opencode, qodercli, pi, grok, kimi]
+      max_concurrency: 1
+      parallel: false
+      allow_soft_degrade: true
+    required_outputs:
+      - 代码实现
+      - 失败测试与转绿验证记录（RED-GREEN）
+      - 重构自测与修改文件清单
+      - 交付基线核验记录（verify-baseline）
+    rules:
+      - "单工位 TDD 紧反馈工坊：单一工位闭环执行需求澄清、测试驱动（编写失败测试先行 RED -> 最小实现转绿 GREEN -> 局部重构自测 REFACTOR），坚决杜绝在工坊内部拆分子任务开设多个 Pane 制造合并死锁与上下文撕裂。"
+      - "严格限定单 Task / 单 Pane 串行推进（max_concurrency: 1，parallel: false）。"
+      - "严禁随意切换或重命名 Git 分支，修改范围必须严格限制在 Task 目标内，以 verify-baseline 为准。"
+      - "开启柔性降级（allow_soft_degrade: true）：在工位候选 Agent 受限时支持安全降级，保障单工位研发畅通。"
+      - "创建 Task 时默认使用 --agent auto，由 Agent Router 结合节点策略与可用 Agent 动态路由。"
+
+  - id: cleanroom_test
+    max_tasks_per_node: 4
+    label: 2洁净室测试
+    node_type: agent
+    depends_on: [craft]
+    parallel: false
+    purpose: 外环洁净室黑盒独立测试门禁：由独立工位运行全量测试套件与异常边界，客观检验候选版本正确性。与洁净室评审并行就绪，验证同一冻结 candidate_sha。
+    default_integration_mode: none
+    default_task_type: test
+    agent_policy:
+      preferred: [codex, opencode, qodercli, claude, agy, pi, grok, kimi]
+      max_concurrency: 1
+      parallel: false
+      exclude_stage_agents: [craft]
+      allow_soft_degrade: true
+    required_outputs:
+      - 测试执行记录
+      - 缺陷清单
+      - 回归测试结果
+      - 极端边界条件核验情况
+      - 门禁测试结论（PASS / FAIL）
+    rules:
+      - "单工位独立黑盒测试（严格限定 1 个 Task / 1 个 Pane）。"
+      - "跨阶段 Agent 隔离与柔性降级：优先排除工坊阶段（craft）Agent 独立执行，杜绝自证自清；当排除后候选池耗尽时支持柔性降级复用并记录审计证据，严禁抛出致命异常阻断流水线。"
+      - "以客观验证为主，严禁直接修改业务代码；发现缺陷提报明确缺陷清单与复现步骤。"
+      - "必须覆盖极端边界与全量回归套件，针对冻结候选版本进行验证。"
+      - "创建 Task 时默认使用 --agent auto。"
+
+  - id: cleanroom_review
+    max_tasks_per_node: 4
+    label: 3洁净室评审
+    node_type: agent
+    depends_on: [craft]
+    parallel: false
+    purpose: 外环洁净室架构与规范独立评审门禁：对代码质量、架构规范、安全合规与极简设计进行客观独立评审。与洁净室测试并行就绪，验证同一冻结 candidate_sha。
+    default_integration_mode: none
+    default_task_type: test
+    agent_policy:
+      preferred: [claude, codex, qodercli, opencode, agy, pi, grok, kimi]
+      max_concurrency: 1
+      parallel: false
+      exclude_stage_agents: [craft]
+      allow_soft_degrade: true
+    required_outputs:
+      - 代码规范审查结论
+      - 架构合理性评估
+      - 安全与合规风险评估
+      - 极简设计与改进建议
+      - 门禁评审结论（PASS / FAIL / REWORK）
+    rules:
+      - "单工位独立评审（严格限定 1 个 Task / 1 个 Pane）。"
+      - "跨阶段 Agent 隔离与柔性降级：优先排除工坊阶段（craft）Agent，坚决杜绝作者自审；当候选池耗尽时支持柔性降级复用并记录审计追踪，杜绝路由死锁。"
+      - "重点审查范围蔓延、未处理异常、安全合规漏洞与过度设计。"
+      - "评审结论必须明确（通过 / 需返工 / 拒绝），未通过时触发结构化返工流程。"
+      - "创建 Task 时默认使用 --agent auto。"
+
+  - id: wrapup
+    max_tasks_per_node: 1
+    label: 4收尾
+    node_type: agent
+    depends_on: [cleanroom_test, cleanroom_review]
+    parallel: false
+    purpose: 双门禁汇聚门禁与标准交付收尾：校验洁净室双门禁通过与版本一致性，执行六步收尾程序（six-step-finish），回填知识库，建立交付 PR 并收拢现场。
+    artifact_mode: shared_artifacts
+    default_integration_mode: none
+    default_task_type: docs
+    agent_policy:
+      preferred: [claude, qodercli, opencode, codex, agy, pi, grok, kimi]
+      max_concurrency: 1
+      parallel: false
+      allow_soft_degrade: true
+    required_outputs:
+      - 最终交付成果说明
+      - 修改文件清单
+      - 双门禁（测试与评审）汇聚验证结论
+      - 文档与知识库更新说明
+      - 六步收尾报告（含逐步状态表）
+      - 交付 PR URL 与合并指引
+    rules:
+      - "单工位收尾（严格限定 1 个 Task / 1 个 Pane）。"
+      - "汇聚洁净室测试与洁净室评审结论，确认冻结 SHA 一致性及双门禁 PASS 后方可推进。"
+      - "必须使用 six-step-finish 技能执行收尾，禁止自创收尾流程。"
+      - "交付 PR 前置（必做）：必须在完成六步收尾步骤 1-2（知识沉淀/wiki 回填并提交）之后、执行步骤 3（合并确认）之前，完成『交付 PR』——首选平台交付入口 `herdr-task create-pr`。硬约束：严禁自动合并；严禁 --force / --yes；不得改写交付分支历史；PR URL 与目标 base 必须写入收尾报告。"
+      - "开启柔性降级（allow_soft_degrade: true）：支持安全路由，杜绝收尾死锁。"
+      - "创建 Task 时默认使用 --agent auto。"

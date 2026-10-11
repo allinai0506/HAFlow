@@ -26,6 +26,8 @@ from herdr.projection import strip_ansi_codes
 
 LOOP_DIR_NAME = ".herdr-loop"
 BASELINE_LINT_FILENAME = "BASELINE_LINT.json"
+BASELINE_TEST_FILENAME = "BASELINE_TEST.json"
+
 
 
 class EvaluationBusyError(RuntimeError):
@@ -197,6 +199,21 @@ def read_baseline_lint(loop_dir: Path) -> Tuple[int, int]:
     except (TypeError, ValueError):
         type_errors = 0
     return max(0, lint_errors), max(0, type_errors)
+
+
+def read_baseline_test(loop_dir: Path) -> List[str]:
+    """Return list of failing test names from BASELINE_TEST.json; [] when absent/corrupt."""
+    try:
+        data = json.loads((Path(loop_dir) / BASELINE_TEST_FILENAME).read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    if not isinstance(data, dict):
+        return []
+    failing = data.get("failing_tests")
+    if not isinstance(failing, list):
+        return []
+    return [str(t).strip() for t in failing if str(t).strip()]
+
 
 
 def get_loop_dir(base_dir: Path) -> Path:
@@ -513,6 +530,8 @@ class MetricVector:
     baseline_type_errors: int = 0
     new_lint_errors: Optional[int] = None
     new_type_errors: Optional[int] = None
+    baseline_failing_tests: List[str] = field(default_factory=list)
+    new_failing_tests: Optional[List[str]] = None
     details: Dict[str, Any] = field(default_factory=dict)
     business_acceptance: str = 'unknown'  # Generic metrics never prove a business gate.
 
@@ -758,10 +777,27 @@ def calculate_metrics(
     baseline_type_errors: int = 0,
     evaluation_exit_code: int = 0,
     evaluation_errors: Optional[List[str]] = None,
+    baseline_failing_tests: Optional[List[str]] = None,
 ) -> MetricVector:
     """Compute the 5-dimensional metric vector from execution outputs."""
     passed, total, failing = parse_test_output(test_output, test_exit_code)
     correctness = (float(passed) / float(total) * 100.0) if total > 0 else (100.0 if test_exit_code == 0 else 0.0)
+
+    # Differential testing: pre-existing test failures on base branch are ignored
+    # when computing delta failures and zero-defect gate convergence.
+    if baseline_failing_tests is not None:
+        base_set = set(baseline_failing_tests)
+        new_failing = [t for t in failing if t not in base_set]
+        pre_existing_ignored = (len(failing) > 0 and len(new_failing) == 0 and test_exit_code != 0)
+        has_test_defects = bool(new_failing) or (test_exit_code != 0 and not pre_existing_ignored)
+        # If all failures are pre-existing, correctness score reflects pre-existing debt tolerance
+        if pre_existing_ignored and total > 0:
+            correctness = 100.0
+    else:
+        new_failing = None
+        pre_existing_ignored = False
+        has_test_defects = (test_exit_code != 0 or bool(failing))
+
 
     lint_errs = parse_lint_output(lint_output, lint_exit_code)
     type_errs = parse_lint_output(type_output, type_exit_code)
@@ -819,9 +855,9 @@ def calculate_metrics(
                                static_check_execution_failed(type_exit_code))
 
     # Absolute zero-defect rule: cannot score 100.0 if any NEW failures exist.
-    # Pre-existing baseline debt is transparent in lint_errors/type_errors
+    # Pre-existing baseline debt is transparent in lint_errors/type_errors/failing_tests
     # but does not cap the score; only the delta gates.
-    if (static_execution_failed or evaluation_exit_code != 0 or evaluation_errors or test_exit_code != 0 or failing or new_lint > 0 or new_type > 0 or (has_repro and repro_val < 100.0) or out_of_bounds) and composite >= 100.0:
+    if (static_execution_failed or evaluation_exit_code != 0 or evaluation_errors or has_test_defects or new_lint > 0 or new_type > 0 or (has_repro and repro_val < 100.0) or out_of_bounds) and composite >= 100.0:
         composite = 95.0
 
     return MetricVector(
@@ -840,6 +876,8 @@ def calculate_metrics(
         baseline_type_errors=baseline_type,
         new_lint_errors=new_lint,
         new_type_errors=new_type,
+        baseline_failing_tests=list(baseline_failing_tests or []),
+        new_failing_tests=new_failing,
         details={
             "out_of_bounds_files": out_of_bounds,
             "test_exit_code": test_exit_code,
@@ -854,6 +892,9 @@ def calculate_metrics(
             "baseline_type_errors": baseline_type,
             "new_lint_errors": new_lint,
             "new_type_errors": new_type,
+            "baseline_failing_tests": list(baseline_failing_tests or []),
+            "new_failing_tests": new_failing,
+            "pre_existing_ignored": pre_existing_ignored,
         }
     )
 
@@ -865,11 +906,18 @@ def is_converged(metrics: MetricVector) -> bool:
     if any(static_check_execution_failed(metrics.details.get(key, 0))
            for key in ("lint_exit_code", "type_exit_code")):
         return False
-    if metrics.details.get("test_exit_code", 0) != 0:
-        return False
+    if metrics.new_failing_tests is not None:
+        if metrics.new_failing_tests:
+            return False
+        if metrics.details.get("test_exit_code", 0) != 0 and not metrics.details.get("pre_existing_ignored", False):
+            return False
+    else:
+        if metrics.details.get("test_exit_code", 0) != 0:
+            return False
+        if metrics.failing_tests:
+            return False
+
     if metrics.composite_score < 99.9:
-        return False
-    if metrics.failing_tests:
         return False
     eff_lint = metrics.new_lint_errors if metrics.new_lint_errors is not None else metrics.lint_errors
     eff_type = metrics.new_type_errors if metrics.new_type_errors is not None else metrics.type_errors

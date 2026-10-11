@@ -6524,3 +6524,25 @@ PR #192 的部分启动恢复会先关闭旧 Pane、归档私有 clone，再持�
 `pytest -q tests/test_dispatch_recovery_ui.py tests/test_launch_reconcile_cli.py tests/test_node_dispatch_contract.py tests/test_scheduler_dispatch_e2e.py tests/test_console_standard_layout_tabs.py`（227 passed，12 subtests passed）；`git diff --check`、`python3 -m compileall -q herdr services bin tests`、`python3 -m py_compile bin/herdr-task` 通过。全量 `pytest -q` 为 3991 passed、27 failed、163 subtests passed；失败项已如实保留，未作为本次专项通过依据。
 
 证据：PR #192；`herdr/task_resources.py#retire_partial_launch`；`herdr/dispatch_recovery.py#abandon_partial_launch`；`tests/test_dispatch_recovery_ui.py#test_audited_partial_launch_retirement_unblocks_only_current_dispatch`；`tests/test_launch_reconcile_cli.py#test_partial_launch_retirement_recovers_after_archive_before_receipt`。
+
+## 152. 差量测试与内生合规预埋：存量缺陷不阻断交付，外生白名单解除 Double Bind（2026-10-11）
+
+### 问题背景
+
+1. 继承 Base 分支存量失败用例时，传统测试门禁因总用例非绿而一票否决，导致修复/迭代任务无法交付；
+2. 目标仓库（如 NexusArchive）内生 Git 钩子（`.husky/pre-commit` -> `bugfix-engineering-gate.sh`）强制要求 `fix-` 分支提交复盘文档（`docs/bug-reports/*.md`），但任务派发时未预埋模板且文件 scope 仅限制在代码文件，导致 Agent 陷入“不写文档无法提交、写文档超出范围被拦截”的 Double Bind 僵局。
+
+### 经验教训
+
+1. **差量门禁算法与退出码归因双重约束**：提取 Base 分支存量失败快照，仅关注候选分支引入的增量失败 $\Delta F = F_{\text{candidate}} \setminus F_{\text{base}}$。当且仅当 $\Delta F = \emptyset$ 且退出码为存量失败所致（`len(failing) > 0` 且 `test_exit_code != 0`）时，才标记 `pre_existing_ignored` 并放行；若测试进程崩溃（exit code != 0）且未能解析出任何用例（`len(failing) == 0`），严禁放行，必须记为测试缺陷阻断收敛，杜绝静默吞掉 runner 崩溃；
+2. **预埋时序必须晚于基线指纹捕获**：`baseline_fingerprint` 记录任务启动前继承的脏文件与未跟踪债务。预埋的合规复盘文档属于当前任务的交付物，若在 `build_baseline_fingerprint` 之前预埋，会被判定为存量未跟踪文件，导致 `commit_task` 的 `current_untracked - baseline_untracked` 差量过滤将其漏提，触发 Husky 门禁拦截，且引发后续 `verify-baseline` 校验失败（exit 3）。因此预埋必须在基线指纹固化之后执行；
+3. **合规预埋与白名单自动联动**：在 Worker 克隆初始化时自动预埋目标规范复盘文档模板，并自动将其纳入任务修改白名单（`delivery_contract.allowed_paths` 与 `required_files`），从源头消除 Double Bind 冲突。
+
+### 操作规范
+
+1. `herdr/differential_testing.py` 提供纯判定函数与快照持久化，`herdr/evaluator.py` 整合 `baseline_failing_tests` 差量计算并实施严格的 `pre_existing_ignored` 退出码保护；`bin/herdr-task differential-test` 提供 CLI 入口；
+2. `herdr/compliance_scaffolding.py` 统一 `is_fix_task` 识别、模板生成与白名单更新；`services/herdr-worker.py` 严格在 `build_baseline_fingerprint` 之后调用 `ensure_compliance_scaffolding`。
+
+### 验证命令 / 关联证据
+
+`pytest -v tests/test_differential_testing.py tests/test_compliance_scaffolding.py`（20 项专项测试 100% PASS，含 runner crash 退出码防吞噬、CLI 差量判定 fail-closed、Worker 预埋->commit->verify-baseline->integrate 完整链路测试）；`python3 -m compileall -q herdr services bin tests`、`git diff --check` clean。

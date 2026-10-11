@@ -2353,3 +2353,23 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 
 ## [2026-10-10] update | 部分启动归档回执的排序与安全重试
 - Updated [[workflow-progress-recovery]]：补充旧代次仅停留在启动提示时的人工确认、Pane/clone 归属核验、归档回执与 CAS 失败后安全重试契约。
+
+## [2026-10-11] feat | HAFlow Anti-Stall Architectural Resilience & Code-Craft-V1
+- 背景：
+  1. 在复杂长链路工作流（如 `wf-nexusarchive-1009-02`）中暴露出三大致命死锁与卡点：
+     - Router 硬隔离耗尽候选池导致 `RouterIsolationRejection` 强行阻断流水线；
+     - Git 采纳防伪机制在平台 Rebase 重放时，因保留历史 Author Date 误判为 `commit_predates_task` 形成自指死锁；
+     - Sentinel 停滞检测仅告警不处置，长期空转任务永久锁死后续阶段；
+     - 细碎分工流水线频繁工位握手导致上下文撕裂。
+- 变更：
+  1. **Router 柔性降级** (`herdr/agent_router.py`)：当 `exclude_stage_agents` 导致候选池为空时，支持受控柔性降级复用，记录 `router_isolation_degraded` 与 `router_opt_out_used` 审计事实，不中断流水线；
+  2. **Git 采纳防伪机制重放识别** (`herdr/git_adoption.py`, `bin/herdr-task`)：在 `allow_rebase` 模式下，验证 fresh Committer Date（`cts >= cutoff`）即可安全采纳，严格拦截真正的外来篡改（`cts < cutoff` 或 `origin/*`）；
+  3. **Sentinel 硬超时看门狗** (`services/herdr-sentinel.py`)：在 `check_task_stalls` 中引入硬超时看门狗，长期停滞任务自动 CAS 转换为 `failed`（`failure_reason: hard_timeout_watchdog`）并记录 `task_hard_timeout` 事件；
+  4. **新一代代码工坊模板** (`workflow_templates/code-craft-v1.yaml`)：落地单工位 TDD 紧反馈工坊（craft）+ 外环洁净室黑盒门禁（cleanroom_test / cleanroom_review）+ 双门禁汇聚收尾（wrapup）；
+  5. **差量测试引擎** (`herdr/differential_testing.py`, `herdr/evaluator.py`, `bin/herdr-task`)：提取 Base 分支存量失败用例快照并计算差量失败集 $\Delta F = F_{\text{candidate}} \setminus F_{\text{base}}$；当 $\Delta F = \emptyset$（仅存在 Base 存量历史失败且 exit_code 与失败项严格对应）时，门禁判定为 `pass` 并记录 `pre_existing_ignored` 告警，不阻断工作流交付；若引入新失败或测试框架异常崩溃则判为 `blocked` 并阻断交付；CLI 提供 `herdr-task differential-test` 子命令；
+  6. **Husky 合规文档自动预埋与白名单联动** (`herdr/compliance_scaffolding.py`, `services/herdr-worker.py`, `bin/herdr-task`)：针对 fix- 分支或 bugfix 任务，在 Worker 初始化/克隆创建后（严格在 `build_baseline_fingerprint` 之后，避免被计入存量未跟踪债务而在 commit 时被跳过暂存）自动预埋符合目标仓库门禁规范的复盘文档模板（`docs/bug-reports/{date}-{slug}.md`，含 `## 根因`、`## 防复发`、`## 验证与回归`）；自动将 `docs/bug-reports/*` 纳入任务修改白名单（`delivery_contract.allowed_paths` 与 `required_files`），彻底解除目标仓库钩子强制复盘与任务 scope 限制之间的 Double Bind 冲突。
+- 证据：
+  - 6 项专项测试：`tests/test_differential_testing.py`（13/13 pass）、`tests/test_compliance_scaffolding.py`（7/7 pass）、`tests/test_agent_router_soft_degrade.py`（3/3 pass）、`tests/test_git_adoption_rebase.py`（5/5 pass）、`tests/test_sentinel_hard_timeout.py`（3/3 pass）、`tests/test_code_craft_v1_template.py`（6/6 pass）；
+  - 全量历史回归测试 125+ 项无回归通过；
+  - `python3 -m compileall -q herdr services bin tests` clean；
+  - `git diff --check` clean。

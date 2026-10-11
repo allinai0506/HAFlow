@@ -280,3 +280,11 @@ Evidence:
 - `herdr/agent_router.py#choose_agent`
 - `bin/herdr-task#_launch_task`
 - `tests/test_fix_bug1002_routing.py`
+
+## 跨阶段隔离与柔性降级
+
+`FACT` 跨阶段 Agent 隔离（`exclude_stage_agents` / `disallow_from_stages`）默认 fail-closed：当排除后可用候选池为空时抛出 `RouterIsolationRejection`。当配置 `allow_soft_degrade: true`（支持节点策略、工作流策略与 `HERDR_ROUTER_SOFT_DEGRADE` 环境变量三级优先级，节点显式配置优先）时，允许受控柔性降级复用，落盘 `router_isolation_degraded` 与 `router_opt_out_used` 审计事件事实并输出 `isolation_degraded: True` 决策上下文，杜绝无可用 Agent 时的流水线硬卡死。
+
+Evidence:
+- `herdr/agent_router.py#_choose_agent_locked` / `#_record_router_opt_out`
+- `tests/test_agent_router_soft_degrade.py`

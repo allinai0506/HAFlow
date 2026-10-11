@@ -366,22 +366,26 @@ def _record_router_opt_out(
     *,
     task_id="",
     run_id="",
+    degraded=False,
 ):
     """Persist the opt-out audit or fail closed before reusing an agent."""
     try:
         store = _get_store()
+        payload = {
+            "workflow_id": workflow_id,
+            "run_id": run_id or "",
+            "task_id": task_id or "",
+            "stage": stage,
+            "selected": selected or "",
+            "reason": reason,
+            "excluded": sorted(set(excluded or [])),
+            "audit_required": True,
+            "degraded": bool(degraded),
+        }
+        event_type = "router_isolation_degraded" if degraded else "router_opt_out_used"
         receipt = store.record_event(
-            "router_opt_out_used",
-            {
-                "workflow_id": workflow_id,
-                "run_id": run_id or "",
-                "task_id": task_id or "",
-                "stage": stage,
-                "selected": selected or "",
-                "reason": reason,
-                "excluded": sorted(set(excluded or [])),
-                "audit_required": True,
-            },
+            event_type,
+            payload,
             workflow_id=workflow_id,
             node_id=stage,
             task_id=task_id or None,
@@ -390,6 +394,18 @@ def _record_router_opt_out(
         )
         if receipt is False:
             raise RuntimeError("router opt-out audit was not durably recorded")
+        if degraded:
+            receipt2 = store.record_event(
+                "router_opt_out_used",
+                payload,
+                workflow_id=workflow_id,
+                node_id=stage,
+                task_id=task_id or None,
+                run_id=run_id or None,
+                source="agent-router",
+            )
+            if receipt2 is False:
+                raise RuntimeError("router opt-out audit was not durably recorded")
         return True
     except (OSError, ValueError, RuntimeError, AttributeError, sqlite3.Error) as exc:
         raise RuntimeError(
@@ -451,12 +467,33 @@ def _choose_agent_locked(
         )
 
     node_policy = {}
+    wf_cfg = None
     if workflow_id:
         wf_cfg = workflow_config_for(workflow_id)
         if wf_cfg:
             node = find_node(wf_cfg, stage)
             if node:
                 node_policy = node.get("agent_policy", {})
+
+    node_val = node_policy.get("allow_soft_degrade")
+    if node_val is None:
+        node_val = node_policy.get("soft_degrade")
+    wf_val = None
+    if wf_cfg:
+        wf_policy = wf_cfg.get("agent_policy") or {}
+        wf_val = wf_policy.get("allow_soft_degrade")
+        if wf_val is None:
+            wf_val = wf_policy.get("soft_degrade")
+    env_val = os.environ.get("HERDR_ROUTER_SOFT_DEGRADE", "").strip().lower() in ("1", "true", "yes")
+
+    if node_val is not None:
+        allow_soft_degrade = bool(node_val)
+    elif wf_val is not None:
+        allow_soft_degrade = bool(wf_val)
+    else:
+        allow_soft_degrade = bool(env_val)
+    is_degraded = False
+    degrade_reason = ""
 
     exclude_stages = (
         node_policy.get("exclude_stage_agents")
@@ -514,14 +551,21 @@ def _choose_agent_locked(
         if selected in stage_used_agents:
             _opt_out, _opt_reason = _isolation_opt_out(node_policy)
             if not (_opt_out and _opt_reason):
-                raise RouterIsolationRejection(
-                    f"Agent '{selected}' is prohibited for stage '{stage}' "
-                    f"because it was used in stage(s): {', '.join(exclude_stages)} "
-                    f"(excluded agents: {sorted(stage_used_agents)}). "
-                    "Provide explicit opt-out with reason "
-                    "(agent_policy.allow_reuse_implementation_agents=true + "
-                    "reuse_reason) to bypass."
-                )
+                if allow_soft_degrade:
+                    is_degraded = True
+                    degrade_reason = (
+                        f"soft_degrade_requested_agent: '{selected}' was used in "
+                        f"stage(s) {', '.join(exclude_stages)}"
+                    )
+                else:
+                    raise RouterIsolationRejection(
+                        f"Agent '{selected}' is prohibited for stage '{stage}' "
+                        f"because it was used in stage(s): {', '.join(exclude_stages)} "
+                        f"(excluded agents: {sorted(stage_used_agents)}). "
+                        "Provide explicit opt-out with reason "
+                        "(agent_policy.allow_reuse_implementation_agents=true + "
+                        "reuse_reason) to bypass."
+                    )
         if selected not in allowed:
             raise RouterPolicyRejection(
                 f"Agent '{selected}' is not allowed for project {project_id}"
@@ -613,17 +657,26 @@ def _choose_agent_locked(
         else:
             filtered = [a for a in candidates if a not in stage_used_agents]
             if not filtered:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
-                raise RouterIsolationRejection(
-                    f"No available Agent for stage '{stage}': all candidates "
-                    f"{candidates} were used in stage(s) "
-                    f"{', '.join(exclude_stages)} "
-                    f"(excluded: {sorted(stage_used_agents)}). "
-                    "Isolation is fail-closed; provide explicit opt-out "
-                    "(agent_policy.allow_reuse_implementation_agents=true + "
-                    "reuse_reason) to bypass."
-                )
-            candidates = filtered
+                if allow_soft_degrade and candidates:
+                    is_degraded = True
+                    degrade_reason = (
+                        f"soft_degrade_candidate_pool_exhausted: all candidates "
+                        f"{candidates} were used in stage(s) "
+                        f"{', '.join(exclude_stages)}"
+                    )
+                else:
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+                    raise RouterIsolationRejection(
+                        f"No available Agent for stage '{stage}': all candidates "
+                        f"{candidates} were used in stage(s) "
+                        f"{', '.join(exclude_stages)} "
+                        f"(excluded: {sorted(stage_used_agents)}). "
+                        "Isolation is fail-closed; provide explicit opt-out "
+                        "(agent_policy.allow_reuse_implementation_agents=true + "
+                        "reuse_reason) to bypass."
+                    )
+            else:
+                candidates = filtered
 
     # A stale status never authorizes execution. Bound refresh to compatible candidates.
     if not snapshot_fresh and candidates:
@@ -741,6 +794,17 @@ def _choose_agent_locked(
                 task_id=reservation_key or "",
                 run_id=run_id or "",
             )
+        elif is_degraded:
+            _record_router_opt_out(
+                workflow_id,
+                stage,
+                selected,
+                degrade_reason,
+                stage_used_agents,
+                task_id=reservation_key or "",
+                run_id=run_id or "",
+                degraded=True,
+            )
 
     if reservation_key:
         reservations.setdefault("reservations", {})[reservation_key] = {
@@ -766,7 +830,10 @@ def _choose_agent_locked(
         "reserved_loads": dict(reserved_loads),
         "run_id": run_id or "",
         "task_id": reservation_key or "",
+        "isolation_degraded": bool(is_degraded),
     }
+    if is_degraded:
+        result_ctx["degraded_reason"] = degrade_reason
     if canary_plan is not None:
         result_ctx["canary_plan"] = canary_plan_ctx
         result_ctx["canary_legacy_pick"] = legacy_pick

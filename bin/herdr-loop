@@ -29,6 +29,8 @@ from herdr.evaluator import (
     init_loop,
     is_converged,
     read_baseline_lint,
+    read_baseline_test,
+    BASELINE_TEST_FILENAME,
     read_repro_requirement,
     run_evaluation_command,
     read_state,
@@ -154,6 +156,8 @@ def _run_evaluation_locked(target_dir: Path) -> tuple[MetricVector, bool, str]:
 
     # Baseline-aware gate: pre-existing debt recorded at init does not block.
     baseline_lint, baseline_type = read_baseline_lint(loop_dir)
+    baseline_snap = loop_dir / BASELINE_TEST_FILENAME
+    baseline_test = read_baseline_test(loop_dir) if baseline_snap.exists() else None
 
     # Calculate metrics
     metrics = calculate_metrics(
@@ -165,9 +169,11 @@ def _run_evaluation_locked(target_dir: Path) -> tuple[MetricVector, bool, str]:
         repro_exit_code=repro_exit if repro_log is not None else None,
         baseline_lint_errors=baseline_lint,
         baseline_type_errors=baseline_type,
+        baseline_failing_tests=baseline_test,
         evaluation_exit_code=evaluation_exit,
         evaluation_errors=evaluation_errors,
     )
+
 
     state = read_state(loop_dir)
     iteration = state.get("iteration", 0) + 1
