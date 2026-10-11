@@ -8,6 +8,24 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-10-11] bench | 评测沉淀：ReviewBench 同模型上下文对照（diff_only vs existing_four_tier）与单变量审计闭环
+
+- 背景：
+  1. HAFlow ReviewBench 现有四层检索上下文无法回答“额外源码上下文究竟给真实 Reviewer 带来多少收益、额外耗时与 Token 用量是多少”；
+  2. 评测容易因基础 diff 提取不对齐、检索扩展挤出基础变更、四层检索降级被隐蔽包装为成功、以及用字符数猜测 Token 导致对照失真。
+- 变更：
+  1. **上下文模式配置 (`review.context_mode`)**：支持 `diff_only` 与 `existing_four_tier`（默认），增加快速合法性与正整数预算校验；
+  2. **基础 Diff 绝对一致契约**：通过 `extract_base_diff` 固定 15,000 字符基线保护上限，四层扩展严格后置追加，保证字符级公平；
+  3. **模型身份可信核查与防假对照**：通过 `resolve_agent_identity` 解析真实模型与版本，未确认时标记 `model_confirmed: false` 并阻断单变量优劣结论输出；
+  4. **三态显式隔离与降级透明追踪**：严格区分四层成功、主动 diff_only 与异常降级；降级样本保留 `fallback_reason` 并自动在对比报告中告警；
+  5. **真实 Token 用量防猜测与双耗时统计**：仅采纳真实 API usage，缺失保留“未知”，严禁字符数折算；严格区分端到端评测总耗时与评审命令累积执行耗时；
+  6. **沉淀 Lesson 154 并新建 `wiki/review-benchmark.md`**。
+- 证据：
+  1. `pytest -q tests/test_review_benchmark.py tests/test_auto_pr_review.py` 47/47 PASS；
+  2. 全库 `pytest -q` 4088 项 100% PASS；
+  3. `python3 -m compileall -q herdr services bin tests`、`git diff --check` clean；
+  4. S6 独立代码审查签发 `MERGE_READY`。
+
 ## [2026-10-11] arch | 架构沉淀：微内核与领域适配器 SPI 解耦、通用自愈与门禁豁免控制面落地
 
 - 背景：
