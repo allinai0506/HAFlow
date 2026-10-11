@@ -1,0 +1,95 @@
+#!/usr/bin/env python3
+"""HAFlow Universal Workflow CLI.
+
+Provides platform-wide workflow state management, reconciliation, and inspection
+across all business and engineering domains.
+"""
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+# Add project root to sys.path
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from herdr import kernel
+
+
+def reconcile_command(workflow_id: str, as_json: bool = False) -> int:
+    try:
+        res = kernel.reconcile_workflow(workflow_id)
+        if as_json:
+            print(json.dumps(res, indent=2, ensure_ascii=False))
+            return 0
+
+        print(f"Workflow: {res.get('workflow_id')} (status: {res.get('status')})")
+        print(f"Reconciliation: {'SUCCESS' if res.get('reconciled') else 'FAILED'}")
+        nodes = res.get("nodes", {})
+        print(f"DAG Nodes ({nodes.get('total', 0)} total):")
+        comp = nodes.get("completed", [])
+        print(f"  Completed ({len(comp)}): {', '.join(comp) if comp else 'none'}")
+        ready = nodes.get("ready", [])
+        print(f"  Ready     ({len(ready)}): {', '.join(ready) if ready else 'none'}")
+        act = nodes.get("active", [])
+        print(f"  Active    ({len(act)}): {', '.join(act) if act else 'none'}")
+        blk = nodes.get("blocked", [])
+        print(f"  Blocked   ({len(blk)}): {', '.join(blk) if blk else 'none'}")
+
+        ledger = res.get("delivery_ledger", {})
+        notes_count = ledger.get("total_notes", 0)
+        del_notes = ledger.get("delivery_notes", [])
+        print(f"Delivery Ledger: {notes_count} notes ({len(del_notes)} delivery claims)")
+
+        print("HERDR_WORKFLOW_RECONCILE_RESULT=" + json.dumps(res, ensure_ascii=False))
+        return 0
+    except Exception as exc:
+        print(f"Error reconciling workflow {workflow_id}: {exc}", file=sys.stderr)
+        return 1
+
+
+def status_command(workflow_id: str, as_json: bool = False) -> int:
+    try:
+        from herdr.state_store import get_store
+        store = get_store()
+        wf = store.get_workflow(workflow_id)
+        if not wf:
+            print(f"Workflow '{workflow_id}' not found", file=sys.stderr)
+            return 1
+        if as_json:
+            print(json.dumps(wf, indent=2, ensure_ascii=False))
+            return 0
+        print(f"Workflow: {workflow_id}")
+        print(f"Status:   {wf.get('status')}")
+        print(f"Title:    {wf.get('title')}")
+        print(f"Template: {wf.get('template_name')}")
+        return 0
+    except Exception as exc:
+        print(f"Error reading workflow {workflow_id}: {exc}", file=sys.stderr)
+        return 1
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="HAFlow Workflow CLI")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    reconcile_cmd = sub.add_parser("reconcile", help="重对齐节点与交付账本状态（通用自愈）")
+    reconcile_cmd.add_argument("workflow_id", help="目标工作流 ID")
+    reconcile_cmd.add_argument("--json", action="store_true", help="以 JSON 格式输出")
+
+    status_cmd = sub.add_parser("status", help="查看工作流状态")
+    status_cmd.add_argument("workflow_id", help="目标工作流 ID")
+    status_cmd.add_argument("--json", action="store_true", help="以 JSON 格式输出")
+
+    args = parser.parse_args()
+
+    if args.command == "reconcile":
+        sys.exit(reconcile_command(args.workflow_id, as_json=args.json))
+    elif args.command == "status":
+        sys.exit(status_command(args.workflow_id, as_json=args.json))
+
+
+if __name__ == "__main__":
+    main()

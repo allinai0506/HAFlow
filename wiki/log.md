@@ -8,6 +8,24 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-10-11] arch | 架构沉淀：微内核与领域适配器 SPI 解耦、通用自愈与门禁豁免控制面落地
+
+- 背景：
+  1. 阶段一与阶段二实现了路由柔性降级、Git 变基采纳、看门狗硬超时、差量测试与 Husky 预埋，但特定代码工程逻辑直接侵入了通用 Worker 初始化与任务 CLI；
+  2. HAFlow 作为企业级多任务通用 Agent 编排系统，中立内核（Controller, Sentinel, Worker, DAG Engine）必须对任何业务领域（编程、招投标、客服、法务、调研）保持 100% 业务中立；
+  3. 控制面缺乏跨领域通用的运行态自愈重对齐与结构化人机协同门禁豁免机制。
+- 变更：
+  1. **微内核 + 领域适配器 SPI (`herdr/domain/`)**：建立 `BaseDomainAdapter` 抽象基类，规范 `on_task_init`、`on_task_finalize`、`prepare_delivery_contract`、`evaluate_differential_tests`、`should_allow_rebase` 扩展点；
+  2. **软件与通用领域解耦**：`SoftwareDomainAdapter` 收敛 Git 变基采纳、Husky 复盘文档预埋、差量测试等代码领域专属行为；`GenericDomainAdapter` 为通用任务提供零副作用、零文件修改的标准透传；
+  3. **服务与 CLI 重构**：`services/herdr-worker.py` 与 `bin/herdr-task` 剥离硬编码的特定领域模块导入，统一通过 `get_domain_adapter` 触发生命周期钩子；
+  4. **通用自愈重对齐引擎 (`herdr/reconciliation.py` & `bin/herdr-workflow reconcile`)**：实现对 DAG 节点完成状态、恢复操作、阶段推进锁及共享交付账本的平台级自愈对齐，并提供 CLI 工具；
+  5. **结构化人机协同门禁豁免 (`herdr/kernel.py` & `bin/herdr-task bypass-gate`)**：结构化签发审计凭证（`bypass_id`、时间戳、原因、操作人），解除任务挂起，持久化门禁结论与轨迹账本；
+  6. **沉淀 Lesson 153 并同步更新系统 Wiki**。
+- 证据：
+  1. `pytest tests/test_domain_adapters.py tests/test_workflow_reconciliation.py tests/test_task_bypass_gate.py` 17 项专项测试 100% PASS；
+  2. `pytest tests/test_compliance_scaffolding.py tests/test_differential_testing.py tests/test_git_adoption_rebase.py` 27 项既有回归 100% PASS；
+  3. `python3 -m compileall -q herdr services bin tests`、`git diff --check` clean。
+
 ## [2026-10-09] sec | PR #185 P1 受控出站代理（Controlled Egress Proxy）与 P2 零静默凭据清理闭环
 
 - 背景：

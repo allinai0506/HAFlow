@@ -269,12 +269,14 @@ def update_task_metadata(
     task_id: str,
     updates: Dict[str, Any],
     store: Optional[StateStore] = None,
+    expected_version: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Atomically update non-protected metadata fields of a task without touching status."""
     s = _get_store(store)
-    res = s.update_task_metadata(task_id, updates)
+    res = s.update_task_metadata(task_id, updates, expected_version=expected_version)
     sync_tasks_projection(store=s)
     return res
+
 
 
 def update_workflow_metadata(
@@ -799,3 +801,146 @@ def fork_workflow_from_checkpoint(
     sync_workflows_projection(store=store)
     sync_tasks_projection(store=store)
     return res
+
+
+def reconcile_workflow(
+    workflow_id: str,
+    store: Optional[StateStore] = None,
+) -> Dict[str, Any]:
+    """Platform-level self-healing: Reconcile DAG nodes and delivery ledger state."""
+    from .reconciliation import reconcile_workflow_state
+    s = _get_store(store)
+    res = reconcile_workflow_state(workflow_id, store=s)
+    sync_workflows_projection(store=s)
+    sync_tasks_projection(store=s)
+    return res
+
+
+def bypass_task_gate(
+    task_id: str,
+    reason: str,
+    operator: str = "human",
+    note: Optional[str] = None,
+    store: Optional[StateStore] = None,
+) -> Dict[str, Any]:
+    """Universal human-in-the-loop gate bypass.
+
+    Creates a structured bypass receipt, marks stage_verdict as 'pass',
+    clears blockers, unblocks suspended/blocked tasks, writes gate verdict file,
+    records trajectory audit event, and appends a shared workflow note.
+    """
+    import uuid
+    from datetime import datetime, timezone
+    from .direct_dispatch import gate_verdict_path
+    from . import workflow_docs
+
+    cleaned_reason = str(reason or "").strip()
+    if not cleaned_reason:
+        raise ValueError("Gate bypass reason must be provided")
+
+    s = _get_store(store)
+    task = s.get_task(task_id)
+    if not task:
+        raise ValueError(f"Task '{task_id}' not found")
+
+    now = time.time()
+    bypass_id = f"bypass_{uuid.uuid4().hex[:12]}"
+    previous_status = task.get("status")
+    previous_verdict = task.get("stage_verdict")
+    previous_note = task.get("stage_verdict_note")
+
+    receipt = {
+        "schema_version": 1,
+        "bypass_id": bypass_id,
+        "task_id": task_id,
+        "run_id": task.get("run_id"),
+        "workflow_id": task.get("workflow_id"),
+        "node_id": task.get("node") or task.get("stage"),
+        "previous_status": previous_status,
+        "previous_verdict": previous_verdict,
+        "previous_note": previous_note,
+        "reason": cleaned_reason,
+        "operator": operator,
+        "note": note,
+        "timestamp": now,
+        "bypassed_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    # Determine status transition: unblock if blocked or paused
+    new_status = previous_status
+    if previous_status in ("blocked", "suspended"):
+        # For verification/gate nodes, completion is the target
+        new_status = "completed"
+    elif previous_status == "paused":
+        new_status = "working"
+
+    verdict_note = f"[GATE BYPASS by {operator}] {cleaned_reason}"
+    if note:
+        verdict_note += f" ({note})"
+
+    task["status"] = new_status
+    task["stage_verdict"] = "pass"
+    task["stage_verdict_note"] = verdict_note
+    task["blocker"] = None
+    task["gate_bypassed"] = True
+    task["gate_bypass"] = receipt
+    task["updated_at"] = now
+    task["version"] = (task.get("version") or 0) + 1
+
+    s.save_task(task)
+    sync_tasks_projection(store=s)
+
+    # Write gate verdict file so external watchers immediately see the pass
+    try:
+        v_path = Path(gate_verdict_path(task_id))
+        v_path.parent.mkdir(parents=True, exist_ok=True)
+        v_data = {
+            "verdict": "pass",
+            "note": verdict_note,
+            "bypass": receipt,
+        }
+        v_path.write_text(json.dumps(v_data, indent=2, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+
+    # Trajectory audit event
+    record_trajectory_event_best_effort(
+        task,
+        "gate_bypassed",
+        payload={"bypass": receipt},
+        ledger=TrajectoryLedger(s.db_path) if hasattr(s, "db_path") else None,
+    )
+
+    # Append note to shared workflow ledger if workflow_id is present
+    wf_id = task.get("workflow_id")
+    if wf_id:
+        try:
+            workflow_docs.append_note(
+                workflow_id=wf_id,
+                kind="gate",
+                title=f"Gate bypassed for {task_id}",
+                body=f"Bypass ID: {bypass_id}\nOperator: {operator}\nReason: {cleaned_reason}",
+                node=task.get("node") or task.get("stage"),
+                task_id=task_id,
+                source=workflow_docs.SOURCE_HUMAN,
+                fields={
+                    "bypass_id": bypass_id,
+                    "operator": operator,
+                    "reason": cleaned_reason,
+                    "verdict": "pass",
+                },
+            )
+        except Exception:
+            pass
+
+    return {
+        "task_id": task_id,
+        "bypass_id": bypass_id,
+        "status": new_status,
+        "previous_status": previous_status,
+        "stage_verdict": "pass",
+        "previous_verdict": previous_verdict,
+        "reason": cleaned_reason,
+        "operator": operator,
+        "receipt": receipt,
+    }

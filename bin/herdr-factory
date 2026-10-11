@@ -883,6 +883,10 @@ def main():
     e2e_cmd = sub.add_parser("e2e")
     e2e_cmd.add_argument("--project")
 
+    reconcile_cmd = sub.add_parser("reconcile", help="重对齐节点与交付账本状态（通用自愈）")
+    reconcile_cmd.add_argument("workflow_id", help="目标工作流 ID")
+    reconcile_cmd.add_argument("--json", action="store_true", help="以 JSON 格式输出")
+
     args = parser.parse_args()
 
     if args.command == "doctor":
@@ -953,6 +957,20 @@ def main():
 
     if args.command == "e2e":
         sys.exit(e2e(args.project))
+
+    if args.command == "reconcile":
+        from herdr import kernel
+        try:
+            res = kernel.reconcile_workflow(args.workflow_id)
+            if getattr(args, "json", False):
+                print(json.dumps(res, indent=2, ensure_ascii=False))
+            else:
+                print(f"Workflow {args.workflow_id} reconciled successfully.")
+                print("HERDR_WORKFLOW_RECONCILE_RESULT=" + json.dumps(res, ensure_ascii=False))
+            sys.exit(0)
+        except Exception as exc:
+            print(f"Reconcile failed: {exc}")
+            sys.exit(1)
 
 
 if __name__ == "__main__":

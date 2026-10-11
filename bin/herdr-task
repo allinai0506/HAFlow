@@ -3273,16 +3273,21 @@ def _launch_task(args):
         if Path(args.task_id).name != args.task_id or args.task_id in {'.', '..'} or len(args.task_id) > 128:
             raise ValueError('task_id must be a bounded single workspace name')
         planned_clone = clone_root / args.task_id
-        from herdr.compliance_scaffolding import is_fix_task, update_contract_whitelist, build_bug_report_template
-        if is_fix_task(task_id=args.task_id, task_type=getattr(args, "task_type", None),
-                       node_id=node_id, branch=getattr(args, "onto", None)):
-            if node.get("delivery_contract"):
-                rel_path, _ = build_bug_report_template({
+        from herdr.domain import get_domain_adapter
+        _domain_adapter = get_domain_adapter(
+            domain=getattr(args, "domain", None) or node.get("domain"),
+            task_type=getattr(args, "task_type", None) or node.get("default_task_type"),
+        )
+        if node.get("delivery_contract"):
+            node["delivery_contract"] = _domain_adapter.prepare_delivery_contract(
+                node["delivery_contract"],
+                {
                     "task_id": args.task_id,
                     "task_type": getattr(args, "task_type", None),
+                    "node_id": node_id,
                     "branch": getattr(args, "onto", None),
-                })
-                node["delivery_contract"] = update_contract_whitelist(node["delivery_contract"], rel_path=rel_path)
+                },
+            )
         from herdr.task_delivery import validate_fix_retrospective
         validate_fix_retrospective(task_id=args.task_id, task_type=getattr(args, "task_type", None),
                                    node_id=node_id, contract=node.get("delivery_contract"),
@@ -4735,11 +4740,7 @@ def verify_metrics(task_id, min_score=99.9, if_present=False):
 
 def differential_test(args):
     """Evaluate differential test failures between candidate and base."""
-    from herdr.differential_testing import (
-        compute_differential_verdict,
-        extract_failing_tests,
-        read_base_test_snapshot,
-    )
+    from herdr.domain import get_domain_adapter
     cand_path = getattr(args, "candidate_output", None)
     if not cand_path:
         print("ERROR: --candidate-output is required for differential-test", file=sys.stderr)
@@ -4748,38 +4749,60 @@ def differential_test(args):
         print(f"ERROR: candidate output file not found: {cand_path}", file=sys.stderr)
         sys.exit(1)
 
-    base_failures = []
-    base_snap_path = getattr(args, "base_snapshot", None)
+    base_out = None
     base_out_path = getattr(args, "base_output", None)
-
-    if base_snap_path:
-        if not os.path.isfile(base_snap_path):
-            print(f"ERROR: base snapshot file not found: {base_snap_path}", file=sys.stderr)
-            sys.exit(1)
-        snap = read_base_test_snapshot(base_snap_path)
-        base_failures = snap.get("failing_tests", [])
-    elif base_out_path:
+    if base_out_path:
         if not os.path.isfile(base_out_path):
             print(f"ERROR: base output file not found: {base_out_path}", file=sys.stderr)
             sys.exit(1)
-        out = Path(base_out_path).read_text(encoding="utf-8", errors="replace")
-        base_failures = extract_failing_tests(out, exit_code=getattr(args, "base_exit_code", 0))
+        base_out = Path(base_out_path).read_text(encoding="utf-8", errors="replace")
+
+    base_snap_path = getattr(args, "base_snapshot", None)
+    if base_snap_path and not os.path.isfile(base_snap_path):
+        print(f"ERROR: base snapshot file not found: {base_snap_path}", file=sys.stderr)
+        sys.exit(1)
 
     cand_out = Path(cand_path).read_text(encoding="utf-8", errors="replace")
-    candidate_failures = extract_failing_tests(cand_out, exit_code=getattr(args, "candidate_exit_code", 0))
+    adapter = get_domain_adapter(domain=getattr(args, "domain", "software"))
+    result_dict = adapter.evaluate_differential_tests(
+        candidate_output=cand_out,
+        base_output=base_out,
+        base_snapshot=base_snap_path,
+        candidate_exit_code=getattr(args, "candidate_exit_code", 0),
+        base_exit_code=getattr(args, "base_exit_code", 0),
+    )
 
-    # Defensive: non-zero exit code without parsed test names is an unmasked defect
-    cand_exit = getattr(args, "candidate_exit_code", 0)
-    if cand_exit != 0 and not candidate_failures:
-        candidate_failures = [f"test_process_exit_code_{cand_exit}"]
-
-    result = compute_differential_verdict(candidate_failures, base_failures)
-    print(f"DIFFERENTIAL_TEST: verdict={result.verdict} delta={len(result.delta_failures)} pre_existing={len(result.pre_existing_failures)}")
-    if result.warning:
-        print(f"WARNING: {result.warning}")
-    print("HERDR_DIFFERENTIAL_TEST_RESULT=" + json.dumps(result.to_dict(), ensure_ascii=False))
-    if result.verdict != "pass":
+    verdict = result_dict.get("verdict", "pass")
+    delta_len = len(result_dict.get("delta_failures", []))
+    pre_len = len(result_dict.get("pre_existing_failures", []))
+    print(f"DIFFERENTIAL_TEST: verdict={verdict} delta={delta_len} pre_existing={pre_len}")
+    if result_dict.get("warning"):
+        print(f"WARNING: {result_dict['warning']}")
+    print("HERDR_DIFFERENTIAL_TEST_RESULT=" + json.dumps(result_dict, ensure_ascii=False))
+    if verdict != "pass":
         sys.exit(1)
+
+
+def bypass_gate_cli(task_id, reason, operator="human", note=None, as_json=False):
+    """Universal human-in-the-loop gate bypass CLI entrypoint."""
+    from herdr import kernel
+    try:
+        res = kernel.bypass_task_gate(task_id, reason=reason, operator=operator, note=note)
+        if as_json:
+            print(json.dumps(res, indent=2, ensure_ascii=False))
+            return 0
+        print(
+            f"[GATE BYPASS] task={task_id} bypass_id={res.get('bypass_id')} "
+            f"verdict={res.get('previous_verdict')} -> {res.get('stage_verdict')} "
+            f"status={res.get('previous_status')} -> {res.get('status')} "
+            f"reason=\"{res.get('reason')}\" operator={res.get('operator')}"
+        )
+        print("HERDR_GATE_BYPASS_RESULT=" + json.dumps(res, ensure_ascii=False))
+        return 0
+    except Exception as exc:
+        print(f"Error bypassing gate for task {task_id}: {exc}", file=sys.stderr)
+        sys.exit(1)
+
 
 
 
@@ -5443,18 +5466,17 @@ def _adopt_head_if_attributable(task_id, task, clone, allow_rebase=False):
     # F-1: the task's own (and onto) branch never counts as foreign, so
     # a legitimate agent-side push of the task branch cannot refuse.
     exclude_branches = [b for b in (branch, onto) if b]
-    task_val = task.get("allow_rebase")
-    onto_val = bool(onto)
-    env_val = os.environ.get("HERDR_ADOPT_ALLOW_REBASE", "").strip().lower() in ("1", "true", "yes")
-
-    if allow_rebase:
-        effective_allow_rebase = True
-    elif task_val is not None:
-        effective_allow_rebase = bool(task_val)
-    elif onto_val:
-        effective_allow_rebase = True
-    else:
-        effective_allow_rebase = env_val
+    from herdr.domain import get_domain_adapter
+    _domain_adapter = get_domain_adapter(
+        domain=task.get("domain"),
+        task_type=task.get("task_type"),
+        task=task,
+    )
+    effective_allow_rebase = _domain_adapter.should_allow_rebase(
+        task,
+        explicit_flag=allow_rebase,
+        env_flag=os.environ.get("HERDR_ADOPT_ALLOW_REBASE", "").strip().lower() in ("1", "true", "yes"),
+    )
 
     interval = None
     history = None
@@ -8381,6 +8403,13 @@ def main():
              "selective replan)",
     )
 
+    bypass_gate_cmd = sub.add_parser("bypass-gate", help="结构化记录门禁豁免凭证，解除任务挂起/阻塞")
+    bypass_gate_cmd.add_argument("task_id", help="目标任务 ID")
+    bypass_gate_cmd.add_argument("--reason", required=True, help="门禁豁免原因（必填审计凭据）")
+    bypass_gate_cmd.add_argument("--operator", default="human", help="操作人标识（默认 human）")
+    bypass_gate_cmd.add_argument("--note", default=None, help="附加说明")
+    bypass_gate_cmd.add_argument("--json", action="store_true", help="以 JSON 格式输出")
+
     stage_cmd = sub.add_parser("stage-status")
     stage_cmd.add_argument("workflow_id")
     stage_cmd.add_argument("stage")
@@ -9008,6 +9037,15 @@ def main():
     elif args.command == "set":
         set_status(args.task_id, args.status, args.verdict, args.note,
                    affected_task_ids=args.affected_task_ids)
+
+    elif args.command == "bypass-gate":
+        bypass_gate_cli(
+            args.task_id,
+            reason=args.reason,
+            operator=args.operator,
+            note=getattr(args, "note", None),
+            as_json=getattr(args, "json", False),
+        )
 
     elif args.command == "stage-status":
         stage_status(

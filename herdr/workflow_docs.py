@@ -416,3 +416,7 @@ def provenance_from_task(task) -> dict:
         "agent": task.get("agent") or "",
         "base_sha": task.get("base_sha") or "",
     }
+
+
+# Backward compatibility alias
+read_notes = load_notes
