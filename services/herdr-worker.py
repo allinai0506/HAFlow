@@ -964,6 +964,12 @@ def main():
     parser.add_argument("--candidate-sha", default=None,
                         help="Exact candidate pin for an unpublished local --onto branch.")
 
+    parser.add_argument(
+        "--domain",
+        default=None,
+        help="Domain adapter identifier (software, generic, etc.)."
+    )
+
     args = parser.parse_args()
 
     context_bindings = {}
@@ -1068,23 +1074,26 @@ def main():
                 f"untracked={len(baseline_fingerprint['untracked'])}"
             )
 
-            # 合规文档自动预埋 (Compliance Scaffolding)
-            # 必须在基线指纹捕获之后执行：确保预埋模板被视为本任务的新增产物，
-            # 能够在 herdr-task commit 时被自动加入暂存区（避免 husky 钩子拦截），
-            # 且提交后工作区恢复为与 baseline_fingerprint 一致的干净状态（保障 integrate 门禁通过）。
+            # 领域生命周期钩子: Task 初始化 (Domain Adapter SPI)
+            # 在基线指纹捕获之后执行领域初始化钩子（如软件领域模板预埋、合规配置等）
+            _domain_adapter = None
+            _task_init_meta = {
+                "task_id": args.task_id,
+                "task_type": args.task_type,
+                "branch": branch,
+                "agent": args.agent,
+            }
             try:
-                from herdr.compliance_scaffolding import ensure_compliance_scaffolding
-                _scaffold_meta = {
-                    "task_id": args.task_id,
-                    "task_type": args.task_type,
-                    "branch": branch,
-                    "agent": args.agent,
-                }
-                _scaffold_res = ensure_compliance_scaffolding(clone, _scaffold_meta)
-                if _scaffold_res.get("scaffolded"):
-                    print(f"[COMPLIANCE SCAFFOLDING] {_scaffold_res['path']}")
-            except Exception as _scaffold_exc:
-                print(f"[COMPLIANCE SCAFFOLDING WARN] {_scaffold_exc}", file=sys.stderr)
+                from herdr.domain import get_domain_adapter
+                _domain_adapter = get_domain_adapter(
+                    domain=getattr(args, "domain", None),
+                    task_type=args.task_type,
+                )
+                _init_res = _domain_adapter.on_task_init(clone, _task_init_meta)
+                if _init_res.get("scaffolded"):
+                    print(f"[COMPLIANCE SCAFFOLDING] {_init_res['path']}")
+            except Exception as _adapter_exc:
+                print(f"[DOMAIN ADAPTER WARN] {_adapter_exc}", file=sys.stderr)
 
 
             baseline_commit = _rev_parse_head(clone)

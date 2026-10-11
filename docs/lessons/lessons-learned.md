@@ -6546,3 +6546,33 @@ PR #192 的部分启动恢复会先关闭旧 Pane、归档私有 clone，再持�
 ### 验证命令 / 关联证据
 
 `pytest -v tests/test_differential_testing.py tests/test_compliance_scaffolding.py`（20 项专项测试 100% PASS，含 runner crash 退出码防吞噬、CLI 差量判定 fail-closed、Worker 预埋->commit->verify-baseline->integrate 完整链路测试）；`python3 -m compileall -q herdr services bin tests`、`git diff --check` clean。
+
+## 153. 微内核与领域适配器解耦：守护通用中立内核，平台级自愈与门禁豁免（2026-10-11）
+
+### 问题背景
+
+在引入 Git 变基采纳、Husky 预埋合规与差量测试后，特定软件研发逻辑（代码提交流程、Husky 钩子、复盘文档路径）直接硬编码到了通用工作区初始化脚本 `services/herdr-worker.py` 与任务主控 CLI `bin/herdr-task` 中。
+HAFlow 作为企业级多任务通用 Agent 编排系统，必须支撑招投标标书制作、智能客服、法务合规审核、深度调研与代码研发等多元业务场景。若通用 Worker 和调度器直接耦合特定代码逻辑，将导致非研发任务被强行执行代码预埋，破坏系统的通用性与业务中立性。
+
+### 经验教训
+
+1. **微内核 + 领域适配器 SPI（Microkernel & Domain Adapter SPI）**：
+   通用内核（Controller、Sentinel、Worker 进程管理、DAG 引擎、StateDB）必须对任何业务领域保持 100% 中立。所有领域特定逻辑收敛于 `herdr/domain/` 扩展点：
+   - `BaseDomainAdapter`：定义 `on_task_init`、`on_task_finalize`、`prepare_delivery_contract`、`evaluate_differential_tests`、`should_allow_rebase` 核心 SPI 生命周期钩子；
+   - `SoftwareDomainAdapter`：封装代码变基采纳策略、Husky 复盘文档预埋、差量测试对比引擎；
+   - `GenericDomainAdapter`：通用任务（标书、客服、法务、文档等）的默认透传适配器，零副作用、零文件修改、零侵入；
+   - `get_domain_adapter`：根据任务类型（task_type）、工作流模板（template_name）或显式领域声明智能解析适配器。
+2. **通用平台级状态自愈（Workflow Reconciliation）**：
+   跨领域的复杂异步工作流在长周期运行中，可能因网络波动、进程异常重启导致内存调度视图与持久化事实产生轻微漂移。提供通用的 `herdr-workflow reconcile <workflow_id>` 引擎，原子对齐 DAG 节点完成状态、恢复操作、阶段推进锁与共享交付账本（delivery ledger），对所有类型工作流通用。
+3. **结构化人机协同门禁豁免（Audited Gate Bypass）**：
+   在门禁阻塞或任务挂起时，禁止通过随意修改数据库或绕过审计机制强行推进。提供通用的 `herdr-task bypass-gate <task_id> --reason <reason>`，自动签发带全局唯一 `bypass_id`、时间戳、操作人与原因的结构化豁免凭证，解除挂起、同步更新门禁结论文件与轨迹账本，兼顾人机协同的灵活性与企业审计合规要求。
+
+### 操作规范
+
+1. 通用服务（`herdr-worker.py`、`herdr-controller.py`）严禁直接导入特定领域的业务逻辑模块，必须统一通过 `herdr.domain.get_domain_adapter` 获取适配器并调用生命周期钩子；
+2. 任何需要临时解除阻塞的操作统一使用 `bin/herdr-task bypass-gate <task_id> --reason <reason>` 并留存审计凭证；
+3. 工作流运行态与节点状态自愈统一调用 `bin/herdr-workflow reconcile <workflow_id>`。
+
+### 验证命令 / 关联证据
+
+`pytest tests/test_domain_adapters.py tests/test_workflow_reconciliation.py tests/test_task_bypass_gate.py`（17 项专项单元与 CLI 测试 100% PASS）；`pytest tests/test_compliance_scaffolding.py tests/test_differential_testing.py tests/test_git_adoption_rebase.py`（27 项回归测试全量通过）；`bin/herdr-workflow reconcile --help`、`bin/herdr-task bypass-gate --help` 命令行验证；`python3 -m compileall -q herdr services bin tests`、`git diff --check` clean。
