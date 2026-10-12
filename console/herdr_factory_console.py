@@ -9723,10 +9723,10 @@ def main():
         )
     except Exception:
         fingerprint = {"running_sha": "unknown", "running_import_root": "unknown", "component_versions": {}}
-    global _deliverable_observation_loader
-    _deliverable_observation_loader = _load_deliverable_observations
     print("HERDR_RUNTIME_FINGERPRINT=" + json.dumps(
         {"service": "com.user.herdr-factory-console", "pid": os.getpid(), **fingerprint}, sort_keys=True,
     ), flush=True)
     ROOT.mkdir(parents=True,exist_ok=True); print(f'{PRODUCT_NAME}控制台: http://{HOST}:{PORT}',flush=True); ThreadingHTTPServer((HOST,PORT),Handler).serve_forever()
-if __name__=='__main__':main()
+if __name__=='__main__':
+    _deliverable_observation_loader = _load_deliverable_observations
+    main()
