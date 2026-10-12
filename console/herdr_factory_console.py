@@ -24,6 +24,7 @@ from herdr import projects as herdr_projects
 from herdr import kernel as herdr_kernel
 from herdr import steering as herdr_steering
 from herdr import projection as herdr_projection
+from herdr import deliverables as herdr_deliverables
 from herdr import archive as herdr_archive
 from herdr import controller_actions as herdr_controller_actions
 from herdr import dashboard as herdr_dashboard
@@ -480,7 +481,11 @@ def workflow_detail(wid):
     stall_info=herdr_projection.detect_workflow_stalls(wid,ts,workflow=w)
     graph=workflow_graph_for(wid,p,w,ts)
     derived={'current_nodes':graph.get('current_nodes',[]),'ready_nodes':graph.get('ready_nodes',[]),'derived_current_stage':graph.get('current_stage',''),'current_stage_source':graph.get('current_stage_source','derived_nodes')}
-    return {'workflow':{'workflow_id':wid,**_with_subject(w),**derived},'project':p,'stages':ss,'tasks':ts,'graph':graph,'context':graph.get('context',{'required':[],'optional':[]}),'coordinator':agent_runtime(w.get('coordinator_pane_id')),'candidate_branch':w.get('candidate_branch'),'agent_override':w.get('agent_override','auto'),'stall':stall_info}
+    try:
+        deliverables=api_workflow_deliverables(wid)
+    except Exception:
+        deliverables=herdr_deliverables.pack([], error='成果目录读取失败')
+    return {'workflow':{'workflow_id':wid,**_with_subject(w),**derived},'project':p,'stages':ss,'tasks':ts,'graph':graph,'context':graph.get('context',{'required':[],'optional':[]}),'coordinator':agent_runtime(w.get('coordinator_pane_id')),'candidate_branch':w.get('candidate_branch'),'agent_override':w.get('agent_override','auto'),'stall':stall_info,'deliverables':deliverables}
 
 
 def task_detail(tid):
@@ -1322,9 +1327,85 @@ def api_controller_execute_action(payload):
     raise RuntimeError(f'未知的控制器动作类型: {act_type}')
 
 
+def _workflow_nodes(wid, w=None):
+    w = w if w is not None else (workflows().get(wid) or {})
+    cfg = w.get('config') if isinstance(w, dict) else None
+    if isinstance(cfg, dict) and isinstance(cfg.get('nodes'), list) and cfg.get('nodes'):
+        return cfg['nodes']
+    try:
+        definition = workflow_definition_for(wid, project_for_workflow(wid), w) or {}
+    except Exception:
+        definition = {}
+    nodes = definition.get('nodes') if isinstance(definition, dict) else None
+    return nodes or []
+
+_deliverable_observation_loader = None
+
+def _load_deliverable_observations(task_id):
+    if not task_id:
+        return []
+    db_path = Path(os.environ['HERDR_STATE_DB']) if os.environ.get('HERDR_STATE_DB') else Path(TASKS_FILE).parent / 'state.db'
+    if not db_path.is_file():
+        return []
+    try:
+        from herdr.state_db import list_observations
+        return list_observations(task_id=str(task_id), source_type='artifact', limit=40, db_path=db_path)
+    except Exception:
+        return []
+
+def _tasks_for_deliverables(tasks):
+    loader = _deliverable_observation_loader
+    if not loader:
+        return list(tasks or [])
+    rows = []
+    for task in tasks or []:
+        if not isinstance(task, dict):
+            continue
+        row = dict(task)
+        try:
+            extra = loader(row.get('task_id')) or []
+        except Exception:
+            extra = []
+        if extra:
+            row['observations'] = list(row.get('observations') or []) + list(extra)
+        rows.append(row)
+    return rows
+
+def api_workflow_deliverables(wid):
+    if not wid:
+        raise RuntimeError('workflow_id 不能为空')
+    w = workflows().get(wid)
+    if not w:
+        raise RuntimeError('工作流不存在')
+    return herdr_deliverables.project_for_tasks(
+        wid, _tasks_for_deliverables(tasks_for_workflow(wid)), _workflow_nodes(wid, w),
+    )
+
+def api_read_deliverable(wid, tid, did, download=False):
+    if not wid or not tid or not did:
+        raise herdr_deliverables.DeliverableError('not_found', 404, '找不到这项成果')
+    w = workflows().get(wid)
+    if not w:
+        raise herdr_deliverables.DeliverableError('not_found', 404, '找不到这项成果')
+    return herdr_deliverables.read_deliverable(
+        wid, _tasks_for_deliverables(tasks_for_workflow(wid)), _workflow_nodes(wid, w), tid, did, download=download,
+    )
+
 def api_task_projection(tid):
     if not tid:raise RuntimeError('task_id 不能为空')
-    return herdr_projection.project_task(tid)
+    proj = herdr_projection.project_task(tid)
+    wid = proj.get('workflow_id')
+    try:
+        if wid:
+            own = [task for task in _tasks_for_deliverables(tasks_for_workflow(wid)) if task.get('task_id') == tid]
+            proj['deliverables'] = herdr_deliverables.project_for_tasks(
+                wid, own, _workflow_nodes(wid), include_expectations=False,
+            )
+        else:
+            proj['deliverables'] = herdr_deliverables.pack([])
+    except Exception:
+        proj['deliverables'] = herdr_deliverables.pack([], error='成果目录读取失败')
+    return proj
 
 def api_workflow_projection(wid):
     if not wid:raise RuntimeError('workflow_id 不能为空')
@@ -3330,6 +3411,62 @@ button { cursor: pointer; }
   font-size: 13px;
   font-weight: 600;
   color: var(--text-primary);
+}
+#deliverablesPanel {
+  margin: 8px 16px 8px;
+  padding: 12px 16px 4px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  max-height: 460px;
+  overflow: auto;
+  flex: 0 0 auto;
+}
+#deliverablesPanel[hidden] { display: none !important; }
+.deliverables-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 4px;
+}
+.deliverables-title {
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--text-primary);
+}
+.deliverables-count, .deliverable-meta {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.deliverable-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 0;
+  border-top: 1px solid var(--border-default);
+}
+.deliverable-main { min-width: 0; flex: 1; }
+.deliverable-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  word-break: break-word;
+}
+.deliverable-meta { margin-top: 2px; }
+.deliverable-actions { display: flex; gap: 8px; flex-shrink: 0; align-items: center; }
+.deliverable-preview { max-height: 60vh; overflow: auto; font-size: 13px; color: var(--text-primary); }
+.deliverable-preview h1, .deliverable-preview h2, .deliverable-preview h3 {
+  font-size: 15px; font-weight: 650; margin: 0 0 8px; color: var(--text-primary);
+}
+.deliverable-preview p { margin: 0 0 8px; }
+.deliverable-preview pre {
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  padding: 8px;
+  overflow: auto;
 }
 
 /* Toast */
@@ -5355,6 +5492,13 @@ body {
     <div id="stages" class="stages"></div>
     <div id="attentionBanner" class="attention-banner" style="display:none"></div>
     <div id="workflowSwitcher" class="wf-switcher" style="display:none"></div>
+    <div id="deliverablesPanel" class="deliverables-panel" hidden>
+      <div class="deliverables-head">
+        <div class="deliverables-title">交付成果</div>
+        <div id="deliverablesCount" class="deliverables-count"></div>
+      </div>
+      <div id="deliverablesBody"></div>
+    </div>
     <div class="workspace-layout">
       <section class="panel main-panel">
         <div id="canvasToolbar">
@@ -6966,6 +7110,7 @@ async function loadWorkflow(id){
     destroyFlowGraph();
   }
   if(keepController)openControllerCockpitModal();else renderFlowWorkbench();
+  if(typeof renderDeliverables==='function')renderDeliverables();
   if(typeof renderSidebarWorkflows==='function')renderSidebarWorkflows();
 }
 function clearWorkflow(){
@@ -6981,6 +7126,8 @@ function clearWorkflow(){
   document.getElementById('stages').innerHTML='';
   const ab=document.getElementById('attentionBanner');if(ab)ab.style.display='none';
   setWorkspaceMode('aux');
+  const deliverableBody=document.getElementById('deliverablesBody');if(deliverableBody)deliverableBody.innerHTML='';
+  const deliverableCount=document.getElementById('deliverablesCount');if(deliverableCount)deliverableCount.textContent='';
   document.getElementById('tasks').innerHTML='<div class="empty">暂无任务</div>';
   paintCrumb();
   if(typeof renderSidebarWorkflows==='function')renderSidebarWorkflows();
@@ -7742,6 +7889,100 @@ function flowChecklist(node){
   else items.push(['ok','下游 · '+down.map(labelOf).join('、')]);
   return items;
 }
+function workflowDeliverables(){
+  const packed=state.workflow&&state.workflow.deliverables;
+  if(packed&&Array.isArray(packed.items))return packed;
+  return {items:[],counts:{present:0,missing:0,unavailable:0,verified:0,workspace:0,unconfirmed:0}};
+}
+function deliverableNoteHtml(packed){
+  const bits=[];
+  if(packed&&packed.error)bits.push('<div class="empty">'+esc(packed.error)+'</div>');
+  if(packed&&packed.notice)bits.push('<div class="empty">'+esc(packed.notice)+'</div>');
+  return bits.join('');
+}
+function deliverableCountsText(counts){
+  counts=counts||{};
+  const parts=['已产生 '+(Number(counts.present)||0)+' 项'];
+  if(counts.workspace)parts.push('工作区文件 '+counts.workspace+' 项');
+  if(counts.missing)parts.push('未产生 '+counts.missing+' 项');
+  if(counts.unconfirmed)parts.push('不可确认 '+counts.unconfirmed+' 项');
+  if(counts.unavailable)parts.push('不可读取 '+counts.unavailable+' 项');
+  if(counts.verified)parts.push('已验证 '+counts.verified+' 项');
+  return parts.join(' · ');
+}
+function deliverableActionsHtml(item){
+  const actions=item.actions||[];
+  const bits=[];
+  if(actions.indexOf('view')>=0)bits.push('<button type="button" class="mini" onclick="openDeliverable('+jsArg(item.id)+','+jsArg(item.task_id)+')">查看</button>');
+  if(actions.indexOf('download')>=0)bits.push('<button type="button" class="mini" onclick="downloadDeliverable('+jsArg(item.id)+','+jsArg(item.task_id)+','+jsArg(item.name)+')">下载</button>');
+  if(actions.indexOf('open')>=0&&item.url)bits.push('<a class="mini" href="'+esc(item.url)+'" target="_blank" rel="noopener noreferrer">打开</a>');
+  if(bits.length)return bits.join('');
+  return '<span class="muted">'+esc(item.reason||(item.status==='missing'?'尚未生成':'当前不能打开'))+'</span>';
+}
+function deliverableRowHtml(item){
+  const meta=[item.type_label||'文件'];
+  if(item.node_label)meta.push(item.node_label);
+  if(item.agent)meta.push(item.agent);
+  if(item.kind==='git_commit'&&item.sha)meta.push(String(item.sha).slice(0,12));
+  meta.push(item.status_label||'');
+  let extra='';
+  if(item.kind==='git_diff'&&Array.isArray(item.files)&&item.files.length){
+    const shown=item.files.slice(0,8).join('、');
+    const more=item.files_changed>item.files.length?(' 等 '+item.files_changed+' 个文件'):'';
+    extra='<div class="deliverable-meta">'+esc(shown+more)+'</div>';
+  }
+  return '<div class="deliverable-row"><div class="deliverable-main"><div class="deliverable-name">'+esc(item.name||'成果')+'</div><div class="deliverable-meta">'+esc(meta.filter(Boolean).join(' · '))+'</div>'+extra+'</div><div class="deliverable-actions">'+deliverableActionsHtml(item)+'</div></div>';
+}
+function renderDeliverables(){
+  const panel=document.getElementById('deliverablesPanel');
+  const body=document.getElementById('deliverablesBody');
+  const count=document.getElementById('deliverablesCount');
+  if(!panel||!body)return;
+  const mode=(document.querySelector('.shell')||{}).dataset?document.querySelector('.shell').dataset.workspace:'';
+  if(!state.workflow||(mode!=='flow'&&mode!=='list')){panel.hidden=true;return;}
+  panel.hidden=false;
+  const packed=workflowDeliverables();
+  if(count)count.textContent=deliverableCountsText(packed.counts);
+  const note=deliverableNoteHtml(packed);
+  if(!packed.items.length){
+    body.innerHTML=note||'<div class="empty">这次工作流还没有交付成果。文件写进任务工作区后，会显示在这里。</div>';
+    return;
+  }
+  body.innerHTML=note+packed.items.map(deliverableRowHtml).join('');
+}
+async function openDeliverable(id, taskId){
+  try{
+    const wid=state.workflowId||'';
+    const data=await api('/api/workflow/deliverable?workflow_id='+encodeURIComponent(wid)+'&task_id='+encodeURIComponent(taskId||'')+'&id='+encodeURIComponent(id||''));
+    const note=data.truncated?'内容较长，这里只显示开头部分。':'';
+    const preview=data.html?'<div class="deliverable-preview">'+data.html+'</div>':'<pre>'+esc(data.text||data.reason||'没有可显示的内容')+'</pre>';
+    openModal(data.name||'成果', (note?'<div class="muted" style="margin-bottom:8px">'+esc(note)+'</div>':'')+preview);
+  }catch(e){
+    toast(e.message||'无法查看这个成果', true);
+  }
+}
+async function downloadDeliverable(id, taskId, name){
+  try{
+    const wid=state.workflowId||'';
+    const url='/api/workflow/deliverable?workflow_id='+encodeURIComponent(wid)+'&task_id='+encodeURIComponent(taskId||'')+'&id='+encodeURIComponent(id||'')+'&download=1';
+    const response=await fetch(url);
+    if(!response.ok){
+      let message='无法下载这个成果';
+      try{const payload=await response.json(); if(payload&&payload.error)message=payload.error;}catch(err){}
+      throw new Error(message);
+    }
+    const blob=await response.blob();
+    const link=document.createElement('a');
+    link.href=URL.createObjectURL(blob);
+    link.download=name||'download';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(function(){URL.revokeObjectURL(link.href);},1000);
+  }catch(e){
+    toast(e.message||'无法下载这个成果', true);
+  }
+}
 function flowOverviewHtml(node, tasks){
   const checks=flowChecklist(node).map(item=>{
     const kind=item[0];
@@ -7750,13 +7991,17 @@ function flowOverviewHtml(node, tasks){
   }).join('');
   const live=(tasks||[]).filter(t=>['cleaned','completed','committed','integrated','superseded'].indexOf(t.status)<0).slice(0,6);
   const rows=live.length?live.map(t=>'<div class="flow-task-row" onclick="openTaskDrawer(\''+esc(t.task_id)+'\')"><div><b>'+esc(t.task_id)+'</b><small>'+esc(t.agent||'未分配')+'</small></div><span class="fn-pill">'+esc(humanStatus(t.status))+'</span></div>').join(''):'<div class="empty">暂无进行中的任务</div>';
-  return dispatchConfirmationHtml(node.id)+currentRecovery(node.id).map(o=>recoveryCard(o,state.workflowId)).join('')+'<div class="flow-reads"><em>读作</em>'+esc(flowReads(node))+'</div><div class="flow-sec">本节点现状</div>'+checks+'<div class="flow-sec">当前任务</div>'+rows;
+  const nodePacked=workflowDeliverables();
+  const nodeItems=(nodePacked.items||[]).filter(item=>String(item.node_id)===String(node.id));
+  const nodeNotice=nodePacked.notice?'<div class="empty">'+esc(nodePacked.notice)+'</div>':'';
+  const nodeRows=nodeItems.length?nodeNotice+nodeItems.map(deliverableRowHtml).join(''):'<div class="empty">'+(nodePacked.notice?esc(nodePacked.notice):nodePacked.error?esc(nodePacked.error):'本节点还没有成果')+'</div>';
+  return dispatchConfirmationHtml(node.id)+currentRecovery(node.id).map(o=>recoveryCard(o,state.workflowId)).join('')+'<div class="flow-reads"><em>读作</em>'+esc(flowReads(node))+'</div><div class="flow-sec">本节点成果</div><div class="muted">执行任务：'+(tasks||[]).length+' 个</div>'+nodeRows+'<div class="flow-sec">本节点现状</div>'+checks+'<div class="flow-sec">当前任务</div>'+rows;
 }
 
 function flowGraphData(){return (state.workflow&&state.workflow.graph)||{nodes:[],edges:[]};}
 function initFlowGraph(){renderFlowGraph();}
 function pickDefaultFlowNodeId(nodes){if(!nodes||!nodes.length)return null;const order=['blocked','failed','working','rework'];for(const st of order){const hit=nodes.find(n=>n.status===st);if(hit)return hit.id;}const completed=new Set(nodes.filter(n=>n.status==='completed').map(n=>n.id));const waitingNext=nodes.find(n=>n.status==='waiting'&&(n.depends_on||[]).every(d=>completed.has(d)));if(waitingNext)return waitingNext.id;const waiting=nodes.find(n=>n.status==='waiting');if(waiting)return waiting.id;return nodes[0].id;}
-function setWorkspaceMode(mode){const fw=document.getElementById('flowWrap');const tl=document.getElementById('tasks');const st=document.getElementById('stages');const fs=document.getElementById('flowSummary');const ab=document.getElementById('flowAttnBar');const ctlP=document.getElementById('controllerTabView');const tplP=document.getElementById('templatesTabView');const arcP=document.getElementById('archiveTabView');const logP=document.getElementById('logsTabView');const shell=document.querySelector('.shell');if(shell)shell.dataset.workspace=mode||'flow';const isSys=(mode==='aux'||mode==='ctl'||mode==='templates'||mode==='archive'||mode==='logs');const bar=document.getElementById('canvasToolbar');if(bar)bar.style.display=isSys?'none':'flex';const tg=document.querySelector('.flow-view-toggle');if(tg)tg.style.display=isSys?'none':'inline-flex';const tf=document.querySelector('.task-filters');if(tf)tf.style.display=(isSys||mode!=='list')?'none':'flex';if(fw)fw.style.display=mode==='flow'?'flex':'none';if(fs)fs.style.display=(mode==='flow')?'block':'none';if(ab&&isSys)ab.style.display='none';if(st)st.style.display='none';if(tl)tl.style.display=(mode==='flow'||mode==='ctl'||mode==='templates'||mode==='archive'||mode==='logs')?'none':'block';if(ctlP)ctlP.hidden=(mode!=='ctl');if(tplP)tplP.hidden=(mode!=='templates');if(arcP)arcP.hidden=(mode!=='archive');if(logP)logP.hidden=(mode!=='logs');}
+function setWorkspaceMode(mode){const fw=document.getElementById('flowWrap');const tl=document.getElementById('tasks');const st=document.getElementById('stages');const fs=document.getElementById('flowSummary');const ab=document.getElementById('flowAttnBar');const ctlP=document.getElementById('controllerTabView');const tplP=document.getElementById('templatesTabView');const arcP=document.getElementById('archiveTabView');const logP=document.getElementById('logsTabView');const shell=document.querySelector('.shell');if(shell)shell.dataset.workspace=mode||'flow';const isSys=(mode==='aux'||mode==='ctl'||mode==='templates'||mode==='archive'||mode==='logs');const bar=document.getElementById('canvasToolbar');if(bar)bar.style.display=isSys?'none':'flex';const tg=document.querySelector('.flow-view-toggle');if(tg)tg.style.display=isSys?'none':'inline-flex';const tf=document.querySelector('.task-filters');if(tf)tf.style.display=(isSys||mode!=='list')?'none':'flex';if(fw)fw.style.display=mode==='flow'?'flex':'none';if(fs)fs.style.display=(mode==='flow')?'block':'none';if(ab&&isSys)ab.style.display='none';if(st)st.style.display='none';if(tl)tl.style.display=(mode==='flow'||mode==='ctl'||mode==='templates'||mode==='archive'||mode==='logs')?'none':'block';if(ctlP)ctlP.hidden=(mode!=='ctl');if(tplP)tplP.hidden=(mode!=='templates');if(arcP)arcP.hidden=(mode!=='archive');if(logP)logP.hidden=(mode!=='logs');if(typeof renderDeliverables==='function')renderDeliverables();}
 function switchWorkflowView(v){state.workflowView=(v==='list'?'list':'flow');const bf=document.getElementById('viewFlowBtn');if(bf)bf.classList.toggle('active',state.workflowView==='flow');const bl=document.getElementById('viewListBtn');if(bl)bl.classList.toggle('active',state.workflowView==='list');setWorkspaceMode(state.workflowView);if(state.workflowView==='flow')requestAnimationFrame(()=>{resizeFlowGraph();fitFlowGraph();});else renderTasks();}
 function switchFlowInspectorTab(t){state.flowInspectorTab=t;['Summary','Tasks','Context','Runtime'].forEach(k=>{const el=document.getElementById('flowTab'+k);if(el)el.classList.toggle('active',k.toLowerCase()===t);});renderNodeInspector();}
 function selectFlowNode(id){state.flowSelectedNodeId=id;updateFlowSelection();renderNodeInspector();}
@@ -8278,6 +8523,21 @@ function renderTaskActivity(task,proj){
 }
 function renderTaskArtifacts(task,proj){
   task=task||{};proj=proj||{};
+  const packed=proj.deliverables;
+  if(packed&&Array.isArray(packed.items)){
+    const items=packed.items.filter(item=>String(item.task_id||'')===String(task.task_id||''));
+    const note=deliverableNoteHtml(packed);
+    if(!items.length&&!(Array.isArray(proj.artifacts)?proj.artifacts:[]).some(a=>a&&(a.kind==='evaluation'||String(a.path||'').indexOf('.herdr-loop')>=0))){
+      return note||'<div class="empty">当前任务尚未产生可展示产物</div>';
+    }
+    const arts=(Array.isArray(proj.artifacts)?proj.artifacts:[]).filter(a=>a&&(a.kind==='evaluation'||String(a.path||'').indexOf('.herdr-loop')>=0));
+    let h=note+items.map(deliverableRowHtml).join('');
+    for(const a of arts){
+      const files=Array.isArray(a.files)&&a.files.length?`<div class="td-ev-detail">${esc(a.files.slice(0,10).join(', '))}${a.files_changed?` · 共 ${a.files_changed} 个文件`:''}</div>`:'';
+      h+=`<div class="td-art"><div class="td-art-hd"><span>${esc(a.name||a.kind||'产物')}</span><span class="badge ${a.passed?'cleaned':(a.kind==='evaluation'?'failed':'waiting')}">${esc(a.kind||'')}</span></div>${a.summary?`<div class="td-ev-detail">${esc(a.summary)}</div>`:''}${files}</div>`;
+    }
+    return h;
+  }
   const arts=Array.isArray(proj.artifacts)?proj.artifacts:[];
   const cr=task.commit_result;
   const commitSha=task.commit||task.integrated_commit||((cr&&typeof cr==='object')?(cr.commit||cr.sha||''):(typeof cr==='string'?cr:''))||'';
@@ -9301,6 +9561,14 @@ class Handler(BaseHTTPRequestHandler):
         if data is not None:p['data']=data
         if error is not None:p['error']=str(error)
         raw=json.dumps(p,ensure_ascii=False).encode(); self.send_response(status); self.send_header('Content-Type','application/json; charset=utf-8'); self.send_header('Content-Length',str(len(raw))); self.send_header('Cache-Control','no-store'); self.end_headers(); self.wfile.write(raw)
+    def send_bytes(self,status,body,headers):
+        payload=body if isinstance(body,(bytes,bytearray)) else bytes(body or b'')
+        self.send_response(status)
+        for key,value in (headers or {}).items():
+            self.send_header(key,value)
+        self.send_header('Content-Length',str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
     def send_html(self,text):
         raw=text.encode(); self.send_response(200); self.send_header('Content-Type','text/html; charset=utf-8'); self.send_header('Content-Length',str(len(raw))); self.send_header('Cache-Control','no-store'); self.end_headers(); self.wfile.write(raw)
     def send_static(self,rel):
@@ -9331,6 +9599,19 @@ class Handler(BaseHTTPRequestHandler):
             if p=='/api/run/status':return self.send_json(200,workflow_job_status(self.query().get('id',[''])[0]))
             if p=='/api/project':return self.send_json(200,project_detail(self.query().get('id',[''])[0]))
             if p=='/api/workflow':return self.send_json(200,workflow_detail(self.query().get('id',[''])[0]))
+            if p=='/api/workflow/deliverables':
+                wid=self.query().get('workflow_id',[''])[0] or self.query().get('id',[''])[0]
+                return self.send_json(200,api_workflow_deliverables(wid))
+            if p=='/api/workflow/deliverable':
+                q=self.query()
+                wid=q.get('workflow_id',[''])[0]
+                tid=q.get('task_id',[''])[0]
+                did=q.get('id',[''])[0] or q.get('deliverable_id',[''])[0]
+                download=q.get('download',[''])[0] in {'1','true','yes'}
+                result=api_read_deliverable(wid,tid,did,download=download)
+                if download:
+                    return self.send_bytes(200,result.get('body') or b'',result.get('headers') or {})
+                return self.send_json(200,{k:v for k,v in result.items() if k!='body'})
             if p=='/api/workflows':return self.send_json(200,api_workflows(self.query().get('project_id',[''])[0] or None))
             if p=='/api/task':return self.send_json(200,task_detail(self.query().get('id',[''])[0]))
             if p=='/api/archive':
@@ -9385,6 +9666,8 @@ class Handler(BaseHTTPRequestHandler):
                 wid=self.query().get('workflow_id',[''])[0] or self.query().get('id',[''])[0]
                 return self.send_json(200,api_workflow_decisions(wid))
             return self.send_json(404,error='Not Found')
+        except herdr_deliverables.DeliverableError as e:
+            return self.send_json(e.status,error=e.message)
         except Exception as e:
             self.log_message('GET %s failed: %s', self.path, e)
             return self.send_json(500,error=e)
@@ -9453,4 +9736,6 @@ def main():
         {"service": "com.user.herdr-factory-console", "pid": os.getpid(), **fingerprint}, sort_keys=True,
     ), flush=True)
     ROOT.mkdir(parents=True,exist_ok=True); print(f'{PRODUCT_NAME}控制台: http://{HOST}:{PORT}',flush=True); ThreadingHTTPServer((HOST,PORT),Handler).serve_forever()
-if __name__=='__main__':main()
+if __name__=='__main__':
+    _deliverable_observation_loader = _load_deliverable_observations
+    main()

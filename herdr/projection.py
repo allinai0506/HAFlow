@@ -463,6 +463,10 @@ def project_workflow(workflow_id: str) -> Dict[str, Any]:
         except Exception:
             pass
 
+    config = wf_entry.get("config") if isinstance(wf_entry.get("config"), dict) else {}
+    nodes = config.get("nodes") if isinstance(config.get("nodes"), list) else []
+    from .deliverables import project_for_tasks as project_deliverables
+
     return {
         "workflow_id": workflow_id,
         "status": wf_entry.get("status"),
@@ -473,6 +477,7 @@ def project_workflow(workflow_id: str) -> Dict[str, Any]:
         },
         "stall": stall_info,
         "tasks": task_projections,
+        "deliverables": project_deliverables(workflow_id, wf_tasks, nodes),
         "projected_at": time.time(),
     }
 

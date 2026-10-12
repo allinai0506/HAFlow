@@ -50,6 +50,7 @@
 | **编写或修改自动化测试** | [[dag-workflow-engine]] | `tests/test_workflow_engine.py` |
 | **工作流外部受控元语与快照回溯** | [[dag-workflow-engine]], [[task-lifecycle]] | `herdr/kernel.py`, `console/herdr_factory_console.py` |
 | **修改 Workflow 主区画布 / Inspector / 视图切换** | [[flow-workbench]] | `herdr/workflow_graph.py`, `console/herdr_factory_console.py`, `console/static/vendor/` |
+| **查看工作流交付成果（文件、提交、PR）** | [[flow-workbench]] | `herdr/deliverables.py`, `herdr/projection.py`, `console/herdr_factory_console.py` |
 | **工位实时打断与插话纠偏 (Steering Mesh & AgentAdapter)** | [[task-lifecycle]] | `herdr/steering.py`, `herdr/agent_adapter.py`, `bin/herdr-task:steer/adapters` |
 | **白盒遥测、语义提炼与产物投影 (Projection Engine)** | [[task-lifecycle]] | `herdr/projection.py`, `console/herdr_factory_console.py` |
 | **通用配置驱动与受控 MCP 生态容器 (Dynamic Config & MCP Mesh)** | [[dag-workflow-engine]] | `herdr/mcp.py`, `herdr/workflow.py` |

@@ -94,7 +94,23 @@ Inspector 不新建第二套详情或解卡系统：
 
 ## 8. 明确不做
 
-Workflow Builder / 拖拽持久化 / Stencil / 版本化 UI / 发布 / MiniMap / ELK / React / React Flow / BPMN / 全局 IA 重构，均不属于本层。
+Workflow Builder / 拖拽持久化 / Stencil / 版本化 UI / 发布 / MiniMap / ELK / React / React Flow / BPMN / 全局 IA 重构，均不属于本层。交付成果区也不改节点自动完成条件。
+
+## 9. 交付成果
+
+`FACT` 工作流页在 `flow` / `list` 模式显示 `#deliverablesPanel`。Workflow、Node、Task 三处读同一份目录：Workflow 汇总各 Node，Node 汇总所属 Task，Task 抽屉「产物」只显示该 Task 的行。身份是 `sha256(task_id + kind + key)` 的前 20 位。
+
+`FACT` 状态只使用已有事实。正式成果 `present`（已产生）只来自三种已有依据：节点输出契约里的文件名、任务上已经登记的产物或 Observation 路径、以及这次任务自己的 Git 变更。工作区里对不上这些依据的文件是 `workspace`（工作区文件），可以查看或下载，但不是正式交付。`required_outputs` 里带允许后缀的相对文件名，要到节点汇总时才判断；某个 Task 没写出的文件不会在其他 Task 上显示为未产生。当前任务都能读取、且都没有该文件时，节点才出现一条 `missing`（未产生）。已替代任务的文件保留为不可读取，但不能满足节点预期。没有当前任务能够确认时，节点显示 `unconfirmed`（不可确认），而不是已产生或未产生。契约句子（如「测试结论（PASS / FAIL）」「招标基本信息表」）不是文件，不会生成未产生行。工作区不受管或文件不可读是 `unavailable`。目录读取失败写入 `error`。扫描达到 40 个文件就停止，并写入 `notice`「成果列表可能未完整。」页面不能把失败或截断显示成没有成果。文件存在不是验收通过。这一层不写入 `verified`，也不因成果推进节点。
+
+`FACT` Context 模式只扫描该 Task 工作区里允许的业务文件，再按上面的依据区分正式成果和工作区文件。Git 模式不整库扫描，也不把派发时的 `baseline_commit` 或与它相同的 `candidate_sha` 当成这次成果。它列出相对该基线到当前 HEAD 的文件，加上 `git status --untracked-files=all` 里后缀允许的变更，并另列这次自己的提交、可靠的 http(s) PR 地址和变更清单。没有基线时，才使用任务记录里的交付 SHA。提交和变更清单不能当文件下载。
+
+`FACT` 查看和下载走 `GET /api/workflow/deliverable`。服务端按工作流和任务重建相对路径，拒绝工作区之外、路径穿越、符号链接越界、敏感文件名和超限文件。Markdown 预览先转义再渲染少量标记。下载响应使用附件、`nosniff` 和 `sandbox`。
+
+Evidence:
+- `herdr/deliverables.py` — `project_for_tasks` / `read_deliverable` / `resolve_workspace_file`
+- `herdr/projection.py` — `project_workflow` 附带 `deliverables`
+- `console/herdr_factory_console.py` — `api_workflow_deliverables` / `renderDeliverables` / `renderTaskArtifacts`
+- `tests/test_deliverables.py`
 
 Evidence:
 - `herdr/workflow_graph.py` — `workflow_graph_projection` / `aggregate_node_status` / `pick_default_node`
