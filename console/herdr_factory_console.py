@@ -5288,7 +5288,7 @@ body {
 }
 .deep-drawer.collapsed {
   transform: translateY(calc(100% - 48px)) !important;
-  clip-path: none !important;
+  clip-path: inset(0 0 calc(100% - 48px) 0) !important;
 }
 .drawer-pill {
   background: #eff6ff !important;
@@ -5317,6 +5317,87 @@ body {
 .sidebar-resizer-handle:hover, .sidebar-resizer-handle.is-dragging {
   background: #3b82f6 !important;
   opacity: 0.6 !important;
+}
+
+/* Quiet detail pass: one accent, calmer chrome, no extra layout. */
+::selection { background: rgba(37, 99, 235, .16); }
+.sidebar-scroll::-webkit-scrollbar { width: 10px; }
+.sidebar-scroll::-webkit-scrollbar-thumb {
+  background: rgba(15, 23, 42, .16);
+  border: 3px solid #f8fafc;
+  border-radius: 99px;
+}
+.item-icon-svg { margin-right: 0 !important; }
+.sidebar-item.danger-item { color: #64748b !important; }
+.sidebar-item.danger-item .item-icon-svg { color: #94a3b8 !important; }
+.sidebar-item.danger-item:hover { background: #fef2f2 !important; color: #b91c1c !important; }
+.sidebar-item.danger-item:hover .item-icon-svg { color: #b91c1c !important; }
+.online-pill.is-idle {
+  background: #f1f5f9 !important;
+  color: #64748b !important;
+}
+.pulse-indicator { animation: none; }
+#sidebarWorkflowGroups .sidebar-item {
+  align-items: center;
+  line-height: 1.45;
+  padding-top: 8px !important;
+  padding-bottom: 8px !important;
+}
+#sidebarWorkflowGroups .item-text {
+  color: #334155;
+  line-height: 1.45;
+}
+.rail-item.active, .rail-item.on {
+  background: #eff6ff;
+  color: #2563eb;
+}
+.rail-item.active::before, .rail-item.on::before { background: #2563eb; }
+.flow-view-toggle .filter-btn.active {
+  background: #ffffff;
+  color: #0f172a;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, .06);
+}
+.canvas-wf-title:hover { color: #1d4ed8; }
+.canvas-wf-id-pill:hover {
+  background: #fff;
+  border-color: #bfdbfe;
+  color: #1d4ed8;
+}
+.flow-insp-tab.active { box-shadow: inset 0 -2px 0 #2563eb; }
+.btn-bottom-action { color: #2563eb; }
+.btn-bottom-action:hover {
+  background: #eff6ff;
+  border-color: #bfdbfe;
+}
+#flowCanvasWrap {
+  background-color: #f8fafc;
+  background-image: radial-gradient(rgba(15, 23, 42, .075) 1px, transparent 1.2px);
+}
+#flowInspectorBody {
+  display: flex;
+  flex-direction: column;
+}
+#flowInspectorBody > .insp-empty {
+  flex: 1;
+  min-height: 220px;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  text-align: center;
+  color: #94a3b8;
+}
+#flowInspectorBody > .insp-empty strong {
+  color: #334155;
+  font-size: 13px;
+  font-weight: 600;
+}
+#flowInspectorBody > .insp-empty span {
+  max-width: 220px;
+  font-size: 12px;
+  line-height: 1.65;
 }
 
 </style>
@@ -5419,7 +5500,7 @@ body {
           <span>项目治理与审计</span>
         </div>
         <div class="sidebar-item highlight-governance" id="navController" onclick="openControllerCockpitModal()" title="Controller 协调器调度控制台">
-          <span class="item-icon">🎮</span>
+          <svg class="item-icon-svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
           <span class="item-text">Controller 控制台</span>
           <span class="pulse-indicator" title="协调器调度活跃"></span>
         </div>
@@ -5441,10 +5522,10 @@ body {
           <span class="item-text">注销项目</span>
         </div>
       </div>
-      <div class="side-foot">
-        <b id="sideFootTitle">当前工厂</b>
-        <span>日志与归档可回看</span>
-      </div>
+    </div>
+    <div class="side-foot">
+      <b id="sideFootTitle">当前工厂</b>
+      <span>日志与归档可回看</span>
     </div>
   </aside>
   <main class="main">
@@ -5548,7 +5629,7 @@ body {
               <button class="flow-insp-tab" id="flowTabContext" onclick="switchFlowInspectorTab('context')">上下文</button>
               <button class="flow-insp-tab" id="flowTabRuntime" onclick="switchFlowInspectorTab('runtime')">运行</button>
             </div>
-            <div id="flowInspectorBody"></div>
+            <div id="flowInspectorBody"><div class="empty insp-empty"><strong>还没有选中节点</strong><span>在流程图里点一个阶段，这里会显示任务、上下文和运行情况。</span></div></div>
           </aside>
         </div>
         <div id="tasks" class="task-list" style="display:none"></div>
@@ -5574,7 +5655,7 @@ body {
       </div>
       <div class="bottom-right">
         <span class="bottom-stat">活跃执行者: <b id="bottomActiveWorkers">0</b></span>
-        <span class="bottom-stat">轮询延迟: <b id="bottomPollLatency">8ms</b></span>
+        <span class="bottom-stat">轮询延迟: <b id="bottomPollLatency">—</b></span>
         <button type="button" class="btn-bottom-action" onclick="toggleDeepDrawer()">
           <span id="bottomDrawerText">▲ 底层现场</span>
         </button>
@@ -5786,9 +5867,15 @@ function syncOpsUi(){
 }
 
 async function api(p,o={}){
+  const started=performance.now();
   const r=await fetch(p,{headers:{'Content-Type':'application/json'},...o});
   const d=await r.json();
   if(!r.ok||d.ok===false)throw new Error(d.error||('HTTP '+r.status));
+  const latency=document.getElementById('bottomPollLatency');
+  if(latency){
+    const ms=Math.max(1,Math.round(performance.now()-started));
+    latency.textContent=ms>=1000?(ms/1000).toFixed(1)+'s':ms+'ms';
+  }
   return d.data??d
 }
 function friendlyErrorChinese(raw){
@@ -6963,6 +7050,16 @@ async function loadProject(id,rer=true){
   renderWorkflowTabs();
   if(isSysTab){
     paintCrumb();
+    const sysId=state.workflowId;
+    if(sysId==='__ctl__'){
+      const anchor=(state.workflow&&state.workflow.workflow&&state.workflow.workflow.workflow_id)||(state.project&&state.project.latest_workflow_id);
+      if(anchor&&!(state.controllerActionsData&&state.workflow&&state.workflow.workflow&&state.workflow.workflow.workflow_id===anchor)){
+        if(!state.workflow||!state.workflow.workflow)state.workflow={workflow:{workflow_id:anchor}};
+        await loadWorkflow(anchor);
+      }else if(typeof openControllerCockpitModal==='function')openControllerCockpitModal();
+    }else if(sysId==='__templates__'&&typeof showTemplateLibrary==='function')showTemplateLibrary();
+    else if(sysId==='__archive__'&&typeof showArchive==='function')showArchive();
+    else if(sysId==='__logs__'&&typeof showLogs==='function')showLogs();
   }else if(state.workflowId){
     await loadWorkflow(state.workflowId);
   }else{
@@ -7350,28 +7447,24 @@ function renderWorkflowTabs(){
     const isActive=wid===state.workflowId;
     if(wid==='__ctl__'){
       return `<div class="wf-tab ${isActive?'active':''}" onclick="openWorkflowTab('__ctl__')" title="Controller 调度与解卡控制台" role="tab" aria-selected="${isActive}">`+
-        `<span class="tab-dot running" aria-hidden="true"></span>`+
         `<svg class="tab-icon-svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polygon points="10 8 16 12 10 16 10 8"/></svg><span class="tab-title">Controller 控制台</span>`+
         `<button type="button" class="tab-close" onclick="closeWorkflowTab('__ctl__',event)" title="关闭页签" aria-label="关闭页签">×</button>`+
         `</div>`;
     }
     if(wid==='__templates__'){
       return `<div class="wf-tab ${isActive?'active':''}" onclick="openWorkflowTab('__templates__')" title="工作流模板规范库" role="tab" aria-selected="${isActive}">`+
-        `<span class="tab-dot completed" aria-hidden="true"></span>`+
         `<svg class="tab-icon-svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg><span class="tab-title">模板规范库</span>`+
         `<button type="button" class="tab-close" onclick="closeWorkflowTab('__templates__',event)" title="关闭页签" aria-label="关闭页签">×</button>`+
         `</div>`;
     }
     if(wid==='__archive__'){
       return `<div class="wf-tab ${isActive?'active':''}" onclick="openWorkflowTab('__archive__')" title="任务归档与冷存储" role="tab" aria-selected="${isActive}">`+
-        `<span class="tab-dot completed" aria-hidden="true"></span>`+
         `<svg class="tab-icon-svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 8v13H3V8"/><path d="M1 3h22v5H1z"/><path d="M10 12h4"/></svg><span class="tab-title">任务归档</span>`+
         `<button type="button" class="tab-close" onclick="closeWorkflowTab('__archive__',event)" title="关闭页签" aria-label="关闭页签">×</button>`+
         `</div>`;
     }
     if(wid==='__logs__'){
       return `<div class="wf-tab ${isActive?'active':''}" onclick="openWorkflowTab('__logs__')" title="调度审计日志" role="tab" aria-selected="${isActive}">`+
-        `<span class="tab-dot running" aria-hidden="true"></span>`+
         `<svg class="tab-icon-svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1-2.5-2.5Z"/><path d="M6 6h10"/><path d="M6 10h10"/></svg><span class="tab-title">调度审计日志</span>`+
         `<button type="button" class="tab-close" onclick="closeWorkflowTab('__logs__',event)" title="关闭页签" aria-label="关闭页签">×</button>`+
         `</div>`;
@@ -7704,7 +7797,10 @@ function paintCrumb(){
   const resCountEl=document.getElementById('sidebarResourceCounts');
   if(resCountEl)resCountEl.textContent=`${activeAgents}/${slotsCount}`;
   const onlinePill=document.getElementById('sidebarOnlinePill');
-  if(onlinePill)onlinePill.textContent=`${activeAgents} 在线`;
+  if(onlinePill){
+    onlinePill.textContent=`${activeAgents} 在线`;
+    if(onlinePill.classList)onlinePill.classList.toggle('is-idle',!activeAgents);
+  }
   const fleetNames=document.getElementById('sidebarFleetNames');
   if(fleetNames){
     const agents=(state.project&&state.project.agents)||[];
@@ -8160,7 +8256,7 @@ function renderFlowGraph(){
 }
 function flowNodeById(id){const g=flowGraphData();return (g.nodes||[]).find(n=>n.id===id)||null;}
 function flowTasksForNode(nodeId){const ts=(state.workflow&&state.workflow.tasks)||[];return ts.filter(t=>String(t.node||t.stage||'')===String(nodeId)&&t.status!=='superseded'&&!t.superseded_by);}
-function renderNodeInspector(){const body=document.getElementById('flowInspectorBody');const title=document.getElementById('flowInspTitle');const meta=document.getElementById('flowInspMeta');if(!body)return;const node=flowNodeById(state.flowSelectedNodeId);if(!node){if(title)title.textContent='节点详情';if(meta)meta.textContent='—';body.innerHTML='<div class="empty">暂无节点</div>';return;}if(title)title.textContent=cleanStageLabel(node.label||node.id);if(meta)meta.textContent=(node.node_type||'agent').toUpperCase()+' · '+flowNodeStatus(node,humanNodeStatus(node.status));const tab=state.flowInspectorTab||'summary';if(tab==='tasks'){const nts=flowTasksForNode(node.id);body.innerHTML=nts.length?nts.map(t=>`<div class="flow-task-row" onclick="openTaskDrawer('${esc(t.task_id)}')"><span><strong>${esc(t.task_id)}</strong><span class="muted"> · ${esc(t.agent||'未分配')}</span></span><span>${badge(t.status)}</span></div>`).join(''):'<div class="empty">该节点暂无任务</div>';return;}if(tab==='context'){const ctx=(state.workflow&&state.workflow.context)||{required:[],optional:[]};const req=ctx.required||[];const opt=ctx.optional||[];body.innerHTML=`<div class="proj-sec"><div class="proj-lbl">必需上下文</div>${req.length?req.map(c=>`<div>· ${esc(typeof c==='string'?c:(c.id||c))}</div>`).join(''):'<div class="muted">—</div>'}</div><div class="proj-sec"><div class="proj-lbl">可选上下文</div>${opt.length?opt.map(c=>`<div>· ${esc(typeof c==='string'?c:(c.id||c))}</div>`).join(''):'<div class="muted">—</div>'}</div><div class="muted" style="margin-top:8px">仅显示真实 Context Contract；无绑定信息时不伪造已加载。</div>`;return;}if(tab==='runtime'){const nts=flowTasksForNode(node.id);body.innerHTML=nts.length?nts.map(t=>`<div class="flow-node-card" style="margin-bottom:8px"><div><strong>${esc(t.task_id)}</strong> ${badge(t.status)}</div><dl class="flow-kv" style="margin-top:8px"><dt>执行者</dt><dd>${esc(t.agent||'—')}</dd><dt>工位</dt><dd>${esc(t.pane_id||'—')}</dd><dt>更新</dt><dd>${esc(t.updated_at||t.last_activity_at||'—')}</dd><dt>分支</dt><dd>${esc(t.candidate_sha||t.integration_branch||'—')}</dd><dt>结论</dt><dd>${esc(t.stage_verdict||'—')}</dd></dl></div>`).join(''):'<div class="empty">暂无运行时信息</div>';return;}const nts=flowTasksForNode(node.id);const acts=(state.controllerActionsData&&state.controllerActionsData.actions)||[];const mine=acts.filter(a=>((a.blocker_task_id||a.old_task_id||String(a.action_id||'').split(':')[0])===node.id)||(node.task_ids||[]).includes(a.blocker_task_id||a.old_task_id));const shown=mine.slice(0,2);const actHtml=shown.length?`<div class="flow-attn"><div class="flow-sec">需要处理</div>${shown.map(a=>`<div class="flow-node-card" style="margin-bottom:8px"><div><strong>${esc(a.title||a.action_id)}</strong></div><div class="muted" style="margin:4px 0">${esc(a.effect||a.description||'')}</div><div style="display:flex;gap:8px;justify-content:flex-end"><button class="mini" onclick="locateControllerTask('${esc(a.blocker_task_id||a.old_task_id||'')}')">查看任务</button><button class="btn primary" style="padding:3px 8px;font-size:11.5px" onclick="executeControllerAction('${esc(a.action_id)}','${esc(state.workflowId)}')">一键执行</button></div></div>`).join('')}</div>`:(node.has_attention?'<div class="muted">该节点需关注，暂无可用一键解卡建议，请查看任务详情。</div>':'');body.innerHTML=flowOverviewHtml(node, nts)+actHtml;}
+function renderNodeInspector(){const body=document.getElementById('flowInspectorBody');const title=document.getElementById('flowInspTitle');const meta=document.getElementById('flowInspMeta');if(!body)return;const node=flowNodeById(state.flowSelectedNodeId);if(!node){if(title)title.textContent='节点详情';if(meta)meta.textContent='未选择';body.innerHTML='<div class="empty insp-empty"><strong>还没有选中节点</strong><span>在流程图里点一个阶段，这里会显示任务、上下文和运行情况。</span></div>';return;}if(title)title.textContent=cleanStageLabel(node.label||node.id);if(meta)meta.textContent=(node.node_type||'agent').toUpperCase()+' · '+flowNodeStatus(node,humanNodeStatus(node.status));const tab=state.flowInspectorTab||'summary';if(tab==='tasks'){const nts=flowTasksForNode(node.id);body.innerHTML=nts.length?nts.map(t=>`<div class="flow-task-row" onclick="openTaskDrawer('${esc(t.task_id)}')"><span><strong>${esc(t.task_id)}</strong><span class="muted"> · ${esc(t.agent||'未分配')}</span></span><span>${badge(t.status)}</span></div>`).join(''):'<div class="empty">该节点暂无任务</div>';return;}if(tab==='context'){const ctx=(state.workflow&&state.workflow.context)||{required:[],optional:[]};const req=ctx.required||[];const opt=ctx.optional||[];body.innerHTML=`<div class="proj-sec"><div class="proj-lbl">必需上下文</div>${req.length?req.map(c=>`<div>· ${esc(typeof c==='string'?c:(c.id||c))}</div>`).join(''):'<div class="muted">—</div>'}</div><div class="proj-sec"><div class="proj-lbl">可选上下文</div>${opt.length?opt.map(c=>`<div>· ${esc(typeof c==='string'?c:(c.id||c))}</div>`).join(''):'<div class="muted">—</div>'}</div><div class="muted" style="margin-top:8px">仅显示真实 Context Contract；无绑定信息时不伪造已加载。</div>`;return;}if(tab==='runtime'){const nts=flowTasksForNode(node.id);body.innerHTML=nts.length?nts.map(t=>`<div class="flow-node-card" style="margin-bottom:8px"><div><strong>${esc(t.task_id)}</strong> ${badge(t.status)}</div><dl class="flow-kv" style="margin-top:8px"><dt>执行者</dt><dd>${esc(t.agent||'—')}</dd><dt>工位</dt><dd>${esc(t.pane_id||'—')}</dd><dt>更新</dt><dd>${esc(t.updated_at||t.last_activity_at||'—')}</dd><dt>分支</dt><dd>${esc(t.candidate_sha||t.integration_branch||'—')}</dd><dt>结论</dt><dd>${esc(t.stage_verdict||'—')}</dd></dl></div>`).join(''):'<div class="empty">暂无运行时信息</div>';return;}const nts=flowTasksForNode(node.id);const acts=(state.controllerActionsData&&state.controllerActionsData.actions)||[];const mine=acts.filter(a=>((a.blocker_task_id||a.old_task_id||String(a.action_id||'').split(':')[0])===node.id)||(node.task_ids||[]).includes(a.blocker_task_id||a.old_task_id));const shown=mine.slice(0,2);const actHtml=shown.length?`<div class="flow-attn"><div class="flow-sec">需要处理</div>${shown.map(a=>`<div class="flow-node-card" style="margin-bottom:8px"><div><strong>${esc(a.title||a.action_id)}</strong></div><div class="muted" style="margin:4px 0">${esc(a.effect||a.description||'')}</div><div style="display:flex;gap:8px;justify-content:flex-end"><button class="mini" onclick="locateControllerTask('${esc(a.blocker_task_id||a.old_task_id||'')}')">查看任务</button><button class="btn primary" style="padding:3px 8px;font-size:11.5px" onclick="executeControllerAction('${esc(a.action_id)}','${esc(state.workflowId)}')">一键执行</button></div></div>`).join('')}</div>`:(node.has_attention?'<div class="muted">该节点需关注，暂无可用一键解卡建议，请查看任务详情。</div>':'');body.innerHTML=flowOverviewHtml(node, nts)+actHtml;}
 let _resizeFlowDebounce=null;
 window.addEventListener('resize',()=>{
   clearTimeout(_resizeFlowDebounce);
@@ -8892,7 +8988,8 @@ async function submitDecision(decisionId){
 }
 function openControllerCockpitModal(){
   const w=state.workflow&&state.workflow.workflow;
-  const wid=(w&&w.workflow_id)||state.workflowId||'未选择工作流';
+  const picked=(w&&w.workflow_id)||state.workflowId||'';
+  const wid=picked&&!String(picked).startsWith('__')?picked:'未选择工作流';
   const stall=state.workflow&&state.workflow.stall;
   const allActs=(state.controllerActionsData&&state.controllerActionsData.actions)||[];
   const blockers=(state.controllerActionsData&&state.controllerActionsData.blockers)||[];
