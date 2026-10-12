@@ -1335,13 +1335,47 @@ def _workflow_nodes(wid, w=None):
     nodes = definition.get('nodes') if isinstance(definition, dict) else None
     return nodes or []
 
+_deliverable_observation_loader = None
+
+def _load_deliverable_observations(task_id):
+    if not task_id:
+        return []
+    db_path = Path(os.environ['HERDR_STATE_DB']) if os.environ.get('HERDR_STATE_DB') else Path(TASKS_FILE).parent / 'state.db'
+    if not db_path.is_file():
+        return []
+    try:
+        from herdr.state_db import list_observations
+        return list_observations(task_id=str(task_id), source_type='artifact', limit=40, db_path=db_path)
+    except Exception:
+        return []
+
+def _tasks_for_deliverables(tasks):
+    loader = _deliverable_observation_loader
+    if not loader:
+        return list(tasks or [])
+    rows = []
+    for task in tasks or []:
+        if not isinstance(task, dict):
+            continue
+        row = dict(task)
+        try:
+            extra = loader(row.get('task_id')) or []
+        except Exception:
+            extra = []
+        if extra:
+            row['observations'] = list(row.get('observations') or []) + list(extra)
+        rows.append(row)
+    return rows
+
 def api_workflow_deliverables(wid):
     if not wid:
         raise RuntimeError('workflow_id 不能为空')
     w = workflows().get(wid)
     if not w:
         raise RuntimeError('工作流不存在')
-    return herdr_deliverables.project_for_tasks(wid, tasks_for_workflow(wid), _workflow_nodes(wid, w))
+    return herdr_deliverables.project_for_tasks(
+        wid, _tasks_for_deliverables(tasks_for_workflow(wid)), _workflow_nodes(wid, w),
+    )
 
 def api_read_deliverable(wid, tid, did, download=False):
     if not wid or not tid or not did:
@@ -1350,7 +1384,7 @@ def api_read_deliverable(wid, tid, did, download=False):
     if not w:
         raise herdr_deliverables.DeliverableError('not_found', 404, '找不到这项成果')
     return herdr_deliverables.read_deliverable(
-        wid, tasks_for_workflow(wid), _workflow_nodes(wid, w), tid, did, download=download,
+        wid, _tasks_for_deliverables(tasks_for_workflow(wid)), _workflow_nodes(wid, w), tid, did, download=download,
     )
 
 def api_task_projection(tid):
@@ -1359,8 +1393,10 @@ def api_task_projection(tid):
     wid = proj.get('workflow_id')
     try:
         if wid:
-            own = [task for task in tasks_for_workflow(wid) if task.get('task_id') == tid]
-            proj['deliverables'] = herdr_deliverables.project_for_tasks(wid, own, _workflow_nodes(wid))
+            own = [task for task in _tasks_for_deliverables(tasks_for_workflow(wid)) if task.get('task_id') == tid]
+            proj['deliverables'] = herdr_deliverables.project_for_tasks(
+                wid, own, _workflow_nodes(wid), include_expectations=False,
+            )
         else:
             proj['deliverables'] = herdr_deliverables.pack([])
     except Exception:
@@ -7851,11 +7887,18 @@ function flowChecklist(node){
 function workflowDeliverables(){
   const packed=state.workflow&&state.workflow.deliverables;
   if(packed&&Array.isArray(packed.items))return packed;
-  return {items:[],counts:{present:0,missing:0,unavailable:0,verified:0}};
+  return {items:[],counts:{present:0,missing:0,unavailable:0,verified:0,workspace:0}};
+}
+function deliverableNoteHtml(packed){
+  const bits=[];
+  if(packed&&packed.error)bits.push('<div class="empty">'+esc(packed.error)+'</div>');
+  if(packed&&packed.notice)bits.push('<div class="empty">'+esc(packed.notice)+'</div>');
+  return bits.join('');
 }
 function deliverableCountsText(counts){
   counts=counts||{};
   const parts=['已产生 '+(Number(counts.present)||0)+' 项'];
+  if(counts.workspace)parts.push('工作区文件 '+counts.workspace+' 项');
   if(counts.missing)parts.push('未产生 '+counts.missing+' 项');
   if(counts.unavailable)parts.push('不可读取 '+counts.unavailable+' 项');
   if(counts.verified)parts.push('已验证 '+counts.verified+' 项');
@@ -7894,7 +7937,7 @@ function renderDeliverables(){
   panel.hidden=false;
   const packed=workflowDeliverables();
   if(count)count.textContent=deliverableCountsText(packed.counts);
-  const note=packed.error?'<div class="empty">'+esc(packed.error)+'</div>':'';
+  const note=deliverableNoteHtml(packed);
   if(!packed.items.length){
     body.innerHTML=note||'<div class="empty">这次工作流还没有交付成果。文件写进任务工作区后，会显示在这里。</div>';
     return;
@@ -7944,7 +7987,8 @@ function flowOverviewHtml(node, tasks){
   const rows=live.length?live.map(t=>'<div class="flow-task-row" onclick="openTaskDrawer(\''+esc(t.task_id)+'\')"><div><b>'+esc(t.task_id)+'</b><small>'+esc(t.agent||'未分配')+'</small></div><span class="fn-pill">'+esc(humanStatus(t.status))+'</span></div>').join(''):'<div class="empty">暂无进行中的任务</div>';
   const nodePacked=workflowDeliverables();
   const nodeItems=(nodePacked.items||[]).filter(item=>String(item.node_id)===String(node.id));
-  const nodeRows=nodeItems.length?nodeItems.map(deliverableRowHtml).join(''):'<div class="empty">'+(nodePacked.error?esc(nodePacked.error):'本节点还没有成果')+'</div>';
+  const nodeNotice=nodePacked.notice?'<div class="empty">'+esc(nodePacked.notice)+'</div>':'';
+  const nodeRows=nodeItems.length?nodeNotice+nodeItems.map(deliverableRowHtml).join(''):'<div class="empty">'+(nodePacked.notice?esc(nodePacked.notice):nodePacked.error?esc(nodePacked.error):'本节点还没有成果')+'</div>';
   return dispatchConfirmationHtml(node.id)+currentRecovery(node.id).map(o=>recoveryCard(o,state.workflowId)).join('')+'<div class="flow-reads"><em>读作</em>'+esc(flowReads(node))+'</div><div class="flow-sec">本节点成果</div><div class="muted">执行任务：'+(tasks||[]).length+' 个</div>'+nodeRows+'<div class="flow-sec">本节点现状</div>'+checks+'<div class="flow-sec">当前任务</div>'+rows;
 }
 
@@ -8475,11 +8519,13 @@ function renderTaskArtifacts(task,proj){
   task=task||{};proj=proj||{};
   const packed=proj.deliverables;
   if(packed&&Array.isArray(packed.items)){
-    if(packed.error&&!packed.items.length)return '<div class="empty">'+esc(packed.error)+'</div>';
-    const items=packed.items;
+    const items=packed.items.filter(item=>String(item.task_id||'')===String(task.task_id||''));
+    const note=deliverableNoteHtml(packed);
+    if(!items.length&&!(Array.isArray(proj.artifacts)?proj.artifacts:[]).some(a=>a&&(a.kind==='evaluation'||String(a.path||'').indexOf('.herdr-loop')>=0))){
+      return note||'<div class="empty">当前任务尚未产生可展示产物</div>';
+    }
     const arts=(Array.isArray(proj.artifacts)?proj.artifacts:[]).filter(a=>a&&(a.kind==='evaluation'||String(a.path||'').indexOf('.herdr-loop')>=0));
-    if(!items.length&&!arts.length)return '<div class="empty">当前任务尚未产生可展示产物</div>';
-    let h=items.map(deliverableRowHtml).join('');
+    let h=note+items.map(deliverableRowHtml).join('');
     for(const a of arts){
       const files=Array.isArray(a.files)&&a.files.length?`<div class="td-ev-detail">${esc(a.files.slice(0,10).join(', '))}${a.files_changed?` · 共 ${a.files_changed} 个文件`:''}</div>`:'';
       h+=`<div class="td-art"><div class="td-art-hd"><span>${esc(a.name||a.kind||'产物')}</span><span class="badge ${a.passed?'cleaned':(a.kind==='evaluation'?'failed':'waiting')}">${esc(a.kind||'')}</span></div>${a.summary?`<div class="td-ev-detail">${esc(a.summary)}</div>`:''}${files}</div>`;
@@ -9676,6 +9722,8 @@ def main():
         )
     except Exception:
         fingerprint = {"running_sha": "unknown", "running_import_root": "unknown", "component_versions": {}}
+    global _deliverable_observation_loader
+    _deliverable_observation_loader = _load_deliverable_observations
     print("HERDR_RUNTIME_FINGERPRINT=" + json.dumps(
         {"service": "com.user.herdr-factory-console", "pid": os.getpid(), **fingerprint}, sort_keys=True,
     ), flush=True)

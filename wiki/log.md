@@ -2430,5 +2430,5 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
   - S6 独立评审工件 `.omc/review-48423e5e-f483-48ea-af18-37b5f3b6b744.md` 裁定 `MERGE_READY`。
 
 ## [2026-10-12] feat | 工作流页交付成果 V1
-- Updated [[flow-workbench]]: 记录 Workflow / Node / Task 共用的交付成果目录。契约句子不是缺失文件；Git 不把派发基线 `baseline_commit` 或与它相同的 `candidate_sha` 当成这次成果，列出基线到当前 HEAD 的文件和未提交变更，没有基线时才用任务记录里的交付 SHA；读取失败不能显示成没有成果。
+- Updated [[flow-workbench]]: 记录 Workflow / Node / Task 共用的交付成果目录。正式成果只来自输出契约、已登记产物或 Observation、以及这次任务的 Git 变更；其余工作区文件单独标出。节点预期在节点上汇总，不要求每个 Task 产出整份清单。扫描达到上限时提示列表可能未完整。契约句子不是缺失文件；Git 不把派发基线当成这次成果。读取失败不能显示成没有成果。
 - Updated [[index]]: 增加查看工作流交付成果的入口。

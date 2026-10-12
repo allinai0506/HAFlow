@@ -1,7 +1,9 @@
 """User-facing deliverables for one task workspace.
 
 A deliverable belongs to one task. Node and workflow views roll up the same
-records. A file on disk is `present`; it is never treated as verified.
+records. A file is `present` only when a contract, a recorded output, or this
+task's Git changes identify it. Other workspace files stay `workspace`.
+Nothing here is treated as verified.
 """
 
 from __future__ import annotations
@@ -36,7 +38,10 @@ STATUS_LABELS = {
     "missing": "未产生",
     "unavailable": "不可读取",
     "verified": "已验证",
+    "workspace": "工作区文件",
 }
+TRUNCATED_NOTICE = "成果列表可能未完整。"
+_RECORDED_KEYS = ("artifacts", "artifact_refs", "changed_artifacts", "deliverables", "observations")
 
 
 class DeliverableError(Exception):
@@ -47,8 +52,8 @@ class DeliverableError(Exception):
         self.message = message
 
 
-def pack(items: List[Dict[str, Any]], error: str = "") -> Dict[str, Any]:
-    counts = {"present": 0, "missing": 0, "unavailable": 0, "verified": 0}
+def pack(items: List[Dict[str, Any]], error: str = "", truncated: bool = False) -> Dict[str, Any]:
+    counts = {"present": 0, "missing": 0, "unavailable": 0, "verified": 0, "workspace": 0}
     for item in items:
         status = item.get("status")
         if status in counts:
@@ -56,6 +61,9 @@ def pack(items: List[Dict[str, Any]], error: str = "") -> Dict[str, Any]:
     packed: Dict[str, Any] = {"items": items, "counts": counts}
     if error:
         packed["error"] = error
+    if truncated:
+        packed["truncated"] = True
+        packed["notice"] = TRUNCATED_NOTICE
     return packed
 
 
@@ -63,18 +71,26 @@ def project_for_tasks(
     workflow_id: str,
     tasks: Iterable[Dict[str, Any]],
     nodes: Optional[Iterable[Dict[str, Any]]] = None,
+    *,
+    include_expectations: bool = True,
 ) -> Dict[str, Any]:
     node_list = [node for node in (nodes or []) if isinstance(node, dict)]
+    task_list = [
+        task for task in (tasks or [])
+        if isinstance(task, dict) and task.get("workflow_id") == workflow_id
+    ]
     items: List[Dict[str, Any]] = []
     error = ""
-    for task in tasks or []:
-        if not isinstance(task, dict) or task.get("workflow_id") != workflow_id:
-            continue
-        rows, task_error = _task_items(task, node_list)
+    truncated = False
+    for task in task_list:
+        rows, task_error, task_truncated = _task_items(task, node_list)
         items.extend(rows)
         if task_error and not error:
             error = task_error
-    return pack(_dedupe(items), error)
+        truncated = truncated or task_truncated
+    if include_expectations:
+        items.extend(_node_gaps(workflow_id, task_list, node_list, items))
+    return pack(_dedupe(items), error, truncated)
 
 
 def read_deliverable(
@@ -96,7 +112,7 @@ def read_deliverable(
     item = next((row for row in packed["items"] if row.get("id") == deliverable_id), None)
     if item is None:
         raise DeliverableError("not_found", 404, "找不到这项成果")
-    if not item.get("readable") or item.get("status") != "present":
+    if not item.get("readable") or item.get("status") not in {"present", "workspace"}:
         raise DeliverableError("unavailable", 409, item.get("reason") or "成果当前不可读取")
     task = owned[0]
     workspace = _workspace(task)
@@ -229,11 +245,7 @@ def safe_markdown_html(text: str) -> str:
 
 def _task_items(task: Dict[str, Any], nodes: List[Dict[str, Any]]):
     node_id, node_label = _node_of(task, nodes)
-    expected = []
-    for raw in _expected_for(node_id, nodes):
-        token = _file_output_token(raw)
-        if token and token not in expected:
-            expected.append(token)
+    expected = _file_tokens(_expected_for(node_id, nodes))
     retired = task.get("status") == "superseded" or bool(task.get("superseded_by"))
     workspace = _workspace(task)
     error = ""
@@ -242,32 +254,48 @@ def _task_items(task: Dict[str, Any], nodes: List[Dict[str, Any]]):
         error = "任务工作区不在受管目录内，不能读取。"
     elif workspace is not None and (workspace / ".git").exists():
         changed, error = _changed_files(workspace)
-    present, walk_error = _present_rels(task, workspace, expected, changed)
+    present, walk_error, truncated, git_rels = _present_rels(task, workspace, expected, changed)
     if walk_error and not error:
         error = walk_error
-    matched = set()
-    items: List[Dict[str, Any]] = []
-    for rel in present:
-        if any(_same_output(token, rel) for token in expected):
-            matched.update(token for token in expected if _same_output(token, rel))
-        items.append(_file_item(task, node_id, node_label, rel, retired))
-    for token in expected:
-        if token in matched:
-            continue
-        if workspace is None or _lookup(workspace, token) != "absent":
-            items.append(_unavailable_item(task, node_id, node_label, token, workspace is None))
-            continue
-        items.append(_missing_item(task, node_id, node_label, token))
+    registered = _registered_rels(task, workspace)
+    items = [
+        _file_item(
+            task, node_id, node_label, rel, retired,
+            _is_formal(rel, expected, registered, git_rels),
+        )
+        for rel in present
+    ]
     items.extend(_git_items(task, node_id, node_label, retired, changed, workspace))
-    return items, error
+    return items, error, truncated
 
 
-def _file_item(task, node_id, node_label, rel, retired) -> Dict[str, Any]:
+def _file_tokens(raw_items: Iterable[Any]) -> List[str]:
+    tokens: List[str] = []
+    for raw in raw_items or []:
+        token = _file_output_token(str(raw))
+        if token and token not in tokens:
+            tokens.append(token)
+    return tokens
+
+
+def _is_formal(rel: str, expected: Iterable[str], registered: Iterable[str], git_rels: Iterable[str]) -> bool:
+    if rel in set(git_rels):
+        return True
+    return any(_same_output(token, rel) for token in list(expected) + list(registered))
+
+
+def _file_item(task, node_id, node_label, rel, retired, formal) -> Dict[str, Any]:
     name = Path(rel).name
     kind, type_label = _classify(name)
-    status = "unavailable" if retired else "present"
-    reason = "所属任务已替代，不能当作当前成果打开。" if retired else ""
-    actions = [] if retired else (["view", "download"] if Path(name).suffix.lower() in TEXT_SUFFIXES else ["download"])
+    if retired:
+        status, reason, actions = "unavailable", "所属任务已替代，不能当作当前成果打开。", []
+    elif formal:
+        status, reason = "present", ""
+        actions = ["view", "download"] if Path(name).suffix.lower() in TEXT_SUFFIXES else ["download"]
+    else:
+        status = "workspace"
+        reason = "这个文件在任务工作区里，但没有登记为本次任务的交付成果。"
+        actions = ["view", "download"] if Path(name).suffix.lower() in TEXT_SUFFIXES else ["download"]
     return _base(
         task, node_id, node_label,
         kind=kind, key=rel, name=name, type_label=type_label,
@@ -276,23 +304,59 @@ def _file_item(task, node_id, node_label, rel, retired) -> Dict[str, Any]:
     )
 
 
-def _missing_item(task, node_id, node_label, token) -> Dict[str, Any]:
-    kind, type_label = _classify(token)
-    return _base(
-        task, node_id, node_label,
-        kind="expected", key=token, name=Path(token).name or token,
-        type_label=type_label, status="missing", reason="尚未生成",
-        actions=[], readable=False, rel_path="",
-    )
+def _node_gaps(workflow_id, tasks, nodes, items) -> List[Dict[str, Any]]:
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for task in tasks:
+        node_id, _label = _node_of(task, nodes)
+        grouped.setdefault(node_id, []).append(task)
+    gaps = []
+    for node in nodes:
+        node_id = str(node.get("id") or "")
+        node_tasks = grouped.get(node_id) or []
+        if not node_tasks:
+            continue
+        label = str(node.get("label") or node_id)
+        for token in _file_tokens(node.get("required_outputs") or []):
+            if _expectation_satisfied(items, node_tasks, node_id, token):
+                continue
+            gaps.append(_gap_item(workflow_id, node_id, label, token, node_tasks))
+    return gaps
 
 
-def _unavailable_item(task, node_id, node_label, token, unmanaged) -> Dict[str, Any]:
-    kind, type_label = _classify(token)
-    reason = "任务工作区不在受管目录内，不能读取。" if unmanaged else "不能读取这项成果"
+def _expectation_satisfied(items, tasks, node_id, token) -> bool:
+    for item in items:
+        rel = str(item.get("rel_path") or "")
+        if str(item.get("node_id")) != str(node_id) or not rel:
+            continue
+        if item.get("status") in {"present", "workspace", "unavailable"} and _same_output(token, rel):
+            return True
+    return any(_lookup(workspace, token) == "present" for task in tasks if (workspace := _workspace(task)) is not None)
+
+
+def _gap_item(workflow_id, node_id, node_label, token, tasks) -> Dict[str, Any]:
+    holder = {"task_id": "", "workflow_id": workflow_id, "agent": ""}
+    _kind, type_label = _classify(token)
+    blocked = False
+    absent = False
+    for task in tasks:
+        workspace = _workspace(task)
+        if workspace is None:
+            blocked = True
+            continue
+        state = _lookup(workspace, token)
+        if state == "blocked":
+            blocked = True
+        elif state == "absent":
+            absent = True
+    if blocked:
+        reason = "有任务工作区不能读取，不能把这项标成尚未生成。" if absent else "任务工作区不在受管目录内，不能读取。"
+        status, reason = "unavailable", reason
+    else:
+        status, reason = "missing", "尚未生成"
     return _base(
-        task, node_id, node_label,
-        kind="expected", key=token, name=Path(token).name or token,
-        type_label=type_label, status="unavailable", reason=reason,
+        holder, node_id, node_label,
+        kind="expected", key=f"{node_id}\n{token}", name=Path(token).name or token,
+        type_label=type_label, status=status, reason=reason,
         actions=[], readable=False, rel_path="",
     )
 
@@ -347,46 +411,59 @@ def _base(task, node_id, node_label, **fields) -> Dict[str, Any]:
 def _present_rels(task, workspace, expected, changed):
     found: List[str] = []
     seen = set()
+    git_rels = set()
+    truncated = False
     walk_error = ""
     if workspace is None:
-        return found, walk_error
+        return found, walk_error, truncated, git_rels
 
-    def add(rel: str) -> None:
+    def add(rel: str) -> str:
+        nonlocal truncated
         rel = str(rel or "").strip().replace("\\", "/")
         if rel.startswith("./"):
             rel = rel[2:]
-        if not rel or rel in seen or len(found) >= MAX_FILES:
-            return
-        if Path(rel).suffix.lower() not in FILE_SUFFIXES or _sensitive(rel):
-            return
+        if not rel or Path(rel).suffix.lower() not in FILE_SUFFIXES or _sensitive(rel):
+            return ""
         if any(part in SKIP_DIRS or part.startswith(".herdr") for part in Path(rel).parts[:-1]):
-            return
+            return ""
         try:
             resolved = resolve_workspace_file(workspace, rel)
             stored = resolved.relative_to(workspace.resolve()).as_posix()
         except (DeliverableError, ValueError):
-            return
+            return ""
+        if stored in seen:
+            return stored
+        if len(found) >= MAX_FILES:
+            truncated = True
+            return ""
         seen.add(stored)
         found.append(stored)
+        return stored
 
     for token in expected:
         add(token)
     if (workspace / ".git").exists():
         for rel in changed or []:
-            add(rel)
+            stored = add(rel)
+            if stored:
+                git_rels.add(stored)
         committed, commit_error = _owned_commit_files(task, workspace)
         for rel in committed:
-            add(rel)
-        return found, commit_error or walk_error
-    paths, walk_error = _walk_files(workspace)
+            stored = add(rel)
+            if stored:
+                git_rels.add(stored)
+        return found, commit_error or walk_error, truncated, git_rels
+    paths, walk_error, walk_truncated = _walk_files(workspace)
+    truncated = truncated or walk_truncated
     for candidate in paths:
         add(_catalog_rel(workspace, candidate))
-    return found, walk_error
+    return found, walk_error, truncated, git_rels
 
 
 def _walk_files(workspace: Path):
     found = []
     failed = False
+    truncated = False
 
     def onerror(_exc) -> None:
         nonlocal failed
@@ -398,13 +475,63 @@ def _walk_files(workspace: Path):
         for name in filenames:
             if _sensitive(name) or Path(name).suffix.lower() not in FILE_SUFFIXES:
                 continue
-            found.append(Path(current) / name)
             if len(found) >= MAX_FILES:
+                truncated = True
                 break
-        if len(found) >= MAX_FILES:
+            found.append(Path(current) / name)
+        if truncated:
             break
     error = "无法读取任务工作区，未列出的文件不代表尚未生成。" if failed else ""
-    return found, error
+    return found, error, truncated
+
+
+def _registered_rels(task: Dict[str, Any], workspace: Optional[Path]) -> List[str]:
+    if workspace is None:
+        return []
+    found: List[str] = []
+    for key in _RECORDED_KEYS:
+        raw = task.get(key)
+        items = raw if isinstance(raw, list) else []
+        for item in items:
+            rel = _ref_rel(item, workspace)
+            if rel and rel not in found and _lookup(workspace, rel) == "present":
+                found.append(rel)
+    return found
+
+
+def _ref_rel(item: Any, workspace: Path) -> str:
+    candidates: List[str] = []
+    if isinstance(item, str):
+        candidates.append(item)
+    elif isinstance(item, dict):
+        for field in ("rel_path", "path", "ref", "artifact_path", "content_ref"):
+            if item.get(field):
+                candidates.append(str(item.get(field)))
+        meta = item.get("metadata")
+        if isinstance(meta, dict):
+            for field in ("artifact_path", "path", "rel_path"):
+                if meta.get(field):
+                    candidates.append(str(meta.get(field)))
+        if not candidates and item.get("name"):
+            candidates.append(str(item.get("name")))
+    for raw in candidates:
+        token = _file_output_token(raw)
+        if token:
+            return token
+        try:
+            path = Path(raw).expanduser()
+            if not path.is_absolute():
+                continue
+            resolved = path.resolve()
+            root = workspace.resolve()
+            if resolved == root or root not in resolved.parents:
+                continue
+            token = _file_output_token(resolved.relative_to(root).as_posix())
+            if token:
+                return token
+        except (OSError, ValueError):
+            continue
+    return ""
 
 
 def _catalog_rel(workspace: Path, candidate: Path) -> str:

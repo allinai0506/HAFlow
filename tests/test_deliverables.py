@@ -269,6 +269,9 @@ def test_console_uses_deliverable_section_and_same_api():
     assert "本节点成果" in source
     assert "toast(" in source.split("async function openDeliverable", 1)[1].split("async function", 1)[0]
     assert "成果目录读取失败" in source
+    assert "工作区文件" in source
+    assert "packed.notice" in source
+    assert "include_expectations=False" in source
 
 
 def test_prose_contract_labels_are_not_missing_files(tmp_path, monkeypatch):
@@ -400,6 +403,134 @@ def test_baseline_commit_is_not_listed_as_this_task_delivery(tmp_path, monkeypat
     assert "旧说明.md" not in names
     commit = next(item for item in packed["items"] if item["kind"] == "git_commit")
     assert commit["sha"] == head
+
+
+def test_context_inputs_are_workspace_files_until_registered(tmp_path, monkeypatch):
+    root, workspace = _workspace(tmp_path, "task-quote")
+    monkeypatch.setenv("HERDR_CLONES_DIR", str(root))
+    (workspace / "需求清单.md").write_text("# 需求\n", encoding="utf-8")
+    (workspace / "客户原始资料.pdf").write_bytes(b"%PDF-input")
+    (workspace / "正式报价单.xlsx").write_bytes(b"quote-bytes")
+    task = _task(
+        "task-quote", workspace, "requirements",
+        observations=[{
+            "source_type": "artifact",
+            "metadata": {"artifact_path": str(workspace / "正式报价单.xlsx")},
+        }],
+    )
+    packed = d.project_for_tasks("wf-biz", [task], NODES)
+    by_name = {item["name"]: item for item in packed["items"]}
+
+    assert by_name["需求清单.md"]["status"] == "present"
+    assert by_name["需求清单.md"]["status_label"] == "已产生"
+    assert by_name["正式报价单.xlsx"]["status"] == "present"
+    assert by_name["客户原始资料.pdf"]["status"] == "workspace"
+    assert by_name["客户原始资料.pdf"]["status_label"] == "工作区文件"
+    assert by_name["客户原始资料.pdf"]["readable"] is True
+    assert packed["counts"]["present"] == 2
+    assert packed["counts"]["workspace"] == 1
+    downloaded = d.read_deliverable(
+        "wf-biz", [task], NODES, "task-quote", by_name["客户原始资料.pdf"]["id"], download=True,
+    )
+    assert downloaded["body"] == b"%PDF-input"
+
+
+def test_node_expected_outputs_are_not_required_of_every_task(tmp_path, monkeypatch):
+    root, first = _workspace(tmp_path, "task-a")
+    second = root / "task-b"
+    second.mkdir()
+    monkeypatch.setenv("HERDR_CLONES_DIR", str(root))
+    (first / "requirements.md").write_text("规格\n", encoding="utf-8")
+    (second / "review.md").write_text("审查\n", encoding="utf-8")
+    nodes = [{
+        "id": "requirements",
+        "label": "需求整理",
+        "required_outputs": ["requirements.md", "review.md"],
+    }]
+    tasks = [
+        _task("task-a", first, "requirements"),
+        _task("task-b", second, "requirements", agent="codex"),
+    ]
+    packed = d.project_for_tasks("wf-biz", tasks, nodes)
+    missing = [item for item in packed["items"] if item["status"] == "missing"]
+    assert missing == []
+    by_task = {}
+    for item in packed["items"]:
+        by_task.setdefault(item["task_id"], set()).add(item["name"])
+    assert by_task["task-a"] == {"requirements.md"}
+    assert by_task["task-b"] == {"review.md"}
+
+    own = d.project_for_tasks("wf-biz", [tasks[0]], nodes, include_expectations=False)
+    assert [item["name"] for item in own["items"]] == ["requirements.md"]
+    assert all(item["status"] != "missing" for item in own["items"])
+
+    (second / "review.md").unlink()
+    partial = d.project_for_tasks("wf-biz", tasks, nodes)
+    gaps = [item for item in partial["items"] if item["status"] == "missing"]
+    assert [item["name"] for item in gaps] == ["review.md"]
+    assert gaps[0]["task_id"] == ""
+    assert gaps[0]["node_id"] == "requirements"
+    assert all(item["task_id"] != "task-a" or item["status"] != "missing" for item in partial["items"])
+
+
+def test_scan_cap_marks_the_catalog_incomplete(tmp_path, monkeypatch):
+    root, workspace = _workspace(tmp_path, "task-req")
+    monkeypatch.setenv("HERDR_CLONES_DIR", str(root))
+    (workspace / "需求清单.md").write_text("正式\n", encoding="utf-8")
+    for index in range(d.MAX_FILES + 1):
+        (workspace / f"资料{index:02d}.txt").write_text("参考\n", encoding="utf-8")
+    packed = d.project_for_tasks("wf-biz", [_task("task-req", workspace, "requirements")], NODES)
+    names = [item["name"] for item in packed["items"]]
+    assert "需求清单.md" in names
+    assert next(item for item in packed["items"] if item["name"] == "需求清单.md")["status"] == "present"
+    assert len(packed["items"]) <= d.MAX_FILES
+    assert packed["truncated"] is True
+    assert packed["notice"] == "成果列表可能未完整。"
+    assert len(names) < (d.MAX_FILES + 2)
+
+
+def test_console_task_view_omits_sibling_expectations(tmp_path, monkeypatch):
+    from console import herdr_factory_console as console
+
+    root, first = _workspace(tmp_path, "task-a")
+    second = root / "task-b"
+    second.mkdir()
+    monkeypatch.setenv("HERDR_CLONES_DIR", str(root))
+    (first / "requirements.md").write_text("规格\n", encoding="utf-8")
+    (first / "客户原始资料.pdf").write_bytes(b"%PDF")
+    (second / "review.md").write_text("审查\n", encoding="utf-8")
+    nodes = [{
+        "id": "requirements",
+        "label": "需求整理",
+        "required_outputs": ["requirements.md", "review.md"],
+    }]
+    tasks = [
+        _task("task-a", first, "requirements"),
+        _task("task-b", second, "requirements", agent="codex"),
+    ]
+    monkeypatch.setattr(
+        console.herdr_projection, "project_task",
+        lambda tid: {"task_id": tid, "workflow_id": "wf-biz"},
+    )
+    monkeypatch.setattr(console, "tasks_for_workflow", lambda wid: tasks)
+    monkeypatch.setattr(console, "workflows", lambda: {"wf-biz": {"config": {"nodes": nodes}}})
+    console._deliverable_observation_loader = lambda task_id: (
+        [{"metadata": {"artifact_path": str(first / "客户原始资料.pdf")}}]
+        if task_id == "task-a" else []
+    )
+    try:
+        workflow = console.api_workflow_deliverables("wf-biz")
+        own = console.api_task_projection("task-a")
+    finally:
+        console._deliverable_observation_loader = None
+
+    workflow_names = {item["name"]: item["status"] for item in workflow["items"]}
+    assert workflow_names["requirements.md"] == "present"
+    assert workflow_names["review.md"] == "present"
+    assert workflow_names["客户原始资料.pdf"] == "present"
+    assert "missing" not in workflow_names.values()
+    assert [item["name"] for item in own["deliverables"]["items"]] == ["requirements.md", "客户原始资料.pdf"]
+    assert all(item["status"] != "missing" for item in own["deliverables"]["items"])
 
 
 def test_task_projection_keeps_soft_catalog_error(monkeypatch):
