@@ -7,6 +7,29 @@
 > *Human + Agent, in Flow*  
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
+## [2026-10-12] fix | 终态工作流与已满足节点派发待办收敛：防历史旧派发在结案后持续误报恢复待办与篡改节点完成状态
+
+- 背景：
+  1. 工作流 `wf-nexusarchive-1011-01` 已经完成交付结案（`status: completed`, `outcome: delivered`），但控制台仍持续提示“1 项恢复待办：计划 · 旧派发尚未确认任务登记”，且流程图中原本已完成的“计划”节点被覆盖显示为“待人工确认”；
+  2. 根因在于早期代次变更时遗留的派发记录（`waiting_human`，`started=1`），在后续新任务（`plan-design`）完成通过、下游节点全线交付、工作流结案后，底层 `node_dispatch` 判定缺少终态工作流与节点已通过任务的自动退役逻辑，导致该操作永久停留在未决状态；
+  3. 前端控制台未对终态工作流短路恢复待办，且节点卡片渲染未优先保护已完成节点（`completed`/`cleaned`），导致已完成节点状态被过期恢复操作错误覆盖。
+- 变更：
+  1. **底层派发判定与生命周期收敛 (`herdr/node_dispatch.py`)**：
+     - 在 `result()` 中增加终态工作流守卫：当工作流处于 `completed`/`failed`/`halted`/`abandoned` 或 `outcome in {'delivered', 'abandoned'}` 或已有 `completed_at` 时，未决派发自动转为 `superseded`（`reason: workflow_completed`，责任转移至 `workflow_terminal`）；
+     - 当代次发生变化（`not current`）但该节点已有完成并通过的任务（`status in {'completed', 'cleaned', 'cleanup_ready'}` 且 `stage_verdict == 'pass'`）时，自动收敛为 `superseded`（`reason: dispatch_existing_tasks`，责任转移至 `registered_tasks`）。
+  2. **工作流结案主动收敛 (`bin/herdr-task`)**：
+     - 在 `_mark_workflow_completed` 完成工作流状态转移后，主动调用 `node_dispatch_store.reconcile_workflow(store.db_path, workflow_id, discover=False)`，在持久化事务中收敛悬挂派发。
+  3. **控制台 API 与前端视图保护 (`console/herdr_factory_console.py`)**：
+     - 后端 `api_workflow_recovery()` 在查询前触发只读收敛，自动修复存量数据库中的历史终态工作流；
+     - 前端 `currentRecovery()` 对终态工作流短路返回空数组；
+     - 前端 `flowNodeStatus()` 增加对已完成/已清理节点的保护，确保真实完成状态不被过期操作篡改。
+  4. **自动化测试**：
+     - 新增 `tests/test_terminal_workflow_dispatch_recovery.py`，全量覆盖终态工作流收敛、已满足节点代次收敛及 Node.js 真实 Console 渲染断言。
+- 证据：
+  1. `pytest -q tests/test_terminal_workflow_dispatch_recovery.py` 3 项全部 PASS；
+  2. 全量恢复与派发套件 207 passed, 9 subtests passed in 26.11s；
+  3. 真实生产数据库 `wf-nexusarchive-1011-01` 历史悬挂记录 85548 成功转为 `superseded`，活动待办归零；
+  4. `python3 -m compileall -q herdr services bin console tests`、`git diff --check` clean。
 
 ## [2026-10-11] bench | 评测沉淀：ReviewBench 同模型上下文对照（diff_only vs existing_four_tier）与单变量审计闭环
 

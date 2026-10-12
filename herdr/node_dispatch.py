@@ -137,7 +137,26 @@ def _valid_required(required):
 
 
 def result(operation, workflow, config, tasks, now):
+    if not active(workflow) and (
+        workflow.get('status') in {'completed', 'failed', 'halted', 'abandoned'}
+        or workflow.get('outcome') in {'delivered', 'abandoned'}
+        or workflow.get('completed_at')
+    ):
+        return 'superseded', {'reason': 'workflow_completed',
+                              'responsibility_transferred_to': 'workflow_terminal'}
     if not current(operation, workflow, config):
+        node_id = operation['payload'].get('node_id')
+        node_completed = any(
+            t.get('workflow_id') == operation['workflow_id']
+            and (t.get('node') or t.get('stage')) == node_id
+            and (not workflow.get('execution_id') or t.get('execution_id') == workflow.get('execution_id'))
+            and t.get('status') in {'completed', 'cleaned', 'cleanup_ready'}
+            and t.get('stage_verdict') == 'pass'
+            for t in tasks
+        )
+        if node_completed:
+            return 'superseded', {'reason': 'dispatch_existing_tasks',
+                                  'responsibility_transferred_to': 'registered_tasks'}
         return ('waiting_human' if operation['started'] else 'superseded', {'reason': 'dispatch_generation_changed'})
     if not active(workflow):
         return None

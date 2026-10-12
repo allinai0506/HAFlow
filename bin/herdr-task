@@ -6521,6 +6521,11 @@ def _mark_workflow_completed(workflow_id, outcome="delivered", force=False):
             force=force,
             store=store,
         )
+        try:
+            from herdr import node_dispatch_store
+            node_dispatch_store.reconcile_workflow(store.db_path, workflow_id, discover=False)
+        except Exception:
+            pass
     except Exception as exc:
         print(f"Error marking workflow {workflow_id} completed: {exc}", file=sys.stderr)
         raise
