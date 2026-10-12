@@ -94,7 +94,23 @@ Inspector 不新建第二套详情或解卡系统：
 
 ## 8. 明确不做
 
-Workflow Builder / 拖拽持久化 / Stencil / 版本化 UI / 发布 / MiniMap / ELK / React / React Flow / BPMN / 全局 IA 重构，均不属于本层。
+Workflow Builder / 拖拽持久化 / Stencil / 版本化 UI / 发布 / MiniMap / ELK / React / React Flow / BPMN / 全局 IA 重构，均不属于本层。交付成果区也不改节点自动完成条件。
+
+## 9. 交付成果
+
+`FACT` 工作流页在 `flow` / `list` 模式显示 `#deliverablesPanel`。Workflow、Node、Task 三处读同一份目录：Workflow 汇总各 Node，Node 汇总所属 Task，Task 抽屉「产物」只显示该 Task 的行。身份是 `sha256(task_id + kind + key)` 的前 20 位。
+
+`FACT` 状态只使用已有事实。受管工作区里可读的文件是 `present`（已产生）。`required_outputs` 里带允许后缀的相对文件名，在工作区里确实没有时才是 `missing`（未产生）。契约句子（如「测试结论（PASS / FAIL）」「招标基本信息表」）不是文件，不会生成未产生行。工作区不受管、任务已替代或文件不可读是 `unavailable`。目录读取失败写入 `error`，页面不能把它显示成「还没有成果」。文件存在不是验收通过。这一层不写入 `verified`，也不因成果推进节点。
+
+`FACT` Context 模式只扫描该 Task 工作区里允许的业务文件。Git 模式不整库扫描，也不把派发时的 `baseline_commit` 或与它相同的 `candidate_sha` 当成这次成果。它列出相对该基线到当前 HEAD 的文件，加上 `git status --untracked-files=all` 里后缀允许的变更，并另列这次自己的提交、可靠的 http(s) PR 地址和变更清单。没有基线时，才使用任务记录里的交付 SHA。提交和变更清单不能当文件下载。
+
+`FACT` 查看和下载走 `GET /api/workflow/deliverable`。服务端按工作流和任务重建相对路径，拒绝工作区之外、路径穿越、符号链接越界、敏感文件名和超限文件。Markdown 预览先转义再渲染少量标记。下载响应使用附件、`nosniff` 和 `sandbox`。
+
+Evidence:
+- `herdr/deliverables.py` — `project_for_tasks` / `read_deliverable` / `resolve_workspace_file`
+- `herdr/projection.py` — `project_workflow` 附带 `deliverables`
+- `console/herdr_factory_console.py` — `api_workflow_deliverables` / `renderDeliverables` / `renderTaskArtifacts`
+- `tests/test_deliverables.py`
 
 Evidence:
 - `herdr/workflow_graph.py` — `workflow_graph_projection` / `aggregate_node_status` / `pick_default_node`
