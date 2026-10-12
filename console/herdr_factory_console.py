@@ -602,8 +602,12 @@ def _blocked_verdict_tasks(wid):
         if t.get('stage_verdict')=='blocked']
 
 def api_workflow_recovery(wid):
-    from herdr import dispatch_recovery
+    from herdr import dispatch_recovery, node_dispatch_store
     db_path=Path(os.environ['HERDR_STATE_DB']) if os.environ.get('HERDR_STATE_DB') else Path(TASKS_FILE).parent/'state.db'
+    try:
+        node_dispatch_store.reconcile_workflow(db_path, wid, discover=False)
+    except Exception:
+        pass
     return {'workflow_id':wid,'operations':dispatch_recovery.list_operations(db_path,wid)}
 
 def api_workflow_recovery_decide(b):
@@ -7661,6 +7665,7 @@ function flowCardFoot(n){
 }
 function flowNodeStatus(node,fallback){
   if(recoveryUnavailable())return '状态未确认';
+  if(node.status==='completed'||node.status==='cleaned'||fallback==='已完成')return fallback;
   const op=currentRecovery(node.id)[0];
   return op?({waiting_human:'待人工确认',awaiting_result:'核验派发',waiting:'已暂缓',pending:'等待派发',running:'正在派发'}[op.status]||'需恢复'):fallback;
 }
@@ -8691,6 +8696,10 @@ function openControllerCockpitModal(){
   renderWorkflowTabs();
 }
 function currentRecovery(nodeId){
+  const w=state.workflow?.workflow;
+  if(w&&(w.status==='completed'||w.status==='failed'||w.status==='halted'||w.outcome==='delivered'||w.outcome==='abandoned'||w.completed_at)){
+    return [];
+  }
   return (state.controllerActionsData?.recovery||[]).filter(o=>!['resolved','superseded'].includes(o.status)&&(!nodeId||o.payload?.node_id===nodeId));
 }
 function dispatchConfirmations(nodeId){return (state.controllerActionsData?.recovery||[]).filter(o=>o.confirmation&&(!nodeId||o.payload?.node_id===nodeId));}
