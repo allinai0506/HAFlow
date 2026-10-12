@@ -39,6 +39,7 @@ STATUS_LABELS = {
     "unavailable": "不可读取",
     "verified": "已验证",
     "workspace": "工作区文件",
+    "unconfirmed": "不可确认",
 }
 TRUNCATED_NOTICE = "成果列表可能未完整。"
 _RECORDED_KEYS = ("artifacts", "artifact_refs", "changed_artifacts", "deliverables", "observations")
@@ -53,7 +54,7 @@ class DeliverableError(Exception):
 
 
 def pack(items: List[Dict[str, Any]], error: str = "", truncated: bool = False) -> Dict[str, Any]:
-    counts = {"present": 0, "missing": 0, "unavailable": 0, "verified": 0, "workspace": 0}
+    counts = {"present": 0, "missing": 0, "unavailable": 0, "verified": 0, "workspace": 0, "unconfirmed": 0}
     for item in items:
         status = item.get("status")
         if status in counts:
@@ -246,7 +247,7 @@ def safe_markdown_html(text: str) -> str:
 def _task_items(task: Dict[str, Any], nodes: List[Dict[str, Any]]):
     node_id, node_label = _node_of(task, nodes)
     expected = _file_tokens(_expected_for(node_id, nodes))
-    retired = task.get("status") == "superseded" or bool(task.get("superseded_by"))
+    retired = _retired_task(task)
     workspace = _workspace(task)
     error = ""
     changed: List[str] = []
@@ -323,22 +324,37 @@ def _node_gaps(workflow_id, tasks, nodes, items) -> List[Dict[str, Any]]:
     return gaps
 
 
+def _retired_task(task: Dict[str, Any]) -> bool:
+    return task.get("status") == "superseded" or bool(task.get("superseded_by"))
+
+
 def _expectation_satisfied(items, tasks, node_id, token) -> bool:
+    """A current readable deliverable satisfies the node. Retired files do not."""
+    active = {str(task.get("task_id") or "") for task in tasks if not _retired_task(task)}
     for item in items:
         rel = str(item.get("rel_path") or "")
         if str(item.get("node_id")) != str(node_id) or not rel:
             continue
-        if item.get("status") in {"present", "workspace", "unavailable"} and _same_output(token, rel):
+        if str(item.get("task_id") or "") not in active:
+            continue
+        if item.get("status") == "present" and _same_output(token, rel):
             return True
-    return any(_lookup(workspace, token) == "present" for task in tasks if (workspace := _workspace(task)) is not None)
+    for task in tasks:
+        if _retired_task(task):
+            continue
+        workspace = _workspace(task)
+        if workspace is not None and _lookup(workspace, token) == "present":
+            return True
+    return False
 
 
 def _gap_item(workflow_id, node_id, node_label, token, tasks) -> Dict[str, Any]:
     holder = {"task_id": "", "workflow_id": workflow_id, "agent": ""}
     _kind, type_label = _classify(token)
+    active = [task for task in tasks if not _retired_task(task)]
     blocked = False
     absent = False
-    for task in tasks:
+    for task in active:
         workspace = _workspace(task)
         if workspace is None:
             blocked = True
@@ -348,11 +364,16 @@ def _gap_item(workflow_id, node_id, node_label, token, tasks) -> Dict[str, Any]:
             blocked = True
         elif state == "absent":
             absent = True
-    if blocked:
-        reason = "有任务工作区不能读取，不能把这项标成尚未生成。" if absent else "任务工作区不在受管目录内，不能读取。"
-        status, reason = "unavailable", reason
-    else:
+    if not active:
+        status, reason = "unconfirmed", "已替代任务的文件不能当作当前交付，当前无法确认成果是否存在。"
+    elif absent and not blocked:
         status, reason = "missing", "尚未生成"
+    elif blocked and not absent:
+        status, reason = "unavailable", "任务工作区不在受管目录内，不能读取。"
+    elif blocked:
+        status, reason = "unconfirmed", "有任务工作区不能读取，不能把这项标成尚未生成。"
+    else:
+        status, reason = "unconfirmed", "当前无法确认这项成果是否已经产生。"
     return _base(
         holder, node_id, node_label,
         kind="expected", key=f"{node_id}\n{token}", name=Path(token).name or token,

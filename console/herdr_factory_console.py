@@ -7887,7 +7887,7 @@ function flowChecklist(node){
 function workflowDeliverables(){
   const packed=state.workflow&&state.workflow.deliverables;
   if(packed&&Array.isArray(packed.items))return packed;
-  return {items:[],counts:{present:0,missing:0,unavailable:0,verified:0,workspace:0}};
+  return {items:[],counts:{present:0,missing:0,unavailable:0,verified:0,workspace:0,unconfirmed:0}};
 }
 function deliverableNoteHtml(packed){
   const bits=[];
@@ -7900,6 +7900,7 @@ function deliverableCountsText(counts){
   const parts=['已产生 '+(Number(counts.present)||0)+' 项'];
   if(counts.workspace)parts.push('工作区文件 '+counts.workspace+' 项');
   if(counts.missing)parts.push('未产生 '+counts.missing+' 项');
+  if(counts.unconfirmed)parts.push('不可确认 '+counts.unconfirmed+' 项');
   if(counts.unavailable)parts.push('不可读取 '+counts.unavailable+' 项');
   if(counts.verified)parts.push('已验证 '+counts.verified+' 项');
   return parts.join(' · ');

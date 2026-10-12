@@ -114,6 +114,42 @@ def test_superseded_task_file_is_not_readable(tmp_path, monkeypatch):
     assert "旧稿" not in caught.value.message
 
 
+def test_superseded_file_does_not_satisfy_the_node_expectation(tmp_path, monkeypatch):
+    root, old = _workspace(tmp_path, "task-old")
+    current = root / "task-now"
+    current.mkdir()
+    monkeypatch.setenv("HERDR_CLONES_DIR", str(root))
+    (old / "requirements.md").write_text("旧稿\n", encoding="utf-8")
+    nodes = [{"id": "requirements", "label": "需求分析", "required_outputs": ["requirements.md"]}]
+    old_task = _task("task-old", old, "requirements", status="superseded", superseded_by="task-now")
+    now_task = _task("task-now", current, "requirements", agent="codex")
+
+    packed = d.project_for_tasks("wf-biz", [old_task, now_task], nodes)
+    history = next(item for item in packed["items"] if item["task_id"] == "task-old")
+    assert history["status"] == "unavailable"
+    assert history["readable"] is False
+    gaps = [item for item in packed["items"] if item["task_id"] == ""]
+    assert [item["status"] for item in gaps] == ["missing"]
+    assert gaps[0]["name"] == "requirements.md"
+    assert gaps[0]["status_label"] == "未产生"
+    assert packed["counts"]["present"] == 0
+
+    (current / "requirements.md").write_text("新稿\n", encoding="utf-8")
+    done = d.project_for_tasks("wf-biz", [old_task, now_task], nodes)
+    assert any(item["task_id"] == "task-now" and item["status"] == "present" for item in done["items"])
+    assert any(item["task_id"] == "task-old" and item["status"] == "unavailable" for item in done["items"])
+    assert not any(item["status"] == "missing" for item in done["items"])
+
+    alone = d.project_for_tasks("wf-biz", [old_task], nodes)
+    assert any(item["task_id"] == "task-old" and item["status"] == "unavailable" for item in alone["items"])
+    unknown = [item for item in alone["items"] if item["task_id"] == ""]
+    assert [item["status"] for item in unknown] == ["unconfirmed"]
+    assert unknown[0]["status_label"] == "不可确认"
+    assert alone["counts"]["present"] == 0
+    assert alone["counts"]["missing"] == 0
+    assert alone["counts"]["unconfirmed"] == 1
+
+
 def test_git_commit_pr_and_diff_are_not_presented_as_downloads(tmp_path, monkeypatch):
     root, workspace = _workspace(tmp_path, "task-dev")
     monkeypatch.setenv("HERDR_CLONES_DIR", str(root))
