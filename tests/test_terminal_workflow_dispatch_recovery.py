@@ -139,8 +139,13 @@ def test_console_completed_workflow_no_active_recovery_and_completed_node_protec
     status_renderer = source.split('function flowNodeStatus(node,fallback){', 1)[1].split('function flowCardInner(', 1)[0]
     status_renderer = 'function flowNodeStatus(node,fallback){' + status_renderer
 
-    operations = [{'id': 1, 'version': 1, 'status': 'waiting_human', 'started': 1,
-                   'payload': {'kind': 'node_dispatch', 'node_id': 'plan'}}]
+    operations = [
+        {'id': 1, 'version': 1, 'status': 'waiting_human', 'started': 1,
+         'payload': {'kind': 'node_dispatch', 'node_id': 'plan'}},
+        {'id': 2, 'version': 1, 'status': 'resolved',
+         'confirmation': {'task_ids': ['task-123']},
+         'payload': {'kind': 'node_dispatch', 'node_id': 'plan'}},
+    ]
 
     script = f"""
     const state = {{
@@ -148,18 +153,31 @@ def test_console_completed_workflow_no_active_recovery_and_completed_node_protec
         workflow: {{ workflow: {{ status: 'completed', outcome: 'delivered' }} }}
     }};
     function recoveryUnavailable() {{ return false; }}
+    function esc(s) {{ return String(s); }}
     {renderer}
     {status_renderer}
 
-    // 1. In completed workflow, currentRecovery returns empty
+    // 1. In completed workflow, currentRecovery & dispatchConfirmations return empty
     const recs = currentRecovery();
     if (recs.length !== 0) throw new Error('currentRecovery should be empty for completed workflow, got: ' + JSON.stringify(recs));
+    const confs = dispatchConfirmations();
+    if (confs.length !== 0) throw new Error('dispatchConfirmations should be empty for completed workflow, got: ' + JSON.stringify(confs));
+    const confHtml = dispatchConfirmationHtml();
+    if (confHtml !== '') throw new Error('dispatchConfirmationHtml should be empty for completed workflow, got: ' + confHtml);
 
-    // 2. Even if workflow was not completed, a node with status completed must retain its completed status
+    // 2. In running workflow, a node with status completed must suppress confirmation banner
     state.workflow.workflow.status = 'running';
     delete state.workflow.workflow.outcome;
+    state.workflow.graph = {{ nodes: [{{ id: 'plan', status: 'completed' }}] }};
     const nodeStatus = flowNodeStatus({{ id: 'plan', status: 'completed' }}, '已完成');
     if (nodeStatus !== '已完成') throw new Error('Completed node status must not be overridden by recovery, got: ' + nodeStatus);
+    const nodeConfs = dispatchConfirmations('plan');
+    if (nodeConfs.length !== 0) throw new Error('dispatchConfirmations should be empty for completed node, got: ' + JSON.stringify(nodeConfs));
+
+    // 3. In running workflow, a node with status working must retain confirmation banner
+    state.workflow.graph = {{ nodes: [{{ id: 'plan', status: 'working' }}] }};
+    const workingConfs = dispatchConfirmations('plan');
+    if (workingConfs.length !== 1) throw new Error('dispatchConfirmations should return active confirmation for working node');
 
     console.log('OK');
     """

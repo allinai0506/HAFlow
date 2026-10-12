@@ -3413,16 +3413,31 @@ button { cursor: pointer; }
   color: var(--text-primary);
 }
 #deliverablesPanel {
-  margin: 8px 16px 8px;
-  padding: 12px 16px 4px;
+  margin: 8px 16px;
+  padding: 8px 16px;
   border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
   background: var(--bg-surface);
-  max-height: 460px;
+  max-height: 240px;
   overflow: auto;
   flex: 0 0 auto;
 }
 #deliverablesPanel[hidden] { display: none !important; }
+.deliverables-notice {
+  padding: 4px 12px;
+  margin: 4px 0 8px;
+  border-radius: 4px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  font-size: 12px;
+  color: #64748b;
+  line-height: 1.5;
+}
+.deliverables-notice.error {
+  background: #fef2f2;
+  border-color: #fecaca;
+  color: #dc2626;
+}
 .deliverables-head {
   display: flex;
   justify-content: space-between;
@@ -4398,10 +4413,11 @@ body {
 .trigger-content { white-space: normal; min-width: 0; flex-wrap: wrap; }
 #workflowSubject.wf-subject { font-size: 14px; font-weight: 680; color: #16171b; }
 #workflowSub { display: block; margin-top: 2px; font-size: 11.5px; color: #8b909a; }
-.top .btn { height: 30px; border-radius: 8px; }
-.top .btn.primary { background: #5e6ad2; border-color: #5e6ad2; color: #fff; font-weight: 650; }
-.top .btn.primary:hover { background: #4f5bc4; border-color: #4f5bc4; color: #fff; }
-.top .btn.icon-only { width: 30px; padding: 0; justify-content: center; }
+.top .btn { height: 32px; border-radius: 8px; font-size: 12px; font-weight: 500; display: inline-flex; align-items: center; gap: 4px; padding: 0 12px; border: 1px solid #e2e8f0; background: #fff; color: #334155; }
+.top .btn:hover { background: #f8fafc; border-color: #cbd5e1; color: #0f172a; }
+.top .btn.primary { background: #4f46e5; border-color: #4f46e5; color: #fff; font-weight: 600; box-shadow: 0 1px 2px rgba(79, 70, 229, 0.2); }
+.top .btn.primary:hover { background: #4338ca; border-color: #4338ca; }
+.top .btn.icon-only { width: 32px; padding: 0; justify-content: center; }
 #opsButton, #dashButton, .metrics { display: none !important; }
 .visually-hidden {
   position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
@@ -4819,22 +4835,45 @@ body {
   position: absolute;
   top: 52px;
   left: 16px;
-  right: 16px;
+  max-width: calc(100% - 332px);
+  width: fit-content;
   z-index: 3;
   background: rgba(254, 252, 232, 0.96);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
   border: 1px solid #fde047;
   border-radius: 8px;
-  padding: 8px 12px;
+  padding: 4px 12px;
   box-shadow: 0 2px 6px rgba(234, 179, 8, 0.1);
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  gap: 8px;
   font-size: 12px;
   color: #854d0e;
   box-sizing: border-box;
+}
+#flowInspector .flow-attn {
+  position: static !important;
+  max-width: 100% !important;
+  width: 100% !important;
+  display: block !important;
+  margin-top: 12px !important;
+  box-shadow: none !important;
+}
+.ctl-wrap .flow-attn {
+  position: static !important;
+  max-width: 100% !important;
+  width: 100% !important;
+  display: flex !important;
+  margin: 8px 0 !important;
+  box-shadow: none !important;
+}
+.flow-act-group {
+  margin-top: 12px;
+  background: #fffbeb;
+  border: 1px solid rgba(217, 119, 6, 0.35);
+  border-radius: 8px;
+  padding: 12px;
 }
 .flow-attn-content {
   display: flex;
@@ -4851,10 +4890,10 @@ body {
   background: #fef08a;
   color: #713f12;
   font-weight: 600;
-  font-size: 11px;
+  font-size: 12px;
   padding: 0 8px;
   border-radius: 4px;
-  height: 22px;
+  height: 20px;
   flex-shrink: 0;
   white-space: nowrap;
 }
@@ -4871,9 +4910,9 @@ body {
   background: #fff !important;
   color: #854d0e !important;
   border: 1px solid #fde047 !important;
-  border-radius: 6px !important;
+  border-radius: 4px !important;
   padding: 4px 8px !important;
-  font-size: 11.5px !important;
+  font-size: 12px !important;
   font-weight: 600 !important;
   cursor: pointer;
   transition: all 0.15s ease;
@@ -5194,50 +5233,68 @@ body {
 }
 .tabs-scroll {
   position: relative !important;
-  padding: 4px !important;
-  gap: 2px !important;
-  background: rgba(0, 0, 0, 0.03) !important;
-  border-radius: 8px !important;
-  height: 38px !important;
+  padding: 0 !important;
+  gap: 4px !important;
+  background: transparent !important;
+  border-radius: 0 !important;
+  height: var(--header-row-height) !important;
   align-items: center !important;
-  border: 1px solid rgba(0, 0, 0, 0.04) !important;
+  border: none !important;
 }
 .wf-tab-sliding-pill {
-  position: absolute !important;
-  top: 4px !important;
-  bottom: 4px !important;
-  background: #ffffff !important;
-  border-radius: 6px !important;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08), 0 0 0 1px rgba(0, 0, 0, 0.04) !important;
-  transition: transform 0.22s cubic-bezier(0.25, 1, 0.5, 1), width 0.22s cubic-bezier(0.25, 1, 0.5, 1) !important;
-  pointer-events: none !important;
-  z-index: 1 !important;
+  display: none !important;
 }
 .wf-tab {
-  height: 30px !important;
+  height: 32px !important;
   padding: 0 8px !important;
   border-radius: 6px !important;
-  border: none !important;
+  border: 1px solid transparent !important;
   background: transparent !important;
-  color: var(--text-secondary, #5f6368) !important;
+  color: var(--text-secondary, #64748b) !important;
   font-weight: 500 !important;
+  font-size: 12px !important;
   position: relative !important;
   z-index: 2 !important;
-  transition: color 0.15s ease !important;
+  transition: all 0.15s ease !important;
   box-shadow: none !important;
   display: inline-flex !important;
   align-items: center !important;
   gap: 8px !important;
 }
 .wf-tab:hover {
-  color: var(--text-primary, #121316) !important;
+  color: var(--text-primary, #0f172a) !important;
+  background: #f1f5f9 !important;
+  border-color: #e2e8f0 !important;
 }
 .wf-tab.active {
-  color: var(--text-primary, #121316) !important;
+  color: var(--text-primary, #0f172a) !important;
   font-weight: 600 !important;
+  background: #ffffff !important;
+  border-color: #e2e8f0 !important;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04) !important;
 }
 .wf-tab.active::after {
   display: none !important;
+}
+.tab-close {
+  width: 16px !important;
+  height: 16px !important;
+  border-radius: 4px !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  color: #94a3b8 !important;
+  font-size: 12px !important;
+  border: none !important;
+  background: transparent !important;
+  cursor: pointer !important;
+  transition: all 0.12s ease !important;
+  margin-left: 2px !important;
+  padding: 0 !important;
+}
+.tab-close:hover {
+  background: rgba(0, 0, 0, 0.08) !important;
+  color: #0f172a !important;
 }
 .tab-icon-svg {
   flex-shrink: 0 !important;
@@ -7992,8 +8049,8 @@ function workflowDeliverables(){
 }
 function deliverableNoteHtml(packed){
   const bits=[];
-  if(packed&&packed.error)bits.push('<div class="empty">'+esc(packed.error)+'</div>');
-  if(packed&&packed.notice)bits.push('<div class="empty">'+esc(packed.notice)+'</div>');
+  if(packed&&packed.error)bits.push('<div class="deliverables-notice error">'+esc(packed.error)+'</div>');
+  if(packed&&packed.notice)bits.push('<div class="deliverables-notice">'+esc(packed.notice)+'</div>');
   return bits.join('');
 }
 function deliverableCountsText(counts){
@@ -8116,7 +8173,7 @@ function renderFlowWorkbench(){
       const working=nodes.filter(n=>n.status==='working').length;
       fs.style.display='inline-flex';
       const dotHtml=working>0?'<span class="flow-status-dot" style="background:#5e6ad2;box-shadow:0 0 0 2px rgba(94,106,210,.25)"></span>':'<span class="flow-status-dot"></span>';
-      fs.innerHTML=dotHtml+'<span><b>'+nodes.length+'</b> 个节点 · <b>'+working+'</b> 个运行中</span><span class="flow-gesture-hint">拖拽平移 · <kbd>⌘</kbd>+滚轮缩放</span>';
+      fs.innerHTML=dotHtml+'<span><b>'+nodes.length+'</b> 个节点 · <b>'+working+'</b> 个运行中</span>';
     }else{
       fs.style.display='none';
     }
@@ -8256,7 +8313,7 @@ function renderFlowGraph(){
 }
 function flowNodeById(id){const g=flowGraphData();return (g.nodes||[]).find(n=>n.id===id)||null;}
 function flowTasksForNode(nodeId){const ts=(state.workflow&&state.workflow.tasks)||[];return ts.filter(t=>String(t.node||t.stage||'')===String(nodeId)&&t.status!=='superseded'&&!t.superseded_by);}
-function renderNodeInspector(){const body=document.getElementById('flowInspectorBody');const title=document.getElementById('flowInspTitle');const meta=document.getElementById('flowInspMeta');if(!body)return;const node=flowNodeById(state.flowSelectedNodeId);if(!node){if(title)title.textContent='节点详情';if(meta)meta.textContent='未选择';body.innerHTML='<div class="empty insp-empty"><strong>还没有选中节点</strong><span>在流程图里点一个阶段，这里会显示任务、上下文和运行情况。</span></div>';return;}if(title)title.textContent=cleanStageLabel(node.label||node.id);if(meta)meta.textContent=(node.node_type||'agent').toUpperCase()+' · '+flowNodeStatus(node,humanNodeStatus(node.status));const tab=state.flowInspectorTab||'summary';if(tab==='tasks'){const nts=flowTasksForNode(node.id);body.innerHTML=nts.length?nts.map(t=>`<div class="flow-task-row" onclick="openTaskDrawer('${esc(t.task_id)}')"><span><strong>${esc(t.task_id)}</strong><span class="muted"> · ${esc(t.agent||'未分配')}</span></span><span>${badge(t.status)}</span></div>`).join(''):'<div class="empty">该节点暂无任务</div>';return;}if(tab==='context'){const ctx=(state.workflow&&state.workflow.context)||{required:[],optional:[]};const req=ctx.required||[];const opt=ctx.optional||[];body.innerHTML=`<div class="proj-sec"><div class="proj-lbl">必需上下文</div>${req.length?req.map(c=>`<div>· ${esc(typeof c==='string'?c:(c.id||c))}</div>`).join(''):'<div class="muted">—</div>'}</div><div class="proj-sec"><div class="proj-lbl">可选上下文</div>${opt.length?opt.map(c=>`<div>· ${esc(typeof c==='string'?c:(c.id||c))}</div>`).join(''):'<div class="muted">—</div>'}</div><div class="muted" style="margin-top:8px">仅显示真实 Context Contract；无绑定信息时不伪造已加载。</div>`;return;}if(tab==='runtime'){const nts=flowTasksForNode(node.id);body.innerHTML=nts.length?nts.map(t=>`<div class="flow-node-card" style="margin-bottom:8px"><div><strong>${esc(t.task_id)}</strong> ${badge(t.status)}</div><dl class="flow-kv" style="margin-top:8px"><dt>执行者</dt><dd>${esc(t.agent||'—')}</dd><dt>工位</dt><dd>${esc(t.pane_id||'—')}</dd><dt>更新</dt><dd>${esc(t.updated_at||t.last_activity_at||'—')}</dd><dt>分支</dt><dd>${esc(t.candidate_sha||t.integration_branch||'—')}</dd><dt>结论</dt><dd>${esc(t.stage_verdict||'—')}</dd></dl></div>`).join(''):'<div class="empty">暂无运行时信息</div>';return;}const nts=flowTasksForNode(node.id);const acts=(state.controllerActionsData&&state.controllerActionsData.actions)||[];const mine=acts.filter(a=>((a.blocker_task_id||a.old_task_id||String(a.action_id||'').split(':')[0])===node.id)||(node.task_ids||[]).includes(a.blocker_task_id||a.old_task_id));const shown=mine.slice(0,2);const actHtml=shown.length?`<div class="flow-attn"><div class="flow-sec">需要处理</div>${shown.map(a=>`<div class="flow-node-card" style="margin-bottom:8px"><div><strong>${esc(a.title||a.action_id)}</strong></div><div class="muted" style="margin:4px 0">${esc(a.effect||a.description||'')}</div><div style="display:flex;gap:8px;justify-content:flex-end"><button class="mini" onclick="locateControllerTask('${esc(a.blocker_task_id||a.old_task_id||'')}')">查看任务</button><button class="btn primary" style="padding:3px 8px;font-size:11.5px" onclick="executeControllerAction('${esc(a.action_id)}','${esc(state.workflowId)}')">一键执行</button></div></div>`).join('')}</div>`:(node.has_attention?'<div class="muted">该节点需关注，暂无可用一键解卡建议，请查看任务详情。</div>':'');body.innerHTML=flowOverviewHtml(node, nts)+actHtml;}
+function renderNodeInspector(){const body=document.getElementById('flowInspectorBody');const title=document.getElementById('flowInspTitle');const meta=document.getElementById('flowInspMeta');if(!body)return;const node=flowNodeById(state.flowSelectedNodeId);if(!node){if(title)title.textContent='节点详情';if(meta)meta.textContent='未选择';body.innerHTML='<div class="empty insp-empty"><strong>还没有选中节点</strong><span>在流程图里点一个阶段，这里会显示任务、上下文和运行情况。</span></div>';return;}if(title)title.textContent=cleanStageLabel(node.label||node.id);if(meta)meta.textContent=(node.node_type||'agent').toUpperCase()+' · '+flowNodeStatus(node,humanNodeStatus(node.status));const tab=state.flowInspectorTab||'summary';if(tab==='tasks'){const nts=flowTasksForNode(node.id);body.innerHTML=nts.length?nts.map(t=>`<div class="flow-task-row" onclick="openTaskDrawer('${esc(t.task_id)}')"><span><strong>${esc(t.task_id)}</strong><span class="muted"> · ${esc(t.agent||'未分配')}</span></span><span>${badge(t.status)}</span></div>`).join(''):'<div class="empty">该节点暂无任务</div>';return;}if(tab==='context'){const ctx=(state.workflow&&state.workflow.context)||{required:[],optional:[]};const req=ctx.required||[];const opt=ctx.optional||[];body.innerHTML=`<div class="proj-sec"><div class="proj-lbl">必需上下文</div>${req.length?req.map(c=>`<div>· ${esc(typeof c==='string'?c:(c.id||c))}</div>`).join(''):'<div class="muted">—</div>'}</div><div class="proj-sec"><div class="proj-lbl">可选上下文</div>${opt.length?opt.map(c=>`<div>· ${esc(typeof c==='string'?c:(c.id||c))}</div>`).join(''):'<div class="muted">—</div>'}</div><div class="muted" style="margin-top:8px">仅显示真实 Context Contract；无绑定信息时不伪造已加载。</div>`;return;}if(tab==='runtime'){const nts=flowTasksForNode(node.id);body.innerHTML=nts.length?nts.map(t=>`<div class="flow-node-card" style="margin-bottom:8px"><div><strong>${esc(t.task_id)}</strong> ${badge(t.status)}</div><dl class="flow-kv" style="margin-top:8px"><dt>执行者</dt><dd>${esc(t.agent||'—')}</dd><dt>工位</dt><dd>${esc(t.pane_id||'—')}</dd><dt>更新</dt><dd>${esc(t.updated_at||t.last_activity_at||'—')}</dd><dt>分支</dt><dd>${esc(t.candidate_sha||t.integration_branch||'—')}</dd><dt>结论</dt><dd>${esc(t.stage_verdict||'—')}</dd></dl></div>`).join(''):'<div class="empty">暂无运行时信息</div>';return;}const nts=flowTasksForNode(node.id);const acts=(state.controllerActionsData&&state.controllerActionsData.actions)||[];const mine=acts.filter(a=>((a.blocker_task_id||a.old_task_id||String(a.action_id||'').split(':')[0])===node.id)||(node.task_ids||[]).includes(a.blocker_task_id||a.old_task_id));const shown=mine.slice(0,2);const actHtml=shown.length?`<div class="flow-act-group"><div class="flow-sec">需要处理</div>${shown.map(a=>`<div class="flow-node-card" style="margin-bottom:8px"><div><strong>${esc(a.title||a.action_id)}</strong></div><div class="muted" style="margin:4px 0">${esc(a.effect||a.description||'')}</div><div style="display:flex;gap:8px;justify-content:flex-end"><button class="mini" onclick="locateControllerTask('${esc(a.blocker_task_id||a.old_task_id||'')}')">查看任务</button><button class="btn primary" style="padding:4px 8px;font-size:12px" onclick="executeControllerAction('${esc(a.action_id)}','${esc(state.workflowId)}')">一键执行</button></div></div>`).join('')}</div>`:(node.has_attention?'<div class="muted">该节点需关注，暂无可用一键解卡建议，请查看任务详情。</div>':'');body.innerHTML=flowOverviewHtml(node, nts)+actHtml;}
 let _resizeFlowDebounce=null;
 window.addEventListener('resize',()=>{
   clearTimeout(_resizeFlowDebounce);
@@ -9053,14 +9110,31 @@ function openControllerCockpitModal(){
   renderWorkflowTabs();
 }
 function currentRecovery(nodeId){
-  const w=state.workflow?.workflow;
+  const w=state.workflow?.workflow||state.workflow;
   if(w&&(w.status==='completed'||w.status==='failed'||w.status==='halted'||w.outcome==='delivered'||w.outcome==='abandoned'||w.completed_at)){
     return [];
   }
   return (state.controllerActionsData?.recovery||[]).filter(o=>!['resolved','superseded'].includes(o.status)&&(!nodeId||o.payload?.node_id===nodeId));
 }
-function dispatchConfirmations(nodeId){return (state.controllerActionsData?.recovery||[]).filter(o=>o.confirmation&&(!nodeId||o.payload?.node_id===nodeId));}
-function dispatchConfirmationHtml(nodeId){return dispatchConfirmations(nodeId).map(o=>'<div class="flow-attn" role="status">派发已确认：'+esc(o.confirmation.task_ids.join('、'))+' · 查看任务列表可跟踪实际执行</div>').join('');}
+function dispatchConfirmations(nodeId){
+  const w=state.workflow?.workflow||state.workflow;
+  if(w&&(w.status==='completed'||w.status==='failed'||w.status==='halted'||w.outcome==='delivered'||w.outcome==='abandoned'||w.completed_at)){
+    return [];
+  }
+  const nid=(typeof nodeId==='object'&&nodeId!==null)?nodeId.id:nodeId;
+  const gNodes=(state.workflow?.graph?.nodes)||[];
+  return (state.controllerActionsData?.recovery||[]).filter(o=>{
+    if(!o.confirmation)return false;
+    const targetNodeId=o.payload?.node_id;
+    if(nid&&targetNodeId!==nid)return false;
+    if(targetNodeId){
+      const n=gNodes.find(item=>String(item.id)===String(targetNodeId));
+      if(n&&(n.status==='completed'||n.status==='cleaned'||n.status==='superseded'))return false;
+    }
+    return true;
+  });
+}
+function dispatchConfirmationHtml(nodeId){return dispatchConfirmations(nodeId).map(o=>'<div class="flow-attn" role="status"><span class="flow-attn-tag">派发已确认</span><span class="flow-attn-text">'+esc(o.confirmation.task_ids.join('、'))+' · 查看任务列表可跟踪实际执行</span></div>').join('');}
 function recoveryUnavailable(){return Boolean(state.workflow&&!state.controllerActionsData);}
 function recoveryCard(o,wid){
   const r=o.recovery;
