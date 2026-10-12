@@ -9110,13 +9110,30 @@ function openControllerCockpitModal(){
   renderWorkflowTabs();
 }
 function currentRecovery(nodeId){
-  const w=state.workflow?.workflow;
+  const w=state.workflow?.workflow||state.workflow;
   if(w&&(w.status==='completed'||w.status==='failed'||w.status==='halted'||w.outcome==='delivered'||w.outcome==='abandoned'||w.completed_at)){
     return [];
   }
   return (state.controllerActionsData?.recovery||[]).filter(o=>!['resolved','superseded'].includes(o.status)&&(!nodeId||o.payload?.node_id===nodeId));
 }
-function dispatchConfirmations(nodeId){return (state.controllerActionsData?.recovery||[]).filter(o=>o.confirmation&&(!nodeId||o.payload?.node_id===nodeId));}
+function dispatchConfirmations(nodeId){
+  const w=state.workflow?.workflow||state.workflow;
+  if(w&&(w.status==='completed'||w.status==='failed'||w.status==='halted'||w.outcome==='delivered'||w.outcome==='abandoned'||w.completed_at)){
+    return [];
+  }
+  const nid=(typeof nodeId==='object'&&nodeId!==null)?nodeId.id:nodeId;
+  const gNodes=(state.workflow?.graph?.nodes)||[];
+  return (state.controllerActionsData?.recovery||[]).filter(o=>{
+    if(!o.confirmation)return false;
+    const targetNodeId=o.payload?.node_id;
+    if(nid&&targetNodeId!==nid)return false;
+    if(targetNodeId){
+      const n=gNodes.find(item=>String(item.id)===String(targetNodeId));
+      if(n&&(n.status==='completed'||n.status==='cleaned'||n.status==='superseded'))return false;
+    }
+    return true;
+  });
+}
 function dispatchConfirmationHtml(nodeId){return dispatchConfirmations(nodeId).map(o=>'<div class="flow-attn" role="status"><span class="flow-attn-tag">派发已确认</span><span class="flow-attn-text">'+esc(o.confirmation.task_ids.join('、'))+' · 查看任务列表可跟踪实际执行</span></div>').join('');}
 function recoveryUnavailable(){return Boolean(state.workflow&&!state.controllerActionsData);}
 function recoveryCard(o,wid){
