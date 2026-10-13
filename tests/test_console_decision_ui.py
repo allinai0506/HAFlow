@@ -88,7 +88,29 @@ class TestConsoleDecisionAndPipelineUI(unittest.TestCase):
 
     def test_workflow_load_fetches_decisions(self):
         js = _js()
-        self.assertIn("state.decisionData=await api('/api/workflow/decisions", js)
+        # Execute the production loader rather than accepting a dead if(false) string.
+        import subprocess
+        block = js[js.index("const workflowExtraRequests=new Map();"):js.index("function clearWorkflow()")]
+        harness = r"""
+const assert=require('node:assert/strict');
+const state={workflowLoadSequence:1,workflow:{workflow:{workflow_id:'wf-decisions'}}};
+const calls=[];
+function api(path){
+ calls.push(path);
+ return Promise.resolve(path.startsWith('/api/workflow/decisions?')?
+  {decisions:[{decision_id:'d-real',workflow_id:'wf-decisions'}]}:{});
+}
+const renderTasks=()=>{},renderFlowWorkbench=()=>{},renderDeliverables=()=>{},renderNodeInspector=()=>{};
+""" + block + r"""
+loadWorkflowExtras('wf-decisions',1);
+setImmediate(()=>{
+ assert(calls.includes('/api/workflow/decisions?workflow_id=wf-decisions'));
+ assert.equal(state.decisionData.decisions[0].decision_id,'d-real');
+ assert.equal(state.decisionData.decisions[0].workflow_id,'wf-decisions');
+});
+"""
+        result=subprocess.run(['node','-e',harness],capture_output=True,text=True,timeout=10)
+        self.assertEqual(result.returncode,0,result.stderr)
 
 
 if __name__ == "__main__":

@@ -328,11 +328,13 @@ def test_user_restore_flows_through_controller_and_still_waits_for_registration(
 def test_late_workflow_refresh_keeps_controller_recovery_page():
     import subprocess
     source=(Path(__file__).resolve().parents[1]/'console/herdr_factory_console.py').read_text()
-    function='async function loadWorkflow(id){'+source.split('async function loadWorkflow(id){',1)[1].split('\nfunction ',1)[0].split('\nasync function ',1)[0]
+    start=source.index('async function loadWorkflow(')
+    function=source[start:].split('\nfunction ',1)[0].split('\nasync function ',1)[0]
     script='''const state={workflowId:'wf',workflow:{workflow:{workflow_id:'wf'}},openWorkflowTabIds:[]};
 let finish;const pending=new Promise(r=>finish=r);let graph=0,cockpit=0;
 async function api(url){await pending;return url.includes('id=')?{workflow:{workflow_id:'wf'}}:{};}
 function saveViewState(){}function renderWorkflowTabs(){}function renderWorkflowHead(){}function renderStages(){}function renderTasks(){}function destroyFlowGraph(){}
+function loadWorkflowExtras(){}
 function renderFlowWorkbench(){graph++;}function openControllerCockpitModal(){cockpit++;state.workflowId='__ctl__';}
 '''+function+'''
 (async()=>{const request=loadWorkflow('wf');state.workflowId='__ctl__';finish();await request;console.log(JSON.stringify({selected:state.workflowId,graph,cockpit}));})();

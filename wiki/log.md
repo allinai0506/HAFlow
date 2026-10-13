@@ -2464,3 +2464,9 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 
 - FACT：Console 交付物装配读取同 workflow/task 的正式 PR 创建事件；复用既有 PR 卡片，兼容旧任务字段，不修改状态。
 - 依据：`console/herdr_factory_console.py::_load_deliverable_pr`；`tests/test_deliverables.py::test_console_projects_persisted_pr_receipt_for_cleaned_task`。
+
+
+## 2026-10-13 — 工作流主体与慢速成果扫描解耦
+
+- FACT：轻量主体使用既有数据库快照，成果/恢复/决策/实时状态独立补全，加载与失败明确，旧默认完整接口兼容。
+- 证据：`tests/test_console_workflow_latency.py`、`console/herdr_factory_console.py::loadWorkflow`。

@@ -96,6 +96,14 @@ Inspector 不新建第二套详情或解卡系统：
 
 Workflow Builder / 拖拽持久化 / Stencil / 版本化 UI / 发布 / MiniMap / ELK / React / React Flow / BPMN / 全局 IA 重构，均不属于本层。交付成果区也不改节点自动完成条件。
 
+## 工作流主体加载
+
+`FACT` Console 使用 `GET /api/workflow?id=…&lightweight=1` 读取目标 workflow 的既有 SQLite 快照，先渲染工作流、任务和图；不扫描 Git 工作区，也不探测实时 coordinator。必要的跨 workflow required_task_ids 按 ID 读取以保留归属错误诊断。默认详情接口仍保留完整响应。
+
+`FACT` 交付成果、恢复操作、决策和实时状态随后通过各自接口补全。请求按类型串行、同地址 in-flight 去重；sequence 与 workflow_id 不符的旧响应被丢弃。等待阶段明确显示加载中，失败保留未知/读取失败。交付物扫描耗时不等于主体首次显示时间。
+
+Evidence: `console/herdr_factory_console.py::workflow_detail/loadWorkflow/loadWorkflowExtras`；`tests/test_console_workflow_latency.py`。
+
 ## 9. 交付成果
 
 `FACT` 工作流页在 `flow` / `list` 模式显示 `#deliverablesPanel`。Workflow、Node、Task 三处读同一份目录：Workflow 汇总各 Node，Node 汇总所属 Task，Task 抽屉「产物」只显示该 Task 的行。身份是 `sha256(task_id + kind + key)` 的前 20 位。

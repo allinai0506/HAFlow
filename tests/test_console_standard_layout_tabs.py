@@ -325,12 +325,13 @@ assert.ok(!state.openWorkflowTabIds.includes('__logs__'));
         self.assertIn('id="sidebarLogsItem" onclick="showLogs()"', self.html)
 
     def test_sidecar_perf_and_soft_refresh(self):
-        """14. Verify sidecar performance optimizations: Promise.all, DOM diffing, system tab protection, and fast service status."""
-        # 1. Promise.all parallelization in loadWorkflow
-        load_wf_match = re.search(r"async function loadWorkflow\(id\)\{.*?\n\}", self.js, re.DOTALL)
+        """14. Verify nonblocking sidecars, DOM diffing, system tabs and service status."""
+        # 1. Actual primary render cannot wait for slow auxiliary requests.
+        from tests.test_console_workflow_latency import assert_workflow_paints_before_extras
+        assert_workflow_paints_before_extras(self.js)
+        load_wf_match = re.search(r"async function loadWorkflow\(id,prefetched=null\)\{.*?\n\}", self.js, re.DOTALL)
         self.assertIsNotNone(load_wf_match)
         load_wf_body = load_wf_match.group(0)
-        self.assertIn("Promise.all([", load_wf_body)
         # 2. Soft refresh: conditional destroyFlowGraph only when workflow changes
         self.assertIn("destroyFlowGraph()", load_wf_body)
 
