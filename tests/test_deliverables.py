@@ -729,3 +729,42 @@ def test_completed_probe_releases_capacity_before_slow_peer_finishes(monkeypatch
         finally:
             release.set()
         assert [item['task_id'] for item in result.result(timeout=5)['items']] == [str(i) for i in range(5)]
+
+
+def test_catalog_read_error_is_quiet_expandable_and_keeps_results():
+    """Execute shared production renderer, including empty workflow catalogs."""
+    import subprocess
+    from console import herdr_factory_console as console
+
+    source = console.HTML
+    notes = source[source.index('function deliverableNoteHtml('):source.index('function deliverableCountsText(')]
+    renderer = source[source.index('function renderDeliverables('):source.index('async function openDeliverable(')]
+    program = r'''
+const assert=require('node:assert/strict');
+const esc=s=>String(s).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;');
+const raw='无法读取任务工作区，未列出的文件不代表尚未生成。 <script>alert(1)</script>';
+const packed={items:[{name:'PR #1611'}],counts:{present:1},error:raw};
+const state={workflow:{deliverables:packed}};
+const panel={hidden:true},body={innerHTML:''},count={textContent:''};
+const document={getElementById:id=>({deliverablesPanel:panel,deliverablesBody:body,deliverablesCount:count})[id],querySelector:()=>({dataset:{workspace:'flow'}})};
+const workflowDeliverables=()=>state.workflow.deliverables;
+const deliverableCountsText=()=> '已产生 1 项';
+const deliverableRowHtml=item=>'<div>'+esc(item.name)+'</div>';
+''' + notes + renderer + r'''
+renderDeliverables();
+assert.ok(body.innerHTML.includes('<summary>部分文件暂时无法展示</summary>'));
+assert.ok(body.innerHTML.includes('<details class="deliverables-notice">'));
+assert.ok(!body.innerHTML.includes('deliverables-notice error'));
+assert.ok(body.innerHTML.includes('PR #1611'));
+assert.ok(body.innerHTML.includes('&lt;script&gt;'));
+assert.ok(!body.innerHTML.includes('<script>'));
+packed.items=[];renderDeliverables();
+assert.ok(body.innerHTML.includes('部分文件暂时无法展示'));
+assert.ok(!body.innerHTML.includes('还没有交付成果'));
+packed.error='';packed.notice='成果列表可能未完整。';renderDeliverables();
+assert.ok(body.innerHTML.includes(packed.notice));
+packed.notice='';renderDeliverables();
+assert.ok(body.innerHTML.includes('还没有交付成果'));
+'''
+    result = subprocess.run(['node', '-e', program], capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
