@@ -12,7 +12,7 @@ import hashlib
 import html
 import os
 import subprocess
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -86,14 +86,27 @@ def project_for_tasks(
     items: List[Dict[str, Any]] = []
     error = ""
     truncated = False
-    for offset in range(0, len(task_list), _PROBE_WORKERS):
-        batch = task_list[offset:offset + _PROBE_WORKERS]
-        results = _PROBES.map(lambda task: _task_items(task, node_list), batch)
-        for rows, task_error, task_truncated in results:
-            items.extend(rows)
-            if task_error and not error:
-                error = task_error
-            truncated = truncated or task_truncated
+    remaining = iter(enumerate(task_list))
+    pending = {}
+    results = {}
+    while True:
+        while len(pending) < _PROBE_WORKERS:
+            entry = next(remaining, None)
+            if entry is None:
+                break
+            index, task = entry
+            pending[_PROBES.submit(_task_items, task, node_list)] = index
+        if not pending:
+            break
+        completed, _ = wait(pending, return_when=FIRST_COMPLETED)
+        for future in completed:
+            results[pending.pop(future)] = future.result()
+    for index in range(len(task_list)):
+        rows, task_error, task_truncated = results[index]
+        items.extend(rows)
+        if task_error and not error:
+            error = task_error
+        truncated = truncated or task_truncated
     if include_expectations:
         items.extend(_node_gaps(workflow_id, task_list, node_list, items))
     return pack(_dedupe(items), error, truncated)

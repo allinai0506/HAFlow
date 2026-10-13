@@ -706,3 +706,26 @@ def test_workspace_probes_are_parallel_bounded_and_keep_task_order(monkeypatch):
             assert packed['error'] == 'first error'
             assert packed['truncated'] is True
     assert peak == 4, 'probe concurrency must be capped across requests in this process'
+
+
+def test_completed_probe_releases_capacity_before_slow_peer_finishes(monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+
+    release, next_started = threading.Event(), threading.Event()
+    tasks = [{'workflow_id': 'wf', 'task_id': str(i)} for i in range(5)]
+    def probe(task, nodes):
+        tid = task['task_id']
+        if tid == '0':
+            assert release.wait(5)
+        if tid == '4':
+            next_started.set()
+        return ([{'id': tid, 'task_id': tid, 'status': 'present'}], '', False)
+    monkeypatch.setattr(d, '_task_items', probe)
+    with ThreadPoolExecutor(max_workers=1) as callers:
+        result = callers.submit(d.project_for_tasks, 'wf', tasks, [], include_expectations=False)
+        try:
+            assert next_started.wait(2), 'completed probes must free capacity without a batch barrier'
+        finally:
+            release.set()
+        assert [item['task_id'] for item in result.result(timeout=5)['items']] == [str(i) for i in range(5)]
