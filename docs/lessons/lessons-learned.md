@@ -6612,3 +6612,27 @@ HAFlow 作为企业级多任务通用 Agent 编排系统，必须支撑招投标
 ### 验证命令 / 关联证据
 
 `pytest -q tests/test_review_benchmark.py tests/test_auto_pr_review.py`（47 项专项测试 100% PASS）；`pytest -q`（全库 4,088 项回归测试 100% PASS）；`bin/herdr-review-bench run` 与 `bin/herdr-review-bench compare` 端到端对比生成验证；`wiki/review-benchmark.md`、`wiki/log.md` 知识闭环。
+
+
+## 155. 工作流首屏不得等待辅助扫描，异步测试必须证明执行完成（2026-10-13）
+
+### 问题背景
+
+工作流详情同步组装交付物、扫描 Git 和运行现场，前端再等待辅助接口，导致工作流主体数秒后才出现。修复提交 `8ee3990` 将主体改为单工作流快照读取，并保留正式 PR 回执投影。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|---|---|---|
+| 主体等待完整成果目录和现场扫描 | 辅助信息耗时会放大用户对主体加载的感知 | 主体独立绘制；辅助信息明确显示加载中或失败 |
+| 切换后旧响应返回 | 异步结果必须同时满足请求序列和实体归属 | 每类请求有并发上限；同路径复用，迟到结果不得覆盖当前工作流 |
+| Node 等待未完成 Promise 却退出 0 | 未完成且没有活动句柄的 Promise 不能证明测试走完 | 在 `beforeExit` 检查完成标记，并用永久阻塞变异验证失败路径 |
+| 用自动化工具操作耗时替代点击延迟 | 光标定位等工具开销不属于页面响应 | 从真实 DOM 点击事件计时，保留慢样本与测量边界 |
+
+### 操作规范
+
+守护测试已固化到 `tests/test_console_workflow_latency.py`：真实 SQLite 快照禁止全量读取和 Git 扫描；实际生产 JS 在四类辅助请求悬而未决时完成主体绘制；A→B 切换拒绝迟到响应。默认完整 API 保持兼容，缺失 required task 引用按 ID 核对归属。
+
+### 验证命令 / 关联证据
+
+`pytest -q tests/test_console_workflow_latency.py`。全量 `pytest -q -x`：4148 passed、163 subtests passed、1 条预期安全拒绝清理警告，exit 0。正式页面连续加载 43–227 ms，Console 重启后首次绘制 607 ms；首轮批量重启出现 1263 ms 样本，不能宣称所有启动瞬间加载均低于 1 秒。详情见 `docs/walkthroughs/20261013-console-workflow-latency.md`。

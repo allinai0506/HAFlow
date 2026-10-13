@@ -2470,3 +2470,5 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 
 - FACT：轻量主体使用既有数据库快照，成果/恢复/决策/实时状态独立补全，加载与失败明确，旧默认完整接口兼容。
 - 证据：`tests/test_console_workflow_latency.py`、`console/herdr_factory_console.py::loadWorkflow`。
+
+- 2026-10-13：加载性能正式验收与知识补充：常规43–227ms、Console重启首次607ms；保留首轮1263ms异常样本。见 `docs/lessons/lessons-learned.md` 第155节和加载性能交付记录。
