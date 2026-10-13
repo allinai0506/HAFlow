@@ -6636,3 +6636,9 @@ HAFlow 作为企业级多任务通用 Agent 编排系统，必须支撑招投标
 ### 验证命令 / 关联证据
 
 `pytest -q tests/test_console_workflow_latency.py`。全量 `pytest -q -x`：4148 passed、163 subtests passed、1 条预期安全拒绝清理警告，exit 0。正式页面连续加载 43–227 ms，Console 重启后首次绘制 607 ms；首轮批量重启出现 1263 ms 样本，不能宣称所有启动瞬间加载均低于 1 秒。详情见 `docs/walkthroughs/20261013-console-workflow-latency.md`。
+
+第155节补充：部署指纹和直达链接通过不能替代普通首页恢复入口验收。实际用户 Chrome 的资源时间线揭示首页仍串行等待 overview 与 project。已在 `test_plain_home_restores_workflow_before_slow_overview` 固化已记住工作流、系统页签和无记忆入口的实际启动行为检查。
+
+第155节补充：用户要求“整个首页”时，应计入侧栏及成果/动作/决策/现场全部就绪，而不能仅验收主体先绘制。只读工作区探测可以有界并行，但必须验证跨请求活跃数量、任务顺序、首个错误和截断语义；Git HEAD 在单次任务投影内复用能同时减少进程启动与快照漂移。对应 `test_workspace_probes_are_parallel_bounded_and_keep_task_order`、`test_task_projection_reads_git_head_once` 及辅助接口的真实SQLite禁止全局读取测试。
+
+第155节补充：有界并行使用整批等待会产生队首阻塞，慢项未完成时其他槽位可能空闲。用每请求最多4项未完成的滚动补位调度，并按输入索引聚合，回归须保持首项悬挂而确认第五项启动，证明消除批次屏障。预览通过仍需正式重启后首轮验收；此次正式1402ms样本不能删去。

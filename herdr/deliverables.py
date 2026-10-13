@@ -12,12 +12,15 @@ import hashlib
 import html
 import os
 import subprocess
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 PREVIEW_LIMIT = 64 * 1024
 DOWNLOAD_LIMIT = 8 * 1024 * 1024
 MAX_FILES = 40
+_PROBE_WORKERS = 4
+_PROBES = ThreadPoolExecutor(max_workers=_PROBE_WORKERS, thread_name_prefix="deliverable")
 
 SKIP_DIRS = {
     ".git", ".herdr", ".herdr-loop", ".hg", ".svn",
@@ -83,8 +86,23 @@ def project_for_tasks(
     items: List[Dict[str, Any]] = []
     error = ""
     truncated = False
-    for task in task_list:
-        rows, task_error, task_truncated = _task_items(task, node_list)
+    remaining = iter(enumerate(task_list))
+    pending = {}
+    results = {}
+    while True:
+        while len(pending) < _PROBE_WORKERS:
+            entry = next(remaining, None)
+            if entry is None:
+                break
+            index, task = entry
+            pending[_PROBES.submit(_task_items, task, node_list)] = index
+        if not pending:
+            break
+        completed, _ = wait(pending, return_when=FIRST_COMPLETED)
+        for future in completed:
+            results[pending.pop(future)] = future.result()
+    for index in range(len(task_list)):
+        rows, task_error, task_truncated = results[index]
         items.extend(rows)
         if task_error and not error:
             error = task_error
@@ -251,11 +269,13 @@ def _task_items(task: Dict[str, Any], nodes: List[Dict[str, Any]]):
     workspace = _workspace(task)
     error = ""
     changed: List[str] = []
+    head = None
     if task.get("clone_path") and workspace is None:
         error = "任务工作区不在受管目录内，不能读取。"
     elif workspace is not None and (workspace / ".git").exists():
         changed, error = _changed_files(workspace)
-    present, walk_error, truncated, git_rels = _present_rels(task, workspace, expected, changed)
+        head = _head_sha(workspace)
+    present, walk_error, truncated, git_rels = _present_rels(task, workspace, expected, changed, head=head)
     if walk_error and not error:
         error = walk_error
     registered = _registered_rels(task, workspace)
@@ -266,7 +286,7 @@ def _task_items(task: Dict[str, Any], nodes: List[Dict[str, Any]]):
         )
         for rel in present
     ]
-    items.extend(_git_items(task, node_id, node_label, retired, changed, workspace))
+    items.extend(_git_items(task, node_id, node_label, retired, changed, workspace, head=head))
     return items, error, truncated
 
 
@@ -382,9 +402,9 @@ def _gap_item(workflow_id, node_id, node_label, token, tasks) -> Dict[str, Any]:
     )
 
 
-def _git_items(task, node_id, node_label, retired, changed, workspace=None) -> List[Dict[str, Any]]:
+def _git_items(task, node_id, node_label, retired, changed, workspace=None, *, head=None) -> List[Dict[str, Any]]:
     items = []
-    sha = _commit_sha(task, workspace)
+    sha = _commit_sha(task, workspace, head=head)
     if sha:
         items.append(_base(
             task, node_id, node_label, kind="git_commit", key=sha, name=f"提交 {sha[:12]}",
@@ -429,7 +449,7 @@ def _base(task, node_id, node_label, **fields) -> Dict[str, Any]:
     return item
 
 
-def _present_rels(task, workspace, expected, changed):
+def _present_rels(task, workspace, expected, changed, *, head=None):
     found: List[str] = []
     seen = set()
     git_rels = set()
@@ -468,7 +488,7 @@ def _present_rels(task, workspace, expected, changed):
             stored = add(rel)
             if stored:
                 git_rels.add(stored)
-        committed, commit_error = _owned_commit_files(task, workspace)
+        committed, commit_error = _owned_commit_files(task, workspace, head=head)
         for rel in committed:
             stored = add(rel)
             if stored:
@@ -751,14 +771,14 @@ def _head_sha(workspace: Path) -> str:
     return _sha_text((result.stdout or "").strip())
 
 
-def _commit_sha(task: Dict[str, Any], workspace: Optional[Path] = None) -> str:
+def _commit_sha(task: Dict[str, Any], workspace: Optional[Path] = None, *, head=None) -> str:
     """Return this task's own commit, never the launch baseline."""
     baseline = _baseline_sha(task)
     delivery = _recorded_delivery_sha(task)
     if delivery and not _same_sha(delivery, baseline):
         return delivery
     if workspace is not None and (workspace / ".git").exists():
-        head = _head_sha(workspace)
+        head = _head_sha(workspace) if head is None else head
         if head and not _same_sha(head, baseline):
             return head
     candidate = _sha_text(task.get("candidate_sha"))
@@ -767,14 +787,14 @@ def _commit_sha(task: Dict[str, Any], workspace: Optional[Path] = None) -> str:
     return ""
 
 
-def _owned_commit_files(task: Dict[str, Any], workspace: Path):
+def _owned_commit_files(task: Dict[str, Any], workspace: Path, *, head=None):
     baseline = _baseline_sha(task)
     if baseline:
-        end = _head_sha(workspace) or _commit_sha(task, workspace)
+        end = (_head_sha(workspace) if head is None else head) or _commit_sha(task, workspace, head=head)
         if not end or _same_sha(end, baseline):
             return [], ""
         return _diff_names(workspace, baseline, end)
-    sha = _commit_sha(task, workspace)
+    sha = _commit_sha(task, workspace, head=head)
     if not sha:
         return [], ""
     return _commit_files(workspace, sha), ""

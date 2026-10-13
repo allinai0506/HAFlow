@@ -952,11 +952,10 @@ def api_workflow_controller_actions(wid):
     """
     wid = str(wid or '').strip()
     if not wid: raise RuntimeError('workflow_id 不能为空')
-    wf = workflows().get(wid) or {}
-    wf = {'workflow_id': wid, **wf}
-    ts = tasks_for_workflow(wid)
+    from herdr.recovery_store import read_snapshot
+    wf, _, ts = read_snapshot(herdr_kernel._get_store().db_path, wid)
     blockers = herdr_controller_actions.resolve_workflow_blockers(ts, wf)
-    p = project_for_workflow(wid) or {}
+    p = project_by_id(wf.get('project_id')) or wf
     proj_root = p.get('project_root') or wf.get('project_root') or ''
     operations = api_workflow_recovery(wid).get('operations',[])
     managed = {tid for op in operations if op['status'] not in {'resolved','superseded'}
@@ -1421,11 +1420,10 @@ def _tasks_for_deliverables(tasks):
 def api_workflow_deliverables(wid):
     if not wid:
         raise RuntimeError('workflow_id 不能为空')
-    w = workflows().get(wid)
-    if not w:
-        raise RuntimeError('工作流不存在')
+    from herdr.recovery_store import read_snapshot
+    w, _, ts = read_snapshot(herdr_kernel._get_store().db_path, wid)
     return herdr_deliverables.project_for_tasks(
-        wid, _tasks_for_deliverables(tasks_for_workflow(wid)), _workflow_nodes(wid, w),
+        wid, _tasks_for_deliverables(ts), _workflow_nodes(wid, w),
     )
 
 def api_read_deliverable(wid, tid, did, download=False):
@@ -9666,6 +9664,9 @@ async function initFromUrlOrState(){
       const td=await api('/api/task?id='+encodeURIComponent(qTask));
       if(td&&td.task&&td.task.workflow_id)qWf=td.task.workflow_id;
     }catch(e){}
+  }
+  if(!qWf&&!qTask&&!qPane&&!qOps&&!qView&&!state.dashMode&&!state.opsMode&&state.shellView==='workbench'&&state.workflowId&&!state.workflowId.startsWith('__')){
+    qWf=state.workflowId;
   }
   if(!qWf&&!qTask&&!qPane&&!qOps&&!qView){
     if(state.dashMode)showDashboard();
