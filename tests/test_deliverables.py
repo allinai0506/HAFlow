@@ -14,6 +14,36 @@ NODES = [
 ]
 
 
+def test_task_projection_reads_git_head_once(tmp_path, monkeypatch):
+    import subprocess
+
+    root, workspace = _workspace(tmp_path, "task-dev")
+    monkeypatch.setenv("HERDR_CLONES_DIR", str(root))
+    def git(*args):
+        return subprocess.check_output(["git", *args], cwd=workspace, text=True).strip()
+    git("init", "-q")
+    git("config", "user.email", "test@example.com")
+    git("config", "user.name", "Test")
+    (workspace / "baseline.md").write_text("baseline")
+    git("add", ".")
+    git("commit", "-qm", "baseline")
+    baseline = git("rev-parse", "HEAD")
+    (workspace / "delivery.md").write_text("delivery")
+    git("add", ".")
+    git("commit", "-qm", "delivery")
+    delivery = git("rev-parse", "HEAD")
+    original = d._head_sha
+    reads = []
+    def head(path):
+        reads.append(path)
+        return original(path)
+    monkeypatch.setattr(d, "_head_sha", head)
+    packed = d.project_for_tasks("wf-biz", [_task("task-dev", workspace, "dev", baseline_commit=baseline)], [])
+    assert any(item["name"] == "delivery.md" for item in packed["items"])
+    assert any(item.get("sha") == delivery for item in packed["items"])
+    assert reads == [workspace]
+
+
 def _workspace(tmp_path, task_id):
     root = tmp_path / "clones"
     root.mkdir()
@@ -269,6 +299,16 @@ def test_download_headers_are_attachment_and_nosniff():
     assert "text/html" not in headers["Content-Type"]
 
 
+def _seed_console_workflow(tmp_path, monkeypatch, tasks, nodes):
+    from herdr import state_db
+    db = tmp_path / 'state.db'
+    monkeypatch.setenv('HERDR_STATE_DB', str(db))
+    state_db.save_workflow({'workflow_id': 'wf-biz', 'config': {'nodes': nodes}}, db_path=db)
+    for task in tasks:
+        state_db.save_task(task, db_path=db)
+    return db
+
+
 def test_console_read_uses_the_same_catalog(tmp_path, monkeypatch):
     from console import herdr_factory_console as console
 
@@ -276,10 +316,7 @@ def test_console_read_uses_the_same_catalog(tmp_path, monkeypatch):
     monkeypatch.setenv("HERDR_CLONES_DIR", str(root))
     (workspace / "需求清单.md").write_text("客户要报价。\n", encoding="utf-8")
     task = _task("task-req", workspace, "requirements")
-    monkeypatch.setattr(console, "workflows", lambda: {
-        "wf-biz": {"workflow_id": "wf-biz", "config": {"nodes": NODES}},
-    })
-    monkeypatch.setattr(console, "tasks_for_workflow", lambda wid: [task] if wid == "wf-biz" else [])
+    _seed_console_workflow(tmp_path, monkeypatch, [task], NODES)
 
     packed = console.api_workflow_deliverables("wf-biz")
     item = next(row for row in packed["items"] if row["name"] == "需求清单.md")
@@ -548,8 +585,7 @@ def test_console_task_view_omits_sibling_expectations(tmp_path, monkeypatch):
         console.herdr_projection, "project_task",
         lambda tid: {"task_id": tid, "workflow_id": "wf-biz"},
     )
-    monkeypatch.setattr(console, "tasks_for_workflow", lambda wid: tasks)
-    monkeypatch.setattr(console, "workflows", lambda: {"wf-biz": {"config": {"nodes": nodes}}})
+    _seed_console_workflow(tmp_path, monkeypatch, tasks, nodes)
     console._deliverable_observation_loader = lambda task_id: (
         [{"metadata": {"artifact_path": str(first / "客户原始资料.pdf")}}]
         if task_id == "task-a" else []
@@ -598,8 +634,7 @@ def test_console_projects_persisted_pr_receipt_for_cleaned_task(tmp_path, monkey
     monkeypatch.setenv('HERDR_STATE_DB', str(db))
     monkeypatch.setattr(console, '_deliverable_pr_loader', console._load_deliverable_pr)
     task = {'task_id': 'impl', 'workflow_id': 'wf-biz', 'node': 'impl', 'status': 'cleaned'}
-    monkeypatch.setattr(console, 'workflows', lambda: {'wf-biz': {'config': {'nodes': []}}})
-    monkeypatch.setattr(console, 'tasks_for_workflow', lambda wid: [task])
+    _seed_console_workflow(tmp_path, monkeypatch, [task], [])
     state_db.record_event({'workflow_id': 'wf-biz', 'task_id': 'impl',
                           'event_type': 'pull_request_created', 'source': 'herdr-task',
                           'payload': {'url': 'https://gitee.com/example/repo/pulls/1611',
@@ -612,6 +647,7 @@ def test_console_projects_persisted_pr_receipt_for_cleaned_task(tmp_path, monkey
     assert prs[0]['status'] == 'present'
     assert prs[0]['actions'] == ['open']
     assert 'pull_request' not in task
+    assert 'pull_request' not in state_db.get_task('impl', db_path=db)
 
 
 @pytest.mark.parametrize('workflow,task_id,event_type,source', [
@@ -628,10 +664,45 @@ def test_console_excludes_unowned_or_unconfirmed_pr_events(tmp_path, monkeypatch
     monkeypatch.setenv('HERDR_STATE_DB', str(db))
     monkeypatch.setattr(console, '_deliverable_pr_loader', console._load_deliverable_pr)
     task = {'task_id': 'impl', 'workflow_id': 'wf-biz', 'node': 'impl', 'status': 'cleaned'}
-    monkeypatch.setattr(console, 'workflows', lambda: {'wf-biz': {'config': {'nodes': []}}})
-    monkeypatch.setattr(console, 'tasks_for_workflow', lambda wid: [task])
+    _seed_console_workflow(tmp_path, monkeypatch, [task], [])
     state_db.record_event({'workflow_id': workflow, 'task_id': task_id,
                           'event_type': event_type, 'source': source,
                           'payload': {'url': 'https://gitee.com/example/repo/pulls/999'}}, db_path=db)
     packed = console.api_workflow_deliverables('wf-biz')
     assert not [item for item in packed['items'] if item['kind'] == 'git_pr']
+
+
+def test_workspace_probes_are_parallel_bounded_and_keep_task_order(monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+    lock = threading.Lock()
+    ready, release = threading.Event(), threading.Event()
+    active = peak = 0
+    tasks = [{'workflow_id': 'wf', 'task_id': str(i)} for i in range(8)]
+    def probe(task, nodes):
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+            if active == 4:
+                ready.set()
+        assert release.wait(5), 'probe release was not signalled'
+        with lock:
+            active -= 1
+        tid = task['task_id']
+        return ([{'id': tid, 'task_id': tid, 'status': 'present'}],
+                'first error' if tid == '1' else '', tid == '2')
+    monkeypatch.setattr(d, '_task_items', probe)
+    with ThreadPoolExecutor(max_workers=2) as callers:
+        results = [callers.submit(d.project_for_tasks, 'wf', tasks, [], include_expectations=False)
+                   for _ in range(2)]
+        try:
+            assert ready.wait(2), 'serial probes delay the complete catalog'
+        finally:
+            release.set()
+        for result in results:
+            packed = result.result(timeout=5)
+            assert [item['task_id'] for item in packed['items']] == [str(i) for i in range(8)]
+            assert packed['error'] == 'first error'
+            assert packed['truncated'] is True
+    assert peak == 4, 'probe concurrency must be capped across requests in this process'
