@@ -3478,11 +3478,7 @@ button { cursor: pointer; }
   color: #64748b;
   line-height: 1.5;
 }
-.deliverables-notice.error {
-  background: #fef2f2;
-  border-color: #fecaca;
-  color: #dc2626;
-}
+.deliverables-notice summary { cursor: pointer; }
 .deliverables-head {
   display: flex;
   justify-content: space-between;
@@ -8127,7 +8123,7 @@ function workflowDeliverables(){
 }
 function deliverableNoteHtml(packed){
   const bits=[];
-  if(packed&&packed.error)bits.push('<div class="deliverables-notice error">'+esc(packed.error)+'</div>');
+  if(packed&&packed.error)bits.push('<details class="deliverables-notice"><summary>部分文件暂时无法展示</summary><div>'+esc(packed.error)+'</div></details>');
   if(packed&&packed.notice)bits.push('<div class="deliverables-notice">'+esc(packed.notice)+'</div>');
   return bits.join('');
 }
@@ -8228,8 +8224,8 @@ function flowOverviewHtml(node, tasks){
   const rows=live.length?live.map(t=>'<div class="flow-task-row" onclick="openTaskDrawer(\''+esc(t.task_id)+'\')"><div><b>'+esc(t.task_id)+'</b><small>'+esc(t.agent||'未分配')+'</small></div><span class="fn-pill">'+esc(humanStatus(t.status))+'</span></div>').join(''):'<div class="empty">暂无进行中的任务</div>';
   const nodePacked=workflowDeliverables();
   const nodeItems=(nodePacked.items||[]).filter(item=>String(item.node_id)===String(node.id));
-  const nodeNotice=nodePacked.notice?'<div class="empty">'+esc(nodePacked.notice)+'</div>':'';
-  const nodeRows=nodeItems.length?nodeNotice+nodeItems.map(deliverableRowHtml).join(''):'<div class="empty">'+(nodePacked.pending?'正在读取本节点成果…':nodePacked.notice?esc(nodePacked.notice):nodePacked.error?esc(nodePacked.error):'本节点还没有成果')+'</div>';
+  const nodeNotice=deliverableNoteHtml(nodePacked);
+  const nodeRows=nodePacked.pending?'<div class="empty">正在读取本节点成果…</div>':nodeItems.length?nodeNotice+nodeItems.map(deliverableRowHtml).join(''):nodeNotice||'<div class="empty">本节点还没有成果</div>';
   return dispatchConfirmationHtml(node.id)+currentRecovery(node.id).map(o=>recoveryCard(o,state.workflowId)).join('')+'<div class="flow-reads"><em>读作</em>'+esc(flowReads(node))+'</div><div class="flow-sec">本节点成果</div><div class="muted">执行任务：'+(tasks||[]).length+' 个</div>'+nodeRows+'<div class="flow-sec">本节点现状</div>'+checks+'<div class="flow-sec">当前任务</div>'+rows;
 }
 
