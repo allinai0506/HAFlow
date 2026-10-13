@@ -94,3 +94,42 @@ def test_lightweight_graph_keeps_foreign_required_task_diagnostic(tmp_path, monk
     assert d['tasks']==[]
     assert d['graph']['nodes'][0]['completion_issues']==[
         {'task_id':'foreign-task','reason':'required_task_out_of_workflow'}]
+
+
+@pytest.mark.parametrize('saved_id', ['wf-remembered', '__ctl__', '__templates__', None])
+def test_plain_home_restores_workflow_before_slow_overview(saved_id):
+    """Exercise the actual startup entry, rather than only a workflow deep link."""
+    import json
+    import subprocess
+    source = c.HTML
+    start = source.index('async function initFromUrlOrState(')
+    block = source[start:source.index("window.addEventListener('popstate'", start)]
+    script = r'''
+const assert=require('node:assert/strict');
+const savedId=JSON.parse(process.argv[1]);
+const state={workflowId:savedId,shellView:'workbench',dashMode:false,opsMode:false};
+const window={location:{search:''}};
+const calls=[],paint=[];let release,completed=false;
+const held=new Promise(r=>release=r);
+process.on('beforeExit',()=>assert.equal(completed,true,'startup assertions did not finish'));
+async function api(path){calls.push(path);return {workflow:{workflow_id:savedId},project:{project_id:'project',workspace_id:'space'}};}
+async function loadWorkflow(id,data){paint.push(id);assert.equal(data.workflow.workflow_id,id);}
+function refreshAll(){calls.push('overview');return held;}
+function showTemplateLibrary(){calls.push('templates');}
+function toast(message){throw new Error(message);}
+''' + block + r'''
+(async()=>{
+ const startup=initFromUrlOrState();await new Promise(r=>setImmediate(r));
+ if(savedId==='wf-remembered'){
+  assert.deepEqual(paint,[savedId],'plain home must paint remembered workflow while overview is pending');
+  assert.equal(calls[0],'/api/workflow?id=wf-remembered&lightweight=1');
+  assert.equal(state.projectId,'project');assert.equal(state.spaceId,'space');
+ }else{
+  assert.deepEqual(paint,[]);assert.deepEqual(calls,[savedId==='__templates__'?'templates':'overview']);
+ }
+ release();await startup;completed=true;
+})().catch(e=>{console.error(e);process.exitCode=1});
+'''
+    result = subprocess.run(['node', '-e', script, json.dumps(saved_id)],
+                            text=True, capture_output=True, timeout=10)
+    assert result.returncode == 0, result.stderr

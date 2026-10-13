@@ -128,3 +128,5 @@ Evidence:
 - `tests/test_workflow_graph_projection.py` — DAG 边精确性、并行拓扑、状态聚合、legacy fail-soft、自定义扇出、context 不伪造
 - `tests/test_console_flow_workbench.py` — 视图切换、容器归属、画布生命周期、依赖缺失 fail-soft、无 CDN
 - PR: https://github.com/allinai0506/HAFlow/pull/114
+
+普通 `/` 首页恢复已记住的工作流也应先走轻量详情，不能先等待空间巡检和完整项目现场。系统页面及首次无历史选择的默认入口保留；后台空间与成果完成时间需单独测量。

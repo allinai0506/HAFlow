@@ -9667,6 +9667,9 @@ async function initFromUrlOrState(){
       if(td&&td.task&&td.task.workflow_id)qWf=td.task.workflow_id;
     }catch(e){}
   }
+  if(!qWf&&!qTask&&!qPane&&!qOps&&!qView&&!state.dashMode&&!state.opsMode&&state.shellView==='workbench'&&state.workflowId&&!state.workflowId.startsWith('__')){
+    qWf=state.workflowId;
+  }
   if(!qWf&&!qTask&&!qPane&&!qOps&&!qView){
     if(state.dashMode)showDashboard();
     else if(state.workflowId==='__templates__')showTemplateLibrary();

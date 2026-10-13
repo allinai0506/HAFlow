@@ -2472,3 +2472,5 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 证据：`tests/test_console_workflow_latency.py`、`console/herdr_factory_console.py::loadWorkflow`。
 
 - 2026-10-13：加载性能正式验收与知识补充：常规43–227ms、Console重启首次607ms；保留首轮1263ms异常样本。见 `docs/lessons/lessons-learned.md` 第155节和加载性能交付记录。
+
+- 2026-10-13：首页加载复查发现直达入口验收遗漏历史选择恢复分支；补普通 `/` 启动回归，明确主体、空间与成果的独立加载边界。
