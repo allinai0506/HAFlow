@@ -143,10 +143,11 @@ def workflow_definition_for(wid,p,w):
         pass
     return None
 
-def workflow_graph_for(wid,p,w,ts):
+def workflow_graph_for(wid,p,w,ts, *, definition=None, all_tasks=None):
     """Pure projection wiring: definition + tasks + blockers -> graph. Never raises."""
     try:
-        definition=workflow_definition_for(wid,p,w)
+        if definition is None:
+            definition=workflow_definition_for(wid,p,w)
     except Exception:
         definition=None
     try:
@@ -159,7 +160,7 @@ def workflow_graph_for(wid,p,w,ts):
             for k in ("status","gate_overrides","current_stage","workflow_id"):
                 if w.get(k) is not None:
                     payload[k]=w[k]
-        return herdr_workflow_graph.workflow_graph_projection(payload,ts or [],blockers,all_tasks=tasks())
+        return herdr_workflow_graph.workflow_graph_projection(payload,ts or [],blockers,all_tasks=tasks() if all_tasks is None else all_tasks)
     except Exception:
         return {'nodes':[],'edges':[],'context':{'required':[],'optional':[]}}
 
@@ -472,20 +473,46 @@ def workflow_stages(wid, p):
     return out or STAGES
 
 
-def workflow_detail(wid):
-    w=workflows().get(wid)
-    if not w:raise RuntimeError('工作流不存在')
-    p=project_for_workflow(wid); ts=enrich_workflow_tasks(wid,p,tasks_for_workflow(wid)); ss=[]
+def workflow_detail(wid, *, lightweight=False):
+    if lightweight:
+        from herdr.recovery_store import read_snapshot
+        from herdr.state_db import get_default_db_path
+        w, _, ts = read_snapshot(get_default_db_path(), wid)
+        p = project_by_id(w.get('project_id')) or w
+    else:
+        w=workflows().get(wid)
+        if not w:raise RuntimeError('工作流不存在')
+        p=project_for_workflow(wid)
+        ts=tasks_for_workflow(wid)
+    ts=enrich_workflow_tasks(wid,p,ts); ss=[]
     for k,l in workflow_stages(wid,p):
         x=stage_summary(ts,k,workflow=w); x['label']=l; ss.append(x)
     stall_info=herdr_projection.detect_workflow_stalls(wid,ts,workflow=w)
-    graph=workflow_graph_for(wid,p,w,ts)
+    if lightweight:
+        definition=w.get('config') or workflow_definition_for(wid,p,w)
+        inventory=list(ts)
+        owned_ids={t.get('task_id') for t in ts}
+        from herdr.state_db import get_task, get_default_db_path
+        for node in (definition or {}).get('nodes') or []:
+            required=node.get('required_task_ids')
+            if isinstance(required,list) and len(required)<=64:
+                for task_id in required:
+                    if isinstance(task_id,str) and task_id not in owned_ids:
+                        referenced=get_task(task_id,db_path=get_default_db_path())
+                        if referenced:inventory.append(referenced)
+                        owned_ids.add(task_id)
+        graph=workflow_graph_for(wid,p,w,ts,definition=definition,all_tasks=inventory)
+    else:
+        graph=workflow_graph_for(wid,p,w,ts)
     derived={'current_nodes':graph.get('current_nodes',[]),'ready_nodes':graph.get('ready_nodes',[]),'derived_current_stage':graph.get('current_stage',''),'current_stage_source':graph.get('current_stage_source','derived_nodes')}
-    try:
-        deliverables=api_workflow_deliverables(wid)
-    except Exception:
-        deliverables=herdr_deliverables.pack([], error='成果目录读取失败')
-    return {'workflow':{'workflow_id':wid,**_with_subject(w),**derived},'project':p,'stages':ss,'tasks':ts,'graph':graph,'context':graph.get('context',{'required':[],'optional':[]}),'coordinator':agent_runtime(w.get('coordinator_pane_id')),'candidate_branch':w.get('candidate_branch'),'agent_override':w.get('agent_override','auto'),'stall':stall_info,'deliverables':deliverables}
+    if lightweight:
+        deliverables={**herdr_deliverables.pack([]), 'pending': True}
+    else:
+        try:
+            deliverables=api_workflow_deliverables(wid)
+        except Exception:
+            deliverables=herdr_deliverables.pack([], error='成果目录读取失败')
+    return {'workflow':{'workflow_id':wid,**_with_subject(w),**derived},'project':p,'stages':ss,'tasks':ts,'graph':graph,'context':graph.get('context',{'required':[],'optional':[]}),'coordinator':None if lightweight else agent_runtime(w.get('coordinator_pane_id')), 'coordinator_pending':lightweight,'candidate_branch':w.get('candidate_branch'),'agent_override':w.get('agent_override','auto'),'stall':stall_info,'deliverables':deliverables}
 
 
 def task_detail(tid):
@@ -1340,6 +1367,7 @@ def _workflow_nodes(wid, w=None):
     return nodes or []
 
 _deliverable_observation_loader = None
+_deliverable_pr_loader = None
 
 def _load_deliverable_observations(task_id):
     if not task_id:
@@ -1353,21 +1381,40 @@ def _load_deliverable_observations(task_id):
     except Exception:
         return []
 
+def _load_deliverable_pr(task):
+    if not task.get('task_id') or not task.get('workflow_id'):
+        return None
+    db_path = Path(os.environ['HERDR_STATE_DB']) if os.environ.get('HERDR_STATE_DB') else Path(TASKS_FILE).parent / 'state.db'
+    if not db_path.is_file():
+        return None
+    from herdr.state_db import list_events
+    events = list_events(
+        workflow_id=task['workflow_id'], task_id=task['task_id'],
+        event_type='pull_request_created', source='herdr-task',
+        limit=1, desc=True, db_path=db_path,
+    )
+    return events[0]['payload'] if events else None
+
 def _tasks_for_deliverables(tasks):
     loader = _deliverable_observation_loader
-    if not loader:
-        return list(tasks or [])
     rows = []
     for task in tasks or []:
         if not isinstance(task, dict):
             continue
         row = dict(task)
         try:
-            extra = loader(row.get('task_id')) or []
+            extra = (loader(row.get('task_id')) or []) if loader else []
         except Exception:
             extra = []
         if extra:
             row['observations'] = list(row.get('observations') or []) + list(extra)
+        if _deliverable_pr_loader:
+            try:
+                receipt = _deliverable_pr_loader(row)
+                if receipt:
+                    row['pull_request'] = receipt
+            except Exception:
+                print('[DELIVERABLES WARN] PR receipt could not be read', flush=True)
         rows.append(row)
     return rows
 
@@ -7234,7 +7281,7 @@ function renderWorkflowSwitcher(){
   box.style.display='flex';
   box.innerHTML='<label>工作流</label><select id="wfSelect" onchange="state.workflowId=this.value;loadWorkflow(this.value)">'+ws.map(x=>`<option value="${esc(x.workflow_id)}"${x.workflow_id===state.workflowId?' selected':''}>${esc(workflowDisplayName(x))}</option>`).join('')+'</select>'
 }
-async function loadWorkflow(id){
+async function loadWorkflow(id,prefetched=null){
   const prevWfId=state.flowGraphWfId||state.workflowId;
   const loadSequence=state.workflowLoadSequence=(state.workflowLoadSequence||0)+1;
   const refreshingController=state.workflowId==='__ctl__'&&state.workflow?.workflow?.workflow_id===id;
@@ -7242,18 +7289,12 @@ async function loadWorkflow(id){
   state.flowSelectedNodeId=null;
   if(!state.openWorkflowTabIds)state.openWorkflowTabIds=[];
   if(id&&!state.openWorkflowTabIds.includes(id))state.openWorkflowTabIds.push(id);
-  const _fetchDecs=()=>api('/api/workflow/decisions?workflow_id='+encodeURIComponent(id));
-  const [wfRes,actionsRes,decisionsRes]=await Promise.all([
-    api('/api/workflow?id='+encodeURIComponent(id)),
-    api('/api/workflow/controller-actions?workflow_id='+encodeURIComponent(id)).catch(()=>null),
-    _fetchDecs().catch(()=>null)
-  ]);
+  const wfRes=prefetched||await api('/api/workflow?id='+encodeURIComponent(id)+'&lightweight=1');
   if(loadSequence!==state.workflowLoadSequence)return;
   const keepController=state.workflowId==='__ctl__'&&state.workflow?.workflow?.workflow_id===id;
   state.workflow=wfRes;
-  state.controllerActionsData=actionsRes;
-  state.decisionData=decisionsRes;
-  if(false){state.decisionData=await api('/api/workflow/decisions?workflow_id='+encodeURIComponent(id));}
+  state.controllerActionsData={pending:true};
+  state.decisionData={pending:true};
   const w=state.workflow.workflow;
   saveViewState();
   renderWorkflowTabs();
@@ -7266,6 +7307,41 @@ async function loadWorkflow(id){
   if(keepController)openControllerCockpitModal();else renderFlowWorkbench();
   if(typeof renderDeliverables==='function')renderDeliverables();
   if(typeof renderSidebarWorkflows==='function')renderSidebarWorkflows();
+  state.workflowRenderedAt=performance.now();
+  loadWorkflowExtras(id,loadSequence);
+}
+const workflowExtraRequests=new Map();
+function workflowExtraRequest(path,sequence){
+  const key=path.split('?')[0];
+  const previous=workflowExtraRequests.get(key);
+  if(previous&&previous.path===path){previous.sequence=sequence;return previous.promise;}
+  const entry={path,sequence};
+  entry.promise=(previous?previous.promise.catch(()=>{}):Promise.resolve()).then(()=>{
+    if(entry.sequence!==state.workflowLoadSequence)throw new Error('工作流已切换');
+    return api(path);
+  }).finally(()=>{if(workflowExtraRequests.get(key)===entry)workflowExtraRequests.delete(key);});
+  workflowExtraRequests.set(key,entry);
+  return entry.promise;
+}
+function loadWorkflowExtras(id,sequence){
+  const current=()=>sequence===state.workflowLoadSequence&&state.workflow?.workflow?.workflow_id===id;
+  const apply=(path,success,failure)=>workflowExtraRequest(path,sequence).then(data=>{
+    if(current())success(data);
+  }).catch(()=>{if(current())failure();});
+  apply('/api/workflow/deliverables?id='+encodeURIComponent(id),data=>{
+    state.workflow.deliverables=data;renderDeliverables();renderNodeInspector();
+  },()=>{
+    state.workflow.deliverables={items:[],counts:{},error:'成果目录读取失败'};renderDeliverables();renderNodeInspector();
+  });
+  apply('/api/workflow/controller-actions?workflow_id='+encodeURIComponent(id),data=>{
+    state.controllerActionsData=data;renderTasks();renderFlowWorkbench();
+  },()=>{state.controllerActionsData=null;renderFlowWorkbench();});
+  apply('/api/workflow/decisions?workflow_id='+encodeURIComponent(id),data=>{
+    state.decisionData=data;renderTasks();
+  },()=>{state.decisionData={error:'决策读取失败'};renderTasks();});
+  apply('/api/workflow/runtime?id='+encodeURIComponent(id),data=>{
+    state.workflow.coordinator=data.coordinator;state.workflow.coordinator_pending=false;
+  },()=>{state.workflow.coordinator_pending=false;state.workflow.coordinator_error='运行状态读取失败';});
 }
 function clearWorkflow(){
   destroyFlowGraph();
@@ -7308,6 +7384,10 @@ function renderSidebarWorkflows(){
   if(!container) return;
   const ws = (state.project && state.project.workflows) || [];
   const totalEl = document.getElementById('sidebarWfTotalCount');
+  if(!state.project){
+    if(totalEl)totalEl.textContent='正在加载';
+    container.innerHTML='<div class="empty" role="status">正在读取空间工作流…</div>';return;
+  }
   if(totalEl) totalEl.textContent = String(ws.length);
 
   if(!ws.length){
@@ -8095,6 +8175,10 @@ function renderDeliverables(){
   if(!state.workflow||(mode!=='flow'&&mode!=='list')){panel.hidden=true;return;}
   panel.hidden=false;
   const packed=workflowDeliverables();
+  if(packed.pending){
+    if(count)count.textContent='正在加载';
+    body.innerHTML='<div class="empty" role="status">正在读取交付成果…</div>';return;
+  }
   if(count)count.textContent=deliverableCountsText(packed.counts);
   const note=deliverableNoteHtml(packed);
   if(!packed.items.length){
@@ -8147,7 +8231,7 @@ function flowOverviewHtml(node, tasks){
   const nodePacked=workflowDeliverables();
   const nodeItems=(nodePacked.items||[]).filter(item=>String(item.node_id)===String(node.id));
   const nodeNotice=nodePacked.notice?'<div class="empty">'+esc(nodePacked.notice)+'</div>':'';
-  const nodeRows=nodeItems.length?nodeNotice+nodeItems.map(deliverableRowHtml).join(''):'<div class="empty">'+(nodePacked.notice?esc(nodePacked.notice):nodePacked.error?esc(nodePacked.error):'本节点还没有成果')+'</div>';
+  const nodeRows=nodeItems.length?nodeNotice+nodeItems.map(deliverableRowHtml).join(''):'<div class="empty">'+(nodePacked.pending?'正在读取本节点成果…':nodePacked.notice?esc(nodePacked.notice):nodePacked.error?esc(nodePacked.error):'本节点还没有成果')+'</div>';
   return dispatchConfirmationHtml(node.id)+currentRecovery(node.id).map(o=>recoveryCard(o,state.workflowId)).join('')+'<div class="flow-reads"><em>读作</em>'+esc(flowReads(node))+'</div><div class="flow-sec">本节点成果</div><div class="muted">执行任务：'+(tasks||[]).length+' 个</div>'+nodeRows+'<div class="flow-sec">本节点现状</div>'+checks+'<div class="flow-sec">当前任务</div>'+rows;
 }
 
@@ -8183,10 +8267,13 @@ function renderFlowWorkbench(){
   if(!state.flowSelectedNodeId||!nodes.some(n=>n.id===state.flowSelectedNodeId)){state.flowSelectedNodeId=pickDefaultFlowNodeId(nodes);}
   const recoveries=currentRecovery();
   const ticker=document.getElementById('bottomTicker');
-  if(ticker)ticker.textContent=recoveryUnavailable()?'恢复状态读取失败，卡点未确认':recoveries.length?'有 '+recoveries.length+' 项恢复待办，请查看卡点':'工作流调度就绪';
+  if(ticker)ticker.textContent=state.controllerActionsData?.pending?'正在读取恢复状态…':recoveryUnavailable()?'恢复状态读取失败，卡点未确认':recoveries.length?'有 '+recoveries.length+' 项恢复待办，请查看卡点':'工作流调度就绪';
   const attnBar=document.getElementById('flowAttnBar');
   if(attnBar){
-    if(state.workflowView==='flow'&&recoveryUnavailable()){
+    if(state.workflowView==='flow'&&state.controllerActionsData?.pending){
+      attnBar.style.display='flex';
+      attnBar.innerHTML='<div class="flow-attn-text" role="status">正在读取恢复状态…</div>';
+    }else if(state.workflowView==='flow'&&recoveryUnavailable()){
       attnBar.style.display='flex';
       attnBar.innerHTML=`<div class="flow-attn-text" role="status"><span>⚠ 恢复状态读取失败，卡点未确认</span></div><button class="mini" onclick="loadWorkflow(state.workflow.workflow.workflow_id)">刷新恢复状态</button>`;
     }else if(state.workflowView==='flow'&&recoveries.length){
@@ -9146,6 +9233,7 @@ function recoveryCard(o,wid){
   return `<div class="ctl-blocker"><strong>${esc(cleanStageLabel(r?.node_label||o.payload?.node_id||'恢复待办'))} · ${esc(labels[o.status]||o.status)}</strong><div>${esc(reason)}</div>${r?`<p class="muted">${esc(r.explanation)}</p><p>${esc(r.next_step)}</p><div>${(r.resource_checks||[]).map(c=>`<p>${esc(c.task_id||'旧启动')}：${esc(c.message)}</p>`).join('')}</div><div class="muted">验收版本：${esc((r.candidate_sha||'未确认').slice(0,12))}</div>`:''}<div class="muted">负责人：总指挥 · 恢复：Controller · ${o.status!=='waiting_human'&&o.next_due_at?'下次检查：'+new Date(o.next_due_at*1000).toLocaleString():'等待人工决定'}${o.detail?.deadline_at?' · 截止：'+new Date(o.detail.deadline_at*1000).toLocaleString():''}</div><div>${controls}</div></div>`;
 }
 function renderRecoveryPanel(wid){
+  if(state.controllerActionsData?.pending)return '<section role="status">正在读取恢复状态…</section>';
   if(recoveryUnavailable())return '<section role="alert">无法读取恢复状态，尚不能确认是否有卡点。<button class="mini" onclick="loadWorkflow(state.workflow.workflow.workflow_id)">刷新恢复状态</button></section>';
   const operations=currentRecovery();
   return (operations.length?'<section><div class="ctl-section-title">恢复待办</div>'+operations.map(o=>recoveryCard(o,wid)).join('')+'</section>':'')+dispatchConfirmationHtml();
@@ -9610,12 +9698,13 @@ async function initFromUrlOrState(){
     state.dashWorkflowId=null;
     state.workflowId=qWf;
     try{
-      const d=await api('/api/workflow?id='+encodeURIComponent(qWf));
+      const d=await api('/api/workflow?id='+encodeURIComponent(qWf)+'&lightweight=1');
       if(d&&d.project){
         if(d.project.project_id)state.projectId=d.project.project_id;
         if(d.project.workspace_id)state.spaceId=d.project.workspace_id;
       }
-    }catch(e){}
+      if(state.shellView==='workbench')await loadWorkflow(qWf,d);
+    }catch(e){toast(e.message,true)}
   }
   if(state.dashMode){
     await showDashboard();
@@ -9769,7 +9858,13 @@ class Handler(BaseHTTPRequestHandler):
             if p=='/api/template':return self.send_json(200,template_detail(self.query().get('id',[''])[0]))
             if p=='/api/run/status':return self.send_json(200,workflow_job_status(self.query().get('id',[''])[0]))
             if p=='/api/project':return self.send_json(200,project_detail(self.query().get('id',[''])[0]))
-            if p=='/api/workflow':return self.send_json(200,workflow_detail(self.query().get('id',[''])[0]))
+            if p=='/api/workflow':return self.send_json(200,workflow_detail(self.query().get('id',[''])[0], lightweight=self.query().get('lightweight',[''])[0]=='1'))
+            if p=='/api/workflow/runtime':
+                from herdr.recovery_store import read_snapshot
+                from herdr.state_db import get_default_db_path
+                wid=self.query().get('id',[''])[0]
+                w,_,_=read_snapshot(get_default_db_path(),wid)
+                return self.send_json(200,{'workflow_id':wid,'coordinator':agent_runtime(w.get('coordinator_pane_id'))})
             if p=='/api/workflow/deliverables':
                 wid=self.query().get('workflow_id',[''])[0] or self.query().get('id',[''])[0]
                 return self.send_json(200,api_workflow_deliverables(wid))
@@ -9909,4 +10004,5 @@ def main():
     ROOT.mkdir(parents=True,exist_ok=True); print(f'{PRODUCT_NAME}控制台: http://{HOST}:{PORT}',flush=True); ThreadingHTTPServer((HOST,PORT),Handler).serve_forever()
 if __name__=='__main__':
     _deliverable_observation_loader = _load_deliverable_observations
+    _deliverable_pr_loader = _load_deliverable_pr
     main()

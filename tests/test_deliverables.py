@@ -587,3 +587,51 @@ def test_task_projection_keeps_soft_catalog_error(monkeypatch):
     proj = console.api_task_projection("task-req")
     assert proj["deliverables"]["items"] == []
     assert "无法列出" in proj["deliverables"]["error"]
+
+
+def test_console_projects_persisted_pr_receipt_for_cleaned_task(tmp_path, monkeypatch):
+    """A PR created through the platform must remain visible after clone cleanup."""
+    from console import herdr_factory_console as console
+    from herdr import state_db
+
+    db = tmp_path / 'state.db'
+    monkeypatch.setenv('HERDR_STATE_DB', str(db))
+    monkeypatch.setattr(console, '_deliverable_pr_loader', console._load_deliverable_pr)
+    task = {'task_id': 'impl', 'workflow_id': 'wf-biz', 'node': 'impl', 'status': 'cleaned'}
+    monkeypatch.setattr(console, 'workflows', lambda: {'wf-biz': {'config': {'nodes': []}}})
+    monkeypatch.setattr(console, 'tasks_for_workflow', lambda wid: [task])
+    state_db.record_event({'workflow_id': 'wf-biz', 'task_id': 'impl',
+                          'event_type': 'pull_request_created', 'source': 'herdr-task',
+                          'payload': {'url': 'https://gitee.com/example/repo/pulls/1611',
+                                      'number': 1611, 'candidate_sha': 'a' * 40}}, db_path=db)
+    packed = console.api_workflow_deliverables('wf-biz')
+    prs = [item for item in packed['items'] if item['kind'] == 'git_pr']
+    assert len(prs) == 1
+    assert prs[0]['url'] == 'https://gitee.com/example/repo/pulls/1611'
+    assert prs[0]['task_id'] == 'impl'
+    assert prs[0]['status'] == 'present'
+    assert prs[0]['actions'] == ['open']
+    assert 'pull_request' not in task
+
+
+@pytest.mark.parametrize('workflow,task_id,event_type,source', [
+    ('wf-other', 'impl', 'pull_request_created', 'herdr-task'),
+    ('wf-biz', 'other', 'pull_request_created', 'herdr-task'),
+    ('wf-biz', 'impl', 'pull_request_intent', 'herdr-task'),
+    ('wf-biz', 'impl', 'pull_request_created', 'agent'),
+])
+def test_console_excludes_unowned_or_unconfirmed_pr_events(tmp_path, monkeypatch, workflow, task_id, event_type, source):
+    from console import herdr_factory_console as console
+    from herdr import state_db
+
+    db = tmp_path / 'state.db'
+    monkeypatch.setenv('HERDR_STATE_DB', str(db))
+    monkeypatch.setattr(console, '_deliverable_pr_loader', console._load_deliverable_pr)
+    task = {'task_id': 'impl', 'workflow_id': 'wf-biz', 'node': 'impl', 'status': 'cleaned'}
+    monkeypatch.setattr(console, 'workflows', lambda: {'wf-biz': {'config': {'nodes': []}}})
+    monkeypatch.setattr(console, 'tasks_for_workflow', lambda wid: [task])
+    state_db.record_event({'workflow_id': workflow, 'task_id': task_id,
+                          'event_type': event_type, 'source': source,
+                          'payload': {'url': 'https://gitee.com/example/repo/pulls/999'}}, db_path=db)
+    packed = console.api_workflow_deliverables('wf-biz')
+    assert not [item for item in packed['items'] if item['kind'] == 'git_pr']
