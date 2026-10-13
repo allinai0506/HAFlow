@@ -1340,6 +1340,7 @@ def _workflow_nodes(wid, w=None):
     return nodes or []
 
 _deliverable_observation_loader = None
+_deliverable_pr_loader = None
 
 def _load_deliverable_observations(task_id):
     if not task_id:
@@ -1353,21 +1354,40 @@ def _load_deliverable_observations(task_id):
     except Exception:
         return []
 
+def _load_deliverable_pr(task):
+    if not task.get('task_id') or not task.get('workflow_id'):
+        return None
+    db_path = Path(os.environ['HERDR_STATE_DB']) if os.environ.get('HERDR_STATE_DB') else Path(TASKS_FILE).parent / 'state.db'
+    if not db_path.is_file():
+        return None
+    from herdr.state_db import list_events
+    events = list_events(
+        workflow_id=task['workflow_id'], task_id=task['task_id'],
+        event_type='pull_request_created', source='herdr-task',
+        limit=1, desc=True, db_path=db_path,
+    )
+    return events[0]['payload'] if events else None
+
 def _tasks_for_deliverables(tasks):
     loader = _deliverable_observation_loader
-    if not loader:
-        return list(tasks or [])
     rows = []
     for task in tasks or []:
         if not isinstance(task, dict):
             continue
         row = dict(task)
         try:
-            extra = loader(row.get('task_id')) or []
+            extra = (loader(row.get('task_id')) or []) if loader else []
         except Exception:
             extra = []
         if extra:
             row['observations'] = list(row.get('observations') or []) + list(extra)
+        if _deliverable_pr_loader:
+            try:
+                receipt = _deliverable_pr_loader(row)
+                if receipt:
+                    row['pull_request'] = receipt
+            except Exception:
+                print('[DELIVERABLES WARN] PR receipt could not be read', flush=True)
         rows.append(row)
     return rows
 
@@ -9909,4 +9929,5 @@ def main():
     ROOT.mkdir(parents=True,exist_ok=True); print(f'{PRODUCT_NAME}控制台: http://{HOST}:{PORT}',flush=True); ThreadingHTTPServer((HOST,PORT),Handler).serve_forever()
 if __name__=='__main__':
     _deliverable_observation_loader = _load_deliverable_observations
+    _deliverable_pr_loader = _load_deliverable_pr
     main()

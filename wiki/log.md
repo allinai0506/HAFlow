@@ -2458,3 +2458,9 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 
 ## [2026-10-12] fix | 已替代任务的文件不满足节点成果
 - Updated [[flow-workbench]]: 已替代任务的文件仍保留为不可读取，但不再满足节点预期。当前任务都能读取、且都没有该文件时，节点才显示未产生。没有当前任务能够确认时，显示不可确认。
+
+
+## 2026-10-13 — PR 交付物回执读取
+
+- FACT：Console 交付物装配读取同 workflow/task 的正式 PR 创建事件；复用既有 PR 卡片，兼容旧任务字段，不修改状态。
+- 依据：`console/herdr_factory_console.py::_load_deliverable_pr`；`tests/test_deliverables.py::test_console_projects_persisted_pr_receipt_for_cleaned_task`。
