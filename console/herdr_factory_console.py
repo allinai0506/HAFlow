@@ -11487,7 +11487,7 @@ async function initFromUrlOrState(){
     state.opsMode=false;
     state.dashMode=false;
     state.shellView=qView;
-    if(qView!=='workbench'&&state.workflowId==='__templates__')state.workflowId=null;
+    if(state.workflowId==='__templates__')state.workflowId=null;
   }
   if(qWf&&!state.dashMode&&state.workflowId!=='__templates__'){
     state.opsMode=false;
