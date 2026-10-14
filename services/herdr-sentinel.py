@@ -840,19 +840,11 @@ def main():
         now = time.time()
         if now - last_experience_sync >= 30.0:
             last_experience_sync = now
-            # Offload Hub I/O from the liveness loop: recover may take many
-            # 8s HTTP calls; run it in a daemon thread, never block patrol.
+            # Offload Hub I/O from the liveness loop via single-flight worker;
+            # overlapping intervals skip instead of stacking threads.
             try:
-                import threading
-
-                def _bg_sentinel_sync():
-                    try:
-                        from herdr.experience.collector import ExperienceCollector
-                        ExperienceCollector().recover_and_sync()
-                    except Exception:
-                        pass
-
-                threading.Thread(target=_bg_sentinel_sync, daemon=True, name="sentinel-exp-sync").start()
+                from herdr.experience.collector import trigger_background_sync
+                trigger_background_sync()
             except Exception:
                 pass
 

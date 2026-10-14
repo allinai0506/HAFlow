@@ -424,11 +424,11 @@ class ExperienceCollector:
 
         return {"retried": retried, "succeeded": succeeded, "failed": failed}
 
-    def recover_and_sync(self, state_db_path: Optional[Path] = None) -> Dict[str, Any]:
+    def recover_and_sync(self, state_db_path: Optional[Path] = None, force: bool = False) -> Dict[str, Any]:
         """Drains pending collections and retries pending uploads. Safe to call periodically."""
         with self._lock:
             collected = self.process_pending(state_db_path=state_db_path)
-            upload_stats = self.retry_pending_uploads()
+            upload_stats = self.retry_pending_uploads(force=force)
             return {
                 "ok": True,
                 "pending_collected": collected,
@@ -461,3 +461,33 @@ class ExperienceCollector:
         )
         thread.start()
         return thread
+
+
+_bg_sync_lock = threading.Lock()
+_bg_sync_inflight = False
+
+
+def trigger_background_sync(state_db_path: Optional[Path] = None) -> bool:
+    """Start one bounded daemon sync; skip while another is in flight.
+
+    Single-flight guard for dispatch/sentinel hot paths: returns True when a
+    worker was started, False when a previous sync is still running.
+    """
+    global _bg_sync_inflight
+    with _bg_sync_lock:
+        if _bg_sync_inflight:
+            return False
+        _bg_sync_inflight = True
+
+    def _worker():
+        global _bg_sync_inflight
+        try:
+            ExperienceCollector().recover_and_sync(state_db_path=state_db_path)
+        except Exception as exc:
+            LOGGER.debug("Background experience sync failed: %s", exc)
+        finally:
+            with _bg_sync_lock:
+                _bg_sync_inflight = False
+
+    threading.Thread(target=_worker, daemon=True, name="exp-sync-bg").start()
+    return True

@@ -57,10 +57,12 @@ class ExperienceClient:
             self.token = token or ""
         self.timeout = timeout
 
-        # P1-09: Validate transport security
+        # P1-09: Validate transport security. The opt-out flag accepts only
+        # explicit truthy values; "0"/"false"/empty never allow plaintext.
         parsed = urllib.parse.urlparse(self.base_url)
         is_loopback = parsed.hostname in ("127.0.0.1", "localhost", "::1", None)
-        if parsed.scheme == "http" and not is_loopback and not os.environ.get("HERDR_ALLOW_INSECURE_HTTP"):
+        allow_insecure = str(os.environ.get("HERDR_ALLOW_INSECURE_HTTP") or "").strip().lower() in {"1", "true", "yes"}
+        if parsed.scheme == "http" and not is_loopback and not allow_insecure:
             raise ExperienceHubSecurityError(
                 f"Refusing to transmit Bearer Token over plain HTTP to non-loopback host '{parsed.hostname}'. "
                 "Configure HTTPS or set HERDR_ALLOW_INSECURE_HTTP=1 for testing."

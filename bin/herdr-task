@@ -4085,19 +4085,10 @@ def _fetch_experience_rules_block(task):
     """Fetch active published enterprise business rules for this task."""
     try:
         # Best-effort background sync: never block dispatch on Hub I/O.
-        # recover_and_sync may fan out to dozens of 8s HTTP calls; it runs
-        # in a bounded daemon thread while rule fetch proceeds immediately.
+        # Single-flight daemon worker; overlapping dispatches skip.
         try:
-            import threading
-
-            def _bg_sync():
-                try:
-                    from herdr.experience.collector import ExperienceCollector
-                    ExperienceCollector().recover_and_sync()
-                except Exception:
-                    pass
-
-            threading.Thread(target=_bg_sync, daemon=True, name="exp-sync-bg").start()
+            from herdr.experience.collector import trigger_background_sync
+            trigger_background_sync()
         except Exception:
             pass
         from herdr.experience.client import fetch_experience_rules_block
@@ -8937,13 +8928,14 @@ def main():
 
     sync_exp_cmd = sub.add_parser('sync-experience', help='Sync pending local business rule candidates with Hub')
     sync_exp_cmd.add_argument('--json', action='store_true', help='Output JSON result')
+    sync_exp_cmd.add_argument('--force', action='store_true', help='Retry pending uploads immediately, ignoring backoff schedule')
 
     args = parser.parse_args()
 
     if args.command == 'sync-experience':
         from herdr.experience.collector import ExperienceCollector
         collector = ExperienceCollector()
-        res = collector.recover_and_sync()
+        res = collector.recover_and_sync(force=getattr(args, "force", False))
         if getattr(args, "json", False):
             print(json.dumps(res, ensure_ascii=False, indent=2))
         else:

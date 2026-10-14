@@ -6853,7 +6853,10 @@ function syncOpsUi(){
 
 async function api(p,o={}){
   const started=performance.now();
-  const r=await fetch(p,{headers:{'Content-Type':'application/json'},...o});
+  let authHeaders={};
+  try{const t=localStorage.getItem('herdr_hub_token')||'';if(t)authHeaders={'Authorization':'Bearer '+t};}catch(e){}
+  const mergedHeaders={'Content-Type':'application/json',...authHeaders,...(o.headers||{})};
+  const r=await fetch(p,{...o,headers:mergedHeaders});
   const d=await r.json();
   if(!r.ok||d.ok===false)throw new Error(d.error||('HTTP '+r.status));
   const latency=document.getElementById('bottomPollLatency');
@@ -9687,9 +9690,13 @@ function paintShellPage(view){
   else if(view==='workflows')renderShellWorkflows();
   else if(view==='experience')renderShellExperience();
 }
+function saveHubToken(){
+  try{const inp=document.getElementById('hubTokenInput');localStorage.setItem('herdr_hub_token',(inp&&inp.value||'').trim());toast('Hub 身份 Token 已保存至本浏览器');renderShellExperience();}catch(e){toast('保存失败: '+(e.message||e),true);}
+}
 async function renderShellExperience(){
   const el=document.getElementById('tasks');if(!el)return;
-  el.innerHTML='<div class="shell-page"><div class="shell-page-head"><h3>企业经验中心 (Experience Hub)</h3><p style="color:var(--text-secondary);font-size:12px;">沉淀自真实任务并通过审核的企业业务规则资产</p></div><div id="experienceHubContainer" style="padding:16px 0;"><div class="loading">加载经验数据中...</div></div></div>';
+  el.innerHTML='<div class="shell-page"><div class="shell-page-head"><h3>企业经验中心 (Experience Hub)</h3><p style="color:var(--text-secondary);font-size:12px;">沉淀自真实任务并通过审核的企业业务规则资产</p><div style="display:flex;gap:8px;align-items:center;margin-top:8px;font-size:12px;"><label for="hubTokenInput" style="color:var(--text-secondary);">Hub 身份 Token:</label><input id="hubTokenInput" type="password" placeholder="粘贴个人 Hub Token（仅存浏览器本地）" style="flex:1;max-width:320px;padding:4px 8px;border:1px solid var(--border-color);border-radius:4px;background:var(--bg-main);color:var(--text-primary);" /><button class="btn btn-sm" onclick="saveHubToken()">保存</button></div></div><div id="experienceHubContainer" style="padding:16px 0;"><div class="loading">加载经验数据中...</div></div></div>';
+  try{const saved=localStorage.getItem('herdr_hub_token')||'';const inp=document.getElementById('hubTokenInput');if(inp)inp.value=saved;}catch(e){}
   const container=document.getElementById('experienceHubContainer');
   try{
     const candRes=await api('/api/experience/candidates?status=pending_review');

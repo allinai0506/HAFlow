@@ -88,6 +88,14 @@ def init_hub_db(db_path: Path) -> sqlite3.Connection:
                 timestamp REAL NOT NULL
             )
         """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_audit_logs_timestamp
+            ON audit_logs (timestamp DESC)
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_audit_logs_experience
+            ON audit_logs (experience_id)
+        """)
 
         # Migration from legacy auth_tokens schema (if table had 'token' instead of 'token_hash')
         cols = {row["name"] for row in conn.execute("PRAGMA table_info(auth_tokens)").fetchall()}
@@ -513,15 +521,26 @@ class HubStorage:
     ) -> List[Dict[str, Any]]:
         conn = self._get_conn()
         try:
-            # Filter before truncating: scan newest-first with a JOIN so a
-            # restricted customer's older records are not hidden by newer
-            # unrelated rows beyond LIMIT.
-            cur = conn.execute("""
-                SELECT a.*, e.customer AS exp_customer
-                FROM audit_logs a LEFT JOIN experiences e
-                  ON a.experience_id = e.experience_id
-                ORDER BY a.timestamp DESC
-            """)
+            # SQL prefilter on the authoritative experience customer before the
+            # Python refinement, so unrelated customers never reach the scan.
+            # Orphan log rows (no linked experience) are kept for the details
+            # check below.
+            if allowed_customers and allowed_customers != ["*"]:
+                placeholders = ", ".join(["?"] * len(allowed_customers))
+                cur = conn.execute(f"""
+                    SELECT a.*, e.customer AS exp_customer
+                    FROM audit_logs a LEFT JOIN experiences e
+                      ON a.experience_id = e.experience_id
+                    WHERE e.customer IN ({placeholders}) OR e.customer IS NULL
+                    ORDER BY a.timestamp DESC
+                """, tuple(allowed_customers))
+            else:
+                cur = conn.execute("""
+                    SELECT a.*, e.customer AS exp_customer
+                    FROM audit_logs a LEFT JOIN experiences e
+                      ON a.experience_id = e.experience_id
+                    ORDER BY a.timestamp DESC
+                """)
             logs = []
             for row in cur:
                 details = json.loads(row["details_json"] or "{}")
@@ -634,7 +653,8 @@ class HubHTTPHandler(BaseHTTPRequestHandler):
                 self._send_json(403, {"error": "forbidden", "message": "Customer scope exceeded"})
                 return
 
-            # P1-04: Contributors can only view their own candidates
+            # P1-04: Contributors see only their own candidates within their
+            # customer scope; same user with two tokens must not cross-read.
             if user["role"] == "contributor":
                 candidates = self.storage.list_candidates(
                     status=status_filter,
@@ -642,6 +662,8 @@ class HubHTTPHandler(BaseHTTPRequestHandler):
                     task_type=type_filter,
                     contributor=user["user_id"],
                 )
+                if allowed != ["*"]:
+                    candidates = [c for c in candidates if c.applies_to.customer in allowed]
             else:
                 candidates = self.storage.list_candidates(
                     status=status_filter,
