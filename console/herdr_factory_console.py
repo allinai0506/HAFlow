@@ -11509,8 +11509,8 @@ async function initFromUrlOrState(){
   }else if(state.shellView==='templates'){
     await showTemplateLibrary();
   }else if(state.shellView&&state.shellView!=='workbench'){
-    await refreshAll();
     showShellView(state.shellView);
+    refreshAll();
   }else{
     await refreshAll();
     if(qWf&&state.workflowId!==qWf){
