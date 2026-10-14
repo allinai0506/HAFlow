@@ -6642,3 +6642,37 @@ HAFlow 作为企业级多任务通用 Agent 编排系统，必须支撑招投标
 第155节补充：用户要求“整个首页”时，应计入侧栏及成果/动作/决策/现场全部就绪，而不能仅验收主体先绘制。只读工作区探测可以有界并行，但必须验证跨请求活跃数量、任务顺序、首个错误和截断语义；Git HEAD 在单次任务投影内复用能同时减少进程启动与快照漂移。对应 `test_workspace_probes_are_parallel_bounded_and_keep_task_order`、`test_task_projection_reads_git_head_once` 及辅助接口的真实SQLite禁止全局读取测试。
 
 第155节补充：有界并行使用整批等待会产生队首阻塞，慢项未完成时其他槽位可能空闲。用每请求最多4项未完成的滚动补位调度，并按输入索引聚合，回归须保持首项悬挂而确认第五项启动，证明消除批次屏障。预览通过仍需正式重启后首轮验收；此次正式1402ms样本不能删去。
+
+---
+
+## 156. 控制台 Shell 视图路由生命周期与发布快照生效契约（2026-10-14）
+
+### 问题背景
+
+在企业经验中心（Experience Hub）前端控制台接入与 URL 视图直达调试中，连续暴露出多项跨模块与生命周期的隐蔽陷阱：
+1. **URL 参数白名单遗漏**：`initFromUrlOrState` 中 `qView` 白名单未包含新视图 `'experience'`，导致直接降级到 `workbench`；
+2. **异步阻塞截断首屏挂载**：在 `initFromUrlOrState` 中，`showShellView` 在 `await refreshAll()` 之后执行；而 `refreshAll()` 涉及空间列表与全局告警等网络 IO，导致页面不仅首屏延迟，且并发的异步加载逻辑互相覆盖；
+3. **系统占位标识跨视图污染**：进入模板规范库后，`state.workflowId` 被记录为系统占位符 `'__templates__'`；后续在 URL 中切换为其他视图时未清理该占位符，触发了 `loadProject` 内部的系统 Tab 拦截器，将界面再次误刷成模板库；
+4. **发布快照（Release Snapshot）机制造成的假重载**：Console 服务常驻 LaunchAgent 指向 `~/.herdr-controller/releases/<commit>` 冻结快照目录，未提交的本地代码或未更新 commit 的重跑无法生成新快照，导致服务持续运行旧代码，形成“已修改源码却不生效”的假象。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|---|---|---|
+| 新增 Shell 视图 URL 参数不生效 | URL 参数白名单未更新导致降级到默认工作台 | 每次新增顶级视图，必须同步更新 `initFromUrlOrState` 白名单与 `paintCrumb` 映射 |
+| 首屏加载依赖全量数据刷新 | 异步 IO 阻塞导致骨架无法立即就绪，且易被后续回调重写 | 必须先同步调用 `showShellView` 挂载骨架并声明模式，再静默执行后台刷新；渲染函数必须添加活跃视图守卫 |
+| 跨视图切换被旧标识污染 | 系统页签占位符（如 `__templates__`）滞留于全局状态 | 切换到任意非模板视图时，必须显式清空 `state.workflowId = null` |
+| 本地修改后直接重启服务无效 | LaunchAgent 读取 release 快照，非直接读取工作区源码 | 修改 Console 必须提交 Git commit，并通过 `./scripts/install-herdr-console.sh` 打包新快照与热重载 |
+
+### 操作规范
+
+1. **顶级视图守卫契约**：在 `renderStages`、`renderTasks`、`renderFlowWorkbench` 与 `loadWorkflow` 顶部添加 `if(state.shellView && state.shellView !== 'workbench') return;`，杜绝后台轮询与定时刷新污染独立 Shell 视图；
+2. **真实浏览器自动化验收**：验证前端路由与视图切换时，必须通过无头浏览器（Chrome / Playwright）同时覆盖直接访问、跨视图导航以及面包屑与侧栏高亮状态，禁止仅靠单元测试中的字符串匹配宣称完成；
+3. **快照一致性核验**：执行 `./scripts/install-herdr-console.sh` 后，必须核对 `ps -o command= -p <pid>` 输出中的 release commit sha 是否与当前 `git rev-parse HEAD` 严格一致。
+
+### 验证命令 / 关联证据
+
+- 真实浏览器验证：Playwright 启动无头 Chrome 连续访问 `?view=experience`、`?view=templates` 与 `?view=workbench`，DOM 元素、面包屑与侧栏高亮 100% 符合预期；
+- 自动化测试回归：`pytest tests/test_console_frontend_syntax.py tests/test_console_shell.py tests/test_console_templates.py tests/test_console_view_state.py tests/test_experience_*.py -v`（70 passed）；
+- 提交记录：`891e08f`、`afa1e75`、`380dbcc`、`aafd6ff`、`f4c6582`。
+
