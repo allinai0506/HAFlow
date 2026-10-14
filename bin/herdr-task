@@ -4081,6 +4081,17 @@ def _compile_working_context_ref(task):
         return None
 
 
+def _fetch_experience_rules_block(task):
+    """Fetch active published enterprise business rules for this task."""
+    try:
+        from herdr.experience.client import fetch_experience_rules_block
+        return fetch_experience_rules_block(task, store=_get_store())
+    except Exception as exc:
+        if task.get("mandatory_experience_rules"):
+            raise RuntimeError(f"Experience Hub is unreachable but mandatory rules required: {exc}")
+        return ""
+
+
 def dispatch_task(task_id, prompt):
     # Reliable delivery protocol:
     # 1) try herdr agent prompt
@@ -4161,6 +4172,8 @@ def dispatch_task(task_id, prompt):
             f"{artifact_task} working-context get --context-id {working_context_ref}\n"
         )
 
+    experience_rules_suffix = _fetch_experience_rules_block(task)
+
     checkpoint_suffix = ""
     completion_suffix = "" if receipt_delivery else (
         "When all requested work is finished, output on its own line "
@@ -4174,6 +4187,7 @@ def dispatch_task(task_id, prompt):
         + prompt
         + context_suffix
         + working_context_suffix
+        + experience_rules_suffix
         + loop_suffix
         + checkpoint_suffix
         + "\nHERDR orchestration protocol:\n"

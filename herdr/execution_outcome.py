@@ -330,7 +330,29 @@ def try_autofinalize_for_task(
         result = finalize_execution_outcome(str(task_id), db_path=db_path)
     except Exception:
         return None
-    return result.get("outcome")
+    outcome = result.get("outcome")
+    if outcome is not None and result.get("status") in {"created", "exists"}:
+        _trigger_experience_collection_best_effort(str(task_id), outcome, db_path=db_path)
+    return outcome
+
+
+def _trigger_experience_collection_best_effort(
+    task_id: str,
+    outcome: Dict[str, Any],
+    db_path: Optional[Path] = None,
+) -> None:
+    """Best-effort async trigger for local ExperienceCollector."""
+    if os.environ.get("HERDR_EXPERIENCE_COLLECTION_DISABLED") == "1":
+        return
+    try:
+        from .experience.collector import ExperienceCollector
+        from .experience.client import ExperienceClient
+
+        hub_client = ExperienceClient()
+        collector = ExperienceCollector(hub_client=hub_client)
+        collector.process_task_settlement_async(str(task_id), outcome, state_db_path=db_path)
+    except Exception:
+        pass
 
 
 def get_execution_outcome(

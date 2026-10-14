@@ -8,6 +8,32 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-10-14] feat | 企业经验中心 V1：业务规则自动提炼、敏感凭证脱敏、内网共享服务与跨员工自动复用闭环 (Enterprise Experience Hub V1)
+
+- 背景：
+  1. HAFlow 中异构 Agent 运行在员工本地电脑上，员工在人机协同中沉淀的优质 Prompt、业务规则与纠偏经验停留在本地，无法自动转化为企业共享资产；
+  2. 既有 `knowledge-capture` 依赖 Agent 主动调用，无法强制兜底，且缺乏企业级权限隔离、审核发布流与跨员工注入闭环；
+  3. 严禁破坏私有化内网约束（不依赖任何公网 SaaS / 外部 API），严禁破坏 Herdr 调度机状态，提炼与同步失败绝不能阻塞主任务执行。
+- 变更：
+  1. **规则提炼核心 (`herdr/experience/extractor.py`)**：
+     - 强制门禁：仅对已完成业务验收 (`qualified_success=True`) 且存在人工纠偏证据（`human_correction`/`steering`/`rework`）的任务提炼规则；
+     - 噪音过滤与模型捏造阻断：无人工纠偏或短小无意义指令直接返回 `no_candidate`；
+     - 敏感信息本地清洗：自动识别并脱敏 Token、API Key、RSA 私钥及密码为 `[redacted]`。
+  2. **本地采集与离线恢复 (`herdr/experience/collector.py`)**：
+     - 本地 SQLite `already_processed` 保证任务幂等；离线缓冲队列持久化未决同步，网络恢复后安全重试；
+     - 挂载于 `herdr/execution_outcome.py:try_autofinalize_for_task`，守护线程异步触发，全链路 Fail-Open。
+  3. **企业共享服务 (`herdr/experience/hub_server.py` & `bin/herdr-experience-hub`)**：
+     - 独立部署内网服务（纯标准库 `http.server` + 独立 SQLite `experience_hub.db`）；
+     - Bearer Token 认证与 RBAC（`contributor` 提交，`reviewer`/`admin` 审核发布与撤回）；
+     - 强客户边界隔离（跨客户禁止访问，返回 403）；全生命周期持久审计日志。
+  4. **跨员工复用与控制台审核面 (`herdr/experience/client.py`, `bin/herdr-task`, `console/herdr_factory_console.py`)**：
+     - 在 `bin/herdr-task:dispatch_task` 中根据任务所属客户自动拉取已发布规则并追加格式化 Prompt 注入；
+     - 控制台 Factory UI 增加「企业经验」审核面板，提供待审列表、规则详情/脱敏证据查看、通过/驳回与已发布规则撤回功能。
+- 证据：
+  1. `pytest tests/test_experience_collector.py tests/test_experience_hub.py tests/test_experience_integration.py -v`: 13 passed in 11.01s；
+  2. 跨员工双客户端端到端场景闭环证明（员工 A 纠错 -> 提炼上传 -> 审核发布 -> 员工 B 自动读取注入并正确完成业务验收 -> 员工 A 本地数据清空后企业规则持久生效 -> 规则撤回后立即失效 -> Hub 宕机主业务优雅降级）；
+  3. 全量编译静态检查干净，S6 独立审查通过，评定 `MERGE_READY`。
+
 ## [2026-10-14] feat | 人机协同闭环：Agent 终端交互等待探测、不透明选项映射与上下文漂移/原子防重控制面落地 (Interaction Loop V1)
 
 - 背景：
