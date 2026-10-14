@@ -4416,6 +4416,13 @@ def try_direct_stage_advance(item):
             "--execution-id", project_ctx.get("execution_id") or workflow_id,
         ]
 
+        # Enterprise experience attribution from the dispatch spec (absent = no flags).
+        try:
+            from herdr.direct_dispatch import experience_launch_flags
+            cmd += experience_launch_flags(spec)
+        except Exception:
+            pass
+
         if dispatch_operation_id is not None:
             cmd += ["--dispatch-operation-id", str(dispatch_operation_id)]
 

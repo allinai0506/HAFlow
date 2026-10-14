@@ -116,7 +116,11 @@ def init_hub_db(db_path: Path) -> sqlite3.Connection:
                 raw_val = r["token"]
                 if raw_val == "admin_secret_token_123":
                     continue
-                thash = raw_val if (len(raw_val) == 64 and all(c in "0123456789abcdef" for c in raw_val)) else hashlib.sha256(raw_val.encode("utf-8")).hexdigest()
+                # Legacy column always stored the RAW token (PR #209 compared it
+                # verbatim), so it must always be hashed here. A 64-hex raw
+                # token (e.g. `openssl rand -hex 32`) must NOT be mistaken for
+                # an already-hashed value, or the admin is locked out.
+                thash = hashlib.sha256(raw_val.encode("utf-8")).hexdigest()
                 if thash == insecure_hash:
                     continue
                 conn.execute("""
@@ -766,13 +770,17 @@ class HubHTTPHandler(BaseHTTPRequestHandler):
                 return
 
             status_code = 201 if ok else 200
-            self._send_json(status_code, {
+            resp = {
                 "ok": True,
                 "experience_id": stored.experience_id,
                 "status": stored.status,
                 "reason": reason,
-                "experience": stored.to_dict(),
-            })
+            }
+            # Idempotent resubmits must not leak another employee's pending
+            # detail: only the original contributor sees the full object.
+            if stored.contributor == user["user_id"]:
+                resp["experience"] = stored.to_dict()
+            self._send_json(status_code, resp)
             return
 
         # 2. Review candidate (approve or reject) — requires reviewer or admin role

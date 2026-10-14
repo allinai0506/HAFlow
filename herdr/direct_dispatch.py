@@ -265,6 +265,10 @@ def normalize_node(node):
         ).strip(),
         "roles": roles,
         "artifact_mode": node.get("artifact_mode"),
+        # Enterprise experience attribution (optional template keys; absent = no behavior).
+        "customer": str(node.get("customer") or "").strip(),
+        "business_task_type": str(node.get("business_task_type") or "").strip(),
+        "mandatory_experience_rules": bool(node.get("mandatory_experience_rules")),
     }
 
 
@@ -460,6 +464,13 @@ def _dispatch_spec(
         "task_type": node["task_type"],
         "integration_mode": integration_mode or node["integration_mode"],
     }
+    # Enterprise experience attribution passthrough (absent = no behavior).
+    if str(node.get("customer") or "").strip():
+        spec["customer"] = str(node.get("customer")).strip()
+    if str(node.get("business_task_type") or "").strip():
+        spec["business_task_type"] = str(node.get("business_task_type")).strip()
+    if node.get("mandatory_experience_rules"):
+        spec["mandatory_experience_rules"] = True
     if redispatch_of:
         spec["redispatch_of"] = redispatch_of
         spec["supersedes"] = redispatch_of
@@ -471,6 +482,20 @@ def _dispatch_spec(
     if frozen_sha:
         spec["candidate_sha"] = frozen_sha
     return spec
+
+
+def experience_launch_flags(spec) -> list:
+    """CLI flags carrying enterprise experience attribution from a dispatch spec."""
+    flags: list = []
+    customer = str((spec or {}).get("customer") or "").strip()
+    if customer:
+        flags += ["--customer", customer]
+    business_type = str((spec or {}).get("business_task_type") or "").strip()
+    if business_type:
+        flags += ["--business-task-type", business_type]
+    if (spec or {}).get("mandatory_experience_rules"):
+        flags += ["--mandatory-experience-rules"]
+    return flags
 
 
 def plan_stage_dispatch(

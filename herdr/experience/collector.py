@@ -81,19 +81,17 @@ def fold_decisions_by_id(notes: Optional[List[Dict[str, Any]]]) -> List[Dict[str
     """Fold append-only decision notes: newest note per decision_id wins.
 
     Notes without a decision_id are kept as-is (no identity to fold on).
-    Applies the existing invalidation annotations so revoked/reopened decisions
-    suppress their superseded resolved versions.
+    Callers must run `workflow_docs.annotate_notes` on the FULL note stream
+    first: annotating a pre-filtered subset would miss invalidation records
+    and silently clear stale flags.
     """
     if not notes:
         return []
-    try:
-        from herdr import workflow_docs
-        annotated = workflow_docs.annotate_notes([n for n in notes if isinstance(n, dict)])
-    except Exception:
-        annotated = [n for n in notes if isinstance(n, dict)]
     latest: Dict[str, Dict[str, Any]] = {}
     kept: List[Dict[str, Any]] = []
-    for note in annotated:
+    for note in notes:
+        if not isinstance(note, dict):
+            continue
         did = str(note.get("decision_id") or "").strip()
         if not did:
             kept.append(note)
@@ -251,8 +249,11 @@ class ExperienceCollector:
                 try:
                     from herdr import workflow_docs
                     all_notes = workflow_docs.load_notes(workflow_id)
+                    # Annotate the FULL stream first: invalidation records are
+                    # kind=invalidation and would be lost by early filtering.
+                    annotated = workflow_docs.annotate_notes(all_notes)
                     scoped = [
-                        n for n in all_notes
+                        n for n in annotated
                         if n.get("kind") == "decision" and (not n.get("task_id") or str(n.get("task_id")) == task_id)
                     ]
                     decisions = fold_decisions_by_id(scoped)
