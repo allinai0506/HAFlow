@@ -353,15 +353,22 @@ def _trigger_experience_collection_best_effort(
     """
     if os.environ.get("HERDR_EXPERIENCE_COLLECTION_DISABLED") == "1":
         return
+    # 1. Durable synchronous enqueue FIRST, without any Hub client: client
+    # construction itself may raise (bad URL/token config) and must never
+    # lose the collection intent.
+    try:
+        from .experience.collector import ExperienceCollector
+        ExperienceCollector().enqueue_task_settlement(str(task_id), outcome, state_db_path=db_path)
+    except Exception as exc:
+        LOGGER.warning("Experience collection enqueue failed for task %s: %s", task_id, exc)
+        return
+    # 2. Bounded async worker (extraction + Hub upload in daemon thread)
     try:
         from .experience.collector import ExperienceCollector
         from .experience.client import ExperienceClient
 
         hub_client = ExperienceClient()
         collector = ExperienceCollector(hub_client=hub_client)
-        # 1. Durable synchronous enqueue (persists before any thread or process can exit)
-        collector.enqueue_task_settlement(str(task_id), outcome, state_db_path=db_path)
-        # 2. Bounded async worker (extraction + Hub upload in daemon thread)
         collector.process_task_settlement_async(str(task_id), outcome, state_db_path=db_path)
     except Exception as exc:
         LOGGER.warning("Experience collection trigger failed for task %s: %s", task_id, exc)

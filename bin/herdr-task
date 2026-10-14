@@ -1225,6 +1225,14 @@ def add_task(args):
         "goal": args.goal,
         "acceptance_criteria": args.acceptance,
     }
+    # Enterprise experience attribution: persist only when provided so legacy
+    # records stay byte-identical.
+    if getattr(args, "customer", None):
+        task["customer"] = str(args.customer).strip()
+    if getattr(args, "business_task_type", None):
+        task["business_task_type"] = str(args.business_task_type).strip()
+    if getattr(args, "mandatory_experience_rules", False):
+        task["mandatory_experience_rules"] = True
     now = _now()
     _init_status_history(
         task,
@@ -3968,6 +3976,14 @@ def _launch_task(args):
         "acceptance_criteria": args.acceptance,
         "candidate_episode_id": project.get("candidate_episode_id"),
     }
+    # Enterprise experience attribution: persist only when provided so legacy
+    # records stay byte-identical.
+    if getattr(args, "customer", None):
+        task["customer"] = str(args.customer).strip()
+    if getattr(args, "business_task_type", None):
+        task["business_task_type"] = str(args.business_task_type).strip()
+    if getattr(args, "mandatory_experience_rules", False):
+        task["mandatory_experience_rules"] = True
     replay_of = getattr(args, "replay_of", None)
     if replay_of:
         task["replay_of"] = replay_of
@@ -8149,6 +8165,9 @@ def main():
         default="none"
     )
     add.add_argument("--goal", required=True)
+    add.add_argument("--customer", default=None, help="Business customer scope for enterprise experience attribution")
+    add.add_argument("--business-task-type", default=None, help="Business rule type (e.g. quote); kept separate from dev --task-type routing")
+    add.add_argument("--mandatory-experience-rules", action="store_true", help="Fail-closed on Hub outage when fetching enterprise rules")
     add.add_argument(
         "--acceptance",
         action="append",
@@ -8237,6 +8256,9 @@ def main():
         default=[]
     )
     launch.add_argument("--prompt", required=True)
+    launch.add_argument("--customer", default=None, help="Business customer scope for enterprise experience attribution")
+    launch.add_argument("--business-task-type", default=None, help="Business rule type (e.g. quote); kept separate from dev --task-type routing")
+    launch.add_argument("--mandatory-experience-rules", action="store_true", help="Fail-closed on Hub outage when fetching enterprise rules")
     launch.add_argument("--run-id", default=None,
                         help="Use a caller-assigned Run identity, e.g. for Replay lineage")
     launch.add_argument("--execution-id", default=None,

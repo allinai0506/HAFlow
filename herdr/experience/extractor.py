@@ -197,7 +197,8 @@ def extract_candidate_from_facts(
         customer = str(raw_customer).strip()
 
     task_type = (
-        task.get("task_type")
+        task.get("business_task_type")
+        or task.get("task_type")
         or payload.get("task_type")
         or task.get("stage")
         or task.get("node")

@@ -66,6 +66,45 @@ def _get_collector_db(db_path: Optional[Path] = None) -> sqlite3.Connection:
     return conn
 
 
+def _note_epoch(note: Dict[str, Any]) -> float:
+    for key in ("ts", "raised_at", "reviewed_at", "created_at"):
+        try:
+            val = note.get(key)
+            if val is not None:
+                return float(val)
+        except (TypeError, ValueError):
+            continue
+    return 0.0
+
+
+def fold_decisions_by_id(notes: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    """Fold append-only decision notes: newest note per decision_id wins.
+
+    Notes without a decision_id are kept as-is (no identity to fold on).
+    Applies the existing invalidation annotations so revoked/reopened decisions
+    suppress their superseded resolved versions.
+    """
+    if not notes:
+        return []
+    try:
+        from herdr import workflow_docs
+        annotated = workflow_docs.annotate_notes([n for n in notes if isinstance(n, dict)])
+    except Exception:
+        annotated = [n for n in notes if isinstance(n, dict)]
+    latest: Dict[str, Dict[str, Any]] = {}
+    kept: List[Dict[str, Any]] = []
+    for note in annotated:
+        did = str(note.get("decision_id") or "").strip()
+        if not did:
+            kept.append(note)
+            continue
+        prev = latest.get(did)
+        if prev is None or _note_epoch(note) >= _note_epoch(prev):
+            latest[did] = note
+    kept.extend(latest.values())
+    return kept
+
+
 class ExperienceCollector:
     """Local machine experience collector and sync manager."""
 
@@ -212,10 +251,11 @@ class ExperienceCollector:
                 try:
                     from herdr import workflow_docs
                     all_notes = workflow_docs.load_notes(workflow_id)
-                    decisions = [
+                    scoped = [
                         n for n in all_notes
                         if n.get("kind") == "decision" and (not n.get("task_id") or str(n.get("task_id")) == task_id)
                     ]
+                    decisions = fold_decisions_by_id(scoped)
                 except Exception as e:
                     LOGGER.debug("load_notes failed: %s", e)
 

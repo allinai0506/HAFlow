@@ -157,6 +157,8 @@ class HubStorage:
 
         if allowed_customers is None:
             allowed_customers = ["*"]
+        if not allowed_customers:
+            raise ValueError("allowed_customers must not be empty; use ['*'] for wildcard scope")
 
         token_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
         conn = self._get_conn()
@@ -521,6 +523,9 @@ class HubStorage:
     ) -> List[Dict[str, Any]]:
         conn = self._get_conn()
         try:
+            # Empty scope is deny-all (never wildcard); also avoids `IN ()`.
+            if allowed_customers is not None and len(allowed_customers) == 0:
+                return []
             # SQL prefilter on the authoritative experience customer before the
             # Python refinement, so unrelated customers never reach the scan.
             # Orphan log rows (no linked experience) are kept for the details
@@ -544,7 +549,7 @@ class HubStorage:
             logs = []
             for row in cur:
                 details = json.loads(row["details_json"] or "{}")
-                if allowed_customers and allowed_customers != ["*"]:
+                if allowed_customers is not None and allowed_customers != ["*"]:
                     cust = details.get("customer") or row["exp_customer"]
                     if cust not in allowed_customers:
                         continue

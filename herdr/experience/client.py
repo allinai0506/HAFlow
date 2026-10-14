@@ -264,7 +264,8 @@ def fetch_experience_rules_block(
         customer = str(raw_cust).strip() if raw_cust and str(raw_cust).strip() not in {"unknown", "default_customer"} else None
 
         task_type = (
-            task.get("task_type")
+            task.get("business_task_type")
+            or task.get("task_type")
             or payload.get("task_type")
             or task.get("stage")
             or task.get("node")
