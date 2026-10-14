@@ -1208,7 +1208,8 @@ def api_task_interaction_respond(b):
 
 def _get_console_hub_client():
     from herdr.experience.client import ExperienceClient
-    return ExperienceClient()
+    token = os.environ.get("HERDR_HUB_ADMIN_TOKEN") or os.environ.get("HERDR_HUB_TOKEN") or "admin_secret_token_123"
+    return ExperienceClient(token=token)
 
 
 def api_experience_candidates(q=None):
@@ -8707,6 +8708,9 @@ async function loadProject(id,rer=true){
   renderSlots();
   renderWorkflowSwitcher();
   renderWorkflowTabs();
+  if(state.shellView&&state.shellView!=='workbench'){
+    return;
+  }
   if(isSysTab){
     paintCrumb();
     const sysId=state.workflowId;
@@ -8854,12 +8858,14 @@ async function loadWorkflow(id,prefetched=null){
   saveViewState();
   renderWorkflowTabs();
   renderWorkflowHead(w);
-  renderStages();
-  renderTasks();
-  if(prevWfId!==id){
-    destroyFlowGraph();
+  if(state.shellView==='workbench'||!state.shellView){
+    renderStages();
+    renderTasks();
+    if(prevWfId!==id){
+      destroyFlowGraph();
+    }
+    if(keepController)openControllerCockpitModal();else renderFlowWorkbench();
   }
-  if(keepController)openControllerCockpitModal();else renderFlowWorkbench();
   if(typeof renderDeliverables==='function')renderDeliverables();
   if(typeof renderSidebarWorkflows==='function')renderSidebarWorkflows();
   state.workflowRenderedAt=performance.now();
@@ -9455,6 +9461,8 @@ function updateAttentionHub(){
   }
 }
 function renderStages(){
+  if(state.shellView&&state.shellView!=='workbench')return;
+  if(state.opsMode||state.dashMode||state.workflowId==='__templates__')return;
   const ss=(state.workflow&&state.workflow.stages)||[];
   const e=document.getElementById('stages');
   if(!e)return;
@@ -9488,6 +9496,8 @@ function renderStages(){
   }).join('')
 }
 function renderTasks(){
+  if(state.shellView&&state.shellView!=='workbench')return;
+  if(state.opsMode||state.dashMode||state.workflowId==='__templates__')return;
   const e=document.getElementById('tasks');
   const allTs=(state.workflow&&state.workflow.tasks)||[];
   updateAttentionHub();
@@ -9552,7 +9562,7 @@ function closeSpaceMenu(){const m=document.getElementById('spaceMenu');if(m)m.hi
 function paintCrumb(){
   const sec=document.getElementById('crumbSection');
   const view=state.opsMode?'ops':state.dashMode?'dashboard':(state.shellView||'workbench');
-  const map={workbench:'工作台',dashboard:'仪表板',ops:'运维',alerts:'告警',agents:'执行者',slots:'工位',workflows:'工作流'};
+  const map={workbench:'工作台',dashboard:'仪表板',ops:'运维',alerts:'告警',agents:'执行者',slots:'工位',workflows:'工作流',experience:'企业经验',templates:'模板规范'};
   if(sec)sec.textContent=map[view]||'工作台';
   const tabsBar=document.getElementById('workflowTabsBar');
   const crumbEl=document.querySelector('.top .crumb');
@@ -9567,7 +9577,7 @@ function paintCrumb(){
   if(tplBtn&&tplBtn.classList)tplBtn.classList.toggle('on',state.workflowId==='__templates__');
   if(arcBtn&&arcBtn.classList)arcBtn.classList.toggle('on',state.workflowId==='__archive__');
   if(logBtn&&logBtn.classList)logBtn.classList.toggle('on',state.workflowId==='__logs__');
-  const railActiveId = (state.workflowId === '__templates__') ? 'templates' : view;
+  const railActiveId = (view === 'templates' || (view === 'workbench' && state.workflowId === '__templates__')) ? 'templates' : view;
   document.querySelectorAll('.rail-item[data-rail-nav]').forEach(el=>el.classList&&el.classList.toggle('active', el.getAttribute('data-rail-nav')===railActiveId));
   const shell=document.querySelector('.shell');
   if(shell&&shell.dataset)shell.dataset.view=view;
@@ -9622,6 +9632,7 @@ function paintCrumb(){
 async function showShellView(view){
   if(view==='dashboard'){state.shellView='dashboard';return showDashboard();}
   if(view==='ops'){state.shellView='ops';return showOpsCenter();}
+  if(view==='templates'){return showTemplateLibrary();}
   const leaving=!!(state.opsMode||state.dashMode);
   state.opsMode=false;state.dashMode=false;stopDashTimer();
   state.shellView=view||'workbench';
@@ -9639,10 +9650,12 @@ async function showShellView(view){
       paintCrumb();
       return;
     }
+    renderStages();
     setWorkspaceMode(state.workflowView||'flow');
     paintCrumb();
     if((state.workflowView||'flow')==='list')renderTasks();
     else{
+      renderFlowWorkbench();
       if(!state.flowGraph)renderFlowGraph();
       requestAnimationFrame(()=>{resizeFlowGraph();fitFlowGraph();});
     }
@@ -9651,6 +9664,7 @@ async function showShellView(view){
   paintShellPage(state.shellView);
 }
 function paintShellPage(view){
+  if(view==='templates'){showTemplateLibrary();return;}
   setWorkspaceMode('aux');
   paintCrumb();
   if(view==='alerts')renderShellAlerts();
@@ -9666,8 +9680,8 @@ async function renderShellExperience(){
   try{
     const candRes=await api('/api/experience/candidates?status=pending_review');
     const ruleRes=await api('/api/experience/rules');
-    const cands=(candRes&&candRes.data&&candRes.data.candidates)||[];
-    const rules=(ruleRes&&ruleRes.data&&ruleRes.data.rules)||[];
+    const cands=(candRes&&(candRes.candidates||candRes.data?.candidates))||[];
+    const rules=(ruleRes&&(ruleRes.rules||ruleRes.data?.rules))||[];
     let html='<div style="display:flex;gap:24px;flex-direction:column;">';
     html+='<div class="card" style="padding:16px;background:var(--bg-card);border:1px solid var(--border-color);border-radius:8px;">';
     html+=`<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;"><h4 style="margin:0;font-size:14px;">待审核业务规则候选 <span class="badge" style="background:var(--primary);color:#fff;border-radius:10px;padding:2px 8px;font-size:11px;">${cands.length}</span></h4></div>`;
@@ -9731,26 +9745,39 @@ async function renderShellExperience(){
   }
 }
 async function reviewExperienceCandidate(expId,action){
-  const comment=prompt(action==='approve'?'请输入审核通过批注（可选）:':'请输入驳回理由:');
-  if(comment===null)return;
-  try{
-    await api('/api/experience/review',{method:'POST',body:JSON.stringify({experience_id:expId,action:action,comment:comment})});
-    toast(action==='approve'?'已通过并发布业务规则':'已驳回规则候选');
-    renderShellExperience();
-  }catch(e){
-    toast('操作失败: '+(e.message||e),true);
-  }
+  showPromptModal({
+    title: action==='approve'?'通过并发布业务规则':'驳回规则候选',
+    label: action==='approve'?'审核通过批注（可选）':'驳回理由',
+    defaultValue: '',
+    confirmText: action==='approve'?'确认发布':'确认驳回',
+    onConfirm: async(comment)=>{
+      try{
+        await api('/api/experience/review',{method:'POST',body:JSON.stringify({experience_id:expId,action:action,comment:comment||''})});
+        toast(action==='approve'?'已通过并发布业务规则':'已驳回规则候选');
+        renderShellExperience();
+      }catch(e){
+        toast('操作失败: '+(e.message||e),true);
+      }
+    }
+  });
 }
 async function revokeExperienceRule(expId){
-  const reason=prompt('请输入撤回该规则的原因:');
-  if(!reason)return;
-  try{
-    await api('/api/experience/revoke',{method:'POST',body:JSON.stringify({experience_id:expId,reason:reason})});
-    toast('已撤回该业务规则');
-    renderShellExperience();
-  }catch(e){
-    toast('撤回失败: '+(e.message||e),true);
-  }
+  showPromptModal({
+    title: '撤回业务规则',
+    label: '撤回原因',
+    defaultValue: '',
+    confirmText: '确认撤回',
+    onConfirm: async(reason)=>{
+      if(!reason)return toast('撤回原因不能为空',true);
+      try{
+        await api('/api/experience/revoke',{method:'POST',body:JSON.stringify({experience_id:expId,reason:reason})});
+        toast('已撤回该业务规则');
+        renderShellExperience();
+      }catch(e){
+        toast('撤回失败: '+(e.message||e),true);
+      }
+    }
+  });
 }
 function renderShellAlerts(){
   const el=document.getElementById('tasks');if(!el)return;
@@ -10012,6 +10039,8 @@ function fitFlowGraph(){try{if(!state.flowGraph)return;if(state.flowGraph.zoomTo
 function flowZoomIn(){try{if(state.flowGraph&&state.flowGraph.zoom)state.flowGraph.zoom(0.15);}catch(e){}}
 function flowZoomOut(){try{if(state.flowGraph&&state.flowGraph.zoom)state.flowGraph.zoom(-0.15);}catch(e){}}
 function renderFlowWorkbench(){
+  if(state.shellView&&state.shellView!=='workbench')return;
+  if(state.opsMode||state.dashMode||state.workflowId==='__templates__')return;
   const g=flowGraphData();const nodes=g.nodes||[];
   setWorkspaceMode(state.workflowView);
   const fs=document.getElementById('flowSummary');
@@ -11435,7 +11464,7 @@ async function initFromUrlOrState(){
   }
   if(!qWf&&!qTask&&!qPane&&!qOps&&!qView){
     if(state.dashMode)showDashboard();
-    else if(state.workflowId==='__templates__')showTemplateLibrary();
+    else if(state.workflowId==='__templates__'||state.shellView==='templates')showTemplateLibrary();
     else if(state.shellView&&state.shellView!=='workbench')showShellView(state.shellView);
     else state.opsMode?showOpsCenter():refreshAll();
     return;
@@ -11454,10 +11483,11 @@ async function initFromUrlOrState(){
     state.dashMode=false;
     state.shellView='templates';
     state.workflowId='__templates__';
-  }else if(qView&&['alerts','agents','slots','workflows','workbench'].includes(qView)){
+  }else if(qView&&['alerts','agents','slots','workflows','workbench','experience'].includes(qView)){
     state.opsMode=false;
     state.dashMode=false;
     state.shellView=qView;
+    if(state.workflowId==='__templates__')state.workflowId=null;
   }
   if(qWf&&!state.dashMode&&state.workflowId!=='__templates__'){
     state.opsMode=false;
@@ -11476,11 +11506,11 @@ async function initFromUrlOrState(){
     await showDashboard();
   }else if(state.opsMode){
     await showOpsCenter();
-  }else if(state.workflowId==='__templates__'||state.shellView==='templates'){
+  }else if(state.shellView==='templates'){
     await showTemplateLibrary();
   }else if(state.shellView&&state.shellView!=='workbench'){
-    await refreshAll();
     showShellView(state.shellView);
+    refreshAll();
   }else{
     await refreshAll();
     if(qWf&&state.workflowId!==qWf){
