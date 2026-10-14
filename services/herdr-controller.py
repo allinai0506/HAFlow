@@ -4397,6 +4397,21 @@ def try_direct_stage_advance(item):
     launched = []
 
     for spec in specs:
+        # Backfill enterprise attribution from the superseded record when the
+        # planner did not carry it, so redispatch never drops mandatory policy.
+        try:
+            _sup_id = str(spec.get("supersedes") or spec.get("redispatch_of") or "").strip()
+            if _sup_id and (not spec.get("customer") or not spec.get("business_task_type")
+                            or not spec.get("mandatory_experience_rules")):
+                _old_task = _get_store().get_task(_sup_id) or {}
+                if not spec.get("customer") and str(_old_task.get("customer") or "").strip():
+                    spec["customer"] = str(_old_task.get("customer")).strip()
+                if not spec.get("business_task_type") and str(_old_task.get("business_task_type") or "").strip():
+                    spec["business_task_type"] = str(_old_task.get("business_task_type")).strip()
+                if not spec.get("mandatory_experience_rules") and _old_task.get("mandatory_experience_rules"):
+                    spec["mandatory_experience_rules"] = True
+        except Exception:
+            pass
         cmd = [
             TASK_MANAGER,
             "launch",

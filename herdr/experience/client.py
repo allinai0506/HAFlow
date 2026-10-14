@@ -117,12 +117,16 @@ class ExperienceClient:
         customer: Optional[str] = None,
         task_type: Optional[str] = None,
         raise_for_status: bool = False,
+        scope: Optional[str] = None,
     ) -> List[BusinessRuleExperience]:
         """Fetch active/published rules applicable to customer and task_type."""
+        params: Dict[str, Any] = {"customer": customer, "task_type": task_type}
+        if scope:
+            params["scope"] = scope
         res = self._request(
             "GET",
             "/api/v1/experiences/rules",
-            params={"customer": customer, "task_type": task_type},
+            params=params,
         )
         if not res.get("ok"):
             err_msg = f"query_rules failed (HTTP {res.get('status_code')}): {res.get('error')} - {res.get('message')}"

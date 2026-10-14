@@ -1243,8 +1243,9 @@ def api_experience_rules(q=None, token=None):
     q = q or {}
     client = _get_console_hub_client(token=token)
     cust = q.get('customer', [None])[0] if isinstance(q.get('customer'), list) else q.get('customer')
+    scope = q.get('scope', [None])[0] if isinstance(q.get('scope'), list) else q.get('scope')
     try:
-        rules = client.query_rules(customer=cust, raise_for_status=True)
+        rules = client.query_rules(customer=cust, raise_for_status=True, scope=scope)
         return {'ok': True, 'count': len(rules), 'rules': [r.to_dict() for r in rules]}
     except Exception as exc:
         status_code = getattr(exc, 'status_code', 500)
@@ -1588,6 +1589,18 @@ def api_controller_execute_action(payload):
             reason = str(payload.get('supersede_reason') or '').strip()
             if not reason: raise RuntimeError('替换任务需要 supersede_reason；优先原工位 rework')
             cmd += ['--supersedes', supersedes, '--supersede-reason', reason]
+        # Inherit enterprise experience policy from the superseded record so
+        # replacement launches cannot silently drop mandatory protection.
+        try:
+            old_task = herdr_kernel._get_store().get_task(supersedes) if supersedes else None
+        except Exception:
+            old_task = None
+        for _flag, _val in (("--customer", (old_task or {}).get("customer")),
+                            ("--business-task-type", (old_task or {}).get("business_task_type"))):
+            if _val and str(_val).strip():
+                cmd += [_flag, str(_val).strip()]
+        if (old_task or {}).get("mandatory_experience_rules"):
+            cmd += ["--mandatory-experience-rules"]
         if payload.get('ack_overflow') is True: cmd.append('--ack-overflow')
         r = run(cmd, timeout=30, check=True)
         return {'ok': True, 'task_id': task_id, 'output': r.stdout.strip()}
@@ -6854,7 +6867,7 @@ function syncOpsUi(){
 async function api(p,o={}){
   const started=performance.now();
   let authHeaders={};
-  try{const t=localStorage.getItem('herdr_hub_token')||'';if(t)authHeaders={'Authorization':'Bearer '+t};}catch(e){}
+  try{const t=sessionStorage.getItem('herdr_hub_token')||'';if(t)authHeaders={'Authorization':'Bearer '+t};}catch(e){}
   const mergedHeaders={'Content-Type':'application/json',...authHeaders,...(o.headers||{})};
   const r=await fetch(p,{...o,headers:mergedHeaders});
   const d=await r.json();
@@ -9691,16 +9704,17 @@ function paintShellPage(view){
   else if(view==='experience')renderShellExperience();
 }
 function saveHubToken(){
-  try{const inp=document.getElementById('hubTokenInput');localStorage.setItem('herdr_hub_token',(inp&&inp.value||'').trim());toast('Hub 身份 Token 已保存至本浏览器');renderShellExperience();}catch(e){toast('保存失败: '+(e.message||e),true);}
+  try{const inp=document.getElementById('hubTokenInput');sessionStorage.setItem('herdr_hub_token',(inp&&inp.value||'').trim());toast('Hub 身份 Token 已保存（仅本标签页有效，关闭即清除）');renderShellExperience();}catch(e){toast('保存失败: '+(e.message||e),true);}
 }
 async function renderShellExperience(){
   const el=document.getElementById('tasks');if(!el)return;
-  el.innerHTML='<div class="shell-page"><div class="shell-page-head"><h3>企业经验中心 (Experience Hub)</h3><p style="color:var(--text-secondary);font-size:12px;">沉淀自真实任务并通过审核的企业业务规则资产</p><div style="display:flex;gap:8px;align-items:center;margin-top:8px;font-size:12px;"><label for="hubTokenInput" style="color:var(--text-secondary);">Hub 身份 Token:</label><input id="hubTokenInput" type="password" placeholder="粘贴个人 Hub Token（仅存浏览器本地）" style="flex:1;max-width:320px;padding:4px 8px;border:1px solid var(--border-color);border-radius:4px;background:var(--bg-main);color:var(--text-primary);" /><button class="btn btn-sm" onclick="saveHubToken()">保存</button></div></div><div id="experienceHubContainer" style="padding:16px 0;"><div class="loading">加载经验数据中...</div></div></div>';
-  try{const saved=localStorage.getItem('herdr_hub_token')||'';const inp=document.getElementById('hubTokenInput');if(inp)inp.value=saved;}catch(e){}
+  el.innerHTML='<div class="shell-page"><div class="shell-page-head"><h3>企业经验中心 (Experience Hub)</h3><p style="color:var(--text-secondary);font-size:12px;">沉淀自真实任务并通过审核的企业业务规则资产</p><div style="display:flex;gap:8px;align-items:center;margin-top:8px;font-size:12px;"><label for="hubTokenInput" style="color:var(--text-secondary);">Hub 身份 Token:</label><input id="hubTokenInput" type="password" placeholder="粘贴个人 Hub Token（仅本标签页有效）" style="flex:1;max-width:320px;padding:4px 8px;border:1px solid var(--border-color);border-radius:4px;background:var(--bg-main);color:var(--text-primary);" /><button class="btn btn-sm" onclick="saveHubToken()">保存</button><label for="hubCustomerInput" style="color:var(--text-secondary);">客户筛选:</label><input id="hubCustomerInput" type="text" placeholder="留空查看授权范围内全部" style="width:160px;padding:4px 8px;border:1px solid var(--border-color);border-radius:4px;background:var(--bg-main);color:var(--text-primary);" /></div></div><div id="experienceHubContainer" style="padding:16px 0;"><div class="loading">加载经验数据中...</div></div></div>';
+  try{const saved=sessionStorage.getItem('herdr_hub_token')||'';const inp=document.getElementById('hubTokenInput');if(inp)inp.value=saved;}catch(e){}
   const container=document.getElementById('experienceHubContainer');
   try{
-    const candRes=await api('/api/experience/candidates?status=pending_review');
-    const ruleRes=await api('/api/experience/rules');
+    const custFilter=((document.getElementById('hubCustomerInput')||{}).value||'').trim();
+    const candRes=await api('/api/experience/candidates?status=pending_review'+(custFilter?'&customer='+encodeURIComponent(custFilter):''));
+    const ruleRes=await api('/api/experience/rules?scope=all'+(custFilter?'&customer='+encodeURIComponent(custFilter):''));
     const cands=(candRes&&(candRes.candidates||candRes.data?.candidates))||[];
     const rules=(ruleRes&&(ruleRes.rules||ruleRes.data?.rules))||[];
     let html='<div style="display:flex;gap:24px;flex-direction:column;">';
@@ -9722,8 +9736,8 @@ async function renderShellExperience(){
               </div>
             </div>
             <div style="display:flex;gap:8px;">
-              <button class="btn btn-sm btn-primary" onclick="reviewExperienceCandidate('${esc(c.experience_id)}','approve')">通过发布</button>
-              <button class="btn btn-sm btn-danger" onclick="reviewExperienceCandidate('${esc(c.experience_id)}','reject')">驳回</button>
+              <button class="btn btn-sm btn-primary" onclick="reviewExperienceCandidate(${jsArg(c.experience_id)},'approve')">通过发布</button>
+              <button class="btn btn-sm btn-danger" onclick="reviewExperienceCandidate(${jsArg(c.experience_id)},'reject')">驳回</button>
             </div>
           </div>
           <div style="margin-top:8px;padding:8px;background:var(--bg-sub);border-radius:4px;font-size:13px;white-space:pre-wrap;">${esc(c.content)}</div>
@@ -9750,7 +9764,7 @@ async function renderShellExperience(){
               </div>
             </div>
             <div>
-              <button class="btn btn-sm btn-outline-danger" onclick="revokeExperienceRule('${esc(r.experience_id)}')">撤回规则</button>
+              <button class="btn btn-sm btn-outline-danger" onclick="revokeExperienceRule(${jsArg(r.experience_id)})">撤回规则</button>
             </div>
           </div>
           <div style="margin-top:8px;padding:8px;background:var(--bg-sub);border-radius:4px;font-size:13px;white-space:pre-wrap;">${esc(r.content)}</div>

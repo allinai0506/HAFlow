@@ -18,6 +18,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import sqlite3
 import ssl
 import sys
@@ -473,14 +474,21 @@ class HubStorage:
         self,
         customer: Optional[str] = None,
         task_type: Optional[str] = None,
+        scope_all: bool = False,
     ) -> List[BusinessRuleExperience]:
-        """Query active rules. Strictly enforces status == 'published' and customer boundary."""
+        """Query active rules. Strictly enforces status == 'published' and customer boundary.
+
+        scope_all (admin listing): skip customer narrowing; callers must still
+        apply the allowed-customers post-filter.
+        """
         conn = self._get_conn()
         try:
             query = "SELECT * FROM experiences WHERE status = 'published'"
             params: List[Any] = []
             cust_str = str(customer).strip() if customer else ""
-            if cust_str and cust_str not in {"unknown", "default_customer"}:
+            if scope_all:
+                pass
+            elif cust_str and cust_str not in {"unknown", "default_customer"}:
                 query += " AND (customer = ? OR customer = '*')"
                 params.append(cust_str)
             else:
@@ -626,10 +634,14 @@ class HubHTTPHandler(BaseHTTPRequestHandler):
             self._send_json(401, {"error": "unauthorized", "message": "Valid Bearer Token is required"})
             return
 
-        # 1. Query published rules for Agent / Task execution
+        # 1. Query published rules for Agent / Task execution.
+        # scope=all is the permission-scoped admin listing (still post-filtered
+        # to the caller's allowed customers below); plain queries keep the
+        # safe customer narrowing.
         if path == "/api/v1/experiences/rules":
             req_cust = query.get("customer", [""])[0]
             req_type = query.get("task_type", [""])[0]
+            scope_all = str(query.get("scope", [""])[0] or "").strip().lower() == "all"
 
             # Cross-customer permission check
             allowed = user["allowed_customers"]
@@ -640,7 +652,7 @@ class HubHTTPHandler(BaseHTTPRequestHandler):
                 })
                 return
 
-            rules = self.storage.query_published_rules(customer=req_cust or None, task_type=req_type or None)
+            rules = self.storage.query_published_rules(customer=req_cust or None, task_type=req_type or None, scope_all=scope_all)
             if allowed != ["*"]:
                 rules = [r for r in rules if r.applies_to.customer == "*" or r.applies_to.customer in allowed]
 
@@ -751,6 +763,12 @@ class HubHTTPHandler(BaseHTTPRequestHandler):
                 exp = BusinessRuleExperience.from_dict(body)
             except Exception as e:
                 self._send_json(400, {"error": "invalid_payload", "message": str(e)})
+                return
+
+            # Experience IDs are rendered into story surfaces: strict charset.
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", exp.experience_id or ""):
+                self._send_json(400, {"error": "invalid_experience_id",
+                                      "message": "experience_id must match [A-Za-z0-9_-]{1,128}"})
                 return
 
             # Customer authorization check: only wildcard scope may write global rules.

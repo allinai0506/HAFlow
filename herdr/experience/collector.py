@@ -178,6 +178,55 @@ class ExperienceCollector:
             LOGGER.error("Failed to enqueue task settlement for %s: %s", task_id, exc)
             return {"ok": False, "status": "error", "reason": str(exc)}
 
+    def _note_collection_failure(
+        self,
+        task_id: str,
+        error: str,
+        run_id: Optional[str] = None,
+        terminal: bool = False,
+    ) -> None:
+        """Advance a stuck collection row so one bad record cannot pin the queue.
+
+        Non-terminal failures keep `pending_collection` but schedule backoff
+        (process_pending skips unripe rows); terminal ones (e.g. task gone)
+        move to `error` and leave the queue for good. Never raises.
+        """
+        try:
+            conn = _get_collector_db(self.db_path)
+            try:
+                with conn:
+                    if run_id:
+                        rows = conn.execute(
+                            "SELECT run_id, retry_count FROM local_collector_records "
+                            "WHERE task_id = ? AND run_id = ? AND status = 'pending_collection'",
+                            (str(task_id), str(run_id)),
+                        ).fetchall()
+                    else:
+                        rows = conn.execute(
+                            "SELECT run_id, retry_count FROM local_collector_records "
+                            "WHERE task_id = ? AND status = 'pending_collection'",
+                            (str(task_id),),
+                        ).fetchall()
+                    for r in rows:
+                        if terminal:
+                            conn.execute(
+                                "UPDATE local_collector_records SET status = 'error', "
+                                "last_error = ?, updated_at = ? WHERE task_id = ? AND run_id = ?",
+                                (error[:300], time.time(), str(task_id), r["run_id"]),
+                            )
+                        else:
+                            nxt = int(r["retry_count"] or 0) + 1
+                            conn.execute(
+                                "UPDATE local_collector_records SET last_error = ?, retry_count = ?, "
+                                "next_retry_at = ?, updated_at = ? WHERE task_id = ? AND run_id = ?",
+                                (error[:300], nxt, time.time() + min(300.0, 5.0 * (2 ** nxt)),
+                                 time.time(), str(task_id), r["run_id"]),
+                            )
+            finally:
+                conn.close()
+        except Exception as exc:
+            LOGGER.debug("Could not advance collection row for %s: %s", task_id, exc)
+
     def process_task_settlement(
         self,
         task_id: str,
@@ -192,6 +241,7 @@ class ExperienceCollector:
         try:
             task = state_db.get_task(task_id, db_path=state_db_path)
             if not task:
+                self._note_collection_failure(str(task_id), "task_not_found", terminal=True)
                 return {"ok": False, "status": "skipped", "reason": "task_not_found"}
 
             run_id = str(task.get("run_id") or (outcome.get("run_id") if outcome else "") or f"run_{task_id}")
@@ -349,15 +399,23 @@ class ExperienceCollector:
 
         except Exception as exc:
             LOGGER.error("process_task_settlement crashed unexpectedly: %s", exc)
+            self._note_collection_failure(str(task_id), str(exc))
             return {"ok": False, "status": "error", "reason": str(exc)}
 
     def process_pending(self, state_db_path: Optional[Path] = None, limit: int = 50) -> int:
-        """Process tasks queued as pending_collection."""
+        """Process tasks queued as pending_collection.
+
+        Rows in backoff (next_retry_at in the future) are skipped so one bad
+        record cannot pin the head of the queue.
+        """
+        now = time.time()
         conn = _get_collector_db(self.db_path)
         try:
             rows = conn.execute(
-                "SELECT task_id, run_id, outcome_json FROM local_collector_records WHERE status = 'pending_collection' ORDER BY created_at ASC LIMIT ?",
-                (limit,),
+                "SELECT task_id, run_id, outcome_json FROM local_collector_records "
+                "WHERE status = 'pending_collection' AND (next_retry_at IS NULL OR next_retry_at <= ?) "
+                "ORDER BY created_at ASC LIMIT ?",
+                (now, limit,),
             ).fetchall()
         finally:
             conn.close()
