@@ -361,8 +361,8 @@ def _trigger_experience_collection_best_effort(
         collector = ExperienceCollector(hub_client=hub_client)
         # 1. Durable synchronous enqueue (persists before any thread or process can exit)
         collector.enqueue_task_settlement(str(task_id), outcome, state_db_path=db_path)
-        # 2. Bounded async worker
-        collector.process_pending_async(state_db_path=db_path)
+        # 2. Bounded async worker (extraction + Hub upload in daemon thread)
+        collector.process_task_settlement_async(str(task_id), outcome, state_db_path=db_path)
     except Exception as exc:
         LOGGER.warning("Experience collection trigger failed for task %s: %s", task_id, exc)
 

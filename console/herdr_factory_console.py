@@ -1208,7 +1208,9 @@ def api_task_interaction_respond(b):
 
 def _get_console_hub_client(token=None):
     from herdr.experience.client import ExperienceClient
-    eff_token = token or os.environ.get("HERDR_HUB_ADMIN_TOKEN") or os.environ.get("HERDR_HUB_TOKEN")
+    # Never fall back to server-side admin credentials: anonymous browser
+    # requests must not inherit admin scope. Caller identity only.
+    eff_token = (token or "").strip()
     return ExperienceClient(token=eff_token)
 
 

@@ -4086,7 +4086,7 @@ def _fetch_experience_rules_block(task):
     try:
         try:
             from herdr.experience.collector import ExperienceCollector
-            ExperienceCollector().process_pending_async()
+            ExperienceCollector().recover_and_sync()
         except Exception:
             pass
         from herdr.experience.client import fetch_experience_rules_block
@@ -4117,6 +4117,15 @@ def dispatch_task(task_id, prompt):
             f"{task['status']}; use herdr-task rework {task_id} --prompt '<repair instructions>' for the same owned execution"
         )
         sys.exit(2)
+
+    # Fail-closed: mandatory rules must resolve before marking dispatched,
+    # otherwise Hub outage would leave a false dispatched state with no
+    # instructions delivered.
+    _prefetched_experience_suffix = None
+    _prefetched_experience = False
+    if task.get("mandatory_experience_rules") and not receipt_delivery:
+        _prefetched_experience_suffix = _fetch_experience_rules_block(task)
+        _prefetched_experience = True
 
     # Runtime closure: the dispatched transition happens before context
     # compilation and prompt delivery, so the compiled context never
@@ -4177,7 +4186,7 @@ def dispatch_task(task_id, prompt):
             f"{artifact_task} working-context get --context-id {working_context_ref}\n"
         )
 
-    experience_rules_suffix = _fetch_experience_rules_block(task)
+    experience_rules_suffix = _prefetched_experience_suffix if _prefetched_experience else _fetch_experience_rules_block(task)
 
     checkpoint_suffix = ""
     completion_suffix = "" if receipt_delivery else (

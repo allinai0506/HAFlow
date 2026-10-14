@@ -272,7 +272,7 @@ class HubStorage:
                     exp.created_at,
                     exp.updated_at,
                 ))
-            self.record_audit("submit_candidate", actor, exp.experience_id, {"title": exp.title})
+            self.record_audit("submit_candidate", actor, exp.experience_id, {"title": exp.title, "customer": exp.applies_to.customer})
             return True, exp, "created"
         finally:
             conn.close()
@@ -364,6 +364,12 @@ class HubStorage:
         if exp.status not in {ExperienceStatus.PENDING_REVIEW.value, ExperienceStatus.REJECTED.value}:
             return False, exp, f"cannot_review_from_{exp.status}"
 
+        # Publishing requires explicit customer scope; unknown/empty must be fixed first.
+        if action == "approve":
+            cust = (exp.applies_to.customer or "").strip()
+            if cust in {"", "unknown", "default_customer"}:
+                return False, exp, "customer_unknown_requires_explicit_scope"
+
         now = time.time()
         new_status = (
             ExperienceStatus.PUBLISHED.value
@@ -402,7 +408,7 @@ class HubStorage:
                     exp.updated_at,
                     exp.experience_id,
                 ))
-            self.record_audit(f"review_{action}", reviewer, experience_id, {"comment": comment})
+            self.record_audit(f"review_{action}", reviewer, experience_id, {"comment": comment, "customer": exp.applies_to.customer})
             return True, exp, "ok"
         finally:
             conn.close()
@@ -444,7 +450,7 @@ class HubStorage:
                     exp.updated_at,
                     exp.experience_id,
                 ))
-            self.record_audit("revoke_rule", actor, experience_id, {"reason": reason})
+            self.record_audit("revoke_rule", actor, experience_id, {"reason": reason, "customer": exp.applies_to.customer})
             return True, exp, "ok"
         finally:
             conn.close()
@@ -508,8 +514,17 @@ class HubStorage:
             for row in cur.fetchall():
                 details = json.loads(row["details_json"] or "{}")
                 if allowed_customers and allowed_customers != ["*"]:
+                    # Authoritative customer comes from the experience record,
+                    # not from a possibly-empty log details field.
                     cust = details.get("customer")
-                    if cust and cust not in allowed_customers and cust != "*":
+                    if not cust and row["experience_id"]:
+                        exp_row = conn.execute(
+                            "SELECT customer FROM experiences WHERE experience_id = ?",
+                            (row["experience_id"],),
+                        ).fetchone()
+                        if exp_row:
+                            cust = exp_row["customer"]
+                    if cust not in allowed_customers:
                         continue
                 logs.append({
                     "id": row["id"],
@@ -629,7 +644,10 @@ class HubHTTPHandler(BaseHTTPRequestHandler):
                     task_type=type_filter,
                 )
                 if allowed != ["*"]:
-                    candidates = [c for c in candidates if not c.applies_to.customer or c.applies_to.customer in allowed or c.applies_to.customer in {"*", "unknown"}]
+                    # Pending review scope is strictly limited to allowed customers.
+                    # Published global rules remain readable via /rules; they are
+                    # not exposed here as reviewable candidates.
+                    candidates = [c for c in candidates if c.applies_to.customer in allowed]
 
             self._send_json(200, {
                 "ok": True,
@@ -664,11 +682,13 @@ class HubHTTPHandler(BaseHTTPRequestHandler):
             if not exp:
                 self._send_json(404, {"error": "not_found", "message": "Experience not found"})
                 return
-            # Customer check
+            # Customer check: restricted users see only their own scope.
+            # Published global rules ('*') stay readable; pending globals do not.
             allowed = user["allowed_customers"]
-            if allowed != ["*"] and exp.applies_to.customer and exp.applies_to.customer != "*" and exp.applies_to.customer not in allowed:
-                self._send_json(403, {"error": "forbidden", "message": "Customer scope exceeded"})
-                return
+            if allowed != ["*"] and exp.applies_to.customer and exp.applies_to.customer not in allowed:
+                if not (exp.applies_to.customer == "*" and exp.status == ExperienceStatus.PUBLISHED.value):
+                    self._send_json(403, {"error": "forbidden", "message": "Customer scope exceeded"})
+                    return
             # P1-04: Contributor can only view their own unapproved candidate
             if user["role"] == "contributor":
                 if exp.status != ExperienceStatus.PUBLISHED.value and exp.contributor != user["user_id"]:
@@ -697,9 +717,9 @@ class HubHTTPHandler(BaseHTTPRequestHandler):
                 self._send_json(400, {"error": "invalid_payload", "message": str(e)})
                 return
 
-            # Customer authorization check
+            # Customer authorization check: only wildcard scope may write global rules.
             allowed = user["allowed_customers"]
-            if allowed != ["*"] and exp.applies_to.customer and exp.applies_to.customer != "*" and exp.applies_to.customer not in allowed:
+            if allowed != ["*"] and exp.applies_to.customer and exp.applies_to.customer not in allowed:
                 self._send_json(403, {"error": "forbidden", "message": "Cannot submit for unauthorized customer"})
                 return
 
@@ -737,9 +757,9 @@ class HubHTTPHandler(BaseHTTPRequestHandler):
                 self._send_json(404, {"error": "not_found", "message": "Experience not found"})
                 return
 
-            # P1-05: Enforce customer boundary on review
+            # P1-05: Enforce customer boundary on review; global rules need wildcard scope.
             allowed = user["allowed_customers"]
-            if allowed != ["*"] and exp.applies_to.customer and exp.applies_to.customer != "*" and exp.applies_to.customer not in allowed:
+            if allowed != ["*"] and exp.applies_to.customer and exp.applies_to.customer not in allowed:
                 self._send_json(403, {"error": "forbidden", "message": f"Reviewer not authorized for customer '{exp.applies_to.customer}'"})
                 return
 
@@ -778,9 +798,9 @@ class HubHTTPHandler(BaseHTTPRequestHandler):
                 self._send_json(404, {"error": "not_found", "message": "Experience not found"})
                 return
 
-            # P1-05: Enforce customer boundary on revoke
+            # P1-05: Enforce customer boundary on revoke; global rules need wildcard scope.
             allowed = user["allowed_customers"]
-            if allowed != ["*"] and exp.applies_to.customer and exp.applies_to.customer != "*" and exp.applies_to.customer not in allowed:
+            if allowed != ["*"] and exp.applies_to.customer and exp.applies_to.customer not in allowed:
                 self._send_json(403, {"error": "forbidden", "message": f"Reviewer not authorized for customer '{exp.applies_to.customer}'"})
                 return
 

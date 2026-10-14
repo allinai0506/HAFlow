@@ -842,7 +842,7 @@ def main():
             last_experience_sync = now
             try:
                 from herdr.experience.collector import ExperienceCollector
-                ExperienceCollector().process_pending_async()
+                ExperienceCollector().recover_and_sync()
             except Exception:
                 pass
 

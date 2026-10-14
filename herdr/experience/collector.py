@@ -82,10 +82,10 @@ class ExperienceCollector:
             self.hub_client = hub_client
         elif os.environ.get("HERDR_HUB_URL") or os.environ.get("HERDR_HUB_TOKEN"):
             try:
-                from .client import ExperienceHubClient
-                self.hub_client = ExperienceHubClient()
+                from .client import ExperienceClient
+                self.hub_client = ExperienceClient()
             except Exception as exc:
-                LOGGER.debug("Could not auto-initialize ExperienceHubClient: %s", exc)
+                LOGGER.debug("Could not auto-initialize ExperienceClient: %s", exc)
                 self.hub_client = None
         else:
             self.hub_client = None
