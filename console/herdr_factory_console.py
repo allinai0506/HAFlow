@@ -1211,7 +1211,7 @@ def _get_console_hub_client(token=None):
     # Never fall back to server-side admin credentials: anonymous browser
     # requests must not inherit admin scope. Caller identity only.
     eff_token = (token or "").strip()
-    return ExperienceClient(token=eff_token)
+    return ExperienceClient(token=eff_token, allow_env_token=False)
 
 
 def api_experience_candidates(q=None, token=None):

@@ -477,6 +477,10 @@ class HubStorage:
             if type_str and type_str not in {"general", "unknown"}:
                 query += " AND (task_type = ? OR task_type = '*' OR task_type = 'general' OR task_type IS NULL)"
                 params.append(type_str)
+            elif type_str in {"general", "unknown"}:
+                # Generic task context must not absorb business-specific rules.
+                query += " AND (task_type = 'general' OR task_type = '*' OR task_type IS NULL)"
+            # Empty task_type (review/listing without type filter) keeps all types.
             query += " ORDER BY version DESC, updated_at DESC"
 
             cur = conn.execute(query, tuple(params))
@@ -509,21 +513,20 @@ class HubStorage:
     ) -> List[Dict[str, Any]]:
         conn = self._get_conn()
         try:
-            cur = conn.execute("SELECT * FROM audit_logs ORDER BY timestamp DESC LIMIT ?", (limit,))
+            # Filter before truncating: scan newest-first with a JOIN so a
+            # restricted customer's older records are not hidden by newer
+            # unrelated rows beyond LIMIT.
+            cur = conn.execute("""
+                SELECT a.*, e.customer AS exp_customer
+                FROM audit_logs a LEFT JOIN experiences e
+                  ON a.experience_id = e.experience_id
+                ORDER BY a.timestamp DESC
+            """)
             logs = []
-            for row in cur.fetchall():
+            for row in cur:
                 details = json.loads(row["details_json"] or "{}")
                 if allowed_customers and allowed_customers != ["*"]:
-                    # Authoritative customer comes from the experience record,
-                    # not from a possibly-empty log details field.
-                    cust = details.get("customer")
-                    if not cust and row["experience_id"]:
-                        exp_row = conn.execute(
-                            "SELECT customer FROM experiences WHERE experience_id = ?",
-                            (row["experience_id"],),
-                        ).fetchone()
-                        if exp_row:
-                            cust = exp_row["customer"]
+                    cust = details.get("customer") or row["exp_customer"]
                     if cust not in allowed_customers:
                         continue
                 logs.append({
@@ -534,6 +537,8 @@ class HubStorage:
                     "details": details,
                     "timestamp": row["timestamp"],
                 })
+                if len(logs) >= limit:
+                    break
             return logs
         finally:
             conn.close()

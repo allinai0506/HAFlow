@@ -4084,9 +4084,20 @@ def _compile_working_context_ref(task):
 def _fetch_experience_rules_block(task):
     """Fetch active published enterprise business rules for this task."""
     try:
+        # Best-effort background sync: never block dispatch on Hub I/O.
+        # recover_and_sync may fan out to dozens of 8s HTTP calls; it runs
+        # in a bounded daemon thread while rule fetch proceeds immediately.
         try:
-            from herdr.experience.collector import ExperienceCollector
-            ExperienceCollector().recover_and_sync()
+            import threading
+
+            def _bg_sync():
+                try:
+                    from herdr.experience.collector import ExperienceCollector
+                    ExperienceCollector().recover_and_sync()
+                except Exception:
+                    pass
+
+            threading.Thread(target=_bg_sync, daemon=True, name="exp-sync-bg").start()
         except Exception:
             pass
         from herdr.experience.client import fetch_experience_rules_block

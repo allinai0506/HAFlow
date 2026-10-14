@@ -162,6 +162,7 @@ class ExperienceCollector:
 
             # 1. Check local deduplication and recover outcome if omitted
             conn = _get_collector_db(self.db_path)
+            existing_retry = 0
             try:
                 row = conn.execute(
                     "SELECT * FROM local_collector_records WHERE task_id = ? AND run_id = ?",
@@ -176,6 +177,20 @@ class ExperienceCollector:
                             "experience_id": row["experience_id"],
                             "reason": "already_processed",
                         }
+                    # Respect upload backoff: repeated settlement must not hammer Hub.
+                    if existing_status == "pending_upload":
+                        try:
+                            existing_retry = int(row["retry_count"] or 0)
+                        except Exception:
+                            existing_retry = 0
+                        nxt = row["next_retry_at"] if "next_retry_at" in row.keys() else 0
+                        if nxt and float(nxt) > time.time():
+                            return {
+                                "ok": True,
+                                "status": "pending_upload",
+                                "experience_id": row["experience_id"],
+                                "reason": "backoff",
+                            }
                     if outcome is None and row["outcome_json"]:
                         try:
                             outcome = json.loads(row["outcome_json"])
@@ -270,11 +285,23 @@ class ExperienceCollector:
                         """, (time.time(), task_id, run_id))
                         return {"ok": True, "status": "uploaded", "experience_id": exp.experience_id, "reason": "ready"}
                     else:
-                        conn.execute("""
-                            UPDATE local_collector_records
-                            SET status = 'pending_upload', last_error = ?, retry_count = 0, next_retry_at = 0, updated_at = ?
-                            WHERE task_id = ? AND run_id = ?
-                        """, (upload_err, time.time(), task_id, run_id))
+                        # First settlement failure stays immediately retryable
+                        # (keeps existing tests' offline->online recovery); once
+                        # backoff is scheduled, repeated settlement must not reset it.
+                        if existing_retry > 0:
+                            curr_retries = existing_retry + 1
+                            backoff = min(300.0, 5.0 * (2 ** curr_retries))
+                            conn.execute("""
+                                UPDATE local_collector_records
+                                SET status = 'pending_upload', last_error = ?, retry_count = ?, next_retry_at = ?, updated_at = ?
+                                WHERE task_id = ? AND run_id = ?
+                            """, (upload_err, curr_retries, time.time() + backoff, time.time(), task_id, run_id))
+                        else:
+                            conn.execute("""
+                                UPDATE local_collector_records
+                                SET status = 'pending_upload', last_error = ?, retry_count = 0, next_retry_at = 0, updated_at = ?
+                                WHERE task_id = ? AND run_id = ?
+                            """, (upload_err, time.time(), task_id, run_id))
                         return {"ok": True, "status": "pending_upload", "experience_id": exp.experience_id, "reason": upload_err}
             finally:
                 conn.close()

@@ -45,10 +45,16 @@ class ExperienceClient:
         base_url: Optional[str] = None,
         token: Optional[str] = None,
         timeout: float = 8.0,
+        allow_env_token: bool = True,
     ):
         raw_url = base_url or os.environ.get("HERDR_HUB_URL") or DEFAULT_HUB_URL
         self.base_url = raw_url.rstrip("/")
-        self.token = token or os.environ.get("HERDR_HUB_TOKEN") or ""
+        if allow_env_token:
+            self.token = token or os.environ.get("HERDR_HUB_TOKEN") or ""
+        else:
+            # Explicit caller identity only: empty stays empty, never inherits
+            # server-side env credentials (used by Console per-request path).
+            self.token = token or ""
         self.timeout = timeout
 
         # P1-09: Validate transport security
@@ -221,7 +227,12 @@ def fetch_experience_rules_block(
     client: Optional[ExperienceClient] = None,
     store: Optional[Any] = None,
 ) -> str:
-    """Fetch active published enterprise business rules and return prompt block."""
+    """Fetch active published enterprise business rules and return prompt block.
+
+    Contract: mandatory_experience_rules=True means fail-closed on transport
+    or auth failure (Hub unreachable / 401 / 403 raises). An empty rule set
+    after a successful Hub query is NOT an error and returns "".
+    """
     is_mandatory = bool(task.get("mandatory_experience_rules"))
     try:
         payload = task.get("payload_json")
