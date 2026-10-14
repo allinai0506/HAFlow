@@ -52,6 +52,7 @@
 | **修改 Workflow 主区画布 / Inspector / 视图切换** | [[flow-workbench]] | `herdr/workflow_graph.py`, `console/herdr_factory_console.py`, `console/static/vendor/` |
 | **查看工作流交付成果（文件、提交、PR）** | [[flow-workbench]] | `herdr/deliverables.py`, `herdr/projection.py`, `console/herdr_factory_console.py` |
 | **工位实时打断与插话纠偏 (Steering Mesh & AgentAdapter)** | [[task-lifecycle]] | `herdr/steering.py`, `herdr/agent_adapter.py`, `bin/herdr-task:steer/adapters` |
+| **Agent 终端等待输入与人工交互闭环 (Interaction Loop)** | [[task-lifecycle]] | `herdr/interaction_loop.py`, `console/herdr_factory_console.py` |
 | **白盒遥测、语义提炼与产物投影 (Projection Engine)** | [[task-lifecycle]] | `herdr/projection.py`, `console/herdr_factory_console.py` |
 | **通用配置驱动与受控 MCP 生态容器 (Dynamic Config & MCP Mesh)** | [[dag-workflow-engine]] | `herdr/mcp.py`, `herdr/workflow.py` |
 | **状态流转网关、嵌入式状态引擎、统一事件流、检查点快照 (State Transition Gateway, StateStore, WorkflowEvent & Checkpoint Store)** | [[task-lifecycle]], [[domain-model]] | `herdr/transitions.py`, `herdr/kernel.py`, `herdr/state_store.py`, `herdr/state_db.py`, `bin/herdr-task` |
