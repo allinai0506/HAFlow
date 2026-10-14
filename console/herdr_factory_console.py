@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import json, os, re, shutil, subprocess, sys, threading, time, urllib.parse, uuid
+import hashlib, json, os, re, shutil, subprocess, sys, threading, time, urllib.parse, uuid
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -540,15 +540,21 @@ def _is_builtin_path(path):
     return Path(path).resolve().parent==herdr_workflow.BUNDLED_TEMPLATES_DIR.resolve()
 
 def _derive_template_category(tid: str, data: dict):
-    cat = str((data or {}).get('category') or '').lower().strip()
-    if cat in ('eng', 'software', 'dev') or '研发' in cat or '开发' in cat:
+    cat_raw = str((data or {}).get('category') or (data or {}).get('category_name') or '').strip()
+    cat_lower = cat_raw.lower()
+    if cat_lower in ('eng', 'software', 'dev') or '研发' in cat_lower or '开发' in cat_lower:
         return 'eng', '💻 软件研发'
-    if cat in ('biz', 'business') or '商务' in cat or '咨询' in cat:
+    if cat_lower in ('biz', 'business') or '商务' in cat_lower or '咨询' in cat_lower:
         return 'biz', '📊 商务咨询'
-    if cat in ('ops', 'operation') or '运营' in cat or '服务' in cat:
+    if cat_lower in ('ops', 'operation') or '运营' in cat_lower or '服务' in cat_lower:
         return 'ops', '🚀 运营服务'
-    if cat in ('sys', 'test') or '测试' in cat or '系统' in cat:
+    if cat_lower in ('sys', 'test') or '测试' in cat_lower or '系统' in cat_lower:
         return 'sys', '🧪 系统测试'
+    if cat_raw:
+        slug = re.sub(r'[^a-zA-Z0-9_-]', '', cat_lower)
+        if not slug or len(slug) < 2:
+            slug = 'cat_' + hashlib.md5(cat_raw.encode('utf-8')).hexdigest()[:8]
+        return slug, cat_raw
     if tid in ('software-development-v1', 'code-craft-v1'):
         return 'eng', '💻 软件研发'
     if tid in ('bidding', 'business-research-v1'):
@@ -5737,6 +5743,36 @@ body {
   border-color: var(--border-default);
   background: var(--bg-subtle);
 }
+.tpl-badge.cat-purple {
+  color: #7c3aed;
+  border-color: rgba(124, 58, 237, 0.25);
+  background: #f5f3ff;
+}
+.tpl-badge.cat-emerald {
+  color: #059669;
+  border-color: rgba(5, 150, 105, 0.25);
+  background: #ecfdf5;
+}
+.tpl-badge.cat-rose {
+  color: #e11d48;
+  border-color: rgba(225, 29, 72, 0.25);
+  background: #fff1f2;
+}
+.tpl-badge.cat-amber {
+  color: #d97706;
+  border-color: rgba(217, 119, 6, 0.25);
+  background: #fffbeb;
+}
+.tpl-badge.cat-indigo {
+  color: #4f46e5;
+  border-color: rgba(79, 70, 229, 0.25);
+  background: #eef2ff;
+}
+.tpl-badge.cat-teal {
+  color: #0d9488;
+  border-color: rgba(13, 148, 136, 0.25);
+  background: #f0fdfa;
+}
 .tpl-desc {
   font-size: 12px;
   color: var(--text-secondary);
@@ -6271,12 +6307,8 @@ body {
           </div>
           <div class="form-group" style="flex:1;display:flex;flex-direction:column;gap:4px">
             <label style="font-size:11.5px;font-weight:600">所属业务分类</label>
-            <select id="tplEditCategory" style="padding:4px 8px;border:1px solid var(--border-default);border-radius:var(--radius-sm);font-size:12.5px;background:var(--bg-surface)">
-              <option value="eng">💻 软件研发类</option>
-              <option value="biz">📊 商务咨询类</option>
-              <option value="ops">🚀 运营服务类</option>
-              <option value="sys">🧪 系统测试类</option>
-            </select>
+            <input type="text" id="tplEditCategory" list="tplCatDatalist" placeholder="选择或输入自定义分类，如：⚖️ 法务合规" style="padding:4px 8px;border:1px solid var(--border-default);border-radius:var(--radius-sm);font-size:12.5px;background:var(--bg-surface)">
+            <datalist id="tplCatDatalist"></datalist>
           </div>
         </div>
         <div class="form-group" style="display:flex;flex-direction:column;gap:4px">
@@ -6665,13 +6697,47 @@ async function fetchTemplates(){
   return state.templates
 }
 
-const TEMPLATE_CATEGORIES=[
+const BUILTIN_TEMPLATE_CATEGORIES=[
   {id:'all',label:'全部'},
   {id:'eng',label:'💻 软件研发'},
   {id:'biz',label:'📊 商务咨询'},
   {id:'ops',label:'🚀 运营服务'},
   {id:'sys',label:'🧪 系统测试'}
 ];
+
+const CUSTOM_BADGE_CLASSES=['cat-purple','cat-emerald','cat-rose','cat-teal','cat-indigo','cat-amber'];
+
+function getTplBadgeClass(catId){
+  if(!catId)return 'cat-biz';
+  if(['eng','biz','ops','sys'].includes(catId))return 'cat-'+catId;
+  let hash=0;
+  for(let i=0;i<catId.length;i++){
+    hash=((hash<<5)-hash)+catId.charCodeAt(i);
+    hash|=0;
+  }
+  const idx=Math.abs(hash)%CUSTOM_BADGE_CLASSES.length;
+  return CUSTOM_BADGE_CLASSES[idx];
+}
+
+function getDynamicTemplateCategories(){
+  const ts=state.templates||[];
+  const map=new Map();
+  BUILTIN_TEMPLATE_CATEGORIES.forEach(c=>{
+    map.set(c.id,{id:c.id,label:c.label,count:0});
+  });
+  ts.forEach(t=>{
+    const cId=t.category||'biz';
+    const cLabel=t.category_name||t.category||'其它';
+    if(map.has(cId)){
+      map.get(cId).count++;
+    }else{
+      map.set(cId,{id:cId,label:cLabel,count:1});
+    }
+  });
+  const all=map.get('all');
+  if(all)all.count=ts.length;
+  return Array.from(map.values());
+}
 
 function ensureTplLayoutDOM(tplEl){
   if(!tplEl||document.getElementById('tplDagCanvas'))return;
@@ -6774,12 +6840,11 @@ function ensureTplLayoutDOM(tplEl){
 function renderTplCategories(){
   const pillsEl=document.getElementById('tplCategoryPills');
   if(!pillsEl)return;
-  const ts=state.templates||[];
+  const categories=getDynamicTemplateCategories();
   const activeCat=state.tplCategoryFilter||'all';
-  pillsEl.innerHTML=TEMPLATE_CATEGORIES.map(cat=>{
-    const cnt=cat.id==='all'?ts.length:ts.filter(t=>t.category===cat.id).length;
+  pillsEl.innerHTML=categories.map(cat=>{
     const isAct=cat.id===activeCat;
-    return `<button type="button" class="tpl-cat-pill ${isAct?'active':''}" onclick="setTplCategory('${cat.id}')"><span>${cat.label}</span><span class="count">${cnt}</span></button>`;
+    return `<button type="button" class="tpl-cat-pill ${isAct?'active':''}" onclick="setTplCategory('${esc(cat.id)}')"><span>${esc(cat.label)}</span><span class="count">${cat.count}</span></button>`;
   }).join('');
 }
 
@@ -6829,7 +6894,7 @@ function renderTplCards(){
             ${t.id==='software-development-v1'?'<span style="font-size:10px;background:var(--primary-subtle);color:var(--primary);padding:2px 4px;border-radius:4px;font-weight:600">官方推荐</span>':''}
             <span class="badge ${is_builtin?'waiting':'good-text'}">${is_builtin?'内置':'自定义'}</span>
           </span>
-          <span class="tpl-badge cat-${t.category||'biz'}">${esc(t.category_name||'工作流')}</span>
+          <span class="tpl-badge ${getTplBadgeClass(t.category)}">${esc(t.category_name||'工作流')}</span>
         </div>
         <div class="tpl-desc">${esc(t.description||'暂无业务说明')}</div>
         <div class="tpl-pipeline" title="流程工序节点微缩示意">${steps||'<span class="muted">无节点</span>'}</div>
@@ -6855,7 +6920,7 @@ async function selectTemplateInLibrary(id){
   if(idEl)idEl.textContent=t.id;
   if(catEl){
     catEl.textContent=t.category_name||'工作流';
-    catEl.className='tpl-badge cat-'+(t.category||'biz');
+    catEl.className='tpl-badge '+getTplBadgeClass(t.category);
   }
   if(descEl)descEl.textContent=t.description||'';
   if(editBtnEl)editBtnEl.textContent=t.is_builtin?'查看 YAML / 向导':'可视化配置 / YAML';
@@ -7132,7 +7197,8 @@ function openTplConfigModal(id,builtin,yaml,detail){
   window._curEditingTemplate={
     id:tpl.id||id||'custom-flow',
     label:tpl.label||tpl.id||'我的工作流',
-    category:tpl.category||'biz',
+    category:tpl.category_name||tpl.category||'📊 商务咨询',
+    category_name:tpl.category_name||tpl.category||'📊 商务咨询',
     version:tpl.version||'1.0',
     description:tpl.description||'',
     nodes:JSON.parse(JSON.stringify(rawNodes))
@@ -7145,7 +7211,15 @@ function openTplConfigModal(id,builtin,yaml,detail){
     nameInput.value=window._curEditingTemplate.id;
     nameInput.disabled=Boolean(builtin&&id);
   }
-  document.getElementById('tplEditCategory').value=window._curEditingTemplate.category||'biz';
+  const catInput=document.getElementById('tplEditCategory');
+  const catDatalist=document.getElementById('tplCatDatalist');
+  if(catDatalist){
+    const dynamicCats=getDynamicTemplateCategories().filter(c=>c.id!=='all');
+    catDatalist.innerHTML=dynamicCats.map(c=>`<option value="${esc(c.label)}">${esc(c.label)}</option>`).join('');
+  }
+  if(catInput){
+    catInput.value=window._curEditingTemplate.category_name||window._curEditingTemplate.category||'📊 商务咨询';
+  }
   document.getElementById('tplEditDesc').value=window._curEditingTemplate.description||'';
   document.getElementById('tplYaml').value=yaml||generateYamlFromTplState(window._curEditingTemplate);
 
@@ -7354,12 +7428,15 @@ function syncTplFormToState(){
   if(!window._curEditingTemplate)return;
   window._curEditingTemplate.label=document.getElementById('tplEditLabel')?.value||window._curEditingTemplate.label;
   window._curEditingTemplate.id=document.getElementById('tplName')?.value||window._curEditingTemplate.id;
-  window._curEditingTemplate.category=document.getElementById('tplEditCategory')?.value||window._curEditingTemplate.category;
+  const catVal=document.getElementById('tplEditCategory')?.value||window._curEditingTemplate.category;
+  window._curEditingTemplate.category=catVal;
+  window._curEditingTemplate.category_name=catVal;
   window._curEditingTemplate.description=document.getElementById('tplEditDesc')?.value||window._curEditingTemplate.description;
 }
 
 function generateYamlFromTplState(tpl){
-  let yaml=`name: ${tpl.id}\nlabel: ${tpl.label}\ncategory: ${tpl.category||'biz'}\nversion: "${tpl.version||'1.0'}"\ndescription: ${tpl.description||''}\n\nnodes:\n`;
+  const cat=tpl.category_name||tpl.category||'💻 软件研发';
+  let yaml=`name: ${tpl.id}\nlabel: ${tpl.label}\ncategory: "${cat}"\nversion: "${tpl.version||'1.0'}"\ndescription: ${tpl.description||''}\n\nnodes:\n`;
   (tpl.nodes||[]).forEach(n=>{
     yaml+=`  - id: ${n.id}\n`;
     yaml+=`    label: ${n.label||n.id}\n`;
