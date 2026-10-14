@@ -7,7 +7,35 @@
 > *Human + Agent, in Flow*  
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
+
+## [2026-10-14] feat | 人机协同闭环：Agent 终端交互等待探测、不透明选项映射与上下文漂移/原子防重控制面落地 (Interaction Loop V1)
+
+- 背景：
+  1. 当异构 Agent（如 Claude Code / Codex / Qoder）在终端运行遇到敏感操作、权限确认或决策提问时，会进入终端阻塞等待输入状态；
+  2. 原架构下用户必须手动离开 HAFlow 控制台、进入底层终端窗口并手动输入命令，割裂了人机协同流程；
+  3. 直接允许前端发送按键存在巨大的安全隐患（按键注入、工位漂移导致误击发、并发双击、DAG 状态被绕过等）。
+- 变更：
+  1. **核心交互模块 (`herdr/interaction_loop.py`)**：
+     - 确定性正则匹配阻塞提示（Claude 数字选项、Codex 字母选项、Qoder 方括号与通用 [y/n] 选项），拒绝 LLM 猜测，未识别模式安全降级；
+     - 提示词 16 位 SHA-256 指纹提取与全套上下文（Pane/Agent/Terminal/Fingerprint/Version）漂移校验；
+     - 服务端生成不透明 `option_id`，剥离真实按键序列，前端浏览器零敏感按键注入能力；
+     - 纯标准库实现，无新增外部依赖，复用 `herdr.state_db.record_event_if_absent` 原子防重与脱敏审计日志。
+  2. **控制台交互 API 与 Attention Hub (`console/herdr_factory_console.py`)**：
+     - 新增 `GET /api/task/interaction`（单任务探测与工作流批量扫描）；
+     - 新增 `POST /api/task/interaction/respond`（身份与指纹双重校验、原子事件登记、按键注入与二次状态确认）；
+     - 前端 Attention Hub 接入交互卡片，支持等待选择、提交中、等待确认与失败降级，提供直接跳转终端现场兜底入口；
+     - 严格遵守 4px 栅格与中文本地化设计规范，不破坏 `loadWorkflowExtras` 并发契约。
+  3. **测试覆盖**：
+     - 新增 `tests/test_interaction_loop.py`（30 项单元测试）与 `tests/test_console_interaction_api.py`（8 项集成测试）；
+     - 并在真实工位完成 Live Herdr Pane 端到端闭环验证。
+- 证据：
+  1. `pytest -v tests/test_interaction_loop.py tests/test_console_interaction_api.py`: 38 passed；
+  2. `pytest -q tests/test_console*.py`: 293 passed, 76 subtests passed；
+  3. `pytest -q tests/test_workflow*.py tests/test_state*.py tests/test_agent*.py`: 434 passed；
+  4. S6 独立代码审查通过，评定 `MERGE_READY`。
+
 ## [2026-10-12] fix | 终态工作流与已满足节点派发待办收敛：防历史旧派发在结案后持续误报恢复待办与篡改节点完成状态
+
 
 - 背景：
   1. 工作流 `wf-nexusarchive-1011-01` 已经完成交付结案（`status: completed`, `outcome: delivered`），但控制台仍持续提示“1 项恢复待办：计划 · 旧派发尚未确认任务登记”，且流程图中原本已完成的“计划”节点被覆盖显示为“待人工确认”；

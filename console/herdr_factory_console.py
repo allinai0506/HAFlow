@@ -30,6 +30,7 @@ from herdr import controller_actions as herdr_controller_actions
 from herdr import dashboard as herdr_dashboard
 from herdr import workflow_docs as herdr_workflow_docs
 from herdr import delivery_record as herdr_delivery_record
+from herdr import interaction_loop as herdr_interaction_loop
 from herdr.agent_binary import resolve_agent_binary
 PROJECTS_FILE=ROOT/'projects.json'; WORKFLOWS_FILE=ROOT/'workflows.json'; TASKS_FILE=ROOT/'tasks.json'; POOLS_FILE=ROOT/'agent-pools.json'; SLOTS_FILE=ROOT/'pane-slots.json'; LOG_DIR=ROOT/'logs'
 CONSOLE_STATIC_DIR=Path(__file__).resolve().parent/'static'
@@ -965,6 +966,246 @@ def api_task_steer_queue(tid):
 def api_agent_adapters():
     from herdr.agent_adapter import list_agent_adapters
     return list_agent_adapters()
+
+
+def _check_task_interaction(t, store=None):
+    if not t:
+        return None
+    tid = t.get('task_id')
+    pid = t.get('pane_id')
+    if not pid:
+        return {'detected': False, 'task_id': tid, 'reason': 'no_pane'}
+    rt = agent_runtime(pid)
+    if not rt:
+        return {'detected': False, 'task_id': tid, 'pane_id': pid, 'reason': 'runtime_unavailable'}
+    agent_status = rt.get('agent_status')
+    agent_name = rt.get('agent') or t.get('agent') or 'auto'
+    try:
+        content = read_pane(pid)
+    except Exception as e:
+        return {'detected': False, 'task_id': tid, 'pane_id': pid, 'reason': f'read_pane_failed: {e}'}
+
+    det = herdr_interaction_loop.detect_agent_interaction(content, agent_name=agent_name)
+    fp = herdr_interaction_loop.compute_prompt_fingerprint(content) if content else ''
+
+    already_responded = False
+    recent_event = None
+    if store and fp:
+        try:
+            evs = store.list_events(task_id=tid, limit=20)
+            for ev in evs:
+                p = ev.get('payload') or {}
+                if p.get('prompt_fingerprint') == fp:
+                    already_responded = True
+                    recent_event = ev.get('event_type')
+                    break
+        except Exception:
+            pass
+
+    return {
+        'detected': bool(det.get('detected')),
+        'unrecognized': bool(det.get('unrecognized')),
+        'task_id': tid,
+        'workflow_id': t.get('workflow_id'),
+        'task_title': t.get('title') or t.get('goal') or tid,
+        'pane_id': pid,
+        'agent': agent_name,
+        'agent_status': agent_status,
+        'terminal_id': rt.get('terminal_id'),
+        'revision': rt.get('revision'),
+        'prompt_fingerprint': fp,
+        'interaction_type': det.get('interaction_type', ''),
+        'raw_prompt': det.get('raw_prompt', ''),
+        'options': [
+            {'option_id': opt['option_id'], 'label': opt['label']}
+            for opt in det.get('options', [])
+        ],
+        'already_responded': already_responded,
+        'recent_event': recent_event,
+        'task_version': t.get('version'),
+    }
+
+
+def api_task_interaction_get(tid='', wid=''):
+    store = herdr_kernel.get_state_store() if hasattr(herdr_kernel, 'get_state_store') else None
+    all_ts = tasks()
+    if tid:
+        t = next((x for x in all_ts if x.get('task_id') == tid), None)
+        if not t and store:
+            try:
+                t = store.get_task(tid)
+            except Exception:
+                pass
+        if not t:
+            raise RuntimeError(f'任务 {tid} 不存在')
+        res = _check_task_interaction(t, store)
+        return {'ok': True, 'task_id': tid, 'interaction': res}
+
+    target_tasks = [
+        t for t in all_ts
+        if (not wid or t.get('workflow_id') == wid)
+        and t.get('status') in {'working', 'blocked', 'dispatched', 'paused', 'rework'}
+    ]
+    interactions = []
+    for t in target_tasks:
+        res = _check_task_interaction(t, store)
+        if res and (res.get('detected') or (res.get('agent_status') == 'blocked' and res.get('raw_prompt'))):
+            interactions.append(res)
+    return {'ok': True, 'interactions': interactions}
+
+
+def api_task_interaction_respond(b):
+    b = b or {}
+    tid = str(b.get('task_id') or '').strip()
+    opt_id = str(b.get('option_id') or '').strip()
+    exp_fp = str(b.get('expected_fingerprint') or '').strip()
+    if not tid:
+        raise RuntimeError('task_id 不能为空')
+    if not opt_id:
+        raise RuntimeError('option_id 不能为空')
+    if not exp_fp:
+        raise RuntimeError('expected_fingerprint 不能为空')
+
+    store = herdr_kernel.get_state_store() if hasattr(herdr_kernel, 'get_state_store') else None
+    t = None
+    if store:
+        try:
+            t = store.get_task(tid)
+        except Exception:
+            pass
+    if not t:
+        t = next((x for x in tasks() if x.get('task_id') == tid), None)
+    if not t:
+        raise RuntimeError(f'任务 {tid} 不存在')
+
+    if t.get('status') in {'superseded', 'cleaned', 'completed', 'committed', 'integrated'}:
+        raise RuntimeError('任务已结束或已作废，拒绝处理交互')
+    if b.get('expected_task_version') is not None and t.get('version') is not None:
+        if t.get('version') != b.get('expected_task_version'):
+            raise RuntimeError('任务代次已变更，拒绝处理交互')
+
+    pid = t.get('pane_id')
+    if not pid:
+        raise RuntimeError('任务未绑定活动工位')
+    if b.get('expected_pane_id') and b.get('expected_pane_id') != pid:
+        raise RuntimeError(f"工位发生漂移: 期望 {b.get('expected_pane_id')}，实际 {pid}")
+
+    rt = agent_runtime(pid)
+    if not rt:
+        raise RuntimeError('无法连接工位执行者运行时')
+
+    content = read_pane(pid)
+    current_fp = herdr_interaction_loop.compute_prompt_fingerprint(content)
+
+    stored_identity = {
+        'pane_id': b.get('expected_pane_id') or pid,
+        'agent': b.get('expected_agent') or rt.get('agent'),
+        'terminal_id': b.get('expected_terminal_id') or rt.get('terminal_id'),
+        'prompt_fingerprint': exp_fp,
+    }
+    current_identity = {
+        'pane_id': pid,
+        'agent': rt.get('agent'),
+        'terminal_id': rt.get('terminal_id'),
+        'prompt_fingerprint': current_fp,
+    }
+    valid, reason = herdr_interaction_loop.validate_interaction_identity(stored_identity, current_identity)
+    if not valid:
+        raise RuntimeError(f'交互上下文已失效: {reason}')
+
+    det = herdr_interaction_loop.detect_agent_interaction(content, agent_name=rt.get('agent'))
+    if not det.get('detected'):
+        raise RuntimeError('当前终端中交互提示已不存在或已变化')
+
+    key_seq = herdr_interaction_loop.resolve_option_key(opt_id, det.get('options', []))
+    if not key_seq:
+        raise RuntimeError(f'非法或已过期的选项标识: {opt_id}')
+
+    wid = t.get('workflow_id')
+    interaction_key = f'{tid}:{pid}:{exp_fp}'
+
+    from herdr import state_db
+    if store:
+        res = state_db.record_event_if_absent(
+            {
+                'event_type': 'interaction_accepted',
+                'workflow_id': wid,
+                'task_id': tid,
+                'agent_id': rt.get('agent'),
+                'source': 'interaction_loop',
+                'payload': {
+                    'interaction_key': interaction_key,
+                    'pane_id': pid,
+                    'prompt_fingerprint': exp_fp,
+                    'option_id': opt_id,
+                    'timestamp': time.time(),
+                }
+            },
+            identity_field='interaction_key',
+            identity_value=interaction_key,
+            db_path=store.db_path,
+        )
+        if res.get('status') == 'exists':
+            raise RuntimeError('该交互已受理，请勿重复提交')
+        elif res.get('status') == 'rejected':
+            raise RuntimeError(f"记录交互状态被拒绝: {res.get('reason')}")
+
+    sent = herdr_interaction_loop.send_interaction_response(pid, key_seq)
+    if not sent:
+        if store:
+            herdr_interaction_loop.record_interaction_event(
+                store, 'interaction_uncertain',
+                workflow_id=wid, task_id=tid, pane_id=pid,
+                agent=rt.get('agent'), prompt_fingerprint=exp_fp,
+                option_id=opt_id, result='uncertain',
+                detail='herdr send-keys returned non-zero or failed'
+            )
+        return {
+            'ok': False,
+            'status': 'failed_or_uncertain',
+            'reason': '发送按键失败或超时，结果未知，已记录审计并禁止自动重试',
+            'task_id': tid,
+            'pane_id': pid,
+        }
+
+    if store:
+        herdr_interaction_loop.record_interaction_event(
+            store, 'interaction_sent',
+            workflow_id=wid, task_id=tid, pane_id=pid,
+            agent=rt.get('agent'), prompt_fingerprint=exp_fp,
+            option_id=opt_id, result='sent'
+        )
+
+    time.sleep(0.4)
+    new_rt = agent_runtime(pid)
+    new_content = read_pane(pid)
+    new_fp = herdr_interaction_loop.compute_prompt_fingerprint(new_content)
+
+    if new_fp != exp_fp or (new_rt and new_rt.get('agent_status') in ('working', 'idle', 'done')):
+        if store:
+            herdr_interaction_loop.record_interaction_event(
+                store, 'interaction_resolved',
+                workflow_id=wid, task_id=tid, pane_id=pid,
+                agent=rt.get('agent'), prompt_fingerprint=exp_fp,
+                option_id=opt_id, result='resolved'
+            )
+        return {
+            'ok': True,
+            'status': 'resolved',
+            'message': '用户选项已发送，原交互问题已解除，执行者正在继续运行',
+            'task_id': tid,
+            'pane_id': pid,
+        }
+    else:
+        return {
+            'ok': True,
+            'status': 'waiting_confirmation',
+            'message': '输入已发送，等待执行者状态更新',
+            'task_id': tid,
+            'pane_id': pid,
+        }
+
+
 
 
 def api_task_force_review(b):
@@ -8609,6 +8850,7 @@ function loadWorkflowExtras(id,sequence){
     state.workflow.coordinator=data.coordinator;state.workflow.coordinator_pending=false;
   },()=>{state.workflow.coordinator_pending=false;state.workflow.coordinator_error='运行状态读取失败';});
 }
+
 function clearWorkflow(){
   destroyFlowGraph();
   state.workflow=null;
@@ -8987,6 +9229,78 @@ function locateControllerTask(taskId){
   try{if(state.taskFilter&&state.taskFilter!=='all'){setTaskFilter('all')}}catch(e){}
   setTimeout(()=>{try{openTaskDrawer(taskId)}catch(e){toast('任务详情打开失败: '+e.message,true)}},60);
 }
+function openTerminalForTask(paneId){
+  const d=document.getElementById('deepDrawer');
+  if(d&&d.classList.contains('collapsed')){
+    toggleDeepDrawer();
+  }
+  switchDrawerTab('tty');
+}
+
+async function submitInteractionResponse(taskId, optionId, fingerprint, paneId, agent, terminalId){
+  const actions=document.getElementById('iactions-'+taskId);
+  const feedback=document.getElementById('ifeedback-'+taskId);
+  if(actions){
+    const btns=actions.querySelectorAll('button');
+    btns.forEach(b=>{b.disabled=true;});
+  }
+  if(feedback){
+    feedback.style.display='block';
+    feedback.innerHTML='<span style="color:var(--primary)">⏳ 正在提交响应…</span>';
+  }
+  try{
+    const res=await api('/api/task/interaction/respond',{
+      method:'POST',
+      body:JSON.stringify({
+        task_id:taskId,
+        option_id:optionId,
+        expected_fingerprint:fingerprint,
+        expected_pane_id:paneId,
+        expected_agent:agent,
+        expected_terminal_id:terminalId,
+      })
+    });
+    if(res&&res.ok){
+      if(res.status==='resolved'){
+        if(feedback)feedback.innerHTML='<span style="color:var(--success)">✅ 已处理：选项已生效，执行者正在继续执行</span>';
+        setTimeout(()=>{
+          if(state.workflowId){
+            refreshWorkflowInteractions(state.workflowId);
+          }
+        },1000);
+      }else{
+        if(feedback)feedback.innerHTML='<span style="color:var(--warning)">⏳ 已发送，等待确认执行者状态更新…</span>';
+        setTimeout(()=>{
+          if(state.workflowId){
+            refreshWorkflowInteractions(state.workflowId);
+          }
+        },1500);
+      }
+    }else{
+      const err=(res&&res.reason)||'处理失败或结果未知';
+      if(feedback)feedback.innerHTML=`<span style="color:var(--danger)">⚠️ ${esc(err)}。可点击右侧“打开终端”入口排查</span>`;
+      if(actions){
+        const btns=actions.querySelectorAll('button');
+        btns.forEach(b=>{b.disabled=false;});
+      }
+    }
+  }catch(e){
+    if(feedback)feedback.innerHTML=`<span style="color:var(--danger)">❌ 提交失败: ${esc(e.message)}。可点击右侧“打开终端”入口排查</span>`;
+    if(actions){
+      const btns=actions.querySelectorAll('button');
+      btns.forEach(b=>{b.disabled=false;});
+    }
+  }
+}
+
+function refreshWorkflowInteractions(wid){
+  if(!wid||state.opsMode)return;
+  api('/api/task/interaction?workflow_id='+encodeURIComponent(wid)).then(d=>{
+    state.activeInteractions=d.interactions||[];
+    updateAttentionHub();
+  }).catch(()=>{state.activeInteractions=[];});
+}
+
 function updateAttentionHub(){
   const ts=(state.workflow&&state.workflow.tasks)||[];
   const cntAll=ts.length;
@@ -9051,7 +9365,45 @@ function updateAttentionHub(){
     }).join('');
     const more=decisionTasks.length>3?`<div class="decision-more">还有 ${decisionTasks.length-3} 项，请查看全部决策项。</div>`:'';
     const details=decisionTasks.length?`<div class="decision-list"><div class="decision-list-label">待决策事项</div>${detailRows}${more}</div>`:'';
-    ab.innerHTML=`<div style="min-width:0;flex:1"><div style="display:flex;align-items:center;gap:8px"><span class="att-badge">人机协同态势</span><span class="att-text">${activeTasks.length} 个执行者正在协同 · ${readyCnt} 个正常推进 · ${attentionTasks.length} 个需关注 · <strong style="color:${decisionTasks.length?'var(--accent)':'var(--text)'}">${decisionTasks.length} 个待你拍板</strong></span></div>${details}</div><div>${decisionTasks.length?`<button class="btn primary" style="padding:4px 12px;font-size:12px" onclick="setTaskFilter('decision')">查看决策项</button>`:''}</div>`;
+
+    const interactions=state.activeInteractions||[];
+    let interactionHtml='';
+    if(interactions.length>0){
+      const cardRows=interactions.map(it=>{
+        const hasOptions=it.options&&it.options.length>0;
+        const btns=hasOptions?it.options.map(opt=>`
+          <button class="btn primary" id="btn-opt-${esc(it.task_id)}-${esc(opt.option_id)}"
+            style="padding:4px 12px;font-size:12px;font-weight:600"
+            onclick="submitInteractionResponse('${esc(it.task_id)}','${esc(opt.option_id)}','${esc(it.prompt_fingerprint)}','${esc(it.pane_id)}','${esc(it.agent)}','${esc(it.terminal_id)}')">
+            ${esc(opt.label)}
+          </button>
+        `).join(''):'<span class="muted" style="font-size:11px">未能自动识别结构化选项，请使用终端处理</span>';
+
+        return `
+          <div class="interaction-card" id="icard-${esc(it.task_id)}" style="margin-top:8px;padding:8px 12px;background:rgba(217,119,6,0.06);border:1px solid rgba(217,119,6,0.3);border-left:4px solid var(--warning);border-radius:4px">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px">
+              <div style="display:flex;align-items:center;gap:8px">
+                <span class="badge warning" style="font-size:11px;font-weight:600">⚡ ${esc(it.agent)} 正在等待你的决定</span>
+                <strong style="font-size:12px;color:var(--text-primary)">${esc(it.task_title || it.task_id)}</strong>
+              </div>
+              <span class="muted" style="font-size:11px">工位: <code>${esc(it.pane_id)}</code></span>
+            </div>
+            <div style="font-size:12px;line-height:1.5;margin-bottom:8px;padding:8px 12px;background:rgba(0,0,0,0.03);border-radius:4px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;color:var(--text-primary)">${esc(it.raw_prompt || '终端等待确认')}</div>
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
+              <div id="iactions-${esc(it.task_id)}" style="display:flex;gap:8px;align-items:center">
+                ${btns}
+              </div>
+              <button class="mini" style="padding:4px 8px;font-size:11px" onclick="openTerminalForTask('${esc(it.pane_id)}')">🖥️ 打开终端现场</button>
+            </div>
+            <div id="ifeedback-${esc(it.task_id)}" style="margin-top:8px;font-size:11px;color:var(--text-secondary);display:none"></div>
+          </div>
+        `;
+      }).join('');
+      interactionHtml=`<div class="interaction-list" style="margin-top:8px">${cardRows}</div>`;
+      ab.style.borderLeft='3px solid var(--warning)';
+    }
+
+    ab.innerHTML=`<div style="min-width:0;flex:1"><div style="display:flex;align-items:center;gap:8px"><span class="att-badge">人机协同态势</span><span class="att-text">${activeTasks.length} 个执行者正在协同 · ${readyCnt} 个正常推进 · ${attentionTasks.length} 个需关注 · <strong style="color:${decisionTasks.length?'var(--accent)':'var(--text)'}">${decisionTasks.length} 个待你拍板</strong>${interactions.length?` · <strong style="color:var(--warning)">⚡ ${interactions.length} 个终端等待交互</strong>`:''}</span></div>${interactionHtml}${details}</div><div>${decisionTasks.length?`<button class="btn primary" style="padding:4px 12px;font-size:12px" onclick="setTaskFilter('decision')">查看决策项</button>`:''}</div>`;
   }
 }
 function renderStages(){
@@ -9091,6 +9443,9 @@ function renderTasks(){
   const e=document.getElementById('tasks');
   const allTs=(state.workflow&&state.workflow.tasks)||[];
   updateAttentionHub();
+  if(state.workflowId&&allTs.some(t=>t.status==='blocked'||(t.blocker&&t.blocker.length))){
+    refreshWorkflowInteractions(state.workflowId);
+  }
   let ts=allTs;
   const f=state.taskFilter||'all';
   if(f==='decision'){
@@ -11200,6 +11555,11 @@ class Handler(BaseHTTPRequestHandler):
             if p=='/api/workflow/decisions':
                 wid=self.query().get('workflow_id',[''])[0] or self.query().get('id',[''])[0]
                 return self.send_json(200,api_workflow_decisions(wid))
+            if p=='/api/task/interaction':
+                q=self.query()
+                tid=q.get('task_id',[''])[0] or q.get('id',[''])[0]
+                wid=q.get('workflow_id',[''])[0]
+                return self.send_json(200,api_task_interaction_get(tid=tid,wid=wid))
             return self.send_json(404,error='Not Found')
         except herdr_deliverables.DeliverableError as e:
             return self.send_json(e.status,error=e.message)
@@ -11252,6 +11612,7 @@ class Handler(BaseHTTPRequestHandler):
             if p=='/api/workflow/decision/raise':return self.send_json(200,api_workflow_decide_raise(b))
             if p=='/api/workflow/decision':return self.send_json(200,api_workflow_decide_resolve(b))
             if p=='/api/workflow/recovery/decision':return self.send_json(200,api_workflow_recovery_decide(b))
+            if p=='/api/task/interaction/respond':return self.send_json(200,api_task_interaction_respond(b))
             return self.send_json(404,error='Not Found')
         except Exception as e:
             self.log_message('POST %s failed: %s', self.path, e)
