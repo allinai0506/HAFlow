@@ -4084,6 +4084,11 @@ def _compile_working_context_ref(task):
 def _fetch_experience_rules_block(task):
     """Fetch active published enterprise business rules for this task."""
     try:
+        try:
+            from herdr.experience.collector import ExperienceCollector
+            ExperienceCollector().process_pending_async()
+        except Exception:
+            pass
         from herdr.experience.client import fetch_experience_rules_block
         return fetch_experience_rules_block(task, store=_get_store())
     except Exception as exc:
@@ -8910,9 +8915,21 @@ def main():
     acceptance.add_argument('--artifact', action='append', required=True)
     acceptance.add_argument('--criterion', action='append', required=True)
 
+    sync_exp_cmd = sub.add_parser('sync-experience', help='Sync pending local business rule candidates with Hub')
+    sync_exp_cmd.add_argument('--json', action='store_true', help='Output JSON result')
+
     args = parser.parse_args()
 
-    if args.command == 'acceptance-record':
+    if args.command == 'sync-experience':
+        from herdr.experience.collector import ExperienceCollector
+        collector = ExperienceCollector()
+        res = collector.recover_and_sync()
+        if getattr(args, "json", False):
+            print(json.dumps(res, ensure_ascii=False, indent=2))
+        else:
+            print(f"[EXPERIENCE SYNC] collected={res.get('pending_collected', 0)} retried={res.get('retried', 0)} succeeded={res.get('succeeded', 0)} failed={res.get('failed', 0)}")
+        sys.exit(0)
+    elif args.command == 'acceptance-record':
         from herdr.task_checkpoint import record_business_acceptance
         try:
             references = []

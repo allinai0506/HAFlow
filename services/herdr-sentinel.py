@@ -834,7 +834,18 @@ def main():
 
     print("[HERDR SENTINEL] starting", flush=True)
 
+    last_experience_sync = 0.0
+
     while True:
+        now = time.time()
+        if now - last_experience_sync >= 30.0:
+            last_experience_sync = now
+            try:
+                from herdr.experience.collector import ExperienceCollector
+                ExperienceCollector().process_pending_async()
+            except Exception:
+                pass
+
         store = _get_store()
         try:
             tasks = store.list_tasks()

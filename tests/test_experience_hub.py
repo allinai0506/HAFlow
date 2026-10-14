@@ -169,3 +169,131 @@ def test_audit_logs_recorded(hub_service):
     assert "submit_candidate" in actions
     assert "review_approve" in actions
     assert "revoke_rule" in actions
+
+
+def test_startup_without_admin_token_rejected():
+    import subprocess
+    import sys
+    # Running bin/herdr-experience-hub with no admin token or env var should fail
+    env = dict(os.environ)
+    env.pop("HERDR_HUB_ADMIN_TOKEN", None)
+    with tempfile.TemporaryDirectory() as td:
+        empty_db = Path(td) / "uninit.db"
+        proc = subprocess.run(
+            [sys.executable, "bin/herdr-experience-hub", "start", "--db-path", str(empty_db), "--check-init-only"],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        assert proc.returncode != 0
+        assert "admin-token" in proc.stderr.lower() or "管理员凭证" in proc.stderr
+
+
+def test_contributor_cannot_forge_published_status(hub_service):
+    _, base_url = hub_service
+    client = ExperienceClient(base_url=base_url, token="token_emp_a")
+
+    cand = _make_candidate("exp_forge_1", customer="customer_acme", content="伪造发布的规则")
+    cand.status = "published"  # Attempt to forge published status!
+    res = client.submit_candidate(cand)
+    assert res.get("ok") is True
+
+    # Server must have forced status to pending_review
+    detail = client.get_experience("exp_forge_1")
+    assert detail is not None
+    assert detail.status == "pending_review"
+
+    # Querying published rules should NOT return it
+    rules = client.query_rules(customer="customer_acme")
+    assert not any(r.experience_id == "exp_forge_1" for r in rules)
+
+
+def test_content_hash_conflict_returns_409(hub_service):
+    _, base_url = hub_service
+    client = ExperienceClient(base_url=base_url, token="token_emp_a")
+
+    cand1 = _make_candidate("exp_collision_1", customer="customer_acme", content="原始业务规则 A")
+    res1 = client.submit_candidate(cand1)
+    assert res1.get("ok") is True
+
+    # Attempt to submit same ID with different content -> 409 conflict
+    cand2 = _make_candidate("exp_collision_1", customer="customer_acme", content="篡改冲突的业务规则 B")
+    res2 = client.submit_candidate(cand2)
+    assert res2.get("ok") is False
+    assert res2.get("status_code") == 409
+    assert "conflict" in (res2.get("error") or "").lower()
+
+
+def test_contributor_cannot_read_other_contributor_candidates(hub_service):
+    _, base_url = hub_service
+    client_a = ExperienceClient(base_url=base_url, token="token_emp_a")
+    client_b = ExperienceClient(base_url=base_url, token="token_emp_b")
+
+    cand_a = _make_candidate("exp_private_a", customer="customer_acme", content="员工A的未审核私有经验")
+    res = client_a.submit_candidate(cand_a)
+    assert res.get("ok") is True
+
+    # Contributor B listing candidates: should NOT see employee A's candidate
+    b_cands = client_b.list_candidates()
+    assert not any(c.experience_id == "exp_private_a" for c in b_cands)
+
+    # Contributor B querying candidate details by ID: should get 403 Forbidden
+    res_b_detail = client_b._request("GET", "/api/v1/experiences/candidate?id=exp_private_a")
+    assert res_b_detail.get("ok") is False
+    assert res_b_detail.get("status_code") == 403
+
+
+def test_reviewer_cross_customer_review_and_revoke_forbidden(hub_service):
+    server, base_url = hub_service
+    # Register reviewer with access ONLY to customer_beta
+    server.storage.register_token("token_rev_beta", user_id="rev_beta", role="reviewer", allowed_customers=["customer_beta"])
+
+    client_a = ExperienceClient(base_url=base_url, token="token_emp_a")
+    client_rev_beta = ExperienceClient(base_url=base_url, token="token_rev_beta")
+    client_admin = ExperienceClient(base_url=base_url, token="token_admin")
+
+    cand_acme = _make_candidate("exp_acme_cross", customer="customer_acme", content="Acme专有商务规则")
+    client_a.submit_candidate(cand_acme)
+
+    # Reviewer Beta attempts to approve Acme candidate -> 403 Forbidden
+    res_app = client_rev_beta.review_candidate("exp_acme_cross", action="approve")
+    assert res_app.get("ok") is False
+    assert res_app.get("status_code") == 403
+
+    # Admin approves it
+    res_admin_app = client_admin.review_candidate("exp_acme_cross", action="approve")
+    assert res_admin_app.get("ok") is True
+
+    # Reviewer Beta attempts to revoke Acme rule -> 403 Forbidden
+    res_rev = client_rev_beta.revoke_rule("exp_acme_cross", reason="非法越权撤回")
+    assert res_rev.get("ok") is False
+    assert res_rev.get("status_code") == 403
+
+
+def test_unknown_customer_not_treated_as_global(hub_service):
+    _, base_url = hub_service
+    client_admin = ExperienceClient(base_url=base_url, token="token_admin")
+
+    cand_unknown = _make_candidate("exp_unknown_1", customer="unknown", content="未知客户的临时规则")
+    client_admin.submit_candidate(cand_unknown)
+    client_admin.review_candidate("exp_unknown_1", action="approve")
+
+    # Querying for customer_acme must NOT return the unknown customer's rule
+    rules_acme = client_admin.query_rules(customer="customer_acme")
+    assert not any(r.experience_id == "exp_unknown_1" for r in rules_acme)
+
+    # Querying without customer context should NOT return unknown customer rules
+    rules_all = client_admin.query_rules(customer=None)
+    assert not any(r.experience_id == "exp_unknown_1" for r in rules_all)
+
+
+def test_token_in_url_rejected(hub_service):
+    import urllib.request
+    _, base_url = hub_service
+    # Sending token in query param without Authorization header must be rejected (401)
+    req = urllib.request.Request(f"{base_url}/api/v1/experiences/rules?token=token_emp_a")
+    try:
+        urllib.request.urlopen(req)
+        assert False, "Expected HTTP 401"
+    except urllib.error.HTTPError as exc:
+        assert exc.code == 401

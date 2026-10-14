@@ -1206,49 +1206,61 @@ def api_task_interaction_respond(b):
         }
 
 
-def _get_console_hub_client():
+def _get_console_hub_client(token=None):
     from herdr.experience.client import ExperienceClient
-    token = os.environ.get("HERDR_HUB_ADMIN_TOKEN") or os.environ.get("HERDR_HUB_TOKEN") or "admin_secret_token_123"
-    return ExperienceClient(token=token)
+    eff_token = token or os.environ.get("HERDR_HUB_ADMIN_TOKEN") or os.environ.get("HERDR_HUB_TOKEN")
+    return ExperienceClient(token=eff_token)
 
 
-def api_experience_candidates(q=None):
+def api_experience_candidates(q=None, token=None):
     q = q or {}
-    client = _get_console_hub_client()
+    client = _get_console_hub_client(token=token)
     status = q.get('status', [None])[0] if isinstance(q.get('status'), list) else q.get('status')
     cust = q.get('customer', [None])[0] if isinstance(q.get('customer'), list) else q.get('customer')
-    cands = client.list_candidates(status=status, customer=cust)
-    return {'ok': True, 'count': len(cands), 'candidates': [c.to_dict() for c in cands]}
+    try:
+        cands = client.list_candidates(status=status, customer=cust, raise_for_status=True)
+        return {'ok': True, 'count': len(cands), 'candidates': [c.to_dict() for c in cands]}
+    except Exception as exc:
+        status_code = getattr(exc, 'status_code', 500)
+        return {'ok': False, 'error': str(exc), 'status_code': status_code, 'candidates': []}
 
 
-def api_experience_candidate(exp_id):
-    client = _get_console_hub_client()
-    exp = client.get_experience(exp_id)
-    if not exp:
-        return {'ok': False, 'error': 'not_found'}
-    return {'ok': True, 'experience': exp.to_dict()}
+def api_experience_candidate(exp_id, token=None):
+    client = _get_console_hub_client(token=token)
+    try:
+        exp = client.get_experience(exp_id, raise_for_status=True)
+        if not exp:
+            return {'ok': False, 'error': 'not_found', 'status_code': 404}
+        return {'ok': True, 'experience': exp.to_dict()}
+    except Exception as exc:
+        status_code = getattr(exc, 'status_code', 500)
+        return {'ok': False, 'error': str(exc), 'status_code': status_code}
 
 
-def api_experience_rules(q=None):
+def api_experience_rules(q=None, token=None):
     q = q or {}
-    client = _get_console_hub_client()
+    client = _get_console_hub_client(token=token)
     cust = q.get('customer', [None])[0] if isinstance(q.get('customer'), list) else q.get('customer')
-    rules = client.query_rules(customer=cust)
-    return {'ok': True, 'count': len(rules), 'rules': [r.to_dict() for r in rules]}
+    try:
+        rules = client.query_rules(customer=cust, raise_for_status=True)
+        return {'ok': True, 'count': len(rules), 'rules': [r.to_dict() for r in rules]}
+    except Exception as exc:
+        status_code = getattr(exc, 'status_code', 500)
+        return {'ok': False, 'error': str(exc), 'status_code': status_code, 'rules': []}
 
 
-def api_experience_review(b):
+def api_experience_review(b, token=None):
     b = b or {}
-    client = _get_console_hub_client()
+    client = _get_console_hub_client(token=token)
     exp_id = str(b.get('experience_id') or '').strip()
     action = str(b.get('action') or 'approve').strip()
     comment = str(b.get('comment') or '').strip()
     return client.review_candidate(exp_id, action=action, comment=comment)
 
 
-def api_experience_revoke(b):
+def api_experience_revoke(b, token=None):
     b = b or {}
-    client = _get_console_hub_client()
+    client = _get_console_hub_client(token=token)
     exp_id = str(b.get('experience_id') or '').strip()
     reason = str(b.get('reason') or '').strip()
     return client.revoke_rule(exp_id, reason=reason)
@@ -11612,6 +11624,11 @@ HTML=HTML_TEMPLATE.replace('__PRODUCT_NAME__',PRODUCT_NAME).replace('__PRODUCT_T
 class Handler(BaseHTTPRequestHandler):
     server_version='HerdrFactoryConsole/1.2'
     def log_message(self,fmt,*args):print(f'[{datetime.now().isoformat(timespec="seconds")}] '+(fmt%args),flush=True)
+    def get_auth_token(self):
+        auth = self.headers.get('Authorization', '')
+        if auth.startswith('Bearer '):
+            return auth[7:].strip()
+        return self.headers.get('X-HAFlow-Token') or None
     def send_json(self,status,data=None,error=None):
         p={'ok':error is None};
         if data is not None:p['data']=data
@@ -11732,9 +11749,21 @@ class Handler(BaseHTTPRequestHandler):
                 tid=q.get('task_id',[''])[0] or q.get('id',[''])[0]
                 wid=q.get('workflow_id',[''])[0]
                 return self.send_json(200,api_task_interaction_get(tid=tid,wid=wid))
-            if p=='/api/experience/candidates':return self.send_json(200,api_experience_candidates(self.query()))
-            if p=='/api/experience/candidate':return self.send_json(200,api_experience_candidate(self.query().get('id',[''])[0]))
-            if p=='/api/experience/rules':return self.send_json(200,api_experience_rules(self.query()))
+            if p=='/api/experience/candidates':
+                res = api_experience_candidates(self.query(), token=self.get_auth_token())
+                if not res.get('ok') and 'error' in res:
+                    return self.send_json(res.get('status_code', 500), error=res['error'])
+                return self.send_json(200, res)
+            if p=='/api/experience/candidate':
+                res = api_experience_candidate(self.query().get('id',[''])[0], token=self.get_auth_token())
+                if not res.get('ok') and 'error' in res:
+                    return self.send_json(res.get('status_code', 404), error=res['error'])
+                return self.send_json(200, res)
+            if p=='/api/experience/rules':
+                res = api_experience_rules(self.query(), token=self.get_auth_token())
+                if not res.get('ok') and 'error' in res:
+                    return self.send_json(res.get('status_code', 500), error=res['error'])
+                return self.send_json(200, res)
             return self.send_json(404,error='Not Found')
         except herdr_deliverables.DeliverableError as e:
             return self.send_json(e.status,error=e.message)
@@ -11787,9 +11816,16 @@ class Handler(BaseHTTPRequestHandler):
             if p=='/api/workflow/decision/raise':return self.send_json(200,api_workflow_decide_raise(b))
             if p=='/api/workflow/decision':return self.send_json(200,api_workflow_decide_resolve(b))
             if p=='/api/workflow/recovery/decision':return self.send_json(200,api_workflow_recovery_decide(b))
-            if p=='/api/task/interaction/respond':return self.send_json(200,api_task_interaction_respond(b))
-            if p=='/api/experience/review':return self.send_json(200,api_experience_review(b))
-            if p=='/api/experience/revoke':return self.send_json(200,api_experience_revoke(b))
+            if p=='/api/experience/review':
+                res = api_experience_review(b, token=self.get_auth_token())
+                if not res.get('ok') and 'error' in res:
+                    return self.send_json(400, error=res.get('error'))
+                return self.send_json(200, res)
+            if p=='/api/experience/revoke':
+                res = api_experience_revoke(b, token=self.get_auth_token())
+                if not res.get('ok') and 'error' in res:
+                    return self.send_json(400, error=res.get('error'))
+                return self.send_json(200, res)
             return self.send_json(404,error='Not Found')
         except Exception as e:
             self.log_message('POST %s failed: %s', self.path, e)

@@ -8,6 +8,37 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-10-14] fix | PR #209 全量缺陷修复与 V1 验收：硬编码凭证消除、服务端强审、两阶段可靠采集、离线指数退避、跨客户越权拦截与强制规则 Fail-Closed 闭环
+
+- 背景：
+  1. PR #209 将企业经验中心 V1 合并至主干（62d1426），但代码复核与 8 条 GitHub Review Comments 识别出严重 P0/P1 安全与功能缺陷；
+  2. P0 缺陷：管理员 Token 硬编码（admin_secret_token_123）导致未授权即可控制服务；客户端可伪造 status="published" 绕过审核直接发布规则；
+  3. P1 缺陷：缺少 import os 导致自动采集未启动；守护线程导致采集任务在进程退出时丢失；离线重试缺少入口与退避调度；未审候选在普通员工间泄露；Reviewer 跨客户越权审核与撤回；未知客户被扩大为全局规则；强制规则任务在 Hub 异常时静默放行；未解决决策被误转为规则；未强制 TLS 传输。
+- 变更：
+  1. **凭证安全与安全初始化 (P0-01 / P1-09)**：
+     - 删除所有硬编码与默认管理员凭证，旧库升级自动清除 default token；首次启动必须显式初始化管理员凭证，否则拒绝启动；
+     - Token 摘要落盘（SHA-256）并采用 hmac.compare_digest 防时序攻击；封禁 URL query 传 Token；非回环地址强制 TLS 或显式授权。
+  2. **服务端强审与语义冲突防重 (P0-02)**：
+     - 新候选 status 强制为 pending_review，绑定当前认证主体，清理越权字段；相同 ID 语义冲突时返回 409 Conflict。
+  3. **两阶段可靠采集与指数退避 (P1-01 / P1-02 / P1-03)**：
+     - 修复 execution_outcome 顶层 os 缺失导入；任务结算在主线程同步持久化 pending_collection 记录，即使触发进程退出重启后亦能恢复；
+     - Sentinel 周期巡检（30s）与 Task 派发触发自动恢复；离线重试按指数退避（5s * 2^n，上限 300s）调度，避免风暴请求；新增 bin/herdr-task sync-experience CLI 命令。
+  4. **严格授权边界与防越权 (P1-04 / P1-05 / P1-06)**：
+     - 普通贡献者只能查看自身提交的待审核候选，禁止跨员工窃见未审核修正；
+     - Reviewer/Admin 审核、驳回与撤回前严格比对目标经验所属客户与审核人 allowed_customers，越权一律 403 Forbidden；
+     - 未知客户标记为 unknown，禁止泄露给其他客户，仅显式通配符 '*' 允许作为全局规则。
+  5. **强制规则 Fail-Closed 与证据严密性 (P1-07 / P1-08)**：
+     - mandatory_experience_rules=True 任务在 Hub 宕机或鉴权失败时严格阻塞报错并终止派发；
+     - 未解决决策、未证实的人工问询或非 qualified_success 任务严禁转为业务经验。
+  6. **控制台安全与测试验证 (P1-10)**：
+     - 控制台消除硬编码凭证，透传错误信息并在离线时展示告警横幅；
+     - 完善覆盖全部 8 条 GitHub Review 及 P0/P1 缺陷用例，单测与集成套件 24 项全量通过。
+- 证据：
+  1. `pytest tests/test_experience_hub.py tests/test_experience_collector.py tests/test_experience_integration.py -v`: 24 passed in 25.08s；
+  2. `python3 -m compileall -q herdr services bin console tests`: Clean (exit code 0)；
+  3. `git diff --check`: Clean (exit code 0)；
+  4. 真实双客户端与全故障场景闭环验收（场景 A: 真实采集触发, 场景 B: 故障恢复, 场景 C: 安全反例, 场景 D: 双员工跨机器复用）。
+
 ## [2026-10-14] feat | 企业经验中心 V1：业务规则自动提炼、敏感凭证脱敏、内网共享服务与跨员工自动复用闭环 (Enterprise Experience Hub V1)
 
 - 背景：

@@ -6,6 +6,7 @@ V1 asset type: business_rule.
 from __future__ import annotations
 
 import enum
+import hashlib
 import json
 import time
 from dataclasses import asdict, dataclass, field
@@ -151,6 +152,11 @@ class BusinessRuleExperience:
     updated_at: float = field(default_factory=time.time)
     review: Optional[ReviewInfo] = None
     audit_trail: List[AuditEvent] = field(default_factory=list)
+
+    def content_hash(self) -> str:
+        """Normalized hash of semantic rule content for conflict detection."""
+        key = f"{self.title.strip()}\n{self.content.strip()}\n{self.applies_to.customer or ''}\n{self.applies_to.task_type or ''}"
+        return hashlib.sha256(key.encode("utf-8")).hexdigest()
 
     def to_dict(self) -> Dict[str, Any]:
         return {
