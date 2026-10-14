@@ -8708,6 +8708,9 @@ async function loadProject(id,rer=true){
   renderSlots();
   renderWorkflowSwitcher();
   renderWorkflowTabs();
+  if(state.shellView&&state.shellView!=='workbench'){
+    return;
+  }
   if(isSysTab){
     paintCrumb();
     const sysId=state.workflowId;
@@ -9574,7 +9577,7 @@ function paintCrumb(){
   if(tplBtn&&tplBtn.classList)tplBtn.classList.toggle('on',state.workflowId==='__templates__');
   if(arcBtn&&arcBtn.classList)arcBtn.classList.toggle('on',state.workflowId==='__archive__');
   if(logBtn&&logBtn.classList)logBtn.classList.toggle('on',state.workflowId==='__logs__');
-  const railActiveId = (state.workflowId === '__templates__') ? 'templates' : view;
+  const railActiveId = (view === 'templates' || (view === 'workbench' && state.workflowId === '__templates__')) ? 'templates' : view;
   document.querySelectorAll('.rail-item[data-rail-nav]').forEach(el=>el.classList&&el.classList.toggle('active', el.getAttribute('data-rail-nav')===railActiveId));
   const shell=document.querySelector('.shell');
   if(shell&&shell.dataset)shell.dataset.view=view;
@@ -11484,6 +11487,7 @@ async function initFromUrlOrState(){
     state.opsMode=false;
     state.dashMode=false;
     state.shellView=qView;
+    if(qView!=='workbench'&&state.workflowId==='__templates__')state.workflowId=null;
   }
   if(qWf&&!state.dashMode&&state.workflowId!=='__templates__'){
     state.opsMode=false;
@@ -11502,7 +11506,7 @@ async function initFromUrlOrState(){
     await showDashboard();
   }else if(state.opsMode){
     await showOpsCenter();
-  }else if(state.workflowId==='__templates__'||state.shellView==='templates'){
+  }else if(state.shellView==='templates'){
     await showTemplateLibrary();
   }else if(state.shellView&&state.shellView!=='workbench'){
     await refreshAll();
