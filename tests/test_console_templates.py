@@ -68,6 +68,30 @@ class TestTemplateLibraryBackend(unittest.TestCase):
             self.module.template_detail("no-such-template")
         self.assertIn("模板不存在", str(ctx.exception))
 
+    def test_templates_summary_includes_category_and_nodes_preview(self):
+        data = self.module.templates_summary()
+        t_dev = next(t for t in data["templates"] if t["id"] == "software-development-v1")
+        self.assertEqual(t_dev["category"], "eng")
+        self.assertEqual(t_dev["category_name"], "💻 软件研发")
+        self.assertGreaterEqual(len(t_dev["nodes_preview"]), 6)
+        labels = [n["label"] for n in t_dev["nodes_preview"]]
+        self.assertTrue(any("需求" in l for l in labels))
+
+        t_bid = next(t for t in data["templates"] if t["id"] == "bidding")
+        self.assertEqual(t_bid["category"], "biz")
+        self.assertEqual(t_bid["category_name"], "📊 商务咨询")
+        self.assertGreaterEqual(len(t_bid["nodes_preview"]), 7)
+
+    def test_template_detail_includes_rich_node_metadata(self):
+        detail = self.module.template_detail("software-development-v1")
+        self.assertEqual(detail["template"]["category"], "eng")
+        self.assertEqual(detail["template"]["category_name"], "💻 软件研发")
+        req_node = next(n for n in detail["nodes"] if n["id"] == "requirements")
+        self.assertIn("需求", req_node["label"])
+        self.assertTrue(len(req_node["purpose"]) > 0)
+        self.assertIn("gate", req_node)
+        self.assertIn("agents", req_node)
+
 
 class TestTemplateSave(unittest.TestCase):
     def setUp(self):
@@ -199,6 +223,28 @@ class TestTemplateLibraryUI(unittest.TestCase):
         body = self.function_body("submitNewWorkflowAsync")
         self.assertIn("newTemplate", body)
         self.assertIn("template:", body)
+
+    def test_template_library_ui_has_categories_filter_and_search(self):
+        self.assertIn("tplCategoryPills", self.html)
+        self.assertIn("filterTemplates()", self.html)
+        self.assertIn("tplSearchInput", self.html)
+        self.assertIn("step-pill", self.html)
+
+    def test_template_library_ui_has_dag_canvas_and_inspector_drawer(self):
+        self.assertIn("tplDagCanvas", self.html)
+        self.assertIn("tplNodeDrawer", self.html)
+        self.assertIn("openTemplateNodeDrawer", self.html)
+        self.assertIn("closeTplNodeDrawer", self.html)
+        self.assertIn("zoomTplGraph", self.html)
+        self.assertIn("fitTplGraph", self.html)
+
+    def test_template_library_ui_has_dual_mode_visual_editor(self):
+        self.assertIn("tplConfigModal", self.html)
+        self.assertIn("switchTplModalTab", self.html)
+        self.assertIn("tplLiveCanvas", self.html)
+        self.assertIn("addNewTplStage", self.html)
+        self.assertIn("deleteTplStage", self.html)
+        self.assertIn("tplStagesEditorList", self.html)
 
 
 class TestTermTranslation(unittest.TestCase):
