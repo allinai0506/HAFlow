@@ -92,6 +92,18 @@ class TestTemplateLibraryBackend(unittest.TestCase):
         self.assertIn("gate", req_node)
         self.assertIn("agents", req_node)
 
+    def test_derive_template_category_custom_and_builtins(self):
+        derive = self.module._derive_template_category
+        self.assertEqual(derive("custom-1", {"category": "dev"}), ("eng", "💻 软件研发"))
+        self.assertEqual(derive("custom-2", {"category": "商务咨询"}), ("biz", "📊 商务咨询"))
+        self.assertEqual(derive("custom-3", {"category": "operation"}), ("ops", "🚀 运营服务"))
+        self.assertEqual(derive("custom-4", {"category": "sys"}), ("sys", "🧪 系统测试"))
+        slug, name = derive("custom-legal", {"category": "⚖️ 法务合规"})
+        self.assertTrue(slug.startswith("cat_"))
+        self.assertEqual(name, "⚖️ 法务合规")
+        self.assertEqual(derive("custom-mkt", {"category": "marketing-ops"}), ("marketing-ops", "marketing-ops"))
+        self.assertEqual(derive("software-development-v1", {}), ("eng", "💻 软件研发"))
+
 
 class TestTemplateSave(unittest.TestCase):
     def setUp(self):
@@ -143,6 +155,18 @@ class TestTemplateSave(unittest.TestCase):
         with self.assertRaises(RuntimeError) as ctx:
             self.module.save_template("demo-flow", VALID_YAML.replace("name: demo-flow", "name: other"))
         self.assertIn("不一致", str(ctx.exception))
+
+    def test_save_template_supports_custom_category(self):
+        custom_yaml = VALID_YAML.replace("name: demo-flow", "name: legal-flow").replace("label: 演示流程", 'label: 法务审查\ncategory: "⚖️ 法务合规"')
+        self.module.save_template("legal-flow", custom_yaml)
+        summary = self.module.templates_summary()
+        saved = next(t for t in summary["templates"] if t["id"] == "legal-flow")
+        self.assertEqual(saved["category_name"], "⚖️ 法务合规")
+        self.assertTrue(saved["category"].startswith("cat_"))
+
+        detail = self.module.template_detail("legal-flow")
+        self.assertEqual(detail["template"]["category_name"], "⚖️ 法务合规")
+        self.assertEqual(detail["template"]["category"], saved["category"])
 
 
 class TestRunWorkflowTemplate(unittest.TestCase):
@@ -245,6 +269,15 @@ class TestTemplateLibraryUI(unittest.TestCase):
         self.assertIn("addNewTplStage", self.html)
         self.assertIn("deleteTplStage", self.html)
         self.assertIn("tplStagesEditorList", self.html)
+
+    def test_template_category_customization_and_dynamic_aggregation(self):
+        self.assertIn("tplCatDatalist", self.html)
+        self.assertIn('list="tplCatDatalist"', self.html)
+        self.assertIn("getDynamicTemplateCategories()", self.html)
+        self.assertIn("getTplBadgeClass(", self.html)
+        self.assertIn(".tpl-badge.cat-purple", self.html)
+        self.assertIn(".tpl-badge.cat-emerald", self.html)
+        self.assertIn(".tpl-badge.cat-rose", self.html)
 
 
 class TestTermTranslation(unittest.TestCase):
