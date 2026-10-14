@@ -1,0 +1,1704 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HAFlow · 工作流模板规范资产库</title>
+  <style>
+    :root {
+      /* HAFlow Official Design System — Linear Clean Light Palette */
+      --bg-page: #f8f9fa;
+      --bg-sidebar: #fafafa;
+      --bg-surface: #ffffff;
+      --bg-subtle: #f4f5f7;
+      --bg-hover: #f0f1f3;
+      --bg-active: #eceef2;
+      --bg-elevated: #ffffff;
+
+      /* Typography */
+      --text-primary: #121316;
+      --text-secondary: #5f6368;
+      --text-tertiary: #8c919a;
+      --text-inverse: #ffffff;
+
+      /* Borders & Dividers */
+      --border-default: #e5e7eb;
+      --border-subtle: #f0f1f3;
+      --border-focus: #5e6ad2;
+      --line: #e6e8ee;
+
+      /* Primary Brand (Linear Blue-Violet / Royal Blue) */
+      --primary: #5e6ad2;
+      --primary-hover: #4f5bc4;
+      --primary-subtle: rgba(94, 106, 210, 0.08);
+      --primary-glow: rgba(94, 106, 210, 0.15);
+
+      /* Status Colors */
+      --success: #16a34a;
+      --success-bg: #f0fdf4;
+      --warning: #d97706;
+      --warning-bg: #fffbeb;
+      --danger: #dc2626;
+      --danger-bg: #fef2f2;
+
+      /* Radius & Shadows */
+      --radius-sm: 6px;
+      --radius-md: 8px;
+      --radius-lg: 10px;
+      --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.04);
+      --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.06);
+      --shadow-lg: 0 12px 28px rgba(0, 0, 0, 0.09);
+
+      --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", "Segoe UI", sans-serif;
+      --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: var(--font-sans);
+      font-size: 13px;
+      color: var(--text-primary);
+      background: var(--bg-page);
+      height: 100vh;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* Top Banner / Breadcrumb Bar (Matching HAFlow Header) */
+    .top-bar {
+      height: 48px;
+      background: var(--bg-surface);
+      border-bottom: 1px solid var(--border-default);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 16px;
+      flex-shrink: 0;
+      z-index: 20;
+    }
+    .brand-wrap {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .rail-brand {
+      width: 28px;
+      height: 28px;
+      background: var(--primary);
+      color: #fff;
+      font-weight: 700;
+      font-size: 13px;
+      border-radius: var(--radius-sm);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      letter-spacing: -0.5px;
+    }
+    .crumb-trail {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 13px;
+      color: var(--text-primary);
+    }
+    .crumb-sep {
+      color: var(--text-tertiary);
+      font-size: 12px;
+    }
+    .crumb-current {
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+    .crumb-desc {
+      font-size: 12px;
+      color: var(--text-secondary);
+      margin-left: 6px;
+      padding-left: 8px;
+      border-left: 1px solid var(--border-default);
+    }
+    .top-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    /* Primary Master-Detail Layout */
+    .main-layout {
+      flex: 1;
+      display: flex;
+      overflow: hidden;
+    }
+
+    /* Left Master Panel: Templates Library */
+    .left-panel {
+      width: 440px;
+      min-width: 380px;
+      background: var(--bg-surface);
+      border-right: 1px solid var(--border-default);
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0;
+    }
+
+    /* Category Filter Section */
+    .filter-section {
+      padding: 12px 16px 10px;
+      border-bottom: 1px solid var(--border-default);
+      background: var(--bg-sidebar);
+    }
+    .search-box {
+      display: flex;
+      align-items: center;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-default);
+      border-radius: var(--radius-md);
+      padding: 6px 10px;
+      margin-bottom: 10px;
+      gap: 8px;
+      transition: all 0.15s;
+    }
+    .search-box:focus-within {
+      border-color: var(--primary);
+      box-shadow: 0 0 0 2px var(--primary-subtle);
+    }
+    .search-box input {
+      border: none;
+      outline: none;
+      width: 100%;
+      font-size: 12px;
+      background: transparent;
+      color: var(--text-primary);
+    }
+    .category-pills {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+    .cat-pill {
+      border: 1px solid var(--border-default);
+      background: var(--bg-surface);
+      color: var(--text-secondary);
+      padding: 3px 9px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 500;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      transition: all 0.15s;
+    }
+    .cat-pill:hover {
+      background: var(--bg-hover);
+      color: var(--text-primary);
+    }
+    .cat-pill.active {
+      background: var(--primary);
+      color: #ffffff;
+      border-color: var(--primary);
+    }
+    .cat-pill .count {
+      opacity: 0.85;
+      font-size: 10px;
+    }
+
+    /* Template Cards List */
+    .cards-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 12px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .tpl-card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-default);
+      border-radius: var(--radius-md);
+      padding: 12px 14px;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .tpl-card:hover {
+      border-color: #cbd5e1;
+      background: var(--bg-subtle);
+      box-shadow: var(--shadow-sm);
+    }
+    .tpl-card.selected {
+      border-color: var(--primary);
+      background: rgba(94, 106, 210, 0.03);
+      box-shadow: 0 0 0 1px var(--primary);
+    }
+    .tpl-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .tpl-title {
+      font-size: 13.5px;
+      font-weight: 600;
+      color: var(--text-primary);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    /* Standard Badge (Matching HAFlow Minimalist Pills) */
+    .badge {
+      font-size: 11px;
+      font-weight: 500;
+      border-radius: 999px;
+      padding: 2px 7px;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      line-height: 1.35;
+      border: 1px solid var(--border-default);
+      background: var(--bg-subtle);
+      color: var(--text-secondary);
+    }
+    .badge.cat-eng {
+      color: var(--primary);
+      border-color: rgba(94, 106, 210, 0.25);
+      background: var(--primary-subtle);
+    }
+    .badge.cat-biz {
+      color: var(--warning);
+      border-color: rgba(217, 119, 6, 0.25);
+      background: var(--warning-bg);
+    }
+    .badge.cat-ops {
+      color: #0284c7;
+      border-color: rgba(2, 132, 199, 0.25);
+      background: #f0f9ff;
+    }
+    .badge.cat-sys {
+      color: var(--text-tertiary);
+      border-color: var(--border-default);
+      background: var(--bg-subtle);
+    }
+
+    .tpl-desc {
+      font-size: 12px;
+      color: var(--text-secondary);
+      line-height: 1.45;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+
+    /* Step Pipeline Pills (Linear Style) */
+    .tpl-pipeline {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 4px;
+      padding: 6px 8px;
+      background: var(--bg-page);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-sm);
+    }
+    .step-pill {
+      font-size: 10.5px;
+      padding: 2px 6px;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-default);
+      border-radius: 4px;
+      color: var(--text-primary);
+      font-weight: 500;
+      white-space: nowrap;
+    }
+    .step-arrow {
+      color: var(--text-tertiary);
+      font-size: 9px;
+    }
+
+    .tpl-foot {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 11px;
+      color: var(--text-tertiary);
+      margin-top: 2px;
+      border-top: 1px solid var(--border-subtle);
+      padding-top: 6px;
+    }
+
+    /* Right Detail & Canvas Panel */
+    .right-panel {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      background: var(--bg-page);
+      overflow: hidden;
+      position: relative;
+    }
+
+    .detail-header {
+      background: var(--bg-surface);
+      border-bottom: 1px solid var(--border-default);
+      padding: 12px 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-shrink: 0;
+    }
+    .detail-meta h2 {
+      font-size: 15px;
+      font-weight: 600;
+      color: var(--text-primary);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .detail-meta p {
+      font-size: 12px;
+      color: var(--text-secondary);
+      margin-top: 4px;
+      line-height: 1.4;
+      max-width: 680px;
+    }
+
+    .detail-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    /* Canvas Container */
+    .canvas-container {
+      flex: 1;
+      position: relative;
+      background: #fafbfc;
+      overflow: hidden;
+    }
+    #dagCanvas {
+      width: 100%;
+      height: 100%;
+      position: absolute;
+      top: 0;
+      left: 0;
+    }
+
+    /* Floating Toolbar (Matching HAFlow Flow Controls) */
+    .canvas-toolbar {
+      position: absolute;
+      bottom: 20px;
+      right: 20px;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-default);
+      border-radius: var(--radius-md);
+      box-shadow: var(--shadow-md);
+      display: flex;
+      align-items: center;
+      padding: 3px;
+      gap: 2px;
+      z-index: 10;
+    }
+    .tool-btn {
+      width: 28px;
+      height: 28px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: transparent;
+      border: none;
+      border-radius: var(--radius-sm);
+      color: var(--text-secondary);
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 500;
+    }
+    .tool-btn:hover {
+      background: var(--bg-hover);
+      color: var(--text-primary);
+    }
+
+    /* Canvas Legend */
+    .canvas-legend {
+      position: absolute;
+      top: 14px;
+      left: 16px;
+      background: rgba(255, 255, 255, 0.96);
+      backdrop-filter: blur(4px);
+      border: 1px solid var(--border-default);
+      border-radius: var(--radius-sm);
+      padding: 6px 12px;
+      box-shadow: var(--shadow-sm);
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      font-size: 11px;
+      color: var(--text-secondary);
+      z-index: 10;
+    }
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+    .legend-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+    }
+    .legend-dot.start { background: var(--success); }
+    .legend-dot.middle { background: var(--primary); }
+    .legend-dot.gate { background: var(--warning); }
+
+    /* Node Inspector Bottom Drawer (Matching HAFlow Inspector) */
+    .node-drawer {
+      background: var(--bg-surface);
+      border-top: 1px solid var(--border-default);
+      box-shadow: var(--shadow-md);
+      padding: 14px 20px;
+      display: none;
+      flex-direction: column;
+      gap: 10px;
+      max-height: 260px;
+      overflow-y: auto;
+      z-index: 15;
+    }
+    .node-drawer.open {
+      display: flex;
+    }
+    .drawer-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .drawer-title {
+      font-size: 13.5px;
+      font-weight: 600;
+      color: var(--text-primary);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .drawer-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+      background: var(--bg-subtle);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-md);
+      padding: 12px;
+    }
+    .drawer-prop label {
+      font-size: 11px;
+      color: var(--text-tertiary);
+      font-weight: 500;
+      display: block;
+      margin-bottom: 3px;
+    }
+    .drawer-prop .val {
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--text-primary);
+      line-height: 1.4;
+    }
+    .drawer-prop .val.code {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--primary);
+    }
+
+    /* Standard Buttons (Matching HAFlow .btn Style) */
+    .btn {
+      height: 30px;
+      padding: 0 12px;
+      border-radius: var(--radius-sm);
+      font-size: 12px;
+      font-weight: 500;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      cursor: pointer;
+      border: 1px solid var(--border-default);
+      background: var(--bg-surface);
+      color: var(--text-primary);
+      transition: all 0.15s;
+    }
+    .btn:hover {
+      background: var(--bg-hover);
+      border-color: #cbd5e1;
+    }
+    .btn.primary {
+      background: var(--primary);
+      border-color: var(--primary);
+      color: #ffffff;
+      font-weight: 600;
+      box-shadow: 0 1px 2px rgba(94, 106, 210, 0.2);
+    }
+    .btn.primary:hover {
+      background: var(--primary-hover);
+      border-color: var(--primary-hover);
+    }
+    .btn.mini {
+      height: 24px;
+      padding: 0 8px;
+      font-size: 11px;
+    }
+
+    /* Modal / Config Drawer */
+    .modal-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(18, 19, 22, 0.4);
+      backdrop-filter: blur(2px);
+      z-index: 100;
+      display: none;
+      align-items: center;
+      justify-content: center;
+    }
+    .modal-overlay.open {
+      display: flex;
+    }
+    .modal-card {
+      width: 900px;
+      max-width: 95vw;
+      height: 84vh;
+      background: var(--bg-surface);
+      border-radius: var(--radius-lg);
+      border: 1px solid var(--border-default);
+      box-shadow: var(--shadow-lg);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      animation: modalIn 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    @keyframes modalIn {
+      from { opacity: 0; transform: scale(0.98); }
+      to { opacity: 1; transform: scale(1); }
+    }
+    .modal-header {
+      height: 52px;
+      padding: 0 20px;
+      border-bottom: 1px solid var(--border-default);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-shrink: 0;
+      background: var(--bg-sidebar);
+    }
+    .modal-tabs {
+      display: flex;
+      background: var(--bg-hover);
+      border-radius: var(--radius-sm);
+      padding: 2px;
+      gap: 2px;
+    }
+    .modal-tab-btn {
+      padding: 4px 12px;
+      border-radius: var(--radius-sm);
+      font-size: 12px;
+      font-weight: 500;
+      border: none;
+      background: transparent;
+      color: var(--text-secondary);
+      cursor: pointer;
+    }
+    .modal-tab-btn.active {
+      background: var(--bg-surface);
+      color: var(--primary);
+      font-weight: 600;
+      box-shadow: var(--shadow-sm);
+    }
+    .modal-body {
+      flex: 1;
+      overflow-y: auto;
+      display: flex;
+    }
+    .modal-footer {
+      height: 54px;
+      padding: 0 20px;
+      border-top: 1px solid var(--border-default);
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 10px;
+      background: var(--bg-sidebar);
+      flex-shrink: 0;
+    }
+
+    /* Wizard Layout */
+    .wizard-left {
+      flex: 1.25;
+      padding: 20px;
+      overflow-y: auto;
+      border-right: 1px solid var(--border-default);
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+    .wizard-right {
+      flex: 0.75;
+      background: var(--bg-sidebar);
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .form-group {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+    .form-group label {
+      font-size: 11.5px;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+    .form-group input, .form-group select, .form-group textarea {
+      padding: 6px 10px;
+      border: 1px solid var(--border-default);
+      border-radius: var(--radius-sm);
+      font-size: 12.5px;
+      outline: none;
+      color: var(--text-primary);
+      font-family: inherit;
+      background: var(--bg-surface);
+    }
+    .form-group input:focus, .form-group select:focus, .form-group textarea:focus {
+      border-color: var(--primary);
+      box-shadow: 0 0 0 2px var(--primary-subtle);
+    }
+
+    /* Dynamic Node Form Item */
+    .node-editor-item {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-default);
+      border-radius: var(--radius-md);
+      padding: 10px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+    .node-editor-item:hover {
+      border-color: #cbd5e1;
+    }
+    .node-item-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .node-idx {
+      width: 18px;
+      height: 18px;
+      background: var(--primary-subtle);
+      color: var(--primary);
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 10.5px;
+      font-weight: 600;
+    }
+
+    /* Toast Notification (Matching HAFlow Toast) */
+    .toast {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%) translateY(100px);
+      background: #1e2024;
+      color: #ffffff;
+      padding: 8px 16px;
+      border-radius: var(--radius-md);
+      font-size: 12.5px;
+      font-weight: 500;
+      box-shadow: var(--shadow-lg);
+      z-index: 200;
+      opacity: 0;
+      transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    .toast.show {
+      transform: translateX(-50%) translateY(0);
+      opacity: 1;
+    }
+
+    /* Custom X6 Node Styling (Matching HAFlow .flow-node-card) */
+    .flow-node-card {
+      width: 216px;
+      height: 120px;
+      background: #ffffff;
+      border: 1px solid var(--border-default);
+      border-radius: var(--radius-md);
+      padding: 10px 12px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      box-shadow: var(--shadow-sm);
+      cursor: pointer;
+      transition: all 0.15s ease;
+      font-family: var(--font-sans);
+    }
+    .flow-node-card:hover {
+      border-color: var(--primary);
+      box-shadow: 0 4px 12px var(--primary-glow);
+      transform: translateY(-1px);
+    }
+    .flow-node-card.selected {
+      border-color: var(--primary);
+      background: rgba(94, 106, 210, 0.04);
+      box-shadow: 0 0 0 2px var(--primary);
+    }
+    .fn-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .fn-step-badge {
+      font-size: 10px;
+      font-weight: 600;
+      color: var(--primary);
+      background: var(--primary-subtle);
+      border: 1px solid rgba(94, 106, 210, 0.2);
+      padding: 1px 5px;
+      border-radius: 4px;
+    }
+    .fn-agent-tag {
+      font-size: 10.5px;
+      color: var(--text-secondary);
+      font-weight: 500;
+    }
+    .fn-title {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-primary);
+      margin: 3px 0 2px;
+    }
+    .fn-purpose {
+      font-size: 11px;
+      color: var(--text-secondary);
+      line-height: 1.35;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+    .fn-footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 10.5px;
+      color: var(--text-tertiary);
+      border-top: 1px solid var(--border-subtle);
+      padding-top: 4px;
+    }
+  </style>
+
+  <!-- Load AntV X6 & Dagre (Local first, then CDN fallback) -->
+  <script src="./vendor/dagre-3.1.1.min.js"></script>
+  <script src="./vendor/x6-3.1.8.min.js"></script>
+  <script>
+    if (typeof window.dagre === 'undefined') {
+      document.write('<script src="https://unpkg.com/dagre@0.8.5/dist/dagre.min.js"><\/script>');
+    }
+    if (typeof window.X6 === 'undefined') {
+      document.write('<script src="https://unpkg.com/@antv/x6@2.18.1/dist/index.js"><\/script>');
+    }
+  </script>
+</head>
+<body>
+
+  <!-- Top Banner (HAFlow Breadcrumb & Primary Actions) -->
+  <header class="top-bar">
+    <div class="brand-wrap">
+      <div class="rail-brand" title="HAFlow">HF</div>
+      <div class="crumb-trail">
+        <span>空间资产</span>
+        <span class="crumb-sep">/</span>
+        <span class="crumb-current">工作流模板规范库</span>
+        <span class="crumb-desc">定义工作流节点与 DAG 依赖拓扑</span>
+      </div>
+    </div>
+    <div class="top-actions">
+      <button class="btn" onclick="showLiveModal(true)">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+        <span>新建自定义模板</span>
+      </button>
+      <button class="btn primary" onclick="toast('已选用当前模板：即刻用于发起新需求')">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+        <span>选用并启动</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- Master-Detail Main Layout -->
+  <div class="main-layout">
+    
+    <!-- Left Master Panel: Templates Library -->
+    <aside class="left-panel">
+      <div class="filter-section">
+        <div class="search-box">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--text-tertiary)" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+          <input type="text" id="searchInput" placeholder="搜索工作流模板、工序名称、业务场景…" oninput="onSearch()">
+        </div>
+        <div class="category-pills" id="categoryPills">
+          <!-- Populated by JS -->
+        </div>
+      </div>
+
+      <div class="cards-list" id="cardsList">
+        <!-- Template Cards injected by JS -->
+      </div>
+    </aside>
+
+    <!-- Right Detail & Canvas Panel -->
+    <main class="right-panel">
+      
+      <!-- Template Header Banner -->
+      <div class="detail-header">
+        <div class="detail-meta">
+          <h2>
+            <span id="curTplTitle">软件开发标准流程</span>
+            <span class="badge cat-eng" id="curTplCat">软件研发</span>
+            <span style="font-size:11px;font-weight:400;color:var(--text-tertiary);font-family:var(--font-mono)" id="curTplId">software-development-v1</span>
+          </h2>
+          <p id="curTplDesc">标准 6 阶段软件开发与评审流程 (需求分析 ➔ 计划 ➔ 实现 ➔ 测试 ➔ 评审 ➔ 收尾)。适用于需求含隐式规则、多模块依赖、需架构拆分与需求对抗的大中型研发任务。</p>
+        </div>
+        <div class="detail-actions">
+          <button class="btn" onclick="openCurrentEditor()">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+            <span>可视化配置 / YAML</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Canvas Area -->
+      <div class="canvas-container">
+        
+        <!-- Legend -->
+        <div class="canvas-legend">
+          <div class="legend-item"><span class="legend-dot start"></span><span>起始工序</span></div>
+          <div class="legend-item"><span class="legend-dot middle"></span><span>流转工序</span></div>
+          <div class="legend-item"><span class="legend-dot gate"></span><span>门禁质询</span></div>
+          <span style="color:var(--border-default)">|</span>
+          <span style="font-size:11px;color:var(--text-tertiary)">提示：点击卡片查看详细属性，滚轮可缩放与平移</span>
+        </div>
+
+        <!-- Real Canvas Div -->
+        <div id="dagCanvas"></div>
+
+        <!-- Floating Controls -->
+        <div class="canvas-toolbar">
+          <button class="tool-btn" onclick="zoomIn()" title="放大">+</button>
+          <button class="tool-btn" onclick="zoomOut()" title="缩小">-</button>
+          <button class="tool-btn" onclick="fitView()" title="自适应居中" style="width:36px">居中</button>
+        </div>
+      </div>
+
+      <!-- Node Inspector Bottom Drawer -->
+      <div class="node-drawer" id="nodeDrawer">
+        <div class="drawer-header">
+          <div class="drawer-title">
+            <span style="font-size:14px;color:var(--primary)">📌</span>
+            <span id="drawerNodeTitle">工序详情</span>
+            <span class="badge cat-eng" id="drawerNodeType">agent 节点</span>
+          </div>
+          <button class="tool-btn" onclick="closeDrawer()">✕</button>
+        </div>
+        <div class="drawer-grid">
+          <div class="drawer-prop">
+            <label>工序职责与使命 (Purpose)</label>
+            <div class="val" id="drawerNodePurpose">-</div>
+          </div>
+          <div class="drawer-prop">
+            <label>负责智能体 (Preferred Agents)</label>
+            <div class="val code" id="drawerNodeAgents">-</div>
+          </div>
+          <div class="drawer-prop">
+            <label>前置依赖工序 (Depends On)</label>
+            <div class="val" id="drawerNodeDeps">-</div>
+          </div>
+          <div class="drawer-prop">
+            <label>准出门禁 / 验收要求</label>
+            <div class="val" id="drawerNodeGate">-</div>
+          </div>
+        </div>
+      </div>
+
+    </main>
+  </div>
+
+  <!-- Modal: Visual Configuration Wizard & YAML Switcher -->
+  <div class="modal-overlay" id="configModal">
+    <div class="modal-card">
+      <div class="modal-header">
+        <div style="font-weight:600;font-size:14px;display:flex;align-items:center;gap:8px">
+          <span>🛠️ 工作流模板配置</span>
+          <span style="font-size:12px;color:var(--text-tertiary);font-weight:400" id="modalTplIdHint"></span>
+        </div>
+        <div class="modal-tabs">
+          <button class="modal-tab-btn active" id="tabBtnForm" onclick="switchModalTab('form')">🎨 可视化配置向导 (推荐)</button>
+          <button class="modal-tab-btn" id="tabBtnYaml" onclick="switchModalTab('yaml')">📄 专家 YAML 模式</button>
+        </div>
+      </div>
+
+      <!-- Tab 1: Visual Form Wizard -->
+      <div class="modal-body" id="modalTabForm">
+        <!-- Left: Form Controls -->
+        <div class="wizard-left">
+          <div class="form-group">
+            <label>模板显示名称</label>
+            <input type="text" id="editLabel" value="软件开发标准流程">
+          </div>
+          <div style="display:flex;gap:12px">
+            <div class="form-group" style="flex:1">
+              <label>唯一标识符 (ID)</label>
+              <input type="text" id="editId" value="software-development-v1" style="font-family:var(--font-mono)">
+            </div>
+            <div class="form-group" style="flex:1">
+              <label>所属业务分类</label>
+              <select id="editCat">
+                <option value="eng">💻 软件研发类</option>
+                <option value="biz">📊 商务咨询类</option>
+                <option value="ops">🚀 运营服务类</option>
+                <option value="sys">🧪 系统测试类</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-group">
+            <label>适用业务场景说明</label>
+            <textarea id="editDesc" rows="2">标准 6 阶段软件开发与评审流程，适用于含隐式规则、多模块依赖的中大型研发任务。</textarea>
+          </div>
+
+          <div style="display:flex;align-items:center;justify-content:space-between;border-top:1px solid var(--border-default);padding-top:14px;margin-top:4px">
+            <div>
+              <div style="font-weight:600;font-size:13px">工序流水线清单 (Pipeline Steps)</div>
+              <div style="font-size:11px;color:var(--text-tertiary)">每个节点代表一个工作流阶段，依赖关系将自动驱动拓扑连线</div>
+            </div>
+            <button class="btn mini" onclick="addNewStage()">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+              <span>+ 添加工序环节</span>
+            </button>
+          </div>
+
+          <!-- Dynamic Node Form List -->
+          <div id="stagesEditorList">
+            <!-- Node forms injected by JS -->
+          </div>
+        </div>
+
+        <!-- Right: Real-time Live DAG Preview -->
+        <div class="wizard-right">
+          <div style="font-weight:600;font-size:12px;color:var(--text-secondary);margin-bottom:8px;display:flex;align-items:center;justify-content:space-between">
+            <span>✨ 拓扑图实时联动预览 (Live DAG)</span>
+            <span style="font-size:10px;color:var(--success);font-weight:600">● 实时重排同步中</span>
+          </div>
+          <div id="livePreviewBox" style="flex:1;background:var(--bg-surface);border:1px solid var(--border-default);border-radius:var(--radius-md);position:relative;overflow:hidden">
+            <div id="liveCanvas" style="width:100%;height:100%"></div>
+          </div>
+          <div style="font-size:11px;color:var(--text-tertiary);margin-top:8px">
+            左侧表单任意改动（如修改前置依赖、添加阶段），右侧图谱将通过 Dagre 算法实时重绘无环依赖图。
+          </div>
+        </div>
+      </div>
+
+      <!-- Tab 2: Raw YAML Mode -->
+      <div class="modal-body" id="modalTabYaml" style="display:none;padding:20px;flex-direction:column;gap:10px">
+        <div style="display:flex;align-items:center;justify-content:space-between">
+          <span style="font-size:12px;color:var(--text-secondary)">底层 YAML 与可视化表单双向无损互通，资深工程师可直接微调规则：</span>
+          <button class="btn mini" onclick="copyYaml()">复制 YAML</button>
+        </div>
+        <textarea id="rawYamlText" style="flex:1;font-family:var(--font-mono);font-size:12px;border:1px solid var(--border-default);border-radius:var(--radius-md);padding:14px;background:#18191d;color:#f8f9fa;outline:none;resize:none;line-height:1.55"></textarea>
+      </div>
+
+      <div class="modal-footer">
+        <button class="btn" onclick="closeModal()">取消</button>
+        <button class="btn primary" onclick="saveConfiguration()">保存并应用此配置</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast Element -->
+  <div class="toast" id="toast"></div>
+
+  <script>
+    // 1. Data Store: All 8 Templates with Categorization and Complete Metadata
+    const TEMPLATES_DATA = [
+      {
+        id: "software-development-v1",
+        label: "软件开发标准流程",
+        category: "eng",
+        categoryName: "💻 软件研发",
+        version: "1.0",
+        description: "标准 6 阶段软件开发与评审流程 (需求分析 -> 计划 -> 实现 -> 测试 -> 评审 -> 收尾)。适用于需求含隐式规则、多模块依赖、需架构拆分与需求对抗的大中型研发任务。",
+        nodes: [
+          { id: "requirements", label: "需求分析", depends_on: [], purpose: "理解需求、澄清范围、识别约束、形成可验收需求规格与对抗审查清单。", agents: ["claude", "qodercli"], gate: "两份核心文档完备" },
+          { id: "plan", label: "技术计划", depends_on: ["requirements"], purpose: "把已确认需求转化为可并行执行、可验收的工程任务，明确任务解耦边界。", agents: ["claude", "codex"], gate: "架构解耦门禁审查" },
+          { id: "implementation", label: "编码实现", depends_on: ["plan"], purpose: "独立工位并行编码，严格按计划执行代码变更与单元验证。", agents: ["qodercli", "claude"], gate: "Verify-baseline 基线通过" },
+          { id: "test", label: "自动化测试", depends_on: ["implementation"], purpose: "执行冒烟与全量测试套件，验证回归安全性。", agents: ["claude", "pi"], gate: "全套 pytest 测试 100% 绿灯" },
+          { id: "review", label: "代码评审", depends_on: ["test"], purpose: "独立 Reviewer 子代理破防式代码审查与规范审计。", agents: ["claude", "grok"], gate: "输出 MERGE_READY 裁决" },
+          { id: "cleanup", label: "交付收尾", depends_on: ["review"], purpose: "知识沉淀归档、Wiki 更新、分支清理与最终交付。", agents: ["claude"], gate: "Wiki 与教训日志追加完成" }
+        ]
+      },
+      {
+        id: "code-craft-v1",
+        label: "代码精修与深度重构",
+        category: "eng",
+        categoryName: "💻 软件研发",
+        version: "1.0",
+        description: "聚焦既有代码债务消除、复杂度精简与架构净化的重构流水线。不破坏外部行为，保真度优先。",
+        nodes: [
+          { id: "diagnosis", label: "架构诊断", depends_on: [], purpose: "静态复杂度扫描、圈复杂度热点识别与重构目标圈定。", agents: ["claude", "codex"], gate: "诊断报告确认" },
+          { id: "refactor", label: "实施重构", depends_on: ["diagnosis"], purpose: "小步快跑执行坏味道消除与代码瘦身。", agents: ["qodercli"], gate: "行为保持等价验证" },
+          { id: "verify", label: "保真回归", depends_on: ["refactor"], purpose: "高强度差异比对与反向断言测试。", agents: ["claude"], gate: "全部既有单测 0 失败" }
+        ]
+      },
+      {
+        id: "bidding",
+        label: "智能招投标全流程",
+        category: "biz",
+        categoryName: "📊 商务咨询",
+        version: "1.0",
+        description: "招投标综合业务流程。从标书深度解析、历史检索到商务与技术方案协同编写。",
+        nodes: [
+          { id: "parsing", label: "标书智能解析", depends_on: [], purpose: "提取招标文件核心条款、评分规则与废标红线。", agents: ["claude"], gate: "废标项无遗漏" },
+          { id: "history_search", label: "历史业绩检索", depends_on: ["parsing"], purpose: "检索企业过往中标案例与资质库相符业绩。", agents: ["pi", "claude"], gate: "业绩匹配度校验" },
+          { id: "scoring_extract", label: "评分标准提取", depends_on: ["parsing"], purpose: "提炼打分矩阵与关键赋分项。", agents: ["claude"], gate: "评分表结构化" },
+          { id: "strategy", label: "投标策略制定", depends_on: ["history_search", "scoring_extract"], purpose: "结合业绩与评分制定差异化竞争策略。", agents: ["claude"], gate: "策略经人工确认" },
+          { id: "technical", label: "技术方案编写", depends_on: ["strategy"], purpose: "编写针对性技术实现方案与组织实施计划。", agents: ["qodercli", "claude"], gate: "技术响应度 100%" },
+          { id: "commercial", label: "商务报价编制", depends_on: ["strategy"], purpose: "测算成本并形成具有竞争力的阶梯报价单。", agents: ["claude"], gate: "无算术失真" },
+          { id: "compliance", label: "综合合规审计", depends_on: ["technical", "commercial"], purpose: "全套投标文件封样前形式合规最终检查。", agents: ["claude"], gate: "出具清标通过报告" }
+        ]
+      },
+      {
+        id: "business-research-v1",
+        label: "商业与行业深度研报流",
+        category: "biz",
+        categoryName: "📊 商务咨询",
+        version: "1.0",
+        description: "针对行业趋势、竞争对手分析、市场前景预测的高质量研报多角色协同生产线。",
+        nodes: [
+          { id: "scoping", label: "课题解构", depends_on: [], purpose: "拆解研究命题、界定受众诉求与核心假设。", agents: ["claude"], gate: "调研大纲确定" },
+          { id: "info_mining", label: "多源信息萃取", depends_on: ["scoping"], purpose: "抓取行业权威数据、财报与一手研究证据。", agents: ["pi", "claude"], gate: "数据来源交叉验证" },
+          { id: "drafting", label: "深度研报撰写", depends_on: ["info_mining"], purpose: "形成具备洞见的逻辑论证与详实章节内容。", agents: ["claude"], gate: "报告初稿生成" },
+          { id: "critique", label: "质量把关终审", depends_on: ["drafting"], purpose: "事实核查、排版规范与逻辑漏洞反驳。", agents: ["grok", "claude"], gate: "专家级终审通过" }
+        ]
+      },
+      {
+        id: "general-task-v1",
+        label: "通用数字化任务协同流",
+        category: "biz",
+        categoryName: "📊 商务咨询",
+        version: "1.0",
+        description: "面向非软件研发类通用任务（咨询方案、文案起草、方案评估、数据分析）的轻量协同流程。",
+        nodes: [
+          { id: "intake_and_scoping", label: "任务理解与界定", depends_on: [], purpose: "理解任务目标、梳理约束条件、确定交付标准。", agents: ["claude"], gate: "目标对齐" },
+          { id: "deep_execution", label: "专项深度执行", depends_on: ["intake_and_scoping"], purpose: "针对核心业务目标执行专业分析与内容产出。", agents: ["claude"], gate: "成果物初稿" },
+          { id: "review_and_delivery", label: "评审验收交付", depends_on: ["deep_execution"], purpose: "校验交付物完整性与排版质量，完成成果归档。", agents: ["claude"], gate: "交付终验通过" }
+        ]
+      },
+      {
+        id: "seo-audit-v1",
+        label: "网站 SEO 综合审计与优化",
+        category: "ops",
+        categoryName: "🚀 运营服务",
+        version: "1.0",
+        description: "面向大型站点的全方位搜索引擎优化审计，涵盖基础体验、内容深度与外链策略。",
+        nodes: [
+          { id: "crawl", label: "爬虫抓取与诊断", depends_on: [], purpose: "技术性 SEO 巡检：抓取状态、死链、性能速度与移动适配。", agents: ["claude"], gate: "诊断清单就绪" },
+          { id: "content_analysis", label: "内容质量深度分析", depends_on: ["crawl"], purpose: "关键词密度、主题覆盖率与薄弱页面识别。", agents: ["claude"], gate: "优化点提取" },
+          { id: "backlink_audit", label: "对手与外链审计", depends_on: ["crawl"], purpose: "竞品排名重叠度及高价值外链渠道分析。", agents: ["pi"], gate: "外链矩阵图谱" },
+          { id: "strategy_output", label: "综合方案输出", depends_on: ["content_analysis", "backlink_audit"], purpose: "输出针对性整改路线图与 PSEO 实施方案。", agents: ["claude"], gate: "可执行清单确认" }
+        ]
+      },
+      {
+        id: "customer-service",
+        label: "客户服务工单协同处理",
+        category: "ops",
+        categoryName: "🚀 运营服务",
+        version: "1.0",
+        description: "复杂客诉与工单的智能分流、跨部门信息收集与答复方案闭环处理流程。",
+        nodes: [
+          { id: "triage", label: "工单分流与诊断", depends_on: [], purpose: "解析客户意图、评估紧急度并自动归集相关日志。", agents: ["claude"], gate: "准确打标分类" },
+          { id: "execution", label: "方案执行与复盘", depends_on: ["triage"], purpose: "执行退款/技术修复，起草专业客户答复并在知识库复盘归档。", agents: ["claude"], gate: "客户确认闭环" }
+        ]
+      },
+      {
+        id: "context-smoke-test",
+        label: "上下文冒烟测试",
+        category: "sys",
+        categoryName: "🧪 系统测试",
+        version: "1.0",
+        description: "HAFlow 系统内核调度器上下文隔离、恢复与跨工位记忆传递的内部自动化验证流。",
+        nodes: [
+          { id: "smoke_step_1", label: "初始化冒烟", depends_on: [], purpose: "注入模拟运行状态与上下文变量。", agents: ["claude"], gate: "变量写入成功" },
+          { id: "smoke_step_2", label: "跨工位验证", depends_on: ["smoke_step_1"], purpose: "验证下游工位能否无损读取上游上下文记忆。", agents: ["claude"], gate: "校验值一致" }
+        ]
+      }
+    ];
+
+    // State
+    let currentCategory = 'all';
+    let currentSelectedId = 'software-development-v1';
+    let currentEditingTemplate = null;
+    let mainGraph = null;
+    let liveGraph = null;
+
+    // Toast Utility
+    function toast(msg) {
+      const el = document.getElementById('toast');
+      el.textContent = msg;
+      el.classList.add('show');
+      setTimeout(() => el.classList.remove('show'), 2400);
+    }
+
+    // 2. Render Left Panel Categories & Cards
+    function renderCategories() {
+      const cats = [
+        { key: 'all', name: '全部模板', count: TEMPLATES_DATA.length },
+        { key: 'eng', name: '💻 软件研发', count: TEMPLATES_DATA.filter(t => t.category === 'eng').length },
+        { key: 'biz', name: '📊 商务咨询', count: TEMPLATES_DATA.filter(t => t.category === 'biz').length },
+        { key: 'ops', name: '🚀 运营服务', count: TEMPLATES_DATA.filter(t => t.category === 'ops').length },
+        { key: 'sys', name: '🧪 系统测试', count: TEMPLATES_DATA.filter(t => t.category === 'sys').length },
+      ];
+      const container = document.getElementById('categoryPills');
+      container.innerHTML = cats.map(c => `
+        <button class="cat-pill ${currentCategory === c.key ? 'active' : ''}" onclick="selectCategory('${c.key}')">
+          <span>${c.name}</span>
+          <span class="count">${c.count}</span>
+        </button>
+      `).join('');
+    }
+
+    function selectCategory(cat) {
+      currentCategory = cat;
+      renderCategories();
+      renderCards();
+    }
+
+    function onSearch() {
+      renderCards();
+    }
+
+    function renderCards() {
+      const query = document.getElementById('searchInput').value.trim().toLowerCase();
+      const filtered = TEMPLATES_DATA.filter(t => {
+        const matchCat = currentCategory === 'all' || t.category === currentCategory;
+        const matchQuery = !query || 
+          t.label.toLowerCase().includes(query) || 
+          t.id.toLowerCase().includes(query) || 
+          t.description.toLowerCase().includes(query) ||
+          t.nodes.some(n => n.label.toLowerCase().includes(query));
+        return matchCat && matchQuery;
+      });
+
+      const container = document.getElementById('cardsList');
+      if (!filtered.length) {
+        container.innerHTML = `<div style="text-align:center;padding:40px;color:var(--text-tertiary)">没有找到匹配的工作流模板</div>`;
+        return;
+      }
+
+      container.innerHTML = filtered.map(t => {
+        const isSelected = t.id === currentSelectedId;
+        const stepPills = t.nodes.map((n, i) => `
+          <span class="step-pill">${n.label}</span>
+          ${i < t.nodes.length - 1 ? '<span class="step-arrow">➔</span>' : ''}
+        `).join('');
+
+        return `
+          <div class="tpl-card ${isSelected ? 'selected' : ''}" onclick="selectTemplate('${t.id}')">
+            <div class="tpl-head">
+              <span class="tpl-title">
+                <span>${t.label}</span>
+                ${t.id === 'software-development-v1' ? '<span style="font-size:10px;background:var(--primary-subtle);color:var(--primary);padding:1px 5px;border-radius:4px;font-weight:600">官方推荐</span>' : ''}
+              </span>
+              <span class="badge cat-${t.category}">${t.categoryName}</span>
+            </div>
+            <div class="tpl-desc">${t.description}</div>
+            
+            <!-- Pipeline Step Flow Pills -->
+            <div class="tpl-pipeline" title="流程工序微缩示意">
+              ${stepPills}
+            </div>
+
+            <div class="tpl-foot">
+              <span><b>${t.nodes.length}</b> 个工序环节 · v${t.version}</span>
+              <span style="color:var(--primary);font-weight:600">点击查看拓扑 ➔</span>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function selectTemplate(id) {
+      currentSelectedId = id;
+      renderCards();
+      const t = TEMPLATES_DATA.find(x => x.id === id);
+      if (!t) return;
+
+      document.getElementById('curTplTitle').textContent = t.label;
+      document.getElementById('curTplId').textContent = t.id;
+      document.getElementById('curTplCat').textContent = t.categoryName;
+      document.getElementById('curTplCat').className = 'badge cat-' + t.category;
+      document.getElementById('curTplDesc').textContent = t.description;
+
+      closeDrawer();
+      renderMainDAG(t.nodes);
+    }
+
+    // 3. Render Main DAG with AntV X6 + Dagre (HAFlow Official Token Styled)
+    function renderMainDAG(nodes) {
+      const container = document.getElementById('dagCanvas');
+      container.innerHTML = '';
+
+      if (mainGraph && mainGraph.dispose) {
+        try { mainGraph.dispose(); } catch(e){}
+      }
+
+      // Check if X6 is ready
+      if (typeof window.X6 === 'undefined' || typeof window.dagre === 'undefined') {
+        renderFallbackSVG(container, nodes);
+        return;
+      }
+
+      const W = container.clientWidth || 800;
+      const H = container.clientHeight || 500;
+
+      // Layout with Dagre
+      const g = new window.dagre.graphlib.Graph();
+      g.setGraph({ rankdir: 'LR', ranksep: 60, nodesep: 32, marginx: 36, marginy: 36 });
+      g.setDefaultEdgeLabel(() => ({}));
+
+      const nodeWidth = 216;
+      const nodeHeight = 120;
+
+      nodes.forEach(n => g.setNode(n.id, { width: nodeWidth, height: nodeHeight }));
+
+      const edges = [];
+      nodes.forEach(n => {
+        (n.depends_on || []).forEach(dep => {
+          g.setEdge(dep, n.id);
+          edges.push({ from: dep, to: n.id });
+        });
+      });
+
+      window.dagre.layout(g);
+
+      // Create X6 Graph
+      mainGraph = new window.X6.Graph({
+        container: container,
+        width: W,
+        height: H,
+        background: { color: 'transparent' },
+        panning: { enabled: true },
+        mousewheel: { enabled: true, modifiers: ['ctrl', 'meta'], minScale: 0.5, maxScale: 2.0 },
+        interacting: { nodeMovable: false, edgeMovable: false }
+      });
+
+      // Register HTML shape if not registered
+      try {
+        if (!window.x6ShapeRegistered && X6.Shape && X6.Shape.HTML) {
+          X6.Shape.HTML.register({
+            shape: 'prototype-card',
+            width: nodeWidth,
+            height: nodeHeight,
+            html(cell) {
+              const data = cell.getData() || {};
+              const div = document.createElement('div');
+              div.className = 'flow-node-card';
+              div.innerHTML = `
+                <div class="fn-header">
+                  <span class="fn-step-badge">${data.isStart ? '起始工序' : '工序环节'}</span>
+                  <span class="fn-agent-tag">${(data.agents || []).join('、') || 'Auto'}</span>
+                </div>
+                <div class="fn-title">${data.label}</div>
+                <div class="fn-purpose">${data.purpose || '暂无说明'}</div>
+                <div class="fn-footer">
+                  <span>${data.gate ? '🔒 门禁校验' : '✓ 自动推进'}</span>
+                  <span style="color:var(--primary);font-weight:600">点击查看属性</span>
+                </div>
+              `;
+              div.onclick = () => openDrawer(data);
+              return div;
+            }
+          });
+          window.x6ShapeRegistered = true;
+        }
+      } catch(e){}
+
+      // Add Nodes
+      nodes.forEach(n => {
+        const pos = g.node(n.id) || { x: 50, y: 50 };
+        const isStart = !n.depends_on || n.depends_on.length === 0;
+
+        mainGraph.addNode({
+          id: n.id,
+          shape: 'prototype-card',
+          x: pos.x - nodeWidth / 2,
+          y: pos.y - nodeHeight / 2,
+          width: nodeWidth,
+          height: nodeHeight,
+          data: { ...n, isStart }
+        });
+      });
+
+      // Add Edges (Linear Blue-Violet Arrow)
+      edges.forEach(e => {
+        mainGraph.addEdge({
+          source: { cell: e.from, anchor: 'right' },
+          target: { cell: e.to, anchor: 'left' },
+          connector: { name: 'smooth' },
+          attrs: {
+            line: {
+              stroke: '#5e6ad2',
+              strokeWidth: 1.8,
+              targetMarker: { name: 'block', size: 6, fill: '#5e6ad2', stroke: '#5e6ad2' }
+            }
+          }
+        });
+      });
+
+      setTimeout(() => fitView(), 40);
+    }
+
+    // Fallback SVG in case X6 fails in offline isolated file protocol
+    function renderFallbackSVG(container, nodes) {
+      container.innerHTML = `
+        <div style="padding:40px;display:flex;flex-wrap:wrap;gap:16px;align-items:center;justify-content:center;height:100%">
+          ${nodes.map((n, i) => `
+            <div class="flow-node-card" style="position:relative" onclick='openDrawer(${JSON.stringify(n)})'>
+              <div class="fn-header">
+                <span class="fn-step-badge">第 ${i+1} 步</span>
+                <span class="fn-agent-tag">${(n.agents||[]).join('、')}</span>
+              </div>
+              <div class="fn-title">${n.label}</div>
+              <div class="fn-purpose">${n.purpose}</div>
+              <div class="fn-footer">
+                <span>${(n.depends_on||[]).length ? '依赖: '+n.depends_on.join(',') : '起始环节'}</span>
+                <span style="color:var(--primary)">点击详情</span>
+              </div>
+            </div>
+            ${i < nodes.length - 1 ? '<div style="font-size:18px;color:var(--primary)">➔</div>' : ''}
+          `).join('')}
+        </div>
+      `;
+    }
+
+    function fitView() {
+      if (mainGraph && mainGraph.zoomToFit) {
+        mainGraph.zoomToFit({ padding: 32, maxScale: 1 });
+      }
+    }
+    function zoomIn() {
+      if (mainGraph && mainGraph.zoom) mainGraph.zoom(0.15);
+    }
+    function zoomOut() {
+      if (mainGraph && mainGraph.zoom) mainGraph.zoom(-0.15);
+    }
+
+    // 4. Node Detail Inspector Drawer
+    function openDrawer(node) {
+      document.getElementById('nodeDrawer').classList.add('open');
+      document.getElementById('drawerNodeTitle').textContent = node.label + ` (${node.id})`;
+      document.getElementById('drawerNodePurpose').textContent = node.purpose || '该阶段主要负责交付目标任务推进。';
+      document.getElementById('drawerNodeAgents').textContent = (node.agents || ['auto (根据任务类型智能路由)']).join('、');
+      document.getElementById('drawerNodeDeps').textContent = (node.depends_on && node.depends_on.length) 
+        ? node.depends_on.join('、') + '（前置工序完备后自动触发）' 
+        : '起始工序（无需前置依赖，工作流启动即就绪）';
+      document.getElementById('drawerNodeGate').textContent = node.gate || '默认标准门禁检查（自动化测试及基线验证）';
+    }
+
+    function closeDrawer() {
+      document.getElementById('nodeDrawer').classList.remove('open');
+    }
+
+    // 5. Visual Config Modal & Live Real-time DAG Editing
+    function openCurrentEditor() {
+      const tpl = TEMPLATES_DATA.find(t => t.id === currentSelectedId);
+      if (tpl) showLiveModal(false, tpl);
+    }
+
+    function showLiveModal(isNew = false, template = null) {
+      const modal = document.getElementById('configModal');
+      modal.classList.add('open');
+
+      if (isNew) {
+        currentEditingTemplate = {
+          id: "custom-flow-" + Math.floor(Math.random() * 1000),
+          label: "新自定义工作流",
+          category: "biz",
+          categoryName: "📊 商务咨询",
+          version: "1.0",
+          description: "这是一个全新创建的自定义流程模版",
+          nodes: [
+            { id: "step_1", label: "需求收集与澄清", depends_on: [], purpose: "明确任务边界与交付形式", agents: ["claude"], gate: "完成大纲" },
+            { id: "step_2", label: "执行与方案产出", depends_on: ["step_1"], purpose: "产出核心方案并自测", agents: ["codex"], gate: "单测通过" }
+          ]
+        };
+      } else {
+        currentEditingTemplate = JSON.parse(JSON.stringify(template));
+      }
+
+      document.getElementById('modalTplIdHint').textContent = `[${currentEditingTemplate.id}]`;
+      document.getElementById('editLabel').value = currentEditingTemplate.label;
+      document.getElementById('editId').value = currentEditingTemplate.id;
+      document.getElementById('editCat').value = currentEditingTemplate.category || 'biz';
+      document.getElementById('editDesc').value = currentEditingTemplate.description;
+
+      switchModalTab('form');
+      renderStagesEditorList();
+      renderLiveDAG();
+    }
+
+    function closeModal() {
+      document.getElementById('configModal').classList.remove('open');
+    }
+
+    function switchModalTab(tab) {
+      const isForm = tab === 'form';
+      document.getElementById('tabBtnForm').classList.toggle('active', isForm);
+      document.getElementById('tabBtnYaml').classList.toggle('active', !isForm);
+      document.getElementById('modalTabForm').style.display = isForm ? 'flex' : 'none';
+      document.getElementById('modalTabYaml').style.display = isForm ? 'none' : 'flex';
+
+      if (!isForm) {
+        syncStateFromForm();
+        document.getElementById('rawYamlText').value = generateYamlFromState(currentEditingTemplate);
+      }
+    }
+
+    function renderStagesEditorList() {
+      const container = document.getElementById('stagesEditorList');
+      const nodes = currentEditingTemplate.nodes;
+
+      container.innerHTML = nodes.map((n, idx) => {
+        const otherNodes = nodes.filter(other => other.id !== n.id);
+        const depOptions = otherNodes.map(other => {
+          const isSelected = (n.depends_on || []).includes(other.id);
+          return `<option value="${other.id}" ${isSelected ? 'selected' : ''}>${other.label} (${other.id})</option>`;
+        }).join('');
+
+        return `
+          <div class="node-editor-item">
+            <div class="node-item-head">
+              <div style="display:flex;align-items:center;gap:6px">
+                <span class="node-idx">${idx + 1}</span>
+                <input type="text" value="${n.label}" style="font-weight:600;font-size:13px;border:none;background:transparent;outline:none" onchange="updateStageField(${idx}, 'label', this.value)" placeholder="工序环节名称">
+                <span style="font-size:11px;color:var(--text-tertiary);font-family:var(--font-mono)">id: ${n.id}</span>
+              </div>
+              <button class="btn mini" style="color:var(--danger);border-color:transparent" onclick="deleteStage(${idx})">删除</button>
+            </div>
+            
+            <div style="display:flex;gap:10px">
+              <div class="form-group" style="flex:1">
+                <label style="font-size:11px">前置依赖环节 (Depends On)</label>
+                <select multiple style="height:54px;font-size:11.5px" onchange="updateStageDeps(${idx}, this)">
+                  ${depOptions}
+                </select>
+              </div>
+              <div class="form-group" style="flex:1">
+                <label style="font-size:11px">工序职责使命 (Purpose)</label>
+                <textarea rows="2" style="font-size:11.5px" onchange="updateStageField(${idx}, 'purpose', this.value)">${n.purpose || ''}</textarea>
+              </div>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function updateStageField(idx, field, val) {
+      currentEditingTemplate.nodes[idx][field] = val;
+      renderLiveDAG();
+    }
+
+    function updateStageDeps(idx, selectEl) {
+      const selected = Array.from(selectEl.selectedOptions).map(opt => opt.value);
+      currentEditingTemplate.nodes[idx].depends_on = selected;
+      renderLiveDAG();
+    }
+
+    function addNewStage() {
+      const newId = 'stage_' + (currentEditingTemplate.nodes.length + 1);
+      const prevId = currentEditingTemplate.nodes.length > 0 
+        ? currentEditingTemplate.nodes[currentEditingTemplate.nodes.length - 1].id 
+        : null;
+
+      currentEditingTemplate.nodes.push({
+        id: newId,
+        label: '新增工作流工序',
+        depends_on: prevId ? [prevId] : [],
+        purpose: '新工序业务使命描述',
+        agents: ['claude'],
+        gate: '验收门禁'
+      });
+
+      renderStagesEditorList();
+      renderLiveDAG();
+      toast('已新增工序环节，右侧拓扑图已实时重排！');
+    }
+
+    function deleteStage(idx) {
+      if (currentEditingTemplate.nodes.length <= 1) {
+        return toast('工作流至少需要保留 1 个工序环节');
+      }
+      const removedId = currentEditingTemplate.nodes[idx].id;
+      currentEditingTemplate.nodes.splice(idx, 1);
+      
+      currentEditingTemplate.nodes.forEach(n => {
+        n.depends_on = (n.depends_on || []).filter(dep => dep !== removedId);
+      });
+
+      renderStagesEditorList();
+      renderLiveDAG();
+      toast('工序已删除，拓扑连线已自动更新');
+    }
+
+    // Render Small Real-time DAG inside Modal
+    function renderLiveDAG() {
+      const container = document.getElementById('liveCanvas');
+      container.innerHTML = '';
+
+      if (liveGraph && liveGraph.dispose) {
+        try { liveGraph.dispose(); } catch(e){}
+      }
+
+      if (typeof window.X6 === 'undefined' || typeof window.dagre === 'undefined') {
+        renderFallbackSVG(container, currentEditingTemplate.nodes);
+        return;
+      }
+
+      const W = container.clientWidth || 340;
+      const H = container.clientHeight || 450;
+
+      const g = new window.dagre.graphlib.Graph();
+      g.setGraph({ rankdir: 'TB', ranksep: 36, nodesep: 20, marginx: 16, marginy: 16 });
+      g.setDefaultEdgeLabel(() => ({}));
+
+      const nodeWidth = 170;
+      const nodeHeight = 58;
+
+      currentEditingTemplate.nodes.forEach(n => g.setNode(n.id, { width: nodeWidth, height: nodeHeight }));
+
+      const edges = [];
+      currentEditingTemplate.nodes.forEach(n => {
+        (n.depends_on || []).forEach(dep => {
+          g.setEdge(dep, n.id);
+          edges.push({ from: dep, to: n.id });
+        });
+      });
+
+      window.dagre.layout(g);
+
+      liveGraph = new window.X6.Graph({
+        container: container,
+        width: W,
+        height: H,
+        background: { color: 'transparent' },
+        panning: { enabled: true },
+        mousewheel: { enabled: true },
+        interacting: { nodeMovable: false }
+      });
+
+      currentEditingTemplate.nodes.forEach(n => {
+        const pos = g.node(n.id) || { x: 50, y: 50 };
+        liveGraph.addNode({
+          id: n.id,
+          x: pos.x - nodeWidth / 2,
+          y: pos.y - nodeHeight / 2,
+          width: nodeWidth,
+          height: nodeHeight,
+          attrs: {
+            body: {
+              fill: '#ffffff',
+              stroke: '#5e6ad2',
+              strokeWidth: 1.5,
+              rx: 6,
+              ry: 6
+            },
+            label: {
+              text: n.label,
+              fill: '#121316',
+              fontSize: 12,
+              fontWeight: '600'
+            }
+          }
+        });
+      });
+
+      edges.forEach(e => {
+        liveGraph.addEdge({
+          source: { cell: e.from },
+          target: { cell: e.to },
+          attrs: {
+            line: {
+              stroke: '#5e6ad2',
+              strokeWidth: 1.8,
+              targetMarker: { name: 'block', size: 5, fill: '#5e6ad2', stroke: '#5e6ad2' }
+            }
+          }
+        });
+      });
+
+      setTimeout(() => {
+        if (liveGraph && liveGraph.zoomToFit) liveGraph.zoomToFit({ padding: 16 });
+      }, 40);
+    }
+
+    function syncStateFromForm() {
+      currentEditingTemplate.label = document.getElementById('editLabel').value;
+      currentEditingTemplate.id = document.getElementById('editId').value;
+      currentEditingTemplate.category = document.getElementById('editCat').value;
+      currentEditingTemplate.description = document.getElementById('editDesc').value;
+    }
+
+    function generateYamlFromState(tpl) {
+      let yaml = `name: ${tpl.id}\nlabel: ${tpl.label}\nversion: "${tpl.version || '1.0'}"\ndescription: ${tpl.description}\n\nnodes:\n`;
+      tpl.nodes.forEach(n => {
+        yaml += `  - id: ${n.id}\n`;
+        yaml += `    label: ${n.label}\n`;
+        yaml += `    node_type: agent\n`;
+        yaml += `    depends_on: [${(n.depends_on || []).join(', ')}]\n`;
+        yaml += `    purpose: ${n.purpose || ''}\n`;
+        yaml += `    agent_policy:\n`;
+        yaml += `      preferred: [${(n.agents || ['claude']).join(', ')}]\n\n`;
+      });
+      return yaml;
+    }
+
+    function copyYaml() {
+      const text = document.getElementById('rawYamlText').value;
+      navigator.clipboard.writeText(text);
+      toast('YAML 已复制到剪贴板');
+    }
+
+    function saveConfiguration() {
+      syncStateFromForm();
+      const existingIdx = TEMPLATES_DATA.findIndex(t => t.id === currentEditingTemplate.id);
+      if (existingIdx >= 0) {
+        TEMPLATES_DATA[existingIdx] = JSON.parse(JSON.stringify(currentEditingTemplate));
+      } else {
+        TEMPLATES_DATA.unshift(JSON.parse(JSON.stringify(currentEditingTemplate)));
+      }
+
+      closeModal();
+      renderCategories();
+      renderCards();
+      selectTemplate(currentEditingTemplate.id);
+      toast('模板已成功保存！配置与拓扑图已实时生效');
+    }
+
+    // Initialize Page
+    window.addEventListener('DOMContentLoaded', () => {
+      renderCategories();
+      renderCards();
+      selectTemplate('software-development-v1');
+    });
+
+    window.addEventListener('resize', () => {
+      if (mainGraph) fitView();
+      if (liveGraph && liveGraph.zoomToFit) liveGraph.zoomToFit({ padding: 16 });
+    });
+  </script>
+</body>
+</html>

@@ -539,18 +539,87 @@ TEMPLATE_NAME_RE=re.compile(r'^[a-z0-9][a-z0-9_-]{0,63}$')
 def _is_builtin_path(path):
     return Path(path).resolve().parent==herdr_workflow.BUNDLED_TEMPLATES_DIR.resolve()
 
+def _derive_template_category(tid: str, data: dict):
+    cat = str((data or {}).get('category') or '').lower().strip()
+    if cat in ('eng', 'software', 'dev') or '研发' in cat or '开发' in cat:
+        return 'eng', '💻 软件研发'
+    if cat in ('biz', 'business') or '商务' in cat or '咨询' in cat:
+        return 'biz', '📊 商务咨询'
+    if cat in ('ops', 'operation') or '运营' in cat or '服务' in cat:
+        return 'ops', '🚀 运营服务'
+    if cat in ('sys', 'test') or '测试' in cat or '系统' in cat:
+        return 'sys', '🧪 系统测试'
+    if tid in ('software-development-v1', 'code-craft-v1'):
+        return 'eng', '💻 软件研发'
+    if tid in ('bidding', 'business-research-v1'):
+        return 'biz', '📊 商务咨询'
+    if tid in ('customer-service', 'seo-audit-v1', 'general-task-v1'):
+        return 'ops', '🚀 运营服务'
+    if tid in ('context-smoke-test',):
+        return 'sys', '🧪 系统测试'
+    desc = str((data or {}).get('description', '')) + ' ' + str((data or {}).get('label', ''))
+    if any(k in desc for k in ('代码', '开发', '架构', '重构', '研发')):
+        return 'eng', '💻 软件研发'
+    if any(k in desc for k in ('标书', '竞标', '商务', '调研', '咨询')):
+        return 'biz', '📊 商务咨询'
+    if any(k in desc for k in ('运营', '客服', 'SEO', '推广')):
+        return 'ops', '🚀 运营服务'
+    if any(k in desc for k in ('测试', '冒烟', '验证')):
+        return 'sys', '🧪 系统测试'
+    return 'biz', '📊 商务咨询'
+
 def templates_summary():
     out=[]
     for name,info in sorted(herdr_workflow.list_templates().items()):
-        out.append({'id':name,**info,'is_builtin':_is_builtin_path(info['path'])})
+        raw = {}
+        try:
+            raw = herdr_workflow._load_file(Path(info['path']))
+        except Exception:
+            pass
+        cat_id, cat_name = _derive_template_category(name, raw)
+        nodes = raw.get('nodes', [])
+        nodes_preview = [{'id': n.get('id'), 'label': n.get('label') or n.get('id'), 'depends_on': n.get('depends_on', [])} for n in nodes if isinstance(n, dict)]
+        out.append({
+            'id': name,
+            **info,
+            'category': cat_id,
+            'category_name': cat_name,
+            'nodes_preview': nodes_preview,
+            'is_builtin': _is_builtin_path(info['path']),
+        })
     return {'templates':out}
 
 def template_detail(tid):
     info=herdr_workflow.list_templates().get(tid)
     if not info:raise RuntimeError('模板不存在: '+tid)
     wf=herdr_workflow.load_template(tid)
-    nodes=[{'id':n.get('id'),'label':n.get('label') or n.get('id'),'node_type':n.get('node_type','agent'),'depends_on':n.get('depends_on',[]),'purpose':n.get('purpose','')} for n in wf.get('nodes',[])]
-    return {'template':{'id':tid,**info},'nodes':nodes,'is_builtin':_is_builtin_path(info['path']),'yaml':Path(info['path']).read_text(encoding='utf-8')}
+    cat_id, cat_name = _derive_template_category(tid, wf)
+    nodes=[]
+    for n in wf.get('nodes',[]):
+        if not isinstance(n, dict): continue
+        agents = []
+        policy = n.get('agent_policy') or {}
+        if isinstance(policy, dict):
+            agents = policy.get('preferred') or []
+        gate_info = n.get('gate') or {}
+        gate_str = ''
+        if isinstance(gate_info, dict):
+            gate_str = gate_info.get('type') or gate_info.get('auto_criteria') or ('门禁校验' if gate_info else '')
+        nodes.append({
+            'id': n.get('id'),
+            'label': n.get('label') or n.get('id'),
+            'node_type': n.get('node_type','agent'),
+            'depends_on': n.get('depends_on',[]),
+            'purpose': n.get('purpose',''),
+            'agents': agents,
+            'gate': gate_str,
+        })
+    return {
+        'template': {'id': tid, **info, 'category': cat_id, 'category_name': cat_name},
+        'nodes': nodes,
+        'is_builtin': _is_builtin_path(info['path']),
+        'yaml': Path(info['path']).read_text(encoding='utf-8'),
+    }
 
 def save_template(name,content):
     name=(name or '').strip()
@@ -5498,6 +5567,413 @@ body {
   line-height: 1.65;
 }
 
+/* Workflow Templates Master-Detail View & Visualization (Linear Palette) */
+#templatesTabView {
+  padding: 0 !important;
+  gap: 0 !important;
+  overflow: hidden !important;
+  background: var(--bg-page);
+  height: 100%;
+}
+.tpl-top-header {
+  height: 48px;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border-default);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 16px;
+  flex-shrink: 0;
+  box-sizing: border-box;
+}
+.tpl-layout {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  overflow: hidden;
+}
+.tpl-left-panel {
+  width: 420px;
+  min-width: 360px;
+  max-width: 460px;
+  background: var(--bg-surface);
+  border-right: 1px solid var(--border-default);
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+}
+.tpl-filter-section {
+  padding: 12px 16px 8px;
+  border-bottom: 1px solid var(--border-default);
+  background: var(--bg-sidebar);
+}
+.tpl-search-box {
+  display: flex;
+  align-items: center;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  padding: 4px 8px;
+  margin-bottom: 8px;
+  gap: 8px;
+  transition: all 0.15s;
+}
+.tpl-search-box:focus-within {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 2px var(--primary-subtle);
+}
+.tpl-search-box input {
+  border: none;
+  outline: none;
+  width: 100%;
+  font-size: 12px;
+  background: transparent;
+  color: var(--text-primary);
+}
+.tpl-category-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.tpl-cat-pill {
+  border: 1px solid var(--border-default);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  transition: all 0.15s;
+}
+.tpl-cat-pill:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.tpl-cat-pill.active {
+  background: var(--primary);
+  color: #ffffff;
+  border-color: var(--primary);
+}
+.tpl-cat-pill .count {
+  opacity: 0.85;
+  font-size: 10px;
+}
+.tpl-cards-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.tpl-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  padding: 12px 16px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.tpl-card:hover {
+  border-color: #cbd5e1;
+  background: var(--bg-subtle);
+  box-shadow: var(--shadow-sm);
+}
+.tpl-card.selected {
+  border-color: var(--primary);
+  background: rgba(94, 106, 210, 0.03);
+  box-shadow: 0 0 0 1px var(--primary);
+}
+.tpl-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.tpl-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.tpl-badge {
+  font-size: 11px;
+  font-weight: 500;
+  border-radius: 999px;
+  padding: 2px 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  line-height: 1.35;
+  border: 1px solid var(--border-default);
+  background: var(--bg-subtle);
+  color: var(--text-secondary);
+}
+.tpl-badge.cat-eng {
+  color: var(--primary);
+  border-color: rgba(94, 106, 210, 0.25);
+  background: var(--primary-subtle);
+}
+.tpl-badge.cat-biz {
+  color: var(--warning);
+  border-color: rgba(217, 119, 6, 0.25);
+  background: var(--warning-bg);
+}
+.tpl-badge.cat-ops {
+  color: #0284c7;
+  border-color: rgba(2, 132, 199, 0.25);
+  background: #f0f9ff;
+}
+.tpl-badge.cat-sys {
+  color: var(--text-tertiary);
+  border-color: var(--border-default);
+  background: var(--bg-subtle);
+}
+.tpl-desc {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.45;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.tpl-pipeline {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 4px 8px;
+  background: var(--bg-page);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+}
+.tpl-pipeline .step-pill {
+  font-size: 10.5px;
+  padding: 2px 4px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: 4px;
+  color: var(--text-primary);
+  font-weight: 500;
+  white-space: nowrap;
+}
+.tpl-pipeline .step-arrow {
+  color: var(--text-tertiary);
+  font-size: 9px;
+}
+.tpl-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--text-tertiary);
+  margin-top: 2px;
+  border-top: 1px solid var(--border-subtle);
+  padding-top: 8px;
+}
+.tpl-right-panel {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-page);
+  overflow: hidden;
+  position: relative;
+}
+.tpl-detail-header {
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border-default);
+  padding: 12px 20px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+}
+.tpl-detail-meta h2 {
+  margin: 0;
+}
+.tpl-detail-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.tpl-canvas-container {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  background: #fafbfc;
+  overflow: hidden;
+}
+#tplDagCanvas {
+  width: 100%;
+  height: 100%;
+  position: absolute;
+  top: 0;
+  left: 0;
+}
+.tpl-canvas-toolbar {
+  position: absolute;
+  bottom: 16px;
+  right: 16px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+  display: flex;
+  align-items: center;
+  padding: 3px;
+  gap: 2px;
+  z-index: 10;
+}
+.tpl-canvas-legend {
+  position: absolute;
+  top: 14px;
+  left: 16px;
+  background: rgba(255, 255, 255, 0.96);
+  backdrop-filter: blur(4px);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  padding: 4px 12px;
+  box-shadow: var(--shadow-sm);
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  z-index: 10;
+}
+.tpl-legend-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.tpl-legend-dot.start { background: var(--success); }
+.tpl-legend-dot.middle { background: var(--primary); }
+.tpl-legend-dot.gate { background: var(--warning); }
+.tpl-node-card {
+  width: 216px;
+  height: 118px;
+  background: #ffffff;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  box-shadow: var(--shadow-sm);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  font-family: var(--font-sans);
+  box-sizing: border-box;
+}
+.tpl-node-card:hover {
+  border-color: var(--primary);
+  box-shadow: 0 4px 12px var(--primary-glow);
+  transform: translateY(-1px);
+}
+.tpl-node-card.selected {
+  border-color: var(--primary);
+  background: rgba(94, 106, 210, 0.04);
+  box-shadow: 0 0 0 2px var(--primary);
+}
+.tpl-node-drawer {
+  background: var(--bg-surface);
+  border-top: 1px solid var(--border-default);
+  box-shadow: var(--shadow-md);
+  padding: 16px 20px;
+  display: none;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 260px;
+  overflow-y: auto;
+  z-index: 15;
+}
+.tpl-node-drawer.open {
+  display: flex;
+}
+.tpl-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(18, 19, 22, 0.4);
+  backdrop-filter: blur(2px);
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.tpl-modal-card {
+  width: 920px;
+  max-width: 95vw;
+  height: 84vh;
+  background: var(--bg-surface);
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border-default);
+  box-shadow: var(--shadow-lg);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.tpl-modal-header {
+  height: 52px;
+  padding: 0 20px;
+  border-bottom: 1px solid var(--border-default);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+  background: var(--bg-sidebar);
+}
+.tpl-modal-tabs {
+  display: flex;
+  background: var(--bg-hover);
+  border-radius: var(--radius-sm);
+  padding: 2px;
+  gap: 2px;
+}
+.tpl-modal-tab-btn {
+  padding: 4px 12px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-weight: 500;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.tpl-modal-tab-btn.active {
+  background: var(--bg-surface);
+  color: var(--primary);
+  font-weight: 600;
+  box-shadow: var(--shadow-sm);
+}
+.tpl-modal-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+}
+.tpl-modal-footer {
+  height: 54px;
+  padding: 0 20px;
+  border-top: 1px solid var(--border-default);
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  background: var(--bg-sidebar);
+  flex-shrink: 0;
+}
+
 </style>
 </head><body>
 <div class="shell" data-view="workbench" data-workspace="flow">
@@ -5768,6 +6244,81 @@ body {
       <button class="close" aria-label="关闭弹窗" onclick="closeModal()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg></button>
     </div>
     <div id="modalBody" class="modal-body"></div>
+  </div>
+</div>
+<div id="tplConfigModal" class="tpl-modal-overlay" role="dialog" aria-modal="true" style="display:none">
+  <div class="tpl-modal-card">
+    <div class="tpl-modal-header">
+      <div style="font-weight:600;font-size:14px;display:flex;align-items:center;gap:8px">
+        <span>🛠️ 工作流模板配置</span>
+        <span style="font-size:12px;color:var(--text-tertiary);font-weight:400" id="tplModalHint"></span>
+      </div>
+      <div class="tpl-modal-tabs">
+        <button type="button" class="tpl-modal-tab-btn active" id="tplTabBtnForm" onclick="switchTplModalTab('form')">🎨 可视化配置向导 (推荐)</button>
+        <button type="button" class="tpl-modal-tab-btn" id="tplTabBtnYaml" onclick="switchTplModalTab('yaml')">📄 专家 YAML 模式</button>
+      </div>
+    </div>
+    <div class="tpl-modal-body" id="tplModalTabForm">
+      <div class="wizard-left" style="flex:1.25;padding:20px;overflow-y:auto;border-right:1px solid var(--border-default);display:flex;flex-direction:column;gap:16px">
+        <div class="form-group" style="display:flex;flex-direction:column;gap:4px">
+          <label style="font-size:11.5px;font-weight:600">模板显示名称</label>
+          <input type="text" id="tplEditLabel" placeholder="例如：软件开发标准流程" style="padding:4px 8px;border:1px solid var(--border-default);border-radius:var(--radius-sm);font-size:12.5px;background:var(--bg-surface)">
+        </div>
+        <div style="display:flex;gap:12px">
+          <div class="form-group" style="flex:1;display:flex;flex-direction:column;gap:4px">
+            <label style="font-size:11.5px;font-weight:600">唯一标识符 (ID / 命令行参数)</label>
+            <input type="text" id="tplName" placeholder="例如：my-flow-v1" style="font-family:var(--font-mono);padding:4px 8px;border:1px solid var(--border-default);border-radius:var(--radius-sm);font-size:12.5px;background:var(--bg-surface)">
+          </div>
+          <div class="form-group" style="flex:1;display:flex;flex-direction:column;gap:4px">
+            <label style="font-size:11.5px;font-weight:600">所属业务分类</label>
+            <select id="tplEditCategory" style="padding:4px 8px;border:1px solid var(--border-default);border-radius:var(--radius-sm);font-size:12.5px;background:var(--bg-surface)">
+              <option value="eng">💻 软件研发类</option>
+              <option value="biz">📊 商务咨询类</option>
+              <option value="ops">🚀 运营服务类</option>
+              <option value="sys">🧪 系统测试类</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-group" style="display:flex;flex-direction:column;gap:4px">
+          <label style="font-size:11.5px;font-weight:600">适用业务场景说明</label>
+          <textarea id="tplEditDesc" rows="2" placeholder="描述此工作流模板的使用场景、输入与产出交付物…" style="padding:4px 8px;border:1px solid var(--border-default);border-radius:var(--radius-sm);font-size:12.5px;background:var(--bg-surface)"></textarea>
+        </div>
+        <div style="display:flex;align-items:center;justify-content:space-between;border-top:1px solid var(--border-default);padding-top:16px;margin-top:4px">
+          <div>
+            <div style="font-weight:600;font-size:13px">工序流水线清单 (Pipeline Steps)</div>
+            <div style="font-size:11px;color:var(--text-tertiary)">每个节点代表一个工作流阶段，依赖关系将自动驱动拓扑连线</div>
+          </div>
+          <button type="button" class="btn mini" onclick="addNewTplStage()">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+            <span>+ 添加工序环节</span>
+          </button>
+        </div>
+        <div id="tplStagesEditorList"></div>
+      </div>
+      <div class="wizard-right" style="flex:0.75;background:var(--bg-sidebar);padding:16px;display:flex;flex-direction:column;overflow:hidden">
+        <div style="font-weight:600;font-size:12px;color:var(--text-secondary);margin-bottom:8px;display:flex;align-items:center;justify-content:space-between">
+          <span>✨ 拓扑图实时联动预览 (Live DAG)</span>
+          <span style="font-size:10px;color:var(--success);font-weight:600">● 实时重排</span>
+        </div>
+        <div style="flex:1;background:var(--bg-surface);border:1px solid var(--border-default);border-radius:var(--radius-md);position:relative;overflow:hidden">
+          <div id="tplLiveCanvas" style="width:100%;height:100%"></div>
+        </div>
+        <div style="font-size:11px;color:var(--text-tertiary);margin-top:8px">
+          左侧表单任意改动（如修改前置依赖、添加阶段），右侧图谱将通过 Dagre 算法实时重绘无环依赖图。
+        </div>
+      </div>
+    </div>
+    <div class="tpl-modal-body" id="tplModalTabYaml" style="display:none;padding:20px;flex-direction:column;gap:8px">
+      <div style="display:flex;align-items:center;justify-content:space-between">
+        <span style="font-size:12px;color:var(--text-secondary)">底层 YAML 与可视化表单双向无损互通，资深工程师可直接微调规则：</span>
+        <button type="button" class="btn mini" onclick="copyTplYaml()">复制 YAML</button>
+      </div>
+      <textarea id="tplYaml" style="flex:1;font-family:var(--font-mono);font-size:12px;border:1px solid var(--border-default);border-radius:var(--radius-md);padding:16px;background:#18191d;color:#f8f9fa;outline:none;resize:none;line-height:1.55"></textarea>
+    </div>
+    <div class="tpl-modal-footer">
+      <button type="button" class="btn" onclick="closeTplModal()">取消</button>
+      <button type="button" class="btn primary" id="btnSaveTplConfig" onclick="saveTemplate()">保存并应用此模板</button>
+    </div>
   </div>
 </div>
 <div id="taskDrawer" class="task-drawer" role="dialog" aria-modal="false" aria-labelledby="taskDrawerTitle" hidden>
@@ -6113,6 +6664,379 @@ async function fetchTemplates(){
   state.templates=d.templates||[];
   return state.templates
 }
+
+const TEMPLATE_CATEGORIES=[
+  {id:'all',label:'全部'},
+  {id:'eng',label:'💻 软件研发'},
+  {id:'biz',label:'📊 商务咨询'},
+  {id:'ops',label:'🚀 运营服务'},
+  {id:'sys',label:'🧪 系统测试'}
+];
+
+function ensureTplLayoutDOM(tplEl){
+  if(!tplEl||document.getElementById('tplDagCanvas'))return;
+  tplEl.innerHTML=`
+    <div class="tpl-top-header">
+      <div style="display:flex;align-items:center;gap:8px">
+        <strong>工作流模板规范资产库</strong>
+        <span class="muted" style="font-size:12px">· 定义工作流阶段与 DAG 依赖拓扑</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <button type="button" class="btn" onclick="showTemplateEditor()">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+          <span>新建模板</span>
+        </button>
+        <button type="button" class="btn primary" onclick="launchWithCurrentTemplate()">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+          <span>选用并启动需求</span>
+        </button>
+      </div>
+    </div>
+    <div class="tpl-layout">
+      <aside class="tpl-left-panel">
+        <div class="tpl-filter-section">
+          <div class="tpl-search-box">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--text-tertiary)" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+            <input type="text" id="tplSearchInput" placeholder="搜索工作流模板、工序名称、业务场景…" oninput="filterTemplates()">
+          </div>
+          <div class="tpl-category-pills" id="tplCategoryPills"></div>
+        </div>
+        <div class="tpl-cards-list" id="tplCardsList"></div>
+      </aside>
+      <main class="tpl-right-panel">
+        <div class="tpl-detail-header">
+          <div class="tpl-detail-meta">
+            <h2 style="font-size:15px;font-weight:600;display:flex;align-items:center;gap:8px">
+              <span id="tplCurTitle">加载中…</span>
+              <span class="tpl-badge cat-eng" id="tplCurCat">软件研发</span>
+              <span style="font-size:11px;font-weight:400;color:var(--text-tertiary);font-family:var(--font-mono)" id="tplCurId"></span>
+            </h2>
+            <p id="tplCurDesc" style="font-size:12px;color:var(--text-secondary);margin-top:4px;line-height:1.4"></p>
+          </div>
+          <div class="tpl-detail-actions">
+            <button type="button" class="btn" onclick="showTemplateDAG(state.currentTemplateId)">
+              <span>节点依赖清单</span>
+            </button>
+            <button type="button" class="btn" onclick="showTemplateEditor(state.currentTemplateId)">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+              <span id="tplEditBtnLabel">可视化配置 / YAML</span>
+            </button>
+          </div>
+        </div>
+        <div class="tpl-canvas-container">
+          <div class="tpl-canvas-legend">
+            <div style="display:flex;align-items:center;gap:5px"><span class="tpl-legend-dot start"></span><span>起始工序</span></div>
+            <div style="display:flex;align-items:center;gap:5px"><span class="tpl-legend-dot middle"></span><span>流转工序</span></div>
+            <div style="display:flex;align-items:center;gap:5px"><span class="tpl-legend-dot gate"></span><span>门禁质询</span></div>
+            <span style="color:var(--border-default)">|</span>
+            <span style="font-size:11px;color:var(--text-tertiary)">提示：点击节点卡片查看属性，支持滚轮缩放与画布平移</span>
+          </div>
+          <div id="tplDagCanvas"></div>
+          <div class="tpl-canvas-toolbar">
+            <button type="button" class="tool-btn" onclick="zoomTplGraph(0.15)" title="放大">+</button>
+            <button type="button" class="tool-btn" onclick="zoomTplGraph(-0.15)" title="缩小">-</button>
+            <button type="button" class="tool-btn" onclick="fitTplGraph()" title="自适应居中" style="width:36px">居中</button>
+          </div>
+        </div>
+        <div class="tpl-node-drawer" id="tplNodeDrawer">
+          <div style="display:flex;align-items:center;justify-content:space-between">
+            <div style="font-size:13.5px;font-weight:600;display:flex;align-items:center;gap:8px">
+              <span style="font-size:14px;color:var(--primary)">📌</span>
+              <span id="tplDrawerTitle">工序详情</span>
+              <span class="tpl-badge cat-eng" id="tplDrawerType">agent 节点</span>
+            </div>
+            <button type="button" class="tool-btn" onclick="closeTplNodeDrawer()">✕</button>
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;background:var(--bg-subtle);border:1px solid var(--border-subtle);border-radius:var(--radius-md);padding:12px">
+            <div>
+              <label style="font-size:11px;color:var(--text-tertiary);font-weight:500;display:block;margin-bottom:3px">工序职责使命 (Purpose)</label>
+              <div id="tplDrawerPurpose" style="font-size:12px;font-weight:500;line-height:1.4">-</div>
+            </div>
+            <div>
+              <label style="font-size:11px;color:var(--text-tertiary);font-weight:500;display:block;margin-bottom:3px">负责智能体 (Preferred Agents)</label>
+              <div id="tplDrawerAgents" style="font-size:11px;font-family:var(--font-mono);color:var(--primary);line-height:1.4">-</div>
+            </div>
+            <div>
+              <label style="font-size:11px;color:var(--text-tertiary);font-weight:500;display:block;margin-bottom:3px">前置依赖工序 (Depends On)</label>
+              <div id="tplDrawerDeps" style="font-size:12px;font-weight:500;line-height:1.4">-</div>
+            </div>
+            <div>
+              <label style="font-size:11px;color:var(--text-tertiary);font-weight:500;display:block;margin-bottom:3px">准出门禁 / 验收要求</label>
+              <div id="tplDrawerGate" style="font-size:12px;font-weight:500;line-height:1.4">-</div>
+            </div>
+          </div>
+        </div>
+      </main>
+    </div>
+  `;
+}
+
+function renderTplCategories(){
+  const pillsEl=document.getElementById('tplCategoryPills');
+  if(!pillsEl)return;
+  const ts=state.templates||[];
+  const activeCat=state.tplCategoryFilter||'all';
+  pillsEl.innerHTML=TEMPLATE_CATEGORIES.map(cat=>{
+    const cnt=cat.id==='all'?ts.length:ts.filter(t=>t.category===cat.id).length;
+    const isAct=cat.id===activeCat;
+    return `<button type="button" class="tpl-cat-pill ${isAct?'active':''}" onclick="setTplCategory('${cat.id}')"><span>${cat.label}</span><span class="count">${cnt}</span></button>`;
+  }).join('');
+}
+
+function setTplCategory(catId){
+  state.tplCategoryFilter=catId;
+  renderTplCategories();
+  renderTplCards();
+}
+
+function filterTemplates(){
+  renderTplCards();
+}
+
+function renderTplCards(){
+  const listEl=document.getElementById('tplCardsList');
+  if(!listEl)return;
+  const ts=state.templates||[];
+  const cat=state.tplCategoryFilter||'all';
+  const q=(document.getElementById('tplSearchInput')?.value||'').trim().toLowerCase();
+  const filtered=ts.filter(t=>{
+    if(cat!=='all'&&t.category!==cat)return false;
+    if(q){
+      const matchText=[t.label||'',t.id||'',t.description||'',(t.nodes_preview||[]).map(n=>n.label).join(' ')].join(' ').toLowerCase();
+      if(!matchText.includes(q))return false;
+    }
+    return true;
+  });
+
+  if(!filtered.length){
+    listEl.innerHTML='<div class="empty">无匹配工作流模板</div>';
+    return;
+  }
+
+  const curId=state.currentTemplateId||'software-development-v1';
+  listEl.innerHTML=filtered.map(t=>{
+    const isSel=t.id===curId;
+    const is_builtin=Boolean(t.is_builtin);
+    const steps=(t.nodes_preview||[]).map((n,i)=>`
+      <span class="step-pill">${esc(n.label||n.id)}</span>
+      ${i<(t.nodes_preview||[]).length-1?'<span class="step-arrow">➔</span>':''}
+    `).join('');
+    return `
+      <div class="tpl-card ${isSel?'selected':''}" onclick="selectTemplateInLibrary('${esc(t.id)}')">
+        <div class="tpl-head">
+          <span class="tpl-title">
+            <span>${esc(t.label||t.id)}</span>
+            ${t.id==='software-development-v1'?'<span style="font-size:10px;background:var(--primary-subtle);color:var(--primary);padding:2px 4px;border-radius:4px;font-weight:600">官方推荐</span>':''}
+            <span class="badge ${is_builtin?'waiting':'good-text'}">${is_builtin?'内置':'自定义'}</span>
+          </span>
+          <span class="tpl-badge cat-${t.category||'biz'}">${esc(t.category_name||'工作流')}</span>
+        </div>
+        <div class="tpl-desc">${esc(t.description||'暂无业务说明')}</div>
+        <div class="tpl-pipeline" title="流程工序节点微缩示意">${steps||'<span class="muted">无节点</span>'}</div>
+        <div class="tpl-foot">
+          <span><b>${t.node_count||0}</b> 个工作流节点 · v${esc(t.version||'1.0')}</span>
+          <span style="color:var(--primary);font-weight:600">查看拓扑 ➔</span>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+async function selectTemplateInLibrary(id){
+  state.currentTemplateId=id;
+  const ts=state.templates||[];
+  const t=ts.find(x=>x.id===id)||{id:id,label:id};
+  const titleEl=document.getElementById('tplCurTitle');
+  const idEl=document.getElementById('tplCurId');
+  const catEl=document.getElementById('tplCurCat');
+  const descEl=document.getElementById('tplCurDesc');
+  const editBtnEl=document.getElementById('tplEditBtnLabel');
+  if(titleEl)titleEl.textContent=t.label||t.id;
+  if(idEl)idEl.textContent=t.id;
+  if(catEl){
+    catEl.textContent=t.category_name||'工作流';
+    catEl.className='tpl-badge cat-'+(t.category||'biz');
+  }
+  if(descEl)descEl.textContent=t.description||'';
+  if(editBtnEl)editBtnEl.textContent=t.is_builtin?'查看 YAML / 向导':'可视化配置 / YAML';
+  renderTplCards();
+  closeTplNodeDrawer();
+
+  try{
+    const d=await api('/api/template?id='+encodeURIComponent(id));
+    if(d.template){
+      if(titleEl)titleEl.textContent=d.template.label||d.template.id;
+      if(descEl)descEl.textContent=d.template.description||'';
+    }
+    state.currentTemplateDetail=d;
+    renderTplDAG(d.nodes||[]);
+  }catch(e){
+    if(t.nodes_preview)renderTplDAG(t.nodes_preview);
+  }
+}
+
+function ensureTplCardShape(){
+  if(window._tplShapeRegistered)return true;
+  if(!window.X6||!X6.Shape||!X6.Shape.HTML||!X6.Shape.HTML.register)return false;
+  try{
+    X6.Shape.HTML.register({
+      shape:'tpl-flow-card',width:216,height:118,effect:['data'],
+      html(cell){
+        const d=(cell&&cell.getData)?(cell.getData()||{}):{};
+        const div=document.createElement('div');
+        div.className='tpl-node-card'+(d.selected?' selected':'');
+        div.innerHTML=`
+          <div style="display:flex;align-items:center;justify-content:space-between">
+            <span style="font-size:10px;font-weight:600;color:var(--primary);background:var(--primary-subtle);border:1px solid rgba(94,106,210,0.2);padding:2px 4px;border-radius:4px">${d.isStart?'起始工序':'工序环节'}</span>
+            <span style="font-size:10.5px;color:var(--text-secondary);font-weight:500">${esc((d.agents||[]).join('、')||'Auto')}</span>
+          </div>
+          <div style="font-size:13px;font-weight:600;color:var(--text-primary);margin:3px 0 2px">${esc(d.label||d.id)}</div>
+          <div style="font-size:11px;color:var(--text-secondary);line-height:1.35;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical">${esc(d.purpose||'暂无说明')}</div>
+          <div style="display:flex;align-items:center;justify-content:space-between;font-size:10.5px;color:var(--text-tertiary);border-top:1px solid var(--border-subtle);padding-top:4px">
+            <span>${d.gate?'🔒 门禁校验':'✓ 自动流转'}</span>
+            <span style="color:var(--primary);font-weight:600">点击查看属性</span>
+          </div>
+        `;
+        div.onclick=()=>openTemplateNodeDrawer(d);
+        return div;
+      }
+    });
+    window._tplShapeRegistered=true;
+    return true;
+  }catch(e){return false;}
+}
+
+function renderTplDAG(nodes){
+  const container=document.getElementById('tplDagCanvas');
+  if(!container)return;
+  container.innerHTML='';
+  if(state.tplGraph&&state.tplGraph.dispose){
+    try{state.tplGraph.dispose();}catch(e){}
+    state.tplGraph=null;
+  }
+  if(!window.X6||!window.dagre){
+    renderTplFallbackSVG(container,nodes);
+    return;
+  }
+  ensureTplCardShape();
+  const W=container.clientWidth||800;
+  const H=container.clientHeight||500;
+
+  try{
+    const g=new window.dagre.graphlib.Graph();
+    g.setGraph({rankdir:'LR',ranksep:56,nodesep:32,marginx:36,marginy:36});
+    g.setDefaultEdgeLabel(()=>({}));
+    const nodeW=216,nodeH=118;
+    nodes.forEach(n=>g.setNode(n.id,{width:nodeW,height:nodeH}));
+    const edges=[];
+    nodes.forEach(n=>{
+      (n.depends_on||[]).forEach(dep=>{
+        g.setEdge(dep,n.id);
+        edges.push({from:dep,to:n.id});
+      });
+    });
+    window.dagre.layout(g);
+
+    const graph=new window.X6.Graph({
+      container:container,width:W,height:H,
+      background:{color:'transparent'},
+      panning:{enabled:true},
+      mousewheel:{enabled:true,modifiers:['ctrl','meta'],minScale:0.4,maxScale:2.2},
+      interacting:{nodeMovable:false,edgeMovable:false}
+    });
+    state.tplGraph=graph;
+
+    nodes.forEach(n=>{
+      const pos=g.node(n.id)||{x:120,y:100};
+      const isStart=!n.depends_on||n.depends_on.length===0;
+      graph.addNode({
+        id:n.id,
+        shape:'tpl-flow-card',
+        x:pos.x-nodeW/2,
+        y:pos.y-nodeH/2,
+        width:nodeW,
+        height:nodeH,
+        data:{...n,isStart}
+      });
+    });
+
+    edges.forEach(e=>{
+      graph.addEdge({
+        source:{cell:e.from,anchor:'right'},
+        target:{cell:e.to,anchor:'left'},
+        connector:{name:'smooth'},
+        attrs:{
+          line:{
+            stroke:'#5e6ad2',
+            strokeWidth:1.8,
+            targetMarker:{name:'block',size:6,fill:'#5e6ad2',stroke:'#5e6ad2'}
+          }
+        }
+      });
+    });
+
+    setTimeout(()=>fitTplGraph(),40);
+  }catch(e){
+    renderTplFallbackSVG(container,nodes);
+  }
+}
+
+function renderTplFallbackSVG(container,nodes){
+  if(!container)return;
+  container.innerHTML=`
+    <div style="padding:32px;display:flex;flex-wrap:wrap;gap:16px;align-items:center;justify-content:center;height:100%;overflow:auto">
+      ${nodes.map((n,i)=>`
+        <div class="tpl-node-card" onclick='openTemplateNodeDrawer(${JSON.stringify(n)})'>
+          <div style="display:flex;align-items:center;justify-content:space-between">
+            <span style="font-size:10px;font-weight:600;color:var(--primary);background:var(--primary-subtle);padding:2px 4px;border-radius:4px">第 ${i+1} 步</span>
+            <span style="font-size:10.5px;color:var(--text-secondary)">${esc((n.agents||[]).join('、')||'Auto')}</span>
+          </div>
+          <div style="font-size:13px;font-weight:600;color:var(--text-primary)">${esc(n.label||n.id)}</div>
+          <div style="font-size:11px;color:var(--text-secondary);line-height:1.35">${esc(n.purpose||'暂无说明')}</div>
+          <div style="display:flex;align-items:center;justify-content:space-between;font-size:10.5px;color:var(--text-tertiary);border-top:1px solid var(--border-subtle);padding-top:4px">
+            <span>${(n.depends_on||[]).length?'依赖: '+esc(n.depends_on.join(',')):'起始环节'}</span>
+            <span style="color:var(--primary)">点击详情</span>
+          </div>
+        </div>
+        ${i<nodes.length-1?'<div style="font-size:18px;color:var(--primary)">➔</div>':''}
+      `).join('')}
+    </div>`;
+}
+
+function fitTplGraph(){
+  if(state.tplGraph&&state.tplGraph.zoomToFit){
+    state.tplGraph.zoomToFit({padding:32,maxScale:1});
+    if(state.tplGraph.centerContent)state.tplGraph.centerContent();
+  }
+}
+
+function zoomTplGraph(delta){
+  if(state.tplGraph&&state.tplGraph.zoom)state.tplGraph.zoom(delta);
+}
+
+function openTemplateNodeDrawer(node){
+  const drawer=document.getElementById('tplNodeDrawer');
+  if(!drawer)return;
+  drawer.classList.add('open');
+  document.getElementById('tplDrawerTitle').textContent=(node.label||node.id)+` (${node.id})`;
+  document.getElementById('tplDrawerPurpose').textContent=node.purpose||'该阶段主要负责交付目标任务推进。';
+  document.getElementById('tplDrawerAgents').textContent=(node.agents&&node.agents.length)?node.agents.join('、'):'auto (根据任务类型智能路由)';
+  document.getElementById('tplDrawerDeps').textContent=(node.depends_on&&node.depends_on.length)?node.depends_on.join('、')+'（前置工序完备后自动触发）':'起始工序（无需前置依赖，工作流启动即就绪）';
+  document.getElementById('tplDrawerGate').textContent=node.gate||'默认标准门禁检查（自动化测试及基线验证）';
+}
+
+function closeTplNodeDrawer(){
+  const drawer=document.getElementById('tplNodeDrawer');
+  if(drawer)drawer.classList.remove('open');
+}
+
+function launchWithCurrentTemplate(){
+  const tid=state.currentTemplateId||'software-development-v1';
+  showNewWorkflow();
+  const sel=document.getElementById('newTemplate');
+  if(sel)sel.value=tid;
+}
+
 async function showTemplateLibrary(){
   const tplEl=document.getElementById('templatesTabView');
   setWorkspaceMode('templates');
@@ -6123,28 +7047,20 @@ async function showTemplateLibrary(){
   saveViewState();
   renderWorkflowTabs();
   paintCrumb();
-  if(tplEl){
-    tplEl.innerHTML=`<div class="ctl-panel-header"><div style="display:flex;justify-content:space-between;align-items:center;width:100%"><div><strong>工作流模板规范库</strong><span class="muted" style="margin-left:8px;font-weight:400">· 模板定义工作流节点与 DAG 依赖</span></div><button class="btn primary" onclick="showTemplateEditor()"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg><span>新建模板</span></button></div></div><div class="empty">正在加载模板…</div>`;
-  }
+  ensureTplLayoutDOM(tplEl);
   try{
     const ts=await fetchTemplates();
-    const cards=ts.length?ts.map(t=>`
-      <div class="task">
-        <div>
-          <div class="task-name">${esc(t.label||t.id)} <span class="badge ${t.is_builtin?'waiting':'good-text'}">${t.is_builtin?'内置':'自定义'}</span></div>
-          <div class="task-id">${esc(t.id)} · v${esc(t.version)} · ${t.node_count} 节点</div>
-          <div class="task-meta">${esc(t.description||'')}</div>
-        </div>
-        <div class="task-actions">
-          <button class="mini" onclick="showTemplateDAG('${esc(t.id)}')">节点依赖</button>
-          <button class="mini" onclick="showTemplateEditor('${esc(t.id)}')">${t.is_builtin?'查看 YAML':'编辑'}</button>
-        </div>
-      </div>`).join(''):'<div class="empty">暂无模板</div>';
-    if(tplEl){
-      tplEl.innerHTML=`<div class="ctl-panel-header"><div style="display:flex;justify-content:space-between;align-items:center;width:100%"><div><strong>工作流模板规范库</strong><span class="muted" style="margin-left:8px;font-weight:400">· 模板定义工作流节点与 DAG 依赖</span></div><button class="btn primary" onclick="showTemplateEditor()"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg><span>新建模板</span></button></div></div><div class="muted" style="margin-bottom:8px">模板定义工作流的节点与 DAG 依赖。自定义模板保存到 ~/.herdr-controller/templates/，对新启动的工作流即时生效，不影响已运行的工作流。</div>${cards}`;
+    renderTplCategories();
+    renderTplCards();
+    const targetId=state.currentTemplateId||'software-development-v1';
+    const found=ts.find(t=>t.id===targetId)||ts[0];
+    if(found){
+      const is_builtin=Boolean(found.is_builtin);
+      selectTemplateInLibrary(found.id);
     }
   }catch(e){toast(e.message,true)}
 }
+
 async function showTemplateDAG(id){
   try{
     const d=await api('/api/template?id='+encodeURIComponent(id));
@@ -6156,9 +7072,11 @@ async function showTemplateDAG(id){
         </div>
         <div class="task-meta">${(n.depends_on||[]).length?'← '+(n.depends_on||[]).map(esc).join('、'):'起始节点'}</div>
       </div>`).join('');
-    openModal('节点依赖 · '+((d.template&&d.template.label)||id),rows||'<div class="empty">无节点</div>')
+    openModal('节点依赖 · '+((d.template&&d.template.label)||id),rows||'<div class="empty">无节点</div>');
+    selectTemplateInLibrary(id);
   }catch(e){toast(e.message,true)}
 }
+
 const TEMPLATE_SCAFFOLD=`name: my-workflow
 label: 我的工作流
 version: "1.0"
@@ -6176,37 +7094,314 @@ nodes:
     depends_on: [analyze]
     purpose: 汇总并产出结果
 `;
+
 async function showTemplateEditor(id){
   const info=(state.templates||[]).find(t=>t.id===id);
   const builtin=!!(info&&info.is_builtin);
   let yaml=TEMPLATE_SCAFFOLD;
+  let detail=null;
   if(id){
     try{
       const d=await api('/api/template?id='+encodeURIComponent(id));
-      yaml=d.yaml
+      yaml=d.yaml;
+      detail=d;
     }catch(e){return toast(e.message,true)}
   }
-  openModal(id?(builtin?'内置模板（只读）':'编辑模板 · '+id):'新建模板',`
-    <div class="form">
-      <label>模板名（小写字母/数字/-/_，作为启动时的 --template 参数${id?'，不可修改':''}）</label>
-      <input id="tplName" value="${esc(id||'')}" ${id?'disabled':''}>
-      <label>YAML 定义</label>
-      <textarea id="tplYaml" style="min-height:320px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace" ${builtin?'disabled':''}>${esc(yaml)}</textarea>
-      <div class="muted">保存时服务端会做 DAG 校验（未知依赖 / 循环依赖会被拒绝）。内置模板只读；自定义模板保存后可在“新建需求”中选用。</div>
-      ${builtin?'':`<button class="btn primary" onclick="saveTemplate()">保存模板</button>`}
-    </div>`)
+  openTplConfigModal(id,builtin,yaml,detail);
 }
+
+function openTplConfigModal(id,builtin,yaml,detail){
+  const modal=document.getElementById('tplConfigModal');
+  if(!modal)return;
+  window._tplModalTab='form';
+  window._tplIsBuiltin=Boolean(builtin);
+  window._curEditingId=id||'';
+
+  const tpl=detail?detail.template:{
+    id:id||'custom-flow-'+Math.floor(Math.random()*1000),
+    label:'新建自定义工作流',
+    category:'biz',
+    description:'描述此工作流模板的使用场景…'
+  };
+
+  const rawNodes=detail?detail.nodes:[
+    {id:'step_1',label:'第一步',depends_on:[],purpose:'初始任务阶段',agents:['claude']},
+    {id:'step_2',label:'第二步',depends_on:['step_1'],purpose:'汇总并产出交付物',agents:['codex']}
+  ];
+
+  window._curEditingTemplate={
+    id:tpl.id||id||'custom-flow',
+    label:tpl.label||tpl.id||'我的工作流',
+    category:tpl.category||'biz',
+    version:tpl.version||'1.0',
+    description:tpl.description||'',
+    nodes:JSON.parse(JSON.stringify(rawNodes))
+  };
+
+  document.getElementById('tplModalHint').textContent=id?`[${id}]${builtin?' · 内置只读':''}`:'[新建模板]';
+  document.getElementById('tplEditLabel').value=window._curEditingTemplate.label;
+  const nameInput=document.getElementById('tplName');
+  if(nameInput){
+    nameInput.value=window._curEditingTemplate.id;
+    nameInput.disabled=Boolean(builtin&&id);
+  }
+  document.getElementById('tplEditCategory').value=window._curEditingTemplate.category||'biz';
+  document.getElementById('tplEditDesc').value=window._curEditingTemplate.description||'';
+  document.getElementById('tplYaml').value=yaml||generateYamlFromTplState(window._curEditingTemplate);
+
+  const saveBtn=document.getElementById('btnSaveTplConfig');
+  if(saveBtn){
+    if(builtin&&id){
+      saveBtn.textContent='内置模板只读（请修改模板名另存为自定义）';
+      nameInput.oninput=()=>{
+        const isNew=nameInput.value.trim()!==id;
+        saveBtn.disabled=!isNew;
+        saveBtn.textContent=isNew?'另存为自定义模板':'内置模板只读';
+      };
+      saveBtn.disabled=true;
+    }else{
+      saveBtn.textContent='保存并应用此模板';
+      saveBtn.disabled=false;
+      if(nameInput)nameInput.oninput=null;
+    }
+  }
+
+  switchTplModalTab('form');
+  renderTplStagesEditorList();
+  renderTplLiveDAG();
+  modal.style.display='flex';
+}
+
+function closeTplModal(){
+  const modal=document.getElementById('tplConfigModal');
+  if(modal)modal.style.display='none';
+}
+
+function switchTplModalTab(tab){
+  window._tplModalTab=tab;
+  const isForm=tab==='form';
+  const tabBtnForm=document.getElementById('tplTabBtnForm');
+  const tabBtnYaml=document.getElementById('tplTabBtnYaml');
+  const bodyForm=document.getElementById('tplModalTabForm');
+  const bodyYaml=document.getElementById('tplModalTabYaml');
+  if(tabBtnForm)tabBtnForm.classList.toggle('active',isForm);
+  if(tabBtnYaml)tabBtnYaml.classList.toggle('active',!isForm);
+  if(bodyForm)bodyForm.style.display=isForm?'flex':'none';
+  if(bodyYaml)bodyYaml.style.display=isForm?'none':'flex';
+
+  if(!isForm&&window._curEditingTemplate){
+    syncTplFormToState();
+    const yaml=generateYamlFromTplState(window._curEditingTemplate);
+    const yamlEl=document.getElementById('tplYaml');
+    if(yamlEl)yamlEl.value=yaml;
+  }
+}
+
+function renderTplStagesEditorList(){
+  const container=document.getElementById('tplStagesEditorList');
+  if(!container||!window._curEditingTemplate)return;
+  const nodes=window._curEditingTemplate.nodes||[];
+
+  container.innerHTML=nodes.map((n,idx)=>{
+    const otherNodes=nodes.filter(o=>o.id!==n.id);
+    const depOptions=otherNodes.map(o=>{
+      const isSel=(n.depends_on||[]).includes(o.id);
+      return `<option value="${esc(o.id)}" ${isSel?'selected':''}>${esc(o.label||o.id)} (${esc(o.id)})</option>`;
+    }).join('');
+
+    return `
+      <div class="node-editor-item" style="background:var(--bg-surface);border:1px solid var(--border-default);border-radius:var(--radius-md);padding:8px 12px;display:flex;flex-direction:column;gap:8px;margin-bottom:8px">
+        <div style="display:flex;align-items:center;justify-content:space-between">
+          <div style="display:flex;align-items:center;gap:8px">
+            <span style="width:18px;height:18px;background:var(--primary-subtle);color:var(--primary);border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:10.5px;font-weight:600">${idx+1}</span>
+            <input type="text" value="${esc(n.label||n.id)}" style="font-weight:600;font-size:13px;border:none;background:transparent;outline:none;color:var(--text-primary)" onchange="updateTplStageField(${idx},'label',this.value)" placeholder="工序环节名称">
+            <span style="font-size:11px;color:var(--text-tertiary);font-family:var(--font-mono)">id: ${esc(n.id)}</span>
+          </div>
+          <button type="button" class="btn mini" style="color:var(--danger);border-color:transparent" onclick="deleteTplStage(${idx})">删除</button>
+        </div>
+        <div style="display:flex;gap:8px">
+          <div style="flex:1;display:flex;flex-direction:column;gap:4px">
+            <label style="font-size:11px;font-weight:600;color:var(--text-secondary)">前置依赖环节 (Depends On)</label>
+            <select multiple style="height:54px;font-size:11.5px;border:1px solid var(--border-default);border-radius:var(--radius-sm);padding:4px" onchange="updateTplStageDeps(${idx},this)">
+              ${depOptions}
+            </select>
+          </div>
+          <div style="flex:1;display:flex;flex-direction:column;gap:4px">
+            <label style="font-size:11px;font-weight:600;color:var(--text-secondary)">工序职责使命 (Purpose)</label>
+            <textarea rows="2" style="font-size:11.5px;border:1px solid var(--border-default);border-radius:var(--radius-sm);padding:4px" onchange="updateTplStageField(${idx},'purpose',this.value)">${esc(n.purpose||'')}</textarea>
+          </div>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+function updateTplStageField(idx,field,val){
+  if(window._curEditingTemplate&&window._curEditingTemplate.nodes[idx]){
+    window._curEditingTemplate.nodes[idx][field]=val;
+    renderTplLiveDAG();
+  }
+}
+
+function updateTplStageDeps(idx,selectEl){
+  if(window._curEditingTemplate&&window._curEditingTemplate.nodes[idx]){
+    const selected=Array.from(selectEl.selectedOptions).map(opt=>opt.value);
+    window._curEditingTemplate.nodes[idx].depends_on=selected;
+    renderTplLiveDAG();
+  }
+}
+
+function addNewTplStage(){
+  if(!window._curEditingTemplate)return;
+  const nodes=window._curEditingTemplate.nodes||[];
+  const newId='stage_'+(nodes.length+1);
+  const prevId=nodes.length>0?nodes[nodes.length-1].id:null;
+  nodes.push({
+    id:newId,
+    label:'新增工序环节',
+    depends_on:prevId?[prevId]:[],
+    purpose:'描述该阶段的业务目标与产出',
+    agents:['claude']
+  });
+  renderTplStagesEditorList();
+  renderTplLiveDAG();
+  toast('已新增工序环节，右侧拓扑图已实时重排！');
+}
+
+function deleteTplStage(idx){
+  if(!window._curEditingTemplate)return;
+  const nodes=window._curEditingTemplate.nodes||[];
+  if(nodes.length<=1)return toast('工作流至少需要保留 1 个工序环节',true);
+  const removedId=nodes[idx].id;
+  nodes.splice(idx,1);
+  nodes.forEach(n=>{
+    n.depends_on=(n.depends_on||[]).filter(dep=>dep!==removedId);
+  });
+  renderTplStagesEditorList();
+  renderTplLiveDAG();
+  toast('工序已删除，拓扑连线已自动更新');
+}
+
+function renderTplLiveDAG(){
+  const container=document.getElementById('tplLiveCanvas');
+  if(!container||!window._curEditingTemplate)return;
+  container.innerHTML='';
+  if(window._tplLiveGraph&&window._tplLiveGraph.dispose){
+    try{window._tplLiveGraph.dispose();}catch(e){}
+    window._tplLiveGraph=null;
+  }
+  if(!window.X6||!window.dagre)return;
+  const nodes=window._curEditingTemplate.nodes||[];
+  const W=container.clientWidth||340;
+  const H=container.clientHeight||450;
+
+  try{
+    const g=new window.dagre.graphlib.Graph();
+    g.setGraph({rankdir:'TB',ranksep:36,nodesep:20,marginx:16,marginy:16});
+    g.setDefaultEdgeLabel(()=>({}));
+    const nodeW=170,nodeH=52;
+    nodes.forEach(n=>g.setNode(n.id,{width:nodeW,height:nodeH}));
+    const edges=[];
+    nodes.forEach(n=>{
+      (n.depends_on||[]).forEach(dep=>{
+        g.setEdge(dep,n.id);
+        edges.push({from:dep,to:n.id});
+      });
+    });
+    window.dagre.layout(g);
+
+    const liveGraph=new window.X6.Graph({
+      container:container,width:W,height:H,
+      background:{color:'transparent'},
+      panning:{enabled:true},
+      mousewheel:{enabled:true},
+      interacting:{nodeMovable:false}
+    });
+    window._tplLiveGraph=liveGraph;
+
+    nodes.forEach(n=>{
+      const pos=g.node(n.id)||{x:50,y:50};
+      liveGraph.addNode({
+        id:n.id,
+        x:pos.x-nodeW/2,
+        y:pos.y-nodeH/2,
+        width:nodeW,
+        height:nodeH,
+        attrs:{
+          body:{fill:'#ffffff',stroke:'#5e6ad2',strokeWidth:1.5,rx:6,ry:6},
+          label:{text:n.label||n.id,fill:'#121316',fontSize:12,fontWeight:'600'}
+        }
+      });
+    });
+
+    edges.forEach(e=>{
+      liveGraph.addEdge({
+        source:{cell:e.from},
+        target:{cell:e.to},
+        attrs:{
+          line:{stroke:'#5e6ad2',strokeWidth:1.8,targetMarker:{name:'block',size:5,fill:'#5e6ad2',stroke:'#5e6ad2'}}
+        }
+      });
+    });
+
+    setTimeout(()=>{
+      if(liveGraph&&liveGraph.zoomToFit)liveGraph.zoomToFit({padding:16});
+    },40);
+  }catch(e){}
+}
+
+function syncTplFormToState(){
+  if(!window._curEditingTemplate)return;
+  window._curEditingTemplate.label=document.getElementById('tplEditLabel')?.value||window._curEditingTemplate.label;
+  window._curEditingTemplate.id=document.getElementById('tplName')?.value||window._curEditingTemplate.id;
+  window._curEditingTemplate.category=document.getElementById('tplEditCategory')?.value||window._curEditingTemplate.category;
+  window._curEditingTemplate.description=document.getElementById('tplEditDesc')?.value||window._curEditingTemplate.description;
+}
+
+function generateYamlFromTplState(tpl){
+  let yaml=`name: ${tpl.id}\nlabel: ${tpl.label}\ncategory: ${tpl.category||'biz'}\nversion: "${tpl.version||'1.0'}"\ndescription: ${tpl.description||''}\n\nnodes:\n`;
+  (tpl.nodes||[]).forEach(n=>{
+    yaml+=`  - id: ${n.id}\n`;
+    yaml+=`    label: ${n.label||n.id}\n`;
+    yaml+=`    node_type: agent\n`;
+    yaml+=`    depends_on: [${(n.depends_on||[]).join(', ')}]\n`;
+    yaml+=`    purpose: ${n.purpose||''}\n`;
+    yaml+=`    agent_policy:\n`;
+    yaml+=`      preferred: [${(n.agents||['claude']).join(', ')}]\n\n`;
+  });
+  return yaml;
+}
+
+function copyTplYaml(){
+  const text=document.getElementById('tplYaml')?.value||'';
+  if(navigator.clipboard&&navigator.clipboard.writeText){
+    navigator.clipboard.writeText(text);
+  }
+  toast('YAML 已复制到剪贴板');
+}
+
 async function saveTemplate(){
-  const name=document.getElementById('tplName').value.trim();
-  const yaml=document.getElementById('tplYaml').value;
+  const name=(document.getElementById('tplName')?.value||'').trim();
+  let yaml=document.getElementById('tplYaml')?.value||'';
+  if(window._tplModalTab==='form'&&window._curEditingTemplate){
+    syncTplFormToState();
+    yaml=generateYamlFromTplState(window._curEditingTemplate);
+    const yamlEl=document.getElementById('tplYaml');
+    if(yamlEl)yamlEl.value=yaml;
+  }
   if(!name)return toast('请填写模板名',true);
   try{
     const d=await api('/api/template',{method:'POST',body:JSON.stringify({name:name,yaml:yaml})});
+    closeTplModal();
     closeModal();
     await fetchTemplates();
-    toast('模板已保存：'+d.name+'（'+d.node_count+' 节点）')
+    renderTplCategories();
+    renderTplCards();
+    selectTemplateInLibrary(d.name);
+    toast('模板已保存：'+d.name+'（'+d.node_count+' 节点）');
   }catch(e){toast(e.message,true)}
 }
+
 async function populateTemplateSelect(selId='newTemplate'){
   try{
     const ts=await fetchTemplates();
