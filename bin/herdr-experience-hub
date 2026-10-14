@@ -1,0 +1,68 @@
+#!/usr/bin/env python3
+"""HAFlow Experience Hub Standalone CLI Service.
+
+Usage:
+  bin/herdr-experience-hub start [--host 0.0.0.0] [--port 8780] [--db-path <path>]
+  bin/herdr-experience-hub token create --token <token> --user <user> --role <role> [--customers <c1,c2>]
+"""
+
+import argparse
+import os
+import sys
+from pathlib import Path
+
+# Add repo root to sys.path
+HERDR_ROOT = Path(__file__).resolve().parent.parent
+if str(HERDR_ROOT) not in sys.path:
+    sys.path.insert(0, str(HERDR_ROOT))
+
+from herdr.experience.hub_server import ExperienceHubServer, HubStorage, DEFAULT_HUB_DB_PATH
+
+
+def main():
+    parser = argparse.ArgumentParser(description="HAFlow Experience Hub CLI")
+    subparsers = parser.add_subparsers(dest="command")
+
+    # start
+    p_start = subparsers.add_parser("start", help="Start the Experience Hub server")
+    p_start.add_argument("--host", default=os.environ.get("HERDR_HUB_HOST", "127.0.0.1"), help="Host to bind")
+    p_start.add_argument("--port", type=int, default=int(os.environ.get("HERDR_HUB_PORT", 8780)), help="Port to bind")
+    p_start.add_argument("--db-path", default=os.environ.get("HERDR_HUB_DB_PATH", str(DEFAULT_HUB_DB_PATH)), help="SQLite DB path")
+
+    # token
+    p_token = subparsers.add_parser("token", help="Manage authentication tokens")
+    token_subs = p_token.add_subparsers(dest="token_command")
+    p_token_create = token_subs.add_parser("create", help="Create or update an auth token")
+    p_token_create.add_argument("--token", required=True, help="Token secret string")
+    p_token_create.add_argument("--user", required=True, help="User ID / Employee ID")
+    p_token_create.add_argument("--role", choices=["contributor", "reviewer", "admin"], default="contributor", help="User role")
+    p_token_create.add_argument("--customers", default="*", help="Comma-separated allowed customer IDs or '*'")
+    p_token_create.add_argument("--db-path", default=os.environ.get("HERDR_HUB_DB_PATH", str(DEFAULT_HUB_DB_PATH)), help="SQLite DB path")
+
+    args = parser.parse_args()
+    if not args.command:
+        parser.print_help()
+        sys.exit(1)
+
+    if args.command == "start":
+        db_path = Path(args.db_path)
+        storage = HubStorage(db_path)
+        # Ensure default test/admin tokens exist if DB is fresh
+        admin_token = os.environ.get("HERDR_HUB_ADMIN_TOKEN", "admin_secret_token_123")
+        storage.register_token(admin_token, user_id="admin", role="admin", allowed_customers=["*"])
+
+        server = ExperienceHubServer(host=args.host, port=args.port, db_path=db_path)
+        print(f"[Experience Hub] Starting server on http://{args.host}:{args.port}")
+        print(f"[Experience Hub] DB: {db_path}")
+        server.start(block=True)
+
+    elif args.command == "token" and args.token_command == "create":
+        db_path = Path(args.db_path)
+        storage = HubStorage(db_path)
+        custs = [c.strip() for c in args.customers.split(",") if c.strip()]
+        storage.register_token(args.token, user_id=args.user, role=args.role, allowed_customers=custs)
+        print(f"[Token Created] user={args.user}, role={args.role}, customers={custs}")
+
+
+if __name__ == "__main__":
+    main()

@@ -1206,6 +1206,51 @@ def api_task_interaction_respond(b):
         }
 
 
+def _get_console_hub_client():
+    from herdr.experience.client import ExperienceClient
+    return ExperienceClient()
+
+
+def api_experience_candidates(q=None):
+    q = q or {}
+    client = _get_console_hub_client()
+    status = q.get('status', [None])[0] if isinstance(q.get('status'), list) else q.get('status')
+    cust = q.get('customer', [None])[0] if isinstance(q.get('customer'), list) else q.get('customer')
+    cands = client.list_candidates(status=status, customer=cust)
+    return {'ok': True, 'count': len(cands), 'candidates': [c.to_dict() for c in cands]}
+
+
+def api_experience_candidate(exp_id):
+    client = _get_console_hub_client()
+    exp = client.get_experience(exp_id)
+    if not exp:
+        return {'ok': False, 'error': 'not_found'}
+    return {'ok': True, 'experience': exp.to_dict()}
+
+
+def api_experience_rules(q=None):
+    q = q or {}
+    client = _get_console_hub_client()
+    cust = q.get('customer', [None])[0] if isinstance(q.get('customer'), list) else q.get('customer')
+    rules = client.query_rules(customer=cust)
+    return {'ok': True, 'count': len(rules), 'rules': [r.to_dict() for r in rules]}
+
+
+def api_experience_review(b):
+    b = b or {}
+    client = _get_console_hub_client()
+    exp_id = str(b.get('experience_id') or '').strip()
+    action = str(b.get('action') or 'approve').strip()
+    comment = str(b.get('comment') or '').strip()
+    return client.review_candidate(exp_id, action=action, comment=comment)
+
+
+def api_experience_revoke(b):
+    b = b or {}
+    client = _get_console_hub_client()
+    exp_id = str(b.get('experience_id') or '').strip()
+    reason = str(b.get('reason') or '').strip()
+    return client.revoke_rule(exp_id, reason=reason)
 
 
 def api_task_force_review(b):
@@ -6275,6 +6320,9 @@ body {
       <button type="button" class="rail-item" id="railNavTemplates" data-rail-nav="templates" data-nav="templates" onclick="showTemplateLibrary()" title="模板与规范资产库 (Templates)">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/></svg>
       </button>
+      <button type="button" class="rail-item" id="railNavExperience" data-rail-nav="experience" data-nav="experience" onclick="showShellView('experience')" title="企业经验中心 (Experience Hub)">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>
+      </button>
     </nav>
     <div class="rail-foot">
       <div class="rail-avatar" id="railSpaceAvatar" title="空间" onclick="toggleSpaceMenu(event)">共</div>
@@ -9609,6 +9657,100 @@ function paintShellPage(view){
   else if(view==='agents')renderShellAgents();
   else if(view==='slots')renderShellSlots();
   else if(view==='workflows')renderShellWorkflows();
+  else if(view==='experience')renderShellExperience();
+}
+async function renderShellExperience(){
+  const el=document.getElementById('tasks');if(!el)return;
+  el.innerHTML='<div class="shell-page"><div class="shell-page-head"><h3>企业经验中心 (Experience Hub)</h3><p style="color:var(--text-secondary);font-size:12px;">沉淀自真实任务并通过审核的企业业务规则资产</p></div><div id="experienceHubContainer" style="padding:16px 0;"><div class="loading">加载经验数据中...</div></div></div>';
+  const container=document.getElementById('experienceHubContainer');
+  try{
+    const candRes=await api('/api/experience/candidates?status=pending_review');
+    const ruleRes=await api('/api/experience/rules');
+    const cands=(candRes&&candRes.data&&candRes.data.candidates)||[];
+    const rules=(ruleRes&&ruleRes.data&&ruleRes.data.rules)||[];
+    let html='<div style="display:flex;gap:24px;flex-direction:column;">';
+    html+='<div class="card" style="padding:16px;background:var(--bg-card);border:1px solid var(--border-color);border-radius:8px;">';
+    html+=`<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;"><h4 style="margin:0;font-size:14px;">待审核业务规则候选 <span class="badge" style="background:var(--primary);color:#fff;border-radius:10px;padding:2px 8px;font-size:11px;">${cands.length}</span></h4></div>`;
+    if(!cands.length){
+      html+='<div class="empty" style="color:var(--text-muted);font-size:13px;padding:12px 0;">当前暂无待审核规则候选</div>';
+    }else{
+      html+='<div style="display:flex;flex-direction:column;gap:12px;">';
+      for(const c of cands){
+        html+=`<div style="border:1px solid var(--border-color);border-radius:6px;padding:12px;background:var(--bg-main);">
+          <div style="display:flex;justify-content:space-between;align-items:flex-start;">
+            <div>
+              <strong style="font-size:14px;">${esc(c.title)}</strong>
+              <div style="font-size:12px;color:var(--text-secondary);margin-top:4px;">
+                <span>适用客户: <b>${esc(c.applies_to.customer||'通用')}</b></span> |
+                <span>贡献者: ${esc(c.contributor)}</span> |
+                <span>来源Task: ${esc(c.source.task_id)}</span>
+              </div>
+            </div>
+            <div style="display:flex;gap:8px;">
+              <button class="btn btn-sm btn-primary" onclick="reviewExperienceCandidate('${esc(c.experience_id)}','approve')">通过发布</button>
+              <button class="btn btn-sm btn-danger" onclick="reviewExperienceCandidate('${esc(c.experience_id)}','reject')">驳回</button>
+            </div>
+          </div>
+          <div style="margin-top:8px;padding:8px;background:var(--bg-sub);border-radius:4px;font-size:13px;white-space:pre-wrap;">${esc(c.content)}</div>
+        </div>`;
+      }
+      html+='</div>';
+    }
+    html+='</div>';
+    html+='<div class="card" style="padding:16px;background:var(--bg-card);border:1px solid var(--border-color);border-radius:8px;">';
+    html+=`<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;"><h4 style="margin:0;font-size:14px;">已发布正式业务规则 <span class="badge" style="background:#10b981;color:#fff;border-radius:10px;padding:2px 8px;font-size:11px;">${rules.length}</span></h4></div>`;
+    if(!rules.length){
+      html+='<div class="empty" style="color:var(--text-muted);font-size:13px;padding:12px 0;">当前暂无已发布规则</div>';
+    }else{
+      html+='<div style="display:flex;flex-direction:column;gap:12px;">';
+      for(const r of rules){
+        html+=`<div style="border:1px solid var(--border-color);border-radius:6px;padding:12px;background:var(--bg-main);">
+          <div style="display:flex;justify-content:space-between;align-items:flex-start;">
+            <div>
+              <strong style="font-size:14px;">${esc(r.title)}</strong> <span style="font-size:11px;color:var(--text-muted);">(v${r.version})</span>
+              <div style="font-size:12px;color:var(--text-secondary);margin-top:4px;">
+                <span>规则ID: <code>${esc(r.experience_id)}</code></span> |
+                <span>适用客户: <b>${esc(r.applies_to.customer||'通用')}</b></span> |
+                <span>贡献者: ${esc(r.contributor)}</span>
+              </div>
+            </div>
+            <div>
+              <button class="btn btn-sm btn-outline-danger" onclick="revokeExperienceRule('${esc(r.experience_id)}')">撤回规则</button>
+            </div>
+          </div>
+          <div style="margin-top:8px;padding:8px;background:var(--bg-sub);border-radius:4px;font-size:13px;white-space:pre-wrap;">${esc(r.content)}</div>
+        </div>`;
+      }
+      html+='</div>';
+    }
+    html+='</div>';
+    html+='</div>';
+    container.innerHTML=html;
+  }catch(e){
+    container.innerHTML=`<div class="error" style="color:var(--danger);padding:16px;">企业经验中心暂未启动或离线: ${esc(e.message||e)}</div>`;
+  }
+}
+async function reviewExperienceCandidate(expId,action){
+  const comment=prompt(action==='approve'?'请输入审核通过批注（可选）:':'请输入驳回理由:');
+  if(comment===null)return;
+  try{
+    await api('/api/experience/review',{method:'POST',body:JSON.stringify({experience_id:expId,action:action,comment:comment})});
+    toast(action==='approve'?'已通过并发布业务规则':'已驳回规则候选');
+    renderShellExperience();
+  }catch(e){
+    toast('操作失败: '+(e.message||e),true);
+  }
+}
+async function revokeExperienceRule(expId){
+  const reason=prompt('请输入撤回该规则的原因:');
+  if(!reason)return;
+  try{
+    await api('/api/experience/revoke',{method:'POST',body:JSON.stringify({experience_id:expId,reason:reason})});
+    toast('已撤回该业务规则');
+    renderShellExperience();
+  }catch(e){
+    toast('撤回失败: '+(e.message||e),true);
+  }
 }
 function renderShellAlerts(){
   const el=document.getElementById('tasks');if(!el)return;
@@ -11560,6 +11702,9 @@ class Handler(BaseHTTPRequestHandler):
                 tid=q.get('task_id',[''])[0] or q.get('id',[''])[0]
                 wid=q.get('workflow_id',[''])[0]
                 return self.send_json(200,api_task_interaction_get(tid=tid,wid=wid))
+            if p=='/api/experience/candidates':return self.send_json(200,api_experience_candidates(self.query()))
+            if p=='/api/experience/candidate':return self.send_json(200,api_experience_candidate(self.query().get('id',[''])[0]))
+            if p=='/api/experience/rules':return self.send_json(200,api_experience_rules(self.query()))
             return self.send_json(404,error='Not Found')
         except herdr_deliverables.DeliverableError as e:
             return self.send_json(e.status,error=e.message)
@@ -11613,6 +11758,8 @@ class Handler(BaseHTTPRequestHandler):
             if p=='/api/workflow/decision':return self.send_json(200,api_workflow_decide_resolve(b))
             if p=='/api/workflow/recovery/decision':return self.send_json(200,api_workflow_recovery_decide(b))
             if p=='/api/task/interaction/respond':return self.send_json(200,api_task_interaction_respond(b))
+            if p=='/api/experience/review':return self.send_json(200,api_experience_review(b))
+            if p=='/api/experience/revoke':return self.send_json(200,api_experience_revoke(b))
             return self.send_json(404,error='Not Found')
         except Exception as e:
             self.log_message('POST %s failed: %s', self.path, e)
