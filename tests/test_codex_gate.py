@@ -90,3 +90,11 @@ def test_workflow_subscribes_and_uses_trusted_base():
     assert "pull_request_review" in text
     assert "pull_request_review_comment" in text
     assert "base.sha" in text
+
+
+def test_workflow_grants_contents_read_for_checkout():
+    import yaml as _yaml
+    from pathlib import Path as _P
+    wf = _yaml.safe_load((_P(__file__).resolve().parent.parent / ".github" / "workflows" / "codex-gate.yml").read_text())
+    assert wf["permissions"]["contents"] == "read"
+    assert wf["permissions"]["pull-requests"] == "read"
