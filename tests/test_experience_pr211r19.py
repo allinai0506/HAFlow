@@ -8,12 +8,12 @@ import tempfile
 import time
 from pathlib import Path
 
+from herdr.experience.collector import _get_collector_db
 
-def _schema(conn):
-    conn.execute("""CREATE TABLE local_collector_records (task_id TEXT NOT NULL, run_id TEXT NOT NULL,
-      outcome_id TEXT, experience_id TEXT, status TEXT NOT NULL, candidate_json TEXT, outcome_json TEXT,
-      last_error TEXT, retry_count INTEGER NOT NULL DEFAULT 0, next_retry_at REAL NOT NULL DEFAULT 0,
-      created_at REAL NOT NULL, updated_at REAL NOT NULL, PRIMARY KEY (task_id, run_id))""")
+
+def _schema(cdb):
+    """Use the production schema so tests cannot drift from it."""
+    return _get_collector_db(cdb)
 
 
 def _exp(eid, content="rule content long enough xxxxx"):
@@ -27,9 +27,9 @@ def test_success_guarded_by_experience_id(tmp_path):
 
     cdb = tmp_path / "c.db"
     conn = sqlite3.connect(str(cdb))
-    _schema(conn)
+    conn = _schema(cdb)
     now = time.time()
-    conn.execute("INSERT INTO local_collector_records VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+    conn.execute("INSERT INTO local_collector_records (task_id, run_id, outcome_id, experience_id, status, candidate_json, outcome_json, last_error, retry_count, next_retry_at, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                  ("t", "r", None, "exp-A", "pending_upload", json.dumps(_exp("exp-A")),
                   None, "x", 0, 0, now, now))
     conn.commit()
@@ -62,9 +62,9 @@ def test_quarantined_collection_fails_sync(tmp_path):
     import os
     cdb = tmp_path / "c.db"
     conn = sqlite3.connect(str(cdb))
-    _schema(conn)
+    conn = _schema(cdb)
     now = time.time()
-    conn.execute("INSERT INTO local_collector_records VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+    conn.execute("INSERT INTO local_collector_records (task_id, run_id, outcome_id, experience_id, status, candidate_json, outcome_json, last_error, retry_count, next_retry_at, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                  ("ghost", "r", None, None, "pending_collection", None,
                   '{"run_id":"r"}', None, 0, 0, now, now))
     conn.commit()

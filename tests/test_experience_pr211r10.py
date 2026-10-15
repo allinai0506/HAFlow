@@ -2,6 +2,8 @@
 
 import json
 import sqlite3
+
+from herdr.experience.collector import _get_collector_db
 import subprocess
 import sys
 import tempfile
@@ -61,13 +63,9 @@ def test_async_settlement_single_flight(tmp_path):
 def test_sync_no_client_fails_loud(tmp_path):
     import os
     cdb = tmp_path / "c.db"
-    conn = sqlite3.connect(str(cdb))
-    conn.execute("""CREATE TABLE local_collector_records (task_id TEXT NOT NULL, run_id TEXT NOT NULL,
-      outcome_id TEXT, experience_id TEXT, status TEXT NOT NULL, candidate_json TEXT, outcome_json TEXT,
-      last_error TEXT, retry_count INTEGER NOT NULL DEFAULT 0, next_retry_at REAL NOT NULL DEFAULT 0,
-      created_at REAL NOT NULL, updated_at REAL NOT NULL, PRIMARY KEY (task_id, run_id))""")
+    conn = _get_collector_db(cdb)
     now = time.time()
-    conn.execute("INSERT INTO local_collector_records VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+    conn.execute("INSERT INTO local_collector_records (task_id, run_id, outcome_id, experience_id, status, candidate_json, outcome_json, last_error, retry_count, next_retry_at, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                  ("t9", "r9", "o9", "e9", "pending_upload", '{"x":1}', None,
                   "down", 3, now + 280, now, now))
     conn.commit()

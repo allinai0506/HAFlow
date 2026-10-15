@@ -107,10 +107,10 @@ def test_poison_row_does_not_block_queue(tmp_path):
     col = ExperienceCollector(db_path=cdb, hub_client=None, contributor="u")
     conn = _get_collector_db(cdb)
     now = time.time()
-    conn.execute("INSERT INTO local_collector_records VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+    conn.execute("INSERT INTO local_collector_records (task_id, run_id, outcome_id, experience_id, status, candidate_json, outcome_json, last_error, retry_count, next_retry_at, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                  ("ghost", "r-ghost", None, None, "pending_collection", None,
                   '{"run_id":"r-ghost"}', None, 0, 0, now - 100, now - 100))
-    conn.execute("INSERT INTO local_collector_records VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+    conn.execute("INSERT INTO local_collector_records (task_id, run_id, outcome_id, experience_id, status, candidate_json, outcome_json, last_error, retry_count, next_retry_at, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                  ("good", "r-good", None, None, "pending_collection", None,
                   json.dumps({"outcome_id": "o1", "run_id": "r-good", "qualified_success": True,
                               "verification_passed": True, "final_status": "completed"}),

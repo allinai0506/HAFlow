@@ -2,6 +2,8 @@
 
 import json
 import sqlite3
+
+from herdr.experience.collector import _get_collector_db
 import subprocess
 import sys
 import tempfile
@@ -63,15 +65,11 @@ def test_failed_upload_does_not_rewind_success(tmp_path):
 def test_sync_failing_hub_exits_nonzero(tmp_path):
     import os
     cdb = tmp_path / "c.db"
-    conn = sqlite3.connect(str(cdb))
-    conn.execute("""CREATE TABLE local_collector_records (task_id TEXT NOT NULL, run_id TEXT NOT NULL,
-      outcome_id TEXT, experience_id TEXT, status TEXT NOT NULL, candidate_json TEXT, outcome_json TEXT,
-      last_error TEXT, retry_count INTEGER NOT NULL DEFAULT 0, next_retry_at REAL NOT NULL DEFAULT 0,
-      created_at REAL NOT NULL, updated_at REAL NOT NULL, PRIMARY KEY (task_id, run_id))""")
+    conn = _get_collector_db(cdb)
     exp = {"experience_id": "e-r11", "type": "business_rule", "title": "t", "content": "x",
            "contributor": "u", "applies_to": {"customer": "acme"}, "source": {"task_id": "t", "run_id": "r"}}
     now = time.time()
-    conn.execute("INSERT INTO local_collector_records VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+    conn.execute("INSERT INTO local_collector_records (task_id, run_id, outcome_id, experience_id, status, candidate_json, outcome_json, last_error, retry_count, next_retry_at, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                  ("t", "r", "o", "e-r11", "pending_upload", json.dumps(exp),
                   None, "x", 0, 0, now, now))
     conn.commit()
@@ -88,13 +86,9 @@ def test_sync_failing_hub_exits_nonzero(tmp_path):
 def test_sync_quarantined_collection_exits_nonzero(tmp_path):
     import os
     cdb = tmp_path / "c.db"
-    conn = sqlite3.connect(str(cdb))
-    conn.execute("""CREATE TABLE local_collector_records (task_id TEXT NOT NULL, run_id TEXT NOT NULL,
-      outcome_id TEXT, experience_id TEXT, status TEXT NOT NULL, candidate_json TEXT, outcome_json TEXT,
-      last_error TEXT, retry_count INTEGER NOT NULL DEFAULT 0, next_retry_at REAL NOT NULL DEFAULT 0,
-      created_at REAL NOT NULL, updated_at REAL NOT NULL, PRIMARY KEY (task_id, run_id))""")
+    conn = _get_collector_db(cdb)
     now = time.time()
-    conn.execute("INSERT INTO local_collector_records VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+    conn.execute("INSERT INTO local_collector_records (task_id, run_id, outcome_id, experience_id, status, candidate_json, outcome_json, last_error, retry_count, next_retry_at, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                  ("ghost", "r", None, None, "pending_collection", None,
                   '{"run_id":"r"}', None, 0, 0, now, now))
     conn.commit()

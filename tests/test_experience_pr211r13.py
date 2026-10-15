@@ -2,6 +2,8 @@
 
 import json
 import sqlite3
+
+from herdr.experience.collector import _get_collector_db
 import subprocess
 import sys
 import tempfile
@@ -28,7 +30,10 @@ def test_collection_failures_propagate():
         col = ExperienceCollector(db_path=cdb, hub_client=None, contributor="u")
         conn = _get_collector_db(cdb)
         now = time.time()
-        conn.execute("INSERT INTO local_collector_records VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        conn.execute("INSERT INTO local_collector_records (task_id, run_id, outcome_id, experience_id, "
+                      "status, candidate_json, outcome_json, last_error, retry_count, "
+                      "next_retry_at, created_at, updated_at) "
+                      "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                      ("t-r13", "r-r13", None, None, "pending_collection", None,
                       '{"run_id":"r-r13"}', None, 0, 0, now, now))
         conn.commit()
@@ -54,7 +59,10 @@ def test_upsert_keeps_concurrent_uploaded():
                              "operator": "human", "urgent": True, "status": "dispatched"}, db_path=sdb)
         conn = C._get_collector_db(cdb)
         now = time.time()
-        conn.execute("INSERT INTO local_collector_records VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        conn.execute("INSERT INTO local_collector_records (task_id, run_id, outcome_id, experience_id, "
+                      "status, candidate_json, outcome_json, last_error, retry_count, "
+                      "next_retry_at, created_at, updated_at) "
+                      "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                      ("t", "r", "o", "e", "pending_upload", '{"x":1}', None,
                       "down", 1, 0, now, now))
         conn.commit()
@@ -93,13 +101,12 @@ def test_sync_collection_failure_exits_nonzero():
         cdb = td / "c.db"
         sdb = td / "s.db"
         sdb.write_bytes(b"not a database")
-        conn = sqlite3.connect(str(cdb))
-        conn.execute("""CREATE TABLE local_collector_records (task_id TEXT NOT NULL, run_id TEXT NOT NULL,
-          outcome_id TEXT, experience_id TEXT, status TEXT NOT NULL, candidate_json TEXT, outcome_json TEXT,
-          last_error TEXT, retry_count INTEGER NOT NULL DEFAULT 0, next_retry_at REAL NOT NULL DEFAULT 0,
-          created_at REAL NOT NULL, updated_at REAL NOT NULL, PRIMARY KEY (task_id, run_id))""")
+        conn = _get_collector_db(cdb)
         now = time.time()
-        conn.execute("INSERT INTO local_collector_records VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        conn.execute("INSERT INTO local_collector_records (task_id, run_id, outcome_id, experience_id, "
+                     "status, candidate_json, outcome_json, last_error, retry_count, "
+                     "next_retry_at, created_at, updated_at) "
+                     "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                      ("t", "r", None, None, "pending_collection", None,
                       '{"run_id":"r"}', None, 0, 0, now, now))
         conn.commit()

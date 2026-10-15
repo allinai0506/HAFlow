@@ -475,17 +475,28 @@ class HubStorage:
         customer: Optional[str] = None,
         task_type: Optional[str] = None,
         scope_all: bool = False,
+        allowed_customers: Optional[List[str]] = None,
     ) -> List[BusinessRuleExperience]:
         """Query active rules. Strictly enforces status == 'published' and customer boundary.
 
         scope_all (admin listing): skip customer narrowing; callers must still
         apply the allowed-customers post-filter.
+
+        allowed_customers narrows scope_all inside SQL so a restricted token
+        cannot make the server materialize the whole cross-customer table.
         """
         conn = self._get_conn()
         try:
             query = "SELECT * FROM experiences WHERE status = 'published'"
             params: List[Any] = []
             cust_str = str(customer).strip() if customer else ""
+            if allowed_customers is not None and list(allowed_customers) != ["*"]:
+                scope = [str(c).strip() for c in allowed_customers if str(c).strip()]
+                if not scope:
+                    return []
+                placeholders = ", ".join("?" for _ in scope)
+                query += f" AND (customer = '*' OR customer IN ({placeholders}))"
+                params.extend(scope)
             if scope_all and not cust_str:
                 # Admin listing without an explicit customer: no SQL narrowing;
                 # the caller still applies the allowed-customers post-filter.
@@ -657,7 +668,15 @@ class HubHTTPHandler(BaseHTTPRequestHandler):
                 })
                 return
 
-            rules = self.storage.query_published_rules(customer=req_cust or None, task_type=req_type or None, scope_all=scope_all)
+            rules = self.storage.query_published_rules(
+                customer=req_cust or None,
+                task_type=req_type or None,
+                scope_all=scope_all,
+                # Narrow inside SQL so a restricted token cannot materialize
+                # the full cross-customer rule table; the post-filter below
+                # stays as defense in depth.
+                allowed_customers=allowed,
+            )
             if allowed != ["*"]:
                 rules = [r for r in rules if r.applies_to.customer == "*" or r.applies_to.customer in allowed]
 

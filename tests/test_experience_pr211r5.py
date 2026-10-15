@@ -175,7 +175,7 @@ def test_sync_force_cli_end_to_end(tmp_path):
                 next_retry_at REAL NOT NULL DEFAULT 0, created_at REAL NOT NULL,
                 updated_at REAL NOT NULL, PRIMARY KEY (task_id, run_id))""")
             now = time.time()
-            conn.execute("INSERT INTO local_collector_records VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            conn.execute("INSERT INTO local_collector_records (task_id, run_id, outcome_id, experience_id, status, candidate_json, outcome_json, last_error, retry_count, next_retry_at, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                          ("t9", "r9", "o9", "r5-c1", "pending_upload", json.dumps(exp.to_dict(), ensure_ascii=False),
                           None, "down", 3, now + 280, now, now))
             conn.commit()

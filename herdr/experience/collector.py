@@ -44,6 +44,7 @@ def _get_collector_db(db_path: Optional[Path] = None) -> sqlite3.Connection:
                 candidate_json TEXT,
                 outcome_json TEXT,
                 last_error TEXT,
+                state_db_path TEXT,
                 retry_count INTEGER NOT NULL DEFAULT 0,
                 next_retry_at REAL NOT NULL DEFAULT 0,
                 created_at REAL NOT NULL,
@@ -63,7 +64,38 @@ def _get_collector_db(db_path: Optional[Path] = None) -> sqlite3.Connection:
             conn.execute("ALTER TABLE local_collector_records ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0")
         if "next_retry_at" not in existing_cols:
             conn.execute("ALTER TABLE local_collector_records ADD COLUMN next_retry_at REAL NOT NULL DEFAULT 0")
+        if "state_db_path" not in existing_cols:
+            conn.execute("ALTER TABLE local_collector_records ADD COLUMN state_db_path TEXT")
     return conn
+
+
+def _resolved_db_str(db_path: Optional[Path]) -> Optional[str]:
+    """Persist the concrete state database identity, not just None-vs-set.
+
+    Recovery (Sentinel background sync) runs without an explicit path, so a
+    row must carry which database holds its task or recovery resolves the
+    default database and quarantines a valid row as task_not_found.
+    """
+    if db_path is None:
+        try:
+            return str(state_db.get_default_db_path())
+        except Exception:
+            return None
+    return str(db_path)
+
+
+def _row_state_db_path(row) -> Optional[Path]:
+    """Recover the per-row state database recorded at enqueue time."""
+    try:
+        stored = row["state_db_path"]
+    except (IndexError, KeyError):
+        return None
+    if not stored:
+        return None
+    try:
+        return Path(stored)
+    except TypeError:
+        return None
 
 
 def _note_epoch(note: Dict[str, Any]) -> float:
@@ -163,14 +195,16 @@ class ExperienceCollector:
                     outcome_json = json.dumps(outcome, ensure_ascii=False) if outcome else None
                     conn.execute("""
                         INSERT INTO local_collector_records
-                        (task_id, run_id, outcome_id, experience_id, status, outcome_json, retry_count, next_retry_at, created_at, updated_at)
-                        VALUES (?, ?, ?, NULL, 'pending_collection', ?, 0, 0, ?, ?)
+                        (task_id, run_id, outcome_id, experience_id, status, outcome_json, state_db_path, retry_count, next_retry_at, created_at, updated_at)
+                        VALUES (?, ?, ?, NULL, 'pending_collection', ?, ?, 0, 0, ?, ?)
                         ON CONFLICT(task_id, run_id) DO UPDATE SET
                             outcome_id = COALESCE(excluded.outcome_id, local_collector_records.outcome_id),
                             outcome_json = COALESCE(excluded.outcome_json, local_collector_records.outcome_json),
+                            state_db_path = COALESCE(excluded.state_db_path, local_collector_records.state_db_path),
                             updated_at = excluded.updated_at
                         WHERE local_collector_records.status NOT IN ('uploaded', 'no_candidate')
-                    """, (task_id, run_id, outcome_id, outcome_json, now, now))
+                    """, (task_id, run_id, outcome_id, outcome_json,
+                          _resolved_db_str(state_db_path), now, now))
                 return {"ok": True, "status": "pending_collection", "task_id": task_id, "run_id": run_id}
             finally:
                 conn.close()
@@ -420,7 +454,7 @@ class ExperienceCollector:
         conn = _get_collector_db(self.db_path)
         try:
             rows = conn.execute(
-                "SELECT task_id, run_id, outcome_json FROM local_collector_records "
+                "SELECT task_id, run_id, outcome_json, state_db_path FROM local_collector_records "
                 "WHERE status = 'pending_collection' AND (next_retry_at IS NULL OR next_retry_at <= ?) "
                 "ORDER BY created_at ASC LIMIT ?",
                 (now, limit,),
@@ -439,7 +473,10 @@ class ExperienceCollector:
                     outcome = json.loads(row["outcome_json"])
                 except Exception:
                     pass
-            res = self.process_task_settlement(tid, outcome=outcome, state_db_path=state_db_path)
+            # An explicit caller path wins; otherwise use the database this
+            # row was enqueued against (absent for pre-migration rows).
+            row_db = state_db_path if state_db_path is not None else _row_state_db_path(row)
+            res = self.process_task_settlement(tid, outcome=outcome, state_db_path=row_db)
             if isinstance(res, dict) and res.get("ok"):
                 processed += 1
             else:

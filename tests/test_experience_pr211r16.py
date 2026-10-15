@@ -63,16 +63,12 @@ def test_force_attempts_failing_row_once(tmp_path):
     import sqlite3
 
     cdb = tmp_path / "c.db"
-    conn = sqlite3.connect(str(cdb))
-    conn.execute("""CREATE TABLE local_collector_records (task_id TEXT NOT NULL, run_id TEXT NOT NULL,
-      outcome_id TEXT, experience_id TEXT, status TEXT NOT NULL, candidate_json TEXT, outcome_json TEXT,
-      last_error TEXT, retry_count INTEGER NOT NULL DEFAULT 0, next_retry_at REAL NOT NULL DEFAULT 0,
-      created_at REAL NOT NULL, updated_at REAL NOT NULL, PRIMARY KEY (task_id, run_id))""")
+    conn = _get_collector_db(cdb)
     exp = {"experience_id": "e", "type": "business_rule", "title": "t", "content": "x",
            "contributor": "u", "applies_to": {"customer": "acme"}, "source": {"task_id": "t", "run_id": "r"}}
     import json
     now = time.time()
-    conn.execute("INSERT INTO local_collector_records VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+    conn.execute("INSERT INTO local_collector_records (task_id, run_id, outcome_id, experience_id, status, candidate_json, outcome_json, last_error, retry_count, next_retry_at, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                  ("t", "r", None, "e", "pending_upload", json.dumps(exp),
                   None, "x", 0, 0, now, now))
     conn.commit()

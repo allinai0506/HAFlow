@@ -3345,6 +3345,17 @@ def _launch_task(args):
         print(str(exc))
         sys.exit(2)
 
+    # Fail closed on mandatory experience rules BEFORE any launch resource
+    # exists. Running this inside dispatch_task() is too late: by then the
+    # worker holds a clone/pane, the task is persisted and the launch intent
+    # finalized, so a Hub outage would leave an undispatchable task whose
+    # retry is consumed by the duplicate check above.
+    if getattr(args, "mandatory_experience_rules", False):
+        try:
+            _mandatory_experience_gate(args, node_id)
+        except Exception:
+            sys.exit(2)
+
     _check_launch_capacity(args, project, data.get("tasks", []), node_id)
     try:
         claim = begin_launch_intent(store, workflow_id=args.workflow_id, node_id=node_id,
@@ -4123,6 +4134,39 @@ def _prefetch_mandatory_rules(task):
     later fetch still fail-closes. Returns the prompt suffix (may be "").
     """
     return _fetch_experience_rules_block(task)
+
+
+def _mandatory_experience_gate(args, node_id):
+    """Fail closed on an unreachable Hub before any launch resource exists.
+
+    Must run before the worker allocates a clone/pane and before the task is
+    persisted: a failure after registration leaves a pending task whose retry
+    is consumed by the duplicate check, never dispatching it. The task context
+    is synthesized from validated args (the task is not registered yet, so no
+    store metadata can be written); dispatch still fetches the block again to
+    record applied rule refs.
+    """
+    if not getattr(args, "mandatory_experience_rules", False):
+        return None
+    context = {
+        "task_id": getattr(args, "task_id", None),
+        "customer": getattr(args, "customer", None),
+        "business_task_type": getattr(args, "business_task_type", None),
+        "task_type": getattr(args, "task_type", None),
+        "stage": node_id,
+        "node": node_id,
+        "mandatory_experience_rules": True,
+    }
+    try:
+        from herdr.experience.client import fetch_experience_rules_block as _fetch_block
+        return _fetch_block(context)
+    except Exception as exc:
+        print(
+            "[EXPERIENCE GATE] mandatory experience rules could not be resolved "
+            f"before allocating launch resources: {exc}",
+            file=sys.stderr,
+        )
+        raise
 
 
 def dispatch_task(task_id, prompt):
