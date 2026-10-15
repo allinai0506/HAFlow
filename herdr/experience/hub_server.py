@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import re
+import socket
 import sqlite3
 import ssl
 import sys
@@ -40,6 +41,18 @@ from .models import (
 LOGGER = logging.getLogger("herdr.experience.hub")
 
 DEFAULT_HUB_DB_PATH = Path.home() / ".herdr-controller" / "experience_hub.db"
+
+# P1-01 (PR #211 R24): hard ceiling for POST request bodies. V1 payloads are
+# single business-rule candidates or tiny review bodies (a few KiB), so 1 MiB
+# leaves roughly two orders of magnitude of headroom while bounding the memory
+# a single request can claim. Deliberately not configurable: this is a
+# protocol contract of the Hub, not a deployment tuning knob.
+MAX_REQUEST_BODY_BYTES = 1_048_576
+
+# Content-Length must be exactly one header with a pure decimal value; signs,
+# whitespace, fractions, exponents and overlong digit strings are rejected
+# before any numeric conversion is attempted.
+_CONTENT_LENGTH_RE = re.compile(r"(0|[1-9][0-9]{0,18})")
 
 
 def init_hub_db(db_path: Path) -> sqlite3.Connection:
@@ -618,19 +631,92 @@ class HubHTTPHandler(BaseHTTPRequestHandler):
 
     storage: HubStorage
 
-    def _send_json(self, status: int, data: Any) -> None:
+    # P1-01: stdlib socket-idle timeout applied to the request/response cycle.
+    # It bounds how long a stalled body read can pin a handler thread; it is
+    # not a total deadline (a client dripping bytes faster than this can still
+    # stretch a single request within the byte budget).
+    timeout = 10.0
+
+    def _send_json(self, status: int, data: Any, *, close: bool = False) -> None:
         raw = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(raw)))
+        if close:
+            self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(raw)
 
-    def _parse_body(self) -> Dict[str, Any]:
-        length = int(self.headers.get("Content-Length", 0) or 0)
-        if not length:
+    def _reject(self, status: int, error: str, message: str) -> None:
+        """Uniform rejection: explicit close contract, no attempt to drain the
+        request body (rejection cost must not scale with declared body size)."""
+        self.close_connection = True
+        self._send_json(status, {"error": error, "message": message}, close=True)
+
+    def _parse_body(self) -> Optional[Dict[str, Any]]:
+        """Admission-control the POST body; return the parsed dict or ``None``.
+
+        ``None`` means the request was rejected and the response has already
+        been sent. Checks run in a fixed order whose cost never scales with the
+        declared body size:
+
+        Transfer-Encoding (400) -> missing Content-Length (411) -> malformed or
+        duplicated Content-Length (400) -> over the byte budget (413) ->
+        truncated body (400) -> existing JSON fallback semantics.
+        """
+        # 1. Transfer coding is not supported: chunked framing (or a TE+CL
+        # combination that could desynchronise message boundaries) is rejected
+        # before any body byte is read.
+        if self.headers.get("Transfer-Encoding") is not None:
+            self._reject(400, "bad_request",
+                         "Transfer-Encoding is not supported; send Content-Length")
+            return None
+
+        # 2. A missing length is a protocol error, never an implicit empty
+        # body: the Hub must not fall back to an unbounded read.
+        raw_lengths = self.headers.get_all("Content-Length") or []
+        if not raw_lengths:
+            self._reject(411, "length_required", "Content-Length header is required")
+            return None
+
+        # 3. Exactly one header value, strict decimal syntax. No bare int()
+        # coercion of attacker-controlled text; conflicting duplicates are
+        # rejected before any conversion.
+        if len(raw_lengths) != 1:
+            self._reject(400, "bad_request",
+                         "Content-Length header must appear exactly once")
+            return None
+        if not _CONTENT_LENGTH_RE.fullmatch(raw_lengths[0]):
+            self._reject(400, "bad_request",
+                         "Content-Length must be a non-negative decimal integer")
+            return None
+
+        length = int(raw_lengths[0])
+
+        # 4. Byte budget: an over-limit request is rejected before the first
+        # body byte is consumed, so rejection cost is constant.
+        if length > MAX_REQUEST_BODY_BYTES:
+            self._reject(413, "payload_too_large",
+                         f"Request body exceeds the {MAX_REQUEST_BODY_BYTES} byte limit")
+            return None
+
+        if length == 0:
             return {}
-        raw = self.rfile.read(length)
+
+        # 5. Bounded read under the handler's socket idle timeout. socket.timeout
+        # (an OSError/TimeoutError alias) and other read failures are rejected.
+        try:
+            raw = self.rfile.read(length)
+        except (socket.timeout, OSError):
+            self._reject(400, "bad_request", "Unable to read request body")
+            return None
+
+        # 6. EOF short read: a truncated body must never fall through to the
+        # `{}` default-action path (a truncated review body must not approve).
+        if raw is None or len(raw) < length:
+            self._reject(400, "bad_request", "Incomplete request body")
+            return None
+
         try:
             return json.loads(raw.decode("utf-8") or "{}")
         except Exception:
@@ -791,11 +877,18 @@ class HubHTTPHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path.rstrip("/")
-        body = self._parse_body()
 
+        # P1-01 security invariant: authenticate before touching the body. An
+        # unauthenticated request is rejected at constant cost regardless of
+        # the Content-Length it declares (no byte of the body is consumed).
         user = self._authenticate()
         if not user:
-            self._send_json(401, {"error": "unauthorized", "message": "Valid Bearer Token is required"})
+            self._reject(401, "unauthorized", "Valid Bearer Token is required")
+            return
+
+        body = self._parse_body()
+        if body is None:
+            # Admission rejected the request; the rejection response is sent.
             return
 
         # 1. Submit candidate (contributor, reviewer, admin)
