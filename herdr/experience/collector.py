@@ -69,6 +69,11 @@ def _get_collector_db(db_path: Optional[Path] = None) -> sqlite3.Connection:
     return conn
 
 
+def _absolute_db_path(p) -> str:
+    """Bind a database path lexically without resolving filesystem links."""
+    return os.path.abspath(os.path.expanduser(str(p)))
+
+
 def _resolved_db_str(db_path: Optional[Path]) -> Optional[str]:
     """Persist the concrete state database identity, not just None-vs-set.
 
@@ -78,10 +83,10 @@ def _resolved_db_str(db_path: Optional[Path]) -> Optional[str]:
     """
     if db_path is None:
         try:
-            return str(state_db.get_default_db_path())
+            return _absolute_db_path(state_db.get_default_db_path())
         except Exception:
             return None
-    return str(db_path)
+    return _absolute_db_path(db_path)
 
 
 def _row_state_db_path(row) -> Optional[Path]:
@@ -172,7 +177,8 @@ class ExperienceCollector:
         Guarantees that pending collection survives process exit or daemon thread termination.
         """
         try:
-            task = state_db.get_task(task_id, db_path=state_db_path)
+            resolved_db = _resolved_db_str(state_db_path)
+            task = state_db.get_task(task_id, db_path=Path(resolved_db) if resolved_db else None)
             run_id = str((task.get("run_id") if task else None) or (outcome.get("run_id") if outcome else "") or f"run_{task_id}")
             outcome_id = outcome.get("outcome_id") if outcome else None
 
@@ -204,7 +210,7 @@ class ExperienceCollector:
                             updated_at = excluded.updated_at
                         WHERE local_collector_records.status NOT IN ('uploaded', 'no_candidate')
                     """, (task_id, run_id, outcome_id, outcome_json,
-                          _resolved_db_str(state_db_path), now, now))
+                          resolved_db, now, now))
                 return {"ok": True, "status": "pending_collection", "task_id": task_id, "run_id": run_id}
             finally:
                 conn.close()
@@ -225,22 +231,18 @@ class ExperienceCollector:
         (process_pending skips unripe rows); terminal ones (e.g. task gone)
         move to `error` and leave the queue for good. Never raises.
         """
+        if not run_id:
+            LOGGER.error("collection failure note without run identity: task=%s", task_id)
+            return
         try:
             conn = _get_collector_db(self.db_path)
             try:
                 with conn:
-                    if run_id:
-                        rows = conn.execute(
-                            "SELECT run_id, retry_count FROM local_collector_records "
-                            "WHERE task_id = ? AND run_id = ? AND status = 'pending_collection'",
-                            (str(task_id), str(run_id)),
-                        ).fetchall()
-                    else:
-                        rows = conn.execute(
-                            "SELECT run_id, retry_count FROM local_collector_records "
-                            "WHERE task_id = ? AND status = 'pending_collection'",
-                            (str(task_id),),
-                        ).fetchall()
+                    rows = conn.execute(
+                        "SELECT run_id, retry_count FROM local_collector_records "
+                        "WHERE task_id = ? AND run_id = ? AND status = 'pending_collection'",
+                        (str(task_id), str(run_id)),
+                    ).fetchall()
                     for r in rows:
                         if terminal:
                             conn.execute(
@@ -277,6 +279,8 @@ class ExperienceCollector:
         Returns status dict:
           {"ok": bool, "status": str, "experience_id": Optional[str], "reason": str}
         """
+        bound_run_id = str(queued_run_id) if queued_run_id else None
+        run_id = None
         try:
             task = state_db.get_task(task_id, db_path=state_db_path)
             if not task:
@@ -447,8 +451,10 @@ class ExperienceCollector:
                 conn.close()
 
         except Exception as exc:
-            LOGGER.error("process_task_settlement crashed unexpectedly: %s", exc)
-            self._note_collection_failure(str(task_id), str(exc))
+            failure_run_id = bound_run_id or run_id
+            LOGGER.error("process_task_settlement crashed unexpectedly: task=%s run=%s: %s",
+                         task_id, failure_run_id or "unknown", exc)
+            self._note_collection_failure(str(task_id), str(exc), run_id=failure_run_id)
             return {"ok": False, "status": "error", "reason": str(exc)}
 
     def process_pending(self, state_db_path: Optional[Path] = None, limit: int = 50) -> Dict[str, Any]:
@@ -487,6 +493,12 @@ class ExperienceCollector:
             # report task_not_found and quarantine valid work. The caller path
             # is only a fallback for rows written before the column existed.
             row_db = _row_state_db_path(row) or state_db_path
+            if row_db and not Path(row_db).exists():
+                self._note_collection_failure(tid, "state_db_missing", run_id=row["run_id"],
+                                              terminal=False)
+                failed += 1
+                task_ids.append(str(tid))
+                continue
             res = self.process_task_settlement(tid, outcome=outcome, state_db_path=row_db,
                                                queued_run_id=row["run_id"])
             if isinstance(res, dict) and res.get("ok"):
