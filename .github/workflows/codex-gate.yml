@@ -1,0 +1,58 @@
+name: Codex P1 Gate
+
+# Merge gate companion to reviews: Codex leaves review-thread comments (not check
+# runs), so branch protection alone cannot see them. This job turns unresolved,
+# non-outdated Codex P1 threads into a red check. To enforce: Settings → Branches
+# → main protection → "Require status checks to pass" → select "Codex P1 Gate".
+# Until selected there, this job only reports.
+
+# NOTE: this workflow intentionally runs on pull_request_target, not
+# pull_request. Target executes the *base* revision's YAML, so a PR cannot keep
+# this required check green while neutering its own gate logic. There are no
+# review-thread triggers under target; after resolving threads, manually Re-run
+# this check (re-runs also execute trusted base code).
+on:
+  pull_request_target:
+    types:
+      - opened
+      - synchronize
+      - reopened
+
+concurrency:
+  group: codex-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  gate:
+    name: Codex P1 Gate
+    runs-on: ubuntu-latest
+    if: github.repository == 'allinai0506/HAFlow'
+    steps:
+      # The gate implementation must come from the protected base revision,
+      # never from the PR under review (else a PR could neuter its own gate).
+      - name: Checkout trusted base revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 1
+          sparse-checkout: |
+            scripts/codex-gate.py
+
+      - name: Bootstrap fallback (script is new in this PR)
+        run: |
+          if [ ! -f scripts/codex-gate.py ]; then
+            echo "::warning::codex-gate.py not in base; using PR head (bootstrap only)"
+            git fetch origin ${{ github.event.pull_request.head.sha }} --depth 1
+            git checkout ${{ github.event.pull_request.head.sha }} -- scripts/codex-gate.py
+          fi
+
+      - name: Check unresolved Codex P1 threads
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: python3 scripts/codex-gate.py --fail-on p1
