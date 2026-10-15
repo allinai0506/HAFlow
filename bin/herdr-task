@@ -3352,9 +3352,11 @@ def _launch_task(args):
     # retry is consumed by the duplicate check above.
     if getattr(args, "mandatory_experience_rules", False):
         try:
-            _mandatory_experience_gate(args, node_id)
+            _prefetched_experience_suffix = _mandatory_experience_gate(args, node_id)
         except Exception:
             sys.exit(2)
+    else:
+        _prefetched_experience_suffix = None
 
     _check_launch_capacity(args, project, data.get("tasks", []), node_id)
     try:
@@ -4057,7 +4059,8 @@ def _launch_task(args):
     # 4. Dispatch
     dispatch_task(
         args.task_id,
-        args.prompt
+        args.prompt,
+        prefetched_experience_suffix=_prefetched_experience_suffix,
     )
     # Retire the previous Task only after the replacement was registered and
     # delivered. Validation or worker startup failures retain its ownership.
@@ -4143,8 +4146,11 @@ def _mandatory_experience_gate(args, node_id):
     persisted: a failure after registration leaves a pending task whose retry
     is consumed by the duplicate check, never dispatching it. The task context
     is synthesized from validated args (the task is not registered yet, so no
-    store metadata can be written); dispatch still fetches the block again to
-    record applied rule refs.
+    store metadata can be written). The returned block is handed to
+    dispatch_task so the mandatory task is never queried twice — a second
+    fail-closed query after allocation would recreate the stranded task this
+    gate exists to prevent. Applied-rule metadata is recorded by the launcher
+    once the task is registered.
     """
     if not getattr(args, "mandatory_experience_rules", False):
         return None
@@ -4169,7 +4175,7 @@ def _mandatory_experience_gate(args, node_id):
         raise
 
 
-def dispatch_task(task_id, prompt):
+def dispatch_task(task_id, prompt, prefetched_experience_suffix=None):
     # Reliable delivery protocol:
     # 1) try herdr agent prompt
     # 2) verify lifecycle / prompt marker
@@ -4194,11 +4200,18 @@ def dispatch_task(task_id, prompt):
     # otherwise Hub outage would leave a false dispatched state with no
     # instructions delivered. Unconditional: run_id is assigned at creation,
     # so a receipt_delivery condition would skip this for every normal task.
-    _prefetched_experience_suffix = None
-    _prefetched_experience = False
-    if task.get("mandatory_experience_rules"):
-        _prefetched_experience_suffix = _prefetch_mandatory_rules(task)
+    # A block already resolved by the pre-allocation gate wins: re-querying
+    # here would re-open the stranded-task window this gate closed, so an
+    # outage between the two must not abort an already-authorized dispatch.
+    if prefetched_experience_suffix is not None:
+        _prefetched_experience_suffix = prefetched_experience_suffix
         _prefetched_experience = True
+    else:
+        _prefetched_experience_suffix = None
+        _prefetched_experience = False
+        if task.get("mandatory_experience_rules"):
+            _prefetched_experience_suffix = _prefetch_mandatory_rules(task)
+            _prefetched_experience = True
 
     # Runtime closure: the dispatched transition happens before context
     # compilation and prompt delivery, so the compiled context never

@@ -1076,7 +1076,7 @@ class SelectiveReplacementLaunchBaselineTest(unittest.TestCase):
                          "status": "working", "run_id": "old-run"})
         task_bin = self._task_mod
         delivered = []
-        def dispatch(task_id, prompt):
+        def dispatch(task_id, prompt, prefetched_experience_suffix=None):
             self.assertIsNotNone(store.get_task(task_id))
             self.assertEqual(store.get_task("old")["status"], "working")
             delivered.append(task_id)

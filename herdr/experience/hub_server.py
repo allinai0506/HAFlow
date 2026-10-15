@@ -135,6 +135,23 @@ def init_hub_db(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
+def _customer_in_scope(allowed: List[str], customer: Optional[str]) -> bool:
+    """Decide customer authorization for one record.
+
+    A record with no customer scope is implicitly global (P1-06 returns only
+    customer='*' rules when the caller has no customer context), so a missing
+    or empty scope must require wildcard authorization. A truthiness check on
+    the customer silently skipped the check for exactly those records, which
+    let a restricted reviewer reject or revoke them.
+    """
+    if list(allowed) == ["*"]:
+        return True
+    cust = str(customer or "").strip()
+    if not cust:
+        return False
+    return cust in allowed
+
+
 class HubStorage:
     """Persistence and query manager for Experience Hub."""
 
@@ -757,7 +774,7 @@ class HubHTTPHandler(BaseHTTPRequestHandler):
             # Customer check: restricted users see only their own scope.
             # Published global rules ('*') stay readable; pending globals do not.
             allowed = user["allowed_customers"]
-            if allowed != ["*"] and exp.applies_to.customer and exp.applies_to.customer not in allowed:
+            if not _customer_in_scope(allowed, exp.applies_to.customer):
                 if not (exp.applies_to.customer == "*" and exp.status == ExperienceStatus.PUBLISHED.value):
                     self._send_json(403, {"error": "forbidden", "message": "Customer scope exceeded"})
                     return
@@ -797,7 +814,7 @@ class HubHTTPHandler(BaseHTTPRequestHandler):
 
             # Customer authorization check: only wildcard scope may write global rules.
             allowed = user["allowed_customers"]
-            if allowed != ["*"] and exp.applies_to.customer and exp.applies_to.customer not in allowed:
+            if not _customer_in_scope(allowed, exp.applies_to.customer):
                 self._send_json(403, {"error": "forbidden", "message": "Cannot submit for unauthorized customer"})
                 return
 
@@ -841,8 +858,8 @@ class HubHTTPHandler(BaseHTTPRequestHandler):
 
             # P1-05: Enforce customer boundary on review; global rules need wildcard scope.
             allowed = user["allowed_customers"]
-            if allowed != ["*"] and exp.applies_to.customer and exp.applies_to.customer not in allowed:
-                self._send_json(403, {"error": "forbidden", "message": f"Reviewer not authorized for customer '{exp.applies_to.customer}'"})
+            if not _customer_in_scope(allowed, exp.applies_to.customer):
+                self._send_json(403, {"error": "forbidden", "message": f"Reviewer not authorized for customer '{exp.applies_to.customer or 'unknown'}'"})
                 return
 
             action = str(body.get("action") or "approve").lower()
@@ -882,8 +899,8 @@ class HubHTTPHandler(BaseHTTPRequestHandler):
 
             # P1-05: Enforce customer boundary on revoke; global rules need wildcard scope.
             allowed = user["allowed_customers"]
-            if allowed != ["*"] and exp.applies_to.customer and exp.applies_to.customer not in allowed:
-                self._send_json(403, {"error": "forbidden", "message": f"Reviewer not authorized for customer '{exp.applies_to.customer}'"})
+            if not _customer_in_scope(allowed, exp.applies_to.customer):
+                self._send_json(403, {"error": "forbidden", "message": f"Reviewer not authorized for customer '{exp.applies_to.customer or 'unknown'}'"})
                 return
 
             reason = str(body.get("reason") or "")

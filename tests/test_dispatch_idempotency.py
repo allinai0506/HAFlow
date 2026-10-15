@@ -202,7 +202,7 @@ def test_launch_entry_registers_identity_and_receipt_before_duplicate(tmp_path, 
     monkeypatch.setattr(cli.subprocess, 'run', lambda *a, **k: calls.append('worker') or SimpleNamespace(returncode=0, stdout='HERDR_WORKER_RESULT=' + json.dumps(result), stderr=''))
     monkeypatch.setattr(cli, 'auto_init_task_loop', lambda *a, **k: None)
     monkeypatch.setattr(cli, 'release_agent_reservation', lambda *a: None)
-    monkeypatch.setattr(cli, 'dispatch_task', lambda *a: calls.append('dispatch'))
+    monkeypatch.setattr(cli, 'dispatch_task', lambda *a, **k: calls.append('dispatch'))
     args = SimpleNamespace(task_id='auto', workflow_id='wf', node='n', source=None, agent='auto', task_type='docs', integration_mode='none', goal='report', acceptance=[], prompt='report', supersedes=None)
     cli.launch_task(args)
     task = store.get_task('auto')
