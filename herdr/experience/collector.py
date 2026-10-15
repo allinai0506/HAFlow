@@ -317,6 +317,7 @@ class ExperienceCollector:
                 steers=steers,
                 decisions=decisions,
                 contributor=self.contributor,
+                state_db_path=state_db_path,
             )
 
             now = time.time()

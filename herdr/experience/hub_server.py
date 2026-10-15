@@ -498,12 +498,15 @@ class HubStorage:
                 query += " AND customer = '*'"
 
             type_str = str(task_type).strip() if task_type else ""
+            # task_type '' is the legacy representation of "applies to any type"
+            # and must keep matching typed queries after the predicate rewrite.
+            general_match = " OR task_type = '*' OR task_type = 'general' OR task_type = '' OR task_type IS NULL"
             if type_str and type_str not in {"general", "unknown"}:
-                query += " AND (task_type = ? OR task_type = '*' OR task_type = 'general' OR task_type IS NULL)"
+                query += " AND (task_type = ?" + general_match + ")"
                 params.append(type_str)
             elif type_str in {"general", "unknown"}:
                 # Generic task context must not absorb business-specific rules.
-                query += " AND (task_type = 'general' OR task_type = '*' OR task_type IS NULL)"
+                query += " AND (task_type = 'general' OR task_type = '*' OR task_type = '' OR task_type IS NULL)"
             # Empty task_type (review/listing without type filter) keeps all types.
             query += " ORDER BY version DESC, updated_at DESC"
 

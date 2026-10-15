@@ -16,6 +16,7 @@ import hashlib
 import json
 import re
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from herdr.supervisor.state import redact_text
@@ -72,8 +73,13 @@ def extract_candidate_from_facts(
     decisions: Optional[List[Dict[str, Any]]] = None,
     rework_prompts: Optional[List[str]] = None,
     contributor: str = "local_employee",
+    state_db_path: Optional[Path] = None,
 ) -> Tuple[Optional[BusinessRuleExperience], str]:
     """Extract candidate business_rule from task facts and human interventions.
+
+    state_db_path must identify the same database the task was read from, so a
+    non-default state database is not silently missed by the authoritative
+    outcome lookup below.
 
     Returns:
         (experience_or_None, reason_code)
@@ -98,7 +104,7 @@ def extract_candidate_from_facts(
         # P1-08: outcome=None 不得仅凭 Task 状态推断已经通过 qualified_success。
         # 必须从 execution_outcome 权威事实层核查真实结算记录。
         from herdr import execution_outcome
-        real_outcome = execution_outcome.get_execution_outcome(task_id, run_id)
+        real_outcome = execution_outcome.get_execution_outcome(task_id, run_id, state_db_path)
         if not real_outcome or not real_outcome.get("qualified_success") or not real_outcome.get("verification_passed"):
             return None, "unqualified_success"
         outcome = real_outcome
