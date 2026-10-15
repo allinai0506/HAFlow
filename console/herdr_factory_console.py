@@ -5358,7 +5358,7 @@ body {
   overflow: visible;
   white-space: normal;
   margin-top: 12px !important;
-  padding: 8px 10px;
+  padding: 8px 12px;
   box-shadow: none !important;
 }
 #flowInspector .flow-attn .flow-attn-text {
