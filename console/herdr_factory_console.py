@@ -5349,9 +5349,25 @@ body {
   position: static !important;
   max-width: 100% !important;
   width: 100% !important;
-  display: block !important;
+  display: flex !important;
+  flex-direction: column;
+  align-items: flex-start;
+  flex: 0 0 auto;
+  height: auto;
+  overflow: visible;
+  white-space: normal;
   margin-top: 12px !important;
+  padding: 8px 10px;
   box-shadow: none !important;
+}
+#flowInspector .flow-attn .flow-attn-text {
+  display: block;
+  width: 100%;
+  overflow: visible;
+  text-overflow: unset;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.45;
 }
 .ctl-wrap .flow-attn {
   position: static !important;

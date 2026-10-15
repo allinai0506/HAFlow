@@ -378,6 +378,15 @@ assert.ok(!state.openWorkflowTabIds.includes('__logs__'));
         self.assertIn("document.getElementById('flowAttnBar')", self.js)
         self.assertNotIn("fs.innerHTML+=`<div role=\"status\" class=\"flow-attn\">", self.js)
 
+        # Inspector confirmation must wrap. display:block plus nowrap clips the task ids.
+        inspector = self.html.split("#flowInspector .flow-attn {", 1)[1].split("}", 1)[0]
+        self.assertIn("flex-direction: column;", inspector)
+        self.assertIn("flex: 0 0 auto;", inspector)
+        self.assertIn("overflow: visible;", inspector)
+        text_rule = self.html.split("#flowInspector .flow-attn .flow-attn-text {", 1)[1].split("}", 1)[0]
+        self.assertIn("white-space: normal;", text_rule)
+        self.assertIn("overflow-wrap: anywhere;", text_rule)
+
 
 if __name__ == "__main__":
     unittest.main()
