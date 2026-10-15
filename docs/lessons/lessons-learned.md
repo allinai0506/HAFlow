@@ -6754,3 +6754,48 @@ HAFlow 作为企业级多任务通用 Agent 编排系统，必须支撑招投标
 ### 验证命令 / 守护测试
 
 `pytest -q tests/test_console_page_latency.py tests/test_ops_center_read_path.py tests/test_deliverable_read_latency.py tests/test_projection_archive_latency.py`。受控 Promise 回归覆盖请求合并、范围反序与项目对象失效；真实 SQLite 证明无初始化、只解码当前页和按任务读取量；临时端口使用数据库一致副本验证页面，生产部署另行验收。
+
+
+---
+
+## 160. 认证前读体、相对路径入队、失败不限定 Run 是副作用顺序与身份隔离的三重违规（2026-10-16）
+
+### 问题背景
+
+Experience Hub V1（PR #211）合并后的独立 Hotfix（`fix/experience-hub-postmerge-hardening`，joint candidate `c9dee79`），修复终审确认的 3 项遗留：P1-01 Hub `do_POST()` 在 Bearer 认证之前调用 `_parse_body()` 直接按客户端 `Content-Length` 无上限读体；P2-01 Collector `_resolved_db_str()` 对显式/默认 `state_db_path` 未绝对化，入队保存相对路径，Sentinel 换 cwd 恢复时打开错误数据库把任务误判为永久丢失；P2-02 `process_task_settlement()` 普通异常分支调用 `_note_collection_failure(task_id, exc)` 不带 Run ID，同 Task 多 Run 时批量污染其他 Run 的重试计数。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 认证前先读请求体 | 读体本身是副作用，未授权请求不得触发；顺序颠倒等于把内存 DoS 面暴露给匿名流量 | 先鉴权再读体：认证失败直接 401，不消费任何 body 字节（AGENTS.md 不变量 5 副作用顺序） |
+| 只按 `Content-Length` 读、无上限 | 声明长度不等于愿意接收；截断体会阻塞线程，超大体会耗尽内存 | 统一字节预算（1 MiB），TE 不支持→400、缺长度→411、非法/重复长度→400、超预算→413、截断→400，均显式关连接防止残体污染后续请求 |
+| 相对路径写入持久队列 | 持久化的易失字段（依赖 cwd）跨进程恢复即失真 | 入队即 `abspath(expanduser())` 绝对化；恢复以每行持久化的库路径为准；缺字段保留兼容回退，绝不允许解析失败把他人任务判为丢失（不变量 1 权威来源、9 缓存与记忆） |
+| 失败处理只带 task_id | 队列行携带的 `queued_run_id` 是身份权威；缺身份就批量改同 Task 全部记录等于跨 Run 串味 | Run 隔离：终止失败/普通异常/重试退避三分支一致地只改 `(task_id, run_id)`；无法确定 Run 身份时拒绝批量修改并安全返回（不变量 2 身份隔离） |
+
+### 操作规范（已固化到 `herdr/experience/hub_server.py`、`herdr/experience/collector.py`）
+
+1. **认证优先于任何 body 消费**：`do_POST` 先校验 Bearer Token，`_reject(401)` 分支不读取正文；`MAX_REQUEST_BODY_BYTES` 是硬契约常量。
+2. **准入契约集中在 `_parse_body`/`_reject`**：错误状态码语义固定（400/411/413），拒绝路径统一处理连接关闭。
+3. **持久化路径必须绝对化**：新增 `_absolute_db_path()`，`_resolved_db_str()`/`_row_state_db_path()` 一致使用；默认目录与业务 Schema 不变。
+4. **失败限定的默认安全**：`_note_collection_failure()` 必填 Run 身份；`process_pending()` 透传 `queued_run_id=row["run_id"]`；`uploaded` 终态与上传幂等不受影响。
+5. **三项修复各配真实行为回归**（非源码字符串断言）：原始 socket + 真实 `ThreadingHTTPServer`、真实 SQLite 全列快照。
+
+### 验证命令 / 守护测试
+
+```bash
+python3 -m pytest -q tests/test_experience_pr211r24_hub_body_limit.py \
+  tests/test_experience_pr211r25_collector_db_path.py \
+  tests/test_experience_pr211r26_collector_run_isolation.py
+# 期望输出:45 passed（r24/r25/r26 专项）
+```
+
+### 相关文档 / 关联证据
+
+- Git Commit `c9dee79` / `15c57c0` — joint candidate；`06b2fa2`（P1-01）、`43dfbf4`（P2-01/P2-02）核心修复
+- `herdr/experience/hub_server.py` — 请求体准入限制
+- `herdr/experience/collector.py` — 数据库路径绝对化与 Run 隔离
+- `wiki/enterprise-experience-hub.md` — 服务安全底线与采集闭环（关联 §157）
+- 测试证据：test-joint-r2 全量 `pytest -q` 4409 passed / 0 failed；review-joint 独立评审零阻塞缺陷
+
+---

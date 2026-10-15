@@ -2579,3 +2579,10 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - Updated [[ops-center]]：共用只读快照与全进程探针预算，刷新合并与未采样语义。
 - Updated [[flow-workbench]]：项目元数据/现场拆分、成果定向补读、白盒快照复用、归档数据库分页、日志尾部有界读取。
 - 当前记录描述本地源码和隔离预览，不代表 8765 已部署、远端已推送或已合并。
+
+
+### 2026-10-16：Experience Hub V1 合并后 Hotfix（P1-01/P2-01/P2-02，隔离工作区）
+
+- Updated [[enterprise-experience-hub]]：请求体准入限制（P1-01，先认证后读体、1 MiB 预算、TE/CL/413/400/411 契约）、Collector 数据库路径绝对化（P2-01）、失败限定的 Run 隔离（P2-02）。
+- 追加 [[../docs/lessons/lessons-learned]] §160：副作用顺序、权威路径、身份隔离三重违规教训。
+- 本记录描述本地源码与 joint candidate `c9dee79`；未推送、未合并，交付由流水线控制器统一收编。

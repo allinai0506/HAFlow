@@ -74,6 +74,8 @@
   - 支持员工或运维脚本显式执行 `bin/herdr-task sync-experience` 强制同步。
   - Hub 离线或网络故障时自动进入 `pending_upload`，重试采用有界指数退避策略 (`min(300s, 5s * 2^retries)`)，避免风暴请求。
 - **本地去重**：维护客户端本地 SQLite 数据库中的 `local_collector_records` 表，按 `task_id` + `run_id` 实现严格幂等。
+- **数据库路径绝对化 (P2-01)**：入队时对显式与默认 `state_db_path` 统一执行 `abspath(expanduser())`（`_absolute_db_path`/`_resolved_db_str`），队列每行持久化其所属库的绝对路径；恢复以每行记录的库路径为准（`_row_state_db_path`），历史缺字段保留兼容回退，绝不允许跨 cwd 或路径解析失败把他人任务误判为永久丢失。
+- **失败限定的 Run 隔离 (P2-02)**：`process_pending` 透传队列携带的 `queued_run_id`，终止失败、普通异常、重试退避三分支一致地只更新 `(task_id, run_id)` 对应记录；无法确定 Run 身份时拒绝批量修改同 Task 其他记录并安全返回，不影响 `uploaded` 终态保护与上传幂等。
 
 ### 2.2 规则提炼核心 (`herdr/experience/extractor.py`)
 - **纯函数设计**：遵循 Functional Core 架构，无 I/O 副作用。
@@ -91,6 +93,7 @@
   - 首次启动强制通过 `--admin-token` 参数或 `HERDR_HUB_ADMIN_TOKEN` 环境变量初始化，未初始化时拒绝启动服务。
   - Token 落盘仅保存 SHA-256 哈希值，比对采用 `hmac.compare_digest` 恒定时间防时序攻击。
   - 严格禁止在 URL Query 参数中传递 Token。跨主机部署非回环地址强制配置 TLS 证书 (`--cert-file` 与 `--key-file`) 启用 HTTPS，或在内网反向代理后使用 `--allow-insecure-http` 明确授权。
+- **请求体准入限制 (P1-01)**：`do_POST` 先认证再读体，认证失败直接 401 且不消费任何正文；统一字节预算 `MAX_REQUEST_BODY_BYTES = 1 MiB`（足够覆盖 V1 业务规则候选）；准入契约集中在 `_parse_body`/`_reject`：不支持 `Transfer-Encoding`→400、缺 `Content-Length`→411、非法/重复 `Content-Length`→400、超预算→413、截断体→400，拒绝路径显式关连接防止残体污染后续请求。
 - **服务端强审与幂等 (P0-02)**：
   - 客户端提交新候选时，服务端强制设置 `status = "pending_review"`，贡献者身份绑定当前认证主体，`version = 1`，客户端无法越权发布。
   - 相同 ID 重复提交时校验内容哈希 (`content_hash`)：相同内容幂等返回 200，不同内容返回 409 Conflict。
