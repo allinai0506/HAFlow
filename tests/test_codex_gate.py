@@ -84,11 +84,15 @@ def test_fetch_graphql_errors_raise(monkeypatch):
         mod.fetch_threads("o", "r", 1, "t")
 
 
-def test_workflow_subscribes_and_uses_trusted_base():
+def test_workflow_runs_trusted_target_event():
+    import yaml as _yaml
     from pathlib import Path as _P
     text = (_P(__file__).resolve().parent.parent / ".github" / "workflows" / "codex-gate.yml").read_text()
-    assert "pull_request_review" in text
-    assert "pull_request_review_comment" in text
+    wf = _yaml.safe_load(text)
+    assert "pull_request_target" in wf[True]
+    # No PR-context trigger may remain: any of them reopens the self-bypass.
+    assert "pull_request:" not in text
+    assert "pull_request_review" not in text
     assert "base.sha" in text
 
 

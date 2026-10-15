@@ -6,21 +6,17 @@ name: Codex P1 Gate
 # → main protection → "Require status checks to pass" → select "Codex P1 Gate".
 # Until selected there, this job only reports.
 
+# NOTE: this workflow intentionally runs on pull_request_target, not
+# pull_request. Target executes the *base* revision's YAML, so a PR cannot keep
+# this required check green while neutering its own gate logic. There are no
+# review-thread triggers under target; after resolving threads, manually Re-run
+# this check (re-runs also execute trusted base code).
 on:
-  pull_request:
+  pull_request_target:
     types:
       - opened
       - synchronize
       - reopened
-  # Codex reviews land after the synchronize run; without these the gate keeps
-  # a stale result. Note: resolving a thread fires no workflow event, so after
-  # resolving, re-run this check manually.
-  pull_request_review:
-    types:
-      - submitted
-  pull_request_review_comment:
-    types:
-      - created
 
 concurrency:
   group: codex-gate-${{ github.event.pull_request.number }}

@@ -332,6 +332,7 @@ class ExperienceCollector:
                                 status = excluded.status,
                                 last_error = excluded.last_error,
                                 updated_at = excluded.updated_at
+                            WHERE local_collector_records.status NOT IN ('uploaded', 'no_candidate')
                         """, (task_id, run_id, outcome_id, None, "no_candidate", None, reason, now, now))
                         return {"ok": True, "status": "no_candidate", "reason": reason}
 
@@ -345,6 +346,7 @@ class ExperienceCollector:
                             status = excluded.status,
                             candidate_json = excluded.candidate_json,
                             updated_at = excluded.updated_at
+                        WHERE local_collector_records.status NOT IN ('uploaded', 'no_candidate')
                     """, (task_id, run_id, outcome_id, exp.experience_id, "pending_upload", candidate_json, None, now, now))
             finally:
                 conn.close()
@@ -402,11 +404,13 @@ class ExperienceCollector:
             self._note_collection_failure(str(task_id), str(exc))
             return {"ok": False, "status": "error", "reason": str(exc)}
 
-    def process_pending(self, state_db_path: Optional[Path] = None, limit: int = 50) -> int:
+    def process_pending(self, state_db_path: Optional[Path] = None, limit: int = 50) -> Dict[str, Any]:
         """Process tasks queued as pending_collection.
 
         Rows in backoff (next_retry_at in the future) are skipped so one bad
-        record cannot pin the head of the queue.
+        record cannot pin the head of the queue. Returns processed/failed
+        counts; failures keep their rows (with backoff) and must be surfaced
+        by callers instead of reported as success.
         """
         now = time.time()
         conn = _get_collector_db(self.db_path)
@@ -421,6 +425,7 @@ class ExperienceCollector:
             conn.close()
 
         processed = 0
+        failed = 0
         for row in rows:
             tid = row["task_id"]
             outcome = None
@@ -429,9 +434,12 @@ class ExperienceCollector:
                     outcome = json.loads(row["outcome_json"])
                 except Exception:
                     pass
-            self.process_task_settlement(tid, outcome=outcome, state_db_path=state_db_path)
-            processed += 1
-        return processed
+            res = self.process_task_settlement(tid, outcome=outcome, state_db_path=state_db_path)
+            if isinstance(res, dict) and res.get("ok"):
+                processed += 1
+            else:
+                failed += 1
+        return {"processed": processed, "failed": failed}
 
     def retry_pending_uploads(self, limit: int = 50, force: bool = False,
                               exclude_task_id: Optional[str] = None) -> Dict[str, Any]:
@@ -530,22 +538,29 @@ class ExperienceCollector:
                            exclude_task_id: Optional[str] = None) -> Dict[str, Any]:
         """Drains pending collections and retries pending uploads. Safe to call periodically."""
         with self._lock:
-            collected = self.process_pending(state_db_path=state_db_path)
+            pending_stats = self.process_pending(state_db_path=state_db_path)
             upload_stats = self.retry_pending_uploads(force=force, exclude_task_id=exclude_task_id)
             remaining = 0
+            pending_remaining = 0
             conn = _get_collector_db(self.db_path)
             try:
                 row = conn.execute(
                     "SELECT COUNT(*) AS n FROM local_collector_records WHERE status = 'pending_upload'"
                 ).fetchone()
                 remaining = int(row["n"] or 0) if row else 0
+                row = conn.execute(
+                    "SELECT COUNT(*) AS n FROM local_collector_records WHERE status = 'pending_collection'"
+                ).fetchone()
+                pending_remaining = int(row["n"] or 0) if row else 0
             except Exception:
                 pass
             finally:
                 conn.close()
             return {
                 "ok": True,
-                "pending_collected": collected,
+                "pending_collected": pending_stats.get("processed", 0),
+                "pending_collection_failed": pending_stats.get("failed", 0),
+                "pending_collection_remaining": pending_remaining,
                 "retried": upload_stats.get("retried", 0),
                 "succeeded": upload_stats.get("succeeded", 0),
                 "failed": upload_stats.get("failed", 0),
