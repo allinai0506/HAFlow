@@ -1,0 +1,123 @@
+name: HAFlow Test Suite
+
+# Full-suite gate on the self-hosted macOS runner.
+#
+# Why this exists: the repository had no workflow that ran `pytest` at all —
+# only the Codex thread gate and the LLM review — so a red test suite could be
+# merged. This is the machine-enforced backstop.
+#
+# The job always runs, and decides internally how much to run. That matters
+# for two reasons:
+#   1. A required status check that never reports (because a path filter
+#      skipped the workflow) leaves the pull request stuck pending forever.
+#   2. Test-only edits are cheap to miss but expensive to get wrong: a test
+#      module that no longer imports makes the suite unrunnable for every
+#      other pull request, so they still get a collection check.
+#
+# HOME is not redirected — see the note on the full-suite step.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+
+concurrency:
+  group: haflow-tests-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: pytest
+    runs-on: [self-hosted, haflow]
+    # A self-hosted runner executes on a real developer machine, so pull
+    # requests from forks must never reach it.
+    if: >-
+      github.repository == 'allinai0506/HAFlow' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    timeout-minutes: 45
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          # Full history: the scope decision below diffs against the base, and
+          # some suites inspect repository state.
+          fetch-depth: 0
+
+      - name: Decide the test scope
+        id: scope
+        run: |
+          set -euo pipefail
+          base="${{ github.event.pull_request.base.sha }}"
+          # fetch-depth: 0 normally already carries the base commit; only go to
+          # the network if it is genuinely missing, and never shallow the clone
+          # here or `git diff base...HEAD` loses its merge base.
+          if ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            git fetch --no-tags origin "$base" || true
+          fi
+          changed="$(git diff --name-only "$base"...HEAD || true)"
+          echo "changed files:"; echo "$changed"
+          # Anything that is not documentation, the wiki, or a test file can
+          # change runtime behaviour, so it gets the full suite.
+          production="$(printf '%s\n' "$changed" \
+            | grep -Ev '^(docs/|wiki/|tests/)' \
+            | grep -Ev '\.md$' \
+            | head -n1 || true)"
+          if [ -n "$production" ]; then
+            echo "mode=full" >> "$GITHUB_OUTPUT"
+            echo "→ full suite (non-doc/test change: $production)"
+          else
+            echo "mode=collect" >> "$GITHUB_OUTPUT"
+            echo "→ collection check (docs and/or test-only change)"
+          fi
+
+      - name: Pick the test interpreter
+        id: python
+        run: |
+          set -euo pipefail
+          # The runner's bare `python3` may be a Homebrew build without pytest
+          # (observed: /opt/homebrew/bin/python3 is 3.14 with no pytest, while
+          # python3.13 has it), so resolve an interpreter instead of assuming.
+          for candidate in python3.13 python3.12 python3.11 python3; do
+            if command -v "$candidate" >/dev/null 2>&1 \
+               && "$candidate" -c 'import pytest' >/dev/null 2>&1; then
+              report="$("$candidate" -c 'import sys, pytest; print(sys.version.split()[0], "| pytest", pytest.__version__)')"
+              echo "using $candidate ($report)"
+              echo "python=$candidate" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+          echo "::error::no interpreter on PATH has pytest; install it with: python3 -m pip install pytest"
+          exit 1
+
+      - name: Full suite
+        if: steps.scope.outputs.mode == 'full'
+        run: |
+          set -o pipefail
+          # HOME is deliberately NOT redirected. `test_os_sandbox_boundary`
+          # verifies that the macOS Seatbelt profile denies reads under the
+          # real developer home, so pointing HOME at a temp directory makes
+          # that check fail (verified: temp-dir HOME fails, home-nested HOME
+          # passes). Isolating the tests is the suite's own responsibility —
+          # the two couplings found on this machine now have root-cause fixes.
+          "${{ steps.python.outputs.python }}" -m pytest -q 2>&1 | tee pytest.log
+
+      - name: Collection check
+        if: steps.scope.outputs.mode == 'collect'
+        run: |
+          set -o pipefail
+          # Test modules must still import and collect: a broken test file
+          # takes the whole suite down for every other pull request.
+          "${{ steps.python.outputs.python }}" -m pytest --collect-only -q 2>&1 | tee pytest.log | tail -n 5
+
+      - name: Upload the pytest log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-log-${{ github.event.pull_request.number }}
+          path: pytest.log
+          retention-days: 7
+          if-no-files-found: ignore
