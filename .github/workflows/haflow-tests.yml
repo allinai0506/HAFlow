@@ -136,6 +136,11 @@ jobs:
           # runner's own temp tree.
           export HOME="$RUNNER_TEMP/ci-home"
           mkdir -p "$HOME"
+          # The redirected HOME has no .gitconfig, and tests that build their
+          # own repositories run `git commit`, which fails with exit 128
+          # without a user identity. Seed one inside the CI-owned HOME only.
+          git config --file "$HOME/.gitconfig" user.name "HAFlow CI"
+          git config --file "$HOME/.gitconfig" user.email "ci@haflow.invalid"
           "${{ steps.python.outputs.python }}" -m pytest -q 2>&1 | tee pytest.log
 
       - name: Collection check
