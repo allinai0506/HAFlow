@@ -33,6 +33,7 @@ def dash_env(tmp_path, monkeypatch):
                       "status": "running", "project_root": "/tmp/p1"}}
     monkeypatch.setattr(c, "tasks", lambda: [dict(t) for t in tasks])
     monkeypatch.setattr(c, "workflows", lambda: dict(wfmap))
+    monkeypatch.setattr(c, "dashboard_inventory", lambda: (c.tasks(), c.workflows()))
     wf_file = tmp_path / "workflows.json"
     tasks_file = tmp_path / "tasks.json"
     wf_file.write_text(json.dumps({"workflows": wfmap}), encoding="utf-8")
@@ -123,6 +124,7 @@ def test_dashboard_data_filters_by_workflow(monkeypatch):
              "wf-2": {"workflow_id": "wf-2", "title": "w2"}}
     monkeypatch.setattr(c, "tasks", lambda: [dict(t) for t in tasks])
     monkeypatch.setattr(c, "workflows", lambda: dict(wfmap))
+    monkeypatch.setattr(c, "dashboard_inventory", lambda: (c.tasks(), c.workflows()))
     with patch.object(c.herdr_workflow_docs, "load_notes", return_value=[]):
         payload = c.dashboard_data(workflow_id="wf-1")
     assert payload["scope"] == "wf-1"

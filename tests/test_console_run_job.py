@@ -3,6 +3,7 @@
 import importlib.machinery
 import importlib.util
 import re
+import subprocess
 import tempfile
 import time
 import unittest
@@ -133,7 +134,30 @@ class TestConsoleOpsNavigation(unittest.TestCase):
 
     def test_late_ops_response_cannot_overwrite_the_factory_view(self):
         body = self.function_body("loadOpsCenter")
-        self.assertIn("if(!state.opsMode)return", body)
+        script = r"""
+const assert=require('node:assert/strict');
+const state={opsMode:true},renders=[];
+let resolve,reject,completed=false;
+process.on('beforeExit',()=>assert.equal(completed,true));
+function pageRead(){return new Promise((ok,fail)=>{resolve=ok;reject=fail})}
+function renderOpsCenter(){renders.push(state.ops)}
+function toast(){throw new Error('stale errors must not render')}
+const document={getElementById(){throw new Error('stale response must not touch DOM')}};
+""" + "async function loadOpsCenter(){" + body + r"""}
+(async()=>{
+ const old=loadOpsCenter();state.opsMode=false;resolve({id:'old'});await old;
+ assert.deepEqual(renders,[]);assert.equal(state.ops,undefined);
+ state.opsMode=true;const failed=loadOpsCenter();state.opsMode=false;reject(new Error('offline'));await failed;
+ assert.deepEqual(renders,[]);
+ state.opsMode=true;const fresh=loadOpsCenter();resolve({id:'new'});await fresh;
+ assert.deepEqual(renders,[{id:'new'}]);completed=true;
+})().catch(e=>{console.error(e);process.exitCode=1});
+"""
+        result=subprocess.run(['node','-e',script],capture_output=True,text=True,timeout=10)
+        self.assertEqual(result.returncode,0,result.stderr)
+        mutant=script.replace('if(!ops||!state.opsMode)return;', 'if(!ops)return;')
+        mutation=subprocess.run(['node','-e',mutant],capture_output=True,text=True,timeout=10)
+        self.assertNotEqual(mutation.returncode,0,'test must reject removed view guard')
 
     def test_workflow_drilldown_restores_its_project_context(self):
         body = self.function_body("openWorkflowFromOps")

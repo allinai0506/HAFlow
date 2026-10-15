@@ -55,6 +55,13 @@ def _seed_task_with_clone(env, task_id, status="working", goal="Implement cache 
     }
     t_data["tasks"].append(task)
     env["tasks_file"].write_text(json.dumps(t_data), encoding="utf-8")
+    # Read-only telemetry never bootstraps a database from JSON projections.
+    from herdr.state_store import SQLiteStateStore
+    store = SQLiteStateStore(env["tasks_file"].parent / "state.db", auto_migrate_json=False)
+    workflows = json.loads(env["workflows_file"].read_text())["workflows"]
+    for workflow in workflows.values():
+        store.save_workflow(workflow)
+    store.save_task(task)
     return task
 
 

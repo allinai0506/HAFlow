@@ -764,14 +764,14 @@ def _node_delivery_complete(tasks, required_task_ids=None):
     return node_is_complete(tasks, required_task_ids)
 
 
-def _build_workflow_cards(workflows_tasks, now, all_tasks=None):
+def _build_workflow_cards(workflows_tasks, now, all_tasks=None, workflow_lookup=None):
     from herdr.scheduler import required_task_issues
     inventory = all_tasks if all_tasks is not None else [
         t for group in workflows_tasks.values() for t in group]
     cards = []
     for workflow_id in sorted(workflows_tasks):
         wf_tasks = workflows_tasks.get(workflow_id, [])
-        workflow, workflow_label = _safe_workflow(workflow_id)
+        workflow, workflow_label = (workflow_lookup or _safe_workflow)(workflow_id)
         node_meta = _collect_workflow_node_metadata(workflow or {})
 
         all_nodes = {}
@@ -870,7 +870,7 @@ def _build_workflow_cards(workflows_tasks, now, all_tasks=None):
     return cards
 
 
-def _build_agent_fleet(tasks, now):
+def _build_agent_fleet(tasks, now, runtime_probe=None):
     seen = set()
     for task in tasks:
         agent = task.get("agent")
@@ -928,7 +928,7 @@ def _build_agent_fleet(tasks, now):
         if pane_id and pane_id in runtime_cache:
             runtime_status = runtime_cache[pane_id]
         elif pane_id:
-            runtime_status = _agent_runtime_status(pane_id)
+            runtime_status = (runtime_probe or _agent_runtime_status)(pane_id)
             runtime_cache[pane_id] = runtime_status
         else:
             runtime_status = None
@@ -1000,7 +1000,7 @@ def _build_agent_fleet(tasks, now):
     )
 
 
-def _build_anomalies(tasks, now):
+def _build_anomalies(tasks, now, runtime_probe=None):
     anomalies = []
     runtime_cache = {}
     for task in tasks:
@@ -1016,7 +1016,7 @@ def _build_anomalies(tasks, now):
             if pane_id in runtime_cache:
                 runtime_status = runtime_cache[pane_id]
             else:
-                runtime_status = _agent_runtime_status(pane_id)
+                runtime_status = (runtime_probe or _agent_runtime_status)(pane_id)
                 runtime_cache[pane_id] = runtime_status
         else:
             runtime_status = None
@@ -1082,9 +1082,10 @@ def _build_boss_summary(tasks, workflows, anomalies):
     }
 
 
-def _ops_center_payload(workflow_id=None, now=None, include_tasks=False):
+def _ops_center_payload(workflow_id=None, now=None, include_tasks=False, *,
+                        snapshot_tasks=None, workflow_lookup=None, runtime_probe=None):
     now = _now() if now is None else float(now)
-    data = load_tasks()
+    data = load_tasks() if snapshot_tasks is None else {"tasks": snapshot_tasks}
 
     all_tasks = data.get("tasks", [])
     if workflow_id:
@@ -1104,9 +1105,17 @@ def _ops_center_payload(workflow_id=None, now=None, include_tasks=False):
         if wf in workflows:
             workflows[wf].append(task)
 
-    workflow_cards = _build_workflow_cards(workflows, now, all_tasks=all_tasks)
-    agent_fleet = _build_agent_fleet(tasks, now)
-    anomalies = _build_anomalies(tasks, now)
+    workflow_cards = _build_workflow_cards(
+        workflows, now, all_tasks=all_tasks, workflow_lookup=workflow_lookup)
+    # One request-local memo serves fleet and anomalies alike.
+    runtime_cache = {}
+    probe = runtime_probe or _agent_runtime_status
+    def runtime_once(pane_id):
+        if pane_id not in runtime_cache:
+            runtime_cache[pane_id] = probe(pane_id)
+        return runtime_cache[pane_id]
+    agent_fleet = _build_agent_fleet(tasks, now, runtime_probe=runtime_once)
+    anomalies = _build_anomalies(tasks, now, runtime_probe=runtime_once)
     boss = _build_boss_summary(tasks, workflows, anomalies)
     task_summaries = _task_summaries_for_ops(tasks, include_detail=include_tasks, now=now)
 
@@ -1147,22 +1156,24 @@ def _ops_center_payload(workflow_id=None, now=None, include_tasks=False):
 
 
 def ops_center(args):
-    payload = _ops_center_payload(
+    from herdr.ops_center import build_ops_center_payload
+    payload = build_ops_center_payload(
         workflow_id=getattr(args, "workflow_id", None),
         include_tasks=getattr(args, "include_tasks", False),
+        db_path=_state_db_path(),
     )
     print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
-def _get_store():
+def _state_db_path():
     if os.environ.get("HERDR_STATE_DB"):
-        return get_state_store(Path(os.environ["HERDR_STATE_DB"]))
+        return Path(os.environ["HERDR_STATE_DB"])
     t_file = globals().get("TASKS_FILE") or os.environ.get("TASKS_FILE")
     if t_file:
         p = Path(t_file)
         db_path = p.parent / "state.db" if p.name == "tasks.json" else p.with_suffix(".db")
         if db_path.parent.exists():
-            return get_state_store(db_path=db_path)
+            return db_path
     legacy_wf_file = globals().get("WORKFLOW_FILE")
     if legacy_wf_file == _DEFAULT_WORKFLOW_FILE and not os.environ.get("WORKFLOW_FILE"):
         legacy_wf_file = None  # Default config path is not an explicit DB selector.
@@ -1171,9 +1182,13 @@ def _get_store():
         p = Path(wf_file)
         db_path = p.parent / "state.db" if p.name in ("workflows.json", "workflow.json") else p.with_suffix(".db")
         if db_path.parent.exists():
-            return get_state_store(db_path=db_path)
-    return get_state_store()
+            return db_path
+    return None
 
+
+def _get_store():
+    db_path = _state_db_path()
+    return get_state_store(db_path=db_path) if db_path is not None else get_state_store()
 
 def load_tasks():
     store = _get_store()

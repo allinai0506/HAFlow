@@ -225,6 +225,10 @@ def test_console_workflows_api_wiring(archive_console_env):
         }
     }
     Path(wf_file).write_text(json.dumps(workflows_data), encoding="utf-8")
+    from herdr import state_db
+    db_path = Path(archive_console_env['tasks_file']).parent / 'state.db'
+    for wid, record in workflows_data['workflows'].items():
+        state_db.save_workflow({'workflow_id':wid, **record}, db_path=db_path)
 
     all_wfs = console.api_workflows()
     assert len(all_wfs) == 3

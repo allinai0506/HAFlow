@@ -10,8 +10,12 @@ import os
 import re
 import subprocess
 import time
+from concurrent.futures import ThreadPoolExecutor
+from threading import BoundedSemaphore
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from .kernel import state_db_path
 
 ANSI_REGEX = re.compile(
     r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\].*?(?:\x07|\x1b\\))"
@@ -264,10 +268,22 @@ def extract_task_blockers(task: Dict[str, Any], clean_text: str) -> List[str]:
     return deduped
 
 
-def project_task(task_id: str) -> Dict[str, Any]:
+def project_task(task_id: str, *, task: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Produce the complete 4D white-box telemetry projection for a task."""
-    tasks_data = load_tasks_data()
-    task = next((t for t in tasks_data.get("tasks", []) if t.get("task_id") == task_id), None)
+    if task is None:
+        from . import state_db
+        try:
+            conn = state_db.get_readonly_db_connection(state_db_path())
+        except FileNotFoundError:
+            conn = None
+        if conn is not None:
+            try:
+                row = conn.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()
+                task = state_db._decode_task_row(row) if row else None
+            finally:
+                conn.close()
+    elif task.get("task_id") != task_id:
+        raise ValueError("task snapshot identity mismatch")
     if not task:
         raise ValueError(f"Task '{task_id}' not found")
 
@@ -300,10 +316,43 @@ def project_task(task_id: str) -> Dict[str, Any]:
     }
 
 
+_CONFIG_UNSET = object()
+
+
+def _stall_config(config, workflow_id, workflow_record):
+    """Validate a pinned definition with targeted readonly reference checks."""
+    import copy
+    from types import SimpleNamespace
+    from . import state_db
+    from .projects import validate_required_task_scope, _with_node_runtime
+    if not isinstance(config, dict) or not config.get("nodes"):
+        return None
+    config = copy.deepcopy(config)
+    required = {task_id for node in config.get("nodes", [])
+                for task_id in node.get("required_task_ids") or []}
+    known = {}
+    if required:
+        conn = state_db.get_readonly_db_connection(state_db_path())
+        try:
+            conn.execute("BEGIN")
+            ids = list(required)
+            for start in range(0, len(ids), 500):
+                chunk = ids[start:start + 500]
+                rows = conn.execute("SELECT task_id,workflow_id,node,stage FROM tasks WHERE task_id IN ("
+                                    + ",".join("?" for _ in chunk) + ")", chunk)
+                known.update((row["task_id"], dict(row)) for row in rows)
+        finally:
+            conn.close()
+    validate_required_task_scope(config, workflow_id, store=SimpleNamespace(get_task=known.get))
+    return _with_node_runtime(config, workflow_record or {})
+
+
 def detect_workflow_stalls(
     workflow_id: str,
     tasks: List[Dict[str, Any]],
     workflow: Optional[Dict[str, Any]] = None,
+    *,
+    config: Any = _CONFIG_UNSET,
 ) -> Dict[str, Any]:
     """Detect workflow deadlocks, orphan reworks, or hanging stage transitions."""
     now = time.time()
@@ -312,8 +361,8 @@ def detect_workflow_stalls(
     wf_entry = workflow
     if wf_entry is None and workflow_id:
         try:
-            wf_data = load_workflows_data()
-            wf_entry = wf_data.get("workflows", {}).get(workflow_id)
+            from . import state_db
+            wf_entry = state_db.get_workflow(workflow_id, db_path=state_db_path())
         except Exception:
             wf_entry = None
 
@@ -337,12 +386,20 @@ def detect_workflow_stalls(
                 "target_task_id": None,
             }
 
+    # Reuse pinned config from the same record/snapshot, including explicit None
+    # for legacy definitions. Never initialize StateStore or import mutable files.
+    try:
+        supplied_config = (wf_entry or {}).get("config") if config is _CONFIG_UNSET else config
+        cfg = _stall_config(supplied_config, workflow_id, wf_entry)
+    except (OSError, RuntimeError, ValueError):
+        cfg = None
+
     # First-node obligations exist before any Task and are read from SQLite.
     if wf_entry and wf_entry.get('startup_ready') is not False:
         from herdr import state_db
         from herdr.node_dispatch_store import read_wait_projection
         try:
-            dispatch_wait = read_wait_projection(state_db.resolve_state_db_path(), workflow_id, now)
+            dispatch_wait = read_wait_projection(state_db_path(), workflow_id, now)
         except (OSError, ValueError, RuntimeError):
             dispatch_wait = None
         if dispatch_wait:
@@ -350,9 +407,9 @@ def detect_workflow_stalls(
 
     # Planned obligations survive Task cleanup and superseded historical rows.
     if wf_entry:
-        from herdr.projects import workflow_config_for, inspect_continuation
+        from herdr.projects import inspect_continuation
         try:
-            pending = inspect_continuation(wf_entry, workflow_config_for(workflow_id) or {}, tasks)
+            pending = inspect_continuation(wf_entry, cfg or {}, tasks)
         except (OSError, RuntimeError, ValueError):
             pending = None
         from herdr.liveness import stage_advance_sla
@@ -391,9 +448,7 @@ def detect_workflow_stalls(
 
         # Check if entire workflow DAG is complete based on workflow config
         try:
-            from herdr.projects import workflow_config_for
             from herdr.workflow import is_workflow_completed
-            cfg = workflow_config_for(workflow_id)
             if cfg and cfg.get("nodes"):
                 completed_nodes = {
                     t.get("node") or t.get("stage")
@@ -433,25 +488,49 @@ def detect_workflow_stalls(
     }
 
 
+# A shared budget covers all simultaneous workflow requests, rather than creating
+# an unbounded set of request-local probe threads. No connection is shared.
+_PROJECTION_WORKERS = 4
+_PROJECTION_POOL = ThreadPoolExecutor(max_workers=_PROJECTION_WORKERS, thread_name_prefix="projection")
+_PROJECTION_SLOTS = BoundedSemaphore(_PROJECTION_WORKERS)
+
+
+def _submit_task_projections(tasks):
+    futures = []
+    for task in tasks:
+        _PROJECTION_SLOTS.acquire()
+        try:
+            future = _PROJECTION_POOL.submit(project_task, task["task_id"], task=task)
+        except BaseException:
+            _PROJECTION_SLOTS.release()
+            raise
+        future.add_done_callback(lambda _: _PROJECTION_SLOTS.release())
+        futures.append(future)
+    return futures
+
+
 def project_workflow(workflow_id: str) -> Dict[str, Any]:
     """Produce aggregated white-box projection across all tasks in a workflow."""
-    wf_data = load_workflows_data()
-    wf_entry = wf_data.get("workflows", {}).get(workflow_id)
-    if not wf_entry:
-        raise ValueError(f"Workflow '{workflow_id}' not found")
+    from . import state_db
+    from .recovery_store import read_snapshot
+    try:
+        wf_entry, _, wf_tasks = read_snapshot(state_db_path(), workflow_id)
+    except (FileNotFoundError, ValueError) as exc:
+        if isinstance(exc, FileNotFoundError) or str(exc) == "workflow not found":
+            raise ValueError(f"Workflow '{workflow_id}' not found") from exc
+        raise
+    # Match the established list_tasks ordering in the same immutable snapshot.
+    wf_tasks.sort(key=lambda task: (task.get("created_at") or 0, task["task_id"]))
 
-    tasks_data = load_tasks_data()
-    wf_tasks = [t for t in tasks_data.get("tasks", []) if t.get("workflow_id") == workflow_id]
-
-    stall_info = detect_workflow_stalls(workflow_id, wf_tasks, workflow=wf_entry)
+    stall_info = detect_workflow_stalls(workflow_id, wf_tasks, workflow=wf_entry, config=wf_entry.get("config"))
 
     task_projections = []
     completed_count = 0
     blocked_count = 0
 
-    for t in wf_tasks:
+    for t, future in zip(wf_tasks, _submit_task_projections(wf_tasks)):
         try:
-            p = project_task(t["task_id"])
+            p = future.result()
             if stall_info["is_stalled"] and stall_info.get("target_task_id") == t["task_id"]:
                 p["blockers"].insert(0, stall_info["message"])
                 p["blocker"] = stall_info["message"]

@@ -6736,3 +6736,21 @@ HAFlow 作为企业级多任务通用 Agent 编排系统，必须支撑招投标
 ### 验证命令 / 守护测试
 
 `pytest -q tests/test_dispatch_recovery_ui.py tests/test_close_workflow_receipt_cli.py`。生产 Agent 启动交互尚未复现，不将回归通过写成运行恢复成功。
+
+## 159. 页面性能验收必须覆盖入口、辅助数据与读取副作用（2026-10-15）
+
+### 问题背景
+
+普通工作流主体的性能修复未覆盖运维入口。实际浏览器 `/api/ops-center` 为 14.87 秒，HTML 仅约 6 毫秒；成果接口另有 8–11 秒样本。运维每次启动 CLI 并争抢 schema 初始化锁，成果按任务反复打开可写连接，日志只显示 200 行却完整读取 58 MB 文件。
+
+### 经验教训
+
+“主体已绘制”不能代表全页就绪；一次接口 200 也不能证明读取能力有效。表面只读的列表调用可能隐含 schema 初始化、全局导出或选错索引。命名工作流的 Git 投影仅 6 毫秒，必须沿真实调用链取证，不能因存在 Git 命令就把它定为瓶颈。
+
+### 操作规范
+
+按页面入口测浏览器请求与最终 DOM，分别报告主体、成果、列表和现场。观测接口使用已有只读连接；单次查询复用快照，任务索引约束相关记录，分页在数据源执行。刷新需要在途合并、最新范围调度和旧响应归属校验；后台现场查询不能因视图切换写入已清空的项目对象。未知、截断与失败必须可见，不用空结果伪装完成。
+
+### 验证命令 / 守护测试
+
+`pytest -q tests/test_console_page_latency.py tests/test_ops_center_read_path.py tests/test_deliverable_read_latency.py tests/test_projection_archive_latency.py`。受控 Promise 回归覆盖请求合并、范围反序与项目对象失效；真实 SQLite 证明无初始化、只解码当前页和按任务读取量；临时端口使用数据库一致副本验证页面，生产部署另行验收。

@@ -6,6 +6,7 @@ filtering, sorting and pagination over task records supplied by the caller.
 Persistence and I/O stay in the imperative shell (console / StateStore).
 """
 
+import math
 from typing import Any, Dict, List, Optional
 
 ARCHIVED_STATUSES = ("cleaned", "superseded", "failed")
@@ -54,7 +55,11 @@ def _recent(task: Dict[str, Any]) -> float:
         or 0
     )
     try:
-        return float(raw)
+        seconds = float(raw)
+        # Corrupt nonfinite values have no chronological meaning. Python NaN
+        # keys make sort order depend on inventory order; use one finite fallback
+        # in both the in-memory reference and SQLite pagination path.
+        return seconds if math.isfinite(seconds) else 0.0
     except (TypeError, ValueError):
         return 0.0
 
@@ -170,3 +175,89 @@ def query_archived_tasks(
         "status": status_key,
         "items": [summarize_task(task) for task in page],
     }
+
+
+def query_archived_tasks_sqlite(
+    db_path=None,
+    project_id=None,
+    workflow_id=None,
+    agent=None,
+    status=None,
+    q=None,
+    limit=DEFAULT_LIMIT,
+    offset=0,
+):
+    """Query one read-only SQLite snapshot; decode full records only for the page.
+
+    SQLite's lower()/LIKE implement ASCII folding and wildcard matching, which
+    differ from the established Python substring contract. Small scalar UDFs
+    retain Unicode normalization and Python timestamp fallback without loading
+    every task payload into Python. Values and filters are always parameters.
+    """
+    import json
+    from . import state_db
+
+    # Reuse the public core's input normalization and pagination contract.
+    result = query_archived_tasks([], status=status, limit=limit, offset=offset)
+    status_key = result['status']
+    statuses = STATUS_GROUPS.get(status_key, (status_key,))
+    project_key = str(project_id).strip() if project_id else ''
+    workflow_key = _norm(workflow_id)
+    agent_key = str(agent).strip() if agent else ''
+    keyword = _norm(q)
+    # These columns override payload values in state_db._decode_task_row.
+    columns = {'task_id', 'workflow_id', 'node', 'stage', 'agent', 'status',
+               'goal', 'created_at', 'updated_at'}
+
+    def value(field):
+        return field if field in columns else f"json_extract(payload_json, '$.{field}')"
+
+    def normalized(field):
+        expr = value(field)
+        kind = "NULL" if field in columns else f"json_type(payload_json, '$.{field}')"
+        return f'archive_norm({expr}, {kind})'
+
+    def scalar_norm(raw, kind):
+        if kind in ('array', 'object'):
+            raw = json.loads(raw)
+        elif kind == 'true':
+            raw = True
+        elif kind == 'false':
+            raw = False
+        return _norm(raw)
+
+    def recent(updated, activity, created):
+        return _recent({'updated_at': updated, 'last_activity_at': activity, 'created_at': created})
+
+    clauses, params = [], []
+    if project_key:
+        clauses.append(f'{value("project_id")} = ?')
+        params.append(project_key)
+    if workflow_key:
+        clauses.append(f'instr({normalized("workflow_id")}, ?) > 0')
+        params.append(workflow_key)
+    if agent_key:
+        clauses.append('agent = ?')
+        params.append(agent_key)
+    if statuses is not None:
+        clauses.append('status IN (' + ','.join('?' for _ in statuses) + ')')
+        params.extend(statuses)
+    if keyword:
+        haystack = " || ' ' || ".join(normalized(field) for field in _SEARCH_FIELDS)
+        clauses.append(f'instr(({haystack}), ?) > 0')
+        params.append(keyword)
+    where = ' WHERE ' + ' AND '.join(clauses) if clauses else ''
+    conn = state_db.get_readonly_db_connection(db_path)
+    try:
+        conn.create_function('archive_norm', 2, scalar_norm, deterministic=True)
+        conn.create_function('archive_recent', 3, recent, deterministic=True)
+        conn.execute('BEGIN')
+        result['total'] = conn.execute('SELECT count(*) FROM tasks' + where, params).fetchone()[0]
+        ordering = f' ORDER BY archive_recent(updated_at, {value("last_activity_at")}, created_at) DESC, task_id ASC'
+        rows = conn.execute('SELECT * FROM tasks' + where + ordering + ' LIMIT ? OFFSET ?',
+                            [*params, result['limit'], result['offset']]).fetchall()
+        result['items'] = [summarize_task(state_db._decode_task_row(row)) for row in rows]
+        result['count'] = len(result['items'])
+        return result
+    finally:
+        conn.close()

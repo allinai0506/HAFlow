@@ -22,6 +22,7 @@ from herdr import workflow_graph as herdr_workflow_graph
 from herdr import human_decisions as herdr_human_decisions
 from herdr import projects as herdr_projects
 from herdr import kernel as herdr_kernel
+from herdr.kernel import state_db_path
 from herdr import steering as herdr_steering
 from herdr import projection as herdr_projection
 from herdr import deliverables as herdr_deliverables
@@ -62,24 +63,8 @@ def run_json(cmd,timeout=20):
     except Exception as e: raise RuntimeError('无法解析 Herdr JSON') from e
 
 def ops_center(workflow_id=None,include_tasks=False):
-    cmd=[str(HERDR_TASK),'ops-center']
-    if workflow_id:cmd += ['--workflow-id',workflow_id]
-    if include_tasks:cmd.append('--include-tasks')
-    data=run_json(cmd,20)
-    subjects={wid:(w.get('title') or w.get('requirement_subject') or herdr_projects.requirement_subject(w.get('requirement',''))) for wid,w in workflows().items()}
-    for c in data.get('workflow_cards') or []:
-        s=subjects.get(c.get('workflow_id'))
-        if s:c['workflow_label']=s
-    all_t_map = {t.get('task_id'): t for t in tasks()}
-    for a in data.get('anomalies') or []:
-        tid = a.get('task_id')
-        if tid and tid in all_t_map:
-            t = all_t_map[tid]
-            if a.get('version') is None:
-                a['version'] = t.get('version')
-            if not a.get('pane_id'):
-                a['pane_id'] = t.get('pane_id')
-    return data
+    from herdr.ops_center import build_ops_center_payload
+    return build_ops_center_payload(workflow_id,include_tasks,db_path=state_db_path())
 
 def projects():return list(load_json(PROJECTS_FILE,{'projects':{}}).get('projects',{}).values())
 def workflows():return herdr_kernel.load_workflows_data().get('workflows',{})
@@ -256,8 +241,8 @@ def agent_loads(pid):
         if t.get('project_id')==pid and t.get('status') in IN_FLIGHT_STATUSES and t.get('agent'):d[t['agent']]=d.get(t['agent'],0)+1
     return d
 
-def preflight(p):
-    po=pool(p.get('project_id')); allowed=po.get('allowed_agents',AGENTS); disabled=set(po.get('disabled_agents',[])); loads=agent_loads(p.get('project_id'))
+def preflight(p, loads=None):
+    po=pool(p.get('project_id')); allowed=po.get('allowed_agents',AGENTS); disabled=set(po.get('disabled_agents',[])); loads=agent_loads(p.get('project_id')) if loads is None else loads
     out=[]
     for a in allowed:
         b=resolve_agent_binary(a)
@@ -296,8 +281,9 @@ def deep_preflight(p, agent=None):
         raise RuntimeError("Deep Preflight JSON 解析失败") from e
 
 
-def slots(p, p_panes=None):
-    cfg=load_json(Path(p.get('workflow_file','')),{}) ; stage_by_tab={s.get('tab_id'):s for s in cfg.get('stages',[])}; anchors={s.get('anchor_pane_id') for s in cfg.get('stages',[])}; binds=load_json(SLOTS_FILE,{'panes':{}}).get('panes',{}); claimed={t.get('pane_id'):t.get('task_id') for t in tasks() if t.get('pane_id')}; out=[]
+def slots(p, p_panes=None, claimed=None):
+    cfg=load_json(Path(p.get('workflow_file','')),{}) ; stage_by_tab={s.get('tab_id'):s for s in cfg.get('stages',[])}; anchors={s.get('anchor_pane_id') for s in cfg.get('stages',[])}; binds=load_json(SLOTS_FILE,{'panes':{}}).get('panes',{}); out=[]
+    if claimed is None:claimed={t.get('pane_id'):t.get('task_id') for t in tasks() if t.get('pane_id')}
     all_panes = p_panes if p_panes is not None else panes(p.get('workspace_id'))
     for x in all_panes:
         pid=x.get('pane_id'); tid=x.get('tab_id')
@@ -445,9 +431,16 @@ def overview():
         'services': service_status(),
     }
 
-def project_detail(pid):
+def project_detail(pid, lightweight=False):
     p=project_by_id(pid)
     if not p:raise RuntimeError('项目不存在')
+    if lightweight:
+        from herdr.console_queries import project_workflows, project_agent_loads
+        db_path=state_db_path()
+        ws=[_with_subject(w) for w in project_workflows(pid, db_path)]
+        loads=project_agent_loads(pid, sorted(IN_FLIGHT_STATUSES), db_path)
+        return {'project':p,'workflows':ws,'latest_workflow_id':ws[0]['workflow_id'] if ws else None,
+                'tabs':[],'panes':[],'slots':[],'agents':preflight(p,loads=loads),'runtime_pending':True}
     ws=workflows_for_project(pid)
     p_panes=panes(p.get('workspace_id'))
     try:
@@ -455,6 +448,20 @@ def project_detail(pid):
     except TypeError:
         s=slots(p)
     return {'project':p,'workflows':ws,'latest_workflow_id':ws[0]['workflow_id'] if ws else None,'tabs':tabs(p.get('workspace_id')),'panes':p_panes,'slots':s,'agents':preflight(p)}
+
+def project_runtime(pid):
+    p=project_by_id(pid)
+    if not p:raise RuntimeError('项目不存在')
+    p_panes=panes(p.get('workspace_id'))
+    from herdr.state_db import get_readonly_db_connection
+    conn=get_readonly_db_connection(state_db_path())
+    try:
+        pane_ids=[row['pane_id'] for row in p_panes if row.get('pane_id')]
+        marks=','.join('?' for _ in pane_ids)
+        claimed={row['pane_id']:row['task_id'] for row in conn.execute(
+            'SELECT pane_id,task_id FROM tasks WHERE pane_id IN ('+marks+') ORDER BY created_at ASC',pane_ids)} if pane_ids else {}
+    finally:conn.close()
+    return {'tabs':tabs(p.get('workspace_id')),'panes':p_panes,'slots':slots(p,p_panes=p_panes,claimed=claimed)}
 
 def workflow_stages(wid, p):
     """阶段卡片来源:优先 workflow.json 的 nodes(id/label),回退内置 STAGES。
@@ -477,8 +484,7 @@ def workflow_stages(wid, p):
 def workflow_detail(wid, *, lightweight=False):
     if lightweight:
         from herdr.recovery_store import read_snapshot
-        from herdr.state_db import get_default_db_path
-        w, _, ts = read_snapshot(get_default_db_path(), wid)
+        w, _, ts = read_snapshot(state_db_path(), wid)
         p = project_by_id(w.get('project_id')) or w
     else:
         w=workflows().get(wid)
@@ -493,13 +499,13 @@ def workflow_detail(wid, *, lightweight=False):
         definition=w.get('config') or workflow_definition_for(wid,p,w)
         inventory=list(ts)
         owned_ids={t.get('task_id') for t in ts}
-        from herdr.state_db import get_task, get_default_db_path
+        from herdr.state_db import get_task
         for node in (definition or {}).get('nodes') or []:
             required=node.get('required_task_ids')
             if isinstance(required,list) and len(required)<=64:
                 for task_id in required:
                     if isinstance(task_id,str) and task_id not in owned_ids:
-                        referenced=get_task(task_id,db_path=get_default_db_path())
+                        referenced=get_task(task_id,db_path=state_db_path())
                         if referenced:inventory.append(referenced)
                         owned_ids.add(task_id)
         graph=workflow_graph_for(wid,p,w,ts,definition=definition,all_tasks=inventory)
@@ -1793,45 +1799,47 @@ _deliverable_pr_loader = None
 def _load_deliverable_observations(task_id):
     if not task_id:
         return []
-    db_path = Path(os.environ['HERDR_STATE_DB']) if os.environ.get('HERDR_STATE_DB') else Path(TASKS_FILE).parent / 'state.db'
-    if not db_path.is_file():
-        return []
+    from herdr.deliverable_store import read_enrichment
     try:
-        from herdr.state_db import list_observations
-        return list_observations(task_id=str(task_id), source_type='artifact', limit=40, db_path=db_path)
+        facts = read_enrichment([{'task_id': task_id}], state_db_path(), pull_requests=False)
+        return facts.get((None, task_id), {}).get('observations', [])
     except Exception:
         return []
 
 def _load_deliverable_pr(task):
     if not task.get('task_id') or not task.get('workflow_id'):
         return None
-    db_path = Path(os.environ['HERDR_STATE_DB']) if os.environ.get('HERDR_STATE_DB') else Path(TASKS_FILE).parent / 'state.db'
-    if not db_path.is_file():
-        return None
-    from herdr.state_db import list_events
-    events = list_events(
-        workflow_id=task['workflow_id'], task_id=task['task_id'],
-        event_type='pull_request_created', source='herdr-task',
-        limit=1, desc=True, db_path=db_path,
-    )
-    return events[0]['payload'] if events else None
+    from herdr.deliverable_store import read_enrichment
+    facts = read_enrichment([task], state_db_path(), observations=False)
+    return facts.get((task['workflow_id'], task['task_id']), {}).get('pull_request')
 
 def _tasks_for_deliverables(tasks):
+    tasks = [task for task in (tasks or []) if isinstance(task, dict)]
     loader = _deliverable_observation_loader
-    rows = []
-    for task in tasks or []:
-        if not isinstance(task, dict):
-            continue
-        row = dict(task)
+    pr_loader = _deliverable_pr_loader
+    default_observations = loader is _load_deliverable_observations
+    default_prs = pr_loader is _load_deliverable_pr
+    facts = {}
+    if tasks and (default_observations or default_prs):
+        from herdr.deliverable_store import read_enrichment
         try:
-            extra = (loader(row.get('task_id')) or []) if loader else []
+            facts = read_enrichment(tasks, state_db_path(),
+                                    observations=default_observations, pull_requests=default_prs)
+        except Exception:
+            print('[DELIVERABLES WARN] persisted receipts could not be read', flush=True)
+    rows = []
+    for task in tasks:
+        row = dict(task)
+        extra_facts = facts.get((row.get('workflow_id'), row.get('task_id')), {})
+        try:
+            extra = extra_facts.get('observations', []) if default_observations else ((loader(row.get('task_id')) or []) if loader else [])
         except Exception:
             extra = []
         if extra:
             row['observations'] = list(row.get('observations') or []) + list(extra)
-        if _deliverable_pr_loader:
+        if pr_loader:
             try:
-                receipt = _deliverable_pr_loader(row)
+                receipt = extra_facts.get('pull_request') if default_prs else pr_loader(row)
                 if receipt:
                     row['pull_request'] = receipt
             except Exception:
@@ -1843,7 +1851,7 @@ def api_workflow_deliverables(wid):
     if not wid:
         raise RuntimeError('workflow_id 不能为空')
     from herdr.recovery_store import read_snapshot
-    w, _, ts = read_snapshot(herdr_kernel._get_store().db_path, wid)
+    w, _, ts = read_snapshot(state_db_path(), wid)
     return herdr_deliverables.project_for_tasks(
         wid, _tasks_for_deliverables(ts), _workflow_nodes(wid, w),
     )
@@ -1851,11 +1859,14 @@ def api_workflow_deliverables(wid):
 def api_read_deliverable(wid, tid, did, download=False):
     if not wid or not tid or not did:
         raise herdr_deliverables.DeliverableError('not_found', 404, '找不到这项成果')
-    w = workflows().get(wid)
-    if not w:
+    from herdr.recovery_store import read_snapshot
+    try:
+        w, _, ts = read_snapshot(state_db_path(), wid)
+    except (ValueError, FileNotFoundError):
         raise herdr_deliverables.DeliverableError('not_found', 404, '找不到这项成果')
+    own = [task for task in ts if task.get('task_id') == tid]
     return herdr_deliverables.read_deliverable(
-        wid, _tasks_for_deliverables(tasks_for_workflow(wid)), _workflow_nodes(wid, w), tid, did, download=download,
+        wid, _tasks_for_deliverables(own), _workflow_nodes(wid, w), tid, did, download=download,
     )
 
 def api_task_projection(tid):
@@ -1864,9 +1875,11 @@ def api_task_projection(tid):
     wid = proj.get('workflow_id')
     try:
         if wid:
-            own = [task for task in _tasks_for_deliverables(tasks_for_workflow(wid)) if task.get('task_id') == tid]
+            from herdr.recovery_store import read_snapshot
+            workflow,_,workflow_tasks=read_snapshot(state_db_path(),wid)
+            own = _tasks_for_deliverables([task for task in workflow_tasks if task.get('task_id') == tid])
             proj['deliverables'] = herdr_deliverables.project_for_tasks(
-                wid, own, _workflow_nodes(wid), include_expectations=False,
+                wid, own, _workflow_nodes(wid,workflow), include_expectations=False,
             )
         else:
             proj['deliverables'] = herdr_deliverables.pack([])
@@ -1879,7 +1892,8 @@ def api_workflow_projection(wid):
     return herdr_projection.project_workflow(wid)
 
 def api_workflows(pid=None):
-    all_w = workflows()
+    from herdr.console_queries import project_workflows
+    all_w = {w['workflow_id']:w for w in project_workflows(pid,state_db_path())}
     res = []
     for wid, w in all_w.items():
         w_proj = w.get('project_id') or ''
@@ -1898,9 +1912,8 @@ def api_workflows(pid=None):
 
 def archive_query(project_id=None,workflow_id=None,agent=None,status=None,q=None,limit=50,offset=0):
     """归档查询读取 StateStore(唯一事实源)。"""
-    all_tasks=tasks()
-    return herdr_archive.query_archived_tasks(
-        all_tasks,
+    return herdr_archive.query_archived_tasks_sqlite(
+        state_db_path(),
         project_id=project_id or None,
         workflow_id=workflow_id or None,
         agent=agent or None,
@@ -1925,6 +1938,10 @@ def _dashboard_pane_runtime(pane_id):
     except Exception:
         return None
 
+def dashboard_inventory():
+    from herdr.console_queries import read_inventory
+    return read_inventory(state_db_path())
+
 def dashboard_data(limit_tasks=50, limit_workflows=50, workflow_id=None):
     """人类仪表板聚合(只读旁路):任务+工位实时/等你决策/最新交付/卡住。
 
@@ -1935,18 +1952,11 @@ def dashboard_data(limit_tasks=50, limit_workflows=50, workflow_id=None):
     workflow_id 未知时返回空分段(fail-soft),不抛错。
     """
     now=time.time()
-    try:
-        _all=tasks()
-    except Exception:
-        _all=[]
+    _all,wf_map=dashboard_inventory()
     if not isinstance(_all,list):
         _all=[]
     scope=(workflow_id or '').strip() or None
     all_tasks=[t for t in _all if (t.get('workflow_id') or 'unknown')==scope] if scope else _all
-    try:
-        wf_map=workflows()
-    except Exception:
-        wf_map={}
     if not isinstance(wf_map,dict):
         wf_map={}
 
@@ -1959,11 +1969,17 @@ def dashboard_data(limit_tasks=50, limit_workflows=50, workflow_id=None):
                 continue
         return 0.0
 
+    all_by_wf={};latest_by_wf={};pane_latest={}
+    for t in _all:
+        wid=t.get('workflow_id') or 'unknown'
+        all_by_wf.setdefault(wid,[]).append(t)
+        latest_by_wf[wid]=max(latest_by_wf.get(wid,0),_upd(t))
     active=[t for t in all_tasks if t.get('status') not in {'superseded','cleaned'} and not t.get('superseded_by')]
     by_wf={}
     for t in active:
         wid=t.get('workflow_id') or 'unknown'
         by_wf.setdefault(wid,[]).append(t)
+        if t.get('pane_id'):pane_latest[t['pane_id']]=max(pane_latest.get(t['pane_id'],0),_upd(t))
     # 最近活跃的工作流优先,保证有界
     wf_ids=sorted(by_wf, key=lambda w:max([_upd(t) for t in by_wf[w]] or [0.0]), reverse=True)[:max(1,limit_workflows)]
 
@@ -2000,14 +2016,14 @@ def dashboard_data(limit_tasks=50, limit_workflows=50, workflow_id=None):
                 anomalies.append({'kind':str(t.get('status')).upper(),'task_id':t.get('task_id'),'workflow_id':wid,'last_activity_at':_upd(t) or None})
     # 工位实时:仅活跃任务的 pane,有界 ≤20,3s 超时,并发上限 8(只读旁路)
     import concurrent.futures as _fut
-    _panes=sorted({t.get('pane_id') for t in active if t.get('pane_id')}, key=lambda p:max([_upd(t) for t in active if t.get('pane_id')==p] or [0.0]), reverse=True)[:20]
+    _panes=sorted(pane_latest,key=pane_latest.get,reverse=True)[:20]
     runtimes={}
     if _panes:
         with _fut.ThreadPoolExecutor(max_workers=8) as _ex:
             _res=dict(zip(_panes,_ex.map(_dashboard_pane_runtime,_panes)))
         runtimes={p:v for p,v in _res.items() if isinstance(v,dict)}
     # 最新交付:最近 20 个工作流各取有效交付(失败隔离)
-    recent_wf=sorted({t.get('workflow_id') for t in all_tasks if t.get('workflow_id')}, key=lambda w:max([_upd(t) for t in all_tasks if t.get('workflow_id')==w] or [0.0]), reverse=True)[:20]
+    recent_wf=sorted({t.get('workflow_id') for t in all_tasks if t.get('workflow_id')},key=latest_by_wf.get,reverse=True)[:20]
     notes_by_wf={}
     for wid in recent_wf:
         try:
@@ -2030,11 +2046,9 @@ def dashboard_data(limit_tasks=50, limit_workflows=50, workflow_id=None):
         except Exception:
             continue
     # 选择器选项:全部工作流(最近优先,≤50),标题复用 _with_subject
-    _by_wf_all={}
-    for t in _all:
-        _by_wf_all.setdefault(t.get('workflow_id') or 'unknown',[]).append(t)
+    _by_wf_all=all_by_wf
     wf_options=[]
-    for wid in sorted(_by_wf_all, key=lambda w:max([_upd(t) for t in _by_wf_all[w]] or [0.0]), reverse=True)[:50]:
+    for wid in sorted(_by_wf_all, key=latest_by_wf.get, reverse=True)[:50]:
         wts=_by_wf_all[wid]
         subj=_with_subject(dict(wf_map.get(wid) or {}, workflow_id=wid))
         wf_options.append({'workflow_id':wid,
@@ -2150,7 +2164,23 @@ def create_candidate(wid):
 def tail_log(kind='controller',n=180):
     mp={'controller':LOG_DIR/'controller.out.log','controller_err':LOG_DIR/'controller.err.log','notifier':LOG_DIR/'notifier.out.log','sentinel':LOG_DIR/'sentinel.out.log'}; p=mp.get(kind)
     if not p or not p.exists():return ''
-    return '\n'.join(p.read_text(errors='ignore').splitlines()[-max(10,min(n,1000)):])
+    # Read only a bounded suffix; never split the entire controller log in RAM.
+    budget=256*1024
+    with p.open('rb') as handle:
+        size=handle.seek(0,os.SEEK_END)
+        length=min(size,budget)
+        handle.seek(size-length)
+        raw=handle.read(length)
+    truncated=size>length
+    if truncated:
+        boundary=raw.find(b'\n')
+        raw=raw[boundary+1:] if boundary>=0 else b''
+    lines=raw.decode('utf-8',errors='ignore').splitlines()
+    count=max(10,min(n,1000))
+    text='\n'.join(lines[-count:])
+    if truncated and len(lines)<count:
+        text='[日志尾部已截断，较早内容超出读取上限]'+('\n'+text if text else '')
+    return text
 
 HTML_TEMPLATE=r'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>__PRODUCT_NAME__</title><style>:root {
   /* Linear Clean Light Palette */
@@ -6897,11 +6927,16 @@ function syncOpsUi(){
   document.querySelectorAll('.factory-action').forEach(button=>{if(state.dashMode)button.hidden=true});
 }
 
+const apiReads=new Map();
 async function api(p,o={}){
   const started=performance.now();
   let authHeaders={};
   try{const t=sessionStorage.getItem('herdr_hub_token')||'';if(t)authHeaders={'Authorization':'Bearer '+t};}catch(e){}
   const mergedHeaders={'Content-Type':'application/json',...authHeaders,...(o.headers||{})};
+  const key=JSON.stringify([p,mergedHeaders]);
+  const share=(o.method||'GET').toUpperCase()==='GET'&&!o.signal;
+  if(share&&apiReads.has(key))return apiReads.get(key);
+  const request=(async()=>{
   const r=await fetch(p,{...o,headers:mergedHeaders});
   const d=await r.json();
   if(!r.ok||d.ok===false)throw new Error(d.error||('HTTP '+r.status));
@@ -6910,7 +6945,25 @@ async function api(p,o={}){
     const ms=Math.max(1,Math.round(performance.now()-started));
     latency.textContent=ms>=1000?(ms/1000).toFixed(1)+'s':ms+'ms';
   }
-  return d.data??d
+  return d.data??d;
+  })();
+  if(share)apiReads.set(key,request);
+  try{return await request}finally{if(share&&apiReads.get(key)===request)apiReads.delete(key)}
+}
+const pageReads=new Map();
+function pageRead(kind,path){
+  let identity='';try{identity=sessionStorage.getItem('herdr_hub_token')||''}catch(e){}
+  const key=JSON.stringify([kind,identity]);
+  const previous=pageReads.get(key);
+  if(previous){
+    previous.nextPath=path;
+    if(previous.path===path)return previous.promise;
+    return previous.promise.catch(()=>null).then(()=>previous.nextPath===path?pageRead(kind,path):null);
+  }
+  const entry={path,nextPath:path,promise:null};
+  entry.promise=api(path).finally(()=>{if(pageReads.get(key)===entry)pageReads.delete(key)});
+  pageReads.set(key,entry);
+  return entry.promise;
 }
 function friendlyErrorChinese(raw){
   const msg=String(raw||'').trim();
@@ -7898,8 +7951,8 @@ async function exitOpsCenter(){
 }
 async function loadOpsCenter(){
   try{
-    const ops=await api('/api/ops-center?include_tasks=1');
-    if(!state.opsMode)return;
+    const ops=await pageRead('ops','/api/ops-center?include_tasks=1');
+    if(!ops||!state.opsMode)return;
     state.ops=ops;
     renderOpsCenter();
   }catch(e){
@@ -8524,13 +8577,14 @@ async function exitDashboard(){
   state.dashMode=false;state.shellView='workbench';saveViewState();syncOpsUi();stopDashTimer();await refreshAll()
 }
 async function loadDashboard(){
+  const scope=state.dashWorkflowId;
   try{
-    const qs=state.dashWorkflowId?('?workflow_id='+encodeURIComponent(state.dashWorkflowId)):'';
-    const d=await api('/api/dashboard'+qs);
-    if(!state.dashMode)return;
+    const qs=scope?('?workflow_id='+encodeURIComponent(scope)):'';
+    const d=await pageRead('dashboard','/api/dashboard'+qs);
+    if(!d||!state.dashMode||state.dashWorkflowId!==scope)return;
     state.dash=d;renderDashboard();
   }catch(e){
-    if(state.dashMode){
+    if(state.dashMode&&state.dashWorkflowId===scope){
       toast(e.message,true);
       const el=document.getElementById('tasks');
       if(el)el.innerHTML=`<div class="panel" style="padding:32px 20px;text-align:center;margin:16px"><div style="font-size:16px;font-weight:700;margin-bottom:8px">仪表板数据加载失败</div><div class="task-meta" style="margin-bottom:16px">${esc(e.message)}</div><button class="btn primary" onclick="loadDashboard()">点击重试</button></div>`;
@@ -8631,11 +8685,14 @@ async function openWorkflowFromOps(id){
 }
 
 async function refreshAll(){
+  const sequence=state.refreshSequence=(state.refreshSequence||0)+1;
   try{
     syncOpsUi();
     if(state.dashMode){await loadDashboard();return}
     if(state.opsMode){await loadOpsCenter();return}
-    state.overview=await api('/api/overview');
+    const overview=await pageRead('overview','/api/overview');
+    if(!overview||sequence!==state.refreshSequence)return;
+    state.overview=overview;
     if(state.opsMode){await loadOpsCenter();return}
     const ss=state.overview.spaces||[];
 
@@ -8646,7 +8703,9 @@ async function refreshAll(){
 
     renderOverview();
     if(state.spaceId)await selectSpace(state.spaceId,false);
-    if(!state.opsMode&&!state.dashMode&&state.shellView&&state.shellView!=='workbench')paintShellPage(state.shellView);
+    if(sequence!==state.refreshSequence||state.opsMode||state.dashMode)return;
+    if(state.shellView==='experience')return;
+    if(state.shellView&&state.shellView!=='workbench')paintShellPage(state.shellView);
     else paintCrumb();
   }catch(e){toast(e.message,true)}
 }
@@ -8696,8 +8755,10 @@ async function selectSpace(workspaceId,rer=true){
   if(s.relation==='current_factory'&&s.project_id){
     state.projectId=s.project_id;
     await loadProject(s.project_id,false);
+    if(state.spaceId!==workspaceId||state.opsMode||state.dashMode)return;
     document.getElementById('projectTitle').textContent=s.label||s.project_name||s.workspace_id;
   }else{
+    state.projectLoadSequence=(state.projectLoadSequence||0)+1;
     destroyFlowGraph();
     state.project=null;
     state.projectId=s.project_id||null;
@@ -8757,7 +8818,11 @@ async function selectSpace(workspaceId,rer=true){
 
 async function loadProject(id,rer=true){
   state.projectId=id;
-  state.project=await api('/api/project?id='+encodeURIComponent(id));
+  const sequence=state.projectLoadSequence=(state.projectLoadSequence||0)+1;
+  const project=await pageRead('project','/api/project?id='+encodeURIComponent(id)+'&lightweight=1');
+  if(!project||state.projectId!==id||sequence!==state.projectLoadSequence||state.opsMode||state.dashMode)return;
+  state.project=project;
+  if(!state.shellView||['workbench','slots'].includes(state.shellView))loadProjectRuntime(id,sequence);
   if(rer&&state.overview)renderOverview();
   document.getElementById('projectTitle').textContent=state.project.project.project_name;
   const w=state.project.workflows;
@@ -8787,9 +8852,27 @@ async function loadProject(id,rer=true){
     else if(sysId==='__archive__'&&typeof showArchive==='function')showArchive();
     else if(sysId==='__logs__'&&typeof showLogs==='function')showLogs();
   }else if(state.workflowId){
-    await loadWorkflow(state.workflowId);
+    if(state.initialWorkflowPainted&&state.workflow?.workflow?.workflow_id===state.workflowId){
+      state.initialWorkflowPainted=false;
+    }else await loadWorkflow(state.workflowId);
   }else{
     clearWorkflow();
+  }
+}
+async function loadProjectRuntime(id,sequence){
+  const project=state.project;
+  if(!project)return;
+  try{
+    const runtime=await pageRead('project-runtime','/api/project/runtime?id='+encodeURIComponent(id));
+    if(!runtime||state.project!==project||state.projectId!==id||sequence!==state.projectLoadSequence||state.opsMode||state.dashMode)return;
+    Object.assign(state.project,runtime,{runtime_pending:false});
+    renderSlots();
+    if(state.shellView==='slots')paintShellPage('slots');
+  }catch(e){
+    if(state.project===project&&state.projectId===id&&sequence===state.projectLoadSequence){
+      state.project.runtime_pending=false;state.project.runtime_error=e.message;renderSlots();
+      if(state.shellView==='slots')paintShellPage('slots');
+    }
   }
 }
 function workflowSubject(w){return (w&&(w.title||w.requirement_subject))||''}
@@ -9700,7 +9783,8 @@ async function showShellView(view){
   state.opsMode=false;state.dashMode=false;stopDashTimer();
   state.shellView=view||'workbench';
   saveViewState();syncOpsUi();
-  if(leaving){await refreshAll();return;}
+  if(['slots','workbench'].includes(state.shellView)&&state.project?.runtime_pending)loadProjectRuntime(state.projectId,state.projectLoadSequence);
+  if(leaving){if(state.shellView!=='workbench')paintShellPage(state.shellView);await refreshAll();return;}
   if(state.shellView==='workbench'){
     if(!state.workflow){
       if(state.space&&state.space.relation&&state.space.relation!=='current_factory'){
@@ -9730,6 +9814,9 @@ function paintShellPage(view){
   if(view==='templates'){showTemplateLibrary();return;}
   setWorkspaceMode('aux');
   paintCrumb();
+  if(['alerts','agents','slots','workflows'].includes(view)&&!state.overview){
+    document.getElementById('tasks').innerHTML='<div class="empty" role="status">正在读取页面数据…</div>';return;
+  }
   if(view==='alerts')renderShellAlerts();
   else if(view==='agents')renderShellAgents();
   else if(view==='slots')renderShellSlots();
@@ -9744,6 +9831,7 @@ function applyHubFilter(){
   renderShellExperience();
 }
 async function renderShellExperience(){
+  const sequence=state.experienceSequence=(state.experienceSequence||0)+1;
   const el=document.getElementById('tasks');if(!el)return;
   el.innerHTML='<div class="shell-page"><div class="shell-page-head"><h3>企业经验中心 (Experience Hub)</h3><p style="color:var(--text-secondary);font-size:12px;">沉淀自真实任务并通过审核的企业业务规则资产</p><div style="display:flex;gap:8px;align-items:center;margin-top:8px;font-size:12px;"><label for="hubTokenInput" style="color:var(--text-secondary);">Hub 身份 Token:</label><input id="hubTokenInput" type="password" placeholder="粘贴个人 Hub Token（仅本标签页有效）" style="flex:1;max-width:320px;padding:4px 8px;border:1px solid var(--border-color);border-radius:4px;background:var(--bg-main);color:var(--text-primary);" /><button class="btn btn-sm" onclick="saveHubToken()">保存</button><label for="hubCustomerInput" style="color:var(--text-secondary);">客户筛选:</label><input id="hubCustomerInput" type="text" placeholder="留空查看授权范围内全部" oninput="window._hubCustomerFilter=this.value" style="width:160px;padding:4px 8px;border:1px solid var(--border-color);border-radius:4px;background:var(--bg-main);color:var(--text-primary);" /><button class="btn btn-sm" onclick="applyHubFilter()">应用</button></div></div><div id="experienceHubContainer" style="padding:16px 0;"><div class="loading">加载经验数据中...</div></div></div>';
   try{const saved=sessionStorage.getItem('herdr_hub_token')||'';const inp=document.getElementById('hubTokenInput');if(inp)inp.value=saved;}catch(e){}
@@ -9751,8 +9839,12 @@ async function renderShellExperience(){
   const container=document.getElementById('experienceHubContainer');
   try{
     const custFilter=(window._hubCustomerFilter||'').trim();
-    const candRes=await api('/api/experience/candidates?status=pending_review'+(custFilter?'&customer='+encodeURIComponent(custFilter):''));
-    const ruleRes=await api('/api/experience/rules?scope=all'+(custFilter?'&customer='+encodeURIComponent(custFilter):''));
+    const suffix=custFilter?'&customer='+encodeURIComponent(custFilter):'';
+    const [candRes,ruleRes]=await Promise.all([
+      pageRead('experience-candidates','/api/experience/candidates?status=pending_review'+suffix),
+      pageRead('experience-rules','/api/experience/rules?scope=all'+suffix),
+    ]);
+    if(!candRes||!ruleRes||sequence!==state.experienceSequence||state.shellView!=='experience'||!container.isConnected)return;
     const cands=(candRes&&(candRes.candidates||candRes.data?.candidates))||[];
     const rules=(ruleRes&&(ruleRes.rules||ruleRes.data?.rules))||[];
     let html='<div style="display:flex;gap:24px;flex-direction:column;">';
@@ -9814,6 +9906,7 @@ async function renderShellExperience(){
     html+='</div>';
     container.innerHTML=html;
   }catch(e){
+    if(sequence!==state.experienceSequence||!container.isConnected)return;
     container.innerHTML=`<div class="error" style="color:var(--danger);padding:16px;">企业经验中心暂未启动或离线: ${esc(e.message||e)}</div>`;
   }
 }
@@ -9879,6 +9972,7 @@ function renderShellWorkflows(){
 }
 async function openShellWorkflow(id){
   state.shellView='workbench';state.workflowView='flow';saveViewState();
+  if(state.project?.runtime_pending)loadProjectRuntime(state.projectId,state.projectLoadSequence);
   if(!state.openWorkflowTabIds)state.openWorkflowTabIds=[];
   if(id&&!state.openWorkflowTabIds.includes(id))state.openWorkflowTabIds.push(id);
   try{await loadWorkflow(id);}catch(e){toast(e.message,true);return;}
@@ -10274,7 +10368,7 @@ window.addEventListener('resize',()=>{
   },100);
 });
 
-function renderAgents(){const rs=state.project.agents||[];document.getElementById('agents').innerHTML=rs.length?rs.map(a=>`<div class="agent-row"><span><i class="dot ${esc(a.status)}"></i>${esc(a.agent)}</span><span class="muted">${esc(agentStatusLabel(a.status))} · 负载 ${a.load} · 认证 ${esc(authHintLabel(a.auth_hint))}</span></div>`).join(''):'<div class="empty">暂无执行者信息</div>'}function renderSlots(){const rs=state.project.slots||[];document.getElementById('slots').innerHTML=rs.length?rs.map(s=>`<div class="slot-row"><div><div>${esc(s.pane_id)} · ${esc(cleanStageLabel(s.stage_label))}</div><div class="task-meta">绑定 ${esc(s.bound_agent)} · 运行时 ${esc(s.live_agent||'空闲')} · ${esc(s.claimed_by?'被任务占用':'未占用')}</div></div><button class="mini" onclick="bindSlotPrompt('${esc(s.pane_id)}')">绑定</button></div>`).join(''):'<div class="empty">暂无用户预建智能体工位</div>'}
+function renderAgents(){const rs=state.project.agents||[];document.getElementById('agents').innerHTML=rs.length?rs.map(a=>`<div class="agent-row"><span><i class="dot ${esc(a.status)}"></i>${esc(a.agent)}</span><span class="muted">${esc(agentStatusLabel(a.status))} · 负载 ${a.load} · 认证 ${esc(authHintLabel(a.auth_hint))}</span></div>`).join(''):'<div class="empty">暂无执行者信息</div>'}function renderSlots(){const target=document.getElementById('slots');if(state.project.runtime_pending){target.innerHTML='<div class="empty" role="status">正在读取工位运行现场…</div>';return}if(state.project.runtime_error){target.innerHTML='<div class="empty">工位运行现场读取失败：'+esc(state.project.runtime_error)+'</div>';return}const rs=state.project.slots||[];document.getElementById('slots').innerHTML=rs.length?rs.map(s=>`<div class="slot-row"><div><div>${esc(s.pane_id)} · ${esc(cleanStageLabel(s.stage_label))}</div><div class="task-meta">绑定 ${esc(s.bound_agent)} · 运行时 ${esc(s.live_agent||'空闲')} · ${esc(s.claimed_by?'被任务占用':'未占用')}</div></div><button class="mini" onclick="bindSlotPrompt('${esc(s.pane_id)}')">绑定</button></div>`).join(''):'<div class="empty">暂无用户预建智能体工位</div>'}
 function openModal(t,h){document.getElementById('modalTitle').textContent=t;document.getElementById('modalBody').innerHTML=h;document.getElementById('modal').classList.add('open')}function closeModal(){document.getElementById('modal').classList.remove('open')}
 function autoFillWorkflowTitle(){
   const ti=document.getElementById('newTitle');
@@ -11240,6 +11334,8 @@ async function showLogs(kind){
 }
 
 async function loadLogContent(isAuto){
+  const sequence=logState.sequence=(logState.sequence||0)+1;
+  const kind=logState.kind,lines=logState.lines;
   const pre=document.getElementById('logContentPre');
   const statLines=document.getElementById('logStatLines');
   const statUpdated=document.getElementById('logStatUpdated');
@@ -11249,7 +11345,8 @@ async function loadLogContent(isAuto){
     pre.textContent='正在拉取调度审计日志…';
   }
   try{
-    const d=await api('/api/logs?kind='+encodeURIComponent(logState.kind)+'&n='+encodeURIComponent(logState.lines));
+    const d=await pageRead('logs','/api/logs?kind='+encodeURIComponent(kind)+'&n='+encodeURIComponent(lines));
+    if(!d||sequence!==logState.sequence||!pre.isConnected)return;
     const output=(d&&d.output)||'（暂无日志输出）';
     pre.textContent=output;
     const lineCount=output.trim()?output.split('\n').length:0;
@@ -11270,6 +11367,7 @@ async function loadLogContent(isAuto){
       pre.scrollTop=pre.scrollHeight;
     }
   }catch(e){
+    if(sequence!==logState.sequence||!pre.isConnected)return;
     if(!isAuto)toast(e.message,true);
     if(pre)pre.textContent='拉取日志失败: '+e.message;
   }
@@ -11452,6 +11550,7 @@ async function filterArchiveByWorkflow(wid,pid){
   loadArchive();
 }
 async function loadArchive(){
+  const sequence=state.archiveSequence=(state.archiveSequence||0)+1;
   const list=document.getElementById('archiveList');
   if(list)list.innerHTML='<div class="empty">正在加载…</div>';
   try{
@@ -11460,10 +11559,12 @@ async function loadArchive(){
     if(archiveQuery.workflow_id)qs.set('workflow_id',archiveQuery.workflow_id);
     if(archiveQuery.agent)qs.set('agent',archiveQuery.agent);
     if(archiveQuery.q)qs.set('q',archiveQuery.q);
-    const d=await api('/api/archive?'+qs.toString());
+    const d=await pageRead('archive','/api/archive?'+qs.toString());
+    if(!d||sequence!==state.archiveSequence)return;
     const el=document.getElementById('archiveList');
     if(el)el.innerHTML=archiveRowsHtml(d);
   }catch(e){
+    if(sequence!==state.archiveSequence)return;
     const el=document.getElementById('archiveList');
     if(el)el.innerHTML='<div class="empty">加载失败：'+esc(e.message)+'</div>';
   }
@@ -11572,7 +11673,7 @@ async function initFromUrlOrState(){
         if(d.project.project_id)state.projectId=d.project.project_id;
         if(d.project.workspace_id)state.spaceId=d.project.workspace_id;
       }
-      if(state.shellView==='workbench')await loadWorkflow(qWf,d);
+      if(state.shellView==='workbench'){await loadWorkflow(qWf,d);state.initialWorkflowPainted=true;}
     }catch(e){toast(e.message,true)}
   }
   if(state.dashMode){
@@ -11731,13 +11832,13 @@ class Handler(BaseHTTPRequestHandler):
             if p=='/api/templates':return self.send_json(200,templates_summary())
             if p=='/api/template':return self.send_json(200,template_detail(self.query().get('id',[''])[0]))
             if p=='/api/run/status':return self.send_json(200,workflow_job_status(self.query().get('id',[''])[0]))
-            if p=='/api/project':return self.send_json(200,project_detail(self.query().get('id',[''])[0]))
+            if p=='/api/project':return self.send_json(200,project_detail(self.query().get('id',[''])[0], lightweight=self.query().get('lightweight',[''])[0]=='1'))
+            if p=='/api/project/runtime':return self.send_json(200,project_runtime(self.query().get('id',[''])[0]))
             if p=='/api/workflow':return self.send_json(200,workflow_detail(self.query().get('id',[''])[0], lightweight=self.query().get('lightweight',[''])[0]=='1'))
             if p=='/api/workflow/runtime':
                 from herdr.recovery_store import read_snapshot
-                from herdr.state_db import get_default_db_path
                 wid=self.query().get('id',[''])[0]
-                w,_,_=read_snapshot(get_default_db_path(),wid)
+                w,_,_=read_snapshot(state_db_path(),wid)
                 return self.send_json(200,{'workflow_id':wid,'coordinator':agent_runtime(w.get('coordinator_pane_id'))})
             if p=='/api/workflow/deliverables':
                 wid=self.query().get('workflow_id',[''])[0] or self.query().get('id',[''])[0]

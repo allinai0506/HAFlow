@@ -56,24 +56,25 @@ def _atomic_write_json(file_path: Path, data: Any) -> None:
     os.replace(tmp_path, file_path)
 
 
+def state_db_path() -> Path:
+    """Resolve the Kernel's existing store selection without opening a database."""
+    from .state_db import get_default_db_path
+    if os.environ.get("HERDR_STATE_DB"):
+        return Path(os.environ["HERDR_STATE_DB"])
+    for key, canonical in (("TASKS_FILE", "tasks.json"), ("WORKFLOWS_FILE", "workflows.json")):
+        value = os.environ.get(key)
+        if value:
+            path = Path(value)
+            db_path = path.parent / "state.db" if path.name == canonical else path.with_suffix(".db")
+            if db_path.parent.exists():
+                return db_path
+    return get_default_db_path()
+
+
 def _get_store(store: Optional[StateStore] = None) -> StateStore:
     if store is not None:
         return store
-    if os.environ.get("HERDR_STATE_DB"):
-        return get_state_store(Path(os.environ["HERDR_STATE_DB"]))
-    tasks_file = os.environ.get("TASKS_FILE")
-    if tasks_file:
-        p = Path(tasks_file)
-        db_path = p.parent / "state.db" if p.name == "tasks.json" else p.with_suffix(".db")
-        if db_path.parent.exists():
-            return get_state_store(db_path=db_path)
-    workflows_file = os.environ.get("WORKFLOWS_FILE")
-    if workflows_file:
-        p = Path(workflows_file)
-        db_path = p.parent / "state.db" if p.name == "workflows.json" else p.with_suffix(".db")
-        if db_path.parent.exists():
-            return get_state_store(db_path=db_path)
-    return get_state_store()
+    return get_state_store(db_path=state_db_path())
 
 
 def load_workflows_data(store: Optional[StateStore] = None) -> Dict[str, Any]:
