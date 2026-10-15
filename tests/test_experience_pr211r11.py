@@ -83,3 +83,25 @@ def test_sync_failing_hub_exits_nonzero(tmp_path):
     assert p.returncode != 0
     body = json.loads(p.stdout)
     assert body["failed"] >= 1 and body["pending_upload_remaining"] >= 1
+
+
+def test_sync_quarantined_collection_exits_nonzero(tmp_path):
+    import os
+    cdb = tmp_path / "c.db"
+    conn = sqlite3.connect(str(cdb))
+    conn.execute("""CREATE TABLE local_collector_records (task_id TEXT NOT NULL, run_id TEXT NOT NULL,
+      outcome_id TEXT, experience_id TEXT, status TEXT NOT NULL, candidate_json TEXT, outcome_json TEXT,
+      last_error TEXT, retry_count INTEGER NOT NULL DEFAULT 0, next_retry_at REAL NOT NULL DEFAULT 0,
+      created_at REAL NOT NULL, updated_at REAL NOT NULL, PRIMARY KEY (task_id, run_id))""")
+    now = time.time()
+    conn.execute("INSERT INTO local_collector_records VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                 ("ghost", "r", None, None, "pending_collection", None,
+                  '{"run_id":"r"}', None, 0, 0, now, now))
+    conn.commit()
+    conn.close()
+    env = dict(os.environ, HERDR_COLLECTOR_DB_PATH=str(cdb), HERDR_STATE_DB=str(tmp_path / "s.db"))
+    p = subprocess.run([sys.executable, "bin/herdr-task", "sync-experience", "--force", "--json"],
+                       capture_output=True, text=True, env=env, timeout=120)
+    assert p.returncode != 0
+    body = json.loads(p.stdout)
+    assert body["pending_collection_failed"] >= 1

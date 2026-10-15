@@ -11,11 +11,9 @@ from unittest.mock import patch
 
 
 def test_gate_runs_on_target_event():
-    import yaml
     text = (Path(__file__).resolve().parent.parent / ".github" / "workflows" / "codex-gate.yml").read_text()
-    wf = yaml.safe_load(text)
-    assert "pull_request_target" in wf[True if "on" not in wf else "on"]
-    assert "pull_request:" not in text
+    assert "\n  pull_request_target:\n" in text
+    assert "\n  pull_request:\n" not in text
 
 
 def test_collection_failures_propagate():

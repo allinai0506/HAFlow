@@ -542,6 +542,7 @@ class ExperienceCollector:
             upload_stats = self.retry_pending_uploads(force=force, exclude_task_id=exclude_task_id)
             remaining = 0
             pending_remaining = 0
+            quarantined = 0
             conn = _get_collector_db(self.db_path)
             try:
                 row = conn.execute(
@@ -552,6 +553,10 @@ class ExperienceCollector:
                     "SELECT COUNT(*) AS n FROM local_collector_records WHERE status = 'pending_collection'"
                 ).fetchone()
                 pending_remaining = int(row["n"] or 0) if row else 0
+                row = conn.execute(
+                    "SELECT COUNT(*) AS n FROM local_collector_records WHERE status = 'error'"
+                ).fetchone()
+                quarantined = int(row["n"] or 0) if row else 0
             except Exception:
                 pass
             finally:
@@ -561,6 +566,7 @@ class ExperienceCollector:
                 "pending_collected": pending_stats.get("processed", 0),
                 "pending_collection_failed": pending_stats.get("failed", 0),
                 "pending_collection_remaining": pending_remaining,
+                "pending_collection_error": quarantined,
                 "retried": upload_stats.get("retried", 0),
                 "succeeded": upload_stats.get("succeeded", 0),
                 "failed": upload_stats.get("failed", 0),

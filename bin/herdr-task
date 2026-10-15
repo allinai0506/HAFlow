@@ -8970,7 +8970,7 @@ def main():
         ):
             print("[EXPERIENCE SYNC FAILED] pending uploads remain; recovery did not complete", file=sys.stderr)
             sys.exit(2)
-        if res.get("pending_collection_failed", 0) > 0 and res.get("pending_collection_remaining", 0) > 0:
+        if res.get("pending_collection_failed", 0) > 0:
             print("[EXPERIENCE SYNC FAILED] pending collections failed; recovery did not complete", file=sys.stderr)
             sys.exit(2)
         sys.exit(0)

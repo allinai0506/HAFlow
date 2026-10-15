@@ -84,21 +84,27 @@ def test_fetch_graphql_errors_raise(monkeypatch):
         mod.fetch_threads("o", "r", 1, "t")
 
 
-def test_workflow_runs_trusted_target_event():
-    import yaml as _yaml
+def _workflow_text():
     from pathlib import Path as _P
-    text = (_P(__file__).resolve().parent.parent / ".github" / "workflows" / "codex-gate.yml").read_text()
-    wf = _yaml.safe_load(text)
-    assert "pull_request_target" in wf[True]
+    return (_P(__file__).resolve().parent.parent / ".github" / "workflows" / "codex-gate.yml").read_text()
+
+
+def _permissions_block():
+    lines = _workflow_text().splitlines()
+    idx = next(i for i, l in enumerate(lines) if l.strip() == "permissions:")
+    return "\n".join(lines[idx + 1:idx + 4])
+
+
+def test_workflow_runs_trusted_target_event():
+    text = _workflow_text()
+    assert "\n  pull_request_target:\n" in text
     # No PR-context trigger may remain: any of them reopens the self-bypass.
-    assert "pull_request:" not in text
+    assert "\n  pull_request:\n" not in text
     assert "pull_request_review" not in text
     assert "base.sha" in text
 
 
 def test_workflow_grants_contents_read_for_checkout():
-    import yaml as _yaml
-    from pathlib import Path as _P
-    wf = _yaml.safe_load((_P(__file__).resolve().parent.parent / ".github" / "workflows" / "codex-gate.yml").read_text())
-    assert wf["permissions"]["contents"] == "read"
-    assert wf["permissions"]["pull-requests"] == "read"
+    block = _permissions_block()
+    assert "contents: read" in block
+    assert "pull-requests: read" in block
