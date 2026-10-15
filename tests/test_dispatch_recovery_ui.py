@@ -578,3 +578,73 @@ def test_explicit_replacement_reuses_pending_operation_with_precise_reasons(scen
         execution_id='execution-1', supersedes='old-impl', dispatch_round=2,
         now=scene.clock[0])['intent']
     assert intent['dispatch_operation_id'] == op['id']
+
+
+def test_first_node_without_candidate_can_reauthorize_after_expired_rollback(scene):
+    from herdr import dispatch_recovery, state_db
+    scene.ctrl._handle_coordinator_item(scene.item)
+    scene.clock[0] = 1901
+    scene.ctrl.check_workflow_recovery('wf')
+    old = nd.operation_for_node(scene.store.db_path, 'wf', 'implementation')
+    assert old['status'] == 'waiting_human'
+    result = decision(scene, old, 'confirm_absent', candidate_sha=None, now=1901)
+    new = result['operation']
+    assert new['id'] != old['id'] and new['status'] == 'pending'
+    assert scene.store.list_tasks(workflow_id='wf') == []
+    with pytest.raises(ValueError):
+        decision(scene, old, 'confirm_absent', candidate_sha=None, now=1901)
+    conn = state_db.get_db_connection(scene.store.db_path)
+    try:
+        with pytest.raises(ValueError, match='authorize'):
+            nd.validate_launch(conn, old['id'], 'wf', 'implementation', 1901)
+    finally:
+        conn.close()
+    assert nd.claim(scene.store.db_path, new['id'], 'controller', now=1901)
+    nd.start(scene.store.db_path, new['id'], 'controller', now=1901)
+    from tests.test_node_dispatch_contract import register_task
+    register_task(scene, new, task_id='recovered')
+    resolved = nd.transport_finished(scene.store.db_path, new['id'], 'controller',
+        reason='dispatch_awaiting_task', now=1902)
+    assert resolved['status'] == 'resolved'
+    assert scene.store.get_task('recovered')['dispatch_operation_id'] == new['id']
+    assert resolved['detail']['registered_runs'] == {'recovered': 'run-recovered'}
+
+
+def test_first_node_without_candidate_still_refuses_unknown_startup(scene):
+    scene.ctrl._handle_coordinator_item(scene.item)
+    scene.clock[0] = 1901
+    scene.ctrl.check_workflow_recovery('wf')
+    old = nd.operation_for_node(scene.store.db_path, 'wf', 'implementation')
+    scene.store.record_event('launch_intent', {'key': 'unknown', 'intent_id': 'i',
+        'node_id': 'implementation', 'execution_id': 'execution-1',
+        'phase': 'resources_ready'}, workflow_id='wf', source='launch', timestamp=1900)
+    with pytest.raises(ValueError, match='启动'):
+        decision(scene, old, 'confirm_absent', candidate_sha=None, now=1901)
+
+
+def test_first_node_rollback_receipt_allows_confirmed_recovery(scene):
+    scene.ctrl._handle_coordinator_item(scene.item)
+    scene.clock[0] = 1901
+    scene.ctrl.check_workflow_recovery('wf')
+    old = nd.operation_for_node(scene.store.db_path, 'wf', 'implementation')
+    scene.store.record_event('launch_intent', {'key': 'rolled-back', 'intent_id': 'i',
+        'workflow_id': 'wf', 'node_id': 'implementation', 'task_id': 'never-registered',
+        'execution_id': 'execution-1', 'dispatch_operation_id': old['id'],
+        'phase': 'resources_absent', 'resources': {'run_id': 'failed-run'}},
+        workflow_id='wf', source='launch', timestamp=1900)
+    assert decision(scene, old, 'confirm_absent', candidate_sha=None, now=1901)['operation']['status'] == 'pending'
+
+
+def test_downstream_recovery_without_frozen_candidate_remains_blocked(scene):
+    downstream(scene)
+    nd.reconcile_workflow(scene.store.db_path, 'wf', legacy_notified=['review'], now=1000)
+    old = nd.operation_for_node(scene.store.db_path, 'wf', 'review')
+    from herdr import state_db
+    conn = state_db.get_db_connection(scene.store.db_path)
+    with conn:
+        conn.execute("DELETE FROM events WHERE event_type='candidate_frozen'")
+    conn.close()
+    with pytest.raises(ValueError):
+        decision(scene, old, 'confirm_absent', candidate_sha=None)
+    stored = next(o for o in recovery_store.list_operations(scene.store.db_path, 'wf') if o['id'] == old['id'])
+    assert stored['status'] == old['status'] and stored['version'] == old['version']

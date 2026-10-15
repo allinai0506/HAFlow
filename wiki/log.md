@@ -2566,3 +2566,10 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 
 ## [2026-10-14] update | 交付目录读取失败采用轻量提示
 - Updated [[flow-workbench]]: Workflow 与 Node 复用默认折叠的中性提示，保留读取原因和已发现成果。
+
+### 2026-10-15：首节点失败恢复与空交付防护（本地修复）
+
+- 首节点无冻结候选时可通过现有人工确认流程恢复，保留未知现场禁止重发和旧凭证过期拒绝。
+- 配置节点的工作流在当前执行没有登记任务时拒绝 delivered；零任务 abandon 记录 abandoned。
+- Evidence: `herdr/dispatch_recovery.py#_view`、`herdr/workflow.py#validate_delivery_inventory`、`tests/test_dispatch_recovery_ui.py`、`tests/test_close_workflow_receipt_cli.py`。
+- 本记录描述本地源码；未部署、未重派真实任务，Agent 启动 blocked 的具体交互原因仍 UNKNOWN。

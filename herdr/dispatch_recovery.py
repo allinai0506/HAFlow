@@ -104,7 +104,7 @@ def _view(conn, op, context):
     valid = core.active(workflow) and core.current(op, workflow, config) and latest and latest['id'] == op['id']
     if not valid:
         blocked = '工作流已暂停或候选、配置已变化，请刷新后查看当前恢复待办。'
-    elif not workflow.get('execution_id') or not workflow.get('candidate_sha'):
+    elif not workflow.get('execution_id') or (node.get('depends_on') and not workflow.get('candidate_sha')):
         blocked = '当前执行或冻结候选身份不完整，尚不能授权补派。'
     elif any(not t.get('run_id') or t.get('execution_id') != workflow['execution_id']
              for dep in node.get('depends_on') or []

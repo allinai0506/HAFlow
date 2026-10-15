@@ -183,3 +183,45 @@ def test_abort_substitutes_real_clone_in_remediation(tmp_path):
     assert result.returncode==2,(result.stdout,result.stderr)
     assert '<clone>' not in result.stdout
     assert str(clone) in result.stdout
+
+
+@pytest.mark.parametrize('args', [(), ('--force',), ('--dry-run',)])
+def test_configured_zero_task_workflow_cannot_claim_delivery(tmp_path, args):
+    store = seed(tmp_path)
+    store.save_workflow({**store.get_workflow('wf'), 'execution_id': 'current',
+        'config': {'nodes': [{'id': 'craft', 'depends_on': []}]}})
+    result = cli(tmp_path, *args)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert 'no registered tasks' in result.stdout
+    assert store.get_workflow('wf')['status'] == 'running'
+    assert not store.list_events(workflow_id='wf', event_type='workflow_transition')
+
+
+def test_zero_task_abandon_records_abandoned_instead_of_delivered(tmp_path):
+    store = seed(tmp_path)
+    result = cli(tmp_path, '--abandon')
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert store.get_workflow('wf')['outcome'] == 'abandoned'
+
+
+def test_atomic_transition_rejects_empty_delivery_even_with_force(tmp_path):
+    store = seed(tmp_path)
+    store.save_workflow({**store.get_workflow('wf'), 'execution_id': 'current',
+        'config': {'nodes': [{'id': 'craft', 'depends_on': []}]}})
+    with pytest.raises(ValueError, match='no registered tasks'):
+        store.transition_workflow('wf', 'completed', 'empty delivery',
+            metadata={'outcome': 'delivered'}, force=True)
+    assert store.get_workflow('wf')['status'] == 'running'
+    assert not store.list_events(workflow_id='wf', event_type='workflow_transition')
+
+
+def test_historical_task_cannot_prove_current_execution_delivery(tmp_path):
+    store = seed(tmp_path)
+    store.save_workflow({**store.get_workflow('wf'), 'execution_id': 'current',
+        'config': {'nodes': [{'id': 'craft', 'depends_on': []}]}})
+    store.save_task({'task_id': 'old', 'workflow_id': 'wf', 'execution_id': 'previous',
+        'node': 'craft', 'status': 'cleaned', 'integration_mode': 'none'})
+    result = cli(tmp_path)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert store.get_workflow('wf')['status'] == 'running'
+    assert store.get_task('old')['status'] == 'cleaned'
