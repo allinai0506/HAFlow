@@ -1,0 +1,42 @@
+name: Codex P1 Gate
+
+# Merge gate companion to reviews: Codex leaves review-thread comments (not check
+# runs), so branch protection alone cannot see them. This job turns unresolved,
+# non-outdated Codex P1 threads into a red check. To enforce: Settings → Branches
+# → main protection → "Require status checks to pass" → select "Codex P1 Gate".
+# Until selected there, this job only reports.
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+
+concurrency:
+  group: codex-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  pull-requests: read
+
+jobs:
+  gate:
+    name: Codex P1 Gate
+    runs-on: ubuntu-latest
+    if: github.repository == 'allinai0506/HAFlow'
+    steps:
+      - name: Checkout PR head (script only, no secrets in code)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 1
+          sparse-checkout: |
+            scripts/codex-gate.py
+
+      - name: Check unresolved Codex P1 threads
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: python3 scripts/codex-gate.py --fail-on p1

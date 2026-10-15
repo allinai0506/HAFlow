@@ -1500,6 +1500,34 @@ def api_workflow_decide_resolve(b):
     return {'ok':True,'note_id':record.get('note_id'),'decision_id':did,
             'decision':decision}
 
+def _launch_experience_inherit(payload, old_task):
+    """CLI flags carrying enterprise experience policy for a launch.
+
+    Direct payload fields win (fix-loop style: policy rides the action);
+    otherwise fall back to the superseded record (replacement style).
+    Absent policy yields no flags.
+    """
+    payload = payload or {}
+    old_task = old_task or {}
+
+    def _pick(key):
+        v = str(payload.get(key) or "").strip()
+        if not v:
+            v = str(old_task.get(key) or "").strip()
+        return v
+
+    flags = []
+    customer = _pick("customer")
+    if customer:
+        flags += ["--customer", customer]
+    business_type = _pick("business_task_type")
+    if business_type:
+        flags += ["--business-task-type", business_type]
+    if payload.get("mandatory_experience_rules") or old_task.get("mandatory_experience_rules"):
+        flags += ["--mandatory-experience-rules"]
+    return flags
+
+
 def api_controller_execute_action(payload):
     payload = payload or {}
     act_type = str(payload.get('type') or payload.get('action_type') or '').strip()
@@ -1589,18 +1617,14 @@ def api_controller_execute_action(payload):
             reason = str(payload.get('supersede_reason') or '').strip()
             if not reason: raise RuntimeError('替换任务需要 supersede_reason；优先原工位 rework')
             cmd += ['--supersedes', supersedes, '--supersede-reason', reason]
-        # Inherit enterprise experience policy from the superseded record so
-        # replacement launches cannot silently drop mandatory protection.
+        # Inherit enterprise experience policy: direct payload fields first
+        # (fix-loop actions carry policy without supersedes), then the
+        # superseded record, so replacement launches never drop protection.
         try:
             old_task = herdr_kernel._get_store().get_task(supersedes) if supersedes else None
         except Exception:
             old_task = None
-        for _flag, _val in (("--customer", (old_task or {}).get("customer")),
-                            ("--business-task-type", (old_task or {}).get("business_task_type"))):
-            if _val and str(_val).strip():
-                cmd += [_flag, str(_val).strip()]
-        if (old_task or {}).get("mandatory_experience_rules"):
-            cmd += ["--mandatory-experience-rules"]
+        cmd += _launch_experience_inherit(payload, old_task)
         if payload.get('ack_overflow') is True: cmd.append('--ack-overflow')
         r = run(cmd, timeout=30, check=True)
         return {'ok': True, 'task_id': task_id, 'output': r.stdout.strip()}
@@ -9706,13 +9730,18 @@ function paintShellPage(view){
 function saveHubToken(){
   try{const inp=document.getElementById('hubTokenInput');sessionStorage.setItem('herdr_hub_token',(inp&&inp.value||'').trim());toast('Hub 身份 Token 已保存（仅本标签页有效，关闭即清除）');renderShellExperience();}catch(e){toast('保存失败: '+(e.message||e),true);}
 }
+function applyHubFilter(){
+  try{const inp=document.getElementById('hubCustomerInput');window._hubCustomerFilter=((inp&&inp.value)||'').trim();}catch(e){}
+  renderShellExperience();
+}
 async function renderShellExperience(){
   const el=document.getElementById('tasks');if(!el)return;
-  el.innerHTML='<div class="shell-page"><div class="shell-page-head"><h3>企业经验中心 (Experience Hub)</h3><p style="color:var(--text-secondary);font-size:12px;">沉淀自真实任务并通过审核的企业业务规则资产</p><div style="display:flex;gap:8px;align-items:center;margin-top:8px;font-size:12px;"><label for="hubTokenInput" style="color:var(--text-secondary);">Hub 身份 Token:</label><input id="hubTokenInput" type="password" placeholder="粘贴个人 Hub Token（仅本标签页有效）" style="flex:1;max-width:320px;padding:4px 8px;border:1px solid var(--border-color);border-radius:4px;background:var(--bg-main);color:var(--text-primary);" /><button class="btn btn-sm" onclick="saveHubToken()">保存</button><label for="hubCustomerInput" style="color:var(--text-secondary);">客户筛选:</label><input id="hubCustomerInput" type="text" placeholder="留空查看授权范围内全部" style="width:160px;padding:4px 8px;border:1px solid var(--border-color);border-radius:4px;background:var(--bg-main);color:var(--text-primary);" /></div></div><div id="experienceHubContainer" style="padding:16px 0;"><div class="loading">加载经验数据中...</div></div></div>';
+  el.innerHTML='<div class="shell-page"><div class="shell-page-head"><h3>企业经验中心 (Experience Hub)</h3><p style="color:var(--text-secondary);font-size:12px;">沉淀自真实任务并通过审核的企业业务规则资产</p><div style="display:flex;gap:8px;align-items:center;margin-top:8px;font-size:12px;"><label for="hubTokenInput" style="color:var(--text-secondary);">Hub 身份 Token:</label><input id="hubTokenInput" type="password" placeholder="粘贴个人 Hub Token（仅本标签页有效）" style="flex:1;max-width:320px;padding:4px 8px;border:1px solid var(--border-color);border-radius:4px;background:var(--bg-main);color:var(--text-primary);" /><button class="btn btn-sm" onclick="saveHubToken()">保存</button><label for="hubCustomerInput" style="color:var(--text-secondary);">客户筛选:</label><input id="hubCustomerInput" type="text" placeholder="留空查看授权范围内全部" oninput="window._hubCustomerFilter=this.value" style="width:160px;padding:4px 8px;border:1px solid var(--border-color);border-radius:4px;background:var(--bg-main);color:var(--text-primary);" /><button class="btn btn-sm" onclick="applyHubFilter()">应用</button></div></div><div id="experienceHubContainer" style="padding:16px 0;"><div class="loading">加载经验数据中...</div></div></div>';
   try{const saved=sessionStorage.getItem('herdr_hub_token')||'';const inp=document.getElementById('hubTokenInput');if(inp)inp.value=saved;}catch(e){}
+  try{const cf=window._hubCustomerFilter||'';const cinp=document.getElementById('hubCustomerInput');if(cinp&&document.activeElement!==cinp)cinp.value=cf;}catch(e){}
   const container=document.getElementById('experienceHubContainer');
   try{
-    const custFilter=((document.getElementById('hubCustomerInput')||{}).value||'').trim();
+    const custFilter=(window._hubCustomerFilter||'').trim();
     const candRes=await api('/api/experience/candidates?status=pending_review'+(custFilter?'&customer='+encodeURIComponent(custFilter):''));
     const ruleRes=await api('/api/experience/rules?scope=all'+(custFilter?'&customer='+encodeURIComponent(custFilter):''));
     const cands=(candRes&&(candRes.candidates||candRes.data?.candidates))||[];

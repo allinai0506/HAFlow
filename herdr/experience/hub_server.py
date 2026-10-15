@@ -486,7 +486,9 @@ class HubStorage:
             query = "SELECT * FROM experiences WHERE status = 'published'"
             params: List[Any] = []
             cust_str = str(customer).strip() if customer else ""
-            if scope_all:
+            if scope_all and not cust_str:
+                # Admin listing without an explicit customer: no SQL narrowing;
+                # the caller still applies the allowed-customers post-filter.
                 pass
             elif cust_str and cust_str not in {"unknown", "default_customer"}:
                 query += " AND (customer = ? OR customer = '*')"
