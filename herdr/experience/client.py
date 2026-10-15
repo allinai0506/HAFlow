@@ -23,6 +23,40 @@ LOGGER = logging.getLogger("herdr.experience.client")
 DEFAULT_HUB_URL = "http://127.0.0.1:8780"
 
 
+class _NoCredentialRedirect(urllib.request.HTTPRedirectHandler):
+    """Redirect handler that never leaks credentials cross-origin.
+
+    stdlib copies every non-content header (including Authorization) to the
+    redirect target. Strip credential headers whenever scheme, host, or port
+    changes; same-origin redirects keep working untouched.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new_req = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new_req is None:
+            return None
+        try:
+            old = urllib.parse.urlparse(req.full_url)
+            new = urllib.parse.urlparse(new_req.full_url)
+            if (old.scheme, old.hostname, old.port) != (new.scheme, new.hostname, new.port):
+                new_req.remove_header("Authorization")
+                new_req.remove_header("Cookie")
+        except Exception:
+            try:
+                new_req.remove_header("Authorization")
+            except Exception:
+                pass
+        return new_req
+
+
+def _hub_opener() -> urllib.request.OpenerDirector:
+    return urllib.request.build_opener(
+        _NoCredentialRedirect,
+        urllib.request.HTTPHandler,
+        urllib.request.HTTPSHandler,
+    )
+
+
 class ExperienceHubError(RuntimeError):
     """Raised when an Experience Hub operation fails."""
 
@@ -92,7 +126,7 @@ class ExperienceClient:
         req = urllib.request.Request(url, data=body, headers=headers, method=method)
 
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            with _hub_opener().open(req, timeout=self.timeout) as resp:
                 resp_bytes = resp.read()
                 return json.loads(resp_bytes.decode("utf-8") or "{}")
         except urllib.error.HTTPError as exc:

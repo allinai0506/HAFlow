@@ -1214,6 +1214,15 @@ def _get_console_hub_client(token=None):
     return ExperienceClient(token=eff_token, allow_env_token=False)
 
 
+def _hub_error_status(res):
+    """Normalize Hub failure codes to a valid HTTP status (502 on transport failure)."""
+    try:
+        code = int(res.get('status_code') or 0)
+    except (TypeError, ValueError):
+        code = 0
+    return code if 100 <= code <= 599 else 502
+
+
 def api_experience_candidates(q=None, token=None):
     q = q or {}
     client = _get_console_hub_client(token=token)
@@ -11804,17 +11813,17 @@ class Handler(BaseHTTPRequestHandler):
             if p=='/api/experience/candidates':
                 res = api_experience_candidates(self.query(), token=self.get_auth_token())
                 if not res.get('ok') and 'error' in res:
-                    return self.send_json(res.get('status_code', 500), error=res['error'])
+                    return self.send_json(_hub_error_status(res), error=res['error'])
                 return self.send_json(200, res)
             if p=='/api/experience/candidate':
                 res = api_experience_candidate(self.query().get('id',[''])[0], token=self.get_auth_token())
                 if not res.get('ok') and 'error' in res:
-                    return self.send_json(res.get('status_code', 404), error=res['error'])
+                    return self.send_json(_hub_error_status(res), error=res['error'])
                 return self.send_json(200, res)
             if p=='/api/experience/rules':
                 res = api_experience_rules(self.query(), token=self.get_auth_token())
                 if not res.get('ok') and 'error' in res:
-                    return self.send_json(res.get('status_code', 500), error=res['error'])
+                    return self.send_json(_hub_error_status(res), error=res['error'])
                 return self.send_json(200, res)
             return self.send_json(404,error='Not Found')
         except herdr_deliverables.DeliverableError as e:
@@ -11868,6 +11877,7 @@ class Handler(BaseHTTPRequestHandler):
             if p=='/api/workflow/decision/raise':return self.send_json(200,api_workflow_decide_raise(b))
             if p=='/api/workflow/decision':return self.send_json(200,api_workflow_decide_resolve(b))
             if p=='/api/workflow/recovery/decision':return self.send_json(200,api_workflow_recovery_decide(b))
+            if p=='/api/task/interaction/respond':return self.send_json(200,api_task_interaction_respond(b))
             if p=='/api/experience/review':
                 res = api_experience_review(b, token=self.get_auth_token())
                 if not res.get('ok') and 'error' in res:
