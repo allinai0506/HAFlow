@@ -3588,7 +3588,7 @@ def _scheduler_freeze_candidate(workflow_id, project_root, source_node, dep_ids=
     # Activity and delivery-note edits are not candidate publication events.
     from herdr import recovery_store, state_db
     store = _get_store()
-    workflow, _, _ = recovery_store.read_snapshot(store.db_path, workflow_id)
+    workflow, _, delivery_tasks = recovery_store.read_snapshot(store.db_path, workflow_id)
     epoch = max(float(workflow.get('created_at') or 0), float(workflow.get('reopened_at') or 0))
     conn = state_db.get_readonly_db_connection(store.db_path)
     try:
@@ -3597,6 +3597,28 @@ def _scheduler_freeze_candidate(workflow_id, project_root, source_node, dep_ids=
         episode = conn.execute("SELECT id FROM events WHERE workflow_id=? AND event_type='candidate_frozen' AND source='critical-path-scheduler' AND timestamp>=? ORDER BY id DESC LIMIT 1", (workflow_id, epoch)).fetchone()
     finally:
         conn.close()
+    git_deliveries = [t for t in delivery_tasks
+        if (t.get('node') or t.get('stage')) == source_node
+        and (not t.get('execution_id') or t['execution_id'] == workflow.get('execution_id'))
+        and t.get('integration_mode') == 'git' and t.get('status') != 'superseded'
+        and not t.get('superseded_by')]
+    if len(git_deliveries) > 1:
+        from herdr.candidate_assembly import delivery_inventory, assemble_candidate
+        try:
+            inventory = delivery_inventory(workflow, delivery_tasks, source_node)
+            publication_current = bool(publication and (not episode or publication['id'] > episode['id'])
+                and json.loads(publication['payload_json']).get('expected_episode_id') == (workflow.get('candidate_episode_id') or 0))
+            sha = assemble_candidate(project_root, inventory, preferred=workflow.get('candidate_sha') or '',
+                                     allow_merge=publication_current)
+            if sha == workflow.get('candidate_sha'):
+                return sha
+            scheduler_facts_store.record_candidate_frozen(workflow_id, sha, source_node=source_node,
+                db_path=store.db_path, expected_episode_id=workflow.get('candidate_episode_id') or 0,
+                delivery_inventory=inventory, publication_event_id=publication['id'])
+            return sha
+        except (ValueError, OSError, subprocess.TimeoutExpired) as exc:
+            print(f"[SCHEDULER ASSEMBLY REFUSED] workflow={workflow_id}: {type(exc).__name__}")
+            return ''
     if publication is None or (episode and publication['id'] <= episode['id']):
         frozen = workflow.get('candidate_sha') or ''
         if not frozen:
@@ -4389,11 +4411,14 @@ def try_direct_stage_advance(item):
 
     dispatch_operation_id = item.get('dispatch_operation_id')
     dispatch_owner = item.get('dispatch_owner')
+    dispatch_attempt = None
     if dispatch_operation_id is not None:
         from herdr.node_dispatch_store import start
-        if start(_get_store().db_path, dispatch_operation_id, dispatch_owner,
-                 expected_task_ids=[spec['task_id'] for spec in specs]) is None:
+        dispatch = start(_get_store().db_path, dispatch_operation_id, dispatch_owner,
+                         expected_task_ids=[spec['task_id'] for spec in specs])
+        if dispatch is None:
             return True
+        dispatch_attempt = dispatch['attempts']
     launched = []
 
     for spec in specs:
@@ -4439,7 +4464,8 @@ def try_direct_stage_advance(item):
             pass
 
         if dispatch_operation_id is not None:
-            cmd += ["--dispatch-operation-id", str(dispatch_operation_id)]
+            cmd += ["--dispatch-operation-id", str(dispatch_operation_id),
+                    "--dispatch-attempt", str(dispatch_attempt)]
 
         if spec.get("artifact_mode"):
             cmd += ["--artifact-mode", spec["artifact_mode"]]

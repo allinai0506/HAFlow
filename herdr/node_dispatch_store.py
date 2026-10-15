@@ -8,11 +8,15 @@ from .direct_dispatch import lineage_redispatch_candidates
 
 def _write(conn, op, status, detail, now, *, next_due=None, owner=None, lease=None, started=None, attempts=None):
     receipt = {**op['detail'], **detail}
+    started = op['started'] if started is None else started
+    attempts = op['attempts'] if attempts is None else attempts
+    if (op['status'], op['detail'], op['next_due_at'], op['owner'], op['lease_until'],
+            op['started'], op['attempts']) == (status, receipt, next_due, owner, lease, started, attempts):
+        return op
     conn.execute('''UPDATE workflow_recovery_operations SET status=?,detail_json=?,
         next_due_at=?,owner=?,lease_until=?,started=?,attempts=?,version=version+1,updated_at=? WHERE id=?''',
         (status, json.dumps(receipt, ensure_ascii=False), next_due, owner, lease,
-         op['started'] if started is None else started,
-         op['attempts'] if attempts is None else attempts, now, op['id']))
+         started, attempts, now, op['id']))
     result = rs._get(conn, op['id'])
     rs._event(conn, result, 'dispatch_' + status, now, receipt)
     return result
@@ -66,6 +70,44 @@ def _snapshot(conn, wid):
                 {'reuse_event_id': f['event_id']} for f in facts if f['verifier'] == node['id']]
         for node in config.get('nodes') or []}
     return workflow, config, tasks
+
+
+def _absence_result(conn, op, workflow, config, tasks, task_ids, now):
+    """One evidence consumer for synchronous results and restart reconciliation."""
+    if (not op['started'] or not core.active(workflow) or not task_ids
+            or not core._valid_required(task_ids) or not op['detail'].get('sent_at')):
+        return None
+    absent = not core.registered_tasks(op, workflow, tasks)
+    for task_id in task_ids:
+        row = conn.execute("SELECT payload_json,timestamp FROM events WHERE workflow_id=? "
+            "AND event_type='launch_intent' AND source='launch' "
+            "AND json_extract(payload_json,'$.dispatch_operation_id')=? "
+            "AND json_extract(payload_json,'$.task_id')=? ORDER BY id DESC LIMIT 1",
+            (op['workflow_id'], op['id'], task_id)).fetchone()
+        intent = json.loads(row['payload_json']) if row else {}
+        rejection = conn.execute("SELECT payload_json FROM events WHERE workflow_id=? "
+            "AND event_type='launch_rejected' AND source='launch' "
+            "AND json_extract(payload_json,'$.dispatch_operation_id')=? "
+            "AND json_extract(payload_json,'$.dispatch_attempt')=? "
+            "AND json_extract(payload_json,'$.task_id')=? ORDER BY id DESC LIMIT 1",
+            (op['workflow_id'], op['id'], op['attempts'], task_id)).fetchone()
+        receipt = json.loads(rejection['payload_json']) if rejection else {}
+        current_absence = (intent.get('phase') == 'resources_absent'
+            and (intent.get('dispatch_attempt') == op['attempts'] or (
+                intent.get('dispatch_attempt') is None
+                and row['timestamp'] >= op['detail'].get('sent_at', now))))
+        absent = absent and (current_absence or (
+            (not intent or intent.get('phase') == 'resources_absent')
+            and receipt.get('resources_absent') is True))
+    if not absent:
+        return None
+    if not core.current(op, workflow, config):
+        return 'superseded', {'reason': 'dispatch_resources_absent'}
+    if core.ready(op, workflow, config, tasks):
+        return ('waiting_human' if op['attempts'] >= 3 else 'pending'), {
+            'reason': 'dispatch_resources_absent', 'deadline_at': None,
+            'decision_needed': '资源已确认未创建；修正派发前置条件后可重试'}
+    return None
 
 
 def reconcile_workflow(db_path, wid, *, legacy_notified=(), discover=True, intake_enabled=True, now=None):
@@ -124,12 +166,28 @@ def reconcile_workflow(db_path, wid, *, legacy_notified=(), discover=True, intak
                 continue
             if op['status'] == 'waiting' and (op['next_due_at'] or 0) > now and core.current(op, workflow, config):
                 continue
+            absence = _absence_result(conn, op, workflow, config, tasks,
+                                      op['detail'].get('expected_task_ids'), now)
+            if absence:
+                _write(conn, op, *absence, now, started=0,
+                       next_due=now + core.CHECK_SECONDS if absence[0] == 'pending' else None)
+                continue
             outcome = core.result(op, workflow, config, tasks, now)
             if outcome:
                 status, detail = outcome
                 if op['status'] != status or any(op['detail'].get(k) != v for k, v in detail.items()):
                     _write(conn, op, status, detail, now)
                 continue
+            if (op['status'] == 'waiting_human' and not op['started']
+                    and op['detail'].get('reason') == 'dispatch_prior_delivery_unknown'
+                    and not _prior_delivery_unknown(conn, op)
+                    and core.current(op, workflow, config) and core.ready(op, workflow, config, tasks)):
+                prior_id = op['detail'].get('prior_operation_id')
+                prior = rs._get(conn, prior_id) if isinstance(prior_id, int) else None
+                if (prior and prior['status'] == 'superseded'
+                        and prior['detail'].get('reason') == 'dispatch_resources_absent'):
+                    _write(conn, op, 'pending', {'reason': 'dispatch_prior_resources_absent'}, now, next_due=now)
+                    continue
             if not core.active(workflow):
                 continue
             if op['status'] == 'running' and op['lease_until'] <= now:
@@ -225,25 +283,18 @@ def direct_finished(db_path, operation_id, owner, attempted_task_ids, now=None):
     now = time.time() if now is None else now
     with rs._transaction(db_path) as conn:
         op = rs._get(conn, operation_id)
-        if op['status'] in core.TERMINAL or op['status'] == 'waiting_human':
+        if op['status'] in core.TERMINAL:
             return op
-        if op['owner'] != owner or op['status'] != 'running' or not op['started']:
+        if not op['started']:
             return op
         workflow, config, tasks = _snapshot(conn, op['workflow_id'])
-        absent = bool(attempted_task_ids) and not core.registered_tasks(op, workflow, tasks)
-        for task_id in attempted_task_ids:
-            row = conn.execute("SELECT payload_json FROM events WHERE workflow_id=? "
-                "AND event_type='launch_intent' AND source='launch' "
-                "AND json_extract(payload_json,'$.dispatch_operation_id')=? "
-                "AND json_extract(payload_json,'$.task_id')=? ORDER BY id DESC LIMIT 1",
-                (op['workflow_id'], op['id'], task_id)).fetchone()
-            intent = json.loads(row['payload_json']) if row else {}
-            absent = absent and intent.get('phase') == 'resources_absent'
-        if absent and core.current(op, workflow, config) and core.ready(op, workflow, config, tasks):
-            return _write(conn, op, 'waiting_human' if op['attempts'] >= 3 else 'pending',
-                {'reason': 'dispatch_resources_absent', 'deadline_at': None,
-                 'decision_needed': '资源已确认未创建；修正派发前置条件后可重试'},
-                now, next_due=now + core.CHECK_SECONDS, started=0)
+        absence = _absence_result(conn, op, workflow, config, tasks, attempted_task_ids, now)
+        if absence and (not core.current(op, workflow, config)
+                        or (op['owner'] == owner and op['status'] == 'running')):
+            return _write(conn, op, *absence, now, started=0,
+                          next_due=now + core.CHECK_SECONDS if absence[0] == 'pending' else None)
+        if op['owner'] != owner or op['status'] != 'running':
+            return op
         outcome = core.result(op, workflow, config, tasks, now)
         if outcome:
             return _write(conn, op, *outcome, now)
@@ -343,6 +394,7 @@ def record_intent(db_path, intent, now):
         predecessors = op['payload'].get('predecessors') or []
         if predecessors and intent.get('supersedes') not in {p['task_id'] for p in predecessors}:
             raise ValueError('replacement dispatch requires its predecessor')
+        intent['dispatch_attempt'] = op['attempts']
         state_db.record_event({'event_type': 'launch_intent', 'payload': intent,
             'workflow_id': intent['workflow_id'], 'node_id': intent['node_id'], 'task_id': intent['key'],
             'source': 'launch', 'timestamp': now}, conn=conn)

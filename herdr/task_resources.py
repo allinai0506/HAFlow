@@ -333,6 +333,47 @@ def abort_launch_intent(store, intent, *, reason='worker_startup_failed', now=No
     return rolled_back
 
 
+def record_launch_rejection(store, args, *, reason, resources_absent):
+    """Record only this CLI attempt's proven pre-allocation failure.
+
+    The caller holds the workflow lock once it has entered launch. A lock
+    rejection has no intent; an entered launch must not settle another run.
+    """
+    intent = getattr(args, '_launch_intent', None)
+    if resources_absent and not intent:
+        from .state_db import get_readonly_db_connection
+        conn = get_readonly_db_connection(store.db_path)
+        try:
+            row = conn.execute("SELECT payload_json FROM events WHERE workflow_id=? "
+                "AND event_type='launch_intent' AND source='launch' "
+                "AND json_extract(payload_json,'$.task_id')=? ORDER BY id DESC LIMIT 1",
+                (args.workflow_id, args.task_id)).fetchone()
+            if row and json.loads(row['payload_json']).get('phase') != 'resources_absent':
+                return
+        finally:
+            conn.close()
+    if resources_absent and intent:
+        current = _latest_intent(store, intent['key'])
+        if (not current or current['intent_id'] != intent['intent_id']
+                or current['phase'] != 'allocating' or registered_launch_task(store, intent)
+                or set(current.get('resources') or {}) - {'planned_clone_path', 'run_id'}):
+            return
+        abort_launch_intent(store, intent, reason=reason)
+    if not resources_absent:
+        return
+    operation_id = getattr(args, 'dispatch_operation_id', None)
+    attempt = getattr(args, 'dispatch_attempt', None)
+    if operation_id is None or type(attempt) is not int or attempt < 1:
+        return bool(intent)
+    store.record_event('launch_rejected', {
+        'dispatch_operation_id': operation_id, 'dispatch_attempt': attempt,
+        'task_id': args.task_id, 'run_id': getattr(args, 'run_id', None),
+        'reason': reason, 'resources_absent': True,
+    }, workflow_id=args.workflow_id, node_id=getattr(args, 'node', None) or getattr(args, 'stage', None),
+        task_id=args.task_id, source='launch')
+    return bool(intent)
+
+
 def _intent_task(store, intent, conn=None):
     if conn is None:
         return store.get_task(intent['task_id'])

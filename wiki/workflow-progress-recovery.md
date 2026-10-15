@@ -147,3 +147,13 @@ Evidence:
 - `herdr/dispatch_recovery.py#_view/decide`
 - `tests/test_dispatch_recovery_ui.py#test_first_node_without_candidate_can_reauthorize_after_expired_rollback`
 - `tests/test_dispatch_recovery_ui.py#test_first_node_without_candidate_still_refuses_unknown_startup`
+
+## FACT：控制链收敛修复（2026-10-16，隔离源码）
+
+并行实现交付使用当前 execution 的 Task/Run/commit/integration_ref inventory。Controller 在工作区之外用 Git 对象合成完整候选；写入冻结事实前再次事务校验 inventory 与发布 episode。无授权不得轮换显式候选，冲突或身份变化拒绝冻结；已有候选完整覆盖交付时保持稳定。
+
+`launch_rejected` 是资源启动前的类型化拒绝事实，绑定 operation、attempt、Task、Run。同步返回及重启后的 reconciliation 共用消费者：证明本次全部任务缺席时有限重试；旧代责任可结案让新代接管。已有 allocating/registered 意图、部分批次证据、错 attempt 或不明副作用仍等待核查。CLI 只结案自己的启动前意图并释放自己的 reservation。
+
+未启动且仅等待旧交付未知的责任，可接管当前 execution、candidate、episode、verified SHA 与角色完整匹配的已完成 PASS。显式暂缓、取消、已开始未知责任不适用。重复扫描相同等待事实不增加 operation version 或事件。
+
+Evidence: `herdr/candidate_assembly.py`、`services/herdr-controller.py#_scheduler_freeze_candidate`、`herdr/scheduler_facts.py#record_candidate_frozen`、`herdr/task_resources.py#record_launch_rejection`、`herdr/node_dispatch_store.py`、`tests/test_control_convergence.py`。354 项专项通过及五组撤回修复反证存于沙盒 `.omc/evidence/`；本节不声明生产已恢复或真实 Agent 已验收。

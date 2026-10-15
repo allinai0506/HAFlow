@@ -3600,6 +3600,7 @@ def _launch_task(args):
                     print("Run './bin/herdr-deep-preflight --deep' to inspect agent connectivity and credentials.")
                 sys.exit(2)
 
+    args._launch_reservation_acquired = True
     # Only after routing and delivery identity checks succeed do we create
     # runtime resources.  All gates are deliberately before topology/Panes:
     # delivery identity, then baseline freshness (scheme A fail-fast).
@@ -3608,6 +3609,7 @@ def _launch_task(args):
         claim=getattr(args, "candidate_sha", None),
     )
     _preflight_baseline_freshness(args, source_repo, base_branch)
+    args._launch_resources_started = True
     stage_config = ensure_stage_topology(
         args.workflow_id,
         node_id,
@@ -4986,16 +4988,32 @@ def _with_git_operation_lock(*, include_source_repo=False):
 
 def launch_task(args):
     """Serialize the workflow budget check through task registration across sources."""
-    from herdr.task_resources import workflow_launch_lock, NodeLaunchBusy
+    from herdr.task_resources import workflow_launch_lock, NodeLaunchBusy, record_launch_rejection
     source = getattr(args, "source", None)
+    entered = False
+
+    def run_launch():
+        nonlocal entered
+        entered = True
+        try:
+            return _launch_task(args)
+        except BaseException:
+            settled = record_launch_rejection(_get_store(), args, reason='launch_preallocation_rejected',
+                resources_absent=not getattr(args, '_launch_resources_started', False))
+            if settled and getattr(args, '_launch_reservation_acquired', False):
+                release_agent_reservation(args.task_id)
+            raise
+
     try:
         with workflow_launch_lock(_get_store().db_path, args.workflow_id):
             if not source:
-                return _launch_task(args)
+                return run_launch()
             with GitOperationLock(source):
                 ensure_no_git_processes(source)
-                return _launch_task(args)
+                return run_launch()
     except (GitOperationBusyError, GitProcessActiveError, NodeLaunchBusy) as exc:
+        if not entered:
+            record_launch_rejection(_get_store(), args, reason='launch_lock_busy', resources_absent=True)
         print(f"[LAUNCH BUSY] {exc}")
         sys.exit(75)
 
@@ -8329,6 +8347,7 @@ def main():
     launch.add_argument("--artifact-mode", choices=["repository_changes", "shared_artifacts"])
     launch.add_argument("--dispatch-role", default=None, help="Stable node role shared by automatic/manual launches")
     launch.add_argument("--dispatch-operation-id", type=int, default=None, help="Bind coordinator dispatch to its durable operation")
+    launch.add_argument("--dispatch-attempt", type=int, default=None, help="Bind a pre-allocation rejection to one controller attempt")
     launch.add_argument("--dispatch-round", type=int, default=None, help="New rounds require --supersedes")
     launch.add_argument("--task-id", required=True)
     launch.add_argument("--workflow-id", required=True)

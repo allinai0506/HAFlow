@@ -2579,3 +2579,10 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - Updated [[ops-center]]：共用只读快照与全进程探针预算，刷新合并与未采样语义。
 - Updated [[flow-workbench]]：项目元数据/现场拆分、成果定向补读、白盒快照复用、归档数据库分页、日志尾部有界读取。
 - 当前记录描述本地源码和隔离预览，不代表 8765 已部署、远端已推送或已合并。
+
+### 2026-10-16：Workflow 控制链收敛（本地沙盒）
+
+- Updated [[workflow-progress-recovery]]：完整交付候选、按 attempt 的启动前拒绝、重启消费、完整 PASS 接管、等待扫描无变化不写入。
+- 补充工程教训 §133，保留未知现场与部分批次禁止重发边界。
+- Evidence: `tests/test_control_convergence.py`；专项 354 passed，12 subtests，五个关键机制撤回后均复现失败；独立复查第三轮 LGTM。
+- 尚未推送、合并、部署、重启服务或修写生产数据库；不代表原工作流已自动推进。
