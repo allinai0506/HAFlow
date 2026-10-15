@@ -3352,11 +3352,12 @@ def _launch_task(args):
     # retry is consumed by the duplicate check above.
     if getattr(args, "mandatory_experience_rules", False):
         try:
-            _prefetched_experience_suffix = _mandatory_experience_gate(args, node_id)
+            _prefetched_experience_suffix, _prefetched_experience_refs = _mandatory_experience_gate(args, node_id)
         except Exception:
             sys.exit(2)
     else:
         _prefetched_experience_suffix = None
+        _prefetched_experience_refs = None
 
     _check_launch_capacity(args, project, data.get("tasks", []), node_id)
     try:
@@ -4061,6 +4062,7 @@ def _launch_task(args):
         args.task_id,
         args.prompt,
         prefetched_experience_suffix=_prefetched_experience_suffix,
+        prefetched_experience_refs=_prefetched_experience_refs,
     )
     # Retire the previous Task only after the replacement was registered and
     # delivered. Validation or worker startup failures retain its ownership.
@@ -4153,7 +4155,7 @@ def _mandatory_experience_gate(args, node_id):
     once the task is registered.
     """
     if not getattr(args, "mandatory_experience_rules", False):
-        return None
+        return None, []
     context = {
         "task_id": getattr(args, "task_id", None),
         "customer": getattr(args, "customer", None),
@@ -4165,7 +4167,9 @@ def _mandatory_experience_gate(args, node_id):
     }
     try:
         from herdr.experience.client import fetch_experience_rules_block as _fetch_block
-        return _fetch_block(context)
+        refs: List[Dict[str, Any]] = []
+        block = _fetch_block(context, references=refs)
+        return block, refs
     except Exception as exc:
         print(
             "[EXPERIENCE GATE] mandatory experience rules could not be resolved "
@@ -4175,7 +4179,8 @@ def _mandatory_experience_gate(args, node_id):
         raise
 
 
-def dispatch_task(task_id, prompt, prefetched_experience_suffix=None):
+def dispatch_task(task_id, prompt, prefetched_experience_suffix=None,
+                  prefetched_experience_refs=None):
     # Reliable delivery protocol:
     # 1) try herdr agent prompt
     # 2) verify lifecycle / prompt marker
@@ -4206,6 +4211,18 @@ def dispatch_task(task_id, prompt, prefetched_experience_suffix=None):
     if prefetched_experience_suffix is not None:
         _prefetched_experience_suffix = prefetched_experience_suffix
         _prefetched_experience = True
+        # The gate ran before registration, so attribution was not written.
+        # Persist it now that the task exists, or a dispatch under specific
+        # rule versions keeps no record of which rules applied.
+        if prefetched_experience_refs:
+            try:
+                _store = _get_store()
+                if hasattr(_store, "update_task_metadata"):
+                    meta = dict(task.get("metadata") or {})
+                    meta["applied_experience_rules"] = prefetched_experience_refs
+                    _store.update_task_metadata(task_id, meta)
+            except (OSError, ValueError, RuntimeError, AttributeError, KeyError):
+                pass
     else:
         _prefetched_experience_suffix = None
         _prefetched_experience = False

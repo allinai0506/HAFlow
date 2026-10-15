@@ -266,12 +266,18 @@ def fetch_experience_rules_block(
     task: Dict[str, Any],
     client: Optional[ExperienceClient] = None,
     store: Optional[Any] = None,
+    references: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
     """Fetch active published enterprise business rules and return prompt block.
 
     Contract: mandatory_experience_rules=True means fail-closed on transport
     or auth failure (Hub unreachable / 401 / 403 raises). An empty rule set
     after a successful Hub query is NOT an error and returns "".
+
+    When `store` is absent (the pre-allocation gate cannot write to an
+    unregistered task), callers pass `references` to receive the same
+    attribution records the store path writes, so applied rule IDs and
+    versions are never lost by prefetching.
     """
     is_mandatory = bool(task.get("mandatory_experience_rules"))
     try:
@@ -313,9 +319,11 @@ def fetch_experience_rules_block(
         hub_client = client or ExperienceClient()
         rules = hub_client.query_rules(customer=customer, task_type=task_type, raise_for_status=is_mandatory)
         if rules:
+            applied_refs = [{"experience_id": r.experience_id, "version": r.version, "title": r.title} for r in rules]
+            if references is not None:
+                references.extend(applied_refs)
             if store and hasattr(store, "update_task_metadata"):
                 try:
-                    applied_refs = [{"experience_id": r.experience_id, "version": r.version, "title": r.title} for r in rules]
                     meta = dict(task.get("metadata") or {})
                     meta["applied_experience_rules"] = applied_refs
                     store.update_task_metadata(task["task_id"], meta)

@@ -266,8 +266,13 @@ class ExperienceCollector:
         task_id: str,
         outcome: Optional[Dict[str, Any]] = None,
         state_db_path: Optional[Path] = None,
+        queued_run_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Process a settled task outcome. Idempotent and fail-safe.
+
+        queued_run_id is the run identity carried by the queue row being
+        recovered; it scopes terminal failures so one missing source task
+        cannot mark every pending row of the same task id.
 
         Returns status dict:
           {"ok": bool, "status": str, "experience_id": Optional[str], "reason": str}
@@ -275,7 +280,11 @@ class ExperienceCollector:
         try:
             task = state_db.get_task(task_id, db_path=state_db_path)
             if not task:
-                self._note_collection_failure(str(task_id), "task_not_found", terminal=True)
+                # Scope the terminal update to this row: other pending rows for
+                # the same task id may point at another run or another database.
+                self._note_collection_failure(str(task_id), "task_not_found",
+                                              run_id=str(queued_run_id) if queued_run_id else None,
+                                              terminal=True)
                 return {"ok": False, "status": "skipped", "reason": "task_not_found"}
 
             run_id = str(task.get("run_id") or (outcome.get("run_id") if outcome else "") or f"run_{task_id}")
@@ -473,10 +482,13 @@ class ExperienceCollector:
                     outcome = json.loads(row["outcome_json"])
                 except Exception:
                     pass
-            # An explicit caller path wins; otherwise use the database this
-            # row was enqueued against (absent for pre-migration rows).
-            row_db = state_db_path if state_db_path is not None else _row_state_db_path(row)
-            res = self.process_task_settlement(tid, outcome=outcome, state_db_path=row_db)
+            # The row's own database identity wins: a worker recovering
+            # database A must never read database B's rows from A, which would
+            # report task_not_found and quarantine valid work. The caller path
+            # is only a fallback for rows written before the column existed.
+            row_db = _row_state_db_path(row) or state_db_path
+            res = self.process_task_settlement(tid, outcome=outcome, state_db_path=row_db,
+                                               queued_run_id=row["run_id"])
             if isinstance(res, dict) and res.get("ok"):
                 processed += 1
             else:

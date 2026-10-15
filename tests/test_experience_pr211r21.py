@@ -43,7 +43,7 @@ def test_gate_is_noop_for_non_mandatory():
     with patch.dict("os.environ", {"HERDR_HUB_URL": "http://127.0.0.1:59999",
                                    "HERDR_HUB_TOKEN": "x"}):
         assert mod._mandatory_experience_gate(
-            _Args(mandatory_experience_rules=False), "quote") is None
+            _Args(mandatory_experience_rules=False), "quote") == (None, [])
 
 
 def test_gate_passes_with_published_rule(tmp_path):
