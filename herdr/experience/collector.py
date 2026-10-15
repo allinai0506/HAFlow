@@ -385,13 +385,13 @@ class ExperienceCollector:
                             conn.execute("""
                                 UPDATE local_collector_records
                                 SET status = 'pending_upload', last_error = ?, retry_count = ?, next_retry_at = ?, updated_at = ?
-                                WHERE task_id = ? AND run_id = ?
+                                WHERE task_id = ? AND run_id = ? AND status != 'uploaded'
                             """, (upload_err, curr_retries, time.time() + backoff, time.time(), task_id, run_id))
                         else:
                             conn.execute("""
                                 UPDATE local_collector_records
                                 SET status = 'pending_upload', last_error = ?, retry_count = 0, next_retry_at = 0, updated_at = ?
-                                WHERE task_id = ? AND run_id = ?
+                                WHERE task_id = ? AND run_id = ? AND status != 'uploaded'
                             """, (upload_err, time.time(), task_id, run_id))
                         return {"ok": True, "status": "pending_upload", "experience_id": exp.experience_id, "reason": upload_err}
             finally:
@@ -499,7 +499,7 @@ class ExperienceCollector:
                                 """
                                 UPDATE local_collector_records
                                 SET last_error = ?, retry_count = ?, next_retry_at = ?, updated_at = ?
-                                WHERE task_id = ? AND run_id = ?
+                                WHERE task_id = ? AND run_id = ? AND status != 'uploaded'
                                 """,
                                 (err, curr_retries, time.time() + backoff, time.time(), row["task_id"], row["run_id"]),
                             )
@@ -516,7 +516,7 @@ class ExperienceCollector:
                             """
                             UPDATE local_collector_records
                             SET last_error = ?, retry_count = ?, next_retry_at = ?, updated_at = ?
-                            WHERE task_id = ? AND run_id = ?
+                            WHERE task_id = ? AND run_id = ? AND status != 'uploaded'
                             """,
                             (str(e), curr_retries, time.time() + backoff, time.time(), row["task_id"], row["run_id"]),
                         )

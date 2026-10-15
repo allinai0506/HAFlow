@@ -8962,10 +8962,13 @@ def main():
             print(json.dumps(res, ensure_ascii=False, indent=2))
         else:
             print(f"[EXPERIENCE SYNC] collected={res.get('pending_collected', 0)} retried={res.get('retried', 0)} succeeded={res.get('succeeded', 0)} failed={res.get('failed', 0)}")
-        # Fail loud when uploads remain but no usable Hub client ran: operator
-        # automation must not mistake an untouched queue for recovery success.
-        if res.get("pending_upload_remaining", 0) > 0 and res.get("reason") == "no_hub_client":
-            print("[EXPERIENCE SYNC FAILED] no usable Hub client; pending uploads unchanged", file=sys.stderr)
+        # Fail loud when uploads remain unrecoverable: operator automation must
+        # not mistake an untouched or failed queue for recovery success.
+        if res.get("pending_upload_remaining", 0) > 0 and (
+            res.get("reason") == "no_hub_client"
+            or res.get("failed", 0) > 0
+        ):
+            print("[EXPERIENCE SYNC FAILED] pending uploads remain; recovery did not complete", file=sys.stderr)
             sys.exit(2)
         sys.exit(0)
     elif args.command == 'acceptance-record':
