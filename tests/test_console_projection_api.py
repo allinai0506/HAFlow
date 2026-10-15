@@ -48,6 +48,9 @@ def _seed_wf(env, wid, status="running"):
         },
     }
     env["wf_file"].write_text(json.dumps(data), encoding="utf-8")
+    from herdr.state_store import SQLiteStateStore
+    store = SQLiteStateStore(env["wf_file"].parent / "state.db", auto_migrate_json=False)
+    store.save_workflow(data["workflows"][wid])
 
 
 def _seed_task(env, task_id, wid="wf-proj-test", status="working", goal="Build Telemetry"):
@@ -63,6 +66,9 @@ def _seed_task(env, task_id, wid="wf-proj-test", status="working", goal="Build T
     }
     t_data["tasks"].append(task)
     env["tasks_file"].write_text(json.dumps(t_data), encoding="utf-8")
+    from herdr.state_store import SQLiteStateStore
+    store = SQLiteStateStore(env["tasks_file"].parent / "state.db", auto_migrate_json=False)
+    store.save_task(task)
     return task
 
 

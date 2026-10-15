@@ -125,8 +125,8 @@ def test_projection_displays_specific_obligations_even_with_superseded_tasks(sce
     from herdr.projection import detect_workflow_stalls
     wf, cfg, tasks = scene
     tasks.append({'workflow_id': 'wf', 'task_id': 'old', 'status': 'superseded'})
-    with patch('herdr.projects.workflow_config_for', return_value=cfg):
-        result = detect_workflow_stalls('wf', tasks, workflow=wf)
+    with patch('herdr.projects.workflow_config_for', side_effect=AssertionError('global config read')):
+        result = detect_workflow_stalls('wf', tasks, workflow=wf, config=cfg)
     assert result['is_stalled']
     assert result['stall_type'] == 'workflow_continuation'
     assert 't4b' in result['message']

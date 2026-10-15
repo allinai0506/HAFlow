@@ -2573,3 +2573,9 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 配置节点的工作流在当前执行没有登记任务时拒绝 delivered；零任务 abandon 记录 abandoned。
 - Evidence: `herdr/dispatch_recovery.py#_view`、`herdr/workflow.py#validate_delivery_inventory`、`tests/test_dispatch_recovery_ui.py`、`tests/test_close_workflow_receipt_cli.py`。
 - 本记录描述本地源码；未部署、未重派真实任务，Agent 启动 blocked 的具体交互原因仍 UNKNOWN。
+
+### 2026-10-15：Console 多入口读取瓶颈修复（隔离工作区）
+
+- Updated [[ops-center]]：共用只读快照与全进程探针预算，刷新合并与未采样语义。
+- Updated [[flow-workbench]]：项目元数据/现场拆分、成果定向补读、白盒快照复用、归档数据库分页、日志尾部有界读取。
+- 当前记录描述本地源码和隔离预览，不代表 8765 已部署、远端已推送或已合并。

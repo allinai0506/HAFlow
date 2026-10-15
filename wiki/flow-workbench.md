@@ -132,3 +132,21 @@ Evidence:
 普通 `/` 首页恢复已记住的工作流也应先走轻量详情，不能先等待空间巡检和完整项目现场。系统页面及首次无历史选择的默认入口保留；后台空间与成果完成时间需单独测量。
 
 Console 成果与 Controller 动作读取指定工作流的权威快照。成果投影共享进程内4个只读探测线程，每请求最多4项未完成、完成即补位，并按任务顺序汇总；同任务 HEAD 在一次投影内复用。上限指活跃线程，不代表跨进程或排队请求上限。整个首页验收须同时覆盖侧栏、PR成果、动作、决策与运行现场。
+
+## 读取性能与隔离（2026-10-15）
+
+`FACT` 项目列表通过 `/api/project?lightweight=1` 读取工作流元数据与执行者负载；`/api/project/runtime` 单独加载工位现场，pending/error 不表示工位为空。工作流直达入口绘制后不再因项目刷新重复读取同一主体。旧项目或空间的运行现场响应不能写入新对象。
+
+成果目录的持久化补充使用 `herdr.deliverable_store.read_enrichment`，同一只读连接按 task 索引限量读取 artifact 与正式 `herdr-task` PR 事件。文件/Git 核心的所有权、可读性和错误语义不变。白盒详情定向读取任务，工作流白盒复用一次快照和全进程 4 个并发工位探测预算。
+
+归档使用 SQLite 筛选、计数与分页，仅解码当前页；保留 Unicode 子串及状态组查询，非有限时间按无效时间 0 排序。日志读取最多 256 KiB 文件尾部，丢弃开头残行；不足请求行数时明确提示截断。
+
+Evidence:
+- `console/herdr_factory_console.py#project_detail`
+- `console/herdr_factory_console.py#loadProjectRuntime`
+- `herdr/deliverable_store.py#read_enrichment`
+- `herdr/projection.py#project_workflow`
+- `herdr/archive.py#query_archived_tasks_sqlite`
+- `tests/test_console_page_latency.py`
+- `tests/test_projection_archive_latency.py`
+- `tests/test_deliverable_read_latency.py`

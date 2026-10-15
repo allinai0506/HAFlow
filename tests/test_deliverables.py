@@ -605,17 +605,20 @@ def test_console_task_view_omits_sibling_expectations(tmp_path, monkeypatch):
     assert all(item["status"] != "missing" for item in own["deliverables"]["items"])
 
 
-def test_task_projection_keeps_soft_catalog_error(monkeypatch):
+def test_task_projection_keeps_soft_catalog_error(tmp_path, monkeypatch):
     from console import herdr_factory_console as console
 
     monkeypatch.setattr(
         console.herdr_projection, "project_task",
         lambda tid: {"task_id": tid, "workflow_id": "wf-biz"},
     )
-    monkeypatch.setattr(console, "tasks_for_workflow", lambda wid: [{
-        "task_id": "task-req", "workflow_id": wid,
-    }])
-    monkeypatch.setattr(console, "workflows", lambda: {"wf-biz": {}})
+    _seed_console_workflow(tmp_path, monkeypatch, [{
+        "task_id": "task-req", "workflow_id": "wf-biz", "node": "requirements",
+    }], [{"id": "requirements"}])
+    def forbid_global(*args, **kwargs):
+        raise AssertionError("task catalog must use its readonly workflow snapshot")
+    monkeypatch.setattr(console, "tasks_for_workflow", forbid_global)
+    monkeypatch.setattr(console, "workflows", forbid_global)
     monkeypatch.setattr(
         console.herdr_deliverables, "project_for_tasks",
         lambda *args, **kwargs: d.pack([], error="无法列出 Git 变更，未列出的文件不代表尚未生成。"),

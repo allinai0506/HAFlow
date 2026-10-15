@@ -162,3 +162,17 @@ Evidence:
 - `console/herdr_factory_console.py#workflow_definition_for` / `#workflow_graph_for`
 - `console/herdr_factory_console.py` 的 `flowChecklist`
 - `tests/test_fix_bug1002_config.py`
+
+## 7. 运维读取与刷新预算（2026-10-15）
+
+`FACT` Console 与 CLI 共用 `herdr.ops_center.build_ops_center_payload`。任务、工作流与当前周期候选回执取自同一个只读 SQLite 快照；查询不启动 CLI 子进程、不初始化 schema，也不逐工作流创建连接。保留已取代任务与 required task 归属校验。
+
+运行现场按 Pane 去重；本进程共享最多 8 个在途探针，每次最多采样 8 个。探针失败、预算耗尽及未采样返回 unknown，`runtime_sampling` 标明 sampled/omitted；不得把未采样解释为健康。既有外部探针超时仍为 3 秒。多个浏览器共享的是单服务进程预算，不宣称跨进程全局限制。
+
+Console 的运维、仪表板、归档、日志与经验查询通过 `pageRead` 合并同类在途请求；切换范围只保留最新等待项。GET 在途合并按路径与请求头隔离，完成后即释放，不是 TTL 缓存；POST 不合并。
+
+Evidence:
+- `herdr/console_queries.py#read_inventory`
+- `herdr/ops_center.py#build_ops_center_payload`
+- `tests/test_ops_center_read_path.py`
+- `tests/test_console_page_latency.py`

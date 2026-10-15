@@ -330,7 +330,7 @@ class TestUniversalSubstrateEndToEnd:
         assert t_gate["status"] == "superseded"
         assert t_comp["status"] == "superseded"
 
-    def test_e2e_attention_hub_and_filter_telemetry(self, e2e_env):
+    def test_e2e_attention_hub_and_filter_telemetry(self, e2e_env, monkeypatch):
         """Verify Attention Hub categorizes decisions, alerts, and active nodes with high SNR."""
         wid = "wf-attention-test-03"
         e2e_env["wf_file"].write_text(json.dumps({"workflows": {wid: {"workflow_id": wid, "status": "running"}}}), encoding="utf-8")
@@ -346,6 +346,17 @@ class TestUniversalSubstrateEndToEnd:
         }
         e2e_env["tasks_file"].write_text(json.dumps(tasks_db), encoding="utf-8")
 
+        # Import legacy input explicitly before the read-only telemetry boundary.
+        from herdr import state_db
+        state_db.migrate_v1_to_v2(
+            workflows_file=e2e_env["wf_file"], tasks_file=e2e_env["tasks_file"],
+            checkpoints_dir=e2e_env["tmp_path"] / "checkpoints",
+            steering_file=e2e_env["steer_file"],
+            db_path=e2e_env["tmp_path"] / "state.db",
+        )
+        def forbid_write(*args, **kwargs):
+            raise AssertionError("telemetry must not initialize or migrate state")
+        monkeypatch.setattr(state_db, "get_db_connection", forbid_write)
         wp = c.api_workflow_projection(wid)
         assert wp["progress"]["total_tasks"] == 5
         assert wp["progress"]["blocked_tasks"] == 1
