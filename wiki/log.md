@@ -8,6 +8,12 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-10-16] feat | 任务详情执行轨迹 V1
+
+- 背景：任务活动时间轴只有状态变化，看不到 Agent 实际读过、改过和执行过什么。
+- 变更：任务详情新增只读「执行轨迹」。任务行和 Trajectory 事件都通过只读连接读取。独占 clone 或已记录 `native_session_id` 能证明归属时，才补充 Codex、Claude Code、OpenCode 原生会话。`agent_session_id` 与 Pane ID 不作为原生会话归属。
+- 证据：`tests/test_execution_trace.py`、`tests/test_execution_trace_api.py`、`tests/test_console_execution_trace.py`。页面说明见 [[execution-trace]]。
+
 ## [2026-10-14] fix | PR #209 全量缺陷修复与 V1 验收：硬编码凭证消除、服务端强审、两阶段可靠采集、离线指数退避、跨客户越权拦截与强制规则 Fail-Closed 闭环
 
 - 背景：

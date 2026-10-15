@@ -63,8 +63,10 @@ class TestTaskDetailDrawer(unittest.TestCase):
         self.assertIn('aria-label="关闭任务详情"', self.html)
 
     def test_four_tabs_present_default_overview(self):
-        for label in ["概览", "活动", "产物", "运行时"]:
+        for label in ["概览", "产物", "运行时"]:
             self.assertIn(label, self.html)
+        self.assertIn(">执行轨迹</button>", self.html)
+        self.assertNotIn(">活动</button>", self.html)
         self.assertIn("switchTaskDrawerTab", self.html)
         self.assertIn("taskDrawerTab", self.html)
         # default tab overview referenced in opener

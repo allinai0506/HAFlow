@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import hashlib, json, os, re, shutil, subprocess, sys, threading, time, urllib.parse, uuid
+import hashlib, json, os, re, shutil, sqlite3, subprocess, sys, threading, time, urllib.parse, uuid
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -1869,6 +1869,41 @@ def api_read_deliverable(wid, tid, did, download=False):
     return herdr_deliverables.read_deliverable(
         wid, _tasks_for_deliverables(own), _workflow_nodes(wid, w), tid, did, download=download,
     )
+
+class TraceQueryError(RuntimeError):
+    def __init__(self, status, message):
+        super().__init__(message)
+        self.status = int(status)
+        self.message = str(message)
+
+def api_task_trajectory(tid, limit=100, cursor=None):
+    """Read one page of a task execution trace. This does not dispatch or write."""
+    tid = str(tid or '').strip()
+    if not tid:
+        raise TraceQueryError(400, 'task_id 不能为空')
+    if limit in (None, ''):
+        limit = 100
+    try:
+        page_limit = int(limit)
+    except (TypeError, ValueError):
+        raise TraceQueryError(400, 'limit 无效')
+    if page_limit < 1 or page_limit > 200:
+        raise TraceQueryError(400, 'limit 无效')
+    from herdr.execution_trace import query_task_trace, read_task_records
+    db_path = Path(os.environ['HERDR_STATE_DB']) if os.environ.get('HERDR_STATE_DB') else Path(TASKS_FILE).parent / 'state.db'
+    try:
+        found = read_task_records(db_path)
+    except FileNotFoundError as exc:
+        raise TraceQueryError(503, '任务轨迹数据库暂不可用。') from exc
+    except sqlite3.Error as exc:
+        raise TraceQueryError(503, '任务轨迹数据库暂不可用。') from exc
+    task = next((item for item in found if item.get('task_id') == tid), None)
+    if task is None:
+        raise TraceQueryError(404, '任务不存在')
+    try:
+        return query_task_trace(task, found, db_path=db_path, limit=page_limit, cursor=cursor or None)
+    except ValueError as exc:
+        raise TraceQueryError(400, str(exc)) from exc
 
 def api_task_projection(tid):
     if not tid:raise RuntimeError('task_id 不能为空')
@@ -3893,6 +3928,40 @@ button { cursor: pointer; }
   word-break: break-word;
   white-space: pre-wrap;
 }
+.trace-timeline .td-ev { grid-template-columns: 76px 18px 1fr; }
+button.trace-ev {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  padding: 0;
+  cursor: pointer;
+}
+.td-dot.neutral {
+  background: transparent;
+  border: 1.5px solid var(--text-tertiary);
+  box-sizing: border-box;
+}
+.td-dot.edit { background: var(--primary); }
+.td-dot.ok { background: var(--success); }
+.td-dot.err { background: var(--danger); }
+.td-ev-title.err { color: var(--danger); }
+.trace-note {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin: 4px 0 8px;
+}
+.trace-extra {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.trace-extra[hidden] { display: none; }
+.trace-extra span { color: var(--text-tertiary); margin-right: 8px; }
 .td-art {
   border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
@@ -6769,7 +6838,7 @@ body {
     </div>
     <div class="td-tabs" role="tablist" aria-label="任务详情页签">
       <button class="td-tab" role="tab" id="tdTabOverview" aria-selected="true" onclick="switchTaskDrawerTab('overview')">概览</button>
-      <button class="td-tab" role="tab" id="tdTabActivity" aria-selected="false" onclick="switchTaskDrawerTab('activity')">活动</button>
+      <button class="td-tab" role="tab" id="tdTabActivity" aria-selected="false" onclick="switchTaskDrawerTab('trace')">执行轨迹</button>
       <button class="td-tab" role="tab" id="tdTabArtifacts" aria-selected="false" onclick="switchTaskDrawerTab('artifacts')">产物</button>
       <button class="td-tab" role="tab" id="tdTabRuntime" aria-selected="false" onclick="switchTaskDrawerTab('runtime')">运行时</button>
     </div>
@@ -6794,7 +6863,7 @@ body {
 <script src="/static/vendor/dagre-3.1.1.min.js"></script>
 <script src="/static/vendor/x6-3.1.8.min.js"></script>
 <script>
-let state={overview:null,project:null,workflow:null,ops:null,dash:null,projectId:null,workflowId:null,openWorkflowTabIds:[],sidebarCollapsed:false,completedExpanded:false,completedVisibleLimit:5,spaceId:null,space:null,opsMode:false,dashMode:false,dashWorkflowId:null,shellView:'workbench',taskFilter:'all',drawerTab:'tty',selectedTaskId:null,taskDrawerTab:'overview',selectedTaskDetail:null,workflowView:'flow',flowSelectedNodeId:null,flowInspectorTab:'summary',flowGraph:null,flowGraphWfId:null,flowHtmlReady:false};
+let state={overview:null,project:null,workflow:null,ops:null,dash:null,projectId:null,workflowId:null,openWorkflowTabIds:[],sidebarCollapsed:false,completedExpanded:false,completedVisibleLimit:5,spaceId:null,space:null,opsMode:false,dashMode:false,dashWorkflowId:null,shellView:'workbench',taskFilter:'all',drawerTab:'tty',selectedTaskId:null,taskDrawerTab:'overview',taskTrace:null,taskTraceSeq:0,selectedTaskDetail:null,workflowView:'flow',flowSelectedNodeId:null,flowInspectorTab:'summary',flowGraph:null,flowGraphWfId:null,flowHtmlReady:false};
 const VIEW_KEY='herdrConsoleView';
 function closeMoreMenu(){const dd=document.getElementById('moreDropdown');if(dd)dd.classList.remove('open')}
 function toggleMoreMenu(e){e.stopPropagation();const dd=document.getElementById('moreDropdown');if(dd)dd.classList.toggle('open')}
@@ -10809,6 +10878,128 @@ function taskDrawerMenuHtml(t){
 }
 function toggleTaskDrawerMenu(e){if(e)e.stopPropagation();const m=document.getElementById('taskDrawerMenu');if(m)m.classList.toggle('open')}
 function closeTaskDrawerMenu(){const m=document.getElementById('taskDrawerMenu');if(m)m.classList.remove('open')}
+function traceClock(ts){
+  const n=taskDrawerNumTs(ts);
+  if(n===null)return '';
+  const ms=n>1e12?n:n*1000;
+  const d=new Date(ms);
+  if(isNaN(d.getTime()))return '';
+  const p=v=>String(v).padStart(2,'0');
+  return p(d.getHours())+':'+p(d.getMinutes())+':'+p(d.getSeconds());
+}
+function traceDotClass(ev){
+  const status=ev&&ev.status;
+  if(status==='success')return 'ok';
+  if(status==='error')return 'err';
+  if(status==='info'||(ev&&ev.kind==='file_edit'))return 'edit';
+  return 'neutral';
+}
+function traceDetailRows(ev){
+  const d=(ev&&ev.details)||{};
+  const rows=[];
+  const add=(k,v)=>{if(v!==null&&v!==undefined&&String(v).trim()!=='')rows.push([k,String(v)])};
+  add('执行者',d.agent||ev.agent);
+  add('工具',d.tool);
+  add('文件',d.path);
+  add('命令',d.command);
+  add('结果',d.result);
+  if(typeof d.exit_code==='number')add('退出码',d.exit_code);
+  if(ev.timestamp!==null&&ev.timestamp!==undefined)add('原始时间',ev.timestamp);
+  add('来源',d.source||ev.source);
+  add('证据',d.source_ref||ev.source_ref);
+  return rows;
+}
+function renderExecutionTrace(model){
+  if(!model||model.status==='loading')return '<div class="empty">正在加载执行轨迹…</div>';
+  if(model.status==='error')return '<div class="empty">执行轨迹加载失败：'+esc(model.message||'未知错误')+'</div><button class="btn mini" type="button" onclick="retryTaskTrace()">重试</button>';
+  const events=Array.isArray(model.events)?model.events:[];
+  const notes=Array.isArray(model.degradation)?model.degradation:[];
+  const codes=notes.map(n=>n&&n.code);
+  const refused=notes.some(n=>n&&n.code==='native_unverified'&&/独占|没有可核对/.test(String(n.message||'')));
+  const sourceDown=codes.includes('native_unavailable')||codes.includes('native_corrupt')||codes.includes('trajectory_unavailable');
+  let banner='';
+  if(!events.length&&sourceDown)banner='<div class="empty">记录来源暂不可用。</div>';
+  else if(!events.length&&refused)banner='<div class="empty">原生会话无法确认属于当前任务，已仅展示已确认的任务记录。</div>';
+  else if(!events.length||model.availability==='none')banner='<div class="empty">当前任务暂无可用执行轨迹。</div>';
+  else if(model.availability==='task_events')banner='<div class="trace-note">当前仅有任务状态记录，尚无可验证的执行者操作明细。</div>';
+  if(events.length&&(codes.includes('native_unavailable')||codes.includes('native_corrupt')))banner+='<div class="trace-note">原生会话记录暂不可用，以下为已保存的任务状态。</div>';
+  if(events.length&&refused&&model.availability!=='agent_actions')banner+='<div class="trace-note">原生会话无法确认属于当前任务，已仅展示已确认的任务记录。</div>';
+  if(codes.includes('native_truncated'))banner+='<div class="trace-note">执行轨迹已截断，仅显示已读取的部分。</div>';
+  if(!events.length)return banner;
+  const timed=events.filter(e=>e.timestamp!==null&&e.timestamp!==undefined);
+  const untimed=events.filter(e=>e.timestamp===null||e.timestamp===undefined);
+  const renderList=(list)=>{
+    return list.map((e,i)=>{
+      const clock=e.timestamp!==null&&e.timestamp!==undefined?traceClock(e.timestamp):'';
+      const line=i<list.length-1?'<div class="td-ev-line"></div>':'';
+      const titleClass=e.status==='error'?' err':'';
+      const rows=traceDetailRows(e);
+      const extra=rows.length?'<span class="trace-extra" hidden>'+rows.map(r=>'<span>'+esc(r[0])+'</span>'+esc(r[1])).join('<br>')+'</span>':'';
+      return '<button type="button" class="td-ev trace-ev" onclick="toggleTraceEvent(this)"><span class="td-ev-time">'+esc(clock)+'</span><span class="td-ev-rail"><span class="td-dot '+traceDotClass(e)+'"></span>'+line+'</span><span class="td-ev-body"><span class="td-ev-title'+titleClass+'">'+esc(e.title||'')+'</span>'+(e.detail?'<span class="td-ev-detail">'+esc(e.detail)+'</span>':'')+extra+'</span></button>';
+    }).join('');
+  };
+  let html=banner+'<div class="td-timeline trace-timeline">'+renderList(timed);
+  if(untimed.length)html+='<div class="trace-note">以下记录没有原始时间，不与已知时间的事件比较先后。</div>'+renderList(untimed);
+  html+='</div>';
+  if(model.has_more)html+='<button class="btn mini" type="button" onclick="loadMoreTaskTrace()">加载更多</button>';
+  return html;
+}
+function toggleTraceEvent(el){
+  if(!el)return;
+  const extra=el.querySelector('.trace-extra');
+  if(!extra)return;
+  extra.hidden=!extra.hidden;
+}
+function applyTraceResponse(state,tid,seq,payload){
+  if(!state||state.selectedTaskId!==tid||state.taskTraceSeq!==seq)return false;
+  const prev=state.taskTrace&&Array.isArray(state.taskTrace.events)?state.taskTrace.events:[];
+  const incoming=payload&&Array.isArray(payload.events)?payload.events:[];
+  state.taskTrace={
+    status:'ready',
+    task_id:payload.task_id,
+    run_id:payload.run_id,
+    availability:payload.availability,
+    events:payload&&payload.append?prev.concat(incoming):incoming,
+    has_more:!!payload.has_more,
+    next_cursor:payload.next_cursor||null,
+    degradation:Array.isArray(payload.degradation)?payload.degradation:[],
+    appending:false
+  };
+  return true;
+}
+function retryTaskTrace(){loadTaskTrace(state.selectedTaskId,true)}
+async function loadTaskTrace(tid,force){
+  if(!tid)return;
+  const seq=state.taskTraceSeq||0;
+  if(!force&&state.taskTrace&&state.taskTrace.task_id===tid&&state.taskTrace.status==='ready')return;
+  state.taskTrace={status:'loading',task_id:tid,events:[]};
+  if(state.taskDrawerTab==='trace'||state.taskDrawerTab==='activity')renderTaskDrawer();
+  try{
+    const data=await api('/api/task/trajectory?id='+encodeURIComponent(tid)+'&limit=100');
+    if(!applyTraceResponse(state,tid,seq,data))return;
+  }catch(e){
+    if(state.selectedTaskId!==tid||state.taskTraceSeq!==seq)return;
+    state.taskTrace={status:'error',task_id:tid,message:e&&e.message?e.message:'未知错误',events:[]};
+  }
+  if(state.selectedTaskId===tid&&(state.taskDrawerTab==='trace'||state.taskDrawerTab==='activity'))renderTaskDrawer();
+}
+async function loadMoreTaskTrace(){
+  const tid=state.selectedTaskId;
+  const model=state.taskTrace;
+  if(!tid||!model||!model.has_more||!model.next_cursor||model.appending)return;
+  const seq=state.taskTraceSeq||0;
+  model.appending=true;
+  try{
+    const data=await api('/api/task/trajectory?id='+encodeURIComponent(tid)+'&limit=100&cursor='+encodeURIComponent(model.next_cursor));
+    if(state.selectedTaskId!==tid||state.taskTraceSeq!==seq)return;
+    data.append=true;
+    applyTraceResponse(state,tid,seq,data);
+  }catch(e){
+    if(state.selectedTaskId!==tid||state.taskTraceSeq!==seq)return;
+    state.taskTrace={status:'error',task_id:tid,message:e&&e.message?e.message:'未知错误',events:model.events||[]};
+  }
+  if(state.taskDrawerTab==='trace'||state.taskDrawerTab==='activity')renderTaskDrawer();
+}
 function renderTaskDrawer(){
   const c=state.selectedTaskDetail;
   const drawer=document.getElementById('taskDrawer');
@@ -10838,14 +11029,15 @@ function renderTaskDrawer(){
   if(rtShort)attrRows.push(['运行现场',rtShort]);
   if(ds)attrRows.push([ds.label,fmtClock(ds.ts)]);
   if(dur!==null)attrRows.push(['耗时',formatElapsed(dur)]);
-  const tabs=['overview','activity','artifacts','runtime'];
-  const labels={overview:'tdTabOverview',activity:'tdTabActivity',artifacts:'tdTabArtifacts',runtime:'tdTabRuntime'};
-  for(const k of tabs){const el=document.getElementById(labels[k]);if(el){const on=state.taskDrawerTab===k;el.classList.toggle('active',on);el.setAttribute('aria-selected',on?'true':'false')}}
+  const tab=state.taskDrawerTab==='activity'?'trace':state.taskDrawerTab;
+  const tabs=['overview','trace','artifacts','runtime'];
+  const labels={overview:'tdTabOverview',trace:'tdTabActivity',artifacts:'tdTabArtifacts',runtime:'tdTabRuntime'};
+  for(const k of tabs){const el=document.getElementById(labels[k]);if(el){const on=tab===k;el.classList.toggle('active',on);el.setAttribute('aria-selected',on?'true':'false')}}
   let body='';
   if(attrRows.length)body+=`<div class="td-attrs">${attrRows.map(r=>`<div class="td-attr-k">${esc(r[0])}</div><div class="td-attr-v">${esc(r[1])}</div>`).join('')}</div>`;
-  if(state.taskDrawerTab==='activity')body+=renderTaskActivity(task,proj);
-  else if(state.taskDrawerTab==='artifacts')body+=renderTaskArtifacts(task,proj);
-  else if(state.taskDrawerTab==='runtime')body+=renderTaskRuntime(task,proj);
+  if(tab==='trace')body+=renderExecutionTrace(state.taskTrace);
+  else if(tab==='artifacts')body+=renderTaskArtifacts(task,proj);
+  else if(tab==='runtime')body+=renderTaskRuntime(task,proj);
   else body+=renderTaskOverview(task,proj);
   document.getElementById('taskDrawerBody').innerHTML=body;
 }
@@ -10861,7 +11053,7 @@ function resolveTaskDetail(tid,td,proj,tdError,projError,rowTask){
 }
 async function openTaskDrawer(tid){
   if(!tid)return;
-  state.selectedTaskId=tid;state.taskDrawerTab='overview';
+  state.selectedTaskId=tid;state.taskDrawerTab='overview';state.taskTrace=null;state.taskTraceSeq=(state.taskTraceSeq||0)+1;
   const drawer=document.getElementById('taskDrawer');
   if(drawer){drawer.hidden=false;drawer.classList.add('open')}
   document.getElementById('taskDrawerTitle').textContent='加载中…';
@@ -10901,10 +11093,12 @@ function closeTaskDrawer(){
   document.querySelectorAll('.task.task-highlight').forEach(el=>el.classList.remove('task-highlight'));
 }
 function switchTaskDrawerTab(tab){
+  if(tab==='activity')tab='trace';
   state.taskDrawerTab=tab;
   renderTaskDrawer();
   const drawer=document.getElementById('taskDrawer');
   if(drawer&&drawer.hidden){drawer.hidden=false;drawer.classList.add('open')}
+  if(tab==='trace')loadTaskTrace(state.selectedTaskId);
 }
 async function showTask(id){try{const [td,proj]=await Promise.all([api('/api/task?id='+encodeURIComponent(id)).catch(()=>null),api('/api/task/projection?id='+encodeURIComponent(id)).catch(()=>null)]);const d=proj||(td&&td.task)||{};const raw=td||proj||{};const st=d.status||(td&&td.task&&td.task.status)||'unknown';const intent=d.intent||(td&&td.task&&td.task.goal)||'无明确意图描述';const blockers=Array.isArray(d.blockers)?d.blockers:(d.blocker?[d.blocker]:[]);const ms=Array.isArray(d.milestones)?d.milestones:[];const arts=Array.isArray(d.artifacts)?d.artifacts:[];const acts=Array.isArray(d.recent_activity)?d.recent_activity:(typeof d.recent_activity==='string'&&d.recent_activity?d.recent_activity.split('\n'):[]);const blkHtml=blockers.length?`<div class="proj-blk"><strong>⚠️ 卡点告警:</strong><span>${esc(blockers.map(humanReason).join('; '))}</span></div>`:'';const msHtml=ms.length?`<div class="proj-sec"><div class="proj-lbl">动态路标</div>${ms.map(m=>`<div class="proj-ms"><span class="proj-ms-dot ${m.status}">${m.status==='completed'?'✓':(m.status==='in_progress'?'›':'·')}</span><span style="${m.status==='completed'?'color:var(--text)':(m.status==='in_progress'?'color:var(--warn);font-weight:600':'color:var(--muted)')}">${esc(m.label)}</span></div>`).join('')}</div>`:'';const artHtml=arts.length?`<div class="proj-sec"><div class="proj-lbl">核心产物</div>${arts.map(a=>`<div class="proj-art"><div class="proj-art-hd"><span>${esc(a.name||a.kind)}</span><span class="badge ${a.passed?'cleaned':(a.kind==='evaluation'?'failed':'waiting')}">${esc(a.kind)}</span></div><div class="muted">${esc(a.summary||'')}</div></div>`).join('')}</div>`:'';const actHtml=acts.length?`<div class="proj-sec"><div class="proj-lbl">近期动态提炼</div><ul class="proj-acts">${acts.map(a=>`<li>${esc(a)}</li>`).join('')}</ul></div>`:'';const body=`<div class="proj-box"><div style="display:flex;justify-content:space-between;align-items:center;padding-bottom:8px;border-bottom:1px solid var(--line)"><div><span class="badge ${st}">${esc(st)}</span><span style="margin-left:8px;font-size:12px;color:var(--muted)">执行者: <strong>${esc(d.agent||'-')}</strong></span><span style="margin-left:8px;font-size:12px;color:var(--muted)">工位: <strong>${esc(d.node||'-')}</strong></span></div><button class="mini" onclick="const el=document.getElementById('taskRawPre');if(el)el.style.display=el.style.display==='none'?'block':'none'">原始数据</button></div>${blkHtml}<div class="proj-sec"><div class="proj-lbl">当前语义意图</div><div class="proj-txt">${esc(intent)}</div></div>${msHtml}${artHtml}${actHtml}<div id="taskRawPre" style="display:none;margin-top:8px"><div class="proj-lbl">原始调试数据</div><pre>${esc(JSON.stringify(raw,null,2))}</pre></div></div>`;openModal('任务白盒简报 · '+id,body)}catch(e){toast(e.message,true)}}async function showPane(id){if(!id)return toast('没有工位',true);try{const d=await api('/api/pane/read?id='+encodeURIComponent(id));openModal('工位 '+id,`<pre>${esc(d.output)}</pre>`)}catch(e){toast(e.message,true)}}async function askCoordinator(id){try{toast('正在通知总指挥…');await api('/api/task/coordinator',{method:'POST',body:JSON.stringify({task_id:id})});toast('总指挥已处理/接收')}catch(e){toast(e.message,true)}}
 async function openSignoffChamber(taskId){try{const [td,proj]=await Promise.all([api('/api/task?id='+encodeURIComponent(taskId)).catch(()=>null),api('/api/task/projection?id='+encodeURIComponent(taskId)).catch(()=>null)]);const d=proj||(td&&td.task)||{};const t=(td&&td.task)||{};window._signoffTask=t;const wid=t.workflow_id||state.workflowId;const node=t.node||t.stage||'';const arts=Array.isArray(d.artifacts)?d.artifacts:[];const isBlocked=t.stage_verdict==='blocked'||t.status==='blocked';let artCards='<div class="empty">暂无生成产物</div>';if(arts.length){artCards=arts.map(a=>`<div class="proj-sec" style="margin-bottom:8px"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px"><strong>${esc(a.name||a.kind)}</strong><span class="badge ${a.passed?'cleaned':(a.kind==='evaluation'?'failed':'waiting')}">${esc(a.kind)}</span></div><div class="task-meta" style="margin-bottom:8px">${esc(a.path||'')}</div><div class="proj-txt ctl-pre-light">${esc(a.content||a.summary||'（文件产物记录正常）')}</div></div>`).join('')}const html=`<div class="signoff-box"><div class="signoff-head"><div><div style="font-size:16px;font-weight:700">${esc(taskDisplayName(t))}</div><div class="task-meta">任务 ID: ${esc(taskId)} · 执行者: <b>${esc(t.agent||'-')}</b> · 节点: <b>${esc(node)}</b> · 版本: <b>v${esc(t.version!=null?t.version:'-')}</b></div></div><div>${badge(t.status)}</div></div>${isBlocked?'<div class="proj-blk"><strong>⚠️ 门禁会签等待:</strong> 当前节点触发门禁阻断，需要人类总指挥核查产物并决策放行或打回。</div>':''}<div class="proj-sec"><div class="proj-lbl">核心交付物与成果列表</div>${artCards}</div><div class="form"><label for="signoffFeedback">审批意见 / 批注说明（通过必填原因，打回可选）</label><input id="signoffFeedback" placeholder="例如：经核验核心成果符合要求，特批放行"></div><div class="signoff-actions"><button class="btn" onclick="closeModal()">暂不处理</button><button class="btn danger-btn" onclick="submitSignoffDecision(\'${esc(taskId)}\',\'${esc(wid)}\',\'${esc(node)}\',\'reject\')">批注打回</button><button class="btn primary" onclick="submitSignoffDecision(\'${esc(taskId)}\',\'${esc(wid)}\',\'${esc(node)}\',\'approve\')">通过并放行</button></div></div>`;openModal('成果交付会签室 (Artifact Signoff Chamber)',html)}catch(e){toast(e.message,true)}}
@@ -11914,6 +12108,16 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(200,api_task_steer_queue(tid))
             if p=='/api/agent/adapters':
                 return self.send_json(200,api_agent_adapters())
+            if p=='/api/task/trajectory':
+                q=self.query()
+                try:
+                    return self.send_json(200, api_task_trajectory(
+                        q.get('id',[''])[0] or q.get('task_id',[''])[0],
+                        q.get('limit',['100'])[0],
+                        q.get('cursor',[''])[0] or None,
+                    ))
+                except TraceQueryError as e:
+                    return self.send_json(e.status, error=e.message)
             if p=='/api/task/projection':
                 tid=self.query().get('id',[''])[0] or self.query().get('task_id',[''])[0]
                 if not tid:raise RuntimeError('task_id 不能为空')
