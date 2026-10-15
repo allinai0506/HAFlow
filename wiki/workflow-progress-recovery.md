@@ -138,3 +138,12 @@ Evidence:
 - `herdr/delivery_rework.py#execute_delivery_recovery`
 - `herdr/workflow_recovery.py#result_status`
 - `tests/test_delivery_rework.py#test_existing_recovery_identities_survive_delivery_extension`
+
+## FACT：尚无候选的首节点恢复
+
+首节点还未产生冻结 candidate_sha 时，execution_id 完整即可进入既有未交付确认流程。依赖节点仍要求冻结候选。恢复不会延长旧 operation 的截止时间；人工确认无旧执行且无未结案启动记录后，原子废弃旧授权并生成新 epoch。resources_absent 回执可解除启动现场阻塞；unknown、已登记任务和旧代未结案仍禁止重复派发。新授权的 claim/start → launch intent → Task 登记 → resolved 使用既有持久链路。
+
+Evidence:
+- `herdr/dispatch_recovery.py#_view/decide`
+- `tests/test_dispatch_recovery_ui.py#test_first_node_without_candidate_can_reauthorize_after_expired_rollback`
+- `tests/test_dispatch_recovery_ui.py#test_first_node_without_candidate_still_refuses_unknown_startup`

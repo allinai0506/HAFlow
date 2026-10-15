@@ -7050,6 +7050,11 @@ def transition_workflow(
         meta = json.loads(row["metadata_json"] or "{}")
         cfg = json.loads(row["config_json"] or "{}")
 
+        if to_status == "completed" and user_meta.get("outcome", meta.get("outcome")) == "delivered":
+            from .recovery_store import _snapshot
+            from .workflow import validate_delivery_inventory
+            validate_delivery_inventory(*_snapshot(conn, workflow_id))
+
         wf_dict = dict(meta)
         wf_dict.update({
             "workflow_id": row["workflow_id"],

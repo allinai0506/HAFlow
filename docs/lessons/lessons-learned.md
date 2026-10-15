@@ -6713,3 +6713,26 @@ HAFlow 作为企业级多任务通用 Agent 编排系统，必须支撑招投标
 - 核心用例覆盖：`test_startup_without_admin_token_rejected`、`test_contributor_cannot_forge_published_status`、`test_content_hash_conflict_returns_409`、`test_contributor_cannot_read_other_contributor_candidates`、`test_reviewer_cross_customer_review_and_revoke_forbidden`、`test_unknown_customer_not_treated_as_global`、`test_settlement_persists_pending_collection_before_thread_exit`、`test_offline_upload_auto_retries_with_backoff`、`test_mandatory_rules_fail_closed_on_hub_outage`；
 - 静态检查：`python3 -m compileall -q herdr services bin console tests` 与 `git diff --check` 均干净（exit code 0）。
 
+
+## 158. 首节点恢复不能依赖尚未产生的交付身份（2026-10-15）
+
+### 问题背景
+
+2026-10-15 两次凭证排序工作流均未注册 Task。第二次 Agent 启动 agent_not_ready 后回滚，重试因 operation deadline expired 拒绝；恢复入口又要求首节点尚未产生的 candidate_sha。第一次零任务关闭被记录为 delivered。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|---|---|---|
+| 恢复要求失败阶段未来才会产生的身份 | 安全条件必须匹配阶段生命周期 | 首节点核对 execution，下游再要求冻结候选；不放松现场核查 |
+| 空库存被视为平凡成功 | 资源清理完成不等于任务交付 | 配置节点的 delivered 必须有当前执行的有效登记任务；放弃单独记账 |
+
+### 操作规范
+
+1. 复用旧授权废弃、新 epoch 原子创建机制；不延长旧截止，也不对未知现场自动重发。
+2. CLI 在副作用前校验，数据库写事务内复核最低交付库存；force 不改变事实。
+3. 保留首节点、下游、未知现场、重复恢复、旧执行任务及 abandon 的负向回归。
+
+### 验证命令 / 守护测试
+
+`pytest -q tests/test_dispatch_recovery_ui.py tests/test_close_workflow_receipt_cli.py`。生产 Agent 启动交互尚未复现，不将回归通过写成运行恢复成功。

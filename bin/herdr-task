@@ -6808,6 +6808,12 @@ def close_workflow(
         store = _get_store()
         if store.get_workflow(workflow_id):
             authority, config, owned_tasks = store.read_workflow_snapshot(workflow_id)
+            from herdr.workflow import validate_delivery_inventory
+            try:
+                validate_delivery_inventory(authority, config, owned_tasks)
+            except ValueError as exc:
+                print(f'[CLOSE ABORT] {exc}')
+                sys.exit(2)
             missing_business = business_gate_blockers(store, authority, config, owned_tasks)
             if missing_business:
                 print('[CLOSE ABORT] business acceptance unavailable: ' + ', '.join(missing_business))
@@ -6862,12 +6868,11 @@ def _close_workflow_owned(
         )
 
     if not tasks:
-        # 中止在注册任何 Task 之前的运行:没有可销毁的资源,
-        # 视为平凡完成,仅做登记与状态清理。
+        # Empty configured deliveries were rejected before acquiring close ownership.
         print(f"[CLOSE REPORT] workflow={workflow_id} (no tasks)")
         if not dry_run:
             if entry.get("status") != "completed":
-                _mark_workflow_completed(workflow_id, force=force)
+                _mark_workflow_completed(workflow_id, outcome="abandoned" if abandon else "delivered", force=force)
             stage_reset(workflow_id)
             print(f"[WORKFLOW CLOSED] {workflow_id}")
         else:
@@ -6875,6 +6880,7 @@ def _close_workflow_owned(
         return {
             "workflow_id": workflow_id,
             "dry_run": dry_run,
+            "outcome": "abandoned" if abandon else "delivered",
             "tasks": [],
             "tabs_closed": [],
             "tabs_would_close": [],

@@ -539,6 +539,19 @@ def get_ready_nodes(workflow: Dict[str, Any], completed_node_ids: Set[str]) -> L
     return ready
 
 
+def validate_delivery_inventory(workflow, config, tasks):
+    """A configured execution needs its own registered task before delivery."""
+    nodes = {n['id'] for n in config.get('nodes') or []}
+    if nodes and not any(
+        t.get('workflow_id') == workflow['workflow_id']
+        and (t.get('node') or t.get('stage')) in nodes
+        and (not workflow.get('execution_id') or t.get('execution_id') == workflow['execution_id'])
+        and t.get('status') != 'superseded' and not t.get('superseded_by')
+        for t in tasks
+    ):
+        raise ValueError('no registered tasks for current workflow execution; use --abandon to discard it')
+
+
 def is_workflow_completed(workflow: Dict[str, Any], completed_node_ids: Set[str]) -> bool:
     """Return True if every node in the workflow has been completed."""
     normalized = normalize_workflow(workflow)

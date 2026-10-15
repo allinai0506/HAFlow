@@ -611,3 +611,14 @@ Evidence:
 Evidence:
 - `services/herdr-sentinel.py#check_task_stalls` / `#task_hard_timeout_seconds`
 - `tests/test_sentinel_hard_timeout.py`
+
+## FACT：空任务不构成交付
+
+配置了 nodes 的工作流，当前 execution 必须有属于配置节点且未被 supersede 的登记 Task，才能以 delivered 结束。close-workflow 在关闭副作用前验证；统一数据库 transition_workflow 在写事务内复核，即使 force 也不能绕过。旧 execution 的任务不算当前执行的交付依据。零 Task 的显式 --abandon 记录 abandoned；无 nodes 的旧式收尾保持兼容。本项仅是最低库存门槛，不能代替原有门禁与集成验收。
+
+Evidence:
+- `herdr/workflow.py#validate_delivery_inventory`
+- `herdr/state_db.py#transition_workflow`
+- `bin/herdr-task#close_workflow/_close_workflow_owned`
+- `tests/test_close_workflow_receipt_cli.py#test_atomic_transition_rejects_empty_delivery_even_with_force`
+- `tests/test_close_workflow_receipt_cli.py#test_historical_task_cannot_prove_current_execution_delivery`
