@@ -834,7 +834,20 @@ def main():
 
     print("[HERDR SENTINEL] starting", flush=True)
 
+    last_experience_sync = 0.0
+
     while True:
+        now = time.time()
+        if now - last_experience_sync >= 30.0:
+            last_experience_sync = now
+            # Offload Hub I/O from the liveness loop via single-flight worker;
+            # overlapping intervals skip instead of stacking threads.
+            try:
+                from herdr.experience.collector import trigger_background_sync
+                trigger_background_sync()
+            except Exception:
+                pass
+
         store = _get_store()
         try:
             tasks = store.list_tasks()

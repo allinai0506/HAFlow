@@ -221,7 +221,7 @@ def test_real_cli_worker_store_preserve_off_base_frozen_candidate(frozen_worker,
     monkeypatch.setattr(cli, 'acquire_pane_for_task', lambda *a: None)
     monkeypatch.setattr(cli, 'auto_init_task_loop', lambda *a, **k: None)
     monkeypatch.setattr(cli, 'release_agent_reservation', lambda *a: None)
-    monkeypatch.setattr(cli, 'dispatch_task', lambda *a: None)
+    monkeypatch.setattr(cli, 'dispatch_task', lambda *a, **k: None)
     monkeypatch.setattr(cli, 'close_pane', lambda *a, **k: None)
     real_run = subprocess.run
     def controlled_transport(cmd, **kwargs):

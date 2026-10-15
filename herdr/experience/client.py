@@ -23,6 +23,54 @@ LOGGER = logging.getLogger("herdr.experience.client")
 DEFAULT_HUB_URL = "http://127.0.0.1:8780"
 
 
+class _NoCredentialRedirect(urllib.request.HTTPRedirectHandler):
+    """Redirect handler that never leaks credentials cross-origin.
+
+    stdlib copies every non-content header (including Authorization) to the
+    redirect target. Strip credential headers whenever scheme, host, or port
+    changes; same-origin redirects keep working untouched.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new_req = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new_req is None:
+            return None
+        try:
+            old = urllib.parse.urlparse(req.full_url)
+            new = urllib.parse.urlparse(new_req.full_url)
+            if (old.scheme, old.hostname, old.port) != (new.scheme, new.hostname, new.port):
+                new_req.remove_header("Authorization")
+                new_req.remove_header("Cookie")
+        except Exception:
+            try:
+                new_req.remove_header("Authorization")
+            except Exception:
+                pass
+        return new_req
+
+
+def _hub_opener() -> urllib.request.OpenerDirector:
+    return urllib.request.build_opener(
+        _NoCredentialRedirect,
+        urllib.request.HTTPHandler,
+        urllib.request.HTTPSHandler,
+    )
+
+
+class ExperienceHubError(RuntimeError):
+    """Raised when an Experience Hub operation fails."""
+
+    def __init__(self, message: str, status_code: int = 0, error: str = ""):
+        super().__init__(message)
+        self.status_code = status_code
+        self.error = error
+
+
+class ExperienceHubSecurityError(ExperienceHubError):
+    """Raised when transmitting credentials over an insecure transport."""
+    pass
+
+
 class ExperienceClient:
     """HTTP client communicating with Experience Hub."""
 
@@ -31,11 +79,28 @@ class ExperienceClient:
         base_url: Optional[str] = None,
         token: Optional[str] = None,
         timeout: float = 8.0,
+        allow_env_token: bool = True,
     ):
         raw_url = base_url or os.environ.get("HERDR_HUB_URL") or DEFAULT_HUB_URL
         self.base_url = raw_url.rstrip("/")
-        self.token = token or os.environ.get("HERDR_HUB_TOKEN") or ""
+        if allow_env_token:
+            self.token = token or os.environ.get("HERDR_HUB_TOKEN") or ""
+        else:
+            # Explicit caller identity only: empty stays empty, never inherits
+            # server-side env credentials (used by Console per-request path).
+            self.token = token or ""
         self.timeout = timeout
+
+        # P1-09: Validate transport security. The opt-out flag accepts only
+        # explicit truthy values; "0"/"false"/empty never allow plaintext.
+        parsed = urllib.parse.urlparse(self.base_url)
+        is_loopback = parsed.hostname in ("127.0.0.1", "localhost", "::1", None)
+        allow_insecure = str(os.environ.get("HERDR_ALLOW_INSECURE_HTTP") or "").strip().lower() in {"1", "true", "yes"}
+        if parsed.scheme == "http" and not is_loopback and not allow_insecure:
+            raise ExperienceHubSecurityError(
+                f"Refusing to transmit Bearer Token over plain HTTP to non-loopback host '{parsed.hostname}'. "
+                "Configure HTTPS or set HERDR_ALLOW_INSECURE_HTTP=1 for testing."
+            )
 
     def _request(
         self,
@@ -61,7 +126,7 @@ class ExperienceClient:
         req = urllib.request.Request(url, data=body, headers=headers, method=method)
 
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            with _hub_opener().open(req, timeout=self.timeout) as resp:
                 resp_bytes = resp.read()
                 return json.loads(resp_bytes.decode("utf-8") or "{}")
         except urllib.error.HTTPError as exc:
@@ -85,15 +150,23 @@ class ExperienceClient:
         self,
         customer: Optional[str] = None,
         task_type: Optional[str] = None,
+        raise_for_status: bool = False,
+        scope: Optional[str] = None,
     ) -> List[BusinessRuleExperience]:
         """Fetch active/published rules applicable to customer and task_type."""
+        params: Dict[str, Any] = {"customer": customer, "task_type": task_type}
+        if scope:
+            params["scope"] = scope
         res = self._request(
             "GET",
             "/api/v1/experiences/rules",
-            params={"customer": customer, "task_type": task_type},
+            params=params,
         )
         if not res.get("ok"):
-            LOGGER.warning("query_rules failed: %s (%s)", res.get("error"), res.get("message"))
+            err_msg = f"query_rules failed (HTTP {res.get('status_code')}): {res.get('error')} - {res.get('message')}"
+            LOGGER.warning(err_msg)
+            if raise_for_status:
+                raise ExperienceHubError(err_msg, status_code=res.get("status_code", 0), error=res.get("error", ""))
             return []
         rules = []
         for r_dict in res.get("rules") or []:
@@ -101,6 +174,8 @@ class ExperienceClient:
                 rules.append(BusinessRuleExperience.from_dict(r_dict))
             except Exception as e:
                 LOGGER.debug("Failed parsing rule dict: %s", e)
+                if raise_for_status:
+                    raise ExperienceHubError(f"Invalid rule payload: {e}")
         return rules
 
     def list_candidates(
@@ -108,6 +183,7 @@ class ExperienceClient:
         status: Optional[str] = None,
         customer: Optional[str] = None,
         task_type: Optional[str] = None,
+        raise_for_status: bool = False,
     ) -> List[BusinessRuleExperience]:
         res = self._request(
             "GET",
@@ -115,6 +191,10 @@ class ExperienceClient:
             params={"status": status, "customer": customer, "task_type": task_type},
         )
         if not res.get("ok"):
+            err_msg = f"list_candidates failed (HTTP {res.get('status_code')}): {res.get('error')} - {res.get('message')}"
+            LOGGER.warning(err_msg)
+            if raise_for_status:
+                raise ExperienceHubError(err_msg, status_code=res.get("status_code", 0), error=res.get("error", ""))
             return []
         candidates = []
         for c_dict in res.get("candidates") or []:
@@ -122,11 +202,17 @@ class ExperienceClient:
                 candidates.append(BusinessRuleExperience.from_dict(c_dict))
             except Exception as e:
                 LOGGER.debug("Failed parsing candidate dict: %s", e)
+                if raise_for_status:
+                    raise ExperienceHubError(f"Invalid candidate payload: {e}")
         return candidates
 
-    def get_experience(self, experience_id: str) -> Optional[BusinessRuleExperience]:
+    def get_experience(self, experience_id: str, raise_for_status: bool = False) -> Optional[BusinessRuleExperience]:
         res = self._request("GET", f"/api/v1/experiences/{experience_id}")
-        if not res.get("ok") or not res.get("experience"):
+        if not res.get("ok"):
+            if raise_for_status:
+                raise ExperienceHubError(f"get_experience failed (HTTP {res.get('status_code')}): {res.get('error')}", status_code=res.get("status_code", 0), error=res.get("error", ""))
+            return None
+        if not res.get("experience"):
             return None
         return BusinessRuleExperience.from_dict(res["experience"])
 
@@ -180,8 +266,20 @@ def fetch_experience_rules_block(
     task: Dict[str, Any],
     client: Optional[ExperienceClient] = None,
     store: Optional[Any] = None,
+    references: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
-    """Fetch active published enterprise business rules and return prompt block."""
+    """Fetch active published enterprise business rules and return prompt block.
+
+    Contract: mandatory_experience_rules=True means fail-closed on transport
+    or auth failure (Hub unreachable / 401 / 403 raises). An empty rule set
+    after a successful Hub query is NOT an error and returns "".
+
+    When `store` is absent (the pre-allocation gate cannot write to an
+    unregistered task), callers pass `references` to receive the same
+    attribution records the store path writes, so applied rule IDs and
+    versions are never lost by prefetching.
+    """
+    is_mandatory = bool(task.get("mandatory_experience_rules"))
     try:
         payload = task.get("payload_json")
         if isinstance(payload, str):
@@ -199,7 +297,7 @@ def fetch_experience_rules_block(
             except Exception:
                 context_meta = {}
 
-        customer = (
+        raw_cust = (
             task.get("customer")
             or payload.get("customer")
             or payload.get("customer_id")
@@ -207,8 +305,11 @@ def fetch_experience_rules_block(
             or context_meta.get("customer_id")
             or None
         )
+        customer = str(raw_cust).strip() if raw_cust and str(raw_cust).strip() not in {"unknown", "default_customer"} else None
+
         task_type = (
-            task.get("task_type")
+            task.get("business_task_type")
+            or task.get("task_type")
             or payload.get("task_type")
             or task.get("stage")
             or task.get("node")
@@ -216,11 +317,13 @@ def fetch_experience_rules_block(
         )
 
         hub_client = client or ExperienceClient()
-        rules = hub_client.query_rules(customer=customer, task_type=task_type)
+        rules = hub_client.query_rules(customer=customer, task_type=task_type, raise_for_status=is_mandatory)
         if rules:
+            applied_refs = [{"experience_id": r.experience_id, "version": r.version, "title": r.title} for r in rules]
+            if references is not None:
+                references.extend(applied_refs)
             if store and hasattr(store, "update_task_metadata"):
                 try:
-                    applied_refs = [{"experience_id": r.experience_id, "version": r.version, "title": r.title} for r in rules]
                     meta = dict(task.get("metadata") or {})
                     meta["applied_experience_rules"] = applied_refs
                     store.update_task_metadata(task["task_id"], meta)
@@ -229,6 +332,7 @@ def fetch_experience_rules_block(
             block = format_rules_for_prompt(rules)
             return "\n\n" + block + "\n" if block else ""
     except Exception as exc:
-        if task.get("mandatory_experience_rules"):
-            raise RuntimeError(f"Experience Hub is unreachable but mandatory rules required: {exc}")
+        if is_mandatory:
+            raise RuntimeError(f"Experience Hub is unreachable but mandatory rules required: {exc}") from exc
+        LOGGER.warning("Non-mandatory experience rules query degraded: %s", exc)
     return ""

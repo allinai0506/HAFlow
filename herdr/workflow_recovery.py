@@ -12,7 +12,7 @@ def successor_launch_command(cli, workflow, predecessor, successor_id, source, p
     sha = predecessor.get('commit')
     if not re.fullmatch(r'[0-9a-f]{40}', sha or '') or not workflow.get('execution_id'):
         raise ValueError('committed successor requires exact SHA and workflow execution identity')
-    return [cli, 'launch', '--task-id', successor_id, '--workflow-id', workflow['workflow_id'],
+    argv = [cli, 'launch', '--task-id', successor_id, '--workflow-id', workflow['workflow_id'],
             '--node', predecessor.get('node') or predecessor['stage'], '--source', source,
             '--agent', 'auto', '--integration-mode', 'git', '--task-type', 'fix',
             '--candidate-sha', sha, '--supersedes', predecessor['task_id'],
@@ -21,6 +21,15 @@ def successor_launch_command(cli, workflow, predecessor, successor_id, source, p
             '--dispatch-round', str(int(predecessor.get('dispatch_round') or 1) + 1),
             '--execution-id', workflow['execution_id'], '--goal', predecessor.get('goal') or '修复验收阻断',
             '--prompt', prompt]
+    # Inherit enterprise experience policy so the repair successor cannot
+    # silently drop mandatory protection (absent = no flags).
+    if str(predecessor.get('customer') or '').strip():
+        argv += ['--customer', str(predecessor.get('customer')).strip()]
+    if str(predecessor.get('business_task_type') or '').strip():
+        argv += ['--business-task-type', str(predecessor.get('business_task_type')).strip()]
+    if predecessor.get('mandatory_experience_rules'):
+        argv += ['--mandatory-experience-rules']
+    return argv
 
 
 

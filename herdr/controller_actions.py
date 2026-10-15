@@ -99,6 +99,37 @@ def pick_alternative_agent(current_agent: str) -> str:
     return "codex"
 
 
+def inherit_experience_policy(task: Dict[str, Any] | None) -> Dict[str, Any]:
+    """Inherit enterprise experience policy from the superseded task record.
+
+    Replacement launches (fix-loop / retest / relaunch) must not silently drop
+    customer scope, business type, or mandatory protection.
+    """
+    task = task or {}
+    policy: Dict[str, Any] = {}
+    customer = str(task.get("customer") or "").strip()
+    if customer:
+        policy["customer"] = customer
+    business_type = str(task.get("business_task_type") or "").strip()
+    if business_type:
+        policy["business_task_type"] = business_type
+    if task.get("mandatory_experience_rules"):
+        policy["mandatory_experience_rules"] = True
+    return policy
+
+
+def _experience_launch_flags(policy: Dict[str, Any]) -> Dict[str, Any]:
+    """CLI flag dict (dash-keys) for bin/herdr-task launch experience options."""
+    flags: Dict[str, Any] = {}
+    if policy.get("customer"):
+        flags["customer"] = policy["customer"]
+    if policy.get("business_task_type"):
+        flags["business-task-type"] = policy["business_task_type"]
+    if policy.get("mandatory_experience_rules"):
+        flags["mandatory-experience-rules"] = True
+    return flags
+
+
 def generate_controller_actions(
     task: Dict[str, Any],
     workflow: Dict[str, Any],
@@ -144,6 +175,7 @@ def generate_controller_actions(
         # Action A: Dispatch Fix-Loop in implementation
         fix_task_id = f"{wid}-impl-fix"
         fix_prompt = f"根据测试发现的问题执行修复与自测: {verdict_note[:180]}" if verdict_note else "修复测试发现的缺陷"
+        fix_policy = inherit_experience_policy(task)
         fix_flags = {
             "task-id": fix_task_id,
             "workflow-id": wid,
@@ -152,6 +184,7 @@ def generate_controller_actions(
             "agent": alt_agent,
             "goal": "执行测试缺陷修复",
             "prompt": fix_prompt,
+            **_experience_launch_flags(fix_policy),
         }
         actions.append(
             ControllerAction(
@@ -170,6 +203,7 @@ def generate_controller_actions(
                     "goal": "执行测试缺陷修复",
                     "prompt": fix_prompt,
                     "source": proj_root,
+                    **fix_policy,
                 },
                 recommended=not reusable,
                 blocker_task_id=tid,
@@ -183,6 +217,7 @@ def generate_controller_actions(
 
         # Action B: Relaunch test with alternative agent
         retest_task_id = next_replacement_id(tid, f"{wid}-test-r2")
+        retest_policy = inherit_experience_policy(task)
         retest_flags = {
             "task-id": retest_task_id,
             "workflow-id": wid,
@@ -193,6 +228,7 @@ def generate_controller_actions(
             "supersede-reason": "operator requested a replacement agent",
             "goal": f"使用 {alt_agent} 重新执行测试验证",
             "prompt": "重新运行测试套件并出具完整验证报告",
+            **_experience_launch_flags(retest_policy),
         }
         actions.append(
             ControllerAction(
@@ -213,6 +249,7 @@ def generate_controller_actions(
                     "goal": f"使用 {alt_agent} 重新执行测试验证",
                     "prompt": "重新运行测试套件并出具完整验证报告",
                     "source": proj_root,
+                    **retest_policy,
                 },
                 blocker_task_id=tid,
                 effect=f"将作废旧测试任务 {tid or '—'}，用 {alt_agent} 新建 {retest_task_id} 重跑测试门禁；旧任务标记取代，可回溯。",
@@ -226,6 +263,7 @@ def generate_controller_actions(
     # 2. Scenario: Plan / Worker Rework / Empty Delivery / General Task Spin
     elif status in {"rework", "failed", "blocked"} or "DONE均零交付" in verdict_note or "重派" in verdict_note:
         relaunch_task_id = next_replacement_id(tid, f"{wid}-{stage}-r2")
+        relaunch_policy = inherit_experience_policy(task)
         relaunch_flags = {
             "task-id": relaunch_task_id,
             "workflow-id": wid,
@@ -236,6 +274,7 @@ def generate_controller_actions(
             "supersede-reason": "operator requested a replacement agent",
             "goal": task.get("goal") or f"重新推进 {stage} 阶段目标",
             "prompt": f"重新执行并确保产物落盘: {task.get('goal', stage)}",
+            **_experience_launch_flags(relaunch_policy),
         }
         actions.append(
             ControllerAction(
@@ -256,6 +295,7 @@ def generate_controller_actions(
                     "goal": task.get("goal") or f"重新推进 {stage} 阶段目标",
                     "prompt": f"重新执行并确保产物落盘: {task.get('goal', stage)}",
                     "source": proj_root,
+                    **relaunch_policy,
                 },
                 recommended=not reusable,
                 blocker_task_id=tid,

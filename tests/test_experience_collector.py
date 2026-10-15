@@ -4,7 +4,7 @@ import os
 import tempfile
 import time
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -187,11 +187,12 @@ def test_collector_idempotency_and_offline_buffering(temp_dir):
         exp_id = res1["experience_id"]
         assert exp_id is not None
 
-        # 2. Hub comes back online -> retry
+        # 2. Hub comes back online -> explicit forced retry (first settlement
+        # failure already scheduled backoff; force is the immediate path)
         mock_hub.submit_candidate.side_effect = None
         mock_hub.submit_candidate.return_value = {"ok": True, "experience_id": exp_id}
 
-        retry_res = collector.retry_pending_uploads()
+        retry_res = collector.retry_pending_uploads(force=True)
         assert retry_res["retried"] == 1
         assert retry_res["succeeded"] == 1
 
@@ -201,3 +202,139 @@ def test_collector_idempotency_and_offline_buffering(temp_dir):
         assert res2["status"] == "uploaded"
         assert res2["reason"] == "already_processed"
         assert res2["experience_id"] == exp_id
+
+
+def test_settlement_persists_pending_collection_before_thread_exit(temp_dir):
+    collector_db = temp_dir / "collector_durable.db"
+    mock_hub = MagicMock()
+    mock_hub.submit_candidate.return_value = {"ok": True, "experience_id": "exp_recovered_1"}
+
+    fake_task = {
+        "task_id": "task_durable_1",
+        "run_id": "run_durable_1",
+        "status": "completed",
+        "customer": "cust_acme",
+        "task_type": "delivery",
+    }
+    fake_steers = [
+        {"operator": "human", "instruction": "大宗发货规则：单次超过500件必须走顺丰冷链陆运"}
+    ]
+    fake_outcome = {
+        "outcome_id": "out_durable_1",
+        "qualified_success": True,
+        "verification_passed": True,
+    }
+
+    # 1. Enqueue task settlement synchronously (simulates process crash immediately after enqueue)
+    collector1 = ExperienceCollector(db_path=collector_db, hub_client=None)
+    with patch("herdr.state_db.get_task", return_value=fake_task):
+        enq_res = collector1.enqueue_task_settlement("task_durable_1", fake_outcome)
+        assert enq_res["ok"] is True
+        assert enq_res["status"] == "pending_collection"
+
+    # Verify directly in SQLite that record exists with status 'pending_collection'
+    import sqlite3
+    conn = sqlite3.connect(str(collector_db))
+    row = conn.execute("SELECT status, outcome_json FROM local_collector_records WHERE task_id = 'task_durable_1'").fetchone()
+    conn.close()
+    assert row is not None
+    assert row[0] == "pending_collection"
+    assert "out_durable_1" in row[1]
+
+    # 2. Simulate new process restart and Sentinel / recovery hook execution
+    collector2 = ExperienceCollector(db_path=collector_db, hub_client=mock_hub)
+    with patch("herdr.state_db.get_task", return_value=fake_task), \
+         patch("herdr.state_db.list_steers", return_value=fake_steers):
+        rec_res = collector2.recover_and_sync()
+        assert rec_res["ok"] is True
+        assert rec_res["pending_collected"] == 1
+
+    # Verify record transitioned to uploaded
+    conn = sqlite3.connect(str(collector_db))
+    row = conn.execute("SELECT status FROM local_collector_records WHERE task_id = 'task_durable_1'").fetchone()
+    conn.close()
+    assert row[0] == "uploaded"
+
+
+def test_offline_upload_auto_retries_with_backoff(temp_dir):
+    collector_db = temp_dir / "collector_backoff.db"
+    mock_hub = MagicMock()
+    mock_hub.submit_candidate.side_effect = ConnectionError("Hub connection refused")
+
+    collector = ExperienceCollector(db_path=collector_db, hub_client=mock_hub)
+    fake_task = {
+        "task_id": "task_bo_1",
+        "run_id": "run_bo_1",
+        "status": "completed",
+        "customer": "cust_acme",
+    }
+    fake_steers = [{"operator": "human", "instruction": "商务规则：必须提供双语合同"}]
+    fake_outcome = {"outcome_id": "out_bo_1", "qualified_success": True, "verification_passed": True}
+
+    with patch("herdr.state_db.get_task", return_value=fake_task), \
+         patch("herdr.state_db.list_steers", return_value=fake_steers):
+        # 1. Initial attempt fails -> backoff scheduled immediately (retry_count=1)
+        collector.process_task_settlement("task_bo_1", fake_outcome)
+
+        # 2. Immediate retry is skipped by the backoff window
+        res1 = collector.retry_pending_uploads()
+        assert res1["retried"] == 0
+
+        # 3. Forced retry ignores backoff window but still fails -> retry_count becomes 2
+        res3 = collector.retry_pending_uploads(force=True)
+        assert res3["retried"] == 1
+        assert res3["failed"] == 1
+
+
+def test_unanswered_question_and_stale_decision_rejected():
+    task = {
+        "task_id": "task_dec_1",
+        "run_id": "run_dec_1",
+        "status": "completed",
+    }
+    outcome = {
+        "outcome_id": "out_dec_1",
+        "qualified_success": True,
+        "verification_passed": True,
+    }
+
+    # Case 1: Unanswered question (decision_status != resolved) -> rejected
+    unresolved_decisions = [
+        {
+            "kind": "decision",
+            "decision_id": "DU-101",
+            "decision_status": "open",  # Not resolved!
+            "question": "是否对客户开放全部 API 权限？",
+            "task_id": "task_dec_1",
+        }
+    ]
+    exp, reason = extract_candidate_from_facts(
+        task=task,
+        outcome=outcome,
+        steers=[],
+        decisions=unresolved_decisions,
+    )
+    assert exp is None
+    assert reason == "no_human_intervention"
+
+    # Case 2: Resolved decision with valid verified answer -> extracted
+    resolved_decisions = [
+        {
+            "kind": "decision",
+            "decision_id": "DU-102",
+            "decision_status": "resolved",
+            "question": "结算币种确认",
+            "selected_option": "境外结算统一使用离岸人民币 CNH 结算",
+            "task_id": "task_dec_1",
+        }
+    ]
+    exp2, reason2 = extract_candidate_from_facts(
+        task=task,
+        outcome=outcome,
+        steers=[],
+        decisions=resolved_decisions,
+    )
+    assert exp2 is not None
+    assert reason2 == "ready"
+    assert "离岸人民币 CNH 结算" in exp2.content
+    assert "decision:DU-102" in exp2.source.evidence_refs

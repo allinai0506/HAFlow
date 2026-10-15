@@ -13,10 +13,14 @@ Features:
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import logging
 import os
+import re
 import sqlite3
+import ssl
 import sys
 import threading
 import time
@@ -68,7 +72,7 @@ def init_hub_db(db_path: Path) -> sqlite3.Connection:
         """)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS auth_tokens (
-                token TEXT PRIMARY KEY,
+                token_hash TEXT PRIMARY KEY,
                 user_id TEXT NOT NULL,
                 role TEXT NOT NULL,
                 allowed_customers_json TEXT NOT NULL,
@@ -85,7 +89,67 @@ def init_hub_db(db_path: Path) -> sqlite3.Connection:
                 timestamp REAL NOT NULL
             )
         """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_audit_logs_timestamp
+            ON audit_logs (timestamp DESC)
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_audit_logs_experience
+            ON audit_logs (experience_id)
+        """)
+
+        # Migration from legacy auth_tokens schema (if table had 'token' instead of 'token_hash')
+        cols = {row["name"] for row in conn.execute("PRAGMA table_info(auth_tokens)").fetchall()}
+        if "token" in cols and "token_hash" not in cols:
+            rows = conn.execute("SELECT * FROM auth_tokens").fetchall()
+            conn.execute("DROP TABLE auth_tokens")
+            conn.execute("""
+                CREATE TABLE auth_tokens (
+                    token_hash TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    allowed_customers_json TEXT NOT NULL,
+                    created_at REAL NOT NULL
+                )
+            """)
+            insecure_hash = hashlib.sha256("admin_secret_token_123".encode("utf-8")).hexdigest()
+            for r in rows:
+                raw_val = r["token"]
+                if raw_val == "admin_secret_token_123":
+                    continue
+                # Legacy column always stored the RAW token (PR #209 compared it
+                # verbatim), so it must always be hashed here. A 64-hex raw
+                # token (e.g. `openssl rand -hex 32`) must NOT be mistaken for
+                # an already-hashed value, or the admin is locked out.
+                thash = hashlib.sha256(raw_val.encode("utf-8")).hexdigest()
+                if thash == insecure_hash:
+                    continue
+                conn.execute("""
+                    INSERT OR REPLACE INTO auth_tokens (token_hash, user_id, role, allowed_customers_json, created_at)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (thash, r["user_id"], r["role"], r["allowed_customers_json"], r["created_at"]))
+        else:
+            # Purge insecure default token if present
+            insecure_hash = hashlib.sha256("admin_secret_token_123".encode("utf-8")).hexdigest()
+            conn.execute("DELETE FROM auth_tokens WHERE token_hash = ?", (insecure_hash,))
     return conn
+
+
+def _customer_in_scope(allowed: List[str], customer: Optional[str]) -> bool:
+    """Decide customer authorization for one record.
+
+    A record with no customer scope is implicitly global (P1-06 returns only
+    customer='*' rules when the caller has no customer context), so a missing
+    or empty scope must require wildcard authorization. A truthiness check on
+    the customer silently skipped the check for exactly those records, which
+    let a restricted reviewer reject or revoke them.
+    """
+    if list(allowed) == ["*"]:
+        return True
+    cust = str(customer or "").strip()
+    if not cust:
+        return False
+    return cust in allowed
 
 
 class HubStorage:
@@ -106,37 +170,61 @@ class HubStorage:
         user_id: str,
         role: str,
         allowed_customers: Optional[List[str]] = None,
-    ) -> None:
+    ) -> str:
+        raw = (token or "").strip()
+        if not raw:
+            raise ValueError("Token string cannot be empty")
+        if raw == "admin_secret_token_123":
+            raise ValueError("Insecure default token 'admin_secret_token_123' is prohibited")
+
         if allowed_customers is None:
             allowed_customers = ["*"]
+        if not allowed_customers:
+            raise ValueError("allowed_customers must not be empty; use ['*'] for wildcard scope")
+
+        token_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
         conn = self._get_conn()
         try:
             with conn:
                 conn.execute("""
-                    INSERT INTO auth_tokens (token, user_id, role, allowed_customers_json, created_at)
+                    INSERT INTO auth_tokens (token_hash, user_id, role, allowed_customers_json, created_at)
                     VALUES (?, ?, ?, ?, ?)
-                    ON CONFLICT(token) DO UPDATE SET
+                    ON CONFLICT(token_hash) DO UPDATE SET
                         user_id = excluded.user_id,
                         role = excluded.role,
                         allowed_customers_json = excluded.allowed_customers_json
-                """, (token, user_id, role, json.dumps(allowed_customers), time.time()))
+                """, (token_hash, user_id, role, json.dumps(allowed_customers), time.time()))
+            return token_hash
         finally:
             conn.close()
 
     def authenticate_token(self, token: str) -> Optional[Dict[str, Any]]:
-        if not token:
+        raw = (token or "").strip()
+        if not raw:
             return None
+        token_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
         conn = self._get_conn()
         try:
-            row = conn.execute("SELECT * FROM auth_tokens WHERE token = ?", (token,)).fetchone()
+            row = conn.execute("SELECT * FROM auth_tokens WHERE token_hash = ?", (token_hash,)).fetchone()
             if not row:
                 return None
+            if not hmac.compare_digest(row["token_hash"], token_hash):
+                return None
             return {
-                "token": row["token"],
+                "token_hash": row["token_hash"],
                 "user_id": row["user_id"],
                 "role": row["role"],
                 "allowed_customers": json.loads(row["allowed_customers_json"] or "[]"),
             }
+        finally:
+            conn.close()
+
+    def has_admin(self) -> bool:
+        """Check if any admin token is registered in the database."""
+        conn = self._get_conn()
+        try:
+            row = conn.execute("SELECT count(*) as c FROM auth_tokens WHERE role = 'admin'").fetchone()
+            return bool(row and row["c"] > 0)
         finally:
             conn.close()
 
@@ -158,14 +246,39 @@ class HubStorage:
             conn.close()
 
     def save_candidate(self, exp: BusinessRuleExperience, actor: str) -> Tuple[bool, BusinessRuleExperience, str]:
-        """Save a new candidate experience. Idempotent on experience_id."""
+        """Save a new candidate experience.
+
+        P0-02:
+        - Server strictly forces status = pending_review.
+        - Server forces contributor = authenticated actor.
+        - Server clears review, version = 1, sets authoritative timestamps.
+        - Idempotent on experience_id: returns already_exists if content matches, or conflict if content differs.
+        """
         conn = self._get_conn()
         try:
             existing = self.get_experience(exp.experience_id)
             if existing:
-                return False, existing, "already_exists"
+                if existing.content_hash() == exp.content_hash():
+                    return False, existing, "already_exists"
+                else:
+                    return False, existing, "conflict"
 
-            exp_dict = exp.to_dict()
+            now = time.time()
+            exp.status = ExperienceStatus.PENDING_REVIEW.value
+            exp.contributor = actor
+            exp.review = None
+            exp.version = 1
+            exp.created_at = now
+            exp.updated_at = now
+            exp.audit_trail = [
+                AuditEvent(
+                    action="submit_candidate",
+                    actor=actor,
+                    timestamp=now,
+                    note=f"提交候选业务规则: {exp.title}",
+                )
+            ]
+
             with conn:
                 conn.execute("""
                     INSERT INTO experiences (
@@ -186,12 +299,12 @@ class HubStorage:
                     exp.version,
                     json.dumps(exp.applies_to.to_dict(), ensure_ascii=False),
                     json.dumps(exp.source.to_dict(), ensure_ascii=False),
-                    json.dumps(exp.review.to_dict() if exp.review else None, ensure_ascii=False),
+                    None,
                     json.dumps([a.to_dict() for a in exp.audit_trail], ensure_ascii=False),
                     exp.created_at,
                     exp.updated_at,
                 ))
-            self.record_audit("submit_candidate", actor, exp.experience_id, {"title": exp.title})
+            self.record_audit("submit_candidate", actor, exp.experience_id, {"title": exp.title, "customer": exp.applies_to.customer})
             return True, exp, "created"
         finally:
             conn.close()
@@ -226,6 +339,7 @@ class HubStorage:
         status: Optional[str] = None,
         customer: Optional[str] = None,
         task_type: Optional[str] = None,
+        contributor: Optional[str] = None,
     ) -> List[BusinessRuleExperience]:
         conn = self._get_conn()
         try:
@@ -235,11 +349,14 @@ class HubStorage:
                 query += " AND status = ?"
                 params.append(status)
             if customer:
-                query += " AND (customer = ? OR customer IS NULL)"
+                query += " AND (customer = ? OR customer = '*' OR customer = 'unknown' OR customer IS NULL)"
                 params.append(customer)
             if task_type:
                 query += " AND (task_type = ? OR task_type IS NULL)"
                 params.append(task_type)
+            if contributor:
+                query += " AND contributor = ?"
+                params.append(contributor)
             query += " ORDER BY created_at DESC"
 
             cur = conn.execute(query, tuple(params))
@@ -279,6 +396,12 @@ class HubStorage:
         if exp.status not in {ExperienceStatus.PENDING_REVIEW.value, ExperienceStatus.REJECTED.value}:
             return False, exp, f"cannot_review_from_{exp.status}"
 
+        # Publishing requires explicit customer scope; unknown/empty must be fixed first.
+        if action == "approve":
+            cust = (exp.applies_to.customer or "").strip()
+            if cust in {"", "unknown", "default_customer"}:
+                return False, exp, "customer_unknown_requires_explicit_scope"
+
         now = time.time()
         new_status = (
             ExperienceStatus.PUBLISHED.value
@@ -317,7 +440,7 @@ class HubStorage:
                     exp.updated_at,
                     exp.experience_id,
                 ))
-            self.record_audit(f"review_{action}", reviewer, experience_id, {"comment": comment})
+            self.record_audit(f"review_{action}", reviewer, experience_id, {"comment": comment, "customer": exp.applies_to.customer})
             return True, exp, "ok"
         finally:
             conn.close()
@@ -359,7 +482,7 @@ class HubStorage:
                     exp.updated_at,
                     exp.experience_id,
                 ))
-            self.record_audit("revoke_rule", actor, experience_id, {"reason": reason})
+            self.record_audit("revoke_rule", actor, experience_id, {"reason": reason, "customer": exp.applies_to.customer})
             return True, exp, "ok"
         finally:
             conn.close()
@@ -368,18 +491,51 @@ class HubStorage:
         self,
         customer: Optional[str] = None,
         task_type: Optional[str] = None,
+        scope_all: bool = False,
+        allowed_customers: Optional[List[str]] = None,
     ) -> List[BusinessRuleExperience]:
-        """Query active rules. Strictly enforces status == 'published'."""
+        """Query active rules. Strictly enforces status == 'published' and customer boundary.
+
+        scope_all (admin listing): skip customer narrowing; callers must still
+        apply the allowed-customers post-filter.
+
+        allowed_customers narrows scope_all inside SQL so a restricted token
+        cannot make the server materialize the whole cross-customer table.
+        """
         conn = self._get_conn()
         try:
             query = "SELECT * FROM experiences WHERE status = 'published'"
             params: List[Any] = []
-            if customer:
-                query += " AND (customer = ? OR customer IS NULL OR customer = '' OR customer = 'default_customer')"
-                params.append(customer)
-            if task_type:
-                query += " AND (task_type = ? OR task_type IS NULL OR task_type = '' OR task_type = 'general')"
-                params.append(task_type)
+            cust_str = str(customer).strip() if customer else ""
+            if allowed_customers is not None and list(allowed_customers) != ["*"]:
+                scope = [str(c).strip() for c in allowed_customers if str(c).strip()]
+                if not scope:
+                    return []
+                placeholders = ", ".join("?" for _ in scope)
+                query += f" AND (customer = '*' OR customer IN ({placeholders}))"
+                params.extend(scope)
+            if scope_all and not cust_str:
+                # Admin listing without an explicit customer: no SQL narrowing;
+                # the caller still applies the allowed-customers post-filter.
+                pass
+            elif cust_str and cust_str not in {"unknown", "default_customer"}:
+                query += " AND (customer = ? OR customer = '*')"
+                params.append(cust_str)
+            else:
+                # P1-06: No customer context provided -> only explicit global rules ('*')
+                query += " AND customer = '*'"
+
+            type_str = str(task_type).strip() if task_type else ""
+            # task_type '' is the legacy representation of "applies to any type"
+            # and must keep matching typed queries after the predicate rewrite.
+            general_match = " OR task_type = '*' OR task_type = 'general' OR task_type = '' OR task_type IS NULL"
+            if type_str and type_str not in {"general", "unknown"}:
+                query += " AND (task_type = ?" + general_match + ")"
+                params.append(type_str)
+            elif type_str in {"general", "unknown"}:
+                # Generic task context must not absorb business-specific rules.
+                query += " AND (task_type = 'general' OR task_type = '*' OR task_type = '' OR task_type IS NULL)"
+            # Empty task_type (review/listing without type filter) keeps all types.
             query += " ORDER BY version DESC, updated_at DESC"
 
             cur = conn.execute(query, tuple(params))
@@ -405,21 +561,54 @@ class HubStorage:
         finally:
             conn.close()
 
-    def list_audit_logs(self, limit: int = 100) -> List[Dict[str, Any]]:
+    def list_audit_logs(
+        self,
+        limit: int = 100,
+        allowed_customers: Optional[List[str]] = None,
+    ) -> List[Dict[str, Any]]:
         conn = self._get_conn()
         try:
-            cur = conn.execute("SELECT * FROM audit_logs ORDER BY timestamp DESC LIMIT ?", (limit,))
-            return [
-                {
+            # Empty scope is deny-all (never wildcard); also avoids `IN ()`.
+            if allowed_customers is not None and len(allowed_customers) == 0:
+                return []
+            # SQL prefilter on the authoritative experience customer before the
+            # Python refinement, so unrelated customers never reach the scan.
+            # Orphan log rows (no linked experience) are kept for the details
+            # check below.
+            if allowed_customers and allowed_customers != ["*"]:
+                placeholders = ", ".join(["?"] * len(allowed_customers))
+                cur = conn.execute(f"""
+                    SELECT a.*, e.customer AS exp_customer
+                    FROM audit_logs a LEFT JOIN experiences e
+                      ON a.experience_id = e.experience_id
+                    WHERE e.customer IN ({placeholders}) OR e.customer IS NULL
+                    ORDER BY a.timestamp DESC
+                """, tuple(allowed_customers))
+            else:
+                cur = conn.execute("""
+                    SELECT a.*, e.customer AS exp_customer
+                    FROM audit_logs a LEFT JOIN experiences e
+                      ON a.experience_id = e.experience_id
+                    ORDER BY a.timestamp DESC
+                """)
+            logs = []
+            for row in cur:
+                details = json.loads(row["details_json"] or "{}")
+                if allowed_customers is not None and allowed_customers != ["*"]:
+                    cust = details.get("customer") or row["exp_customer"]
+                    if cust not in allowed_customers:
+                        continue
+                logs.append({
                     "id": row["id"],
                     "action": row["action"],
                     "actor": row["actor"],
                     "experience_id": row["experience_id"],
-                    "details": json.loads(row["details_json"] or "{}"),
+                    "details": details,
                     "timestamp": row["timestamp"],
-                }
-                for row in cur.fetchall()
-            ]
+                })
+                if len(logs) >= limit:
+                    break
+            return logs
         finally:
             conn.close()
 
@@ -454,10 +643,7 @@ class HubHTTPHandler(BaseHTTPRequestHandler):
         custom = self.headers.get("X-HAFlow-Token", "")
         if custom:
             return custom.strip()
-        # Query parameter fallback for development/testing
-        q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-        if "token" in q:
-            return q["token"][0]
+        # P1-09: Prohibit passing token via URL query parameter
         return None
 
     def _authenticate(self) -> Optional[Dict[str, Any]]:
@@ -481,24 +667,35 @@ class HubHTTPHandler(BaseHTTPRequestHandler):
             self._send_json(401, {"error": "unauthorized", "message": "Valid Bearer Token is required"})
             return
 
-        # 1. Query published rules for Agent / Task execution
+        # 1. Query published rules for Agent / Task execution.
+        # scope=all is the permission-scoped admin listing (still post-filtered
+        # to the caller's allowed customers below); plain queries keep the
+        # safe customer narrowing.
         if path == "/api/v1/experiences/rules":
             req_cust = query.get("customer", [""])[0]
             req_type = query.get("task_type", [""])[0]
+            scope_all = str(query.get("scope", [""])[0] or "").strip().lower() == "all"
 
             # Cross-customer permission check
             allowed = user["allowed_customers"]
-            if allowed != ["*"] and req_cust and req_cust not in allowed:
+            if allowed != ["*"] and req_cust and req_cust != "*" and req_cust not in allowed:
                 self._send_json(403, {
                     "error": "forbidden",
                     "message": f"User {user['user_id']} is not authorized for customer '{req_cust}'",
                 })
                 return
 
-            rules = self.storage.query_published_rules(customer=req_cust or None, task_type=req_type or None)
-            # Further filter by user's allowed customers if user has restricted access and query was general
+            rules = self.storage.query_published_rules(
+                customer=req_cust or None,
+                task_type=req_type or None,
+                scope_all=scope_all,
+                # Narrow inside SQL so a restricted token cannot materialize
+                # the full cross-customer rule table; the post-filter below
+                # stays as defense in depth.
+                allowed_customers=allowed,
+            )
             if allowed != ["*"]:
-                rules = [r for r in rules if not r.applies_to.customer or r.applies_to.customer in allowed or r.applies_to.customer == "default_customer"]
+                rules = [r for r in rules if r.applies_to.customer == "*" or r.applies_to.customer in allowed]
 
             self._send_json(200, {
                 "ok": True,
@@ -513,15 +710,33 @@ class HubHTTPHandler(BaseHTTPRequestHandler):
             cust_filter = query.get("customer", [None])[0]
             type_filter = query.get("task_type", [None])[0]
 
-            # Regular contributors can only see candidates for their allowed customers
             allowed = user["allowed_customers"]
-            if allowed != ["*"] and cust_filter and cust_filter not in allowed:
+            if allowed != ["*"] and cust_filter and cust_filter != "*" and cust_filter not in allowed:
                 self._send_json(403, {"error": "forbidden", "message": "Customer scope exceeded"})
                 return
 
-            candidates = self.storage.list_candidates(status=status_filter, customer=cust_filter, task_type=type_filter)
-            if allowed != ["*"]:
-                candidates = [c for c in candidates if not c.applies_to.customer or c.applies_to.customer in allowed]
+            # P1-04: Contributors see only their own candidates within their
+            # customer scope; same user with two tokens must not cross-read.
+            if user["role"] == "contributor":
+                candidates = self.storage.list_candidates(
+                    status=status_filter,
+                    customer=cust_filter,
+                    task_type=type_filter,
+                    contributor=user["user_id"],
+                )
+                if allowed != ["*"]:
+                    candidates = [c for c in candidates if c.applies_to.customer in allowed]
+            else:
+                candidates = self.storage.list_candidates(
+                    status=status_filter,
+                    customer=cust_filter,
+                    task_type=type_filter,
+                )
+                if allowed != ["*"]:
+                    # Pending review scope is strictly limited to allowed customers.
+                    # Published global rules remain readable via /rules; they are
+                    # not exposed here as reviewable candidates.
+                    candidates = [c for c in candidates if c.applies_to.customer in allowed]
 
             self._send_json(200, {
                 "ok": True,
@@ -530,30 +745,46 @@ class HubHTTPHandler(BaseHTTPRequestHandler):
             })
             return
 
-        # 3. Audit logs
+        # 3. Audit logs (reviewer and admin only)
         if path == "/api/v1/experiences/audit":
             if user["role"] not in {"reviewer", "admin"}:
                 self._send_json(403, {"error": "forbidden", "message": "Reviewer or Admin role required"})
                 return
-            logs = self.storage.list_audit_logs()
+            logs = self.storage.list_audit_logs(allowed_customers=user["allowed_customers"])
             self._send_json(200, {"ok": True, "audit_logs": logs})
             return
 
         # 4. Get single experience detail
-        if path.startswith("/api/v1/experiences/"):
-            exp_id = path.split("/api/v1/experiences/")[1]
-            if "/" not in exp_id and exp_id:
-                exp = self.storage.get_experience(exp_id)
-                if not exp:
-                    self._send_json(404, {"error": "not_found", "message": "Experience not found"})
-                    return
-                # Customer check
-                allowed = user["allowed_customers"]
-                if allowed != ["*"] and exp.applies_to.customer and exp.applies_to.customer not in allowed:
+        target_exp_id = None
+        if path.startswith("/api/v1/experiences/") and path not in {
+            "/api/v1/experiences/rules",
+            "/api/v1/experiences/candidates",
+            "/api/v1/experiences/audit",
+            "/api/v1/experiences/candidate",
+        }:
+            target_exp_id = path.split("/api/v1/experiences/")[1]
+        elif path in {"/api/v1/experiences/candidate", "/api/v1/experience"}:
+            target_exp_id = query.get("id", [""])[0] or query.get("experience_id", [""])[0]
+
+        if target_exp_id and "/" not in target_exp_id:
+            exp = self.storage.get_experience(target_exp_id)
+            if not exp:
+                self._send_json(404, {"error": "not_found", "message": "Experience not found"})
+                return
+            # Customer check: restricted users see only their own scope.
+            # Published global rules ('*') stay readable; pending globals do not.
+            allowed = user["allowed_customers"]
+            if not _customer_in_scope(allowed, exp.applies_to.customer):
+                if not (exp.applies_to.customer == "*" and exp.status == ExperienceStatus.PUBLISHED.value):
                     self._send_json(403, {"error": "forbidden", "message": "Customer scope exceeded"})
                     return
-                self._send_json(200, {"ok": True, "experience": exp.to_dict()})
-                return
+            # P1-04: Contributor can only view their own unapproved candidate
+            if user["role"] == "contributor":
+                if exp.status != ExperienceStatus.PUBLISHED.value and exp.contributor != user["user_id"]:
+                    self._send_json(403, {"error": "forbidden", "message": "Contributors cannot access other contributors' unapproved candidates"})
+                    return
+            self._send_json(200, {"ok": True, "experience": exp.to_dict()})
+            return
 
         self._send_json(404, {"error": "not_found", "message": f"Endpoint {path} not found"})
 
@@ -575,21 +806,40 @@ class HubHTTPHandler(BaseHTTPRequestHandler):
                 self._send_json(400, {"error": "invalid_payload", "message": str(e)})
                 return
 
-            # Customer authorization check
+            # Experience IDs are rendered into story surfaces: strict charset.
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", exp.experience_id or ""):
+                self._send_json(400, {"error": "invalid_experience_id",
+                                      "message": "experience_id must match [A-Za-z0-9_-]{1,128}"})
+                return
+
+            # Customer authorization check: only wildcard scope may write global rules.
             allowed = user["allowed_customers"]
-            if allowed != ["*"] and exp.applies_to.customer and exp.applies_to.customer not in allowed:
+            if not _customer_in_scope(allowed, exp.applies_to.customer):
                 self._send_json(403, {"error": "forbidden", "message": "Cannot submit for unauthorized customer"})
                 return
 
             ok, stored, reason = self.storage.save_candidate(exp, actor=user["user_id"])
+            if reason == "conflict":
+                self._send_json(409, {
+                    "ok": False,
+                    "error": "conflict",
+                    "message": "Candidate with this ID already exists with different content",
+                    "experience_id": exp.experience_id,
+                })
+                return
+
             status_code = 201 if ok else 200
-            self._send_json(status_code, {
+            resp = {
                 "ok": True,
                 "experience_id": stored.experience_id,
                 "status": stored.status,
                 "reason": reason,
-                "experience": stored.to_dict(),
-            })
+            }
+            # Idempotent resubmits must not leak another employee's pending
+            # detail: only the original contributor sees the full object.
+            if stored.contributor == user["user_id"]:
+                resp["experience"] = stored.to_dict()
+            self._send_json(status_code, resp)
             return
 
         # 2. Review candidate (approve or reject) — requires reviewer or admin role
@@ -599,6 +849,17 @@ class HubHTTPHandler(BaseHTTPRequestHandler):
 
             if user["role"] not in {"reviewer", "admin"}:
                 self._send_json(403, {"error": "forbidden", "message": "Reviewer or Admin role required for review"})
+                return
+
+            exp = self.storage.get_experience(exp_id)
+            if not exp:
+                self._send_json(404, {"error": "not_found", "message": "Experience not found"})
+                return
+
+            # P1-05: Enforce customer boundary on review; global rules need wildcard scope.
+            allowed = user["allowed_customers"]
+            if not _customer_in_scope(allowed, exp.applies_to.customer):
+                self._send_json(403, {"error": "forbidden", "message": f"Reviewer not authorized for customer '{exp.applies_to.customer or 'unknown'}'"})
                 return
 
             action = str(body.get("action") or "approve").lower()
@@ -631,6 +892,17 @@ class HubHTTPHandler(BaseHTTPRequestHandler):
                 self._send_json(403, {"error": "forbidden", "message": "Reviewer or Admin role required for revocation"})
                 return
 
+            exp = self.storage.get_experience(exp_id)
+            if not exp:
+                self._send_json(404, {"error": "not_found", "message": "Experience not found"})
+                return
+
+            # P1-05: Enforce customer boundary on revoke; global rules need wildcard scope.
+            allowed = user["allowed_customers"]
+            if not _customer_in_scope(allowed, exp.applies_to.customer):
+                self._send_json(403, {"error": "forbidden", "message": f"Reviewer not authorized for customer '{exp.applies_to.customer or 'unknown'}'"})
+                return
+
             reason = str(body.get("reason") or "")
             ok, updated, err = self.storage.revoke_rule(exp_id, actor=user["user_id"], reason=reason)
             if not ok:
@@ -656,24 +928,43 @@ class ExperienceHubServer:
         host: str = "127.0.0.1",
         port: int = 8780,
         db_path: Optional[Path] = None,
+        cert_file: Optional[Path] = None,
+        key_file: Optional[Path] = None,
+        allow_insecure_http: bool = False,
     ):
         self.host = host
         self.port = port
         self.db_path = db_path or Path(os.environ.get("HERDR_HUB_DB_PATH") or DEFAULT_HUB_DB_PATH)
+        self.cert_file = Path(cert_file) if cert_file else None
+        self.key_file = Path(key_file) if key_file else None
+        self.allow_insecure_http = allow_insecure_http or (os.environ.get("HERDR_HUB_ALLOW_INSECURE_HTTP") == "1")
         self.storage = HubStorage(self.db_path)
         self._server: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
 
     def start(self, block: bool = False) -> None:
+        is_loopback = self.host in ("127.0.0.1", "localhost", "::1")
+        if not is_loopback and not (self.cert_file and self.key_file) and not self.allow_insecure_http:
+            raise RuntimeError(
+                f"Binding Experience Hub to non-loopback host '{self.host}' over plain HTTP is prohibited. "
+                "Provide TLS certs (--cert-file and --key-file) or set --allow-insecure-http if behind a trusted TLS reverse proxy."
+            )
+
         handler_cls = type(
             "ConfiguredHubHandler",
             (HubHTTPHandler,),
             {"storage": self.storage},
         )
         self._server = ThreadingHTTPServer((self.host, self.port), handler_cls)
-        # Handle port 0 dynamic assignment
         self.port = self._server.server_address[1]
-        LOGGER.info("Experience Hub listening on http://%s:%d", self.host, self.port)
+
+        if self.cert_file and self.key_file:
+            ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+            ctx.load_cert_chain(certfile=str(self.cert_file), keyfile=str(self.key_file))
+            self._server.socket = ctx.wrap_socket(self._server.socket, server_side=True)
+            LOGGER.info("Experience Hub listening on https://%s:%d (TLS enabled)", self.host, self.port)
+        else:
+            LOGGER.info("Experience Hub listening on http://%s:%d", self.host, self.port)
 
         if block:
             try:

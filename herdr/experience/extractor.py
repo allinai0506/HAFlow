@@ -16,6 +16,7 @@ import hashlib
 import json
 import re
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from herdr.supervisor.state import redact_text
@@ -72,8 +73,13 @@ def extract_candidate_from_facts(
     decisions: Optional[List[Dict[str, Any]]] = None,
     rework_prompts: Optional[List[str]] = None,
     contributor: str = "local_employee",
+    state_db_path: Optional[Path] = None,
 ) -> Tuple[Optional[BusinessRuleExperience], str]:
     """Extract candidate business_rule from task facts and human interventions.
+
+    state_db_path must identify the same database the task was read from, so a
+    non-default state database is not silently missed by the authoritative
+    outcome lookup below.
 
     Returns:
         (experience_or_None, reason_code)
@@ -95,11 +101,13 @@ def extract_candidate_from_facts(
         if not outcome.get("qualified_success") or not outcome.get("verification_passed"):
             return None, "unqualified_success"
     else:
-        # If outcome object not directly passed, check task facts
-        if task.get("status") not in {"completed", "committed", "integrated"}:
+        # P1-08: outcome=None 不得仅凭 Task 状态推断已经通过 qualified_success。
+        # 必须从 execution_outcome 权威事实层核查真实结算记录。
+        from herdr import execution_outcome
+        real_outcome = execution_outcome.get_execution_outcome(task_id, run_id, state_db_path)
+        if not real_outcome or not real_outcome.get("qualified_success") or not real_outcome.get("verification_passed"):
             return None, "unqualified_success"
-        if task.get("acceptance_verdict") is False or task.get("stage_verdict") == "blocked":
-            return None, "unqualified_success"
+        outcome = real_outcome
 
     # 2. Gather human corrections
     human_instructions: List[str] = []
@@ -109,32 +117,41 @@ def extract_candidate_from_facts(
     if steers:
         for s in steers:
             op = s.get("operator") or "human"
-            instruction = s.get("instruction") or ""
+            instruction = (s.get("instruction") or "").strip()
             steer_id = s.get("steer_id") or ""
-            if op == "human" and instruction.strip():
-                human_instructions.append(instruction.strip())
+            if op == "human" and instruction and instruction not in human_instructions:
+                human_instructions.append(instruction)
                 if steer_id:
                     evidence_refs.append(f"steer:{steer_id}")
 
     # From rework prompts
     if rework_prompts:
         for rp in rework_prompts:
-            if rp and rp.strip():
+            if rp and rp.strip() and rp.strip() not in human_instructions:
                 human_instructions.append(rp.strip())
                 evidence_refs.append("rework_prompt")
 
     rework_p = task.get("rework_prompt")
-    if rework_p and rework_p.strip() and rework_p not in human_instructions:
+    if rework_p and rework_p.strip() and rework_p.strip() not in human_instructions:
         human_instructions.append(rework_p.strip())
         evidence_refs.append("task:rework_prompt")
 
-    # From human decisions
+    # From human decisions (P1-08: Must be resolved decisions, never unconfirmed questions or stale notes)
     if decisions:
         for d in decisions:
-            dec = d.get("decision") or d.get("detail") or d.get("question") or ""
-            note_id = d.get("note_id") or d.get("decision_id") or ""
-            if dec.strip():
-                human_instructions.append(dec.strip())
+            if d.get("stale"):
+                continue
+            status = d.get("decision_status") or d.get("status")
+            if d.get("decision_id") and status and status != "resolved":
+                # Unanswered open question: reject!
+                continue
+            dec = (d.get("decision") or d.get("selected_option") or d.get("answer") or d.get("detail") or "").strip()
+            if not dec:
+                # Do NOT fall back to d.get("question")
+                continue
+            if dec not in human_instructions:
+                human_instructions.append(dec)
+                note_id = d.get("note_id") or d.get("decision_id") or ""
                 if note_id:
                     evidence_refs.append(f"decision:{note_id}")
 
@@ -142,11 +159,11 @@ def extract_candidate_from_facts(
         return None, "no_human_intervention"
 
     # 3. Filter trivial phrases
-    meaningful = [
-        _clean_and_redact(inst)
-        for inst in human_instructions
-        if not _is_trivial_instruction(inst)
-    ]
+    meaningful = []
+    for inst in human_instructions:
+        cleaned = _clean_and_redact(inst)
+        if not _is_trivial_instruction(cleaned) and cleaned not in meaningful:
+            meaningful.append(cleaned)
 
     if not meaningful:
         return None, "no_actionable_rule"
@@ -172,17 +189,22 @@ def extract_candidate_from_facts(
         except Exception:
             context_meta = {}
 
-    customer = (
+    # P1-06: 未知客户保持 unknown，严禁视为全局或 default_customer
+    raw_customer = (
         task.get("customer")
         or payload.get("customer")
         or payload.get("customer_id")
         or context_meta.get("customer")
         or context_meta.get("customer_id")
-        or "default_customer"
     )
+    if not raw_customer or str(raw_customer).strip() in {"default_customer", "unknown", "None", ""}:
+        customer = "unknown"
+    else:
+        customer = str(raw_customer).strip()
 
     task_type = (
-        task.get("task_type")
+        task.get("business_task_type")
+        or task.get("task_type")
         or payload.get("task_type")
         or task.get("stage")
         or task.get("node")

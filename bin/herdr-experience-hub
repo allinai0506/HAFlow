@@ -28,6 +28,11 @@ def main():
     p_start.add_argument("--host", default=os.environ.get("HERDR_HUB_HOST", "127.0.0.1"), help="Host to bind")
     p_start.add_argument("--port", type=int, default=int(os.environ.get("HERDR_HUB_PORT", 8780)), help="Port to bind")
     p_start.add_argument("--db-path", default=os.environ.get("HERDR_HUB_DB_PATH", str(DEFAULT_HUB_DB_PATH)), help="SQLite DB path")
+    p_start.add_argument("--admin-token", default=os.environ.get("HERDR_HUB_ADMIN_TOKEN"), help="Admin token for initial setup")
+    p_start.add_argument("--cert-file", default=os.environ.get("HERDR_HUB_CERT_FILE"), help="Path to TLS certificate file")
+    p_start.add_argument("--key-file", default=os.environ.get("HERDR_HUB_KEY_FILE"), help="Path to TLS private key file")
+    p_start.add_argument("--allow-insecure-http", action="store_true", default=(os.environ.get("HERDR_HUB_ALLOW_INSECURE_HTTP") == "1"), help="Allow HTTP on non-loopback (e.g. behind TLS reverse proxy)")
+    p_start.add_argument("--check-init-only", action="store_true", help="Check admin initialization and exit immediately")
 
     # token
     p_token = subparsers.add_parser("token", help="Manage authentication tokens")
@@ -47,16 +52,48 @@ def main():
     if args.command == "start":
         db_path = Path(args.db_path)
         storage = HubStorage(db_path)
-        # Ensure default test/admin tokens exist if DB is fresh
-        admin_token = os.environ.get("HERDR_HUB_ADMIN_TOKEN", "admin_secret_token_123")
-        storage.register_token(admin_token, user_id="admin", role="admin", allowed_customers=["*"])
 
-        server = ExperienceHubServer(host=args.host, port=args.port, db_path=db_path)
-        print(f"[Experience Hub] Starting server on http://{args.host}:{args.port}")
+        admin_token = args.admin_token
+        if admin_token:
+            if admin_token == "admin_secret_token_123":
+                print("[Experience Hub ERROR] 严禁使用硬编码默认 Token 'admin_secret_token_123'！", file=sys.stderr)
+                sys.exit(1)
+            storage.register_token(admin_token, user_id="admin", role="admin", allowed_customers=["*"])
+            print("[Experience Hub] 管理员凭据初始化完成 (Admin credentials initialized).")
+        elif not storage.has_admin():
+            print("[Experience Hub ERROR] 尚未初始化管理员凭证 (No admin credentials configured).", file=sys.stderr)
+            print("首次启动必须通过 --admin-token / 环境变量 HERDR_HUB_ADMIN_TOKEN 提供管理员凭证，", file=sys.stderr)
+            print("或执行: bin/herdr-experience-hub token create --token <secret> --user admin --role admin", file=sys.stderr)
+            sys.exit(1)
+
+        if getattr(args, "check_init_only", False):
+            print("[Experience Hub] Admin initialization verified.")
+            sys.exit(0)
+
+        is_loopback = args.host in ("127.0.0.1", "localhost", "::1")
+        if not is_loopback and not (args.cert_file and args.key_file) and not args.allow_insecure_http:
+            print(f"[Experience Hub ERROR] 严禁在非回环地址 {args.host} 直接明文运行 HTTP 暴露 Bearer Token！", file=sys.stderr)
+            print("请配置 TLS 证书 (--cert-file 与 --key-file) 启用 HTTPS，或在反向代理后使用 --allow-insecure-http 明确授权。", file=sys.stderr)
+            sys.exit(1)
+
+        proto = "https" if (args.cert_file and args.key_file) else "http"
+        print(f"[Experience Hub] Starting server on {proto}://{args.host}:{args.port}")
         print(f"[Experience Hub] DB: {db_path}")
+
+        server = ExperienceHubServer(
+            host=args.host,
+            port=args.port,
+            db_path=db_path,
+            cert_file=Path(args.cert_file) if args.cert_file else None,
+            key_file=Path(args.key_file) if args.key_file else None,
+            allow_insecure_http=args.allow_insecure_http,
+        )
         server.start(block=True)
 
     elif args.command == "token" and args.token_command == "create":
+        if args.token == "admin_secret_token_123":
+            print("[Experience Hub ERROR] 严禁使用硬编码默认 Token 'admin_secret_token_123'！", file=sys.stderr)
+            sys.exit(1)
         db_path = Path(args.db_path)
         storage = HubStorage(db_path)
         custs = [c.strip() for c in args.customers.split(",") if c.strip()]

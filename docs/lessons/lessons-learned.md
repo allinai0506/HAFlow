@@ -6676,3 +6676,40 @@ HAFlow 作为企业级多任务通用 Agent 编排系统，必须支撑招投标
 - 自动化测试回归：`pytest tests/test_console_frontend_syntax.py tests/test_console_shell.py tests/test_console_templates.py tests/test_console_view_state.py tests/test_experience_*.py -v`（70 passed）；
 - 提交记录：`891e08f`、`afa1e75`、`380dbcc`、`aafd6ff`、`f4c6582`。
 
+---
+
+## 157. 企业经验共享服务安全底线与两阶段异步采集闭环（2026-10-14）
+
+### 问题背景
+
+在 PR #209（企业经验中心 V1）的代码复核与闭环验收中，暴露了一组严重的安全与功能缺陷（PR #209 GitHub Review 8 条自动审查意见及 P0/P1 问题）：
+1. **硬编码管理员凭证**：服务端硬编码 `admin_secret_token_123`，且数据库升级尝试自动补全，构成未授权即可完全控制服务的漏洞；
+2. **信任客户端发布状态**：客户端提交候选时直接接受 `{"status": "published"}`，导致未审核经验可被绕过直接上线；
+3. **采集任务因守护线程丢失**：任务结算通过非守护线程执行异步提取与网络上报，进程退出或重启时线程直接消亡，导致已结算经验永久丢失；
+4. **离线重试缺乏自动触发与退避**：内网断网时虽然记录 `pending_upload`，但仅有静态方法，无外部定时调度，且重试未设置指数退避；
+5. **候选数据泄露与跨客户越权**：未审核候选向同租户其他员工公开；审核人员缺少客户归属校验，可跨客户审核与撤回规则；
+6. **强制业务规则静默放行**：Client 查询接口吞咽所有 401/403/连接失败并返回空列表，导致 `mandatory_experience_rules=True` 的任务在未加载必要规则的情况下盲目执行。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|---|---|---|
+| 硬编码默认凭证与明文存储 | 默认凭证极大降低攻击门槛，明文凭证易受越权读取与转储泄露 | 严禁任何硬编码凭证；首次启动强制初始化，否则拒绝服务；DB 仅存 SHA-256 摘要，采用恒定时间比对 |
+| 信任客户端权威字段 | 客户端请求体不可信，状态机转换必须由服务端独占裁决 | 强制候选状态为 `pending_review`，贡献者身份绑定当前认证主体，清理越权字段；语义冲突返回 409 |
+| 仅依靠守护线程处理副作用 | CLI/子进程可能在守护线程写入数据库前退出 | 必须使用两阶段持久化：主流程同步落盘 `pending_collection`，后台守护进程（如 Sentinel）周期重试并恢复 |
+| 离线重试无退避窗口 | 盲目重试会引发流量风暴或耗尽服务端资源 | 采用有界指数退避 (`min(300s, 5s * 2^retries)`)，提供 CLI 强制同步命令 |
+| 强制约束接口静默吞异常 | Fail-Open 仅适用于非关键辅助能力，核心业务规则必须 Fail-Closed | 普通任务降级并记录告警，`mandatory_experience_rules=True` 任务遇到网络/鉴权异常必须抛错阻断派发 |
+
+### 操作规范
+
+1. **凭证生命周期规范**：服务端启动命令 (`bin/herdr-experience-hub start`) 在数据库无管理员记录且未传入 `--admin-token` 时直接退出（退出码 1）；禁用 URL Query 传递 Token；跨主机部署必须配置 TLS 或声明受信反代；
+2. **两阶段可靠采集规范**：在 `execution_outcome.py` 中先同步调用 `collector.enqueue_task_settlement()` 落盘，再启动异步任务；`services/herdr-sentinel.py` 必须注册 30s 周期性恢复巡检；
+3. **严格客户鉴权规范**：在执行审核、撤回与候选读取前，必须获取目标实体的真实所属客户并与当前用户的 `allowed_customers` 比对，未知客户严格标记为 `unknown`，禁止扩大为全局规则；
+4. **Fail-Closed 契约**：在 `herdr/experience/client.py` 中为 `query_rules` 增加 `raise_for_status` 控制，强制规则任务异常直接透传 `RuntimeError`。
+
+### 验证命令 / 关联证据
+
+- 单元与集成测试全量验证：`pytest tests/test_experience_hub.py tests/test_experience_collector.py tests/test_experience_integration.py -v`（24 passed in 25.08s）；
+- 核心用例覆盖：`test_startup_without_admin_token_rejected`、`test_contributor_cannot_forge_published_status`、`test_content_hash_conflict_returns_409`、`test_contributor_cannot_read_other_contributor_candidates`、`test_reviewer_cross_customer_review_and_revoke_forbidden`、`test_unknown_customer_not_treated_as_global`、`test_settlement_persists_pending_collection_before_thread_exit`、`test_offline_upload_auto_retries_with_backoff`、`test_mandatory_rules_fail_closed_on_hub_outage`；
+- 静态检查：`python3 -m compileall -q herdr services bin console tests` 与 `git diff --check` 均干净（exit code 0）。
+

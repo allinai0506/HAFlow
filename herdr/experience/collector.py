@@ -42,7 +42,11 @@ def _get_collector_db(db_path: Optional[Path] = None) -> sqlite3.Connection:
                 experience_id TEXT,
                 status TEXT NOT NULL,
                 candidate_json TEXT,
+                outcome_json TEXT,
                 last_error TEXT,
+                state_db_path TEXT,
+                retry_count INTEGER NOT NULL DEFAULT 0,
+                next_retry_at REAL NOT NULL DEFAULT 0,
                 created_at REAL NOT NULL,
                 updated_at REAL NOT NULL,
                 PRIMARY KEY (task_id, run_id)
@@ -52,11 +56,89 @@ def _get_collector_db(db_path: Optional[Path] = None) -> sqlite3.Connection:
             CREATE INDEX IF NOT EXISTS idx_collector_status
             ON local_collector_records (status)
         """)
+        # Schema migration for existing databases
+        existing_cols = {row["name"] for row in conn.execute("PRAGMA table_info(local_collector_records)").fetchall()}
+        if "outcome_json" not in existing_cols:
+            conn.execute("ALTER TABLE local_collector_records ADD COLUMN outcome_json TEXT")
+        if "retry_count" not in existing_cols:
+            conn.execute("ALTER TABLE local_collector_records ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0")
+        if "next_retry_at" not in existing_cols:
+            conn.execute("ALTER TABLE local_collector_records ADD COLUMN next_retry_at REAL NOT NULL DEFAULT 0")
+        if "state_db_path" not in existing_cols:
+            conn.execute("ALTER TABLE local_collector_records ADD COLUMN state_db_path TEXT")
     return conn
+
+
+def _resolved_db_str(db_path: Optional[Path]) -> Optional[str]:
+    """Persist the concrete state database identity, not just None-vs-set.
+
+    Recovery (Sentinel background sync) runs without an explicit path, so a
+    row must carry which database holds its task or recovery resolves the
+    default database and quarantines a valid row as task_not_found.
+    """
+    if db_path is None:
+        try:
+            return str(state_db.get_default_db_path())
+        except Exception:
+            return None
+    return str(db_path)
+
+
+def _row_state_db_path(row) -> Optional[Path]:
+    """Recover the per-row state database recorded at enqueue time."""
+    try:
+        stored = row["state_db_path"]
+    except (IndexError, KeyError):
+        return None
+    if not stored:
+        return None
+    try:
+        return Path(stored)
+    except TypeError:
+        return None
+
+
+def _note_epoch(note: Dict[str, Any]) -> float:
+    for key in ("ts", "raised_at", "reviewed_at", "created_at"):
+        try:
+            val = note.get(key)
+            if val is not None:
+                return float(val)
+        except (TypeError, ValueError):
+            continue
+    return 0.0
+
+
+def fold_decisions_by_id(notes: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    """Fold append-only decision notes: newest note per decision_id wins.
+
+    Notes without a decision_id are kept as-is (no identity to fold on).
+    Callers must run `workflow_docs.annotate_notes` on the FULL note stream
+    first: annotating a pre-filtered subset would miss invalidation records
+    and silently clear stale flags.
+    """
+    if not notes:
+        return []
+    latest: Dict[str, Dict[str, Any]] = {}
+    kept: List[Dict[str, Any]] = []
+    for note in notes:
+        if not isinstance(note, dict):
+            continue
+        did = str(note.get("decision_id") or "").strip()
+        if not did:
+            kept.append(note)
+            continue
+        prev = latest.get(did)
+        if prev is None or _note_epoch(note) >= _note_epoch(prev):
+            latest[did] = note
+    kept.extend(latest.values())
+    return kept
 
 
 class ExperienceCollector:
     """Local machine experience collector and sync manager."""
+
+    _lock = threading.Lock()
 
     def __init__(
         self,
@@ -65,16 +147,132 @@ class ExperienceCollector:
         contributor: Optional[str] = None,
     ):
         self.db_path = db_path
-        self.hub_client = hub_client
+        if hub_client is not None:
+            self.hub_client = hub_client
+        elif os.environ.get("HERDR_HUB_URL") or os.environ.get("HERDR_HUB_TOKEN"):
+            try:
+                from .client import ExperienceClient
+                self.hub_client = ExperienceClient()
+            except Exception as exc:
+                LOGGER.debug("Could not auto-initialize ExperienceClient: %s", exc)
+                self.hub_client = None
+        else:
+            self.hub_client = None
+
         self.contributor = contributor or os.environ.get("HERDR_EMPLOYEE_ID") or os.environ.get("USER") or "local_employee"
+
+    def enqueue_task_settlement(
+        self,
+        task_id: str,
+        outcome: Optional[Dict[str, Any]] = None,
+        state_db_path: Optional[Path] = None,
+    ) -> Dict[str, Any]:
+        """Synchronously enqueue task settlement into durable storage before async work.
+
+        Guarantees that pending collection survives process exit or daemon thread termination.
+        """
+        try:
+            task = state_db.get_task(task_id, db_path=state_db_path)
+            run_id = str((task.get("run_id") if task else None) or (outcome.get("run_id") if outcome else "") or f"run_{task_id}")
+            outcome_id = outcome.get("outcome_id") if outcome else None
+
+            conn = _get_collector_db(self.db_path)
+            try:
+                with conn:
+                    row = conn.execute(
+                        "SELECT status, experience_id FROM local_collector_records WHERE task_id = ? AND run_id = ?",
+                        (task_id, run_id),
+                    ).fetchone()
+                    if row and row["status"] in {"uploaded", "no_candidate"}:
+                        return {
+                            "ok": True,
+                            "status": row["status"],
+                            "experience_id": row["experience_id"],
+                            "reason": "already_processed",
+                        }
+
+                    now = time.time()
+                    outcome_json = json.dumps(outcome, ensure_ascii=False) if outcome else None
+                    conn.execute("""
+                        INSERT INTO local_collector_records
+                        (task_id, run_id, outcome_id, experience_id, status, outcome_json, state_db_path, retry_count, next_retry_at, created_at, updated_at)
+                        VALUES (?, ?, ?, NULL, 'pending_collection', ?, ?, 0, 0, ?, ?)
+                        ON CONFLICT(task_id, run_id) DO UPDATE SET
+                            outcome_id = COALESCE(excluded.outcome_id, local_collector_records.outcome_id),
+                            outcome_json = COALESCE(excluded.outcome_json, local_collector_records.outcome_json),
+                            state_db_path = COALESCE(excluded.state_db_path, local_collector_records.state_db_path),
+                            updated_at = excluded.updated_at
+                        WHERE local_collector_records.status NOT IN ('uploaded', 'no_candidate')
+                    """, (task_id, run_id, outcome_id, outcome_json,
+                          _resolved_db_str(state_db_path), now, now))
+                return {"ok": True, "status": "pending_collection", "task_id": task_id, "run_id": run_id}
+            finally:
+                conn.close()
+        except Exception as exc:
+            LOGGER.error("Failed to enqueue task settlement for %s: %s", task_id, exc)
+            return {"ok": False, "status": "error", "reason": str(exc)}
+
+    def _note_collection_failure(
+        self,
+        task_id: str,
+        error: str,
+        run_id: Optional[str] = None,
+        terminal: bool = False,
+    ) -> None:
+        """Advance a stuck collection row so one bad record cannot pin the queue.
+
+        Non-terminal failures keep `pending_collection` but schedule backoff
+        (process_pending skips unripe rows); terminal ones (e.g. task gone)
+        move to `error` and leave the queue for good. Never raises.
+        """
+        try:
+            conn = _get_collector_db(self.db_path)
+            try:
+                with conn:
+                    if run_id:
+                        rows = conn.execute(
+                            "SELECT run_id, retry_count FROM local_collector_records "
+                            "WHERE task_id = ? AND run_id = ? AND status = 'pending_collection'",
+                            (str(task_id), str(run_id)),
+                        ).fetchall()
+                    else:
+                        rows = conn.execute(
+                            "SELECT run_id, retry_count FROM local_collector_records "
+                            "WHERE task_id = ? AND status = 'pending_collection'",
+                            (str(task_id),),
+                        ).fetchall()
+                    for r in rows:
+                        if terminal:
+                            conn.execute(
+                                "UPDATE local_collector_records SET status = 'error', "
+                                "last_error = ?, updated_at = ? WHERE task_id = ? AND run_id = ?",
+                                (error[:300], time.time(), str(task_id), r["run_id"]),
+                            )
+                        else:
+                            nxt = int(r["retry_count"] or 0) + 1
+                            conn.execute(
+                                "UPDATE local_collector_records SET last_error = ?, retry_count = ?, "
+                                "next_retry_at = ?, updated_at = ? WHERE task_id = ? AND run_id = ?",
+                                (error[:300], nxt, time.time() + min(300.0, 5.0 * (2 ** nxt)),
+                                 time.time(), str(task_id), r["run_id"]),
+                            )
+            finally:
+                conn.close()
+        except Exception as exc:
+            LOGGER.debug("Could not advance collection row for %s: %s", task_id, exc)
 
     def process_task_settlement(
         self,
         task_id: str,
         outcome: Optional[Dict[str, Any]] = None,
         state_db_path: Optional[Path] = None,
+        queued_run_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Process a settled task outcome. Idempotent and fail-safe.
+
+        queued_run_id is the run identity carried by the queue row being
+        recovered; it scopes terminal failures so one missing source task
+        cannot mark every pending row of the same task id.
 
         Returns status dict:
           {"ok": bool, "status": str, "experience_id": Optional[str], "reason": str}
@@ -82,13 +280,19 @@ class ExperienceCollector:
         try:
             task = state_db.get_task(task_id, db_path=state_db_path)
             if not task:
+                # Scope the terminal update to this row: other pending rows for
+                # the same task id may point at another run or another database.
+                self._note_collection_failure(str(task_id), "task_not_found",
+                                              run_id=str(queued_run_id) if queued_run_id else None,
+                                              terminal=True)
                 return {"ok": False, "status": "skipped", "reason": "task_not_found"}
 
             run_id = str(task.get("run_id") or (outcome.get("run_id") if outcome else "") or f"run_{task_id}")
             outcome_id = outcome.get("outcome_id") if outcome else None
 
-            # 1. Check local deduplication
+            # 1. Check local deduplication and recover outcome if omitted
             conn = _get_collector_db(self.db_path)
+            existing_retry = 0
             try:
                 row = conn.execute(
                     "SELECT * FROM local_collector_records WHERE task_id = ? AND run_id = ?",
@@ -103,6 +307,25 @@ class ExperienceCollector:
                             "experience_id": row["experience_id"],
                             "reason": "already_processed",
                         }
+                    # Respect upload backoff: repeated settlement must not hammer Hub.
+                    if existing_status == "pending_upload":
+                        try:
+                            existing_retry = int(row["retry_count"] or 0)
+                        except Exception:
+                            existing_retry = 0
+                        nxt = row["next_retry_at"] if "next_retry_at" in row.keys() else 0
+                        if nxt and float(nxt) > time.time():
+                            return {
+                                "ok": True,
+                                "status": "pending_upload",
+                                "experience_id": row["experience_id"],
+                                "reason": "backoff",
+                            }
+                    if outcome is None and row["outcome_json"]:
+                        try:
+                            outcome = json.loads(row["outcome_json"])
+                        except Exception:
+                            pass
             finally:
                 conn.close()
 
@@ -119,10 +342,14 @@ class ExperienceCollector:
                 try:
                     from herdr import workflow_docs
                     all_notes = workflow_docs.load_notes(workflow_id)
-                    decisions = [
-                        n for n in all_notes
+                    # Annotate the FULL stream first: invalidation records are
+                    # kind=invalidation and would be lost by early filtering.
+                    annotated = workflow_docs.annotate_notes(all_notes)
+                    scoped = [
+                        n for n in annotated
                         if n.get("kind") == "decision" and (not n.get("task_id") or str(n.get("task_id")) == task_id)
                     ]
+                    decisions = fold_decisions_by_id(scoped)
                 except Exception as e:
                     LOGGER.debug("load_notes failed: %s", e)
 
@@ -133,36 +360,38 @@ class ExperienceCollector:
                 steers=steers,
                 decisions=decisions,
                 contributor=self.contributor,
+                state_db_path=state_db_path,
             )
 
             now = time.time()
             conn = _get_collector_db(self.db_path)
             try:
-                if not exp:
+                with conn:
+                    if not exp:
+                        conn.execute("""
+                            INSERT INTO local_collector_records
+                            (task_id, run_id, outcome_id, experience_id, status, candidate_json, last_error, created_at, updated_at)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            ON CONFLICT(task_id, run_id) DO UPDATE SET
+                                status = excluded.status,
+                                last_error = excluded.last_error,
+                                updated_at = excluded.updated_at
+                            WHERE local_collector_records.status NOT IN ('uploaded', 'no_candidate')
+                        """, (task_id, run_id, outcome_id, None, "no_candidate", None, reason, now, now))
+                        return {"ok": True, "status": "no_candidate", "reason": reason}
+
+                    candidate_json = json.dumps(exp.to_dict(), ensure_ascii=False)
                     conn.execute("""
                         INSERT INTO local_collector_records
-                        (task_id, run_id, outcome_id, experience_id, status, candidate_json, last_error, created_at, updated_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        (task_id, run_id, outcome_id, experience_id, status, candidate_json, last_error, retry_count, next_retry_at, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
                         ON CONFLICT(task_id, run_id) DO UPDATE SET
+                            experience_id = excluded.experience_id,
                             status = excluded.status,
+                            candidate_json = excluded.candidate_json,
                             updated_at = excluded.updated_at
-                    """, (task_id, run_id, outcome_id, None, "no_candidate", None, reason, now, now))
-                    conn.commit()
-                    return {"ok": True, "status": "no_candidate", "reason": reason}
-
-                candidate_json = json.dumps(exp.to_dict(), ensure_ascii=False)
-                # Save locally as pending_upload
-                conn.execute("""
-                    INSERT INTO local_collector_records
-                    (task_id, run_id, outcome_id, experience_id, status, candidate_json, last_error, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(task_id, run_id) DO UPDATE SET
-                        experience_id = excluded.experience_id,
-                        status = excluded.status,
-                        candidate_json = excluded.candidate_json,
-                        updated_at = excluded.updated_at
-                """, (task_id, run_id, outcome_id, exp.experience_id, "pending_upload", candidate_json, None, now, now))
-                conn.commit()
+                        WHERE local_collector_records.status NOT IN ('uploaded', 'no_candidate')
+                    """, (task_id, run_id, outcome_id, exp.experience_id, "pending_upload", candidate_json, None, now, now))
             finally:
                 conn.close()
 
@@ -179,61 +408,129 @@ class ExperienceCollector:
                 except Exception as exc:
                     upload_err = str(exc)
                     LOGGER.warning("Experience Hub upload failed for %s: %s", exp.experience_id, exc)
+            else:
+                upload_err = "no_hub_client"
 
             conn = _get_collector_db(self.db_path)
             try:
-                if upload_ok:
-                    conn.execute("""
-                        UPDATE local_collector_records
-                        SET status = 'uploaded', last_error = NULL, updated_at = ?
-                        WHERE task_id = ? AND run_id = ?
-                    """, (time.time(), task_id, run_id))
-                    conn.commit()
-                    return {"ok": True, "status": "uploaded", "experience_id": exp.experience_id, "reason": "ready"}
-                else:
-                    conn.execute("""
-                        UPDATE local_collector_records
-                        SET last_error = ?, updated_at = ?
-                        WHERE task_id = ? AND run_id = ?
-                    """, (upload_err, time.time(), task_id, run_id))
-                    conn.commit()
-                    return {"ok": True, "status": "pending_upload", "experience_id": exp.experience_id, "reason": upload_err or "hub_offline"}
+                with conn:
+                    if upload_ok:
+                        cur = conn.execute("""
+                            UPDATE local_collector_records
+                            SET status = 'uploaded', last_error = NULL, retry_count = 0, next_retry_at = 0, updated_at = ?
+                            WHERE task_id = ? AND run_id = ? AND experience_id = ?
+                        """, (time.time(), task_id, run_id, exp.experience_id))
+                        if cur.rowcount:
+                            return {"ok": True, "status": "uploaded", "experience_id": exp.experience_id, "reason": "ready"}
+                        current = conn.execute(
+                            "SELECT status, experience_id FROM local_collector_records WHERE task_id = ? AND run_id = ?",
+                            (task_id, run_id),
+                        ).fetchone()
+                        if current is None:
+                            return {"ok": True, "status": "uploaded", "experience_id": exp.experience_id, "reason": "ready"}
+                        return {"ok": True, "status": current["status"],
+                                "experience_id": current["experience_id"], "reason": "superseded"}
+                    else:
+                        # Every settlement failure schedules backoff immediately:
+                        # repeated task/eval writes must not each trigger an
+                        # upload. Explicit forced recovery stays the immediate
+                        # retry mechanism.
+                        curr_retries = existing_retry + 1
+                        backoff = min(300.0, 5.0 * (2 ** curr_retries))
+                        conn.execute("""
+                            UPDATE local_collector_records
+                            SET status = 'pending_upload', last_error = ?, retry_count = ?, next_retry_at = ?, updated_at = ?
+                            WHERE task_id = ? AND run_id = ? AND status != 'uploaded'
+                        """, (upload_err, curr_retries, time.time() + backoff, time.time(), task_id, run_id))
+                        return {"ok": True, "status": "pending_upload", "experience_id": exp.experience_id, "reason": upload_err}
             finally:
                 conn.close()
 
         except Exception as exc:
             LOGGER.error("process_task_settlement crashed unexpectedly: %s", exc)
+            self._note_collection_failure(str(task_id), str(exc))
             return {"ok": False, "status": "error", "reason": str(exc)}
 
-    def process_task_settlement_async(
-        self,
-        task_id: str,
-        outcome: Optional[Dict[str, Any]] = None,
-        state_db_path: Optional[Path] = None,
-    ) -> threading.Thread:
-        """Asynchronously process task settlement in a daemon thread.
+    def process_pending(self, state_db_path: Optional[Path] = None, limit: int = 50) -> Dict[str, Any]:
+        """Process tasks queued as pending_collection.
 
-        Guaranteed not to block caller or raise exception.
+        Rows in backoff (next_retry_at in the future) are skipped so one bad
+        record cannot pin the head of the queue. Returns processed/failed
+        counts; failures keep their rows (with backoff) and must be surfaced
+        by callers instead of reported as success.
         """
-        thread = threading.Thread(
-            target=self.process_task_settlement,
-            args=(task_id, outcome, state_db_path),
-            daemon=True,
-            name=f"collector-{task_id}",
-        )
-        thread.start()
-        return thread
-
-    def retry_pending_uploads(self) -> Dict[str, Any]:
-        """Retry pending uploads that were delayed due to Hub offline or network errors."""
-        if not self.hub_client:
-            return {"retried": 0, "succeeded": 0, "failed": 0, "reason": "no_hub_client"}
-
+        now = time.time()
         conn = _get_collector_db(self.db_path)
         try:
             rows = conn.execute(
-                "SELECT * FROM local_collector_records WHERE status = 'pending_upload'"
+                "SELECT task_id, run_id, outcome_json, state_db_path FROM local_collector_records "
+                "WHERE status = 'pending_collection' AND (next_retry_at IS NULL OR next_retry_at <= ?) "
+                "ORDER BY created_at ASC LIMIT ?",
+                (now, limit,),
             ).fetchall()
+        finally:
+            conn.close()
+
+        processed = 0
+        failed = 0
+        task_ids: List[str] = []
+        for row in rows:
+            tid = row["task_id"]
+            outcome = None
+            if row["outcome_json"]:
+                try:
+                    outcome = json.loads(row["outcome_json"])
+                except Exception:
+                    pass
+            # The row's own database identity wins: a worker recovering
+            # database A must never read database B's rows from A, which would
+            # report task_not_found and quarantine valid work. The caller path
+            # is only a fallback for rows written before the column existed.
+            row_db = _row_state_db_path(row) or state_db_path
+            res = self.process_task_settlement(tid, outcome=outcome, state_db_path=row_db,
+                                               queued_run_id=row["run_id"])
+            if isinstance(res, dict) and res.get("ok"):
+                processed += 1
+            else:
+                failed += 1
+            task_ids.append(str(tid))
+        return {"processed": processed, "failed": failed, "task_ids": task_ids}
+
+    def retry_pending_uploads(self, limit: int = 50, force: bool = False,
+                              exclude_task_id: Optional[str] = None,
+                              exclude_task_ids: Optional[List[str]] = None,
+                              exclude_rows: Optional[set] = None) -> Dict[str, Any]:
+        """Retry pending uploads that were delayed due to Hub offline or network errors."""
+        if not self.hub_client:
+            return {"retried": 0, "succeeded": 0, "failed": 0, "reason": "no_hub_client"}
+        excluded = {str(exclude_task_id)} if exclude_task_id else set()
+        excluded |= {str(t) for t in (exclude_task_ids or [])}
+
+        now = time.time()
+        conn = _get_collector_db(self.db_path)
+        try:
+            if force:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM local_collector_records
+                    WHERE status = 'pending_upload'
+                    ORDER BY updated_at ASC LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM local_collector_records
+                    WHERE status = 'pending_upload' AND (next_retry_at <= ? OR next_retry_at IS NULL)
+                    ORDER BY updated_at ASC LIMIT ?
+                    """,
+                    (now, limit),
+                ).fetchall()
+            if excluded:
+                rows = [r for r in rows if str(r["task_id"]) not in excluded]
+            if exclude_rows:
+                rows = [r for r in rows if (str(r["task_id"]), str(r["run_id"])) not in exclude_rows]
         finally:
             conn.close()
 
@@ -249,21 +546,193 @@ class ExperienceCollector:
                 candidate_data = json.loads(candidate_raw)
                 exp = BusinessRuleExperience.from_dict(candidate_data)
                 res = self.hub_client.submit_candidate(exp)
-                if res.get("ok"):
-                    succeeded += 1
-                    c = _get_collector_db(self.db_path)
-                    try:
-                        c.execute(
-                            "UPDATE local_collector_records SET status = 'uploaded', last_error = NULL, updated_at = ? WHERE task_id = ? AND run_id = ?",
-                            (time.time(), row["task_id"], row["run_id"]),
-                        )
-                        c.commit()
-                    finally:
-                        c.close()
-                else:
-                    failed += 1
+                c = _get_collector_db(self.db_path)
+                try:
+                    with c:
+                        if res.get("ok"):
+                            cur = c.execute(
+                                """
+                                UPDATE local_collector_records
+                                SET status = 'uploaded', last_error = NULL, retry_count = 0, next_retry_at = 0, updated_at = ?
+                                WHERE task_id = ? AND run_id = ? AND experience_id = ?
+                                """,
+                                (time.time(), row["task_id"], row["run_id"], exp.experience_id),
+                            )
+                            if cur.rowcount:
+                                succeeded += 1
+                            else:
+                                LOGGER.debug("Upload superseded for %s; row changed concurrently", row["task_id"])
+                        else:
+                            failed += 1
+                            err = res.get("error") or "upload_rejected"
+                            curr_retries = int(row["retry_count"] or 0) + 1
+                            backoff = min(300.0, 5.0 * (2 ** curr_retries))
+                            c.execute(
+                                """
+                                UPDATE local_collector_records
+                                SET last_error = ?, retry_count = ?, next_retry_at = ?, updated_at = ?
+                                WHERE task_id = ? AND run_id = ? AND status != 'uploaded'
+                                """,
+                                (err, curr_retries, time.time() + backoff, time.time(), row["task_id"], row["run_id"]),
+                            )
+                finally:
+                    c.close()
             except Exception as e:
                 failed += 1
+                curr_retries = int(row["retry_count"] or 0) + 1
+                backoff = min(300.0, 5.0 * (2 ** curr_retries))
+                c = _get_collector_db(self.db_path)
+                try:
+                    with c:
+                        c.execute(
+                            """
+                            UPDATE local_collector_records
+                            SET last_error = ?, retry_count = ?, next_retry_at = ?, updated_at = ?
+                            WHERE task_id = ? AND run_id = ? AND status != 'uploaded'
+                            """,
+                            (str(e), curr_retries, time.time() + backoff, time.time(), row["task_id"], row["run_id"]),
+                        )
+                finally:
+                    c.close()
                 LOGGER.debug("Retry upload failed for %s: %s", row["task_id"], e)
 
-        return {"retried": retried, "succeeded": succeeded, "failed": failed}
+        return {"retried": retried, "succeeded": succeeded, "failed": failed,
+                "attempted": [(str(r["task_id"]), str(r["run_id"])) for r in rows]}
+
+    def recover_and_sync(self, state_db_path: Optional[Path] = None, force: bool = False,
+                           exclude_task_id: Optional[str] = None) -> Dict[str, Any]:
+        """Drains pending collections and retries pending uploads. Safe to call periodically.
+
+        Rows collected in this same pass are excluded from the immediate retry
+        (unless force drains everything): their first failure stays
+        immediately eligible, and retrying them here would double every Hub call.
+        """
+        with self._lock:
+            pending_stats = self.process_pending(state_db_path=state_db_path)
+            same_pass = [str(t) for t in (pending_stats.get("task_ids") or [])]
+            if exclude_task_id:
+                same_pass.append(str(exclude_task_id))
+            upload_stats = {"retried": 0, "succeeded": 0, "failed": 0}
+            if force:
+                # Explicit operator sync drains every batch (bounded loop), but
+                # each row is attempted only once per invocation: forced retries
+                # ignore backoff, so without this a failing row would be
+                # re-selected on every iteration (retry storm).
+                attempted: set = set()
+                for _ in range(20):
+                    batch = self.retry_pending_uploads(force=True, exclude_rows=attempted)
+                    upload_stats["retried"] += batch.get("retried", 0)
+                    upload_stats["succeeded"] += batch.get("succeeded", 0)
+                    upload_stats["failed"] += batch.get("failed", 0)
+                    attempted |= {(str(t), str(r)) for t, r in batch.get("attempted", [])}
+                    if batch.get("retried", 0) == 0:
+                        upload_stats["reason"] = batch.get("reason") or ""
+                        break
+                else:
+                    upload_stats["reason"] = ""
+            else:
+                upload_stats = self.retry_pending_uploads(exclude_task_ids=same_pass)
+            remaining = 0
+            pending_remaining = 0
+            quarantined = 0
+            conn = _get_collector_db(self.db_path)
+            try:
+                row = conn.execute(
+                    "SELECT COUNT(*) AS n FROM local_collector_records WHERE status = 'pending_upload'"
+                ).fetchone()
+                remaining = int(row["n"] or 0) if row else 0
+                row = conn.execute(
+                    "SELECT COUNT(*) AS n FROM local_collector_records WHERE status = 'pending_collection'"
+                ).fetchone()
+                pending_remaining = int(row["n"] or 0) if row else 0
+                row = conn.execute(
+                    "SELECT COUNT(*) AS n FROM local_collector_records WHERE status = 'error'"
+                ).fetchone()
+                quarantined = int(row["n"] or 0) if row else 0
+            except Exception:
+                pass
+            finally:
+                conn.close()
+            return {
+                "ok": True,
+                "pending_collected": pending_stats.get("processed", 0),
+                "pending_collection_failed": pending_stats.get("failed", 0),
+                "pending_collection_remaining": pending_remaining,
+                "pending_collection_error": quarantined,
+                "retried": upload_stats.get("retried", 0),
+                "succeeded": upload_stats.get("succeeded", 0),
+                "failed": upload_stats.get("failed", 0),
+                "reason": upload_stats.get("reason") or "",
+                "pending_upload_remaining": remaining,
+            }
+
+    def process_task_settlement_async(
+        self,
+        task_id: str,
+        outcome: Optional[Dict[str, Any]] = None,
+        state_db_path: Optional[Path] = None,
+    ) -> Optional[threading.Thread]:
+        """Asynchronously process task settlement in a daemon thread.
+
+        Per-task single-flight: repeated settlement writes while a worker is
+        still running are skipped (returns None) instead of stacking threads
+        and duplicating Hub I/O. Guaranteed not to block caller or raise.
+        """
+        with _settlement_lock:
+            if str(task_id) in _settlement_inflight:
+                LOGGER.debug("Settlement worker already running for %s; skipping", task_id)
+                return None
+            _settlement_inflight.add(str(task_id))
+
+        def _worker():
+            try:
+                self.process_task_settlement(task_id, outcome, state_db_path)
+                # Exclude the just-attempted task: its first failure stays
+                # immediately eligible, and an unconditional recover here would
+                # re-submit it a second time before any backoff.
+                self.recover_and_sync(state_db_path, exclude_task_id=str(task_id))
+            except Exception as exc:
+                LOGGER.debug("Async collector worker error: %s", exc)
+            finally:
+                with _settlement_lock:
+                    _settlement_inflight.discard(str(task_id))
+
+        thread = threading.Thread(
+            target=_worker,
+            daemon=True,
+            name=f"collector-{task_id}",
+        )
+        thread.start()
+        return thread
+
+
+_bg_sync_lock = threading.Lock()
+_bg_sync_inflight = False
+_settlement_lock = threading.Lock()
+_settlement_inflight: set = set()
+
+
+def trigger_background_sync(state_db_path: Optional[Path] = None) -> bool:
+    """Start one bounded daemon sync; skip while another is in flight.
+
+    Single-flight guard for dispatch/sentinel hot paths: returns True when a
+    worker was started, False when a previous sync is still running.
+    """
+    global _bg_sync_inflight
+    with _bg_sync_lock:
+        if _bg_sync_inflight:
+            return False
+        _bg_sync_inflight = True
+
+    def _worker():
+        global _bg_sync_inflight
+        try:
+            ExperienceCollector().recover_and_sync(state_db_path=state_db_path)
+        except Exception as exc:
+            LOGGER.debug("Background experience sync failed: %s", exc)
+        finally:
+            with _bg_sync_lock:
+                _bg_sync_inflight = False
+
+    threading.Thread(target=_worker, daemon=True, name="exp-sync-bg").start()
+    return True

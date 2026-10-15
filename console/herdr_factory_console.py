@@ -1206,49 +1206,73 @@ def api_task_interaction_respond(b):
         }
 
 
-def _get_console_hub_client():
+def _get_console_hub_client(token=None):
     from herdr.experience.client import ExperienceClient
-    token = os.environ.get("HERDR_HUB_ADMIN_TOKEN") or os.environ.get("HERDR_HUB_TOKEN") or "admin_secret_token_123"
-    return ExperienceClient(token=token)
+    # Never fall back to server-side admin credentials: anonymous browser
+    # requests must not inherit admin scope. Caller identity only.
+    eff_token = (token or "").strip()
+    return ExperienceClient(token=eff_token, allow_env_token=False)
 
 
-def api_experience_candidates(q=None):
+def _hub_error_status(res):
+    """Normalize Hub failure codes to a valid HTTP status (502 on transport failure)."""
+    try:
+        code = int(res.get('status_code') or 0)
+    except (TypeError, ValueError):
+        code = 0
+    return code if 100 <= code <= 599 else 502
+
+
+def api_experience_candidates(q=None, token=None):
     q = q or {}
-    client = _get_console_hub_client()
+    client = _get_console_hub_client(token=token)
     status = q.get('status', [None])[0] if isinstance(q.get('status'), list) else q.get('status')
     cust = q.get('customer', [None])[0] if isinstance(q.get('customer'), list) else q.get('customer')
-    cands = client.list_candidates(status=status, customer=cust)
-    return {'ok': True, 'count': len(cands), 'candidates': [c.to_dict() for c in cands]}
+    try:
+        cands = client.list_candidates(status=status, customer=cust, raise_for_status=True)
+        return {'ok': True, 'count': len(cands), 'candidates': [c.to_dict() for c in cands]}
+    except Exception as exc:
+        status_code = getattr(exc, 'status_code', 500)
+        return {'ok': False, 'error': str(exc), 'status_code': status_code, 'candidates': []}
 
 
-def api_experience_candidate(exp_id):
-    client = _get_console_hub_client()
-    exp = client.get_experience(exp_id)
-    if not exp:
-        return {'ok': False, 'error': 'not_found'}
-    return {'ok': True, 'experience': exp.to_dict()}
+def api_experience_candidate(exp_id, token=None):
+    client = _get_console_hub_client(token=token)
+    try:
+        exp = client.get_experience(exp_id, raise_for_status=True)
+        if not exp:
+            return {'ok': False, 'error': 'not_found', 'status_code': 404}
+        return {'ok': True, 'experience': exp.to_dict()}
+    except Exception as exc:
+        status_code = getattr(exc, 'status_code', 500)
+        return {'ok': False, 'error': str(exc), 'status_code': status_code}
 
 
-def api_experience_rules(q=None):
+def api_experience_rules(q=None, token=None):
     q = q or {}
-    client = _get_console_hub_client()
+    client = _get_console_hub_client(token=token)
     cust = q.get('customer', [None])[0] if isinstance(q.get('customer'), list) else q.get('customer')
-    rules = client.query_rules(customer=cust)
-    return {'ok': True, 'count': len(rules), 'rules': [r.to_dict() for r in rules]}
+    scope = q.get('scope', [None])[0] if isinstance(q.get('scope'), list) else q.get('scope')
+    try:
+        rules = client.query_rules(customer=cust, raise_for_status=True, scope=scope)
+        return {'ok': True, 'count': len(rules), 'rules': [r.to_dict() for r in rules]}
+    except Exception as exc:
+        status_code = getattr(exc, 'status_code', 500)
+        return {'ok': False, 'error': str(exc), 'status_code': status_code, 'rules': []}
 
 
-def api_experience_review(b):
+def api_experience_review(b, token=None):
     b = b or {}
-    client = _get_console_hub_client()
+    client = _get_console_hub_client(token=token)
     exp_id = str(b.get('experience_id') or '').strip()
     action = str(b.get('action') or 'approve').strip()
     comment = str(b.get('comment') or '').strip()
     return client.review_candidate(exp_id, action=action, comment=comment)
 
 
-def api_experience_revoke(b):
+def api_experience_revoke(b, token=None):
     b = b or {}
-    client = _get_console_hub_client()
+    client = _get_console_hub_client(token=token)
     exp_id = str(b.get('experience_id') or '').strip()
     reason = str(b.get('reason') or '').strip()
     return client.revoke_rule(exp_id, reason=reason)
@@ -1485,6 +1509,34 @@ def api_workflow_decide_resolve(b):
     return {'ok':True,'note_id':record.get('note_id'),'decision_id':did,
             'decision':decision}
 
+def _launch_experience_inherit(payload, old_task):
+    """CLI flags carrying enterprise experience policy for a launch.
+
+    Direct payload fields win (fix-loop style: policy rides the action);
+    otherwise fall back to the superseded record (replacement style).
+    Absent policy yields no flags.
+    """
+    payload = payload or {}
+    old_task = old_task or {}
+
+    def _pick(key):
+        v = str(payload.get(key) or "").strip()
+        if not v:
+            v = str(old_task.get(key) or "").strip()
+        return v
+
+    flags = []
+    customer = _pick("customer")
+    if customer:
+        flags += ["--customer", customer]
+    business_type = _pick("business_task_type")
+    if business_type:
+        flags += ["--business-task-type", business_type]
+    if payload.get("mandatory_experience_rules") or old_task.get("mandatory_experience_rules"):
+        flags += ["--mandatory-experience-rules"]
+    return flags
+
+
 def api_controller_execute_action(payload):
     payload = payload or {}
     act_type = str(payload.get('type') or payload.get('action_type') or '').strip()
@@ -1574,6 +1626,14 @@ def api_controller_execute_action(payload):
             reason = str(payload.get('supersede_reason') or '').strip()
             if not reason: raise RuntimeError('替换任务需要 supersede_reason；优先原工位 rework')
             cmd += ['--supersedes', supersedes, '--supersede-reason', reason]
+        # Inherit enterprise experience policy: direct payload fields first
+        # (fix-loop actions carry policy without supersedes), then the
+        # superseded record, so replacement launches never drop protection.
+        try:
+            old_task = herdr_kernel._get_store().get_task(supersedes) if supersedes else None
+        except Exception:
+            old_task = None
+        cmd += _launch_experience_inherit(payload, old_task)
         if payload.get('ack_overflow') is True: cmd.append('--ack-overflow')
         r = run(cmd, timeout=30, check=True)
         return {'ok': True, 'task_id': task_id, 'output': r.stdout.strip()}
@@ -6839,7 +6899,10 @@ function syncOpsUi(){
 
 async function api(p,o={}){
   const started=performance.now();
-  const r=await fetch(p,{headers:{'Content-Type':'application/json'},...o});
+  let authHeaders={};
+  try{const t=sessionStorage.getItem('herdr_hub_token')||'';if(t)authHeaders={'Authorization':'Bearer '+t};}catch(e){}
+  const mergedHeaders={'Content-Type':'application/json',...authHeaders,...(o.headers||{})};
+  const r=await fetch(p,{...o,headers:mergedHeaders});
   const d=await r.json();
   if(!r.ok||d.ok===false)throw new Error(d.error||('HTTP '+r.status));
   const latency=document.getElementById('bottomPollLatency');
@@ -9673,13 +9736,23 @@ function paintShellPage(view){
   else if(view==='workflows')renderShellWorkflows();
   else if(view==='experience')renderShellExperience();
 }
+function saveHubToken(){
+  try{const inp=document.getElementById('hubTokenInput');sessionStorage.setItem('herdr_hub_token',(inp&&inp.value||'').trim());toast('Hub 身份 Token 已保存（仅本标签页有效，关闭即清除）');renderShellExperience();}catch(e){toast('保存失败: '+(e.message||e),true);}
+}
+function applyHubFilter(){
+  try{const inp=document.getElementById('hubCustomerInput');window._hubCustomerFilter=((inp&&inp.value)||'').trim();}catch(e){}
+  renderShellExperience();
+}
 async function renderShellExperience(){
   const el=document.getElementById('tasks');if(!el)return;
-  el.innerHTML='<div class="shell-page"><div class="shell-page-head"><h3>企业经验中心 (Experience Hub)</h3><p style="color:var(--text-secondary);font-size:12px;">沉淀自真实任务并通过审核的企业业务规则资产</p></div><div id="experienceHubContainer" style="padding:16px 0;"><div class="loading">加载经验数据中...</div></div></div>';
+  el.innerHTML='<div class="shell-page"><div class="shell-page-head"><h3>企业经验中心 (Experience Hub)</h3><p style="color:var(--text-secondary);font-size:12px;">沉淀自真实任务并通过审核的企业业务规则资产</p><div style="display:flex;gap:8px;align-items:center;margin-top:8px;font-size:12px;"><label for="hubTokenInput" style="color:var(--text-secondary);">Hub 身份 Token:</label><input id="hubTokenInput" type="password" placeholder="粘贴个人 Hub Token（仅本标签页有效）" style="flex:1;max-width:320px;padding:4px 8px;border:1px solid var(--border-color);border-radius:4px;background:var(--bg-main);color:var(--text-primary);" /><button class="btn btn-sm" onclick="saveHubToken()">保存</button><label for="hubCustomerInput" style="color:var(--text-secondary);">客户筛选:</label><input id="hubCustomerInput" type="text" placeholder="留空查看授权范围内全部" oninput="window._hubCustomerFilter=this.value" style="width:160px;padding:4px 8px;border:1px solid var(--border-color);border-radius:4px;background:var(--bg-main);color:var(--text-primary);" /><button class="btn btn-sm" onclick="applyHubFilter()">应用</button></div></div><div id="experienceHubContainer" style="padding:16px 0;"><div class="loading">加载经验数据中...</div></div></div>';
+  try{const saved=sessionStorage.getItem('herdr_hub_token')||'';const inp=document.getElementById('hubTokenInput');if(inp)inp.value=saved;}catch(e){}
+  try{const cf=window._hubCustomerFilter||'';const cinp=document.getElementById('hubCustomerInput');if(cinp&&document.activeElement!==cinp)cinp.value=cf;}catch(e){}
   const container=document.getElementById('experienceHubContainer');
   try{
-    const candRes=await api('/api/experience/candidates?status=pending_review');
-    const ruleRes=await api('/api/experience/rules');
+    const custFilter=(window._hubCustomerFilter||'').trim();
+    const candRes=await api('/api/experience/candidates?status=pending_review'+(custFilter?'&customer='+encodeURIComponent(custFilter):''));
+    const ruleRes=await api('/api/experience/rules?scope=all'+(custFilter?'&customer='+encodeURIComponent(custFilter):''));
     const cands=(candRes&&(candRes.candidates||candRes.data?.candidates))||[];
     const rules=(ruleRes&&(ruleRes.rules||ruleRes.data?.rules))||[];
     let html='<div style="display:flex;gap:24px;flex-direction:column;">';
@@ -9701,8 +9774,8 @@ async function renderShellExperience(){
               </div>
             </div>
             <div style="display:flex;gap:8px;">
-              <button class="btn btn-sm btn-primary" onclick="reviewExperienceCandidate('${esc(c.experience_id)}','approve')">通过发布</button>
-              <button class="btn btn-sm btn-danger" onclick="reviewExperienceCandidate('${esc(c.experience_id)}','reject')">驳回</button>
+              <button class="btn btn-sm btn-primary" onclick="reviewExperienceCandidate(${jsArg(c.experience_id)},'approve')">通过发布</button>
+              <button class="btn btn-sm btn-danger" onclick="reviewExperienceCandidate(${jsArg(c.experience_id)},'reject')">驳回</button>
             </div>
           </div>
           <div style="margin-top:8px;padding:8px;background:var(--bg-sub);border-radius:4px;font-size:13px;white-space:pre-wrap;">${esc(c.content)}</div>
@@ -9729,7 +9802,7 @@ async function renderShellExperience(){
               </div>
             </div>
             <div>
-              <button class="btn btn-sm btn-outline-danger" onclick="revokeExperienceRule('${esc(r.experience_id)}')">撤回规则</button>
+              <button class="btn btn-sm btn-outline-danger" onclick="revokeExperienceRule(${jsArg(r.experience_id)})">撤回规则</button>
             </div>
           </div>
           <div style="margin-top:8px;padding:8px;background:var(--bg-sub);border-radius:4px;font-size:13px;white-space:pre-wrap;">${esc(r.content)}</div>
@@ -11612,6 +11685,11 @@ HTML=HTML_TEMPLATE.replace('__PRODUCT_NAME__',PRODUCT_NAME).replace('__PRODUCT_T
 class Handler(BaseHTTPRequestHandler):
     server_version='HerdrFactoryConsole/1.2'
     def log_message(self,fmt,*args):print(f'[{datetime.now().isoformat(timespec="seconds")}] '+(fmt%args),flush=True)
+    def get_auth_token(self):
+        auth = self.headers.get('Authorization', '')
+        if auth.startswith('Bearer '):
+            return auth[7:].strip()
+        return self.headers.get('X-HAFlow-Token') or None
     def send_json(self,status,data=None,error=None):
         p={'ok':error is None};
         if data is not None:p['data']=data
@@ -11732,9 +11810,21 @@ class Handler(BaseHTTPRequestHandler):
                 tid=q.get('task_id',[''])[0] or q.get('id',[''])[0]
                 wid=q.get('workflow_id',[''])[0]
                 return self.send_json(200,api_task_interaction_get(tid=tid,wid=wid))
-            if p=='/api/experience/candidates':return self.send_json(200,api_experience_candidates(self.query()))
-            if p=='/api/experience/candidate':return self.send_json(200,api_experience_candidate(self.query().get('id',[''])[0]))
-            if p=='/api/experience/rules':return self.send_json(200,api_experience_rules(self.query()))
+            if p=='/api/experience/candidates':
+                res = api_experience_candidates(self.query(), token=self.get_auth_token())
+                if not res.get('ok') and 'error' in res:
+                    return self.send_json(_hub_error_status(res), error=res['error'])
+                return self.send_json(200, res)
+            if p=='/api/experience/candidate':
+                res = api_experience_candidate(self.query().get('id',[''])[0], token=self.get_auth_token())
+                if not res.get('ok') and 'error' in res:
+                    return self.send_json(_hub_error_status(res), error=res['error'])
+                return self.send_json(200, res)
+            if p=='/api/experience/rules':
+                res = api_experience_rules(self.query(), token=self.get_auth_token())
+                if not res.get('ok') and 'error' in res:
+                    return self.send_json(_hub_error_status(res), error=res['error'])
+                return self.send_json(200, res)
             return self.send_json(404,error='Not Found')
         except herdr_deliverables.DeliverableError as e:
             return self.send_json(e.status,error=e.message)
@@ -11788,8 +11878,16 @@ class Handler(BaseHTTPRequestHandler):
             if p=='/api/workflow/decision':return self.send_json(200,api_workflow_decide_resolve(b))
             if p=='/api/workflow/recovery/decision':return self.send_json(200,api_workflow_recovery_decide(b))
             if p=='/api/task/interaction/respond':return self.send_json(200,api_task_interaction_respond(b))
-            if p=='/api/experience/review':return self.send_json(200,api_experience_review(b))
-            if p=='/api/experience/revoke':return self.send_json(200,api_experience_revoke(b))
+            if p=='/api/experience/review':
+                res = api_experience_review(b, token=self.get_auth_token())
+                if not res.get('ok') and 'error' in res:
+                    return self.send_json(400, error=res.get('error'))
+                return self.send_json(200, res)
+            if p=='/api/experience/revoke':
+                res = api_experience_revoke(b, token=self.get_auth_token())
+                if not res.get('ok') and 'error' in res:
+                    return self.send_json(400, error=res.get('error'))
+                return self.send_json(200, res)
             return self.send_json(404,error='Not Found')
         except Exception as e:
             self.log_message('POST %s failed: %s', self.path, e)

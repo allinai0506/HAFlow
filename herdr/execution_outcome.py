@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import os
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -33,6 +35,7 @@ from . import state_db
 from .transitions import COMPLETED_TASK_STATUSES, TERMINAL_TASK_STATUSES
 
 OUTCOME_SCHEMA_VERSION = state_db.OUTCOME_SCHEMA_VERSION
+LOGGER = logging.getLogger("herdr.execution_outcome")
 
 
 def outcome_id_for(task_id: str, run_id: str) -> str:
@@ -341,9 +344,25 @@ def _trigger_experience_collection_best_effort(
     outcome: Dict[str, Any],
     db_path: Optional[Path] = None,
 ) -> None:
-    """Best-effort async trigger for local ExperienceCollector."""
+    """Best-effort trigger for local ExperienceCollector.
+
+    P1-01 & P1-02:
+    1. Synchronously persists collection intent to local SQLite DB so sudden process exit does not lose the task.
+    2. Spawns bounded asynchronous drain for extraction and Hub upload.
+    3. Fail-open: failures are logged and never break task settlement.
+    """
     if os.environ.get("HERDR_EXPERIENCE_COLLECTION_DISABLED") == "1":
         return
+    # 1. Durable synchronous enqueue FIRST, without any Hub client: client
+    # construction itself may raise (bad URL/token config) and must never
+    # lose the collection intent.
+    try:
+        from .experience.collector import ExperienceCollector
+        ExperienceCollector().enqueue_task_settlement(str(task_id), outcome, state_db_path=db_path)
+    except Exception as exc:
+        LOGGER.warning("Experience collection enqueue failed for task %s: %s", task_id, exc)
+        return
+    # 2. Bounded async worker (extraction + Hub upload in daemon thread)
     try:
         from .experience.collector import ExperienceCollector
         from .experience.client import ExperienceClient
@@ -351,8 +370,8 @@ def _trigger_experience_collection_best_effort(
         hub_client = ExperienceClient()
         collector = ExperienceCollector(hub_client=hub_client)
         collector.process_task_settlement_async(str(task_id), outcome, state_db_path=db_path)
-    except Exception:
-        pass
+    except Exception as exc:
+        LOGGER.warning("Experience collection trigger failed for task %s: %s", task_id, exc)
 
 
 def get_execution_outcome(

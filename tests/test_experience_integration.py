@@ -257,3 +257,30 @@ def test_full_enterprise_experience_lifecycle_dual_clients(enterprise_environmen
         # Ordinary task does not crash; returns empty rules block
         offline_block = fetch_experience_rules_block(task_b)
         assert offline_block == ""
+
+
+def test_mandatory_rules_fail_closed_on_hub_outage():
+    from herdr.experience.client import fetch_experience_rules_block
+
+    mandatory_task = {
+        "task_id": "quote_task_mandatory_001",
+        "customer": "customer_quote_vip",
+        "task_type": "quote",
+        "mandatory_experience_rules": True,
+    }
+
+    # 1. Hub offline (unreachable address) -> Must fail closed (raise RuntimeError)
+    with patch.dict(os.environ, {"HERDR_HUB_URL": "http://127.0.0.1:59999", "HERDR_HUB_TOKEN": "token_dummy"}):
+        with pytest.raises(RuntimeError, match="Mandatory business rules cannot be acquired|Hub is unreachable"):
+            fetch_experience_rules_block(mandatory_task)
+
+    # 2. Ordinary non-mandatory task -> Must fail open (returns "")
+    normal_task = {
+        "task_id": "quote_task_normal_001",
+        "customer": "customer_quote_vip",
+        "task_type": "quote",
+        "mandatory_experience_rules": False,
+    }
+    with patch.dict(os.environ, {"HERDR_HUB_URL": "http://127.0.0.1:59999", "HERDR_HUB_TOKEN": "token_dummy"}):
+        block = fetch_experience_rules_block(normal_task)
+        assert block == ""

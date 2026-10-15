@@ -1225,6 +1225,14 @@ def add_task(args):
         "goal": args.goal,
         "acceptance_criteria": args.acceptance,
     }
+    # Enterprise experience attribution: persist only when provided so legacy
+    # records stay byte-identical.
+    if getattr(args, "customer", None):
+        task["customer"] = str(args.customer).strip()
+    if getattr(args, "business_task_type", None):
+        task["business_task_type"] = str(args.business_task_type).strip()
+    if getattr(args, "mandatory_experience_rules", False):
+        task["mandatory_experience_rules"] = True
     now = _now()
     _init_status_history(
         task,
@@ -3337,6 +3345,20 @@ def _launch_task(args):
         print(str(exc))
         sys.exit(2)
 
+    # Fail closed on mandatory experience rules BEFORE any launch resource
+    # exists. Running this inside dispatch_task() is too late: by then the
+    # worker holds a clone/pane, the task is persisted and the launch intent
+    # finalized, so a Hub outage would leave an undispatchable task whose
+    # retry is consumed by the duplicate check above.
+    if getattr(args, "mandatory_experience_rules", False):
+        try:
+            _prefetched_experience_suffix, _prefetched_experience_refs = _mandatory_experience_gate(args, node_id)
+        except Exception:
+            sys.exit(2)
+    else:
+        _prefetched_experience_suffix = None
+        _prefetched_experience_refs = None
+
     _check_launch_capacity(args, project, data.get("tasks", []), node_id)
     try:
         claim = begin_launch_intent(store, workflow_id=args.workflow_id, node_id=node_id,
@@ -3968,6 +3990,14 @@ def _launch_task(args):
         "acceptance_criteria": args.acceptance,
         "candidate_episode_id": project.get("candidate_episode_id"),
     }
+    # Enterprise experience attribution: persist only when provided so legacy
+    # records stay byte-identical.
+    if getattr(args, "customer", None):
+        task["customer"] = str(args.customer).strip()
+    if getattr(args, "business_task_type", None):
+        task["business_task_type"] = str(args.business_task_type).strip()
+    if getattr(args, "mandatory_experience_rules", False):
+        task["mandatory_experience_rules"] = True
     replay_of = getattr(args, "replay_of", None)
     if replay_of:
         task["replay_of"] = replay_of
@@ -4030,7 +4060,9 @@ def _launch_task(args):
     # 4. Dispatch
     dispatch_task(
         args.task_id,
-        args.prompt
+        args.prompt,
+        prefetched_experience_suffix=_prefetched_experience_suffix,
+        prefetched_experience_refs=_prefetched_experience_refs,
     )
     # Retire the previous Task only after the replacement was registered and
     # delivered. Validation or worker startup failures retain its ownership.
@@ -4084,6 +4116,13 @@ def _compile_working_context_ref(task):
 def _fetch_experience_rules_block(task):
     """Fetch active published enterprise business rules for this task."""
     try:
+        # Best-effort background sync: never block dispatch on Hub I/O.
+        # Single-flight daemon worker; overlapping dispatches skip.
+        try:
+            from herdr.experience.collector import trigger_background_sync
+            trigger_background_sync()
+        except Exception:
+            pass
         from herdr.experience.client import fetch_experience_rules_block
         return fetch_experience_rules_block(task, store=_get_store())
     except Exception as exc:
@@ -4092,7 +4131,56 @@ def _fetch_experience_rules_block(task):
         return ""
 
 
-def dispatch_task(task_id, prompt):
+def _prefetch_mandatory_rules(task):
+    """Fetch mandatory experience rules before any dispatch side effect.
+
+    Runs unconditionally for mandatory tasks: receipt-style tasks carry run_id
+    from creation, so gating on it would silently skip the check while the
+    later fetch still fail-closes. Returns the prompt suffix (may be "").
+    """
+    return _fetch_experience_rules_block(task)
+
+
+def _mandatory_experience_gate(args, node_id):
+    """Fail closed on an unreachable Hub before any launch resource exists.
+
+    Must run before the worker allocates a clone/pane and before the task is
+    persisted: a failure after registration leaves a pending task whose retry
+    is consumed by the duplicate check, never dispatching it. The task context
+    is synthesized from validated args (the task is not registered yet, so no
+    store metadata can be written). The returned block is handed to
+    dispatch_task so the mandatory task is never queried twice — a second
+    fail-closed query after allocation would recreate the stranded task this
+    gate exists to prevent. Applied-rule metadata is recorded by the launcher
+    once the task is registered.
+    """
+    if not getattr(args, "mandatory_experience_rules", False):
+        return None, []
+    context = {
+        "task_id": getattr(args, "task_id", None),
+        "customer": getattr(args, "customer", None),
+        "business_task_type": getattr(args, "business_task_type", None),
+        "task_type": getattr(args, "task_type", None),
+        "stage": node_id,
+        "node": node_id,
+        "mandatory_experience_rules": True,
+    }
+    try:
+        from herdr.experience.client import fetch_experience_rules_block as _fetch_block
+        refs: List[Dict[str, Any]] = []
+        block = _fetch_block(context, references=refs)
+        return block, refs
+    except Exception as exc:
+        print(
+            "[EXPERIENCE GATE] mandatory experience rules could not be resolved "
+            f"before allocating launch resources: {exc}",
+            file=sys.stderr,
+        )
+        raise
+
+
+def dispatch_task(task_id, prompt, prefetched_experience_suffix=None,
+                  prefetched_experience_refs=None):
     # Reliable delivery protocol:
     # 1) try herdr agent prompt
     # 2) verify lifecycle / prompt marker
@@ -4112,6 +4200,35 @@ def dispatch_task(task_id, prompt):
             f"{task['status']}; use herdr-task rework {task_id} --prompt '<repair instructions>' for the same owned execution"
         )
         sys.exit(2)
+
+    # Fail-closed: mandatory rules must resolve before marking dispatched,
+    # otherwise Hub outage would leave a false dispatched state with no
+    # instructions delivered. Unconditional: run_id is assigned at creation,
+    # so a receipt_delivery condition would skip this for every normal task.
+    # A block already resolved by the pre-allocation gate wins: re-querying
+    # here would re-open the stranded-task window this gate closed, so an
+    # outage between the two must not abort an already-authorized dispatch.
+    if prefetched_experience_suffix is not None:
+        _prefetched_experience_suffix = prefetched_experience_suffix
+        _prefetched_experience = True
+        # The gate ran before registration, so attribution was not written.
+        # Persist it now that the task exists, or a dispatch under specific
+        # rule versions keeps no record of which rules applied.
+        if prefetched_experience_refs:
+            try:
+                _store = _get_store()
+                if hasattr(_store, "update_task_metadata"):
+                    meta = dict(task.get("metadata") or {})
+                    meta["applied_experience_rules"] = prefetched_experience_refs
+                    _store.update_task_metadata(task_id, meta)
+            except (OSError, ValueError, RuntimeError, AttributeError, KeyError):
+                pass
+    else:
+        _prefetched_experience_suffix = None
+        _prefetched_experience = False
+        if task.get("mandatory_experience_rules"):
+            _prefetched_experience_suffix = _prefetch_mandatory_rules(task)
+            _prefetched_experience = True
 
     # Runtime closure: the dispatched transition happens before context
     # compilation and prompt delivery, so the compiled context never
@@ -4172,7 +4289,7 @@ def dispatch_task(task_id, prompt):
             f"{artifact_task} working-context get --context-id {working_context_ref}\n"
         )
 
-    experience_rules_suffix = _fetch_experience_rules_block(task)
+    experience_rules_suffix = _prefetched_experience_suffix if _prefetched_experience else _fetch_experience_rules_block(task)
 
     checkpoint_suffix = ""
     completion_suffix = "" if receipt_delivery else (
@@ -8133,6 +8250,9 @@ def main():
         default="none"
     )
     add.add_argument("--goal", required=True)
+    add.add_argument("--customer", default=None, help="Business customer scope for enterprise experience attribution")
+    add.add_argument("--business-task-type", default=None, help="Business rule type (e.g. quote); kept separate from dev --task-type routing")
+    add.add_argument("--mandatory-experience-rules", action="store_true", help="Fail-closed on Hub outage when fetching enterprise rules")
     add.add_argument(
         "--acceptance",
         action="append",
@@ -8221,6 +8341,9 @@ def main():
         default=[]
     )
     launch.add_argument("--prompt", required=True)
+    launch.add_argument("--customer", default=None, help="Business customer scope for enterprise experience attribution")
+    launch.add_argument("--business-task-type", default=None, help="Business rule type (e.g. quote); kept separate from dev --task-type routing")
+    launch.add_argument("--mandatory-experience-rules", action="store_true", help="Fail-closed on Hub outage when fetching enterprise rules")
     launch.add_argument("--run-id", default=None,
                         help="Use a caller-assigned Run identity, e.g. for Replay lineage")
     launch.add_argument("--execution-id", default=None,
@@ -8910,9 +9033,39 @@ def main():
     acceptance.add_argument('--artifact', action='append', required=True)
     acceptance.add_argument('--criterion', action='append', required=True)
 
+    sync_exp_cmd = sub.add_parser('sync-experience', help='Sync pending local business rule candidates with Hub')
+    sync_exp_cmd.add_argument('--json', action='store_true', help='Output JSON result')
+    sync_exp_cmd.add_argument('--force', action='store_true', help='Retry pending uploads immediately, ignoring backoff schedule')
+
     args = parser.parse_args()
 
-    if args.command == 'acceptance-record':
+    if args.command == 'sync-experience':
+        from herdr.experience.collector import ExperienceCollector
+        collector = ExperienceCollector()
+        res = collector.recover_and_sync(force=getattr(args, "force", False))
+        if getattr(args, "json", False):
+            print(json.dumps(res, ensure_ascii=False, indent=2))
+        else:
+            print(f"[EXPERIENCE SYNC] collected={res.get('pending_collected', 0)} retried={res.get('retried', 0)} succeeded={res.get('succeeded', 0)} failed={res.get('failed', 0)}")
+        # Fail loud when uploads remain unrecoverable: operator automation must
+        # not mistake an untouched or failed queue for recovery success.
+        # A forced drain attempts every eligible row, so any remainder means
+        # something did not go through.
+        if res.get("pending_upload_remaining", 0) > 0 and (
+            res.get("reason") == "no_hub_client"
+            or res.get("failed", 0) > 0
+            or getattr(args, "force", False)
+        ):
+            print("[EXPERIENCE SYNC FAILED] pending uploads remain; recovery did not complete", file=sys.stderr)
+            sys.exit(2)
+        if res.get("pending_collection_failed", 0) > 0:
+            print("[EXPERIENCE SYNC FAILED] pending collections failed; recovery did not complete", file=sys.stderr)
+            sys.exit(2)
+        if res.get("pending_collection_error", 0) > 0:
+            print("[EXPERIENCE SYNC FAILED] quarantined collections remain; a settlement was dropped", file=sys.stderr)
+            sys.exit(2)
+        sys.exit(0)
+    elif args.command == 'acceptance-record':
         from herdr.task_checkpoint import record_business_acceptance
         try:
             references = []
