@@ -371,12 +371,21 @@ class ExperienceCollector:
             try:
                 with conn:
                     if upload_ok:
-                        conn.execute("""
+                        cur = conn.execute("""
                             UPDATE local_collector_records
                             SET status = 'uploaded', last_error = NULL, retry_count = 0, next_retry_at = 0, updated_at = ?
-                            WHERE task_id = ? AND run_id = ?
-                        """, (time.time(), task_id, run_id))
-                        return {"ok": True, "status": "uploaded", "experience_id": exp.experience_id, "reason": "ready"}
+                            WHERE task_id = ? AND run_id = ? AND experience_id = ?
+                        """, (time.time(), task_id, run_id, exp.experience_id))
+                        if cur.rowcount:
+                            return {"ok": True, "status": "uploaded", "experience_id": exp.experience_id, "reason": "ready"}
+                        current = conn.execute(
+                            "SELECT status, experience_id FROM local_collector_records WHERE task_id = ? AND run_id = ?",
+                            (task_id, run_id),
+                        ).fetchone()
+                        if current is None:
+                            return {"ok": True, "status": "uploaded", "experience_id": exp.experience_id, "reason": "ready"}
+                        return {"ok": True, "status": current["status"],
+                                "experience_id": current["experience_id"], "reason": "superseded"}
                     else:
                         # Every settlement failure schedules backoff immediately:
                         # repeated task/eval writes must not each trigger an
@@ -491,15 +500,18 @@ class ExperienceCollector:
                 try:
                     with c:
                         if res.get("ok"):
-                            succeeded += 1
-                            c.execute(
+                            cur = c.execute(
                                 """
                                 UPDATE local_collector_records
                                 SET status = 'uploaded', last_error = NULL, retry_count = 0, next_retry_at = 0, updated_at = ?
-                                WHERE task_id = ? AND run_id = ?
+                                WHERE task_id = ? AND run_id = ? AND experience_id = ?
                                 """,
-                                (time.time(), row["task_id"], row["run_id"]),
+                                (time.time(), row["task_id"], row["run_id"], exp.experience_id),
                             )
+                            if cur.rowcount:
+                                succeeded += 1
+                            else:
+                                LOGGER.debug("Upload superseded for %s; row changed concurrently", row["task_id"])
                         else:
                             failed += 1
                             err = res.get("error") or "upload_rejected"
