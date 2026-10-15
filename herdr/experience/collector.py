@@ -426,6 +426,7 @@ class ExperienceCollector:
 
         processed = 0
         failed = 0
+        task_ids: List[str] = []
         for row in rows:
             tid = row["task_id"]
             outcome = None
@@ -439,13 +440,17 @@ class ExperienceCollector:
                 processed += 1
             else:
                 failed += 1
-        return {"processed": processed, "failed": failed}
+            task_ids.append(str(tid))
+        return {"processed": processed, "failed": failed, "task_ids": task_ids}
 
     def retry_pending_uploads(self, limit: int = 50, force: bool = False,
-                              exclude_task_id: Optional[str] = None) -> Dict[str, Any]:
+                              exclude_task_id: Optional[str] = None,
+                              exclude_task_ids: Optional[List[str]] = None) -> Dict[str, Any]:
         """Retry pending uploads that were delayed due to Hub offline or network errors."""
         if not self.hub_client:
             return {"retried": 0, "succeeded": 0, "failed": 0, "reason": "no_hub_client"}
+        excluded = {str(exclude_task_id)} if exclude_task_id else set()
+        excluded |= {str(t) for t in (exclude_task_ids or [])}
 
         now = time.time()
         conn = _get_collector_db(self.db_path)
@@ -468,8 +473,8 @@ class ExperienceCollector:
                     """,
                     (now, limit),
                 ).fetchall()
-            if exclude_task_id:
-                rows = [r for r in rows if str(r["task_id"]) != str(exclude_task_id)]
+            if excluded:
+                rows = [r for r in rows if str(r["task_id"]) not in excluded]
         finally:
             conn.close()
 
@@ -536,10 +541,32 @@ class ExperienceCollector:
 
     def recover_and_sync(self, state_db_path: Optional[Path] = None, force: bool = False,
                            exclude_task_id: Optional[str] = None) -> Dict[str, Any]:
-        """Drains pending collections and retries pending uploads. Safe to call periodically."""
+        """Drains pending collections and retries pending uploads. Safe to call periodically.
+
+        Rows collected in this same pass are excluded from the immediate retry
+        (unless force drains everything): their first failure stays
+        immediately eligible, and retrying them here would double every Hub call.
+        """
         with self._lock:
             pending_stats = self.process_pending(state_db_path=state_db_path)
-            upload_stats = self.retry_pending_uploads(force=force, exclude_task_id=exclude_task_id)
+            same_pass = [str(t) for t in (pending_stats.get("task_ids") or [])]
+            if exclude_task_id:
+                same_pass.append(str(exclude_task_id))
+            upload_stats = {"retried": 0, "succeeded": 0, "failed": 0}
+            if force:
+                # Explicit operator sync drains every batch (bounded loop).
+                for _ in range(20):
+                    batch = self.retry_pending_uploads(force=True)
+                    upload_stats["retried"] += batch.get("retried", 0)
+                    upload_stats["succeeded"] += batch.get("succeeded", 0)
+                    upload_stats["failed"] += batch.get("failed", 0)
+                    if batch.get("retried", 0) == 0:
+                        upload_stats["reason"] = batch.get("reason") or ""
+                        break
+                else:
+                    upload_stats["reason"] = ""
+            else:
+                upload_stats = self.retry_pending_uploads(exclude_task_ids=same_pass)
             remaining = 0
             pending_remaining = 0
             quarantined = 0
