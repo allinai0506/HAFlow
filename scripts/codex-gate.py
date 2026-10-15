@@ -72,7 +72,11 @@ def fetch_threads(owner: str, repo: str, pr: int, token: str) -> Dict[str, Any]:
                      "Accept": "application/vnd.github+json"})
         with urllib.request.urlopen(req, timeout=30) as resp:
             page = json.loads(resp.read().decode())
-        pr_node = ((page.get("data") or {}).get("repository") or {}).get("pullRequest") or {}
+        if isinstance(page.get("errors"), list) and page["errors"]:
+            raise RuntimeError(f"GitHub GraphQL errors: {page['errors'][0].get('message')}")
+        pr_node = ((page.get("data") or {}).get("repository") or {}).get("pullRequest")
+        if pr_node is None:
+            raise RuntimeError("GitHub GraphQL returned no pullRequest node (fail-closed)")
         threads = pr_node.get("reviewThreads") or {}
         nodes.extend(threads.get("nodes") or [])
         info = threads.get("pageInfo") or {}

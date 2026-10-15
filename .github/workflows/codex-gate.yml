@@ -12,6 +12,15 @@ on:
       - opened
       - synchronize
       - reopened
+  # Codex reviews land after the synchronize run; without these the gate keeps
+  # a stale result. Note: resolving a thread fires no workflow event, so after
+  # resolving, re-run this check manually.
+  pull_request_review:
+    types:
+      - submitted
+  pull_request_review_comment:
+    types:
+      - created
 
 concurrency:
   group: codex-gate-${{ github.event.pull_request.number }}
@@ -26,13 +35,23 @@ jobs:
     runs-on: ubuntu-latest
     if: github.repository == 'allinai0506/HAFlow'
     steps:
-      - name: Checkout PR head (script only, no secrets in code)
+      # The gate implementation must come from the protected base revision,
+      # never from the PR under review (else a PR could neuter its own gate).
+      - name: Checkout trusted base revision
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ github.event.pull_request.base.sha }}
           fetch-depth: 1
           sparse-checkout: |
             scripts/codex-gate.py
+
+      - name: Bootstrap fallback (script is new in this PR)
+        run: |
+          if [ ! -f scripts/codex-gate.py ]; then
+            echo "::warning::codex-gate.py not in base; using PR head (bootstrap only)"
+            git fetch origin ${{ github.event.pull_request.head.sha }} --depth 1
+            git checkout ${{ github.event.pull_request.head.sha }} -- scripts/codex-gate.py
+          fi
 
       - name: Check unresolved Codex P1 threads
         env:

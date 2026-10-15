@@ -433,7 +433,8 @@ class ExperienceCollector:
             processed += 1
         return processed
 
-    def retry_pending_uploads(self, limit: int = 50, force: bool = False) -> Dict[str, Any]:
+    def retry_pending_uploads(self, limit: int = 50, force: bool = False,
+                              exclude_task_id: Optional[str] = None) -> Dict[str, Any]:
         """Retry pending uploads that were delayed due to Hub offline or network errors."""
         if not self.hub_client:
             return {"retried": 0, "succeeded": 0, "failed": 0, "reason": "no_hub_client"}
@@ -459,6 +460,8 @@ class ExperienceCollector:
                     """,
                     (now, limit),
                 ).fetchall()
+            if exclude_task_id:
+                rows = [r for r in rows if str(r["task_id"]) != str(exclude_task_id)]
         finally:
             conn.close()
 
@@ -523,11 +526,12 @@ class ExperienceCollector:
 
         return {"retried": retried, "succeeded": succeeded, "failed": failed}
 
-    def recover_and_sync(self, state_db_path: Optional[Path] = None, force: bool = False) -> Dict[str, Any]:
+    def recover_and_sync(self, state_db_path: Optional[Path] = None, force: bool = False,
+                           exclude_task_id: Optional[str] = None) -> Dict[str, Any]:
         """Drains pending collections and retries pending uploads. Safe to call periodically."""
         with self._lock:
             collected = self.process_pending(state_db_path=state_db_path)
-            upload_stats = self.retry_pending_uploads(force=force)
+            upload_stats = self.retry_pending_uploads(force=force, exclude_task_id=exclude_task_id)
             return {
                 "ok": True,
                 "pending_collected": collected,
@@ -549,7 +553,10 @@ class ExperienceCollector:
         def _worker():
             try:
                 self.process_task_settlement(task_id, outcome, state_db_path)
-                self.recover_and_sync(state_db_path)
+                # Exclude the just-attempted task: its first failure stays
+                # immediately eligible, and an unconditional recover here would
+                # re-submit it a second time before any backoff.
+                self.recover_and_sync(state_db_path, exclude_task_id=str(task_id))
             except Exception as exc:
                 LOGGER.debug("Async collector worker error: %s", exc)
 
