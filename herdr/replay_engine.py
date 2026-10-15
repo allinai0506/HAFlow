@@ -187,9 +187,12 @@ def build_launch_argv(
     run_id: str = "",
     replay_of: str = "",
     policy: dict[str, Any] | None = None,
+    customer: str = "",
+    business_task_type: str = "",
+    mandatory_experience_rules: bool = False,
 ) -> list[str]:
     """Build the existing launch-chain argv without side effects."""
-    return [
+    argv = [
         "herdr-task", "launch",
         "--task-id", str(task_id),
         "--workflow-id", str(workflow_id),
@@ -202,6 +205,13 @@ def build_launch_argv(
         "--replay-of", str(replay_of),
         "--agent-policy", json.dumps(policy, ensure_ascii=False),
     ]
+    if str(customer or "").strip():
+        argv += ["--customer", str(customer).strip()]
+    if str(business_task_type or "").strip():
+        argv += ["--business-task-type", str(business_task_type).strip()]
+    if mandatory_experience_rules:
+        argv += ["--mandatory-experience-rules"]
+    return argv
 
 
 def build_preflight_argv(*, source: str) -> list[str]:
@@ -308,6 +318,9 @@ def replay_run(
         run_id=target_run,
         replay_of=source_run_id,
         policy=effective_policy,
+        customer=str(source_task.get("customer") or ""),
+        business_task_type=str(source_task.get("business_task_type") or ""),
+        mandatory_experience_rules=bool(source_task.get("mandatory_experience_rules")),
     )
     preflight_argv = build_preflight_argv(source=effective_source)
 

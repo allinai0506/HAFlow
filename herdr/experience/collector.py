@@ -445,7 +445,8 @@ class ExperienceCollector:
 
     def retry_pending_uploads(self, limit: int = 50, force: bool = False,
                               exclude_task_id: Optional[str] = None,
-                              exclude_task_ids: Optional[List[str]] = None) -> Dict[str, Any]:
+                              exclude_task_ids: Optional[List[str]] = None,
+                              exclude_rows: Optional[set] = None) -> Dict[str, Any]:
         """Retry pending uploads that were delayed due to Hub offline or network errors."""
         if not self.hub_client:
             return {"retried": 0, "succeeded": 0, "failed": 0, "reason": "no_hub_client"}
@@ -475,6 +476,8 @@ class ExperienceCollector:
                 ).fetchall()
             if excluded:
                 rows = [r for r in rows if str(r["task_id"]) not in excluded]
+            if exclude_rows:
+                rows = [r for r in rows if (str(r["task_id"]), str(r["run_id"])) not in exclude_rows]
         finally:
             conn.close()
 
@@ -537,7 +540,8 @@ class ExperienceCollector:
                     c.close()
                 LOGGER.debug("Retry upload failed for %s: %s", row["task_id"], e)
 
-        return {"retried": retried, "succeeded": succeeded, "failed": failed}
+        return {"retried": retried, "succeeded": succeeded, "failed": failed,
+                "attempted": [(str(r["task_id"]), str(r["run_id"])) for r in rows]}
 
     def recover_and_sync(self, state_db_path: Optional[Path] = None, force: bool = False,
                            exclude_task_id: Optional[str] = None) -> Dict[str, Any]:
@@ -554,12 +558,17 @@ class ExperienceCollector:
                 same_pass.append(str(exclude_task_id))
             upload_stats = {"retried": 0, "succeeded": 0, "failed": 0}
             if force:
-                # Explicit operator sync drains every batch (bounded loop).
+                # Explicit operator sync drains every batch (bounded loop), but
+                # each row is attempted only once per invocation: forced retries
+                # ignore backoff, so without this a failing row would be
+                # re-selected on every iteration (retry storm).
+                attempted: set = set()
                 for _ in range(20):
-                    batch = self.retry_pending_uploads(force=True)
+                    batch = self.retry_pending_uploads(force=True, exclude_rows=attempted)
                     upload_stats["retried"] += batch.get("retried", 0)
                     upload_stats["succeeded"] += batch.get("succeeded", 0)
                     upload_stats["failed"] += batch.get("failed", 0)
+                    attempted |= {(str(t), str(r)) for t, r in batch.get("attempted", [])}
                     if batch.get("retried", 0) == 0:
                         upload_stats["reason"] = batch.get("reason") or ""
                         break
