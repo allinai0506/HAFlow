@@ -21,6 +21,14 @@ def stop(*args,**kwargs): raise StopEntry()
 @pytest.mark.parametrize('relative,service', [('services/herdr-controller.py','com.user.herdr-controller'),('services/herdr-sentinel.py','com.user.herdr-sentinel'),('console/herdr_factory_console.py','com.user.herdr-factory-console')])
 def test_main_logs_actual_import_fingerprint_before_work(relative,service,tmp_path,capsys,monkeypatch):
     monkeypatch.setenv('OPENAI_API_KEY','fake-secret-do-not-log')
+    # Hermetic run: nothing here may touch the developer's real home.
+    monkeypatch.setenv('HOME',str(tmp_path))
+    # The loop's first iteration fires the enterprise-experience background
+    # sync (`now - 0.0 >= 30` is true with a real clock). That call is imported
+    # inside main(), so it bypasses the stub namespace below and would start a
+    # real worker: default collector DB under HOME plus real Hub I/O. Stop the
+    # transport explicitly rather than relying on interval timing.
+    monkeypatch.setattr('herdr.experience.collector.trigger_background_sync',lambda *args,**kwargs: False)
     path=ROOT/relative
     tree=ast.parse(path.read_text())
     main=next(node for node in tree.body if isinstance(node,ast.FunctionDef) and node.name=='main')
@@ -35,6 +43,12 @@ def test_main_logs_actual_import_fingerprint_before_work(relative,service,tmp_pa
     assert records[0]['running_sha']=='unknown' # workspace is not release evidence
     assert str(path.resolve()) in records[0]['component_versions']
     assert 'fake-secret-do-not-log' not in output
+    # Executable hermeticity guard: executing real entrypoint code must not
+    # create the default collector database (or anything else) under HOME.
+    # A leaked background sync produced a 16KB
+    # ~/.herdr-controller/experience_collector.db here before it was stubbed.
+    assert not (tmp_path/'.herdr-controller').exists()
+    assert not list(tmp_path.glob('**/*.db'))
 
 
 def test_doctor_reports_configured_snapshot_but_runtime_unknown(tmp_path,capsys,monkeypatch):
