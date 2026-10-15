@@ -29,6 +29,7 @@ from herdr import deliverables as herdr_deliverables
 from herdr import archive as herdr_archive
 from herdr import controller_actions as herdr_controller_actions
 from herdr import dashboard as herdr_dashboard
+from herdr.reason_labels import human_reason
 from herdr import workflow_docs as herdr_workflow_docs
 from herdr import delivery_record as herdr_delivery_record
 from herdr import interaction_loop as herdr_interaction_loop
@@ -403,7 +404,7 @@ def overview():
             'status': t.get('status'),
             'agent': t.get('agent'),
             'pane_id': t.get('pane_id'),
-            'reason': (
+            'reason': human_reason(
                 t.get('failure_reason')
                 or t.get('blocked_reason')
                 or t.get('sentinel_reason')
@@ -7045,6 +7046,13 @@ function humanStatus(s){
     finalizing:'收尾中',mixed:'处理中',active:'运行中'
   })[s]||s||'未知'
 }
+function humanReason(value){
+  const text=String(value??'').trim();
+  const labels={
+    inner_loop_exhausted:'工位内循环已耗尽全部重试次数，无法自愈，需要总指挥仲裁'
+  };
+  return Object.prototype.hasOwnProperty.call(labels, text)?labels[text]:text;
+}
 function humanNodeStatus(s){
   return s==='completed'?'已完成':humanStatus(s);
 }
@@ -9355,7 +9363,7 @@ function decisionSummary(t){
   return {
     title,
     question:t.decision_question||`是否批准“${title}”继续推进？`,
-    basis:t.stage_verdict_note||blocker||t.blocked_reason||t.goal||'请核查成果后选择通过并放行或批注打回'
+    basis:humanReason(t.stage_verdict_note||blocker||t.blocked_reason||t.sentinel_reason||t.goal||'请核查成果后选择通过并放行或批注打回')
   };
 }
 function copyCliCommand(cmd){
@@ -10700,8 +10708,8 @@ function buildTaskEvents(task,proj){
   const rtStart=taskDrawerNumTs(rt.started_at);
   if(rtStart!==null&&!evs.some(e=>e.type==='runtime_ready'))push('runtime_ready',rtStart,'运行现场就绪',(task.pane_id?('工位 '+task.pane_id):''),'info');
   const upd=taskUpdatedAt(task);
-  const blockers=Array.isArray(proj.blockers)?proj.blockers:(proj.blocker?[proj.blocker]:((task.blocker||task.blocked_reason)?[task.blocker||task.blocked_reason]:[]));
-  const realBlockers=blockers.filter(b=>b&&String(b).trim());
+  const blockers=Array.isArray(proj.blockers)?proj.blockers:(proj.blocker?[proj.blocker]:((task.blocker||task.blocked_reason||task.sentinel_reason)?[task.blocker||task.blocked_reason||task.sentinel_reason]:[]));
+  const realBlockers=blockers.map(humanReason).filter(b=>b&&String(b).trim());
   if(realBlockers.length&&upd!==null&&!evs.some(e=>(e.type==='blocked'||e.type==='failed')&&e.timestamp!==null&&Math.abs(e.timestamp-upd)<2))push('blocked',upd,'任务已阻塞',String(realBlockers[0]),'warn');
   let acts=proj.recent_activity;
   if(typeof acts==='string'&&acts)acts=acts.split('\n');
@@ -10714,7 +10722,7 @@ function renderTaskOverview(task,proj){
   task=task||{};proj=proj||{};
   const goal=task.goal||proj.goal||proj.intent||'';
   const result=task.last_result||task.result||'';
-  const blocker=proj.blocker||task.blocker||task.blocked_reason||'';
+  const blocker=humanReason(proj.blocker||task.blocker||task.blocked_reason||task.sentinel_reason||'');
   const verdict=task.stage_verdict||'';
   const note=task.stage_verdict_note||'';
   let h='';
@@ -10898,7 +10906,7 @@ function switchTaskDrawerTab(tab){
   const drawer=document.getElementById('taskDrawer');
   if(drawer&&drawer.hidden){drawer.hidden=false;drawer.classList.add('open')}
 }
-async function showTask(id){try{const [td,proj]=await Promise.all([api('/api/task?id='+encodeURIComponent(id)).catch(()=>null),api('/api/task/projection?id='+encodeURIComponent(id)).catch(()=>null)]);const d=proj||(td&&td.task)||{};const raw=td||proj||{};const st=d.status||(td&&td.task&&td.task.status)||'unknown';const intent=d.intent||(td&&td.task&&td.task.goal)||'无明确意图描述';const blockers=Array.isArray(d.blockers)?d.blockers:(d.blocker?[d.blocker]:[]);const ms=Array.isArray(d.milestones)?d.milestones:[];const arts=Array.isArray(d.artifacts)?d.artifacts:[];const acts=Array.isArray(d.recent_activity)?d.recent_activity:(typeof d.recent_activity==='string'&&d.recent_activity?d.recent_activity.split('\n'):[]);const blkHtml=blockers.length?`<div class="proj-blk"><strong>⚠️ 卡点告警:</strong><span>${esc(blockers.join('; '))}</span></div>`:'';const msHtml=ms.length?`<div class="proj-sec"><div class="proj-lbl">动态路标</div>${ms.map(m=>`<div class="proj-ms"><span class="proj-ms-dot ${m.status}">${m.status==='completed'?'✓':(m.status==='in_progress'?'›':'·')}</span><span style="${m.status==='completed'?'color:var(--text)':(m.status==='in_progress'?'color:var(--warn);font-weight:600':'color:var(--muted)')}">${esc(m.label)}</span></div>`).join('')}</div>`:'';const artHtml=arts.length?`<div class="proj-sec"><div class="proj-lbl">核心产物</div>${arts.map(a=>`<div class="proj-art"><div class="proj-art-hd"><span>${esc(a.name||a.kind)}</span><span class="badge ${a.passed?'cleaned':(a.kind==='evaluation'?'failed':'waiting')}">${esc(a.kind)}</span></div><div class="muted">${esc(a.summary||'')}</div></div>`).join('')}</div>`:'';const actHtml=acts.length?`<div class="proj-sec"><div class="proj-lbl">近期动态提炼</div><ul class="proj-acts">${acts.map(a=>`<li>${esc(a)}</li>`).join('')}</ul></div>`:'';const body=`<div class="proj-box"><div style="display:flex;justify-content:space-between;align-items:center;padding-bottom:8px;border-bottom:1px solid var(--line)"><div><span class="badge ${st}">${esc(st)}</span><span style="margin-left:8px;font-size:12px;color:var(--muted)">执行者: <strong>${esc(d.agent||'-')}</strong></span><span style="margin-left:8px;font-size:12px;color:var(--muted)">工位: <strong>${esc(d.node||'-')}</strong></span></div><button class="mini" onclick="const el=document.getElementById('taskRawPre');if(el)el.style.display=el.style.display==='none'?'block':'none'">原始数据</button></div>${blkHtml}<div class="proj-sec"><div class="proj-lbl">当前语义意图</div><div class="proj-txt">${esc(intent)}</div></div>${msHtml}${artHtml}${actHtml}<div id="taskRawPre" style="display:none;margin-top:8px"><div class="proj-lbl">原始调试数据</div><pre>${esc(JSON.stringify(raw,null,2))}</pre></div></div>`;openModal('任务白盒简报 · '+id,body)}catch(e){toast(e.message,true)}}async function showPane(id){if(!id)return toast('没有工位',true);try{const d=await api('/api/pane/read?id='+encodeURIComponent(id));openModal('工位 '+id,`<pre>${esc(d.output)}</pre>`)}catch(e){toast(e.message,true)}}async function askCoordinator(id){try{toast('正在通知总指挥…');await api('/api/task/coordinator',{method:'POST',body:JSON.stringify({task_id:id})});toast('总指挥已处理/接收')}catch(e){toast(e.message,true)}}
+async function showTask(id){try{const [td,proj]=await Promise.all([api('/api/task?id='+encodeURIComponent(id)).catch(()=>null),api('/api/task/projection?id='+encodeURIComponent(id)).catch(()=>null)]);const d=proj||(td&&td.task)||{};const raw=td||proj||{};const st=d.status||(td&&td.task&&td.task.status)||'unknown';const intent=d.intent||(td&&td.task&&td.task.goal)||'无明确意图描述';const blockers=Array.isArray(d.blockers)?d.blockers:(d.blocker?[d.blocker]:[]);const ms=Array.isArray(d.milestones)?d.milestones:[];const arts=Array.isArray(d.artifacts)?d.artifacts:[];const acts=Array.isArray(d.recent_activity)?d.recent_activity:(typeof d.recent_activity==='string'&&d.recent_activity?d.recent_activity.split('\n'):[]);const blkHtml=blockers.length?`<div class="proj-blk"><strong>⚠️ 卡点告警:</strong><span>${esc(blockers.map(humanReason).join('; '))}</span></div>`:'';const msHtml=ms.length?`<div class="proj-sec"><div class="proj-lbl">动态路标</div>${ms.map(m=>`<div class="proj-ms"><span class="proj-ms-dot ${m.status}">${m.status==='completed'?'✓':(m.status==='in_progress'?'›':'·')}</span><span style="${m.status==='completed'?'color:var(--text)':(m.status==='in_progress'?'color:var(--warn);font-weight:600':'color:var(--muted)')}">${esc(m.label)}</span></div>`).join('')}</div>`:'';const artHtml=arts.length?`<div class="proj-sec"><div class="proj-lbl">核心产物</div>${arts.map(a=>`<div class="proj-art"><div class="proj-art-hd"><span>${esc(a.name||a.kind)}</span><span class="badge ${a.passed?'cleaned':(a.kind==='evaluation'?'failed':'waiting')}">${esc(a.kind)}</span></div><div class="muted">${esc(a.summary||'')}</div></div>`).join('')}</div>`:'';const actHtml=acts.length?`<div class="proj-sec"><div class="proj-lbl">近期动态提炼</div><ul class="proj-acts">${acts.map(a=>`<li>${esc(a)}</li>`).join('')}</ul></div>`:'';const body=`<div class="proj-box"><div style="display:flex;justify-content:space-between;align-items:center;padding-bottom:8px;border-bottom:1px solid var(--line)"><div><span class="badge ${st}">${esc(st)}</span><span style="margin-left:8px;font-size:12px;color:var(--muted)">执行者: <strong>${esc(d.agent||'-')}</strong></span><span style="margin-left:8px;font-size:12px;color:var(--muted)">工位: <strong>${esc(d.node||'-')}</strong></span></div><button class="mini" onclick="const el=document.getElementById('taskRawPre');if(el)el.style.display=el.style.display==='none'?'block':'none'">原始数据</button></div>${blkHtml}<div class="proj-sec"><div class="proj-lbl">当前语义意图</div><div class="proj-txt">${esc(intent)}</div></div>${msHtml}${artHtml}${actHtml}<div id="taskRawPre" style="display:none;margin-top:8px"><div class="proj-lbl">原始调试数据</div><pre>${esc(JSON.stringify(raw,null,2))}</pre></div></div>`;openModal('任务白盒简报 · '+id,body)}catch(e){toast(e.message,true)}}async function showPane(id){if(!id)return toast('没有工位',true);try{const d=await api('/api/pane/read?id='+encodeURIComponent(id));openModal('工位 '+id,`<pre>${esc(d.output)}</pre>`)}catch(e){toast(e.message,true)}}async function askCoordinator(id){try{toast('正在通知总指挥…');await api('/api/task/coordinator',{method:'POST',body:JSON.stringify({task_id:id})});toast('总指挥已处理/接收')}catch(e){toast(e.message,true)}}
 async function openSignoffChamber(taskId){try{const [td,proj]=await Promise.all([api('/api/task?id='+encodeURIComponent(taskId)).catch(()=>null),api('/api/task/projection?id='+encodeURIComponent(taskId)).catch(()=>null)]);const d=proj||(td&&td.task)||{};const t=(td&&td.task)||{};window._signoffTask=t;const wid=t.workflow_id||state.workflowId;const node=t.node||t.stage||'';const arts=Array.isArray(d.artifacts)?d.artifacts:[];const isBlocked=t.stage_verdict==='blocked'||t.status==='blocked';let artCards='<div class="empty">暂无生成产物</div>';if(arts.length){artCards=arts.map(a=>`<div class="proj-sec" style="margin-bottom:8px"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px"><strong>${esc(a.name||a.kind)}</strong><span class="badge ${a.passed?'cleaned':(a.kind==='evaluation'?'failed':'waiting')}">${esc(a.kind)}</span></div><div class="task-meta" style="margin-bottom:8px">${esc(a.path||'')}</div><div class="proj-txt ctl-pre-light">${esc(a.content||a.summary||'（文件产物记录正常）')}</div></div>`).join('')}const html=`<div class="signoff-box"><div class="signoff-head"><div><div style="font-size:16px;font-weight:700">${esc(taskDisplayName(t))}</div><div class="task-meta">任务 ID: ${esc(taskId)} · 执行者: <b>${esc(t.agent||'-')}</b> · 节点: <b>${esc(node)}</b> · 版本: <b>v${esc(t.version!=null?t.version:'-')}</b></div></div><div>${badge(t.status)}</div></div>${isBlocked?'<div class="proj-blk"><strong>⚠️ 门禁会签等待:</strong> 当前节点触发门禁阻断，需要人类总指挥核查产物并决策放行或打回。</div>':''}<div class="proj-sec"><div class="proj-lbl">核心交付物与成果列表</div>${artCards}</div><div class="form"><label for="signoffFeedback">审批意见 / 批注说明（通过必填原因，打回可选）</label><input id="signoffFeedback" placeholder="例如：经核验核心成果符合要求，特批放行"></div><div class="signoff-actions"><button class="btn" onclick="closeModal()">暂不处理</button><button class="btn danger-btn" onclick="submitSignoffDecision(\'${esc(taskId)}\',\'${esc(wid)}\',\'${esc(node)}\',\'reject\')">批注打回</button><button class="btn primary" onclick="submitSignoffDecision(\'${esc(taskId)}\',\'${esc(wid)}\',\'${esc(node)}\',\'approve\')">通过并放行</button></div></div>`;openModal('成果交付会签室 (Artifact Signoff Chamber)',html)}catch(e){toast(e.message,true)}}
 async function submitSignoffDecision(taskId,wid,node,act){const feedback=(document.getElementById('signoffFeedback')?.value||'').trim();if(act==='approve'&&!feedback){return toast('通过并放行必须填写审批说明原因',true)}closeModal();try{toast(act==='approve'?'正在通过并放行…':'正在批注打回…');const body={task_id:taskId,workflow_id:wid,node:node,action:act,feedback:feedback,reason:feedback,operator:'总指挥'};if(act==='approve'){body.confirmed=true;const curT=window._signoffTask||{};if(curT.task_id===taskId){if(curT.version!==undefined&&curT.version!==null)body.expected_version=curT.version;if(curT.pane_id)body.expected_pane_id=curT.pane_id}}const res=await api('/api/task/signoff',{method:'POST',body:JSON.stringify(body)});if(res.ok){await loadWorkflow(wid);toast(act==='approve'?'已通过并放行门禁！':'已完成批注打回，已回退至上游重新推进')}else{toast('操作失败: '+(res.error||'未知错误'),true)}}catch(e){toast(e.message,true)}}
 async function forceReviewTask(tid){
@@ -11131,7 +11139,7 @@ function openControllerCockpitModal(){
     const sections=groups.map((g,gi)=>{
       const b=g.blocker||{};
       const tid=b.task_id||(g.items[0]?actionKey(g.items[0]):'')||'';
-      const reason=b.stage_verdict_note||b.blocker||b.blocked_reason||'';
+      const reason=humanReason(b.stage_verdict_note||b.blocker||b.blocked_reason||b.sentinel_reason||'');
       const st=b.status||'';
       const ag=b.agent||'';
       const stageLabel=b.stage_label||b.stage||b.node||'';
@@ -11203,7 +11211,7 @@ function recoveryCard(o,wid){
   const labels={pending:'等待派发',running:'正在处理',waiting:'已暂缓',waiting_human:'等待人工确认',awaiting_result:'等待总指挥建立任务'};
   const reasons={dispatch_task_missing:'未确认目标任务登记，请核对已有派发并补足需求',dispatch_delivery_unknown:'派发结果未知，先核验已有任务',dispatch_awaiting_task:'通知已返回，正在核验实际任务登记',legacy_dispatch_unknown:'历史通知无登记证据，正在核验',coordinator_missing:'总指挥工位不可用，等待前置问题处理',dispatch_generation_changed:'工作流代次或配置已变化，旧派发需核对',coordinator_busy:'总指挥忙碌，等待下一次检查',source_wip_requires_decision:'源仓库存在未处理改动，请先确认归属和处理方式',delivery_unknown:'交付结果未知，请核对现有后继',successor_delivery_unconfirmed:'后继交付尚未确认',candidate_unknown:'候选身份尚未确认',candidate_mismatch:'验收候选与当前候选不一致',recovery_successor_failed:'修复任务仍未通过，需要人工处理',finalize_escalated:'交付需要人工排除前置障碍',workflow_execution_unknown:'工作流执行身份尚未确认'};
   const code=o.detail?.reason||o.payload?.reason;
-  const reason=r?.summary||o.detail?.decision_needed||reasons[code]||code||'等待恢复处理';
+  const reason=r?.summary||o.detail?.decision_needed||reasons[code]||humanReason(code)||'等待恢复处理';
   const controls=r?(r.actions||[]).map(a=>`<button class="mini" data-recovery-action="${esc(a.action)}" onclick="openRecoveryDecision(${o.id},'${esc(a.action)}')">${esc(a.label)}</button>`).join(''):(o.status==='waiting_human'?`<button class="mini" onclick="decideRecovery(${o.id},${o.version},'${o.started?'verify':'retry'}','${esc(wid)}')">${o.started?'核对现有任务':'前置问题已处理，重试'}</button><button class="mini" onclick="decideRecovery(${o.id},${o.version},'hold','${esc(wid)}')">暂缓一小时</button>`:'');
   return `<div class="ctl-blocker"><strong>${esc(cleanStageLabel(r?.node_label||o.payload?.node_id||'恢复待办'))} · ${esc(labels[o.status]||o.status)}</strong><div>${esc(reason)}</div>${r?`<p class="muted">${esc(r.explanation)}</p><p>${esc(r.next_step)}</p><div>${(r.resource_checks||[]).map(c=>`<p>${esc(c.task_id||'旧启动')}：${esc(c.message)}</p>`).join('')}</div><div class="muted">验收版本：${esc((r.candidate_sha||'未确认').slice(0,12))}</div>`:''}<div class="muted">负责人：总指挥 · 恢复：Controller · ${o.status!=='waiting_human'&&o.next_due_at?'下次检查：'+new Date(o.next_due_at*1000).toLocaleString():'等待人工决定'}${o.detail?.deadline_at?' · 截止：'+new Date(o.detail.deadline_at*1000).toLocaleString():''}</div><div>${controls}</div></div>`;
 }

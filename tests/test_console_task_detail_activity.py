@@ -45,6 +45,7 @@ def _extract_fn(html, name):
 
 STUB_GLOBALS = (
     "function humanStatus(s){return s||'unknown';}"
+    "function humanReason(s){return s==null?'':String(s);}"
     "var state={selectedTaskDetail:null,workflowId:null};"
     "function taskDisplayName(t){return 'T';}"
     "function esc(s){return String(s??'');}"

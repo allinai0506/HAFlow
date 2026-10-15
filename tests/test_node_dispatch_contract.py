@@ -483,6 +483,7 @@ def test_console_renders_dispatch_wait_owner_deadline_and_decision(tmp_path):
                    'payload': {'kind': 'node_dispatch', 'node_id': 'implementation'}}]
     script = ('const state={controllerActionsData:{recovery:' + json.dumps(operations) + '}};\n'
               'function cleanStageLabel(x){return String(x);}'
+              'function humanReason(x){return x==null?\'\':String(x);}'
               'function esc(x){return String(x).replaceAll("<","&lt;").replaceAll(">","&gt;");}\n'
               + renderer + '\nconsole.log(renderRecoveryPanel("wf"));')
     result = subprocess.run([node, '-e', script], text=True, capture_output=True, timeout=10)

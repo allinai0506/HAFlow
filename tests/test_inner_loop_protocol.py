@@ -290,7 +290,8 @@ class BlockerArbitrationEventTest(unittest.TestCase):
             self._task(clone_path=clone), "inner_loop_exhausted"
         )
         self.assertIn("HERDR_CONTROLLER_BLOCKER_EVENT", message)
-        self.assertIn("inner_loop_exhausted", message)
+        self.assertIn("工位内循环已耗尽全部重试次数", message)
+        self.assertNotIn("inner_loop_exhausted", message)
         self.assertIn("评分停滞在 0.4", message)
         self.assertIn("set wf-1-impl-x working", message)
         self.assertIn("failed", message)

@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .kernel import state_db_path
+from .reason_labels import human_reason
 
 ANSI_REGEX = re.compile(
     r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\].*?(?:\x07|\x1b\\))"
@@ -236,35 +237,33 @@ def extract_task_blockers(task: Dict[str, Any], clean_text: str) -> List[str]:
     elif status == "interrupted":
         blockers.append(f"已制动暂停: {task.get('interrupt_reason') or '人工干预'}")
 
-    if not clean_text:
-        return blockers
+    if clean_text:
+        # 1. Explicit marker [HERDR_TASK_BLOCKER] or [BLOCKER]
+        marker_match = re.search(r"\[(?:HERDR_TASK_)?BLOCKER\][:\s]*(.+)", clean_text, re.IGNORECASE)
+        if marker_match:
+            blockers.append(marker_match.group(1).strip())
+        elif "HERDR_TASK_BLOCKER" in clean_text:
+            blockers.append("终端输出阻碍标记 HERDR_TASK_BLOCKER")
 
-    # 1. Explicit marker [HERDR_TASK_BLOCKER] or [BLOCKER]
-    marker_match = re.search(r"\[(?:HERDR_TASK_)?BLOCKER\][:\s]*(.+)", clean_text, re.IGNORECASE)
-    if marker_match:
-        blockers.append(marker_match.group(1).strip())
-    elif "HERDR_TASK_BLOCKER" in clean_text:
-        blockers.append("终端输出阻碍标记 HERDR_TASK_BLOCKER")
+        # 2. Fatal runtime error signatures in recent log tail
+        tail_lines = [l.strip() for l in clean_text.splitlines() if l.strip()][-12:]
+        tail_text = "\n".join(tail_lines)
 
-    # 2. Fatal runtime error signatures in recent log tail
-    tail_lines = [l.strip() for l in clean_text.splitlines() if l.strip()][-12:]
-    tail_text = "\n".join(tail_lines)
+        import_err = re.search(r"(?:ModuleNotFoundError|ImportError):\s*([^\n\r]+)", tail_text)
+        if import_err:
+            blockers.append(f"依赖缺失: {import_err.group(0).strip()}")
 
-    import_err = re.search(r"(?:ModuleNotFoundError|ImportError):\s*([^\n\r]+)", tail_text)
-    if import_err:
-        blockers.append(f"依赖缺失: {import_err.group(0).strip()}")
+        syntax_err = re.search(r"(?:SyntaxError):\s*([^\n\r]+)", tail_text)
+        if syntax_err:
+            blockers.append(f"语法错误: {syntax_err.group(0).strip()}")
 
-    syntax_err = re.search(r"(?:SyntaxError):\s*([^\n\r]+)", tail_text)
-    if syntax_err:
-        blockers.append(f"语法错误: {syntax_err.group(0).strip()}")
-
-    # Deduplicate while preserving order
     deduped: List[str] = []
     seen = set()
     for b in blockers:
-        if b not in seen:
-            seen.add(b)
-            deduped.append(b)
+        text = human_reason(b)
+        if text not in seen:
+            seen.add(text)
+            deduped.append(text)
     return deduped
 
 

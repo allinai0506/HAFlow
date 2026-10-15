@@ -15,6 +15,7 @@ if str(HERDR_ROOT) not in sys.path:
     sys.path.insert(0, str(HERDR_ROOT))
 
 from herdr import liveness  # noqa: E402  (must follow sys.path bootstrap)
+from herdr.reason_labels import INNER_LOOP_EXHAUSTED_TEXT  # noqa: E402
 
 HOME = Path.home()
 ROOT = HOME / ".herdr-controller"
@@ -932,7 +933,7 @@ def main():
                 )
                 if blocker_action == "record":
                     print(
-                        f"[SENTINEL BLOCKER] task={task_id} pane={pane_id} — inner loop exhausted, observation sent to Controller",
+                        f"[SENTINEL BLOCKER] task={task_id} pane={pane_id} — {INNER_LOOP_EXHAUSTED_TEXT}，观察已交给 Controller",
                         flush=True,
                     )
                     continue
