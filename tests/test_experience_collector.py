@@ -187,11 +187,12 @@ def test_collector_idempotency_and_offline_buffering(temp_dir):
         exp_id = res1["experience_id"]
         assert exp_id is not None
 
-        # 2. Hub comes back online -> retry
+        # 2. Hub comes back online -> explicit forced retry (first settlement
+        # failure already scheduled backoff; force is the immediate path)
         mock_hub.submit_candidate.side_effect = None
         mock_hub.submit_candidate.return_value = {"ok": True, "experience_id": exp_id}
 
-        retry_res = collector.retry_pending_uploads()
+        retry_res = collector.retry_pending_uploads(force=True)
         assert retry_res["retried"] == 1
         assert retry_res["succeeded"] == 1
 
@@ -272,19 +273,14 @@ def test_offline_upload_auto_retries_with_backoff(temp_dir):
 
     with patch("herdr.state_db.get_task", return_value=fake_task), \
          patch("herdr.state_db.list_steers", return_value=fake_steers):
-        # 1. Initial attempt fails -> enters pending_upload with retry_count=0
+        # 1. Initial attempt fails -> backoff scheduled immediately (retry_count=1)
         collector.process_task_settlement("task_bo_1", fake_outcome)
 
-        # 2. First retry attempt fails -> retry_count becomes 1, next_retry_at is scheduled in future
+        # 2. Immediate retry is skipped by the backoff window
         res1 = collector.retry_pending_uploads()
-        assert res1["retried"] == 1
-        assert res1["failed"] == 1
+        assert res1["retried"] == 0
 
-        # 3. Immediate subsequent call to retry_pending_uploads() should be skipped by backoff window
-        res2 = collector.retry_pending_uploads()
-        assert res2["retried"] == 0
-
-        # 4. Forced retry ignores backoff window
+        # 3. Forced retry ignores backoff window but still fails -> retry_count becomes 2
         res3 = collector.retry_pending_uploads(force=True)
         assert res3["retried"] == 1
         assert res3["failed"] == 1
