@@ -1018,17 +1018,29 @@ def test_migrate_v1_to_v2(state_env):
         "tasks": v1_tasks["tasks"],
     }), encoding="utf-8")
 
+    # Seed V1 steering file (this test's own file; the migration must read it
+    # and never fall back to the host's real ~/.herdr-controller data).
+    state_env["steer_file"].write_text(json.dumps({
+        "steering_queues": {"task-steer-1": [{"steer_id": "s-1", "instruction": "口径 A"}],
+                            "task-steer-2": [{"steer_id": "s-2", "instruction": "口径 B"}]},
+        "history": [{"action": "issued", "task_id": "task-steer-1", "steer_id": "s-1"}],
+    }), encoding="utf-8")
+
     # Perform migration
     res = state_db.migrate_v1_to_v2(
         workflows_file=state_env["wf_file"],
         tasks_file=state_env["tasks_file"],
         checkpoints_dir=state_env["cp_dir"],
+        steering_file=state_env["steer_file"],
         db_path=state_env["db_file"],
     )
     assert res["ok"] is True
     assert res["migrated_workflows"] == 1
     assert res["migrated_tasks"] == 1
     assert res["migrated_checkpoints"] == 1
+    assert res["migrated_steers"] == 2, (
+        "migration must read the steering file it was given; a host-default "
+        f"fallback is what produced {res['migrated_steers']} entries")
 
     # Verify SQLite DB contents
     migrated_wf = state_db.get_workflow(wid, state_env["db_file"])
