@@ -3,26 +3,32 @@ name: HAFlow Test Suite
 # Full-suite gate on the self-hosted macOS runner.
 #
 # Why this exists: the repository had no workflow that ran `pytest` at all —
-# only the Codex thread gate and the LLM review — so a red test suite could be
+# only the Codex thread gate and the LLM review — so a red suite could be
 # merged. This is the machine-enforced backstop.
 #
-# The job always runs, and decides internally how much to run. That matters
-# for two reasons:
-#   1. A required status check that never reports (because a path filter
-#      skipped the workflow) leaves the pull request stuck pending forever.
-#   2. Test-only edits are cheap to miss but expensive to get wrong: a test
-#      module that no longer imports makes the suite unrunnable for every
-#      other pull request, so they still get a collection check.
+# Security shape:
+#   * `pull_request_target`, not `pull_request`: the workflow definition then
+#     always comes from the base branch, so a pull request cannot edit away the
+#     fork guard below. Under plain `pull_request` the definition comes from the
+#     PR itself, which makes any guard in it decorative.
+#   * The job never runs for a fork head, so untrusted content never executes
+#     on a persistent developer machine.
+#   * `tests-required` is the check to put in branch protection. A job skipped
+#     by a conditional still reports Success, so the raw `tests` job must not
+#     be the required one: `tests-required` fails whenever testing was skipped.
 #
-# HOME is not redirected — see the note on the full-suite step.
+# Scope: documentation-only changes take a fast collection path; everything
+# else — including test-only changes — runs the full suite. Collection alone
+# proves nothing about assertions, fixtures, or test bodies.
 
 on:
-  pull_request:
+  pull_request_target:
     types: [opened, synchronize, reopened]
     branches: [main]
+  workflow_dispatch:
 
 concurrency:
-  group: haflow-tests-${{ github.event.pull_request.number }}
+  group: haflow-tests-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
 
 permissions:
@@ -32,46 +38,70 @@ jobs:
   tests:
     name: pytest
     runs-on: [self-hosted, haflow]
-    # A self-hosted runner executes on a real developer machine, so pull
-    # requests from forks must never reach it.
+    # Never execute fork content on the persistent self-hosted machine.
     if: >-
       github.repository == 'allinai0506/HAFlow' &&
-      github.event.pull_request.head.repo.full_name == github.repository
+      (github.event_name == 'workflow_dispatch' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
     timeout-minutes: 45
     steps:
-      - name: Checkout PR head
+      - name: Checkout the merge result
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
-          # Full history: the scope decision below diffs against the base, and
-          # some suites inspect repository state.
+          # The generated merge ref, not the isolated head: a branch can pass
+          # on its own and still fail once combined with main.
+          ref: >-
+            ${{ github.event_name == 'workflow_dispatch'
+                && 'main'
+                || format('refs/pull/{0}/merge', github.event.pull_request.number) }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Decide the test scope
         id: scope
         run: |
           set -euo pipefail
-          base="${{ github.event.pull_request.base.sha }}"
-          # fetch-depth: 0 normally already carries the base commit; only go to
-          # the network if it is genuinely missing, and never shallow the clone
-          # here or `git diff base...HEAD` loses its merge base.
-          if ! git cat-file -e "$base^{commit}" 2>/dev/null; then
-            git fetch --no-tags origin "$base" || true
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "mode=full" >> "$GITHUB_OUTPUT"
+            echo "→ full suite (manual dispatch)"
+            exit 0
           fi
-          changed="$(git diff --name-only "$base"...HEAD || true)"
+
+          base="${{ github.event.pull_request.base.sha }}"
+          head="${{ github.event.pull_request.head.sha }}"
+
+          # Fail closed. An uncomputable diff must never downgrade a
+          # production change to the cheap path and still report success.
+          if ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            echo "::error::base commit $base is missing from the checkout"
+            exit 1
+          fi
+          if ! git cat-file -e "$head^{commit}" 2>/dev/null; then
+            echo "::error::head commit $head is missing from the checkout"
+            exit 1
+          fi
+
+          # Scope is decided from the pull request's own changes (base...head),
+          # while the suite runs against the merge result checked out above.
+          changed="$(git diff --name-only "$base...$head")" || {
+            echo "::error::could not diff $base...$head"
+            exit 1
+          }
           echo "changed files:"; echo "$changed"
-          # Anything that is not documentation, the wiki, or a test file can
-          # change runtime behaviour, so it gets the full suite.
-          production="$(printf '%s\n' "$changed" \
-            | grep -Ev '^(docs/|wiki/|tests/)' \
+
+          # Only documentation can be skipped: it cannot change runtime
+          # behaviour. Test changes must execute, so they are NOT excluded —
+          # collection alone would let a red test-only PR pass.
+          code="$(printf '%s\n' "$changed" \
+            | grep -Ev '^(docs/|wiki/)' \
             | grep -Ev '\.md$' \
             | head -n1 || true)"
-          if [ -n "$production" ]; then
+          if [ -n "$code" ]; then
             echo "mode=full" >> "$GITHUB_OUTPUT"
-            echo "→ full suite (non-doc/test change: $production)"
+            echo "→ full suite (non-doc change: $code)"
           else
             echo "mode=collect" >> "$GITHUB_OUTPUT"
-            echo "→ collection check (docs and/or test-only change)"
+            echo "→ collection check (documentation only)"
           fi
 
       - name: Pick the test interpreter
@@ -97,27 +127,47 @@ jobs:
         if: steps.scope.outputs.mode == 'full'
         run: |
           set -o pipefail
-          # HOME is deliberately NOT redirected. `test_os_sandbox_boundary`
-          # verifies that the macOS Seatbelt profile denies reads under the
-          # real developer home, so pointing HOME at a temp directory makes
-          # that check fail (verified: temp-dir HOME fails, home-nested HOME
-          # passes). Isolating the tests is the suite's own responsibility —
-          # the two couplings found on this machine now have root-cause fixes.
+          # HOME points inside RUNNER_TEMP, which lives under the real home.
+          # That is deliberate on both counts: the suite is isolated from the
+          # developer's live state, and test_os_sandbox_boundary can still
+          # prove macOS Seatbelt denies reads under the developer home (a
+          # /var/folders HOME lands in an allowed region and fails that check,
+          # verified). Anything the suite leaves behind stays inside the
+          # runner's own temp tree.
+          export HOME="$RUNNER_TEMP/ci-home"
+          mkdir -p "$HOME"
           "${{ steps.python.outputs.python }}" -m pytest -q 2>&1 | tee pytest.log
 
       - name: Collection check
         if: steps.scope.outputs.mode == 'collect'
         run: |
           set -o pipefail
-          # Test modules must still import and collect: a broken test file
-          # takes the whole suite down for every other pull request.
+          export HOME="$RUNNER_TEMP/ci-home"
+          mkdir -p "$HOME"
           "${{ steps.python.outputs.python }}" -m pytest --collect-only -q 2>&1 | tee pytest.log | tail -n 5
 
       - name: Upload the pytest log on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: pytest-log-${{ github.event.pull_request.number }}
+          name: pytest-log-${{ github.event.pull_request.number || github.run_id }}
           path: pytest.log
           retention-days: 7
           if-no-files-found: ignore
+
+  tests-required:
+    name: tests-required
+    # This is the check to mark required. `runs-on` stays off the self-hosted
+    # machine so the guard itself executes for every pull request.
+    runs-on: ubuntu-latest
+    needs: [tests]
+    if: always()
+    steps:
+      - name: Fail unless the suite actually ran and passed
+        run: |
+          result="${{ needs.tests.result }}"
+          if [ "$result" != "success" ]; then
+            echo "::error::the test job reported '$result'. A skipped job means this pull request was never tested (fork heads are not executed on the self-hosted runner), and this check must not report success in that case."
+            exit 1
+          fi
+          echo "test job passed"
