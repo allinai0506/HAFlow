@@ -7048,9 +7048,10 @@ function humanStatus(s){
 }
 function humanReason(value){
   const text=String(value??'').trim();
-  return ({
+  const labels={
     inner_loop_exhausted:'工位内循环已耗尽全部重试次数，无法自愈，需要总指挥仲裁'
-  })[text]||text;
+  };
+  return Object.prototype.hasOwnProperty.call(labels, text)?labels[text]:text;
 }
 function humanNodeStatus(s){
   return s==='completed'?'已完成':humanStatus(s);

@@ -2,6 +2,9 @@
 
 import importlib.machinery
 import importlib.util
+import json
+import shutil
+import subprocess
 from pathlib import Path
 
 from herdr.dashboard import build_dashboard
@@ -63,6 +66,38 @@ def test_notifier_reason_matches_shared_label():
     assert module.reason({"sentinel_reason": "inner_loop_exhausted"}) == INNER_LOOP_EXHAUSTED_TEXT
     assert module.reason({"failure_reason": "磁盘满了"}) == "磁盘满了"
     assert INNER_LOOP_EXHAUSTED_TEXT in NOTIFIER
+
+
+def _extract_fn(source, name):
+    start = source.find(f"function {name}(")
+    assert start >= 0
+    i = source.find("{", start)
+    depth = 0
+    for j in range(i, len(source)):
+        if source[j] == "{":
+            depth += 1
+        elif source[j] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start:j + 1]
+    raise AssertionError(f"{name} was not closed")
+
+
+def test_console_human_reason_keeps_prototype_keys():
+    node = shutil.which("node")
+    if node is None:
+        return
+    script = (
+        _extract_fn(CONSOLE, "humanReason")
+        + "\nconst samples=['inner_loop_exhausted','constructor','toString','valueOf','__proto__','No disk space',''];"
+        + "\nconsole.log(JSON.stringify(samples.map(s=>[s, humanReason(s)])));"
+    )
+    result = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    got = dict(json.loads(result.stdout))
+    assert got["inner_loop_exhausted"] == INNER_LOOP_EXHAUSTED_TEXT
+    for key in ("constructor", "toString", "valueOf", "__proto__", "No disk space", ""):
+        assert got[key] == key
 
 
 def test_console_and_sentinel_show_the_same_chinese_label():
