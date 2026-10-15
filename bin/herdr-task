@@ -4115,6 +4115,16 @@ def _fetch_experience_rules_block(task):
         return ""
 
 
+def _prefetch_mandatory_rules(task):
+    """Fetch mandatory experience rules before any dispatch side effect.
+
+    Runs unconditionally for mandatory tasks: receipt-style tasks carry run_id
+    from creation, so gating on it would silently skip the check while the
+    later fetch still fail-closes. Returns the prompt suffix (may be "").
+    """
+    return _fetch_experience_rules_block(task)
+
+
 def dispatch_task(task_id, prompt):
     # Reliable delivery protocol:
     # 1) try herdr agent prompt
@@ -4138,11 +4148,12 @@ def dispatch_task(task_id, prompt):
 
     # Fail-closed: mandatory rules must resolve before marking dispatched,
     # otherwise Hub outage would leave a false dispatched state with no
-    # instructions delivered.
+    # instructions delivered. Unconditional: run_id is assigned at creation,
+    # so a receipt_delivery condition would skip this for every normal task.
     _prefetched_experience_suffix = None
     _prefetched_experience = False
-    if task.get("mandatory_experience_rules") and not receipt_delivery:
-        _prefetched_experience_suffix = _fetch_experience_rules_block(task)
+    if task.get("mandatory_experience_rules"):
+        _prefetched_experience_suffix = _prefetch_mandatory_rules(task)
         _prefetched_experience = True
 
     # Runtime closure: the dispatched transition happens before context
