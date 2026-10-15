@@ -1,7 +1,14 @@
-"""Execute real entrypoint main functions with loops/transports stopped safely."""
+"""Execute real entrypoint main functions with loops/transports stopped safely.
+
+Only the `main` function body is executed, so the stub namespace below must
+carry every module-level name the entrypoints reference: a missing name shows
+up as a NameError inside the service, which looks like a production defect but
+is really an incomplete stub.
+"""
 import ast
 import json
 import os
+import time
 from pathlib import Path
 from types import SimpleNamespace
 import pytest
@@ -17,7 +24,7 @@ def test_main_logs_actual_import_fingerprint_before_work(relative,service,tmp_pa
     path=ROOT/relative
     tree=ast.parse(path.read_text())
     main=next(node for node in tree.body if isinstance(node,ast.FunctionDef) and node.name=='main')
-    namespace={'__file__':str(path),'Path':Path,'json':json,'os':os,'HERDR_ROOT':ROOT,'ROOT':tmp_path,'STATE_FILE':tmp_path/'state.json','TASKS_FILE':str(tmp_path/'tasks.json'),'COORDINATOR_PANE':'unknown','PRODUCT_NAME':'HAFlow','HOST':'localhost','PORT':0,'load_json':lambda *args:{'seen':{},'nudged':{}},'_get_store':stop,'report_integration_gaps':stop,'reset_queued_stage_states':stop,'ThreadingHTTPServer':stop,'Handler':object,'threading':SimpleNamespace(Thread=stop)}
+    namespace={'__file__':str(path),'Path':Path,'json':json,'os':os,'time':time,'HERDR_ROOT':ROOT,'ROOT':tmp_path,'STATE_FILE':tmp_path/'state.json','TASKS_FILE':str(tmp_path/'tasks.json'),'COORDINATOR_PANE':'unknown','PRODUCT_NAME':'HAFlow','HOST':'localhost','PORT':0,'load_json':lambda *args:{'seen':{},'nudged':{}},'_get_store':stop,'report_integration_gaps':stop,'reset_queued_stage_states':stop,'ThreadingHTTPServer':stop,'Handler':object,'threading':SimpleNamespace(Thread=stop)}
     exec(compile(ast.Module(body=[main],type_ignores=[]),str(path),'exec'),namespace)
     with pytest.raises(StopEntry): namespace['main']()
     output=capsys.readouterr().out
