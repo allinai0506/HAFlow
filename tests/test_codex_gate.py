@@ -27,6 +27,12 @@ def test_unresolved_p1_blocks():
     assert len(out) == 1 and out[0]["path"] == "a.py"
 
 
+def test_unresolved_p0_blocks():
+    mod = _load()
+    out = mod.find_blocking_threads(_payload(_thread("chatgpt-codex-connector[bot]", "[![P0 Badge](x)] critical")))
+    assert len(out) == 1 and out[0]["path"] == "a.py"
+
+
 def test_resolved_outdated_p2_other_bot_pass():
     mod = _load()
     out = mod.find_blocking_threads(_payload(

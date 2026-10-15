@@ -15,7 +15,7 @@ from typing import Any, Dict, List
 
 API_URL = "https://api.github.com/graphql"
 BOT_LOGIN = "chatgpt-codex-connector"
-P1_MARK = "P1 Badge"
+BLOCK_MARKS = ("P1 Badge", "P0 Badge")
 
 THREADS_QUERY = """
 query($owner: String!, $repo: String!, $pr: Int!, $cursor: String) {
@@ -53,7 +53,7 @@ def find_blocking_threads(payload: Dict[str, Any], bot: str = BOT_LOGIN,
         if not any(bot in str((c.get("author") or {}).get("login") or "") for c in comments if isinstance(c, dict)):
             continue
         text = "\n".join(bodies)
-        if fail_on == "any" or P1_MARK in text:
+        if fail_on == "any" or any(m in text for m in BLOCK_MARKS):
             first = bodies[0].strip().splitlines()[0][:160] if bodies else ""
             blockers.append({"path": t.get("path"), "title": first})
     return blockers
