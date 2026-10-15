@@ -5702,7 +5702,7 @@ task_id: {task_id}
 stage: {task['stage']}
 pane_id: {task['pane_id']}
 agent: {task['agent']}
-agent_status: blocked (inner_loop_exhausted)
+agent_status: 已阻塞（工位内循环已耗尽全部重试次数，无法自愈，需要总指挥仲裁）
 
 任务目标：
 {goal}
@@ -5966,6 +5966,8 @@ def handle_coordinator_delivery_stall(item, task, elapsed):
     registry watcher 会依据 episode 的 next_retry_at 做慢速重试;
     总指挥恢复后事件会自然补投,不需要人工重启。
     """
+    from herdr.reason_labels import human_reason
+
     key = item["key"]
     event_type = item["event_type"]
     workflow_id = task.get("workflow_id")
@@ -5998,7 +6000,7 @@ def handle_coordinator_delivery_stall(item, task, elapsed):
     notify_attention(
         "Herdr Factory · 总指挥停滞",
         task,
-        f"事件 {event_type} 等待总指挥超过 {int(elapsed)}s（pane={pane_id}）。"
+        f"事件 {human_reason(event_type)} 等待总指挥超过 {int(elapsed)}s（pane={pane_id}）。"
         "已记录 attention 并将慢速重试，请检查总指挥状态与集成健康。",
         "coordinator_stalled",
     )

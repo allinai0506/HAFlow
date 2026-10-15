@@ -171,6 +171,13 @@ def test_extract_task_blockers():
     b1 = projection.extract_task_blockers(task_blocked, "")
     assert "No disk space" in b1
 
+    exhausted = projection.extract_task_blockers(
+        {"status": "blocked", "sentinel_reason": "inner_loop_exhausted"},
+        "",
+    )
+    assert exhausted == ["工位内循环已耗尽全部重试次数，无法自愈，需要总指挥仲裁"]
+    assert "inner_loop_exhausted" not in exhausted
+
     # 2. Terminal marker blocker
     task_normal = {"status": "working"}
     term_marker = "Log 1\n[BLOCKER] Missing AWS credentials\nLog 2"

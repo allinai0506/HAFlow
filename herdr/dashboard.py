@@ -13,6 +13,8 @@ import copy
 from datetime import datetime
 from typing import Any, Dict, List, Mapping, Optional
 
+from .reason_labels import human_reason
+
 ACTIVE_STATUSES = {"pending", "dispatched", "working", "blocked",
                    "agent_done", "rework", "failed"}
 HISTORY_STATUSES = {"superseded", "cleaned"}
@@ -184,6 +186,7 @@ def build_dashboard(
         reason = _attention_reason(t)
         if not reason:
             reason = str(t.get("blocker") or t.get("stage_verdict_note") or "等你看一眼")
+        reason = human_reason(reason)
         upd = _epoch(t.get("last_activity_at")) or _epoch(t.get("updated_at"))
         seen[tid] = {
             "task_id": tid,

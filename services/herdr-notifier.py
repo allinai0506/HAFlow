@@ -94,10 +94,16 @@ def project(task):
         or "unknown-project"
     )
 
+# Keep in step with herdr.reason_labels. Notifier stays stdlib-only.
+_REASON_LABELS = {
+    "inner_loop_exhausted": "工位内循环已耗尽全部重试次数，无法自愈，需要总指挥仲裁",
+}
+
 def reason(task):
     for k in ("failure_reason","blocked_reason","human_review_reason","sentinel_reason","reason"):
         if task.get(k):
-            return str(task[k])
+            text = str(task[k]).strip()
+            return _REASON_LABELS.get(text, text)
     return "需要人工查看"
 
 def workflow_complete(tasks):
