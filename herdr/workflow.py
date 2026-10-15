@@ -362,6 +362,13 @@ def _normalize_workflow_body(workflow: Dict[str, Any]) -> Dict[str, Any]:
                 "rules": list(node.get("rules") or []),
                 "gate": dict(node.get("gate") or {}),
             }
+            # Enterprise experience attribution (optional template keys).
+            if str(node.get("customer") or "").strip():
+                norm_node["customer"] = str(node.get("customer")).strip()
+            if str(node.get("business_task_type") or "").strip():
+                norm_node["business_task_type"] = str(node.get("business_task_type")).strip()
+            if node.get("mandatory_experience_rules"):
+                norm_node["mandatory_experience_rules"] = True
             if node.get("delivery_contract") is not None:
                 from .task_delivery import validate_contract, scope_conflicts
                 norm_node["delivery_contract"] = validate_contract(node["delivery_contract"])
@@ -457,6 +464,13 @@ def _normalize_workflow_body(workflow: Dict[str, Any]) -> Dict[str, Any]:
                 "rules": list(policy.get("rules") or []),
                 "gate": dict(policy.get("gate") or {}),
             }
+            # Enterprise experience attribution (optional policy keys).
+            if str(policy.get("customer") or "").strip():
+                norm_node["customer"] = str(policy.get("customer")).strip()
+            if str(policy.get("business_task_type") or "").strip():
+                norm_node["business_task_type"] = str(policy.get("business_task_type")).strip()
+            if policy.get("mandatory_experience_rules"):
+                norm_node["mandatory_experience_rules"] = True
             validate_artifact_contract(policy.get("artifact_mode"), norm_node["default_integration_mode"],
                                        node_id=node_id, task_type=norm_node["default_task_type"])
             if "artifact_mode" in policy:

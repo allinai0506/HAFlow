@@ -532,12 +532,25 @@ class ExperienceCollector:
         with self._lock:
             collected = self.process_pending(state_db_path=state_db_path)
             upload_stats = self.retry_pending_uploads(force=force, exclude_task_id=exclude_task_id)
+            remaining = 0
+            conn = _get_collector_db(self.db_path)
+            try:
+                row = conn.execute(
+                    "SELECT COUNT(*) AS n FROM local_collector_records WHERE status = 'pending_upload'"
+                ).fetchone()
+                remaining = int(row["n"] or 0) if row else 0
+            except Exception:
+                pass
+            finally:
+                conn.close()
             return {
                 "ok": True,
                 "pending_collected": collected,
                 "retried": upload_stats.get("retried", 0),
                 "succeeded": upload_stats.get("succeeded", 0),
                 "failed": upload_stats.get("failed", 0),
+                "reason": upload_stats.get("reason") or "",
+                "pending_upload_remaining": remaining,
             }
 
     def process_task_settlement_async(
@@ -545,11 +558,19 @@ class ExperienceCollector:
         task_id: str,
         outcome: Optional[Dict[str, Any]] = None,
         state_db_path: Optional[Path] = None,
-    ) -> threading.Thread:
+    ) -> Optional[threading.Thread]:
         """Asynchronously process task settlement in a daemon thread.
 
-        Guaranteed not to block caller or raise exception.
+        Per-task single-flight: repeated settlement writes while a worker is
+        still running are skipped (returns None) instead of stacking threads
+        and duplicating Hub I/O. Guaranteed not to block caller or raise.
         """
+        with _settlement_lock:
+            if str(task_id) in _settlement_inflight:
+                LOGGER.debug("Settlement worker already running for %s; skipping", task_id)
+                return None
+            _settlement_inflight.add(str(task_id))
+
         def _worker():
             try:
                 self.process_task_settlement(task_id, outcome, state_db_path)
@@ -559,6 +580,9 @@ class ExperienceCollector:
                 self.recover_and_sync(state_db_path, exclude_task_id=str(task_id))
             except Exception as exc:
                 LOGGER.debug("Async collector worker error: %s", exc)
+            finally:
+                with _settlement_lock:
+                    _settlement_inflight.discard(str(task_id))
 
         thread = threading.Thread(
             target=_worker,
@@ -571,6 +595,8 @@ class ExperienceCollector:
 
 _bg_sync_lock = threading.Lock()
 _bg_sync_inflight = False
+_settlement_lock = threading.Lock()
+_settlement_inflight: set = set()
 
 
 def trigger_background_sync(state_db_path: Optional[Path] = None) -> bool:
