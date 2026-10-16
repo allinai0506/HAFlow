@@ -94,12 +94,26 @@ if (args and args[0] == "api"
         print("[]")
         sys.exit(0)
     sha = "e" * 40 if mode == "wrong_head" else _read("head.txt")
-    status = "running" if mode == "running" else "completed"
     author = ("evil-user" if mode == "forged_author"
               else "chatgpt-codex-connector[bot]")
-    body = ('<!-- codex-review-state:v1 '
-            '{"code_review":{"commit_sha":"%s","status":"%s"}} -->' % (sha, status))
-    print(json.dumps([{"login": author, "body": body}]))
+
+    def marker(status, created):
+        body = ('<!-- codex-review-state:v1 '
+                '{"code_review":{"commit_sha":"%s","status":"%s"}} -->'
+                % (sha, status))
+        return {"login": author, "body": body, "created_at": created}
+
+    if mode == "completed_then_running":
+        items = [marker("completed", "2026-10-16T05:00:00Z"),
+                 marker("running", "2026-10-16T05:10:00Z")]
+    elif mode == "running_then_completed":
+        items = [marker("running", "2026-10-16T05:00:00Z"),
+                 marker("completed", "2026-10-16T05:10:00Z")]
+    elif mode == "running":
+        items = [marker("running", "2026-10-16T05:00:00Z")]
+    else:
+        items = [marker("completed", "2026-10-16T05:00:00Z")]
+    print(json.dumps(items))
     sys.exit(0)
 
 if (args and args[0] == "api"
@@ -739,3 +753,36 @@ def test_completion_rechecks_head_after_forge_validation(scene):
     assert refused.returncode == 2
     assert "advanced during validation" in (refused.stdout + refused.stderr)
     assert scene.store.get_task("wrapup-task")["status"] == "agent_done"
+
+
+def test_latest_review_state_must_be_completed(scene):
+    (scene.fakebin / "review_state").write_text("completed_then_running")
+    refused = record_valid(scene.store, scene.head)
+    assert refused.returncode == 2
+    assert "latest Codex review" in (refused.stdout + refused.stderr)
+
+    (scene.fakebin / "review_state").write_text("running_then_completed")
+    ok = record_valid(scene.store, scene.head)
+    assert ok.returncode == 0, ok.stdout + ok.stderr
+
+
+def test_receipt_must_match_recorded_delivery_pr_number(scene):
+    scene.store.record_event(
+        "pull_request_created",
+        {"number": 1, "url": "https://github.com/owner/repo/pull/1",
+         "candidate_sha": scene.head, "branch": "b", "base": "main",
+         "state": "open", "provider": "github"},
+        task_id="wrapup-task", workflow_id="wf-closure", source="herdr-task",
+    )
+    other_pr = record_valid(
+        scene.store, scene.head,
+        pr_url="https://github.com/owner/repo/pull/999",
+    )
+    assert other_pr.returncode == 2
+    assert "recorded delivery PR" in (other_pr.stdout + other_pr.stderr)
+
+    matching = record_valid(
+        scene.store, scene.head,
+        pr_url="https://github.com/owner/repo/pull/1",
+    )
+    assert matching.returncode == 0, matching.stdout + matching.stderr

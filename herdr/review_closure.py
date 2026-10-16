@@ -151,15 +151,15 @@ def _fetch_codex_blockers(owner: str, repo: str, number: int) -> Optional[List[D
     return None  # pagination budget exhausted → fail closed
 
 
-def _fetch_codex_review_states(owner: str, repo: str, number: int) -> Optional[List[Tuple[str, str]]]:
-    """(commit_sha, status) pairs from trusted codex-review-state markers.
+def _fetch_codex_review_states(owner: str, repo: str, number: int) -> Optional[List[Tuple[str, str, str]]]:
+    """(commit_sha, status, created_at) from trusted codex-review-state markers.
 
     Only markers authored by the Codex App/bot are accepted — any other
-    comment carrying the marker text must not satisfy the review gate (Codex
-    review P1). None means the forge could not be queried (callers fail
-    closed). An empty blocker list only proves no finding was observed —
-    completion evidence must additionally show a *completed* review for the
-    certified head.
+    comment carrying the marker text must not satisfy the review gate. The
+    timestamp is preserved so callers can require the *latest* state for a
+    head to be completed (a newer running marker supersedes an older
+    completed one). None means the forge could not be queried (callers fail
+    closed).
     """
     try:
         rc, out, _err = _run_gh([
@@ -167,13 +167,13 @@ def _fetch_codex_review_states(owner: str, repo: str, number: int) -> Optional[L
             f"repos/{owner}/{repo}/issues/{number}/comments",
             "--paginate", "--jq",
             '[.[] | select(.body | test("codex-review-state"))'
-            ' | {login: .user.login, body: .body}]',
+            ' | {login: .user.login, body: .body, created_at: .created_at}]',
         ])
     except (FileNotFoundError, subprocess.SubprocessError):
         return None
     if rc:
         return None
-    states: List[Tuple[str, str]] = []
+    states: List[Tuple[str, str, str]] = []
     for line in (out or "").splitlines():
         line = line.strip()
         if not line.startswith("["):
@@ -199,8 +199,9 @@ def _fetch_codex_review_states(owner: str, repo: str, number: int) -> Optional[L
             review = state.get("code_review") or {}
             sha = str(review.get("commit_sha") or "").strip().lower()
             status = str(review.get("status") or "").strip().lower()
+            created = str(item.get("created_at") or "").strip()
             if sha or status:
-                states.append((sha, status))
+                states.append((sha, status, created))
     return states
 
 
@@ -291,11 +292,19 @@ def verify_against_forge(pr_url: Any, head_sha: str) -> Tuple[bool, str, Optiona
         return False, (
             "forge verification failed: could not read the Codex review state"
         ), None
-    if not any(sha == pr_head and status == "completed" for sha, status in review_states):
+    head_states = [state for state in review_states if state[0] == pr_head]
+    if not head_states:
         return False, (
             f"no completed Codex review found for the certified head "
             f"{pr_head[:12]}; trigger the review (e.g. `@codex review`), wait "
             "for it to complete, then re-record"
+        ), None
+    latest_status = max(head_states, key=lambda state: state[2])[1]
+    if latest_status != "completed":
+        return False, (
+            f"the latest Codex review for the certified head {pr_head[:12]} "
+            f"is '{latest_status or 'unknown'}' (a newer review may publish "
+            "new P0/P1 findings); wait for it to complete before recording"
         ), None
     verification = {
         "provider": "github",
@@ -343,7 +352,7 @@ def collect_deferred_evidence(store, task: Any) -> Tuple[bool, str, Optional[Dic
     (Codex review P1s).
     """
     task = task or {}
-    identity, identity_source, _candidate = delivery_identity(store, task)
+    identity, _number, identity_source, _candidate = delivery_identity(store, task)
     if identity and identity_source == "workflow_delivery_record":
         return False, (
             f"a delivery PR is already recorded for this workflow ({identity}, "
@@ -401,12 +410,13 @@ def parse_remote_identity(url: Any) -> Optional[Tuple[str, str]]:
     return match.group(1), match.group(2)
 
 
-def delivery_identity(store, task: Any) -> Tuple[str, str, str]:
-    """(owner/repo, source, candidate_sha) for the task's delivery, best effort.
+def delivery_identity(store, task: Any) -> Tuple[str, str, str, str]:
+    """(owner/repo, pr_number, source, candidate_sha) for the task's delivery.
 
     Priority: the workflow's authoritative ``pull_request_created`` delivery
-    record (owner/repo plus the certified candidate SHA), then the readable
-    GitHub remote of the task's source repo / clone.
+    record (owner/repo, the exact PR number and the certified candidate SHA),
+    then the readable GitHub remote of the task's source repo / clone (PR
+    number empty).
     """
     task = task or {}
     workflow_id = str(task.get("workflow_id") or "").strip()
@@ -426,9 +436,10 @@ def delivery_identity(store, task: Any) -> Tuple[str, str, str]:
                 continue
             parsed = parse_pr_url(payload.get("url"))
             if parsed:
-                _host, owner, repo, _number = parsed
+                _host, owner, repo, number = parsed
                 return (
                     f"{owner}/{repo}",
+                    str(number),
                     "workflow_delivery_record",
                     str(payload.get("candidate_sha") or "").strip().lower(),
                 )
@@ -436,8 +447,8 @@ def delivery_identity(store, task: Any) -> Tuple[str, str, str]:
         for url in git_remote_urls(path):
             identity = parse_remote_identity(url)
             if identity:
-                return f"{identity[0]}/{identity[1]}", "repository_remote", ""
-    return "", "", ""
+                return f"{identity[0]}/{identity[1]}", "", "repository_remote", ""
+    return "", "", "", ""
 
 
 def identity_mismatch(store, task: Any, pr_url: Any, head_sha: Any) -> Optional[str]:
@@ -450,8 +461,8 @@ def identity_mismatch(store, task: Any, pr_url: Any, head_sha: Any) -> Optional[
     parsed = parse_pr_url(pr_url)
     if not parsed:
         return "unrecognized PR URL"
-    _host, owner, repo, _number = parsed
-    identity, source, candidate = delivery_identity(store, task)
+    _host, owner, repo, number = parsed
+    identity, expected_number, source, candidate = delivery_identity(store, task)
     if not identity:
         return (
             "cannot anchor the receipt to an authoritative delivery identity "
@@ -461,6 +472,11 @@ def identity_mismatch(store, task: Any, pr_url: Any, head_sha: Any) -> Optional[
         return (
             f"receipt PR {owner}/{repo} does not match the delivery identity "
             f"{identity} ({source})"
+        )
+    if expected_number and str(number) != expected_number:
+        return (
+            f"receipt PR #{number} does not match the recorded delivery PR "
+            f"#{expected_number} ({source})"
         )
     if candidate and candidate != str(head_sha or "").strip().lower():
         return (
