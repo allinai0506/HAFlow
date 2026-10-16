@@ -51,7 +51,17 @@ def _read(name, default=""):
     return path.read_text().strip() if path.exists() else default
 
 
-if len(args) >= 2 and args[0] == "api" and args[1] == "graphql":
+def _api_host_pinned(tokens):
+    return ("--hostname" in tokens
+            and tokens[tokens.index("--hostname") + 1] == "github.com")
+
+
+if args and args[0] == "api":
+    if not _api_host_pinned(args):
+        print("fake gh: api call missing --hostname github.com", file=sys.stderr)
+        sys.exit(1)
+
+if args and args[0] == "api" and "graphql" in args:
     if (HERE / "graphql_errors").exists():
         print(json.dumps({"errors": [{"message": "boom"}], "data": None}))
         sys.exit(0)
@@ -75,8 +85,8 @@ if len(args) >= 2 and args[0] == "api" and args[1] == "graphql":
     print(json.dumps(payload))
     sys.exit(0)
 
-if (len(args) >= 2 and args[0] == "api" and args[1].startswith("repos/")
-        and "/pulls/" in args[1]):
+if (args and args[0] == "api"
+        and any(t.startswith("repos/") and "/pulls/" in t for t in args)):
     print(json.dumps({
         "head": _read("head.txt"),
         "state": _read("pr_state", "open") or "open",
@@ -85,6 +95,11 @@ if (len(args) >= 2 and args[0] == "api" and args[1].startswith("repos/")
     sys.exit(0)
 
 if args[:2] == ["pr", "checks"]:
+    repo_idx = args.index("--repo") if "--repo" in args else -1
+    if repo_idx < 0 or not args[repo_idx + 1].startswith("github.com/"):
+        print("fake gh: pr checks missing --repo github.com/<owner>/<repo>",
+              file=sys.stderr)
+        sys.exit(1)
     sys.exit(int(_read("checks_rc", "0") or 0))
 
 print("fake gh: unsupported args: " + " ".join(args), file=sys.stderr)

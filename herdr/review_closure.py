@@ -111,7 +111,8 @@ def _fetch_codex_blockers(owner: str, repo: str, number: int) -> Optional[List[D
     blockers: List[Dict[str, Any]] = []
     cursor = None
     for _ in range(5):
-        argv = ["api", "graphql", "-f", f"query={_THREADS_QUERY}",
+        argv = ["api", "--hostname", "github.com", "graphql",
+                "-f", f"query={_THREADS_QUERY}",
                 "-f", f"owner={owner}", "-f", f"repo={repo}", "-F", f"pr={number}"]
         if cursor:
             argv += ["-f", f"cursor={cursor}"]
@@ -172,7 +173,8 @@ def verify_against_forge(pr_url: Any, head_sha: str) -> Tuple[bool, str, Optiona
         ), None
     try:
         rc, out, err = _run_gh(
-            ["api", f"repos/{owner}/{repo}/pulls/{number}",
+            ["api", "--hostname", "github.com",
+             f"repos/{owner}/{repo}/pulls/{number}",
              "--jq", "{head: .head.sha, state: .state, merged_at: .merged_at}"],
         )
     except FileNotFoundError:
@@ -210,7 +212,9 @@ def verify_against_forge(pr_url: Any, head_sha: str) -> Tuple[bool, str, Optiona
             "open or merged PR is required for review closure"
         ), None
     try:
-        rc, out, err = _run_gh(["pr", "checks", str(number), "--repo", f"{owner}/{repo}"])
+        rc, out, err = _run_gh(
+            ["pr", "checks", str(number), "--repo", f"github.com/{owner}/{repo}"],
+        )
     except subprocess.SubprocessError as exc:
         return False, f"forge verification failed while reading checks: {exc}", None
     if rc:
