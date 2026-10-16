@@ -52,6 +52,21 @@ def _read(name, default=""):
 
 
 if len(args) >= 2 and args[0] == "api" and args[1] == "graphql":
+    if (HERE / "graphql_errors").exists():
+        print(json.dumps({"errors": [{"message": "boom"}], "data": None}))
+        sys.exit(0)
+    typed_pr = False
+    for i, token in enumerate(args[:-1]):
+        if args[i + 1].startswith("pr="):
+            typed_pr = token == "-F"
+    if not typed_pr:
+        # Real gh sends raw fields as strings; the query declares $pr: Int!,
+        # so GitHub answers HTTP-200 with an errors payload.
+        print(json.dumps({
+            "errors": [{"message": "Variable $pr of type Int! was provided invalid value"}],
+            "data": None,
+        }))
+        sys.exit(0)
     threads = HERE / "threads.json"
     payload = {"data": {"repository": {"pullRequest": {"reviewThreads": {
         "pageInfo": {"hasNextPage": False, "endCursor": None},
@@ -509,3 +524,11 @@ def test_deferred_records_unsupported_forge_evidence(tmp_path):
     )
     assert recorded.returncode == 0, recorded.stdout + recorded.stderr
     assert run_cli(scene.store, "set", "wrapup-task", "completed").returncode == 0
+
+
+def test_graphql_errors_fail_closed(scene):
+    """HTTP-200 GraphQL errors must never read as 'no unresolved threads'."""
+    (scene.fakebin / "graphql_errors").write_text("1")
+    refused = record_valid(scene.store, scene.head)
+    assert refused.returncode == 2
+    assert "could not read review threads" in (refused.stdout + refused.stderr)

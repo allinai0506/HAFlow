@@ -112,7 +112,7 @@ def _fetch_codex_blockers(owner: str, repo: str, number: int) -> Optional[List[D
     cursor = None
     for _ in range(5):
         argv = ["api", "graphql", "-f", f"query={_THREADS_QUERY}",
-                "-f", f"owner={owner}", "-f", f"repo={repo}", "-f", f"pr={number}"]
+                "-f", f"owner={owner}", "-f", f"repo={repo}", "-F", f"pr={number}"]
         if cursor:
             argv += ["-f", f"cursor={cursor}"]
         try:
@@ -125,8 +125,13 @@ def _fetch_codex_blockers(owner: str, repo: str, number: int) -> Optional[List[D
             payload = json.loads(out or "{}")
         except ValueError:
             return None
-        threads = ((((payload.get("data") or {}).get("repository") or {})
-                    .get("pullRequest") or {}).get("reviewThreads") or {})
+        if isinstance(payload.get("errors"), list) and payload["errors"]:
+            return None  # HTTP-200 GraphQL errors must never read as "no threads"
+        pr_node = (((payload.get("data") or {}).get("repository") or {})
+                   .get("pullRequest"))
+        if pr_node is None:
+            return None  # missing node → fail closed
+        threads = pr_node.get("reviewThreads") or {}
         for node in (threads.get("nodes") or []):
             if not isinstance(node, dict) or node.get("isResolved") or node.get("isOutdated"):
                 continue
