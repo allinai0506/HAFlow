@@ -149,6 +149,16 @@ def transition_task(
         current = s.get_task(task_id)
     except Exception:
         current = None
+    # Wrapup completion carries the machine-checked review-closure invariant.
+    # This gateway is the single funnel for every completion source (CLI set,
+    # the controller's CAS auto-accept path and repair flows); prompt-text
+    # requirements alone are bypassable (Codex review P1, wf-haflow-1015-01).
+    if (to_status == "completed" and current is not None
+            and (current.get("node") or current.get("stage")) == "wrapup"):
+        from . import review_closure
+        closure_ok, closure_why = review_closure.check_completion_allowed(s, current)
+        if not closure_ok:
+            raise ValueError(f"[REVIEW CLOSURE REQUIRED] task={task_id}: {closure_why}")
     # RuntimeState follows the task transition inside the same atomic write:
     # record-only, never influences the transition outcome itself.
     from .archive import ARCHIVED_STATUSES
@@ -874,6 +884,15 @@ def bypass_task_gate(
         new_status = "completed"
     elif previous_status == "paused":
         new_status = "working"
+
+    # This bypass persists the status directly (no StateStore transition
+    # gateway), so the shared review-closure invariant must be enforced here
+    # explicitly (Codex review P1, wf-haflow-1015-01).
+    if new_status == "completed" and (task.get("node") or task.get("stage")) == "wrapup":
+        from . import review_closure
+        closure_ok, closure_why = review_closure.check_completion_allowed(s, task)
+        if not closure_ok:
+            raise ValueError(f"[REVIEW CLOSURE REQUIRED] task={task_id}: {closure_why}")
 
     verdict_note = f"[GATE BYPASS by {operator}] {cleaned_reason}"
     if note:
