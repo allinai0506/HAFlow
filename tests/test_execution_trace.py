@@ -949,3 +949,235 @@ def test_codex_pinned_session_survives_the_scan_cap(tmp_path):
     )
     assert any(item.get("session_id") == pinned and item.get("path") == "src/billing.py" for item in actions)
     assert all(item.get("session_id") == pinned for item in actions)
+
+
+def _codex_rows(rows):
+    return "\n".join(json.dumps({"type": "response_item", **row}) for row in rows)
+
+
+def _codex_exec(call_id, input_text, ts=20, **payload_extra):
+    return {"timestamp": ts, "payload": {
+        "type": "custom_tool_call", "name": "exec", "call_id": call_id,
+        "input": input_text, **payload_extra,
+    }}
+
+
+def _codex_output(call_id, text):
+    return {"payload": {
+        "type": "custom_tool_call_output", "call_id": call_id,
+        "output": [{"type": "input_text", "text": text}],
+    }}
+
+
+def _actions(text):
+    actions, _notes = parse_codex_jsonl(text, session_id="s1")
+    return actions
+
+
+def test_malformed_codex_patch_literal_never_escapes_and_stays_unclaimed():
+    direct = _codex_rows([
+        _codex_exec("p1", 'text(await tools.apply_patch("*** Begin Patch\\n*** Update File: src/a.py\\n\\q"))'),
+    ])
+    const_form = _codex_rows([
+        _codex_exec("p2", 'const patch = "*** Begin Patch\\n*** Update File: src/a.py\\n@@\\n-a\\n+b\\q";\nawait tools.apply_patch(patch);'),
+        _codex_output("p2", '{"exit_code":0,"auto_approved":true,"stdout":"Success."}'),
+    ])
+    git_style = _codex_rows([
+        _codex_exec("p3", '*** Begin Patch\n*** Update File: src/a.py\n@@\n-a\n+b\n*** End Patch\n<<\'EOF\'\ntrailing\nEOF'),
+    ])
+    for name, text in (("direct", direct), ("const", const_form), ("git", git_style)):
+        try:
+            actions, _notes = parse_codex_jsonl(text, session_id="s1")
+        except json.JSONDecodeError as exc:
+            pytest.fail(f"{name}: JSONDecodeError escaped the parser (B-1): {exc}")
+        assert len(actions) == 1, name
+        action = actions[0]
+        assert action.get("kind") is None, name
+        assert action.get("path") is None, name
+        assert action.get("command") is None, name
+        blob = json.dumps([action], ensure_ascii=False)
+        assert "Begin Patch" not in blob
+        assert "invalid escape" not in blob
+
+    empty_task = task_doc(status_history=[], created_at=None, started_at=None, commit=None)
+    for text in (direct, const_form, git_style):
+        page = assemble_trace(empty_task, [], _actions(text))
+        assert page["events"][0]["kind"] == "tool_call"
+        assert page["events"][0]["title"] == "调用工具"
+        blob = json.dumps(page, ensure_ascii=False)
+        assert "Expecting" not in blob and "JSONDecodeError" not in blob and "invalid escape" not in blob
+
+
+def test_real_codex_reads_are_recognized_from_unpacked_commands():
+    text = _codex_rows([
+        _codex_exec("r1", 'text(await tools.exec_command({cmd:"ls docs && cat .herdr-loop/GOAL.md",max_output_tokens:4000}));'),
+        _codex_output("r1", "Script completed\nOutput:\n\nGOAL body"),
+        _codex_exec("r2", 'text(await tools.exec_command({cmd:"cat > .herdr-loop/phase1.txt <<\'EOF\'\\n阶段1 secret-payload\\nEOF\\n",max_output_tokens:100}));', ts=21),
+        _codex_output("r2", "Script completed\nOutput:\n\n"),
+        _codex_exec("r3", 'text(await tools.exec_command({cmd:"cat AGENTS.md RULES.md",max_output_tokens:30000}));', ts=22),
+        _codex_output("r3", "Script completed\nOutput:\n\nbody"),
+        _codex_exec("r4", 'text(await tools.exec_command({cmd:"head -n 20 wiki/index.md",max_output_tokens:8000}));', ts=23),
+        _codex_output("r4", "Script completed\nOutput:\n\nhead"),
+    ])
+    actions = _actions(text)
+    reads = [item for item in actions if item.get("kind") == "file_read"]
+    assert [item.get("path") for item in reads] == ["wiki/index.md"]
+    assert any(item.get("command") == "ls docs && cat .herdr-loop/GOAL.md" for item in actions)
+    assert not any("phase1.txt" in str(item.get("path")) for item in actions)
+    assert all(item.get("kind") != "file_edit" for item in actions)
+    events = project_native_actions(actions, task_doc())
+    read_events = [event for event in events if event["kind"] == "file_read"]
+    assert len(read_events) == 1
+    assert read_events[0]["detail"] == "Read · wiki/index.md"
+
+
+def test_real_codex_test_events_need_single_commands_not_and_chains():
+    text = _codex_rows([
+        _codex_exec("t1", 'text(await tools.exec_command({cmd:"pytest -q tests/test_a.py && python3 -m compileall -q herdr",max_output_tokens:12000}));'),
+        _codex_output("t1", 'Script completed\nOutput:\n\n{"chunk_id":"a","wall_time_seconds":1.0,"exit_code":0,"output":"4 passed"}'),
+        _codex_exec("t2", 'text(await tools.exec_command({cmd:"pytest -q",max_output_tokens:12000}));', ts=21),
+        _codex_output("t2", 'Script completed\nOutput:\n\n{"chunk_id":"b","exit_code":1,"output":"1 failed"}'),
+    ])
+    actions = _actions(text)
+    events = project_native_actions(actions, task_doc())
+    kinds = [event["kind"] for event in events]
+    assert kinds == ["tool_call", "test_failed"]
+    assert "4 passed" not in json.dumps(events)
+
+
+def test_real_codex_apply_patch_edit_needs_valid_patch_and_success_receipt():
+    patch_literal = '*** Begin Patch\\n*** Update File: /clone/src/a.py\\n@@\\n-def old():\\n+def new():\\n*** End Patch'
+    ok = _codex_rows([
+        _codex_exec("e1", f'const patch = "{patch_literal}";\ntext(await tools.apply_patch(patch));'),
+        _codex_output("e1", '{"exit_code":0,"auto_approved":true,"stdout":"Success.\\n"}'),
+    ])
+    actions = _actions(ok)
+    edits = [item for item in actions if item.get("kind") == "file_edit"]
+    assert [item.get("path") for item in edits] == ["/clone/src/a.py"]
+    events = project_native_actions(actions, task_doc(clone_path="/clone"))
+    assert [event["kind"] for event in events] == ["file_edit"]
+    assert events[0]["detail"] == "Edit · src/a.py"
+
+    failed = _codex_rows([
+        _codex_exec("e2", f'const patch = "{patch_literal}";\ntext(await tools.apply_patch(patch));'),
+        _codex_output("e2", '{"exit_code":1,"stdout":"patch rejected"}'),
+    ])
+    actions = _actions(failed)
+    assert all(item.get("kind") != "file_edit" for item in actions)
+
+    no_receipt = _codex_rows([
+        _codex_exec("e3", f'const patch = "{patch_literal}";\ntext(await tools.apply_patch(patch));'),
+    ])
+    actions = _actions(no_receipt)
+    assert all(item.get("kind") != "file_edit" for item in actions)
+
+    git_form = _codex_rows([
+        _codex_exec("e4", 'apply_patch "*** Begin Patch\\n*** Add File: src/b.py\\n+line\\n*** End Patch"'),
+        _codex_output("e4", "Success."),
+    ])
+    actions = _actions(git_form)
+    edits = [item for item in actions if item.get("kind") == "file_edit"]
+    assert [item.get("path") for item in edits] == ["src/b.py"]
+
+
+def test_patch_heredoc_noise_is_not_an_edit_and_bare_exec_stays_tool_call():
+    text = _codex_rows([
+        _codex_exec("h1", 'text(await tools.exec_command({cmd:"cat > src/billing.py <<\'EOF\'\\n*** Begin Patch\\nnot real\\n*** End Patch\\nEOF\\n",max_output_tokens:100}));'),
+        _codex_output("h1", "Script completed\nOutput:\n\n"),
+        _codex_exec("h2", 'text(await tools.exec_command({cmd:"grep -q \\"*** Begin Patch\\" /tmp/x",max_output_tokens:100}));', ts=21),
+        _codex_output("h2", "Script completed\nOutput:\n\n"),
+    ])
+    actions = _actions(text)
+    assert len(actions) == 2
+    assert all(item.get("kind") is None for item in actions)
+    assert all(item.get("path") is None for item in actions)
+    assert actions[0].get("command") is None
+    assert "grep" in str(actions[1].get("command"))
+    events = project_native_actions(actions, task_doc())
+    assert [event["kind"] for event in events] == ["tool_call", "tool_call"]
+    assert "not real" not in json.dumps(events)
+
+
+def _retry_event(actions):
+    events = project_native_actions(actions, task_doc())
+    retries = [event for event in events if event["kind"] == "retry"]
+    assert len(retries) == 1
+    return retries[0]
+
+
+def test_retry_label_synthesizes_both_sides_of_the_retry():
+    retest = _codex_rows([
+        _codex_exec("q1", 'text(await tools.exec_command({cmd:"pytest -q",max_output_tokens:12000}));'),
+        _codex_output("q1", '{"chunk_id":"a","exit_code":1,"output":"1 failed"}'),
+        _codex_exec("q2", 'text(await tools.exec_command({cmd:"pytest -q",max_output_tokens:12000}));', ts=21, retry_of="q1"),
+        _codex_output("q2", '{"chunk_id":"b","exit_code":0,"output":"passed"}'),
+    ])
+    prior_tool_retry = _codex_rows([
+        _codex_exec("v1", 'text(await tools.exec_command({cmd:"cat .herdr-loop/STATE.md",max_output_tokens:4000}));'),
+        _codex_output("v1", "Script completed\nOutput:\n\nstate"),
+        _codex_exec("v2", 'text(await tools.exec_command({cmd:"pytest -q",max_output_tokens:12000}));', ts=21, retry_of="v1"),
+        _codex_output("v2", '{"chunk_id":"b","exit_code":1,"output":"2 failed"}'),
+    ])
+    retry_event = _retry_event(_actions(retest))
+    assert retry_event["title"] == "修复并再次测试"
+    retry_event = _retry_event(_actions(prior_tool_retry))
+    assert retry_event["title"] == "再次测试"
+    assert retry_event["detail"] == "Retry · pytest"
+
+
+def test_commit_history_items_never_inherit_the_task_sha():
+    bare_item = task_doc(status_history=[{"to": "committed", "at": 1_700_000_050.0}])
+    events = project_task_history(bare_item)
+    commit_events = [event for event in events if event["kind"] == "commit"]
+    assert len(commit_events) == 1
+    assert commit_events[0]["source_ref"] == "task:task-a:commit"
+    item_event = next(event for event in events if event["source_ref"] == "task:task-a:status:0")
+    assert item_event["kind"] == "task_completed"
+    assert "9d41c07" not in json.dumps(item_event, ensure_ascii=False)
+
+    evidenced = task_doc(status_history=[{"to": "committed", "at": 1_700_000_050.0, "commit": "abc1234def5678"}])
+    events = project_task_history(evidenced)
+    item = next(event for event in events if event["source_ref"] == "task:task-a:status:0")
+    assert item["kind"] == "commit"
+    assert item["timestamp"] == 1_700_000_050.0
+    assert item["correlation_id"] == "commit:task-a:abc1234def5678"
+    assert item["detail"] == "Commit · abc1234"
+
+
+def test_evidence_backed_commit_transition_keeps_time_and_beats_unbacked_projection():
+    stored = [{
+        "id": 9, "task_id": "task-a", "run_id": "run-a", "agent_id": "codex",
+        "event_type": "task_status_changed", "timestamp": 1_700_000_110.0,
+        "source": "controller", "sequence": 3,
+        "payload": {"metadata": {"to_status": "committed"}},
+    }]
+    task = task_doc(status_history=[{"to": "committed", "at": 1_700_000_100.0}])
+    page = assemble_trace(task, stored, [], limit=50)
+    timed = [event for event in page["events"] if event.get("timestamp") == 1_700_000_110.0]
+    assert len(timed) == 1
+    assert timed[0]["kind"] == "task_completed"
+    # The task-level commit event is the only place the doc's SHA may appear.
+    assert json.dumps(page["events"], ensure_ascii=False).count("9d41c07") == 2
+    commit_event = next(event for event in page["events"] if event["kind"] == "commit")
+    assert commit_event["timestamp"] is None
+    assert commit_event["source_ref"] == "task:task-a:commit"
+
+
+def _native_commit_action(source_ref, session_id, ordinal, timestamp, sha):
+    return {
+        "session_id": session_id, "ordinal": ordinal, "timestamp": timestamp,
+        "tool": "exec", "path": None, "command": None, "exit_code": 0,
+        "retry_of": None, "is_error": False, "kind": "commit", "source_ref": source_ref,
+        "sha": sha,
+    }
+
+
+def test_untimed_task_commit_yields_to_the_evidence_backed_commit():
+    evidence = _native_commit_action("codex:sess-1:4", "sess-1", 4, 1_700_000_110.0, "9d41c07abc1234")
+    task = task_doc(status_history=[])
+    page = assemble_trace(task, [], [evidence], limit=50)
+    commits = [event for event in page["events"] if event["kind"] == "commit"]
+    assert len(commits) == 1
+    assert commits[0]["timestamp"] == 1_700_000_110.0
+    assert commits[0]["source"] == "native_session"
+    assert commits[0]["source_ref"] == "codex:sess-1:4"

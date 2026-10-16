@@ -114,3 +114,96 @@ loadMoreTaskTrace().then(()=>{
 """
     result = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)
     assert result.returncode == 0, result.stderr
+
+
+def test_trajectory_api_uses_authoritative_state_db_path(tmp_path, monkeypatch):
+    db = tmp_path / "state.db"
+    monkeypatch.delenv("HERDR_STATE_DB", raising=False)
+    monkeypatch.setenv("TASKS_FILE", str(tmp_path / "tasks.json"))
+    seen = {}
+
+    def fake_read_trace_tasks(path, tid):
+        seen["path"] = path
+        raise FileNotFoundError(path)
+
+    from herdr import execution_trace
+
+    monkeypatch.setattr(execution_trace, "read_trace_tasks", fake_read_trace_tasks)
+    with pytest.raises(console.TraceQueryError) as caught:
+        console.api_task_trajectory("task-a")
+    assert caught.value.status == 503
+    assert str(seen["path"]) == str(db)
+
+
+def test_polling_and_icons_are_wired_in_the_console():
+    html = console.HTML_TEMPLATE
+    assert "state.taskTracePoll=null" in html
+    assert "function startTaskTracePoll()" in html
+    assert "function stopTaskTracePoll()" in html
+    assert "function pollTaskTrace()" in html
+    assert "function traceTaskWorking()" in html
+    assert "setInterval(pollTaskTrace,8000)" in html
+    assert "['working','dispatched','rework'].includes(t.status)" in html
+    assert "else stopTaskTracePoll()" in html
+    assert "stopTaskTracePoll();" in html.split("function closeTaskDrawer(){")[1].split("function switchTaskDrawerTab")[0]
+    for glyph in ("file_read:'▤'", "file_edit:'✎'", "test_passed:'✓'", "test_failed:'✗'", "retry:'↻'", "commit:'⊂⊃'"):
+        assert glyph in html
+    assert "const clock=hasTime?traceClock(e.timestamp):'时间未知'" in html
+
+
+def test_trace_poll_guard_and_untimed_display():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not found")
+    html = console.HTML_TEMPLATE
+    names = [
+        "traceTaskWorking", "stopTaskTracePoll", "pollTaskTrace", "startTaskTracePoll",
+    ]
+    script = "\n".join(_extract(html, name) for name in names)
+    script += r"""
+const assert=require('node:assert/strict');
+let intervals=[]; let cleared=0; let reloaded=null;
+function setInterval(fn,ms){intervals.push({fn,ms});return intervals.length}
+function clearInterval(id){cleared+=1}
+function loadTaskTrace(tid,force){reloaded={tid,force}}
+const state={taskTracePoll:null,taskDrawerTab:'trace',selectedTaskId:'task-a',selectedTaskDetail:{task:{status:'working'}}};
+startTaskTracePoll();
+assert.equal(intervals.length,1);
+assert.equal(intervals[0].ms,8000);
+pollTaskTrace();
+assert.deepEqual(reloaded,{tid:'task-a',force:true});
+reloaded=null;
+state.selectedTaskDetail={task:{status:'cleaned'}};
+pollTaskTrace();
+assert.equal(reloaded,null);
+assert.equal(cleared>=1,true);
+state.selectedTaskDetail={task:{status:'working'}};
+state.taskDrawerTab='overview';
+startTaskTracePoll();
+assert.equal(state.taskTracePoll,null);
+"""
+    result = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)  # noqa: PLW1510
+    assert result.returncode == 0, result.stderr
+
+
+def test_render_shows_six_icons_and_unknown_time():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not found")
+    html = console.HTML_TEMPLATE
+    names = [
+        "esc", "taskDrawerNumTs", "traceClock", "traceDotClass", "traceDetailRows", "renderExecutionTrace",
+    ]
+    script = "\n".join(_extract(html, name) for name in names)
+    script += r"""
+const assert=require('node:assert/strict');
+const kinds=['file_read','file_edit','test_passed','test_failed','retry','commit'];
+const events=kinds.map((kind,i)=>({id:'e'+i,kind,title:'T'+i,detail:'d',status:'neutral',timestamp:1700000000+i,source:'native_session',source_ref:'r'+i}));
+events.push({id:'u',kind:'commit',title:'无时间',detail:'',status:'neutral',timestamp:null,source:'task_history',source_ref:'task:u'});
+const view=renderExecutionTrace({status:'ready',availability:'agent_actions',events});
+for(const g of ['▤','✎','✓','✗','↻','⊂⊃'])assert.equal(view.includes(g),true);
+assert.equal(view.includes('时间未知'),true);
+assert.equal(view.includes('<script>'),false);
+"""
+    result = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)  # noqa: PLW1510
+    assert result.returncode == 0, result.stderr

@@ -750,7 +750,7 @@ def _blocked_verdict_tasks(wid):
 
 def api_workflow_recovery(wid):
     from herdr import dispatch_recovery, node_dispatch_store
-    db_path=Path(os.environ['HERDR_STATE_DB']) if os.environ.get('HERDR_STATE_DB') else Path(TASKS_FILE).parent/'state.db'
+    db_path=state_db_path()
     try:
         node_dispatch_store.reconcile_workflow(db_path, wid, discover=False)
     except Exception:
@@ -759,7 +759,7 @@ def api_workflow_recovery(wid):
 
 def api_workflow_recovery_decide(b):
     from herdr import recovery_store
-    db_path=Path(os.environ['HERDR_STATE_DB']) if os.environ.get('HERDR_STATE_DB') else Path(TASKS_FILE).parent/'state.db'
+    db_path=state_db_path()
     wid=str(b.get('workflow_id') or '').strip()
     operation_id=int(b['operation_id'])
     operations=recovery_store.list_operations(db_path,wid)
@@ -1922,7 +1922,7 @@ def api_task_trajectory(tid, limit=100, cursor=None):
     if page_limit < 1 or page_limit > 200:
         raise TraceQueryError(400, 'limit 无效')
     from herdr.execution_trace import query_task_trace, read_trace_tasks
-    db_path = Path(os.environ['HERDR_STATE_DB']) if os.environ.get('HERDR_STATE_DB') else Path(TASKS_FILE).parent / 'state.db'
+    db_path = state_db_path()
     try:
         found = read_trace_tasks(db_path, tid)
     except FileNotFoundError as exc:
@@ -3959,6 +3959,11 @@ button { cursor: pointer; }
   margin-top: 2px;
   word-break: break-word;
   white-space: pre-wrap;
+}
+.td-ev-icon {
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  margin-right: 5px;
 }
 .trace-timeline .td-ev { grid-template-columns: 76px 18px 1fr; }
 button.trace-ev {
@@ -6895,7 +6900,7 @@ body {
 <script src="/static/vendor/dagre-3.1.1.min.js"></script>
 <script src="/static/vendor/x6-3.1.8.min.js"></script>
 <script>
-let state={overview:null,project:null,workflow:null,ops:null,dash:null,projectId:null,workflowId:null,openWorkflowTabIds:[],sidebarCollapsed:false,completedExpanded:false,completedVisibleLimit:5,spaceId:null,space:null,opsMode:false,dashMode:false,dashWorkflowId:null,shellView:'workbench',taskFilter:'all',drawerTab:'tty',selectedTaskId:null,taskDrawerTab:'overview',taskTrace:null,taskTraceSeq:0,selectedTaskDetail:null,workflowView:'flow',flowSelectedNodeId:null,flowInspectorTab:'summary',flowGraph:null,flowGraphWfId:null,flowHtmlReady:false};
+let state={overview:null,project:null,workflow:null,ops:null,dash:null,projectId:null,workflowId:null,openWorkflowTabIds:[],sidebarCollapsed:false,completedExpanded:false,completedVisibleLimit:5,spaceId:null,space:null,opsMode:false,dashMode:false,dashWorkflowId:null,shellView:'workbench',taskFilter:'all',drawerTab:'tty',selectedTaskId:null,taskDrawerTab:'overview',taskTrace:null,taskTraceSeq:0,taskTracePoll:null,selectedTaskDetail:null,workflowView:'flow',flowSelectedNodeId:null,flowInspectorTab:'summary',flowGraph:null,flowGraphWfId:null,flowHtmlReady:false};
 const VIEW_KEY='herdrConsoleView';
 function closeMoreMenu(){const dd=document.getElementById('moreDropdown');if(dd)dd.classList.remove('open')}
 function toggleMoreMenu(e){e.stopPropagation();const dd=document.getElementById('moreDropdown');if(dd)dd.classList.toggle('open')}
@@ -10961,13 +10966,17 @@ function renderExecutionTrace(model){
   const timed=events.filter(e=>e.timestamp!==null&&e.timestamp!==undefined);
   const untimed=events.filter(e=>e.timestamp===null||e.timestamp===undefined);
   const renderList=(list)=>{
+    const icons={file_read:'▤',file_edit:'✎',test_passed:'✓',test_failed:'✗',retry:'↻',commit:'⊂⊃'};
     return list.map((e,i)=>{
-      const clock=e.timestamp!==null&&e.timestamp!==undefined?traceClock(e.timestamp):'';
+      const hasTime=e.timestamp!==null&&e.timestamp!==undefined;
+      const clock=hasTime?traceClock(e.timestamp):'时间未知';
+      const icon=(e.kind&&icons[e.kind])?icons[e.kind]:'';
       const line=i<list.length-1?'<div class="td-ev-line"></div>':'';
       const titleClass=e.status==='error'?' err':'';
       const rows=traceDetailRows(e);
       const extra=rows.length?'<span class="trace-extra" hidden>'+rows.map(r=>'<span>'+esc(r[0])+'</span>'+esc(r[1])).join('<br>')+'</span>':'';
-      return '<button type="button" class="td-ev trace-ev" onclick="toggleTraceEvent(this)"><span class="td-ev-time">'+esc(clock)+'</span><span class="td-ev-rail"><span class="td-dot '+traceDotClass(e)+'"></span>'+line+'</span><span class="td-ev-body"><span class="td-ev-title'+titleClass+'">'+esc(e.title||'')+'</span>'+(e.detail?'<span class="td-ev-detail">'+esc(e.detail)+'</span>':'')+extra+'</span></button>';
+      return '<button type="button" class="td-ev trace-ev" onclick="toggleTraceEvent(this)"><span class="td-ev-time'+(hasTime?'':' muted')+'">'+esc(clock)+'</span><span class="td-ev-rail"><span class="td-dot '+traceDotClass(e)+'"></span>'+line+'</span><span class="td-ev-body"><span class="td-ev-title'+titleClass+'">'
+        +(icon?'<span class="td-ev-icon">'+esc(icon)+'</span>':'')+esc(e.title||'')+'</span>'+(e.detail?'<span class="td-ev-detail">'+esc(e.detail)+'</span>':'')+extra+'</span></button>';
     }).join('');
   };
   let html=banner+'<div class="td-timeline trace-timeline">'+renderList(timed);
@@ -11001,6 +11010,22 @@ function applyTraceResponse(state,tid,seq,payload){
   return true;
 }
 function retryTaskTrace(){loadTaskTrace(state.selectedTaskId,true)}
+function traceTaskWorking(){
+  const t=state.selectedTaskDetail&&state.selectedTaskDetail.task;
+  return !!t&&['working','dispatched','rework'].includes(t.status);
+}
+function stopTaskTracePoll(){
+  if(state.taskTracePoll){clearInterval(state.taskTracePoll);state.taskTracePoll=null}
+}
+function pollTaskTrace(){
+  if(!(state.taskDrawerTab==='trace'&&state.selectedTaskId&&traceTaskWorking())){stopTaskTracePoll();return}
+  loadTaskTrace(state.selectedTaskId,true);
+}
+function startTaskTracePoll(){
+  stopTaskTracePoll();
+  if(!(state.taskDrawerTab==='trace'&&traceTaskWorking()))return;
+  state.taskTracePoll=setInterval(pollTaskTrace,8000);
+}
 async function loadTaskTrace(tid,force){
   if(!tid)return;
   const seq=state.taskTraceSeq||0;
@@ -11133,6 +11158,7 @@ async function openTaskDrawer(tid){
 function closeTaskDrawer(){
   const drawer=document.getElementById('taskDrawer');
   if(!drawer||drawer.hidden)return;
+  stopTaskTracePoll();
   drawer.classList.remove('open');drawer.hidden=true;
   state.selectedTaskId=null;state.selectedTaskDetail=null;closeTaskDrawerMenu();
   document.querySelectorAll('.task.task-highlight').forEach(el=>el.classList.remove('task-highlight'));
@@ -11143,7 +11169,8 @@ function switchTaskDrawerTab(tab){
   renderTaskDrawer();
   const drawer=document.getElementById('taskDrawer');
   if(drawer&&drawer.hidden){drawer.hidden=false;drawer.classList.add('open')}
-  if(tab==='trace')loadTaskTrace(state.selectedTaskId);
+  if(tab==='trace'){loadTaskTrace(state.selectedTaskId);startTaskTracePoll()}
+  else stopTaskTracePoll();
 }
 async function showTask(id){try{const [td,proj]=await Promise.all([api('/api/task?id='+encodeURIComponent(id)).catch(()=>null),api('/api/task/projection?id='+encodeURIComponent(id)).catch(()=>null)]);const d=proj||(td&&td.task)||{};const raw=td||proj||{};const st=d.status||(td&&td.task&&td.task.status)||'unknown';const intent=d.intent||(td&&td.task&&td.task.goal)||'无明确意图描述';const blockers=Array.isArray(d.blockers)?d.blockers:(d.blocker?[d.blocker]:[]);const ms=Array.isArray(d.milestones)?d.milestones:[];const arts=Array.isArray(d.artifacts)?d.artifacts:[];const acts=Array.isArray(d.recent_activity)?d.recent_activity:(typeof d.recent_activity==='string'&&d.recent_activity?d.recent_activity.split('\n'):[]);const blkHtml=blockers.length?`<div class="proj-blk"><strong>⚠️ 卡点告警:</strong><span>${esc(blockers.map(humanReason).join('; '))}</span></div>`:'';const msHtml=ms.length?`<div class="proj-sec"><div class="proj-lbl">动态路标</div>${ms.map(m=>`<div class="proj-ms"><span class="proj-ms-dot ${m.status}">${m.status==='completed'?'✓':(m.status==='in_progress'?'›':'·')}</span><span style="${m.status==='completed'?'color:var(--text)':(m.status==='in_progress'?'color:var(--warn);font-weight:600':'color:var(--muted)')}">${esc(m.label)}</span></div>`).join('')}</div>`:'';const artHtml=arts.length?`<div class="proj-sec"><div class="proj-lbl">核心产物</div>${arts.map(a=>`<div class="proj-art"><div class="proj-art-hd"><span>${esc(a.name||a.kind)}</span><span class="badge ${a.passed?'cleaned':(a.kind==='evaluation'?'failed':'waiting')}">${esc(a.kind)}</span></div><div class="muted">${esc(a.summary||'')}</div></div>`).join('')}</div>`:'';const actHtml=acts.length?`<div class="proj-sec"><div class="proj-lbl">近期动态提炼</div><ul class="proj-acts">${acts.map(a=>`<li>${esc(a)}</li>`).join('')}</ul></div>`:'';const body=`<div class="proj-box"><div style="display:flex;justify-content:space-between;align-items:center;padding-bottom:8px;border-bottom:1px solid var(--line)"><div><span class="badge ${st}">${esc(st)}</span><span style="margin-left:8px;font-size:12px;color:var(--muted)">执行者: <strong>${esc(d.agent||'-')}</strong></span><span style="margin-left:8px;font-size:12px;color:var(--muted)">工位: <strong>${esc(d.node||'-')}</strong></span></div><button class="mini" onclick="const el=document.getElementById('taskRawPre');if(el)el.style.display=el.style.display==='none'?'block':'none'">原始数据</button></div>${blkHtml}<div class="proj-sec"><div class="proj-lbl">当前语义意图</div><div class="proj-txt">${esc(intent)}</div></div>${msHtml}${artHtml}${actHtml}<div id="taskRawPre" style="display:none;margin-top:8px"><div class="proj-lbl">原始调试数据</div><pre>${esc(JSON.stringify(raw,null,2))}</pre></div></div>`;openModal('任务白盒简报 · '+id,body)}catch(e){toast(e.message,true)}}async function showPane(id){if(!id)return toast('没有工位',true);try{const d=await api('/api/pane/read?id='+encodeURIComponent(id));openModal('工位 '+id,`<pre>${esc(d.output)}</pre>`)}catch(e){toast(e.message,true)}}async function askCoordinator(id){try{toast('正在通知总指挥…');await api('/api/task/coordinator',{method:'POST',body:JSON.stringify({task_id:id})});toast('总指挥已处理/接收')}catch(e){toast(e.message,true)}}
 async function openSignoffChamber(taskId){try{const [td,proj]=await Promise.all([api('/api/task?id='+encodeURIComponent(taskId)).catch(()=>null),api('/api/task/projection?id='+encodeURIComponent(taskId)).catch(()=>null)]);const d=proj||(td&&td.task)||{};const t=(td&&td.task)||{};window._signoffTask=t;const wid=t.workflow_id||state.workflowId;const node=t.node||t.stage||'';const arts=Array.isArray(d.artifacts)?d.artifacts:[];const isBlocked=t.stage_verdict==='blocked'||t.status==='blocked';let artCards='<div class="empty">暂无生成产物</div>';if(arts.length){artCards=arts.map(a=>`<div class="proj-sec" style="margin-bottom:8px"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px"><strong>${esc(a.name||a.kind)}</strong><span class="badge ${a.passed?'cleaned':(a.kind==='evaluation'?'failed':'waiting')}">${esc(a.kind)}</span></div><div class="task-meta" style="margin-bottom:8px">${esc(a.path||'')}</div><div class="proj-txt ctl-pre-light">${esc(a.content||a.summary||'（文件产物记录正常）')}</div></div>`).join('')}const html=`<div class="signoff-box"><div class="signoff-head"><div><div style="font-size:16px;font-weight:700">${esc(taskDisplayName(t))}</div><div class="task-meta">任务 ID: ${esc(taskId)} · 执行者: <b>${esc(t.agent||'-')}</b> · 节点: <b>${esc(node)}</b> · 版本: <b>v${esc(t.version!=null?t.version:'-')}</b></div></div><div>${badge(t.status)}</div></div>${isBlocked?'<div class="proj-blk"><strong>⚠️ 门禁会签等待:</strong> 当前节点触发门禁阻断，需要人类总指挥核查产物并决策放行或打回。</div>':''}<div class="proj-sec"><div class="proj-lbl">核心交付物与成果列表</div>${artCards}</div><div class="form"><label for="signoffFeedback">审批意见 / 批注说明（通过必填原因，打回可选）</label><input id="signoffFeedback" placeholder="例如：经核验核心成果符合要求，特批放行"></div><div class="signoff-actions"><button class="btn" onclick="closeModal()">暂不处理</button><button class="btn danger-btn" onclick="submitSignoffDecision(\'${esc(taskId)}\',\'${esc(wid)}\',\'${esc(node)}\',\'reject\')">批注打回</button><button class="btn primary" onclick="submitSignoffDecision(\'${esc(taskId)}\',\'${esc(wid)}\',\'${esc(node)}\',\'approve\')">通过并放行</button></div></div>`;openModal('成果交付会签室 (Artifact Signoff Chamber)',html)}catch(e){toast(e.message,true)}}
