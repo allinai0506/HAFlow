@@ -3893,6 +3893,28 @@ def get_execution_outcome(
         conn.close()
 
 
+def read_execution_outcome(
+    task_id: str,
+    run_id: str,
+    db_path: Optional[Path] = None,
+) -> Optional[Dict[str, Any]]:
+    """Read one settled outcome without creating or migrating the database.
+
+    ``get_execution_outcome`` opens a writable connection and may create the
+    file. Quality assessment must not use that path.
+    """
+    conn = get_readonly_db_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT * FROM agent_execution_outcomes "
+            "WHERE task_id = ? AND run_id = ?",
+            (str(task_id), str(run_id)),
+        ).fetchone()
+        return _decode_outcome_row(row) if row is not None else None
+    finally:
+        conn.close()
+
+
 def rollout_bucket_key(agent: str, node: str, task_type: str) -> str:
     """Unambiguous display/render key for one bucket.
 

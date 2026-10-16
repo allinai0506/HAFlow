@@ -321,6 +321,16 @@ herdr-task rollout check-guard --agent codex --node implementation \
   自动止损默认由 `rollout check-guard --auto-rollback` 显式执行。
 
 
+## `herdr-quality assess`
+
+只读评估一次 Agent 执行。不写状态库，不派发 Agent，不发布经验规则。
+
+```bash
+bin/herdr-quality assess --task-id <task_id> --run-id <run_id> [--db-path <state.db>]
+```
+
+标准输出是一份 JSON。`correctness` 只取已结算 Outcome 的 `qualified_success`；没有结算结果时是 `unknown`。`process_quality` 表示过程里有没有已确认的改进信号。退出码 0 只表示报告已输出。字段和判定见 `wiki/quality-assessment.md`。
+
 ## 节点配额、原位返工与工位回收
 
 `agent_policy.max_concurrency` 限制 pending/活跃任务，节点 `max_tasks_per_node` 限制累计在役历史任务（已退役行——`status=superseded` 或带 `superseded_by` 的谱系行——不占预算）。launch 在工作流级跨进程锁内检查，拒绝时列出已有 task_id。替换需要真实空闲并发槽位；满额时先使用同任务 rework。默认软件开发模板累计配额：需求 2、计划 2、实现 12、测试 4、评审 4、收尾 1。
