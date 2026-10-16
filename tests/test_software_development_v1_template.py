@@ -118,6 +118,8 @@ class TestSoftwareDevelopmentV1Template(unittest.TestCase):
         self.assertIn("record-review-closure", rules)
         # 分页：多页 PR 不得只查第一页而漏报 findings
         self.assertIn("--paginate", rules)
+        # 结构化 findings：回执须报机器可读的 P1=0 计数
+        self.assertIn("--unresolved-p1", rules)
         # 修复提交再门禁：新 head 必须重新过独立门禁/重建交付身份
         self.assertIn("新的有效交付身份", rules)
         # 契约启用标记：新工作流 wrapup 节点必须显式 opt-in（兼容旧工作流）

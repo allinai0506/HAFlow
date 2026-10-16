@@ -5,28 +5,40 @@ Codex review P1s (wf-haflow-1015-01), pinned behaviourally:
 1. the invariant lives in the **shared transition gateway** — the
    controller's CAS auto-accept path (``kernel.transition_task``) is covered
    too, not only the CLI ``set`` pre-check;
-2. a receipt is only acceptable with concrete content: non-deferred needs
-   PR URL + ``ci_status=pass`` + findings; deferred needs a reason — always
-   plus the certified 40-hex head SHA;
+2. receipt content is structured and machine-checked: non-deferred needs
+   PR URL + ``ci_status=pass`` + unresolved P1 = 0 + P2 count + disposition;
+   deferred needs a reason — always plus the certified 40-hex head SHA;
 3. the receipt is **bound to the reviewed head**: a later commit invalidates
-   it (stale receipt must be re-recorded); the audited
-   ``--skip-review-closure --note`` bypass writes a skipped event;
+   it, and an unverifiable head fails closed; the audited
+   ``--skip-review-closure --note`` bypass is likewise bound to the head and
+   expires on rework;
 4. the contract is **opt-in** via the pinned workflow configuration
-   (``review_closure_required: true`` on the wrapup node): legacy workflows
-   and custom templates keep their previous behaviour instead of being
-   bricked by repeated auto-accept refusals.
+   (``review_closure_required: true`` on the wrapup node; the authoritative
+   snapshot is SQLite ``config_json``, with the pinned file as fallback):
+   legacy workflows and custom templates keep their previous behaviour,
+   while an existing-but-unreadable configuration fails closed.
 """
 import json
 import os
 from pathlib import Path
+import sqlite3
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 from herdr.state_store import SQLiteStateStore
 
 ROOT = Path(__file__).resolve().parents[1]
-DUMMY_HEAD = "a" * 40
+
+OPTED_NODES = [
+    {"id": "implementation"},
+    {"id": "wrapup", "review_closure_required": True},
+]
+PLAIN_NODES = [
+    {"id": "implementation"},
+    {"id": "wrapup"},
+]
 
 
 def run_cli(store, *argv):
@@ -53,9 +65,9 @@ def run_kernel_transition(store, task_id, to_status="completed"):
     )
 
 
-def make_git_clone(tmp_path: Path) -> Path:
-    clone = tmp_path / "clone"
-    clone.mkdir()
+def make_git_clone(root: Path) -> Path:
+    clone = root / "clone"
+    clone.mkdir(parents=True)
 
     def git(*args):
         subprocess.run(["git", "-C", str(clone), *args], check=True,
@@ -84,30 +96,30 @@ def commit_more(clone: Path, content: str) -> None:
                    check=True, capture_output=True, text=True)
 
 
-def opted_config(tmp_path: Path) -> Path:
-    config = tmp_path / "workflow.json"
-    config.write_text(json.dumps({
-        "nodes": [
-            {"id": "implementation"},
-            {"id": "wrapup", "review_closure_required": True},
-        ],
-    }))
-    return config
-
-
-@pytest.fixture
-def scene(tmp_path):
-    config = opted_config(tmp_path)
-    store = SQLiteStateStore(tmp_path / "state.db")
-    store.save_workflow({"workflow_id": "wf-closure", "status": "running"})
+def make_scene(root: Path) -> SimpleNamespace:
+    clone = make_git_clone(root)
+    store = SQLiteStateStore(root / "state.db")
+    store.save_workflow({
+        "workflow_id": "wf-closure", "status": "running",
+        "config": {"nodes": OPTED_NODES},
+    })
+    store.save_workflow({"workflow_id": "wf-legacy", "status": "running"})
+    store.save_workflow({
+        "workflow_id": "wf-custom", "status": "running",
+        "config": {"nodes": PLAIN_NODES},
+    })
     store.save_task({
         "task_id": "wrapup-task", "workflow_id": "wf-closure",
         "status": "agent_done", "stage": "wrapup", "node": "wrapup",
-        "agent": "qodercli", "workflow_config": str(config),
+        "agent": "qodercli", "clone_path": str(clone),
     })
-    # Legacy wrapup task: its pinned configuration predates the contract.
     store.save_task({
-        "task_id": "legacy-wrapup", "workflow_id": "wf-closure",
+        "task_id": "legacy-wrapup", "workflow_id": "wf-legacy",
+        "status": "agent_done", "stage": "wrapup", "node": "wrapup",
+        "agent": "qodercli",
+    })
+    store.save_task({
+        "task_id": "custom-wrapup", "workflow_id": "wf-custom",
         "status": "agent_done", "stage": "wrapup", "node": "wrapup",
         "agent": "qodercli",
     })
@@ -116,37 +128,45 @@ def scene(tmp_path):
         "status": "agent_done", "stage": "implementation",
         "node": "implementation", "agent": "opencode",
     })
-    return store
+    return SimpleNamespace(store=store, clone=clone, head=clone_head(clone))
 
 
-def record_valid(store, task_id="wrapup-task", head=DUMMY_HEAD):
-    return run_cli(
-        store, "record-review-closure", task_id,
-        "--pr-url", "https://example.test/pr/1",
-        "--ci-status", "pass",
-        "--findings", "P1=0, P2=1 disposed",
-        "--head-sha", head,
-    )
+@pytest.fixture
+def scene(tmp_path):
+    return make_scene(tmp_path)
+
+
+def record_valid(store, head, task_id="wrapup-task", **extra):
+    argv = ["record-review-closure", task_id,
+            "--pr-url", "https://example.test/pr/1",
+            "--ci-status", "pass",
+            "--unresolved-p1", "0",
+            "--unresolved-p2", "1",
+            "--findings", "P2 disposed via follow-up issue #9",
+            "--head-sha", head]
+    for key, value in extra.items():
+        argv += [f"--{key.replace('_', '-')}", str(value)]
+    return run_cli(store, *argv)
 
 
 def test_wrapup_completion_requires_receipt(scene):
-    result = run_cli(scene, "set", "wrapup-task", "completed")
+    result = run_cli(scene.store, "set", "wrapup-task", "completed")
     assert result.returncode == 2, result.stdout + result.stderr
     assert "REVIEW CLOSURE REQUIRED" in (result.stdout + result.stderr)
-    assert scene.get_task("wrapup-task")["status"] == "agent_done"
+    assert scene.store.get_task("wrapup-task")["status"] == "agent_done"
 
 
 def test_shared_transition_gateway_enforces_invariant(scene):
     """The controller's CAS auto-accept path must be gated too (kernel funnel)."""
-    refused = run_kernel_transition(scene, "wrapup-task")
+    refused = run_kernel_transition(scene.store, "wrapup-task")
     assert refused.returncode != 0
     assert "REVIEW CLOSURE REQUIRED" in refused.stderr
-    assert scene.get_task("wrapup-task")["status"] == "agent_done"
+    assert scene.store.get_task("wrapup-task")["status"] == "agent_done"
 
-    assert record_valid(scene).returncode == 0
-    allowed = run_kernel_transition(scene, "wrapup-task")
+    assert record_valid(scene.store, scene.head).returncode == 0
+    allowed = run_kernel_transition(scene.store, "wrapup-task")
     assert allowed.returncode == 0, allowed.stdout + allowed.stderr
-    assert scene.get_task("wrapup-task")["status"] == "completed"
+    assert scene.store.get_task("wrapup-task")["status"] == "completed"
 
 
 @pytest.mark.parametrize("ci_args", [
@@ -157,95 +177,185 @@ def test_shared_transition_gateway_enforces_invariant(scene):
 def test_receipt_requires_passing_ci(scene, ci_args):
     argv = ["record-review-closure", "wrapup-task",
             "--pr-url", "https://example.test/pr/1",
-            "--findings", "P1=0", "--head-sha", DUMMY_HEAD, *ci_args]
-    result = run_cli(scene, *argv)
+            "--unresolved-p1", "0", "--unresolved-p2", "0",
+            "--findings", "clean", "--head-sha", scene.head, *ci_args]
+    result = run_cli(scene.store, *argv)
     assert result.returncode == 2, result.stdout + result.stderr
     assert "REVIEW CLOSURE REFUSED" in (result.stdout + result.stderr)
 
 
-def test_receipt_requires_findings_and_head(scene):
-    no_findings = run_cli(
-        scene, "record-review-closure", "wrapup-task",
-        "--pr-url", "https://example.test/pr/1",
-        "--ci-status", "pass", "--head-sha", DUMMY_HEAD,
+def test_receipt_rejects_unresolved_p1_and_requires_structured_counts(scene):
+    unresolved = record_valid(scene.store, scene.head, unresolved_p1=3)
+    assert unresolved.returncode == 2
+    assert "unresolved P1" in (unresolved.stdout + unresolved.stderr)
+
+    missing_p1 = run_cli(
+        scene.store, "record-review-closure", "wrapup-task",
+        "--pr-url", "https://example.test/pr/1", "--ci-status", "pass",
+        "--unresolved-p2", "0", "--findings", "x", "--head-sha", scene.head,
     )
-    assert no_findings.returncode == 2
+    assert missing_p1.returncode == 2
+    assert "unresolved-p1" in (missing_p1.stdout + missing_p1.stderr)
 
-    no_head = run_cli(
-        scene, "record-review-closure", "wrapup-task",
-        "--pr-url", "https://example.test/pr/1",
-        "--ci-status", "pass", "--findings", "P1=0",
+    missing_p2 = run_cli(
+        scene.store, "record-review-closure", "wrapup-task",
+        "--pr-url", "https://example.test/pr/1", "--ci-status", "pass",
+        "--unresolved-p1", "0", "--findings", "x", "--head-sha", scene.head,
     )
-    assert no_head.returncode == 2
-    assert "head-sha" in (no_head.stdout + no_head.stderr)
+    assert missing_p2.returncode == 2
+
+    missing_findings = run_cli(
+        scene.store, "record-review-closure", "wrapup-task",
+        "--pr-url", "https://example.test/pr/1", "--ci-status", "pass",
+        "--unresolved-p1", "0", "--unresolved-p2", "0",
+        "--head-sha", scene.head,
+    )
+    assert missing_findings.returncode == 2
+
+    missing_head = run_cli(
+        scene.store, "record-review-closure", "wrapup-task",
+        "--pr-url", "https://example.test/pr/1", "--ci-status", "pass",
+        "--unresolved-p1", "0", "--unresolved-p2", "0", "--findings", "x",
+    )
+    assert missing_head.returncode == 2
+    assert "head-sha" in (missing_head.stdout + missing_head.stderr)
 
 
-def test_stale_receipt_is_rejected_scoped(tmp_path):
-    clone = make_git_clone(tmp_path)
-    config = opted_config(tmp_path)
-    store = SQLiteStateStore(tmp_path / "state.db")
-    store.save_workflow({"workflow_id": "wf-closure", "status": "running"})
-    store.save_task({
-        "task_id": "wrapup-task", "workflow_id": "wf-closure",
-        "status": "agent_done", "stage": "wrapup", "node": "wrapup",
-        "agent": "qodercli", "clone_path": str(clone),
-        "workflow_config": str(config),
-    })
+def test_record_rejects_head_that_does_not_match_clone(scene):
+    result = record_valid(scene.store, "b" * 40)
+    assert result.returncode == 2
+    assert "clone HEAD" in (result.stdout + result.stderr)
 
-    assert record_valid(store, head=clone_head(clone)).returncode == 0
-    commit_more(clone, "two\n")  # a commit after the reviewed head
 
-    stale = run_cli(store, "set", "wrapup-task", "completed")
+def test_stale_receipt_is_rejected_then_fresh_receipt_completes(scene):
+    assert record_valid(scene.store, scene.head).returncode == 0
+    commit_more(scene.clone, "two\n")  # a commit after the reviewed head
+
+    stale = run_cli(scene.store, "set", "wrapup-task", "completed")
     assert stale.returncode == 2
     assert "stale" in (stale.stdout + stale.stderr)
-    assert store.get_task("wrapup-task")["status"] == "agent_done"
+    assert scene.store.get_task("wrapup-task")["status"] == "agent_done"
 
-    assert record_valid(store, head=clone_head(clone)).returncode == 0
-    fresh = run_cli(store, "set", "wrapup-task", "completed")
+    assert record_valid(scene.store, clone_head(scene.clone)).returncode == 0
+    fresh = run_cli(scene.store, "set", "wrapup-task", "completed")
     assert fresh.returncode == 0, fresh.stdout + fresh.stderr
-    assert store.get_task("wrapup-task")["status"] == "completed"
+    assert scene.store.get_task("wrapup-task")["status"] == "completed"
+
+
+def test_unverifiable_head_fails_closed(scene):
+    task = scene.store.get_task("wrapup-task")
+    task["clone_path"] = str(scene.clone.parent / "gone-clone")
+    scene.store.save_task(task)
+
+    assert record_valid(scene.store, scene.head).returncode == 0
+    refused = run_cli(scene.store, "set", "wrapup-task", "completed")
+    assert refused.returncode == 2
+    assert "cannot verify" in (refused.stdout + refused.stderr)
+    assert scene.store.get_task("wrapup-task")["status"] == "agent_done"
+
+
+def test_bypass_is_bound_to_head_and_expires_on_rework(scene):
+    refused = run_cli(
+        scene.store, "set", "wrapup-task", "completed", "--skip-review-closure",
+    )
+    assert refused.returncode == 2
+    assert "SKIP REFUSED" in (refused.stdout + refused.stderr)
+
+    # A bypass recorded for an older head must not survive rework.
+    scene.store.record_event(
+        "review_closure_skipped",
+        {"task_id": "wrapup-task", "reason": "old waiver", "head_sha": scene.head},
+        task_id="wrapup-task", workflow_id="wf-closure",
+        node_id="wrapup", source="herdr-task",
+    )
+    commit_more(scene.clone, "rework\n")
+    expired = run_cli(scene.store, "set", "wrapup-task", "completed")
+    assert expired.returncode == 2
+    assert "expired" in (expired.stdout + expired.stderr)
+    assert scene.store.get_task("wrapup-task")["status"] == "agent_done"
+
+    # A fresh audited bypass binds the current head and completes.
+    fresh = run_cli(
+        scene.store, "set", "wrapup-task", "completed", "--skip-review-closure",
+        "--note", "audited emergency after rework",
+    )
+    assert fresh.returncode == 0, fresh.stdout + fresh.stderr
+    assert scene.store.get_task("wrapup-task")["status"] == "completed"
 
 
 def test_deferred_receipt_requires_reason_then_allows_completion(scene):
     refused = run_cli(
-        scene, "record-review-closure", "wrapup-task",
-        "--deferred", "--head-sha", DUMMY_HEAD,
+        scene.store, "record-review-closure", "wrapup-task",
+        "--deferred", "--head-sha", scene.head,
     )
     assert refused.returncode == 2
     assert "REVIEW CLOSURE REFUSED" in (refused.stdout + refused.stderr)
 
     deferred = run_cli(
-        scene, "record-review-closure", "wrapup-task", "--deferred",
+        scene.store, "record-review-closure", "wrapup-task", "--deferred",
         "--reason", "no remote configured: git remote -v empty",
-        "--head-sha", DUMMY_HEAD,
+        "--head-sha", scene.head,
     )
     assert deferred.returncode == 0, deferred.stdout + deferred.stderr
-    assert run_cli(scene, "set", "wrapup-task", "completed").returncode == 0
-
-
-def test_skip_bypass_requires_note_and_records(scene):
-    refused = run_cli(
-        scene, "set", "wrapup-task", "completed", "--skip-review-closure",
-    )
-    assert refused.returncode == 2
-    assert "SKIP REFUSED" in (refused.stdout + refused.stderr)
-
-    bypassed = run_cli(
-        scene, "set", "wrapup-task", "completed", "--skip-review-closure",
-        "--note", "audited emergency: platform outage",
-    )
-    assert bypassed.returncode == 0, bypassed.stdout + bypassed.stderr
-    assert scene.get_task("wrapup-task")["status"] == "completed"
+    assert run_cli(scene.store, "set", "wrapup-task", "completed").returncode == 0
 
 
 def test_non_wrapup_completion_unaffected(scene):
-    result = run_cli(scene, "set", "impl-task", "completed")
+    result = run_cli(scene.store, "set", "impl-task", "completed")
     assert result.returncode == 0, result.stdout + result.stderr
-    assert scene.get_task("impl-task")["status"] == "completed"
+    assert scene.store.get_task("impl-task")["status"] == "completed"
 
 
-def test_legacy_or_custom_wrapup_without_capability_is_not_gated(scene):
+def test_legacy_and_custom_wrapup_without_capability_are_not_gated(scene):
     """Upgrades must not brick pinned configurations that never opted in."""
-    legacy = run_cli(scene, "set", "legacy-wrapup", "completed")
+    legacy = run_cli(scene.store, "set", "legacy-wrapup", "completed")
     assert legacy.returncode == 0, legacy.stdout + legacy.stderr
-    assert scene.get_task("legacy-wrapup")["status"] == "completed"
+    custom = run_cli(scene.store, "set", "custom-wrapup", "completed")
+    assert custom.returncode == 0, custom.stdout + custom.stderr
+    assert scene.store.get_task("legacy-wrapup")["status"] == "completed"
+    assert scene.store.get_task("custom-wrapup")["status"] == "completed"
+
+
+def test_file_fallback_gates_and_unreadable_config_fails_closed(scene, tmp_path):
+    # No config snapshot on the workflow row: the task's pinned file is the
+    # fallback and still opts in.
+    config = tmp_path / "run" / "workflow.json"
+    config.parent.mkdir()
+    config.write_text(json.dumps({"nodes": OPTED_NODES}))
+    scene.store.save_workflow({"workflow_id": "wf-file", "status": "running"})
+    scene.store.save_task({
+        "task_id": "file-wrapup", "workflow_id": "wf-file",
+        "status": "agent_done", "stage": "wrapup", "node": "wrapup",
+        "agent": "qodercli", "clone_path": str(scene.clone),
+        "workflow_config": str(config),
+    })
+    refused = run_cli(scene.store, "set", "file-wrapup", "completed")
+    assert refused.returncode == 2
+    assert "REVIEW CLOSURE REQUIRED" in (refused.stdout + refused.stderr)
+
+    # An existing-but-unreadable pinned file fails closed, not silently off.
+    broken = tmp_path / "run" / "broken.json"
+    broken.write_text("{not json")
+    scene.store.save_workflow({"workflow_id": "wf-broken", "status": "running"})
+    scene.store.save_task({
+        "task_id": "broken-wrapup", "workflow_id": "wf-broken",
+        "status": "agent_done", "stage": "wrapup", "node": "wrapup",
+        "agent": "qodercli", "workflow_config": str(broken),
+    })
+    broken_run = run_cli(scene.store, "set", "broken-wrapup", "completed")
+    assert broken_run.returncode == 2
+    assert scene.store.get_task("broken-wrapup")["status"] == "agent_done"
+
+
+def test_corrupt_authoritative_snapshot_fails_closed(scene):
+    conn = sqlite3.connect(scene.store.db_path)
+    conn.execute(
+        "UPDATE workflows SET config_json=? WHERE workflow_id=?",
+        ("{bad json", "wf-closure"),
+    )
+    conn.commit()
+    conn.close()
+
+    refused = run_cli(scene.store, "set", "wrapup-task", "completed")
+    assert refused.returncode == 2
+    assert scene.store.get_task("wrapup-task")["status"] == "agent_done"
