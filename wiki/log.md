@@ -8,6 +8,11 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-10-16] fix | 质量评估收紧旧证据归属并容错损坏输入
+- 背景：任务已有持久 `run_id` 时，没有 `run_id` 的旧行仍被算进本次运行，旧失败会造出假异常、旧通过能把轨迹补成 acceptable。原生会话损坏和无关任务的坏载荷也会让过程结论失真或丢掉整次评估。
+- 变更：旧行回退只留给真正没有运行身份的任务；`native_corrupt` 记为 unknown；轨迹按克隆目录找兄弟任务时跳过坏载荷。
+- 证据：`tests/test_quality_assessment.py`、`tests/test_execution_trace.py`。
+
 ## [2026-10-16] fix | 质量评估对齐测试命令识别并容错坏插话载荷
 - 背景：`npm test`、`go test`、`cargo test` 没有退出码时不被当成测试命令，成功结论可能判成 acceptable。一条损坏的插话载荷会让整次评估退化成 `assessment_unavailable`。
 - 变更：测试命令识别复用执行轨迹的分类器；插话查询用 `json_valid` 保护，坏载荷按没有运行身份处理。

@@ -279,6 +279,19 @@ class QualityJudgementTest(unittest.TestCase):
                 self.assertEqual(report["process_quality"], "unknown")
                 self.assertIn("exit_code_unknown", report["problem_codes"])
 
+    def test_corrupt_native_session_is_unknown(self):
+        report = assess_quality(
+            TASK, RUN,
+            outcome=_outcome(),
+            events=[_event("test_passed", "t1", command="pytest", exit_code=0)],
+            degradation=[{"code": "native_corrupt", "message": "记录损坏"}],
+        )
+        self.assertEqual(report["correctness"], "success")
+        self.assertEqual(report["trace_completeness"], "unknown")
+        self.assertEqual(report["process_quality"], "unknown")
+        self.assertIn("native_corrupt", report["problem_codes"])
+        self.assertNotIn("business_failure", report["problem_codes"])
+
     def test_python_runner_forms_stay_recognized(self):
         for command in ("pytest tests/a.py", "py.test tests/a.py", "tox", "python3 -m pytest tests/a.py"):
             with self.subTest(command=command):
@@ -700,6 +713,121 @@ class QualityReadTest(unittest.TestCase):
         self.assertEqual(report["correctness"], "success")
         self.assertEqual(report["process_quality"], "acceptable")
         self.assertEqual(report["corrective_human_count"], 0)
+
+    def _insert_task(self, task_id, run_id, *, clone_path=None, agent="fixture"):
+        payload = {"run_id": run_id, "task_type": "dev"}
+        if clone_path:
+            payload["clone_path"] = clone_path
+        conn = state_db.get_db_connection(self.db)
+        try:
+            conn.execute(
+                "INSERT INTO tasks (task_id, workflow_id, node, stage, agent, status, "
+                "payload_json, created_at, updated_at, version) "
+                "VALUES (?, 'wf-1', 'test', 'test', ?, 'completed', ?, 1, 2, 1)",
+                (task_id, agent, json.dumps(payload)),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _insert_outcome(self, task_id, run_id, *, human=0, recorded_at=60.0, eval_id="eval-extra"):
+        state_db.insert_execution_outcome({
+            "outcome_id": outcome_id_for(task_id, run_id),
+            "run_id": run_id,
+            "task_id": task_id,
+            "workflow_id": "wf-1",
+            "agent": "fixture",
+            "node": "test",
+            "task_type": "dev",
+            "final_status": "completed",
+            "requirements_satisfied": True,
+            "verification_passed": True,
+            "qualified_success": True,
+            "rework_count": 0,
+            "blocked_count": 0,
+            "human_intervention_count": human,
+            "recorded_at": recorded_at,
+            "source_eval_id": eval_id,
+            "source_eval_revision": 1,
+            "source_task_version": 1,
+            "schema_version": 1,
+        }, db_path=self.db)
+
+    def _insert_scoped_verification(self, task_id, run_id, *, passed=True, evidence="ev-extra", timestamp=12):
+        conn = state_db.get_db_connection(self.db)
+        try:
+            conn.execute(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'verification_completed', ?, ?, 'trajectory', ?, 1)",
+                (task_id, json.dumps({"verification": {"passed": passed, "evidence_id": evidence}}),
+                 timestamp, run_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_legacy_unscoped_pass_cannot_complete_a_persisted_run(self):
+        task_id, run_id = "task-scoped", "run-scoped"
+        self._insert_task(task_id, run_id)
+        conn = state_db.get_db_connection(self.db)
+        try:
+            conn.execute(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'verification_completed', ?, 9, 'trajectory', NULL, 1)",
+                (task_id, json.dumps({"verification": {"passed": True, "evidence_id": "ev-old"}})),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        self._insert_outcome(task_id, run_id, eval_id="eval-scoped")
+        report = assess_task_run(task_id, run_id, db_path=self.db, budget_s=0.2)
+        self.assertIn("unscoped_evidence_ignored", report["problem_codes"])
+        self.assertEqual(report["trace_completeness"], "unknown")
+        self.assertNotEqual(report["process_quality"], "acceptable")
+
+    def test_legacy_unscoped_failure_is_not_an_anomaly_for_a_persisted_run(self):
+        task_id, run_id = "task-scoped-fail", "run-scoped-fail"
+        self._insert_task(task_id, run_id)
+        self._insert_scoped_verification(task_id, run_id, evidence="ev-scoped")
+        conn = state_db.get_db_connection(self.db)
+        try:
+            conn.execute(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'verification_completed', ?, 9, 'trajectory', NULL, 1)",
+                (task_id, json.dumps({"verification": {"passed": False, "evidence_id": "ev-old"}})),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        self._insert_outcome(task_id, run_id, eval_id="eval-scoped-fail")
+        report = assess_task_run(task_id, run_id, db_path=self.db, budget_s=0.2)
+        self.assertIn("unscoped_evidence_ignored", report["problem_codes"])
+        self.assertEqual(report["test_anomalies"], [])
+        self.assertNotIn("test_anomaly", report["problem_codes"])
+
+    def test_corrupt_sibling_task_does_not_erase_the_assessment(self):
+        task_id, run_id = "task-clone", "run-clone"
+        self._insert_task(task_id, run_id, clone_path="/tmp/herdr-shared-clone")
+        conn = state_db.get_db_connection(self.db)
+        try:
+            conn.execute(
+                "INSERT INTO tasks (task_id, workflow_id, node, stage, agent, status, "
+                "payload_json, created_at, updated_at, version) "
+                "VALUES ('task-broken', 'wf-1', 'test', 'test', 'fixture', 'completed', ?, 1, 2, 1)",
+                ("{not json",),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        self._insert_scoped_verification(task_id, run_id, evidence="ev-clone")
+        self._insert_outcome(task_id, run_id, eval_id="eval-clone")
+        report = assess_task_run(task_id, run_id, db_path=self.db, budget_s=0.2)
+        self.assertNotIn("assessment_unavailable", report["problem_codes"])
+        self.assertEqual(report["correctness"], "success")
+        self.assertEqual(report["trace_completeness"], "complete")
 
     def test_missing_database_returns_a_report(self):
         missing = Path(self.tmp.name) / "absent.db"

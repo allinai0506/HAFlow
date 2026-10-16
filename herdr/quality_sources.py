@@ -80,7 +80,7 @@ def load_quality_inputs(task_id: str, run_id: str, *, db_path, roots, budget_s: 
             break
     else:
         truncated = True
-    return _bundle(outcome, events, native, notes, signals, allow_legacy=True, truncated=truncated)
+    return _bundle(outcome, events, native, notes, signals, allow_legacy=not persisted, truncated=truncated)
 
 
 def _bundle(outcome, events, actions, degradation, signals, *, allow_legacy, truncated):

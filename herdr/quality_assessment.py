@@ -23,6 +23,7 @@ _UNKNOWN_NOTES = frozenset({
     "trajectory_unavailable",
     "native_unavailable",
     "native_unverified",
+    "native_corrupt",
     "historical_run_trace_limited",
     "human_signals_truncated",
 })

@@ -127,7 +127,8 @@ def read_trace_tasks(db_path, task_id: str) -> List[Dict[str, Any]]:
             SELECT task_id, json_extract(payload_json, '$.clone_path') AS clone_path
             FROM tasks
             WHERE task_id != ?
-              AND json_extract(payload_json, '$.clone_path') IS NOT NULL
+              AND CASE WHEN json_valid(payload_json)
+                       THEN json_extract(payload_json, '$.clone_path') END IS NOT NULL
             """,
             (task_id,),
         ).fetchall()

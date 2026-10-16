@@ -6,7 +6,14 @@ from pathlib import Path
 
 import pytest
 
-from herdr.execution_trace import assemble_trace, project_native_actions, project_task_history, query_task_trace
+from herdr import state_db
+from herdr.execution_trace import (
+    assemble_trace,
+    project_native_actions,
+    project_task_history,
+    query_task_trace,
+    read_trace_tasks,
+)
 from herdr.native_session_trace import load_native_actions, parse_claude_jsonl, parse_codex_jsonl, parse_opencode_parts
 
 
@@ -262,6 +269,35 @@ def test_query_isolates_task_and_run_without_writable_connection(tmp_path, monke
     assert all(event["task_id"] == "task-a" and event["run_id"] == "run-a" for event in page["events"])
     assert page["degraded"] is True
     assert "native_unavailable" in {item["code"] for item in page["degradation"]}
+
+
+def test_corrupt_sibling_task_payload_does_not_break_trace_tasks(tmp_path):
+    db = tmp_path / "state.db"
+    state_db.init_db(db)
+    conn = state_db.get_db_connection(db)
+    try:
+        conn.execute(
+            "INSERT INTO workflows (workflow_id, title, status, created_at, updated_at) "
+            "VALUES ('wf-a', 'wf', 'pending', 1, 1)"
+        )
+        conn.execute(
+            "INSERT INTO tasks (task_id, workflow_id, node, stage, agent, status, "
+            "payload_json, created_at, updated_at, version) "
+            "VALUES ('task-a', 'wf-a', 'test', 'test', 'codex', 'completed', ?, 1, 2, 1)",
+            (json.dumps({"run_id": "run-a", "clone_path": CLONE}),),
+        )
+        conn.execute(
+            "INSERT INTO tasks (task_id, workflow_id, node, stage, agent, status, "
+            "payload_json, created_at, updated_at, version) "
+            "VALUES ('task-broken', 'wf-a', 'test', 'test', 'codex', 'completed', ?, 1, 2, 1)",
+            ("{not json",),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    tasks = read_trace_tasks(db, "task-a")
+    assert [task["task_id"] for task in tasks] == ["task-a"]
+    assert tasks[0]["clone_path"] == CLONE
 
 
 def test_pagination_is_stable_and_rejects_bad_windows():
