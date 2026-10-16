@@ -498,11 +498,13 @@ def test_transition_task_rows_keep_status_and_time(tmp_path, monkeypatch):
     assert len(ledger) == 1
     assert ledger[0]["timestamp"] == 1_700_000_050.0
     assert ledger[0]["run_id"] == "run-a"
+    assert history_dispatch["correlation_id"] == ledger[0]["correlation_id"]
     native = [{
         "source_ref": "native:1", "ordinal": 1, "timestamp": 1_700_000_100,
         "tool": "exec", "command": "ls",
     }]
     page = assemble_trace(task, stored, native, limit=50)
+    assert sum(event["kind"] == "task_dispatched" for event in page["events"]) == 1
     timed = [event["kind"] for event in page["events"] if event["timestamp"] is not None]
     assert timed.index("task_dispatched") < timed.index("tool_call")
 
@@ -571,3 +573,103 @@ def test_codex_scan_reaches_the_newest_session_beyond_the_cap(tmp_path):
     )
     assert any(item.get("session_id") == "new-session" for item in actions)
     assert all(note["code"] != "native_unverified" for note in notes)
+
+
+def test_stale_launch_identity_run_does_not_bind_native_actions(tmp_path):
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    root = tmp_path / "codex" / "2026" / "10" / "16"
+    root.mkdir(parents=True)
+    session = "\n".join([
+        json.dumps({"type": "session_meta", "payload": {"cwd": str(clone), "session_id": "pinned-session"}}),
+        json.dumps({"type": "response_item", "timestamp": 20, "payload": {
+            "type": "function_call", "name": "read", "call_id": "r1",
+            "arguments": json.dumps({"file_path": "src/billing.py"}),
+        }}),
+    ]) + "\n"
+    (root / "session.jsonl").write_text(session, encoding="utf-8")
+    identity = clone / ".herdr-launch-identity.json"
+    identity.write_text(json.dumps({
+        "task_id": "task-a", "run_id": "run-old", "native_session_id": "pinned-session",
+    }), encoding="utf-8")
+    task = task_doc(
+        agent="codex", clone_path=str(clone), run_id="run-new",
+        commit=None, status_history=[], created_at=None, started_at=None,
+    )
+    roots = {"codex_sessions": tmp_path / "codex", "claude_projects": tmp_path / "claude", "opencode_db": tmp_path / "none.db"}
+    actions, notes = load_native_actions(task, [task], roots)
+    assert actions == []
+    assert notes[0]["code"] == "native_unverified"
+    assert "没有可核对" in notes[0]["message"]
+    identity.write_text(json.dumps({
+        "task_id": "task-a", "run_id": "run-new", "native_session_id": "pinned-session",
+    }), encoding="utf-8")
+    actions, notes = load_native_actions(task, [task], roots)
+    assert any(item.get("session_id") == "pinned-session" for item in actions)
+    assert notes == []
+
+
+def test_claude_pinned_session_survives_the_file_cap(tmp_path):
+    from herdr.native_session_trace import MAX_FILES
+
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    import os
+    encoded = "".join(ch if ch.isalnum() else "-" for ch in os.path.abspath(str(clone)))
+    folder = tmp_path / "claude" / encoded
+    folder.mkdir(parents=True)
+    pinned = "ffffffff-ffff-ffff-ffff-ffffffffffff"
+    for index in range(MAX_FILES):
+        name = f"00000000-0000-0000-0000-{index:012d}.jsonl"
+        (folder / name).write_text(json.dumps({
+            "cwd": str(clone), "sessionId": f"other-{index}",
+            "message": {"content": [{"type": "tool_use", "id": "t", "name": "Read", "input": {"file_path": "other.py"}}]},
+        }) + "\n", encoding="utf-8")
+    (folder / f"{pinned}.jsonl").write_text(json.dumps({
+        "cwd": str(clone), "sessionId": pinned,
+        "message": {"content": [{"type": "tool_use", "id": "t", "name": "Read", "input": {"file_path": "src/billing.py"}}]},
+    }) + "\n", encoding="utf-8")
+    task = task_doc(
+        agent="claude", clone_path=str(clone), native_session_id=pinned,
+        commit=None, status_history=[], created_at=None, started_at=None,
+    )
+    actions, notes = load_native_actions(
+        task, [task],
+        {"codex_sessions": tmp_path / "codex", "claude_projects": tmp_path / "claude", "opencode_db": tmp_path / "none.db"},
+    )
+    assert any(item.get("session_id") == pinned and item.get("path") == "src/billing.py" for item in actions)
+    assert all(item.get("session_id") == pinned for item in actions)
+    assert any(note["code"] == "native_truncated" for note in notes)
+
+
+def test_stored_event_cap_keeps_the_current_run_row(tmp_path):
+    from herdr.execution_trace import STORED_LIMIT, read_stored_events
+
+    db = tmp_path / "state.db"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        """
+        CREATE TABLE events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            workflow_id TEXT, node_id TEXT, task_id TEXT, agent_id TEXT,
+            event_type TEXT, payload_json TEXT, timestamp REAL,
+            source TEXT, run_id TEXT, sequence INTEGER
+        )
+        """
+    )
+    stale = [("task-a", "codex", "agent_started", "{}", index, "trajectory", "run-old", index) for index in range(STORED_LIMIT)]
+    noise = [("task-a", "codex", "debug_log", "{}", 10_000 + index, "trajectory", "run-a", index) for index in range(STORED_LIMIT)]
+    conn.executemany(
+        """
+        INSERT INTO events (task_id, agent_id, event_type, payload_json, timestamp, source, run_id, sequence)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        stale + noise + [("task-a", "codex", "task_transition", json.dumps({"to_status": "dispatched"}), 20_000, "controller", "run-a", 1)],
+    )
+    conn.commit()
+    conn.close()
+    rows, notes = read_stored_events(task_doc(commit=None), db)
+    assert any(row["event_type"] == "task_transition" and row["run_id"] == "run-a" for row in rows)
+    assert all(row["run_id"] in (None, "", "run-a") for row in rows)
+    assert all(row["event_type"] != "debug_log" for row in rows)
+    assert notes == []

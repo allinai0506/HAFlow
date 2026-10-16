@@ -60,6 +60,9 @@ def load_native_actions(
     if not clone:
         notes.append(_note("native_unverified", "任务没有可核对的隔离目录，未读取原生会话。"))
         return [], notes
+    if _identity_run_conflict(task):
+        notes.append(_note("native_unverified", "启动身份属于其他运行，没有可核对的当前会话。"))
+        return [], notes
     exclusive = _clone_exclusive(task, siblings)
     if not exclusive and not _recorded_native_id(task):
         notes.append(_note("native_unverified", "隔离目录不是该任务独占，未合并原生会话。"))
@@ -305,6 +308,33 @@ def _load_codex(task, root, deadline):
     return actions, notes, truncated
 
 
+def _claude_candidates(folder: Path, recorded: str, deadline: float) -> Tuple[List[Path], bool]:
+    """Keep a pinned session even when it sorts after the file cap."""
+    names = sorted(folder.glob("*.jsonl"), key=lambda item: item.name)
+    pinned = None
+    if recorded and "/" not in recorded and "\\" not in recorded and recorded not in {".", ".."}:
+        direct = folder / f"{recorded}.jsonl"
+        if direct.is_file() and direct.parent == folder:
+            pinned = direct
+        else:
+            for path in names:
+                if time.monotonic() > deadline:
+                    break
+                head, _ = _read_text(path, 65536)
+                _, session_id = _claude_identity(head)
+                if session_id == recorded:
+                    pinned = path
+                    break
+    ordered = []
+    if pinned is not None:
+        ordered.append(pinned)
+    for path in names:
+        if path == pinned:
+            continue
+        ordered.append(path)
+    return ordered[:MAX_FILES], len(ordered) > MAX_FILES
+
+
 def _load_claude(task, root, deadline):
     if root is None or not Path(root).is_dir():
         return [], [_note("native_unavailable", "记录来源暂不可用。")], False
@@ -314,11 +344,7 @@ def _load_claude(task, root, deadline):
         return [], [], False
     actions: List[Dict[str, Any]] = []
     notes: List[Dict[str, str]] = []
-    truncated = False
-    files = sorted(folder.glob("*.jsonl"), key=lambda item: item.name)[:MAX_FILES + 1]
-    if len(files) > MAX_FILES:
-        truncated = True
-        files = files[:MAX_FILES]
+    files, truncated = _claude_candidates(folder, _recorded_native_id(task), deadline)
     for path in files:
         if time.monotonic() > deadline:
             truncated = True
@@ -665,8 +691,27 @@ def _recorded_native_id(task: Dict[str, Any]) -> str:
     identity = _launch_identity(task)
     value = identity.get("native_session_id") if isinstance(identity, dict) else None
     if isinstance(value, str) and value.strip() and identity.get("task_id") == task.get("task_id"):
+        if (identity.get("run_id") or None) != (task.get("run_id") or None):
+            return ""
         return value.strip()
     return ""
+
+
+def _identity_run_conflict(task: Dict[str, Any]) -> bool:
+    runtime = task.get("runtime") if isinstance(task.get("runtime"), dict) else {}
+    for source in (runtime, task):
+        value = source.get("native_session_id")
+        if isinstance(value, str) and value.strip():
+            return False
+    identity = _launch_identity(task)
+    if not isinstance(identity, dict) or not identity:
+        return False
+    if identity.get("task_id") != task.get("task_id"):
+        return False
+    value = identity.get("native_session_id")
+    if not isinstance(value, str) or not value.strip():
+        return False
+    return (identity.get("run_id") or None) != (task.get("run_id") or None)
 
 
 def _launch_identity(task: Dict[str, Any]) -> Dict[str, Any]:

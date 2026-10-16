@@ -18,7 +18,11 @@ Trajectory 行没有 `run_id` 时保留为未知运行，不标成任务当前�
 
 Pane ID 会回收，也不能当作历史归属。
 
-没有记录 `native_session_id` 时，只接受工作目录与该任务独占 `clone_path` 完全一致的原生会话。隔离目录被多个任务共用时，拒绝合并原生记录。已经写在任务或 `.herdr-launch-identity.json` 里的 `native_session_id` 必须与原生会话 ID 一致。
+没有记录 `native_session_id` 时，只接受工作目录与该任务独占 `clone_path` 完全一致的原生会话。隔离目录被多个任务共用时，拒绝合并原生记录。已经写在任务、运行时或 `.herdr-launch-identity.json` 里的 `native_session_id` 必须与原生会话 ID 一致。身份文件的 `task_id` 对得上、但 `run_id` 属于另一次运行时，不用这份身份，也不退回按工作目录合并。
+
+Claude 会话先定位已记录的那一份，再套用单次最多 8 个文件的上限。`events` 先按当前运行（没有 `run_id` 的旧行仍保留）和可投影的事件类型过滤，再取最多 2000 条。
+
+同一次状态变化会同时写进状态历史和 `task_transition`。相同任务、目标状态和时间合成一条轨迹。
 
 对不上的原生记录直接丢弃，页面仍显示已经归属的任务事件。
 

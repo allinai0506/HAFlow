@@ -21,6 +21,11 @@ MAX_LIMIT = 200
 DEFAULT_LIMIT = 100
 STORED_LIMIT = 2000
 _MISSING = object()
+_PROJECTABLE_EVENT_TYPES = (
+    "agent_started", "task_started", "task_completed", "initial_dispatched",
+    "task_status_changed", "task_transition",
+    "verification_completed", "tests_completed", "blocked_marker_observed",
+)
 AGENT_ACTION_KINDS = frozenset({
     "file_read", "file_edit", "tool_call", "test_failed", "test_passed", "retry",
 })
@@ -149,6 +154,12 @@ def assemble_trace(
     }
 
 
+def _transition_correlation(task_id, status, timestamp):
+    if timestamp is None or not status:
+        return None
+    return f"transition:{task_id}:{status}:{float(timestamp):.6f}"
+
+
 def project_task_history(task: Dict[str, Any]) -> List[Dict[str, Any]]:
     task_id = task.get("task_id")
     run_id = task.get("run_id")
@@ -179,6 +190,8 @@ def project_task_history(task: Dict[str, Any]) -> List[Dict[str, Any]]:
         correlation = None
         if status == "pending" and created is not None and timestamp == created:
             correlation = f"created:{task_id}:{created}"
+        else:
+            correlation = _transition_correlation(task_id, status, timestamp)
         events.append(_event(
             task, kind=kind, title=title, status=tone, timestamp=timestamp,
             sequence=index + 1, source="task_history",
@@ -233,18 +246,24 @@ def project_stored_event(row: Dict[str, Any], task: Dict[str, Any]) -> Optional[
     elif event_type == "initial_dispatched":
         base.update(kind="task_dispatched", title="任务已派发", status="info")
     elif event_type in {"task_status_changed", "task_transition"}:
-        mapped = _status_kind(
+        to_status = (
             metadata.get("to_status")
             or payload.get("to_status")
             or payload.get("status")
             or row.get("status")
         )
+        mapped = _status_kind(to_status)
         if mapped is None:
             return None
         kind, title, tone = mapped
         if kind == "commit":
             kind, title, tone = "task_completed", "已提交", "info"
         base.update(kind=kind, title=title, status=tone)
+        created = _time(task.get("created_at"))
+        if to_status == "pending" and created is not None and timestamp == created:
+            base["correlation_id"] = f"created:{task.get('task_id')}:{created}"
+        else:
+            base["correlation_id"] = _transition_correlation(task.get("task_id"), to_status, timestamp)
     elif event_type in {"verification_completed", "tests_completed"}:
         kind, title, tone, detail, result = _verification_view(payload, event_type)
         base.update(kind=kind, title=title, status=tone, detail=detail)
@@ -259,7 +278,7 @@ def project_stored_event(row: Dict[str, Any], task: Dict[str, Any]) -> Optional[
         task, kind=base["kind"], title=base["title"], status=base["status"],
         detail=base["detail"], timestamp=timestamp, sequence=sequence,
         source=origin, source_ref=source_ref, agent=agent, details=base["details"],
-        run_id=row_run,
+        run_id=row_run, correlation_id=base.get("correlation_id"),
     )
 
 
@@ -355,15 +374,25 @@ def read_stored_events(task: Dict[str, Any], db_path) -> Tuple[List[Dict[str, An
     try:
         try:
             conn.execute("PRAGMA query_only=ON;")
+            task_run = task.get("run_id") or None
+            type_marks = ",".join("?" for _ in _PROJECTABLE_EVENT_TYPES)
+            if task_run:
+                run_sql = "(run_id IS NULL OR run_id = '' OR run_id = ?)"
+                params = (task.get("task_id"), *_PROJECTABLE_EVENT_TYPES, task_run, STORED_LIMIT)
+            else:
+                run_sql = "(run_id IS NULL OR run_id = '')"
+                params = (task.get("task_id"), *_PROJECTABLE_EVENT_TYPES, STORED_LIMIT)
             rows = conn.execute(
-                """
+                f"""
                 SELECT id, task_id, agent_id, event_type, timestamp, source, run_id, sequence, payload_json
                 FROM events
                 WHERE task_id = ?
+                  AND event_type IN ({type_marks})
+                  AND {run_sql}
                 ORDER BY timestamp ASC, id ASC
                 LIMIT ?
                 """,
-                (task.get("task_id"), STORED_LIMIT),
+                params,
             ).fetchall()
         except sqlite3.Error:
             return [], [{"code": "trajectory_unavailable", "message": "任务轨迹数据库暂不可用。"}]
