@@ -269,7 +269,7 @@ def test_live_product_chain_reads_real_sessions_without_writing():
         allowed = {"agent", "tool", "path", "command", "result", "exit_code", "timestamp", "source", "source_ref"}
         for event in page["events"]:
             assert event["task_id"] == task["task_id"]
-            assert event["run_id"] == task.get("run_id")
+            assert event["run_id"] in (None, task.get("run_id"))
             assert set(event.get("details") or {}).issubset(allowed)
             path = (event.get("details") or {}).get("path")
             if path:

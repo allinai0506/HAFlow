@@ -10941,7 +10941,8 @@ function renderExecutionTrace(model){
   let html=banner+'<div class="td-timeline trace-timeline">'+renderList(timed);
   if(untimed.length)html+='<div class="trace-note">以下记录没有原始时间，不与已知时间的事件比较先后。</div>'+renderList(untimed);
   html+='</div>';
-  if(model.has_more)html+='<button class="btn mini" type="button" onclick="loadMoreTaskTrace()">加载更多</button>';
+  if(model.appendError)html+='<div class="trace-note">后续轨迹加载失败：'+esc(model.appendError)+'</div><button class="btn mini" type="button" onclick="loadMoreTaskTrace()">重试</button>';
+  else if(model.has_more)html+='<button class="btn mini" type="button" onclick="loadMoreTaskTrace()">加载更多</button>';
   return html;
 }
 function toggleTraceEvent(el){
@@ -10996,7 +10997,19 @@ async function loadMoreTaskTrace(){
     applyTraceResponse(state,tid,seq,data);
   }catch(e){
     if(state.selectedTaskId!==tid||state.taskTraceSeq!==seq)return;
-    state.taskTrace={status:'error',task_id:tid,message:e&&e.message?e.message:'未知错误',events:model.events||[]};
+    const current=state.taskTrace&&Array.isArray(state.taskTrace.events)?state.taskTrace:model;
+    state.taskTrace={
+      status:'ready',
+      task_id:current.task_id||tid,
+      run_id:current.run_id,
+      availability:current.availability,
+      events:current.events||[],
+      has_more:!!current.has_more,
+      next_cursor:current.next_cursor||null,
+      degradation:Array.isArray(current.degradation)?current.degradation:[],
+      appending:false,
+      appendError:e&&e.message?e.message:'未知错误'
+    };
   }
   if(state.taskDrawerTab==='trace'||state.taskDrawerTab==='activity')renderTaskDrawer();
 }

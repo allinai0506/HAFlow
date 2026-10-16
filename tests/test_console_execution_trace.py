@@ -11,6 +11,8 @@ from console import herdr_factory_console as console
 def _extract(html, name):
     start = html.find(f"function {name}(")
     assert start >= 0, name
+    if html[max(0, start - 6):start] == "async ":
+        start -= 6
     brace = html.find("{", start)
     depth = 0
     for index in range(brace, len(html)):
@@ -49,7 +51,7 @@ def test_trace_renderer_states_escape_and_stale_response():
     html = console.HTML_TEMPLATE
     names = [
         "esc", "taskDrawerNumTs", "traceClock", "traceDotClass", "traceDetailRows",
-        "renderExecutionTrace", "applyTraceResponse", "toggleTraceEvent",
+        "renderExecutionTrace", "applyTraceResponse", "toggleTraceEvent", "loadMoreTaskTrace",
     ]
     script = "\n".join(_extract(html, name) for name in names)
     script += r"""
@@ -93,6 +95,22 @@ assert.equal(applyTraceResponse(state,'task-a',1,{task_id:'task-a', events:[{id:
 assert.equal(state.taskTrace.events[0].id, 'keep');
 assert.equal(applyTraceResponse(state,'task-b',2,{task_id:'task-b', availability:'task_events', events:[{id:'new'}], has_more:false}), true);
 assert.deepEqual(state.taskTrace.events.map(e=>e.id), ['new']);
+state.selectedTaskId='task-b';
+state.taskTraceSeq=2;
+state.taskDrawerTab='trace';
+state.taskTrace={status:'ready', task_id:'task-b', run_id:'run-b', availability:'task_events', events:[{id:'keep', title:'已有事件', status:'neutral', timestamp:10}], has_more:true, next_cursor:'keep', degradation:[]};
+async function api(){ throw new Error('网络中断'); }
+function renderTaskDrawer(){}
+loadMoreTaskTrace().then(()=>{
+  const html=renderExecutionTrace(state.taskTrace);
+  assert.equal(state.taskTrace.status, 'ready');
+  assert.equal(state.taskTrace.events[0].id, 'keep');
+  assert.equal(state.taskTrace.appendError, '网络中断');
+  assert.equal(html.includes('已有事件'), true);
+  assert.equal(html.includes('后续轨迹加载失败：网络中断'), true);
+  assert.equal(html.includes('loadMoreTaskTrace()'), true);
+  assert.equal(html.includes('执行轨迹加载失败'), false);
+}).catch((err)=>{ console.error(err); process.exit(1); });
 """
     result = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)
     assert result.returncode == 0, result.stderr

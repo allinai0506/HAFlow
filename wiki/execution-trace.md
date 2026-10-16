@@ -14,6 +14,8 @@
 
 `agent_session_id` 是 HAFlow 启动适配器记下的会话标识，不是 Codex、Claude Code 或 OpenCode 的原生会话 ID。不能拿它去对原生记录。
 
+Trajectory 行没有 `run_id` 时保留为未知运行，不标成任务当前的 `run_id`。状态历史优先用记录里的 `timestamp`。
+
 Pane ID 会回收，也不能当作历史归属。
 
 没有记录 `native_session_id` 时，只接受工作目录与该任务独占 `clone_path` 完全一致的原生会话。隔离目录被多个任务共用时，拒绝合并原生记录。已经写在任务或 `.herdr-launch-identity.json` 里的 `native_session_id` 必须与原生会话 ID 一致。

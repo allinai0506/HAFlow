@@ -456,3 +456,118 @@ def test_opencode_loader_matches_directory_exactly(tmp_path):
     assert len(actions) == 1
     assert actions[0]["session_id"] == "keep"
     assert actions[0]["path"] == "src/billing.py"
+
+
+def test_unscoped_ledger_row_keeps_an_unknown_run():
+    row = {
+        "id": 9, "task_id": "task-a", "run_id": None, "event_type": "agent_started",
+        "timestamp": 30, "source": "trajectory", "sequence": 1, "payload": {},
+    }
+    page = assemble_trace(task_doc(commit=None, status_history=[], created_at=None, started_at=None), [row], [])
+    assert page["run_id"] == "run-a"
+    assert len(page["events"]) == 1
+    assert page["events"][0]["run_id"] is None
+    assert page["events"][0]["task_id"] == "task-a"
+
+
+def test_transition_task_rows_keep_status_and_time(tmp_path, monkeypatch):
+    db = tmp_path / "state.db"
+    monkeypatch.setattr("herdr.state_db.time.time", lambda: 1_700_000_050.0)
+    from herdr.execution_trace import project_stored_event, read_stored_events, read_task_records
+    from herdr.state_db import save_task, transition_task
+
+    save_task({
+        "task_id": "task-a",
+        "workflow_id": "wf-a",
+        "run_id": "run-a",
+        "agent": "codex",
+        "status": "pending",
+        "node": "dev",
+        "created_at": 1_700_000_000.0,
+    }, db_path=db)
+    result = transition_task("task-a", "dispatched", "dispatch", source="controller", db_path=db)
+    assert result["accepted"] is True
+    task = next(item for item in read_task_records(db) if item["task_id"] == "task-a")
+    history = project_task_history(task)
+    history_dispatch = next(event for event in history if event["kind"] == "task_dispatched")
+    assert history_dispatch["timestamp"] == 1_700_000_050.0
+    stored, notes = read_stored_events(task, db)
+    assert notes == []
+    ledger = [project_stored_event(row, task) for row in stored]
+    ledger = [event for event in ledger if event and event["kind"] == "task_dispatched"]
+    assert len(ledger) == 1
+    assert ledger[0]["timestamp"] == 1_700_000_050.0
+    assert ledger[0]["run_id"] == "run-a"
+    native = [{
+        "source_ref": "native:1", "ordinal": 1, "timestamp": 1_700_000_100,
+        "tool": "exec", "command": "ls",
+    }]
+    page = assemble_trace(task, stored, native, limit=50)
+    timed = [event["kind"] for event in page["events"] if event["timestamp"] is not None]
+    assert timed.index("task_dispatched") < timed.index("tool_call")
+
+
+def test_opencode_loader_uses_part_id_for_retry(tmp_path):
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    db = tmp_path / "opencode.db"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT)")
+    conn.execute("CREATE TABLE part (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT)")
+    conn.execute("INSERT INTO session VALUES (?, ?)", ("keep", str(clone)))
+    conn.execute(
+        "INSERT INTO part VALUES (?, ?, ?, ?)",
+        ("p1", "keep", 10, json.dumps({
+            "type": "tool", "tool": "bash",
+            "state": {"status": "completed", "input": {"command": "pytest -q"}, "metadata": {"exit": 1}},
+        })),
+    )
+    conn.execute(
+        "INSERT INTO part VALUES (?, ?, ?, ?)",
+        ("p2", "keep", 11, json.dumps({
+            "type": "tool", "tool": "bash", "retry_of": "p1",
+            "state": {"status": "completed", "input": {"command": "pytest -q"}, "metadata": {"exit": 0}},
+        })),
+    )
+    conn.commit()
+    conn.close()
+    task = task_doc(agent="opencode", clone_path=str(clone), commit=None, status_history=[], created_at=None, started_at=None)
+    actions, notes = load_native_actions(task, [task], {"opencode_db": db})
+    assert notes == []
+    assert actions[1]["retry_of"] == actions[0]["source_ref"]
+    page = assemble_trace(task, [], actions, limit=20)
+    assert [event["kind"] for event in page["events"]] == ["test_failed", "retry", "test_passed"]
+
+
+def test_codex_scan_reaches_the_newest_session_beyond_the_cap(tmp_path):
+    from herdr.native_session_trace import MAX_SCAN
+
+    root = tmp_path / "sessions"
+    old = root / "2020" / "01" / "01"
+    new = root / "2026" / "10" / "16"
+    old.mkdir(parents=True)
+    new.mkdir(parents=True)
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    filler = json.dumps({"type": "session_meta", "payload": {"cwd": "/other", "session_id": "old"}}) + "\n"
+    for index in range(MAX_SCAN):
+        (old / f"session-{index:04d}.jsonl").write_text(filler, encoding="utf-8")
+    owned = "\n".join([
+        json.dumps({"type": "session_meta", "payload": {"cwd": str(clone), "session_id": "new-session"}}),
+        json.dumps({
+            "type": "response_item", "timestamp": 1_700_000_020,
+            "payload": {
+                "type": "function_call", "name": "read", "call_id": "r1",
+                "arguments": json.dumps({"file_path": "src/billing.py"}),
+            },
+        }),
+    ]) + "\n"
+    (new / "session-last.jsonl").write_text(owned, encoding="utf-8")
+    task = task_doc(agent="codex", clone_path=str(clone), commit=None, status_history=[], created_at=None, started_at=None)
+    actions, notes = load_native_actions(
+        task, [task],
+        {"codex_sessions": root, "claude_projects": tmp_path / "missing-claude", "opencode_db": tmp_path / "none.db"},
+        budget_s=8,
+    )
+    assert any(item.get("session_id") == "new-session" for item in actions)
+    assert all(note["code"] != "native_unverified" for note in notes)

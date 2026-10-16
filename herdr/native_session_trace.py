@@ -235,18 +235,53 @@ def parse_opencode_parts(parts: Sequence[Dict[str, Any]], *, session_id: str = "
     return actions, notes
 
 
+def _recent_jsonl(root: Path, limit: int, deadline: float) -> Tuple[List[Path], bool]:
+    """Return up to ``limit`` JSONL files, newest directory and file names first.
+
+    Each directory is sorted on its own. The walk stops once the limit is
+    filled, so an older date tree is not listed just to sort the whole store.
+    """
+    found: List[Path] = []
+    hit = False
+
+    def walk(directory: Path) -> None:
+        nonlocal hit
+        if hit or len(found) >= limit or time.monotonic() > deadline:
+            hit = True
+            return
+        try:
+            entries = list(directory.iterdir())
+        except OSError:
+            return
+        entries.sort(key=lambda item: item.name, reverse=True)
+        for entry in entries:
+            if len(found) >= limit or time.monotonic() > deadline:
+                hit = True
+                return
+            name = entry.name
+            if name.startswith("."):
+                continue
+            try:
+                is_dir = entry.is_dir()
+            except OSError:
+                continue
+            if is_dir:
+                walk(entry)
+                continue
+            if name.endswith(".jsonl") and not name.endswith(".jsonl.zst"):
+                found.append(entry)
+
+    walk(root)
+    return found, hit
+
+
 def _load_codex(task, root, deadline):
     if root is None or not Path(root).is_dir():
         return [], [_note("native_unavailable", "记录来源暂不可用。")], False
     clone = _norm_path(task.get("clone_path"))
     matches: List[Tuple[str, Path]] = []
-    scanned = 0
-    budget_hit = False
-    for path in sorted(Path(root).rglob("*.jsonl")):
-        if time.monotonic() > deadline or scanned >= MAX_SCAN:
-            budget_hit = True
-            break
-        scanned += 1
+    candidates, budget_hit = _recent_jsonl(Path(root), MAX_SCAN, deadline)
+    for path in candidates:
         cwd, session_id = _codex_meta(path)
         if _norm_path(cwd) == clone and session_id:
             matches.append((session_id, path))
@@ -337,10 +372,10 @@ def _load_opencode(task, db_path, deadline):
                 truncated = True
                 break
             parts = conn.execute(
-                "SELECT time_created, data FROM part WHERE session_id = ? ORDER BY time_created ASC, id ASC LIMIT ?",
+                "SELECT id, time_created, data FROM part WHERE session_id = ? ORDER BY time_created ASC, id ASC LIMIT ?",
                 (session_id, MAX_ACTIONS),
             ).fetchall()
-            payload = [{"time_created": item[0], "data": item[1]} for item in parts]
+            payload = [{"id": item[0], "time_created": item[1], "data": item[2]} for item in parts]
             batch, batch_notes = parse_opencode_parts(payload, session_id=session_id)
             actions.extend(batch)
             notes.extend(batch_notes)

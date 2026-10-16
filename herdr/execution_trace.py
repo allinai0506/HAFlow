@@ -20,6 +20,7 @@ from .state_db import get_readonly_db_connection
 MAX_LIMIT = 200
 DEFAULT_LIMIT = 100
 STORED_LIMIT = 2000
+_MISSING = object()
 AGENT_ACTION_KINDS = frozenset({
     "file_read", "file_edit", "tool_call", "test_failed", "test_passed", "retry",
 })
@@ -172,7 +173,9 @@ def project_task_history(task: Dict[str, Any]) -> List[Dict[str, Any]]:
         kind, title, tone = mapped
         if kind == "commit":
             kind, title, tone = "task_completed", "已提交", "info"
-        timestamp = _time(item.get("at"))
+        timestamp = _time(item.get("timestamp"))
+        if timestamp is None:
+            timestamp = _time(item.get("at"))
         correlation = None
         if status == "pending" and created is not None and timestamp == created:
             correlation = f"created:{task_id}:{created}"
@@ -207,10 +210,11 @@ def project_task_history(task: Dict[str, Any]) -> List[Dict[str, Any]]:
 def project_stored_event(row: Dict[str, Any], task: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if row.get("task_id") not in (None, task.get("task_id")):
         return None
-    run_id = task.get("run_id")
-    if run_id and row.get("run_id") not in (None, run_id):
-        return None
-    if not run_id and row.get("run_id"):
+    row_run = row.get("run_id") or None
+    task_run = task.get("run_id") or None
+    # A ledger row with no run_id is legacy evidence. Keep it, but do not
+    # stamp it with the task's current run.
+    if row_run != task_run and not (row_run is None and task_run):
         return None
     event_type = str(row.get("event_type") or "")
     payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
@@ -228,8 +232,13 @@ def project_stored_event(row: Dict[str, Any], task: Dict[str, Any]) -> Optional[
         base.update(kind="task_completed", title="任务完成", status="info")
     elif event_type == "initial_dispatched":
         base.update(kind="task_dispatched", title="任务已派发", status="info")
-    elif event_type == "task_status_changed":
-        mapped = _status_kind(metadata.get("to_status") or payload.get("status") or row.get("status"))
+    elif event_type in {"task_status_changed", "task_transition"}:
+        mapped = _status_kind(
+            metadata.get("to_status")
+            or payload.get("to_status")
+            or payload.get("status")
+            or row.get("status")
+        )
         if mapped is None:
             return None
         kind, title, tone = mapped
@@ -250,6 +259,7 @@ def project_stored_event(row: Dict[str, Any], task: Dict[str, Any]) -> Optional[
         task, kind=base["kind"], title=base["title"], status=base["status"],
         detail=base["detail"], timestamp=timestamp, sequence=sequence,
         source=origin, source_ref=source_ref, agent=agent, details=base["details"],
+        run_id=row_run,
     )
 
 
@@ -480,13 +490,13 @@ def _status_kind(status: Any):
 
 
 def _event(task, *, kind, title, status, timestamp, sequence, source, source_ref, agent=None,
-           detail="", details=None, correlation_id=None):
+           detail="", details=None, correlation_id=None, run_id=_MISSING):
     if details is None:
         details = _details(agent=agent, source=source, source_ref=source_ref, timestamp=timestamp)
     event = {
         "id": f"trace:{source}:{source_ref}",
         "task_id": task.get("task_id"),
-        "run_id": task.get("run_id"),
+        "run_id": task.get("run_id") if run_id is _MISSING else run_id,
         "timestamp": timestamp,
         "sequence": sequence if isinstance(sequence, int) else 0,
         "kind": kind,

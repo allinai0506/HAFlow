@@ -8,6 +8,12 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-10-16] fix | 执行轨迹评审修复
+
+- 背景：轨迹接口把没有 `run_id` 的账本行标成当前运行，并且读不到 `task_transition` 的时间。
+- 变更：无运行身份的账本行保持未知。状态迁移按 `task_transition` 和 `timestamp` 投影。OpenCode 重试保留 part id。Codex 会话从新到旧有界读取。翻页失败保留已加载事件。
+- 证据：`tests/test_execution_trace.py`、`tests/test_console_execution_trace.py`。
+
 ## [2026-10-16] feat | 任务详情执行轨迹 V1
 
 - 背景：任务活动时间轴只有状态变化，看不到 Agent 实际读过、改过和执行过什么。
