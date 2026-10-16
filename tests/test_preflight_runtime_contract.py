@@ -44,6 +44,21 @@ def test_startup_requires_native_identity_and_interactive_ready(runtime,text,sta
     assert result['interactive_ready'] is (status=='READY')
 
 
+def test_agy_status_banner_is_chrome_not_a_startup_blocker():
+    runtime={'agent_session':{'value':'s'},'agent_status':'idle'}
+    screen=('? for shortcutsGemini 3.8 Flash · high · AI: Out of credits\n'
+            '(Google AI Pro)\n>\n')
+    result=aa.startup_readiness('agy',{'agent_session_id':'s'},runtime,screen)
+    assert result['status']=='READY'
+    assert result['interactive_ready'] is True
+
+
+def test_agy_private_status_exception_does_not_hide_real_blockers():
+    runtime={'agent_session':{'value':'s'},'agent_status':'idle'}
+    assert aa.startup_readiness('agy',{'agent_session_id':'s'},runtime,'not logged in\n')['status']=='AUTH_REQUIRED'
+    assert aa.startup_readiness('codex',{'agent_session_id':'s'},runtime,'Out of credits\n')['status']=='TOKEN_EXHAUSTED'
+
+
 def test_type_or_pane_alone_cannot_prove_startup_identity():
     assert aa.startup_readiness('codex',{}, {'agent_status':'idle'},'')['status']=='UNKNOWN'
 

@@ -256,6 +256,23 @@ def classify_text(text):
     return None
 
 
+# agy (Antigravity CLI) >= 1.4.0 renders a persistent status line that can
+# carry a spurious "AI: Out of credits" badge (upstream changelog: an empty
+# credits response is read as a zero balance). The badge is terminal chrome
+# shown alongside an otherwise usable session and must not be classified as
+# a startup blocker; real depletion still surfaces later as prompt/runtime
+# failures. Scope this exception to agy only.
+AGY_SPURIOUS_CREDITS_LINE = re.compile(
+    r"[^\n]*\bAI:\s*Out of credits\b[^\n]*\n?", re.I)
+
+
+def strip_known_status_chrome(agent, text):
+    """Drop per-agent status-bar chrome that never represents a startup block."""
+    if not text or agent != "agy":
+        return text
+    return AGY_SPURIOUS_CREDITS_LINE.sub("", text)
+
+
 # Per-agent smoke timeouts (seconds). Claude cold start routinely needs 35-60s
 # (measured 36.9s success, occasional >60s flake), so a flat 35s timeout
 # deterministically misreports healthy-but-slow as TIMEOUT.
