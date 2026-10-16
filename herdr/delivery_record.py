@@ -241,6 +241,20 @@ def _has_candidate_identity(note: dict) -> bool:
     )
 
 
+def unidentified_delivery_notes(notes: list[dict] | None) -> list[dict]:
+    """Delivery notes that carry no candidate identity.
+
+    Such notes are human evidence, not claims (``_has_candidate_identity``):
+    the selector skips them and callers report them as a degradation.
+    """
+    return [
+        note for note in (notes or [])
+        if isinstance(note, dict)
+        and note.get("kind") == "delivery"
+        and not _has_candidate_identity(note)
+    ]
+
+
 def _delivery_fingerprint(note: dict) -> tuple:
     """Return the semantic identity payload, excluding replay metadata."""
     return tuple(
@@ -275,46 +289,50 @@ def select_effective_delivery(
     of one identity/payload collapse to one canonical note; conflicting
     payloads, mixed workflow/run scopes, unknown supersede targets, and
     multiple eligible tips all raise ``DeliveryAmbiguityError``.
+
+    Delivery notes without any candidate identity stay out of the candidate
+    set: they are human evidence, not claims (``unidentified_delivery_notes``
+    reports them).  Only identified claims can be selected or conflict.
     """
     source_notes = [note for note in (notes or []) if isinstance(note, dict)]
     delivery_notes = [note for note in source_notes if note.get("kind") == "delivery"]
     if not delivery_notes:
         return None
-    malformed = [note for note in delivery_notes if not _has_candidate_identity(note)]
-    if malformed:
-        raise DeliveryAmbiguityError(malformed)
+    claims = [note for note in delivery_notes if _has_candidate_identity(note)]
+    if not claims:
+        return None
 
-    scopes = {_scope(note) for note in delivery_notes}
+    scopes = {_scope(note) for note in claims}
     if workflow_id is not None:
-        delivery_notes = [
-            note for note in delivery_notes
+        claims = [
+            note for note in claims
             if not note.get("workflow_id") or note.get("workflow_id") == workflow_id
         ]
     if run_id is not None:
-        delivery_notes = [
-            note for note in delivery_notes
+        claims = [
+            note for note in claims
             if not note.get("run_id") or note.get("run_id") == run_id
         ]
-    if not delivery_notes:
+    if not claims:
         return None
-    filtered_scopes = {_scope(note) for note in delivery_notes}
+    filtered_scopes = {_scope(note) for note in claims}
     if len(filtered_scopes) > 1:
-        raise DeliveryAmbiguityError(delivery_notes)
+        raise DeliveryAmbiguityError(claims)
     if workflow_id is None:
         workflow_scopes = {scope[0] for scope in scopes if scope[0]}
         if len(workflow_scopes) > 1 or (workflow_scopes and "" in {
             scope[0] for scope in scopes
         }):
-            raise DeliveryAmbiguityError(delivery_notes)
+            raise DeliveryAmbiguityError(claims)
     if run_id is None:
         run_scopes = {scope[1] for scope in scopes if scope[1]}
         if len(run_scopes) > 1 or (run_scopes and "" in {
             scope[1] for scope in scopes
         }):
-            raise DeliveryAmbiguityError(delivery_notes)
+            raise DeliveryAmbiguityError(claims)
 
     by_identity: dict[str, list[dict]] = {}
-    for note in delivery_notes:
+    for note in claims:
         by_identity.setdefault(candidate_identity(note), []).append(note)
 
     canonical: dict[str, dict] = {}
