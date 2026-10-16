@@ -2817,16 +2817,23 @@ def set_task_status(
     if expected_status is not None or expected_version is not None:
         from herdr import kernel
 
-        result = kernel.transition_task(
-            task_id=task_id,
-            to_status=status,
-            reason=f"{source}:{status}",
-            source=source,
-            metadata=metadata or {},
-            expected_status=expected_status,
-            expected_version=expected_version,
-            store=_get_store(),
-        )
+        try:
+            result = kernel.transition_task(
+                task_id=task_id,
+                to_status=status,
+                reason=f"{source}:{status}",
+                source=source,
+                metadata=metadata or {},
+                expected_status=expected_status,
+                expected_version=expected_version,
+                store=_get_store(),
+            )
+        except ValueError as exc:
+            # Shared transition-gateway refusals (e.g. the wrapup
+            # review-closure invariant) fail this transition closed instead
+            # of crashing the sweep: the task keeps its current status.
+            print(f"[STATE TRANSITION REFUSED] {task_id}: {exc}")
+            return False
         if not result.get("accepted", True):
             print(
                 f"[STATE CAS REJECTED] {task_id}: "

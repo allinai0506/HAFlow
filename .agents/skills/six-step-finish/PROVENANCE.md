@@ -15,7 +15,7 @@
 
 | 文件 | sha256 |
 |---|---|
-| `SKILL.md` | `7bf03e6b2acdb84a9d094411dd1161077f224ea2cd6d74526a6ca9ed0647559d` |
+| `SKILL.md` | `578871a8cac1e75dfbb331c485519045efa9c93527a9a2d1b3065fcfaadf8f37` |
 | `scripts/finish-task.sh` | `51c73e5bd8b91b3132b20158b13f26511b3d209ba9735de49084f8bf4da835b6` |
 | `skill-metadata.yml` | `a0c02d9d7a7cf981fa69a5f472073e44c577e8f8e77a1485e1563730c5054c54` |
 
@@ -40,4 +40,4 @@ python3 -m pytest tests/test_six_step_skill_provenance.py -q
 | 日期 | 版本 | 修订内容 |
 |---|---|---|
 | 2026-09-17 | `2026.09.17-1` | 新增 **步骤 0：交付 PR 前置**——交付分支必须先按目标仓库 PR 流程推送 + 创建 PR（如 nexusarchive `npm run pr:create`），本技能不做合入；同步在「常见借口」表补充三条（先建 PR / 严禁自动合并 / 不代劳 PR 创建）。背景：`wf-nexusarchive-0917-01` 收官时 wrapup 只做只读合并确认即 DEFERRED，全链路无 push/PR 动作，PR 只能由人工/总指挥补交（lessons §64）。 |
-| 2026-10-16 | `2026.10.16-1` | 新增 **步骤 0.5：PR 审核闭环**——PR 创建后必须在申报完成前抓取 CI 与评审 findings（`gh pr checks` / `reviews` / `comments` 等），硬条件：CI 全绿、未决 P1=0、P2/P3 逐条处置；「常见借口」补两条（PR/审核属控制器职责、CI 没跑完先报完成）；`skill-metadata.yml` 补触发词「交付 PR」「PR 审核闭环」。模板侧同步：wrapup 节点新增『PR 审核闭环』『职责单一性』规则、六步执行规则 (8)(9)、required_outputs 增补审核闭环证据。背景：`wf-haflow-1015-01` 收尾未创建交付 PR、未检查 GitHub（Codex）审核 findings，P1/P2 于交付后才发现导致返工。随后按 Codex 复审补齐：① gh api 查询加 `--paginate`（聚合全部页，避免多页漏报）；② 修复提交再门禁（平台=重走门禁产生新的有效交付身份，forge=对新 head 重新触发审核）；③ HAFlow 新增 `herdr-task record-review-closure` 机器回执与 wrapup completed 转换的 fail-closed 校验（含 `--skip-review-closure --note` 审计豁免），行为级测试见 `tests/test_wrapup_review_closure.py`。 |
+| 2026-10-16 | `2026.10.16-1` | 新增 **步骤 0.5：PR 审核闭环**——PR 创建后必须在申报完成前抓取 CI 与评审 findings（`gh pr checks` / `reviews` / `comments` 等），硬条件：CI 全绿、未决 P1=0、P2/P3 逐条处置；「常见借口」补两条（PR/审核属控制器职责、CI 没跑完先报完成）；`skill-metadata.yml` 补触发词「交付 PR」「PR 审核闭环」。模板侧同步：wrapup 节点新增『PR 审核闭环』『职责单一性』规则、六步执行规则 (8)(9)、required_outputs 增补审核闭环证据。背景：`wf-haflow-1015-01` 收尾未创建交付 PR、未检查 GitHub（Codex）审核 findings，P1/P2 于交付后才发现导致返工。随后按 Codex 复审补齐：① gh api 查询加 `--paginate`（聚合全部页，避免多页漏报）；② 修复提交再门禁（平台=重走门禁产生新的有效交付身份，forge=对新 head 重新触发审核）；③ HAFlow 新增 `herdr-task record-review-closure` 机器回执与 wrapup completed 转换的 fail-closed 校验（含 `--skip-review-closure --note` 审计豁免），行为级测试见 `tests/test_wrapup_review_closure.py`。该轮 Codex 复审（1387187）再提三条 P1 并已闭环：① 不变量上移至共享转换网关 `herdr.kernel.transition_task`（覆盖控制器 CAS auto-accept 等所有完成来源），控制器侧对网关拒绝改为 `[STATE TRANSITION REFUSED]` graceful 返回 False；② 回执内容校验（非 deferred 须 `--ci-status pass` 且 findings 非空）在写入时 fail-closed；③ 回执绑定 `--head-sha`，与工位克隆当前 HEAD 比对，head 变更即判 stale 并拒绝完成。 |

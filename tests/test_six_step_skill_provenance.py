@@ -16,7 +16,7 @@ EXPECTED_SHA256 = {
     "scripts/finish-task.sh":
         "51c73e5bd8b91b3132b20158b13f26511b3d209ba9735de49084f8bf4da835b6",
     "SKILL.md":
-        "7bf03e6b2acdb84a9d094411dd1161077f224ea2cd6d74526a6ca9ed0647559d",
+        "578871a8cac1e75dfbb331c485519045efa9c93527a9a2d1b3065fcfaadf8f37",
 }
 
 

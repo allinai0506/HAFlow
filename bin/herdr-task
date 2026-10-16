@@ -2170,16 +2170,17 @@ def cmd_eval_compare(args):
 
 
 def _enforce_wrapup_review_closure(task_id, task, *, skip, note):
-    """Wrapup completion must carry a review-closure receipt.
+    """CLI-side pre-check for the shared wrapup review-closure invariant.
 
-    The wrapup node's rules require the delivery PR and its CI/review findings
-    to be closed out before completion; without this gate that requirement is
-    prompt text only, and a bare ``set ... completed`` (including the
-    controller's auto-accept path, which is also a CLI set) can still close
-    the workflow. ``record-review-closure`` writes the receipt;
-    ``--skip-review-closure --note`` is the audited emergency bypass
-    (Codex review P1, wf-haflow-1015-01).
+    The authoritative gate lives in ``herdr.kernel.transition_task`` — every
+    completion source (CLI ``set``, the controller's CAS auto-accept path and
+    repair flows) funnels through it. This pre-check only exists for a
+    friendly refusal message. The audited ``--skip-review-closure --note``
+    bypass records a ``review_closure_skipped`` event, which also satisfies
+    the kernel gate (Codex review P1, wf-haflow-1015-01).
     """
+    from herdr import review_closure
+    store = _get_store()
     if skip:
         reason = str(note or "").strip()
         if not reason:
@@ -2189,7 +2190,6 @@ def _enforce_wrapup_review_closure(task_id, task, *, skip, note):
                 file=sys.stderr,
             )
             sys.exit(2)
-        store = _get_store()
         store.record_event(
             "review_closure_skipped",
             {"task_id": task_id, "reason": reason},
@@ -2200,68 +2200,43 @@ def _enforce_wrapup_review_closure(task_id, task, *, skip, note):
         )
         print(f"[REVIEW CLOSURE SKIPPED] {task_id}: completion allowed with audited bypass")
         return
-    store = _get_store()
-    try:
-        events = store.list_events(
-            task_id=task_id,
-            event_type="review_closure_recorded",
-            source="herdr-task",
-            desc=True,
-            limit=1,
-        )
-    except (OSError, ValueError, RuntimeError):
-        events = []
-    if events:
+    ok, why = review_closure.check_completion_allowed(store, task)
+    if ok:
         print(f"[REVIEW CLOSURE RECEIPT] {task_id}: receipt present")
         return
-    print(
-        f"[REVIEW CLOSURE REQUIRED] {task_id}: wrapup completion requires a "
-        "review-closure receipt. Run `herdr-task record-review-closure "
-        f'{task_id} --pr-url <url> --ci-status <pass|fail|pending> '
-        '--findings "<conclusions>"` (or `--deferred --reason "<evidence>"` '
-        'when the PR truly cannot be created); emergency bypass: '
-        '--skip-review-closure --note "<audited reason>".',
-        file=sys.stderr,
-    )
+    print(f"[REVIEW CLOSURE REQUIRED] {why}", file=sys.stderr)
     sys.exit(2)
 
 
 def record_review_closure(task_id, pr_url=None, ci_status=None, findings=None,
-                          deferred=False, reason=None):
+                          deferred=False, reason=None, head_sha=None):
     """Record the machine-readable review-closure receipt for a task.
 
-    The receipt is what ``set ... completed`` validates for wrapup tasks: a
-    PR URL (or an explicit deferred reason), the CI status and the review
-    findings conclusions. Prompt text alone is not completion evidence.
+    The receipt is what the completion transition validates for wrapup tasks:
+    the head SHA it closed out (a later commit makes it stale) plus either a
+    delivery PR URL with ``ci_status=pass`` and a findings disposition, or a
+    deferred reason with the blocking evidence. Content is validated here so
+    an unacceptable receipt can never be written.
     """
+    from herdr import review_closure
     data = load_tasks()
     task = find_task(data, task_id)
     if not task:
         print(f"Task not found: {task_id}")
         sys.exit(1)
-    if deferred:
-        if not str(reason or "").strip():
-            print(
-                "[REVIEW CLOSURE REFUSED] --deferred requires --reason with "
-                "the concrete blocking evidence",
-                file=sys.stderr,
-            )
-            sys.exit(2)
-    elif not str(pr_url or "").strip():
-        print(
-            "[REVIEW CLOSURE REFUSED] --pr-url is required (or use --deferred "
-            "--reason when the PR truly cannot be created)",
-            file=sys.stderr,
-        )
-        sys.exit(2)
     payload = {
         "task_id": task_id,
         "pr_url": str(pr_url or "").strip(),
-        "ci_status": str(ci_status or "").strip(),
+        "ci_status": str(ci_status or "").strip().lower(),
         "findings": str(findings or "").strip(),
         "deferred": bool(deferred),
         "reason": str(reason or "").strip(),
+        "head_sha": str(head_sha or "").strip().lower(),
     }
+    ok, why = review_closure.validate_receipt_payload(payload)
+    if not ok:
+        print(f"[REVIEW CLOSURE REFUSED] {why}", file=sys.stderr)
+        sys.exit(2)
     store = _get_store()
     store.record_event(
         "review_closure_recorded",
@@ -8714,6 +8689,7 @@ def main():
     closure_cmd.add_argument("--pr-url", default=None, help="交付 PR URL（未 deferred 时必填）")
     closure_cmd.add_argument("--ci-status", default=None, help="CI/必过检查结果（如 pass / fail / pending）")
     closure_cmd.add_argument("--findings", default=None, help="评审 findings 结论（未决 P1/P2 数量与处置）")
+    closure_cmd.add_argument("--head-sha", default=None, help="被审（闭环）的 40-hex 提交 SHA；head 变更后回执即失效（必填）")
     closure_cmd.add_argument("--deferred", action="store_true", help="确实无法创建 PR 时记录延迟与证据")
     closure_cmd.add_argument("--reason", default=None, help="--deferred 必填：阻断证据（命令+错误输出）")
 
@@ -9386,7 +9362,8 @@ def main():
     elif args.command == "record-review-closure":
         record_review_closure(args.task_id, pr_url=args.pr_url,
                               ci_status=args.ci_status, findings=args.findings,
-                              deferred=args.deferred, reason=args.reason)
+                              deferred=args.deferred, reason=args.reason,
+                              head_sha=args.head_sha)
 
     elif args.command == "bypass-gate":
         bypass_gate_cli(
