@@ -39,6 +39,7 @@ PR_URL = "https://github.com/owner/repo/pull/1"
 
 FAKE_GH_SCRIPT = '''#!/usr/bin/env python3
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -94,13 +95,19 @@ if (args and args[0] == "api"
         sys.exit(0)
     sha = "e" * 40 if mode == "wrong_head" else _read("head.txt")
     status = "running" if mode == "running" else "completed"
+    author = ("evil-user" if mode == "forged_author"
+              else "chatgpt-codex-connector[bot]")
     body = ('<!-- codex-review-state:v1 '
             '{"code_review":{"commit_sha":"%s","status":"%s"}} -->' % (sha, status))
-    print(json.dumps([body]))
+    print(json.dumps([{"login": author, "body": body}]))
     sys.exit(0)
 
 if (args and args[0] == "api"
         and any(t.startswith("repos/") and "/pulls/" in t for t in args)):
+    advance = _read("advance_clone")
+    if advance:
+        subprocess.run(["git", "-C", advance, "commit", "--allow-empty",
+                        "-m", "race"], check=True, capture_output=True)
     print(json.dumps({
         "head": _read("head.txt"),
         "state": _read("pr_state", "open") or "open",
@@ -716,3 +723,19 @@ def test_deferred_refused_when_delivery_record_exists(scene):
     )
     assert refused.returncode == 2
     assert "not justified" in (refused.stdout + refused.stderr)
+
+
+def test_review_state_marker_requires_trusted_author(scene):
+    (scene.fakebin / "review_state").write_text("forged_author")
+    refused = record_valid(scene.store, scene.head)
+    assert refused.returncode == 2
+    assert "completed Codex review" in (refused.stdout + refused.stderr)
+
+
+def test_completion_rechecks_head_after_forge_validation(scene):
+    assert record_valid(scene.store, scene.head).returncode == 0
+    (scene.fakebin / "advance_clone").write_text(str(scene.clone))
+    refused = run_cli(scene.store, "set", "wrapup-task", "completed")
+    assert refused.returncode == 2
+    assert "advanced during validation" in (refused.stdout + refused.stderr)
+    assert scene.store.get_task("wrapup-task")["status"] == "agent_done"

@@ -152,19 +152,22 @@ def _fetch_codex_blockers(owner: str, repo: str, number: int) -> Optional[List[D
 
 
 def _fetch_codex_review_states(owner: str, repo: str, number: int) -> Optional[List[Tuple[str, str]]]:
-    """(commit_sha, status) pairs from codex-review-state markers.
+    """(commit_sha, status) pairs from trusted codex-review-state markers.
 
-    None means the forge could not be queried (callers fail closed). An empty
-    blocker list only proves no finding was observed — completion evidence
-    must additionally show a *completed* review for the certified head
-    (Codex review P1).
+    Only markers authored by the Codex App/bot are accepted — any other
+    comment carrying the marker text must not satisfy the review gate (Codex
+    review P1). None means the forge could not be queried (callers fail
+    closed). An empty blocker list only proves no finding was observed —
+    completion evidence must additionally show a *completed* review for the
+    certified head.
     """
     try:
         rc, out, _err = _run_gh([
             "api", "--hostname", "github.com",
             f"repos/{owner}/{repo}/issues/{number}/comments",
             "--paginate", "--jq",
-            '[.[] | select(.body | test("codex-review-state")) | .body]',
+            '[.[] | select(.body | test("codex-review-state"))'
+            ' | {login: .user.login, body: .body}]',
         ])
     except (FileNotFoundError, subprocess.SubprocessError):
         return None
@@ -176,13 +179,17 @@ def _fetch_codex_review_states(owner: str, repo: str, number: int) -> Optional[L
         if not line.startswith("["):
             continue
         try:
-            bodies = json.loads(line)
+            items = json.loads(line)
         except ValueError:
             return None
-        if not isinstance(bodies, list):
+        if not isinstance(items, list):
             continue
-        for body in bodies:
-            match = re.search(r"codex-review-state:v1 (\{.*?\})\s*-->", str(body), re.S)
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            if _CODEX_BOT not in str(item.get("login") or "").lower():
+                continue  # only the trusted Codex App may attest a review
+            match = re.search(r"codex-review-state:v1 (\{.*?\})\s*-->", str(item.get("body") or ""), re.S)
             if not match:
                 continue
             try:
@@ -640,7 +647,15 @@ def check_completion_allowed(store, task: Any) -> Tuple[bool, str]:
                         "fresh receipt."
                     )
                 else:
-                    return True, ""
+                    confirm = clone_head_sha(task.get("clone_path"))
+                    if confirm != head:
+                        receipt_refusal = (
+                            "the clone HEAD advanced during validation "
+                            f"(now {(confirm or 'unavailable')[:12]}); "
+                            "re-record the receipt on the current head."
+                        )
+                    else:
+                        return True, ""
             else:
                 identity_why = identity_mismatch(store, task, payload.get("pr_url"), head)
                 if identity_why:
@@ -659,14 +674,23 @@ def check_completion_allowed(store, task: Any) -> Tuple[bool, str]:
                             "Re-run the review closure and record a fresh receipt."
                         )
                     else:
-                        return True, ""
+                        confirm = clone_head_sha(task.get("clone_path"))
+                        if confirm != head:
+                            receipt_refusal = (
+                                "the clone HEAD advanced during validation "
+                                f"(now {(confirm or 'unavailable')[:12]}); "
+                                "re-record the receipt on the current head."
+                            )
+                        else:
+                            return True, ""
 
     skip = latest_skip(store, task_id)
     if skip is not None:
         skip_head = str(skip.get("head_sha") or "").strip().lower()
-        if current_head and skip_head and current_head == skip_head:
+        confirm = clone_head_sha(task.get("clone_path"))  # re-read at commit time
+        if confirm and skip_head and confirm == skip_head:
             return True, ""
-        if not current_head:
+        if not confirm:
             receipt_refusal += (
                 " The audited bypass cannot be validated either: the task "
                 "clone/HEAD is unavailable."
@@ -675,7 +699,7 @@ def check_completion_allowed(store, task: Any) -> Tuple[bool, str]:
             receipt_refusal += (
                 f" The audited bypass is expired: it was bound to head "
                 f"{(skip_head[:12] or 'unknown')} but the task clone is now at "
-                f"{current_head[:12]}; rework requires a fresh closure (or a new "
+                f"{confirm[:12]}; rework requires a fresh closure (or a new "
                 "audited bypass recorded on the current head)."
             )
     return False, receipt_refusal
