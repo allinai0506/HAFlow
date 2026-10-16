@@ -490,21 +490,37 @@ def workflow_stages(wid, p):
 def _referenced_task_inventory(wid,p,ts,w):
     """Tasks of the workflow plus explicitly referenced task ids (bounded, fail-soft).
 
-    The graph projection only looks up referenced ids by task id; it never needs
-    the whole task table.  Read them one by one instead of scanning everything.
+    The graph projection only looks up referenced ids by task id, so they are
+    fetched in one bounded read-only query instead of one connection per id
+    (which would also bypass the read-only guarantee).
     """
     definition=w.get('config') or workflow_definition_for(wid,p,w)
     inventory=list(ts)
     owned_ids={t.get('task_id') for t in ts}
-    from herdr.state_db import get_task
+    required_ids=[]
     for node in (definition or {}).get('nodes') or []:
         required=node.get('required_task_ids')
         if isinstance(required,list) and len(required)<=64:
             for task_id in required:
                 if isinstance(task_id,str) and task_id not in owned_ids:
-                    referenced=get_task(task_id,db_path=state_db_path())
-                    if referenced:inventory.append(referenced)
+                    required_ids.append(task_id)
                     owned_ids.add(task_id)
+    if required_ids:
+        from herdr.console_queries import workflow_tasks
+        # workflow_tasks is scoped to one workflow_id, so fetch by id here via
+        # the read-only connection in one bounded IN query.
+        from herdr.state_db import get_readonly_db_connection
+        conn=get_readonly_db_connection(state_db_path())
+        try:
+            marks=','.join('?' for _ in required_ids)
+            rows=conn.execute(
+                f'SELECT * FROM tasks WHERE task_id IN ({marks})',
+                tuple(required_ids),
+            ).fetchall()
+            from herdr.state_db import _decode_task_row
+            inventory.extend(_decode_task_row(r) for r in rows)
+        finally:
+            conn.close()
     return definition,inventory
 
 def workflow_detail(wid, *, lightweight=False):

@@ -7,7 +7,7 @@ from .state_db import get_readonly_db_connection
 def project_workflows(project_id=None, db_path=None):
     conn = get_readonly_db_connection(db_path)
     try:
-        where=" WHERE json_extract(metadata_json, '$.project_id') = ?" if project_id else ''
+        where=" WHERE CASE WHEN json_valid(metadata_json) THEN json_extract(metadata_json, '$.project_id') END = ?" if project_id else ''
         rows = conn.execute('SELECT * FROM workflows'+where+
             ' ORDER BY created_at DESC, workflow_id DESC', (project_id,) if project_id else ())
         result = []
