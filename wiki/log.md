@@ -2623,3 +2623,9 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 两项 Bot 缺陷经业务 RED 确认；补真实 CLI、正常第二轮及五种完成状态验收。新提交专项/全量结果另行绑定，不复用旧版本回执。
 
 - P1/P2 最终补证：384 项专项、4421 项全量通过（2 skipped，163 subtests），独立复查收敛；P1/P2 撤回修复后各自回归重新失败。协调器命令同步改用同版本 TASK_MANAGER。
+
+### 2026-10-16：Experience Hub V1 合并后 Hotfix（P1-01/P2-01/P2-02，隔离工作区）
+
+- Updated [[enterprise-experience-hub]]：请求体准入限制（P1-01，先认证后读体、1 MiB 预算、TE/CL/413/400/411 契约）、Collector 数据库路径绝对化（P2-01）、失败限定的 Run 隔离（P2-02）。
+- 追加 [[../docs/lessons/lessons-learned]] §160：副作用顺序、权威路径、身份隔离三重违规教训。
+- 本记录描述本地源码与 joint candidate `c9dee79`；未推送、未合并，交付由流水线控制器统一收编。
