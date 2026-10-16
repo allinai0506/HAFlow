@@ -30,7 +30,7 @@ graph LR
 4. **复杂度定规划 (Complexity determines planning depth)**：轻量修改快速对齐，复杂重构深入设计，拒绝一刀切。
 5. **风险度定质检 (Risk determines assurance depth)**：核心调度算法与状态机变更必须经过最高强度对抗测试与静态审查。
 6. **单一控制权 (One controller owns execution)**：同一时刻仅由一个主控者推进执行，严禁嵌套死循环。
-7. **改动即失效 (Any change invalidates stale evidence)**：源码或测试发生任何变动，既有验证与审查结论立即失效，必须重新跑测。
+7. **按影响面更新证据 (Changes invalidate affected evidence)**：源码、测试或行为配置变更使受影响的验证与审查结论失效，必须重跑相应验证并复审；纯文档修改重验文档，不机械重跑无关测试。影响面不明时扩大验证范围。
 8. **无铁证不宣称完成 (No completion claim without fresh evidence)**：坚决抵制口头“已修复”，必须输出实时命令的 PASS 铁证。
 9. **交付不越权 (Delivery never exceeds authorization)**：交付范围与分支目标严格受控，严禁越权修改主干。
 
@@ -45,7 +45,8 @@ graph LR
   - 严格遵循测试驱动开发模式（RED ➔ GREEN ➔ REFACTOR）；
   - 编写最小优雅实现，坚决避免过度工程与 AI Slop。
 - **S5 验证阶段 (Verify - 证据驱动)**：
-  - 运行全量自动化测试套件（`pytest`），执行相关 CLI 检查；
+  - 本地运行受影响模块、调用方及真实调用链的专项测试，执行适用的静态和 CLI 检查；纯文档修改只检查文档。具体证据要求见工程协议第 9.4 节；
+  - 非文档 PR 的全量回归由 CI 在合并结果上统一执行，不要求提交前或每轮审查修复在本地重复全量；CI 不可用时，在隔离环境对待合并版本执行全量并记录证据，不能免除全量验收；
   - 必须获取新鲜的真实执行结果，以命令输出作为唯一事实来源。
 - **S6 审查阶段 (Review - 修复闭环)**：
   - 审查架构一致性（严格遵守 `herdr/` 纯核心与装配外壳解耦）；

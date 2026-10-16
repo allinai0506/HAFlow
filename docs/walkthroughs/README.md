@@ -32,3 +32,5 @@
 
    - [`20260930-console-shell-closeout.md`](20260930-console-shell-closeout.md)：Console Shell v1（PR #116）的历史代码验收、收尾及本机热更新记录；2026-10-01 补交归档。
    - [`20261002-workflow-reliability.md`](20261002-workflow-reliability.md)：六项工作流可靠性改进、本地调用链验收、崩溃/并发反例与人工复核边界。
+
+- [`20261016-control-convergence.md`](20261016-control-convergence.md)：Workflow 自动推进控制链根因、五项收敛修复与隔离验证边界。

@@ -37,6 +37,7 @@
 | :--- | :--- | :--- |
 | **修改任务状态流转或添加新状态** | [[task-lifecycle]] | `herdr/transitions.py`, `herdr/kernel.py:transition_task/workflow` |
 | **回放一次 Agent 执行的历史事实** | [[task-lifecycle]] §1.2 | `herdr/trajectory.py`, `herdr/state_db.py`, `bin/herdr-task`, `services/herdr-controller.py` |
+| **在任务详情查看 Agent 执行轨迹** | [[execution-trace]] | `herdr/execution_trace.py`, `herdr/native_session_trace.py`, `console/herdr_factory_console.py` |
 | **诊断一次运行是否卡住/异常/重复失败 (Trajectory Observer)** | [[trajectory-observer]] | `herdr/observer/`, `herdr/state_db.py:trajectory_findings`, `services/herdr-controller.py:registry_watcher`, `bin/herdr-task:observe` |
 | **为下一 Agent 生成可追溯的当前工作记忆 (Semantic Context Compact)** | [[semantic-context-compact]] | `herdr/context_compact.py`, `herdr/state_db.py:context_packs`, `bin/herdr-task:compact` |
 | **按 Task 状态和 Agent 角色编译 WorkingContext** | [[semantic-context-compact]] | `herdr/context_compiler.py`, `herdr/state_db.py:working_contexts`, `herdr/collaboration.py` |

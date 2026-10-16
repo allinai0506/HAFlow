@@ -212,7 +212,7 @@ def _launch_event(store, intent, now=None, *, conn=None):
         return record_event({"event_type":"launch_intent", "payload":dict(intent),
             "workflow_id":intent["workflow_id"], "node_id":intent["node_id"],
             "task_id":intent["key"], "source":"launch", "timestamp":now}, conn=conn)
-    if intent.get('dispatch_operation_id') is not None and intent['phase'] == 'allocating' and set(intent.get('resources') or {}) == {'run_id'}:
+    if intent.get('dispatch_operation_id') is not None and intent['phase'] == 'allocating':
         from .node_dispatch_store import record_intent
         record_intent(store.db_path, intent, time.time() if now is None else now)
         return
@@ -247,12 +247,15 @@ def find_dispatch_task(store, workflow_id, node_id, role, candidate_sha, dispatc
 
 def begin_launch_intent(store, *, workflow_id, node_id, role='worker', candidate_sha='',
                         dispatch_round=1, task_id, supersedes=None, now=None,
-                        lease_seconds=120, dispatch_operation_id=None, run_id=None, execution_id=None):
+                        lease_seconds=120, dispatch_operation_id=None, dispatch_attempt=None, run_id=None, execution_id=None):
     """Call under workflow_launch_lock BEFORE Router/Pane/Clone side effects.
 
     A lease is an attention deadline, never permission to repeat an uncertain
     allocation. Both automatic and manual launches must use this identity.
     """
+    # Legacy callers can authorize only the first attempt, never the current retry.
+    if dispatch_attempt is None:
+        dispatch_attempt = 1
     from .state_db import get_readonly_db_connection
     from .dispatch_recovery import require_authorization
     conn = get_readonly_db_connection(store.db_path)
@@ -281,6 +284,12 @@ def begin_launch_intent(store, *, workflow_id, node_id, role='worker', candidate
         return {'status': 'duplicate', 'task': task}
     previous = _latest_intent(store, key)
     if previous and previous['phase'] != 'resources_absent':
+        previous_attempt = previous.get('dispatch_attempt', 1)
+        if previous_attempt == 0 and previous.get('supersedes'):
+            previous_attempt = 1
+        if (dispatch_operation_id is not None
+                and previous_attempt != dispatch_attempt):
+            raise ValueError('existing intent belongs to another dispatch attempt')
         if dispatch_operation_id is not None and previous.get('dispatch_operation_id') != dispatch_operation_id:
             raise ValueError('existing intent belongs to another dispatch operation')
         status = 'in_progress' if now < previous['lease_until'] and not (previous.get('resources') or {}).get('allocation_failed') else 'recovery_required'
@@ -291,7 +300,7 @@ def begin_launch_intent(store, *, workflow_id, node_id, role='worker', candidate
               'task_id': task_id, 'supersedes': supersedes, 'phase': 'allocating',
               'lease_until': now + lease_seconds, 'resources': {}}
     if dispatch_operation_id is not None:
-        intent.update(dispatch_operation_id=dispatch_operation_id, execution_id=execution_id)
+        intent.update(dispatch_operation_id=dispatch_operation_id, dispatch_attempt=dispatch_attempt, execution_id=execution_id)
         intent['resources']['run_id'] = run_id
     _launch_event(store, intent, now)
     return {'status': 'claimed', 'intent': intent}
@@ -306,6 +315,9 @@ def record_launch_resources(store, intent, resource_identity, *, now=None):
     if not current or current['intent_id'] != intent['intent_id'] or current['phase'] != 'allocating':
         raise ValueError('launch intent no longer owns allocation')
     updated = {**current, 'resources': {**current['resources'], **resource_identity}}
+    if current.get('dispatch_attempt') == 0 and current.get('supersedes'):
+        # Only an already persisted pre-claim replacement can carry legacy zero.
+        updated['dispatch_attempt'] = 1
     if len(json.dumps(updated)) > 8192:
         raise ValueError('launch resource identity exceeds budget')
     _launch_event(store, updated, now)
@@ -331,6 +343,47 @@ def abort_launch_intent(store, intent, *, reason='worker_startup_failed', now=No
     rolled_back = {**current, 'phase': 'resources_absent', 'abort_reason': reason}
     _launch_event(store, rolled_back, now)
     return rolled_back
+
+
+def record_launch_rejection(store, args, *, reason, resources_absent):
+    """Record only this CLI attempt's proven pre-allocation failure.
+
+    The caller holds the workflow lock once it has entered launch. A lock
+    rejection has no intent; an entered launch must not settle another run.
+    """
+    intent = getattr(args, '_launch_intent', None)
+    if resources_absent and not intent:
+        from .state_db import get_readonly_db_connection
+        conn = get_readonly_db_connection(store.db_path)
+        try:
+            row = conn.execute("SELECT payload_json FROM events WHERE workflow_id=? "
+                "AND event_type='launch_intent' AND source='launch' "
+                "AND json_extract(payload_json,'$.task_id')=? ORDER BY id DESC LIMIT 1",
+                (args.workflow_id, args.task_id)).fetchone()
+            if row and json.loads(row['payload_json']).get('phase') != 'resources_absent':
+                return
+        finally:
+            conn.close()
+    if resources_absent and intent:
+        current = _latest_intent(store, intent['key'])
+        if (not current or current['intent_id'] != intent['intent_id']
+                or current['phase'] != 'allocating' or registered_launch_task(store, intent)
+                or set(current.get('resources') or {}) - {'planned_clone_path', 'run_id'}):
+            return
+        abort_launch_intent(store, intent, reason=reason)
+    if not resources_absent:
+        return
+    operation_id = getattr(args, 'dispatch_operation_id', None)
+    attempt = getattr(args, 'dispatch_attempt', None)
+    if operation_id is None or type(attempt) is not int or attempt < 1:
+        return bool(intent)
+    store.record_event('launch_rejected', {
+        'dispatch_operation_id': operation_id, 'dispatch_attempt': attempt,
+        'task_id': args.task_id, 'run_id': getattr(args, 'run_id', None),
+        'reason': reason, 'resources_absent': True,
+    }, workflow_id=args.workflow_id, node_id=getattr(args, 'node', None) or getattr(args, 'stage', None),
+        task_id=args.task_id, source='launch')
+    return bool(intent)
 
 
 def _intent_task(store, intent, conn=None):

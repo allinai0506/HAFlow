@@ -1,6 +1,7 @@
 """Pure node dispatch identity, registration evidence and wait projection."""
 import hashlib
 import json
+from .transitions import COMPLETED_TASK_STATUSES
 
 WAIT_SECONDS = 900
 CHECK_SECONDS = 30
@@ -176,8 +177,10 @@ def result(operation, workflow, config, tasks, now):
                 {'reason': 'dispatch_dependencies_changed'})
     registered = registered_tasks(operation, workflow, tasks)
     predecessors = operation['payload'].get('predecessors') or []
+    waiting_for_prior = (operation['status'] == 'waiting_human'
+                         and operation['detail'].get('reason') == 'dispatch_prior_delivery_unknown')
     if (not operation['started'] and not predecessors and workflow.get('execution_id')
-            and operation['status'] in {'pending', 'running'}):
+            and (operation['status'] in {'pending', 'running'} or waiting_for_prior)):
         existing = [t for t in tasks if t.get('workflow_id') == operation['workflow_id']
                     and (t.get('node') or t.get('stage')) == operation['payload']['node_id']
                     and t.get('execution_id') == workflow.get('execution_id')
@@ -188,6 +191,17 @@ def result(operation, workflow, config, tasks, now):
         required = operation['payload'].get('required_task_ids')
         inventory_owned = _valid_required(required) and (required is None
             or set(required).issubset({t['task_id'] for t in existing}))
+        if waiting_for_prior:
+            node = next(n for n in config['nodes'] if n['id'] == operation['payload']['node_id'])
+            roles = {r['name'] for r in (node.get('agent_policy') or {}).get('roles', [])}
+            expected = operation['payload'].get('candidate_sha')
+            inventory_owned = inventory_owned and roles.issubset({t.get('dispatch_role') for t in existing})
+            inventory_owned = inventory_owned and all(
+                t.get('status') in COMPLETED_TASK_STATUSES
+                and t.get('stage_verdict') == 'pass'
+                and (not expected or (t.get('verified_candidate_sha') == expected
+                    and t.get('candidate_episode_id') == operation['payload'].get('candidate_episode_id')))
+                for t in existing)
         if existing and inventory_owned:
             return 'superseded', {'reason': 'dispatch_existing_tasks',
                 'responsibility_transferred_to': 'registered_tasks',

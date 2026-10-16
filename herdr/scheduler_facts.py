@@ -97,7 +97,7 @@ def record_scheduler_decision(
 
 def record_candidate_frozen(
     workflow_id, candidate_sha, source_node="", delivery_branch="", db_path=None,
-    expected_episode_id=None, publication_event_id=None,
+    expected_episode_id=None, publication_event_id=None, delivery_inventory=None,
 ):
     """Explicit candidate publication, serialized with episode CAS.
 
@@ -121,6 +121,13 @@ def record_candidate_frozen(
         if expected_episode_id is not None and expected_episode_id != latest_id:
             raise ValueError('candidate episode changed')
         prior = json.loads(row['payload_json']) if row else {}
+        if delivery_inventory is not None:
+            from .candidate_assembly import delivery_inventory as current_inventory
+            workflow, _, tasks = recovery_store._snapshot(conn, workflow_id)
+            if current_inventory(workflow, tasks, source_node) != delivery_inventory:
+                raise ValueError('candidate delivery inventory changed')
+            if not delivery_inventory or publication_event_id is None or workflow.get('status') != 'running':
+                raise ValueError('candidate assembly requires an active publication')
         if publication_event_id is not None:
             if publication_event_id <= latest_id:
                 return {'status': 'exists', 'event': dict(row)}
@@ -131,10 +138,14 @@ def record_candidate_frozen(
             task = next((t for t in tasks if pub and t['task_id'] == pub['task_id']), {})
             if value.get('expected_episode_id') != latest_id:
                 raise ValueError('candidate publication episode changed')
-            if (not pub or value.get('candidate_sha') != sha or not workflow.get('execution_id')
+            published_sha = value.get('candidate_sha')
+            bound_sha = (published_sha == sha if delivery_inventory is None else
+                         any(t['commit'] == published_sha and t['task_id'] == task.get('task_id')
+                             for t in delivery_inventory))
+            if (not pub or not bound_sha or not workflow.get('execution_id')
                     or value.get('execution_id') != workflow['execution_id']
                     or task.get('run_id') != pub['run_id'] or task.get('execution_id') != workflow['execution_id']
-                    or task.get('integrated_commit') != sha or task.get('superseded_by')
+                    or task.get('integrated_commit') != published_sha or task.get('superseded_by')
                     or task.get('status') not in {'integrated', 'cleanup_ready', 'cleaned'}):
                 raise ValueError('candidate publication identity unknown')
             if publication_event_id <= prior.get('publication_event_id', 0):
@@ -146,7 +157,8 @@ def record_candidate_frozen(
             'payload': {'candidate_sha': sha, 'source_node': str(source_node or ''),
                         'delivery_branch': str(delivery_branch or ''),
                         'rotated_from': prior.get('candidate_sha', ''),
-                        'publication_event_id': publication_event_id or 0}}, conn=conn)
+                        'publication_event_id': publication_event_id or 0,
+                        **({'delivery_inventory': delivery_inventory} if delivery_inventory is not None else {})}}, conn=conn)
         return {'status': 'created', 'event': event}
 
 

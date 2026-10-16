@@ -8,6 +8,36 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-10-16] fix | 执行轨迹复审：测试结论与 Claude 枚举预算
+
+- 背景：单元测试全部通过时，轨迹会把 `tests_completed` 画成通过，即使同一份证据的验证结论是未通过。Claude 会先列出并排序目录里的全部会话文件，时间预算来不及生效。
+- 变更：通过数等于总数不再推断为通过。同一 `evidence_id` 以验证结论为准。已记录的 Claude 会话直接按文件名打开，其余枚举在预算或文件上限处停止。
+- 证据：`tests/test_execution_trace.py`。
+
+## [2026-10-16] fix | 执行轨迹复审：旧运行身份、任务查询范围、Codex 会话定位
+
+- 背景：没有 `run_id` 的旧任务，轨迹事件写在 `run_<task_id>` 上，查询却把它们丢掉。打开一条轨迹会解码全部历史任务。已记录的 Codex 会话如果比最近 800 个文件更旧，也会被截掉。
+- 变更：旧任务按 `run_id_for_task()` 读取自己的事件，没有 `run_id` 的行仍保持未知。轨迹查询只解码当前任务和共用隔离目录的任务。Codex 先定位已记录会话，再套用扫描上限。
+- 证据：`tests/test_execution_trace.py`、`tests/test_execution_trace_api.py`。
+
+## [2026-10-16] fix | 执行轨迹复审：运行身份、读取上限与状态去重
+
+- 背景：同任务旧运行留下的启动身份会绑到当前运行；Claude 会话超过文件上限时，已记录的会话可能被截掉；账本先取最旧 2000 行再过滤，当前运行的状态会被挤掉；同一次状态变化在时间线上出现两次。
+- 变更：启动身份的 `run_id` 必须与当前任务一致，否则拒绝合并原生会话。Claude 先定位已记录会话再截断。账本按运行和可投影类型过滤后再限量。同一次状态变化只保留一条轨迹。
+- 证据：`tests/test_execution_trace.py`。
+
+## [2026-10-16] fix | 执行轨迹评审修复
+
+- 背景：轨迹接口把没有 `run_id` 的账本行标成当前运行，并且读不到 `task_transition` 的时间。
+- 变更：无运行身份的账本行保持未知。状态迁移按 `task_transition` 和 `timestamp` 投影。OpenCode 重试保留 part id。Codex 会话从新到旧有界读取。翻页失败保留已加载事件。
+- 证据：`tests/test_execution_trace.py`、`tests/test_console_execution_trace.py`。
+
+## [2026-10-16] feat | 任务详情执行轨迹 V1
+
+- 背景：任务活动时间轴只有状态变化，看不到 Agent 实际读过、改过和执行过什么。
+- 变更：任务详情新增只读「执行轨迹」。任务行和 Trajectory 事件都通过只读连接读取。独占 clone 或已记录 `native_session_id` 能证明归属时，才补充 Codex、Claude Code、OpenCode 原生会话。`agent_session_id` 与 Pane ID 不作为原生会话归属。
+- 证据：`tests/test_execution_trace.py`、`tests/test_execution_trace_api.py`、`tests/test_console_execution_trace.py`。页面说明见 [[execution-trace]]。
+
 ## [2026-10-14] fix | PR #209 全量缺陷修复与 V1 验收：硬编码凭证消除、服务端强审、两阶段可靠采集、离线指数退避、跨客户越权拦截与强制规则 Fail-Closed 闭环
 
 - 背景：
@@ -2580,6 +2610,19 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - Updated [[flow-workbench]]：项目元数据/现场拆分、成果定向补读、白盒快照复用、归档数据库分页、日志尾部有界读取。
 - 当前记录描述本地源码和隔离预览，不代表 8765 已部署、远端已推送或已合并。
 
+### 2026-10-16：Workflow 控制链收敛（本地沙盒）
+
+- Updated [[workflow-progress-recovery]]：完整交付候选、按 attempt 的启动前拒绝、重启消费、完整 PASS 接管、等待扫描无变化不写入。
+- 补充工程教训 §133，保留未知现场与部分批次禁止重发边界。
+- Evidence: `tests/test_control_convergence.py`；专项 354 passed，12 subtests，五个关键机制撤回后均复现失败；独立复查第三轮 LGTM。
+- 尚未推送、合并、部署、重启服务或修写生产数据库；不代表原工作流已自动推进。
+
+### 2026-10-16：PR #222 P1/P2 审查修复
+
+- Updated [[workflow-progress-recovery]]：调用方 attempt 全链路校验、资源/登记拒绝旧轮次，完成状态复用统一集合。
+- 两项 Bot 缺陷经业务 RED 确认；补真实 CLI、正常第二轮及五种完成状态验收。新提交专项/全量结果另行绑定，不复用旧版本回执。
+
+- P1/P2 最终补证：384 项专项、4421 项全量通过（2 skipped，163 subtests），独立复查收敛；P1/P2 撤回修复后各自回归重新失败。协调器命令同步改用同版本 TASK_MANAGER。
 
 ### 2026-10-16：Experience Hub V1 合并后 Hotfix（P1-01/P2-01/P2-02，隔离工作区）
 
