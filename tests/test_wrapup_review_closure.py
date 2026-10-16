@@ -77,7 +77,11 @@ if len(args) >= 2 and args[0] == "api" and args[1] == "graphql":
 
 if (len(args) >= 2 and args[0] == "api" and args[1].startswith("repos/")
         and "/pulls/" in args[1]):
-    print(json.dumps({"head": _read("head.txt"), "state": "open"}))
+    print(json.dumps({
+        "head": _read("head.txt"),
+        "state": _read("pr_state", "open") or "open",
+        "merged_at": _read("pr_merged_at") or None,
+    }))
     sys.exit(0)
 
 if args[:2] == ["pr", "checks"]:
@@ -568,3 +572,15 @@ def test_completion_revalidates_forge_state(scene):
     allowed = run_cli(scene.store, "set", "wrapup-task", "completed")
     assert allowed.returncode == 0, allowed.stdout + allowed.stderr
     assert scene.store.get_task("wrapup-task")["status"] == "completed"
+
+
+def test_closed_unmerged_pr_is_rejected(scene):
+    (scene.fakebin / "pr_state").write_text("closed")
+    refused = record_valid(scene.store, scene.head)
+    assert refused.returncode == 2
+    assert "not merged" in (refused.stdout + refused.stderr)
+
+    # A merged PR (closed with merged_at set) is acceptable.
+    (scene.fakebin / "pr_merged_at").write_text("2026-10-16T00:00:00Z")
+    merged = record_valid(scene.store, scene.head)
+    assert merged.returncode == 0, merged.stdout + merged.stderr

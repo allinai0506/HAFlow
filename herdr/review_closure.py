@@ -173,7 +173,7 @@ def verify_against_forge(pr_url: Any, head_sha: str) -> Tuple[bool, str, Optiona
     try:
         rc, out, err = _run_gh(
             ["api", f"repos/{owner}/{repo}/pulls/{number}",
-             "--jq", "{head: .head.sha, state: .state}"],
+             "--jq", "{head: .head.sha, state: .state, merged_at: .merged_at}"],
         )
     except FileNotFoundError:
         return False, (
@@ -201,6 +201,13 @@ def verify_against_forge(pr_url: Any, head_sha: str) -> Tuple[bool, str, Optiona
         return False, (
             f"PR head {pr_head[:12]} does not match --head-sha "
             f"{str(head_sha or '')[:12]}; the receipt must certify the PR's actual head"
+        ), None
+    pr_state = str((pr or {}).get("state") or "").strip().lower()
+    merged_at = (pr or {}).get("merged_at")
+    if pr_state != "open" and not merged_at:
+        return False, (
+            f"the delivery PR is {pr_state or 'unknown'} and not merged; an "
+            "open or merged PR is required for review closure"
         ), None
     try:
         rc, out, err = _run_gh(["pr", "checks", str(number), "--repo", f"{owner}/{repo}"])

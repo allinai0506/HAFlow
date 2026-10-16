@@ -55,10 +55,10 @@ rework 后过期）。
 
 | 步骤 | 内容 | 执行者 |
 |---|---|---|
-| 0 交付 PR（前置） | 按项目/平台 PR 入口推送交付分支并创建 PR（不合并；平台入口不可用时按回退路径执行并记录） | Agent / 项目脚本 |
-| 0.5 PR 审核闭环（前置） | 抓取（`--paginate`）PR CI 检查与评审 findings 并逐条处置（未决 P1 或 CI 红 = 未完成）；落 `record-review-closure` 回执 | Agent |
 | 1 知识沉淀 | Bug 根因追加到 lessons-learned，新知识回填 wiki/文档 | Agent 调用 `knowledge-capture` |
 | 2 Wiki checkpoint | 判定本次是否产生了必须回填的新知识，逐项确认 | 脚本（`.wiki/` 存在时） |
+| 0 交付 PR（前置，须在步骤 1-2 的知识提交之后） | 按项目/平台 PR 入口推送交付分支并创建 PR（不合并；平台入口不可用时按回退路径执行并记录）——保证 PR 已包含知识提交 | Agent / 项目脚本 |
+| 0.5 PR 审核闭环（前置，紧随步骤 0） | 抓取（`--paginate`）PR CI 检查与评审 findings 并逐条处置（未决 P1 或 CI 红 = 未完成）；落 `record-review-closure` 回执（**绑定当前 head——回执之后不得再产生提交**，否则须重新闭环重录） | Agent |
 | 3 合并确认 | 核验分支确实已合入 base：git 三重检查 + 可选 forge 复核 | 脚本 |
 | 4 锚点同步 | 切回锚点/基准分支并 rebase 到最新 base | 脚本 |
 | 5 分支核对 | 拒绝受保护分支、锚点分支；核对命名；删除本地/远端分支 | 脚本 |
