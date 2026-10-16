@@ -372,31 +372,71 @@ def _load_codex(task, root, deadline):
     return actions, notes, truncated
 
 
+def _claude_jsonl(entry: Path) -> bool:
+    name = entry.name
+    return name.endswith(".jsonl") and not name.endswith(".jsonl.zst") and not name.startswith(".")
+
+
 def _claude_candidates(folder: Path, recorded: str, deadline: float) -> Tuple[List[Path], bool]:
-    """Keep a pinned session even when it sorts after the file cap."""
-    names = sorted(folder.glob("*.jsonl"), key=lambda item: item.name)
-    pinned = None
-    if recorded and "/" not in recorded and "\\" not in recorded and recorded not in {".", ".."}:
+    """Find Claude sessions without listing the whole directory first.
+
+    A safe recorded id is opened directly. Any fallback walk stops at the
+    deadline or the file cap instead of sorting every session name.
+    """
+    recorded = _safe_recorded_id(recorded)
+    if recorded:
         direct = folder / f"{recorded}.jsonl"
-        if direct.is_file() and direct.parent == folder:
-            pinned = direct
-        else:
-            for path in names:
-                if time.monotonic() > deadline:
-                    break
-                head, _ = _read_text(path, 65536)
-                _, session_id = _claude_identity(head)
-                if session_id == recorded:
-                    pinned = path
-                    break
-    ordered = []
-    if pinned is not None:
-        ordered.append(pinned)
-    for path in names:
-        if path == pinned:
+        try:
+            if direct.is_file() and direct.parent == folder:
+                return [direct], False
+        except OSError:
+            pass
+        pinned, truncated = _claude_match_recorded(folder, recorded, deadline)
+        if pinned is not None:
+            return [pinned], truncated
+        return [], truncated
+    found: List[Path] = []
+    truncated = False
+    try:
+        entries = folder.iterdir()
+    except OSError:
+        return [], False
+    for entry in entries:
+        if time.monotonic() > deadline:
+            truncated = True
+            break
+        try:
+            is_file = entry.is_file()
+        except OSError:
             continue
-        ordered.append(path)
-    return ordered[:MAX_FILES], len(ordered) > MAX_FILES
+        if not is_file or not _claude_jsonl(entry):
+            continue
+        found.append(entry)
+        if len(found) >= MAX_FILES:
+            truncated = True
+            break
+    return found, truncated
+
+
+def _claude_match_recorded(folder: Path, recorded: str, deadline: float) -> Tuple[Optional[Path], bool]:
+    try:
+        entries = folder.iterdir()
+    except OSError:
+        return None, False
+    for entry in entries:
+        if time.monotonic() > deadline:
+            return None, True
+        try:
+            is_file = entry.is_file()
+        except OSError:
+            continue
+        if not is_file or not _claude_jsonl(entry):
+            continue
+        head, _ = _read_text(entry, 65536)
+        _, session_id = _claude_identity(head)
+        if session_id == recorded:
+            return entry, False
+    return None, False
 
 
 def _load_claude(task, root, deadline):

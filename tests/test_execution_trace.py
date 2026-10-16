@@ -639,7 +639,108 @@ def test_claude_pinned_session_survives_the_file_cap(tmp_path):
     )
     assert any(item.get("session_id") == pinned and item.get("path") == "src/billing.py" for item in actions)
     assert all(item.get("session_id") == pinned for item in actions)
-    assert any(note["code"] == "native_truncated" for note in notes)
+    assert notes == []
+
+
+def test_equal_test_counts_do_not_become_a_pass():
+    bare = task_doc(commit=None, status_history=[], created_at=None, started_at=None)
+    counts = {"passed_tests": 4, "total_tests": 4, "failing_count": 0, "evidence_id": "ev-1"}
+    alone = assemble_trace(bare, [{
+        "id": 1, "task_id": "task-a", "run_id": "run-a", "event_type": "tests_completed",
+        "timestamp": 10, "source": "controller", "sequence": 1, "payload": counts,
+    }], [])
+    assert alone["events"][0]["kind"] == "tool_call"
+    assert alone["events"][0]["status"] == "unknown"
+    assert alone["events"][0]["title"] != "测试通过"
+    paired = assemble_trace(bare, [
+        {
+            "id": 1, "task_id": "task-a", "run_id": "run-a", "event_type": "tests_completed",
+            "timestamp": 10, "source": "controller", "sequence": 1, "payload": counts,
+        },
+        {
+            "id": 2, "task_id": "task-a", "run_id": "run-a", "event_type": "verification_completed",
+            "timestamp": 11, "source": "trajectory", "sequence": 2,
+            "payload": {"verification": {"passed": False, "evidence_id": "ev-1", **counts}},
+        },
+    ], [])
+    assert [event["kind"] for event in paired["events"]] == ["test_failed"]
+    assert paired["events"][0]["title"] == "测试失败"
+    failed = assemble_trace(bare, [{
+        "id": 3, "task_id": "task-a", "run_id": "run-a", "event_type": "tests_completed",
+        "timestamp": 12, "source": "controller", "sequence": 3,
+        "payload": {"passed_tests": 1, "total_tests": 4, "failing_count": 3},
+    }], [])
+    assert failed["events"][0]["kind"] == "test_failed"
+
+
+def test_claude_recorded_session_does_not_list_every_file(tmp_path, monkeypatch):
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    import os
+    encoded = "".join(ch if ch.isalnum() else "-" for ch in os.path.abspath(str(clone)))
+    folder = tmp_path / "claude" / encoded
+    folder.mkdir(parents=True)
+    pinned = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    for index in range(40):
+        (folder / f"other-{index:02d}.jsonl").write_text("{}", encoding="utf-8")
+    (folder / f"{pinned}.jsonl").write_text(json.dumps({
+        "cwd": str(clone), "sessionId": pinned,
+        "message": {"content": [{"type": "tool_use", "id": "t", "name": "Read", "input": {"file_path": "src/billing.py"}}]},
+    }) + "\n", encoding="utf-8")
+    monkeypatch.setattr(Path, "glob", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("unbounded glob")))
+    monkeypatch.setattr(Path, "iterdir", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("listed directory")))
+    task = task_doc(
+        agent="claude", clone_path=str(clone), native_session_id=pinned,
+        commit=None, status_history=[], created_at=None, started_at=None,
+    )
+    actions, notes = load_native_actions(
+        task, [task],
+        {"codex_sessions": tmp_path / "codex", "claude_projects": tmp_path / "claude", "opencode_db": tmp_path / "none.db"},
+    )
+    assert any(item.get("session_id") == pinned for item in actions)
+    assert notes == []
+
+
+def test_claude_content_scan_stops_at_the_deadline(tmp_path, monkeypatch):
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    import os
+    encoded = "".join(ch if ch.isalnum() else "-" for ch in os.path.abspath(str(clone)))
+    folder = tmp_path / "claude" / encoded
+    folder.mkdir(parents=True)
+    for index in range(30):
+        (folder / f"session-{index:02d}.jsonl").write_text(json.dumps({
+            "cwd": str(clone), "sessionId": f"other-{index}",
+        }) + "\n", encoding="utf-8")
+    reads = {"count": 0}
+    from herdr import native_session_trace as native
+    real_read = native._read_text
+
+    def counting_read(path, limit):
+        reads["count"] += 1
+        return real_read(path, limit)
+
+    clock = {"calls": 0}
+
+    def fake_clock():
+        clock["calls"] += 1
+        if clock["calls"] > 8:
+            return 10_000.0
+        return 0.0
+
+    monkeypatch.setattr(native, "_read_text", counting_read)
+    monkeypatch.setattr(native.time, "monotonic", fake_clock)
+    monkeypatch.setattr(Path, "glob", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("unbounded glob")))
+    task = task_doc(
+        agent="claude", clone_path=str(clone), native_session_id="not-a-filename",
+        commit=None, status_history=[], created_at=None, started_at=None,
+    )
+    load_native_actions(
+        task, [task],
+        {"codex_sessions": tmp_path / "codex", "claude_projects": tmp_path / "claude", "opencode_db": tmp_path / "none.db"},
+        budget_s=0.2,
+    )
+    assert reads["count"] < 30
 
 
 def test_stored_event_cap_keeps_the_current_run_row(tmp_path):

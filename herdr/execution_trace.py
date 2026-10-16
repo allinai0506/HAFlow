@@ -183,7 +183,10 @@ def assemble_trace(
 ) -> Dict[str, Any]:
     events = []
     events.extend(project_task_history(task))
+    verdicts = _verification_verdicts(stored_rows)
     for row in stored_rows:
+        if _tests_row_has_verdict(row, verdicts):
+            continue
         projected = project_stored_event(row, task)
         if projected is not None:
             events.append(projected)
@@ -547,16 +550,42 @@ def _verification_view(payload: Dict[str, Any], event_type: str):
             return "test_failed", "测试失败", "error", "验证未通过", "验证未通过"
         return "tool_call", "验证已记录", "unknown", "", None
     failing = verification.get("failing_count")
-    passed_tests = verification.get("passed_tests")
-    total = verification.get("total_tests")
     if isinstance(failing, int) and failing > 0:
         return "test_failed", "测试失败", "error", f"失败 {failing}", f"失败 {failing}"
-    if (
-        failing == 0 and isinstance(passed_tests, int) and isinstance(total, int)
-        and total > 0 and passed_tests == total
-    ):
-        return "test_passed", "测试通过", "success", f"{passed_tests}/{total}", f"{passed_tests}/{total}"
+    # Equal pass/total counts are not a pass. Convergence and the
+    # verification_completed receipt are the authoritative verdict.
     return "tool_call", "验证已记录", "unknown", "", None
+
+
+def _row_evidence_id(row: Dict[str, Any]) -> Optional[str]:
+    payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+    verification = payload.get("verification") if isinstance(payload.get("verification"), dict) else {}
+    for value in (payload.get("evidence_id"), verification.get("evidence_id")):
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _verification_verdicts(rows: Sequence[Dict[str, Any]]) -> Dict[str, bool]:
+    verdicts = {}
+    for row in rows:
+        if str(row.get("event_type") or "") != "verification_completed":
+            continue
+        payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+        verification = payload.get("verification") if isinstance(payload.get("verification"), dict) else None
+        if not isinstance(verification, dict) or not isinstance(verification.get("passed"), bool):
+            continue
+        evidence_id = _row_evidence_id(row)
+        if evidence_id:
+            verdicts[evidence_id] = verification["passed"]
+    return verdicts
+
+
+def _tests_row_has_verdict(row: Dict[str, Any], verdicts: Dict[str, bool]) -> bool:
+    if str(row.get("event_type") or "") != "tests_completed":
+        return False
+    evidence_id = _row_evidence_id(row)
+    return bool(evidence_id and evidence_id in verdicts)
 
 
 def _status_kind(status: Any):
