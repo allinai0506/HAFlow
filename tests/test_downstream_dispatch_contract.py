@@ -266,6 +266,7 @@ def test_proven_resources_absent_direct_failure_retries_with_fixed_attempt_budge
         intent = begin_launch_intent(scene.store, workflow_id='wf', node_id='test',
             task_id=arg('--task-id'), candidate_sha=SHA,
             dispatch_operation_id=int(arg('--dispatch-operation-id')),
+            dispatch_attempt=int(arg('--dispatch-attempt')),
             execution_id='execution-1', run_id='test-run', now=scene.clock[0])['intent']
         abort_launch_intent(scene.store, intent, reason='router_rejected', now=scene.clock[0])
         return SimpleNamespace(returncode=1, stdout='', stderr='router rejected before allocation')

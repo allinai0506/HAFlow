@@ -6161,6 +6161,26 @@ if any(op['status'] not in {'resolved','superseded'}
 - Resolution: summarize untracked directories in Git before applying the unchanged output cap; preserve individual tracked-change detection.
 - Prevention: real Git regressions distinguish large internal-only evidence, untracked user directories and tracked internal changes. Treat OS probe failures as unknown and reject teardown. Preserve historical documents with Run-bound checkpoints and reversible artifact relocation without rewriting verdicts or bypassing branch hooks.
 
+#### 2026-10-16：并行交付、启动拒绝与恢复消费的组合边界
+
+**问题背景**：`wf-haflow-1015-01` 的单个实现提交先被冻为候选，后续联合交付改变候选；旧启动在分配资源前被拒绝，却留下 allocating 意图。锁冲突也因缺少可消费的本次拒绝回执进入未知等待；重复扫描持续写同一等待状态。
+
+**经验教训**：发送失败不等于资源缺席，退出码也不是缺席证明。候选必须覆盖同一次执行的完整交付 inventory；恢复必须在同步返回及进程重启后消费同一持久证据，并绑定 operation、attempt、Task、Run 和 episode。仅修生产者会留下永久等待的消费者。
+
+**操作规范**：已固化到 `tests/test_control_convergence.py`：真实 Git 合成完整候选并事务复核 inventory；显式候选的轮换需当前发布授权；只结束本次、资源启动前的意图；确定缺席有限重试，未知保留阻塞；当前完整 PASS 只能接管尚未启动的对应等待；无事实变化不增版本或写事件。批次缺少任一缺席证据仍为 unknown，不用新回执覆盖未结案 allocating。连续两次锁冲突与 Controller 重启必须列为相邻场景。
+
+**验证命令 / 关联证据**：`python3.13 -m pytest -q tests/test_control_convergence.py tests/test_node_dispatch_contract.py tests/test_downstream_dispatch_contract.py tests/test_dispatch_recovery_ui.py tests/test_terminal_workflow_dispatch_recovery.py tests/test_scheduler_facts.py tests/test_scheduler_dispatch_e2e.py tests/test_workflow_repair_contracts.py tests/test_dispatch_idempotency.py tests/test_launch_reconcile_cli.py`：354 passed，12 subtests。基线 5 个 RED；隔离副本分别撤回候选合成、拒绝回执消费、启动前结案、PASS 接管和无变化写保护，对应断言均重新失败。证据在本修复沙盒 `.omc/evidence/`；未部署、未修写生产数据。
+
+#### 2026-10-16：审查补证——身份必须来自调用方，状态集合必须复用
+
+**问题背景**：PR #222 Bot 复现旧 attempt 被 record_intent 覆盖为当前值，以及 committed/integrated PASS 被等待接管漏掉。上一轮回执消费测试与 cleaned 正例未覆盖这两条入口。
+
+**经验教训**：消费端绑定 attempt 不能替代生产端保留并校验输入身份；把旧命令重标成当前轮次等于伪造授权。局部复制完成状态子集会让合法生命周期卡住。
+
+**操作规范**：CLI 两次 begin 与协调器均透传 attempt；意图写入、资源更新、登记比较同一授权轮次，不推断重试身份。完成判定复用 transitions 的集合，保留候选和业务验证条件。
+
+**验证命令 / 关联证据**：`tests/test_control_convergence.py` 新增旧命令重放、真实 CLI Router 前拒绝、当前第二轮正常登记、非法/缺省 attempt、五种完成状态测试；`.omc/evidence/bot-review-red.log` 为 6 个业务 RED，修复后执行完整专项和全量。审查线程为 PR #222 discussion_r4289397810 / discussion_r4289397812。
+
 ### 首派回执与后续恢复的生命周期冲突（#156）
 
 **现象**：首个Task故障作废后，扫描识别需要补派，但resolved首派记录不允许claim，队列长期为空。
