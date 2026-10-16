@@ -2273,10 +2273,19 @@ def record_review_closure(task_id, pr_url=None, ci_status=None, findings=None,
             )
             sys.exit(2)
         payload["verification"] = verification
-        ok, why = review_closure.validate_receipt_payload(payload)
-        if not ok:
-            print(f"[REVIEW CLOSURE REFUSED] {why}", file=sys.stderr)
+    else:
+        evidence_ok, evidence_detail, evidence = review_closure.collect_deferred_evidence(task)
+        if not evidence_ok:
+            print(
+                f"[REVIEW CLOSURE REFUSED] deferred is not justified: {evidence_detail}",
+                file=sys.stderr,
+            )
             sys.exit(2)
+        payload["verification"] = evidence
+    ok, why = review_closure.validate_receipt_payload(payload)
+    if not ok:
+        print(f"[REVIEW CLOSURE REFUSED] {why}", file=sys.stderr)
+        sys.exit(2)
     store = _get_store()
     store.record_event(
         "review_closure_recorded",

@@ -469,3 +469,43 @@ def test_corrupt_authoritative_snapshot_fails_closed(scene):
     refused = run_cli(scene.store, "set", "wrapup-task", "completed")
     assert refused.returncode == 2
     assert scene.store.get_task("wrapup-task")["status"] == "agent_done"
+
+
+def test_non_github_pr_host_is_not_machine_verifiable(scene):
+    refused = record_valid(
+        scene.store, scene.head,
+        pr_url="https://github.example.com/owner/repo/pull/7",
+    )
+    assert refused.returncode == 2
+    assert "not machine-verifiable" in (refused.stdout + refused.stderr)
+
+
+def test_deferred_requires_machine_evidence(scene):
+    # A GitHub remote means the PR path is verifiable: deferral is refused.
+    subprocess.run(
+        ["git", "-C", str(scene.clone), "remote", "add", "origin",
+         "https://github.com/owner/repo.git"],
+        check=True, capture_output=True, text=True,
+    )
+    refused = run_cli(
+        scene.store, "record-review-closure", "wrapup-task", "--deferred",
+        "--reason", "trust me", "--head-sha", scene.head,
+    )
+    assert refused.returncode == 2
+    assert "not justified" in (refused.stdout + refused.stderr)
+
+
+def test_deferred_records_unsupported_forge_evidence(tmp_path):
+    scene = make_scene(tmp_path)
+    subprocess.run(
+        ["git", "-C", str(scene.clone), "remote", "add", "origin",
+         "file:///nonexistent/repo.git"],
+        check=True, capture_output=True, text=True,
+    )
+    recorded = run_cli(
+        scene.store, "record-review-closure", "wrapup-task", "--deferred",
+        "--reason", "gitee mirror only; unsupported forge",
+        "--head-sha", scene.head,
+    )
+    assert recorded.returncode == 0, recorded.stdout + recorded.stderr
+    assert run_cli(scene.store, "set", "wrapup-task", "completed").returncode == 0

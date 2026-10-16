@@ -29,10 +29,12 @@ description: Use when implementation is complete and a development branch needs 
 与处置必须写入收尾报告与状态表。
 闭环完成后必须运行 `herdr-task record-review-closure <task-id> --pr-url <URL>
 --ci-status pass --unresolved-p1 0 --unresolved-p2 <n> --findings '<P2/P3 处置>'
---head-sha <被审的 40-hex 提交>` 落**机器回执**（内容校验 + **forge 实证**：非 deferred 须
+--head-sha <被审的 40-hex 提交>` 落**机器回执**（内容校验 + **forge 实证（GitHub）**：非 deferred 须
 CI=pass、结构化计数 P1=0、findings 非空，且写入前经 gh 实证 PR head 与
 --head-sha 一致、`gh pr checks` 全绿、无未决 Codex P1/P0 评审线程；gh 不可用
-或任一校验失败即拒绝；确实无法创建/验证 PR 时 `--deferred --reason '<证据>'`）。
+或任一校验失败即拒绝。非 GitHub forge 暂不支持机器实证：`--deferred
+--reason '<证据>'`（附 remote 探测证据；**存在 GitHub remote 时 deferred 不被
+接受**，必须走 PR 路径））。
 回执**绑定被审 head**：完成时与工位克隆 HEAD 比对，head 之后再有提交（或
 head 不可验证）即拒绝，必须重新闭环。HAFlow 中启用了本契约的模板（wrapup
 节点 `review_closure_required: true`，权威来源为 pin 配置快照）在任何

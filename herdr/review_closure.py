@@ -43,7 +43,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 _HEX40 = re.compile(r"[0-9a-f]{40}")
-_PR_URL = re.compile(r"^https?://[^/]+/([^/]+)/([^/]+)/pull/(\d+)(?:[/?#].*)?$")
+_PR_URL = re.compile(r"^https?://([^/]+)/([^/]+)/([^/]+)/pull/(\d+)(?:[/?#].*)?$")
 _CODEX_BOT = "chatgpt-codex-connector"
 _BLOCK_MARKS = ("P1 Badge", "P0 Badge")
 _THREADS_QUERY = """
@@ -88,12 +88,12 @@ def latest_skip(store, task_id: str) -> Optional[Dict[str, Any]]:
     return _latest_event(store, task_id, "review_closure_skipped")
 
 
-def parse_pr_url(pr_url: Any) -> Optional[Tuple[str, str, int]]:
-    """(owner, repo, number) for a recognizable pull-request URL, else None."""
+def parse_pr_url(pr_url: Any) -> Optional[Tuple[str, str, str, int]]:
+    """(host, owner, repo, number) for a recognizable pull-request URL."""
     match = _PR_URL.match(str(pr_url or "").strip())
     if not match:
         return None
-    return match.group(1), match.group(2), int(match.group(3))
+    return match.group(1), match.group(2), match.group(3), int(match.group(4))
 
 
 def _run_gh(argv: List[str], timeout: int = 45) -> Tuple[int, str, str]:
@@ -158,7 +158,13 @@ def verify_against_forge(pr_url: Any, head_sha: str) -> Tuple[bool, str, Optiona
         return False, (
             f"--pr-url {str(pr_url or '')!r} is not a recognizable pull-request URL"
         ), None
-    owner, repo, number = parsed
+    host, owner, repo, number = parsed
+    if host.lower() != "github.com":
+        return False, (
+            f"PR host {host!r} is not machine-verifiable by this platform yet "
+            "(GitHub only; gh would query the wrong forge). Record a deferred "
+            "receipt with the forge evidence instead."
+        ), None
     try:
         rc, out, err = _run_gh(
             ["api", f"repos/{owner}/{repo}/pulls/{number}",
@@ -222,6 +228,78 @@ def verify_against_forge(pr_url: Any, head_sha: str) -> Tuple[bool, str, Optiona
     return True, "forge verification passed", verification
 
 
+def git_remote_urls(path: Any) -> List[str]:
+    """Unique remote URLs of a local git worktree (empty when unreadable)."""
+    if not path:
+        return []
+    repo = Path(str(path)).expanduser()
+    if not (repo / ".git").exists():
+        return []
+    try:
+        probe = subprocess.run(
+            ["git", "-C", str(repo), "remote", "-v"],
+            text=True, capture_output=True, timeout=10, check=False,
+        )
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return []
+    if probe.returncode:
+        return []
+    urls: List[str] = []
+    for line in (probe.stdout or "").splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[1] not in urls:
+            urls.append(parts[1])
+    return urls
+
+
+def collect_deferred_evidence(task: Any) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
+    """Machine-derived evidence for a deferred (no verifiable PR) closure.
+
+    Deferred is only justified when there is no git remote at all, or the
+    remotes belong to a forge this platform cannot verify yet. A GitHub
+    remote means the PR path is verifiable and deferral is refused; the probe
+    result is stored so the deferral is auditable (Codex review P1).
+    """
+    task = task or {}
+    remotes: List[str] = []
+    for path in (task.get("clone_path"), task.get("source_repo")):
+        for url in git_remote_urls(path):
+            if url not in remotes:
+                remotes.append(url)
+    if not remotes:
+        return True, "no git remote configured; a PR cannot exist", {
+            "provider": "none",
+            "remotes": [],
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+        }
+    if any("github.com" in url.lower() for url in remotes):
+        return False, (
+            "a GitHub remote exists; the PR path is verifiable — create the PR, "
+            "close the review and record a normal receipt (deferred is not "
+            "justified)"
+        ), None
+    probe_detail = ""
+    try:
+        probe = subprocess.run(
+            ["git", "ls-remote", "--exit-code", remotes[0]],
+            text=True, capture_output=True, timeout=20, check=False,
+        )
+        probe_detail = (
+            "reachable" if probe.returncode == 0
+            else f"unreachable: {(probe.stderr or '').strip()[:160]}"
+        )
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        probe_detail = f"probe failed: {exc}"
+    host = re.sub(r"^[a-z+]+://", "", remotes[0]).split("@")[-1].split("/")[0]
+    return True, f"unsupported forge {host!r} (probe: {probe_detail})", {
+        "provider": "unsupported-forge",
+        "host": host,
+        "remotes": remotes,
+        "probe": probe_detail,
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 def _wrapup_flag(config: Any) -> bool:
     if not isinstance(config, dict):
         return False
@@ -275,6 +353,15 @@ def validate_receipt_payload(payload: Any, require_verification: bool = True) ->
     if payload.get("deferred"):
         if not str(payload.get("reason") or "").strip():
             return False, "deferred receipt requires --reason with the blocking evidence"
+        verification = payload.get("verification")
+        provider = ""
+        if isinstance(verification, dict):
+            provider = str(verification.get("provider") or "").strip().lower()
+        if provider not in ("none", "unsupported-forge") and require_verification:
+            return False, (
+                "deferred receipt lacks machine-derived evidence (no-remote / "
+                "unsupported-forge probe); record it via the CLI"
+            )
         return True, ""
     if not str(payload.get("pr_url") or "").strip():
         return False, "--pr-url is required (or use --deferred --reason)"
