@@ -8,6 +8,37 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-10-16] fix | 质量评估保住被截断的验收回执并按会话配对重试
+- 背景：账本超过读取上限时，晚于窗口的验收回执会丢失，已被回执覆盖的失败被算成测试异常。原生会话部分损坏不记 unknown；缺时间戳的跨会话动作会按加载顺序虚构重试。
+- 变更：截断时补读同范围验收回执；原生解析器只要丢弃过记录就记 `native_corrupt`；缺时间戳时只在同一会话内配对隐式重试。
+- 证据：`tests/test_execution_trace.py`、`tests/test_quality_assessment.py`。
+
+## [2026-10-16] fix | 质量评估收紧旧证据归属并容错损坏输入
+- 背景：任务已有持久 `run_id` 时，没有 `run_id` 的旧行仍被算进本次运行，旧失败会造出假异常、旧通过能把轨迹补成 acceptable。原生会话损坏和无关任务的坏载荷也会让过程结论失真或丢掉整次评估。
+- 变更：旧行回退只留给真正没有运行身份的任务；`native_corrupt` 记为 unknown；轨迹按克隆目录找兄弟任务时跳过坏载荷。
+- 证据：`tests/test_quality_assessment.py`、`tests/test_execution_trace.py`。
+
+## [2026-10-16] fix | 质量评估对齐测试命令识别并容错坏插话载荷
+- 背景：`npm test`、`go test`、`cargo test` 没有退出码时不被当成测试命令，成功结论可能判成 acceptable。一条损坏的插话载荷会让整次评估退化成 `assessment_unavailable`。
+- 变更：测试命令识别复用执行轨迹的分类器；插话查询用 `json_valid` 保护，坏载荷按没有运行身份处理。
+- 证据：`tests/test_quality_assessment.py`。
+
+## [2026-10-16] fix | 质量评估保持动作顺序并限制人工记录
+- 背景：缺时间戳的后续动作会被排到时间零点，非显式重试被看丢。人工记录按整个任务一次读完。
+- 变更：时间戳不齐时保持读入顺序。插话和 intervention 只读本次运行，超过 200 条记 `human_signals_truncated`。
+- 证据：`tests/test_quality_assessment.py`。
+
+## [2026-10-16] fix | 质量评估补上插话身份和历史验收去重
+- 背景：普通插话没有 `run_id`，真实纠错被标成无法归属。历史运行把同一次验收的 `tests_completed` 又记成一条异常。
+- 变更：新插话写入任务当时的 `run_id`。历史投影使用与当前轨迹相同的 `evidence_id` 回执过滤。
+- 证据：`tests/test_steering_mesh.py`、`tests/test_quality_assessment.py`。
+
+## [2026-10-16] feat | Agent 执行质量评估 V1
+
+- 背景：已结算的 Outcome 只能说明业务是否合格，不能区分一次顺利完成和靠返工、阻塞或人工纠错才完成。
+- 变更：新增只读评估。它复制 Outcome 的业务结论、返工和阻塞次数，并从现有轨迹确认测试异常、显式重试和非显式重试。缺失和未归属保持 unknown。不写任务库，不发布经验规则。
+- 证据：`tests/test_quality_assessment.py`。页面说明见 [[quality-assessment]]。
+
 ## [2026-10-16] fix | 执行轨迹复审：测试结论与 Claude 枚举预算
 
 - 背景：单元测试全部通过时，轨迹会把 `tests_completed` 画成通过，即使同一份证据的验证结论是未通过。Claude 会先列出并排序目录里的全部会话文件，时间预算来不及生效。

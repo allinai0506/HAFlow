@@ -127,7 +127,8 @@ def read_trace_tasks(db_path, task_id: str) -> List[Dict[str, Any]]:
             SELECT task_id, json_extract(payload_json, '$.clone_path') AS clone_path
             FROM tasks
             WHERE task_id != ?
-              AND json_extract(payload_json, '$.clone_path') IS NOT NULL
+              AND CASE WHEN json_valid(payload_json)
+                       THEN json_extract(payload_json, '$.clone_path') END IS NOT NULL
             """,
             (task_id,),
         ).fetchall()
@@ -441,10 +442,10 @@ def read_stored_events(task: Dict[str, Any], db_path) -> Tuple[List[Dict[str, An
             type_marks = ",".join("?" for _ in _PROJECTABLE_EVENT_TYPES)
             if task_run:
                 run_sql = "(run_id IS NULL OR run_id = '' OR run_id = ?)"
-                params = (task.get("task_id"), *_PROJECTABLE_EVENT_TYPES, task_run, STORED_LIMIT)
+                run_params = (task_run,)
             else:
                 run_sql = "(run_id IS NULL OR run_id = '')"
-                params = (task.get("task_id"), *_PROJECTABLE_EVENT_TYPES, STORED_LIMIT)
+                run_params = ()
             rows = conn.execute(
                 f"""
                 SELECT id, task_id, agent_id, event_type, timestamp, source, run_id, sequence, payload_json
@@ -455,8 +456,14 @@ def read_stored_events(task: Dict[str, Any], db_path) -> Tuple[List[Dict[str, An
                 ORDER BY timestamp ASC, id ASC
                 LIMIT ?
                 """,
-                params,
+                (task.get("task_id"), *_PROJECTABLE_EVENT_TYPES, *run_params, STORED_LIMIT),
             ).fetchall()
+            if len(rows) >= STORED_LIMIT:
+                seen = {row["id"] for row in rows}
+                rows = list(rows) + [
+                    row for row in _receipts_for_scope(conn, task.get("task_id"), run_sql, run_params)
+                    if row["id"] not in seen
+                ]
         except sqlite3.Error:
             return [], [{"code": "trajectory_unavailable", "message": "任务轨迹数据库暂不可用。"}]
     finally:
@@ -484,6 +491,27 @@ def read_stored_events(task: Dict[str, Any], db_path) -> Tuple[List[Dict[str, An
     if len(events) >= STORED_LIMIT:
         notes.append({"code": "native_truncated", "message": "执行轨迹已截断，仅显示已读取的部分。"})
     return events, notes
+
+
+def _receipts_for_scope(conn, task_id, run_sql: str, run_params: Sequence[Any]) -> List[Any]:
+    """Read verification receipts for the same scope, past the stored window.
+
+    The window keeps the oldest rows, so a later authoritative receipt can
+    fall outside it while its superseded ``tests_completed`` row stays in
+    view. Receipts are one per checkpoint, so reading them stays bounded.
+    """
+    return conn.execute(
+        f"""
+        SELECT id, task_id, agent_id, event_type, timestamp, source, run_id, sequence, payload_json
+        FROM events
+        WHERE task_id = ?
+          AND event_type = 'verification_completed'
+          AND {run_sql}
+        ORDER BY timestamp ASC, id ASC
+        LIMIT ?
+        """,
+        (task_id, *run_params, STORED_LIMIT),
+    ).fetchall()
 
 
 def _classify_action(action: Dict[str, Any]) -> Dict[str, Any]:

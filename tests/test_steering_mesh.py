@@ -57,6 +57,19 @@ def test_format_steer_prompt():
     assert "Please stick to standard library" in prompt
 
 
+def test_queue_steer_records_the_task_run(steering_env):
+    task_id = "task-run"
+    task = _seed_task(steering_env, task_id, status="working")
+    task["run_id"] = "run-live"
+    from herdr.state_store import get_state_store
+    get_state_store().save_task(task)
+
+    steering.queue_steer(task_id, "fix the failing test", operator="human", execute_dispatch=False)
+
+    saved = steering.load_steering_data()["steering_queues"][task_id][0]
+    assert saved["run_id"] == "run-live"
+
+
 def test_queue_steer_normal(steering_env):
     task_id = "task-001"
     _seed_task(steering_env, task_id, status="working")
