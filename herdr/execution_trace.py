@@ -13,8 +13,9 @@ import shlex
 import sqlite3
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from .native_session_trace import load_native_actions
+from .native_session_trace import _norm_path, load_native_actions
 from .state_db import get_readonly_db_connection
+from .trajectory import run_id_for_task
 
 
 MAX_LIMIT = 200
@@ -51,6 +52,42 @@ _TASK_COLUMNS = (
 )
 
 
+def _task_from_row(row) -> Dict[str, Any]:
+    try:
+        payload = json.loads(row["payload_json"] or "{}")
+    except json.JSONDecodeError:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    task = dict(payload)
+    task.update({
+        "task_id": row["task_id"],
+        "workflow_id": row["workflow_id"],
+        "node": row["node"],
+        "stage": row["stage"],
+        "agent": row["agent"],
+        "status": row["status"],
+        "stage_verdict": row["stage_verdict"],
+        "stage_verdict_note": row["stage_verdict_note"],
+        "pane_id": row["pane_id"],
+        "goal": row["goal"],
+        "blocker": row["blocker"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+        "version": int(row["version"] or 0),
+    })
+    return task
+
+
+def _select_tasks(where: str) -> str:
+    return (
+        "SELECT "
+        + ", ".join(_TASK_COLUMNS)
+        + ", payload_json FROM tasks "
+        + where
+    )
+
+
 def read_task_records(db_path) -> List[Dict[str, Any]]:
     """Read task documents through the read-only state connection.
 
@@ -61,39 +98,54 @@ def read_task_records(db_path) -> List[Dict[str, Any]]:
     try:
         conn.execute("PRAGMA query_only=ON;")
         rows = conn.execute(
-            "SELECT "
-            + ", ".join(_TASK_COLUMNS)
-            + ", payload_json FROM tasks ORDER BY created_at ASC, task_id ASC"
+            _select_tasks("ORDER BY created_at ASC, task_id ASC")
         ).fetchall()
     finally:
         conn.close()
-    records = []
-    for row in rows:
-        try:
-            payload = json.loads(row["payload_json"] or "{}")
-        except json.JSONDecodeError:
-            payload = {}
-        if not isinstance(payload, dict):
-            payload = {}
-        task = dict(payload)
-        task.update({
-            "task_id": row["task_id"],
-            "workflow_id": row["workflow_id"],
-            "node": row["node"],
-            "stage": row["stage"],
-            "agent": row["agent"],
-            "status": row["status"],
-            "stage_verdict": row["stage_verdict"],
-            "stage_verdict_note": row["stage_verdict_note"],
-            "pane_id": row["pane_id"],
-            "goal": row["goal"],
-            "blocker": row["blocker"],
-            "created_at": row["created_at"],
-            "updated_at": row["updated_at"],
-            "version": int(row["version"] or 0),
-        })
-        records.append(task)
-    return records
+    return [_task_from_row(row) for row in rows]
+
+
+def read_trace_tasks(db_path, task_id: str) -> List[Dict[str, Any]]:
+    """Read one task and the other tasks that share its clone directory.
+
+    Unrelated task payloads stay in the database. Clone ownership still
+    compares normalized paths, using only the stored path string to decide
+    which full documents to decode.
+    """
+    conn = get_readonly_db_connection(db_path)
+    try:
+        conn.execute("PRAGMA query_only=ON;")
+        row = conn.execute(_select_tasks("WHERE task_id = ?"), (task_id,)).fetchone()
+        if row is None:
+            return []
+        task = _task_from_row(row)
+        clone = _norm_path(task.get("clone_path"))
+        if not clone:
+            return [task]
+        paths = conn.execute(
+            """
+            SELECT task_id, json_extract(payload_json, '$.clone_path') AS clone_path
+            FROM tasks
+            WHERE task_id != ?
+              AND json_extract(payload_json, '$.clone_path') IS NOT NULL
+            """,
+            (task_id,),
+        ).fetchall()
+        share = [
+            item["task_id"]
+            for item in paths
+            if _norm_path(item["clone_path"]) == clone
+        ]
+        if not share:
+            return [task]
+        marks = ",".join("?" for _ in share)
+        siblings = conn.execute(
+            _select_tasks(f"WHERE task_id IN ({marks})"),
+            tuple(share),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [task, *(_task_from_row(item) for item in siblings)]
 
 
 def query_task_trace(
@@ -226,8 +278,14 @@ def project_stored_event(row: Dict[str, Any], task: Dict[str, Any]) -> Optional[
     row_run = row.get("run_id") or None
     task_run = task.get("run_id") or None
     # A ledger row with no run_id is legacy evidence. Keep it, but do not
-    # stamp it with the task's current run.
-    if row_run != task_run and not (row_run is None and task_run):
+    # stamp it with the task's current run. A task that itself has no
+    # persisted run_id still owns rows written under run_id_for_task().
+    if row_run is None:
+        pass
+    elif task_run:
+        if row_run != task_run:
+            return None
+    elif not task.get("task_id") or row_run != run_id_for_task(task):
         return None
     event_type = str(row.get("event_type") or "")
     payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
@@ -375,6 +433,8 @@ def read_stored_events(task: Dict[str, Any], db_path) -> Tuple[List[Dict[str, An
         try:
             conn.execute("PRAGMA query_only=ON;")
             task_run = task.get("run_id") or None
+            if not task_run and task.get("task_id"):
+                task_run = run_id_for_task(task)
             type_marks = ",".join("?" for _ in _PROJECTABLE_EVENT_TYPES)
             if task_run:
                 run_sql = "(run_id IS NULL OR run_id = '' OR run_id = ?)"

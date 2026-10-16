@@ -1889,15 +1889,15 @@ def api_task_trajectory(tid, limit=100, cursor=None):
         raise TraceQueryError(400, 'limit 无效')
     if page_limit < 1 or page_limit > 200:
         raise TraceQueryError(400, 'limit 无效')
-    from herdr.execution_trace import query_task_trace, read_task_records
+    from herdr.execution_trace import query_task_trace, read_trace_tasks
     db_path = Path(os.environ['HERDR_STATE_DB']) if os.environ.get('HERDR_STATE_DB') else Path(TASKS_FILE).parent / 'state.db'
     try:
-        found = read_task_records(db_path)
+        found = read_trace_tasks(db_path, tid)
     except FileNotFoundError as exc:
         raise TraceQueryError(503, '任务轨迹数据库暂不可用。') from exc
     except sqlite3.Error as exc:
         raise TraceQueryError(503, '任务轨迹数据库暂不可用。') from exc
-    task = next((item for item in found if item.get('task_id') == tid), None)
+    task = found[0] if found else None
     if task is None:
         raise TraceQueryError(404, '任务不存在')
     try:

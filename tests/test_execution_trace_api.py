@@ -14,8 +14,9 @@ from pathlib import Path
 import pytest
 
 from console import herdr_factory_console as console
-from herdr.execution_trace import query_task_trace
+from herdr.execution_trace import query_task_trace, read_trace_tasks
 from herdr.state_db import get_readonly_db_connection
+from herdr.trajectory import run_id_for_task
 
 
 def _db(path: Path, tasks=()):
@@ -149,6 +150,35 @@ def test_api_missing_database_does_not_create_one(tmp_path, monkeypatch):
     assert not db.exists()
 
 
+def test_trace_lookup_skips_unrelated_task_payloads(tmp_path, monkeypatch):
+    clone = tmp_path / "clone"
+    target = _task("task-a", "run-a")
+    target["clone_path"] = str(clone)
+    share = _task("task-share", "run-share")
+    share["clone_path"] = str(clone) + "/"
+    other = _task("task-other", "run-other")
+    other["clone_path"] = str(tmp_path / "elsewhere")
+    other["blob"] = "UNRELATED_PAYLOAD"
+    db = tmp_path / "state.db"
+    _db(db, [target, share, other])
+    seen = []
+    real_loads = json.loads
+
+    def spy(text, *args, **kwargs):
+        seen.append(text if isinstance(text, str) else "")
+        return real_loads(text, *args, **kwargs)
+
+    monkeypatch.setattr("herdr.execution_trace.json.loads", spy)
+    records = read_trace_tasks(db, "task-a")
+    assert {item["task_id"] for item in records} == {"task-a", "task-share"}
+    assert all("UNRELATED_PAYLOAD" not in text for text in seen)
+    page = query_task_trace(
+        records[0], records, db_path=db,
+        roots={"codex_sessions": tmp_path / "missing", "claude_projects": tmp_path / "missing", "opencode_db": tmp_path / "missing.db"},
+    )
+    assert "native_unverified" in {item["code"] for item in page["degradation"]}
+
+
 def test_api_empty_task_reports_none(tmp_path, monkeypatch):
     db = tmp_path / "state.db"
     empty = {
@@ -269,7 +299,8 @@ def test_live_product_chain_reads_real_sessions_without_writing():
         allowed = {"agent", "tool", "path", "command", "result", "exit_code", "timestamp", "source", "source_ref"}
         for event in page["events"]:
             assert event["task_id"] == task["task_id"]
-            assert event["run_id"] in (None, task.get("run_id"))
+            allowed_run = task.get("run_id") or run_id_for_task(task)
+            assert event["run_id"] in (None, allowed_run)
             assert set(event.get("details") or {}).issubset(allowed)
             path = (event.get("details") or {}).get("path")
             if path:

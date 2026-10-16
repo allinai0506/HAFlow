@@ -14,13 +14,15 @@
 
 `agent_session_id` 是 HAFlow 启动适配器记下的会话标识，不是 Codex、Claude Code 或 OpenCode 的原生会话 ID。不能拿它去对原生记录。
 
-Trajectory 行没有 `run_id` 时保留为未知运行，不标成任务当前的 `run_id`。状态历史优先用记录里的 `timestamp`。
+Trajectory 行没有 `run_id` 时保留为未知运行，不标成任务当前的 `run_id`。任务本身也没有 `run_id` 时，账本里 `run_<task_id>` 的行仍属于该任务；这是 `run_id_for_task()` 给旧任务写上的身份。状态历史优先用记录里的 `timestamp`。
 
 Pane ID 会回收，也不能当作历史归属。
 
 没有记录 `native_session_id` 时，只接受工作目录与该任务独占 `clone_path` 完全一致的原生会话。隔离目录被多个任务共用时，拒绝合并原生记录。已经写在任务、运行时或 `.herdr-launch-identity.json` 里的 `native_session_id` 必须与原生会话 ID 一致。身份文件的 `task_id` 对得上、但 `run_id` 属于另一次运行时，不用这份身份，也不退回按工作目录合并。
 
-Claude 会话先定位已记录的那一份，再套用单次最多 8 个文件的上限。`events` 先按当前运行（没有 `run_id` 的旧行仍保留）和可投影的事件类型过滤，再取最多 2000 条。
+Claude 会话先定位已记录的那一份，再套用单次最多 8 个文件的上限。Codex 也先按已记录的会话 ID 定位，再套用最多 800 个文件的扫描上限。`events` 先按当前运行（没有 `run_id` 的旧行仍保留；旧任务再加 `run_<task_id>`）和可投影的事件类型过滤，再取最多 2000 条。
+
+打开一条轨迹时只解码该任务，以及 `clone_path` 规范化后与它相同的其他任务。其余任务的完整载荷留在库里。
 
 同一次状态变化会同时写进状态历史和 `task_transition`。相同任务、目标状态和时间合成一条轨迹。
 

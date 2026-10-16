@@ -278,12 +278,76 @@ def _recent_jsonl(root: Path, limit: int, deadline: float) -> Tuple[List[Path], 
     return found, hit
 
 
+def _safe_recorded_id(recorded: str) -> str:
+    if not isinstance(recorded, str):
+        return ""
+    text = recorded.strip()
+    if not text or "/" in text or "\\" in text or text in {".", ".."} or len(text) > 128:
+        return ""
+    return text
+
+
+def _walk_jsonl(root: Path, deadline: float):
+    """Yield JSONL paths newest-name-first until the deadline."""
+    def walk(directory: Path):
+        if time.monotonic() > deadline:
+            return
+        try:
+            entries = list(directory.iterdir())
+        except OSError:
+            return
+        entries.sort(key=lambda item: item.name, reverse=True)
+        for entry in entries:
+            if time.monotonic() > deadline:
+                return
+            name = entry.name
+            if name.startswith("."):
+                continue
+            try:
+                is_dir = entry.is_dir()
+            except OSError:
+                continue
+            if is_dir:
+                yield from walk(entry)
+                continue
+            if name.endswith(".jsonl") and not name.endswith(".jsonl.zst"):
+                yield entry
+
+    yield from walk(root)
+
+
+def _find_recorded_codex(root: Path, recorded: str, deadline: float) -> Optional[Path]:
+    """Find a recorded Codex session even when it is older than the scan cap."""
+    recorded = _safe_recorded_id(recorded)
+    if not recorded or not root.is_dir():
+        return None
+    suffix = f"{recorded}.jsonl"
+    for path in _walk_jsonl(root, deadline):
+        if not path.name.endswith(suffix):
+            continue
+        _, session_id = _codex_meta(path)
+        if not session_id or session_id == recorded:
+            return path
+    if time.monotonic() > deadline:
+        return None
+    for path in _walk_jsonl(root, deadline):
+        _, session_id = _codex_meta(path)
+        if session_id == recorded:
+            return path
+    return None
+
+
 def _load_codex(task, root, deadline):
     if root is None or not Path(root).is_dir():
         return [], [_note("native_unavailable", "记录来源暂不可用。")], False
     clone = _norm_path(task.get("clone_path"))
     matches: List[Tuple[str, Path]] = []
+    recorded = _recorded_native_id(task)
+    pinned = _find_recorded_codex(Path(root), recorded, deadline) if recorded else None
     candidates, budget_hit = _recent_jsonl(Path(root), MAX_SCAN, deadline)
+    if pinned is not None:
+        candidates = [pinned] + [item for item in candidates if item != pinned]
+        candidates = candidates[:MAX_SCAN]
     for path in candidates:
         cwd, session_id = _codex_meta(path)
         if _norm_path(cwd) == clone and session_id:

@@ -673,3 +673,84 @@ def test_stored_event_cap_keeps_the_current_run_row(tmp_path):
     assert all(row["run_id"] in (None, "", "run-a") for row in rows)
     assert all(row["event_type"] != "debug_log" for row in rows)
     assert notes == []
+
+
+def test_runless_task_keeps_the_synthetic_trajectory_run(tmp_path):
+    from herdr.execution_trace import read_stored_events, read_task_records
+    from herdr.state_db import save_task
+    from herdr.trajectory import TrajectoryLedger, record_trajectory_event, run_id_for_task
+
+    db = tmp_path / "state.db"
+    task = {
+        "task_id": "task-legacy",
+        "workflow_id": "wf-a",
+        "agent": "codex",
+        "status": "working",
+        "node": "dev",
+        "created_at": 10.0,
+    }
+    save_task(task, db_path=db)
+    record_trajectory_event(task, "task_started", ledger=TrajectoryLedger(db))
+    conn = sqlite3.connect(db)
+    conn.executemany(
+        """
+        INSERT INTO events (task_id, agent_id, event_type, payload_json, timestamp, source, run_id, sequence)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            ("task-legacy", "codex", "agent_started", "{}", 11, "trajectory", None, 2),
+            ("task-legacy", "codex", "task_completed", "{}", 12, "trajectory", "run-other", 3),
+        ],
+    )
+    conn.commit()
+    conn.close()
+    loaded = next(item for item in read_task_records(db) if item["task_id"] == "task-legacy")
+    assert not loaded.get("run_id")
+    rows, notes = read_stored_events(loaded, db)
+    synthetic = run_id_for_task(task)
+    assert notes == []
+    assert any(row["event_type"] == "task_started" and row["run_id"] == synthetic for row in rows)
+    assert any(row["event_type"] == "agent_started" and row["run_id"] in (None, "") for row in rows)
+    assert all(row["run_id"] != "run-other" for row in rows)
+    page = assemble_trace(loaded, rows, [])
+    assert page["run_id"] in (None, "")
+    trajectory = [event for event in page["events"] if event["source"] == "trajectory"]
+    assert any(event["run_id"] == synthetic for event in trajectory)
+    assert any(event["run_id"] is None for event in trajectory)
+
+
+def test_codex_pinned_session_survives_the_scan_cap(tmp_path):
+    from herdr.native_session_trace import MAX_SCAN
+
+    root = tmp_path / "sessions"
+    new = root / "2026" / "10" / "16"
+    old = root / "2020" / "01" / "01"
+    new.mkdir(parents=True)
+    old.mkdir(parents=True)
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    filler = json.dumps({"type": "session_meta", "payload": {"cwd": "/other", "session_id": "newer"}}) + "\n"
+    for index in range(MAX_SCAN):
+        (new / f"session-{index:04d}.jsonl").write_text(filler, encoding="utf-8")
+    pinned = "pinned-session"
+    (old / "session-old.jsonl").write_text("\n".join([
+        json.dumps({"type": "session_meta", "payload": {"cwd": str(clone), "session_id": pinned}}),
+        json.dumps({
+            "type": "response_item", "timestamp": 20,
+            "payload": {
+                "type": "function_call", "name": "read", "call_id": "r1",
+                "arguments": json.dumps({"file_path": "src/billing.py"}),
+            },
+        }),
+    ]) + "\n", encoding="utf-8")
+    task = task_doc(
+        agent="codex", clone_path=str(clone), native_session_id=pinned,
+        commit=None, status_history=[], created_at=None, started_at=None,
+    )
+    actions, _notes = load_native_actions(
+        task, [task],
+        {"codex_sessions": root, "claude_projects": tmp_path / "missing-claude", "opencode_db": tmp_path / "none.db"},
+        budget_s=8,
+    )
+    assert any(item.get("session_id") == pinned and item.get("path") == "src/billing.py" for item in actions)
+    assert all(item.get("session_id") == pinned for item in actions)
