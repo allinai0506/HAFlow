@@ -29,6 +29,7 @@ from .trajectory import run_id_for_task
 
 _NATIVE_AGENTS = frozenset({"codex", "claude", "opencode"})
 _PAGE_CAP = 10
+_HUMAN_CAP = 200
 
 
 def load_quality_inputs(task_id: str, run_id: str, *, db_path, roots, budget_s: float) -> Dict[str, Any]:
@@ -45,14 +46,18 @@ def load_quality_inputs(task_id: str, run_id: str, *, db_path, roots, budget_s: 
     task = found[0]
     persisted = str(task.get("run_id") or "")
     owning = persisted == run_id if persisted else run_id == run_id_for_task(task)
-    signals = _human_rows(task_id, db_path)
+    signals, human_note = _human_rows(task_id, run_id, db_path)
     if not owning:
         events, truncated = _events_for_run(task, run_id, db_path)
         notes = [{"code": "historical_run_trace_limited", "message": "只读取该运行已归属的账本事件。"}]
         if truncated:
             notes.append({"code": "native_truncated", "message": "执行轨迹已截断，仅显示已读取的部分。"})
+        if human_note:
+            notes.append(human_note)
         return _bundle(outcome, events, [], notes, signals, allow_legacy=False, truncated=truncated)
     stored, notes = read_stored_events(task, db_path)
+    if human_note:
+        notes = list(notes) + [human_note]
     agent = str(task.get("agent") or (task.get("runtime") or {}).get("agent") or "")
     if agent in _NATIVE_AGENTS:
         native, native_notes = load_native_actions(task, found[1:], roots, budget_s=budget_s)
@@ -138,38 +143,52 @@ def _events_for_run(task: Dict[str, Any], run_id: str, db_path):
     return merge_trace_events(projected), len(decoded) >= STORED_LIMIT
 
 
-def _human_rows(task_id: str, db_path) -> Dict[str, List[Dict[str, str]]]:
+def _human_rows(task_id: str, run_id: str, db_path):
+    limit = _HUMAN_CAP + 1
     conn = get_readonly_db_connection(db_path)
     try:
-        steers = []
-        for row in conn.execute(
-            "SELECT steer_id, operator, payload_json FROM steering_items WHERE task_id = ?",
-            (task_id,),
-        ):
-            try:
-                payload = json.loads(row["payload_json"] or "{}")
-            except json.JSONDecodeError:
-                payload = {}
-            if not isinstance(payload, dict):
-                payload = {}
-            steers.append({
-                "ref": str(row["steer_id"] or ""),
-                "run_id": str(payload.get("run_id") or ""),
-                "operator": row["operator"] if row["operator"] is not None else "",
-                "decision_id": str(payload.get("decision_id") or ""),
-                "kind": str(payload.get("kind") or ""),
-            })
-        interventions = [
-            {
-                "ref": str(row["intervention_id"] or ""),
-                "run_id": str(row["run_id"] or ""),
-                "action": str(row["action"] or ""),
-            }
-            for row in conn.execute(
-                "SELECT intervention_id, run_id, action FROM interventions WHERE task_id = ?",
-                (task_id,),
-            )
-        ]
+        steer_rows = conn.execute(
+            "SELECT steer_id, operator, payload_json FROM steering_items "
+            "WHERE task_id = ? AND json_extract(payload_json, '$.run_id') = ? "
+            "ORDER BY created_at ASC, steer_id ASC LIMIT ?",
+            (task_id, run_id, limit),
+        ).fetchall()
+        intervention_rows = conn.execute(
+            "SELECT intervention_id, run_id, action FROM interventions "
+            "WHERE task_id = ? AND run_id = ? "
+            "ORDER BY requested_at ASC, intervention_id ASC LIMIT ?",
+            (task_id, run_id, limit),
+        ).fetchall()
     finally:
         conn.close()
-    return {"steers": steers, "interventions": interventions}
+    truncated = len(steer_rows) > _HUMAN_CAP or len(intervention_rows) > _HUMAN_CAP
+    steers = []
+    for row in steer_rows[:_HUMAN_CAP]:
+        try:
+            payload = json.loads(row["payload_json"] or "{}")
+        except json.JSONDecodeError:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        steers.append({
+            "ref": str(row["steer_id"] or ""),
+            "run_id": str(payload.get("run_id") or ""),
+            "operator": row["operator"] if row["operator"] is not None else "",
+            "decision_id": str(payload.get("decision_id") or ""),
+            "kind": str(payload.get("kind") or ""),
+        })
+    interventions = [
+        {
+            "ref": str(row["intervention_id"] or ""),
+            "run_id": str(row["run_id"] or ""),
+            "action": str(row["action"] or ""),
+        }
+        for row in intervention_rows[:_HUMAN_CAP]
+    ]
+    note = None
+    if truncated:
+        note = {
+            "code": "human_signals_truncated",
+            "message": "本次运行的人工记录超过读取上限。",
+        }
+    return {"steers": steers, "interventions": interventions}, note

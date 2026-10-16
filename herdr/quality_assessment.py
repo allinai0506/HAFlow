@@ -25,6 +25,7 @@ _UNKNOWN_NOTES = frozenset({
     "native_unavailable",
     "native_unverified",
     "historical_run_trace_limited",
+    "human_signals_truncated",
 })
 _PARTIAL_NOTES = frozenset({"native_truncated", "native_index_budget"})
 
@@ -260,8 +261,7 @@ def _retries(actions: Sequence[Dict[str, Any]]):
     implicit = []
     exit_unknown = False
     failed: Dict[str, str] = {}
-    ordered = sorted(usable, key=_action_order)
-    for item in ordered:
+    for item in _ordered_actions(usable):
         source = item.get("source_ref")
         command = item.get("command") if isinstance(item.get("command"), str) else ""
         command = " ".join(command.split())
@@ -281,13 +281,27 @@ def _retries(actions: Sequence[Dict[str, Any]]):
     return _unique(explicit), _unique(implicit), exit_unknown
 
 
-def _action_order(item: Dict[str, Any]):
+def _ordered_actions(actions: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Order retries without treating a missing timestamp as time zero."""
+    indexed = list(enumerate(actions))
+    if any(not _has_timestamp(item) for _, item in indexed):
+        return [item for _, item in indexed]
+    return [
+        item for _, item in sorted(
+            indexed,
+            key=lambda pair: (
+                pair[1]["timestamp"],
+                pair[1].get("ordinal") if isinstance(pair[1].get("ordinal"), int)
+                and not isinstance(pair[1].get("ordinal"), bool) else pair[0],
+                pair[0],
+            ),
+        )
+    ]
+
+
+def _has_timestamp(item: Dict[str, Any]) -> bool:
     timestamp = item.get("timestamp")
-    ordinal = item.get("ordinal")
-    return (
-        timestamp if isinstance(timestamp, (int, float)) and not isinstance(timestamp, bool) else 0,
-        ordinal if isinstance(ordinal, int) and not isinstance(ordinal, bool) else 0,
-    )
+    return isinstance(timestamp, (int, float)) and not isinstance(timestamp, bool)
 
 
 def _is_test_command(command: str) -> bool:

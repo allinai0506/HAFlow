@@ -17,6 +17,7 @@ from unittest.mock import patch
 from herdr import state_db
 from herdr.execution_outcome import outcome_id_for
 from herdr.quality_assessment import ASSESSOR_VERSION, assess_quality, assess_task_run
+from herdr.quality_sources import _HUMAN_CAP
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -205,6 +206,33 @@ class QualityJudgementTest(unittest.TestCase):
         self.assertEqual(report["process_quality"], "improvement_opportunity")
         self.assertIn("explicit_retry", report["problem_codes"])
         self.assertNotIn("implicit_retry", report["problem_codes"])
+
+    def test_missing_timestamp_keeps_later_retry_in_input_order(self):
+        failed = _action("a", "git status", 1, ordinal=1)
+        failed["timestamp"] = 10
+        later = _action("b", "git status", 0, ordinal=2)
+        later["timestamp"] = None
+        report = assess_quality(
+            TASK, RUN,
+            outcome=_outcome(),
+            events=[_event("test_passed", "seen", command="pytest", exit_code=0)],
+            actions=[failed, later],
+        )
+        self.assertIn("implicit_retry", report["problem_codes"])
+        self.assertEqual(report["process_quality"], "improvement_opportunity")
+
+    def test_complete_timestamps_still_follow_time_order(self):
+        later = _action("b", "git status", 0, ordinal=2)
+        later["timestamp"] = 20
+        earlier = _action("a", "git status", 1, ordinal=1)
+        earlier["timestamp"] = 10
+        report = assess_quality(
+            TASK, RUN,
+            outcome=_outcome(),
+            events=[_event("test_passed", "seen", command="pytest", exit_code=0)],
+            actions=[later, earlier],
+        )
+        self.assertIn("implicit_retry", report["problem_codes"])
 
     def test_implicit_retry_needs_the_same_failed_command(self):
         report = assess_quality(
@@ -516,6 +544,86 @@ class QualityReadTest(unittest.TestCase):
         self.assertEqual(report["process_quality"], "acceptable")
         self.assertEqual(report["trace_completeness"], "complete")
         self.assertNotIn("native_unattributed", report["problem_codes"])
+
+    def test_human_reads_stay_on_the_requested_run_and_cap(self):
+        task_id = "task-humans"
+        run_id = "run-humans"
+        conn = state_db.get_db_connection(self.db)
+        try:
+            conn.execute(
+                "INSERT INTO tasks (task_id, workflow_id, node, stage, agent, status, "
+                "payload_json, created_at, updated_at, version) "
+                "VALUES (?, 'wf-1', 'test', 'test', 'fixture', 'completed', ?, 1, 2, 1)",
+                (task_id, json.dumps({"run_id": run_id, "task_type": "dev"})),
+            )
+            conn.execute(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'verification_completed', ?, 12, 'trajectory', ?, 1)",
+                (task_id, json.dumps({
+                    "verification": {"passed": True, "evidence_id": "ev-humans"},
+                }), run_id),
+            )
+            conn.execute(
+                "INSERT INTO steering_items (steer_id, task_id, instruction, operator, "
+                "created_at, payload_json) VALUES (?, ?, 'fix it', 'human', 1, ?)",
+                ("steer-match", task_id, json.dumps({"run_id": run_id})),
+            )
+            for index in range(_HUMAN_CAP + 1):
+                conn.execute(
+                    "INSERT INTO steering_items (steer_id, task_id, instruction, operator, "
+                    "created_at, payload_json) VALUES (?, ?, 'other', 'human', ?, ?)",
+                    (f"steer-other-{index}", task_id, 10 + index, json.dumps({"run_id": "run-other"})),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+        state_db.insert_execution_outcome({
+            "outcome_id": outcome_id_for(task_id, run_id),
+            "run_id": run_id,
+            "task_id": task_id,
+            "workflow_id": "wf-1",
+            "agent": "fixture",
+            "node": "test",
+            "task_type": "dev",
+            "final_status": "completed",
+            "requirements_satisfied": True,
+            "verification_passed": True,
+            "qualified_success": True,
+            "rework_count": 0,
+            "blocked_count": 0,
+            "human_intervention_count": 1,
+            "recorded_at": 40.0,
+            "source_eval_id": "eval-humans",
+            "source_eval_revision": 1,
+            "source_task_version": 1,
+            "schema_version": 1,
+        }, db_path=self.db)
+        matched = assess_task_run(task_id, run_id, db_path=self.db, budget_s=0.2)
+        self.assertEqual(matched["corrective_human_count"], 1)
+        self.assertEqual(matched["process_quality"], "improvement_opportunity")
+        self.assertNotIn("human_signals_truncated", matched["problem_codes"])
+
+        conn = state_db.get_db_connection(self.db)
+        try:
+            for index in range(_HUMAN_CAP + 1):
+                conn.execute(
+                    "INSERT INTO steering_items (steer_id, task_id, instruction, operator, "
+                    "created_at, payload_json) VALUES (?, ?, 'approve', 'human', ?, ?)",
+                    (
+                        f"steer-cap-{index}",
+                        task_id,
+                        100 + index,
+                        json.dumps({"run_id": run_id, "decision_id": f"d-{index}", "kind": "decision"}),
+                    ),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+        capped = assess_task_run(task_id, run_id, db_path=self.db, budget_s=0.2)
+        self.assertIn("human_signals_truncated", capped["problem_codes"])
+        self.assertLessEqual(capped["workflow_decision_count"], _HUMAN_CAP)
+        self.assertNotEqual(capped["process_quality"], "acceptable")
 
     def test_missing_database_returns_a_report(self):
         missing = Path(self.tmp.name) / "absent.db"
