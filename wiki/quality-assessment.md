@@ -30,13 +30,13 @@
 
 ## 不推断的事
 
-没有 Outcome，不能用轨迹里的测试失败补成业务失败。原生测试失败也不是业务验收回执：没有 Outcome、账本里又没有验收事件时，仍记 `verification_missing`。没有退出码的测试命令记 `exit_code_unknown`，不记成测试异常。原生会话对不上记 `native_unattributed`。非 Codex、Claude Code、OpenCode 的任务没有原生会话可归属，不因此记为未归属。
+没有 Outcome，不能用轨迹里的测试失败补成业务失败。原生测试失败也不是业务验收回执：没有 Outcome、账本里又没有验收事件时，仍记 `verification_missing`。没有退出码的测试命令记 `exit_code_unknown`，不记成测试异常。测试命令按执行轨迹同一套识别：pytest 家族、`npm`/`pnpm`/`yarn test`、`go test`、`cargo test`。原生会话对不上记 `native_unattributed`。非 Codex、Claude Code、OpenCode 的任务没有原生会话可归属，不因此记为未归属。
 
 显式重试来自原生动作的 `retry_of`、轨迹里的 `retry` 事件，或本次运行的 `RETRY` intervention。非显式重试只在同一条完整命令先失败、随后又执行，且中间没有显式重试链接时成立。缺时间戳的动作保持读入顺序，不把它排到时间零点。命令文本不同不算。返工次数仍以 Outcome 为准，重试不会改写它。人工插话和 intervention 只读本次 `run_id`，超过 200 条记 `human_signals_truncated`，过程不能判成 acceptable。
 
 其他运行的事件直接丢弃，并记下 `foreign_run_dropped`。这个编码只说明隔离生效，不表示这次运行本身有问题。任务当前运行和被评估的运行不同时，只读该运行自己的账本事件，不读取当前工作区里的原生会话，也不把没有 `run_id` 的旧行算进来。同一 `evidence_id` 已有验收回执时，配对的 `tests_completed` 不再另记一条测试异常。
 
-评估器异常时返回 `assessment_unavailable`。结算、经验采集和 Controller 不调用它。
+评估器异常时返回 `assessment_unavailable`。结算、经验采集和 Controller 不调用它。插话载荷不是合法 JSON 时按没有运行身份处理，一条坏记录不会丢掉整次评估。
 
 ## 命令
 

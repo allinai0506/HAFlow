@@ -266,6 +266,30 @@ class QualityJudgementTest(unittest.TestCase):
         self.assertIn("exit_code_unknown", report["problem_codes"])
         self.assertNotIn("business_failure", report["problem_codes"])
 
+    def test_unknown_exit_code_of_a_non_pytest_runner_is_unknown(self):
+        for command in ("npm test", "pnpm test", "yarn test", "go test ./...", "cargo test"):
+            with self.subTest(command=command):
+                report = assess_quality(
+                    TASK, RUN,
+                    outcome=_outcome(),
+                    events=[_event("test_passed", "receipt", command="pytest", exit_code=0)],
+                    actions=[_action("t1", command, None)],
+                )
+                self.assertEqual(report["correctness"], "success")
+                self.assertEqual(report["process_quality"], "unknown")
+                self.assertIn("exit_code_unknown", report["problem_codes"])
+
+    def test_python_runner_forms_stay_recognized(self):
+        for command in ("pytest tests/a.py", "py.test tests/a.py", "tox", "python3 -m pytest tests/a.py"):
+            with self.subTest(command=command):
+                report = assess_quality(
+                    TASK, RUN,
+                    outcome=_outcome(),
+                    events=[_event("test_passed", "receipt", command="pytest", exit_code=0)],
+                    actions=[_action("t1", command, None)],
+                )
+                self.assertIn("exit_code_unknown", report["problem_codes"])
+
     def test_workflow_decision_is_not_a_quality_defect(self):
         report = assess_quality(
             TASK, RUN,
@@ -624,6 +648,58 @@ class QualityReadTest(unittest.TestCase):
         self.assertIn("human_signals_truncated", capped["problem_codes"])
         self.assertLessEqual(capped["workflow_decision_count"], _HUMAN_CAP)
         self.assertNotEqual(capped["process_quality"], "acceptable")
+
+    def test_malformed_steering_payload_does_not_erase_the_assessment(self):
+        task_id = "task-bad-json"
+        run_id = "run-bad-json"
+        conn = state_db.get_db_connection(self.db)
+        try:
+            conn.execute(
+                "INSERT INTO tasks (task_id, workflow_id, node, stage, agent, status, "
+                "payload_json, created_at, updated_at, version) "
+                "VALUES (?, 'wf-1', 'test', 'test', 'fixture', 'completed', ?, 1, 2, 1)",
+                (task_id, json.dumps({"run_id": run_id, "task_type": "dev"})),
+            )
+            conn.execute(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'verification_completed', ?, 12, 'trajectory', ?, 1)",
+                (task_id, json.dumps({"verification": {"passed": True, "evidence_id": "ev-bad"}}), run_id),
+            )
+            conn.execute(
+                "INSERT INTO steering_items (steer_id, task_id, instruction, operator, "
+                "created_at, payload_json) VALUES ('steer-bad', ?, 'broken', 'human', 5, '{not json')",
+                (task_id,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        state_db.insert_execution_outcome({
+            "outcome_id": outcome_id_for(task_id, run_id),
+            "run_id": run_id,
+            "task_id": task_id,
+            "workflow_id": "wf-1",
+            "agent": "fixture",
+            "node": "test",
+            "task_type": "dev",
+            "final_status": "completed",
+            "requirements_satisfied": True,
+            "verification_passed": True,
+            "qualified_success": True,
+            "rework_count": 0,
+            "blocked_count": 0,
+            "human_intervention_count": 0,
+            "recorded_at": 50.0,
+            "source_eval_id": "eval-bad-json",
+            "source_eval_revision": 1,
+            "source_task_version": 1,
+            "schema_version": 1,
+        }, db_path=self.db)
+        report = assess_task_run(task_id, run_id, db_path=self.db, budget_s=0.2)
+        self.assertNotIn("assessment_unavailable", report["problem_codes"])
+        self.assertEqual(report["correctness"], "success")
+        self.assertEqual(report["process_quality"], "acceptable")
+        self.assertEqual(report["corrective_human_count"], 0)
 
     def test_missing_database_returns_a_report(self):
         missing = Path(self.tmp.name) / "absent.db"

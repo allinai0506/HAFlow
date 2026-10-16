@@ -11,7 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
-from .execution_trace import AGENT_ACTION_KINDS
+from .execution_trace import AGENT_ACTION_KINDS, _argv, _test_runner
 
 
 ASSESSOR_VERSION = "1"
@@ -19,7 +19,6 @@ _EVENT_CAP = 2000
 _ACTION_CAP = 500
 _ANOMALY_CAP = 20
 _EVIDENCE_CAP = 40
-_TEST_BINARIES = frozenset({"pytest", "py.test", "tox"})
 _UNKNOWN_NOTES = frozenset({
     "trajectory_unavailable",
     "native_unavailable",
@@ -305,18 +304,8 @@ def _has_timestamp(item: Dict[str, Any]) -> bool:
 
 
 def _is_test_command(command: str) -> bool:
-    parts = command.split()
-    if not parts:
-        return False
-    name = parts[0].rsplit("/", 1)[-1]
-    if name in _TEST_BINARIES:
-        return True
-    return (
-        name in {"python", "python3"}
-        and len(parts) >= 3
-        and parts[1] == "-m"
-        and parts[2] in _TEST_BINARIES
-    )
+    """Recognize the same runners as the trace classifier, quoting included."""
+    return _test_runner(_argv(command) or command.split()) is not None
 
 
 def _humans(signals: Dict[str, Any], run_id: str, evidence: List[Dict[str, str]]):

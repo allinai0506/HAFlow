@@ -8,6 +8,11 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-10-16] fix | 质量评估对齐测试命令识别并容错坏插话载荷
+- 背景：`npm test`、`go test`、`cargo test` 没有退出码时不被当成测试命令，成功结论可能判成 acceptable。一条损坏的插话载荷会让整次评估退化成 `assessment_unavailable`。
+- 变更：测试命令识别复用执行轨迹的分类器；插话查询用 `json_valid` 保护，坏载荷按没有运行身份处理。
+- 证据：`tests/test_quality_assessment.py`。
+
 ## [2026-10-16] fix | 质量评估保持动作顺序并限制人工记录
 - 背景：缺时间戳的后续动作会被排到时间零点，非显式重试被看丢。人工记录按整个任务一次读完。
 - 变更：时间戳不齐时保持读入顺序。插话和 intervention 只读本次运行，超过 200 条记 `human_signals_truncated`。

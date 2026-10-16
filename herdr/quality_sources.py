@@ -149,7 +149,9 @@ def _human_rows(task_id: str, run_id: str, db_path):
     try:
         steer_rows = conn.execute(
             "SELECT steer_id, operator, payload_json FROM steering_items "
-            "WHERE task_id = ? AND json_extract(payload_json, '$.run_id') = ? "
+            "WHERE task_id = ? "
+            "AND CASE WHEN json_valid(payload_json) "
+            "THEN json_extract(payload_json, '$.run_id') END = ? "
             "ORDER BY created_at ASC, steer_id ASC LIMIT ?",
             (task_id, run_id, limit),
         ).fetchall()
