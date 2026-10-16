@@ -8,6 +8,11 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-10-16] fix | 质量评估补上插话身份和历史验收去重
+- 背景：普通插话没有 `run_id`，真实纠错被标成无法归属。历史运行把同一次验收的 `tests_completed` 又记成一条异常。
+- 变更：新插话写入任务当时的 `run_id`。历史投影使用与当前轨迹相同的 `evidence_id` 回执过滤。
+- 证据：`tests/test_steering_mesh.py`、`tests/test_quality_assessment.py`。
+
 ## [2026-10-16] feat | Agent 执行质量评估 V1
 
 - 背景：已结算的 Outcome 只能说明业务是否合格，不能区分一次顺利完成和靠返工、阻塞或人工纠错才完成。

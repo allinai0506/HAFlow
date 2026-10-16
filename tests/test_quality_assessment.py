@@ -404,6 +404,51 @@ class QualityReadTest(unittest.TestCase):
             "schema_version": 1,
         }, db_path=self.db)
 
+    def test_historical_receipt_hides_a_superseded_test_failure(self):
+        conn = state_db.get_db_connection(self.db)
+        try:
+            conn.execute(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'tests_completed', ?, 9, 'trajectory', ?, 3)",
+                (TASK, json.dumps({
+                    "verification": {"failing_count": 3, "evidence_id": "ev-a"},
+                }), RUN),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        report = assess_task_run(TASK, RUN, db_path=self.db, budget_s=0.2)
+        self.assertEqual(report["test_anomalies"], [])
+
+    def test_historical_failed_receipt_is_counted_once(self):
+        run_id = "run-hist"
+        conn = state_db.get_db_connection(self.db)
+        try:
+            conn.execute(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'tests_completed', ?, 13, 'trajectory', ?, 1)",
+                (TASK, json.dumps({
+                    "verification": {"failing_count": 2, "evidence_id": "ev-h"},
+                }), run_id),
+            )
+            conn.execute(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'verification_completed', ?, 14, 'trajectory', ?, 2)",
+                (TASK, json.dumps({
+                    "verification": {"passed": False, "evidence_id": "ev-h"},
+                }), run_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        report = assess_task_run(TASK, run_id, db_path=self.db, budget_s=0.2)
+        self.assertEqual(len(report["test_anomalies"]), 1)
+        self.assertEqual(report["test_anomalies"][0]["code"], "test_failed")
+        self.assertTrue(report["test_anomalies"][0]["evidence_ref"])
+
     def test_read_is_isolated_and_does_not_change_the_database(self):
         before = hashlib.sha256(self.db.read_bytes()).hexdigest()
         report = assess_task_run(TASK, RUN, db_path=self.db, budget_s=0.2)

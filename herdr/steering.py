@@ -163,9 +163,11 @@ def queue_steer(
         raise ValueError(f"Task '{task_id}' is in inactive status '{status}' and cannot receive steering instructions")
 
     steer_id = f"str-{int(time.time())}-{uuid.uuid4().hex[:8]}"
+    from .trajectory import run_id_for_task
     steer_item = {
         "steer_id": steer_id,
         "task_id": task_id,
+        "run_id": run_id_for_task(task),
         "instruction": instruction,
         "operator": operator,
         "urgent": urgent,

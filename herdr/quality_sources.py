@@ -14,6 +14,8 @@ from .execution_trace import (
     MAX_LIMIT,
     STORED_LIMIT,
     _PROJECTABLE_EVENT_TYPES,
+    _tests_row_has_verdict,
+    _verification_verdicts,
     assemble_trace,
     merge_trace_events,
     project_stored_event,
@@ -125,8 +127,11 @@ def _events_for_run(task: Dict[str, Any], run_id: str, db_path):
         })
     view = dict(task)
     view["run_id"] = run_id
+    verdicts = _verification_verdicts(decoded)
     projected = []
     for row in decoded:
+        if _tests_row_has_verdict(row, verdicts):
+            continue
         event = project_stored_event(row, view)
         if event is not None:
             projected.append(event)
