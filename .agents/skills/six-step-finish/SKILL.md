@@ -36,7 +36,10 @@ CI=pass、结构化计数 P1=0、findings 非空，且写入前经 gh 实证 PR 
 --reason '<证据>'`（附 remote 探测证据；**存在 GitHub remote 时 deferred 不被
 接受**，必须走 PR 路径））。
 回执**绑定被审 head**：完成时与工位克隆 HEAD 比对，head 之后再有提交（或
-head 不可验证）即拒绝，必须重新闭环。HAFlow 中启用了本契约的模板（wrapup
+head 不可验证）即拒绝，必须重新闭环；回执 PR 还须与**交付身份**一致
+（`pull_request_created` 记录的交付 PR / 项目 GitHub remote 的 owner/repo），
+且**完成转换时会再次实证 forge 状态**（记录后 CI 转红或新增未决 P0/P1 即失效，
+须重新闭环重录）。HAFlow 中启用了本契约的模板（wrapup
 节点 `review_closure_required: true`，权威来源为 pin 配置快照）在任何
 completed 转换（含控制器 auto-accept 与 bypass-gate 直写路径）都会 fail-closed
 校验回执，缺失/失效将被拒绝；未被 pin 配置启用的旧工作流/自定义模板保持原

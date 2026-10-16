@@ -2262,7 +2262,17 @@ def record_review_closure(task_id, pr_url=None, ci_status=None, findings=None,
             file=sys.stderr,
         )
         sys.exit(2)
+    store = _get_store()
     if not deferred:
+        identity_why = review_closure.identity_mismatch(
+            store, task, payload["pr_url"], payload["head_sha"],
+        )
+        if identity_why:
+            print(
+                f"[REVIEW CLOSURE REFUSED] delivery identity check failed: {identity_why}",
+                file=sys.stderr,
+            )
+            sys.exit(2)
         verified, detail, verification = review_closure.verify_against_forge(
             payload["pr_url"], payload["head_sha"],
         )
@@ -2286,7 +2296,6 @@ def record_review_closure(task_id, pr_url=None, ci_status=None, findings=None,
     if not ok:
         print(f"[REVIEW CLOSURE REFUSED] {why}", file=sys.stderr)
         sys.exit(2)
-    store = _get_store()
     store.record_event(
         "review_closure_recorded",
         payload,

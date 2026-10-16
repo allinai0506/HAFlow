@@ -305,6 +305,87 @@ def collect_deferred_evidence(task: Any) -> Tuple[bool, str, Optional[Dict[str, 
     }
 
 
+def parse_remote_identity(url: Any) -> Optional[Tuple[str, str]]:
+    """(owner, repo) when the remote URL points at github.com, else None."""
+    text = str(url or "").strip()
+    match = re.match(
+        r"^(?:[a-z+]+://)?(?:[^@/]+@)?github\.com[:/]+([^/\s]+)/([^/\s]+?)(?:\.git)?$",
+        text,
+    )
+    if not match:
+        return None
+    return match.group(1), match.group(2)
+
+
+def delivery_identity(store, task: Any) -> Tuple[str, str, str]:
+    """(owner/repo, source, candidate_sha) for the task's delivery, best effort.
+
+    Priority: the workflow's authoritative ``pull_request_created`` delivery
+    record (owner/repo plus the certified candidate SHA), then the readable
+    GitHub remote of the task's source repo / clone.
+    """
+    task = task or {}
+    workflow_id = str(task.get("workflow_id") or "").strip()
+    if workflow_id:
+        try:
+            events = store.list_events(
+                workflow_id=workflow_id,
+                event_type="pull_request_created",
+                desc=True,
+                limit=5,
+            )
+        except (OSError, ValueError, RuntimeError):
+            events = []
+        for event in events:
+            payload = event.get("payload") if isinstance(event, dict) else None
+            if not isinstance(payload, dict):
+                continue
+            parsed = parse_pr_url(payload.get("url"))
+            if parsed:
+                _host, owner, repo, _number = parsed
+                return (
+                    f"{owner}/{repo}",
+                    "workflow_delivery_record",
+                    str(payload.get("candidate_sha") or "").strip().lower(),
+                )
+    for path in (task.get("source_repo"), task.get("clone_path")):
+        for url in git_remote_urls(path):
+            identity = parse_remote_identity(url)
+            if identity:
+                return f"{identity[0]}/{identity[1]}", "repository_remote", ""
+    return "", "", ""
+
+
+def identity_mismatch(store, task: Any, pr_url: Any, head_sha: Any) -> Optional[str]:
+    """None when the receipt's PR is the workflow's authoritative delivery.
+
+    A PR URL whose repository is not the delivery identity must not satisfy
+    the gate, even when its head SHA matches (e.g. a fork or a second
+    repository hosting the same commit) — Codex review P1.
+    """
+    parsed = parse_pr_url(pr_url)
+    if not parsed:
+        return "unrecognized PR URL"
+    _host, owner, repo, _number = parsed
+    identity, source, candidate = delivery_identity(store, task)
+    if not identity:
+        return (
+            "cannot anchor the receipt to an authoritative delivery identity "
+            "(no pull_request_created record and no readable GitHub remote)"
+        )
+    if identity != f"{owner}/{repo}":
+        return (
+            f"receipt PR {owner}/{repo} does not match the delivery identity "
+            f"{identity} ({source})"
+        )
+    if candidate and candidate != str(head_sha or "").strip().lower():
+        return (
+            f"receipt head {str(head_sha or '')[:12]} does not match the "
+            f"certified delivery candidate {candidate[:12]} ({source})"
+        )
+    return None
+
+
 def _wrapup_flag(config: Any) -> bool:
     if not isinstance(config, dict):
         return False
@@ -470,8 +551,29 @@ def check_completion_allowed(store, task: Any) -> Tuple[bool, str]:
                     "the new head; platform: new effective delivery identity) and "
                     "record a fresh receipt."
                 )
-            else:
+            elif payload.get("deferred"):
+                # Deferred receipts carry no forge state to revalidate; they
+                # are bound by head plus the recorded machine evidence.
                 return True, ""
+            else:
+                identity_why = identity_mismatch(store, task, payload.get("pr_url"), head)
+                if identity_why:
+                    receipt_refusal = (
+                        f"review-closure receipt failed the delivery-identity "
+                        f"check ({identity_why})"
+                    )
+                else:
+                    reok, rewhy, _verification = verify_against_forge(
+                        payload.get("pr_url"), head,
+                    )
+                    if not reok:
+                        receipt_refusal = (
+                            "review-closure receipt no longer holds: forge "
+                            f"re-validation at completion failed ({rewhy}). "
+                            "Re-run the review closure and record a fresh receipt."
+                        )
+                    else:
+                        return True, ""
 
     skip = latest_skip(store, task_id)
     if skip is not None:

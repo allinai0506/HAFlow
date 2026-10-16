@@ -114,6 +114,9 @@ def run_cli(store, *argv):
 def run_kernel_transition(store, task_id, to_status="completed"):
     env = os.environ.copy()
     env["HERDR_STATE_DB"] = str(store.db_path)
+    fakebin = Path(store.db_path).parent / "fakebin"
+    if fakebin.is_dir():
+        env["PATH"] = f"{fakebin}{os.pathsep}{env.get('PATH', '')}"
     code = (
         "from herdr import kernel; "
         f"kernel.transition_task({task_id!r}, {to_status!r}, 'shared-path-test', 'test')"
@@ -157,6 +160,11 @@ def commit_more(clone: Path, content: str) -> None:
 
 def make_scene(root: Path) -> SimpleNamespace:
     clone = make_git_clone(root)
+    subprocess.run(
+        ["git", "-C", str(clone), "remote", "add", "origin",
+         "https://github.com/owner/repo.git"],
+        check=True, capture_output=True, text=True,
+    )
     fakebin = root / "fakebin"
     fakebin.mkdir()
     gh = fakebin / "gh"
@@ -319,7 +327,7 @@ def test_record_rejects_head_that_does_not_match_clone(scene):
 def test_record_requires_forge_verification(scene):
     bad_url = record_valid(scene.store, scene.head, pr_url="not-a-pr")
     assert bad_url.returncode == 2
-    assert "not a recognizable" in (bad_url.stdout + bad_url.stderr)
+    assert "unrecognized PR URL" in (bad_url.stdout + bad_url.stderr)
 
     set_fake_head(scene, "c" * 40)  # forge reports a different PR head
     mismatched = record_valid(scene.store, scene.head)
@@ -368,11 +376,12 @@ def test_stale_receipt_is_rejected_then_fresh_receipt_completes(scene):
 
 
 def test_unverifiable_head_fails_closed(scene):
+    assert record_valid(scene.store, scene.head).returncode == 0
+
     task = scene.store.get_task("wrapup-task")
     task["clone_path"] = str(scene.clone.parent / "gone-clone")
     scene.store.save_task(task)
 
-    assert record_valid(scene.store, scene.head).returncode == 0
     refused = run_cli(scene.store, "set", "wrapup-task", "completed")
     assert refused.returncode == 2
     assert "cannot verify" in (refused.stdout + refused.stderr)
@@ -409,6 +418,10 @@ def test_bypass_is_bound_to_head_and_expires_on_rework(scene):
 
 
 def test_deferred_receipt_requires_reason_then_allows_completion(scene):
+    subprocess.run(
+        ["git", "-C", str(scene.clone), "remote", "remove", "origin"],
+        check=True, capture_output=True, text=True,
+    )
     refused = run_cli(
         scene.store, "record-review-closure", "wrapup-task",
         "--deferred", "--head-sha", scene.head,
@@ -496,12 +509,7 @@ def test_non_github_pr_host_is_not_machine_verifiable(scene):
 
 
 def test_deferred_requires_machine_evidence(scene):
-    # A GitHub remote means the PR path is verifiable: deferral is refused.
-    subprocess.run(
-        ["git", "-C", str(scene.clone), "remote", "add", "origin",
-         "https://github.com/owner/repo.git"],
-        check=True, capture_output=True, text=True,
-    )
+    # The scene's GitHub origin means the PR path is verifiable: refused.
     refused = run_cli(
         scene.store, "record-review-closure", "wrapup-task", "--deferred",
         "--reason", "trust me", "--head-sha", scene.head,
@@ -512,6 +520,10 @@ def test_deferred_requires_machine_evidence(scene):
 
 def test_deferred_records_unsupported_forge_evidence(tmp_path):
     scene = make_scene(tmp_path)
+    subprocess.run(
+        ["git", "-C", str(scene.clone), "remote", "remove", "origin"],
+        check=True, capture_output=True, text=True,
+    )
     subprocess.run(
         ["git", "-C", str(scene.clone), "remote", "add", "origin",
          "file:///nonexistent/repo.git"],
@@ -532,3 +544,27 @@ def test_graphql_errors_fail_closed(scene):
     refused = record_valid(scene.store, scene.head)
     assert refused.returncode == 2
     assert "could not read review threads" in (refused.stdout + refused.stderr)
+
+
+def test_receipt_must_match_delivery_identity(scene):
+    refused = record_valid(
+        scene.store, scene.head,
+        pr_url="https://github.com/attacker/fork/pull/1",
+    )
+    assert refused.returncode == 2
+    assert "delivery identity" in (refused.stdout + refused.stderr)
+
+
+def test_completion_revalidates_forge_state(scene):
+    assert record_valid(scene.store, scene.head).returncode == 0
+
+    (scene.fakebin / "checks_rc").write_text("8")  # CI went red after recording
+    refused = run_cli(scene.store, "set", "wrapup-task", "completed")
+    assert refused.returncode == 2
+    assert "no longer holds" in (refused.stdout + refused.stderr)
+    assert scene.store.get_task("wrapup-task")["status"] == "agent_done"
+
+    (scene.fakebin / "checks_rc").write_text("0")
+    allowed = run_cli(scene.store, "set", "wrapup-task", "completed")
+    assert allowed.returncode == 0, allowed.stdout + allowed.stderr
+    assert scene.store.get_task("wrapup-task")["status"] == "completed"
