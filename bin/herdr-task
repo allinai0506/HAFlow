@@ -8265,7 +8265,9 @@ def record_delivery_note(
             )
             sys.exit(2)
         prior_candidates = [
-            item for item in annotated if item.get("kind") == "delivery"
+            item for item in annotated
+            if item.get("kind") == "delivery"
+            and _dr._is_delivery_claim(item)
         ]
         if prior_candidates and not supersedes:
             print(
@@ -8276,6 +8278,13 @@ def record_delivery_note(
         return True
 
     initial_notes = wd.load_notes(workflow_id)
+    legacy = _dr.unidentified_delivery_notes(initial_notes)
+    if legacy:
+        shown = ", ".join(str(note.get("note_id") or "?") for note in legacy[:5])
+        print(
+            f"[BASELINE DEGRADED] {len(legacy)} identity-less delivery note(s) "
+            f"ignored (human evidence, not delivery claims): {shown}"
+        )
     existing = _find_existing(initial_notes)
     if existing is not None:
         print(f"[DELIVERY EXISTS] {existing.get('note_id')}")
