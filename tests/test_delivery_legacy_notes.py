@@ -136,9 +136,42 @@ def test_note_add_still_writes_human_kinds(docs_root):
     assert [note["kind"] for note in notes] == ["decision"]
 
 
-def test_launch_preflight_degrades_legacy_notes_and_uses_the_frozen_candidate(
-    docs_root, capsys, monkeypatch
-):
+def test_partially_identified_delivery_note_fails_closed(docs_root):
+    for partial in (
+        {"delivery_id": "candidate-x"},
+        {"candidate_sha": SHA},
+        {"delivery_branch": "herdr/integration-partial", "candidate_sha": SHA},
+        {"review_task": f"{WF}-review-auto", "test_gate": f"{WF}-test-auto"},
+        {"delivery_id": "candidate-x", "supersedes": "n-something"},
+    ):
+        note = {"note_id": "n-partial", "kind": "delivery", "workflow_id": WF}
+        note.update(partial)
+        with pytest.raises(delivery_record.DeliveryAmbiguityError):
+            delivery_record.select_effective_delivery([note])
+
+
+def test_ignored_note_cannot_suppress_a_real_claim(docs_root):
+    claim = _claim()
+    # An ignored (identity-less) note carrying a supersedes edge that targets
+    # the claim must have no effect on the claim's eligibility.
+    ignored = _legacy_note()
+    ignored["supersedes"] = claim["note_id"]
+
+    effective = delivery_record.select_effective_delivery([ignored, claim])
+
+    assert effective is not None
+    assert effective["candidate_sha"] == SHA
+    assert delivery_record.unidentified_delivery_notes([ignored, claim]) == [ignored]
+
+
+def test_ignored_note_is_not_a_claim_even_with_an_edge(docs_root):
+    ignored = _legacy_note()
+    ignored["supersedes"] = "n-anything"
+
+    assert delivery_record._is_delivery_claim(ignored) is False
+    assert ignored in delivery_record.unidentified_delivery_notes([ignored])
+
+def test_launch_preflight_degrades_legacy_notes_and_uses_the_frozen_candidate(docs_root, capsys, monkeypatch):
     module = load_script("herdr-task-legacy-notes-preflight", "bin/herdr-task")
     legacy = _legacy_note()
     frozen = "c" * 40

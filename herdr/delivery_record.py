@@ -228,6 +228,39 @@ def apply_invalidation(
     )
 
 
+_IDENTITY_FIELDS = (
+    "delivery_id", "candidate_id", "identity",
+    "delivery_branch", "candidate_sha", "review_task", "test_gate",
+)
+_EDGE_FIELDS = (
+    "supersedes", "supersedes_candidate", "supersedes_delivery",
+    "supersedes_id", "replaces", "replaced_candidate",
+    "superseded_by", "superseded_by_candidate", "superseded_by_delivery",
+    "invalidated_by", "invalidated_by_candidate",
+    "invalidated_candidates", "invalidates_candidates",
+    "invalidated_delivery_ids", "invalidated_candidate_shas",
+    "delivery_ids", "candidate_ids", "candidate_shas",
+)
+
+
+def _is_delivery_claim(note: dict | None) -> bool:
+    """Whether a delivery note carries any identity-bearing field.
+
+    A note with none of these is human evidence, not a claim (see
+    ``unidentified_delivery_notes``).  A note with some but not all of them is
+    still a claim — an incomplete one that must fail closed rather than be
+    silently ignored.  Edge fields alone do not make a note a claim: an
+    ignored note may carry a ``supersedes`` line, but that edge has no effect.
+    """
+    note = note or {}
+    for field in _IDENTITY_FIELDS:
+        if note.get(field) not in (None, ""):
+            return True
+        if _body_value(note, field):
+            return True
+    return False
+
+
 def _has_candidate_identity(note: dict) -> bool:
     """Whether a delivery note carries an explicit candidate identity.
 
@@ -242,16 +275,18 @@ def _has_candidate_identity(note: dict) -> bool:
 
 
 def unidentified_delivery_notes(notes: list[dict] | None) -> list[dict]:
-    """Delivery notes that carry no candidate identity.
+    """Delivery notes that carry no identity-bearing field at all.
 
-    Such notes are human evidence, not claims (``_has_candidate_identity``):
-    the selector skips them and callers report them as a degradation.
+    Such notes are human evidence, not claims (``_is_delivery_claim``): the
+    selector skips them and callers report them as a degradation.  Notes that
+    carry some but not all identity fields are *not* listed — they are
+    incomplete claims that must fail closed rather than be ignored.
     """
     return [
         note for note in (notes or [])
         if isinstance(note, dict)
         and note.get("kind") == "delivery"
-        and not _has_candidate_identity(note)
+        and not _is_delivery_claim(note)
     ]
 
 
@@ -298,7 +333,13 @@ def select_effective_delivery(
     delivery_notes = [note for note in source_notes if note.get("kind") == "delivery"]
     if not delivery_notes:
         return None
-    claims = [note for note in delivery_notes if _has_candidate_identity(note)]
+    claims = [note for note in delivery_notes if _is_delivery_claim(note)]
+    if not claims:
+        return None
+    incomplete = [note for note in claims if not _has_candidate_identity(note)]
+    if incomplete:
+        raise DeliveryAmbiguityError(incomplete)
+    claims = [note for note in claims if _has_candidate_identity(note)]
     if not claims:
         return None
 
@@ -378,7 +419,7 @@ def select_effective_delivery(
                 resolved.add(identity)
         return resolved
 
-    for note in delivery_notes:
+    for note in claims:
         superseded.update(_resolve(_supersedes(note)))
         superseded.update(_resolve(_superseded_by(note)))
     for note in source_notes:
