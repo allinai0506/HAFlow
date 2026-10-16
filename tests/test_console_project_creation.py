@@ -281,9 +281,9 @@ class ConsoleWorkflowStagesTest(unittest.TestCase):
             {"id": "deep_execution", "label": "2专项深度执行"},
             {"id": "review_and_delivery", "label": "3评审验收与交付归档"},
         ])
-        with patch.object(self.console, "workflows", return_value={
-            "wf-1": {"workflow_id": "wf-1", "project_id": "p-1",
-                     "requirement": "REQ"},
+        with patch.object(self.console, "workflow_by_id", return_value={
+            "workflow_id": "wf-1", "project_id": "p-1",
+            "requirement": "REQ",
         }), patch.object(self.console, "project_for_workflow",
                          return_value={"workflow_file": wf_file}), \
              patch.object(self.console, "tasks_for_workflow", return_value=[]), \
@@ -300,31 +300,23 @@ class ConsoleWorkflowStagesTest(unittest.TestCase):
         self.assertEqual(detail["stages"][0]["label"], "1任务理解与范围界定")
 
     def test_tasks_for_workflow_reads_state_store_not_json_projection(self):
+        import os, tempfile
+        from herdr import state_db
+        tmp = tempfile.TemporaryDirectory(prefix="herdr-console-tasks-")
+        self.addCleanup(tmp.cleanup)
+        db = Path(tmp.name) / "state.db"
+        os.environ["HERDR_STATE_DB"] = str(db)
+        self.addCleanup(lambda: os.environ.pop("HERDR_STATE_DB", None))
         tasks = [
-            {
-                "task_id": "task-current",
-                "workflow_id": "wf-current",
-                "project_id": "p-current",
-                "agent": "opencode",
-                "status": "blocked",
-            },
-            {
-                "task_id": "task-other",
-                "workflow_id": "wf-other",
-                "project_id": "p-current",
-                "agent": "codex",
-                "status": "working",
-            },
+            {"task_id": "task-current", "workflow_id": "wf-current", "project_id": "p-current", "agent": "opencode", "status": "blocked"},
+            {"task_id": "task-other", "workflow_id": "wf-other", "project_id": "p-current", "agent": "codex", "status": "working"},
         ]
-        with patch.object(
-            self.console.herdr_kernel,
-            "load_tasks_data",
-            return_value={"tasks": tasks},
-        ), patch.object(self.console, "load_json", return_value={"tasks": []}):
+        for t in tasks:
+            state_db.save_task(t, db_path=db)
+        with patch.object(self.console, "load_json", return_value={"tasks": []}):
             actual = self.console.tasks_for_workflow("wf-current")
             loads = self.console.agent_loads("p-current")
-
-        self.assertEqual(actual, [tasks[0]])
+        self.assertEqual(actual, [state_db.get_task("task-current", db_path=db)])
         self.assertEqual(loads["opencode"], 1)
         self.assertEqual(loads["codex"], 1)
 

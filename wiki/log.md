@@ -8,6 +8,11 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-10-17] fix | 控制台详情页按请求范围读取工作流与任务
+- 背景：工作流白盒页每次导出全部工作流（81 个、state.db 103MB）再过滤，单次 543 次 SQLite 查询、约 0.7s；项目页同样全量扫描。数据规模下读取成本随库增长。
+- 变更：`herdr/console_queries.py` 新增 `workflow_snapshot` / `project_workflow_snapshots` / `workflow_tasks`，按 `workflow_id`/`project_id` 在 SQLite 层过滤再解码；`workflow_detail` 与 `project_detail` 改用它们；graph 投影的 referenced 任务按 id 读取。语义与原实现一致。
+- 证据：`tests/test_console_page_latency.py` 新增 2 条"只读请求范围"回归；profile：workflow_detail 0.61s→0.135s，project_detail 0.69s→0.180s。
+
 ## [2026-10-16] fix | 质量评估保住被截断的验收回执并按会话配对重试
 - 背景：账本超过读取上限时，晚于窗口的验收回执会丢失，已被回执覆盖的失败被算成测试异常。原生会话部分损坏不记 unknown；缺时间戳的跨会话动作会按加载顺序虚构重试。
 - 变更：截断时补读同范围验收回执；原生解析器只要丢弃过记录就记 `native_corrupt`；缺时间戳时只在同一会话内配对隐式重试。

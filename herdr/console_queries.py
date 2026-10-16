@@ -36,6 +36,60 @@ def project_agent_loads(project_id, statuses, db_path=None):
         conn.close()
 
 
+def workflow_snapshot(workflow_id, db_path=None):
+    """One workflow snapshot (metadata + config + frozen candidate), or None.
+
+    Scoped read: the requested row and its current-epoch candidate event only.
+    Never initializes the database.
+    """
+    from .recovery_store import _workflow_snapshot
+    conn = get_readonly_db_connection(db_path)
+    try:
+        conn.execute('BEGIN')
+        row = conn.execute(
+            'SELECT workflow_id FROM workflows WHERE workflow_id = ?', (workflow_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        return _workflow_snapshot(conn, workflow_id)[0]
+    finally:
+        conn.close()
+
+
+def project_workflow_snapshots(project_id, db_path=None):
+    """Full snapshots for one project's workflows, filtered in SQLite first.
+
+    ``project_workflows`` above stays the lightweight metadata-only variant.
+    Corrupt metadata rows are skipped by the filter instead of failing the read.
+    """
+    from .recovery_store import _workflow_snapshot
+    conn = get_readonly_db_connection(db_path)
+    try:
+        conn.execute('BEGIN')
+        rows = conn.execute(
+            "SELECT workflow_id FROM workflows "
+            "WHERE CASE WHEN json_valid(metadata_json) "
+            "THEN json_extract(metadata_json, '$.project_id') END = ? "
+            "ORDER BY created_at DESC, workflow_id DESC",
+            (project_id,),
+        ).fetchall()
+        return [_workflow_snapshot(conn, row['workflow_id'])[0] for row in rows]
+    finally:
+        conn.close()
+
+
+def workflow_tasks(workflow_id, db_path=None):
+    """Tasks of one workflow, decoded exactly like the shared task list."""
+    from . import state_db
+    conn = get_readonly_db_connection(db_path)
+    try:
+        return [state_db._decode_task_row(row) for row in conn.execute(
+            'SELECT * FROM tasks WHERE workflow_id = ? ORDER BY created_at ASC, task_id ASC',
+            (workflow_id,))]
+    finally:
+        conn.close()
+
+
 def read_inventory(db_path=None):
     """Return (tasks, workflows_by_id) from one read-only SQLite snapshot.
 

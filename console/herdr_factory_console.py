@@ -71,8 +71,11 @@ def projects():return list(load_json(PROJECTS_FILE,{'projects':{}}).get('project
 def workflows():return herdr_kernel.load_workflows_data().get('workflows',{})
 def tasks():return herdr_kernel.load_tasks_data().get('tasks',[])
 def project_by_id(pid):return next((p for p in projects() if p.get('project_id')==pid),None)
+def workflow_by_id(wid):
+    from herdr.console_queries import workflow_snapshot
+    return workflow_snapshot(wid,db_path=state_db_path())
 def project_for_workflow(wid):
-    w=workflows().get(wid); return (project_by_id(w.get('project_id')) if w else None) or w
+    w=workflow_by_id(wid); return (project_by_id(w.get('project_id')) if w else None) or w
 
 def _with_subject(w):
     w=dict(w)
@@ -85,14 +88,16 @@ def _with_subject(w):
     return w
 
 def workflows_for_project(pid):
-    out=[]
-    for wid,w in workflows().items():
-        if w.get('project_id')==pid: out.append({'workflow_id':wid,**_with_subject(w)})
+    from herdr.console_queries import project_workflow_snapshots
+    out=[{'workflow_id':w['workflow_id'],**_with_subject(w)}
+         for w in project_workflow_snapshots(pid,db_path=state_db_path())]
     # 工作流 ID 混用两套命名(wf-proj-<hash>-<时间戳> 与 wf-proj-<MMDD>-<序号>)，
-    # 字典序不再等于时间序；必须按 created_at 倒序，保证默认选中最新的工作流。
-    return sorted(out,key=lambda x:(x.get('created_at') or 0,x['workflow_id']),reverse=True)
+    # 字典序不再等于时间序；SQL 已按 created_at 倒序，保证默认选中最新的工作流。
+    return out
 
-def tasks_for_workflow(wid):return [t for t in tasks() if t.get('workflow_id')==wid]
+def tasks_for_workflow(wid):
+    from herdr.console_queries import workflow_tasks
+    return workflow_tasks(wid,db_path=state_db_path())
 
 def workflow_node_types(wid,p):
     cfg=load_json(Path(p.get('workflow_file')),{}) if p and p.get('workflow_file') else {}
@@ -482,13 +487,33 @@ def workflow_stages(wid, p):
     return out or STAGES
 
 
+def _referenced_task_inventory(wid,p,ts,w):
+    """Tasks of the workflow plus explicitly referenced task ids (bounded, fail-soft).
+
+    The graph projection only looks up referenced ids by task id; it never needs
+    the whole task table.  Read them one by one instead of scanning everything.
+    """
+    definition=w.get('config') or workflow_definition_for(wid,p,w)
+    inventory=list(ts)
+    owned_ids={t.get('task_id') for t in ts}
+    from herdr.state_db import get_task
+    for node in (definition or {}).get('nodes') or []:
+        required=node.get('required_task_ids')
+        if isinstance(required,list) and len(required)<=64:
+            for task_id in required:
+                if isinstance(task_id,str) and task_id not in owned_ids:
+                    referenced=get_task(task_id,db_path=state_db_path())
+                    if referenced:inventory.append(referenced)
+                    owned_ids.add(task_id)
+    return definition,inventory
+
 def workflow_detail(wid, *, lightweight=False):
     if lightweight:
         from herdr.recovery_store import read_snapshot
         w, _, ts = read_snapshot(state_db_path(), wid)
         p = project_by_id(w.get('project_id')) or w
     else:
-        w=workflows().get(wid)
+        w=workflow_by_id(wid)
         if not w:raise RuntimeError('工作流不存在')
         p=project_for_workflow(wid)
         ts=tasks_for_workflow(wid)
@@ -496,22 +521,8 @@ def workflow_detail(wid, *, lightweight=False):
     for k,l in workflow_stages(wid,p):
         x=stage_summary(ts,k,workflow=w); x['label']=l; ss.append(x)
     stall_info=herdr_projection.detect_workflow_stalls(wid,ts,workflow=w)
-    if lightweight:
-        definition=w.get('config') or workflow_definition_for(wid,p,w)
-        inventory=list(ts)
-        owned_ids={t.get('task_id') for t in ts}
-        from herdr.state_db import get_task
-        for node in (definition or {}).get('nodes') or []:
-            required=node.get('required_task_ids')
-            if isinstance(required,list) and len(required)<=64:
-                for task_id in required:
-                    if isinstance(task_id,str) and task_id not in owned_ids:
-                        referenced=get_task(task_id,db_path=state_db_path())
-                        if referenced:inventory.append(referenced)
-                        owned_ids.add(task_id)
-        graph=workflow_graph_for(wid,p,w,ts,definition=definition,all_tasks=inventory)
-    else:
-        graph=workflow_graph_for(wid,p,w,ts)
+    definition,inventory=_referenced_task_inventory(wid,p,ts,w)
+    graph=workflow_graph_for(wid,p,w,ts,definition=definition,all_tasks=inventory)
     derived={'current_nodes':graph.get('current_nodes',[]),'ready_nodes':graph.get('ready_nodes',[]),'derived_current_stage':graph.get('current_stage',''),'current_stage_source':graph.get('current_stage_source','derived_nodes')}
     if lightweight:
         deliverables={**herdr_deliverables.pack([]), 'pending': True}

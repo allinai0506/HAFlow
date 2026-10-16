@@ -198,8 +198,8 @@ class TestFlowWorkbenchBackend(unittest.TestCase):
             ]}, f)
             wf_path = f.name
         try:
-            with patch.object(self.console, "workflows", return_value={
-                "wf-1": {"workflow_id": "wf-1", "project_id": "p-1"},
+            with patch.object(self.console, "workflow_by_id", return_value={
+                "workflow_id": "wf-1", "project_id": "p-1",
             }), patch.object(self.console, "project_for_workflow", return_value={
                 "workflow_file": wf_path,
             }), patch.object(self.console, "tasks_for_workflow", return_value=[
