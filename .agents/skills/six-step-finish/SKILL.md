@@ -18,11 +18,20 @@ description: Use when implementation is complete and a development branch needs 
 
 **前置条件（步骤 0.5：PR 审核闭环）**：PR 创建后必须在申报完成前抓取并处理
 机器审核结果——CI/必过检查 + 评审 findings（GitHub：`gh pr checks`、
-`gh api repos/<owner>/<repo>/pulls/<n>/reviews`、
-`gh api repos/<owner>/<repo>/pulls/<n>/comments`；其余 forge 用对应入口）。
-硬条件：必过 CI 全绿、无未决 P1 finding、P2/P3 逐条处置或明示豁免；需要修复
-时在交付分支追加提交（不改写历史）并复验。CI 未跑完或存在未决 P1 时，收尾
-尚未完成，不得申报；findings 与处置必须写入收尾报告与状态表。
+`gh api --paginate repos/<owner>/<repo>/pulls/<n>/reviews`、
+`gh api --paginate repos/<owner>/<repo>/pulls/<n>/comments`——两处必须带
+`--paginate` 并聚合全部页，否则多页 PR 会漏报后页 findings；其余 forge 用
+对应入口）。硬条件：必过 CI 全绿、无未决 P1 finding、P2/P3 逐条处置或明示
+豁免；需要修复时在交付分支追加提交（不改写历史）并复验——**修复提交会使既有
+认证失效**：平台路径须重走 test/review 产生新的有效交付身份，forge 回退路径
+须对新 head 重新触发审核（如 `@codex review`）并重新核验；严禁以旧审核结果
+放行已变更 head。CI 未跑完或存在未决 P1 时，收尾尚未完成，不得申报；findings
+与处置必须写入收尾报告与状态表。
+闭环完成后必须运行 `herdr-task record-review-closure <task-id> --pr-url <URL>
+--ci-status <pass|fail|pending> --findings '<结论>'` 落**机器回执**（确实无法
+创建 PR 时 `--deferred --reason '<证据>'`）；HAFlow 的 wrapup 任务在 completed
+转换处会 fail-closed 校验该回执存在，缺失将被拒绝（应急豁免
+`--skip-review-closure --note '<审计原因>'`，会记录豁免事件）。
 
 **优先级规则：** 项目内有专属收尾脚本时（如 xiyu `scripts/agent-finish-task.sh`）
 优先用项目脚本；否则用本技能的 `scripts/finish-task.sh`。
@@ -34,7 +43,7 @@ description: Use when implementation is complete and a development branch needs 
 | 步骤 | 内容 | 执行者 |
 |---|---|---|
 | 0 交付 PR（前置） | 按项目/平台 PR 入口推送交付分支并创建 PR（不合并；平台入口不可用时按回退路径执行并记录） | Agent / 项目脚本 |
-| 0.5 PR 审核闭环（前置） | 抓取 PR CI 检查与评审 findings 并逐条处置（未决 P1 或 CI 红 = 未完成） | Agent |
+| 0.5 PR 审核闭环（前置） | 抓取（`--paginate`）PR CI 检查与评审 findings 并逐条处置（未决 P1 或 CI 红 = 未完成）；落 `record-review-closure` 回执 | Agent |
 | 1 知识沉淀 | Bug 根因追加到 lessons-learned，新知识回填 wiki/文档 | Agent 调用 `knowledge-capture` |
 | 2 Wiki checkpoint | 判定本次是否产生了必须回填的新知识，逐项确认 | 脚本（`.wiki/` 存在时） |
 | 3 合并确认 | 核验分支确实已合入 base：git 三重检查 + 可选 forge 复核 | 脚本 |
@@ -60,7 +69,10 @@ description: Use when implementation is complete and a development branch needs 
 6. **审核闭环后才能报完成（步骤 0.5）。** PR 创建后先抓取 CI 与评审
    findings，未决 P1 或 CI 红意味着还有修复工作——在交付分支追加提交并复验，
    不得把「CI 未跑完 / 有未决 findings」当作可交付状态申报，也不得以
-   「PR/审核属控制器职责」为由跳过 PR 入口或其回退路径。
+   「PR/审核属控制器职责」为由跳过 PR 入口或其回退路径。修复提交会使既有
+   认证失效：平台路径须重走门禁产生新的有效交付身份，forge 路径须对新 head
+   重新触发审核；收尾完成前必须运行 `herdr-task record-review-closure` 落
+   机器回执——HAFlow 的 wrapup 完成转换会 fail-closed 校验该回执。
 
 ## 脚本用法
 

@@ -2169,7 +2169,113 @@ def cmd_eval_compare(args):
         print(f"{field}: {diff['before'][field]} -> {diff['after'][field]}")
 
 
-def set_status(task_id, new_status, verdict=None, note=None, affected_task_ids=None):
+def _enforce_wrapup_review_closure(task_id, task, *, skip, note):
+    """Wrapup completion must carry a review-closure receipt.
+
+    The wrapup node's rules require the delivery PR and its CI/review findings
+    to be closed out before completion; without this gate that requirement is
+    prompt text only, and a bare ``set ... completed`` (including the
+    controller's auto-accept path, which is also a CLI set) can still close
+    the workflow. ``record-review-closure`` writes the receipt;
+    ``--skip-review-closure --note`` is the audited emergency bypass
+    (Codex review P1, wf-haflow-1015-01).
+    """
+    if skip:
+        reason = str(note or "").strip()
+        if not reason:
+            print(
+                "[REVIEW CLOSURE SKIP REFUSED] --skip-review-closure requires "
+                "--note with the audited reason",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        store = _get_store()
+        store.record_event(
+            "review_closure_skipped",
+            {"task_id": task_id, "reason": reason},
+            task_id=task_id,
+            workflow_id=task.get("workflow_id"),
+            node_id=task.get("node") or task.get("stage"),
+            source="herdr-task",
+        )
+        print(f"[REVIEW CLOSURE SKIPPED] {task_id}: completion allowed with audited bypass")
+        return
+    store = _get_store()
+    try:
+        events = store.list_events(
+            task_id=task_id,
+            event_type="review_closure_recorded",
+            source="herdr-task",
+            desc=True,
+            limit=1,
+        )
+    except (OSError, ValueError, RuntimeError):
+        events = []
+    if events:
+        print(f"[REVIEW CLOSURE RECEIPT] {task_id}: receipt present")
+        return
+    print(
+        f"[REVIEW CLOSURE REQUIRED] {task_id}: wrapup completion requires a "
+        "review-closure receipt. Run `herdr-task record-review-closure "
+        f'{task_id} --pr-url <url> --ci-status <pass|fail|pending> '
+        '--findings "<conclusions>"` (or `--deferred --reason "<evidence>"` '
+        'when the PR truly cannot be created); emergency bypass: '
+        '--skip-review-closure --note "<audited reason>".',
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
+
+def record_review_closure(task_id, pr_url=None, ci_status=None, findings=None,
+                          deferred=False, reason=None):
+    """Record the machine-readable review-closure receipt for a task.
+
+    The receipt is what ``set ... completed`` validates for wrapup tasks: a
+    PR URL (or an explicit deferred reason), the CI status and the review
+    findings conclusions. Prompt text alone is not completion evidence.
+    """
+    data = load_tasks()
+    task = find_task(data, task_id)
+    if not task:
+        print(f"Task not found: {task_id}")
+        sys.exit(1)
+    if deferred:
+        if not str(reason or "").strip():
+            print(
+                "[REVIEW CLOSURE REFUSED] --deferred requires --reason with "
+                "the concrete blocking evidence",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+    elif not str(pr_url or "").strip():
+        print(
+            "[REVIEW CLOSURE REFUSED] --pr-url is required (or use --deferred "
+            "--reason when the PR truly cannot be created)",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    payload = {
+        "task_id": task_id,
+        "pr_url": str(pr_url or "").strip(),
+        "ci_status": str(ci_status or "").strip(),
+        "findings": str(findings or "").strip(),
+        "deferred": bool(deferred),
+        "reason": str(reason or "").strip(),
+    }
+    store = _get_store()
+    store.record_event(
+        "review_closure_recorded",
+        payload,
+        task_id=task_id,
+        workflow_id=task.get("workflow_id"),
+        node_id=task.get("node") or task.get("stage"),
+        source="herdr-task",
+    )
+    print("[REVIEW CLOSURE RECORDED] " + json.dumps(payload, ensure_ascii=False))
+
+
+def set_status(task_id, new_status, verdict=None, note=None, affected_task_ids=None,
+               skip_review_closure=False):
     data = load_tasks()
     task = find_task(data, task_id)
 
@@ -2298,6 +2404,13 @@ def set_status(task_id, new_status, verdict=None, note=None, affected_task_ids=N
             f"{task_id}: {old_status} -> {new_status}"
         )
         sys.exit(2)
+
+    # Wrapup completion must carry the review-closure receipt (machine-
+    # produced). Prompt-text-only requirements can still be bypassed by a
+    # bare `set ... completed` — including the controller's auto-accept path,
+    # which is also a CLI set (Codex review P1, wf-haflow-1015-01).
+    if new_status == "completed" and (task.get("node") or task.get("stage")) == "wrapup":
+        _enforce_wrapup_review_closure(task_id, task, skip=skip_review_closure, note=note)
 
     metadata = {}
     if verdict:
@@ -8585,6 +8698,24 @@ def main():
              "stored as stage_verdict_affected_task_ids for PR #110 "
              "selective replan)",
     )
+    set_cmd.add_argument(
+        "--skip-review-closure",
+        action="store_true",
+        default=False,
+        help="Audited emergency bypass for the wrapup review-closure receipt "
+             "gate (requires --note; records a review_closure_skipped event)",
+    )
+
+    closure_cmd = sub.add_parser(
+        "record-review-closure",
+        help="记录 wrapup 审核闭环回执（PR URL / CI / findings；完成转换会 fail-closed 校验）",
+    )
+    closure_cmd.add_argument("task_id")
+    closure_cmd.add_argument("--pr-url", default=None, help="交付 PR URL（未 deferred 时必填）")
+    closure_cmd.add_argument("--ci-status", default=None, help="CI/必过检查结果（如 pass / fail / pending）")
+    closure_cmd.add_argument("--findings", default=None, help="评审 findings 结论（未决 P1/P2 数量与处置）")
+    closure_cmd.add_argument("--deferred", action="store_true", help="确实无法创建 PR 时记录延迟与证据")
+    closure_cmd.add_argument("--reason", default=None, help="--deferred 必填：阻断证据（命令+错误输出）")
 
     bypass_gate_cmd = sub.add_parser("bypass-gate", help="结构化记录门禁豁免凭证，解除任务挂起/阻塞")
     bypass_gate_cmd.add_argument("task_id", help="目标任务 ID")
@@ -9249,7 +9380,13 @@ def main():
 
     elif args.command == "set":
         set_status(args.task_id, args.status, args.verdict, args.note,
-                   affected_task_ids=args.affected_task_ids)
+                   affected_task_ids=args.affected_task_ids,
+                   skip_review_closure=args.skip_review_closure)
+
+    elif args.command == "record-review-closure":
+        record_review_closure(args.task_id, pr_url=args.pr_url,
+                              ci_status=args.ci_status, findings=args.findings,
+                              deferred=args.deferred, reason=args.reason)
 
     elif args.command == "bypass-gate":
         bypass_gate_cli(

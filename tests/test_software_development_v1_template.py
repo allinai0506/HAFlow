@@ -114,6 +114,12 @@ class TestSoftwareDevelopmentV1Template(unittest.TestCase):
         self.assertIn("未决 P1", rules)
         # 职责单一性：不得以“属控制器职责”跳过 PR 入口或审核闭环
         self.assertIn("属控制器职责", rules)
+        # 机器回执：完成转换由 record-review-closure 回执校验（非纯文本）
+        self.assertIn("record-review-closure", rules)
+        # 分页：多页 PR 不得只查第一页而漏报 findings
+        self.assertIn("--paginate", rules)
+        # 修复提交再门禁：新 head 必须重新过独立门禁/重建交付身份
+        self.assertIn("新的有效交付身份", rules)
         outputs = self.node_map["wrapup"].get("required_outputs", [])
         self.assertTrue(any("审核闭环证据" in o for o in outputs))
         self.assertTrue(any("CI 状态" in o for o in outputs))
