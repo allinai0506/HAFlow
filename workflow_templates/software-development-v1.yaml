@@ -220,8 +220,8 @@ nodes:
     parallel: false
     purpose: >
       确认整个 Workflow 完成。必须使用 six-step-finish（六步收尾）技能
-      作为标准收尾程序，产出包含逐步（1-6）状态表的收尾报告。
-      汇总成果、风险和交付信息。
+      作为标准收尾程序，产出包含逐步（0-6）状态表与 PR 审核闭环证据的
+      收尾报告。汇总成果、风险和交付信息。
     artifact_mode: shared_artifacts
     default_integration_mode: none
     default_task_type: docs
@@ -230,9 +230,10 @@ nodes:
       max_concurrency: 1
       exclude_stage_agents: [implementation]
     required_outputs:
-      - 六步收尾报告（含逐步状态表：步骤/执行者/命令/结果/证据）
+      - 六步收尾报告（含逐步状态表：步骤/执行者/命令/结果/证据，且固定包含「PR URL / CI 状态 / 审核 findings 状态」三列信息）
       - 最终交付成果说明与修改文件清单
       - 交付 PR URL 与合并指引
+      - PR 审核闭环证据（CI 检查结果 + 评审 findings 清单与逐条处置结论）
       - 遗留问题与后续建议
     rules:
       - 单工位收尾（严格限定 1 个 Task / 1 个 Pane）。
@@ -240,7 +241,9 @@ nodes:
       - 必须核对全流程所有阶段的交付物是否完备，汇聚确认 test 与 review 均基于同一 candidate_sha 判定 pass，负责生成交付汇总和合并指引。
       - 必须使用 six-step-finish 技能执行收尾，禁止自创收尾流程。技能说明（仓库内）：.agents/skills/six-step-finish/SKILL.md；收尾脚本（仓库内）：.agents/skills/six-step-finish/scripts/finish-task.sh；绝对兜底：~/.agents/skills/six-step-finish/。基准分支必须显式传入：--base <本工作流 base_branch，见 stage advance 事件头部 base_branch 字段>。
       - "交付 PR 前置（必做，2026-09-17 引入；2026-10-03 改用平台入口）：必须在完成六步收尾步骤 1-2（知识沉淀/wiki 回填并提交）之后、执行步骤 3（合并确认）之前，完成『交付 PR』——首选平台交付入口 `herdr-task create-pr <integrated-task_id> --title '<PR 标题>' [--body-file <说明文件>] [--draft]`：该命令由平台推送交付分支并创建待审查 PR，自带门禁校验（要求 task-owned integration refs、当前集成 SHA、同 workflow 同 SHA 的独立 review/test pass 与有效 delivery 记录），推送源为明确 SHA，归属清晰。仅当该命令不可用或显式失败时，才回退到目标仓库标准流程（读取 AGENTS.md / CLAUDE.md / docs/guides/*wrap-up*.md / package.json scripts 后按其约定创建，如 nexusarchive：`npm run pr:create`；目标仓无脚本时用 forge CLI/API 创建），并须在报告中写明回退原因。无论走哪条路径，PR URL 与目标 base 必须写入收尾报告与交付汇总；仅当两条路径都确实无法创建（缺凭据/无远端/无约定）时才记录 DEFERRED 并说明原因。硬约束：严禁自动合并（合入由作者/评审决定）；严禁 --force / --yes；不得改写交付分支历史；Worker/收尾 Agent 不得自行 push 分支或自建 PR——远端推送与建 PR 一律经上述入口执行。"
-      - "六步收尾执行规则：(1) 先完成步骤 1（调用 knowledge-capture），知识更新与交付物同分支提交；再执行步骤 2（wiki checkpoint），仓库无 .wiki/WIKI.md 时脚本自动跳过，但仍须按 AGENTS.md wiki 治理判断是否回填 wiki/；(2) 步骤 3 的合并确认只读执行（--dry-run），且必须先确认目标分支相对 base 至少有 1 个提交（零提交分支会被 git cherry 误判为已合入）；运行 finish-task.sh 前必须先检查目标分支是否存在（如 `git show-ref --verify --quiet refs/heads/<branch>`），分支不存在 → 报告「已清理/无资源」并跳过脚本，不得记为失败；(3) 已建 PR 但未合入 → 记录 ⛔ 与 DEFERRED，产出收尾计划与合并指引（必须含 PR URL）；严禁 --force；(4) 严禁 --yes（会丢弃未提交变更）；破坏性步骤须在 base 合入后执行；(5) 不得删除 clone / pane / 阶段 tab（close-workflow 的职责）；(6) 收尾报告必须含六步状态表；(7) 明确区分工作流交付完成与 PR 合并：创建交付 PR 并输出状态表后即代表本工作流收尾交付完成，严禁在收尾中自动执行 PR 合并。"
+      - "PR 审核闭环（必做，2026-10-16 引入；wf-haflow-1015-01 事故教训）：交付 PR 创建/确认成功后，必须在申报完成前抓取并处理该 PR 的机器审核结果——CI/必过检查与评审 findings（GitHub：`gh pr checks <n> --repo <owner>/<repo>`、`gh api repos/<owner>/<repo>/pulls/<n>/reviews`、`gh api repos/<owner>/<repo>/pulls/<n>/comments`；Gitee/GitLab 用对应入口）。硬条件：① 必过 CI 全绿；② 无未决 P1 级 finding（发现即需在交付分支追加修复提交并重跑复验，禁止改写历史）；③ P2/P3 finding 逐条处置或明示豁免理由；④ findings 数、处置动作与复验证据写入收尾报告与状态表。CI 未跑完、存在未决 P1、或审核入口不可达且未记录原因时，不得申报收尾完成（属未完成，不得以 DEFERRED 规避）。"
+      - "职责单一性：PR 创建与审核闭环是收尾任务自身职责，不得以『属控制器职责』为由跳过；DEFERRED 仅在平台入口与项目回退双路径都实测不可用时允许，且必须附实测证据（执行的命令 + 错误输出）与人工建议动作。"
+      - "六步收尾执行规则：(1) 先完成步骤 1（调用 knowledge-capture），知识更新与交付物同分支提交；再执行步骤 2（wiki checkpoint），仓库无 .wiki/WIKI.md 时脚本自动跳过，但仍须按 AGENTS.md wiki 治理判断是否回填 wiki/；(2) 步骤 3 的合并确认只读执行（--dry-run），且必须先确认目标分支相对 base 至少有 1 个提交（零提交分支会被 git cherry 误判为已合入）；运行 finish-task.sh 前必须先检查目标分支是否存在（如 `git show-ref --verify --quiet refs/heads/<branch>`），分支不存在 → 报告「已清理/无资源」并跳过脚本，不得记为失败；(3) 已建 PR 但未合入 → 记录 ⛔ 与 DEFERRED，产出收尾计划与合并指引（必须含 PR URL）；严禁 --force；(4) 严禁 --yes（会丢弃未提交变更）；破坏性步骤须在 base 合入后执行；(5) 不得删除 clone / pane / 阶段 tab（close-workflow 的职责）；(6) 收尾报告必须含六步状态表；(7) 明确区分工作流交付完成与 PR 合并：创建交付 PR 并输出状态表后即代表本工作流收尾交付完成，严禁在收尾中自动执行 PR 合并；(8) PR 审核闭环前置：建 PR 后、合并确认（步骤 3）前，必须完成审核闭环（CI 全绿 + 未决 P1=0 + findings 逐条处置，见『PR 审核闭环』规则）；存在待修 findings 时在交付分支追加提交并复验，全部闭环后方可申报完成；(9) 状态表新增固定三列：PR URL / CI 状态 / 审核 findings 状态（含未决 P1、P2 数量与处置），缺任一项视为收尾未完成。"
       - 仅当 workflow_id 以 e2e- 开头时：验收不得依赖 Pane/TUI 是否能读到完成文本；Task 的 acceptance criteria 必须以 Herdr 生命周期到达 done/agent_done 且 verify-baseline 返回 BASELINE_MATCH 为完成依据；不得要求 E2E_*_OK 或 HERDR_TASK_DONE 必须能通过 pane read 读取；满足上述条件直接 completed，不要因为 alternate-screen 空白而 rework。
       - 创建 Task 时默认使用 --agent auto，由 Agent Router 根据当前 node、task_type 和项目 Agent Pool 动态选择（自动排除实现阶段 Agent）；只有存在明确理由或用户显式指定时才固定具体 Agent。
       - 收尾完成后，标记整个 Workflow 进入完成状态，提醒用户执行物理 purge 或保留现场供复查。

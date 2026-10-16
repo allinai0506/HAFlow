@@ -1,7 +1,7 @@
 ---
 name: six-step-finish
-version: "2026.09.17-1"
-description: Use when implementation is complete and a development branch needs to be finished — knowledge capture, wiki checkpoint, merge confirmation, anchor sync, branch validation, hygiene cleanup. Merge confirmation is forge-optional (Gitee / GitHub / GitLab / local-only) and the anchor branch is parameterized, so it works in any project. A project-specific finish script (e.g. xiyu scripts/agent-finish-task.sh) takes precedence when present.
+version: "2026.10.16-1"
+description: Use when implementation is complete and a development branch needs to be finished — PR creation fallback, PR review closure (CI + findings), knowledge capture, wiki checkpoint, merge confirmation, anchor sync, branch validation, hygiene cleanup. Merge confirmation is forge-optional (Gitee / GitHub / GitLab / local-only) and the anchor branch is parameterized, so it works in any project. A project-specific finish script (e.g. xiyu scripts/agent-finish-task.sh) takes precedence when present.
 ---
 
 # Six-Step Finish（六步收尾）
@@ -10,10 +10,19 @@ description: Use when implementation is complete and a development branch needs 
 它只做「已合入的核验与善后清理」，不负责合入动作本身——合入走 PR / 项目合入工具。
 
 **前置条件（步骤 0：交付 PR）**：交付分支必须已推送到远端并已创建 PR——
-按目标仓库的标准 PR 流程执行（如 nexusarchive：`npm run pr:create`；无项目脚本时用
-forge CLI/API 创建）。本技能不创建 PR、不做合入；若发现分支未推送或无 PR，
-先执行项目的 PR 流程再运行本技能。知识沉淀（步骤 1-2）必须先于 PR 创建，
-保证 PR 包含知识提交。
+按目标仓库的标准 PR 流程执行（平台化流程优先用平台 PR 入口，如 HAFlow：
+`herdr-task create-pr`；不可用时回退项目/forge 入口，如 nexusarchive：
+`npm run pr:create`、GitHub 仓 `gh pr create`），并记录所用入口与回退原因。
+本技能不创建 PR、不做合入；若发现分支未推送或无 PR，先执行项目的 PR 流程
+再运行本技能。知识沉淀（步骤 1-2）必须先于 PR 创建，保证 PR 包含知识提交。
+
+**前置条件（步骤 0.5：PR 审核闭环）**：PR 创建后必须在申报完成前抓取并处理
+机器审核结果——CI/必过检查 + 评审 findings（GitHub：`gh pr checks`、
+`gh api repos/<owner>/<repo>/pulls/<n>/reviews`、
+`gh api repos/<owner>/<repo>/pulls/<n>/comments`；其余 forge 用对应入口）。
+硬条件：必过 CI 全绿、无未决 P1 finding、P2/P3 逐条处置或明示豁免；需要修复
+时在交付分支追加提交（不改写历史）并复验。CI 未跑完或存在未决 P1 时，收尾
+尚未完成，不得申报；findings 与处置必须写入收尾报告与状态表。
 
 **优先级规则：** 项目内有专属收尾脚本时（如 xiyu `scripts/agent-finish-task.sh`）
 优先用项目脚本；否则用本技能的 `scripts/finish-task.sh`。
@@ -24,7 +33,8 @@ forge CLI/API 创建）。本技能不创建 PR、不做合入；若发现分支
 
 | 步骤 | 内容 | 执行者 |
 |---|---|---|
-| 0 交付 PR（前置） | 按项目 PR 流程推送交付分支并创建 PR（不合并） | Agent / 项目脚本 |
+| 0 交付 PR（前置） | 按项目/平台 PR 入口推送交付分支并创建 PR（不合并；平台入口不可用时按回退路径执行并记录） | Agent / 项目脚本 |
+| 0.5 PR 审核闭环（前置） | 抓取 PR CI 检查与评审 findings 并逐条处置（未决 P1 或 CI 红 = 未完成） | Agent |
 | 1 知识沉淀 | Bug 根因追加到 lessons-learned，新知识回填 wiki/文档 | Agent 调用 `knowledge-capture` |
 | 2 Wiki checkpoint | 判定本次是否产生了必须回填的新知识，逐项确认 | 脚本（`.wiki/` 存在时） |
 | 3 合并确认 | 核验分支确实已合入 base：git 三重检查 + 可选 forge 复核 | 脚本 |
@@ -47,6 +57,10 @@ forge CLI/API 创建）。本技能不创建 PR、不做合入；若发现分支
    并在回复中列出将永久删除的提交清单。
 5. **解读输出。** `✅ 任务收尾完成` 后报告：切到了哪个锚点分支、删了哪些
    分支/锁/worktree；`--dry-run` 输出仅作计划展示，不代表已执行。
+6. **审核闭环后才能报完成（步骤 0.5）。** PR 创建后先抓取 CI 与评审
+   findings，未决 P1 或 CI 红意味着还有修复工作——在交付分支追加提交并复验，
+   不得把「CI 未跑完 / 有未决 findings」当作可交付状态申报，也不得以
+   「PR/审核属控制器职责」为由跳过 PR 入口或其回退路径。
 
 ## 脚本用法
 
@@ -99,3 +113,5 @@ bash finish-task.sh --dry-run
 | "forge 检查拿不到 token，用 --force 跳过吧" | 先降级跑纯 git 检查；`--force` 只用于确定已合入但检测失败的场合。 |
 | "知识沉淀等合入后再补" | 步骤 1 在最前。合入后你已经在别的分支上，上下文就冷了。 |
 | "这个孤儿 worktree 顺手也清了" | 只清注册到本任务分支的 worktree 和 prunable 孤儿；其他是宿主环境的地盘。 |
+| "PR 创建/审核是控制器（或平台）的事" | 收尾任务对 PR 入口与审核闭环负责：平台入口不可用就走项目/forge 回退（`gh pr create` 等）并记录；「属控制器职责」不构成跳过理由，DEFERRED 必须附实测失败证据（命令 + 错误输出）。 |
+| "CI/评审还没出结果，先报完成" | 未跑完 = 未完成。先抓取 `gh pr checks` 与 review findings；未决 P1 须在交付分支修复、复验通过后才可申报。 |

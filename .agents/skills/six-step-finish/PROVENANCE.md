@@ -7,17 +7,17 @@
 | 字段 | 值 |
 |---|---|
 | 上游路径 | `/Users/user/.agents/skills/six-step-finish/` |
-| 上游版本 | `2026.09.17-1`（本地修订：步骤 0 交付 PR 前置；`skill-metadata.yml` 另行声明 `1.0.0`） |
+| 上游版本 | `2026.10.16-1`（本地修订链：步骤 0 交付 PR 前置 → 步骤 0.5 PR 审核闭环；`skill-metadata.yml` 另行声明 `1.0.0`） |
 | 导入日期 | `2026-09-13` |
-| 导入方式 | 逐字复制（verbatim copy），脚本权限保持 `755` |
+| 导入方式 | 逐字复制（verbatim copy）+ 本地修订（见下方修订记录），脚本权限保持 `755` |
 
 ## 文件清单与校验（sha256）
 
 | 文件 | sha256 |
 |---|---|
-| `SKILL.md` | `1efd5aafb5b8226d363e903612433409a3492454dd993a150c1adaa77f213df1` |
+| `SKILL.md` | `0a86b83e433546fc7332303852b54e1f931776e8312c725e1e9414e5a1716ba0` |
 | `scripts/finish-task.sh` | `51c73e5bd8b91b3132b20158b13f26511b3d209ba9735de49084f8bf4da835b6` |
-| `skill-metadata.yml` | `92fbcc3abe8da97ef95a2251f545df890dd2147bb522c139d203629c99aa34ee` |
+| `skill-metadata.yml` | `a0c02d9d7a7cf981fa69a5f472073e44c577e8f8e77a1485e1563730c5054c54` |
 
 ## 复验命令
 
@@ -40,3 +40,4 @@ python3 -m pytest tests/test_six_step_skill_provenance.py -q
 | 日期 | 版本 | 修订内容 |
 |---|---|---|
 | 2026-09-17 | `2026.09.17-1` | 新增 **步骤 0：交付 PR 前置**——交付分支必须先按目标仓库 PR 流程推送 + 创建 PR（如 nexusarchive `npm run pr:create`），本技能不做合入；同步在「常见借口」表补充三条（先建 PR / 严禁自动合并 / 不代劳 PR 创建）。背景：`wf-nexusarchive-0917-01` 收官时 wrapup 只做只读合并确认即 DEFERRED，全链路无 push/PR 动作，PR 只能由人工/总指挥补交（lessons §64）。 |
+| 2026-10-16 | `2026.10.16-1` | 新增 **步骤 0.5：PR 审核闭环**——PR 创建后必须在申报完成前抓取 CI 与评审 findings（`gh pr checks` / `reviews` / `comments` 等），硬条件：CI 全绿、未决 P1=0、P2/P3 逐条处置；「常见借口」补两条（PR/审核属控制器职责、CI 没跑完先报完成）；`skill-metadata.yml` 补触发词「交付 PR」「PR 审核闭环」。模板侧同步：wrapup 节点新增『PR 审核闭环』『职责单一性』规则、六步执行规则 (8)(9)、required_outputs 增补审核闭环证据。背景：`wf-haflow-1015-01` 收尾未创建交付 PR、未检查 GitHub（Codex）审核 findings，P1/P2 于交付后才发现导致返工。 |

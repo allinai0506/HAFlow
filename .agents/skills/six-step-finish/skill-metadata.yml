@@ -10,6 +10,8 @@ triggers:
     - "收尾"
     - "六步收尾"
     - "任务收尾"
+    - "交付 PR"
+    - "PR 审核闭环"
     - "finish task"
     - "finish branch"
     - "清理分支"

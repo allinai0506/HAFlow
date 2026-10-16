@@ -100,6 +100,24 @@ class TestSoftwareDevelopmentV1Template(unittest.TestCase):
         # 六步执行规则的未合入分支必须携带 PR URL 指引
         self.assertIn("已建 PR 但未合入", rules)
 
+    def test_wrapup_requires_pr_review_closure(self):
+        """PR 审核闭环是 wrapup 的必做前置：CI 全绿 + 未决 P1=0 + findings 处置。
+
+        回归背景：wf-haflow-1015-01 收尾时未创建交付 PR、也未检查 GitHub
+        （Codex）审核 findings，P1/P2 在交付后才发现，导致返工。规则缺失点：
+        六步收尾从未包含『抓取 PR 审核结果并闭环』这一环，且 PR 职责可被
+        『属控制器职责』措辞规避。
+        """
+        rules = "\n".join(self.node_map["wrapup"].get("rules", []))
+        self.assertIn("PR 审核闭环", rules)
+        self.assertIn("gh pr checks", rules)
+        self.assertIn("未决 P1", rules)
+        # 职责单一性：不得以“属控制器职责”跳过 PR 入口或审核闭环
+        self.assertIn("属控制器职责", rules)
+        outputs = self.node_map["wrapup"].get("required_outputs", [])
+        self.assertTrue(any("审核闭环证据" in o for o in outputs))
+        self.assertTrue(any("CI 状态" in o for o in outputs))
+
 
 class TestNodeBudgets(unittest.TestCase):
     def test_bundled_budgets_survive_normalization(self):
