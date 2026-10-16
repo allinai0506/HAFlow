@@ -885,6 +885,15 @@ def bypass_task_gate(
     elif previous_status == "paused":
         new_status = "working"
 
+    # This bypass persists the status directly (no StateStore transition
+    # gateway), so the shared review-closure invariant must be enforced here
+    # explicitly (Codex review P1, wf-haflow-1015-01).
+    if new_status == "completed" and (task.get("node") or task.get("stage")) == "wrapup":
+        from . import review_closure
+        closure_ok, closure_why = review_closure.check_completion_allowed(s, task)
+        if not closure_ok:
+            raise ValueError(f"[REVIEW CLOSURE REQUIRED] task={task_id}: {closure_why}")
+
     verdict_note = f"[GATE BYPASS by {operator}] {cleaned_reason}"
     if note:
         verdict_note += f" ({note})"

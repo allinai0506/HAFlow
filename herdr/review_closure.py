@@ -3,8 +3,8 @@
 The wrapup node's rules require the delivery PR and its CI/review findings to
 be closed out before completion. Prompt text alone is bypassable, so this
 module owns the machine-checked invariant used by every completion source:
-the CLI ``set`` path and the controller's CAS auto-accept path — both funnel
-through :func:`herdr.kernel.transition_task`.
+the CLI ``set`` path, the controller's CAS auto-accept path, and the
+``bypass-gate`` direct write — all funnel through these checks.
 
 An acceptable receipt carries, in one ``review_closure_recorded`` event:
 
@@ -13,9 +13,13 @@ An acceptable receipt carries, in one ``review_closure_recorded`` event:
   and an unverifiable head fails closed instead of waving the transition
   through;
 - for a normal closure: the delivery PR URL, ``ci_status=pass``, the
-  structured unresolved P1/P2 counts (P1 must be 0) and a disposition text;
-- for a deferred closure (the PR genuinely cannot be created): a concrete
-  reason carrying the blocking evidence, plus the same head SHA.
+  structured unresolved P1/P2 counts (P1 must be 0), a disposition text, and
+  a ``verification`` block that the CLI only writes after querying the forge
+  (gh): the URL must identify a PR whose head matches the certified SHA,
+  ``gh pr checks`` must be all green, and no unresolved Codex P1/P0 review
+  threads may remain — self-attested values alone are not evidence;
+- for a deferred closure (the PR genuinely cannot be created or verified): a
+  concrete reason carrying the blocking evidence, plus the same head SHA.
 
 A ``review_closure_skipped`` event (written by the audited
 ``--skip-review-closure --note`` bypass) also allows completion, but only for
@@ -28,16 +32,35 @@ registration (SQLite ``config_json``); the task's pinned ``workflow_config``
 file is only a fallback for registrations that carry no config snapshot. A
 configuration that exists but cannot be read fails closed, while a verified
 absent capability (legacy workflows, custom templates without the flag)
-keeps the previous completion path (Codex review P1).
+keeps the previous completion path.
 """
 
 import json
 import re
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 _HEX40 = re.compile(r"[0-9a-f]{40}")
+_PR_URL = re.compile(r"^https?://[^/]+/([^/]+)/([^/]+)/pull/(\d+)(?:[/?#].*)?$")
+_CODEX_BOT = "chatgpt-codex-connector"
+_BLOCK_MARKS = ("P1 Badge", "P0 Badge")
+_THREADS_QUERY = """
+query($owner: String!, $repo: String!, $pr: Int!, $cursor: String) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $pr) {
+      reviewThreads(first: 100, after: $cursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          id path isResolved isOutdated
+          comments(first: 5) { nodes { author { login } body } }
+        }
+      }
+    }
+  }
+}
+"""
 
 
 def _latest_event(store, task_id: str, event_type: str) -> Optional[Dict[str, Any]]:
@@ -63,6 +86,140 @@ def latest_receipt(store, task_id: str) -> Optional[Dict[str, Any]]:
 
 def latest_skip(store, task_id: str) -> Optional[Dict[str, Any]]:
     return _latest_event(store, task_id, "review_closure_skipped")
+
+
+def parse_pr_url(pr_url: Any) -> Optional[Tuple[str, str, int]]:
+    """(owner, repo, number) for a recognizable pull-request URL, else None."""
+    match = _PR_URL.match(str(pr_url or "").strip())
+    if not match:
+        return None
+    return match.group(1), match.group(2), int(match.group(3))
+
+
+def _run_gh(argv: List[str], timeout: int = 45) -> Tuple[int, str, str]:
+    probe = subprocess.run(
+        ["gh", *argv], text=True, capture_output=True, timeout=timeout, check=False,
+    )
+    return probe.returncode, probe.stdout or "", probe.stderr or ""
+
+
+def _fetch_codex_blockers(owner: str, repo: str, number: int) -> Optional[List[Dict[str, Any]]]:
+    """Unresolved, non-outdated Codex P1/P0 threads (marks mirror scripts/codex-gate.py).
+
+    Returns None when the forge could not be queried (caller fails closed).
+    """
+    blockers: List[Dict[str, Any]] = []
+    cursor = None
+    for _ in range(5):
+        argv = ["api", "graphql", "-f", f"query={_THREADS_QUERY}",
+                "-f", f"owner={owner}", "-f", f"repo={repo}", "-f", f"pr={number}"]
+        if cursor:
+            argv += ["-f", f"cursor={cursor}"]
+        try:
+            rc, out, _err = _run_gh(argv)
+        except (FileNotFoundError, subprocess.SubprocessError):
+            return None
+        if rc:
+            return None
+        try:
+            payload = json.loads(out or "{}")
+        except ValueError:
+            return None
+        threads = ((((payload.get("data") or {}).get("repository") or {})
+                    .get("pullRequest") or {}).get("reviewThreads") or {})
+        for node in (threads.get("nodes") or []):
+            if not isinstance(node, dict) or node.get("isResolved") or node.get("isOutdated"):
+                continue
+            comments = ((node.get("comments") or {}).get("nodes") or [])
+            comments = [c for c in comments if isinstance(c, dict)]
+            if not any(_CODEX_BOT in str((c.get("author") or {}).get("login") or "")
+                       for c in comments):
+                continue
+            text = "\n".join(str(c.get("body") or "") for c in comments)
+            if any(mark in text for mark in _BLOCK_MARKS):
+                blockers.append(node)
+        page = threads.get("pageInfo") or {}
+        if not page.get("hasNextPage"):
+            return blockers
+        cursor = page.get("endCursor")
+    return None  # pagination budget exhausted → fail closed
+
+
+def verify_against_forge(pr_url: Any, head_sha: str) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
+    """Query the forge for authoritative closure evidence (via gh).
+
+    Returns (ok, detail, verification_block). The block is what the receipt
+    stores; it is only produced when the PR URL identifies a PR, the PR head
+    matches the certified SHA, all checks pass and no unresolved Codex P1/P0
+    threads remain (Codex review P1).
+    """
+    parsed = parse_pr_url(pr_url)
+    if not parsed:
+        return False, (
+            f"--pr-url {str(pr_url or '')!r} is not a recognizable pull-request URL"
+        ), None
+    owner, repo, number = parsed
+    try:
+        rc, out, err = _run_gh(
+            ["api", f"repos/{owner}/{repo}/pulls/{number}",
+             "--jq", "{head: .head.sha, state: .state}"],
+        )
+    except FileNotFoundError:
+        return False, (
+            "gh CLI is not available for forge verification; install/authenticate "
+            "gh, or record a deferred receipt with --reason <evidence>"
+        ), None
+    except subprocess.SubprocessError as exc:
+        return False, f"forge verification failed while querying the PR: {exc}", None
+    if rc:
+        return False, (
+            f"forge verification failed: gh api returned {rc}: "
+            f"{(err or out).strip()[:200]}"
+        ), None
+    try:
+        pr = json.loads(out or "{}")
+    except ValueError:
+        return False, "forge verification failed: gh api returned unparsable JSON", None
+    raw_head = (pr or {}).get("head")
+    if isinstance(raw_head, dict):
+        raw_head = raw_head.get("sha")
+    pr_head = str(raw_head or "").strip().lower()
+    if not _HEX40.fullmatch(pr_head):
+        return False, "forge verification failed: could not read the PR head from the forge", None
+    if pr_head != str(head_sha or "").strip().lower():
+        return False, (
+            f"PR head {pr_head[:12]} does not match --head-sha "
+            f"{str(head_sha or '')[:12]}; the receipt must certify the PR's actual head"
+        ), None
+    try:
+        rc, out, err = _run_gh(["pr", "checks", str(number), "--repo", f"{owner}/{repo}"])
+    except subprocess.SubprocessError as exc:
+        return False, f"forge verification failed while reading checks: {exc}", None
+    if rc:
+        return False, (
+            f"PR checks are not all passing (gh pr checks rc={rc}): "
+            f"{(out or err).strip()[:300]}"
+        ), None
+    blockers = _fetch_codex_blockers(owner, repo, number)
+    if blockers is None:
+        return False, (
+            "forge verification failed: could not read review threads via "
+            "gh api graphql"
+        ), None
+    if blockers:
+        return False, (
+            f"{len(blockers)} unresolved Codex P1/P0 review thread(s) remain on "
+            f"the PR; resolve them (and re-review the new head) before recording"
+        ), None
+    verification = {
+        "provider": "github",
+        "pr": f"{owner}/{repo}#{number}",
+        "head": pr_head,
+        "checks": "pass",
+        "unresolved_codex_p1": 0,
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+    }
+    return True, "forge verification passed", verification
 
 
 def _wrapup_flag(config: Any) -> bool:
@@ -108,7 +265,7 @@ def closure_required(store, task: Any) -> bool:
     return _wrapup_flag(file_config)
 
 
-def validate_receipt_payload(payload: Any) -> Tuple[bool, str]:
+def validate_receipt_payload(payload: Any, require_verification: bool = True) -> Tuple[bool, str]:
     """Content validation: an unacceptable receipt must never be written."""
     if not isinstance(payload, dict):
         return False, "receipt payload is missing"
@@ -139,6 +296,21 @@ def validate_receipt_payload(payload: Any) -> Tuple[bool, str]:
         return False, "--unresolved-p2 must report the unresolved P2 count from the review"
     if not str(payload.get("findings") or "").strip():
         return False, "--findings must state the P2/P3 disposition"
+    verification = payload.get("verification")
+    if isinstance(verification, dict) and verification:
+        if (str(verification.get("provider") or "").strip().lower() != "github"
+                or str(verification.get("head") or "").strip().lower() != head):
+            return False, (
+                "forge verification evidence does not match the certified "
+                "head/provider"
+            )
+        return True, ""
+    if require_verification:
+        return False, (
+            "receipt lacks forge verification evidence for the certified head; "
+            "record it via the CLI so the forge (gh) is queried for the PR head, "
+            "checks and unresolved P1 review threads"
+        )
     return True, ""
 
 

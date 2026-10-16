@@ -2247,7 +2247,9 @@ def record_review_closure(task_id, pr_url=None, ci_status=None, findings=None,
         "unresolved_p1": unresolved_p1,
         "unresolved_p2": unresolved_p2,
     }
-    ok, why = review_closure.validate_receipt_payload(payload)
+    ok, why = review_closure.validate_receipt_payload(
+        payload, require_verification=False,
+    )
     if not ok:
         print(f"[REVIEW CLOSURE REFUSED] {why}", file=sys.stderr)
         sys.exit(2)
@@ -2260,6 +2262,21 @@ def record_review_closure(task_id, pr_url=None, ci_status=None, findings=None,
             file=sys.stderr,
         )
         sys.exit(2)
+    if not deferred:
+        verified, detail, verification = review_closure.verify_against_forge(
+            payload["pr_url"], payload["head_sha"],
+        )
+        if not verified:
+            print(
+                f"[REVIEW CLOSURE REFUSED] forge verification failed: {detail}",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        payload["verification"] = verification
+        ok, why = review_closure.validate_receipt_payload(payload)
+        if not ok:
+            print(f"[REVIEW CLOSURE REFUSED] {why}", file=sys.stderr)
+            sys.exit(2)
     store = _get_store()
     store.record_event(
         "review_closure_recorded",
