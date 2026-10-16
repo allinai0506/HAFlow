@@ -2169,15 +2169,17 @@ def cmd_eval_compare(args):
         print(f"{field}: {diff['before'][field]} -> {diff['after'][field]}")
 
 
-def _enforce_wrapup_review_closure(task_id, task, *, skip, note):
+def _enforce_wrapup_review_closure(task_id, task, *, skip, note, operator=None):
     """CLI-side pre-check for the shared wrapup review-closure invariant.
 
     The authoritative gate lives in ``herdr.kernel.transition_task`` — every
     completion source (CLI ``set``, the controller's CAS auto-accept path and
     repair flows) funnels through it. This pre-check only exists for a
-    friendly refusal message. The audited ``--skip-review-closure --note``
-    bypass records a ``review_closure_skipped`` event, which also satisfies
-    the kernel gate (Codex review P1, wf-haflow-1015-01).
+    friendly refusal message. The audited ``--skip-review-closure`` bypass
+    requires an operator identity independent of the task worker plus the
+    ``HERDR_OPERATOR=1`` shell capability (task workers do not carry it); it
+    records a ``review_closure_skipped`` event, which also satisfies the
+    kernel gate (Codex review P1, wf-haflow-1015-01).
     """
     from herdr import review_closure
     store = _get_store()
@@ -2187,6 +2189,31 @@ def _enforce_wrapup_review_closure(task_id, task, *, skip, note):
             print(
                 "[REVIEW CLOSURE SKIP REFUSED] --skip-review-closure requires "
                 "--note with the audited reason",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        operator_id = str(operator or "").strip()
+        if not operator_id:
+            print(
+                "[REVIEW CLOSURE SKIP REFUSED] --skip-review-closure requires "
+                "--operator <identity> (an operator independent of the task "
+                "worker)",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        if os.environ.get("HERDR_OPERATOR") != "1":
+            print(
+                "[REVIEW CLOSURE SKIP REFUSED] the emergency bypass requires an "
+                "operator shell capability (HERDR_OPERATOR=1); task workers do "
+                "not carry it",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        task_agent = str(task.get("agent") or "").strip().lower()
+        if task_agent and operator_id.lower() == task_agent:
+            print(
+                "[REVIEW CLOSURE SKIP REFUSED] the operator must be independent "
+                "of the task worker",
                 file=sys.stderr,
             )
             sys.exit(2)
@@ -2201,7 +2228,7 @@ def _enforce_wrapup_review_closure(task_id, task, *, skip, note):
             sys.exit(2)
         store.record_event(
             "review_closure_skipped",
-            {"task_id": task_id, "reason": reason, "head_sha": head},
+            {"task_id": task_id, "reason": reason, "head_sha": head, "operator": operator_id},
             task_id=task_id,
             workflow_id=task.get("workflow_id"),
             node_id=task.get("node") or task.get("stage"),
@@ -2308,7 +2335,7 @@ def record_review_closure(task_id, pr_url=None, ci_status=None, findings=None,
 
 
 def set_status(task_id, new_status, verdict=None, note=None, affected_task_ids=None,
-               skip_review_closure=False):
+               skip_review_closure=False, skip_operator=None):
     data = load_tasks()
     task = find_task(data, task_id)
 
@@ -2443,7 +2470,8 @@ def set_status(task_id, new_status, verdict=None, note=None, affected_task_ids=N
     # bare `set ... completed` — including the controller's auto-accept path,
     # which is also a CLI set (Codex review P1, wf-haflow-1015-01).
     if new_status == "completed" and (task.get("node") or task.get("stage")) == "wrapup":
-        _enforce_wrapup_review_closure(task_id, task, skip=skip_review_closure, note=note)
+        _enforce_wrapup_review_closure(task_id, task, skip=skip_review_closure,
+                                       note=note, operator=skip_operator)
 
     metadata = {}
     if verdict:
@@ -8736,7 +8764,14 @@ def main():
         action="store_true",
         default=False,
         help="Audited emergency bypass for the wrapup review-closure receipt "
-             "gate (requires --note; records a review_closure_skipped event)",
+             "gate (requires --note, --operator and the HERDR_OPERATOR=1 "
+             "capability; records a review_closure_skipped event)",
+    )
+    set_cmd.add_argument(
+        "--operator",
+        default=None,
+        help="Audited operator identity for --skip-review-closure (must be "
+             "independent of the task worker; requires HERDR_OPERATOR=1)",
     )
 
     closure_cmd = sub.add_parser(
@@ -9417,7 +9452,8 @@ def main():
     elif args.command == "set":
         set_status(args.task_id, args.status, args.verdict, args.note,
                    affected_task_ids=args.affected_task_ids,
-                   skip_review_closure=args.skip_review_closure)
+                   skip_review_closure=args.skip_review_closure,
+                   skip_operator=args.operator)
 
     elif args.command == "record-review-closure":
         record_review_closure(args.task_id, pr_url=args.pr_url,

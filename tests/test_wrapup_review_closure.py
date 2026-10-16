@@ -86,6 +86,20 @@ if args and args[0] == "api" and "graphql" in args:
     sys.exit(0)
 
 if (args and args[0] == "api"
+        and any(t.startswith("repos/") and "/issues/" in t and t.endswith("/comments")
+                for t in args)):
+    mode = _read("review_state", "completed")
+    if mode == "missing":
+        print("[]")
+        sys.exit(0)
+    sha = "e" * 40 if mode == "wrong_head" else _read("head.txt")
+    status = "running" if mode == "running" else "completed"
+    body = ('<!-- codex-review-state:v1 '
+            '{"code_review":{"commit_sha":"%s","status":"%s"}} -->' % (sha, status))
+    print(json.dumps([body]))
+    sys.exit(0)
+
+if (args and args[0] == "api"
         and any(t.startswith("repos/") and "/pulls/" in t for t in args)):
     print(json.dumps({
         "head": _read("head.txt"),
@@ -116,11 +130,13 @@ PLAIN_NODES = [
 ]
 
 
-def run_cli(store, *argv):
+def run_cli(store, *argv, env_extra=None):
     env = os.environ.copy()
     env["HERDR_STATE_DB"] = str(store.db_path)
     env.pop("TASKS_FILE", None)
     env.pop("WORKFLOWS_FILE", None)
+    if env_extra:
+        env.update(env_extra)
     fakebin = Path(store.db_path).parent / "fakebin"
     if fakebin.is_dir():
         env["PATH"] = f"{fakebin}{os.pathsep}{env.get('PATH', '')}"
@@ -430,7 +446,9 @@ def test_bypass_is_bound_to_head_and_expires_on_rework(scene):
     # A fresh audited bypass binds the current head and completes.
     fresh = run_cli(
         scene.store, "set", "wrapup-task", "completed", "--skip-review-closure",
+        "--operator", "ops-lead",
         "--note", "audited emergency after rework",
+        env_extra={"HERDR_OPERATOR": "1"},
     )
     assert fresh.returncode == 0, fresh.stdout + fresh.stderr
     assert scene.store.get_task("wrapup-task")["status"] == "completed"
@@ -599,3 +617,81 @@ def test_closed_unmerged_pr_is_rejected(scene):
     (scene.fakebin / "pr_merged_at").write_text("2026-10-16T00:00:00Z")
     merged = record_valid(scene.store, scene.head)
     assert merged.returncode == 0, merged.stdout + merged.stderr
+
+
+def test_bypass_requires_operator_identity_and_capability(scene):
+    no_operator = run_cli(
+        scene.store, "set", "wrapup-task", "completed", "--skip-review-closure",
+        "--note", "emergency",
+    )
+    assert no_operator.returncode == 2
+    assert "--operator" in (no_operator.stdout + no_operator.stderr)
+
+    no_capability = run_cli(
+        scene.store, "set", "wrapup-task", "completed", "--skip-review-closure",
+        "--operator", "ops-lead", "--note", "emergency",
+    )
+    assert no_capability.returncode == 2
+    assert "HERDR_OPERATOR" in (no_capability.stdout + no_capability.stderr)
+
+    worker_operator = run_cli(
+        scene.store, "set", "wrapup-task", "completed", "--skip-review-closure",
+        "--operator", "qodercli", "--note", "emergency",
+        env_extra={"HERDR_OPERATOR": "1"},
+    )
+    assert worker_operator.returncode == 2
+    assert "independent" in (worker_operator.stdout + worker_operator.stderr)
+
+    allowed = run_cli(
+        scene.store, "set", "wrapup-task", "completed", "--skip-review-closure",
+        "--operator", "ops-lead", "--note", "emergency",
+        env_extra={"HERDR_OPERATOR": "1"},
+    )
+    assert allowed.returncode == 0, allowed.stdout + allowed.stderr
+    assert scene.store.get_task("wrapup-task")["status"] == "completed"
+
+
+def test_receipt_requires_completed_review_on_head(scene):
+    (scene.fakebin / "review_state").write_text("missing")
+    missing = record_valid(scene.store, scene.head)
+    assert missing.returncode == 2
+    assert "completed Codex review" in (missing.stdout + missing.stderr)
+
+    (scene.fakebin / "review_state").write_text("running")
+    assert record_valid(scene.store, scene.head).returncode == 2
+
+    (scene.fakebin / "review_state").write_text("wrong_head")
+    assert record_valid(scene.store, scene.head).returncode == 2
+
+    (scene.fakebin / "review_state").write_text("completed")
+    ok = record_valid(scene.store, scene.head)
+    assert ok.returncode == 0, ok.stdout + ok.stderr
+
+
+def test_deferred_is_revalidated_at_completion(scene):
+    subprocess.run(
+        ["git", "-C", str(scene.clone), "remote", "remove", "origin"],
+        check=True, capture_output=True, text=True,
+    )
+    recorded = run_cli(
+        scene.store, "record-review-closure", "wrapup-task", "--deferred",
+        "--reason", "no remote configured", "--head-sha", scene.head,
+    )
+    assert recorded.returncode == 0, recorded.stdout + recorded.stderr
+
+    subprocess.run(
+        ["git", "-C", str(scene.clone), "remote", "add", "origin",
+         "https://github.com/owner/repo.git"],
+        check=True, capture_output=True, text=True,
+    )
+    refused = run_cli(scene.store, "set", "wrapup-task", "completed")
+    assert refused.returncode == 2
+    assert "no longer justified" in (refused.stdout + refused.stderr)
+
+    subprocess.run(
+        ["git", "-C", str(scene.clone), "remote", "remove", "origin"],
+        check=True, capture_output=True, text=True,
+    )
+    allowed = run_cli(scene.store, "set", "wrapup-task", "completed")
+    assert allowed.returncode == 0, allowed.stdout + allowed.stderr
+    assert scene.store.get_task("wrapup-task")["status"] == "completed"

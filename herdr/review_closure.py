@@ -151,6 +151,52 @@ def _fetch_codex_blockers(owner: str, repo: str, number: int) -> Optional[List[D
     return None  # pagination budget exhausted → fail closed
 
 
+def _fetch_codex_review_states(owner: str, repo: str, number: int) -> Optional[List[Tuple[str, str]]]:
+    """(commit_sha, status) pairs from codex-review-state markers.
+
+    None means the forge could not be queried (callers fail closed). An empty
+    blocker list only proves no finding was observed — completion evidence
+    must additionally show a *completed* review for the certified head
+    (Codex review P1).
+    """
+    try:
+        rc, out, _err = _run_gh([
+            "api", "--hostname", "github.com",
+            f"repos/{owner}/{repo}/issues/{number}/comments",
+            "--paginate", "--jq",
+            '[.[] | select(.body | test("codex-review-state")) | .body]',
+        ])
+    except (FileNotFoundError, subprocess.SubprocessError):
+        return None
+    if rc:
+        return None
+    states: List[Tuple[str, str]] = []
+    for line in (out or "").splitlines():
+        line = line.strip()
+        if not line.startswith("["):
+            continue
+        try:
+            bodies = json.loads(line)
+        except ValueError:
+            return None
+        if not isinstance(bodies, list):
+            continue
+        for body in bodies:
+            match = re.search(r"codex-review-state:v1 (\{.*?\})\s*-->", str(body), re.S)
+            if not match:
+                continue
+            try:
+                state = json.loads(match.group(1))
+            except ValueError:
+                continue
+            review = state.get("code_review") or {}
+            sha = str(review.get("commit_sha") or "").strip().lower()
+            status = str(review.get("status") or "").strip().lower()
+            if sha or status:
+                states.append((sha, status))
+    return states
+
+
 def verify_against_forge(pr_url: Any, head_sha: str) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
     """Query the forge for authoritative closure evidence (via gh).
 
@@ -232,6 +278,17 @@ def verify_against_forge(pr_url: Any, head_sha: str) -> Tuple[bool, str, Optiona
         return False, (
             f"{len(blockers)} unresolved Codex P1/P0 review thread(s) remain on "
             f"the PR; resolve them (and re-review the new head) before recording"
+        ), None
+    review_states = _fetch_codex_review_states(owner, repo, number)
+    if review_states is None:
+        return False, (
+            "forge verification failed: could not read the Codex review state"
+        ), None
+    if not any(sha == pr_head and status == "completed" for sha, status in review_states):
+        return False, (
+            f"no completed Codex review found for the certified head "
+            f"{pr_head[:12]}; trigger the review (e.g. `@codex review`), wait "
+            "for it to complete, then re-record"
         ), None
     verification = {
         "provider": "github",
@@ -563,9 +620,18 @@ def check_completion_allowed(store, task: Any) -> Tuple[bool, str]:
                     "record a fresh receipt."
                 )
             elif payload.get("deferred"):
-                # Deferred receipts carry no forge state to revalidate; they
-                # are bound by head plus the recorded machine evidence.
-                return True, ""
+                # Re-check that the deferral is still justified: a GitHub
+                # remote appearing after recording reopens the PR path
+                # (Codex review P2).
+                evidence_ok, evidence_detail, _evidence = collect_deferred_evidence(task)
+                if not evidence_ok:
+                    receipt_refusal = (
+                        "the deferred receipt is no longer justified: "
+                        f"{evidence_detail}. Use the PR/review path and record a "
+                        "fresh receipt."
+                    )
+                else:
+                    return True, ""
             else:
                 identity_why = identity_mismatch(store, task, payload.get("pr_url"), head)
                 if identity_why:

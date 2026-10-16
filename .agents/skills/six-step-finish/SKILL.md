@@ -31,8 +31,9 @@ description: Use when implementation is complete and a development branch needs 
 --ci-status pass --unresolved-p1 0 --unresolved-p2 <n> --findings '<P2/P3 处置>'
 --head-sha <被审的 40-hex 提交>` 落**机器回执**（内容校验 + **forge 实证（GitHub）**：非 deferred 须
 CI=pass、结构化计数 P1=0、findings 非空，且写入前经 gh 实证 PR head 与
---head-sha 一致、`gh pr checks` 全绿、无未决 Codex P1/P0 评审线程；gh 不可用
-或任一校验失败即拒绝。非 GitHub forge 暂不支持机器实证：`--deferred
+--head-sha 一致、`gh pr checks` 全绿、无未决 Codex P1/P0 评审线程、**该 head
+存在已完成的 Codex 审核记录**（codex-review-state=completed 且 commit_sha
+匹配；空线程列表 ≠ 已审核）；gh 不可用或任一校验失败即拒绝。非 GitHub forge 暂不支持机器实证：`--deferred
 --reason '<证据>'`（附 remote 探测证据；**存在 GitHub remote 时 deferred 不被
 接受**，必须走 PR 路径））。
 回执**绑定被审 head**：完成时与工位克隆 HEAD 比对，head 之后再有提交（或
@@ -43,8 +44,9 @@ head 不可验证）即拒绝，必须重新闭环；回执 PR 还须与**交付
 节点 `review_closure_required: true`，权威来源为 pin 配置快照）在任何
 completed 转换（含控制器 auto-accept 与 bypass-gate 直写路径）都会 fail-closed
 校验回执，缺失/失效将被拒绝；未被 pin 配置启用的旧工作流/自定义模板保持原
-行为（应急豁免 `--skip-review-closure --note '<审计原因>'` 绑定当前 head，
-rework 后过期）。
+行为（应急豁免须操作员能力：`--skip-review-closure --operator <id>
+--note '<审计原因>'` + 环境标记 `HERDR_OPERATOR=1`（工位环境不具备）；豁免绑定
+当前 head，rework 后过期）。
 
 **优先级规则：** 项目内有专属收尾脚本时（如 xiyu `scripts/agent-finish-task.sh`）
 优先用项目脚本；否则用本技能的 `scripts/finish-task.sh`。
