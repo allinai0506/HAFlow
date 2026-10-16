@@ -325,15 +325,24 @@ def git_remote_urls(path: Any) -> List[str]:
     return urls
 
 
-def collect_deferred_evidence(task: Any) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
+def collect_deferred_evidence(store, task: Any) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
     """Machine-derived evidence for a deferred (no verifiable PR) closure.
 
-    Deferred is only justified when there is no git remote at all, or the
-    remotes belong to a forge this platform cannot verify yet. A GitHub
-    remote means the PR path is verifiable and deferral is refused; the probe
-    result is stored so the deferral is auditable (Codex review P1).
+    Deferred is only justified when no delivery PR is recorded for the
+    workflow and there is no git remote at all, or the remotes belong to a
+    forge this platform cannot verify yet. A recorded ``pull_request_created``
+    delivery or a GitHub remote means the PR path is verifiable and deferral
+    is refused; the probe result is stored so the deferral is auditable
+    (Codex review P1s).
     """
     task = task or {}
+    identity, identity_source, _candidate = delivery_identity(store, task)
+    if identity and identity_source == "workflow_delivery_record":
+        return False, (
+            f"a delivery PR is already recorded for this workflow ({identity}, "
+            "pull_request_created); verify it and record a normal receipt "
+            "(deferred is not justified)"
+        ), None
     remotes: List[str] = []
     for path in (task.get("clone_path"), task.get("source_repo")):
         for url in git_remote_urls(path):
@@ -623,7 +632,7 @@ def check_completion_allowed(store, task: Any) -> Tuple[bool, str]:
                 # Re-check that the deferral is still justified: a GitHub
                 # remote appearing after recording reopens the PR path
                 # (Codex review P2).
-                evidence_ok, evidence_detail, _evidence = collect_deferred_evidence(task)
+                evidence_ok, evidence_detail, _evidence = collect_deferred_evidence(store, task)
                 if not evidence_ok:
                     receipt_refusal = (
                         "the deferred receipt is no longer justified: "

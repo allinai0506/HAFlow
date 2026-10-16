@@ -2311,7 +2311,7 @@ def record_review_closure(task_id, pr_url=None, ci_status=None, findings=None,
             sys.exit(2)
         payload["verification"] = verification
     else:
-        evidence_ok, evidence_detail, evidence = review_closure.collect_deferred_evidence(task)
+        evidence_ok, evidence_detail, evidence = review_closure.collect_deferred_evidence(store, task)
         if not evidence_ok:
             print(
                 f"[REVIEW CLOSURE REFUSED] deferred is not justified: {evidence_detail}",

@@ -695,3 +695,24 @@ def test_deferred_is_revalidated_at_completion(scene):
     allowed = run_cli(scene.store, "set", "wrapup-task", "completed")
     assert allowed.returncode == 0, allowed.stdout + allowed.stderr
     assert scene.store.get_task("wrapup-task")["status"] == "completed"
+
+
+def test_deferred_refused_when_delivery_record_exists(scene):
+    """A recorded delivery PR beats an empty remote list (Codex review P1)."""
+    subprocess.run(
+        ["git", "-C", str(scene.clone), "remote", "remove", "origin"],
+        check=True, capture_output=True, text=True,
+    )
+    scene.store.record_event(
+        "pull_request_created",
+        {"number": 7, "url": "https://github.com/owner/repo/pull/7",
+         "candidate_sha": scene.head, "branch": "b", "base": "main",
+         "state": "open", "provider": "github"},
+        task_id="wrapup-task", workflow_id="wf-closure", source="herdr-task",
+    )
+    refused = run_cli(
+        scene.store, "record-review-closure", "wrapup-task", "--deferred",
+        "--reason", "no remote", "--head-sha", scene.head,
+    )
+    assert refused.returncode == 2
+    assert "not justified" in (refused.stdout + refused.stderr)
