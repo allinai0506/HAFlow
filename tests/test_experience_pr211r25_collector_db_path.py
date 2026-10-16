@@ -6,6 +6,7 @@ import sqlite3
 import subprocess
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -189,3 +190,33 @@ def test_missing_source_retries_then_recovers(tmp_path):
         conn.execute("UPDATE local_collector_records SET next_retry_at=0")
     assert col.process_pending()["processed"] == 1
     assert rows(q)["A"]["status"] == "uploaded"
+
+
+def test_default_source_absent_defers_recovery(tmp_path, monkeypatch):
+    """A row bound to a not-yet-created default DB defers instead of losing.
+
+    Clean-environment regression: when no explicit source is given, the row
+    persists the resolved default path. If that file does not exist yet,
+    recovery must keep the row ``pending_collection`` with a
+    ``state_db_missing`` backoff rather than reaching ``task_not_found`` or
+    quarantining the row.
+    """
+    q = tmp_path / "q.db"
+    absent_default = tmp_path / "default-state.db"  # deliberately never created
+    monkeypatch.setattr(state_db, "get_default_db_path", lambda: absent_default)
+    col = ExperienceCollector(q, Hub())
+    with patch("herdr.state_db.get_task", return_value={
+        "task_id": "shared", "run_id": "A", "status": "completed",
+        "customer": "acme", "task_type": "quote",
+    }):
+        assert col.enqueue_task_settlement("shared", outcome("A"))["ok"] is True
+
+    res = col.process_pending()
+    assert res["processed"] == 0
+    assert res["failed"] == 1
+    row = rows(q)["A"]
+    assert row["status"] == "pending_collection"
+    assert row["retry_count"] == 1
+    assert row["next_retry_at"] > 0
+    assert "state_db_missing" in (row["last_error"] or "")
+    assert not absent_default.exists()

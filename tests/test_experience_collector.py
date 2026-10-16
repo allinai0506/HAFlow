@@ -225,10 +225,17 @@ def test_settlement_persists_pending_collection_before_thread_exit(temp_dir):
         "verification_passed": True,
     }
 
-    # 1. Enqueue task settlement synchronously (simulates process crash immediately after enqueue)
+    # 1. Enqueue task settlement synchronously (simulates process crash immediately after enqueue).
+    # Bind the row to an explicit, existing temporary source database: recovery
+    # defers rows whose persisted database file is absent (state_db_missing
+    # backoff), so relying on the machine's default state path would make this
+    # test environment-dependent (it fails in clean-HOME environments).
+    source_db = temp_dir / "source_state.db"
+    source_db.write_bytes(b"")  # a real (empty) source database file
     collector1 = ExperienceCollector(db_path=collector_db, hub_client=None)
     with patch("herdr.state_db.get_task", return_value=fake_task):
-        enq_res = collector1.enqueue_task_settlement("task_durable_1", fake_outcome)
+        enq_res = collector1.enqueue_task_settlement("task_durable_1", fake_outcome,
+                                                     state_db_path=source_db)
         assert enq_res["ok"] is True
         assert enq_res["status"] == "pending_collection"
 

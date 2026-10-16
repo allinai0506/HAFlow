@@ -688,6 +688,50 @@ def test_stalled_body_releases_handler_within_idle_timeout(hub):
 # 7. Existing POST semantics unchanged
 # --------------------------------------------------------------------------- #
 
+# --------------------------------------------------------------------------- #
+# Non-object JSON bodies: explicit 400 instead of an empty response
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("raw_body", [b"null", b"[]", b'"text"', b"123", b"true"])
+def test_non_object_json_body_is_400_invalid_payload(hub, raw_body):
+    """Syntactically valid JSON that is not an object must get an explicit 400.
+
+    ``null`` used to decode to ``None``, which was indistinguishable from the
+    internal "rejection already sent" sentinel: the handler returned without
+    sending anything and the client observed a dropped connection. Every
+    non-object JSON value must now produce the same ``invalid_payload``
+    rejection and leave business state untouched.
+    """
+    exp_id = "exp_r24_non_object"
+    _submit_pending(hub, exp_id)
+    before = hub.snapshot()
+
+    head = _request_bytes(
+        "/api/v1/experiences/candidates",
+        token="token_emp_a",
+        headers=[f"Content-Length: {len(raw_body)}"],
+        body=raw_body,
+    )
+    data = hub.raw(head, timeout=3.0)
+
+    status, headers, payload = _parse_response(data)
+    assert status == 400
+    assert payload["error"] == "invalid_payload"
+    assert headers.get("connection") == "close"
+    assert hub.snapshot() == before
+
+    # The server survives; later requests on the same routes still work.
+    health_status, health = _http_json(hub, "GET", "/api/v1/health")
+    assert health_status == 200
+    assert health["status"] == "ok"
+
+    review_status, review = _http_json(
+        hub, "POST", f"/api/v1/experiences/{exp_id}/review",
+        token="token_reviewer", data={"action": "approve"})
+    assert review_status == 200
+    assert review["status"] == "published"
+
+
 def test_existing_post_semantics_unchanged(hub):
     health_status, health = _http_json(hub, "GET", "/api/v1/health")
     assert health_status == 200

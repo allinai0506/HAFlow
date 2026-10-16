@@ -662,7 +662,8 @@ class HubHTTPHandler(BaseHTTPRequestHandler):
 
         Transfer-Encoding (400) -> missing Content-Length (411) -> malformed or
         duplicated Content-Length (400) -> over the byte budget (413) ->
-        truncated body (400) -> existing JSON fallback semantics.
+        truncated body (400) -> non-object JSON (400) -> existing ``{}``
+        fallback for unparseable bodies.
         """
         # 1. Transfer coding is not supported: chunked framing (or a TE+CL
         # combination that could desynchronise message boundaries) is rejected
@@ -718,9 +719,18 @@ class HubHTTPHandler(BaseHTTPRequestHandler):
             return None
 
         try:
-            return json.loads(raw.decode("utf-8") or "{}")
+            parsed = json.loads(raw.decode("utf-8") or "{}")
         except Exception:
             return {}
+        # 7. Syntactically valid JSON that is not an object (``null``, a list,
+        # a string, a number) is not a mutating payload. Reject it explicitly:
+        # returning the decoded ``None`` would be indistinguishable from the
+        # "already rejected" sentinel and would leave the client without any
+        # response at all.
+        if not isinstance(parsed, dict):
+            self._reject(400, "invalid_payload", "Request body must be a JSON object")
+            return None
+        return parsed
 
     def _extract_token(self) -> Optional[str]:
         auth = self.headers.get("Authorization", "")
