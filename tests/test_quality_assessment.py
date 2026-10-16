@@ -234,6 +234,35 @@ class QualityJudgementTest(unittest.TestCase):
         )
         self.assertIn("implicit_retry", report["problem_codes"])
 
+    def test_missing_timestamps_do_not_pair_retries_across_sessions(self):
+        older_failure = _action("a", "git status", 1, ordinal=1)
+        older_failure.update({"session_id": "sess-a", "timestamp": None})
+        newer_success = _action("b", "git status", 0, ordinal=1)
+        newer_success.update({"session_id": "sess-b", "timestamp": None})
+        for actions in ([older_failure, newer_success], [newer_success, older_failure]):
+            with self.subTest(order=[item["source_ref"] for item in actions]):
+                report = assess_quality(
+                    TASK, RUN,
+                    outcome=_outcome(),
+                    events=[_event("test_passed", "seen", command="pytest", exit_code=0)],
+                    actions=actions,
+                )
+                self.assertNotIn("implicit_retry", report["problem_codes"])
+
+    def test_missing_timestamps_still_pair_retries_inside_one_session(self):
+        failed = _action("a", "git status", 1, ordinal=1)
+        failed.update({"session_id": "sess-a", "timestamp": None})
+        later = _action("b", "git status", 0, ordinal=2)
+        later.update({"session_id": "sess-a", "timestamp": None})
+        report = assess_quality(
+            TASK, RUN,
+            outcome=_outcome(),
+            events=[_event("test_passed", "seen", command="pytest", exit_code=0)],
+            actions=[failed, later],
+        )
+        self.assertIn("implicit_retry", report["problem_codes"])
+        self.assertEqual(report["process_quality"], "improvement_opportunity")
+
     def test_implicit_retry_needs_the_same_failed_command(self):
         report = assess_quality(
             TASK, RUN,
@@ -828,6 +857,39 @@ class QualityReadTest(unittest.TestCase):
         self.assertNotIn("assessment_unavailable", report["problem_codes"])
         self.assertEqual(report["correctness"], "success")
         self.assertEqual(report["trace_completeness"], "complete")
+
+    def test_truncated_event_window_keeps_the_authoritative_receipt(self):
+        from herdr.execution_trace import STORED_LIMIT
+
+        task_id, run_id = "task-cap", "run-cap"
+        self._insert_task(task_id, run_id)
+        conn = state_db.get_db_connection(self.db)
+        try:
+            conn.execute(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'tests_completed', ?, 1, 'trajectory', ?, 1)",
+                (task_id, json.dumps({"verification": {"failing_count": 3, "evidence_id": "ev-cap"}}), run_id),
+            )
+            conn.executemany(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'task_started', '{}', ?, 'trajectory', ?, ?)",
+                [(task_id, 10 + index, run_id, index + 2) for index in range(STORED_LIMIT - 1)],
+            )
+            conn.execute(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'verification_completed', ?, 100000, 'trajectory', ?, 5000)",
+                (task_id, json.dumps({"verification": {"passed": True, "evidence_id": "ev-cap"}}), run_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        self._insert_outcome(task_id, run_id, eval_id="eval-cap")
+        report = assess_task_run(task_id, run_id, db_path=self.db, budget_s=0.2)
+        self.assertEqual(report["test_anomalies"], [])
+        self.assertNotIn("test_anomaly", report["problem_codes"])
 
     def test_missing_database_returns_a_report(self):
         missing = Path(self.tmp.name) / "absent.db"

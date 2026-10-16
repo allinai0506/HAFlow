@@ -260,7 +260,12 @@ def _retries(actions: Sequence[Dict[str, Any]]):
             consumed.add(retry_of)
     implicit = []
     exit_unknown = False
-    failed: Dict[str, str] = {}
+    # Loaders concatenate sessions, so without complete timestamps the list
+    # order is a chronology only inside one session. Pair a failure with its
+    # retry inside that session; a pair spanning unordered sessions stays
+    # unknown instead of being invented in loader order.
+    per_session = not all(_has_timestamp(item) for item in usable)
+    failed: Dict[Any, str] = {}
     for item in _ordered_actions(usable):
         source = item.get("source_ref")
         command = item.get("command") if isinstance(item.get("command"), str) else ""
@@ -273,12 +278,17 @@ def _retries(actions: Sequence[Dict[str, Any]]):
             continue
         if not isinstance(exit_code, int):
             continue
-        if command in failed:
-            implicit.extend([failed.pop(command), source])
+        key = (_session_key(item), command) if per_session else command
+        if key in failed:
+            implicit.extend([failed.pop(key), source])
             continue
         if exit_code != 0:
-            failed[command] = source
+            failed[key] = source
     return _unique(explicit), _unique(implicit), exit_unknown
+
+
+def _session_key(item: Dict[str, Any]) -> str:
+    return str(item.get("session_id") or "")
 
 
 def _ordered_actions(actions: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:

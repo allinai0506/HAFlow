@@ -389,7 +389,7 @@ def test_claude_parser_reads_edits_exits_and_skips_corrupt_lines():
         json.dumps({"message": {"content": [{"type": "tool_result", "tool_use_id": "t5", "content": "boom", "is_error": True}]}}),
     ])
     actions, notes = parse_claude_jsonl(text, session_id="claude-1")
-    assert notes == []
+    assert [note["code"] for note in notes] == ["native_corrupt"]
     page = assemble_trace(task_doc(agent="claude", clone_path=clone, commit=None, status_history=[], created_at=None, started_at=None), [], actions)
     blob = json.dumps(page["events"], ensure_ascii=False)
     assert "SECRET_FILE_BODY" not in blob
@@ -425,12 +425,29 @@ def test_opencode_exit_and_retry_are_structured_only():
         {"id": "bad", "data": "{"},
     ]
     actions, notes = parse_opencode_parts(parts, session_id="oc-1")
-    assert notes == []
+    assert [note["code"] for note in notes] == ["native_corrupt"]
     page = assemble_trace(task_doc(agent="opencode", commit=None, status_history=[], created_at=None, started_at=None), [], actions)
     kinds = [event["kind"] for event in page["events"]]
     assert kinds == ["file_read", "test_failed", "retry", "test_passed", "tool_call"]
     assert page["events"][-1]["status"] == "neutral"
     assert page["events"][-1]["title"] != "测试通过"
+
+
+def test_partial_codex_corruption_keeps_actions_and_reports_the_note():
+    text = "\n".join([
+        "{not-json",
+        json.dumps({"type": "response_item", "payload": {
+            "type": "custom_tool_call", "name": "exec", "call_id": "c1",
+            "input": 'text(await tools.exec_command({cmd:"pytest -q"}))',
+        }}),
+        json.dumps({"type": "response_item", "payload": {
+            "type": "custom_tool_call_output", "call_id": "c1",
+            "output": [{"type": "text", "text": '{"exit_code": 0}'}],
+        }}),
+    ])
+    actions, notes = parse_codex_jsonl(text, session_id="codex-1")
+    assert actions
+    assert [note["code"] for note in notes] == ["native_corrupt"]
 
 
 def test_loader_degrades_on_corrupt_missing_and_unmatched_sessions(tmp_path):
@@ -810,6 +827,47 @@ def test_stored_event_cap_keeps_the_current_run_row(tmp_path):
     assert all(row["run_id"] in (None, "", "run-a") for row in rows)
     assert all(row["event_type"] != "debug_log" for row in rows)
     assert notes == []
+
+
+def test_stored_event_cap_keeps_a_receipt_beyond_the_window(tmp_path):
+    from herdr.execution_trace import STORED_LIMIT, read_stored_events
+
+    db = tmp_path / "state.db"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        """
+        CREATE TABLE events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            workflow_id TEXT, node_id TEXT, task_id TEXT, agent_id TEXT,
+            event_type TEXT, payload_json TEXT, timestamp REAL,
+            source TEXT, run_id TEXT, sequence INTEGER
+        )
+        """
+    )
+    filler = [
+        ("task-a", "codex", "task_started", "{}", 10 + index, "trajectory", "run-a", index + 2)
+        for index in range(STORED_LIMIT - 1)
+    ]
+    conn.executemany(
+        """
+        INSERT INTO events (task_id, agent_id, event_type, payload_json, timestamp, source, run_id, sequence)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            ("task-a", "codex", "tests_completed",
+             json.dumps({"verification": {"failing_count": 3, "evidence_id": "ev-cap"}}),
+             1, "trajectory", "run-a", 1),
+            *filler,
+            ("task-a", "codex", "verification_completed",
+             json.dumps({"verification": {"passed": True, "evidence_id": "ev-cap"}}),
+             100_000, "trajectory", "run-a", 5_000),
+        ],
+    )
+    conn.commit()
+    conn.close()
+    rows, notes = read_stored_events(task_doc(commit=None), db)
+    assert any(row["event_type"] == "verification_completed" for row in rows)
+    assert [note["code"] for note in notes] == ["native_truncated"]
 
 
 def test_runless_task_keeps_the_synthetic_trajectory_run(tmp_path):

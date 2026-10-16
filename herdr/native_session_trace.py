@@ -130,7 +130,7 @@ def parse_codex_jsonl(text: str, *, session_id: str = "") -> Tuple[List[Dict[str
             calls.append(payload)
         elif kind in {"custom_tool_call_output", "function_call_output"} and call_id:
             outputs.setdefault(call_id, []).append(_output_text(payload.get("output")))
-    if bad and not calls:
+    if bad:
         notes.append(_note("native_corrupt", "部分原生会话记录已损坏，已跳过无法解析的内容。"))
     return _actions_from_codex_calls(calls, outputs, session_id), notes
 
@@ -187,7 +187,7 @@ def parse_claude_jsonl(text: str, *, session_id: str = "") -> Tuple[List[Dict[st
         if tool_id:
             known_ids[tool_id] = action["source_ref"]
     notes = []
-    if bad and not actions:
+    if bad:
         notes.append(_note("native_corrupt", "部分原生会话记录已损坏，已跳过无法解析的内容。"))
     return actions, notes
 
@@ -233,7 +233,7 @@ def parse_opencode_parts(parts: Sequence[Dict[str, Any]], *, session_id: str = "
         if isinstance(part_id, str) and part_id:
             known_ids[part_id] = action["source_ref"]
     notes = []
-    if bad and not actions:
+    if bad:
         notes.append(_note("native_corrupt", "部分原生会话记录已损坏，已跳过无法解析的内容。"))
     return actions, notes
 
