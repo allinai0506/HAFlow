@@ -274,7 +274,9 @@ class ExperienceCollector:
 
         queued_run_id is the run identity carried by the queue row being
         recovered; it scopes terminal failures so one missing source task
-        cannot mark every pending row of the same task id.
+        cannot mark every pending row of the same task id, and it guards
+        against cross-run settlement when the task id was reused for a newer
+        run (a run mismatch fails closed before any extraction or write).
 
         Returns status dict:
           {"ok": bool, "status": str, "experience_id": Optional[str], "reason": str}
@@ -290,6 +292,18 @@ class ExperienceCollector:
                                               run_id=str(queued_run_id) if queued_run_id else None,
                                               terminal=True)
                 return {"ok": False, "status": "skipped", "reason": "task_not_found"}
+
+            # Identity isolation (Codex review P1): the queue row names the run
+            # whose outcome it holds. When the task id has been reused for a
+            # newer run, the task no longer carries this row's facts; settling
+            # under the current run would upload a cross-run candidate and
+            # strand the queued row. Fail closed before any extraction or
+            # write, scoped to the queued run.
+            task_run_id = str(task.get("run_id") or "")
+            if bound_run_id and task_run_id and task_run_id != bound_run_id:
+                self._note_collection_failure(str(task_id), "run_identity_mismatch",
+                                              run_id=bound_run_id, terminal=True)
+                return {"ok": False, "status": "skipped", "reason": "run_identity_mismatch"}
 
             run_id = str(task.get("run_id") or (outcome.get("run_id") if outcome else "") or f"run_{task_id}")
             outcome_id = outcome.get("outcome_id") if outcome else None

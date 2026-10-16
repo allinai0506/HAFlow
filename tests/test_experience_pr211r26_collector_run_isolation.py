@@ -111,16 +111,50 @@ def test_terminal_other_run_all_columns_unchanged(queued, monkeypatch, terminal)
     assert rows(q)["B"] == before
 
 
-def test_queued_identity_wins_on_task_run_conflict(queued, monkeypatch):
+def test_task_run_conflict_refused_without_cross_run_settlement(queued):
+    """Queued run and the task's current run disagree: refuse, never settle.
+
+    The queued identity no longer merely scopes exception accounting while
+    extraction still runs against the task's current run (Codex review P1:
+    that allowed a cross-run upload and stranded the queued row). The mismatch
+    now fails closed before any extraction or write, recorded terminally
+    against the queued row only.
+    """
     col, _hub, a, _b, q = queued
     before = rows(q)
-    extraction_fault(monkeypatch)
-    assert not col.process_task_settlement(
-        "shared", state_db_path=a, queued_run_id="B"
-    )["ok"]
+    result = col.process_task_settlement("shared", state_db_path=a, queued_run_id="B")
+    assert not result["ok"]
+    assert result["reason"] == "run_identity_mismatch"
     after = rows(q)
     assert after["A"] == before["A"]
-    assert after["B"]["retry_count"] == 1
+    assert after["B"]["status"] == "error"
+    assert "run_identity_mismatch" in after["B"]["last_error"]
+
+
+def test_task_run_reuse_refuses_cross_run_upload(tmp_path):
+    """Task id reused for a new run while the old run's row is pending.
+
+    Reproduces the Codex review scenario without fault injection: enqueue run
+    A, overwrite the source task with run B, then recover. The queued row must
+    not be uploaded under B, no phantom B row may appear, and run A's row must
+    not linger in pending_collection.
+    """
+    a, q = tmp_path / "a.db", tmp_path / "q.db"
+    seed(a, "A")
+    hub = Hub()
+    col = ExperienceCollector(q, hub)
+    assert col.enqueue_task_settlement("shared", outcome("A"), a)["ok"]
+
+    seed(a, "B")  # the task id is reused for a new run before recovery
+
+    stats = col.process_pending()
+    assert stats["processed"] == 0
+    assert stats["failed"] == 1
+    assert hub.entities == {}
+    stored = rows(q)
+    assert set(stored) == {"A"}
+    assert stored["A"]["status"] == "error"
+    assert "run_identity_mismatch" in stored["A"]["last_error"]
 
 
 def test_upload_backoff_and_reentry_keep_one_entity(queued):
