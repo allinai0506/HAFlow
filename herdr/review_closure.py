@@ -19,6 +19,7 @@ A ``review_closure_skipped`` event (written by the audited
 ``--skip-review-closure --note`` bypass) also allows completion.
 """
 
+import json
 import re
 import subprocess
 from pathlib import Path
@@ -94,9 +95,35 @@ def clone_head_sha(clone_path: Any) -> str:
     return (probe.stdout or "").strip().lower()
 
 
+def closure_required(task: Any) -> bool:
+    """True when the workflow's pinned configuration opts into the contract.
+
+    Legacy workflows and custom templates whose wrapup node predates the
+    contract keep their previous behaviour — the invariant must not brick
+    upgrades with repeated auto-accept refusals (Codex review P1). The opt-in
+    marker is the explicit ``review_closure_required`` capability on the
+    wrapup node of the task's pinned workflow configuration.
+    """
+    path = str((task or {}).get("workflow_config") or "").strip()
+    if not path:
+        return False
+    try:
+        with open(path, "r", encoding="utf-8") as stream:
+            config = json.load(stream)
+    except (OSError, ValueError):
+        return False
+    for node in (config.get("nodes") or []):
+        if isinstance(node, dict) and (node.get("id") or node.get("key")) == "wrapup":
+            return bool(node.get("review_closure_required"))
+    return False
+
+
 def check_completion_allowed(store, task: Any) -> Tuple[bool, str]:
     """(ok, refusal_reason) for a wrapup completion transition."""
     task_id = str((task or {}).get("task_id") or "")
+    if not closure_required(task):
+        # Not opted in (legacy workflow / custom template): previous behaviour.
+        return True, ""
     if skipped_recently(store, task_id):
         return True, ""
     payload = latest_receipt(store, task_id)

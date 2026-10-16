@@ -31,9 +31,11 @@ description: Use when implementation is complete and a development branch needs 
 --ci-status pass --findings '<结论>' --head-sha <被审的 40-hex 提交>` 落**机器
 回执**（内容校验：非 deferred 须 CI=pass 且 findings 非空；确实无法创建 PR 时
 `--deferred --reason '<证据>'`）。回执**绑定被审 head**：head 之后再有提交即
-失效，必须重新闭环。HAFlow 的 wrapup 任务在任何 completed 转换（含控制器
-auto-accept 的共享转换网关）都会 fail-closed 校验回执，缺失/失效将被拒绝
-（应急豁免 `--skip-review-closure --note '<审计原因>'`，会记录豁免事件）。
+失效，必须重新闭环。HAFlow 中启用了本契约的模板（wrapup 节点
+`review_closure_required: true`）在任何 completed 转换（含控制器 auto-accept
+的共享转换网关）都会 fail-closed 校验回执，缺失/失效将被拒绝；未被 pin 配置
+启用的旧工作流/自定义模板保持原行为（应急豁免 `--skip-review-closure
+--note '<审计原因>'`，会记录豁免事件）。
 
 **优先级规则：** 项目内有专属收尾脚本时（如 xiyu `scripts/agent-finish-task.sh`）
 优先用项目脚本；否则用本技能的 `scripts/finish-task.sh`。

@@ -10,8 +10,13 @@ Codex review P1s (wf-haflow-1015-01), pinned behaviourally:
    plus the certified 40-hex head SHA;
 3. the receipt is **bound to the reviewed head**: a later commit invalidates
    it (stale receipt must be re-recorded); the audited
-   ``--skip-review-closure --note`` bypass writes a skipped event.
+   ``--skip-review-closure --note`` bypass writes a skipped event;
+4. the contract is **opt-in** via the pinned workflow configuration
+   (``review_closure_required: true`` on the wrapup node): legacy workflows
+   and custom templates keep their previous behaviour instead of being
+   bricked by repeated auto-accept refusals.
 """
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -79,12 +84,30 @@ def commit_more(clone: Path, content: str) -> None:
                    check=True, capture_output=True, text=True)
 
 
+def opted_config(tmp_path: Path) -> Path:
+    config = tmp_path / "workflow.json"
+    config.write_text(json.dumps({
+        "nodes": [
+            {"id": "implementation"},
+            {"id": "wrapup", "review_closure_required": True},
+        ],
+    }))
+    return config
+
+
 @pytest.fixture
 def scene(tmp_path):
+    config = opted_config(tmp_path)
     store = SQLiteStateStore(tmp_path / "state.db")
     store.save_workflow({"workflow_id": "wf-closure", "status": "running"})
     store.save_task({
         "task_id": "wrapup-task", "workflow_id": "wf-closure",
+        "status": "agent_done", "stage": "wrapup", "node": "wrapup",
+        "agent": "qodercli", "workflow_config": str(config),
+    })
+    # Legacy wrapup task: its pinned configuration predates the contract.
+    store.save_task({
+        "task_id": "legacy-wrapup", "workflow_id": "wf-closure",
         "status": "agent_done", "stage": "wrapup", "node": "wrapup",
         "agent": "qodercli",
     })
@@ -159,12 +182,14 @@ def test_receipt_requires_findings_and_head(scene):
 
 def test_stale_receipt_is_rejected_scoped(tmp_path):
     clone = make_git_clone(tmp_path)
+    config = opted_config(tmp_path)
     store = SQLiteStateStore(tmp_path / "state.db")
     store.save_workflow({"workflow_id": "wf-closure", "status": "running"})
     store.save_task({
         "task_id": "wrapup-task", "workflow_id": "wf-closure",
         "status": "agent_done", "stage": "wrapup", "node": "wrapup",
         "agent": "qodercli", "clone_path": str(clone),
+        "workflow_config": str(config),
     })
 
     assert record_valid(store, head=clone_head(clone)).returncode == 0
@@ -217,3 +242,10 @@ def test_non_wrapup_completion_unaffected(scene):
     result = run_cli(scene, "set", "impl-task", "completed")
     assert result.returncode == 0, result.stdout + result.stderr
     assert scene.get_task("impl-task")["status"] == "completed"
+
+
+def test_legacy_or_custom_wrapup_without_capability_is_not_gated(scene):
+    """Upgrades must not brick pinned configurations that never opted in."""
+    legacy = run_cli(scene, "set", "legacy-wrapup", "completed")
+    assert legacy.returncode == 0, legacy.stdout + legacy.stderr
+    assert scene.get_task("legacy-wrapup")["status"] == "completed"

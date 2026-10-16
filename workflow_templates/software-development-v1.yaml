@@ -223,6 +223,7 @@ nodes:
       作为标准收尾程序，产出包含逐步（0-6）状态表与 PR 审核闭环证据的
       收尾报告。汇总成果、风险和交付信息。
     artifact_mode: shared_artifacts
+    review_closure_required: true
     default_integration_mode: none
     default_task_type: docs
     agent_policy:

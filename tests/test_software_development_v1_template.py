@@ -120,6 +120,8 @@ class TestSoftwareDevelopmentV1Template(unittest.TestCase):
         self.assertIn("--paginate", rules)
         # 修复提交再门禁：新 head 必须重新过独立门禁/重建交付身份
         self.assertIn("新的有效交付身份", rules)
+        # 契约启用标记：新工作流 wrapup 节点必须显式 opt-in（兼容旧工作流）
+        self.assertTrue(self.node_map["wrapup"].get("review_closure_required"))
         outputs = self.node_map["wrapup"].get("required_outputs", [])
         self.assertTrue(any("审核闭环证据" in o for o in outputs))
         self.assertTrue(any("CI 状态" in o for o in outputs))
