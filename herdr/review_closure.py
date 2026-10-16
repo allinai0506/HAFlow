@@ -352,12 +352,12 @@ def collect_deferred_evidence(store, task: Any) -> Tuple[bool, str, Optional[Dic
     (Codex review P1s).
     """
     task = task or {}
-    identity, _number, identity_source, _candidate = delivery_identity(store, task)
-    if identity and identity_source == "workflow_delivery_record":
+    identities, _number, identity_source, _candidate = delivery_identity(store, task)
+    if identities and identity_source == "workflow_delivery_record":
         return False, (
-            f"a delivery PR is already recorded for this workflow ({identity}, "
-            "pull_request_created); verify it and record a normal receipt "
-            "(deferred is not justified)"
+            f"a delivery PR is already recorded for this workflow "
+            f"({identities[0]}, pull_request_created); verify it and record a "
+            "normal receipt (deferred is not justified)"
         ), None
     remotes: List[str] = []
     for path in (task.get("clone_path"), task.get("source_repo")):
@@ -410,13 +410,15 @@ def parse_remote_identity(url: Any) -> Optional[Tuple[str, str]]:
     return match.group(1), match.group(2)
 
 
-def delivery_identity(store, task: Any) -> Tuple[str, str, str, str]:
-    """(owner/repo, pr_number, source, candidate_sha) for the task's delivery.
+def delivery_identity(store, task: Any) -> Tuple[List[str], str, str, str]:
+    """(owner/repo identities, expected PR number, source, candidate_sha).
 
     Priority: the workflow's authoritative ``pull_request_created`` delivery
-    record (owner/repo, the exact PR number and the certified candidate SHA),
-    then the readable GitHub remote of the task's source repo / clone (PR
-    number empty).
+    record (exact owner/repo, the PR number and the certified candidate SHA).
+    Without a record, every readable GitHub remote of the task's source repo
+    or clone supplies an acceptable identity — a fork fallback keeps both
+    ``origin`` and ``upstream`` usable instead of depending on remote
+    iteration order (Codex review P1).
     """
     task = task or {}
     workflow_id = str(task.get("workflow_id") or "").strip()
@@ -438,17 +440,22 @@ def delivery_identity(store, task: Any) -> Tuple[str, str, str, str]:
             if parsed:
                 _host, owner, repo, number = parsed
                 return (
-                    f"{owner}/{repo}",
+                    [f"{owner}/{repo}"],
                     str(number),
                     "workflow_delivery_record",
                     str(payload.get("candidate_sha") or "").strip().lower(),
                 )
+    identities: List[str] = []
     for path in (task.get("source_repo"), task.get("clone_path")):
         for url in git_remote_urls(path):
             identity = parse_remote_identity(url)
             if identity:
-                return f"{identity[0]}/{identity[1]}", "", "repository_remote", ""
-    return "", "", "", ""
+                name = f"{identity[0]}/{identity[1]}"
+                if name not in identities:
+                    identities.append(name)
+    if identities:
+        return identities, "", "repository_remote", ""
+    return [], "", "", ""
 
 
 def identity_mismatch(store, task: Any, pr_url: Any, head_sha: Any) -> Optional[str]:
@@ -462,16 +469,16 @@ def identity_mismatch(store, task: Any, pr_url: Any, head_sha: Any) -> Optional[
     if not parsed:
         return "unrecognized PR URL"
     _host, owner, repo, number = parsed
-    identity, expected_number, source, candidate = delivery_identity(store, task)
-    if not identity:
+    identities, expected_number, source, candidate = delivery_identity(store, task)
+    if not identities:
         return (
             "cannot anchor the receipt to an authoritative delivery identity "
             "(no pull_request_created record and no readable GitHub remote)"
         )
-    if identity != f"{owner}/{repo}":
+    if f"{owner}/{repo}" not in identities:
         return (
             f"receipt PR {owner}/{repo} does not match the delivery identity "
-            f"{identity} ({source})"
+            f"({', '.join(identities)}; {source})"
         )
     if expected_number and str(number) != expected_number:
         return (

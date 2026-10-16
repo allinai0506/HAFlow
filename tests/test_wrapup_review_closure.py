@@ -786,3 +786,27 @@ def test_receipt_must_match_recorded_delivery_pr_number(scene):
         pr_url="https://github.com/owner/repo/pull/1",
     )
     assert matching.returncode == 0, matching.stdout + matching.stderr
+
+
+def test_fork_and_upstream_remotes_accept_target_pr(scene):
+    """Fork fallback (origin=fork, upstream=target) must not block the PR."""
+    subprocess.run(
+        ["git", "-C", str(scene.clone), "remote", "set-url", "origin",
+         "git@github.com:forkuser/repo.git"],
+        check=True, capture_output=True, text=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(scene.clone), "remote", "add", "upstream",
+         "https://github.com/owner/repo.git"],
+        check=True, capture_output=True, text=True,
+    )
+    # PR_URL (owner/repo) is the upstream target; it must be accepted.
+    ok = record_valid(scene.store, scene.head)
+    assert ok.returncode == 0, ok.stdout + ok.stderr
+
+    unknown = record_valid(
+        scene.store, scene.head,
+        pr_url="https://github.com/third/repo/pull/1",
+    )
+    assert unknown.returncode == 2
+    assert "delivery identity" in (unknown.stdout + unknown.stderr)
