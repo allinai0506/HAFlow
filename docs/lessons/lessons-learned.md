@@ -6171,6 +6171,16 @@ if any(op['status'] not in {'resolved','superseded'}
 
 **验证命令 / 关联证据**：`python3.13 -m pytest -q tests/test_control_convergence.py tests/test_node_dispatch_contract.py tests/test_downstream_dispatch_contract.py tests/test_dispatch_recovery_ui.py tests/test_terminal_workflow_dispatch_recovery.py tests/test_scheduler_facts.py tests/test_scheduler_dispatch_e2e.py tests/test_workflow_repair_contracts.py tests/test_dispatch_idempotency.py tests/test_launch_reconcile_cli.py`：354 passed，12 subtests。基线 5 个 RED；隔离副本分别撤回候选合成、拒绝回执消费、启动前结案、PASS 接管和无变化写保护，对应断言均重新失败。证据在本修复沙盒 `.omc/evidence/`；未部署、未修写生产数据。
 
+#### 2026-10-16：审查补证——身份必须来自调用方，状态集合必须复用
+
+**问题背景**：PR #222 Bot 复现旧 attempt 被 record_intent 覆盖为当前值，以及 committed/integrated PASS 被等待接管漏掉。上一轮回执消费测试与 cleaned 正例未覆盖这两条入口。
+
+**经验教训**：消费端绑定 attempt 不能替代生产端保留并校验输入身份；把旧命令重标成当前轮次等于伪造授权。局部复制完成状态子集会让合法生命周期卡住。
+
+**操作规范**：CLI 两次 begin 与协调器均透传 attempt；意图写入、资源更新、登记比较同一授权轮次，不推断重试身份。完成判定复用 transitions 的集合，保留候选和业务验证条件。
+
+**验证命令 / 关联证据**：`tests/test_control_convergence.py` 新增旧命令重放、真实 CLI Router 前拒绝、当前第二轮正常登记、非法/缺省 attempt、五种完成状态测试；`.omc/evidence/bot-review-red.log` 为 6 个业务 RED，修复后执行完整专项和全量。审查线程为 PR #222 discussion_r4289397810 / discussion_r4289397812。
+
 ### 首派回执与后续恢复的生命周期冲突（#156）
 
 **现象**：首个Task故障作废后，扫描识别需要补派，但resolved首派记录不允许claim，队列长期为空。

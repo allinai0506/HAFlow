@@ -61,3 +61,19 @@ python3.13 -m pytest -q tests/test_control_convergence.py tests/test_node_dispat
 发布时应保留上一不可变 release，部署目标提交后核验服务实际路径/指纹；仅 kickstart 可能仍运行旧快照。观察当前 operation 的 claim → typed receipt / intent → Task 登记 → resolved，以及 candidate inventory 和重复扫描事件量。回滚应恢复上一 release，并保留新旧启动证据，不复活旧授权或删除未知意图。
 
 本沙盒未登记为原生 Task，因此没有 `herdr-task verify-baseline` 回执；固定基线 diff 只作辅助审阅。没有可调用的自动复杂度评分工具，采用新文件静态检查与独立调用链审查，不伪报自动健康门禁通过。
+
+## PR #222 Bot 审查追加修复
+
+`chatgpt-codex-connector` 对提交 `e645a90` 指出两项有效缺陷：P1 为调用方 `--dispatch-attempt` 未进入 begin_launch_intent，而 record_intent 将其覆盖为当前轮次，迟到旧命令可能被新授权接纳；P2 为 PASS 接管复制了不完整的生命周期集合，遗漏 committed/integrated。
+
+P1 修复贯穿直派 CLI、恢复后再次 begin、协调器提示与持久意图，事务比较精确 attempt 并保留原值。资源更新和 Task 登记也检查同一意图的 attempt，旧轮次不得更新证据或登记。历史省略 attempt 的调用最多表示第一轮 1，不允许取当前重试轮次；旧未知现场仍须核验。P2 复用 transitions.COMPLETED_TASK_STATUSES，保留 execution/candidate/episode/verified SHA/verdict/角色校验。
+
+新增回归在修复前出现 6 个业务断言失败：committed/integrated 接管、三种 started 状态的旧 attempt、旧意图资源更新。另补真实 CLI 在 Router 前拒绝重放、当前第二轮正常登记、缺省/非法 attempt、协调器透传及旧意图登记拒绝。旧测试只覆盖回执消费与第一轮意图，未验证输入 attempt 是否保持；仅对 cleaned 状态的正例也掩盖了生命周期集合分叉。独立复查和全量结果由本次提交前补证，不能沿用上一提交通过结果。
+
+兼容复查另覆盖历史无 attempt 的 allocating 意图：资源更新与登记均只固定解释为首轮 1。既有合法 supersedes 替代允许在尚未 claim、计数为 0 时启动，此狭窄入口也固定对应首轮 1；不根据当前重试轮次补身份。普通未启动责任仍拒绝，第二轮及以后精确比较当前授权轮次。原替代流程测试保持不变，新增首轮替代登记与错误第二轮的对照。
+
+进一步覆盖旧实现确曾持久化的合法替代首轮 `dispatch_attempt=0`：只从持久意图恢复此历史值并固定解释为首轮 1，不接纳新命令的 0；在计数 0/1 可恢复资源与登记，计数 2 起拒绝。新增 counter 0/1/2 × 资源更新/登记/恢复入口九项对照；第三轮独立复查 LGTM，无已确认剩余阻塞。分别撤回 P1 校验与 P2 统一集合后，对应断言重新失败（exit 1），证据 `bot-counterfactual.json`。最终专项和全量结果待本轮运行结束补录。
+
+实际发布链补证：协调器原提示硬编码 `~/HAFlow/bin/herdr-task`，而部署的 Controller 运行于不可变 release，原工作区 CLI 不一定支持新 attempt 参数。现复用已有 TASK_MANAGER，并为 list/launch 路径加引号；真实 Controller 消息回归修前失败、修后通过，独立增量复查 LGTM。期间已启动的旧版全量因源码变化中止并作废，最终验证重新运行。
+
+最终验证：专项 384 passed、12 subtests（67.13 秒）；全量 4421 passed、2 skipped、3 warnings、163 subtests（777.48 秒，exit 0）。compileall、CLI AST、导入检查、diff --check 通过。两组撤回修复反证均为目标断言失败。当前结果绑定 `.omc/evidence/bot-source-manifest.json`，旧中止运行不计入通过。

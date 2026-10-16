@@ -2586,3 +2586,10 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 补充工程教训 §133，保留未知现场与部分批次禁止重发边界。
 - Evidence: `tests/test_control_convergence.py`；专项 354 passed，12 subtests，五个关键机制撤回后均复现失败；独立复查第三轮 LGTM。
 - 尚未推送、合并、部署、重启服务或修写生产数据库；不代表原工作流已自动推进。
+
+### 2026-10-16：PR #222 P1/P2 审查修复
+
+- Updated [[workflow-progress-recovery]]：调用方 attempt 全链路校验、资源/登记拒绝旧轮次，完成状态复用统一集合。
+- 两项 Bot 缺陷经业务 RED 确认；补真实 CLI、正常第二轮及五种完成状态验收。新提交专项/全量结果另行绑定，不复用旧版本回执。
+
+- P1/P2 最终补证：384 项专项、4421 项全量通过（2 skipped，163 subtests），独立复查收敛；P1/P2 撤回修复后各自回归重新失败。协调器命令同步改用同版本 TASK_MANAGER。

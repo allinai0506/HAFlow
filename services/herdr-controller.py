@@ -7456,7 +7456,7 @@ task_type:
 
 1. 首先执行：
 
-   ~/HAFlow/bin/herdr-task list --workflow-id {workflow_id}
+   "{TASK_MANAGER}" list --workflow-id {workflow_id}
 
    阅读当前 Workflow 已完成节点的真实成果。
 
@@ -7480,7 +7480,7 @@ task_type:
 
 5. 创建 Task 必须使用：
 
-   ~/HAFlow/bin/herdr-task launch
+   "{TASK_MANAGER}" launch
 
    并指定：
 
@@ -7488,7 +7488,7 @@ task_type:
    --node {next_stage}
    --source {project_root}
 {candidate_flags}
-{('   --dispatch-operation-id ' + str(dispatch_op['id'])) if dispatch_op else ''}
+{('   --dispatch-operation-id ' + str(dispatch_op['id']) + ' --dispatch-attempt ' + str(dispatch_op['attempts'])) if dispatch_op else ''}
 {('   替代派发：每个前序任务各建一个替代Task，分别携带 --supersedes ' + ', --supersedes '.join(p['task_id'] for p in dispatch_op['payload'].get('predecessors', []))) if dispatch_op and dispatch_op['payload'].get('predecessors') else ''}
 
 6. 默认使用本节点 policy：

@@ -378,6 +378,12 @@ def validate_launch(conn, operation_id, workflow_id, node_id, now, *, intent=Non
     allow_unstarted = can_launch_with_replacement(op, intent, tasks)
     reasons = _launch_refusals(conn, op, workflow, config, tasks, node_id, now,
                                allow_unstarted=allow_unstarted)
+    if intent is not None and 'dispatch_attempt' in intent:
+        attempt = intent['dispatch_attempt']
+        # A valid explicit replacement may own the first launch before claim.
+        expected_attempt = 1 if allow_unstarted and not op['started'] and op['attempts'] == 0 else op['attempts']
+        if type(attempt) is not int or attempt < 1 or attempt != expected_attempt:
+            reasons.append('dispatch attempt is stale or missing')
     if reasons:
         raise ValueError('dispatch operation does not authorize this launch: ' + '; '.join(reasons))
     return op, workflow
@@ -385,6 +391,8 @@ def validate_launch(conn, operation_id, workflow_id, node_id, now, *, intent=Non
 
 def record_intent(db_path, intent, now):
     from . import state_db
+    # Historical absence means first attempt only, never the latest retry.
+    intent = {'dispatch_attempt': 1, **intent}
     with rs._transaction(db_path) as conn:
         op, workflow = validate_launch(conn, intent['dispatch_operation_id'], intent['workflow_id'], intent['node_id'], now, intent=intent)
         if intent.get('execution_id') != workflow['execution_id'] or not intent['resources'].get('run_id'):
@@ -394,7 +402,6 @@ def record_intent(db_path, intent, now):
         predecessors = op['payload'].get('predecessors') or []
         if predecessors and intent.get('supersedes') not in {p['task_id'] for p in predecessors}:
             raise ValueError('replacement dispatch requires its predecessor')
-        intent['dispatch_attempt'] = op['attempts']
         state_db.record_event({'event_type': 'launch_intent', 'payload': intent,
             'workflow_id': intent['workflow_id'], 'node_id': intent['node_id'], 'task_id': intent['key'],
             'source': 'launch', 'timestamp': now}, conn=conn)
@@ -414,6 +421,13 @@ def validate_task_registration(conn, task, now):
     row = conn.execute("SELECT payload_json FROM events WHERE workflow_id=? AND event_type='launch_intent' AND source='launch' AND json_extract(payload_json,'$.intent_id')=? ORDER BY id DESC LIMIT 1",
                        (task['workflow_id'], task.get('launch_intent_id'))).fetchone()
     intent = json.loads(row['payload_json']) if row else {}
+    expected_attempt = 1 if not op['started'] and op['attempts'] == 0 else op['attempts']
+    intent_attempt = intent.get('dispatch_attempt', 1)
+    if (intent_attempt == 0 and op['attempts'] in (0, 1)
+            and intent.get('supersedes') and intent['supersedes'] == task.get('supersedes')):
+        intent_attempt = 1
+    if intent_attempt != expected_attempt:
+        raise ValueError('dispatch task intent belongs to another dispatch attempt')
     predecessors = op['payload'].get('predecessors') or []
     if predecessors and (task.get('supersedes') != intent.get('supersedes')
                          or task.get('supersedes') not in {p['task_id'] for p in predecessors}):

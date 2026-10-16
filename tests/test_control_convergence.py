@@ -6,9 +6,13 @@ import os
 import sqlite3
 import subprocess
 import sys
+import time
 from types import SimpleNamespace
 from pathlib import Path
 from tests.test_node_dispatch_contract import scene as scene
+from tests.test_dispatch_idempotency import (
+    launch_transport_scene as launch_transport_scene,
+)
 from tests.test_downstream_dispatch_contract import (
     direct_scene,
     downstream,
@@ -132,7 +136,13 @@ def test_claim_of_unchanged_wait_should_not_write_again(scene):
     )
 
 
-def test_waiting_unstarted_operation_should_adopt_matching_completed_manual_task(scene):
+@pytest.mark.parametrize(
+    "completed_status",
+    ["completed", "committed", "integrated", "cleanup_ready", "cleaned"],
+)
+def test_waiting_unstarted_operation_should_adopt_matching_completed_manual_task(
+    scene, completed_status
+):
     downstream(scene)
     nd.reconcile_workflow(scene.store.db_path, "wf", now=1000)
     op = op_for(scene)
@@ -152,7 +162,7 @@ def test_waiting_unstarted_operation_should_adopt_matching_completed_manual_task
             "node": "test",
             "execution_id": "execution-1",
             "run_id": "manual-run",
-            "status": "cleaned",
+            "status": completed_status,
             "candidate_sha": SHA,
             "verified_candidate_sha": SHA,
             "stage_verdict": "pass",
@@ -618,6 +628,7 @@ def test_proven_busy_then_registration_makes_forward_progress_once(scene, monkey
             task_id=arg("--task-id"),
             candidate_sha=SHA,
             dispatch_operation_id=op_id,
+            dispatch_attempt=int(arg("--dispatch-attempt")),
             execution_id="execution-1",
             run_id="only-run",
         )["intent"]
@@ -874,3 +885,436 @@ def test_preallocation_settlement_releases_only_owned_reservation(scene, monkeyp
             )
         )
     assert released == ["owned"]
+
+
+@pytest.mark.parametrize("status", ["running", "awaiting_result", "waiting_human"])
+def test_replayed_prior_attempt_cannot_write_launch_intent(scene, status):
+    downstream(scene)
+    nd.reconcile_workflow(scene.store.db_path, "wf", now=1000)
+    op = op_for(scene)
+    nd.claim(scene.store.db_path, op["id"], "owner", now=1000)
+    op = nd.start(scene.store.db_path, op["id"], "owner", now=1000)
+    # Model a newer authorised attempt with the same operation/episode.
+    with recovery_store._transaction(scene.store.db_path) as conn:
+        nd._write(
+            conn, op, status, {}, 1010, started=1, attempts=2, owner="owner", lease=1100
+        )
+    before = scene.store.list_events(workflow_id="wf", event_type="launch_intent")
+    with pytest.raises(ValueError, match="attempt"):
+        nd.record_intent(
+            scene.store.db_path,
+            dict(
+                key="stale-key",
+                intent_id="stale-intent",
+                workflow_id="wf",
+                node_id="test",
+                task_id="stale",
+                candidate_sha=SHA,
+                dispatch_operation_id=op["id"],
+                dispatch_attempt=1,
+                execution_id="execution-1",
+                resources={"run_id": "stale-run"},
+                phase="allocating",
+            ),
+            1010,
+        )
+    assert (
+        scene.store.list_events(workflow_id="wf", event_type="launch_intent") == before
+    )
+    assert scene.store.get_task("stale") is None
+
+
+def test_old_attempt_cannot_register_or_update_resources(scene):
+    from herdr.task_resources import begin_launch_intent, record_launch_resources
+
+    downstream(scene)
+    nd.reconcile_workflow(scene.store.db_path, "wf", now=1000)
+    op = op_for(scene)
+    nd.claim(scene.store.db_path, op["id"], "owner", now=1000)
+    op = nd.start(scene.store.db_path, op["id"], "owner", now=1000)
+    intent = begin_launch_intent(
+        scene.store,
+        workflow_id="wf",
+        node_id="test",
+        task_id="old",
+        candidate_sha=SHA,
+        dispatch_operation_id=op["id"],
+        execution_id="execution-1",
+        run_id="old-run",
+        now=1000,
+    )["intent"]
+    with recovery_store._transaction(scene.store.db_path) as conn:
+        nd._write(
+            conn,
+            op,
+            "running",
+            {},
+            1010,
+            started=1,
+            attempts=2,
+            owner="owner",
+            lease=1100,
+        )
+    with pytest.raises(ValueError, match="attempt"):
+        record_launch_resources(
+            scene.store, intent, {"planned_clone_path": "/tmp/old"}, now=1010
+        )
+    with pytest.raises(ValueError, match="attempt"):
+        scene.store.save_task(
+            dict(
+                task_id="old",
+                workflow_id="wf",
+                node="test",
+                execution_id="execution-1",
+                run_id="old-run",
+                status="working",
+                candidate_sha=SHA,
+                dispatch_operation_id=op["id"],
+                launch_intent_id=intent["intent_id"],
+            )
+        )
+    assert scene.store.get_task("old") is None
+
+
+@pytest.mark.parametrize("supplied", [1, None, 0, True, "2"])
+def test_begin_launch_never_infers_retry_attempt(scene, supplied):
+    from herdr.task_resources import begin_launch_intent
+
+    downstream(scene)
+    nd.reconcile_workflow(scene.store.db_path, "wf", now=1000)
+    op = op_for(scene)
+    nd.claim(scene.store.db_path, op["id"], "owner", now=1000)
+    op = nd.start(scene.store.db_path, op["id"], "owner", now=1000)
+    with recovery_store._transaction(scene.store.db_path) as conn:
+        nd._write(
+            conn,
+            op,
+            "running",
+            {},
+            1010,
+            started=1,
+            attempts=2,
+            owner="owner",
+            lease=1100,
+        )
+    with pytest.raises(ValueError, match="attempt"):
+        begin_launch_intent(
+            scene.store,
+            workflow_id="wf",
+            node_id="test",
+            task_id="old",
+            candidate_sha=SHA,
+            dispatch_operation_id=op["id"],
+            dispatch_attempt=supplied,
+            execution_id="execution-1",
+            run_id="old-run",
+            now=1010,
+        )
+    intent = begin_launch_intent(
+        scene.store,
+        workflow_id="wf",
+        node_id="test",
+        task_id="current",
+        candidate_sha=SHA,
+        dispatch_operation_id=op["id"],
+        dispatch_attempt=2,
+        execution_id="execution-1",
+        run_id="current-run",
+        now=1010,
+    )["intent"]
+    assert intent["dispatch_attempt"] == 2
+    scene.store.save_task(
+        dict(
+            task_id="current",
+            workflow_id="wf",
+            node="test",
+            status="working",
+            run_id="current-run",
+            execution_id="execution-1",
+            candidate_sha=SHA,
+            dispatch_operation_id=op["id"],
+            launch_intent_id=intent["intent_id"],
+        )
+    )
+    assert scene.store.get_task("current")["run_id"] == "current-run"
+
+
+def test_coordinator_prompt_preserves_attempt(scene):
+    scene.ctrl._handle_coordinator_item(scene.item)
+    op = op_for(scene, "implementation")
+    prompt = " ".join(scene.sent[0])
+    assert f"--dispatch-attempt {op['attempts']}" in prompt
+    assert f'"{scene.ctrl.TASK_MANAGER}" launch' in prompt
+    assert f'"{scene.ctrl.TASK_MANAGER}" list' in prompt
+    assert "~/HAFlow/bin/herdr-task" not in prompt
+
+
+@pytest.mark.parametrize("attempt", [1, 2])
+def test_actual_cli_threads_attempt_before_router(
+    launch_transport_scene, monkeypatch, attempt
+):
+    cli, store, args = launch_transport_scene
+    wf = store.get_workflow("wf")
+    wf["execution_id"] = "execution-1"
+    store.save_workflow(wf)
+    nd.reconcile_workflow(store.db_path, "wf")
+    op = nd.operation_for_node(store.db_path, "wf", "n")
+    nd.claim(store.db_path, op["id"], "owner")
+    op = nd.start(store.db_path, op["id"], "owner")
+    with recovery_store._transaction(store.db_path) as conn:
+        nd._write(
+            conn,
+            op,
+            "running",
+            {},
+            time.time(),
+            started=1,
+            attempts=2,
+            owner="owner",
+            lease=time.time() + 100,
+        )
+    args.dispatch_operation_id = op["id"]
+    args.dispatch_attempt = attempt
+    called = []
+
+    class StopRouter(Exception):
+        pass
+
+    def router(*a, **kw):
+        called.append(True)
+        raise StopRouter()
+
+    monkeypatch.setattr(cli, "choose_agent", router)
+    if attempt == 1:
+        with pytest.raises(SystemExit) as exc:
+            cli.launch_task(args)
+        assert exc.value.code == 2
+        assert not called
+        assert not store.list_events(event_type="launch_intent")
+    else:
+        with pytest.raises(StopRouter):
+            cli.launch_task(args)
+        assert called
+        assert all(
+            e["payload"]["dispatch_attempt"] == 2
+            for e in store.list_events(event_type="launch_intent")
+        )
+    assert not store.list_tasks()
+
+
+@pytest.mark.parametrize("current_attempt", [1, 2])
+def test_legacy_intent_missing_attempt_only_authorizes_first_round(
+    scene, current_attempt
+):
+    from herdr.task_resources import begin_launch_intent, record_launch_resources
+
+    downstream(scene)
+    nd.reconcile_workflow(scene.store.db_path, "wf", now=1000)
+    op = op_for(scene)
+    nd.claim(scene.store.db_path, op["id"], "owner", now=1000)
+    op = nd.start(scene.store.db_path, op["id"], "owner", now=1000)
+    intent = begin_launch_intent(
+        scene.store,
+        workflow_id="wf",
+        node_id="test",
+        task_id="legacy",
+        candidate_sha=SHA,
+        dispatch_operation_id=op["id"],
+        execution_id="execution-1",
+        run_id="legacy-run",
+        now=1000,
+    )["intent"]
+    del intent["dispatch_attempt"]
+    scene.store.record_event(
+        "launch_intent",
+        intent,
+        workflow_id="wf",
+        task_id=intent["key"],
+        source="launch",
+        timestamp=1001,
+    )
+    if current_attempt == 2:
+        with recovery_store._transaction(scene.store.db_path) as conn:
+            nd._write(
+                conn,
+                op,
+                "running",
+                {},
+                1010,
+                started=1,
+                attempts=2,
+                owner="owner",
+                lease=1100,
+            )
+        with pytest.raises(ValueError, match="attempt"):
+            record_launch_resources(
+                scene.store, intent, {"planned_clone_path": "/tmp/legacy"}, now=1010
+            )
+    else:
+        record_launch_resources(
+            scene.store, intent, {"planned_clone_path": "/tmp/legacy"}, now=1010
+        )
+        latest = scene.store.list_events(
+            task_id=intent["key"],
+            event_type="launch_intent",
+            source="launch",
+            limit=1,
+            desc=True,
+        )[0]["payload"]
+        assert latest["dispatch_attempt"] == 1
+        scene.store.save_task(
+            dict(
+                task_id="legacy",
+                workflow_id="wf",
+                node="test",
+                status="working",
+                run_id="legacy-run",
+                execution_id="execution-1",
+                candidate_sha=SHA,
+                dispatch_operation_id=op["id"],
+                launch_intent_id=intent["intent_id"],
+            )
+        )
+        assert scene.store.get_task("legacy")["run_id"] == "legacy-run"
+
+
+@pytest.mark.parametrize("attempt", [0, 1, 2])
+def test_unclaimed_explicit_replacement_only_authorizes_first_attempt(scene, attempt):
+    from herdr.task_resources import begin_launch_intent
+
+    nd.reconcile_workflow(scene.store.db_path, "wf", now=1000)
+    op = op_for(scene, "implementation")
+    scene.store.save_task(
+        dict(
+            task_id="old",
+            workflow_id="wf",
+            node="implementation",
+            execution_id="execution-1",
+            run_id="old-run",
+            status="superseded",
+            dispatch_role="worker",
+            dispatch_round=1,
+        )
+    )
+    kwargs = dict(
+        workflow_id="wf",
+        node_id="implementation",
+        task_id="replacement",
+        dispatch_operation_id=op["id"],
+        dispatch_attempt=attempt,
+        execution_id="execution-1",
+        run_id="replacement-run",
+        supersedes="old",
+        dispatch_round=2,
+        now=1000,
+    )
+    if attempt != 1:
+        with pytest.raises(ValueError, match="attempt"):
+            begin_launch_intent(scene.store, **kwargs)
+        assert not scene.store.list_events(event_type="launch_intent")
+    else:
+        intent = begin_launch_intent(scene.store, **kwargs)["intent"]
+        assert intent["dispatch_attempt"] == 1
+        scene.store.save_task(
+            dict(
+                task_id="replacement",
+                workflow_id="wf",
+                node="implementation",
+                execution_id="execution-1",
+                run_id="replacement-run",
+                status="working",
+                supersedes="old",
+                dispatch_round=2,
+                dispatch_role="worker",
+                dispatch_operation_id=op["id"],
+                launch_intent_id=intent["intent_id"],
+            )
+        )
+        assert scene.store.get_task("replacement")["run_id"] == "replacement-run"
+
+
+@pytest.mark.parametrize("counter", [0, 1, 2])
+@pytest.mark.parametrize("action", ["resources", "registration", "resume"])
+def test_persisted_legacy_zero_attempt_replacement(scene, counter, action):
+    from herdr.task_resources import begin_launch_intent, record_launch_resources
+
+    nd.reconcile_workflow(scene.store.db_path, "wf", now=1000)
+    op = op_for(scene, "implementation")
+    scene.store.save_task(
+        dict(
+            task_id="old",
+            workflow_id="wf",
+            node="implementation",
+            execution_id="execution-1",
+            run_id="old-run",
+            status="superseded",
+            dispatch_role="worker",
+            dispatch_round=1,
+        )
+    )
+    kwargs = dict(
+        workflow_id="wf",
+        node_id="implementation",
+        task_id="replacement",
+        dispatch_operation_id=op["id"],
+        execution_id="execution-1",
+        run_id="replacement-run",
+        supersedes="old",
+        dispatch_round=2,
+        now=1000,
+    )
+    intent = begin_launch_intent(scene.store, **kwargs)["intent"]
+    intent["dispatch_attempt"] = 0  # Actual value persisted by pre-fix implementation.
+    scene.store.record_event(
+        "launch_intent",
+        intent,
+        workflow_id="wf",
+        task_id=intent["key"],
+        source="launch",
+        timestamp=1001,
+    )
+    if counter > 0:
+        with recovery_store._transaction(scene.store.db_path) as conn:
+            nd._write(
+                conn,
+                op,
+                "running",
+                {"deadline_at": 1900},
+                1010,
+                started=1,
+                attempts=counter,
+                owner="owner",
+                lease=1100,
+            )
+
+    def perform():
+        if action == "resources":
+            return record_launch_resources(
+                scene.store, intent, {"planned_clone_path": "/tmp/legacy"}, now=1010
+            )
+        if action == "resume":
+            return begin_launch_intent(
+                scene.store, dispatch_attempt=max(1, counter), **kwargs
+            )
+        return scene.store.save_task(
+            dict(
+                task_id="replacement",
+                workflow_id="wf",
+                node="implementation",
+                execution_id="execution-1",
+                run_id="replacement-run",
+                status="working",
+                supersedes="old",
+                dispatch_role="worker",
+                dispatch_round=2,
+                dispatch_operation_id=op["id"],
+                launch_intent_id=intent["intent_id"],
+            )
+        )
+
+    if counter == 2:
+        with pytest.raises(ValueError, match="attempt"):
+            perform()
+        assert scene.store.get_task("replacement") is None
+    else:
+        perform()

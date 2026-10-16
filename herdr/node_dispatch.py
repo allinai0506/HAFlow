@@ -1,6 +1,7 @@
 """Pure node dispatch identity, registration evidence and wait projection."""
 import hashlib
 import json
+from .transitions import COMPLETED_TASK_STATUSES
 
 WAIT_SECONDS = 900
 CHECK_SECONDS = 30
@@ -196,7 +197,7 @@ def result(operation, workflow, config, tasks, now):
             expected = operation['payload'].get('candidate_sha')
             inventory_owned = inventory_owned and roles.issubset({t.get('dispatch_role') for t in existing})
             inventory_owned = inventory_owned and all(
-                t.get('status') in {'completed', 'cleanup_ready', 'cleaned'}
+                t.get('status') in COMPLETED_TASK_STATUSES
                 and t.get('stage_verdict') == 'pass'
                 and (not expected or (t.get('verified_candidate_sha') == expected
                     and t.get('candidate_episode_id') == operation['payload'].get('candidate_episode_id')))

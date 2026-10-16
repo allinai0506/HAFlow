@@ -3381,6 +3381,7 @@ def _launch_task(args):
                                     dispatch_round=args.dispatch_round, task_id=args.task_id,
                                     supersedes=getattr(args, "supersedes", None),
                                     dispatch_operation_id=getattr(args, "dispatch_operation_id", None),
+                                    dispatch_attempt=getattr(args, "dispatch_attempt", None),
                                     run_id=run_id, execution_id=getattr(args, "execution_id", None))
     except ValueError as exc:
         print(f"[DISPATCH REJECTED] {exc}")
@@ -3390,7 +3391,7 @@ def _launch_task(args):
         recovered = recover_launch_resources(store, claim['intent'])
         if recovered['status'] == 'resources_absent':
             release_agent_reservation(claim['intent']['task_id'])
-            claim = begin_launch_intent(store, workflow_id=args.workflow_id, node_id=node_id, role=args.dispatch_role, candidate_sha=candidate, dispatch_round=args.dispatch_round, task_id=args.task_id, supersedes=getattr(args, 'supersedes', None), dispatch_operation_id=getattr(args, 'dispatch_operation_id', None), run_id=run_id, execution_id=getattr(args, 'execution_id', None))
+            claim = begin_launch_intent(store, workflow_id=args.workflow_id, node_id=node_id, role=args.dispatch_role, candidate_sha=candidate, dispatch_round=args.dispatch_round, task_id=args.task_id, supersedes=getattr(args, 'supersedes', None), dispatch_operation_id=getattr(args, 'dispatch_operation_id', None), dispatch_attempt=getattr(args, 'dispatch_attempt', None), run_id=run_id, execution_id=getattr(args, 'execution_id', None))
     if claim['status'] != 'claimed':
         if claim['status'] == 'duplicate':
             if committed_recovery:
@@ -8347,7 +8348,7 @@ def main():
     launch.add_argument("--artifact-mode", choices=["repository_changes", "shared_artifacts"])
     launch.add_argument("--dispatch-role", default=None, help="Stable node role shared by automatic/manual launches")
     launch.add_argument("--dispatch-operation-id", type=int, default=None, help="Bind coordinator dispatch to its durable operation")
-    launch.add_argument("--dispatch-attempt", type=int, default=None, help="Bind a pre-allocation rejection to one controller attempt")
+    launch.add_argument("--dispatch-attempt", type=int, default=None, help="Bind launch authorization to one controller attempt")
     launch.add_argument("--dispatch-round", type=int, default=None, help="New rounds require --supersedes")
     launch.add_argument("--task-id", required=True)
     launch.add_argument("--workflow-id", required=True)
