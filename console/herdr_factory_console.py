@@ -6521,6 +6521,382 @@ body {
   flex-shrink: 0;
 }
 
+/* --- Enterprise Experience Hub (企业经验中心) Modern Typography & Table --- */
+.exp-shell-wrap {
+  padding: 24px 32px 80px 32px;
+  width: 100%;
+  box-sizing: border-box;
+}
+.exp-page-header {
+  margin-bottom: 24px;
+}
+.exp-header-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 20px;
+  flex-wrap: wrap;
+}
+.exp-title-area h2 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 700;
+  color: #0f172a;
+  letter-spacing: -0.02em;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.exp-title-badge {
+  font-size: 12px;
+  font-weight: 700;
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: #ede9fe;
+  color: #6d28d9;
+  letter-spacing: 0.5px;
+}
+.exp-subtitle {
+  margin: 8px 0 0;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.exp-toolbar-panel {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 8px 16px;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
+  flex-wrap: wrap;
+}
+.exp-auth-group, .exp-filter-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.exp-input {
+  padding: 4px 8px;
+  border: 1px solid #cbd5e1;
+  border-radius: 4px;
+  font-size: 12px;
+  background: #ffffff;
+  color: #0f172a;
+  outline: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.exp-input:focus {
+  border-color: #6366f1;
+  box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.12);
+}
+.exp-btn-base {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 8px 16px;
+  border-radius: 4px;
+  border: none;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.exp-btn-primary {
+  background: #4f46e5;
+  color: #ffffff;
+}
+.exp-btn-primary:hover {
+  background: #4338ca;
+}
+.exp-btn-secondary {
+  background: #f1f5f9;
+  color: #334155;
+  border: 1px solid #cbd5e1;
+}
+.exp-btn-secondary:hover {
+  background: #e2e8f0;
+  color: #0f172a;
+}
+.exp-btn-approve {
+  background: #10b981;
+  color: #ffffff;
+  box-shadow: 0 1px 2px rgba(16, 185, 129, 0.2);
+}
+.exp-btn-approve:hover {
+  background: #059669;
+}
+.exp-btn-reject {
+  background: #ffffff;
+  color: #ef4444;
+  border: 1px solid #fca5a5;
+}
+.exp-btn-reject:hover {
+  background: #fef2f2;
+}
+.exp-btn-revoke {
+  background: #ffffff;
+  color: #64748b;
+  border: 1px solid #cbd5e1;
+}
+.exp-btn-revoke:hover {
+  background: #f8fafc;
+  color: #dc2626;
+  border-color: #fca5a5;
+}
+.exp-group-divider {
+  width: 1px;
+  height: 20px;
+  background: #e2e8f0;
+}
+.exp-section {
+  margin-bottom: 32px;
+}
+.exp-section-title-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #e2e8f0;
+}
+.exp-section-title-bar h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 700;
+  color: #1e293b;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.exp-count-badge {
+  font-size: 12px;
+  font-weight: 700;
+  padding: 4px 8px;
+  border-radius: 12px;
+}
+.exp-count-amber {
+  background: #fef3c7;
+  color: #92400e;
+}
+.exp-count-emerald {
+  background: #d1fae5;
+  color: #065f46;
+}
+.exp-card {
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.03);
+  margin-bottom: 16px;
+  overflow: hidden;
+  transition: box-shadow 0.15s ease, transform 0.15s ease;
+}
+.exp-card:hover {
+  box-shadow: 0 4px 16px rgba(15, 23, 42, 0.06);
+}
+.exp-card-candidate {
+  border-left: 4px solid #f59e0b;
+}
+.exp-card-published {
+  border-left: 4px solid #10b981;
+}
+.exp-card-header {
+  padding: 16px 20px;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  background: #fafbfc;
+  border-bottom: 1px solid #f1f5f9;
+}
+.exp-card-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.exp-card-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 700;
+  color: #0f172a;
+  line-height: 1.45;
+}
+.exp-version-pill {
+  font-size: 12px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: #ecfdf5;
+  color: #047857;
+  border: 1px solid #a7f3d0;
+}
+.exp-meta-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+.exp-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  color: #475569;
+}
+.exp-chip strong {
+  color: #1e293b;
+}
+.exp-card-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-shrink: 0;
+}
+.exp-card-body {
+  padding: 20px;
+  color: #334155;
+  font-size: 12px;
+  line-height: 1.65;
+}
+.exp-section-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 16px;
+  font-weight: 700;
+  margin: 16px 0 8px 0;
+  padding-bottom: 8px;
+  border-bottom: 2px solid #e2e8f0;
+}
+.exp-section-header:first-child {
+  margin-top: 0;
+}
+.exp-section-lesson {
+  color: #b45309;
+  border-bottom-color: #fde68a;
+}
+.exp-section-rule {
+  color: #047857;
+  border-bottom-color: #a7f3d0;
+}
+.exp-section-icon {
+  font-size: 16px;
+}
+.exp-table-wrapper {
+  overflow-x: auto;
+  margin: 12px 0 16px 0;
+  border-radius: 8px;
+  border: 1px solid #e2e8f0;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.02);
+}
+.exp-table {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+  font-size: 12px;
+  table-layout: auto;
+}
+.exp-table th {
+  background: #f8fafc;
+  color: #475569;
+  font-weight: 700;
+  padding: 8px 16px;
+  border-bottom: 1px solid #e2e8f0;
+  white-space: nowrap;
+}
+.exp-table td {
+  padding: 12px 16px;
+  border-bottom: 1px solid #f1f5f9;
+  vertical-align: top;
+  line-height: 1.6;
+}
+.exp-table tr:last-child td {
+  border-bottom: none;
+}
+.exp-table tr:hover td {
+  background: #fafbfc;
+}
+.exp-col-issue {
+  color: #991b1b;
+  font-weight: 600;
+  background: #fff5f5;
+  width: 22%;
+  min-width: 140px;
+  border-right: 1px solid #fee2e2;
+}
+.exp-col-lesson {
+  color: #334155;
+  width: 42%;
+}
+.exp-col-solution {
+  color: #14532d;
+  background: #f0fdf4;
+  width: 36%;
+  border-left: 1px solid #dcfce7;
+}
+.exp-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  background: #f1f5f9;
+  color: #0f172a;
+  padding: 2px 4px;
+  border-radius: 4px;
+  font-size: 12px;
+  border: 1px solid #e2e8f0;
+}
+.exp-list {
+  margin: 8px 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.exp-list-item {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  background: #f8fafc;
+  padding: 8px 16px;
+  border-radius: 4px;
+  border: 1px solid #f1f5f9;
+}
+.exp-list-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  border-radius: 12px;
+  background: #e2e8f0;
+  color: #475569;
+  font-size: 12px;
+  font-weight: 700;
+  margin-top: 0;
+}
+.exp-list-body {
+  flex: 1;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.exp-card-footer {
+  padding: 8px 20px;
+  background: #f8fafc;
+  border-top: 1px solid #f1f5f9;
+  font-size: 12px;
+  color: #64748b;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
 </style>
 </head><body>
 <div class="shell" data-view="workbench" data-workspace="flow">
@@ -9981,101 +10357,305 @@ function paintShellPage(view){
   else if(view==='experience')renderShellExperience();
 }
 function saveHubToken(){
-  try{const inp=document.getElementById('hubTokenInput');sessionStorage.setItem('herdr_hub_token',(inp&&inp.value||'').trim());toast('Hub 身份 Token 已保存（仅本标签页有效，关闭即清除）');renderShellExperience();}catch(e){toast('保存失败: '+(e.message||e),true);}
+  try{
+    const inp=document.getElementById('hubTokenInput');
+    sessionStorage.setItem('herdr_hub_token',(inp&&inp.value||'').trim());
+    toast('Hub 身份 Token 已保存（仅本标签页有效）');
+    renderShellExperience();
+  }catch(e){
+    toast('保存失败: '+(e.message||e),true);
+  }
 }
+
 function applyHubFilter(){
-  try{const inp=document.getElementById('hubCustomerInput');window._hubCustomerFilter=((inp&&inp.value)||'').trim();}catch(e){}
+  try{
+    const inp=document.getElementById('hubCustomerInput');
+    window._hubCustomerFilter=((inp&&inp.value)||'').trim();
+  }catch(e){}
   renderShellExperience();
 }
+
+function formatExperienceContent(rawText){
+  if(!rawText)return '';
+  const lines=String(rawText).split('\n');
+  let out=[];
+  let tableLines=[];
+  let listItems=[];
+
+  function formatInline(str){
+    let s=esc(str);
+    s=s.replace(/`([^`]+)`/g,'<code class="exp-code">$1</code>');
+    s=s.replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>');
+    return s;
+  }
+
+  function flushTable(){
+    if(!tableLines.length)return;
+    const rows=tableLines.map(l=>{
+      let trimmed=l.trim();
+      if(trimmed.startsWith('|'))trimmed=trimmed.slice(1);
+      if(trimmed.endsWith('|'))trimmed=trimmed.slice(0,-1);
+      return trimmed.split('|').map(c=>c.trim());
+    });
+    let headerRow=null;
+    let dataRows=[];
+    if(rows.length>=2&&rows[1].every(c=>/^:?-+:?$/.test(c))){
+      headerRow=rows[0];
+      dataRows=rows.slice(2);
+    }else{
+      dataRows=rows;
+    }
+    let thHtml='';
+    if(headerRow){
+      thHtml='<thead><tr>'+headerRow.map(c=>'<th>'+formatInline(c)+'</th>').join('')+'</tr></thead>';
+    }
+    let trHtml=dataRows.map(r=>{
+      return '<tr>'+r.map((c,i)=>{
+        let cls='';
+        if(i===0&&headerRow&&/问题|形态|缺陷|陷阱/.test(headerRow[0]))cls=' class="exp-col-issue"';
+        else if(i===1&&headerRow&&/教训|原因|分析|复盘/.test(headerRow[1]))cls=' class="exp-col-lesson"';
+        else if(i===2&&headerRow&&/规范|对策|规程|准则|方案/.test(headerRow[2]))cls=' class="exp-col-solution"';
+        return '<td'+cls+'>'+formatInline(c)+'</td>';
+      }).join('')+'</tr>';
+    }).join('');
+    out.push('<div class="exp-table-wrapper"><table class="exp-table">'+thHtml+'<tbody>'+trHtml+'</tbody></table></div>');
+    tableLines=[];
+  }
+
+  function flushList(){
+    if(!listItems.length)return;
+    let listHtml='<div class="exp-list">'+listItems.map((item,idx)=>{
+      return '<div class="exp-list-item"><span class="exp-list-badge">'+(item.num||(idx+1))+'</span><div class="exp-list-body">'+formatInline(item.text)+'</div></div>';
+    }).join('')+'</div>';
+    out.push(listHtml);
+    listItems=[];
+  }
+
+  for(let i=0;i<lines.length;i++){
+    const line=lines[i];
+    const trimmed=line.trim();
+
+    if(trimmed.startsWith('|')&&trimmed.endsWith('|')){
+      flushList();
+      tableLines.push(trimmed);
+      continue;
+    }else{
+      flushTable();
+    }
+
+    const secMatch=trimmed.match(/^【(.*?)】$/);
+    if(secMatch){
+      flushList();
+      const title=secMatch[1];
+      let icon='📌';
+      let cls='';
+      if(/经验|教训|复盘|背景/.test(title)){
+        icon='💡'; cls=' exp-section-lesson';
+      }else if(/规范|操作|规程|准则/.test(title)){
+        icon='📋'; cls=' exp-section-rule';
+      }
+      out.push('<div class="exp-section-header'+cls+'"><span class="exp-section-icon">'+icon+'</span><span class="exp-section-title">'+esc(title)+'</span></div>');
+      continue;
+    }
+
+    const numMatch=trimmed.match(/^(\d+)[\.、]\s*(.*)$/);
+    if(numMatch){
+      listItems.push({num:numMatch[1],text:numMatch[2]});
+      continue;
+    }
+
+    const bulletMatch=trimmed.match(/^[-*]\s+(.*)$/);
+    if(bulletMatch){
+      listItems.push({num:'•',text:bulletMatch[1]});
+      continue;
+    }
+
+    flushList();
+    if(!trimmed)continue;
+    out.push('<p style="margin:8px 0 12px;line-height:1.6;">'+formatInline(trimmed)+'</p>');
+  }
+
+  flushTable();
+  flushList();
+  return out.join('');
+}
+
 async function renderShellExperience(){
   const sequence=state.experienceSequence=(state.experienceSequence||0)+1;
   const el=document.getElementById('tasks');if(!el)return;
-  el.innerHTML='<div class="shell-page"><div class="shell-page-head"><h3>企业经验中心 (Experience Hub)</h3><p style="color:var(--text-secondary);font-size:12px;">沉淀自真实任务并通过审核的企业业务规则资产</p><div style="display:flex;gap:8px;align-items:center;margin-top:8px;font-size:12px;"><label for="hubTokenInput" style="color:var(--text-secondary);">Hub 身份 Token:</label><input id="hubTokenInput" type="password" placeholder="粘贴个人 Hub Token（仅本标签页有效）" style="flex:1;max-width:320px;padding:4px 8px;border:1px solid var(--border-color);border-radius:4px;background:var(--bg-main);color:var(--text-primary);" /><button class="btn btn-sm" onclick="saveHubToken()">保存</button><label for="hubCustomerInput" style="color:var(--text-secondary);">客户筛选:</label><input id="hubCustomerInput" type="text" placeholder="留空查看授权范围内全部" oninput="window._hubCustomerFilter=this.value" style="width:160px;padding:4px 8px;border:1px solid var(--border-color);border-radius:4px;background:var(--bg-main);color:var(--text-primary);" /><button class="btn btn-sm" onclick="applyHubFilter()">应用</button></div></div><div id="experienceHubContainer" style="padding:16px 0;"><div class="loading">加载经验数据中...</div></div></div>';
-  try{const saved=sessionStorage.getItem('herdr_hub_token')||'';const inp=document.getElementById('hubTokenInput');if(inp)inp.value=saved;}catch(e){}
-  try{const cf=window._hubCustomerFilter||'';const cinp=document.getElementById('hubCustomerInput');if(cinp&&document.activeElement!==cinp)cinp.value=cf;}catch(e){}
+
+  let saved='';
+  try{saved=sessionStorage.getItem('herdr_hub_token')||'';}catch(e){}
+  const custFilter=(window._hubCustomerFilter||'').trim();
+
+  let authStatusHtml='';
+  if(saved){
+    authStatusHtml='<span style="display:inline-flex;align-items:center;gap:4px;font-size:12px;font-weight:600;color:#059669;background:#ecfdf5;padding:4px 8px;border-radius:4px;border:1px solid #a7f3d0;">✓ 已载入凭据</span>';
+  }else{
+    authStatusHtml='<span style="display:inline-flex;align-items:center;gap:4px;font-size:12px;font-weight:600;color:#d97706;background:#fef3c7;padding:4px 8px;border-radius:4px;border:1px solid #fde68a;">! 需凭据</span>';
+  }
+
+  el.innerHTML=`<div class="exp-shell-wrap">
+    <div class="exp-page-header">
+      <div class="exp-header-top">
+        <div class="exp-title-area">
+          <h2>企业经验中心 <span class="exp-title-badge">EXPERIENCE HUB</span></h2>
+          <p class="exp-subtitle">沉淀自真实生产任务闭环与实战复盘，经由审核固化为组织级业务规则与操作准则资产</p>
+        </div>
+        <div class="exp-toolbar-panel">
+          <div class="exp-auth-group">
+            <span style="font-size:12px;font-weight:600;color:#475569;">🔑 凭据:</span>
+            ${authStatusHtml}
+            <input id="hubTokenInput" class="exp-input" type="password" placeholder="粘贴 Hub 身份 Token" style="width:200px;" />
+            <button class="exp-btn-base exp-btn-primary" onclick="saveHubToken()">保存凭据</button>
+          </div>
+          <div class="exp-group-divider"></div>
+          <div class="exp-filter-group">
+            <span style="font-size:12px;font-weight:600;color:#475569;">🏢 租户:</span>
+            <input id="hubCustomerInput" class="exp-input" type="text" placeholder="全部 / 指定租户" oninput="window._hubCustomerFilter=this.value" style="width:130px;" />
+            <button class="exp-btn-base exp-btn-secondary" onclick="applyHubFilter()">筛选</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div id="experienceHubContainer"><div class="loading" style="padding:48px 0;text-align:center;color:#64748b;">正在加载企业经验数据...</div></div>
+  </div>`;
+
+  try{const inp=document.getElementById('hubTokenInput');if(inp)inp.value=saved;}catch(e){}
+  try{const cinp=document.getElementById('hubCustomerInput');if(cinp&&document.activeElement!==cinp)cinp.value=custFilter;}catch(e){}
   const container=document.getElementById('experienceHubContainer');
+
   try{
-    const custFilter=(window._hubCustomerFilter||'').trim();
     const suffix=custFilter?'&customer='+encodeURIComponent(custFilter):'';
     const [candRes,ruleRes]=await Promise.all([
       pageRead('experience-candidates','/api/experience/candidates?status=pending_review'+suffix),
       pageRead('experience-rules','/api/experience/rules?scope=all'+suffix),
     ]);
     if(!candRes||!ruleRes||sequence!==state.experienceSequence||state.shellView!=='experience'||!container.isConnected)return;
+
     if(candRes.ok===false||ruleRes.ok===false){
-      const err = candRes.error || ruleRes.error || '未授权或服务异常';
-      container.innerHTML=`<div class="card" style="padding:16px;background:var(--bg-card);border:1px solid var(--border-color);border-radius:8px;">
-        <div style="color:var(--danger);font-size:14px;font-weight:600;margin-bottom:8px;">⚠️ 企业经验中心访问受限 / 需身份验证</div>
-        <div style="color:var(--text-secondary);font-size:13px;line-height:1.6;">${esc(err)}</div>
-        <div style="margin-top:12px;font-size:12px;color:var(--text-muted);">
-          提示：请在上方输入框粘贴个人或 Reviewer 的 Hub Token（本地开发环境可执行 <code>cat ~/.herdr-controller/credentials/experience-console-reviewer.token</code> 获取凭据）。
+      const err=candRes.error||ruleRes.error||'未授权或服务异常';
+      container.innerHTML=`<div class="card" style="padding:24px;background:#ffffff;border:1px solid #fed7aa;border-left:4px solid #f59e0b;border-radius:8px;">
+        <div style="color:#9a3412;font-size:15px;font-weight:700;margin-bottom:8px;">🔑 企业经验中心访问受限 / 需身份验证</div>
+        <div style="color:#475569;font-size:13px;line-height:1.6;">${esc(err)}</div>
+        <div style="margin-top:14px;font-size:12px;color:#64748b;line-height:1.6;">
+          提示：企业经验中心严禁匿名访问。请在上方输入框粘贴个人或 Reviewer 的 Hub Token 后点击「保存凭据」。<br>
+          （本地开发环境可在终端执行 <code>cat ~/.herdr-controller/credentials/experience-console-reviewer.token</code> 获取凭据）
         </div>
       </div>`;
       return;
     }
+
     const cands=(candRes&&(candRes.candidates||candRes.data?.candidates))||[];
     const rules=(ruleRes&&(ruleRes.rules||ruleRes.data?.rules))||[];
-    let html='<div style="display:flex;gap:24px;flex-direction:column;">';
-    html+='<div class="card" style="padding:16px;background:var(--bg-card);border:1px solid var(--border-color);border-radius:8px;">';
-    html+=`<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;"><h4 style="margin:0;font-size:14px;">待审核业务规则候选 <span class="badge" style="background:var(--primary);color:#fff;border-radius:10px;padding:2px 8px;font-size:11px;">${cands.length}</span></h4></div>`;
+    let html='';
+
+    // 1. Pending Candidates Section
+    html+='<div class="exp-section">';
+    html+=`<div class="exp-section-title-bar">
+      <h3>⏳ 待审核业务规则候选 <span class="exp-count-badge exp-count-amber">${cands.length}</span></h3>
+      <span style="font-size:12px;color:#64748b;">沉淀自真实任务闭环与实战教训，待审核通过后生效</span>
+    </div>`;
+
     if(!cands.length){
-      html+='<div class="empty" style="color:var(--text-muted);font-size:13px;padding:12px 0;">当前暂无待审核规则候选</div>';
+      html+='<div class="empty" style="color:#94a3b8;font-size:13px;padding:24px;text-align:center;background:#f8fafc;border-radius:8px;border:1px dashed #e2e8f0;">当前暂无待审核规则候选</div>';
     }else{
-      html+='<div style="display:flex;flex-direction:column;gap:12px;">';
       for(const c of cands){
-        html+=`<div style="border:1px solid var(--border-color);border-radius:6px;padding:12px;background:var(--bg-main);">
-          <div style="display:flex;justify-content:space-between;align-items:flex-start;">
+        const cust=c.applies_to?.customer||'通用';
+        const actor=c.contributor||'unknown';
+        const tid=c.source?.task_id||'—';
+        const refs=(c.source?.evidence_refs||[]).join(', ');
+        html+=`<div class="exp-card exp-card-candidate">
+          <div class="exp-card-header">
             <div>
-              <strong style="font-size:14px;">${esc(c.title)}</strong>
-              <div style="font-size:12px;color:var(--text-secondary);margin-top:4px;">
-                <span>适用客户: <b>${esc(c.applies_to.customer||'通用')}</b></span> |
-                <span>贡献者: ${esc(c.contributor)}</span> |
-                <span>来源Task: ${esc(c.source.task_id)}</span>
+              <div class="exp-card-title-row">
+                <span class="exp-title-badge">待审核候选</span>
+                <h4 class="exp-card-title">${esc(c.title)}</h4>
+              </div>
+              <div class="exp-meta-row">
+                <span class="exp-chip">🏢 适用客户: <strong>${esc(cust)}</strong></span>
+                <span class="exp-chip">👤 提炼者: <strong>${esc(actor)}</strong></span>
+                <span class="exp-chip">🔗 来源任务: <code>${esc(tid)}</code></span>
+                ${refs?`<span class="exp-chip" title="${esc(refs)}">📄 引用证据: <code>${esc(refs)}</code></span>`:''}
               </div>
             </div>
-            <div style="display:flex;gap:8px;">
-              <button class="btn btn-sm btn-primary" onclick="reviewExperienceCandidate(${jsArg(c.experience_id)},'approve')">通过发布</button>
-              <button class="btn btn-sm btn-danger" onclick="reviewExperienceCandidate(${jsArg(c.experience_id)},'reject')">驳回</button>
+            <div class="exp-card-actions">
+              <button class="exp-btn-base exp-btn-approve" onclick="reviewExperienceCandidate(${jsArg(c.experience_id)},'approve')">✓ 通过并发布</button>
+              <button class="exp-btn-base exp-btn-reject" onclick="reviewExperienceCandidate(${jsArg(c.experience_id)},'reject')">✕ 驳回</button>
             </div>
           </div>
-          <div style="margin-top:8px;padding:8px;background:var(--bg-sub);border-radius:4px;font-size:13px;white-space:pre-wrap;">${esc(c.content)}</div>
+          <div class="exp-card-body">
+            ${formatExperienceContent(c.content)}
+          </div>
         </div>`;
       }
-      html+='</div>';
     }
     html+='</div>';
-    html+='<div class="card" style="padding:16px;background:var(--bg-card);border:1px solid var(--border-color);border-radius:8px;">';
-    html+=`<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;"><h4 style="margin:0;font-size:14px;">已发布正式业务规则 <span class="badge" style="background:#10b981;color:#fff;border-radius:10px;padding:2px 8px;font-size:11px;">${rules.length}</span></h4></div>`;
+
+    // 2. Published Rules Section
+    html+='<div class="exp-section">';
+    html+=`<div class="exp-section-title-bar">
+      <h3>🛡️ 已发布正式业务规则 <span class="exp-count-badge exp-count-emerald">${rules.length}</span></h3>
+      <span style="font-size:12px;color:#64748b;">已全量生效并注入智能体调度与执行的权威业务规则资产</span>
+    </div>`;
+
     if(!rules.length){
-      html+='<div class="empty" style="color:var(--text-muted);font-size:13px;padding:12px 0;">当前暂无已发布规则</div>';
+      html+='<div class="empty" style="color:#94a3b8;font-size:13px;padding:24px;text-align:center;background:#f8fafc;border-radius:8px;border:1px dashed #e2e8f0;">当前暂无已发布规则</div>';
     }else{
-      html+='<div style="display:flex;flex-direction:column;gap:12px;">';
       for(const r of rules){
-        html+=`<div style="border:1px solid var(--border-color);border-radius:6px;padding:12px;background:var(--bg-main);">
-          <div style="display:flex;justify-content:space-between;align-items:flex-start;">
+        const cust=r.applies_to?.customer||'通用';
+        const actor=r.contributor||'unknown';
+        const ver=r.version||1;
+        const rev=r.review;
+        let auditText='已发布生效';
+        if(rev&&rev.reviewer){
+          auditText=`审核人: ${esc(rev.reviewer)} · 审核结论: "${esc(rev.comment||'同意采纳')}"`;
+        }
+        html+=`<div class="exp-card exp-card-published">
+          <div class="exp-card-header">
             <div>
-              <strong style="font-size:14px;">${esc(r.title)}</strong> <span style="font-size:11px;color:var(--text-muted);">(v${r.version})</span>
-              <div style="font-size:12px;color:var(--text-secondary);margin-top:4px;">
-                <span>规则ID: <code>${esc(r.experience_id)}</code></span> |
-                <span>适用客户: <b>${esc(r.applies_to.customer||'通用')}</b></span> |
-                <span>贡献者: ${esc(r.contributor)}</span>
+              <div class="exp-card-title-row">
+                <span class="exp-version-pill">v${ver} 权威规则</span>
+                <h4 class="exp-card-title">${esc(r.title)}</h4>
+              </div>
+              <div class="exp-meta-row">
+                <span class="exp-chip">🏢 适用客户: <strong>${esc(cust)}</strong></span>
+                <span class="exp-chip">👤 提炼者: <strong>${esc(actor)}</strong></span>
+                <span class="exp-chip">🆔 规则编号: <code>${esc(r.experience_id)}</code></span>
               </div>
             </div>
-            <div>
-              <button class="btn btn-sm btn-outline-danger" onclick="revokeExperienceRule(${jsArg(r.experience_id)})">撤回规则</button>
+            <div class="exp-card-actions">
+              <button class="exp-btn-base exp-btn-revoke" onclick="revokeExperienceRule(${jsArg(r.experience_id)})">撤回规则</button>
             </div>
           </div>
-          <div style="margin-top:8px;padding:8px;background:var(--bg-sub);border-radius:4px;font-size:13px;white-space:pre-wrap;">${esc(r.content)}</div>
+          <div class="exp-card-body">
+            ${formatExperienceContent(r.content)}
+          </div>
+          <div class="exp-card-footer">
+            <span>✓ ${auditText}</span>
+            <span>更新于 ${r.updated_at?new Date(r.updated_at*1000).toLocaleString('zh-CN',{hour12:false}):'—'}</span>
+          </div>
         </div>`;
       }
-      html+='</div>';
     }
     html+='</div>';
-    html+='</div>';
+
     container.innerHTML=html;
   }catch(e){
     if(sequence!==state.experienceSequence||!container.isConnected)return;
-    container.innerHTML=`<div class="error" style="color:var(--danger);padding:16px;">企业经验中心暂未启动或离线: ${esc(e.message||e)}</div>`;
+    const errStr=String(e.message||e);
+    if(errStr.includes('401')||errStr.includes('unauthorized')){
+      container.innerHTML=`<div class="card" style="padding:24px;background:#ffffff;border:1px solid #fed7aa;border-left:4px solid #f59e0b;border-radius:8px;">
+        <div style="color:#9a3412;font-size:15px;font-weight:700;margin-bottom:8px;">🔑 企业经验中心需身份验证</div>
+        <div style="color:#475569;font-size:13px;line-height:1.6;">${esc(errStr)}</div>
+        <div style="margin-top:14px;font-size:12px;color:#64748b;line-height:1.6;">
+          提示：请在页面顶部的「🔑 凭据」输入框中粘贴 Hub 身份 Token 后点击「保存凭据」。<br>
+          （本地开发环境可在终端执行 <code>cat ~/.herdr-controller/credentials/experience-console-reviewer.token</code> 获取凭据）
+        </div>
+      </div>`;
+    }else{
+      container.innerHTML=`<div class="error" style="color:var(--danger);padding:16px;">企业经验中心读取异常: ${esc(errStr)}</div>`;
+    }
   }
 }
 async function reviewExperienceCandidate(expId,action){
