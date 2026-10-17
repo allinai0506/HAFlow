@@ -6335,7 +6335,8 @@ def _check_finalize_retry(task, status, now):
         return False
     if task.get("finalize_escalated"):
         return True
-    if task.get("integration_mode") != "git" or workflow_closed(
+    mode = task.get("integration_mode") or "none"
+    if mode not in ("git", "none") or workflow_closed(
         task.get("workflow_id")
     ):
         attention_clear(f"{task_id}:finalize")
@@ -6502,10 +6503,7 @@ def finalize_completed_task(task_id):
     for completed in maybe_complete_on_task_done(task_id):
         print(f"[COLLABORATION COMPLETED] {completed.get('event_id')}")
 
-    mode = task.get(
-        "integration_mode",
-        "none"
-    )
+    mode = task.get("integration_mode") or "none"
 
     print(
         f"[FINALIZE] "
@@ -6755,6 +6753,123 @@ def finalize_completed_task(task_id):
     # 不需要 Git 集成
     # --------------------------------
     elif mode == "none":
+        clone_path = task.get("clone_path")
+        is_context_task = task.get("execution_mode") == "context"
+        if clone_path and os.path.exists(clone_path) and not is_context_task:
+            status_res = subprocess.run(
+                ["git", "-C", clone_path, "status", "--porcelain", "--untracked-files=normal"],
+                capture_output=True, text=True
+            )
+            if status_res.returncode != 0:
+                from herdr.task_delivery import diagnostic_tail
+                print(
+                    f"[FINALIZE ERROR] "
+                    f"task={task_id} "
+                    f"worktree status failed rc={status_res.returncode}: "
+                    f"{status_res.stderr.strip() or status_res.stdout.strip()}"
+                )
+                _record_finalize_event(
+                    task,
+                    "finalize_status_error",
+                    {
+                        "rc": status_res.returncode,
+                        "detail": diagnostic_tail(status_res.stdout, status_res.stderr),
+                    },
+                )
+                return {"retryable": True, "kind": "error", "rc": status_res.returncode}
+            from herdr.repo_hygiene import teardown_output_diagnosis
+            diag = teardown_output_diagnosis(status_res.stdout, task_id=task_id)
+
+            head_res = subprocess.run(
+                ["git", "-C", clone_path, "rev-parse", "HEAD"],
+                capture_output=True, text=True
+            )
+            head_sha = head_res.stdout.strip() if head_res.returncode == 0 else ""
+            task_commit = task.get("commit")
+            baseline = task.get("baseline_commit")
+            unadopted_head = bool(head_sha and head_sha != task_commit and head_sha != baseline)
+
+            if diag.get("reason") or unadopted_head:
+                commit_env = dict(os.environ)
+                commit_env["HERDR_DEFER_HEAVY_TESTS"] = "1"
+                commit_proc = subprocess.run(
+                    [
+                        TASK_MANAGER,
+                        "commit",
+                        task_id,
+                        "--message",
+                        f"chore(closure): preserve worktree output ({task_id})"
+                    ],
+                    text=True,
+                    capture_output=True,
+                    env=commit_env
+                )
+                commit_payload = _parse_commit_result(commit_proc.stdout)
+                if commit_proc.returncode == 3:
+                    # Empty commit: no changes to adopt
+                    pass
+                elif (commit_proc.returncode == 7 and commit_payload.get("task_id") == task_id
+                      and commit_payload.get("result") == "delivery_blocked"):
+                    delivery = commit_payload.get("delivery") or {}
+                    from herdr.task_delivery import record_delivery_failure
+                    if record_delivery_failure(task, delivery, store=_get_store()):
+                        print(f"[DELIVERY BLOCKED] task={task_id} waiting for scoped repair")
+                        return {"retryable": False, "kind": "delivery", "rc": 7}
+                    return {"retryable": False, "kind": "stale_delivery_result", "rc": 7}
+                elif commit_proc.returncode == 4:
+                    print(
+                        f"[FINALIZE REFUSED] "
+                        f"task={task_id} "
+                        f"reason={commit_payload.get('reason')}"
+                    )
+                    _escalate_finalize(
+                        get_task(task_id) or task,
+                        "commit_refused",
+                        commit_payload,
+                    )
+                    return {"retryable": False, "kind": "refused", "rc": 4}
+                elif commit_proc.returncode == 75:
+                    print(
+                        f"[FINALIZE WAIT] "
+                        f"task={task_id} "
+                        f"reason=git_busy retry later"
+                    )
+                    if (commit_payload.get("task_id") == task_id
+                            and commit_payload.get("result") == "wait"
+                            and commit_payload.get("reason") == "git_index_lock"):
+                        return {"retryable": True, "kind": "wait", "rc": 75,
+                                "reason": "git_index_lock", "budgeted": False}
+                    return {"retryable": True, "kind": "wait", "rc": 75}
+                elif commit_proc.returncode != 0:
+                    from herdr.task_delivery import diagnostic_tail
+                    print(
+                        f"[FINALIZE ERROR] "
+                        f"task={task_id} "
+                        f"preservation commit failed rc={commit_proc.returncode}: "
+                        f"{commit_proc.stderr.strip() or commit_proc.stdout.strip()}"
+                    )
+                    _record_finalize_event(
+                        task,
+                        "finalize_commit_error",
+                        {
+                            "rc": commit_proc.returncode,
+                            "detail": diagnostic_tail(commit_proc.stdout, commit_proc.stderr),
+                        },
+                    )
+                    return {"retryable": True, "kind": "error", "rc": commit_proc.returncode}
+                else:
+                    task = get_task(task_id) or task
+
+            if head_sha and head_sha != baseline:
+                refreshed_commit = (get_task(task_id) or task).get("commit")
+                if not refreshed_commit:
+                    from herdr import kernel
+                    kernel.update_task_metadata(
+                        task_id,
+                        {"commit": head_sha, "commit_result": "reconciled"},
+                        store=_get_store(),
+                    )
+                    task = get_task(task_id) or task
         if not set_task_status(
             task_id,
             "cleanup_ready"

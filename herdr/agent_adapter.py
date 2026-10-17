@@ -676,9 +676,11 @@ def startup_readiness(agent: str, expected_identity: dict, runtime: dict, termin
         return {**result, "status": "IDENTITY_MISMATCH", "reason": "identity_mismatch"}
     if terminal_text is None:
         return {**result, "reason": "transcript_unavailable"}
-    # Central classifier is shared with the noninteractive probe.
-    from herdr.deep_preflight import classify_text
-    blocker = classify_text(terminal_text)
+    # Central classifier is shared with the noninteractive probe. Per-agent
+    # status chrome (e.g. agy's spurious "AI: Out of credits" badge) is not
+    # a startup blocker and is stripped before classification.
+    from herdr.deep_preflight import classify_text, strip_known_status_chrome
+    blocker = classify_text(strip_known_status_chrome(agent, terminal_text))
     if blocker:
         return {**result, "status": blocker, "reason": "startup_blocked"}
     if runtime.get("agent_status") not in ("idle", "done"):

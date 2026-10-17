@@ -5425,14 +5425,11 @@ def commit_task(task_id, message=None, allow_rebase=False):
 
     if task["status"] != "completed":
         existing = task.get("commit")
-        if task.get("status") in (
-            "committed",
-            "integrated",
-            "cleanup_ready",
-            "cleaned",
-        ) and existing:
+        status = task.get("status")
+
+        def _print_idempotent_commit(cid):
             print(f"[COMMITTED] {task_id}")
-            print(f"[COMMIT] {existing}")
+            print(f"[COMMIT] {cid}")
             stored_result = task.get("commit_result")
             if stored_result not in ("created", "adopted"):
                 stored_result = "created"
@@ -5442,18 +5439,125 @@ def commit_task(task_id, message=None, allow_rebase=False):
                     {
                         "task_id": task_id,
                         "result": stored_result,
-                        "commit": existing,
-                        "status": task.get("status"),
+                        "commit": cid,
+                        "status": status,
                     },
                     ensure_ascii=False,
                 )
             )
+
+        if status == "integrated":
+            # Once integrated, a candidate is final; new commits cannot be made here.
+            clone_path = task.get("clone_path")
+            has_uncommitted = False
+            if clone_path and os.path.exists(clone_path):
+                status_res = subprocess.run(
+                    ["git", "-C", clone_path, "status", "--porcelain", "--untracked-files=normal"],
+                    capture_output=True, text=True
+                )
+                if status_res.returncode != 0:
+                    print(
+                        f"Failed to inspect worktree status for task (rc={status_res.returncode}): {task_id}",
+                        file=sys.stderr
+                    )
+                    sys.exit(1)
+                from herdr.repo_hygiene import teardown_output_diagnosis
+                diag = teardown_output_diagnosis(status_res.stdout, task_id=task_id)
+                has_dirty = bool(diag.get("reason"))
+
+                head_res = subprocess.run(
+                    ["git", "-C", clone_path, "rev-parse", "HEAD"],
+                    capture_output=True, text=True
+                )
+                if head_res.returncode != 0:
+                    print(
+                        f"Failed to resolve HEAD for task (rc={head_res.returncode}): {task_id}",
+                        file=sys.stderr
+                    )
+                    sys.exit(1)
+                head_sha = head_res.stdout.strip()
+                expected_commit = task.get("integrated_commit") or task.get("commit")
+                head_diverged = bool(head_sha and expected_commit and head_sha != expected_commit)
+                has_uncommitted = has_dirty or head_diverged
+            if has_uncommitted:
+                print(
+                    f"Task is already integrated; post-integration changes cannot be committed directly "
+                    f"(reintegration required): {task_id}"
+                )
+                sys.exit(2)
+            if existing:
+                _print_idempotent_commit(existing)
+                return
+            print(f"Task cannot commit from status: {status}")
+            sys.exit(2)
+
+        if status in ("cleanup_ready", "cleaned"):
+            # Only non-git tasks (e.g. integration_mode="none") with uncommitted output
+            # are allowed to perform a preservation commit in cleanup_ready/cleaned status.
+            clone_path = task.get("clone_path")
+            has_uncommitted = False
+            if clone_path and os.path.exists(clone_path):
+                status_res = subprocess.run(
+                    ["git", "-C", clone_path, "status", "--porcelain", "--untracked-files=normal"],
+                    capture_output=True, text=True
+                )
+                if status_res.returncode != 0:
+                    print(
+                        f"Failed to inspect worktree status for task (rc={status_res.returncode}): {task_id}",
+                        file=sys.stderr
+                    )
+                    sys.exit(1)
+                from herdr.repo_hygiene import teardown_output_diagnosis
+                diag = teardown_output_diagnosis(status_res.stdout, task_id=task_id)
+                has_dirty = bool(diag.get("reason"))
+
+                head_res = subprocess.run(
+                    ["git", "-C", clone_path, "rev-parse", "HEAD"],
+                    capture_output=True, text=True
+                )
+                if head_res.returncode != 0:
+                    print(
+                        f"Failed to resolve HEAD for task (rc={head_res.returncode}): {task_id}",
+                        file=sys.stderr
+                    )
+                    sys.exit(1)
+                head_sha = head_res.stdout.strip()
+                expected_commit = task.get("integrated_commit") or task.get("commit")
+                head_diverged = bool(head_sha and expected_commit and head_sha != expected_commit)
+                has_uncommitted = has_dirty or head_diverged
+
+            if task.get("integration_mode") == "git":
+                if has_uncommitted:
+                    print(
+                        f"Task has completed git lifecycle; "
+                        f"post-integration changes cannot be committed directly: {task_id}"
+                    )
+                    sys.exit(2)
+                if existing:
+                    _print_idempotent_commit(existing)
+                    return
+                print(f"Task cannot commit from status: {status}")
+                sys.exit(2)
+            else:
+                if has_uncommitted:
+                    pass
+                elif existing:
+                    _print_idempotent_commit(existing)
+                    return
+                else:
+                    print(f"Task cannot commit from status: {status}")
+                    sys.exit(2)
+
+        elif status == "committed" and existing:
+            _print_idempotent_commit(existing)
             return
-        print(
-            f"Task cannot commit from status: "
-            f"{task['status']}"
-        )
-        sys.exit(2)
+
+        else:
+            print(
+                f"Task cannot commit from status: "
+                f"{task['status']}"
+            )
+            sys.exit(2)
 
     clone = task.get("clone_path")
 
@@ -5576,10 +5680,14 @@ def commit_task(task_id, message=None, allow_rebase=False):
         store=_get_store(),
     )
 
-    set_status(
-        task_id,
-        "committed"
-    )
+    is_none_mode = (task.get("integration_mode") or "none") == "none"
+    preserve_status = ("completed", "cleanup_ready", "cleaned") if is_none_mode else ("cleanup_ready", "cleaned")
+    target_status = task["status"] if task.get("status") in preserve_status else "committed"
+    if task.get("status") != target_status:
+        set_status(
+            task_id,
+            target_status
+        )
 
     print(f"[COMMITTED] {task_id}")
     print(f"[COMMIT] {commit_hash}")
@@ -5904,7 +6012,14 @@ def _adopt_head_if_attributable(task_id, task, clone, allow_rebase=False):
             },
             store=_get_store(),
         )
-        set_status(task_id, "committed")
+        is_none_mode = (task.get("integration_mode") or "none") == "none"
+        preserve_status = ("completed", "cleanup_ready", "cleaned") if is_none_mode else ("cleanup_ready", "cleaned")
+        target_status = task["status"] if task.get("status") in preserve_status else "committed"
+        if task.get("status") != target_status:
+            set_status(
+                task_id,
+                target_status
+            )
         short_base = str(detail.get("baseline") or "")[:8]
         print(
             f"[ADOPTED] task={task_id} "
@@ -6537,9 +6652,9 @@ def _teardown_output_guard(task):
             if identity.get("task_id") != task.get("task_id") or (task.get("run_id") and identity.get("run_id") != task.get("run_id")):
                 return {"reason": "clone_identity_changed"}
         # Context workspaces are plain directories. Their artifacts remain in
-        # place; Git metadata, when present, must still pass the Git output gate.
-        if (task.get("execution_mode") == "context" and task.get("integration_mode") == "none"
-                and path.is_dir() and not os.path.lexists(path / ".git")):
+        # place; context mode has no git commit path.
+        if (task.get("execution_mode") == "context" and (task.get("integration_mode") or "none") == "none"
+                and path.is_dir()):
             return {"reason": ""}
         try:
             root = run_bounded(["git", "-C", str(path), "rev-parse", "--show-toplevel"], timeout=5, output_limit=8192)
@@ -6551,11 +6666,28 @@ def _teardown_output_guard(task):
             result = run_bounded(["git", "-C", str(path), "status", "--porcelain", "--untracked-files=normal"], timeout=5, output_limit=65536)
             if result["status"] != "completed" or result["exit_code"]:
                 return {"reason": "clone_git_inventory_unknown"}
+            head_out = run_bounded(["git", "-C", str(path), "rev-parse", "HEAD"], timeout=5, output_limit=8192)
+            if head_out["status"] != "completed" or head_out["exit_code"]:
+                return {"reason": "clone_git_inventory_unknown"}
+            head_sha = head_out["stdout"].strip()
         except (OSError, ValueError):
             return {"reason": "clone_git_inventory_unknown"}
         diagnosis = teardown_output_diagnosis(result["stdout"], task_id=task.get("task_id", ""))
         if diagnosis["reason"]:
+            if (task.get("integration_mode") or "none") == "none":
+                diagnosis["remediation_cmd"] = f"git -C <clone> status; herdr-task commit {task.get('task_id', '')}"
             return diagnosis
+        expected_commit = task.get("integrated_commit") or task.get("commit")
+        if expected_commit and head_sha and head_sha != expected_commit:
+            cmd = (
+                f"git -C <clone> status; herdr-task commit {task.get('task_id', '')}"
+                if (task.get("integration_mode") or "none") == "none"
+                else f"git -C <clone> log; herdr-task integrate {task.get('task_id', '')}"
+            )
+            return {
+                "reason": "unintegrated_commit_diverged",
+                "remediation_cmd": cmd,
+            }
     if (task.get("integration_mode") == "git" and task.get("status") in {"completed", "committed"}):
         return {"reason": "git_finalize_pending", "remediation_cmd": "herdr-task commit " + str(task.get("task_id")) + "; herdr-task integrate " + str(task.get("task_id"))}
     return {"reason": ""}
@@ -6581,7 +6713,7 @@ def clone_deletable(task):
     output = _teardown_output_guard(task)
     if output["reason"]:
         return False, output["reason"]
-    if task.get("execution_mode") == "context" and task.get("integration_mode") == "none":
+    if task.get("execution_mode") == "context" and (task.get("integration_mode") or "none") == "none":
         return False, "context artifacts retained; explicit purge required"
     if task.get("integration_ref") or task.get("integration_branch"):
         return True, "integrated"

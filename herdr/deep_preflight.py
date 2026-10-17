@@ -256,6 +256,29 @@ def classify_text(text):
     return None
 
 
+# agy (Antigravity CLI) >= 1.4.0 renders a persistent status line that can
+# carry a spurious "AI: Out of credits" badge (upstream changelog: an empty
+# credits response is read as a zero balance). The badge is terminal chrome
+# shown alongside an otherwise usable session and must not be classified as
+# a startup blocker; real depletion still surfaces later as prompt/runtime
+# failures. Scope this exception to agy only, and restrict stripping to
+# recognizable status-bar indicators (shortcuts, delimiter dot/pipe, bracketed badges)
+# so genuine standalone/error depletion lines remain classified as TOKEN_EXHAUSTED.
+AGY_SPURIOUS_CREDITS_LINE = re.compile(
+    r"(?=[^\n]*(?:shortcuts|·|[|│]|\[\s*AI:\s*Out of credits|\b(?:Gemini|Claude|Flash|Pro)\b[^\n]*·))"
+    r"(?![^\n]*\b(?:error|fatal|fail(?:ed|ure)?|exception)\b)"
+    r"[^\n]*\bAI:\s*Out of credits\b[^\n]*\n?",
+    re.I
+)
+
+
+def strip_known_status_chrome(agent, text):
+    """Drop per-agent status-bar chrome that never represents a startup block."""
+    if not text or agent != "agy":
+        return text
+    return AGY_SPURIOUS_CREDITS_LINE.sub("", text)
+
+
 # Per-agent smoke timeouts (seconds). Claude cold start routinely needs 35-60s
 # (measured 36.9s success, occasional >60s flake), so a flat 35s timeout
 # deterministically misreports healthy-but-slow as TIMEOUT.
@@ -407,7 +430,8 @@ def smoke_probe(agent, binary, cwd, timeout=None):
         res = normalize_result(run(cmd, timeout=limit, cwd=cwd))
         elapsed = round(time.time() - started, 2)
         combined = (res["stdout"] + "\n" + res["stderr"]).strip()
-        classification = classify_text(combined)
+        sanitized_combined = strip_known_status_chrome(agent, combined)
+        classification = classify_text(sanitized_combined)
 
         if res["timeout"]:
             if agent in SMOKE_TIMEOUTS and attempt == 1:
@@ -441,7 +465,7 @@ def smoke_probe(agent, binary, cwd, timeout=None):
             }
 
         if res["returncode"] == 0:
-            verified = smoke_response_verified(agent, res["stdout"])
+            verified = smoke_response_verified(agent, strip_known_status_chrome(agent, res["stdout"]))
             note = (
                 f"真实最小调用成功，响应证据已验证 ({elapsed}s)"
                 if verified

@@ -336,5 +336,61 @@ class TestConsoleSelfCheckEvidence(unittest.TestCase):
         self.assertIn("preflightProgressBar", html)
 
 
+class TestAgySmokeProbeSanitization(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.m = load_deep_preflight()
+
+    def test_agy_smoke_probe_strips_spurious_credits_chrome(self):
+        m = self.m
+        cmd = ["/path/to/agy", "--print", "Reply with exactly HERDR_PREFLIGHT_OK and nothing else."]
+        fake_run_result = {
+            "stdout": "[AI: Out of credits]\nHERDR_PREFLIGHT_OK",
+            "stderr": "",
+            "returncode": 0,
+            "timeout": False,
+        }
+        with patch.object(m, "choose_smoke_command", return_value=(cmd, "agy --print")), \
+             patch.object(m, "run", return_value=fake_run_result):
+            res = m.smoke_probe("agy", "/path/to/agy", "/tmp")
+
+        self.assertEqual(res["status"], "READY")
+        self.assertTrue(res["request_verified"])
+        self.assertNotIn("TOKEN_EXHAUSTED", res["status"])
+
+    def test_inspect_deep_agy_spurious_credits_returns_ready(self):
+        m = self.m
+        project = {"project_id": "p1", "project_root": "/tmp"}
+        fake_run_result = {
+            "stdout": "[AI: Out of credits]\nHERDR_PREFLIGHT_OK",
+            "stderr": "",
+            "returncode": 0,
+            "timeout": False,
+        }
+        with patch.object(m, "project_pool", return_value={"allowed_agents": ["agy"]}), \
+             patch.object(m, "resolve_binary", return_value="/bin/agy"), \
+             patch.object(m, "version_probe", return_value=(True, "1.0")), \
+             patch.object(m, "choose_smoke_command", return_value=(["/bin/agy", "--print", "probe"], "agy --print")), \
+             patch.object(m, "run", return_value=fake_run_result):
+            rows = m.inspect(project, deep=True, target_agents=["agy"])
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["final_status"], "READY")
+        self.assertTrue(rows[0]["request_verified"])
+
+    def test_agy_standalone_out_of_credits_is_preserved_and_classified_token_exhausted(self):
+        m = self.m
+        standalone = "AI: Out of credits\n"
+        error_line = "Error: AI: Out of credits\n"
+
+        # Standalone lines without status-bar indicators must NOT be stripped
+        self.assertEqual(m.strip_known_status_chrome("agy", standalone), standalone)
+        self.assertEqual(m.strip_known_status_chrome("agy", error_line), error_line)
+
+        # Standalone line must be properly classified as TOKEN_EXHAUSTED
+        self.assertEqual(m.classify_text(m.strip_known_status_chrome("agy", standalone)), "TOKEN_EXHAUSTED")
+        self.assertEqual(m.classify_text(m.strip_known_status_chrome("agy", error_line)), "TOKEN_EXHAUSTED")
+
+
 if __name__ == "__main__":
     unittest.main()
