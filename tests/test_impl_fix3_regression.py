@@ -881,8 +881,10 @@ def test_malformed_delivery_note_is_not_an_eligible_candidate(tmp_path, monkeypa
     malformed = workflow_docs.append_note(
         "wf-delivery-malformed", kind="delivery", title="malformed", node="wrapup"
     )
-    with pytest.raises(delivery_record.DeliveryAmbiguityError):
-        delivery_record.select_effective_delivery([malformed])
+    # Identity-less prose is evidence, not a claim: it stays out of the
+    # candidate set (and is reported) instead of locking the workflow.
+    assert delivery_record.unidentified_delivery_notes([malformed]) == [malformed]
+    assert delivery_record.select_effective_delivery([malformed]) is None
 
 
 def test_concurrent_record_delivery_has_one_winner_and_no_false_success(
