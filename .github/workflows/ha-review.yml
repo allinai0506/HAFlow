@@ -22,6 +22,12 @@ jobs:
     runs-on: [self-hosted, haflow]
     if: github.repository == 'allinai0506/HAFlow'
     steps:
+      - name: Reset sticky runner git configuration
+        run: |
+          git sparse-checkout disable 2>/dev/null || true
+          git config core.sparsecheckout false 2>/dev/null || true
+          rm -f .git/info/sparse-checkout 2>/dev/null || true
+
       - name: Checkout trusted base branch
         uses: actions/checkout@v4
         with:
