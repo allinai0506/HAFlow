@@ -10356,11 +10356,19 @@ function paintShellPage(view){
   else if(view==='workflows')renderShellWorkflows();
   else if(view==='experience')renderShellExperience();
 }
-function saveHubToken(){
+async function saveHubToken(){
   try{
     const inp=document.getElementById('hubTokenInput');
-    sessionStorage.setItem('herdr_hub_token',(inp&&inp.value||'').trim());
-    toast('Hub 身份 Token 已保存（仅本标签页有效）');
+    const val=(inp&&inp.value||'').trim();
+    if(val){
+      sessionStorage.setItem('herdr_hub_token',val);
+      try{await api('/api/experience/token',{method:'POST',body:JSON.stringify({token:val})});}catch(e){}
+      toast('Hub 身份凭据已持久化至数据库');
+    }else{
+      sessionStorage.removeItem('herdr_hub_token');
+      try{await api('/api/experience/token',{method:'POST',body:JSON.stringify({token:''})});}catch(e){}
+      toast('Hub 身份凭据已清除');
+    }
     renderShellExperience();
   }catch(e){
     toast('保存失败: '+(e.message||e),true);
@@ -10486,6 +10494,15 @@ async function renderShellExperience(){
 
   let saved='';
   try{saved=sessionStorage.getItem('herdr_hub_token')||'';}catch(e){}
+  if(!saved){
+    try{
+      const tokenRes=await api('/api/experience/token');
+      if(tokenRes&&tokenRes.token){
+        saved=tokenRes.token;
+        sessionStorage.setItem('herdr_hub_token',saved);
+      }
+    }catch(e){}
+  }
   const custFilter=(window._hubCustomerFilter||'').trim();
 
   let authStatusHtml='';
@@ -10538,7 +10555,7 @@ async function renderShellExperience(){
       container.innerHTML=`<div class="card" style="padding:24px;background:#ffffff;border:1px solid #fed7aa;border-left:4px solid #f59e0b;border-radius:8px;">
         <div style="color:#9a3412;font-size:15px;font-weight:700;margin-bottom:8px;">🔑 企业经验中心访问受限 / 需身份验证</div>
         <div style="color:#475569;font-size:13px;line-height:1.6;">${esc(err)}</div>
-        <div style="margin-top:14px;font-size:12px;color:#64748b;line-height:1.6;">
+        <div style="margin-top:16px;font-size:12px;color:#64748b;line-height:1.6;">
           提示：企业经验中心严禁匿名访问。请在上方输入框粘贴个人或 Reviewer 的 Hub Token 后点击「保存凭据」。<br>
           （本地开发环境可在终端执行 <code>cat ~/.herdr-controller/credentials/experience-console-reviewer.token</code> 获取凭据）
         </div>
@@ -10648,7 +10665,7 @@ async function renderShellExperience(){
       container.innerHTML=`<div class="card" style="padding:24px;background:#ffffff;border:1px solid #fed7aa;border-left:4px solid #f59e0b;border-radius:8px;">
         <div style="color:#9a3412;font-size:15px;font-weight:700;margin-bottom:8px;">🔑 企业经验中心需身份验证</div>
         <div style="color:#475569;font-size:13px;line-height:1.6;">${esc(errStr)}</div>
-        <div style="margin-top:14px;font-size:12px;color:#64748b;line-height:1.6;">
+        <div style="margin-top:16px;font-size:12px;color:#64748b;line-height:1.6;">
           提示：请在页面顶部的「🔑 凭据」输入框中粘贴 Hub 身份 Token 后点击「保存凭据」。<br>
           （本地开发环境可在终端执行 <code>cat ~/.herdr-controller/credentials/experience-console-reviewer.token</code> 获取凭据）
         </div>
@@ -12907,6 +12924,12 @@ class Handler(BaseHTTPRequestHandler):
                 if not res.get('ok') and 'error' in res:
                     return self.send_json(_hub_error_status(res), error=res['error'])
                 return self.send_json(200, res)
+            if p=='/api/experience/token':
+                q = self.query()
+                uid = q.get('user', ['local-console-reviewer'])[0] or 'local-console-reviewer'
+                from herdr.state_db import get_user_token
+                tok = get_user_token(uid, 'experience_hub')
+                return self.send_json(200, {'ok': True, 'token': tok or ''})
             return self.send_json(404,error='Not Found')
         except herdr_deliverables.DeliverableError as e:
             return self.send_json(e.status,error=e.message)
@@ -12970,6 +12993,12 @@ class Handler(BaseHTTPRequestHandler):
                 if not res.get('ok') and 'error' in res:
                     return self.send_json(400, error=res.get('error'))
                 return self.send_json(200, res)
+            if p=='/api/experience/token':
+                tok = str(b.get('token', '')).strip()
+                uid = str(b.get('user', 'local-console-reviewer')).strip() or 'local-console-reviewer'
+                from herdr.state_db import save_user_token
+                save_user_token(uid, 'experience_hub', tok)
+                return self.send_json(200, {'ok': True, 'saved': bool(tok)})
             return self.send_json(404,error='Not Found')
         except Exception as e:
             self.log_message('POST %s failed: %s', self.path, e)

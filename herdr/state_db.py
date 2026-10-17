@@ -663,6 +663,16 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
         );
     """)
 
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS user_tokens (
+            user_id TEXT NOT NULL,
+            token_type TEXT NOT NULL,
+            token_value TEXT NOT NULL,
+            updated_at REAL NOT NULL,
+            PRIMARY KEY (user_id, token_type)
+        );
+    """)
+
     conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_wf_created ON tasks(workflow_id, created_at, task_id);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_workflows_project ON workflows (CASE WHEN json_valid(metadata_json) THEN json_extract(metadata_json, '$.project_id') END);")
@@ -7943,3 +7953,74 @@ def migrate_v1_to_v2(
         "migrated_checkpoints": migrated_cps,
         "migrated_steers": migrated_steers,
     }
+
+
+def save_user_token(
+    user_id: str,
+    token_type: str,
+    token_value: str,
+    db_path: Optional[Path] = None,
+) -> None:
+    """Save or update a persistent user token in the database."""
+    resolved_path = resolve_state_db_path(db_path)
+    init_db(resolved_path)
+    now = time.time()
+    with get_db_connection(resolved_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO user_tokens (user_id, token_type, token_value, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id, token_type) DO UPDATE SET
+                token_value = excluded.token_value,
+                updated_at = excluded.updated_at
+            """,
+            (user_id, token_type, token_value, now),
+        )
+        conn.commit()
+
+
+def get_user_token(
+    user_id: str,
+    token_type: str,
+    db_path: Optional[Path] = None,
+) -> Optional[str]:
+    """Retrieve a persistent user token from the database, defaulting from credentials if unseeded."""
+    resolved_path = resolve_state_db_path(db_path)
+    init_db(resolved_path)
+    with get_db_connection(resolved_path) as conn:
+        row = conn.execute(
+            "SELECT token_value FROM user_tokens WHERE user_id = ? AND token_type = ?",
+            (user_id, token_type),
+        ).fetchone()
+        if row is not None:
+            return str(row[0]) if row[0] is not None else ""
+
+    # Fallback seeding for default local reviewer token if not yet seeded
+    if token_type == "experience_hub" and user_id in ("local-console-reviewer", "default"):
+        cred_path = Path.home() / ".herdr-controller" / "credentials" / "experience-console-reviewer.token"
+        if cred_path.is_file():
+            try:
+                token_val = cred_path.read_text(encoding="utf-8").strip()
+                if token_val:
+                    save_user_token(user_id, token_type, token_val, db_path=resolved_path)
+                    return token_val
+            except Exception:
+                pass
+    return None
+
+
+def delete_user_token(
+    user_id: str,
+    token_type: str,
+    db_path: Optional[Path] = None,
+) -> bool:
+    """Delete a persistent user token from the database."""
+    resolved_path = resolve_state_db_path(db_path)
+    init_db(resolved_path)
+    with get_db_connection(resolved_path) as conn:
+        cur = conn.execute(
+            "DELETE FROM user_tokens WHERE user_id = ? AND token_type = ?",
+            (user_id, token_type),
+        )
+        conn.commit()
+        return cur.rowcount > 0
