@@ -10361,12 +10361,12 @@ async function saveHubToken(){
     const inp=document.getElementById('hubTokenInput');
     const val=(inp&&inp.value||'').trim();
     if(val){
+      await api('/api/experience/token',{method:'POST',body:JSON.stringify({token:val})});
       sessionStorage.setItem('herdr_hub_token',val);
-      try{await api('/api/experience/token',{method:'POST',body:JSON.stringify({token:val})});}catch(e){}
-      toast('Hub 身份凭据已持久化至数据库');
+      toast('Hub 身份凭据已持久化至受保护存储');
     }else{
+      await api('/api/experience/token',{method:'POST',body:JSON.stringify({token:''})});
       sessionStorage.removeItem('herdr_hub_token');
-      try{await api('/api/experience/token',{method:'POST',body:JSON.stringify({token:''})});}catch(e){}
       toast('Hub 身份凭据已清除');
     }
     renderShellExperience();
@@ -10494,19 +10494,15 @@ async function renderShellExperience(){
 
   let saved='';
   try{saved=sessionStorage.getItem('herdr_hub_token')||'';}catch(e){}
-  if(!saved){
-    try{
-      const tokenRes=await api('/api/experience/token');
-      if(tokenRes&&tokenRes.token){
-        saved=tokenRes.token;
-        sessionStorage.setItem('herdr_hub_token',saved);
-      }
-    }catch(e){}
-  }
+  let hasServerToken=false;
+  try{
+    const tokenRes=await api('/api/experience/token');
+    hasServerToken=Boolean(tokenRes&&(tokenRes.has_token||tokenRes.data?.has_token));
+  }catch(e){}
   const custFilter=(window._hubCustomerFilter||'').trim();
 
   let authStatusHtml='';
-  if(saved){
+  if(saved||hasServerToken){
     authStatusHtml='<span style="display:inline-flex;align-items:center;gap:4px;font-size:12px;font-weight:600;color:#059669;background:#ecfdf5;padding:4px 8px;border-radius:4px;border:1px solid #a7f3d0;">✓ 已载入凭据</span>';
   }else{
     authStatusHtml='<span style="display:inline-flex;align-items:center;gap:4px;font-size:12px;font-weight:600;color:#d97706;background:#fef3c7;padding:4px 8px;border-radius:4px;border:1px solid #fde68a;">! 需凭据</span>';
@@ -10523,7 +10519,7 @@ async function renderShellExperience(){
           <div class="exp-auth-group">
             <span style="font-size:12px;font-weight:600;color:#475569;">🔑 凭据:</span>
             ${authStatusHtml}
-            <input id="hubTokenInput" class="exp-input" type="password" placeholder="粘贴 Hub 身份 Token" style="width:200px;" />
+            <input id="hubTokenInput" class="exp-input" type="password" placeholder="${hasServerToken?'已绑定默认凭据 (可在此覆盖)':'粘贴 Hub 身份 Token'}" style="width:200px;" />
             <button class="exp-btn-base exp-btn-primary" onclick="saveHubToken()">保存凭据</button>
           </div>
           <div class="exp-group-divider"></div>
@@ -12778,7 +12774,11 @@ class Handler(BaseHTTPRequestHandler):
         auth = self.headers.get('Authorization', '')
         if auth.startswith('Bearer '):
             return auth[7:].strip()
-        return self.headers.get('X-HAFlow-Token') or None
+        header_tok = self.headers.get('X-HAFlow-Token')
+        if header_tok:
+            return header_tok.strip()
+        from herdr.state_db import get_user_token
+        return get_user_token('local-console-reviewer', 'experience_hub')
     def send_json(self,status,data=None,error=None):
         p={'ok':error is None};
         if data is not None:p['data']=data
@@ -12929,7 +12929,7 @@ class Handler(BaseHTTPRequestHandler):
                 uid = q.get('user', ['local-console-reviewer'])[0] or 'local-console-reviewer'
                 from herdr.state_db import get_user_token
                 tok = get_user_token(uid, 'experience_hub')
-                return self.send_json(200, {'ok': True, 'token': tok or ''})
+                return self.send_json(200, {'ok': True, 'has_token': bool(tok)})
             return self.send_json(404,error='Not Found')
         except herdr_deliverables.DeliverableError as e:
             return self.send_json(e.status,error=e.message)
