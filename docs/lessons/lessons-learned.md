@@ -6906,3 +6906,45 @@ git log --oneline 1d2b25b..f15b1c3   # test_finding_verifier 行号锚点修复
 `pytest -q tests/test_delivery_legacy_notes.py tests/test_impl_fix3_regression.py tests/test_impl_fix1_regression.py tests/test_impl_fix2_regression.py tests/test_impl_fix5_regression.py`（相邻 v1/v2/v3/fix-loop 回归一并覆盖）。
 
 ---
+
+## 163. 编排层五种停滞形态：Agent 兜底、评估器范围、哨兵误杀与两类退役死锁（2026-10-17）
+
+### 问题背景
+
+`wf-haflow-1016-02`（Agent 执行轨迹可视化 V1）从需求到收尾跑了 5 个实现轮次、4 轮门禁重派。代码缺陷只占一小部分，大量时间耗在编排/工具链的停滞形态上：agy 启动死循环导致门禁无 Agent 可用（ops 142452/142453 hold 2h）；`.herdr-loop` 评估器默认裸跑全量 pytest（4612 项）撞上硬编码 300s 超时，5 轮 50 分耗尽（OBS-6，test-auto-r3/r4/r5 三次同因复现）；哨兵 `hard_timeout_watchdog` 在 impl-r3 等待协调答复时以 idle 3609s>3600s 误杀 working→failed（work 已完成于 commit 4ff9560，rework 拒绝 failed 终态，只能人工 fetch refs + rebase 恢复）；已裁决(completed/blocked) 门禁任务无法退役（状态机禁 completed→superseded），business cohort 闭世界检查死锁，wrapup launch 被拒，最终由协调器用 state_db CAS 补挂 `superseded_by` 修复（审计事件 93332）；BASELINE STALE 拒绝的 launch 仍留下 failed 僵尸行，NODE CAPACITY 在写入 supersedes 链接之前计数，第二次派发被自己的僵尸行堵死。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|---|---|---|
+| agy 就绪门超时 20s → agent_not_ready，worker 回滚但克隆残留；重试被 "launch workspace already exists" 拒绝，形成循环 | 失败路径的残留物不得成为下次重试的守卫对象；路由降级链在全部候选被堵时没有 available-agent 兜底 | 启动失败回滚必须连带清理本 op 创建的克隆残留；路由对"实现阶段 Agent 隔离"必须提供显式审计豁免通道（`--allow-reuse-implementation-agents` + 独立会话/run），并在耗尽时输出可行动的 blocked 原因而不是循环重试 |
+| 派发未传 `--test-cmd/--lint-cmd` 时 EVALUATOR.sh 默认全量 pytest+ruff，与 AGENTS.md §6"本地不重复 CI 全量"结构性冲突 | 工具的默认值必须遵守仓库常驻约束；结构性超时不是代码缺陷，不得重试凑分 | 实现类任务 launch 必须显式限定专项测试范围；评估器 exit 124 且失败用例为 0 时按 OBS-6 先例仲裁、走完成协议，全量交给 CI |
+| 哨兵 idle 3600s 把"等待人工/协调回复"当作停滞误杀 | 长任务的可配置等待语义与硬超时混为一谈；误杀后 failed 终态不可 rework，恢复成本极高 | 需要等待回复的 worker 必须全程周期性心跳/checkpoint（收尾任务指令要求连续执行）；终态前保留可恢复身份（refs/herdr/tasks/* 必须本地 fetch 可达） |
+| 门禁任务 r3 completed/blocked 是不可变历史，r4 的 supersedes 退役步骤因 completed→superseded 非法而失败，留下不合格活跃任务，下游 cohort 死锁 | 退役是元数据关系（superseded_by），不是状态回退；不可变结论与可退役身份应分离建模 | 恢复用引擎自身 recovery_successor 回填语义：`update_task_metadata` CAS 仅补挂 `superseded_by` + `supersede_reason`，status/verdict/commit 历史不动，落审计事件；bypass-gate 会改写 verdict 违反真实性三原则，禁止用于退役 |
+| wrapup 首轮（r1）因候选基线过期派发失败仍注册任务，failed 僵尸行使 NODE CAPACITY(2>1) 在写入 supersedes 链接前计数，形成容量死锁 | 被拒绝的派发不得占用节点容量；校验顺序影响可达性 | 合法解法顺序固定：先 CLI `supersede <旧failed> --by <新id>`（failed→superseded 允许），再 `launch --supersedes`；引擎侧应把 supersede 链接写入移到容量检查之前 |
+
+### 操作规范
+
+1. **派发实现/门禁任务**：`herdr-task launch` 显式传 `--test-cmd`/`--lint-cmd` 限定影响面专项；禁止依赖评估器默认全量。
+2. **worker 防误杀**：验收指令写死"全程连续执行，等待外部输入时周期性 checkpoint"；哨兵阈值调整属控制器变更，须单独评审。
+3. **门禁轮转**：新一轮 gate launch 必须 `--supersedes <旧>`；若旧任务已 completed，先走 CAS 补挂 `superseded_by`（带审计事件），不得手工改 verdict。
+4. **派发失败自愈**：遇 NODE CAPACITY 死锁按上文顺序清理 failed 行；每次 launch 后查 `herdr-task list`/state.db 确认落库，不凭 CLI 输出尾部判定。
+
+### 验证命令 / 守护测试
+
+```bash
+# 退役回填语义：status/verdict 不变，仅元数据补挂
+herdr-task list --workflow-id <wf> | grep -o '"superseded_by": "[^"]*"'
+# 期望：被退役门禁任务行含 superseded_by 指向新一轮，且 stage_verdict 保持原结论
+# 评估器范围：launch 后检查工位 .herdr-loop/EVALUATOR.sh 是否含显式 test-cmd
+rg -n "pytest -q tests/" <clone>/.herdr-loop/EVALUATOR.sh   # 期望：定向专项而非裸全量
+```
+
+### 相关文档 / 关联证据
+
+- `docs/walkthroughs/20261017-wf-haflow-1016-02-wrapup.md` — 本轮收尾状态表与双门禁 r5 回执汇总
+- 工作流共享留痕 `wf-haflow-1016-02/shared/notes.jsonl` — "agy 死循环人工接管"（1792197177）、"哨兵误杀恢复"（1792203761）、"退役补挂手动恢复"（1792206605，审计事件 93332）、"容量死锁"（1792207545）
+- Git Commit `67c0039`（候选）/ `4ff9560`（误杀前已完成工作）/ `9f95990`（#236 基线旋转点）
+- `herdr/state_db.py` `update_task_metadata` CAS — 回填所用原语
+
+---
