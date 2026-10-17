@@ -1,0 +1,44 @@
+# DEFECT-5 (BLOCKING) — 冻结候选引入仓库既有守卫测试的红线
+
+## 结论
+候选 4e543ee 在 console/herdr_factory_console.py 新增的 .td-ev-icon 规则使用了被禁的
+spacing token（margin-right: 5px），使仓库既有守卫测试
+tests/test_console_standard_layout_tabs.py::TestConsoleStandardLayoutAndTabs::test_no_spacing_grid_violations
+由绿转红。基线 0ed2015 无该值，该测试在基线通过。
+
+## 复现步骤（均在工位 clone 内执行）
+1) git rev-parse HEAD
+   4e543ee6a9e9cc9d4269222a177a94aa12f78275
+2) PYTHONPATH=. pytest -q tests/test_console_standard_layout_tabs.py
+   .....F.........   -> 1 failed, 14 passed
+   AssertionError: Lists differ: ['margin-right: 5px'] != []
+3) grep -n "margin-right: 5px" console/herdr_factory_console.py
+   3934:  margin-right: 5px;
+4) git blame -L 3934,3934 console/herdr_factory_console.py
+   4e543ee6a9e9cc9d4269222a177a94aa12f78275  (候选本身引入)
+5) git show 0ed2015:console/herdr_factory_console.py | grep -n "margin-right: 5px"
+   无命中（基线不含该值）
+
+## 同一正则的基线/候选对比（脚本化，非人工判断）
+baseline violations: []
+candidate violations: ['margin-right: 5px']
+
+## 触发条件与后果
+触发条件：任何执行 tests/ 全量或该守卫测试的 CI/门禁。
+后果：4e543ee 使测试套件变红（new failing test），CI 门禁必然失败；
+      同时使本工位 herdr-loop eval 的 correctness 不可能达到 100
+      （只评不改节点禁止修改业务代码，修复权在实现工位）。
+
+## 建议最小修复（不由本工位执行）
+把 .td-ev-icon 的 margin-right 调整为 token 允许值（4px 或 8px），
+或复用既有 token 变量；改后重跑
+pytest -q tests/test_console_standard_layout_tabs.py 与全量。
+
+## 影响面全量定向回归（60 个引用被改模块的测试文件，182.39s）
+命令: grep -ln "herdr_factory_console|native_session_trace|execution_trace" tests/*.py \
+      | xargs env PYTHONPATH=. pytest -q --tb=line -p no:cacheprovider
+结果: 1 failed, 781 passed, 93 subtests passed  (exit 1)
+唯一失败: tests/test_console_standard_layout_tabs.py::TestConsoleStandardLayoutAndTabs::test_no_spacing_grid_violations
+文件清单: impact-files.txt / 完整输出: impact-regression.txt
+说明: 引用被改动的 3 个源文件的测试文件共 60 个，已全部执行；其余 tests/ 用例与被改模块无引用关系，
+      按 AGENTS.md §6 由 CI 在合并结果上执行全量。

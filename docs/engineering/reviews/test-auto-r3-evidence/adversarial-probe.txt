@@ -1,0 +1,30 @@
+PASS  F1.secret_read_no_path_leak  
+PASS  F1.multi_file_cat_unclaimed  
+PASS  F1.shell_meta_never_read_claim  
+FAIL  F1.or_chain_head_unclaimed[DEFECT-1]  [{'session_id': 's1', 'ordinal': 1, 'timestamp': 1.0, 'tool': 'exec', 'path': 'missing.txt', 'command': 'cat missing.txt || cat real.txt', 'exit_code': 0, 'retry_of': None, 'is_error': False, 'kind': 'file_read', 'source
+FAIL  F1.mixed_chain_head_unclaimed[DEFECT-1]  [{'session_id': 's1', 'ordinal': 1, 'timestamp': 1.0, 'tool': 'exec', 'path': 'a.py', 'command': 'cat a.py && rm x || cp y z', 'exit_code': 0, 'retry_of': None, 'is_error': False, 'kind': 'file_read', 'source_ref': 'code
+PASS  F1.overlong_patch_path_unclaimed  
+PASS  F1.output_marker_not_edit  
+PASS  F1.rejected_patch_text_not_claimed  
+PASS  F1.malformed_no_escape  
+PASS  F1.loader_no_exception  
+PASS  F2.test_to_test_title  
+PASS  F2.tool_to_test_title  
+PASS  F2.test_to_tool_title  
+PASS  F2.self_retry_ignored  
+PASS  F2.unknown_retry_target_ignored  
+PASS  F3.shaless_committed_never_carries_task_sha  
+PASS  F3.commit_events_use_own_sha_only  
+PASS  F3.shaless_becomes_submitted  
+PASS  F3.unbacked_project_never_stamps_time  
+PASS  F3.evidence_commit_wins_single_event  
+PASS  F3.time_unknown_preserved  
+PASS  F3.adopted_not_a_commit  
+PASS  F6.pinned_exact_session_found  
+PASS  F6.traversal_recorded_id_binds_nothing  
+PASS  F6.deadline_bounded  
+PASS  T.failure_not_success  
+PASS  T.no_evidence_no_test_event  
+PASS  T.detail_bounded  
+FAIL  F1.multi_file_session_keeps_every_action[DEFECT-2]  (2, ['two.md'], [])
+{"total": 29, "failed": 3}

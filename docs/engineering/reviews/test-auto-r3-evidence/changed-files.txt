@@ -1,0 +1,8 @@
+console/herdr_factory_console.py
+docs/bug-reports/2026-10-17-impl-trace-core-1016-r2.md
+docs/walkthroughs/20261017-impl-trace-core-1016-r2.md
+docs/walkthroughs/README.md
+herdr/execution_trace.py
+herdr/native_session_trace.py
+tests/test_console_execution_trace.py
+tests/test_execution_trace.py

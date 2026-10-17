@@ -1,0 +1,25 @@
+段落3 · 门禁结论修订（取代段落2末尾"门禁判定：pass"一行）
+
+补充运行候选改动文件的既有回归守卫后，发现 1 项由本候选引入的红测，门禁结论按证据由 pass 下调为 **blocked**。
+
+## DEFECT-5（P1，阻塞，本候选引入）
+- 位置：console/herdr_factory_console.py:3934，本候选新增的 .td-ev-icon 规则使用禁用 spacing token `margin-right: 5px;`
+- 后果：仓库既有守卫测试 tests/test_console_standard_layout_tabs.py::TestConsoleStandardLayoutAndTabs::test_no_spacing_grid_violations 由绿转红（`1 failed, 14 passed`，AssertionError: Lists differ: ['margin-right: 5px'] != []）
+- 归属证明：`git blame -L 3934,3934` 归属 4e543ee 本身；基线 0ed2015 同一正则 0 命中（baseline violations [] / candidate violations ['margin-right: 5px']）→ 属新增失败，非环境噪声、非基线债务
+- 复现：git rev-parse HEAD → 4e543ee…；PYTHONPATH=. pytest -q tests/test_console_standard_layout_tabs.py → 1 failed, 14 passed
+- 建议最小修复（本工位只评不改，未执行）：改为 token 允许值（4px 或 8px）或复用既有变量；改后重跑该守卫与影响面回归
+
+## 影响面定向全量回归（替代无法在本机跑完的全量）
+- 判定依据：引用被改动的 3 个源文件（herdr/native_session_trace.py、herdr/execution_trace.py、console/herdr_factory_console.py）的测试文件共 60 个，全部执行
+- 命令：grep -ln "herdr_factory_console|native_session_trace|execution_trace" tests/*.py | xargs env PYTHONPATH=. pytest -q --tb=line -p no:cacheprovider
+- 结果：1 failed, 781 passed, 93 subtests passed in 182.39s —— 唯一失败即 DEFECT-5
+- 其余用例与被改模块无引用关系，按 AGENTS.md §6 由 CI 在合并结果上执行全量
+
+## 六项验收结论不变，仅 F4 追加阻塞项
+F1 实现有效（附 DEFECT-1）、F2 pass、F3 pass、F4 主路径实现（附 DEFECT-3/4，并新增阻塞 DEFECT-5）、F5 pass、F6 pass。真实性三原则抽查通过。git diff 全程为空，HEAD 仍为 4e543ee。
+
+## 附带观察 OBS-6（harness 侧，非本候选缺陷）
+.herdr-loop EVALUATOR.sh 跑全量 pytest（4598 items），而 herdr/evaluator.py 把评估器超时硬编码为 300s；本机全量实测 28–35 分钟（30% 用时约 19 分钟），必然 evaluator_exit:124 → correctness 0.0，与代码好坏无关。叠加"只评不改"节点无权修复红测 → herdr-loop eval 在本节点不可能到 100.0。建议评估器按节点 DoD 专项命令取值 / 超时可配 / 给 test 节点单独收敛口径。
+
+产物：.herdr-test-evidence/{regression-spacing.txt, impact-files.txt, impact-regression.txt, VERIFICATION-REPORT.md}
+门禁：HERDR_GATE_VERDICT: blocked（1 阻塞 + 3 非阻塞缺陷 + 6 项观察）

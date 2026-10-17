@@ -1,0 +1,2 @@
+{"loads":5,"cleared_after_completion":0,"poll_survives_finished_task":true}
+{"auto_start_after_pending_to_working":false,"never_started_for_pending":true}

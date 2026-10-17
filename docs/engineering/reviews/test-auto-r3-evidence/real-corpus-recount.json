@@ -1,0 +1,14 @@
+{
+  "jsonl_files": 198,
+  "native_actions": 11494,
+  "kinds": {
+    "tool_call": 11003,
+    "file_read": 442,
+    "file_read_exit_unknown": 34,
+    "test_passed": 1,
+    "file_edit": 46,
+    "test_failed": 2
+  },
+  "suspicious_count": 0,
+  "suspicious_sample": []
+}
