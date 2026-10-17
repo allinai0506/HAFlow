@@ -264,3 +264,18 @@ def read_archived_file(task, rel, limit):
                     return blob
                 break
     raise ValueError("archive file verification failed")
+
+
+def plan_clone(task, clone_root):
+    """Validate ownership and archive budgets without publishing files or metadata."""
+    root = _root(task, clone_root)
+    if task.get("clone_archive"):
+        verify_source(task, clone_root, task["clone_archive"])
+    else:
+        _inventory(root)
+    return {
+        "archive_required": True,
+        "archive_would_create": not bool(task.get("clone_archive")),
+        "clone_would_delete": True,
+        "deletion_condition": "archive verified and source identity/content unchanged",
+    }

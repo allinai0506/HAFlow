@@ -6810,7 +6810,7 @@ def _close_owned_pane(identity):
     return proven
 
 
-def _finalize_one(task, purge_clones=False, dry_run=False, close_claim=None, output_override="", reclaim_archive=None):
+def _finalize_one(task, purge_clones=False, dry_run=False, close_claim=None, output_override="", reclaim_archive=None, reclaim_plan=None):
     """对单个已收敛任务执行物理收尾,返回报告行。幂等。"""
     task_id = task.get("task_id")
     status = task.get("status")
@@ -6830,8 +6830,24 @@ def _finalize_one(task, purge_clones=False, dry_run=False, close_claim=None, out
         "action": "finalized",
     }
 
+    archive_required = close_claim is not None and not dry_run and not reclaim_archive
+
+    def retain_unarchived_clone():
+        clone = task.get("clone_path")
+        if archive_required and clone and os.path.lexists(os.path.expanduser(clone)):
+            diagnosis = {"reason": "recovery_archive_required"}
+            row.update(action="retained", output_guard=diagnosis,
+                       clone_retained_reason=diagnosis["reason"], pane_retained_reason=diagnosis["reason"])
+            _record_output_retention(task, diagnosis)
+            return True
+        return False
+
+    if retain_unarchived_clone():
+        return row
     output = _teardown_output_guard(task)
-    authorization = output_override or ("verified-archive" if reclaim_archive else "purge-clones" if purge_clones else "")
+    authorization = output_override or ("verified-archive" if reclaim_archive else
+                                         "planned-archive" if dry_run and reclaim_plan else
+                                         "purge-clones" if purge_clones else "")
     if output["reason"]:
         row["output_guard"] = output
         row["clone_retained_reason"] = output["reason"]
@@ -6849,7 +6865,10 @@ def _finalize_one(task, purge_clones=False, dry_run=False, close_claim=None, out
         row["clone_would_delete"] = bool(
             task.get("clone_path") and (deletable or purge_clones)
         )
-        if not deletable and not purge_clones:
+        if reclaim_plan:
+            row.update(reclaim_plan)
+            row["clone_retained_reason"] = None
+        elif not deletable and not purge_clones:
             row["clone_retained_reason"] = reason
         return row
 
@@ -6901,7 +6920,11 @@ def _finalize_one(task, purge_clones=False, dry_run=False, close_claim=None, out
         return row
     deletable, reason = clone_deletable(task)
     if task.get("clone_path"):
-        if deletable or purge_clones or reclaim_archive:
+        if archive_required:
+            # Never invoke delete without a workflow recovery point, even if
+            # the clone appeared after preflight or after the initial check.
+            retain_unarchived_clone()
+        elif deletable or purge_clones or reclaim_archive:
             if close_claim is None:
                 row["clone_deleted"] = delete_clone_safely(task["clone_path"])
             else:
@@ -7369,26 +7392,60 @@ def _close_workflow_owned(
         )
         sys.exit(2)
 
-    # Workflow-level reclamation only: stage cleanup must keep downstream inputs.
-    # Snapshot every remaining sandbox before any teardown. Recovery archives are
-    # private local backups, not Provider evidence or a second task state store.
+    # Preflight is read-only: pause may still win until the atomic closing
+    # transition. Escape flags authorize output handling, never archive bypass.
+    from herdr.clone_archive import plan_clone, preserve_clone
+    reclaim_plans = {}
+    output_authorizations = {}
+    for task in tasks:
+        task_id = task["task_id"]
+        output = _teardown_output_guard(task)
+        explicit = ("purge-clones" if purge_clones else "force" if force else "abandon" if abandon else
+                    "accept-escalated" if accept_escalated and task_id in escalated_git else "")
+        clone = task.get("clone_path")
+        exists = bool(clone and os.path.lexists(os.path.expanduser(clone)))
+        deleting_archive = task.get("clone_archive") and task.get("clone_reclaim_started") == task["clone_archive"].get("manifest_sha256")
+        document_output = (output["reason"] in {"unpreserved_worktree_output", "unintegrated_commit_diverged"}
+                           and (task.get("integration_mode") or "none") == "none")
+        safe_path = exists and not os.path.islink(clone) and os.path.commonpath([CLONE_ROOT, os.path.realpath(clone)]) == CLONE_ROOT and os.path.realpath(clone) != CLONE_ROOT
+        allowed = (not output["reason"] or explicit or task.get("status") == "failed"
+                   or safe_path and (deleting_archive or document_output))
+        if output["reason"] and not allowed:
+            if not dry_run:
+                _record_output_retention(task, output)
+                shown = dict(output)
+                if shown.get("remediation_cmd") and clone:
+                    shown["remediation_cmd"] = shown["remediation_cmd"].replace("<clone>", str(clone))
+                print("[CLOSE ABORT] unpreserved task output: " + json.dumps({"task_id": task_id, **shown}, ensure_ascii=False))
+                sys.exit(2)
+            continue
+        if exists:
+            try:
+                reclaim_plans[task_id] = plan_clone(task, CLONE_ROOT)
+            except (OSError, ValueError, tarfile.TarError) as exc:
+                print(f"[CLOSE ABORT] sandbox archive planning failed: {task_id}: {exc}")
+                sys.exit(2)
+        output_authorizations[task_id] = explicit
+
+    # Own the workflow state before the first archive or archive metadata write.
+    # SQLite validates the current state in the same transaction as this change;
+    # a concurrent pause either wins before this point or is rejected afterwards.
+    if not dry_run and entry and entry.get("status") not in {"closing", "completed"}:
+        from herdr import kernel
+        kernel.transition_workflow(
+            workflow_id=workflow_id, to_status="closing",
+            reason=f"close_workflow: {'abandoned' if abandon else 'delivered'}",
+            source="herdr-task", force=force, store=_get_store(),
+            expected_status=entry.get("status"),
+        )
+
     archives = {}
     if not dry_run:
-        from herdr.clone_archive import preserve_clone
         from herdr import kernel
         for task in tasks:
-            clone = task.get("clone_path")
-            if not clone or not os.path.lexists(os.path.expanduser(clone)):
+            task_id = task["task_id"]
+            if task_id not in reclaim_plans:
                 continue
-            output = _teardown_output_guard(task)
-            safe_path = (not os.path.islink(clone) and os.path.commonpath([CLONE_ROOT, os.path.realpath(clone)]) == CLONE_ROOT
-                         and os.path.realpath(clone) != CLONE_ROOT)
-            deleting_archive = task.get("clone_archive") and task.get("clone_reclaim_started") == task["clone_archive"].get("manifest_sha256")
-            archivable_output = safe_path and (deleting_archive or (
-                output["reason"] in {"unpreserved_worktree_output", "unintegrated_commit_diverged"}
-                and (task.get("integration_mode") or "none") == "none"))
-            if output["reason"] and not archivable_output and task.get("status") != "failed":
-                continue  # Existing output gate below supplies the diagnosis.
             try:
                 if task.get("clone_archive"):
                     archive = preserve_clone(task, CLONE_ROOT)
@@ -7399,43 +7456,21 @@ def _close_workflow_owned(
                         raise ValueError("deliverable inventory incomplete")
                     archive = preserve_clone(task, CLONE_ROOT)
                     archive["deliverables"] = catalog["items"]
+                # A recovery snapshot must not grant an implicit Git-output
+                # override when output appeared during the archive operation.
+                recovering = task.get("clone_archive") and task.get("clone_reclaim_started") == task["clone_archive"].get("manifest_sha256")
+                if ((task.get("integration_mode") or "none") == "git"
+                        and task.get("status") != "failed" and not recovering
+                        and not output_authorizations.get(task_id)):
+                    current_output = _teardown_output_guard(task)
+                    if current_output["reason"]:
+                        _record_output_retention(task, current_output)
+                        raise ValueError("Git output changed before archive publication: " + current_output["reason"])
             except (OSError, ValueError, tarfile.TarError) as exc:
-                print(f"[CLOSE ABORT] sandbox archive failed: {task['task_id']}: {exc}")
+                print(f"[CLOSE ABORT] sandbox archive failed: {task_id}: {exc}")
                 sys.exit(2)
-            archives[task["task_id"]] = archive
-            kernel.update_task_metadata(task["task_id"], {"clone_archive": archive}, store=_get_store())
-
-    output_authorizations = {}
-    for task in tasks:
-        if task.get("status") == "failed":
-            continue
-        output = _teardown_output_guard(task)
-        if not output["reason"]:
-            continue
-        authorized = ("verified-archive" if task["task_id"] in archives else "purge-clones" if purge_clones else "force" if force else "abandon" if abandon else
-                      "accept-escalated" if accept_escalated and task.get("task_id") in escalated_git else "")
-        if not dry_run:
-            _record_output_retention(task, output, authorized_via=authorized)
-        if not authorized and not dry_run:
-            shown = dict(output)
-            if shown.get("remediation_cmd") and task.get("clone_path"):
-                shown["remediation_cmd"] = shown["remediation_cmd"].replace("<clone>", str(task["clone_path"]))
-            print("[CLOSE ABORT] unpreserved task output: " + json.dumps({"task_id": task["task_id"], **shown}, ensure_ascii=False))
-            sys.exit(2)
-        output_authorizations[task["task_id"]] = authorized
-
-    # 2. Record closing state under the outer cross-process lifecycle ownership.
-    if not dry_run and entry and entry.get("status") not in {"closing", "completed"}:
-        from herdr import kernel
-        store = _get_store()
-        kernel.transition_workflow(
-            workflow_id=workflow_id,
-            to_status="closing",
-            reason=f"close_workflow: {'abandoned' if abandon else 'delivered'}",
-            source="herdr-task",
-            force=force,
-            store=store,
-        )
+            archives[task_id] = archive
+            kernel.update_task_metadata(task_id, {"clone_archive": archive}, store=_get_store())
 
     if dry_run:
         print(f"[DRY RUN] close-workflow {workflow_id}")
@@ -7458,7 +7493,7 @@ def _close_workflow_owned(
     }
 
     for task in tasks:
-        if task.get("status") == "failed" and task["task_id"] not in archives:
+        if task.get("status") == "failed" and task["task_id"] not in reclaim_plans:
             report["tasks"].append({
                 "task_id": task.get("task_id"),
                 "status": "failed",
@@ -7467,6 +7502,8 @@ def _close_workflow_owned(
             })
             continue
         finalize_options = dict(purge_clones=purge_clones, dry_run=dry_run, close_claim=close_claim)
+        if dry_run and task["task_id"] in reclaim_plans:
+            finalize_options["reclaim_plan"] = reclaim_plans[task["task_id"]]
         if task["task_id"] in archives:
             finalize_options["reclaim_archive"] = archives[task["task_id"]]
         authorization = output_authorizations.get(task["task_id"])

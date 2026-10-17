@@ -261,6 +261,7 @@ def transition_workflow(
     metadata: Optional[Dict[str, Any]] = None,
     force: bool = False,
     store: Optional[StateStore] = None,
+    expected_status: Optional[str] = None,
 ) -> Dict[str, Any]:
     """State Transition Gateway: Atomically transition workflow status and append WorkflowEvent."""
     s = _get_store(store)
@@ -271,6 +272,7 @@ def transition_workflow(
         source=source,
         metadata=metadata,
         force=force,
+        **({"expected_status": expected_status} if expected_status is not None else {}),
     )
     sync_workflows_projection(store=s)
     return res

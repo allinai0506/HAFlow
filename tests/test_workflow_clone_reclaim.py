@@ -307,3 +307,274 @@ def test_controller_auto_close_runs_real_cli_and_reclaims(tmp_path, monkeypatch)
     from herdr.clone_archive import read_archived_file
 
     assert read_archived_file(task, "report.md", 1024) == b"valuable result\n"
+
+
+@pytest.mark.parametrize(
+    "flag", ["--purge-clones", "--force", "--abandon", "--accept-escalated"]
+)
+@pytest.mark.parametrize("kind", ["staged", "untracked"])
+def test_override_close_still_archives_dirty_git_output(
+    tmp_path, monkeypatch, flag, kind
+):
+    status = "committed" if flag == "--accept-escalated" else "cleaned"
+    store, clone, env = scene(tmp_path, monkeypatch, status=status, mode="git")
+    store.update_task_metadata(
+        "t",
+        {
+            "integration_mode": "git",
+            "integration_ref": "refs/tasks/t",
+            "finalize_escalated": flag == "--accept-escalated",
+        },
+    )
+    output = clone / ("report.md" if kind == "staged" else "new.md")
+    output.write_text("unintegrated result must survive")
+    if kind == "staged":
+        subprocess.run(
+            ["git", "-C", str(clone), "add", "report.md"],
+            check=True,
+            capture_output=True,
+        )
+    result = close(env, flag)
+    assert result.returncode == 0, result.stdout + result.stderr
+    task = store.get_task("t")
+    assert task.get("clone_archive"), "override deleted output without recovery archive"
+    from herdr.clone_archive import read_archived_file
+
+    assert (
+        read_archived_file(task, output.name, 1024)
+        == b"unintegrated result must survive"
+    )
+    assert not clone.exists()
+
+
+def test_archival_begins_only_after_closing_blocks_pause(tmp_path, monkeypatch):
+    from herdr import clone_archive, kernel
+    from herdr.transitions import InvalidTransitionError
+
+    store, clone, _ = scene(tmp_path, monkeypatch)
+    cli = load_cli(monkeypatch, store, clone)
+    preserve = clone_archive.preserve_clone
+
+    def pause_during_archive(task, clone_root):
+        assert (
+            store.get_workflow("wf")["status"] == "closing"
+        ), "archive side effects began while workflow could pause"
+        with pytest.raises(InvalidTransitionError):
+            kernel.transition_workflow(
+                workflow_id="wf",
+                to_status="paused",
+                reason="concurrent user pause",
+                source="test",
+                store=store,
+            )
+        return preserve(task, clone_root)
+
+    monkeypatch.setattr(clone_archive, "preserve_clone", pause_during_archive)
+    assert cli.close_workflow("wf")["close_state"] == "completed"
+    assert not clone.exists()
+
+
+@pytest.mark.parametrize(
+    "status,mode",
+    [
+        ("cleaned", "context"),
+        ("completed", "context"),
+        ("failed", "context"),
+        ("cleaned", "git"),
+    ],
+)
+def test_dry_run_reports_archive_then_reclaim_without_side_effects(
+    tmp_path, monkeypatch, status, mode
+):
+    store, clone, _ = scene(tmp_path, monkeypatch, status=status, mode=mode)
+    cli = load_cli(monkeypatch, store, clone)
+    report = cli.close_workflow("wf", dry_run=True)
+    row = report["tasks"][0]
+    assert row["clone_would_delete"] is True
+    assert row["archive_would_create"] is True
+    assert row["archive_required"] is True
+    assert clone.exists() and not store.get_task("t").get("clone_archive")
+    assert store.get_workflow("wf")["status"] == "running"
+    from herdr.clone_archive import archive_directory
+
+    assert not archive_directory(store.get_task("t")).exists()
+
+
+def test_late_clone_cannot_be_purged_without_an_archive(tmp_path, monkeypatch):
+    import shutil
+
+    store, clone, _ = scene(tmp_path, monkeypatch)
+    cli = load_cli(monkeypatch, store, clone)
+    shutil.rmtree(clone)
+    finalize = cli._finalize_one
+
+    def late_clone(task, **kwargs):
+        clone.mkdir()
+        (clone / "report.md").write_text("late output must remain")
+        return finalize(task, **kwargs)
+
+    monkeypatch.setattr(cli, "_finalize_one", late_clone)
+    with pytest.raises(SystemExit) as exc:
+        cli.close_workflow("wf", purge_clones=True)
+    assert exc.value.code == 2
+    assert (clone / "report.md").read_text() == "late output must remain"
+    assert not store.get_task("t").get("clone_archive")
+    assert store.get_workflow("wf")["status"] != "completed"
+
+
+def test_pause_wins_during_read_only_plan_without_archive_side_effects(
+    tmp_path, monkeypatch
+):
+    from herdr import clone_archive, kernel
+    from herdr.transitions import InvalidTransitionError
+
+    store, clone, _ = scene(tmp_path, monkeypatch)
+    cli = load_cli(monkeypatch, store, clone)
+    plan = clone_archive.plan_clone
+
+    def pause_after_plan(task, clone_root):
+        result = plan(task, clone_root)
+        kernel.transition_workflow(
+            workflow_id="wf",
+            to_status="paused",
+            reason="pause won",
+            source="test",
+            store=store,
+        )
+        return result
+
+    monkeypatch.setattr(clone_archive, "plan_clone", pause_after_plan)
+    with pytest.raises(InvalidTransitionError):
+        cli.close_workflow("wf")
+    task = store.get_task("t")
+    assert store.get_workflow("wf")["status"] == "paused"
+    assert clone.exists() and not task.get("clone_archive")
+    assert not clone_archive.archive_directory(task).exists()
+
+
+@pytest.mark.parametrize("kind", ["staged", "untracked"])
+def test_default_dirty_git_close_still_requires_explicit_authorization(
+    tmp_path, monkeypatch, kind
+):
+    store, clone, env = scene(tmp_path, monkeypatch, mode="git")
+    store.update_task_metadata(
+        "t", {"integration_mode": "git", "integration_ref": "refs/tasks/t"}
+    )
+    output = clone / ("report.md" if kind == "staged" else "new.md")
+    output.write_text("not yet integrated")
+    if kind == "staged":
+        subprocess.run(
+            ["git", "-C", str(clone), "add", "report.md"],
+            check=True,
+            capture_output=True,
+        )
+    result = close(env)
+    assert result.returncode == 2 and "unpreserved_worktree_output" in result.stdout
+    assert output.read_text() == "not yet integrated"
+    assert store.get_workflow("wf")["status"] == "running"
+    assert not store.get_task("t").get("clone_archive")
+
+
+def test_archive_write_failure_stays_closing_and_retries(tmp_path, monkeypatch):
+    from herdr import clone_archive
+
+    store, clone, _ = scene(tmp_path, monkeypatch)
+    cli = load_cli(monkeypatch, store, clone)
+    preserve = clone_archive.preserve_clone
+
+    def failure(*args):
+        raise OSError("archive disk failure")
+
+    monkeypatch.setattr(clone_archive, "preserve_clone", failure)
+    with pytest.raises(SystemExit):
+        cli.close_workflow("wf")
+    assert store.get_workflow("wf")["status"] == "closing"
+    assert clone.exists() and not store.get_task("t").get("clone_archive")
+    monkeypatch.setattr(clone_archive, "preserve_clone", preserve)
+    assert cli.close_workflow("wf")["close_state"] == "completed"
+    assert not clone.exists()
+
+
+def test_late_dirty_git_during_archive_cannot_gain_implicit_override(
+    tmp_path, monkeypatch
+):
+    from herdr import clone_archive
+
+    store, clone, _ = scene(tmp_path, monkeypatch, mode="git")
+    store.update_task_metadata(
+        "t", {"integration_mode": "git", "integration_ref": "refs/tasks/t"}
+    )
+    cli = load_cli(monkeypatch, store, clone)
+    preserve = clone_archive.preserve_clone
+
+    def late_output(task, clone_root):
+        (clone / "report.md").write_text("late unintegrated output")
+        subprocess.run(
+            ["git", "-C", str(clone), "add", "report.md"],
+            check=True,
+            capture_output=True,
+        )
+        return preserve(task, clone_root)
+
+    monkeypatch.setattr(clone_archive, "preserve_clone", late_output)
+    with pytest.raises(SystemExit):
+        cli.close_workflow("wf")
+    assert (clone / "report.md").read_text() == "late unintegrated output"
+    assert store.get_workflow("wf")["status"] != "completed"
+    assert not store.get_task("t").get("clone_archive")
+
+
+def test_force_cannot_override_pause_that_wins_during_plan(tmp_path, monkeypatch):
+    from herdr import clone_archive, kernel
+    from herdr.state_store import SQLiteStateStore
+    from herdr.transitions import InvalidTransitionError
+
+    store, clone, _ = scene(tmp_path, monkeypatch)
+    cli = load_cli(monkeypatch, store, clone)
+    plan = clone_archive.plan_clone
+    concurrent = SQLiteStateStore(store.db_path)
+
+    def pause_after_plan(task, clone_root):
+        result = plan(task, clone_root)
+        kernel.transition_workflow(
+            workflow_id="wf",
+            to_status="paused",
+            reason="newer pause",
+            source="test",
+            store=concurrent,
+        )
+        return result
+
+    monkeypatch.setattr(clone_archive, "plan_clone", pause_after_plan)
+    with pytest.raises(InvalidTransitionError):
+        cli.close_workflow("wf", force=True)
+    task = store.get_task("t")
+    assert store.get_workflow("wf")["status"] == "paused"
+    assert clone.exists() and not task.get("clone_archive")
+    assert not clone_archive.archive_directory(task).exists()
+
+    closing = [
+        event
+        for event in store.list_events(
+            workflow_id="wf", event_type="workflow_transition"
+        )
+        if (event.get("payload") or {}).get("to_status") == "closing"
+    ]
+    assert not closing
+
+
+def test_force_still_closes_status_explicitly_observed_as_paused(tmp_path, monkeypatch):
+    from herdr import kernel
+
+    store, clone, env = scene(tmp_path, monkeypatch)
+    kernel.transition_workflow(
+        workflow_id="wf",
+        to_status="paused",
+        reason="existing pause",
+        source="test",
+        store=store,
+    )
+    result = close(env, "--force")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not clone.exists() and store.get_task("t").get("clone_archive")
+    assert store.get_workflow("wf")["status"] == "completed"
