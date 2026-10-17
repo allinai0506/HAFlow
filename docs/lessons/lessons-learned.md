@@ -6934,6 +6934,6 @@ git log --oneline 1d2b25b..f15b1c3   # test_finding_verifier 行号锚点修复
 
 ### 验证命令 / 守护测试
 
-`pytest -q tests/test_console_templates.py tests/test_console_project_creation.py`（14 项新回归：空间隔离、冻结定义优先、preferred 透传、保存模板记账）；`pytest -q tests/test_console_*.py`。
+`pytest -q tests/test_console_templates.py tests/test_console_project_creation.py`（18 项新回归：空间隔离、冻结定义优先、preferred 透传、保存模板记账、过期继续帧丢弃与回落对齐）；`pytest -q tests/test_console_*.py`。
 
 ---

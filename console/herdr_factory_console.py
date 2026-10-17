@@ -7454,7 +7454,7 @@ function renderTplCards(){
 
 function projectTemplateId(){const p=state.project&&state.project.project;return (p&&p.workflow_template)||''}
 function spaceTemplateSelections(){return state.templateSelections}
-function rememberSpaceTemplate(id){if(id)spaceTemplateSelections()[state.spaceId||'']=id}
+function rememberSpaceTemplate(id,spaceId){if(id)spaceTemplateSelections()[spaceId||state.spaceId||'']=id}
 function effectiveTemplateId(){return spaceTemplateSelections()[state.spaceId||'']||projectTemplateId()||'software-development-v1'}
 
 async function selectTemplateInLibrary(id,remember){ // remember=1 仅用户点选(卡片 onclick / 保存模板)记账;程序化显示不得覆盖空间选择
@@ -7671,6 +7671,8 @@ async function showTemplateLibrary(){
     const targetId=effectiveTemplateId();
     const found=ts.find(t=>t.id===targetId)||ts[0];
     if(found){
+      // 项目模板已删除/不可用时,回落项同步为空间选择,保证卡片选中/详情/DAG/启动与显示一致(仅会话内)
+      if(found.id!==targetId)rememberSpaceTemplate(found.id);
       selectTemplateInLibrary(found.id);
     }
   }catch(e){toast(e.message,true)}
@@ -8017,6 +8019,7 @@ async function saveTemplate(){
     if(yamlEl)yamlEl.value=yaml;
   }
   if(!name)return toast('请填写模板名',true);
+  const sid=state.spaceId; // 保存发起时的空间:继续帧按发起空间记账,不随切换漂移
   try{
     const d=await api('/api/template',{method:'POST',body:JSON.stringify({name:name,yaml:yaml})});
     closeTplModal();
@@ -8024,14 +8027,19 @@ async function saveTemplate(){
     await fetchTemplates();
     renderTplCategories();
     renderTplCards();
-    selectTemplateInLibrary(d.name,1);
+    if(sid===state.spaceId)selectTemplateInLibrary(d.name,1);
+    else rememberSpaceTemplate(d.name,sid);
     toast('模板已保存：'+d.name+'（'+d.node_count+' 节点）');
   }catch(e){toast(e.message,true)}
 }
 
 async function populateTemplateSelect(selId='newTemplate',preferredId=null){
   try{
+    // 弹窗重开/替换:旧弹窗迟到的填充必须丢弃,不得覆盖新弹窗已选模板(按 selId 各自计数)
+    const seqs=state.templateSelectSeq=state.templateSelectSeq||{};
+    const seq=seqs[selId]=(seqs[selId]||0)+1;
     const ts=await fetchTemplates();
+    if(seq!==seqs[selId])return;
     const sel=document.getElementById(selId);
     if(!sel||!ts.length)return;
     const wanted=(preferredId&&ts.some(t=>t.id===preferredId))?preferredId:'software-development-v1';

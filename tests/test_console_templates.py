@@ -373,11 +373,122 @@ function getTplBadgeClass(){return 'cat-biz'}
 })().catch(e=>{console.error(e);process.exitCode=1});
 ''')
 
+    def test_library_fallback_reconciles_missing_project_template(self):
+        """项目模板缺失时,库视图回落项必须同步为有效选择(Codex P2)。"""
+        source = self.html
+        block = (source[source.index('function renderTplCards('):
+                        source.index('function ensureTplCardShape(')]
+                 + '\n'
+                 + source[source.index('async function showTemplateLibrary('):
+                          source.index('async function showTemplateDAG(')])
+        self.run_js(block, r'''
+const ts=[{id:'alpha',label:'Alpha',category:'biz',nodes_preview:[{label:'a1'}]},{id:'bidding',label:'投标',category:'biz',nodes_preview:[]}];
+const state={spaceId:'w1',shellView:'',templateSelections:{},templates:[],currentTemplateDetail:null,project:{project:{workflow_template:'gone'}}};
+const nodes={};
+function element(id){return nodes[id]||(nodes[id]={textContent:'',className:'',innerHTML:'',value:''});}
+const document={getElementById:element};
+function esc(s){return String(s==null?'':s)}
+function toast(){}
+function setWorkspaceMode(){}
+function renderWorkflowTabs(){}
+function paintCrumb(){}
+function ensureTplLayoutDOM(){}
+function saveViewState(){}
+async function fetchTemplates(){state.templates=ts;return ts}
+function renderTplCategories(){}
+function closeTplNodeDrawer(){}
+function renderTplDAG(){}
+function getTplBadgeClass(){return 'cat-biz'}
+async function api(){return {template:{id:'alpha',label:'Alpha'},nodes:[{id:'n1'}]};}
+// SOURCE
+(async()=>{
+ await showTemplateLibrary();
+ assert.equal(effectiveTemplateId(),'alpha','项目模板缺失时回落项必须同步为有效选择');
+ assert.equal(state.templateSelections['w1'],'alpha','回落选择记入当前空间');
+ assert.equal(nodes['tplCurId'].textContent,'alpha','详情面板必须显示回落模板');
+ const html=nodes['tplCardsList'].innerHTML;
+ const i=html.indexOf('tpl-card selected');
+ assert.ok(i>=0&&html.slice(i,i+160).includes("selectTemplateInLibrary('alpha',1)"),'回落模板卡片必须显示为选中');
+})().catch(e=>{console.error(e);process.exitCode=1});
+''')
+
+    def test_save_template_records_to_originating_space(self):
+        """保存请求挂起期间切换空间:记账必须归属发起空间(Codex P2)。"""
+        source = self.html
+        block = (source[source.index('function projectTemplateId('):
+                        source.index('function ensureTplCardShape(')]
+                 + '\n'
+                 + source[source.index('async function saveTemplate('):
+                          source.index('async function populateTemplateSelect(')])
+        self.run_js(block, r'''
+const state={spaceId:'wA',templateSelections:{},templates:[{id:'my-tpl',label:'My',node_count:2}],currentTemplateDetail:null,project:null};
+const nodes={};
+function element(id){return nodes[id]||(nodes[id]={textContent:'',className:'',innerHTML:'',value:''});}
+const document={getElementById:element};
+const window={};
+element('tplName').value='my-tpl';
+element('tplYaml').value='nodes: []';
+element('tplCurId');
+function toast(){}
+function closeTplModal(){}
+function closeModal(){}
+async function fetchTemplates(){return state.templates}
+function renderTplCategories(){}
+function renderTplCards(){}
+function closeTplNodeDrawer(){}
+function renderTplDAG(){}
+function getTplBadgeClass(){return 'cat-biz'}
+async function api(url,opts){
+  if(opts&&opts.method==='POST'){
+    await new Promise(r=>setTimeout(r,15));
+    state.spaceId='wB'; // 保存挂起期间用户切到空间 B
+    return {name:'my-tpl',node_count:2};
+  }
+  return {template:{id:'my-tpl',label:'My'},nodes:[]};
+}
+// SOURCE
+(async()=>{
+ await saveTemplate();
+ assert.equal(state.templateSelections['wA'],'my-tpl','保存结果必须记账到发起空间');
+ assert.equal(state.templateSelections['wB'],undefined,'切换后的空间不得继承保存结果');
+ assert.equal(nodes['tplCurId'].textContent,'','不得改写当前空间的面板显示');
+})().catch(e=>{console.error(e);process.exitCode=1});
+''')
+
+    def test_stale_template_select_population_does_not_override_new_modal(self):
+        """弹窗重开时,旧弹窗迟到的模板填充不得覆盖新弹窗的选择(Codex P2)。"""
+        source = self.html
+        block = source[source.index('async function populateTemplateSelect('):
+                       source.index('let opsTimer=')]
+        self.run_js(block, r'''
+const state={spaceId:'w1'};
+const nodes={};
+function element(id){return nodes[id]||(nodes[id]={textContent:'',className:'',innerHTML:'',value:''});}
+const document={getElementById:element};
+function esc(s){return s}
+let fetches=0;
+async function fetchTemplates(){
+  fetches++;
+  const ts=[{id:'bidding',label:'投标',node_count:3},{id:'code',label:'代码',node_count:2}];
+  if(fetches===1)return new Promise(r=>setTimeout(()=>r(ts),25));
+  return ts;
+}
+// SOURCE
+(async()=>{
+ const p1=populateTemplateSelect('newTemplate','bidding');
+ const p2=populateTemplateSelect('newTemplate','code');
+ await Promise.all([p1,p2]);
+ assert.equal(nodes['newTemplate'].value,'code','旧弹窗迟到的填充不得覆盖新弹窗选择');
+ assert.ok(nodes['newTemplate'].innerHTML.includes('value="code" selected'),'选项 HTML 必须属于新弹窗');
+})().catch(e=>{console.error(e);process.exitCode=1});
+''')
+
     def test_populate_template_select_prefers_requested_template(self):
         source = self.html
         block = source[source.index('async function populateTemplateSelect('):
                        source.index('let opsTimer=')]
         self.run_js(block, r'''
+const state={spaceId:'w1'};
 const elements={newTemplate:{value:'',innerHTML:''}};
 const document={getElementById:id=>elements[id]||null};
 async function fetchTemplates(){return [{id:'software-development-v1',label:'软件开发',node_count:6},{id:'bidding',label:'投标',node_count:7}]}
