@@ -3,6 +3,7 @@
 import importlib.machinery
 import importlib.util
 import re
+import subprocess
 import tempfile
 import time
 import unittest
@@ -220,8 +221,8 @@ class TestTemplateLibraryUI(unittest.TestCase):
     def test_template_library_fetches_and_renders_templates(self):
         body = self.function_body("showTemplateLibrary")
         self.assertIn("fetchTemplates()", body)
-        self.assertIn("is_builtin", body)
         self.assertIn("/api/templates", self.function_body("fetchTemplates"))
+        self.assertIn("is_builtin", self.function_body("selectTemplateInLibrary"))
 
     def test_template_dag_preview_renders_dependencies(self):
         body = self.function_body("showTemplateDAG")
@@ -247,6 +248,120 @@ class TestTemplateLibraryUI(unittest.TestCase):
         body = self.function_body("submitNewWorkflowAsync")
         self.assertIn("newTemplate", body)
         self.assertIn("template:", body)
+
+    def test_show_template_library_uses_space_effective_template(self):
+        """模板库选中态必须按工作空间隔离,不得沿用全局选择。"""
+        body = self.function_body("showTemplateLibrary")
+        self.assertIn("effectiveTemplateId()", body)
+        self.assertNotIn("state.currentTemplateId", body)
+
+    def test_launch_with_current_template_carries_selection(self):
+        body = self.function_body("launchWithCurrentTemplate")
+        self.assertIn("showNewWorkflow(effectiveTemplateId())", body)
+        self.assertNotIn("sel.value", body)
+
+    def test_show_new_workflow_forwards_preferred_template(self):
+        body = self.function_body("showNewWorkflow")
+        self.assertIn("preferredTemplateId", body)
+        self.assertIn("populateTemplateSelect('newTemplate',preferredTemplateId)", body)
+
+    def test_populate_template_select_honors_preferred_id(self):
+        body = self.function_body("populateTemplateSelect")
+        self.assertIn("preferredId", body)
+        self.assertIn("software-development-v1", body)
+
+    def test_template_cards_mark_user_pick_for_remembering(self):
+        body = self.function_body("renderTplCards")
+        self.assertIn("selectTemplateInLibrary('${esc(t.id)}',1)", body)
+        self.assertIn("effectiveTemplateId()", body)
+
+    def test_space_switch_refreshes_open_template_library(self):
+        body = self.function_body("selectSpace")
+        self.assertIn("rer&&state.shellView==='templates'", body)
+        self.assertIn("showTemplateLibrary()", body)
+
+    def test_save_template_remembers_saved_template_as_space_pick(self):
+        body = self.function_body("saveTemplate")
+        self.assertIn("selectTemplateInLibrary(d.name,1)", body)
+
+
+class TestTemplateLibraryBehavior(unittest.TestCase):
+    """run_js 行为回归:模板选中态按工作空间隔离,弹窗携带首选模板。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.html = load_console().HTML
+
+    def run_js(self, block, script):
+        result = subprocess.run(
+            ['node', '-e', "const assert=require('node:assert/strict');\n"
+             + script.split('// SOURCE')[0] + '\n' + block + '\n'
+             + script.split('// SOURCE')[1]],
+            text=True, capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_template_selection_is_scoped_per_space(self):
+        source = self.html
+        block = source[source.index('function projectTemplateId('):
+                       source.index('async function selectTemplateInLibrary(')]
+        self.run_js(block, r'''
+const state={spaceId:'w1',project:{project:{workflow_template:'software-development-v1'}},templateSelections:{}};
+// SOURCE
+assert.equal(effectiveTemplateId(),'software-development-v1','无选择时回落到项目实际模板');
+rememberSpaceTemplate('bidding');
+assert.equal(effectiveTemplateId(),'bidding');
+state.spaceId='w2';
+assert.equal(effectiveTemplateId(),'software-development-v1','其他空间不得继承 w1 的选择');
+state.spaceId='w1';
+assert.equal(effectiveTemplateId(),'bidding','回到 w1 恢复其自身选择');
+state.project=null;
+state.spaceId='w3';
+assert.equal(effectiveTemplateId(),'software-development-v1','无项目无选择时回落默认模板');
+''')
+
+    def test_select_template_in_library_remembers_only_user_pick(self):
+        source = self.html
+        block = source[source.index('function projectTemplateId('):
+                       source.index('function ensureTplCardShape(')]
+        self.run_js(block, r'''
+const state={spaceId:'w1',templateSelections:{},templates:[{id:'bidding',label:'投标'}],currentTemplateDetail:null};
+const nodes={};
+function element(id){return nodes[id]||(nodes[id]={textContent:'',className:''});}
+const document={getElementById:element};
+async function api(){return {template:{label:'投标',id:'bidding'},nodes:[]};}
+function renderTplCards(){}
+function closeTplNodeDrawer(){}
+function renderTplDAG(){}
+function getTplBadgeClass(){return 'cat-biz'}
+// SOURCE
+(async()=>{
+ await selectTemplateInLibrary('bidding',1);
+ assert.equal(state.templateSelections['w1'],'bidding','用户点选必须记入当前空间');
+ await selectTemplateInLibrary('software-development-v1');
+ assert.equal(state.templateSelections['w1'],'bidding','程序化显示不得覆盖用户选择');
+ assert.equal(nodes['tplCurId'].textContent,'software-development-v1','显示仍应跟随传入模板');
+})().catch(e=>{console.error(e);process.exitCode=1});
+''')
+
+    def test_populate_template_select_prefers_requested_template(self):
+        source = self.html
+        block = source[source.index('async function populateTemplateSelect('):
+                       source.index('let opsTimer=')]
+        self.run_js(block, r'''
+const elements={newTemplate:{value:'',innerHTML:''}};
+const document={getElementById:id=>elements[id]||null};
+async function fetchTemplates(){return [{id:'software-development-v1',label:'软件开发',node_count:6},{id:'bidding',label:'投标',node_count:7}]}
+function esc(s){return s}
+// SOURCE
+(async()=>{
+ await populateTemplateSelect('newTemplate','bidding');
+ assert.equal(elements.newTemplate.value,'bidding','preferred 模板必须被选中');
+ await populateTemplateSelect('newTemplate');
+ assert.equal(elements.newTemplate.value,'software-development-v1','缺省回落 software-development-v1');
+ await populateTemplateSelect('newTemplate','no-such-template');
+ assert.equal(elements.newTemplate.value,'software-development-v1','未知模板回落默认');
+})().catch(e=>{console.error(e);process.exitCode=1});
+''')
 
     def test_template_library_ui_has_categories_filter_and_search(self):
         self.assertIn("tplCategoryPills", self.html)

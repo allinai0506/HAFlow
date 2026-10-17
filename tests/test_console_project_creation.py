@@ -299,6 +299,53 @@ class ConsoleWorkflowStagesTest(unittest.TestCase):
         )
         self.assertEqual(detail["stages"][0]["label"], "1任务理解与范围界定")
 
+    def test_stages_prefer_frozen_run_definition_over_project_template(self):
+        """工作空间换模板后,历史运行的阶段卡片必须仍跟随该次运行的冻结定义。"""
+        project_wf_file = self._workflow_file([
+            {"id": "requirements", "label": "2需求分析"},
+            {"id": "plan", "label": "3计划"},
+        ])
+        frozen = {"workflow_template": "code-craft-v1", "nodes": [
+            {"id": "craft", "label": "1打磨"},
+            {"id": "wrapup", "label": "收尾"},
+        ]}
+        stages = self.console.workflow_stages(
+            "wf-1", {"workflow_file": project_wf_file}, w={"config": frozen})
+        self.assertEqual(stages, [("craft", "1打磨"), ("wrapup", "收尾")])
+        stages = self.console.workflow_stages(
+            "wf-1", {"workflow_file": project_wf_file},
+            definition={"nodes": [{"id": "craft", "label": "1打磨"}]})
+        self.assertEqual(stages, [("craft", "1打磨")])
+
+    def test_workflow_detail_stages_use_frozen_definition_when_project_template_changed(self):
+        """项目 reprovision 到新模板后,老运行详情页的阶段必须仍按冻结定义渲染。"""
+        project_wf_file = self._workflow_file([
+            {"id": "requirements", "label": "2需求分析"},
+            {"id": "plan", "label": "3计划"},
+        ])
+        frozen = {"workflow_template": "code-craft-v1", "nodes": [
+            {"id": "craft", "label": "1打磨"},
+            {"id": "cleanroom_test", "label": "2净室测试"},
+            {"id": "wrapup", "label": "收尾"},
+        ]}
+        with patch.object(self.console, "workflow_by_id", return_value={
+            "workflow_id": "wf-1", "project_id": "p-1",
+            "requirement": "REQ", "config": frozen,
+        }), patch.object(self.console, "project_for_workflow",
+                         return_value={"workflow_file": project_wf_file}), \
+             patch.object(self.console, "tasks_for_workflow", return_value=[]), \
+             patch.object(self.console, "agent_runtime", return_value=None), \
+             patch.object(
+                 self.console.herdr_projection,
+                 "detect_workflow_stalls", return_value=None,
+             ):
+            detail = self.console.workflow_detail("wf-1")
+        self.assertEqual(
+            [s["key"] for s in detail["stages"]],
+            ["craft", "cleanroom_test", "wrapup"],
+        )
+        self.assertEqual(detail["stages"][0]["label"], "1打磨")
+
     def test_tasks_for_workflow_reads_state_store_not_json_projection(self):
         import os, tempfile
         from herdr import state_db
@@ -319,6 +366,44 @@ class ConsoleWorkflowStagesTest(unittest.TestCase):
         self.assertEqual(actual, [state_db.get_task("task-current", db_path=db)])
         self.assertEqual(loads["opencode"], 1)
         self.assertEqual(loads["codex"], 1)
+
+
+class ConsoleProjectTemplateExposureTest(unittest.TestCase):
+    """项目详情必须携带当前生效模板名,供前端按工作空间初始化模板库/弹窗。"""
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util
+        path = Path(__file__).resolve().parent.parent / "console" / "herdr_factory_console.py"
+        spec = importlib.util.spec_from_file_location("console_mod_project_tpl", str(path))
+        cls.console = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.console)
+
+    def _detail(self, record):
+        with patch.object(self.console, "project_by_id", return_value=record), \
+             patch.object(self.console, "workflows_for_project", return_value=[]), \
+             patch.object(self.console, "tabs", return_value=[]), \
+             patch.object(self.console, "panes", return_value=[]), \
+             patch.object(self.console, "slots", return_value=[]), \
+             patch.object(self.console, "preflight", return_value=[]):
+            return self.console.project_detail(record["project_id"])
+
+    def test_project_detail_exposes_current_workflow_template(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            wf_file = Path(tmpdir) / "workflow.json"
+            wf_file.write_text(json.dumps({
+                "workflow_template": "code-craft-v1",
+                "nodes": [{"id": "craft", "label": "1打磨"}],
+            }, ensure_ascii=False), encoding="utf-8")
+            detail = self._detail({
+                "project_id": "p-1", "workspace_id": "w1",
+                "workflow_file": str(wf_file),
+            })
+        self.assertEqual(detail["project"]["workflow_template"], "code-craft-v1")
+
+    def test_project_detail_without_workflow_file_yields_empty_template(self):
+        detail = self._detail({"project_id": "p-1", "workspace_id": "w1"})
+        self.assertEqual(detail["project"]["workflow_template"], "")
 
 
 class TestConsoleProjectEndpointsAndUI(unittest.TestCase):

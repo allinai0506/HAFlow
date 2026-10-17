@@ -2671,3 +2671,10 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - Updated [[enterprise-experience-hub]]：请求体准入限制（P1-01，先认证后读体、1 MiB 预算、TE/CL/413/400/411 契约）、Collector 数据库路径绝对化（P2-01）、失败限定的 Run 隔离（P2-02）。
 - 追加 [[../docs/lessons/lessons-learned]] §160：副作用顺序、权威路径、身份隔离三重违规教训。
 - 本记录描述本地源码与 joint candidate `c9dee79`；未推送、未合并，交付由流水线控制器统一收编。
+
+### 2026-10-17：Console 工作空间模板隔离（本地沙盒）
+
+- Updated [[flow-workbench]]：模板库选中态按空间作用域（`templateSelections[spaceId]`，仅用户点选/保存模板记账，程序化显示不覆盖）；阶段卡片/手动推进/回滚与图投影同源冻结（运行 `config` 优先于项目当前 workflow.json）；"选用并启动需求"弹窗模板透传不再静默重置；切空间模板库刷新带 `rer` 门避免重复渲染。
+- 追加 [[../docs/lessons/lessons-learned]] §163：全局选中态、历史渲染数据源、异步 DOM 重建三类隔离教训。
+- Evidence: `tests/test_console_templates.py`、`tests/test_console_project_creation.py`（14 项新回归 RED→GREEN）；console 专项 323 passed, 76 subtests；真实状态库只读复核两条历史运行 stages == 冻结节点。
+- 本记录描述本地源码与隔离沙盒；尚未合并、未部署、未重启 8765。
