@@ -82,6 +82,183 @@ class TestTeardownCleanedCommit(unittest.TestCase):
         guard_after = self.cli._teardown_output_guard(updated)
         self.assertEqual(guard_after["reason"], "")
 
+    def test_integrated_task_with_uncommitted_output_is_rejected(self):
+        """An integrated task with uncommitted output must reject commit and preserve candidate commit and status."""
+        repo = self.tmp_dir / "clone-integrated"
+        repo.mkdir()
+        def git(*args):
+            return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True)
+
+        git("init", "-b", "main")
+        git("config", "user.name", "Test")
+        git("config", "user.email", "test@example.invalid")
+        (repo / "base.txt").write_text("base")
+        git("add", ".")
+        git("commit", "-m", "base")
+        base_commit = git("rev-parse", "HEAD").stdout.strip()
+
+        # Dirty output created after integration
+        (repo / "leak.txt").write_text("untracked leak")
+
+        task = {
+            "task_id": "task-integrated-1",
+            "workflow_id": "wf-1",
+            "node": "impl",
+            "stage": "impl",
+            "status": "integrated",
+            "clone_path": str(repo),
+            "commit": base_commit,
+            "integrated_commit": base_commit,
+            "integration_mode": "git",
+        }
+        self.store.save_task(task)
+
+        os.environ["HERDR_STATE_DB"] = str(self.db_path)
+        os.environ["TASKS_FILE"] = str(self.tasks_file)
+
+        with self.assertRaises(SystemExit) as ctx:
+            self.cli.commit_task("task-integrated-1")
+        self.assertEqual(ctx.exception.code, 2)
+
+        persisted = self.store.get_task("task-integrated-1")
+        self.assertEqual(persisted["status"], "integrated")
+        self.assertEqual(persisted["commit"], base_commit)
+
+    def test_integrated_task_clean_is_idempotent(self):
+        """An integrated task with clean worktree returns existing commit idempotently."""
+        repo = self.tmp_dir / "clone-integrated-clean"
+        repo.mkdir()
+        def git(*args):
+            return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True)
+
+        git("init", "-b", "main")
+        git("config", "user.name", "Test")
+        git("config", "user.email", "test@example.invalid")
+        (repo / "base.txt").write_text("base")
+        git("add", ".")
+        git("commit", "-m", "base")
+        base_commit = git("rev-parse", "HEAD").stdout.strip()
+
+        task = {
+            "task_id": "task-integrated-clean",
+            "workflow_id": "wf-1",
+            "node": "impl",
+            "stage": "impl",
+            "status": "integrated",
+            "clone_path": str(repo),
+            "commit": base_commit,
+            "integrated_commit": base_commit,
+            "integration_mode": "git",
+        }
+        self.store.save_task(task)
+
+        os.environ["HERDR_STATE_DB"] = str(self.db_path)
+        os.environ["TASKS_FILE"] = str(self.tasks_file)
+
+        # Should not raise SystemExit
+        self.cli.commit_task("task-integrated-clean")
+
+        persisted = self.store.get_task("task-integrated-clean")
+        self.assertEqual(persisted["status"], "integrated")
+        self.assertEqual(persisted["commit"], base_commit)
+
+    def test_cleaned_git_task_with_uncommitted_output_is_rejected(self):
+        """A cleaned git task with uncommitted output must reject commit."""
+        repo = self.tmp_dir / "clone-cleaned-git"
+        repo.mkdir()
+        def git(*args):
+            return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True)
+
+        git("init", "-b", "main")
+        git("config", "user.name", "Test")
+        git("config", "user.email", "test@example.invalid")
+        (repo / "base.txt").write_text("base")
+        git("add", ".")
+        git("commit", "-m", "base")
+        base_commit = git("rev-parse", "HEAD").stdout.strip()
+
+        (repo / "extra.txt").write_text("extra")
+
+        task = {
+            "task_id": "task-cleaned-git",
+            "workflow_id": "wf-1",
+            "node": "impl",
+            "stage": "impl",
+            "status": "cleaned",
+            "clone_path": str(repo),
+            "commit": base_commit,
+            "integration_mode": "git",
+        }
+        self.store.save_task(task)
+
+        os.environ["HERDR_STATE_DB"] = str(self.db_path)
+        os.environ["TASKS_FILE"] = str(self.tasks_file)
+
+        with self.assertRaises(SystemExit) as ctx:
+            self.cli.commit_task("task-cleaned-git")
+        self.assertEqual(ctx.exception.code, 2)
+
+    def test_finalize_none_mode_preservation_commit_failure_is_retryable(self):
+        """When preservation commit fails for mode=none, controller leaves task retryable in completed status."""
+        spec = importlib.util.spec_from_file_location(
+            "herdr_controller",
+            str(HERDR_ROOT / "services" / "herdr-controller.py"),
+        )
+        ctl = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(ctl)
+
+        repo = self.tmp_dir / "clone-finalize-fail"
+        repo.mkdir()
+        def git(*args):
+            return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True)
+
+        git("init", "-b", "main")
+        git("config", "user.name", "Test")
+        git("config", "user.email", "test@example.invalid")
+        (repo / "base.txt").write_text("base")
+        git("add", ".")
+        git("commit", "-m", "base")
+
+        # Dirty file
+        (repo / "untracked.md").write_text("dirty")
+
+        task_id = "task-finalize-fail"
+        task = {
+            "task_id": task_id,
+            "workflow_id": "wf-1",
+            "node": "doc",
+            "stage": "doc",
+            "status": "completed",
+            "clone_path": str(repo),
+            "integration_mode": "none",
+        }
+        self.store.save_task(task)
+
+        # Mock TASK_MANAGER commit to fail
+        real_subprocess_run = subprocess.run
+        def failing_subprocess_run(cmd, *args, **kwargs):
+            if isinstance(cmd, (list, tuple)) and len(cmd) >= 2 and cmd[1] == "commit":
+                return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="hook error: pre-commit failed")
+            return real_subprocess_run(cmd, *args, **kwargs)
+
+        orig_run = ctl.subprocess.run
+        ctl.subprocess.run = failing_subprocess_run
+        try:
+            os.environ["HERDR_STATE_DB"] = str(self.db_path)
+            res = ctl.finalize_completed_task(task_id)
+            self.assertTrue(res.get("retryable"))
+            self.assertEqual(res.get("kind"), "error")
+            self.assertEqual(res.get("rc"), 1)
+
+            persisted = self.store.get_task(task_id)
+            self.assertEqual(persisted["status"], "completed")  # Did not advance to cleanup_ready!
+
+            events = self.store.list_events(task_id=task_id, event_type="finalize_commit_error")
+            self.assertEqual(len(events), 1)
+            self.assertIn("hook error: pre-commit failed", events[0]["payload"]["detail"])
+        finally:
+            ctl.subprocess.run = orig_run
+
 
 if __name__ == "__main__":
     unittest.main()

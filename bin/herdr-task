@@ -5425,12 +5425,29 @@ def commit_task(task_id, message=None, allow_rebase=False):
 
     if task["status"] != "completed":
         existing = task.get("commit")
-        if task.get("status") in (
-            "committed",
-            "integrated",
-            "cleanup_ready",
-            "cleaned",
-        ) and existing:
+        status = task.get("status")
+
+        def _print_idempotent_commit(cid):
+            print(f"[COMMITTED] {task_id}")
+            print(f"[COMMIT] {cid}")
+            stored_result = task.get("commit_result")
+            if stored_result not in ("created", "adopted"):
+                stored_result = "created"
+            print(
+                "HERDR_COMMIT_RESULT="
+                + json.dumps(
+                    {
+                        "task_id": task_id,
+                        "result": stored_result,
+                        "commit": cid,
+                        "status": status,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+        if status == "integrated":
+            # Once integrated, a candidate is final; new commits cannot be made here.
             clone_path = task.get("clone_path")
             has_uncommitted = False
             if clone_path and os.path.exists(clone_path):
@@ -5441,27 +5458,58 @@ def commit_task(task_id, message=None, allow_rebase=False):
                 from herdr.repo_hygiene import teardown_output_diagnosis
                 diag = teardown_output_diagnosis(status_res.stdout, task_id=task_id)
                 has_uncommitted = bool(diag.get("reason"))
-            if not has_uncommitted:
-                print(f"[COMMITTED] {task_id}")
-                print(f"[COMMIT] {existing}")
-                stored_result = task.get("commit_result")
-                if stored_result not in ("created", "adopted"):
-                    stored_result = "created"
+            if has_uncommitted:
                 print(
-                    "HERDR_COMMIT_RESULT="
-                    + json.dumps(
-                        {
-                            "task_id": task_id,
-                            "result": stored_result,
-                            "commit": existing,
-                            "status": task.get("status"),
-                        },
-                        ensure_ascii=False,
-                    )
+                    f"Task is already integrated; post-integration changes cannot be committed directly "
+                    f"(reintegration required): {task_id}"
                 )
+                sys.exit(2)
+            if existing:
+                _print_idempotent_commit(existing)
                 return
-        elif task.get("status") in ("cleanup_ready", "cleaned"):
-            pass
+            print(f"Task cannot commit from status: {status}")
+            sys.exit(2)
+
+        if status in ("cleanup_ready", "cleaned"):
+            # Only non-git tasks (e.g. integration_mode="none") with uncommitted output
+            # are allowed to perform a preservation commit in cleanup_ready/cleaned status.
+            clone_path = task.get("clone_path")
+            has_uncommitted = False
+            if clone_path and os.path.exists(clone_path):
+                status_res = subprocess.run(
+                    ["git", "-C", clone_path, "status", "--porcelain", "--untracked-files=normal"],
+                    capture_output=True, text=True
+                )
+                from herdr.repo_hygiene import teardown_output_diagnosis
+                diag = teardown_output_diagnosis(status_res.stdout, task_id=task_id)
+                has_uncommitted = bool(diag.get("reason"))
+
+            if task.get("integration_mode") == "git":
+                if has_uncommitted:
+                    print(
+                        f"Task has completed git lifecycle; "
+                        f"post-integration changes cannot be committed directly: {task_id}"
+                    )
+                    sys.exit(2)
+                if existing:
+                    _print_idempotent_commit(existing)
+                    return
+                print(f"Task cannot commit from status: {status}")
+                sys.exit(2)
+            else:
+                if has_uncommitted:
+                    pass
+                elif existing:
+                    _print_idempotent_commit(existing)
+                    return
+                else:
+                    print(f"Task cannot commit from status: {status}")
+                    sys.exit(2)
+
+        elif status == "committed" and existing:
+            _print_idempotent_commit(existing)
+            return
+
         else:
             print(
                 f"Task cannot commit from status: "

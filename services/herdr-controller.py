@@ -6766,7 +6766,7 @@ def finalize_completed_task(task_id):
             if diag.get("reason"):
                 commit_env = dict(os.environ)
                 commit_env["HERDR_DEFER_HEAVY_TESTS"] = "1"
-                subprocess.run(
+                commit_proc = subprocess.run(
                     [
                         TASK_MANAGER,
                         "commit",
@@ -6778,6 +6778,25 @@ def finalize_completed_task(task_id):
                     capture_output=True,
                     env=commit_env
                 )
+                if commit_proc.returncode == 75:
+                    return {"retryable": True, "kind": "wait", "rc": 75}
+                elif commit_proc.returncode != 0:
+                    from herdr.task_delivery import diagnostic_tail
+                    print(
+                        f"[FINALIZE ERROR] "
+                        f"task={task_id} "
+                        f"preservation commit failed rc={commit_proc.returncode}: "
+                        f"{commit_proc.stderr.strip() or commit_proc.stdout.strip()}"
+                    )
+                    _record_finalize_event(
+                        task,
+                        "finalize_commit_error",
+                        {
+                            "rc": commit_proc.returncode,
+                            "detail": diagnostic_tail(commit_proc.stdout, commit_proc.stderr),
+                        },
+                    )
+                    return {"retryable": True, "kind": "error", "rc": commit_proc.returncode}
         if not set_task_status(
             task_id,
             "cleanup_ready"
