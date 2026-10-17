@@ -605,6 +605,9 @@ class CloseWorkflowGateTest(unittest.TestCase):
         self.workflows_file = root / "workflows.json"
         self.stage_state_file = root / "stage-state.json"
         self.clone_root = os.path.realpath(str(root / "clones"))
+        clone_env = patch.dict(os.environ, {"HERDR_CLONES_DIR": self.clone_root})
+        clone_env.start()
+        self.addCleanup(clone_env.stop)
 
         for name in ("TASKS_FILE", "WORKFLOWS_FILE", "STAGE_STATE_FILE",
                      "EVIDENCE_ROOT", "CLONE_ROOT"):

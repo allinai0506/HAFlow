@@ -2696,3 +2696,10 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 追加 [[../docs/lessons/lessons-learned]] §163：全局选中态、历史渲染数据源、异步 DOM 重建、深链接水合四类隔离教训。
 - Evidence: `tests/test_console_templates.py`、`tests/test_console_project_creation.py`（19 项新回归 RED→GREEN）；既有性能回归 `test_plain_home_restores_workflow_before_slow_overview[__templates__]` 期望更新（先调度模板库、overview 后台水合）；console 专项 328 passed, 76 subtests；真实状态库只读复核两条历史运行 stages == 冻结节点。
 - 本记录描述本地源码与隔离沙盒；尚未合并、未部署、未重启 8765。
+
+### 2026-10-17：工作流结束自动归档并回收 Task 沙盒（隔离工作区）
+
+- Updated [[task-lifecycle]] §5：阶段 cleanup 保留以支持下游；最终 close-workflow 先固化私有本地恢复归档，校验后回收包括文档、context、failed 的受管 clone；归档后 Console 仍可读成果。
+- 删除失败不发布成功关闭回执；部分删除重试复用首份完整归档，校验原目录实例与剩余内容子集，禁止残余覆盖完整恢复点。
+- Evidence: `tests/test_workflow_clone_reclaim.py`（真实 CLI、SQLite、Controller 自动关闭、归档后读取和中断恢复），既有生命周期、回执与成果专项。
+- 本记录描述本地源码；尚未推送、合并、部署或重启服务。

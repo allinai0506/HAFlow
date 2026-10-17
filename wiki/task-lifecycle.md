@@ -370,8 +370,34 @@ Evidence:
 
 - 有 `integration_ref/branch`(已完成 integrate)或 `superseded` → 可删;
 - `committed` 未 integrate → 拒删(commit 仅存于 clone);
-- mode=none 的 docs/test/review 任务无 integration 通道 → 默认保留,
-  `--purge-clones` 显式授权后才删。
+- 单任务 `finalize` 对 mode=none 的 docs/test/review、context 工作区仍默认保留，
+  避免阶段结束后破坏下游输入；`cleanup` 也只做逻辑清理。
+- **整个 Workflow 关闭**时，所有仍存在的受管 Task clone（含 failed）先生成私有
+  本地恢复归档并校验，再回收目录；不再将文档与失败现场默认永久保留在 clones 下。
+  Git 集成、业务验收及身份门禁仍适用，归档不证明代码已经集成。
+
+### 5.2.1 Workflow 关闭时的恢复归档
+
+`FACT` `close-workflow` 在受管工作流锁内，将尚存 clone 的完整内容（包括 Git 历史、
+文档、失败诊断）压缩保存到 Workflow 共享目录下的 `clone-archives/<身份摘要>/`。
+归档目录权限为 0700、文件为 0600，不发送给 Provider，不作为已脱敏的模型证据。
+Task 的 SQLite 元数据 `clone_archive` 保存归档位置、SHA256、清单摘要及成果目录。
+Console 继续以原成果 ID 预览/下载经过哈希校验的归档文件；敏感文件与符号链接不开放读取。
+
+- 先校验归档字节、源内容和目录实例，再执行删除；单 clone 上限 1 GiB / 100000 条目，
+  读取散列和目录扫描设有时间预算。超限、归档失败或源发生变化则保留并报告，工作流不宣称关闭成功。
+- 首份归档为不可变恢复点；真正删除前持久化 `clone_reclaim_started`。删除中断后，
+  仅同一目录实例且剩余内容为归档子集时允许续删，不用残余目录覆盖完整归档。
+- failed Task 回收 clone 后仍为 failed；阶段 `cleanup` 不执行此归档删除策略。
+- 恢复归档不自动过期，也不保证释放与原沙盒等量的磁盘空间。未登记的手工沙盒、
+  无 Task 归属的启动失败目录及历史已完成关闭回执不在本路径中自动扫描删除。
+
+Evidence:
+- `herdr/clone_archive.py:preserve_clone,verify_source,read_archived_file`
+- `bin/herdr-task:_close_workflow_owned,_finalize_one,cleanup_task`
+- `herdr/workflow_close.py:CloseClaim.action`
+- `herdr/deliverables.py:project_for_tasks,read_deliverable`
+- `tests/test_workflow_clone_reclaim.py`
 
 ### 5.3 close-workflow、所有权预占与共享 tab 守卫
 
@@ -383,8 +409,9 @@ Evidence:
 5. **清 stage-state 并输出收尾报告**。
 - `--accept-escalated` 是对已升级 Git Task 的人工确认，报告 outcome 为
   `escalated_accepted`；它允许物理收尾，但不提升 Task 集成状态。已提交未集成的
-  Clone 必须保留，报告逐项列出 Pane 关闭结果、Task 状态和 Clone 保留原因；工作流
-  完成 outcome 同样记录为 `escalated_accepted`。
+  Clone 在经过人工确认、完整恢复归档及校验后回收，未集成提交仍保存在归档内；
+  报告逐项列出 Pane 关闭结果、Task 状态和 Clone 删除结果，工作流 outcome 记录为
+  `escalated_accepted`，不能据此宣称已集成。
 - **总指挥 pane 例外**: 默认保留至知识沉淀 + PR 合并后由 `--include-coordinator` 关闭。
 - **自动触发**: Controller 在 `is_workflow_completed` 时后台调用 `close-workflow`(in-flight 防重入 + status=completed/closing 短路); 零任务的已登记运行视为平凡完成。
 

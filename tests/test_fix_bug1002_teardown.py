@@ -88,7 +88,9 @@ def test_new_staged_output_during_transcript_blocks_teardown(tmp_path,cli,monkey
 
 def test_late_output_retention_prevents_workflow_completed(tmp_path,cli,monkeypatch):
     from herdr.state_store import get_state_store
-    repo=tmp_path/'clone';repo.mkdir()
+    repo=tmp_path/'clones/clone';repo.mkdir(parents=True)
+    monkeypatch.setattr(cli,'CLONE_ROOT',str(repo.parent))
+    monkeypatch.setenv('HERDR_CLONES_DIR',str(repo.parent))
     def git(*args):return subprocess.run(['git','-C',str(repo),*args],check=True,capture_output=True,text=True)
     git('init','-b','task');git('config','user.name','Test');git('config','user.email','test@example.com')
     (repo/'output').write_text('base');git('add','.');git('commit','-m','base')
@@ -117,6 +119,10 @@ def test_context_workspace_real_cli_retains_artifacts(tmp_path, monkeypatch, cli
     spec = importlib.util.spec_from_file_location('context_worker', Path(__file__).resolve().parents[1]/'services/herdr-worker.py')
     worker = importlib.util.module_from_spec(spec); spec.loader.exec_module(worker)
     monkeypatch.setattr(worker, 'CLONE_ROOT', tmp_path/'clones')
+    # Physical close accepts only the isolated HOME's managed clone root.
+    monkeypatch.setenv('HOME',str(tmp_path))
+    monkeypatch.setenv('HERDR_CLONES_DIR',str(tmp_path/'.herdr-controller/clones'))
+    monkeypatch.setattr(worker, 'CLONE_ROOT', tmp_path/'.herdr-controller/clones')
     repo = worker.create_context_task_workspace('context-task')
     if has_output:
         (repo/'artifact.txt').write_text('context artifact must survive')
@@ -129,13 +135,19 @@ def test_context_workspace_real_cli_retains_artifacts(tmp_path, monkeypatch, cli
     result = subprocess.run([sys.executable,str(Path(__file__).resolve().parents[1]/'bin/herdr-task'),command,
                              'context-task' if command=='finalize' else 'wf'],env=env,text=True,capture_output=True,timeout=20)
     assert result.returncode == 0, result.stdout+result.stderr
-    assert repo.exists() and not (repo/'.git').exists()
-    if has_output:
-        assert (repo/'artifact.txt').read_text() == 'context artifact must survive'
-    assert store.get_task('context-task')['status'] == 'cleaned'
-    assert store.get_task('context-task')['clone_retained'] is True
+    task = store.get_task('context-task')
+    assert task['status'] == 'cleaned'
     if command == 'close-workflow':
+        assert not repo.exists() and task['clone_retained'] is False
+        if has_output:
+            from herdr.clone_archive import read_archived_file
+            assert read_archived_file(task,'artifact.txt',1024) == b'context artifact must survive'
         assert store.get_workflow('wf')['status'] == 'completed'
+    else:
+        assert repo.exists() and not (repo/'.git').exists()
+        assert task['clone_retained'] is True
+        if has_output:
+            assert (repo/'artifact.txt').read_text() == 'context artifact must survive'
 
 
 def test_context_metadata_cannot_bypass_git_or_identity_guard(tmp_path,cli):
