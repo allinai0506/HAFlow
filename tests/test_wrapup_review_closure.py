@@ -93,7 +93,7 @@ if (args and args[0] == "api"
     if mode == "missing":
         print("[]")
         sys.exit(0)
-    sha = "e" * 40 if mode == "wrong_head" else _read("head.txt")
+    sha = "e" * 40 if mode in ("wrong_head", "multi_round_earlier_completed", "running_then_completed_different_head") else _read("head.txt")
     author = ("evil-user" if mode == "forged_author"
               else "chatgpt-codex-connector[bot]")
 
@@ -106,9 +106,12 @@ if (args and args[0] == "api"
     if mode == "completed_then_running":
         items = [marker("completed", "2026-10-16T05:00:00Z"),
                  marker("running", "2026-10-16T05:10:00Z")]
-    elif mode == "running_then_completed":
+    elif mode in ("running_then_completed", "running_then_completed_different_head"):
         items = [marker("running", "2026-10-16T05:00:00Z"),
                  marker("completed", "2026-10-16T05:10:00Z")]
+    elif mode == "multi_round_earlier_completed":
+        items = [marker("completed", "2026-10-16T04:00:00Z"),
+                 marker("completed", "2026-10-16T05:00:00Z")]
     elif mode == "running":
         items = [marker("running", "2026-10-16T05:00:00Z")]
     else:
@@ -810,3 +813,17 @@ def test_fork_and_upstream_remotes_accept_target_pr(scene):
     )
     assert unknown.returncode == 2
     assert "delivery identity" in (unknown.stdout + unknown.stderr)
+
+
+def test_stop_line_passes_after_two_completed_rounds(scene):
+    (scene.fakebin / "review_state").write_text("multi_round_earlier_completed")
+    ok = record_valid(scene.store, scene.head)
+    assert ok.returncode == 0, ok.stdout + ok.stderr
+
+
+def test_stop_line_does_not_pass_with_only_one_completed_round(scene):
+    (scene.fakebin / "review_state").write_text("running_then_completed_different_head")
+    refused = record_valid(scene.store, scene.head)
+    assert refused.returncode == 2
+    assert "no completed Codex review found" in (refused.stdout + refused.stderr)
+

@@ -29,7 +29,7 @@ permissions:
 jobs:
   gate:
     name: Codex P1 Gate
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, haflow]
     if: github.repository == 'allinai0506/HAFlow'
     steps:
       # The gate implementation must come from the protected base revision,

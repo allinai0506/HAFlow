@@ -108,3 +108,93 @@ def test_workflow_grants_contents_read_for_checkout():
     block = _permissions_block()
     assert "contents: read" in block
     assert "pull-requests: read" in block
+
+
+def test_backlog_thread_does_not_block():
+    mod = _load()
+    thread_with_backlog = {
+        "id": "t",
+        "path": "a.py",
+        "isResolved": False,
+        "isOutdated": False,
+        "comments": {
+            "nodes": [
+                {"author": {"login": "chatgpt-codex-connector[bot]"}, "body": "[![P1 Badge](x)] theoretical flaw"},
+                {"author": {"login": "developer"}, "body": "Tracked in backlog: https://github.com/allinai0506/HAFlow/issues/999"},
+            ]
+        },
+    }
+    out = mod.find_blocking_threads(_payload(thread_with_backlog))
+    assert out == []
+
+
+def test_count_bot_reviews():
+    mod = _load()
+    payload = {
+        "data": {
+            "repository": {
+                "pullRequest": {
+                    "reviews": {
+                        "nodes": [
+                            {"author": {"login": "chatgpt-codex-connector[bot]"}},
+                            {"author": {"login": "someone-else"}},
+                            {"author": {"login": "chatgpt-codex-connector[bot]"}},
+                        ]
+                    }
+                }
+            }
+        }
+    }
+    assert mod.count_bot_reviews(payload) == 2
+
+
+def test_max_rounds_stop_line_passes(monkeypatch, capsys):
+    mod = _load()
+    payload = {
+        "data": {
+            "repository": {
+                "pullRequest": {
+                    "reviews": {
+                        "nodes": [
+                            {"author": {"login": "chatgpt-codex-connector[bot]"}},
+                            {"author": {"login": "chatgpt-codex-connector[bot]"}},
+                        ]
+                    },
+                    "reviewThreads": {
+                        "nodes": [
+                            _thread("chatgpt-codex-connector[bot]", "[![P1 Badge](x)] round 3 edge case")
+                        ]
+                    }
+                }
+            }
+        }
+    }
+    monkeypatch.setenv("GITHUB_TOKEN", "fake_tok")
+    monkeypatch.setattr(mod, "fetch_threads", lambda o, r, p, t: payload)
+    rc = mod.main(["--repo-slug", "o/r", "--pr-number", "1", "--max-rounds", "2"])
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "PASS (exceeded max review rounds limit 2" in captured.out
+    assert "[ADVISORY BACKLOG]" in captured.out
+
+
+def test_whitespace_body_does_not_raise_index_error():
+    mod = _load()
+    thread = {
+        "id": "t",
+        "path": "a.py",
+        "isResolved": False,
+        "isOutdated": False,
+        "comments": {
+            "nodes": [
+                {"author": {"login": "chatgpt-codex-connector[bot]"}, "body": "   \n\n   "},
+                {"author": {"login": "chatgpt-codex-connector[bot]"}, "body": "[![P1 Badge](x)] flaw"},
+            ]
+        },
+    }
+    blockers = mod.find_blocking_threads(_payload(thread))
+    assert len(blockers) == 1
+    assert blockers[0]["path"] == "a.py"
+    assert blockers[0]["title"] == ""
+
+

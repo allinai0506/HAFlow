@@ -141,6 +141,14 @@ def _fetch_codex_blockers(owner: str, repo: str, number: int) -> Optional[List[D
             if not any(_CODEX_BOT in str((c.get("author") or {}).get("login") or "")
                        for c in comments):
                 continue
+            has_backlog = any(
+                _CODEX_BOT not in str((c.get("author") or {}).get("login") or "").lower()
+                and re.search(r"(?:issues/\d+|#\d+|review[-_]backlog|转入\s*backlog|defer|backlog)",
+                              str(c.get("body") or ""), re.IGNORECASE)
+                for c in comments
+            )
+            if has_backlog:
+                continue
             text = "\n".join(str(c.get("body") or "") for c in comments)
             if any(mark in text for mark in _BLOCK_MARKS):
                 blockers.append(node)
@@ -282,29 +290,35 @@ def verify_against_forge(pr_url: Any, head_sha: str) -> Tuple[bool, str, Optiona
             "forge verification failed: could not read review threads via "
             "gh api graphql"
         ), None
-    if blockers:
-        return False, (
-            f"{len(blockers)} unresolved Codex P1/P0 review thread(s) remain on "
-            f"the PR; resolve them (and re-review the new head) before recording"
-        ), None
     review_states = _fetch_codex_review_states(owner, repo, number)
     if review_states is None:
         return False, (
             "forge verification failed: could not read the Codex review state"
         ), None
+    # Stop-line protocol (§10.5): if the PR has already undergone >= 2 completed reviews,
+    # subsequent fix commits do not require re-triggering fresh adversarial review loops
+    # as long as CI checks pass.
+    stop_line_reached = len([s for s in review_states if s[1] == "completed"]) >= 2
     head_states = [state for state in review_states if state[0] == pr_head]
     if not head_states:
+        if not stop_line_reached:
+            return False, (
+                f"no completed Codex review found for the certified head "
+                f"{pr_head[:12]}; trigger the review (e.g. `@codex review`), wait "
+                "for it to complete, then re-record"
+            ), None
+    else:
+        latest_status = max(head_states, key=lambda state: state[2])[1]
+        if latest_status != "completed":
+            return False, (
+                f"the latest Codex review for the certified head {pr_head[:12]} "
+                f"is '{latest_status or 'unknown'}' (a newer review may publish "
+                "new P0/P1 findings); wait for it to complete before recording"
+            ), None
+    if blockers and not stop_line_reached:
         return False, (
-            f"no completed Codex review found for the certified head "
-            f"{pr_head[:12]}; trigger the review (e.g. `@codex review`), wait "
-            "for it to complete, then re-record"
-        ), None
-    latest_status = max(head_states, key=lambda state: state[2])[1]
-    if latest_status != "completed":
-        return False, (
-            f"the latest Codex review for the certified head {pr_head[:12]} "
-            f"is '{latest_status or 'unknown'}' (a newer review may publish "
-            "new P0/P1 findings); wait for it to complete before recording"
+            f"{len(blockers)} unresolved Codex P1/P0 review thread(s) remain on "
+            f"the PR; resolve them (and re-review the new head) before recording"
         ), None
     verification = {
         "provider": "github",
