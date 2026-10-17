@@ -671,7 +671,8 @@ def verifier_branch_node_ids(workflow_cfg):
     yields an empty set, which means no verifier can be reused (fail-closed).
     """
     found = set()
-    for node in (workflow_cfg or {}).get("nodes") or []:
+    cfg = workflow_cfg if isinstance(workflow_cfg, dict) else {}
+    for node in (cfg.get("nodes") if isinstance(cfg.get("nodes"), list) else []):
         if not isinstance(node, dict):
             continue
         deps = node_dependencies(node)

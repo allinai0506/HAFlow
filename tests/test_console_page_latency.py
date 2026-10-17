@@ -152,6 +152,24 @@ def test_workflow_detail_reads_only_the_requested_workflow(tmp_path,monkeypatch)
     assert [t['task_id'] for t in detail['tasks']]==['t-owned']
 
 
+def test_workflow_detail_handles_malformed_pinned_config(tmp_path,monkeypatch):
+    db=tmp_path/'state.db';monkeypatch.setenv('HERDR_STATE_DB',str(db))
+    from herdr import state_db
+    state_db.init_db(db)
+    state_db.save_workflow({'workflow_id':'wf-bad','project_id':'p','status':'working','created_at':2,
+                            'config':{'nodes':[{'id':'impl','required_task_ids':['t-ref']},'not-a-dict',42]},
+                            'workflow_file':None},db_path=db)
+    state_db.save_workflow({'workflow_id':'wf-bad2','project_id':'p','status':'working','created_at':3,
+                            'config':[1,2,3],'workflow_file':None},db_path=db)
+    state_db.save_task({'task_id':'t-ref','workflow_id':'wf-other','node':'impl','stage':'impl','status':'completed'},db_path=db)
+    monkeypatch.setattr(c,'project_by_id',lambda pid:None)
+    monkeypatch.setattr(c,'agent_runtime',lambda pane:None)
+    monkeypatch.setattr(c,'api_workflow_deliverables',lambda wid:c.herdr_deliverables.pack([]))
+    for wid in ('wf-bad','wf-bad2'):
+        detail=c.workflow_detail(wid)
+        assert detail['workflow']['workflow_id']==wid
+
+
 def test_workflow_detail_bulk_reads_referenced_tasks_without_writable_connections(tmp_path,monkeypatch):
     db=tmp_path/'state.db';monkeypatch.setenv('HERDR_STATE_DB',str(db))
     state_db.save_workflow({'workflow_id':'wf-detail','project_id':'p','status':'working','created_at':2,

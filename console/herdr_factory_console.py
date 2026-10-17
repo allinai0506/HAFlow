@@ -481,6 +481,7 @@ def workflow_stages(wid, p):
         cfg=load_json(Path(p.get('workflow_file')),{}) or {}
     out=[]
     for n in (cfg.get('nodes') or []):
+        if not isinstance(n, dict): continue
         key=n.get('id') or n.get('key')
         if not key:continue
         out.append((key,n.get('label') or key))
@@ -494,15 +495,19 @@ def _referenced_task_inventory(wid,p,ts,w):
     fetched in one bounded read-only query instead of one connection per id
     (which would also bypass the read-only guarantee).
     """
-    definition=w.get('config') or workflow_definition_for(wid,p,w)
-    inventory=list(ts)
-    owned_ids={t.get('task_id') for t in ts}
-    required_ids=[]
-    for node in (definition or {}).get('nodes') or []:
-        required=node.get('required_task_ids')
-        if isinstance(required,list) and len(required)<=64:
+    definition = w.get('config') if isinstance(w, dict) and isinstance(w.get('config'), dict) and w.get('config') else None
+    if not definition:
+        definition = workflow_definition_for(wid, p, w)
+    inventory = list(ts)
+    owned_ids = {t.get('task_id') for t in ts}
+    required_ids = []
+    for node in (definition.get('nodes') if isinstance(definition, dict) and isinstance(definition.get('nodes'), list) else []):
+        if not isinstance(node, dict):
+            continue
+        required = node.get('required_task_ids')
+        if isinstance(required, list) and len(required) <= 64:
             for task_id in required:
-                if isinstance(task_id,str) and task_id not in owned_ids:
+                if isinstance(task_id, str) and task_id not in owned_ids:
                     required_ids.append(task_id)
                     owned_ids.add(task_id)
     if required_ids:
