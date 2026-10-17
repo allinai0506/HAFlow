@@ -5638,7 +5638,7 @@ def commit_task(task_id, message=None, allow_rebase=False):
         store=_get_store(),
     )
 
-    target_status = task["status"] if task.get("status") in ("cleanup_ready", "cleaned") else "committed"
+    target_status = task["status"] if task.get("status") in ("completed", "cleanup_ready", "cleaned") else "committed"
     if task.get("status") != target_status:
         set_status(
             task_id,

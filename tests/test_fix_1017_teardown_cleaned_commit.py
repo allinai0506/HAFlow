@@ -302,6 +302,54 @@ class TestTeardownCleanedCommit(unittest.TestCase):
             ctl.finalize_completed_task = orig_finalize
             ctl.attention_clear(f"{task_id}:finalize")
 
+    def test_completed_none_mode_task_commit_preserves_completed_status_for_cleanup_ready(self):
+        """A completed mode=none task creating a preservation commit remains in completed status and can transition to cleanup_ready."""
+        repo = self.tmp_dir / "clone-completed-none"
+        repo.mkdir()
+        def git(*args):
+            return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True)
+
+        git("init", "-b", "main")
+        git("config", "user.name", "Test")
+        git("config", "user.email", "test@example.invalid")
+        (repo / "base.txt").write_text("base")
+        git("add", ".")
+        git("commit", "-m", "base")
+
+        # Dirty output to preserve
+        (repo / "report.txt").write_text("report output")
+
+        task_id = "task-completed-none"
+        task = {
+            "task_id": task_id,
+            "workflow_id": "wf-1",
+            "node": "audit",
+            "stage": "audit",
+            "status": "completed",
+            "clone_path": str(repo),
+            "integration_mode": "none",
+        }
+        self.store.save_workflow({"workflow_id": "wf-1", "status": "running"})
+        self.store.save_task(task)
+
+        os.environ["HERDR_STATE_DB"] = str(self.db_path)
+        os.environ["TASKS_FILE"] = str(self.tasks_file)
+
+        # Commit uncommitted output
+        self.cli.commit_task(task_id, message="chore(closure): preserve worktree output")
+
+        # Task MUST remain in completed status, not prematurely advanced to committed
+        updated = self.store.get_task(task_id)
+        self.assertEqual(updated["status"], "completed")
+        self.assertIsNotNone(updated.get("commit"))
+
+        # Now controller can successfully transition completed -> cleanup_ready
+        from herdr.transitions import validate_task_transition
+        self.assertTrue(validate_task_transition("completed", "cleanup_ready"))
+        self.store.transition_task(task_id, "cleanup_ready", reason="finalize_complete")
+        final = self.store.get_task(task_id)
+        self.assertEqual(final["status"], "cleanup_ready")
+
 
 if __name__ == "__main__":
     unittest.main()
