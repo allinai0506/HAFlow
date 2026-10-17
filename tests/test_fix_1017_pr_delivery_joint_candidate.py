@@ -119,6 +119,19 @@ def joint_delivery_fixture(tmp_path, monkeypatch):
             'node': tid,
         })
 
+    # Record candidate_frozen event with authoritative delivery_inventory
+    store.record_event(
+        'candidate_frozen',
+        {
+            'candidate_sha': joint_sha,
+            'delivery_inventory': [
+                {'task_id': 't1', 'commit': t1_sha},
+            ],
+        },
+        workflow_id='wf-joint',
+        source='critical-path-scheduler',
+    )
+
     # Record delivery note pointing to joint_sha
     wd.append_note(
         'wf-joint',
@@ -143,7 +156,6 @@ def test_joint_candidate_publication_and_pr_creation(joint_delivery_fixture):
     store, repo, remote, t1_sha, joint_sha = joint_delivery_fixture
     provider = Provider(joint_sha)
 
-    # t1_sha is ancestor of joint_sha in repo
     res = create_task_pr(store, 't1', title='Joint delivery PR', client=provider)
     assert res['number'] == 1
     assert res['candidate_sha'] == joint_sha
@@ -160,13 +172,38 @@ def test_joint_candidate_publication_and_pr_creation(joint_delivery_fixture):
 
 def test_joint_candidate_via_delivery_inventory_event(joint_delivery_fixture):
     store, repo, remote, t1_sha, joint_sha = joint_delivery_fixture
-    # Record a candidate_frozen event with delivery_inventory
+    provider = Provider(joint_sha)
+    res = create_task_pr(store, 't1', title='Joint delivery PR via event', client=provider)
+    assert res['candidate_sha'] == joint_sha
+
+
+def test_joint_candidate_rejected_without_authoritative_inventory(joint_delivery_fixture):
+    store, repo, remote, t1_sha, joint_sha = joint_delivery_fixture
+    # Remove all candidate_frozen events from state DB
+    import sqlite3
+    with sqlite3.connect(store.db_path) as conn:
+        conn.execute("DELETE FROM events WHERE event_type = 'candidate_frozen'")
+        conn.commit()
+
+    provider = Provider(joint_sha)
+    # Even though t1_sha is an ancestor of joint_sha in git, lack of authoritative event MUST fail
+    with pytest.raises(ValueError, match='delivery identity does not bind the integrated candidate'):
+        create_task_pr(store, 't1', title='Joint PR without event', client=provider)
+
+
+def test_joint_candidate_rejected_if_inventory_lacks_task(joint_delivery_fixture):
+    store, repo, remote, t1_sha, joint_sha = joint_delivery_fixture
+    # Replace candidate_frozen event with one that does NOT include t1
+    import sqlite3
+    with sqlite3.connect(store.db_path) as conn:
+        conn.execute("DELETE FROM events WHERE event_type = 'candidate_frozen'")
+        conn.commit()
     store.record_event(
         'candidate_frozen',
         {
             'candidate_sha': joint_sha,
             'delivery_inventory': [
-                {'task_id': 't1', 'commit': t1_sha},
+                {'task_id': 'other_task', 'commit': joint_sha},
             ],
         },
         workflow_id='wf-joint',
@@ -174,8 +211,74 @@ def test_joint_candidate_via_delivery_inventory_event(joint_delivery_fixture):
     )
 
     provider = Provider(joint_sha)
-    res = create_task_pr(store, 't1', title='Joint delivery PR via event', client=provider)
-    assert res['candidate_sha'] == joint_sha
+    with pytest.raises(ValueError, match='delivery identity does not bind the integrated candidate'):
+        create_task_pr(store, 't1', title='Joint PR with foreign task inventory', client=provider)
+
+
+def test_publication_rejects_missing_delivery_branch_on_exact_candidate(joint_delivery_fixture):
+    store, repo, remote, t1_sha, joint_sha = joint_delivery_fixture
+    # Set task to joint_sha so note_sha == sha
+    t1 = store.get_task('t1')
+    store.save_task({**t1, 'integrated_commit': joint_sha})
+
+    # Note has candidate_sha == joint_sha and valid gates, but omits delivery_branch
+    notes = [
+        {
+            'note_id': 'n-legacy',
+            'kind': 'delivery',
+            'workflow_id': 'wf-joint',
+            'delivery_id': f'candidate-{joint_sha}',
+            'candidate_sha': joint_sha,
+            'review_task': 'review',
+            'test_gate': 'test',
+            'base': 'main',
+            # 'delivery_branch' intentionally missing
+        }
+    ]
+    with pytest.raises(ValueError, match='delivery identity does not bind the integrated candidate'):
+        _publication(store.get_task('t1'), notes, store)
+
+
+def test_publication_rejects_mismatched_delivery_branch_on_exact_candidate(joint_delivery_fixture):
+    store, repo, remote, t1_sha, joint_sha = joint_delivery_fixture
+    t1 = store.get_task('t1')
+    store.save_task({**t1, 'integrated_commit': joint_sha})
+
+    # Note has mismatched delivery_branch
+    notes = [
+        {
+            'note_id': 'n-legacy',
+            'kind': 'delivery',
+            'workflow_id': 'wf-joint',
+            'delivery_id': f'candidate-{joint_sha}',
+            'delivery_branch': 'herdr/integration-other',
+            'candidate_sha': joint_sha,
+            'review_task': 'review',
+            'test_gate': 'test',
+            'base': 'main',
+        }
+    ]
+    with pytest.raises(ValueError, match='delivery identity does not bind the integrated candidate'):
+        _publication(store.get_task('t1'), notes, store)
+
+
+def test_joint_candidate_rejected_if_note_lacks_delivery_branch(joint_delivery_fixture):
+    store, repo, remote, t1_sha, joint_sha = joint_delivery_fixture
+    # Note has candidate_sha == joint_sha, covering event exists, but note omits delivery_branch
+    notes = [
+        {
+            'note_id': 'n-joint-nobranch',
+            'kind': 'delivery',
+            'workflow_id': 'wf-joint',
+            'delivery_id': f'candidate-{joint_sha}',
+            'candidate_sha': joint_sha,
+            'review_task': 'review',
+            'test_gate': 'test',
+            'base': 'main',
+        }
+    ]
+    with pytest.raises(ValueError, match='delivery identity does not bind the integrated candidate'):
+        _publication(store.get_task('t1'), notes, store)
 
 
 def test_joint_candidate_rejected_if_unrelated_sha(joint_delivery_fixture):

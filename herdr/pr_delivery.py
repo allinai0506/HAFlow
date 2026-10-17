@@ -82,10 +82,12 @@ def _git(repo, *args):
 
 
 def _is_joint_candidate_covering(store, task, sha, note_sha):
+    if not store:
+        return False
     try:
         events = store.list_events(workflow_id=task.get('workflow_id'), event_type='candidate_frozen')
         for ev in events:
-            payload = ev.get('payload') or {}
+            payload = ev.get('payload') or ev.get('payload_json') or {}
             if isinstance(payload, str):
                 try:
                     payload = json.loads(payload)
@@ -97,19 +99,6 @@ def _is_joint_candidate_covering(store, task, sha, note_sha):
                         return True
     except Exception:
         pass
-
-    repo = Path(task.get('source_repo') or '').expanduser()
-    if repo.is_dir():
-        try:
-            res = subprocess.run(
-                ['git', '-C', str(repo), 'merge-base', '--is-ancestor', sha, note_sha],
-                capture_output=True,
-                timeout=10,
-            )
-            if res.returncode == 0:
-                return True
-        except Exception:
-            pass
     return False
 
 
@@ -130,13 +119,15 @@ def _publication(task, notes, store):
     note_branch = _body_value(note, 'delivery_branch')
 
     if note_sha == sha:
-        if note_branch and note_branch != branch:
+        if not note_branch or note_branch != branch:
             raise ValueError('delivery identity does not bind the integrated candidate')
         effective_sha = sha
         effective_branch = branch
     elif _is_joint_candidate_covering(store, task, sha, note_sha):
+        if not note_branch:
+            raise ValueError('delivery identity does not bind the integrated candidate')
         effective_sha = note_sha
-        effective_branch = note_branch or branch
+        effective_branch = note_branch
     else:
         raise ValueError('delivery identity does not bind the integrated candidate')
 
