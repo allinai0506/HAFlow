@@ -5463,7 +5463,22 @@ def commit_task(task_id, message=None, allow_rebase=False):
                     sys.exit(1)
                 from herdr.repo_hygiene import teardown_output_diagnosis
                 diag = teardown_output_diagnosis(status_res.stdout, task_id=task_id)
-                has_uncommitted = bool(diag.get("reason"))
+                has_dirty = bool(diag.get("reason"))
+
+                head_res = subprocess.run(
+                    ["git", "-C", clone_path, "rev-parse", "HEAD"],
+                    capture_output=True, text=True
+                )
+                if head_res.returncode != 0:
+                    print(
+                        f"Failed to resolve HEAD for task (rc={head_res.returncode}): {task_id}",
+                        file=sys.stderr
+                    )
+                    sys.exit(1)
+                head_sha = head_res.stdout.strip()
+                expected_commit = task.get("integrated_commit") or task.get("commit")
+                head_diverged = bool(head_sha and expected_commit and head_sha != expected_commit)
+                has_uncommitted = has_dirty or head_diverged
             if has_uncommitted:
                 print(
                     f"Task is already integrated; post-integration changes cannot be committed directly "
@@ -5494,7 +5509,22 @@ def commit_task(task_id, message=None, allow_rebase=False):
                     sys.exit(1)
                 from herdr.repo_hygiene import teardown_output_diagnosis
                 diag = teardown_output_diagnosis(status_res.stdout, task_id=task_id)
-                has_uncommitted = bool(diag.get("reason"))
+                has_dirty = bool(diag.get("reason"))
+
+                head_res = subprocess.run(
+                    ["git", "-C", clone_path, "rev-parse", "HEAD"],
+                    capture_output=True, text=True
+                )
+                if head_res.returncode != 0:
+                    print(
+                        f"Failed to resolve HEAD for task (rc={head_res.returncode}): {task_id}",
+                        file=sys.stderr
+                    )
+                    sys.exit(1)
+                head_sha = head_res.stdout.strip()
+                expected_commit = task.get("integrated_commit") or task.get("commit")
+                head_diverged = bool(head_sha and expected_commit and head_sha != expected_commit)
+                has_uncommitted = has_dirty or head_diverged
 
             if task.get("integration_mode") == "git":
                 if has_uncommitted:
@@ -6636,6 +6666,10 @@ def _teardown_output_guard(task):
             result = run_bounded(["git", "-C", str(path), "status", "--porcelain", "--untracked-files=normal"], timeout=5, output_limit=65536)
             if result["status"] != "completed" or result["exit_code"]:
                 return {"reason": "clone_git_inventory_unknown"}
+            head_out = run_bounded(["git", "-C", str(path), "rev-parse", "HEAD"], timeout=5, output_limit=8192)
+            if head_out["status"] != "completed" or head_out["exit_code"]:
+                return {"reason": "clone_git_inventory_unknown"}
+            head_sha = head_out["stdout"].strip()
         except (OSError, ValueError):
             return {"reason": "clone_git_inventory_unknown"}
         diagnosis = teardown_output_diagnosis(result["stdout"], task_id=task.get("task_id", ""))
@@ -6643,6 +6677,17 @@ def _teardown_output_guard(task):
             if (task.get("integration_mode") or "none") == "none":
                 diagnosis["remediation_cmd"] = f"git -C <clone> status; herdr-task commit {task.get('task_id', '')}"
             return diagnosis
+        expected_commit = task.get("integrated_commit") or task.get("commit")
+        if expected_commit and head_sha and head_sha != expected_commit:
+            cmd = (
+                f"git -C <clone> status; herdr-task commit {task.get('task_id', '')}"
+                if (task.get("integration_mode") or "none") == "none"
+                else f"git -C <clone> log; herdr-task integrate {task.get('task_id', '')}"
+            )
+            return {
+                "reason": "unintegrated_commit_diverged",
+                "remediation_cmd": cmd,
+            }
     if (task.get("integration_mode") == "git" and task.get("status") in {"completed", "committed"}):
         return {"reason": "git_finalize_pending", "remediation_cmd": "herdr-task commit " + str(task.get("task_id")) + "; herdr-task integrate " + str(task.get("task_id"))}
     return {"reason": ""}

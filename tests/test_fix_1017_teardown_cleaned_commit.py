@@ -162,6 +162,56 @@ class TestTeardownCleanedCommit(unittest.TestCase):
         self.assertEqual(persisted["status"], "integrated")
         self.assertEqual(persisted["commit"], base_commit)
 
+    def test_integrated_task_with_diverged_head_rejects_commit(self):
+        """When an integrated task has a diverged HEAD (clean worktree but new commits), commit_task rejects it."""
+        repo = self.tmp_dir / "clone-integrated-diverged"
+        repo.mkdir()
+        def git(*args):
+            return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True)
+
+        git("init", "-b", "main")
+        git("config", "user.name", "Test")
+        git("config", "user.email", "test@example.invalid")
+        (repo / "base.txt").write_text("base")
+        git("add", ".")
+        git("commit", "-m", "base")
+        base_commit = git("rev-parse", "HEAD").stdout.strip()
+
+        # Add a new commit in clone after integration (worktree clean, but HEAD diverged)
+        (repo / "post.txt").write_text("post")
+        git("add", ".")
+        git("commit", "-m", "post")
+        post_commit = git("rev-parse", "HEAD").stdout.strip()
+        self.assertNotEqual(base_commit, post_commit)
+
+        task = {
+            "task_id": "task-integrated-diverged",
+            "workflow_id": "wf-1",
+            "node": "impl",
+            "stage": "impl",
+            "status": "integrated",
+            "clone_path": str(repo),
+            "commit": base_commit,
+            "integrated_commit": base_commit,
+            "integration_mode": "git",
+        }
+        self.store.save_task(task)
+
+        os.environ["HERDR_STATE_DB"] = str(self.db_path)
+        os.environ["TASKS_FILE"] = str(self.tasks_file)
+
+        # Calling commit_task must reject with exit code 2
+        with self.assertRaises(SystemExit) as ctx:
+            self.cli.commit_task("task-integrated-diverged")
+        self.assertEqual(ctx.exception.code, 2)
+
+        # _teardown_output_guard must report unintegrated_commit_diverged
+        guard = self.cli._teardown_output_guard(task)
+        self.assertEqual(guard["reason"], "unintegrated_commit_diverged")
+        deletable, reason = self.cli.clone_deletable(task)
+        self.assertFalse(deletable)
+        self.assertEqual(reason, "unintegrated_commit_diverged")
+
     def test_cleaned_git_task_with_uncommitted_output_is_rejected(self):
         """A cleaned git task with uncommitted output must reject commit."""
         repo = self.tmp_dir / "clone-cleaned-git"
