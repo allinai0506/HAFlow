@@ -12,6 +12,7 @@ import hashlib
 import html
 import os
 import subprocess
+import tarfile
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
@@ -135,23 +136,35 @@ def read_deliverable(
         raise DeliverableError("unavailable", 409, item.get("reason") or "成果当前不可读取")
     task = owned[0]
     workspace = _workspace(task)
-    if workspace is None:
-        raise DeliverableError("forbidden", 403, "不能读取这项成果")
-    path = resolve_workspace_file(workspace, str(item.get("rel_path") or ""))
-    if path.suffix.lower() not in FILE_SUFFIXES:
-        raise DeliverableError("forbidden", 403, "不能读取这项成果")
-    size = path.stat().st_size
+    archived_blob = None
+    if task.get("clone_archive") and (workspace is None or not workspace.exists()):
+        from herdr.clone_archive import read_archived_file
+        try:
+            archived_blob = read_archived_file(task, str(item.get("rel_path") or ""), DOWNLOAD_LIMIT)
+        except (OSError, ValueError, tarfile.TarError) as exc:
+            raise DeliverableError("unavailable", 409, "归档成果校验失败") from exc
+        size = len(archived_blob)
+    else:
+        if workspace is None:
+            raise DeliverableError("forbidden", 403, "不能读取这项成果")
+        path = resolve_workspace_file(workspace, str(item.get("rel_path") or ""))
+        if path.suffix.lower() not in FILE_SUFFIXES:
+            raise DeliverableError("forbidden", 403, "不能读取这项成果")
+        size = path.stat().st_size
     if size > DOWNLOAD_LIMIT:
         raise DeliverableError("too_large", 413, "文件超过读取上限")
     if download:
         return {
             "mode": "download",
             "filename": item["name"],
-            "body": path.read_bytes(),
+            "body": archived_blob if archived_blob is not None else path.read_bytes(),
             "headers": download_headers(item["name"]),
         }
-    with path.open("rb") as handle:
-        blob = handle.read(PREVIEW_LIMIT)
+    if archived_blob is not None:
+        blob = archived_blob[:PREVIEW_LIMIT]
+    else:
+        with path.open("rb") as handle:
+            blob = handle.read(PREVIEW_LIMIT)
     text = _preview_text(blob)
     previewable = "view" in (item.get("actions") or [])
     return {
@@ -267,6 +280,25 @@ def _task_items(task: Dict[str, Any], nodes: List[Dict[str, Any]]):
     expected = _file_tokens(_expected_for(node_id, nodes))
     retired = _retired_task(task)
     workspace = _workspace(task)
+    if task.get("clone_archive") and (workspace is None or not workspace.exists()):
+        from herdr.clone_archive import archive_manifest
+        try:
+            entries = archive_manifest(task)["entries"]
+            items = []
+            for row in task["clone_archive"].get("deliverables", []):
+                rel = row.get("rel_path")
+                if not rel:
+                    items.append(row)
+                    continue
+                parts = Path(rel).parts
+                if (_sensitive(rel) or any(part in SKIP_DIRS or part.startswith(".herdr") for part in parts[:-1])
+                        or Path(rel).suffix.lower() not in FILE_SUFFIXES or entries.get(rel,{}).get("type")!="file"):
+                    continue
+                items.append(_file_item(task,node_id,node_label,rel,retired,
+                                        row.get("status")=="present" or any(_same_output(token,rel) for token in expected)))
+            return items, "", False
+        except (OSError, ValueError, tarfile.TarError):
+            return [], "任务成果归档不可读取或校验失败。", False
     error = ""
     changed: List[str] = []
     head = None
@@ -483,6 +515,8 @@ def _present_rels(task, workspace, expected, changed, *, head=None):
 
     for token in expected:
         add(token)
+    for rel in _registered_rels(task, workspace):
+        add(rel)
     if (workspace / ".git").exists():
         for rel in changed or []:
             stored = add(rel)

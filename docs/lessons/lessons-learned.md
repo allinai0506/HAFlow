@@ -6981,3 +6981,32 @@ rg -n "pytest -q tests/" <clone>/.herdr-loop/EVALUATOR.sh   # 期望：定向专
 - `herdr/state_db.py` `update_task_metadata` CAS — 回填所用原语
 
 ---
+
+## 165. 资源清理的成功回执必须对应物理结果，部分删除重试不能覆盖恢复点（2026-10-17）
+
+### 问题背景
+
+工作流已关闭仍留有完整 CoW clone；阶段 cleanup 只更新逻辑状态，最终关闭对文档和失败现场默认保留。改为自动回收时，真实临时目录回归进一步复现：rmtree 部分删除后失败，重试对残余重新归档会覆盖完整恢复点引用，使 Console 成果消失。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+| --- | --- | --- |
+| cleaned 与磁盘目录是否存在不一致 | 阶段状态不代表物理副作用成功 | 最终回收逐项核对目录，未删完不发布成功关闭回执 |
+| 删除失败动作被日志当作完成 | 幂等日志不能永久缓存失败结果 | 重试前重验原实例身份，再续做未完成删除 |
+| 部分删除后重新备份残余 | 可恢复点必须先于首次破坏性操作且跨重试保持完整 | 固化归档及删除意图，续删仅允许原实例和归档内容子集 |
+
+### 操作规范
+
+1. 阶段 cleanup 与最终资源回收分开，避免提前删除下游输入。
+2. 恢复归档在源外原子发布并校验；只在同 Task / Run 身份和源内容验证通过后删目录。
+3. SQLite 保留首份完整归档引用；任何新增或变化产物都必须阻止未经保护的续删。
+4. 恢复备份是私有原始数据，不自动当作已脱敏证据发送给模型。
+
+### 验证命令 / 守护测试
+
+```bash
+python3 -m pytest -q tests/test_workflow_clone_reclaim.py tests/test_workflow_close_claim.py
+```
+
+关键回归：`test_partial_delete_retry_keeps_original_archive_and_file`，覆盖成果、Git 元数据和身份文件部分删除后重试；`test_controller_auto_close_runs_real_cli_and_reclaims` 覆盖真实自动关闭链路。

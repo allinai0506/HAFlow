@@ -20,7 +20,7 @@ class CloseClaim:
         self.operation_id = operation_id
         self.receipt = receipt
 
-    def action(self, key, identity, owns, execute):
+    def action(self, key, identity, owns, execute, *, retry_incomplete=False):
         """Journal intent before I/O; resume only after rechecking original identity.
 
         owns(identity) must validate an immutable runtime instance, never Pane ID
@@ -28,7 +28,10 @@ class CloseClaim:
         """
         if self.state != 'owner': raise ValueError('close ownership required')
         row = self.connection.execute('SELECT identity,status,result FROM workflow_close_actions WHERE operation_id=? AND action_key=?', (self.operation_id,key)).fetchone()
-        if row and row[1] != 'started': return json.loads(row[2])
+        if row and row[1] != 'started':
+            previous = json.loads(row[2])
+            if not retry_incomplete or previous.get('result'):
+                return previous
         if row: identity = json.loads(row[0])
         else:
             with self.connection:

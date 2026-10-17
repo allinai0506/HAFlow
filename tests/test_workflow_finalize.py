@@ -46,6 +46,8 @@ class FinalizeTestBase(unittest.TestCase):
         self.stage_state_file = str(root / "stage-state.json")
         self.evidence_root = str(root / "evidence")
         self.clone_root = os.path.realpath(str(root / "clones"))
+        self.clone_env = patch.dict(os.environ, {"HERDR_CLONES_DIR": self.clone_root})
+        self.clone_env.start()
 
         _ht.TASKS_FILE = self.tasks_file
         _ht.WORKFLOWS_FILE = self.workflows_file
@@ -71,6 +73,7 @@ class FinalizeTestBase(unittest.TestCase):
                 store.delete_workflow(w["workflow_id"])
         except Exception:
             pass
+        self.clone_env.stop()
         self.tmp.cleanup()
 
     # -- helpers ---------------------------------------------------------
@@ -399,7 +402,7 @@ class TestCloseWorkflow(FinalizeTestBase):
         self.assertEqual(by_id["t-c"]["status"], "cleaned")
         self.assertEqual(by_id["t-git-ok"]["status"], "cleaned")
 
-    def test_full_close_retains_failed_and_never_touches_coordinator(self):
+    def test_full_close_archives_all_clones_and_never_touches_coordinator(self):
         tasks = [
             self._mk_task("t-git", status="cleaned",
                           integration_ref="refs/herdr/tasks/t-git"),
@@ -417,11 +420,13 @@ class TestCloseWorkflow(FinalizeTestBase):
             report = _ht.close_workflow("wf-test")
 
         by_id = {r["task_id"]: r for r in report["tasks"]}
-        self.assertEqual(by_id["t-fail"]["action"], "retained-failed")
+        self.assertEqual(by_id["t-fail"]["action"], "finalized")
+        self.assertFalse(os.path.exists(by_id["t-fail"]["clone_path"]))
+        self.assertEqual(self._read_tasks()[-1]["status"], "failed")
         self.assertEqual(by_id["t-git"]["action"], "finalized")
         self.assertEqual(by_id["t-c"]["status"], "cleaned")
         self.assertFalse(os.path.exists(by_id["t-git"]["clone_path"]))
-        self.assertTrue(os.path.exists(by_id["t-docs"]["clone_path"]))
+        self.assertFalse(os.path.exists(by_id["t-docs"]["clone_path"]))
         self.assertFalse(os.path.exists(by_id["t-sup"]["clone_path"]))
 
         # Legacy fixtures persist only Pane IDs: unknown instance ownership

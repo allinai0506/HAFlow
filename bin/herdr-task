@@ -8,6 +8,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import tarfile
 import time
 from contextlib import ExitStack
 from functools import wraps
@@ -6809,7 +6810,7 @@ def _close_owned_pane(identity):
     return proven
 
 
-def _finalize_one(task, purge_clones=False, dry_run=False, close_claim=None, output_override=""):
+def _finalize_one(task, purge_clones=False, dry_run=False, close_claim=None, output_override="", reclaim_archive=None):
     """对单个已收敛任务执行物理收尾,返回报告行。幂等。"""
     task_id = task.get("task_id")
     status = task.get("status")
@@ -6830,7 +6831,7 @@ def _finalize_one(task, purge_clones=False, dry_run=False, close_claim=None, out
     }
 
     output = _teardown_output_guard(task)
-    authorization = output_override or ("purge-clones" if purge_clones else "")
+    authorization = output_override or ("verified-archive" if reclaim_archive else "purge-clones" if purge_clones else "")
     if output["reason"]:
         row["output_guard"] = output
         row["clone_retained_reason"] = output["reason"]
@@ -6853,6 +6854,16 @@ def _finalize_one(task, purge_clones=False, dry_run=False, close_claim=None, out
         return row
 
     def retain_new_output():
+        if reclaim_archive and task.get("clone_path") and os.path.exists(task["clone_path"]):
+            from herdr.clone_archive import verify_source
+            try:
+                verify_source(task, CLONE_ROOT, reclaim_archive)
+            except (OSError, ValueError, tarfile.TarError) as exc:
+                diagnosis = {"reason": "archive_source_changed", "detail": str(exc)}
+                row.update(action="retained", output_guard=diagnosis,
+                           clone_retained_reason=diagnosis["reason"], pane_retained_reason=diagnosis["reason"])
+                _record_output_retention(task, diagnosis)
+                return True
         current_output = _teardown_output_guard(task)
         if current_output["reason"] and not authorization:
             row.update(action="retained", output_guard=current_output,
@@ -6890,7 +6901,7 @@ def _finalize_one(task, purge_clones=False, dry_run=False, close_claim=None, out
         return row
     deletable, reason = clone_deletable(task)
     if task.get("clone_path"):
-        if deletable or purge_clones:
+        if deletable or purge_clones or reclaim_archive:
             if close_claim is None:
                 row["clone_deleted"] = delete_clone_safely(task["clone_path"])
             else:
@@ -6905,9 +6916,18 @@ def _finalize_one(task, purge_clones=False, dry_run=False, close_claim=None, out
                                 and not retain_new_output())
                     except OSError:
                         return False
+                def delete_owned_clone():
+                    if retain_new_output():
+                        return False
+                    if reclaim_archive:
+                        from herdr import kernel
+                        kernel.update_task_metadata(task_id, {
+                            "clone_reclaim_started": reclaim_archive["manifest_sha256"],
+                        }, store=_get_store())
+                    return delete_clone_safely(clone)
                 action = close_claim.action(
-                    "clone:" + task_id, identity, owns_clone,
-                    lambda: delete_clone_safely(clone) if not retain_new_output() else False,
+                    "clone:" + task_id, identity, owns_clone, delete_owned_clone,
+                    retry_incomplete=bool(reclaim_archive),
                 )
                 row["clone_deleted"] = bool(action.get("result"))
             if not row["clone_deleted"]:
@@ -7349,6 +7369,42 @@ def _close_workflow_owned(
         )
         sys.exit(2)
 
+    # Workflow-level reclamation only: stage cleanup must keep downstream inputs.
+    # Snapshot every remaining sandbox before any teardown. Recovery archives are
+    # private local backups, not Provider evidence or a second task state store.
+    archives = {}
+    if not dry_run:
+        from herdr.clone_archive import preserve_clone
+        from herdr import kernel
+        for task in tasks:
+            clone = task.get("clone_path")
+            if not clone or not os.path.lexists(os.path.expanduser(clone)):
+                continue
+            output = _teardown_output_guard(task)
+            safe_path = (not os.path.islink(clone) and os.path.commonpath([CLONE_ROOT, os.path.realpath(clone)]) == CLONE_ROOT
+                         and os.path.realpath(clone) != CLONE_ROOT)
+            deleting_archive = task.get("clone_archive") and task.get("clone_reclaim_started") == task["clone_archive"].get("manifest_sha256")
+            archivable_output = safe_path and (deleting_archive or (
+                output["reason"] in {"unpreserved_worktree_output", "unintegrated_commit_diverged"}
+                and (task.get("integration_mode") or "none") == "none"))
+            if output["reason"] and not archivable_output and task.get("status") != "failed":
+                continue  # Existing output gate below supplies the diagnosis.
+            try:
+                if task.get("clone_archive"):
+                    archive = preserve_clone(task, CLONE_ROOT)
+                else:
+                    from herdr.deliverables import project_for_tasks
+                    catalog = project_for_tasks(workflow_id, [task], include_expectations=False)
+                    if catalog.get("error") or catalog.get("truncated"):
+                        raise ValueError("deliverable inventory incomplete")
+                    archive = preserve_clone(task, CLONE_ROOT)
+                    archive["deliverables"] = catalog["items"]
+            except (OSError, ValueError, tarfile.TarError) as exc:
+                print(f"[CLOSE ABORT] sandbox archive failed: {task['task_id']}: {exc}")
+                sys.exit(2)
+            archives[task["task_id"]] = archive
+            kernel.update_task_metadata(task["task_id"], {"clone_archive": archive}, store=_get_store())
+
     output_authorizations = {}
     for task in tasks:
         if task.get("status") == "failed":
@@ -7356,7 +7412,7 @@ def _close_workflow_owned(
         output = _teardown_output_guard(task)
         if not output["reason"]:
             continue
-        authorized = ("purge-clones" if purge_clones else "force" if force else "abandon" if abandon else
+        authorized = ("verified-archive" if task["task_id"] in archives else "purge-clones" if purge_clones else "force" if force else "abandon" if abandon else
                       "accept-escalated" if accept_escalated and task.get("task_id") in escalated_git else "")
         if not dry_run:
             _record_output_retention(task, output, authorized_via=authorized)
@@ -7402,7 +7458,7 @@ def _close_workflow_owned(
     }
 
     for task in tasks:
-        if task.get("status") == "failed":
+        if task.get("status") == "failed" and task["task_id"] not in archives:
             report["tasks"].append({
                 "task_id": task.get("task_id"),
                 "status": "failed",
@@ -7411,6 +7467,8 @@ def _close_workflow_owned(
             })
             continue
         finalize_options = dict(purge_clones=purge_clones, dry_run=dry_run, close_claim=close_claim)
+        if task["task_id"] in archives:
+            finalize_options["reclaim_archive"] = archives[task["task_id"]]
         authorization = output_authorizations.get(task["task_id"])
         if authorization:
             finalize_options["output_override"] = authorization
@@ -7420,6 +7478,13 @@ def _close_workflow_owned(
            for row in report["tasks"]) and not dry_run:
         print("[CLOSE ABORT] output changed during teardown: " + json.dumps(report, ensure_ascii=False))
         sys.exit(2)
+
+    if not dry_run:
+        remaining = [task["task_id"] for task in tasks if task.get("clone_path")
+                     and os.path.lexists(os.path.expanduser(task["clone_path"]))]
+        if remaining:
+            print("[CLOSE ABORT] sandbox reclamation incomplete: " + ", ".join(remaining))
+            sys.exit(2)
 
     topo = _workflow_stage_tabs(workflow_id, tasks)
     live_panes = (
