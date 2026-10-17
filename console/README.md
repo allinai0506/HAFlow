@@ -87,3 +87,17 @@ POST /api/run                -> body 支持 template 字段，透传 herdr-facto
 - 后端数据聚合只修改 `bin/herdr-task`。
 - 修改后至少执行 Console 语法检查、`/api/ops-center` HTTP smoke test 和浏览器页面检查。
 - 不把 `~/.herdr-console` 下的备份文件、日志或缓存同步进仓库。
+
+## 极简工作台 V1
+
+入口 `/simple` 提供新建项目、新建需求、获得成果三个操作；`/` 保留专业工作台。两侧链接传递 `project_id` / `workflow_id`，刷新从服务端重载项目和需求。
+
+- 业务目录选择 `business-task-v1`，通过既有 Context Runtime 执行，无需初始化 Git；软件项目与 Git 模板仍要求 Git 仓库。
+- 模板选择器读取 `/api/templates` 的全部分类（含自定义），详情读取 `/api/template` 的真实节点、执行模式及 context 契约；必填资料路径必须填写。
+- 启动后轮询原有 job 接口，以返回的 `WORKFLOW_ID=` 打开对应需求。job 状态仅在 Console 进程存活期间可查；重启后请从已登记需求中核对，避免重复启动。
+- 人工决定复用共享文档决策机制。文件预览与下载复用既有成果归属/路径检查；“工作区文件”与“已产生”保留原始状态，不宣称已验收。
+- 静态资产为 `console/static/simple.{html,css,js}`；无前端框架或构建依赖。`/simple` 的品牌来自 Python 常量。
+- 新增 `GET /api/projects` 返回原项目注册表；创建项目的写路径初始化选定 StateStore，读取项目列表不探测终端。
+
+专项：`python3.13 -m pytest -q tests/test_simple_workbench.py tests/test_console_project_creation.py tests/test_console_run_job.py tests/test_console_templates.py`。
+隔离页面验收服务：`python3.13 tests/support/simple_workbench_sandbox.py --root <本工位临时目录> --port 8877`。该服务只替代外部终端与模型健康边界，业务 API / SQLite / 决策 / 文件为真实实现，不可用作生产服务。

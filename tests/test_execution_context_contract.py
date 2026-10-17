@@ -178,9 +178,10 @@ class TestTemplates(unittest.TestCase):
         from herdr.workflow import list_templates
         for name in list_templates():
             wf = load_template(name)
-            if name == "context-smoke-test":
-                continue
-            self.assertEqual(execution_mode(wf), "git", f"template {name} must stay git")
+            if name in {"context-smoke-test", "business-task-v1"}:
+                self.assertEqual(execution_mode(wf), "context", f"template {name} declares Context Runtime")
+            else:
+                self.assertEqual(execution_mode(wf), "git", f"legacy template {name} must stay git")
 
     def test_context_smoke_test_template(self):
         wf = load_template("context-smoke-test")

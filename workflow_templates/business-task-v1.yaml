@@ -1,0 +1,35 @@
+name: business-task-v1
+label: 通用业务协作
+author: HAFlow
+version: "1.0"
+category: biz
+description: 在普通业务目录中完成分析、文案与方案任务，明确范围、执行工作并交付成果，无需 Git。
+execution:
+  mode: context
+context:
+  required: []
+  optional:
+    - id: reference
+      label: 参考资料
+nodes:
+  - id: scope
+    label: 明确需求
+    node_type: agent
+    depends_on: []
+    purpose: 阅读业务目录及可选参考资料，明确目标、约束和成果验收标准；遇到关键歧义请求人工决策。
+    default_task_type: docs
+    default_integration_mode: none
+  - id: execute
+    label: 完成工作
+    node_type: agent
+    depends_on: [scope]
+    purpose: 按确认的需求执行分析或写作，在任务工作目录产出可交付文件。
+    default_task_type: docs
+    default_integration_mode: none
+  - id: deliver
+    label: 验收交付
+    node_type: agent
+    depends_on: [execute]
+    purpose: 核验上游成果符合验收标准，记录最终成果路径和已知限制。
+    default_task_type: docs
+    default_integration_mode: none

@@ -1029,7 +1029,13 @@ def _register_project_workflow(
 
 
 def create_project(root, project_name=None, template_name="software-development-v1"):
-    root = detect_git_root(root)
+    template = load_template(template_name)
+    if execution_mode(template) == "context":
+        root = canonical_root(root)
+        if not Path(root).is_dir():
+            raise RuntimeError(f"项目目录不存在或不是目录: {root}")
+    else:
+        root = detect_git_root(root)
     record = project_by_root(root)
     if record and _workspace_alive(record.get("workspace_id", "")):
         if template_name and template_name != _workflow_template_of(record):

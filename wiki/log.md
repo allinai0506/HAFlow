@@ -2711,3 +2711,8 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - Evidence: `tests/test_workflow_clone_reclaim.py`：四种旗标 × staged/untracked，暂停双向交错、晚到目录、归档写入失败重试和 dry-run 零副作用。
 
 - 发布保护追加：内部 Workflow 转移支持可选 `expected_status`，SQLite 写事务内先匹配观察状态再处理 force；阻止显式强制关闭覆盖预检期间的新暂停，并保留初始已暂停时的合法强制收口。证据：强制暂停交错与初始 paused 两项真实 SQLite / CLI 回归。
+
+## [2026-10-17] 新增 | 极简工作台 V1
+- Added [[simple-workbench]]：记录 /simple 与专业工作台共用 API、URL 身份、Context 业务目录和真实成果读取边界。
+- Evidence: `tests/test_simple_workbench.py`、`console/static/simple.js`、`console/herdr_factory_console.py#Handler`。
+- 补充 `docs/lessons/lessons-learned.md` §166：输入项目可能经 Git 根目录归一化，启动后按返回工作流读回真实归属，不允许旧需求默认值掩盖错误。
