@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import sqlite3
 import time
 from pathlib import Path
@@ -19,6 +20,18 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 READ_TOOLS = {"read", "read_file"}
 EDIT_TOOLS = {"edit", "write", "apply_patch", "str_replace", "strreplace"}
 _EXEC_CMD = re.compile(r"exec_command\(\{cmd:\s*\"((?:\\.|[^\"\\])*)\"")
+_PATCH_MARKER = re.compile(r"apply_patch|(?:^|\r?\n)[ \t]*\*\*\* Begin Patch[ \t]*(?:\r?\n|$)")
+_BEGIN_PATCH = "*** Begin Patch"
+_END_PATCH = "*** End Patch"
+_PATCH_FILE = re.compile(r"(?m)^\*\*\* (?:Update|Add|Delete) File: (.+)$")
+_READ_ARGV = re.compile(r"^(?:cat|head|tail|sed)$")
+_AND_CHAIN = re.compile(r"(?:\|\||&&)")
+# GNU informational modes exit 0 without consuming the operand, so a
+# successful receipt proves nothing about the file having been read.
+_NON_READING_OPTIONS = frozenset({"--help", "--version", "-h", "-V", "--usage"})
+# Codex exec wrapper marks a completed script run; free-form stderr text alone
+# is not a success signal.
+_EXEC_SUCCESS_SENTINEL = "Script completed"
 _TASK_ID = re.compile(r"^[A-Za-z0-9._-]{1,160}$")
 _CLAUDE_UNSAFE = re.compile(r"[^A-Za-z0-9]")
 
@@ -528,19 +541,64 @@ def _actions_from_codex_calls(calls, outputs, session_id):
         timestamp = _codex_time(payload)
         retry_of = _codex_retry(payload, known_ids)
         blob = "\n".join(outputs.get(call_id, []))
-        if name == "exec" or payload.get("type") == "custom_tool_call" and name == "exec":
-            commands = _exec_commands(str(payload.get("input") or ""))
+        if name == "exec":
+            raw = str(payload.get("input") or "")
             exits = _exit_codes(blob)
+            code = exits[0] if len(exits) == 1 else None
+            failed = any(item != 0 for item in exits)
+            try:
+                commands = _exec_commands(raw)
+            except json.JSONDecodeError:
+                commands = []
+            if _PATCH_MARKER.search(raw) or any(_PATCH_MARKER.search(command) for command in commands):
+                patch, unpack_error = _extract_codex_patch(raw)
+                paths = _patch_paths(patch) if patch else []
+                if paths and not unpack_error and not failed and _patch_success(blob, code):
+                    for path in paths:
+                        ordinal += 1
+                        actions.append(_tool_action(
+                            session_id=session_id, ordinal=ordinal, timestamp=timestamp,
+                            tool="apply_patch", path=path, command=None, exit_code=code,
+                            retry_of=retry_of, is_error=False, ref_prefix="codex",
+                        ))
+                        retry_of = None
+                    known_ids.append((call_id, actions[-1]["source_ref"]))
+                    continue
+                # A patch we cannot prove: emit a bare fact, never its content.
+                ordinal += 1
+                action = _tool_action(
+                    session_id=session_id, ordinal=ordinal, timestamp=timestamp, tool="exec",
+                    path=None, command=None, exit_code=None, retry_of=retry_of,
+                    is_error=failed, ref_prefix="codex",
+                )
+                action["kind"] = None
+                actions.append(action)
+                known_ids.append((call_id, action["source_ref"]))
+                continue
+            if not commands:
+                ordinal += 1
+                action = _tool_action(
+                    session_id=session_id, ordinal=ordinal, timestamp=timestamp, tool="exec",
+                    path=None, command=None, exit_code=None, retry_of=retry_of,
+                    is_error=failed, ref_prefix="codex",
+                )
+                actions.append(action)
+                known_ids.append((call_id, action["source_ref"]))
+                continue
             assigned = _assign_exits(commands, exits)
             for command, exit_code in assigned:
                 ordinal += 1
-                ref = f"codex:{session_id}:{ordinal}"
-                actions.append(_tool_action(
+                action = _tool_action(
                     session_id=session_id, ordinal=ordinal, timestamp=timestamp, tool="exec",
-                    path=None, command=command, exit_code=exit_code, retry_of=retry_of, is_error=False,
-                    ref_prefix="codex",
-                ))
-                known_ids.append((call_id, ref))
+                    path=None, command=command, exit_code=exit_code, retry_of=retry_of,
+                    is_error=False, ref_prefix="codex",
+                )
+                if blob and not failed and _receipt_success(blob, exit_code):
+                    action["path"] = _recognized_read_path(command)
+                    if action["path"]:
+                        action["kind"] = "file_read"
+                actions.append(action)
+                known_ids.append((call_id, action["source_ref"]))
                 retry_of = None
             continue
         ordinal += 1
@@ -562,7 +620,153 @@ def _actions_from_codex_calls(calls, outputs, session_id):
     return actions
 
 
-def _exec_commands(raw: str) -> List[str]:
+def _js_string_literals(source: str) -> list[str]:
+    """Return the raw text of every double-quoted JS string literal, in order."""
+    literals: list[str] = []
+    index = 0
+    length = len(source)
+    while index < length:
+        if source[index] != '"':
+            index += 1
+            continue
+        start = index + 1
+        index += 1
+        closed = False
+        while index < length:
+            char = source[index]
+            if char == "\\":
+                index += 2
+                continue
+            if char == '"':
+                literals.append(source[start:index])
+                index += 1
+                closed = True
+                break
+            index += 1
+        if not closed:
+            literals.append(source[start:])
+            break
+    return literals
+
+
+def _extract_codex_patch(raw: str) -> tuple[str | None, bool]:
+    """Unpack a real Codex patch, or report why it stays unclaimed.
+
+    The escaped form says whether a JS string literal failed to unpack.
+    Malformed or ambiguous content is never carried outward.
+    """
+    if raw.lstrip().startswith(_BEGIN_PATCH.strip()):
+        return _validated_patch(raw.strip()), False
+    for body in _js_string_literals(raw):
+        if _BEGIN_PATCH.strip() not in body:
+            continue
+        try:
+            unpacked = json.loads('"' + body + '"')
+        except json.JSONDecodeError:
+            return None, True
+        return _validated_patch(unpacked.strip()), False
+    return None, False
+
+
+def _validated_patch(candidate: str) -> str | None:
+    if "<<" in candidate:
+        return None
+    start = candidate.find(_BEGIN_PATCH.strip())
+    if start < 0 or not candidate.rstrip().endswith(_END_PATCH):
+        return None
+    patch = candidate[start:].strip()
+    return patch if _patch_paths(patch) else None
+
+
+def _patch_success(blob: str, code: int | None) -> bool:
+    """Require a positive apply_patch receipt before claiming an edit."""
+    if code == 0:
+        return True
+    return blob.strip() == "Success."
+
+
+def _receipt_success(blob: str, code: int | None) -> bool:
+    """True only when the receipt proves the run finished successfully."""
+    if code is not None:
+        return code == 0
+    return _EXEC_SUCCESS_SENTINEL in blob
+
+
+def _patch_paths(patch: str) -> list[str]:
+    if not patch.startswith(_BEGIN_PATCH.strip()):
+        return []
+    paths = [item.strip() for item in _PATCH_FILE.findall(patch)]
+    if not paths or any(not item or len(item) > 512 for item in paths):
+        return []
+    return paths
+
+
+def _recognized_read_path(command: str | None) -> str | None:
+    """Return the single file of a literal read command, else None.
+
+    A whole command is trusted only without chaining operators; in an
+    ``&&`` chain only the head segment has a guaranteed status. Any ``||``
+    in the command makes segment status unprovable (a failed head is
+    masked by the fallback). Heredocs, globs, and redirections stay
+    uninterpreted.
+    """
+    if not isinstance(command, str) or not command.strip():
+        return None
+    if "<<" in command or any(char in command for char in "><$*?~{}()\\'\""):
+        return None
+    operators = _AND_CHAIN.search(command)
+    if operators and (operators.group() == "||" or "||" in command):
+        return None
+    if not operators:
+        return _read_single(command)
+    head = command[:operators.start()]
+    if not head.strip():
+        return None
+    return _read_single(head)
+
+
+def _read_single(segment: str) -> str | None:
+    argv = _read_argv(segment)
+    if not argv or not _READ_ARGV.match(os.path.basename(argv[0])):
+        return None
+    if any(item in _NON_READING_OPTIONS for item in argv[1:]):
+        return None
+    return _read_target(argv)
+
+
+def _read_argv(segment: str) -> list[str]:
+    try:
+        return [item for item in shlex.split(segment) if item]
+    except ValueError:
+        return []
+
+
+def _read_target(argv: Sequence[str]) -> str | None:
+    command = os.path.basename(argv[0])
+    args = list(argv[1:])
+    if command == "cat":
+        paths = [item for item in args if not item.startswith("-")]
+        return paths[0] if len(paths) == 1 else None
+    if command in {"head", "tail"}:
+        index = 0
+        while index < len(args) and args[index].startswith("-"):
+            if args[index] in {"-n", "-c"} and index + 1 < len(args):
+                index += 2
+            else:
+                index += 1
+        rest = args[index:]
+        if len(args) > index and any(item.startswith("-") for item in rest):
+            return None
+        return rest[0] if len(rest) == 1 and not rest[0].startswith("-") else None
+    if command == "sed":
+        if args[:1] != ["-n"] or len(args) < 3 or not re.fullmatch(r"[0-9]+(?:,[0-9]+)?p", args[1]):
+            return None
+        rest = args[2:]
+        return rest[0] if len(rest) == 1 and not rest[0].startswith("-") else None
+    return None
+
+
+def _exec_commands(raw: str) -> list[str]:
     commands = []
     for match in _EXEC_CMD.finditer(raw or ""):
         try:

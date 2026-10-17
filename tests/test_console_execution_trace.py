@@ -13,7 +13,16 @@ def _extract(html, name):
     assert start >= 0, name
     if html[max(0, start - 6):start] == "async ":
         start -= 6
-    brace = html.find("{", start)
+    paren = html.index("(", start)
+    depth = 0
+    for index in range(paren, len(html)):
+        if html[index] == "(":
+            depth += 1
+        elif html[index] == ")":
+            depth -= 1
+            if depth == 0:
+                break
+    brace = html.find("{", index)
     depth = 0
     for index in range(brace, len(html)):
         if html[index] == "{":
@@ -113,4 +122,344 @@ loadMoreTaskTrace().then(()=>{
 }).catch((err)=>{ console.error(err); process.exit(1); });
 """
     result = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stderr
+
+
+def test_trajectory_api_uses_authoritative_state_db_path(tmp_path, monkeypatch):
+    db = tmp_path / "state.db"
+    monkeypatch.delenv("HERDR_STATE_DB", raising=False)
+    monkeypatch.setenv("TASKS_FILE", str(tmp_path / "tasks.json"))
+    seen = {}
+
+    def fake_read_trace_tasks(path, tid):
+        seen["path"] = path
+        raise FileNotFoundError(path)
+
+    from herdr import execution_trace
+
+    monkeypatch.setattr(execution_trace, "read_trace_tasks", fake_read_trace_tasks)
+    with pytest.raises(console.TraceQueryError) as caught:
+        console.api_task_trajectory("task-a")
+    assert caught.value.status == 503
+    assert str(seen["path"]) == str(db)
+
+
+def test_polling_and_icons_are_wired_in_the_console():
+    html = console.HTML_TEMPLATE
+    assert "state.taskTracePoll=null" in html
+    assert "function startTaskTracePoll()" in html
+    assert "function stopTaskTracePoll()" in html
+    assert "function pollTaskTrace()" in html
+    assert "function traceTaskWorking()" in html
+    assert "setInterval(pollTaskTrace,8000)" in html
+    assert "['working','dispatched','rework'].includes(t.status)" in html
+    poll_body = html.split("function pollTaskTrace(){")[1].split("function startTaskTracePoll")[0]
+    assert "refreshSelectedTaskStatus" in poll_body
+    assert "document.hidden" in poll_body
+    # Codex P1：终态分支停表前必须先做最后一次轨迹拉取
+    assert "loadTaskTrace" in poll_body.split("cleanup_ready")[0].split("stopTaskTracePoll();return")[-1]
+    refresh_body = html.split("async function refreshSelectedTaskStatus(){")[1].split("\nfunction ")[0]
+    assert "api('/api/task?id='" in refresh_body
+    assert "else stopTaskTracePoll()" in html
+    assert "stopTaskTracePoll();" in html.split("function closeTaskDrawer(){")[1].split("function switchTaskDrawerTab")[0]
+    for glyph in ("file_read:'▤'", "file_edit:'✎'", "test_passed:'✓'", "test_failed:'✗'", "retry:'↻'", "commit:'⊂⊃'"):
+        assert glyph in html
+    assert "const clock=hasTime?traceClock(e.timestamp):'时间未知'" in html
+
+
+def test_trace_poll_guard_reads_live_task_status_from_fetch_boundary():
+    # F4 regression: the poll decision must come from the live /api/task chain,
+    # not the snapshot frozen at drawer open. Only the network fetch is stubbed.
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not found")
+    html = console.HTML_TEMPLATE
+    names = [
+        "api", "applyTraceResponse", "loadTaskTrace", "traceTaskWorking",
+        "stopTaskTracePoll", "pollTaskTrace", "startTaskTracePoll",
+        "refreshSelectedTaskStatus",
+    ]
+    script = "\n".join(_extract(html, name) for name in names)
+    script += r"""
+const assert=require('node:assert/strict');
+globalThis.performance={now:()=>0};
+globalThis.sessionStorage={getItem:()=>null};
+globalThis.document={getElementById:()=>null,hidden:false};
+const apiReads=new Map();
+let taskStatus='pending';
+let statusCalls=0, traceCalls=0, cleared=0;
+const intervals=[];
+function setInterval(fn,ms){intervals.push({fn,ms});return intervals.length}
+function clearInterval(id){cleared+=1}
+function renderTaskDrawer(){}
+async function fetch(p){
+  if(p.startsWith('/api/task/trajectory')){
+    traceCalls+=1;
+    return {ok:true,status:200,json:async()=>({data:{task_id:'task-a',run_id:'run-a',availability:'agent_actions',events:[{id:'e'+traceCalls,title:'事件',status:'neutral',timestamp:1700000000}]}})};
+  }
+  if(p.startsWith('/api/task?')){
+    statusCalls+=1;
+    return {ok:true,status:200,json:async()=>({data:{task:{task_id:'task-a',status:taskStatus},runtime:{pane_id:'pane-1'}}})};
+  }
+  throw new Error('unexpected path '+p);
+}
+const state={taskTracePoll:null,taskDrawerTab:'trace',selectedTaskId:'task-a',taskTraceSeq:1,taskTrace:null,selectedTaskDetail:{task:{task_id:'task-a',status:'pending'},proj:{},live:{}}};
+
+(async()=>{
+  // 反向场景：打开抽屉时 pending —— 轮询定时器仍要建立，且先只做状态刷新
+  startTaskTracePoll();
+  assert.equal(intervals.length,1,'trace 页打开后必须建立轮询定时器');
+  assert.equal(intervals[0].ms,8000);
+  await pollTaskTrace();
+  assert.equal(statusCalls,1,'每个轮询回调必须经 /api/task 刷新任务状态');
+  assert.equal(traceCalls,0,'pending 阶段不应拉取轨迹');
+  assert.equal(cleared,0,'pending 阶段应保持轮询');
+  assert.equal(state.selectedTaskDetail.task.status,'pending');
+
+  // 转 working 后：同一轮询链路自动开始拉取轨迹
+  taskStatus='working';
+  await pollTaskTrace();
+  assert.equal(state.selectedTaskDetail.task.status,'working','状态刷新必须写回 selectedTaskDetail');
+  assert.equal(state.selectedTaskDetail.live.pane_id,'pane-1','live 运行时快照应随刷新更新');
+  assert.equal(traceCalls,1,'任务转 working 后应启动轨迹拉取');
+  assert.equal(state.taskTrace.status,'ready');
+
+  // 完成场景：后端转 completed 后下一 tick 依真实状态自动停止，不再无限扫描
+  taskStatus='completed';
+  const doneBaseTrace=traceCalls;
+  await pollTaskTrace();
+  assert.equal(cleared>=1,true,'任务完成后轮询必须自动停止');
+  assert.equal(cleared,1,'完成后停表只发生一次');
+  assert.equal(state.taskTracePoll,null,'定时器句柄必须清空，生产链路不再有后续 tick');
+  // Codex P1：停表前必须以最终状态做一次收尾拉取，否则上一 tick 之后记录的
+  // 最终 test/commit 事件永久缺失且抽屉停留在 working 快照
+  assert.equal(traceCalls,doneBaseTrace+1,'终态停表前必须完成最后一次轨迹拉取');
+  assert.equal(state.selectedTaskDetail.task.status,'completed','终态状态必须写回后再停表');
+
+  // Codex P2：working → blocked/agent_done 等非终态活跃状态变化必须刷新一次
+  // 轨迹与头部，阻塞前的最终动作不得停留在旧 working 快照；稳定态不得重复拉取
+  taskStatus='blocked';
+  state.selectedTaskDetail.task.status='working';
+  startTaskTracePoll();
+  const blockedBaseTrace=traceCalls;
+  await pollTaskTrace();
+  assert.equal(traceCalls,blockedBaseTrace+1,'状态变化进入非终态活跃态必须刷新一次轨迹');
+  assert.equal(state.selectedTaskDetail.task.status,'blocked','阻塞状态必须写回并渲染');
+  await pollTaskTrace();
+  assert.equal(traceCalls,blockedBaseTrace+1,'稳定 blocked 不得反复全量拉取轨迹');
+  taskStatus='agent_done';
+  const adBaseTrace=traceCalls;
+  await pollTaskTrace();
+  assert.equal(traceCalls,adBaseTrace+1,'agent_done 状态变化同样必须刷新');
+  stopTaskTracePoll();
+
+  // document.hidden 守卫：隐藏页 tick 不发任何网络请求，恢复可见后继续
+  taskStatus='working';
+  startTaskTracePoll();
+  const hiddenBaseStatus=statusCalls, hiddenBaseTrace=traceCalls;
+  document.hidden=true;
+  await pollTaskTrace();
+  assert.equal(statusCalls,hiddenBaseStatus,'隐藏页不应刷新任务状态');
+  assert.equal(traceCalls,hiddenBaseTrace,'隐藏页不应拉取轨迹');
+  document.hidden=false;
+  await pollTaskTrace();
+  assert.equal(statusCalls,hiddenBaseStatus+1,'恢复可见后应继续刷新');
+  assert.equal(traceCalls,hiddenBaseTrace+1,'恢复可见后 working 任务应继续拉取轨迹');
+
+  // 非 trace 页不建立轮询
+  state.taskDrawerTab='overview';
+  startTaskTracePoll();
+  assert.equal(state.taskTracePoll,null,'概览页不应启动轨迹轮询');
+})().catch((err)=>{console.error(err);process.exit(1)});
+"""
+    result = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)  # noqa: PLW1510
+    assert result.returncode == 0, result.stderr
+
+
+def test_render_shows_six_icons_and_unknown_time():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not found")
+    html = console.HTML_TEMPLATE
+    names = [
+        "esc", "taskDrawerNumTs", "traceClock", "traceDotClass", "traceDetailRows", "renderExecutionTrace",
+    ]
+    script = "\n".join(_extract(html, name) for name in names)
+    script += r"""
+const assert=require('node:assert/strict');
+const kinds=['file_read','file_edit','test_passed','test_failed','retry','commit'];
+const events=kinds.map((kind,i)=>({id:'e'+i,kind,title:'T'+i,detail:'d',status:'neutral',timestamp:1700000000+i,source:'native_session',source_ref:'r'+i}));
+events.push({id:'u',kind:'commit',title:'无时间',detail:'',status:'neutral',timestamp:null,source:'task_history',source_ref:'task:u'});
+const view=renderExecutionTrace({status:'ready',availability:'agent_actions',events});
+for(const g of ['▤','✎','✓','✗','↻','⊂⊃'])assert.equal(view.includes(g),true);
+assert.equal(view.includes('时间未知'),true);
+assert.equal(view.includes('<script>'),false);
+"""
+    result = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)  # noqa: PLW1510
+    assert result.returncode == 0, result.stderr
+
+
+def test_polling_preserves_loaded_trace_depth_beyond_first_page():
+    # Codex P2：working 任务轨迹超过首页 100 条后，轮询不得把已加载事件截回首页
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not found")
+    html = console.HTML_TEMPLATE
+    names = ["api", "applyTraceResponse", "loadTaskTrace"]
+    if "function mergeTraceEvents" in html:
+        names.insert(1, "mergeTraceEvents")
+    script = "\n".join(_extract(html, name) for name in names)
+    script += r"""
+const assert=require('node:assert/strict');
+globalThis.document={getElementById:()=>null,hidden:false};
+globalThis.performance={now:()=>0};
+globalThis.sessionStorage={getItem:()=>null};
+const apiReads=new Map();
+let traceCalls=0;
+const traceUrls=[];
+function renderTaskDrawer(){}
+async function fetch(p){
+  if(p.startsWith('/api/task/trajectory')){
+    traceCalls+=1;traceUrls.push(p);
+    // 后端按 oldest-first 返回 limit 大小的窗口，库里共 255 条
+    const lm=p.match(/limit=(\d+)/);const size=lm?Number(lm[1]):100;
+    const cm=p.match(/cursor=e(\d+)/);const start=cm?Number(cm[1])+1:0;
+    const events=[];for(let i=start;i<Math.min(start+size,255);i++)events.push({id:'e'+i,title:'事件'+i,status:'neutral',timestamp:1700000000+i});
+    return {ok:true,status:200,json:async()=>({data:{task_id:'task-a',run_id:'run-a',availability:'agent_actions',events,has_more:false,next_cursor:null}})};
+  }
+  throw new Error('unexpected path '+p);
+}
+const state={taskTraceSeq:1,taskDrawerTab:'trace',selectedTaskId:'task-a',taskTrace:null};
+
+(async()=>{
+  // 首页：无已加载事件 → 维持 limit=100 全窗口
+  await loadTaskTrace('task-a',true);
+  assert.equal(traceUrls[0].includes('limit=100'),true,'空视图轮询应取首页窗口');
+  assert.equal(traceUrls[0].includes('cursor='),false,'空视图不应带 cursor');
+
+  // 已加载 150 条（跨两页）：轮询窗口必须覆盖已加载深度
+  const deep=[];for(let i=0;i<150;i++)deep.push({id:'e'+i,title:'事件'+i,status:'neutral',timestamp:1700000000+i});
+  state.taskTrace={status:'ready',task_id:'task-a',run_id:'run-a',availability:'agent_actions',events:deep,has_more:true,next_cursor:'e149'};
+  await loadTaskTrace('task-a',true);
+  assert.equal(traceUrls[1].includes('limit=150'),true,'轮询窗口必须覆盖已加载深度: '+traceUrls[1]);
+  assert.equal(state.taskTrace.events.length>=150,true,'覆盖深度后不得把已加载事件截回首页');
+
+  // 已加载超过后端单窗口上限（200）：改用 cursor 增量追加，不重建整页
+  const huge=[];for(let i=0;i<250;i++)huge.push({id:'e'+i,title:'事件'+i,status:'neutral',timestamp:1700000000+i});
+  state.taskTrace={status:'ready',task_id:'task-a',run_id:'run-a',availability:'agent_actions',events:huge,has_more:false,next_cursor:null};
+  const before=traceCalls;
+  await loadTaskTrace('task-a',true);
+  assert.equal(traceCalls,before+1,'超深度后轮询仍应发请求以发现新活动');
+  assert.equal(traceUrls[traceUrls.length-1].includes('cursor=e249'),true,'深度超过单窗口上限应取增量窗口: '+traceUrls[traceUrls.length-1]);
+  assert.equal(state.taskTrace.events.length,255,'增量窗口只追加新事件，保留既有 250 条');
+})().catch((err)=>{console.error(err);process.exit(1)});
+"""
+    result = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)  # noqa: PLW1510
+    assert result.returncode == 0, result.stderr
+
+
+def test_polling_tail_cursor_at_window_limit_and_timed_ordering():
+    # Codex P2：恰好 200 条时即进入增量窗口；cursor 必须取最后一条有时间戳的事件，
+    # 因为无时间戳的任务历史/提交事件排在所有有时间戳事件之后，用尾部无时间戳事件做
+    # cursor 会永久漏掉随后到达的新原生动作。
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not found")
+    html = console.HTML_TEMPLATE
+    names = ["api", "applyTraceResponse", "loadTaskTrace"]
+    if "function mergeTraceEvents" in html:
+        names.insert(1, "mergeTraceEvents")
+    script = "\n".join(_extract(html, name) for name in names)
+    script += r"""
+const assert=require('node:assert/strict');
+globalThis.document={getElementById:()=>null,hidden:false};
+globalThis.performance={now:()=>0};
+globalThis.sessionStorage={getItem:()=>null};
+const apiReads=new Map();
+const traceUrls=[];
+function renderTaskDrawer(){}
+async function fetch(p){
+  if(p.startsWith('/api/task/trajectory')){
+    traceUrls.push(p);
+    const lm=p.match(/limit=(\d+)/);const size=lm?Number(lm[1]):100;
+    const cm=p.match(/cursor=e(\d+)/);const start=cm?Number(cm[1])+1:0;
+    const events=[];for(let i=start;i<Math.min(start+size,255);i++)events.push({id:'e'+i,title:'事件'+i,status:'neutral',timestamp:1700000000+i});
+    return {ok:true,status:200,json:async()=>({data:{task_id:'task-a',run_id:'run-a',availability:'agent_actions',events,has_more:false,next_cursor:null}})};
+  }
+  throw new Error('unexpected path '+p);
+}
+const state={taskTraceSeq:1,taskDrawerTab:'trace',selectedTaskId:'task-a',taskTrace:null};
+function build(n,tailUntimed){
+  const evs=[];for(let i=0;i<n;i++)evs.push({id:'e'+i,title:'事件'+i,status:'neutral',timestamp:1700000000+i});
+  if(tailUntimed)for(let i=n-10;i<n;i++)evs[i].timestamp=null;
+  return evs;
+}
+
+(async()=>{
+  // 恰好等于单页上限 200：必须已进入增量窗口，而不是反复重取前 200 条
+  state.taskTrace={status:'ready',task_id:'task-a',run_id:'run-a',availability:'agent_actions',events:build(200,false),has_more:true,next_cursor:'e199'};
+  await loadTaskTrace('task-a',true);
+  assert.equal(traceUrls[0].includes('cursor=e199'),true,'达到单页上限即应转增量窗口: '+traceUrls[0]);
+  assert.equal(state.taskTrace.events.length,255,'增量窗口追加第 201 条之后的新事件（库内共 255 条）');
+
+  // 尾部为无时间戳事件：cursor 取最后一条有时间戳的事件，并按 id 合并不重复
+  state.taskTrace={status:'ready',task_id:'task-a',run_id:'run-a',availability:'agent_actions',events:build(250,true),has_more:false,next_cursor:null};
+  await loadTaskTrace('task-a',true);
+  assert.equal(traceUrls[1].includes('cursor=e239'),true,'尾部无时间戳时 cursor 必须取最后一条有时间戳事件: '+traceUrls[1]);
+  const ids=state.taskTrace.events.map(e=>e.id);
+  assert.equal(new Set(ids).size,ids.length,'合并按 id 去重，不得出现重复事件');
+  assert.equal(ids.length,255,'保留既有 250 条（含 10 条无时间戳尾部）并追加新增 5 条');
+  assert.equal(ids.filter(id=>id==='e249').length,1);
+})().catch((err)=>{console.error(err);process.exit(1)});
+"""
+    result = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)  # noqa: PLW1510
+    assert result.returncode == 0, result.stderr
+
+
+def test_invalid_incremental_cursor_falls_back_instead_of_clearing_trace():
+    # Codex P2：cursor 指向的事件可能已被后续证据抑制（tests_completed 被
+    # verification_completed 取代）而返回 400 "cursor 无效"；此时必须退回无 cursor 的
+    # 覆盖窗口并按 id 合并，而不是清空已加载轨迹——终态那一次刷新后轮询已停，清空即永久坏掉。
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not found")
+    html = console.HTML_TEMPLATE
+    names = ["api", "applyTraceResponse", "loadTaskTrace"]
+    if "function mergeTraceEvents" in html:
+        names.insert(1, "mergeTraceEvents")
+    script = "\n".join(_extract(html, name) for name in names)
+    script += r"""
+const assert=require('node:assert/strict');
+globalThis.document={getElementById:()=>null,hidden:false};
+globalThis.performance={now:()=>0};
+globalThis.sessionStorage={getItem:()=>null};
+const apiReads=new Map();
+const traceUrls=[];
+function renderTaskDrawer(){}
+async function fetch(p){
+  if(p.startsWith('/api/task/trajectory')){
+    traceUrls.push(p);
+    if(p.includes('cursor=')){
+      // 模拟 herdr-task 侧 cursor 校验失败：raise TraceQueryError(400,'cursor 无效')
+      return {ok:false,status:400,json:async()=>({ok:false,error:'cursor 无效'})};
+    }
+    const lm=p.match(/limit=(\d+)/);const size=lm?Number(lm[1]):100;
+    const events=[];for(let i=0;i<Math.min(size,255);i++)events.push({id:'e'+i,title:'事件'+i,status:'neutral',timestamp:1700000000+i});
+    return {ok:true,status:200,json:async()=>({data:{task_id:'task-a',run_id:'run-a',availability:'agent_actions',events,has_more:false,next_cursor:null}})};
+  }
+  throw new Error('unexpected path '+p);
+}
+const state={taskTraceSeq:1,taskDrawerTab:'trace',selectedTaskId:'task-a',taskTrace:null};
+
+(async()=>{
+  const loaded=[];for(let i=0;i<250;i++)loaded.push({id:'e'+i,title:'事件'+i,status:'neutral',timestamp:1700000000+i});
+  state.taskTrace={status:'ready',task_id:'task-a',run_id:'run-a',availability:'agent_actions',events:loaded,has_more:false,next_cursor:null};
+  await loadTaskTrace('task-a',true);
+  assert.equal(traceUrls.length,2,'cursor 失效后必须再发一次无 cursor 覆盖窗口请求');
+  assert.equal(traceUrls[1].includes('cursor='),false,'兜底请求不得继续携带失效 cursor');
+  assert.equal(state.taskTrace.status,'ready','兜底成功不得把抽屉打成 error 态');
+  assert.equal(state.taskTrace.events.length,250,'保留全部已加载事件，不清空轨迹');
+})().catch((err)=>{console.error(err);process.exit(1)});
+"""
+    result = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)  # noqa: PLW1510
     assert result.returncode == 0, result.stderr

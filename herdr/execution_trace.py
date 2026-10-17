@@ -183,7 +183,6 @@ def assemble_trace(
     cursor: Optional[str] = None,
 ) -> Dict[str, Any]:
     events = []
-    events.extend(project_task_history(task))
     verdicts = _verification_verdicts(stored_rows)
     for row in stored_rows:
         if _tests_row_has_verdict(row, verdicts):
@@ -192,6 +191,7 @@ def assemble_trace(
         if projected is not None:
             events.append(projected)
     events.extend(project_native_actions(native_actions, task))
+    events.extend(project_task_history(task))
     merged = merge_trace_events(events)
     page, has_more, next_cursor, page_limit = paginate_trace(merged, limit, cursor)
     availability = trace_availability(merged)
@@ -238,7 +238,9 @@ def project_task_history(task: Dict[str, Any]) -> List[Dict[str, Any]]:
         if mapped is None:
             continue
         kind, title, tone = mapped
-        if kind == "commit":
+        item_sha = _commit_sha(item)
+        if kind == "commit" and not item_sha:
+            # A commit transition without its own SHA is only a completion.
             kind, title, tone = "task_completed", "已提交", "info"
         timestamp = _time(item.get("timestamp"))
         if timestamp is None:
@@ -246,6 +248,8 @@ def project_task_history(task: Dict[str, Any]) -> List[Dict[str, Any]]:
         correlation = None
         if status == "pending" and created is not None and timestamp == created:
             correlation = f"created:{task_id}:{created}"
+        elif kind == "commit":
+            correlation = f"commit:{task_id}:{item_sha}"
         else:
             correlation = _transition_correlation(task_id, status, timestamp)
         events.append(_event(
@@ -253,6 +257,7 @@ def project_task_history(task: Dict[str, Any]) -> List[Dict[str, Any]]:
             sequence=index + 1, source="task_history",
             source_ref=f"task:{task_id}:status:{index}", agent=agent,
             correlation_id=correlation,
+            detail=f"Commit · {item_sha[:7]}" if kind == "commit" else "",
             details=_details(agent=agent, source="task_history", source_ref=f"task:{task_id}:status:{index}", timestamp=timestamp),
         ))
     runtime = task.get("runtime") if isinstance(task.get("runtime"), dict) else {}
@@ -271,6 +276,7 @@ def project_task_history(task: Dict[str, Any]) -> List[Dict[str, Any]]:
             task, kind="commit", title="生成提交", status="neutral",
             detail=f"Commit · {sha[:7]}", timestamp=None, sequence=10_001,
             source="task_history", source_ref=f"task:{task_id}:commit", agent=agent,
+            correlation_id=f"commit:{task_id}:{sha}",
             details=_details(agent=agent, result=sha[:7], source="task_history", source_ref=f"task:{task_id}:commit"),
         ))
     return events
@@ -345,7 +351,7 @@ def project_stored_event(row: Dict[str, Any], task: Dict[str, Any]) -> Optional[
 
 
 def project_native_actions(actions: Sequence[Dict[str, Any]], task: Dict[str, Any]) -> List[Dict[str, Any]]:
-    known = {item.get("source_ref") for item in actions if item.get("source_ref")}
+    known = {}
     events = []
     agent = task.get("agent")
     for action in actions:
@@ -360,10 +366,18 @@ def project_native_actions(actions: Sequence[Dict[str, Any]], task: Dict[str, An
         if isinstance(action.get("path"), str):
             action["path"] = _relativize_path(action["path"], task.get("clone_path"))
         classified = _classify_action(action)
-        if isinstance(retry_of, str) and retry_of in known and retry_of != source_ref:
+        previous = known.get(retry_of) if isinstance(retry_of, str) else None
+        valid_retry = (
+            previous is not None
+            and previous.get("session_id") == action.get("session_id")
+            and isinstance(previous.get("ordinal"), int)
+            and previous["ordinal"] < ordinal
+            and retry_of != source_ref
+        )
+        if valid_retry:
             runner = classified.get("runner") or classified.get("command") or classified.get("tool")
             events.append(_event(
-                task, kind="retry", title="修复并再次测试", status="info",
+                task, kind="retry", title=_retry_title(previous, classified), status="info",
                 detail=_clip(f"Retry · {runner}" if runner else "Retry"),
                 timestamp=timestamp, sequence=max(sequence - 1, 0), source="native_session",
                 source_ref=source_ref + ":retry", agent=agent,
@@ -372,13 +386,31 @@ def project_native_actions(actions: Sequence[Dict[str, Any]], task: Dict[str, An
                     source="native_session", source_ref=source_ref + ":retry", timestamp=timestamp,
                 ),
             ))
+        correlation = None
+        if classified["kind"] == "commit":
+            sha = action.get("sha")
+            if isinstance(sha, str) and sha:
+                correlation = f"commit:{task.get('task_id')}:{sha}"
         events.append(_event(
             task, kind=classified["kind"], title=classified["title"], status=classified["status"],
             detail=classified["detail"], timestamp=timestamp, sequence=sequence,
             source="native_session", source_ref=source_ref, agent=agent,
-            details=classified["details"],
+            details=classified["details"], correlation_id=correlation,
         ))
+        known.setdefault(source_ref, action)
     return events
+
+
+def _retry_title(previous: dict[str, Any], classified: dict[str, Any]) -> str:
+    """Name a retry by what ran before and what runs now, never by guess."""
+    prior_kind = _classify_action(previous).get("kind")
+    current_test = classified.get("kind") in {"test_passed", "test_failed"}
+    prior_test = prior_kind in {"test_passed", "test_failed"}
+    if current_test and prior_test:
+        return "修复并再次测试"
+    if current_test:
+        return "再次测试"
+    return "重试工具调用"
 
 
 def merge_trace_events(events: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -526,6 +558,9 @@ def _classify_action(action: Dict[str, Any]) -> Dict[str, Any]:
     kind = action.get("kind")
     timestamp = _time(action.get("timestamp"))
     source_ref = str(action.get("source_ref") or "")
+    if kind == "commit":
+        sha = action.get("sha") if isinstance(action.get("sha"), str) and _SHA.match(action.get("sha")) else ""
+        return _classified("commit", "生成提交", "neutral", f"Commit · {sha[:7]}" if sha else "Commit", tool, None, None, None, timestamp, source_ref)
     if kind == "file_read":
         return _classified("file_read", "读取项目文件", "neutral", _file_detail("Read", path), tool or "Read", path, None, None, timestamp, source_ref)
     if kind == "file_edit":

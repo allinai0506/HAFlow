@@ -34,3 +34,4 @@
    - [`20261002-workflow-reliability.md`](20261002-workflow-reliability.md)：六项工作流可靠性改进、本地调用链验收、崩溃/并发反例与人工复核边界。
 
 - [`20261016-control-convergence.md`](20261016-control-convergence.md)：Workflow 自动推进控制链根因、五项收敛修复与隔离验证边界。
+- [`20261017-impl-trace-core-1016-r2.md`](20261017-impl-trace-core-1016-r2.md)：impl-trace-core-1016-r2 返工 —— B-1 补丁解包降级、M-1/M-2 对着真实 Codex 会话重写识别（附六类命中/误报统计）、M-3 retry 双侧定性、M-4 禁止继承 SHA 与证据优先、T-CONSOLE 补做。
