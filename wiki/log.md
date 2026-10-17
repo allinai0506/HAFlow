@@ -8,6 +8,24 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-10-17] fix | 治理 PR 审核数小时死循环与 CI Runner 欠费秒挂
+
+- 背景：
+  1. 近 25 个 PR 审查平均耗时 3~5.5 小时，最高长达 21.5 小时（#211，26 次提交、24 轮审查；#238，17 次提交、29 轮审查）；
+  2. 官方 runner 账单欠费导致 `ubuntu-latest` 守卫作业秒挂（2s 失败）；
+  3. `pytest` 单线程串行执行全量测试耗时 20+ 分钟；
+  4. Codex 机器人无休止死循环对抗，缺少停表线机制；每次微调提交都会触发新一轮审查，造成审查死锁。
+- 变更：
+  1. **CI 门禁与守卫全量接入自建 Runner**：`.github/workflows/codex-gate.yml` 与 `haflow-tests.yml` 的 `tests-required` 统一改为 `[self-hosted, haflow]`，彻底根除因官方 runner 欠费导致的秒挂；
+  2. **CI 动态多核并发加速**：在 `haflow-tests.yml` 中引入 `pytest-xdist` 动态检测，存在时自动 `-n auto` 并发执行，测试套件运行速度提升 3~4 倍；
+  3. **落地工程协议 §10.5 停表线机制**：在 `scripts/codex-gate.py` 中引入 `count_bot_reviews` 与 `--max-rounds`（默认 2 轮），达到上限后自动将未决 P1 转为 `[ADVISORY BACKLOG]` 并放行（exit 0）；
+  4. **识别 Review 线程 Backlog 转接**：在 `scripts/codex-gate.py` 与 `herdr/review_closure.py` 中增加 `is_thread_backlogged`，当协作者回复 issue 链接/编号时不再将其判为阻塞；
+  5. **收尾核验精准过滤已完成评审**：在 `herdr/review_closure.py` 中严密过滤 `status == "completed"`，防止单轮 running + completed 事件误计为 2 轮完成，并补充防护回归测试。
+- 证据：
+  1. `python3.13 -m pytest tests/test_codex_gate.py tests/test_wrapup_review_closure.py` 47 项用例全部 PASS（多核模式 8.65s，单核模式 90.67s）；
+  2. `python3.13 -m compileall -q herdr scripts bin tests` clean；
+  3. S6 独立评审子代理完成深度审查并签发 `verdict: MERGE_READY`。
+
 ## [2026-10-17] fix | 控制台详情页按请求范围读取工作流与任务
 - 背景：工作流白盒页每次导出全部工作流（81 个、state.db 103MB）再过滤，单次 543 次 SQLite 查询、约 0.7s；项目页同样全量扫描。数据规模下读取成本随库增长。
 - 变更：`herdr/console_queries.py` 新增 `workflow_snapshot` / `project_workflow_snapshots` / `workflow_tasks`，按 `workflow_id`/`project_id` 在 SQLite 层过滤再解码；`workflow_detail` 与 `project_detail` 改用它们；graph 投影的 referenced 任务按 id 读取。语义与原实现一致。
