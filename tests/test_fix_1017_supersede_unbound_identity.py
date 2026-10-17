@@ -215,6 +215,101 @@ class TestSupersedeUnboundIdentity(unittest.TestCase):
             state_db.save_task(task, self.db_path)
         self.assertIn("cannot change dispatch task registration identity", str(ctx.exception))
 
+    def test_latest_authoritative_launch_intent_selected_across_allocating_and_resource_events(self):
+        """save_task selects the latest source='launch' event so run_id is preserved and ordinary status progression succeeds."""
+        wf_id = "wf-test-multi-intent"
+        task_id = "t-multi-intent"
+        node = "impl"
+        intent_id = "intent-multi-123"
+        run_id = "run-authoritative-456"
+
+        state_db.save_workflow({"workflow_id": wf_id, "status": "running"}, self.db_path)
+
+        conn = state_db.get_db_connection(self.db_path)
+        # 1. Allocating event without resources
+        conn.execute(
+            """INSERT INTO events (workflow_id, task_id, event_type, source, payload_json, timestamp, node_id)
+               VALUES (?, ?, 'launch_intent', 'launch', ?, 1000.0, ?)""",
+            (
+                wf_id,
+                task_id,
+                json.dumps({
+                    "task_id": task_id,
+                    "dispatch_operation_id": None,
+                    "intent_id": intent_id,
+                    "execution_id": wf_id,
+                    "resources": {},
+                }),
+                node,
+            ),
+        )
+
+        # 2. Irrelevant event with non-launch source
+        conn.execute(
+            """INSERT INTO events (workflow_id, task_id, event_type, source, payload_json, timestamp, node_id)
+               VALUES (?, ?, 'launch_intent', 'audit_probe', ?, 1001.0, ?)""",
+            (
+                wf_id,
+                task_id,
+                json.dumps({
+                    "task_id": task_id,
+                    "dispatch_operation_id": None,
+                    "intent_id": intent_id,
+                    "execution_id": wf_id,
+                    "resources": {"run_id": "run-bogus"},
+                }),
+                node,
+            ),
+        )
+
+        # 3. Authoritative resource-bearing event with source='launch'
+        conn.execute(
+            """INSERT INTO events (workflow_id, task_id, event_type, source, payload_json, timestamp, node_id)
+               VALUES (?, ?, 'launch_intent', 'launch', ?, 1002.0, ?)""",
+            (
+                wf_id,
+                task_id,
+                json.dumps({
+                    "task_id": task_id,
+                    "dispatch_operation_id": None,
+                    "intent_id": intent_id,
+                    "execution_id": wf_id,
+                    "resources": {"run_id": run_id},
+                }),
+                node,
+            ),
+        )
+
+        # 4. Registered task with authoritative run_id
+        payload = {
+            "task_id": task_id,
+            "workflow_id": wf_id,
+            "node": node,
+            "stage": node,
+            "status": "working",
+            "dispatch_operation_id": None,
+            "run_id": run_id,
+            "execution_id": wf_id,
+            "launch_intent_id": intent_id,
+        }
+        conn.execute(
+            """INSERT INTO tasks (task_id, workflow_id, node, stage, agent, status, payload_json, created_at, updated_at, version)
+               VALUES (?, ?, ?, ?, 'agent', 'working', ?, 1002.0, 1002.0, 1)""",
+            (task_id, wf_id, node, node, json.dumps(payload)),
+        )
+        conn.commit()
+        conn.close()
+
+        # Ordinary status progression must succeed and keep run_id intact
+        task = state_db.get_task(task_id, self.db_path)
+        task["status"] = "completed"
+        task["stage_verdict"] = "passed"
+        state_db.save_task(task, self.db_path)
+
+        updated = state_db.get_task(task_id, self.db_path)
+        self.assertEqual(updated["status"], "completed")
+        self.assertEqual(updated["run_id"], run_id)
+
 
 if __name__ == "__main__":
     unittest.main()
