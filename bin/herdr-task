@@ -6604,7 +6604,7 @@ def _teardown_output_guard(task):
                 return {"reason": "clone_identity_changed"}
         # Context workspaces are plain directories. Their artifacts remain in
         # place; Git metadata, when present, must still pass the Git output gate.
-        if (task.get("execution_mode") == "context" and task.get("integration_mode") == "none"
+        if (task.get("execution_mode") == "context" and (task.get("integration_mode") or "none") == "none"
                 and path.is_dir() and not os.path.lexists(path / ".git")):
             return {"reason": ""}
         try:
@@ -6621,7 +6621,7 @@ def _teardown_output_guard(task):
             return {"reason": "clone_git_inventory_unknown"}
         diagnosis = teardown_output_diagnosis(result["stdout"], task_id=task.get("task_id", ""))
         if diagnosis["reason"]:
-            if task.get("integration_mode") == "none":
+            if (task.get("integration_mode") or "none") == "none":
                 diagnosis["remediation_cmd"] = f"git -C <clone> status; herdr-task commit {task.get('task_id', '')}"
             return diagnosis
     if (task.get("integration_mode") == "git" and task.get("status") in {"completed", "committed"}):
@@ -6649,7 +6649,7 @@ def clone_deletable(task):
     output = _teardown_output_guard(task)
     if output["reason"]:
         return False, output["reason"]
-    if task.get("execution_mode") == "context" and task.get("integration_mode") == "none":
+    if task.get("execution_mode") == "context" and (task.get("integration_mode") or "none") == "none":
         return False, "context artifacts retained; explicit purge required"
     if task.get("integration_ref") or task.get("integration_branch"):
         return True, "integrated"

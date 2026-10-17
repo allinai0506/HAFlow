@@ -6503,10 +6503,7 @@ def finalize_completed_task(task_id):
     for completed in maybe_complete_on_task_done(task_id):
         print(f"[COLLABORATION COMPLETED] {completed.get('event_id')}")
 
-    mode = task.get(
-        "integration_mode",
-        "none"
-    )
+    mode = task.get("integration_mode") or "none"
 
     print(
         f"[FINALIZE] "
@@ -6757,7 +6754,13 @@ def finalize_completed_task(task_id):
     # --------------------------------
     elif mode == "none":
         clone_path = task.get("clone_path")
-        if clone_path and os.path.exists(clone_path):
+        is_context_plain = (
+            task.get("execution_mode") == "context"
+            and clone_path
+            and os.path.exists(clone_path)
+            and not os.path.lexists(os.path.join(clone_path, ".git"))
+        )
+        if clone_path and os.path.exists(clone_path) and not is_context_plain:
             status_res = subprocess.run(
                 ["git", "-C", clone_path, "status", "--porcelain", "--untracked-files=normal"],
                 capture_output=True, text=True

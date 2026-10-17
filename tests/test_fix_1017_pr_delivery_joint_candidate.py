@@ -215,6 +215,57 @@ def test_joint_candidate_rejected_if_inventory_lacks_task(joint_delivery_fixture
         create_task_pr(store, 't1', title='Joint PR with foreign task inventory', client=provider)
 
 
+def test_joint_candidate_rejected_if_freeze_event_from_non_scheduler_source(joint_delivery_fixture):
+    store, repo, remote, t1_sha, joint_sha = joint_delivery_fixture
+    # Replace candidate_frozen event with one from non-scheduler source (e.g. worker)
+    import sqlite3
+    with sqlite3.connect(store.db_path) as conn:
+        conn.execute("DELETE FROM events WHERE event_type = 'candidate_frozen'")
+        conn.commit()
+    store.record_event(
+        'candidate_frozen',
+        {
+            'candidate_sha': joint_sha,
+            'delivery_inventory': [
+                {'task_id': 't1', 'commit': t1_sha},
+            ],
+        },
+        workflow_id='wf-joint',
+        source='worker',  # Non-scheduler source MUST be rejected!
+    )
+
+    provider = Provider(joint_sha)
+    with pytest.raises(ValueError, match='delivery identity does not bind the integrated candidate'):
+        create_task_pr(store, 't1', title='Joint PR with worker freeze event', client=provider)
+
+
+def test_joint_candidate_rejected_if_freeze_event_before_workflow_epoch(joint_delivery_fixture):
+    store, repo, remote, t1_sha, joint_sha = joint_delivery_fixture
+    # Replace candidate_frozen event with one timestamped before workflow created_at
+    wf = store.get_workflow('wf-joint')
+    epoch = float(wf.get('created_at') or 1000)
+    import sqlite3
+    with sqlite3.connect(store.db_path) as conn:
+        conn.execute("DELETE FROM events WHERE event_type = 'candidate_frozen'")
+        conn.commit()
+    store.record_event(
+        'candidate_frozen',
+        {
+            'candidate_sha': joint_sha,
+            'delivery_inventory': [
+                {'task_id': 't1', 'commit': t1_sha},
+            ],
+        },
+        workflow_id='wf-joint',
+        source='critical-path-scheduler',
+        timestamp=epoch - 100,  # Prior epoch event MUST be rejected!
+    )
+
+    provider = Provider(joint_sha)
+    with pytest.raises(ValueError, match='delivery identity does not bind the integrated candidate'):
+        create_task_pr(store, 't1', title='Joint PR with stale epoch freeze event', client=provider)
+
+
 def test_publication_rejects_missing_delivery_branch_on_exact_candidate(joint_delivery_fixture):
     store, repo, remote, t1_sha, joint_sha = joint_delivery_fixture
     # Set task to joint_sha so note_sha == sha

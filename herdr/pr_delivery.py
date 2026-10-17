@@ -84,21 +84,38 @@ def _git(repo, *args):
 def _is_joint_candidate_covering(store, task, sha, note_sha):
     if not store:
         return False
-    try:
-        events = store.list_events(workflow_id=task.get('workflow_id'), event_type='candidate_frozen')
-        for ev in events:
-            payload = ev.get('payload') or ev.get('payload_json') or {}
-            if isinstance(payload, str):
-                try:
-                    payload = json.loads(payload)
-                except Exception:
-                    payload = {}
-            if payload.get('candidate_sha') == note_sha:
-                for item in (payload.get('delivery_inventory') or []):
-                    if item.get('task_id') == task.get('task_id') and item.get('commit') == sha:
-                        return True
-    except Exception:
-        pass
+    events = []
+    db_path = getattr(store, 'db_path', None)
+    if db_path is not None:
+        try:
+            from . import scheduler_facts
+            events = scheduler_facts.list_candidate_frozen_events(task.get('workflow_id'), db_path=db_path)
+        except Exception:
+            events = []
+    elif hasattr(store, 'list_events'):
+        try:
+            wf = store.get_workflow(task.get('workflow_id')) if hasattr(store, 'get_workflow') else {}
+            epoch = max(float((wf or {}).get('created_at') or 0), float((wf or {}).get('reopened_at') or 0))
+            raw_events = store.list_events(
+                workflow_id=task.get('workflow_id'),
+                event_type='candidate_frozen',
+                source='critical-path-scheduler',
+            )
+            events = [ev for ev in raw_events if float(ev.get('timestamp') or 0) >= epoch]
+        except Exception:
+            events = []
+
+    for ev in events:
+        payload = ev.get('payload') or ev.get('payload_json') or {}
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except Exception:
+                payload = {}
+        if payload.get('candidate_sha') == note_sha:
+            for item in (payload.get('delivery_inventory') or []):
+                if item.get('task_id') == task.get('task_id') and item.get('commit') == sha:
+                    return True
     return False
 
 
