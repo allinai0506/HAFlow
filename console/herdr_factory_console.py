@@ -3963,7 +3963,7 @@ button { cursor: pointer; }
 .td-ev-icon {
   font-size: 11.5px;
   color: var(--text-secondary);
-  margin-right: 5px;
+  margin-right: 4px;
 }
 .trace-timeline .td-ev { grid-template-columns: 76px 18px 1fr; }
 button.trace-ev {
@@ -11014,16 +11014,33 @@ function traceTaskWorking(){
   const t=state.selectedTaskDetail&&state.selectedTaskDetail.task;
   return !!t&&['working','dispatched','rework'].includes(t.status);
 }
+async function refreshSelectedTaskStatus(){
+  const tid=state.selectedTaskId;
+  if(!tid||!state.selectedTaskDetail)return;
+  try{
+    const td=await api('/api/task?id='+encodeURIComponent(tid));
+    if(state.selectedTaskId!==tid||!state.selectedTaskDetail)return;
+    const c=state.selectedTaskDetail;
+    c.task=Object.assign({},c.task,(td&&td.task)||{});
+    if(td&&td.runtime)c.live=td.runtime;
+  }catch(e){/* 取态失败保留上次快照，下一 tick 重试 */}
+}
 function stopTaskTracePoll(){
   if(state.taskTracePoll){clearInterval(state.taskTracePoll);state.taskTracePoll=null}
 }
 function pollTaskTrace(){
-  if(!(state.taskDrawerTab==='trace'&&state.selectedTaskId&&traceTaskWorking())){stopTaskTracePoll();return}
-  loadTaskTrace(state.selectedTaskId,true);
+  if(!(state.taskDrawerTab==='trace'&&state.selectedTaskId)){stopTaskTracePoll();return}
+  if(document.hidden)return;
+  return refreshSelectedTaskStatus().then(()=>{
+    if(!(state.taskDrawerTab==='trace'&&state.selectedTaskId)){stopTaskTracePoll();return}
+    if(traceTaskWorking())return loadTaskTrace(state.selectedTaskId,true);
+    const t=state.selectedTaskDetail&&state.selectedTaskDetail.task;
+    if(t&&['completed','failed','superseded','cleaned','committed','integrated','cleanup_ready'].includes(t.status)){stopTaskTracePoll();return}
+  });
 }
 function startTaskTracePoll(){
   stopTaskTracePoll();
-  if(!(state.taskDrawerTab==='trace'&&traceTaskWorking()))return;
+  if(!(state.taskDrawerTab==='trace'&&state.selectedTaskId))return;
   state.taskTracePoll=setInterval(pollTaskTrace,8000);
 }
 async function loadTaskTrace(tid,force){

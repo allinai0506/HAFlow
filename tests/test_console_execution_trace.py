@@ -13,7 +13,16 @@ def _extract(html, name):
     assert start >= 0, name
     if html[max(0, start - 6):start] == "async ":
         start -= 6
-    brace = html.find("{", start)
+    paren = html.index("(", start)
+    depth = 0
+    for index in range(paren, len(html)):
+        if html[index] == "(":
+            depth += 1
+        elif html[index] == ")":
+            depth -= 1
+            if depth == 0:
+                break
+    brace = html.find("{", index)
     depth = 0
     for index in range(brace, len(html)):
         if html[index] == "{":
@@ -144,6 +153,11 @@ def test_polling_and_icons_are_wired_in_the_console():
     assert "function traceTaskWorking()" in html
     assert "setInterval(pollTaskTrace,8000)" in html
     assert "['working','dispatched','rework'].includes(t.status)" in html
+    poll_body = html.split("function pollTaskTrace(){")[1].split("function startTaskTracePoll")[0]
+    assert "refreshSelectedTaskStatus" in poll_body
+    assert "document.hidden" in poll_body
+    refresh_body = html.split("async function refreshSelectedTaskStatus(){")[1].split("\nfunction ")[0]
+    assert "api('/api/task?id='" in refresh_body
     assert "else stopTaskTracePoll()" in html
     assert "stopTaskTracePoll();" in html.split("function closeTaskDrawer(){")[1].split("function switchTaskDrawerTab")[0]
     for glyph in ("file_read:'▤'", "file_edit:'✎'", "test_passed:'✓'", "test_failed:'✗'", "retry:'↻'", "commit:'⊂⊃'"):
@@ -151,36 +165,88 @@ def test_polling_and_icons_are_wired_in_the_console():
     assert "const clock=hasTime?traceClock(e.timestamp):'时间未知'" in html
 
 
-def test_trace_poll_guard_and_untimed_display():
+def test_trace_poll_guard_reads_live_task_status_from_fetch_boundary():
+    # F4 regression: the poll decision must come from the live /api/task chain,
+    # not the snapshot frozen at drawer open. Only the network fetch is stubbed.
     node = shutil.which("node")
     if not node:
         pytest.skip("node not found")
     html = console.HTML_TEMPLATE
     names = [
-        "traceTaskWorking", "stopTaskTracePoll", "pollTaskTrace", "startTaskTracePoll",
+        "api", "applyTraceResponse", "loadTaskTrace", "traceTaskWorking",
+        "stopTaskTracePoll", "pollTaskTrace", "startTaskTracePoll",
+        "refreshSelectedTaskStatus",
     ]
     script = "\n".join(_extract(html, name) for name in names)
     script += r"""
 const assert=require('node:assert/strict');
-let intervals=[]; let cleared=0; let reloaded=null;
+globalThis.performance={now:()=>0};
+globalThis.sessionStorage={getItem:()=>null};
+globalThis.document={getElementById:()=>null,hidden:false};
+const apiReads=new Map();
+let taskStatus='pending';
+let statusCalls=0, traceCalls=0, cleared=0;
+const intervals=[];
 function setInterval(fn,ms){intervals.push({fn,ms});return intervals.length}
 function clearInterval(id){cleared+=1}
-function loadTaskTrace(tid,force){reloaded={tid,force}}
-const state={taskTracePoll:null,taskDrawerTab:'trace',selectedTaskId:'task-a',selectedTaskDetail:{task:{status:'working'}}};
-startTaskTracePoll();
-assert.equal(intervals.length,1);
-assert.equal(intervals[0].ms,8000);
-pollTaskTrace();
-assert.deepEqual(reloaded,{tid:'task-a',force:true});
-reloaded=null;
-state.selectedTaskDetail={task:{status:'cleaned'}};
-pollTaskTrace();
-assert.equal(reloaded,null);
-assert.equal(cleared>=1,true);
-state.selectedTaskDetail={task:{status:'working'}};
-state.taskDrawerTab='overview';
-startTaskTracePoll();
-assert.equal(state.taskTracePoll,null);
+function renderTaskDrawer(){}
+async function fetch(p){
+  if(p.startsWith('/api/task/trajectory')){
+    traceCalls+=1;
+    return {ok:true,status:200,json:async()=>({data:{task_id:'task-a',run_id:'run-a',availability:'agent_actions',events:[{id:'e'+traceCalls,title:'事件',status:'neutral',timestamp:1700000000}]}})};
+  }
+  if(p.startsWith('/api/task?')){
+    statusCalls+=1;
+    return {ok:true,status:200,json:async()=>({data:{task:{task_id:'task-a',status:taskStatus},runtime:{pane_id:'pane-1'}}})};
+  }
+  throw new Error('unexpected path '+p);
+}
+const state={taskTracePoll:null,taskDrawerTab:'trace',selectedTaskId:'task-a',taskTraceSeq:1,taskTrace:null,selectedTaskDetail:{task:{task_id:'task-a',status:'pending'},proj:{},live:{}}};
+
+(async()=>{
+  // 反向场景：打开抽屉时 pending —— 轮询定时器仍要建立，且先只做状态刷新
+  startTaskTracePoll();
+  assert.equal(intervals.length,1,'trace 页打开后必须建立轮询定时器');
+  assert.equal(intervals[0].ms,8000);
+  await pollTaskTrace();
+  assert.equal(statusCalls,1,'每个轮询回调必须经 /api/task 刷新任务状态');
+  assert.equal(traceCalls,0,'pending 阶段不应拉取轨迹');
+  assert.equal(cleared,0,'pending 阶段应保持轮询');
+  assert.equal(state.selectedTaskDetail.task.status,'pending');
+
+  // 转 working 后：同一轮询链路自动开始拉取轨迹
+  taskStatus='working';
+  await pollTaskTrace();
+  assert.equal(state.selectedTaskDetail.task.status,'working','状态刷新必须写回 selectedTaskDetail');
+  assert.equal(state.selectedTaskDetail.live.pane_id,'pane-1','live 运行时快照应随刷新更新');
+  assert.equal(traceCalls,1,'任务转 working 后应启动轨迹拉取');
+  assert.equal(state.taskTrace.status,'ready');
+
+  // 完成场景：后端转 completed 后下一 tick 依真实状态自动停止，不再无限扫描
+  taskStatus='completed';
+  await pollTaskTrace();
+  assert.equal(cleared>=1,true,'任务完成后轮询必须自动停止');
+  assert.equal(cleared,1,'完成后停表只发生一次');
+  assert.equal(state.taskTracePoll,null,'定时器句柄必须清空，生产链路不再有后续 tick');
+
+  // document.hidden 守卫：隐藏页 tick 不发任何网络请求，恢复可见后继续
+  taskStatus='working';
+  startTaskTracePoll();
+  const hiddenBaseStatus=statusCalls, hiddenBaseTrace=traceCalls;
+  document.hidden=true;
+  await pollTaskTrace();
+  assert.equal(statusCalls,hiddenBaseStatus,'隐藏页不应刷新任务状态');
+  assert.equal(traceCalls,hiddenBaseTrace,'隐藏页不应拉取轨迹');
+  document.hidden=false;
+  await pollTaskTrace();
+  assert.equal(statusCalls,hiddenBaseStatus+1,'恢复可见后应继续刷新');
+  assert.equal(traceCalls,hiddenBaseTrace+1,'恢复可见后 working 任务应继续拉取轨迹');
+
+  // 非 trace 页不建立轮询
+  state.taskDrawerTab='overview';
+  startTaskTracePoll();
+  assert.equal(state.taskTracePoll,null,'概览页不应启动轨迹轮询');
+})().catch((err)=>{console.error(err);process.exit(1)});
 """
     result = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)  # noqa: PLW1510
     assert result.returncode == 0, result.stderr
