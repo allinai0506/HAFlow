@@ -163,6 +163,58 @@ class TestSupersedeUnboundIdentity(unittest.TestCase):
             state_db.save_task(task, self.db_path)
         self.assertIn("cannot change dispatch task registration identity", str(ctx.exception))
 
+    def test_supersede_unbound_task_rejects_identity_tampering(self):
+        """Superseding an unbound task cannot alter its proven launch intent identity."""
+        wf_id = "wf-test-unbound-tamper"
+        task_id = "t-unbound-tamper"
+        node = "impl"
+        state_db.save_workflow({"workflow_id": wf_id, "status": "running"}, self.db_path)
+
+        conn = state_db.get_db_connection(self.db_path)
+        conn.execute(
+            """INSERT INTO events (workflow_id, task_id, event_type, source, payload_json, timestamp, node_id)
+               VALUES (?, ?, 'launch_intent', 'launch', ?, 1000.0, ?)""",
+            (
+                wf_id,
+                task_id,
+                json.dumps({
+                    "task_id": task_id,
+                    "dispatch_operation_id": None,
+                    "intent_id": "intent-unbound-orig",
+                    "execution_id": wf_id,
+                    "resources": {"run_id": "run-unbound-orig"},
+                }),
+                node,
+            ),
+        )
+
+        payload = {
+            "task_id": task_id,
+            "workflow_id": wf_id,
+            "node": node,
+            "stage": node,
+            "status": "failed",
+            "dispatch_operation_id": None,
+            "run_id": "run-unbound-orig",
+            "execution_id": wf_id,
+            "launch_intent_id": "intent-unbound-orig",
+        }
+        conn.execute(
+            """INSERT INTO tasks (task_id, workflow_id, node, stage, agent, status, payload_json, created_at, updated_at, version)
+               VALUES (?, ?, ?, ?, 'agent', 'failed', ?, 1000.0, 1000.0, 1)""",
+            (task_id, wf_id, node, node, json.dumps(payload)),
+        )
+        conn.commit()
+        conn.close()
+
+        task = state_db.get_task(task_id, self.db_path)
+        task["status"] = "superseded"
+        task["run_id"] = "run-tampered-unbound"  # Tamper with run_id on unbound task!
+
+        with self.assertRaises(ValueError) as ctx:
+            state_db.save_task(task, self.db_path)
+        self.assertIn("cannot change dispatch task registration identity", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

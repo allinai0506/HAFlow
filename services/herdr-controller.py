@@ -6335,7 +6335,8 @@ def _check_finalize_retry(task, status, now):
         return False
     if task.get("finalize_escalated"):
         return True
-    if task.get("integration_mode") != "git" or workflow_closed(
+    mode = task.get("integration_mode") or "none"
+    if mode not in ("git", "none") or workflow_closed(
         task.get("workflow_id")
     ):
         attention_clear(f"{task_id}:finalize")

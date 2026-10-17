@@ -1615,50 +1615,50 @@ def save_task(
             if not isinstance(previous, dict):
                 previous = {}
             identity_keys = ('dispatch_operation_id', 'run_id', 'execution_id', 'launch_intent_id')
-            if any(previous.get(key) in (None, '') for key in identity_keys):
+            is_proven_intent = False
+            proven_intent_payload = None
+            if previous.get('launch_intent_id'):
+                ev = conn.execute(
+                    "SELECT payload_json FROM events WHERE workflow_id=? AND event_type='launch_intent' "
+                    "AND json_extract(payload_json,'$.task_id')=? AND json_extract(payload_json,'$.intent_id')=?",
+                    (existing['workflow_id'], tid, previous['launch_intent_id'])
+                ).fetchone()
+                if ev:
+                    is_proven_intent = True
+                    try:
+                        proven_intent_payload = json.loads(ev['payload_json'])
+                    except (TypeError, json.JSONDecodeError):
+                        proven_intent_payload = None
+
+            if is_proven_intent and proven_intent_payload:
+                intent_op = proven_intent_payload.get('dispatch_operation_id')
+                intent_run = (proven_intent_payload.get('resources') or {}).get('run_id')
+                intent_exec = proven_intent_payload.get('execution_id')
+                intent_supersedes = proven_intent_payload.get('supersedes')
+                previous['dispatch_operation_id'] = intent_op
+                previous['launch_intent_id'] = proven_intent_payload.get('intent_id')
+                previous['execution_id'] = intent_exec
+                previous['run_id'] = intent_run
+                if previous.get('supersedes') is None:
+                    previous['supersedes'] = intent_supersedes
+            elif any(previous.get(key) in (None, '') for key in identity_keys):
                 from .node_dispatch_store import recover_registration_identity
                 durable = recover_registration_identity(conn, existing['workflow_id'], tid)
                 if durable:
-                    is_proven_intent = False
-                    proven_intent_payload = None
-                    if previous.get('launch_intent_id'):
-                        ev = conn.execute(
-                            "SELECT payload_json FROM events WHERE workflow_id=? AND event_type='launch_intent' "
-                            "AND json_extract(payload_json,'$.task_id')=? AND json_extract(payload_json,'$.intent_id')=?",
-                            (existing['workflow_id'], tid, previous['launch_intent_id'])
-                        ).fetchone()
-                        if ev:
-                            is_proven_intent = True
-                            try:
-                                proven_intent_payload = json.loads(ev['payload_json'])
-                            except (TypeError, json.JSONDecodeError):
-                                proven_intent_payload = None
-
-                    if is_proven_intent and proven_intent_payload:
-                        intent_op = proven_intent_payload.get('dispatch_operation_id')
-                        intent_run = (proven_intent_payload.get('resources') or {}).get('run_id')
-                        intent_exec = proven_intent_payload.get('execution_id')
-                        intent_supersedes = proven_intent_payload.get('supersedes')
-                        previous['dispatch_operation_id'] = intent_op
-                        previous['launch_intent_id'] = proven_intent_payload.get('intent_id')
-                        previous['execution_id'] = intent_exec
-                        previous['run_id'] = intent_run
-                        if previous.get('supersedes') is None:
-                            previous['supersedes'] = intent_supersedes
-                    else:
-                        if any(previous.get(key) not in (None, '') and previous[key] != durable[key]
-                               for key in (*identity_keys, 'supersedes')):
-                            raise ValueError('dispatch registration identity conflicts with durable launch intent')
-                        previous.update(durable)
+                    if any(previous.get(key) not in (None, '') and previous[key] != durable[key]
+                           for key in (*identity_keys, 'supersedes')):
+                        raise ValueError('dispatch registration identity conflicts with durable launch intent')
+                    previous.update(durable)
                 elif previous.get('dispatch_operation_id') is not None:
                     raise ValueError('dispatch registration identity is incomplete without durable launch intent')
             if previous.get('dispatch_operation_id') is not None and previous.get('supersedes') is None:
                 from .node_dispatch_store import recover_registration_identity
                 durable = recover_registration_identity(conn, existing['workflow_id'], tid)
-                previous['supersedes'] = durable.get('supersedes')
+                if durable:
+                    previous['supersedes'] = durable.get('supersedes')
             if previous.get('dispatch_operation_id') != task_dict.get('dispatch_operation_id'):
                 raise ValueError('cannot rebind an existing task to another dispatch operation')
-            if previous.get('dispatch_operation_id') is not None and (
+            if (previous.get('dispatch_operation_id') is not None or is_proven_intent) and (
                     existing['workflow_id'] != wid or existing['node'] != node
                     or any(previous.get(key) != task_dict.get(key) for key in ('run_id', 'execution_id', 'launch_intent_id', 'supersedes'))):
                 raise ValueError('cannot change dispatch task registration identity')

@@ -259,6 +259,49 @@ class TestTeardownCleanedCommit(unittest.TestCase):
         finally:
             ctl.subprocess.run = orig_run
 
+    def test_check_finalize_retry_drives_none_mode_preservation_retry(self):
+        """_check_finalize_retry drives retries for mode=none tasks rather than discarding immediately."""
+        spec = importlib.util.spec_from_file_location(
+            "herdr_controller",
+            str(HERDR_ROOT / "services" / "herdr-controller.py"),
+        )
+        ctl = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(ctl)
+
+        task_id = "task-retry-none"
+        task = {
+            "task_id": task_id,
+            "workflow_id": "wf-1",
+            "node": "doc",
+            "stage": "doc",
+            "status": "completed",
+            "integration_mode": "none",
+        }
+        self.store.save_task(task)
+
+        finalize_called = []
+        def mock_finalize(tid):
+            finalize_called.append(tid)
+            return {"retryable": True, "kind": "error", "rc": 1}
+
+        orig_finalize = ctl.finalize_completed_task
+        ctl.finalize_completed_task = mock_finalize
+        try:
+            os.environ["HERDR_STATE_DB"] = str(self.db_path)
+            now = 1000.0
+            ret = ctl._check_finalize_retry(task, "completed", now)
+            self.assertTrue(ret)
+            self.assertEqual(finalize_called, [task_id])
+
+            # Attention episode should have been noted with reason commit_retry
+            ep = ctl.attention_get(f"{task_id}:finalize")
+            self.assertIsNotNone(ep)
+            self.assertEqual(ep.get("reason"), "commit_retry")
+            self.assertEqual(ep.get("attempts"), 1)
+        finally:
+            ctl.finalize_completed_task = orig_finalize
+            ctl.attention_clear(f"{task_id}:finalize")
+
 
 if __name__ == "__main__":
     unittest.main()
