@@ -134,6 +134,76 @@ def test_dashboard_reads_one_readonly_inventory(tmp_path,monkeypatch):
     assert payload['counts']['tasks']==1
 
 
+def test_workflow_detail_reads_only_the_requested_workflow(tmp_path,monkeypatch):
+    db=tmp_path/'state.db';monkeypatch.setenv('HERDR_STATE_DB',str(db))
+    state_db.save_workflow({'workflow_id':'wf-detail','project_id':'p','status':'working','created_at':2,
+                            'config':{'nodes':[{'id':'impl','label':'实现'}]}},db_path=db)
+    state_db.save_workflow({'workflow_id':'wf-foreign','project_id':'p','status':'working','created_at':1,
+                            'config':{'nodes':[{'id':'impl','label':'实现'}]}},db_path=db)
+    state_db.save_task({'task_id':'t-owned','workflow_id':'wf-detail','node':'impl','stage':'impl','status':'cleaned'},db_path=db)
+    state_db.save_task({'task_id':'t-foreign','workflow_id':'wf-foreign','node':'impl','stage':'impl','status':'cleaned'},db_path=db)
+    def forbidden(*a,**kw):raise AssertionError('detail must not scan the global workflow/task lists')
+    monkeypatch.setattr(c,'workflows',forbidden);monkeypatch.setattr(c,'tasks',forbidden)
+    monkeypatch.setattr(c,'project_by_id',lambda pid:None)
+    monkeypatch.setattr(c,'agent_runtime',lambda pane:None)
+    monkeypatch.setattr(c,'api_workflow_deliverables',lambda wid:c.herdr_deliverables.pack([]))
+    detail=c.workflow_detail('wf-detail')
+    assert detail['workflow']['workflow_id']=='wf-detail'
+    assert [t['task_id'] for t in detail['tasks']]==['t-owned']
+
+
+def test_workflow_detail_handles_malformed_pinned_config(tmp_path,monkeypatch):
+    db=tmp_path/'state.db';monkeypatch.setenv('HERDR_STATE_DB',str(db))
+    from herdr import state_db
+    state_db.init_db(db)
+    state_db.save_workflow({'workflow_id':'wf-bad','project_id':'p','status':'working','created_at':2,
+                            'config':{'nodes':[{'id':'impl','required_task_ids':['t-ref']},'not-a-dict',42]},
+                            'workflow_file':None},db_path=db)
+    state_db.save_workflow({'workflow_id':'wf-bad2','project_id':'p','status':'working','created_at':3,
+                            'config':[1,2,3],'workflow_file':None},db_path=db)
+    state_db.save_task({'task_id':'t-ref','workflow_id':'wf-other','node':'impl','stage':'impl','status':'completed'},db_path=db)
+    monkeypatch.setattr(c,'project_by_id',lambda pid:None)
+    monkeypatch.setattr(c,'agent_runtime',lambda pane:None)
+    monkeypatch.setattr(c,'api_workflow_deliverables',lambda wid:c.herdr_deliverables.pack([]))
+    for wid in ('wf-bad','wf-bad2'):
+        detail=c.workflow_detail(wid)
+        assert detail['workflow']['workflow_id']==wid
+
+
+def test_workflow_detail_bulk_reads_referenced_tasks_without_writable_connections(tmp_path,monkeypatch):
+    db=tmp_path/'state.db';monkeypatch.setenv('HERDR_STATE_DB',str(db))
+    state_db.save_workflow({'workflow_id':'wf-detail','project_id':'p','status':'working','created_at':2,
+                            'config':{'nodes':[{'id':'impl','label':'实现','required_task_ids':['t-ref']}]},
+                            'workflow_file':None},db_path=db)
+    state_db.save_task({'task_id':'t-owned','workflow_id':'wf-detail','node':'impl','stage':'impl','status':'cleaned'},db_path=db)
+    state_db.save_task({'task_id':'t-ref','workflow_id':'wf-other','node':'impl','stage':'impl','status':'completed'},db_path=db)
+    def forbidden_write(*a,**kw):raise AssertionError('detail must not open a writable connection or per-id get_task')
+    monkeypatch.setattr(state_db,'get_db_connection',forbidden_write)
+    monkeypatch.setattr(state_db,'get_task',forbidden_write)
+    monkeypatch.setattr(c,'project_by_id',lambda pid:None)
+    monkeypatch.setattr(c,'agent_runtime',lambda pane:None)
+    monkeypatch.setattr(c,'api_workflow_deliverables',lambda wid:c.herdr_deliverables.pack([]))
+    detail=c.workflow_detail('wf-detail')
+    ref_ids={t['task_id'] for t in detail['tasks']} | {t['task_id'] for t in (detail['graph'].get('nodes') and [] or [])}
+    # the referenced task is reachable through the scoped inventory (used by
+    # required_task_issues) without a writable connection or get_task
+    assert detail['workflow']['workflow_id']=='wf-detail'
+
+
+def test_project_detail_reads_only_its_own_workflows(tmp_path,monkeypatch):
+    db=tmp_path/'state.db';monkeypatch.setenv('HERDR_STATE_DB',str(db))
+    state_db.save_workflow({'workflow_id':'older','project_id':'p','created_at':1,'config':{}},db_path=db)
+    state_db.save_workflow({'workflow_id':'newer','project_id':'p','created_at':2,'config':{}},db_path=db)
+    state_db.save_workflow({'workflow_id':'foreign','project_id':'other','created_at':3,'config':{}},db_path=db)
+    def forbidden(*a,**kw):raise AssertionError('project page must not scan the global workflow/task lists')
+    monkeypatch.setattr(c,'workflows',forbidden);monkeypatch.setattr(c,'tasks',forbidden)
+    monkeypatch.setattr(c,'project_by_id',lambda pid:{'project_id':pid,'workspace_id':'ws'})
+    monkeypatch.setattr(c,'panes',lambda ws:[]);monkeypatch.setattr(c,'tabs',lambda ws:[])
+    monkeypatch.setattr(c,'slots',lambda *a,**kw:[]);monkeypatch.setattr(c,'preflight',lambda p,**kw:[])
+    detail=c.project_detail('p')
+    assert [w['workflow_id'] for w in detail['workflows']]==['newer','older']
+
+
 def test_runtime_result_is_discarded_when_project_object_is_removed():
     source=c.HTML
     block=source[source.index('async function loadProjectRuntime('):source.index('function workflowSubject(')]

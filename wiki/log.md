@@ -8,6 +8,11 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-10-17] fix | 控制台详情页按请求范围读取工作流与任务
+- 背景：工作流白盒页每次导出全部工作流（81 个、state.db 103MB）再过滤，单次 543 次 SQLite 查询、约 0.7s；项目页同样全量扫描。数据规模下读取成本随库增长。
+- 变更：`herdr/console_queries.py` 新增 `workflow_snapshot` / `project_workflow_snapshots` / `workflow_tasks`，按 `workflow_id`/`project_id` 在 SQLite 层过滤再解码；`workflow_detail` 与 `project_detail` 改用它们；graph 投影的 referenced 任务按 id 读取。语义与原实现一致。
+- 证据：`tests/test_console_page_latency.py` 新增 2 条"只读请求范围"回归；profile：workflow_detail 0.61s→0.135s，project_detail 0.69s→0.180s。
+
 ## [2026-10-16] fix | 无身份的历史 delivery 备注降级为人工证据
 
 - 背景：协调器用 `note-add --kind delivery` 写过散文本备注（无 `delivery_branch/candidate_sha/review_task/test_gate`）。选择器把它们当成机器候选并判 `delivery_ambiguous` fail-closed，test/review 派发被锁死，只能靠手工修补共享文档解开。

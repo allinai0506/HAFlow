@@ -23,6 +23,8 @@ def console_actions_env(tmp_path, monkeypatch):
     monkeypatch.setenv("TASKS_FILE", str(tasks_file))
     monkeypatch.setattr(c, "WORKFLOWS_FILE", str(wf_file))
     monkeypatch.setattr(c, "TASKS_FILE", str(tasks_file))
+    db = tmp_path / "state.db"
+    monkeypatch.setenv("HERDR_STATE_DB", str(db))
 
     # Seed a workflow with a superseded blocked task and an active failed task
     wf_data = {
@@ -61,6 +63,12 @@ def console_actions_env(tmp_path, monkeypatch):
 
     wf_file.write_text(json.dumps(wf_data), encoding="utf-8")
     tasks_file.write_text(json.dumps(tasks_data), encoding="utf-8")
+
+    from herdr import state_db
+    state_db.init_db(db)
+    state_db.save_workflow(wf_data["workflows"]["wf-test-01"], db_path=db)
+    for t in tasks_data["tasks"]:
+        state_db.save_task(t, db_path=db)
 
     return {"wf_file": wf_file, "tasks_file": tasks_file}
 

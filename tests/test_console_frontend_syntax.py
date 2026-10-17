@@ -211,8 +211,8 @@ if (!container.innerHTML.includes('新的需求主题')) process.exit(3);
             json.dump({"nodes": [{"id": "review", "node_type": "gate"}]}, f)
             workflow_path = f.name
         try:
-            with patch.object(self.console, "workflows", return_value={
-                "wf-1": {"workflow_id": "wf-1", "project_id": "p-1"},
+            with patch.object(self.console, "workflow_by_id", return_value={
+                "workflow_id": "wf-1", "project_id": "p-1",
             }), patch.object(self.console, "project_for_workflow", return_value={
                 "workflow_file": workflow_path,
             }), patch.object(self.console, "tasks_for_workflow", return_value=[{

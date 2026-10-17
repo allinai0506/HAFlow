@@ -328,7 +328,9 @@ def _stall_config(config, workflow_id, workflow_record):
         return None
     config = copy.deepcopy(config)
     required = {task_id for node in config.get("nodes", [])
-                for task_id in node.get("required_task_ids") or []}
+                if isinstance(node, dict)
+                for task_id in (node.get("required_task_ids") if isinstance(node.get("required_task_ids"), list) else [])
+                if isinstance(task_id, str)}
     known = {}
     if required:
         conn = state_db.get_readonly_db_connection(state_db_path())

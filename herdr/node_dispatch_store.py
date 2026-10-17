@@ -68,7 +68,7 @@ def _snapshot(conn, wid):
             and (not t.get('execution_id') or t['execution_id'] == workflow.get('execution_id'))),
             key=lambda t: t['task_id']) or [
                 {'reuse_event_id': f['event_id']} for f in facts if f['verifier'] == node['id']]
-        for node in config.get('nodes') or []}
+        for node in ((config if isinstance(config, dict) else {}).get('nodes') or []) if isinstance(node, dict) and node.get('id')}
     return workflow, config, tasks
 
 
@@ -117,7 +117,9 @@ def reconcile_workflow(db_path, wid, *, legacy_notified=(), discover=True, intak
         current_tasks = [t for t in tasks if not t.get('execution_id')
                          or t.get('execution_id') == workflow.get('execution_id')]
         if discover and core.active(workflow):
-            for node in config.get('nodes') or []:
+            for node in (config.get('nodes') or []):
+                if not isinstance(node, dict):
+                    continue
                 if (not node.get('id') or node.get('node_type', 'agent') != 'agent'
                         or (not node.get('depends_on') and not intake_enabled)
                         or not core.dependencies_ready(workflow, config, node, current_tasks)

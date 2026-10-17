@@ -663,9 +663,9 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
         );
     """)
 
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_wf ON tasks(workflow_id);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_wf_created ON tasks(workflow_id, created_at, task_id);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_workflows_project ON workflows (CASE WHEN json_valid(metadata_json) THEN json_extract(metadata_json, '$.project_id') END);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_cp_wf_created ON checkpoints(workflow_id, created_at DESC);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_completion_observations_task ON completion_observations(task_id);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_cp_parent ON checkpoints(parent_checkpoint_id);")
