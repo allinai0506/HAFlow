@@ -414,3 +414,52 @@ function build(n,tailUntimed){
 """
     result = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)  # noqa: PLW1510
     assert result.returncode == 0, result.stderr
+
+
+def test_invalid_incremental_cursor_falls_back_instead_of_clearing_trace():
+    # Codex P2：cursor 指向的事件可能已被后续证据抑制（tests_completed 被
+    # verification_completed 取代）而返回 400 "cursor 无效"；此时必须退回无 cursor 的
+    # 覆盖窗口并按 id 合并，而不是清空已加载轨迹——终态那一次刷新后轮询已停，清空即永久坏掉。
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not found")
+    html = console.HTML_TEMPLATE
+    names = ["api", "applyTraceResponse", "loadTaskTrace"]
+    if "function mergeTraceEvents" in html:
+        names.insert(1, "mergeTraceEvents")
+    script = "\n".join(_extract(html, name) for name in names)
+    script += r"""
+const assert=require('node:assert/strict');
+globalThis.document={getElementById:()=>null,hidden:false};
+globalThis.performance={now:()=>0};
+globalThis.sessionStorage={getItem:()=>null};
+const apiReads=new Map();
+const traceUrls=[];
+function renderTaskDrawer(){}
+async function fetch(p){
+  if(p.startsWith('/api/task/trajectory')){
+    traceUrls.push(p);
+    if(p.includes('cursor=')){
+      // 模拟 herdr-task 侧 cursor 校验失败：raise TraceQueryError(400,'cursor 无效')
+      return {ok:false,status:400,json:async()=>({ok:false,error:'cursor 无效'})};
+    }
+    const lm=p.match(/limit=(\d+)/);const size=lm?Number(lm[1]):100;
+    const events=[];for(let i=0;i<Math.min(size,255);i++)events.push({id:'e'+i,title:'事件'+i,status:'neutral',timestamp:1700000000+i});
+    return {ok:true,status:200,json:async()=>({data:{task_id:'task-a',run_id:'run-a',availability:'agent_actions',events,has_more:false,next_cursor:null}})};
+  }
+  throw new Error('unexpected path '+p);
+}
+const state={taskTraceSeq:1,taskDrawerTab:'trace',selectedTaskId:'task-a',taskTrace:null};
+
+(async()=>{
+  const loaded=[];for(let i=0;i<250;i++)loaded.push({id:'e'+i,title:'事件'+i,status:'neutral',timestamp:1700000000+i});
+  state.taskTrace={status:'ready',task_id:'task-a',run_id:'run-a',availability:'agent_actions',events:loaded,has_more:false,next_cursor:null};
+  await loadTaskTrace('task-a',true);
+  assert.equal(traceUrls.length,2,'cursor 失效后必须再发一次无 cursor 覆盖窗口请求');
+  assert.equal(traceUrls[1].includes('cursor='),false,'兜底请求不得继续携带失效 cursor');
+  assert.equal(state.taskTrace.status,'ready','兜底成功不得把抽屉打成 error 态');
+  assert.equal(state.taskTrace.events.length,250,'保留全部已加载事件，不清空轨迹');
+})().catch((err)=>{console.error(err);process.exit(1)});
+"""
+    result = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)  # noqa: PLW1510
+    assert result.returncode == 0, result.stderr

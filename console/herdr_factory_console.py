@@ -11084,8 +11084,21 @@ async function loadTaskTrace(tid,force){
     if(cursorId)data.append=true;
     if(!applyTraceResponse(state,tid,seq,data))return;
   }catch(e){
-    if(state.selectedTaskId!==tid||state.taskTraceSeq!==seq)return;
-    state.taskTrace={status:'error',task_id:tid,message:e&&e.message?e.message:'未知错误',events:[]};
+    // cursor 指向的事件可能已被后续证据抑制（tests_completed 让位给 verification_completed），
+    // 增量请求会以 400 "cursor 无效" 失败。终态那次刷新之后轮询已停止，此处若清空轨迹就永久坏掉，
+    // 因此退回无 cursor 的覆盖窗口并按 id 合并。
+    let recovered=false;
+    if(cursorId){
+      try{
+        const retry=await api('/api/task/trajectory?id='+encodeURIComponent(tid)+'&limit='+Math.min(200,Math.max(100,loaded.length)));
+        retry.append=true;
+        recovered=applyTraceResponse(state,tid,seq,retry);
+      }catch(retryError){recovered=false}
+    }
+    if(!recovered){
+      if(state.selectedTaskId!==tid||state.taskTraceSeq!==seq)return;
+      state.taskTrace={status:'error',task_id:tid,message:e&&e.message?e.message:'未知错误',events:[]};
+    }
   }
   if(state.selectedTaskId===tid&&(state.taskDrawerTab==='trace'||state.taskDrawerTab==='activity'))renderTaskDrawer();
 }
