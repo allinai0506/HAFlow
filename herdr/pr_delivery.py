@@ -105,17 +105,19 @@ def _is_joint_candidate_covering(store, task, sha, note_sha):
         except Exception:
             events = []
 
-    for ev in events:
-        payload = ev.get('payload') or ev.get('payload_json') or {}
-        if isinstance(payload, str):
-            try:
-                payload = json.loads(payload)
-            except Exception:
-                payload = {}
-        if payload.get('candidate_sha') == note_sha:
-            for item in (payload.get('delivery_inventory') or []):
-                if item.get('task_id') == task.get('task_id') and item.get('commit') == sha:
-                    return True
+    if not events:
+        return False
+    current_ev = events[-1]
+    payload = current_ev.get('payload') or current_ev.get('payload_json') or {}
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except Exception:
+            payload = {}
+    if payload.get('candidate_sha') == note_sha:
+        for item in (payload.get('delivery_inventory') or []):
+            if item.get('task_id') == task.get('task_id') and item.get('commit') == sha:
+                return True
     return False
 
 

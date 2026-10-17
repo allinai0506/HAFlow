@@ -266,6 +266,28 @@ def test_joint_candidate_rejected_if_freeze_event_before_workflow_epoch(joint_de
         create_task_pr(store, 't1', title='Joint PR with stale epoch freeze event', client=provider)
 
 
+def test_joint_candidate_rejected_if_rotated_to_newer_freeze_episode(joint_delivery_fixture):
+    store, repo, remote, t1_sha, joint_sha = joint_delivery_fixture
+    # Record a newer candidate_frozen event representing rotation to a new candidate
+    newer_joint_sha = '1111111111111111111111111111111111111111'
+    store.record_event(
+        'candidate_frozen',
+        {
+            'candidate_sha': newer_joint_sha,
+            'delivery_inventory': [
+                {'task_id': 't2', 'commit': '2222222222222222222222222222222222222222'},
+            ],
+        },
+        workflow_id='wf-joint',
+        source='critical-path-scheduler',
+    )
+
+    # Note and provider still target the historical joint_sha
+    provider = Provider(joint_sha)
+    with pytest.raises(ValueError, match='delivery identity does not bind the integrated candidate'):
+        create_task_pr(store, 't1', title='Joint PR with rotated candidate', client=provider)
+
+
 def test_publication_rejects_missing_delivery_branch_on_exact_candidate(joint_delivery_fixture):
     store, repo, remote, t1_sha, joint_sha = joint_delivery_fixture
     # Set task to joint_sha so note_sha == sha
