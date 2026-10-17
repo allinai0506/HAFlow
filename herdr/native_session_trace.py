@@ -587,7 +587,7 @@ def _actions_from_codex_calls(calls, outputs, session_id):
                     path=None, command=command, exit_code=exit_code, retry_of=retry_of,
                     is_error=False, ref_prefix="codex",
                 )
-                if exit_code in (None, 0) and not failed:
+                if blob and exit_code in (None, 0) and not failed:
                     action["path"] = _recognized_read_path(command)
                     if action["path"]:
                         action["kind"] = "file_read"

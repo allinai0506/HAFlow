@@ -1198,3 +1198,21 @@ def test_or_guarded_read_is_not_claimed_as_file_read():
     assert [item.get("path") for item in reads] == ["notes.md"]
     assert all("missing.txt" not in str(item.get("path")) for item in actions)
     assert all("a.txt" not in str(item.get("path")) and "b.txt" not in str(item.get("path")) for item in reads)
+
+
+def test_file_read_requires_output_receipt_not_absence_of_one():
+    """Codex P2：call 已记录、output 未到达（exits 为空且无回执文本）——不得认领 file_read。"""
+    text = _codex_rows([
+        _codex_exec("n1", 'text(await tools.exec_command({cmd:"cat PLAN.md",max_output_tokens:4000}));'),
+    ])
+    actions = _actions(text)
+    assert all(item.get("kind") != "file_read" for item in actions)
+    assert actions[0].get("exit_code") is None
+    assert actions[0].get("path") is None
+
+    with_receipt = _codex_rows([
+        _codex_exec("n2", 'text(await tools.exec_command({cmd:"cat PLAN.md",max_output_tokens:4000}));', ts=21),
+        _codex_output("n2", "Script completed\nOutput:\n\nplan body"),
+    ])
+    reads = [item for item in _actions(with_receipt) if item.get("kind") == "file_read"]
+    assert [item.get("path") for item in reads] == ["PLAN.md"]

@@ -236,6 +236,23 @@ const state={taskTracePoll:null,taskDrawerTab:'trace',selectedTaskId:'task-a',ta
   assert.equal(traceCalls,doneBaseTrace+1,'终态停表前必须完成最后一次轨迹拉取');
   assert.equal(state.selectedTaskDetail.task.status,'completed','终态状态必须写回后再停表');
 
+  // Codex P2：working → blocked/agent_done 等非终态活跃状态变化必须刷新一次
+  // 轨迹与头部，阻塞前的最终动作不得停留在旧 working 快照；稳定态不得重复拉取
+  taskStatus='blocked';
+  state.selectedTaskDetail.task.status='working';
+  startTaskTracePoll();
+  const blockedBaseTrace=traceCalls;
+  await pollTaskTrace();
+  assert.equal(traceCalls,blockedBaseTrace+1,'状态变化进入非终态活跃态必须刷新一次轨迹');
+  assert.equal(state.selectedTaskDetail.task.status,'blocked','阻塞状态必须写回并渲染');
+  await pollTaskTrace();
+  assert.equal(traceCalls,blockedBaseTrace+1,'稳定 blocked 不得反复全量拉取轨迹');
+  taskStatus='agent_done';
+  const adBaseTrace=traceCalls;
+  await pollTaskTrace();
+  assert.equal(traceCalls,adBaseTrace+1,'agent_done 状态变化同样必须刷新');
+  stopTaskTracePoll();
+
   // document.hidden 守卫：隐藏页 tick 不发任何网络请求，恢复可见后继续
   taskStatus='working';
   startTaskTracePoll();

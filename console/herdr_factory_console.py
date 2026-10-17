@@ -11035,12 +11035,17 @@ function pollTaskTrace(){
     if(!(state.taskDrawerTab==='trace'&&state.selectedTaskId)){stopTaskTracePoll();return}
     if(traceTaskWorking())return loadTaskTrace(state.selectedTaskId,true);
     const t=state.selectedTaskDetail&&state.selectedTaskDetail.task;
+    const now=t&&t.status?t.status:null;
     if(t&&['completed','failed','superseded','cleaned','committed','integrated','cleanup_ready'].includes(t.status)){stopTaskTracePoll();return loadTaskTrace(state.selectedTaskId,true)}
+    if(now!==state.traceLastPolledStatus){state.traceLastPolledStatus=now;return loadTaskTrace(state.selectedTaskId,true)}
+    state.traceLastPolledStatus=now;
   });
 }
 function startTaskTracePoll(){
   stopTaskTracePoll();
   if(!(state.taskDrawerTab==='trace'&&state.selectedTaskId))return;
+  const t=state.selectedTaskDetail&&state.selectedTaskDetail.task;
+  state.traceLastPolledStatus=t&&t.status?t.status:null;
   state.taskTracePoll=setInterval(pollTaskTrace,8000);
 }
 async function loadTaskTrace(tid,force){
