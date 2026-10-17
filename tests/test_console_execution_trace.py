@@ -156,6 +156,8 @@ def test_polling_and_icons_are_wired_in_the_console():
     poll_body = html.split("function pollTaskTrace(){")[1].split("function startTaskTracePoll")[0]
     assert "refreshSelectedTaskStatus" in poll_body
     assert "document.hidden" in poll_body
+    # Codex P1：终态分支停表前必须先做最后一次轨迹拉取
+    assert "loadTaskTrace" in poll_body.split("cleanup_ready")[0].split("stopTaskTracePoll();return")[-1]
     refresh_body = html.split("async function refreshSelectedTaskStatus(){")[1].split("\nfunction ")[0]
     assert "api('/api/task?id='" in refresh_body
     assert "else stopTaskTracePoll()" in html
@@ -224,10 +226,15 @@ const state={taskTracePoll:null,taskDrawerTab:'trace',selectedTaskId:'task-a',ta
 
   // 完成场景：后端转 completed 后下一 tick 依真实状态自动停止，不再无限扫描
   taskStatus='completed';
+  const doneBaseTrace=traceCalls;
   await pollTaskTrace();
   assert.equal(cleared>=1,true,'任务完成后轮询必须自动停止');
   assert.equal(cleared,1,'完成后停表只发生一次');
   assert.equal(state.taskTracePoll,null,'定时器句柄必须清空，生产链路不再有后续 tick');
+  // Codex P1：停表前必须以最终状态做一次收尾拉取，否则上一 tick 之后记录的
+  // 最终 test/commit 事件永久缺失且抽屉停留在 working 快照
+  assert.equal(traceCalls,doneBaseTrace+1,'终态停表前必须完成最后一次轨迹拉取');
+  assert.equal(state.selectedTaskDetail.task.status,'completed','终态状态必须写回后再停表');
 
   // document.hidden 守卫：隐藏页 tick 不发任何网络请求，恢复可见后继续
   taskStatus='working';

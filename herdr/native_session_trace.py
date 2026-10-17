@@ -692,15 +692,17 @@ def _recognized_read_path(command: str | None) -> str | None:
     """Return the single file of a literal read command, else None.
 
     A whole command is trusted only without chaining operators; in an
-    ``&&``/``||`` chain only the head segment has a guaranteed status.
-    Heredocs, globs, and redirections stay uninterpreted.
+    ``&&`` chain only the head segment has a guaranteed status. Any ``||``
+    in the command makes segment status unprovable (a failed head is
+    masked by the fallback). Heredocs, globs, and redirections stay
+    uninterpreted.
     """
     if not isinstance(command, str) or not command.strip():
         return None
     if "<<" in command or any(char in command for char in "><$*?~{}()\\'\""):
         return None
     operators = _AND_CHAIN.search(command)
-    if operators and "||" in command[:operators.start()]:
+    if operators and (operators.group() == "||" or "||" in command):
         return None
     if not operators:
         return _read_single(command)

@@ -11035,7 +11035,7 @@ function pollTaskTrace(){
     if(!(state.taskDrawerTab==='trace'&&state.selectedTaskId)){stopTaskTracePoll();return}
     if(traceTaskWorking())return loadTaskTrace(state.selectedTaskId,true);
     const t=state.selectedTaskDetail&&state.selectedTaskDetail.task;
-    if(t&&['completed','failed','superseded','cleaned','committed','integrated','cleanup_ready'].includes(t.status)){stopTaskTracePoll();return}
+    if(t&&['completed','failed','superseded','cleaned','committed','integrated','cleanup_ready'].includes(t.status)){stopTaskTracePoll();return loadTaskTrace(state.selectedTaskId,true)}
   });
 }
 function startTaskTracePoll(){

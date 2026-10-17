@@ -1181,3 +1181,20 @@ def test_untimed_task_commit_yields_to_the_evidence_backed_commit():
     assert commits[0]["timestamp"] == 1_700_000_110.0
     assert commits[0]["source"] == "native_session"
     assert commits[0]["source_ref"] == "codex:sess-1:4"
+
+
+def test_or_guarded_read_is_not_claimed_as_file_read():
+    """Codex P2：`||` 首段退出状态不可证——cat 失败被 `|| true` 兜底不得认领 file_read。"""
+    text = _codex_rows([
+        _codex_exec("o1", 'text(await tools.exec_command({cmd:"cat missing.txt || true",max_output_tokens:4000}));'),
+        _codex_output("o1", "Script completed\nOutput:\n\n"),
+        _codex_exec("o2", 'text(await tools.exec_command({cmd:"cat notes.md && rm -rf build",max_output_tokens:4000}));', ts=21),
+        _codex_output("o2", "Script completed\nOutput:\n\nnotes"),
+        _codex_exec("o3", 'text(await tools.exec_command({cmd:"cat a.txt || cat b.txt",max_output_tokens:4000}));', ts=22),
+        _codex_output("o3", "Script completed\nOutput:\n\nb"),
+    ])
+    actions = _actions(text)
+    reads = [item for item in actions if item.get("kind") == "file_read"]
+    assert [item.get("path") for item in reads] == ["notes.md"]
+    assert all("missing.txt" not in str(item.get("path")) for item in actions)
+    assert all("a.txt" not in str(item.get("path")) and "b.txt" not in str(item.get("path")) for item in reads)
