@@ -2703,3 +2703,9 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 删除失败不发布成功关闭回执；部分删除重试复用首份完整归档，校验原目录实例与剩余内容子集，禁止残余覆盖完整恢复点。
 - Evidence: `tests/test_workflow_clone_reclaim.py`（真实 CLI、SQLite、Controller 自动关闭、归档后读取和中断恢复），既有生命周期、回执与成果专项。
 - 本记录描述本地源码；尚未推送、合并、部署或重启服务。
+
+### 2026-10-17：工作流沙盒回收发布保护补丁
+
+- Updated [[task-lifecycle]]：先纯预检，再原子进入 closing，最后归档发布与回收；显式覆盖旗标不能绕过恢复点，实际删除入口防止预检后的晚到 clone 裸删；dry-run 报告归档后有条件回收。
+- 扩展教训 §165：授权路径必须同样保护副作用，异步审查完成证据不能由先行绿色门禁代替。
+- Evidence: `tests/test_workflow_clone_reclaim.py`：四种旗标 × staged/untracked，暂停双向交错、晚到目录、归档写入失败重试和 dry-run 零副作用。

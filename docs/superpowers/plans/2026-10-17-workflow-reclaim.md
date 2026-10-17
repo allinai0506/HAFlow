@@ -15,3 +15,5 @@ Files: herdr/clone_archive.py (new), bin/herdr-task, herdr/deliverables.py, herd
 - [x] Review diff for deletion safety, interruption/retry, ownership and reader behavior; update Wiki and record verification. No push/merge/deploy.
 
 Recovery refinement: first snapshot remains immutable across partial deletion; clone_reclaim_started binds deletion intent to manifest SHA. Retry rechecks original directory inode and permits only matching remaining entries.
+
+Release-guard follow-up: archive eligibility and explicit override flags must agree. Preflight without writes, atomically enter closing, then publish archives/metadata. Require recovery archive at the actual Workflow delete branch even for a late-created clone. Dry-run reports conditional archive and reclaim for context/docs/failed. Add both pause-orderings, four override flags with staged/untracked Git output, late clone and archive write-retry regressions. Wait for asynchronous cloud review completion before merging.
