@@ -29,9 +29,9 @@ class TestSentinelHardTimeout(unittest.TestCase):
         self.store = SQLiteStateStore(self.db_path)
         self.sentinel = load_sentinel()
         # Keep watchdog/database behavior real, but never send desktop alerts.
-        self.notify_stall = self.enterContext(
-            patch.object(self.sentinel, "notify_stall")
-        )
+        notification_patch = patch.object(self.sentinel, "notify_stall")
+        self.notify_stall = notification_patch.start()
+        self.addCleanup(notification_patch.stop)
 
     def tearDown(self):
         self.tmp_dir.cleanup()
