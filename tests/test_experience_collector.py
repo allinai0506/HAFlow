@@ -371,7 +371,7 @@ def test_extract_candidates_from_lessons():
     assert "Agent 兜底边界" in cand.content
     assert "部署前核对全部" in cand.content
     assert cand.contributor == "reviewer_bob"
-    assert "docs/lessons/lessons-learned.md#L164" in cand.source.evidence_refs
+    assert "docs/lessons/lessons-learned.md#L2" in cand.source.evidence_refs
 
 
 def test_extract_candidate_from_facts_rework_goal_and_coordinator():
@@ -415,7 +415,7 @@ def test_extract_candidate_from_facts_rework_goal_and_coordinator():
     assert "task:t-rework-01:rework_goal" in exp.source.evidence_refs
 
 
-def test_extract_candidate_fallback_outcome_when_unfinalized(tmp_path):
+def test_extract_candidate_unfinalized_outcome_fails_closed(tmp_path):
     from herdr import state_db
 
     sdb = tmp_path / "state.db"
@@ -438,6 +438,7 @@ def test_extract_candidate_fallback_outcome_when_unfinalized(tmp_path):
         "instruction": "务必对所有输入执行参数合法性与边界校验",
     }]
 
+    # When no execution outcome exists in DB, it must fail-closed as unqualified_success
     exp, reason = extract_candidate_from_facts(
         task=task,
         outcome=None,
@@ -445,6 +446,39 @@ def test_extract_candidate_fallback_outcome_when_unfinalized(tmp_path):
         contributor="tester",
         state_db_path=sdb,
     )
-    assert exp is not None
-    assert reason == "ready"
-    assert "边界校验" in exp.content
+    assert exp is None
+    assert reason == "unqualified_success"
+
+    # When authoritative execution outcome is finalized and recorded in DB, it succeeds
+    from herdr import execution_outcome
+    oid = execution_outcome.outcome_id_for("t-unfinalized", "r-unfinalized")
+    state_db.insert_execution_outcome({
+        "outcome_id": oid,
+        "task_id": "t-unfinalized",
+        "run_id": "r-unfinalized",
+        "workflow_id": "wf-pass",
+        "agent": "codex",
+        "node": "impl",
+        "task_type": "engineering",
+        "final_status": "completed",
+        "requirements_satisfied": 1,
+        "verification_passed": 1,
+        "qualified_success": 1,
+        "rework_count": 0,
+        "blocked_count": 0,
+        "human_intervention_count": 1,
+        "recorded_at": time.time(),
+        "source_eval_id": "eval-1",
+        "source_eval_revision": 1,
+    }, db_path=sdb)
+
+    exp2, reason2 = extract_candidate_from_facts(
+        task=task,
+        outcome=None,
+        steers=steers,
+        contributor="tester",
+        state_db_path=sdb,
+    )
+    assert exp2 is not None
+    assert reason2 == "ready"
+    assert "边界校验" in exp2.content

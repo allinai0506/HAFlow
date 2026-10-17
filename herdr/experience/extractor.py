@@ -105,34 +105,9 @@ def extract_candidate_from_facts(
         # 必须从 execution_outcome 权威事实层核查真实结算记录。
         from herdr import execution_outcome
         real_outcome = execution_outcome.get_execution_outcome(task_id, run_id, state_db_path)
-        if real_outcome and real_outcome.get("qualified_success") and real_outcome.get("verification_passed"):
-            outcome = real_outcome
-        else:
-            # Fallback to verified task/workflow completion evidence when outcome table row was unfinalized
-            is_qualified = False
-            if task.get("stage_verdict") == "pass" or task.get("acceptance_verdict") is True:
-                is_qualified = True
-            elif task.get("status") in ("completed", "cleaned"):
-                wf_id = task.get("workflow_id")
-                if wf_id:
-                    try:
-                        from herdr import state_db
-                        wf = state_db.get_workflow(str(wf_id), db_path=state_db_path)
-                        if wf and wf.get("status") == "completed":
-                            is_qualified = True
-                    except Exception:
-                        pass
-            if not is_qualified:
-                return None, "unqualified_success"
-            outcome = {
-                "outcome_id": f"outcome_{task_id}_{run_id}",
-                "task_id": task_id,
-                "run_id": run_id,
-                "workflow_id": workflow_id,
-                "qualified_success": True,
-                "verification_passed": True,
-                "recorded_at": time.time(),
-            }
+        if not real_outcome or not real_outcome.get("qualified_success") or not real_outcome.get("verification_passed"):
+            return None, "unqualified_success"
+        outcome = real_outcome
 
     # 2. Gather human corrections
     human_instructions: List[str] = []
@@ -368,12 +343,13 @@ def extract_candidates_from_lessons(
         exp_hash = hashlib.sha256(raw_seed.encode("utf-8")).hexdigest()[:16]
         experience_id = f"exp_l{lesson_num}_{exp_hash[:8]}"
 
+        line_offset = lessons_markdown[:match.start()].count("\n") + 1
         now = time.time()
         source = ExperienceSource(
             task_id=f"lesson-{lesson_num}",
             run_id=f"run_lesson_{lesson_num}",
             workflow_id=None,
-            evidence_refs=[f"docs/lessons/lessons-learned.md#L{lesson_num}"],
+            evidence_refs=[f"docs/lessons/lessons-learned.md#L{line_offset}"],
             correction_summary=clean_title,
         )
         applies_to = AppliesTo(

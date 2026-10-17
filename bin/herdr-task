@@ -9437,6 +9437,7 @@ def main():
     sync_exp_cmd.add_argument('--force', action='store_true', help='Retry pending uploads immediately, ignoring backoff schedule')
     sync_exp_cmd.add_argument('--token', type=str, default=None, help='Hub auth token (defaults to HERDR_HUB_TOKEN env var)')
     sync_exp_cmd.add_argument('--include-lessons', action='store_true', help='Extract rules from docs/lessons/lessons-learned.md')
+    sync_exp_cmd.add_argument('--lessons-path', type=str, default=None, help='Path to lessons markdown file')
     sync_exp_cmd.add_argument('--workflow-id', type=str, default=None, help='Enqueue and extract rules for all terminal tasks in workflow')
 
     args = parser.parse_args()
@@ -9452,7 +9453,10 @@ def main():
         if getattr(args, "workflow_id", None):
             collector.collect_workflow_tasks(args.workflow_id)
         if getattr(args, "include_lessons", False):
-            collector.collect_and_sync_lessons()
+            les_path = getattr(args, "lessons_path", None)
+            les_res = collector.collect_and_sync_lessons(lessons_path=les_path)
+            if not les_res.get("ok"):
+                print(f"[EXPERIENCE SYNC WARNING] lessons sync notice: {les_res.get('reason')}", file=sys.stderr)
         res = collector.recover_and_sync(force=getattr(args, "force", False) or bool(getattr(args, "workflow_id", None) or getattr(args, "include_lessons", False)))
         if getattr(args, "json", False):
             print(json.dumps(res, ensure_ascii=False, indent=2))

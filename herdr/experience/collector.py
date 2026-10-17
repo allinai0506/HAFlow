@@ -737,7 +737,11 @@ class ExperienceCollector:
         min_lesson_num: int = 160,
     ) -> Dict[str, Any]:
         """Extract and sync corporate business rules from lessons-learned.md."""
-        target = lessons_path or Path("/Users/user/haflow/docs/lessons/lessons-learned.md")
+        if lessons_path:
+            target = Path(lessons_path)
+        else:
+            repo_root = Path(__file__).resolve().parent.parent.parent
+            target = repo_root / "docs" / "lessons" / "lessons-learned.md"
         if not target.is_file():
             return {"ok": False, "reason": "lessons_file_missing"}
         try:
@@ -763,13 +767,18 @@ class ExperienceCollector:
                         """, (exp.source.task_id, exp.source.run_id, exp.experience_id, cand_json, now, now))
                     if self.hub_client:
                         try:
-                            self.hub_client.submit_candidate(exp)
-                            with conn:
-                                conn.execute(
-                                    "UPDATE local_collector_records SET status = 'uploaded', updated_at = ? WHERE task_id = ? AND run_id = ?",
-                                    (now, exp.source.task_id, exp.source.run_id)
-                                )
-                            uploaded += 1
+                            res = self.hub_client.submit_candidate(exp)
+                            if isinstance(res, dict) and res.get("ok"):
+                                with conn:
+                                    conn.execute(
+                                        "UPDATE local_collector_records SET status = 'uploaded', updated_at = ? WHERE task_id = ? AND run_id = ?",
+                                        (now, exp.source.task_id, exp.source.run_id)
+                                    )
+                                uploaded += 1
+                            else:
+                                err_msg = (res.get("error") if isinstance(res, dict) else str(res)) or "submit_rejected"
+                                LOGGER.debug("Upload rejected for lesson %s: %s", exp.experience_id, err_msg)
+                                failed += 1
                         except Exception as e:
                             LOGGER.debug("Upload failed for lesson %s: %s", exp.experience_id, e)
                             failed += 1
