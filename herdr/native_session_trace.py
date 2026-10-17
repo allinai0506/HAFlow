@@ -26,6 +26,9 @@ _END_PATCH = "*** End Patch"
 _PATCH_FILE = re.compile(r"(?m)^\*\*\* (?:Update|Add|Delete) File: (.+)$")
 _READ_ARGV = re.compile(r"^(?:cat|head|tail|sed)$")
 _AND_CHAIN = re.compile(r"(?:\|\||&&)")
+# GNU informational modes exit 0 without consuming the operand, so a
+# successful receipt proves nothing about the file having been read.
+_NON_READING_OPTIONS = frozenset({"--help", "--version", "-h", "-V", "--usage"})
 _TASK_ID = re.compile(r"^[A-Za-z0-9._-]{1,160}$")
 _CLAUDE_UNSAFE = re.compile(r"[^A-Za-z0-9]")
 
@@ -715,6 +718,8 @@ def _recognized_read_path(command: str | None) -> str | None:
 def _read_single(segment: str) -> str | None:
     argv = _read_argv(segment)
     if not argv or not _READ_ARGV.match(os.path.basename(argv[0])):
+        return None
+    if any(item in _NON_READING_OPTIONS for item in argv[1:]):
         return None
     return _read_target(argv)
 

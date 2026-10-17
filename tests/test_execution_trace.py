@@ -1216,3 +1216,17 @@ def test_file_read_requires_output_receipt_not_absence_of_one():
     ])
     reads = [item for item in _actions(with_receipt) if item.get("kind") == "file_read"]
     assert [item.get("path") for item in reads] == ["PLAN.md"]
+
+
+def test_informational_options_are_not_claimed_as_file_read():
+    """Codex P2：`cat --help missing.txt` 成功退出但未读取该文件——不得认领 file_read。"""
+    text = _codex_rows([
+        _codex_exec("h1", 'text(await tools.exec_command({cmd:"cat --help missing.txt",max_output_tokens:4000}));'),
+        _codex_output("h1", "Usage: cat [OPTION]... [FILE]..."),
+        _codex_exec("h2", 'text(await tools.exec_command({cmd:"head --version notes.md",max_output_tokens:4000}));', ts=21),
+        _codex_output("h2", "head (GNU coreutils) 9.4"),
+        _codex_exec("h3", 'text(await tools.exec_command({cmd:"cat -n notes.md",max_output_tokens:4000}));', ts=22),
+        _codex_output("h3", "Script completed\nOutput:\n\n     1  hello"),
+    ])
+    reads = [item for item in _actions(text) if item.get("kind") == "file_read"]
+    assert [item.get("path") for item in reads] == ["notes.md"]

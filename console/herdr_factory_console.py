@@ -11052,10 +11052,18 @@ async function loadTaskTrace(tid,force){
   if(!tid)return;
   const seq=state.taskTraceSeq||0;
   if(!force&&state.taskTrace&&state.taskTrace.task_id===tid&&state.taskTrace.status==='ready')return;
-  state.taskTrace={status:'loading',task_id:tid,events:[]};
-  if(state.taskDrawerTab==='trace'||state.taskDrawerTab==='activity')renderTaskDrawer();
+  const loaded=state.taskTrace&&state.taskTrace.task_id===tid&&Array.isArray(state.taskTrace.events)?state.taskTrace.events:[];
+  // 后端单页上限 200：深度不超过上限时用覆盖式窗口，超过后只用 cursor 取增量并追加
+  const tailMode=loaded.length>200&&!!loaded[loaded.length-1]&&!!loaded[loaded.length-1].id;
+  if(!tailMode){
+    state.taskTrace={status:'loading',task_id:tid,events:[]};
+    if(state.taskDrawerTab==='trace'||state.taskDrawerTab==='activity')renderTaskDrawer();
+  }
   try{
-    const data=await api('/api/task/trajectory?id='+encodeURIComponent(tid)+'&limit=100');
+    let path='/api/task/trajectory?id='+encodeURIComponent(tid)+'&limit='+(tailMode?100:Math.min(200,Math.max(100,loaded.length)));
+    if(tailMode)path+='&cursor='+encodeURIComponent(loaded[loaded.length-1].id);
+    const data=await api(path);
+    if(tailMode)data.append=true;
     if(!applyTraceResponse(state,tid,seq,data))return;
   }catch(e){
     if(state.selectedTaskId!==tid||state.taskTraceSeq!==seq)return;

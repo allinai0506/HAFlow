@@ -297,3 +297,60 @@ assert.equal(view.includes('<script>'),false);
 """
     result = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)  # noqa: PLW1510
     assert result.returncode == 0, result.stderr
+
+
+def test_polling_preserves_loaded_trace_depth_beyond_first_page():
+    # Codex P2：working 任务轨迹超过首页 100 条后，轮询不得把已加载事件截回首页
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not found")
+    html = console.HTML_TEMPLATE
+    names = ["api", "applyTraceResponse", "loadTaskTrace"]
+    script = "\n".join(_extract(html, name) for name in names)
+    script += r"""
+const assert=require('node:assert/strict');
+globalThis.document={getElementById:()=>null,hidden:false};
+globalThis.performance={now:()=>0};
+globalThis.sessionStorage={getItem:()=>null};
+const apiReads=new Map();
+let traceCalls=0;
+const traceUrls=[];
+function renderTaskDrawer(){}
+async function fetch(p){
+  if(p.startsWith('/api/task/trajectory')){
+    traceCalls+=1;traceUrls.push(p);
+    // 后端按 oldest-first 返回 limit 大小的窗口，库里共 255 条
+    const lm=p.match(/limit=(\d+)/);const size=lm?Number(lm[1]):100;
+    const cm=p.match(/cursor=e(\d+)/);const start=cm?Number(cm[1])+1:0;
+    const events=[];for(let i=start;i<Math.min(start+size,255);i++)events.push({id:'e'+i,title:'事件'+i,status:'neutral',timestamp:1700000000+i});
+    return {ok:true,status:200,json:async()=>({data:{task_id:'task-a',run_id:'run-a',availability:'agent_actions',events,has_more:false,next_cursor:null}})};
+  }
+  throw new Error('unexpected path '+p);
+}
+const state={taskTraceSeq:1,taskDrawerTab:'trace',selectedTaskId:'task-a',taskTrace:null};
+
+(async()=>{
+  // 首页：无已加载事件 → 维持 limit=100 全窗口
+  await loadTaskTrace('task-a',true);
+  assert.equal(traceUrls[0].includes('limit=100'),true,'空视图轮询应取首页窗口');
+  assert.equal(traceUrls[0].includes('cursor='),false,'空视图不应带 cursor');
+
+  // 已加载 150 条（跨两页）：轮询窗口必须覆盖已加载深度
+  const deep=[];for(let i=0;i<150;i++)deep.push({id:'e'+i,title:'事件'+i,status:'neutral',timestamp:1700000000+i});
+  state.taskTrace={status:'ready',task_id:'task-a',run_id:'run-a',availability:'agent_actions',events:deep,has_more:true,next_cursor:'e149'};
+  await loadTaskTrace('task-a',true);
+  assert.equal(traceUrls[1].includes('limit=150'),true,'轮询窗口必须覆盖已加载深度: '+traceUrls[1]);
+  assert.equal(state.taskTrace.events.length>=150,true,'覆盖深度后不得把已加载事件截回首页');
+
+  // 已加载超过后端单窗口上限（200）：改用 cursor 增量追加，不重建整页
+  const huge=[];for(let i=0;i<250;i++)huge.push({id:'e'+i,title:'事件'+i,status:'neutral',timestamp:1700000000+i});
+  state.taskTrace={status:'ready',task_id:'task-a',run_id:'run-a',availability:'agent_actions',events:huge,has_more:false,next_cursor:null};
+  const before=traceCalls;
+  await loadTaskTrace('task-a',true);
+  assert.equal(traceCalls,before+1,'超深度后轮询仍应发请求以发现新活动');
+  assert.equal(traceUrls[traceUrls.length-1].includes('cursor=e249'),true,'深度超过单窗口上限应取增量窗口: '+traceUrls[traceUrls.length-1]);
+  assert.equal(state.taskTrace.events.length,255,'增量窗口只追加新事件，保留既有 250 条');
+})().catch((err)=>{console.error(err);process.exit(1)});
+"""
+    result = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)  # noqa: PLW1510
+    assert result.returncode == 0, result.stderr
