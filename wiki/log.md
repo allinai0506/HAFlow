@@ -8,6 +8,12 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-10-16] fix | 无身份的历史 delivery 备注降级为人工证据
+
+- 背景：协调器用 `note-add --kind delivery` 写过散文本备注（无 `delivery_branch/candidate_sha/review_task/test_gate`）。选择器把它们当成机器候选并判 `delivery_ambiguous` fail-closed，test/review 派发被锁死，只能靠手工修补共享文档解开。
+- 变更：`select_effective_delivery` 把无身份的 delivery 备注排除出候选集（`unidentified_delivery_notes` 报告），真实歧义仍在；launch 前置打印 `[BASELINE DEGRADED]` 并回退冻结候选；`note-add --kind delivery` 直接拒绝并指向 `record-delivery`。CLI 参考同步。
+- 证据：`tests/test_delivery_legacy_notes.py`、`tests/test_impl_fix3_regression.py`。
+
 ## [2026-10-16] fix | 质量评估保住被截断的验收回执并按会话配对重试
 - 背景：账本超过读取上限时，晚于窗口的验收回执会丢失，已被回执覆盖的失败被算成测试异常。原生会话部分损坏不记 unknown；缺时间戳的跨会话动作会按加载顺序虚构重试。
 - 变更：截断时补读同范围验收回执；原生解析器只要丢弃过记录就记 `native_corrupt`；缺时间戳时只在同一会话内配对隐式重试。

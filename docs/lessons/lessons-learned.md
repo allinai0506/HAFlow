@@ -6880,3 +6880,29 @@ git log --oneline 1d2b25b..f15b1c3   # test_finding_verifier 行号锚点修复
 - 关联章节：§160（同工作流事故本体）
 
 ---
+
+## 162. 无候选身份的 delivery 备注必须降级为人工证据，而不是锁死工作流（2026-10-16）
+
+### 问题背景
+
+`wf-haflow-1016-02` 的协调器用 `herdr-task note-add --kind delivery` 写下两条散文本备注（没有 `delivery_branch/candidate_sha/review_task/test_gate`）。FR-4 选择器把无身份备注也纳入候选集并直接抛 `DeliveryAmbiguityError`，test/review 自动派发 fail-closed，整个工作流被锁死；只能人工改写工作流共享文档（把 `kind` 降级为 `note`、再追加 `invalidation` 留痕）才解开。同类误标在历史工作流（如 `wf-project-1001-01`）里已经存在。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|---|---|---|
+| 非机器声明混进机器候选集 | "不是交付声明"的输入应被排除并留痕，而不是让整条链 fail-closed | 选择器只对带身份的 claim 判歧义；无身份备注由 `unidentified_delivery_notes` 报告，launch 打印 `[BASELINE DEGRADED]` 并回退冻结候选 |
+| CLI 能产出下游无法解释的条目 | 写入接口只接受消费者能正确解释的结构 | `note-add --kind delivery` 拒绝（exit 2），指向 `record-delivery`；人工留痕用 `--kind note` |
+| 交付身份有多条写入路径 | 身份只能有一个权威生产者 | delivery 备注只由 `record-delivery`（四要素）或 controller 落盘 |
+
+### 操作规范
+
+1. 遇到 fail-closed 锁死，先分清"真歧义"与"非声明混入"；后者修数据 + 修选择器，不改身份语义。
+2. 人工修补 append-only 共享文档时保留原文，降级字段 + 追加 invalidation 留痕（可审计）。
+3. 两条带身份且互不取代的 claim 仍必须 fail-closed；负向回归必须保留。
+
+### 验证命令 / 守护测试
+
+`pytest -q tests/test_delivery_legacy_notes.py tests/test_impl_fix3_regression.py tests/test_impl_fix1_regression.py tests/test_impl_fix2_regression.py tests/test_impl_fix5_regression.py`（相邻 v1/v2/v3/fix-loop 回归一并覆盖）。
+
+---

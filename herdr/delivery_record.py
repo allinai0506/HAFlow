@@ -228,6 +228,39 @@ def apply_invalidation(
     )
 
 
+_IDENTITY_FIELDS = (
+    "delivery_id", "candidate_id", "identity",
+    "delivery_branch", "candidate_sha", "review_task", "test_gate",
+)
+_EDGE_FIELDS = (
+    "supersedes", "supersedes_candidate", "supersedes_delivery",
+    "supersedes_id", "replaces", "replaced_candidate",
+    "superseded_by", "superseded_by_candidate", "superseded_by_delivery",
+    "invalidated_by", "invalidated_by_candidate",
+    "invalidated_candidates", "invalidates_candidates",
+    "invalidated_delivery_ids", "invalidated_candidate_shas",
+    "delivery_ids", "candidate_ids", "candidate_shas",
+)
+
+
+def _is_delivery_claim(note: dict | None) -> bool:
+    """Whether a delivery note carries any identity-bearing field.
+
+    A note with none of these is human evidence, not a claim (see
+    ``unidentified_delivery_notes``).  A note with some but not all of them is
+    still a claim — an incomplete one that must fail closed rather than be
+    silently ignored.  Edge fields alone do not make a note a claim: an
+    ignored note may carry a ``supersedes`` line, but that edge has no effect.
+    """
+    note = note or {}
+    for field in _IDENTITY_FIELDS:
+        if note.get(field) not in (None, ""):
+            return True
+        if _body_value(note, field):
+            return True
+    return False
+
+
 def _has_candidate_identity(note: dict) -> bool:
     """Whether a delivery note carries an explicit candidate identity.
 
@@ -239,6 +272,22 @@ def _has_candidate_identity(note: dict) -> bool:
     return bool(candidate_sha and explicit) or all(
         _body_value(note, field) for field in REQUIRED_FIELDS
     )
+
+
+def unidentified_delivery_notes(notes: list[dict] | None) -> list[dict]:
+    """Delivery notes that carry no identity-bearing field at all.
+
+    Such notes are human evidence, not claims (``_is_delivery_claim``): the
+    selector skips them and callers report them as a degradation.  Notes that
+    carry some but not all identity fields are *not* listed — they are
+    incomplete claims that must fail closed rather than be ignored.
+    """
+    return [
+        note for note in (notes or [])
+        if isinstance(note, dict)
+        and note.get("kind") == "delivery"
+        and not _is_delivery_claim(note)
+    ]
 
 
 def _delivery_fingerprint(note: dict) -> tuple:
@@ -275,46 +324,56 @@ def select_effective_delivery(
     of one identity/payload collapse to one canonical note; conflicting
     payloads, mixed workflow/run scopes, unknown supersede targets, and
     multiple eligible tips all raise ``DeliveryAmbiguityError``.
+
+    Delivery notes without any candidate identity stay out of the candidate
+    set: they are human evidence, not claims (``unidentified_delivery_notes``
+    reports them).  Only identified claims can be selected or conflict.
     """
     source_notes = [note for note in (notes or []) if isinstance(note, dict)]
     delivery_notes = [note for note in source_notes if note.get("kind") == "delivery"]
     if not delivery_notes:
         return None
-    malformed = [note for note in delivery_notes if not _has_candidate_identity(note)]
-    if malformed:
-        raise DeliveryAmbiguityError(malformed)
+    claims = [note for note in delivery_notes if _is_delivery_claim(note)]
+    if not claims:
+        return None
+    incomplete = [note for note in claims if not _has_candidate_identity(note)]
+    if incomplete:
+        raise DeliveryAmbiguityError(incomplete)
+    claims = [note for note in claims if _has_candidate_identity(note)]
+    if not claims:
+        return None
 
-    scopes = {_scope(note) for note in delivery_notes}
+    scopes = {_scope(note) for note in claims}
     if workflow_id is not None:
-        delivery_notes = [
-            note for note in delivery_notes
+        claims = [
+            note for note in claims
             if not note.get("workflow_id") or note.get("workflow_id") == workflow_id
         ]
     if run_id is not None:
-        delivery_notes = [
-            note for note in delivery_notes
+        claims = [
+            note for note in claims
             if not note.get("run_id") or note.get("run_id") == run_id
         ]
-    if not delivery_notes:
+    if not claims:
         return None
-    filtered_scopes = {_scope(note) for note in delivery_notes}
+    filtered_scopes = {_scope(note) for note in claims}
     if len(filtered_scopes) > 1:
-        raise DeliveryAmbiguityError(delivery_notes)
+        raise DeliveryAmbiguityError(claims)
     if workflow_id is None:
         workflow_scopes = {scope[0] for scope in scopes if scope[0]}
         if len(workflow_scopes) > 1 or (workflow_scopes and "" in {
             scope[0] for scope in scopes
         }):
-            raise DeliveryAmbiguityError(delivery_notes)
+            raise DeliveryAmbiguityError(claims)
     if run_id is None:
         run_scopes = {scope[1] for scope in scopes if scope[1]}
         if len(run_scopes) > 1 or (run_scopes and "" in {
             scope[1] for scope in scopes
         }):
-            raise DeliveryAmbiguityError(delivery_notes)
+            raise DeliveryAmbiguityError(claims)
 
     by_identity: dict[str, list[dict]] = {}
-    for note in delivery_notes:
+    for note in claims:
         by_identity.setdefault(candidate_identity(note), []).append(note)
 
     canonical: dict[str, dict] = {}
@@ -360,7 +419,7 @@ def select_effective_delivery(
                 resolved.add(identity)
         return resolved
 
-    for note in delivery_notes:
+    for note in claims:
         superseded.update(_resolve(_supersedes(note)))
         superseded.update(_resolve(_superseded_by(note)))
     for note in source_notes:

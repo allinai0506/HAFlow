@@ -141,6 +141,8 @@ herdr-task check-delivery --workflow-id <id> --head-sha <sha> --head-ref <branch
 - 缺少或歧义的有效 delivery、被 invalidation 的候选：exit 2。
 - test/review launch 没有有效 delivery baseline 或 baseline 不包含候选：exit 2，
   写入 StateStore `test_baseline_rejected` actionable event；先运行 `record-delivery` 补齐身份。
+- 无候选身份的人工 delivery 备注不算歧义：选择器忽略它们并打印
+  `[BASELINE DEGRADED]`（列出备注 ID），工作流回退到冻结候选，不因此锁死。
 
 ---
 
@@ -181,6 +183,9 @@ herdr-task note-list <workflow_id> [--node <node_id>] [--limit <n>] \
   [--current-base-sha <sha>] [--json]
 ```
 - `--kind`：`requirement|spec|plan|decision|evidence|gate|invalidation|note|wrapup`；
+  `--kind delivery` 已禁用（exit 2）：delivery 备注必须用
+  `herdr-task record-delivery` 写入（需要 `delivery_branch/candidate_sha/review_task/test_gate`），
+  人工留痕请用 `--kind note`；
 - `--source`：CLI 仅接受 `agent|human`；`controller` 机器证据由门禁 verdict
   （`herdr-task set ... --verdict`）与 fix-loop 自动落盘，不接受手工伪造；
 - `--task <task_id>` 时自动从任务记录与 CoW clone 补全 `node/agent/base_sha`；
