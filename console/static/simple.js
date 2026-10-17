@@ -2,7 +2,7 @@
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const query = new URLSearchParams(location.search);
-const model = {projects:[], projectId:query.get('project_id') || '', workflowId:query.get('workflow_id') || '', templates:[], sequence:0, templateSequence:0, job:null};
+const model = {projects:[], projectId:query.get('project_id') || '', workflowId:query.get('workflow_id') || '', templates:[], sequence:0, templateSequence:0, job:null, templateSelections:new Map(), overviewSequence:0};
 const labels = {pending:'待开始',running:'执行中',working:'执行中',dispatched:'已派发',blocked:'受阻，等待处理',failed:'执行失败',paused:'已暂停',completed:'执行完成，待收尾',delivered:'已交付',cleaned:'已完成',integrated:'已集成',committed:'已提交',superseded:'已取代',rework:'返工中',unknown:'状态未知',ready:'已就绪',waiting:'等待中'};
 const label = status => labels[status] || status || '状态未知';
 async function api(url, body) {
@@ -17,7 +17,7 @@ function contextUrl(path) {
   const q=new URLSearchParams();
   if(model.projectId) q.set('project_id',model.projectId);
   if(model.workflowId) q.set('workflow_id',model.workflowId);
-  return path + (q.size ? '?'+q : '');
+  return path + ([...q].length ? '?'+q : '');
 }
 function saveSelection() {
   history.replaceState(null,'',contextUrl('/simple'));
@@ -45,11 +45,17 @@ async function refreshProjects() {
     $('project').value=model.projectId;
     $('projectEmpty').hidden=!!model.projects.length;
     await selectProject(false);
+    await loadProjectOverview();
   } catch(e) { notice('项目加载失败：'+e.message+'。可点击刷新状态重试。'); }
 }
 async function selectProject(clear=true) {
   const sequence=++model.sequence;
   model.projectId=$('project').value;
+  ++model.templateSequence;
+  $('start').disabled=true;
+  for(const id of ['category','template','templateSearch']) $(id).value='';
+  $('templateInfo').textContent=''; $('contextInputs').replaceChildren();
+  $('attentionList').replaceChildren();
   if(clear) model.workflowId='';
   $('execution').hidden=true;
   $('resultList').innerHTML='<p class="empty">正在读取成果…</p>';
@@ -64,7 +70,7 @@ async function selectProject(clear=true) {
     options($('workflow'),workflows.map(w=>[w.workflow_id,w.title || w.requirement_subject || w.workflow_id]),'暂无需求');
     $('workflow').value=model.workflowId;
     $('requirementEmpty').hidden=!!workflows.length;
-    await loadWorkflow();
+    await Promise.all([loadWorkflow(),loadAttention(workflows,model.projectId)]);
   } catch(e) { if(sequence===model.sequence) { options($('workflow'),[],'需求加载失败'); $('resultList').textContent='成果暂不可读取'; notice('需求加载失败：'+e.message); } }
 }
 async function loadWorkflow() {
@@ -82,6 +88,7 @@ async function loadWorkflow() {
     $('execution').hidden=false;
     $('requirementTitle').textContent=d.workflow.title || d.workflow.requirement_subject || wid;
     $('requirementText').textContent=d.workflow.requirement || '';
+    $('workflowTemplate').textContent='工作流模板：'+(d.workflow.template || d.workflow.template_id || d.workflow.workflow_template || d.workflow.config?.workflow_template || '未提供');
     $('status').textContent=label(d.workflow.status);
     $('stages').innerHTML=(d.stages || []).map(s=>`<li>${esc(s.label || s.key)}<small>${esc(label(s.status))}</small></li>`).join('');
     $('tasks').innerHTML=(d.tasks || []).map(t=>`<div class="task"><div>${esc(t.node_label || t.goal || t.task_id)}<small>${esc(t.failure_reason || t.blocked_reason || '')}</small></div><span>${esc(label(t.status))}</span></div>`).join('') || '<p class="empty">需求已登记，等待调度派发。</p>';
@@ -101,7 +108,7 @@ async function loadDecisions(wid, sequence) {
         event.preventDefault(); const button=form.querySelector('button'); button.disabled=true;
         try {
           await api('/api/workflow/decision',{workflow_id:wid,decision_id:decision.decision_id,decision:form.querySelector('textarea').value.trim()});
-          if(wid===model.workflowId) { notice('决定已记录，工作流将按既有机制继续处理。'); await loadWorkflow(); }
+          if(wid===model.workflowId) { notice('决定已记录，工作流将按既有机制继续处理。'); await selectProject(false); }
         } catch(e) { formError(form,e); } finally { button.disabled=false; }
       };
       $('decisions').append(form);
@@ -151,37 +158,91 @@ async function loadResults(wid,sequence) {
     }
   } catch(e) { if(sequence===model.sequence) $('resultList').textContent='成果加载失败：'+e.message+'。请刷新重试。'; }
 }
+async function loadProjectOverview() {
+  const sequence=++model.overviewSequence;
+  $('projectList').replaceChildren();
+  for(const project of model.projects) {
+    const card=document.createElement('button'); card.className='projectCard';
+    const summary=(project.project_name || project.project_id)+' · 目标：'+(project.goal || project.description || '未提供')+' · 最近活动：';
+    card.textContent=summary+'正在读取…';
+    card.onclick=()=>{ $('project').value=project.project_id; return selectProject(); };
+    $('projectList').append(card);
+    try {
+      const workflows=await api('/api/workflows?project_id='+encodeURIComponent(project.project_id));
+      if(sequence!==model.overviewSequence) return;
+      const recent=workflows.slice().sort((a,b)=>(b.updated_at || b.created_at || 0)-(a.updated_at || a.created_at || 0))[0];
+      card.textContent=summary+(recent?(recent.title || recent.requirement_subject || recent.workflow_id)+(recent.updated_at || recent.created_at?' · '+new Date((recent.updated_at || recent.created_at)*1000).toLocaleString():''):'暂无需求活动');
+    } catch { card.textContent=summary+'读取失败，请刷新重试'; }
+  }
+}
+async function loadAttention(workflows,projectId) {
+  const sequence=(model.attentionSequence || 0)+1; model.attentionSequence=sequence;
+  $('attentionList').textContent='正在读取各需求的待处理事项…';
+  const items=[]; let failed=false;
+  // Sequential requests keep this aggregation bounded without another state source.
+  for(const workflow of workflows) {
+    if(projectId!==model.projectId || sequence!==model.attentionSequence) return;
+    try {
+      const data=await api('/api/workflow/decisions?workflow_id='+encodeURIComponent(workflow.workflow_id));
+      if(projectId!==model.projectId || sequence!==model.attentionSequence) return;
+      for(const decision of data.decisions || []) items.push({workflow,decision});
+    } catch { failed=true; }
+  }
+  if(projectId!==model.projectId || sequence!==model.attentionSequence) return;
+  $('attentionList').replaceChildren();
+  for(const {workflow,decision} of items) {
+    const button=document.createElement('button'); button.className='attentionItem';
+    button.textContent=(workflow.title || workflow.requirement_subject || workflow.workflow_id)+'：'+decision.question;
+    button.onclick=()=>{ $('workflow').value=workflow.workflow_id; return loadWorkflow(); };
+    $('attentionList').append(button);
+  }
+  if(!items.length) $('attentionList').textContent=failed?'部分需求待处理事项读取失败，请刷新重试':'当前项目暂无需要你处理的事项。';
+  else if(failed) { const p=document.createElement('p'); p.textContent='部分需求读取失败，列表可能不完整，请刷新重试。'; $('attentionList').append(p); }
+}
+function rememberTemplateSelection() {
+  model.templateSelections.set(model.projectId,{category:$('category').value,template:$('template').value,search:$('templateSearch').value});
+}
 async function openRequirement() {
   if(!currentProject()) { notice('请先创建或选择一个项目。'); $('newProject').focus(); return; }
+  const projectId=model.projectId, sequence=++model.templateSequence;
   $('requirementDialog').showModal();
-  $('requirementProject').textContent='所属项目：'+(currentProject().project_name || model.projectId);
+  $('requirementProject').textContent='所属项目：'+(currentProject().project_name || projectId);
   formError($('requirementForm'),'');
   if(model.job) { pollJob(); return; }
   $('start').disabled=true;
   try {
     const data=await api('/api/templates');
+    if(projectId!==model.projectId || sequence!==model.templateSequence) return;
     model.templates=data.templates || [];
     const categories=new Map(model.templates.map(t=>[t.category,t.category_name || t.category]));
+    const saved=model.templateSelections.get(projectId);
     options($('category'),[['','全部分类'],...categories], '暂无分类');
-    populateTemplates();
-    if(currentProject()?.execution?.mode==='context' && model.templates.some(t=>t.id==='business-task-v1')) $('template').value='business-task-v1';
+    $('category').value=saved?.category || '';
+    $('templateSearch').value=saved?.search || '';
+    populateTemplates(saved?.template || '');
+    if(!saved) {
+      const mode=currentProject()?.execution?.mode || 'git';
+      const preferred=model.templates.find(t=>t.execution_mode===mode);
+      $('template').value=preferred?.id || '';
+    }
     await loadTemplate();
-  } catch(e) { formError($('requirementForm'),'模板加载失败：'+e.message); }
+  } catch(e) { if(projectId===model.projectId && sequence===model.templateSequence) formError($('requirementForm'),'模板加载失败：'+e.message); }
 }
-function populateTemplates() {
-  const selected=$('template').value;
-  const templates=model.templates.filter(t=>!$('category').value || t.category===$('category').value);
-  options($('template'),templates.map(t=>[t.id,t.label || t.id]),'暂无模板');
+function populateTemplates(selected=$('template').value) {
+  const search=$('templateSearch').value.trim().toLocaleLowerCase();
+  const templates=model.templates.filter(t=>(!$('category').value || t.category===$('category').value) && (!search || [t.label,t.name,t.id,t.description].join(' ').toLocaleLowerCase().includes(search)));
+  options($('template'),templates.map(t=>[t.id,t.label || t.id]),'暂无匹配模板');
   if(templates.some(t=>t.id===selected)) $('template').value=selected;
 }
 async function loadTemplate() {
-  const sequence=++model.templateSequence;
+  const sequence=++model.templateSequence, projectId=model.projectId;
+  rememberTemplateSelection();
   $('start').disabled=true; $('templateInfo').textContent='正在读取实际模板…'; $('contextInputs').replaceChildren();
   const tid=$('template').value;
   if(!tid) { $('templateInfo').textContent='此分类没有可用模板。'; return; }
   try {
     const d=await api('/api/template?id='+encodeURIComponent(tid));
-    if(sequence!==model.templateSequence) return;
+    if(sequence!==model.templateSequence || projectId!==model.projectId) return;
     $('templateInfo').textContent=`${d.template.label || tid}\n${d.template.description || '模板未提供说明'}\n${d.nodes.map(n=>n.label).join(' → ')}\n执行方式：${d.execution_mode==='context'?'业务上下文，可使用普通目录':'Git 仓库，目录需已初始化 Git'}`;
     for(const kind of ['required','optional']) for(const ctx of d.context?.[kind] || []) {
       const wrapper=document.createElement('label'); wrapper.textContent=(ctx.label || ctx.id)+(kind==='required'?'（必填）':'（选填）');
@@ -196,11 +257,11 @@ function draftSave() {
 try { const draft=JSON.parse(localStorage.getItem('haflow.simple.draft') || '{}'); $('title').value=draft.title || ''; $('requirement').value=draft.requirement || ''; model.job=JSON.parse(sessionStorage.getItem('haflow.simple.job') || 'null'); } catch { /* URL and server remain authoritative. */ }
 $('title').oninput=draftSave; $('requirement').oninput=draftSave;
 $('projectForm').onsubmit=async event=>{
-  event.preventDefault(); const button=event.submitter; button.disabled=true; formError(event.target,'');
+  event.preventDefault(); const button=event.submitter || event.target.querySelector('button[type=submit]'); if(button) button.disabled=true; formError(event.target,'');
   try {
     const project=await api('/api/project/create',{project_name:$('projectName').value.trim(),project_root:$('projectRoot').value.trim(),template:$('projectType').value});
     model.projectId=project.project_id; model.workflowId=''; $('projectDialog').close(); await refreshProjects(); notice('项目已关联。');
-  } catch(e) { formError(event.target,e); } finally { button.disabled=false; }
+  } catch(e) { formError(event.target,e); } finally { if(button) button.disabled=false; }
 };
 $('requirementForm').onsubmit=async event=>{
   event.preventDefault(); if(model.job) return;
@@ -238,15 +299,25 @@ async function pollJob() {
     formError($('requirementForm'),e); $('jobStatus').textContent=model.job?'状态读取失败，稍后会继续查询。':'启动失败，请核对后重试。'; if(model.job) setTimeout(pollJob,5000); }
   finally { polling=false; $('start').disabled=!!model.job; }
 }
-$('newProject').onclick=()=>{ formError($('projectForm'),''); $('projectDialog').showModal(); };
+$('newProject').onclick=async()=>{
+  formError($('projectForm'),''); $('projectDialog').showModal();
+  const button=$('projectForm').querySelector('button[type=submit]'); button.disabled=true;
+  options($('projectType'),[],'正在读取模板…');
+  try {
+    const data=await api('/api/templates');
+    options($('projectType'),(data.templates || []).map(t=>[t.id,(t.execution_mode==='context'?'业务目录':'Git 仓库')+' · '+(t.label || t.id)]),'没有可用模板');
+    button.disabled=!$('projectType').value;
+  } catch(e) { formError($('projectForm'),'项目模板读取失败：'+e.message); }
+};
 $('newRequirement').onclick=openRequirement;
 $('showResults').onclick=()=>{ $('results').scrollIntoView({behavior:'auto'}); $('results').focus(); };
 $('project').onchange=()=>{notice(); selectProject();};
 $('workflow').onchange=()=>{notice(); loadWorkflow();};
 $('category').onchange=()=>{populateTemplates();loadTemplate();};
 $('template').onchange=loadTemplate;
+$('templateSearch').oninput=()=>{populateTemplates();loadTemplate();};
 $('refresh').onclick=refreshProjects;
 for(const button of document.querySelectorAll('[data-close]')) button.onclick=()=>button.closest('dialog').close();
-setInterval(()=>{ if(!document.hidden && !document.querySelector('dialog[open]') && !document.activeElement.closest('.decision') && model.workflowId) loadWorkflow(); },15000);
+setInterval(()=>{ if(!document.hidden && !document.querySelector('dialog[open]') && !document.activeElement.closest('.decision') && model.workflowId) selectProject(false); },15000);
 refreshProjects();
 if(model.job) pollJob();

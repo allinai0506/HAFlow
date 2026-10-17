@@ -647,6 +647,7 @@ def templates_summary():
             'category': cat_id,
             'category_name': cat_name,
             'nodes_preview': nodes_preview,
+            'execution_mode': herdr_workflow.execution_mode(raw),
             'is_builtin': _is_builtin_path(info['path']),
         })
     return {'templates':out}
@@ -12970,10 +12971,10 @@ class Handler(BaseHTTPRequestHandler):
                 name=str(b.get('project_name') or '').strip() or None
                 if not str(b.get('project_root') or '').strip():raise RuntimeError('项目目录不能为空')
                 tmpl=str(b.get('template') or 'software-development-v1').strip()
-                project=herdr_projects.create_project(root,project_name=name,template_name=tmpl)
                 # Initialize the selected state store on this write path, never on GET.
                 from herdr.state_store import get_state_store
                 get_state_store(state_db_path())
+                project=herdr_projects.create_project(root,project_name=name,template_name=tmpl)
                 return self.send_json(200,project)
             if p=='/api/project/adopt':
                 wid=str(b.get('workspace_id','')).strip()

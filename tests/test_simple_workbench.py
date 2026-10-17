@@ -177,3 +177,156 @@ const api=async url=>url.startsWith('/api/run/status')?{status:'succeeded',outpu
     harness = harness.replace('REFRESH_FAILED', 'true' if refresh_failed else 'false')
     result = subprocess.run([node, '-e', harness], text=True, capture_output=True, check=False)
     assert result.returncode == 0, result.stderr
+
+
+def _run_simple_js(case):
+    """Execute production JS with only DOM/transport boundaries replaced."""
+    import subprocess
+    from pathlib import Path
+    source = (Path(__file__).parents[1] / 'console/static/simple.js').read_text()
+    source = source[:source.rindex('refreshProjects();')]
+    harness = r"""
+const assert=require('node:assert/strict');
+const elements=new Map();
+class Element {
+ constructor(){this.value='';this.textContent='';this.innerHTML='';this.hidden=false;this.disabled=false;this.children=[];this.dataset={};}
+ replaceChildren(...items){this.children=items;this.value='';}
+ add(o){this.children.push(o);if(this.children.length===1)this.value=o.value;}
+ append(o){this.children.push(o);}
+ querySelector(){return new Element()}
+ querySelectorAll(){return []}
+ showModal(){} close(){} focus(){} scrollIntoView(){}
+}
+const document={getElementById(id){if(!elements.has(id))elements.set(id,new Element());return elements.get(id)},createElement(){return new Element()},querySelectorAll(){return []}};
+const Option=function(text,value){this.text=text;this.value=value};
+const location={search:''};const history={replaceState(){}};
+const localStorage={getItem(){return null},setItem(){}};const sessionStorage={getItem(){return null},setItem(){}};
+const setInterval=()=>{};const setTimeout=()=>{};
+let responses={};
+const fetch=async url=>({ok:true,json:async()=>({data:typeof responses[url]==='function'?await responses[url]():responses[url]})});
+"""
+    result = subprocess.run(['node', '-e', harness + source + '\n(async()=>{' + case + '\n})().catch(e=>{console.error(e);process.exitCode=1});'], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+
+
+def test_r2_template_summary_exposes_mode():
+    for item in c.templates_summary()['templates']:
+        assert item['execution_mode'] == c.template_detail(item['id'])['execution_mode']
+
+
+def test_r2_project_template_roundtrip_and_search():
+    _run_simple_js(r"""
+model.projects=[{project_id:'A',execution:{mode:'context'}},{project_id:'B'}];
+const templates=[{id:'contract',label:'合同审阅',description:'条款风险',category:'legal',execution_mode:'context'}, {id:'analysis',label:'分析',description:'经营复盘',category:'biz',execution_mode:'context'}, {id:'code',label:'开发',description:'代码审查',category:'eng',execution_mode:'git'}];
+responses['/api/templates']={templates};
+for(const t of templates)responses['/api/template?id='+t.id]={template:t,nodes:[],context:{},execution_mode:t.execution_mode};
+for(const id of ['A','B'])responses['/api/workflows?project_id='+id]=[];
+$('project').value='A';await selectProject();await openRequirement();
+$('category').value='legal';$('category').onchange();await loadTemplate();
+assert.equal($('template').value,'contract');
+$('project').value='B';await selectProject();await openRequirement();
+assert.equal($('category').value,'');assert.equal($('template').value,'code');
+$('project').value='A';await selectProject();await openRequirement();
+assert.equal($('template').value,'contract');assert.equal($('category').value,'legal');
+$('category').value='';$('templateSearch').value='经营';$('templateSearch').oninput();await loadTemplate();
+assert.deepEqual($('template').children.map(x=>x.value),['analysis']);
+$('templateSearch').value='合同';$('templateSearch').oninput();await loadTemplate();
+assert.deepEqual($('template').children.map(x=>x.value),['contract']);
+$('category').value='biz';$('category').onchange();await loadTemplate();assert.equal($('template').value,'');assert.equal($('start').disabled,true);
+""")
+
+
+def test_r2_late_template_response_cannot_enable_other_project():
+    _run_simple_js(r"""
+model.projects=[{project_id:'A'},{project_id:'B'}];model.projectId='A';
+$('template').value='old';let finish;
+responses['/api/template?id=old']=()=>new Promise(r=>{finish=r});
+const pending=loadTemplate();await Promise.resolve();
+responses['/api/workflows?project_id=B']=[];
+$('project').value='B';await selectProject();
+finish({template:{label:'OLD'},nodes:[],context:{required:[{id:'secret'}]}});await pending;
+assert.equal($('start').disabled,true);assert.equal($('contextInputs').children.length,0);assert.ok(!$('templateInfo').textContent.includes('OLD'));
+""")
+
+
+def test_r2_execution_shows_actual_template_and_aggregates_other_requirements():
+    _run_simple_js(r"""
+model.projects=[{project_id:'A',project_name:'真实项目'}];
+responses['/api/workflows?project_id=A']=[{workflow_id:'one',title:'需求一',updated_at:1700000000},{workflow_id:'two',title:'需求二',updated_at:1700000100}];
+for(const wid of ['one','two'])responses['/api/workflow/decisions?workflow_id='+wid]={decisions:[{decision_id:wid,question:'裁决'+wid}]};
+responses['/api/workflow?id=one&lightweight=1']={workflow:{project_id:'A',title:'需求一',template:'actual-frozen'},stages:[],tasks:[]};
+loadDecisions=async()=>{};loadResults=async()=>{};
+$('project').value='A';await selectProject();
+assert.ok($('workflowTemplate').textContent.includes('actual-frozen'));
+assert.equal($('attentionList').children.length,2);
+assert.ok($('attentionList').children[1].textContent.includes('需求二'));
+await $('attentionList').children[1].onclick();assert.equal(model.workflowId,'two');
+""")
+
+
+def test_r2_context_url_without_searchparams_size():
+    _run_simple_js(r"""
+Object.defineProperty(URLSearchParams.prototype,'size',{get(){return undefined}});
+model.projectId='project A';model.workflowId='w';assert.ok(contextUrl('/').includes('project_id=project+A'));
+assert.equal(contextUrl('/'),'/?project_id=project+A&workflow_id=w');
+""")
+
+
+def test_r2_null_submitter_still_creates_project():
+    _run_simple_js(r"""
+responses['/api/project/create']={project_id:'new'};refreshProjects=async()=>{};
+await $('projectForm').onsubmit({preventDefault(){},target:$('projectForm'),submitter:null});
+assert.equal(model.projectId,'new');
+""")
+
+
+def test_r2_limits_are_explicit():
+    from pathlib import Path
+    root = Path(__file__).parents[1]
+    page = (root / 'console/static/simple.html').read_text()
+    doc = (root / 'docs/walkthroughs/20261017-simple-workbench-v1.md').read_text()
+    for text in (page, doc):
+        assert '仅支持已存在目录' in text
+        assert '项目目标/简介采集与持久化尚未实现' in text
+    assert 'business-task-v1' not in page
+    assert 'software-development-v1' not in page
+
+
+def test_r2_project_overview_reads_names_goals_and_recent_activity():
+    _run_simple_js(r"""
+model.projects=[{project_id:'A',project_name:'项目甲',goal:'真实目标'},{project_id:'B',project_name:'项目乙'}];
+responses['/api/workflows?project_id=A']=[{workflow_id:'old',title:'旧需求',created_at:1000},{workflow_id:'new',title:'最新需求',created_at:2000}];
+responses['/api/workflows?project_id=B']=[];
+await loadProjectOverview();
+assert.equal($('projectList').children.length,2);
+assert.ok($('projectList').children[0].textContent.includes('项目甲 · 目标：真实目标 · 最近活动：最新需求'));
+assert.ok($('projectList').children[1].textContent.includes('项目乙 · 目标：未提供 · 最近活动：暂无需求活动'));
+""")
+
+
+def test_r2_late_attention_response_is_not_shown_in_other_project():
+    _run_simple_js(r"""
+model.projectId='A';let finish;
+responses['/api/workflow/decisions?workflow_id=one']=()=>new Promise(r=>{finish=r});
+const pending=loadAttention([{workflow_id:'one',title:'项目甲秘密需求'}],'A');await Promise.resolve();
+model.projectId='B';await loadAttention([],'B');
+finish({decisions:[{question:'不能混入乙项目'}]});await pending;
+assert.equal($('attentionList').children.length,0);assert.ok(!$('attentionList').textContent.includes('不能混入'));
+""")
+
+
+@pytest.mark.parametrize('term,category,want', [('合同','','contract'), ('风险','','contract'), ('风险','biz','')])
+def test_r2_search_name_and_scenario_preserves_category(term, category, want):
+    _run_simple_js("""
+model.templates=[{id:'contract',label:'合同审阅',description:'条款风险',category:'legal'},{id:'analysis',label:'经营分析',description:'经营复盘',category:'biz'}];
+$('templateSearch').value=TERM;$('category').value=CATEGORY;populateTemplates();
+assert.equal($('template').value,WANT);assert.deepEqual($('template').children.map(x=>x.value),[WANT]);
+""".replace('TERM', json.dumps(term)).replace('CATEGORY', json.dumps(category)).replace('WANT', json.dumps(want)))
+
+
+def test_r2_new_project_templates_come_from_real_metadata():
+    _run_simple_js(r"""
+responses['/api/templates']={templates:[{id:'custom-only',label:'自定义业务',execution_mode:'context'}]};
+await $('newProject').onclick();
+assert.deepEqual($('projectType').children.map(x=>[x.value,x.text]),[['custom-only','业务目录 · 自定义业务']]);
+""")

@@ -52,3 +52,45 @@
 - 最后一次浏览器冲突验证用了过窄的预期错误文本而超时；HTTP 实际回执为 failed，原因为活动工作流阻止模板切换。其后 ego-browser 空间已不存在，未创建新空间绕过；该次精确 UI 文本断言不计 PASS。此前页面核心路径、导航、文件与窄屏验证有效；启动失败 UI 的处理另有 Node 及真实 HTTP 回归。
 - 自审完成，未发现已知阻塞功能缺陷；未执行独立评审、当前合并结果 CI、真实付费 Agent 生命周期或生产业务 UAT。
 - 未配置机器交付契约；内循环评分不认证业务验收、合并或部署。后续由协调器绑定候选与业务验收回执。
+
+## R2 交付限制（2026-10-18）
+
+- F5：项目目标/简介采集与持久化尚未实现；概览只读既有注册表中的 goal/description，无字段时明确显示“未提供”，不宣称采集功能已实现。
+- F6：仅支持已存在目录；未实现服务端新建文件夹与相应权限校验，页面已明示此限制。
+- “需要我处理”聚合当前项目各需求的既有待决账本；不扩展 Task 生命周期。项目最近活动来自真实需求列表，无需求时显示无活动。
+
+## R2 定向返工验收
+
+基线为 `85c3a98eb1973f0fd1656e6557aa78268a067da2`。本轮沿工位分支 `agent/codex/fix-haflow-simple-workbench-v1-r2` 修改；下列记录针对本轮，前文 V1 数字为历史证据。
+
+| 项 | 变更与验证 |
+| --- | --- |
+| F1 / D-1 | 模板、分类、搜索按 `project_id` 保存于页面内存。项目切换清空控件并失效旧模板请求。Node 回归覆盖 A→B→A 和延迟响应。真实浏览器重复验证业务 A 法务模板→Git B 模式默认→A 恢复法务选择。 |
+| F2 | 名称与 description 业务场景搜索叠加分类筛选，保留原生选择器与对话框滚动。名称、场景、分类无匹配各有独立断言。 |
+| F3 | 执行页显示 `/api/workflow` 返回的实际模板标识。浏览器真实启动隔离工作流后读回 `legal-r2`。缺失字段显示“未提供”。 |
+| F4 | 内容区列出项目名称、已有目标和最近需求活动。当前项目各需求的待决记录聚合为“需要我处理”；点击进入对应需求。Node 断言两条需求同时出现，并拒绝其他项目的迟到响应。浏览器验证两需求聚合与裁决后仅余另一项。 |
+| F5 | 采用上述显式未实现限制；无新的目标输入与持久化能力，不描述为已实现。 |
+| F6 | 页面与本文明示仅支持已存在目录，未实现新建文件夹及权限校验。 |
+| A3 | `/api/project/create` 在调用 `create_project` 之前初始化选定 StateStore。真实 HTTP 故障测试断言初始化失败时临时项目注册表不存在。成功创建→启动→SQLite→公开读取链沿用真实集成测试。 |
+| C1 / C2 | submitter 为空时回退到表单提交按钮；URL 参数使用 `[...q].length`。两项独立回归都在冻结候选脚本上确认 RED。 |
+| D2 | simple 页面中删除模板 ID 默认值；模板模式由 `templates_summary.execution_mode` 透传，新建项目选项也来自真实元数据。自定义唯一模板回归确认不依赖内置 ID。 |
+
+测试使用既有 `tests/test_simple_workbench.py` 和 `tests/test_console_project_creation.py`。首批 7 项在修改前均失败；后续把搜索和兼容性检查拆成独立断言，并用只读 `git show 85c3a98:console/static/simple.js` 再次确认 C1、C2、名称搜索、场景搜索和 D2 的 RED。最新专项命令：
+
+```bash
+/opt/homebrew/bin/python3.13 -m pytest -q tests/test_simple_workbench.py tests/test_console_project_creation.py tests/test_execution_context_contract.py
+```
+
+结果为 78 passed。`node --check console/static/simple.js`、三个改动 Python 文件 AST 与 `git diff --check` 通过。Ruff 基线对照：console 文件 87→86，项目测试 4→4，simple 测试 0→0；没有新增诊断，整库仍有历史 lint 问题。
+
+浏览器采用 ego-browser space 15 和工位内临时 sandbox，端口 8987。项目装配的终端传输与收费模型边界被隔离，模板、Factory 启动、SQLite、共享决策账本和公开 HTTP 路由保持真实。390px 窄屏没有横向溢出，截图已目视检查。一次聚合验证因误判 API 列表顺序而点击错误项并超时；该轮不计通过，随后按实际目标完成验证。浏览器空间已结束，不保留用户现场。
+
+前两轮内循环分别为 4745 passed / 1 failed、4748 passed / 1 failed，均在 `test_rollout_policy.py::TestGuard::test_concurrent_operators_never_lose_an_update` 报 `2 != 1`。该文件及相关 rollout/state_db 实现相对基线无变化，单项独立运行及随后 30 次原样重复均通过。本轮没有修改该范围外测试或相关核心代码；全量最终结果另追加。
+
+本轮只自审，独立洁净室双门禁待协调器在新候选重跑。未验证当前合并结果 CI、生产 UAT 或真实付费 Agent 生命周期，未推送、未合并、未部署。没有配置机器交付契约，自检分数不证明这些事项通过。启动现场已有的 `docs/bug-reports/2026-10-18-haflow-simple-workbench-v1-r2.md` 保持原内容，不列入本轮提交。
+
+### R2 最终全量与候选状态
+
+第三轮 `PYTEST_ADDOPTS='-n auto' /Users/user/HAFlow/bin/herdr-loop eval`：**4753 passed，3 warnings，102.76s；100.0，converged=true，test_exit_code=0**。未过滤任何测试，也未修改评估器或 rollout 测试。前两轮并发测试失败保留为已观察到的不稳定验收风险，第三轮通过不抹去该记录。评估器按既有 baseline-aware 规则计新增 lint 为 0，实际整库 lint 退出码仍为 1。
+
+本轮增加 14 项回归，业务提交限 7 个授权文件。自审未发现范围内未修缺陷；候选可移交洁净室复验，不能据此宣称已通过独立双门禁或可合并。F5/F6 的未实现项按本次任务允许的显式限制方案交付。
