@@ -1,0 +1,12 @@
+段落1 · 基线与专项验证（工位 wf-haflow-1016-02-test-auto-r3，只评不改）
+
+验证对象确认为冻结候选 4e543ee6a9e9cc9d4269222a177a94aa12f78275：
+herdr-task verify-baseline → BASELINE_MATCH，baseline_commit == head == 4e543ee，commits_ahead=0，worktree_changed=false。
+全程 git diff 为空，业务代码零改动；所有命令在本工位隔离 clone 内执行。
+
+专项结果：
+- pytest -q tests/test_execution_trace.py tests/test_execution_trace_api.py tests/test_console_execution_trace.py → 49 passed（0 failed，0 skipped），逐条 PASSED 清单已留档。
+- python3 -m compileall -q herdr services bin tests → exit 0。
+- git diff --check → clean。
+- ruff 逐规则 parent(0ed2015)↔candidate(4e543ee) 差分（stdin 同源配置对比，覆盖 5 个改动文件）→ 0 新增。
+- 相邻调用方回归：tests/test_console_frontend_syntax.py + tests/test_quality_assessment.py + tests/test_console_controller_actions_api.py → 58 passed / 11 subtests，JS 内联改动未破坏前端语法校验。

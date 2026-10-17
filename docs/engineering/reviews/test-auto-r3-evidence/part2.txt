@@ -1,0 +1,18 @@
+段落2 · F1–F6 逐条判定（同一冻结候选，与 review 并行）
+
+F1 Codex file_read/file_edit 保守识别：实现有效。认领需同时满足可解包+补丁结构完整+路径合法+无失败退出码+成功回执；读取仅接受 cat/head/tail/sed 干净单文件，拒绝 heredoc/glob/重定向/变量/引号。真实语料独立复算（~/.codex/sessions，198 JSONL/11494 动作）：file_read=442 file_edit=46 test_passed=1 test_failed=2 retry=0 commit=0，更严格谓词复核可疑 0 条。
+F2 retry 语义：pass。双侧定性探针全通过（test→test=修复并再次测试；tool→test=再次测试；test→tool=重试工具调用；自引用/未知 ref 不生成 retry）。
+F3 Commit 时间-SHA 关联：pass。无自带 SHA 的 committed 降级为 task_completed 且不共享 commit correlation；任务级 SHA 事件 timestamp=None 保持未知；合并顺序改为 存储→原生→任务历史，带证据转换（t=110）不再被无证据投影挤掉。生产写入侧为 git rev-parse HEAD 全称，不存在缩写/全称重复成事件。
+F4 执行中任务自动刷新：主路径实现（trace 页签 8s 轮询，切页签/关抽屉停表），但见 DEFECT-3。
+F5 统一 state_db_path：pass。Console 三处 ad-hoc 解析全部收敛到既有权威 herdr.kernel.state_db_path，全文件残留 0 处；用 LaunchAgent 实况 env 验证三个解析器同值为 ~/.herdr-controller/state.db，线上 Console 读取库不变。
+F6 精确会话不被扫描预算饿死：pass。构造 820 个更新噪声会话把精确会话挤出 MAX_SCAN=800 窗口后仍能取到其动作；traversal 式 recorded id 不绑定任何会话；预算压到 0.2s 有界退出并给 note。
+
+真实性三原则抽查：无证据不生成事件、时间未知不伪造、失败不误报成功 —— 探针全部通过。
+
+确认缺陷（含复现，详见工位 .herdr-test-evidence/VERIFICATION-REPORT.md）：
+- DEFECT-1 P2 本候选引入：|| 链（含 A && B || C 混合链）首段被认领为 file_read，而 || 的整体 exit 0 不能证明首段成功；当前真实语料 0 命中（442 条中 plain=435、&&=7、||=0）。修复为整条命令不含 || 才解释首段。
+- DEFECT-2 P2 基线既有（0ed2015 同样存在）：同一 session_id 跨多个 rollout 文件时 source_ref 冲突，merge_trace_events 先到先得静默丢事件。真实语料 128 个 session_id 中 19 个受影响，最严重 779 条动作 354 条冲突；端到端 loaded=397/unique_ref=243（丢 154）；HTTP 层 4 条动作仅可见 1 条。
+- DEFECT-3 P2 本候选引入：traceTaskWorking() 读 state.selectedTaskDetail 快照，而该快照只在 openTaskDrawer 赋值、全局 refreshAll 不刷新 → 已完成任务轮询永不停表（每 8s 触发一次带 4s 预算的原生会话扫描）；pending 任务转 working 后自动刷新永不起动。
+- DEFECT-4 P3：强刷整块重建 DOM，用户展开的事件明细每 8s 被收起并闪烁加载态。
+
+门禁判定：pass。F1–F6 六项均达成且无回归；上述 4 项为非阻塞缺陷（无状态写入、无越权、无持久化/并发风险，DEFECT-2 属基线既有），须由 wrapup 转 implementation backlog。

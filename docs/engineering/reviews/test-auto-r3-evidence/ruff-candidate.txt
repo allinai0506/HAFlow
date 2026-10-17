@@ -1,0 +1,43 @@
+--- CAND herdr/native_session_trace.py
+  48 herdr/native_session_trace.py: UP006 [*] Use `dict` instead of `Dict` for type annotation
+  29 herdr/native_session_trace.py: UP006 [*] Use `list` instead of `List` for type annotation
+  18 herdr/native_session_trace.py: UP045 [*] Use `X | None` for type annotations
+  13 herdr/native_session_trace.py: UP006 [*] Use `tuple` instead of `Tuple` for type annotation
+   1 herdr/native_session_trace.py: UP035 `typing.Tuple` is deprecated, use `tuple` instead
+   1 herdr/native_session_trace.py: UP035 `typing.List` is deprecated, use `list` instead
+   1 herdr/native_session_trace.py: UP035 `typing.Dict` is deprecated, use `dict` instead
+   1 herdr/native_session_trace.py: UP035 [*] Import from `collections.abc` instead: `Iterable`, `Sequence`
+   1 herdr/native_session_trace.py: I001 [*] Import block is un-sorted or un-formatted
+   1 herdr/native_session_trace.py: F841 Local variable `clone` is assigned to but never used
+--- CAND herdr/execution_trace.py
+  40 herdr/execution_trace.py: UP006 [*] Use `dict` instead of `Dict` for type annotation
+  12 herdr/execution_trace.py: UP045 [*] Use `X | None` for type annotations
+  10 herdr/execution_trace.py: UP006 [*] Use `list` instead of `List` for type annotation
+   1 herdr/execution_trace.py: UP035 `typing.Tuple` is deprecated, use `tuple` instead
+   1 herdr/execution_trace.py: UP035 `typing.List` is deprecated, use `list` instead
+   1 herdr/execution_trace.py: UP035 `typing.Dict` is deprecated, use `dict` instead
+   1 herdr/execution_trace.py: UP035 [*] Import from `collections.abc` instead: `Iterable`, `Sequence`
+   1 herdr/execution_trace.py: UP006 [*] Use `tuple` instead of `Tuple` for type annotation
+   1 herdr/execution_trace.py: SIM114 [*] Combine `if` branches using logical `or` operator
+   1 herdr/execution_trace.py: PIE810 Call `startswith` once with a `tuple`
+   1 herdr/execution_trace.py: I001 [*] Import block is un-sorted or un-formatted
+   1 herdr/execution_trace.py: FURB167 [*] Use of regular expression alias `re.I`
+   1 herdr/execution_trace.py: F841 Local variable `run_id` is assigned to but never used
+   1 herdr/execution_trace.py: C408 Unnecessary `dict()` call (rewrite as a literal)
+--- CAND console/herdr_factory_console.py
+  54 console/herdr_factory_console.py: BLE001 Do not catch blind exception: `Exception`
+  12 console/herdr_factory_console.py: S110 `try`-`except`-`pass` detected, consider logging the exception
+   3 console/herdr_factory_console.py: SIM102 Use a single `if` statement instead of nested `if` statements
+   3 console/herdr_factory_console.py: S112 `try`-`except`-`continue` detected, consider logging the exception
+   3 console/herdr_factory_console.py: I001 [*] Import block is un-sorted or un-formatted
+   2 console/herdr_factory_console.py: TRY004 Prefer `TypeError` exception for invalid type
+   2 console/herdr_factory_console.py: PLW1510 `subprocess.run` without explicit `check` argument
+   1 console/herdr_factory_console.py: FURB192 Prefer `max` over `sorted()` to compute the maximum value in a sequence
+   1 console/herdr_factory_console.py: F841 Local variable `latest_v` is assigned to but never used
+   1 console/herdr_factory_console.py: F541 [*] f-string without any placeholders
+   1 console/herdr_factory_console.py: F401 [*] `shutil` imported but unused
+   1 console/herdr_factory_console.py: DTZ005 `datetime.datetime.now()` called without a `tz` argument
+--- CAND tests/test_execution_trace.py
+   3 tests/test_execution_trace.py: I001 [*] Import block is un-sorted or un-formatted
+--- CAND tests/test_console_execution_trace.py
+   1 tests/test_console_execution_trace.py: PLW1510 `subprocess.run` without explicit `check` argument

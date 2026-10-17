@@ -1,0 +1,22 @@
+段落5 · 门禁执行与工位内循环收口（wf-haflow-1016-02-test-auto-r3）
+
+## 门禁结论
+HERDR_GATE_VERDICT: blocked
+- 阻塞项 1：DEFECT-5 —— 候选 4e543ee 在 console/herdr_factory_console.py:3934 新增 `.td-ev-icon { margin-right: 5px; }`，使既有设计令牌守卫 tests/test_console_standard_layout_tabs.py::test_no_spacing_grid_violations 由绿转红（基线 0ed2015 同正则 0 命中，`git blame` 归属候选本身）。影响面定向全量：60 个引用被改模块的测试文件 → 1 failed / 781 passed / 93 subtests。
+- 非阻塞缺陷 4：DEFECT-1（`||` 链首段被认领为 file_read，本候选引入，真实语料当前 0 命中）、DEFECT-2（同 session_id 跨文件的 source_ref 冲突静默丢事件，基线 0ed2015 既有）、DEFECT-3（trace 轮询读状态快照，停表/起动都不成立，本候选引入）、DEFECT-4（P3 强刷重建 DOM 丢失展开态）。
+- 六项验收：F1 实现有效（附 DEFECT-1）、F2 pass、F3 pass、F4 附 DEFECT-3/4/5、F5 pass、F6 pass。真实性三原则抽查全部通过。
+- business_acceptance 已记录：event id 93154，verdict=blocked，AC-1..AC-9（AC-2=blocked，其余 pass），三条 observation 回执。
+
+## 只评不改合规
+全程 `git diff` 为空、`git diff --check` clean、HEAD 始终 4e543ee6a9e9cc9d4269222a177a94aa12f78275；未修改业务代码、未修改 harness、未启动真实 Agent、未调用收费模型、未写生产 state.db。所有产物落 `.herdr-test-evidence/`。
+
+## 工位内循环（herdr-loop）结果
+5 轮自检全部 50.0 / converged=False，STATE.md status=exhausted，BLOCKER.md 已生成。两个独立且本节点无法自愈的外部障碍：
+1. `.herdr-loop/EVALUATOR.sh` 跑全量 `pytest`（4598 items），`herdr/evaluator.py:131` 硬编码 `timeout=300`；本机实测全量 28–35 分钟（30% 用时约 19 分钟），必然 `evaluator_exit:124` → `missing_exit_receipt:TEST_EXIT` → correctness 0.0。已排除自身并发干扰：第 2、3 轮在机器空闲下各得 301s 精确超时，同分同因。
+2. 即便给足时间，`pytest` 在本候选上不可能全绿（DEFECT-5 红测），而"不修改业务代码"是本节点硬约束，修复权属于实现工位 → 绝对零缺陷规则（evaluator.py:857）注定 correctness < 100。
+结论：100.0 收敛对"只评不改"的 test 节点结构性不可达，属 harness 口径问题（见报告 OBS-6），不是本工位未完成验证工作。据此按熔断流程输出 HERDR_TASK_BLOCKER，不输出 HERDR_TASK_DONE。
+
+## 交由总指挥仲裁
+- 修复建议（最小改动）：`.td-ev-icon` 的 `margin-right` 取 4px 或 8px 或复用既有 token 变量；改后重跑该守卫 + 60 文件影响面回归。
+- 建议同时收口 DEFECT-1（整条命令不含 `||` 才解释首段）与 DEFECT-3（轮询内刷新任务状态或以终态收口）；DEFECT-2 建议转 implementation backlog（把文件身份纳入 source_ref）。
+- harness 侧建议：评估器取值改为节点 DoD 专项命令，或超时可配（如 HERDR_LOOP_EVAL_TIMEOUT），或为 test/评审类节点定义单独收敛口径。

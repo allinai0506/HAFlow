@@ -1,0 +1,24 @@
+段落6 · 完成申报未落账（本工位操作顺序失误，如实记录）
+
+## 事实
+1. 已执行：`herdr-task set wf-haflow-1016-02-test-auto-r3 agent_done` → `working -> agent_done`
+2. 已执行：`herdr-task set ... completed --verdict blocked --affected-task-id impl-trace-core-1016-r3 --note <缺陷清单>` → `agent_done -> completed`，`[VERIFIED CANDIDATE] head=4e543ee6a9e9cc9d4269222a177a94aa12f78275`
+3. 随后执行 `herdr-task report-completion wf-haflow-1016-02-test-auto-r3 --identity-file .../receipt-qwhq66jz.json --artifact ×5` 失败：
+   `ValueError: Task is not executing`（herdr/completion_receipt.py:197 —— `report_completion` 要求 status ∈ {pending, dispatched, working, rework}）
+
+## 判定
+本工位自身的过程缺陷，与候选无关：完成申报（receipt-v1）必须在状态推进之前执行，我按"先输出门禁结论并推进状态"的字面顺序先推进了状态，导致完成声明窗口关闭。凭据未过期（`completion_epoch_started_at=1792196697`，24h 内），失败原因不是过期。
+不可自纠：`completed` 的合法后继只有 `committed`/`cleanup_ready`，状态机没有回退到执行态的路径；`renew-completion` 需要主控签发的 `--operation-id`，属主控权限。禁止伪造结果、禁止擅自扩大授权，因此停在此处并上报。
+
+## 已经落账的机器可消费信号（不受本次失败影响）
+- `stage_verdict = blocked`、`stage_verdict_note`（898 字，含 DEFECT-1..5 与修复建议）、`stage_verdict_affected_task_ids = [impl-trace-core-1016-r3]`
+- `business_acceptance_recorded` 事件 id 93154：candidate_sha=4e543ee…、verdict=blocked、AC-1..AC-9（AC-2=blocked）、`required_criteria_sha256=de4e6a2b…488d`、三条 observation 回执
+- 受管 checkpoint 分段 5 条 + 聚合：obs_2b413d02… / obs_0dadba4e… / obs_eec504c4… / obs_c576c5c4… / 聚合 obs_564cad77…（sha256 见各次发布回执）
+- `.herdr-loop/BLOCKER.md`（iteration 5/5，status=exhausted，score 50.0）
+
+## 请求主控处理（二选一或并用）
+1. 直接把 `stage_verdict=blocked` + `business_acceptance`(event 93154) 作为本门禁的消费输入，按 `--affected-task-id impl-trace-core-1016-r3` 做选择性重规划，把 DEFECT-5 退回实现工位；本次缺的只是 receipt-v1 完成声明记账，不影响结论有效性。
+2. 若 receipt-v1 记账为硬前置：签发 `renew-completion --operation-id <op>` 的新 epoch，并把本 test 工位重新置入执行态（`rework`/`working`）以便仅补跑 `report-completion`；工件、证据与结论均已落盘，无需重跑验证。
+
+## 本工位结论不变
+HERDR_GATE_VERDICT: blocked —— 1 阻塞（DEFECT-5 候选引入禁用 spacing token，使既有守卫测试由绿转红）+ 4 非阻塞缺陷 + 6 项观察。只评不改全程合规：`git diff` 为空、`git diff --check` clean、HEAD 仍为冻结候选。
