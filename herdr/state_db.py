@@ -1654,8 +1654,7 @@ def save_task(
 
             if previous.get('dispatch_operation_id') is not None and (
                     existing['workflow_id'] != wid or existing['node'] != node
-                    or any(previous.get(key) not in (None, '') and previous[key] != task_dict.get(key)
-                           for key in ('run_id', 'execution_id', 'launch_intent_id', 'supersedes'))):
+                    or any(previous.get(key) != task_dict.get(key) for key in ('run_id', 'execution_id', 'launch_intent_id', 'supersedes'))):
                 raise ValueError('cannot change dispatch task registration identity')
 
             if is_proven_unbound and status == 'superseded' and proven_intent_payload:

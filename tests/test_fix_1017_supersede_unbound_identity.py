@@ -163,6 +163,61 @@ class TestSupersedeUnboundIdentity(unittest.TestCase):
             state_db.save_task(task, self.db_path)
         self.assertIn("cannot change dispatch task registration identity", str(ctx.exception))
 
+    def test_bound_task_with_null_supersedes_rejects_injecting_supersedes(self):
+        """When an existing bound task has durable supersedes=None, a later save cannot inject supersedes."""
+        wf_id = "wf-test-null-supersedes"
+        task_id = "t-bound-null-sup"
+        node = "impl"
+        state_db.save_workflow({"workflow_id": wf_id, "status": "running"}, self.db_path)
+
+        conn = state_db.get_db_connection(self.db_path)
+        # Durable launch intent event with supersedes=None
+        conn.execute(
+            """INSERT INTO events (workflow_id, task_id, event_type, source, payload_json, timestamp, node_id)
+               VALUES (?, ?, 'launch_intent', 'launch', ?, 1000.0, ?)""",
+            (
+                wf_id,
+                task_id,
+                json.dumps({
+                    "task_id": task_id,
+                    "dispatch_operation_id": 200,
+                    "intent_id": "intent-200",
+                    "execution_id": wf_id,
+                    "supersedes": None,
+                    "resources": {"run_id": "run-200"},
+                }),
+                node,
+            ),
+        )
+
+        payload = {
+            "task_id": task_id,
+            "workflow_id": wf_id,
+            "node": node,
+            "stage": node,
+            "status": "working",
+            "dispatch_operation_id": 200,
+            "run_id": "run-200",
+            "execution_id": wf_id,
+            "launch_intent_id": "intent-200",
+            "supersedes": None,
+        }
+        conn.execute(
+            """INSERT INTO tasks (task_id, workflow_id, node, stage, agent, status, payload_json, created_at, updated_at, version)
+               VALUES (?, ?, ?, ?, 'agent', 'working', ?, 1000.0, 1000.0, 1)""",
+            (task_id, wf_id, node, node, json.dumps(payload)),
+        )
+        conn.commit()
+        conn.close()
+
+        task = state_db.get_task(task_id, self.db_path)
+        # Attempt to inject a fake supersedes
+        task["supersedes"] = "t-fake-predecessor"
+
+        with self.assertRaises(ValueError) as ctx:
+            state_db.save_task(task, self.db_path)
+        self.assertIn("cannot change dispatch task registration identity", str(ctx.exception))
+
     def test_supersede_unbound_task_rejects_identity_tampering(self):
         """Superseding an unbound task cannot alter its proven launch intent identity."""
         wf_id = "wf-test-unbound-tamper"
