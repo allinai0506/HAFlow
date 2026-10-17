@@ -489,6 +489,61 @@ class TestTeardownCleanedCommit(unittest.TestCase):
         self.assertEqual(updated["status"], "completed")
         self.assertIsNotNone(updated.get("commit"))
 
+    def test_finalize_none_mode_reconciles_unadopted_head_before_cleanup(self):
+        """When a none-mode task has clean worktree but unadopted advanced HEAD, finalize adopts HEAD and records canonical commit before cleanup."""
+        spec = importlib.util.spec_from_file_location(
+            "herdr_controller",
+            str(HERDR_ROOT / "services" / "herdr-controller.py"),
+        )
+        ctl = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(ctl)
+
+        repo = self.tmp_dir / "clone-unadopted"
+        repo.mkdir()
+        def git(*args):
+            return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True)
+
+        git("init", "-b", "main")
+        git("config", "user.name", "Test")
+        git("config", "user.email", "test@example.invalid")
+        (repo / "base.txt").write_text("base")
+        git("add", ".")
+        git("commit", "-m", "base")
+        baseline_sha = git("rev-parse", "HEAD").stdout.strip()
+
+        # Advance HEAD with clean worktree (e.g. prior attempt created commit before interruption)
+        (repo / "output.txt").write_text("clean output committed on HEAD")
+        git("add", ".")
+        git("commit", "-m", "preservation output")
+        advanced_head = git("rev-parse", "HEAD").stdout.strip()
+        self.assertNotEqual(advanced_head, baseline_sha)
+
+        task_id = "task-unadopted-head"
+        task = {
+            "task_id": task_id,
+            "workflow_id": "wf-1",
+            "node": "audit",
+            "stage": "audit",
+            "status": "completed",
+            "clone_path": str(repo),
+            "baseline_commit": baseline_sha,
+            "branch": "main",
+            "commit": None,  # unadopted!
+            "integration_mode": "none",
+        }
+        self.store.save_workflow({"workflow_id": "wf-1", "status": "running"})
+        self.store.save_task(task)
+
+        os.environ["HERDR_STATE_DB"] = str(self.db_path)
+        os.environ["TASKS_FILE"] = str(self.tasks_file)
+        res = ctl.finalize_completed_task(task_id)
+        self.assertEqual(res, {"retryable": False, "kind": "finalized"})
+
+        final_task = self.store.get_task(task_id)
+        self.assertEqual(final_task["status"], "cleaned")
+        # Canonical commit MUST be bound to the advanced HEAD!
+        self.assertEqual(final_task.get("commit"), advanced_head)
+
 
 if __name__ == "__main__":
     unittest.main()

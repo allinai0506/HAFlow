@@ -362,7 +362,7 @@ class TestAgySmokeProbeSanitization(unittest.TestCase):
         m = self.m
         project = {"project_id": "p1", "project_root": "/tmp"}
         fake_run_result = {
-            "stdout": "AI: Out of credits\nHERDR_PREFLIGHT_OK",
+            "stdout": "[AI: Out of credits]\nHERDR_PREFLIGHT_OK",
             "stderr": "",
             "returncode": 0,
             "timeout": False,
@@ -377,6 +377,19 @@ class TestAgySmokeProbeSanitization(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["final_status"], "READY")
         self.assertTrue(rows[0]["request_verified"])
+
+    def test_agy_standalone_out_of_credits_is_preserved_and_classified_token_exhausted(self):
+        m = self.m
+        standalone = "AI: Out of credits\n"
+        error_line = "Error: AI: Out of credits\n"
+
+        # Standalone lines without status-bar indicators must NOT be stripped
+        self.assertEqual(m.strip_known_status_chrome("agy", standalone), standalone)
+        self.assertEqual(m.strip_known_status_chrome("agy", error_line), error_line)
+
+        # Standalone line must be properly classified as TOKEN_EXHAUSTED
+        self.assertEqual(m.classify_text(m.strip_known_status_chrome("agy", standalone)), "TOKEN_EXHAUSTED")
+        self.assertEqual(m.classify_text(m.strip_known_status_chrome("agy", error_line)), "TOKEN_EXHAUSTED")
 
 
 if __name__ == "__main__":

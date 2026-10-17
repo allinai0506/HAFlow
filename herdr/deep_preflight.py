@@ -261,9 +261,15 @@ def classify_text(text):
 # credits response is read as a zero balance). The badge is terminal chrome
 # shown alongside an otherwise usable session and must not be classified as
 # a startup blocker; real depletion still surfaces later as prompt/runtime
-# failures. Scope this exception to agy only.
+# failures. Scope this exception to agy only, and restrict stripping to
+# recognizable status-bar indicators (shortcuts, delimiter dot/pipe, bracketed badges)
+# so genuine standalone/error depletion lines remain classified as TOKEN_EXHAUSTED.
 AGY_SPURIOUS_CREDITS_LINE = re.compile(
-    r"[^\n]*\bAI:\s*Out of credits\b[^\n]*\n?", re.I)
+    r"(?=[^\n]*(?:shortcuts|·|[|│]|\[\s*AI:\s*Out of credits|\b(?:Gemini|Claude|Flash|Pro)\b[^\n]*·))"
+    r"(?![^\n]*\b(?:error|fatal|fail(?:ed|ure)?|exception)\b)"
+    r"[^\n]*\bAI:\s*Out of credits\b[^\n]*\n?",
+    re.I
+)
 
 
 def strip_known_status_chrome(agent, text):

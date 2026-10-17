@@ -6784,7 +6784,17 @@ def finalize_completed_task(task_id):
                 return {"retryable": True, "kind": "error", "rc": status_res.returncode}
             from herdr.repo_hygiene import teardown_output_diagnosis
             diag = teardown_output_diagnosis(status_res.stdout, task_id=task_id)
-            if diag.get("reason"):
+
+            head_res = subprocess.run(
+                ["git", "-C", clone_path, "rev-parse", "HEAD"],
+                capture_output=True, text=True
+            )
+            head_sha = head_res.stdout.strip() if head_res.returncode == 0 else ""
+            task_commit = task.get("commit")
+            baseline = task.get("baseline_commit")
+            unadopted_head = bool(head_sha and head_sha != task_commit and head_sha != baseline)
+
+            if diag.get("reason") or unadopted_head:
                 commit_env = dict(os.environ)
                 commit_env["HERDR_DEFER_HEAVY_TESTS"] = "1"
                 commit_proc = subprocess.run(
@@ -6801,6 +6811,22 @@ def finalize_completed_task(task_id):
                 )
                 if commit_proc.returncode == 75:
                     return {"retryable": True, "kind": "wait", "rc": 75}
+                elif commit_proc.returncode == 3:
+                    # Empty commit: no changes to adopt
+                    pass
+                elif commit_proc.returncode == 4:
+                    commit_payload = _parse_commit_result(commit_proc.stdout)
+                    print(
+                        f"[FINALIZE REFUSED] "
+                        f"task={task_id} "
+                        f"reason={commit_payload.get('reason')}"
+                    )
+                    _escalate_finalize(
+                        get_task(task_id) or task,
+                        "commit_refused",
+                        commit_payload,
+                    )
+                    return {"retryable": False, "kind": "refused", "rc": 4}
                 elif commit_proc.returncode != 0:
                     from herdr.task_delivery import diagnostic_tail
                     print(
@@ -6818,6 +6844,19 @@ def finalize_completed_task(task_id):
                         },
                     )
                     return {"retryable": True, "kind": "error", "rc": commit_proc.returncode}
+                else:
+                    task = get_task(task_id) or task
+
+            if head_sha and head_sha != baseline:
+                refreshed_commit = (get_task(task_id) or task).get("commit")
+                if not refreshed_commit:
+                    from herdr import kernel
+                    kernel.update_task_metadata(
+                        task_id,
+                        {"commit": head_sha, "commit_result": "reconciled"},
+                        store=_get_store(),
+                    )
+                    task = get_task(task_id) or task
         if not set_task_status(
             task_id,
             "cleanup_ready"

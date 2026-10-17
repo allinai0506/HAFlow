@@ -5970,7 +5970,14 @@ def _adopt_head_if_attributable(task_id, task, clone, allow_rebase=False):
             },
             store=_get_store(),
         )
-        set_status(task_id, "committed")
+        is_none_mode = (task.get("integration_mode") or "none") == "none"
+        preserve_status = ("completed", "cleanup_ready", "cleaned") if is_none_mode else ("cleanup_ready", "cleaned")
+        target_status = task["status"] if task.get("status") in preserve_status else "committed"
+        if task.get("status") != target_status:
+            set_status(
+                task_id,
+                target_status
+            )
         short_base = str(detail.get("baseline") or "")[:8]
         print(
             f"[ADOPTED] task={task_id} "
