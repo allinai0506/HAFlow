@@ -5431,29 +5431,43 @@ def commit_task(task_id, message=None, allow_rebase=False):
             "cleanup_ready",
             "cleaned",
         ) and existing:
-            print(f"[COMMITTED] {task_id}")
-            print(f"[COMMIT] {existing}")
-            stored_result = task.get("commit_result")
-            if stored_result not in ("created", "adopted"):
-                stored_result = "created"
-            print(
-                "HERDR_COMMIT_RESULT="
-                + json.dumps(
-                    {
-                        "task_id": task_id,
-                        "result": stored_result,
-                        "commit": existing,
-                        "status": task.get("status"),
-                    },
-                    ensure_ascii=False,
+            clone_path = task.get("clone_path")
+            has_uncommitted = False
+            if clone_path and os.path.exists(clone_path):
+                status_res = subprocess.run(
+                    ["git", "-C", clone_path, "status", "--porcelain", "--untracked-files=normal"],
+                    capture_output=True, text=True
                 )
+                from herdr.repo_hygiene import teardown_output_diagnosis
+                diag = teardown_output_diagnosis(status_res.stdout, task_id=task_id)
+                has_uncommitted = bool(diag.get("reason"))
+            if not has_uncommitted:
+                print(f"[COMMITTED] {task_id}")
+                print(f"[COMMIT] {existing}")
+                stored_result = task.get("commit_result")
+                if stored_result not in ("created", "adopted"):
+                    stored_result = "created"
+                print(
+                    "HERDR_COMMIT_RESULT="
+                    + json.dumps(
+                        {
+                            "task_id": task_id,
+                            "result": stored_result,
+                            "commit": existing,
+                            "status": task.get("status"),
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+                return
+        elif task.get("status") in ("cleanup_ready", "cleaned"):
+            pass
+        else:
+            print(
+                f"Task cannot commit from status: "
+                f"{task['status']}"
             )
-            return
-        print(
-            f"Task cannot commit from status: "
-            f"{task['status']}"
-        )
-        sys.exit(2)
+            sys.exit(2)
 
     clone = task.get("clone_path")
 
@@ -5576,10 +5590,12 @@ def commit_task(task_id, message=None, allow_rebase=False):
         store=_get_store(),
     )
 
-    set_status(
-        task_id,
-        "committed"
-    )
+    target_status = task["status"] if task.get("status") in ("cleanup_ready", "cleaned") else "committed"
+    if task.get("status") != target_status:
+        set_status(
+            task_id,
+            target_status
+        )
 
     print(f"[COMMITTED] {task_id}")
     print(f"[COMMIT] {commit_hash}")
@@ -6555,6 +6571,8 @@ def _teardown_output_guard(task):
             return {"reason": "clone_git_inventory_unknown"}
         diagnosis = teardown_output_diagnosis(result["stdout"], task_id=task.get("task_id", ""))
         if diagnosis["reason"]:
+            if task.get("integration_mode") == "none":
+                diagnosis["remediation_cmd"] = f"git -C <clone> status; herdr-task commit {task.get('task_id', '')}"
             return diagnosis
     if (task.get("integration_mode") == "git" and task.get("status") in {"completed", "committed"}):
         return {"reason": "git_finalize_pending", "remediation_cmd": "herdr-task commit " + str(task.get("task_id")) + "; herdr-task integrate " + str(task.get("task_id"))}

@@ -81,18 +81,65 @@ def _git(repo, *args):
     return result.stdout.strip()
 
 
+def _is_joint_candidate_covering(store, task, sha, note_sha):
+    try:
+        events = store.list_events(workflow_id=task.get('workflow_id'), event_type='candidate_frozen')
+        for ev in events:
+            payload = ev.get('payload') or {}
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                except Exception:
+                    payload = {}
+            if payload.get('candidate_sha') == note_sha:
+                for item in (payload.get('delivery_inventory') or []):
+                    if item.get('task_id') == task.get('task_id') and item.get('commit') == sha:
+                        return True
+    except Exception:
+        pass
+
+    repo = Path(task.get('source_repo') or '').expanduser()
+    if repo.is_dir():
+        try:
+            res = subprocess.run(
+                ['git', '-C', str(repo), 'merge-base', '--is-ancestor', sha, note_sha],
+                capture_output=True,
+                timeout=10,
+            )
+            if res.returncode == 0:
+                return True
+        except Exception:
+            pass
+    return False
+
+
 def _publication(task, notes, store):
     if task.get('status') not in {'integrated','cleanup_ready','cleaned'}:
         raise ValueError('task must be integrated before PR publication')
     note = select_effective_delivery(wd.annotate_notes(notes))
+    if not note:
+        raise ValueError('delivery identity does not bind the integrated candidate: no effective delivery note')
     sha = task.get('integrated_commit')
     branch = task.get('integration_branch')
     if branch != f"herdr/integration-{task['task_id']}" or task.get('integration_ref') != f"refs/herdr/tasks/{task['task_id']}":
         raise ValueError('publication requires the task-owned integration refs')
-    if (not note or not re.fullmatch(r'[0-9a-f]{40}', str(sha or ''))
-            or _body_value(note,'candidate_sha') != sha
-            or _body_value(note,'delivery_branch') != branch):
+    if not re.fullmatch(r'[0-9a-f]{40}', str(sha or '')):
         raise ValueError('delivery identity does not bind the integrated candidate')
+
+    note_sha = _body_value(note, 'candidate_sha')
+    note_branch = _body_value(note, 'delivery_branch')
+
+    if note_sha == sha:
+        if note_branch and note_branch != branch:
+            raise ValueError('delivery identity does not bind the integrated candidate')
+        effective_sha = sha
+        effective_branch = branch
+    elif _is_joint_candidate_covering(store, task, sha, note_sha):
+        effective_sha = note_sha
+        effective_branch = note_branch or branch
+    else:
+        raise ValueError('delivery identity does not bind the integrated candidate')
+
     if _body_value(note,'review_task') == _body_value(note,'test_gate'):
         raise ValueError('review and test gates must be distinct tasks')
     gates = []
@@ -105,14 +152,14 @@ def _publication(task, notes, store):
         if not any(re.search(r'(?:^|[-_])'+expected+r'(?:$|[-_])',identity) for identity in identities):
             raise ValueError('delivery gate task has no matching review/test role')
         if (gate.get('workflow_id') != task['workflow_id'] or gate.get('stage_verdict') != 'pass'
-                or gate.get('candidate_sha') != sha or gate.get('verified_candidate_sha') != sha or gate.get('status') not in {'completed','committed','integrated','cleanup_ready','cleaned'}):
+                or gate.get('candidate_sha') != effective_sha or gate.get('verified_candidate_sha') != effective_sha or gate.get('status') not in {'completed','committed','integrated','cleanup_ready','cleaned'}):
             raise ValueError('delivery gate does not certify this workflow candidate')
         gates.append(gate)
     from .business_gate import business_gates_blockers
     if business_gates_blockers(store, store.get_workflow(task['workflow_id']) or {}, gates,
                                {g.get('node') or g.get('stage') for g in gates}):
         raise ValueError('delivery gate business acceptance unavailable')
-    return sha, branch, task.get('base_branch') or _body_value(note,'base') or 'main'
+    return effective_sha, effective_branch, task.get('base_branch') or _body_value(note,'base') or 'main'
 
 
 def _matching_pr(rows, branch, base, sha):
@@ -140,8 +187,12 @@ def create_task_pr(store, task_id, *, title, body='', draft=False, client=None):
         repo = Path(task.get('source_repo') or '').expanduser()
         if not repo.is_dir():
             raise ValueError('integrated source repository missing')
+        task_commit = task.get('integrated_commit') or sha
         for ref in (branch, task.get('integration_ref')):
-            if not ref or _git(repo,'rev-parse','--verify',f'{ref}^{{commit}}') != sha:
+            if not ref:
+                raise ValueError('integrated ref differs from recorded candidate')
+            ref_commit = _git(repo, 'rev-parse', '--verify', f'{ref}^{{commit}}')
+            if ref_commit not in {sha, task_commit}:
                 raise ValueError('integrated ref differs from recorded candidate')
         _git(repo,'check-ref-format',f'refs/heads/{branch}')
         _git(repo,'check-ref-format',f'refs/heads/{base}')

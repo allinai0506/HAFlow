@@ -1224,7 +1224,12 @@ def main():
             pane_id = None
         # Expected identity is the start receipt, never the foreign queried instance.
         print("HERDR_WORKER_FAILURE=" + json.dumps(failure, sort_keys=True), file=sys.stderr, flush=True)
-        if clone and clone.exists() and pane_id is None and not agent_start_attempted and not is_task_active_in_registry(args.task_id):
+        can_cleanup_clone = (
+            clone and clone.exists() and pane_id is None
+            and (not agent_start_attempted or failure.get("disposition") in ("pane_reclaimed", "rolled_back"))
+            and not is_task_active_in_registry(args.task_id)
+        )
+        if can_cleanup_clone:
             print(
                 f"[WORKER ROLLBACK] Cleaning up incomplete clone: {clone}",
                 file=sys.stderr

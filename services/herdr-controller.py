@@ -6755,6 +6755,29 @@ def finalize_completed_task(task_id):
     # 不需要 Git 集成
     # --------------------------------
     elif mode == "none":
+        clone_path = task.get("clone_path")
+        if clone_path and os.path.exists(clone_path):
+            status_res = subprocess.run(
+                ["git", "-C", clone_path, "status", "--porcelain", "--untracked-files=normal"],
+                capture_output=True, text=True
+            )
+            from herdr.repo_hygiene import teardown_output_diagnosis
+            diag = teardown_output_diagnosis(status_res.stdout, task_id=task_id)
+            if diag.get("reason"):
+                commit_env = dict(os.environ)
+                commit_env["HERDR_DEFER_HEAVY_TESTS"] = "1"
+                subprocess.run(
+                    [
+                        TASK_MANAGER,
+                        "commit",
+                        task_id,
+                        "--message",
+                        f"chore(closure): preserve worktree output ({task_id})"
+                    ],
+                    text=True,
+                    capture_output=True,
+                    env=commit_env
+                )
         if not set_task_status(
             task_id,
             "cleanup_ready"
