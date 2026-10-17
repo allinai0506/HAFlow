@@ -153,7 +153,7 @@ Evidence:
 
 ## 模板隔离与运行冻结定义（2026-10-17）
 
-`FACT` 模板库选中态按空间隔离：`state.templateSelections[spaceId]`；`effectiveTemplateId()` 依次取 空间选择 → 项目实际模板（`project_detail` 新增 `workflow_template`，读项目 workflow.json）→ 默认模板。只有用户点选模板卡片、或保存模板成功后才会记账（`selectTemplateInLibrary(id,remember)` 传 `remember=1`）；程序化显示（模板库初始渲染、切空间刷新）不写选择，唯一例外是项目模板已删除/不可用时的回落对齐（把回落项同步为空间选择，见下）。切换空间时若当前在模板库视图，选中态随空间重绘（`rer&&state.shellView==='templates'` 时刷新，避免与 `paintShellPage` 重复渲染）。
+`FACT` 模板库选中态按空间隔离：`state.templateSelections[spaceId]`；`effectiveTemplateId()` 依次取 空间选择 → 项目实际模板（`project_detail` 新增 `workflow_template`，读项目 workflow.json）→ 默认模板。只有用户点选模板卡片、或保存模板成功后才会记账（`selectTemplateInLibrary(id,remember)` 传 `remember=1`）；程序化显示（模板库初始渲染、切空间刷新）不写选择，唯一例外是项目模板已删除/不可用时的回落对齐（把回落项同步为空间选择，见下）。切换空间时若当前在模板库视图，选中态随空间重绘（`rer&&state.shellView==='templates'` 时刷新，避免与 `paintShellPage` 重复渲染）。冷启动直开或恢复模板库视图（`?view=templates` / 恢复 `shellView==='templates'`）时先渲染库、再 `refreshAll()` 水合空间/项目后按有效模板重绘（overview 后台拉取，不阻塞首屏），避免选中回落默认模板、"选用并启动" 暂不可用。
 
 `FACT` 阶段卡片与图投影同源"运行冻结定义"：`workflow_stages(wid,p,w,definition)` 解析顺序 definition → `w.config`（运行记录冻结定义）→ 项目 workflow.json → 内置 STAGES；`workflow_detail` 先用 `_referenced_task_inventory` 解析 definition 再渲染阶段，阶段、手动推进与回滚选项不再被项目后续换模板（reprovision）改写。
 
@@ -164,4 +164,5 @@ Evidence:
 Evidence:
 - `console/herdr_factory_console.py` — `workflow_stages` / `_project_workflow_template` / `project_detail` / `effectiveTemplateId` / `rememberSpaceTemplate` / `selectTemplateInLibrary` / `populateTemplateSelect` / `launchWithCurrentTemplate` / `saveTemplate` / `selectSpace`
 - `tests/test_console_project_creation.py` — 冻结定义优先级（直接调用 + `workflow_detail` 级）、`workflow_template` 暴露
-- `tests/test_console_templates.py` — `TestTemplateLibraryBehavior`（空间隔离、仅用户点选记账、preferred 透传、保存模板记账、过期详情/填充丢弃、保存按发起空间记账、回落对齐）
+- `tests/test_console_templates.py` — `TestTemplateLibraryBehavior`（空间隔离、仅用户点选记账、preferred 透传、保存模板记账、过期详情/填充丢弃、保存按发起空间记账、回落对齐、直开视图水合重绘）
+- `tests/test_console_workflow_latency.py` — 启动调度性能回归（`__templates__` 先调度模板库、overview 后台水合不阻塞启动）

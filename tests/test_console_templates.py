@@ -483,6 +483,37 @@ async function fetchTemplates(){
 })().catch(e=>{console.error(e);process.exitCode=1});
 ''')
 
+    def test_direct_templates_view_load_hydrates_project_before_render(self):
+        """直开/恢复模板库视图时必须水合项目并按有效模板重绘(Codex P2)。"""
+        source = self.html
+        block = source[source.index('async function initFromUrlOrState('):
+                       source.index("window.addEventListener('popstate'")]
+        self.run_js(block, r'''
+const calls=[];
+const state={dashMode:false,opsMode:false,shellView:'workbench',workflowId:null};
+const window={location:{search:'?view=templates'}};
+async function api(){throw new Error('unexpected api call')}
+async function refreshAll(){calls.push('refreshAll')}
+async function showTemplateLibrary(){calls.push('showTemplateLibrary')}
+async function showDashboard(){calls.push('showDashboard')}
+async function showOpsCenter(){calls.push('showOpsCenter')}
+function showShellView(v){calls.push('showShellView:'+v)}
+async function loadWorkflow(){}
+function toast(){}
+// SOURCE
+(async()=>{
+ await initFromUrlOrState();
+ assert.ok(calls.includes('showTemplateLibrary'),'?view=templates 必须渲染模板库');
+ assert.ok(calls.includes('refreshAll'),'?view=templates 必须水合项目/空间并重绘,否则有效模板回落默认');
+ assert.ok(calls.indexOf('showTemplateLibrary')<calls.indexOf('refreshAll'),'先渲染,水合后再重绘');
+ calls.length=0;
+ window.location.search='';
+ state.shellView='templates';state.workflowId='__templates__';
+ await initFromUrlOrState();
+ assert.ok(calls.includes('showTemplateLibrary')&&calls.includes('refreshAll'),'恢复模板库视图同样必须水合后重绘');
+})().catch(e=>{console.error(e);process.exitCode=1});
+''')
+
     def test_populate_template_select_prefers_requested_template(self):
         source = self.html
         block = source[source.index('async function populateTemplateSelect('):

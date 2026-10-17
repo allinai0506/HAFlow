@@ -125,7 +125,9 @@ function toast(message){throw new Error(message);}
   assert.equal(calls[0],'/api/workflow?id=wf-remembered&lightweight=1');
   assert.equal(state.projectId,'project');assert.equal(state.spaceId,'space');
  }else{
-  assert.deepEqual(paint,[]);assert.deepEqual(calls,[savedId==='__templates__'?'templates':'overview']);
+  assert.deepEqual(paint,[]);
+  assert.deepEqual(calls,savedId==='__templates__'?['templates','overview']:['overview'],
+    '__templates__ must dispatch the library first, then hydrate overview without blocking startup');
  }
  release();await startup;completed=true;
 })().catch(e=>{console.error(e);process.exitCode=1});

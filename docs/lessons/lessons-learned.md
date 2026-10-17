@@ -6925,15 +6925,17 @@ git log --oneline 1d2b25b..f15b1c3   # test_finding_verifier 行号锚点修复
 | 渲染历史运行读"项目当前配置" | 历史事实（run）不接受后续配置漂移改写 | `workflow_stages` 冻结优先：definition → `w.config` → 项目文件 → STAGES，与图投影冻结快照语义对齐 |
 | 程序化显示覆盖用户选择 | "记住选择"只发生在用户意图入口 | `selectTemplateInLibrary(id,remember)` 仅卡片 onclick / 保存模板传 `remember=1` |
 | 异步重建 DOM 丢失选中值 | 重建后必须显式恢复目标值 | `populateTemplateSelect(selId,preferredId)` 计算 wanted 后 `sel.value=wanted`；未知模板回落默认 |
+| 深链接/恢复视图先渲染后水合 | 首屏可先渲染，但选中依赖的权威上下文必须在同一入口水合并重绘 | `?view=templates` 直开/恢复先 `showTemplateLibrary()` 再 `refreshAll()` 水合空间/项目重绘 |
 
 ### 操作规范
 
 1. 多工作空间/多租户控制台的"当前选中"不得用全局单例变量；切换空间时相关视图必须按空间状态重绘。
 2. 任何"历史运行"视图的数据源必须是运行冻结定义；项目当前配置只作无冻结时的回退。
 3. 写入用户选择的路径与程序化展示路径必须分开；异步 DOM 重建不得丢失用户选择。
+4. 深链接/恢复视图不得把"未水合回落值"当最终选中态；渲染入口必须在同一流程内水合空间/项目等权威上下文并按之重绘（首屏可先渲染以保证响应）。
 
 ### 验证命令 / 守护测试
 
-`pytest -q tests/test_console_templates.py tests/test_console_project_creation.py`（18 项新回归：空间隔离、冻结定义优先、preferred 透传、保存模板记账、过期继续帧丢弃与回落对齐）；`pytest -q tests/test_console_*.py`。
+`pytest -q tests/test_console_templates.py tests/test_console_project_creation.py`（19 项新回归：空间隔离、冻结定义优先、preferred 透传、保存模板记账、过期继续帧丢弃、回落对齐与直开视图水合重绘）；`pytest -q tests/test_console_*.py`（含性能回归 `test_plain_home_restores_workflow_before_slow_overview`：`__templates__` 先调度模板库、overview 后台水合不阻塞启动）。
 
 ---

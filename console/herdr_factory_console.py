@@ -11931,7 +11931,7 @@ async function initFromUrlOrState(){
   }
   if(!qWf&&!qTask&&!qPane&&!qOps&&!qView){
     if(state.dashMode)showDashboard();
-    else if(state.workflowId==='__templates__'||state.shellView==='templates')showTemplateLibrary();
+    else if(state.workflowId==='__templates__'||state.shellView==='templates'){showTemplateLibrary();refreshAll();}
     else if(state.shellView&&state.shellView!=='workbench')showShellView(state.shellView);
     else state.opsMode?showOpsCenter():refreshAll();
     return;
@@ -11974,7 +11974,9 @@ async function initFromUrlOrState(){
   }else if(state.opsMode){
     await showOpsCenter();
   }else if(state.shellView==='templates'){
+    // 冷启动直开:先渲染,再水合项目/空间并按有效模板重绘(否则 effectiveTemplateId 回落默认模板)
     await showTemplateLibrary();
+    refreshAll();
   }else if(state.shellView&&state.shellView!=='workbench'){
     showShellView(state.shellView);
     refreshAll();
