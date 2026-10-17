@@ -28,6 +28,10 @@ class TestSentinelHardTimeout(unittest.TestCase):
         self.db_path = self.root / "state.db"
         self.store = SQLiteStateStore(self.db_path)
         self.sentinel = load_sentinel()
+        # Keep watchdog/database behavior real, but never send desktop alerts.
+        self.notify_stall = self.enterContext(
+            patch.object(self.sentinel, "notify_stall")
+        )
 
     def tearDown(self):
         self.tmp_dir.cleanup()
@@ -54,6 +58,8 @@ class TestSentinelHardTimeout(unittest.TestCase):
         reloaded = self.store.get_task("t-stalled-long")
         self.assertEqual(reloaded["status"], "failed")
         self.assertEqual(reloaded["failure_reason"], "hard_timeout_watchdog")
+        self.notify_stall.assert_called_once()
+        self.assertEqual(self.notify_stall.call_args.args[0]["task_id"], "t-stalled-long")
 
         # Verify audit event recorded
         events = self.store.list_events(task_id="t-stalled-long")
@@ -90,6 +96,7 @@ class TestSentinelHardTimeout(unittest.TestCase):
         reloaded = self.store.get_task("t-stalled-short")
         self.assertEqual(reloaded["status"], "working")
         # But an alert was sent
+        self.notify_stall.assert_not_called()
         self.assertEqual(len(alerts_recorded), 1)
         self.assertEqual(alerts_recorded[0][0], "t-stalled-short")
 
@@ -112,6 +119,9 @@ class TestSentinelHardTimeout(unittest.TestCase):
 
         reloaded = self.store.get_task("t-disabled-timeout")
         self.assertEqual(reloaded["status"], "working")
+
+        self.notify_stall.assert_called_once()
+        self.assertEqual(self.notify_stall.call_args.args[0]["task_id"], "t-disabled-timeout")
 
     def test_concurrent_progress_rejects_timeout_cas(self):
         now = 10000.0
@@ -146,6 +156,8 @@ class TestSentinelHardTimeout(unittest.TestCase):
         reloaded = self.store.get_task("t-concurrent-race")
         self.assertEqual(reloaded["status"], "working")
         self.assertEqual(reloaded["version"], 2)
+        self.notify_stall.assert_called_once()
+        self.assertEqual(self.notify_stall.call_args.args[0]["task_id"], "t-concurrent-race")
         self.assertNotIn("t-concurrent-race", state.get("timeouts", {}))
 
         # No task_hard_timeout event recorded
