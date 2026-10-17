@@ -306,6 +306,8 @@ def test_polling_preserves_loaded_trace_depth_beyond_first_page():
         pytest.skip("node not found")
     html = console.HTML_TEMPLATE
     names = ["api", "applyTraceResponse", "loadTaskTrace"]
+    if "function mergeTraceEvents" in html:
+        names.insert(1, "mergeTraceEvents")
     script = "\n".join(_extract(html, name) for name in names)
     script += r"""
 const assert=require('node:assert/strict');
@@ -350,6 +352,64 @@ const state={taskTraceSeq:1,taskDrawerTab:'trace',selectedTaskId:'task-a',taskTr
   assert.equal(traceCalls,before+1,'超深度后轮询仍应发请求以发现新活动');
   assert.equal(traceUrls[traceUrls.length-1].includes('cursor=e249'),true,'深度超过单窗口上限应取增量窗口: '+traceUrls[traceUrls.length-1]);
   assert.equal(state.taskTrace.events.length,255,'增量窗口只追加新事件，保留既有 250 条');
+})().catch((err)=>{console.error(err);process.exit(1)});
+"""
+    result = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)  # noqa: PLW1510
+    assert result.returncode == 0, result.stderr
+
+
+def test_polling_tail_cursor_at_window_limit_and_timed_ordering():
+    # Codex P2：恰好 200 条时即进入增量窗口；cursor 必须取最后一条有时间戳的事件，
+    # 因为无时间戳的任务历史/提交事件排在所有有时间戳事件之后，用尾部无时间戳事件做
+    # cursor 会永久漏掉随后到达的新原生动作。
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not found")
+    html = console.HTML_TEMPLATE
+    names = ["api", "applyTraceResponse", "loadTaskTrace"]
+    if "function mergeTraceEvents" in html:
+        names.insert(1, "mergeTraceEvents")
+    script = "\n".join(_extract(html, name) for name in names)
+    script += r"""
+const assert=require('node:assert/strict');
+globalThis.document={getElementById:()=>null,hidden:false};
+globalThis.performance={now:()=>0};
+globalThis.sessionStorage={getItem:()=>null};
+const apiReads=new Map();
+const traceUrls=[];
+function renderTaskDrawer(){}
+async function fetch(p){
+  if(p.startsWith('/api/task/trajectory')){
+    traceUrls.push(p);
+    const lm=p.match(/limit=(\d+)/);const size=lm?Number(lm[1]):100;
+    const cm=p.match(/cursor=e(\d+)/);const start=cm?Number(cm[1])+1:0;
+    const events=[];for(let i=start;i<Math.min(start+size,255);i++)events.push({id:'e'+i,title:'事件'+i,status:'neutral',timestamp:1700000000+i});
+    return {ok:true,status:200,json:async()=>({data:{task_id:'task-a',run_id:'run-a',availability:'agent_actions',events,has_more:false,next_cursor:null}})};
+  }
+  throw new Error('unexpected path '+p);
+}
+const state={taskTraceSeq:1,taskDrawerTab:'trace',selectedTaskId:'task-a',taskTrace:null};
+function build(n,tailUntimed){
+  const evs=[];for(let i=0;i<n;i++)evs.push({id:'e'+i,title:'事件'+i,status:'neutral',timestamp:1700000000+i});
+  if(tailUntimed)for(let i=n-10;i<n;i++)evs[i].timestamp=null;
+  return evs;
+}
+
+(async()=>{
+  // 恰好等于单页上限 200：必须已进入增量窗口，而不是反复重取前 200 条
+  state.taskTrace={status:'ready',task_id:'task-a',run_id:'run-a',availability:'agent_actions',events:build(200,false),has_more:true,next_cursor:'e199'};
+  await loadTaskTrace('task-a',true);
+  assert.equal(traceUrls[0].includes('cursor=e199'),true,'达到单页上限即应转增量窗口: '+traceUrls[0]);
+  assert.equal(state.taskTrace.events.length,255,'增量窗口追加第 201 条之后的新事件（库内共 255 条）');
+
+  // 尾部为无时间戳事件：cursor 取最后一条有时间戳的事件，并按 id 合并不重复
+  state.taskTrace={status:'ready',task_id:'task-a',run_id:'run-a',availability:'agent_actions',events:build(250,true),has_more:false,next_cursor:null};
+  await loadTaskTrace('task-a',true);
+  assert.equal(traceUrls[1].includes('cursor=e239'),true,'尾部无时间戳时 cursor 必须取最后一条有时间戳事件: '+traceUrls[1]);
+  const ids=state.taskTrace.events.map(e=>e.id);
+  assert.equal(new Set(ids).size,ids.length,'合并按 id 去重，不得出现重复事件');
+  assert.equal(ids.length,255,'保留既有 250 条（含 10 条无时间戳尾部）并追加新增 5 条');
+  assert.equal(ids.filter(id=>id==='e249').length,1);
 })().catch((err)=>{console.error(err);process.exit(1)});
 """
     result = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)  # noqa: PLW1510

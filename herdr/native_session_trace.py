@@ -29,6 +29,9 @@ _AND_CHAIN = re.compile(r"(?:\|\||&&)")
 # GNU informational modes exit 0 without consuming the operand, so a
 # successful receipt proves nothing about the file having been read.
 _NON_READING_OPTIONS = frozenset({"--help", "--version", "-h", "-V", "--usage"})
+# Codex exec wrapper marks a completed script run; free-form stderr text alone
+# is not a success signal.
+_EXEC_SUCCESS_SENTINEL = "Script completed"
 _TASK_ID = re.compile(r"^[A-Za-z0-9._-]{1,160}$")
 _CLAUDE_UNSAFE = re.compile(r"[^A-Za-z0-9]")
 
@@ -590,7 +593,7 @@ def _actions_from_codex_calls(calls, outputs, session_id):
                     path=None, command=command, exit_code=exit_code, retry_of=retry_of,
                     is_error=False, ref_prefix="codex",
                 )
-                if blob and exit_code in (None, 0) and not failed:
+                if blob and not failed and _receipt_success(blob, exit_code):
                     action["path"] = _recognized_read_path(command)
                     if action["path"]:
                         action["kind"] = "file_read"
@@ -680,6 +683,13 @@ def _patch_success(blob: str, code: int | None) -> bool:
     if code == 0:
         return True
     return blob.strip() == "Success."
+
+
+def _receipt_success(blob: str, code: int | None) -> bool:
+    """True only when the receipt proves the run finished successfully."""
+    if code is not None:
+        return code == 0
+    return _EXEC_SUCCESS_SENTINEL in blob
 
 
 def _patch_paths(patch: str) -> list[str]:

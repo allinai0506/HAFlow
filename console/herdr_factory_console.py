@@ -10992,6 +10992,19 @@ function toggleTraceEvent(el){
   if(!extra)return;
   extra.hidden=!extra.hidden;
 }
+function mergeTraceEvents(prev,incoming){
+  const merged=Array.isArray(prev)?prev.slice():[];
+  if(!Array.isArray(incoming)||!incoming.length)return merged;
+  const index=new Map();
+  merged.forEach((item,pos)=>{if(item&&item.id)index.set(item.id,pos)});
+  for(const item of incoming){
+    if(!item||!item.id){merged.push(item);continue}
+    const pos=index.get(item.id);
+    if(pos===undefined){index.set(item.id,merged.length);merged.push(item)}
+    else merged[pos]=item;
+  }
+  return merged;
+}
 function applyTraceResponse(state,tid,seq,payload){
   if(!state||state.selectedTaskId!==tid||state.taskTraceSeq!==seq)return false;
   const prev=state.taskTrace&&Array.isArray(state.taskTrace.events)?state.taskTrace.events:[];
@@ -11001,7 +11014,7 @@ function applyTraceResponse(state,tid,seq,payload){
     task_id:payload.task_id,
     run_id:payload.run_id,
     availability:payload.availability,
-    events:payload&&payload.append?prev.concat(incoming):incoming,
+    events:payload&&payload.append?mergeTraceEvents(prev,incoming):incoming,
     has_more:!!payload.has_more,
     next_cursor:payload.next_cursor||null,
     degradation:Array.isArray(payload.degradation)?payload.degradation:[],
@@ -11053,17 +11066,22 @@ async function loadTaskTrace(tid,force){
   const seq=state.taskTraceSeq||0;
   if(!force&&state.taskTrace&&state.taskTrace.task_id===tid&&state.taskTrace.status==='ready')return;
   const loaded=state.taskTrace&&state.taskTrace.task_id===tid&&Array.isArray(state.taskTrace.events)?state.taskTrace.events:[];
-  // 后端单页上限 200：深度不超过上限时用覆盖式窗口，超过后只用 cursor 取增量并追加
-  const tailMode=loaded.length>200&&!!loaded[loaded.length-1]&&!!loaded[loaded.length-1].id;
-  if(!tailMode){
+  // 后端单页上限 200：深度未达上限用覆盖式窗口；达到上限后只用 cursor 取增量并按 id 合并。
+  // cursor 必须取最后一条有时间戳的事件：无时间戳的任务历史/提交事件排在全部有时间戳事件之后，
+  // 以它们作 cursor 会永久漏掉随后到达的新原生动作。
+  let cursorId=null;
+  if(loaded.length>=200){
+    for(let i=loaded.length-1;i>=0;i--){if(loaded[i]&&loaded[i].timestamp&&loaded[i].id){cursorId=loaded[i].id;break}}
+  }
+  if(!cursorId){
     state.taskTrace={status:'loading',task_id:tid,events:[]};
     if(state.taskDrawerTab==='trace'||state.taskDrawerTab==='activity')renderTaskDrawer();
   }
   try{
-    let path='/api/task/trajectory?id='+encodeURIComponent(tid)+'&limit='+(tailMode?100:Math.min(200,Math.max(100,loaded.length)));
-    if(tailMode)path+='&cursor='+encodeURIComponent(loaded[loaded.length-1].id);
+    let path='/api/task/trajectory?id='+encodeURIComponent(tid)+'&limit='+(cursorId?100:Math.min(200,Math.max(100,loaded.length)));
+    if(cursorId)path+='&cursor='+encodeURIComponent(cursorId);
     const data=await api(path);
-    if(tailMode)data.append=true;
+    if(cursorId)data.append=true;
     if(!applyTraceResponse(state,tid,seq,data))return;
   }catch(e){
     if(state.selectedTaskId!==tid||state.taskTraceSeq!==seq)return;

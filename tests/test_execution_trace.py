@@ -1230,3 +1230,25 @@ def test_informational_options_are_not_claimed_as_file_read():
     ])
     reads = [item for item in _actions(text) if item.get("kind") == "file_read"]
     assert [item.get("path") for item in reads] == ["notes.md"]
+
+
+def test_file_read_needs_explicit_success_signal_not_any_nonempty_receipt():
+    """Codex P2：回执有文本但无结构化 exit_code——只有明确成功标志才可认领 file_read。"""
+    failure_text = _codex_rows([
+        _codex_exec("s1", 'text(await tools.exec_command({cmd:"cat missing.txt",max_output_tokens:4000}));'),
+        _codex_output("s1", "cat: missing.txt: No such file or directory"),
+    ])
+    assert all(item.get("kind") != "file_read" for item in _actions(failure_text))
+
+    sentinel = _codex_rows([
+        _codex_exec("s2", 'text(await tools.exec_command({cmd:"cat GOAL.md",max_output_tokens:4000}));', ts=21),
+        _codex_output("s2", "Script completed\nOutput:\n\ngoal body"),
+    ])
+    reads = [item for item in _actions(sentinel) if item.get("kind") == "file_read"]
+    assert [item.get("path") for item in reads] == ["GOAL.md"]
+
+    nonzero = _codex_rows([
+        _codex_exec("s3", 'text(await tools.exec_command({cmd:"cat other.txt",max_output_tokens:4000}));', ts=22),
+        _codex_output("s3", 'Script completed\nOutput:\n\n{"chunk_id":"c","exit_code":2,"output":"cat: other.txt: Permission denied"}'),
+    ])
+    assert all(item.get("kind") != "file_read" for item in _actions(nonzero))
