@@ -5455,6 +5455,12 @@ def commit_task(task_id, message=None, allow_rebase=False):
                     ["git", "-C", clone_path, "status", "--porcelain", "--untracked-files=normal"],
                     capture_output=True, text=True
                 )
+                if status_res.returncode != 0:
+                    print(
+                        f"Failed to inspect worktree status for task (rc={status_res.returncode}): {task_id}",
+                        file=sys.stderr
+                    )
+                    sys.exit(1)
                 from herdr.repo_hygiene import teardown_output_diagnosis
                 diag = teardown_output_diagnosis(status_res.stdout, task_id=task_id)
                 has_uncommitted = bool(diag.get("reason"))
@@ -5480,6 +5486,12 @@ def commit_task(task_id, message=None, allow_rebase=False):
                     ["git", "-C", clone_path, "status", "--porcelain", "--untracked-files=normal"],
                     capture_output=True, text=True
                 )
+                if status_res.returncode != 0:
+                    print(
+                        f"Failed to inspect worktree status for task (rc={status_res.returncode}): {task_id}",
+                        file=sys.stderr
+                    )
+                    sys.exit(1)
                 from herdr.repo_hygiene import teardown_output_diagnosis
                 diag = teardown_output_diagnosis(status_res.stdout, task_id=task_id)
                 has_uncommitted = bool(diag.get("reason"))

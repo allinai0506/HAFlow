@@ -198,6 +198,72 @@ class TestTeardownCleanedCommit(unittest.TestCase):
             self.cli.commit_task("task-cleaned-git")
         self.assertEqual(ctx.exception.code, 2)
 
+    def test_integrated_task_git_status_failure_fails_closed(self):
+        """When git status fails for an integrated task, commit_task must exit 1 (fail closed)."""
+        repo = self.tmp_dir / "clone-integrated-fail"
+        repo.mkdir()
+        task = {
+            "task_id": "task-integrated-fail",
+            "workflow_id": "wf-1",
+            "node": "impl",
+            "stage": "impl",
+            "status": "integrated",
+            "clone_path": str(repo),
+            "commit": "sha123",
+            "integration_mode": "git",
+        }
+        self.store.save_task(task)
+
+        real_subprocess_run = subprocess.run
+        def failing_status_run(cmd, *args, **kwargs):
+            if isinstance(cmd, (list, tuple)) and "status" in cmd:
+                return subprocess.CompletedProcess(cmd, 128, stdout="", stderr="fatal: not a git repository")
+            return real_subprocess_run(cmd, *args, **kwargs)
+
+        orig_run = self.cli.subprocess.run
+        self.cli.subprocess.run = failing_status_run
+        try:
+            os.environ["HERDR_STATE_DB"] = str(self.db_path)
+            os.environ["TASKS_FILE"] = str(self.tasks_file)
+            with self.assertRaises(SystemExit) as ctx:
+                self.cli.commit_task("task-integrated-fail")
+            self.assertEqual(ctx.exception.code, 1)
+        finally:
+            self.cli.subprocess.run = orig_run
+
+    def test_cleaned_task_git_status_failure_fails_closed(self):
+        """When git status fails for a cleaned task, commit_task must exit 1 (fail closed)."""
+        repo = self.tmp_dir / "clone-cleaned-fail"
+        repo.mkdir()
+        task = {
+            "task_id": "task-cleaned-fail",
+            "workflow_id": "wf-1",
+            "node": "impl",
+            "stage": "impl",
+            "status": "cleaned",
+            "clone_path": str(repo),
+            "commit": "sha123",
+            "integration_mode": "git",
+        }
+        self.store.save_task(task)
+
+        real_subprocess_run = subprocess.run
+        def failing_status_run(cmd, *args, **kwargs):
+            if isinstance(cmd, (list, tuple)) and "status" in cmd:
+                return subprocess.CompletedProcess(cmd, 128, stdout="", stderr="fatal: not a git repository")
+            return real_subprocess_run(cmd, *args, **kwargs)
+
+        orig_run = self.cli.subprocess.run
+        self.cli.subprocess.run = failing_status_run
+        try:
+            os.environ["HERDR_STATE_DB"] = str(self.db_path)
+            os.environ["TASKS_FILE"] = str(self.tasks_file)
+            with self.assertRaises(SystemExit) as ctx:
+                self.cli.commit_task("task-cleaned-fail")
+            self.assertEqual(ctx.exception.code, 1)
+        finally:
+            self.cli.subprocess.run = orig_run
+
     def test_finalize_none_mode_preservation_commit_failure_is_retryable(self):
         """When preservation commit fails for mode=none, controller leaves task retryable in completed status."""
         spec = importlib.util.spec_from_file_location(
