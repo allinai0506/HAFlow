@@ -201,7 +201,7 @@ for i in range(nst.MAX_SCAN + 20):
     )
 old = sessions / "2025" / "01" / "01"
 old.mkdir(parents=True, exist_ok=True)
-target_id = "11111111-2222-3333-4444-555555555555"
+target_id = "<redacted-uuid>"
 (old / f"rollout-2025-01-01-{target_id}.jsonl").write_text(rows([
     {"type": "session_meta", "cwd": str(clone), "session_id": target_id},
     codex_exec("1", 'text(await tools.exec_command({cmd:"cat GOAL.md"}));', ts=10),
@@ -239,7 +239,7 @@ d2 = ROOT / ".herdr-test-evidence" / "f2dir" / "sessions" / "2026" / "01"
 d2clone = ROOT / ".herdr-test-evidence" / "f2dir" / "clone"
 d2.mkdir(parents=True, exist_ok=True)
 d2clone.mkdir(parents=True, exist_ok=True)
-sid2 = "aaaaaaaa-1111-2222-3333-444444444444"
+sid2 = "<redacted-uuid>"
 for n, cmd in (("A", "cat one.md"), ("B", "cat two.md")):
     body = rows([
         {"type": "session_meta", "cwd": str(d2clone), "session_id": sid2},

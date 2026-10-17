@@ -1,9 +1,9 @@
 sessions with >1 rollout file: 19
 top collisions (lost, parsed, session, files):
-   (354, 779, '01a1432e-e16a-71b0-87d1-b00e97bc832d', 8)
-   (314, 647, '01a13e2d-2c67-7f52-bcf5-7bf34748bc92', 8)
-   (270, 702, '01a12922-f91d-7470-a03e-25d1c5a714dd', 4)
-   (215, 684, '01a12d4d-f38e-7471-b6d4-3cfbac83d0c6', 4)
-   (203, 611, '01a13d4b-e3b8-7063-b387-2db71987f0b8', 4)
+   (354, 779, '<redacted-uuid>', 8)
+   (314, 647, '<redacted-uuid>', 8)
+   (270, 702, '<redacted-uuid>', 4)
+   (215, 684, '<redacted-uuid>', 4)
+   (203, 611, '<redacted-uuid>', 4)
 e2e session=01a1432e loaded_actions=397 unique_refs=243 page_events=200 notes=[{'code': 'native_corrupt', 'message': '部分原生会话记录已损坏，已跳过无法解析的内容。'}, {'code': 'native_truncated', 'message': '执行轨迹已截断，仅显示已读取的部分。'}]
   dropped_by_ref_collision = 154  kinds: {'task_created': 1, 'tool_call': 198, 'file_read': 1}
