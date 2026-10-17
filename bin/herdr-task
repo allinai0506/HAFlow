@@ -5680,7 +5680,7 @@ def commit_task(task_id, message=None, allow_rebase=False):
         store=_get_store(),
     )
 
-    is_none_mode = (task.get("integration_mode") or "none") == "none"
+    is_none_mode = (task.get("integration_mode") or ("none" if not task.get("branch") else "git")) == "none"
     preserve_status = ("completed", "cleanup_ready", "cleaned") if is_none_mode else ("cleanup_ready", "cleaned")
     target_status = task["status"] if task.get("status") in preserve_status else "committed"
     if task.get("status") != target_status:
@@ -6012,7 +6012,7 @@ def _adopt_head_if_attributable(task_id, task, clone, allow_rebase=False):
             },
             store=_get_store(),
         )
-        is_none_mode = (task.get("integration_mode") or "none") == "none"
+        is_none_mode = (task.get("integration_mode") or ("none" if not task.get("branch") else "git")) == "none"
         preserve_status = ("completed", "cleanup_ready", "cleaned") if is_none_mode else ("cleanup_ready", "cleaned")
         target_status = task["status"] if task.get("status") in preserve_status else "committed"
         if task.get("status") != target_status:
@@ -6652,9 +6652,9 @@ def _teardown_output_guard(task):
             if identity.get("task_id") != task.get("task_id") or (task.get("run_id") and identity.get("run_id") != task.get("run_id")):
                 return {"reason": "clone_identity_changed"}
         # Context workspaces are plain directories. Their artifacts remain in
-        # place; context mode has no git commit path.
+        # place; Git metadata, when present, must still pass the Git output gate.
         if (task.get("execution_mode") == "context" and (task.get("integration_mode") or "none") == "none"
-                and path.is_dir()):
+                and path.is_dir() and not os.path.lexists(path / ".git")):
             return {"reason": ""}
         try:
             root = run_bounded(["git", "-C", str(path), "rev-parse", "--show-toplevel"], timeout=5, output_limit=8192)
@@ -6664,12 +6664,15 @@ def _teardown_output_guard(task):
             # is already excluded by diagnosis; tracked files remain individually
             # visible, including tracked changes under an internal directory.
             result = run_bounded(["git", "-C", str(path), "status", "--porcelain", "--untracked-files=normal"], timeout=5, output_limit=65536)
-            if result["status"] != "completed" or result["exit_code"]:
-                return {"reason": "clone_git_inventory_unknown"}
+            expected_commit = task.get("integrated_commit") or task.get("commit")
+            head_sha = ""
             head_out = run_bounded(["git", "-C", str(path), "rev-parse", "HEAD"], timeout=5, output_limit=8192)
-            if head_out["status"] != "completed" or head_out["exit_code"]:
+            if head_out["status"] != "completed":
                 return {"reason": "clone_git_inventory_unknown"}
-            head_sha = head_out["stdout"].strip()
+            if head_out["exit_code"] == 0:
+                head_sha = head_out["stdout"].strip()
+            elif expected_commit:
+                return {"reason": "clone_git_inventory_unknown"}
         except (OSError, ValueError):
             return {"reason": "clone_git_inventory_unknown"}
         diagnosis = teardown_output_diagnosis(result["stdout"], task_id=task.get("task_id", ""))
@@ -6677,7 +6680,6 @@ def _teardown_output_guard(task):
             if (task.get("integration_mode") or "none") == "none":
                 diagnosis["remediation_cmd"] = f"git -C <clone> status; herdr-task commit {task.get('task_id', '')}"
             return diagnosis
-        expected_commit = task.get("integrated_commit") or task.get("commit")
         if expected_commit and head_sha and head_sha != expected_commit:
             cmd = (
                 f"git -C <clone> status; herdr-task commit {task.get('task_id', '')}"
@@ -9435,13 +9437,29 @@ def main():
     sync_exp_cmd = sub.add_parser('sync-experience', help='Sync pending local business rule candidates with Hub')
     sync_exp_cmd.add_argument('--json', action='store_true', help='Output JSON result')
     sync_exp_cmd.add_argument('--force', action='store_true', help='Retry pending uploads immediately, ignoring backoff schedule')
+    sync_exp_cmd.add_argument('--token', type=str, default=None, help='Hub auth token (defaults to HERDR_HUB_TOKEN env var)')
+    sync_exp_cmd.add_argument('--include-lessons', action='store_true', help='Extract rules from docs/lessons/lessons-learned.md')
+    sync_exp_cmd.add_argument('--lessons-path', type=str, default=None, help='Path to lessons markdown file')
+    sync_exp_cmd.add_argument('--workflow-id', type=str, default=None, help='Enqueue and extract rules for all terminal tasks in workflow')
 
     args = parser.parse_args()
 
     if args.command == 'sync-experience':
         from herdr.experience.collector import ExperienceCollector
-        collector = ExperienceCollector()
-        res = collector.recover_and_sync(force=getattr(args, "force", False))
+        explicit_token = getattr(args, "token", None)
+        hub_client = None
+        if explicit_token:
+            from herdr.experience.client import ExperienceClient
+            hub_client = ExperienceClient(token=explicit_token)
+        collector = ExperienceCollector(hub_client=hub_client)
+        if getattr(args, "workflow_id", None):
+            collector.collect_workflow_tasks(args.workflow_id)
+        if getattr(args, "include_lessons", False):
+            les_path = getattr(args, "lessons_path", None)
+            les_res = collector.collect_and_sync_lessons(lessons_path=les_path)
+            if not les_res.get("ok"):
+                print(f"[EXPERIENCE SYNC WARNING] lessons sync notice: {les_res.get('reason')}", file=sys.stderr)
+        res = collector.recover_and_sync(force=getattr(args, "force", False) or bool(getattr(args, "workflow_id", None) or getattr(args, "include_lessons", False)))
         if getattr(args, "json", False):
             print(json.dumps(res, ensure_ascii=False, indent=2))
         else:

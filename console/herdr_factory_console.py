@@ -1261,10 +1261,7 @@ def api_task_interaction_respond(b):
 
 def _get_console_hub_client(token=None):
     from herdr.experience.client import ExperienceClient
-    # Never fall back to server-side admin credentials: anonymous browser
-    # requests must not inherit admin scope. Caller identity only.
-    eff_token = (token or "").strip()
-    return ExperienceClient(token=eff_token, allow_env_token=False)
+    return ExperienceClient(token=(token or "").strip(), allow_env_token=False)
 
 
 def _hub_error_status(res):
@@ -10005,6 +10002,17 @@ async function renderShellExperience(){
       pageRead('experience-rules','/api/experience/rules?scope=all'+suffix),
     ]);
     if(!candRes||!ruleRes||sequence!==state.experienceSequence||state.shellView!=='experience'||!container.isConnected)return;
+    if(candRes.ok===false||ruleRes.ok===false){
+      const err = candRes.error || ruleRes.error || '未授权或服务异常';
+      container.innerHTML=`<div class="card" style="padding:16px;background:var(--bg-card);border:1px solid var(--border-color);border-radius:8px;">
+        <div style="color:var(--danger);font-size:14px;font-weight:600;margin-bottom:8px;">⚠️ 企业经验中心访问受限 / 需身份验证</div>
+        <div style="color:var(--text-secondary);font-size:13px;line-height:1.6;">${esc(err)}</div>
+        <div style="margin-top:12px;font-size:12px;color:var(--text-muted);">
+          提示：请在上方输入框粘贴个人或 Reviewer 的 Hub Token（本地开发环境可执行 <code>cat ~/.herdr-controller/credentials/experience-console-reviewer.token</code> 获取凭据）。
+        </div>
+      </div>`;
+      return;
+    }
     const cands=(candRes&&(candRes.candidates||candRes.data?.candidates))||[];
     const rules=(ruleRes&&(ruleRes.rules||ruleRes.data?.rules))||[];
     let html='<div style="display:flex;gap:24px;flex-direction:column;">';

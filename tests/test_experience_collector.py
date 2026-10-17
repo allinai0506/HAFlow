@@ -345,3 +345,140 @@ def test_unanswered_question_and_stale_decision_rejected():
     assert reason2 == "ready"
     assert "离岸人民币 CNH 结算" in exp2.content
     assert "decision:DU-102" in exp2.source.evidence_refs
+
+
+def test_extract_candidates_from_lessons():
+    from herdr.experience.extractor import extract_candidates_from_lessons
+
+    sample_md = """
+## 164. 编排层五种停滞形态：Agent 兜底、评估器范围、哨兵误杀与两类退役死锁（2026-10-17）
+
+### 背景与触发
+连续两场长流程排查暴露编排层五种非预期挂起。
+
+### 经验教训
+1. **Agent 兜底边界**：兜底逻辑必须限定在当前执行轮次。
+2. **评估器覆盖面**：评估器不得因未声明字段直接短路。
+
+### 操作规范
+- 部署前核对全部 5 处锁释放路径。
+"""
+    candidates = extract_candidates_from_lessons(sample_md, contributor="reviewer_bob", min_lesson_num=160)
+    assert len(candidates) == 1
+    cand = candidates[0]
+    assert cand.experience_id.startswith("exp_l164_")
+    assert "编排层五种停滞形态" in cand.title
+    assert "Agent 兜底边界" in cand.content
+    assert "部署前核对全部" in cand.content
+    assert cand.contributor == "reviewer_bob"
+    assert "docs/lessons/lessons-learned.md#L2" in cand.source.evidence_refs
+
+
+def test_extract_candidate_from_facts_rework_goal_and_coordinator():
+    task = {
+        "task_id": "t-rework-01",
+        "run_id": "r-rework-01",
+        "workflow_id": "wf-01",
+        "status": "completed",
+        "customer": "HAFlow",
+        "task_type": "engineering",
+        "supersedes": "t-orig-01",
+        "goal": "修复：返工并补齐缺失的单元测试覆盖和门禁检查",
+    }
+    outcome = {
+        "outcome_id": "o-rework-01",
+        "run_id": "r-rework-01",
+        "task_id": "t-rework-01",
+        "qualified_success": True,
+        "verification_passed": True,
+        "recorded_at": time.time(),
+    }
+    steers = [
+        {
+            "steer_id": "st-coord-01",
+            "task_id": "t-rework-01",
+            "operator": "coordinator(w13:p1)",
+            "instruction": "请注意测试环境隔离与幂等设计，禁止直接连接外部数据库",
+        }
+    ]
+    exp, reason = extract_candidate_from_facts(
+        task=task,
+        outcome=outcome,
+        steers=steers,
+        contributor="tester",
+    )
+    assert exp is not None
+    assert reason == "ready"
+    assert "测试环境隔离与幂等设计" in exp.content
+    assert "返工并补齐缺失的单元测试覆盖" in exp.content
+    assert "steer:st-coord-01" in exp.source.evidence_refs
+    assert "task:t-rework-01:rework_goal" in exp.source.evidence_refs
+
+
+def test_extract_candidate_unfinalized_outcome_fails_closed(tmp_path):
+    from herdr import state_db
+
+    sdb = tmp_path / "state.db"
+    state_db.init_db(sdb)
+    state_db.save_task({
+        "task_id": "t-unfinalized",
+        "run_id": "r-unfinalized",
+        "workflow_id": "wf-pass",
+        "status": "completed",
+        "customer": "HAFlow",
+        "task_type": "engineering",
+        "stage_verdict": "pass",
+    }, db_path=sdb)
+
+    task = state_db.get_task("t-unfinalized", db_path=sdb)
+    steers = [{
+        "steer_id": "st-01",
+        "task_id": "t-unfinalized",
+        "operator": "human",
+        "instruction": "务必对所有输入执行参数合法性与边界校验",
+    }]
+
+    # When no execution outcome exists in DB, it must fail-closed as unqualified_success
+    exp, reason = extract_candidate_from_facts(
+        task=task,
+        outcome=None,
+        steers=steers,
+        contributor="tester",
+        state_db_path=sdb,
+    )
+    assert exp is None
+    assert reason == "unqualified_success"
+
+    # When authoritative execution outcome is finalized and recorded in DB, it succeeds
+    from herdr import execution_outcome
+    oid = execution_outcome.outcome_id_for("t-unfinalized", "r-unfinalized")
+    state_db.insert_execution_outcome({
+        "outcome_id": oid,
+        "task_id": "t-unfinalized",
+        "run_id": "r-unfinalized",
+        "workflow_id": "wf-pass",
+        "agent": "codex",
+        "node": "impl",
+        "task_type": "engineering",
+        "final_status": "completed",
+        "requirements_satisfied": 1,
+        "verification_passed": 1,
+        "qualified_success": 1,
+        "rework_count": 0,
+        "blocked_count": 0,
+        "human_intervention_count": 1,
+        "recorded_at": time.time(),
+        "source_eval_id": "eval-1",
+        "source_eval_revision": 1,
+    }, db_path=sdb)
+
+    exp2, reason2 = extract_candidate_from_facts(
+        task=task,
+        outcome=None,
+        steers=steers,
+        contributor="tester",
+        state_db_path=sdb,
+    )
+    assert exp2 is not None
+    assert reason2 == "ready"
+    assert "边界校验" in exp2.content
