@@ -5638,7 +5638,7 @@ def commit_task(task_id, message=None, allow_rebase=False):
         store=_get_store(),
     )
 
-    is_none_mode = task.get("integration_mode") == "none"
+    is_none_mode = (task.get("integration_mode") or "none") == "none"
     preserve_status = ("completed", "cleanup_ready", "cleaned") if is_none_mode else ("cleanup_ready", "cleaned")
     target_status = task["status"] if task.get("status") in preserve_status else "committed"
     if task.get("status") != target_status:

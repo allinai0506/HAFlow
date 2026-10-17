@@ -399,6 +399,47 @@ class TestTeardownCleanedCommit(unittest.TestCase):
         final = self.store.get_task(task_id)
         self.assertEqual(final["status"], "cleanup_ready")
 
+    def test_completed_legacy_task_missing_integration_mode_preserves_completed_status(self):
+        """A completed legacy task omitting integration_mode defaults to mode=none and preserves completed status on preservation commit."""
+        repo = self.tmp_dir / "clone-completed-legacy"
+        repo.mkdir()
+        def git(*args):
+            return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True)
+
+        git("init", "-b", "main")
+        git("config", "user.name", "Test")
+        git("config", "user.email", "test@example.invalid")
+        (repo / "base.txt").write_text("base")
+        git("add", ".")
+        git("commit", "-m", "base")
+
+        # Dirty output to preserve
+        (repo / "report.txt").write_text("legacy report output")
+
+        task_id = "task-completed-legacy"
+        task = {
+            "task_id": task_id,
+            "workflow_id": "wf-1",
+            "node": "audit",
+            "stage": "audit",
+            "status": "completed",
+            "clone_path": str(repo),
+            # "integration_mode" intentionally omitted (legacy task)
+        }
+        self.store.save_workflow({"workflow_id": "wf-1", "status": "running"})
+        self.store.save_task(task)
+
+        os.environ["HERDR_STATE_DB"] = str(self.db_path)
+        os.environ["TASKS_FILE"] = str(self.tasks_file)
+
+        # Commit uncommitted output
+        self.cli.commit_task(task_id, message="chore(closure): preserve worktree output")
+
+        # Task MUST remain in completed status, not advanced to committed
+        updated = self.store.get_task(task_id)
+        self.assertEqual(updated["status"], "completed")
+        self.assertIsNotNone(updated.get("commit"))
+
 
 if __name__ == "__main__":
     unittest.main()
