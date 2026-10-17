@@ -424,7 +424,8 @@ def smoke_probe(agent, binary, cwd, timeout=None):
         res = normalize_result(run(cmd, timeout=limit, cwd=cwd))
         elapsed = round(time.time() - started, 2)
         combined = (res["stdout"] + "\n" + res["stderr"]).strip()
-        classification = classify_text(combined)
+        sanitized_combined = strip_known_status_chrome(agent, combined)
+        classification = classify_text(sanitized_combined)
 
         if res["timeout"]:
             if agent in SMOKE_TIMEOUTS and attempt == 1:
@@ -458,7 +459,7 @@ def smoke_probe(agent, binary, cwd, timeout=None):
             }
 
         if res["returncode"] == 0:
-            verified = smoke_response_verified(agent, res["stdout"])
+            verified = smoke_response_verified(agent, strip_known_status_chrome(agent, res["stdout"]))
             note = (
                 f"真实最小调用成功，响应证据已验证 ({elapsed}s)"
                 if verified

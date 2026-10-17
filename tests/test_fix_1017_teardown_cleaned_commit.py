@@ -259,6 +259,55 @@ class TestTeardownCleanedCommit(unittest.TestCase):
         finally:
             ctl.subprocess.run = orig_run
 
+    def test_finalize_rejects_failed_worktree_status_inventory(self):
+        """A failure in git status during mode=none finalization must fail-closed and return a retryable error."""
+        spec = importlib.util.spec_from_file_location(
+            "herdr_controller",
+            str(HERDR_ROOT / "services" / "herdr-controller.py"),
+        )
+        ctl = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(ctl)
+
+        repo = self.tmp_dir / "clone-status-fail"
+        repo.mkdir()
+
+        task_id = "task-status-fail"
+        task = {
+            "task_id": task_id,
+            "workflow_id": "wf-1",
+            "node": "doc",
+            "stage": "doc",
+            "status": "completed",
+            "clone_path": str(repo),
+            "integration_mode": "none",
+        }
+        self.store.save_task(task)
+
+        real_subprocess_run = subprocess.run
+        def failing_git_status_run(cmd, *args, **kwargs):
+            if isinstance(cmd, (list, tuple)) and len(cmd) >= 4 and cmd[0] == "git" and cmd[3] == "status":
+                return subprocess.CompletedProcess(cmd, 128, stdout="", stderr="fatal: not a git repository (or any of the parent directories)")
+            return real_subprocess_run(cmd, *args, **kwargs)
+
+        orig_run = ctl.subprocess.run
+        ctl.subprocess.run = failing_git_status_run
+        try:
+            os.environ["HERDR_STATE_DB"] = str(self.db_path)
+            res = ctl.finalize_completed_task(task_id)
+            self.assertTrue(res.get("retryable"))
+            self.assertEqual(res.get("kind"), "error")
+            self.assertEqual(res.get("rc"), 128)
+
+            persisted = self.store.get_task(task_id)
+            self.assertEqual(persisted["status"], "completed")  # Did not advance to cleanup_ready or cleaned!
+
+            events = self.store.list_events(task_id=task_id, event_type="finalize_status_error")
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["payload"]["rc"], 128)
+            self.assertIn("not a git repository", events[0]["payload"]["detail"])
+        finally:
+            ctl.subprocess.run = orig_run
+
     def test_check_finalize_retry_drives_none_mode_preservation_retry(self):
         """_check_finalize_retry drives retries for mode=none tasks rather than discarding immediately."""
         spec = importlib.util.spec_from_file_location(

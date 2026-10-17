@@ -6762,6 +6762,23 @@ def finalize_completed_task(task_id):
                 ["git", "-C", clone_path, "status", "--porcelain", "--untracked-files=normal"],
                 capture_output=True, text=True
             )
+            if status_res.returncode != 0:
+                from herdr.task_delivery import diagnostic_tail
+                print(
+                    f"[FINALIZE ERROR] "
+                    f"task={task_id} "
+                    f"worktree status failed rc={status_res.returncode}: "
+                    f"{status_res.stderr.strip() or status_res.stdout.strip()}"
+                )
+                _record_finalize_event(
+                    task,
+                    "finalize_status_error",
+                    {
+                        "rc": status_res.returncode,
+                        "detail": diagnostic_tail(status_res.stdout, status_res.stderr),
+                    },
+                )
+                return {"retryable": True, "kind": "error", "rc": status_res.returncode}
             from herdr.repo_hygiene import teardown_output_diagnosis
             diag = teardown_output_diagnosis(status_res.stdout, task_id=task_id)
             if diag.get("reason"):
