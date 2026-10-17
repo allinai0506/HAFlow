@@ -141,7 +141,14 @@ jobs:
           # without a user identity. Seed one inside the CI-owned HOME only.
           git config --file "$HOME/.gitconfig" user.name "HAFlow CI"
           git config --file "$HOME/.gitconfig" user.email "ci@haflow.invalid"
-          "${{ steps.python.outputs.python }}" -m pytest -q 2>&1 | tee pytest.log
+          # Use pytest-xdist if available for multi-core parallelism
+          if "${{ steps.python.outputs.python }}" -c 'import xdist' >/dev/null 2>&1; then
+            echo "→ running pytest with pytest-xdist parallelism (-n auto)"
+            "${{ steps.python.outputs.python }}" -m pytest -q -n auto 2>&1 | tee pytest.log
+          else
+            echo "→ running pytest single-threaded (xdist not installed)"
+            "${{ steps.python.outputs.python }}" -m pytest -q 2>&1 | tee pytest.log
+          fi
 
       - name: Collection check
         if: steps.scope.outputs.mode == 'collect'
@@ -162,9 +169,7 @@ jobs:
 
   tests-required:
     name: tests-required
-    # This is the check to mark required. `runs-on` stays off the self-hosted
-    # machine so the guard itself executes for every pull request.
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, haflow]
     needs: [tests]
     if: always()
     steps:
