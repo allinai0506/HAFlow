@@ -259,6 +259,128 @@ class TestTeardownCleanedCommit(unittest.TestCase):
         finally:
             ctl.subprocess.run = orig_run
 
+    def test_finalize_none_mode_routes_delivery_blocked_into_rework(self):
+        """When none-mode preservation commit encounters delivery_blocked (rc 7), finalize records delivery failure and returns non-retryable delivery outcome."""
+        spec = importlib.util.spec_from_file_location(
+            "herdr_controller",
+            str(HERDR_ROOT / "services" / "herdr-controller.py"),
+        )
+        ctl = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(ctl)
+
+        repo = self.tmp_dir / "clone-none-deliv-fail"
+        repo.mkdir()
+        def git(*args):
+            return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True)
+
+        git("init", "-b", "main")
+        git("config", "user.name", "Test")
+        git("config", "user.email", "test@example.invalid")
+        (repo / "base.txt").write_text("base")
+        git("add", ".")
+        git("commit", "-m", "base")
+        (repo / "dirty.txt").write_text("dirty")
+
+        task_id = "task-none-deliv-fail"
+        task = {
+            "task_id": task_id,
+            "workflow_id": "wf-1",
+            "node": "audit",
+            "stage": "audit",
+            "status": "completed",
+            "clone_path": str(repo),
+            "integration_mode": "none",
+        }
+        self.store.save_workflow({"workflow_id": "wf-1", "status": "running"})
+        self.store.save_task(task)
+
+        delivery_recorded = []
+        import herdr.task_delivery as td
+        orig_record = td.record_delivery_failure
+        def mock_record_delivery_failure(t, delivery, store=None):
+            delivery_recorded.append((t.get("task_id"), delivery))
+            return True
+        td.record_delivery_failure = mock_record_delivery_failure
+
+        real_subprocess_run = subprocess.run
+        import json
+        def commit_rc7_run(cmd, *args, **kwargs):
+            if isinstance(cmd, (list, tuple)) and len(cmd) >= 2 and cmd[1] == "commit":
+                payload = json.dumps({"task_id": task_id, "result": "delivery_blocked", "delivery": {"reason": "gate_failed"}})
+                return subprocess.CompletedProcess(cmd, 7, stdout=f"HERDR_COMMIT_RESULT={payload}\n", stderr="")
+            return real_subprocess_run(cmd, *args, **kwargs)
+
+        orig_run = ctl.subprocess.run
+        ctl.subprocess.run = commit_rc7_run
+        try:
+            os.environ["HERDR_STATE_DB"] = str(self.db_path)
+            res = ctl.finalize_completed_task(task_id)
+            self.assertEqual(res, {"retryable": False, "kind": "delivery", "rc": 7})
+            self.assertEqual(len(delivery_recorded), 1)
+            self.assertEqual(delivery_recorded[0][0], task_id)
+            self.assertEqual(delivery_recorded[0][1].get("reason"), "gate_failed")
+        finally:
+            ctl.subprocess.run = orig_run
+            td.record_delivery_failure = orig_record
+
+    def test_finalize_none_mode_git_index_lock_is_non_budgeted(self):
+        """When none-mode preservation commit encounters verified git_index_lock (rc 75), finalize returns budgeted=False."""
+        spec = importlib.util.spec_from_file_location(
+            "herdr_controller",
+            str(HERDR_ROOT / "services" / "herdr-controller.py"),
+        )
+        ctl = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(ctl)
+
+        repo = self.tmp_dir / "clone-none-lock"
+        repo.mkdir()
+        def git(*args):
+            return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True)
+
+        git("init", "-b", "main")
+        git("config", "user.name", "Test")
+        git("config", "user.email", "test@example.invalid")
+        (repo / "base.txt").write_text("base")
+        git("add", ".")
+        git("commit", "-m", "base")
+        (repo / "dirty.txt").write_text("dirty")
+
+        task_id = "task-none-lock"
+        task = {
+            "task_id": task_id,
+            "workflow_id": "wf-1",
+            "node": "audit",
+            "stage": "audit",
+            "status": "completed",
+            "clone_path": str(repo),
+            "integration_mode": "none",
+        }
+        self.store.save_workflow({"workflow_id": "wf-1", "status": "running"})
+        self.store.save_task(task)
+
+        real_subprocess_run = subprocess.run
+        import json
+        def commit_rc75_lock_run(cmd, *args, **kwargs):
+            if isinstance(cmd, (list, tuple)) and len(cmd) >= 2 and cmd[1] == "commit":
+                payload = json.dumps({"task_id": task_id, "result": "wait", "reason": "git_index_lock"})
+                return subprocess.CompletedProcess(cmd, 75, stdout=f"HERDR_COMMIT_RESULT={payload}\n", stderr="")
+            return real_subprocess_run(cmd, *args, **kwargs)
+
+        orig_run = ctl.subprocess.run
+        ctl.subprocess.run = commit_rc75_lock_run
+        try:
+            os.environ["HERDR_STATE_DB"] = str(self.db_path)
+            res = ctl.finalize_completed_task(task_id)
+            self.assertEqual(res, {
+                "retryable": True,
+                "kind": "wait",
+                "rc": 75,
+                "reason": "git_index_lock",
+                "budgeted": False,
+            })
+        finally:
+            ctl.subprocess.run = orig_run
+
     def test_finalize_rejects_failed_worktree_status_inventory(self):
         """A failure in git status during mode=none finalization must fail-closed and return a retryable error."""
         spec = importlib.util.spec_from_file_location(

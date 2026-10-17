@@ -6809,13 +6809,19 @@ def finalize_completed_task(task_id):
                     capture_output=True,
                     env=commit_env
                 )
-                if commit_proc.returncode == 75:
-                    return {"retryable": True, "kind": "wait", "rc": 75}
-                elif commit_proc.returncode == 3:
+                commit_payload = _parse_commit_result(commit_proc.stdout)
+                if commit_proc.returncode == 3:
                     # Empty commit: no changes to adopt
                     pass
+                elif (commit_proc.returncode == 7 and commit_payload.get("task_id") == task_id
+                      and commit_payload.get("result") == "delivery_blocked"):
+                    delivery = commit_payload.get("delivery") or {}
+                    from herdr.task_delivery import record_delivery_failure
+                    if record_delivery_failure(task, delivery, store=_get_store()):
+                        print(f"[DELIVERY BLOCKED] task={task_id} waiting for scoped repair")
+                        return {"retryable": False, "kind": "delivery", "rc": 7}
+                    return {"retryable": False, "kind": "stale_delivery_result", "rc": 7}
                 elif commit_proc.returncode == 4:
-                    commit_payload = _parse_commit_result(commit_proc.stdout)
                     print(
                         f"[FINALIZE REFUSED] "
                         f"task={task_id} "
@@ -6827,6 +6833,18 @@ def finalize_completed_task(task_id):
                         commit_payload,
                     )
                     return {"retryable": False, "kind": "refused", "rc": 4}
+                elif commit_proc.returncode == 75:
+                    print(
+                        f"[FINALIZE WAIT] "
+                        f"task={task_id} "
+                        f"reason=git_busy retry later"
+                    )
+                    if (commit_payload.get("task_id") == task_id
+                            and commit_payload.get("result") == "wait"
+                            and commit_payload.get("reason") == "git_index_lock"):
+                        return {"retryable": True, "kind": "wait", "rc": 75,
+                                "reason": "git_index_lock", "budgeted": False}
+                    return {"retryable": True, "kind": "wait", "rc": 75}
                 elif commit_proc.returncode != 0:
                     from herdr.task_delivery import diagnostic_tail
                     print(
