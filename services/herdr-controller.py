@@ -6754,13 +6754,8 @@ def finalize_completed_task(task_id):
     # --------------------------------
     elif mode == "none":
         clone_path = task.get("clone_path")
-        is_context_plain = (
-            task.get("execution_mode") == "context"
-            and clone_path
-            and os.path.exists(clone_path)
-            and not os.path.lexists(os.path.join(clone_path, ".git"))
-        )
-        if clone_path and os.path.exists(clone_path) and not is_context_plain:
+        is_context_task = task.get("execution_mode") == "context"
+        if clone_path and os.path.exists(clone_path) and not is_context_task:
             status_res = subprocess.run(
                 ["git", "-C", clone_path, "status", "--porcelain", "--untracked-files=normal"],
                 capture_output=True, text=True

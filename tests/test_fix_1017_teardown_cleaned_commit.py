@@ -479,6 +479,58 @@ class TestTeardownCleanedCommit(unittest.TestCase):
         finally:
             ctl.subprocess.run = orig_run
 
+    def test_finalize_context_mode_with_git_metadata_bypasses_git_status(self):
+        """A context-mode workspace containing .git metadata bypasses git status and git commit, cleanly reaching cleanup_ready."""
+        spec = importlib.util.spec_from_file_location(
+            "herdr_controller",
+            str(HERDR_ROOT / "services" / "herdr-controller.py"),
+        )
+        ctl = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(ctl)
+
+        context_dir = self.tmp_dir / "context-git-dir"
+        context_dir.mkdir()
+        (context_dir / "context_output.json").write_text('{"summary": "ok"}')
+        git_dir = context_dir / ".git"
+        git_dir.mkdir()
+        (git_dir / "HEAD").write_text("ref: refs/heads/main\n")
+
+        task_id = "task-context-git"
+        task = {
+            "task_id": task_id,
+            "workflow_id": "wf-1",
+            "node": "context-extract",
+            "stage": "context-extract",
+            "status": "completed",
+            "clone_path": str(context_dir),
+            "execution_mode": "context",
+            "integration_mode": "none",
+        }
+        self.store.save_workflow({"workflow_id": "wf-1", "status": "running"})
+        self.store.save_task(task)
+
+        git_status_called = []
+        real_subprocess_run = subprocess.run
+        def spy_subprocess_run(cmd, *args, **kwargs):
+            if isinstance(cmd, (list, tuple)) and "status" in cmd:
+                git_status_called.append(cmd)
+            return real_subprocess_run(cmd, *args, **kwargs)
+
+        orig_run = ctl.subprocess.run
+        ctl.subprocess.run = spy_subprocess_run
+        try:
+            os.environ["HERDR_STATE_DB"] = str(self.db_path)
+            res = ctl.finalize_completed_task(task_id)
+            self.assertEqual(res, {"retryable": False, "kind": "finalized"})
+            self.assertEqual(git_status_called, [])
+
+            persisted = self.store.get_task(task_id)
+            self.assertEqual(persisted["status"], "cleaned")
+            self.assertTrue(context_dir.exists())
+            self.assertTrue((context_dir / "context_output.json").exists())
+        finally:
+            ctl.subprocess.run = orig_run
+
     def test_check_finalize_retry_drives_none_mode_preservation_retry(self):
         """_check_finalize_retry drives retries for mode=none tasks rather than discarding immediately."""
         spec = importlib.util.spec_from_file_location(

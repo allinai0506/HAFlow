@@ -1212,21 +1212,21 @@ def main():
             "pane_id": pane_id, "pane_source": pane_source, "clone": str(clone.resolve()) if clone else None,
             "agent_started": agent_started if agent_started else (None if agent_start_attempted else False),
             "agent_start_attempted": agent_start_attempted, "disposition": "unknown",
-            "recovery_required": agent_start_attempted or pane_id is not None,
+            "recovery_required": agent_start_attempted or pane_id is not None or bool(clone and os.path.lexists(clone)),
             "startup_status": (readiness or {}).get("status", "UNKNOWN"),
             "failure_type": type(exc).__name__,
         }
+        pane_rolled_back = False
         if not agent_start_attempted and pane_id and rollback_unstarted_pane(clone, pane_id, pane_source, launch_identity):
-            failure.update(disposition='pane_reclaimed', recovery_required=False)
+            pane_rolled_back = True
             pane_id = None
         elif agent_start_attempted and not agent_started and pane_id and pane_source == 'dynamic' and rollback_unready_startup(clone, pane_id, pane_source, launch_identity, agent):
-            failure.update(disposition='rolled_back', recovery_required=False, agent_started=False)
+            pane_rolled_back = True
             pane_id = None
-        # Expected identity is the start receipt, never the foreign queried instance.
-        print("HERDR_WORKER_FAILURE=" + json.dumps(failure, sort_keys=True), file=sys.stderr, flush=True)
+
         can_cleanup_clone = (
-            clone and clone.exists() and pane_id is None
-            and (not agent_start_attempted or failure.get("disposition") in ("pane_reclaimed", "rolled_back"))
+            clone and os.path.lexists(clone) and pane_id is None
+            and (not agent_start_attempted or pane_rolled_back)
             and not is_task_active_in_registry(args.task_id)
         )
         if can_cleanup_clone:
@@ -1234,7 +1234,27 @@ def main():
                 f"[WORKER ROLLBACK] Cleaning up incomplete clone: {clone}",
                 file=sys.stderr
             )
-            shutil.rmtree(clone, ignore_errors=True)
+            try:
+                shutil.rmtree(clone, ignore_errors=True)
+            except OSError as _rm_err:
+                print(
+                    f"[WORKER ROLLBACK WARN] Failed to remove clone {clone}: {_rm_err}",
+                    file=sys.stderr
+                )
+
+        clone_absent = not clone or not os.path.lexists(clone)
+        if clone_absent and pane_id is None:
+            if not agent_start_attempted and pane_rolled_back:
+                failure.update(disposition='pane_reclaimed', recovery_required=False)
+            elif agent_start_attempted and not agent_started and pane_rolled_back:
+                failure.update(disposition='rolled_back', recovery_required=False, agent_started=False)
+            elif not agent_start_attempted and not pane_id:
+                failure.update(recovery_required=False)
+        else:
+            failure.update(recovery_required=True)
+
+        # Expected identity is the start receipt, never the foreign queried instance.
+        print("HERDR_WORKER_FAILURE=" + json.dumps(failure, sort_keys=True), file=sys.stderr, flush=True)
         raise
 
 
