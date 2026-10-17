@@ -39,8 +39,11 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           fetch-depth: 1
+          # Cone-mode sparse-checkout rejects file paths ("not a directory");
+          # non-cone mode treats the entry as a file pattern.
           sparse-checkout: |
             scripts/codex-gate.py
+          sparse-checkout-cone-mode: false
 
       - name: Bootstrap fallback (script is new in this PR)
         run: |
