@@ -731,6 +731,81 @@ class ExperienceCollector:
         thread.start()
         return thread
 
+    def collect_and_sync_lessons(
+        self,
+        lessons_path: Optional[Path] = None,
+        min_lesson_num: int = 160,
+    ) -> Dict[str, Any]:
+        """Extract and sync corporate business rules from lessons-learned.md."""
+        target = lessons_path or Path("/Users/user/haflow/docs/lessons/lessons-learned.md")
+        if not target.is_file():
+            return {"ok": False, "reason": "lessons_file_missing"}
+        try:
+            from .extractor import extract_candidates_from_lessons
+            content = target.read_text(encoding="utf-8")
+            candidates = extract_candidates_from_lessons(content, contributor=self.contributor, min_lesson_num=min_lesson_num)
+            uploaded = 0
+            failed = 0
+            now = time.time()
+            conn = _get_collector_db(self.db_path)
+            try:
+                for exp in candidates:
+                    cand_json = json.dumps(exp.to_dict(), ensure_ascii=False)
+                    with conn:
+                        conn.execute("""
+                            INSERT INTO local_collector_records
+                            (task_id, run_id, outcome_id, experience_id, status, candidate_json, created_at, updated_at)
+                            VALUES (?, ?, NULL, ?, 'pending_upload', ?, ?, ?)
+                            ON CONFLICT(task_id, run_id) DO UPDATE SET
+                                candidate_json = excluded.candidate_json,
+                                updated_at = excluded.updated_at
+                            WHERE local_collector_records.status != 'uploaded'
+                        """, (exp.source.task_id, exp.source.run_id, exp.experience_id, cand_json, now, now))
+                    if self.hub_client:
+                        try:
+                            self.hub_client.submit_candidate(exp)
+                            with conn:
+                                conn.execute(
+                                    "UPDATE local_collector_records SET status = 'uploaded', updated_at = ? WHERE task_id = ? AND run_id = ?",
+                                    (now, exp.source.task_id, exp.source.run_id)
+                                )
+                            uploaded += 1
+                        except Exception as e:
+                            LOGGER.debug("Upload failed for lesson %s: %s", exp.experience_id, e)
+                            failed += 1
+            finally:
+                conn.close()
+            return {"ok": True, "total": len(candidates), "uploaded": uploaded, "failed": failed}
+        except Exception as exc:
+            LOGGER.error("collect_and_sync_lessons failed: %s", exc)
+            return {"ok": False, "reason": str(exc)}
+
+    def collect_workflow_tasks(
+        self,
+        workflow_id: str,
+        state_db_path: Optional[Path] = None,
+    ) -> Dict[str, Any]:
+        """Enqueue settlement for all terminal tasks in a workflow."""
+        try:
+            conn = state_db.get_db_connection(state_db_path)
+            try:
+                rows = conn.execute(
+                    "SELECT task_id, status, run_id FROM tasks WHERE workflow_id = ? ORDER BY created_at",
+                    (str(workflow_id),),
+                ).fetchall()
+            finally:
+                conn.close()
+            enqueued = 0
+            for r in rows:
+                tid = r["task_id"]
+                st = r["status"]
+                if st in ("completed", "cleaned"):
+                    self.enqueue_task_settlement(tid, state_db_path=state_db_path)
+                    enqueued += 1
+            return {"ok": True, "workflow_id": workflow_id, "enqueued": enqueued}
+        except Exception as exc:
+            return {"ok": False, "reason": str(exc)}
+
 
 _bg_sync_lock = threading.Lock()
 _bg_sync_inflight = False

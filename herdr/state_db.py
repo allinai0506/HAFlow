@@ -1208,6 +1208,7 @@ def _ensure_eval_replay_columns(conn: sqlite3.Connection) -> None:
     """Upgrade eval/replay tables with B3/B6 fact columns in place."""
     eval_columns = {row["name"] for row in conn.execute("PRAGMA table_info(eval_results);")}
     eval_types = {
+        "scores_json": "TEXT",
         "requirements_satisfied": "INTEGER",
         "verification_passed": "INTEGER",
         "human_intervention_count": "INTEGER",
