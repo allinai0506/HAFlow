@@ -343,6 +343,36 @@ function getTplBadgeClass(){return 'cat-biz'}
 })().catch(e=>{console.error(e);process.exitCode=1});
 ''')
 
+    def test_stale_template_detail_response_does_not_overwrite_newer_selection(self):
+        """切换空间/连续点选时,迟到的旧模板详情响应不得覆盖最新选择(Codex P2)。"""
+        source = self.html
+        block = source[source.index('function projectTemplateId('):
+                       source.index('function ensureTplCardShape(')]
+        self.run_js(block, r'''
+const state={spaceId:'w1',templateSelections:{},templates:[{id:'bidding',label:'投标'},{id:'code',label:'代码'}],currentTemplateDetail:null};
+const nodes={};
+function element(id){return nodes[id]||(nodes[id]={textContent:'',className:''});}
+const document={getElementById:element};
+const dagCalls=[];
+async function api(url){
+  if(url.includes('bidding'))return new Promise(r=>setTimeout(()=>r({template:{id:'bidding',label:'迟到旧响应'},nodes:[{id:'old-node'}]}),30));
+  return {template:{id:'code',label:'代码'},nodes:[{id:'new-node'}]};
+}
+function renderTplCards(){}
+function closeTplNodeDrawer(){}
+function renderTplDAG(ns){dagCalls.push((ns||[]).map(n=>n.id).join(','))}
+function getTplBadgeClass(){return 'cat-biz'}
+// SOURCE
+(async()=>{
+ const p1=selectTemplateInLibrary('bidding',1);
+ const p2=selectTemplateInLibrary('code');
+ await Promise.all([p1,p2]);
+ assert.equal(nodes['tplCurId'].textContent,'code','迟到旧响应不得覆盖最新面板');
+ assert.equal(state.currentTemplateDetail&&state.currentTemplateDetail.template.id,'code','currentTemplateDetail 必须属于最新选择');
+ assert.equal(dagCalls[dagCalls.length-1],'new-node','DAG 必须属于最新选择');
+})().catch(e=>{console.error(e);process.exitCode=1});
+''')
+
     def test_populate_template_select_prefers_requested_template(self):
         source = self.html
         block = source[source.index('async function populateTemplateSelect('):

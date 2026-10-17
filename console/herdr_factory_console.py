@@ -7477,8 +7477,11 @@ async function selectTemplateInLibrary(id,remember){ // remember=1 仅用户点�
   renderTplCards();
   closeTplNodeDrawer();
 
+  // 过期响应丢弃:切空间/连续点选后,迟到的 /api/template 继续帧不得覆盖最新选择
+  const sequence=state.templateDetailSequence=(state.templateDetailSequence||0)+1;
   try{
     const d=await api('/api/template?id='+encodeURIComponent(id));
+    if(sequence!==state.templateDetailSequence)return;
     if(d.template){
       if(titleEl)titleEl.textContent=d.template.label||d.template.id;
       if(descEl)descEl.textContent=d.template.description||'';
@@ -7486,6 +7489,7 @@ async function selectTemplateInLibrary(id,remember){ // remember=1 仅用户点�
     state.currentTemplateDetail=d;
     renderTplDAG(d.nodes||[]);
   }catch(e){
+    if(sequence!==state.templateDetailSequence)return;
     if(t.nodes_preview)renderTplDAG(t.nodes_preview);
   }
 }
