@@ -150,6 +150,7 @@ class StateStore(ABC):
         source: str = "system",
         metadata: Optional[Dict[str, Any]] = None,
         force: bool = False,
+        expected_status: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Atomically validate and transition a workflow status, appending a WorkflowEvent."""
         pass
@@ -693,6 +694,7 @@ class SQLiteStateStore(StateStore):
         source: str = "system",
         metadata: Optional[Dict[str, Any]] = None,
         force: bool = False,
+        expected_status: Optional[str] = None,
     ) -> Dict[str, Any]:
         return state_db.transition_workflow(
             workflow_id=workflow_id,
@@ -702,6 +704,7 @@ class SQLiteStateStore(StateStore):
             metadata=metadata,
             force=force,
             db_path=self.db_path,
+            **({"expected_status": expected_status} if expected_status is not None else {}),
         )
 
     def update_workflow_metadata(

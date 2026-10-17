@@ -522,3 +522,59 @@ def test_late_dirty_git_during_archive_cannot_gain_implicit_override(
     assert (clone / "report.md").read_text() == "late unintegrated output"
     assert store.get_workflow("wf")["status"] != "completed"
     assert not store.get_task("t").get("clone_archive")
+
+
+def test_force_cannot_override_pause_that_wins_during_plan(tmp_path, monkeypatch):
+    from herdr import clone_archive, kernel
+    from herdr.state_store import SQLiteStateStore
+    from herdr.transitions import InvalidTransitionError
+
+    store, clone, _ = scene(tmp_path, monkeypatch)
+    cli = load_cli(monkeypatch, store, clone)
+    plan = clone_archive.plan_clone
+    concurrent = SQLiteStateStore(store.db_path)
+
+    def pause_after_plan(task, clone_root):
+        result = plan(task, clone_root)
+        kernel.transition_workflow(
+            workflow_id="wf",
+            to_status="paused",
+            reason="newer pause",
+            source="test",
+            store=concurrent,
+        )
+        return result
+
+    monkeypatch.setattr(clone_archive, "plan_clone", pause_after_plan)
+    with pytest.raises(InvalidTransitionError):
+        cli.close_workflow("wf", force=True)
+    task = store.get_task("t")
+    assert store.get_workflow("wf")["status"] == "paused"
+    assert clone.exists() and not task.get("clone_archive")
+    assert not clone_archive.archive_directory(task).exists()
+
+    closing = [
+        event
+        for event in store.list_events(
+            workflow_id="wf", event_type="workflow_transition"
+        )
+        if (event.get("payload") or {}).get("to_status") == "closing"
+    ]
+    assert not closing
+
+
+def test_force_still_closes_status_explicitly_observed_as_paused(tmp_path, monkeypatch):
+    from herdr import kernel
+
+    store, clone, env = scene(tmp_path, monkeypatch)
+    kernel.transition_workflow(
+        workflow_id="wf",
+        to_status="paused",
+        reason="existing pause",
+        source="test",
+        store=store,
+    )
+    result = close(env, "--force")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not clone.exists() and store.get_task("t").get("clone_archive")
+    assert store.get_workflow("wf")["status"] == "completed"

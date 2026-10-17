@@ -2709,3 +2709,5 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - Updated [[task-lifecycle]]：先纯预检，再原子进入 closing，最后归档发布与回收；显式覆盖旗标不能绕过恢复点，实际删除入口防止预检后的晚到 clone 裸删；dry-run 报告归档后有条件回收。
 - 扩展教训 §165：授权路径必须同样保护副作用，异步审查完成证据不能由先行绿色门禁代替。
 - Evidence: `tests/test_workflow_clone_reclaim.py`：四种旗标 × staged/untracked，暂停双向交错、晚到目录、归档写入失败重试和 dry-run 零副作用。
+
+- 发布保护追加：内部 Workflow 转移支持可选 `expected_status`，SQLite 写事务内先匹配观察状态再处理 force；阻止显式强制关闭覆盖预检期间的新暂停，并保留初始已暂停时的合法强制收口。证据：强制暂停交错与初始 paused 两项真实 SQLite / CLI 回归。

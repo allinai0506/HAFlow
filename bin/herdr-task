@@ -7436,6 +7436,7 @@ def _close_workflow_owned(
             workflow_id=workflow_id, to_status="closing",
             reason=f"close_workflow: {'abandoned' if abandon else 'delivered'}",
             source="herdr-task", force=force, store=_get_store(),
+            expected_status=entry.get("status"),
         )
 
     archives = {}

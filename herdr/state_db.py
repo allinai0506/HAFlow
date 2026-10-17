@@ -32,6 +32,7 @@ from herdr.transitions import (
     ACTIVE_TASK_STATUSES,
     COMPLETED_TASK_STATUSES,
     TERMINAL_TASK_STATUSES,
+    InvalidTransitionError,
     validate_task_transition,
     validate_workflow_transition,
 )
@@ -7103,6 +7104,7 @@ def transition_workflow(
     force: bool = False,
     db_path: Optional[Path] = None,
     conn: Optional[sqlite3.Connection] = None,
+    expected_status: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Atomically validate and transition a workflow status, appending a canonical WorkflowEvent."""
     should_close = False
@@ -7120,6 +7122,11 @@ def transition_workflow(
             raise ValueError(f"Workflow '{workflow_id}' not found")
 
         old_status = row["status"]
+        if expected_status is not None and old_status != expected_status:
+            raise InvalidTransitionError(
+                f"Workflow '{workflow_id}' changed during preflight: "
+                f"expected {expected_status}, found {old_status}"
+            )
         validate_workflow_transition(old_status, to_status, force=force)
 
         user_meta = dict(metadata or {})
