@@ -1657,19 +1657,45 @@ def save_task(
                     or any(previous.get(key) != task_dict.get(key) for key in ('run_id', 'execution_id', 'launch_intent_id', 'supersedes'))):
                 raise ValueError('cannot change dispatch task registration identity')
 
-            if is_proven_unbound and status == 'superseded' and proven_intent_payload:
+            if is_proven_unbound and proven_intent_payload:
                 intent_run = (proven_intent_payload.get('resources') or {}).get('run_id')
+                if intent_run is None:
+                    intent_run = proven_intent_payload.get('run_id')
                 intent_exec = proven_intent_payload.get('execution_id')
                 intent_supersedes = proven_intent_payload.get('supersedes')
                 intent_wf = proven_intent_payload.get('workflow_id')
                 intent_node = proven_intent_payload.get('node_id')
-                if ((intent_wf and wid != intent_wf)
-                        or (intent_node and node != intent_node)
-                        or (intent_run and task_dict.get('run_id') != intent_run)
-                        or (intent_exec and task_dict.get('execution_id') != intent_exec)
-                        or (proven_intent_payload.get('intent_id') and task_dict.get('launch_intent_id') != proven_intent_payload['intent_id'])
-                        or (intent_supersedes and task_dict.get('supersedes') != intent_supersedes)):
+                intent_id = proven_intent_payload.get('intent_id')
+
+                if intent_supersedes is not None and previous.get('supersedes') not in (None, '') and previous['supersedes'] != intent_supersedes:
+                    raise ValueError('dispatch registration identity conflicts with durable launch intent')
+
+                if (existing['workflow_id'] != wid) or (intent_wf is not None and wid != intent_wf):
                     raise ValueError('cannot change dispatch task registration identity')
+
+                if (existing['node'] != node) or (intent_node is not None and node != intent_node):
+                    raise ValueError('cannot change dispatch task registration identity')
+
+                if (intent_id is not None and task_dict.get('launch_intent_id') != intent_id) or (
+                        previous.get('launch_intent_id') is not None and task_dict.get('launch_intent_id') != previous['launch_intent_id']):
+                    raise ValueError('cannot change dispatch task registration identity')
+
+                if intent_exec is not None and task_dict.get('execution_id') != intent_exec:
+                    raise ValueError('cannot change dispatch task registration identity')
+
+                if (intent_run is not None and task_dict.get('run_id') != intent_run) or (
+                        previous.get('run_id') is not None and task_dict.get('run_id') != previous['run_id']):
+                    raise ValueError('cannot change dispatch task registration identity')
+
+                if previous.get('supersedes') is not None:
+                    if task_dict.get('supersedes') != previous['supersedes']:
+                        raise ValueError('cannot change dispatch task registration identity')
+                elif intent_supersedes is None:
+                    if task_dict.get('supersedes') is not None:
+                        raise ValueError('cannot change dispatch task registration identity')
+                else:
+                    if task_dict.get('supersedes') is not None and task_dict.get('supersedes') != intent_supersedes:
+                        raise ValueError('cannot change dispatch task registration identity')
         elif task_dict.get('dispatch_operation_id') is not None:
             from .node_dispatch_store import validate_task_registration
             validate_task_registration(conn, task_dict, now)

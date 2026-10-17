@@ -365,6 +365,242 @@ class TestSupersedeUnboundIdentity(unittest.TestCase):
         self.assertEqual(updated["status"], "completed")
         self.assertEqual(updated["run_id"], run_id)
 
+    def test_unbound_task_ordinary_status_progression_rejects_identity_tampering(self):
+        """Advancing an unbound task to completed or cleaned must validate identity against proven intent."""
+        wf_id = "wf-test-unbound-ordinary"
+        task_id = "t-unbound-ordinary"
+        node = "impl"
+        intent_id = "intent-unbound-1"
+        run_id = "run-unbound-1"
+
+        state_db.save_workflow({"workflow_id": wf_id, "status": "running"}, self.db_path)
+
+        conn = state_db.get_db_connection(self.db_path)
+        conn.execute(
+            """INSERT INTO events (workflow_id, task_id, event_type, source, payload_json, timestamp, node_id)
+               VALUES (?, ?, 'launch_intent', 'launch', ?, 1000.0, ?)""",
+            (
+                wf_id,
+                task_id,
+                json.dumps({
+                    "task_id": task_id,
+                    "dispatch_operation_id": None,
+                    "intent_id": intent_id,
+                    "execution_id": wf_id,
+                    "supersedes": None,
+                    "resources": {"run_id": run_id},
+                }),
+                node,
+            ),
+        )
+
+        payload = {
+            "task_id": task_id,
+            "workflow_id": wf_id,
+            "node": node,
+            "stage": node,
+            "status": "working",
+            "dispatch_operation_id": None,
+            "run_id": run_id,
+            "execution_id": wf_id,
+            "launch_intent_id": intent_id,
+            "supersedes": None,
+        }
+        conn.execute(
+            """INSERT INTO tasks (task_id, workflow_id, node, stage, agent, status, payload_json, created_at, updated_at, version)
+               VALUES (?, ?, ?, ?, 'agent', 'working', ?, 1000.0, 1000.0, 1)""",
+            (task_id, wf_id, node, node, json.dumps(payload)),
+        )
+        conn.commit()
+        conn.close()
+
+        # 1. Advancing to completed but tampering with run_id is rejected
+        task = state_db.get_task(task_id, self.db_path)
+        task["status"] = "completed"
+        task["run_id"] = "run-tampered"
+        with self.assertRaises(ValueError) as ctx:
+            state_db.save_task(task, self.db_path)
+        self.assertIn("cannot change dispatch task registration identity", str(ctx.exception))
+
+        # 2. Advancing to completed but tampering with execution_id is rejected
+        task = state_db.get_task(task_id, self.db_path)
+        task["status"] = "completed"
+        task["execution_id"] = "exec-tampered"
+        with self.assertRaises(ValueError) as ctx:
+            state_db.save_task(task, self.db_path)
+        self.assertIn("cannot change dispatch task registration identity", str(ctx.exception))
+
+        # 3. Advancing to completed but injecting a predecessor supersedes is rejected
+        task = state_db.get_task(task_id, self.db_path)
+        task["status"] = "completed"
+        task["supersedes"] = "t-fake-predecessor"
+        with self.assertRaises(ValueError) as ctx:
+            state_db.save_task(task, self.db_path)
+        self.assertIn("cannot change dispatch task registration identity", str(ctx.exception))
+
+        # 4. Advancing to completed with untampered identity succeeds
+        task = state_db.get_task(task_id, self.db_path)
+        task["status"] = "completed"
+        state_db.save_task(task, self.db_path)
+        persisted = state_db.get_task(task_id, self.db_path)
+        self.assertEqual(persisted["status"], "completed")
+
+        # 5. Advancing from completed to cleaned but tampering with node is rejected
+        task = state_db.get_task(task_id, self.db_path)
+        task["status"] = "cleaned"
+        task["node"] = "tampered-node"
+        with self.assertRaises(ValueError) as ctx:
+            state_db.save_task(task, self.db_path)
+        self.assertIn("cannot change dispatch task registration identity", str(ctx.exception))
+
+        # 6. Advancing to cleaned with untampered identity succeeds
+        task = state_db.get_task(task_id, self.db_path)
+        task["status"] = "cleaned"
+        state_db.save_task(task, self.db_path)
+        persisted = state_db.get_task(task_id, self.db_path)
+        self.assertEqual(persisted["status"], "cleaned")
+
+    def test_unbound_task_with_replacement_intent_supersedes_validation(self):
+        """Unbound task with replacement intent allows pre-link None/intent_supersedes, rejects other and post-link changes."""
+        wf_id = "wf-test-unbound-repl"
+        task_id = "t-unbound-repl"
+        node = "impl"
+        intent_id = "intent-unbound-repl"
+        run_id = "run-unbound-repl"
+
+        state_db.save_workflow({"workflow_id": wf_id, "status": "running"}, self.db_path)
+
+        conn = state_db.get_db_connection(self.db_path)
+        conn.execute(
+            """INSERT INTO events (workflow_id, task_id, event_type, source, payload_json, timestamp, node_id)
+               VALUES (?, ?, 'launch_intent', 'launch', ?, 1000.0, ?)""",
+            (
+                wf_id,
+                task_id,
+                json.dumps({
+                    "task_id": task_id,
+                    "dispatch_operation_id": None,
+                    "intent_id": intent_id,
+                    "execution_id": wf_id,
+                    "supersedes": "t-old-valid",
+                    "resources": {"run_id": run_id},
+                }),
+                node,
+            ),
+        )
+
+        payload = {
+            "task_id": task_id,
+            "workflow_id": wf_id,
+            "node": node,
+            "stage": node,
+            "status": "working",
+            "dispatch_operation_id": None,
+            "run_id": run_id,
+            "execution_id": wf_id,
+            "launch_intent_id": intent_id,
+            "supersedes": None,
+        }
+        conn.execute(
+            """INSERT INTO tasks (task_id, workflow_id, node, stage, agent, status, payload_json, created_at, updated_at, version)
+               VALUES (?, ?, ?, ?, 'agent', 'working', ?, 1000.0, 1000.0, 1)""",
+            (task_id, wf_id, node, node, json.dumps(payload)),
+        )
+        conn.commit()
+        conn.close()
+
+        # 1. Pre-link: setting a wrong supersedes is rejected
+        task = state_db.get_task(task_id, self.db_path)
+        task["supersedes"] = "t-wrong-predecessor"
+        with self.assertRaises(ValueError) as ctx:
+            state_db.save_task(task, self.db_path)
+        self.assertIn("cannot change dispatch task registration identity", str(ctx.exception))
+
+        # 2. Pre-link: setting matching supersedes or leaving it None succeeds
+        task = state_db.get_task(task_id, self.db_path)
+        task["supersedes"] = "t-old-valid"
+        state_db.save_task(task, self.db_path)
+        persisted = state_db.get_task(task_id, self.db_path)
+        self.assertEqual(persisted["supersedes"], "t-old-valid")
+
+        # 3. Post-link: stripping supersedes back to None is rejected
+        task = state_db.get_task(task_id, self.db_path)
+        task["supersedes"] = None
+        with self.assertRaises(ValueError) as ctx:
+            state_db.save_task(task, self.db_path)
+        self.assertIn("cannot change dispatch task registration identity", str(ctx.exception))
+
+    def test_unbound_task_nullable_identity_fields_exact_match(self):
+        """When unbound intent has specified identities, tampering with any of them is rejected."""
+        wf_id = "wf-test-unbound-nullable"
+        task_id = "t-unbound-nullable"
+        node = "impl"
+        intent_id = "intent-unbound-null"
+        orig_run = "run-orig-123"
+        orig_exec = "exec-orig-456"
+
+        state_db.save_workflow({"workflow_id": wf_id, "status": "running"}, self.db_path)
+
+        conn = state_db.get_db_connection(self.db_path)
+        conn.execute(
+            """INSERT INTO events (workflow_id, task_id, event_type, source, payload_json, timestamp, node_id)
+               VALUES (?, ?, 'launch_intent', 'launch', ?, 1000.0, ?)""",
+            (
+                wf_id,
+                task_id,
+                json.dumps({
+                    "task_id": task_id,
+                    "dispatch_operation_id": None,
+                    "intent_id": intent_id,
+                    "execution_id": orig_exec,
+                    "supersedes": None,
+                    "resources": {"run_id": orig_run},
+                }),
+                node,
+            ),
+        )
+
+        payload = {
+            "task_id": task_id,
+            "workflow_id": wf_id,
+            "node": node,
+            "stage": node,
+            "status": "working",
+            "dispatch_operation_id": None,
+            "run_id": orig_run,
+            "execution_id": orig_exec,
+            "launch_intent_id": intent_id,
+            "supersedes": None,
+        }
+        conn.execute(
+            """INSERT INTO tasks (task_id, workflow_id, node, stage, agent, status, payload_json, created_at, updated_at, version)
+               VALUES (?, ?, ?, ?, 'agent', 'working', ?, 1000.0, 1000.0, 1)""",
+            (task_id, wf_id, node, node, json.dumps(payload)),
+        )
+        conn.commit()
+        conn.close()
+
+        # 1. Tampering with run_id is rejected
+        task = state_db.get_task(task_id, self.db_path)
+        task["run_id"] = "run-tampered"
+        with self.assertRaises(ValueError) as ctx:
+            state_db.save_task(task, self.db_path)
+        self.assertIn("cannot change dispatch task registration identity", str(ctx.exception))
+
+        # 2. Tampering with execution_id is rejected
+        task = state_db.get_task(task_id, self.db_path)
+        task["execution_id"] = "exec-tampered"
+        with self.assertRaises(ValueError) as ctx:
+            state_db.save_task(task, self.db_path)
+        self.assertIn("cannot change dispatch task registration identity", str(ctx.exception))
+
+        # 3. Injecting a predecessor when intent had supersedes=None is rejected
+        task = state_db.get_task(task_id, self.db_path)
+        task["supersedes"] = "t-fake-pred"
+        with self.assertRaises(ValueError) as ctx:
+            state_db.save_task(task, self.db_path)
+        self.assertIn("cannot change dispatch task registration identity", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()
