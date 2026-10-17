@@ -437,9 +437,16 @@ def overview():
         'services': service_status(),
     }
 
+def _project_workflow_template(p):
+    """项目当前生效的模板名(读项目 workflow.json;缺失返回空串)。"""
+    if not p or not p.get('workflow_file'):return ''
+    cfg=load_json(Path(p.get('workflow_file')),{}) or {}
+    return str(cfg.get('workflow_template') or '')
+
 def project_detail(pid, lightweight=False):
     p=project_by_id(pid)
     if not p:raise RuntimeError('项目不存在')
+    p={**p,'workflow_template':_project_workflow_template(p)}
     if lightweight:
         from herdr.console_queries import project_workflows, project_agent_loads
         db_path=state_db_path()
@@ -469,15 +476,21 @@ def project_runtime(pid):
     finally:conn.close()
     return {'tabs':tabs(p.get('workspace_id')),'panes':p_panes,'slots':slots(p,p_panes=p_panes,claimed=claimed)}
 
-def workflow_stages(wid, p):
-    """阶段卡片来源:优先 workflow.json 的 nodes(id/label),回退内置 STAGES。
+def workflow_stages(wid, p, w=None, definition=None):
+    """阶段卡片来源:优先该次运行的冻结定义,次选项目 workflow.json 的 nodes(id/label),回退内置 STAGES。
 
     背景(wf-nexusarchive-0918-02):前端阶段卡片此前硬编码 software-development
     的 6 阶段,切换模板(general-task-v1 等)后界面不跟随,必须按工作流
     自己的节点定义渲染。
+    隔离回归(工作空间模板切换):项目 reprovision 后不得改写历史运行的
+    阶段展示,运行冻结定义(definition/config)优先于项目当前模板。
     """
     cfg={}
-    if p and p.get('workflow_file'):
+    if isinstance(definition,dict) and definition.get('nodes'):
+        cfg=definition
+    if not cfg.get('nodes') and isinstance(w,dict) and isinstance(w.get('config'),dict):
+        cfg=w['config']
+    if not cfg.get('nodes') and p and p.get('workflow_file'):
         cfg=load_json(Path(p.get('workflow_file')),{}) or {}
     out=[]
     for n in (cfg.get('nodes') or []):
@@ -538,11 +551,12 @@ def workflow_detail(wid, *, lightweight=False):
         if not w:raise RuntimeError('工作流不存在')
         p=project_for_workflow(wid)
         ts=tasks_for_workflow(wid)
-    ts=enrich_workflow_tasks(wid,p,ts); ss=[]
-    for k,l in workflow_stages(wid,p):
+    ts=enrich_workflow_tasks(wid,p,ts)
+    definition,inventory=_referenced_task_inventory(wid,p,ts,w)
+    ss=[]
+    for k,l in workflow_stages(wid,p,w,definition=definition):
         x=stage_summary(ts,k,workflow=w); x['label']=l; ss.append(x)
     stall_info=herdr_projection.detect_workflow_stalls(wid,ts,workflow=w)
-    definition,inventory=_referenced_task_inventory(wid,p,ts,w)
     graph=workflow_graph_for(wid,p,w,ts,definition=definition,all_tasks=inventory)
     derived={'current_nodes':graph.get('current_nodes',[]),'ready_nodes':graph.get('ready_nodes',[]),'derived_current_stage':graph.get('current_stage',''),'current_stage_source':graph.get('current_stage_source','derived_nodes')}
     if lightweight:
@@ -6900,7 +6914,7 @@ body {
 <script src="/static/vendor/dagre-3.1.1.min.js"></script>
 <script src="/static/vendor/x6-3.1.8.min.js"></script>
 <script>
-let state={overview:null,project:null,workflow:null,ops:null,dash:null,projectId:null,workflowId:null,openWorkflowTabIds:[],sidebarCollapsed:false,completedExpanded:false,completedVisibleLimit:5,spaceId:null,space:null,opsMode:false,dashMode:false,dashWorkflowId:null,shellView:'workbench',taskFilter:'all',drawerTab:'tty',selectedTaskId:null,taskDrawerTab:'overview',taskTrace:null,taskTraceSeq:0,taskTracePoll:null,selectedTaskDetail:null,workflowView:'flow',flowSelectedNodeId:null,flowInspectorTab:'summary',flowGraph:null,flowGraphWfId:null,flowHtmlReady:false};
+let state={overview:null,project:null,workflow:null,ops:null,dash:null,projectId:null,workflowId:null,openWorkflowTabIds:[],sidebarCollapsed:false,completedExpanded:false,completedVisibleLimit:5,spaceId:null,space:null,templateSelections:{},opsMode:false,dashMode:false,dashWorkflowId:null,shellView:'workbench',taskFilter:'all',drawerTab:'tty',selectedTaskId:null,taskDrawerTab:'overview',taskTrace:null,taskTraceSeq:0,taskTracePoll:null,selectedTaskDetail:null,workflowView:'flow',flowSelectedNodeId:null,flowInspectorTab:'summary',flowGraph:null,flowGraphWfId:null,flowHtmlReady:false};
 const VIEW_KEY='herdrConsoleView';
 function closeMoreMenu(){const dd=document.getElementById('moreDropdown');if(dd)dd.classList.remove('open')}
 function toggleMoreMenu(e){e.stopPropagation();const dd=document.getElementById('moreDropdown');if(dd)dd.classList.toggle('open')}
@@ -7316,10 +7330,10 @@ function ensureTplLayoutDOM(tplEl){
             <p id="tplCurDesc" style="font-size:12px;color:var(--text-secondary);margin-top:4px;line-height:1.4"></p>
           </div>
           <div class="tpl-detail-actions">
-            <button type="button" class="btn" onclick="showTemplateDAG(state.currentTemplateId)">
+            <button type="button" class="btn" onclick="showTemplateDAG(effectiveTemplateId())">
               <span>节点依赖清单</span>
             </button>
-            <button type="button" class="btn" onclick="showTemplateEditor(state.currentTemplateId)">
+            <button type="button" class="btn" onclick="showTemplateEditor(effectiveTemplateId())">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
               <span id="tplEditBtnLabel">可视化配置 / YAML</span>
             </button>
@@ -7414,7 +7428,7 @@ function renderTplCards(){
     return;
   }
 
-  const curId=state.currentTemplateId||'software-development-v1';
+  const curId=effectiveTemplateId();
   listEl.innerHTML=filtered.map(t=>{
     const isSel=t.id===curId;
     const is_builtin=Boolean(t.is_builtin);
@@ -7423,7 +7437,7 @@ function renderTplCards(){
       ${i<(t.nodes_preview||[]).length-1?'<span class="step-arrow">➔</span>':''}
     `).join('');
     return `
-      <div class="tpl-card ${isSel?'selected':''}" onclick="selectTemplateInLibrary('${esc(t.id)}')">
+      <div class="tpl-card ${isSel?'selected':''}" onclick="selectTemplateInLibrary('${esc(t.id)}',1)">
         <div class="tpl-head">
           <span class="tpl-title">
             <span>${esc(t.label||t.id)}</span>
@@ -7443,8 +7457,13 @@ function renderTplCards(){
   }).join('');
 }
 
-async function selectTemplateInLibrary(id){
-  state.currentTemplateId=id;
+function projectTemplateId(){const p=state.project&&state.project.project;return (p&&p.workflow_template)||''}
+function spaceTemplateSelections(){return state.templateSelections}
+function rememberSpaceTemplate(id,spaceId){if(id)spaceTemplateSelections()[spaceId||state.spaceId||'']=id}
+function effectiveTemplateId(){return spaceTemplateSelections()[state.spaceId||'']||projectTemplateId()||'software-development-v1'}
+
+async function selectTemplateInLibrary(id,remember){ // remember=1 仅用户点选(卡片 onclick / 保存模板)记账;程序化显示不得覆盖空间选择
+  if(remember)rememberSpaceTemplate(id);
   const ts=state.templates||[];
   const t=ts.find(x=>x.id===id)||{id:id,label:id};
   const titleEl=document.getElementById('tplCurTitle');
@@ -7463,8 +7482,11 @@ async function selectTemplateInLibrary(id){
   renderTplCards();
   closeTplNodeDrawer();
 
+  // 过期响应丢弃:切空间/连续点选后,迟到的 /api/template 继续帧不得覆盖最新选择
+  const sequence=state.templateDetailSequence=(state.templateDetailSequence||0)+1;
   try{
     const d=await api('/api/template?id='+encodeURIComponent(id));
+    if(sequence!==state.templateDetailSequence)return;
     if(d.template){
       if(titleEl)titleEl.textContent=d.template.label||d.template.id;
       if(descEl)descEl.textContent=d.template.description||'';
@@ -7472,6 +7494,7 @@ async function selectTemplateInLibrary(id){
     state.currentTemplateDetail=d;
     renderTplDAG(d.nodes||[]);
   }catch(e){
+    if(sequence!==state.templateDetailSequence)return;
     if(t.nodes_preview)renderTplDAG(t.nodes_preview);
   }
 }
@@ -7632,10 +7655,7 @@ function closeTplNodeDrawer(){
 }
 
 function launchWithCurrentTemplate(){
-  const tid=state.currentTemplateId||'software-development-v1';
-  showNewWorkflow();
-  const sel=document.getElementById('newTemplate');
-  if(sel)sel.value=tid;
+  showNewWorkflow(effectiveTemplateId());
 }
 
 async function showTemplateLibrary(){
@@ -7653,10 +7673,11 @@ async function showTemplateLibrary(){
     const ts=await fetchTemplates();
     renderTplCategories();
     renderTplCards();
-    const targetId=state.currentTemplateId||'software-development-v1';
+    const targetId=effectiveTemplateId();
     const found=ts.find(t=>t.id===targetId)||ts[0];
     if(found){
-      const is_builtin=Boolean(found.is_builtin);
+      // 项目模板已删除/不可用时,回落项同步为空间选择,保证卡片选中/详情/DAG/启动与显示一致(仅会话内)
+      if(found.id!==targetId)rememberSpaceTemplate(found.id);
       selectTemplateInLibrary(found.id);
     }
   }catch(e){toast(e.message,true)}
@@ -8003,6 +8024,7 @@ async function saveTemplate(){
     if(yamlEl)yamlEl.value=yaml;
   }
   if(!name)return toast('请填写模板名',true);
+  const sid=state.spaceId; // 保存发起时的空间:继续帧按发起空间记账,不随切换漂移
   try{
     const d=await api('/api/template',{method:'POST',body:JSON.stringify({name:name,yaml:yaml})});
     closeTplModal();
@@ -8010,17 +8032,24 @@ async function saveTemplate(){
     await fetchTemplates();
     renderTplCategories();
     renderTplCards();
-    selectTemplateInLibrary(d.name);
+    if(sid===state.spaceId)selectTemplateInLibrary(d.name,1);
+    else rememberSpaceTemplate(d.name,sid);
     toast('模板已保存：'+d.name+'（'+d.node_count+' 节点）');
   }catch(e){toast(e.message,true)}
 }
 
-async function populateTemplateSelect(selId='newTemplate'){
+async function populateTemplateSelect(selId='newTemplate',preferredId=null){
   try{
+    // 弹窗重开/替换:旧弹窗迟到的填充必须丢弃,不得覆盖新弹窗已选模板(按 selId 各自计数)
+    const seqs=state.templateSelectSeq=state.templateSelectSeq||{};
+    const seq=seqs[selId]=(seqs[selId]||0)+1;
     const ts=await fetchTemplates();
+    if(seq!==seqs[selId])return;
     const sel=document.getElementById(selId);
     if(!sel||!ts.length)return;
-    sel.innerHTML=ts.map(t=>`<option value="${esc(t.id)}"${t.id==='software-development-v1'?' selected':''}>${esc(t.id)} · ${esc(t.label||'')}（${t.node_count} 节点）</option>`).join('')
+    const wanted=(preferredId&&ts.some(t=>t.id===preferredId))?preferredId:'software-development-v1';
+    sel.innerHTML=ts.map(t=>`<option value="${esc(t.id)}"${t.id===wanted?' selected':''}>${esc(t.id)} · ${esc(t.label||'')}（${t.node_count} 节点）</option>`).join('');
+    sel.value=wanted;
   }catch(e){}
 }
 let opsTimer=null;
@@ -8943,7 +8972,8 @@ async function selectSpace(workspaceId,rer=true){
 
   if(rer)renderOverview();
   paintCrumb();
-  saveViewState()
+  saveViewState();
+  if(rer&&state.shellView==='templates')await showTemplateLibrary();
 }
 
 async function loadProject(id,rer=true){
@@ -10583,10 +10613,10 @@ async function submitUnregisterProject(){
     toast('注销失败：'+e.message,true);
   }
 }
-function showNewWorkflow(){
+function showNewWorkflow(preferredTemplateId){
   if(!state.project||!state.space||state.space.relation!=='current_factory')return toast('请先选择当前工厂空间',true);
   openModal('新建需求',`<div class="form"><label for="newProjName">项目</label><input id="newProjName" value="${esc(state.project.project.project_name)}" disabled><label for="newTitle">本次任务名称</label><input id="newTitle" placeholder="例如：适配深色模式切换 / 修复结算页面浮点精度 Bug"><label for="newTemplate">工作流模板</label><select id="newTemplate"><option value="software-development-v1">software-development-v1（默认软件开发）</option></select><label for="newAgent">执行者策略</label><select id="newAgent"><option value="auto">auto（Router 自动）</option>${['opencode','codex','claude','qodercli','agy','pi','grok','kimi'].map(a=>`<option>${a}</option>`).join('')}</select><label for="newRequirement">自然语言需求</label><textarea id="newRequirement" onblur="autoFillWorkflowTitle()"></textarea><button class="btn primary" onclick="submitNewWorkflowAsync()">启动工作流</button><div id="runWaitStatus" class="muted" style="min-height:16px;font-size:12px"></div></div>`);
-  populateTemplateSelect()
+  populateTemplateSelect('newTemplate',preferredTemplateId)
 }
 let preflightRunId=0;
 const preflightState={total:0,completed:0,ready:0,warn:0,error:0,disabled:0,results:{}};
@@ -11989,7 +12019,7 @@ async function initFromUrlOrState(){
   }
   if(!qWf&&!qTask&&!qPane&&!qOps&&!qView){
     if(state.dashMode)showDashboard();
-    else if(state.workflowId==='__templates__'||state.shellView==='templates')showTemplateLibrary();
+    else if(state.workflowId==='__templates__'||state.shellView==='templates'){showTemplateLibrary();refreshAll();}
     else if(state.shellView&&state.shellView!=='workbench')showShellView(state.shellView);
     else state.opsMode?showOpsCenter():refreshAll();
     return;
@@ -12032,7 +12062,9 @@ async function initFromUrlOrState(){
   }else if(state.opsMode){
     await showOpsCenter();
   }else if(state.shellView==='templates'){
+    // 冷启动直开:先渲染,再水合项目/空间并按有效模板重绘(否则 effectiveTemplateId 回落默认模板)
     await showTemplateLibrary();
+    refreshAll();
   }else if(state.shellView&&state.shellView!=='workbench'){
     showShellView(state.shellView);
     refreshAll();
