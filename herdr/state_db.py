@@ -663,6 +663,16 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
         );
     """)
 
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS user_tokens (
+            user_id TEXT NOT NULL,
+            token_type TEXT NOT NULL,
+            has_token INTEGER NOT NULL DEFAULT 1,
+            updated_at REAL NOT NULL,
+            PRIMARY KEY (user_id, token_type)
+        );
+    """)
+
     conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_wf_created ON tasks(workflow_id, created_at, task_id);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_workflows_project ON workflows (CASE WHEN json_valid(metadata_json) THEN json_extract(metadata_json, '$.project_id') END);")
@@ -7943,3 +7953,110 @@ def migrate_v1_to_v2(
         "migrated_checkpoints": migrated_cps,
         "migrated_steers": migrated_steers,
     }
+
+
+def _get_credentials_dir() -> Path:
+    """Return protected credentials directory with strict mode 0700 permissions."""
+    cred_dir = Path.home() / ".herdr-controller" / "credentials"
+    cred_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        cred_dir.chmod(0o700)
+    except OSError:
+        pass
+    return cred_dir
+
+
+def save_user_token(
+    user_id: str,
+    token_type: str,
+    token_value: str,
+    db_path: Optional[Path] = None,
+) -> None:
+    """Save or update a persistent user token in the protected credentials store (0600) and track metadata in DB."""
+    resolved_path = Path(db_path) if db_path else get_default_db_path()
+    now = time.time()
+
+    cred_dir = _get_credentials_dir()
+    safe_uid = re.sub(r"[^a-zA-Z0-9_\-]", "_", user_id)
+    safe_type = re.sub(r"[^a-zA-Z0-9_\-]", "_", token_type)
+    token_file = cred_dir / f"{safe_uid}_{safe_type}.token"
+
+    if token_value:
+        token_file.write_text(token_value, encoding="utf-8")
+        try:
+            token_file.chmod(0o600)
+        except OSError:
+            pass
+    elif token_file.exists():
+        token_file.unlink()
+
+    with get_db_connection(resolved_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO user_tokens (user_id, token_type, has_token, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id, token_type) DO UPDATE SET
+                has_token = excluded.has_token,
+                updated_at = excluded.updated_at
+            """,
+            (user_id, token_type, 1 if token_value else 0, now),
+        )
+        conn.commit()
+
+
+def get_user_token(
+    user_id: str,
+    token_type: str,
+    db_path: Optional[Path] = None,
+) -> Optional[str]:
+    """Retrieve a persistent user token from the protected credentials store, defaulting if unseeded."""
+    cred_dir = _get_credentials_dir()
+    safe_uid = re.sub(r"[^a-zA-Z0-9_\-]", "_", user_id)
+    safe_type = re.sub(r"[^a-zA-Z0-9_\-]", "_", token_type)
+    token_file = cred_dir / f"{safe_uid}_{safe_type}.token"
+
+    if token_file.is_file():
+        try:
+            val = token_file.read_text(encoding="utf-8").strip()
+            if val:
+                return val
+        except Exception:
+            pass
+
+    # Fallback seeding for default local reviewer token if not yet seeded
+    if token_type == "experience_hub" and user_id in ("local-console-reviewer", "default"):
+        cred_path = cred_dir / "experience-console-reviewer.token"
+        if cred_path.is_file():
+            try:
+                token_val = cred_path.read_text(encoding="utf-8").strip()
+                if token_val:
+                    return token_val
+            except Exception:
+                pass
+    return None
+
+
+def delete_user_token(
+    user_id: str,
+    token_type: str,
+    db_path: Optional[Path] = None,
+) -> bool:
+    """Delete a persistent user token from credentials store and state database."""
+    resolved_path = Path(db_path) if db_path else get_default_db_path()
+    cred_dir = _get_credentials_dir()
+    safe_uid = re.sub(r"[^a-zA-Z0-9_\-]", "_", user_id)
+    safe_type = re.sub(r"[^a-zA-Z0-9_\-]", "_", token_type)
+    token_file = cred_dir / f"{safe_uid}_{safe_type}.token"
+    deleted = False
+    if token_file.exists():
+        token_file.unlink()
+        deleted = True
+    with get_db_connection(resolved_path) as conn:
+        cur = conn.execute(
+            "DELETE FROM user_tokens WHERE user_id = ? AND token_type = ?",
+            (user_id, token_type),
+        )
+        conn.commit()
+        if cur.rowcount > 0:
+            deleted = True
+    return deleted

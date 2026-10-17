@@ -10356,11 +10356,19 @@ function paintShellPage(view){
   else if(view==='workflows')renderShellWorkflows();
   else if(view==='experience')renderShellExperience();
 }
-function saveHubToken(){
+async function saveHubToken(){
   try{
     const inp=document.getElementById('hubTokenInput');
-    sessionStorage.setItem('herdr_hub_token',(inp&&inp.value||'').trim());
-    toast('Hub 身份 Token 已保存（仅本标签页有效）');
+    const val=(inp&&inp.value||'').trim();
+    if(val){
+      await api('/api/experience/token',{method:'POST',body:JSON.stringify({token:val})});
+      sessionStorage.setItem('herdr_hub_token',val);
+      toast('Hub 身份凭据已持久化至受保护存储');
+    }else{
+      await api('/api/experience/token',{method:'POST',body:JSON.stringify({token:''})});
+      sessionStorage.removeItem('herdr_hub_token');
+      toast('Hub 身份凭据已清除');
+    }
     renderShellExperience();
   }catch(e){
     toast('保存失败: '+(e.message||e),true);
@@ -10486,10 +10494,15 @@ async function renderShellExperience(){
 
   let saved='';
   try{saved=sessionStorage.getItem('herdr_hub_token')||'';}catch(e){}
+  let hasServerToken=false;
+  try{
+    const tokenRes=await api('/api/experience/token');
+    hasServerToken=Boolean(tokenRes&&(tokenRes.has_token||tokenRes.data?.has_token));
+  }catch(e){}
   const custFilter=(window._hubCustomerFilter||'').trim();
 
   let authStatusHtml='';
-  if(saved){
+  if(saved||hasServerToken){
     authStatusHtml='<span style="display:inline-flex;align-items:center;gap:4px;font-size:12px;font-weight:600;color:#059669;background:#ecfdf5;padding:4px 8px;border-radius:4px;border:1px solid #a7f3d0;">✓ 已载入凭据</span>';
   }else{
     authStatusHtml='<span style="display:inline-flex;align-items:center;gap:4px;font-size:12px;font-weight:600;color:#d97706;background:#fef3c7;padding:4px 8px;border-radius:4px;border:1px solid #fde68a;">! 需凭据</span>';
@@ -10506,7 +10519,7 @@ async function renderShellExperience(){
           <div class="exp-auth-group">
             <span style="font-size:12px;font-weight:600;color:#475569;">🔑 凭据:</span>
             ${authStatusHtml}
-            <input id="hubTokenInput" class="exp-input" type="password" placeholder="粘贴 Hub 身份 Token" style="width:200px;" />
+            <input id="hubTokenInput" class="exp-input" type="password" placeholder="${hasServerToken?'已绑定默认凭据 (可在此覆盖)':'粘贴 Hub 身份 Token'}" style="width:200px;" />
             <button class="exp-btn-base exp-btn-primary" onclick="saveHubToken()">保存凭据</button>
           </div>
           <div class="exp-group-divider"></div>
@@ -10538,7 +10551,7 @@ async function renderShellExperience(){
       container.innerHTML=`<div class="card" style="padding:24px;background:#ffffff;border:1px solid #fed7aa;border-left:4px solid #f59e0b;border-radius:8px;">
         <div style="color:#9a3412;font-size:15px;font-weight:700;margin-bottom:8px;">🔑 企业经验中心访问受限 / 需身份验证</div>
         <div style="color:#475569;font-size:13px;line-height:1.6;">${esc(err)}</div>
-        <div style="margin-top:14px;font-size:12px;color:#64748b;line-height:1.6;">
+        <div style="margin-top:16px;font-size:12px;color:#64748b;line-height:1.6;">
           提示：企业经验中心严禁匿名访问。请在上方输入框粘贴个人或 Reviewer 的 Hub Token 后点击「保存凭据」。<br>
           （本地开发环境可在终端执行 <code>cat ~/.herdr-controller/credentials/experience-console-reviewer.token</code> 获取凭据）
         </div>
@@ -10648,7 +10661,7 @@ async function renderShellExperience(){
       container.innerHTML=`<div class="card" style="padding:24px;background:#ffffff;border:1px solid #fed7aa;border-left:4px solid #f59e0b;border-radius:8px;">
         <div style="color:#9a3412;font-size:15px;font-weight:700;margin-bottom:8px;">🔑 企业经验中心需身份验证</div>
         <div style="color:#475569;font-size:13px;line-height:1.6;">${esc(errStr)}</div>
-        <div style="margin-top:14px;font-size:12px;color:#64748b;line-height:1.6;">
+        <div style="margin-top:16px;font-size:12px;color:#64748b;line-height:1.6;">
           提示：请在页面顶部的「🔑 凭据」输入框中粘贴 Hub 身份 Token 后点击「保存凭据」。<br>
           （本地开发环境可在终端执行 <code>cat ~/.herdr-controller/credentials/experience-console-reviewer.token</code> 获取凭据）
         </div>
@@ -12761,7 +12774,11 @@ class Handler(BaseHTTPRequestHandler):
         auth = self.headers.get('Authorization', '')
         if auth.startswith('Bearer '):
             return auth[7:].strip()
-        return self.headers.get('X-HAFlow-Token') or None
+        header_tok = self.headers.get('X-HAFlow-Token')
+        if header_tok:
+            return header_tok.strip()
+        from herdr.state_db import get_user_token
+        return get_user_token('local-console-reviewer', 'experience_hub')
     def send_json(self,status,data=None,error=None):
         p={'ok':error is None};
         if data is not None:p['data']=data
@@ -12907,6 +12924,12 @@ class Handler(BaseHTTPRequestHandler):
                 if not res.get('ok') and 'error' in res:
                     return self.send_json(_hub_error_status(res), error=res['error'])
                 return self.send_json(200, res)
+            if p=='/api/experience/token':
+                q = self.query()
+                uid = q.get('user', ['local-console-reviewer'])[0] or 'local-console-reviewer'
+                from herdr.state_db import get_user_token
+                tok = get_user_token(uid, 'experience_hub')
+                return self.send_json(200, {'ok': True, 'has_token': bool(tok)})
             return self.send_json(404,error='Not Found')
         except herdr_deliverables.DeliverableError as e:
             return self.send_json(e.status,error=e.message)
@@ -12970,6 +12993,12 @@ class Handler(BaseHTTPRequestHandler):
                 if not res.get('ok') and 'error' in res:
                     return self.send_json(400, error=res.get('error'))
                 return self.send_json(200, res)
+            if p=='/api/experience/token':
+                tok = str(b.get('token', '')).strip()
+                uid = str(b.get('user', 'local-console-reviewer')).strip() or 'local-console-reviewer'
+                from herdr.state_db import save_user_token
+                save_user_token(uid, 'experience_hub', tok)
+                return self.send_json(200, {'ok': True, 'saved': bool(tok)})
             return self.send_json(404,error='Not Found')
         except Exception as e:
             self.log_message('POST %s failed: %s', self.path, e)
