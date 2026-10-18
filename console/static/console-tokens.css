@@ -58,3 +58,10 @@
   --warn: var(--warning);
   --bad: var(--danger);
 }
+
+/* Shared workbench mode navigation; current mode is static page identity. */
+.workbenchModes { display: inline-flex; align-items: center; gap: 2px; padding: 3px; border: 1px solid var(--border-default); border-radius: 7px; background: var(--bg-subtle); white-space: nowrap; }
+.workbenchModes > a, .workbenchModes > span { display: block; padding: 5px 6px; border-radius: 4px; font-size: 11px; line-height: 18px; font-weight: 500; color: var(--text-secondary); text-decoration: none; }
+.workbenchModes > a:hover { background: var(--bg-hover); color: var(--text-primary); text-decoration: none; }
+.workbenchModes > [aria-current="page"] { color: var(--primary); background: var(--bg-surface); box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+.workbenchModes > a:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }

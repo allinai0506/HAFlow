@@ -4508,10 +4508,6 @@ body {
   font-size: 12px;
   color: #16171b;
 }
-.sidebar-workbench-switch { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.sidebar-workbench-switch a { font-size: 11px; line-height: 14px; color: var(--text-secondary); text-decoration: none; }
-.sidebar-workbench-switch a:hover { color: var(--primary); }
-.sidebar-workbench-switch a:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; border-radius: 2px; }
 .btn-collapse-sidebar {
   margin-left: auto;
   width: 24px;
@@ -6862,7 +6858,7 @@ body {
       <div class="rail-brand" title="__PRODUCT_NAME__" onclick="showShellView('workbench')">HF</div>
     </div>
     <nav class="rail-nav" aria-label="系统一级导航">
-      <button type="button" class="rail-item active" id="railNavWorkbench" data-rail-nav="workbench" data-nav="workbench" onclick="showShellView('workbench')" title="空间工作台 (Workbench)">
+      <button type="button" class="rail-item active" id="railNavWorkbench" data-rail-nav="workbench" data-nav="workbench" onclick="showShellView('workbench')" title="流程工作台 (Workbench)">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
       </button>
       <button type="button" class="rail-item" id="railNavDashboard" data-rail-nav="dashboard" data-nav="dashboard" onclick="showShellView('dashboard')" title="全局仪表板 (Dashboard)">
@@ -6889,10 +6885,10 @@ body {
   <aside class="sidebar" id="sidebar">
     <div class="sidebar-head brand-row">
       <div class="brand">__PRODUCT_NAME__</div>
-      <div class="sidebar-workbench-switch">
-        <span class="sidebar-title" id="sidebarTitle">空间工作台</span>
-        <a id="simpleWorkbench" href="/simple" onclick="this.href=simpleWorkbenchUrl()" title="切换到极简工作台，保留当前项目与需求">切换到极简工作台 ↗</a>
-      </div>
+      <nav class="workbenchModes" aria-label="工作台模式">
+        <a id="simpleWorkbench" href="/simple" onclick="this.href=simpleWorkbenchUrl()" title="切换到极简工作台，保留当前项目与需求">极简工作台</a>
+        <span id="sidebarTitle" aria-current="page">流程工作台</span>
+      </nav>
       <button type="button" class="btn-collapse-sidebar" id="btnCollapseSidebar" onclick="toggleSidebar()" title="折叠侧边栏 (⌘B)">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m15 18-6-6 6-6"/></svg>
       </button>
