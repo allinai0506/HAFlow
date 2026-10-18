@@ -95,10 +95,17 @@ def _gate_verdict_file_candidates(task):
 
 
 def _task_has_valid_gate_verdict(task):
+    rework_started = task.get("rework_started_at")
     for path in _gate_verdict_file_candidates(task):
         try:
             if not os.path.exists(path):
                 continue
+            if rework_started:
+                try:
+                    if os.stat(path).st_mtime < (rework_started - 1.0):
+                        continue
+                except OSError:
+                    continue
             with open(path, "r", encoding="utf-8") as f:
                 payload = json.load(f)
             if isinstance(payload, dict):
@@ -834,19 +841,18 @@ def check_task_stalls(tasks, state, notify_fn=None, now=None):
             timeouts.pop(tid, None)
             continue
 
-        # Issue #250: If a valid gate-verdict file already exists, suppress watchdog failure
-        has_verdict, verdict_val, verdict_note = _task_has_valid_gate_verdict(task)
-        if has_verdict:
-            print(
-                f"[SENTINEL TIMEOUT SUPPRESSED] task={tid} status={status} idle={int(idle_seconds)}s — "
-                f"gate verdict '{verdict_val}' already written, suppressing watchdog failure",
-                flush=True,
-            )
-            timeouts.pop(tid, None)
-            continue
-
-        # Issue #250: Gate tasks running full regression suites receive extended hard timeout
+        # Issue #250 & Codex review: Check gate identity before suppressing watchdog or extending timeout
         if _is_gate_task(task):
+            has_verdict, verdict_val, verdict_note = _task_has_valid_gate_verdict(task)
+            if has_verdict:
+                print(
+                    f"[SENTINEL TIMEOUT SUPPRESSED] task={tid} status={status} idle={int(idle_seconds)}s — "
+                    f"gate verdict '{verdict_val}' already written, suppressing watchdog failure",
+                    flush=True,
+                )
+                timeouts.pop(tid, None)
+                continue
+
             gate_timeout = task_gate_hard_timeout_seconds(hard_timeout)
             if idle_seconds < gate_timeout:
                 timeouts.pop(tid, None)

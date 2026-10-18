@@ -2335,6 +2335,19 @@ def record_review_closure(task_id, pr_url=None, ci_status=None, findings=None,
     print("[REVIEW CLOSURE RECORDED] " + json.dumps(payload, ensure_ascii=False))
 
 
+def _is_gate_task(t):
+    if not t:
+        return False
+    if t.get("gate"):
+        return True
+    node = str(t.get("node") or t.get("stage") or "").lower()
+    if any(k in node for k in ("cleanroom", "gate")):
+        return True
+    if node in ("test", "review", "wrapup"):
+        return True
+    return False
+
+
 def set_status(task_id, new_status, verdict=None, note=None, affected_task_ids=None,
                skip_review_closure=False, skip_operator=None):
     data = load_tasks()
@@ -2461,8 +2474,12 @@ def set_status(task_id, new_status, verdict=None, note=None, affected_task_ids=N
 
     allowed_transitions = set(TRANSITIONS.get(old_status, set()))
     force_transition = False
-    if old_status == "failed" and new_status == "completed" and verdict:
-        # Issue #250: Allow adopting gate verdict from failed state
+    is_watchdog_gate = (
+        _is_gate_task(task)
+        and task.get("failure_reason") == "hard_timeout_watchdog"
+    )
+    if old_status == "failed" and new_status == "completed" and verdict and is_watchdog_gate:
+        # Issue #250 & Codex review: Allow adopting gate verdict from failed state ONLY for watchdog-failed gate tasks
         allowed_transitions.add("completed")
         force_transition = True
 
@@ -2489,6 +2506,8 @@ def set_status(task_id, new_status, verdict=None, note=None, affected_task_ids=N
     if verdict:
         metadata["stage_verdict_affected_task_ids"] = list(affected_ids)
 
+    expected_status = old_status if force_transition else None
+    expected_version = task.get("version") if force_transition else None
     store = _get_store()
     try:
         from herdr import kernel
@@ -2500,7 +2519,15 @@ def set_status(task_id, new_status, verdict=None, note=None, affected_task_ids=N
             metadata=metadata,
             force=force_transition,
             store=store,
+            expected_status=expected_status,
+            expected_version=expected_version,
         )
+        if force_transition and not res.get("accepted", True):
+            print(
+                f"Concurrent state change: task {task_id} is no longer at observed failed state (version {expected_version})",
+                file=sys.stderr,
+            )
+            sys.exit(2)
     except Exception as exc:
         print(f"Error transitioning task {task_id}: {exc}", file=sys.stderr)
         sys.exit(2)
@@ -5160,6 +5187,10 @@ def adopt_verdict_cli(task_id, verdict=None, note=None, operator="human", as_jso
         print(f"Task not found: {task_id}", file=sys.stderr)
         sys.exit(1)
 
+    if not _is_gate_task(task):
+        print(f"Task {task_id} is not a gate task", file=sys.stderr)
+        sys.exit(2)
+
     affected_ids = []
     # If verdict is not explicitly given, read from gate-verdict file
     if not verdict:
@@ -5176,10 +5207,17 @@ def adopt_verdict_cli(task_id, verdict=None, note=None, operator="human", as_jso
         if clone_path:
             candidates.append(os.path.join(clone_path, ".herdr/gate-verdict.json"))
 
+        rework_started = task.get("rework_started_at")
         for path in candidates:
             try:
                 if not os.path.exists(path):
                     continue
+                if rework_started:
+                    try:
+                        if os.stat(path).st_mtime < (rework_started - 1.0):
+                            continue
+                    except OSError:
+                        continue
                 with open(path, "r", encoding="utf-8") as f:
                     payload = json.load(f)
                 if isinstance(payload, dict):
@@ -5387,6 +5425,16 @@ def cmd_rework(args):
             print(f"Rework refused: pane ownership {reason}")
             sys.exit(2)
         prompt = args.prompt or task.get("rework_prompt") or "继续当前任务，就地修复评审问题并重新自测，不新建 Task。"
+        # PR #250 & Codex P1: Purge prior gate-verdict files before rework starts
+        for cand in [
+            str((Path.home() / ".herdr-controller" / "gate-verdicts" / f"{args.task_id}.json")),
+            os.path.join(task.get("clone_path", ""), ".herdr", "gate-verdict.json") if task.get("clone_path") else None,
+        ]:
+            if cand and os.path.exists(cand):
+                try:
+                    os.remove(cand)
+                except OSError:
+                    pass
         if task.get('completion_protocol') == 'receipt-v1':
             import uuid
             from herdr.supervisor_delivery import deliver

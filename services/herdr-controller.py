@@ -3120,10 +3120,11 @@ def process_blocked_observations():
 
 
 def process_gate_verdict_reconciliations():
-    """PR #250: Reconcile gate tasks that have written a valid verdict.
+    """PR #250 & Codex P1: Reconcile gate tasks that have written a valid verdict.
 
     Covers two failure modes:
     1. A working gate task where gate_verdict_ready is True is transitioned to agent_done.
+       Requires verdict freshness for current execution epoch AND agent runtime settled (idle/done).
     2. A gate task failed by watchdog where a valid gate verdict file exists is auto-adopted.
     """
     processed = 0
@@ -3136,11 +3137,23 @@ def process_gate_verdict_reconciliations():
 
         task_id = task.get("task_id")
         if status in {"working", "dispatched"}:
+            if not _gate_verdict_is_fresh(task):
+                continue
+            pane_id = task.get("pane_id")
+            if pane_id:
+                try:
+                    runtime = get_agent_runtime_status(pane_id)
+                    if runtime not in ("idle", "done"):
+                        continue
+                except Exception:
+                    continue
             if gate_verdict_ready(task):
                 if _set_observed_status(task, "agent_done", "gate_verdict_recovery"):
                     emit_done_if_allowed(get_task(task_id))
                     processed += 1
         elif status == "failed" and task.get("failure_reason") == "hard_timeout_watchdog":
+            if not _gate_verdict_is_fresh(task):
+                continue
             verdict, _, _ = read_gate_verdict(task)
             if verdict in ("pass", "blocked"):
                 if try_auto_verdict(task_id):
@@ -8172,7 +8185,36 @@ def _gate_verdict_file_candidates(task):
     return candidates
 
 
+def _gate_verdict_file_info(task):
+    """Return (path, mtime) for the first existing gate verdict file candidate."""
+    for path in _gate_verdict_file_candidates(task):
+        try:
+            if os.path.exists(path):
+                st = os.stat(path)
+                return path, st.st_mtime
+        except OSError:
+            pass
+    return None, None
+
+
+def _gate_verdict_is_fresh(task):
+    """PR #250 & Codex P1: Ensure verdict file is fresh for the current execution epoch.
+
+    If a gate task was reworked or retried, any verdict file created before
+    rework_started_at is stale and must not be adopted.
+    """
+    path, mtime = _gate_verdict_file_info(task)
+    if not path or mtime is None:
+        return False
+    rework_started = task.get("rework_started_at")
+    if rework_started and mtime < (rework_started - 1.0):
+        return False
+    return True
+
+
 def _verdict_from_file(task):
+    if not _gate_verdict_is_fresh(task):
+        return None, ""
     for path in _gate_verdict_file_candidates(task):
         try:
             with open(path, encoding="utf-8") as handle:
@@ -8195,6 +8237,8 @@ def _verdict_affected_task_ids(task):
     含非字符串成员 → None(调用方不传 --affected-task-id,等价 legacy);
     显式空列表 → [](Verifier 表示无法归因,决策层据此 fallback)。
     """
+    if not _gate_verdict_is_fresh(task):
+        return None
     for path in _gate_verdict_file_candidates(task):
         try:
             with open(path, encoding="utf-8") as handle:
@@ -8317,9 +8361,9 @@ def try_auto_verdict(task_id):
 
     status = task.get("status")
     if status != "agent_done":
-        # Issue #250: Allow adopting gate verdict if task was placed in failed
-        # (e.g. by watchdog) but produced a valid machine-readable gate verdict.
-        if not (status == "failed" and task.get("failure_reason") == "hard_timeout_watchdog"):
+        # Issue #250 & Codex review: Allow adopting gate verdict if task was placed in failed
+        # (e.g. by watchdog) but produced a valid, fresh machine-readable gate verdict.
+        if not (status == "failed" and task.get("failure_reason") == "hard_timeout_watchdog" and _gate_verdict_is_fresh(task)):
             return False
 
     workflow_id = task.get("workflow_id")

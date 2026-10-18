@@ -83,7 +83,15 @@ class ControllerGateVerdictRecoveryTest(unittest.TestCase):
             "version": 5,
         }
 
-        with patch.object(self.ctrl, "get_task", return_value=task), \
+        # Write gate verdict file to make it fresh on disk
+        verdict_file = self.verdicts_dir / f"{task_id}.json"
+        verdict_file.write_text(
+            json.dumps({"verdict": "blocked", "note": "D1 blocker"}),
+            encoding="utf-8",
+        )
+
+        with patch.dict(os.environ, {"HERDR_GATE_VERDICT_DIR": str(self.verdicts_dir)}), \
+             patch.object(self.ctrl, "get_task", return_value=task), \
              patch.object(self.ctrl, "auto_verdict_enabled", return_value=True), \
              patch.object(self.ctrl, "node_is_gate", return_value=True), \
              patch.object(self.ctrl, "read_gate_verdict", return_value=("blocked", "D1 blocker", "file")), \

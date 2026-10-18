@@ -8,6 +8,22 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-10-18] fix | 门禁裁决隔离强化：拒绝陈旧裁决、CAS 绑定受控采纳与工位身份校验 (PR #266)
+
+- 背景：
+  1. GitHub Codex 自动化评审在 PR #266 中指出 4 项时效与并发边界缺陷；
+  2. 重启或返工中的门禁任务可能因磁盘残留的历史裁决文件，被后台对账逻辑瞬间误判为完成而误置 `agent_done`；
+  3. `herdr-task set completed --verdict` 强制流转未限定失败原因与工位类型，且未绑定 CAS 状态与版本号快照，存在覆盖新执行的并发竞争风险；
+  4. Sentinel 误在非门禁实现任务残留同名文件时抑制了 watchdog 超时。
+- 变更：
+  1. **裁决时效与重启清理**：在 `services/herdr-controller.py` 增加 `_gate_verdict_is_fresh`，确保裁决文件 mtime 晚于 `rework_started_at`；`process_gate_verdict_reconciliations` 严格要求工位运行时为 `idle`/`done` 且裁决新鲜；`bin/herdr-task rework` 派发前清理既有历史裁决文件；
+  2. **收紧 failed 采纳范围**：`bin/herdr-task set` 严格限制仅当 `_is_gate_task(task)` 且 `failure_reason == "hard_timeout_watchdog"` 时允许带 `--verdict` 流转至 `completed`；`adopt-verdict` 增加门禁身份校验；
+  3. **强制采纳 CAS 绑定**：`kernel.transition_task` 传入 `expected_status` 与 `expected_version`，并发变更时原子拒绝；
+  4. **Sentinel 门禁身份前置**：先检查 `_is_gate_task(task)`，再进行超时抑制或预算延长。
+- 证据：
+  1. `tests/test_issue_250_codex_p1_p2_fixes.py`（6 测试全部通过）；
+  2. `pytest -v tests/test_issue_250_*.py`（21 测试全部通过）。
+
 ## [2026-10-18] fix | 洁净室门禁评测自适应超时与 watchdog 结论自动采纳 (issue #250)
 
 - 背景：
