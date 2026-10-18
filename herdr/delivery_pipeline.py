@@ -194,6 +194,7 @@ def delivery_projection(task: Any, workflow: Any = None, tasks: Iterable[Any] = 
         "gates": gates,
         "commit": _sha(task, "commit"),
         "commit_short": _sha(task, "commit")[:8],
+        "integration_mode": _text(task.get("integration_mode") or "none"),
         "integration_branch": _text(task.get("integration_branch")),
         "candidate_sha": _sha(task, "candidate_sha"),
         "candidate_short": _sha(task, "candidate_sha")[:8],

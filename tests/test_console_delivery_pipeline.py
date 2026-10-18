@@ -143,6 +143,7 @@ class TestConsoleDeliveryProjection(unittest.TestCase):
         self.assertEqual([g["id"] for g in out["gates"]],
                          ["cleanroom_test", "cleanroom_review"])
         self.assertEqual(out["commit_short"], "6e582588")
+        self.assertEqual(out["integration_mode"], "git")
         self.assertEqual(out["integration_branch"],
                          "herdr/integration-haflow-simple-workbench-v1-r2")
         self.assertEqual(out["candidate_published_at"], PUBLISHED_AT)
@@ -256,6 +257,7 @@ class TestDeliveryBadgeRendering(unittest.TestCase):
                           {"id": "cleanroom_review", "label": "3洁净室评审"}],
                 "commit_short": "6e582588",
                 "integration_branch": "herdr/integration-craft-r2",
+                "integration_mode": "git",
                 "candidate_short": "85c3a98e", "candidate_published_at": PUBLISHED_AT}
         base.update(kw)
         return base
@@ -320,6 +322,13 @@ class TestDeliveryBadgeRendering(unittest.TestCase):
     def test_pipeline_line_is_omitted_before_anything_was_committed(self):
         delivery = self._delivery_js(commit_short="", integration_branch="",
                                      candidate_published_at=None)
+        line = self._run("deliveryPipelineLine(T)",
+                         f"var T={self._task(delivery)};")
+        self.assertEqual(line, "")
+
+    def test_pipeline_line_is_omitted_for_a_non_git_task(self):
+        """A gate/report task is not part of the git delivery chain."""
+        delivery = self._delivery_js(integration_mode="none", integration_branch="")
         line = self._run("deliveryPipelineLine(T)",
                          f"var T={self._task(delivery)};")
         self.assertEqual(line, "")

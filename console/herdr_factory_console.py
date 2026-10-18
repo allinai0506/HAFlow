@@ -7617,10 +7617,10 @@ function deliveryClock(ts){
   return p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+':'+p(d.getMinutes());
 }
 // commit → integration branch → candidate publication, all existing facts.
-// A task that has not been committed yet has no pipeline row to show: the
-// commit segment is what makes the row a delivery statement rather than noise.
+// Only git tasks belong here; the commit segment is what makes the row a
+// delivery statement rather than noise on a non-git or uncommitted task.
 function deliveryPipelineLine(t){
-  const d=deliveryOf(t);if(!d)return '';
+  const d=deliveryOf(t);if(!d||d.integration_mode!=='git')return '';
   const parts=[];
   if(d.commit_short)parts.push('commit='+d.commit_short);
   if(d.integration_branch)parts.push(d.integration_branch);
