@@ -22,3 +22,9 @@ $ python3 probe-p1.py   # 修复前
 - 修复后 cap-swallow：`["historical_run_trace_limited","outcome_absent","test_anomaly","trace_truncated"]`，process=improvement_opportunity。
 - 回归：`pytest -q tests/test_quality_assessment.py tests/test_execution_trace.py` → 105 passed + 13 subtests；r6 九场景 A-I 重跑 ALL_PASS（无误报回归）；compileall/diff-check 干净。
 - 复现脚本留存：本工位 `artifacts/wrapup-p1/probe-p1.py`（与 r6 probe 同构：init_db + 原生 INSERT + assess_task_run）。
+
+## 附：第二轮 Codex P2（非有限 JSON 常量）复现与修复
+
+- 复现（修复前）：`decode_stored_payload('{"a": NaN}')` → `corrupt=False`；真实 SQLite 中 `{"verification": {"passed": true, "evidence_id": "ev1", "w": NaN}}` 伪装权威回执抑制 failing `tests_completed`。
+- 修复：`decode_stored_payload` 经 `parse_constant=_reject_nonfinite` 拒绝 `NaN/Infinity/-Infinity`（与 SQLite `json_valid` 语义对齐，单点解码）。
+- 复验（修复后）：该场景 codes=`['historical_run_trace_limited','outcome_absent','stored_payload_corrupt','test_anomaly']`，process=improvement_opportunity；影响面 106 passed+13 subtests；r6 九场景 ALL_PASS。
