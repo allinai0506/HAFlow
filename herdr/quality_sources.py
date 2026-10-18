@@ -8,6 +8,7 @@ or create the database.
 from __future__ import annotations
 
 import json
+import sqlite3
 from typing import Any, Dict, List
 
 from .execution_trace import (
@@ -15,6 +16,8 @@ from .execution_trace import (
     STORED_LIMIT,
     _PROJECTABLE_EVENT_TYPES,
     _corrupt_payload_note,
+    _receipts_for_scope,
+    _row_evidence_id,
     _tests_row_has_verdict,
     _verification_verdicts,
     assemble_trace,
@@ -99,19 +102,64 @@ def _bundle(outcome, events, actions, degradation, signals, *, allow_legacy, tru
 
 
 def _events_for_run(task: Dict[str, Any], run_id: str, db_path):
-    conn = get_readonly_db_connection(db_path)
     try:
-        marks = ",".join("?" for _ in _PROJECTABLE_EVENT_TYPES)
-        rows = conn.execute(
-            f"""
-            SELECT id, task_id, agent_id, event_type, timestamp, source, run_id, sequence, payload_json
-            FROM events
-            WHERE task_id = ? AND run_id = ? AND event_type IN ({marks})
-            ORDER BY timestamp ASC, id ASC
-            LIMIT ?
-            """,
-            (task.get("task_id"), run_id, *_PROJECTABLE_EVENT_TYPES, STORED_LIMIT),
-        ).fetchall()
+        conn = get_readonly_db_connection(db_path)
+    except FileNotFoundError:
+        return [], False, [{"code": "trajectory_unavailable", "message": "任务轨迹数据库暂不可用。"}]
+    try:
+        try:
+            conn.execute("PRAGMA query_only=ON;")
+            task_id = task.get("task_id")
+            marks = ",".join("?" for _ in _PROJECTABLE_EVENT_TYPES)
+            rows = conn.execute(
+                f"""
+                SELECT id, task_id, agent_id, event_type, timestamp, source, run_id, sequence, payload_json
+                FROM events
+                WHERE task_id = ? AND run_id = ? AND event_type IN ({marks})
+                ORDER BY timestamp ASC, id ASC
+                LIMIT ?
+                """,
+                (task_id, run_id, *_PROJECTABLE_EVENT_TYPES, STORED_LIMIT),
+            ).fetchall()
+            truncated = len(rows) >= STORED_LIMIT
+            if truncated:
+                seen = {row["id"] for row in rows}
+                receipt_rows = _receipts_for_scope(conn, task_id, "run_id = ?", (run_id,))
+                supplemented = [row for row in receipt_rows if row["id"] not in seen]
+                rows = list(rows) + supplemented
+                seen.update(row["id"] for row in supplemented)
+                if len(receipt_rows) >= STORED_LIMIT:
+                    window_ev_ids = set()
+                    covered_ev_ids = set()
+                    for r in rows:
+                        p, c = decode_stored_payload(r["payload_json"])
+                        if not c:
+                            ev = _row_evidence_id({"payload": p})
+                            if ev:
+                                if r["event_type"] == "tests_completed":
+                                    window_ev_ids.add(ev)
+                                elif r["event_type"] == "verification_completed":
+                                    covered_ev_ids.add(ev)
+                    uncovered = sorted(window_ev_ids - covered_ev_ids)[:20]
+                    for ev_id in uncovered:
+                        extra_rows = conn.execute(
+                            """
+                            SELECT id, task_id, agent_id, event_type, timestamp, source, run_id, sequence, payload_json
+                            FROM events
+                            WHERE task_id = ? AND run_id = ? AND event_type = 'verification_completed'
+                              AND (json_extract(payload_json, '$.verification.evidence_id') = ?
+                                   OR json_extract(payload_json, '$.evidence_id') = ?)
+                            ORDER BY timestamp ASC, id ASC
+                            LIMIT 10
+                            """,
+                            (task_id, run_id, ev_id, ev_id),
+                        ).fetchall()
+                        for extra in extra_rows:
+                            if extra["id"] not in seen:
+                                rows.append(extra)
+                                seen.add(extra["id"])
+        except sqlite3.Error:
+            return [], False, [{"code": "trajectory_unavailable", "message": "任务轨迹数据库暂不可用。"}]
     finally:
         conn.close()
     decoded = []
@@ -145,7 +193,7 @@ def _events_for_run(task: Dict[str, Any], run_id: str, db_path):
         event = project_stored_event(row, view)
         if event is not None:
             projected.append(event)
-    return merge_trace_events(projected), len(rows) >= STORED_LIMIT, notes
+    return merge_trace_events(projected), truncated, notes
 
 
 def _human_rows(task_id: str, run_id: str, db_path):

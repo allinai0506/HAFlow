@@ -8,6 +8,7 @@ experience rules.
 import hashlib
 import json
 import os
+import sqlite3
 import subprocess
 import tempfile
 import unittest
@@ -890,6 +891,301 @@ class QualityReadTest(unittest.TestCase):
         report = assess_task_run(task_id, run_id, db_path=self.db, budget_s=0.2)
         self.assertEqual(report["test_anomalies"], [])
         self.assertNotIn("test_anomaly", report["problem_codes"])
+
+    def test_truncated_historical_event_window_keeps_the_authoritative_receipt(self):
+        from herdr.execution_trace import STORED_LIMIT
+
+        task_id = "task-hist-cap"
+        hist_run = "run-hist-cap"
+        current_run = "run-current-cap"
+        self._insert_task(task_id, current_run)
+        conn = state_db.get_db_connection(self.db)
+        try:
+            conn.execute(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'tests_completed', ?, 1, 'trajectory', ?, 1)",
+                (task_id, json.dumps({"verification": {"failing_count": 3, "evidence_id": "ev-hist-cap"}}), hist_run),
+            )
+            conn.executemany(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'task_started', '{}', ?, 'trajectory', ?, ?)",
+                [(task_id, 10 + index, hist_run, index + 2) for index in range(STORED_LIMIT - 1)],
+            )
+            conn.execute(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'verification_completed', ?, 100000, 'trajectory', ?, 5000)",
+                (task_id, json.dumps({"verification": {"passed": True, "evidence_id": "ev-hist-cap"}}), hist_run),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        self._insert_outcome(task_id, hist_run, eval_id="eval-hist-cap")
+        report = assess_task_run(task_id, hist_run, db_path=self.db, budget_s=0.2)
+        self.assertEqual(report["test_anomalies"], [])
+        self.assertNotIn("test_anomaly", report["problem_codes"])
+        self.assertEqual(report["process_quality"], "unknown")
+        self.assertIn("historical_run_trace_limited", report["problem_codes"])
+        self.assertIn("trace_truncated", report["problem_codes"])
+
+    def test_historical_receipt_supplement_boundary_2000_and_1999(self):
+        from herdr.execution_trace import STORED_LIMIT
+
+        task_1999 = "task-boundary-1999"
+        run_1999 = "run-boundary-1999"
+        self._insert_task(task_1999, "other-run")
+        conn = state_db.get_db_connection(self.db)
+        try:
+            conn.execute(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'tests_completed', ?, 1, 'trajectory', ?, 1)",
+                (task_1999, json.dumps({"verification": {"failing_count": 3, "evidence_id": "ev-1999"}}), run_1999),
+            )
+            conn.executemany(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'task_started', '{}', ?, 'trajectory', ?, ?)",
+                [(task_1999, 10 + index, run_1999, index + 2) for index in range(STORED_LIMIT - 3)],
+            )
+            conn.execute(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'verification_completed', ?, 50000, 'trajectory', ?, 2000)",
+                (task_1999, json.dumps({"verification": {"passed": True, "evidence_id": "ev-1999"}}), run_1999),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        self._insert_outcome(task_1999, run_1999, eval_id="eval-1999")
+        report_1999 = assess_task_run(task_1999, run_1999, db_path=self.db, budget_s=0.2)
+        self.assertEqual(report_1999["test_anomalies"], [])
+        self.assertNotIn("test_anomaly", report_1999["problem_codes"])
+        self.assertNotIn("trace_truncated", report_1999["problem_codes"])
+        self.assertEqual(report_1999["trace_completeness"], "unknown")
+        self.assertEqual(report_1999["process_quality"], "unknown")
+
+        task_2000 = "task-boundary-2000"
+        run_2000 = "run-boundary-2000"
+        self._insert_task(task_2000, "other-run")
+        conn = state_db.get_db_connection(self.db)
+        try:
+            conn.execute(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'tests_completed', ?, 1, 'trajectory', ?, 1)",
+                (task_2000, json.dumps({"verification": {"failing_count": 3, "evidence_id": "ev-2000"}}), run_2000),
+            )
+            conn.executemany(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'task_started', '{}', ?, 'trajectory', ?, ?)",
+                [(task_2000, 10 + index, run_2000, index + 2) for index in range(STORED_LIMIT - 2)],
+            )
+            conn.execute(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'verification_completed', ?, 50000, 'trajectory', ?, 2000)",
+                (task_2000, json.dumps({"verification": {"passed": True, "evidence_id": "ev-2000"}}), run_2000),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        self._insert_outcome(task_2000, run_2000, eval_id="eval-2000")
+        report_2000 = assess_task_run(task_2000, run_2000, db_path=self.db, budget_s=0.2)
+        self.assertEqual(report_2000["test_anomalies"], [])
+        self.assertNotIn("test_anomaly", report_2000["problem_codes"])
+        self.assertIn("trace_truncated", report_2000["problem_codes"])
+        self.assertEqual(report_2000["process_quality"], "unknown")
+
+    def test_historical_receipt_does_not_leak_across_runs(self):
+        from herdr.execution_trace import STORED_LIMIT
+
+        task_id = "task-cross-leak"
+        hist_run = "run-hist-leak"
+        other_run = "run-other-leak"
+        self._insert_task(task_id, "current-run")
+        conn = state_db.get_db_connection(self.db)
+        try:
+            conn.execute(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'tests_completed', ?, 1, 'trajectory', ?, 1)",
+                (task_id, json.dumps({"verification": {"failing_count": 3, "evidence_id": "ev-cross"}}), hist_run),
+            )
+            conn.executemany(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'task_started', '{}', ?, 'trajectory', ?, ?)",
+                [(task_id, 10 + index, hist_run, index + 2) for index in range(STORED_LIMIT - 1)],
+            )
+            conn.execute(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'verification_completed', ?, 100000, 'trajectory', ?, 5000)",
+                (task_id, json.dumps({"verification": {"passed": True, "evidence_id": "ev-cross"}}), other_run),
+            )
+            conn.execute(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'verification_completed', ?, 100001, 'trajectory', NULL, 5001)",
+                (task_id, json.dumps({"verification": {"passed": True, "evidence_id": "ev-cross"}})),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        self._insert_outcome(task_id, hist_run, eval_id="eval-cross-leak")
+        report = assess_task_run(task_id, hist_run, db_path=self.db, budget_s=0.2)
+        self.assertEqual(len(report["test_anomalies"]), 1)
+        self.assertEqual(report["test_anomalies"][0]["code"], "test_failed")
+        self.assertIn("test_anomaly", report["problem_codes"])
+        self.assertEqual(report["process_quality"], "improvement_opportunity")
+
+    def test_historical_multiple_pairings_and_unmatched_receipts(self):
+        from herdr.execution_trace import STORED_LIMIT
+
+        task_id = "task-multi-pair"
+        hist_run = "run-multi-pair"
+        self._insert_task(task_id, "current-run")
+        conn = state_db.get_db_connection(self.db)
+        try:
+            conn.execute(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'tests_completed', ?, 1, 'trajectory', ?, 1)",
+                (task_id, json.dumps({"verification": {"failing_count": 2, "evidence_id": "ev-pass"}}), hist_run),
+            )
+            conn.execute(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'tests_completed', ?, 2, 'trajectory', ?, 2)",
+                (task_id, json.dumps({"verification": {"failing_count": 2, "evidence_id": "ev-fail"}}), hist_run),
+            )
+            conn.executemany(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'task_started', '{}', ?, 'trajectory', ?, ?)",
+                [(task_id, 10 + index, hist_run, index + 3) for index in range(STORED_LIMIT - 2)],
+            )
+            conn.execute(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'verification_completed', ?, 100000, 'trajectory', ?, 5000)",
+                (task_id, json.dumps({"verification": {"passed": True, "evidence_id": "ev-pass"}}), hist_run),
+            )
+            conn.execute(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'verification_completed', ?, 100001, 'trajectory', ?, 5001)",
+                (task_id, json.dumps({"verification": {"passed": False, "evidence_id": "ev-fail"}}), hist_run),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        self._insert_outcome(task_id, hist_run, eval_id="eval-multi-pair")
+        report = assess_task_run(task_id, hist_run, db_path=self.db, budget_s=0.2)
+        self.assertEqual(len(report["test_anomalies"]), 1)
+        self.assertEqual(report["test_anomalies"][0]["code"], "test_failed")
+        self.assertIn("test_anomaly", report["problem_codes"])
+        self.assertEqual(report["process_quality"], "improvement_opportunity")
+
+    def test_historical_unmatched_receipt_does_not_suppress_failure(self):
+        from herdr.execution_trace import STORED_LIMIT
+
+        task_id = "task-unmatched"
+        hist_run = "run-unmatched"
+        self._insert_task(task_id, "current-run")
+        conn = state_db.get_db_connection(self.db)
+        try:
+            conn.execute(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'tests_completed', ?, 1, 'trajectory', ?, 1)",
+                (task_id, json.dumps({"verification": {"failing_count": 3, "evidence_id": "ev-target"}}), hist_run),
+            )
+            conn.executemany(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'task_started', '{}', ?, 'trajectory', ?, ?)",
+                [(task_id, 10 + index, hist_run, index + 2) for index in range(STORED_LIMIT - 1)],
+            )
+            conn.execute(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'verification_completed', ?, 100000, 'trajectory', ?, 5000)",
+                (task_id, json.dumps({"verification": {"passed": True, "evidence_id": "ev-different"}}), hist_run),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        self._insert_outcome(task_id, hist_run, eval_id="eval-unmatched")
+        report = assess_task_run(task_id, hist_run, db_path=self.db, budget_s=0.2)
+        self.assertEqual(len(report["test_anomalies"]), 1)
+        self.assertIn("test_anomaly", report["problem_codes"])
+        self.assertEqual(report["process_quality"], "improvement_opportunity")
+
+    def test_historical_receipt_supplement_saturation_keeps_window_evidence(self):
+        from herdr.execution_trace import STORED_LIMIT
+
+        task_id = "task-saturation"
+        hist_run = "run-saturation"
+        self._insert_task(task_id, "current-run")
+        conn = state_db.get_db_connection(self.db)
+        try:
+            conn.execute(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'tests_completed', ?, 1, 'trajectory', ?, 1)",
+                (task_id, json.dumps({"verification": {"failing_count": 3, "evidence_id": "ev-target"}}), hist_run),
+            )
+            conn.executemany(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'task_started', '{}', ?, 'trajectory', ?, ?)",
+                [(task_id, 10 + index, hist_run, index + 2) for index in range(STORED_LIMIT - 1)],
+            )
+            conn.executemany(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'verification_completed', ?, ?, 'trajectory', ?, ?)",
+                [
+                    (task_id, json.dumps({"verification": {"passed": True, "evidence_id": f"dummy-{i}"}}),
+                     1000 + i, hist_run, 3000 + i)
+                    for i in range(STORED_LIMIT)
+                ],
+            )
+            conn.execute(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'verification_completed', ?, 100000, 'trajectory', ?, 90000)",
+                (task_id, json.dumps({"verification": {"passed": True, "evidence_id": "ev-target"}}), hist_run),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        self._insert_outcome(task_id, hist_run, eval_id="eval-saturation")
+        report = assess_task_run(task_id, hist_run, db_path=self.db, budget_s=0.2)
+        self.assertEqual(report["test_anomalies"], [])
+        self.assertNotIn("test_anomaly", report["problem_codes"])
+        self.assertEqual(report["process_quality"], "unknown")
+        self.assertIn("trace_truncated", report["problem_codes"])
+
+    def test_historical_receipt_query_sqlite_error_degrades_gracefully(self):
+        task_id = "task-sqlite-err"
+        hist_run = "run-sqlite-err"
+        self._insert_task(task_id, "current-run")
+        self._insert_outcome(task_id, hist_run, eval_id="eval-sqlite-err")
+
+        with (
+            patch("herdr.quality_sources._receipts_for_scope", side_effect=sqlite3.OperationalError("disk error")),
+            patch("herdr.quality_sources.STORED_LIMIT", 0),
+        ):
+            report = assess_task_run(task_id, hist_run, db_path=self.db, budget_s=0.2)
+            self.assertIn("trace_unavailable", report["problem_codes"])
+            self.assertEqual(report["trace_completeness"], "unknown")
+            self.assertEqual(report["process_quality"], "unknown")
 
     def test_missing_database_returns_a_report(self):
         missing = Path(self.tmp.name) / "absent.db"
