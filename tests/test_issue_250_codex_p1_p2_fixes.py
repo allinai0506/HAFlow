@@ -328,6 +328,60 @@ class CodexReviewP1P2FixesTest(unittest.TestCase):
                 versions={non_gate_id: 1},
             )
 
+    def test_p1_fresh_fallback_candidate_accepted_when_primary_candidate_is_stale(self):
+        """P1 (Round 2 finding): Fresh clone fallback verdict must not be rejected when external dir has a stale file."""
+        controller = _load_controller()
+        task_id = "wf-p1-multi-candidate"
+
+        # Candidate 1 (state dir): Stale file from prior epoch (mtime = 1000.0)
+        primary_verdict = self.verdicts_dir / f"{task_id}.json"
+        primary_verdict.write_text(
+            json.dumps({"verdict": "blocked", "note": "stale verdict from previous run"}),
+            encoding="utf-8",
+        )
+        os.utime(str(primary_verdict), (1000.0, 1000.0))
+
+        # Candidate 2 (clone dir): Fresh file from current rework (mtime = 3000.0)
+        clone_dir = self.tmp_dir / "clone_multi"
+        clone_dir.mkdir()
+        clone_herdr = clone_dir / ".herdr"
+        clone_herdr.mkdir()
+        clone_verdict = clone_herdr / "gate-verdict.json"
+        clone_verdict.write_text(
+            json.dumps({
+                "verdict": "pass",
+                "note": "fresh verdict from current rework",
+                "affected_task_ids": ["wf-p1-impl-2"],
+            }),
+            encoding="utf-8",
+        )
+        os.utime(str(clone_verdict), (3000.0, 3000.0))
+
+        # Task was reworked at 2000.0 (Candidate 1 is stale at 1000.0; Candidate 2 is fresh at 3000.0)
+        task = {
+            "task_id": task_id,
+            "workflow_id": "wf-p1",
+            "node": "cleanroom_test",
+            "stage": "cleanroom_test",
+            "status": "working",
+            "clone_path": str(clone_dir),
+            "rework_started_at": 2000.0,
+            "version": 3,
+        }
+
+        with patch.dict(os.environ, {"HERDR_GATE_VERDICT_DIR": str(self.verdicts_dir)}):
+            # 1. Freshness check must succeed because Candidate 2 is fresh!
+            self.assertTrue(controller._gate_verdict_is_fresh(task))
+
+            # 2. _verdict_from_file must parse Candidate 2 ("pass") rather than failing globally
+            verdict, note = controller._verdict_from_file(task)
+            self.assertEqual(verdict, "pass")
+            self.assertEqual(note, "fresh verdict from current rework")
+
+            # 3. _verdict_affected_task_ids must read Candidate 2's affected IDs
+            aff_ids = controller._verdict_affected_task_ids(task)
+            self.assertEqual(aff_ids, ["wf-p1-impl-2"])
+
 
 if __name__ == "__main__":
     unittest.main()

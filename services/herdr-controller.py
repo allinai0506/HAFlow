@@ -8185,38 +8185,42 @@ def _gate_verdict_file_candidates(task):
     return candidates
 
 
-def _gate_verdict_file_info(task):
-    """Return (path, mtime) for the first existing gate verdict file candidate."""
-    for path in _gate_verdict_file_candidates(task):
-        try:
-            if os.path.exists(path):
-                st = os.stat(path)
-                return path, st.st_mtime
-        except OSError:
-            pass
-    return None, None
+def _gate_verdict_file_is_fresh(path, task):
+    """PR #250 & Codex P1: Check if candidate verdict file belongs to current execution epoch."""
+    rework_started = task.get("rework_started_at")
+    if not rework_started:
+        return True
+    try:
+        st = os.stat(path)
+        return st.st_mtime >= (rework_started - 1.0)
+    except OSError:
+        return False
 
 
 def _gate_verdict_is_fresh(task):
-    """PR #250 & Codex P1: Ensure verdict file is fresh for the current execution epoch.
-
-    If a gate task was reworked or retried, any verdict file created before
-    rework_started_at is stale and must not be adopted.
-    """
-    path, mtime = _gate_verdict_file_info(task)
-    if not path or mtime is None:
-        return False
-    rework_started = task.get("rework_started_at")
-    if rework_started and mtime < (rework_started - 1.0):
-        return False
-    return True
+    """PR #250 & Codex P1: Return True if at least one candidate file is valid and fresh."""
+    for path in _gate_verdict_file_candidates(task):
+        try:
+            if not os.path.exists(path):
+                continue
+            if not _gate_verdict_file_is_fresh(path, task):
+                continue
+            with open(path, encoding="utf-8") as handle:
+                payload = json.load(handle)
+            if isinstance(payload, dict) and _normalize_gate_verdict(payload.get("verdict")):
+                return True
+        except Exception:
+            continue
+    return False
 
 
 def _verdict_from_file(task):
-    if not _gate_verdict_is_fresh(task):
-        return None, ""
     for path in _gate_verdict_file_candidates(task):
         try:
+            if not os.path.exists(path):
+                continue
+            if not _gate_verdict_file_is_fresh(path, task):
+                continue
             with open(path, encoding="utf-8") as handle:
                 payload = json.load(handle)
         except Exception:
@@ -8237,10 +8241,12 @@ def _verdict_affected_task_ids(task):
     含非字符串成员 → None(调用方不传 --affected-task-id,等价 legacy);
     显式空列表 → [](Verifier 表示无法归因,决策层据此 fallback)。
     """
-    if not _gate_verdict_is_fresh(task):
-        return None
     for path in _gate_verdict_file_candidates(task):
         try:
+            if not os.path.exists(path):
+                continue
+            if not _gate_verdict_file_is_fresh(path, task):
+                continue
             with open(path, encoding="utf-8") as handle:
                 payload = json.load(handle)
         except Exception:
