@@ -382,6 +382,190 @@ class CodexReviewP1P2FixesTest(unittest.TestCase):
             aff_ids = controller._verdict_affected_task_ids(task)
             self.assertEqual(aff_ids, ["wf-p1-impl-2"])
 
+    def test_p1_candidate_capture_refreshes_cas_version_and_permits_transition(self):
+        """P1: Capturing verified_candidate_sha updates DB version; CAS check must not fail with Concurrent state change."""
+        from herdr import state_store
+        store = state_store.SQLiteStateStore(self.db_path)
+        herdr_task_bin = HERDR_ROOT / "bin" / "herdr-task"
+
+        # Create a real git repository for completion evidence
+        repo_dir = self.tmp_dir / "git_repo_p1"
+        repo_dir.mkdir()
+        subprocess.run(["git", "init"], cwd=str(repo_dir), check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=str(repo_dir), check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=str(repo_dir), check=True, capture_output=True)
+        (repo_dir / "README.md").write_text("p1 test", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=str(repo_dir), check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=str(repo_dir), check=True, capture_output=True)
+        head_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=str(repo_dir), check=True, capture_output=True, text=True
+        ).stdout.strip()
+
+        task_id = "wf-p1-git-cas-gate"
+        task = {
+            "task_id": task_id,
+            "workflow_id": "wf-p1",
+            "node": "cleanroom_test",
+            "stage": "cleanroom_test",
+            "gate": True,
+            "status": "failed",
+            "failure_reason": "hard_timeout_watchdog",
+            "clone_path": str(repo_dir),
+            "candidate_sha": head_sha,
+            "created_at": 1000.0,
+            "updated_at": 2000.0,
+            "version": 2,
+        }
+        store.save_task(task)
+
+        env = {
+            **os.environ,
+            "TASKS_FILE": str(self.tasks_file),
+            "HERDR_STATE_DB": str(self.db_path),
+            "PYTHONPATH": str(HERDR_ROOT),
+        }
+
+        # Execute `herdr-task set <task_id> completed --verdict pass --note "passed gate"`
+        # Prior to the fix, _capture_verified_candidate bumped SQLite version to 3, but set_status
+        # passed expected_version=2 to kernel.transition_task, failing with exit code 2:
+        # "Concurrent state change: task ... is no longer at observed failed state (version 2)"
+        res = subprocess.run(
+            [sys.executable, str(herdr_task_bin), "set", task_id, "completed",
+             "--verdict", "pass", "--note", "passed gate"],
+            text=True,
+            capture_output=True,
+            env=env,
+        )
+        self.assertEqual(res.returncode, 0, f"set completed failed: {res.stderr}\n{res.stdout}")
+        self.assertNotIn("Concurrent state change", res.stderr)
+
+        updated = store.get_task(task_id)
+        self.assertEqual(updated["status"], "completed")
+        self.assertEqual(updated["stage_verdict"], "pass")
+        self.assertEqual(updated["verified_candidate_sha"], head_sha)
+        self.assertGreaterEqual(updated["version"], 3)
+
+    def test_p2_adopt_verdict_rejects_malformed_attribution_list(self):
+        """P2: Malformed affected_task_ids (non-string, blank, or non-list) must be rejected wholly, not partially adopted."""
+        from herdr import state_store
+        store = state_store.SQLiteStateStore(self.db_path)
+        herdr_task_bin = HERDR_ROOT / "bin" / "herdr-task"
+
+        env = {
+            **os.environ,
+            "TASKS_FILE": str(self.tasks_file),
+            "HERDR_STATE_DB": str(self.db_path),
+            "HERDR_GATE_VERDICT_DIR": str(self.verdicts_dir),
+            "PYTHONPATH": str(HERDR_ROOT),
+        }
+
+        # Case 1: Mixed list containing non-string integer ["impl-a", 7]
+        task_id = "wf-p2-malformed-mixed"
+        task = {
+            "task_id": task_id,
+            "workflow_id": "wf-p2",
+            "node": "cleanroom_test",
+            "stage": "cleanroom_test",
+            "gate": True,
+            "status": "failed",
+            "failure_reason": "hard_timeout_watchdog",
+            "version": 1,
+        }
+        store.save_task(task)
+
+        verdict_file = self.verdicts_dir / f"{task_id}.json"
+        verdict_file.write_text(
+            json.dumps({
+                "verdict": "blocked",
+                "note": "mixed list blocker",
+                "affected_task_ids": ["impl-a", 7],
+            }),
+            encoding="utf-8",
+        )
+
+        res = subprocess.run(
+            [sys.executable, str(herdr_task_bin), "adopt-verdict", task_id],
+            text=True,
+            capture_output=True,
+            env=env,
+        )
+        self.assertEqual(res.returncode, 0, f"adopt-verdict failed: {res.stderr}\n{res.stdout}")
+        self.assertIn("Malformed affected_task_ids", res.stderr)
+        updated = store.get_task(task_id)
+        self.assertEqual(updated["status"], "completed")
+        self.assertEqual(updated["stage_verdict"], "blocked")
+        # Must be empty list, NOT partial subset ["impl-a"]
+        self.assertEqual(updated.get("stage_verdict_affected_task_ids"), [])
+
+        # Case 2: Non-list string "impl-a"
+        task_id_2 = "wf-p2-malformed-nonlist"
+        task_2 = {
+            "task_id": task_id_2,
+            "workflow_id": "wf-p2",
+            "node": "cleanroom_test",
+            "stage": "cleanroom_test",
+            "gate": True,
+            "status": "failed",
+            "failure_reason": "hard_timeout_watchdog",
+            "version": 1,
+        }
+        store.save_task(task_2)
+
+        verdict_file_2 = self.verdicts_dir / f"{task_id_2}.json"
+        verdict_file_2.write_text(
+            json.dumps({
+                "verdict": "blocked",
+                "note": "string non-list blocker",
+                "affected_task_ids": "impl-a",
+            }),
+            encoding="utf-8",
+        )
+
+        res_2 = subprocess.run(
+            [sys.executable, str(herdr_task_bin), "adopt-verdict", task_id_2],
+            text=True,
+            capture_output=True,
+            env=env,
+        )
+        self.assertEqual(res_2.returncode, 0)
+        self.assertIn("Malformed affected_task_ids", res_2.stderr)
+        updated_2 = store.get_task(task_id_2)
+        self.assertEqual(updated_2.get("stage_verdict_affected_task_ids"), [])
+
+        # Case 3: Valid list ["impl-a", "impl-b"]
+        task_id_3 = "wf-p2-valid-list"
+        task_3 = {
+            "task_id": task_id_3,
+            "workflow_id": "wf-p2",
+            "node": "cleanroom_test",
+            "stage": "cleanroom_test",
+            "gate": True,
+            "status": "failed",
+            "failure_reason": "hard_timeout_watchdog",
+            "version": 1,
+        }
+        store.save_task(task_3)
+
+        verdict_file_3 = self.verdicts_dir / f"{task_id_3}.json"
+        verdict_file_3.write_text(
+            json.dumps({
+                "verdict": "blocked",
+                "note": "valid list blocker",
+                "affected_task_ids": ["impl-a", "impl-b"],
+            }),
+            encoding="utf-8",
+        )
+
+        res_3 = subprocess.run(
+            [sys.executable, str(herdr_task_bin), "adopt-verdict", task_id_3],
+            text=True,
+            capture_output=True,
+            env=env,
+        )
+        self.assertEqual(res_3.returncode, 0)
+        updated_3 = store.get_task(task_id_3)
+        self.assertEqual(updated_3.get("stage_verdict_affected_task_ids"), ["impl-a", "impl-b"])
+
 
 if __name__ == "__main__":
     unittest.main()

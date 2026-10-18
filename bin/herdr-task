@@ -2507,8 +2507,15 @@ def set_status(task_id, new_status, verdict=None, note=None, affected_task_ids=N
         metadata["stage_verdict_affected_task_ids"] = list(affected_ids)
 
     expected_status = old_status if force_transition else None
-    expected_version = task.get("version") if force_transition else None
     store = _get_store()
+    if force_transition:
+        try:
+            fresh = store.get_task(task_id)
+            if fresh and isinstance(fresh, dict) and "version" in fresh:
+                task["version"] = fresh["version"]
+        except Exception:
+            pass
+    expected_version = task.get("version") if force_transition else None
     try:
         from herdr import kernel
         res = kernel.transition_task(
@@ -5225,11 +5232,35 @@ def adopt_verdict_cli(task_id, verdict=None, note=None, operator="human", as_jso
                     if raw_v in ("pass", "blocked"):
                         verdict = raw_v
                         note = note or str(payload.get("note") or "").strip()
-                        raw_aff = payload.get("affected_task_ids")
-                        if isinstance(raw_aff, list):
-                            for aff in raw_aff:
-                                if isinstance(aff, str) and aff.strip():
-                                    affected_ids.append(aff.strip())
+                        if verdict == "blocked":
+                            raw_aff = payload.get("affected_task_ids")
+                            if raw_aff is not None:
+                                if not isinstance(raw_aff, list):
+                                    print(
+                                        f"[ADOPT VERDICT WARN] Malformed affected_task_ids in {path}: "
+                                        f"expected list, got {type(raw_aff).__name__}; rejecting attribution",
+                                        file=sys.stderr,
+                                    )
+                                    affected_ids = []
+                                else:
+                                    valid = True
+                                    ids = []
+                                    for item in raw_aff:
+                                        text = str(item).strip() if isinstance(item, str) else ""
+                                        if not text:
+                                            valid = False
+                                            break
+                                        if text not in ids:
+                                            ids.append(text)
+                                    if valid:
+                                        affected_ids = ids
+                                    else:
+                                        print(
+                                            f"[ADOPT VERDICT WARN] Malformed affected_task_ids in {path}: "
+                                            f"contains non-string or blank item; rejecting attribution",
+                                            file=sys.stderr,
+                                        )
+                                        affected_ids = []
                         break
             except Exception:
                 continue
@@ -8547,6 +8578,15 @@ def _capture_verified_candidate(task):
             store=store,
         )
         task["verified_candidate_sha"] = head
+        try:
+            fresh = store.get_task(task_id)
+            if fresh and isinstance(fresh, dict) and "version" in fresh:
+                task["version"] = fresh["version"]
+            elif task.get("version") is not None:
+                task["version"] = int(task.get("version") or 0) + 1
+        except Exception:
+            if task.get("version") is not None:
+                task["version"] = int(task.get("version") or 0) + 1
         print(f"[VERIFIED CANDIDATE] {task_id} head={head}")
     except Exception as exc:
         print(f"[VERIFIED CANDIDATE WARN] {task_id}: {exc}", file=sys.stderr)
