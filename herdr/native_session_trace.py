@@ -69,6 +69,9 @@ def load_native_actions(
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, str]]]:
     """Load native actions for one task, or explain why they were refused."""
     notes: List[Dict[str, str]] = []
+    agent = str(task.get("agent") or (task.get("runtime") or {}).get("agent") or "")
+    if agent not in {"codex", "claude", "opencode"}:
+        return [], [_note("native_unsupported", "该执行者暂无原生工具轨迹适配；以下展示已保存的派发、报告与产物回执。")]
     clone = _norm_path(task.get("clone_path"))
     if not clone:
         notes.append(_note("native_unverified", "任务没有可核对的隔离目录，未读取原生会话。"))
@@ -84,7 +87,6 @@ def load_native_actions(
     bound["_clone_exclusive"] = exclusive
     roots = roots or default_roots()
     deadline = time.monotonic() + max(0.2, float(budget_s))
-    agent = str(bound.get("agent") or (bound.get("runtime") or {}).get("agent") or "")
     actions: List[Dict[str, Any]] = []
     truncated = False
     try:

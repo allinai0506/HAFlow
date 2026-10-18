@@ -2732,14 +2732,36 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 ## [2026-10-18] Updated | 工作台模式并排切换
 - Updated [[simple-workbench]]: 左上同排“极简工作台 / 流程工作台”，当前模式高亮，保留项目及需求上下文；原空间工作台更名为流程工作台。
 
+## [2026-10-18] fix | 执行轨迹复用报告回执、任务视图统一
+- Updated [[execution-trace]]: 记录阶段报告、产物回执、候选版本及原生适配缺口；生命周期记录折叠。
+- Updated [[flow-workbench]]: Inspector 与列表共用任务行，历史任务可见且不参与当前节点聚合。
+
+## [2026-10-18] fix | 历史产物允许查阅和下载
+- Updated [[flow-workbench]]: 已替代任务产物的读取能力与当前交付资格分开；保留路径、敏感文件和归档校验，历史产物不满足当前节点预期。
+
+## [2026-10-18] fix | 恢复执行轨迹的信息优先级
+- Updated [[execution-trace]]: 具体事件与报告置于产物之前；轨迹页不重复完整属性卡，保留历史产物下载和任务视图共用行。
+
+## [2026-10-18] fix | 画布按最新图投影刷新
+- Updated [[flow-workbench]]: 修复同 workflow 只更新选中态导致节点与连线保留旧数据；投影变化重建，未变复用。
+
+## [2026-10-18] fix | 侧栏任务行禁止压缩
+- 共享任务行在 Inspector flex 容器中保持自然高度，避免执行者与下一任务编号重叠；不改变任务内容及列表布局。
+
+## [2026-10-18] fix | 流程图和列表打开同一任务详情
+- Updated [[flow-workbench]]: 有任务的画布节点直达现有任务抽屉，共用四页签；保留当前/历史任务选择和无任务节点的定义概览。
+
+## [2026-10-18] docs | PR 交付状态与入口一致性教训
+- 更新任务修复记录为最终实现、部署候选、完整验证和已知边界；工程教训 §167 固化同对象、双入口、完整页签验收。
+
 ## [2026-10-18] Fix | issue #255 agy 新目录信任预埋与失败证据
 - Fixed [[preflight-and-health]] §3.3 记录的信任预埋能力缺口：`herdr/workspace_trust.py` 新增 agy handler（realpath + `_exact_case_path` 逐段 scandir 真实大小写、幂等合并 `~/.gemini/antigravity-cli/settings.json` trustedWorkspaces、原子替换），注册 `_TRUST_HANDLERS` 后 `bin/herdr-task launch` 前置预埋自动覆盖 agy。
 - `services/herdr-worker.py` TRUST_REQUIRED 失败路径新增有界脱敏 pane 片段证据（异常消息与 HERDR_WORKER_FAILURE.trust_evidence）。
 - Evidence: `tests/test_workspace_trust.py`、`tests/test_herdr_worker.py`；真实链路对照实验（agy 1.4.2：未预埋目录复现对话框→TRUST_REQUIRED，预埋目录 `herdr agent start` 直达 READY）。
-- 补充 `docs/lessons/lessons-learned.md` §167：无头探针通过不等于交互式启动可用；复盘见 `docs/bug-reports/2026-10-18-haflow-issue-255-agy-trust.md`。
+- 补充 `docs/lessons/lessons-learned.md` §168：无头探针通过不等于交互式启动可用；复盘见 `docs/bug-reports/2026-10-18-haflow-issue-255-agy-trust.md`。
 
 ## [2026-10-18] Fix | issue #255 B-1 信任写入保持原权限 + 双门禁汇聚收尾
 - Fixed [[preflight-and-health]] §3.3：`ensure_agy_workspace_trust` 原子 replace 携模放宽权限（0600→0644）修复——写前 `S_IMODE` 捕获、replace 前 chmod tmp、首建 0o600、fail-closed；候选 `a7036d2` 经 cleanroom_test-r5 / cleanroom_review-r5 双门禁 pass（三点一致：任务/verdict 文件/冻结记录 94417）。
 - Evidence: 3 个权限用例 RED(8b581c3)→GREEN(a7036d2)；黑盒实测 0600→0600/0640 保持/首建 0600；影响面 7 套件 97 passed。
-- 补充 `docs/lessons/lessons-learned.md` §168（原子写携模陷阱）与 §169（基线漂移与汇聚期四种编排停摆）；复盘见 `docs/bug-reports/2026-10-18-haflow-issue-255-agy-trust-r2.md`；收尾报告 `docs/walkthroughs/20261018-wf-haflow-1018-01-wrapup.md`。
+- 补充 `docs/lessons/lessons-learned.md` §169（原子写携模陷阱）与 §170（基线漂移与汇聚期四种编排停摆）；复盘见 `docs/bug-reports/2026-10-18-haflow-issue-255-agy-trust-r2.md`；收尾报告 `docs/walkthroughs/20261018-wf-haflow-1018-01-wrapup.md`。
 - 本记录描述本地源码；PR 保持 OPEN，合并决策留人工。

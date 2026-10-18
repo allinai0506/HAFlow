@@ -7044,7 +7044,27 @@ python3 -m pytest -q tests/test_workflow_clone_reclaim.py tests/test_workflow_cl
 
 ---
 
-## 167. 预检无头探针不能代替交互式启动的真实门（2026-10-18）
+## 167. 多入口详情统一必须按同一对象验证完整页面，不能用共享任务行代替（2026-10-18）
+
+### 问题背景
+
+用户要求流程图节点与列表任务的单任务详情一致。`e7fb86e` 只复用了任务行，列表仍走 `openTaskDrawer`、画布仍走旧节点概览；后续调整轨迹顺序、缓存与排版仍未覆盖真正的入口差异。用户再次提供两张详情截图后，`ecb638e` 将画布点击接到现有任务详情。
+
+### 经验教训
+
+共享数据、共享列表行和共享完整详情是不同验收层次。入口相同文字或 helper 存在，不能证明用户打开的是同一对象、同一内容。历史产物是否可读，也不能由它是否有资格计入当前交付来代替判断。
+
+### 操作规范
+
+明确两张截图各自的入口、对象 ID 与展示范围；优先让入口调用同一个详情装配函数。对同一任务从两个真实入口分别操作，对比全部要求页签。默认当前任务，历史任务明确标记；无任务的流程节点不伪造任务详情。发现误解后修正验收目标，不用无关界面修补冒充需求闭合。
+
+### 验证命令 / 守护测试
+
+`python3.13 -m pytest -q tests/test_console_execution_trace.py tests/test_deliverables.py`
+
+`test_canvas_node_and_list_row_open_the_same_task_detail` 原先失败于画布未打开详情；覆盖当前、历史与未派发节点。真实浏览器对 `haflow-issue-255-agy-trust-r2` 从画布和列表打开，概览、轨迹、产物、运行时四页签的完整显示文本逐项相同。
+
+## 168. 预检无头探针不能代替交互式启动的真实门（2026-10-18）
 
 ### 问题背景
 
@@ -7077,7 +7097,7 @@ agy（Antigravity CLI）在每个新目录首启弹出交互式信任对话框�
 `test_agy_has_trust_handler_and_preseed_target`、`test_ensure_agy_workspace_trust_uses_real_disk_casing`、
 `test_agy_trust_dialog_failure_evidence_is_readable` 守护预埋覆盖、真实 casing 与证据可判读。
 
-## 168. 原子 replace() 携带临时文件模式，静默放宽目标权限（2026-10-18）
+## 169. 原子 replace() 携带临时文件模式，静默放宽目标权限（2026-10-18）
 
 ### 问题背景
 
@@ -7117,7 +7137,7 @@ AGENTS.md §4.12 落盘安全边界。cleanroom_review 门禁在 temp HOME 用�
 于 8b581c3：`420 != 384` / `420 != 416`；GREEN 于 a7036d2）。
 复盘见 `docs/bug-reports/2026-10-18-haflow-issue-255-agy-trust-r2.md`。
 
-## 169. 基线漂移与门禁汇聚期的四种编排停摆形态（2026-10-18）
+## 170. 基线漂移与门禁汇聚期的四种编排停摆形态（2026-10-18）
 
 ### 问题背景
 

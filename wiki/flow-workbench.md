@@ -88,7 +88,7 @@ Inspector 默认选中同样必须确定性：blocked > failed > working > rewor
 
 Inspector 不新建第二套详情或解卡系统：
 
-- 任务行 → `openTaskDrawer(taskId)`（既有 Task Drawer，含概览/活动/产物/运行时）
+- 任务行 → `openTaskDrawer(taskId)`（既有 Task Drawer，含概览/执行轨迹/产物/运行时）
 - 阻塞节点 → `executeControllerAction(actionId)` + 既有 `/api/controller/execute-action`
 - 视图切换到「任务列表」→ 既有 `renderTasks()`，不重写任务列表
 
@@ -108,7 +108,7 @@ Evidence: `console/herdr_factory_console.py::workflow_detail/loadWorkflow/loadWo
 
 `FACT` 工作流页在 `flow` / `list` 模式显示 `#deliverablesPanel`。Workflow、Node、Task 三处读同一份目录：Workflow 汇总各 Node，Node 汇总所属 Task，Task 抽屉「产物」只显示该 Task 的行。身份是 `sha256(task_id + kind + key)` 的前 20 位。
 
-`FACT` 状态只使用已有事实。正式成果 `present`（已产生）只来自三种已有依据：节点输出契约里的文件名、任务上已经登记的产物或 Observation 路径、以及这次任务自己的 Git 变更。工作区里对不上这些依据的文件是 `workspace`（工作区文件），可以查看或下载，但不是正式交付。`required_outputs` 里带允许后缀的相对文件名，要到节点汇总时才判断；某个 Task 没写出的文件不会在其他 Task 上显示为未产生。当前任务都能读取、且都没有该文件时，节点才出现一条 `missing`（未产生）。已替代任务的文件保留为不可读取，但不能满足节点预期。没有当前任务能够确认时，节点显示 `unconfirmed`（不可确认），而不是已产生或未产生。契约句子（如「测试结论（PASS / FAIL）」「招标基本信息表」）不是文件，不会生成未产生行。工作区不受管或文件不可读是 `unavailable`。目录读取失败写入 `error`。Workflow 与 Node 以中性、默认折叠的「部分文件暂时无法展示」提示保留未知状态，展开可查看原始原因；已发现成果继续展示。扫描达到 40 个文件就停止，并写入 `notice`「成果列表可能未完整。」页面不能把失败或截断显示成没有成果。文件存在不是验收通过。这一层不写入 `verified`，也不因成果推进节点。
+`FACT` 状态只使用已有事实。正式成果 `present`（已产生）只来自三种已有依据：节点输出契约里的文件名、任务上已经登记的产物或 Observation 路径、以及这次任务自己的 Git 变更。工作区里对不上这些依据的文件是 `workspace`（工作区文件），可以查看或下载，但不是正式交付。`required_outputs` 里带允许后缀的相对文件名，要到节点汇总时才判断；某个 Task 没写出的文件不会在其他 Task 上显示为未产生。当前任务都能读取、且都没有该文件时，节点才出现一条 `missing`（未产生）。已替代任务仍能校验和读取的文件标记为 `historical`（历史产物），可查看、下载，但不计入当前成果数量，也不能满足节点预期。提交仍是记录，不能当文件下载；历史 PR 链接可以打开。没有当前任务能够确认时，节点显示 `unconfirmed`（不可确认），而不是已产生或未产生。契约句子（如「测试结论（PASS / FAIL）」「招标基本信息表」）不是文件，不会生成未产生行。工作区不受管或文件不可读是 `unavailable`。目录读取失败写入 `error`。Workflow 与 Node 以中性、默认折叠的「部分文件暂时无法展示」提示保留未知状态，展开可查看原始原因；已发现成果继续展示。扫描达到 40 个文件就停止，并写入 `notice`「成果列表可能未完整。」页面不能把失败或截断显示成没有成果。文件存在不是验收通过。这一层不写入 `verified`，也不因成果推进节点。
 
 `FACT` Context 模式只扫描该 Task 工作区里允许的业务文件，再按上面的依据区分正式成果和工作区文件。Git 模式不整库扫描，也不把派发时的 `baseline_commit` 或与它相同的 `candidate_sha` 当成这次成果。它列出相对该基线到当前 HEAD 的文件，加上 `git status --untracked-files=all` 里后缀允许的变更，并另列这次自己的提交、可靠的 http(s) PR 地址和变更清单。没有基线时，才使用任务记录里的交付 SHA。提交和变更清单不能当文件下载。 PR 链接补充读取同一 workflow/task 的 `herdr-task` 正式 `pull_request_created` 事件回执（按时间与事件 ID 取最新一条），兼容任务已有 PR 字段；创建意图及备注不是正式 PR 依据。工作区清理不影响 PR 链接展示。
 
@@ -166,3 +166,23 @@ Evidence:
 - `tests/test_console_project_creation.py` — 冻结定义优先级（直接调用 + `workflow_detail` 级）、`workflow_template` 暴露
 - `tests/test_console_templates.py` — `TestTemplateLibraryBehavior`（空间隔离、仅用户点选记账、preferred 透传、保存模板记账、过期详情/填充丢弃、保存按发起空间记账、回落对齐、直开视图水合重绘）
 - `tests/test_console_workflow_latency.py` — 启动调度性能回归（`__templates__` 先调度模板库、overview 后台水合不阻塞启动）
+
+## 任务内容一致性
+
+`FACT` 列表与流程图 Inspector 的任务页共用 `renderTaskRow()`，显示相同任务名称、ID、执行者、状态与操作菜单；侧栏仅改变布局。`flowTasksForNode()` 只按节点筛选同一份 `workflow.tasks`，保留已替代任务供查看历史；节点状态聚合仍排除已替代任务。概览的当前任务区也复用同一任务行。
+
+Evidence: `console/herdr_factory_console.py::renderTaskRow/renderTasks/renderNodeInspector/flowTasksForNode`；`tests/test_console_execution_trace.py::test_flow_and_list_render_identical_task_content_and_history`。
+
+## 同一工作流的数据刷新
+
+`FACT` 画布复用同时检查 workflow ID 与完整 graph projection 的序列化键。节点状态、执行者、任务计数或边发生变化时重建节点和连线；投影未变时只更新选中态，避免每次读取都重建。销毁画布同时清理投影键。
+
+Evidence: `renderFlowGraph/destroyFlowGraph`；`tests/test_console_execution_trace.py::test_flow_graph_refreshes_changed_projection_but_reuses_unchanged_graph`。隔离浏览器使用真实 X6/Dagre 验证同 workflow 的 working/claude/1 → completed/qodercli/2 变化，不修改生产任务状态。
+
+## 统一单任务详情入口
+
+`FACT` 点击已有任务的画布节点与点击列表任务，均调用 `openTaskDrawer(task_id)`。共用同一份任务/API 投影、详情抽屉和「概览 / 执行轨迹 / 产物 / 运行时」四页签，不再把节点模板概览当成该任务详情。节点存在多个执行记录时，默认选最后一条未替代任务；全部已替代时选最后一条历史任务。历史记录仍可通过节点任务列表选择，尚无任务的节点继续显示节点信息。
+
+`FACT` X6 的 `node:click` 是唯一画布点击装配；删除 HTML 包装层重复点击监听，防止一次点击重复加载详情。
+
+Evidence: `selectFlowNode/openTaskDrawer/onTaskRowClick`；`tests/test_console_execution_trace.py::test_canvas_node_and_list_row_open_the_same_task_detail`。

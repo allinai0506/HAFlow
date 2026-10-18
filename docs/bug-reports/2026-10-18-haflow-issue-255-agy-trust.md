@@ -138,4 +138,4 @@ agy（见"已知限制"）。
   影响面 7 套件 97 passed、eval 100/CONVERGED；B-1 闭合、残余风险（D-1/D-2/D-3/
   R-1/R-2/R-3）全部非阻塞。
 - 交付 PR 与六步收尾状态表见 `docs/walkthroughs/20261018-wf-haflow-1018-01-wrapup.md`；
-  编排停摆教训归档见 `docs/lessons/lessons-learned.md` §169。
+  编排停摆教训归档见 `docs/lessons/lessons-learned.md` §170。
