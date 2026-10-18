@@ -102,6 +102,8 @@ def _bundle(outcome, events, actions, degradation, signals, *, allow_legacy, tru
 
 
 def _events_for_run(task: Dict[str, Any], run_id: str, db_path):
+    unresolved = set()
+    receipts_saturated = False
     try:
         conn = get_readonly_db_connection(db_path)
     except FileNotFoundError:
@@ -129,6 +131,25 @@ def _events_for_run(task: Dict[str, Any], run_id: str, db_path):
                 rows = list(rows) + supplemented
                 seen.update(row["id"] for row in supplemented)
                 if len(receipt_rows) >= STORED_LIMIT:
+                    receipts_saturated = True
+                    # Fetch corrupt receipts separately so they cannot consume the
+                    # per-evidence budget or make json_extract abort the batch.
+                    corrupt_rows = conn.execute(
+                        """
+                        SELECT id, task_id, agent_id, event_type, timestamp, source, run_id, sequence, payload_json
+                        FROM events
+                        WHERE task_id = ? AND run_id = ? AND event_type = 'verification_completed'
+                          AND payload_json IS NOT NULL AND payload_json != ''
+                          AND CASE WHEN json_valid(payload_json)
+                                   THEN json_type(payload_json) != 'object' ELSE 1 END
+                        ORDER BY timestamp ASC, id ASC LIMIT ?
+                        """,
+                        (task_id, run_id, STORED_LIMIT),
+                    ).fetchall()
+                    for corrupt_row in corrupt_rows:
+                        if corrupt_row["id"] not in seen:
+                            rows.append(corrupt_row)
+                            seen.add(corrupt_row["id"])
                     window_ev_ids = set()
                     covered_ev_ids = set()
                     for r in rows:
@@ -139,21 +160,27 @@ def _events_for_run(task: Dict[str, Any], run_id: str, db_path):
                                 if r["event_type"] == "tests_completed":
                                     window_ev_ids.add(ev)
                                 elif r["event_type"] == "verification_completed":
-                                    covered_ev_ids.add(ev)
-                    uncovered = sorted(window_ev_ids - covered_ev_ids)[:20]
-                    for ev_id in uncovered:
+                                    covered_ev_ids.update(_verification_verdicts([{
+                                        "event_type": r["event_type"], "payload": p,
+                                    }]))
+                    uncovered = sorted(window_ev_ids - covered_ev_ids)
+                    unresolved.update(uncovered)
+                    for ev_id in uncovered[:20]:
                         extra_rows = conn.execute(
                             """
                             SELECT id, task_id, agent_id, event_type, timestamp, source, run_id, sequence, payload_json
                             FROM events
                             WHERE task_id = ? AND run_id = ? AND event_type = 'verification_completed'
-                              AND (json_extract(payload_json, '$.verification.evidence_id') = ?
-                                   OR json_extract(payload_json, '$.evidence_id') = ?)
+                              AND CASE WHEN json_valid(payload_json) THEN
+                                  (json_extract(payload_json, '$.verification.evidence_id') = ?
+                                   OR json_extract(payload_json, '$.evidence_id') = ?) ELSE 0 END
                             ORDER BY timestamp ASC, id ASC
                             LIMIT 10
                             """,
                             (task_id, run_id, ev_id, ev_id),
                         ).fetchall()
+                        if len(extra_rows) < 10:
+                            unresolved.discard(ev_id)
                         for extra in extra_rows:
                             if extra["id"] not in seen:
                                 rows.append(extra)
@@ -183,12 +210,23 @@ def _events_for_run(task: Dict[str, Any], run_id: str, db_path):
     notes = []
     if corrupt_ids:
         notes.append(_corrupt_payload_note(corrupt_ids))
+    unresolved_rows = {
+        row["id"] for row in decoded
+        if receipts_saturated and row["event_type"] == "tests_completed"
+        and (_row_evidence_id(row) in unresolved or not _row_evidence_id(row))
+    }
+    if unresolved_rows:
+        notes.append({
+            "code": "verification_receipts_unresolved",
+            "message": "部分测试证据超出回执核实预算，保持未知。",
+            "details": {"unresolved_count": len(unresolved_rows)},
+        })
     view = dict(task)
     view["run_id"] = run_id
     verdicts = _verification_verdicts(decoded)
     projected = []
     for row in decoded:
-        if _tests_row_has_verdict(row, verdicts):
+        if row["id"] in unresolved_rows or _tests_row_has_verdict(row, verdicts):
             continue
         event = project_stored_event(row, view)
         if event is not None:

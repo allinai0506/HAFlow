@@ -1,0 +1,57 @@
+.FF                                                                    [100%]
+=================================== FAILURES ===================================
+_ QualityReadTest.test_r3_saturated_21_pairs_do_not_confirm_unread_failure (pairs=21) _
+
+self = <tests.test_quality_assessment.QualityReadTest testMethod=test_r3_saturated_21_pairs_do_not_confirm_unread_failure>
+
+    def test_r3_saturated_21_pairs_do_not_confirm_unread_failure(self):
+        for pairs in (20, 21):
+            with self.subTest(pairs=pairs):
+                task_id = f"r3-pairs-{pairs}"
+                run = self._saturated_history(task_id, pairs=pairs)
+                report = assess_task_run(task_id, run, db_path=self.db)
+>               self.assertEqual(report["test_anomalies"], [])
+E               AssertionError: Lists differ: [{'code': 'test_failed', 'evidence_ref': 'trace:trajectory:trajectory:4045'}] != []
+E               
+E               First list contains 1 additional elements.
+E               First extra element 0:
+E               {'code': 'test_failed', 'evidence_ref': 'trace:trajectory:trajectory:4045'}
+E               
+E               - [{'code': 'test_failed', 'evidence_ref': 'trace:trajectory:trajectory:4045'}]
+E               + []
+
+tests/test_quality_assessment.py:1216: AssertionError
+_ QualityReadTest.test_r3_saturated_budget_exhaustion_is_explicitly_unresolved _
+
+self = <tests.test_quality_assessment.QualityReadTest testMethod=test_r3_saturated_budget_exhaustion_is_explicitly_unresolved>
+
+    def test_r3_saturated_budget_exhaustion_is_explicitly_unresolved(self):
+        from herdr.quality_sources import load_quality_inputs
+    
+        task_id = "r3-unresolved"
+        run = self._saturated_history(task_id, paired=False)
+        inputs = load_quality_inputs(task_id, run, db_path=self.db, roots={}, budget_s=0.2)
+        notes = [n for n in inputs["degradation"] if n["code"] == "verification_receipts_unresolved"]
+>       self.assertEqual(len(notes), 1)
+E       AssertionError: 0 != 1
+
+tests/test_quality_assessment.py:1227: AssertionError
+___ QualityReadTest.test_r3_saturated_corrupt_receipt_preserves_legal_events ___
+
+self = <tests.test_quality_assessment.QualityReadTest testMethod=test_r3_saturated_corrupt_receipt_preserves_legal_events>
+
+    def test_r3_saturated_corrupt_receipt_preserves_legal_events(self):
+        from herdr.quality_sources import load_quality_inputs
+    
+        task_id = "r3-corrupt"
+        run = self._saturated_history(task_id, pairs=1, corrupt=True, paired=False)
+        inputs = load_quality_inputs(task_id, run, db_path=self.db, roots={}, budget_s=0.2)
+>       self.assertTrue(any(e["kind"] == "test_failed" for e in inputs["events"]))
+E       AssertionError: False is not true
+
+tests/test_quality_assessment.py:1240: AssertionError
+=========================== short test summary info ============================
+SUBFAILED(pairs=21) tests/test_quality_assessment.py::QualityReadTest::test_r3_saturated_21_pairs_do_not_confirm_unread_failure
+FAILED tests/test_quality_assessment.py::QualityReadTest::test_r3_saturated_budget_exhaustion_is_explicitly_unresolved
+FAILED tests/test_quality_assessment.py::QualityReadTest::test_r3_saturated_corrupt_receipt_preserves_legal_events
+3 failed, 1 passed, 55 deselected, 1 subtests passed in 1.72s

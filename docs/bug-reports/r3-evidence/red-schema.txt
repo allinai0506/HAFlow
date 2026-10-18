@@ -1,0 +1,34 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+______ QualityReadTest.test_r3_schema_only_receipt_is_not_a_verified_pair ______
+
+self = <tests.test_quality_assessment.QualityReadTest testMethod=test_r3_schema_only_receipt_is_not_a_verified_pair>
+
+    def test_r3_schema_only_receipt_is_not_a_verified_pair(self):
+        task_id = "r3-schema-pair"
+        run = self._saturated_history(task_id, pairs=1)
+        conn = state_db.get_db_connection(self.db)
+        try:
+            conn.execute(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id) VALUES ('wf-1', ?, 'verification_completed', ?, 4000, 'trajectory', ?)",
+                (task_id, json.dumps({"evidence_id": "z000"}), run),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        report = assess_task_run(task_id, run, db_path=self.db)
+>       self.assertEqual(report["test_anomalies"], [])
+E       AssertionError: Lists differ: [{'code': 'test_failed', 'evidence_ref': 'trace:trajectory:trajectory:3'}] != []
+E       
+E       First list contains 1 additional elements.
+E       First extra element 0:
+E       {'code': 'test_failed', 'evidence_ref': 'trace:trajectory:trajectory:3'}
+E       
+E       - [{'code': 'test_failed', 'evidence_ref': 'trace:trajectory:trajectory:3'}]
+E       + []
+
+tests/test_quality_assessment.py:1314: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_quality_assessment.py::QualityReadTest::test_r3_schema_only_receipt_is_not_a_verified_pair
+1 failed, 60 deselected in 0.53s

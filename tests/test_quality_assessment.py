@@ -1172,6 +1172,148 @@ class QualityReadTest(unittest.TestCase):
         self.assertEqual(report["process_quality"], "unknown")
         self.assertIn("trace_truncated", report["problem_codes"])
 
+    def _saturated_history(self, task_id, *, pairs=21, corrupt=False, paired=True):
+        hist_run = "historical-r3"
+        self._insert_task(task_id, "current-r3")
+        self._insert_outcome(task_id, hist_run, eval_id=task_id)
+        rows = []
+        for i in range(pairs):
+            rows.append(("tests_completed", json.dumps({"verification": {
+                "failing_count": 1, "evidence_id": f"z{i:03}",
+            }}), i + 1, hist_run))
+        rows.extend(("task_started", "{}", 100 + i, hist_run) for i in range(2000 - pairs))
+        rows.extend(("verification_completed", json.dumps({"verification": {
+            "passed": True, "evidence_id": f"a{i}",
+        }}), 5000 + i, hist_run) for i in range(2000))
+        if paired:
+            rows.extend(("verification_completed", json.dumps({"verification": {
+                "passed": True, "evidence_id": f"z{i:03}",
+            }}), 10000 + i, hist_run) for i in range(pairs))
+        if corrupt:
+            rows.append(("verification_completed", "{broken", 20000, hist_run))
+        # These receipts must never resolve this run's evidence.
+        rows.extend(("verification_completed", json.dumps({"verification": {
+            "passed": True, "evidence_id": "z000",
+        }}), 30000, foreign) for foreign in ("other-r3", None))
+        conn = state_db.get_db_connection(self.db)
+        try:
+            conn.executemany(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id) VALUES ('wf-1', ?, ?, ?, ?, 'trajectory', ?)",
+                [(task_id, *row) for row in rows],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return hist_run
+
+    def test_r3_saturated_21_pairs_do_not_confirm_unread_failure(self):
+        for pairs in (20, 21):
+            with self.subTest(pairs=pairs):
+                task_id = f"r3-pairs-{pairs}"
+                run = self._saturated_history(task_id, pairs=pairs)
+                report = assess_task_run(task_id, run, db_path=self.db)
+                self.assertEqual(report["test_anomalies"], [])
+                self.assertEqual(report["process_quality"], "unknown")
+                self.assertNotIn("stored_payload_corrupt", report["problem_codes"])
+
+    def test_r3_saturated_budget_exhaustion_is_explicitly_unresolved(self):
+        from herdr.quality_sources import load_quality_inputs
+
+        task_id = "r3-unresolved"
+        run = self._saturated_history(task_id, paired=False)
+        inputs = load_quality_inputs(task_id, run, db_path=self.db, roots={}, budget_s=0.2)
+        notes = [n for n in inputs["degradation"] if n["code"] == "verification_receipts_unresolved"]
+        self.assertEqual(len(notes), 1)
+        self.assertEqual(notes[0]["details"]["unresolved_count"], 1)
+        report = assess_task_run(task_id, run, db_path=self.db)
+        # Twenty exact absence checks still confirm their real failures.
+        self.assertEqual(len(report["test_anomalies"]), 20)
+        self.assertEqual(report["process_quality"], "improvement_opportunity")
+
+    def test_r3_saturated_corrupt_receipt_preserves_legal_events(self):
+        from herdr.quality_sources import load_quality_inputs
+
+        task_id = "r3-corrupt"
+        run = self._saturated_history(task_id, pairs=1, corrupt=True, paired=False)
+        inputs = load_quality_inputs(task_id, run, db_path=self.db, roots={}, budget_s=0.2)
+        self.assertTrue(any(e["kind"] == "test_failed" for e in inputs["events"]))
+        self.assertTrue(any(e["kind"] == "agent_started" for e in inputs["events"]))
+        notes = [n for n in inputs["degradation"] if n["code"] == "stored_payload_corrupt"]
+        self.assertEqual(len(notes), 1)
+        self.assertEqual(notes[0]["details"]["corrupt_count"], 1)
+        self.assertNotIn("trajectory_unavailable", [n["code"] for n in inputs["degradation"]])
+        report = assess_task_run(task_id, run, db_path=self.db)
+        self.assertIn("stored_payload_corrupt", report["problem_codes"])
+        self.assertEqual(len(report["test_anomalies"]), 1)
+        self.assertEqual(report["trace_completeness"], "unknown")
+
+    def test_r3_corrupt_saturated_receipt_with_successful_pair_stays_unknown(self):
+        from herdr.quality_sources import load_quality_inputs
+
+        task_id = "r3-corrupt-paired"
+        run = self._saturated_history(task_id, pairs=1, corrupt=True)
+        report = assess_task_run(task_id, run, db_path=self.db)
+        self.assertEqual(report["test_anomalies"], [])
+        self.assertEqual(report["process_quality"], "unknown")
+        self.assertIn("stored_payload_corrupt", report["problem_codes"])
+        conn = state_db.get_db_connection(self.db)
+        try:
+            # Valid JSON non-objects share the decoder's corrupt semantics.
+            conn.executemany(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id) VALUES ('wf-1', ?, 'verification_completed', ?, 40000, 'trajectory', ?)",
+                [(task_id, payload, run) for payload in ('[]', 'null', '"str"')]
+                + [(task_id, '{broken', foreign) for foreign in ('other-r3', None)],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        inputs = load_quality_inputs(task_id, run, db_path=self.db, roots={}, budget_s=0.2)
+        notes = [n for n in inputs["degradation"] if n["code"] == "stored_payload_corrupt"]
+        self.assertEqual(notes[0]["details"]["corrupt_count"], 4)
+        self.assertLessEqual(len(notes[0]["details"]["sample_ids"]), 8)
+        self.assertTrue(any(e["kind"] == "test_passed" for e in inputs["events"]))
+
+    def test_r3_per_evidence_receipt_cap_does_not_confirm_failure(self):
+        from herdr.quality_sources import load_quality_inputs
+
+        task_id = "r3-receipt-cap"
+        run = self._saturated_history(task_id, pairs=1, paired=False)
+        conn = state_db.get_db_connection(self.db)
+        try:
+            conn.executemany(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id) VALUES ('wf-1', ?, 'verification_completed', ?, ?, 'trajectory', ?)",
+                [(task_id, json.dumps({"evidence_id": "z000"}), 10000 + i, run) for i in range(10)]
+                + [(task_id, json.dumps({"verification": {"evidence_id": "z000", "passed": True}}), 20000, run)],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        inputs = load_quality_inputs(task_id, run, db_path=self.db, roots={}, budget_s=0.2)
+        self.assertIn("verification_receipts_unresolved", [n["code"] for n in inputs["degradation"]])
+        report = assess_task_run(task_id, run, db_path=self.db)
+        self.assertEqual(report["test_anomalies"], [])
+        self.assertEqual(report["process_quality"], "unknown")
+
+    def test_r3_schema_only_receipt_is_not_a_verified_pair(self):
+        task_id = "r3-schema-pair"
+        run = self._saturated_history(task_id, pairs=1)
+        conn = state_db.get_db_connection(self.db)
+        try:
+            conn.execute(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id) VALUES ('wf-1', ?, 'verification_completed', ?, 4000, 'trajectory', ?)",
+                (task_id, json.dumps({"evidence_id": "z000"}), run),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        report = assess_task_run(task_id, run, db_path=self.db)
+        self.assertEqual(report["test_anomalies"], [])
+        self.assertEqual(report["process_quality"], "unknown")
+
     def test_historical_receipt_query_sqlite_error_degrades_gracefully(self):
         task_id = "task-sqlite-err"
         hist_run = "run-sqlite-err"

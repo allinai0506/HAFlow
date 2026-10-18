@@ -1,0 +1,39 @@
+{
+  "pairs20": {
+    "anomalies": 0,
+    "process_quality": "unknown",
+    "problem_codes": [
+      "historical_run_trace_limited",
+      "trace_truncated"
+    ],
+    "database_unchanged": true
+  },
+  "pairs21": {
+    "anomalies": 0,
+    "process_quality": "unknown",
+    "problem_codes": [
+      "historical_run_trace_limited",
+      "trace_truncated"
+    ],
+    "database_unchanged": true
+  },
+  "corrupt_saturation": {
+    "anomalies": 1,
+    "process_quality": "improvement_opportunity",
+    "problem_codes": [
+      "historical_run_trace_limited",
+      "stored_payload_corrupt",
+      "test_anomaly",
+      "trace_truncated"
+    ],
+    "database_unchanged": true
+  },
+  "query_plan": [
+    [
+      5,
+      0,
+      61,
+      "SEARCH events USING INDEX idx_events_type (event_type=?)"
+    ]
+  ]
+}
