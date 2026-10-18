@@ -333,6 +333,27 @@ class TestDeliveryBadgeRendering(unittest.TestCase):
                          f"var T={self._task(delivery)};")
         self.assertEqual(line, "")
 
+    def test_inspector_runtime_card_shows_the_delivery_state_and_row(self):
+        """The node card is the other place that used to read「已提交」."""
+        extra = (
+            "var elements={flowInspectorBody:{},flowInspTitle:{},flowInspMeta:{}};\n"
+            "var document={getElementById:id=>elements[id]||(elements[id]={}),"
+            "querySelectorAll:()=>[],querySelector:()=>null};\n"
+            f"var T={self._task(self._delivery_js(), node='craft')};\n"
+            "var state={workflow:{tasks:[T],context:{required:[],optional:[]}},"
+            "workflowId:'wf-253',flowSelectedNodeId:'craft',flowInspectorTab:'runtime'};\n"
+            "function flowNodeById(){return {id:'craft',label:'1代码工坊',node_type:'agent',status:'waiting'};}\n"
+            "function humanNodeStatus(s){return s;}\n"
+            "function flowNodeStatus(n,s){return s;}\n"
+            "renderNodeInspector();\n"
+        )
+        html = self._run("elements.flowInspectorBody.innerHTML", extra,
+                         extra_fns=("flowTasksForNode", "renderNodeInspector"))
+        self.assertIn("等待集成", html)
+        self.assertIn("等待门禁: 洁净室测试、洁净室评审", html)
+        self.assertIn("commit=6e582588 → herdr/integration-craft-r2", html)
+        self.assertNotIn("已提交", html)
+
     def test_cockpit_shows_the_scheduler_attribution_instead_of_a_button(self):
         """No action exists for the step, so the panel must explain who owns it."""
         extra = ("var state={workflow:{tasks:[{task_id:'craft-r2',status:'committed',"

@@ -2758,5 +2758,5 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - Updated [[flow-workbench]] §10：新增 `herdr/delivery_pipeline.py` 纯投影（阶段 / 调度器归属 / 待过门禁 / commit→integration_branch→候选发布时间）；`committed` 且守护进程已接管的 git 任务徽章改为「等待集成 · 等待门禁: …」，调度控制不再产出人工「并入目标分支」动作，改列归属说明；节点卡片与任务抽屉新增交付管道行。
 - 门禁定义复用 `workflow_progress.gate_retry_node` 单一入口；等待原因只读既有事实（任务字段、门禁 `stage_verdict`、`candidate_published` 事件），未建第二事实源。
 - 追加 [[../docs/lessons/lessons-learned]] §168：守护进程已接管的进行中状态不得渲染成终态，也不得再暴露第二个人工入口。
-- Evidence: `tests/test_delivery_pipeline.py`、`tests/test_console_delivery_pipeline.py`、`tests/test_controller_progress_actions.py`（新增回归）；console 专项 + 核心专项通过。
-- 本记录描述本地隔离沙盒源码；尚未推送、合并、部署或重启 8765。
+- Evidence: `tests/test_delivery_pipeline.py`、`tests/test_console_delivery_pipeline.py`、`tests/test_controller_progress_actions.py`（新增回归）；console 专项 + 核心专项通过。PR: https://github.com/allinai0506/HAFlow/pull/264
+- 本记录描述本地隔离沙盒源码；分支已推送（PR #264），尚未合并、部署或重启 8765。

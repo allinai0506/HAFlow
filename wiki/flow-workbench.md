@@ -215,3 +215,4 @@ Evidence:
 - `tests/test_delivery_pipeline.py` — 纯投影与归属反例（paused/非 git/context/已升级/未知状态）
 - `tests/test_console_delivery_pipeline.py` — 服务端真实 SQLite + 事件账本读链、`workflow_detail` / `api_workflow_controller_actions`、Node 渲染断言
 - `tests/test_controller_progress_actions.py` — 调度器接管不产出人工 integrate，其余链路动作保留
+- PR: https://github.com/allinai0506/HAFlow/pull/264
