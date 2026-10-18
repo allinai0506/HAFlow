@@ -827,3 +827,100 @@ def test_stop_line_does_not_pass_with_only_one_completed_round(scene):
     assert refused.returncode == 2
     assert "no completed Codex review found" in (refused.stdout + refused.stderr)
 
+
+def test_rogue_remote_in_clone_is_rejected_as_delivery_identity(scene):
+    """Rogue remote added by worker in clone must not become a delivery identity (issue #227)."""
+    subprocess.run(
+        ["git", "-C", str(scene.clone), "remote", "add", "evil",
+         "https://github.com/attacker/repo.git"],
+        check=True, capture_output=True, text=True,
+    )
+    refused = record_valid(
+        scene.store, scene.head,
+        pr_url="https://github.com/attacker/repo/pull/1",
+    )
+    assert refused.returncode == 2
+    assert "delivery identity" in (refused.stdout + refused.stderr)
+
+
+def test_source_repo_is_authoritative_over_clone_remotes(scene, tmp_path):
+    """source_repo remotes are authoritative; clone remotes cannot expand them (issue #227)."""
+    source = tmp_path / "source_repo"
+    source.mkdir()
+    subprocess.run(["git", "-C", str(source), "init", "-q"], check=True)
+    subprocess.run(
+        ["git", "-C", str(source), "remote", "add", "origin",
+         "https://github.com/owner/repo.git"],
+        check=True,
+    )
+
+    task = scene.store.get_task("wrapup-task")
+    task["source_repo"] = str(source)
+    scene.store.save_task(task)
+
+    # Worker injects rogue remotes into task clone
+    subprocess.run(
+        ["git", "-C", str(scene.clone), "remote", "add", "evil",
+         "https://github.com/attacker/repo.git"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(scene.clone), "remote", "add", "upstream",
+         "https://github.com/attacker/repo.git"],
+        check=True,
+    )
+
+    refused = record_valid(
+        scene.store, scene.head,
+        pr_url="https://github.com/attacker/repo/pull/1",
+    )
+    assert refused.returncode == 2
+    assert "delivery identity" in (refused.stdout + refused.stderr)
+
+    # The legitimate owner/repo PR remains accepted
+    ok = record_valid(
+        scene.store, scene.head,
+        pr_url="https://github.com/owner/repo/pull/1",
+    )
+    assert ok.returncode == 0, ok.stdout + ok.stderr
+
+
+def test_fork_source_repo_accepts_upstream_and_ignores_clone_evil(scene, tmp_path):
+    """Fork in source_repo accepts upstream target PR and ignores clone evil (issue #227)."""
+    source = tmp_path / "fork_source_repo"
+    source.mkdir()
+    subprocess.run(["git", "-C", str(source), "init", "-q"], check=True)
+    subprocess.run(
+        ["git", "-C", str(source), "remote", "add", "origin",
+         "git@github.com:forkuser/repo.git"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(source), "remote", "add", "upstream",
+         "https://github.com/owner/repo.git"],
+        check=True,
+    )
+
+    task = scene.store.get_task("wrapup-task")
+    task["source_repo"] = str(source)
+    scene.store.save_task(task)
+
+    subprocess.run(
+        ["git", "-C", str(scene.clone), "remote", "add", "evil",
+         "https://github.com/attacker/repo.git"],
+        check=True,
+    )
+
+    ok = record_valid(
+        scene.store, scene.head,
+        pr_url="https://github.com/owner/repo/pull/1",
+    )
+    assert ok.returncode == 0, ok.stdout + ok.stderr
+
+    refused = record_valid(
+        scene.store, scene.head,
+        pr_url="https://github.com/attacker/repo/pull/1",
+    )
+    assert refused.returncode == 2
+    assert "delivery identity" in (refused.stdout + refused.stderr)
+

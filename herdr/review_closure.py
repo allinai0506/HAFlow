@@ -331,8 +331,8 @@ def verify_against_forge(pr_url: Any, head_sha: str) -> Tuple[bool, str, Optiona
     return True, "forge verification passed", verification
 
 
-def git_remote_urls(path: Any) -> List[str]:
-    """Unique remote URLs of a local git worktree (empty when unreadable)."""
+def git_named_remotes(path: Any) -> List[Tuple[str, str]]:
+    """(remote_name, url) pairs of a local git worktree (empty when unreadable)."""
     if not path:
         return []
     repo = Path(str(path)).expanduser()
@@ -347,12 +347,26 @@ def git_remote_urls(path: Any) -> List[str]:
         return []
     if probe.returncode:
         return []
-    urls: List[str] = []
+    remotes: List[Tuple[str, str]] = []
+    seen: set = set()
     for line in (probe.stdout or "").splitlines():
         parts = line.split()
-        if len(parts) >= 2 and parts[1] not in urls:
-            urls.append(parts[1])
+        if len(parts) >= 2:
+            name, url = parts[0].strip(), parts[1].strip()
+            if (name, url) not in seen:
+                seen.add((name, url))
+                remotes.append((name, url))
+    return remotes
+
+
+def git_remote_urls(path: Any) -> List[str]:
+    """Unique remote URLs of a local git worktree (empty when unreadable)."""
+    urls: List[str] = []
+    for _name, url in git_named_remotes(path):
+        if url not in urls:
+            urls.append(url)
     return urls
+
 
 
 def collect_deferred_evidence(store, task: Any) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
@@ -424,15 +438,47 @@ def parse_remote_identity(url: Any) -> Optional[Tuple[str, str]]:
     return match.group(1), match.group(2)
 
 
+_DELIVERY_REMOTE_NAMES = ("upstream", "origin")
+
+
+def _path_delivery_identities(path: Any) -> List[str]:
+    """Extract authoritative GitHub delivery identities from a git worktree.
+
+    Only standard delivery remotes ('upstream' then 'origin') are accepted.
+    'upstream' is prioritized over 'origin' so fork workflows accept the
+    target PR without depending on iteration order (issue #227).
+    """
+    by_name: Dict[str, List[str]] = {}
+    for name, url in git_named_remotes(path):
+        identity = parse_remote_identity(url)
+        if identity:
+            repo_id = f"{identity[0]}/{identity[1]}"
+            key = name.lower()
+            by_name.setdefault(key, [])
+            if repo_id not in by_name[key]:
+                by_name[key].append(repo_id)
+
+    identities: List[str] = []
+    for key in _DELIVERY_REMOTE_NAMES:
+        for repo_id in by_name.get(key, []):
+            if repo_id not in identities:
+                identities.append(repo_id)
+    return identities
+
+
 def delivery_identity(store, task: Any) -> Tuple[List[str], str, str, str]:
     """(owner/repo identities, expected PR number, source, candidate_sha).
 
-    Priority: the workflow's authoritative ``pull_request_created`` delivery
-    record (exact owner/repo, the PR number and the certified candidate SHA).
-    Without a record, every readable GitHub remote of the task's source repo
-    or clone supplies an acceptable identity — a fork fallback keeps both
-    ``origin`` and ``upstream`` usable instead of depending on remote
-    iteration order (Codex review P1).
+    Priority:
+    1. The workflow's authoritative ``pull_request_created`` delivery record
+       (exact owner/repo, the PR number and certified candidate SHA).
+    2. The project's authoritative ``source_repo`` remotes (trusted remotes
+       ``upstream`` then ``origin``). When ``source_repo`` supplies delivery
+       identities, ``clone_path`` is never consulted, preventing workers from
+       injecting rogue remotes (issue #227).
+    3. Fallback to ``clone_path`` remotes only when ``source_repo`` is
+       unavailable or has no GitHub remotes. In ``clone_path``, only trusted
+       delivery remotes (``upstream``, ``origin``) are accepted.
     """
     task = task or {}
     workflow_id = str(task.get("workflow_id") or "").strip()
@@ -459,16 +505,19 @@ def delivery_identity(store, task: Any) -> Tuple[List[str], str, str, str]:
                     "workflow_delivery_record",
                     str(payload.get("candidate_sha") or "").strip().lower(),
                 )
-    identities: List[str] = []
-    for path in (task.get("source_repo"), task.get("clone_path")):
-        for url in git_remote_urls(path):
-            identity = parse_remote_identity(url)
-            if identity:
-                name = f"{identity[0]}/{identity[1]}"
-                if name not in identities:
-                    identities.append(name)
-    if identities:
-        return identities, "", "repository_remote", ""
+
+    source_repo = task.get("source_repo")
+    if source_repo:
+        source_identities = _path_delivery_identities(source_repo)
+        if source_identities:
+            return source_identities, "", "repository_remote", ""
+
+    clone_path = task.get("clone_path")
+    if clone_path:
+        clone_identities = _path_delivery_identities(clone_path)
+        if clone_identities:
+            return clone_identities, "", "repository_remote", ""
+
     return [], "", "", ""
 
 
@@ -489,7 +538,8 @@ def identity_mismatch(store, task: Any, pr_url: Any, head_sha: Any) -> Optional[
             "cannot anchor the receipt to an authoritative delivery identity "
             "(no pull_request_created record and no readable GitHub remote)"
         )
-    if f"{owner}/{repo}" not in identities:
+    target_repo = f"{owner}/{repo}"
+    if not any(target_repo.lower() == ident.lower() for ident in identities):
         return (
             f"receipt PR {owner}/{repo} does not match the delivery identity "
             f"({', '.join(identities)}; {source})"
