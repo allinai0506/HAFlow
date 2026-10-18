@@ -4508,6 +4508,10 @@ body {
   font-size: 12px;
   color: #16171b;
 }
+.sidebar-workbench-switch { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.sidebar-workbench-switch a { font-size: 11px; line-height: 14px; color: var(--text-secondary); text-decoration: none; }
+.sidebar-workbench-switch a:hover { color: var(--primary); }
+.sidebar-workbench-switch a:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; border-radius: 2px; }
 .btn-collapse-sidebar {
   margin-left: auto;
   width: 24px;
@@ -6885,7 +6889,10 @@ body {
   <aside class="sidebar" id="sidebar">
     <div class="sidebar-head brand-row">
       <div class="brand">__PRODUCT_NAME__</div>
-      <span class="sidebar-title" id="sidebarTitle">空间工作台</span>
+      <div class="sidebar-workbench-switch">
+        <span class="sidebar-title" id="sidebarTitle">空间工作台</span>
+        <a id="simpleWorkbench" href="/simple" onclick="this.href=simpleWorkbenchUrl()" title="切换到极简工作台，保留当前项目与需求">切换到极简工作台 ↗</a>
+      </div>
       <button type="button" class="btn-collapse-sidebar" id="btnCollapseSidebar" onclick="toggleSidebar()" title="折叠侧边栏 (⌘B)">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m15 18-6-6 6-6"/></svg>
       </button>
@@ -6995,7 +7002,6 @@ body {
         <div class="tabs-scroll" id="workflowTabsList"></div>
       </div>
       <div class="actions">
-        <a id="simpleWorkbench" class="btn" href="/simple" onclick="this.href=simpleWorkbenchUrl()" title="切换到极简工作台，保留当前项目与需求">极简工作台 ↗</a>
         <button class="btn factory-action" onclick="advanceStage()" title="推进当前阶段">进入下一阶段</button>
         <div class="dropdown factory-action" id="moreDropdown">
           <button class="btn icon-only" onclick="toggleMoreMenu(event)" aria-label="更多操作" title="更多操作">···</button>
